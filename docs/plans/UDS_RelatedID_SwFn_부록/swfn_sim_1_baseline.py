@@ -65,7 +65,10 @@ for tbl in TBL.finditer(xml):
     rel_key = next((k for k in order if re.search(r"related", k)), "")
     if not rel_key:
         continue
+    # proto 는 부록 A 에서 팀이 SwFn 을 판단할 단서로 쓴다 — UDS 파서를 여기 하나로 유지하려고
+    # 소비처(swfn_assign_appendix.py)가 아니라 이 파일에서 함께 뽑는다.
     uds_rows.append({"uid": kv.get("id", ""), "unit": kv.get("name", ""),
+                     "proto": kv.get("prototype", "")[:70],
                      "related": kv.get(rel_key, "")})
 print(f"UDS 함수 표 {len(uds_rows)}")
 

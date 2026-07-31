@@ -1,901 +1,391 @@
-﻿SwUFn ID	함수명	Prototype(발췌)	현재 Related ID	추가할 SwFn (팀 기입)
-SwUFn_0128	g_SystemHashCalculate_Enable	void g_SystemHashCalculate_Enable( void )	SwCom_01	
-SwUFn_0129	g_Lib_Sha256_Nb_Start	void g_Lib_Sha256_Nb_Start(void)	SwCom_01	
-SwUFn_0130	g_Lib_Sha256_Nb_Process	void g_Lib_Sha256_Nb_Process(void)	SwCom_01	
-SwUFn_0131	g_Lib_Sha256_Nb_GetState	E_LIB_SHA256_NB_STATE g_Lib_Sha256_Nb_GetState(void)	SwCom_01	
-SwUFn_0132	g_Lib_Sha256_Nb_Reset	void g_Lib_Sha256_Nb_Reset(void)	SwCom_01	
-SwUFn_0113	s_SysMain_InitCore	static void s_SysMain_InitCore(void)	SwCom_01	
-SwUFn_0115	s_Configure_PowerControl	static void s_Configure_PowerControl(void)	SwCom_01	
-SwUFn_0116	s_Configure_MotorControl	static void s_Configure_MotorControl(void)	SwCom_01	
-SwUFn_0117	s_Configure_WatchdogAndOthers	static void s_Configure_WatchdogAndOthers(void)	SwCom_01	
-SwUFn_0118	s_Reset_SystemModules	static void s_Reset_SystemModules( void )	SwCom_01	
-SwUFn_0119	s_Reset_SystemTimers	static void s_Reset_SystemTimers( void )	SwCom_01	
-SwUFn_0120	s_Reset_DiagAndUDS	static void s_Reset_DiagAndUDS( void )	SwCom_01	
-SwUFn_0122	s_sha256_transform	static void s_sha256_transform(SHA256_CTX *ctx, const U8 data[])	SwCom_01	
-SwUFn_0123	s_sha256_init	static void s_sha256_init(SHA256_CTX *ctx)	SwCom_01	
-SwUFn_0124	s_sha256_update	static void s_sha256_update(SHA256_CTX *ctx, __far const U8 *data, U32	SwCom_01	
-SwUFn_0125	s_sha256_final	static void s_sha256_final(SHA256_CTX *ctx, __far U8 *hash)	SwCom_01	
-SwUFn_0126	s_Sha256_Hash_Init	static void s_Sha256_Hash_Init(void)	SwCom_01	
-SwUFn_0127	s_SystemHashCalculate	static void s_SystemHashCalculate( void )	SwCom_01	
-SwUFn_0133	s_sha256_add_u32_mod	static U32 s_sha256_add_u32_mod( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_01	
-SwUFn_0134	s_sha256_sub_u32_guarded	static U32 s_sha256_sub_u32_guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_01	
-SwUFn_0140	s_sha256_expand_word	static U32 s_sha256_expand_word( U32 u32t_Mim2, U32 u32t_Mim7, U32 u32	SwCom_01	
-SwUFn_0141	s_sha256_round_step	static void s_sha256_round_step( S_SHA256_WorkState_t* pt_WorkState, U	SwCom_01	
-SwUFn_0142	s_sha256_accumulate_state	static void s_sha256_accumulate_state( U32 au32_State[8], const S_SHA2	SwCom_01	
-SwUFn_0201	g_DrvIn_Main	void g_DrvIn_Main( void )	SwCom_02	
-SwUFn_0205	u16g_DrvIn_SPI_DataTransfer	U16 u16g_DrvIn_SPI_DataTransfer( IC_Type Slave_IC, U8 FrameSize, U32 T	SwCom_02	
-SwUFn_0206	u16g_FrameCtrl_DRV8706SQ	U16 u16g_FrameCtrl_DRV8706SQ( U8 u8t_RW, U8 Address, U8 Data )	SwCom_02	
-SwUFn_0207	u32g_FrameCtrl_IIM20670	U32 u32g_FrameCtrl_IIM20670( U8 u8t_RW, U8 Address, U16 Data )	SwCom_02	
-SwUFn_0208	g_DrvIn_DRV8706SQ_Init	void g_DrvIn_DRV8706SQ_Init( void )	SwCom_02	
-SwUFn_0209	g_DrvIn_Main_Reset	void g_DrvIn_Main_Reset( void )	SwCom_02	
-SwUFn_0210	u16g_Lib_MovAvrFilter	U16 u16g_Lib_MovAvrFilter( U8 u8t_Count, U8 u8t_BufferIdx, U16 u16t_Da	SwCom_02	
-SwUFn_0226	g_DrvIn_DRV8706SQ_Init_Left	void g_DrvIn_DRV8706SQ_Init_Left( void )	SwCom_02	
-SwUFn_0211	s_MotorPulseCntClr	static void s_MotorPulseCntClr( void )	SwCom_02	
-SwUFn_0212	s_DrvIn_DataUpdate	static void s_DrvIn_DataUpdate( U8 u8t_Count )	SwCom_02	
-SwUFn_0213	s_MotorSpeedMeasure	static void s_MotorSpeedMeasure( void )	SwCom_02	
-SwUFn_0214	s16s_MotorSpdRatioMeasure	static S16 s16s_MotorSpdRatioMeasure( void )	SwCom_02	
-SwUFn_0215	s_CsPinCtrl	static void s_CsPinCtrl( IC_Type SS_IC, U8 Data )	SwCom_02	
-SwUFn_0216	u8s_IIM20670_CRC	static U8 u8s_IIM20670_CRC( U32 Data )	SwCom_02	
-SwUFn_0217	s_IIM20670_Init	static void s_IIM20670_Init( void )	SwCom_02	
-SwUFn_0218	s_ProcessAdcMeasurement	static void s_ProcessAdcMeasurement( void )	SwCom_02	
-SwUFn_0219	u16s_MotorSpeed_MovingAverage	static U16 u16s_MotorSpeed_MovingAverage(U16 u16t_NewSpeed)	SwCom_02	
-SwUFn_0220	u8s_CountUp_Guarded	static U8 u8s_CountUp_Guarded( U8 u8t_Value )	SwCom_02	
-SwUFn_0221	u16s_CountUp_Guarded	static U16 u16s_CountUp_Guarded( U16 u16t_Value )	SwCom_02	
-SwUFn_0222	u32s_Add_Guarded	static U32 u32s_Add_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_02	
-SwUFn_0223	u32s_Mul_Guarded	static U32 u32s_Mul_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_02	
-SwUFn_0224	s_DrvIn_SPI_WriteDrv8706	static void s_DrvIn_SPI_WriteDrv8706( U8 u8t_FrameSize, U32 u32t_Comma	SwCom_02	
-SwUFn_0225	s_DrvIn_SPI_WriteIIM20670	static void s_DrvIn_SPI_WriteIIM20670( U8 u8t_FrameSize, U32 u32t_Comm	SwCom_02	
-SwUFn_0302	g_ApiIn_LinRx_ReadData_Reset	void g_ApiIn_LinRx_ReadData_Reset( void )	SwCom_03	
-SwUFn_0310	s_ApiIn_LinRx_ProcessSbcmMsg	static void s_ApiIn_LinRx_ProcessSbcmMsg(void)	SwCom_03	
-SwUFn_0311	s_ApiIn_LinRx_ProcessSbcmMsg2	static void s_ApiIn_LinRx_ProcessSbcmMsg2(void)	SwCom_03	
-SwUFn_0312	s_ApiIn_LinRx_ProcessIgnDelay	static void s_ApiIn_LinRx_ProcessIgnDelay(void)	SwCom_03	
-SwUFn_0313	s_ApiIn_LinRx_ProcessHashCalc	static void s_ApiIn_LinRx_ProcessHashCalc(void)	SwCom_03	
-SwUFn_0401	g_ApiIn_Main	void g_ApiIn_Main( void )	SwCom_04	
-SwUFn_0402	g_ApiIn_Main_Reset	void g_ApiIn_Main_Reset( void )	SwCom_04	
-SwUFn_0423	u8g_Lib_u8bit_RangeCheck	static inline U8 u8g_Lib_u8bit_RangeCheck( U8 u8t_Data, U8 u8t_DataMin	SwCom_04	
-SwUFn_0424	u8g_Lib_u16bit_RangeCheck	static inline U8 u8g_Lib_u16bit_RangeCheck( U16 u16t_Data, U16 u16t_Da	SwCom_04	
-SwUFn_0425	u8g_Lib_s16bit_RangeCheck	static inline U8 u8g_Lib_s16bit_RangeCheck( S16 s16t_Data, S16 s16t_Da	SwCom_04	
-SwUFn_0403	u16s_AdcToVoltage	static U16 u16s_AdcToVoltage(U16 u16t_AdcValue)	SwCom_04	
-SwUFn_0409	s16s_ApiIn_MotorCurrent_Conv	static S16 s16s_ApiIn_MotorCurrent_Conv( U16 u16t_AdcValue )	SwCom_04	
-SwUFn_0410	u16s_ApiIn_BuzzLvl_Conv	static U16 u16s_ApiIn_BuzzLvl_Conv( U16 u16t_Data )	SwCom_04	
-SwUFn_0411	u16s_ApiIn_ActivePwrMon_Conv	static U16 u16s_ApiIn_ActivePwrMon_Conv( U16 u16t_Data )	SwCom_04	
-SwUFn_0412	u16s_ApiIn_HallSnsrLevel_Conv	static U16 u16s_ApiIn_HallSnsrLevel_Conv( U16 u16t_Data )	SwCom_04	
-SwUFn_0413	u16s_ApiIn_Vsup_Conv	static U16 u16s_ApiIn_Vsup_Conv ( void )	SwCom_04	
-SwUFn_0414	u16s_ApiIn_BandGap_Conv	static U16 u16s_ApiIn_BandGap_Conv ( void )	SwCom_04	
-SwUFn_0415	u8s_ApiIn_MotorRps_Conv	static U8 u8s_ApiIn_MotorRps_Conv( U8 u8t_Data )	SwCom_04	
-SwUFn_0416	u16s_ApiIn_MotorFB_Conv	static U16 u16s_ApiIn_MotorFB_Conv( U16 u16t_Data )	SwCom_04	
-SwUFn_0417	u16s_ApiIn_MotorTemp_Conv	static U16 u16s_ApiIn_MotorTemp_Conv( U16 u16t_Data )	SwCom_04	
-SwUFn_0418	u16s_ApiIn_OverPos_Conv	static S16 u16s_ApiIn_OverPos_Conv( S16 s16t_Data )	SwCom_04	
-SwUFn_0420	s_ApiIn_ProcessMonitorData	static void s_ApiIn_ProcessMonitorData( void )	SwCom_04	
-SwUFn_0421	s16s_ApiIn_InterpolateTemperature	static S16 s16s_ApiIn_InterpolateTemperature( U16 u16t_Data, U8 u8t_In	SwCom_04	
-SwUFn_0422	u16s_ApiIn_ClampTemperature	static U16 u16s_ApiIn_ClampTemperature( S16 s16t_Temperature )	SwCom_04	
-SwUFn_0426	s_ApiIn_E2EProFileCheck	static void s_ApiIn_E2EProFileCheck( void )	SwCom_04	
-SwUFn_0427	u8s_E2E_AC_ProFileCheck_SBCM0	static U8 u8s_E2E_AC_ProFileCheck_SBCM0( void )	SwCom_04	
-SwUFn_0428	u8s_E2E_AC_ProFileCheck_SBCM1	static U8 u8s_E2E_AC_ProFileCheck_SBCM1( void )	SwCom_04	
-SwUFn_0429	u8s_E2E_CRC_ProFileCheck_SBCM0	static U8 u8s_E2E_CRC_ProFileCheck_SBCM0( void )	SwCom_04	
-SwUFn_0430	u8s_E2E_CRC_ProFileCheck_SBCM1	static U8 u8s_E2E_CRC_ProFileCheck_SBCM1( void )	SwCom_04	
-SwUFn_0431	s_VsupMovingAverage8_FC	static U16 s_VsupMovingAverage8_FC( U16 u16t_Input, U8 u8t_Reset )	SwCom_04	
-SwUFn_0433	u16s_ApiIn_AddU16_Guarded	static U16 u16s_ApiIn_AddU16_Guarded( U16 u16t_Lhs, U16 u16t_Rhs )	SwCom_04	
-SwUFn_0434	u32s_ApiIn_AddU32_Guarded	static U32 u32s_ApiIn_AddU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_04	
-SwUFn_0435	u32s_ApiIn_SubU32_Guarded	static U32 u32s_ApiIn_SubU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_04	
-SwUFn_0436	u32s_ApiIn_MulU32_Guarded	static U32 u32s_ApiIn_MulU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_04	
-SwUFn_0437	s_ApiIn_ReadSBCM0RawSignals	static void s_ApiIn_ReadSBCM0RawSignals( S_ApiIn_SBCM0RawSignals* pt_R	SwCom_04	
-SwUFn_0438	s_ApiIn_PackSBCM0Bytes	static void s_ApiIn_PackSBCM0Bytes( const S_ApiIn_SBCM0RawSignals* pt_	SwCom_04	
-SwUFn_0439	u8s_ApiIn_CalcSBCM0Crc	static U8 u8s_ApiIn_CalcSBCM0Crc( const U8 au8_Byte[8] )	SwCom_04	
-SwUFn_0440	u8s_ApiIn_U16ToU8_Guarded	static U8 u8s_ApiIn_U16ToU8_Guarded( U16 u16t_Value )	SwCom_04	
-SwUFn_0441	u16s_ApiIn_ScaledVoltage_10000_1992	static U16 u16s_ApiIn_ScaledVoltage_10000_1992( U16 u16t_Data )	SwCom_04	
-SwUFn_0502	g_Ap_Main_Reset	void g_Ap_Main_Reset( void )	SwCom_05	
-SwUFn_0503	s_Ap_DataUpdate	static void s_Ap_DataUpdate( void )	SwCom_05	
-SwUFn_0504	s_Ap_ExecuteControlFunctions	static void s_Ap_ExecuteControlFunctions( void )	SwCom_05	
-SwUFn_0602	g_ApiOut_Main_Reset	void g_ApiOut_Main_Reset( void )	SwCom_06	
-SwUFn_0607	u16s_ApiOut_MotorPwmDuty_Conv	static U16 u16s_ApiOut_MotorPwmDuty_Conv( void )	SwCom_13	
-SwUFn_0608	u8s_ApiOut_MotorCtrl_Conv	static U8 u8s_ApiOut_MotorCtrl_Conv( void )	SwCom_13	
-SwUFn_0613	u8s_ApiOut_MotorTemp_Conv	static U8 u8s_ApiOut_MotorTemp_Conv( void )	SwCom_06	
-SwUFn_0614	s_ApiOut_DataValidCntInc	static void s_ApiOut_DataValidCntInc( void )	SwCom_06	
-SwUFn_0701	g_ApiOut_LinTx_DataSend	void g_ApiOut_LinTx_DataSend (void)	SwCom_07	
-SwUFn_0702	s_LinTx_General	static void s_LinTx_General( void )	SwCom_07	
-SwUFn_0703	s_LinTx_DTC	static void s_LinTx_DTC( void )	SwCom_07	
-SwUFn_0704	s_LinTx_DTC_WriteHighVoltage	static void s_LinTx_DTC_WriteHighVoltage(U8 u8t_Value)	SwCom_07	
-SwUFn_0705	s_LinTx_DTC_WriteHallSensorError	static void s_LinTx_DTC_WriteHallSensorError(U8 u8t_Value)	SwCom_07	
-SwUFn_0706	s_LinTx_DTC_WriteBuzzerError	static void s_LinTx_DTC_WriteBuzzerError(U8 u8t_Value)	SwCom_07	
-SwUFn_0707	s_LinTx_DTC_WriteMotorCircuitOpen	static void s_LinTx_DTC_WriteMotorCircuitOpen(U8 u8t_Value)	SwCom_07	
-SwUFn_0708	s_LinTx_DTC_WriteMotorOutShortLow	static void s_LinTx_DTC_WriteMotorOutShortLow(U8 u8t_Value)	SwCom_07	
-SwUFn_0709	s_LinTx_DTC_WriteMotorOutShortHigh	static void s_LinTx_DTC_WriteMotorOutShortHigh(U8 u8t_Value)	SwCom_07	
-SwUFn_0712	s_LinTx_DTC_WriteOverCurrent	static void s_LinTx_DTC_WriteOverCurrent(U8 u8t_Value)	SwCom_07	
-SwUFn_0713	s_LinTx_DTC_ProcessTable	static void s_LinTx_DTC_ProcessTable(void)	SwCom_07	
-SwUFn_0801	g_DrvOut_Main	void g_DrvOut_Main( void )	SwCom_08	
-SwUFn_0802	g_DrvOut_Main_Reset	void g_DrvOut_Main_Reset( void )	SwCom_08	
-SwUFn_0803	s_DrvOut_MotorCtrl	static void s_DrvOut_MotorCtrl( U8 State, U16 Speed )	SwCom_08	
-SwUFn_0804	s_DrvOut_SetPWMDutyDirect	static void s_DrvOut_SetPWMDutyDirect( U16 speed_pp4, U16 speed_pp2 )	SwCom_08	
-SwUFn_0805	s_PWM_SetFrequency	static void s_PWM_SetFrequency( U8 frequency )	SwCom_08	
-SwUFn_0806	s_DrvOut_BuzzerCtrl	static void s_DrvOut_BuzzerCtrl( void )	SwCom_08	
-SwUFn_0807	s_ProcessMotorDirection	static void s_ProcessMotorDirection( U8 State, U16 Speed )	SwCom_08	
-SwUFn_0916	g_PLLOnWakeNotify	void g_PLLOnWakeNotify( void )	SwCom_09	
-SwUFn_0905	u8s_BattLvlCheck	static U8 u8s_BattLvlCheck( void )	SwCom_09	
-SwUFn_0906	u8s_HighSlopeCheck	static U8 u8s_HighSlopeCheck( void )	SwCom_09	
-SwUFn_0909	u8s_VehicleSpeedCheck	static U8 u8s_VehicleSpeedCheck( void )	SwCom_09	
-SwUFn_0912	u8s_RAM_Test	U8 u8s_RAM_Test(void )	SwCom_09	
-SwUFn_0913	u8s_ROM_Test_Enable	U8 u8s_ROM_Test_Enable( void )	SwCom_09	
-SwUFn_0914	u8s_Register_Test	U8 u8s_Register_Test(void )	SwCom_09	
-SwUFn_0915	u8s_EEPROM_Test	U8 u8s_EEPROM_Test( void )	SwCom_09	
-SwUFn_0917	u8s_E2E_0_FailureCheck	static U8 u8s_E2E_0_FailureCheck( void )	SwCom_09	
-SwUFn_0918	u8s_E2E_1_FailureCheck	static U8 u8s_E2E_1_FailureCheck( void )	SwCom_09	
-SwUFn_0919	u8s_CpuPllStatusCheck	static U8 u8s_CpuPllStatusCheck( U8 u8t_CpuOnStatusChanged_F )	SwCom_09	
-SwUFn_0920	u8s_CpuOscStatusCheck	static U8 u8s_CpuOscStatusCheck( U8 u8t_CpuOnStatusChanged_F )	SwCom_09	
-SwUFn_0921	u8s_CpustatusCheckIn1Min	static U8 u8s_CpustatusCheckIn1Min( U8 u8t_TimerType )	SwCom_09	
-SwUFn_0922	s_SysCtrl_IncU16_Sat	static U16 s_SysCtrl_IncU16_Sat( U16 u16t_Value )	SwCom_09	
-SwUFn_0923	s_SysCtrl_IncU8_Sat	static U8 s_SysCtrl_IncU8_Sat( U8 u8t_Value )	SwCom_09	
-SwUFn_0924	s_SystemResetCheck	static void s_SystemResetCheck(void)	SwCom_09	
-SwUFn_1006	s_Sleep_DisableInterrupts	static void s_Sleep_DisableInterrupts(void)	SwCom_10	
-SwUFn_1007	s_Sleep_DisablePower	static void s_Sleep_DisablePower(void)	SwCom_10	
-SwUFn_1008	s_Sleep_ConfigureLIN	static void s_Sleep_ConfigureLIN(void)	SwCom_10	
-SwUFn_1009	s_Sleep_EnterSleepMode	static void s_Sleep_EnterSleepMode(void)	SwCom_10	
-SwUFn_1010	s_Sleep_DisableMotorControl	static void s_Sleep_DisableMotorControl	SwCom_10	
-SwUFn_1011	s_Wake_Up_LIN_Init	static void s_Wake_Up_LIN_Init(void)	SwCom_10	
-SwUFn_1012	s_Wake_Up_ADC_Init	static void s_Wake_Up_ADC_Init(void)	SwCom_10	
-SwUFn_1013	s_Wake_Up_Power_Enable	static void s_Wake_Up_Power_Enable(void)	SwCom_10	
-SwUFn_1014	s_Wake_Up_System_Init	static void s_Wake_Up_System_Init(void)	SwCom_10	
-SwUFn_1101	g_SysEepromCtrl_Main	void g_SysEepromCtrl_Main ( void )	SwCom_11	
-SwUFn_1102	g_SysEepromCtrl_Diag	void g_SysEepromCtrl_Diag ( void )	SwCom_11	
-SwUFn_1104	u8g_SysEepromCtrl_ReadData	U8 u8g_SysEepromCtrl_ReadData( U16 u16t_Addr1, U16 u16t_Addr2 )	SwCom_11	
-SwUFn_1106	g_InlineModeEEPROMClear	void g_InlineModeEEPROMClear( void )	SwCom_11	
-SwUFn_1107	g_InlineModeSpeedChangeFlagEEPROMSet	void g_InlineModeSpeedChangeFlagEEPROMSet( void )	SwCom_11	
-SwUFn_1108	g_SysEepromCtrl_TunningParamRead	void g_SysEepromCtrl_TunningParamRead( void )	SwCom_11	
-SwUFn_1109	g_SysEepromCtrl_Reset	void g_SysEepromCtrl_Reset( void )	SwCom_11	
-SwUFn_1111	g_SysEepromCtrl_WriteInlineData	void g_SysEepromCtrl_WriteInlineData( U16 u16t_Offset, U8 u8t_Data )	SwCom_11	
-SwUFn_1112	g_SysEepromCtrl_WriteDiagData	void g_SysEepromCtrl_WriteDiagData( U16 u16t_Offset, U8 u8t_Data )	SwCom_11	
-SwUFn_1114	g_SysEepromCtrl_WriteWdbiDirect	void g_SysEepromCtrl_WriteWdbiDirect( U16 u16t_Addr1, U16 u16t_Addr2, 	SwCom_11	
-SwUFn_1116	u8g_SysEepromCtrl_ReadInlineData	U8 u8g_SysEepromCtrl_ReadInlineData( U16 u16t_Offset )	SwCom_11	
-SwUFn_1117	u8g_SysEepromCtrl_ReadDiagData	U8 u8g_SysEepromCtrl_ReadDiagData( U16 u16t_Offset )	SwCom_11	
-SwUFn_1118	u8g_SysEepromCtrl_ReadProdDate	U8 u8g_SysEepromCtrl_ReadProdDate( U16 u16t_Offset )	SwCom_11	
-SwUFn_1119	u8g_SysEepromCtrl_ReadPartNo	U8 u8g_SysEepromCtrl_ReadPartNo( U16 u16t_Offset )	SwCom_11	
-SwUFn_1120	u8g_SysEepromCtrl_ReadHwVer	U8 u8g_SysEepromCtrl_ReadHwVer( U16 u16t_Offset )	SwCom_11	
-SwUFn_1121	u8g_SysEepromCtrl_ReadDbVer	U8 u8g_SysEepromCtrl_ReadDbVer( U16 u16t_Offset )	SwCom_11	
-SwUFn_1122	u8g_SysEepromCtrl_ReadCrcByte	U8 u8g_SysEepromCtrl_ReadCrcByte( U16 u16t_Offset )	SwCom_11	
-SwUFn_1123	u8g_SysEepromCtrl_ReadUdsData	U8 u8g_SysEepromCtrl_ReadUdsData( U16 u16t_Addr1, U16 u16t_Addr2 )	SwCom_11	
-SwUFn_1124	u8g_SysEepromCtrl_ReadSysParam	U8 u8g_SysEepromCtrl_ReadSysParam( U16 u16t_Offset )	SwCom_11	
-SwUFn_1125	u8g_SysEepromCtrl_ReadDirectAccess	U8 u8g_SysEepromCtrl_ReadDirectAccess( U16 u16t_Addr )	SwCom_11	
-SwUFn_1168	g_Lib_SafeWriteQueue_EnqueueWrite	U8 g_Lib_SafeWriteQueue_EnqueueWrite(ST_SAFE_WRITE_QUEUE* pst_Queue, c	SwCom_11	
-SwUFn_1169	g_Lib_SafeWriteQueue_ProcessQueue	void g_Lib_SafeWriteQueue_ProcessQueue(ST_SAFE_WRITE_QUEUE* pst_Queue,	SwCom_11	
-SwUFn_1173	g_SysEepromCtrl_SafeWrite_ProcessQueue	void g_SysEepromCtrl_SafeWrite_ProcessQueue(void)	SwCom_11	
-SwUFn_1176	g_Lib_u8bit_ArrayClear	static inline void g_Lib_u8bit_ArrayClear(U8* u8t_Data, U8 u8t_DataIni	SwCom_11	
-SwUFn_1177	g_Lib_u16bit_ArrayClear	static inline void g_Lib_u16bit_ArrayClear( U16* u16t_Data, U16 u16tDa	SwCom_11	
-SwUFn_1196	g_InlineModeEEPROMSet	void g_InlineModeEEPROMSet(void)	SwCom_11	
-SwUFn_1126	s_Write2Eeprom_ProdDate	void s_Write2Eeprom_ProdDate(void)	SwCom_11	
-SwUFn_1127	s_Write2Eeprom_PartNo	void s_Write2Eeprom_PartNo ( void )	SwCom_11	
-SwUFn_1128	s_Write2Eeprom_HW_Version	void s_Write2Eeprom_HW_Version( void )	SwCom_11	
-SwUFn_1129	s_Write2Eeprom_DB_Version	void s_Write2Eeprom_DB_Version( void )	SwCom_11	
-SwUFn_1130	s_Write2Eeprom_UserOptionRecord	void s_Write2Eeprom_UserOptionRecord( void )	SwCom_11	
-SwUFn_1131	s_Write2Eeprom_Write1Byte	void s_Write2Eeprom_Write1Byte( void )	SwCom_11	
-SwUFn_1132	s_Write2Eeprom_ReprogramExcute	void s_Write2Eeprom_ReprogramExcute( void )	SwCom_11	
-SwUFn_1133	s_Write2Eeprom_Cal_Checksum	static void s_Write2Eeprom_Cal_Checksum( void )	SwCom_11	
-SwUFn_1134	s_EepromSysInfoDataRead	void s_EepromSysInfoDataRead( void )	SwCom_11	
-SwUFn_1135	s_EepromProdDateRead	void s_EepromProdDateRead( void )	SwCom_11	
-SwUFn_1136	s_EepromPartNoRead	void s_EepromPartNoRead( void )	SwCom_11	
-SwUFn_1137	s_EepromHeVerRead	void s_EepromHeVerRead( void )	SwCom_11	
-SwUFn_1138	s_EepromDbVerRead	void s_EepromDbVerRead( void )	SwCom_11	
-SwUFn_1139	s_EepromSleepModeRead	void s_EepromSleepModeRead( void )	SwCom_21, SwCom_11	
-SwUFn_1140	s_EepromMotorA1A2OutputRead	void s_EepromMotorA1A2OutputRead( void )	SwCom_21, SwCom_11	
-SwUFn_1141	s_DiagDataSave_OpenFail	void s_DiagDataSave_OpenFail( U16 index )	SwCom_11	
-SwUFn_1144	s_DiagEepromWrite	void s_DiagEepromWrite( U8 failMode )	SwCom_11	
-SwUFn_1145	s_OverPosWrite	void s_OverPosWrite ( void )	SwCom_11	
-SwUFn_1146	s_DiagEepromRead	void s_DiagEepromRead( void )	SwCom_11	
-SwUFn_1147	s_SystemParamRead	void s_SystemParamRead( void )	SwCom_11	
-SwUFn_1148	s_TunningParamRead	void s_TunningParamRead( void )	SwCom_11	
-SwUFn_1149	s_TunningParamRead_8bitData	void s_TunningParamRead_8bitData( void )	SwCom_11	
-SwUFn_1150	s_TunningParamRead_16bitData	void s_TunningParamRead_16bitData( void )	SwCom_11	
-SwUFn_1152	calculate_crc32_eeprom	static U32 calculate_crc32_eeprom(U16 StartAddr, U16 EndAddr)	SwCom_11	
-SwUFn_1153	s_SysEepromCtrl_WriteCrcByte	static void s_SysEepromCtrl_WriteCrcByte( U16 u16t_Offset, U8 u8t_Data	SwCom_11	
-SwUFn_1154	s_SysEepromCtrl_ProcessWdbiCommands	static void s_SysEepromCtrl_ProcessWdbiCommands(void)	SwCom_11	
-SwUFn_1155	s_SysEepromCtrl_ProcessTunningParamRead	static void s_SysEepromCtrl_ProcessTunningParamRead(void)	SwCom_11	
-SwUFn_1156	s_SysEepromCtrl_ProcessWdbiData	static void s_SysEepromCtrl_ProcessWdbiData(void)	SwCom_11	
-SwUFn_1157	s_SysEepromCtrl_ProcessWdbiWrite	static void s_SysEepromCtrl_ProcessWdbiWrite(void)	SwCom_11	
-SwUFn_1158	s_SysEepromCtrl_ProcessWdbiSpecial	static void s_SysEepromCtrl_ProcessWdbiSpecial(void)	SwCom_11	
-SwUFn_1159	s_SysEepromCtrl_ResetTables	static void s_SysEepromCtrl_ResetTables(void)	SwCom_11	
-SwUFn_1160	s_SysEepromCtrl_ResetVariables	static void s_SysEepromCtrl_ResetVariables(void)	SwCom_11	
-SwUFn_1161	s_SysEepromCtrl_InitializeEepromData	static void s_SysEepromCtrl_InitializeEepromData(void)	SwCom_11	
-SwUFn_1162	s_EepromSysInfoDataRead_All	static void s_EepromSysInfoDataRead_All(void)	SwCom_11	
-SwUFn_1163	s_EepromReadVersionData	static void s_EepromReadVersionData(void)	SwCom_11	
-SwUFn_1164	s_Lib_SafeWriteQueue_Enqueue	static U8 s_Lib_SafeWriteQueue_Enqueue(ST_SAFE_WRITE_QUEUE* pst_Queue,	SwCom_11	
-SwUFn_1165	s_Lib_SafeWriteQueue_Dequeue	static U8 s_Lib_SafeWriteQueue_Dequeue(ST_SAFE_WRITE_QUEUE* pst_Queue,	SwCom_11	
-SwUFn_1166	s_Lib_SafeWriteQueue_ExecuteWrite	static U8 s_Lib_SafeWriteQueue_ExecuteWrite(const ST_SAFE_WRITE_QUEUE_	SwCom_11	
-SwUFn_1167	s_Lib_SafeWriteQueue_HandleWriteFailure	static void s_Lib_SafeWriteQueue_HandleWriteFailure(ST_SAFE_WRITE_QUEU	SwCom_11	
-SwUFn_1170	s_SysEepromCtrl_SafeWrite_WriteCallback	static U8 s_SysEepromCtrl_SafeWrite_WriteCallback(const ST_SAFE_WRITE_	SwCom_11	
-SwUFn_1171	s_SysEepromCtrl_SafeWrite_IsSafeToWrite	static U8 s_SysEepromCtrl_SafeWrite_IsSafeToWrite(void)	SwCom_11	
-SwUFn_1174	s_SysEepromCtrl_WriteData_Direct	static void s_SysEepromCtrl_WriteData_Direct( U16 u16t_Addr1, U16 u16t	SwCom_11	
-SwUFn_1175	s_SysEepromCtrl_WriteSystemFlag	static void s_SysEepromCtrl_WriteSystemFlag( U16 u16t_FlagAddr, U8 u8t	SwCom_11	
-SwUFn_1178	s_DiagEepromWrite_OpenFail	static void s_DiagEepromWrite_OpenFail(void)	SwCom_11	
-SwUFn_1179	s_SysEepromCtrl_ResetInlineAndInfo	static void s_SysEepromCtrl_ResetInlineAndInfo(void)	SwCom_11	
-SwUFn_1180	s_SysEepromCtrl_ResetControlAndOffsets	static void s_SysEepromCtrl_ResetControlAndOffsets(void)	SwCom_11	
-SwUFn_1181	s_SysEepromCtrl_ResetGains	static void s_SysEepromCtrl_ResetGains(void)	SwCom_11	
-SwUFn_1182	s_SysEepromCtrl_ResetSpeeds	static void s_SysEepromCtrl_ResetSpeeds(void)	SwCom_11	
-SwUFn_1183	s_SysEepromCtrl_ResetTempAndNewParams	static void s_SysEepromCtrl_ResetTempAndNewParams(void)	SwCom_11	
-SwUFn_1184	s_SysEepromCtrl_ResetDiagAndIndices	static void s_SysEepromCtrl_ResetDiagAndIndices(void)	SwCom_11	
-SwUFn_1185	s_DiagEepromWrite_CloseFail	static void s_DiagEepromWrite_CloseFail(void)	SwCom_11	
-SwUFn_1186	s_DiagEepromWrite_AssistFail	static void s_DiagEepromWrite_AssistFail(void)	SwCom_11	
-SwUFn_1187	s_Lib_SafeWriteQueue_ProcessEntry	static void s_Lib_SafeWriteQueue_ProcessEntry(ST_SAFE_WRITE_QUEUE* pst	SwCom_11	
-SwUFn_1188	s_Lib_SafeWriteQueue_ProcessSafeWrites	static void s_Lib_SafeWriteQueue_ProcessSafeWrites(ST_SAFE_WRITE_QUEUE	SwCom_11	
-SwUFn_1189	s_SysEepromCtrl_AddU32_Guarded	static U32 s_SysEepromCtrl_AddU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs 	SwCom_11	
-SwUFn_1190	s_SysEepromCtrl_ScaleU8ToU16	static U16 s_SysEepromCtrl_ScaleU8ToU16( U8 u8t_Value, U16 u16t_Scale 	SwCom_11	
-SwUFn_1191	s_SysEepromCtrl_MakeEepromAddr	static EEPROM_TAddress_Const s_SysEepromCtrl_MakeEepromAddr( U32 u32t_	SwCom_11	
-SwUFn_1192	s_SysEepromCtrl_CopyTunningTables	static void s_SysEepromCtrl_CopyTunningTables( const S16 as16_SourceAc	SwCom_11	
-SwUFn_1193	s_SysEepromCtrl_SafeWrite_EnqueueDispatch	static U8 s_SysEepromCtrl_SafeWrite_EnqueueDispatch(U16 u16t_Addr1, U1	SwCom_11	
-SwUFn_1194	s_SysEepromCtrl_ReadByte_AbsAddr	static U8 s_SysEepromCtrl_ReadByte_AbsAddr( U32 u32t_AddrAbs, U8 *pu8t	SwCom_33	
-SwUFn_1195	s_SysEepromCtrl_WriteByte_AbsAddr	static U8 s_SysEepromCtrl_WriteByte_AbsAddr( U32 u32t_AddrAbs, U8 u8t_	SwCom_33	
-SwUFn_1202	g_DiagCtrlMain_Reset	void g_DiagCtrlMain_Reset( void )	SwCom_12	
-SwUFn_1215	u16s_Buzzer_Check	static U16 u16s_Buzzer_Check( void )	SwCom_12	
-SwUFn_1219	s_UpdateErrorCode	static void s_UpdateErrorCode( U16 u16t_Data )	SwCom_12	
-SwUFn_1221	u8s_DriveIC_DetectError	static U8 u8s_DriveIC_DetectError( U16 *u16t_Status )	SwCom_12	
-SwUFn_1222	s_DriveIC_ClearFaults	static void s_DriveIC_ClearFaults( void )	SwCom_12	
-SwUFn_1223	u16s_DriveIC_StateHandler	static U16 u16s_DriveIC_StateHandler( U8 u8t_ErrDetected_F )	SwCom_12	
-SwUFn_1224	u16s_DiagCheck_LB_Helper	static U16 u16s_DiagCheck_LB_Helper( void )	SwCom_12	
-SwUFn_1225	u16s_DiagCheck_HB_Helper1	static U16 u16s_DiagCheck_HB_Helper1( void )	SwCom_12	
-SwUFn_1226	u16s_DiagCheck_HB_Helper2	static U16 u16s_DiagCheck_HB_Helper2( void )	SwCom_12	
-SwUFn_1230	u16s_TempSensor_Check	static U16 u16s_TempSensor_Check( void )	SwCom_12	
-SwUFn_1231	s_DiagCtrlMain_MCUChecks	static void s_DiagCtrlMain_MCUChecks(void)	SwCom_12	
-SwUFn_1235	s_VDS_HandleClearCtrl	static DiagStep_t s_VDS_HandleClearCtrl(U8 u8t_RW_Cmd, U8 u8t_FrameSiz	SwCom_12	
-SwUFn_1239	u16s_MotorOverHeat_CheckNormalState	static U16 u16s_MotorOverHeat_CheckNormalState( U16 u16t_MotorTemp )	SwCom_12	
-SwUFn_1240	u16s_MotorOverHeat_CheckErrorState	static U16 u16s_MotorOverHeat_CheckErrorState( U16 u16t_MotorTemp )	SwCom_12	
-SwUFn_1244	s_MotorBattShortRun_IsShortDetected	static U8 s_MotorBattShortRun_IsShortDetected(void)	SwCom_12	
-SwUFn_1245	s_MotorBattShortRun_HandleNormal	static U16 s_MotorBattShortRun_HandleNormal(U8 u8t_ShortDetected)	SwCom_12	
-SwUFn_1246	s_MotorBattShortRun_HandleError	static U16 s_MotorBattShortRun_HandleError(U8 u8t_ShortDetected)	SwCom_12	
-SwUFn_1247	s_MotorBattShortRun_HandleDefault	static U16 s_MotorBattShortRun_HandleDefault(void)	SwCom_12	
-SwUFn_1248	u16s_MotorBattShortRun	static U16 u16s_MotorBattShortRun( void )	SwCom_12	
-SwUFn_1249	u32s_LowVoltComp_AddU32_Guarded	static U32 u32s_LowVoltComp_AddU32_Guarded(U32 u32t_Lhs, U32 u32t_Rhs)	SwCom_12	
-SwUFn_1250	u32s_LowVoltComp_SubU32_Guarded	static U32 u32s_LowVoltComp_SubU32_Guarded(U32 u32t_Lhs, U32 u32t_Rhs)	SwCom_12	
-SwUFn_1251	u32s_LowVoltComp_MulU32_Guarded	static U32 u32s_LowVoltComp_MulU32_Guarded(U32 u32t_Lhs, U32 u32t_Rhs)	SwCom_12	
-SwUFn_1252	u16s_LowVoltComp_CalcEffCurrent	static U16 u16s_LowVoltComp_CalcEffCurrent(void)	SwCom_12	
-SwUFn_1253	u16s_LowVoltComp_CalcExpectedSag	static U16 u16s_LowVoltComp_CalcExpectedSag(U16 u16t_EffCurrent)	SwCom_12	
-SwUFn_1254	s_LowVoltComp_UpdateBaseVsup	static void s_LowVoltComp_UpdateBaseVsup(U16 u16t_EffCurrent)	SwCom_12	
-SwUFn_1255	s_LowVoltComp_UpdateLearnK	static void s_LowVoltComp_UpdateLearnK(U16 u16t_EffCurrent, U16 u16t_E	SwCom_12	
-SwUFn_1256	u16s_LowVoltComp_UpdateAndGetBattVsup	static U16 u16s_LowVoltComp_UpdateAndGetBattVsup(void)	SwCom_12	
-SwUFn_1301	g_Ap_PreviousCtrl_Env	void g_Ap_PreviousCtrl_Env( void )	SwCom_13	
-SwUFn_1302	g_Ap_PreviousCtrl_Perf	void g_Ap_PreviousCtrl_Perf ( void )	SwCom_13	
-SwUFn_1303	g_Ap_PreviousCtrl_Reset	void g_Ap_PreviousCtrl_Reset( void )	SwCom_13	
-SwUFn_1382	u16g_Conv_AngleToPulse	static inline U16 u16g_Conv_AngleToPulse(U16 u16t_Angle)	SwCom_13	
-SwUFn_1397	g_Ap_DoorPreCtrl_GetActiveHoldingTm	U16 g_Ap_DoorPreCtrl_GetActiveHoldingTm( void )	SwCom_13	
-SwUFn_1304	s_Ap_Diagnostic	static void s_Ap_Diagnostic( void )	SwCom_13	
-SwUFn_1305	s_PreviousCtrl_Env_A	void s_PreviousCtrl_Env_A ( void )	SwCom_13	
-SwUFn_1306	s_PreviousCtrl_Env_B	void s_PreviousCtrl_Env_B ( void )	SwCom_13	
-SwUFn_1307	s_FanRecircurationCheck	static void s_FanRecircurationCheck( void )	SwCom_13	
-SwUFn_1309	s_GetTemperature	static void s_GetTemperature( void )	SwCom_13	
-SwUFn_1310	s_LowBatteryAction_Ign	static void s_LowBatteryAction_Ign( void )	SwCom_13	
-SwUFn_1311	s_Ap_HighBatteryAction	static void s_Ap_HighBatteryAction( void )	SwCom_13	
-SwUFn_1312	s_OverCurrentDetect_UserCtrl	static void s_OverCurrentDetect_UserCtrl( void )	SwCom_13	
-SwUFn_1318	s_AntipinchRunCheck	static void s_AntipinchRunCheck( void )	SwCom_13	
-SwUFn_1319	s_ActiveHoldingTimeCheck	static void s_ActiveHoldingTimeCheck( void )	SwCom_13	
-SwUFn_1320	s_MotorOverHeatCheck	static void s_MotorOverHeatCheck( void )	SwCom_13	
-SwUFn_1321	s_MotorOverHeatActiveHoldCheck	static void s_MotorOverHeatActiveHoldCheck( void )	SwCom_13	
-SwUFn_1322	s_ManualOperationDetect	static void s_ManualOperationDetect( void )	SwCom_13	
-SwUFn_1323	s_ReverseOperationDetect	static void s_ReverseOperationDetect( void )	SwCom_13	
-SwUFn_1324	s_DoorSlipDetect	static void s_DoorSlipDetect( void )	SwCom_13	
-SwUFn_1325	s_DecelerationDetect	static void s_DecelerationDetect( void )	SwCom_13	
-SwUFn_1326	s_ArrivalDetect	static void s_ArrivalDetect( void )	SwCom_13	
-SwUFn_1329	s_OverOpenCheck	static void s_OverOpenCheck(void)	SwCom_13	
-SwUFn_1333	s_ReboundProtection	static void s_ReboundProtection( void )	SwCom_13	
-SwUFn_1334	s_ReboundProtection_Ready	static void s_ReboundProtection_Ready ( void )	SwCom_13	
-SwUFn_1335	s_ReboundProtection_Return	static void s_ReboundProtection_Return( void )	SwCom_13	
-SwUFn_1336	u8s_ReboundDetection	static U8 u8s_ReboundDetection( void )	SwCom_13	
-SwUFn_1338	s_PlayProtectReady	void s_PlayProtectReady( void )	SwCom_13	
-SwUFn_1339	s_PlayProtectCloseCheck	void s_PlayProtectCloseCheck( void )	SwCom_13	
-SwUFn_1340	s_PlayProtectOpenCheck	void s_PlayProtectOpenCheck( void )	SwCom_13	
-SwUFn_1341	s_PlayProtectChk	static void s_PlayProtectChk ( void )	SwCom_13	
-SwUFn_1342	s_IsDoorStop	static void s_IsDoorStop( void )	SwCom_13	
-SwUFn_1343	s16s_DoorStopPosition	static S16 s16s_DoorStopPosition(void)	SwCom_13	
-SwUFn_1344	s16s_DoorStopPosition_AssistClose	static S16 s16s_DoorStopPosition_AssistClose( S16 s16t_Data )	SwCom_13	
-SwUFn_1345	s_IsDoorMoving	static void s_IsDoorMoving(void)	SwCom_13	
-SwUFn_1346	s_IsDoorMoving_FullLatch	static void s_IsDoorMoving_FullLatch( void )	SwCom_13	
-SwUFn_1347	s_IsDrMov_FullLatch_StopPosChk	void s_IsDrMov_FullLatch_StopPosChk( void )	SwCom_13	
-SwUFn_1348	s_IsDrMov_FullLatch_MoveChk	void s_IsDrMov_FullLatch_MoveChk( void )	SwCom_13	
-SwUFn_1349	s_IsDrMov_FullLatch_StopChk	void s_IsDrMov_FullLatch_StopChk( void )	SwCom_13	
-SwUFn_1353	s_DoorMovingCheck	static void s_DoorMovingCheck( void )	SwCom_13	
-SwUFn_1354	s_AstOutCompensate	static void s_AstOutCompensate( void )	SwCom_13	
-SwUFn_1360	s_AutoStop_LinCMDCheck	static void s_AutoStop_LinCMDCheck( void )	SwCom_13	
-SwUFn_1361	s_Env_A_SensorReadings	static void s_Env_A_SensorReadings(void)	SwCom_13	
-SwUFn_1362	s_Env_A_EnvironmentalChecks	static void s_Env_A_EnvironmentalChecks(void)	SwCom_13	
-SwUFn_1363	s_Env_B_SafetyChecks	static void s_Env_B_SafetyChecks(void)	SwCom_13	
-SwUFn_1364	s_Env_B_ProtectionChecks	static void s_Env_B_ProtectionChecks(void)	SwCom_13	
-SwUFn_1365	s_Env_B_ThermalChecks	static void s_Env_B_ThermalChecks(void)	SwCom_13	
-SwUFn_1366	s_PreviousCtrl_BasicChecks	static void s_PreviousCtrl_BasicChecks(void)	SwCom_13	
-SwUFn_1367	s_ExecuteProtectionChecks	static void s_ExecuteProtectionChecks(void)	SwCom_13	
-SwUFn_1368	s_ExecutePositionChecks	static void s_ExecutePositionChecks(void)	SwCom_13	
-SwUFn_1369	s_PreviousCtrl_ActiveStateChecks	static void s_PreviousCtrl_ActiveStateChecks(void)	SwCom_13	
-SwUFn_1370	s_PreviousCtrl_IdleStateReset	static void s_PreviousCtrl_IdleStateReset(void)	SwCom_13	
-SwUFn_1374	s_ApplyTemperatureCompensation	static void s_ApplyTemperatureCompensation(U16 *u16p_Peak, U16 *u16p_S	SwCom_13	
-SwUFn_1375	s_CheckOpenOverloadCondition	static U8 s_CheckOpenOverloadCondition(U16 u16_Current, U16 u16_Peak, 	SwCom_13	
-SwUFn_1376	s_ProcessOpenOverloadDetection	static void s_ProcessOpenOverloadDetection(S16 s16_OpenDisplacement)	SwCom_13	
-SwUFn_1377	s_GetCloseIgnoreTime	static U16 s_GetCloseIgnoreTime(void)	SwCom_13	
-SwUFn_1378	s_GetCloseCurrentThreshold	static U16 s_GetCloseCurrentThreshold(U16 *u16p_Peak, U16 *u16p_Starti	SwCom_13	
-SwUFn_1379	s_CheckCloseOverloadCondition	static U8 s_CheckCloseOverloadCondition(const CloseOverloadParam_t *pP	SwCom_13	
-SwUFn_1380	s_ProcessCloseOverloadDetection	static void s_ProcessCloseOverloadDetection(S16 s16_CloseDisplacement,	SwCom_13	
-SwUFn_1383	s_GetSlopeType	static void s_GetSlopeType(void)	SwCom_13	
-SwUFn_1384	s_MotorOverHeatActiveHoldPostActionCheck	static void s_MotorOverHeatActiveHoldPostActionCheck( void )	SwCom_13	
-SwUFn_1385	s_UpdateThermalThresholdByAmbientTemp	static void s_UpdateThermalThresholdByAmbientTemp( void )	SwCom_13	
-SwUFn_1386	s_CompensateThermalThreshold	static U16 s_CompensateThermalThreshold(U16 u16t_EepromThreshold)	SwCom_13	
-SwUFn_1387	s_MotorTemperatureSelect	static void s_MotorTemperatureSelect( void )	SwCom_13	
-SwUFn_1388	s_MotorTemperatureSelect1Min	static void s_MotorTemperatureSelect1Min( void )	SwCom_13	
-SwUFn_1389	s16_GetTempRatio	static S16 s16_GetTempRatio(U8 u8_TempCode)	SwCom_13	
-SwUFn_1390	s16_Lerp	static S16 s16_Lerp(U8 u8t_InputX, U8 u8t_LeftX, U8 u8t_RightX, S16 s1	SwCom_13	
-SwUFn_1391	s16_ClampS16	static S16 s16_ClampS16(S16 s16t_InputVal, S16 vmin, S16 vmax)	SwCom_13	
-SwUFn_1392	s16_GetTempOffset_FromLut	static S16 s16_GetTempOffset_FromLut(U8 u8_TempCode, const S16 *pOffse	SwCom_13	
-SwUFn_1393	s16_LerpSlope_S16	static S16 s16_LerpSlope_S16(S16 s16t_InputX, S16 s16t_LowerX, S16 s16	SwCom_13	
-SwUFn_1394	s16_Interp3_BySlope	static S16 s16_Interp3_BySlope(S16 slopeDeg, S16 low, S16 flat, S16 hi	SwCom_13	
-SwUFn_1395	s_Env_B_BuzzerChecks	static void s_Env_B_BuzzerChecks(void)	SwCom_13	
-SwUFn_1396	s_GetOpenCurrentThreshold	static void s_GetOpenCurrentThreshold(U16 *u16p_Peak, U16 *u16p_Starti	SwCom_13	
-SwUFn_1398	s_Ap_PreviousCtrl_ResetFlags	static void s_Ap_PreviousCtrl_ResetFlags(void)	SwCom_13	
-SwUFn_1399	s_Ap_PreviousCtrl_ResetActiveOffsetLut	static void s_Ap_PreviousCtrl_ResetActiveOffsetLut(void)	SwCom_13	
-SwUFn_13100	s_Ap_PreviousCtrl_ResetEepromParams	static void s_Ap_PreviousCtrl_ResetEepromParams(void)	SwCom_13	
-SwUFn_13101	s_Ap_PreviousCtrl_ResetCounters	static void s_Ap_PreviousCtrl_ResetCounters(void)	SwCom_13	
-SwUFn_13102	s_IsDoorClosed	static U8 s_IsDoorClosed(U8 u8t_DoorState)	SwCom_13	
-SwUFn_13103	s_IsAllDoorsClosedForDeviceType	static U8 s_IsAllDoorsClosedForDeviceType(void)	SwCom_13	
-SwUFn_13104	s_AreAllWindowsClosed	static U8 s_AreAllWindowsClosed(void)	SwCom_13	
-SwUFn_13105	s_GetCompensateLevel_WindowClosed	static U8 s_GetCompensateLevel_WindowClosed(U8 u8_Level)	SwCom_13	
-SwUFn_13106	s_GetCompensateLevel_WindowOpen	static U8 s_GetCompensateLevel_WindowOpen(U8 u8_Level)	SwCom_13	
-SwUFn_13107	s_ReverseOperationDetect_Open	static void s_ReverseOperationDetect_Open(S16 s16t_Position_8)	SwCom_13	
-SwUFn_13108	s_Ap_PreviousCtrl_ResetCounters_Group1	static void s_Ap_PreviousCtrl_ResetCounters_Group1(void)	SwCom_13	
-SwUFn_13109	s_Ap_PreviousCtrl_ResetCounters_Group2	static void s_Ap_PreviousCtrl_ResetCounters_Group2(void)	SwCom_13	
-SwUFn_13110	s_Ap_PreviousCtrl_ResetCounters_Group3	static void s_Ap_PreviousCtrl_ResetCounters_Group3(void)	SwCom_13	
-SwUFn_13111	s_ReverseOperationDetect_Close	static void s_ReverseOperationDetect_Close(S16 s16t_Position_30)	SwCom_13	
-SwUFn_13112	s_DoorStopPosition_Init	static void s_DoorStopPosition_Init(void)	SwCom_13	
-SwUFn_13113	s_DoorStopPosition_Stage1	static void s_DoorStopPosition_Stage1(S16 *ps16_Result)	SwCom_13	
-SwUFn_13114	s_DoorStopPosition_Stage2	static void s_DoorStopPosition_Stage2(S16 *ps16_Result)	SwCom_13	
-SwUFn_13115	s_DoorStopPosition_Stage3	static void s_DoorStopPosition_Stage3(S16 *ps16_Result)	SwCom_13	
-SwUFn_13116	s_GetDoorMovingOpenSteps	static void s_GetDoorMovingOpenSteps(S16 *ps16_OpenStep, S16 *ps16_Ope	SwCom_13	
-SwUFn_13117	s_GetDoorMovingCloseSteps	static void s_GetDoorMovingCloseSteps(S16 *ps16_CloseStep, S16 *ps16_C	SwCom_13	
-SwUFn_13118	s_DoorMovingOpenCheck	static S8 s_DoorMovingOpenCheck(S16 s16_PosDiff, S16 s16_OpenStep, S16	SwCom_13	
-SwUFn_13119	s_DoorMovingCloseCheck	static S8 s_DoorMovingCloseCheck(S16 s16_PosDiff, S16 s16_CloseStep, S	SwCom_13	
-SwUFn_13120	s_IsOpenOverloadBasicFail	static U8 s_IsOpenOverloadBasicFail(void)	SwCom_13	
-SwUFn_13121	s_IsOpenOverloadSpeedFail	static U8 s_IsOpenOverloadSpeedFail(U16 u16_Current, U16 u16_Peak)	SwCom_13	
-SwUFn_13122	s_IsOpenOverloadEarlyTime	static U8 s_IsOpenOverloadEarlyTime(void)	SwCom_13	
-SwUFn_13123	s_GetOpenOverloadResult	static U8 s_GetOpenOverloadResult(U16 u16_Current, U16 u16_Starting, U	SwCom_13	
-SwUFn_13124	s_IsCloseOverloadBasicFail	static U8 s_IsCloseOverloadBasicFail(void)	SwCom_13	
-SwUFn_13125	s_IsCloseOverloadPrecondition	static U8 s_IsCloseOverloadPrecondition(U16 u16_Current, U16 u16_Peak,	SwCom_13	
-SwUFn_13126	s_IsCloseOverloadTimeOk	static U8 s_IsCloseOverloadTimeOk(U16 u16_IgnoreTm, U16 u16_Current)	SwCom_13	
-SwUFn_13127	s_GetCloseOverloadResult	static U8 s_GetCloseOverloadResult(U16 u16_Current, U16 u16_Starting, 	SwCom_13	
-SwUFn_13128	s_DecelerationDetect_UpdateTrend	static void s_DecelerationDetect_UpdateTrend( void )	SwCom_13	
-SwUFn_13129	s_DecelerationDetect_UpdateSpeedFlag	static void s_DecelerationDetect_UpdateSpeedFlag( void )	SwCom_13	
-SwUFn_13130	s_DampingDetect_HandleIdle	static void s_DampingDetect_HandleIdle( U8 u8t_DampingAllowed )	SwCom_13	
-SwUFn_13131	s_DampingDetect_HandleHolding	static void s_DampingDetect_HandleHolding( void )	SwCom_13	
-SwUFn_13132	s_DampingDetect_ResetState	static void s_DampingDetect_ResetState( void )	SwCom_13	
-SwUFn_13133	s_ReboundProtection_SelectParams	static void s_ReboundProtection_SelectParams( S_ReboundPrtctParams_t* 	SwCom_13	
-SwUFn_13134	s_ReboundProtection_HandleDetected	static void s_ReboundProtection_HandleDetected( const S_ReboundPrtctPa	SwCom_13	
-SwUFn_13135	s_ReboundProtection_Return_HandleSlopeHigh	static void s_ReboundProtection_Return_HandleSlopeHigh( void )	SwCom_13	
-SwUFn_13136	s_ReboundProtection_Return_HandleReleaseBySpeed	static void s_ReboundProtection_Return_HandleReleaseBySpeed( void )	SwCom_13	
-SwUFn_13137	s_ReboundProtection_Return_HandleClearCondition	static void s_ReboundProtection_Return_HandleClearCondition( void )	SwCom_13	
-SwUFn_13138	s_AreThreeDoorsClosed	static U8 s_AreThreeDoorsClosed(U8 u8t_Door1, U8 u8t_Door2, U8 u8t_Doo	SwCom_13	
-SwUFn_13139	s_GetEnvTemperature	static void s_GetEnvTemperature( void )	SwCom_13	
-SwUFn_13140	s_Ap_PreviousCtrl_ResetEnvState	static void s_Ap_PreviousCtrl_ResetEnvState(void)	SwCom_13	
-SwUFn_13141	s_PlayProtectTempTrendChk	static void s_PlayProtectTempTrendChk(U16 u16t_MotorTemp)	SwCom_13	
-SwUFn_13142	u32s_PlayProtectI2tAddScoreGet	static U32 u32s_PlayProtectI2tAddScoreGet(U16 u16t_Current)	SwCom_13	
-SwUFn_13143	s_PlayProtectI2tScoreUpdate	static void s_PlayProtectI2tScoreUpdate(U32 u32t_AddScore)	SwCom_13	
-SwUFn_13144	u32s_PlayProtectI2tLimitGet	static U32 u32s_PlayProtectI2tLimitGet(U16 u16t_MotorTemp, U16 u16t_Th	SwCom_13	
-SwUFn_13145	s_PlayProtectMotorThermalStressChk	static void s_PlayProtectMotorThermalStressChk(void)	SwCom_13	
-SwUFn_13146	s_AntiPinchClose_UpdateDecel	static void s_AntiPinchClose_UpdateDecel(U8 u8t_AfterStartZone_F)	SwCom_13	
-SwUFn_13147	s_AntiPinchClose_UpdateNoProgress	static void s_AntiPinchClose_UpdateNoProgress(U8 u8t_AfterStartZone_F)	SwCom_13	
-SwUFn_13148	s_AntiPinchClose_UpdateLowSpeed	static void s_AntiPinchClose_UpdateLowSpeed(U8 u8t_AfterStartZone_F)	SwCom_13	
-SwUFn_13149	s_AntiPinchDetect_Close_Decel	void s_AntiPinchDetect_Close_Decel(void)	SwCom_13	
-SwUFn_13150	s_PlayProtectTimeOverMonitor	static void s_PlayProtectTimeOverMonitor(void)	SwCom_13	
-SwUFn_1401	g_Ap_DoorCtrl_Func	void g_Ap_DoorCtrl_Func( void )	SwCom_14	
-SwUFn_1402	g_Ap_DoorCtrl_Reset	void g_Ap_DoorCtrl_Reset( void )	SwCom_14	
-SwUFn_1446	g_Ap_DoorCtrl_GetDrMovgTmMon	U16 g_Ap_DoorCtrl_GetDrMovgTmMon( void )	SwCom_14	
-SwUFn_1405	s_ShortBrakeCtrl	static void s_ShortBrakeCtrl( void )	SwCom_14	
-SwUFn_1406	s_DoorStateCtrl_UserCtrl	static void s_DoorStateCtrl_UserCtrl ( void )	SwCom_14	
-SwUFn_1414	s_DoorState_AutoOpen	static void s_DoorState_AutoOpen( void )	SwCom_14	
-SwUFn_1418	s_DoorState_UserCtrl_Stop	static void s_DoorState_UserCtrl_Stop( void )	SwCom_14	
-SwUFn_1419	s_DoorState_UserCtrl_Open	static void s_DoorState_UserCtrl_Open( void )	SwCom_14	
-SwUFn_1420	s_DoorState_UserCtrl_Close	static void s_DoorState_UserCtrl_Close( void )	SwCom_14	
-SwUFn_1421	s_DoorState_UserCtrl_AutoOpen	static void s_DoorState_UserCtrl_AutoOpen( void )	SwCom_14	
-SwUFn_1422	s_DoorState_UserCtrl_AutoClose	static void s_DoorState_UserCtrl_AutoClose( void )	SwCom_14	
-SwUFn_1432	s_MoveStartOpen_FrontParamSet	void s_MoveStartOpen_FrontParamSet ( void )	SwCom_14	
-SwUFn_1433	s_MoveStartOpen_RearParamSet	void s_MoveStartOpen_RearParamSet ( void )	SwCom_14	
-SwUFn_1436	s_MoveStartClose_FrontParamSet	void s_MoveStartClose_FrontParamSet( void )	SwCom_14	
-SwUFn_1437	s_MoveStartClose_RearParamSet	void s_MoveStartClose_RearParamSet ( void )	SwCom_14	
-SwUFn_1438	s_ProcessDoorStateTransition	static void s_ProcessDoorStateTransition(enum en_g_DoorState t_DoorSta	SwCom_14	
-SwUFn_1439	s_ProcessAutoStopChecks	static void s_ProcessAutoStopChecks(void)	SwCom_14	
-SwUFn_1440	s_ProcessLatchStates	static void s_ProcessLatchStates(void)	SwCom_14	
-SwUFn_1441	s_ProcessMovementRequests	static void s_ProcessMovementRequests(void)	SwCom_14	
-SwUFn_1442	s_ProcessInitAndStopStates	static void s_ProcessInitAndStopStates(enum en_g_DoorState t_DoorState	SwCom_14	
-SwUFn_1443	s_ProcessOpenStates	static void s_ProcessOpenStates(enum en_g_DoorState t_DoorState)	SwCom_14	
-SwUFn_1444	s_ProcessCloseStates	static void s_ProcessCloseStates(enum en_g_DoorState t_DoorState)	SwCom_14	
-SwUFn_1445	s_HistoryPushDoorState	static void s_HistoryPushDoorState( enum en_g_DoorState *pe_StateHisto	SwCom_14	
-SwUFn_1447	s_DoorState_AutoClose_HandleHalfLatch	static void s_DoorState_AutoClose_HandleHalfLatch(void)	SwCom_14	
-SwUFn_1448	s_DoorState_AutoClose_HandleFullClose	static void s_DoorState_AutoClose_HandleFullClose(void)	SwCom_14	
-SwUFn_1449	u8s_DoorState_AutoClose_ShouldStop	static U8 u8s_DoorState_AutoClose_ShouldStop(void)	SwCom_14	
-SwUFn_1450	s_DoorState_AutoClose_UpdateFailInfo	static void s_DoorState_AutoClose_UpdateFailInfo(void)	SwCom_14	
-SwUFn_1451	u8s_DoorState_AutoClose_ShouldUpdateFailInfo	static U8 u8s_DoorState_AutoClose_ShouldUpdateFailInfo(void)	SwCom_14	
-SwUFn_1501	g_Ap_MotorCtrl_Func	void g_Ap_MotorCtrl_Func( void )	SwCom_15	
-SwUFn_1502	g_Ap_MotorCtrl_Reset	void g_Ap_MotorCtrl_Reset( void )	SwCom_15	
-SwUFn_1590	g_Ap_MotorCtrl_GetComSpeed	S32 g_Ap_MotorCtrl_GetComSpeed(void)	SwCom_15	
-SwUFn_1591	g_Ap_MotorCtrl_GetScanState	ScanState_t g_Ap_MotorCtrl_GetScanState(void)	SwCom_15	
-SwUFn_1592	g_Ap_MotorCtrl_GetSlipDirection	U8 g_Ap_MotorCtrl_GetSlipDirection(void)	SwCom_15	
-SwUFn_1593	g_Ap_MotorCtrl_GetSlipHoldingForce	S16 g_Ap_MotorCtrl_GetSlipHoldingForce(void)	SwCom_15	
-SwUFn_1594	g_Ap_MotorCtrl_GetSlipHoldingPosition	S16 g_Ap_MotorCtrl_GetSlipHoldingPosition(void)	SwCom_15	
-SwUFn_1595	g_Ap_MotorCtrl_GetSlipHoldingCurrent	S16 g_Ap_MotorCtrl_GetSlipHoldingCurrent(void)	SwCom_15	
-SwUFn_1503	s_MotorStateCtrl	static void s_MotorStateCtrl( void )	SwCom_15	
-SwUFn_1504	s_MotorCtrl	static void s_MotorCtrl( void )	SwCom_15	
-SwUFn_1506	s_MotorState_ShortBrake	static void s_MotorState_ShortBrake( void )	SwCom_15	
-SwUFn_1507	s_MotorState_Open	static void s_MotorState_Open( void )	SwCom_15	
-SwUFn_1508	s_MotorState_Close	static void s_MotorState_Close( void )	SwCom_15	
-SwUFn_1509	s_MotorSpeedModeSelection	static void s_MotorSpeedModeSelection( void )	SwCom_15	
-SwUFn_1510	s_MotorSpeedModeSelection_FrontSet	static void s_MotorSpeedModeSelection_FrontSet ( void )	SwCom_15	
-SwUFn_1511	s_MotorSpeedModeSelection_RearSet	static void s_MotorSpeedModeSelection_RearSet ( void )	SwCom_15	
-SwUFn_1512	s_MotorSpeedCtrl	static void s_MotorSpeedCtrl( void )	SwCom_15	
-SwUFn_1513	s_MotorSpeedCtrl_General	static void s_MotorSpeedCtrl_General( void )	SwCom_15	
-SwUFn_1514	s_MotorSpeedCtrl_UserCtrl	static void s_MotorSpeedCtrl_UserCtrlvoid )	SwCom_15	
-SwUFn_1515	s_MotorSpdCtrl_AutoOpen	static void s_MotorSpdCtrl_AutoOpen( void )	SwCom_15	
-SwUFn_1516	s_MotorSpdCtrl_AutoClose	static s_MotorSpdCtrl_AutoClose ( void )	SwCom_15	
-SwUFn_1517	s_ComSpeedLimit	static void s_ComSpeedLimit( void )	SwCom_15	
-SwUFn_1525	s_MotorSpdCtrl_AssistOpen	static void s_MotorSpdCtrl_AssistOpen( void )	SwCom_15	
-SwUFn_1526	s_MotorSpdCtrl_AssistClose	static void s_MotorSpdCtrl_AssistClose( void )	SwCom_15	
-SwUFn_1529	s_PID_Control_Speed	static S32 s_PID_Control_Speed(S32 S32t_TargetSpeed)	SwCom_15	
-SwUFn_1530	s_PID_Control_Speed_Reset	static void s_PID_Control_Speed_Reset( void )	SwCom_15	
-SwUFn_1533	s_MotorSpdCtrl_AutoStop	static void s_MotorSpdCtrl_AutoStop( void )	SwCom_15	
-SwUFn_1534	s_MotorSpdCtrl_ActiveHolding	static void s_MotorSpdCtrl_ActiveHolding( void )	SwCom_15	
-SwUFn_1536	s_MotorSpdCtrl_UserCtrlMove	static void s_MotorSpdCtrl_UserCtrlMove( void )	SwCom_15	
-SwUFn_1537	s_MotorSpdCtrl_UserCtrlPositioning	static void s_MotorSpdCtrl_UserCtrlPositioning ( void )	SwCom_15	
-SwUFn_1539	s_ProcessDoorMovementState	static void s_ProcessDoorMovementState(void)	SwCom_15	
-SwUFn_1540	s_ProcessAutoStopState	static void s_ProcessAutoStopState(void)	SwCom_15	
-SwUFn_1547	s_GetDoorSideAdjustedAngles	static void s_GetDoorSideAdjustedAngles(S16 *s16p_Pitch, S16 *s16p_Rol	SwCom_15	
-SwUFn_1554	s_ApplyAutoCloseModifiers	static void s_ApplyAutoCloseModifiers( S32 *s32p_speed )	SwCom_15	
-SwUFn_1555	s_UpdateAutoCloseControl	static void s_UpdateAutoCloseControl(S32 s32_target_speed)	SwCom_15	
-SwUFn_1558	s_AssistClose_PrepareAngles	static void s_AssistClose_PrepareAngles(S16 *s16p_pitch, S16 *s16p_rol	SwCom_15	
-SwUFn_1560	s_AssistClose_CalculatePWM	static void s_AssistClose_CalculatePWM(S16 s16_pitch, S16 s16_roll)	SwCom_15	
-SwUFn_1561	s_AssistClose_ProcessStopCondition	static void s_AssistClose_ProcessStopCondition(void)	SwCom_15	
-SwUFn_1563	s_AssistClose_SetMotorDirection	static void s_AssistClose_SetMotorDirection(void)	SwCom_15	
-SwUFn_1564	s_AssistOpen_PrepareAngles	static void s_AssistOpen_PrepareAngles(S16 *s16p_pitch, S16 *s16p_roll	SwCom_15	
-SwUFn_1565	s_AssistOpen_CalculateBasePWM	static void s_AssistOpen_CalculateBasePWM(S16 s16_pitch, S16 s16_roll)	SwCom_15	
-SwUFn_1566	s_AssistOpen_CheckNormalConditions	static U8 s_AssistOpen_CheckNormalConditions(void)	SwCom_15	
-SwUFn_1567	s_AssistOpen_ProcessStopCycle	static void s_AssistOpen_ProcessStopCycle(void)	SwCom_15	
-SwUFn_1568	s_AssistOpen_ProcessActiveHolding	static void s_AssistOpen_ProcessActiveHolding(void)	SwCom_15	
-SwUFn_1569	s_AssistOpen_SetMotorDirection	static void s_AssistOpen_SetMotorDirection(void)	SwCom_15	
-SwUFn_1570	s_AssistOpen_ProcessNormalOperation	static void s_AssistOpen_ProcessNormalOperation(S16 s16t_Pitch, S16 s1	SwCom_15	
-SwUFn_1571	s_MotorCompensation	static void s_MotorCompensation( void )	SwCom_15	
-SwUFn_1572	s_MotorSpdCtrl_PreActiveHolding	static void s_MotorSpdCtrl_PreActiveHolding( void )	SwCom_15	
-SwUFn_1573	s_DoorHolding_PrepareAngles	static void s_DoorHolding_PrepareAngles(S16 *s16p_pitch, S16 *s16p_rol	SwCom_15	
-SwUFn_1574	s_DoorHolding_ProcessState	static void s_DoorHolding_ProcessState(S16 s16_pitch, S16 s16_roll, U3	SwCom_15	
-SwUFn_1575	s32g_CompensateOutputByVoltage_LUT	static void s32g_CompensateOutputByVoltage_LUT( void )	SwCom_15	
-SwUFn_1576	s16s_InterpSlopeCompensation	static S16 s16s_InterpSlopeCompensation( const S16 s16g_Table[ROLL_CNT	SwCom_15	
-SwUFn_1577	s32_DivRound	static S32 s32_DivRound(S32 num, S32 den)	SwCom_15	
-SwUFn_1578	s_CalcIntersectPoint_NoS64	static void s_CalcIntersectPoint_NoS64(const IntersectLine_t *pLine, S	SwCom_15	
-SwUFn_1579	s16_ClampToS16	static S16 s16_ClampToS16(S32 s32t_InputVal)	SwCom_15	
-SwUFn_1580	s_CalcAutoCloseSpeedProfile	static S32 s_CalcAutoCloseSpeedProfile(void)	SwCom_15	
-SwUFn_1581	s_PID_Control_Position	static S32 s_PID_Control_Position(S16 S16t_TargetPosition)	SwCom_15	
-SwUFn_1582	s_PID_Control_Position_Reset	static void s_PID_Control_Position_Reset( void )	SwCom_15	
-SwUFn_1583	s_DoorHoldingStabilization	static void s_DoorHoldingStabilization( void )	SwCom_15	
-SwUFn_1584	s_ProcessSlipDetected	static void s_ProcessSlipDetected( S16 s16t_diff )	SwCom_15	
-SwUFn_1585	s_SlipCheck_Original	static void s_SlipCheck_Original( S16 s16t_Position_10 )	SwCom_15	
-SwUFn_1586	s_DoorHoldingForceScan	static void s_DoorHoldingForceScan(void)	SwCom_15	
-SwUFn_1587	s16s_Gap_Diff	static S16 s16s_Gap_Diff( S16 s16t_Data1, S16 s16t_Data2 )	SwCom_15	
-SwUFn_1588	s_DoorHolding_InitState	static void s_DoorHolding_InitState(S16 s16_pitch, S16 s16_roll)	SwCom_15	
-SwUFn_1589	s_DoorHolding_SlipCheckState	static void s_DoorHolding_SlipCheckState(U32 u32_holdingTime)	SwCom_15	
-SwUFn_1596	prv_FindBracketIdx	static U16 prv_FindBracketIdx(const S16 val, const S16* xAxis, const U	SwCom_15	
-SwUFn_1597	prv_ComputeQ15Ratio	static U16 prv_ComputeQ15Ratio(const S16 val, const S16 s16t_RangeStar	SwCom_15	
-SwUFn_1598	prv_LerpQ15	static S16 prv_LerpQ15(const S16 s16t_StartVal, const S16 s16t_EndVal,	SwCom_15	
-SwUFn_1599	g_Ap_MotorCtrl_GetRefSpeedMon	S32 g_Ap_MotorCtrl_GetRefSpeedMon( void )	SwCom_15	
-SwUFn_15100	s_MotorCtrl_DetermineFromFreeStop	static void s_MotorCtrl_DetermineFromFreeStop(void)	SwCom_15	
-SwUFn_15101	u8s_MotorCtrl_IsShortMode	static U8 u8s_MotorCtrl_IsShortMode(void)	SwCom_15	
-SwUFn_15102	s_AutoClose_GetAnglesLimited	static void s_AutoClose_GetAnglesLimited(S16 *s16p_Pitch, S16 *s16p_Ro	SwCom_15	
-SwUFn_15103	s_AutoClose_ApplyHoldingSpeed	static void s_AutoClose_ApplyHoldingSpeed(S32 *s32p_speed, S16 s16t_Po	SwCom_15	
-SwUFn_15104	s_AutoClose_ApplyTip2Run_Normal	static void s_AutoClose_ApplyTip2Run_Normal(S32 *s32p_speed)	SwCom_15	
-SwUFn_15105	s_AutoCloseProfile_Init	static void s_AutoCloseProfile_Init(AutoCloseProfileParam_t *pProfile)	SwCom_15	
-SwUFn_15106	s_AutoCloseProfile_CalcIntersection	static void s_AutoCloseProfile_CalcIntersection(AutoCloseProfileParam_	SwCom_15	
-SwUFn_15107	s_AutoCloseProfile_CalcSpeed	static S32 s_AutoCloseProfile_CalcSpeed(const AutoCloseProfileParam_t 	SwCom_15	
-SwUFn_15108	s_DoorHolding_TempPauseCheck	static U8 s_DoorHolding_TempPauseCheck(void)	SwCom_15	
-SwUFn_15109	s_DoorHolding_ScanInit	static void s_DoorHolding_ScanInit(void)	SwCom_15	
-SwUFn_15110	s_DoorHolding_SetDirection	static void s_DoorHolding_SetDirection(void)	SwCom_15	
-SwUFn_15111	s_DoorHolding_MoveToTarget	static void s_DoorHolding_MoveToTarget(S16 s16t_Position_23, S16 s16t_	SwCom_15	
-SwUFn_15112	s_DoorHolding_Wait2s	static void s_DoorHolding_Wait2s(void)	SwCom_15	
-SwUFn_15113	s_DoorHolding_MeasureSpeed	static void s_DoorHolding_MeasureSpeed(void)	SwCom_15	
-SwUFn_15114	s_DoorHolding_HoldingForceStay	static void s_DoorHolding_HoldingForceStay(void)	SwCom_15	
-SwUFn_15115	s_DoorHolding_NextPosition	static void s_DoorHolding_NextPosition(void)	SwCom_15	
-SwUFn_15116	s_DoorHolding_ClampComSpeed	static void s_DoorHolding_ClampComSpeed(void)	SwCom_15	
-SwUFn_15117	s_DoorHolding_HandleScanState	static void s_DoorHolding_HandleScanState(ScanState_t u8t_ScanState, S	SwCom_15	
-SwUFn_15118	s_DoorHolding_ClampCurrentSpeed	static void s_DoorHolding_ClampCurrentSpeed(void)	SwCom_15	
-SwUFn_15119	s_DoorHolding_UpdateMovingTarget	static void s_DoorHolding_UpdateMovingTarget(S16 s16t_Position_23, S16	SwCom_15	
-SwUFn_15120	s_DoorHolding_UpdateComSpeed	static void s_DoorHolding_UpdateComSpeed(void)	SwCom_15	
-SwUFn_15121	s_DoorHolding_CheckTargetReached	static void s_DoorHolding_CheckTargetReached(S16 s16t_Position_23)	SwCom_15	
-SwUFn_15122	s_DoorHolding_SampleHoldData	static void s_DoorHolding_SampleHoldData(void)	SwCom_15	
-SwUFn_15123	s_DoorHolding_FinalizeHoldData	static void s_DoorHolding_FinalizeHoldData(void)	SwCom_15	
-SwUFn_15124	s_DoorHolding_HandleInitOrDirection	static void s_DoorHolding_HandleInitOrDirection(ScanState_t u8t_ScanSt	SwCom_15	
-SwUFn_15125	s_DoorHolding_HandleMoveOrWait	static void s_DoorHolding_HandleMoveOrWait(ScanState_t u8t_ScanState, 	SwCom_15	
-SwUFn_15126	s_DoorHolding_HandleSlipOrMeasure	static void s_DoorHolding_HandleSlipOrMeasure(ScanState_t u8t_ScanStat	SwCom_15	
-SwUFn_15127	s_DoorHolding_HandleForceOrNext	static void s_DoorHolding_HandleForceOrNext(ScanState_t u8t_ScanState)	SwCom_15	
-SwUFn_15128	s_GetSlipPhaseIndex	static U8 s_GetSlipPhaseIndex(void)	SwCom_15	
-SwUFn_15129	s_SlipCheck_Original_WaitPhase	static void s_SlipCheck_Original_WaitPhase(S16 s16t_Position_10)	SwCom_15	
-SwUFn_15130	s_SlipCheck_Original_AdjustPhase	static void s_SlipCheck_Original_AdjustPhase(S16 s16t_pwm_step)	SwCom_15	
-SwUFn_15131	s_DoorHolding_HandleWaitState	static void s_DoorHolding_HandleWaitState(void)	SwCom_15	
-SwUFn_15132	s_DoorHolding_HandleSetTuneState	static void s_DoorHolding_HandleSetTuneState(void)	SwCom_15	
-SwUFn_15133	s_AssistClose_SetEndStep	static void s_AssistClose_SetEndStep(void)	SwCom_15	
-SwUFn_15134	s_AssistClose_GetAnglesLimited	static void s_AssistClose_GetAnglesLimited(S16 *s16p_Pitch, S16 *s16p_	SwCom_15	
-SwUFn_15136	s_Assist_CalcActiveHoldingPwm	static S32 s_Assist_CalcActiveHoldingPwm(S16 s16_NowStep, S16 s16_EndS	SwCom_15	
-SwUFn_15137	s_Assist_ApplyActiveHolding	static void s_Assist_ApplyActiveHolding(void)	SwCom_15	
-SwUFn_15138	s_AssistClose_TryActivateRevKick	static void s_AssistClose_TryActivateRevKick(void)	SwCom_15	
-SwUFn_15139	s_AssistClose_UpdateNowStep	static void s_AssistClose_UpdateNowStep(void)	SwCom_15	
-SwUFn_15140	s_AssistClose_UpdateActiveHoldingPwm	static void s_AssistClose_UpdateActiveHoldingPwm(void)	SwCom_15	
-SwUFn_15141	s_AssistClose_CheckReverseMovement	static void s_AssistClose_CheckReverseMovement(void)	SwCom_15	
-SwUFn_15142	s_AssistClose_ProcessOutsideSection	static void s_AssistClose_ProcessOutsideSection(void)	SwCom_15	
-SwUFn_15143	s_AssistClose_ProcessActiveSection	static void s_AssistClose_ProcessActiveSection(void)	SwCom_15	
-SwUFn_15144	s_AssistOpen_SetEndStep	static void s_AssistOpen_SetEndStep(void)	SwCom_15	
-SwUFn_15145	s_AssistOpen_GetAnglesLimited	static void s_AssistOpen_GetAnglesLimited(S16 *s16p_Pitch, S16 *s16p_R	SwCom_15	
-SwUFn_15147	s_AssistOpen_TryActivateRevKick	static void s_AssistOpen_TryActivateRevKick(void)	SwCom_15	
-SwUFn_15148	s_AssistOpen_UpdateNowStep	static void s_AssistOpen_UpdateNowStep(void)	SwCom_15	
-SwUFn_15149	s_AssistOpen_UpdateActiveHoldingPwm	static void s_AssistOpen_UpdateActiveHoldingPwm(void)	SwCom_15	
-SwUFn_15150	s_AssistOpen_CheckReverseMovement	static void s_AssistOpen_CheckReverseMovement(void)	SwCom_15	
-SwUFn_15151	s_AssistOpen_ProcessOutsideSection	static void s_AssistOpen_ProcessOutsideSection(void)	SwCom_15	
-SwUFn_15152	s_AssistOpen_ProcessActiveSection	static void s_AssistOpen_ProcessActiveSection(void)	SwCom_15	
-SwUFn_15153	s_GetVsupRatio_Interpolate	static U16 s_GetVsupRatio_Interpolate(U16 u16_Vsup, const U16 *pu16_Vo	SwCom_15	
-SwUFn_15154	s_GetVsupRatio	static U16 s_GetVsupRatio(U16 u16_Vsup)	SwCom_15	
-SwUFn_15155	s_AutoCloseProfile_SelectMode	static void s_AutoCloseProfile_SelectMode(AutoCloseProfileParam_t *pPr	SwCom_15	
-SwUFn_15156	s_MotorSpeedModeSelection_FrontSetModeBase	static void s_MotorSpeedModeSelection_FrontSetModeBase( void )	SwCom_15	
-SwUFn_15157	s_MotorSpeedModeSelection_FrontApplySlope	static void s_MotorSpeedModeSelection_FrontApplySlope( void )	SwCom_15	
-SwUFn_15158	s_MotorSpeedModeSelection_FrontApplyCompensation	static void s_MotorSpeedModeSelection_FrontApplyCompensation( void )	SwCom_15	
-SwUFn_15159	s16s_InterpActiveHolding	static S16 s16s_InterpActiveHolding( const S16 roll_deg, const S16 pit	SwCom_15	
-SwUFn_15160	s16s_InterpPreActiveHolding	static S16 s16s_InterpPreActiveHolding( const S16 roll_deg, const S16 	SwCom_15	
-SwUFn_15161	s16s_InterpAssistClose	static S16 s16s_InterpAssistClose( const S16 roll_deg, const S16 pitch	SwCom_15	
-SwUFn_15162	s16s_InterpAssistOpen	static S16 s16s_InterpAssistOpen( const S16 roll_deg, const S16 pitch_	SwCom_15	
-SwUFn_15163	s_AutoCloseProfile_CalcMode1Speed	static S32 s_AutoCloseProfile_CalcMode1Speed(const AutoCloseProfilePar	SwCom_15	
-SwUFn_15164	s_AutoCloseProfile_CalcMode2Speed	static S32 s_AutoCloseProfile_CalcMode2Speed(const AutoCloseProfilePar	SwCom_15	
-SwUFn_15165	s_Ap_MotorCtrl_ResetCoreState	static void s_Ap_MotorCtrl_ResetCoreState( void )	SwCom_15	
-SwUFn_15166	s_Ap_MotorCtrl_ResetControlState	static void s_Ap_MotorCtrl_ResetControlState( void )	SwCom_15	
-SwUFn_15167	s_Ap_MotorCtrl_ResetEepromParamState	static void s_Ap_MotorCtrl_ResetEepromParamState( void )	SwCom_15	
-SwUFn_15168	u16s_GetAssistPositionGain	static U16 u16s_GetAssistPositionGain(U16 u16t_Pos, const U16 *pu16t_G	SwCom_15	
-SwUFn_15169	s16s_GetAssistOpenPositionOffset	static S16 s16s_GetAssistOpenPositionOffset(S16 s16t_OffsetMax)	SwCom_15	
-SwUFn_15170	s16s_GetAssistClosePositionOffset	static S16 s16s_GetAssistClosePositionOffset(S16 s16t_OffsetMax)	SwCom_15	
-SwUFn_1601	g_Ap_BuzzerCtrl_Func	void g_Ap_BuzzerCtrl_Func( void )	SwCom_16	
-SwUFn_1602	g_Ap_BuzzerCtrl_Reset	void g_Ap_BuzzerCtrl_Reset( void )	SwCom_16	
-SwUFn_1603	u8g_BuzzerStateReturn	U8 u8g_BuzzerStateReturn( void )	SwCom_16	
-SwUFn_1605	s_BuzzerStateStop	static void s_BuzzerStateStop( void )	SwCom_16	
-SwUFn_1606	s_BuzzerStateFlashing_Twice	static void s_BuzzerStateFlashing_Twice( void )	SwCom_16	
-SwUFn_1607	s_BuzzerStateFlashing_Triple	static void s_BuzzerStateFlashing_Triple( void )	SwCom_16	
-SwUFn_1608	s_BuzzerStateFlashing_TwiceLong	static void s_BuzzerStateFlashing_TwiceLong( void )	SwCom_16	
-SwUFn_1609	s_BuzzerOnOffCtrl	static void s_BuzzerOnOffCtrl( void )	SwCom_16	
-SwUFn_1610	s_BuzzerCtrl_On	static void s_BuzzerCtrl_On( void )	SwCom_16	
-SwUFn_1611	s_BuzzerCtrl_Off	static void s_BuzzerCtrl_Off( void )	SwCom_16	
-SwUFn_1612	s_BuzzerTimerCtrl	static void s_BuzzerTimerCtrl( void )	SwCom_16	
-SwUFn_1613	s_ClearBuzzerTimer	static void s_ClearBuzzerTimer(void)	SwCom_16	
-SwUFn_1614	u8s_IsTripleFlashBuzzerCondition	static U8 u8s_IsTripleFlashBuzzerCondition(void)	SwCom_16	
-SwUFn_1615	u8s_IsTwiceFlashBuzzerCondition	static U8 u8s_IsTwiceFlashBuzzerCondition(void)	SwCom_16	
-SwUFn_1616	u8s_IsTwiceLongFlashBuzzerCondition	static U8 u8s_IsTwiceLongFlashBuzzerCondition(void)	SwCom_16	
-SwUFn_1617	u8s_IsTripleLongFlashBuzzerCondition	static U8 u8s_IsTripleLongFlashBuzzerCondition(void)	SwCom_16	
-SwUFn_1618	s_BuzzerStateFlashing_TripleLong	static void s_BuzzerStateFlashing_TripleLong( void )	SwCom_16	
-SwUFn_1710	_EntryPoint	void _EntryPoint(void)	SwCom_17	
-SwUFn_1712	PE_Initialize_Core	static void PE_Initialize_Core(void)	SwCom_17	
-SwUFn_1713	PE_Initialize_Communication	static void PE_Initialize_Communication(void)	SwCom_17	
-SwUFn_1714	PE_Initialize_Timers	static void PE_Initialize_Timers(void)	SwCom_17	
-SwUFn_1715	PE_Initialize_Motor_PWM	static void PE_Initialize_Motor_PWM(void)	SwCom_17	
-SwUFn_1716	PE_Initialize_Peripherals	static void PE_Initialize_Peripherals(void)	SwCom_17	
-SwUFn_1717	PE_Get_Reset_Source	static byte PE_Get_Reset_Source(void)	SwCom_17	
-SwUFn_1718	PE_Determine_Reset_Source	static void PE_Determine_Reset_Source(void)	SwCom_17	
-SwUFn_1719	PE_Initialize_Interrupt_Priorities	static void PE_Initialize_Interrupt_Priorities(void)	SwCom_17	
-SwUFn_1720	PE_Initialize_GPIO	static void PE_Initialize_GPIO(void)	SwCom_17	
-SwUFn_1721	PE_Initialize_GPIO_Part1	static void PE_Initialize_GPIO_Part1(void)	SwCom_17	
-SwUFn_1722	PE_Initialize_GPIO_Part2	static void PE_Initialize_GPIO_Part2(void)	SwCom_17	
-SwUFn_1801	PT6_MOTOR_SPEED_OnCapture	void PT6_MOTOR_SPEED_OnCapture(void)	SwCom_18	
-SwUFn_1802	PL0_WAKE_UP_OnInterrupt	void PL0_WAKE_UP_OnInterrupt(void)	SwCom_18	
-SwUFn_1803	SPICtrlTimer_OnInterrupt	void SPICtrlTimer_OnInterrupt(void)	SwCom_18	
-SwUFn_1804	SysTickTimer_OnInterrupt	void SysTickTimer_OnInterrupt(void)	SwCom_18	
-SwUFn_1805	Cpu_OnReset	void Cpu_OnReset(void)	SwCom_18	
-SwUFn_1806	Cpu_OnMachineException	void Cpu_OnMachineException(void)	SwCom_18	
-SwUFn_1807	Cpu_OnIllegalOpcode	void Cpu_OnIllegalOpcode(void)	SwCom_18	
-SwUFn_1808	Cpu_OnSpareOpcode	void Cpu_OnSpareOpcode(void)	SwCom_18	
-SwUFn_1812	Cpu_OnSpuriousInterrupt	void Cpu_OnSpuriousInterrupt(void)	SwCom_18	
-SwUFn_1813	Cpu_OnSRAM_ECCerror	void Cpu_OnSRAM_ECCerror(void)	SwCom_18	
-SwUFn_1814	s_Events_AddU16_Mod	static U16 s_Events_AddU16_Mod( U16 u16t_Lhs, U16 u16t_Rhs )	SwCom_18	
-SwUFn_1815	s_Events_SubU16_Mod	static U16 s_Events_SubU16_Mod( U16 u16t_Lhs, U16 u16t_Rhs )	SwCom_18	
-SwUFn_1816	s_Events_IncU8_Mod	static U8 s_Events_IncU8_Mod( U8 u8t_Value )	SwCom_18	
-SwUFn_1901	LINPHY0_Init	void LINPHY0_Init(void)	SwCom_19	
-SwUFn_2101	EEPROM_SetByte	byte EEPROM_SetByte(EEPROM_TAddress Addr,byte Data)	SwCom_21	
-SwUFn_2102	EEPROM_GetByte	byte EEPROM_GetByte(EEPROM_TAddress Addr,byte *Data)	SwCom_21	
-SwUFn_2103	EEPROM_Init	void EEPROM_Init(void)	SwCom_21	
-SwUFn_2104	BackupSector	static void BackupSector(EEPROM_TAddress_ Addr, word From, word To)	SwCom_21	
-SwUFn_2105	WriteBlock	static byte WriteBlock(EEPROM_TAddress Addr, word From, word To, const	SwCom_21	
-SwUFn_2106	EraseSectorInternal	static byte EraseSectorInternal(EEPROM_TAddress Addr)	SwCom_21	
-SwUFn_2107	WriteWord	static byte WriteWord(EEPROM_TAddress AddrRow,word Data16)	SwCom_21	
-SwUFn_2108	SetupFCCOB	static byte SetupFCCOB(dword PhraseAddr, word To, const word* Data, wo	SwCom_21	
-SwUFn_2201	ADC_MONITOR_Enable	byte ADC_MONITOR_Enable(void)	SwCom_22	
-SwUFn_2202	ADC_MONITOR_Disable	byte ADC_MONITOR_Disable(void)	SwCom_22	
-SwUFn_2203	ADC_MONITOR_Measure	byte ADC_MONITOR_Measure(bool WaitForResult)	SwCom_22	
-SwUFn_2204	ADC_MONITOR_GetValue16	byte ADC_MONITOR_GetValue16(word *Values)	SwCom_22	
-SwUFn_2205	ADC_MONITOR_HWEnDi	void ADC_MONITOR_HWEnDi(void)	SwCom_22	
-SwUFn_2206	ADC_MONITOR_Init	void ADC_MONITOR_Init(void)	SwCom_22	
-SwUFn_2208	PAD4_SNSR_PWR_EN_PutVal	void PAD4_SNSR_PWR_EN_PutVal(bool Val)	SwCom_22	
-SwUFn_2209	PAD5_MONITOR_PWR_EN_PutVal	void PAD5_MONITOR_PWR_EN_PutVal(bool Val)	SwCom_22	
-SwUFn_2207	ADC_MONITOR_MainMeasure	static void ADC_MONITOR_MainMeasure(void)	SwCom_22	
-SwUFn_2301	PP2_MOTOR_PWM2_IN2_Init	void PP2_MOTOR_PWM2_IN2_Init(void)	SwCom_23	
-SwUFn_2302	PP2_MOTOR_PWM2_IN2_SetRatio16	byte PP2_MOTOR_PWM2_IN2_SetRatio16(word Ratio)	SwCom_23	
-SwUFn_2303	PP4_MOTOR_PWM4_IN1_Init	void PP4_MOTOR_PWM4_IN1_Init(void)	SwCom_23	
-SwUFn_2304	PP4_MOTOR_PWM4_IN1_SetRatio16	byte PP4_MOTOR_PWM4_IN1_SetRatio16(word Ratio)	SwCom_23	
-SwUFn_2307	PJ0_MOTOR_NHZ1_PutVal	void PJ0_MOTOR_NHZ1_PutVal(bool Val)	SwCom_23	
-SwUFn_2308	PP3_MOTOR_NHZ2_PutVal	void PP3_MOTOR_NHZ2_PutVal(bool Val)	SwCom_23	
-SwUFn_2309	PP0_MOTOR_NSLEEP_PutVal	void PP0_MOTOR_NSLEEP_PutVal(bool Val)	SwCom_23	
-SwUFn_2310	PT7_MOTOR_DRV_OFF_PutVal	void PT7_MOTOR_DRV_OFF_PutVal(bool Val)	SwCom_23	
-SwUFn_2311	SPI0_Init	void SPI0_Init(void)	SwCom_23	
-SwUFn_2312	SPICtrlTimer_Interrupt	__interrupt void SPICtrlTimer_Interrupt(void)	SwCom_23	
-SwUFn_2305	PP2_SetRatio	static void PP2_SetRatio(void)	SwCom_23	
-SwUFn_2306	PP4_SetRatio	static void PP4_SetRatio(void)	SwCom_23	
-SwUFn_2401	PP1_BUZZER_PWM_Enable	byte PP1_BUZZER_PWM_Enable(void)	SwCom_24	
-SwUFn_2402	PP1_BUZZER_PWM_Disable	byte PP1_BUZZER_PWM_Disable(void)	SwCom_24	
-SwUFn_2403	PP1_BUZZER_PWM_SetRatio16	byte PP1_BUZZER_PWM_Enable(void)	SwCom_24	
-SwUFn_2404	PP1_BUZZER_PWM_Init	void PP1_BUZZER_PWM_Init(void)	SwCom_24	
-SwUFn_2405	HWEnDi	static void HWEnDi(void)	SwCom_24	
-SwUFn_2406	PP1_SetRatio	static void PP1_SetRatio(void)	SwCom_24	
-SwUFn_2601	BATS_Init	void BATS_Init(void)	SwCom_26	
-SwUFn_2901	SCI0_Init	void SCI0_Init(void)	SwCom_29	
-SwUFn_3001	SysTickTimer_Interrupt	__interrupt void SysTickTimer_Interrupt(void)	SwCom_30	
-SwUFn_3101	PT6_MOTOR_SPEED_Init	void PT6_MOTOR_SPEED_Init(void)	SwCom_31	
-SwUFn_3102	PT6_MOTOR_SPEED_Interrupt	__interrupt void PT6_MOTOR_SPEED_Interrupt(void)	SwCom_31, SwCom_32	
-SwUFn_3301	g_UDS_RDBI_Paser	void g_UDS_RDBI_Paser( void )	SwCom_33	
-SwUFn_3302	g_UDS_WDBI_Paser	void g_UDS_WDBI_Paser( void )	SwCom_33	
-SwUFn_3303	g_UDS_LinComp_Reset	void g_UDS_LinComp_Reset( void )	SwCom_33	
-SwUFn_3355	g_UDS_SecurityAccess_TimerHandler	void g_UDS_SecurityAccess_TimerHandler( void )	SwCom_33	
-SwUFn_3356	g_UDS_ControlDTC	void g_UDS_ControlDTC( void )	SwCom_33	
-SwUFn_3357	g_UDS_CommunicationControl	void g_UDS_CommunicationControl( void )	SwCom_33	
-SwUFn_3305	u16s_Pwm2Spd_Conv	U16 u16s_Pwm2Spd_Conv( U8 u8t_PwmData )	SwCom_33	
-SwUFn_3306	s_UDS_RDBI_ProdDate	void s_UDS_RDBI_ProdDate( void )	SwCom_33	
-SwUFn_3307	s_UDS_RDBI_PartNumber	void s_UDS_RDBI_PartNumber( void )	SwCom_33	
-SwUFn_3308	s_UDS_RDBI_SW_Version	void s_UDS_RDBI_SW_Version( void )	SwCom_33	
-SwUFn_3309	s_UDS_RDBI_HW_Version	void s_UDS_RDBI_HW_Version( void )	SwCom_33	
-SwUFn_3310	s_UDS_RDBI_DB_Version	void s_UDS_RDBI_DB_Version( void )	SwCom_33	
-SwUFn_3311	s_UDS_RDBI_SW_Unit1_Version	void s_UDS_RDBI_SW_Unit1_Version ( void )	SwCom_33	
-SwUFn_3312	s_UDS_RDBI_StatusCheck1	void s_UDS_RDBI_StatusCheck1 ( void )	SwCom_33	
-SwUFn_3313	s_UDS_RDBI_StatusCheck2	void s_UDS_RDBI_StatusCheck2 ( void )	SwCom_33	
-SwUFn_3314	s_UDS_WDBI_UserOptRecordId	void s_UDS_WDBI_UserOptRecordId( void )	SwCom_33	
-SwUFn_3315	s_UDS_WDBI_UsOptMain	void s_UDS_WDBI_UsOptMain ( void )	SwCom_33	
-SwUFn_3316	s_UDS_WDBI_UsOpt_F1G	void s_UDS_WDBI_UsOpt_F1G ( void )	SwCom_33	
-SwUFn_3317	s_UDS_WDBI_UsOpt_E2G_1	void s_UDS_WDBI_UsOpt_E2G_1( void )	SwCom_33	
-SwUFn_3318	s_UDS_WDBI_UsOpt_E2G_2	void s_UDS_WDBI_UsOpt_E2G_2 ( void )	SwCom_33	
-SwUFn_3319	s_UDS_WDBI_UsOpt_E2G_3	void s_UDS_WDBI_UsOpt_E2G_3( void )	SwCom_33	
-SwUFn_3321	s_UDS_WDBI_ProdDate	void s_UDS_WDBI_ProdDate( void )	SwCom_33	
-SwUFn_3322	s_UDS_WDBI_PartNumber	void s_UDS_WDBI_PartNumber( void )	SwCom_33	
-SwUFn_3323	s_UDS_WDBI_HW_Version	void s_UDS_WDBI_HW_Version( void )	SwCom_33	
-SwUFn_3324	s_UDS_WDBI_DB_Version	void s_UDS_WDBI_DB_Version( void )	SwCom_33	
-SwUFn_3325	s_UDS_WDBI_US_ReadEeprom	void s_UDS_WDBI_US_ReadEeprom( void )	SwCom_33	
-SwUFn_3326	s_UDS_WDBI_US_WiteEeprom	void s_UDS_WDBI_US_WiteEeprom( void )	SwCom_33	
-SwUFn_3327	s_UDS_WDBI_US_ApplyParam	void s_UDS_WDBI_US_ApplyParam( void )	SwCom_33	
-SwUFn_3328	s_UDS_WDBI_US_ClearEeprom	void s_UDS_WDBI_US_ClearEeprom( void )	SwCom_33	
-SwUFn_3329	s_UDS_WDBI_US_ReadSysSts	void s_UDS_WDBI_US_ReadSysSts( void )	SwCom_33	
-SwUFn_3330	s_UDS_WDBI_US_UserCtrl	void s_UDS_WDBI_US_UserCtrl( void )	SwCom_33	
-SwUFn_3331	s_UDS_WDBI_US_OpDataRead	void s_UDS_WDBI_US_OpDataRead ( void )	SwCom_33	
-SwUFn_3332	s_UDS_WDBI_US_SysOpt	void s_UDS_WDBI_US_SysOpt( void )	SwCom_33	
-SwUFn_3333	s_UDS_WDBI_US_BuzzTest	void s_UDS_WDBI_US_BuzzTest( void )	SwCom_33	
-SwUFn_3334	s_UDS_WDBI_US_Reprogram	void s_UDS_WDBI_US_Reprogram( void )	SwCom_33	
-SwUFn_3335	s_UDS_WDBI_US_Write_Checksum	void s_UDS_WDBI_US_Write_Checksum( void )	SwCom_33	
-SwUFn_3336	s_UDS_WDBI_US_Read_Checksum	void s_UDS_WDBI_US_Read_Checksum( void )	SwCom_33	
-SwUFn_3337	s_UDS_DSC_ProgSession	void s_UDS_DSC_ProgSession( void )	SwCom_33	
-SwUFn_3340	s_UDS_RDBI_ExtractParams	static void s_UDS_RDBI_ExtractParams(void)	SwCom_33	
-SwUFn_3341	s_UDS_RDBI_ProcessSystemInfo	static void s_UDS_RDBI_ProcessSystemInfo(U16 u16t_DidLsb);	SwCom_33	
-SwUFn_3342	s_UDS_RDBI_ProcessSystemStatus	static void s_UDS_RDBI_ProcessSystemStatus(U16 u16t_DidLsb)	SwCom_33	
-SwUFn_3343	s_UDS_RDBI_ProcessDatePartInfo	static void s_UDS_RDBI_ProcessDatePartInfo(U16 u16t_DidLsb)	SwCom_33	
-SwUFn_3344	s_UDS_RDBI_ProcessVersionInfo	static void s_UDS_RDBI_ProcessVersionInfo(U16 u16t_DidLsb)	SwCom_33	
-SwUFn_3345	s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup1	static void s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup1(U8 u8t_ServiceId)	SwCom_33	
-SwUFn_3346	s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup2	static void s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup2(U8 u8t_ServiceId)	SwCom_33	
-SwUFn_3351	s_UDS_SendNRC22_ConditionsNotCorrect	void s_UDS_SendNRC22_ConditionsNotCorrect( void )	SwCom_33	
-SwUFn_3352	s_UDS_RDBI_SW_Unit1_IVD	static void s_UDS_RDBI_SW_Unit1_IVD( void )	SwCom_33	
-SwUFn_3353	s_UDS_RDBI_StatusCheck3	void s_UDS_RDBI_StatusCheck3( void )	SwCom_33	
-SwUFn_3358	s_UDS_DSC_ExtendedSession	void s_UDS_DSC_ExtendedSession( void )	SwCom_33	
-SwUFn_3359	s_UDS_SA_RequestSeed	void s_UDS_SA_RequestSeed( void )	SwCom_33	
-SwUFn_3360	s_UDS_SA_SendKey	void s_UDS_SA_SendKey( void )	SwCom_33	
-SwUFn_3361	s_UDS_SecurityAccessAlgorithm	static U32 s_UDS_SecurityAccessAlgorithm( U32 u32_Seed )	SwCom_33	
-SwUFn_3362	s_UDS_SendNRC78_ResponsePending	void s_UDS_SendNRC78_ResponsePending( void )	SwCom_33	
-SwUFn_3363	s_UDS_RDBI_ProcessTempOffsetTable	static void s_UDS_RDBI_HandlePwmTable(void)	SwCom_33	
-SwUFn_3364	s_UDS_WDBI_ProcessTempOffsetTable	static void s_UDS_WDBI_ProcessTempOffsetTable(void)	SwCom_33	
-SwUFn_3365	s_UDS_WDBI_SlipDetectParams	static void s_UDS_WDBI_SlipDetectParams(void)	SwCom_33	
-SwUFn_3366	s_UDS_WDBI_US_Scan_Start	void s_UDS_WDBI_US_Scan_Start( void )	SwCom_33	
-SwUFn_3367	s_UDS_WDBI_US_Scan_Read	void s_UDS_WDBI_US_Scan_Read( void )	SwCom_33	
-SwUFn_3368	s_UDS_WDBI_US_Position_Scan	void s_UDS_WDBI_US_Position_Scan( void )	SwCom_33	
-SwUFn_3369	s_UDS_RDBI_ProcessDynamicPWMTable	static void s_UDS_RDBI_ProcessDynamicPWMTable(void)	SwCom_33	
-SwUFn_3370	s_UDS_RDBI_SendDynamicTableData	static void s_UDS_RDBI_SendDynamicTableData(const S16* ps16_TablePtr, 	SwCom_33	
-SwUFn_3371	s_UDS_WDBI_ProcessDynamicPWMTable	static void s_UDS_WDBI_ProcessDynamicPWMTable(void)	SwCom_33	
-SwUFn_3372	s_UDS_RDBI_RealTimeMonitor	static void s_UDS_RDBI_RealTimeMonitor(void)	SwCom_33	
-SwUFn_3374	s_UDS_RDBI_ValidateSingleFrame	static U8 s_UDS_RDBI_ValidateSingleFrame(U8 u8t_Pci)	SwCom_33	
-SwUFn_3375	s_UDS_RDBI_Dispatch	static void s_UDS_RDBI_Dispatch(void)	SwCom_33	
-SwUFn_3376	s_UDS_RDBI_HandleSystemInfo	static void s_UDS_RDBI_HandleSystemInfo(void)	SwCom_33	
-SwUFn_3377	s_UDS_RDBI_HandleSystemStatus	static void s_UDS_RDBI_HandleSystemStatus(void)	SwCom_33	
-SwUFn_3378	s_UDS_RDBI_HandleParamTuning	static void s_UDS_RDBI_HandleParamTuning(void)	SwCom_33	
-SwUFn_3379	s_UDS_RDBI_HandleDirectParamRead	static void s_UDS_RDBI_HandleDirectParamRead(void)	SwCom_33	
-SwUFn_3380	s_UDS_RDBI_HandlePwmTable	static void s_UDS_RDBI_HandlePwmTable(void)	SwCom_33	
-SwUFn_3381	s_UDS_WDBI_ValidateRequest	static U8 s_UDS_WDBI_ValidateRequest(U8 u8t_Pci, U8 *pu8_FrameType)	SwCom_33	
-SwUFn_3382	s_UDS_WDBI_ExtractParams	static void s_UDS_WDBI_ExtractParams(U8 u8t_FrameType)	SwCom_33	
-SwUFn_3383	s_UDS_WDBI_Dispatch	static void s_UDS_WDBI_Dispatch(U8 u8t_FrameType, U8 u8t_Pci)	SwCom_33	
-SwUFn_3384	s_UDS_WDBI_HandleStdDid	static void s_UDS_WDBI_HandleStdDid(U8 u8t_FrameType, U8 u8t_Pci)	SwCom_33	
-SwUFn_3385	s_UDS_WDBI_HandlePwmTable	static void s_UDS_WDBI_HandlePwmTable(U8 u8t_FrameType, U8 u8t_Pci)	SwCom_33	
-SwUFn_3386	s_UDS_WDBI_HandleParamTuning	static void s_UDS_WDBI_HandleParamTuning(U8 u8t_FrameType, U8 u8t_Pci)	SwCom_33	
-SwUFn_3387	s_UDS_WDBI_HandleDirectParamWrite	static void s_UDS_WDBI_HandleDirectParamWrite(U8 u8t_FrameType, U8 u8t	SwCom_33	
-SwUFn_3388	s_GetPWMTablePtr_RDBI	static const S16* s_GetPWMTablePtr_RDBI(U8 u8t_TableId)	SwCom_33	
-SwUFn_3390	s_UDS_GetTempOffsetTablePtr	static const S16* s_UDS_GetTempOffsetTablePtr(U8 u8t_TableId, U8 *pu8t	SwCom_33	
-SwUFn_3391	s_UDS_BuildTempOffsetResponse	static U8 s_UDS_BuildTempOffsetResponse(U8 u8t_TableId, const S16* ps1	SwCom_33	
-SwUFn_3392	s_UDS_GetTempOffsetTablePtrWritable	static S16* s_UDS_GetTempOffsetTablePtrWritable(U8 u8t_TableId)	SwCom_33	
-SwUFn_3393	s_UDS_ParseTempOffsetWrite	static U8 s_UDS_ParseTempOffsetWrite(U8 u8t_FrameType, U8 u8t_PCI, U8 	SwCom_33	
-SwUFn_3394	s_UDS_CalcRealTimeAngle	static S16 s_UDS_CalcRealTimeAngle(S16 s16t_MotorPosition)	SwCom_33	
-SwUFn_3395	s_UDS_RDBI_GetRealTimeData	static void s_UDS_RDBI_GetRealTimeData(UdsRealTimeData_t *pData)	SwCom_33	
-SwUFn_3396	s_UDS_RDBI_BuildRealTimeResponse	static void s_UDS_RDBI_BuildRealTimeResponse(const UdsRealTimeData_t *	SwCom_33	
-SwUFn_3397	s_UDS_SlipDetect_HandleCustom	static void s_UDS_SlipDetect_HandleCustom(U8 u8t_QueueIdx, U16 u16t_Le	SwCom_33	
-SwUFn_3398	s_UDS_SubU32_Guarded	static U32 s_UDS_SubU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	SwCom_33	
-SwUFn_3399	s_UDS_GetRxPduByte	static U8 s_UDS_GetRxPduByte(U16 u16t_FrameIdx, U8 u8t_ByteIdx, U8 *pu	SwCom_33	
-SwUFn_33100	s_UDS_MakeEepromAddr	static EEPROM_TAddress_Const s_UDS_MakeEepromAddr(U32 u32t_AddrAbs)	SwCom_33	
-SwUFn_33101	s_SetPWMTableValue	static U8 s_SetPWMTableValue(U8 u8t_TableId, U8 u8t_StartIdx, S16 s16t	SwCom_33	
-SwUFn_33102	s_UDS_SlipDetect_HandlePreset	static void s_UDS_SlipDetect_HandlePreset(U8 u8t_Mode, U16 u16t_Length	SwCom_33	
-SwUFn_33103	s_UDS_WDBI_ReadSingleFramePayload	static U8 s_UDS_WDBI_ReadSingleFramePayload( U16 u16t_FrameIdx, U8 u8t	SwCom_33	
-SwUFn_33104	s_UDS_WDBI_ReadMultiFramePayload	static U8 s_UDS_WDBI_ReadMultiFramePayload( U16 u16t_FrameIdx, U8 u8t_	SwCom_33	
-SwUFn_33105	s_UDS_WDBI_ReadMultiFrameConsecutive	static U8 s_UDS_WDBI_ReadMultiFrameConsecutive( U8 au8t_Payload[8], U8	SwCom_33	
-SwUFn_33106	s_UDS_WDBI_ReadParamTuningPayload	static U8 s_UDS_WDBI_ReadParamTuningPayload( U8 u8t_FrameType, U8 u8t_	SwCom_33	
-SwUFn_33107	s_UDS_SlipDetect_ReadCustomPayload	static U8 s_UDS_SlipDetect_ReadCustomPayload( U8 u8t_QueueIdx,U8 *pu8t	SwCom_33	
-SwUFn_33108	s_UDS_SlipDetect_ApplyPreset	static void s_UDS_SlipDetect_ApplyPreset(const SlipDetectPhase_t *pst_	SwCom_33	
-SwUFn_33109	s_UDS_SlipDetect_SendPresetPositiveResponse	static void s_UDS_SlipDetect_SendPresetPositiveResponse(U16 u16t_Lengt	SwCom_33	
-SwUFn_3407	u8s_DeviceTypeChk_IsValidPartNo	static U8 u8s_DeviceTypeChk_IsValidPartNo(void)	SwCom_34	
-SwUFn_3408	u8s_DeviceTypeChk_DetermineType	static U8 u8s_DeviceTypeChk_DetermineType(void)	SwCom_34	
-SwUFn_3501	Init_MCU	void Init_MCU(void)	SwCom_35	
-SwUFn_3502	RTI_Init	void RTI_Init(void)	SwCom_35	
-SwUFn_3503	RTI_Disable	void RTI_Disable(void)	SwCom_35	
-SwUFn_3504	RTI_Enable	void RTI_Enable(void)	SwCom_35	
-SwUFn_3505	RTI_CheckTimer	UINT8 RTI_CheckTimer(void)	SwCom_35	
-SwUFn_3506	FTMRZ_Init	void FTMRZ_Init(void)	SwCom_35	
-SwUFn_3507	PFLASH_Send_Command	void PFLASH_Send_Command(void)	SwCom_35	
-SwUFn_3508	EraseFlashSector	void EraseFlashSector(UINT32 FlashAddress)	SwCom_35	
-SwUFn_3509	FTMRZ_Prog_Phrase	void FTMRZ_Prog_Phrase(void)	SwCom_35	
-SwUFn_3510	TIM0_Init	void TIM0_Init(void)	SwCom_35	
-SwUFn_3511	TIM0_Start	void TIM0_Start(void)	SwCom_35	
-SwUFn_3512	TIM0_Stop	void TIM0_Stop(void)	SwCom_35	
-SwUFn_3513	TIM0_GetNextCompareValue	static UINT16 TIM0_GetNextCompareValue(UINT16 currentCount)	SwCom_35	
-SwUFn_3514	TIM0_Ch0_ISR	__interrupt void TIM0_Ch0_ISR(void)	SwCom_35	
-SwUFn_3515	SCI0_Init	void SCI0_Init(void)	SwCom_35	
-SwUFn_3516	LINPHY0_Init	void LINPHY0_Init(void)	SwCom_35	
-SwUFn_3517	lin_lld_sci_init	void lin_lld_sci_init(void)	SwCom_35	
-SwUFn_3518	Comms_Reset_Reg	void Comms_Reset_Reg(void)	SwCom_35	
-SwUFn_3519	SCI_T_Bytes	void SCI_T_Bytes(UINT8 * u8char, UINT8 u8leng)	SwCom_35	
-SwUFn_3520	EEPROM_SetByte	byte EEPROM_SetByte(EEPROM_TAddress_Const Addr, byte Data)	SwCom_35	
-SwUFn_3521	EEPROM_GetByte	byte EEPROM_GetByte(EEPROM_TAddress_Const Addr, byte * Data)	SwCom_35	
-SwUFn_3522	EEPROM_ErasePreciseBlock	byte EEPROM_ErasePreciseBlock(EEPROM_TAddress_Const Addr, word Size, E	SwCom_35	
-SwUFn_3523	EepConstAddressToValue	static dword EepConstAddressToValue(EEPROM_TAddress_Const Addr)	SwCom_35	
-SwUFn_3524	EepValueToVolatileWordAddress	static volatile word * EepValueToVolatileWordAddress(dword AddrValue)	SwCom_35	
-SwUFn_3525	EepValueToWordAddress	static EepWordAddress EepValueToWordAddress(dword AddrValue)	SwCom_35	
-SwUFn_3526	EepTryAddOffset	static byte EepTryAddOffset(dword BaseValue, dword Offset, dword * Res	SwCom_35	
-SwUFn_3527	EepIsCommandBusy	static byte EepIsCommandBusy(void)	SwCom_35	
-SwUFn_3528	EepHasMgmtStatusError	static byte EepHasMgmtStatusError(void)	SwCom_35	
-SwUFn_3529	BackupSector	static void BackupSector(EepWordAddress p_Addr, word From, word To)	SwCom_35	
-SwUFn_3530	EepLoadPhraseWord	static void EepLoadPhraseWord(byte RegisterIndex, word Value)	SwCom_35	
-SwUFn_3531	WriteBlock	static byte WriteBlock(dword AddrValue, word From, word To, word * Dat	SwCom_35	
-SwUFn_3532	EepSetupFCCOB	static void EepSetupFCCOB(dword PhraseAddr, word To, word * Data, word	SwCom_35	
-SwUFn_3533	EraseSectorInternal	static byte EraseSectorInternal(dword AddrValue)	SwCom_35	
-SwUFn_3534	WriteWord	static byte WriteWord(dword AddrRowValue, word Data16)	SwCom_35	
-SwUFn_3535	EepValidatePreciseEraseRange	static byte EepValidatePreciseEraseRange(EEPROM_TAddress_Const Addr, w	SwCom_35	
-SwUFn_3536	EepServicePreciseEraseCallback	static void EepServicePreciseEraseCallback(EepromCallback pCallback, b	SwCom_35	
-SwUFn_3537	EepIsFullPreciseSector	static byte EepIsFullPreciseSector(dword CurrentSectorAddr, dword Phys	SwCom_35	
-SwUFn_3538	EepEraseBoundaryPreciseSector	static byte EepEraseBoundaryPreciseSector(dword CurrentSectorAddr, dwo	SwCom_35	
-SwUFn_3539	LinInit	void LinInit(void)	SwCom_35	
-SwUFn_3540	LinSend	e_ERROR_CODE LinSend(UINT8 * data)	SwCom_35	
-SwUFn_3541	LinRecv	e_ERROR_CODE LinRecv(UINT8 * LinRecvData)	SwCom_35	
-SwUFn_3542	LinSendForProgSession	void LinSendForProgSession(void)	SwCom_35	
-SwUFn_3543	LinInt_PrepareResponsePending	void LinInt_PrepareResponsePending(void)	SwCom_35	
-SwUFn_3544	LinInt_StartInterruptMode	void LinInt_StartInterruptMode(void)	SwCom_35	
-SwUFn_3545	LinInt_StopInterruptMode	void LinInt_StopInterruptMode(void)	SwCom_35	
-SwUFn_3546	SCI0_ISR	__interrupt void SCI0_ISR(void)	SwCom_35	
-SwUFn_3547	sf_LinBreakDetectWait	static e_ERROR_CODE sf_LinBreakDetectWait(void)	SwCom_35	
-SwUFn_3548	sf_LinHeaderCheck	static e_ERROR_CODE sf_LinHeaderCheck(UINT8 PID)	SwCom_35	
-SwUFn_3549	sf_LinDataPolling	static UINT8 sf_LinDataPolling(e_ERROR_CODE * e_Err)	SwCom_35	
-SwUFn_3550	sf_LinDecrementWordToZero	static UINT16 sf_LinDecrementWordToZero(UINT16 value)	SwCom_35	
-SwUFn_3551	sf_LinIncrementByte	static UINT8 sf_LinIncrementByte(UINT8 value, UINT8 limit)	SwCom_35	
-SwUFn_3552	sf_LinIncrementWord	static UINT16 sf_LinIncrementWord(UINT16 value, UINT16 limit)	SwCom_35	
-SwUFn_3553	sf_LinAccumulateChecksum	static UINT16 sf_LinAccumulateChecksum(UINT16 currentSum, UINT8 dataBy	SwCom_35	
-SwUFn_3554	sf_LinCheckSum	static UINT8 sf_LinCheckSum(UINT8 length)	SwCom_35	
-SwUFn_3555	sf_LinIntCheckSum	static UINT8 sf_LinIntCheckSum(const volatile UINT8 * data, UINT8 leng	SwCom_35	
-SwUFn_3556	sf_LinStartPendingResponseTx	static void sf_LinStartPendingResponseTx(volatile LIN_INT_CTRL * pCtrl	SwCom_35	
-SwUFn_3557	sf_LinStartDataTx	static void sf_LinStartDataTx(volatile LIN_INT_CTRL * pCtrl)	SwCom_35	
-SwUFn_3558	sf_LinHandlePidState	static void sf_LinHandlePidState(volatile LIN_INT_CTRL * pCtrl, UINT8 	SwCom_35	
-SwUFn_3559	sf_LinHandleDataState	static void sf_LinHandleDataState(volatile LIN_INT_CTRL * pCtrl, UINT8	SwCom_35	
-SwUFn_3560	sf_LinCompleteRxFrame	static void sf_LinCompleteRxFrame(volatile LIN_INT_CTRL * pCtrl, UINT8	SwCom_35	
-SwUFn_3561	sf_LinHandleReceiveState	static void sf_LinHandleReceiveState(volatile LIN_INT_CTRL * pCtrl, UI	SwCom_35	
-SwUFn_3562	sf_LinHandleTransmitState	static void sf_LinHandleTransmitState(volatile LIN_INT_CTRL * pCtrl)	SwCom_35	
-SwUFn_3563	main	void main(void)	SwCom_35	
-SwUFn_3564	MainInit	static void MainInit(void)	SwCom_35	
-SwUFn_3565	MainInitBootFlow	static void MainInitBootFlow(void)	SwCom_35	
-SwUFn_3566	MainInitReprogServices	static void MainInitReprogServices(void)	SwCom_35	
-SwUFn_3567	MainInitShadowServices	static void MainInitShadowServices(void)	SwCom_35	
-SwUFn_3568	MainStartReprogSession	static void MainStartReprogSession(void)	SwCom_35	
-SwUFn_3569	MainEnsurePollingMode	static void MainEnsurePollingMode(void)	SwCom_35	
-SwUFn_3570	MainProcessReprogCycle	static e_ERROR_CODE MainProcessReprogCycle(UINT8 * LinRecvData, UINT8 	SwCom_35	
-SwUFn_3571	MainServiceLoop	static void MainServiceLoop(UINT8 * LinRecvData, UINT8 * LinSendData)	SwCom_35	
-SwUFn_3572	ReprogLinRecvTask	static e_ERROR_CODE ReprogLinRecvTask(UINT8 * LinRecvData)	SwCom_35	
-SwUFn_3573	ReprogLinSendTask	static e_ERROR_CODE ReprogLinSendTask(UINT8 * LinSendData)	SwCom_35	
-SwUFn_3574	ReprogLinMultiFrameTask	static e_ERROR_CODE ReprogLinMultiFrameTask(UINT8 * LinSendData)	SwCom_35	
-SwUFn_3575	ReprogErrorTask	static void ReprogErrorTask(e_ERROR_CODE e_ReprogErr)	SwCom_35	
-SwUFn_3576	ReProgLinInit	static void ReProgLinInit(void)	SwCom_35	
-SwUFn_3577	ReProgFlagContol	e_EEPROM_CODE ReProgFlagContol(UINT8 ReProg_Opt)	SwCom_35	
-SwUFn_3578	Check_MainApp_Jump	void Check_MainApp_Jump(void)	SwCom_35	
-SwUFn_3579	ChkAppIsValid	UINT8 ChkAppIsValid(void)	SwCom_35	
-SwUFn_3580	Copy_Shadow	void Copy_Shadow(void)	SwCom_35	
-SwUFn_3581	Get_RAM_Ptr	pt2Func Get_RAM_Ptr(pt2Func ptr)	SwCom_35	
-SwUFn_3582	Jump_Main_Application	void Jump_Main_Application(void)	SwCom_35	
-SwUFn_3583	LinUdsInit	void LinUdsInit(void)	SwCom_35	
-SwUFn_3584	sf_ResetAfterNegativeResponse	static void sf_ResetAfterNegativeResponse(void)	SwCom_35	
-SwUFn_3585	LinUdsReProgAndMsgGenerate	void LinUdsReProgAndMsgGenerate(const LinTpMessageType * ReqMsg, LinTp	SwCom_35	
-SwUFn_3586	sf_LinUdsDiagnosticSessionControl	static void sf_LinUdsDiagnosticSessionControl(const LinTpMessageType *	SwCom_35	
-SwUFn_3587	sf_LinUdsSecurityAccess	static void sf_LinUdsSecurityAccess(const LinTpMessageType * ReqMsg, L	SwCom_35	
-SwUFn_3588	sf_LinUdsRoutineControl	static void sf_LinUdsRoutineControl(const LinTpMessageType * ReqMsg, L	SwCom_35	
-SwUFn_3589	sf_LinUdsEraseMemory	static void sf_LinUdsEraseMemory(const LinTpMessageType * ReqMsg, LinT	SwCom_35	
-SwUFn_3590	sf_LinUdsChkProDepenency	static void sf_LinUdsChkProDepenency(const LinTpMessageType * ReqMsg, 	SwCom_35	
-SwUFn_3591	sf_LinUdsVersionCheck	static void sf_LinUdsVersionCheck(const LinTpMessageType * ReqMsg, Lin	SwCom_35	
-SwUFn_3592	sf_LinUdsRequestDownload	static void sf_LinUdsRequestDownload(const LinTpMessageType * ReqMsg, 	SwCom_35	
-SwUFn_3593	sf_LinUdsTransferData	static void sf_LinUdsTransferData(const LinTpMessageType * ReqMsg, Lin	SwCom_35	
-SwUFn_3594	sf_LinUdsTransferExit	static void sf_LinUdsTransferExit(const LinTpMessageType * ReqMsg, Lin	SwCom_35	
-SwUFn_3595	sf_LinUdsECUReset	static void sf_LinUdsECUReset(const LinTpMessageType * ReqMsg, LinTpMe	SwCom_35	
-SwUFn_3596	sf_LinUdsControlDTCSetting	static void sf_LinUdsControlDTCSetting(const LinTpMessageType * ReqMsg	SwCom_35	
-SwUFn_3597	sf_LinUdsCommunicationControl	static void sf_LinUdsCommunicationControl(const LinTpMessageType * Req	SwCom_35	
-SwUFn_3598	sf_LinUdsNegativeResponse	static void sf_LinUdsNegativeResponse(UINT8 UdsServiceId, UINT8 NRC, L	SwCom_35	
-SwUFn_3599	sf_LinUdsOutOfRangeResponse	static void sf_LinUdsOutOfRangeResponse(UINT8 UdsServiceId, LinTpMessa	SwCom_35	
-SwUFn_35100	sf_LinUdsIncorMsgLengthResponse	static void sf_LinUdsIncorMsgLengthResponse(UINT8 UdsServiceId, LinTpM	SwCom_35	
-SwUFn_35101	sf_LinUdsSequenceErrorResponse	static void sf_LinUdsSequenceErrorResponse(UINT8 UdsServiceId, LinTpMe	SwCom_35	
-SwUFn_35102	sf_SendSessionNrcResponse	static void sf_SendSessionNrcResponse(UINT8 UdsServiceId, UINT8 NRC, L	SwCom_35	
-SwUFn_35103	sf_SendRoutineNrcResponse	static void sf_SendRoutineNrcResponse(UINT8 UdsServiceId, UINT8 NRC, L	SwCom_35	
-SwUFn_35104	sf_SendVersionNrcResponse	static void sf_SendVersionNrcResponse(UINT8 UdsServiceId, UINT8 NRC, L	SwCom_35	
-SwUFn_35105	sf_SendResetNrcResponse	static void sf_SendResetNrcResponse(UINT8 UdsServiceId, UINT8 NRC, Lin	SwCom_35	
-SwUFn_35106	sf_SendMiscNrcResponse	static void sf_SendMiscNrcResponse(UINT8 UdsServiceId, UINT8 NRC, LinT	SwCom_35	
-SwUFn_35107	sf_SendDispatchOutOfRangeResponse	static void sf_SendDispatchOutOfRangeResponse(UINT8 UdsServiceId, LinT	SwCom_35	
-SwUFn_35108	sf_SendRoutineOutOfRangeResponse	static void sf_SendRoutineOutOfRangeResponse(UINT8 UdsServiceId, LinTp	SwCom_35	
-SwUFn_35109	sf_SendRequestDownloadOutOfRangeResponse	static void sf_SendRequestDownloadOutOfRangeResponse(UINT8 UdsServiceI	SwCom_35	
-SwUFn_35110	sf_SendCommunicationOutOfRangeResponse	static void sf_SendCommunicationOutOfRangeResponse(UINT8 UdsServiceId,	SwCom_35	
-SwUFn_35111	sf_SendTransferOutOfRangeResponse	static void sf_SendTransferOutOfRangeResponse(UINT8 UdsServiceId, LinT	SwCom_35	
-SwUFn_35112	sf_SendSessionIncorMsgLengthResponse	static void sf_SendSessionIncorMsgLengthResponse(UINT8 UdsServiceId, L	SwCom_35	
-SwUFn_35113	sf_SendSecurityIncorMsgLengthResponse	static void sf_SendSecurityIncorMsgLengthResponse(UINT8 UdsServiceId, 	SwCom_35	
-SwUFn_35114	sf_SendRoutineIncorMsgLengthResponse	static void sf_SendRoutineIncorMsgLengthResponse(UINT8 UdsServiceId, L	SwCom_35	
-SwUFn_35115	sf_SendTransferIncorMsgLengthResponse	static void sf_SendTransferIncorMsgLengthResponse(UINT8 UdsServiceId, 	SwCom_35	
-SwUFn_35116	sf_SendRequestDownloadIncorMsgLengthResponse	static void sf_SendRequestDownloadIncorMsgLengthResponse(UINT8 UdsServ	SwCom_35	
-SwUFn_35117	sf_SendOptionalIncorMsgLengthResponse	static void sf_SendOptionalIncorMsgLengthResponse(UINT8 UdsServiceId, 	SwCom_35	
-SwUFn_35118	sf_SendSessionSequenceErrorResponse	static void sf_SendSessionSequenceErrorResponse(UINT8 UdsServiceId, Li	SwCom_35	
-SwUFn_35119	sf_SendSecuritySequenceErrorResponse	static void sf_SendSecuritySequenceErrorResponse(UINT8 UdsServiceId, L	SwCom_35	
-SwUFn_35120	sf_SendRoutineSequenceErrorResponse	static void sf_SendRoutineSequenceErrorResponse(UINT8 UdsServiceId, Li	SwCom_35	
-SwUFn_35121	sf_SendTransferSequenceErrorResponse	static void sf_SendTransferSequenceErrorResponse(UINT8 UdsServiceId, L	SwCom_35	
-SwUFn_35122	sf_LinUdsResponsePending	static void sf_LinUdsResponsePending(UINT8 UdsServiceId)	SwCom_35	
-SwUFn_35123	sf_SecurityCheck	static e_Security_Level sf_SecurityCheck(UINT8 UdsServiceId, LinTpMess	SwCom_35	
-SwUFn_35124	sf_SecurityAccessAlgorithm	static UINT32 sf_SecurityAccessAlgorithm(UINT32 SecuritySeed)	SwCom_35	
-SwUFn_35125	sf_TryAddU32	static UINT8 sf_TryAddU32(UINT32 base, UINT32 offset, UINT32 * sum)	SwCom_35	
-SwUFn_35126	sf_TrySubU16	static UINT8 sf_TrySubU16(UINT16 base, UINT16 delta, UINT16 * result)	SwCom_35	
-SwUFn_35127	sf_ReadU16MsbFirst	static UINT16 sf_ReadU16MsbFirst(const UINT8 * data)	SwCom_35	
-SwUFn_35128	sf_ReadU32MsbFirst	static UINT32 sf_ReadU32MsbFirst(const UINT8 * data)	SwCom_35	
-SwUFn_35129	CheckProgDependencies	UINT8 CheckProgDependencies(void)	SwCom_35	
-SwUFn_35130	ChkProgRespPending	void ChkProgRespPending(void)	SwCom_35	
-SwUFn_35131	sf_ReadAppVersion	static void sf_ReadAppVersion(UINT8 * versionOut)	SwCom_35	
-SwUFn_35132	sf_SavePreviousVersion	static void sf_SavePreviousVersion(const UINT8 * version)	SwCom_35	
-SwUFn_35133	sf_ClearPreviousVersion	static void sf_ClearPreviousVersion(void)	SwCom_35	
-SwUFn_35134	sf_GetEepromVersionState	static UINT8 sf_GetEepromVersionState(UINT8 * eepromVersion)	SwCom_35	
-SwUFn_35135	sf_SyncFlashPreviousVersion	static void sf_SyncFlashPreviousVersion(UINT8 bEepromValid, const UINT	SwCom_35	
-SwUFn_35136	sf_SyncEepromPreviousVersion	static void sf_SyncEepromPreviousVersion(const UINT8 * eepromVersion)	SwCom_35	
-SwUFn_35137	sf_BuildRoutineControlResponse	static void sf_BuildRoutineControlResponse(UINT16 routineId, UINT16 re	SwCom_35	
-SwUFn_35138	sf_SyncPreviousVersionBeforeErase	static void sf_SyncPreviousVersionBeforeErase(void)	SwCom_35	
-SwUFn_35139	sf_EraseApplicationSectors	static void sf_EraseApplicationSectors(void)	SwCom_35	
-SwUFn_35140	sf_IsRequestedVersionAllowed	static UINT8 sf_IsRequestedVersionAllowed(void)	SwCom_35	
-SwUFn_35141	sf_CommitVerifiedAppVersion	static byte sf_CommitVerifiedAppVersion(void)	SwCom_35	
-SwUFn_35142	sf_ParseRequestDownloadField	static UINT32 sf_ParseRequestDownloadField(const LinTpMessageType * Re	SwCom_35	
-SwUFn_35143	sf_ResolveRequestDownloadTarget	static UINT8 sf_ResolveRequestDownloadTarget(UINT32 downloadSize, UINT	SwCom_35	
-SwUFn_35144	sf_BuildRequestDownloadResponse	static void sf_BuildRequestDownloadResponse(LinTpMessageType * RespMsg	SwCom_35	
-SwUFn_35145	sf_IsTransferDataBlockSequenceValid	static UINT8 sf_IsTransferDataBlockSequenceValid(UINT8 udsBlockSeqCoun	SwCom_35	
-SwUFn_35146	sf_BuildTransferDataResponse	static void sf_BuildTransferDataResponse(LinTpMessageType * RespMsg)	SwCom_35	
-SwUFn_35147	sf_LoadSignatureHeader	static void sf_LoadSignatureHeader(const LinTpMessageType * ReqMsg, UI	SwCom_35	
-SwUFn_35148	sf_StoreSignatureData	static void sf_StoreSignatureData(const LinTpMessageType * ReqMsg, UIN	SwCom_35	
-SwUFn_35149	sf_IsFirmwareTransferLengthAccepted	static UINT8 sf_IsFirmwareTransferLengthAccepted(UINT16 transferDataLe	SwCom_35	
-SwUFn_35150	sf_CaptureCrc32Data	static void sf_CaptureCrc32Data(const LinTpMessageType * ReqMsg, UINT1	SwCom_35	
-SwUFn_35151	sf_WriteTransferDataToFlash	static void sf_WriteTransferDataToFlash(const LinTpMessageType * ReqMs	SwCom_35	
-SwUFn_35152	sf_UpdateTransferExitSequenceForFirmware	static void sf_UpdateTransferExitSequenceForFirmware(void)	SwCom_35	
-SwUFn_35153	sf_HandleSignatureTransferData	static void sf_HandleSignatureTransferData(const LinTpMessageType * Re	SwCom_35	
-SwUFn_35154	sf_HandleFirmwareTransferData	static void sf_HandleFirmwareTransferData(const LinTpMessageType * Req	SwCom_35	
-SwUFn_35155	sf_PushSecureFlashRange	static void sf_PushSecureFlashRange(UINT32 endAddress)	SwCom_35	
-SwUFn_35156	sf_ExecuteStandardSecureFlashVerification	static SecureFlash_RT sf_ExecuteStandardSecureFlashVerification(void)	SwCom_35	
-SwUFn_35157	sf_HandleStandardSecureFlashResult	static UINT8 sf_HandleStandardSecureFlashResult(SecureFlash_RT sfResul	SwCom_35	
-SwUFn_35158	sf_RunStandardSecureFlashVerification	static UINT8 sf_RunStandardSecureFlashVerification(void)	SwCom_35	
-SwUFn_35159	sf_RunCrc32Verification	static UINT8 sf_RunCrc32Verification(void)	SwCom_35	
-SwUFn_35160	sf_IsFirmwareInstalled	static UINT8 sf_IsFirmwareInstalled(void)	SwCom_35	
-SwUFn_35161	sf_IsAppVersionValid	static UINT8 sf_IsAppVersionValid(const UINT8 * version)	SwCom_35	
-SwUFn_35162	sf_EraseApplicationArea	static void sf_EraseApplicationArea(void)	SwCom_35	
-SwUFn_35163	ClearReprogActive	void ClearReprogActive(void)	SwCom_35	
-SwUFn_35164	sf_ReadEepromVersion	static byte sf_ReadEepromVersion(UINT8 * versionOut)	SwCom_35	
-SwUFn_35165	sf_WriteEepromVersion	static byte sf_WriteEepromVersion(const UINT8 * version)	SwCom_35	
-SwUFn_35166	sf_IsEepromVersionValid	static UINT8 sf_IsEepromVersionValid(const UINT8 * version)	SwCom_35	
-SwUFn_35167	sf_VersionsMatch	static UINT8 sf_VersionsMatch(const UINT8 * version1, const UINT8 * ve	SwCom_35	
-SwUFn_35168	StdUtilCopyData	void StdUtilCopyData(UINT8 * dst, const UINT8 * src, UINT32 cnt)	SwCom_35	
-SwUFn_35169	StdUtilDataSet	void StdUtilDataSet(UINT8 * dst, const UINT8 data, UINT32 cnt)	SwCom_35	
-SwUFn_35170	LinTpMsgInit	void LinTpMsgInit(LinTpMessageType * LinMsg)	SwCom_35	
-SwUFn_35171	sf_LinTpGetNextCfNum	static UINT8 sf_LinTpGetNextCfNum(UINT8 cfNum)	SwCom_35	
-SwUFn_35172	LinUdsToTp	e_ERROR_CODE LinUdsToTp(LinTpMessageType * LinRespMsg, UINT8 * LinSend	SwCom_35	
-SwUFn_35173	LinRawToTp	e_ERROR_CODE LinRawToTp(const UINT8 * pData, LinTpMessageType * LinReq	SwCom_35	
-SwUFn_35174	sf_LinTpParserSF	static e_ERROR_CODE sf_LinTpParserSF(LinTpMessageType * LinReqMsg, con	SwCom_35	
-SwUFn_35175	sf_LinTpParserMF	static e_ERROR_CODE sf_LinTpParserMF(LinTpMessageType * LinReqMsg, con	SwCom_35	
+﻿SwUFn ID	함수명	Prototype(발췌)	계층	현재 Related ID	SwFn 후보 (검증 후 택1)	비고	팀 확정
+SwUFn_0221	u16s_CountUp_Guarded	static U16 u16s_CountUp_Guarded( U16 u16t_Value )	APP	SWCOM_02	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_33, SWFN_34, SWFN_05, SWFN_35, SWFN_36, SWFN_37, SWFN_39, SWFN_46, SWFN_01, SWFN_13	후보 18개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0222	u32s_Add_Guarded	static U32 u32s_Add_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	APP	SWCOM_02	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_33, SWFN_34, SWFN_05, SWFN_35, SWFN_36, SWFN_37, SWFN_39, SWFN_46, SWFN_01, SWFN_13	후보 18개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0223	u32s_Mul_Guarded	static U32 u32s_Mul_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	APP	SWCOM_02	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_33, SWFN_34, SWFN_05, SWFN_35, SWFN_36, SWFN_37, SWFN_39, SWFN_46, SWFN_01, SWFN_13	후보 18개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0220	u8s_CountUp_Guarded	static U8 u8s_CountUp_Guarded( U8 u8t_Value )	APP	SWCOM_02	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_33, SWFN_34, SWFN_05, SWFN_35, SWFN_36, SWFN_37, SWFN_39, SWFN_46, SWFN_01, SWFN_13	후보 18개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0313	s_ApiIn_LinRx_ProcessHashCalc	static void s_ApiIn_LinRx_ProcessHashCalc(void)	APP	SWCOM_03	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_32, SWFN_40, SWFN_05, SWFN_01, SWFN_13	후보 12개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0312	s_ApiIn_LinRx_ProcessIgnDelay	static void s_ApiIn_LinRx_ProcessIgnDelay(void)	APP	SWCOM_03	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_32, SWFN_40, SWFN_05, SWFN_01, SWFN_13	후보 12개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0421	s16s_ApiIn_InterpolateTemperature	static S16 s16s_ApiIn_InterpolateTemperature( U16 u16t_Data, U8 u8t_In	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0426	s_ApiIn_E2EProFileCheck	static void s_ApiIn_E2EProFileCheck( void )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0420	s_ApiIn_ProcessMonitorData	static void s_ApiIn_ProcessMonitorData( void )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0433	u16s_ApiIn_AddU16_Guarded	static U16 u16s_ApiIn_AddU16_Guarded( U16 u16t_Lhs, U16 u16t_Rhs )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0422	u16s_ApiIn_ClampTemperature	static U16 u16s_ApiIn_ClampTemperature( S16 s16t_Temperature )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0441	u16s_ApiIn_ScaledVoltage_10000_1992	static U16 u16s_ApiIn_ScaledVoltage_10000_1992( U16 u16t_Data )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0434	u32s_ApiIn_AddU32_Guarded	static U32 u32s_ApiIn_AddU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0436	u32s_ApiIn_MulU32_Guarded	static U32 u32s_ApiIn_MulU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0435	u32s_ApiIn_SubU32_Guarded	static U32 u32s_ApiIn_SubU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0440	u8s_ApiIn_U16ToU8_Guarded	static U8 u8s_ApiIn_U16ToU8_Guarded( U16 u16t_Value )	APP	SWCOM_04	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_05, SWFN_36, SWFN_37, SWFN_46, SWFN_01, SWFN_13	후보 17개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_0504	s_Ap_ExecuteControlFunctions	static void s_Ap_ExecuteControlFunctions( void )	APP	SWCOM_05	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_40, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0614	s_ApiOut_DataValidCntInc	static void s_ApiOut_DataValidCntInc( void )	APP	SWCOM_06	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_09, SWFN_32, SWFN_05, SWFN_39, SWFN_38, SWFN_01, SWFN_13	후보 12개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0807	s_ProcessMotorDirection	static void s_ProcessMotorDirection( U8 State, U16 Speed )	APP	SWCOM_08	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_38, SWFN_01, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0922	s_SysCtrl_IncU16_Sat	static U16 s_SysCtrl_IncU16_Sat( U16 u16t_Value )	APP	SWCOM_09	SWFN_02, SWFN_03, SWFN_04, SWFN_32, SWFN_43, SWFN_50, SWFN_52, SWFN_53, SWFN_05, SWFN_42, SWFN_51	후보 11개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0923	s_SysCtrl_IncU8_Sat	static U8 s_SysCtrl_IncU8_Sat( U8 u8t_Value )	APP	SWCOM_09	SWFN_02, SWFN_03, SWFN_04, SWFN_32, SWFN_43, SWFN_50, SWFN_52, SWFN_53, SWFN_05, SWFN_42, SWFN_51	후보 11개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0924	s_SystemResetCheck	static void s_SystemResetCheck(void)	APP	SWCOM_09	SWFN_02, SWFN_03, SWFN_04, SWFN_32, SWFN_43, SWFN_50, SWFN_52, SWFN_53, SWFN_05, SWFN_42, SWFN_51	후보 11개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0917	u8s_E2E_0_FailureCheck	static U8 u8s_E2E_0_FailureCheck( void )	APP	SWCOM_09	SWFN_02, SWFN_03, SWFN_04, SWFN_32, SWFN_43, SWFN_50, SWFN_52, SWFN_53, SWFN_05, SWFN_42, SWFN_51	후보 11개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_0918	u8s_E2E_1_FailureCheck	static U8 u8s_E2E_1_FailureCheck( void )	APP	SWCOM_09	SWFN_02, SWFN_03, SWFN_04, SWFN_32, SWFN_43, SWFN_50, SWFN_52, SWFN_53, SWFN_05, SWFN_42, SWFN_51	후보 11개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1008	s_Sleep_ConfigureLIN	static void s_Sleep_ConfigureLIN(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1006	s_Sleep_DisableInterrupts	static void s_Sleep_DisableInterrupts(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1010	s_Sleep_DisableMotorControl	static void s_Sleep_DisableMotorControl	APP	SWCOM_10	SWFN_47		
+SwUFn_1007	s_Sleep_DisablePower	static void s_Sleep_DisablePower(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1009	s_Sleep_EnterSleepMode	static void s_Sleep_EnterSleepMode(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1012	s_Wake_Up_ADC_Init	static void s_Wake_Up_ADC_Init(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1011	s_Wake_Up_LIN_Init	static void s_Wake_Up_LIN_Init(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1013	s_Wake_Up_Power_Enable	static void s_Wake_Up_Power_Enable(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1014	s_Wake_Up_System_Init	static void s_Wake_Up_System_Init(void)	APP	SWCOM_10	SWFN_47		
+SwUFn_1231	s_DiagCtrlMain_MCUChecks	static void s_DiagCtrlMain_MCUChecks(void)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1254	s_LowVoltComp_UpdateBaseVsup	static void s_LowVoltComp_UpdateBaseVsup(U16 u16t_EffCurrent)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1255	s_LowVoltComp_UpdateLearnK	static void s_LowVoltComp_UpdateLearnK(U16 u16t_EffCurrent, U16 u16t_E	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1247	s_MotorBattShortRun_HandleDefault	static U16 s_MotorBattShortRun_HandleDefault(void)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1246	s_MotorBattShortRun_HandleError	static U16 s_MotorBattShortRun_HandleError(U8 u8t_ShortDetected)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1245	s_MotorBattShortRun_HandleNormal	static U16 s_MotorBattShortRun_HandleNormal(U8 u8t_ShortDetected)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1244	s_MotorBattShortRun_IsShortDetected	static U8 s_MotorBattShortRun_IsShortDetected(void)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1235	s_VDS_HandleClearCtrl	static DiagStep_t s_VDS_HandleClearCtrl(U8 u8t_RW_Cmd, U8 u8t_FrameSiz	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1225	u16s_DiagCheck_HB_Helper1	static U16 u16s_DiagCheck_HB_Helper1( void )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1226	u16s_DiagCheck_HB_Helper2	static U16 u16s_DiagCheck_HB_Helper2( void )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1224	u16s_DiagCheck_LB_Helper	static U16 u16s_DiagCheck_LB_Helper( void )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1252	u16s_LowVoltComp_CalcEffCurrent	static U16 u16s_LowVoltComp_CalcEffCurrent(void)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1253	u16s_LowVoltComp_CalcExpectedSag	static U16 u16s_LowVoltComp_CalcExpectedSag(U16 u16t_EffCurrent)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1256	u16s_LowVoltComp_UpdateAndGetBattVsup	static U16 u16s_LowVoltComp_UpdateAndGetBattVsup(void)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1248	u16s_MotorBattShortRun	static U16 u16s_MotorBattShortRun( void )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1240	u16s_MotorOverHeat_CheckErrorState	static U16 u16s_MotorOverHeat_CheckErrorState( U16 u16t_MotorTemp )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1239	u16s_MotorOverHeat_CheckNormalState	static U16 u16s_MotorOverHeat_CheckNormalState( U16 u16t_MotorTemp )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1230	u16s_TempSensor_Check	static U16 u16s_TempSensor_Check( void )	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1249	u32s_LowVoltComp_AddU32_Guarded	static U32 u32s_LowVoltComp_AddU32_Guarded(U32 u32t_Lhs, U32 u32t_Rhs)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1251	u32s_LowVoltComp_MulU32_Guarded	static U32 u32s_LowVoltComp_MulU32_Guarded(U32 u32t_Lhs, U32 u32t_Rhs)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1250	u32s_LowVoltComp_SubU32_Guarded	static U32 u32s_LowVoltComp_SubU32_Guarded(U32 u32t_Lhs, U32 u32t_Rhs)	APP	SWCOM_12	SWFN_25, SWFN_33, SWFN_34, SWFN_40, SWFN_44, SWFN_45, SWFN_35, SWFN_37, SWFN_39, SWFN_13	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1397	g_Ap_DoorPreCtrl_GetActiveHoldingTm	U16 g_Ap_DoorPreCtrl_GetActiveHoldingTm( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1391	s16_ClampS16	static S16 s16_ClampS16(S16 s16t_InputVal, S16 vmin, S16 vmax)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1392	s16_GetTempOffset_FromLut	static S16 s16_GetTempOffset_FromLut(U8 u8_TempCode, const S16 *pOffse	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1389	s16_GetTempRatio	static S16 s16_GetTempRatio(U8 u8_TempCode)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1394	s16_Interp3_BySlope	static S16 s16_Interp3_BySlope(S16 slopeDeg, S16 low, S16 flat, S16 hi	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1390	s16_Lerp	static S16 s16_Lerp(U8 u8t_InputX, U8 u8t_LeftX, U8 u8t_RightX, S16 s1	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1393	s16_LerpSlope_S16	static S16 s16_LerpSlope_S16(S16 s16t_InputX, S16 s16t_LowerX, S16 s16	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1344	s16s_DoorStopPosition_AssistClose	static S16 s16s_DoorStopPosition_AssistClose( S16 s16t_Data )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1319	s_ActiveHoldingTimeCheck	static void s_ActiveHoldingTimeCheck( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13146	s_AntiPinchClose_UpdateDecel	static void s_AntiPinchClose_UpdateDecel(U8 u8t_AfterStartZone_F)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13148	s_AntiPinchClose_UpdateLowSpeed	static void s_AntiPinchClose_UpdateLowSpeed(U8 u8t_AfterStartZone_F)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13147	s_AntiPinchClose_UpdateNoProgress	static void s_AntiPinchClose_UpdateNoProgress(U8 u8t_AfterStartZone_F)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13149	s_AntiPinchDetect_Close_Decel	void s_AntiPinchDetect_Close_Decel(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1304	s_Ap_Diagnostic	static void s_Ap_Diagnostic( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1399	s_Ap_PreviousCtrl_ResetActiveOffsetLut	static void s_Ap_PreviousCtrl_ResetActiveOffsetLut(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13101	s_Ap_PreviousCtrl_ResetCounters	static void s_Ap_PreviousCtrl_ResetCounters(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13108	s_Ap_PreviousCtrl_ResetCounters_Group1	static void s_Ap_PreviousCtrl_ResetCounters_Group1(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13109	s_Ap_PreviousCtrl_ResetCounters_Group2	static void s_Ap_PreviousCtrl_ResetCounters_Group2(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13110	s_Ap_PreviousCtrl_ResetCounters_Group3	static void s_Ap_PreviousCtrl_ResetCounters_Group3(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13100	s_Ap_PreviousCtrl_ResetEepromParams	static void s_Ap_PreviousCtrl_ResetEepromParams(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13140	s_Ap_PreviousCtrl_ResetEnvState	static void s_Ap_PreviousCtrl_ResetEnvState(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1398	s_Ap_PreviousCtrl_ResetFlags	static void s_Ap_PreviousCtrl_ResetFlags(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1374	s_ApplyTemperatureCompensation	static void s_ApplyTemperatureCompensation(U16 *u16p_Peak, U16 *u16p_S	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13104	s_AreAllWindowsClosed	static U8 s_AreAllWindowsClosed(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13138	s_AreThreeDoorsClosed	static U8 s_AreThreeDoorsClosed(U8 u8t_Door1, U8 u8t_Door2, U8 u8t_Doo	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1360	s_AutoStop_LinCMDCheck	static void s_AutoStop_LinCMDCheck( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1379	s_CheckCloseOverloadCondition	static U8 s_CheckCloseOverloadCondition(const CloseOverloadParam_t *pP	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1375	s_CheckOpenOverloadCondition	static U8 s_CheckOpenOverloadCondition(U16 u16_Current, U16 u16_Peak,	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1386	s_CompensateThermalThreshold	static U16 s_CompensateThermalThreshold(U16 u16t_EepromThreshold)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13131	s_DampingDetect_HandleHolding	static void s_DampingDetect_HandleHolding( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13130	s_DampingDetect_HandleIdle	static void s_DampingDetect_HandleIdle( U8 u8t_DampingAllowed )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13132	s_DampingDetect_ResetState	static void s_DampingDetect_ResetState( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13129	s_DecelerationDetect_UpdateSpeedFlag	static void s_DecelerationDetect_UpdateSpeedFlag( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13128	s_DecelerationDetect_UpdateTrend	static void s_DecelerationDetect_UpdateTrend( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1353	s_DoorMovingCheck	static void s_DoorMovingCheck( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13119	s_DoorMovingCloseCheck	static S8 s_DoorMovingCloseCheck(S16 s16_PosDiff, S16 s16_CloseStep, S	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13118	s_DoorMovingOpenCheck	static S8 s_DoorMovingOpenCheck(S16 s16_PosDiff, S16 s16_OpenStep, S16	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13112	s_DoorStopPosition_Init	static void s_DoorStopPosition_Init(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13113	s_DoorStopPosition_Stage1	static void s_DoorStopPosition_Stage1(S16 *ps16_Result)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13114	s_DoorStopPosition_Stage2	static void s_DoorStopPosition_Stage2(S16 *ps16_Result)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13115	s_DoorStopPosition_Stage3	static void s_DoorStopPosition_Stage3(S16 *ps16_Result)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1362	s_Env_A_EnvironmentalChecks	static void s_Env_A_EnvironmentalChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1361	s_Env_A_SensorReadings	static void s_Env_A_SensorReadings(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1395	s_Env_B_BuzzerChecks	static void s_Env_B_BuzzerChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1364	s_Env_B_ProtectionChecks	static void s_Env_B_ProtectionChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1363	s_Env_B_SafetyChecks	static void s_Env_B_SafetyChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1365	s_Env_B_ThermalChecks	static void s_Env_B_ThermalChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1368	s_ExecutePositionChecks	static void s_ExecutePositionChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1367	s_ExecuteProtectionChecks	static void s_ExecuteProtectionChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1378	s_GetCloseCurrentThreshold	static U16 s_GetCloseCurrentThreshold(U16 *u16p_Peak, U16 *u16p_Starti	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1377	s_GetCloseIgnoreTime	static U16 s_GetCloseIgnoreTime(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13127	s_GetCloseOverloadResult	static U8 s_GetCloseOverloadResult(U16 u16_Current, U16 u16_Starting,	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13105	s_GetCompensateLevel_WindowClosed	static U8 s_GetCompensateLevel_WindowClosed(U8 u8_Level)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13106	s_GetCompensateLevel_WindowOpen	static U8 s_GetCompensateLevel_WindowOpen(U8 u8_Level)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13117	s_GetDoorMovingCloseSteps	static void s_GetDoorMovingCloseSteps(S16 *ps16_CloseStep, S16 *ps16_C	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13116	s_GetDoorMovingOpenSteps	static void s_GetDoorMovingOpenSteps(S16 *ps16_OpenStep, S16 *ps16_Ope	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13139	s_GetEnvTemperature	static void s_GetEnvTemperature( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1396	s_GetOpenCurrentThreshold	static void s_GetOpenCurrentThreshold(U16 *u16p_Peak, U16 *u16p_Starti	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13123	s_GetOpenOverloadResult	static U8 s_GetOpenOverloadResult(U16 u16_Current, U16 u16_Starting, U	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1383	s_GetSlopeType	static void s_GetSlopeType(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13103	s_IsAllDoorsClosedForDeviceType	static U8 s_IsAllDoorsClosedForDeviceType(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13124	s_IsCloseOverloadBasicFail	static U8 s_IsCloseOverloadBasicFail(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13125	s_IsCloseOverloadPrecondition	static U8 s_IsCloseOverloadPrecondition(U16 u16_Current, U16 u16_Peak,	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13126	s_IsCloseOverloadTimeOk	static U8 s_IsCloseOverloadTimeOk(U16 u16_IgnoreTm, U16 u16_Current)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13102	s_IsDoorClosed	static U8 s_IsDoorClosed(U8 u8t_DoorState)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1346	s_IsDoorMoving_FullLatch	static void s_IsDoorMoving_FullLatch( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1348	s_IsDrMov_FullLatch_MoveChk	void s_IsDrMov_FullLatch_MoveChk( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1349	s_IsDrMov_FullLatch_StopChk	void s_IsDrMov_FullLatch_StopChk( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1347	s_IsDrMov_FullLatch_StopPosChk	void s_IsDrMov_FullLatch_StopPosChk( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13120	s_IsOpenOverloadBasicFail	static U8 s_IsOpenOverloadBasicFail(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13122	s_IsOpenOverloadEarlyTime	static U8 s_IsOpenOverloadEarlyTime(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13121	s_IsOpenOverloadSpeedFail	static U8 s_IsOpenOverloadSpeedFail(U16 u16_Current, U16 u16_Peak)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1321	s_MotorOverHeatActiveHoldCheck	static void s_MotorOverHeatActiveHoldCheck( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1384	s_MotorOverHeatActiveHoldPostActionCheck	static void s_MotorOverHeatActiveHoldPostActionCheck( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1320	s_MotorOverHeatCheck	static void s_MotorOverHeatCheck( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1387	s_MotorTemperatureSelect	static void s_MotorTemperatureSelect( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1388	s_MotorTemperatureSelect1Min	static void s_MotorTemperatureSelect1Min( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1329	s_OverOpenCheck	static void s_OverOpenCheck(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13143	s_PlayProtectI2tScoreUpdate	static void s_PlayProtectI2tScoreUpdate(U32 u32t_AddScore)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13145	s_PlayProtectMotorThermalStressChk	static void s_PlayProtectMotorThermalStressChk(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13141	s_PlayProtectTempTrendChk	static void s_PlayProtectTempTrendChk(U16 u16t_MotorTemp)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13150	s_PlayProtectTimeOverMonitor	static void s_PlayProtectTimeOverMonitor(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1369	s_PreviousCtrl_ActiveStateChecks	static void s_PreviousCtrl_ActiveStateChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1366	s_PreviousCtrl_BasicChecks	static void s_PreviousCtrl_BasicChecks(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1370	s_PreviousCtrl_IdleStateReset	static void s_PreviousCtrl_IdleStateReset(void)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1380	s_ProcessCloseOverloadDetection	static void s_ProcessCloseOverloadDetection(S16 s16_CloseDisplacement,	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1376	s_ProcessOpenOverloadDetection	static void s_ProcessOpenOverloadDetection(S16 s16_OpenDisplacement)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13134	s_ReboundProtection_HandleDetected	static void s_ReboundProtection_HandleDetected( const S_ReboundPrtctPa	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13137	s_ReboundProtection_Return_HandleClearCondition	static void s_ReboundProtection_Return_HandleClearCondition( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13136	s_ReboundProtection_Return_HandleReleaseBySpeed	static void s_ReboundProtection_Return_HandleReleaseBySpeed( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13135	s_ReboundProtection_Return_HandleSlopeHigh	static void s_ReboundProtection_Return_HandleSlopeHigh( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13133	s_ReboundProtection_SelectParams	static void s_ReboundProtection_SelectParams( S_ReboundPrtctParams_t*	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13111	s_ReverseOperationDetect_Close	static void s_ReverseOperationDetect_Close(S16 s16t_Position_30)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13107	s_ReverseOperationDetect_Open	static void s_ReverseOperationDetect_Open(S16 s16t_Position_8)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1385	s_UpdateThermalThresholdByAmbientTemp	static void s_UpdateThermalThresholdByAmbientTemp( void )	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1382	u16g_Conv_AngleToPulse	static inline U16 u16g_Conv_AngleToPulse(U16 u16t_Angle)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13142	u32s_PlayProtectI2tAddScoreGet	static U32 u32s_PlayProtectI2tAddScoreGet(U16 u16t_Current)	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_13144	u32s_PlayProtectI2tLimitGet	static U32 u32s_PlayProtectI2tLimitGet(U16 u16t_MotorTemp, U16 u16t_Th	APP	SWCOM_13	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_12, SWFN_25, SWFN_32, SWFN_41, SWFN_05, SWFN_01, SWFN_13	후보 13개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1446	g_Ap_DoorCtrl_GetDrMovgTmMon	U16 g_Ap_DoorCtrl_GetDrMovgTmMon( void )	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1448	s_DoorState_AutoClose_HandleFullClose	static void s_DoorState_AutoClose_HandleFullClose(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1447	s_DoorState_AutoClose_HandleHalfLatch	static void s_DoorState_AutoClose_HandleHalfLatch(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1450	s_DoorState_AutoClose_UpdateFailInfo	static void s_DoorState_AutoClose_UpdateFailInfo(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1445	s_HistoryPushDoorState	static void s_HistoryPushDoorState( enum en_g_DoorState *pe_StateHisto	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1439	s_ProcessAutoStopChecks	static void s_ProcessAutoStopChecks(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1444	s_ProcessCloseStates	static void s_ProcessCloseStates(enum en_g_DoorState t_DoorState)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1438	s_ProcessDoorStateTransition	static void s_ProcessDoorStateTransition(enum en_g_DoorState t_DoorSta	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1442	s_ProcessInitAndStopStates	static void s_ProcessInitAndStopStates(enum en_g_DoorState t_DoorState	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1440	s_ProcessLatchStates	static void s_ProcessLatchStates(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1441	s_ProcessMovementRequests	static void s_ProcessMovementRequests(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1443	s_ProcessOpenStates	static void s_ProcessOpenStates(enum en_g_DoorState t_DoorState)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1405	s_ShortBrakeCtrl	static void s_ShortBrakeCtrl( void )	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1449	u8s_DoorState_AutoClose_ShouldStop	static U8 u8s_DoorState_AutoClose_ShouldStop(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1451	u8s_DoorState_AutoClose_ShouldUpdateFailInfo	static U8 u8s_DoorState_AutoClose_ShouldUpdateFailInfo(void)	APP	SWCOM_14	SWFN_02, SWFN_03, SWFN_04, SWFN_06, SWFN_07, SWFN_08, SWFN_09, SWFN_12, SWFN_32, SWFN_44, SWFN_45, SWFN_05, SWFN_01, SWFN_13	후보 14개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1590	g_Ap_MotorCtrl_GetComSpeed	S32 g_Ap_MotorCtrl_GetComSpeed(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1599	g_Ap_MotorCtrl_GetRefSpeedMon	S32 g_Ap_MotorCtrl_GetRefSpeedMon( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1591	g_Ap_MotorCtrl_GetScanState	ScanState_t g_Ap_MotorCtrl_GetScanState(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1592	g_Ap_MotorCtrl_GetSlipDirection	U8 g_Ap_MotorCtrl_GetSlipDirection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1595	g_Ap_MotorCtrl_GetSlipHoldingCurrent	S16 g_Ap_MotorCtrl_GetSlipHoldingCurrent(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1593	g_Ap_MotorCtrl_GetSlipHoldingForce	S16 g_Ap_MotorCtrl_GetSlipHoldingForce(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1594	g_Ap_MotorCtrl_GetSlipHoldingPosition	S16 g_Ap_MotorCtrl_GetSlipHoldingPosition(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1597	prv_ComputeQ15Ratio	static U16 prv_ComputeQ15Ratio(const S16 val, const S16 s16t_RangeStar	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1596	prv_FindBracketIdx	static U16 prv_FindBracketIdx(const S16 val, const S16* xAxis, const U	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1598	prv_LerpQ15	static S16 prv_LerpQ15(const S16 s16t_StartVal, const S16 s16t_EndVal,	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1579	s16_ClampToS16	static S16 s16_ClampToS16(S32 s32t_InputVal)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1587	s16s_Gap_Diff	static S16 s16s_Gap_Diff( S16 s16t_Data1, S16 s16t_Data2 )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15170	s16s_GetAssistClosePositionOffset	static S16 s16s_GetAssistClosePositionOffset(S16 s16t_OffsetMax)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15169	s16s_GetAssistOpenPositionOffset	static S16 s16s_GetAssistOpenPositionOffset(S16 s16t_OffsetMax)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15159	s16s_InterpActiveHolding	static S16 s16s_InterpActiveHolding( const S16 roll_deg, const S16 pit	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15161	s16s_InterpAssistClose	static S16 s16s_InterpAssistClose( const S16 roll_deg, const S16 pitch	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15162	s16s_InterpAssistOpen	static S16 s16s_InterpAssistOpen( const S16 roll_deg, const S16 pitch_	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15160	s16s_InterpPreActiveHolding	static S16 s16s_InterpPreActiveHolding( const S16 roll_deg, const S16	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1576	s16s_InterpSlopeCompensation	static S16 s16s_InterpSlopeCompensation( const S16 s16g_Table[ROLL_CNT	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1577	s32_DivRound	static S32 s32_DivRound(S32 num, S32 den)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1575	s32g_CompensateOutputByVoltage_LUT	static void s32g_CompensateOutputByVoltage_LUT( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15166	s_Ap_MotorCtrl_ResetControlState	static void s_Ap_MotorCtrl_ResetControlState( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15165	s_Ap_MotorCtrl_ResetCoreState	static void s_Ap_MotorCtrl_ResetCoreState( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15167	s_Ap_MotorCtrl_ResetEepromParamState	static void s_Ap_MotorCtrl_ResetEepromParamState( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1554	s_ApplyAutoCloseModifiers	static void s_ApplyAutoCloseModifiers( S32 *s32p_speed )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15137	s_Assist_ApplyActiveHolding	static void s_Assist_ApplyActiveHolding(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15136	s_Assist_CalcActiveHoldingPwm	static S32 s_Assist_CalcActiveHoldingPwm(S16 s16_NowStep, S16 s16_EndS	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1560	s_AssistClose_CalculatePWM	static void s_AssistClose_CalculatePWM(S16 s16_pitch, S16 s16_roll)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15141	s_AssistClose_CheckReverseMovement	static void s_AssistClose_CheckReverseMovement(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15134	s_AssistClose_GetAnglesLimited	static void s_AssistClose_GetAnglesLimited(S16 *s16p_Pitch, S16 *s16p_	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1558	s_AssistClose_PrepareAngles	static void s_AssistClose_PrepareAngles(S16 *s16p_pitch, S16 *s16p_rol	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15143	s_AssistClose_ProcessActiveSection	static void s_AssistClose_ProcessActiveSection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15142	s_AssistClose_ProcessOutsideSection	static void s_AssistClose_ProcessOutsideSection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1561	s_AssistClose_ProcessStopCondition	static void s_AssistClose_ProcessStopCondition(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15133	s_AssistClose_SetEndStep	static void s_AssistClose_SetEndStep(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1563	s_AssistClose_SetMotorDirection	static void s_AssistClose_SetMotorDirection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15138	s_AssistClose_TryActivateRevKick	static void s_AssistClose_TryActivateRevKick(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15140	s_AssistClose_UpdateActiveHoldingPwm	static void s_AssistClose_UpdateActiveHoldingPwm(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15139	s_AssistClose_UpdateNowStep	static void s_AssistClose_UpdateNowStep(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1565	s_AssistOpen_CalculateBasePWM	static void s_AssistOpen_CalculateBasePWM(S16 s16_pitch, S16 s16_roll)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1566	s_AssistOpen_CheckNormalConditions	static U8 s_AssistOpen_CheckNormalConditions(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15150	s_AssistOpen_CheckReverseMovement	static void s_AssistOpen_CheckReverseMovement(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15145	s_AssistOpen_GetAnglesLimited	static void s_AssistOpen_GetAnglesLimited(S16 *s16p_Pitch, S16 *s16p_R	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_1564	s_AssistOpen_PrepareAngles	static void s_AssistOpen_PrepareAngles(S16 *s16p_pitch, S16 *s16p_roll	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1568	s_AssistOpen_ProcessActiveHolding	static void s_AssistOpen_ProcessActiveHolding(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15152	s_AssistOpen_ProcessActiveSection	static void s_AssistOpen_ProcessActiveSection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1570	s_AssistOpen_ProcessNormalOperation	static void s_AssistOpen_ProcessNormalOperation(S16 s16t_Pitch, S16 s1	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15151	s_AssistOpen_ProcessOutsideSection	static void s_AssistOpen_ProcessOutsideSection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1567	s_AssistOpen_ProcessStopCycle	static void s_AssistOpen_ProcessStopCycle(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15144	s_AssistOpen_SetEndStep	static void s_AssistOpen_SetEndStep(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1569	s_AssistOpen_SetMotorDirection	static void s_AssistOpen_SetMotorDirection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15147	s_AssistOpen_TryActivateRevKick	static void s_AssistOpen_TryActivateRevKick(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15149	s_AssistOpen_UpdateActiveHoldingPwm	static void s_AssistOpen_UpdateActiveHoldingPwm(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15148	s_AssistOpen_UpdateNowStep	static void s_AssistOpen_UpdateNowStep(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15103	s_AutoClose_ApplyHoldingSpeed	static void s_AutoClose_ApplyHoldingSpeed(S32 *s32p_speed, S16 s16t_Po	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15104	s_AutoClose_ApplyTip2Run_Normal	static void s_AutoClose_ApplyTip2Run_Normal(S32 *s32p_speed)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15102	s_AutoClose_GetAnglesLimited	static void s_AutoClose_GetAnglesLimited(S16 *s16p_Pitch, S16 *s16p_Ro	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_15106	s_AutoCloseProfile_CalcIntersection	static void s_AutoCloseProfile_CalcIntersection(AutoCloseProfileParam_	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15163	s_AutoCloseProfile_CalcMode1Speed	static S32 s_AutoCloseProfile_CalcMode1Speed(const AutoCloseProfilePar	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15164	s_AutoCloseProfile_CalcMode2Speed	static S32 s_AutoCloseProfile_CalcMode2Speed(const AutoCloseProfilePar	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15107	s_AutoCloseProfile_CalcSpeed	static S32 s_AutoCloseProfile_CalcSpeed(const AutoCloseProfileParam_t	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15105	s_AutoCloseProfile_Init	static void s_AutoCloseProfile_Init(AutoCloseProfileParam_t *pProfile)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15155	s_AutoCloseProfile_SelectMode	static void s_AutoCloseProfile_SelectMode(AutoCloseProfileParam_t *pPr	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1580	s_CalcAutoCloseSpeedProfile	static S32 s_CalcAutoCloseSpeedProfile(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1578	s_CalcIntersectPoint_NoS64	static void s_CalcIntersectPoint_NoS64(const IntersectLine_t *pLine, S	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1517	s_ComSpeedLimit	static void s_ComSpeedLimit( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_15121	s_DoorHolding_CheckTargetReached	static void s_DoorHolding_CheckTargetReached(S16 s16t_Position_23)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15116	s_DoorHolding_ClampComSpeed	static void s_DoorHolding_ClampComSpeed(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_15118	s_DoorHolding_ClampCurrentSpeed	static void s_DoorHolding_ClampCurrentSpeed(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요 / 공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_15123	s_DoorHolding_FinalizeHoldData	static void s_DoorHolding_FinalizeHoldData(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15127	s_DoorHolding_HandleForceOrNext	static void s_DoorHolding_HandleForceOrNext(ScanState_t u8t_ScanState)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15124	s_DoorHolding_HandleInitOrDirection	static void s_DoorHolding_HandleInitOrDirection(ScanState_t u8t_ScanSt	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15125	s_DoorHolding_HandleMoveOrWait	static void s_DoorHolding_HandleMoveOrWait(ScanState_t u8t_ScanState,	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15117	s_DoorHolding_HandleScanState	static void s_DoorHolding_HandleScanState(ScanState_t u8t_ScanState, S	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15132	s_DoorHolding_HandleSetTuneState	static void s_DoorHolding_HandleSetTuneState(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15126	s_DoorHolding_HandleSlipOrMeasure	static void s_DoorHolding_HandleSlipOrMeasure(ScanState_t u8t_ScanStat	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15131	s_DoorHolding_HandleWaitState	static void s_DoorHolding_HandleWaitState(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15114	s_DoorHolding_HoldingForceStay	static void s_DoorHolding_HoldingForceStay(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1588	s_DoorHolding_InitState	static void s_DoorHolding_InitState(S16 s16_pitch, S16 s16_roll)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15113	s_DoorHolding_MeasureSpeed	static void s_DoorHolding_MeasureSpeed(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15111	s_DoorHolding_MoveToTarget	static void s_DoorHolding_MoveToTarget(S16 s16t_Position_23, S16 s16t_	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15115	s_DoorHolding_NextPosition	static void s_DoorHolding_NextPosition(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1573	s_DoorHolding_PrepareAngles	static void s_DoorHolding_PrepareAngles(S16 *s16p_pitch, S16 *s16p_rol	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1574	s_DoorHolding_ProcessState	static void s_DoorHolding_ProcessState(S16 s16_pitch, S16 s16_roll, U3	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15122	s_DoorHolding_SampleHoldData	static void s_DoorHolding_SampleHoldData(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15109	s_DoorHolding_ScanInit	static void s_DoorHolding_ScanInit(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15110	s_DoorHolding_SetDirection	static void s_DoorHolding_SetDirection(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1589	s_DoorHolding_SlipCheckState	static void s_DoorHolding_SlipCheckState(U32 u32_holdingTime)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15108	s_DoorHolding_TempPauseCheck	static U8 s_DoorHolding_TempPauseCheck(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15120	s_DoorHolding_UpdateComSpeed	static void s_DoorHolding_UpdateComSpeed(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15119	s_DoorHolding_UpdateMovingTarget	static void s_DoorHolding_UpdateMovingTarget(S16 s16t_Position_23, S16	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15112	s_DoorHolding_Wait2s	static void s_DoorHolding_Wait2s(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1586	s_DoorHoldingForceScan	static void s_DoorHoldingForceScan(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1583	s_DoorHoldingStabilization	static void s_DoorHoldingStabilization( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1547	s_GetDoorSideAdjustedAngles	static void s_GetDoorSideAdjustedAngles(S16 *s16p_Pitch, S16 *s16p_Rol	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15128	s_GetSlipPhaseIndex	static U8 s_GetSlipPhaseIndex(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15154	s_GetVsupRatio	static U16 s_GetVsupRatio(U16 u16_Vsup)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15153	s_GetVsupRatio_Interpolate	static U16 s_GetVsupRatio_Interpolate(U16 u16_Vsup, const U16 *pu16_Vo	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1571	s_MotorCompensation	static void s_MotorCompensation( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15100	s_MotorCtrl_DetermineFromFreeStop	static void s_MotorCtrl_DetermineFromFreeStop(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1534	s_MotorSpdCtrl_ActiveHolding	static void s_MotorSpdCtrl_ActiveHolding( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1526	s_MotorSpdCtrl_AssistClose	static void s_MotorSpdCtrl_AssistClose( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1525	s_MotorSpdCtrl_AssistOpen	static void s_MotorSpdCtrl_AssistOpen( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1516	s_MotorSpdCtrl_AutoClose	static s_MotorSpdCtrl_AutoClose ( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1515	s_MotorSpdCtrl_AutoOpen	static void s_MotorSpdCtrl_AutoOpen( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1533	s_MotorSpdCtrl_AutoStop	static void s_MotorSpdCtrl_AutoStop( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1572	s_MotorSpdCtrl_PreActiveHolding	static void s_MotorSpdCtrl_PreActiveHolding( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15158	s_MotorSpeedModeSelection_FrontApplyCompensation	static void s_MotorSpeedModeSelection_FrontApplyCompensation( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15157	s_MotorSpeedModeSelection_FrontApplySlope	static void s_MotorSpeedModeSelection_FrontApplySlope( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15156	s_MotorSpeedModeSelection_FrontSetModeBase	static void s_MotorSpeedModeSelection_FrontSetModeBase( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1581	s_PID_Control_Position	static S32 s_PID_Control_Position(S16 S16t_TargetPosition)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1582	s_PID_Control_Position_Reset	static void s_PID_Control_Position_Reset( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1529	s_PID_Control_Speed	static S32 s_PID_Control_Speed(S32 S32t_TargetSpeed)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1530	s_PID_Control_Speed_Reset	static void s_PID_Control_Speed_Reset( void )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1540	s_ProcessAutoStopState	static void s_ProcessAutoStopState(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1539	s_ProcessDoorMovementState	static void s_ProcessDoorMovementState(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1584	s_ProcessSlipDetected	static void s_ProcessSlipDetected( S16 s16t_diff )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1585	s_SlipCheck_Original	static void s_SlipCheck_Original( S16 s16t_Position_10 )	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15130	s_SlipCheck_Original_AdjustPhase	static void s_SlipCheck_Original_AdjustPhase(S16 s16t_pwm_step)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15129	s_SlipCheck_Original_WaitPhase	static void s_SlipCheck_Original_WaitPhase(S16 s16t_Position_10)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1555	s_UpdateAutoCloseControl	static void s_UpdateAutoCloseControl(S32 s32_target_speed)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15168	u16s_GetAssistPositionGain	static U16 u16s_GetAssistPositionGain(U16 u16t_Pos, const U16 *pu16t_G	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_15101	u8s_MotorCtrl_IsShortMode	static U8 u8s_MotorCtrl_IsShortMode(void)	APP	SWCOM_15	SWFN_02, SWFN_03, SWFN_04, SWFN_07, SWFN_08, SWFN_25, SWFN_32, SWFN_05, SWFN_38, SWFN_01	후보 10개 — 도구가 좁히지 못함(SwCom 요구 폭이 넓음). 설계 판단 필요	
+SwUFn_1618	s_BuzzerStateFlashing_TripleLong	static void s_BuzzerStateFlashing_TripleLong( void )	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1608	s_BuzzerStateFlashing_TwiceLong	static void s_BuzzerStateFlashing_TwiceLong( void )	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1613	s_ClearBuzzerTimer	static void s_ClearBuzzerTimer(void)	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1614	u8s_IsTripleFlashBuzzerCondition	static U8 u8s_IsTripleFlashBuzzerCondition(void)	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1617	u8s_IsTripleLongFlashBuzzerCondition	static U8 u8s_IsTripleLongFlashBuzzerCondition(void)	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1615	u8s_IsTwiceFlashBuzzerCondition	static U8 u8s_IsTwiceFlashBuzzerCondition(void)	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1616	u8s_IsTwiceLongFlashBuzzerCondition	static U8 u8s_IsTwiceLongFlashBuzzerCondition(void)	APP	SWCOM_16	SWFN_04, SWFN_07, SWFN_08, SWFN_32, SWFN_05, SWFN_13		
+SwUFn_1814	s_Events_AddU16_Mod	static U16 s_Events_AddU16_Mod( U16 u16t_Lhs, U16 u16t_Rhs )	APP	SWCOM_18	SWFN_52, SWFN_53, SWFN_42, SWFN_51		
+SwUFn_1816	s_Events_IncU8_Mod	static U8 s_Events_IncU8_Mod( U8 u8t_Value )	APP	SWCOM_18	SWFN_52, SWFN_53, SWFN_42, SWFN_51		
+SwUFn_1815	s_Events_SubU16_Mod	static U16 s_Events_SubU16_Mod( U16 u16t_Lhs, U16 u16t_Rhs )	APP	SWCOM_18	SWFN_52, SWFN_53, SWFN_42, SWFN_51		
+SwUFn_3357	g_UDS_CommunicationControl	void g_UDS_CommunicationControl( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3356	g_UDS_ControlDTC	void g_UDS_ControlDTC( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3355	g_UDS_SecurityAccess_TimerHandler	void g_UDS_SecurityAccess_TimerHandler( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3388	s_GetPWMTablePtr_RDBI	static const S16* s_GetPWMTablePtr_RDBI(U8 u8t_TableId)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33101	s_SetPWMTableValue	static U8 s_SetPWMTableValue(U8 u8t_TableId, U8 u8t_StartIdx, S16 s16t	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3391	s_UDS_BuildTempOffsetResponse	static U8 s_UDS_BuildTempOffsetResponse(U8 u8t_TableId, const S16* ps1	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3394	s_UDS_CalcRealTimeAngle	static S16 s_UDS_CalcRealTimeAngle(S16 s16t_MotorPosition)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3358	s_UDS_DSC_ExtendedSession	void s_UDS_DSC_ExtendedSession( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3337	s_UDS_DSC_ProgSession	void s_UDS_DSC_ProgSession( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3399	s_UDS_GetRxPduByte	static U8 s_UDS_GetRxPduByte(U16 u16t_FrameIdx, U8 u8t_ByteIdx, U8 *pu	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3390	s_UDS_GetTempOffsetTablePtr	static const S16* s_UDS_GetTempOffsetTablePtr(U8 u8t_TableId, U8 *pu8t	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3392	s_UDS_GetTempOffsetTablePtrWritable	static S16* s_UDS_GetTempOffsetTablePtrWritable(U8 u8t_TableId)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3393	s_UDS_ParseTempOffsetWrite	static U8 s_UDS_ParseTempOffsetWrite(U8 u8t_FrameType, U8 u8t_PCI, U8	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3396	s_UDS_RDBI_BuildRealTimeResponse	static void s_UDS_RDBI_BuildRealTimeResponse(const UdsRealTimeData_t *	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3310	s_UDS_RDBI_DB_Version	void s_UDS_RDBI_DB_Version( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3375	s_UDS_RDBI_Dispatch	static void s_UDS_RDBI_Dispatch(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3340	s_UDS_RDBI_ExtractParams	static void s_UDS_RDBI_ExtractParams(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3395	s_UDS_RDBI_GetRealTimeData	static void s_UDS_RDBI_GetRealTimeData(UdsRealTimeData_t *pData)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3379	s_UDS_RDBI_HandleDirectParamRead	static void s_UDS_RDBI_HandleDirectParamRead(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3378	s_UDS_RDBI_HandleParamTuning	static void s_UDS_RDBI_HandleParamTuning(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3380	s_UDS_RDBI_HandlePwmTable	static void s_UDS_RDBI_HandlePwmTable(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3376	s_UDS_RDBI_HandleSystemInfo	static void s_UDS_RDBI_HandleSystemInfo(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3377	s_UDS_RDBI_HandleSystemStatus	static void s_UDS_RDBI_HandleSystemStatus(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3309	s_UDS_RDBI_HW_Version	void s_UDS_RDBI_HW_Version( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3307	s_UDS_RDBI_PartNumber	void s_UDS_RDBI_PartNumber( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3343	s_UDS_RDBI_ProcessDatePartInfo	static void s_UDS_RDBI_ProcessDatePartInfo(U16 u16t_DidLsb)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3369	s_UDS_RDBI_ProcessDynamicPWMTable	static void s_UDS_RDBI_ProcessDynamicPWMTable(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3341	s_UDS_RDBI_ProcessSystemInfo	static void s_UDS_RDBI_ProcessSystemInfo(U16 u16t_DidLsb);	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3342	s_UDS_RDBI_ProcessSystemStatus	static void s_UDS_RDBI_ProcessSystemStatus(U16 u16t_DidLsb)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3363	s_UDS_RDBI_ProcessTempOffsetTable	static void s_UDS_RDBI_HandlePwmTable(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3344	s_UDS_RDBI_ProcessVersionInfo	static void s_UDS_RDBI_ProcessVersionInfo(U16 u16t_DidLsb)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3306	s_UDS_RDBI_ProdDate	void s_UDS_RDBI_ProdDate( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3372	s_UDS_RDBI_RealTimeMonitor	static void s_UDS_RDBI_RealTimeMonitor(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3370	s_UDS_RDBI_SendDynamicTableData	static void s_UDS_RDBI_SendDynamicTableData(const S16* ps16_TablePtr,	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3312	s_UDS_RDBI_StatusCheck1	void s_UDS_RDBI_StatusCheck1 ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3313	s_UDS_RDBI_StatusCheck2	void s_UDS_RDBI_StatusCheck2 ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3353	s_UDS_RDBI_StatusCheck3	void s_UDS_RDBI_StatusCheck3( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3352	s_UDS_RDBI_SW_Unit1_IVD	static void s_UDS_RDBI_SW_Unit1_IVD( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3311	s_UDS_RDBI_SW_Unit1_Version	void s_UDS_RDBI_SW_Unit1_Version ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3308	s_UDS_RDBI_SW_Version	void s_UDS_RDBI_SW_Version( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3374	s_UDS_RDBI_ValidateSingleFrame	static U8 s_UDS_RDBI_ValidateSingleFrame(U8 u8t_Pci)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3359	s_UDS_SA_RequestSeed	void s_UDS_SA_RequestSeed( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3360	s_UDS_SA_SendKey	void s_UDS_SA_SendKey( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3361	s_UDS_SecurityAccessAlgorithm	static U32 s_UDS_SecurityAccessAlgorithm( U32 u32_Seed )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3351	s_UDS_SendNRC22_ConditionsNotCorrect	void s_UDS_SendNRC22_ConditionsNotCorrect( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3362	s_UDS_SendNRC78_ResponsePending	void s_UDS_SendNRC78_ResponsePending( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33108	s_UDS_SlipDetect_ApplyPreset	static void s_UDS_SlipDetect_ApplyPreset(const SlipDetectPhase_t *pst_	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3397	s_UDS_SlipDetect_HandleCustom	static void s_UDS_SlipDetect_HandleCustom(U8 u8t_QueueIdx, U16 u16t_Le	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33102	s_UDS_SlipDetect_HandlePreset	static void s_UDS_SlipDetect_HandlePreset(U8 u8t_Mode, U16 u16t_Length	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33107	s_UDS_SlipDetect_ReadCustomPayload	static U8 s_UDS_SlipDetect_ReadCustomPayload( U8 u8t_QueueIdx,U8 *pu8t	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33109	s_UDS_SlipDetect_SendPresetPositiveResponse	static void s_UDS_SlipDetect_SendPresetPositiveResponse(U16 u16t_Lengt	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3398	s_UDS_SubU32_Guarded	static U32 s_UDS_SubU32_Guarded( U32 u32t_Lhs, U32 u32t_Rhs )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38	공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_3383	s_UDS_WDBI_Dispatch	static void s_UDS_WDBI_Dispatch(U8 u8t_FrameType, U8 u8t_Pci)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3382	s_UDS_WDBI_ExtractParams	static void s_UDS_WDBI_ExtractParams(U8 u8t_FrameType)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3387	s_UDS_WDBI_HandleDirectParamWrite	static void s_UDS_WDBI_HandleDirectParamWrite(U8 u8t_FrameType, U8 u8t	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3386	s_UDS_WDBI_HandleParamTuning	static void s_UDS_WDBI_HandleParamTuning(U8 u8t_FrameType, U8 u8t_Pci)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3385	s_UDS_WDBI_HandlePwmTable	static void s_UDS_WDBI_HandlePwmTable(U8 u8t_FrameType, U8 u8t_Pci)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3384	s_UDS_WDBI_HandleStdDid	static void s_UDS_WDBI_HandleStdDid(U8 u8t_FrameType, U8 u8t_Pci)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3371	s_UDS_WDBI_ProcessDynamicPWMTable	static void s_UDS_WDBI_ProcessDynamicPWMTable(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3364	s_UDS_WDBI_ProcessTempOffsetTable	static void s_UDS_WDBI_ProcessTempOffsetTable(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33105	s_UDS_WDBI_ReadMultiFrameConsecutive	static U8 s_UDS_WDBI_ReadMultiFrameConsecutive( U8 au8t_Payload[8], U8	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33104	s_UDS_WDBI_ReadMultiFramePayload	static U8 s_UDS_WDBI_ReadMultiFramePayload( U16 u16t_FrameIdx, U8 u8t_	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33106	s_UDS_WDBI_ReadParamTuningPayload	static U8 s_UDS_WDBI_ReadParamTuningPayload( U8 u8t_FrameType, U8 u8t_	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_33103	s_UDS_WDBI_ReadSingleFramePayload	static U8 s_UDS_WDBI_ReadSingleFramePayload( U16 u16t_FrameIdx, U8 u8t	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3365	s_UDS_WDBI_SlipDetectParams	static void s_UDS_WDBI_SlipDetectParams(void)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3333	s_UDS_WDBI_US_BuzzTest	void s_UDS_WDBI_US_BuzzTest( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3331	s_UDS_WDBI_US_OpDataRead	void s_UDS_WDBI_US_OpDataRead ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3368	s_UDS_WDBI_US_Position_Scan	void s_UDS_WDBI_US_Position_Scan( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3336	s_UDS_WDBI_US_Read_Checksum	void s_UDS_WDBI_US_Read_Checksum( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38	공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_3367	s_UDS_WDBI_US_Scan_Read	void s_UDS_WDBI_US_Scan_Read( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3366	s_UDS_WDBI_US_Scan_Start	void s_UDS_WDBI_US_Scan_Start( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3332	s_UDS_WDBI_US_SysOpt	void s_UDS_WDBI_US_SysOpt( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3335	s_UDS_WDBI_US_Write_Checksum	void s_UDS_WDBI_US_Write_Checksum( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38	공용 — 여러 기능이 쓰므로 단일 SwFn 부적절 가능	
+SwUFn_3314	s_UDS_WDBI_UserOptRecordId	void s_UDS_WDBI_UserOptRecordId( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3317	s_UDS_WDBI_UsOpt_E2G_1	void s_UDS_WDBI_UsOpt_E2G_1( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3318	s_UDS_WDBI_UsOpt_E2G_2	void s_UDS_WDBI_UsOpt_E2G_2 ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3345	s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup1	static void s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup1(U8 u8t_ServiceId)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3346	s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup2	static void s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup2(U8 u8t_ServiceId)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3319	s_UDS_WDBI_UsOpt_E2G_3	void s_UDS_WDBI_UsOpt_E2G_3( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3316	s_UDS_WDBI_UsOpt_F1G	void s_UDS_WDBI_UsOpt_F1G ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3315	s_UDS_WDBI_UsOptMain	void s_UDS_WDBI_UsOptMain ( void )	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3381	s_UDS_WDBI_ValidateRequest	static U8 s_UDS_WDBI_ValidateRequest(U8 u8t_Pci, U8 *pu8_FrameType)	APP	SWCOM_33	SWFN_14, SWFN_40, SWFN_38		
+SwUFn_3408	u8s_DeviceTypeChk_DetermineType	static U8 u8s_DeviceTypeChk_DetermineType(void)	APP	SWCOM_34	SWFN_43		
+SwUFn_3407	u8s_DeviceTypeChk_IsValidPartNo	static U8 u8s_DeviceTypeChk_IsValidPartNo(void)	APP	SWCOM_34	SWFN_43		
+SwUFn_3518	Comms_Reset_Reg	void Comms_Reset_Reg(void)	APP	SWCOM_35		후보 없음 — 검토 필요	
+SwUFn_3501	Init_MCU	void Init_MCU(void)	APP	SWCOM_35		후보 없음 — 검토 필요	
+SwUFn_3569	MainEnsurePollingMode	static void MainEnsurePollingMode(void)	APP	SWCOM_35		후보 없음 — 검토 필요	
+SwUFn_3565	MainInitBootFlow	static void MainInitBootFlow(void)	APP	SWCOM_35		후보 없음 — 검토 필요	
+SwUFn_3567	MainInitShadowServices	static void MainInitShadowServices(void)	APP	SWCOM_35		후보 없음 — 검토 필요	
+SwUFn_3571	MainServiceLoop	static void MainServiceLoop(UINT8 * LinRecvData, UINT8 * LinSendData)	APP	SWCOM_35		후보 없음 — 검토 필요	
