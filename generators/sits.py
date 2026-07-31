@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from report_gen.doc_kind import is_sds_filename
 
 _logger = logging.getLogger(__name__)
 
@@ -153,7 +154,8 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
     global _SDS_MAP_CACHE, _SDS_MAP_CACHE_MTIME
     docs_dir = Path(__file__).resolve().parents[1] / "docs"
     try:
-        sds_files = sorted(docs_dir.glob("*SDS*.docx"))
+        # `*SDS*` 글롭은 `SwDS` 표기를 놓친다("swds" 에 "sds" 없음) — 전량 글롭 후 단일 출처로 거른다.
+        sds_files = sorted(p for p in docs_dir.glob("*.docx") if is_sds_filename(p.name))
         if sds_files:
             current_mtime = sds_files[0].stat().st_mtime
             # Return cached copy if file hasn't changed

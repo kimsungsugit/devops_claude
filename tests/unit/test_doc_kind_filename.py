@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.helpers.sds import is_sds_filename, is_srs_filename
+from report_gen.doc_kind import is_sds_filename, is_srs_filename
 
 # (파일명, SDS 인가, SRS 인가) — 앞 넷은 저장소/사용자 프로젝트 실파일명
 CASES = [
@@ -56,22 +56,44 @@ def test_junk_inputs_are_false(junk):
     assert is_srs_filename(junk) is False
 
 
-def test_routers_use_the_shared_classifier_not_substrings():
-    """구조 가드 — 파일명 판정이 substring 으로 되돌아가면 잡는다.
+def test_backend_helper_reexports_the_canonical_definition():
+    """`backend.helpers.sds` 는 재수출만 — 두 벌이 되면 한쪽만 고쳐진다.
 
+    `generators/` 는 `backend/` 를 import 할 수 없어(라우터가 generators 를 쓰므로 순환)
+    정본은 `report_gen.doc_kind` 여야 한다.
+    """
+    from backend.helpers import sds as helper_mod
+    from report_gen import doc_kind
+
+    assert helper_mod.is_sds_filename is doc_kind.is_sds_filename
+    assert helper_mod.is_srs_filename is doc_kind.is_srs_filename
+
+
+def test_no_module_reimplements_the_classifier():
+    """구조 가드 — 파일명 판정이 substring/글롭으로 되돌아가면 잡는다.
+
+    `backend/routers`(26곳)와 `generators`(3곳)가 모두 대상이다. 라운드121 은 라우터만
+    고쳤고 generators 3곳이 남아 있었다 — 같은 실수를 다시 하지 않도록 둘 다 스캔한다.
     남는 `"srs" in hn` 하나는 **표 컬럼 헤더** 판정이라 파일명과 무관하다(허용).
     """
     import re
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
+    targets = ["backend/routers/jenkins.py", "backend/routers/local.py",
+               "generators/sts.py", "generators/suts.py", "generators/sits.py",
+               "backend/helpers/sds.py"]
+    bad_line = re.compile(r'"(?:sds|srs)"\s+(?:not\s+)?in\s|glob\(\s*["\']\*S[DR]S\*')
     offenders = []
-    for rel in ("backend/routers/jenkins.py", "backend/routers/local.py"):
+    for rel in targets:
         for i, ln in enumerate(
                 (root / rel).read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-            if not re.search(r'"(?:sds|srs)" in ', ln):
+            stripped = ln.strip()
+            if stripped.startswith("#"):    # 사고 경위 주석은 허용
                 continue
-            if "hn" in ln:      # 표 헤더 판정(이미 swrs 를 함께 본다)
+            if not bad_line.search(ln):
                 continue
-            offenders.append(f"{rel}:{i}: {ln.strip()[:70]}")
-    assert not offenders, "파일명 판정이 substring 으로 남아 있다:\n" + "\n".join(offenders)
+            if "hn" in ln:                  # 표 헤더 판정(이미 swrs 를 함께 본다)
+                continue
+            offenders.append(f"{rel}:{i}: {stripped[:70]}")
+    assert not offenders, "파일명 판정이 substring/글롭으로 남아 있다:\n" + "\n".join(offenders)

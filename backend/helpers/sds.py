@@ -4,29 +4,11 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
+# 문서 종류 파일명 판정은 `report_gen.doc_kind` 가 **정본**이다. 여기서는 재수출만 한다 —
+# `generators/` 는 `backend/` 를 import 할 수 없어(라우터가 generators 를 쓰므로 순환)
+# 양쪽이 닿는 `report_gen/` 에 둬야 한 벌로 유지된다.
+from report_gen.doc_kind import is_sds_filename, is_srs_filename  # noqa: F401  (re-export)
 from workflow.function_module_map import build_function_module_index
-
-# ── 문서 종류 판정 (파일명) ────────────────────────────────────────────────
-# 프로젝트마다 표기가 다르다: HDPDM01 은 `(HDPDM01_SDS)`, KJPDS02 는 `(KJPDS02_SwDS)`.
-# 오래도록 `"sds" in name.lower()` 로만 봤는데 **"swds" 안에는 "sds" 가 없다** —
-# 그래서 KJPDS02 의 SwDS/SwRS 는 어느 경로에서도 인식되지 않았고, 저장소 `docs/` 폴백이
-# 대신 잡혀 다른 프로젝트(HDPDM01) 설계서가 쓰였다.
-#
-# ⚠ 단위설계(`SUDS`/`SwUDS`)를 아키텍처설계(SDS)로 삼키면 안 된다. 다행히 "suds"·"swuds"
-#   어디에도 "sds"·"swds" 부분문자열이 없어 아래 토큰 매칭으로 자연히 갈린다 —
-#   느슨하게 `ds` 같은 걸로 잡으면 즉시 깨지므로 토큰을 넓히지 말 것.
-_SDS_NAME_RE = re.compile(r"(?<![a-z])s(?:w)?ds(?![a-z])", re.I)
-_SRS_NAME_RE = re.compile(r"(?<![a-z])s(?:w)?rs(?![a-z])", re.I)
-
-
-def is_sds_filename(name: Any) -> bool:
-    """SW 아키텍처 설계서(SDS/SwDS) 파일명인가. 단위설계(SUDS/SwUDS)는 False."""
-    return bool(_SDS_NAME_RE.search(Path(str(name or "")).name))
-
-
-def is_srs_filename(name: Any) -> bool:
-    """SW 요구사항 명세서(SRS/SwRS) 파일명인가. 시스템 요구(SyRS)는 False."""
-    return bool(_SRS_NAME_RE.search(Path(str(name or "")).name))
 
 try:
     from docx import Document  # type: ignore

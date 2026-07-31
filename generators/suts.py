@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import _extract_sds_partition_map
 
 _logger = logging.getLogger(__name__)
@@ -121,11 +122,20 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
         return _SDS_MAP_CACHE
     docs_dir = Path(__file__).resolve().parents[1] / "docs"
     merged: Dict[str, Dict[str, str]] = {}
+    picked: List[str] = []
     if docs_dir.exists():
         for path in docs_dir.glob("*.docx"):
-            if "sds" not in path.name.lower():
+            # `"sds" in name` 은 `SwDS` 표기를 놓친다("swds" 에 "sds" 없음) — 단일 출처 사용.
+            if not is_sds_filename(path.name):
                 continue
+            picked.append(path.name)
             _merge_sds_partition_map(merged, _extract_sds_partition_map(str(path)))
+    if merged:
+        # ⚠ 침묵 금지 — 이 맵으로 단위 ASIL 을 채우는데 출처가 **다른 프로젝트**일 수 있다.
+        _logger.warning(
+            "SDS 미지정 — 저장소 docs/ 글롭 폴백 사용(**프로젝트 무관**): %s (%d 엔트리). "
+            "대상 프로젝트의 SDS 를 `load_sds_map_from` 으로 넘기면 이 폴백은 쓰이지 않는다",
+            ", ".join(picked) or "(없음)", len(merged))
     _SDS_MAP_CACHE = merged
     return merged
 
