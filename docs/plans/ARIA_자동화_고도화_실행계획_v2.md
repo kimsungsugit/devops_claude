@@ -705,6 +705,48 @@ D2 의 신원 게이트가 먼저 들어갔으므로, 이 변경을 해도 타 �
 
 ---
 
+## 5-10. SITS 의 SDS 보강이 한 건도 산출한 적 없었다 — ✅ 완료 (2026-07-31)
+
+§5-8(D2) 을 고친 뒤 **같은 결함군의 남은 인스턴스**를 쓸다가 찾았다.
+`_load_default_sds_map`(저장소 `docs/` 글롭)이 `sts`·`suts`·`sits` **세 곳에 복제**돼
+있는데, 앞의 둘은 `sds_map` 파라미터로 프로젝트 SDS 를 받을 수 있고 docstring 에 경고까지
+달려 있었다. **`sits` 만 파라미터가 없어 저장소 문서 고정**이었다.
+
+### 실측 — 두 겹으로 깨져 있었고 둘 다 침묵했다
+
+| # | 결함 | 실측 |
+|---|---|---|
+| S1 | 프로젝트 SDS 를 쓸 방법이 **없었다** | `collect_integration_flows` 에 `sds_map` 파라미터 부재. 그런데 `generate_sits` 는 `sds_docx_path` 를 **이미 받고 있었다** — 배선만 없었다 |
+| S2 | 읽는 필드가 스키마에 **없었다** | 맵 값 스키마 = `{kind, description, related, asil, component_description, canonical}`. 코드는 `entry.get("swcom") or entry.get("component")` → 항상 `None`. 실측 **763항목 중 보유 0개** |
+| — | 안 보였다 | 전체가 `except Exception: pass` 안 |
+
+즉 이 보강은 **한 번도 산출한 적이 없다.** 5.1MB 남의 프로젝트 문서를 파싱하고 결과는 0,
+표면에는 아무것도 안 나온다. 같은 맵을 쓰는 `sts.py::_lookup_sds_related_ids` 는 **실재
+필드 `related`** 를 읽는다 — 세 생성기가 같은 맵을 서로 다르게 읽고 있었다.
+
+### 수정
+
+1. `collect_integration_flows(..., sds_map=None)` 추가 — `sts`/`suts` 와 파라미터 동등
+2. `generate_sits` 가 받은 `sds_docx_path` 를 흐름 수집까지 **배선**.
+   맵 확보는 **SUTS 가 이미 고쳐 둔 `_resolve_sds_map` 을 재사용**한다
+   (복제하면 한쪽만 고쳐진다 — 이 저장소의 반복 실패 모드)
+3. `except Exception: pass` 제거 — 조회 실패는 함수명과 함께 경고
+4. `stats_out` 에 `sds_source`/`sds_map_entries`/`sds_lookups`/`sds_key_hits`/
+   `sds_swcom_hits` 보고. 조회했는데 산출 0 이면 **경고**한다
+
+### 이 라운드에서 **하지 않은** 것
+
+**대체 필드를 추측하지 않았다.** 틀린 SwCom 을 추적성 열에 넣는 건 0건보다 나쁘다.
+스키마에 필드가 생기면 테스트가 실패해 알려 준다(`TestMeasuredSchemaGap`).
+
+### 검증
+
+- 새 테스트 11건(`tests/unit/test_sits_sds_related_source.py`) — **뮤테이션 6/6**
+- 실측 확인: 폴백은 `lookups=1, key_hits=0, swcom_hits=0` + 경고,
+  호출자 SDS 를 주면 `swcom_hits=1` 이며 `SwCom_07` 이 `related_ids` 에 실제로 들어간다
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |

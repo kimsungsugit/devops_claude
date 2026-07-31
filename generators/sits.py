@@ -333,6 +333,7 @@ def collect_integration_flows(
     function_details: Dict[str, Dict[str, Any]],
     max_flows: int = _DEFAULT_MAX_FLOWS,
     stats_out: Optional[Dict[str, Any]] = None,
+    sds_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -343,9 +344,31 @@ def collect_integration_flows(
       { flow_id, entry_fn, call_chain, functions, module_name, swcom_id,
         input_vars, expected_vars, asil, related_ids }
 
-    `stats_out` 를 주면 캡 절단 내역(총 후보 수·제외 수·제외분 ASIL 분포)을 채운다.
-    소비처에서 결과 길이로 되짚으면 절단을 못 본다 — 캡 **전** 총량이 여기서만 보인다.
+    Args:
+        sds_map: Related ID 보강용 SDS 파티션 맵. None 이면 저장소 `docs/` 글롭
+            (`_load_default_sds_map`)으로 폴백하는데 이는 **프로젝트 무관**이다
+            — `sts.py`/`suts.py` 는 이미 같은 파라미터를 갖고 있었고 여기만 없어서
+            **호출자가 대상 프로젝트의 SDS 를 줄 방법 자체가 없었다.**
+
+    `stats_out` 를 주면 캡 절단 내역(총 후보 수·제외 수·제외분 ASIL 분포)과
+    **SDS 보강 실적**(`sds_*` 키)을 채운다. 소비처에서 결과 길이로 되짚으면 절단을 못
+    본다 — 캡 **전** 총량이 여기서만 보인다.
     """
+    # ── SDS 보강 계측 ──────────────────────────────────────────────────────
+    # ⚠ 실측(2026-07-31): 이 보강은 **한 건도 산출한 적이 없다.**
+    #   `_load_default_sds_map()` 이 주는 맵의 값 스키마는
+    #   `{kind, description, related, asil, component_description, canonical}` 인데
+    #   여기서는 `entry.get("swcom") or entry.get("component")` 를 읽었다 — **없는
+    #   필드**라 항상 None 이고, 그 사실이 `except Exception: pass` 에 묻혀 있었다.
+    #   (같은 맵을 쓰는 `sts.py::_lookup_sds_related_ids` 는 실재 필드 `related` 를 읽는다.)
+    #   대체 필드를 **추측하지 않는다** — 틀린 SwCom 을 추적성 열에 넣는 건 0 건보다 나쁘다.
+    #   대신 0 을 **보이게** 만든다: 아래 카운터가 `stats_out` 으로 나간다.
+    _sds_lookups = 0        # 조회 시도한 함수 수
+    _sds_key_hits = 0       # 맵에서 키가 잡힌 수
+    _sds_swcom_hits = 0     # 실제로 SwCom 을 얻은 수
+    _sds_source = "argument" if sds_map is not None else "repo_docs_glob"
+    if sds_map is None:
+        sds_map = _load_default_sds_map()
     # Build name → info lookup
     name_to_info: Dict[str, Dict[str, Any]] = {}
     for fid, info in function_details.items():
@@ -560,18 +583,21 @@ def collect_integration_flows(
             val = info.get(field) or ""
             ids = _parse_req_ids(str(val))
             related_parts.extend(ids)
-        # from SDS map
+        # from SDS map — 결과가 0 이어도 **왜 0 인지** 셀 수 있어야 한다(위 주석 참조).
+        _sds_lookups += 1
         try:
-            sds_map = _load_default_sds_map()
             for cand in [fn_name, fn_name.lower()]:
                 entry = sds_map.get(cand)
                 if entry:
+                    _sds_key_hits += 1
                     swcom_cand = entry.get("swcom") or entry.get("component")
                     if swcom_cand:
                         related_parts.append(swcom_cand)
+                        _sds_swcom_hits += 1
                     break
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - 조회 실패는 보고하고 계속한다
+            _logger.warning("SITS: SDS Related 보강 조회 실패(%s) — 이 함수는 건너뛴다: %s",
+                            type(e).__name__, fn_name)
         # Assign SwCom.
         # ⚠ _infer_swcom_id는 **모듈 등장 순번**으로 만든 합성 ID다(실제 SDS component ID가
         # 아니다). 모든 flow에 무조건 들어가므로 related_ids는 절대 비지 않는다 — 이 값을
@@ -631,6 +657,22 @@ def collect_integration_flows(
             "logic_flow": info.get("logic_flow") or [],
         })
 
+    # SDS 보강 실적을 **반드시** 내보낸다. 0 을 침묵시키면 "보강이 동작한다" 로 읽힌다.
+    if stats_out is not None:
+        stats_out.update({
+            "sds_source": _sds_source,
+            "sds_map_entries": len(sds_map or {}),
+            "sds_lookups": _sds_lookups,
+            "sds_key_hits": _sds_key_hits,
+            "sds_swcom_hits": _sds_swcom_hits,
+        })
+    if _sds_lookups and not _sds_swcom_hits:
+        _logger.warning(
+            "SITS: SDS 기반 Related 보강이 %d회 조회에서 **0건** 산출했다 "
+            "(키 매칭 %d건, 맵 %d항목, 출처=%s). 맵 스키마에 swcom/component 필드가 "
+            "없거나 다른 프로젝트의 SDS 다 — Related ID 의 SwCom 축은 비어 있다.",
+            _sds_lookups, _sds_key_hits, len(sds_map or {}), _sds_source,
+        )
     _logger.info("SITS: collected %d integration flows", len(flows))
     return flows
 
@@ -1650,8 +1692,19 @@ def generate_sits(
     _progress(5, "SITS 생성 시작")
 
     # ── Stage 1-4: document context loading ─────────────────────────────────
+    # ⚠ SITS 는 `sds_docx_path` 를 받고도 **Related ID 보강에는 쓰지 않았다** — 흐름
+    #   수집이 저장소 `docs/` 글롭(프로젝트 무관, 현재 HDPDM01)만 봤다. SUTS 가 정확히
+    #   같은 결함을 이미 고쳐 뒀고(`suts._resolve_sds_map` docstring 참조) 그 헬퍼를
+    #   **재사용**한다 — 복제하면 한쪽만 고쳐지는 이 저장소의 반복 실패 모드가 된다.
+    _project_sds_map: Optional[Dict[str, Dict[str, str]]] = None
     if sds_docx_path:
         _progress(7, "SDS 설계 컨텍스트 로드 중")
+        try:
+            from generators.suts import _resolve_sds_map
+            _project_sds_map = _resolve_sds_map(sds_docx_path)
+        except Exception as e:  # noqa: BLE001 - 확보 실패는 폴백 사유로 보고만 한다
+            _logger.warning("SITS: 프로젝트 SDS 맵 확보 실패(%s) — 저장소 docs/ 폴백으로 "
+                            "넘어간다(프로젝트 무관): %s", type(e).__name__, e)
         try:
             from generators.sts import _load_sds_summary
             sds_summary = _load_sds_summary(sds_docx_path)
@@ -1793,7 +1846,8 @@ def generate_sits(
     _progress(40, "통합 흐름 수집 중")
     flow_stats: Dict[str, Any] = {}
     flows = collect_integration_flows(
-        function_details, max_flows=max_flows, stats_out=flow_stats)
+        function_details, max_flows=max_flows, stats_out=flow_stats,
+        sds_map=_project_sds_map)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")
