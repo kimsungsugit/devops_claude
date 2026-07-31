@@ -1293,18 +1293,14 @@ def generate_asil_related_confidence_report(
                 desc = str(row.get("description") or "").strip()
                 asil = str(row.get("asil") or "").strip()
                 rel = str(row.get("related") or "").strip()
-                desc_src = "inference" if (not desc or _is_generic_description(desc)) else "reference"
-                asil_src = "inference"
-                rel_src = "inference"
-                if asil and asil not in {"TBD", "N/A", "-"}:
-                    asil_src = "sds"
-                if rel and rel not in {"TBD", "N/A", "-"}:
-                    if re.search(r"\bSw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+\b", rel):
-                        rel_src = "srs"
-                    elif re.search(r"\bSwCom_\d+\b", rel, flags=re.I):
-                        rel_src = "rule"
-                    else:
-                        rel_src = "reference"
+                # ⚠ 여기서 읽은 문서는 **우리가 방금 쓴 산출물**(`generated_docx_path`)이다.
+                #   예전엔 값의 모양만 보고 `sds`(0.95)·`srs`(0.95)·`rule`·`reference` 를
+                #   붙였다 — 즉 자기 출력을 되읽어 출처를 만들어냈다. 값의 진짜 유래는
+                #   "생성 문서" 하나뿐이고 그 안의 값이 애초에 어디서 왔는지는 이 계층이
+                #   모른다. 모른다는 사실을 그대로 적는다(`generated_doc`, 0.30).
+                desc_src = "generated_doc" if desc else "inference"
+                asil_src = "generated_doc" if (asil and asil not in {"TBD", "N/A", "-"}) else "inference"
+                rel_src = "generated_doc" if (rel and rel not in {"TBD", "N/A", "-"}) else "inference"
                 rebuilt_from_doc[name] = {
                     "id": str(row.get("id") or ""),
                     "name": str(row.get("name") or ""),
@@ -1382,20 +1378,19 @@ def generate_asil_related_confidence_report(
                         info["description_source"] = "comment"
                     elif doc_desc and doc_desc.upper() not in {"N/A", "TBD", "-"} and weak_desc_src:
                         # Prioritize explicit document text over inferred prose.
+                        # ⚠ 값을 실제로 가져왔을 때만 출처를 바꾼다. 예전엔 값을 안 바꾸고도
+                        #   출처만 `reference` 로 올렸다 — 근거 없는 등급 상승이다.
                         if (not cur_desc) or _is_generic_description(cur_desc):
                             info["description"] = doc_desc
-                        info["description_source"] = "reference"
+                            info["description_source"] = "generated_doc"
                     if (not cur_asil or cur_asil in {"TBD", "N/A", "-"}) and doc_asil:
                         info["asil"] = doc_asil
-                        info["asil_source"] = "sds"
+                        info["asil_source"] = "generated_doc"
                     if (not cur_rel or cur_rel in {"TBD", "N/A", "-"}) and doc_rel and weak_rel_src:
                         info["related"] = doc_rel
-                        if re.search(r"\bSw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+\b", doc_rel):
-                            info["related_source"] = "srs"
-                        elif re.search(r"\bSwCom_\d+\b", doc_rel, flags=re.I):
-                            info["related_source"] = "rule"
-                        else:
-                            info["related_source"] = "reference"
+                        # ID 가 `SwFn_07` 모양이라는 건 "SRS 를 참조했다" 는 증거가 아니라
+                        # 그냥 문자열 모양이다. 모양으로 출처를 지어내지 않는다.
+                        info["related_source"] = "generated_doc"
 
     # ⚠ 2026-07-29 — 이 어휘와 **실제 생산 어휘가 벌어져 있었다.** 코드가 실제로 넣는
     # 값 중 `uds`·`swcom`·`rag`·`module_inherit`·`default`·`srs_default_qm`·`call_graph`
@@ -1417,6 +1412,10 @@ def generate_asil_related_confidence_report(
         "module_inherit": "모듈 상속",  # docx_builder.py:1897
         "inference": "추론",
         "default": "기본값(근거 없음)",  # docx_builder.py:1900, helpers/uds.py
+        # 이 리포트가 **자기 산출물**(생성 UDS DOCX)에서 회수한 값. 원 유래는 이 계층이
+        # 모른다 — 되읽었다는 사실만 안다. `unknown` 과 점수는 같지만 원인이 달라서
+        # 별도 라벨을 둔다(이건 어휘 드리프트가 아니라 payload 결손의 신호다).
+        "generated_doc": "생성 문서 회수(원 유래 불명)",
         "unknown": "미상(분류 불가)",
     }
     src_score = {
@@ -1434,6 +1433,9 @@ def generate_asil_related_confidence_report(
         "inference": 0.60,
         # 근거가 **없어서** 쓴 값. 추론보다 낮아야 한다 — 추론은 최소한 무언가를 보고 한 것이다.
         "default": 0.30,
+        # 자기 산출물 회수. 문서에 적혀 있다는 사실은 그 값이 **옳다는 근거가 아니다**
+        # (우리가 쓴 것이므로). 원 유래 불명이니 `unknown` 과 같은 0.30.
+        "generated_doc": 0.30,
         # 어휘에 없는 값. 조용히 '추론' 으로 접지 않는다 — 모른다는 사실 자체가 정보다.
         "unknown": 0.30,
     }
@@ -1479,6 +1481,8 @@ def generate_asil_related_confidence_report(
             return "AI(Gemini) 모델이 코드 컨텍스트로 생성"
         if src == "rule":
             return "함수명/ID 기반 룰로 할당됨"
+        if src == "generated_doc":
+            return "생성 UDS DOCX 에서 회수 — 원 유래 미확인(payload 에 출처가 없었다)"
         return "코드/문맥 기반 추론"
 
     def _overall_grade(score: float) -> str:

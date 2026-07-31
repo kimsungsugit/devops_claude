@@ -1,0 +1,324 @@
+"""신뢰도 리포트가 **자기 산출물을 되읽어 출처를 만들어내면** 안 된다.
+
+## 회귀 대상 (2026-07-31 실측)
+
+`generate_asil_related_confidence_report` 는 `generated_docx_path` — 즉 **이 파이프라인이
+방금 쓴 UDS DOCX** — 를 되읽어 payload 의 빈 필드를 채운다. 값을 채우는 것 자체는 유용하다.
+문제는 **출처 라벨**이었다: 값의 실제 유래가 아니라 **문자열 모양**만 보고
+
+    asil 이 placeholder 가 아니다        → `sds`   (0.95)
+    related 가 `SwFn_\\d+` 모양이다       → `srs`   (0.95)
+    related 가 `SwCom_\\d+` 모양이다      → `rule`  (0.75)
+    그 외                                → `reference` (0.90)
+
+를 붙였다. `SwFn_07` 이라는 **문자열 모양**은 "SRS 를 참조했다"는 증거가 아니다.
+
+실측 — 같은 payload(진짜 유래 `default`/`inference`)에 생성 DOCX 만 물렸을 때:
+
+    항목                    DOCX 미지정      DOCX 되읽음
+    ---------------------  --------------   --------------
+    ASIL 출처              기본값(근거 없음)  SDS
+    Related 출처           추론              SRS
+    점수 / 등급            0.500 / D        0.933 / B
+    저신뢰 목록            1건 노출          **none**
+    "정본 문서 근거"        0 / 1 (0%)       **1 / 1 (100%)**
+    증거 문장              (없음)            "SDS 매핑 규칙에 의해 보강됨"
+
+마지막 두 줄이 특히 나쁘다. 이 리포트의 **용도 자체가** "어느 필드가 근거가 약한가" 인데,
+세탁된 행은 조치 대상 목록에서 사라지고 없는 증거 문장까지 붙는다.
+
+수정: 생성 문서에서 회수한 값은 전부 `generated_doc`(0.30, "생성 문서 회수(원 유래 불명)").
+모양 기반 분류는 제거. 값을 실제로 가져오지 않았으면 출처도 바꾸지 않는다.
+"""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+MODULE = Path(__file__).resolve().parents[2] / "report_gen" / "validation.py"
+
+# 생성 DOCX 가 담고 있는 값. 유래는 오직 "우리 출력물" 이다.
+DOC_ROW = {
+    "id": "SwUFn_07",
+    "name": "Ecu_HandleFault",
+    "description": "Handles the ECU fault state transition.",
+    "asil": "D",
+    "related": "SwFn_07",
+}
+
+# payload 의 진짜 유래는 약하다: 값 없음 + default/inference.
+WEAK_PAYLOAD = {
+    "function_details_by_name": {
+        "ecu_handlefault": {
+            "id": "SwUFn_07",
+            "name": "Ecu_HandleFault",
+            "description": "",
+            "description_source": "inference",
+            "asil": "",
+            "asil_source": "default",
+            "related": "",
+            "related_source": "inference",
+        }
+    }
+}
+
+
+class _FakeDoc:
+    """`docx.Document()` 반환 스텁 — 실제 파싱은 추출기 스텁이 대신한다."""
+
+
+@pytest.fixture
+def report(tmp_path, monkeypatch):
+    """리포트를 생성해 본문을 돌려준다.
+
+    `doc_row=None` 이면 `generated_docx_path` 를 넘기지 않는다(= 대조군).
+    """
+
+    def _run(payload, doc_row=DOC_ROW, name="conf"):
+        from report_gen.validation import generate_asil_related_confidence_report
+
+        out = tmp_path / f"{name}.md"
+        if doc_row is None:
+            generate_asil_related_confidence_report(payload, str(out))
+            return out.read_text(encoding="utf-8")
+
+        fake_docx = tmp_path / f"{name}.docx"
+        fake_docx.write_bytes(b"stub")
+        monkeypatch.setattr("docx.Document", lambda *_a, **_k: _FakeDoc())
+        monkeypatch.setattr(
+            "report_gen.validation._extract_function_info_from_docx",
+            lambda _doc: {doc_row["id"]: dict(doc_row)},
+        )
+        generate_asil_related_confidence_report(payload, str(out), str(fake_docx))
+        return out.read_text(encoding="utf-8")
+
+    return _run
+
+
+def _score(text: str) -> float:
+    for line in text.splitlines():
+        if "Overall confidence score" in line:
+            return float(line.split("`")[1])
+    raise AssertionError("점수 줄을 찾지 못했다")
+
+
+def _section(text: str, title: str) -> list[str]:
+    out, hit = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            hit = line[3:].strip() == title
+            continue
+        if hit and line.strip():
+            out.append(line.strip())
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 핵심 — 자기 산출물 되읽기가 점수를 올리면 안 된다
+# ---------------------------------------------------------------------------
+
+class TestSelfReadDoesNotInflate:
+    def test_score_does_not_exceed_control(self, report):
+        """대조군(DOCX 미지정)보다 높아지면 그 차이는 전부 세탁분이다."""
+        control = _score(report(WEAK_PAYLOAD, doc_row=None, name="ctl"))
+        laundered = _score(report(WEAK_PAYLOAD, name="doc"))
+        assert laundered <= control, (
+            f"자기 산출물을 되읽었다는 이유만으로 {control:.3f} → {laundered:.3f} 로 올랐다"
+        )
+
+    def test_grade_does_not_improve(self, report):
+        control = report(WEAK_PAYLOAD, doc_row=None, name="ctl")
+        laundered = report(WEAK_PAYLOAD, name="doc")
+        assert "grade: `B`" not in laundered and "grade: `A`" not in laundered
+        assert "grade: `D`" in control
+
+    @pytest.mark.parametrize("section", ["ASIL Source", "Related ID Source", "Description Source"])
+    def test_no_canonical_label_invented(self, report, section):
+        """SDS / SRS / 레퍼런스 / 룰 — 어느 것도 자기 문서 회수에 붙어선 안 된다."""
+        lines = _section(report(WEAK_PAYLOAD, name="doc"), section)
+        joined = " ".join(lines)
+        for forbidden in ("SDS", "SRS", "레퍼런스", "룰"):
+            assert f"- {forbidden}:" not in joined, f"{section} 에 '{forbidden}' 이 날조됐다: {joined}"
+
+    def test_labeled_as_generated_doc(self, report):
+        lines = " ".join(_section(report(WEAK_PAYLOAD, name="doc"), "ASIL Source"))
+        assert "생성 문서 회수" in lines, lines
+
+
+# ---------------------------------------------------------------------------
+# 모양 기반 출처 날조
+# ---------------------------------------------------------------------------
+
+class TestIdShapeIsNotEvidence:
+    @pytest.mark.parametrize(
+        ("related", "forbidden"),
+        [("SwFn_07", "SRS"), ("SwTR_0608", "SRS"), ("SwCom_03", "룰"), ("무언가 다른 값", "레퍼런스")],
+    )
+    def test_shape_does_not_choose_source(self, report, related, forbidden):
+        row = dict(DOC_ROW, related=related)
+        lines = " ".join(_section(report(WEAK_PAYLOAD, doc_row=row, name="s"), "Related ID Source"))
+        assert f"- {forbidden}:" not in lines, (
+            f"related='{related}' 의 문자열 모양만 보고 '{forbidden}' 출처를 지어냈다: {lines}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 리포트의 용도 자체가 무너지던 두 표면
+# ---------------------------------------------------------------------------
+
+class TestActionableSurfacesSurvive:
+    def test_stays_in_low_confidence_list(self, report):
+        """세탁되면 조치 대상 목록에서 사라진다 — 이 리포트의 존재 이유가 사라진다."""
+        lines = _section(report(WEAK_PAYLOAD, name="doc"), "Low Confidence Samples")
+        assert lines and lines != ["- none"], "저신뢰 목록이 비었다 — 회수 행이 조치 대상에서 빠졌다"
+        assert "ecu_handlefault" in " ".join(lines)
+
+    def test_excluded_from_canonical_doc_count(self, report):
+        text = report(WEAK_PAYLOAD, name="doc")
+        line = next(ln for ln in text.splitlines() if "Related canonical(doc-backed)" in ln)
+        assert "(0.0%)" in line, f"자기 문서 회수가 '정본 문서 근거' 로 집계됐다: {line.strip()}"
+
+    def test_no_fabricated_sds_evidence_sentence(self, report):
+        text = report(WEAK_PAYLOAD, name="doc")
+        assert "SDS 매핑 규칙에 의해 보강됨" not in text
+        assert "SRS 요구사항 ID/ASIL 추출 규칙에 의해 보강됨" not in text
+
+    def test_evidence_sentence_states_unknown_origin(self, report):
+        text = report(WEAK_PAYLOAD, name="doc")
+        assert "원 유래 미확인" in text, "회수 사실을 증거 문장이 밝히지 않는다"
+
+
+# ---------------------------------------------------------------------------
+# 분기 1 — payload 가 아예 비었을 때의 전면 재구축
+# ---------------------------------------------------------------------------
+
+class TestFullRebuildBranch:
+    def test_rebuild_is_also_labeled_generated_doc(self, report):
+        text = report({}, name="rb")
+        assert "- Total functions: `1`" in text, "재구축 분기가 발동하지 않았다(측정 전제 붕괴)"
+        for section in ("ASIL Source", "Related ID Source", "Description Source"):
+            assert "생성 문서 회수" in " ".join(_section(text, section)), section
+
+    def test_rebuild_score_is_not_high(self, report):
+        assert _score(report({}, name="rb")) <= 0.60
+
+
+# ---------------------------------------------------------------------------
+# 값을 안 가져왔으면 출처도 안 바꾼다
+# ---------------------------------------------------------------------------
+
+class TestSourceUnchangedWhenValueKept:
+    def test_description_source_kept_when_payload_text_survives(self, report):
+        """예전엔 값을 그대로 두고 `description_source` 만 `reference` 로 올렸다."""
+        payload = {
+            "function_details_by_name": {
+                "ecu_handlefault": {
+                    "id": "SwUFn_07",
+                    "name": "Ecu_HandleFault",
+                    # 구체적인 문장이라 _is_generic_description 에 걸리지 않는다 → 값 유지
+                    "description": "Latches the fault flag and reports it to the diagnostic manager.",
+                    "description_source": "inference",
+                    "asil": "D",
+                    "asil_source": "comment",
+                    "related": "SwFn_07",
+                    "related_source": "comment",
+                }
+            }
+        }
+        lines = " ".join(_section(report(payload, name="keep"), "Description Source"))
+        assert "- 추론:" in lines, f"값을 안 바꿨는데 출처가 승격됐다: {lines}"
+
+
+# ---------------------------------------------------------------------------
+# 음성 대조군 — 정당한 강한 출처는 보존돼야 한다
+# ---------------------------------------------------------------------------
+
+class TestLegitimateSourcePreserved:
+    def test_payload_sds_survives_docx_merge(self, report):
+        payload = {
+            "function_details_by_name": {
+                "ecu_handlefault": {
+                    "id": "SwUFn_07",
+                    "name": "Ecu_HandleFault",
+                    "description": "Handles the ECU fault state transition in the safety monitor.",
+                    "description_source": "sds",
+                    "asil": "A",
+                    "asil_source": "sds",
+                    "related": "SwTR_0608",
+                    "related_source": "sds",
+                }
+            }
+        }
+        text = report(payload, name="legit")
+        assert "- SDS: `1` / `1` (100.0%)" in text, "정당한 SDS 출처가 회수 라벨에 덮였다"
+        assert _score(text) >= 0.95
+
+
+# ---------------------------------------------------------------------------
+# 어휘 계약
+# ---------------------------------------------------------------------------
+
+class TestVocabulary:
+    def test_generated_doc_is_a_known_source(self, report):
+        text = report(WEAK_PAYLOAD, name="voc")
+        assert "분류 불가 출처값" not in text, "generated_doc 이 미지값으로 접힌다"
+
+    def test_generated_doc_scores_no_higher_than_inference(self):
+        """자기 문서 회수가 추론보다 높으면 되읽기가 이득이 된다 — 그러면 안 된다."""
+        import report_gen.validation as V
+
+        src = MODULE.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        scores = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+            # ⚠ `src_labels` 도 같은 키를 갖는다(문자열 값). 값이 **수치**인 표만 잡는다 —
+            #   조이지 않으면 라벨 표를 먼저 집어 KeyError 로 죽는다(이 테스트가 실제로 겪었다).
+            numeric = all(
+                isinstance(v, ast.Constant) and isinstance(v.value, (int, float))
+                for v in node.values
+            )
+            if numeric and {"inference", "generated_doc", "comment"} <= set(keys):
+                scores = {
+                    str(k.value): float(v.value)
+                    for k, v in zip(node.keys, node.values)
+                    if isinstance(k, ast.Constant)
+                    and isinstance(v, ast.Constant)
+                    and isinstance(v.value, (int, float))
+                }
+                break
+        assert scores is not None, "src_score 테이블을 찾지 못했다"
+        assert scores["generated_doc"] <= scores["inference"]
+        assert V is not None
+
+
+# ---------------------------------------------------------------------------
+# 구조 계약 — 모양→출처 분류가 되살아나지 않게
+# ---------------------------------------------------------------------------
+
+class TestNoShapeBasedSourceAssignment:
+    def test_no_regex_shape_branch_assigns_canonical_source(self):
+        """`re.search(...SwFn...)` 결과로 `srs`/`rule`/`sds` 를 배정하는 구조가 없어야 한다.
+
+        AST 로 본다 — 주석이나 문자열 안의 언급은 세지 않는다.
+        """
+        tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "generate_asil_related_confidence_report"
+        )
+        offenders = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.If):
+                continue
+            test_src = ast.dump(node.test)
+            if "re" not in test_src or "search" not in test_src:
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Constant) and sub.value in {"srs", "sds", "rule", "reference"}:
+                    offenders.append(sub.value)
+        assert not offenders, f"모양 기반 출처 배정이 남아 있다: {sorted(set(offenders))}"
