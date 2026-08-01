@@ -2006,9 +2006,14 @@ def generate_uds_docx(
             if inherited:
                 finfo["asil"] = inherited
                 finfo["asil_source"] = "module_inherit"
-            else:
-                finfo["asil"] = "QM"
-                finfo["asil_source"] = "default"
+            # ⚠ 예전엔 여기 `else: asil="QM"; asil_source="default"` 가 있었다. 지웠다.
+            #   모듈 상속조차 못 찾았다는 건 **아무 근거도 없다**는 뜻이다. 그 상태를
+            #   `QM`(안전 관련 아님)으로 적으면 근거의 부재가 등급 주장으로 둔갑한다.
+            #   값을 지어내지 않는다 — 없으면 없는 대로, `TBD` 면 `TBD` 로 둔다.
+            #   ⚠ 이 else 를 되살리면 상류(`requirements.py`)에서 같은 이유로 지운
+            #   지어내기가 **여기서 다시 채워져** 상류 수정이 통째로 no-op 이 된다.
+            #   네 사이트(`requirements.py`·여기·`function_analyzer.py`·`helpers/uds.py`)는
+            #   한 세트다.
 
     def _resolve_related_asil_desc(
         info: Dict[str, Any],
@@ -2101,8 +2106,15 @@ def generate_uds_docx(
                 info["related_source"] = "inference"
         # 값을 **비우면서** 출처를 "추론" 이라고 적으면, 아무것도 없는 칸이 근거 0.60 을
         # 받는다. 근거가 없어서 비운 것이므로 `default`(근거 없음, 0.30)가 사실이다.
+        # ⚠ 예전엔 여기서 `info["asil"] = ""` 로 **TBD 를 지웠다**. 값 대입을 뺐다.
+        #   "미정"(TBD)과 "아예 없음"(빈칸)은 다른 상태다. 게다가 이 blanking 은
+        #   같은 함수 끝(`:2505`)의 `UDS TBD residual` 경고가 세는 바로 그 값을
+        #   **세기 전에 지워서**, `asil_tbd` 가 구조적으로 항상 0 이었다 —
+        #   경고가 발화할 수 없는 잔량 카운터였다.
+        #   출처 라벨은 유지한다: 값이 없으면 근거도 없으므로 `default`(0.30, 최약체)가
+        #   사실이다(`inference` 0.60 을 주면 빈 칸이 추론 대접을 받는다).
         if (not info.get("asil")) or str(info.get("asil")).strip() in {"", "TBD"}:
-            info["asil"] = ""
+            info["asil"] = str(info.get("asil") or "").strip()
             info["asil_source"] = "default"
         if (not info.get("related")) or str(info.get("related")).strip() in {"", "TBD"}:
             info["related"] = ""

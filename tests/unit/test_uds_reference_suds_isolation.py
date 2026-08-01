@@ -199,16 +199,20 @@ class TestFieldClassSplit:
     def test_foreign_reference_cannot_set_related_id(self, gen):
         """핵심 — 다른 프로젝트 참조는 Related ID 를 채우지 못한다.
 
-        ⚠ 실측으로 확인한 것: **실제로 유출되던 축은 `related`** 다. `asil` 은 이 병합
-        지점 **이전**에 이미 `QM`(source=default)으로 채워져 있어 참조가 닿지 못한다
-        (별건으로 기록 — §D3). `related` 는 그런 기본값이 없어 참조 값이 그대로 들어왔다.
+        ⚠ 2026-07-31 갱신 — 예전 이 docstring 은 *"실제로 유출되던 축은 `related`
+        뿐이고 `asil` 은 병합 이전에 이미 `QM`(source=default)으로 채워져 참조가
+        닿지 못한다(§D3)"* 라고 적었다. 그 선행 `QM` 지어내기를 **제거**했으므로
+        (`tests/unit/test_asil_no_fabrication.py`) 이제 `asil` 축도 병합 자격을
+        얻는다 → 신원 게이트가 **실제로** 두 축 다 막는다(1건 → 2건).
+        차단 수가 는 것은 과대계상이 아니라 **게이트가 비로소 일을 하는 것**이다.
 
         뮤테이션: 루프의 `if not _ref_safety_ok: ... continue` 를 지우면 실패.
         """
         info, rs = gen(project_name="KJPDS02_PV",
                        ref_block={"asil": "A", "related": "SwFn_99"})
         assert "SwFn_99" not in str(info.get("related") or "")
-        assert rs["safety_fields_blocked"] == 1
+        assert str(info.get("asil") or "").upper() != "A", "남의 프로젝트 등급이 들어왔다"
+        assert rs["safety_fields_blocked"] == 2
         assert rs["safety_fields_applied"] == 0
         assert rs["identity"]["same_project"] is False
 
@@ -216,25 +220,58 @@ class TestFieldClassSplit:
         """신원 판정 불가도 차단 — '확인 못 함' 은 '같은 프로젝트' 가 아니다."""
         info, rs = gen(project_name="", ref_block={"asil": "A", "related": "SwFn_99"})
         assert "SwFn_99" not in str(info.get("related") or "")
-        assert rs["safety_fields_blocked"] == 1
+        assert rs["safety_fields_blocked"] == 2
         assert rs["identity"]["same_project"] is None
 
     def test_same_project_reference_still_fills_related(self, gen):
-        """음성 대조군 — 본인 프로젝트 참조의 정당한 보강까지 죽이면 안 된다."""
+        """음성 대조군 — 본인 프로젝트 참조의 정당한 보강까지 죽이면 안 된다.
+
+        ⚠ 2026-07-31 — `asil` 도 여기서 들어온다. 예전엔 병합 이전 `QM` 지어내기가
+        칸을 선점해 **참조의 ASIL 이 영영 적용되지 않았다**(§D3 로 기록돼 있던 결함).
+        지어내기를 제거하니 병합 규칙을 하나도 안 바꾸고 그 결함이 풀렸다 —
+        그리고 자격 판정은 여전히 "값이 비었/TBD 인가" 라서 **실등급 하향 경로는
+        열리지 않는다**(`test_existing_value_is_never_overwritten` 참조).
+        """
         info, rs = gen(project_name="HDPDM01_PDS64_RD",
                        ref_block={"asil": "C", "related": "SwFn_12"})
         assert info["related"] == "SwFn_12"
-        assert rs["safety_fields_applied"] == 1
+        assert info["asil"] == "C", "자기 프로젝트 SUDS 의 ASIL 이 아직도 못 들어온다"
+        assert rs["safety_fields_applied"] == 2
         assert rs["safety_fields_blocked"] == 0
+
+    def test_invalid_asil_from_reference_is_rejected(self, gen):
+        """참조 파싱이 어긋나 **프로토타입 문자열**이 ASIL 칸에 온 경우.
+
+        실측된 실물: `asil = 'void s_Init_SystemManagementFunc( void )'`.
+        그게 등급으로 굳으면 ISO 26262 판정 자체가 무의미해진다.
+
+        ⚠ 신원이 **확인된** 프로젝트로 관측한다. 남의 프로젝트로 보면 신원 게이트가
+        먼저 막아 어휘 검사가 있는지 없는지 알 수 없다 — 실제로 그래서 뮤테이션
+        (`_VALID_ASIL` 검사 제거)이 **생존**했다. 기존 테스트는 상수 집합만 보는
+        판정 복제였고, 이 파일 docstring 이 경고하던 바로 그 실패 모드다.
+        """
+        info, rs = gen(project_name="HDPDM01_PDS64_RD",
+                       ref_block={"asil": "void s_Init_SystemManagementFunc( void )",
+                                  "related": "SwFn_12"})
+        assert info["asil"] != "void s_Init_SystemManagementFunc( void )"
+        assert str(info.get("asil") or "").upper() in {"", "TBD"}
+        assert rs["invalid_asil_rejected"] == 1
+        assert rs["safety_fields_applied"] == 1, "related 만 적용돼야 한다"
 
     def test_blocked_count_does_not_overstate(self, gen):
         """막았다고 셀 수 있는 건 **실제로 적용됐을** 값뿐이다.
 
-        `asil` 은 어차피 적용 대상이 아니었으므로(선행 기본값 `QM`) 차단으로 세면
-        막은 양이 부풀려진다. 판정 순서를 신원-우선으로 되돌리면 2가 되어 실패한다.
+        판정 순서는 `적용 자격 → 값 유효성 → 신원` 이다. 신원을 맨 앞으로 되돌리면
+        **어차피 적용되지 않았을 시도까지** 차단으로 세어 막은 양이 부풀려진다.
+
+        ⚠ 2026-07-31 — 예전엔 "선행 `QM` 기본값 때문에 `asil` 이 적용 대상이 아니다"
+        로 이걸 관측했는데, 그 지어내기를 제거해 이제 빈 `asil` 은 정당한 적용
+        대상이다. 그래서 관측 방법을 바꿨다: 대상이 **이미 실제 등급을 가진** 경우로
+        본다. 그 칸은 자격 단계에서 걸러지므로 차단으로 세면 안 된다(related 만 1건).
         """
         _info, rs = gen(project_name="KJPDS02_PV",
-                        ref_block={"asil": "A", "related": "SwFn_99"})
+                        ref_block={"asil": "A", "related": "SwFn_99"},
+                        target_overrides={"asil": "D"})
         assert rs["safety_fields_blocked"] == 1, "적용 불가한 시도까지 차단으로 셌다"
 
     def test_descriptive_fields_pass_even_for_foreign_reference(self, gen):
@@ -282,7 +319,7 @@ class TestFieldClassSplit:
         from report_gen.docx_builder import gen_stats_path
         gen(project_name="KJPDS02_PV", ref_block={"asil": "A", "related": "SwFn_99"})
         side = json.loads(gen_stats_path(str(tmp_path / "out.docx")).read_text(encoding="utf-8"))
-        assert side["reference_suds"]["safety_fields_blocked"] == 1
+        assert side["reference_suds"]["safety_fields_blocked"] == 2
         assert side["reference_suds"]["identity"]["reason"] == "token_mismatch"
 
 

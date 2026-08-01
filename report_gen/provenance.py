@@ -59,14 +59,40 @@ WEAK_SOURCES = frozenset(
 # 약함/강함을 가르는 점수 경계. `rule`(0.75)까지가 약함, `call_graph`(0.80)부터 강함.
 WEAK_SCORE_MAX = 0.75
 
+# 같은 뜻의 다른 표기. **점수·약함 판정 모두 이 표를 거친 뒤에 한다.**
+#
+# ⚠ 2026-07-31 실측 — 이 표가 `validation.py` 지역 변수(`_src_aliases`)로만 있었고
+#   `WEAK_SOURCES` 는 별칭을 몰랐다. 그래서 `srs_default_qm` 이
+#   **점수는 0.30(최약체)인데 `is_weak_source()` 는 강함**이라고 답했다 —
+#   더 나은 근거(주석 `@asil` 1.00, SDS 0.95)가 와도 그 칸을 덮지 못했다.
+#   커밋 6e53bba(`generated_doc`)가 막으려던 갈라짐이 **별칭 축에서 재발**한 것이고,
+#   그걸 지키는 가드는 `src_score` 리터럴만 AST 로 읽어 별칭을 구조적으로 못 봤다.
+#   그래서 표를 여기로 올리고 `validation.py` 가 이걸 가져다 쓴다.
+#
+# `srs_default_qm` 은 생산자가 사라졌지만(근거 없는 QM 지어내기를 제거했다) **남긴다** —
+# 디스크의 옛 payload 가 아직 이 라벨을 달고 있어 재처리 시 판정 대상이 된다.
+SOURCE_ALIASES = {
+    "sds_match": "sds",
+    "hsis": "sds",
+    "srs_default_qm": "default",   # SRS 에 없어서 QM 기본 — 기본값이다 (legacy payload 전용)
+}
+
+
+def canonical_source(src: Any) -> str:
+    """별칭을 정본 라벨로 접는다. 어휘에 없으면 소문자 정규화만 해서 돌려준다."""
+    s = str(src or "").strip().lower()
+    return SOURCE_ALIASES.get(s, s)
+
 
 def is_weak_source(src: Any) -> bool:
     """이 출처를 더 나은 근거로 덮어써도 되는가.
 
     ⚠ 하드코딩된 집합 리터럴로 이 판정을 재현하지 말 것 — 새 라벨이 생길 때 한쪽만
     갱신되어 조용히 갈라진다(이 모듈이 생긴 이유).
+    ⚠ **별칭을 먼저 접는다.** 안 접으면 `srs_default_qm`(=`default`, 0.30) 같은
+    최약체가 "어휘에 없음 → 강함" 으로 분류된다(2026-07-31 실측 회귀).
     """
-    return str(src or "").strip().lower() in WEAK_SOURCES
+    return canonical_source(src) in WEAK_SOURCES
 
 
 def unrecorded_source(value: Any, *, generic: bool = False) -> str:

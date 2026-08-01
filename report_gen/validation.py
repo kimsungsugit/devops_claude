@@ -24,6 +24,7 @@ from report_gen.function_analyzer import (
     _is_generic_description,
     _classify_description_quality,
 )
+from report_gen.provenance import SOURCE_ALIASES
 from report_gen.requirements import _extract_function_info_from_docx
 from report_gen.utils import _extract_call_names, _safe_dict
 
@@ -1439,11 +1440,11 @@ def generate_asil_related_confidence_report(
         # 어휘에 없는 값. 조용히 '추론' 으로 접지 않는다 — 모른다는 사실 자체가 정보다.
         "unknown": 0.30,
     }
-    _src_aliases = {
-        "sds_match": "sds",
-        "hsis": "sds",
-        "srs_default_qm": "default",   # SRS 에 없어서 QM 기본 — 기본값이다
-    }
+    # ⚠ 별칭 표는 `report_gen/provenance.py::SOURCE_ALIASES` 단일 출처다.
+    #   여기 리터럴로 다시 적으면 `is_weak_source()` 와 갈라진다 — 실제로 갈라져서
+    #   `srs_default_qm` 이 **점수 0.30(최약체)인데 판정은 강함**이 됐고, 더 나은
+    #   근거가 그 칸을 못 덮었다(2026-07-31).
+    _src_aliases = dict(SOURCE_ALIASES)
     # 미지값을 모아 보고서에 노출한다(어휘 드리프트를 조용히 흡수하지 않는다).
     unknown_src_values: Dict[str, int] = {}
 

@@ -301,7 +301,14 @@ class TestVocabulary:
 # ---------------------------------------------------------------------------
 
 def _src_score_table() -> dict[str, float]:
-    """`validation.py::src_score` 를 AST 로 읽는다(import 부작용 없이)."""
+    """`validation.py::src_score` 를 AST 로 읽고 **별칭까지 펼친다**(import 부작용 없이).
+
+    ⚠ 2026-07-31 — 이 함수가 `src_score` **리터럴 dict 만** 읽어서 별칭
+    (`_src_aliases`)을 구조적으로 못 봤다. 그 결과 아래 세 계약 테스트가
+    `srs_default_qm`(점수 0.30 = 최약체, 판정은 강함)이라는 실제 갈라짐을
+    **3 passed 로 통과**시켰다 — 가드 자신이 fail-open 이었다.
+    별칭을 대상 라벨의 점수로 펼쳐 넣어 같은 사각이 재발하지 않게 한다.
+    """
     tree = ast.parse(MODULE.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Dict) or not node.keys:
@@ -313,14 +320,62 @@ def _src_score_table() -> dict[str, float]:
             continue
         keys = {k.value for k in node.keys if isinstance(k, ast.Constant)}
         if {"comment", "inference", "default"} <= keys:
-            return {
+            table = {
                 str(k.value): float(v.value)
                 for k, v in zip(node.keys, node.values)
                 if isinstance(k, ast.Constant)
                 and isinstance(v, ast.Constant)
                 and isinstance(v.value, (int, float))
             }
+            from report_gen.provenance import SOURCE_ALIASES
+
+            for alias, target in SOURCE_ALIASES.items():
+                if target in table:
+                    table[alias] = table[target]
+            return table
     raise AssertionError("src_score 표를 찾지 못했다")
+
+
+def test_contract_table_covers_alias_labels():
+    """계약 테이블이 **별칭 라벨 자체**를 담아야 한다.
+
+    ⚠ 뮤테이션에서 드러났다: `_src_score_table()` 의 별칭 확장을 지워도 아래
+    세 계약 테스트가 전부 통과한다(생존). 확장이 **자기 자신을 지키지 못하는**
+    것이다 — 그러면 `is_weak_source()` 가 별칭 인식을 잃는 순간 가드가 다시
+    공허 통과로 돌아간다(이번 회귀가 정확히 그 상태였다). 여기서 직접 못박는다.
+    """
+    from report_gen.provenance import SOURCE_ALIASES
+
+    table = _src_score_table()
+    missing = sorted(a for a in SOURCE_ALIASES if a not in table)
+    assert not missing, f"계약 테이블이 별칭 라벨을 못 본다: {missing}"
+
+
+def test_every_alias_target_has_a_score():
+    """별칭이 가리키는 정본 라벨은 점수표에 있어야 한다.
+
+    없으면 `src_score.get(..., 0.6)` 로 조용히 접혀, 최약체(0.30)든 최강자(1.00)든
+    전부 '추론' 자리인 0.60 을 받는다.
+    """
+    from report_gen.provenance import SOURCE_ALIASES
+
+    scores = _src_score_table()
+    missing = sorted(t for t in set(SOURCE_ALIASES.values()) if t not in scores)
+    assert not missing, f"별칭 대상인데 점수가 없다: {missing}"
+
+
+def test_validation_does_not_redeclare_the_alias_table():
+    """별칭 표는 `provenance.SOURCE_ALIASES` 단일 출처다 — 리터럴 재선언 금지.
+
+    복제되면 `is_weak_source()` 와 점수표가 다시 갈라진다(이번 회귀의 원인).
+    """
+    tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+    offenders = [
+        n.lineno for n in ast.walk(tree)
+        if isinstance(n, ast.Dict) and n.keys
+        and {k.value for k in n.keys if isinstance(k, ast.Constant)} & {"sds_match", "hsis"}
+    ]
+    assert not offenders, f"validation.py:{offenders} 에 별칭 표가 다시 리터럴로 적혔다"
 
 
 class TestWeakSourceTableAgreesWithScores:

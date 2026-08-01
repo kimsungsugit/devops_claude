@@ -450,7 +450,12 @@ class TestFunctionAnalyzerHelpers:
             "calling": "",
         }
         result = _finalize_function_fields(info)
-        assert result["asil"] == "QM"
+        # ⚠ 2026-07-31: 예전엔 `"QM"` 을 기대했다. 근거가 없을 때 QM(= 안전 관련 아님)을
+        #   지어내던 동작을 지웠다 — 근거의 부재를 등급 주장으로 바꾸지 않는다.
+        #   `related`/`precondition` 의 자리표시자는 안전 판정이 아니라 서식이라 유지한다.
+        assert result["asil"] == ""
+        assert not str(result.get("asil_source") or "").strip(), (
+            "값을 채우지 않았는데 출처를 적었다 — 없는 근거를 기록한 것이다")
         assert result["related"] == "TBD"
         assert result["precondition"] == "N/A"
         assert isinstance(result["inputs"], list)

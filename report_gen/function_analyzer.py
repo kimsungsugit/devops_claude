@@ -1017,10 +1017,15 @@ def _finalize_function_fields(info: Dict[str, Any]) -> Dict[str, Any]:
             )
             out["description_source"] = out.get("description_source") or "inference"
         out["description"] = desc_enhanced
-    if not str(out.get("asil") or "").strip():
-        out["asil"] = "QM"
-        out["asil_source"] = out.get("asil_source") or "default"
-    out["asil"] = _normalize_asil_value(str(out.get("asil") or ""))
+    # ⚠ 예전엔 `if not asil: asil="QM"; asil_source="default"` 였다. 지웠다 —
+    #   근거의 부재를 등급 주장으로 바꾸지 않는다(`docx_builder._inherit_module_asil` 참조).
+    # ⚠ 정규화 결과를 **무조건 대입**하던 것도 고쳤다. `_normalize_asil_value` 는
+    #   `"TBD"`/`"N/A"`/`"-"` 를 빈 문자열로 접는다(계약: `tests/unit/test_report_gen.py:79`).
+    #   순위 비교(`requirements.py:2237`)에선 그게 맞지만, 값 칸에 그대로 대입하면
+    #   **"미정"(TBD)과 "아예 없음"(빈칸)이 같은 것이 된다.** 정규화는 값을 다듬는
+    #   것이지 지우는 게 아니므로, 등급을 못 뽑으면 원래 표기를 보존한다.
+    _asil_norm = _normalize_asil_value(str(out.get("asil") or ""))
+    out["asil"] = _asil_norm if _asil_norm else str(out.get("asil") or "").strip()
     if not str(out.get("related") or "").strip():
         out["related"] = "TBD"
         out["related_source"] = out.get("related_source") or "inference"

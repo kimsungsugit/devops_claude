@@ -404,13 +404,15 @@ def _enrich_function_quality_fields(uds_payload: Dict[str, Any]) -> None:
             # ⚠ 예전엔 여기서 `asil_source` 를 inference → rule 로 **승격**했다.
             # 한 일은 `"asil d"` → `"D"` 정규화뿐인데 근거 등급이 0.60 → 0.75 로 올랐다.
             # **정규화는 새 근거가 아니다.** 출처는 원래 값을 그대로 둔다.
-        else:
-            # 명시적 ASIL 매핑이 없어 QM 으로 보수적 기본값을 쓴다.
-            # ⚠ 예전엔 이걸 `"rule"`(0.75)로 적었다 — 근거가 **없어서** 기본값을 쓴 건데
-            # 실제 규칙 유도보다 높은 등급을 받았다. 기본값은 기본값이라고 적는다.
-            # (`report_gen/validation.py` 의 출처 어휘가 `default` 를 최저 등급으로 안다)
-            info["asil"] = "QM"
-            info["asil_source"] = "default"
+        # ⚠ 예전엔 `else: asil="QM"; asil_source="default"` 였다. 지웠다.
+        #   주석은 이걸 "보수적 기본값" 이라 불렀지만 **방향이 거꾸로다** — ISO 26262 에서
+        #   QM 은 **최저** 등급(안전 요구 면제)이라, 모르는 것을 QM 으로 적는 건 보수가
+        #   아니라 under-classification 이다. 보수는 상향이지 하향이 아니다.
+        #   `_normalize_asil_simple` 은 `TBD`/`N/A`/`-`/미인식 문자열을 전부 빈 값으로
+        #   접으므로(실측), 여기서 **대입하지 않는 것**이 곧 "없으면 없는 대로, TBD 면
+        #   TBD" 를 지키는 길이다. 원래 표기를 그대로 둔다.
+        #   ⚠ 이 else 를 되살리면 `requirements.py`·`docx_builder.py`·`function_analyzer.py`
+        #   에서 같은 이유로 지운 지어내기가 여기서 되살아난다 — 네 곳은 한 세트다.
         if _is_blank_value(info.get("related") or info.get("related_id") or info.get("related_ids")):
             inferred_related = _infer_related_id_simple(info)
             if inferred_related:

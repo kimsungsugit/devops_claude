@@ -143,14 +143,31 @@ class TestNoEvidenceFreePromotion:
         assert out["asil"] == "D"                      # 값은 정규화된다
         assert out["asil_source"] == "inference"       # 출처는 그대로 — 정규화는 근거가 아니다
 
-    def test_missing_asil_is_labelled_default_not_rule(self):
-        out = self._run({"name": "f", "asil": "", "asil_source": "inference"})
-        assert out["asil"] == "QM"
-        assert out["asil_source"] == "default", "근거가 없어 쓴 기본값을 '룰' 로 적었다"
+    def test_missing_asil_is_not_fabricated(self):
+        """⚠ 2026-07-31 로 불변식이 **강해졌다**.
 
-    def test_no_source_at_all_is_default(self):
+        예전 계약은 "근거 없이 채운 QM 은 `rule`(0.75) 이 아니라 `default`(0.30) 로
+        적어라" 였다 — 라벨만 정직해지고 **값은 여전히 지어냈다**. 이제는 아예 채우지
+        않는다: `QM` 은 ISO 26262 에서 "안전 요구 면제" 라는 실질 주장이라, 근거의
+        부재를 그걸로 바꾸면 under-classification 이다.
+
+        옛 승격 회귀(`rule` 로 적기)도 계속 막는다 — 아래 두 번째 단언.
+        """
+        out = self._run({"name": "f", "asil": "", "asil_source": "inference"})
+        assert out["asil"] == "", "근거가 없는데 등급을 지어냈다"
+        assert out["asil_source"] == "inference", (
+            "아무 일도 안 했는데 출처를 바꿨다 — 정규화도 승격도 근거가 아니다")
+
+    def test_no_source_at_all_stays_unset(self):
         out = self._run({"name": "f", "asil": ""})
-        assert out["asil_source"] == "default"
+        assert out["asil"] == ""
+        assert not str(out.get("asil_source") or "").strip(), (
+            "채운 값이 없는데 출처를 발명했다")
+
+    def test_tbd_is_preserved_not_blanked(self):
+        """"없음" 과 "미정" 은 다른 상태다 — 접으면 구분이 사라진다."""
+        out = self._run({"name": "f", "asil": "TBD"})
+        assert out["asil"] == "TBD"
 
     def test_strong_source_is_preserved(self):
         """대조군 — 실제 문서 유래 출처를 깎아내리면 안 된다."""

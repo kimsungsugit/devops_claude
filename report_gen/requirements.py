@@ -1609,6 +1609,19 @@ def enrich_function_details_with_docs(
                     info["asil"] = asil
                     info["asil_source"] = "srs"
                     break
+        # ⚠ 예전엔 여기서 `asil="QM"; asil_source="srs_default_qm"` 을 썼다. 지웠다.
+        #   "SRS 요구에 매칭됐는데 **그 요구에 ASIL 이 안 적혀 있다**" 는 근거의 **부재**인데,
+        #   그걸 `QM`(= 안전 관련 아님)이라는 **실질 주장**으로 바꿔 적은 것이었다.
+        #   ISO 26262 에서 QM 은 안전 요구가 면제된다는 뜻이라, 침묵을 등급으로 굳히면
+        #   under-classification 이 된다. 게다가 실측(2026-07-31)에서 이 라벨은
+        #   점수표(`validation.py::_src_aliases`)가 `default`(0.30, 최약체)로 접는데
+        #   `provenance.WEAK_SOURCES` 엔 없어서 `is_weak_source()` 는 **강한 출처**로
+        #   답했다 — 그래서 더 나은 근거(주석 `@asil`=1.00, SDS=0.95)가 와도 이 칸을
+        #   덮지 못했다. 최약체가 최강자를 막고 있었다.
+        #   값을 지어내지 않는다. 없으면 없는 대로, `TBD` 면 `TBD` 로 둔다.
+        #   다만 **왜** 미상인지는 잃지 않는다 — SRS 문서 자체에 등급이 없다는 건
+        #   상류 문서의 결함이라 보고 가치가 있다. 점수·병합 판정에 참여하지 않는
+        #   진단 키로만 남긴다(`*_source` 가 아니므로 어휘표와 무관).
         cur_asil = str(info.get("asil") or "").strip().upper()
         if (
             related
@@ -1616,8 +1629,7 @@ def enrich_function_details_with_docs(
             and not matched_req_with_asil
             and ((not cur_asil) or cur_asil in {"TBD", "N/A", "-"})
         ):
-            info["asil"] = "QM"
-            info["asil_source"] = "srs_default_qm"
+            info["asil_unresolved"] = "srs_req_without_asil"
 
         # SwUDS 문서 직독 ASIL — 등급 낮추기 절대 없음(상향만). 단 소스 유래(asil_source="comment",
         # C @asil Doxygen)와 문서 유래(sds 이름휴리스틱·srs·inference·blank)를 구분한다:
