@@ -903,6 +903,85 @@ ended"* 를 매 실행 찍는 EOL 패키지이고 실사용처는 legacy fallbac
 
 ---
 
+## 5-14. 근거 없는 QM 을 지어내던 5곳 — ✅ 완료 (2026-08-01)
+
+사용자 지시: *"srs_default_qm 하면 안된다 절대, none은 none tbd면 tbd"*.
+
+### 실측 (고치기 전)
+
+ASIL 이 비었거나 `TBD` 일 때 **다섯 곳**이 `QM` 을 써 넣었다. ISO 26262 에서 `QM` 은
+"안전 요구가 면제된다" 는 **실질 주장**이라 근거의 부재를 그걸로 바꾸면
+under-classification 이다. `helpers/uds.py` 의 옛 주석은 이걸 *"보수적 기본값"* 이라
+불렀는데 **방향이 거꾸로다** — QM 은 최저 등급이라 보수는 상향이지 하향이 아니다.
+
+| 사이트 | 조건 | 붙던 출처 |
+|---|---|---|
+| `report_gen/requirements.py:1619` | SRS 매칭됐는데 **그 요구에 ASIL 이 없음** | `srs_default_qm` |
+| `report_gen/docx_builder.py:2010` | 모듈 상속도 실패 | `default` |
+| `report_gen/docx_builder.py:2109` | **TBD 를 빈 값으로 지움** (5번째, 조사 중 발견) | `default` |
+| `report_gen/function_analyzer.py:1021` | asil 이 빈 값 | `default` |
+| `backend/helpers/uds.py:412` | 정규화가 등급을 못 뽑음 | `default` |
+
+실 payload 3세트 431함수: `asil_source` = `sds` 407 / `srs` 18 / **`srs_default_qm` 6**,
+`asil` 값 = `A` 354 / `QM` 77 로 **빈 값 0건** — `with_asil` 이 431/431(100%) 만점이었다.
+
+**납품 문서 표면의 실물 피해**(실 템플릿으로 44MB DOCX 를 생성해 셀 판독):
+`u8s_SbcmMsg_LinTmOutCheck`(SwUFn_0307)·`u8s_SbcmMsg2_LinTmOutCheck`(SwUFn_0308)가
+**ASIL QM 으로 기록**됐다 — 정상 판정 시 **ASIL A**. 나머지 5개 함수는 payload 에선
+뒤집히나 프로덕션 템플릿에 heading 이 없어 문서엔 안 들어간다.
+
+### ⚠ 가설이 절반 틀렸다 — 막힌 게이트는 주석이 아니라 SDS 였다
+
+"주석 `@asil`(1.00)조차 못 뚫는다" 로 봤는데, 이 프로젝트 소스엔 **`@asil` 태그가
+아예 없다**(`D:\Project\Ados\PDS64_RD\Sources\` C/H 99개 중 0개, payload 27,648
+엔트리의 `comment_asil` 전부 빈 값). 실제로 막히던 건 **SDS 게이트**
+(`docx_builder.py:2047`, 0.95)다. 결론은 같지만 근거는 바꿔 적는다.
+
+### 수정
+
+1. 다섯 사이트의 값 대입 제거. SRS 가 침묵한 사실은 `asil_unresolved` **진단 키**로만
+   남긴다(`*_source` 가 아니므로 점수·병합 판정에 불참)
+2. `_normalize_asil_value` 결과를 무조건 대입하던 것 → 등급을 못 뽑으면 **원래 표기 보존**.
+   그 함수는 `TBD`/`N/A`/`-` 를 빈 문자열로 접는데(계약 `test_report_gen.py:79`),
+   순위 비교엔 맞지만 값 칸에 대입하면 "미정" 과 "아예 없음" 이 같아진다
+3. 별칭 표를 `report_gen/provenance.py::SOURCE_ALIASES` **단일 출처**로 올리고
+   `is_weak_source()` 가 먼저 접게 했다
+
+### ⚠ 부수 효과 둘 — 둘 다 측정으로 드러났다
+
+- **D3 가 병합 규칙을 하나도 안 건드리고 해소됐다.** QM 이 칸을 선점하지 않으니 자기
+  프로젝트 참조 SUDS 의 ASIL 이 비로소 도달한다(`safety_fields_applied` 1→2,
+  `safety_fields_blocked` 1→2). 자격 판정은 여전히 "값이 비었/TBD 인가" 라서
+  **실등급 D/C 하향 경로는 열리지 않는다** — 원래 제안(자격을 `is_weak_source()` 로
+  교체)이었다면 `unknown`·`module_inherit` 도 약함이라 하향이 열렸을 것이다.
+- **`asil_tbd` 잔량 경고는 발화할 수 없는 카운터였다** — `docx_builder.py:2505` 가 세는
+  값을 `:2109` 가 **세기 전에 지웠다**.
+
+### 같이 고친 것 — 별칭 축에서 갈라진 약함 판정 + 가드 두 개의 fail-open
+
+`srs_default_qm` 은 점수표가 `default`(0.30, 최약체)로 접는데 `WEAK_SOURCES` 가
+별칭을 몰라 `is_weak_source()` 는 **강함**이라 답했다. 커밋 `6e53bba`(`generated_doc`)가
+막으려던 갈라짐의 **별칭 축 재발**이다. 그리고 그걸 지키는 가드 둘이 전부 사각이었다:
+
+| 가드 | 사각 |
+|---|---|
+| `TestWeakSourceTableAgreesWithScores` | `src_score` **리터럴 dict 만** AST 로 읽어 `_src_aliases` 를 구조적으로 못 봄 → **24 passed 공허 통과** |
+| `TestNoShapeBasedSourceAssignment` | `MODULE = validation.py` 한 파일, 그중 함수 하나만 스캔 |
+
+### 검증
+
+- 신규 `tests/unit/test_asil_no_fabrication.py` 23건 — **뮤테이션 6/6 kill**
+- 가드 뮤테이션 3/4 kill(1건은 무해 생존 — 별칭 제거 시 `unknown` 0.30/약함으로 떨어져 동등)
+- 참조 격리 뮤테이션 R1·R3 kill. ⚠ **R2(ASIL 어휘검사 제거)는 생존**했다 —
+  기존 `test_parsed_prototype_string_is_not_a_grade` 가 상수 집합만 보는 **판정 복제**라
+  루프를 안 태웠다. 실제 루프를 태우는 가드를 신설해 kill 로 전환
+- 회귀 **5,202 passed / 1 skipped**
+- ⚠ 커밋은 자동 잡(`44cb895 chore(auto): end-of-day snapshot`)이 `outputs/`·`config/`
+  와 함께 쓸어담아 **이미 푸시**했다. 내용·검증 상태는 정확하나 메시지가 사유를
+  담지 못했다 — 그래서 이 절이 기록이다
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -916,7 +995,12 @@ ended"* 를 매 실행 찍는 EOL 패키지이고 실사용처는 legacy fallbac
 | ~~7~~ | ~~실 KB 재인덱싱~~ | ✅ 완료 — §5-5 #2 + **§5-7 에서 실제 실행**(63/63, 시맨틱 0→63). 돌려 보니 백엔드가 죽어 있었고(모델 404) 가드가 그걸 잡았다 |
 | ~~D1~~ | ~~provenance 가 "미기록" 을 `inference` 로 확정~~ | ✅ 완료 — §5-9. 값을 보고 `default`/`inference`/`unknown` 을 가르고, 판정 복제 6곳을 `report_gen/provenance.py` 단일 출처로 전환. **점수 이동은 의도한 것**(0.60 은 부풀린 값이었다) |
 | ~~D2~~ | ~~저장소 고정 HDPDM01 SUDS 로 함수 정보 채움~~ | ✅ 완료 — §5-8. 신원 게이트 + 안전축/서술축 분리 + ASIL 어휘 검사 + 하드코딩 폴백 제거. **성능(생성 31.9초 중 24.3초)은 미해결** — 신원 불일치여도 문서는 여전히 읽는다(서술축 때문). 신원 판정을 읽기 **전에** 하고 불일치면 아예 안 읽는 최적화는 별건 |
-| 🔴 D3 | 약한 출처(`default`/`inference`)가 강한 근거(참조 SUDS)를 선점 | §5-8 참조. `asil` 은 병합 전 `QM` 으로, `description` 은 합성문으로 칸이 차 자기 프로젝트 SUDS 의 ASIL 416건이 영영 안 들어간다. `_weak_sources` 어휘가 이미 있으므로 자격 조건을 바꾸면 되나 **HDPDM01 수치가 이동** → 정책 결정 |
+| ~~D3~~ | ~~약한 출처가 강한 근거(참조 SUDS)를 선점~~ | ✅ 완료 — §5-14. **병합 규칙을 안 건드리고 해소됐다**: 선점하던 `QM` 지어내기를 제거하니 참조 ASIL 이 도달한다. 원래 제안(자격을 `is_weak_source()` 로 교체)은 `unknown`·`module_inherit` 도 약함이라 **하향 경로를 열었을 것** — 안 하길 잘했다 |
+| ~~11~~ | ~~빈 값에도 출처 점수가 매겨진다~~ | 부분 해소 — §5-14. 값을 안 채우면 출처도 안 적으므로 "빈 ASIL + `asil_source=sds`" 조합의 주 생산 경로가 사라졌다. `_score_for` 자체가 값 유무를 안 보는 건 그대로(레거시 payload 재처리 시 여전) |
+| 18 | `helpers/uds.py:420-421` 모양 기반 `rule` 재라벨 | ⚠ **반증으로 축소됨**(verdict: weakened). 살아남은 사실: `_normalize_field_source` 화이트리스트 밖 13종이 `inference` 로 접힌 뒤 `SwFn_\d+` **모양만 보고** `rule`(0.75)로 덮인다 — `validation.py:1391-1393` 이 명시적으로 금지한 패턴을 같은 파이프라인 31줄 뒤가 되돌린다. 실측 `related_trusted_fill` 0%→100%, `RELATED_ID_TRUST_LOW` 소거 → Quality DB 유입. **뒤집힌 주장**: "신뢰도 리포트 세탁" 은 안 일어난다(두 경로 모두 리포트가 재라벨 **이전**에 기록됨), 등급 D→B·저신뢰 30→0 도 실데이터 재현 실패(149→149, D→D, `gate_pass` False→False) |
+| 19 | ~~`_normalize_field_source` 화이트리스트 붕괴 교정~~ | ⛔ **기각 — 반증됨**(verdict: overturned). 실데이터에서 발화하는 붕괴 라벨은 `sds_match`(6,428행) 하나인데, 그건 `requirements.py:1586-1591` 의 **else 분기** = *"설명이 SDS 에서 오지 **않았을** 때"* 라 trusted=False 가 **정답**이다. 고쳤으면 6,428행을 거짓 trusted 로 만들고 게이트 7건을 FAIL→PASS 로 뒤집었을 것 — **제안 fix 자체가 결함**이었다 |
+| 20 | `sds_match` 별칭이 0.95 를 받는다 | #19 의 뒤집힌 근거에서 따라 나온다. `sds_match` 가 *"SDS 에서 안 가져왔다"* 는 뜻이면 `_src_aliases` 가 `sds`(0.95)로 접는 건 **과대 신용**이다. 점수·의미 재정의라 정책 결정 |
+| 21 | 이름맵이 `_resolve_related_asil_desc` 를 통째로 건너뛴다 | 조사 중 발견(별칭 버그와 무관, 더 큼). `docx_builder.py:2118` 루프는 `function_details` **전용**인데 렌더러 `_resolve_function_info`(:2917-2919)는 `function_details_by_name` 을 **우선** 조회한다. 게다가 `:2370` 미러는 값은 안 옮기고 **출처만** 옮겨 `('QM','sds')` 같은 조합을 만든다(출처가 값을 거짓 보증) |
 | 8 | UTCV-001 잔여 | `applicable` 정책축·커버리지 예외 disposition. 이 저장소에 해당 축이 **존재하지 않아** 신규 기능 개발이다(결함 수정 아님) — 사용자 판단 필요 |
 | 9 | 템플릿↔소스 프로젝트 불일치 | 소스 900함수 중 271개만 HDPDM01 템플릿에 존재(629건=69.9% 부재). 의도된 부분집합인지 오배치인지는 프로젝트 설정 판단이 필요해 `ok` verdict 는 뒤집지 않고 수치만 노출해 둔 상태 |
 | 10 | `workflow/ai_validator.py` | dead code(호출자 0). 살릴지 지울지는 정책 결정 — 사용자 몫으로 남김 |
