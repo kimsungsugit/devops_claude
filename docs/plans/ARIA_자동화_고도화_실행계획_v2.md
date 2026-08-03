@@ -1027,9 +1027,9 @@ under-classification 이다. `helpers/uds.py` 의 옛 주석은 이걸 *"보수�
 | 15 | 리포트 timeout 시 payload 제자리 변경 경합 | §5-13. `_run_report_with_timeout`(`backend/helpers/common.py:389`)의 `cancel_futures=True` 는 **이미 실행 중인** future 를 안 죽인다. 그 스레드가 `uds_payload` 를 계속 변경하는 동안 다음 리포트가 같은 payload 를 쓴다. 리포트 계층의 변경 규약(제자리 변경 자체)을 바꿔야 하는 건이라 별건 |
 | 16 | `google.generativeai`(EOL) 폴백 제거 여부 | §5-12. *"All support … has ended"* 를 매 실행 찍는 수명 종료 패키지인데 legacy 폴백 한 곳으로 남아 있다. 지연 로딩으로 **비용은 이미 0** 이므로 제거는 순수 정책 결정 |
 | 17 | `uds_ai` 대용량 페이로드에 stage cap 부재 | ⚠ **이번 세션 미측정** — plan 단계 기록만 있고 이 계획서엔 여태 누락돼 있었다(2026-07-31 에 옮김). 정직성이 아니라 **비용** 문제로 분류돼 있었다. 착수 전 실측부터 할 것 |
-| **22** | **게이트 조회·검토 기록 섹션** (Detail 신규 섹션 `gate`) | **사용자 요청 2026-08-03**: *"탭을 생성해서 그 프로젝트에서 게이트에 대한 걸 보고 리뷰하고 작성할 건 작성하게"*. 실측·반증 완료, 설계 확정, **미착수** — 아래 §6-1. 계획서 31항목에 대응 항목이 **없다**(`탭` Grep 0건/1047줄). CORE-004 와 §5 보류 「ApprovalRecord 승인축」을 건드리지만 **필드 단위 승인을 비목표로 고정하면 CORE-000 없이 성립**한다 |
-| **23** | **게이트 판정을 두 파서가 정반대로 읽는다** | ⚠ **실 결함 — 재현 완료**(§6-1 G0). 22 의 선행이지만 **탭과 무관하게 지금 존재**한다. 같은 `.quality_gate.md` 에 `backend/helpers/uds.py:464` 는 **첫 매치**를 `bool` 로, `report_gen/validation.py:1077` 은 **마지막 매치**를 `'true'` **문자열**로 낸다. 이 저장소가 4번째로 겪는 판정 복제(`_is_hsis_data_row`·`_ratchet_core`·`_artifact_check`) |
-| 24 | 비관리자에게 매 앱 로드마다 403 토스트 | `QualityDashboard` 가 adminMode 와 무관하게 **항상 마운트**되고(`App.jsx:358-373`, 조건부 언마운트 0건) mount effect 가 즉시 발화(`QualityDashboard.jsx:273-275`) → `/api/quality/*` 는 라우터 전체 admin(`quality.py:16-20`) → 403 → `toast('error', …)` + 빨간 '데이터 로드 실패' 패널(`:264-267`, `:333-338`). 곁가지: 표시 게이트는 localStorage `devops_admin_mode` 인데 실권한은 `admin_users.json` 이라 **양방향 불일치** — `AdminContext` 가 백엔드 `is_admin` 을 이미 갖고 있는데 `App.jsx:235` 필터가 그걸 안 쓴다 |
+| **22** | **게이트 조회·검토 기록 섹션** (Detail 신규 섹션 `gate`) | ⬜ 미착수. **선행 G0 은 후보 23 으로 완료**(2026-08-03). **사용자 요청 2026-08-03**: *"탭을 생성해서 그 프로젝트에서 게이트에 대한 걸 보고 리뷰하고 작성할 건 작성하게"*. 실측·반증 완료, 설계 확정, **미착수** — 아래 §6-1. 계획서 31항목에 대응 항목이 **없다**(`탭` Grep 0건/1047줄). CORE-004 와 §5 보류 「ApprovalRecord 승인축」을 건드리지만 **필드 단위 승인을 비목표로 고정하면 CORE-000 없이 성립**한다 |
+| ~~**23**~~ | ~~게이트 판정을 두 파서가 정반대로 읽는다~~ | ✅ **완료** — §5-15. `report_gen/gate_report.py` 단일 출처. ⚠ 첫 수정이 되레 fail-open 을 만들어 같이 고쳤다. 원래 기록: ⚠ 재현 완료(§6-1 G0), 22 의 선행이지만 탭과 무관하게 존재했다. 같은 `.quality_gate.md` 에 `backend/helpers/uds.py:464` 는 **첫 매치**를 `bool` 로, `report_gen/validation.py:1077` 은 **마지막 매치**를 `'true'` **문자열**로 낸다. 이 저장소가 4번째로 겪는 판정 복제(`_is_hsis_data_row`·`_ratchet_core`·`_artifact_check`) |
+| 24 | 비관리자에게 매 앱 로드마다 403 토스트 | ⬜ **미착수**(프론트 변경이라 별건). `QualityDashboard` 가 adminMode 와 무관하게 **항상 마운트**되고(`App.jsx:358-373`, 조건부 언마운트 0건) mount effect 가 즉시 발화(`QualityDashboard.jsx:273-275`) → `/api/quality/*` 는 라우터 전체 admin(`quality.py:16-20`) → 403 → `toast('error', …)` + 빨간 '데이터 로드 실패' 패널(`:264-267`, `:333-338`). 곁가지: 표시 게이트는 localStorage `devops_admin_mode` 인데 실권한은 `admin_users.json` 이라 **양방향 불일치** — `AdminContext` 가 백엔드 `is_admin` 을 이미 갖고 있는데 `App.jsx:235` 필터가 그걸 안 쓴다 |
 
 > ⚠ 12·13 은 원래 **취소선(완료) 행 안에** 적혀 있어 표만 보면 안 보였고, 14·15 는 본문
 > 절 안에만, 17 은 계획서에 아예 없었다. 2026-07-31 에 전부 이 표로 올렸다.
@@ -1196,6 +1196,101 @@ under-classification 이다. `helpers/uds.py` 의 옛 주석은 이걸 *"보수�
 > ⚠ 인용 주의: 조사 중 나온 `gate_pass 135곳/21파일` 은 ripgrep `--count`(= **매칭 라인 수**) 를
 > occurrence 로 라벨한 오류다. occurrence 기준 재측정은 152 / tracked 20파일.
 > **생산 4모듈·소비 6모듈 결론은 유효하나 수치 라벨은 인용하지 말 것.**
+
+---
+
+## 5-15. 게이트가 조용히 스스로를 끄던 곳들 + 하네스 전수 점검 — ✅ 완료 (2026-08-03)
+
+7커밋. 전부 같은 부류다: **검사가 실패했는데 그 사실이 어디에도 안 남는다.**
+
+### 게이트 판정 (후보 23 → 완료)
+
+`.quality_gate.md` 를 읽는 파서가 둘이었고 **정반대 판정**을 냈다 — `uds.py:464` 는
+`re.search` 로 **첫 매치**·`bool`, `validation.py:1073-1080` 은 줄 루프라 **마지막 매치**·
+**문자열**. 검토 의견 한 줄이 섞이면 뒤집힌다(재현). **JS 에서 `'false'` 는 truthy** 라
+화면에 닿는 순간 FAIL 이 PASS 로 그려진다. → `report_gen/gate_report.py` 단일 출처.
+`Gate pass:` 가 **정확히 1회**일 때만 값을 낸다(2회 이상 = `ambiguous`).
+
+⚠ **첫 수정이 되레 게이트를 느슨하게 만들었다.** `_build_quality_evaluation:605` 가
+`None` 을 *"리포트 게이트 없음"* 으로 보고 병합에서 빼기 때문에, 모호한 사이드카가
+판정에서 통째로 빠져 quick 만 통과하면 PASS 가 됐다 — 첫 매치로 `False` 를 내던 옛
+코드보다 느슨하다. `absent`(미생성)와 `ambiguous`/`not_found`/`read_error`(있는데 못 읽음)를
+갈라 후자를 **fail-closed**(`report_unreadable`). 커밋 `a4ffdf4`.
+
+곁가지: `called_fill` 이 한 번도 파싱된 적이 없었다(생산자는 `- Called fill (supported):`,
+정규식은 `- Called fill:`). 실물 92/93 에서 이제 처음 파싱된다.
+
+### `gate_pass` 의 의미가 경로마다 달랐다 (커밋 `9c484b7`)
+
+같은 "UDS 생성" 인데 `/api/local/uds/generate`(동기)만 3중 판정(quick AND confidence AND
+report)을 DB 에 넣고 나머지 3경로는 **bare quick_gate** 를 넣는다. `quality_summaries.gate_pass`
+한 컬럼에 두 정의가 섞여 있는데 가를 근거가 없었다 — **후보 22 검토 탭이 읽을 컬럼이다.**
+→ `gate_definition:<source>` 비게이트 지표 행으로 **additive** 기록(스키마 변경 없음).
+정의 통일은 기록 값 자체를 바꾸므로 **정책 결정**으로 남긴다.
+
+### 비밀값 스캔이 한 번도 동작한 적 없었다 (커밋 `c277fc7`)
+
+플러그인 훅 2개가 stdin JSON 을 `jq` 로 팠는데 **이 환경엔 jq 가 없다**. 변수가 빈
+문자열이 되고 곧바로 `exit 0`. 대조 실측 — 같은 파일(`API_KEY`/`PASSWORD` 2건):
+옛 `.sh` **탐지 0건** / 새 `.py` **2건**. stdlib 로 재작성하고 입력·도구 이상은
+`DISABLED` 로 명시. 비밀값은 **키 이름과 줄 번호만** 출력한다(경고문이 값을 대화
+기록에 복사하면 검사기가 유출 경로가 된다).
+
+### 게이트 두 개가 조용히 스스로를 껐다 (커밋 `4aba7d4`)
+
+- `.githooks/pre-commit` 에 `pipefail` 이 **없고** 세 목록이 전부 `$(git … | grep …)` 라,
+  `git diff --cached` 가 실패하면 목록이 비어 **syntax·ruff·eslint·frontmatter 4개가
+  경고 한 줄 없이 스킵**되고 `"Pre-commit checks passed"` 가 찍힌다.
+  `_ratchet_core.py:139` 는 같은 실패 모드를 이미 막는데 **그 ratchet 을 부를지 정하는
+  바깥 레이어**만 무방비였다. 스텁 주입 대조: 옛 판 rc=124(pytest 진입) / 새 판 rc=1 중단.
+- `quality_check.py` 본문이 최상위 코드인데 top-level try/except 가 없어, Stop 훅의
+  `2>/dev/null || true` 와 겹치면 크래시가 **완전 침묵**한다("검사할 게 없었다" 와 동일).
+  이 파일 docstring 이 선언한 *"못 돌렸으면 PASS 라고 쓰지 않는다"* 를 **자기 자신에게는**
+  못 지키고 있었다. `sys.excepthook` 으로 최소 침습 방어(주입 실측: stdout 빔 → `CRASHED`).
+
+### 하네스 문서가 없는 것을 있다고 말했다 (커밋 `a3e8297`)
+
+`check_skill_frontmatter.py` 는 frontmatter **구조**만 본다 → 본문 주장은 아무도 안 봤다.
+`scripts/check_doc_references.py` 신설(DOC001 경로/DOC002 줄번호/DOC003 심볼, 변경 라인
+ratchet, `_ratchet_core` 재사용). **오탐을 먼저 실측**했다 — 첫 실행 23건 중 14건이 오탐
+(gitignore 된 실재 파일 6 / bare 파일명 4 / "이건 없다" 서술 4) → 억제 3종 도입 후
+**backlog 0**. 그 과정에서 **내가 20분 전에 만든 잘못된 경로 2건**을 이 검사기가 잡았다.
+
+고친 것: 허구 문서 3건(`build_docx` 없음 / Alembic·`backend/models.py` 없음 /
+Prometheus `/metrics` 없음) · 드리프트 6건(이미 제거된 CI `--ignore` 2곳 · 죽은 줄번호 ·
+`deep-reviewer` 가 종료조건 출처를 틀리게 지목 — **"DRIFT 방지" 를 선언한 파일에서 난
+drift** · tests 4,638→**5,241** · 침묵-except 1294→**831**) · 에이전트 4개의 맨 `python -c`
+(인터프리터 문제를 "DB 없음" 으로 오진 보고) · CI 사각 2건(GH `timeout-minutes` 부재,
+설치 실패 흡수).
+
+### 후보 21 — 이름맵 우회 (C2 완료, 커밋 `21df0ca`)
+
+payload 는 두 맵을 **둘 다** 싣는데(4개 빌더 전부) docx 생성이 payload 를 **JSON 파일로
+써서 서브프로세스**에 넘기므로 역직렬화에서 **서로 다른 객체로 갈라진다**. 해석 루프는
+`function_details` 전용인데 렌더러는 `function_details_by_name` 을 **먼저** 조회하고,
+`heading_fn_name` 이 `.lower()` 라 **적중한다** — 즉 렌더러가 enrich 안 된 사본을 그린다.
+→ `rejoin_function_maps()` 로 이름 기준 재결합. orphan 은 안 버리고, 사본이 정본을
+**덮어쓰지 않는다**(덮어쓰면 낡은 QM 이 ASIL A 를 지우는 하향 경로가 열린다).
+
+⚠ **첫 뮤테이션에서 배선 구멍이 드러났다** — 규칙 테스트는 전부 통과하는데 빌더에서
+호출문을 지우는 뮤테이션이 **생존**했다. 규칙은 지켜지는데 아무도 안 부르는 상태.
+AST 로 호출 실재를 못박아 4/4 KILLED.
+
+⚠ **사이드카는 이 결함의 증거가 못 된다** — 로컬 payload 사이드카엔 `by_name` 이 없다.
+그것만 보고 "분기 없음" 으로 판단했으면 오진이었다.
+
+**C4(미러 `:2428-2441`)는 C2 이후 구조적 no-op** 이다 — `target is info` 라 자기 값을
+자기에게 쓴다. 두 곳이 **같은 키 정규화**(`strip().lower()`)를 쓰는 한 성립하므로,
+없는 결함에 코드를 더하지 않는다. ⚠ 정규화가 갈리면 되살아난다.
+
+### 잔여
+
+- **C3(G2)** — by_name 에만 있는 orphan 은 여전히 해석 루프를 안 탄다(주석-ASIL 승격·
+  SDS 주입·`req_map`·모듈 ASIL 상속). C2 로 "값이 갈라지는" 축은 닫혔고 남은 건
+  **애초에 정본에 없는 함수** 축이다. 규모 미측정.
+- `/api/local/editor/*` 무권한 쓰기(`local.py` 에 `require_admin` 0건, base 를 요청자가 지정)
+  와 `.env` `DEV_MODE_X_USER_FALLBACK=1` 로 인한 `X-User` 신원 위조 — **보안 표면 변경이라
+  사용자 결정**. 보고만 하고 손대지 않았다.
 
 ---
 
