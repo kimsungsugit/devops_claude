@@ -140,7 +140,12 @@ class TestNoDuplicatedJudgment:
             vals = {e.value for e in node.elts
                     if isinstance(e, ast.Constant) and isinstance(e.value, str)}
             # 출처 라벨 2개 이상을 모아 둔 집합 = 판정 복제 신호
-            if len(vals & WEAK_SOURCES - {""}) >= 2:
+            # ⚠ 예전엔 `& WEAK_SOURCES - {""}` 라 **빈 문자열을 세지 않았다**.
+            #   그래서 이 저장소에서 실제로 가장 흔한 복제 형태인 `{"", "inference"}`
+            #   (원소 2개, 그중 하나가 `""`)가 1개로 세어져 **영영 안 걸렸다**.
+            #   `""` 도 어엿한 출처 라벨(= 아무도 기록 안 함)이므로 함께 센다.
+            #   실측(2026-08-03): 조여도 스캔 대상 3파일에서 신규 탐지 0건 = 오탐 없음.
+            if len(vals & WEAK_SOURCES) >= 2:
                 offenders.append(f"{path}:{node.lineno} {sorted(vals)}")
         assert not offenders, f"약한 출처 판정이 복제됐다: {offenders}"
 
@@ -149,19 +154,35 @@ class TestNoDuplicatedJudgment:
         src = Path(path).read_text(encoding="utf-8")
         assert "from report_gen.provenance import" in src, f"{path} 가 단일 출처를 안 쓴다"
 
-    def test_known_remaining_site_is_recorded(self):
-        """⚠ `report_gen/requirements.py:enrich_function_details_with_docs` 는 아직 미전환.
+    def test_remaining_literal_site_is_intentional(self):
+        """⚠ **전환하지 말 것.** `report_gen/requirements.py:1590` 의 `{"", "inference"}` 는
+        의도된 잔존이다.
 
-        전환 시점에 그 파일이 **다른 세션의 미커밋 작업**을 담고 있어 건드리지 않았다
-        (동시 세션 규약). 남은 판정은 `{"", "inference"}` 로 `WEAK_SOURCES` 의 진부분집합
-        이라 **덜 덮어쓸 뿐 잘못 덮어쓰지는 않는다** — 안전한 방향의 격차다.
+        2026-08-03 실측으로 판정이 **뒤집혔다**. 이 docstring 은 예전에
+        *"전환하면 여기서 실패하므로 그때 이 테스트를 지우고 위 목록에 파일을 추가하면
+        된다"* 고 **전환을 지시**하고 있었다. 세 가지 이유로 틀렸다:
 
-        이 테스트는 그 격차를 **잊지 않기 위해** 있다. 전환하면 여기서 실패하므로
-        그때 이 테스트를 지우고 위 목록에 파일을 추가하면 된다.
+        1. **방향이 세탁이다.** 이 분기가 붙이는 라벨은 `sds_match` 이고
+           `provenance.SOURCE_ALIASES` 가 그걸 `sds`(**0.95**)로 접는다. 리터럴을
+           `is_weak_source()` 로 넓히면 `default`/`unknown`/`generated_doc`(0.30)·
+           `module_inherit`(0.70)·`rule`(0.75) 이던 행이 0.95 를 받는다.
+        2. **`sds_match` 의 뜻이 반대다.** `requirements.py:1586-1591` 을 보면 이건
+           설명이 SDS 에서 **오지 않았을 때**의 else 분기다. 그런 행을 더 만드는 게
+           개선일 리 없다.
+        3. **복제 사이트는 짝이 아니다.** `tools/generate_uds_local.py:206` 의 같은
+           리터럴은 `hsis` 를 붙인다(다른 라벨). 게다가 그 파일은 `:16-18` 에서
+           `sys.path` 를 `D:\\Project\\devops\\260105` 로 밀어 넣고 거기서 `report_gen` 을
+           가져오는데 **그 트리엔 `provenance.py` 가 없다** — 단일 출처를 import 하면
+           스크립트가 import 에서 죽는다.
+
+        `sds_match` 별칭이 0.95 를 받는 것 자체가 과대 신용이 아닌지는 별건(계획서 #20).
+        그 판단이 먼저다.
         """
         src = Path("report_gen/requirements.py").read_text(encoding="utf-8")
         assert 'in {"", "inference"}' in src, (
-            "requirements.py 가 전환된 것 같다 — _DUP_SITES 에 추가하고 이 테스트를 제거할 것"
+            "requirements.py:1590 의 리터럴이 사라졌다. 이건 **의도된 잔존**이다 — "
+            "is_weak_source() 로 넓히면 0.30~0.75 이던 행이 sds_match→sds(0.95) 를 받는다. "
+            "되돌리거나, 바꿀 근거가 생겼다면 이 테스트의 docstring 부터 갱신할 것"
         )
 
 
