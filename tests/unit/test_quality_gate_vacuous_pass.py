@@ -232,6 +232,54 @@ class TestRecorderIntegration:
         assert rows["gated_metric_count"].gate_pass is None
         assert rows["gated_metric_count"].threshold is None
 
+    def test_gate_definition_is_persisted_so_two_definitions_are_distinguishable(self, qdb):
+        """**같은 doc_type 인데 호출 경로마다 `gate_pass` 의 정의가 다르다.**
+
+        UDS 실측(2026-08-03): `/api/local/uds/generate`(동기)만 `_build_quality_evaluation`
+        을 통해 quick AND confidence AND report 3중 판정을 기록하고, 나머지 3경로
+        (`local generate-async` · `jenkins generate` · `jenkins generate-async`)는
+        **bare quick_gate** 를 기록한다. `quality_summaries.gate_pass` 한 컬럼에 두 정의가
+        섞여 있는데 그걸 가를 근거가 DB 어디에도 없었다 — 이 컬럼을 읽는 쪽(후보 22 검토 탭)이
+        무엇을 비교하는지 모르게 된다.
+
+        정의 통일은 기록 값 자체를 바꾸므로 정책 결정으로 남기고, **어느 정의였는지**만
+        additive 로 남긴다(스키마 변경 없음, 판정 무영향).
+        """
+        from workflow.quality.db import get_session
+        from workflow.quality.models import QualityScore
+        from workflow.quality.recorder import record_run
+
+        def _defs(rid: int) -> list[str]:
+            with get_session(qdb) as s:
+                return [r.metric_name for r in s.query(QualityScore).filter_by(run_id=rid).all()
+                        if r.metric_name.startswith("gate_definition:")]
+
+        # 3중 판정 경로 — _build_quality_evaluation 이 gate_source 를 실어 보낸다
+        rid_merged = record_run(
+            "sits",
+            {"requirement_traceability_pct": 80.0, "io_coverage_pct": 90.0,
+             "total_test_cases": 5, "gate_source": "quick_confidence_and_report"},
+            db_path=qdb,
+        )
+        assert _defs(rid_merged) == ["gate_definition:quick_confidence_and_report"]
+
+        # bare quick_gate 경로 — gate_source 가 아예 없다. 그 **부재 자체**가 기록돼야 한다.
+        rid_bare = record_run(
+            "sits",
+            {"requirement_traceability_pct": 80.0, "io_coverage_pct": 90.0,
+             "total_test_cases": 5},
+            db_path=qdb,
+        )
+        assert _defs(rid_bare) == ["gate_definition:quick_gate_only"]
+
+        # 판정에 끼어들면 안 된다 — 비게이트 지표다
+        with get_session(qdb) as s:
+            row = (s.query(QualityScore)
+                   .filter_by(run_id=rid_bare, metric_name="gate_definition:quick_gate_only")
+                   .one())
+            assert row.gate_pass is None
+            assert row.threshold is None
+
     def test_normal_run_still_passes(self, qdb):
         """음성 대조군 — 정상 통과 실행이 fail-closed 로 오염되지 않는다."""
         from workflow.quality.advisor import suggest_improvements

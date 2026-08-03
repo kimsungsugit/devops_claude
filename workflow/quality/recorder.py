@@ -160,6 +160,27 @@ def _record_run_impl(
         "threshold": None,
     }]
 
+    # ⚠ **같은 doc_type 인데 호출 경로마다 gate_pass 의 정의가 다르다.**
+    # UDS 실측(2026-08-03): `/api/local/uds/generate`(동기)만 `_build_quality_evaluation`
+    # 을 통해 quick AND confidence AND report 3중 판정을 기록하고,
+    # `local generate-async` · `jenkins generate` · `jenkins generate-async` 세 경로는
+    # **bare quick_gate** 를 기록한다. 즉 `quality_summaries.gate_pass` 한 컬럼에 두
+    # 정의가 섞여 있는데 그걸 구분할 근거가 DB 어디에도 없었다.
+    #
+    # 정의를 통일하면 **기록되는 값 자체가 바뀌므로**(과거 run 과 비교 불가) 그건 정책
+    # 결정으로 남기고, 여기서는 "이 행이 어느 정의로 나왔는지" 만 additive 로 남긴다.
+    # 스키마 변경 없음 — `gated_metric_count` 와 같은 비게이트 지표 행이다.
+    # 이름에 정의를 넣어 SQL 한 줄로 분포가 나온다:
+    #   select metric_name, count(*) from quality_scores
+    #    where metric_name like 'gate_definition:%' group by 1
+    _src = str((quality_data or {}).get("gate_source") or "").strip() or "quick_gate_only"
+    metrics = list(metrics) + [{
+        "metric_name": f"gate_definition:{_src}",
+        "value": 1.0,
+        "gate_pass": None,
+        "threshold": None,
+    }]
+
     # 2. DB 기록
     with get_session(db_path) as session:
         # output_size 계산
