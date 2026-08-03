@@ -32,6 +32,45 @@ def _sanitize_outgoing(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return sanitize_messages(messages)
 
 
+def _trim_outgoing(
+    messages: List[Dict[str, str]], config: Dict[str, Any], model: Any = "",
+) -> tuple[List[Dict[str, str]], Dict[str, Any]]:
+    """설정된 입력 예산을 적용하고 **절단 사실을 meta 로 돌려준다**(구현은 ai.py 단일 출처).
+
+    ⚠ 이 스택은 `llm_call` 을 안 거치는 독립 egress 라, 예전엔 예산이 설정돼 있어도
+    **통째로 무시**하고 원문을 그대로 보냈다. 그 결과가 "같은 챗 질문이 공급자에 따라
+    한쪽(gemini/openai_compat=llm_call)은 잘려서 답이 나오고 한쪽(anthropic=이 어댑터)은
+    상한 초과로 실패" 다 — `TestAnthropicChatPathIsConsistent` 가 **응답** 절단에 대해
+    막아둔 것과 같은 비대칭이 **입력** 쪽에 남아 있었다.
+
+    예산 값은 정책이라 여기서 만들지 않는다. `config["max_input_tokens"]` 가 **명시된
+    경우에만** 적용하며, 없으면 완전 no-op(기존 동작과 바이트 동일)다.
+    """
+    from workflow.ai import resolve_token_margin, trim_messages_to_token_budget
+
+    try:
+        limit = int(config.get("max_input_tokens") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return messages, {}
+
+    out, info = trim_messages_to_token_budget(
+        messages, limit, margin=resolve_token_margin(model),
+    )
+    if not info.get("applied"):
+        return out, {}
+
+    warn = (
+        f"input_truncated: {info.get('before_tokens_est')}→{info.get('after_tokens_est')} "
+        f"tokens (limit {info.get('limit_tokens')})"
+    )
+    if info.get("gave_up_over_limit"):
+        warn += " — 예산 아래로 못 내림(초과분 그대로 전송)"
+    logger.warning("나가는 프롬프트를 잘랐다 — %s", warn)
+    return out, {"input_trim": info, "warnings": [warn]}
+
+
 def _completion_meta(requested_model: str, resp: Any, *, finish_raw: Any = "__from_resp__") -> Dict[str, Any]:
     """응답 완결성 + 실제로 답한 모델을 표준 키로 만든다.
 
@@ -107,6 +146,7 @@ class GeminiAdapter(LLMAdapter):
         # ⚠ 이 스택은 llm_call 을 안 거치는 독립 egress 다 — 프롬프트 시크릿
         #    가리기도 여기서 따로 해야 한다(판정은 ai.py 단일 출처).
         messages = _sanitize_outgoing(messages)
+        messages, _trim = _trim_outgoing(messages, self.config, self.model)
         try:
             from google import genai as genai_new
         except ImportError:
@@ -146,7 +186,7 @@ class GeminiAdapter(LLMAdapter):
                     "completion_tokens": getattr(um, "candidates_token_count", 0),
                 }
             return {"output": text_out, "usage": usage,
-                    **_completion_meta(self.model, resp)}
+                    **_trim, **_completion_meta(self.model, resp)}
 
         raise ImportError("google-genai SDK not installed")
 
@@ -169,6 +209,7 @@ class OpenAIAdapter(LLMAdapter):
         # ⚠ 이 스택은 llm_call 을 안 거치는 독립 egress 다 — 프롬프트 시크릿
         #    가리기도 여기서 따로 해야 한다(판정은 ai.py 단일 출처).
         messages = _sanitize_outgoing(messages)
+        messages, _trim = _trim_outgoing(messages, self.config, self.model)
         try:
             import openai
         except ImportError:
@@ -198,7 +239,7 @@ class OpenAIAdapter(LLMAdapter):
         # 모델 echo 는 top-level `resp.model`.
         _oa_fr = getattr(resp.choices[0], "finish_reason", None) if resp.choices else None
         return {"output": text_out, "usage": usage,
-                **_completion_meta(self.model, resp, finish_raw=_oa_fr)}
+                **_trim, **_completion_meta(self.model, resp, finish_raw=_oa_fr)}
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -219,6 +260,7 @@ class AnthropicAdapter(LLMAdapter):
         # ⚠ 이 스택은 llm_call 을 안 거치는 독립 egress 다 — 프롬프트 시크릿
         #    가리기도 여기서 따로 해야 한다(판정은 ai.py 단일 출처).
         messages = _sanitize_outgoing(messages)
+        messages, _trim = _trim_outgoing(messages, self.config, self.model)
         try:
             import anthropic
         except ImportError:
@@ -254,8 +296,8 @@ class AnthropicAdapter(LLMAdapter):
         }
         # Anthropic 은 `stop_reason` 이다("end_turn"=정상, "max_tokens"=절단).
         return {"output": text_out, "usage": usage,
-                **_completion_meta(self.model, resp,
-                                   finish_raw=getattr(resp, "stop_reason", None))}
+                **_trim, **_completion_meta(self.model, resp,
+                                            finish_raw=getattr(resp, "stop_reason", None))}
 
 
 _ADAPTER_MAP = {

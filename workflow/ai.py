@@ -751,6 +751,149 @@ def _extract_gemini_text(resp: Any) -> Optional[str]:
 
     return None
 
+
+# ── 입력 예산·절단 (egress 공용 단일 출처) ──────────────────────────────────
+#
+# ⚠ 아래 4개는 예전엔 `llm_call` **안쪽 중첩 함수**였다. 그래서 `workflow/llm_adapters.py`
+#   스택(`assistant_service._call_anthropic`, `scripts/generate_periodic_reports.py`)은
+#   같은 절단을 **구조적으로 쓸 수 없었다** — 설정에 입력 예산이 있어도 그쪽 egress 는
+#   통째로 무시하고 원문을 그대로 보낸다. 결과는 "같은 챗 질문이 공급자에 따라 한쪽은
+#   잘려서 답이 나오고 한쪽은 상한 초과로 실패" 다.
+#
+#   판정·구현 복제는 이 저장소가 반복해 겪은 실패 모드라(`_ratchet_core`·`provenance`·
+#   `gate_report` 와 같은 처방) 구현을 모듈 레벨로 올려 단일 출처로 만든다.
+#   **상한 값을 정하는 건 정책이지만, egress 마다 구현이 갈리는 건 결함이다.**
+
+def resolve_token_margin(model: Any, policy: Optional[Dict[str, Any]] = None) -> float:
+    """토큰 추정 여유율. gemini 는 tiktoken 추정이 더 어긋나 별도 기본값을 쓴다."""
+    margin = float((policy or {}).get("token_estimate_margin") or 0.0)
+    if margin > 0:
+        return margin
+    if "gemini" in str(model).lower():
+        return float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_GEMINI", 1.25))
+    return float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_DEFAULT", 1.1))
+
+
+def estimate_tokens(text: str, *, margin: float = 1.0) -> int:
+    if not text:
+        return 0
+    try:
+        import tiktoken  # type: ignore
+        enc = tiktoken.get_encoding("cl100k_base")
+        base = int(len(enc.encode(text)))
+    except Exception:  # silent-ok: tiktoken 부재/인코딩 실패는 문자수 근사로 대체한다.
+        # 추정치일 뿐이고, 근사로 떨어져도 절단 사실은 그대로 보고된다(판정을 바꾸지 않음).
+        base = max(1, int(len(text) / 4))
+    return max(1, int(base * margin))
+
+
+def _truncate_middle(text: str, keep_head: int, keep_tail: int) -> str:
+    if len(text) <= (keep_head + keep_tail + 20):
+        return text
+    return text[:keep_head] + "\n...[truncated]...\n" + text[-keep_tail:]
+
+
+def _summarize_text(text: str, *, keep_head: int = 1200, keep_tail: int = 800) -> str:
+    if not text:
+        return text
+    lines = text.splitlines()
+    if len(text) <= (keep_head + keep_tail + 200):
+        return text
+    keywords = ("error", "fail", "failed", "exception", "traceback", "warning", "assert", "timeout")
+    key_lines = [ln for ln in lines if any(k in ln.lower() for k in keywords)]
+    key_block = "\n".join(key_lines[:80])
+    head = text[:keep_head]
+    tail = text[-keep_tail:]
+    summary = "\n".join(
+        [
+            head,
+            "\n...[summary]...\n",
+            key_block,
+            "\n...[tail]...\n",
+            tail,
+        ]
+    )
+    return summary
+
+
+def trim_messages_to_token_budget(
+    msgs: List[Dict[str, str]],
+    max_tokens: int,
+    *,
+    margin: float = 1.0,
+    warn_input_tokens: Optional[int] = None,
+    on_warn: Optional[Any] = None,
+) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    """예산 초과분을 요약·중간절단으로 줄이고 **(메시지, 절단정보)** 를 함께 돌려준다.
+
+    절단정보를 반환값에 넣는 건 의도적이다 — 예전엔 절단이 호출자에게 전혀 안 보였고,
+    `input_tokens_est` 는 **절단 뒤** 값이라 "원래 그 크기였다" 와 구분되지 않았다.
+    잘랐다는 사실·원래 크기·예산 아래로 못 내린 경우를 모두 남긴다.
+    """
+    info: Dict[str, Any] = {"applied": False}
+    if max_tokens <= 0:
+        return msgs, info
+    msgs = list(msgs or [])
+
+    def _total_tokens() -> int:
+        return sum(estimate_tokens(m.get("content", ""), margin=margin) for m in msgs)
+
+    total = _total_tokens()
+    if total <= max_tokens:
+        return msgs, info
+
+    info.update({
+        "applied": True,
+        "limit_tokens": int(max_tokens),
+        "before_tokens_est": int(total),
+        "summarized": False,
+        "truncated_messages": 0,
+        "gave_up_over_limit": False,
+    })
+
+    threshold = int(
+        warn_input_tokens
+        if warn_input_tokens is not None
+        else getattr(config, "LLM_WARN_INPUT_TOKENS", 200000)
+    )
+    if total >= threshold and callable(on_warn):
+        on_warn(total, threshold)
+
+    if total >= threshold:
+        info["summarized"] = True
+        for i, m in enumerate(msgs):
+            if m.get("role") == "system":
+                continue
+            content = m.get("content", "")
+            if len(content) > 4000:
+                msgs[i]["content"] = _summarize_text(content)
+        total = _total_tokens()
+
+    for _ in range(20):
+        if total <= max_tokens:
+            break
+        idx = None
+        longest = 0
+        for i, m in enumerate(msgs):
+            if m.get("role") == "system":
+                continue
+            ln = len(m.get("content", ""))
+            if ln > longest:
+                longest = ln
+                idx = i
+        if idx is None:
+            break
+        content = msgs[idx].get("content", "")
+        msgs[idx]["content"] = _truncate_middle(content, keep_head=2000, keep_tail=1200)
+        info["truncated_messages"] = int(info.get("truncated_messages") or 0) + 1
+        total = _total_tokens()
+    # ⚠ 위 루프는 20회로 제한된다. 그 안에 예산 아래로 못 내려오면 **초과분을 그대로
+    #    보낸다** — 그 사실도 남겨야 호출자가 구분할 수 있다.
+    info["after_tokens_est"] = int(total)
+    info["gave_up_over_limit"] = bool(total > max_tokens)
+    return msgs, info
+
+
 def llm_call(
     cfg: Dict[str, Any],
     messages: List[Dict[str, str]],
@@ -823,50 +966,10 @@ def llm_call(
         meta_out["temperature"] = temperature
         meta_out["max_tokens"] = num_predict
 
-    token_margin = float(policy.get("token_estimate_margin") or 0.0)
-    if token_margin <= 0:
-        if "gemini" in str(model).lower():
-            token_margin = float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_GEMINI", 1.25))
-        else:
-            token_margin = float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_DEFAULT", 1.1))
+    token_margin = resolve_token_margin(model, policy)
 
     def _estimate_tokens(text: str) -> int:
-        if not text:
-            return 0
-        try:
-            import tiktoken  # type: ignore
-            enc = tiktoken.get_encoding("cl100k_base")
-            base = int(len(enc.encode(text)))
-        except Exception:
-            base = max(1, int(len(text) / 4))
-        return max(1, int(base * token_margin))
-
-    def _truncate_middle(text: str, keep_head: int, keep_tail: int) -> str:
-        if len(text) <= (keep_head + keep_tail + 20):
-            return text
-        return text[:keep_head] + "\n...[truncated]...\n" + text[-keep_tail:]
-
-    def _summarize_text(text: str, *, keep_head: int = 1200, keep_tail: int = 800) -> str:
-        if not text:
-            return text
-        lines = text.splitlines()
-        if len(text) <= (keep_head + keep_tail + 200):
-            return text
-        keywords = ("error", "fail", "failed", "exception", "traceback", "warning", "assert", "timeout")
-        key_lines = [ln for ln in lines if any(k in ln.lower() for k in keywords)]
-        key_block = "\n".join(key_lines[:80])
-        head = text[:keep_head]
-        tail = text[-keep_tail:]
-        summary = "\n".join(
-            [
-                head,
-                "\n...[summary]...\n",
-                key_block,
-                "\n...[tail]...\n",
-                tail,
-            ]
-        )
-        return summary
+        return estimate_tokens(text, margin=token_margin)
 
     # 절단 사실을 담아 둔다 — 아래에서 `meta_out` 으로 내보낸다.
     #
@@ -879,67 +982,29 @@ def llm_call(
     _trim_info: Dict[str, Any] = {"applied": False}
 
     def _trim_messages_to_token_budget(msgs: List[Dict[str, str]], max_tokens: int) -> List[Dict[str, str]]:
-        if max_tokens <= 0:
-            return msgs
-        msgs = list(msgs or [])
+        """모듈 레벨 단일 출처에 위임한다(구현 복제 금지 — 어댑터 egress 와 같은 코드)."""
 
-        def _total_tokens() -> int:
-            return sum(_estimate_tokens(m.get("content", "")) for m in msgs)
+        def _warn(total: int, threshold: int) -> None:
+            # 경고가 `log_dir` 유무에 걸린 건 의도적이지만, 그것만으론 침묵할 수 있어
+            # 절단 사실은 아래 `_trim_info` → `meta_out["input_trim"]` 로 따로 나간다.
+            if log_dir:
+                _agent_log(
+                    log_dir,
+                    "warning",
+                    f"Input tokens estimate {total} exceeds {threshold}. Applying auto-summarization.",
+                )
 
-        total = _total_tokens()
-        if total <= max_tokens:
-            return msgs
-
-        _trim_info.update({
-            "applied": True,
-            "limit_tokens": int(max_tokens),
-            "before_tokens_est": int(total),
-            "summarized": False,
-            "truncated_messages": 0,
-            "gave_up_over_limit": False,
-        })
-
-        warn_threshold = int(policy.get("warn_input_tokens") or getattr(config, "LLM_WARN_INPUT_TOKENS", 200000))
-        if total >= warn_threshold and log_dir:
-            _agent_log(
-                log_dir,
-                "warning",
-                f"Input tokens estimate {total} exceeds {warn_threshold}. Applying auto-summarization.",
-            )
-
-        if total >= warn_threshold:
-            _trim_info["summarized"] = True
-            for i, m in enumerate(msgs):
-                if m.get("role") == "system":
-                    continue
-                content = m.get("content", "")
-                if len(content) > 4000:
-                    msgs[i]["content"] = _summarize_text(content)
-            total = _total_tokens()
-
-        for _ in range(20):
-            if total <= max_tokens:
-                break
-            idx = None
-            longest = 0
-            for i, m in enumerate(msgs):
-                if m.get("role") == "system":
-                    continue
-                ln = len(m.get("content", ""))
-                if ln > longest:
-                    longest = ln
-                    idx = i
-            if idx is None:
-                break
-            content = msgs[idx].get("content", "")
-            msgs[idx]["content"] = _truncate_middle(content, keep_head=2000, keep_tail=1200)
-            _trim_info["truncated_messages"] = int(_trim_info.get("truncated_messages") or 0) + 1
-            total = _total_tokens()
-        # ⚠ 위 루프는 20회로 제한된다. 그 안에 예산 아래로 못 내려오면 **초과분을 그대로
-        #    보낸다** — 예전엔 그 사실도 아무 데도 안 남았다.
-        _trim_info["after_tokens_est"] = int(total)
-        _trim_info["gave_up_over_limit"] = bool(total > max_tokens)
-        return msgs
+        out, info = trim_messages_to_token_budget(
+            msgs,
+            max_tokens,
+            margin=token_margin,
+            warn_input_tokens=int(
+                policy.get("warn_input_tokens") or getattr(config, "LLM_WARN_INPUT_TOKENS", 200000)
+            ),
+            on_warn=_warn,
+        )
+        _trim_info.update(info)
+        return out
 
     env_max = os.environ.get("LLM_MAX_INPUT_TOKENS", "").strip()
     explicit_input = ("max_input_tokens" in cfg) or bool(env_max)
