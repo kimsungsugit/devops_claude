@@ -24,6 +24,7 @@ from report_gen.function_analyzer import (
     _is_generic_description,
     _classify_description_quality,
 )
+from report_gen.gate_report import parse_gate_report, to_percent_text_map
 from report_gen.provenance import SOURCE_ALIASES
 from report_gen.requirements import _extract_function_info_from_docx
 from report_gen.utils import _extract_call_names, _safe_dict
@@ -1069,20 +1070,20 @@ def _parse_accuracy_summary(text: str) -> Dict[str, Any]:
 
 
 def _parse_quality_gate_summary(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"gate_pass": "", "metrics": {}}
-    for raw in str(text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        m_gate = re.search(r"gate pass:\s*`?(true|false)`?", line, flags=re.I)
-        if m_gate:
-            out["gate_pass"] = str(m_gate.group(1)).lower()
-            continue
-        m_metric = re.search(r"-\s*([^:]+):\s*`?\d+`?\s*/\s*`?\d+`?\s*\(([^)]+)\)", line)
-        if m_metric:
-            key = re.sub(r"[^a-z0-9]+", "_", str(m_metric.group(1)).strip().lower()).strip("_")
-            out.setdefault("metrics", {})[key] = str(m_metric.group(2)).strip()
-    return out
+    """조회용 게이트 요약. 판정은 `report_gen.gate_report` **단일 출처**에 위임한다.
+
+    ⚠ 계약 변경(2026-08-03): `gate_pass` 가 `''`/`'true'`/`'false'` **문자열**에서
+    `None`/`True`/`False` **bool** 로 바뀌었다. 예전 문자열 계약은 두 가지가 잘못됐다 —
+    ① 같은 파일을 읽는 `uds.py::_parse_quality_gate_report` 는 bool 을 내서 타입이 갈렸고
+    ② **JS 에서 `'false'` 는 truthy** 라 이 값이 화면에 닿으면 FAIL 이 PASS 로 그려진다.
+    전환 시점에 이 키의 프론트 소비자는 0건이었다(view endpoint 3개를 호출하는 코드 자체가 없음).
+    """
+    parsed = parse_gate_report(text)
+    return {
+        "gate_pass": parsed.get("gate_pass"),
+        "gate_pass_status": parsed.get("gate_pass_status"),
+        "metrics": to_percent_text_map(parsed),
+    }
 
 
 def build_uds_view_payload(

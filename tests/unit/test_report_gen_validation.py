@@ -204,7 +204,11 @@ class TestParseQualityGateSummary:
             "- Called fill: `25` / `42` (59.5%)\n"
         )
         result = _parse_quality_gate_summary(text)
-        assert result["gate_pass"] == "true"
+        # ⚠ 계약 변경(2026-08-03): 예전엔 `'true'` **문자열**이었다. 같은 파일을 읽는
+        #    uds.py 쪽은 bool 을 냈고, JS 에서 `'false'` 는 truthy 라 화면에 닿으면
+        #    FAIL 이 PASS 로 그려진다. 이제 둘 다 `report_gen.gate_report` 단일 출처.
+        assert result["gate_pass"] is True
+        assert result["gate_pass_status"] == "ok"
         assert "description_fill" in result["metrics"]
         assert result["metrics"]["description_fill"] == "71.4%"
 
@@ -212,8 +216,28 @@ class TestParseQualityGateSummary:
         from report_gen.validation import _parse_quality_gate_summary
 
         result = _parse_quality_gate_summary("")
-        assert result["gate_pass"] == ""
+        # 빈 입력은 "판정 불가" 지 통과가 아니다 — `''`(falsy) 가 아니라 명시적 None.
+        assert result["gate_pass"] is None
+        assert result["gate_pass_status"] == "not_found"
         assert result["metrics"] == {}
+
+    def test_two_gate_lines_are_unjudgeable_not_a_guess(self):
+        """본문에 `Gate pass:` 가 2회 이상이면 **어느 것도 고르지 않는다**.
+
+        예전엔 이 함수가 마지막 매치를, uds.py 가 첫 매치를 취해 같은 파일에
+        정반대 판정이 나왔다. 검토 의견 한 줄이 게이트를 뒤집는 경로였다.
+        """
+        from report_gen.validation import _parse_quality_gate_summary
+
+        result = _parse_quality_gate_summary(
+            "- Gate pass: `false`\n"
+            "- Description fill: `30` / `42` (71.4%)\n"
+            "\n## 검토 의견\n이전 릴리스에선 Gate pass: True 였습니다.\n"
+        )
+        assert result["gate_pass"] is None
+        assert result["gate_pass_status"] == "ambiguous"
+        # 지표는 그대로 읽힌다 — 판정만 보류한다.
+        assert result["metrics"]["description_fill"] == "71.4%"
 
 
 class TestLoadUdsPayloadForDocx:

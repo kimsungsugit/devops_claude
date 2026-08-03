@@ -37,6 +37,10 @@ from backend.state import (
 from backend.state import (
     uds_view_cache_lock as _uds_view_cache_lock,
 )
+from report_gen.gate_report import (
+    parse_gate_report,
+    to_rate_map,
+)
 from report_generator import (
     _build_req_map_from_doc_paths,
     build_uds_view_payload,
@@ -454,22 +458,29 @@ def _validate_docx_template_bytes(raw: Optional[bytes]) -> Tuple[bool, str]:
 
 
 def _parse_quality_gate_report(path: Optional[Path]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"gate_pass": None, "rates": {}}
+    """`.quality_gate.md` 사이드카 → 게이트 판정 + 지표율.
+
+    ⚠ 판정은 `report_gen.gate_report` **단일 출처**에 위임한다. 예전엔 이 함수가
+    `re.search` 로 **첫 매치**를, `validation.py::_parse_quality_gate_summary` 가 줄 루프로
+    **마지막 매치**를 취해 같은 파일에 정반대 값을 냈다(타입도 bool vs 문자열).
+    상세와 재현 결과는 `report_gen/gate_report.py` 모듈 docstring 참조.
+
+    `gate_pass=None` 은 **판정 불가**(파일 없음 / 읽기 실패 / `Gate pass:` 부재 또는 2회 이상)
+    이지 통과가 아니다 — 아래 `_build_quality_evaluation` 이 그 구분을 유지한다.
+    """
+    out: Dict[str, Any] = {"gate_pass": None, "rates": {}, "gate_pass_status": "absent"}
     if not path or not path.exists():
         return out
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
+        # 파일은 있는데 못 읽었다 — "리포트가 없다" 와 구분해야 한다(아래 병합이 다르게 취급).
+        out["gate_pass_status"] = "read_error"
         return out
-    m_gate = re.search(r"- Gate pass:\s*`?(True|False)`?", text, flags=re.I)
-    if m_gate:
-        out["gate_pass"] = str(m_gate.group(1)).strip().lower() == "true"
-    for key in ["Description", "Input", "Output", "Globals\\(Global\\)", "Globals\\(Static\\)", "Called", "Calling"]:
-        m = re.search(rf"- {key} fill:\s*`\d+`\s*/\s*`\d+`\s*\(([\d.]+)%\)", text, flags=re.I)
-        if not m:
-            continue
-        norm = key.lower().replace("\\", "").replace("(", "_").replace(")", "").replace(" ", "_")
-        out["rates"][f"{norm}_fill"] = float(m.group(1))
+    parsed = parse_gate_report(text)
+    out["gate_pass"] = parsed.get("gate_pass")
+    out["gate_pass_status"] = parsed.get("gate_pass_status")
+    out["rates"] = to_rate_map(parsed)
     return out
 
 
@@ -589,11 +600,23 @@ def _build_quality_evaluation(
     quick_pass = bool((quick_gate or {}).get("gate_pass"))
     confidence_pass = bool((quick_gate or {}).get("confidence_gate_pass"))
     report_pass = report_gate.get("gate_pass")
+    report_status = str(report_gate.get("gate_pass_status") or "absent")
     if doc_only_mode:
         # In doc-only mode, additional reports are intentionally skipped.
         merged_pass = bool(quick_pass and confidence_pass)
         gate_source = "quick_only"
+    elif report_status in {"ambiguous", "not_found", "read_error"}:
+        # ⚠ "리포트가 없다" 와 "리포트가 있는데 못 읽었다" 는 다르다.
+        #    아래 `absent` 는 리포트를 안 만든 경우라 병합에서 빼는 게 맞지만,
+        #    파일이 있는데 판정을 못 뽑은 경우(모호/누락/읽기실패)를 같이 빼면
+        #    **본문에 문장 한 줄 넣어 리포트 게이트를 무력화**할 수 있다
+        #    (모호 → None → 병합 제외 → quick 만 통과하면 PASS). 옛 코드가 첫 매치를
+        #    골라 False 를 내던 것보다 되레 느슨해지므로, 여기서는 fail-closed 한다.
+        #    이 저장소 규약: 미측정을 통과로 바꾸지 않는다.
+        merged_pass = False
+        gate_source = "report_unreadable"
     elif report_pass is None:
+        # status == "absent" — 리포트 자체가 생성되지 않았다(타임아웃·doc_only 등).
         merged_pass = bool(quick_pass and confidence_pass)
         gate_source = "quick_only"
     else:
