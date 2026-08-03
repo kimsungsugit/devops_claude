@@ -56,6 +56,50 @@ import sys
 import time
 from pathlib import Path
 
+
+def _crash_reporter(exc_type, exc, tb) -> None:  # pragma: no cover - 방어
+    """미포착 예외를 **침묵시키지 않는다.**
+
+    Stop 훅 커맨드는 `python scripts/quality_check.py 2>/dev/null || true` 다 —
+    stderr 도 종료코드도 지운다. 이 스크립트 본문은 함수로 감싸이지 않은 **최상위
+    코드**(라인 ~200~600)라, 그 구간 어디서든 미포착 예외가 나면
+      ① traceback 은 stderr 로 가서 버려지고
+      ② `print()` 는 파일 맨 끝에서만 실행되므로 stdout 이 **완전히 빈다**
+      ③ 종료코드는 `|| true` 가 지운다
+    결과적으로 Claude 는 아무것도 못 받고, 그건 **"검사할 게 없었다" 와 구분되지 않는다.**
+
+    이 파일 docstring 이 선언한 *"못 돌렸으면 PASS라고 쓰지 않는다"* 를 정작
+    **자기 자신의 크래시에는 적용하지 못하고 있었다**(2026-08-03 발견). 아래 훅이 그 구멍을 막는다.
+
+    `sys.exit()` 은 `SystemExit` 이라 인터프리터가 excepthook 을 거치지 않고 처리하므로
+    정상 종료 경로에는 영향이 없다.
+    """
+    where = ""
+    try:
+        import traceback as _tb
+
+        _tb.print_exception(exc_type, exc, tb, file=sys.stderr)  # 수동 실행 시 진단용
+        frames = _tb.extract_tb(tb)
+        if frames:
+            where = f" @ {os.path.basename(frames[-1].filename)}:{frames[-1].lineno}"
+    except Exception:  # silent-ok: 위치 표기는 부가 정보다. 여기서 죽으면 아래 CRASHED
+        pass           #            보고 자체가 사라져 원래 결함(완전 침묵)이 되살아난다.
+    detail = f"{getattr(exc_type, '__name__', exc_type)}: {exc}"
+    try:
+        print(json.dumps({
+            "systemMessage": (
+                f"[Quality Check] CRASHED — 점검을 **완료하지 못했다** ({detail}){where}. "
+                "이 줄이 없으면 '이상 없음' 과 구분되지 않으므로 명시한다. "
+                "재현: .venv/Scripts/python.exe scripts/quality_check.py"
+            ),
+            "structured": {"verified": False, "crashed": True, "error": detail},
+        }, ensure_ascii=False))
+    except Exception:  # silent-ok: 여기서 예외를 올리면 excepthook 안의 예외라 인터프리터가
+        pass           #            그냥 죽인다. 삼키는 게 아니라 마지막 방어선이다.
+
+
+sys.excepthook = _crash_reporter
+
 # 같은 scripts/ 디렉터리 — sys.path[0]로 해석된다. 단 이 import가 실패하면
 # 훅 커맨드의 `2>/dev/null || true`가 traceback을 삼켜 **게이트가 통째로 침묵**하므로
 # (= 이 스크립트가 막으려는 바로 그 fake-green) 폴백을 둔다.

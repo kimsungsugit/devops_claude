@@ -19,8 +19,27 @@ if [ ! -x "$PROJECT_PY" ]; then
     echo "⚠️  .venv python not found, falling back to PATH 'python'"
 fi
 
+# 0. 스테이징 목록을 **한 번만** 뽑는다 — 그리고 git 실패를 통과로 바꾸지 않는다.
+#
+# 예전엔 세 곳(STAGED_PY / STAGED_SKILL / STAGED_JS)이 전부 각자
+#   $(git diff --cached --name-only … | grep …)
+# 였다. 이 스크립트엔 `pipefail` 이 없어(전 파일 0건) 파이프의 종료코드는 **grep 만**
+# 결정한다. 그래서 `git diff --cached` 자체가 실패해도(index.lock 경합 등 — 이 저장소가
+# 실제로 겪은 사고다) 세 목록이 전부 빈 문자열이 되고
+#   [1/3] syntax → "No Python files staged, skipping"
+#   [2/3] ruff / eslint / frontmatter → if 조건이 거짓이라 **블록에 진입조차 안 함**
+# 이 되어 게이트 4개가 **경고 한 줄 없이** 사라진 채 "=== Pre-commit checks passed ===" 가
+# 찍힌다. `scripts/_ratchet_core.py` 는 같은 실패 모드를 이미 fail-closed(Disabled)로
+# 막는데, 정작 그 ratchet 을 **부를지 말지 정하는** 이 바깥 레이어만 무방비였다.
+if ! STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM); then
+    echo "❌ git diff --cached 실패 — 스테이징 목록을 못 읽었다."
+    echo "   목록이 비면 syntax/ruff/eslint/frontmatter 4개 게이트가 조용히 스킵된다."
+    echo "   미검증을 통과로 바꾸지 않는다. Commit aborted."
+    exit 1
+fi
+
 # 1. Python syntax check on staged .py files
-STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+STAGED_PY=$(printf '%s\n' "$STAGED_ALL" | grep '\.py$' || true)
 if [ -n "$STAGED_PY" ]; then
     echo "[1/3] Checking Python syntax..."
     for f in $STAGED_PY; do
@@ -42,7 +61,7 @@ fi
 #    레거시 backlog(ruff 위반·frontmatter)를 안 건드린다(변경 파일 ratchet).
 #    도구 부재는 DISABLED 로 명시(빈 출력을 clean 으로 읽지 않음 = anti-fake-green).
 set +e
-STAGED_SKILL=$(git diff --cached --name-only --diff-filter=ACM | grep 'SKILL\.md$')
+STAGED_SKILL=$(printf '%s\n' "$STAGED_ALL" | grep 'SKILL\.md$' || true)
 if [ -n "$STAGED_PY" ]; then
     # ratchet: 변경 라인의 **신규** 위반만 차단. 저장소 ruff backlog(1072건/247파일,
     # 2026-07-18 실측) 탓에 파일 전체 ruff 는 거의 모든 파일에서 레거시를 터뜨려
@@ -67,7 +86,7 @@ fi
 # node_modules 배제는 유지한다 — tracked 였던 2,186개는 이제 추적 해제됐지만(Initial commit
 # 에 휩쓸려 들어온 것), 누군가 다시 `git add -f` 하면 커맨드라인 길이 한계를 넘겨 eslint
 # 기동 자체가 실패한다. 방어는 남겨 두는 게 싸다.
-STAGED_JS=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/')
+STAGED_JS=$(printf '%s\n' "$STAGED_ALL" | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/' || true)
 if [ -n "$STAGED_JS" ]; then
     # ruff 와 같은 ratchet 원리. frontend-v2 는 오래 lint 게이트가 없어(config·의존성 부재)
     # 레거시 error 101건(2026-07-20 실측)이 쌓였다 — 파일 전체 eslint 는 건드리는 파일마다
