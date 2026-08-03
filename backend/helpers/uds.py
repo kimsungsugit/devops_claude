@@ -67,13 +67,11 @@ from backend.helpers.common import (
     _api_logger,
     _compact_symbol_simple,
     _has_meaningful_value,
-    _has_trace_token,
     _infer_related_id_simple,
     _is_allowed_req_doc,
     _is_trusted_source_for_field,
     _mtime_or_zero,
     _normalize_asil_simple,
-    _normalize_field_source,
     _normalize_symbol_simple,
     _parse_signature_outputs_simple,
     _parse_signature_params_simple,
@@ -418,9 +416,21 @@ def _enrich_function_quality_fields(uds_payload: Dict[str, Any]) -> None:
             if inferred_related:
                 info["related"] = inferred_related
                 info["related_source"] = "rule"
-        else:
-            if _normalize_field_source(info.get("related_source")) == "inference" and _has_trace_token(info.get("related")):
-                info["related_source"] = "rule"
+        # ⚠ 예전엔 여기 else 분기가 있었다. 지웠다.
+        #   `_normalize_field_source(related_source) == "inference" and _has_trace_token(related)`
+        #   → `related_source = "rule"`. **값은 안 바꾸고 라벨만 바꾼다** — 즉 한 일이
+        #   아무것도 없는데 근거 등급을 옮겼다.
+        #   `_normalize_field_source` 화이트리스트가 6종뿐이라 **밖의 13종이 전부** 이
+        #   조건에 걸렸다: `uds`·`swcom`·`sds_match`·`hsis`(0.95)·`rag`·`ai`(0.85)·
+        #   `call_graph`(0.80) 은 **하향**, `default`·`unknown`·`generated_doc`(0.30)·
+        #   `inference`(0.60)·`module_inherit`(0.70) 은 **근거 없는 상향**.
+        #   판정 근거는 `related` 값이 `SwFn_\d+` **모양이라는 것뿐**이다.
+        #   `report_gen/validation.py:1391-1393` 이 바로 이 패턴을 지우며
+        #   *"ID 가 SwFn_07 모양이라는 건 SRS 를 참조했다는 증거가 아니라 그냥 문자열
+        #   모양이다"* 라고 못박았다 — 계층이 다른 게 아니라 같은 규약을 어긴 것이다.
+        #   실측: `related_trusted_fill` 0%→100%, 사유코드 `RELATED_ID_TRUST_LOW` 소거.
+        #   local sync 경로는 enrich(`routers/local.py:1076`)가 신뢰도 리포트(`:1196`)보다
+        #   **먼저** 돌아, 납품 사이드카 `.field_confidence.md` 의 저신뢰 공시가 지워졌다.
 
     if isinstance(details, dict):
         for _, info in details.items():
