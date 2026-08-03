@@ -868,6 +868,16 @@ def llm_call(
         )
         return summary
 
+    # 절단 사실을 담아 둔다 — 아래에서 `meta_out` 으로 내보낸다.
+    #
+    # ⚠ 예전엔 절단이 **완전히 침묵**할 수 있었다. 경고가
+    #   `if total >= warn_threshold and log_dir:` 라 **`log_dir` 이 없으면 안 찍히는데**,
+    #   `workflow/uds_ai.py:341` 이 바로 `log_dir=None` 으로 부른다 — 이 저장소에서
+    #   가장 큰 프롬프트를 내는 경로가 하필 그쪽이다. 게다가 `meta_out["input_tokens_est"]`
+    #   는 **절단 뒤** 값이라 호출자는 원래 크기를 알 방법이 없었다("원래 그 크기였다"로 보인다).
+    #   값(상한)을 정하는 건 정책이지만, **잘랐다는 사실을 감추는 건 정책이 아니다.**
+    _trim_info: Dict[str, Any] = {"applied": False}
+
     def _trim_messages_to_token_budget(msgs: List[Dict[str, str]], max_tokens: int) -> List[Dict[str, str]]:
         if max_tokens <= 0:
             return msgs
@@ -880,6 +890,15 @@ def llm_call(
         if total <= max_tokens:
             return msgs
 
+        _trim_info.update({
+            "applied": True,
+            "limit_tokens": int(max_tokens),
+            "before_tokens_est": int(total),
+            "summarized": False,
+            "truncated_messages": 0,
+            "gave_up_over_limit": False,
+        })
+
         warn_threshold = int(policy.get("warn_input_tokens") or getattr(config, "LLM_WARN_INPUT_TOKENS", 200000))
         if total >= warn_threshold and log_dir:
             _agent_log(
@@ -889,6 +908,7 @@ def llm_call(
             )
 
         if total >= warn_threshold:
+            _trim_info["summarized"] = True
             for i, m in enumerate(msgs):
                 if m.get("role") == "system":
                     continue
@@ -913,7 +933,12 @@ def llm_call(
                 break
             content = msgs[idx].get("content", "")
             msgs[idx]["content"] = _truncate_middle(content, keep_head=2000, keep_tail=1200)
+            _trim_info["truncated_messages"] = int(_trim_info.get("truncated_messages") or 0) + 1
             total = _total_tokens()
+        # ⚠ 위 루프는 20회로 제한된다. 그 안에 예산 아래로 못 내려오면 **초과분을 그대로
+        #    보낸다** — 예전엔 그 사실도 아무 데도 안 남았다.
+        _trim_info["after_tokens_est"] = int(total)
+        _trim_info["gave_up_over_limit"] = bool(total > max_tokens)
         return msgs
 
     env_max = os.environ.get("LLM_MAX_INPUT_TOKENS", "").strip()
@@ -952,6 +977,22 @@ def llm_call(
         messages = _trim_messages_to_token_budget(messages, max_input_tokens)
         if meta_out is not None:
             meta_out["input_tokens_est"] = sum(_estimate_tokens(m.get("content", "")) for m in messages)
+            # ⚠ 위 `input_tokens_est` 는 **절단 뒤** 값이라 그것만으론 "원래 그 크기였다" 와
+            #    구분되지 않는다. 잘랐다는 사실·원래 크기·포기 여부를 함께 내보낸다.
+            #    `applied=False` 일 때도 키를 남긴다 — 키 부재를 "안 잘렸다" 로 읽으면
+            #    구 소비자와 신 소비자가 갈린다.
+            meta_out["input_trim"] = dict(_trim_info)
+            if _trim_info.get("applied"):
+                meta_out.setdefault("warnings", []).append(
+                    "input_truncated: {before}→{after} tokens (limit {limit}, stage={stage})".format(
+                        before=_trim_info.get("before_tokens_est"),
+                        after=_trim_info.get("after_tokens_est"),
+                        limit=_trim_info.get("limit_tokens"),
+                        stage=stage or "-",
+                    )
+                    + (" — 예산 아래로 못 내림(초과분 그대로 전송)"
+                       if _trim_info.get("gave_up_over_limit") else "")
+                )
     # ⚠ 절단 **뒤**에 가린다. 앞에서 가리면 `[REDACTED:...]` 자체가 절단에 잘려 나가
     # 시크릿 일부가 남을 수 있다. 여기가 프롬프트가 네트워크로 나가기 직전 지점이다.
     messages = sanitize_messages(messages)

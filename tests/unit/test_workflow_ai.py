@@ -487,3 +487,91 @@ class TestLlmCallDefensive:
 
         # Assert
         assert meta_out.get("error") == "empty_config"
+
+
+# ---------------------------------------------------------------------------
+# 입력 절단 보고 — 잘랐다는 사실을 감추지 않는다 (계획서 후보 17)
+# ---------------------------------------------------------------------------
+
+class _StopBeforeProvider(Exception):
+    """provider 진입 직전에 끊기 위한 sentinel — 네트워크를 타지 않는다."""
+
+
+class TestInputTrimIsReported:
+    """**가장 큰 프롬프트를 내는 경로에서 절단이 완전히 침묵했다** (2026-08-03 실측).
+
+    - 경고는 `if total >= warn_threshold and log_dir:` 라 **`log_dir` 이 없으면 안 찍힌다**.
+      그런데 `workflow/uds_ai.py:341` 이 바로 `log_dir=None` 으로 부른다.
+    - `meta_out["input_tokens_est"]` 는 **절단 뒤** 값이라 호출자는 원래 크기를 모른다
+      ("원래 그 크기였다"와 구분 불가).
+    - 절단 루프는 20회 제한이라 못 내려오면 **초과분을 그대로 보내는데** 그 사실도 안 남았다.
+
+    ⚠ 곁가지 실측: `config.py` 의 `max_input_tokens_by_stage` 는
+    `build_fix`/`syntax_fix`/`static`/`domain_tests`/`plan_repair`/`test_plan`/`test_code`
+    만 담는데, `uds_ai` 가 쓰는 stage 는 `uds_analysis`·`uds_audit`·`uds_logic`·
+    `uds_review`·`uds_sections` 5종이라 **stage 별 상한이 하나도 안 걸린다**(전역 상한만 적용).
+    상한 **값**을 정하는 건 정책이라 여기서 정하지 않는다 — 잘랐다는 **사실**만 못박는다.
+    """
+
+    def _run(self, monkeypatch, *, stage, limit, content):
+        monkeypatch.setattr(
+            ai_mod, "sanitize_messages",
+            lambda _m: (_ for _ in ()).throw(_StopBeforeProvider()),
+        )
+        meta: Dict[str, Any] = {}
+        try:
+            ai_mod.llm_call(
+                {"provider": "gemini", "model": "gemini-3.5-flash-lite",
+                 "api_key": "x", "max_input_tokens": limit},
+                [{"role": "system", "content": "sys"},
+                 {"role": "user", "content": content}],
+                stage=stage,
+                meta_out=meta,
+            )
+        except _StopBeforeProvider:
+            pass
+        return meta
+
+    def test_절단되면_원래_크기와_함께_보고된다(self, monkeypatch):
+        meta = self._run(monkeypatch, stage="uds_sections", limit=200, content="x" * 40_000)
+        trim = meta.get("input_trim")
+        assert trim, "input_trim 키 자체가 없다 — 절단 사실이 사라졌다"
+        assert trim["applied"] is True
+        assert trim["before_tokens_est"] > trim["after_tokens_est"], trim
+        assert trim["limit_tokens"] == 200
+        assert any("input_truncated" in w for w in meta.get("warnings", [])), meta.get("warnings")
+
+    def test_안_잘렸으면_키는_남되_applied_는_False(self, monkeypatch):
+        """키 부재를 '안 잘렸다' 로 읽으면 구/신 소비자가 갈린다 — 항상 키를 남긴다."""
+        meta = self._run(monkeypatch, stage="uds_sections", limit=1_000_000, content="short")
+        assert meta.get("input_trim") == {"applied": False}
+        assert not [w for w in meta.get("warnings", []) if "input_truncated" in w]
+
+    def test_예산_아래로_못_내리면_그_사실도_남는다(self, monkeypatch):
+        """20회 루프로도 안 되면 초과분을 그대로 보낸다 — 조용히 보내면 안 된다."""
+        meta = self._run(monkeypatch, stage="uds_sections", limit=1, content="y" * 40_000)
+        trim = meta["input_trim"]
+        assert trim["applied"] is True
+        assert trim["gave_up_over_limit"] is True, trim
+        assert any("초과분 그대로 전송" in w for w in meta.get("warnings", [])), meta.get("warnings")
+
+    def test_uds_stage_는_stage별_상한이_안_걸린다(self):
+        """실측 고정 — 이 사실이 바뀌면(=상한을 넣으면) 이 테스트가 알려 준다.
+
+        ⚠ 이 파일은 맨 위에서 **stub config** 를 설치해 `LLM_MODEL_POLICIES = {}` 로
+        만든다. 그래서 `import config` 로 읽으면 항상 빈 dict 를 보고 **아무것도
+        검증하지 못한다**. 실제 `config.py` 를 경로로 직접 읽는다.
+        """
+        import importlib.util
+
+        real = Path(__file__).resolve().parents[2] / "config.py"
+        spec = importlib.util.spec_from_file_location("_real_config_for_test", real)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)   # type: ignore[union-attr]
+
+        caps = mod.LLM_MODEL_POLICIES["gemini-3.5-flash-lite"]["max_input_tokens_by_stage"]
+        uds_stages = {"uds_analysis", "uds_audit", "uds_logic", "uds_review", "uds_sections"}
+        assert not (uds_stages & set(caps)), (
+            f"uds stage 에 상한이 생겼다(정책 변경) — 계획서 후보 17 을 갱신할 것: "
+            f"{sorted(uds_stages & set(caps))}"
+        )
