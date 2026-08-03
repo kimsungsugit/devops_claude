@@ -308,29 +308,41 @@ def _read_excel_artifact_sidecar(file_path: Path) -> Dict[str, Any]:
 def _infer_related_id_simple(info: Dict[str, Any]) -> str:
     if not isinstance(info, dict):
         return ""
+    # ⚠ `info.get("id")` 를 후보에서 뺐다(2026-08-03). 그게 **유일한 실사용 입구**였다 —
+    #   실 payload 86개 실측: 빈 `related` 5,780건이 전부 값을 받았고, **전부** 이
+    #   `id` 후보에서 나왔으며 **전부** `SwFn_N` 형태였다. 즉 함수 자신의 설계 ID
+    #   `SwUFn_0307` 을 `SwFn_0307` 로 **개명**해 Related ID 칸에 넣고 있었다.
+    #   함수 자신의 ID 는 "이 함수가 어느 요구/설계요소를 구현하는가" 의 답이 아니다.
+    #   실제 `SwUDS v3.02` 의 Related ID 는 SwDS **설계요소 ID**(`SwCom_NN`/`SwFn_NN`)로
+    #   1,035/1,035 채워져 있다(`docs/plans/UDS_RelatedID_SwFn_보강요청.md` §1).
+    #   그러니 개명은 **실재하는 네임스페이스 안에 근거 없는 ID 를 만들어 넣는 것**이라
+    #   리뷰어가 문서 유래와 구분할 수 없다 — 빈칸보다 나쁘다.
     candidates = [
         info.get("related"),
         info.get("related_id"),
         info.get("related_ids"),
         info.get("swcom"),
-        info.get("id"),
         info.get("partition"),
     ]
     for cand in candidates:
         text = str(cand or "").strip()
         if not text or text.upper() in {"N/A", "TBD", "-"}:
             continue
-        m = re.search(r"\b(SwCom_\d+|SwFn_\d+|SwUFn_\d+|SwSTR_\d+|SwST_\d+)\b", text, flags=re.I)
+        # ⚠ `SwUFn_\d+` 를 패턴에서 뺐다 — 위와 같은 이유다. Related ID 칸에 단위함수
+        #   설계 ID 가 적혀 있어도 그건 요구 추적이 아니라 자기 자신이다.
+        m = re.search(r"\b(SwCom_\d+|SwFn_\d+|SwSTR_\d+|SwST_\d+)\b", text, flags=re.I)
         if m:
             token = str(m.group(1) or "").strip()
-            if token.lower().startswith("swufn_"):
-                token = "SwFn_" + token.split("_", 1)[-1]
             token = token.replace("swcom", "SwCom")
             token = token.replace("swfn", "SwFn")
             token = token.replace("swstr", "SwSTR")
             token = token.replace("swst", "SwST")
             return token
-        return text
+        # ⚠ 예전엔 여기가 `return text` 였다 — ID 패턴이 **하나도 안 맞아도** 그 후보의
+        #   원문을 Related ID 로 반환했다(예: `partition="APP_Layer"` → Related ID 가
+        #   "APP_Layer"). 게다가 첫 후보에서 반환하므로 **뒤 후보를 아예 안 봤다**.
+        #   ID 가 아니면 넘어간다. 끝까지 못 찾으면 빈 값 — 지어내지 않는다.
+        continue
     return ""
 
 

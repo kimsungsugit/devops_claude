@@ -249,9 +249,20 @@ class TestInferRelatedIdSimple:
     def test_with_swcom(self):
         assert _infer_related_id_simple({"related": "SwCom_123"}) == "SwCom_123"
 
-    def test_with_swufn(self):
-        result = _infer_related_id_simple({"related": "SwUFn_42"})
-        assert "SwFn_42" in result
+    def test_swufn_is_not_renamed_into_a_requirement_id(self):
+        """⚠ 2026-08-03 로 **단언이 뒤집혔다**.
+
+        예전엔 `SwUFn_42` → `SwFn_42` 개명을 기대했다. 그 개명이 곧 지어내기였다:
+        `SwUFn_NN` 은 이 함수 **자신의** 단위설계 ID 이고 `SwFn_NN` 은 SwDS 의
+        **설계요소** ID 다. 번호가 같다는 근거는 어디에도 없는데, 실재하는
+        네임스페이스 안에 그럴듯한 ID 를 만들어 넣어 리뷰어가 문서 유래와
+        구분할 수 없게 만들었다.
+
+        실측(payload 86개): 빈 `related` **5,780건 전부**가 이 경로로 값을 받았고
+        전부 함수 자신의 `id` 에서 왔다. 상세는
+        `tests/unit/test_related_id_no_fabrication.py`.
+        """
+        assert _infer_related_id_simple({"related": "SwUFn_42"}) == ""
 
     def test_empty(self):
         assert _infer_related_id_simple({}) == ""

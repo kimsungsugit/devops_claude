@@ -93,6 +93,79 @@ class TestNoShapeBasedRelabel:
 
 
 # ---------------------------------------------------------------------------
+# 값 축 — 함수 자신의 ID 를 요구 ID 로 개명하던 것
+# ---------------------------------------------------------------------------
+
+class TestNoInventedRelatedId:
+    """`_infer_related_id_simple` 이 빈 Related ID 를 **지어내던** 경로.
+
+    실측(payload 86개, 2026-08-03): 빈 `related` **5,780건이 전부** 값을 받았고,
+    **전부** 함수 자신의 `id` 후보에서 나왔으며 **전부** `SwFn_N` 형태였다.
+    즉 `SwUFn_0307`(이 함수 자신의 단위설계 ID)을 `SwFn_0307`(SwDS 설계요소 ID)로
+    **개명**해 추적 칸에 넣었다. 번호가 대응한다는 근거는 어디에도 없다.
+
+    실제 `SwUDS v3.02` 의 Related ID 는 SwDS 설계요소 ID 로 1,035/1,035 채워져 있다
+    (`docs/plans/UDS_RelatedID_SwFn_보강요청.md` §1). 그래서 개명은 **실재하는
+    네임스페이스 안에 근거 없는 ID 를 만들어 넣는 것**이라 문서 유래와 구분되지 않는다.
+    """
+
+    def test_own_design_id_does_not_become_a_related_id(self):
+        out = _enrich({"name": "f", "id": "SwUFn_0307", "related": "TBD"})
+        assert out["related"] == "TBD", "함수 자신의 ID 를 요구 추적으로 둔갑시켰다"
+        assert "SwFn_0307" not in str(out.get("related") or "")
+
+    def test_own_id_is_not_a_candidate_even_when_it_looks_like_a_design_id(self):
+        """`id` 후보 제거 자체를 고정한다.
+
+        ⚠ 뮤테이션에서 드러났다: `SwUFn_` 을 정규식에서 뺀 뒤로는 `id` 후보를
+        되살려도 위 테스트가 안 깨진다(`SwUFn_0307` 이 어느 패턴에도 안 맞아서).
+        그래서 **`id` 가 설계 ID 모양인 경우**로 따로 못박는다 — 그때는 함수
+        자신의 ID 가 곧바로 자기 Related ID 가 된다.
+        """
+        from backend.helpers.common import _infer_related_id_simple
+
+        assert _infer_related_id_simple({"id": "SwCom_03", "related": "TBD"}) == ""
+
+    def test_swufn_in_the_related_cell_is_not_renamed(self):
+        """Related 칸에 단위함수 ID 가 적혀 있어도 요구 추적이 아니다."""
+        from backend.helpers.common import _infer_related_id_simple
+
+        assert _infer_related_id_simple({"related": "SwUFn_42"}) == ""
+
+    def test_non_id_text_is_not_used_as_a_related_id(self):
+        """`partition="APP_Layer"` 가 Related ID 가 되던 것."""
+        from backend.helpers.common import _infer_related_id_simple
+
+        assert _infer_related_id_simple({"partition": "APP_Layer", "related": ""}) == ""
+
+    def test_later_candidates_are_still_examined(self):
+        """⚠ 옛 코드는 첫 후보에서 **무조건 반환**해 뒤 후보를 못 봤다.
+
+        `swcom` 이 ID 가 아니면 거기서 그 원문을 Related ID 로 돌려주고 끝냈다.
+        이제 넘어가므로 뒤에 있는 진짜 ID 를 찾아낸다 — 수정이 회수를 **늘리는** 방향.
+        """
+        from backend.helpers.common import _infer_related_id_simple
+
+        got = _infer_related_id_simple(
+            {"swcom": "Motor Control", "partition": "SwCom_07", "related": ""})
+        assert got == "SwCom_07"
+
+    @pytest.mark.parametrize("info,expected", [
+        ({"related": "SwCom_123"}, "SwCom_123"),
+        ({"swcom": "SwCom_09", "related": "TBD"}, "SwCom_09"),
+        ({"related": "SwSTR_11"}, "SwSTR_11"),
+    ])
+    def test_real_design_ids_still_flow(self, info, expected):
+        """음성 대조군 — 실제 설계요소 ID 는 계속 채워져야 한다.
+
+        이게 없으면 "아무것도 안 채우게" 과교정한 걸 아무도 못 본다.
+        """
+        from backend.helpers.common import _infer_related_id_simple
+
+        assert _infer_related_id_simple(info) == expected
+
+
+# ---------------------------------------------------------------------------
 # 지표 축 — 재라벨이 게이트를 통과시키던 것
 # ---------------------------------------------------------------------------
 
