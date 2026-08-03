@@ -140,8 +140,19 @@ def invalidate_gate_cache() -> None:
     _gate_cache = ("", False, 0.0)
 
 
-def _ping_worker(host: str, port: int, timeout: float = _PING_TIMEOUT) -> bool:
-    """worker TCP server에 ping op 전송 → pong 수신 시 True."""
+def _ping_worker(host: str, port: int, timeout: Optional[float] = None) -> bool:
+    """worker TCP server에 ping op 전송 → pong 수신 시 True.
+
+    ⚠ `timeout` 기본값을 `_PING_TIMEOUT` 으로 **직접 쓰면 안 된다**. 기본 인자는 `def`
+    시점에 한 번 평가돼 상수에 얼어붙으므로, 이후 `_PING_TIMEOUT` 을 바꿔도(설정 튜닝·
+    테스트 monkeypatch) **아무 효과가 없다** — 바꾼 쪽은 바꿨다고 믿는데 값은 그대로다.
+    실제로 이 함정이 조사를 한 번 헛돌렸다: 병렬 실행에서 나던 flake 를 "ping timeout
+    가설" 로 보고 `_PING_TIMEOUT` 을 0.0001 로 낮춰 반증했다고 기록했는데, 그 실험
+    자체가 no-op 이라 아무것도 검증하지 않았다. 부하를 준 채 제대로 재현하니 60회 중
+    13회 실패했다(무부하 0회) — 가설은 맞았고 반증이 틀렸다.
+    """
+    if timeout is None:
+        timeout = _PING_TIMEOUT
     req = json.dumps({"id": "ping", "op": "ping", "args": {}}).encode("utf-8") + b"\n"
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:

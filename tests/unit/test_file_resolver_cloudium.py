@@ -36,7 +36,16 @@ def _reset_resolver_and_gate_cache(monkeypatch, tmp_path):
     돌고 나면 **이후 모든 테스트가 Local resolver 를 물려받았다**. 누설을 막으려던
     fixture 가 곧 누설원이었다 — 실제로 test_routers.py 14건이 이 누설에 얹혀
     통과하다가 단독 실행 시에만 실패했다(dev 머신 file_mode=cloudium).
+
+    ⚠ ping 예산: 게이트 검사는 `_MockWorker` 의 accept 스레드가 **0.5초 안에 스케줄
+    되기**를 요구한다. `-n auto`(18워커)로 CPU 가 포화되면 그 스레드가 제때 못 깨어
+    `PermissionError: Cloudium worker 미응답` 이 난다 — 코드 결함이 아니라 **테스트가
+    실시간 응답에 건 가정**이다. 실측: 부하 O 60회 중 13회 실패 / 부하 X 0회.
+    프로덕션 값(0.5초)은 실사용 live-ness 지연이라 정책이므로 건드리지 않고, 테스트에서만
+    넉넉히 준다. (`_ping_worker` 가 이 값을 **호출 시점에** 읽도록 고친 뒤에야 유효해졌다
+    — 기본 인자로 얼어붙어 있던 동안엔 이 monkeypatch 가 no-op 이었다.)
     """
+    monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 15.0)
     _orig_resolver = file_resolver._resolver  # None 일 수 있음(lazy init 전)
     file_resolver.invalidate_gate_cache()
     file_resolver.set_resolver(file_resolver.LocalFileResolver())
@@ -1567,3 +1576,65 @@ def test_asgi_middleware_no_unexpected_message_error_on_streaming_response(
     assert "Unexpected message received" not in log_text, (
         f"starlette known issue #1438 재발 — 로그에 Unexpected message: {log_text[:300]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 후보 25 — ping 예산이 **호출 시점에** 읽히는가
+# ---------------------------------------------------------------------------
+class TestPingTimeoutIsLive:
+    """`_PING_TIMEOUT` 을 바꾸면 실제로 바뀌어야 한다.
+
+    예전 시그니처는 `timeout: float = _PING_TIMEOUT` 이었다. 기본 인자는 `def` 시점에
+    한 번 평가돼 상수에 얼어붙으므로, 이후 값을 바꿔도(설정 튜닝·테스트 monkeypatch)
+    **아무 효과가 없다** — 바꾼 쪽은 바꿨다고 믿는데 값은 그대로다.
+
+    이 함정이 조사를 한 번 헛돌렸다: 병렬 실행 flake 를 "ping timeout 가설" 로 보고
+    `_PING_TIMEOUT` 을 0.0001 로 낮춰 **반증했다고 기록**했는데, 그 실험이 no-op 이라
+    아무것도 검증하지 않았다. 부하를 준 채 제대로 재현하니 **60회 중 13회 실패**
+    (무부하 0회), 예산을 키우니 0회 — 가설은 맞았고 반증이 틀렸다.
+
+    되돌리면 다시 **조용히** no-op 이 되므로(실패가 아니라 무반응) 값으로 잠근다.
+    """
+
+    def _capture_timeout(self, monkeypatch):
+        seen = {}
+
+        def _fake_create_connection(addr, timeout=None, **_kw):
+            seen["timeout"] = timeout
+            raise OSError("stop here — 연결 자체는 이 테스트의 관심사가 아니다")
+
+        monkeypatch.setattr(file_resolver.socket, "create_connection",
+                            _fake_create_connection)
+        return seen
+
+    def test_module_constant_is_read_at_call_time(self, monkeypatch):
+        seen = self._capture_timeout(monkeypatch)
+        monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 7.25)
+
+        assert file_resolver._ping_worker("127.0.0.1", 1) is False
+        assert seen["timeout"] == 7.25, (
+            "기본 인자가 상수에 얼어붙었다 — _PING_TIMEOUT 을 바꿔도 무시된다")
+
+    def test_explicit_timeout_still_wins(self, monkeypatch):
+        seen = self._capture_timeout(monkeypatch)
+        monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 7.25)
+
+        file_resolver._ping_worker("127.0.0.1", 1, timeout=0.125)
+        assert seen["timeout"] == 0.125
+
+    def test_signature_does_not_freeze_the_constant(self):
+        """시그니처를 되돌리면 위 두 테스트보다 먼저 여기서 걸린다."""
+        import inspect
+
+        default = inspect.signature(file_resolver._ping_worker).parameters["timeout"].default
+        assert default is None, (
+            f"timeout 기본값이 {default!r} 로 고정됐다 — 모듈 상수 변경이 무시된다")
+
+    def test_gate_check_uses_the_live_budget(self, monkeypatch):
+        """`is_gate_running` 경유로도 살아 있어야 한다(직접 호출만 고치면 반쪽)."""
+        seen = self._capture_timeout(monkeypatch)
+        monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 3.5)
+        file_resolver.invalidate_gate_cache()
+
+        assert file_resolver.is_gate_running(host="127.0.0.1", port=1) is False
+        assert seen["timeout"] == 3.5
