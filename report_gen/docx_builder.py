@@ -1699,6 +1699,56 @@ def _write_gen_stats(output_path: str, stats: Dict[str, Any]) -> None:
         _logger.warning("생성 통계 sidecar 기록 실패(%s) — 문서 자체는 정상", e)
 
 
+def rejoin_function_maps(
+    function_details: Any,
+    function_details_by_name: Any,
+) -> int:
+    """`function_details_by_name` 값을 `function_details` 값과 **같은 객체로** 되돌린다.
+
+    ## 왜 필요한가
+
+    payload 는 두 맵을 **둘 다** 싣는다(`jenkins.py:2529` · `local.py:967`·`:1457` ·
+    `backend/helpers/uds.py:1711` — 4개 빌더 전부). 라우터 시점에는 같은 dict 를 가리키지만,
+    docx 생성은 `_run_docx_in_subprocess`(`backend/helpers/uds.py:1277`)가 payload 를
+    **JSON 파일로 써서 서브프로세스에 넘기므로** 역직렬화 시점에 갈라진다.
+
+    갈라진 뒤가 문제다. 해석 루프(주석-ASIL 승격 · SDS 주입 · `req_map` · 모듈 ASIL 상속)는
+    `function_details` **전용**인데 렌더러 `_resolve_function_info` 는
+    `function_details_by_name` 을 **먼저** 조회한다(키는 양쪽 다 소문자라 적중한다).
+    즉 렌더러가 **enrich 되지 않은 사본**을 그린다 — 예외도 경고도 없다.
+
+    ## 규칙
+
+    - 이름(소문자)으로 이어 붙인다. 이후 모든 변경이 두 맵에 동시에 보인다.
+    - `by_name` 에만 있는 항목(orphan)은 **버리지 않는다** — 지우면 렌더러가 찾던 함수가
+      사라져 결함을 반대 방향으로 만든다.
+    - 사본에만 있던 값은 잃지 않는다. 정본이 **비어 있는** 키만 옮긴다(덮어쓰지 않는다).
+
+    Returns:
+        재결합한 항목 수(0 이면 원래 같은 객체였다는 뜻 — 로컬 동기 경로 등).
+    """
+    if not isinstance(function_details, dict) or not isinstance(function_details_by_name, dict):
+        return 0
+    canonical: Dict[str, Dict[str, Any]] = {}
+    for info in function_details.values():
+        if isinstance(info, dict):
+            nm = str(info.get("name") or "").strip().lower()
+            if nm:
+                canonical.setdefault(nm, info)
+    rejoined = 0
+    for nm, cur in list(function_details_by_name.items()):
+        tgt = canonical.get(str(nm).strip().lower())
+        if tgt is None or tgt is cur:
+            continue
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if v not in (None, "", [], {}) and tgt.get(k) in (None, "", [], {}):
+                    tgt[k] = v
+        function_details_by_name[nm] = tgt
+        rejoined += 1
+    return rejoined
+
+
 def generate_uds_docx(
     template_path: Optional[str],
     uds_payload: Dict[str, Any],
@@ -1838,6 +1888,14 @@ def generate_uds_docx(
             }
         if rebuilt:
             function_details_by_name = rebuilt
+
+    _rejoined = rejoin_function_maps(function_details, function_details_by_name)
+    if _rejoined:
+        generation_warnings.append(
+            f"function_details_by_name {_rejoined}건을 function_details 와 재결합했다"
+            " (JSON 왕복으로 갈라진 사본 — 해석 루프 결과가 렌더러에 반영되지 않던 경로)"
+        )
+
     # payload 우선, 없으면 소스루트 폴백이 파싱한 것 사용.
     call_map = payload.get("call_map", {}) or _fallback_call_map or {}
     if isinstance(call_map, dict) and call_map:
