@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,24 @@ WEAK_PAYLOAD = {
         }
     }
 }
+
+
+_WEAK_PAYLOAD_SNAPSHOT = copy.deepcopy(WEAK_PAYLOAD)
+
+
+@pytest.fixture(autouse=True)
+def _weak_payload_must_stay_pristine():
+    """모듈 전역 픽스처가 테스트 사이에 변형되면 **순서 의존**이 생긴다.
+
+    이 파일의 테스트 12곳이 `WEAK_PAYLOAD` 를 복사 없이 리포트에 넘긴다. 리포트가
+    입력을 제자리 변경하던 시절엔 첫 테스트가 그걸 오염시켰고, 뒤 테스트는 오염된
+    상태를 보면서도 통과했다(= 결함이 자기 탐지를 가림). 리포트가 더 이상 입력을
+    변경하지 않으므로 이 가드는 그 회귀를 즉시 드러낸다.
+    """
+    yield
+    assert WEAK_PAYLOAD == _WEAK_PAYLOAD_SNAPSHOT, (
+        "모듈 전역 WEAK_PAYLOAD 가 테스트 중에 변형됐다 — 뒤 테스트가 순서에 의존하게 된다"
+    )
 
 
 class _FakeDoc:
@@ -439,3 +458,77 @@ class TestNoShapeBasedSourceAssignment:
                 if isinstance(sub, ast.Constant) and sub.value in {"srs", "sds", "rule", "reference"}:
                     offenders.append(sub.value)
         assert not offenders, f"모양 기반 출처 배정이 남아 있다: {sorted(set(offenders))}"
+
+
+class TestReportDoesNotMutateCallerPayload:
+    """**리포트가 자기가 감사할 게이트를 부풀리고 있었다** (2026-08-03 실측).
+
+    `details_by_name` 은 `payload["function_details_by_name"]` **그 자체**이고 그 값들은
+    `function_details` 와 같은 객체다. 생성 DOCX 병합을 그 객체에 직접 하면 리포트가
+    **입력을 변경**한다. 그리고 라우터는 이 리포트 **뒤에** quick gate 를 계산해 DB 에 넣는다:
+
+        jenkins.py        L2600(confidence) -> L2634(quick gate)
+        helpers/uds.py    L1827             -> L1860
+        local.py          L1197             -> L1236 (두 번째 기록)
+
+    실측(함수 5개): `asil_fill` · `description_fill` · `related_fill` 이 **0.0 -> 100.0**.
+    fill 카운터는 출처를 안 보므로, §5-13 이 `generated_doc`=0.30 으로 정직화한 것과
+    무관하게 100% 로 잡힌다 — 출처는 정직한데 **분량은 부풀려진다**.
+
+    부수 효과로 계획서 후보 15(리포트 timeout 시 payload 제자리 변경 경합)도 닫힌다:
+    타임아웃된 스레드가 계속 돌아도 이제 남의 payload 를 못 만진다.
+    """
+
+    def _payload(self):
+        """⚠ 전역 `WEAK_PAYLOAD` 를 쓰지 않고 **리터럴로 새로 만든다.**
+
+        옛 코드는 payload 를 제자리 변경하므로, 이 파일의 다른 테스트 12곳이
+        `WEAK_PAYLOAD`(모듈 전역)를 **복사 없이** 넘기면서 그걸 오염시킨다.
+        오염된 뒤엔 병합 조건이 이미 충족돼 no-op 이 되고, 여기서 그 전역을
+        deepcopy 하면 **결함이 자기 탐지를 가린다** — 실제로 그랬다:
+        단독 실행은 실패하는데 파일 전체 실행은 통과했다.
+        """
+        fn = {
+            "id": "SwUFn_07", "name": "Ecu_HandleFault",
+            "description": "", "description_source": "inference",
+            "asil": "", "asil_source": "default",
+            "related": "", "related_source": "inference",
+        }
+        # 라우터가 싣는 모양 — 두 맵이 **같은 객체**를 가리킨다(docx_builder 재결합 후 특히).
+        return {"function_details": {"SwUFn_07": fn},
+                "function_details_by_name": {"ecu_handlefault": fn}}
+
+    def test_payload_is_untouched(self, report):
+        import copy as _c
+
+        payload = self._payload()
+        before = _c.deepcopy(payload)
+        report(payload)
+        assert payload == before, (
+            "리포트가 호출자의 payload 를 변경했다 — "
+            f"변경 후: {payload['function_details_by_name']['ecu_handlefault']}"
+        )
+
+    def test_quick_gate_is_unchanged_by_running_the_report(self, report):
+        """감사 도구를 돌렸다고 감사 대상 수치가 움직이면 안 된다."""
+        from backend.helpers.uds import _compute_quick_quality_gate
+
+        payload = self._payload()
+        before = _compute_quick_quality_gate(payload)["rates"]
+        report(payload)
+        after = _compute_quick_quality_gate(payload)["rates"]
+
+        for key in ("asil_fill", "description_fill", "related_fill"):
+            assert before.get(key) == after.get(key), (
+                f"{key} 가 리포트 실행만으로 {before.get(key)} -> {after.get(key)} 로 움직였다"
+            )
+
+    def test_report_still_sees_the_merged_values(self, report):
+        """⚠ 음성 대조군 — 사본으로 바꾸면서 병합 자체를 죽이면 리포트가 무의미해진다.
+
+        병합 결과는 리포트의 **자기 분석용**으로 살아 있어야 한다: 생성 문서에서 회수한
+        값이므로 `generated_doc`(0.30) 로 평가되고 저신뢰로 남아야 한다.
+        """
+        text = report(self._payload())
+        assert "생성 문서 회수" in text, "병합이 통째로 죽어 문서 유래 값을 못 봤다"
+        assert _score(text) <= 0.35, f"생성 문서 유래인데 점수가 높다: {_score(text)}"

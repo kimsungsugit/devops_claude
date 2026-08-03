@@ -1342,6 +1342,29 @@ def generate_asil_related_confidence_report(
                     fid = str(row.get("id") or "").strip()
                     if fid:
                         by_id_from_doc[fid] = row
+                # ⚠ **호출자의 payload 를 건드리지 않는다.**
+                #
+                # `details_by_name` 은 `payload["function_details_by_name"]` 그 자체이고,
+                # 그 값들은 `function_details` 와 **같은 객체**다(docx_builder 의 재결합
+                # 이후 특히). 아래 병합을 그 객체에 직접 하면 리포트가 입력을 변경한다.
+                # 실측(2026-08-03) — 함수 5개 payload 에 이 리포트를 돌리면:
+                #
+                #     asil_fill 0.0 -> 100.0 · description_fill 0.0 -> 100.0
+                #     related_fill 0.0 -> 100.0   (전부 `*_source = generated_doc`)
+                #
+                # 그리고 라우터는 이 리포트 **뒤에** quick gate 를 계산해 DB 에 넣는다
+                # (`jenkins.py` L2600->L2634, `helpers/uds.py` L1827->L1860,
+                #  `local.py` 의 두 번째 기록 L1197->L1236). 즉 **출처를 감사해야 할
+                # 리포트가 자기가 감사할 게이트를 부풀린다**. fill 카운터는 출처를 안 보므로
+                # §5-13 이 `generated_doc`=0.30 으로 정직화한 것과 무관하게 100% 로 잡힌다.
+                #
+                # 부수 효과로 후보 15(리포트 timeout 시 payload 제자리 변경 경합)도 닫힌다 —
+                # 타임아웃된 스레드가 계속 돌아도 이제 남의 payload 를 못 만진다.
+                # 병합 결과는 이 리포트의 **자기 분석용**이므로 사본이면 충분하다.
+                details_by_name = {
+                    k: (dict(v) if isinstance(v, dict) else v)
+                    for k, v in details_by_name.items()
+                }
                 for name, info in list(details_by_name.items()):
                     if not isinstance(info, dict):
                         continue
