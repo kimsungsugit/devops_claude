@@ -10,6 +10,48 @@ from report_gen.source_parser import _read_text_limited  # noqa: F401  (leaf mod
 
 _logger = logging.getLogger("report_generator")
 
+def function_name_key(name: Any) -> str:
+    """`function_details_by_name` 의 **키 규칙 단일 출처**.
+
+    ⚠ 이 규칙이 갈리면 조용히 깨진다. 2026-08-03 실측:
+
+        report_gen/uds_generator.py::_put_by_name   `.strip().lower()`   ← 정본
+        backend/routers/jenkins.py                  `.strip().lower()`   ✓
+        backend/routers/local.py                    `.strip()`           ✗ 원형 유지
+        tools/generate_uds_local.py                 `.strip()`           ✗ 원형 유지
+
+    그런데 **조회는 전부 소문자**다 — `docx_builder` 13곳, `backend/routers/code.py:126`,
+    `backend/routers/test_gen.py:32`, `uds_generator` 4곳. 즉 local 경로에서 만든 맵은
+    이름에 대문자가 있는 함수를 **전부 못 찾는다**. 실측 표본에서 350개 중 **267개(76.3%)**
+    가 대문자를 포함한다.
+
+    맞으면 아무 일도 안 일어나고 틀리면 조용히 miss 다 — 그래서 규칙을 한 곳에 둔다.
+    """
+    return str(name or "").strip().lower()
+
+
+def build_function_details_by_name(details: Any) -> Dict[str, Any]:
+    """`function_details` → `function_details_by_name`(이름 키) 재구성.
+
+    라우터 3곳(local·jenkins·tools)이 같은 루프를 복제하고 있었고 그중 둘이 키 규칙을
+    틀렸다. 값은 **원본 객체 그대로** 담는다 — 사본을 넣으면 문서 생성의 in-place 갱신이
+    반영되지 않는다(`uds_generator._put_by_name` docstring 참조).
+
+    동명 함수는 last-wins 다(기존 동작 유지). 충돌 기록이 필요한 경로는
+    `_put_by_name(collisions=...)` 를 쓴다.
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(details, dict):
+        return out
+    for info in details.values():
+        if not isinstance(info, dict):
+            continue
+        key = function_name_key(info.get("name"))
+        if key:
+            out[key] = info
+    return out
+
+
 def _safe_dict(x) -> Dict[str, Any]:
     return x if isinstance(x, dict) else {}
 

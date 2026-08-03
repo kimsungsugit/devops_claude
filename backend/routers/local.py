@@ -115,6 +115,7 @@ from backend.services.local_service import (
 from backend.services.paths import is_under_any
 from backend.user_context import wrap_with_user
 from report_gen.provenance import is_weak_source
+from report_gen.utils import build_function_details_by_name
 from report_generator import (
     _build_req_map_from_doc_paths,
     enrich_function_details_with_docs,
@@ -542,14 +543,12 @@ def _enrich_source_sections_with_docs(
     )
     sections["function_details"] = details
 
-    rebuilt_by_name: Dict[str, Any] = {}
-    for _, info in details.items():
-        if not isinstance(info, dict):
-            continue
-        name = str(info.get("name") or "").strip()
-        if name:
-            rebuilt_by_name[name] = info
-    sections["function_details_by_name"] = rebuilt_by_name
+    # ⚠ 키 규칙은 `report_gen.utils.function_name_key` **단일 출처**를 따른다.
+    #    여기 있던 인라인 루프는 `.strip()` 만 해서 **원형 대소문자**를 키로 썼는데,
+    #    조회는 전부 소문자다(`docx_builder` 13곳 · `code.py:126` · `test_gen.py:32` ·
+    #    `uds_generator` 4곳). 실측 표본 350개 중 267개(76.3%)가 대문자를 포함해
+    #    그만큼 **조용히 miss** 했다. jenkins 경로는 처음부터 소문자였다(비대칭).
+    sections["function_details_by_name"] = build_function_details_by_name(details)
     return sections, req_paths, sds_paths
 
 

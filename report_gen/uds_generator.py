@@ -107,6 +107,7 @@ from report_gen.utils import (
     _extract_simple_call_names,
     _safe_dict,
     _infer_type_from_file,
+    function_name_key,
 )
 
 _logger = logging.getLogger("report_generator")
@@ -181,7 +182,7 @@ def _put_by_name(
     → by_name은 **동일성 유지(last-wins 그대로)**, 충돌 사실은 별도 맵(`collisions`)에 기록한다.
       소비자(영향분석)는 자신의 deepcopy에 이 정보를 얹어 쓴다.
     """
-    key = str(name or "").strip().lower()
+    key = function_name_key(name)
     if not key:
         return
     prev = by_name.get(key)

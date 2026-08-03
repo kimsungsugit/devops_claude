@@ -114,6 +114,7 @@ from backend.user_context import wrap_with_user
 
 # 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.
 from report_gen.trace_link_table import build_link_table
+from report_gen.utils import build_function_details_by_name
 
 # 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기를 수정하지 않고 그 출력만 소비.
 from report_generator import (
@@ -2461,14 +2462,9 @@ async def jenkins_uds_generate(
                 sds_doc_paths=sds_doc_paths,
             )
             source_sections["function_details"] = details
-            rebuilt_by_name: Dict[str, Any] = {}
-            for _, info in details.items():
-                if not isinstance(info, dict):
-                    continue
-                name = str(info.get("name") or "").strip().lower()
-                if name:
-                    rebuilt_by_name[name] = info
-            source_sections["function_details_by_name"] = rebuilt_by_name
+            # 키 규칙은 `report_gen.utils.function_name_key` 단일 출처.
+            # (이 경로는 원래도 소문자였지만 local·tools 판은 아니었다 — 복제가 원인이다.)
+            source_sections["function_details_by_name"] = build_function_details_by_name(details)
     req_from_docs = generate_uds_requirements_from_docs(req_texts) if req_texts else ""
     req_map = _build_req_map_from_doc_paths(req_doc_paths, req_texts) if req_texts or req_doc_paths else {}
     logic_items: List[Dict[str, Any]] = []

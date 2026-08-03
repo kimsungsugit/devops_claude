@@ -235,15 +235,12 @@ def _enrich_source_sections_with_docs(
         if str(info.get("related_source") or "").strip() in {"sds", "hsis", "srs"}:
             _append_evidence(info, "related_evidence_sources", str(info.get("related_source") or "").strip())
 
-    rebuilt_by_name: dict[str, dict] = {}
-    for info in details.values():
-        if not isinstance(info, dict):
-            continue
-        name = str(info.get("name") or "").strip()
-        if name:
-            rebuilt_by_name[name] = info
+    # ⚠ 여기도 `.strip()` 만 해서 **원형 대소문자**를 키로 썼다(local.py 와 같은 결함).
+    #    조회는 전부 소문자라 대문자 포함 함수를 통째로 못 찾았다.
+    from report_gen.utils import build_function_details_by_name
+
     sections["function_details"] = details
-    sections["function_details_by_name"] = rebuilt_by_name
+    sections["function_details_by_name"] = build_function_details_by_name(details)
     return sections
 
 

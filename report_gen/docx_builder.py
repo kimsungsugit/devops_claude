@@ -54,6 +54,7 @@ from report_gen.utils import (
     _normalize_swufn_id,
     _safe_dict,
     _table_rows_from_texts,
+    function_name_key,
 )
 
 _logger = logging.getLogger("report_generator")
@@ -1732,12 +1733,12 @@ def rejoin_function_maps(
     canonical: Dict[str, Dict[str, Any]] = {}
     for info in function_details.values():
         if isinstance(info, dict):
-            nm = str(info.get("name") or "").strip().lower()
+            nm = function_name_key(info.get("name"))
             if nm:
                 canonical.setdefault(nm, info)
     rejoined = 0
     for nm, cur in list(function_details_by_name.items()):
-        tgt = canonical.get(str(nm).strip().lower())
+        tgt = canonical.get(function_name_key(nm))
         if tgt is None or tgt is cur:
             continue
         if isinstance(cur, dict):
