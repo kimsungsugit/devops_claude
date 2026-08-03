@@ -206,4 +206,36 @@ describe('QualityDashboard', () => {
     // Assert
     expect(screen.getByText('점수 트렌드')).toBeInTheDocument();
   });
+
+  describe('403 은 장애가 아니라 권한 상태다', () => {
+    /* `/api/quality/*` 는 라우터 전체가 admin 전용이다(backend/routers/quality.py:16-20).
+     * 비관리자에게 403 은 **정상 응답**인데, 이걸 "로드 실패" 로 토스트하면 사용자가
+     * 고칠 수 없는 오류를 반복해서 본다. */
+    it('403 이면 에러 토스트를 띄우지 않고 권한 안내를 보여준다', async () => {
+      const err = new Error('Forbidden');
+      err.status = 403;
+      mockApi.mockRejectedValue(err);
+
+      render(<QualityDashboard />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/관리자 전용 화면입니다/)).toBeInTheDocument();
+      });
+      expect(mockToast).not.toHaveBeenCalled();
+    });
+
+    it('403 이 아닌 장애는 여전히 에러 토스트를 띄운다', async () => {
+      const err = new Error('boom');
+      err.status = 500;
+      mockApi.mockRejectedValue(err);
+
+      render(<QualityDashboard />);
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith('error', expect.stringContaining('boom'));
+      });
+      // 권한 안내로 오분류하면 진짜 장애가 "권한 없음" 으로 위장된다
+      expect(screen.queryByText(/관리자 전용 화면입니다/)).not.toBeInTheDocument();
+    });
+  });
 });

@@ -234,6 +234,25 @@ export default function App() {
 
   const TABS = adminMode ? ALL_TABS : ALL_TABS.filter(t => !t.adminOnly);
 
+  // ⚠ 뷰는 **처음 열어 본 뒤에만** 마운트한다(그 뒤로는 keep-alive — display 토글).
+  //
+  // 예전엔 4뷰가 전부 **항상 마운트**됐다(조건부 언마운트 0건). 그래서 Quality 탭이
+  // 보이지 않는 사용자에게도 `QualityDashboard` 의 mount effect 가 즉시 발화하고,
+  // `/api/quality/*` 는 라우터 전체가 admin 전용이라(`backend/routers/quality.py:16-20`)
+  // 403 을 받아 **매 앱 로드마다 빨간 에러 토스트 + '데이터 로드 실패' 패널**이 떴다.
+  // 사용자가 아무것도 안 눌렀는데 실패가 보인다.
+  //
+  // Detail 이 섹션에 쓰는 visited-lazy 와 같은 방식이다(`Detail.jsx` 의 visited).
+  // 부수 효과로 admin 도 Quality 탭을 안 열면 요청이 0건이 된다.
+  // 구현은 `Detail.jsx:67-74`(섹션 keep-alive)와 **같은 패턴**을 쓴다 — 첫 방문에만
+  // 한 번 추가되고 `has()` 로 막혀 있어 재렌더가 누적되지 않는다.
+  const [visited, setVisited] = useState(() => new Set([activeTab]));
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 활성 탭을 방문 기록에 누적(keep-alive 파생 집합). Detail.jsx:71-74 와 동일 패턴
+    setVisited((prev) => (prev.has(activeTab) ? prev : new Set(prev).add(activeTab)));
+  }, [activeTab]);
+  const isMounted = (id) => id === activeTab || visited.has(id);
+
   useEffect(() => {
     document.body.setAttribute('data-theme', theme);
     saveTheme(theme);
@@ -358,18 +377,26 @@ export default function App() {
             <div className="app-body">
               <div className="tab-content">
                 <ErrorBoundary>
-                  <div style={{ display: activeTab === 'dashboard' ? 'block' : 'none' }}>
-                    <Dashboard onGoDetail={(section) => { setActiveTab('detail'); if (section) setTimeout(() => window.__detailSection?.(section), 100); }} />
-                  </div>
-                  <div style={{ display: activeTab === 'detail' ? 'block' : 'none' }}>
-                    <Detail />
-                  </div>
-                  <div style={{ display: activeTab === 'quality' ? 'block' : 'none' }}>
-                    <QualityDashboard />
-                  </div>
-                  <div style={{ display: activeTab === 'settings' ? 'block' : 'none' }}>
-                    <Settings />
-                  </div>
+                  {isMounted('dashboard') && (
+                    <div style={{ display: activeTab === 'dashboard' ? 'block' : 'none' }}>
+                      <Dashboard onGoDetail={(section) => { setActiveTab('detail'); if (section) setTimeout(() => window.__detailSection?.(section), 100); }} />
+                    </div>
+                  )}
+                  {isMounted('detail') && (
+                    <div style={{ display: activeTab === 'detail' ? 'block' : 'none' }}>
+                      <Detail />
+                    </div>
+                  )}
+                  {isMounted('quality') && (
+                    <div style={{ display: activeTab === 'quality' ? 'block' : 'none' }}>
+                      <QualityDashboard />
+                    </div>
+                  )}
+                  {isMounted('settings') && (
+                    <div style={{ display: activeTab === 'settings' ? 'block' : 'none' }}>
+                      <Settings />
+                    </div>
+                  )}
                 </ErrorBoundary>
               </div>
             </div>

@@ -24,6 +24,16 @@ vi.mock('../views/Detail.jsx', () => ({
 vi.mock('../views/Settings.jsx', () => ({
   default: () => <div data-testid="settings">Settings</div>,
 }));
+// Quality 뷰는 **마운트 여부 자체**가 검증 대상이라 스파이를 둔다.
+// 예전엔 4뷰가 전부 항상 마운트돼, 보이지도 않는 Quality 의 mount effect 가
+// admin 전용 endpoint 를 때려 비관리자에게 매 로드마다 403 토스트가 떴다.
+const qualityMountSpy = vi.fn();
+vi.mock('../views/QualityDashboard.jsx', () => ({
+  default: () => {
+    qualityMountSpy();
+    return <div data-testid="quality">Quality</div>;
+  },
+}));
 
 // Mock fetch for health check
 globalThis.fetch = vi.fn(() => Promise.resolve({
@@ -66,6 +76,34 @@ describe('App', () => {
     await user.click(screen.getByText('프로젝트 결과'));
     expect(screen.getByText('프로젝트 결과')).toHaveClass('active');
     expect(screen.getByText('대시보드')).not.toHaveClass('active');
+  });
+
+  describe('탭 lazy 마운트 (안 열어 본 뷰는 요청하지 않는다)', () => {
+    it('처음 렌더에서 Quality 뷰를 마운트하지 않는다', () => {
+      render(<App />);
+      // 예전엔 여기서 마운트돼 `/api/quality/*` 로 403 을 받고
+      // 빨간 '데이터 로드 실패' 패널 + 에러 토스트가 떴다 — 사용자는 아무것도 안 눌렀다.
+      expect(qualityMountSpy).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('quality')).not.toBeInTheDocument();
+    });
+
+    it('안 열어 본 다른 탭(설정)도 마운트하지 않는다', () => {
+      render(<App />);
+      expect(screen.queryByTestId('settings')).not.toBeInTheDocument();
+    });
+
+    it('한 번 연 탭은 벗어나도 마운트를 유지한다 (keep-alive)', async () => {
+      const user = userEvent.setup();
+      render(<App />);
+
+      await user.click(screen.getByText('프로젝트 결과'));
+      expect(screen.getByTestId('detail')).toBeInTheDocument();
+
+      await user.click(screen.getByText('대시보드'));
+      // 언마운트되면 오래 걸려 얻은 결과(커버리지·영향 가이드 등)가 날아간다.
+      expect(screen.getByTestId('detail')).toBeInTheDocument();
+      expect(screen.getByTestId('detail').parentElement).toHaveStyle({ display: 'none' });
+    });
   });
 
   it('toggles theme on button click', async () => {

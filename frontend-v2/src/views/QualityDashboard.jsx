@@ -263,8 +263,15 @@ export default function QualityDashboard() {
       setTrend(trendData.trend || trendData.items || (Array.isArray(trendData) ? trendData : []));
     } catch (err) {
       if (seq !== loadSeq.current) return;
-      setLoadError(err.message || '로드 실패');  // 장애를 '기록 없음'(빈 상태)과 구분
-      toast('error', `품질 데이터 로드 실패: ${err.message}`);
+      // 403 은 **장애가 아니라 권한 상태**다. `/api/quality/*` 는 라우터 전체가 admin
+      // 전용이라(`backend/routers/quality.py:16-20`) 비관리자에겐 정상 응답이다.
+      // 이걸 "로드 실패" 로 토스트하면 사용자가 고칠 수 없는 오류를 반복해서 본다.
+      if (err.status === 403) {
+        setLoadError('관리자 전용 화면입니다 — 품질 데이터 조회 권한이 없습니다.');
+      } else {
+        setLoadError(err.message || '로드 실패');  // 장애를 '기록 없음'(빈 상태)과 구분
+        toast('error', `품질 데이터 로드 실패: ${err.message}`);
+      }
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
