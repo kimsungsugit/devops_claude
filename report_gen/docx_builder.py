@@ -2338,6 +2338,16 @@ def generate_uds_docx(
         "safety_fields_blocked": 0,
         "descriptive_fields_applied": 0,
         "invalid_asil_rejected": 0,
+        # ⚠ 아래 6축은 예전엔 **계수에서 통째로 빠져** 있었다. `descriptive_fields_applied`
+        #    는 description/precondition/logic 만 세는데, 실제로 참조 문서가 덧씌우는 축은
+        #    11개다. 즉 sidecar 의 `reference_suds` 는 "무엇이 적용됐나" 를 묻는 기록인데
+        #    절반 이상이 안 보였다 — 남의 프로젝트 문서에서 온 입출력·전역·호출관계가
+        #    무기록으로 들어간다. 이 상태로는 "신원 불일치면 아예 안 읽어도 되는가"(성능)
+        #    조차 판정할 수 없다: 적용량이 0인지 아닌지를 모르기 때문이다.
+        "structural_fields_applied": {
+            "inputs": 0, "outputs": 0, "globals_static": 0,
+            "globals_global": 0, "called": 0, "calling": 0,
+        },
     }
     if ref_doc_path.exists():
         if not _ref_safety_ok:
@@ -2407,24 +2417,31 @@ def generate_uds_docx(
                         if (not cur) or (key == "precondition" and cur.upper() in {"N/A", "TBD", "-"}):
                             target[key] = incoming
                             _ref_stats["descriptive_fields_applied"] += 1
+                _struct = _ref_stats["structural_fields_applied"]
                 if block.get("inputs") and not target.get("inputs"):
                     target["inputs"] = block.get("inputs")
+                    _struct["inputs"] += 1
                 if block.get("outputs") and not target.get("outputs"):
                     target["outputs"] = block.get("outputs")
+                    _struct["outputs"] += 1
                 if block.get("globals_static") and not target.get("globals_static"):
                     target["globals_static"] = block.get("globals_static")
+                    _struct["globals_static"] += 1
                 if block.get("globals_global") and not target.get("globals_global"):
                     target["globals_global"] = block.get("globals_global")
+                    _struct["globals_global"] += 1
                 if block.get("called"):
                     cur_called = str(target.get("called") or "").strip()
                     if ((not cur_called) or cur_called.upper() in {"N/A", "TBD", "-"}) and patched_called < patched_limit:
                         target["called"] = block.get("called")
                         patched_called += 1
+                        _struct["called"] += 1
                 if block.get("calling"):
                     cur_calling = str(target.get("calling") or "").strip()
                     if ((not cur_calling) or cur_calling.upper() in {"N/A", "TBD", "-"}) and patched_calling < patched_limit:
                         target["calling"] = block.get("calling")
                         patched_calling += 1
+                        _struct["calling"] += 1
 
     if isinstance(function_details, dict) and isinstance(function_details_by_name, dict):
         for fid, info in function_details.items():

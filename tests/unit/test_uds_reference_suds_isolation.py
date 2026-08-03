@@ -363,3 +363,64 @@ class TestIntegration:
             if marker in ln and "ref_docx" in ln and not ln.lstrip().startswith("#")
         ]
         assert not assign_lines, f"하드코딩 폴백이 되살아났다: {assign_lines}"
+
+
+class TestStructuralFieldsAreCounted:
+    """참조가 덧씌우는 축은 11개인데 계수는 5개만 있었다 (계획서 §6 후보 12).
+
+    `descriptive_fields_applied` 는 description/precondition/logic 만 센다.
+    `inputs`·`outputs`·`globals_static`·`globals_global`·`called`·`calling` 6축은
+    **무기록으로** 들어갔다 — sidecar 의 `reference_suds` 는 "무엇이 적용됐나" 를 묻는
+    기록인데 절반 이상이 안 보였다는 뜻이다.
+
+    이건 정직성 문제이자 **후보 12(성능)의 선행 조건**이다: 신원 불일치 시 40MB 읽기를
+    건너뛰어도 되는지는 "그때 적용량이 0인가" 로 갈리는데, 6축을 안 세면 알 수 없다.
+    """
+
+    _FULL_BLOCK = {
+        "description": "ref desc", "asil": "A", "related": "SwFn_12",
+        "precondition": "ref pre", "logic": "ref logic",
+        "inputs": [{"name": "a"}], "outputs": [{"name": "b"}],
+        "globals_static": ["g_s"], "globals_global": ["g_g"],
+        "called": "callee_x", "calling": "caller_y",
+    }
+
+    def test_foreign_reference_still_writes_six_structural_axes(self, gen):
+        """신원 불일치인데도 구조 축은 그대로 들어온다 — 그래서 읽기를 못 건너뛴다."""
+        info, stats = gen(project_name="KJPDS02_PV", ref_block=dict(self._FULL_BLOCK))
+
+        assert stats["identity"]["same_project"] is not True
+        struct = stats["structural_fields_applied"]
+        assert sum(struct.values()) > 0, (
+            "구조 축 적용량이 0이면 신원 불일치 시 읽기를 건너뛸 수 있다는 뜻인데, "
+            "실측은 그렇지 않다 — 이 단언이 깨지면 성능 최적화 전제를 다시 재라")
+        # 실제로 대상 함수에 남의 프로젝트 값이 들어갔는지 값으로 확인한다
+        assert info["called"] == "callee_x"
+        assert info["calling"] == "caller_y"
+
+    def test_every_structural_axis_is_counted(self, gen):
+        """축 하나라도 계수에서 빠지면 그 축만 다시 보이지 않게 된다."""
+        _info, stats = gen(project_name="KJPDS02_PV", ref_block=dict(self._FULL_BLOCK))
+
+        struct = stats["structural_fields_applied"]
+        assert set(struct) == {
+            "inputs", "outputs", "globals_static", "globals_global", "called", "calling",
+        }
+        zero = [k for k, v in struct.items() if v == 0]
+        assert not zero, f"덧씌웠는데 계수가 0인 축: {zero}"
+
+    def test_counter_stays_zero_when_nothing_is_applied(self, gen):
+        """계수가 '읽었다'가 아니라 '적용했다'를 세는지 — 대조군."""
+        occupied = {
+            "inputs": [{"name": "own"}], "outputs": [{"name": "own"}],
+            "globals_static": ["own"], "globals_global": ["own"],
+            "called": "own_callee", "calling": "own_caller",
+        }
+        info, stats = gen(project_name="KJPDS02_PV", ref_block=dict(self._FULL_BLOCK),
+                          target_overrides=occupied)
+
+        assert stats["structural_fields_applied"] == {
+            "inputs": 0, "outputs": 0, "globals_static": 0,
+            "globals_global": 0, "called": 0, "calling": 0,
+        }
+        assert info["called"] == "own_callee", "이미 값이 있으면 참조가 덮지 않는다"

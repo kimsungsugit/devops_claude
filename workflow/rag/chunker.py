@@ -5,12 +5,76 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
+import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+
+# ── 대용량 문서 텍스트 추출 캐시 ────────────────────────────────────────────
+#
+# 실측(2026-08-03): UDS 생성 한 번이 **같은 38.8MB 참조 SUDS 를 세 경로에서 각각**
+# 읽는다 — `docx_builder` 의 함수정보 파싱(7.4s), `helpers/uds.py` 의 SwCom diff,
+# `local.py`/`jenkins.py` 의 AI 예시 텍스트(`_read_text_from_file` 단독 **11.7초**).
+# 서로를 모르는 세 호출처라 아무도 중복을 못 본다.
+#
+# 반환값이 **불변 문자열**이라 이 저장소가 겪은 캐시 사고(공유 가변 구조를 호출자가
+# 제자리 변경)와 무관하다. 무효화는 `(정규화 경로, mtime_ns, size)` 로 한다 —
+# 내용 해시가 아니라 파일 신원이므로 stale 은 파일이 안 바뀐 경우뿐이다.
+_TEXT_CACHE: "OrderedDict[Tuple[str, int, int], str]" = OrderedDict()
+_TEXT_CACHE_MAX = 4
+_TEXT_CACHE_MIN_BYTES = 1_000_000  # 작은 파일은 캐시 이득이 없고 항목만 밀어낸다
+_TEXT_CACHE_LOCK = threading.Lock()
+
+
+def _text_cache_key(path: Path) -> Optional[Tuple[str, int, int]]:
+    """캐시 자격과 키. 자격 미달이면 `None`(= 캐시 안 함)."""
+    try:
+        st = path.stat()
+        resolved = os.path.normcase(str(path.resolve()))
+    except OSError:
+        return None
+    if st.st_size < _TEXT_CACHE_MIN_BYTES:
+        return None
+    # ⚠ `tempfile.NamedTemporaryFile` 은 temp **루트 직속**에 파일을 만들고 OS 가 그
+    #   경로를 재사용한다. 업로드본을 tmp 로 받아 읽는 호출처가 여럿이라
+    #   (`local.py:1042` 등) 경로·크기가 겹치면 남의 파일 내용을 돌려줄 수 있다.
+    #   루트 **직속**만 뺀다 — 하위 디렉터리(pytest tmp_path 등)는 매번 새로 만들어져
+    #   재사용되지 않으므로, 넓게 막으면 캐시가 검증 불가능해지기만 한다.
+    try:
+        if os.path.normcase(str(path.resolve().parent)) == os.path.normcase(
+            str(Path(tempfile.gettempdir()).resolve())
+        ):
+            return None
+    except OSError:
+        return None
+    return (resolved, st.st_mtime_ns, st.st_size)
 
 
 def _read_text_from_file(path: Path) -> str:
+    """파일에서 텍스트를 뽑는다. 큰 문서는 파일 신원 기준으로 캐시한다."""
+    key = _text_cache_key(path)
+    if key is None:
+        return _read_text_uncached(path)
+    with _TEXT_CACHE_LOCK:
+        hit = _TEXT_CACHE.get(key)
+        if hit is not None:
+            _TEXT_CACHE.move_to_end(key)
+            return hit
+    # 락 밖에서 읽는다 — 11초짜리 추출을 락 안에서 하면 다른 요청이 통째로 막힌다.
+    # 동시 miss 는 중복 작업일 뿐 결과를 바꾸지 않는다(문자열은 불변).
+    text = _read_text_uncached(path)
+    with _TEXT_CACHE_LOCK:
+        _TEXT_CACHE[key] = text
+        _TEXT_CACHE.move_to_end(key)
+        while len(_TEXT_CACHE) > _TEXT_CACHE_MAX:
+            _TEXT_CACHE.popitem(last=False)
+    return text
+
+
+def _read_text_uncached(path: Path) -> str:
     ext = path.suffix.lower()
     try:
         if ext in (".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml"):
