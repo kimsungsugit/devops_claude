@@ -521,7 +521,7 @@ for f in jsx_files:
                 _add("Warning", "pattern", f"{f}:{i}", "Possible .map() without null guard — add ?. or Array.isArray check")
 
 # 침묵 except ratchet: HEAD 대비 **추가된 라인**만 net-new 로 본다. 레거시 backlog
-# (침묵 except 1294개, 정당한 것 포함)는 건드리는 파일이어도 침묵 — posttool_dispatch
+# (침묵 except 831개[2026-08-03 실측], 정당한 것 포함)는 건드리는 파일이어도 침묵 — posttool_dispatch
 # .py:78-82 의 "레거시를 자동 변형 말고 사람이 결정" 과 같은 ratchet 원칙.
 # git diff -U0 HEAD 는 staged+unstaged 를 한 번에, 현재 워킹 파일 기준 라인번호로 준다.
 _added_lines: dict[str, set[int]] = {}

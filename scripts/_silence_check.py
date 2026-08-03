@@ -1,7 +1,8 @@
 """broad-silent except 탐지 (AST) — ruff 사각지대 보강.
 
 `ruff`/E722 는 bare `except:` 만 본다. `except Exception: pass` 는 **구조적
-사각지대**다(프로젝트 침묵 except 1294개의 대부분이 여기 산다). 이 모듈은
+사각지대**다(프로젝트 침묵 except **831개**의 대부분이 여기 산다 — 2026-08-03 실측.
+앞서 적혀 있던 1294 는 낡은 값이었다). 이 모듈은
 '실패를 조용히 삼키는 except' 라는 **코드 형태**를 찾는다.
 
 ⚠ 이건 '나쁜 코드' 탐지가 아니라 '형태' 탐지다. 구현 중 실측한 결과, 위험한
@@ -25,7 +26,7 @@ tmp.unlink cleanup)이 **구조적으로 완전히 동일**하다 — 둘 다
   - `posttool_dispatch.py` (PostToolUse, per-file): 편집 파일의 침묵 목록을
     advisory context 로 보고(비차단·정보성).
   - `quality_check.py §7d` (Stop, changed-files **ratchet**): git diff 추가 라인에
-    속한 **net-new 침묵만** Warning. 레거시 1294개는 건드리는 파일이어도 침묵.
+    속한 **net-new 침묵만** Warning. 레거시 831개(2026-08-03 실측)는 건드리는 파일이어도 침묵.
 
 CLI (검증/수동용): `.venv/Scripts/python.exe scripts/_silence_check.py <file.py> ...`
   exit 0 = 침묵 없음 / 1 = 침묵 있음.

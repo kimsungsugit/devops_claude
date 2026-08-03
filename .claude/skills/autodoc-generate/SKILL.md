@@ -42,10 +42,10 @@ AutoDoc 시스템을 활용하여 다양한 형태의 문서를 자동 생성합
 
 | 모듈 | 목록 | 개수 |
 |------|------|------|
-| `scripts/multi_lang_analyzer.py` `_EXT_LANG_MAP` | c, cpp, cs, java, go, ts, js — **Python 없음** | 7 |
-| `scripts/analyze_all.py` `LANG_EXTENSIONS` | Python, C, C++, C#, Java, JavaScript, TypeScript, Go, **Rust** | 9 |
+| `<AutoDoc>/scripts/multi_lang_analyzer.py` `_EXT_LANG_MAP` | c, cpp, cs, java, go, ts, js — **Python 없음** | 7 |
+| `<AutoDoc>/scripts/analyze_all.py` `LANG_EXTENSIONS` | Python, C, C++, C#, Java, JavaScript, TypeScript, Go, **Rust** | 9 |
 
-(Python 은 별도 `scripts/ast_analyzer.py` 가 담당. `tests/test_multi_lang.py` 가
+(Python 은 별도 `<AutoDoc>/scripts/ast_analyzer.py` 가 담당. `<AutoDoc>/tests/test_multi_lang.py` 가
 검증하는 건 위 **7개** 쪽이다.)
 
 | 언어 | 분석 항목 |

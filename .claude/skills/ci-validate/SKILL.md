@@ -14,14 +14,19 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 - PowerShell executor
 - Syntax check → Unit tests
 - 현재 스위트 전량, 15분 타임아웃 (개수를 고정 기재하지 말 것 — 실제 개수는 `.venv/Scripts/python.exe -m pytest tests/unit/ --collect-only -q` 로 확인. 과거 "253개" 표기가 실제와 14배 어긋난 채 방치됐다)
-- ⚠ **GitLab 은 test_impact_jobs 를 건너뛰지 않는다** (`.gitlab-ci.yml` 에 `impact_jobs`·
-  `ignore` 0건). `--ignore=tests/unit/test_impact_jobs.py` 는 **GitHub 쪽**
-  (`.github/workflows/ci.yml:58`)에만 있다 — 아래 GitHub Actions 절 참조
+- ⚠ **양쪽 다 test_impact_jobs 를 건너뛰지 않는다.** `.gitlab-ci.yml` 은 원래 0건이었고,
+  GitHub 쪽 `--ignore=tests/unit/test_impact_jobs.py` 도 커밋 `b107c4b`(2026-07-29)에서
+  **제거됐다**(`ci.yml:83-86` 주석이 그 경위를 남긴다 — 19건이 계속 미검증이었다).
+  *(2026-08-03 정정: 이 절은 이미 사라진 `--ignore` 를 계속 있다고 적고 있었다.)*
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
-- 잡 **3개**: `syntax-check`(:10) / `unit-tests`(:37) / `frontend-tests`(:70)
-- `unit-tests` 는 `--ignore=tests/unit/test_impact_jobs.py`(:58) 로 그 파일만 제외
+- 잡 **4개**: `syntax-check`(:10) / `unit-tests`(:37) / `frontend-tests`(:99) / **`lint`(:117)**
+- `lint` = ruff_ratchet + eslint_ratchet(변경 라인) + SKILL.md frontmatter.
+  로컬 pre-commit 과 달리 **DISABLED(rc=2)도 빌드 실패**로 다룬다(의도적 비대칭 —
+  통제된 환경에서 도구 부재는 인프라 이상이다)
 - ⚠ **deploy stage 없음** — 이 CI 는 검증 전용이다
+- ⚠ `unit-tests` 잡에 **`timeout-minutes` 가 없다**(GitLab 은 15m 명시). hang 시 하드캡이
+  GitHub 기본값에만 의존한다 — 로컬 훅이 900s+30s KILL 로 fail-closed 인 것과 비대칭
 
 ## 실행 순서
 
@@ -85,6 +90,7 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 ```
 
 ## 알려진 이슈
-- `test_impact_jobs` - hanging 가능성, 타임아웃 필요
+- ~~`test_impact_jobs` - hanging 가능성~~ → **해소**(2026-07-29 `b107c4b`). CI 에서 제외를
+  풀었고 19건이 통과한다. hang 3종의 실제 원인은 재진입 데드락·tkinter 모달이었다
 - PYTHONPATH에 프로젝트 루트 포함 필요
 - PowerShell 실행 정책 설정 필요 (Windows)

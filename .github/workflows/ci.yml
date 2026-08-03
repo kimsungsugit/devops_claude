@@ -43,6 +43,12 @@ jobs:
     #   전체 회귀는 4,603 passed 라 코드 결함이 아니라 **러너 OS 불일치**였다.
     #   skipif 로 넘기면 CI 가 그 33건을 영영 안 보게 되므로 러너를 맞춘다.
     runs-on: windows-latest
+    # ⚠ hang 상한. 이 저장소에서 "오래 걸림" 의 실체는 느림이 아니라 **hang** 이었다
+    #   (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달). 로컬 훅은
+    #   900s+30s KILL 로 fail-closed 인데 여긴 상한이 없어 GitHub 기본값(최대 360분)에
+    #   의존했다 — GitLab 은 `timeout: 15m` 을 명시하는데 여기만 비대칭이었다.
+    #   xdist 미적용(직렬)이라 로컬 179초보다 넉넉히 잡되, 종일 도는 일은 없게 한다.
+    timeout-minutes: 30
     needs: syntax-check
     # ⚠ windows 러너의 로캘은 영문(cp1252)이라 **한글 출력이 UnicodeEncodeError 로 죽는다.**
     #   개발 PC 는 한국어 로캘(cp949)이라 이 차이가 로컬에서는 안 보인다. 실측: 훅 계약
@@ -68,7 +74,14 @@ jobs:
           # 폴백하므로, 로컬 .venv 가 만족하는 계약을 CI 도 같은 방식으로 만족해야 한다
           # (테스트를 약화시키는 게 아니라 환경을 계약에 맞추는 것).
           pip install pytest pytest-cov ruff
-          pip install -r requirements.txt || true
+          # ⚠ `|| true` 를 뗐다. 설치가 실패해도 조용히 넘어가면 그 뒤 테스트가
+          #   module_missing 으로 죽었을 때 **원인이 설치 실패라는 신호가 이미 사라진 뒤**다.
+          #   실패를 여기서 드러내되, 어떤 패키지가 문제인지 로그에 남긴다.
+          if ! pip install -r requirements.txt; then
+            echo "::error::requirements.txt 설치 실패 — 이후 테스트 결과는 신뢰할 수 없다"
+            pip check || true
+            exit 1
+          fi
 
       - name: Run unit tests with coverage
         shell: bash
@@ -184,5 +197,12 @@ jobs:
           if [ -n "$CHANGED_SKILL" ]; then
             echo "Frontmatter on changed SKILL.md"
             python scripts/check_skill_frontmatter.py $CHANGED_SKILL || RC=1
+          fi
+          # 하네스 문서 **본문**의 코드 참조 실재 검사. frontmatter 검사기는 구조만 보므로
+          # "없는 함수 사용법"·"무관한 줄번호"·"허구인 에이전트 문서" 가 사각이었다.
+          CHANGED_DOC=$(echo "$CHANGED" | grep -E '^(\.claude/.*\.md|CLAUDE\.md)$' || true)
+          if [ -n "$CHANGED_DOC" ]; then
+            echo "Doc references on changed harness docs"
+            python scripts/check_doc_references.py --base "$BASE" $CHANGED_DOC || RC=$?
           fi
           exit $RC

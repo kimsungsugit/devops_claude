@@ -17,6 +17,8 @@ import os
 import re
 import sys
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _payload_file(payload: dict) -> str:
     return (
@@ -80,6 +82,30 @@ def main(payload: dict | None = None) -> None:
         except Exception as e:
             # 침묵하면 "검사했고 깨끗함"과 구분이 안 된다 — 이 저장소의 fake-green.
             issues.append(f"frontmatter: 검사 불가 ({type(e).__name__}) — 통과 아님")
+
+    # 하네스 문서 **본문**의 코드 참조 실재 검사. frontmatter 검사기는 구조만 보므로
+    # "없는 함수 사용법"·"무관한 줄번호"·"통째로 허구인 에이전트 문서" 를 못 봤다
+    # (2026-08-03 감사에서 9건). 여기서는 **이 파일에 새로 생긴 위반만** 신고한다.
+    _rel = os.path.abspath(fpath)
+    if _rel.startswith(str(_ROOT)) and (
+        os.sep + ".claude" + os.sep in _rel or os.path.basename(fpath) == "CLAUDE.md"
+    ):
+        try:
+            from pathlib import Path
+
+            _here = os.path.dirname(os.path.abspath(__file__))
+            if _here not in sys.path:
+                sys.path.insert(0, _here)
+            import check_doc_references as _cdr
+
+            _md_rel = Path(_rel).relative_to(_ROOT).as_posix()
+            _paths, _by_name = _cdr._tracked_index()
+            issues.extend(
+                f"doc-ref: {h[2]} {h[3]} (L{h[1]})"
+                for h in _cdr.scan([_md_rel], _paths, _by_name)
+            )
+        except Exception as e:
+            issues.append(f"doc-ref: 검사 불가 ({type(e).__name__}) — 통과 아님")
 
     in_code = False
     prev_level = 0

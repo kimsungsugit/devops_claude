@@ -110,7 +110,7 @@ tools:
 
 ```bash
 # 최근 품질 트렌드 확인
-python -c "
+.venv/Scripts/python.exe -c "
 import sys, os
 sys.path.insert(0, os.environ.get('PYTHONPATH', '.'))
 from workflow.quality.db import init_db, get_session
@@ -121,14 +121,14 @@ with get_session() as s:
     for r in runs:
         sm = r.summary
         print(f'{r.doc_type} | score={sm.overall_score:.1f} | gate={sm.gate_pass} | delta={sm.score_delta} | {r.created_at}')
-" 2>/dev/null || echo "Quality DB not available (skip)"
+" || echo "Quality DB 조회 실패 — 위 stderr 확인 (DB 부재/스키마/인터프리터 중 무엇인지 구분할 것)"
 ```
 
 ### 2. 개선 제안 확인
 
 ```bash
 # 가장 최근 실패 run의 개선 제안
-python -c "
+.venv/Scripts/python.exe -c "
 import sys, os
 sys.path.insert(0, os.environ.get('PYTHONPATH', '.'))
 from workflow.quality.advisor import suggest_improvements
@@ -143,7 +143,7 @@ with get_session() as s:
             print(f'[{sg[\"priority\"]}] {sg[\"label\"]}: {sg[\"value\"]}/{sg[\"threshold\"]} -> {sg[\"advice\"]}')
     else:
         print('No failed runs found')
-" 2>/dev/null || echo "Quality DB not available (skip)"
+" || echo "Quality DB 조회 실패 — 위 stderr 확인 (DB 부재/스키마/인터프리터 중 무엇인지 구분할 것)"
 ```
 
 ### 3. 계획서에 반영

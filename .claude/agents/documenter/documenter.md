@@ -97,14 +97,23 @@ tools:
 
 DOCX 파일 생성이 필요할 때는 `report_gen/docx_builder.py` 활용:
 ```bash
-python -c "
-from report_gen.docx_builder import build_docx
-build_docx(template='templates/uds_template.docx', data=payload, output='exports/result.docx')
+.venv/Scripts/python.exe -c "
+from report_gen.docx_builder import generate_uds_docx
+generate_uds_docx(template_path, uds_payload, output_path)   # 3개 다 위치 인자
 "
 ```
-- `template`: Optional. None이면 기본 템플릿 사용
-- `data`: UDS 페이로드 딕셔너리
-- `output`: 출력 DOCX 경로
+`generate_uds_docx(template_path, uds_payload, output_path, ai_config=None, *, stats_out=None) -> str`
+(`report_gen/docx_builder.py:1702`)
+
+- `template_path`: `Optional[str]`. `None` 이면 기본 템플릿 경로 해석
+- `uds_payload`: UDS 페이로드 딕셔너리
+- `output_path`: 출력 DOCX 경로. 반환값은 실제 기록된 경로
+- `stats_out`: keyword-only. 생성 N ↔ 기록 K 대조용 통계를 받아 온다 —
+  **호출부가 `None` 으로 두면 그 대조가 통째로 사라진다**(과거 4곳 전부 `None` 이었다)
+
+> ⚠ 2026-08-03 정정: 이 절은 원래 `build_docx(template=…, data=…, output=…)` 를 적고 있었는데
+> **그런 함수는 저장소에 없다**(`def build_docx` 0건). `templates/uds_template.docx` 도 없다
+> (`templates/` 에 `.docx` 파일 0개). 그대로 실행하면 `ImportError` 다.
 
 ## 원칙
 - 코드를 직접 수정하지 않는다

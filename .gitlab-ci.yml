@@ -96,8 +96,19 @@ unit-tests:
     - shared
   before_script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
-    - python -m pip install --no-build-isolation -r requirements-dev.txt 2>$null; $true
-    - python -m pip install --no-build-isolation -r requirements-core.txt 2>$null; $true
+    # ⚠ `2>$null; $true` 를 뗐다 — stderr 를 버리고 종료코드를 무력화하면 설치 실패가
+    #   **흔적 없이** 사라지고, 뒤이어 테스트가 ModuleNotFoundError 로 죽었을 때 원인이
+    #   설치 실패라는 신호가 이미 없다. 여기서는 **보이게만** 하고 죽이지는 않는다:
+    #   이 러너는 의도적으로 core+dev 만 설치해 테스트 폐포가 축소된 환경이고(아래 주석),
+    #   러너 동작을 로컬에서 검증할 수 없어 fail-fast 로 바꾸는 건 별건으로 남긴다.
+    - |
+      python -m pip install --no-build-isolation -r requirements-dev.txt
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: requirements-dev.txt 설치 실패(exit $LASTEXITCODE) — 이후 실패는 의존성 부재일 수 있다" }
+      $global:LASTEXITCODE = 0
+    - |
+      python -m pip install --no-build-isolation -r requirements-core.txt
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: requirements-core.txt 설치 실패(exit $LASTEXITCODE) — 이후 실패는 의존성 부재일 수 있다" }
+      $global:LASTEXITCODE = 0
   script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="

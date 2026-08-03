@@ -1,7 +1,7 @@
 """scripts/_silence_check.py — broad-silent except 분류기.
 
 이 게이트가 막는 것: `ruff`/E722 는 bare `except:` 만 보고 `except Exception: pass`
-(프로젝트 침묵 except 1294개의 대부분)를 **구조적으로 못 본다**. 분류기는 그
+(프로젝트 침묵 except 831개[2026-08-03 실측]의 대부분)를 **구조적으로 못 본다**. 분류기는 그
 사각지대를 AST 로 보강한다.
 
 핵심 계약 — 분류기는 '침묵 **형태**'를 탐지하지 '나쁜 코드'를 판정하지 않는다

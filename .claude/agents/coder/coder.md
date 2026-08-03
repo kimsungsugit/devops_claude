@@ -52,7 +52,7 @@ tools:
 
 ### 품질 트렌드 확인 (구현 시작 전)
 ```bash
-python -c "
+.venv/Scripts/python.exe -c "
 import sys, os
 sys.path.insert(0, os.environ.get('PYTHONPATH', '.'))
 from workflow.quality.db import init_db, get_session
@@ -69,7 +69,7 @@ with get_session() as s:
     )
     for name, avg_val in low_scores:
         print(f'반복 실패: {name} (평균 {avg_val:.1f})')
-" 2>/dev/null || echo "Quality DB not available (skip)"
+" || echo "Quality DB 조회 실패 — 위 stderr 확인 (DB 부재/스키마/인터프리터 중 무엇인지 구분할 것)"
 ```
 
 ### 적용 규칙

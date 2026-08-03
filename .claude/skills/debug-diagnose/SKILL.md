@@ -35,7 +35,8 @@ when_to_use: 원인 파악, 왜 실패하지, 왜 안되지, 진단, 트러블�
 
 ### 1. test_impact_jobs hanging
 - **파일**: `tests/unit/test_impact_jobs.py`
-- **CI 처리**: GitHub Actions에서 `--ignore` 제외, GitLab은 15분 timeout
+- **CI 처리**: ⚠ 2026-08-03 정정 — GitHub 의 `--ignore` 는 `b107c4b`(2026-07-29)에서
+  **제거됐다**. 지금은 **양쪽 CI 다 이 파일을 돌린다**(GitLab 은 15분 timeout)
 - **원인**: 백그라운드 스레드 동기화, _wait_for_job() 10초 하드 timeout
 - **진단**: `.venv/Scripts/python.exe -m pytest tests/unit/test_impact_jobs.py -v --timeout=30`
 

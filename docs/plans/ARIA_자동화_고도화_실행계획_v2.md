@@ -139,9 +139,20 @@
   ② 그래도 예산에 닿으면 **fail-closed(중단)**. 이 저장소에서 "오래 걸림" 의 실체는 느림이 아니라
   **hang** 이었으므로(재진입 데드락·tkinter 모달) 통과시킬 대상이 아니다.
   부수 효과: 게이트가 ~3.5분이라 이제 포그라운드 커밋이 가능해져 **동시 세션 흡수 창이 9분 → 3.5분**으로 줄었다.
-- ⬜ **CI 는 xdist 미적용** — `ci.yml` 은 timeout 이 없어 하드 게이트라 급하지 않지만,
-  windows 러너에서 직렬로 도는 만큼 느리다(coverage 병행 시 xdist 설정 주의). 별건.
-- ⬜ **CI 가 `test_impact_jobs.py` 를 `--ignore` 로 제외한다** — 로컬은 돌고 CI 는 안 도는 파일이 하나 있다.
+- ⬜ **CI 는 xdist 미적용** — GH·GitLab 둘 다 `-n auto` 0건(2026-08-03 실측). windows 러너에서
+  직렬로 도는 만큼 느리다(coverage 병행 시 xdist 설정 주의). ⚠ 위 "`ci.yml` 은 timeout 이 없어
+  하드 게이트" 라는 전제는 **틀렸다** — timeout 이 없다는 건 하드 게이트가 아니라 **hang 에
+  대한 상한이 없다**는 뜻이다(GitLab 은 15m 명시). 아래 항목으로 분리.
+- ⬜ **GH Actions `unit-tests` 에 `timeout-minutes` 가 없다** — 로컬 훅은 900s+30s KILL 로
+  fail-closed 인데 CI 는 GitHub 기본값에만 의존한다. 이 저장소에서 "오래 걸림" 의 실체는
+  **hang** 이었다.
+- ⬜ **설치 실패 신호가 사라진다** — `ci.yml:71` `pip install … || true`,
+  `.gitlab-ci.yml:50,99,100,104` `2>$null; $true`. 최종적으로 module_missing 등으로 드러날
+  가능성이 높지만 **설치 단계 자체의 실패는 안 보인다**.
+- ~~⬜ CI 가 `test_impact_jobs.py` 를 `--ignore` 로 제외한다~~ → ✅ **이미 해소**.
+  커밋 `b107c4b`(2026-07-29)가 제거했고 `ci.yml:83-86` 주석이 경위를 남긴다.
+  2026-08-03 에 확인 — 이 항목이 열린 채 남아 있었고 `ci-validate`·`debug-diagnose`
+  SKILL.md 도 옛 상태를 기술하고 있어 함께 정정했다.
 - ⬜ CORE-003 `not_measured` **경량** 계약 (전면 스키마 아님) — 미측정을 0/PASS 와 구분
 - ✅ **LLM 응답 완결성 + 근거 등급 정직성 3건**(L1/L2/L3) — 아래 별도 절
 - ⬜ CORE-006 잔여: `agent_call` 에 경로·시크릿 redaction(저장소 전체 0건), 모델 echo 대조

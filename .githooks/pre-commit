@@ -120,6 +120,25 @@ if [ -n "$STAGED_SKILL" ]; then
         echo "$FM_OUT"
     fi
 fi
+# 하네스 문서 **본문**의 코드 참조 실재 검사(변경 라인 ratchet). frontmatter 검사기는
+# 구조만 보므로 "없는 함수 사용법"·"무관한 줄번호"·"통째로 허구인 에이전트 문서" 가
+# 전부 사각이었다(2026-08-03 감사에서 9건 — backlog 는 그때 0으로 정리했다).
+STAGED_DOC=$(printf '%s\n' "$STAGED_ALL" | grep -E '^(\.claude/.*\.md|CLAUDE\.md)$' || true)
+if [ -n "$STAGED_DOC" ]; then
+    echo "[2/3] 문서 코드참조 검사(변경 라인 한정)..."
+    DR_OUT=$("$PROJECT_PY" scripts/check_doc_references.py --cached $STAGED_DOC 2>&1)
+    DR_RC=$?
+    if [ $DR_RC -eq 2 ]; then
+        echo "⚠️  $DR_OUT"
+    elif [ $DR_RC -ne 0 ]; then
+        echo "$DR_OUT"
+        echo "❌ 문서가 없는 경로/줄/심볼을 가리킨다. 고치거나, 부재를 서술하는 문단이면"
+        echo "   그 문단에 <!-- doc-refs-ok --> 를 달 것."
+        exit 1
+    else
+        echo "✅ $DR_OUT"
+    fi
+fi
 set -e
 
 # 3. Run pytest with 900s timeout

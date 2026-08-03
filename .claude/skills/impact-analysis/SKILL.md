@@ -47,7 +47,9 @@ cd "<source_root>" && svn status | grep -E "\.[ch]$"
 | HEADER | **AUTO** | FLAG | FLAG | FLAG | FLAG |
 
 - **AUTO** = 자동 재생성. 단 `trigger.auto_generate=True` 일 때만 실행되고,
-  아니면 런타임에 **FLAG 로 강등**된다 (`impact_orchestrator.py:34-35, 1659-1660`)
+  아니면 런타임에 **FLAG 로 강등**된다 (`impact_orchestrator.py:2487-2489`)
+  *(2026-08-03 정정: 예전 표기 `:1659-1660` 은 `module_name`/`description_source` 필드 코드라
+  강등과 무관했다. 줄번호 인용은 파일이 자라면 조용히 어긋난다.)*
 - **FLAG** = 검토 대상으로 표시(자동 생성 안 함)
 - **`-`** = **액션 없음** (검토조차 아님)
 

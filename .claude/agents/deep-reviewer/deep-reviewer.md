@@ -115,7 +115,14 @@ start-work Gate 5 / self-review.md deep depth의 적응형 3~5회 루프에서 �
 - **Round 2**: X3/X4/X6 (계약/회귀/일관성)
 - **Round 3+**: X5/X7/X8/X9 + 잔존 Critical
 
-종료 조건은 reviewer.md와 동일 (Critical 0 + 최소 3회 / 정체 시 중단 / 최대 5회).
+종료 조건 단일 출처는 **`.claude/skills/start-work/SKILL.md` `#### 종료 조건`(Gate 5)**
+— `MIN_ROUNDS=3` / `MAX_ROUNDS=5` / Critical 0 / 정체 시 중단.
+
+> ⚠ 2026-08-03 정정: 이 줄은 원래 *"reviewer.md 와 동일"* 이라고 적고 있었는데
+> **`reviewer.md` 에는 그 정의가 없다**(`적응형`·`3~5회`·`정체` 전부 0건).
+> `reviewer.md` 가 단일 출처인 것은 **`review_depth` 4단계 판정**이고, 루프 종료 조건은
+> `.claude/skills/start-work/SKILL.md` 다. 이 파일 위쪽이 "DRIFT 방지 — 단일 출처 동기화 의무" 를
+> 선언한 바로 그 자리에서 난 drift다.
 
 ## 출력 형식
 
