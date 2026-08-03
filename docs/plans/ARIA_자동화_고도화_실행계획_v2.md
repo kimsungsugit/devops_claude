@@ -50,7 +50,7 @@
 | CORE-001 | Baseline·산출물 컨텍스트 SSOT | ⬜ | `BaselineManifest` 코드 0건 |
 | CORE-002 | 로컬·워커 공통 FileResolver | 🟡 | `_resolved_doc_input`(suts) · `_doc_or_discovered`(local.py 17곳) 도입. 전 생성기 통합은 미완 |
 | CORE-003 | 근거·추정·검증 결과 공통 계약 | 🟡 | provenance 필드는 이미 존재. `not_measured` 계약은 **0건** |
-| CORE-004 | 품질 DB ↔ 승인 피드백 | ⬜ | |
+| CORE-004 | 품질 DB ↔ 승인 피드백 | ⬜ | **설계 확정·구현 0줄** — §6-1(후보 22). 상태는 ⬜ 유지: 설계는 통과가 아니다 |
 | CORE-005 | Baseline Manifest 기반 fail-closed gate | 🟡 | validator 예외 fail-closed 는 됨(STS B7). **baseline mismatch 축은 미착수** |
 | CORE-006 | 공통 LLM Context Gateway | 🟡 | **응답 완결성 검증 완료**(아래 L1). redaction 은 여전히 0건. ⚠ §1 의 "이미 단일 진입점" 판정은 **틀렸다** — 아래 정정 참조 |
 
@@ -166,7 +166,7 @@
 | 항목 | 판단 |
 |---|---|
 | **CORE-000 전체** | ⛔ 보류. ArtifactEnvelope·EvidenceRef·FieldState·ApprovalRecord·QualityState + contracts 8모듈 + DB 마이그레이션 + 수용시험 43개. 이 저장소 규모에서 수개월이고, 그 기간 동안 얻는 게 없다. 같은 목적(거짓 PASS 차단)은 §3 처럼 지점별로 훨씬 싸게 달성된다 |
-| **ApprovalRecord 승인축** | ⛔ 보류. 승인 워크플로 자체가 아직 없다 |
+| **ApprovalRecord 승인축** | ⛔ 보류 **유지**. 승인 워크플로 자체가 아직 없다. ⚠ 2026-08-03 사용자 요청으로 §6-1(후보 22) 이 생겼지만 그건 **`ApprovalRecord` 계약이 아니라 '검토 기록' 테이블 1개**다 — 필드 단위 승인을 비목표로 고정해 CORE-000 을 선행 요구에서 뺐다. 둘을 같은 것으로 보면 착수 불가가 된다 |
 | **6-domain 조직 KB** | ⛔ 보류. 단일 프로젝트 KB 도 아직 안정화 전 |
 | **함수 기준 커버리지 게이트화** | ⛔ 보류. 실측 6.4% 라 게이트에 넣으면 기존 프로젝트가 즉시 FAIL — **정책 결정 사항**이므로 지표 노출만 하고 임계는 안 걸었다 |
 | **SITS `max_flows` 기본값 상향** | ⛔ 보류. 실측 프로젝트는 여전히 25개(전부 QM) 부족하나, 전 프로젝트 산출물 크기가 바뀌므로 값 결정은 사용자 몫. 인자로 노출해 코드 수정 없이 조정 가능하게만 함 |
@@ -1016,6 +1016,9 @@ under-classification 이다. `helpers/uds.py` 의 옛 주석은 이걸 *"보수�
 | 15 | 리포트 timeout 시 payload 제자리 변경 경합 | §5-13. `_run_report_with_timeout`(`backend/helpers/common.py:389`)의 `cancel_futures=True` 는 **이미 실행 중인** future 를 안 죽인다. 그 스레드가 `uds_payload` 를 계속 변경하는 동안 다음 리포트가 같은 payload 를 쓴다. 리포트 계층의 변경 규약(제자리 변경 자체)을 바꿔야 하는 건이라 별건 |
 | 16 | `google.generativeai`(EOL) 폴백 제거 여부 | §5-12. *"All support … has ended"* 를 매 실행 찍는 수명 종료 패키지인데 legacy 폴백 한 곳으로 남아 있다. 지연 로딩으로 **비용은 이미 0** 이므로 제거는 순수 정책 결정 |
 | 17 | `uds_ai` 대용량 페이로드에 stage cap 부재 | ⚠ **이번 세션 미측정** — plan 단계 기록만 있고 이 계획서엔 여태 누락돼 있었다(2026-07-31 에 옮김). 정직성이 아니라 **비용** 문제로 분류돼 있었다. 착수 전 실측부터 할 것 |
+| **22** | **게이트 조회·검토 기록 섹션** (Detail 신규 섹션 `gate`) | **사용자 요청 2026-08-03**: *"탭을 생성해서 그 프로젝트에서 게이트에 대한 걸 보고 리뷰하고 작성할 건 작성하게"*. 실측·반증 완료, 설계 확정, **미착수** — 아래 §6-1. 계획서 31항목에 대응 항목이 **없다**(`탭` Grep 0건/1047줄). CORE-004 와 §5 보류 「ApprovalRecord 승인축」을 건드리지만 **필드 단위 승인을 비목표로 고정하면 CORE-000 없이 성립**한다 |
+| **23** | **게이트 판정을 두 파서가 정반대로 읽는다** | ⚠ **실 결함 — 재현 완료**(§6-1 G0). 22 의 선행이지만 **탭과 무관하게 지금 존재**한다. 같은 `.quality_gate.md` 에 `backend/helpers/uds.py:464` 는 **첫 매치**를 `bool` 로, `report_gen/validation.py:1077` 은 **마지막 매치**를 `'true'` **문자열**로 낸다. 이 저장소가 4번째로 겪는 판정 복제(`_is_hsis_data_row`·`_ratchet_core`·`_artifact_check`) |
+| 24 | 비관리자에게 매 앱 로드마다 403 토스트 | `QualityDashboard` 가 adminMode 와 무관하게 **항상 마운트**되고(`App.jsx:358-373`, 조건부 언마운트 0건) mount effect 가 즉시 발화(`QualityDashboard.jsx:273-275`) → `/api/quality/*` 는 라우터 전체 admin(`quality.py:16-20`) → 403 → `toast('error', …)` + 빨간 '데이터 로드 실패' 패널(`:264-267`, `:333-338`). 곁가지: 표시 게이트는 localStorage `devops_admin_mode` 인데 실권한은 `admin_users.json` 이라 **양방향 불일치** — `AdminContext` 가 백엔드 `is_admin` 을 이미 갖고 있는데 `App.jsx:235` 필터가 그걸 안 쓴다 |
 
 > ⚠ 12·13 은 원래 **취소선(완료) 행 안에** 적혀 있어 표만 보면 안 보였고, 14·15 는 본문
 > 절 안에만, 17 은 계획서에 아예 없었다. 2026-07-31 에 전부 이 표로 올렸다.
@@ -1033,6 +1036,155 @@ under-classification 이다. `helpers/uds.py` 의 옛 주석은 이걸 *"보수�
 | 1-b. 같은 판정을 SITR 에도 | ⛔ **대상 표면이 없다** | `swit_sitr_aggregator.py` 에 `final_test_result` **0건** — SITR 은 그 셀을 쓰지 않는다. `swit_comprehensive_aggregator.py:63` 의 `= "OK"` 는 **소비처 0인 dead default**(`.final_test_result` 참조 전수 3건이 전부 SwUT 계열). 배선하면 없는 결함에 코드를 더하는 것 |
 | 2. 실측값과 합성값을 타입에서 구분 | ✅ 완료 | `CoverageStats.measured`(`swut_input_adapter.py:71`). 합성값은 달성 판정에서 제외(`:455`), 전부 합성이면 `na` |
 | 3. 가중평균 오류 교정 | ⏸ 미착수 — **사유가 코드에 기록됨** | `workflow/vcast_traceability.py` 는 **어디서도 import 되지 않는다**. 게다가 이 계층엔 분자·분모가 없어(`_parse_pct` 가 백분율만 뽑음) 파서가 counts 를 보존하도록 먼저 바꿔야 한다 — 둘 다 모듈 docstring 에 명시. 되살릴 때 같이 고칠 것 |
+
+---
+
+## 6-1. 게이트 조회·검토 기록 섹션 (후보 22) — 설계 확정, 미착수
+
+> 사용자 요청(2026-08-03): *"탭을 생성해서 그 프로젝트에서 게이트에 대한 걸 보고 리뷰하고
+> 작성할 건 작성하게 만들어야하니깐"*. 착수 전 실측 5축 + 적대적 반증 2축을 돌린 결과다.
+> **구현은 아직 0줄이다.**
+
+### ⚠ 착수 전에 알아야 할 것 — 측정이 설계를 세 번 바꿨다
+
+**① 이 기능을 소박하게 만들면 게이트가 뒤집힌다 (재현 완료).**
+`.quality_gate.md` 사이드카 끝에 검토 의견을 덧붙이는 건 가장 자연스러운 구현인데,
+그 문장에 `Gate pass: True` 라는 **글자만 들어가도** 조회 응답의 판정이 뒤집힌다.
+`.venv/Scripts/python.exe` 로 두 파서를 같은 입력에 실제 실행한 결과:
+
+| 입력 | `backend/helpers/uds.py::_parse_quality_gate_report` | `report_gen/validation.py::_parse_quality_gate_summary` |
+|---|---|---|
+| 게이트 본문만 (대조군) | `False` (`bool`) | `'false'` (`str`) |
+| 위 + 검토 의견 1줄 | `False` (`bool`) | **`'true'`** (`str`) |
+
+즉 **같은 파일에 정반대 판정**이다. 원인은 `uds.py:464` 가 `re.search` 로 **첫 매치**를 취하고
+`validation.py:1073-1080` 은 줄 루프에서 매번 덮어써 **마지막 매치**가 이기기 때문이다.
+타입까지 갈린다 — **JS 에서 문자열 `'false'` 는 truthy** 라 프론트가 그대로 읽으면 FAIL 이 PASS 로 그려진다.
+이건 탭과 **무관하게 지금 존재하는 결함**이므로 후보 23 으로 따로 세웠다.
+
+**② 최상위 탭이 아니라 Detail 섹션이어야 한다.**
+최상위 4뷰는 `App.jsx:358-373` 에서 **전부 항상 마운트**된다(조건부 언마운트 0건). 그래서 최상위에
+만들면 비관리자에게 매 앱 로드마다 403 토스트가 뜬다(후보 24 가 그 현행 실증이다).
+`Detail.jsx:280` 의 visited-lazy 는 **첫 진입 전 요청 0건**이라 이 문제가 없다.
+사용자 요청의 *"그 프로젝트에서"* 도 Detail(프로젝트 결과) 스코프를 가리킨다.
+
+**③ 리뷰 표면이 0 이라는 전제는 틀렸다.**
+반증이 뒤집었다 — 리뷰 **상태** 표시는 이미 라이브다(`ResultPanel.jsx:14-17,708,727` 수동 검토 필요 배지 /
+`ImpactGuideSection.jsx:381,3339` AUTO↔FLAG / `ProjectSummarySection.jsx:396` 검토 대기 문서 칩).
+없는 것은 **쓰기(작성)** 축 하나다. 또한 최초 보고가 "이미 화면에 있다" 며 든 근거 일부는
+`SHOW.traceability=false`(`summaryCommon.js:19`) 블록 안이라 **렌더되지 않는 줄**이었다 — 인용 금지.
+
+### 범위
+
+**만든다** — ① 이미 계산·영속되는데 화면에 못 오는 게이트 근거를 한 자리에서 **조회**(신규 판정 로직 0개)
+② 그 근거에 사람이 **검토 기록**(코멘트·판정·사유)을 남긴다 ③ 정책값을 **읽기 전용 노출**.
+
+**안 만든다 (명시적 제외)**
+
+- **CORE-000 계약 6종** — 코드 0건인 채로 둔다. 이 섹션은 **필드 단위 승인을 하지 않기 때문에**
+  `FieldState`·`EvidenceRef` 없이 성립한다. **필드 단위로 넓히는 순간 CORE-000 이 선행 요구가 되어
+  착수 불가**가 되므로 이를 비목표로 고정한다. ← 이 항목의 성패가 여기 걸려 있다
+- **DOCX 본문 편집** — '작성'의 대상은 검토 기록이지 문서 내용이 아니다
+- **최상위 탭 신설** — 위 ②
+- **게이트화**(임계 적용으로 FAIL 을 만드는 것) — 표시만 하고 판정에 넣지 않는다
+- **챗 승인 테이블 재사용** — `ChatPendingApproval`/`ChatApprovalAudit` 은 대상 식별자 컬럼이 0개고,
+  챗 approve 는 `answer_chat` 재실행일 뿐 **어떤 mutation 도 인가하지 않는다**(`action_type` 4종 디스패처 0건).
+  어휘·패턴만 참고하고 같은 테이블에 섞지 않는다
+- **`/api/local/editor/*` 재사용** — 아래 S3
+
+### 이미 있어 재사용하는 것 (재작업 금지)
+
+| 무엇 | 어디 |
+|---|---|
+| 게이트 판정 단일 출처 + fail-closed(대상 0개면 `gate_pass=False`, `reason='no_gated_metric'`) | `workflow/quality/evaluator.py:371-404` · `recorder.py:146-161` |
+| 지표별 value/threshold/gate_pass 상세 endpoint (**소비자만 0건**) | `backend/routers/quality.py:105-121` (`GET /api/quality/runs/{run_id}`, `include_scores`) |
+| 게이트 조회 화면(목록·문서종 필터·PASS/FAIL pill·트렌드) | `frontend-v2/src/views/QualityDashboard.jsx` |
+| **실패 지표별 label/value/threshold 를 이미 그리는 패널** — '왜 FAIL 인가'는 없는 게 아니라 목록 행이 아니라 여기 있다 | `QualityDashboard.jsx:192-194,205-228` ← `workflow/quality/advisor.py:294-302` |
+| fail-closed 사유의 자연어 전달("게이트 항목이 0개라 판정이 성립하지 않습니다(통과 아님)") | `advisor.py:313-339` → `quality.py:176-183` → `QualityDashboard.jsx:192-194` |
+| 검사 규모 영속 지표 | `recorder.py:146-161`(`gated_metric_count`) · `evaluator.py:51-65,114`(`quality_thresholds_missing`) |
+| 품질 DB + 기록 배선 **12곳** | `models.py:18,51,71` / `helpers/uds.py:1836`, `local.py:1139·1237·1523`, `jenkins.py:2637`, `swut.py:658`, `swit.py:553`, `swsa.py:165`, `swreport.py:140`, `generators/sts.py:2621`·`suts.py:2646`·`sits.py:2010` |
+| 서브탭 셸(**방문 서브만 마운트** + 렌더 중 조정 + 수동 활성화) | `ProjectSummarySection.jsx:40-46,131-176,612-666`. ⚠ DocGenHub 판(`:20-118`)은 **자동 활성화라 조회 폭주** — 복제 대상은 ProjectSummary 판 |
+| Detail 섹션 등록·keep-alive·딥링크·breadcrumb | `Detail.jsx:14-31`(SECTIONS) · `:67,71-74,277-292`(visited lazy) · `:92-105`(`window.__detailSection`) |
+| 출처·측정근거 표시 선례(근거 등급 UI 를 발명할 필요 없음) | `BaselineDiffPanel.jsx:71,78-80` · `FunctionCoveragePanel.jsx:68,134,240,245` |
+| 동시 쓰기 방어 선례(FileLock) / 입력 신선도 지문(4-tuple mtime) | `services/scm_registry.py:27` / `helpers/uds.py:973-978` |
+
+### 정말로 없는 것 (실측 확인)
+
+| 무엇 | 없음을 어떻게 확인했나 |
+|---|---|
+| 산출물/run 대상 검토·승인 레코드 | `__tablename__` Grep = 9건 전수(chat 4 + quality 3 + rag 2). 리뷰/코멘트/승인 테이블 0개 |
+| 산출물 내용 해시(승인을 바이트에 고정할 수단) | Grep `sha256\|md5\|content_hash\|hashlib` over `workflow/quality/` → **0건**. `GenerationRun` 13컬럼에 해시 0개 |
+| 게이트 실패 **사유(reason)** 의 영속·전달 | `QualitySummary` 6컬럼에 없음, `/api/quality/runs` 응답 5키에도 없음. `evaluator.py:396` 의 reason 은 지표로만 남음 |
+| `GET /api/quality/runs/{run_id}`(지표 전량표)를 쓰는 화면 | Grep `/api/quality` over `frontend-v2/src` → 4건 전부 `QualityDashboard.jsx`(advice/runs/trend). **상세 호출 0건** |
+| 정직성 신호 14키의 프론트 소비 | 단일 Grep(`quality_evaluation`…`gated_metric_count`) over `frontend-v2/src` → **No matches found** |
+| `.field_confidence.md`(저신뢰 필드 목록) reader | Grep 전체 7건 = writer 4 + 주석 1 + 테스트 2. **reader 0** |
+| UDS run 의 프로젝트 식별자 | `record_uds_run` 5개 호출처 전부 `project_root` 미전달 + sqlite `project_root IS NULL AND doc_type='uds'` = **3/3** |
+| `target_function` 기록 | 12개 호출처에 인자 0건 + `count(target_function)` = **0/683** → `/api/quality/trend` 의 이 필터는 항상 0건 |
+| 검토 결과의 **작성(write) 표면** | `approval` Grep over `frontend-v2/src` = 21건 / **1파일**(챗 카드). 나머지 37개 섹션 0건 |
+| `'expired'` 를 기록하는 코드 | Grep over `backend/` → **No matches found**. TTL 만료는 감사행 **없이** 소멸(`chat_approval_store.py:45-50,126`) |
+| 게이트 임계값의 앱 조회·조정 경로 | `UDS_QUALITY_GATE_THRESHOLDS` 참조 = config 정의 + 3소비 + 테스트/문서. **API·프론트 0건** |
+| 계획서 31항목 중 대응 항목 | `탭` Grep over 이 계획서 → **0건 / 1047줄** |
+
+### 단계 (독립 착수 가능 단위)
+
+| # | 단계 | 산출물 | 착수 전 실측 | 선행 |
+|---|---|---|---|---|
+| **G0** | **파서 이원 판정 제거** — 단일 출처화, 매치 2회 이상이면 `None`(파싱 실패), 헤더 블록 1회만, 반환 `bool` 고정. `Called fill (supported):` 정규식 불일치(`validation.py:856` vs `uds.py:467`)도 같이 | 단일 파서 + **뮤테이션 테스트(pytest 종료코드로 검출)** | `- Gate pass:` 생산자가 `validation.py:847` 외에 더 있는지 | 없음 |
+| **G1** | **섹션 껍데기** — `Detail.jsx` SECTIONS 에 1행 + ProjectSummary 판 서브탭 셸 복제 | 빈 섹션 + `Detail.test.jsx` mock + 서브탭 회귀 | `Detail.test.jsx:49-93` mock 수·`:277` 단언이 깨지는지 | 없음 |
+| **G2** | **run 게이트 상세 (읽기 전용, 신규 백엔드 0)** — 기존 endpoint 배선. `gated_metric_count` 없는 run 은 **'검사 규모 미기록'으로 분리**. `gate_pass` 는 서버 값만, **프론트 재계산 금지** | 지표 상세 화면 | ⚠ 라이브 1회 호출로 **실제 응답 shape** 확인(문서 아님) | G1 |
+| **G3** | **문서 사이드카 게이트 조회** — 파싱 실패는 `0`/`PASS` 가 아니라 **'판정 불가'** | 문서 단위 게이트 카드 | G0 후 두 파서가 동일 결과인지 재확인 | G0, G1 |
+| **G4** | **정책값 읽기 전용 노출** — `UDS_QUALITY_GATE_THRESHOLDS` / `UDS_QUALITY_WARNING_THRESHOLDS`(판정 참조 0) / `TEST_QUALITY_GATES_BY_ASIL`(사용 0)을 **"적용됨 / 정의만 있고 미사용"** 라벨과 함께 | `GET /api/quality/policy` + 화면 | env override 실적 — 화면이 **config 리터럴**을 보일지 **실효값**을 보일지가 여기서 갈린다 | G1 |
+| **G5** | **검토 기록 스키마 (쓰기, 백엔드만)** — 신규 테이블 1개. `subject_kind`/`subject_id`(=`generation_runs.id`)/`output_sha256`**(필수)**/`reviewer`/`auth_method`/`decision`/`comment`/`version`. `UNIQUE(subject_kind, subject_id, reviewer)`. 상태 전이 + 감사 INSERT 를 **한 트랜잭션**. 쓰기 실패는 **fail-loud** | 테이블 + `POST/GET /api/review/*` + 동시쓰기·해시불일치·권한 테스트 | `quality.sqlite` 에 붙일지 별도 DB 인지. `workflow/quality/db.py:62-70` 에 `busy_timeout` 명시 없음(`chat_history_db.py:69` 는 있음) | G2 |
+| **G6** | **검토 기록 UI (작성)** — 코멘트 + 판정 저장. `default` 사용자·`X-User` 폴백 저장 거부. 성공 토스트는 **서버 2xx 이후에만**. 해시 불일치는 `stale` 명시(**빈칸 금지**) | 작성 UI + 이력 표시 | `output_path` 가 살아 있는 run 비율(없으면 해시 재계산 불가) | G5 |
+| **G7** | **검토 이력 조회** — 챗 승인 감사와 **분리**. `expired` 를 실제로 기록 | 이력 목록 + 필터 | 챗 감사 `status` 실측 분포 | G5 |
+
+### 설계상 방어 — 리뷰가 측정을 대체하지 않게
+
+이 저장소 규약은 **"미측정을 통과로 바꾸지 않는다"** 인데, 승인 UI 는 그 규약을 정면으로 위협한다.
+
+| 위험 | 방어 |
+|---|---|
+| **S1** 리뷰 문장이 게이트를 뒤집음(**재현 완료**, 위 ①) | 검토 텍스트를 **게이트 산출물 파일에 절대 쓰지 않는다**(전용 DB 테이블만). 쓰기 대상은 **대상키 화이트리스트**로만 — 자유 경로 파라미터 금지 |
+| **S2** 두 파서 정반대 판정 (`bool False` vs `'true'` 문자열) | G0 을 **선행 단계로 분리**. 반환 타입 `bool` 고정. 판정 복제 4번째 사례이므로 **뮤테이션 테스트 동반** |
+| **S3** 게이트 근거 파일이 비-admin 에게 쓰기 개방 — `POST /api/local/editor/write` 는 **base 를 요청자가 지정**하고(`local_service.py:777-789`) `local.py` 에 `require_admin` **0건**. 같은 방식으로 `reports/quality.sqlite` 자체도 덮인다 | 검토 쓰기에 **`editor/*` 를 재사용하지 않는다**. 전용 endpoint + Pydantic + `extra='forbid'`. `editor/*` 권한 축소는 **범위 밖이지만 백로그 등재** |
+| **S4** 승인자 신원이 헤더 한 줄로 위조 — `.env` `DEV_MODE_X_USER_FALLBACK=1` 이 `X-User` 를 사용자로 승격(`user_context.py:157-160`), `admin_users.json` = 1명이라 `require_admin` 도 함께 통과 | 검토 쓰기만 **X-User 폴백 거부(JWT 필수)**. `'default'` 사용자는 저장 거부. `auth_method` 컬럼으로 사후 판별 가능하게 |
+| **S5** 재생성 후 승인이 옮겨붙거나 사라짐 — 산출물 파일명이 매번 타임스탬프 | `output_sha256` **필수** + 조회 시 재계산 비교. 불일치는 지우지 말고 **`stale`** 로 명시(빈칸=미검토와 구분 불가). **해시 컬럼 1개만** 추가하고 `ArtifactEnvelope` 는 안 끌어온다 |
+| **S6** 재생성 없이도 stale — `trace_matrix_summary.json` 의 신선도 근거가 `generated_at` 문자열 1개뿐 | 입력 지문 없이는 **'신선도 미확인'** 배지 + 검토 잠금. 지문 패턴은 저장소 안에 있다(`helpers/uds.py:973-978`) |
+| **S7** 게이트 단위가 **4층으로 분열**(run / 문서 / 빌드캐시 / impact run)이고 조인키가 없다 | 검토 단위를 **run 하나로 못 박는다**. 다른 층은 딥링크로만. ⚠ 대상 선택에 **`project_root` 필터 금지** — UDS 3행 전부 NULL 이라 "UDS 는 승인할 게 없다"로 보인다 |
+| **S8** 대상의 **79.9%(546/683)** 가 '몇 개를 검사했는지' 복원 불가 — 그중 `gate_pass=1` 이 **182건** | 목록을 `gated_metric_count` 유무로 **2분**하고 부재 run 은 **'검사 규모 미기록'으로 검토 잠금**(가짜라는 뜻이 아니라 **판별 불가**라고 문구에 명시) |
+| **S9** 동시 쓰기 lost update — 유일한 유사 표면(UDS 라벨)이 락 없는 RMW + 비원자 `write_text`, 읽기 예외를 삼켜 **전체 라벨이 조용히 0건** | 검토 기록을 **JSON 파일로 저장하지 않는다**. DB + UNIQUE + 낙관적 `version` |
+| **S10** 쓰기 경합이 침묵 실패 — `record_run` 은 `except Exception: return -1` 이고 12개 호출처가 전부 로깅만 | 검토 쓰기는 **예외적으로 fail-loud**. `busy_timeout` 명시. 프론트는 2xx 이후에만 성공 토스트 |
+| **S11** 감사 공백 — (a) 감사 실패 **이중 침묵**, (b) resolve 가 pop 을 **먼저** 하고 감사를 나중에 | 순서를 뒤집어 **한 트랜잭션**. bare `except Exception: pass` 금지(신규라 AST ratchet 대상) |
+| **S12** 입력 표면 — `extra='forbid'` 90개 중 4개, `local.py` write 52개 admin 우회, Form 239개가 Pydantic 우회, `comment` 에 `max_length` 없음 | 검토 쓰기는 **Form·`req: dict` 금지**. Pydantic + `extra='forbid'` + `max_length` + CRLF 차단 + 대상키 화이트리스트. **첫 리뷰 라운드에 입력 표면 매트릭스로 빈 셀 0 확인** |
+| **S13** '검토 대기 문서 N' 칩에 연결하면 오작동 — N 은 빌드별 FLAG **이벤트 누적합**이라 한 문서가 5빌드면 5 | 이 칩에 **검토 상태를 연결하지 않는다**. 검토 완료 수는 별도 카운터 |
+| **S14** '승인'이 실행을 뜻하지 않는데 UI 는 그렇게 읽힘 | 어휘를 **'검토 기록'** 으로 고정. `subject_kind`/`subject_id` 필수. **챗 감사 테이블·조회 API 공유 금지** |
+| 프론트 게이트 판정 복제 — `QualityDashboard.jsx:24,86` 의 `?? (score >= 70)` (현재는 서버가 score/gate 를 동시에 None 으로 줘 거짓 PASS 가 안 나지만 **잠복**) | 새 화면은 이 헬퍼를 **재사용하지 않고**, `gate_pass` 부재는 PASS 도 FAIL 도 아닌 **'판정 없음'**. 임계 70 을 프론트에 다시 두지 않는다 |
+| 검토자/승인자 이름 스탬프를 승인 증거로 오인 — 인증과 무연결, `allow_empty=True` 로 공란 통과, **검증한 값과 기록되는 값이 다름**(`default_x or x_override` 16곳 vs `meta.approver` override 우선) | 이 필드를 검토 기록의 근거로 **읽지도 쓰지도 않는다**. 병기 시 '문서에 인쇄된 이름(인증 무관)' 이라 라벨 |
+
+### 정책 결정으로 남기는 것 (사용자 몫 — 노출까지만)
+
+1. **검토 권한 주체** — admin 전용인가 지정 리뷰어 목록인가. 현재 `admin_users.json` 은 **1명**이라 admin 전용이면 사실상 단독 검토다
+2. `UDS_QUALITY_WARNING_THRESHOLDS` '주의' 밴드 사용 여부 (정의는 있고 판정 참조 0)
+3. 함수 기준 커버리지 게이트화 (실측 6.4% — 넣으면 기존 프로젝트 즉시 FAIL)
+4. `TEST_QUALITY_GATES_BY_ASIL` 5프로파일 활성화 여부 (참조 0)
+5. `stale`(해시 불일치) 처리 — 자동 무효화인가 표시만인가
+6. 검토 만료(TTL) 도입 여부 — 두면 만료도 **감사행으로** 남긴다(현행 챗의 `expired` 무기록 재현 금지)
+7. 미검토 문서의 게시(publish) 차단 여부 — 승격하면 `/uds/publish`(`jenkins.py:5198`)가 영향
+8. §6 열린 후보 중 **8·9 만** 이 섹션이 결정의 자리가 될 수 있다. **10·11·20 은 코드 상수·점수 재정의라 런타임 설정으로 환원되지 않는다**
+
+### 미측정 — 착수 전 확인 필요
+
+1. **`GET /api/quality/runs/{run_id}` 의 라이브 응답 shape** — 코드로만 봤고 **실제 호출을 안 했다**. G2 착수 전 필수
+2. **`sits` 0행 / `suts` 3행의 원인** — 배선(`sits.py:2010`)은 있는데 실적이 없다. **미실행인지 예외 삼킴인지 모른다**(= 코드 추가가 아니라 실행 경로 조사 대상)
+3. `output_path` 가 살아 있는 run 비율 — 없으면 `output_sha256` 재계산 불가
+4. `quality.sqlite` 동시 접근의 실사용 여부 — 5s 초과 실패를 스크립트로 재현했을 뿐 운영 발생은 미확인
+5. `.quality_gate.md` 사이드카의 현존 개수·생산자 다양성 — S1/S2 재현은 **샘플 1개** 기준
+6. `/api/local/editor/*` 의 실사용자 — 프론트 0건은 확인했으나 스크립트·외부 도구는 **모른다**(권한 축소를 백로그로 미루는 이유)
+7. env override 실적 — G4 가 리터럴을 보일지 실효값을 보일지가 여기서 갈린다
+
+> ⚠ 인용 주의: 조사 중 나온 `gate_pass 135곳/21파일` 은 ripgrep `--count`(= **매칭 라인 수**) 를
+> occurrence 로 라벨한 오류다. occurrence 기준 재측정은 152 / tracked 20파일.
+> **생산 4모듈·소비 6모듈 결론은 유효하나 수치 라벨은 인용하지 말 것.**
 
 ---
 
