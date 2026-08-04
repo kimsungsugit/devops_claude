@@ -1017,21 +1017,21 @@ under-classification 이다. `helpers/uds.py` 의 옛 주석은 이걸 *"보수�
 | ~~14~~ | ~~`requirements.py::enrich_function_details_with_docs` 미전환~~ | ⛔ **기각 확정** — 전환하면 ①`sds_match`→`sds`(0.95) 세탁 ②`sds_match` 는 "SDS 에서 **안** 왔다" 는 else 분기 ③`tools/generate_uds_local.py:16-18` 이 `sys.path` 를 `260105` 로 밀어넣는데 그 트리엔 `provenance.py` 가 없어 **import 에서 죽는다**. 가드 docstring 이 전환을 지시하고 있던 것도 교정(`05c07eb`) |
 | 18-old | (아래는 조사 시점 기록) | ⚠ **반증으로 축소됨**(verdict: weakened). 살아남은 사실: `_normalize_field_source` 화이트리스트 밖 13종이 `inference` 로 접힌 뒤 `SwFn_\d+` **모양만 보고** `rule`(0.75)로 덮인다 — `validation.py:1391-1393` 이 명시적으로 금지한 패턴을 같은 파이프라인 31줄 뒤가 되돌린다. 실측 `related_trusted_fill` 0%→100%, `RELATED_ID_TRUST_LOW` 소거 → Quality DB 유입. **뒤집힌 주장**: "신뢰도 리포트 세탁" 은 안 일어난다(두 경로 모두 리포트가 재라벨 **이전**에 기록됨), 등급 D→B·저신뢰 30→0 도 실데이터 재현 실패(149→149, D→D, `gate_pass` False→False) |
 | 19 | ~~`_normalize_field_source` 화이트리스트 붕괴 교정~~ | ⛔ **기각 — 반증됨**(verdict: overturned). 실데이터에서 발화하는 붕괴 라벨은 `sds_match`(6,428행) 하나인데, 그건 `requirements.py:1586-1591` 의 **else 분기** = *"설명이 SDS 에서 오지 **않았을** 때"* 라 trusted=False 가 **정답**이다. 고쳤으면 6,428행을 거짓 trusted 로 만들고 게이트 7건을 FAIL→PASS 로 뒤집었을 것 — **제안 fix 자체가 결함**이었다 |
-| 20 | `sds_match` 별칭이 0.95 를 받는다 | #19 의 뒤집힌 근거에서 따라 나온다. `sds_match` 가 *"SDS 에서 안 가져왔다"* 는 뜻이면 `_src_aliases` 가 `sds`(0.95)로 접는 건 **과대 신용**이다. 점수·의미 재정의라 정책 결정 |
+| ~~20~~ | ~~`sds_match` 별칭이 0.95 를 받는다~~ | ✅ **완료**(`b7e1ff6`) — 별칭에서 빼고 **자기 라벨·자기 점수 0.80**(`call_graph` 와 같은 보조 증거 티어). 생산 지점(`requirements.py:1593-1598`)이 *"설명을 SDS 에서 가져왔을 때"* 의 **else 분기**라 뜻이 정확히 *"설명은 SDS 유래가 아니다"* 다. 실측 이동(실제 생산 함수를 별칭 복원본/현행본으로 각각 실행, uds_local payload 33개): **문서 등급 9/33 파일 전부 하향**(A→B 7, B→C 2) · **Description canonical(doc-backed) 5,805→4,556(−1,249)** · 표기가 `SDS: 209/220 (95.0%)` → `SDS 매핑(설명은 SDS 유래 아님): 209/220`. ⚠ 복제 스크립트로 재면 11파일/−2,184(과대) — 라이브 수치만 인용할 것. 게이트 판정은 **안 움직인다**(4번째 어휘 사본 `_normalize_field_source` 가 이미 `inference`=untrusted 로 접는다). ⚠ **0.75 이하 금지** — `is_weak_source()` 가 True 가 되어 RAG·AI·HSIS 덮어쓰기 3경로가 열린다(점수 정직화가 아니라 내용 변경). ⚠ `function_analyzer.py:839` 는 **안 건드렸다** — 초안은 `canonical_source()` 경유로 바꾸자고 했으나 반증에서 뒤집혔다: 그 사이트는 세 표 중 **유일하게 맞는** 표이고, 바꾸면 `hsis` 가 medium→high 로 뛰어 세탁을 다른 표면에 재생산한다 |
 | 21 | 이름맵이 `_resolve_related_asil_desc` 를 통째로 건너뛴다 | 조사 중 발견(별칭 버그와 무관, 더 큼). `docx_builder.py:2118` 루프는 `function_details` **전용**인데 렌더러 `_resolve_function_info`(:2917-2919)는 `function_details_by_name` 을 **우선** 조회한다. 게다가 `:2370` 미러는 값은 안 옮기고 **출처만** 옮겨 `('QM','sds')` 같은 조합을 만든다(출처가 값을 거짓 보증) |
 | ~~25~~ | ~~`test_cloudium_prefix_exact_match_succeeds` 가 병렬에서 flaky~~ | ✅ **완료**(`1861692`) — ⚠ **이전 라운드의 "반증" 이 무효였다**. `_ping_worker(host, port, timeout: float = _PING_TIMEOUT)` 에서 **기본 인자는 `def` 시점에 한 번 평가돼 상수에 얼어붙는다** — `_PING_TIMEOUT` 을 0.0001 로 낮춘 그 실험은 **no-op** 이라 아무것도 검증하지 않았다(실패가 아니라 무반응이라 눈에 안 띈다). 제대로 재현했다(CPU 포화 + 실제 `_MockWorker` TCP): **부하 O·0.5s → 60회 중 13회 실패**(수정 후 재측정 24/60) / 부하 X·0.5s → 0회 / 부하 O·15s → 0회. `-n auto`(18워커) 포화 시 mock worker 의 accept 스레드가 0.5초 안에 스케줄되지 못해 **게이트 ping** 이 만료된다(실패 지점은 `exists` IPC 10s 가 아니다). → `timeout=None` 폴백으로 **호출 시점에** 상수를 읽게 하고, 테스트 autouse 픽스처에서만 예산 15초. **프로덕션 0.5초는 실사용 live-ness 지연이라 정책이므로 안 건드렸다** — 고친 건 "조정이 먹히지 않던 것". 되돌리면 다시 조용히 no-op 이 되므로 시그니처·`is_gate_running` 경유까지 값으로 잠금(4건). 뮤테이션 3/3. 원래 기록: ⚠ **재현 실패 — 사실만 기록.** 2026-08-03 pre-commit(`-n auto`, 18워커)에서 1회 실패했는데 ① 단독 실행 통과 ② 같은 커맨드 전체 재실행 **5,276 passed**(재현 0회) ③ 가설이었던 `_PING_TIMEOUT=0.5s` 초과는 **확인 실패**(ping 을 0.0001s 로 줄여도 통과). 이 테스트는 `_MockWorker` 라는 **실제 TCP 서버**를 띄운다. pre-commit 은 테스트 실패에 fail-closed 라 flake 가 커밋을 무작위로 막는다 — 게이트 신뢰도 문제다. **추측으로 고치지 않았다**: 재현 경로를 먼저 찾을 것 |
-| 8 | UTCV-001 잔여 | `applicable` 정책축·커버리지 예외 disposition. 이 저장소에 해당 축이 **존재하지 않아** 신규 기능 개발이다(결함 수정 아님) — 사용자 판단 필요 |
-| 9 | 템플릿↔소스 프로젝트 불일치 | 소스 900함수 중 271개만 HDPDM01 템플릿에 존재(629건=69.9% 부재). 의도된 부분집합인지 오배치인지는 프로젝트 설정 판단이 필요해 `ok` verdict 는 뒤집지 않고 수치만 노출해 둔 상태 |
-| 10 | `workflow/ai_validator.py` | dead code(호출자 0). 살릴지 지울지는 정책 결정 — 사용자 몫으로 남김 |
-| 11 | 빈 값에도 출처 점수가 매겨진다 | §5-13 참조. `_score_for` 는 값 유무를 안 본다 — 빈 ASIL + `asil_source="sds"` 가 0.95 를 받는다. "출처는 있는데 값이 없다" 는 상태를 점수에 어떻게 반영할지는 정책 판단 |
+| ~~8~~ | ~~UTCV-001 잔여~~ | ✅ **완료**(`fbcfeaf`) — ⚠ **전제가 틀렸다**: 축이 통째로 없는 게 아니라 `exception`(면제)·`not_measured`(`CoverageStats.measured`)·ASIL threshold 분리가 **이미 있다**. 정말 없는 건 disposition 워크플로 하나이고 그건 기능 개발이라 **미착수 확정**. 대신 그 조사에서 나온 **순수 결함**을 고쳤다: 정상 1함수 + `total=0` 2함수 → `Coverage 166.67%`. fail 판정이 두 곳에서 다르다(데이터행 `not passed` ← total=0 이면 True / 요약 `f != g` ← 0==0 이라 False) → 미측정이 Fail 로는 안 세고 Exception 으로만 세어져 **분자에만** 더해진다. 프로덕션 경로가 만든다(04.MetricsReport HMR merge · `_parse_metric_cell` 파싱 실패). ⚠ **산술만 정규화하면 `(3-0+0)/3=100%`** — 1/3 함수만 측정인데 100% 이고, 166.67% 라는 **불가능한 값이 유일하게 시끄러운 신호**였는데 조용한 정상값으로 바꾸는 fake-green 이다. 그래서 ①미측정에 Exception 'O' 를 안 찍고 ②**분모에서 빼고** ③실측 0이면 숫자가 아니라 `"미측정"`. PV 자동 예외 정책(`:994` 사용자 결정)은 대조군으로 고정 |
+| ~~9~~ | ~~템플릿↔소스 프로젝트 불일치~~ | ✅ **완료**(`3b1a376`) — ⚠ **전제가 두 번 뒤집혔다**. ①"무손실이라 `ok` 가 정답" 의 근거가 된 산출물은 템플릿 모드가 아니라 **무템플릿 폴백**(손실이 원리적으로 0인 경로, `unmatched_payload_count: 0` 하드코딩)이라 검증이 성립하지 않는다 — 템플릿 모드 실측은 이미 저장소에 있다: **payload 432개 중 95개(22.0%) 미반영 + 빈 heading 74개인데 `success`**(`helpers/uds.py:1308-1312`). ②결함의 절반(**주입**)이 빠져 있었다 — 미매칭 heading 은 빈칸이 아니라 `_fallback_function_description` 으로 **합성 설명이 붙은 섹션**이 된다(`:3088-3092`). → `ok`/`success` 판정은 **뒤집지 않고**(의도된 부분집합인 회사 양식이 실재) `template_identity` 를 **참조 SUDS 와 같은 판정 함수**로 표면화 + 경고 + `_gen_stats_result_fields` 화이트리스트 추가(**여기 안 넣으면 API 응답에서 잘린다**). ⚠ 인용 주의: `629/900` 은 틀린 값이 아니라 **출처 미표기**(KJPDS02 결합 캐시). 사과-대-사과는 payload 기준 **HDPDM01 80.3% vs KJPDS02 30.1%(2.7배)**. ⚠ 별건: `hdpdm01.linked_docs.uds` 가 **KJPDS02 문서**를 가리킨다 — 바인딩 착수 전 registry 정리 필요 |
+| ~~10~~ | ~~`workflow/ai_validator.py`~~ | ✅ **완료**(`a44b62e`) — **중복 5개 삭제 + 안 겹치던 검사 1개 이식**(순 −600줄). 6개 공개 API 중 4개가 live 구현과 중복(JSON fence-strip 2벌·evidence facade 는 `uds_ai.py:11,795` 가 직접 경로로 우회·retry `:846-872`·시크릿은 `ai.py`). 중복 아닌 건 **거절문구 검사** 하나였고 공백이 실측된다: `_is_generic_description("I'm sorry, I cannot generate…")` → **False**, len 61 > min_len(5/10) → **채택**, 그 뒤 `description_source="ai"` 가 신뢰 출처라 `trusted_desc` 화이트리스트에서 내용검사를 **면제**받아 원문 그대로 실린다. ⚠ `trusted_desc` 에 `and not is_llm_refusal(…)` 만으로는 **부족**했다 — else 분기 `_enhance_description_text` 가 상투구 아닌 텍스트를 그대로 돌려주므로 값을 비워 폴백으로 보내야 한다. ⚠ `min_length=20` 은 **안 가져왔다**(6~20자 정상 한국어 설명이 새로 거절된다). ⚠ **관측된 오염은 0건**이다(JSON 전수) — 납품 DOCX 는 zip 이라 **측정 실패**이지 clean 아님. ⚠ 조사 초안의 `_classify_description_quality→high` 게이트 뒤집힘 서술은 반증됨(그건 게이트가 아니라 **카운터**) |
+| ~~11~~ | ~~빈 값에도 출처 점수가 매겨진다~~ | ✅ **완료**(`c341610`) — `_score_for` 는 **안 건드렸다**. 빈 값을 점수에서 빼는 옵션은 실측하면 ASIL 도 Related 도 없는 함수를 D→A 로 **승격**시켜 방향이 반대라, 현행 동작을 테스트로 고정하고(바꾸면 이 후보를 다시 연다) **진짜 잔여인 유입 3곳**을 닫았다: `routers/local.py` HSIS 승격·`tools/generate_uds_local.py` 같은 승격·`requirements.py` SDS 매칭이 **값을 안 보고 라벨만** 올렸다(`hsis`·`sds_match` → 0.95). 디스크 잔여는 0건이었지만 막고 있던 게 `docx_builder.py:2175-2180` 의 되돌림 **한 겹**뿐이라 회귀 위험이 다르다. 판정은 `provenance.has_evidence_value` 단일 출처(⚠`str(v or "")` 관용구 금지 — `0`·`False` 가 자리표시자로 접힌다) |
 | ~~12~~ | ~~D2 잔여 — 참조 SUDS 를 신원 불일치에도 읽는다~~ | ✅ **완료**(`03b0f67`) — ⚠ **제안된 fix 가 실측으로 막혔다**: 신원 불일치여도 구조 축은 **그대로 적용된다**(foreign 참조의 `called`/`calling` 이 대상 함수에 들어가는 것을 값으로 확인). 읽기를 건너뛰면 순수 성능이 아니라 **산출물이 바뀐다**. ⚠ 그 판정이 애초에 불가능했던 이유: sidecar `reference_suds` 가 세는 축은 5개인데 실제로 덧씌우는 축은 **11개** — `inputs`·`outputs`·`globals_static`·`globals_global`·`called`·`calling` 6축이 **무기록**이라 적용량을 몰랐다. → `structural_fields_applied`(축별 계수) 신설. ⚠ **진짜 비용은 중복 읽기였다**: 서로를 모르는 세 호출처가 같은 38.8MB 를 각각 읽는다(`docx_builder` 파싱 7.4s · `helpers/uds.py` SwCom diff · `local`/`jenkins` AI 예시 `_read_text_from_file` **11.7s**). → `_read_text_from_file` 에 파일 신원 캐시(`(정규화 경로, mtime_ns, size)`, LRU 4, 1MB 미만 제외) — 실측 **8.96s→0.000s**, 내용 동일. 반환값이 **불변 문자열**이라 이 저장소가 겪은 캐시 사고(공유 가변 구조 제자리 변경)와 무관. ⚠ temp **루트 직속**만 제외(`NamedTemporaryFile` 경로는 OS 가 재사용) — 하위까지 막으면 캐시가 검증 불가능해진다. ⚠ **수치 정정**: "24.3초" 는 세 읽기의 합이지 한 곳 비용이 아니다(docx 파싱만 7.4초). 테스트 14건, 뮤테이션 8/8. **정책 잔여**: 남의 프로젝트 문서의 구조 축을 애초에 적용해야 하는가 — 값이 이동하므로 D3 과 같은 등급 |
 | ~~13~~ | ~~#5 잔여 — 토큰 예산·stage cap 이 egress 간 공유 안 됨~~ | ✅ **완료**(`a7e3342`) — ⚠ **전제 2건이 실측으로 뒤집혔다**. ① `embedder` 는 이미 상한·보고가 있다(`_clip_input` + `input_truncated` reason, `rag/embedder.py:49-78`) — "embedder 엔 없다"는 틀렸다. ② 어댑터 두 호출처(`assistant_service._call_anthropic`·`generate_periodic_reports`)는 입력을 **상류에서 캡**하고(`commits[:20]`·`changed_files[:80]`·`uncommitted[:30]`), 주기보고서는 실패를 `생성 방식: fallback` + 사유로 **마크다운에 렌더**한다 → **활성 침묵 없음**. 진짜 실체는 **구현이 갇혀 있던 것**: `_estimate_tokens`/`_truncate_middle`/`_summarize_text`/`_trim_messages_to_token_budget` 4개가 전부 `llm_call` **안쪽 중첩 함수**라 어댑터 egress 가 구조적으로 못 썼고, 설정에 `max_input_tokens` 가 있어도 **읽지도 않았다** — 같은 챗이 공급자에 따라 한쪽은 잘려서 답이 나오고 한쪽은 상한 초과로 실패한다(`TestAnthropicChatPathIsConsistent` 가 **응답** 절단에 대해 막아둔 비대칭이 **입력** 쪽에 잔존). → 4개를 모듈 레벨 단일 출처로 승격 + `llm_adapters._trim_outgoing` 을 세 어댑터에 배선(예산 **명시 시에만** 적용, 미설정 시 no-op). **상한 값은 정책이라 안 정했다**(후보 17 과 같은 경계). 테스트 18건(규칙+배선 AST 가드), 뮤테이션 6/6. ⚠ **테스트 함정**: `warn_input_tokens` 생략 시 `config.LLM_WARN_INPUT_TOKENS` 를 읽는데 다른 테스트가 `config` 를 MagicMock 으로 갈면 `int()` 가 **1**(MagicMock.`__int__`) → 늘 요약 경로. 단독 통과·합본 실패로 드러남 |
 | ~~15~~ | ~~리포트 timeout 시 payload 제자리 변경 경합~~ | ✅ **완료**(`47765f4`) — 경합보다 큰 게 나왔다. `generate_asil_related_confidence_report` 가 **payload 를 제자리 변경**해 `asil_fill`·`description_fill`·`related_fill` 을 **0.0→100.0** 으로 만들고, 라우터가 그 **뒤에** quick gate 를 계산해 DB 에 넣는다(`jenkins.py` L2600→L2634 · `helpers/uds.py` L1827→L1860 · `local.py` 두 번째 기록 L1197→L1236). fill 카운터는 출처를 안 보므로 §5-13 의 `generated_doc`=0.30 정직화와 무관하게 100% 로 잡힌다 — **출처는 정직한데 분량이 부풀려진다**. 병합을 사본에 하도록 고쳐 경합도 함께 닫힘(공유 가변 상태 제거). ⚠ **결함이 자기 탐지를 가렸다**: 이 파일 테스트 12곳이 전역 `WEAK_PAYLOAD` 를 복사 없이 넘겨 옛 코드가 그걸 오염시켰고, 뒤 테스트가 오염본을 deepcopy 하니 병합이 no-op → 단독 실패/전체 통과. 리터럴 전환 + 전역 오염 autouse 가드로 2/2 KILL. 원래 기록: §5-13. `_run_report_with_timeout`(`backend/helpers/common.py:389`)의 `cancel_futures=True` 는 **이미 실행 중인** future 를 안 죽인다. 그 스레드가 `uds_payload` 를 계속 변경하는 동안 다음 리포트가 같은 payload 를 쓴다. 리포트 계층의 변경 규약(제자리 변경 자체)을 바꿔야 하는 건이라 별건 |
-| 16 | `google.generativeai`(EOL) 폴백 제거 여부 | §5-12. *"All support … has ended"* 를 매 실행 찍는 수명 종료 패키지인데 legacy 폴백 한 곳으로 남아 있다. 지연 로딩으로 **비용은 이미 0** 이므로 제거는 순수 정책 결정 |
+| ~~16~~ | ~~`google.generativeai`(EOL) 폴백 제거 여부~~ | ✅ **완료**(`1b795f1`) — **제거 보류로 확정**하고 조사 중 드러난 실제 결함만 고쳤다. ⚠ 계획서 근거 2개가 **둘 다 틀렸다**: 경고는 지연 로딩(8126e77)이 이미 없앴고(`import workflow.ai` 후 `sys.modules` 에 없음 — 중간에 관측된 경고는 **260105 트리 옛 사본**이 낸 교차트리 artifact), 비용도 0이 아니다(첫 LLM 호출 때 legacy 한계비용 **1.4~2.8초**). 제거를 막은 건 **`safety_settings` 비대칭** — legacy 블록만 BLOCK_NONE 4종을 걸고 신 SDK 경로엔 safety 인자가 **아예 없다**. legacy 가 "신 SDK 가 SAFETY 로 막을 때 유일하게 뚫는 경로" 일 수 있는데 **실제 API 호출 없이는 판정 불가**(측정 실패)라, 측정 실패를 "안 쓰이니 안전" 으로 읽지 않는다. 고친 결함: **오류 라벨 비대칭** — `gemini_sdk_missing` 이 `or` 가드 없이 무조건 덮어써, 신 SDK 가 재시도를 소진하고 legacy 미설치인 환경에서 실제 사유(429/timeout)가 사라지고 **"SDK 가 설치돼 있는데 설치 안 됨"** 이 남았다(소비처: `_agent_once` → UDS 생성 실패 사유) |
 | ~~17~~ | ~~`uds_ai` 대용량 페이로드에 stage cap 부재~~ | ✅ **완료**(`c73e60a`) — ⚠ **주장이 절반 틀렸다**: `agent_call` 호출자 5곳이 전부 `stage` 를 넘기고 `llm_call` 은 stage 상한을 적용한다. 맞는 건 **설정** 쪽 — `config.py` 상한은 `build_fix`·`syntax_fix`·`static`·`domain_tests`·`plan_repair`·`test_plan`·`test_code` 뿐이라 `uds_analysis`·`uds_audit`·`uds_logic`·`uds_review`·`uds_sections` 5종과 **하나도 안 겹친다**(전역 1,048,576 만 적용 = 상한 걸린 stage 의 5.2배). **상한 값은 정책이라 안 정했고**, 대신 진짜 결함인 **절단 침묵**을 고쳤다: 경고가 `log_dir` 있을 때만 찍히는데 `uds_ai.py:341` 이 `log_dir=None` · `input_tokens_est` 가 절단 **뒤** 값이라 원래 크기를 모름 · 20회 루프로 못 내려오면 **초과분을 그대로 보내는데** 그것도 무기록. → `meta_out["input_trim"]` + `warnings`. 뮤테이션 3/3. 원래 기록:  ⚠ **이번 세션 미측정** — plan 단계 기록만 있고 이 계획서엔 여태 누락돼 있었다(2026-07-31 에 옮김). 정직성이 아니라 **비용** 문제로 분류돼 있었다. 착수 전 실측부터 할 것 |
-| **22** | **게이트 조회·검토 기록 섹션** (Detail 신규 섹션 `gate`) | ⬜ 미착수. **선행 G0 은 후보 23 으로 완료**(2026-08-03). **사용자 요청 2026-08-03**: *"탭을 생성해서 그 프로젝트에서 게이트에 대한 걸 보고 리뷰하고 작성할 건 작성하게"*. 실측·반증 완료, 설계 확정, **미착수** — 아래 §6-1. 계획서 31항목에 대응 항목이 **없다**(`탭` Grep 0건/1047줄). CORE-004 와 §5 보류 「ApprovalRecord 승인축」을 건드리지만 **필드 단위 승인을 비목표로 고정하면 CORE-000 없이 성립**한다 |
+| **22** | **게이트 조회·검토 기록 섹션** (Detail 신규 섹션 `gate`) | 🟡 **G1·G2·G4 완료**(`bb12fa9`) / G3·G5·G6·G7 미착수. 만든 것: Detail `gate` 섹션 + run 이력·지표별 근거 조회(**신규 판정 0개**) + `GET /api/quality/policy`. 정직성 규약을 값으로 고정 — `gate_pass` 프론트 재계산 금지(`QualityDashboard` 의 `?? (score>=70)` 폴백 **미재사용**), `gated_metric_count` 부재는 '검사 규모 미기록'(실측 72.9%), `gate_definition:` 마커 부재는 '게이트 정의 미상'(마커 51/749), `project_root` 필터 금지. ⚠ 고친 계약: `GET /runs/{id}` 가 미존재 run 에 **200+error** 를 내 `api.js:145` 가 실패를 성공으로 삼켰다 → **404**(소비자 0건이던 지금이 유일하게 무해한 시점). ⚠ G4 는 계획서의 2분법이 부족 — 적용되는 표 안에서도 **env 조정 가능 vs 코드 상수**가 갈려 축을 둘 뒀다. ⚠ **G5 착수 조건 정정**: `output_sha256` 이 749 중 6건뿐이라 막혔다는 건 분모 오염이다 — 나머지는 BytesIO 응답이라 서버에 파일이 없는 게 정상이고, **영속 산출물 doc_type(uds·suts) 기준으로는 6/6 = 100%** 다. 즉 검토 대상을 그 축으로 못박으면 S5 요건 무수정으로 성립한다 |
 | ~~**23**~~ | ~~게이트 판정을 두 파서가 정반대로 읽는다~~ | ✅ **완료** — §5-15. `report_gen/gate_report.py` 단일 출처. ⚠ 첫 수정이 되레 fail-open 을 만들어 같이 고쳤다. 원래 기록: ⚠ 재현 완료(§6-1 G0), 22 의 선행이지만 탭과 무관하게 존재했다. 같은 `.quality_gate.md` 에 `backend/helpers/uds.py:464` 는 **첫 매치**를 `bool` 로, `report_gen/validation.py:1077` 은 **마지막 매치**를 `'true'` **문자열**로 낸다. 이 저장소가 4번째로 겪는 판정 복제(`_is_hsis_data_row`·`_ratchet_core`·`_artifact_check`) |
-| ~~24~~ | ~~비관리자에게 매 앱 로드마다 403 토스트~~ | ✅ **완료**(`54f52aa`) — visited-lazy 마운트 + 403 을 장애가 아닌 권한 상태로. 뮤테이션 3/3(M3 은 App.test 가 뷰를 mock 해 처음 생존 → QualityDashboard.test 에 403/500 두 갈래 추가). **정책 잔여**: adminMode(localStorage)와 backend `is_admin` 이 다른 출처라 양방향 불일치 — 표시 authority 변경은 백엔드 장애 시 실제 admin 이 UI 에서 잠길 수 있어 사용자 결정. 원래 기록: `QualityDashboard` 가 adminMode 와 무관하게 **항상 마운트**되고(`App.jsx:358-373`, 조건부 언마운트 0건) mount effect 가 즉시 발화(`QualityDashboard.jsx:273-275`) → `/api/quality/*` 는 라우터 전체 admin(`quality.py:16-20`) → 403 → `toast('error', …)` + 빨간 '데이터 로드 실패' 패널(`:264-267`, `:333-338`). 곁가지: 표시 게이트는 localStorage `devops_admin_mode` 인데 실권한은 `admin_users.json` 이라 **양방향 불일치** — `AdminContext` 가 백엔드 `is_admin` 을 이미 갖고 있는데 `App.jsx:235` 필터가 그걸 안 쓴다 |
+| ~~24~~ | ~~비관리자에게 매 앱 로드마다 403 토스트~~ | ✅ **완료**(`54f52aa`) + **정책 잔여도 완료**(`de3c977`) — 표시 authority 를 **탭별로** 갈랐다: `quality`→backend `is_admin`(호출 3종이 전부 라우터 레벨 `require_admin` 이라 비관리자에게 여는 건 100% false affordance), `settings`→localStorage 유지(`health.py:233-239` 가 "비-admin 이 직접 전환해야 한다" 고 명시한 file-mode 를 담아 backend authority 로 옮기면 **실제 기능이 잠긴다**). ⚠ 계획서가 적은 "백엔드 장애 시 admin 잠김" 우려는 **설정 탭 쪽**에서 성립하고 Quality 는 반대다. 같이 닫은 구멍 둘: ①loading 동안 backend 판정을 쓰면 진짜 admin 도 RTT 만큼 탭이 튄다 → localStorage 를 **힌트**로 쓰되 힌트 없으면 표시 안 함 ②탭 목록에서 빼도 **뷰는 안 닫힌다**(`isMounted` 는 `activeTab` 만 본다) → 렌더 중 조정으로 대시보드 복귀. **보안 경계가 아니라 UX/일관성** 결정이며 `.env` `DEV_MODE_X_USER_FALLBACK=1` 로 `X-User` 한 줄이 `is_admin` 을 통과하는 것은 **별건**(라이브 실증) |
 
 > ⚠ 12·13 은 원래 **취소선(완료) 행 안에** 적혀 있어 표만 보면 안 보였고, 14·15 는 본문
 > 절 안에만, 17 은 계획서에 아예 없었다. 2026-07-31 에 전부 이 표로 올렸다.
@@ -1322,6 +1322,79 @@ by_name 을 만들므로 by_name 은 **진부분집합**이다(동명은 last-wi
 - `/api/local/editor/*` 무권한 쓰기(`local.py` 에 `require_admin` 0건, base 를 요청자가 지정)
   와 `.env` `DEV_MODE_X_USER_FALLBACK=1` 로 인한 `X-User` 신원 위조 — **보안 표면 변경이라
   사용자 결정**. 보고만 하고 손대지 않았다.
+
+---
+
+## 5-16. 남은 정책 후보 8건 일괄 — ✅ 완료 (2026-08-04)
+
+사용자 지시 *"남은 후보 정책도 다 진행"*. §6 에서 "정책 결정이라 사용자 몫" 으로 남아
+있던 8건(8·9·10·11·16·20·22·24-파생)을 전부 처리했다. 9커밋.
+
+### 방법 — 결정 전에 재고, 잰 것을 다시 반증했다
+
+측정 에이전트 9 + **반증 에이전트 9** 를 병렬로 돌렸다(오류 0). 결과:
+
+> **9건 중 9건이 `weakened`** — 계획서 전제와 1차 권고 **양쪽**이 교정됐다.
+
+반증이 뒤집은 것 중 큰 셋:
+
+| 후보 | 1차 권고 | 반증 |
+|---|---|---|
+| 12(a) | "이름 조인이 오배정과 교차프로젝트를 한 번에 닫는다" | 이름 조인 시 구조축이 **770→787 로 늘고** 매칭 354건 중 244건이 prototype 불일치 → **신원 게이트가 유일한 레버** |
+| 9 | "432/432 무손실이라 `ok` 가 정답" | 그 검증은 **무템플릿 폴백**(손실이 원리적으로 0인 경로) — 템플릿 모드 실측은 **95/432 미반영 + 빈 heading 74** 인데 `success` |
+| 8 | "166.67% 를 정상 범위로 되돌린다" | 그러면 **1/3 함수만 측정인데 100%** — loud 를 silent 로 강등(fake-green). 미측정은 분모에서 빼고 **명시**해야 한다 |
+
+### 결정과 근거 (상세는 §6 표의 각 완료 행)
+
+- **삭제**: `ai_validator.py`(중복 5개). 단 안 겹치던 **거절문구 검사 1개는 live 경로로 이식**
+- **보류 확정**: `google.generativeai` legacy 폴백 — `safety_settings` 비대칭이
+  실제 API 호출 없이는 판정 불가라, **측정 실패를 "안 쓰이니 안전" 으로 읽지 않는다**
+- **미착수 확정**: UTCV-001 `applicable` disposition 워크플로 · stage cap(실데이터가
+  전역 상한의 2.05%) · 어댑터 `max_input_tokens` 기본값(공급자 상한이 저장소에
+  기록돼 있지 않아 정하면 지어내는 것)
+- **점수 재정의**: `sds_match` 0.95 → **0.80**(자기 라벨). 0.75 이하는 덮어쓰기 3경로를
+  여는 **내용 변경**이라 금지
+- **표면화**: 템플릿 프로젝트 신원 · 구조축 차단 · 미측정 커버리지 · 게이트 근거 조회
+
+### 이 라운드에서 곁가지로 나온 결함 3건 (전부 침묵이었다)
+
+1. **`tools/generate_uds_local.py:276` 이 ImportError 로 죽고 있었다** — `sys.path` 최상단이
+   `260105` 라 `report_gen` 이 그 트리로 해석되는데 `build_function_details_by_name` 은
+   이 저장소 `utils.py:33` 에만 있다. 즉 §6 후보 21 C3(`fc246d7`)의 함수명 키 단일화가
+   **이 도구 경로에서 한 번도 도달한 적이 없다**. 호출자가 없어 조용했다.
+2. **무템플릿 폴백 사이드카에 `reference_suds` 키가 아예 없었다** — 참조 병합 루프는
+   템플릿/폴백 분기보다 **위**라 폴백 모드에서도 남의 프로젝트 값이 들어가는데 흔적이
+   0이었다(검토자가 "참조를 안 썼다" 로 읽는다).
+3. **`meta_out["error"] = "gemini_sdk_missing"`** 이 `or` 가드 없이 실제 실패 사유를
+   덮어 **"SDK 가 설치돼 있는데 설치 안 됨"** 이라는 거짓 진단을 남겼다.
+
+### 가드가 자기 자신을 복제하고 있던 것
+
+`test_validation_does_not_redeclare_the_alias_table` 이 감시 키를 `{"sds_match","hsis"}`
+**리터럴**로 갖고 있었다 — 그건 이 가드가 막으려는 바로 그 복제이고, `sds_match` 가
+정당한 `src_labels` 항목이 된 순간 오탐을 냈다. `SOURCE_ALIASES` 에서 파생시켰다.
+**가드가 자기 자신을 지키는지도 뮤테이션할 것**(이번에 M7 로 확인).
+
+### 검증
+
+| 축 | 값 |
+|---|---|
+| 뮤테이션 | **61/61 killed** (6+7+8+5+7+7+6+5+10). 1차에 생존한 4건은 전부 **대조군 부재**가 원인이었다 — 로그 가드·패턴별 독립 표본·loading 음성 케이스·경고 수치 |
+| 백엔드 스위트 | 5,320 → **5,424 passed / 1 skipped** (`-n auto` 106초) |
+| 프론트 | **1,042 passed / 64 파일** |
+| 신규 테스트 | 백엔드 +104(삭제분 −32 반영 후 순증), 프론트 +23 |
+
+⚠ **복제 하네스로 재지 말 것.** 후보 20 의 이동량을 replica 로 재면 11파일/−2,184 인데
+실제 생산 함수로 재면 **9파일/−1,249** 다. 표면 선택(`function_details_by_name` 우선)을
+흉내 내면 조용히 과대측정된다 — `[[reference_sim_harness_live_parity]]`.
+
+### 잔여 (이 라운드 밖)
+
+- **G3·G5·G6·G7** (검토 기록 쓰기) — §6 22행. 착수 조건은 정정됐다(아래).
+- `config/scm_registry.json` 의 `hdpdm01.linked_docs.uds` 가 **KJPDS02 문서**를 가리킨다.
+  프로젝트별 템플릿 바인딩 착수 전에 정리 필요. (이 파일은 현재 uncommitted 수정 상태)
+- `/api/scm/*` 에 `require_admin` 0건 — 후보 24 조사 중 발견. **보안 표면이라 별건**.
+- 위 §5-15 잔여(`/api/local/editor/*`, `X-User` 위조)는 그대로.
 
 ---
 
