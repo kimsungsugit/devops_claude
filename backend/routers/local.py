@@ -1007,8 +1007,15 @@ async def local_uds_generate(
             if rag_query:
                 fn_count = len(source_sections.get("function_details_by_name") or {}) if isinstance(source_sections, dict) else 0
                 default_top_k = 12 if fn_count >= 300 else 10 if fn_count >= 120 else 8 if expand else 4
-                use_top_k = rag_top_k if rag_top_k and rag_top_k > 0 else int(
-                    getattr(config, "AGENT_RAG_TOP_K_DEFAULT", default_top_k)
+                # ⚠ `rag_top_k` 는 사용자 Form 입력이 그대로 검색 폭 → 프롬프트 크기가 되는
+                #    유일한 축이라 상한을 건다(§6 후보 17). clamp 는
+                #    `workflow.ai.clamp_rag_top_k` 단일 출처 — 소비처 3곳이 각자 조이면 갈라진다.
+                from workflow.ai import clamp_rag_top_k
+                use_top_k = clamp_rag_top_k(
+                    rag_top_k if rag_top_k and rag_top_k > 0 else int(
+                        getattr(config, "AGENT_RAG_TOP_K_DEFAULT", default_top_k)
+                    ),
+                    default=default_top_k,
                 )
                 use_categories = [str(c).strip() for c in re.split(r"[,\n;]+", rag_categories or "") if str(c).strip()]
                 if not use_categories:

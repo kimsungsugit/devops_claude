@@ -2348,6 +2348,12 @@ def generate_uds_docx(
             "inputs": 0, "outputs": 0, "globals_static": 0,
             "globals_global": 0, "called": 0, "calling": 0,
         },
+        # 신원 미확인이라 **적용하지 않은** 구조 축. 0 이 아닌데 기록이 없으면 산출물
+        # 검토자는 "적용할 게 없었다" 와 "막았다" 를 구분할 수 없다.
+        "structural_fields_blocked": {
+            "inputs": 0, "outputs": 0, "globals_static": 0,
+            "globals_global": 0, "called": 0, "calling": 0,
+        },
     }
     if ref_doc_path.exists():
         if not _ref_safety_ok:
@@ -2417,31 +2423,61 @@ def generate_uds_docx(
                         if (not cur) or (key == "precondition" and cur.upper() in {"N/A", "TBD", "-"}):
                             target[key] = incoming
                             _ref_stats["descriptive_fields_applied"] += 1
+                # ── 구조 축 (인터페이스 정의) ──
+                # 입출력 파라미터·사용 전역·호출관계는 서술이 아니라 **시험 대상 인터페이스
+                # 정의**다. UDS 의 이 칸이 그대로 SUTS 시험 케이스의 대상이 되므로, 다른
+                # 프로젝트 문서에서 이름만 겹쳐 흘러들면 존재하지 않는 인터페이스를 시험하는
+                # 문서가 나온다. ISO 26262 추적성(UDS↔Source)이 끊긴다.
+                #
+                # ⚠ 그래서 안전축과 같은 신원 게이트를 건다(2026-08-04, §6 후보 12 정책).
+                #   예전엔 이 6축만 게이트 밖이었다 — `_ref_safety_ok` 가 False 여도 그대로
+                #   적용됐고, 심지어 2026-08-03 까지는 **계수조차 없어** 적용량을 몰랐다.
+                #
+                # ⚠ 판정 순서는 위 안전축과 같다: **적용 자격 → 신원**. 신원을 먼저 보면
+                #   어차피 적용되지 않았을 시도까지 "차단" 으로 세어 막은 양을 부풀린다.
+                #
+                # ⚠ 이름 조인으로 바꾸는 대안(초안 A2)은 측정으로 기각됐다: 이름 조인 시
+                #   구조축 적용이 770→787 로 **늘고**, 이름이 같아 매칭된 354건 중 244건이
+                #   참조와 대상의 prototype 이 다르다(두 코드베이스가 같은 PDS 계열이라
+                #   함수명이 대량으로 겹친다). 교차 프로젝트 오염을 닫는 레버는 신원 게이트뿐이다.
                 _struct = _ref_stats["structural_fields_applied"]
-                if block.get("inputs") and not target.get("inputs"):
-                    target["inputs"] = block.get("inputs")
-                    _struct["inputs"] += 1
-                if block.get("outputs") and not target.get("outputs"):
-                    target["outputs"] = block.get("outputs")
-                    _struct["outputs"] += 1
-                if block.get("globals_static") and not target.get("globals_static"):
-                    target["globals_static"] = block.get("globals_static")
-                    _struct["globals_static"] += 1
-                if block.get("globals_global") and not target.get("globals_global"):
-                    target["globals_global"] = block.get("globals_global")
-                    _struct["globals_global"] += 1
-                if block.get("called"):
-                    cur_called = str(target.get("called") or "").strip()
-                    if ((not cur_called) or cur_called.upper() in {"N/A", "TBD", "-"}) and patched_called < patched_limit:
-                        target["called"] = block.get("called")
-                        patched_called += 1
-                        _struct["called"] += 1
-                if block.get("calling"):
-                    cur_calling = str(target.get("calling") or "").strip()
-                    if ((not cur_calling) or cur_calling.upper() in {"N/A", "TBD", "-"}) and patched_calling < patched_limit:
-                        target["calling"] = block.get("calling")
-                        patched_calling += 1
-                        _struct["calling"] += 1
+                _blocked = _ref_stats["structural_fields_blocked"]
+
+                def _apply_struct(axis: str, *, eligible: bool, value: Any) -> bool:
+                    """구조 축 1개 적용. 자격이 있는데 신원이 없으면 **차단으로 계수**."""
+                    if not eligible:
+                        return False
+                    if not _ref_safety_ok:
+                        _blocked[axis] += 1
+                        return False
+                    target[axis] = value
+                    _struct[axis] += 1
+                    return True
+
+                for _axis in ("inputs", "outputs", "globals_static", "globals_global"):
+                    _apply_struct(
+                        _axis,
+                        eligible=bool(block.get(_axis)) and not target.get(_axis),
+                        value=block.get(_axis),
+                    )
+                _cur_called = str(target.get("called") or "").strip()
+                if _apply_struct(
+                    "called",
+                    eligible=bool(block.get("called"))
+                    and ((not _cur_called) or _cur_called.upper() in {"N/A", "TBD", "-"})
+                    and patched_called < patched_limit,
+                    value=block.get("called"),
+                ):
+                    patched_called += 1
+                _cur_calling = str(target.get("calling") or "").strip()
+                if _apply_struct(
+                    "calling",
+                    eligible=bool(block.get("calling"))
+                    and ((not _cur_calling) or _cur_calling.upper() in {"N/A", "TBD", "-"})
+                    and patched_calling < patched_limit,
+                    value=block.get("calling"),
+                ):
+                    patched_calling += 1
 
     if isinstance(function_details, dict) and isinstance(function_details_by_name, dict):
         for fid, info in function_details.items():
@@ -3624,6 +3660,16 @@ def generate_uds_docx(
                 "이 프로젝트의 SUDS 를 UDS_REF_SUDS_PATH 로 지정하면 적용된다.",
                 _ref_stats["safety_fields_blocked"], _ref_stats["identity"]["reason"],
             )
+        _struct_blocked_total = sum(_ref_stats["structural_fields_blocked"].values())
+        if _struct_blocked_total:
+            _logger.warning(
+                "참조 SUDS 의 구조 축(입출력·전역·호출관계) %d건을 적용하지 않았다 — "
+                "프로젝트 신원 미확인(%s). 축별: %s. "
+                "이 칸은 SUTS 시험 대상 인터페이스 정의라 남의 프로젝트 값이 들어가면 "
+                "존재하지 않는 인터페이스를 시험하는 문서가 된다.",
+                _struct_blocked_total, _ref_stats["identity"]["reason"],
+                _ref_stats["structural_fields_blocked"],
+            )
         if _unmatched or _empty_headings or _boilerplate_headings:
             _logger.warning(
                 "UDS DOCX 생성 충실도: payload 함수 %d개 중 %d개 반영(%.1f%%). "
@@ -4158,6 +4204,11 @@ def generate_uds_docx(
         "empty_heading_count": 0,
         "empty_heading_sample": [],
         "match_pct": 100.0 if _nt_fn_names else None,
+        # ⚠ 이 키가 **없었다**. 참조 SUDS 병합 루프는 템플릿/폴백 분기보다 **위**에서
+        #    항상 돌기 때문에, 폴백 모드에서도 남의 프로젝트 문서 값이 들어간다. 그런데
+        #    사이드카에는 흔적이 하나도 안 남아 검토자가 "참조를 안 썼다" 로 읽었다.
+        #    템플릿 경로에만 기록을 넣은 전형적인 "한쪽만 고침" 이라 여기서 닫는다.
+        "reference_suds": _ref_stats,
     }
     if stats_out is not None:
         stats_out.update(_nt_stats)

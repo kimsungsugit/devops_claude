@@ -167,6 +167,61 @@ class TestSidecar:
         assert side["unmatched_payload_count"] == 0
         assert side["match_pct"] == 100.0
 
+    def test_no_template_sidecar_still_reports_reference_suds(self, tmp_path, monkeypatch):
+        """폴백 모드도 참조 SUDS 기록을 남겨야 한다 — **없었다**.
+
+        ⚠ 참조 병합 루프는 템플릿/폴백 **분기보다 위**에서 항상 돈다. 그래서 폴백
+        모드에서도 남의 프로젝트 문서 값이 들어갈 수 있는데, `_nt_stats` 에는
+        `reference_suds` 키 자체가 없어 사이드카에 흔적이 하나도 안 남았다 —
+        검토자가 "참조를 안 썼다" 로 읽는다. 템플릿 경로에만 기록을 넣은
+        전형적인 "한쪽만 고침"(이 저장소 1위 재발 패턴)이다.
+        """
+        import config
+        monkeypatch.setattr(config, "resolve_uds_template_path", lambda: "", raising=False)
+        _out, _stats, side = _gen(tmp_path, None, _payload(["alpha"]))
+
+        assert "reference_suds" in side, "폴백 사이드카에 참조 SUDS 기록이 없다"
+        ref = side["reference_suds"]
+        for key in ("identity", "safety_fields_applied", "safety_fields_blocked",
+                    "descriptive_fields_applied",
+                    "structural_fields_applied", "structural_fields_blocked"):
+            assert key in ref, f"참조 기록에 `{key}` 축이 없다"
+
+    def test_no_template_sidecar_records_actual_blocking(self, tmp_path, monkeypatch):
+        """폴백 모드에서 **실제 차단이 일어났을 때** 그 수치가 사이드카에 도달하는가.
+
+        ⚠ 위 테스트는 autouse 픽스처가 참조 경로를 부재로 만들어 두므로 **키 존재**만
+        본다. 그것만 두면 "0 만 담긴 기록" 으로도 통과하니, 여기서 남의 프로젝트 참조를
+        실제로 물려 차단 계수가 0이 아님을 값으로 확인한다.
+        """
+        import docx
+
+        import config
+        from report_gen import docx_builder
+
+        ref_path = tmp_path / "(HDPDM01_SUDS) x.docx"
+        docx.Document().save(str(ref_path))
+        monkeypatch.setattr(config, "UDS_REF_SUDS_PATH", str(ref_path), raising=False)
+        monkeypatch.setattr(config, "resolve_uds_template_path", lambda: "", raising=False)
+        monkeypatch.setattr(
+            docx_builder, "_extract_function_info_from_docx",
+            lambda _doc: {"REF_0001": {
+                "name": "alpha", "inputs": [{"name": "a"}], "outputs": [{"name": "b"}],
+                "globals_static": ["g_s"], "globals_global": ["g_g"],
+                "called": "callee_x", "calling": "caller_y",
+            }},
+        )
+
+        payload = _payload(["alpha"])
+        payload["project_name"] = "KJPDS02_PV"
+        _out, _stats, side = _gen(tmp_path, None, payload)
+
+        ref = side["reference_suds"]
+        assert ref["identity"]["same_project"] is not True
+        assert sum(ref["structural_fields_blocked"].values()) > 0, (
+            "폴백 모드에서 차단이 일어났는데 사이드카에 0으로 남았다 — 침묵이 그대로다")
+        assert sum(ref["structural_fields_applied"].values()) == 0
+
     def test_explicit_template_is_marked_as_argument(self, tmp_path):
         tpl = _make_template(tmp_path / "t.docx", ["SwUFn_0001: alpha"])
         _out, _stats, side = _gen(tmp_path, tpl, _payload(["alpha"]))

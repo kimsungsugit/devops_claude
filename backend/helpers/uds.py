@@ -1603,8 +1603,14 @@ def _uds_generate_from_paths(
                 if not rag_query:
                     rag_query = (source_sections.get("overview", "") or "").strip()[:2000]
                 if rag_query:
-                    use_top_k = rag_top_k if rag_top_k and rag_top_k > 0 else int(
-                        getattr(config, "AGENT_RAG_TOP_K_DEFAULT", 3)
+                    # ⚠ 상한은 `workflow.ai.clamp_rag_top_k` 단일 출처(§6 후보 17).
+                    #    사용자 Form 입력이 그대로 프롬프트 크기가 되는 유일한 축이다.
+                    from workflow.ai import clamp_rag_top_k
+                    use_top_k = clamp_rag_top_k(
+                        rag_top_k if rag_top_k and rag_top_k > 0 else int(
+                            getattr(config, "AGENT_RAG_TOP_K_DEFAULT", 3)
+                        ),
+                        default=3,
                     )
                     use_categories = [str(c).strip() for c in (rag_categories or []) if str(c).strip()]
                     if not use_categories:

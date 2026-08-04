@@ -1440,6 +1440,38 @@ def llm_call(
 # Agent loop wrapper (roles + review + RAG)
 # ---------------------------------------------------------------------------
 
+def clamp_rag_top_k(value: Any, *, default: int = 1) -> int:
+    """RAG `top_k` 를 `[1, config.AGENT_RAG_TOP_K_MAX]` 로 조인다 — **판정 단일 출처**.
+
+    ## 왜 여기만 막나 (§6 후보 17 실측, 2026-08-04)
+
+    `uds_analysis`·`uds_audit`·`uds_logic`·`uds_review`·`uds_sections` 5종에 stage cap
+    이 없어 전역 상한(1,048,576)만 적용된다는 것이 후보 17 의 잔여였다. 값을 정하기 전에
+    재 봤더니 **넣을 이유가 없었다**: 실데이터 프롬프트가 전역 상한의 **2.05%**, 최악
+    포화 시나리오도 **16.32%** 다(`user_payload` 가 이미 `_trim_text` 로 78,000자에
+    묶여 있다). 없는 문제에 stage 키 13개를 더하는 건 과잉이다.
+
+    실제로 열려 있는 축은 **`rag_top_k` 하나**였다 — 사용자 Form 입력이 그대로 검색
+    결과 개수가 되고 그게 프롬프트 크기가 되는데 상한이 없었다(`rag_top_k=1000` → 전역
+    상한의 45.9%). 소비처가 셋이라 각자 조이면 갈라진다:
+
+        workflow/ai.py            `max(1, ...)`  하한만 있고 상한 없음
+        backend/routers/local.py  Form 값 그대로
+        backend/helpers/uds.py    Form 값 그대로
+
+    그래서 clamp 를 여기 하나 두고 셋이 부른다.
+
+    비정상 입력(문자열·None·음수)은 예외가 아니라 `default` 로 접는다 — 이 값은 검색
+    폭이라 실패시킬 이유가 없다.
+    """
+    max_k = max(1, int(getattr(config, "AGENT_RAG_TOP_K_MAX", 50)))
+    try:
+        k = int(value)
+    except (TypeError, ValueError):
+        k = int(default)
+    return max(1, min(k, max_k))
+
+
 def _default_agent_settings(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     settings = {
         "roles": list(getattr(config, "AGENT_ROLES_DEFAULT", ["planner", "generator", "fixer", "reviewer"])),
@@ -1458,10 +1490,7 @@ def _default_agent_settings(overrides: Optional[Dict[str, Any]] = None) -> Dict[
         settings["max_steps"] = max(1, int(settings.get("max_steps", 1)))
     except Exception:
         settings["max_steps"] = 1
-    try:
-        settings["rag_top_k"] = max(1, int(settings.get("rag_top_k", 1)))
-    except Exception:
-        settings["rag_top_k"] = 1
+    settings["rag_top_k"] = clamp_rag_top_k(settings.get("rag_top_k"), default=1)
     if not isinstance(settings.get("roles"), list):
         settings["roles"] = [str(settings.get("roles"))]
     settings["roles"] = [str(r) for r in settings["roles"] if str(r).strip()]

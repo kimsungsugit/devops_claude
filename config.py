@@ -443,6 +443,12 @@ AGENT_MAX_STEPS_DEFAULT = 3
 AGENT_REVIEW_ENABLED_DEFAULT = True
 AGENT_RAG_ENABLED_DEFAULT = True
 AGENT_RAG_TOP_K_DEFAULT = 3
+# RAG 검색 결과 개수의 **상한**. 사용자 Form 입력이 그대로 프롬프트 크기가 되는
+# 유일한 축이라(§6 후보 17 실측: stage cap 은 필요 없었다 — 실데이터가 전역 상한의
+# 2.05%, 최악 포화도 16.32% 였다) 여기만 막는다. `rag_top_k=1000` 이면 프롬프트가
+# 전역 상한의 45.9% 까지 간다. 판정 복제를 막으려고 clamp 는
+# `workflow.ai.clamp_rag_top_k()` 한 곳에서만 한다.
+AGENT_RAG_TOP_K_MAX = _safe_int("AGENT_RAG_TOP_K_MAX", 50)
 AGENT_RUN_MODES = ["auto", "review", "off"]
 AGENT_RUN_MODE_DEFAULT = "auto"
 

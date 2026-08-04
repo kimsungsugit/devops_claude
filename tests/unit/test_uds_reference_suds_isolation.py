@@ -366,15 +366,32 @@ class TestIntegration:
 
 
 class TestStructuralFieldsAreCounted:
-    """참조가 덧씌우는 축은 11개인데 계수는 5개만 있었다 (계획서 §6 후보 12).
+    """구조 6축은 **신원이 확인된 참조에서만** 들어온다 (§6 후보 12 정책 결정).
 
-    `descriptive_fields_applied` 는 description/precondition/logic 만 센다.
-    `inputs`·`outputs`·`globals_static`·`globals_global`·`called`·`calling` 6축은
-    **무기록으로** 들어갔다 — sidecar 의 `reference_suds` 는 "무엇이 적용됐나" 를 묻는
-    기록인데 절반 이상이 안 보였다는 뜻이다.
+    ## 경위 — 계수를 먼저 만들고, 그 다음 결정했다
 
-    이건 정직성 문제이자 **후보 12(성능)의 선행 조건**이다: 신원 불일치 시 40MB 읽기를
-    건너뛰어도 되는지는 "그때 적용량이 0인가" 로 갈리는데, 6축을 안 세면 알 수 없다.
+    참조가 덧씌우는 축은 11개인데 계수는 5개뿐이었다. `descriptive_fields_applied` 는
+    description/precondition/logic 만 세고, `inputs`·`outputs`·`globals_static`·
+    `globals_global`·`called`·`calling` 6축은 **무기록으로** 들어갔다. 그래서
+    "신원 불일치 시 이 축들을 적용해도 되는가" 를 판정할 근거 자체가 없었다
+    (2026-08-03 에 `structural_fields_applied` 신설).
+
+    계수가 생기자 답이 나왔다: 신원 불일치인데도 6축이 **그대로 적용되고** 있었고,
+    남의 프로젝트 참조의 `called`/`calling` 이 대상 함수에 값으로 들어갔다.
+
+    ## 결정 (2026-08-04) — 안전축과 같은 게이트를 건다
+
+    입출력 파라미터·사용 전역·호출관계는 서술이 아니라 **시험 대상 인터페이스 정의**다.
+    UDS 의 이 칸이 그대로 SUTS 시험 케이스의 대상이 되므로, 다른 프로젝트 문서에서
+    이름만 겹쳐 흘러들면 존재하지 않는 인터페이스를 시험하는 문서가 나온다
+    (ISO 26262 UDS↔Source 추적성 단절).
+
+    ## 기각된 대안 — 이름 조인(A2)
+
+    "fid 대신 이름으로 조인하면 오배정과 교차프로젝트가 한 번에 닫힌다" 는 초안은
+    측정으로 뒤집혔다: 이름 조인 시 구조축 적용이 **770→787 로 늘고**, 이름이 같아
+    매칭된 354건 중 **244건이 참조와 대상의 prototype 이 다르다**(두 코드베이스가 같은
+    PDS 계열이라 함수명이 대량으로 겹친다). 교차 프로젝트를 닫는 레버는 신원 게이트뿐이다.
     """
 
     _FULL_BLOCK = {
@@ -384,30 +401,71 @@ class TestStructuralFieldsAreCounted:
         "globals_static": ["g_s"], "globals_global": ["g_g"],
         "called": "callee_x", "calling": "caller_y",
     }
+    _AXES = {"inputs", "outputs", "globals_static", "globals_global", "called", "calling"}
 
-    def test_foreign_reference_still_writes_six_structural_axes(self, gen):
-        """신원 불일치인데도 구조 축은 그대로 들어온다 — 그래서 읽기를 못 건너뛴다."""
+    def test_foreign_reference_cannot_write_structural_axes(self, gen):
+        """핵심 — 신원 불일치면 구조 6축이 **대상 함수에 닿지 않는다**.
+
+        ⚠ 이 단언은 2026-08-04 에 **뒤집힌 것**이다. 그전 판은 같은 자리에서
+        `info["called"] == "callee_x"` 를 단언해 *"남의 값이 들어온다"* 는 실측을
+        고정하고 있었다(그게 당시 목적이었다 — 성능 최적화 가능 여부 판정용).
+        이제는 그 유입 자체를 정책으로 막았으므로 반대 방향을 고정한다.
+        """
         info, stats = gen(project_name="KJPDS02_PV", ref_block=dict(self._FULL_BLOCK))
 
         assert stats["identity"]["same_project"] is not True
-        struct = stats["structural_fields_applied"]
-        assert sum(struct.values()) > 0, (
-            "구조 축 적용량이 0이면 신원 불일치 시 읽기를 건너뛸 수 있다는 뜻인데, "
-            "실측은 그렇지 않다 — 이 단언이 깨지면 성능 최적화 전제를 다시 재라")
-        # 실제로 대상 함수에 남의 프로젝트 값이 들어갔는지 값으로 확인한다
-        assert info["called"] == "callee_x"
-        assert info["calling"] == "caller_y"
+        assert sum(stats["structural_fields_applied"].values()) == 0, (
+            "신원 미확인 참조의 구조 축이 적용됐다 — SUTS 가 존재하지 않는 인터페이스를 "
+            "시험하게 된다")
+        assert info["called"] != "callee_x", "남의 프로젝트 호출관계가 대상에 들어갔다"
+        # `.get()` 으로 읽는다 — 막히면 키 **자체가 안 생긴다**(빈 값이 아니라 부재).
+        assert info.get("calling") != "caller_y"
+        assert info["inputs"] == [] and info["outputs"] == []
 
-    def test_every_structural_axis_is_counted(self, gen):
-        """축 하나라도 계수에서 빠지면 그 축만 다시 보이지 않게 된다."""
+    def test_blocking_is_recorded_per_axis(self, gen):
+        """막은 사실이 **축별로** 사이드카에 남아야 한다.
+
+        차단을 로그로만 남기면 산출물 검토자는 "적용할 게 없었다" 와 "막았다" 를
+        구분할 수 없다 — 이 저장소가 반복해 겪은 침묵이다.
+        """
         _info, stats = gen(project_name="KJPDS02_PV", ref_block=dict(self._FULL_BLOCK))
 
+        blocked = stats["structural_fields_blocked"]
+        assert set(blocked) == self._AXES
+        zero = [k for k, v in blocked.items() if v == 0]
+        assert not zero, f"막았는데 계수가 0인 축: {zero}"
+
+    def test_blocking_is_also_warned_to_the_operator(self, gen, caplog):
+        """사이드카뿐 아니라 **로그로도** 알려야 한다.
+
+        ⚠ 뮤테이션에서 이 경고를 통째로 지웠는데 아무 테스트도 안 잡았다(생존).
+        사이드카는 산출물을 열어 본 사람만 보고, 운영자는 로그를 본다 — 둘 다 필요하다.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="report_generator"):
+            gen(project_name="KJPDS02_PV", ref_block=dict(self._FULL_BLOCK))
+
+        hits = [r.getMessage() for r in caplog.records if "구조 축" in r.getMessage()]
+        assert hits, "구조 축 차단이 로그로 보고되지 않았다"
+        assert "6" in hits[0], f"차단 건수가 경고에 없다: {hits[0]}"
+
+    def test_same_project_reference_still_applies_all_six(self, gen):
+        """대조군 — 신원이 **맞으면** 6축이 그대로 들어온다.
+
+        게이트가 기능을 통째로 죽인 게 아니라 교차 프로젝트만 막는지 확인한다.
+        이게 없으면 "전부 0" 도 통과하므로 위 두 테스트가 공허해진다.
+        """
+        info, stats = gen(project_name="HDPDM01", ref_block=dict(self._FULL_BLOCK))
+
+        assert stats["identity"]["same_project"] is True
         struct = stats["structural_fields_applied"]
-        assert set(struct) == {
-            "inputs", "outputs", "globals_static", "globals_global", "called", "calling",
-        }
+        assert set(struct) == self._AXES
         zero = [k for k, v in struct.items() if v == 0]
-        assert not zero, f"덧씌웠는데 계수가 0인 축: {zero}"
+        assert not zero, f"신원이 맞는데 적용되지 않은 축: {zero}"
+        assert sum(stats["structural_fields_blocked"].values()) == 0
+        assert info["called"] == "callee_x"
+        assert info["calling"] == "caller_y"
 
     def test_counter_stays_zero_when_nothing_is_applied(self, gen):
         """계수가 '읽었다'가 아니라 '적용했다'를 세는지 — 대조군."""
