@@ -790,6 +790,48 @@ def _fallback_function_description(
     return f"{name}: {context} 모듈에서 {action}."
 
 
+# LLM 이 **작업을 거절한 문장**. 설명이 아니라 거절이므로 어떤 출처 등급으로도
+# 산출물에 실리면 안 된다.
+#
+# ⚠ `_GENERIC_DESC_PATTERNS`(아래)와 **다른 축**이다. 그쪽은 "내용이 없는 상투구" 라
+#   더 나은 문구로 **보강**하면 되지만, 거절문은 보강 대상이 아니라 **거부** 대상이다.
+#   실제로 `_is_generic_description("I'm sorry, I cannot generate a description…")`
+#   은 `False` 를 돌려준다 — 상투구 목록으로는 안 잡힌다(실측).
+#
+# 출처: 삭제한 `workflow/ai_validator.py::validate_llm_response` 의 `banned_patterns`.
+# 그 모듈은 프로덕션 호출자가 0이라 **한 번도 발화한 적이 없었고**(§6 후보 10), 6개
+# 공개 API 중 4개는 live 구현과 중복이었다. 중복이 아닌 유일한 검사가 이것이라
+# 여기로 옮기고 나머지는 지웠다. ⚠ 같이 있던 `min_length=20` 은 **가져오지 않았다** —
+# 실사용 채택 기준이 `len > 5`(1패스)/`len > 10`(2패스)라, 20자로 올리면 6~20자
+# 정상 한국어 설명이 새로 거절된다.
+_LLM_REFUSAL_PATTERNS = (
+    "as an ai",
+    "i'm sorry",
+    "i am sorry",
+    "i cannot",
+    "i can't",
+    "죄송합니다",
+    "제공할 수 없습니다",
+    "생성할 수 없습니다",
+    "답변할 수 없습니다",
+)
+
+
+def is_llm_refusal(text: Any) -> bool:
+    """LLM 이 거절한 문장인가 — **판정 단일 출처**.
+
+    소비처 둘이 리터럴로 각자 적으면 이 저장소가 네 번 겪은 "복제 → 한쪽만 고쳐짐" 이
+    된다:
+      - `workflow/uds_ai.py::_process_batch`  AI 설명 **채택 관문**
+      - `report_gen/function_analyzer.py::_finalize_function_fields`
+        `trusted_desc` 화이트리스트가 `"ai"` 를 내용검사에서 면제하던 자리
+    """
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(p in lowered for p in _LLM_REFUSAL_PATTERNS)
+
+
 _GENERIC_DESC_PATTERNS = [
     "auto-generated from",
     "함수의 동작을 수행한다",
@@ -994,6 +1036,23 @@ def _finalize_function_fields(info: Dict[str, Any]) -> Dict[str, Any]:
     name_text = str(out.get("name") or "").strip()
     desc_raw = str(out.get("description") or "").strip()
     desc_source = str(out.get("description_source") or "").strip().lower()
+    # ⚠ **거절문은 설명이 아니다** — 값이 없는 것과 같이 취급한다(§6 후보 10).
+    #    신뢰 출처(`ai`/`comment`/`sds`/`reference`)는 아래에서 내용검사를 **면제**받아
+    #    원문 그대로 통과하므로, 여기서 비우지 않으면 "I'm sorry, I cannot generate…"
+    #    같은 문장이 납품 UDS 의 설명 칸에 그대로 실린다.
+    #    ⚠ `trusted_desc = … and not is_llm_refusal(…)` 만으로는 **부족했다**: else 분기의
+    #      `_enhance_description_text` 는 상투구가 아닌 텍스트를 그대로 돌려주고
+    #      `_is_generic_description(거절문)` 은 False 라, 거절문이 살아남는다(실측).
+    #      값을 비워 폴백 생성으로 보내야 한다.
+    if desc_raw and is_llm_refusal(desc_raw):
+        _logger.warning(
+            "함수 %s 의 설명이 모델 거절문이라 채택하지 않는다(출처=%s): %.60s",
+            name_text or "?", desc_source or "-", desc_raw,
+        )
+        desc_raw = ""
+        desc_source = ""
+        out["description"] = ""
+        out["description_source"] = ""
     trusted_desc = desc_source in {"ai", "comment", "sds", "reference"}
     if not desc_raw:
         desc_raw = _fallback_function_description(

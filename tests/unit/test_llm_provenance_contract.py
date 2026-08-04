@@ -508,12 +508,3 @@ class TestOutgoingSecretRedaction:
         src = inspect.getsource(getattr(mod, adapter_name).generate)
         assert "_sanitize_outgoing(messages)" in src, f"{adapter_name} 는 프롬프트를 안 가린다"
 
-
-class TestDeadValidatorIsLabelled:
-    """docstring 이 '하고 있다' 고 주장하면 리뷰어가 보호받고 있다고 읽는다."""
-
-    def test_module_states_it_is_not_wired(self):
-        from workflow import ai_validator
-
-        doc = ai_validator.__doc__ or ""
-        assert "프로덕션에서 호출되지 않는다" in doc

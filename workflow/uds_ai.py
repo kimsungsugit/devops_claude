@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from report_gen.function_analyzer import is_llm_refusal
 from workflow.ai import agent_call, call_judge, load_oai_config, load_oai_configs
 from workflow.llm_semantic_validator import SemanticReport, validate_evidence
 import config
@@ -1115,6 +1116,18 @@ def generate_ai_function_descriptions(
                         desc = parsed.get(name) or parsed.get(name.lower()) or ""
                         desc = str(desc).strip()
                         min_len = 5 if pass_num == 1 else 10
+                        # ⚠ **거절문 거부.** 이 `len > min_len` 이 AI 설명의 유일한
+                        #    내용 관문이었다. 거절문("I'm sorry, I cannot generate…")은
+                        #    61자라 무조건 통과했고, 그 뒤로는 `description_source="ai"`
+                        #    가 신뢰 출처라 `_is_generic_description` 검사까지 면제받아
+                        #    납품 UDS 의 설명 칸에 그대로 실릴 수 있었다.
+                        #    판정은 `function_analyzer.is_llm_refusal` 단일 출처.
+                        if desc and is_llm_refusal(desc):
+                            logger.warning(
+                                "[AI] batch %d: %s — 모델이 작업을 거절한 문장이라 채택하지 "
+                                "않는다: %.60s", batch_idx + 1, name, desc,
+                            )
+                            continue
                         if desc and len(desc) > min_len:
                             results[name.lower()] = desc
                             if fid:
