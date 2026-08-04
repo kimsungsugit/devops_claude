@@ -5,6 +5,7 @@ import Detail from './views/Detail.jsx';
 import Settings from './views/Settings.jsx';
 import QualityDashboard from './views/QualityDashboard.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
+import { useAdminMode } from './contexts/AdminContext.jsx';
 
 /* ── Toast context ─────────────────────────────────────────────────── */
 const ToastCtx = createContext(null);
@@ -214,11 +215,32 @@ function StatusFooter() {
 }
 
 /* ── App root ───────────────────────────────────────────────────────── */
+/**
+ * 탭 표시 권한의 **출처**(§6 후보 24 파생 정책 결정, 2026-08-04).
+ *
+ * 예전엔 둘 다 `adminOnly: true` 로 묶여 **localStorage 토글(Ctrl+Shift+A)** 하나가
+ * 판정했다. 실권한은 backend `admin_users.json` 이라 양방향으로 어긋난다.
+ * 통째로 backend 로 옮기는 것(B)도 오답이다 — 두 탭의 성질이 다르다:
+ *
+ *   `backend` — Quality: 호출 3종이 전부 라우터 레벨 `require_admin`
+ *               (`backend/routers/quality.py:16-20`)이라 비관리자에게 여는 것은
+ *               **100% false affordance** 다. 열어도 403 뿐이라 잃는 기능이 0이다.
+ *   `local`   — 설정: `health.py:233-239` 가 *"비-admin 이 직접 전환해야 한다"* 고
+ *               명시한 file-mode 를 담고 있고, `localStorage` 로만 도는 핸들러도 있다
+ *               (doc paths·shared inputs·quality 설정). backend authority 로 옮기면
+ *               `/api/auth/me` 가 실패하는 순간(`AdminContext` 는 실패를
+ *               `isAdmin:false` 로 접는다) **실제로 쓰이는 기능이 잠긴다**.
+ *
+ * ⚠ 계획서는 "표시 authority 변경 → 백엔드 장애 시 admin 이 UI 에서 잠긴다" 를 우려로
+ *   적었는데, 실측하면 그 우려가 성립하는 건 **설정 탭 쪽**이고 Quality 는 반대다.
+ * ⚠ 이건 보안 경계가 아니라 **UX/일관성** 결정이다. 실제 방어선은 backend
+ *   `require_admin` 이고 이 커밋은 그걸 건드리지 않는다.
+ */
 const ALL_TABS = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'detail',    label: '프로젝트 결과' },
-  { id: 'quality',   label: 'Quality', adminOnly: true },
-  { id: 'settings',  label: '설정', adminOnly: true },
+  { id: 'quality',   label: 'Quality', authority: 'backend' },
+  { id: 'settings',  label: '설정', authority: 'local' },
 ];
 
 function isAdminMode() {
@@ -231,8 +253,19 @@ export default function App() {
   const [userName, setUserName] = useState(getUsername);
   const [userInput, setUserInput] = useState('');
   const [adminMode, setAdminMode] = useState(isAdminMode);
+  // backend 실권한 — `AdminProvider` 는 `main.jsx:11-20` 에서 App **상위**에 있다.
+  const { isAdmin: backendIsAdmin, loading: adminLoading } = useAdminMode();
 
-  const TABS = adminMode ? ALL_TABS : ALL_TABS.filter(t => !t.adminOnly);
+  // ⚠ `adminLoading` 동안 backend 판정을 쓰면 **진짜 admin 도 RTT 만큼 탭이 없다가
+  //   튀어나온다**(초기값이 `isAdmin:false, loading:true`). 그동안은 사용자가 직접 켠
+  //   localStorage 토글을 힌트로 쓰고, 응답이 오면 backend 로 확정한다.
+  //   표시만의 문제다 — 실제 접근은 backend `require_admin` 이 막는다.
+  const canSeeBackendAdminTab = adminLoading ? adminMode : backendIsAdmin;
+  const TABS = ALL_TABS.filter((t) => {
+    if (t.authority === 'backend') return canSeeBackendAdminTab;
+    if (t.authority === 'local') return adminMode;
+    return true;
+  });
 
   // ⚠ 뷰는 **처음 열어 본 뒤에만** 마운트한다(그 뒤로는 keep-alive — display 토글).
   //
@@ -251,6 +284,22 @@ export default function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 활성 탭을 방문 기록에 누적(keep-alive 파생 집합). Detail.jsx:71-74 와 동일 패턴
     setVisited((prev) => (prev.has(activeTab) ? prev : new Set(prev).add(activeTab)));
   }, [activeTab]);
+
+  // ⚠ 탭 목록에서 빠지는 것만으로는 **뷰가 안 닫힌다.** `isMounted` 는 `activeTab` 과
+  //   `visited` 만 보고, 렌더 조건도 `display: activeTab === id` 다. 그래서 Quality 를
+  //   보고 있는 중에 backend `isAdmin` 이 false 로 뒤집히면(토큰 만료·백엔드 재기동 후
+  //   `/api/auth/me` 실패 → `AdminContext` 가 `isAdmin:false` 로 접는다)
+  //   **탭 버튼만 사라지고 화면은 그대로 남는다.** 현행 localStorage 판정에선 사용자가
+  //   직접 토글해야 생기는 상태지만, backend authority 로 옮기면 조작 없이 발생한다.
+  //
+  //   ⚠ effect 가 아니라 **렌더 중 조정**이다(React 공식 "prop/파생 변화에 state 맞추기").
+  //     effect 로 하면 한 프레임 동안 권한 없는 화면이 그대로 보이고, effect 안 setState 는
+  //     캐스케이딩 렌더로 eslint 게이트(`react-hooks/set-state-in-effect`)에도 걸린다.
+  //     같은 패턴을 `ProjectSummarySection.jsx:141-151` 이 이미 쓴다.
+  if (!TABS.some((t) => t.id === activeTab)) {
+    setActiveTab('dashboard');
+  }
+
   const isMounted = (id) => id === activeTab || visited.has(id);
 
   useEffect(() => {
