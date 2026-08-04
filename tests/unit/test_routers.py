@@ -827,12 +827,19 @@ class TestQualityRouter:
         assert "offset" in data
 
     def test_get_run_nonexistent(self):
-        """GET /api/quality/runs/<id> with nonexistent returns error."""
+        """GET /api/quality/runs/<id> with nonexistent returns **404**.
+
+        ⚠ 2026-08-04 에 계약을 뒤집었다(§6-1 후보 22 G2). 예전 이 테스트는
+        `status_code == 200` + `"error" in data` 를 고정하고 있었는데, 그게
+        **프론트가 에러를 성공으로 삼키는 원인**이었다 — `api.js:145` 는
+        `if (res.ok) return res.json()` 이라 200 이면 그대로 통과시킨다.
+        이 endpoint 의 프론트 소비자가 0건이던 시점이라 무해하게 바로잡을 수 있었다.
+        """
         r = client.get("/api/quality/runs/999999")
-        assert r.status_code == 200
-        data = r.json()
-        # Returns error field (not HTTP 404) when run not found
-        assert "error" in data or "id" in data
+        assert r.status_code == 404, (
+            "미존재 run 이 200 이면 프론트 헬퍼가 실패를 성공으로 읽는다"
+        )
+        assert "999999" in str(r.json())
 
     def test_trend_default_doc_type(self):
         """GET /api/quality/trend without doc_type defaults to uds."""
