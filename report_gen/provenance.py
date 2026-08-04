@@ -72,10 +72,25 @@ WEAK_SCORE_MAX = 0.75
 # `srs_default_qm` 은 생산자가 사라졌지만(근거 없는 QM 지어내기를 제거했다) **남긴다** —
 # 디스크의 옛 payload 가 아직 이 라벨을 달고 있어 재처리 시 판정 대상이 된다.
 SOURCE_ALIASES = {
-    "sds_match": "sds",
     "hsis": "sds",
     "srs_default_qm": "default",   # SRS 에 없어서 QM 기본 — 기본값이다 (legacy payload 전용)
 }
+
+# ⚠ `sds_match` 는 **일부러 여기 없다**(2026-08-04, §6 후보 20).
+#
+# 예전엔 `"sds_match": "sds"` 로 접혀 0.95(정본 문서)를 받았다. 그런데 생산 지점
+# (`report_gen/requirements.py:1593-1598`)은 *"설명을 SDS 에서 가져온 경우"* 의
+# **else 분기**다 — 즉 이 라벨의 뜻은 정확히 *"설명이 SDS 에서 오지 **않았다**"* 이고,
+# SDS 급 신용은 과대다. 같은 사실이 §6 후보 19 를 기각시킨 근거이기도 했다.
+#
+# 실측이 뒷받침한다: 이 라벨이 붙은 행 중 `comment_description` 보유가 **0행**이라
+# 주석 유래 가능성도 없고, 표본에서 설명 문구가 `function_analyzer.py:901` 의 **함수명
+# 템플릿**이었다. 그래서 `report_gen/validation.py` 에 **자기 라벨·자기 점수(0.80)** 를
+# 갖는다 — `call_graph` 와 같은 "보조 증거" 티어다.
+#
+# ⚠ 0.75 이하로는 내리지 않는다. `WEAK_SCORE_MAX` 아래로 가면 `is_weak_source()` 가
+#   True 가 되어 RAG·AI·HSIS 덮어쓰기 3경로가 새로 열리고, 그건 점수 정직화가 아니라
+#   **산출물 내용 변경**이다(1,900+행 대상). 여기서 하려는 일이 아니다.
 
 
 def canonical_source(src: Any) -> str:

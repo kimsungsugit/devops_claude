@@ -1426,6 +1426,11 @@ def generate_asil_related_confidence_report(
     src_labels = {
         "comment": "주석",
         "sds": "SDS",
+        # ⚠ `sds`(0.95)의 별칭이 **아니다**. 생산 지점(`requirements.py:1593-1598`)이
+        #   *"설명을 SDS 에서 가져왔을 때"* 의 else 분기라, 이 라벨의 뜻은 정확히
+        #   *"함수는 SDS 에 매핑됐지만 설명은 SDS 유래가 아니다"* 다. 라벨 문구가
+        #   그 뜻을 말해야 리뷰어가 표를 사실로 오독하지 않는다.
+        "sds_match": "SDS 매핑(설명은 SDS 유래 아님)",
         "srs": "SRS",
         "uds": "UDS",              # requirements.py:1436, impact_orchestrator.py:369
         "swcom": "SDS component",  # impact_orchestrator.py:608
@@ -1453,6 +1458,11 @@ def generate_asil_related_confidence_report(
         "ai": 0.85,
         "rag": 0.85,
         "call_graph": 0.80,
+        # SDS 매핑은 실제 근거지만 **설명 문구는 SDS 유래가 아니다** — 매핑이라는 보조
+        # 증거 하나뿐이라 `call_graph` 와 같은 티어. 예전엔 별칭으로 `sds`(0.95)를 받았다.
+        # ⚠ `WEAK_SCORE_MAX`(0.75) 아래로 내리지 말 것 — `is_weak_source()` 가 True 가
+        #   되어 RAG·AI·HSIS 덮어쓰기 3경로가 열린다(점수 정직화가 아니라 내용 변경).
+        "sds_match": 0.80,
         "rule": 0.75,
         "module_inherit": 0.70,   # 모듈에서 물려받음 — 명시 규칙보다 약하다
         "inference": 0.60,
@@ -1498,6 +1508,10 @@ def generate_asil_related_confidence_report(
                 return str(info.get("comment_related") or info.get("related") or "").strip()
         if src == "sds":
             return "SDS 매핑 규칙에 의해 보강됨"
+        if src == "sds_match":
+            # ⚠ 예전엔 별칭으로 접혀 위 `sds` 문구("보강됨")를 그대로 받았다. 이 라벨은
+            #    설명이 SDS 에서 오지 **않은** 경우라, 그 문구는 거짓 근거였다.
+            return "함수가 SDS 에 매핑됨 — 다만 이 설명 문구는 SDS 유래가 아니다"
         if src == "srs":
             return "SRS 요구사항 ID/ASIL 추출 규칙에 의해 보강됨"
         if src == "reference":
@@ -1644,7 +1658,13 @@ def generate_asil_related_confidence_report(
     lines.append(f"- Total functions: `{total}`")
     lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
     lines.append(f"- Low confidence threshold: `< 0.80`")
-    lines.append("- Source categories: `SDS / SRS / UDS / 주석 / 지식베이스 / 룰 / 추론 / 기본값`")
+    # ⚠ 범례는 `src_labels` 에서 **파생**시킨다. 예전엔 하드코딩 문자열이라 새 라벨이
+    #    생겨도 범례에 안 나타났다 — 표에는 찍히는데 범례엔 없는 라벨이 생긴다.
+    lines.append("- Source categories: " + " / ".join(f"`{v}`" for v in src_labels.values()))
+    lines.append(
+        "  - ⚠ `SDS` 와 `SDS 매핑(설명은 SDS 유래 아님)` 은 다르다 — 후자는 함수가 SDS 에 "
+        "매핑됐다는 뜻일 뿐이고 **설명 문구의 출처는 SDS 가 아니다**(보조 증거 0.80)."
+    )
     # ⚠ 어휘에 없는 출처값을 조용히 '추론' 으로 접지 않는다. 접으면 리뷰어가 표에 찍힌
     # "추론" 을 사실로 읽는다 — 실제로는 분류를 못 한 것이다. 여기서 명시한다.
     if unknown_src_values:

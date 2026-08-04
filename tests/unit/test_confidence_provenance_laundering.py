@@ -387,12 +387,21 @@ def test_validation_does_not_redeclare_the_alias_table():
     """별칭 표는 `provenance.SOURCE_ALIASES` 단일 출처다 — 리터럴 재선언 금지.
 
     복제되면 `is_weak_source()` 와 점수표가 다시 갈라진다(이번 회귀의 원인).
+
+    ⚠ 감시 대상 키를 **`SOURCE_ALIASES` 에서 파생**시킨다. 예전엔 `{"sds_match", "hsis"}`
+    를 리터럴로 적었는데, 그건 이 가드가 막으려는 바로 그 복제였다 — 실제로
+    `sds_match` 가 별칭에서 빠져 **자기 라벨**이 된 순간(§6 후보 20) 정당한 `src_labels`
+    항목을 오탐으로 잡았다. 가드도 단일 출처를 따라야 한다.
     """
+    from report_gen.provenance import SOURCE_ALIASES
+
+    alias_keys = set(SOURCE_ALIASES)
+    assert alias_keys, "SOURCE_ALIASES 가 비었다 — 이 가드가 아무것도 안 지킨다"
     tree = ast.parse(MODULE.read_text(encoding="utf-8"))
     offenders = [
         n.lineno for n in ast.walk(tree)
         if isinstance(n, ast.Dict) and n.keys
-        and {k.value for k in n.keys if isinstance(k, ast.Constant)} & {"sds_match", "hsis"}
+        and {k.value for k in n.keys if isinstance(k, ast.Constant)} & alias_keys
     ]
     assert not offenders, f"validation.py:{offenders} 에 별칭 표가 다시 리터럴로 적혔다"
 
