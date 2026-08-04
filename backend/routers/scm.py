@@ -6,8 +6,9 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend.dependencies.admin import require_admin
 from backend.schemas import ScmLinkedDocs, ScmRegisterRequest, ScmUpdateRequest
 from backend.services.scm_registry import (
     ScmValidationError,
@@ -196,7 +197,32 @@ def _svn_status(entry: Any) -> Dict[str, Any]:
     }
 
 
-@router.post("/api/scm/register")
+# ── 권한 정책 (2026-08-04, 보안 표면 감사 + 사용자 결정) ─────────────────────
+#
+# **쓰기 5종만 admin, 읽기는 개방.** 형제 evidence 라우터(swut/swit/swsa/swreport/quality)는
+# 라우터 전체가 admin 인데 scm 만 `require_admin` 이 **0건**이었다 — 의도된 예외가 아니라
+# 누락이다(`git log -S require_admin -- backend/routers/scm.py` = 이력 전무이고,
+# 의도적 비게이트인 file-mode 는 `health.py:233-239` 에 사유 주석이 있는데 여기엔 없다).
+#
+# 무권한으로 재현된 것(비관리자 헤더 하나, tmp 사본 대상):
+#   POST   /api/scm/register        -> 200, entry 생성 + cloudium 읽기 경계 라이브 확장
+#   PUT    /api/scm/update/{id}     -> 200, 운영 entry 의 scm_url·scm_username·scm_password_env 변조
+#   POST   /api/scm/{id}/link-docs  -> 200, 연결문서 전면 교체(나머지 필드 공란화)
+#   DELETE /api/scm/delete/{id}     -> 200, entry 삭제(→ 영향도·문서생성·추적성 탭 전멸)
+#   POST   /api/scm/test/{id}       -> 200, **공격자 URL 로 아웃바운드** svn info 시도
+#
+# `update` 가 특히 중요하다: `scm_url` 재지정 + `scm_password_env` 유지는
+# `resolve_scm_credentials`(Jenkins sync·impact_orchestrator 가 쓴다)를 통해
+# **`DEVOPS_SCM_PASSWORD` 가 설정되는 순간 자격 유출로 활성화**되는 잠복 경로다
+# (현재 그 env 가 비어 있어 유출은 잠복, URL 재지정과 아웃바운드는 라이브였다).
+#
+# ⚠ **읽기(list/status/audit/change-history/impact-job/build-timeline)는 잠그지 않는다.**
+#    형제 라우터와 달리 scm 읽기는 UI 전반에 배선돼 있다 — Dashboard·projectLoader·
+#    DocGen·SrsSds·ProjectSummary·Analysis·ImpactGuide 가 앱 초기 로드에 `GET /api/scm/list`
+#    를 부른다. 라우터 통짜 게이트는 비관리자 사용자가 생기는 순간 **조회 화면을 통째로**
+#    깨뜨린다. 오늘은 등록 사용자가 1명(admin)뿐이라 파손 0이지만, 그건 잠글 이유이지
+#    통짜로 잠글 이유는 아니다. (사용자 결정: 읽기 개방 유지)
+@router.post("/api/scm/register", dependencies=[Depends(require_admin)])
 def scm_register(req: ScmRegisterRequest) -> Dict[str, Any]:
     try:
         entry = register_entry(req)
@@ -215,7 +241,7 @@ def scm_list() -> Dict[str, Any]:
     return {"ok": True, "items": items, "count": len(items)}
 
 
-@router.put("/api/scm/update/{entry_id}")
+@router.put("/api/scm/update/{entry_id}", dependencies=[Depends(require_admin)])
 def scm_update(entry_id: str, req: ScmUpdateRequest) -> Dict[str, Any]:
     try:
         entry = update_entry(entry_id, req)
@@ -227,7 +253,7 @@ def scm_update(entry_id: str, req: ScmUpdateRequest) -> Dict[str, Any]:
     return {"ok": True, "item": entry.model_dump(mode="json")}
 
 
-@router.delete("/api/scm/delete/{entry_id}")
+@router.delete("/api/scm/delete/{entry_id}", dependencies=[Depends(require_admin)])
 def scm_delete(entry_id: str) -> Dict[str, Any]:
     deleted = delete_entry(entry_id)
     if not deleted:
@@ -252,7 +278,7 @@ def scm_status(entry_id: str) -> Dict[str, Any]:
     return {"ok": True, "item": entry.model_dump(mode="json"), "status": status}
 
 
-@router.post("/api/scm/test/{entry_id}")
+@router.post("/api/scm/test/{entry_id}", dependencies=[Depends(require_admin)])
 def scm_test(entry_id: str) -> Dict[str, Any]:
     entry = get_registry_entry(entry_id)
     if entry is None:
@@ -265,7 +291,7 @@ def scm_test(entry_id: str) -> Dict[str, Any]:
     return {"ok": bool(status.get("ok")), "result": status}
 
 
-@router.post("/api/scm/{entry_id}/link-docs")
+@router.post("/api/scm/{entry_id}/link-docs", dependencies=[Depends(require_admin)])
 def scm_link_docs(entry_id: str, linked_docs: ScmLinkedDocs) -> Dict[str, Any]:
     try:
         entry = replace_linked_docs(entry_id, linked_docs)
