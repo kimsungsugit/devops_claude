@@ -1254,6 +1254,32 @@ def llm_call(
                 meta_out["error"] = meta_out.get("error") or last_err
 
         # 1-b) Legacy SDK (google-generativeai, deprecated fallback)
+        #
+        # ⚠ **제거 보류 확정 (2026-08-04, §6 후보 16).** 수명 종료 패키지지만 지운다는
+        #    결정을 내리지 않았다. 근거와 반증을 남긴다:
+        #
+        #    제거를 지지한 것
+        #      - 발동 흔적 0건. 단, 그 grep 은 **양성 대조군이 0** 이었다(성공 경로가 남기는
+        #        `"sdk": "google-genai"` 조차 산출물에서 0건) — 즉 legacy 가 매 호출마다
+        #        발동했어도 0 을 냈을 측정이다. 올바른 haystack(`reports/agent_logs/
+        #        agent_runs/`)으로 다시 재면 12레코드 전부 신 SDK 이지만, 표본은 하루치 5파일이다.
+        #      - 비용이 0 이 아니다. 지연 로딩 후에도 첫 LLM 호출 때 legacy 한계비용
+        #        **1.4~2.8초**(3회 실측)를 문다. 계획서의 "비용은 이미 0" 은 틀렸다.
+        #        단 RAG 임베딩 경로는 `rag/embedder.py` 가 신 SDK 를 직접 import 하므로
+        #        이 비용을 물지 않는다 — "LLM 을 쓰는 모든 프로세스" 는 과대 표현이다.
+        #
+        #    제거를 막은 것 (결정적)
+        #      - **`safety_settings` 비대칭.** 이 블록만 4종 BLOCK_NONE 을 건다(아래).
+        #        신 SDK 경로(`GenerateContentConfig`)에는 safety 인자가 **아예 없다**.
+        #        그러면 legacy 는 "신 SDK 가 SAFETY 로 막을 때 유일하게 뚫는 경로" 일 수
+        #        있고, 지우면 복구 경로 하나가 사라진다. 어느 쪽인지는 **실제 API 호출
+        #        없이는 판정 불가**다 — 이 라운드에서 재지 못했다(측정 실패).
+        #      - 측정 실패를 "안 쓰이니 안전" 으로 읽는 것은 이 저장소가 금지한 fake-green
+        #        이다. 같은 논리라면 "쓸모없다" 도 미검증이다.
+        #
+        #    되살릴 때 할 것: `google.generativeai` 로 `list_models()` 1회 호출해
+        #    하드락 모델(`gemini-3.5-flash-lite`)을 legacy 스택이 서빙하는지 확인하고,
+        #    신 SDK 경로에 safety 설정을 **먼저** 넣어 비대칭을 없앤 뒤 제거할 것.
         _gl = _sdk("genai_legacy")
         if _gl is not None:
             last_err = ""
@@ -1325,13 +1351,21 @@ def llm_call(
                 _agent_log(log_dir, "error", f"Gemini(Legacy SDK) failed after retries: {last_err}")
             if meta_out is not None:
                 meta_out["sdk"] = "google-generativeai"
-                meta_out["error"] = last_err
+                # 위 신 SDK 블록(`meta_out.get("error") or last_err`)과 같은 규약 —
+                # **먼저 난 실제 실패 사유가 이긴다**. 예전엔 무조건 덮어써서, 신 SDK 의
+                # 429/timeout 이 legacy 의 사유로 바뀌어 진단이 한 단계 멀어졌다.
+                meta_out["error"] = meta_out.get("error") or last_err
             return None
 
         if log_dir:
             _agent_log(log_dir, "error", "Gemini SDK not available. Install google-genai.")
         if meta_out is not None:
-            meta_out["error"] = "gemini_sdk_missing"
+            # ⚠ `or` 가드가 **필수**다. 이 줄은 "SDK 가 없다" 는 **상태 서술**이지 시도의
+            #    실패 사유가 아니다. 무조건 덮어쓰면, 신 SDK 가 재시도를 소진하고
+            #    legacy 가 설치돼 있지 않은 환경에서 실제 사유(429/timeout/500)가 사라지고
+            #    **"SDK 가 설치돼 있는데 설치 안 됨"** 이라는 거짓 진단이 남는다.
+            #    소비처: `ai.py::_agent_once` → `reason = f"llm_error:{llm_meta.get('error')}"`.
+            meta_out["error"] = meta_out.get("error") or "gemini_sdk_missing"
         return None
 
     # -----------------------------------------------------------------------
