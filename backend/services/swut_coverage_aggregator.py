@@ -856,6 +856,13 @@ def _write_coverage_sheet(
     # 잔재). 시퀀스 ID/phase prefix/base 누적 로직 제거 (회사 감사본 v0.10 정합).
     spec_unmatched: list[str] = []
     spec_unmatched_count = 0
+    # §6 후보 8 / UTCV-001 — **미측정(total=0) 행**. 예외(면제 결정)와 엄격히 구분한다.
+    # 섞으면 "한 번도 재지 않은 행" 이 "재고 나서 면제한 행" 으로 기록되고, 요약 분자에만
+    # 더해져 커버리지가 100% 를 넘는다(실측 166.67%).
+    # ⚠ **건수는 여기서 세지 않는다** — 분모를 정하는 `_write_spec_totals` 의 셀 스캔이
+    #   유일한 계수 출처다. 여기는 "어느 함수인가" 만 모은다(같은 수를 두 곳에서 세면
+    #   갈라진다 — 이 저장소 1위 재발 패턴).
+    spec_unmeasured_names: list[str] = []
     last_data_row = data_start - 1
 
     if written == 0 and function_rows:
@@ -1067,16 +1074,33 @@ def _write_coverage_sheet(
                     _g_l = _gcl_row(stmt_count_col + 1)
                     _j_l = _gcl_row(branch_count_col)
                     _k_l = _gcl_row(branch_count_col + 1)
+                    # ⚠ **미측정(total=0)을 예외로 위장하지 않는다** (§6 후보 8 / UTCV-001).
+                    #   `passed` 는 `total > 0 and covered == total` 이라 total=0 이면
+                    #   False 다. 예전엔 그걸 그대로 `not passed → Exception 'O'` 로 넘겨,
+                    #   **한 번도 측정하지 않은 행이 "면제 결정된 행"** 으로 기록됐다.
+                    #   Exception 'O' 는 PV 정책상 "미달을 면제한다" 는 **판단**이고
+                    #   (:994 사용자 결정), 미측정은 판단 이전 상태다 — 섞으면 안 된다.
+                    #   게다가 아래 요약이 `(Total - Fail + Exception)/Total` 인데 미측정
+                    #   행은 `f == g`(0==0)라 Fail 로 안 세어져, Exception 만 분자에 더해져
+                    #   **166.67%** 라는 불가능한 커버리지가 나왔다(실측 재현).
+                    #   프로덕션 경로가 실제로 이런 행을 만든다: `swut_input_adapter.py`
+                    #   의 04.MetricsReport HMR merge 와 `_parse_metric_cell` 파싱 실패.
+                    _stmt_unmeasured = int(fc.statement.total or 0) <= 0
+                    _branch_unmeasured = int(fc.branch.total or 0) <= 0
                     safe_write(ws, r, stmt_count_col, fc.statement.covered)
                     safe_write(ws, r, stmt_count_col + 1, fc.statement.total)
                     safe_write(ws, r, stmt_count_col + 2, f'=IF({_f_l}{r}={_g_l}{r}, "O", "X")')
-                    if not fc.statement.passed:
+                    if not fc.statement.passed and not _stmt_unmeasured:
                         safe_write(ws, r, stmt_count_col + 3, "O")
                     safe_write(ws, r, branch_count_col, fc.branch.covered)
                     safe_write(ws, r, branch_count_col + 1, fc.branch.total)
                     safe_write(ws, r, branch_count_col + 2, f'=IF({_j_l}{r}={_k_l}{r}, "O", "X")')
-                    if not fc.branch.passed:
+                    if not fc.branch.passed and not _branch_unmeasured:
                         safe_write(ws, r, branch_count_col + 3, "O")
+                    if (_stmt_unmeasured or _branch_unmeasured) and len(spec_unmeasured_names) < 15:
+                        spec_unmeasured_names.append(
+                            f"{getattr(fc, 'unit_id', '?')}({getattr(fc, 'name', '?')})"
+                        )
                 else:
                     safe_write(ws, r, stmt_count_col, fc.statement.total)
                     safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
@@ -1250,6 +1274,15 @@ def _write_coverage_sheet(
                     f"SwUDS 미등재 함수 (순차 SwUFn fallback). 예: "
                     f"{', '.join(spec_unmatched[:15])}"
                 )
+            if spec_unmeasured_names:
+                # ⚠ **건수는 여기서 세지 않는다.** 분모를 정하는 건 `_write_spec_totals` 의
+                #   셀 스캔이고, 같은 수를 두 곳에서 세면 갈라진다(이 저장소 1위 재발 패턴).
+                #   여기서는 "어느 함수인가" 라는 **다른 사실**만 보탠다.
+                out_warnings.append(
+                    f"[spec-cov] 미측정(Total=0) 함수 예시: "
+                    f"{', '.join(spec_unmeasured_names)}"
+                    f"{' …' if len(spec_unmeasured_names) >= 15 else ''}"
+                )
 
     if is_swit_metric_layout and written > 0:
         import copy as _copy_swit_total
@@ -1410,6 +1443,13 @@ def _write_spec_totals(
     상단 요약 r5(Statement)/r6(Branch) (E/F/G/H 고정열):
       E=Total  F=Fail Count  G=Exception  H=(E-F+G)/E → Exception 상쇄로 100%.
 
+    ⚠ **분모는 `E`(전체 행)가 아니라 실측 행 수다** (2026-08-04, §6 후보 8 / UTCV-001).
+    미측정(Total=0) 행은 `f != g` 가 거짓이라 Fail 로 안 세지는데 Exception 으로는
+    세어져 **분자에만** 더해졌다 → 정상 1행 + 미측정 2행이면 `(3-0+2)/3 = 166.67%`.
+    미측정을 분모에서 빼고, 뺀 사실을 `out_warnings` 로 보고한다. 실측 행이 0이면
+    숫자가 아니라 `"미측정"` 을 쓴다 — 0% 도 100% 도 아니다.
+    `E`(Total 행 수) 자체는 감사본 정합을 위해 그대로 둔다.
+
     기존(라운드 92~100)은 3행(Fail/Pass/Total)이었으나 회사 v0.10 감사본은 단일행.
     openpyxl 수식은 캐시가 없어 '안 보임'(라운드 93) → literal 값 stamp. H/L 데이터행은
     `=IF(Count=Total,"O","X")` 수식이라 값 대신 F/G·J/K 직접 비교로 fail 산출.
@@ -1434,6 +1474,8 @@ def _write_spec_totals(
     name_count = 0
     stmt_cov_sum = stmt_tot_sum = branch_cov_sum = branch_tot_sum = 0
     stmt_fail = branch_fail = stmt_exc = branch_exc = 0
+    # 미측정(Total=0) 행. **분모에서 뺀다** — 자세한 사유는 아래 `_cov_stmt` 주석.
+    stmt_unmeasured = branch_unmeasured = 0
     for rr in range(data_start, last_data_row + 1):
         if str(ws.cell(rr, name_col).value or "").strip():
             name_count += 1
@@ -1453,6 +1495,12 @@ def _write_spec_totals(
             stmt_fail += 1
         if isinstance(j, (int, float)) and isinstance(k, (int, float)) and j != k:
             branch_fail += 1
+        # ⚠ `f != g` 로는 미측정을 못 본다 — 0/0 은 **같으므로** Fail 로 안 세어진다.
+        #   Total 이 0 인지 따로 봐야 한다(같은 원인으로 166.67% 가 나왔다).
+        if isinstance(g, (int, float)) and g == 0:
+            stmt_unmeasured += 1
+        if isinstance(k, (int, float)) and k == 0:
+            branch_unmeasured += 1
         if str(ws.cell(rr, stmt_exc_col).value or "").strip().upper() == "O":
             stmt_exc += 1
         if str(ws.cell(rr, branch_exc_col).value or "").strip().upper() == "O":
@@ -1477,16 +1525,40 @@ def _write_spec_totals(
     _set(row_total, branch_exc_col, branch_exc)    # M
 
     # --- 상단 요약 r5(Statement)/r6(Branch) (E/F/G/H 고정열) ---
-    _cov_stmt = (name_count - stmt_fail + stmt_exc) / name_count if name_count else 0
-    _cov_branch = (name_count - branch_fail + branch_exc) / name_count if name_count else 0
+    #
+    # ⚠ 분모는 **실측 행 수**다(§6 후보 8 / UTCV-001). 예전엔 `name_count` 를 그대로 써서
+    #   미측정(Total=0) 행이 분모에 남았고, 그 행은 ①`f != g` 가 거짓이라 Fail 로 안 세고
+    #   ②`not passed` 라 Exception 으로는 세어져 **분자에만 더해졌다** →
+    #   실측 재현: 정상 1행 + 미측정 2행 → `(3 - 0 + 2)/3 = 166.67%`.
+    #
+    # ⚠ 산술만 정규화해 `(3-0+0)/3 = 100%` 로 만들면 **더 나쁘다**. 3함수 중 1함수만
+    #   측정했는데 100% 라고 말하는 것이고, 166.67% 라는 불가능한 값이 유일하게 시끄러운
+    #   신호였는데 그걸 조용한 정상값으로 바꾸는 셈이다(이 저장소가 반복해 겪은 fake-green).
+    #   그래서 미측정을 **분모에서 빼고**, 뺐다는 사실을 경고로 남긴다.
+    #
+    # ⚠ 실측 행이 0이면 커버리지는 0% 도 100% 도 아니라 **판정 불가**다. 숫자를 쓰지 않는다.
+    _stmt_den = name_count - stmt_unmeasured
+    _branch_den = name_count - branch_unmeasured
+    _cov_stmt = (
+        (_stmt_den - stmt_fail + stmt_exc) / _stmt_den if _stmt_den > 0 else None
+    )
+    _cov_branch = (
+        (_branch_den - branch_fail + branch_exc) / _branch_den if _branch_den > 0 else None
+    )
     _set(5, 5, name_count)
     _set(5, 6, stmt_fail)
     _set(5, 7, stmt_exc)
-    _set(5, 8, _cov_stmt)
+    _set(5, 8, _cov_stmt if _cov_stmt is not None else "미측정")
     _set(6, 5, name_count)
     _set(6, 6, branch_fail)
     _set(6, 7, branch_exc)
-    _set(6, 8, _cov_branch)
+    _set(6, 8, _cov_branch if _cov_branch is not None else "미측정")
+    if (stmt_unmeasured or branch_unmeasured) and out_warnings is not None:
+        out_warnings.append(
+            f"[spec-cov] 미측정(Total=0) 행 — Statement {stmt_unmeasured}건 / "
+            f"Branch {branch_unmeasured}건 (전체 {name_count}행). Exception 으로 표기하지 "
+            f"않고 커버리지 분모에서 제외했다. 분모: Statement {_stmt_den} / Branch {_branch_den}."
+        )
 
     # --- 스타일 ---
     # 폰트: 데이터행(data_start) name/size, bold/italic off (REF Total 라벨 정합).
@@ -1554,10 +1626,16 @@ def _write_spec_totals(
             _dst.fill = _copy_tot.copy(_gray_fill)
 
     if out_warnings is not None:
+        # ⚠ `:.3f` 를 직접 쓰지 않는다 — 실측 행이 0이면 `_cov_*` 가 `None` 이라
+        #   TypeError 로 **경고 자체가 죽는다**(그러면 미측정 사실이 침묵한다).
+        def _cov_text(value):
+            return "미측정" if value is None else f"{value:.3f}"
+
         out_warnings.append(
             f"[spec-cov] 라운드 103 단일 TOTALS 행 R{row_total} — "
-            f"Statement(함수 {name_count}/Fail {stmt_fail}/Exc {stmt_exc}/Cov {_cov_stmt:.3f}) "
-            f"Branch(Fail {branch_fail}/Exc {branch_exc}/Cov {_cov_branch:.3f})"
+            f"Statement(함수 {name_count}/Fail {stmt_fail}/Exc {stmt_exc}/"
+            f"Cov {_cov_text(_cov_stmt)}) "
+            f"Branch(Fail {branch_fail}/Exc {branch_exc}/Cov {_cov_text(_cov_branch)})"
             + ("" if (_gray_fill or _rt_has_gray) else " [경고: Total 회색 음영 미검출]")
         )
 
