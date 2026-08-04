@@ -114,7 +114,7 @@ from backend.services.local_service import (
 )
 from backend.services.paths import is_under_any
 from backend.user_context import wrap_with_user
-from report_gen.provenance import is_weak_source
+from report_gen.provenance import has_evidence_value, is_weak_source
 from report_gen.utils import build_function_details_by_name
 from report_generator import (
     _build_req_map_from_doc_paths,
@@ -506,7 +506,13 @@ def _enrich_function_details_map(
                     if not _matched_sigs:
                         continue
                     # Upgrade description_source from inference → hsis
-                    if is_weak_source(_fn_info.get("description_source") or "inference"):
+                    # ⚠ **값이 있을 때만** 올린다. `hsis` 는 별칭이 `sds`(0.95)라, 설명이
+                    #    빈 칸인데 라벨만 올리면 "근거는 SDS 급인데 내용이 없다" 는 상태가
+                    #    0.95 를 받는다(`_score_for` 는 값 유무를 안 본다).
+                    if (
+                        has_evidence_value(_fn_info.get("description"))
+                        and is_weak_source(_fn_info.get("description_source") or "inference")
+                    ):
                         _fn_info["description_source"] = "hsis"
                     # Set related if currently TBD/empty
                     _cur_rel = str(_fn_info.get("related") or "").strip()

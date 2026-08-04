@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from report_gen.function_analyzer import _normalize_symbol_name
+from report_gen.provenance import has_evidence_value
 from report_gen.source_parser import (
     _extract_comment_lines,
     _scan_source_function_names,
@@ -1587,7 +1588,13 @@ def enrich_function_details_with_docs(
             if (not desc or desc.lower().startswith("function")) and sds_info.get("description"):
                 info["description"] = sds_info["description"]
                 info["description_source"] = "sds"
-            elif str(info.get("description_source") or "").strip() in {"", "inference"}:
+            # ⚠ `has_evidence_value(desc)` 가 **필수**다. 위 `if` 는 `sds_info` 에 설명이
+            #    있을 때만 타므로, 설명이 비어 있고 SDS 에도 설명이 없으면 이 `elif` 로
+            #    떨어져 **빈 칸에 출처만** 붙던 경로가 열려 있었다.
+            elif (
+                has_evidence_value(desc)
+                and str(info.get("description_source") or "").strip() in {"", "inference"}
+            ):
                 info["description_source"] = "sds_match"
 
         related = str(info.get("related") or "").strip()

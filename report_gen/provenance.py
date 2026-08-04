@@ -118,3 +118,36 @@ def unrecorded_source(value: Any, *, generic: bool = False) -> str:
     if generic:
         return "inference"
     return "unknown"
+
+
+def has_evidence_value(value: Any) -> bool:
+    """이 값이 **출처를 붙일 만한 실값**인가. 자리표시자면 False.
+
+    출처 라벨은 "이 값이 어디서 왔는가" 를 뜻한다. 값이 없는데 라벨만 올리면 그 칸은
+    *근거는 있는데 내용이 없다* 는 불가능한 상태가 되고, `validation.py::_score_for`
+    가 값 유무를 안 보므로 **빈 칸이 0.95(강한 출처) 점수를 받는다**.
+
+    ⚠ 실측(2026-08-04) — 값을 건드리지 않고 라벨만 올리던 사이트가 3곳 있었다:
+
+    | 사이트 | 하던 일 |
+    |---|---|
+    | `backend/routers/local.py` HSIS 승격 | 약한 출처면 `description` 을 안 보고 `hsis`(→별칭 `sds`) |
+    | `tools/generate_uds_local.py` 같은 승격 | 동일 |
+    | `report_gen/requirements.py` SDS 매칭 | `description` 이 비어도 `sds_match` |
+
+    세 곳 모두 디스크 실측 잔여는 0건이었지만(마지막에 `docx_builder.py` 가 자리표시자를
+    `default` 로 되돌리는 안전망 하나가 막고 있었다), **유입 경로 자체는 열려 있었다** —
+    안전망 한 겹에 의존하는 상태와 유입이 없는 상태는 회귀 위험이 다르다.
+
+    ⚠ `backend/helpers/common.py::_has_meaningful_value` 와 **다른 축**이다. 그쪽은
+    "이 필드가 채워졌는가"(채움률 분자)라 리스트도 받고 판정 집합도 다르며, 바꾸면
+    공표된 채움률이 움직인다. 여기는 "출처 라벨을 붙여도 되는가" 판정이므로 어휘를
+    `PLACEHOLDER_VALUES` 에 맞춘다. 둘을 합치지 말 것.
+
+    ⚠ `str(value or "")` 관용구를 쓰지 않는다 — `0`·`False` 가 falsy 라 `""` 로 접혀
+    **실값이 자리표시자로 분류된다**. 같은 파일 `unrecorded_source` 는 아직 그 관용구를
+    쓰는데, 거기는 바꾸면 공표된 출처 라벨이 움직이므로 이 함수만 정확히 한다.
+    """
+    if value is None:
+        return False
+    return str(value).strip().lower() not in PLACEHOLDER_VALUES

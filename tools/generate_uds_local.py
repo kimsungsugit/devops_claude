@@ -23,6 +23,41 @@ from workflow.rag import get_kb
 import report_generator as rg
 
 
+def _load_repo_module(rel_module: str):
+    """**이 저장소의** `report_gen/<rel_module>.py` 를 파일 경로로 직접 연다.
+
+    ⚠ 이 파일에서 `from report_gen.X import …` 를 쓰면 안 된다. 위 16-18행이
+    `sys.path` **최상단**에 `D:/Project/devops/260105` 를 밀어넣는데 그 트리에도
+    `report_gen/` 패키지가 있어 전부 그쪽으로 해석된다. 실측(2026-08-04):
+
+        report_gen           -> D:\\Project\\devops\\260105\\report_gen\\__init__.py
+        report_gen.provenance -> ModuleNotFoundError (그 트리엔 파일이 없다)
+        report_gen.utils      -> D:\\Project\\devops\\260105\\report_gen\\utils.py (576줄,
+                                 이 저장소 판은 622줄 — **다른 파일**이다)
+
+    실제로 이것 때문에 조용히 깨져 있던 배선이 있었다: `build_function_details_by_name`
+    (§6 후보 21 C3, 커밋 `fc246d7` 의 함수명 키 단일화)은 이 저장소 `utils.py:33` 에만
+    있어서, 여기서 import 하면 **ImportError 로 죽는다**. 즉 그 fix 는 이 도구 경로에서
+    한 번도 도달한 적이 없다. 같은 그림자가 §6 후보 14 를 기각시킨 사유 중 하나이기도 하다.
+
+    판정·구현을 여기 다시 적으면 이 저장소가 네 번 겪은 "복제 → 한쪽만 고쳐짐" 이 되므로
+    정본 파일을 로드한다.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "report_gen" / f"{rel_module}.py"
+    spec = importlib.util.spec_from_file_location(f"_aria_repo_{rel_module}", path)
+    if spec is None or spec.loader is None:      # pragma: no cover - 파일 부재
+        raise ImportError(f"report_gen/{rel_module}.py 정본을 열 수 없다: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+has_evidence_value = _load_repo_module("provenance").has_evidence_value
+build_function_details_by_name = _load_repo_module("utils").build_function_details_by_name
+
+
 def _iter_udf_identifiers(info: dict) -> set[str]:
     used_vars: set[str] = set()
     for field in ("globals_global", "globals_static", "inputs", "outputs"):
@@ -203,7 +238,13 @@ def _enrich_source_sections_with_docs(
                         info["hsis_related_ids"] = hsis_related_ids
                     _append_evidence(info, "description_evidence_sources", "hsis")
                     _append_evidence(info, "related_evidence_sources", "hsis")
-                    if str(info.get("description_source") or "").strip() in {"", "inference"}:
+                    # ⚠ **값이 있을 때만** 올린다 — `hsis` 는 별칭이 `sds`(0.95)라, 설명이
+                    #    빈 칸인데 라벨만 올리면 빈 칸이 최상급 점수를 받는다.
+                    #    (`backend/routers/local.py` 의 같은 승격과 lockstep)
+                    if (
+                        has_evidence_value(info.get("description"))
+                        and str(info.get("description_source") or "").strip() in {"", "inference"}
+                    ):
                         info["description_source"] = "hsis"
                     elif str(info.get("description_source") or "").strip() in {"sds", "sds_match"}:
                         info["description_source_detail"] = "hsis+sds_match"
@@ -237,8 +278,8 @@ def _enrich_source_sections_with_docs(
 
     # ⚠ 여기도 `.strip()` 만 해서 **원형 대소문자**를 키로 썼다(local.py 와 같은 결함).
     #    조회는 전부 소문자라 대문자 포함 함수를 통째로 못 찾았다.
-    from report_gen.utils import build_function_details_by_name
-
+    # ⚠ `from report_gen.utils import …` 였는데 그건 260105 트리로 해석돼 **ImportError**
+    #    였다(이 함수 전체가 죽는다). 모듈 상단 `_load_repo_module` 참조.
     sections["function_details"] = details
     sections["function_details_by_name"] = build_function_details_by_name(details)
     return sections
