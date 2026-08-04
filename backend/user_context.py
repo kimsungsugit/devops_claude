@@ -34,16 +34,32 @@ _allowed_users: set[str] | None = None
 
 
 def _load_allowed_users() -> set[str] | None:
-    """Load allowed users from config. Returns None if no restriction (file missing)."""
+    """Load allowed users from config. Returns None if no restriction (file missing).
+
+    ⚠ `None` = **제한 없음**이다. 빈 목록(`[]`)을 그렇게 접는 건 `DEPLOY.md:18` 의
+    의도지만, **파싱 실패까지 같은 값으로 접으면** 파일이 손상되거나 dict 로 잘못
+    쓰인 순간 경고 한 줄 없이 제한이 사라진다 — 이 저장소가 반복해 겪은 fail-open 이다.
+    값은 그대로 두되(되돌리면 운영이 잠긴다) **사실을 로그로 남긴다**.
+    """
     if not _ALLOWED_USERS_PATH.exists():
         return None
     try:
         data = json.loads(_ALLOWED_USERS_PATH.read_text(encoding="utf-8"))
-        if isinstance(data, list) and len(data) > 0:
-            return set(data)
+    except Exception as e:   # noqa: BLE001 - 아래에서 사유와 함께 보고한다
+        _logger.warning(
+            "allowed_users.json 을 읽지 못했다(%s: %s) — 사용자 제한이 **해제된 상태**로 "
+            "진행한다. 제한을 걸려면 이 파일을 고칠 것: %s",
+            type(e).__name__, e, _ALLOWED_USERS_PATH,
+        )
         return None
-    except Exception:
-        return None
+    if isinstance(data, list) and len(data) > 0:
+        return set(data)
+    if not isinstance(data, list):
+        _logger.warning(
+            "allowed_users.json 이 list 가 아니다(%s) — 사용자 제한이 **해제된 상태**로 진행한다.",
+            type(data).__name__,
+        )
+    return None
 
 
 def get_allowed_users() -> set[str] | None:
@@ -127,8 +143,14 @@ class UserContextMiddleware(BaseHTTPMiddleware):
 
         # 45차 C1 best-effort 인증: /api/auth/me 등은 인증 시도하되 실패해도 default user 진행
         if path in _AUTH_BEST_EFFORT_PATHS:
-            user, _err = _extract_user_from_authorization(request)
-            if user is None and is_dev_mode_x_user_fallback_enabled():
+            user, err = _extract_user_from_authorization(request)
+            # ⚠ **토큰이 제시됐는데 검증에 실패했으면 X-User 로 내려가지 않는다.**
+            #    예전엔 `_err` 를 버려서, 아래 엄격 경로가 401(TOKEN_INVALID)로 막는 조합
+            #    (깨진 Bearer + `X-User: <admin>`)이 여기서만 통과했다 — 실측:
+            #        엄격  GET /api/quality/runs  Bearer garbage + X-User hbrnd2 -> 401
+            #        관대  GET /api/auth/me       같은 조합                      -> 200 is_admin=True
+            #    같은 입력에 두 판정이 갈리는 상태였고, 그 200 이 **admin 계정명 oracle** 이었다.
+            if user is None and err is None and is_dev_mode_x_user_fallback_enabled():
                 user = (request.headers.get("X-User") or "").strip() or None
             if user:
                 token = current_user.set(user)

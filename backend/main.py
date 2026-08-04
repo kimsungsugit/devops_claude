@@ -77,6 +77,23 @@ async def _lifespan(app_instance):
         ip = socket.gethostbyname(hostname)
     except Exception:
         ip = "127.0.0.1"
+    # ⚠ **인증 폴백이 켜져 있으면 기동 때마다 크게 알린다.**
+    #   `DEV_MODE_X_USER_FALLBACK=1` 이면 JWT 없이 `X-User` 헤더 한 줄이 신원이 되고,
+    #   그 이름이 `admin_users.json` 에 있으면 **admin 게이트 27개가 전부 통과**된다
+    #   (실측 2026-08-04: `X-User: <admin>` 으로 `/api/swut/sutr/build` 등 ISO 26262
+    #   evidence 생성기 게이트 통과). 이 플래그는 untracked `.env` 한 줄이라 조용히
+    #   되살아날 수 있으므로, 켜진 상태를 **침묵시키지 않는다**.
+    try:
+        from backend.services.auth_service import is_dev_mode_x_user_fallback_enabled
+        if is_dev_mode_x_user_fallback_enabled():
+            _api_logger.warning(
+                "⚠ DEV_MODE_X_USER_FALLBACK 이 켜져 있다 — JWT 없이 X-User 헤더만으로 "
+                "신원이 결정되고, 그 이름이 admin 이면 모든 admin 게이트가 통과된다. "
+                "개발 전용 플래그이므로 운영에서는 .env 에서 0 으로 둘 것."
+            )
+    except Exception as _fe:   # noqa: BLE001 - 경고 실패가 기동을 막지 않는다
+        _api_logger.warning("인증 폴백 상태를 확인하지 못했다: %s", _fe)
+
     # Initialize Quality DB
     try:
         from workflow.quality.db import init_db as _init_quality_db
