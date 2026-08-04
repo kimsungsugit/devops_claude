@@ -580,6 +580,7 @@ def build_swit_coverage_report(
     hmr_html_bytes: bytes | None = None,
     swits_map: dict[str, Any] | None = None,
     hmr_html_bytes_list: list[bytes] | None = None,
+    swuds_skip_reason: str = "",
 ) -> SwitCoverageBuildResult:
     """SwIT Coverage Report v2.02 xlsx 생성.
 
@@ -858,6 +859,7 @@ def build_swit_coverage_report(
                 swuds_function_ids=swuds_function_ids,
                 out_warnings=warnings,
                 test_kind="SwIT",
+                swuds_skip_reason=swuds_skip_reason,
             )
             if swuds_function_ids is not None:
                 summary["consistency_swuds_compared"] = True

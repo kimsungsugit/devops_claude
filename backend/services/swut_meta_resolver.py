@@ -299,27 +299,58 @@ def _cached_parse_swuds(path: str) -> Any:
         return result
 
 
-def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
+def resolve_swuds_function_ids(
+    req: Any, project_id: str,
+    out_warnings: list[str] | None = None,
+) -> set[str] | None:
     """16차 + 49차 — swuds_docx_path가 있으면 docx → function ID set 반환.
 
     plan vs 구현 divergence (54-fix I2 / 55차):
         plan의 `kind` 인자는 req 객체 속성으로 흡수 (덕 타이핑). 자세히는
         `resolve_swuds_path` docstring 참조.
 
-    실패 시 None — caller는 SwUDS 비교 skip + warnings에 사유 누적.
+    Args:
+        out_warnings: 실패 사유 누적 list.
+
+            ⚠ **2026-08-04 — 이 인자가 없어서 이 함수만 침묵했다.** 형제 3개
+            (``resolve_hmr_html_bytes`` · ``resolve_swuts_test_specs`` ·
+            ``resolve_swuds_maps``)는 F6 Round 1 W1 에서 전부 `out_warnings` 를
+            받게 고쳤는데 이 함수만 빠졌고, 옛 docstring 은 *"caller 가 warnings 에
+            사유 누적"* 이라고 **적어 두기까지 했다** — 4개 호출처(SwUT coverage/SUTR,
+            SwIT coverage/SITR) 어디도 누적하지 않았으므로 구현되지 않은 계약이었다.
+
+            실측(KJPDS02·HDPDM01, cloudium 모드): `swuds_docx_path` 2건이 모두
+            allowed_prefixes 밖이라 PermissionError → None → SwUDS↔시험 ID 매핑
+            검증이 통째로 건너뛰어졌고, 산출물에는 그 사실이 **어디에도 없었다**.
+
+    Returns:
+        function ID set. 실패 시 None — caller 는 SwUDS 비교를 skip 하되,
+        `out_warnings` 를 넘겼다면 **사유가 산출물까지 도달한다**.
     """
     swuds_path = resolve_swuds_path(req, project_id)
     if not swuds_path:
+        # 경로 미지정은 결함이 아니라 선택 — 경고를 만들지 않는다(소음 방지).
         return None
     try:
         result = _cached_parse_swuds(swuds_path)  # 라운드 89 — path 키 캐시
         if not result.ok:
             _logger.warning("SwUDS parse failed (function_ids)")
+            if out_warnings is not None:
+                out_warnings.append(
+                    "[swuds] function ID parse 실패 (ok=False) — docx 양식 확인. "
+                    "SwUDS↔시험 함수 ID 매핑 검증을 건너뛴다"
+                )
             return None
         return result.function_ids
     except (FileNotFoundError, PermissionError, OSError) as e:
         # F6 Round 3 NC2: OSError 확대 정책 일관성 — swuts/hmr 함수와 대칭.
         _logger.warning("SwUDS docx read failed: %s", e)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[swuds] function ID read 실패 — {type(e).__name__}: {str(e)[:160]} "
+                "(cloudium 모드면 allowed_prefixes에 SwUDS 경로 포함 여부 확인). "
+                "SwUDS↔시험 함수 ID 매핑 검증을 건너뛴다"
+            )
         return None
 
 

@@ -948,6 +948,7 @@ def build_swutcr_report(
     swuts_map: dict[str, Any] | None = None,
     hmr_html_bytes: bytes | None = None,
     spec_fi: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> SwutcrBuildResult:
     """Build a SwUTCR xlsm from template and SwUT evidence data.
 
@@ -1133,6 +1134,7 @@ def build_swutcr_report(
                 swuds_function_ids=swuds_function_ids,
                 out_warnings=warnings,
                 agg=agg,
+                swuds_skip_reason=swuds_skip_reason,
             )
             summary["consistency_self_check_rows"] = count
             summary["consistency_swuds_compared"] = swuds_function_ids is not None

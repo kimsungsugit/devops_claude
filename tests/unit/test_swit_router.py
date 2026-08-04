@@ -685,7 +685,10 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "collect_swit_session", lambda *_args, **_kwargs: object())
         monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
-        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: {"SwUFn_0001"})
+        # 2026-08-04: `out_warnings` kwarg 추가(SwUDS 읽기 실패 침묵 차단) — 스텁도
+        # kwargs 를 흡수해야 한다. `lambda _req:` 로 두면 TypeError 로 죽는다.
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids",
+                            lambda _req, **_kwargs: {"SwUFn_0001"})
         monkeypatch.setattr(
             swit_mod, "_resolver_resolve_hmr_html_bytes",
             lambda *_args, **_kwargs: None,
@@ -744,7 +747,8 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
         monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
-        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: set())
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids",
+                            lambda _req, **_kwargs: set())  # out_warnings kwarg 흡수(2026-08-04)
         monkeypatch.setattr(swit_mod, "_resolver_resolve_hmr_html_bytes", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_resolver_resolve_swuts_test_specs", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
@@ -794,7 +798,8 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
         monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
-        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: set())
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids",
+                            lambda _req, **_kwargs: set())  # out_warnings kwarg 흡수(2026-08-04)
         monkeypatch.setattr(swit_mod, "_resolver_resolve_swuts_test_specs", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
             swit_mod,

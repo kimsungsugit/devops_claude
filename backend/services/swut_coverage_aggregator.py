@@ -2491,6 +2491,7 @@ def _write_consistency_sheet(
     *,
     test_kind: str = "SwUTS",
     agg: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> int:
     """2.Consistency 시트 — {test_kind} 자체 일관성 + SwUDS↔{test_kind} 매핑 (16차).
 
@@ -2531,16 +2532,30 @@ def _write_consistency_sheet(
     )
 
     # 안내문 + 헤더 + data
+    #
+    # ⚠ **2026-08-04 정직성 수정.** 옛 else 문구는 *"swuds_docx_path 옵션 제공 시 자동
+    #   활성화"* 라 **경로를 안 줬다고 단정**했다. 그런데 `swuds_function_ids is None` 은
+    #   ① 경로 미지정 ② 읽기 실패(cloudium 차단·권한·부재) ③ parse 실패 를 모두 접은 값이다.
+    #   실측(2026-08-04, KJPDS02·HDPDM01): 두 프로젝트 다 `swuds_docx_path` 가 **설정돼
+    #   있는데** allowed_prefixes 밖이라 PermissionError → None. 즉 ISO 26262 감사 증거
+    #   문서가 "엔지니어가 문서를 제공하지 않음" 으로 원인을 **잘못 귀속**하고 있었다.
+    #   미검증 사실은 그대로 두되 **사유를 지어내지 않는다**.
     if swuds_function_ids is not None:
         intro = (
             f"본 시트는 {test_kind} 내부 자체 일관성 + SwUDS↔{test_kind} 함수 ID 매핑 "
             "자동 검증 결과 (16차 v3.02). FAIL 행은 reviewer 검토 + audit evidence 보강 필요."
         )
+    elif swuds_skip_reason:
+        intro = (
+            f"본 시트는 {test_kind} 내부 자체 일관성 4 항목 자동 검증 결과. "
+            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 **수행되지 않았다** — 사유: "
+            f"{swuds_skip_reason}"
+        )
     else:
         intro = (
             f"본 시트는 {test_kind} 내부 자체 일관성 4 항목 자동 검증 결과. "
-            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 swuds_docx_path 옵션 제공 시 "
-            "자동 활성화 (16차)."
+            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 **수행되지 않았다** "
+            "(SwUDS 경로 미지정 / 읽기 실패 / parse 실패 중 하나 — 빌드 warnings 참조). 16차"
         )
     safe_write(ws, 1, 1, intro)
     safe_write(ws, 3, 1, "Item")
@@ -3313,6 +3328,7 @@ def build_coverage_report(
     swuds_function_ids: set[str] | None = None,
     swuts_map: dict[str, Any] | None = None,
     hmr_html_bytes: bytes | None = None,
+    swuds_skip_reason: str = "",
 ) -> CoverageBuildResult:
     """Coverage Report v3.01 xlsx 생성.
 
@@ -3558,6 +3574,7 @@ def build_coverage_report(
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
             agg=agg,
+            swuds_skip_reason=swuds_skip_reason,
         )
         summary["consistency_self_check_rows"] = n_cons
         # 라운드 95 — spec_based(KJPDS02)는 agg SwUDS name→SwUFn 매핑으로 정합성을

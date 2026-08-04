@@ -811,6 +811,7 @@ def build_swit_sitr_report(
     deviation_cases: list[Any] | None = None,
     swuds_function_ids: set[str] | None = None,
     swuts_map: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> SwitSitrBuildResult:
     """SwIT SITR v2.02 xlsm 생성.
 
@@ -995,6 +996,7 @@ def build_swit_sitr_report(
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
             test_kind="SwIT",
+            swuds_skip_reason=swuds_skip_reason,
         )
         summary["consistency_self_check_rows"] = n_cons
         if swuds_function_ids is not None:

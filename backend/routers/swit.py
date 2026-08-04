@@ -441,9 +441,18 @@ def _build_result_to_response(
 # 38차 I2: _run_build_safely 함수 제거 → backend/routers/_safety.run_build_safely 사용.
 
 
-def _resolve_swuds_function_ids(req: SwITBuildRequest) -> set[str] | None:
-    """Thin wrapper — SwUT 32차 + 49차 정책 동일 (54차 DRY 통합)."""
-    return _resolver_resolve_swuds_function_ids(req, req.project_id)
+def _resolve_swuds_function_ids(
+    req: SwITBuildRequest,
+    out_warnings: list[str] | None = None,
+) -> set[str] | None:
+    """Thin wrapper — SwUT 32차 + 49차 정책 동일 (54차 DRY 통합).
+
+    `out_warnings` 는 2026-08-04 추가 — SwUT 쪽과 lockstep. 상세는
+    `swut_meta_resolver.resolve_swuds_function_ids` docstring.
+    """
+    return _resolver_resolve_swuds_function_ids(
+        req, req.project_id, out_warnings=out_warnings,
+    )
 
 
 def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
@@ -514,7 +523,9 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     # 51차 — Coverage 양식 전용 path 사용 (config fallback: swit_coverage_template).
     template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_swit_coverage_meta(req)
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: SwUDS 읽기/parse 실패 사유 누적 (SwUT 와 lockstep).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report 매핑.
     # F6 Round 1 W1: hmr 실패 사유 누적 (silent 차단).
     _hmr_warnings: list[str] = []
@@ -540,7 +551,10 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         hmr_html_bytes=hmr_html_bytes,
         swits_map=swits_map,
         hmr_html_bytes_list=_metric_report_bytes or None,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)
     if _swits_warnings:
@@ -696,7 +710,9 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
 
     # 51차 — SITR 양식 전용 path 사용 (config fallback: swit_sitr_template).
     template_bytes = _read_template_bytes(req.sitr_template_path, req.project_id, "sitr")
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: 실패 사유 누적 (SwIT coverage / SwUT 3경로와 lockstep).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-A: SwITS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
     # F6 Round 1 W1: spec 실패 사유 누적 (silent 차단).
     _swuts_warnings: list[str] = []
@@ -708,7 +724,10 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _swuts_warnings:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:

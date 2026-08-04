@@ -396,13 +396,38 @@ class CloudiumFileResolver(LocalFileResolver):
             if (normalized_path == normalized_prefix
                     or normalized_path.startswith(normalized_prefix + "/")):
                 return
+        # 2026-08-04: 옛 판은 차단마다 `allowed=%s` 로 허용목록 **전체**를 찍었다.
+        # 실측 54항목 ≈ 5KB/건 — 폴더 스캔 한 번에 로그가 수백 KB로 불어나 정작
+        # 중요한 줄을 덮는다. 대신 **가장 가까운 허용 항목**을 하나만 보여 준다:
+        # 실무에서 이 차단은 거의 항상 "형제 폴더라 한 단계가 안 맞는다" 이고,
+        # 그때 필요한 정보는 목록 전체가 아니라 "무엇과 어디까지 같았나" 다.
+        nearest = self._nearest_allowed_prefix(normalized_path)
         _logger.warning(
-            "[cloudium-check] BLOCKED (no prefix match) path=%s normalized=%s allowed=%s",
-            path, normalized_path, self.allowed_prefixes,
+            "[cloudium-check] BLOCKED (no prefix match) path=%s | 허용목록 %d건 중 "
+            "최근접=%s",
+            path, len(self.allowed_prefixes), nearest or "(공통 접두 없음)",
         )
         raise PermissionError(
             f"Cloudium 모드: 허용되지 않은 경로 접근 차단됨: {path}"
         )
+
+    def _nearest_allowed_prefix(self, normalized_path: str) -> str:
+        """정규화 경로와 **공통 접두가 가장 긴** 허용 항목을 돌려준다(진단용).
+
+        경계 판정에는 절대 쓰지 않는다 — `_check_allowed` 가 이미 거부를 확정한
+        뒤에 사람이 읽을 힌트를 만드는 용도다.
+        """
+        best, best_len = "", 0
+        for prefix in self.allowed_prefixes:
+            np = self._normalize_for_compare(prefix).rstrip("/")
+            common = 0
+            for a, b in zip(normalized_path.split("/"), np.split("/")):
+                if a != b:
+                    break
+                common += 1
+            if common > best_len:
+                best, best_len = prefix, common
+        return best
 
     @staticmethod
     def _normalize_for_compare(p: str) -> str:
@@ -519,7 +544,16 @@ class CloudiumFileResolver(LocalFileResolver):
         # 라운드 96-fix — list_dir와 동일 사유 (U: latency spike, HMR html 수백 KB)
         result = self._ipc_call("read_text", {"path": path, "encoding": encoding},
                                 timeout=60.0)
-        return result if isinstance(result, str) else ""
+        # 2026-08-04: 형식 불일치를 `""` 로 접지 않는다 — `read_bytes` 의 W5 수정과
+        # **같은 계약**이다. 옛 판은 worker 가 result 를 안 주거나(구버전/미지원 op)
+        # 이상한 형을 줘도 "빈 파일" 로 보였다 = 읽기 실패와 빈 파일이 구분 불가.
+        # 형제 셋 중 read_bytes 만 고쳐 두고 둘을 남긴, 이 저장소의 재발 패턴이었다.
+        if not isinstance(result, str):
+            raise PermissionError(
+                f"Cloudium worker read_text 응답 형식 비정상 (type={type(result).__name__}) "
+                f"path={path}. 최신 worker로 재빌드/재시작하세요."
+            )
+        return result
 
     def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
                  include_dirs: bool = False) -> List[str]:
@@ -533,7 +567,16 @@ class CloudiumFileResolver(LocalFileResolver):
                                 {"path": path, "pattern": pattern,
                                  "recursive": recursive, "include_dirs": include_dirs},
                                 timeout=30.0)
-        return list(result) if isinstance(result, list) else []
+        # 2026-08-04: `read_text` 와 같은 이유로 `[]` 강제변환 제거.
+        # ⚠ 이건 **형식 불일치**만 막는다. worker 가 정상적으로 빈 list 를 주는 경우
+        #   (= 빈 폴더 / **없는 폴더**)는 그대로 `[]` 다 — 그 둘의 구분은 별건이고
+        #   `LocalFileResolver` 도 똑같이 못 하므로 한쪽만 바꾸면 모드 간 계약이 갈린다.
+        if not isinstance(result, list):
+            raise PermissionError(
+                f"Cloudium worker list_dir 응답 형식 비정상 (type={type(result).__name__}) "
+                f"path={path}. 최신 worker로 재빌드/재시작하세요."
+            )
+        return list(result)
 
     # X5: read-only invariant — 명시적 write 차단 메서드.
     # 시그너처는 LocalFileResolver의 미래 write 메서드 후보와 일치시켜 정적

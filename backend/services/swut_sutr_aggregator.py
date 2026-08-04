@@ -1201,6 +1201,7 @@ def build_sutr(
     deviation_cases: list[Any] | None = None,
     swuds_function_ids: set[str] | None = None,
     swuts_map: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> SutrBuildResult:
     """SUTR v3.01 xlsm 생성.
 
@@ -1392,6 +1393,7 @@ def build_sutr(
             cons_ws, session,
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
+            swuds_skip_reason=swuds_skip_reason,
         )
         summary["consistency_self_check_rows"] = n_cons
         if swuds_function_ids is not None:

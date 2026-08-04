@@ -368,9 +368,19 @@ def _resolve_c_source_root(req: SwUTBuildRequest) -> str:
     return _resolver_resolve_c_source_root(req, req.project_id)
 
 
-def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
-    """Thin wrapper — 16차/49차 정책 동일."""
-    return _resolver_resolve_swuds_function_ids(req, req.project_id)
+def _resolve_swuds_function_ids(
+    req: SwUTBuildRequest,
+    out_warnings: list[str] | None = None,
+) -> set[str] | None:
+    """Thin wrapper — 16차/49차 정책 동일.
+
+    `out_warnings` 는 2026-08-04 추가 — 읽기/parse 실패가 산출물까지 도달하도록
+    (형제 hmr/swuts 와 대칭). 넘기지 않으면 예전처럼 침묵하므로 **호출처가 반드시
+    넘긴다**.
+    """
+    return _resolver_resolve_swuds_function_ids(
+        req, req.project_id, out_warnings=out_warnings,
+    )
 
 
 def _resolve_swuds_function_asil_map(req: SwUTBuildRequest) -> dict[str, str]:
@@ -630,7 +640,10 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     # 51차 — Coverage 양식 전용 path 사용 (config fallback: coverage_report_template).
     template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_coverage_meta(req)
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: SwUDS 읽기/parse 실패 사유 누적 (hmr/swuts 와 대칭 — 과거 이 한 줄만
+    # 침묵해서, cloudium 차단으로 SwUDS 검증이 통째로 빠져도 산출물이 조용했다).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report에서 함수별
     # Function Calls coverage 추출 → 3.Coverage 시트 row 6 stamp (KJPDS02 v1.01).
     # F6 Round 1 W1: hmr read 실패 시 result.warnings에 사유 push (silent 차단).
@@ -645,7 +658,10 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     result = build_coverage_report(session, meta, template_bytes,
                                     swuds_function_ids=swuds_fn_ids,
                                     swuts_map=swuts_map,
-                                    hmr_html_bytes=hmr_html_bytes)
+                                    hmr_html_bytes=hmr_html_bytes,
+                                    swuds_skip_reason="; ".join(_swuds_warnings))
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)
     if _swuts_warnings:
@@ -799,7 +815,9 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     # 51차 — SUTR 양식 전용 path 사용 (config fallback: sutr_template).
     template_bytes = _read_template_bytes(req.sutr_template_path, req.project_id, "sutr")
     # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: 실패 사유 누적도 Coverage 와 대칭 (아래 warnings extend 참조).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-A: SwUTS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
     # None이면 build_sutr 내부에서 기존 하드코딩 fallback (backward-compat).
     # F6 Round 1 W1: parse/read 실패 사유는 result.warnings에 push (silent 차단).
@@ -812,7 +830,10 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _swuts_warnings:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
@@ -912,7 +933,11 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         _apply_vcast_source_fallback(session, resolver, _lf)
     template_bytes = _read_template_bytes(req.swutcr_template_path, req.project_id, "swutcr")
     meta = _build_swutcr_meta(req)
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: SwUTCR 도 나머지 4경로와 동일하게 SwUDS 실패 사유를 누적한다.
+    # (이 경로는 첫 배선 때 빠뜨렸고 AST 호출부 검사가 잡아냈다 — 함수에 인자를
+    #  다는 것과 호출처가 넘기는 것은 별개 명제라는 증거.)
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     hmr_warnings: list[str] = []
     hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
         req, req.project_id, out_warnings=hmr_warnings,
@@ -940,7 +965,10 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         swuts_map=swuts_map,
         hmr_html_bytes=hmr_html_bytes,
         spec_fi=spec_fi,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if hmr_warnings:
         result.warnings.extend(hmr_warnings)
     if swuts_warnings:
