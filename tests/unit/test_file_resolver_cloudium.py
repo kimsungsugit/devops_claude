@@ -1048,15 +1048,52 @@ def test_autouse_fixture_resets_resolver_to_local():
 # ---------------------------------------------------------------------------
 # W2: 라우터 path 키 회귀 테스트 — PATH_KEYS 누락 자동 탐지
 # ---------------------------------------------------------------------------
+#
+# ⚠ **Pydantic body 축 backlog** (2026-08-04 신설).
+#
+# 아래 검출기가 `.get("키")`/`Form(` 만 보던 사각을 Pydantic 요청 모델 필드까지 넓혔더니
+# **31개 키**가 한꺼번에 드러났다. 전부 사용자 입력이 경로가 되는 자리인데 cloudium
+# 게이트가 구조적으로 한 번도 본 적이 없다.
+#
+# 전부를 즉시 `_CLOUDIUM_PATH_KEYS` 에 넣지 **않는다**: 그 순간 미들웨어가 이 키들을
+# 검사하기 시작해 cloudium 모드의 문서 생성 흐름이 막힐 수 있는데, cloudium worker 없이는
+# 그 회귀를 검증할 수 없다. **검증 못 하는 게이트 확장은 이 저장소가 금지한 부류**다.
+#
+# 그래서 `ruff_ratchet`/침묵-except ratchet 과 같은 방식을 쓴다: **기존은 명시 부채로
+# 열거하고 신규는 차단**한다. 보이지 않던 사각이 **세어지는 목록**이 된 것이 이 라운드의
+# 소득이고, 각 키를 게이트에 올리는 건 cloudium 실환경 검증과 함께 갈 별건이다.
+#
+# ✅ `project_root`·`rel_path` 는 backlog 에 있지만 **다른 층에서 이미 막힌다** —
+#    `backend/routers/local.py::confine_request_root` 가 허용 루트 밖을 403 으로 끊는다
+#    (`tests/unit/test_local_request_root_confinement.py`). 나머지 29개는 admin 게이트는
+#    있으나 cloudium path 검사는 없는 상태다.
+_PYDANTIC_KEY_BACKLOG = frozenset({
+    "c_source_root", "compile_commands_path", "coverage_path", "coverage_template_path",
+    "exclude_paths", "fault_injection_result_path", "hmr_html_path", "impact_path",
+    "include_paths", "local_reports_dir", "log_folder", "oai_config_path",
+    "path_target", "project_root", "rel_path", "sheet_target",
+    "sitr_path", "sitr_template_path", "sutr_path", "sutr_template_path",
+    "switcr_template_path", "switcv_path", "switr_path", "swuds_docx_path",
+    "swutcr_template_path", "swuts_docx_path", "target_dir", "test_target",
+    "vcast_log_path", "vcast_log_paths", "verification_target",
+})
 def test_all_router_user_input_path_keys_are_in_path_keys_whitelist():
     """라우터의 사용자 입력 path 키가 모두 _CLOUDIUM_PATH_KEYS에 등록되어 있는지 검증.
 
     검사 패턴:
       - (payload|body|req).get("XXX_path") / .get("XXX_root") 등 — JSON body
       - XXX_path: str = Form("") — multipart form field
+      - **Pydantic 요청 모델의 필드 선언** (`backend/schemas.py`) — 아래 ⚠ 참조
 
     누락되면 미들웨어가 검사 못 해 Cloudium 모드에서도 통과 → 정책 우회 결손.
     이 테스트는 새 endpoint가 새 키 이름을 도입할 때 즉시 실패해야 한다.
+
+    ⚠ **2026-08-04 — 이 검출기에 구조적 사각이 있었다.** `.get("키")` 와 `Form(` 만 보므로
+       **Pydantic 모델을 body 로 받는 endpoint**(`req: EditorWriteRequest` → `req.project_root`)
+       는 통째로 안 보였다. 실측: `project_root detected? False`, `rel_path detected? False`.
+       그래서 `/api/local/editor/*` 20곳이 cloudium 모드에서도 게이트 없이 통과했고
+       (라이브 재현: `mode=cloudium` 인데 `editor/write` 200), 이 회귀 테스트는 **초록**이었다.
+       검사가 못 보는 축은 "없다" 가 아니라 "안 봤다" 다 — 축을 넓힌다.
     """
     import re
     from pathlib import Path as _P
@@ -1082,26 +1119,69 @@ def test_all_router_user_input_path_keys_are_in_path_keys_whitelist():
     path_suffixes = ("_path", "_paths", "_root", "_dir", "_folder", "_target")
     path_exact_names = {"path", "target", "folder", "root"}
 
+    def _is_path_key(key: str) -> bool:
+        return key in path_exact_names or any(key.endswith(s) for s in path_suffixes)
+
     found_keys: set[str] = set()
     for py_file in routers_dir.glob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         for m in get_pattern.finditer(text):
-            key = m.group(1)
-            if key in path_exact_names or any(key.endswith(s) for s in path_suffixes):
-                found_keys.add(key)
+            if _is_path_key(m.group(1)):
+                found_keys.add(m.group(1))
         for m in form_pattern.finditer(text):
-            key = m.group(1)
-            if key in path_exact_names or any(key.endswith(s) for s in path_suffixes):
-                found_keys.add(key)
+            if _is_path_key(m.group(1)):
+                found_keys.add(m.group(1))
+
+    # ── Pydantic 요청 모델 필드 (위 ⚠ 의 사각) ──────────────────────────────
+    # 라우터가 `req: XxxRequest` 로 받는 body 는 위 두 정규식에 전혀 안 걸린다.
+    # 모델 정의를 AST 로 읽어 **path 성 필드**를 같은 화이트리스트로 검사한다.
+    import ast as _ast
+
+    schemas_py = _P(__file__).resolve().parents[2] / "backend" / "schemas.py"
+    assert schemas_py.is_file(), f"스키마 파일을 못 찾음: {schemas_py}"
+    _tree = _ast.parse(schemas_py.read_text(encoding="utf-8"))
+    _model_fields: dict[str, set[str]] = {}
+    for _node in _tree.body:
+        if not isinstance(_node, _ast.ClassDef):
+            continue
+        _model_fields[_node.name] = {
+            stmt.target.id
+            for stmt in _node.body
+            if isinstance(stmt, _ast.AnnAssign) and isinstance(stmt.target, _ast.Name)
+        }
+
+    # 라우터 함수 시그니처에서 **실제로 body 로 쓰이는** 모델만 본다 — 모든 모델을 훑으면
+    # 응답 모델·내부 DTO 까지 걸려 오탐이 난다.
+    _sig_pattern = re.compile(r":\s*(\w+Request)\b")
+    _used_models: set[str] = set()
+    for py_file in routers_dir.glob("*.py"):
+        _used_models.update(_sig_pattern.findall(py_file.read_text(encoding="utf-8")))
+
+    for _model in sorted(_used_models):
+        for _field in _model_fields.get(_model, set()):
+            if _is_path_key(_field):
+                found_keys.add(_field)
 
     # PATH_KEYS (single-string) 또는 MULTI_PATH_KEYS (콤마/세미콜론 split) 둘 중 하나에 들어 있으면 통과
     whitelist = _CLOUDIUM_PATH_KEYS | _CLOUDIUM_MULTI_PATH_KEYS
-    missing = found_keys - whitelist
+    missing = found_keys - whitelist - _PYDANTIC_KEY_BACKLOG
     assert not missing, (
         f"라우터에서 사용되는 사용자 입력 path 키가 PATH_KEYS / MULTI_PATH_KEYS 어디에도 누락됨: "
         f"{sorted(missing)}. backend/middleware.py의 _CLOUDIUM_PATH_KEYS 또는 "
         f"_CLOUDIUM_MULTI_PATH_KEYS에 추가하거나, path가 아니라면 path_exact_names/path_suffixes "
         f"화이트리스트 조정 필요."
+    )
+    # ⚠ backlog 는 **줄어들기만** 해야 한다. 이미 게이트에 등록됐거나 코드에서 사라진
+    #    키가 backlog 에 남아 있으면, 다음 사람이 "아직 부채" 로 오독한다.
+    stale = _PYDANTIC_KEY_BACKLOG - found_keys
+    assert not stale, (
+        f"backlog 에 있는데 라우터에서 더 이상 안 쓰이는 키: {sorted(stale)} — "
+        f"_PYDANTIC_KEY_BACKLOG 에서 지울 것(부채 목록이 실제보다 커 보인다)."
+    )
+    overlap = _PYDANTIC_KEY_BACKLOG & whitelist
+    assert not overlap, (
+        f"backlog 와 게이트 화이트리스트에 **둘 다** 있는 키: {sorted(overlap)} — "
+        f"게이트에 등록됐으면 backlog 에서 지울 것."
     )
 
 

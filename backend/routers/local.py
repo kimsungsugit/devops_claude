@@ -13,10 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 import config
+from backend.dependencies.admin import require_admin
 from backend.helpers import (
     _apply_uds_view_filters,
     _augment_path,
@@ -150,6 +151,93 @@ repo_root = Path(__file__).resolve().parents[2]
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
+
+
+# ---------------------------------------------------------------------------
+# 요청자가 지정한 base(`project_root`) 확정 — **단일 출처**
+# ---------------------------------------------------------------------------
+#
+# ## 왜 생겼나 (2026-08-04, 보안 표면 감사)
+#
+# 이 파일의 endpoint 20곳이 `req.project_root` 를 **그대로 base 로** 써서, 인증만 통과하면
+# (당시엔 `X-User` 헤더 한 줄이면 됐다) 디스크 임의 위치를 읽고 쓸 수 있었다. 실측 재현:
+#
+#   POST /api/local/editor/write  project_root="C:/Users/<me>"                  -> 200, 홈에 파일 생성
+#   POST /api/local/editor/write  project_root=…\Start Menu\Programs\Startup    -> 200, **로그인 시 자동실행 지속성**
+#   POST /api/local/editor/write  rel_path="backend/routers/__probe.py"         -> 200, **코드 주입 표면**
+#   POST /api/local/editor/read   rel_path=".env"                               -> 200, 2,165B (JWT_SECRET 포함)
+#   POST /api/local/editor/read   rel_path="reports/quality.sqlite"             -> 200, 'SQLite format 3\x00'
+#
+# ⚠ **traversal 가드는 이미 있었고 정상 동작했다**(`../` 3종 전부 차단). 결함은 traversal 이
+#    아니라 **base 지정**이다 — `rel_path` 만 검사하고 root 는 body 를 그대로 믿었다.
+#    같은 파일 `:4155`/`:4177`/`:4236`(open-file/read-abs/open-folder)은 이미 이 확정을
+#    하고 있었다 — 읽기전용 3곳은 잠겼고 **쓰기 3곳은 열려 있던** 비대칭이었다.
+#
+# ⚠ 확정만으로는 부족하다. `.env`·`reports/quality.sqlite` 는 `repo_root` **밑**이라
+#    화이트리스트를 통과한다. 그래서 민감 경로 거부를 함께 둔다(`_deny_sensitive_target`).
+#
+# ⚠ 이 헬퍼는 **라우터 계층 전용**이다. MCP(`write_file`/`replace_in_file`)는 HTTP 를 타지
+#    않고 `local_service` 함수를 in-process 로 부르며 자체 가드가 있다 — 건드리지 않는다.
+
+def _allowed_request_roots() -> List[Path]:
+    """요청자가 base 로 지정할 수 있는 최상위 경로. `:4157` 과 같은 목록이다."""
+    return [(Path.home() / ".devops_pro_cache").resolve(), repo_root.resolve()]
+
+
+# base 확정을 통과해도 **내용을 내주면 안 되는** 것들. 전부 `repo_root` 밑이라
+# 화이트리스트로는 안 걸린다.
+_SENSITIVE_NAME_PREFIXES = (".env",)
+_SENSITIVE_SUFFIXES = (".sqlite", ".sqlite3", ".db")
+_SENSITIVE_RELATIVE = (
+    Path("config/admin_users.json"),
+    Path("config/users.json"),
+    Path("config/allowed_users.json"),
+)
+
+
+def _deny_sensitive_target(target: Path) -> None:
+    """자격·신원·감사 저장소는 이 API 로 읽지도 쓰지도 못한다."""
+    name = target.name.lower()
+    if name.startswith(_SENSITIVE_NAME_PREFIXES):
+        raise HTTPException(status_code=403, detail="sensitive file not allowed")
+    # `quality.sqlite.bak` 처럼 접미가 더 붙어도 막는다 — 확장자 일치만 보면 새 나간다.
+    if any(s in name for s in _SENSITIVE_SUFFIXES):
+        raise HTTPException(status_code=403, detail="sensitive file not allowed")
+    try:
+        rel = target.resolve().relative_to(repo_root.resolve())
+    except (ValueError, OSError):
+        return
+    if any(rel == p or rel.as_posix() == p.as_posix() for p in _SENSITIVE_RELATIVE):
+        raise HTTPException(status_code=403, detail="sensitive file not allowed")
+
+
+def confine_request_root(project_root: Any, *, rel_path: Any = None) -> str:
+    """요청 body 의 base 를 허용 루트 안으로 **확정**한다. 밖이면 403.
+
+    Args:
+        project_root: 요청자가 준 base. 빈 값이면 `repo_root`.
+        rel_path: 있으면 최종 대상까지 민감 경로 검사를 건다.
+
+    Returns:
+        확정된 base 문자열(하위 서비스 함수가 그대로 쓸 수 있게).
+    """
+    raw = str(project_root or "").strip() or str(repo_root)
+    try:
+        target = Path(raw).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid project_root") from exc
+    if not is_under_any(target, _allowed_request_roots()):
+        # ⚠ 어떤 경로가 허용되는지 응답에 적지 않는다 — 실패 자체가 정보다.
+        _logger.warning("허용 밖 project_root 요청을 차단했다: %s", target)
+        raise HTTPException(status_code=403, detail="project_root not allowed")
+    _deny_sensitive_target(target)
+    if rel_path is not None and str(rel_path).strip():
+        try:
+            combined = (target / str(rel_path)).resolve()
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid rel_path") from exc
+        _deny_sensitive_target(combined)
+    return str(target)
 
 
 async def _run_blocking(func, *args, **kwargs):
@@ -3791,11 +3879,11 @@ def local_vectorcast_delete(package_path: str = "") -> Dict[str, Any]:
     return {"ok": True, "deleted": str(pkg_dir)}
 
 
-@router.post("/api/local/scm")
+@router.post("/api/local/scm", dependencies=[Depends(require_admin)])
 def local_scm(req: ScmRequest) -> Dict[str, Any]:
     if req.mode.lower() == "git":
         return run_git(
-            project_root=req.project_root,
+            project_root=confine_request_root(req.project_root, rel_path=req.workdir_rel),
             workdir_rel=req.workdir_rel,
             action=req.action,
             repo_url=req.repo_url,
@@ -3805,7 +3893,7 @@ def local_scm(req: ScmRequest) -> Dict[str, Any]:
         )
     if req.mode.lower() == "svn":
         return run_svn(
-            project_root=req.project_root,
+            project_root=confine_request_root(req.project_root, rel_path=req.workdir_rel),
             workdir_rel=req.workdir_rel,
             action=req.action,
             repo_url=req.repo_url,
@@ -3851,32 +3939,37 @@ def local_impact_trigger_async(req: LocalImpactTriggerRequest) -> Dict[str, Any]
     return start_impact_job(trigger)
 
 
-@router.post("/api/local/kb/list")
+@router.post("/api/local/kb/list", dependencies=[Depends(require_admin)])
 def local_kb_list(req: KBRequest) -> Dict[str, Any]:
-    return {"entries": list_kb_entries(req.project_root, req.report_dir)}
+    root = confine_request_root(req.project_root)
+    return {"entries": list_kb_entries(root, req.report_dir)}
 
 
-@router.post("/api/local/kb/delete")
+@router.post("/api/local/kb/delete", dependencies=[Depends(require_admin)])
 def local_kb_delete(req: KBRequest) -> Dict[str, Any]:
     if not req.entry_key:
         raise HTTPException(status_code=400, detail="entry_key required")
-    ok, msg = delete_kb_entry(req.entry_key, req.project_root, req.report_dir)
+    root = confine_request_root(req.project_root)
+    ok, msg = delete_kb_entry(req.entry_key, root, req.report_dir)
     return {"ok": ok, "message": msg}
 
 
-@router.post("/api/local/editor/read")
+@router.post("/api/local/editor/read", dependencies=[Depends(require_admin)])
 def local_editor_read(req: EditorReadRequest) -> Dict[str, Any]:
-    return read_file_text(req.project_root, req.rel_path, req.max_bytes)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return read_file_text(root, req.rel_path, req.max_bytes)
 
 
-@router.post("/api/local/editor/write")
+@router.post("/api/local/editor/write", dependencies=[Depends(require_admin)])
 def local_editor_write(req: EditorWriteRequest) -> Dict[str, Any]:
-    return write_file_text(req.project_root, req.rel_path, req.content, req.make_backup)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return write_file_text(root, req.rel_path, req.content, req.make_backup)
 
 
-@router.post("/api/local/editor/replace")
+@router.post("/api/local/editor/replace", dependencies=[Depends(require_admin)])
 def local_editor_replace(req: EditorReplaceRequest) -> Dict[str, Any]:
-    return replace_lines(req.project_root, req.rel_path, req.start_line, req.end_line, req.content)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return replace_lines(root, req.rel_path, req.start_line, req.end_line, req.content)
 
 
 @router.post("/api/local/format-c")
@@ -4169,7 +4262,7 @@ def api_open_file(req: OpenFileRequest) -> Dict[str, Any]:
     return {"ok": True, "path": str(target)}
 
 
-@router.post("/api/local/editor/read-abs")
+@router.post("/api/local/editor/read-abs", dependencies=[Depends(require_admin)])
 def local_editor_read_abs(req: EditorReadAbsRequest) -> Dict[str, Any]:
     if not req.path:
         raise HTTPException(status_code=400, detail="path required")
@@ -4248,10 +4341,10 @@ def api_open_folder(req: OpenFolderRequest) -> Dict[str, Any]:
     return {"ok": True, "path": str(target)}
 
 
-@router.post("/api/local/preflight")
+@router.post("/api/local/preflight", dependencies=[Depends(require_admin)])
 def local_preflight(req: PreflightRequest) -> Dict[str, Any]:
     cfg = dict(req.config or {})
-    resolved, root = _resolve_source_root_from_cfg(cfg, req.project_root)
+    resolved, root = _resolve_source_root_from_cfg(cfg, confine_request_root(req.project_root))
     extra_paths = _collect_tool_paths()
     original_path = os.environ.get("PATH", "")
     os.environ["PATH"] = _augment_path(original_path, extra_paths)
@@ -4272,61 +4365,73 @@ def local_preflight(req: PreflightRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/api/local/list-dir")
+@router.post("/api/local/list-dir", dependencies=[Depends(require_admin)])
 def api_list_dir(req: ListDirRequest) -> Dict[str, Any]:
-    return list_directory(req.project_root, req.rel_path)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return list_directory(root, req.rel_path)
 
 
-@router.post("/api/local/search")
+@router.post("/api/local/search", dependencies=[Depends(require_admin)])
 def api_search(req: SearchRequest) -> Dict[str, Any]:
-    return search_in_files(req.project_root, req.rel_path, req.query, req.max_results)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return search_in_files(root, req.rel_path, req.query, req.max_results)
 
 
-@router.post("/api/local/replace-text")
+@router.post("/api/local/replace-text", dependencies=[Depends(require_admin)])
 def api_replace_text(req: ReplaceTextRequest) -> Dict[str, Any]:
-    return replace_in_file(req.project_root, req.rel_path, req.search, req.replace)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return replace_in_file(root, req.rel_path, req.search, req.replace)
 
 
-@router.post("/api/local/git/status")
+@router.post("/api/local/git/status", dependencies=[Depends(require_admin)])
 def api_git_status(req: GitRequest) -> Dict[str, Any]:
-    return git_status(req.project_root, req.workdir_rel)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_status(root, req.workdir_rel)
 
 
-@router.post("/api/local/git/diff")
+@router.post("/api/local/git/diff", dependencies=[Depends(require_admin)])
 def api_git_diff(req: GitRequest) -> Dict[str, Any]:
-    return git_diff(req.project_root, req.workdir_rel, req.staged, req.path)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_diff(root, req.workdir_rel, req.staged, req.path)
 
 
-@router.post("/api/local/git/log")
+@router.post("/api/local/git/log", dependencies=[Depends(require_admin)])
 def api_git_log(req: GitRequest) -> Dict[str, Any]:
-    return git_log(req.project_root, req.workdir_rel, req.max_count)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_log(root, req.workdir_rel, req.max_count)
 
 
-@router.post("/api/local/git/branches")
+@router.post("/api/local/git/branches", dependencies=[Depends(require_admin)])
 def api_git_branches(req: GitRequest) -> Dict[str, Any]:
-    return git_branches(req.project_root, req.workdir_rel)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_branches(root, req.workdir_rel)
 
 
-@router.post("/api/local/git/checkout")
+@router.post("/api/local/git/checkout", dependencies=[Depends(require_admin)])
 def api_git_checkout(req: GitRequest) -> Dict[str, Any]:
-    return git_checkout(req.project_root, req.workdir_rel, req.branch)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_checkout(root, req.workdir_rel, req.branch)
 
 
-@router.post("/api/local/git/create-branch")
+@router.post("/api/local/git/create-branch", dependencies=[Depends(require_admin)])
 def api_git_create_branch(req: GitRequest) -> Dict[str, Any]:
-    return git_create_branch(req.project_root, req.workdir_rel, req.branch)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_create_branch(root, req.workdir_rel, req.branch)
 
 
-@router.post("/api/local/git/stage")
+@router.post("/api/local/git/stage", dependencies=[Depends(require_admin)])
 def api_git_stage(req: GitRequest) -> Dict[str, Any]:
-    return git_stage(req.project_root, req.workdir_rel, req.paths)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_stage(root, req.workdir_rel, req.paths)
 
 
-@router.post("/api/local/git/unstage")
+@router.post("/api/local/git/unstage", dependencies=[Depends(require_admin)])
 def api_git_unstage(req: GitRequest) -> Dict[str, Any]:
-    return git_unstage(req.project_root, req.workdir_rel, req.paths)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_unstage(root, req.workdir_rel, req.paths)
 
 
-@router.post("/api/local/git/commit")
+@router.post("/api/local/git/commit", dependencies=[Depends(require_admin)])
 def api_git_commit(req: GitRequest) -> Dict[str, Any]:
-    return git_commit(req.project_root, req.workdir_rel, req.message)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_commit(root, req.workdir_rel, req.message)

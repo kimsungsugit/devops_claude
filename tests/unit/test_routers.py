@@ -53,6 +53,24 @@ client = TestClient(app, raise_server_exceptions=False)
 # that specific request: `client.get(url, headers={"X-User": ""})`.
 client.headers["X-User"] = "test"
 
+# ── /api/local/* 잠금 이후 규약 (2026-08-04 보안 표면 감사) ──────────────────
+# 20개 endpoint 가 ① admin 전용이고 ② `project_root` 를 허용 루트
+# (`~/.devops_pro_cache`, repo_root) 안으로 **확정**한다. 그래서 이 계열 회귀는
+#   - 헤더를 admin(`tester`)으로 주고
+#   - 임시 디렉터리를 **repo_root 밑**에 만들어야 한다.
+# 시스템 temp(`tempfile.TemporaryDirectory()`)는 허용 루트 밖이라 403 이다 —
+# 그게 바로 이 라운드가 막은 것이므로 테스트를 그쪽에 맞추는 게 맞다.
+LOCAL_ADMIN_HEADERS = {"X-User": "tester"}
+_REPO_ROOT_FOR_TESTS = Path(__file__).resolve().parents[2]
+
+
+def local_tmpdir():
+    """허용 루트(repo_root) **안**의 임시 디렉터리. `.codex_tmp/` 는 gitignore 대상."""
+    base = _REPO_ROOT_FOR_TESTS / ".codex_tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(dir=str(base))
+
+
 # 파일 resolver 는 conftest 의 `_default_local_resolver` 가 local 로 고정한다
 # (머신의 config/file_mode.json=cloudium 에 의존하면 파일 계열 라우터가 전부
 #  403 cloudium-blocked 로 떨어져 이 파일이 단독 실행 시 14건 깨졌었다).
@@ -873,12 +891,13 @@ class TestLocalRouter:
 
     def test_list_dir(self):
         """POST /api/local/list-dir with real directory returns entries."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with local_tmpdir() as tmpdir:
             # Create a test file inside
             (Path(tmpdir) / "test.txt").write_text("hello", encoding="utf-8")
             r = client.post(
                 "/api/local/list-dir",
                 json={"project_root": tmpdir, "rel_path": "."},
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r.status_code == 200
             data = r.json()
@@ -886,18 +905,34 @@ class TestLocalRouter:
             assert any(e["name"] == "test.txt" for e in data["entries"])
 
     def test_list_dir_nonexistent(self):
-        """POST /api/local/list-dir with nonexistent returns ok=False."""
-        r = client.post(
-            "/api/local/list-dir",
-            json={"project_root": "/nonexistent/root", "rel_path": "."},
-        )
+        """허용 루트 **안**의 없는 경로는 ok=False (403 아님).
+
+        ⚠ 예전엔 `/nonexistent/root` 를 썼는데, 이제 그건 허용 루트 밖이라 **403** 이다.
+        그 403 은 별도 테스트(`test_list_dir_outside_allowed_root_is_403`)가 덮고,
+        여기서는 원래 의도인 '없는 경로의 우아한 처리'를 유지한다.
+        """
+        with local_tmpdir() as tmpdir:
+            r = client.post(
+                "/api/local/list-dir",
+                json={"project_root": tmpdir, "rel_path": "no_such_subdir"},
+                headers=LOCAL_ADMIN_HEADERS,
+            )
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is False
 
+    def test_list_dir_outside_allowed_root_is_403(self):
+        """요청자가 base 를 지정해 허용 루트 밖을 보던 경로 — 이제 막힌다."""
+        r = client.post(
+            "/api/local/list-dir",
+            json={"project_root": "/nonexistent/root", "rel_path": "."},
+            headers=LOCAL_ADMIN_HEADERS,
+        )
+        assert r.status_code == 403
+
     def test_search_in_files(self):
         """POST /api/local/search with real files returns results."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with local_tmpdir() as tmpdir:
             (Path(tmpdir) / "main.c").write_text(
                 "int main() { return 0; }", encoding="utf-8"
             )
@@ -908,6 +943,7 @@ class TestLocalRouter:
                     "rel_path": ".",
                     "query": "main",
                 },
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r.status_code == 200
             data = r.json()
@@ -916,7 +952,7 @@ class TestLocalRouter:
 
     def test_search_empty_query(self):
         """POST /api/local/search with empty query returns ok=False."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with local_tmpdir() as tmpdir:
             r = client.post(
                 "/api/local/search",
                 json={
@@ -924,6 +960,7 @@ class TestLocalRouter:
                     "rel_path": ".",
                     "query": "",
                 },
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r.status_code == 200
             data = r.json()
@@ -931,7 +968,7 @@ class TestLocalRouter:
 
     def test_editor_read_write_cycle(self):
         """POST /api/local/editor/write + read cycle works."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with local_tmpdir() as tmpdir:
             # Write
             r = client.post(
                 "/api/local/editor/write",
@@ -941,6 +978,7 @@ class TestLocalRouter:
                     "content": "hello world",
                     "make_backup": False,
                 },
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r.status_code == 200
             assert r.json()["ok"] is True
@@ -952,6 +990,7 @@ class TestLocalRouter:
                     "project_root": tmpdir,
                     "rel_path": "test.txt",
                 },
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r2.status_code == 200
             d2 = r2.json()
@@ -960,7 +999,7 @@ class TestLocalRouter:
 
     def test_editor_replace(self):
         """POST /api/local/editor/replace replaces lines correctly."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with local_tmpdir() as tmpdir:
             fpath = Path(tmpdir) / "test.c"
             fpath.write_text("line1\nline2\nline3\n", encoding="utf-8")
             r = client.post(
@@ -972,6 +1011,7 @@ class TestLocalRouter:
                     "end_line": 2,
                     "content": "REPLACED",
                 },
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r.status_code == 200
             assert r.json()["ok"] is True
@@ -986,7 +1026,8 @@ class TestLocalRouter:
         r = client.post(
             "/api/local/format-c",
             json={"text": "int main(){return 0;}", "filename": "test.c"},
-        )
+                headers=LOCAL_ADMIN_HEADERS,
+            )
         assert r.status_code == 200
         data = r.json()
         assert "ok" in data
@@ -997,13 +1038,14 @@ class TestLocalRouter:
         r = client.post(
             "/api/local/format-c",
             json={"text": "", "filename": "test.c"},
-        )
+                headers=LOCAL_ADMIN_HEADERS,
+            )
         assert r.status_code == 200
         assert r.json()["ok"] is False
 
     def test_replace_text(self):
         """POST /api/local/replace-text replaces text in file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with local_tmpdir() as tmpdir:
             fpath = Path(tmpdir) / "main.c"
             fpath.write_text("int foo = 42;", encoding="utf-8")
             r = client.post(
@@ -1014,6 +1056,7 @@ class TestLocalRouter:
                     "search": "42",
                     "replace": "99",
                 },
+                headers=LOCAL_ADMIN_HEADERS,
             )
             assert r.status_code == 200
             assert r.json()["ok"] is True
@@ -1022,7 +1065,7 @@ class TestLocalRouter:
 
     def test_open_file_empty_path(self):
         """POST /api/local/open-file with empty path returns 400."""
-        r = client.post("/api/local/open-file", json={"path": ""})
+        r = client.post("/api/local/open-file", json={"path": ""}, headers=LOCAL_ADMIN_HEADERS)
         assert r.status_code == 400
 
     def test_open_file_nonexistent(self):
@@ -1030,30 +1073,34 @@ class TestLocalRouter:
         r = client.post(
             "/api/local/open-file",
             json={"path": "/nonexistent/file.txt"},
-        )
+                headers=LOCAL_ADMIN_HEADERS,
+            )
         assert r.status_code in (403, 404)
 
     def test_open_folder_empty_path(self):
         """POST /api/local/open-folder with empty path returns 400."""
-        r = client.post("/api/local/open-folder", json={"path": ""})
+        r = client.post("/api/local/open-folder", json={"path": ""}, headers=LOCAL_ADMIN_HEADERS)
         assert r.status_code == 400
 
     def test_preflight_missing_config(self):
         """POST /api/local/preflight without config returns 422."""
-        r = client.post("/api/local/preflight", json={})
+        r = client.post("/api/local/preflight", json={}, headers=LOCAL_ADMIN_HEADERS)
         assert r.status_code == 422
 
     def test_kb_list_missing_fields(self):
         """POST /api/local/kb/list without body returns 422."""
-        r = client.post("/api/local/kb/list", json={})
+        r = client.post("/api/local/kb/list", json={}, headers=LOCAL_ADMIN_HEADERS)
         assert r.status_code == 422
 
     def test_kb_delete_no_entry_key(self):
         """POST /api/local/kb/delete without entry_key returns 400."""
-        r = client.post(
-            "/api/local/kb/list",
-            json={"project_root": "/tmp", "report_dir": "reports"},
-        )
+        # `/tmp` 는 허용 루트 밖이라 이제 403 — 응답 shape 검증이 목적이므로 repo 안으로.
+        with local_tmpdir() as tmpdir:
+            r = client.post(
+                "/api/local/kb/list",
+                json={"project_root": tmpdir, "report_dir": "reports"},
+                headers=LOCAL_ADMIN_HEADERS,
+            )
         assert r.status_code == 200
         assert "entries" in r.json()
 
