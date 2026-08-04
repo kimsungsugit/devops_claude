@@ -3628,10 +3628,25 @@ def generate_uds_docx(
         _normalize_function_info_tables(doc)
         _remove_docx_paragraphs(doc, ["N/A"])
         _unmatched = sorted(_payload_fn_names - _matched_fn_names)
+        # ⚠ **템플릿의 프로젝트 신원** (§6 후보 9). 참조 SUDS 와 **같은 판정 함수**를
+        #    쓴다 — 새로 만들면 같은 질문에 답하는 판정이 둘이 되고, 이 저장소가 네 번
+        #    겪은 "한쪽만 고쳐짐" 이 된다.
+        #
+        #    왜 필요한가: 템플릿은 heading 집합이 곧 문서의 함수 목록이다. 남의 프로젝트
+        #    템플릿을 쓰면 ①이 프로젝트 함수가 heading 에 없어 **누락**되고 ②템플릿에만
+        #    있는 남의 함수 heading 이 `_fallback_function_description` 으로 **합성 설명이
+        #    붙은 섹션**으로 출력된다(:3088-3092). 실측(HDPDM01 템플릿 × KJPDS02 payload):
+        #    payload 432개 중 95개(22.0%) 미반영 + 빈 heading 74개인데 판정은 `success`.
+        #
+        #    ⚠ 여기서 `ok`/`success` 판정을 뒤집지 않는다 — 템플릿이 의도된 부분집합인
+        #      경우(회사 양식)가 실제로 있고, 그걸 실패로 만들면 정상 산출이 막힌다.
+        #      **수치와 신원을 표면화**하고 판단은 사람에게 남긴다.
+        _template_identity = _reference_identity_verdict(uds_payload, Path(str(template_path or "")))
         _stats = {
             "mode": "template",
             "template_path": str(template_path or ""),
             "template_source": template_source,
+            "template_identity": _template_identity,
             "payload_functions": len(_payload_fn_names),
             "matched_functions": len(_matched_fn_names),
             # ⚠ 총량은 캡 **전**에 센다. 아래 sample 은 잘린 예시이므로 그 길이로 총량을
@@ -3659,6 +3674,17 @@ def generate_uds_docx(
                 "참조 SUDS 의 ASIL·Related %d건을 적용하지 않았다 — 프로젝트 신원 미확인(%s). "
                 "이 프로젝트의 SUDS 를 UDS_REF_SUDS_PATH 로 지정하면 적용된다.",
                 _ref_stats["safety_fields_blocked"], _ref_stats["identity"]["reason"],
+            )
+        if _template_identity.get("same_project") is not True:
+            _logger.warning(
+                "템플릿의 프로젝트 신원을 확인하지 못했다(%s: template=%s vs payload=%s) — "
+                "payload %d개 중 %d개 미반영, 빈 heading %d개. 템플릿 heading 집합이 곧 "
+                "문서의 함수 목록이라, 남의 프로젝트 템플릿이면 이 프로젝트 함수가 누락되고 "
+                "템플릿에만 있는 함수가 합성 설명과 함께 실린다. "
+                "이 프로젝트의 템플릿을 지정할 것(생성 자체는 막지 않는다 — 의도된 부분집합일 수 있다).",
+                _template_identity.get("reason"),
+                _template_identity.get("ref_tokens"), _template_identity.get("payload_tokens"),
+                len(_payload_fn_names), len(_unmatched), len(_empty_headings),
             )
         _struct_blocked_total = sum(_ref_stats["structural_fields_blocked"].values())
         if _struct_blocked_total:

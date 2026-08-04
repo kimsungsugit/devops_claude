@@ -140,6 +140,11 @@ def _gen_stats_result_fields(out_path: Path) -> Dict[str, Any]:
         "gen_stats_summary": {
             "mode": stats.get("mode"),
             "template_source": stats.get("template_source"),
+            # ⚠ **명시 화이트리스트다.** 새 축을 `_stats` 에만 넣고 여기 안 더하면
+            #    사이드카에는 있는데 API 응답에서 조용히 잘린다 — 이 docstring 이 말하는
+            #    "보고를 추가하는 것과 보고가 도달하는 것은 다르다" 가 여기서 재발한다.
+            #    (§6 후보 9 의 `template_identity` 가 정확히 그 자리였다.)
+            "template_identity": stats.get("template_identity"),
             "payload_functions": stats.get("payload_functions"),
             "matched_functions": stats.get("matched_functions"),
             "match_pct": stats.get("match_pct"),      # 분모 0 이면 None(미측정)
