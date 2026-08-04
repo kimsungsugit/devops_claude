@@ -450,21 +450,33 @@ class TestGeneralAPI:
         r = client.get("/api/this-endpoint-does-not-exist")
         assert r.status_code == 404
 
-    def test_cors_headers_present(self):
-        """CORS middleware adds Access-Control-Allow-Origin header."""
-        r = client.get(
-            "/api/health",
-            headers={"Origin": "http://localhost:3000"},
-        )
+    def test_cors_headers_present_for_allowed_origin(self):
+        """허용 origin 에는 Access-Control-Allow-Origin 이 붙는다.
+
+        ⚠ 2026-08-04 에 계약이 바뀌었다. 예전 이 테스트는 `http://localhost:3000`(어디서도
+        쓰지 않는 포트)으로 헤더를 확인했는데, 그건 `allow_origins=["*"]` 였기 때문에
+        통과한 것이다 — 즉 **와일드카드를 검증하고 있었다**. 이제는 실제로 쓰는
+        origin(vite dev 5174)으로 본다.
+        """
+        r = client.get("/api/health", headers={"Origin": "http://localhost:5174"})
         assert r.status_code == 200
-        assert "access-control-allow-origin" in r.headers
+        assert r.headers.get("access-control-allow-origin") == "http://localhost:5174"
+
+    def test_cors_header_absent_for_unknown_origin(self):
+        """모르는 origin 에는 헤더를 안 준다 — 브라우저가 응답 판독을 막는다.
+
+        `*` 시절엔 임의 웹페이지가 localhost:9000 응답을 읽을 수 있었다(drive-by).
+        """
+        r = client.get("/api/health", headers={"Origin": "http://evil.example"})
+        assert r.status_code == 200          # 서버는 처리한다(CORS 는 브라우저 정책이다)
+        assert "access-control-allow-origin" not in r.headers
 
     def test_options_preflight(self):
-        """OPTIONS preflight request is handled by CORS middleware."""
+        """OPTIONS preflight 는 허용 origin 에 대해 처리된다."""
         r = client.options(
             "/api/health",
             headers={
-                "Origin": "http://localhost:3000",
+                "Origin": "http://localhost:5174",
                 "Access-Control-Request-Method": "GET",
             },
         )

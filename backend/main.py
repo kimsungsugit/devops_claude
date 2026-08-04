@@ -199,9 +199,36 @@ async def _lifespan(app_instance):
 
 app = FastAPI(title="ARIA API", version="1.0", lifespan=_lifespan)
 
+# ── CORS (2026-08-04 좁힘, 보안 표면 감사) ───────────────────────────────────
+#
+# 예전엔 `allow_origins=["*"]` 였다. 그러면 **사용자가 아무 웹페이지만 방문해도** 그
+# 페이지의 스크립트가 `http://localhost:9000` 으로 요청을 보내고 **응답을 읽을 수 있다**
+# (drive-by). 실측 당시 `/api/local/editor/read` 로 `.env`(JWT_SECRET·
+# BOOTSTRAP_ADMIN_PASSWORD 포함)가 그 경로로 나갔다. 그 endpoint 는 이번 라운드에
+# 잠갔지만, `*` 자체가 심층방어를 통째로 없애므로 함께 정리한다.
+#
+# ⚠ **LAN 의 다른 PC 접속은 안 깨진다**(사용자 확인 사항). 프로덕션은 백엔드가
+#    `frontend-v2/dist` 를 **같은 오리진에서 서빙**하므로(`:316-345`), `http://<LAN-IP>:9000`
+#    으로 여는 프론트의 API 호출은 same-origin 이고 CORS 검사를 아예 타지 않는다.
+#    bind 는 0.0.0.0 유지 — 이 목록은 브라우저 cross-origin 판독만 제한한다.
+#
+# ⚠ cross-origin 이 실제로 필요한 경우는 **vite dev 서버(5174)가 원격 백엔드를 볼 때**뿐이다.
+#    그런 조합을 쓰면 `DEVOPS_CORS_EXTRA_ORIGINS` 에 콤마로 origin 을 넣는다.
+#    (값을 코드에 하드코딩하지 않는 이유: 이 저장소는 배포 host 를 모른다 — 지어내지 않는다.)
+_CORS_DEFAULT_ORIGINS = [
+    "http://localhost:5174", "http://127.0.0.1:5174",   # vite dev
+    "http://localhost:9000", "http://127.0.0.1:9000",   # 백엔드가 서빙하는 프론트
+]
+_CORS_EXTRA = [
+    o.strip() for o in os.environ.get("DEVOPS_CORS_EXTRA_ORIGINS", "").split(",") if o.strip()
+]
+_CORS_ORIGINS = _CORS_DEFAULT_ORIGINS + _CORS_EXTRA
+if _CORS_EXTRA:
+    _api_logger.info("CORS 추가 origin: %s", _CORS_EXTRA)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
