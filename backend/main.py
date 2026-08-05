@@ -441,13 +441,23 @@ if (_frontend_dist / "index.html").exists():
             return FileResponse(str(p), media_type="image/svg+xml")
         raise HTTPException(status_code=404)
 
+    # index.html 은 **캐시하지 않는다**(해시 붙은 assets/ 는 계속 캐시된다).
+    #
+    # ⚠ 왜: vite 빌드는 번들 파일명에 해시를 넣고 **옛 파일은 지운다**. 그래서 새 배포
+    #   후 브라우저가 옛 index.html 을 캐시로 재사용하면, 거기 적힌 옛 번들은 이미
+    #   없어서 404 이거나(빈 화면) 이미 로드된 옛 JS 가 그대로 돈다 — 사용자에겐
+    #   "고쳤다는데 안 바뀐다" 로 보이고, 하드 새로고침을 알아야만 벗어난다.
+    #   Cache-Control 이 없으면 브라우저가 **휴리스틱 캐싱**(Last-Modified 기반)을
+    #   적용하므로 "헤더를 안 보내면 캐시 안 된다" 가 아니다 — 명시해야 한다.
+    _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
     # SPA catch-all: return index.html for any non-API unmatched route
     # API paths that don't match a router endpoint get a proper 404 instead of index.html
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail=f"API endpoint not found: /{full_path}")
-        return FileResponse(str(_frontend_dist / "index.html"))
+        return FileResponse(str(_frontend_dist / "index.html"), headers=_NO_CACHE)
 
     _api_logger.info("Frontend-v2 production build served from %s", _frontend_dist)
 else:
