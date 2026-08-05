@@ -242,6 +242,7 @@ def confine_request_root(project_root: Any, *, rel_path: Any = None) -> str:
 # blocking 오프로딩의 **단일 정의**는 backend/routers/_safety.py 에 있다.
 # 여기 사본을 두면 jenkins.py 와 갈라져 한쪽만 고쳐진다(이 저장소 1순위 재발 패턴).
 from backend.routers._safety import run_blocking as _run_blocking  # noqa: E402
+from backend.services.resolver_helpers import read_requirement_doc  # noqa: E402
 
 _MAX_PREVIEW_COLS = 20
 
@@ -959,18 +960,16 @@ async def local_uds_generate(
             elif ftype == "sds":
                 sds_texts.append(text.strip())
     sds_doc_paths: List[str] = []
+    # 탈락 사유를 버리지 않는다 — 예전엔 `except Exception: text = ""` 라
+    # 경로 오타·권한 없음·본문 0자가 전부 같은 침묵이었다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            if not _is_allowed_req_doc(p):
-                continue
-            text = _read_text_from_file(p)
-        except Exception:
-            text = ""
-        if text:
-            req_texts.append(text.strip())
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if p and text:
+            req_texts.append(text)
             if p.suffix.lower() == ".docx":
                 req_doc_paths.append(str(p))
             fname_lower = p.name.lower()
@@ -1498,27 +1497,26 @@ async def local_uds_generate_async(
                     elif ftype == "sds":
                         sds_texts.append(text.strip())
 
+            _async_doc_skips: List[str] = []
             for path_str in req_paths_list:
-                try:
-                    p = Path(path_str).expanduser().resolve()
-                    if not p.exists() or not p.is_file():
-                        continue
-                    if not _is_allowed_req_doc(p):
-                        continue
-                    text = _read_text_from_file(p)
-                except Exception:
-                    text = ""
-                if text:
-                    req_texts.append(text.strip())
+                p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+                if reason:
+                    _async_doc_skips.append(reason)
+                    continue
+                if p and text:
+                    req_texts.append(text)
                     if p.suffix.lower() == ".docx":
                         req_doc_paths.append(str(p))
                     fname_lower = p.name.lower()
                     if is_srs_filename(fname_lower):
-                        srs_texts.append(text.strip())
+                        srs_texts.append(text)
                     elif is_sds_filename(fname_lower):
-                        sds_texts.append(text.strip())
+                        sds_texts.append(text)
                         if p.suffix.lower() in {".docx", ".doc"}:
                             sds_doc_paths.append(str(p))
+            if _async_doc_skips:
+                _logger.warning("[UDS-async] 요구사항 문서 %d건 탈락: %s",
+                                len(_async_doc_skips), "; ".join(_async_doc_skips[:5]))
 
             source_sections, req_doc_paths, sds_doc_paths = _enrich_source_sections_with_docs(
                 source_sections,
@@ -2213,21 +2211,24 @@ async def local_sts_generate(
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
 
+    # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file():
-                text = _read_text_from_file(p)
-                if text:
-                    req_texts.append(text.strip())
-                    if p.suffix.lower() == ".docx":
-                        req_doc_paths.append(str(p))
-                        if is_sds_filename(p.name):
-                            sds_doc_paths.append(str(p))
-                    if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
-                        srs_docx_path = str(p)
-        except Exception:
-            pass
+        p, text, reason = read_requirement_doc(path_str)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+            if is_sds_filename(p.name):
+                sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
+    if doc_skips:
+        _logger.warning("[STS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     for f in (req_files or []):
         if not f or not f.filename:
@@ -2399,21 +2400,24 @@ async def local_sts_generate_stream(
     req_texts: List[str] = []
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
+    # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file():
-                text = _read_text_from_file(p)
-                if text:
-                    req_texts.append(text.strip())
-                    if p.suffix.lower() == ".docx":
-                        req_doc_paths.append(str(p))
-                        if is_sds_filename(p.name):
-                            sds_doc_paths.append(str(p))
-                    if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
-                        srs_docx_path = str(p)
-        except Exception:
-            pass
+        p, text, reason = read_requirement_doc(path_str)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+            if is_sds_filename(p.name):
+                sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
+    if doc_skips:
+        _logger.warning("[STS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     for f in (req_files or []):
         if not f or not f.filename:
@@ -2583,21 +2587,24 @@ async def local_sts_generate_async(
     req_texts: List[str] = []
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
+    # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file():
-                text = _read_text_from_file(p)
-                if text:
-                    req_texts.append(text.strip())
-                    if p.suffix.lower() == ".docx":
-                        req_doc_paths.append(str(p))
-                        if is_sds_filename(p.name):
-                            sds_doc_paths.append(str(p))
-                    if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
-                        srs_docx_path = str(p)
-        except Exception:
-            pass
+        p, text, reason = read_requirement_doc(path_str)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+            if is_sds_filename(p.name):
+                sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
+    if doc_skips:
+        _logger.warning("[STS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     for f in (req_files or []):
         if not f or not f.filename:

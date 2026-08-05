@@ -12,6 +12,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from backend.routers._safety import run_blocking as _run_blocking
+from backend.services.resolver_helpers import read_requirement_doc
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -2424,20 +2425,20 @@ async def jenkins_uds_generate(
                 srs_texts.append(text.strip())
             elif ftype == "sds":
                 sds_texts.append(text.strip())
+    # 탈락 사유를 버리지 않는다 — 아래 uds_warnings 로 산출물까지 올린다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            if not _is_allowed_req_doc(p):
-                continue
-            text = _read_text_from_file(p)
-        except Exception:
-            text = ""
-        if text:
-            req_texts.append(text.strip())
-            if p.suffix.lower() == ".docx":
-                req_doc_paths.append(str(p))
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+    if doc_skips:
+        _logger.warning("[UDS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     jenkins_meta = summary.get("jenkins") if isinstance(summary, dict) else {}
     if not isinstance(jenkins_meta, dict):
@@ -3136,22 +3137,25 @@ async def jenkins_sts_generate_async(
         p = Path(srs_path).expanduser().resolve()
         if p.exists() and p.is_file():
             srs_docx_path = str(p)
+    # 탈락한 요구사항 문서의 **사유**를 모은다 — 예전엔 `except Exception: continue`
+    # 라 경로 오타·권한 없음·본문 0자가 전부 같은 침묵이었고, 마지막에 나오는
+    # "SRS document is required" 가 원인과 무관한 안내가 됐다(실측: cloudium 모드에서
+    # registry 의 U: 문서는 백엔드 권한으로 열리지 않아 전량 탈락한다).
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            text = _read_text_from_file(p)
-            if text:
-                req_texts.append(text.strip())
-                if p.suffix.lower() == ".docx":
-                    req_doc_paths.append(str(p))
-                if is_sds_filename(p.name):
-                    sds_doc_paths.append(str(p))
-                if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
-                    srs_docx_path = str(p)
-        except Exception:
+        p, text, reason = read_requirement_doc(path_str)
+        if reason:
+            doc_skips.append(reason)
             continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+        if is_sds_filename(p.name):
+            sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
     for f in (req_files or []):
         if not f or not f.filename:
             continue
@@ -3172,7 +3176,14 @@ async def jenkins_sts_generate_async(
         except Exception:
             continue
     if not req_texts and not srs_docx_path:
-        raise HTTPException(status_code=400, detail="SRS document is required")
+        # 왜 하나도 못 읽었는지 함께 말한다. "문서를 달라" 는 안내는 문서를 준
+        # 사용자에게 아무 정보도 주지 않는다.
+        detail = "SRS document is required"
+        if doc_skips:
+            detail += " — 지정한 문서가 전부 읽히지 않았다: " + " / ".join(doc_skips[:5])
+            if len(doc_skips) > 5:
+                detail += f" (외 {len(doc_skips) - 5}건)"
+        raise HTTPException(status_code=400, detail=detail)
     def _resolve_opt_j(val: str) -> Optional[str]:
         if not val:
             return None
