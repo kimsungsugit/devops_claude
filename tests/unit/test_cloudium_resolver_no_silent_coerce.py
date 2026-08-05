@@ -107,6 +107,63 @@ def test_empty_list_is_still_empty(monkeypatch, resolver, tmp_path):
     assert resolver.list_dir(str(tmp_path)) == []
 
 
+# ---------------------------------------------------------------------------
+# browse_file / browse_directory
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("op", ["browse_file", "browse_directory"])
+@pytest.mark.parametrize("bogus", [None, 0, [], {"path": "x"}])
+def test_browse_rejects_non_string_response(monkeypatch, resolver, op, bogus):
+    """⚠ **이건 2026-08-05 에 뒤늦게 추가됐다.** 앞선 라운드에서 read_bytes/read_text/
+    list_dir 셋을 같은 계약으로 맞추면서 browse 둘을 빠뜨렸다 — 같은 파일 안에서
+    '판정 복제 → 한쪽만 고쳐짐' 을 스스로 재현한 셈이다.
+
+    browse 에서 특히 나쁜 이유: 빈 문자열이 **취소** 를 뜻한다(health.py 가
+    `error="cancelled"` 로 읽는다). 비정상 응답을 `""` 로 접으면 "worker 가 이 op 을
+    모른다" 가 "사용자가 취소했다" 로 둔갑해, 관리자가 원인을 영영 못 본다.
+    """
+    _stub_ipc(monkeypatch, resolver, bogus)
+    with pytest.raises(PermissionError, match=f"{op} 응답 형식 비정상"):
+        getattr(resolver, op)("제목", "")
+
+
+@pytest.mark.parametrize("op", ["browse_file", "browse_directory"])
+def test_browse_empty_string_still_means_cancelled(monkeypatch, resolver, op):
+    """진짜 취소(빈 문자열)는 그대로 통과해야 한다 — 과잉 차단이면 취소가 오류가 된다."""
+    _stub_ipc(monkeypatch, resolver, "")
+    assert getattr(resolver, op)("제목", "") == ""
+
+
+@pytest.mark.parametrize("op", ["browse_file", "browse_directory"])
+def test_browse_passes_through_real_path(monkeypatch, resolver, op):
+    _stub_ipc(monkeypatch, resolver, "U:/a/b.docx")
+    assert getattr(resolver, op)("제목", "") == "U:/a/b.docx"
+
+
+def test_all_five_ipc_readers_share_one_contract():
+    """다섯 IPC 판독기가 **같은 계약**인지 소스에서 직접 센다.
+
+    셋만 고치고 둘을 남기는 일이 실제로 있었으므로, 개수를 세는 가드를 둔다.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(file_resolver.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    expected = {"read_bytes", "read_text", "list_dir", "browse_file", "browse_directory"}
+    guarded = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in expected:
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Raise) and "응답 형식 비정상" in ast.unparse(sub):
+                guarded.add(node.name)
+    missing = expected - guarded
+    assert not missing, (
+        f"IPC 판독기 {sorted(missing)} 가 비정상 응답을 빈 값으로 접는다 — "
+        "나머지와 계약이 갈렸다"
+    )
+
+
 def test_read_bytes_contract_is_the_reference(monkeypatch, resolver, tmp_path):
     """셋이 같은 계약인지 — read_bytes 가 원본이다."""
     _stub_ipc(monkeypatch, resolver, 42)

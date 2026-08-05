@@ -606,13 +606,27 @@ class CloudiumFileResolver(LocalFileResolver):
         result = self._ipc_call("browse_file",
                                 {"title": title, "initialdir": initialdir},
                                 timeout=600.0)
-        return result if isinstance(result, str) else ""
+        # ⚠ 빈 문자열은 **취소** 라는 뜻이다(호출처 health.py 가 error="cancelled" 로
+        #   읽는다). 비정상 응답을 `""` 로 접으면 "worker 가 이 op 을 모른다" 가
+        #   "사용자가 취소했다" 로 둔갑한다 — read_bytes/read_text/list_dir 과 같은
+        #   계약으로 맞춘다(그 셋은 고쳤는데 browse 둘이 남아 있었다).
+        if not isinstance(result, str):
+            raise PermissionError(
+                f"Cloudium worker browse_file 응답 형식 비정상 (type={type(result).__name__}). "
+                "최신 worker로 재빌드/재시작하세요."
+            )
+        return result
 
     def browse_directory(self, title: str = "", initialdir: str = "") -> str:
         result = self._ipc_call("browse_directory",
                                 {"title": title, "initialdir": initialdir},
                                 timeout=600.0)
-        return result if isinstance(result, str) else ""
+        if not isinstance(result, str):
+            raise PermissionError(
+                f"Cloudium worker browse_directory 응답 형식 비정상 "
+                f"(type={type(result).__name__}). 최신 worker로 재빌드/재시작하세요."
+            )
+        return result
 
     @property
     def mode(self) -> str:
