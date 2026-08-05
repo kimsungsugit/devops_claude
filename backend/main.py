@@ -65,6 +65,69 @@ if not _api_logger.handlers:
     _api_logger.addHandler(_h)
     _api_logger.setLevel(logging.INFO)
 
+
+def _attach_file_log() -> str:
+    """콘솔 외에 **회전 파일 로그**를 붙인다. 성공하면 파일 경로, 실패하면 "".
+
+    ## 왜 필요한가
+
+    ``scripts/start.bat:37`` 은 uvicorn 을 리다이렉션 없이 띄운다. 그래서 로그가
+    콘솔 창에만 남고, 창이 닫히거나 프로세스가 죽으면 **증거가 0** 이다.
+    실제로 2026-08-04 "클라우디움 먹통" 을 진단할 때 원인(백엔드 미기동)을
+    특정하는 데 네 번의 조사가 필요했던 이유가 이것이다 — 죽은 뒤에 볼 게 없었다.
+
+    ## 계약
+
+    - ``uvicorn.error`` 에도 붙인다. 기동 실패·미포착 예외 traceback 이 그쪽으로
+      가기 때문이다(``devops_api`` 만 붙이면 정작 크래시가 파일에 안 남는다).
+      ``uvicorn.access`` 는 **일부러 제외** — 요청마다 한 줄이라 회전이 너무 빨라
+      정작 크래시 직전 구간이 밀려난다.
+    - 콘솔 포맷과 달리 **날짜를 포함**한다. 사후 분석에서 시:분:초만으로는
+      어느 날 일인지 알 수 없다.
+    - 파일을 못 열면 **조용히 넘어가지 않고 사유를 보고**한다. 빈 로그를
+      "문제 없음" 으로 읽는 것이 이 저장소가 반복해 겪은 fake-green 이다.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    log_dir = Path(os.environ.get("DEVOPS_LOG_DIR") or (repo_root / "logs"))
+    try:
+        max_mb = max(1, int(os.environ.get("DEVOPS_LOG_MAX_MB") or 20))
+        backups = max(1, int(os.environ.get("DEVOPS_LOG_BACKUPS") or 5))
+    except ValueError:
+        max_mb, backups = 20, 5
+        _api_logger.warning("DEVOPS_LOG_MAX_MB/BACKUPS 가 정수가 아니다 — 기본값(20MB×5) 사용")
+
+    target = log_dir / "backend.log"
+    # uvicorn --reload 는 모듈을 다시 import 한다 — 같은 파일에 핸들러가 겹치지 않게.
+    for existing in list(_api_logger.handlers):
+        if getattr(existing, "baseFilename", None) == str(target.resolve()):
+            return str(target)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(
+            target, maxBytes=max_mb * 1024 * 1024, backupCount=backups, encoding="utf-8",
+        )
+    except OSError as exc:
+        # stderr 로도 낸다 — 이 시점엔 파일 로그가 없으므로 콘솔이 유일한 통로다.
+        msg = (f"파일 로그를 열지 못했다({type(exc).__name__}: {exc}) — 콘솔 로그만 남는다. "
+               f"경로: {target}. DEVOPS_LOG_DIR 로 다른 위치를 지정할 수 있다.")
+        _api_logger.warning(msg)
+        print(f"[devops_api] {msg}", file=sys.stderr)
+        return ""
+
+    if os.environ.get("LOG_FORMAT", "").lower() == "json":
+        fh.setFormatter(JSONFormatter())
+    else:
+        fh.setFormatter(logging.Formatter(
+            "[%(asctime)s] %(levelname)s %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+    _api_logger.addHandler(fh)
+    logging.getLogger("uvicorn.error").addHandler(fh)
+    return str(target)
+
+
+_LOG_FILE_PATH = _attach_file_log()
+
 from contextlib import asynccontextmanager
 
 
