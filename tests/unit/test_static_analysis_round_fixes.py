@@ -193,6 +193,51 @@ def test_scan_source_survives_future_tuple_width_changes(tmp_path):
 # ---------------------------------------------------------------------------
 # 3. 침묵 표면
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 4. 이번 라운드 룰 승격이 실제로 켜져 있는가
+# ---------------------------------------------------------------------------
+def test_ratchet_actually_detects_promoted_rules(tmp_path):
+    """승격한 룰이 **진짜로** ruff 호출에 반영되는지 — 상수만 보지 말고 돌려본다.
+
+    (pytest tmp_path 는 이 저장소에선 `<repo>/.codex_tmp/...` 라 repo 하위이고,
+     ratchet 의 경로 정규화가 성립한다.)
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(REPO / "scripts"))
+    import ruff_ratchet  # noqa: PLC0415
+
+    probe = tmp_path / "_promoted_probe.py"
+    probe.write_text(
+        "def f(a, b):\n"
+        "    return list(zip(a, b))\n",          # B905
+        encoding="utf-8",
+    )
+    codes = {code for _f, _line, code, _msg in ruff_ratchet._collect([str(probe)])}
+    assert "B905" in codes, (
+        f"승격한 B905 가 검출되지 않는다 — --extend-select 가 빠졌다. 검출: {sorted(codes)}"
+    )
+
+
+def test_promoted_rule_set_covers_this_rounds_real_defects():
+    """이번 라운드에 **실제 결함을 낸** 룰군이 승격 목록에 남아 있는지."""
+    import sys as _sys
+
+    _sys.path.insert(0, str(REPO / "scripts"))
+    import ruff_ratchet  # noqa: PLC0415
+
+    selected = set(ruff_ratchet._EXTRA_SELECT.split(","))
+    # ASYNC: 이벤트 루프 점유(browse_file 최대 600초) / B905: 미실행 TC → Deviation 둔갑
+    for must in ("ASYNC", "B905", "B017", "S608", "S307"):
+        assert must in selected, f"{must} 가 승격 목록에서 빠졌다"
+    # ⚠ S603/S607 은 **의도적 제외**다(153건 중 실제 결함 2건 = 98.7% 거짓양성).
+    #   되살리면 곧 무시되는 게이트가 된다 — 그 결정을 여기서 못 박는다.
+    assert "S603" not in selected and "S607" not in selected, (
+        "S603/S607 을 켰다 — 거짓양성 98.7% 라 게이트가 무력해진다. 의도한 변경이면 "
+        "ruff_ratchet._EXTRA_SELECT 주석의 근거부터 갱신할 것"
+    )
+
+
 def test_requirements_preview_reports_failures_instead_of_null():
     """실패를 ``null`` 로 접지 않고 사유를 응답에 싣는지 — 소스 수준 가드.
 
