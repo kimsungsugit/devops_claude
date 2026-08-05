@@ -63,7 +63,7 @@ def test_test_report_missing_summary_warns(monkeypatch):
     monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["Sheet1"]))
     monkeypatch.setattr(
         cc, "_extract_sutr_summary",
-        lambda wb, *, tc_prefix="SwUTC": {"total_tcs": 0, "not_executed_tcs": []},
+        lambda wb, *, tc_prefix="SwUTC", **_kwargs: {"total_tcs": 0, "not_executed_tcs": []},
     )
     out = summarize_test_report(b"x")
     assert "sutr_summary" in out
@@ -75,7 +75,7 @@ def test_not_executed_reconciled_from_list(monkeypatch):
     monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["1.Test Summary"]))
     monkeypatch.setattr(
         cc, "_extract_sutr_summary",
-        lambda wb, *, tc_prefix="SwUTC": {
+        lambda wb, *, tc_prefix="SwUTC", **_kwargs: {
             "total_tcs": 30, "tested": 28, "passed": 26, "failed": 2,
             "deviated": 0, "not_executed": 0,
             "not_executed_tcs": ["SwITC_1", "SwITC_2"], "deviation_tcs": [],
@@ -92,7 +92,7 @@ def test_not_executed_not_overwritten_when_nonzero(monkeypatch):
     monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["1.Test Summary"]))
     monkeypatch.setattr(
         cc, "_extract_sutr_summary",
-        lambda wb, *, tc_prefix="SwUTC": {
+        lambda wb, *, tc_prefix="SwUTC", **_kwargs: {
             "not_executed": 5, "not_executed_tcs": ["SwITC_1"],
         },
     )
@@ -146,7 +146,7 @@ def test_not_executed_clamped_to_total(monkeypatch):
     monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["1.Test Summary"]))
     monkeypatch.setattr(
         cc, "_extract_sutr_summary",
-        lambda wb, *, tc_prefix="SwUTC": {
+        lambda wb, *, tc_prefix="SwUTC", **_kwargs: {
             "total_tcs": 5, "not_executed": 0,
             "not_executed_tcs": [f"SwITC_{i}" for i in range(12)],
         },
@@ -161,7 +161,7 @@ def test_not_executed_no_clamp_when_total_zero(monkeypatch):
     monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["1.Test Summary"]))
     monkeypatch.setattr(
         cc, "_extract_sutr_summary",
-        lambda wb, *, tc_prefix="SwUTC": {
+        lambda wb, *, tc_prefix="SwUTC", **_kwargs: {
             "total_tcs": 0, "not_executed": 0,
             "not_executed_tcs": ["SwITC_1", "SwITC_2"],
         },

@@ -744,9 +744,15 @@ def _scan_source_function_names(source_root: str, max_files: int = 800) -> Dict[
             if not raw:
                 continue
             text = _strip_c_comments(raw)
-            for fn, _, _ in _extract_c_prototypes(text):
+            # ⚠ `fn, *_` 로 받는다 — 두 추출기의 튜플 폭이 3 → 4 로 넓어졌을 때
+            #   (43a2f99, 2026-04-08) 같은 커밋이 uds_generator.py 소비처는 고쳤는데
+            #   여기만 3-tuple 로 남아 **C 파일이 하나라도 있으면 ValueError** 였다.
+            #   호출자(jenkins requirements-preview)가 그 예외를 무로그로 삼켜
+            #   `function_mapping: null` 로 응답했기 때문에 약 4개월간 드러나지 않았다.
+            #   여기서 필요한 건 이름뿐이므로 폭 변화에 영향받지 않게 둔다.
+            for fn, *_rest in _extract_c_prototypes(text):
                 names.add(fn)
-            for fn, _, _ in _extract_c_definitions(text):
+            for fn, *_rest in _extract_c_definitions(text):
                 names.add(fn)
         if scanned > max_files:
             break

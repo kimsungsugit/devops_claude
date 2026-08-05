@@ -3583,21 +3583,32 @@ async def jenkins_uds_requirements_preview(
     mapping = generate_uds_requirements_mapping(preview.get("items") or [])
     compare = None
     function_mapping = None
+    # ⚠ 이 두 블록은 예전에 `except Exception: <var> = None` 이었다. 그래서
+    #   ① source_root 미지정 ② 소스에 함수 없음 ③ 파서 크래시 세 상태가 응답에서
+    #   전부 같은 `null` 이 됐고, 실제로 `_scan_source_function_names` 가 튜플 폭
+    #   불일치로 **모든 정상 호출에서 ValueError** 를 내던 것이 약 4개월간 묻혔다.
+    #   ISO 26262 맥락에서 이 필드는 문서↔소스 함수명 추적 대조 결과라, null 을
+    #   '불일치 0건' 으로 읽으면 추적성 갭이 은폐된다. 사유를 응답에 싣는다
+    #   ('미계산은 0 이 아니라 —' 규약과 같은 취지).
+    errors: Dict[str, str] = {}
     if source_root:
         try:
             compare = generate_uds_requirements_compare(preview.get("items") or [], source_root)
-        except Exception:
-            compare = None
+        except Exception as exc:
+            _logger.warning("requirements-preview: compare 실패 — %s", exc, exc_info=True)
+            errors["compare"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         try:
             function_mapping = generate_uds_function_mapping(req_texts, source_root)
-        except Exception:
-            function_mapping = None
+        except Exception as exc:
+            _logger.warning("requirements-preview: function_mapping 실패 — %s", exc, exc_info=True)
+            errors["function_mapping"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     return {
         "ok": True,
         "preview": preview,
         "mapping": mapping,
         "compare": compare,
         "function_mapping": function_mapping,
+        **({"errors": errors} if errors else {}),
     }
 
 
