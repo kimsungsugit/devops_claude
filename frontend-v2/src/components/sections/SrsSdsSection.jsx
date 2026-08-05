@@ -60,20 +60,31 @@ export default function SrsSdsSection({ job, analysisResult }) {
     : (analysisResult?.matchedScm || (_scmList.length === 1 ? _scmList[0] : null));
   // 자동매칭 실패로 SCM을 못 정한 상태 — 조용히 비우면 '문서 미설정'으로 오독된다.
   const scmAmbiguous = !_staleContext && !activeScm && _scmList.length > 1;
+  // SCM linked docs (for loadMatrix + UI)
+  // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
+  const scmLinkedDocs = activeScm?.linked_docs;
+  const scmId = activeScm?.id || '';
+  // 아래 effect(86행~)가 `/api/scm/list` 레지스트리로 갱신한다. 초기값은 분석 스냅샷이고
+  // 조회 실패 시에도 스냅샷으로 폴백하므로, **이 하나가 곧 "지금 유효한 SCM 문서"** 다.
+  const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
+
+  // ⚠ SCM 문서의 출처는 **여기 하나**여야 한다.
+  //   예전엔 `activeScm?.linked_docs`(=분석 시점 스냅샷)를 따로 읽는 `scmLinked` 가 있었고,
+  //   아래 '입력 문서 현황' 패널과 docPaths 가 그걸 썼다. 그런데 그 스냅샷은 분석 이후
+  //   레지스트리/Settings 에서 경로를 바꿔도 **절대 갱신되지 않는다.**
+  //   86~109행 주석이 바로 그 문제를 서술하는데(“옛 경로를 고집해 … 새로고침·분석
+  //   재실행으로도 안 고쳐졌다”), 그 수정은 loadMatrix 쪽만 linkedDocs 를 쓰게 했고
+  //   패널은 스냅샷에 남겨 뒀다 — 같은 결함을 한쪽만 고친 것이다.
+  //   증상: localStorage 에 없는 문서(예: SUTS)만 옛 경로로 남아 "SUTS만 안 바뀐다".
+  const scmLinked = linkedDocs || {};
+
   // Merge: SCM linked_docs takes priority, then localStorage
-  const scmLinked = activeScm?.linked_docs || {};
   const docPaths = useMemo(() => ({
     srs: localDocPaths.srs || scmLinked.srs || '',
     sds: localDocPaths.sds || scmLinked.sds || '',
     hsis: localDocPaths.hsis || scmLinked.hsis || '',
     stp: localDocPaths.stp || scmLinked.stp || '',
   }), [localDocPaths, scmLinked.srs, scmLinked.sds, scmLinked.hsis, scmLinked.stp]);
-
-  // SCM linked docs (for loadMatrix + UI)
-  // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
-  const scmLinkedDocs = activeScm?.linked_docs;
-  const scmId = activeScm?.id || '';
-  const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
 
   // VectorCAST 결과 로그 경로(복수) — Jenkins 빌드에 RAG 없을 때 cloudium fallback.
   // 부트로더/FBL/APP 등 별도 결과 대응. 설정의 SCM '연결 문서 경로'(linked_docs.vectorcast)
