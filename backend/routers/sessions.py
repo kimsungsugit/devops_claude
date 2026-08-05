@@ -28,6 +28,7 @@ from backend.services.files import list_log_candidates, list_report_files, read_
 from backend.services.paths import safe_resolve_under
 from backend.services.report_parsers import build_report_summary, build_report_comparisons, find_project_report_dirs
 from backend.state import session_list_cache as _session_list_cache, SESSION_CACHE_TTL as _SESSION_CACHE_TTL
+from backend.state import running_processes  # /api/run/stop 소유권 대조 — stop_run 참조
 
 repo_root = Path(__file__).resolve().parents[2]
 
@@ -396,18 +397,69 @@ def _is_process_alive(pid: int) -> bool:
         return False
 
 
+def _find_tracked_run(pid: int) -> Tuple[str, Dict[str, Any]]:
+    """추적 중인 실행 중에서 이 pid 를 가진 것을 찾는다. 없으면 ``("", {})``.
+
+    ``running_processes`` 는 ``_track_process``(backend/helpers/session.py:369)가
+    실행 시작 때 채운다. 그런데 **프로덕션에서 이걸 읽는 코드가 한 곳도 없었다**
+    (전수 grep 결과 읽는 쪽은 테스트뿐) — 소유권 대조용으로 만들어 두고 대조를
+    안 한 셈이라, ``stop_run`` 이 임의 PID 를 그대로 죽이고 있었다.
+    """
+    for session_id, info in list(running_processes.items()):
+        try:
+            if int((info or {}).get("pid") or 0) == pid:
+                return session_id, dict(info or {})
+        except (TypeError, ValueError):
+            continue
+    return "", {}
+
+
 @router.post("/api/run/stop")
 def stop_run(req: StopRequest) -> Dict[str, Any]:
+    """이 백엔드가 **직접 띄운** 실행만 중단한다.
+
+    ⚠ 이전 판은 body 의 pid 를 검증 없이 ``taskkill /T /F`` 로 넘겼다. 이 라우터는
+      ``router = APIRouter()`` 라 ``require_admin`` 이 없어(같은 파일 34행) 인증된
+      일반 사용자 누구나 호출할 수 있었고, 따라서
+        - 다른 사용자의 생성 작업을 임의로 끊거나
+        - 백엔드 자신의 PID 를 주어 ``/T``(자식 트리 포함) ``/F``(강제)로
+          uvicorn 을 통째로 내릴 수 있었다.
+      ``check=False`` + ``{"ok": True}`` 고정이라 실패도 성공과 구분되지 않아
+      PID 존재 여부를 떠보는 oracle 로도 쓸 수 있었다.
+    """
     pid = int(req.pid or 0)
     if pid <= 0:
         raise HTTPException(status_code=400, detail="invalid pid")
+
+    session_id, tracked = _find_tracked_run(pid)
+    if not session_id:
+        # 추적 밖의 PID 는 이 API 의 소관이 아니다. 존재/부재를 흘리지 않도록
+        # 메시지는 동일하게 유지한다.
+        raise HTTPException(status_code=403, detail="pid is not a tracked run")
+
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
+        killed = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True
+        )
+        kill_ok = killed.returncode == 0
     else:
-        os.kill(pid, 15)
-    if req.status_path:
         try:
-            path = Path(req.status_path).expanduser().resolve()
+            os.kill(pid, 15)
+            kill_ok = True
+        except (OSError, PermissionError):
+            kill_ok = False
+
+    # 상태 파일 경로는 **요청이 아니라 추적 기록**에서 가져온다. 이전 판은
+    # `Path(req.status_path).resolve()` 를 그대로 써서 임의 경로에 JSON 을 썼다 —
+    # 같은 파일의 다른 핸들러(270·294·316·368)는 전부 `safe_resolve_under` 를
+    # 쓰는데 여기만 빠져 있었다.
+    status_written = False
+    status_error = ""
+    tracked_status = str(tracked.get("status_path") or "")
+    if tracked_status:
+        path = Path(tracked_status)  # except 절이 path 를 참조하므로 try 밖에서 바인딩
+        try:
+            path = path.expanduser().resolve()
             data = _read_json(path, default={})
             if not isinstance(data, dict):
                 data = {}
@@ -420,9 +472,20 @@ def stop_run(req: StopRequest) -> Dict[str, Any]:
                 }
             )
             _write_json(path, data)
-        except Exception:
-            pass
-    return {"ok": True}
+            status_written = True
+        except OSError as exc:
+            # 침묵하지 않는다 — 이전 판은 `except Exception: pass` 라 상태 파일이
+            # 안 써져도 호출자는 정상 종료로 읽었다.
+            status_error = f"{type(exc).__name__}: {exc}"
+            _logger.warning("[run/stop] status 파일 기록 실패 %s: %s", path, exc)
+
+    running_processes.pop(session_id, None)
+    return {
+        "ok": kill_ok,
+        "session_id": session_id,
+        "status_written": status_written,
+        **({"status_error": status_error} if status_error else {}),
+    }
 
 
 @router.get("/api/reports/local/summary")

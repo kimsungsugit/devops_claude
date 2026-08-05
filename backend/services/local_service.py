@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -805,13 +806,37 @@ def replace_lines(project_root: str, rel_path: str, start_line: int, end_line: i
     return {"ok": True, "path": str(target)}
 
 
-def _pick_via_powershell(script: str) -> Tuple[str, str]:
+# 다이얼로그 제목을 PowerShell 로 넘기는 유일한 통로. 스크립트 **문자열이 아니라**
+# 환경변수다 — 아래 _pick_via_powershell docstring 참조.
+_DLG_TITLE_ENV = "ARIA_DIALOG_TITLE"
+_DLG_TITLE_MAX = 200
+
+
+def _pick_via_powershell(script: str, title: str = "") -> Tuple[str, str]:
+    """PowerShell 파일/폴더 다이얼로그 실행.
+
+    ⚠ **title 은 절대 script 문자열에 보간하지 말 것.** 이전 판은
+
+        f"$dlg.Description='{title or '폴더 선택'}';"
+
+    처럼 작은따옴표 **안에** f-string 으로 끼워 넣었다. `powershell -Command` 는
+    받은 문자열을 **파싱**하므로 `shell=False` 는 아무 방어도 되지 않는다 —
+    title 에 작은따옴표 하나만 넣으면 인용이 닫히고 그 뒤가 명령으로 실행된다
+    (`/api/file-mode/browse-file` body 의 `title` 은 검증이 없어 그대로 여기 온다).
+
+    환경변수 경유는 값이 PowerShell **파서를 거치지 않으므로** 이스케이프 규칙에
+    의존하지 않는 구조적 차단이다. 스크립트 쪽은 `$env:ARIA_DIALOG_TITLE` 를 읽는다.
+    """
+    env = dict(os.environ)
+    # NUL 은 환경변수에 담을 수 없어 ValueError 를 낸다(요청 하나가 500 이 된다).
+    env[_DLG_TITLE_ENV] = (title or "").replace("\x00", "")[:_DLG_TITLE_MAX]
     try:
         res = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             timeout=600,
+            env=env,
         )
     except Exception as exc:
         return "", f"powershell_error:{exc}"
@@ -846,11 +871,12 @@ def pick_directory(title: str = "폴더 선택") -> Tuple[str, str]:
     script = (
         "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
         "$dlg=New-Object System.Windows.Forms.FolderBrowserDialog;"
-        f"$dlg.Description='{title or '폴더 선택'}';"
+        # title 은 여기 보간하지 않는다 — 환경변수로 받는다(_pick_via_powershell 참조).
+        f"$dlg.Description=$env:{_DLG_TITLE_ENV};"
         "$dlg.ShowNewFolderButton=$true;"
         "if($dlg.ShowDialog() -eq 'OK'){ $dlg.SelectedPath }"
     )
-    path, err = _pick_via_powershell(script)
+    path, err = _pick_via_powershell(script, title or "폴더 선택")
     if path:
         return path, ""
     if err:
@@ -883,11 +909,12 @@ def pick_file(title: str = "파일 선택") -> Tuple[str, str]:
     script = (
         "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
         "$dlg=New-Object System.Windows.Forms.OpenFileDialog;"
-        f"$dlg.Title='{title or '파일 선택'}';"
+        # title 은 여기 보간하지 않는다 — 환경변수로 받는다(_pick_via_powershell 참조).
+        f"$dlg.Title=$env:{_DLG_TITLE_ENV};"
         "$dlg.Filter='All files (*.*)|*.*';"
         "if($dlg.ShowDialog() -eq 'OK'){ $dlg.FileName }"
     )
-    path, err = _pick_via_powershell(script)
+    path, err = _pick_via_powershell(script, title or "파일 선택")
     if path:
         return path, ""
     if err:
