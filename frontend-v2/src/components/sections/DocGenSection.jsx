@@ -4,6 +4,7 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import { isAbortError } from '../../impactPoll.js';
 import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
 import { persistDocPaths, useScmFallback } from '../../docGenHelpers.js';
+import { loadDocPaths, useDocPathsSync } from '../../sharedInputs.js';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -187,12 +188,10 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
 
   const [scm] = useScmFallback(analysisResult);
   const linkedDocs = scm?.linked_docs || {};
-  const [localDocPaths, setLocalDocPaths] = useState(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}');
-      return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
-    } catch (_) { return {}; }
-  });
+  // Settings 에서 저장한 경로를 **같은 세션에서** 반영한다. 이 섹션도 keep-alive 라
+  // 재마운트가 없어, 구독이 없으면 mount 시 스냅샷이 새로고침 전까지 고정된다.
+  const [localDocPaths, setLocalDocPaths] = useState(loadDocPaths);
+  useDocPathsSync(setLocalDocPaths);
 
   // path 정규화 — 슬래시 방향 통일
   const _normPath = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '');

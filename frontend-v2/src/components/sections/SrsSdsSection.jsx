@@ -5,6 +5,7 @@ import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
 import { impactConflict, contextConflict, mismatchText } from '../../impactGuard.js';
 import { saveTraceMatrix, loadTraceMatrixByKey, loadTraceMatrixByBinding } from '../../traceMatrixStore.js';
+import { loadDocPaths, useDocPathsSync } from '../../sharedInputs.js';
 
 export default function SrsSdsSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -34,9 +35,12 @@ export default function SrsSdsSection({ job, analysisResult }) {
   });
   const _autoLoadedRef = useRef(false);
 
-  const localDocPaths = useMemo(() => {
-    try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
-  }, []);
+  // ⚠ 예전엔 `useMemo(…, [])` 였다 — **마운트 시 1회만** 읽는다는 뜻이다. 그런데 이
+  //   섹션은 keep-alive(display:none)라 재마운트되지 않으므로, Settings 에서 문서 경로를
+  //   바꿔도 전체 새로고침 전까지 옛 경로로 activeDocs → 추적성 매트릭스가 만들어졌다.
+  //   (사용자 보고: "설정에서 저장하면 프로젝트 탭 문서가 업데이트돼야 하는데 안 된다")
+  const [localDocPaths, setLocalDocPaths] = useState(loadDocPaths);
+  useDocPathsSync(setLocalDocPaths);
 
   // ⚠ 이 섹션에서 오귀속 피해가 가장 큰 건 아래 "영향 분석 결과" 패널이 아니라 activeScm이다.
   // activeScm.linked_docs가 docPaths → loadMatrix로 흘러 추적성 매트릭스(SRS→SDS→UDS→STS→

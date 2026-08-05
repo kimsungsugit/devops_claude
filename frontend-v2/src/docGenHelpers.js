@@ -11,8 +11,9 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { api } from './api.js';
+import { DOC_PATHS_KEY, saveDocPaths } from './sharedInputs.js';
 
-export const DOC_PATHS_KEY = 'devops_v2_doc_paths';
+export { DOC_PATHS_KEY };
 
 /**
  * 문서 경로 override 영속. 저장에 성공하면 true.
@@ -26,15 +27,14 @@ export const DOC_PATHS_KEY = 'devops_v2_doc_paths';
  *   그래서 실패를 반환값으로 알리고, 성공 토스트는 호출처가 true 일 때만 띄운다.
  */
 export function persistDocPaths(next, toast) {
-  try {
-    localStorage.setItem(DOC_PATHS_KEY, JSON.stringify(next));
-    return true;
-  } catch (e) {
-    toast('warning',
-      `경로가 저장되지 않았습니다(${e?.name || 'StorageError'}) — 이 세션에서만 적용되고 ` +
-      '새로고침하면 SCM 등록 경로로 되돌아갑니다.');
-    return false;
-  }
+  // 저장 + **같은 탭 통지**는 sharedInputs.saveDocPaths 단일 출처를 거친다.
+  // 여기서 직접 setItem 하면 이 입구로 저장한 값만 프로젝트 탭에 반영되지 않는다.
+  let err = null;
+  if (saveDocPaths(next, (e) => { err = e; })) return true;
+  toast('warning',
+    `경로가 저장되지 않았습니다(${err?.name || 'StorageError'}) — 이 세션에서만 적용되고 ` +
+    '새로고침하면 SCM 등록 경로로 되돌아갑니다.');
+  return false;
 }
 
 /**

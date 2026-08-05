@@ -4,7 +4,9 @@ import {
   post, api, saveServerJenkinsConfig,
   fetchServerUdsTemplate, saveServerUdsTemplate, uploadServerUdsTemplate,
 } from '../api.js';
-import { loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS } from '../sharedInputs.js';
+import {
+  loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS, saveDocPaths,
+} from '../sharedInputs.js';
 
 export default function Settings() {
   return (
@@ -520,7 +522,10 @@ function DocInputSection() {
   const setDoc = (k, v) => {
     const next = { ...paths, [k]: v };
     setPaths(next);
-    localStorage.setItem(DOC_KEY, JSON.stringify(next));
+    // ⚠ 직접 setItem 하지 않는다 — saveDocPaths 가 같은 탭 구독자에게 통지한다.
+    //   통지가 없으면 프로젝트 탭 섹션들이 keep-alive 라 재마운트되지 않아
+    //   전체 새로고침 전까지 옛 경로를 계속 쓴다(사용자 보고 결함).
+    saveDocPaths(next);
   };
   const setShr = (k, v) => {
     const next = { ...shared, [k]: v };
@@ -540,7 +545,7 @@ function DocInputSection() {
     }
     if (!filled) { toast('info', '채울 빈 칸이 없습니다 (이미 입력됨 또는 SCM에 경로 없음).'); return; }
     setPaths(next);
-    localStorage.setItem(DOC_KEY, JSON.stringify(next));
+    saveDocPaths(next);
     toast('success', `선택 SCM 연결문서로 빈 칸 ${filled}개를 채웠습니다.`);
   };
 
