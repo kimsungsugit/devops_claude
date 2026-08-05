@@ -1,5 +1,4 @@
 """Auto-generated router: local"""
-import asyncio
 import json
 import logging
 import os
@@ -240,10 +239,9 @@ def confine_request_root(project_root: Any, *, rel_path: Any = None) -> str:
     return str(target)
 
 
-async def _run_blocking(func, *args, **kwargs):
-    """blocking 함수를 별도 스레드에서 실행 — async 엔드포인트의 이벤트 루프 hang 방지."""
-    import functools
-    return await asyncio.to_thread(functools.partial(func, *args, **kwargs))
+# blocking 오프로딩의 **단일 정의**는 backend/routers/_safety.py 에 있다.
+# 여기 사본을 두면 jenkins.py 와 갈라져 한쪽만 고쳐진다(이 저장소 1순위 재발 패턴).
+from backend.routers._safety import run_blocking as _run_blocking  # noqa: E402
 
 _MAX_PREVIEW_COLS = 20
 
@@ -1009,7 +1007,10 @@ async def local_uds_generate(
 
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
-        source_sections = generate_uds_source_sections(
+        # 전체 소스트리 파싱 — 수 초~수십 초. 이벤트 루프에서 돌리면 그동안
+        # 백엔드 전체가 멈춘다(tests/unit/test_router_event_loop_blocking.py).
+        source_sections = await _run_blocking(
+            generate_uds_source_sections,
             source_root,  # 콤마 구분 복수 경로 그대로 전달
             component_map=component_map if component_map else None,
             sds_partition_map=_sds_pmap if _sds_pmap else None,
@@ -1162,7 +1163,9 @@ async def local_uds_generate(
                 ]
             )
             notes_text = "\n\n".join([doc_block, src_block]).strip()
-        ai_sections = generate_uds_ai_sections(
+        # Gemini 호출 — 수 분. 이 저장소에서 이벤트 루프를 가장 오래 잡는 축이다.
+        ai_sections = await _run_blocking(
+            generate_uds_ai_sections,
             requirements_text=req_combined,
             source_sections=source_sections,
             notes_text=notes_text,
@@ -1263,7 +1266,8 @@ async def local_uds_generate(
         }
     # 부가 보고서 (각각 _run_report_with_timeout 내부에서 timeout 관리됨)
     validation_path = out_path.with_suffix(".validation.md")
-    ok_validation, _ = _run_report_with_timeout(
+    ok_validation, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_validation_report(str(out_path), str(validation_path)),
         timeout_seconds=report_timeout_short,
         report_name="validation report",
@@ -1272,7 +1276,8 @@ async def local_uds_generate(
         validation_path = None
     accuracy_path = out_path.with_suffix(".accuracy.md")
     src_root = str(source_root_path) if source_root_path else ""
-    ok_accuracy, _ = _run_report_with_timeout(
+    ok_accuracy, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_called_calling_accuracy_report(
             str(out_path),
             src_root,
@@ -1285,7 +1290,8 @@ async def local_uds_generate(
     if not ok_accuracy:
         accuracy_path = None
     swcom_context_path = out_path.with_suffix(".swcom_context.md")
-    ok_swcom, _ = _run_report_with_timeout(
+    ok_swcom, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_swcom_context_report(str(out_path), str(swcom_context_path)),
         timeout_seconds=report_timeout_short,
         report_name="swcom context report",
@@ -1294,7 +1300,8 @@ async def local_uds_generate(
         swcom_context_path = None
     swcom_diff_path = None
     confidence_path = out_path.with_suffix(".field_confidence.md")
-    ok_confidence, _ = _run_report_with_timeout(
+    ok_confidence, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_asil_related_confidence_report(
             uds_payload,
             str(confidence_path),
@@ -1306,7 +1313,8 @@ async def local_uds_generate(
     if not ok_confidence:
         confidence_path = None
     constraints_path = out_path.with_suffix(".constraints.md")
-    ok_constraints, _ = _run_report_with_timeout(
+    ok_constraints, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_constraints_report(uds_payload, str(constraints_path)),
         timeout_seconds=report_timeout_short,
         report_name="constraints report",
@@ -1314,14 +1322,15 @@ async def local_uds_generate(
     if not ok_constraints:
         constraints_path = None
     quality_gate_path = out_path.with_suffix(".quality_gate.md")
-    ok_quality_gate, _ = _run_report_with_timeout(
+    ok_quality_gate, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_field_quality_gate_report(str(out_path), str(quality_gate_path)),
         timeout_seconds=report_timeout_short,
         report_name="field quality gate report",
     )
     if not ok_quality_gate:
         quality_gate_path = None
-    preview_html = generate_uds_preview_html(uds_payload)
+    preview_html = await _run_blocking(generate_uds_preview_html, uds_payload)
     preview_path = out_path.with_suffix(".html")
     preview_path.write_text(preview_html, encoding="utf-8")
     quality_evaluation = _build_quality_evaluation(
@@ -2307,7 +2316,9 @@ async def local_sts_generate(
     _sts_ai_cfg = _load_sts_ai_config()
 
     try:
-        result = generate_sts(
+        # STS 생성 전 구간(문서 파싱 + AI + xlsx 빌드) — 이벤트 루프 밖에서 돈다.
+        result = await _run_blocking(
+            generate_sts,
             requirements_text=req_texts,
             function_details=function_details,
             output_path=str(out_path),
@@ -2828,7 +2839,7 @@ def local_sts_view(filename: str, report_dir: Optional[str] = None) -> Dict[str,
 
 
 @router.post("/api/local/suts/generate")
-async def local_suts_generate(
+def local_suts_generate(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
@@ -2931,7 +2942,7 @@ async def local_suts_generate(
 
 
 @router.post("/api/local/suts/generate-stream")
-async def local_suts_generate_stream(
+def local_suts_generate_stream(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
@@ -3053,7 +3064,7 @@ async def local_suts_generate_stream(
 
 
 @router.post("/api/local/suts/generate-async")
-async def local_suts_generate_async(
+def local_suts_generate_async(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
@@ -3252,7 +3263,7 @@ def local_suts_view(filename: str, report_dir: Optional[str] = None) -> Dict[str
 
 
 @router.post("/api/local/sits/generate")
-async def local_sits_generate(
+def local_sits_generate(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
@@ -3352,7 +3363,7 @@ async def local_sits_generate(
 
 
 @router.post("/api/local/sits/generate-stream")
-async def local_sits_generate_stream(
+def local_sits_generate_stream(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
@@ -3471,7 +3482,7 @@ async def local_sits_generate_stream(
 
 
 @router.post("/api/local/sits/generate-async")
-async def local_sits_generate_async(
+def local_sits_generate_async(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),

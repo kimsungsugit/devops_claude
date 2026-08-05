@@ -11,6 +11,7 @@ import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from backend.routers._safety import run_blocking as _run_blocking
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -2444,7 +2445,8 @@ async def jenkins_uds_generate(
     summary_text = summary.get("summary_text", "") if isinstance(summary, dict) else ""
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
-        source_sections = generate_uds_source_sections(
+        source_sections = await _run_blocking(
+            generate_uds_source_sections,
             str(source_root_path),
             component_map=component_map if component_map else None,
         )
@@ -2559,13 +2561,14 @@ async def jenkins_uds_generate(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"uds_spec_{job_slug}_{ts}.docx"
     tpl = str(template_path).strip() or None
-    _generate_docx_with_retry(tpl, uds_payload, out_path)
+    await _run_blocking(_generate_docx_with_retry, tpl, uds_payload, out_path)
     _write_uds_payload_sidecar(out_path, uds_payload)
     residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})
     validation_path = out_path.with_suffix(".validation.md")
     _jenkins_report_short = 300
     _jenkins_report_long = 600
-    ok_validation, _ = _run_report_with_timeout(
+    ok_validation, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_validation_report(str(out_path), str(validation_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="validation report",
@@ -2574,7 +2577,8 @@ async def jenkins_uds_generate(
         validation_path = None
     accuracy_path = out_path.with_suffix(".accuracy.md")
     src_root = str(source_root_path) if source_root_path else ""
-    ok_accuracy, _ = _run_report_with_timeout(
+    ok_accuracy, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_called_calling_accuracy_report(
             str(out_path),
             src_root,
@@ -2587,7 +2591,8 @@ async def jenkins_uds_generate(
     if not ok_accuracy:
         accuracy_path = None
     swcom_context_path = out_path.with_suffix(".swcom_context.md")
-    ok_swcom, _ = _run_report_with_timeout(
+    ok_swcom, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_swcom_context_report(str(out_path), str(swcom_context_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="swcom context report",
@@ -2596,7 +2601,8 @@ async def jenkins_uds_generate(
         swcom_context_path = None
     swcom_diff_path = None
     confidence_path = out_path.with_suffix(".field_confidence.md")
-    ok_confidence, _ = _run_report_with_timeout(
+    ok_confidence, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_asil_related_confidence_report(
             uds_payload,
             str(confidence_path),
@@ -2608,7 +2614,8 @@ async def jenkins_uds_generate(
     if not ok_confidence:
         confidence_path = None
     constraints_path = out_path.with_suffix(".constraints.md")
-    ok_constraints, _ = _run_report_with_timeout(
+    ok_constraints, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_constraints_report(uds_payload, str(constraints_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="constraints report",
@@ -2616,7 +2623,8 @@ async def jenkins_uds_generate(
     if not ok_constraints:
         constraints_path = None
     quality_gate_path = out_path.with_suffix(".quality_gate.md")
-    ok_quality_gate, _ = _run_report_with_timeout(
+    ok_quality_gate, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_field_quality_gate_report(str(out_path), str(quality_gate_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="field quality gate report",
@@ -2639,7 +2647,7 @@ async def jenkins_uds_generate(
         # 몇 년간 삼켜 품질 기록이 통째로 유실된 전례 — 608f849).
         _logger.exception("UDS quality record skipped (non-fatal)")
 
-    preview_html = generate_uds_preview_html(uds_payload)
+    preview_html = await _run_blocking(generate_uds_preview_html, uds_payload)
     preview_path = out_path.with_suffix(".html")
     preview_path.write_text(preview_html, encoding="utf-8")
     return {
@@ -3306,7 +3314,7 @@ def jenkins_sts_view(job_url: str, cache_root: str, filename: str) -> Dict[str, 
 
 
 @router.post("/api/jenkins/suts/generate-async")
-async def jenkins_suts_generate_async(
+def jenkins_suts_generate_async(
     job_url: str = Form(...),
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),

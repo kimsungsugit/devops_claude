@@ -931,11 +931,23 @@ def preview_image(path: str, image_id: str):
 
 
 @admin_router.post("/file-mode/browse-file")
-async def browse_file(body: BrowseFileRequest = BrowseFileRequest()):
+def browse_file(body: BrowseFileRequest = BrowseFileRequest()):
     """OS 파일 선택 다이얼로그.
 
     - cloudium 모드: worker IPC로 위임 (worker GUI에서 다이얼로그 → 클라우디움 폴더 보임)
     - local 모드: backend 자체 tkinter (local_service.pick_file)
+
+    ⚠ **`async def` 가 아니다 — 되돌리지 말 것.** 본문에 ``await`` 이 하나도 없는
+      반면, 하는 일은 이 코드베이스에서 **가장 긴 블로킹 호출**이다:
+        - cloudium: ``resolver.browse_file`` → worker TCP IPC ``timeout=600.0``.
+          worker 가 사용자 데스크톱에 다이얼로그를 띄우므로 사용자가 고르거나
+          취소할 때까지 소켓 ``recv`` 가 반환하지 않는다 — 최대 10분.
+        - local: ``pick_file`` → tkinter 모달, 타임아웃 없음.
+      ``async def`` 였을 때는 그 시간 내내 **이벤트 루프가 점유**돼 백엔드가 다른
+      어떤 요청도 처리하지 못했다(uvicorn 은 ``--workers 1`` 고정 — main.py:8-10).
+      마침 이 버튼이 있는 Settings 화면이 5초마다 cloudium 게이트를 폴링하므로,
+      다이얼로그를 열어둔 채로 두면 화면 전체가 "먹통" 으로 보인다.
+      ``def`` 로 두면 FastAPI 가 스레드풀로 디스패치한다.
     """
     from backend.services.file_resolver import CloudiumFileResolver, get_resolver
     resolver = get_resolver()
@@ -973,10 +985,16 @@ async def browse_file(body: BrowseFileRequest = BrowseFileRequest()):
 
 
 @router.post("/file-mode/check-access")
-async def check_cloudium_access(body: CheckAccessRequest = CheckAccessRequest()):
+def check_cloudium_access(body: CheckAccessRequest = CheckAccessRequest()):
     """경로 접근 가능 여부 확인.
 
     cloudium 모드는 게이트 프로세스(excel_rename_gui_v2.exe) 실행 여부도 함께 검사.
+
+    ⚠ **`async def` 가 아니다 — 되돌리지 말 것.** ``await`` 이 하나도 없는데
+      ``resolver.exists`` 는 worker 로 나가는 **동기 TCP IPC** 이고, 아래 W7 주석이
+      말하듯 프론트가 **5초마다 폴링**한다(모든 사용자가 동시에). ``async def`` 면
+      그 IPC 지연이 그대로 이벤트 루프 점유가 되어, U: 가 느려지는 순간 폴링 자체가
+      백엔드를 마비시킨다. ``def`` 로 두면 FastAPI 가 스레드풀로 보낸다.
     """
     from backend.services.file_resolver import (
         CloudiumFileResolver,
