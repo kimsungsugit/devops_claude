@@ -60,8 +60,15 @@ function QACPanel({ job, analysisResult }) {
     try {
       const data = await api('/api/qac/reports');
       setReports(data?.reports ?? []);
-    } catch (_) {}
-  }, []);
+    } catch (e) {
+      // ⚠ 빈 catch 였다. 조회가 실패하면 reports 가 초기값 [] 로 남고, 렌더 가드가
+      //   `reports.length > 0` 이라 '생성된 산출물' 블록 자체가 안 그려진다 —
+      //   사용자는 실패를 **'산출물 0건'이라는 확정적 부정 답변**으로 읽는다.
+      //   (같은 파일의 VCast 쌍둥이는 이미 console.warn 을 남기고 있었다.)
+      console.warn('QAC reports load failed:', e?.message);
+      toast('error', `산출물 목록 조회 실패: ${e?.message || 'unknown'}`);
+    }
+  }, [toast]);
   const [scanLoading, setScanLoading] = useState(false);
 
   const scanFolderFiles = useCallback(async () => {

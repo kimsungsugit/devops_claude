@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { post } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
@@ -29,17 +29,34 @@ export default function ScmSection({ job, analysisResult }) {
     if (analysisResult?.scmList) setScmList(analysisResult.scmList);
   }, [analysisResult]);
 
+  // 마지막으로 반영한 matchedScm.id — 사용자의 수동 선택(아래 select)을 매 렌더마다
+  // 덮어쓰지 않으면서, Dashboard 의 매칭이 **실제로 바뀐** 경우만 재도출하기 위한 것.
+  const appliedMatchRef = useRef(null);
+
   useEffect(() => {
     // Prefer the registry entry that Dashboard matched to this job; fall back
     // to the first entry only when no match was recorded (multi-registry
     // setups would otherwise silently show data for the wrong project).
-    if (scmList.length > 0 && !selectedId) {
-      const matched = analysisResult?.matchedScm;
-      const preferId = matched?.id && scmList.some(s => s.id === matched.id)
-        ? matched.id
-        : scmList[0].id;
-      setSelectedId(preferId);
-    }
+    //
+    // ⚠ 예전 가드는 `!selectedId` 뿐이라 **한 번 정해지면 다시는 안 바뀌었다.**
+    //   Detail 은 display:none 으로 keep-alive 되고 섹션 key 가 job URL 기반이라
+    //   같은 job 에서 SCM 을 바꿔 재분석해도 ScmSection 이 remount 되지 않는다.
+    //   그러면 헤더·URL·소스 루트·'연결 문서' 표가 전부 **옛 프로젝트 것**으로
+    //   남고, 게다가 impactConflict 가 새 scm_id 와 옛 selectedId 를 비교해
+    //   scm_mismatch 를 띄우며 변경 파일 목록을 통째로 숨긴다 — 원인은 분석이
+    //   아니라 굳어버린 선택인데 배너는 분석을 탓한다.
+    if (scmList.length === 0) return;
+    const matched = analysisResult?.matchedScm;
+    const stillValid = selectedId && scmList.some(s => s.id === selectedId);
+    const matchChanged = !!matched?.id && matched.id !== appliedMatchRef.current;
+    if (stillValid && !matchChanged) return;
+    const preferId = matched?.id && scmList.some(s => s.id === matched.id)
+      ? matched.id
+      : scmList[0].id;
+    appliedMatchRef.current = matched?.id ?? null;
+    setSelectedId(preferId);
+    setScmInfo(null);
+    setSourceRoot(null);
   }, [scmList, analysisResult, selectedId]);
 
   /* --- Load SCM info via POST /api/jenkins/scm-info --- */

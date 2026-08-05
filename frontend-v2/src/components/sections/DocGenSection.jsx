@@ -3,6 +3,7 @@ import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import { isAbortError } from '../../impactPoll.js';
 import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
+import { persistDocPaths, useScmFallback } from '../../docGenHelpers.js';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -184,17 +185,7 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
     }
   }, [job, cfg, cacheRoot, docPaths, toast, analysisResult]);
 
-  const [scm, setScm] = useState(
-    analysisResult?.matchedScm || analysisResult?.scmList?.[0] || null,
-  );
-  useEffect(() => {
-    if (!scm?.source_root) {
-      api('/api/scm/list').then(d => {
-        const items = d?.items || (Array.isArray(d) ? d : []);
-        if (items.length > 0) setScm(items[0]);
-      }).catch(() => {});
-    }
-  }, [scm]);
+  const [scm] = useScmFallback(analysisResult);
   const linkedDocs = scm?.linked_docs || {};
   const [localDocPaths, setLocalDocPaths] = useState(() => {
     try {
@@ -241,9 +232,9 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
       }
       const next = { ...localDocPaths, [key]: picked.path };
       setLocalDocPaths(next);
-      try { localStorage.setItem('devops_v2_doc_paths', JSON.stringify(next)); } catch (_) {}
+      const saved = persistDocPaths(next, toast);
       await ensureCloudiumPrefix(picked.path);
-      toast('success', `${label} 경로: ${picked.path.split(/[\\/]/).pop()}`);
+      if (saved) toast('success', `${label} 경로: ${picked.path.split(/[\\/]/).pop()}`);
     } catch (e) {
       toast('error', `다이얼로그 실패: ${e.message}`);
     }
@@ -254,8 +245,9 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
     const next = { ...localDocPaths };
     delete next[key];
     setLocalDocPaths(next);
-    try { localStorage.setItem('devops_v2_doc_paths', JSON.stringify(next)); } catch (_) {}
-    toast('info', `${label} 임시 경로 초기화 → SCM 등록 경로 사용`);
+    if (persistDocPaths(next, toast)) {
+      toast('info', `${label} 임시 경로 초기화 → SCM 등록 경로 사용`);
+    }
   };
 
   // Merge input docs: SCM linked_docs + localStorage
@@ -475,17 +467,7 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
   const [registering, setRegistering] = useState(null);
   const [packages, setPackages] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [scm, setScm] = useState(
-    analysisResult?.matchedScm || analysisResult?.scmList?.[0] || null,
-  );
-  useEffect(() => {
-    if (!scm?.source_root) {
-      api('/api/scm/list').then(d => {
-        const items = d?.items || (Array.isArray(d) ? d : []);
-        if (items.length > 0) setScm(items[0]);
-      }).catch(() => {});
-    }
-  }, []);
+  const [scm] = useScmFallback(analysisResult);
 
   // 패키지 목록 조회
   const loadPackages = useCallback(async () => {
