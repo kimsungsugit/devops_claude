@@ -40,6 +40,7 @@ vi.mock('../api.js', () => ({
   post: vi.fn(),
   defaultCacheRoot: vi.fn(() => ''),
   getUsername: vi.fn(() => 'testuser'),
+  authHeaders: vi.fn(() => ({ 'X-User': 'testuser' })),
 }));
 
 // fetch mock (VectorCAST 패키지 목록 등 fetch 호출 대비)

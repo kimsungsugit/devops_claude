@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
+import { api, post, defaultCacheRoot, getUsername, authHeaders } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import { isAbortError } from '../../impactPoll.js';
 import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
@@ -103,7 +103,8 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
         fetchBody = formData;
         fetchHeaders = {};
       }
-      if (user) fetchHeaders['X-User'] = user;
+      // auth 는 authHeaders()(Bearer + X-User) — X-User 만이면 1b6bb99(2026-08-04) 이후 401.
+      Object.assign(fetchHeaders, authHeaders());
       const res = await fetch(`${apiPrefix}/${docType}/generate-async`, {
         method: 'POST',
         body: fetchBody,
@@ -499,9 +500,8 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
         const items = listData?.items || [];
         if (items.length > 0) formData.append('filename', items[0].filename || items[0].name || '');
       } catch (_) {}
-      const user = getUsername();
       const endpoint = docType === 'sits' ? '/api/local/sits/export-vectorcast' : `/api/jenkins/${docType}/export-vectorcast`;
-      const res = await fetch(endpoint, { method: 'POST', body: formData, headers: user ? { 'X-User': user } : {} });
+      const res = await fetch(endpoint, { method: 'POST', body: formData, headers: authHeaders() });
       if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
       const data = await res.json();
       const summary = data?.manifest?.summary || {};

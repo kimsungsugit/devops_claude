@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
+import { api, post, defaultCacheRoot, authHeaders } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { loadSharedInputs } from '../../sharedInputs.js';
@@ -106,18 +106,16 @@ function QACPanel({ job, analysisResult }) {
       const isAbsPath = artifactPath.includes(':') || artifactPath.startsWith('/') || artifactPath.startsWith('\\');
       let res;
       if (isAbsPath) {
-        const user = getUsername();
         res = await fetch('/api/qac/generate-excel-from-path', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({ path: artifactPath }),
         });
       } else {
         const qs = `job_url=${encodeURIComponent(job?.url ?? '')}&cache_root=${encodeURIComponent(cacheRoot)}&rel_path=${encodeURIComponent(artifactPath)}`;
-        // X-User 명시 추가 (UserContextMiddleware 401 silent failure 차단).
-        const user2 = getUsername();
+        // authHeaders()(Bearer + X-User) 명시 (UserContextMiddleware 401 silent failure 차단).
         res = await fetch(`/api/qac/jenkins-excel?${qs}`, {
-          headers: user2 ? { 'X-User': user2 } : {},
+          headers: authHeaders(),
         });
       }
       if (!res.ok) {
@@ -151,11 +149,10 @@ function QACPanel({ job, analysisResult }) {
     try {
       const formData = new FormData();
       formData.append('file', uploadFile);
-      const user = getUsername();
       const res = await fetch(`/api/qac/generate-excel?old_version=${uploadOldVer}`, {
         method: 'POST',
         body: formData,
-        headers: user ? { 'X-User': user } : {},
+        headers: authHeaders(),
       });
       if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
       const blob = await res.blob();
@@ -451,11 +448,10 @@ function VCastPanel({ job, analysisResult }) {
     try {
       const formData = new FormData();
       formData.append('file', uploadFile);
-      const user = getUsername();
       // Step 1: Parse
       const parseRes = await fetch(`/api/vcast/parse?report_type=${uploadType}&version=${version}`, {
         method: 'POST', body: formData,
-        headers: user ? { 'X-User': user } : {},
+        headers: authHeaders(),
       });
       if (!parseRes.ok) throw new Error(await parseRes.text() || `HTTP ${parseRes.status}`);
       const parsed = await parseRes.json();
@@ -465,7 +461,7 @@ function VCastPanel({ job, analysisResult }) {
       const mode = uploadType === 'Metrics' ? 'Metrics' : 'TestReport';
       const excelRes = await fetch('/api/vcast/generate-excel', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           parsed_data: parsed?.data ?? parsed,
           mode,
@@ -792,11 +788,10 @@ function ExcelComparePanel() {
       const formData = new FormData();
       formData.append('source', sourceFile);
       formData.append('target', targetFile);
-      const user = getUsername();
       const res = await fetch('/api/excel/compare-upload', {
         method: 'POST',
         body: formData,
-        headers: user ? { 'X-User': user } : {},
+        headers: authHeaders(),
       });
       if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
       const data = await res.json();

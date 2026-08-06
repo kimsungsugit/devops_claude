@@ -12,7 +12,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../api.js', () => ({
   getUsername: () => 'tester',
-  getAccessToken: () => '',  // 45차 C1: AdminContext가 JWT 없이도 X-User fallback 동작
+  // 45차 C1 은 getAccessToken 을 직접 읽었으나, 2026-08-06 부터 auth 헤더는
+  // `authHeaders()` 단일 출처다(raw fetch 12곳이 Bearer 를 빠뜨려 401 이 났던 결함).
+  authHeaders: () => ({ 'X-User': 'tester' }),
 }));
 
 const { AdminProvider, useAdminMode } = await import('../contexts/AdminContext.jsx');

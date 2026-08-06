@@ -8,7 +8,7 @@
  * C3 fix (same-tab 미반영): storage event + 동일 탭 custom event 둘 다 listen.
  */
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { getAccessToken, getUsername } from '../api.js';
+import { authHeaders, getUsername } from '../api.js';
 
 // 42차 W5: refresh debounce — 같은 탭에서 visibility/storage event 빠르게 연쇄 시 fetch 1회만
 const REFRESH_DEBOUNCE_MS = 5000;
@@ -54,14 +54,13 @@ export function AdminProvider({ children }) {
 
     const user = getUsername();
     // 45차 C1: JWT Authorization 우선 부착, X-User는 backward-compat (DEV 모드 backend).
-    const access = getAccessToken();
-    const headers = {};
-    if (access) headers.Authorization = `Bearer ${access}`;
-    if (user) headers['X-User'] = user;
+    // ⚠ 헤더를 손으로 조립하지 말 것 — authHeaders() 단일 출처를 쓴다. 조립본이 흩어져
+    //   있었던 탓에 raw fetch 12곳이 Bearer 를 빠뜨린 채 남았고, 커밋 1b6bb99(2026-08-04)
+    //   이후 전부 401 이 됐다(요구사항 커버리지 매트릭스 미생성, 2026-08-06 사용자 보고).
     try {
       const res = await fetch(buildUrl('/api/auth/me'), {
         cache: 'no-store',
-        headers,
+        headers: authHeaders(),
       });
       // 43차 W20: fetch 동안 unmount 시 무시
       if (!isMountedRef.current) return;

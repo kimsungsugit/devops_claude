@@ -246,10 +246,15 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // 백엔드가 알려준 "이 요구문서를 왜 못 읽었는가" — 아래 0건 분기에서 사유로 쓴다.
       let reqDocErrors = [];
       try {
-        const user = getUsername();
+        // ⚠ multipart 라 api()/post() 헬퍼(JSON 전용)를 못 쓴다. 그래도 auth 헤더는 반드시
+        //   authHeaders()(Bearer + X-User) 로 붙일 것 — X-User 만 보내면 커밋 1b6bb99
+        //   (2026-08-04, X-User 한 줄 신원 위조 차단) 이후 미들웨어가 **401** 로 막는다.
+        //   그러면 reqItems=0 이 되고, 아래 "요구사항 0건" 분기가 Step 4(traceability-matrix)를
+        //   통째로 건너뛴다 = 매트릭스가 아예 생성되지 않는다(사용자 보고 2026-08-06).
+        //   Content-Type 은 설정하지 말 것 — 브라우저가 multipart boundary 를 붙여야 한다.
         const previewRes = await fetch('/api/jenkins/uds/requirements-preview', {
           method: 'POST', body: form,
-          headers: user ? { 'X-User': user } : {},
+          headers: authHeaders(),
         });
         if (previewRes.ok) {
           const previewData = await previewRes.json();
@@ -1433,16 +1438,15 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
   }, [linkTable]);
 
   // xlsx 내보내기(hiMA TrMatrixReport 대응) — 전체 매트릭스를 서버에서 xlsx로 렌더.
-  // 바이너리 응답이라 api() 헬퍼 대신 raw fetch지만 X-User 헤더 + res.ok 검사 명시(X9).
+  // 바이너리 응답이라 api() 헬퍼 대신 raw fetch지만 authHeaders(Bearer+X-User) + res.ok 검사 명시(X9).
   const [xlsxBusy, setXlsxBusy] = useState(false);
   const exportXlsx = useCallback(async () => {
     setXlsxBusy(true);
     try {
-      const user = getUsername();
       const payload = { matrix: fullMatrix || { rows, link_table: linkTable }, meta: exportMeta || {} };
       const res = await fetch(buildUrl('/api/jenkins/uds/traceability-matrix/export-xlsx'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(payload),
       });
       if (!res.ok) {

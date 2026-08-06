@@ -29,7 +29,8 @@ vi.mock('../api.js', () => ({
   saveServerJenkinsConfig: vi.fn(() => Promise.resolve({ ok: true })),
   // ⚠ `AdminContext.jsx:11` 이 이걸 import 한다. 빠뜨리면 provider 가 죽어
   //    "비관리자" 기대가 **엉뚱한 이유로** 통과한다(공허 통과).
-  getAccessToken: () => '',
+  //    (2026-08-06: getAccessToken 직접 조립 → authHeaders() 단일 출처로 이관)
+  authHeaders: () => ({ 'X-User': 'testuser' }),
 }));
 
 vi.mock('../views/Dashboard.jsx', () => ({

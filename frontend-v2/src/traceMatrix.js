@@ -10,7 +10,7 @@
  * traceability-matrix 호출은 서버에서 trace_matrix_summary.json을 부작용으로 캐시하므로,
  * 요약 탭은 이 함수 호출 후 trace-summary를 재조회하면 된다(영속 → 재방문 시 재생성 없음).
  */
-import { post, getUsername, buildUrl } from './api.js';
+import { post, authHeaders, buildUrl } from './api.js';
 
 const FAIL_R = new Set(['fail', 'failed', 'false', '0', 'ng']);
 
@@ -34,7 +34,8 @@ export async function buildTraceMatrix({ linkedDocs, sourceRoot = '', jobUrl = '
   const dataSources = [];
   const progress = (m) => { try { onProgress?.(m); } catch { /* ignore */ } };
 
-  // Step 1: SRS 요구사항(멀티파트 — FormData/raw fetch, JSON post 헬퍼로 못 보냄. X-User + res.ok 명시).
+  // Step 1: SRS 요구사항(멀티파트 — FormData/raw fetch, JSON post 헬퍼로 못 보냄.
+  //          auth 는 authHeaders()(Bearer + X-User), res.ok 검사 명시).
   progress('요구사항 추출 중...');
   let reqItems = [];
   let mappingPairs = [];
@@ -46,9 +47,12 @@ export async function buildTraceMatrix({ linkedDocs, sourceRoot = '', jobUrl = '
     const form = new FormData();
     if (docs.srs) form.append('req_paths', docs.srs);
     if (sourceRoot) form.append('source_root', sourceRoot);
-    const user = getUsername();
+    // ⚠ SrsSdsSection.jsx 의 동일 호출과 **한 세트**다 — 한쪽만 고치면 이 저장소 단골인
+    //   "판정 복제 → 한쪽만 수정" 이 재발한다. multipart 라 헬퍼를 못 쓰지만 auth 는
+    //   authHeaders()(Bearer + X-User) 필수. X-User 만이면 1b6bb99 이후 401 → reqItems=0
+    //   → 매트릭스 미생성. Content-Type 은 브라우저가 붙이도록 비워 둔다.
     const res = await fetch(buildUrl('/api/jenkins/uds/requirements-preview'), {
-      method: 'POST', body: form, headers: user ? { 'X-User': user } : {},
+      method: 'POST', body: form, headers: authHeaders(),
     });
     if (res.ok) {
       const data = await res.json();

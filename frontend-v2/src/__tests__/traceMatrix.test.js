@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 let mockPost;
 vi.mock('../api.js', () => ({
   post: (...a) => mockPost(...a),
-  getUsername: () => 'u',
+  authHeaders: () => ({ Authorization: 'Bearer T', 'X-User': 'u' }),
   buildUrl: (p) => p,
 }));
 
