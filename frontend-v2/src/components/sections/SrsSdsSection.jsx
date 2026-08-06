@@ -376,7 +376,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
             }
             dataSources.push(`STS: ${stsData.vcast_rows.length}건`);
           } else if (Array.isArray(stsData?.available_sheets)) {
-            stepWarnings.push(`STS: ${stsData.error || '시트 미인식'}. 사용 가능한 시트: ${stsData.available_sheets.join(', ')}`);
+            // ⚠ warning 우선 — SITS 분기(:412)와 같은 순서다. warning 을 안 보면 '시트는
+            //   찾았는데 0행'인 응답에도 "시트 미인식"이라고 **거짓 사유**를 붙인다.
+            stepWarnings.push(`STS: ${stsData.warning || stsData.error || '시트 미인식'}. 사용 가능한 시트: ${stsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`STS 추출 실패: ${e.message}`);
@@ -395,7 +397,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
             }
             dataSources.push(`SUTS: ${sutsData.vcast_rows.length}건`);
           } else if (Array.isArray(sutsData?.available_sheets)) {
-            stepWarnings.push(`SUTS: ${sutsData.error || '시트 미인식'}. 사용 가능한 시트: ${sutsData.available_sheets.join(', ')}`);
+            // warning 우선 — 위 STS 와 동일 이유(거짓 '시트 미인식' 방지).
+            stepWarnings.push(`SUTS: ${sutsData.warning || sutsData.error || '시트 미인식'}. 사용 가능한 시트: ${sutsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`SUTS 추출 실패: ${e.message}`);

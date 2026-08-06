@@ -4527,8 +4527,10 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
     """
     trace_ws = None
     trace_type = None
+    sheet_name = ""
     if sheet_name_arg and sheet_name_arg in wb.sheetnames:
         trace_ws = wb[sheet_name_arg]
+        sheet_name = sheet_name_arg
         trace_type = "matrix" if "swrs" in sheet_name_arg.lower() else "list"
     else:
         # N23: keyword 좁힘 — "사양" 단독은 "기능 사양" 등 false positive 위험.
@@ -4538,11 +4540,19 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
             nl = name.lower()
             if any(kw in nl for kw in _trace_keywords) or nl.strip() == "tc":
                 trace_ws = wb[name]
+                sheet_name = name
                 trace_type = "matrix" if "swrs" in nl else "list"
                 break
 
+    # 0행일 때 **왜 0행인지**를 말하기 위한 진단. 추출 로직·행 수는 불변이고 카운터만 는다.
+    # (과거엔 시트를 찾고도 0행이면 ok:true 로 조용히 끝나 밴드가 이유 없이 비었다.)
+    diag: Dict[str, Any] = {
+        "sheet": sheet_name, "sheets": list(wb.sheetnames), "layout": trace_type,
+        "req_cols": 0, "tc_seen": 0, "req_cells_seen": 0, "id_hits": 0,
+        "header_row": None, "truncated_at": None,
+    }
     if not trace_ws:
-        return [], list(wb.sheetnames)
+        return [], list(wb.sheetnames), diag
 
     # 아래 로직은 `ws.cell(r, c)` 랜덤 접근이 13곳이다. 워크북이 read_only 로 열리므로
     # (성능 — `_load_trace_workbook` 주석 참조) 여기서 **한 번만** 순회해 값 격자로 바꾼다.
@@ -4557,10 +4567,12 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
             v = trace_ws.cell(4, c).value
             if v and ("Sw" in str(v) or "SW" in str(v).upper() or "Sy" in str(v)):
                 req_cols.append((c, _normalize_req_id(str(v).strip())))
+        diag["req_cols"] = len(req_cols)
         for r in range(5, (trace_ws.max_row or 0) + 1):
             tc_id = str(trace_ws.cell(r, 3).value or "").strip()
             if not tc_id:
                 continue
+            diag["tc_seen"] += 1
             for col, rid in req_cols:
                 val = trace_ws.cell(r, col).value
                 if val is not None and str(val).strip():
@@ -4574,12 +4586,16 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
             # 헤더 기반: TC ID ↔ 요구 컬럼. 병합셀/연속행은 직전 TC carry-forward,
             # 빈 행 50연속 시 조기 종료. 요구는 req 컬럼에서만 regex 추출.
             header_row, tc_col, req_id_cols, unit_col = detected
+            diag["layout"] = "header"
+            diag["header_row"] = header_row
+            diag["req_cols"] = len(req_id_cols)
             empty_streak = 0
             current_tc = ""
             current_unit = ""
             for r in range(header_row + 1, (trace_ws.max_row or header_row) + 1):
                 tc_v = str(trace_ws.cell(r, tc_col).value or "").strip()
                 if tc_v:
+                    diag["tc_seen"] += 1
                     current_tc = tc_v
                     current_unit = ""  # 새 TC 블록 시작 → unit 초기화
                 if unit_col:
@@ -4590,10 +4606,13 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
                 for rc in req_id_cols:
                     cv = str(trace_ws.cell(r, rc).value or "").strip()
                     if cv:
+                        diag["req_cells_seen"] += 1
                         found += _TRACE_ID_RE.findall(cv)
+                diag["id_hits"] += len(found)
                 if not tc_v and not found:
                     empty_streak += 1
                     if empty_streak >= 50:
+                        diag["truncated_at"] = r
                         break
                     continue
                 empty_streak = 0
@@ -4606,26 +4625,89 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
                         })
         else:
             # Fallback: 기존 고정 컬럼 (TC=5, SRS req=6, func=4)
+            diag["layout"] = "fixed_fallback"
             for r in range(4, trace_ws.max_row + 1):
                 tc_id = str(trace_ws.cell(r, 5).value or "").strip()
                 req_raw = str(trace_ws.cell(r, 6).value or "").strip()
                 func_name = str(trace_ws.cell(r, 4).value or "").strip()
+                if req_raw:
+                    diag["req_cells_seen"] += 1
                 if not tc_id:
                     continue
+                diag["tc_seen"] += 1
                 for rid in _TRACE_ID_RE.findall(req_raw):
+                    diag["id_hits"] += 1
                     vcast_rows.append({
                         "requirement_id": _normalize_req_id(rid),
                         "testcase": tc_id, "unit": func_name,
                         "source": source_label, "result": "mapped",
                     })
-    return vcast_rows, None
+    return vcast_rows, None, diag
 
 
-def _finalize_trace_result(vcast_rows, avail, *, expected: str, other: str) -> Dict[str, Any]:
+def _trace_empty_reason(diag: Dict[str, Any], label: str) -> str:
+    """'시트는 찾았는데 0행' 의 **사유**를 갈래별로 만든다.
+
+    커밋 b2d2968("SRS 경로를 확인하세요가 실은 다섯 갈래였다")와 같은 교정이다 — 판정은
+    맞는데 **왜인지를 말하지 않는 것**이 결함이다. 0행이 되는 경로는 아래처럼 서로 다르고,
+    각각 사용자가 취할 조치가 다르다. 뭉뚱그리면 엉뚱한 곳(문서 경로 등)을 의심하게 된다.
+    """
+    sheet = diag.get("sheet") or "?"
+    layout = diag.get("layout")
+    req_cols = int(diag.get("req_cols") or 0)
+    tc_seen = int(diag.get("tc_seen") or 0)
+    cells = int(diag.get("req_cells_seen") or 0)
+    hits = int(diag.get("id_hits") or 0)
+    head = f"{label} 시트('{sheet}')를 인식했으나 TC↔요구 매핑을 0건 추출했습니다"
+
+    if layout == "matrix":
+        if req_cols == 0:
+            why = "matrix 레이아웃으로 판정했으나 4행에서 요구 ID 헤더(Sw*/Sy*)를 찾지 못했습니다"
+        elif tc_seen == 0:
+            why = f"요구 헤더 {req_cols}개는 인식했으나 3열에 TC ID가 없습니다"
+        else:
+            why = f"TC {tc_seen}개 × 요구 {req_cols}열을 인식했으나 교차 표시가 한 칸도 없습니다"
+    elif layout == "fixed_fallback":
+        # 가장 흔한 실사용 원인 — 템플릿이 둘 이상인데 컬럼을 고정으로 가정한 경우.
+        # (SUTS 2템플릿 사건: 컬럼 하드코딩으로 704/1013행이 침묵 드롭됐다.)
+        why = ("헤더를 인식하지 못해 고정 컬럼(TC=5열·요구=6열)으로 폴백했고 그 위치에 값이 "
+               f"없습니다(TC {tc_seen}개·요구셀 {cells}개). 문서 템플릿이 다를 수 있으니 "
+               "sheet_name 을 지정하거나 헤더 표기('Test Case ID'/'Related ID')를 확인하세요")
+    elif layout == "header":
+        hr = diag.get("header_row")
+        if tc_seen == 0:
+            why = f"헤더(행 {hr})는 인식했으나 TC 열에 값이 없습니다"
+        elif cells == 0:
+            why = f"TC {tc_seen}개는 읽었으나 요구 열({req_cols}개)이 전부 비어 있습니다"
+        else:
+            why = (f"요구 열에 값 {cells}개가 있으나 ID 패턴에 맞는 것이 {hits}개입니다 — "
+                   "요구 ID 표기 규약(SwTR_/SwUFn_ 등)을 확인하세요")
+    else:
+        why = "레이아웃을 판정하지 못했습니다"
+
+    tail = ""
+    if diag.get("truncated_at"):
+        # 절단을 침묵시키지 않는다 — 아래쪽에 데이터가 더 있었을 수 있다.
+        tail += f" ⚠ 빈 행 50연속으로 {diag['truncated_at']}행에서 조기 종료했습니다."
+    sheets = diag.get("sheets") or []
+    if sheets:
+        tail += f" 사용 가능한 시트: {', '.join(str(s) for s in sheets)}"
+    return f"{head} — {why}.{tail}"
+
+
+def _finalize_trace_result(vcast_rows, avail, *, expected: str, other: str,
+                           diag: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """공유: 추출 결과를 응답 dict으로 마감 + 내용검증 경고(H3) 부착.
 
     expected/other는 'sts'|'suts' — 실제 구조가 other로 감지되면 오태깅 경고를 실어
     조용한 밴드 오태깅(fail-open)을 fail-loud로 전환한다(추출 로직·행은 불변).
+
+    ⚠ **'시트는 찾았는데 0행'이 여기서 `ok:true` + 무사유로 나갔다.** 프론트는
+    `warning` 도 `available_sheets` 도 없어 두 분기가 **모두 미발화** → 밴드가 이유 없이
+    빈다(완전 침묵). SITS 는 같은 결함을 이미 고쳐 두고 주석에 "비대칭 해소"라고 적어
+    놨는데(:5157) STS/SUTS 만 남아 있었다 — 이 저장소 단골인 "복제 → 한쪽만 수정".
+    이제 `diag` 로 갈래별 사유를 만들어 `warning` 에 싣는다(프론트는 이미 warning 을
+    무조건 표시하므로 배선 변경 불필요).
     """
     if avail is not None:
         return {
@@ -4641,6 +4723,17 @@ def _finalize_trace_result(vcast_rows, avail, *, expected: str, other: str) -> D
         "total_mappings": len(vcast_rows),
         "requirements_covered": len(req_set),
     }
+    if not vcast_rows:
+        _lbl_up = expected.upper()
+        result["warning"] = (
+            _trace_empty_reason(diag, _lbl_up) if diag
+            # diag 없이 불린 경우(구 호출자)도 침묵시키지 않는다 — 사유는 덜 구체적이어도 남긴다.
+            else f"{_lbl_up} 시트를 인식했으나 TC↔요구 매핑을 0건 추출했습니다(레이아웃 확인 필요)."
+        )
+        # 진단 원자료도 함께 — 프론트는 안 쓰지만 운영/재현에 필요하다.
+        if diag:
+            result["empty_diagnostics"] = diag
+        return result
     if _detect_trace_doc_type(vcast_rows) == other:
         _lbl = {"sts": "SW 요구/통합시험(STS)", "suts": "SW 단위시험(SUTS)"}
         result["warning"] = (
@@ -4663,12 +4756,12 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         return jenkins_suts_extract_traceability(body)
     wb, _fp = _load_trace_workbook(body)
     try:
-        vcast_rows, avail = _extract_test_spec_traceability(
+        vcast_rows, avail, diag = _extract_test_spec_traceability(
             wb, source_label="STS",
             sheet_name_arg=str(body.get("sheet_name", "")).strip())
     finally:
         wb.close()
-    return _finalize_trace_result(vcast_rows, avail, expected="sts", other="suts")
+    return _finalize_trace_result(vcast_rows, avail, expected="sts", other="suts", diag=diag)
 
 
 @router.post("/api/jenkins/suts/extract-traceability")
@@ -4682,13 +4775,13 @@ def jenkins_suts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """
     wb, _fp = _load_trace_workbook(body)
     try:
-        vcast_rows, avail = _extract_test_spec_traceability(
+        vcast_rows, avail, diag = _extract_test_spec_traceability(
             wb, source_label="SUTS",
             sheet_name_arg=str(body.get("sheet_name", "")).strip(),
             unit_header_extra=("name",))
     finally:
         wb.close()
-    return _finalize_trace_result(vcast_rows, avail, expected="suts", other="sts")
+    return _finalize_trace_result(vcast_rows, avail, expected="suts", other="sts", diag=diag)
 
 
 @router.post("/api/jenkins/sds/extract-mapping")
