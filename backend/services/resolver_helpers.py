@@ -89,6 +89,120 @@ def read_requirement_doc(
     return p, text.strip(), ""
 
 
+def read_uploaded_requirement_doc(filename: str, data: bytes) -> tuple[str, str]:
+    """업로드된 요구문서 바이트를 파싱하고 **사유를 돌려준다**. 반환 ``(본문, 사유)``.
+
+    임시 파일 write → 파서 → **unlink** 까지 한 덩어리로 묶는다. 호출부(async 핸들러)는
+    이걸 워커 스레드로 보내므로 docx 파싱이 이벤트 루프를 잡지 않는다.
+
+    ⚠ 예전 인라인 판은 두 가지가 틀려 있었다: 파싱 실패를 ``text = ""`` 로 삼켜
+    "요구 0건"으로만 보였고, ``delete=False`` 로 만든 임시 파일을 **지우지 않아**
+    업로드마다 temp 가 쌓였다.
+    """
+    import tempfile
+
+    from workflow.rag.chunker import _read_text_from_file
+
+    name = Path(filename or "").name or "업로드 파일"
+    suffix = Path(name).suffix.lower() or ".txt"
+    tmp_p: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(data)
+            tmp_p = Path(tmp.name)
+        text = _read_text_from_file(tmp_p)
+    except Exception as exc:  # noqa: BLE001 — 파서 계열이 광범위. 사유는 보존한다
+        return "", f"{name}: 본문 추출 실패 ({type(exc).__name__}: {str(exc)[:100]})"
+    finally:
+        if tmp_p is not None:
+            try:
+                tmp_p.unlink()
+            except OSError:
+                pass
+
+    if not text or not text.strip():
+        return "", f"{name}: 본문 0자 — 양식/권한 확인 필요"
+    return text.strip(), ""
+
+
+def read_requirement_doc_via_resolver(
+    path_str: str, *, allow: Callable[[Path], bool] | None = None,
+) -> tuple[str, str]:
+    """resolver(cloudium 이면 **worker IPC**) 경유로 요구문서 1건을 읽고 사유를 돌려준다.
+
+    반환: ``(본문, 사유)``. 성공하면 사유는 ``""``.
+
+    ## 위 :func:`read_requirement_doc` 과 무엇이 다른가
+
+    저쪽은 ``Path`` 직독이라 cloudium 모드에서 ``U:/…`` 를 **못 읽는다**(사유만 정확히
+    알려준다). 이쪽은 resolver 를 타므로 실제로 읽힌다. 즉 둘은 대체재가 아니라
+    각각 다른 호출부의 정답이고, **사유 문구만 공유**해야 화면에서 같은 말로 보인다.
+
+    ## 왜 신설했나
+
+    ``/api/jenkins/uds/requirements-preview`` 의 읽기 루프가 다섯 갈래 실패를 전부
+    ``text = ""`` 로 삼키고 있었다 — ①접근 거부 ②파일 없음 ③형식 불허 ④read 실패
+    ⑤본문 추출 실패. 응답은 언제나 ``ok: True`` 라 호출자는 구분할 수 없고, 프론트는
+    끝에서 **"SRS 경로를 확인하세요"** 라는 한 문장으로 뭉갠다. 사용자에겐
+    *"문서는 있는데 없다고 나온다"* 로 보인다(실제 보고).
+
+    바로 아래 두 블록(``compare``/``function_mapping``)은 같은 결함을 이미 고쳐
+    ``errors`` 에 사유를 싣는데(그 주석이 "네 상태가 전부 같은 null 이 돼 4개월간
+    묻혔다"고 적고 있다), **정작 그 위 루프는 안 고쳐졌다** — 늘 나오는 한쪽만 고침.
+    """
+    from workflow.rag.chunker import _read_text_from_file
+
+    raw = (path_str or "").strip()
+    if not raw:
+        return "", ""
+    name = Path(raw).name or raw
+
+    try:
+        enforce_resolver_access(raw)
+    except HTTPException as exc:
+        return "", f"{name}: 접근 거부 — {str(exc.detail)[:160]}"
+    except Exception as exc:  # noqa: BLE001 — resolver 계열 예외가 광범위. 사유는 보존한다
+        return "", f"{name}: 접근 검사 실패 ({type(exc).__name__}: {str(exc)[:120]})"
+
+    from backend.services.file_resolver import get_resolver
+    resolver = get_resolver()
+
+    try:
+        if not resolver.exists(raw):
+            return "", f"{name}: 파일 없음 — 경로가 바뀌었거나 문서가 이동/개정됐을 수 있다"
+    except Exception as exc:  # noqa: BLE001
+        return "", f"{name}: 존재 확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"
+
+    if allow is not None and not allow(Path(raw)):
+        return "", f"{name}: 허용된 요구사항 문서 형식이 아님"
+
+    try:
+        data = resolver.read_bytes(raw)
+    except Exception as exc:  # noqa: BLE001
+        return "", f"{name}: 읽기 실패 ({type(exc).__name__}: {str(exc)[:120]})"
+
+    import tempfile
+    suffix = Path(raw).suffix or ".txt"
+    tmp_p: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(data)
+            tmp_p = Path(tmp.name)
+        text = _read_text_from_file(tmp_p)
+    except Exception as exc:  # noqa: BLE001 — 파서 계열 예외가 광범위
+        return "", f"{name}: 본문 추출 실패 ({type(exc).__name__}: {str(exc)[:100]})"
+    finally:
+        if tmp_p is not None:
+            try:
+                tmp_p.unlink()
+            except OSError:
+                pass
+
+    if not text or not text.strip():
+        return "", f"{name}: 본문 0자 — 양식/권한 확인 필요"
+    return text.strip(), ""
+
+
 def enforce_resolver_access(path: str) -> None:
     """Cloudium 모드에서 게이트 + 화이트리스트 검사 — 실패 시 403.
 

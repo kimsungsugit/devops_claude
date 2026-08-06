@@ -40,6 +40,8 @@ export async function buildTraceMatrix({ linkedDocs, sourceRoot = '', jobUrl = '
   let mappingPairs = [];
   let udsFunctionIds = [];
   let udsFunctionAsil = {};
+  // 백엔드가 알려준 "이 요구문서를 왜 못 읽었는가" — 아래 0건 분기에서 사유로 쓴다.
+  let reqDocErrors = [];
   try {
     const form = new FormData();
     if (docs.srs) form.append('req_paths', docs.srs);
@@ -52,6 +54,7 @@ export async function buildTraceMatrix({ linkedDocs, sourceRoot = '', jobUrl = '
       const data = await res.json();
       reqItems = data?.preview?.items || [];
       mappingPairs = data?.traceability?.mapping_pairs || data?.mapping || [];
+      reqDocErrors = data?.req_doc_errors || [];
     } else {
       warnings.push(`요구사항 미리보기 실패: HTTP ${res.status}`);
     }
@@ -180,7 +183,19 @@ export async function buildTraceMatrix({ linkedDocs, sourceRoot = '', jobUrl = '
   } catch (e) { warnings.push(`VectorCAST 수집 실패: ${e.message}`); }
 
   if (reqItems.length === 0) {
-    return { ok: false, warnings: [...warnings, 'SRS에서 요구사항을 추출하지 못했습니다. SRS 경로를 확인하세요.'], dataSources, reason: 'no_requirements' };
+    // ⚠ 세 상태를 한 문장으로 뭉개지 않는다 — ①경로 미지정 ②문서를 못 읽음(사유 있음)
+    //   ③읽었으나 요구 ID 0건. ②·③에서 "경로를 확인하세요"라고 하면 문서가 멀쩡히
+    //   등록된 사용자에게 "있는데 없다고 나온다"로 보인다(실제 보고).
+    //   SrsSdsSection 의 같은 분기와 문구를 맞춘다(복제 중 한쪽만 고쳐지지 않도록).
+    let why;
+    if (!docs.srs) {
+      why = 'SRS 경로가 지정되지 않았습니다 — 설정 탭 또는 SCM 연결 문서에서 등록하세요.';
+    } else if (reqDocErrors.length > 0) {
+      why = `SRS 문서를 읽지 못했습니다 — ${reqDocErrors.join(' / ')}`;
+    } else {
+      why = `SRS 문서는 읽었으나 요구사항 ID를 0건 인식했습니다(양식 확인 필요) — ${docs.srs}`;
+    }
+    return { ok: false, warnings: [...warnings, why], dataSources, reason: 'no_requirements' };
   }
 
   // Step 4: 서버 매트릭스 생성(계산은 서버측 — 캐시 trace_matrix_summary.json 부작용).

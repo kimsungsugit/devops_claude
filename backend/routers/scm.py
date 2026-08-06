@@ -261,6 +261,60 @@ def scm_delete(entry_id: str) -> Dict[str, Any]:
     return {"ok": True, "deleted": entry_id}
 
 
+@router.get("/api/scm/linked-docs-status/{entry_id}")
+def scm_linked_docs_status(entry_id: str) -> Dict[str, Any]:
+    """등록된 연결 문서가 **실제로 존재하는지** 확인한다(레지스트리 경로 전용).
+
+    ## 왜 필요한가
+
+    화면의 '입력 문서 현황'은 경로 **문자열이 비어 있지 않다**는 것만 보고 `등록됨`
+    배지를 달았다 — 파일 존재를 확인한 적이 없다. 그래서 문서가 개정되며 파일명이
+    바뀌면 배지는 `등록됨` 인데 매트릭스는 "SRS 없음"으로 실패하고, 사용자에게는
+    *"문서가 있는데 없다고 나온다"* 로 보인다(실제 보고).
+
+    실측(2026-08-06): `kjpds02` 항목은 등록된 11개 중 **8개가 실물 없음**이었고,
+    SRS 는 `_v2.03_…docx` 로 등록돼 있는데 폴더엔 `_v3.01_…_R.docx` 하나뿐이었다.
+
+    ## 입력 표면
+
+    경로는 **레지스트리에서만** 온다 — 사용자 제출 경로를 받지 않으므로 새 입력
+    표면이 없다(임의 경로 존재 여부 probe 방지). cloudium 모드에서는 resolver 가
+    allowed_prefixes 를 검사한 뒤 worker IPC 로 확인한다.
+
+    실측 비용: 16경로 약 200ms(평균 13ms). ``def`` 라 FastAPI 가 워커 스레드로
+    보내므로 이벤트 루프를 막지 않는다.
+    """
+    entry = get_registry_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="registry entry not found")
+
+    from backend.services.file_resolver import get_resolver
+    resolver = get_resolver()
+
+    def _probe(path: str) -> Dict[str, Any]:
+        try:
+            return {"exists": bool(resolver.exists(path)), "reason": ""}
+        except PermissionError as exc:
+            return {"exists": None, "reason": f"접근 거부 — {str(exc)[:160]}"}
+        except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위
+            # ⚠ 확인 실패를 `exists: false` 로 접지 않는다. "없다"와 "못 봤다"는
+            #   다른 말이고, 접으면 멀쩡한 문서를 없다고 보고하게 된다.
+            return {"exists": None, "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+
+    items: Dict[str, Any] = {}
+    for key, value in entry.linked_docs.model_dump(mode="json").items():
+        if isinstance(value, list):
+            probed = [_probe(p) for p in value if str(p or "").strip()]
+            items[key] = {
+                "total": len(probed),
+                "missing": sum(1 for r in probed if r["exists"] is False),
+                "unknown": sum(1 for r in probed if r["exists"] is None),
+            }
+        elif str(value or "").strip():
+            items[key] = _probe(str(value))
+    return {"ok": True, "entry_id": entry_id, "items": items}
+
+
 @router.get("/api/scm/status/{entry_id}")
 def scm_status(entry_id: str) -> Dict[str, Any]:
     entry = get_registry_entry(entry_id)

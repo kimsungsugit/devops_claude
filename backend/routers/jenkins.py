@@ -3542,54 +3542,42 @@ async def jenkins_uds_requirements_preview(
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []))
     req_texts: List[str] = []
+    req_doc_errors: List[str] = []
+    # ⚠ 업로드 분기도 파싱 실패를 조용히 삼켜 "요구 0건"으로만 보였다(경로 분기와 같은
+    #   결함). 사유를 남긴다. 임시 파일 write/파싱/unlink 는 헬퍼 한 덩어리로 묶어
+    #   워커 스레드로 보낸다 — docx 파싱이 이벤트 루프를 잡지 않도록.
+    from backend.services.resolver_helpers import read_uploaded_requirement_doc
     for f in req_files:
         if not f or not f.filename:
             continue
-        suffix = Path(f.filename).suffix.lower() or ".txt"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await f.read())
-            tmp_path = Path(tmp.name)
-        try:
-            text = _read_text_from_file(tmp_path)
-        except Exception:
-            text = ""
+        text, reason = await _run_blocking(
+            read_uploaded_requirement_doc, f.filename, await f.read(),
+        )
+        if reason:
+            req_doc_errors.append(reason)
         if text:
-            req_texts.append(text.strip())
+            req_texts.append(text)
     # N20 fix: cloudium 모드에서 backend python.exe는 클라우디움 폴더 권한 없음
     # → Path.exists() / _read_text_from_file의 직접 read 모두 실패. resolver를
     # 통해 worker IPC로 read 후 임시 파일에 저장 → _read_text_from_file 호출.
     # local 모드에서는 resolver.read_bytes도 직접 read이라 동일 동작.
-    from backend.services.file_resolver import get_resolver
-    from backend.services.resolver_helpers import enforce_resolver_access
-    _resolver = get_resolver()
+    #
+    # ⚠ 이 루프는 예전에 다섯 갈래 실패(접근 거부/파일 없음/형식 불허/read 실패/본문
+    #   추출 실패)를 전부 `text = ""` 로 삼켰다. 응답은 언제나 ok:True 라 호출자는
+    #   구분할 수 없고, 프론트는 끝에서 "SRS 경로를 확인하세요" 한 문장으로 뭉갠다 —
+    #   사용자에겐 "문서는 있는데 없다고 나온다"로 보인다(실제 보고). 바로 아래
+    #   compare/function_mapping 블록은 같은 결함을 이미 고쳐 errors 에 사유를 싣는데
+    #   정작 그 위인 여기가 안 고쳐져 있었다. 사유를 req_doc_errors 로 올린다.
+    from backend.services.resolver_helpers import read_requirement_doc_via_resolver
     for path_str in _parse_path_list(req_paths):
-        text = ""
-        try:
-            enforce_resolver_access(path_str)  # cloudium 게이트 + 화이트리스트
-            if not _resolver.exists(path_str):
-                continue
-            suffix = Path(path_str).suffix or ".txt"
-            if not _is_allowed_req_doc(Path(path_str)):
-                continue
-            data = _resolver.read_bytes(path_str)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(data)
-                tmp_p = Path(tmp.name)
-            try:
-                text = _read_text_from_file(tmp_p)
-            except Exception:
-                text = ""
-            finally:
-                try:
-                    tmp_p.unlink()
-                except Exception:
-                    pass
-        except (PermissionError, OSError):
-            text = ""
-        except Exception:
-            text = ""
+        text, reason = read_requirement_doc_via_resolver(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            req_doc_errors.append(reason)
         if text:
-            req_texts.append(text.strip())
+            req_texts.append(text)
+    # 경로도 업로드도 안 온 상태는 "읽었는데 0건"과 전혀 다른 사유다 — 구분해 알린다.
+    if not req_texts and not req_doc_errors and not _parse_path_list(req_paths):
+        req_doc_errors.append("요구사항 문서 경로가 지정되지 않았습니다")
     preview = generate_uds_requirements_preview(req_texts)
     mapping = generate_uds_requirements_mapping(preview.get("items") or [])
     compare = None
@@ -3613,12 +3601,18 @@ async def jenkins_uds_requirements_preview(
         except Exception as exc:
             _logger.warning("requirements-preview: function_mapping 실패 — %s", exc, exc_info=True)
             errors["function_mapping"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    if req_doc_errors:
+        _logger.warning("requirements-preview: 요구문서 %d건 탈락 — %s",
+                        len(req_doc_errors), "; ".join(req_doc_errors)[:400])
     return {
         "ok": True,
         "preview": preview,
         "mapping": mapping,
         "compare": compare,
         "function_mapping": function_mapping,
+        # 읽지 못한 요구문서의 **사유**. 호출자가 "요구 0건"을 경로 탓으로 뭉개지 않도록
+        # 무엇이 왜 탈락했는지 그대로 전달한다(빈 배열이면 키 자체를 안 싣는다).
+        **({"req_doc_errors": req_doc_errors} if req_doc_errors else {}),
         **({"errors": errors} if errors else {}),
     }
 

@@ -116,6 +116,24 @@ export default function SrsSdsSection({ job, analysisResult }) {
     [localDocPaths, scmLinked],
   );
 
+  // 등록된 SCM 문서가 **실제로 있는지**. 예전엔 경로 문자열이 비어있지 않다는 것만 보고
+  // '등록됨' 배지를 달았다 — 존재를 확인한 적이 없다. 문서가 개정되며 파일명이 바뀌면
+  // 배지는 등록됨인데 매트릭스는 "SRS 없음"으로 실패해, 사용자에겐 "있는데 없다고 나온다"가
+  // 된다(실제 보고). 레지스트리 경로만 확인한다(설정 직접 입력값은 서버가 모른다).
+  // 결과에 **어느 scmId 것인지**를 함께 담는다 — 프로젝트를 바꾸면 앞 항목의 확인 결과가
+  // 새 항목 배지로 새어 "다른 프로젝트 파일이 없다"고 표시된다.
+  const [docExistsRaw, setDocExistsRaw] = useState(null);
+  useEffect(() => {
+    if (!scmId) return undefined;
+    let cancelled = false;
+    api(`/api/scm/linked-docs-status/${encodeURIComponent(scmId)}`)
+      .then((d) => { if (!cancelled) setDocExistsRaw({ scmId, items: d?.items || {} }); })
+      // 확인 자체가 실패하면 **모른다**로 둔다 — false 로 접으면 멀쩡한 문서를 없다고 표시한다.
+      .catch(() => { if (!cancelled) setDocExistsRaw({ scmId, items: null }); });
+    return () => { cancelled = true; };
+  }, [scmId, linkedDocs]);
+  const docExists = docExistsRaw?.scmId === scmId ? docExistsRaw.items : null;
+
   // 가려진 키를 설정에서 **비운다** — SCM 값을 복사해 넣으면 그 순간 또 굳어서 다음 SCM
   // 변경이 다시 안 보인다. 비워 두면 이후로는 레지스트리 값이 그대로 흐른다.
   const adoptScmPaths = useCallback(() => {
@@ -225,6 +243,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
       let mappingPairs = [];
       let udsFunctionIds = [];  // 전체 UDS 함수 인벤토리(SDS→UDS bridge 시드용)
       let udsFunctionAsil = {};  // SwUDS 함수별 ASIL — 매트릭스 요구사항 ASIL max-merge 소스(under-report 해소)
+      // 백엔드가 알려준 "이 요구문서를 왜 못 읽었는가" — 아래 0건 분기에서 사유로 쓴다.
+      let reqDocErrors = [];
       try {
         const user = getUsername();
         const previewRes = await fetch('/api/jenkins/uds/requirements-preview', {
@@ -236,6 +256,16 @@ export default function SrsSdsSection({ job, analysisResult }) {
           reqItems = previewData?.preview?.items || [];
           mappingPairs = previewData?.traceability?.mapping_pairs
             || previewData?.mapping || [];
+          reqDocErrors = previewData?.req_doc_errors || [];
+        } else {
+          // ⚠ 예전엔 이 else 가 **비어 있었다**. res.ok 를 검사는 하는데 false 일 때
+          //   아무것도 안 해서, 401/403/500 이 경고 한 줄 없이 사라지고 끝에서
+          //   "SRS 경로를 확인하세요"(= 엉뚱한 원인)로 둔갑했다.
+          const body = await previewRes.text().catch(() => '');
+          const msg = `요구사항 미리보기 실패: HTTP ${previewRes.status}`
+            + (body ? ` — ${body.slice(0, 200)}` : '');
+          stepWarnings.push(msg);
+          toast('warning', msg);
         }
       } catch (e) {
         stepWarnings.push(`요구사항 미리보기 실패: ${e.message}`);
@@ -490,8 +520,20 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       // Warn if no data sources contributed
       if (reqItems.length === 0) {
-        stepWarnings.push('SRS에서 요구사항을 추출하지 못했습니다. SRS 경로를 확인하세요.');
-        toast('warning', 'SRS 요구사항이 없어 매트릭스를 생성할 수 없습니다.');
+        // ⚠ 예전엔 세 상태를 "SRS 경로를 확인하세요" 한 문장으로 뭉갰다 —
+        //   ①경로 미지정 ②문서를 못 읽음(사유 있음) ③읽었으나 요구 ID 0건.
+        //   ②·③에서 경로를 의심하게 만들어, 문서가 멀쩡히 등록된 사용자에게
+        //   "있는데 없다고 나온다"로 보였다(실제 보고). 셋을 갈라 말한다.
+        let why;
+        if (!docPaths.srs) {
+          why = 'SRS 경로가 지정되지 않았습니다 — 설정 탭 또는 SCM 연결 문서에서 등록하세요.';
+        } else if (reqDocErrors.length > 0) {
+          why = `SRS 문서를 읽지 못했습니다 — ${reqDocErrors.join(' / ')}`;
+        } else {
+          why = `SRS 문서는 읽었으나 요구사항 ID를 0건 인식했습니다(양식 확인 필요) — ${docPaths.srs}`;
+        }
+        stepWarnings.push(why);
+        toast('warning', `매트릭스 생성 불가 — ${why.slice(0, 120)}`);
         setWarnings(stepWarnings);
         setLoading(false);
         setLoadProgress('');
@@ -763,7 +805,15 @@ export default function SrsSdsSection({ job, analysisResult }) {
                       설정 우선
                     </span>
                   )}
-                  <StatusBadge tone="success">등록됨</StatusBadge>
+                  {/* SCM 경로일 때만 존재를 단언한다. 설정 직접 입력값은 서버가 모르므로
+                      확인하지 않은 것을 '확인됨'이라 부르지 않는다. */}
+                  {fromScm && docExists?.[key]?.exists === false ? (
+                    <StatusBadge tone="danger" title="등록된 경로에 파일이 없습니다 — 문서가 개정되며 파일명이 바뀌었을 수 있습니다.">파일 없음</StatusBadge>
+                  ) : fromScm && docExists?.[key]?.exists === true ? (
+                    <StatusBadge tone="success">확인됨</StatusBadge>
+                  ) : (
+                    <StatusBadge tone="success">등록됨</StatusBadge>
+                  )}
                 </>
               ) : (
                 <>
