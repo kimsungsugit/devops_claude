@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 
 # 공용 헬퍼(backend/helpers) — 라우터 간 private import 아님.
+from backend.cache import KeyedBuildLocks
 from backend.helpers.jenkins import _normalize_jenkins_cache_root
 from backend.services.jenkins_service import list_cached_builds
 from backend.services.prqa_delta import (
@@ -2635,24 +2636,15 @@ def _ccn_map(reports_dir: Path, *, job_url: str = "") -> Dict[str, int]:
 ARCH_METRICS_CACHE_NAME = "summary_arch_metrics_cache.json"
 
 # 빌드(캐시 파일)별 계산 락 — 동시 요청이 같은 스냅샷을 중복 파싱하지 않도록. 전역 단일 락은
-# 서로 다른 프로젝트끼리도 직렬화시키므로 키별로 나눈다. 락 객체 자체의 생성은 _ARCH_LOCKS_GUARD로 보호.
-_ARCH_BUILD_LOCKS: Dict[str, threading.Lock] = {}
-_ARCH_LOCKS_GUARD = threading.Lock()
-_ARCH_LOCKS_MAX = 16
+# 서로 다른 프로젝트끼리도 직렬화시키므로 키별로 나눈다.
+# 2026-08-06: 이 구현이 `backend/cache.py::KeyedBuildLocks` 로 승격됐다(같은 결함이 jenkins.py
+# 의 비싼 캐시 둘에 남아 있었다 — 여긴 1.5초짜리라 고쳐졌고 101초·460초짜리는 안 고쳐져 있었다).
+# 사본을 남기면 이 저장소 단골인 "복제 → 한쪽만 수정" 이 되므로 공용 구현을 쓴다.
+_ARCH_BUILD_LOCKS = KeyedBuildLocks(max_keys=16)
 
 
 def _arch_build_lock(cache_path: Path) -> threading.Lock:
-    key = str(cache_path)
-    with _ARCH_LOCKS_GUARD:
-        lock = _ARCH_BUILD_LOCKS.get(key)
-        if lock is None:
-            if len(_ARCH_BUILD_LOCKS) >= _ARCH_LOCKS_MAX:
-                # 무한 증식 방지. 사용 중인 락을 버려도 새 락으로 다시 직렬화될 뿐이라 안전하다
-                # (락은 중복 계산 회피용 최적화이지 정확성 장치가 아님 — 캐시 쓰기는 원자적).
-                _ARCH_BUILD_LOCKS.clear()
-            lock = threading.Lock()
-            _ARCH_BUILD_LOCKS[key] = lock
-        return lock
+    return _ARCH_BUILD_LOCKS.get(str(cache_path))
 
 
 def _arch_src_fingerprint(

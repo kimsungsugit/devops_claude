@@ -498,5 +498,5 @@ def local_report_summary() -> Dict[str, Any]:
         comparisons = build_report_comparisons([s for s in summaries if s.get("source", {}).get("job_slug")])
         return {"reports": summaries, "comparisons": comparisons}
 
-    return cached_response("local_report_summary", _compute, ttl=30.0)
+    return cached_response("local_report_summary", _compute)
 

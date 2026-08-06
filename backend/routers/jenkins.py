@@ -20,6 +20,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Response, Uploa
 from fastapi.responses import FileResponse
 
 import config
+from backend.cache import KeyedBuildLocks
 from backend.helpers import (
     _apply_uds_view_filters,
     _build_excel_artifact_payload,
@@ -997,9 +998,47 @@ def _aggregate_it_function_calls(
 _VCAST_CLOUDIUM_PARSE_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
 _VCAST_CLOUDIUM_PARSE_LOCK = threading.Lock()
 _VCAST_CLOUDIUM_PARSE_TTL = 1800.0  # 30분
+# 폴더별 single-flight — 아래 래퍼 주석 참조. 등록 경로는 통상 한 자릿수라 32면 충분.
+_VCAST_PARSE_BUILD_LOCKS = KeyedBuildLocks(max_keys=32)
+
+
+def _vcast_cloudium_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    """신선한 캐시 값의 **사본**(캐시 객체 변형 방지), 없으면 None."""
+    with _VCAST_CLOUDIUM_PARSE_LOCK:
+        entry = _VCAST_CLOUDIUM_PARSE_CACHE.get(key)
+    if entry and (time.time() - entry[0]) < _VCAST_CLOUDIUM_PARSE_TTL:
+        return dict(entry[1])
+    return None
 
 
 def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
+    """cloudium 원본 리포트 폴더 파싱 — TTL 캐시 + **폴더별 single-flight**.
+
+    실제 파싱은 `_parse_vcast_logs_from_cloudium_folder_impl`.
+
+    ⚠ 예전엔 락을 캐시 *조회*에만 걸고 파싱은 락 밖에서 했다("동시 miss는 redundant
+    parse 허용, 락 점유 최소화"). 그 전제는 파싱이 싸다는 것인데, 실측은 폴더당 ~100초·
+    4폴더 병렬로도 233초다. **cloudium worker 는 하나**라 같은 폴더를 두 요청이 동시에
+    요구하면 서로 경합해 둘 다 느려진다 — 2026-08-06 실측 **460초**(≈ 단독 233초의 2배.
+    매트릭스의 sync `/report/vectorcast-rag` 와 분석탭의 async 잡이 겹쳤을 때).
+    즉 TTL 캐시는 "누가 먼저 끝낸 다음"부터만 듣고, 정작 막으려던 pile-up 은 못 막았다.
+
+    ⚠ trade-off: 예외 경로(worker 미응답 등)는 결과를 **캐시하지 않는다**(의도된 재시도
+    허용, :1309). 그래서 대기하던 요청이 재파싱한다 = 실패가 직렬화된다. worker 장애는
+    통상 IPC timeout 으로 빨리 끝나 수용 가능하다고 판단했다 — 실패가 느려지면 여길 볼 것.
+    """
+    p = str(path or "").strip()
+    if not p:
+        return {}
+    key = p.replace("\\", "/").rstrip("/").lower()
+    return _VCAST_PARSE_BUILD_LOCKS.run(
+        key,
+        lambda: _vcast_cloudium_cache_get(key),
+        lambda: _parse_vcast_logs_from_cloudium_folder_impl(p, key),
+    )
+
+
+def _parse_vcast_logs_from_cloudium_folder_impl(p: str, _key: str) -> Dict[str, Any]:
     """vectorcast_rag.json이 없는 cloudium 원본 리포트 폴더에서 실행결과를 직접 파싱.
 
     사용자가 설정 SCM '연결 문서 경로'에 등록하는 폴더는 우리 산출물(vectorcast_rag.json)
@@ -1011,21 +1050,16 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
     HTML만 읽어 매트릭스 join용 test_rows(subprogram/testcase/unit/result)를 조립한다.
     subprogram은 tc_name(`SwUFn_3401.001`)에서 함수 id(`SwUFn_3401`)를 도출 — ISO 26262
     추적성 체인이 SwUFn id로 매핑되므로 UDS mapping_pairs.source_ids와 join된다.
+
+    ⚠ 캐시 조회·single-flight 는 래퍼(`_parse_vcast_logs_from_cloudium_folder`)가 한다.
+    여기 직접 들어오지 말 것 — 중복 파싱 방지가 통째로 사라진다.
+    `_key` 는 래퍼가 만든 캐시 키를 그대로 받는다(양쪽이 키를 따로 만들면 조회는 miss,
+    쓰기는 다른 칸에 들어가 캐시가 영원히 안 맞는다).
     """
     import re as _re
     from pathlib import Path as _P
 
-    p = str(path or "").strip()
-    if not p:
-        return {}
-    # TTL 캐시 조회 — parse는 락 밖에서 수행(동시 miss는 redundant parse 허용,
-    # 락 점유 최소화). 캐시 객체 변형 방지 위해 사본 반환.
-    _key = p.replace("\\", "/").rstrip("/").lower()
     _now = time.time()
-    with _VCAST_CLOUDIUM_PARSE_LOCK:
-        _cached = _VCAST_CLOUDIUM_PARSE_CACHE.get(_key)
-    if _cached and (_now - _cached[0]) < _VCAST_CLOUDIUM_PARSE_TTL:
-        return dict(_cached[1])
     try:
         from backend.services import swut_input_adapter as SA
         from backend.services.file_resolver import get_resolver
@@ -4043,6 +4077,8 @@ def jenkins_trace_summary(req: dict) -> Dict[str, Any]:
 # uds_path 기준 TTL 캐시로 재추출을 막는다. 파일은 세션 중 거의 안 바뀌므로 30분 TTL.
 _UDS_MAPPING_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
 _UDS_MAPPING_LOCK = threading.Lock()
+# 경로별 single-flight — 라우트 docstring 참조. 동시 진행 문서는 한 자릿수라 16이면 충분.
+_UDS_MAPPING_BUILD_LOCKS = KeyedBuildLocks(max_keys=16)
 _UDS_MAPPING_TTL = 1800.0
 # 파서 산출 스키마 버전 — 캐시 키에 prefix해 파서 변경 시 자동 무효화(재기동 불필요).
 # helpers/uds.py:_SOURCE_SECTIONS_SCHEMA_VERSION 선례. 파서 로직 변경 시 반드시 bump.
@@ -4091,25 +4127,51 @@ def _docx_tables_text(data: bytes) -> Optional[List[List[List[str]]]]:
         return None
 
 
+def _uds_mapping_cache_get(ck: str) -> Optional[Dict[str, Any]]:
+    """신선한 캐시 값의 **사본**(캐시 객체 변형 방지), 없으면 None."""
+    with _UDS_MAPPING_LOCK:
+        entry = _UDS_MAPPING_CACHE.get(ck)
+    if entry and (time.time() - entry[0]) < _UDS_MAPPING_TTL:
+        return dict(entry[1])
+    return None
+
+
 @router.post("/api/jenkins/uds/extract-mapping")
 def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
-    """UDS 문서에서 함수↔요구사항 매핑을 추출"""
-    import re as _re
+    """UDS 문서에서 함수↔요구사항 매핑을 추출 — TTL 캐시 + **경로별 single-flight**.
 
-    from backend.services.file_resolver import get_resolver
-    from backend.services.resolver_helpers import enforce_resolver_access
+    ⚠ 캐시 주석은 원래 "재로드/연타 시 같은 파싱이 쌓여 worker/CPU 경합 → 타임아웃을
+    유발하므로 TTL 캐시로 막는다" 였는데, 락을 캐시 *조회*에만 걸어서 **정작 그 pile-up
+    을 못 막았다**. cold key 에 동시 도착한 N개 요청은 전부 파싱한다 — 캐시는 누가 먼저
+    끝낸 다음부터만 듣기 때문이다. 실측 101초짜리 파싱이고 호출처가 둘(SrsSdsSection·
+    traceMatrix)이라 실제로 겹친다. single-flight 로 한 번만 파싱하고 나머지는 그 결과를 쓴다.
+    """
     uds_path = str(body.get("uds_path", "")).strip()
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path required")
+    from backend.services.resolver_helpers import enforce_resolver_access
     enforce_resolver_access(uds_path)  # C3: health.py와 일관된 방어심층
-    # TTL 캐시 — 손상 docx fallback(73MB 파싱) 재로드 pile-up 방지. 스키마 버전 prefix로
-    # 파서 변경 시 stale 캐시가 옛 산출을 반환하는 것을 차단(30분 TTL 내에도 즉시 무효화).
+    # 스키마 버전 prefix로 파서 변경 시 stale 캐시가 옛 산출을 반환하는 것을 차단
+    # (30분 TTL 내에도 즉시 무효화).
     _ck = _UDS_MAPPING_SCHEMA_VERSION + ":" + uds_path.replace("\\", "/").rstrip("/").lower()
+    return _UDS_MAPPING_BUILD_LOCKS.run(
+        _ck,
+        lambda: _uds_mapping_cache_get(_ck),
+        lambda: _jenkins_uds_extract_mapping_impl(uds_path, _ck),
+    )
+
+
+def _jenkins_uds_extract_mapping_impl(uds_path: str, _ck: str) -> Dict[str, Any]:
+    """UDS 매핑 추출 본체(36MB read + 최대 73MB document.xml 파싱).
+
+    ⚠ 캐시 조회·single-flight 는 위 라우트가 한다. 여기 직접 들어오지 말 것.
+    `_ck` 는 라우트가 만든 캐시 키를 그대로 받는다(양쪽이 키를 따로 만들면 조회는 miss,
+    쓰기는 다른 칸에 들어가 캐시가 영원히 안 맞는다).
+    """
+    import re as _re
+
+    from backend.services.file_resolver import get_resolver
     _now = time.time()
-    with _UDS_MAPPING_LOCK:
-        _hit = _UDS_MAPPING_CACHE.get(_ck)
-    if _hit and (_now - _hit[0]) < _UDS_MAPPING_TTL:
-        return dict(_hit[1])
     resolver = get_resolver()
     try:
         if not resolver.exists(uds_path):
