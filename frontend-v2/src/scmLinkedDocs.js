@@ -24,10 +24,37 @@
  *   (P/F 공백의 직접 원인이었던 지점 — 원 동작 보존).
  * - 조회 실패는 조용히 스냅샷 폴백. 문서 경로는 화면의 **부가 정보**라, 못 가져왔다고
  *   빈 화면을 만드는 편이 더 나쁘다.
+ *
+ * ## 재조회 계약 (2026-08-06 2차 — 첫 판의 구멍)
+ *
+ * 첫 판은 `[scmId, enabled]` 만 deps 로 걸어 **마운트 시 1회**만 조회했다. Detail 섹션은
+ * keep-alive(`display:none`)라 재마운트되지 않으므로, 설정에서 SCM 연결 문서 경로를 바꿔
+ * 저장해도 **전체 새로고침 전까지** 이 값이 갱신되지 않는다 — 사용자 재보고:
+ * *"요구사항 커버리지 입력 문서 현황에서 안 바뀌어 있어."*
+ *
+ * `saveDocPaths`(localStorage)는 `DOC_PATHS_EVENT` 로 이 문제를 이미 풀어 뒀는데,
+ * **레지스트리 쪽에는 같은 통지가 없었다** — 또 한쪽만 고친 상태였다. 두 경로를 맞춘다:
+ *   1. 앱 안에서의 저장 → `notifyScmRegistryChanged()` (설정의 SCM 등록/수정/삭제)
+ *   2. 앱 **밖**에서의 변경(`config/scm_registry.json` 직접 편집 등) → `window` focus
+ *
+ * 값이 실제로 달라졌을 때만 setState 한다 — focus 는 alt-tab 마다 오므로, 매번 새 객체를
+ * 넣으면 이 값을 dep 로 쓰는 `loadMatrix` 콜백이 alt-tab 마다 새로 만들어진다.
  */
 import { useEffect, useState } from 'react';
 
 import { api } from './api.js';
+
+/** SCM 레지스트리가 바뀌었음을 같은 탭에 알리는 이벤트 (다른 탭은 focus 로 수렴). */
+export const SCM_REGISTRY_EVENT = 'aria-scm-registry-changed';
+
+/**
+ * 레지스트리 변경 통지. **레지스트리를 쓰는 모든 입구는 여기를 거친다.**
+ * 한 곳이라도 빠뜨리면 그 경로로 저장한 값만 화면에 안 나타난다 — 사용자에게는
+ * "어떤 건 되고 어떤 건 안 된다"로 보이는, 원인을 짚기 가장 어려운 형태다.
+ */
+export function notifyScmRegistryChanged() {
+  try { window.dispatchEvent(new Event(SCM_REGISTRY_EVENT)); } catch { /* no-window */ }
+}
 
 /**
  * @param {string} scmId    이 화면이 대상으로 삼은 SCM 항목 id ('' 면 조회하지 않는다)
@@ -37,13 +64,34 @@ import { api } from './api.js';
  */
 export function useRegistryLinkedDocs(scmId, snapshot, enabled = true) {
   const [fetched, setFetched] = useState(() => snapshot || {});
+  // 재조회 트리거. 이벤트/focus 가 올릴 때마다 아래 조회 effect 가 다시 돈다.
+  const [reloadTick, setReloadTick] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const bump = () => setReloadTick((t) => t + 1);
+    window.addEventListener(SCM_REGISTRY_EVENT, bump);
+    // 앱 밖에서 `config/scm_registry.json` 을 직접 고친 경우엔 이벤트가 없다. 창으로
+    // 돌아오는 시점이 유일하게 잡을 수 있는 신호다(값이 같으면 아래에서 no-op).
+    window.addEventListener('focus', bump);
+    return () => {
+      window.removeEventListener(SCM_REGISTRY_EVENT, bump);
+      window.removeEventListener('focus', bump);
+    };
+  }, [enabled]);
 
   useEffect(() => {
     // 게이트가 닫혀 있으면 조회 자체를 하지 않는다. 값은 아래 반환부에서 파생하므로
     // 여기서 setState 를 부르지 않는다(effect 내 동기 setState = 연쇄 렌더).
     if (!enabled) return undefined;
     let cancelled = false;
-    const fallback = () => { if (!cancelled && snapshot) setFetched(snapshot); };
+    // 값이 **실제로 달라졌을 때만** 갱신 — focus 재조회가 alt-tab 마다 새 객체를 넣으면
+    // 이 값을 dep 로 쓰는 소비자(loadMatrix useCallback 등)가 매번 새로 만들어진다.
+    const apply = (next) => {
+      if (cancelled) return;
+      setFetched((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
+    const fallback = () => { if (snapshot) apply(snapshot); };
 
     api('/api/scm/list').then((d) => {
       if (cancelled) return;
@@ -56,7 +104,7 @@ export function useRegistryLinkedDocs(scmId, snapshot, enabled = true) {
       const reg = matched.linked_docs;
       const regVcast = Array.isArray(reg.vectorcast) ? reg.vectorcast.filter(Boolean) : [];
       const snapVcast = Array.isArray(snapshot?.vectorcast) ? snapshot.vectorcast.filter(Boolean) : [];
-      setFetched(
+      apply(
         regVcast.length === 0 && snapVcast.length > 0
           ? { ...reg, vectorcast: snapshot.vectorcast }
           : reg,
@@ -66,7 +114,7 @@ export function useRegistryLinkedDocs(scmId, snapshot, enabled = true) {
     return () => { cancelled = true; };
     // snapshot 은 매 렌더 새 객체일 수 있어 deps 에 넣으면 무한 루프가 된다 — scmId 로만 건다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scmId, enabled]);
+  }, [scmId, enabled, reloadTick]);
 
   // 게이트가 닫히면 **빈 객체** — 다른 Job 의 문서로 매트릭스를 만드는 오귀속 차단.
   return [enabled ? fetched : EMPTY, setFetched];

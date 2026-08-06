@@ -5,8 +5,28 @@ import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
 import { impactConflict, contextConflict, mismatchText } from '../../impactGuard.js';
 import { saveTraceMatrix, loadTraceMatrixByKey, loadTraceMatrixByBinding } from '../../traceMatrixStore.js';
-import { loadDocPaths, useDocPathsSync } from '../../sharedInputs.js';
+import {
+  loadDocPaths, saveDocPaths, useDocPathsSync, docPathsOverridingScm,
+} from '../../sharedInputs.js';
 import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
+
+// 추적성 매트릭스 입력 문서 11종 — 설계(SRS/SDS/UDS)·인터페이스(HSIS)·SW시험(STS/SUTS/SITS)
+// ·시스템(SyRS상위/SyTS/SyITS)·계획(STP). '입력 문서 현황' 패널과 가림 판정이 **같은 목록**을
+// 써야 한다 — 따로 두면 한쪽에만 키를 추가했을 때 그 문서만 조용히 판정에서 빠진다.
+const DOC_STATUS_ROWS = [
+  { label: 'SRS', key: 'srs', grp: 'design' },
+  { label: 'SDS', key: 'sds', grp: 'design' },
+  { label: 'UDS', key: 'uds', grp: 'design' },
+  { label: 'HSIS', key: 'hsis', grp: 'interface' },
+  { label: 'STS', key: 'sts', grp: 'test' },
+  { label: 'SUTS', key: 'suts', grp: 'test' },
+  { label: 'SITS', key: 'sits', grp: 'test' },
+  { label: 'SyRS↑', key: 'syrs', grp: 'system' },
+  { label: 'SyTS', key: 'syts', grp: 'system' },
+  { label: 'SyITS', key: 'syits', grp: 'system' },
+  { label: 'STP', key: 'stp', grp: 'plan' },
+];
+const DOC_STATUS_KEYS = DOC_STATUS_ROWS.map(r => r.key);
 
 export default function SrsSdsSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -87,6 +107,24 @@ export default function SrsSdsSection({ job, analysisResult }) {
     hsis: localDocPaths.hsis || scmLinked.hsis || '',
     stp: localDocPaths.stp || scmLinked.stp || '',
   }), [localDocPaths, scmLinked.srs, scmLinked.sds, scmLinked.hsis, scmLinked.stp]);
+
+  // 설정(localStorage)이 SCM 최신본을 가리고 있는 문서 키. 우선순위 자체는 그대로 두되
+  // (직접 입력을 덮지 않는 게 정책이다) 가려졌다는 **사실을 숨기지 않는다** — 이게 안 보이면
+  // 사용자에겐 "설정에서 저장했는데 안 바뀐다"로만 보인다.
+  const overriddenKeys = useMemo(
+    () => docPathsOverridingScm(localDocPaths, scmLinked, DOC_STATUS_KEYS),
+    [localDocPaths, scmLinked],
+  );
+
+  // 가려진 키를 설정에서 **비운다** — SCM 값을 복사해 넣으면 그 순간 또 굳어서 다음 SCM
+  // 변경이 다시 안 보인다. 비워 두면 이후로는 레지스트리 값이 그대로 흐른다.
+  const adoptScmPaths = useCallback(() => {
+    const next = { ...loadDocPaths() };
+    for (const k of overriddenKeys) delete next[k];
+    if (saveDocPaths(next, (e) => toast('error', `설정 저장 실패: ${e.message}`))) {
+      toast('success', `${overriddenKeys.length}개 경로를 SCM 값으로 되돌렸습니다.`);
+    }
+  }, [overriddenKeys, toast]);
 
   // VectorCAST 결과 로그 경로(복수) — Jenkins 빌드에 RAG 없을 때 cloudium fallback.
   // 부트로더/FBL/APP 등 별도 결과 대응. 설정의 SCM '연결 문서 경로'(linked_docs.vectorcast)
@@ -681,24 +719,31 @@ export default function SrsSdsSection({ job, analysisResult }) {
         <div className="panel-header">
           <span className="panel-title">입력 문서 현황</span>
         </div>
+        {/* 설정값이 SCM 최신본을 가리고 있으면 **먼저** 알린다 — 이걸 숨기면 사용자에게는
+            "설정에서 저장했는데 화면이 안 바뀐다"로만 보인다(실제 재보고 사유). */}
+        {overriddenKeys.length > 0 && (
+          <div className="panel-body text-sm" style={{ paddingTop: 0 }}>
+            <span style={{ color: 'var(--warning, #b45309)' }}>
+              ⚠ 설정 탭에 직접 저장된 경로가 SCM 최신본을 가리고 있습니다
+              ({overriddenKeys.map(k => k.toUpperCase()).join(', ')}).
+            </span>
+            {' '}
+            <button
+              type="button"
+              className="btn-sm"
+              title="설정 탭의 해당 경로를 비워 SCM 레지스트리 값을 그대로 따르게 합니다(이후 SCM 변경이 바로 반영됨)."
+              onClick={adoptScmPaths}
+            >
+              SCM 값 따르기 ({overriddenKeys.length})
+            </button>
+          </div>
+        )}
         <div className="field-group">
-          {/* 추적성 매트릭스 입력 문서 11종 — 설계(SRS/SDS/UDS)·인터페이스(HSIS)·SW시험(STS/SUTS/SITS)
-              ·시스템(SyRS상위/SyTS/SyITS)·계획(STP). 경로는 localStorage 우선, 없으면 SCM linked_docs. */}
-          {[
-            { label: 'SRS', key: 'srs', grp: 'design' },
-            { label: 'SDS', key: 'sds', grp: 'design' },
-            { label: 'UDS', key: 'uds', grp: 'design' },
-            { label: 'HSIS', key: 'hsis', grp: 'interface' },
-            { label: 'STS', key: 'sts', grp: 'test' },
-            { label: 'SUTS', key: 'suts', grp: 'test' },
-            { label: 'SITS', key: 'sits', grp: 'test' },
-            { label: 'SyRS↑', key: 'syrs', grp: 'system' },
-            { label: 'SyTS', key: 'syts', grp: 'system' },
-            { label: 'SyITS', key: 'syits', grp: 'system' },
-            { label: 'STP', key: 'stp', grp: 'plan' },
-          ].map(({ label, key, grp }) => {
+          {/* 경로는 localStorage(설정 탭) 우선, 없으면 SCM linked_docs — 목록은 DOC_STATUS_ROWS 단일 출처. */}
+          {DOC_STATUS_ROWS.map(({ label, key, grp }) => {
             const path = localDocPaths[key] || scmLinked[key] || '';
             const fromScm = !localDocPaths[key] && !!scmLinked[key];
+            const overridden = overriddenKeys.includes(key);
             const dot = { design: '#0d9488', interface: '#0e7490', test: '#2563eb', system: '#9333ea', plan: '#6b7280' }[grp];
             return (
             <div key={label} className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
@@ -709,6 +754,15 @@ export default function SrsSdsSection({ job, analysisResult }) {
                     {path.split(/[\\/]/).pop()}
                   </span>
                   {fromScm && <span className="pill pill-info" style={{ fontSize: 9 }}>SCM</span>}
+                  {overridden && (
+                    <span
+                      className="pill"
+                      style={{ fontSize: 9, background: 'var(--warning, #b45309)', color: '#fff' }}
+                      title={`설정 탭 값이 SCM 최신본을 가리고 있습니다.\nSCM: ${scmLinked[key]}`}
+                    >
+                      설정 우선
+                    </span>
+                  )}
                   <StatusBadge tone="success">등록됨</StatusBadge>
                 </>
               ) : (

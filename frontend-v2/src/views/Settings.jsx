@@ -7,6 +7,7 @@ import {
 import {
   loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS, saveDocPaths,
 } from '../sharedInputs.js';
+import { notifyScmRegistryChanged } from '../scmLinkedDocs.js';
 
 export default function Settings() {
   return (
@@ -200,6 +201,10 @@ function ScmSection() {
       setEditMode(null);
       setForm(defaultScmForm());
       loadList();
+      // ⚠ 마운트된 프로젝트 섹션들에 통지. 없으면 Detail 이 keep-alive(display:none)라
+      //   재마운트되지 않아 '입력 문서 현황'/추적성 매트릭스가 전체 새로고침 전까지
+      //   옛 경로를 계속 쓴다(사용자 재보고 결함). doc_paths 쪽 saveDocPaths 와 대칭.
+      notifyScmRegistryChanged();
     } catch (e) {
       toast('error', `${editMode ? '수정' : '등록'} 실패: ${e.message}`);
     }
@@ -213,6 +218,7 @@ function ScmSection() {
       await api(`/api/scm/delete/${id}`, { method: 'DELETE' });
       toast('success', '삭제 완료');
       loadList();
+      notifyScmRegistryChanged();
     } catch (e) {
       toast('error', `삭제 실패: ${e.message}`);
     }

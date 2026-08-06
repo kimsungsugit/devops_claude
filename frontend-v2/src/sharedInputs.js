@@ -103,6 +103,42 @@ export function saveDocPaths(obj, onError) {
   return true;
 }
 
+/**
+ * 경로 비교용 정규화 — 슬래시 방향과 끝 슬래시만 흡수하고 대소문자는 접는다(Windows).
+ * 선두 `//`(UNC)는 보존한다 — 거기까지 접으면 서로 다른 서버 경로가 같아 보인다.
+ */
+export function normDocPath(p) {
+  return String(p || '').trim()
+    .replace(/\\/g, '/')
+    .replace(/(?!^)\/{2,}/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+/**
+ * 설정(localStorage `doc_paths`)이 SCM 레지스트리 최신본을 **가리고 있는** 키 목록.
+ *
+ * 문서 경로의 우선순위는 `설정값 > SCM linked_docs` 다(의도된 정책 — 직접 입력을 덮지
+ * 않는다). 문제는 그게 **화면에 안 보인다**는 것이다. 설정의 '빈 칸 채우기'는 SCM 값을
+ * localStorage 로 **복사**하는데, 그 순간부터 그 키는 설정값으로 굳어 SCM 을 아무리 고쳐도
+ * 화면이 안 바뀐다. 게다가 그 행에는 `SCM` 배지도 안 붙어 직접 입력과 구분되지 않는다.
+ * 사용자에게는 "설정에서 저장했는데 안 바뀐다"로만 보인다 — 실제 재보고 사유.
+ *
+ * @param {object} local  loadDocPaths() 결과
+ * @param {object} scm    SCM linked_docs
+ * @param {string[]} keys 비교할 문서 키
+ * @returns {string[]} 양쪽 다 값이 있고 **서로 다른** 키들
+ */
+export function docPathsOverridingScm(local, scm, keys) {
+  const out = [];
+  for (const k of keys || []) {
+    const l = normDocPath(local?.[k]);
+    const s = normDocPath(scm?.[k]);
+    if (l && s && l !== s) out.push(k);
+  }
+  return out;
+}
+
 /** 공유 입력 단일 키 갱신 후 갱신된 객체 반환. */
 export function saveSharedInput(key, val) {
   const cur = loadSharedInputs();
