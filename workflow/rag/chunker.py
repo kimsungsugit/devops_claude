@@ -74,8 +74,23 @@ def _read_text_from_file(path: Path) -> str:
     return text
 
 
+# 이 파서가 실제로 본문을 뽑을 수 있는 확장자 — **단일 출처**.
+# 아래 분기와 반드시 함께 움직여야 한다(test_req_doc_format_gate.py 가 대조한다).
+# 호출부가 "읽을 수 있는가"를 미리 알아야 하는 이유: cloudium 에서는 본문 추출 전에
+# worker IPC 로 바이트를 통째로 끌어온다. 못 읽을 형식을 걸러내지 않으면 수십 MB를
+# 받아 놓고 ""를 돌려주고, 사용자는 "본문 0자"라는 **원인과 무관한** 사유를 본다.
+SUPPORTED_TEXT_EXTS = frozenset({
+    ".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml",
+    ".html", ".htm",
+    ".pdf",
+    ".docx",
+})
+
+
 def _read_text_uncached(path: Path) -> str:
     ext = path.suffix.lower()
+    if ext not in SUPPORTED_TEXT_EXTS:
+        return ""
     try:
         if ext in (".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml"):
             return path.read_text(encoding="utf-8", errors="ignore")

@@ -58,7 +58,11 @@ def materialize_via_resolver(
         return None, ""
     name = Path(raw).name or raw
 
-    # allow 는 **바이트를 받기 전에** 판정한다 — 안 쓸 문서를 IPC 로 끌어오지 않는다.
+    # ⚠ 게이트는 전부 **바이트를 받기 전에** — 안 쓸 문서를 IPC 로 끌어오지 않는다.
+    #   ① 파서가 아예 못 읽는 형식(단일 출처: chunker.SUPPORTED_TEXT_EXTS)
+    #   ② 호출자의 추가 제약(allow) — ①보다 넓힐 수는 없고 좁히기만 한다
+    if (why := parser_unreadable_reason(raw)):
+        return None, why
     if allow is not None and not allow(Path(raw)):
         return None, f"{name}: 허용된 요구사항 문서 형식이 아님"
 
@@ -93,6 +97,31 @@ def materialize_via_resolver(
     except OSError as exc:
         return None, f"{name}: 로컬 임시 파일 생성 실패 ({type(exc).__name__}: {str(exc)[:100]})"
     return out, ""
+
+
+def parser_unreadable_reason(path_str: str) -> str:
+    """파서가 **아예 못 읽는** 확장자면 사유를, 읽을 수 있으면 ``""`` 를 준다.
+
+    판정 기준은 ``chunker.SUPPORTED_TEXT_EXTS`` **단일 출처**다 — 목록을 여기 복제하면
+    파서에 형식이 추가돼도 게이트가 모르고 계속 거부한다(이 저장소 단골 드리프트).
+
+    ## 왜 '읽기 전에' 판정하나
+
+    cloudium 에서는 본문 추출 전에 worker IPC 로 바이트를 **통째로** 끌어온다. 못 읽을
+    형식을 안 거르면 수십 MB 를 받아 놓고 파서가 ``""`` 를 돌려주고, 사용자는
+    **"본문 0자 — 양식/권한 확인 필요"** 라는 원인과 무관한 사유를 본다.
+    (요구문서 읽기가 실체화로 바뀌면서 이 비용이 실제로 생겼다 — 그 전에는 Path 직독이
+     실패해 애초에 바이트를 안 받았다.)
+    """
+    from workflow.rag.chunker import SUPPORTED_TEXT_EXTS
+
+    p = Path((path_str or "").strip())
+    ext = p.suffix.lower()
+    if ext in SUPPORTED_TEXT_EXTS:
+        return ""
+    shown = ext or "(확장자 없음)"
+    return (f"{p.name or path_str}: 본문 추출기가 읽을 수 없는 형식 {shown} — "
+            f"지원: {', '.join(sorted(SUPPORTED_TEXT_EXTS))}")
 
 
 def _needs_resolver_read() -> bool:
@@ -200,6 +229,14 @@ def read_requirement_doc(
         if _needs_resolver_read():
             return _via_resolver()
         return p, "", f"{p.name}: {type(exc).__name__} — {str(exc)[:120]}"
+
+    # ⚠ 파서 게이트는 **존재/디렉터리 판정 뒤**에 온다. 앞에 두면 디렉터리(확장자 없음)가
+    #   "읽을 수 없는 형식"으로 뭉개져 '파일이 아님'이라는 갈래가 사라진다(실제로 그렇게
+    #   짰다가 기존 테스트에 잡혔다 — 갈래를 가르려다 갈래를 없앤 꼴).
+    #   cloudium 은 어차피 위 exists/PermissionError 에서 _via_resolver 로 빠지고,
+    #   거기(materialize)에 같은 게이트가 있어 IPC 절약은 그대로다.
+    if (why := parser_unreadable_reason(raw)):
+        return p, "", why
 
     if allow is not None and not allow(p):
         return p, "", f"{p.name}: 허용된 요구사항 문서 위치가 아님"

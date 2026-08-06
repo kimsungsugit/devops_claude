@@ -214,9 +214,11 @@ def test_하류가_쓰는_경로가_실제로_열린다(cloud):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_allow_거부는_IPC_read_를_아예_하지_않는다(cloud):
-    fake = cloud({"U:/proj/x.exe": b"MZ"})
+    # ⚠ 파서가 **읽을 수 있는** 형식이어야 한다. 못 읽는 형식(.exe 등)은 그보다 앞선
+    #   파서 게이트에서 먼저 걸려, 이 테스트가 정작 allow 를 검증하지 못한다.
+    fake = cloud({"U:/proj/note.md": b"# x"})
     p, text, reason = RH.read_requirement_doc(
-        "U:/proj/x.exe", allow=lambda _p: False)
+        "U:/proj/note.md", allow=lambda _p: False)
     assert text == "" and "허용된" in reason
     assert fake.read_calls == [], "허용 밖 문서를 IPC 로 끌어왔다 — 순서가 뒤바뀌었다"
 

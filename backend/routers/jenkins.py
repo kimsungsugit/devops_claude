@@ -3177,7 +3177,7 @@ async def jenkins_sts_generate_async(
     # registry 의 U: 문서는 백엔드 권한으로 열리지 않아 전량 탈락한다).
     doc_skips: List[str] = []
     for path_str in req_paths_list:
-        p, text, reason = read_requirement_doc(path_str)
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
         if reason:
             doc_skips.append(reason)
             continue

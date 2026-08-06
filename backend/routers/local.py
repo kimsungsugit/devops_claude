@@ -2214,7 +2214,7 @@ async def local_sts_generate(
     # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
     doc_skips: List[str] = []
     for path_str in req_paths_list:
-        p, text, reason = read_requirement_doc(path_str)
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
         if reason:
             doc_skips.append(reason)
             continue
@@ -2403,7 +2403,7 @@ async def local_sts_generate_stream(
     # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
     doc_skips: List[str] = []
     for path_str in req_paths_list:
-        p, text, reason = read_requirement_doc(path_str)
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
         if reason:
             doc_skips.append(reason)
             continue
@@ -2590,7 +2590,7 @@ async def local_sts_generate_async(
     # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
     doc_skips: List[str] = []
     for path_str in req_paths_list:
-        p, text, reason = read_requirement_doc(path_str)
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
         if reason:
             doc_skips.append(reason)
             continue
