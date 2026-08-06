@@ -109,6 +109,28 @@ describe('입력 문서 현황 — 레지스트리 최신본 우선', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('SUTS·SITS·STS 가 함께 갱신된다 (한 키만 고쳐지지 않는다)', async () => {
+    const OLD = { suts: 'U:/old/A_SUTS.xlsm', sits: 'U:/old/A_SITS.xlsm', sts: 'U:/old/A_STS.xlsm' };
+    const NEW = { suts: 'U:/new/B_SUTS.xlsm', sits: 'U:/new/B_SITS.xlsm', sts: 'U:/new/B_STS.xlsm' };
+    mockApi.mockImplementation(async (path) => {
+      if (String(path).includes('/api/scm/list')) {
+        return { items: [{ id: 'kjpds02_pv', name: 'KJPDS02_PV', linked_docs: NEW }] };
+      }
+      return {};
+    });
+    const snap = { id: 'kjpds02_pv', name: 'KJPDS02_PV', linked_docs: OLD };
+    render(<SrsSdsSection job={JOB} analysisResult={{ ...RESULT, scmList: [snap], matchedScm: snap }} />);
+
+    await waitFor(() => {
+      for (const n of ['B_SUTS.xlsm', 'B_SITS.xlsm', 'B_STS.xlsm']) {
+        expect(screen.getByText(n)).toBeInTheDocument();
+      }
+    });
+    for (const n of ['A_SUTS.xlsm', 'A_SITS.xlsm', 'A_STS.xlsm']) {
+      expect(screen.queryByText(n)).not.toBeInTheDocument();
+    }
+  });
+
   it('레지스트리 조회가 실패하면 스냅샷으로 폴백한다(빈 화면 금지)', async () => {
     mockApi.mockImplementation(async (path) => {
       if (String(path).includes('/api/scm/list')) throw new Error('network');

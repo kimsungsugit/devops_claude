@@ -6,6 +6,7 @@ import { defaultCacheRoot } from '../../api.js';
 import { impactConflict, contextConflict, mismatchText } from '../../impactGuard.js';
 import { saveTraceMatrix, loadTraceMatrixByKey, loadTraceMatrixByBinding } from '../../traceMatrixStore.js';
 import { loadDocPaths, useDocPathsSync } from '../../sharedInputs.js';
+import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
 
 export default function SrsSdsSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -64,9 +65,10 @@ export default function SrsSdsSection({ job, analysisResult }) {
   // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
   const scmLinkedDocs = activeScm?.linked_docs;
   const scmId = activeScm?.id || '';
-  // 아래 effect(86행~)가 `/api/scm/list` 레지스트리로 갱신한다. 초기값은 분석 스냅샷이고
-  // 조회 실패 시에도 스냅샷으로 폴백하므로, **이 하나가 곧 "지금 유효한 SCM 문서"** 다.
-  const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
+  // `/api/scm/list` 레지스트리 최신본(실패 시 분석 스냅샷 폴백) — **이 하나가 곧
+  // "지금 유효한 SCM 문서"** 다. 구현은 `scmLinkedDocs.js` 단일 출처
+  // (ProjectSummarySection 도 같은 훅을 쓴다 — 복제하면 또 한쪽만 고쳐진다).
+  const [linkedDocs, setLinkedDocs] = useRegistryLinkedDocs(scmId, scmLinkedDocs);
 
   // ⚠ SCM 문서의 출처는 **여기 하나**여야 한다.
   //   예전엔 `activeScm?.linked_docs`(=분석 시점 스냅샷)를 따로 읽는 `scmLinked` 가 있었고,
@@ -94,30 +96,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
     [linkedDocs],
   );
 
-  useEffect(() => {
-    // 레지스트리(단일 진실원)를 항상 최신으로 가져온다. 과거엔 분석 시점 스냅샷
-    // (scmLinkedDocs)이 sts/suts/sits+vectorcast로 완전하면 재fetch를 건너뛰었는데(early-return),
-    // 그러면 관리/Settings에서 경로가 갱신돼도(예: SwUTS v0.10→v1.02 release, 상위폴더 이관)
-    // 프론트가 옛 경로를 고집해 '파일을 찾을 수 없습니다'가 나고 새로고침·분석 재실행으로도
-    // 안 고쳐졌다(스냅샷이 완전한 한 레지스트리를 안 읽음). 이제 레지스트리를 우선하되,
-    // 원 스냅샷의 유일 목적이던 vectorcast 누락 방지만 보존한다: 레지스트리 vectorcast가 비고
-    // 스냅샷에만 있으면 vectorcast만 스냅샷에서 보강(경로/문서는 레지스트리 최신본).
-    api('/api/scm/list').then(d => {
-      const items = d?.items || (Array.isArray(d) ? d : []);
-      // Match the SAME registry entry the Dashboard selected for this job.
-      // Falling back to items[0] would silently pull another project's docs
-      // in multi-SCM environments.
-      const matched = scmId ? items.find(it => it.id === scmId) : items[0];
-      if (matched?.linked_docs) {
-        const reg = matched.linked_docs;
-        const regVcast = Array.isArray(reg.vectorcast) ? reg.vectorcast.filter(Boolean) : [];
-        const snapVcast = Array.isArray(scmLinkedDocs?.vectorcast) ? scmLinkedDocs.vectorcast.filter(Boolean) : [];
-        setLinkedDocs(regVcast.length === 0 && snapVcast.length > 0
-          ? { ...reg, vectorcast: scmLinkedDocs.vectorcast }
-          : reg);
-      } else if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs);
-    }).catch(() => { if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs); });
-  }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // (레지스트리 재조회는 위 `useRegistryLinkedDocs` 안에 있다 — 예전엔 여기 인라인
+  //  effect 였는데, ProjectSummarySection 에는 그 effect 가 아예 없어서 같은 화면의
+  //  자동 매트릭스가 옛 경로로 만들어졌다. 복제 대신 훅으로 뽑아 둘이 함께 움직인다.)
 
   // cacheKey SHAPE 단일 출처 — loadMatrix(생성·캐시히트)와 마운트 복원 effect가 같은 키를
   // 쓰도록. docs = 시험/vcast 문서 소스(loadMatrix는 재fetch한 activeDocs, 마운트는 state

@@ -5,6 +5,7 @@ import { pickScmForJob } from '../../projectLoader.js';
 import { targetConsistent } from '../../impactGuard.js';
 import { classifyGate } from '../ResultPanel.jsx';
 import { buildTraceMatrix } from '../../traceMatrix.js';
+import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
 import { clearArchMetricsCache } from '../../archMetricsCache.js';
 import PipelineHealthStrip from './PipelineHealthStrip.jsx';
 import SummaryPanel from './SummaryPanel.jsx';
@@ -97,10 +98,6 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
   // deep-review W1: analysisResult가 다른 Job의 것으로 증명되면(잡 전환 직후 stale 등)
   // 그 문서 바인딩으로 추적성 매트릭스를 생성·영속하는 오귀속을 차단한다(scmId와 동일 게이트).
   const docsConsistent = targetConsistent(analysisResult, job?.url);
-  const linkedDocs = useMemo(
-    () => (docsConsistent ? analysisResult?.matchedScm?.linked_docs || {} : {}),
-    [analysisResult, docsConsistent],
-  );
   const sourceRoot = docsConsistent ? (analysisResult?.matchedScm?.source_root || '') : '';
   const scmId = useMemo(() => {
     if (!targetConsistent(analysisResult, job?.url)) return '';
@@ -109,6 +106,15 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
       || analysisResult?.impactData?.trigger?.scm_id
       || '';
   }, [analysisResult, job]);
+
+  // ⚠ 예전엔 `analysisResult.matchedScm.linked_docs` 를 그대로 썼다 — **분석 시점
+  //   스냅샷**이라 그 뒤 설정/레지스트리에서 경로를 바꿔도 절대 갱신되지 않았고,
+  //   이 탭의 자동 추적성 매트릭스가 옛 SUTS/SITS/STS 로 만들어졌다.
+  //   SrsSdsSection 은 재조회 경로를 갖고 있었는데 여기엔 아예 없었다(판정 복제).
+  //   `docsConsistent` 오귀속 게이트는 `enabled` 로 그대로 보존한다.
+  const [linkedDocs] = useRegistryLinkedDocs(
+    scmId, analysisResult?.matchedScm?.linked_docs, docsConsistent,
+  );
 
   // ── 진행 중 작업 레지스트리 ──
   // ⚠ 진행 표시가 서브탭 **안에만** 있으면, 사용자가 다른 탭으로 옮기는 순간 "함수 축 계산 중
