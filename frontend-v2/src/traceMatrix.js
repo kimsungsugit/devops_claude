@@ -11,6 +11,7 @@
  * 요약 탭은 이 함수 호출 후 trace-summary를 재조회하면 된다(영속 → 재방문 시 재생성 없음).
  */
 import { post, authHeaders, buildUrl } from './api.js';
+import { runVectorcastRagJob } from './vcastRagJob.js';
 
 const FAIL_R = new Set(['fail', 'failed', 'false', '0', 'ng']);
 
@@ -158,9 +159,11 @@ export async function buildTraceMatrix({ linkedDocs, sourceRoot = '', jobUrl = '
   // Step 3d: VectorCAST(함수 단위 롤업, fuzzy) — SUTS와 동일 granularity로.
   progress('VectorCAST 데이터 수집 중...');
   try {
-    const rag = await post('/api/jenkins/report/vectorcast-rag', {
+    // sync 호출은 원격 IPC 직렬 파싱으로 수 분 블로킹 → 프록시/브라우저 타임아웃에 끊기면
+    // VectorCAST 없는 매트릭스가 만들어진다. 백그라운드 잡 + 폴링(응답 shape 동일)으로 받는다.
+    const rag = await runVectorcastRagJob({
       job_url: jobUrl, cache_root: cacheRoot, build_selector: buildSelector, vcast_log_paths: docs.vectorcast,
-    });
+    }, { onProgress: progress });
     const rawRows = rag?.data?.test_rows || [];
     const vcWarnings = rag?.data?.parse_warnings || rag?.parse_warnings || [];
     if (!rawRows.length && Array.isArray(vcWarnings) && vcWarnings.length) {

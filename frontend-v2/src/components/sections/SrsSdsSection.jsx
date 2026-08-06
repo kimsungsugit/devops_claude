@@ -9,6 +9,7 @@ import {
   loadDocPaths, saveDocPaths, useDocPathsSync, docPathsOverridingScm,
 } from '../../sharedInputs.js';
 import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
+import { runVectorcastRagJob } from '../../vcastRagJob.js';
 
 // 추적성 매트릭스 입력 문서 11종 — 설계(SRS/SDS/UDS)·인터페이스(HSIS)·SW시험(STS/SUTS/SITS)
 // ·시스템(SyRS상위/SyTS/SyITS)·계획(STP). '입력 문서 현황' 패널과 가림 판정이 **같은 목록**을
@@ -55,6 +56,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
     return null;
   });
   const _autoLoadedRef = useRef(false);
+  // VectorCAST 잡 폴링이 언마운트 후에도 최대 12분 계속 도는 걸 막는 생존 가드.
+  // 이 섹션은 keep-alive(display:none)라 언마운트가 드물지만, Detail 뷰가 통째로 사라질 때
+  // 폴링만 남는 것을 방지한다(가드 자체는 3줄이라 보험으로 둔다).
+  const _aliveRef = useRef(true);
+  useEffect(() => { _aliveRef.current = true; return () => { _aliveRef.current = false; }; }, []);
 
   // ⚠ 예전엔 `useMemo(…, [])` 였다 — **마운트 시 1회만** 읽는다는 뜻이다. 그런데 이
   //   섹션은 keep-alive(display:none)라 재마운트되지 않으므로, Settings 에서 문서 경로를
@@ -464,11 +470,19 @@ export default function SrsSdsSection({ job, analysisResult }) {
         const vcastLogPaths = Array.isArray(activeDocs?.vectorcast)
           ? activeDocs.vectorcast.filter(Boolean)
           : [];
-        const ragData = await post('/api/jenkins/report/vectorcast-rag', {
+        // ⚠ sync 호출이었다. 원격 IPC 직렬 파싱이라 수 분 블로킹이고, 프록시/브라우저
+        //   타임아웃에 끊기면 아래 catch 가 경고만 남긴 채 **VectorCAST 없는 매트릭스**가
+        //   만들어진다. 캐시 저장은 무조건이라(:614 의도된 결정) 그 반쪽이 그대로 굳는다.
+        //   백엔드가 이미 만들어 둔 백그라운드 잡 + 폴링으로 받는다(응답 shape 동일).
+        //   폴링은 요청 하나하나가 짧아 프록시 타임아웃에 안 걸리는 게 핵심 이득이다.
+        const ragData = await runVectorcastRagJob({
           job_url: job.url,
           cache_root: cacheRoot,
           build_selector: cfg.buildSelector || 'lastSuccessfulBuild',
           vcast_log_paths: vcastLogPaths,
+        }, {
+          onProgress: setLoadProgress,
+          shouldContinue: () => _aliveRef.current,
         });
         const rawRows = ragData?.data?.test_rows || [];
         // silent-drop 방지(P1): VectorCAST 폴더 파싱 실패/빈결과 사유(worker timeout·폴더 부재
