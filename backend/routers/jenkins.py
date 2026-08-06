@@ -4316,7 +4316,18 @@ def _load_trace_workbook(body: Dict[str, Any]):
     try:
         import openpyxl
         data = resolver.read_bytes(file_path)
-        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        # ⚠ read_only 는 **필수**다. 정상 모드는 시트의 셀 전부를 Cell 객체로 물화하는데,
+        #   실측(2026-08-06, KJPDS02_PV) SUTS 4.75MB 로드가 **28.5초**(read_only 0.50초,
+        #   56배)다. 엔드포인트 왕복은 36초까지 갔다 — 사용자에게는 "SITS 는 바뀌었는데
+        #   SUTS 만 안 바뀐다"로 보인다(SITS 는 이미 read_only 라 5.6초).
+        #   같은 파일의 SITS(4815)·SyTS(5094) 로더는 처음부터 read_only 였고, 이 로더만
+        #   빠져 있었다 — 판정 복제.
+        #
+        #   ⚠⚠ read_only 워크시트에 `ws.cell(r, c)` 랜덤 접근을 하면 호출마다 재스캔이라
+        #   O(행²)로 폭주한다(이 저장소 실측 전례: SITS 75분 → 0.9초). 이 파서는 그 접근을
+        #   13곳에서 하므로 `_GridSheet` 로 **한 번만 순회해 값 격자를 뜬 뒤** 넘긴다.
+        #   플래그만 뒤집으면 되레 느려진다 — 둘은 한 세트다.
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     except Exception as exc:
@@ -4334,6 +4345,57 @@ def _load_trace_workbook(body: Dict[str, Any]):
 # SUTS(v0.10)는 189열이라 200 캡을 아슬히 통과했으나 더 넓은 릴리스에서 같은 침묵 손실
 # 위험이 있어 헤더 탐지도 이 상한으로 통일한다(하드 200 캡 제거). 성능 영향 없음(둘 다 선형).
 _MAX_SCAN_COLS = 1024
+
+
+class _GridSheet:
+    """read_only 워크시트를 **한 번만** 순회해 만든 in-memory 값 격자.
+
+    `ws.cell(r, c).value` / `.max_row` / `.max_column` 만 흉내내므로, 기존 파서 로직을
+    한 줄도 안 바꾸고 그대로 얹을 수 있다(랜덤 접근 13곳).
+
+    ## 왜 필요한가 (둘 다 실측)
+
+    - **정상 모드**: 셀 전부를 Cell 객체로 물화 → SUTS 4.75MB 로드가 28.5초.
+    - **read_only + 랜덤 `.cell()`**: 호출마다 재스캔 → O(행²) 폭주. 이 저장소는
+      같은 형태로 SITS 파서가 **75분** 걸린 전례가 있다.
+
+    한 번의 `iter_rows(values_only=True)` 로 값만 뜨면 둘 다 피한다(로드 0.5초 + 순회).
+    Cell 객체가 아니라 **값 튜플**이라 메모리도 정상 모드보다 가볍다.
+
+    열은 `_MAX_SCAN_COLS` 로 자른다 — 파서가 그 너머를 안 보므로 결과는 동일하고,
+    비정상적으로 넓은 시트에서 메모리가 터지는 것만 막는다.
+    """
+
+    __slots__ = ("_rows", "max_row", "max_column")
+
+    def __init__(self, ws, max_cols: int = _MAX_SCAN_COLS):
+        rows: list[tuple] = []
+        width = 0
+        for row in ws.iter_rows(values_only=True):
+            if row is None:
+                rows.append(())
+                continue
+            trimmed = row[:max_cols]
+            width = max(width, len(trimmed))
+            rows.append(trimmed)
+        self._rows = rows
+        self.max_row = len(rows)
+        self.max_column = width
+
+    class _Cell:
+        __slots__ = ("value",)
+
+        def __init__(self, value):
+            self.value = value
+
+    def cell(self, row: int, column: int):
+        """1-based 접근. 범위 밖은 openpyxl 과 같이 `value=None` 을 돌려준다."""
+        if row < 1 or column < 1 or row > len(self._rows):
+            return self._Cell(None)
+        data = self._rows[row - 1]
+        if column > len(data):
+            return self._Cell(None)
+        return self._Cell(data[column - 1])
 
 
 def _detect_trace_header_cols(ws, unit_header_extra=()):
@@ -4425,6 +4487,11 @@ def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
 
     if not trace_ws:
         return [], list(wb.sheetnames)
+
+    # 아래 로직은 `ws.cell(r, c)` 랜덤 접근이 13곳이다. 워크북이 read_only 로 열리므로
+    # (성능 — `_load_trace_workbook` 주석 참조) 여기서 **한 번만** 순회해 값 격자로 바꾼다.
+    # 이 줄이 없으면 read_only 랜덤 접근이 O(행²)로 폭주한다(SITS 75분 전례).
+    trace_ws = _GridSheet(trace_ws)
 
     vcast_rows: List[Dict[str, Any]] = []
     if trace_type == "matrix":
