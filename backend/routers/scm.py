@@ -301,18 +301,41 @@ def scm_linked_docs_status(entry_id: str) -> Dict[str, Any]:
             #   다른 말이고, 접으면 멀쩡한 문서를 없다고 보고하게 된다.
             return {"exists": None, "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
 
+    # ── 다른 프로젝트 문서가 등록돼 있는가 ────────────────────────────────
+    # 존재 확인만으로는 이걸 못 본다. 실측(2026-08-07): `hdpdm01` 항목의 `uds` 가
+    # `(KJPDS02_SwUDS)…` 였는데, 파일이 없어서 "파일 없음"으로만 보고됐다 — **진짜 문제가
+    # 가려진 것**이다. 파일이 있었다면 다른 프로젝트의 설계서가 이 프로젝트의 추적성
+    # 증거로 조용히 들어갔을 것이고, ISO 26262 산출물에서 그건 되돌리기 어렵다.
+    # (같은 사고를 저장소가 이미 두 번 고쳤다 — `_pick_doc_path` 저장소 docs/ 바꿔치기,
+    #  SUTS ASIL 이 HDPDM01 로 채워지던 건. 여긴 등록 단계라 더 앞이다.)
+    from report_gen.doc_kind import cross_project_verdict
+    owner_texts = [entry_id, entry.name, entry.source_root, entry.scm_url]
+
+    def _identity(path: str) -> Dict[str, Any]:
+        v = cross_project_verdict(owner_texts, path)
+        # ⚠ same_project=None(판정 불가)을 '확인됨'으로 접지 않는다 — 그대로 올려서
+        #   화면이 "확인함"과 "모름"을 구분할 수 있게 한다.
+        return {"same_project": v["same_project"], "identity_reason": v["reason"],
+                "doc_tokens": v.get("doc_tokens") or []}
+
     items: Dict[str, Any] = {}
     for key, value in entry.linked_docs.model_dump(mode="json").items():
         if isinstance(value, list):
-            probed = [_probe(p) for p in value if str(p or "").strip()]
+            paths = [p for p in value if str(p or "").strip()]
+            probed = [_probe(p) for p in paths]
+            ids = [_identity(str(p)) for p in paths]
             items[key] = {
                 "total": len(probed),
                 "missing": sum(1 for r in probed if r["exists"] is False),
                 "unknown": sum(1 for r in probed if r["exists"] is None),
+                "foreign_project": sum(1 for r in ids if r["same_project"] is False),
             }
         elif str(value or "").strip():
-            items[key] = _probe(str(value))
-    return {"ok": True, "entry_id": entry_id, "items": items}
+            items[key] = {**_probe(str(value)), **_identity(str(value))}
+    foreign = sorted(k for k, v in items.items()
+                     if v.get("same_project") is False or v.get("foreign_project"))
+    return {"ok": True, "entry_id": entry_id, "items": items,
+            "foreign_project_keys": foreign}
 
 
 @router.get("/api/scm/status/{entry_id}")

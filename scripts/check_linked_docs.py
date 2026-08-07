@@ -91,20 +91,34 @@ def _probe(resolver, path: str) -> tuple[str, str]:
 
 
 def audit(resolver, entries) -> int:
-    """등록 문서 존재 여부 감사. 반환값 = 문제(MISSING+UNKNOWN) 총건수."""
+    """등록 문서 감사 — 존재 여부 **+ 다른 프로젝트 문서 등록**. 반환값 = 문제 총건수.
+
+    ⚠ 존재 확인만으론 후자를 못 본다. 실측(2026-08-07): `hdpdm01` 의 `uds` 가
+    `(KJPDS02_SwUDS)…` 였는데 파일이 없어 "파일 없음"으로만 보고됐다 — **진짜 문제가
+    가려진 것**이다. 파일이 있었다면 다른 프로젝트 설계서가 이 프로젝트의 추적성 증거로
+    조용히 들어간다.
+    """
+    from report_gen.doc_kind import cross_project_verdict
+
     problems = 0
     for entry in entries:
         linked = entry.get("linked_docs") or {}
+        owner = [entry.get("id"), entry.get("name"), entry.get("source_root"), entry.get("scm_url")]
         rows: list[tuple[str, str, str, str]] = []
+        foreign: list[tuple[str, str, list]] = []
         for key, value in linked.items():
             for path in (value if isinstance(value, list) else ([value] if value else [])):
                 if not str(path or "").strip():
                     continue
                 state, reason = _probe(resolver, str(path))
                 rows.append((key, str(path), state, reason))
+                v = cross_project_verdict(owner, str(path))
+                if v["same_project"] is False:
+                    foreign.append((key, str(path), v["doc_tokens"]))
         bad = [r for r in rows if r[2] != "OK"]
-        problems += len(bad)
-        print(f"\n[{entry.get('id')}] {entry.get('name')} — 등록 {len(rows)}개 / 문제 {len(bad)}건")
+        problems += len(bad) + len(foreign)
+        print(f"\n[{entry.get('id')}] {entry.get('name')} — 등록 {len(rows)}개 / "
+              f"문제 {len(bad)}건 / 타 프로젝트 {len(foreign)}건")
         for key, path, state, reason in rows:
             if state == "OK":
                 continue
@@ -112,7 +126,10 @@ def audit(resolver, entries) -> int:
             print(f"   {mark}{key:9s} …{path[-72:]}")
             if reason:
                 print(f"              → {reason}")
-        if not bad:
+        for key, path, toks in foreign:
+            print(f"   ⚠ 타프로젝트 {key:9s} …{path[-64:]}")
+            print(f"              → 문서 토큰 {toks} 가 이 항목 신원과 겹치지 않는다")
+        if not bad and not foreign:
             print("   ✓ 전부 확인됨")
     return problems
 

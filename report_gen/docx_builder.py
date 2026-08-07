@@ -1608,27 +1608,22 @@ def _add_blank_table(
 
 
 # 참조 SUDS 신원 판정용 — 문서 종류/일반 명사는 프로젝트 식별자가 아니다.
-_REF_TOKEN_STOPWORDS = frozenset({
-    "SUDS", "SWUDS", "SRS", "SWRS", "SDS", "SWSA", "UDS", "STS", "SUTS", "SITS",
-    "SYRS", "SYTS", "HSIS", "SPEC", "SPECIFICATION", "SOFTWARE", "UNIT", "DESIGN",
-    "DOCUMENT", "REPORT", "FINAL", "DRAFT", "TEMPLATE", "TOKENIZED", "LOCAL",
-    # `reference.docx` 같은 범용 파일명이 `REFERENCE` 를 프로젝트 ID 로 만들면,
-    # 신원 판정이 "확인 불가" 가 아니라 "다른 프로젝트" 로 잘못 확정된다(테스트가 잡았다).
-    "REFERENCE", "REVISION", "VERSION", "COMMON", "SAMPLE", "OUTPUT",
-})
+# ⚠ 2026-08-07: 정의가 `report_gen/doc_kind.py` 로 **승격**됐다(SCM 연결 문서 신원 검사도
+#   같은 판정을 쓴다 — 사본을 두면 이 저장소 단골인 "한쪽만 수정"이 된다).
+#   아래 두 이름은 기존 참조를 위한 별칭일 뿐이다.
+from report_gen.doc_kind import (  # noqa: E402 — 별칭 바인딩 지점에 두어 출처를 명시
+    PROJECT_TOKEN_STOPWORDS,
+    project_tokens,
+)
+
+_REF_TOKEN_STOPWORDS = PROJECT_TOKEN_STOPWORDS
 # ISO 26262 등급 어휘. 참조 문서 파싱이 어긋나면 프로토타입 문자열 같은 게 ASIL 로 들어온다
 # — 실측: 참조 SUDS 416 블록 중 1건이 `asil='void s_Init_SystemManagementFunc( void )'`.
 _VALID_ASIL = frozenset({"A", "B", "C", "D", "QM"})
 
 
-def _project_tokens(text: Any) -> Set[str]:
-    """문자열에서 프로젝트 식별자 후보 토큰을 뽑는다(대문자 영숫자 5자 이상)."""
-    out: Set[str] = set()
-    for tok in re.split(r"[^A-Za-z0-9]+", str(text or "")):
-        t = tok.strip().upper()
-        if len(t) >= 5 and t not in _REF_TOKEN_STOPWORDS and not t.isdigit():
-            out.add(t)
-    return out
+# 토큰 추출도 doc_kind 단일 구현을 그대로 쓴다(별칭).
+_project_tokens = project_tokens
 
 
 def _reference_identity_verdict(uds_payload: Any, ref_path: Path) -> Dict[str, Any]:
