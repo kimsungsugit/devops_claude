@@ -42,7 +42,7 @@ vi.mock('../views/Detail.jsx', () => ({
 vi.mock('../views/Settings.jsx', () => ({
   default: () => <div data-testid="settings">Settings</div>,
 }));
-vi.mock('../views/QualityDashboard.jsx', () => ({
+vi.mock('../components/sections/QualityGateSection.jsx', () => ({
   default: () => <div data-testid="quality">Quality</div>,
 }));
 
@@ -82,7 +82,7 @@ describe('탭별 권한 출처 — 4조합 진리표', () => {
   it('localStorage=F, backend=F → 둘 다 숨김', async () => {
     mockAuthMe({ isAdmin: false });
     renderApp();
-    await waitFor(() => expect(tab('Quality')).toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).toBeNull());
     expect(tab('설정')).toBeNull();
   });
 
@@ -90,14 +90,14 @@ describe('탭별 권한 출처 — 4조합 진리표', () => {
     localStorage.setItem('devops_admin_mode', 'true');
     mockAuthMe({ isAdmin: false });
     renderApp();
-    await waitFor(() => expect(tab('Quality')).toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).toBeNull());
     expect(tab('설정')).not.toBeNull();
   });
 
   it('localStorage=F, backend=T → Quality 만 보인다', async () => {
     mockAuthMe({ isAdmin: true });
     renderApp();
-    await waitFor(() => expect(tab('Quality')).not.toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).not.toBeNull());
     expect(tab('설정')).toBeNull();
   });
 
@@ -105,7 +105,7 @@ describe('탭별 권한 출처 — 4조합 진리표', () => {
     localStorage.setItem('devops_admin_mode', 'true');
     mockAuthMe({ isAdmin: true });
     renderApp();
-    await waitFor(() => expect(tab('Quality')).not.toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).not.toBeNull());
     expect(tab('설정')).not.toBeNull();
   });
 });
@@ -116,7 +116,7 @@ describe('백엔드 장애 시', () => {
     mockAuthMe({ isAdmin: false, fail: true });
     renderApp();
     // `/api/auth/me` 401 → AdminContext 는 isAdmin:false 로 접는다.
-    await waitFor(() => expect(tab('Quality')).toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).toBeNull());
     expect(tab('설정')).not.toBeNull();
   });
 });
@@ -127,16 +127,16 @@ describe('loading 축', () => {
     mockAuthMe({ isAdmin: true, delayMs: 50 });
     renderApp();
     // 아직 loading — 힌트로 이미 보인다
-    expect(tab('Quality')).not.toBeNull();
-    await waitFor(() => expect(tab('Quality')).not.toBeNull());
+    expect(tab('품질 관제')).not.toBeNull();
+    await waitFor(() => expect(tab('품질 관제')).not.toBeNull());
   });
 
   it('힌트가 틀렸으면 응답 후 정정된다', async () => {
     localStorage.setItem('devops_admin_mode', 'true');
     mockAuthMe({ isAdmin: false, delayMs: 20 });
     renderApp();
-    expect(tab('Quality')).not.toBeNull();      // 힌트
-    await waitFor(() => expect(tab('Quality')).toBeNull());  // 확정
+    expect(tab('품질 관제')).not.toBeNull();      // 힌트
+    await waitFor(() => expect(tab('품질 관제')).toBeNull());  // 확정
   });
 
   it('힌트가 없으면 응답 전에는 보이지 않는다', async () => {
@@ -145,8 +145,8 @@ describe('loading 축', () => {
     //    없앤 false affordance 가 축소된 형태로 되살아난다.
     mockAuthMe({ isAdmin: true, delayMs: 50 });
     renderApp();
-    expect(tab('Quality')).toBeNull();          // 힌트 없음 → 표시 안 함
-    await waitFor(() => expect(tab('Quality')).not.toBeNull());  // 확정 후 표시
+    expect(tab('품질 관제')).toBeNull();          // 힌트 없음 → 표시 안 함
+    await waitFor(() => expect(tab('품질 관제')).not.toBeNull());  // 확정 후 표시
   });
 });
 
@@ -155,10 +155,10 @@ describe('권한이 사라지면 보고 있던 뷰도 닫힌다', () => {
     localStorage.setItem('devops_admin_mode', 'true');
     mockAuthMe({ isAdmin: true });
     renderApp();
-    await waitFor(() => expect(tab('Quality')).not.toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).not.toBeNull());
 
     const { default: userEvent } = await import('@testing-library/user-event');
-    await userEvent.click(tab('Quality'));
+    await userEvent.click(tab('품질 관제'));
     expect(screen.getByTestId('quality')).toBeVisible();
 
     // 토큰 만료·백엔드 재기동 — AdminContext 가 isAdmin:false 로 접는다
@@ -167,7 +167,7 @@ describe('권한이 사라지면 보고 있던 뷰도 닫힌다', () => {
       window.dispatchEvent(new Event('admin-mode-changed'));
     });
 
-    await waitFor(() => expect(tab('Quality')).toBeNull());
+    await waitFor(() => expect(tab('품질 관제')).toBeNull());
     // ⚠ 탭 버튼만 사라지고 화면이 남으면 안 된다 — 렌더 중 조정으로 활성 탭을 돌린다.
     await waitFor(() => expect(screen.getByTestId('quality')).not.toBeVisible());
     expect(screen.getByTestId('dashboard')).toBeVisible();

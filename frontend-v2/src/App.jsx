@@ -3,7 +3,7 @@ import { getInitialTheme, saveTheme, loadJenkinsConfig, saveJenkinsConfig, getUs
 import Dashboard from './views/Dashboard.jsx';
 import Detail from './views/Detail.jsx';
 import Settings from './views/Settings.jsx';
-import QualityDashboard from './views/QualityDashboard.jsx';
+import QualityGateSection from './components/sections/QualityGateSection.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { useAdminMode } from './contexts/AdminContext.jsx';
 
@@ -222,9 +222,13 @@ function StatusFooter() {
  * 판정했다. 실권한은 backend `admin_users.json` 이라 양방향으로 어긋난다.
  * 통째로 backend 로 옮기는 것(B)도 오답이다 — 두 탭의 성질이 다르다:
  *
- *   `backend` — Quality: 호출 3종이 전부 라우터 레벨 `require_admin`
- *               (`backend/routers/quality.py:16-20`)이라 비관리자에게 여는 것은
- *               **100% false affordance** 다. 열어도 403 뿐이라 잃는 기능이 0이다.
+ *   `backend` — 품질 관제: **전역**(모든 프로젝트) 이력·추세·정책을 보는 운영 화면이다.
+ *               ⚠ 2026-08-07 에 근거가 바뀌었다. 예전 근거는 "`/api/quality/*` 가
+ *               라우터 전체 `require_admin` 이라 열어도 403 뿐 = false affordance" 였는데,
+ *               그 라우터는 이제 **조회 개방**(`require_user`)이다. 그래도 탭을 admin 에
+ *               두는 이유는 다른 데 있다 — 일반 사용자에게 필요한 건 *자기 프로젝트의*
+ *               게이트이고 그건 `프로젝트 결과 > 🚦 품질 게이트` 가 (같은 컴포넌트로)
+ *               이미 열려 있다. 전 프로젝트 이력을 한 화면에 늘어놓는 건 운영 성격이다.
  *   `local`   — 설정: `health.py:233-239` 가 *"비-admin 이 직접 전환해야 한다"* 고
  *               명시한 file-mode 를 담고 있고, `localStorage` 로만 도는 핸들러도 있다
  *               (doc paths·shared inputs·quality 설정). backend authority 로 옮기면
@@ -239,7 +243,7 @@ function StatusFooter() {
 const ALL_TABS = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'detail',    label: '프로젝트 결과' },
-  { id: 'quality',   label: 'Quality', authority: 'backend' },
+  { id: 'quality',   label: '품질 관제', authority: 'backend' },
   { id: 'settings',  label: '설정', authority: 'local' },
 ];
 
@@ -269,11 +273,13 @@ export default function App() {
 
   // ⚠ 뷰는 **처음 열어 본 뒤에만** 마운트한다(그 뒤로는 keep-alive — display 토글).
   //
-  // 예전엔 4뷰가 전부 **항상 마운트**됐다(조건부 언마운트 0건). 그래서 Quality 탭이
-  // 보이지 않는 사용자에게도 `QualityDashboard` 의 mount effect 가 즉시 발화하고,
-  // `/api/quality/*` 는 라우터 전체가 admin 전용이라(`backend/routers/quality.py:16-20`)
-  // 403 을 받아 **매 앱 로드마다 빨간 에러 토스트 + '데이터 로드 실패' 패널**이 떴다.
-  // 사용자가 아무것도 안 눌렀는데 실패가 보인다.
+  // 예전엔 4뷰가 전부 **항상 마운트**됐다(조건부 언마운트 0건). 그래서 품질 탭이
+  // 보이지 않는 사용자에게도 그 뷰의 mount effect 가 즉시 발화하고, `/api/quality/*` 가
+  // 당시엔 라우터 전체 admin 전용이라 403 을 받아 **매 앱 로드마다 빨간 에러 토스트 +
+  // '데이터 로드 실패' 패널**이 떴다. 사용자가 아무것도 안 눌렀는데 실패가 보인다.
+  //
+  // (2026-08-07: 그 라우터는 조회 개방됐지만 lazy 마운트는 그대로 둔다 — 403 이 아니어도
+  //  안 보는 화면 때문에 매 로드마다 요청을 두 번 더 보낼 이유가 없다.)
   //
   // Detail 이 섹션에 쓰는 visited-lazy 와 같은 방식이다(`Detail.jsx` 의 visited).
   // 부수 효과로 admin 도 Quality 탭을 안 열면 요청이 0건이 된다.
@@ -438,7 +444,11 @@ export default function App() {
                   )}
                   {isMounted('quality') && (
                     <div style={{ display: activeTab === 'quality' ? 'block' : 'none' }}>
-                      <QualityDashboard />
+                      {/* analysisResult 를 넘기지 않는다 = **전역 스코프**(전 프로젝트).
+                          같은 컴포넌트가 `프로젝트 결과 > 🚦 품질 게이트` 에서는
+                          analysisResult 를 받아 그 프로젝트로 좁힌다 — 화면 두 벌이
+                          서로 다른 판정을 내던 것을 한 벌로 합친 결과다. */}
+                      <QualityGateSection />
                     </div>
                   )}
                   {isMounted('settings') && (

@@ -28,7 +28,7 @@ vi.mock('../views/Settings.jsx', () => ({
 // 예전엔 4뷰가 전부 항상 마운트돼, 보이지도 않는 Quality 의 mount effect 가
 // admin 전용 endpoint 를 때려 비관리자에게 매 로드마다 403 토스트가 떴다.
 const qualityMountSpy = vi.fn();
-vi.mock('../views/QualityDashboard.jsx', () => ({
+vi.mock('../components/sections/QualityGateSection.jsx', () => ({
   default: () => {
     qualityMountSpy();
     return <div data-testid="quality">Quality</div>;

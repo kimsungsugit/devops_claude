@@ -10,7 +10,7 @@ import AiAssistSection from '../components/sections/AiAssistSection.jsx';
 import ImpactGuideSection from '../components/sections/ImpactGuideSection.jsx';
 import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx';
 import ProjectSummarySection from '../components/sections/ProjectSummarySection.jsx';
-import GateReviewSection from '../components/sections/GateReviewSection.jsx';
+import QualityGateSection from '../components/sections/QualityGateSection.jsx';
 
 const SECTIONS = [
   // 빌드 정보 + SCM 통합 — SCM은 빌드 로그 아래에 배치(BuildInfoWithScmSection). **기본 진입 탭**.
@@ -31,7 +31,7 @@ const SECTIONS = [
   // 최상위 4뷰는 `App.jsx` 에서 방문 전까지 마운트되지 않지만, Detail 섹션의
   // visited-lazy 는 **첫 진입 전 요청 0건**이라 비관리자에게 403 토스트가 뜰 여지가
   // 아예 없다. 사용자 요청의 "그 프로젝트에서" 도 Detail(프로젝트 결과) 스코프를 가리킨다.
-  { id: 'gate',    icon: '🚦', label: '품질 게이트',   Component: GateReviewSection },
+  { id: 'gate',    icon: '🚦', label: '품질 게이트',   Component: QualityGateSection },
   // AI 어시스턴트는 성격이 다른 대화형 도구 — 좌측 nav에서 구분선으로 앞 5개(결과/분석/생성)와 분리.
   { id: 'ai',      icon: '🤖', label: 'AI 어시스턴트', Component: AiAssistSection, dividerBefore: true },
 ];
