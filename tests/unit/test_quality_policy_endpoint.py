@@ -32,13 +32,15 @@ def client(monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from backend.dependencies.admin import require_admin
+    from backend.dependencies.auth import require_user
     from backend.routers import quality
 
     app = FastAPI()
     app.include_router(quality.router)
-    # 권한 계층은 이 파일의 검증 대상이 아니다 — 별도 테스트가 덮는다.
-    app.dependency_overrides[require_admin] = lambda: "tester"
+    # 권한 계층은 이 파일의 검증 대상이 아니다 — `test_quality_evidence.py` 가 덮는다.
+    # (2026-08-07: 라우터 게이트가 `require_admin` → `require_user` 로 바뀌었다.
+    #  조회 전용이라 admin 이 아니라 로그인만 요구한다 — 그 결정은 저쪽에서 검증.)
+    app.dependency_overrides[require_user] = lambda: "tester"
     return TestClient(app)
 
 

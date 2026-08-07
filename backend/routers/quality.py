@@ -7,17 +7,50 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend.dependencies.admin import require_admin
+from backend.dependencies.auth import require_user
 
 _logger = logging.getLogger("devops_api.quality")
 
-# 형제 evidence 라우터(swsa/swut/swit/swreport)와 동일하게 라우터 전체 admin only.
-# 프론트 Quality 탭의 adminOnly 는 클라이언트 토글일 뿐이라 backend 게이트가 유일 방어선.
+# **조회 전용 라우터 — 로그인만 요구한다**(2026-08-07 사용자 결정).
+#
+# 예전엔 형제 evidence 라우터(swsa/swut/swit/swreport)를 따라 라우터 전체가
+# `require_admin` 이었다. 그 근거는 "빌더 실행 = evidence 생성" 이라 admin 만
+# 허용한다는 것인데, **여기는 생성이 아니라 조회**다. 쓰기 endpoint 가 애초에 0개고,
+# 게이트 결과는 팀이 공유해야 할 정보다. 문서 생성 화면에 게이트 보드를 두는 이상
+# 일반 사용자가 403 을 보면 화면 절반이 죽는다.
+#
+# 개방 범위는 "로그인한 사용자" 까지다 — 미인증(`default`)은 여전히 401.
 router = APIRouter(
     prefix="/api/quality",
     tags=["quality"],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_user)],
 )
+
+
+def _parse_meta(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """`meta_json` 문자열 → dict. 깨진 값은 **삼키지 않고** None + 경고."""
+    if not raw:
+        return None
+    try:
+        import json
+        got = json.loads(raw)
+        return got if isinstance(got, dict) else None
+    except (ValueError, TypeError):
+        _logger.warning("meta_json 파싱 실패 — 표시에서 제외한다: %.80s", raw)
+        return None
+
+
+def _gate_reason(scores) -> Optional[str]:
+    """`gate_reason:<code>` 마커 행에서 사유 코드를 뽑는다.
+
+    `recorder.py` 가 판정 사유를 비게이트 지표 행으로 남긴다(스키마 변경 회피).
+    사유가 없는 정상 판정에는 행 자체가 없으므로 None 이 곧 "사유 없음" 이다.
+    """
+    for s in (scores or []):
+        name = str(getattr(s, "metric_name", "") or "")
+        if name.startswith("gate_reason:"):
+            return name.split(":", 1)[1] or None
+    return None
 
 
 def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
@@ -26,9 +59,20 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
         "id": run.id,
         "run_uuid": run.run_uuid,
         "doc_type": run.doc_type,
+        # 프로젝트 축. `project_root` 는 어휘가 doc_type 마다 달라 그룹핑에 못 쓴다 —
+        # 화면은 `scm_id` 를 쓰고, `project_root` 는 원본 증거로 함께 낸다.
+        "scm_id": run.scm_id,
         "project_root": run.project_root,
         "target_function": run.target_function,
         "status": run.status,
+        # meta_json 에 ASIL 등급·release 버전이 있는데 그동안 응답에 없어 화면이
+        # 못 봤다(swut/swit `{"asil_level","kind","release_sw_version"}`).
+        "meta": _parse_meta(run.meta_json),
+        "error_msg": run.error_msg,
+        # 판정 **사유**. FAIL/판정불가의 이유를 화면이 말할 수 있게 한다.
+        # None = 사유 없음(정상 판정) — 사유 미기록(구 run)과는 구분되지 않는다는
+        # 한계가 있고, 그건 `gated_metric_count` 부재로 따로 드러난다.
+        "gate_reason": _gate_reason(getattr(run, "scores", None)),
         # 저장은 tz-naive UTC(datetime.now(utc)) → 응답에 UTC offset 명시.
         # (naive isoformat 은 'Z' 없어 JS가 로컬해석 → KST 등에서 날짜 하루 밀림)
         "created_at": (
@@ -67,12 +111,15 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
 @router.get("/runs")
 def list_runs(
     doc_type: Optional[str] = Query(None, description="uds|sts|suts"),
-    project_root: Optional[str] = Query(None),
+    scm_id: Optional[str] = Query(None, description="SCM registry entry id (프로젝트 축)"),
+    project_root: Optional[str] = Query(None, description="레거시 축 — 어휘 혼재라 정확일치만"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
     """생성 이력 목록 (summary 포함)."""
     try:
+        from sqlalchemy.orm import selectinload
+
         from workflow.quality.db import get_session, init_db
         from workflow.quality.models import GenerationRun
     except ImportError:
@@ -84,9 +131,17 @@ def list_runs(
         q = session.query(GenerationRun)
         if doc_type:
             q = q.filter(GenerationRun.doc_type == doc_type.lower().strip())
+        if scm_id:
+            q = q.filter(GenerationRun.scm_id == scm_id.strip())
         if project_root:
             q = q.filter(GenerationRun.project_root == project_root)
         total = q.count()
+        # summary/scores 를 미리 적재한다. `_run_to_dict` 가 둘 다 만지므로
+        # lazy 로 두면 목록 50건에 100+ 왕복이 붙는다(N+1).
+        q = q.options(
+            selectinload(GenerationRun.summary),
+            selectinload(GenerationRun.scores),
+        )
         # created_at 동률 시 id 2차키로 결정적 정렬 (동시/근접 타임스탬프 역전 방지)
         runs = (
             q.order_by(GenerationRun.created_at.desc(), GenerationRun.id.desc())
@@ -131,9 +186,59 @@ def get_run(run_id: int) -> Dict[str, Any]:
         return _run_to_dict(run, include_scores=True)
 
 
+@router.get("/runs/{run_id}/evidence")
+def get_run_evidence(run_id: int) -> Dict[str, Any]:
+    """"왜 이 점수인가" 의 근거 — 산출물 옆 사이드카 3종을 읽어 낸다.
+
+    ## 왜 run_id 만 받나 (보안)
+
+    사이드카 경로를 **클라이언트가 보내지 않는다**. 서버가 DB 의 `output_path` 를
+    꺼내 형제 파일을 읽으므로, 경로 traversal 이 성립할 입구 자체가 없다. 파일
+    경로를 쿼리로 받았다면 검증 로직이 필요했고, 그건 우회 가능한 방어다.
+
+    ## 응답 계약
+
+    세 섹션(`gate_report` / `confidence` / `docx_validate`)은 각각 `present` 를
+    갖고, `False` 면 `reason` 이 붙는다. **부재를 빈 dict 나 0 으로 내지 않는다** —
+    화면이 그걸 "근거상 문제 없음" 으로 그리면 그게 곧 거짓 증거다.
+
+    산출물이 없는 run(실측상 다수 — `output_path` 는 오래 기록되지 않았다)도
+    404 가 아니라 200 + `output_path_present: false` 다. run 은 실재하니까.
+    """
+    try:
+        from workflow.quality.db import get_session, init_db
+        from workflow.quality.models import GenerationRun
+    except ImportError:
+        raise HTTPException(status_code=503, detail="quality module not available") from None
+
+    init_db()
+
+    with get_session() as session:
+        run = session.query(GenerationRun).filter_by(id=run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
+        output_path = run.output_path
+        doc_type = run.doc_type
+
+    try:
+        from report_gen.evidence import read_evidence
+    except ImportError:
+        raise HTTPException(status_code=503, detail="evidence module not available") from None
+
+    payload = read_evidence(output_path or "")
+    payload["run_id"] = run_id
+    payload["doc_type"] = doc_type
+    payload["output_path"] = output_path
+    # 사이드카는 UDS 파이프라인 산출물이다. 다른 doc_type 에서 present=False 가
+    # 뜨는 건 결함이 아니라 정상이라는 걸 화면이 구분할 수 있게 표시한다.
+    payload["sidecars_expected"] = (str(doc_type or "").lower() == "uds")
+    return payload
+
+
 @router.get("/trend")
 def get_trend(
     doc_type: Optional[str] = Query(None, description="uds|sts|suts (생략/all = 전체)"),
+    scm_id: Optional[str] = Query(None, description="SCM registry entry id (프로젝트 축)"),
     project_root: Optional[str] = Query(None),
     target_function: Optional[str] = Query(None),
     last_n: int = Query(20, ge=1, le=100),
@@ -153,6 +258,8 @@ def get_trend(
         # 프론트 "전체"(doc_type 생략) → 미필터. list_runs 와 동일한 전체 조회 의미.
         if dt and dt != "all":
             q = q.filter(GenerationRun.doc_type == dt)
+        if scm_id:
+            q = q.filter(GenerationRun.scm_id == scm_id.strip())
         if project_root:
             q = q.filter(GenerationRun.project_root == project_root)
         if target_function:

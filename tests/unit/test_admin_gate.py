@@ -71,10 +71,24 @@ _ENDPOINTS = [
     ("POST", "/api/file-mode/add-allowed-prefix", {"prefix": "U:/test"}),
     ("POST", "/api/file-mode/remove-allowed-prefix", {"prefix": "U:/test"}),
     ("POST", "/api/file-mode/browse-file", {"kind": "file"}),
-    # Quality (4) — ISO 26262 품질 evidence, 형제 라우터와 동일 admin only
+]
+
+# `/api/quality/*` 는 **의도적으로 이 목록에서 빠졌다** (2026-08-07 사용자 결정).
+#
+# 예전엔 형제 evidence 라우터(swut/swit/file-mode)를 따라 admin only 였는데, 그
+# 근거는 "빌더 실행 = evidence 생성" 이라 아무나 못 돌리게 한다는 것이다. 품질
+# 라우터는 **쓰기 endpoint 가 0개인 조회 전용**이라 그 근거가 성립하지 않고,
+# 문서 생성 화면에 게이트 보드를 두는 이상 일반 사용자가 403 이면 화면 절반이 죽는다.
+#
+# 지우기만 하면 "왜 빠졌는지" 와 "얼마나 열렸는지" 가 함께 사라지므로, 아래
+# `TestQualityIsLoginOnly` 가 새 계약을 **양방향으로** 못박는다 — 비관리자는 통과하고
+# 미인증은 여전히 막힌다. 누가 admin 게이트를 되돌리면 그쪽이 실패한다.
+_LOGIN_ONLY_ENDPOINTS = [
     ("GET", "/api/quality/runs", None),
     ("GET", "/api/quality/runs/1", None),
+    ("GET", "/api/quality/runs/1/evidence", None),
     ("GET", "/api/quality/trend", None),
+    ("GET", "/api/quality/policy", None),
     ("POST", "/api/quality/runs/1/advice", {}),
 ]
 
@@ -88,9 +102,42 @@ def _call(method, path, body, user_header):
     return client.post(path, json=body or {}, headers=headers)
 
 
+@pytest.mark.parametrize("method,path,body", _LOGIN_ONLY_ENDPOINTS)
+class TestQualityIsLoginOnly:
+    """`/api/quality/*` 는 admin 이 아니라 **로그인**만 요구한다.
+
+    admin 게이트를 벗긴 결정을 양방향으로 못박는다:
+      - 되돌림 방지: 누가 `require_admin` 을 다시 걸면 `test_non_admin_can_read` 실패
+      - 과개방 방지: 누가 dependency 를 통째로 빼면 `test_anonymous_still_rejected` 실패
+    """
+
+    def test_non_admin_can_read(self, method, path, body):
+        """비관리자도 조회할 수 있다 — 403 ADMIN_REQUIRED 가 뜨면 안 된다."""
+        r = _call(method, path, body, user_header="guest")
+        assert r.status_code != 403, (
+            f"품질 조회가 비관리자에게 막혔다 (status=403, path={path}). "
+            f"라우터 게이트가 require_admin 으로 되돌아갔는지 확인할 것: {r.text[:200]}"
+        )
+        # run_id=1 이 없을 수 있으므로 404 는 정상. 401 은 신원 문제라 여기선 실패.
+        assert r.status_code in (200, 404, 503), (
+            f"예상 밖 status={r.status_code} path={path}: {r.text[:200]}"
+        )
+
+    def test_anonymous_still_rejected(self, method, path, body):
+        """미인증(X-User 없음)은 여전히 막힌다 — 개방은 '로그인까지' 다."""
+        r = _call(method, path, body, user_header=None)
+        assert r.status_code in (401, 403), (
+            f"미인증 요청이 통과했다 (status={r.status_code}, path={path}) — "
+            f"라우터 dependency 가 통째로 빠졌는지 확인할 것"
+        )
+
+
 @pytest.mark.parametrize("method,path,body", _ENDPOINTS)
 class TestAdminGate:
-    """13 endpoint × 3 user type = 39 회귀."""
+    """15 endpoint × 3 user type 회귀 (SwIT 5 · SwUT 6 · file-mode 4).
+
+    ⚠ `/api/quality/*` 는 여기 없다 — `_LOGIN_ONLY_ENDPOINTS` 주석 참조.
+    """
 
     def test_non_admin_rejected_403(self, method, path, body):
         """admin 아닌 user → 403 ADMIN_REQUIRED."""
