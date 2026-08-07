@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse
 
 import config
 from backend.cache import KeyedBuildLocks
+from backend.services.output_paths import reserve_unique_path
 from backend.helpers import (
     _apply_uds_view_filters,
     _build_excel_artifact_payload,
@@ -186,12 +187,15 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
 
 
 def _build_jenkins_excel_output(cache_root: str, category: str, stem: str, template_path: Optional[str]) -> Tuple[str, Path]:
+    """STS/SUTS Excel 산출물 경로. ⚠ ts 가 **초 단위**라 같은 job·같은 초 요청이 같은
+    경로를 낸다 — 그대로 두면 마지막 쓰기만 남고 앞 사용자는 남의 산출물을 받는다.
+    `reserve_unique_path` 로 원자 선점한다(충돌 없으면 이름은 오늘과 동일)."""
     target_dir = _jenkins_sts_dir(cache_root) if category == "sts" else _jenkins_suts_dir(cache_root)
     target_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = Path(template_path).suffix.lower() if template_path and Path(template_path).suffix.lower() in {".xlsx", ".xlsm"} else ".xlsx"
-    filename = f"{stem}_{ts}{suffix}"
-    return filename, target_dir / filename
+    out_path = reserve_unique_path(target_dir / f"{stem}_{ts}{suffix}")
+    return out_path.name, out_path
 
 
 def _excel_media_type(file_path: Path) -> str:
@@ -2360,7 +2364,8 @@ async def jenkins_uds_template_upload(
     ext = Path(file.filename).suffix.lower() or ".docx"
     out_dir = _jenkins_templates_dir(cache_root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"uds_template_{job_slug}_{ts}{ext}"
+    # 초 단위 ts — 같은 job 에 같은 초로 두 번 올리면 앞 업로드가 사라진다. 원자 선점.
+    out_path = reserve_unique_path(out_dir / f"uds_template_{job_slug}_{ts}{ext}")
     content = await file.read()
     out_path.write_bytes(content)
     return {
@@ -2594,7 +2599,9 @@ async def jenkins_uds_generate(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = _jenkins_exports_dir(cache_root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"uds_spec_{job_slug}_{ts}.docx"
+    # 초 단위 ts — 동시 생성 시 UDS 산출물이 서로를 덮어쓴다(ISO 26262 산출물이라
+    # '남의 문서를 받는' 결과가 된다). 원자 선점으로 비켜간다.
+    out_path = reserve_unique_path(out_dir / f"uds_spec_{job_slug}_{ts}.docx")
     tpl = str(template_path).strip() or None
     await _run_blocking(_generate_docx_with_retry, tpl, uds_payload, out_path)
     _write_uds_payload_sidecar(out_path, uds_payload)
@@ -5915,7 +5922,7 @@ def jenkins_report_files_download_zip(req: JenkinsReportZipRequest) -> FileRespo
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_slug = _job_slug(req.job_url)
     sel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(req.build_selector))
-    out_path = out_dir / f"jenkins_reports_{job_slug}_{sel}_{ts}.zip"
+    out_path = reserve_unique_path(out_dir / f"jenkins_reports_{job_slug}_{sel}_{ts}.zip")
     _create_jenkins_zip_file(
         report_dir,
         out_path,
@@ -5937,7 +5944,7 @@ def jenkins_report_files_download_zip_select(req: JenkinsReportRequest, sel: Rep
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_slug = _job_slug(req.job_url)
     sel_key = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(req.build_selector))
-    out_path = out_dir / f"jenkins_reports_{job_slug}_{sel_key}_{ts}.zip"
+    out_path = reserve_unique_path(out_dir / f"jenkins_reports_{job_slug}_{sel_key}_{ts}.zip")
     paths = sel.paths or []
     if not paths:
         raise HTTPException(status_code=400, detail="paths required")

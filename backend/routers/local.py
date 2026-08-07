@@ -3723,9 +3723,12 @@ def local_suts_export_vectorcast(
     effective_source_root = resolved_source_root or str(cfg.get("source_root") or "").strip()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    package_name = f"suts_vectorcast_{ts}"
-    out_dir = base_dir / "vectorcast" / package_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠ 키가 **없는** 이름이다(ts 뿐) — 다른 프로젝트·다른 사용자여도 같은 초면 부딪힌다.
+    #   `mkdir(exist_ok=True)` 는 폴더를 **공유**시켜 안의 산출물이 서로 덮어써진다.
+    #   원자 선점으로 폴더 자체를 비켜간다.
+    from backend.services.output_paths import reserve_unique_dir
+    out_dir = reserve_unique_dir(base_dir / "vectorcast" / f"suts_vectorcast_{ts}")
+    package_name = out_dir.name
     intermediate_json = out_dir / "suts_vectorcast_model.json"
     warnings_md = out_dir / "suts_vectorcast_warnings.md"
 
