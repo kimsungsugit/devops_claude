@@ -600,6 +600,30 @@ async def build_swit_coverage(
         )
 
 
+def _record_sitr_quality(
+    req: SwITSitrBuildRequest, meta: Any, summary: dict[str, Any],
+) -> None:
+    """SITR 빌드 1회를 Quality DB 에 기록 (non-fatal) — swut.py `_record_sutr_quality` 대칭.
+
+    Coverage 빌드에만 기록이 있어 SITR 은 만들어도 이력이 남지 않았다. doc_type 을
+    `swit` 이 아니라 `sitr` 로 두는 이유는 summary 스키마가 커버리지와 달라서다
+    (`total/tested/passed/failed` — evaluator.evaluate_test_result 참조).
+
+    SITR 경로도 둘(표준/spec-based)이라 호출부가 둘이다 — 복제 대신 함수로 묶는다.
+    """
+    try:
+        from workflow.quality.recorder import record_test_result_run
+        record_test_result_run(
+            "sitr", summary,
+            project_id=str(getattr(req, "project_id", "") or ""),
+            asil_level=str(getattr(meta, "asil_level", "") or ""),
+            release_sw_version=str(getattr(req, "release_sw_version", "") or ""),
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SITR quality record skipped (non-fatal)")
+
+
 def _is_sitr_spec_based(req: SwITSitrBuildRequest, cfg: dict[str, Any]) -> bool:
     """SwITR spec-based 경로 사용 여부 (SwUTR `_is_sutr_spec_based` 대칭).
 
@@ -671,6 +695,7 @@ def _do_swit_sitr_build_spec_based(
             status_code=500,
             detail=f"spec-based SwITR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
+    _record_sitr_quality(req, meta, result.summary)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -732,6 +757,7 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
+    _record_sitr_quality(req, meta, result.summary)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

@@ -695,6 +695,32 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     )
 
 
+def _record_sutr_quality(
+    req: SwUTBuildRequest, meta: Any, summary: dict[str, Any],
+) -> None:
+    """SUTR 빌드 1회를 Quality DB 에 기록 (non-fatal).
+
+    Coverage 빌드에만 기록이 있어 **SUTR 은 몇 번을 만들어도 이력이 남지 않았다** —
+    생성 현황 화면이 방금 만든 문서를 계속 "미생성" 으로 표시했다. doc_type 을
+    `swut` 이 아니라 `sutr` 로 두는 이유는 두 산출물의 summary 스키마가 달라서다
+    (커버리지 평가기에 넣으면 측정하지도 않은 축이 0% FAIL 로 둔갑 — evaluator 참조).
+
+    SUTR 경로가 둘(표준/spec-based)이라 호출부도 둘이다. 블록을 그대로 복제하면
+    한쪽만 고쳐지므로 함수로 묶는다.
+    """
+    try:
+        from workflow.quality.recorder import record_test_result_run
+        record_test_result_run(
+            "sutr", summary,
+            project_id=str(getattr(req, "project_id", "") or ""),
+            asil_level=str(getattr(meta, "asil_level", "") or ""),
+            release_sw_version=str(getattr(req, "release_sw_version", "") or ""),
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SUTR quality record skipped (non-fatal)")
+
+
 def _is_sutr_spec_based(req: SwUTBuildRequest, cfg: dict[str, Any]) -> bool:
     """라운드 91 — spec-based SUTR 경로 사용 여부.
 
@@ -766,6 +792,7 @@ def _do_sutr_build_spec_based(
             status_code=500,
             detail=f"spec-based SUTR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
+    _record_sutr_quality(req, meta, result.summary)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -838,6 +865,7 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
+    _record_sutr_quality(req, meta, result.summary)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

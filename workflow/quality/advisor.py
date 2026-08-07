@@ -170,6 +170,31 @@ _SWREPORT_ADVICE = {
     },
 }
 
+# SUTR/SITR(시험 **결과** 보고서) — 커버리지 문서와 조치가 다르다. "커버리지를 올려라"
+# 가 아니라 "안 돌린 TC 를 돌려라 / 실패를 고쳐라" 다.
+_TEST_RESULT_ADVICE = {
+    "test_execution_pct": {
+        "label": "시험 실행률",
+        "low_advice": "등록된 TC 중 실행되지 않은 것이 있습니다. 미실행 TC 는 통과도 실패도 아닌 **시험 공백**이라 결과 보고서의 판정 근거가 되지 못합니다 — VectorCAST 실행 로그가 해당 환경까지 수집됐는지 먼저 확인하세요.",
+        "threshold": 100.0,
+    },
+    "pass_rate_pct": {
+        "label": "통과율(미실행 포함)",
+        "low_advice": "실패했거나 실행되지 않은 TC 가 있습니다. 실행률이 함께 낮다면 원인은 실패가 아니라 미실행입니다 — 두 지표를 같이 보세요.",
+        "threshold": 100.0,
+    },
+    "executed_pass_rate_pct": {
+        "label": "실행분 통과율(문서 표기값)",
+        "low_advice": "문서 Test Summary 시트에 찍히는 값입니다. 이 값이 100%인데 위 통과율이 낮다면 **돌린 것은 다 통과했지만 안 돌린 것이 있다**는 뜻입니다.",
+        "threshold": None,
+    },
+    "deviation_cases": {
+        "label": "편차(Deviation) 건수",
+        "low_advice": "편차는 자동 판정 대상이 아닙니다(ISO 26262 상 audit reviewer 판단). 건수만 참고하고 내용은 직접 검토하세요.",
+        "threshold": None,
+    },
+}
+
 # SwSA(MISRA/HIS 정적·안전분석) — HIS pass% 만 게이트(위반 절대수는 제안 부적합).
 _SWSA_ADVICE = {
     "his_pass_pct": {
@@ -252,6 +277,8 @@ def suggest_improvements(
             advice_rules = _SUTS_ADVICE
         elif doc_type in ("swut", "swit"):
             advice_rules = _SWUT_ADVICE
+        elif doc_type in ("sutr", "sitr"):
+            advice_rules = _TEST_RESULT_ADVICE
         elif doc_type == "swreport":
             advice_rules = _SWREPORT_ADVICE
         elif doc_type == "swsa":

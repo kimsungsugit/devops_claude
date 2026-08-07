@@ -342,6 +342,54 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     return metrics
 
 
+def evaluate_test_result(summary: Dict[str, Any]) -> MetricList:
+    """SUTR/SITR(시험 **결과** 보고서) summary -> MetricList.
+
+    ## 왜 커버리지 평가기를 재사용하지 않나
+
+    두 산출물의 summary 는 키가 다르다. SUTR/SITR 은 ``total/tested/passed/failed``
+    를 내고 **커버리지 축(``overall_statement_pct`` 등)을 아예 내지 않는다**. 그런데
+    ``_safe_float`` 는 부재를 ``0.0`` 으로 접으므로, 커버리지 평가기에 넣으면
+    ``statement_coverage_pct=0 < 100`` → **측정하지도 않은 축으로 FAIL 을 지어낸다**.
+    시험 결과 보고서는 커버리지 문서가 아니므로 커버리지로 채점하지 않는다.
+
+    ## 통과율 분모를 ``total`` 로 두는 이유
+
+    문서의 Test Summary 시트는 ``passed/tested`` 를 찍는다. 그 값을 게이트로 쓰면
+    **스위트의 10%만 돌려도 통과율 100%** 가 되어 시험 공백이 은폐된다(같은 결함을
+    ``evaluate_coverage`` 가 이미 겪었다 — 거기 주석 참조). 게이트는 미실행을 분모에
+    포함한 ``passed/total`` 로 걸고, 문서에 찍히는 값은 비게이트 참고지표
+    ``executed_pass_rate_pct`` 로 함께 남겨 화면과 문서가 서로 모순되지 않게 한다.
+
+    편차(Deviation)는 **점수로 환산하지 않는다** — ISO 26262 상 audit reviewer 가
+    직접 판단할 항목이라 자동 판정 대상이 아니다(비게이트 참고지표로만 노출).
+    """
+    metrics: MetricList = []
+    total = _safe_float(summary, "total")
+    tested = _safe_float(summary, "tested")
+    passed = _safe_float(summary, "passed")
+
+    # 분모 0 은 recorder 의 빈-산출물 skip 이 먼저 걸러내지만, 외부 직접 호출도
+    # 있으므로 여기서도 0除 를 막는다(0/0 을 100% 로 접지 않는다 — 아래 max 는
+    # 분자도 0 이라 결과가 0.0 이 된다).
+    metrics.append(
+        _metric("test_execution_pct", round(tested / max(total, 1.0) * 100, 2), threshold=100.0),
+    )
+    metrics.append(
+        _metric("pass_rate_pct", round(passed / max(total, 1.0) * 100, 2), threshold=100.0),
+    )
+    metrics.append(
+        _metric("executed_pass_rate_pct", round(passed / max(tested, 1.0) * 100, 2)),
+    )
+
+    metrics.append(_metric("total_tcs", total))
+    metrics.append(_metric("tested_tcs", tested))
+    metrics.append(_metric("failed_tcs", _safe_float(summary, "failed")))
+    metrics.append(_metric("deviation_cases", _safe_float(summary, "deviation_cases_written")))
+    metrics.append(_metric("environments", _safe_float(summary, "environments")))
+    return metrics
+
+
 def evaluate_swsa(quality_data: Dict[str, Any]) -> MetricList:
     """SwSA(MISRA/HIS 정적·안전분석) -> MetricList.
 

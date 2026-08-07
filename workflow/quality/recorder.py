@@ -16,6 +16,7 @@ from workflow.quality.evaluator import (
     evaluate_suts,
     evaluate_swreport,
     evaluate_swsa,
+    evaluate_test_result,
     evaluate_uds,
 )
 from workflow.quality.models import GenerationRun, QualityScore, QualitySummary
@@ -55,6 +56,11 @@ def record_run(
             _empty = int(_qd.get("performed_count") or 0) <= 0
         elif _dt in ("swut", "swit"):
             _empty = int(_qd.get("total_tcs") or 0) <= 0
+        elif _dt in ("sutr", "sitr"):
+            # 시험 결과 보고서 summary 는 `total_tcs` 가 아니라 `total` 이다 —
+            # 커버리지 키를 그대로 쓰면 **모든 SUTR/SITR 이 빈 산출물로 skip** 된다
+            # (기록이 없으니 화면은 "미생성" 을 계속 보여주고, 원인은 보이지 않는다).
+            _empty = int(_qd.get("total") or 0) <= 0
         elif _dt == "swsa":
             _empty = not (_qd.get("his_metrics"))
         if _empty:
@@ -126,6 +132,37 @@ def record_uds_run(quality_eval: Dict[str, Any], **kwargs: Any) -> int:
         return -1
 
 
+def record_test_result_run(
+    doc_type: str,
+    summary: Dict[str, Any],
+    *,
+    project_id: str = "",
+    asil_level: str = "",
+    release_sw_version: str = "",
+    **kwargs: Any,
+) -> int:
+    """SUTR/SITR(시험 결과 보고서) 1회 기록 — SwUT/SwIT 라우터 **공용 단일 출처**.
+
+    라우터별로 복제하면 한쪽만 고쳐진다. 실제로 커버리지 기록 블록이 이미 swut/swit 에
+    두 벌 복제돼 있고, 이 저장소는 같은 패턴으로 여러 번 당했다(판정 복제 → 한쪽만 수정).
+    doc_type 외에는 전부 같으므로 인자만 다르게 받아 여기 한 곳에서 만든다.
+
+    ``project_id`` 를 ``project_root`` 로 넘기는 건 오타가 아니다 — Sw* 계열은 예전부터
+    ``project_root`` 자리에 project_id("HDPDM01")를 실어 왔고, ``record_run`` 의 scm_id
+    자동 해결이 그 어휘를 그대로 받는다(models.py 의 project_root 주석 참조).
+    """
+    return record_run(
+        doc_type, summary,
+        project_root=str(project_id or ""),
+        meta={
+            "asil_level": str(asil_level or ""),
+            "kind": doc_type,
+            "release_sw_version": str(release_sw_version or ""),
+        },
+        **kwargs,
+    )
+
+
 def _record_run_impl(
     doc_type: str,
     quality_data: Dict[str, Any],
@@ -151,6 +188,10 @@ def _record_run_impl(
     elif doc_type in ("swut", "swit"):
         _meta = kwargs.get("meta") or {}
         metrics = evaluate_coverage(quality_data, asil=_meta.get("asil_level"))
+    elif doc_type in ("sutr", "sitr"):
+        # 커버리지 문서(swut/swit)와 **다른 평가기** — 시험 결과 보고서는 커버리지 축을
+        # 내지 않으므로 evaluate_coverage 에 넣으면 미측정 축이 0% FAIL 로 둔갑한다.
+        metrics = evaluate_test_result(quality_data)
     elif doc_type == "swsa":
         metrics = evaluate_swsa(quality_data)
     else:
@@ -302,6 +343,11 @@ def _record_run_impl(
                 or quality_data.get("function_rows")
                 or 0
             )
+        elif doc_type in ("sutr", "sitr"):
+            # 시험 결과 보고서의 분모는 함수가 아니라 **TC 수**다. 아래 else 로 흘리면
+            # `total_test_cases`(다른 문서군의 키)를 찾다 못 찾고 0 이 되어, 규모가
+            # 0 인 실행처럼 보인다.
+            fn_count = int(quality_data.get("total") or 0)
         elif doc_type == "swsa":
             fn_count = int(quality_data.get("his_metric_count") or 0)
         else:
