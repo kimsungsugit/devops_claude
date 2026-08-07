@@ -43,8 +43,8 @@ repo_root = Path(__file__).resolve().parents[2]
 
 
 
-def _jenkins_exports_dir(cache_root: str) -> Path:
-    return _normalize_jenkins_cache_root(cache_root) / "exports"
+def _jenkins_exports_dir(cache_root: str, *, create: bool = True) -> Path:
+    return _normalize_jenkins_cache_root(cache_root, create=create) / "exports"
 
 
 def _jenkins_templates_dir(cache_root: str) -> Path:
@@ -82,13 +82,16 @@ def _save_uds_meta(out_dir: Path, job_slug: str, meta: Dict[str, Any]) -> None:
     _write_json(_uds_meta_path(out_dir, job_slug), meta)
 
 
-def _normalize_jenkins_cache_root(cache_root: str, username: str = "") -> Path:
+def _normalize_jenkins_cache_root(cache_root: str, username: str = "", *, create: bool = True) -> Path:
     """Normalize cache root path and ensure the directory exists.
 
     Args:
         cache_root: Explicit cache root path (from frontend).
         username: Reserved for future per-user override. Currently unused
                   because the frontend already embeds the username in the path.
+        create: 없으면 만들지 여부. **읽기 전용 조회는 반드시 False** — 목록 조회가
+                디렉터리를 만들면 "없는 캐시"가 조회만으로 생겨나고, 오타 난 경로도
+                빈 폴더로 실재하게 돼 진단이 뒤집힌다. 기본 True 는 기존 쓰기 경로 유지.
     """
     if cache_root:
         base = Path(cache_root).expanduser().resolve()
@@ -96,10 +99,11 @@ def _normalize_jenkins_cache_root(cache_root: str, username: str = "") -> Path:
         base = (Path.home() / ".devops_pro_cache").resolve()
     # Ensure the cache directory tree exists — first-time sync for a new project
     # was failing because parents didn't exist yet.
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    if create:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:  # silent-ok — 기존 동작 유지. 생성 실패는 곧이어 쓰기 시점에
+            pass           #   더 구체적인 오류로 드러난다(여기서 삼켜도 정보가 사라지지 않음)
     return base
 
 

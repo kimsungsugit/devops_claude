@@ -112,7 +112,7 @@ from backend.services.local_service import (
     search_in_files,
     write_file_text,
 )
-from backend.services.paths import is_under_any
+from backend.services.paths import is_under_any, safe_resolve_under
 from backend.user_context import wrap_with_user
 from report_gen.provenance import has_evidence_value, is_weak_source
 from report_gen.utils import build_function_details_by_name
@@ -3833,53 +3833,173 @@ def local_sits_export_vectorcast(
 
 # ── VectorCAST 패키지 목록 / 다운로드 ──
 
-@router.get("/api/local/vectorcast/list")
-def local_vectorcast_list(report_dir: str = "") -> Dict[str, Any]:
-    """등록된 VectorCAST 패키지 목록 조회."""
-    base_dir = _resolve_report_dir(report_dir)
-    vcast_dir = base_dir / "vectorcast"
-    if not vcast_dir.exists():
-        return {"ok": True, "packages": []}
-    packages = []
-    for d in sorted(vcast_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not d.is_dir():
+# ── VectorCAST 패키지 루트 ────────────────────────────────────────────────────
+# ⚠ 등록(쓰기)이 **두 갈래**다. 읽기가 한쪽만 보면 반대쪽 산출물이 통째로 사라진다:
+#     `/api/local/{suts,sits}/export-vectorcast` → `_resolve_report_dir(report_dir)/vectorcast`
+#     `/api/jenkins/suts/export-vectorcast`      → `_jenkins_exports_dir(cache_root)/vectorcast`
+#   실측(2026-08-07): `reports/vectorcast` 3개 · `.devops_pro_cache/exports/vectorcast` 2개.
+#   목록은 전자만 봤고, 심지어 프론트가 cache_root 를 report_dir 로 보내 403 이었다 →
+#   화면엔 "등록된 패키지가 없습니다". **403 이 '없음'으로 위장**한 것이다.
+#
+#   그래서 한쪽 루트만 고르는 수정(어느 쪽이든)은 답이 아니다 — 반대쪽이 그대로 사라진다.
+#   목록·다운로드·삭제가 **이 함수 하나**를 공유하게 한다. 따로 세면 곧 어긋나서
+#   "목록에 보이는데 못 지운다"(또는 그 반대)가 된다.
+
+def _vcast_roots(report_dir: str, cache_root: str) -> Tuple[List[Tuple[str, Path]], List[str]]:
+    """(source, 루트) 목록과 **제외 사유**를 함께 준다. 사유를 버리면 침묵이 된다."""
+    from backend.helpers.jenkins import _jenkins_exports_dir
+
+    roots: List[Tuple[str, Path]] = []
+    notes: List[str] = []
+
+    try:
+        base = _resolve_report_dir(report_dir)
+    except HTTPException as exc:
+        # 허용 밖 report_dir 이라고 전체를 실패시키지 않는다 — 기본 리포트 루트는 살리고
+        # 무시했다는 사실만 올린다(구 프론트가 cache_root 를 여기로 보내던 전례).
+        base = _resolve_report_dir("")
+        notes.append(f"report_dir 무시됨({exc.detail}) — 기본 리포트 루트로 대체")
+    roots.append(("reports", (base / "vectorcast").resolve()))
+
+    raw_cache = str(cache_root or "").strip()
+    if raw_cache:
+        try:
+            # ⚠ create=False — 조회가 디렉터리를 만들면 오타 난 경로도 실재하게 된다.
+            roots.append(("jenkins_cache",
+                          (_jenkins_exports_dir(raw_cache, create=False) / "vectorcast").resolve()))
+            # 캐시는 **사용자별 격리 + legacy 공유 이중구조**다(`.devops_pro_cache/{user}/`
+            # 와 `.devops_pro_cache/`). 사용자 세그먼트가 붙기 전에 등록된 패키지는 상위
+            # 공유 루트에 남아 있어, 여기를 안 보면 그 등록물이 영영 안 보인다
+            # (실측 2026-08-07: 현재 jenkins 경유 등록물 2건이 **전부** 이쪽에 있다).
+            # ⚠ **실재할 때만** 추가한다 — 없는 루트를 지어내면 진단이 흐려진다.
+            parent = Path(raw_cache).expanduser().resolve().parent
+            legacy = (_jenkins_exports_dir(str(parent), create=False) / "vectorcast").resolve()
+            if legacy.is_dir():
+                roots.append(("jenkins_cache_legacy", legacy))
+        except (OSError, ValueError) as exc:
+            notes.append(f"cache_root 제외됨 — {type(exc).__name__}: {exc}")
+
+    # 두 루트가 같은 디렉터리를 가리키면 패키지가 두 번 나온다(첫 등장만 남긴다).
+    seen: set = set()
+    deduped: List[Tuple[str, Path]] = []
+    for source, root in roots:
+        if root in seen:
             continue
-        manifest_file = d / "manifest.json"
+        seen.add(root)
+        deduped.append((source, root))
+    return deduped, notes
+
+
+def _scan_vcast_root(source: str, root: Path) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """루트 하나를 훑는다. (패키지, 실패사유). 미존재는 실패가 아니다(아직 등록 전)."""
+    if not root.exists():
+        return [], None
+    packages: List[Dict[str, Any]] = []
+    try:
+        entries = [d for d in root.iterdir() if d.is_dir()]
+    except OSError as exc:
+        return [], f"{source} 루트를 읽지 못했다 — {type(exc).__name__}: {exc}"
+
+    for d in entries:
+        try:
+            mtime = d.stat().st_mtime
+            files = sorted(p.name for p in d.iterdir() if p.is_file())
+        except OSError as exc:
+            # 개별 패키지 실패가 나머지를 가리지 않게 — 행은 남기되 사유를 싣는다.
+            packages.append({
+                "name": d.name, "doc_type": "suts", "path": str(d), "source": source,
+                "files": [], "file_count": 0, "created": None, "summary": {},
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            continue
         meta: Dict[str, Any] = {}
+        manifest_file = d / "manifest.json"
         if manifest_file.exists():
             try:
-                import json
                 meta = json.loads(manifest_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        files = sorted(p.name for p in d.iterdir() if p.is_file())
-        doc_type = "sits" if "sits" in d.name else "suts"
+            except (OSError, ValueError):
+                meta = {}          # manifest 파손은 목록 자체를 막지 않는다(summary 만 빈다)
         packages.append({
             "name": d.name,
-            "doc_type": doc_type,
+            "doc_type": "sits" if "sits" in d.name else "suts",
             "path": str(d),
+            "source": source,
             "files": files,
             "file_count": len(files),
-            "created": datetime.fromtimestamp(d.stat().st_mtime).isoformat(),
-            "summary": meta.get("summary", {}),
+            "created": datetime.fromtimestamp(mtime).isoformat(),
+            "summary": meta.get("summary", {}) if isinstance(meta, dict) else {},
         })
-    return {"ok": True, "packages": packages}
+    return packages, None
+
+
+def _confine_vcast_package(package_path: str, report_dir: str, cache_root: str) -> Path:
+    """`package_path` 를 목록이 훑는 루트의 **직계 하위**로 확정한다. 밖이면 403.
+
+    ⚠ 이전엔 검사가 **아예 없었다** — `delete` 는 임의 경로를 `shutil.rmtree` 했고
+      `download` 는 임의 파일을 반환했다. 목록이 준 경로를 되받는 설계라 클라이언트를
+      믿은 것인데, 클라이언트가 준 값은 클라이언트가 지어낼 수도 있는 값이다.
+    ⚠ '직계 하위'인 이유: 단순 하위 검사는 루트 **자기 자신**도 통과시켜
+      `vectorcast` 디렉터리째 삭제된다.
+    """
+    raw = str(package_path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="package_path required")
+    try:
+        target = Path(raw).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid package_path") from exc
+    roots, _ = _vcast_roots(report_dir, cache_root)
+    if not any(target.parent == root for _, root in roots):
+        # ⚠ 어떤 경로가 허용되는지 응답에 적지 않는다 — 실패 자체가 정보다.
+        _logger.warning("허용 밖 VectorCAST package_path 를 차단했다: %s", target)
+        raise HTTPException(status_code=403, detail="package_path not allowed")
+    return target
+
+
+@router.get("/api/local/vectorcast/list")
+def local_vectorcast_list(report_dir: str = "", cache_root: str = "") -> Dict[str, Any]:
+    """등록된 VectorCAST 패키지 목록 조회 — **등록 경로 두 갈래를 모두** 훑는다."""
+    roots, warnings = _vcast_roots(report_dir, cache_root)
+    packages: List[Dict[str, Any]] = []
+    scanned: List[Dict[str, Any]] = []
+    for source, root in roots:
+        found, failure = _scan_vcast_root(source, root)
+        if failure:
+            warnings.append(failure)
+        packages.extend(found)
+        scanned.append({
+            "source": source, "path": str(root),
+            "exists": root.exists(), "count": len(found),
+            "error": failure,
+        })
+    # 루트를 가로질러 최신순. created 가 없는 행(stat 실패)은 뒤로.
+    packages.sort(key=lambda p: p.get("created") or "", reverse=True)
+    # `scanned_roots` 는 "0건"이 어느 루트에서 온 0건인지 화면이 말할 수 있게 하는 근거다.
+    return {"ok": True, "packages": packages, "warnings": warnings, "scanned_roots": scanned}
 
 
 @router.get("/api/local/vectorcast/download")
-def local_vectorcast_download(package_path: str = "", filename: str = ""):
-    """VectorCAST 패키지 파일 다운로드."""
+def local_vectorcast_download(
+    package_path: str = "",
+    filename: str = "",
+    report_dir: str = "",
+    cache_root: str = "",
+):
+    """VectorCAST 패키지 파일 다운로드 — 허용 루트 하위만."""
     from fastapi.responses import FileResponse
-    pkg_dir = Path(package_path)
-    if not pkg_dir.exists() or not pkg_dir.is_dir():
+    pkg_dir = _confine_vcast_package(package_path, report_dir, cache_root)
+    if not pkg_dir.is_dir():
         raise HTTPException(status_code=404, detail="Package not found")
     if filename:
-        target = pkg_dir / filename
-        if not target.exists():
+        # ⚠ `pkg_dir / filename` 만으론 `../` 로 패키지 밖을 짚는다 — 상대경로를 살균한다.
+        try:
+            target = safe_resolve_under(pkg_dir, filename)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid filename") from exc
+        if not target.is_file():
             raise HTTPException(status_code=404, detail="File not found")
-        return FileResponse(str(target), filename=filename)
+        return FileResponse(str(target), filename=target.name)
     # filename 없으면 ZIP으로 전체 패키지 다운로드
-    import tempfile
     import zipfile
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -3890,11 +4010,19 @@ def local_vectorcast_download(package_path: str = "", filename: str = ""):
 
 
 @router.delete("/api/local/vectorcast/delete")
-def local_vectorcast_delete(package_path: str = "") -> Dict[str, Any]:
-    """VectorCAST 패키지 삭제."""
+def local_vectorcast_delete(
+    package_path: str = "",
+    report_dir: str = "",
+    cache_root: str = "",
+) -> Dict[str, Any]:
+    """VectorCAST 패키지 삭제 — 허용 루트의 **직계 하위**만.
+
+    ⚠ 이 함수는 `shutil.rmtree` 다. 이전엔 경로 검사가 없어 인증된 사용자면
+      **서버의 아무 디렉터리나** 지울 수 있었다.
+    """
     import shutil
-    pkg_dir = Path(package_path)
-    if not pkg_dir.exists() or not pkg_dir.is_dir():
+    pkg_dir = _confine_vcast_package(package_path, report_dir, cache_root)
+    if not pkg_dir.is_dir():
         raise HTTPException(status_code=404, detail="Package not found")
     shutil.rmtree(pkg_dir)
     return {"ok": True, "deleted": str(pkg_dir)}

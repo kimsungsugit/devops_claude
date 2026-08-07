@@ -405,3 +405,178 @@ describe('DocGenSection 폴러 — abort 계약 (signal 실배선)', () => {
     expect(r.output_path).toBe('ok.docx');
   }, 20000);
 });
+
+/* ── VectorCAST 패키지 패널 ─────────────────────────────────────────────
+ * 실측(2026-08-07): 이 패널은 세 가지가 동시에 고장 나 있었고 **아무도 몰랐다**.
+ *   1. 목록이 cache 경로를 `report_dir` 로 보내 403 → `catch` 가 삼켜
+ *      화면엔 "등록된 패키지가 없습니다" (403 이 '없음'으로 위장)
+ *   2. 등록 경로가 두 갈래인데 목록은 한쪽만 봐서 반대쪽 등록물이 안 보임
+ *   3. 다운로드가 `<a href download>` 라 Authorization 이 안 실려 401
+ * 백엔드 계약은 `tests/unit/test_vectorcast_package_endpoints.py`.
+ */
+describe('DocGenSection — VectorCAST 패키지 목록이 실패를 숨기지 않는다', () => {
+  const VCAST_URL = '/api/local/vectorcast/list';
+  let vcastResponse;
+  let vcastError;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    vcastResponse = { ok: true, packages: [], warnings: [], scanned_roots: [] };
+    vcastError = null;
+    // ⚠ url 별 분기 — 전역 mockResolvedValue 로 덮으면 같은 컴포넌트의 다른 조회까지
+    //   같은 응답을 받아 테스트가 엉뚱한 이유로 통과한다.
+    api.mockImplementation(async (url) => {
+      if (String(url).startsWith(VCAST_URL)) {
+        if (vcastError) throw vcastError;
+        return vcastResponse;
+      }
+      return { items: [] };
+    });
+  });
+
+  afterEach(() => {
+    // 원래 구현으로 되돌린다 — 특정 값으로 고정하지 않는다.
+    api.mockReset();
+    api.mockResolvedValue({ items: [] });
+  });
+
+  const renderPanel = () =>
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+  it('조회 실패를 "패키지가 없습니다"로 위장하지 않는다', async () => {
+    vcastError = new Error('403: package_path not allowed');
+    renderPanel();
+
+    expect(await screen.findByText(/목록을 불러오지 못했습니다/)).toBeInTheDocument();
+    expect(screen.queryByText(/등록된 VectorCAST 패키지가 없습니다/)).toBeNull();
+  });
+
+  it('백엔드가 루트를 제외했으면 그 사유를 화면에 올린다', async () => {
+    vcastResponse = {
+      ok: true, packages: [], scanned_roots: [],
+      warnings: ['report_dir 무시됨(report_dir not allowed) — 기본 리포트 루트로 대체'],
+    };
+    renderPanel();
+
+    expect(await screen.findByText(/report_dir 무시됨/)).toBeInTheDocument();
+  });
+
+  it('cache_root 로 조회한다 — report_dir 로 보내면 백엔드가 403 을 낸다', async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      const call = api.mock.calls.find(([u]) => String(u).startsWith(VCAST_URL));
+      expect(call).toBeTruthy();
+      expect(call[0]).toContain('cache_root=');
+      expect(call[0]).not.toContain('report_dir=');
+    });
+  });
+
+  it('0건이면 어느 위치를 봤는지 밝힌다 (미등록 ≠ 경로 오설정)', async () => {
+    vcastResponse = {
+      ok: true, packages: [], warnings: [],
+      scanned_roots: [
+        { source: 'reports', path: 'R:/reports/vectorcast', exists: true, count: 0 },
+        { source: 'jenkins_cache', path: 'C:/cache/exports/vectorcast', exists: false, count: 0 },
+      ],
+    };
+    renderPanel();
+
+    const note = await screen.findByText(/조회한 위치:/);
+    expect(note.textContent).toContain('R:/reports/vectorcast');
+    expect(note.textContent).toContain('C:/cache/exports/vectorcast (없음)');
+  });
+
+  it('이름이 같아도 루트가 다르면 둘 다 보인다 (key 충돌로 한쪽이 사라지지 않는다)', async () => {
+    vcastResponse = {
+      ok: true, warnings: [], scanned_roots: [],
+      packages: [
+        { name: 'suts_pkg', path: '/a/suts_pkg', source: 'reports', doc_type: 'suts', file_count: 3, files: [], summary: {}, created: null },
+        { name: 'suts_pkg', path: '/b/suts_pkg', source: 'jenkins_cache', doc_type: 'suts', file_count: 4, files: [], summary: {}, created: null },
+      ],
+    };
+    // ⚠ 행 개수만 세면 부족하다 — React 는 key 가 겹쳐도 **첫 렌더는 두 행을 그린다**.
+    //   그래서 `key={pkg.name}` 으로 되돌린 뮤턴트가 생존했다. 충돌 자체를 단언한다:
+    //   갱신 시 엉뚱한 행이 남는 사고는 이 경고가 나온 뒤에 생긴다.
+    const errors = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a) => { errors.push(a.join(' ')); });
+    try {
+      renderPanel();
+      await waitFor(() => expect(screen.getAllByText('suts_pkg')).toHaveLength(2));
+      expect(screen.getByText('(빌드 캐시)')).toBeInTheDocument();
+      expect(errors.filter((m) => /same key/i.test(m))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('다운로드가 인증 헤더를 붙이고, 실패를 조용히 넘기지 않는다', async () => {
+    vcastResponse = {
+      ok: true, warnings: [], scanned_roots: [],
+      packages: [
+        { name: 'dl_pkg', path: '/a/dl_pkg', source: 'reports', doc_type: 'suts', file_count: 1, files: [], summary: {}, created: null },
+      ],
+    };
+    const savedFetch = globalThis.fetch;
+    const savedCreate = URL.createObjectURL;
+    const savedRevoke = URL.revokeObjectURL;
+    // ⚠ 401 을 준다 — 예전 `<a href download>` 는 헤더를 못 실어 실제로 이 응답을 받았고,
+    //   그 401 본문이 그대로 파일로 저장돼 "열리지 않는 파일"이 됐다.
+    // ⚠ 응답 mock 은 **완전해야** 한다. 처음엔 `blob` 을 빼먹었더니 `res.ok` 검사를
+    //   지운 뮤턴트가 `res.blob is not a function` 으로 죽어 **엉뚱한 이유로** 에러
+    //   토스트가 났고, 그래서 그 뮤턴트가 생존했다(가드가 아니라 mock 이 잡은 것).
+    globalThis.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      text: async () => 'Authorization Bearer token 필요',
+      blob: async () => new Blob(['Authorization Bearer token 필요']),
+    }));
+    URL.createObjectURL = vi.fn(() => 'blob:mock');
+    URL.revokeObjectURL = vi.fn();
+    try {
+      renderPanel();
+      await userEvent.click(await screen.findByText(/📥 다운로드/));
+
+      await waitFor(() => {
+        const call = globalThis.fetch.mock.calls.find(([u]) =>
+          String(u).startsWith('/api/local/vectorcast/download'));
+        expect(call).toBeTruthy();
+        expect(call[1]?.headers).toBeTruthy();          // authHeaders() 미부착이면 undefined
+        expect(mockToast).toHaveBeenCalledWith('error', expect.stringContaining('다운로드 실패'));
+      });
+      // 관측량: 실패했으면 **파일 저장이 시작되면 안 된다**. 토스트만 보면
+      // "에러도 내고 파일도 받는" 상태를 놓친다(그게 예전 401 저장 사고였다).
+      expect(URL.createObjectURL).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = savedFetch;
+      URL.createObjectURL = savedCreate;
+      URL.revokeObjectURL = savedRevoke;
+    }
+  });
+
+  it('삭제도 cache_root 를 함께 보낸다 (목록과 같은 루트로 판정돼야 지워진다)', async () => {
+    vcastResponse = {
+      ok: true, warnings: [], scanned_roots: [],
+      packages: [
+        { name: 'del_pkg', path: '/a/del_pkg', source: 'reports', doc_type: 'suts', file_count: 1, files: [], summary: {}, created: null },
+      ],
+    };
+    const savedConfirm = globalThis.confirm;
+    globalThis.confirm = vi.fn(() => true);
+    try {
+      renderPanel();
+      await userEvent.click(await screen.findByText('🗑'));
+
+      await waitFor(() => {
+        const call = api.mock.calls.find(([u]) =>
+          String(u).startsWith('/api/local/vectorcast/delete'));
+        expect(call).toBeTruthy();
+        expect(call[0]).toContain('cache_root=');
+        expect(call[0]).toContain('package_path=');
+      });
+    } finally {
+      globalThis.confirm = savedConfirm;
+    }
+  });
+});

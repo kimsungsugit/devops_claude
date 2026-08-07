@@ -467,20 +467,37 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
   const [registering, setRegistering] = useState(null);
   const [packages, setPackages] = useState([]);
   const [loading, setLoading] = useState(false);
+  // ⚠ 조회 실패를 빈 목록으로 접지 않는다. 예전엔 `catch { setPackages([]) }` 라
+  //   403 이 "등록된 패키지가 없습니다"로 위장했고, 그래서 아무도 몰랐다.
+  const [loadError, setLoadError] = useState('');
+  const [scannedRoots, setScannedRoots] = useState([]);
   const [scm] = useScmFallback(analysisResult);
 
   // 패키지 목록 조회
+  // ⚠ `report_dir` 로 cacheRoot 를 보내면 안 된다 — 백엔드는 그 인자를 `reports/` 안으로
+  //   confine 하므로 캐시 경로는 403 이었다. 등록(쓰기)이 두 갈래(로컬=reports/,
+  //   jenkins=cacheRoot/exports/)라 **양쪽 다** 봐야 하며, 그건 `cache_root` 로 넘긴다.
+  const listQuery = useCallback(
+    (extra = {}) => new URLSearchParams({ cache_root: cacheRoot || '', ...extra }).toString(),
+    [cacheRoot],
+  );
+
   const loadPackages = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api(`/api/local/vectorcast/list?report_dir=${encodeURIComponent(cacheRoot)}`);
+      const data = await api(`/api/local/vectorcast/list?${listQuery()}`);
       setPackages(data?.packages || []);
-    } catch (_) {
+      setScannedRoots(data?.scanned_roots || []);
+      // 백엔드가 일부 루트를 제외했으면 그 사유를 그대로 올린다(부분 성공도 성공이 아니다).
+      setLoadError((data?.warnings || []).join(' · '));
+    } catch (e) {
       setPackages([]);
+      setScannedRoots([]);
+      setLoadError(e?.message || '목록을 불러오지 못했습니다');
     } finally {
       setLoading(false);
     }
-  }, [cacheRoot]);
+  }, [listQuery]);
 
   // 마운트 시 + 등록 후 목록 로드
   useEffect(() => { loadPackages(); }, [loadPackages]);
@@ -514,17 +531,43 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
     }
   }, [job, cfg, cacheRoot, scm, toast, loadPackages]);
 
-  // 패키지 삭제
+  // 패키지 삭제 — 백엔드가 `cache_root` 로 허용 루트를 재구성해 경로를 확정한다.
   const deletePackage = useCallback(async (pkgPath, pkgName) => {
     if (!window.confirm(`"${pkgName}" 패키지를 삭제하시겠습니까?`)) return;
     try {
-      await api(`/api/local/vectorcast/delete?package_path=${encodeURIComponent(pkgPath)}`, { method: 'DELETE' });
+      await api(`/api/local/vectorcast/delete?${listQuery({ package_path: pkgPath })}`, { method: 'DELETE' });
       toast('success', `${pkgName} 삭제됨`);
       loadPackages();
     } catch (e) {
       toast('error', `삭제 실패: ${e.message}`);
     }
-  }, [toast, loadPackages]);
+  }, [toast, loadPackages, listQuery]);
+
+  // 패키지 다운로드.
+  // ⚠ 예전엔 `<a href download>` 였다 — anchor 는 `Authorization` 헤더를 실을 수 없어
+  //   `UserContextMiddleware` 에서 **401** 로 끊겼다(`/api/local/*` 은 인증 우회 목록에
+  //   없다). 게다가 401 응답이 그대로 파일로 저장돼 사용자에겐 "받아지긴 했는데
+  //   열리지 않는 파일"로 보였다. fetch → blob 으로 바꿔 헤더를 붙이고 실패를 드러낸다.
+  const downloadPackage = useCallback(async (pkgPath, pkgName) => {
+    try {
+      const res = await fetch(
+        `/api/local/vectorcast/download?${listQuery({ package_path: pkgPath })}`,
+        { headers: authHeaders() },
+      );
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${pkgName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast('error', `다운로드 실패: ${e.message}`);
+    }
+  }, [toast, listQuery]);
 
   return (
     <div className="panel" style={{ marginTop: 12 }}>
@@ -562,9 +605,21 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
               </tr>
             </thead>
             <tbody>
+              {/* ⚠ key 는 path — 루트가 둘이라 이름이 같은 패키지가 공존할 수 있다
+                  (name 을 key 로 쓰면 React 가 한쪽을 통째로 삼킨다). */}
               {packages.map((pkg) => (
-                <tr key={pkg.name} style={{ borderTop: '1px solid var(--border)' }}>
-                  <td style={{ padding: '6px 8px', fontWeight: 600 }}>{pkg.name}</td>
+                <tr key={pkg.path} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 8px', fontWeight: 600 }}>
+                    {pkg.name}
+                    {pkg.source && pkg.source !== 'reports' && (
+                      <span className="text-muted" style={{ fontSize: 10, marginLeft: 6 }}>
+                        {pkg.source === 'jenkins_cache_legacy' ? '(공유 캐시)' : '(빌드 캐시)'}
+                      </span>
+                    )}
+                    {pkg.error && (
+                      <div style={{ fontSize: 10, color: 'var(--danger)' }}>읽기 실패: {pkg.error}</div>
+                    )}
+                  </td>
                   <td style={{ padding: '6px 8px' }}>
                     <span className={`pill pill-${pkg.doc_type === 'sits' ? 'danger' : 'warning'}`} style={{ fontSize: 10 }}>
                       {pkg.doc_type.toUpperCase()}
@@ -578,14 +633,14 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
                   </td>
                   <td style={{ padding: '6px 8px', textAlign: 'center' }}>
                     <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
-                      <a
-                        href={`/api/local/vectorcast/download?package_path=${encodeURIComponent(pkg.path)}`}
-                        download
+                      <button
+                        type="button"
                         className="btn-sm"
-                        style={{ textDecoration: 'none', color: 'var(--accent)', fontSize: 11, padding: '2px 8px' }}
+                        onClick={() => downloadPackage(pkg.path, pkg.name)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 11, padding: '2px 8px' }}
                       >
                         📥 다운로드
-                      </a>
+                      </button>
                       <button
                         className="btn-ghost btn-xs"
                         style={{ color: 'var(--danger)', fontSize: 11 }}
@@ -602,9 +657,23 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
         </div>
       )}
 
-      {packages.length === 0 && !loading && (
+      {/* ⚠ 실패를 "없음"으로 표시하지 않는다 — 그게 이 패널이 오래 고장 나 있던 이유다.
+          403 이 "등록된 패키지가 없습니다"로 보였고, 아무도 오류를 못 봤다. */}
+      {loadError && (
+        <div className="text-sm" style={{ padding: 10, color: 'var(--danger)' }}>
+          목록을 불러오지 못했습니다 — {loadError}
+        </div>
+      )}
+      {packages.length === 0 && !loading && !loadError && (
         <div className="text-sm text-muted" style={{ padding: 12, textAlign: 'center' }}>
           등록된 VectorCAST 패키지가 없습니다. 위 버튼으로 등록하세요.
+          {/* 0건이 **어느 루트에서 온** 0건인지 밝힌다. 안 밝히면 경로 오설정과
+              미등록이 화면에서 똑같이 보인다(이번 결함의 재발 경로). */}
+          {scannedRoots.length > 0 && (
+            <div style={{ fontSize: 10, marginTop: 6, opacity: 0.8 }}>
+              조회한 위치: {scannedRoots.map((r) => `${r.path}${r.exists ? '' : ' (없음)'}`).join(' · ')}
+            </div>
+          )}
         </div>
       )}
       {loading && <div className="text-sm text-muted" style={{ padding: 8 }}>로딩 중...</div>}
