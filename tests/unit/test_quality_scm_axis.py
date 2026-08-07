@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import pathlib
 import sqlite3
+import sys
 import tempfile
+import types
 
 import pytest
 
@@ -324,3 +326,172 @@ class TestGateReasonPersisted:
                 r.metric_name for r in s.query(QualityScore).filter_by(run_id=rid).all()
             ]
         assert not [n for n in names if n.startswith("gate_reason:")]
+
+
+# ==============================================================
+# 5. resolve_scm_id — 런타임/백필 **공용** 판정
+# ==============================================================
+
+def _entry(entry_id: str, source_root: str = ""):
+    return types.SimpleNamespace(id=entry_id, source_root=source_root)
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    """registry 를 가짜 항목으로 대체 (사용자 로컬 `scm_registry.json` 비의존)."""
+    def _install(entries):
+        import backend.services.scm_registry as reg
+        monkeypatch.setattr(reg, "list_registry_entries", lambda: list(entries))
+    return _install
+
+
+class TestResolveScmId:
+
+    def test_matches_entry_id_case_insensitively(self, fake_registry):
+        """`project_id` 어휘("HDPDM01") → registry id("hdpdm01")."""
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("hdpdm01"), _entry("kjpds02")])
+        assert resolve_scm_id("HDPDM01") == "hdpdm01"
+        assert resolve_scm_id("hdpdm01") == "hdpdm01"
+
+    def test_matches_source_root(self, fake_registry):
+        """`source_root` 어휘(sts/suts/sits/uds) → registry id."""
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("kjpds02_pv", source_root="D:/Project/Ados/PDS64_RD")])
+        assert resolve_scm_id("D:/Project/Ados/PDS64_RD") == "kjpds02_pv"
+        # 후행 슬래시 차이는 흡수 (normpath 는 플랫폼 무관하게 제거)
+        assert resolve_scm_id("D:/Project/Ados/PDS64_RD/") == "kjpds02_pv"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="경로 대소문자/구분자 무시는 Windows 규칙")
+    def test_source_root_ignores_case_and_separator_on_windows(self, fake_registry):
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("kjpds02_pv", source_root="D:/Project/Ados/PDS64_RD")])
+        assert resolve_scm_id(r"d:\project\ados\pds64_rd") == "kjpds02_pv"
+
+    def test_prefix_is_not_a_match(self, fake_registry):
+        """부분일치 거부 — 'KJPDS02' 가 'kjpds02_pv' 를 집으면 안 된다.
+
+        실제 registry 에 `kjpds02` 와 `kjpds02_pv` 가 **둘 다** 있어서, 접두 매칭을
+        허용하는 순간 어느 쪽인지 정할 수 없다.
+        """
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("kjpds02_pv")])
+        assert resolve_scm_id("KJPDS02") is None
+
+    def test_two_similar_ids_resolve_exactly(self, fake_registry):
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("kjpds02"), _entry("kjpds02_pv")])
+        assert resolve_scm_id("KJPDS02") == "kjpds02"
+        assert resolve_scm_id("KJPDS02_PV") == "kjpds02_pv"
+
+    def test_sole_entry_is_not_a_free_pass(self, fake_registry):
+        """후보가 하나뿐이어도 무관한 값을 그 하나로 접지 않는다.
+
+        `docGenHelpers.js::useScmFallback` 이 `items[0]` 을 무근거로 집는 그 패턴을
+        품질 이력에 들이면 A 프로젝트의 FAIL 이 B 화면에 뜬다.
+        """
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("hdpdm01", source_root="C:/src/hdpdm01")])
+        assert resolve_scm_id("C:/somewhere/else") is None
+        assert resolve_scm_id("WHATEVER") is None
+
+    def test_comma_paths_agree_on_one_project(self, fake_registry):
+        """복수 소스 경로가 전부 같은 프로젝트면 그 프로젝트다."""
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("kjpds02", source_root="D:/a")])
+        assert resolve_scm_id("D:/a,D:/a") == "kjpds02"
+
+    def test_comma_paths_spanning_projects_are_unknown(self, fake_registry):
+        """섞여 있으면 미상 — 임의로 한쪽을 고르지 않는다."""
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("p1", source_root="D:/a"), _entry("p2", source_root="D:/b")])
+        assert resolve_scm_id("D:/a,D:/b") is None
+
+    def test_duplicate_source_root_is_unknown(self, fake_registry):
+        """두 entry 가 같은 source_root 를 쓰면 그 경로로는 특정할 수 없다."""
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("p1", source_root="D:/same"), _entry("p2", source_root="D:/same")])
+        assert resolve_scm_id("D:/same") is None
+
+    def test_blank_and_empty_registry(self, fake_registry):
+        from backend.services.scm_registry import resolve_scm_id
+
+        fake_registry([_entry("p1")])
+        assert resolve_scm_id("") is None
+        assert resolve_scm_id("   ") is None
+        fake_registry([])
+        assert resolve_scm_id("p1") is None
+
+
+# ==============================================================
+# 6. recorder 자동 해결 — 호출부 7곳을 건드리지 않고 축이 채워진다
+# ==============================================================
+
+class TestRecorderAutoResolve:
+
+    def test_project_root_fills_scm_id(self, qdb, fake_registry):
+        """`project_root` 만 넘겨도 scm_id 가 채워진다 (Sw*/generators 경로)."""
+        from workflow.quality.db import get_session
+        from workflow.quality.models import GenerationRun
+        from workflow.quality.recorder import record_run
+
+        fake_registry([_entry("hdpdm01")])
+        rid = record_run("sits", _sits(80.0), project_root="HDPDM01", db_path=qdb)
+        with get_session(qdb) as s:
+            assert s.query(GenerationRun).filter_by(id=rid).one().scm_id == "hdpdm01"
+
+    def test_unresolvable_project_root_stays_null(self, qdb, fake_registry):
+        """근거가 없으면 NULL(미상) — 아무 값이나 채우지 않는다."""
+        from workflow.quality.db import get_session
+        from workflow.quality.models import GenerationRun
+        from workflow.quality.recorder import record_run
+
+        fake_registry([_entry("hdpdm01")])
+        rid = record_run("sits", _sits(80.0), project_root="UNKNOWN_THING", db_path=qdb)
+        with get_session(qdb) as s:
+            run = s.query(GenerationRun).filter_by(id=rid).one()
+            assert run.scm_id is None
+            assert run.project_root == "UNKNOWN_THING"  # 원본은 남는다
+
+    def test_explicit_scm_id_wins_over_auto_resolve(self, qdb, fake_registry):
+        """명시 전달이 자동 해결보다 우선 (사용자가 SCM 을 수동 지정한 경우)."""
+        from workflow.quality.db import get_session
+        from workflow.quality.models import GenerationRun
+        from workflow.quality.recorder import record_run
+
+        fake_registry([_entry("hdpdm01"), _entry("kjpds02")])
+        rid = record_run(
+            "sits", _sits(80.0),
+            project_root="HDPDM01", scm_id="kjpds02", db_path=qdb,
+        )
+        with get_session(qdb) as s:
+            assert s.query(GenerationRun).filter_by(id=rid).one().scm_id == "kjpds02"
+
+    def test_registry_failure_does_not_lose_the_run(self, qdb, monkeypatch):
+        """registry 를 못 읽어도 **품질 기록 자체는 살아남는다**.
+
+        축이 미상이 되는 건 감수할 열화지만, 기록이 통째로 사라지는 건 아니다
+        (이 저장소는 `except: pass` 가 품질 기록을 몇 년간 삼킨 전례가 있다).
+        """
+        import backend.services.scm_registry as reg
+        from workflow.quality.db import get_session
+        from workflow.quality.models import GenerationRun
+        from workflow.quality.recorder import record_run
+
+        def _boom():
+            raise RuntimeError("registry unreadable")
+
+        monkeypatch.setattr(reg, "list_registry_entries", _boom)
+        rid = record_run("sits", _sits(80.0), project_root="HDPDM01", db_path=qdb)
+        assert rid > 0
+        with get_session(qdb) as s:
+            assert s.query(GenerationRun).filter_by(id=rid).one().scm_id is None

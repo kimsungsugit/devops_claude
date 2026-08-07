@@ -60,6 +60,22 @@ def record_run(
         if _empty:
             _logger.info("%s quality run skipped (empty output)", _dt)
             return -1
+
+        # scm_id 를 명시로 받지 못했으면 `project_root` 에서 해결한다.
+        # 호출부 7곳(swut/swit/swreport/swsa/sts/suts/sits)은 이미 프로젝트를 아는
+        # 값을 project_root 로 넘기고 있으므로, 판정을 **여기 한 곳**에 두면 그
+        # 7곳을 건드리지 않고도 축이 채워지고 앞으로 늘 호출도 자동으로 덮인다.
+        # (UDS 5곳은 project_root 자체가 없어 명시 전달이 필요하다 — 라우터 참조.)
+        if not scm_id and project_root:
+            try:
+                from backend.services.scm_registry import resolve_scm_id
+                scm_id = resolve_scm_id(project_root)
+            except Exception:
+                # registry 를 못 읽는 건 품질 기록을 버릴 이유가 아니다. 축만 미상으로
+                # 두고 기록은 계속한다 — 다만 침묵은 금지(사후에 왜 NULL 인지 알아야 한다).
+                _logger.exception("scm_id 자동 해결 실패 — 미상(NULL)으로 기록한다")
+                scm_id = None
+
         return _record_run_impl(
             doc_type, quality_data,
             project_root=project_root, scm_id=scm_id,

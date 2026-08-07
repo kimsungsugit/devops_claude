@@ -1238,7 +1238,15 @@ async def local_uds_generate(
         # Quality DB recording (non-fatal)
         try:
             from workflow.quality.recorder import record_uds_run
-            record_uds_run(quality_evaluation, output_path=str(out_path))
+            # project_root 는 sts/suts/sits 와 **같은 어휘**(source_root)로 넘긴다 —
+            # recorder 가 이 값으로 scm_id 를 해결한다. 예전엔 UDS 만 아무것도 안
+            # 넘겨서 DB 의 uds 행이 3/3 전부 NULL 이었고, 그래서 "이 프로젝트의 UDS
+            # 품질" 을 물을 수단이 없었다.
+            record_uds_run(
+                quality_evaluation,
+                project_root=str(source_root or ""),
+                output_path=str(out_path),
+            )
         except Exception:
             # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
             _logger.exception("[UDS_GENERATE][%s] quality record skipped (non-fatal)", req_id)
@@ -1342,7 +1350,12 @@ async def local_uds_generate(
     # Quality DB recording (non-fatal)
     try:
         from workflow.quality.recorder import record_uds_run
-        record_uds_run(quality_evaluation, output_path=str(out_path))
+        # doc_only 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
+        record_uds_run(
+            quality_evaluation,
+            project_root=str(source_root or ""),
+            output_path=str(out_path),
+        )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
         _logger.exception("[UDS_GENERATE][%s] quality record skipped (non-fatal)", req_id)
@@ -1627,7 +1640,12 @@ async def local_uds_generate_async(
             # Quality DB recording (non-fatal)
             try:
                 from workflow.quality.recorder import record_uds_run
-                record_uds_run(quick_qg, output_path=str(out_path))
+                # 동기 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
+                record_uds_run(
+                    quick_qg,
+                    project_root=str(source_root or ""),
+                    output_path=str(out_path),
+                )
             except Exception:
                 # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
                 _logger.exception("UDS quality record skipped (non-fatal)")

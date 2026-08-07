@@ -1869,6 +1869,8 @@ def _uds_generate_from_paths(
         _enrich_function_quality_fields(uds_payload)
         record_uds_run(
             _compute_quick_quality_gate(uds_payload),
+            # local 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
+            project_root=str(source_root or ""),
             output_path=str(out_path),
         )
     except Exception:
