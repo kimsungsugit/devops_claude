@@ -28,6 +28,7 @@ def record_run(
     quality_data: Dict[str, Any],
     *,
     project_root: Optional[str] = None,
+    scm_id: Optional[str] = None,
     target_function: Optional[str] = None,
     status: str = "success",
     elapsed_sec: Optional[float] = None,
@@ -61,7 +62,8 @@ def record_run(
             return -1
         return _record_run_impl(
             doc_type, quality_data,
-            project_root=project_root, target_function=target_function,
+            project_root=project_root, scm_id=scm_id,
+            target_function=target_function,
             status=status, elapsed_sec=elapsed_sec,
             output_path=output_path, ai_model=ai_model,
             error_msg=error_msg, meta=meta, db_path=db_path,
@@ -181,6 +183,20 @@ def _record_run_impl(
         "threshold": None,
     }]
 
+    # 판정 **사유**도 같은 방식으로 남긴다. 예전엔 `compute_gate_verdict` 가 낸
+    # `reason` 을 위 로그 한 줄에 쓰고 버렸다 — 그래서 화면은 "FAIL" 만 알고
+    # "왜" 를 알 방법이 DB 어디에도 없었다(`gated_metric_count` 값 0 이 유일한 흔적).
+    # 사유가 없을 때(정상 판정)는 행을 만들지 않는다 — 빈 사유를 남기면 소비처가
+    # "사유 있음/없음" 을 구분하지 못한다.
+    _reason = str(verdict.get("reason") or "").strip()
+    if _reason:
+        metrics = list(metrics) + [{
+            "metric_name": f"gate_reason:{_reason}"[:50],  # 컬럼이 String(50)
+            "value": 1.0,
+            "gate_pass": None,
+            "threshold": None,
+        }]
+
     # 2. DB 기록
     with get_session(db_path) as session:
         # output_size 계산
@@ -195,6 +211,7 @@ def _record_run_impl(
             run_uuid=str(uuid.uuid4()),
             doc_type=doc_type,
             project_root=kwargs.get("project_root"),
+            scm_id=kwargs.get("scm_id"),
             target_function=kwargs.get("target_function"),
             status=kwargs.get("status", "success"),
             elapsed_sec=kwargs.get("elapsed_sec"),
@@ -224,12 +241,22 @@ def _record_run_impl(
         # 직전 동일 doc_type run 조회 (delta 계산).
         # id < run.id (삽입 순서 엄밀히 이전) + (created_at, id) 결정적 정렬 →
         # 동시 기록 시 더 새 run 을 prev 로 잘못 고르는 RMW 레이스 차단.
+        #
+        # ⚠ **프로젝트도 같아야 한다.** 예전엔 doc_type 만 봐서 HDPDM01 swut 의
+        # delta 가 바로 앞에 기록된 KJPDS02 swut 대비로 계산됐다 — 화면의 `↑ +12.4`
+        # 가 다른 프로젝트와의 차이였다는 뜻이다. scm_id 를 아는 run 끼리만 비교한다.
+        # scm_id 가 없는(백필 미상·구 경로) run 은 현행대로 doc_type 만 본다 —
+        # 과거 행과의 연속성을 끊지 않기 위함이고, 이 경우 delta 는 여전히 프로젝트를
+        # 넘나들 수 있다(그 한계는 scm_id 가 채워지는 만큼 자연히 사라진다).
+        _scm = kwargs.get("scm_id")
+        _prev_q = session.query(GenerationRun).filter(
+            GenerationRun.doc_type == doc_type,
+            GenerationRun.id < run.id,
+        )
+        if _scm:
+            _prev_q = _prev_q.filter(GenerationRun.scm_id == _scm)
         prev_run = (
-            session.query(GenerationRun)
-            .filter(
-                GenerationRun.doc_type == doc_type,
-                GenerationRun.id < run.id,
-            )
+            _prev_q
             .order_by(GenerationRun.created_at.desc(), GenerationRun.id.desc())
             .first()
         )
