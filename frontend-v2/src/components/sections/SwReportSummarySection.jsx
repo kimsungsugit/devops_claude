@@ -4,7 +4,9 @@ import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
 import { isAbortError } from '../../impactPoll.js';
-import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
+import { useSharedInputSync, markTouched } from '../../sharedInputs.js';
+// 폼 기본값·payload 조립은 생성 현황 보드와 **공유** (복제 시 두 경로가 다른 문서를 낸다).
+import { BUILDER_SPECS, loadBuilderForm, toBuildPayload } from '../../swBuilderForms.js';
 
 // API base 해석 — SwUTBuildSection과 동일 (raw fetch blob 전용. JSON은 api.js post() 사용).
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -15,39 +17,12 @@ function buildUrl(path) {
   return API_BASE.replace(/\/$/, '') + path;
 }
 
-const STORAGE_KEY = 'devops_v2_swreport_form';
-
-// 폼 기본값. source_paths_text는 UI 전용 (textarea 여러 줄) — payload 만들 때
-// 줄단위 split → trim → 빈줄 제거하여 source_paths 배열로 변환하고, 이 키 자체는
-// payload에서 제거한다 (backend SwReportBuildRequest extra='forbid' 422 회피).
-const DEFAULT_FORM = {
-  project_id: 'ES95411',
-  release_sw_version: '',
-  test_date: '',
-  // ES95411 마스터 양식(xlsm) 경로 — 비면 backend config fallback.
-  template_path: '',
-  // UI 전용 필드 — 레벨별 산출물 경로 (한 줄당 1개, 최대 16). payload에선 source_paths 배열로 변환.
-  source_paths_text: '',
-  // 선택 메타 (SwUT 폼 수준)
-  project_full_name: '',
-  asil_level: 'ASIL B',
-  phase: '',
-  product: '',
-  test_target: '',
-  test_engineer: '',
-};
+// 폼 기본값·localStorage 키·UI 전용 키 strip 은 swBuilderForms.js 단일 출처
+// (생성 현황 보드가 같은 payload 로 원클릭 생성한다).
+const STORAGE_KEY = BUILDER_SPECS.swreport.storageKey;
 
 function loadSavedForm() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10), ...saved };
-    // 입력 일원화: touched가 아닌(prefill) 매핑 필드만 공유 기본값으로 채움(사용자 입력·빈값 보존).
-    const touched = resolveTouched('swreport', STORAGE_KEY, saved);
-    return applySharedDefaults(base, touched, sharedDefaultsFor('swreport', loadSharedInputs()));
-  } catch (e) {
-    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
-    return applySharedDefaults(base, new Set(), sharedDefaultsFor('swreport', loadSharedInputs()));
-  }
+  return loadBuilderForm('swreport');
 }
 
 // FastAPI 422 detail(배열/문자열/객체)을 사람이 읽을 한 줄로 정규화.
@@ -69,13 +44,9 @@ function formatDetailMessage(detail) {
 // 폼 → 백엔드 payload 변환 (preview/build 공용).
 // source_paths_text(UI 전용)는 제거하고 source_paths 배열로 변환한다.
 function buildPayload(form) {
-  // source_paths_text는 backend schema(extra='forbid')에 없으므로 반드시 strip.
-  const { source_paths_text: _spText, ...payload } = form;
-  const sourcePaths = (form.source_paths_text || '')
-    .split('\n').map(s => s.trim()).filter(Boolean);
-  // 비어있으면 키 자체를 보내지 않음 — backend는 template 자체를 source로 refresh.
-  if (sourcePaths.length > 0) payload.source_paths = sourcePaths;
-  return payload;
+  // strip + 배열 변환은 공유 모듈. 비어있으면 키 자체를 보내지 않는다 —
+  // backend 는 template 자체를 source 로 refresh 한다.
+  return toBuildPayload('swreport', form);
 }
 
 export default function SwReportSummarySection() {
