@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { api, post } from '../../api.js';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { api, post, buildUrl, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
+import { loadBuilderForm, toBuildPayload, missingRequiredFields } from '../../swBuilderForms.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -34,13 +35,44 @@ const DOC_ROWS = [
   { key: 'sits', label: 'SITS', icon: '📕', desc: 'SW 통합시험' },
 ];
 
-// 보조 표 — 빌더 산출물. **이력이 있는 것만** 보여준다(없는 걸 '미생성' 으로 줄 세우면
-// 안 쓰는 빌더까지 결함처럼 읽힌다). 각 행은 해당 서브탭으로 이동한다.
+/**
+ * 시험 **결과** 문서 — 보드에서 바로 만든다.
+ *
+ * 예전엔 이 셋을 만들려면 각자의 서브탭에 들어가 15~20개 필드를 채워야 했다. 그런데
+ * 그 값 대부분은 이미 어딘가에 있다(직전 빌드의 저장 폼, 설정>입력 자료 공유값,
+ * `config/swut_meta.json` 의 프로젝트별 양식/승인자). 그래서 **디폴트로 채워 한 번에
+ * 만들고**, 세부 조정이 필요할 때만 탭으로 간다. 탭은 그대로 남는다.
+ *
+ * ⚠ `release_sw_version` 만은 디폴트가 없다 — 저장 폼에도 직전 실행에도 없으면
+ * **지어내지 않고** 입력을 요구한다. 임의 버전(`1.0.0` 같은)을 찍으면 ISO 26262
+ * 납품 문서 표지에 틀린 릴리스가 박힌다.
+ *
+ * `builder` = swBuilderForms 의 폼 종류, `key` = quality DB 의 doc_type.
+ */
+const TEST_REPORT_ROWS = [
+  {
+    key: 'sutr', label: 'SUTR', icon: '🧪', desc: 'SW 단위시험 결과',
+    builder: 'swut', endpoint: '/api/swut/sutr/build', sub: 'swut', fallbackName: 'sutr.xlsm',
+  },
+  {
+    key: 'sitr', label: 'SITR', icon: '🔗', desc: 'SW 통합시험 결과',
+    builder: 'swit', endpoint: '/api/swit/sitr/build', sub: 'swit', fallbackName: 'sitr.xlsm',
+  },
+  {
+    key: 'swreport', label: '통합 Summary', icon: '📊', desc: '전 레벨 결과 roll-up',
+    builder: 'swreport', endpoint: '/api/swreport/summary/build', sub: 'swreport',
+    fallbackName: 'swreport_summary.xlsm',
+  },
+];
+
+// 보조 표 — 커버리지/정적분석 산출물. **이력이 있는 것만** 보여준다(없는 걸 '미생성'
+// 으로 줄 세우면 안 쓰는 빌더까지 결함처럼 읽힌다). 각 행은 해당 서브탭으로 이동한다.
+// `swreport` 는 위 시험 결과 표로 옮겼다 — 두 표에 같은 행을 두면 어느 쪽이 최신인지
+// 화면이 두 번 답하게 된다.
 const BUILDER_ROWS = [
-  { key: 'swut', label: 'SwUT', sub: 'swut' },
-  { key: 'swit', label: 'SwIT', sub: 'swit' },
-  { key: 'swsa', label: 'SwSA', sub: 'swsa' },
-  { key: 'swreport', label: '통합 결과', sub: 'swreport' },
+  { key: 'swut', label: 'SwUT 커버리지', sub: 'swut' },
+  { key: 'swit', label: 'SwIT 커버리지', sub: 'swit' },
+  { key: 'swsa', label: 'SwSA 정적분석', sub: 'swsa' },
 ];
 
 /**
@@ -61,6 +93,9 @@ const METRIC_LABELS = {
   statement_coverage_pct: '구문 커버리지', branch_coverage_pct: '분기 커버리지',
   mcdc_coverage_pct: 'MC/DC 커버리지', pass_rate_pct: '시험 통과율',
   his_pass_pct: 'HIS 메트릭 통과율',
+  // 시험 결과 보고서(SUTR/SITR) — 커버리지와 다른 축이다.
+  test_execution_pct: '시험 실행률', executed_pass_rate_pct: '실행분 통과율',
+  deviation_cases: '편차 건수', tested_tcs: '실행 TC', failed_tcs: '실패 TC',
 };
 
 const metricLabel = (code) => METRIC_LABELS[code] || code;
@@ -127,6 +162,43 @@ function fmtWhen(iso) {
   if (Number.isNaN(d.getTime())) return '—';
   const p = (n) => String(n).padStart(2, '0');
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 실패 응답을 사람이 읽는 한 줄로.
+ *
+ * 403 을 그냥 "HTTP 403" 으로 흘리면 사용자는 서버 장애로 읽는다. Sw* 빌더는
+ * 관리자 전용이므로(라우터 `dependencies=[Depends(require_admin)]`) **권한 상태**임을
+ * 명시한다 — 조회는 되는데 생성만 막히는 상황이 정상 동작이라는 걸 화면이 말해야 한다.
+ */
+async function describeBuildError(res) {
+  if (res.status === 403) return '관리자 전용 빌더입니다 — 조회는 되지만 생성은 관리자 등록이 필요합니다.';
+  if (res.status === 401) return '로그인이 필요합니다.';
+  let detail = '';
+  try {
+    const j = await res.json();
+    if (Array.isArray(j?.detail)) {
+      detail = j.detail
+        .map(d => {
+          const loc = (d?.loc || []).filter(x => x !== 'body').join('.');
+          const msg = d?.msg || d?.type || '';
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .join(', ');
+    } else if (typeof j?.detail === 'string') detail = j.detail;
+    else if (j?.message) detail = j.message;
+  } catch (_e) {
+    // 비 JSON 본문(502 HTML 등) — status 로 폴백한다.
+  }
+  return detail || `HTTP ${res.status}`;
+}
+
+/** Content-Disposition 에서 파일명. RFC 5987(UTF-8) 우선. */
+function filenameFrom(res, fallback) {
+  const cd = res.headers.get('Content-Disposition') || '';
+  const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
+  if (!m) return fallback;
+  try { return decodeURIComponent(m[1]); } catch (_e) { return m[1]; }
 }
 
 function Pill({ tone, children }) {
@@ -246,6 +318,91 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
 
   const builderRows = BUILDER_ROWS.filter(b => latestByType[b.key]);
 
+  // ── 시험 결과 문서 원클릭 생성 ────────────────────────────────────────────
+  const [reportState, setReportState] = useState({});      // {key: {busy, error}}
+  const [versionEdit, setVersionEdit] = useState({});       // {key: '1.02'} 사용자 직접 입력
+  const blobCleanupRef = useRef([]);
+
+  useEffect(() => () => {
+    // 언마운트 시 blob URL 즉시 회수 + 예약 타이머 취소(누수 방지).
+    blobCleanupRef.current.forEach(({ timerId, url }) => {
+      clearTimeout(timerId);
+      try { URL.revokeObjectURL(url); } catch (_e) { /* 이미 회수됨 */ }
+    });
+    blobCleanupRef.current = [];
+  }, []);
+
+  const triggerDownload = useCallback((blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    const timerId = setTimeout(() => {
+      try { URL.revokeObjectURL(url); } catch (_e) { /* 이미 회수됨 */ }
+      blobCleanupRef.current = blobCleanupRef.current.filter(i => i.timerId !== timerId);
+    }, 5000);
+    blobCleanupRef.current.push({ timerId, url });
+  }, []);
+
+  /**
+   * 각 행의 실제 빌드 입력. 폼(저장값+공유입력+기본값)에 버전 폴백을 얹는다.
+   *
+   * 버전 폴백 순서: 사용자가 이 화면에서 입력 > 빌더 탭 저장 폼 > **같은 프로젝트의
+   * 직전 실행에 기록된 버전**(백엔드가 meta.release_sw_version 으로 남긴다) > 없음.
+   * 마지막이 빈 문자열인 채로 두는 것이 요점이다 — 지어내지 않는다.
+   */
+  const reportRows = useMemo(() => {
+    const runVer = (runs || []).map(r => r?.meta?.release_sw_version).find(Boolean) || '';
+    return TEST_REPORT_ROWS.map(row => {
+      const form = loadBuilderForm(row.builder);
+      const version = versionEdit[row.key] ?? (form.release_sw_version || runVer);
+      const projectId = String(form.project_id || '');
+      return {
+        ...row,
+        form,
+        version,
+        projectId,
+        versionSource: versionEdit[row.key] != null ? 'input'
+          : form.release_sw_version ? 'saved' : (runVer ? 'run' : 'none'),
+        // 화면 범위와 빌드 대상이 다르면 다른 프로젝트 문서를 만들게 된다 —
+        // 조용히 진행하지 않고 행에 표시한다(자동 교정은 하지 않는다: swut_meta.json
+        // 에 등록되지 않은 project_id 로 바꾸면 빌드가 통째로 실패한다).
+        scopeMismatch: !!(scmId && projectId && scmId.toLowerCase() !== projectId.toLowerCase()),
+      };
+    });
+  }, [runs, versionEdit, scmId]);
+
+  const generateReport = useCallback(async (row) => {
+    const form = { ...row.form, release_sw_version: row.version };
+    const missing = missingRequiredFields(form);
+    if (missing.length) {
+      toast('warning', `필수 값이 비어 있습니다: ${missing.join(', ')} — 임의 값으로 채우지 않습니다.`);
+      return;
+    }
+    setReportState(p => ({ ...p, [row.key]: { busy: true, error: '' } }));
+    try {
+      // xlsm blob 응답이라 raw fetch. authHeaders() + res.ok 검사 명시 (X9).
+      const res = await fetch(buildUrl(row.endpoint), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(toBuildPayload(row.builder, form)),
+      });
+      if (!res.ok) throw new Error(await describeBuildError(res));
+      const blob = await res.blob();
+      triggerDownload(blob, filenameFrom(res, row.fallbackName));
+      setReportState(p => ({ ...p, [row.key]: { busy: false, error: '' } }));
+      toast('success', `${row.label} ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
+      load();   // 방금 만든 실행이 표에 반영되도록 이력 재조회
+    } catch (e) {
+      const msg = e?.message || String(e);
+      setReportState(p => ({ ...p, [row.key]: { busy: false, error: msg } }));
+      toast('error', `${row.label} 생성 실패: ${msg}`);
+    }
+  }, [toast, triggerDownload, load]);
+
   return (
     <div className="docgen-status-board">
       <div className="panel">
@@ -327,6 +484,97 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
             품질 이력이 없습니다 — 문서를 생성하면 게이트 결과가 여기 쌓입니다.
           </div>
         )}
+      </div>
+
+      <div className="panel" style={{ marginTop: 'var(--sp-4)' }}>
+        <div className="panel-header">
+          <span className="panel-title">시험 결과 문서</span>
+          <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            나머지 입력은 직전 빌드·공유 설정·프로젝트 config 기본값
+          </span>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table className="board-table">
+            <thead>
+              <tr>
+                <th>문서</th>
+                <th>상태</th>
+                <th style={{ textAlign: 'right' }}>점수</th>
+                <th>왜 이 점수인가</th>
+                <th>릴리스 버전</th>
+                <th>생성 시각</th>
+                <th aria-label="작업" />
+              </tr>
+            </thead>
+            <tbody>
+              {reportRows.map(row => {
+                const run = latestByType[row.key];
+                const st = reportState[row.key] || {};
+                const v = st.busy ? { tone: 'info', label: '생성 중' } : verdictOf(run);
+                return (
+                  <tr key={row.key}>
+                    <td>
+                      <strong>{row.icon} {row.label}</strong>
+                      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                        {row.desc}
+                        {row.projectId && <> · 대상 <code>{row.projectId}</code></>}
+                      </div>
+                      {row.scopeMismatch && (
+                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
+                          ⚠ 화면 범위({scmId})와 빌드 대상이 다릅니다 — 탭에서 project_id 확인
+                        </div>
+                      )}
+                      {st.error && (
+                        <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>
+                          {st.error}
+                        </div>
+                      )}
+                    </td>
+                    <td><Pill tone={v.tone}>{v.label}</Pill></td>
+                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtScore(run?.summary?.overall_score)}
+                      <DeltaMark delta={run?.summary?.score_delta} />
+                    </td>
+                    <td style={{ fontSize: 'var(--text-xs)' }}>{whyOf(run, v)}</td>
+                    <td>
+                      {/* 디폴트가 없는 유일한 필수값. 비어 있으면 지어내지 않고 요구한다. */}
+                      <input
+                        type="text"
+                        aria-label={`${row.label} 릴리스 SW 버전`}
+                        value={row.version}
+                        placeholder="예: 1.02"
+                        onChange={e => setVersionEdit(p => ({ ...p, [row.key]: e.target.value }))}
+                        style={{ width: 84, fontSize: 'var(--text-xs)' }}
+                      />
+                      <div style={{ fontSize: 'var(--text-xs)', color: row.version ? 'var(--text-muted)' : 'var(--color-warning)' }}>
+                        {row.version
+                          ? { input: '직접 입력', saved: '직전 빌드값', run: '직전 실행 기록' }[row.versionSource]
+                          : '입력 필요'}
+                      </div>
+                    </td>
+                    <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                      {fmtWhen(run?.created_at)}
+                    </td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      <button
+                        type="button" className="btn-primary btn-sm"
+                        onClick={() => generateReport(row)}
+                        disabled={!!st.busy || !row.version}
+                        title={row.version ? '' : '릴리스 SW 버전을 입력하세요 — 임의 값으로 채우지 않습니다.'}
+                      >
+                        {st.busy ? '생성 중…' : '생성'}
+                      </button>
+                      <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
+                        onClick={() => onNavigateSub?.(row.sub)}>
+                        세부 →
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {builderRows.length > 0 && (

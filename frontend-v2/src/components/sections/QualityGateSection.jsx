@@ -49,7 +49,10 @@ const DOC_TYPES = [
   { value: '', label: '전체' },
   { value: 'uds', label: 'UDS' }, { value: 'sts', label: 'STS' },
   { value: 'suts', label: 'SUTS' }, { value: 'sits', label: 'SITS' },
-  { value: 'swut', label: 'SwUT' }, { value: 'swit', label: 'SwIT' },
+  // swut/swit = 커버리지 결과, sutr/sitr = 시험 **결과 보고서**. 평가기가 달라
+  // (커버리지 축 vs 실행률·통과율) 한 항목으로 합치면 지표가 섞인다.
+  { value: 'swut', label: 'SwUT 커버리지' }, { value: 'swit', label: 'SwIT 커버리지' },
+  { value: 'sutr', label: 'SUTR' }, { value: 'sitr', label: 'SITR' },
   { value: 'swsa', label: 'SwSA' }, { value: 'swreport', label: '통합 Summary' },
 ];
 

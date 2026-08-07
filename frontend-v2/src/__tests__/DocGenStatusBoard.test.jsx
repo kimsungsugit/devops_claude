@@ -20,6 +20,9 @@ const mockToast = vi.fn();
 vi.mock('../api.js', () => ({
   api: (...a) => mockApi(...a),
   post: (...a) => mockPost(...a),
+  buildUrl: (p) => p,
+  // 실제 헤더 조립은 api.js 의 책임 — 여기서는 **붙었는지**만 본다(X9).
+  authHeaders: () => ({ Authorization: 'Bearer T', 'X-User': 'u' }),
 }));
 vi.mock('../App.jsx', () => ({ useToast: () => mockToast }));
 
@@ -285,5 +288,146 @@ describe('DocGenStatusBoard — 프로젝트 스코프와 진행', () => {
     mockApi.mockResolvedValue({ runs: [], total: 0, error: 'quality module not available' });
     mountBoard();
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/quality module not available/));
+  });
+});
+
+/**
+ * 시험 결과 문서(SUTR/SITR/통합 Summary) 원클릭 생성.
+ *
+ * 여기서 지켜야 할 선은 하나다 — **디폴트로 채우되 지어내지는 않는다.** 릴리스 SW
+ * 버전을 임의로 찍으면 ISO 26262 납품 문서 표지에 틀린 릴리스가 박히고, 그건 화면이
+ * 조용히 만든 거짓 증거다.
+ */
+describe('DocGenStatusBoard — 시험 결과 문서 원클릭 생성', () => {
+  const okXlsm = () => ({
+    ok: true, status: 200,
+    headers: { get: (k) => (k === 'Content-Disposition' ? 'attachment; filename="SUTR.xlsm"' : null) },
+    blob: async () => new Blob(['x'.repeat(2048)]),
+  });
+
+  beforeEach(() => {
+    localStorage.clear();
+    global.fetch = vi.fn().mockResolvedValue(okXlsm());
+    // jsdom 에는 없다 — 다운로드 경로가 여기서 죽으면 테스트가 원인을 가린다.
+    global.URL.createObjectURL = vi.fn(() => 'blob:x');
+    global.URL.revokeObjectURL = vi.fn();
+  });
+
+  it('세 행이 모두 뜨고 각자 생성/세부 버튼을 갖는다', async () => {
+    mountBoard();
+    for (const label of ['🧪 SUTR', '🔗 SITR', '📊 통합 Summary']) {
+      const tr = await waitFor(() => rowOf(label));
+      expect(within(tr).getByRole('button', { name: '생성' })).toBeInTheDocument();
+      expect(within(tr).getByRole('button', { name: '세부 →' })).toBeInTheDocument();
+    }
+  });
+
+  it('릴리스 버전이 없으면 생성이 막히고 "입력 필요" 라고 말한다', async () => {
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🧪 SUTR'));
+    expect(within(tr).getByRole('button', { name: '생성' })).toBeDisabled();
+    expect(within(tr).getByText('입력 필요')).toBeInTheDocument();
+    // 음성 대조군 — 임의 버전을 채워 넣지 않는다.
+    expect(within(tr).getByLabelText(/릴리스 SW 버전/)).toHaveValue('');
+  });
+
+  it('직전 빌드 저장값을 디폴트로 쓴다', async () => {
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({ release_sw_version: '2.02' }));
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🧪 SUTR'));
+    expect(within(tr).getByLabelText(/릴리스 SW 버전/)).toHaveValue('2.02');
+    expect(within(tr).getByText('직전 빌드값')).toBeInTheDocument();
+  });
+
+  it('저장값이 없으면 직전 실행 기록의 버전으로 폴백한다', async () => {
+    mockApi.mockResolvedValue({
+      runs: [run({ doc_type: 'swut', meta: { release_sw_version: '1.07' } })], total: 1,
+    });
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🔗 SITR'));
+    expect(within(tr).getByLabelText(/릴리스 SW 버전/)).toHaveValue('1.07');
+    expect(within(tr).getByText('직전 실행 기록')).toBeInTheDocument();
+  });
+
+  it('생성하면 UI 전용 키 없이 POST 하고 인증 헤더를 붙인다', async () => {
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({
+      release_sw_version: '2.02', log_folders_text: 'A\nB',
+    }));
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🧪 SUTR'));
+    await user.click(within(tr).getByRole('button', { name: '생성' }));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    const [url, opt] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/swut/sutr/build');
+    expect(opt.headers.Authorization).toBe('Bearer T');       // X9 — 없으면 401 을 삼킨다
+    const body = JSON.parse(opt.body);
+    expect(body.release_sw_version).toBe('2.02');
+    expect(body.log_folders).toEqual(['A', 'B']);
+    expect('log_folders_text' in body).toBe(false);           // backend extra='forbid'
+  });
+
+  it('성공하면 이력을 다시 읽는다 (방금 만든 실행이 표에 반영돼야 한다)', async () => {
+    localStorage.setItem('devops_v2_swreport_form', JSON.stringify({ release_sw_version: '1.00' }));
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📊 통합 Summary'));
+    await waitFor(() => expect(mockApi).toHaveBeenCalledTimes(1));
+    await user.click(within(tr).getByRole('button', { name: '생성' }));
+    await waitFor(() => expect(mockApi.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('403 을 서버 장애가 아니라 권한 상태로 말한다', async () => {
+    localStorage.setItem('devops_v2_swit_form', JSON.stringify({ release_sw_version: '1.00' }));
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 403, json: async () => ({ detail: 'admin only' }),
+      headers: { get: () => null },
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🔗 SITR'));
+    await user.click(within(tr).getByRole('button', { name: '생성' }));
+    await waitFor(() => expect(within(tr).getByRole('alert')).toHaveTextContent(/관리자 전용/));
+    expect(within(tr).queryByText(/HTTP 403/)).toBeNull();
+  });
+
+  it('422 필드 오류를 그대로 보여준다 (사유 없는 "실패" 로 뭉개지 않는다)', async () => {
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({ release_sw_version: '1.00' }));
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 422, headers: { get: () => null },
+      json: async () => ({ detail: [{ loc: ['body', 'test_date'], msg: 'string does not match' }] }),
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🧪 SUTR'));
+    await user.click(within(tr).getByRole('button', { name: '생성' }));
+    await waitFor(() => expect(within(tr).getByRole('alert')).toHaveTextContent(/test_date/));
+  });
+
+  it('빌드 대상 프로젝트가 화면 범위와 다르면 조용히 만들지 않고 경고한다', async () => {
+    // 화면은 kjpds02_pv 범위인데 저장 폼의 project_id 는 HDPDM01(기본값).
+    mountBoard();
+    const tr = await waitFor(() => rowOf('🧪 SUTR'));
+    expect(within(tr).getByText(/화면 범위\(kjpds02_pv\)와 빌드 대상이 다릅니다/)).toBeInTheDocument();
+  });
+
+  it('범위가 일치하면 경고하지 않는다 (경고가 상시 표시면 무시된다)', async () => {
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({ project_id: 'KJPDS02_PV' }));
+    render(<DocGenStatusBoard job={JOB} genState={null}
+      analysisResult={{ matchedScm: { id: 'kjpds02_pv', name: 'KJPDS02_PV' } }} />);
+    const tr = await waitFor(() => rowOf('🧪 SUTR'));
+    expect(within(tr).queryByText(/빌드 대상이 다릅니다/)).toBeNull();
+  });
+
+  it('통합 Summary 는 빌더 산출물 표에 중복되지 않는다', async () => {
+    mockApi.mockResolvedValue({
+      runs: [run({ doc_type: 'swreport', id: 9 }), run({ doc_type: 'swut', id: 8 })], total: 2,
+    });
+    mountBoard();
+    await waitFor(() => rowOf('📊 통합 Summary'));
+    // 보조 표에는 커버리지 계열만 남는다.
+    expect(screen.getByText('SwUT 커버리지')).toBeInTheDocument();
+    expect(screen.queryByText('통합 결과')).toBeNull();
   });
 });
