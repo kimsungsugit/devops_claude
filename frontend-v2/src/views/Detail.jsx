@@ -37,11 +37,15 @@ const SECTIONS = [
 ];
 
 // 통합 전 개별 탭 id — 외부 네비게이션 호환용. docgen 허브로 라우팅 후 서브 선택.
-const DOCGEN_SUB_IDS = new Set(['docgen', 'reports', 'swut', 'swit', 'swsa', 'swreport']);
+const DOCGEN_SUB_IDS = new Set(['status', 'docgen', 'reports', 'swut', 'swit', 'swsa', 'swreport']);
 
-// 각 허브의 **첫 서브** — 섹션 라벨과 사실상 같은 뜻이라 breadcrumb 에서 생략한다
-// (매번 "문서 생성 › 문서 생성", "프로젝트 분석 › 개요" 가 되면 소음이다).
-const FIRST_SUB_IDS = new Set(['docgen', 'overview']);
+// 섹션 라벨과 **사실상 같은 뜻인** 첫 서브만 breadcrumb 에서 생략한다
+// ("프로젝트 분석 › 개요" 가 매번 뜨면 소음이다).
+//
+// ⚠ 'docgen' 은 여기서 빠졌다(2026-08-07). 문서 생성 허브의 첫 서브가 '생성 현황'
+// 보드로 바뀌었고, '생성 현황' 도 '문서 생성' 도 서로 다른 뜻이라 둘 다 보여야 한다 —
+// 서브가 7개나 되므로 지금 어디에 있는지가 오히려 필요한 정보다.
+const FIRST_SUB_IDS = new Set(['overview']);
 
 export default function Detail() {
   const { selectedJob, analysisResult, setSelectedJob, setAnalysisResult } = useJob();

@@ -26,7 +26,7 @@ const BUILDER_TABS = [
   { id: 'swreport', label: '통합 결과', icon: '📊', desc: '전 레벨 통합 Summary' },
 ];
 
-export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
+export default function DocGenSection({ job, analysisResult, onNavigateSub, onGenState, onRegisterGenerate }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
   const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
@@ -186,6 +186,22 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
       setGenerating(null);
     }
   }, [job, cfg, cacheRoot, docPaths, toast, analysisResult]);
+
+  // 생성 현황 보드('생성 현황' 서브탭)가 같은 폴링을 다시 돌리지 않도록 진행 상태를
+  // 부모(DocGenHubSection)로 올려보낸다. `result` 는 완료/실패 시에만 새 객체가 되므로
+  // 보드가 그 identity 변화를 이력 재조회 트리거로 쓴다.
+  useEffect(() => {
+    if (!onGenState) return;
+    onGenState({ docType: generating, stage: genStage, progress: genProgress, result: genResult });
+  }, [generating, genStage, genProgress, genResult, onGenState]);
+
+  // 보드의 '생성' 버튼이 호출할 실제 함수를 등록한다. `generateDoc` 은 이 컴포넌트의
+  // 폼 상태(docPaths·cacheRoot·linked_docs)에 묶여 있어 끌어올리면 그게 전부 따라온다 —
+  // 등록으로 두면 로직 복제도 이동도 없다.
+  useEffect(() => {
+    if (!onRegisterGenerate) return;
+    onRegisterGenerate(generateDoc);
+  }, [onRegisterGenerate, generateDoc]);
 
   const [scm] = useScmFallback(analysisResult);
   const linkedDocs = scm?.linked_docs || {};

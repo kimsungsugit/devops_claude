@@ -115,8 +115,16 @@ def list_runs(
     project_root: Optional[str] = Query(None, description="레거시 축 — 어휘 혼재라 정확일치만"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    include_scores: bool = Query(
+        False, description="지표까지 함께 (보드가 실패 지표를 뽑을 때)"
+    ),
 ) -> Dict[str, Any]:
-    """생성 이력 목록 (summary 포함)."""
+    """생성 이력 목록 (summary 포함).
+
+    `include_scores=true` 는 run 당 지표 ~13행을 더 싣는다. 생성 현황 보드처럼
+    **문서 종류별 최신 1건씩**(4~7건)만 보는 화면을 위한 것이다 — 큰 limit 과
+    함께 쓰면 응답이 급격히 커지므로 목록 UI 는 기본값(False)을 유지할 것.
+    """
     try:
         from sqlalchemy.orm import selectinload
 
@@ -150,7 +158,7 @@ def list_runs(
             .all()
         )
         return {
-            "runs": [_run_to_dict(r) for r in runs],
+            "runs": [_run_to_dict(r, include_scores=include_scores) for r in runs],
             "total": total,
             "limit": limit,
             "offset": offset,

@@ -684,6 +684,41 @@ label {
 
 .impact-table tr:hover td { background: var(--hover); }
 
+/* ── Board table (생성 현황 보드 / 품질 게이트 상세) ──
+   `.impact-table` 과 같은 골격이되 (a) 행 확장을 쓰므로 hover 를 데이터 행에만 걸고,
+   (b) 셀 정렬을 middle 로 둔다(상태 pill·진행바가 세로 중앙에 와야 읽힌다).
+
+   ⚠ 이 블록이 없으면 표가 **브라우저 기본 <table>** 로 렌더된다 — 테두리도 배경도
+   없이. `GateReviewSection` 이 정의되지 않은 `.data-table`/`.section`/`.alert` 를
+   쓰다가 정확히 그렇게 됐고, 그게 "품질 게이트 UI 가 와닿지 않는다" 의 물리적
+   1순위 원인이었다. 새 표를 만들 땐 클래스가 실제로 정의돼 있는지 확인할 것. */
+.board-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+}
+
+.board-table th {
+  text-align: left;
+  padding: 6px 10px;
+  background: var(--bg);
+  border-bottom: 2px solid var(--border);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.board-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.board-table tbody tr:hover td { background: var(--hover); }
+
 /* ── Accordion nav ── */
 .detail-layout {
   display: flex;

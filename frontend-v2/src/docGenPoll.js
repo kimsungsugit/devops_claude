@@ -30,7 +30,12 @@ export async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg
     throwIfAborted(signal);  // 요청 왕복 중 도착한 '중단' — 없으면 done:true 가 그대로 성공 처리된다
     const p = data?.progress || {};
     if (p.message || p.stage) onMsg(p.message || p.stage);
-    if (p.progress != null) onMsg(`${p.message || ''} (${p.progress}%)`);
+    // ⚠ 서버가 넣는 필드는 `percent` 다(`helpers/uds.py::_set_progress`, `jenkins.py`).
+    // 여기서 `p.progress` 만 읽던 탓에 이 줄은 **한 번도 발화한 적이 없고**, 화면의 %는
+    // `DocGenSection::resolveProgress` 가 메시지 문자열을 stageMap 으로 역추론한
+    // 추정치였다. percent 우선 + progress 폴백으로 실제 값을 흘린다.
+    const pct = p.percent != null ? p.percent : p.progress;
+    if (pct != null) onMsg(`${p.message || ''} (${pct}%)`);
     if (p.done || p.error) return p;
   }
 }
@@ -45,6 +50,9 @@ export async function pollStsProgress(jobId, action, jobUrl, { onMsg, signal, pr
     throwIfAborted(signal);  // 요청 왕복 중 도착한 '중단' (return 지점이 3개라 창이 더 넓다)
     const p = data?.progress || data || {};
     if (p.message || p.stage) onMsg(p.message || p.stage);
+    // UDS 폴러와 동일 — 서버 필드는 `percent`(위 주석 참조).
+    const pct = p.percent != null ? p.percent : p.progress;
+    if (pct != null) onMsg(`${p.message || ''} (${pct}%)`);
     if (p.done || p.error) return p;
     if (p.status === 'completed' || p.status === 'done') return { done: true, ...p };
     if (p.status === 'failed' || p.status === 'error') return { error: p.error || p.message || '실패', ...p };
