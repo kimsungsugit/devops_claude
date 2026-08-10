@@ -161,7 +161,12 @@ function ScmSection() {
       branch: '',
       base_ref: 'HEAD~1',
       source_root: '',
-      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '', vectorcast: [], codesonar: [] },
+      linked_docs: {
+        srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '',
+        // 문서별 생성 템플릿(UDS .docx / 시험 규격서 .xlsm) — 형식이 달라 키를 나눈다.
+        uds_template: '', sts_template: '', suts_template: '', sits_template: '',
+        vectorcast: [], codesonar: [],
+      },
     };
   }
 
@@ -390,7 +395,10 @@ function ScmSection() {
           </div>
           <div className="settings-section-title" style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8 }}>연결 문서 경로</div>
           <div className="field-group cols-3">
-            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syts', 'syits'].map(k => (
+            {/* 템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
+                예전엔 필드가 없어 설정의 공용 `template` 하나가 양쪽에 갔다. */}
+            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syts', 'syits',
+              'uds_template', 'sts_template', 'suts_template', 'sits_template'].map(k => (
               <div className="field" key={k}>
                 <label>{k.toUpperCase()} 경로</label>
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -497,8 +505,13 @@ function PathField({ label, value, ph, onChange, onBrowse, span2 = false, multil
   );
 }
 
-// linked_docs(SCM 연결문서)에서 상속 가능한 doc_paths 키 (template/vectorcast 제외 — 전자는
-// linked_docs에 없고 후자는 복수 경로 list라 단일 문서 필드와 매핑 안 됨).
+// linked_docs(SCM 연결문서)에서 상속 가능한 doc_paths 키.
+//
+// ⚠ 템플릿은 이제 linked_docs 에 **있다**(`uds_template` 등, 문서별로 형식이 다르다).
+//   다만 여기 넣지 않는 이유는 `doc_paths`(설정>입력 자료)에 대응 필드가 없기 때문이다 —
+//   생성 시 `DocGenSection` 이 레지스트리를 직접 읽는다. `doc_paths` 에 템플릿 입력을
+//   추가하려면 이 목록도 함께 늘릴 것.
+// vectorcast/codesonar 는 복수 경로 list 라 단일 문서 필드와 매핑되지 않는다.
 const SCM_INHERIT_KEYS = ['srs', 'sds', 'hsis', 'stp', 'uds', 'sts', 'suts', 'sits'];
 const DOC_SCM_KEY = 'devops_v2_doc_scm';
 

@@ -126,6 +126,17 @@ class ScmLinkedDocs(BaseModel):
     # 있어 단일 문자열이 아닌 복수 경로 list. 각 경로는 vectorcast_rag.json 파일 또는
     # 그 상위 폴더. SwUT/SwIT 로그처럼 SCM별로 설정의 '연결 문서 경로'에서 등록.
     vectorcast: List[str] = Field(default_factory=list)
+    # 문서별 **생성 템플릿**. 형식이 서로 다르다 — UDS 는 .docx, 시험 규격서는 .xlsm 이다.
+    # 예전엔 이 필드가 아예 없어서 프론트가 설정의 `docPaths.template` **하나**를
+    # UDS(`uds_template_path`)와 시험문서(`template_path`) 양쪽에 같이 보냈다. 형식이
+    # 다른 두 자리에 같은 경로가 가므로 한쪽은 반드시 틀린다(라이브에서 준비 게이트의
+    # '템플릿' 항목이 어느 프로젝트에서도 채워지지 않은 이유이기도 하다).
+    # ⚠ SwUT/SwIT 빌더 템플릿은 여기가 아니라 `config/swut_meta.json`
+    #   `template_paths` 가 프로젝트별로 관리한다 — 두 곳에 두면 갈라진다.
+    uds_template: str = ""
+    sts_template: str = ""
+    suts_template: str = ""
+    sits_template: str = ""
     # 정적분석 산출물 폴더 경로(들) — 보통 회사 SCM의 '09.정적분석/01.Static Analysis' 폴더
     # 하나를 등록하면 그 안의 4종 리포트(CodeSonar PDF / QAC HIS PDF / CPD XML / CodeEye PDF)를
     # 모두 파싱한다. AnalysisSection '정적분석 불러오기'가 linked_docs.codesonar를 읽으므로,

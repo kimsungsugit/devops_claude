@@ -68,8 +68,15 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       formData.append('cache_root', cacheRoot);
       formData.append('build_selector', cfg.buildSelector || 'lastSuccessfulBuild');
       if (scm?.source_root) formData.append('source_root', scm.source_root);
-      if (docPaths.template) formData.append('template_path', docPaths.template);
-      if (docType === 'uds' && docPaths.template) formData.append('uds_template_path', docPaths.template);
+      // 템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
+      // 예전엔 설정의 공용 `template` 하나를 두 자리에 같이 보냈다 — 형식이 다르므로
+      // 한쪽은 반드시 틀린다. 문서별 키를 먼저 보고 없을 때만 공용으로 폴백한다.
+      const TPL_KEY = { uds: 'uds_template', sts: 'sts_template', suts: 'suts_template', sits: 'sits_template' };
+      const tplKey = TPL_KEY[docType];
+      const templatePath = (tplKey && (docPaths[tplKey] || linkedDocs[tplKey]))
+        || docPaths.template || linkedDocs.template || '';
+      if (templatePath) formData.append('template_path', templatePath);
+      if (docType === 'uds' && templatePath) formData.append('uds_template_path', templatePath);
       // Pass linked doc paths
       const srsPath = docPaths.srs || linkedDocs.srs || '';
       const sdsPath = docPaths.sds || linkedDocs.sds || '';

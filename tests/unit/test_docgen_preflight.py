@@ -237,6 +237,56 @@ def test_flow_loss_is_present_tense_when_already_cut(
     assert expect in str(step.get("reason") or "")
 
 
+@pytest.mark.parametrize("doc_type,key", [
+    ("uds", "uds_template"),
+    ("sts", "sts_template"),
+    ("suts", "suts_template"),
+    ("sits", "sits_template"),
+])
+def test_template_is_per_document(doc_type: str, key: str, tmp_path: Path) -> None:
+    """템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
+
+    예전엔 `ScmLinkedDocs` 에 템플릿 필드가 아예 없어서 프론트가 설정의 공용
+    `template` 하나를 UDS 자리와 시험문서 자리에 **같이** 보냈다. 형식이 다르므로
+    한쪽은 반드시 틀린다.
+    """
+    from backend.schemas import ScmLinkedDocs
+
+    assert key in ScmLinkedDocs.model_fields, f"{key} 필드가 없다"
+
+    tpl = tmp_path / f"{key}.xlsm"
+    tpl.write_bytes(b"x")
+    data = _post({"doc_type": doc_type, "source_root": str(tmp_path),
+                  "doc_paths": {key: str(tpl)}})
+    step = _step(data, "template")
+    assert step is not None
+    assert step["state"] == "ok", f"{doc_type} 이 {key} 를 못 찾았다"
+    assert step["value"] == str(tpl)
+
+
+def test_shared_template_still_works_as_fallback(tmp_path: Path) -> None:
+    """구 설정(공용 `template`)도 계속 동작해야 한다 — 회귀를 만들지 않는다."""
+    tpl = tmp_path / "legacy.docx"
+    tpl.write_bytes(b"x")
+    data = _post({"doc_type": "uds", "source_root": str(tmp_path),
+                  "doc_paths": {"template": str(tpl)}})
+    step = _step(data, "template")
+    assert step is not None and step["state"] == "ok"
+
+
+def test_specific_template_wins_over_shared(tmp_path: Path) -> None:
+    """전용 키가 공용보다 우선이다 — 그게 이 분리의 목적이다."""
+    shared = tmp_path / "shared.docx"
+    specific = tmp_path / "uds_only.docx"
+    shared.write_bytes(b"x")
+    specific.write_bytes(b"x")
+    data = _post({"doc_type": "uds", "source_root": str(tmp_path),
+                  "doc_paths": {"template": str(shared), "uds_template": str(specific)}})
+    step = _step(data, "template")
+    assert step is not None
+    assert step["value"] == str(specific)
+
+
 def test_multi_root_source_is_parsed(tmp_path: Path) -> None:
     """`source_root` 는 **콤마 구분 복수 경로**일 수 있다.
 

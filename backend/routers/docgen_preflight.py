@@ -71,6 +71,15 @@ _DOC_KEY_TO_INPUT = {
 }
 _INPUT_TO_DOC_KEY = {v: k for k, v in _DOC_KEY_TO_INPUT.items()}
 
+# 템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm). 그래서 레지스트리
+# 키도 문서별로 나뉜다. 없으면 공용 `template` 로 폴백한다(구 설정 호환).
+_TEMPLATE_KEY_BY_DOC = {
+    "uds": "uds_template",
+    "sts": "sts_template",
+    "suts": "suts_template",
+    "sits": "sits_template",
+}
+
 
 class PreflightRequest(BaseModel):
     doc_type: str = Field(..., description="uds/sts/suts/sits/sutr/sitr/swreport")
@@ -145,19 +154,32 @@ def _resolve_inputs(req: PreflightRequest) -> Dict[str, str]:
             linked = entry.linked_docs.model_dump(mode="json")
             source_root = source_root or (entry.source_root or "")
 
+    def _pick(*keys: str) -> str:
+        """설정(doc_paths) > 레지스트리 순, 그리고 **앞선 키가 이긴다**."""
+        for key in keys:
+            v = str(req.doc_paths.get(key) or "").strip()
+            if v:
+                return v
+        for key in keys:
+            raw = linked.get(key)
+            v = str((raw[0] if isinstance(raw, list) and raw else raw) or "").strip()
+            if v:
+                return v
+        return ""
+
     out: Dict[str, str] = {}
     if source_root:
         out[_req.IN_SOURCE_ROOT] = source_root
     for doc_key, input_key in _DOC_KEY_TO_INPUT.items():
-        v = str(req.doc_paths.get(doc_key) or "").strip()
-        if not v:
-            raw = linked.get(doc_key)
-            if isinstance(raw, list):
-                v = str(raw[0]) if raw else ""
-            else:
-                v = str(raw or "")
-        if v.strip():
-            out[input_key] = v.strip()
+        if doc_key == "template":
+            # 문서별 템플릿을 먼저 보고, 없으면 공용 `template`(구 설정) 로 폴백한다.
+            # 형식이 다른 자리에 같은 경로를 넣던 것이 원래 결함이므로 전용 키가 우선이다.
+            specific = _TEMPLATE_KEY_BY_DOC.get(str(req.doc_type or "").strip().lower())
+            v = _pick(specific, "template") if specific else _pick("template")
+        else:
+            v = _pick(doc_key)
+        if v:
+            out[input_key] = v
     return out
 
 
@@ -614,7 +636,8 @@ def docgen_adopt_doc_path(req: AdoptDocPathRequest) -> Dict[str, Any]:
     from backend.services.scm_registry import get_registry_entry, update_entry
 
     doc_key = str(req.doc_key or "").strip().lower()
-    if doc_key not in _DOC_KEY_TO_INPUT:
+    # 문서별 템플릿 키(`uds_template` 등)도 교체 대상이다 — 템플릿도 개정되며 파일명이 바뀐다.
+    if doc_key not in _DOC_KEY_TO_INPUT and doc_key not in set(_TEMPLATE_KEY_BY_DOC.values()):
         raise HTTPException(status_code=400, detail=f"알 수 없는 문서 키: {req.doc_key}")
 
     name = str(req.filename or "").strip()
