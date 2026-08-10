@@ -175,6 +175,65 @@ describe('DocGenPreflightPanel', () => {
     expect(screen.getByText(/EEPROM_TAddress/)).toBeInTheDocument();
   });
 
+  it('결정 질문을 보인다', () => {
+    renderPanel(base([], 'needs_decision'), {
+      questions: {
+        questions: [{
+          id: 'proceed_without_swds', kind: 'confirm', severity: 'high',
+          title: 'SwDS 없이 만들까요?',
+          body: 'SwDS 가 연결되지 않았습니다.',
+          options: [{ value: 'proceed', label: '이대로 진행' }],
+          generated_by: 'rule',
+        }],
+        llm_used: false, llm_reason: '',
+      },
+    });
+    expect(screen.getByText('SwDS 없이 만들까요?')).toBeInTheDocument();
+    expect(screen.getByText('이대로 진행')).toBeInTheDocument();
+  });
+
+  it('AI 가 쓴 문장은 그 사실을 밝힌다 — 출처를 숨기지 않는다', () => {
+    renderPanel(base([], 'needs_decision'), {
+      questions: {
+        questions: [{
+          id: 'q1', kind: 'confirm', severity: 'high', title: '제목',
+          body: '본문', options: [], generated_by: 'llm',
+        }],
+        llm_used: true, llm_reason: '',
+      },
+    });
+    expect(screen.getByText('(AI 작성)')).toBeInTheDocument();
+  });
+
+  it('룰 문장에는 AI 표시가 붙지 않는다', () => {
+    renderPanel(base([], 'needs_decision'), {
+      questions: {
+        questions: [{
+          id: 'q1', kind: 'confirm', severity: 'high', title: '제목',
+          body: '본문', options: [], generated_by: 'rule',
+        }],
+        llm_used: false, llm_reason: '',
+      },
+    });
+    expect(screen.queryByText('(AI 작성)')).toBeNull();
+  });
+
+  it('질문이 없으면 사유를 말한다 — 빈 칸은 "문제 없음" 으로 읽힌다', () => {
+    renderPanel(base([], 'ready'), {
+      questions: { questions: [], llm_used: false, llm_reason: '결정할 항목이 없습니다' },
+    });
+    expect(screen.getByText('결정할 항목이 없습니다')).toBeInTheDocument();
+  });
+
+  it('질문 조회 실패는 alert 으로 드러나되 준비 패널은 살아 있다', () => {
+    renderPanel(base([{
+      id: 'swds', phase: 'input', state: 'needed', label: 'SwDS(설계서)',
+    }], 'needs_decision'), { questionsError: '질문을 불러오지 못했습니다.' });
+    expect(screen.getByRole('alert')).toHaveTextContent('질문을 불러오지 못했습니다.');
+    // 준비 단계는 그대로 보여야 한다.
+    expect(screen.getByText('SwDS(설계서)')).toBeInTheDocument();
+  });
+
   it('measured 의 partial 은 절단을 침묵시키지 않는다', () => {
     renderPanel(base([{
       id: 'comment_coverage', phase: 'material', state: 'degraded', label: '소스 주석',

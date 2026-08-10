@@ -183,6 +183,16 @@ def _read_doc_material(path: str) -> Dict[str, Any]:
 @router.post("/api/docgen/preflight")
 def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
     """생성 전 준비 상태를 판정한다. **생성하지 않는다.**"""
+    return _compute_preflight(req)
+
+
+def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
+    """preflight 판정 본체.
+
+    엔드포인트에서 분리한 이유는 **질문 생성기가 같은 판정을 써야** 하기 때문이다.
+    프론트가 계산된 `steps` 를 되보내는 방식은 임의 데이터를 판정 입력으로 삼는 셈이라
+    쓰지 않는다 — 서버가 같은 함수로 다시 계산한다.
+    """
     from backend.services.file_resolver import get_resolver
 
     spec = _req.requirements_for(req.doc_type)
@@ -430,6 +440,32 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
         "verdict": verdict,
         "file_mode": mode,
         "steps": steps,
+    }
+
+
+@router.post("/api/docgen/questions")
+def docgen_questions(req: PreflightRequest) -> Dict[str, Any]:
+    """결정 항목을 **자연어 질문**으로 낸다.
+
+    ## 왜 preflight 와 분리했나
+
+    preflight 는 행을 펼칠 때마다 도는 동기 API 이고 LLM 은 수 초다. 한 응답에 묶으면
+    준비 상태 표시 전체가 LLM 을 기다린다. preflight 가 먼저 오고 질문이 뒤따른다.
+
+    ## 판정을 다시 계산한다
+
+    프론트가 계산된 `steps` 를 되보내지 않는다 — 임의 데이터를 판정 입력으로 삼는 셈이다.
+    서버가 `_compute_preflight` 로 같은 판정을 다시 만든다.
+    """
+    from backend.services import docgen_questions as _q
+
+    pf = _compute_preflight(req)
+    built = _q.build_questions(req.doc_type, pf.get("steps") or [])
+    return {
+        "ok": True,
+        "doc_type": req.doc_type,
+        "verdict": pf.get("verdict"),
+        **built,
     }
 
 

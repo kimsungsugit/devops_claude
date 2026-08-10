@@ -122,7 +122,64 @@ function ChainRows({ chain }) {
  * 핸들러가 조회하면 되고, 보드는 이미 `근거` 탭을 정확히 그 방식으로 채운다
  * (`DocGenStatusBoard.toggleExpand`). 결과적으로 표시 전용 순수 컴포넌트가 된다.
  */
-export default function DocGenPreflightPanel({ data, loading, error, onReload, onAction }) {
+/**
+ * 결정 질문 — 게이트가 낸 코드(`proceed_without_swds`)를 사람이 답할 수 있는 문장으로.
+ *
+ * ⚠ **문장의 출처를 숨기지 않는다.** `generated_by === 'llm'` 이면 AI 가 썼다고 밝힌다.
+ * 수치는 서버가 검증한다 — 프롬프트에 없던 숫자가 섞이면 그 응답은 폐기되고 룰 문장이
+ * 온다. 그래도 "AI 문장" 표시는 남긴다(읽는 사람이 판단할 몫이다).
+ */
+function QuestionList({ payload, error }) {
+  if (error) {
+    return (
+      <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>
+        {error}
+      </div>
+    );
+  }
+  if (!payload) return null;
+  const items = payload.questions || [];
+  if (!items.length) {
+    return (
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+        {payload.llm_reason || '결정할 항목이 없습니다'}
+      </div>
+    );
+  }
+  return (
+    <div className="pipeline-steps">
+      {items.map(q => (
+        <div key={q.id} className={`pipeline-step ${q.severity === 'high' ? 'step-warn' : ''}`}>
+          <span className="step-icon" aria-hidden="true">?</span>
+          <span className="step-label">
+            {q.title}
+            {q.generated_by === 'llm' && (
+              <span style={{ marginLeft: 6, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                (AI 작성)
+              </span>
+            )}
+            <div className="step-msg">
+              {q.body}
+              {Array.isArray(q.options) && q.options.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  {q.options.map(o => (
+                    <span key={o.value} className="pill pill-neutral" style={{ marginRight: 4 }}>
+                      {o.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function DocGenPreflightPanel({
+  data, loading, error, questions, questionsError, onReload, onAction,
+}) {
   if (loading && !data) {
     return <div style={{ padding: 'var(--sp-3)', fontSize: 'var(--text-xs)' }}>준비 상태를 확인하는 중…</div>;
   }
@@ -154,6 +211,15 @@ export default function DocGenPreflightPanel({ data, loading, error, onReload, o
           {loading ? '확인 중…' : '다시 확인'}
         </button>
       </div>
+
+      {(questions || questionsError) && (
+        <div style={{ marginBottom: 'var(--sp-3)' }}>
+          <div style={{ fontWeight: 700, fontSize: 'var(--text-xs)', marginBottom: 4 }}>
+            결정할 것
+          </div>
+          <QuestionList payload={questions} error={questionsError} />
+        </div>
+      )}
 
       {byPhase.map(([phase, rows]) => (
         <div key={phase} style={{ marginBottom: 'var(--sp-3)' }}>

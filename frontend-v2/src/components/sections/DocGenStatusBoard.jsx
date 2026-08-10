@@ -336,6 +336,30 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
   const [prepOpen, setPrepOpen] = useState(null);      // 펼친 doc_type
   const [prep, setPrep] = useState({});                // {docType: {data, loading, error}}
 
+  /**
+   * 결정 질문 — **preflight 와 별도**로 뒤따라 채운다.
+   *
+   * 문장을 LLM 이 쓰므로 수 초가 걸린다. 한 응답에 묶으면 준비 상태 표시 전체가 그걸
+   * 기다린다. 실패해도 준비 패널은 그대로 살아 있어야 하므로 조용히 비운다
+   * (서버가 LLM 없이도 룰 문장으로 답하므로 여기까지 오는 실패는 네트워크뿐이다).
+   */
+  const loadQuestions = useCallback(async (docType) => {
+    try {
+      const res = await post('/api/docgen/questions', {
+        doc_type: docType,
+        scm_id: scmId || '',
+        source_root: analysisResult?.matchedScm?.source_root || '',
+        doc_paths: loadDocPaths() || {},
+      });
+      setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), questions: res } }));
+    } catch (e) {
+      setPrep(p => ({
+        ...p,
+        [docType]: { ...(p[docType] || {}), questionsError: e?.message || '질문을 불러오지 못했습니다.' },
+      }));
+    }
+  }, [scmId, analysisResult]);
+
   const loadPrep = useCallback(async (docType) => {
     setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), loading: true } }));
     try {
@@ -351,13 +375,15 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         return;
       }
       setPrep(p => ({ ...p, [docType]: { loading: false, data: res, error: '' } }));
+      // 준비 상태를 먼저 그리고 질문은 뒤따라 채운다(LLM 이라 느리다).
+      loadQuestions(docType);
     } catch (e) {
       setPrep(p => ({
         ...p,
         [docType]: { loading: false, error: e?.message || '준비 상태를 확인하지 못했습니다.' },
       }));
     }
-  }, [scmId, analysisResult]);
+  }, [scmId, analysisResult, loadQuestions]);
 
   const togglePrep = useCallback((docType) => {
     if (prepOpen === docType) { setPrepOpen(null); return; }
@@ -835,6 +861,8 @@ function FragmentRow({
               data={prepState?.data}
               loading={!!prepState?.loading}
               error={prepState?.error || ''}
+              questions={prepState?.questions}
+              questionsError={prepState?.questionsError || ''}
               onReload={onPrepReload}
               onAction={onPrepAction}
             />
