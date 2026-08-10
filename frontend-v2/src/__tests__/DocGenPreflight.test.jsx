@@ -123,6 +123,58 @@ describe('DocGenPreflightPanel', () => {
     expect(screen.getByText('brand_new_state')).toBeInTheDocument();
   });
 
+  it('캡은 절단 건수가 아니라 여유로 보인다', () => {
+    renderPanel(base([{
+      id: 'sits_flows', phase: 'material', state: 'ok', label: '통합 흐름',
+      measured: { value: 84, of: 120, headroom: 36 },
+    }], 'ready'));
+    expect(screen.getByText(/여유 36/)).toBeInTheDocument();
+  });
+
+  it('여유 0 은 경계 상태로 강조된다 — 절단 0 이어도 안전하지 않다', () => {
+    renderPanel(base([{
+      id: 'sits_flows', phase: 'material', state: 'degraded', label: '통합 흐름',
+      measured: { value: 120, of: 120, headroom: 0 },
+      reason: '캡에 닿아 있습니다 — 함수가 늘면 흐름이 잘리기 시작합니다',
+    }]));
+    expect(screen.getByText(/여유 0/)).toBeInTheDocument();
+    expect(screen.getByText(/캡에 닿아 있습니다/)).toBeInTheDocument();
+  });
+
+  it('SwDS 보강 0건은 조회·키매칭과 함께 드러난다', () => {
+    renderPanel(base([{
+      id: 'sits_sds_related', phase: 'material', state: 'degraded',
+      label: 'SwDS 기반 Related 보강',
+      measured: { value: 0, lookups: 84, key_hits: 38, map_entries: 763 },
+      reason: 'SwDS 를 읽었지만 SwCom 을 하나도 얻지 못했습니다',
+    }]));
+    // 조회는 됐는데 산출이 0 이라는 사실이 세 값으로만 드러난다.
+    expect(screen.getByText(/조회 84/)).toBeInTheDocument();
+    expect(screen.getByText(/키매칭 38/)).toBeInTheDocument();
+    expect(screen.getByText(/맵 763항목/)).toBeInTheDocument();
+  });
+
+  it('콜체인 예시를 보인다 — SITS 문서 D열에 그대로 박히는 값이다', () => {
+    renderPanel(base([{
+      id: 'sits_flows', phase: 'material', state: 'ok', label: '통합 흐름',
+      measured: { value: 84, of: 120, headroom: 36 },
+      sample: { entry_fn: 'Cpu_LvdStatusChanged', asil: 'QM',
+                call_chain: 'Cpu_LvdStatusChanged -> Cpu_OnLvdStatusChanged' },
+    }], 'ready'));
+    expect(screen.getByText(/Cpu_LvdStatusChanged -> Cpu_OnLvdStatusChanged/)).toBeInTheDocument();
+  });
+
+  it('타입 폴백은 건수와 변수 목록을 함께 보인다 — 건수만으론 못 고친다', () => {
+    renderPanel(base([{
+      id: 'suts_types', phase: 'material', state: 'degraded', label: '입출력 변수 타입 근거',
+      measured: { value: 157, of: 206, fallback: 49 },
+      reason: '49개가 근거 없이 uint8_t(0~255)로 채워집니다',
+      samples: ['[IN] EEPROM_TAddress Addr'],
+    }]));
+    expect(screen.getByText(/폴백 49/)).toBeInTheDocument();
+    expect(screen.getByText(/EEPROM_TAddress/)).toBeInTheDocument();
+  });
+
   it('measured 의 partial 은 절단을 침묵시키지 않는다', () => {
     renderPanel(base([{
       id: 'comment_coverage', phase: 'material', state: 'degraded', label: '소스 주석',

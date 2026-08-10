@@ -363,7 +363,14 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       if (!root) { toast('warning', '소스 루트가 없습니다 — SCM 설정을 확인하세요.'); return; }
       toast('info', '소스를 측정합니다 — 수십 초 이상 걸릴 수 있습니다.');
       try {
-        await post('/api/docgen/measure-source', { source_root: root });
+        // 시험 문서(SITS/SUTS)는 통합 흐름·변수 타입까지 잰다. SwDS 는 SITS 의
+        // Related 보강 실적을 재는 데 필요하다(맵이 없으면 그 축이 측정 불가).
+        const paths = loadDocPaths() || {};
+        await post('/api/docgen/measure-source', {
+          source_root: root,
+          doc_type: prepOpen || '',
+          sds_path: paths.sds || analysisResult?.matchedScm?.linked_docs?.sds || '',
+        });
         if (prepOpen) loadPrep(prepOpen);
       } catch (e) {
         toast('error', `소스 측정 실패: ${e?.message || e}`);

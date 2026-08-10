@@ -333,7 +333,10 @@ def _select_flows_within_cap(
 
 def collect_integration_flows(
     function_details: Dict[str, Dict[str, Any]],
-    max_flows: int = _DEFAULT_MAX_FLOWS,
+    # ⚠ `None` = 캡 없음. `_select_flows_within_cap` 은 처음부터 `Optional[int]` 를
+    #   받았는데 여기만 `int` 로 좁아, 캡 **전** 총량을 재려는 호출자가 타입상 막혔다.
+    #   (총량은 캡 전에만 보인다 — 결과 길이로 되짚으면 절단을 못 본다.)
+    max_flows: Optional[int] = _DEFAULT_MAX_FLOWS,
     stats_out: Optional[Dict[str, Any]] = None,
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:

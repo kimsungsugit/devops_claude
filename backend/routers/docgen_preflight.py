@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 from backend.services import docgen_comment_coverage as _cov
 from backend.services import docgen_field_sources as _chain
 from backend.services import docgen_requirements as _req
+from backend.services import docgen_test_materials as _tm
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api.docgen_preflight")
@@ -77,6 +78,9 @@ class PreflightRequest(BaseModel):
     # 생성 핸들러가 이미 받는 것과 같은 표면이라 새 입력 표면이 아니다.
     doc_paths: Dict[str, str] = Field(default_factory=dict)
     source_root: str = Field("", description="비우면 레지스트리 값을 쓴다")
+    # 시험 결과 3종(SUTR/SITR/통합)의 빌더 폼. 프론트 `missingRequiredFields` 판정을
+    # 여기로 흡수해 **판정이 두 벌이 되지 않게** 한다(이 저장소의 반복 결함).
+    form: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _step(step_id: str, phase: str, state: str, label: str, **extra: Any) -> Dict[str, Any]:
@@ -300,6 +304,64 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 actions=[{"kind": "measure_source"}],
             ))
 
+    # ── 3-b. 재료 — 시험 문서 전용 (SITS 흐름 / SUTS 타입) ───────────────────
+    #
+    # UDS 는 필드를 채우지만 시험 문서는 **시험 케이스를 합성한다**. 재료가 없으면
+    # 문서가 안 만들어지는 게 아니라 **틀린 시험값이 만들어진다**.
+    if req.doc_type in ("sits", "suts") and src and available.get(_req.IN_SOURCE_ROOT):
+        tm = _tm.cached(src) if _tm.has_cached(src) else None
+        if tm is None:
+            steps.append(_step(
+                "test_materials", "material", S_UNMEASURED,
+                "통합 흐름 / 변수 타입",
+                reason="아직 측정하지 않았습니다 — 소스 파싱은 수십 초 이상 걸립니다",
+                actions=[{"kind": "measure_source"}],
+            ))
+        elif not tm.get("ok"):
+            steps.append(_step("test_materials", "material", S_UNMEASURED,
+                               "통합 흐름 / 변수 타입", reason=str(tm.get("reason") or "")))
+        else:
+            if req.doc_type == "sits":
+                s = tm["sits"]
+                # ⚠ "절단 0" 이 아니라 **여유**를 본다. 실측: KJPDS02 는 후보 120 /
+                #   캡 120 으로 여유가 0 이라, 함수가 하나만 늘어도 조용히 잘린다.
+                steps.append(_step(
+                    "sits_flows", "material",
+                    S_DEGRADED if s["at_cap_boundary"] else S_OK, "통합 흐름",
+                    measured={"value": s["flows_total"], "of": s["cap"],
+                              "headroom": s["headroom"]},
+                    reason=("캡에 닿아 있습니다 — 함수가 늘면 흐름이 잘리기 시작하고, "
+                            "잘린 흐름은 시험 규격에 존재하지 않습니다"
+                            if s["at_cap_boundary"] else ""),
+                    sample=s.get("sample_flow"),
+                ))
+                # SwCom 보강 0 건은 **숨기지 않는다** — 실측상 실 SwDS 를 줘도 0 이다.
+                swcom_hits = s.get("sds_swcom_hits")
+                steps.append(_step(
+                    "sits_sds_related", "material",
+                    S_OK if swcom_hits else S_DEGRADED, "SwDS 기반 Related 보강",
+                    measured={"value": swcom_hits, "lookups": s.get("sds_lookups"),
+                              "key_hits": s.get("sds_key_hits"),
+                              "map_entries": s.get("sds_map_entries")},
+                    reason=(s.get("sds_reason") or
+                            ("SwDS 를 읽었지만 SwCom 을 하나도 얻지 못했습니다 — "
+                             "추적성 열이 합성 ID 만 남습니다" if not swcom_hits else "")),
+                ))
+            if req.doc_type in ("suts", "sits"):
+                t = tm["suts"]
+                total = t["variables"]
+                steps.append(_step(
+                    "suts_types", "material",
+                    S_OK if total and t["fallback"] == 0 else S_DEGRADED,
+                    "입출력 변수 타입 근거",
+                    measured={"value": t["grounded"], "of": total,
+                              "fallback": t["fallback"]},
+                    reason=(f"{t['fallback']}개가 근거 없이 uint8_t(0~255)로 채워집니다 — "
+                            "실제 폭이 다르면 경계값 시험이 틀립니다"
+                            if t["fallback"] else ""),
+                    samples=t.get("fallback_samples"),
+                ))
+
     # ── 4. 사슬 — 각 필드를 채울 경로의 단계별 가용성 ─────────────────────────
     available[_chain.INPUT_CALL_GRAPH] = bool(available.get(_req.IN_SOURCE_ROOT))
     for field in (spec.get("fields") or []):
@@ -314,6 +376,21 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
             # ⚠ 칸 수를 예고하지 않는다(모듈 docstring 규약).
             reason="" if have_any else "근거 있는 출처가 하나도 확보되지 않았습니다",
         ))
+
+    # ── 4-b. 시험 결과 3종 — 빌더 폼 필수값 ──────────────────────────────────
+    #
+    # ⚠ `release_sw_version` 만은 **기본값을 만들지 않는다.** 임의 버전을 찍으면
+    #   ISO 26262 납품 문서 표지에 틀린 릴리스가 박힌다 — 화면이 조용히 만든 거짓 증거다.
+    if req.doc_type in _req.TEST_REPORT_DOC_TYPES:
+        for field in _req.TEST_REPORT_FORM_FIELDS:
+            filled = str(req.form.get(field) or "").strip()
+            steps.append(_step(
+                f"form_{field}", "decision",
+                S_OK if filled else S_NEEDED, field,
+                value=filled,
+                reason="" if filled else "값이 필요합니다 — 임의 값으로 채우지 않습니다",
+                actions=[] if filled else [{"kind": "input_value", "target": field}],
+            ))
 
     # ── 5. 캡 — 자료 부족이 아니라 사용자 결정 ───────────────────────────────
     for cap_name, cap in (spec.get("caps") or {}).items():
@@ -355,13 +432,25 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
 class MeasureSourceRequest(BaseModel):
     source_root: str
     max_files: int = 300
+    # 시험 문서(SITS/SUTS)면 통합 흐름·변수 타입까지 잰다. 파서가 달라 비용이 별개다.
+    doc_type: str = ""
+    sds_path: str = ""
 
 
 @router.post("/api/docgen/measure-source")
 def docgen_measure_source(req: MeasureSourceRequest) -> Dict[str, Any]:
-    """소스 주석 커버리지를 **실제로 측정**한다(느리다 — 실측 41~368초).
+    """소스 재료를 **실제로 측정**한다(느리다 — 실측 41~368초).
 
     preflight 와 분리한 이유는 `docgen_comment_coverage.has_cached` docstring 참조.
     결과는 캐시되어 이후 preflight 가 즉시 싣는다.
+
+    ⚠ 두 측정은 **다른 파서**를 쓴다(`parse_c_project` vs `generate_uds_source_sections`).
+    한쪽 캐시가 있다고 다른 쪽이 있는 게 아니므로 각각 판정한다.
     """
-    return {"ok": True, "result": _cov.measure(req.source_root, max_files=req.max_files)}
+    out: Dict[str, Any] = {
+        "ok": True,
+        "comment_coverage": _cov.measure(req.source_root, max_files=req.max_files),
+    }
+    if str(req.doc_type or "").strip().lower() in ("sits", "suts"):
+        out["test_materials"] = _tm.measure(req.source_root, sds_path=req.sds_path)
+    return out

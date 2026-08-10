@@ -62,13 +62,27 @@ function Measured({ m }) {
   }
   if (m.chars != null) parts.push(`본문 ${m.chars.toLocaleString()}자`);
   if (m.scanned_files != null) parts.push(`스캔 ${m.scanned_files}파일`);
+  if (m.fallback != null) parts.push(`폴백 ${m.fallback}`);
+  // SwDS 보강 실적 — 조회는 되는데 산출이 0 인 상태를 드러내려면 세 값이 다 필요하다.
+  if (m.lookups != null) parts.push(`조회 ${m.lookups}`);
+  if (m.key_hits != null) parts.push(`키매칭 ${m.key_hits}`);
+  if (m.map_entries != null) parts.push(`맵 ${m.map_entries}항목`);
   if (m.api_default != null || m.generator_default != null) {
     parts.push(`현재 ${m.api_default ?? '—'} · 생성기 기본 ${m.generator_default ?? '—'}`);
   }
-  if (!parts.length) return null;
+  if (!parts.length && m.headroom == null) return null;
   return (
     <span style={{ color: 'var(--text-muted)' }}>
       {parts.join(' · ')}
+      {/* 캡은 **여유**로 읽어야 한다. '절단 0' 은 경계에 닿은 상태를 숨긴다. */}
+      {m.headroom != null && (
+        <strong style={{
+          marginLeft: parts.length ? 6 : 0,
+          color: m.headroom <= 0 ? 'var(--color-warning)' : 'var(--text-muted)',
+        }}>
+          여유 {m.headroom}
+        </strong>
+      )}
       {m.partial && (
         <strong style={{ color: 'var(--color-warning)' }}> · 일부만 봄(상한 도달)</strong>
       )}
@@ -170,6 +184,13 @@ export default function DocGenPreflightPanel({ data, loading, error, onReload, o
                         <div style={{ color: 'var(--color-info)' }}>제안: {s.suggestion}</div>
                       )}
                       <Measured m={s.measured} />
+                      {/* 콜체인은 SITS 문서 D열에 그대로 박힌다 — 화면도 실물을 보인다. */}
+                      {s.sample?.call_chain && (
+                        <div style={{ fontFamily: 'monospace', fontSize: 'var(--text-xs)', opacity: 0.8 }}>
+                          예: {s.sample.call_chain}
+                          {s.sample.asil && ` (ASIL ${s.sample.asil})`}
+                        </div>
+                      )}
                       {Array.isArray(s.samples) && s.samples.length > 0 && (
                         <div style={{ opacity: 0.75 }}>예: {s.samples.slice(0, 3).map(x => `"${x}"`).join(' · ')}</div>
                       )}
