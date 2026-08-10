@@ -80,6 +80,15 @@ _TEMPLATE_KEY_BY_DOC = {
     "sits": "sits_template",
 }
 
+# 시험 **결과** 문서의 양식은 SCM 레지스트리가 아니라 `config/swut_meta.json` 의
+# `template_paths` 가 프로젝트별로 관리한다(정본을 옮기면 갈라진다). 여기 있는 것은
+# **어느 키를 봐야 하는가** 뿐이다.
+_TEST_REPORT_TEMPLATE_KEY = {
+    "sutr": "sutr_template",
+    "sitr": "swit_sitr_template",
+    "swreport": "es95411_template",
+}
+
 
 class PreflightRequest(BaseModel):
     doc_type: str = Field(..., description="uds/sts/suts/sits/sutr/sitr/swreport")
@@ -427,6 +436,46 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             chain=grounded,
             # ⚠ 칸 수를 예고하지 않는다(모듈 docstring 규약).
             reason="" if have_any else "근거 있는 출처가 하나도 확보되지 않았습니다",
+        ))
+
+    # ── 4-a. 시험 결과 3종 — **양식 템플릿** ─────────────────────────────────
+    #
+    # 이 셋의 템플릿은 SCM 레지스트리가 아니라 `config/swut_meta.json` 의
+    # `template_paths` 가 **프로젝트별로** 관리한다(정본을 옮기면 갈라진다). 문제는
+    # 게이트가 그 존재를 확인한 적이 없다는 것이다 — 실측 비대칭:
+    #   HDPDM01 6키(통합 Summary용 `es95411_template` **없음**) / KJPDS02 9키
+    #   그리고 `swut_meta` 에 등록된 프로젝트는 둘뿐인데 SCM 은 셋이다.
+    # 없으면 [생성]을 눌러야 알 수 있었다.
+    if req.doc_type in _req.TEST_REPORT_DOC_TYPES:
+        tpl_key = _TEST_REPORT_TEMPLATE_KEY.get(req.doc_type, "")
+        project_id = str(req.form.get("project_id") or "").strip()
+        state, reason, value = S_UNMEASURED, "", ""
+        if not project_id:
+            state, reason = S_NEEDED, "대상 project_id 를 먼저 정해야 템플릿을 찾을 수 있습니다"
+        else:
+            try:
+                from backend.services.swut_meta_resolver import load_meta_from_config
+                meta = load_meta_from_config(project_id) or {}
+            except Exception as exc:  # noqa: BLE001 — config 로딩 계열이 광범위
+                meta = {}
+                reason = f"양식 설정을 읽지 못했습니다 ({type(exc).__name__}: {str(exc)[:100]})"
+            paths = (meta or {}).get("template_paths") or {}
+            if not meta:
+                state = S_MISSING
+                reason = reason or (f"`{project_id}` 가 양식 설정(swut_meta)에 없습니다 — "
+                                    "회사 표준 양식을 찾을 수 없습니다")
+            elif not paths.get(tpl_key):
+                state = S_MISSING
+                reason = f"`{project_id}` 에 `{tpl_key}` 양식이 등록돼 있지 않습니다"
+            else:
+                value = str(paths[tpl_key])
+                probe = _probe_path(resolver, value)
+                state = probe["state"]
+                reason = probe["reason"] or ("" if state == S_OK else "양식 파일을 찾지 못했습니다")
+        steps.append(_step(
+            "report_template", "input", state, "결과 양식(템플릿)",
+            required=True, value=value, reason=reason,
+            actions=[{"kind": "open_scm"}] if state != S_OK else [],
         ))
 
     # ── 4-b. 시험 결과 3종 — 빌더 폼 필수값 ──────────────────────────────────

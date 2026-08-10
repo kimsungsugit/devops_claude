@@ -67,7 +67,67 @@ def merge_all_scm_paths_to_cloudium() -> dict:
                 "SCM entry %s allowed_prefixes merge 실패: %s",
                 getattr(entry, "id", "?"), e,
             )
-    return {"merged_entries": count, "mode": "cloudium"}
+    tpl = _merge_report_template_prefixes()
+    return {"merged_entries": count, "mode": "cloudium", "template_paths": tpl}
+
+
+def _merge_report_template_prefixes() -> int:
+    """시험 **결과** 문서 양식(`config/swut_meta.json` `template_paths`) 경로도 병합한다.
+
+    ## 왜 필요한가
+
+    이 병합은 SCM 레지스트리 entry 만 훑었다. 그런데 SUTR/SITR/통합 Summary 의 양식은
+    레지스트리가 아니라 `swut_meta.json` 이 프로젝트별로 관리한다 — 그래서 그 경로가
+    cloudium `allowed_prefixes` 에 없었고, **워커가 양식을 못 읽었다.**
+
+    실측(2026-08-10, 준비 게이트가 드러냄):
+
+    | 양식 | 결과 |
+    |---|---|
+    | `sutr_template`(공용 표준 폴더) | 읽힘 — 다른 경로 덕에 우연히 prefix 안이었다 |
+    | `swit_sitr_template`·`es95411_template`(프로젝트 전용 폴더) | **접근 거부** |
+
+    설정에 등록된 경로는 시스템이 스스로 읽을 수 있어야 한다 — SCM 경로를 자동
+    병합하는 것과 같은 논리다. 추가만 하므로 기존 접근 권한은 줄지 않는다.
+
+    Returns: 병합한 경로 수(local 모드면 0).
+    """
+    import json
+    import logging
+    from pathlib import Path as _Path
+
+    from backend.services.file_resolver import CloudiumFileResolver, get_resolver
+
+    if not isinstance(get_resolver(), CloudiumFileResolver):
+        return 0
+    try:
+        from backend.services.swut_meta_resolver import load_meta_from_config
+
+        cfg = _Path(__file__).resolve().parents[2] / "config" / "swut_meta.json"
+        project_ids = list((json.loads(cfg.read_text(encoding="utf-8")).get("projects") or {}))
+    except Exception as exc:  # noqa: BLE001 — 설정 부재/파손은 병합 생략으로 흡수
+        logging.getLogger("devops_api").warning("양식 경로 병합 건너뜀: %s", exc)
+        return 0
+
+    paths: list[str] = []
+    for pid in project_ids:
+        try:
+            tp = (load_meta_from_config(pid) or {}).get("template_paths") or {}
+        except Exception:  # noqa: BLE001  # silent-ok — 프로젝트 하나 실패가 전체를 막지 않는다
+            continue
+        for key, val in tp.items():
+            if key.startswith("_") or not str(val or "").strip():
+                continue
+            paths.append(str(val))
+    if not paths:
+        return 0
+    try:
+        from backend.routers.health import _apply_extra_prefixes_to_resolver
+        _apply_extra_prefixes_to_resolver(paths)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("devops_api").warning("양식 경로 prefix 적용 실패: %s", exc)
+        return 0
+    return len(paths)
 
 
 def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:

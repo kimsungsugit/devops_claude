@@ -156,6 +156,96 @@ def test_cache_miss_is_explicit(tmp_path) -> None:
     assert tm.cached(str(tmp_path)) is None
 
 
+# ── 시험 결과 문서의 **양식 템플릿** ────────────────────────────────────────
+#
+# 이 셋의 양식은 SCM 레지스트리가 아니라 `config/swut_meta.json` 의 `template_paths` 가
+# 프로젝트별로 관리한다. 게이트가 그 존재를 확인한 적이 없어서, 없으면 [생성]을 눌러야
+# 알 수 있었다.
+
+def _preflight(payload: dict) -> dict:
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+    r = TestClient(app).post("/api/docgen/preflight", json=payload, headers={"X-User": "t"})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _find(data: dict, step_id: str):
+    return next((s for s in data["steps"] if s["id"] == step_id), None)
+
+
+@pytest.mark.parametrize("doc_type", ["sutr", "sitr", "swreport"])
+def test_report_template_step_exists(doc_type: str) -> None:
+    """시험 결과 3종은 **양식 확인 단계**를 갖는다."""
+    data = _preflight({"doc_type": doc_type, "form": {"project_id": "KJPDS02"}})
+    assert _find(data, "report_template") is not None, f"{doc_type}: 양식 단계가 없다"
+
+
+def test_report_template_needs_project_id_first() -> None:
+    """project_id 없이는 양식을 찾을 수 없다 — 그 사실을 말한다."""
+    data = _preflight({"doc_type": "sutr", "form": {}})
+    step = _find(data, "report_template")
+    assert step is not None and step["state"] == "needed"
+    assert "project_id" in step["reason"]
+
+
+def test_unknown_project_is_reported_not_silent() -> None:
+    """양식 설정에 없는 프로젝트면 **사유와 함께** 막는다.
+
+    실측: SCM 레지스트리는 3개 프로젝트인데 `swut_meta` 에는 2개뿐이다.
+    """
+    data = _preflight({"doc_type": "sutr", "form": {"project_id": "__no_such_project__"}})
+    step = _find(data, "report_template")
+    assert step is not None and step["state"] == "missing"
+    assert "swut_meta" in step["reason"] or "양식 설정" in step["reason"]
+
+
+def test_missing_template_key_is_named() -> None:
+    """어느 키가 없는지 말해야 등록할 수 있다.
+
+    실측 비대칭: HDPDM01 은 통합 Summary 양식(`es95411_template`)이 **없다**.
+    """
+    data = _preflight({"doc_type": "swreport", "form": {"project_id": "HDPDM01"}})
+    step = _find(data, "report_template")
+    assert step is not None
+    if step["state"] == "missing":
+        assert "es95411_template" in step["reason"], "빠진 키 이름을 말하지 않는다"
+
+
+def test_template_prefix_merge_is_wired() -> None:
+    """양식 경로도 cloudium 접근 목록에 병합돼야 한다.
+
+    실측: SCM 레지스트리 경로만 병합해서 `swit_sitr_template`·`es95411_template`
+    (프로젝트 전용 폴더)이 **접근 거부**였다. 준비 게이트가 그걸 드러냈다.
+    """
+    from backend.routers.scm import (
+        _merge_report_template_prefixes,
+        merge_all_scm_paths_to_cloudium,
+    )
+
+    # local 모드(conftest 격리)에서는 no-op 이어야 한다 — 권한 개념이 없다.
+    assert _merge_report_template_prefixes() == 0
+    out = merge_all_scm_paths_to_cloudium()
+    assert out["mode"] == "skipped_local"
+
+    # cloudium 경로에서 **실제로 호출되는지**를 고정한다. local 조기 반환 때문에
+    # 위 호출로는 확인할 수 없고, 배선이 빠지면 양식이 다시 '접근 거부' 가 된다.
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parents[2] / "backend/routers/scm.py").read_text(
+        encoding="utf-8", errors="ignore")
+    assert "_merge_report_template_prefixes()" in src.split("def _merge_report_template_prefixes")[0], (
+        "merge_all_scm_paths_to_cloudium 이 양식 경로를 병합하지 않는다"
+    )
+
+
+def test_report_template_keys_are_mapped() -> None:
+    from backend.routers.docgen_preflight import _TEST_REPORT_TEMPLATE_KEY
+    from backend.services.docgen_requirements import TEST_REPORT_DOC_TYPES
+
+    assert set(_TEST_REPORT_TEMPLATE_KEY) == set(TEST_REPORT_DOC_TYPES)
+
+
 def test_sits_endpoints_accept_max_flows() -> None:
     """SITS 3경로가 전부 `max_flows` 를 받아야 한다.
 
