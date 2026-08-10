@@ -80,23 +80,27 @@ def is_substantive_description(text: Any) -> bool:
 def _signature(source_root: str, max_files: int) -> Optional[Tuple[int, int]]:
     """(파일 수, mtime 합) — 싸게 재고 변경을 감지한다. 실패하면 ``None``(캐시 미사용)."""
     try:
-        root = Path(source_root.split(",")[0].strip())
-        if not root.exists():
+        # ⚠ 복수 루트를 **전부** 본다. 첫 루트만 보면 둘째 트리가 바뀌어도 캐시가 살아
+        #   남아 낡은 수치를 계속 보여준다.
+        roots = [Path(r.strip()) for r in str(source_root or "").split(",") if r.strip()]
+        roots = [r for r in roots if r.exists()]
+        if not roots:
             return None
         n = 0
         mtime_sum = 0
-        for p in root.rglob("*"):
-            if p.suffix.lower() not in {".c", ".h"}:
-                continue
-            n += 1
-            if n > max_files:
-                break
-            try:
-                mtime_sum += int(p.stat().st_mtime)
-            except OSError:
-                # 개별 파일 stat 실패는 시그니처를 무효화하지 않는다 — 캐시가 조금
-                # 둔감해질 뿐이고, 여기서 None 을 내면 매번 전량 재파싱이 된다.
-                continue
+        for root in roots:
+            for p in root.rglob("*"):
+                if p.suffix.lower() not in {".c", ".h"}:
+                    continue
+                n += 1
+                if n > max_files:
+                    break
+                try:
+                    mtime_sum += int(p.stat().st_mtime)
+                except OSError:
+                    # 개별 파일 stat 실패는 시그니처를 무효화하지 않는다 — 캐시가 조금
+                    # 둔감해질 뿐이고, 여기서 None 을 내면 매번 전량 재파싱이 된다.
+                    continue
         return (n, mtime_sum)
     except Exception:  # noqa: BLE001  # silent-ok
         # 시그니처를 못 구하면 캐시를 안 쓸 뿐 결과는 같다(매번 재파싱). 여기서 로깅하면
@@ -116,7 +120,16 @@ def _parse_cached(source_root: str, max_files: int) -> Tuple[Any, Dict[str, Any]
 
     from workflow.code_parser.c_parser import parse_c_project
     t0 = time.time()
-    res = parse_c_project(source_root, max_files=max_files)
+    # ⚠ `source_root` 는 **콤마 구분 복수 경로**일 수 있다(레지스트리 실측:
+    #   `C:\…\NE1AW_PORTING,C:\…\PDS128_FBL`). `parse_c_project` 는 단일 루트만 받으므로
+    #   콤마 문자열을 그대로 넘기면 존재하지 않는 경로가 되어 **함수 0개**가 나온다.
+    #   라이브 검증에서 정확히 그렇게 나왔다(scanned_files=0). 루트마다 돌려 합친다.
+    roots = [r.strip() for r in str(source_root or "").split(",") if r.strip()]
+    res: Dict[str, Any] = {"functions": [], "globals": [], "scanned": []}
+    for root in roots:
+        part = parse_c_project(root, max_files=max_files)
+        res["functions"].extend(part.get("functions") or [])
+        res["scanned"].extend(part.get("scanned") or [])
     meta = {
         "cached": False,
         "elapsed_s": round(time.time() - t0, 1),
@@ -196,19 +209,29 @@ def measure(source_root: str, *, max_files: int = 300) -> Dict[str, Any]:
         - `partial` 은 `max_files` 상한에 걸려 **일부만 봤다**는 뜻이다. 침묵 절단 금지
           (이 저장소가 여러 번 겪은 결함 — 상한이 총량을 조용히 줄인다).
     """
-    root_first = str(source_root or "").split(",")[0].strip()
-    if not root_first or not Path(root_first).exists():
+    def _absent(reason: str) -> Dict[str, Any]:
+        # ⚠ 부재는 **사유와 함께** 낸다. 숫자만 0 으로 내면 화면이 "주석이 하나도 없다"
+        #   로 그린다 — 실제로는 재지 못한 것이다.
         return {
-            "scanned_files": 0, "functions": 0, "partial": False,
-            "reason": "소스 루트를 찾을 수 없습니다",
+            "scanned_files": 0, "functions": 0, "partial": False, "reason": reason,
             "description": {"filled": 0, "substantive": 0},
             "asil": {"filled": 0}, "related": {"filled": 0},
             "substantive_gap": 0, "samples": [],
         }
 
+    # 복수 루트(콤마 구분) 중 **하나라도** 있으면 진행한다.
+    roots = [r.strip() for r in str(source_root or "").split(",") if r.strip()]
+    if not roots or not any(Path(r).exists() for r in roots):
+        return _absent("소스 루트를 찾을 수 없습니다")
+
     res, meta = _parse_cached(source_root, max_files)
     funcs = list(res.get("functions") or [])
     scanned = list(res.get("scanned") or [])
+    if not scanned:
+        # 파일을 하나도 못 읽었다 = **재지 못한 것**이지 "함수가 0개" 가 아니다.
+        # 라이브 검증에서 복수 루트를 못 다뤄 정확히 이 상태가 나왔고, 화면은 그걸
+        # `함수 0 · 주석 0` 으로 그렸다(있지도 않은 결핍을 지목).
+        return _absent("소스 파일을 하나도 읽지 못했습니다 — 경로/권한을 확인하세요")
 
     desc_filled = 0
     desc_substantive = 0

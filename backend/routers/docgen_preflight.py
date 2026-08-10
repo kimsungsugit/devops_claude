@@ -287,8 +287,17 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # ── 3. 재료 — 소스 주석 (캐시가 있을 때만) ───────────────────────────────
     src = inputs.get(_req.IN_SOURCE_ROOT, "")
     if src and available.get(_req.IN_SOURCE_ROOT):
-        if _cov.has_cached(src):
-            cov = _cov.measure(src)
+        cov = _cov.measure(src) if _cov.has_cached(src) else None
+        if cov is not None and cov.get("reason"):
+            # 측정을 시도했지만 못 쟀다 — `0` 으로 그리면 "주석이 하나도 없다" 가 된다.
+            # ⚠ `available[comment]` 를 **설정하지 않는다**. 설정하면 사슬이 그 출처를
+            #   "확인했고 없음"(X)으로 그리는데 실제로는 모르는 상태다.
+            steps.append(_step(
+                "comment_coverage", "material", S_UNMEASURED, "소스 주석",
+                reason=str(cov["reason"]),
+                actions=[{"kind": "measure_source"}],
+            ))
+        elif cov is not None:
             fn = cov["functions"]
             filled = cov["description"]["filled"]
             subst = cov["description"]["substantive"]
@@ -344,9 +353,16 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     S_DEGRADED if s["at_cap_boundary"] else S_OK, "통합 흐름",
                     measured={"value": s["flows_total"], "of": s["cap"],
                               "headroom": s["headroom"]},
-                    reason=("캡에 닿아 있습니다 — 함수가 늘면 흐름이 잘리기 시작하고, "
-                            "잘린 흐름은 시험 규격에 존재하지 않습니다"
-                            if s["at_cap_boundary"] else ""),
+                    # ⚠ 이미 잘리는 것과 곧 잘릴 것은 다른 말이다. 라이브에서 여유가
+                    #   **-25**(즉 25개가 이미 빠지는 중)인데 "함수가 늘면 잘리기
+                    #   시작한다" 는 미래형 문구가 나왔다 — 현재 손실을 예고로 읽게 한다.
+                    reason=(
+                        f"흐름 {abs(s['headroom'])}개가 상한을 넘어 시험 규격에서 빠집니다 "
+                        "— 안전등급이 높은 쪽부터 남지만, 빠진 흐름은 문서에 존재하지 않습니다"
+                        if isinstance(s["headroom"], int) and s["headroom"] < 0
+                        else ("여유가 없습니다 — 함수가 늘면 그 순간부터 흐름이 잘립니다"
+                              if s["at_cap_boundary"] else "")
+                    ),
                     sample=s.get("sample_flow"),
                 ))
                 # SwCom 보강 0 건은 **숨기지 않는다** — 실측상 실 SwDS 를 줘도 0 이다.

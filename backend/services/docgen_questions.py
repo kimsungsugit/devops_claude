@@ -121,15 +121,30 @@ def _questions_from_steps(doc_type: str, steps: List[Dict[str, Any]]) -> List[Di
         # 2) 캡 — 자료 부족이 아니라 상한 설정이다.
         elif sid.startswith("cap_"):
             m = s.get("measured") or {}
-            out.append(_q(
-                sid, "value", "medium",
-                {"cap": sid[4:], "api_default": m.get("api_default"),
-                 "generator_default": m.get("generator_default"),
-                 "effect": str(s.get("reason") or "")},
-                f"{sid[4:]} 상한을 조정할까요?",
-                (f"현재 {m.get('api_default')} 이고 생성기 기본값은 "
-                 f"{m.get('generator_default')} 입니다. {s.get('reason') or ''}"),
-            ))
+            cap_name = sid[4:]
+            api_default = m.get("api_default")
+            # 흐름 캡은 **지금 실제로 잘리고 있는지**가 심각도를 가른다. 여유가 0 이하면
+            # 안전등급 높은 흐름까지 규격에서 사라질 수 있다(실측 kjpds02_pv: 여유 -25).
+            flow = (by_id.get("sits_flows") or {}).get("measured") or {}
+            headroom = flow.get("headroom")
+            at_boundary = isinstance(headroom, int) and headroom <= 0
+            severity = "high" if (cap_name == "max_flows" and at_boundary) else "medium"
+            facts = {"cap": cap_name, "api_default": api_default,
+                     "generator_default": m.get("generator_default"),
+                     "effect": str(s.get("reason") or "")}
+            if cap_name == "max_flows" and headroom is not None:
+                facts["headroom"] = headroom
+                facts["flows_total"] = flow.get("value")
+            # ⚠ `api_default is None` 은 **API 가 이 값을 받지 않는다**는 뜻이다.
+            #   "현재 None" 으로 흘리면 사용자는 값이 비었다고 읽는다.
+            current = (f"현재 {api_default}" if api_default is not None
+                       else "이 상한은 화면에서 조정할 수 없습니다(생성기 기본값 고정)")
+            head = (f"{cap_name} 상한 — 지금 잘리고 있습니다" if at_boundary and cap_name == "max_flows"
+                    else f"{cap_name} 상한을 조정할까요?")
+            body = f"{current}, 생성기 기본값은 {m.get('generator_default')} 입니다. {s.get('reason') or ''}"
+            if at_boundary and cap_name == "max_flows":
+                body = (f"통합 흐름이 상한을 넘어 일부가 시험 규격에서 빠집니다. {body}")
+            out.append(_q(sid, "value", severity, facts, head, body))
 
         # 3) 빌더 폼 필수값 — 특히 릴리스 버전은 **지어내면 안 된다**.
         elif sid.startswith("form_") and state == "needed":

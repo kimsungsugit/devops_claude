@@ -196,3 +196,89 @@ def test_measure_reports_scanned_zero_distinctly(tmp_path: Path) -> None:
     res = cov.measure(str(tmp_path / "nope"))
     assert res["scanned_files"] == 0
     assert res["reason"], "사유 없이 0 만 내면 '함수가 없다' 로 읽힌다"
+
+
+# ── 라이브 검증(2026-08-10)에서 드러난 것들 ────────────────────────────────
+
+@pytest.mark.parametrize("headroom,expect", [
+    (-25, "빠집니다"),      # 이미 잘리는 중 — 현재형
+    (0, "여유가 없습니다"),   # 경계 — 예고형
+])
+def test_flow_loss_is_present_tense_when_already_cut(
+    headroom: int, expect: str, tmp_path: Path,
+) -> None:
+    """이미 잘리는 것과 곧 잘릴 것은 다른 말이다.
+
+    라이브(kjpds02_pv)에서 여유가 **-25**(25개가 이미 빠지는 중)인데 "함수가 늘면
+    잘리기 시작한다" 는 미래형이 나왔다 — 현재 손실을 예고로 읽게 한다.
+    """
+    from backend.services import docgen_test_materials as tm
+
+    fake = {
+        "ok": True, "functions": 10, "elapsed_s": 0.1,
+        "sits": {"flows_total": 145 if headroom < 0 else 120, "cap": 120,
+                 "headroom": headroom, "at_cap_boundary": headroom <= 0,
+                 "sds_map_entries": 0, "sds_reason": "", "sds_lookups": 0,
+                 "sds_key_hits": 0, "sds_swcom_hits": 0, "sample_flow": None},
+        "suts": {"variables": 0, "grounded": 0, "fallback": 0, "fallback_samples": []},
+    }
+    import time as _time
+
+    root = str(tmp_path)          # 실재해야 재료 단계까지 간다(조건부 스킵 = 공허 통과)
+    tm.clear_cache()
+    # 실제 preflight 를 태운다 — 문구 생성 로직을 테스트가 복제하면 가드가 못 된다.
+    tm._CACHE[tm._key(root)] = (_time.time(), fake)
+    try:
+        data = _post({"doc_type": "sits", "source_root": root})
+    finally:
+        tm.clear_cache()
+    step = _step(data, "sits_flows")
+    assert step is not None, "재료 단계에 도달하지 못했다 — 이 테스트가 아무것도 검증하지 못한다"
+    assert expect in str(step.get("reason") or "")
+
+
+def test_multi_root_source_is_parsed(tmp_path: Path) -> None:
+    """`source_root` 는 **콤마 구분 복수 경로**일 수 있다.
+
+    실측 레지스트리: `C:\\…\\NE1AW_PORTING,C:\\…\\PDS128_FBL`. 콤마 문자열을 그대로
+    파서에 넘기면 존재하지 않는 경로가 되어 **함수 0개**가 나오고, 화면은 그걸
+    "주석이 하나도 없다" 로 그렸다.
+    """
+    a, b = tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    b.mkdir()
+    (a / "one.c").write_text("void fa(void) { }\n", encoding="utf-8")
+    (b / "two.c").write_text("void fb(void) { }\n", encoding="utf-8")
+    cov.clear_cache()
+    res = cov.measure(f"{a},{b}")
+    assert res["scanned_files"] >= 2, "둘째 루트를 스캔하지 않았다"
+    assert not res.get("reason")
+
+
+def test_empty_scan_is_unmeasured_not_zero(tmp_path: Path) -> None:
+    """파일을 하나도 못 읽으면 **재지 못한 것**이지 "함수 0개" 가 아니다."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    cov.clear_cache()
+    res = cov.measure(str(empty))
+    assert res["scanned_files"] == 0
+    assert res["reason"], "빈 스캔에 사유가 없다"
+
+
+def test_unmeasurable_source_does_not_mark_comment_absent(tmp_path: Path) -> None:
+    """측정 실패를 "주석 없음" 으로 접지 않는다 — 사슬에서 `?`(모름)이어야 한다.
+
+    라이브에서 `comment=X`(확인했고 없음)로 그려졌는데 실제로는 파싱이 안 된 것이었다.
+    """
+    empty = tmp_path / "src"
+    empty.mkdir()
+    cov.clear_cache()
+    cov.measure(str(empty))          # 캐시에 '못 쟀음' 을 넣는다
+    data = _post({"doc_type": "uds", "source_root": str(empty)})
+    step = _step(data, "comment_coverage")
+    assert step is not None and step["state"] == "unmeasured"
+    assert "measured" not in step
+    chain = _step(data, "chain_asil")
+    assert chain is not None
+    have = {r["source"]: r["have"] for r in chain["chain"]}
+    assert have["comment"] is None, "측정 실패인데 '확인했고 없음' 으로 그렸다"

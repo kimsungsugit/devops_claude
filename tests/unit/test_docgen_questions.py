@@ -164,6 +164,52 @@ def test_no_steps_yields_no_questions() -> None:
     assert out["llm_reason"]
 
 
+def test_flow_cap_at_boundary_is_high_severity() -> None:
+    """이미 잘리고 있으면 심각도가 올라간다.
+
+    실측(kjpds02_pv): 흐름 145 / 캡 120 → **여유 -25**. 안전등급 높은 흐름까지 규격에서
+    사라질 수 있는데 `medium` 으로 두면 사용자가 지나친다.
+    """
+    steps = [
+        {"id": "sits_flows", "phase": "material", "state": "degraded", "label": "통합 흐름",
+         "measured": {"value": 145, "of": 120, "headroom": -25}},
+        {"id": "cap_max_flows", "phase": "decision", "state": "needed", "label": "max_flows",
+         "reason": "통합 흐름 상한", "measured": {"api_default": None, "generator_default": 120}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
+    assert cap["severity"] == "high"
+    assert cap["facts"]["headroom"] == -25
+    assert "잘리고" in cap["title"] or "빠집니다" in cap["body"]
+
+
+def test_flow_cap_with_headroom_stays_medium() -> None:
+    steps = [
+        {"id": "sits_flows", "phase": "material", "state": "ok", "label": "통합 흐름",
+         "measured": {"value": 84, "of": 120, "headroom": 36}},
+        {"id": "cap_max_flows", "phase": "decision", "state": "needed", "label": "max_flows",
+         "reason": "통합 흐름 상한", "measured": {"api_default": None, "generator_default": 120}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
+    assert cap["severity"] == "medium"
+
+
+def test_unadjustable_cap_says_so() -> None:
+    """`api_default is None` 은 "API 가 안 받는다" 이지 "값이 비었다" 가 아니다.
+
+    라이브에서 **"현재 None 이고"** 로 나왔다 — 사용자에게 아무 뜻도 아니다.
+    """
+    steps = [
+        {"id": "cap_max_flows", "phase": "decision", "state": "needed", "label": "max_flows",
+         "reason": "상한", "measured": {"api_default": None, "generator_default": 120}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
+    assert "None" not in cap["body"]
+    assert "조정할 수 없" in cap["body"]
+
+
 def test_facts_carry_measurements_not_prose() -> None:
     """`facts` 는 코드가 채운 측정값이다 — 여기 문장이 섞이면 검증이 무의미해진다."""
     out = q.build_questions("sits", _steps(), use_llm=False)
