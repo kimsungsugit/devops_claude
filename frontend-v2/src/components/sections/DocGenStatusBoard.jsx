@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api, post, buildUrl, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { loadBuilderForm, toBuildPayload, missingRequiredFields } from '../../swBuilderForms.js';
+import DocGenPreflightPanel from './DocGenPreflightPanel.jsx';
+import { loadDocPaths } from '../../sharedInputs.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -316,6 +318,73 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     else onNavigateSub?.('docgen');
   }, [job, onGenerate, onNavigateSub, toast]);
 
+  // ── 생성 **준비** 펼침 (근거 펼침과 별개 축: 근거=생성 후, 준비=생성 전) ──────
+  //
+  // 조회를 자식의 useEffect 가 아니라 **이 펼침 핸들러**에서 한다 — effect 안의 동기
+  // setState 는 cascading render 를 만든다(`react-hooks/set-state-in-effect`).
+  // 바로 위 `toggleExpand`(근거)도 같은 방식이라 화면 전체가 한 패턴을 쓴다.
+  const [prepOpen, setPrepOpen] = useState(null);      // 펼친 doc_type
+  const [prep, setPrep] = useState({});                // {docType: {data, loading, error}}
+
+  const loadPrep = useCallback(async (docType) => {
+    setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), loading: true } }));
+    try {
+      const res = await post('/api/docgen/preflight', {
+        doc_type: docType,
+        scm_id: scmId || '',
+        source_root: analysisResult?.matchedScm?.source_root || '',
+        doc_paths: loadDocPaths() || {},
+      });
+      // 200 + error 를 성공으로 삼지 않는다.
+      if (res?.error) {
+        setPrep(p => ({ ...p, [docType]: { loading: false, error: String(res.error) } }));
+        return;
+      }
+      setPrep(p => ({ ...p, [docType]: { loading: false, data: res, error: '' } }));
+    } catch (e) {
+      setPrep(p => ({
+        ...p,
+        [docType]: { loading: false, error: e?.message || '준비 상태를 확인하지 못했습니다.' },
+      }));
+    }
+  }, [scmId, analysisResult]);
+
+  const togglePrep = useCallback((docType) => {
+    if (prepOpen === docType) { setPrepOpen(null); return; }
+    setPrepOpen(docType);
+    if (!prep[docType]?.data) loadPrep(docType);
+  }, [prepOpen, prep, loadPrep]);
+
+  /** 준비 패널의 액션. 실동작이 없는 것은 **조용히 넘기지 않고** 무엇을 해야 하는지 말한다. */
+  const handlePrepAction = useCallback(async (action, step) => {
+    const kind = action?.kind;
+    if (kind === 'measure_source') {
+      const root = analysisResult?.matchedScm?.source_root || '';
+      if (!root) { toast('warning', '소스 루트가 없습니다 — SCM 설정을 확인하세요.'); return; }
+      toast('info', '소스를 측정합니다 — 수십 초 이상 걸릴 수 있습니다.');
+      try {
+        await post('/api/docgen/measure-source', { source_root: root });
+        if (prepOpen) loadPrep(prepOpen);
+      } catch (e) {
+        toast('error', `소스 측정 실패: ${e?.message || e}`);
+      }
+      return;
+    }
+    if (kind === 'run_worker') {
+      toast('warning', 'Cloudium worker 가 응답하지 않습니다 — excel_rename_gui_v2.exe 를 실행한 뒤 다시 확인하세요.');
+      return;
+    }
+    if (kind === 'pick_path' || kind === 'open_scm' || kind === 'adopt_suggestion') {
+      toast('info', `${step?.label || '입력'} 은 설정 > 입력 자료 또는 SCM 등록에서 지정합니다.`);
+      return;
+    }
+    if (kind === 'input_value') {
+      toast('info', `${step?.label || '값'} 은 해당 빌더 탭에서 조정합니다.`);
+      return;
+    }
+    toast('info', `아직 지원하지 않는 동작입니다: ${kind}`);
+  }, [analysisResult, prepOpen, loadPrep, toast]);
+
   const builderRows = BUILDER_ROWS.filter(b => latestByType[b.key]);
 
   // ── 시험 결과 문서 원클릭 생성 ────────────────────────────────────────────
@@ -472,6 +541,11 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                     onToggle={() => toggleExpand(row.key)}
                     onGenerate={() => handleGenerate(row.key)}
                     disabled={!!genState?.docType}
+                    prepIsOpen={prepOpen === row.key}
+                    prepState={prep[row.key]}
+                    onTogglePrep={() => togglePrep(row.key)}
+                    onPrepReload={() => loadPrep(row.key)}
+                    onPrepAction={handlePrepAction}
                   />
                 );
               })}
@@ -628,8 +702,17 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
   );
 }
 
-/** 한 문서 행 + 펼침 근거. `<tbody>` 안이라 Fragment 로 두 `<tr>` 을 낸다. */
-function FragmentRow({ row, run, busy, genState, verdict, isOpen, detail, onToggle, onGenerate, disabled }) {
+/**
+ * 한 문서 행 + 두 종류 펼침. `<tbody>` 안이라 Fragment 로 여러 `<tr>` 을 낸다.
+ *
+ * 펼침이 둘인 이유: **`준비`는 생성 전 조건, `근거`는 생성 후 품질**이라 답하는 질문이
+ * 다르다. 한 행에 나란히 두면 "지금 만들면 어떻게 되는가" 와 "왜 이 점수인가" 를 같은
+ * 자리에서 볼 수 있다. 동시에 펼쳐도 무방하다(서로 다른 `<tr>`).
+ */
+function FragmentRow({
+  row, run, busy, genState, verdict, isOpen, detail, onToggle, onGenerate, disabled,
+  prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction,
+}) {
   const pct = busy ? Number(genState?.progress || 0) : null;
   return (
     <>
@@ -665,6 +748,12 @@ function FragmentRow({ row, run, busy, genState, verdict, isOpen, detail, onTogg
           <button type="button" className="btn-primary btn-sm" onClick={onGenerate} disabled={disabled}>
             {busy ? '생성 중…' : '생성'}
           </button>
+          {/* 준비는 **생성 이력과 무관하게** 항상 물을 수 있어야 한다 — 한 번도 만든 적
+              없는 문서일수록 "무엇이 부족한가" 가 더 필요하다. */}
+          <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
+            onClick={onTogglePrep} aria-expanded={!!prepIsOpen}>
+            {prepIsOpen ? '준비 접기' : '준비'}
+          </button>
           {run && (
             <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
               onClick={onToggle} aria-expanded={isOpen}>
@@ -673,6 +762,19 @@ function FragmentRow({ row, run, busy, genState, verdict, isOpen, detail, onTogg
           )}
         </td>
       </tr>
+      {prepIsOpen && (
+        <tr>
+          <td colSpan={6} style={{ background: 'var(--bg)' }}>
+            <DocGenPreflightPanel
+              data={prepState?.data}
+              loading={!!prepState?.loading}
+              error={prepState?.error || ''}
+              onReload={onPrepReload}
+              onAction={onPrepAction}
+            />
+          </td>
+        </tr>
+      )}
       {isOpen && run && (
         <tr>
           <td colSpan={6} style={{ background: 'var(--bg)' }}>

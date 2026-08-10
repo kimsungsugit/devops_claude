@@ -394,6 +394,9 @@ app.include_router(_sessions_router)
 from backend.routers.scm import router as _scm_router  # noqa: E402
 
 app.include_router(_scm_router)
+from backend.routers.docgen_preflight import router as _docgen_preflight_router  # noqa: E402
+
+app.include_router(_docgen_preflight_router)
 from backend.routers.summary_insight import router as _summary_insight_router  # noqa: E402
 
 app.include_router(_summary_insight_router)

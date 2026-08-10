@@ -629,6 +629,21 @@ label {
   background: var(--color-danger-soft);
 }
 
+/* 생성 준비 게이트 전용 톤 (DocGenPreflightPanel).
+   - step-warn  : `degraded`(있지만 부족) / `stale_path` — **차단이 아니다**. 붉은색을
+                  쓰면 진행 불가로 읽히므로 경고 톤을 따로 둔다.
+   - step-muted : `unmeasured`(재지 못함) — 값이 0 인 것과 다르다. 회색으로 두어
+                  "아직 모른다" 가 "문제 없음/0" 으로 읽히지 않게 한다. */
+.pipeline-step.step-warn {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.pipeline-step.step-muted {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
 .step-icon { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
 .step-label { flex: 1; font-weight: 500; }
 .step-msg { font-size: var(--text-sm); color: var(--text-muted); }
