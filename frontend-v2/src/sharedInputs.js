@@ -25,6 +25,8 @@ import { useEffect } from 'react';
 
 export const SHARED_KEY = 'devops_v2_shared_inputs';
 export const DOC_PATHS_KEY = 'devops_v2_doc_paths';
+// 생성 상한(캡). 자료 부족이 아니라 **사용자 결정**이라 문서 경로와 따로 둔다.
+export const DOCGEN_CAPS_KEY = 'devops_v2_docgen_caps';
 
 // 같은 탭에서 값이 바뀌었음을 알리는 커스텀 이벤트(다른 탭은 'storage' 이벤트).
 // 열려있는(keep-alive) 섹션이 이를 구독해 즉시 갱신한다.
@@ -32,6 +34,27 @@ export const DOC_PATHS_KEY = 'devops_v2_doc_paths';
 //   유발하고(그 반대도) 무관한 필드가 흔들린다.
 export const SHARED_EVENT = 'aria-shared-inputs-changed';
 export const DOC_PATHS_EVENT = 'aria-doc-paths-changed';
+
+/**
+ * 생성 상한 로드 — `{max_flows: 200, ...}`. 항상 객체.
+ *
+ * ⚠ **미설정과 0 을 구분한다.** 키가 없으면 서버에 아무것도 보내지 않아 생성기 기본값이
+ * 쓰인다. `0` 을 보내면 "흐름을 하나도 만들지 마라" 가 되어 뜻이 정반대다.
+ */
+export function loadDocGenCaps() {
+  try { return JSON.parse(localStorage.getItem(DOCGEN_CAPS_KEY) || '{}') || {}; }
+  catch (_e) { return {}; }
+}
+
+/** 상한 하나 저장. 빈 값이면 **키를 지운다**(= 생성기 기본값으로 되돌린다). */
+export function saveDocGenCap(name, value) {
+  const caps = loadDocGenCaps();
+  const n = Number(value);
+  if (value === '' || value == null || !Number.isFinite(n) || n <= 0) delete caps[name];
+  else caps[name] = Math.trunc(n);
+  try { localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify(caps)); } catch (_e) { /* 용량 초과 */ }
+  return caps;
+}
 
 /** 공유 입력 객체 로드 (항상 객체 반환). */
 export function loadSharedInputs() {

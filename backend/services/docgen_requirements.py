@@ -136,7 +136,9 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         caps={"max_subcases": {"api": 7, "generator": 14,
                                "effect": "TC 당 sub-case — 생성기 기본 14종(BV 7/조건조합 4/"
                                          "에러전파 2/전역 2) 중 이 수만큼만 만듭니다"},
-              "max_flows": {"api": None, "generator": 120,
+              # API 가 `max_flows` 를 받는다(미지정이면 생성기 기본값 120). 실측
+              # kjpds02_pv 는 흐름 145 라 기본값으로는 25개가 규격에서 빠진다.
+              "max_flows": {"api": 120, "generator": 120, "adjustable": True,
                             "effect": "통합 흐름 상한 — 넘으면 안전등급 높은 쪽부터 남기고 "
                                       "**잘린 흐름은 시험 규격에 존재하지 않습니다**"}},
         handler="POST /api/local/sits/generate-async",

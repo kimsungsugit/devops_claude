@@ -4,7 +4,7 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import { isAbortError } from '../../impactPoll.js';
 import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
 import { persistDocPaths, useScmFallback } from '../../docGenHelpers.js';
-import { loadDocPaths, useDocPathsSync } from '../../sharedInputs.js';
+import { loadDocPaths, loadDocGenCaps, useDocPathsSync } from '../../sharedInputs.js';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -88,6 +88,14 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       }
       if (hsisPath) formData.append('hsis_path', hsisPath);
       if (stpPath) formData.append('stp_path', stpPath);
+      // 생성 상한 — **설정된 것만** 보낸다. 안 보내면 생성기 기본값이 쓰이고, 그게
+      // 단일 출처다(여기서 숫자를 복제하면 생성기 상수와 갈라진다).
+      // 실측 kjpds02_pv: 통합 흐름 145 라 기본 120 으로는 25개가 규격에서 빠진다.
+      if (docType === 'sits') {
+        const caps = loadDocGenCaps();
+        if (caps.max_flows) formData.append('max_flows', String(caps.max_flows));
+        if (caps.max_subcases) formData.append('max_subcases', String(caps.max_subcases));
+      }
       if (udsPath && docType !== 'uds') formData.append('uds_path', udsPath);
 
       const user = getUsername();

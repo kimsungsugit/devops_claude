@@ -1,5 +1,31 @@
 // 조회는 이 컴포넌트가 하지 않는다 — 부모(보드)가 행을 펼칠 때 받아 props 로 내린다.
 // 이유는 아래 컴포넌트 주석 참조.
+import { loadDocGenCaps, saveDocGenCap } from '../../sharedInputs.js';
+
+/**
+ * 생성 상한 입력 — 캡은 **자료 부족이 아니라 사용자 결정**이라 그 자리에서 바꾼다.
+ *
+ * 비우면 키를 지워 **생성기 기본값**으로 되돌린다(0 을 보내면 "하나도 만들지 마라" 가
+ * 되어 뜻이 정반대다). 비제어 입력이라 컴포넌트 상태가 없다 — 저장은 이벤트에서만
+ * 일어나므로 effect 안의 setState 문제도 생기지 않는다.
+ */
+function CapInput({ name, apiDefault, onSaved }) {
+  const caps = loadDocGenCaps();
+  return (
+    <span style={{ whiteSpace: 'nowrap' }}>
+      <input
+        type="number"
+        min="1"
+        aria-label={`${name} 상한`}
+        defaultValue={caps[name] ?? ''}
+        placeholder={apiDefault != null ? String(apiDefault) : ''}
+        onChange={(e) => saveDocGenCap(name, e.target.value)}
+        onBlur={() => onSaved?.()}
+        style={{ width: 72, fontSize: 'var(--text-xs)' }}
+      />
+    </span>
+  );
+}
 
 /**
  * 생성 **준비** 패널 — 만들기 전에 무엇이 부족한지 단계별로 보인다.
@@ -263,6 +289,14 @@ export default function DocGenPreflightPanel({
                       {Array.isArray(s.chain) && s.chain.length > 0 && <ChainRows chain={s.chain} />}
                     </div>
                   </span>
+                  {/* 캡은 그 자리에서 바꾼다 — 다른 탭으로 보내면 결정 흐름이 끊긴다. */}
+                  {s.id?.startsWith('cap_') && (
+                    <CapInput
+                      name={s.id.slice(4)}
+                      apiDefault={s.measured?.api_default}
+                      onSaved={onReload}
+                    />
+                  )}
                   {Array.isArray(s.actions) && s.actions.length > 0 && (
                     <span style={{ whiteSpace: 'nowrap' }}>
                       {s.actions.map((a, i) => (

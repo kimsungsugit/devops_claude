@@ -156,6 +156,29 @@ def test_cache_miss_is_explicit(tmp_path) -> None:
     assert tm.cached(str(tmp_path)) is None
 
 
+def test_sits_endpoints_accept_max_flows() -> None:
+    """SITS 3경로가 전부 `max_flows` 를 받아야 한다.
+
+    실측(kjpds02_pv): 흐름 145 / 기본 캡 120 이라 **25개가 시험 규격에서 빠진다**.
+    라우터가 이 값을 안 받으면 게이트가 사실을 알려줘도 고칠 수단이 없다.
+    한 경로만 고치면 다른 두 경로로 만든 문서는 계속 잘린다.
+    """
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parents[2] / "backend/routers/local.py").read_text(
+        encoding="utf-8", errors="ignore")
+    assert src.count("max_flows: Optional[int] = Form(None)") == 3, "SITS 3경로 중 일부만 받는다"
+    # 미지정이면 인자 자체를 넘기지 않는다 — 생성기 기본값이 단일 출처다.
+    assert src.count('**({"max_flows": max_flows} if max_flows is not None else {})') == 3
+
+
+def test_max_flows_is_marked_adjustable() -> None:
+    """게이트가 "조정할 수 없습니다" 라고 말하면 안 된다 — 이제 받는다."""
+    from backend.services.docgen_requirements import requirements_for
+    cap = requirements_for("sits")["caps"]["max_flows"]
+    assert cap["api"] == 120
+    assert cap.get("adjustable") is True
+
+
 @pytest.mark.parametrize("doc_type", ["sutr", "sitr", "swreport"])
 def test_test_report_form_fields_are_shared(doc_type: str) -> None:
     """시험 결과 3종의 폼 필수값은 서버 단일 출처를 쓴다(프론트 복제 제거)."""

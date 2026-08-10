@@ -3307,6 +3307,10 @@ def local_sits_generate(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_subcases: int = Form(7),
+    # 통합 흐름 상한. **미지정(None)이면 생성기 기본값**(120)을 쓴다 — 여기서 숫자를
+    # 복제하면 생성기 상수와 갈라진다. 실측(kjpds02_pv): 흐름 145 로 상한을 넘어
+    # 25개가 시험 규격에서 빠지고 있는데, 지금까지 화면에서 올릴 방법이 없었다.
+    max_flows: Optional[int] = Form(None),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -3361,6 +3365,8 @@ def local_sits_generate(
             template_path=tpl_path,
             project_config=project_config,
             max_subcases=max_subcases,
+            # 미지정이면 인자 자체를 넘기지 않는다 — 생성기 기본값이 단일 출처다.
+            **({"max_flows": max_flows} if max_flows is not None else {}),
             srs_docx_path=srs_docx,
             sds_docx_path=sds_docx,
             uds_path=uds_file,
@@ -3406,6 +3412,10 @@ def local_sits_generate_stream(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_subcases: int = Form(7),
+    # 통합 흐름 상한. **미지정(None)이면 생성기 기본값**(120)을 쓴다 — 여기서 숫자를
+    # 복제하면 생성기 상수와 갈라진다. 실측(kjpds02_pv): 흐름 145 로 상한을 넘어
+    # 25개가 시험 규격에서 빠지고 있는데, 지금까지 화면에서 올릴 방법이 없었다.
+    max_flows: Optional[int] = Form(None),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -3467,6 +3477,7 @@ def local_sits_generate_stream(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_subcases=max_subcases,
+                **({"max_flows": max_flows} if max_flows is not None else {}),
                 on_progress=_on_progress,
                 srs_docx_path=srs_docx_stream,
                 sds_docx_path=sds_docx_stream,
@@ -3524,6 +3535,10 @@ def local_sits_generate_async(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_subcases: int = Form(7),
+    # 통합 흐름 상한. **미지정(None)이면 생성기 기본값**(120)을 쓴다 — 여기서 숫자를
+    # 복제하면 생성기 상수와 갈라진다. 실측(kjpds02_pv): 흐름 145 로 상한을 넘어
+    # 25개가 시험 규격에서 빠지고 있는데, 지금까지 화면에서 올릴 방법이 없었다.
+    max_flows: Optional[int] = Form(None),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -3603,6 +3618,7 @@ def local_sits_generate_async(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_subcases=max_subcases,
+                **({"max_flows": max_flows} if max_flows is not None else {}),
                 on_progress=_sits_on_progress,
                 srs_docx_path=srs_docx_async,
                 sds_docx_path=sds_docx_async,
