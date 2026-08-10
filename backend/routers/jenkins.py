@@ -3227,15 +3227,17 @@ async def jenkins_sts_generate_async(
             if len(doc_skips) > 5:
                 detail += f" (외 {len(doc_skips) - 5}건)"
         raise HTTPException(status_code=400, detail=detail)
-    def _resolve_opt_j(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
-
-    sds_docx_path = _resolve_opt_j(sds_path)
-    uds_file_path = _resolve_opt_j(uds_path)
-    stp_docx_path = _resolve_opt_j(stp_path)
+    # 선택 입력은 **worker 경유**로 로컬화한다. 예전엔 `Path(val).exists()` 직독이라
+    # cloudium `U:` 문서가 전량 PermissionError → `None` → 생성기가 **그 문서 없이**
+    # 만들고 화면엔 "생성 완료" 가 떴다(근거가 빠진 ISO 26262 산출물). 사유도 수집한다.
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips: List[str] = []
+    sds_docx_path = resolve_builder_input(sds_path, label="SDS", reasons=opt_skips)
+    uds_file_path = resolve_builder_input(uds_path, label="UDS", reasons=opt_skips)
+    stp_docx_path = resolve_builder_input(stp_path, label="STP", reasons=opt_skips)
+    if opt_skips:
+        _logger.warning("STS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips), "; ".join(opt_skips)[:400])
 
     tpl_path: Optional[str] = None
     if template_path:

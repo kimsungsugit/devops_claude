@@ -2297,11 +2297,13 @@ async def local_sts_generate(
             print(f"[STS_GENERATE][{req_id}] source parsing warning: {e}", flush=True)
 
     # Resolve optional supplementary document paths
+    # 선택 입력은 **worker 경유**로 로컬화한다 — 직독은 cloudium `U:` 를 못 읽어
+    # 전량 `None` 이 되고, 생성기가 그 문서 **없이** 만든 뒤 "생성 완료" 가 떴다.
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips: List[str] = []
+
     def _resolve_opt(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=opt_skips)
 
     sds_docx_path = _resolve_opt(sds_path)
     # Fallback: auto-discover SDS from docs/ if not provided
@@ -2311,6 +2313,9 @@ async def local_sts_generate(
     stp_docx_path = _resolve_opt(stp_path)
     hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
                               _discover_hsis_path, label="HSIS")
+    if opt_skips:
+        _logger.warning("STS(sync): 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips), "; ".join(opt_skips)[:400])
 
     # Resolve template
     tpl_path: Optional[str] = None
@@ -2478,17 +2483,21 @@ async def local_sts_generate_stream(
         except Exception:
             pass
 
+    # 선택 입력 worker 경유 (위 sync 핸들러와 같은 이유).
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips2: List[str] = []
+
     def _resolve_opt2(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=opt_skips2)
 
     sds_docx_path = _resolve_opt2(sds_path)
     uds_file_path = _resolve_opt2(uds_path)
     stp_docx_path = _resolve_opt2(stp_path)
     hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
                               _discover_hsis_path, label="HSIS")
+    if opt_skips2:
+        _logger.warning("STS(stream): 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips2), "; ".join(opt_skips2)[:400])
 
     tpl_path: Optional[str] = None
     if template_path:
@@ -2659,11 +2668,12 @@ async def local_sts_generate_async(
         job_id=job_id,
     )
 
+    # 선택 입력 worker 경유 (위 sync/stream 핸들러와 같은 이유).
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips3: List[str] = []
+
     def _resolve_opt3(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=opt_skips3)
 
     sds_docx_path = _resolve_opt3(sds_path)
     # Fallback: auto-discover SDS from docs/ if not provided
@@ -2673,6 +2683,9 @@ async def local_sts_generate_async(
     stp_docx_path = _resolve_opt3(stp_path)
     hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
                               _discover_hsis_path, label="HSIS")
+    if opt_skips3:
+        _logger.warning("STS(async): 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips3), "; ".join(opt_skips3)[:400])
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = source_root.split(",")[0].strip() if source_root else ""
@@ -2896,11 +2909,11 @@ def local_suts_generate(
         if p.exists() and p.is_file():
             tpl_path = str(p)
 
+    from backend.services.resolver_helpers import resolve_builder_input
+
     def _resolve_doc_path(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        # worker 경유 — 직독은 cloudium `U:` 를 못 읽어 선택 문서가 조용히 빠졌다.
+        return resolve_builder_input(val)
 
     srs_docx = _resolve_doc_path(srs_path)
     sds_docx = _resolve_doc_path(sds_path)
@@ -3000,11 +3013,10 @@ def local_suts_generate_stream(
         if p.exists() and p.is_file():
             tpl_path = str(p)
 
+    from backend.services.resolver_helpers import resolve_builder_input
+
     def _res_doc(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx_stream = _res_doc(srs_path)
     sds_docx_stream = _res_doc(sds_path)
@@ -3125,11 +3137,10 @@ def local_suts_generate_async(
         if p.exists() and p.is_file():
             tpl_path = str(p)
 
+    from backend.services.resolver_helpers import resolve_builder_input
+
     def _res_async(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx_async = _res_async(srs_path)
     sds_docx_async = _res_async(sds_path)
@@ -3321,11 +3332,10 @@ def local_sits_generate(
         if p.exists() and p.is_file():
             tpl_path = str(p)
 
+    from backend.services.resolver_helpers import resolve_builder_input
+
     def _resolve_doc_path_sits(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx = _resolve_doc_path_sits(srs_path)
     sds_docx = _resolve_doc_path_sits(sds_path)
@@ -3422,11 +3432,10 @@ def local_sits_generate_stream(
         if p.exists() and p.is_file():
             tpl_path = str(p)
 
+    from backend.services.resolver_helpers import resolve_builder_input
+
     def _res_doc_sits(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx_stream = _res_doc_sits(srs_path)
     sds_docx_stream = _res_doc_sits(sds_path)
@@ -3544,11 +3553,13 @@ def local_sits_generate_async(
         if p.exists() and p.is_file():
             tpl_path = str(p)
 
+    # 선택 입력 worker 경유. SITS 는 선택 문서가 5종(SRS·SDS·UDS·HSIS·STP)이라
+    # 직독 시절엔 cloudium 에서 **다섯 개가 통째로** 빠진 채 만들어졌다.
+    from backend.services.resolver_helpers import resolve_builder_input
+    sits_opt_skips: List[str] = []
+
     def _res_async_sits(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=sits_opt_skips)
 
     srs_docx_async = _res_async_sits(srs_path)
     sds_docx_async = _res_async_sits(sds_path)
@@ -3556,6 +3567,9 @@ def local_sits_generate_async(
     hsis_async = _doc_or_discovered(_res_async_sits(hsis_path), hsis_path,
                               _discover_hsis_path, label="HSIS")
     stp_async = _res_async_sits(stp_path)
+    if sits_opt_skips:
+        _logger.warning("SITS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(sits_opt_skips), "; ".join(sits_opt_skips)[:400])
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sits", "sits_local", tpl_path)

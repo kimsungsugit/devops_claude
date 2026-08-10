@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import logging
 import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import HTTPException
+
+_logger = logging.getLogger("devops_api.resolver_helpers")
 
 # cloudium 문서를 로컬로 떨구는 프로세스 수명 temp 루트. 첫 사용 시 만들고 종료 시 지운다.
 _MATERIALIZE_ROOT: Path | None = None
@@ -97,6 +100,101 @@ def materialize_via_resolver(
     except OSError as exc:
         return None, f"{name}: 로컬 임시 파일 생성 실패 ({type(exc).__name__}: {str(exc)[:100]})"
     return out, ""
+
+
+def resolve_builder_input(
+    path_str: str, *, label: str = "", reasons: list[str] | None = None,
+) -> str | None:
+    """생성기가 **직접 열** 선택 입력 문서의 경로를 준다. 없으면 ``None`` + 사유 수집.
+
+    ## 왜 이 함수가 생겼나
+
+    라우터 5곳에 **글자 그대로 같은** 로컬 전용 판정이 복제돼 있었다
+    (`_resolve_opt_j` · `_resolve_opt` · `_resolve_opt2` · `_resolve_opt3` ·
+    `_res_async_sits`)::
+
+        p2 = Path(val).expanduser().resolve()
+        return str(p2) if p2.exists() and p2.is_file() else None
+
+    두 가지가 잘못돼 있었다:
+
+    1. **cloudium 을 못 읽는다.** 등록 문서 41개가 전부 `U:` 인데 `Path.exists()` 는
+       백엔드 권한으로 `PermissionError` 를 낸다 → 전량 `None` → 생성기가 그 문서 **없이**
+       만들고 화면엔 "생성 완료" 가 뜬다. 근거가 빠진 ISO 26262 산출물이다.
+    2. **사유가 사라진다.** 경로 오타·권한·형식이 전부 같은 `None` 이다.
+
+    ## ⚠ `materialize_via_resolver` 와 다르다
+
+    그쪽은 **본문 추출용**이라 `parser_unreadable_reason`(= `SUPPORTED_TEXT_EXTS`) 게이트를
+    통과해야 한다. 생성기가 여는 파일은 `.xlsm`/`.xlsx`(HSIS·규격서·템플릿)라 **그 게이트가
+    오히려 막는다** — openpyxl 은 그 형식을 직접 열 수 있고 텍스트 추출기와 무관하다.
+    그래서 형식 게이트 없이 접근 검사 → 존재 → 바이트만 거친다.
+
+    ## local 모드는 동작을 바꾸지 않는다
+
+    직독이 정답이고 대용량 xlsm 을 복사할 이유가 없다. cloudium 일 때만 로컬 사본을 만든다.
+    """
+    raw = (path_str or "").strip()
+    if not raw:
+        # 지정하지 않은 것은 실패가 아니다 — 사유를 남기지 않는다.
+        return None
+
+    name = label or Path(raw).name or raw
+
+    def _note(reason: str) -> None:
+        # ⚠ 수집기를 안 넘긴 호출부에서도 **사유가 남아야** 한다. 선택 입력이 조용히
+        #   빠지는 것이 이 이관이 고치려는 결함 자체이므로, 로그는 항상 남긴다.
+        _logger.warning("선택 입력 제외 — %s: %s", name, reason)
+        if reasons is not None:
+            reasons.append(f"{name}: {reason}")
+
+    if not _needs_resolver_read():
+        p = Path(raw).expanduser().resolve()
+        if p.exists() and p.is_file():
+            return str(p)
+        _note("파일 없음 — 경로가 바뀌었거나 문서가 이동/개정됐을 수 있다")
+        return None
+
+    try:
+        enforce_resolver_access(raw)
+    except HTTPException as exc:
+        _note(f"접근 거부 — {str(exc.detail)[:160]}")
+        return None
+    except Exception as exc:  # noqa: BLE001 — resolver 계열이 광범위. 사유는 보존한다
+        _note(f"접근 검사 실패 ({type(exc).__name__}: {str(exc)[:120]})")
+        return None
+
+    from backend.services.file_resolver import get_resolver
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(raw):
+            _note("파일 없음 — 경로가 바뀌었거나 문서가 이동/개정됐을 수 있다")
+            return None
+    except Exception as exc:  # noqa: BLE001
+        _note(f"존재 확인 실패 ({type(exc).__name__}: {str(exc)[:120]})")
+        return None
+
+    try:
+        data = resolver.read_bytes(raw)
+    except Exception as exc:  # noqa: BLE001
+        _note(f"읽기 실패 ({type(exc).__name__}: {str(exc)[:120]})")
+        return None
+    if not data:
+        _note("0바이트 — worker read 가 비었거나 파일이 비어 있음")
+        return None
+
+    # ⚠ 파일명을 유지한다 — 호출부·생성기가 `p.name` 으로 문서 종류를 판정한다
+    #   (`is_srs_filename`/`is_sds_filename`). `tmpXXXX.docx` 로 바꾸면 오분류된다.
+    key = hashlib.sha1(raw.replace("\\", "/").lower().encode("utf-8")).hexdigest()[:12]
+    try:
+        out_dir = _materialize_root() / key
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / (Path(raw).name or "document")
+        out.write_bytes(data)
+    except OSError as exc:
+        _note(f"로컬 임시 파일 생성 실패 ({type(exc).__name__}: {str(exc)[:100]})")
+        return None
+    return str(out)
 
 
 def parser_unreadable_reason(path_str: str) -> str:
