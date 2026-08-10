@@ -293,10 +293,16 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     if (!run || detail[docType]) return;   // 이미 받았으면 재요청하지 않는다
     setDetail(prev => ({ ...prev, [docType]: { loading: true } }));
     try {
-      // 근거(사이드카)와 조치 제안을 함께. 하나가 실패해도 나머지는 보여준다.
-      const [ev, ad] = await Promise.allSettled([
+      // 근거(사이드카)·조치 제안·원인 귀속을 함께. 하나가 실패해도 나머지는 보여준다.
+      const [ev, ad, at] = await Promise.allSettled([
         api(`/api/quality/runs/${run.id}/evidence`),
         post(`/api/quality/runs/${run.id}/advice`, {}),
+        post('/api/docgen/attribution', {
+          run_id: run.id,
+          scm_id: scmId || '',
+          source_root: analysisResult?.matchedScm?.source_root || '',
+          doc_paths: loadDocPaths() || {},
+        }),
       ]);
       setDetail(prev => ({
         ...prev,
@@ -306,12 +312,15 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           evidenceError: ev.status === 'rejected' ? (ev.reason?.message || '근거 조회 실패') : '',
           advice: ad.status === 'fulfilled' ? ad.value : null,
           adviceError: ad.status === 'rejected' ? (ad.reason?.message || '제안 조회 실패') : '',
+          attribution: at.status === 'fulfilled' ? at.value : null,
+          attributionError: at.status === 'rejected'
+            ? (at.reason?.message || '원인 분석 실패') : '',
         },
       }));
     } catch (e) {
       setDetail(prev => ({ ...prev, [docType]: { loading: false, error: e?.message || '조회 실패' } }));
     }
-  }, [expanded, latestByType, detail]);
+  }, [expanded, latestByType, detail, scmId, analysisResult]);
 
   const handleGenerate = useCallback((docType) => {
     if (!job?.url) { toast('warning', '프로젝트를 먼저 선택하세요.'); return; }
@@ -843,6 +852,81 @@ function FragmentRow({
   );
 }
 
+/**
+ * 원인 귀속 — **"이 칸이 왜 비었나"** 를 사슬 단계로 되짚는다.
+ *
+ * 채움률만 보면 무엇을 해야 할지 알 수 없다. `ASIL 12%` 는 조치가 아니고,
+ * "1순위 소스 `@asil` 0건 · 2순위 SwDS 미연결" 이라야 조치가 보인다.
+ *
+ * ⚠ **두 시점을 섞지 않는다.** 기여 건수는 생성 당시, 가용성(`have_now`)은 지금이다.
+ * 지금 SwDS 를 연결해도 이미 만들어진 문서는 달라지지 않으므로 그 사실을 함께 밝힌다.
+ */
+export function AttributionDetail({ data, error }) {
+  if (error) {
+    return (
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 'var(--text-xs)', marginBottom: 4 }}>왜 못 채웠나</div>
+        <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>{error}</div>
+      </div>
+    );
+  }
+  if (!data) return null;
+  if (!data.available) {
+    // 부재를 빈 칸으로 두지 않는다 — 빈 칸은 "원인이 없다" 로 읽힌다.
+    return (
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 'var(--text-xs)', marginBottom: 4 }}>왜 못 채웠나</div>
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          분석 불가 — {data.reason || '사유 미상'}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ fontWeight: 700, fontSize: 'var(--text-xs)', marginBottom: 4 }}>
+        왜 못 채웠나
+        {data.total_functions != null && (
+          <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
+            {' '}· 함수 {data.total_functions}
+            {data.grade && ` · 출처 신뢰도 ${data.grade}`}
+          </span>
+        )}
+      </div>
+      {(data.fields || []).map(f => (
+        <div key={f.field} style={{ marginBottom: 6, fontSize: 'var(--text-xs)' }}>
+          <strong>{f.label}</strong>{' '}
+          <span style={{ color: f.grounded_total ? 'var(--text-muted)' : 'var(--color-warning)' }}>
+            근거 {f.grounded_total} · 자리채움 {f.ungrounded_total}
+          </span>
+          <ul style={{ margin: '2px 0 0', paddingLeft: '1.1em', lineHeight: 1.7 }}>
+            {(f.rows || []).filter(r => r.grounded).map((r, i) => (
+              <li key={`${r.source}-${i}`}>
+                <code>{r.source}</code>
+                {r.input_label && ` (${r.input_label})`}
+                {': '}
+                <strong style={{ color: r.contributed ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                  {r.contributed ? `${r.count}건` : '0건'}
+                </strong>
+                {/* 지금 상태는 생성 당시와 다를 수 있다 — 그래서 따로 적는다. */}
+                {!r.contributed && r.have_now === true && ' · 지금은 연결됨(재생성하면 반영)'}
+                {!r.contributed && r.have_now === false && ' · 지금도 없음'}
+                {!r.contributed && r.have_now == null && ' · 현재 상태 확인 안 함'}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      {data.timing_note && (
+        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          ⓘ {data.timing_note.replace(/\*\*/g, '')}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 펼친 근거 — 사이드카(왜 이 품질인가) + 조치 제안. */
 function EvidenceDetail({ run, detail }) {
   if (!detail || detail.loading) {
@@ -950,7 +1034,10 @@ function EvidenceDetail({ run, detail }) {
         )}
       </div>
 
-      {/* 3. 실행 메타 */}
+      {/* 3. 원인 귀속 — "이 칸이 왜 비었나" */}
+      <AttributionDetail data={detail.attribution} error={detail.attributionError} />
+
+      {/* 4. 실행 메타 */}
       <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
         run #{run.id}
         {run.scm_id && ` · 프로젝트 ${run.scm_id}`}

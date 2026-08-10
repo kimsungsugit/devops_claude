@@ -433,6 +433,104 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
     }
 
 
+class AttributionRequest(BaseModel):
+    run_id: int
+    scm_id: str = ""
+    doc_paths: Dict[str, str] = Field(default_factory=dict)
+    source_root: str = ""
+
+
+@router.post("/api/docgen/attribution")
+def docgen_attribution(req: AttributionRequest) -> Dict[str, Any]:
+    """생성된 문서에서 **"이 칸이 왜 비었나"** 를 사슬로 거슬러 올라간다.
+
+    ## 무엇이 없었나
+
+    필드별 채움률·TBD 잔여·출처 분포는 **이미 산출된다**(품질 지표 + 신뢰도 사이드카).
+    없던 것은 그 분포를 **입력 축으로 환산**하는 일이다 — `asil_source` 가 `default`
+    435건이라는 사실만으로는 무엇을 해야 할지 알 수 없고, "1순위 소스 `@asil` 0건 ·
+    2순위 SwDS 미연결" 로 바꿔야 조치가 보인다.
+
+    ## ⚠ 두 시점을 섞지 않는다
+
+    출처 분포는 **생성 당시** 산출이고 입력 가용성은 **지금** 이다. 지금 SwDS 를
+    연결했다고 과거 산출물이 달라지지 않으므로, 응답은 두 값을 나란히 두고 시점이
+    다르다는 사실(`timing_note`)을 함께 낸다. 한쪽으로 합치면 "이미 고쳤는데 왜 아직
+    비어 있나" 라는 오독이 생긴다.
+
+    ## 경로 입력 표면
+
+    사이드카 경로는 **클라이언트가 보내지 않는다** — DB 의 `output_path` 에서 온다
+    (`quality.get_run_evidence` 와 같은 규약).
+    """
+    try:
+        from workflow.quality.db import get_session, init_db
+        from workflow.quality.models import GenerationRun
+    except ImportError:
+        raise HTTPException(status_code=503, detail="quality module not available") from None
+
+    init_db()
+    with get_session() as session:
+        run = session.query(GenerationRun).filter_by(id=req.run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail=f"run_id {req.run_id} not found")
+        output_path = run.output_path
+        doc_type = str(run.doc_type or "")
+
+    try:
+        from report_gen.evidence import read_evidence
+    except ImportError:
+        raise HTTPException(status_code=503, detail="evidence module not available") from None
+
+    ev = read_evidence(output_path or "")
+    conf = ev.get("confidence") or {}
+    if not conf.get("present"):
+        # 부재를 빈 결과로 접지 않는다 — 사유 없이 `[]` 를 주면 "원인이 없다" 로 읽힌다.
+        return {
+            "ok": True, "run_id": req.run_id, "doc_type": doc_type,
+            "output_path": output_path,
+            "available": False,
+            "reason": conf.get("reason") or "신뢰도 사이드카가 없습니다",
+            "fields": [],
+        }
+
+    # 현재 입력 가용성 — preflight 와 **같은 해석**을 쓴다(두 화면이 갈리지 않게).
+    from backend.services.file_resolver import get_resolver
+    resolver = get_resolver()
+    inputs = _resolve_inputs(PreflightRequest(
+        doc_type=doc_type or "uds", scm_id=req.scm_id,
+        doc_paths=req.doc_paths, source_root=req.source_root,
+    ))
+    available: Dict[str, bool] = {}
+    for key, path in inputs.items():
+        if key == _req.IN_SOURCE_ROOT:
+            first = path.split(",")[0].strip()
+            available[key] = bool(first) and Path(first).expanduser().is_dir()
+        else:
+            available[key] = _probe_path(resolver, path)["state"] == S_OK
+
+    dist_by_field = {
+        "asil": _chain.parse_source_distribution(conf.get("asil_sources")),
+        "related": _chain.parse_source_distribution(conf.get("related_sources")),
+        "description": _chain.parse_source_distribution(conf.get("description_sources")),
+    }
+    fields = [_chain.attribute_field(f, d, available) for f, d in dist_by_field.items()]
+
+    return {
+        "ok": True,
+        "run_id": req.run_id,
+        "doc_type": doc_type,
+        "output_path": output_path,
+        "available": True,
+        "total_functions": conf.get("total_functions"),
+        "overall_score": conf.get("overall_score"),
+        "grade": conf.get("grade"),
+        "fields": fields,
+        "timing_note": ("출처 분포는 **생성 당시** 값이고 입력 가용성은 **지금** 입니다 — "
+                        "지금 자료를 채워도 이미 만들어진 문서는 달라지지 않습니다."),
+    }
+
+
 class AdoptDocPathRequest(BaseModel):
     scm_id: str
     doc_key: str = Field(..., description="srs/sds/uds/hsis/stp/template")

@@ -36,6 +36,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from report_gen.provenance import canonical_source
@@ -203,6 +204,103 @@ def chain_state(field: str, available: Dict[str, bool]) -> List[Dict[str, Any]]:
             "grounded": need is not None,
         })
     return out
+
+
+# ── 사이드카 라벨 → 출처 코드 (결과 귀속용) ────────────────────────────────
+#
+# 신뢰도 사이드카(`.field_confidence.md`)는 출처 분포를 **한국어 라벨**로 적는다
+# (`report_gen/validation.py::src_labels`). 생성 결과에서 원인을 거슬러 올라가려면
+# 라벨을 코드로 되돌려야 하는데, 그 표는 `generate_asil_related_confidence_report`
+# **함수 내부의 지역 변수**라 import 할 수 없다.
+#
+# ⚠ 그래서 여기 복제한다. 복제는 반드시 낡으므로
+#   `tests/unit/test_docgen_attribution.py` 가 `validation.py` 소스의 리터럴과 대조한다.
+#   라벨을 고치면 그 테스트가 먼저 깨진다.
+LABEL_TO_SOURCE: Dict[str, str] = {
+    "주석": "comment",
+    "SDS": "sds",
+    "SDS 매핑(설명은 SDS 유래 아님)": "sds_match",
+    "SRS": "srs",
+    "UDS": "uds",
+    "SDS component": "swcom",
+    "레퍼런스": "reference",
+    "AI": "ai",
+    "지식베이스": "rag",
+    "콜그래프": "call_graph",
+    "룰": "rule",
+    "모듈 상속": "module_inherit",
+    "추론": "inference",
+    "기본값(근거 없음)": "default",
+    "생성 문서 회수(원 유래 불명)": "generated_doc",
+    "미상(분류 불가)": "unknown",
+}
+
+# `- 주석: `12` / `435` (2.8%)` 형태. 사이드카 생산 코드는
+# `validation.py::_dump_counter` 다.
+_DIST_LINE = re.compile(r"^(?P<label>.+?):\s*`(?P<cnt>\d+)`\s*/\s*`(?P<total>\d+)`")
+
+
+def parse_source_distribution(lines: Any) -> Dict[str, int]:
+    """사이드카 출처 분포 줄들 → ``{출처 코드: 건수}``.
+
+    ⚠ 알 수 없는 라벨은 **버리지 않고** 라벨 그대로 키로 남긴다. 조용히 없애면
+    "그 출처가 0건" 으로 읽혀 원인 귀속이 틀린다(어휘 드리프트를 흡수하지 않는다).
+    """
+    out: Dict[str, int] = {}
+    for raw in (lines or []):
+        m = _DIST_LINE.match(str(raw).strip())
+        if not m:
+            continue
+        label = str(m.group("label") or "").strip()
+        out[str(LABEL_TO_SOURCE.get(label, label))] = int(m.group("cnt"))
+    return out
+
+
+def attribute_field(field: str, distribution: Dict[str, int],
+                    available: Dict[str, bool]) -> Dict[str, Any]:
+    """"이 필드가 왜 그렇게 채워졌나" 를 사슬 단계별로 되짚는다.
+
+    Args:
+        field: ``asil`` / ``related`` / ``description``.
+        distribution: `parse_source_distribution` 결과(생성 **당시** 산출).
+        available: 현재 입력 가용 상태(preflight 와 같은 형식).
+
+    Returns:
+        ``{"field", "rows": [...], "grounded_total", "ungrounded_total"}``
+        각 row 는 ``{source, input, input_label, count, contributed, have_now}``.
+
+    ⚠ `distribution` 은 **생성 시점**, `available` 은 **현재** 다. 두 시점이 다를 수
+    있으므로 호출자는 그 사실을 화면에 밝혀야 한다 — 지금 SwDS 를 연결했다고 과거
+    산출물이 달라지지는 않는다.
+    """
+    rows: List[Dict[str, Any]] = []
+    grounded_total = 0
+    ungrounded_total = 0
+    for src in FIELD_SOURCES.get(field, []):
+        need = source_input(src)
+        cnt = int(distribution.get(src, 0))
+        if need is None:
+            ungrounded_total += cnt
+        else:
+            grounded_total += cnt
+        rows.append({
+            "source": src,
+            "input": need,
+            "input_label": INPUT_LABELS.get(need or "", ""),
+            "count": cnt,
+            "contributed": cnt > 0,
+            "grounded": need is not None,
+            # 확인하지 않은 입력은 `None` — `False`(없음)와 구분한다.
+            "have_now": (bool(available[need]) if (need and need in available) else None),
+        })
+    return {
+        "field": field,
+        "label": FIELD_LABELS.get(field, field),
+        "rows": rows,
+        # 근거 있는 출처가 채운 칸 수 vs 생성기 내부 산출로 채운 칸 수.
+        "grounded_total": grounded_total,
+        "ungrounded_total": ungrounded_total,
+    }
 
 
 def missing_grounded_inputs(field: str, available: Dict[str, bool]) -> List[str]:
