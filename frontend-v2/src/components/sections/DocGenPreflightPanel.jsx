@@ -227,6 +227,7 @@ const ACTION_LABELS = {
   pick_path: '경로 지정',
   adopt_suggestion: '이 파일로 교체',
   measure_source: '소스 측정',
+  export_comment_targets: '보강 대상 내려받기',
   input_value: '값 지정',
   open_scm: 'SCM 설정',
 };

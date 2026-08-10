@@ -32,9 +32,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.dependencies.admin import require_admin
 from backend.services import docgen_comment_coverage as _cov
 from backend.services import docgen_field_sources as _chain
 from backend.services import docgen_requirements as _req
@@ -290,6 +291,9 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 reason=(f"설명 {filled}개 중 실질 내용은 {subst}개 — 나머지는 양식 라벨만 있습니다"
                         if cov["substantive_gap"] else ""),
                 samples=cov["samples"],
+                # 건수만으로는 못 고친다 — 파일·함수명 목록을 내보낼 수 있게 한다.
+                actions=([{"kind": "export_comment_targets"}]
+                         if (cov["substantive_gap"] or filled < fn) else []),
             ))
             available[_chain.INPUT_SOURCE_COMMENT] = bool(subst)
             steps.append(_step(
@@ -427,6 +431,100 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
         "file_mode": mode,
         "steps": steps,
     }
+
+
+class AdoptDocPathRequest(BaseModel):
+    scm_id: str
+    doc_key: str = Field(..., description="srs/sds/uds/hsis/stp/template")
+    # ⚠ **파일명만** 받는다. 전체 경로를 받으면 임의 경로를 레지스트리에 심을 수 있다.
+    #   부모 디렉터리는 기존 등록 경로에서 가져오므로 폴더를 벗어날 수 없다.
+    filename: str
+
+
+@router.post("/api/docgen/adopt-doc-path", dependencies=[Depends(require_admin)])
+def docgen_adopt_doc_path(req: AdoptDocPathRequest) -> Dict[str, Any]:
+    """낡은 등록 경로를 **같은 폴더의 개정본**으로 교체한다.
+
+    실측(인계 문서): `kjpds02` 는 SRS 를 `_v2.03_….docx` 로 등록했는데 폴더엔
+    `_v3.01_…_R.docx` 하나뿐이었다. 문서가 개정되며 파일명이 바뀌면 등록이 조용히 낡고,
+    화면은 "문서가 있는데 없다고 나온다" 가 된다.
+
+    ## 왜 설정 복사가 아니라 레지스트리 갱신인가
+
+    설정(`doc_paths`)에 복사하면 **그 순간 또 굳는다** — 다음 개정 때 같은 문제가 나고,
+    이번엔 설정이 SCM 을 가려서 더 안 보인다. 진실원은 레지스트리다.
+
+    ## 입력 표면
+
+    `filename` 만 받고 부모 디렉터리는 **기존 등록 경로**에서 온다. 경로 구분자가 섞인
+    이름은 거부한다 — 그래야 등록된 폴더 밖을 가리킬 수 없다.
+    """
+    from backend.schemas import ScmLinkedDocs, ScmUpdateRequest
+    from backend.services.file_resolver import get_resolver
+    from backend.services.scm_registry import get_registry_entry, update_entry
+
+    doc_key = str(req.doc_key or "").strip().lower()
+    if doc_key not in _DOC_KEY_TO_INPUT:
+        raise HTTPException(status_code=400, detail=f"알 수 없는 문서 키: {req.doc_key}")
+
+    name = str(req.filename or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise HTTPException(status_code=400, detail="파일명만 지정할 수 있습니다")
+
+    entry = get_registry_entry(req.scm_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="registry entry not found")
+
+    linked = entry.linked_docs.model_dump(mode="json")
+    current = linked.get(doc_key)
+    current_path = str((current[0] if isinstance(current, list) and current else current) or "")
+    if not current_path:
+        raise HTTPException(status_code=400, detail=f"{doc_key} 에 기존 등록 경로가 없습니다")
+
+    parent = str(Path(current_path).parent)
+    new_path = str(Path(parent) / name)
+
+    # 교체 전에 **실물을 확인**한다. 없는 파일로 바꾸면 문제를 옮기기만 한다.
+    resolver = get_resolver()
+    probe = _probe_path(resolver, new_path)
+    if probe["state"] != S_OK:
+        raise HTTPException(
+            status_code=400,
+            detail=f"교체 대상을 확인하지 못했습니다: {probe['reason'] or '파일 없음'}",
+        )
+
+    # 리스트형 키(복수 등록)는 첫 항목만 바꾸고 나머지는 보존한다.
+    if isinstance(current, list):
+        linked[doc_key] = [new_path, *current[1:]]
+    else:
+        linked[doc_key] = new_path
+
+    updated = update_entry(
+        req.scm_id, ScmUpdateRequest(linked_docs=ScmLinkedDocs.model_validate(linked)),
+    )
+    return {"ok": True, "doc_key": doc_key, "old": current_path, "new": new_path,
+            "item": updated.model_dump(mode="json")}
+
+
+class CommentTargetsRequest(BaseModel):
+    source_root: str
+    max_files: int = 300
+
+
+@router.post("/api/docgen/comment-targets")
+def docgen_comment_targets(req: CommentTargetsRequest) -> Dict[str, Any]:
+    """주석이 없거나 **내용이 비어 있는** 함수 목록.
+
+    건수만으로는 아무도 못 고친다 — 파일·함수명이 있어야 개발자가 실제로 주석을 단다.
+    실측(HDPDM01): `comment_desc` 380개 중 **277개가 `'Function  |'`**(양식 라벨만)이라
+    "주석 없음"(55개)보다 "내용 없음"이 훨씬 많다. 두 갈래를 **구분해서** 낸다.
+
+    ⚠ 캐시가 없으면 재지 않는다(무겁다). 먼저 `measure-source` 를 부를 것.
+    """
+    if not _cov.has_cached(req.source_root, max_files=req.max_files):
+        return {"ok": False, "reason": "아직 측정하지 않았습니다 — 먼저 소스를 측정하세요",
+                "targets": []}
+    return {"ok": True, **_cov.list_comment_targets(req.source_root, max_files=req.max_files)}
 
 
 class MeasureSourceRequest(BaseModel):

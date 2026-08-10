@@ -4,6 +4,7 @@ import { useToast } from '../../App.jsx';
 import { loadBuilderForm, toBuildPayload, missingRequiredFields } from '../../swBuilderForms.js';
 import DocGenPreflightPanel from './DocGenPreflightPanel.jsx';
 import { loadDocPaths } from '../../sharedInputs.js';
+import { notifyScmRegistryChanged } from '../../scmLinkedDocs.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -355,6 +356,38 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     if (!prep[docType]?.data) loadPrep(docType);
   }, [prepOpen, prep, loadPrep]);
 
+  // ── blob 다운로드 유틸 ───────────────────────────────────────────────────
+  //
+  // 시험 결과 섹션(아래)과 준비 패널의 CSV 내보내기가 **둘 다** 쓴다. 그래서 두 소비처
+  // 중 **먼저 오는 쪽 앞**에 둔다 — 뒤에 두면 `handlePrepAction` 의 deps 배열이 정의
+  // 전에 평가되어 TDZ ReferenceError 가 난다(`react-hooks/exhaustive-deps` 가 그 deps 를
+  // 요구하므로 순서를 맞추는 것이 정답이고, deps 를 빼는 건 회피다).
+  const blobCleanupRef = useRef([]);
+
+  useEffect(() => () => {
+    // 언마운트 시 blob URL 즉시 회수 + 예약 타이머 취소(누수 방지).
+    blobCleanupRef.current.forEach(({ timerId, url }) => {
+      clearTimeout(timerId);
+      try { URL.revokeObjectURL(url); } catch (_e) { /* 이미 회수됨 */ }
+    });
+    blobCleanupRef.current = [];
+  }, []);
+
+  const triggerDownload = useCallback((blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    const timerId = setTimeout(() => {
+      try { URL.revokeObjectURL(url); } catch (_e) { /* 이미 회수됨 */ }
+      blobCleanupRef.current = blobCleanupRef.current.filter(i => i.timerId !== timerId);
+    }, 5000);
+    blobCleanupRef.current.push({ timerId, url });
+  }, []);
+
   /** 준비 패널의 액션. 실동작이 없는 것은 **조용히 넘기지 않고** 무엇을 해야 하는지 말한다. */
   const handlePrepAction = useCallback(async (action, step) => {
     const kind = action?.kind;
@@ -381,7 +414,49 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       toast('warning', 'Cloudium worker 가 응답하지 않습니다 — excel_rename_gui_v2.exe 를 실행한 뒤 다시 확인하세요.');
       return;
     }
-    if (kind === 'pick_path' || kind === 'open_scm' || kind === 'adopt_suggestion') {
+    if (kind === 'adopt_suggestion') {
+      // 설정에 복사하지 않고 **레지스트리를 갱신**한다 — 설정에 복사하면 그 순간 또
+      // 굳고, 이번엔 설정이 SCM 을 가려 더 안 보인다.
+      if (!scmId) { toast('warning', 'SCM 프로젝트가 매칭되지 않아 교체할 수 없습니다.'); return; }
+      try {
+        const res = await post('/api/docgen/adopt-doc-path', {
+          scm_id: scmId, doc_key: step?.id || '', filename: action?.value || '',
+        });
+        notifyScmRegistryChanged();
+        toast('success', `${step?.label || '문서'} 경로를 교체했습니다: ${res?.new || ''}`);
+        if (prepOpen) loadPrep(prepOpen);
+      } catch (e) {
+        // 403(관리자 전용)은 장애가 아니라 권한 상태다.
+        const msg = String(e?.message || e);
+        toast('error', /403/.test(msg)
+          ? '경로 교체는 관리자만 할 수 있습니다 — 설정 > SCM 에서 변경하세요.'
+          : `경로 교체 실패: ${msg}`);
+      }
+      return;
+    }
+    if (kind === 'export_comment_targets') {
+      const root = analysisResult?.matchedScm?.source_root || '';
+      try {
+        const res = await post('/api/docgen/comment-targets', { source_root: root });
+        if (!res?.ok) { toast('warning', res?.reason || '목록을 만들지 못했습니다.'); return; }
+        const rows = [
+          ['구분', '파일', '함수', '현재 설명'],
+          ...(res.no_comment || []).map(r => ['주석 없음', r.file, r.function, '']),
+          ...(res.empty_comment || []).map(r => ['내용 없음', r.file, r.function, r.current || '']),
+        ];
+        // Excel 이 UTF-8 을 알아보게 BOM 을 붙인다(한글 깨짐 방지).
+        const csv = '﻿' + rows
+          .map(cols => cols.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(','))
+          .join('\r\n');
+        triggerDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }),
+          `comment_targets_${scmId || 'project'}.csv`);
+        toast('success', `주석 보강 대상 ${res.total_targets}건을 내려받았습니다.`);
+      } catch (e) {
+        toast('error', `목록 생성 실패: ${e?.message || e}`);
+      }
+      return;
+    }
+    if (kind === 'pick_path' || kind === 'open_scm') {
       toast('info', `${step?.label || '입력'} 은 설정 > 입력 자료 또는 SCM 등록에서 지정합니다.`);
       return;
     }
@@ -390,38 +465,13 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       return;
     }
     toast('info', `아직 지원하지 않는 동작입니다: ${kind}`);
-  }, [analysisResult, prepOpen, loadPrep, toast]);
+  }, [analysisResult, scmId, prepOpen, loadPrep, toast, triggerDownload]);
 
   const builderRows = BUILDER_ROWS.filter(b => latestByType[b.key]);
 
   // ── 시험 결과 문서 원클릭 생성 ────────────────────────────────────────────
   const [reportState, setReportState] = useState({});      // {key: {busy, error}}
   const [versionEdit, setVersionEdit] = useState({});       // {key: '1.02'} 사용자 직접 입력
-  const blobCleanupRef = useRef([]);
-
-  useEffect(() => () => {
-    // 언마운트 시 blob URL 즉시 회수 + 예약 타이머 취소(누수 방지).
-    blobCleanupRef.current.forEach(({ timerId, url }) => {
-      clearTimeout(timerId);
-      try { URL.revokeObjectURL(url); } catch (_e) { /* 이미 회수됨 */ }
-    });
-    blobCleanupRef.current = [];
-  }, []);
-
-  const triggerDownload = useCallback((blob, filename) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (_e) { /* 이미 회수됨 */ }
-      blobCleanupRef.current = blobCleanupRef.current.filter(i => i.timerId !== timerId);
-    }, 5000);
-    blobCleanupRef.current.push({ timerId, url });
-  }, []);
 
   /**
    * 각 행의 실제 빌드 입력. 폼(저장값+공유입력+기본값)에 버전 폴백을 얹는다.

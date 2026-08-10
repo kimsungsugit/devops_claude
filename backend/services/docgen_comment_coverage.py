@@ -150,6 +150,38 @@ def has_cached(source_root: str, *, max_files: int = 300) -> bool:
         )
 
 
+def list_comment_targets(source_root: str, *, max_files: int = 300) -> Dict[str, Any]:
+    """주석 보강 대상 함수 목록 — **두 갈래를 구분해서** 낸다.
+
+    - `no_comment`  : 주석 자체가 없다.
+    - `empty_comment`: 주석은 있는데 **내용이 비어 있다**(양식 라벨만).
+
+    실측(HDPDM01): 380개 중 **277개가 후자**다. 둘을 합치면 "주석을 다세요" 라는 같은
+    안내가 나가는데, 후자는 이미 주석 블록이 있으므로 **한 줄만 채우면 되는** 훨씬 싼
+    작업이다. 조치 비용이 다르므로 섞지 않는다.
+
+    반환은 파일·함수명을 포함한다 — 건수만으로는 아무도 못 고친다.
+    """
+    res, _meta = _parse_cached(source_root, max_files)
+    funcs = list(res.get("functions") or [])
+    no_comment: List[Dict[str, str]] = []
+    empty_comment: List[Dict[str, str]] = []
+    for f in funcs:
+        name = str(f.get("name") or "")
+        file = str(f.get("file") or "")
+        d = str(f.get("comment_desc") or "").strip()
+        if not d:
+            no_comment.append({"file": file, "function": name})
+        elif not is_substantive_description(d):
+            empty_comment.append({"file": file, "function": name, "current": d[:80]})
+    return {
+        "functions": len(funcs),
+        "no_comment": no_comment,
+        "empty_comment": empty_comment,
+        "total_targets": len(no_comment) + len(empty_comment),
+    }
+
+
 def measure(source_root: str, *, max_files: int = 300) -> Dict[str, Any]:
     """소스 주석 커버리지를 잰다.
 
