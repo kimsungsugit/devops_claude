@@ -168,3 +168,80 @@ def test_safety_related_is_o_for_safety_and_never_invented(module_name):
     assert fn("A") == "O" and fn("D") == "O" and fn("ASIL-B") == "O"
     assert fn("QM") == "X"
     assert fn("") == "" and fn("TBD") == "" and fn(None) == ""
+
+
+# ─── 커버리지 분모 정직성 ────────────────────────────────────────────────────
+
+def test_function_coverage_denominator_is_not_self():
+    """분모를 TC 수로 떨어뜨리면 **언제나 100%** 가 된다.
+
+    실측(KJPDS02_PV, 2026-08-11): 저장소 `docs/uds_function_swcom_override.json`
+    251개로 함수 목록이 잘린 뒤 251/251 = "함수 커버리지 100.0%" 로 보고됐다.
+    정본 SwUTS 는 1,014 함수 — **77.8% 를 버리고 완전 커버라고 말한 것**이다.
+    """
+    from generators.suts import generate_suts_quality_report
+
+    units = [{"fid": "f1", "name": "a", "input_vars": ["x"], "output_vars": [], "component": "C"}]
+    seqs = {"f1": [{"seq_num": 1, "inputs": {"x": 1}, "expected": {}}]}
+
+    got = generate_suts_quality_report(units, seqs, 100)
+    assert got["function_coverage_pct"] == 1.0, "1/100 은 1% 다 — 자기 자신을 분모로 쓰면 100%"
+
+    # 소스 함수 수를 모르면 **미측정**이다. 0% 도 100% 도 아니다.
+    unmeasured = generate_suts_quality_report(units, seqs, 0)
+    assert unmeasured["function_coverage_pct"] is None
+
+
+def test_unmeasured_coverage_is_not_drawn_as_zero():
+    """미측정을 `0%` 로 내면 "한 함수도 안 덮였다" 로 읽힌다 — 지표를 아예 내지 않는다."""
+    from generators.suts import generate_suts_quality_report
+    from workflow.quality.evaluator import evaluate_suts
+
+    units = [{"fid": "f1", "name": "a", "input_vars": ["x"], "output_vars": [], "component": "C"}]
+    seqs = {"f1": [{"seq_num": 1, "inputs": {"x": 1}, "expected": {}}]}
+
+    measured = evaluate_suts(generate_suts_quality_report(units, seqs, 100))
+    unmeasured = evaluate_suts(generate_suts_quality_report(units, seqs, 0))
+    assert len(unmeasured) == len(measured) - 1, "미측정일 때 커버리지 지표가 빠져야 한다"
+
+
+def test_override_map_is_not_used_as_a_filter():
+    """`docs/uds_function_swcom_override.json` 은 **보강용**이다.
+
+    ⚠ 예전엔 이 목록에 없는 함수를 전부 버렸다. 저장소 파일이라 프로젝트가 바뀌어도
+      같은 251개로 자른다 — 정본 1,014 중 782개(77.8%)가 침묵 탈락했다.
+    구조 검사다: 필터 컴프리헨션이 되살아나면 깨진다.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "generators" / "suts.py"
+    tree = ast.parse(src.read_text(encoding="utf-8", errors="ignore"))
+
+    # `function_details = {… _ovr_names …}` — override 목록으로 좁히는 **재대입**이
+    # 결함의 실체다. 문자열 비교는 들여쓰기 한 칸에도 깨지므로 AST 로 본다.
+    #
+    # ⚠ 호출자가 준 `target_function_names`(→ `target_name_set`) 로 좁히는 것은
+    #   **정당한 필터**다("이 함수들만 만들어 달라"는 명시적 요청). 그건 잡지 않는다.
+    def _mentions_override(node: ast.AST) -> bool:
+        return any(
+            isinstance(n, ast.Name) and n.id in ("_ovr_names", "_ovr_names_lower")
+            for n in ast.walk(node)
+        )
+
+    narrowing = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "function_details" for t in node.targets)
+        and isinstance(node.value, ast.DictComp)
+        and _mentions_override(node.value)
+    ]
+    assert not narrowing, (
+        "override 목록으로 function_details 를 좁히고 있다 — "
+        f"line {[n.lineno for n in narrowing]}. override 는 보강용이지 필터가 아니다."
+    )
+
+    # 보충 기능 자체는 남아 있어야 한다(필터를 걷어내며 같이 지우면 안 된다).
+    body = src.read_text(encoding="utf-8", errors="ignore")
+    assert "uds_function_swcom_override.json" in body
+    assert "_ovr_only_names" in body

@@ -2114,8 +2114,15 @@ def generate_suts_quality_report(
         comp = (u.get("component") or "Unknown").split("\n")[0]
         components[comp] = components.get(comp, 0) + 1
 
-    src_total = total_source_functions or total_tc
-    func_coverage_pct = round(total_tc / max(src_total, 1) * 100, 1)
+    # ⚠ 분모를 TC 수로 떨어뜨리지 않는다. 예전엔 `total_source_functions or total_tc`
+    #   라, 소스 함수 수를 못 받으면 **자기 자신을 분모로** 써서 언제나 100.0% 가
+    #   나왔다. 실측(KJPDS02_PV)에서는 함수 목록이 251개로 잘린 뒤 251/251 = 100% 로
+    #   보고됐다 — 정본 1,014 함수 중 77.8% 를 버리고 "완전 커버" 라고 말한 것이다.
+    #   재지 못했으면 **`None`**(미측정)이지 100% 가 아니다.
+    src_total = int(total_source_functions or 0)
+    func_coverage_pct: Optional[float] = (
+        round(total_tc / src_total * 100, 1) if src_total > 0 else None
+    )
     io_coverage_pct = round(with_io / max(total_tc, 1) * 100, 1)
 
     return {
@@ -2384,8 +2391,22 @@ def generate_suts(
 
     _progress(25, f"소스 파싱 완료 - {len(function_details)}개 함수 발견")
 
-    # 함수 단위 override 기반 필터 (레퍼런스에 있는 함수만 포함)
-    # override가 있으면 verify=X 필터보다 정확하므로 우선 적용
+    # 함수 단위 override 맵 — **보강·보충 전용**. 필터로 쓰지 않는다.
+    #
+    # ⚠ 예전엔 이 목록에 **없는 함수를 전부 버렸다**("레퍼런스에 있는 함수만 포함").
+    #   그 결과가 실측으로 드러났다(2026-08-11, KJPDS02_PV):
+    #     · 소스 파싱 900~1,153 함수 → override 251개로 잘림 → TC 251개
+    #     · 정본 SwUTS 는 1,014 함수. 그중 **782개(77.8%)가 목록에 없어 침묵 탈락**
+    #     · override 251개 중 정본에 실재하는 건 223개뿐 — 28개는 없는 함수다
+    #   이 파일은 **저장소**(`docs/`)에 있어 프로젝트가 바뀌어도 같은 251개로 자른다.
+    #   과거 어느 스냅샷의 목록이 지금 프로젝트의 시험 범위를 정하고 있었다.
+    #
+    #   게다가 커버리지 분모가 **필터 후 값**이라 언제나 251/251 = "함수 커버리지
+    #   100.0%" 로 보고됐다 — 77.8% 를 버리고 100% 라고 말하는 fail-open 이다.
+    #
+    #   그래서 필터를 걷어내고 **탈락 대신 보충만** 한다(목록에 있는데 소스에 없는
+    #   함수는 종전대로 빈 엔트리로 추가한다 — 그건 정보를 더하지 빼지 않는다).
+    _ovr_only_names: List[str] = []
     try:
         import json as _json
         for _ovr_path in [
@@ -2398,13 +2419,14 @@ def generate_suts(
                 _ovr_names_lower = {n.lower() for n in _ovr_names}
                 if _ovr_names:
                     before2 = len(function_details)
-                    function_details = {
-                        fid: info for fid, info in function_details.items()
+                    # ⚠ 여기서 걸러내지 않는다(위 주석 참조). 목록 밖 함수도 그대로 둔다.
+                    _in_list = sum(
+                        1 for info in function_details.values()
                         if isinstance(info, dict) and (
                             str(info.get("name") or "") in _ovr_names
                             or str(info.get("name") or "").lower() in _ovr_names_lower
                         )
-                    }
+                    )
                     # override에 있지만 파서에 없는 함수를 빈 엔트리로 추가
                     _existing_names = {str(info.get("name") or "").lower() for info in function_details.values() if isinstance(info, dict)}
                     _added = 0
@@ -2427,7 +2449,18 @@ def generate_suts(
                                 "module_name": f"SwCom_{_sc:02d}",
                             }
                             _added += 1
-                    _progress(28, f"override 필터: {before2} → {len(function_details)}개 (+{_added} 보충)")
+                            _ovr_only_names.append(_ovr_name)
+                    # 침묵 금지 — 목록과 소스가 얼마나 어긋나는지 그대로 보고한다.
+                    _progress(
+                        28,
+                        f"override 보강: 소스 {before2}개 중 목록 일치 {_in_list}개 "
+                        f"(+{_added} 보충 → {len(function_details)}개). 필터 아님",
+                    )
+                    _logger.info(
+                        "uds override: source=%d in_list=%d added=%d total=%d "
+                        "(목록 %d개 — 필터로 쓰지 않는다)",
+                        before2, _in_list, _added, len(function_details), len(_ovr_names),
+                    )
                 break
     except Exception:
         pass
@@ -2931,7 +2964,10 @@ def generate_suts_validation_report(
             f"| 총 출력 변수 | {qr.get('total_output_vars', 0)} |",
             f"| I/O 보유 TC | {qr.get('with_io_count', 0)} ({qr.get('io_coverage_pct', 0)}%) |",
             f"| 로직 보유 TC | {qr.get('with_logic_count', 0)} |",
-            f"| 함수 커버리지 | {qr.get('function_coverage_pct', 0)}% |",
+            # 미측정은 `0%` 가 아니라 `—` 다. 0% 로 그리면 "한 함수도 안 덮였다" 로 읽힌다.
+            "| 함수 커버리지 | "
+            + (f"{qr['function_coverage_pct']}%" if qr.get("function_coverage_pct") is not None else "— (미측정)")
+            + f" (소스 함수 {qr.get('total_source_functions') or '—'}개 기준) |",
             "",
         ])
         if qr.get("gen_method_distribution"):
@@ -2950,7 +2986,9 @@ def generate_suts_validation_report(
         ("시퀀스 존재", seq_count > 0),
         ("I/O 없는 TC < 50%", empty_io <= tc_count * 0.5 if tc_count else True),
         ("TC당 평균 시퀀스 >= 2", stats.get("avg_seq_per_tc", 0) >= 2 if tc_count else True),
-        ("함수 커버리지 > 0", qr.get("function_coverage_pct", 0) > 0 if qr else tc_count > 0),
+        # ⚠ 미측정(None)을 통과로 접지 않는다 — 못 잰 것을 "이상 없음" 으로 만들면
+        #   게이트가 fail-open 이 된다. TC 가 있으면 그건 그것대로 별도 항목이 본다.
+        ("함수 커버리지 측정됨", (qr or {}).get("function_coverage_pct") is not None),
     ]
     passed = sum(1 for _, ok in gate_items if ok)
 

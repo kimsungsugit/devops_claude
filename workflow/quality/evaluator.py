@@ -183,9 +183,14 @@ def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
     total = _safe_float(quality_report, "total_test_cases")
 
     # 함수 커버리지
-    metrics.append(
-        _metric("function_coverage_pct", _safe_float(quality_report, "function_coverage_pct"), threshold=80.0),
-    )
+    # ⚠ 미측정(`None`)은 **지표를 내지 않는다**. `_safe_float` 는 None 을 `0.0` 으로
+    #   접는데, 여기서 0% 로 그리면 "한 함수도 안 덮였다" 로 읽힌다 — 못 잰 것과
+    #   0인 것은 다르다. 생성기는 소스 함수 수를 모르면 `None` 을 준다(fail-open 방지).
+    if isinstance(quality_report, dict) and quality_report.get("function_coverage_pct") is not None:
+        metrics.append(
+            _metric("function_coverage_pct",
+                    _safe_float(quality_report, "function_coverage_pct"), threshold=80.0),
+        )
 
     # I/O 커버리지
     metrics.append(
