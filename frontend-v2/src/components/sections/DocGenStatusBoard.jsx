@@ -368,6 +368,10 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         scm_id: scmId || '',
         source_root: analysisResult?.matchedScm?.source_root || '',
         doc_paths: loadDocPaths() || {},
+        // UDS 는 Jenkins 빌드 캐시가 있어야 시작한다 — 게이트가 그걸 확인하려면
+        // 화면이 보고 있는 job/캐시를 알아야 한다.
+        job_url: job?.url || '',
+        cache_root: analysisResult?.cacheRoot || '',
       });
       // 200 + error 를 성공으로 삼지 않는다.
       if (res?.error) {
@@ -383,7 +387,8 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         [docType]: { loading: false, error: e?.message || '준비 상태를 확인하지 못했습니다.' },
       }));
     }
-  }, [scmId, analysisResult, loadQuestions]);
+    // `job` 은 빌드 캐시 확인에 쓰인다 — 빼면 프로젝트를 바꿔도 옛 job 으로 판정한다.
+  }, [scmId, analysisResult, job, loadQuestions]);
 
   const togglePrep = useCallback((docType) => {
     if (prepOpen === docType) { setPrepOpen(null); return; }

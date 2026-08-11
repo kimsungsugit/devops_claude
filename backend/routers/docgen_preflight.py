@@ -83,6 +83,19 @@ _TEMPLATE_KEY_BY_DOC = {
 # 시험 **결과** 문서의 양식은 SCM 레지스트리가 아니라 `config/swut_meta.json` 의
 # `template_paths` 가 프로젝트별로 관리한다(정본을 옮기면 갈라진다). 여기 있는 것은
 # **어느 키를 봐야 하는가** 뿐이다.
+# 생성기가 **실제로 여는 형식**. UDS 는 python-docx, 시험 규격서는 openpyxl 이다.
+#
+# ⚠ 회사 표준 폴더에는 같은 이름의 `.xlsm` 과 `.docx` 가 **둘 다** 있다(실측). 그래서
+#   `.docx` 를 고르기 쉬운데, 시험 규격서 생성기는 그걸 열다가
+#   `InvalidFileException: openpyxl does not support .docx` 로 죽는다 — 실제로 그렇게
+#   실패했다. 게이트가 **생성 전에** 잡아야 하는 종류의 결함이다.
+_TEMPLATE_EXPECTED_EXT = {
+    "uds": (".docx",),
+    "sts": (".xlsm", ".xlsx"),
+    "suts": (".xlsm", ".xlsx"),
+    "sits": (".xlsm", ".xlsx"),
+}
+
 _TEST_REPORT_TEMPLATE_KEY = {
     "sutr": "sutr_template",
     "sitr": "swit_sitr_template",
@@ -100,6 +113,10 @@ class PreflightRequest(BaseModel):
     # 시험 결과 3종(SUTR/SITR/통합)의 빌더 폼. 프론트 `missingRequiredFields` 판정을
     # 여기로 흡수해 **판정이 두 벌이 되지 않게** 한다(이 저장소의 반복 결함).
     form: Dict[str, Any] = Field(default_factory=dict)
+    # UDS 는 Jenkins **빌드 캐시**가 있어야 시작한다(`helpers/uds.py:1504`).
+    job_url: str = ""
+    cache_root: str = ""
+    build_selector: str = "lastSuccessfulBuild"
 
 
 def _step(step_id: str, phase: str, state: str, label: str, **extra: Any) -> Dict[str, Any]:
@@ -292,9 +309,57 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 extra["reason"] = "파일이 없습니다 — 경로가 바뀌었을 수 있습니다"
                 extra["actions"] = [{"kind": "pick_path",
                                      "target": _INPUT_TO_DOC_KEY.get(key, key)}]
+        # 템플릿은 **형식까지** 맞아야 한다 — 존재만으로는 부족하다.
+        if key == _req.IN_TEMPLATE and state == S_OK:
+            want = _TEMPLATE_EXPECTED_EXT.get(str(req.doc_type or "").lower(), ())
+            ext = Path(path).suffix.lower()
+            if want and ext not in want:
+                state = S_MISSING
+                extra["reason"] = (
+                    f"생성기가 {'/'.join(want)} 를 여는데 {ext} 가 등록됐습니다 — "
+                    "같은 이름의 다른 형식 파일을 확인하세요"
+                )
+                # 같은 이름의 올바른 확장자 파일이 **실재할 때만** 제안한다.
+                for cand_ext in want:
+                    cand = Path(path).with_suffix(cand_ext)
+                    if _probe_path(resolver, str(cand))["state"] == S_OK:
+                        state = S_STALE
+                        extra["suggestion"] = cand.name
+                        extra["actions"] = [{"kind": "adopt_suggestion", "value": cand.name}]
+                        break
+
         steps.append(_step(key, "input", state, label, required=is_required,
                            effect=optional.get(key, ""), **extra))
         available[key] = (state == S_OK)
+
+    # ── 1-a. UDS 는 Jenkins **빌드 캐시**가 있어야 시작한다 ───────────────────
+    #
+    # `_uds_generate_from_paths`(`backend/helpers/uds.py:1504`)가 **맨 첫 줄에서**
+    # `_resolve_cached_build_root` 를 부르고 없으면 `404: cached build not found` 로
+    # 즉시 죽는다 — `source_only=True` 여도 마찬가지다. 실측: 소스·요구문서·템플릿이
+    # 다 갖춰져 있어도 **0.0초 만에** 실패했다. 게이트가 이 전제를 몰라 "준비 완료" 로
+    # 그릴 수 있었다.
+    # ⚠ STS/SUTS/SITS 는 이 전제가 없다(같은 세션에서 캐시 없이 생성 성공).
+    if req.doc_type == "uds":
+        if not req.job_url:
+            steps.append(_step(
+                "build_cache", "input", S_NEEDED, "Jenkins 빌드 캐시", required=True,
+                reason="프로젝트(빌드)를 먼저 선택해야 합니다",
+            ))
+        else:
+            try:
+                from backend.helpers.jenkins import _resolve_cached_build_root
+                build_root = _resolve_cached_build_root(
+                    req.job_url, req.cache_root, req.build_selector)
+            except Exception as exc:  # noqa: BLE001 — 캐시 해석 계열이 광범위
+                build_root = None
+                _logger.warning("preflight: 빌드 캐시 확인 실패 — %s", exc)
+            steps.append(_step(
+                "build_cache", "input", S_OK if build_root else S_MISSING,
+                "Jenkins 빌드 캐시", required=True, value=str(build_root or ""),
+                reason="" if build_root else (
+                    "내려받은 빌드 산출물이 없습니다 — 빌드를 선택해 동기화한 뒤 다시 시도하세요"),
+            ))
 
     # ── 1-b. 사슬이 참조하는 나머지 입력도 **확인은 한다** ────────────────────
     #

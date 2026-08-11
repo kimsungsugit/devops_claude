@@ -275,13 +275,14 @@ def test_ai_source_is_resolved_from_config(tmp_path: Path) -> None:
     assert "ai" in desc
 
 
-@pytest.mark.parametrize("doc_type,key", [
-    ("uds", "uds_template"),
-    ("sts", "sts_template"),
-    ("suts", "suts_template"),
-    ("sits", "sits_template"),
+@pytest.mark.parametrize("doc_type,key,ext", [
+    # ⚠ 확장자가 문서마다 다르다 — UDS 는 python-docx, 시험 규격서는 openpyxl.
+    ("uds", "uds_template", ".docx"),
+    ("sts", "sts_template", ".xlsm"),
+    ("suts", "suts_template", ".xlsm"),
+    ("sits", "sits_template", ".xlsm"),
 ])
-def test_template_is_per_document(doc_type: str, key: str, tmp_path: Path) -> None:
+def test_template_is_per_document(doc_type: str, key: str, ext: str, tmp_path: Path) -> None:
     """템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
 
     예전엔 `ScmLinkedDocs` 에 템플릿 필드가 아예 없어서 프론트가 설정의 공용
@@ -292,7 +293,7 @@ def test_template_is_per_document(doc_type: str, key: str, tmp_path: Path) -> No
 
     assert key in ScmLinkedDocs.model_fields, f"{key} 필드가 없다"
 
-    tpl = tmp_path / f"{key}.xlsm"
+    tpl = tmp_path / f"{key}{ext}"
     tpl.write_bytes(b"x")
     data = _post({"doc_type": doc_type, "source_root": str(tmp_path),
                   "doc_paths": {key: str(tpl)}})
@@ -300,6 +301,88 @@ def test_template_is_per_document(doc_type: str, key: str, tmp_path: Path) -> No
     assert step is not None
     assert step["state"] == "ok", f"{doc_type} 이 {key} 를 못 찾았다"
     assert step["value"] == str(tpl)
+
+
+def test_uds_requires_a_cached_build(tmp_path: Path) -> None:
+    """UDS 는 Jenkins **빌드 캐시**가 있어야 시작한다.
+
+    `_uds_generate_from_paths`(`helpers/uds.py:1504`)가 맨 첫 줄에서 캐시를 찾고 없으면
+    `404: cached build not found` 로 즉시 죽는다 — `source_only=True` 여도 마찬가지다.
+    실측: 소스·요구문서·템플릿이 다 갖춰져 있어도 **0.0초 만에** 실패했다.
+    게이트가 이 전제를 모르면 '준비 완료' 라고 그린다.
+    """
+    data = _post({"doc_type": "uds", "source_root": str(tmp_path)})
+    step = _step(data, "build_cache")
+    assert step is not None, "UDS 에 빌드 캐시 단계가 없다"
+    assert step["required"] is True
+    assert step["state"] != "ok"
+    assert data["verdict"] in ("blocked", "needs_decision")
+
+
+@pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
+def test_other_docs_do_not_require_a_build(doc_type: str, tmp_path: Path) -> None:
+    """STS/SUTS/SITS 는 그 전제가 없다 — 같은 세션에서 캐시 없이 생성에 성공했다.
+
+    없는 조건을 요구하면 만들 수 있는 문서를 못 만들게 막는다.
+    """
+    data = _post({"doc_type": doc_type, "source_root": str(tmp_path)})
+    assert _step(data, "build_cache") is None
+
+
+def test_template_format_must_match_the_generator(tmp_path: Path) -> None:
+    """템플릿은 **존재만으로 부족하다** — 생성기가 여는 형식이어야 한다.
+
+    실측: 회사 표준 폴더에 같은 이름의 `.xlsm` 과 `.docx` 가 **둘 다** 있어서 `.docx` 를
+    고르기 쉬운데, 시험 규격서 생성기(openpyxl)는 그걸 열다가
+    `InvalidFileException: openpyxl does not support .docx` 로 죽는다. 실제로 그렇게
+    실패했고, 게이트는 그걸 **생성 전에** 잡아야 한다.
+    """
+    wrong = tmp_path / "spec.docx"
+    wrong.write_bytes(b"x")
+    data = _post({"doc_type": "suts", "source_root": str(tmp_path),
+                  "doc_paths": {"suts_template": str(wrong)}})
+    step = _step(data, "template")
+    assert step is not None
+    assert step["state"] != "ok", "형식이 틀린 템플릿을 통과시켰다"
+    assert ".xlsm" in str(step.get("reason") or ""), "어떤 형식을 원하는지 말하지 않는다"
+
+
+def test_template_suggestion_only_when_the_file_exists(tmp_path: Path) -> None:
+    """같은 이름의 올바른 형식이 **실재할 때만** 제안한다 — 없는 파일을 권하면 안 된다."""
+    wrong = tmp_path / "spec.docx"
+    wrong.write_bytes(b"x")
+    # (1) 대체본이 없다 → 제안 없음
+    d1 = _post({"doc_type": "suts", "source_root": str(tmp_path),
+                "doc_paths": {"suts_template": str(wrong)}})
+    s1 = _step(d1, "template")
+    assert s1 is not None and "suggestion" not in s1
+
+    # (2) 대체본을 만들어 두면 → 그 파일명을 제안
+    (tmp_path / "spec.xlsm").write_bytes(b"x")
+    d2 = _post({"doc_type": "suts", "source_root": str(tmp_path),
+                "doc_paths": {"suts_template": str(wrong)}})
+    s2 = _step(d2, "template")
+    assert s2 is not None
+    assert s2["state"] == "stale_path"
+    assert s2["suggestion"] == "spec.xlsm"
+    assert any(a["kind"] == "adopt_suggestion" for a in (s2.get("actions") or []))
+
+
+def test_uds_template_wants_docx(tmp_path: Path) -> None:
+    """UDS 는 python-docx 라 `.docx` 가 맞다 — 시험문서와 반대다."""
+    ok_tpl = tmp_path / "unit.docx"
+    ok_tpl.write_bytes(b"x")
+    data = _post({"doc_type": "uds", "source_root": str(tmp_path),
+                  "doc_paths": {"uds_template": str(ok_tpl)}})
+    step = _step(data, "template")
+    assert step is not None and step["state"] == "ok"
+
+    bad = tmp_path / "unit.xlsm"
+    bad.write_bytes(b"x")
+    data2 = _post({"doc_type": "uds", "source_root": str(tmp_path),
+                   "doc_paths": {"uds_template": str(bad)}})
+    step2 = _step(data2, "template")
+    assert step2 is not None and step2["state"] != "ok"
 
 
 def test_shared_template_still_works_as_fallback(tmp_path: Path) -> None:
