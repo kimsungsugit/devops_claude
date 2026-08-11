@@ -2888,7 +2888,11 @@ def local_suts_generate(
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    #   중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    #   숫자 복제이므로 `test_docgen_test_materials.py` 가 생성기 상수와 대조한다.
+    max_sequences: int = Form(24),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -2992,7 +2996,11 @@ def local_suts_generate_stream(
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    #   중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    #   숫자 복제이므로 `test_docgen_test_materials.py` 가 생성기 상수와 대조한다.
+    max_sequences: int = Form(24),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -3114,7 +3122,11 @@ def local_suts_generate_async(
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    #   중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    #   숫자 복제이므로 `test_docgen_test_materials.py` 가 생성기 상수와 대조한다.
+    max_sequences: int = Form(24),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -4539,6 +4551,10 @@ def api_open_folder(req: OpenFolderRequest) -> Dict[str, Any]:
     ]
     if not is_under_any(target, allowed_roots):
         raise HTTPException(status_code=403, detail="path not allowed")
+    # 산출물 경로는 **파일**로 온다(생성 응답의 `output_path`). 파일을 404 로 튕기면
+    # "폴더 열기" 가 항상 실패하므로, 파일이면 담고 있는 폴더를 연다.
+    if target.is_file():
+        target = target.parent
     if not target.exists() or not target.is_dir():
         raise HTTPException(status_code=404, detail="folder not found")
     try:

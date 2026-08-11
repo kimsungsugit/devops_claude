@@ -284,6 +284,27 @@ def test_sits_endpoints_accept_max_flows() -> None:
     assert src.count('**({"max_flows": max_flows} if max_flows is not None else {})') == 3
 
 
+def test_suts_api_default_matches_generator() -> None:
+    """SUTS 시퀀스 상한의 API 기본값이 **생성기 기본값과 같아야** 한다.
+
+    예전엔 API 가 6 이라 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    중 6개만 만들었고, 화면은 그 사실을 말하지 않았다. 숫자를 라우터에 복제했으므로
+    생성기 상수와 갈라지지 않게 여기서 대조한다.
+    """
+    import re
+    from pathlib import Path as _P
+
+    from generators.suts import _DEFAULT_SEQ_COUNT
+
+    repo = _P(__file__).resolve().parents[2]
+    for rel in ("backend/routers/jenkins.py", "backend/routers/local.py"):
+        src = (repo / rel).read_text(encoding="utf-8", errors="ignore")
+        for got in re.findall(r"max_sequences: int = Form\((\d+)\)", src):
+            assert int(got) == _DEFAULT_SEQ_COUNT, (
+                f"{rel}: API 기본 {got} ≠ 생성기 기본 {_DEFAULT_SEQ_COUNT}"
+            )
+
+
 def test_max_flows_is_marked_adjustable() -> None:
     """게이트가 "조정할 수 없습니다" 라고 말하면 안 된다 — 이제 받는다."""
     from backend.services.docgen_requirements import requirements_for

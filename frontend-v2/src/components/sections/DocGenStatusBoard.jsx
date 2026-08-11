@@ -322,6 +322,58 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     }
   }, [expanded, latestByType, detail, scmId, analysisResult]);
 
+  /** 산출물이 **어디에 저장됐는지** 를 화면에서 바로 열게 한다(경로만 보여주면 찾아가야 한다). */
+  const handleOpenFolder = useCallback(async (path) => {
+    if (!path) { toast('warning', '저장 경로를 알 수 없습니다.'); return; }
+    try {
+      await post('/api/local/open-folder', { path });
+    } catch (e) {
+      // 서버가 못 열면 경로라도 알려준다 — 조용히 넘어가면 사용자가 뭘 해야 할지 모른다.
+      toast('error', `폴더를 열지 못했습니다: ${e?.message || e} — 경로: ${path}`);
+    }
+  }, [toast]);
+
+  /**
+   * 산출물을 **사용자가 고른 폴더**로 내보낸다.
+   *
+   * 생성 위치 자체는 신뢰 루트 하위로 confine 돼 있어 바꿀 수 없다(경계이지 결함이
+   * 아니다 — `backend/helpers/session.py:95`). 그래서 "경로 선택" 은 완료된 파일의
+   * 내보내기로 푼다. 폴더 선택은 이 저장소가 이미 쓰는 worker 네이티브 다이얼로그다.
+   */
+  const handleSaveAs = useCallback(async (path) => {
+    if (!path) { toast('warning', '저장할 파일 경로를 알 수 없습니다.'); return; }
+    let dest = '';
+    try {
+      const picked = await post('/api/file-mode/browse-file', {
+        kind: 'directory', title: '문서를 저장할 폴더 선택',
+      });
+      dest = picked?.path || '';
+    } catch (e) {
+      toast('error', `폴더 선택 실패: ${e?.message || e}`);
+      return;
+    }
+    if (!dest) return;  // 사용자 취소 — 조용히 끝낸다
+
+    const send = (overwrite) => post('/api/docgen/save-as', { src_path: path, dest_dir: dest, overwrite });
+    try {
+      const r = await send(false);
+      toast('success', `저장했습니다: ${r?.path || dest}`);
+    } catch (e) {
+      // 같은 이름이 있으면 **묻고** 덮는다. 조용한 덮어쓰기는 되돌릴 수 없다.
+      if (e?.code === 'dest_exists') {
+        if (!window.confirm(`${e.message}\n덮어쓸까요?`)) return;
+        try {
+          const r2 = await send(true);
+          toast('success', `덮어썼습니다: ${r2?.path || dest}`);
+        } catch (e2) {
+          toast('error', `저장 실패: ${e2?.message || e2}`);
+        }
+        return;
+      }
+      toast('error', `저장 실패: ${e?.message || e}`);
+    }
+  }, [toast]);
+
   const handleGenerate = useCallback((docType) => {
     if (!job?.url) { toast('warning', '프로젝트를 먼저 선택하세요.'); return; }
     if (typeof onGenerate === 'function') onGenerate(docType);
@@ -656,6 +708,9 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                     onToggle={() => toggleExpand(row.key)}
                     onGenerate={() => handleGenerate(row.key)}
                     disabled={!!genState?.docType}
+                    lastResult={genResult?.docType === row.key ? genResult : null}
+                    onOpenFolder={handleOpenFolder}
+                    onSaveAs={handleSaveAs}
                     prepIsOpen={prepOpen === row.key}
                     prepState={prep[row.key]}
                     onTogglePrep={() => togglePrep(row.key)}
@@ -830,9 +885,11 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
  * 다르다. 한 행에 나란히 두면 "지금 만들면 어떻게 되는가" 와 "왜 이 점수인가" 를 같은
  * 자리에서 볼 수 있다. 동시에 펼쳐도 무방하다(서로 다른 `<tr>`).
  */
-function FragmentRow({
+/** @internal 테스트에서 단독 렌더하려고 내보낸다(보드 전체 마운트는 이 행을 못 겨눈다). */
+export function FragmentRow({
   row, run, busy, genState, verdict, isOpen, detail, onToggle, onGenerate, disabled,
   prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction,
+  lastResult, onOpenFolder, onSaveAs,
 }) {
   const pct = busy ? Number(genState?.progress || 0) : null;
   return (
@@ -883,6 +940,26 @@ function FragmentRow({
           )}
         </td>
       </tr>
+      {lastResult?.success && (
+        <tr>
+          <td colSpan={6} style={{ background: 'var(--bg)', fontSize: 'var(--text-xs)' }}>
+            {/* "생성 완료" 만으로는 **파일을 찾을 수 없다** — 저장 위치를 같은 자리에서 말한다. */}
+            <span style={{ color: 'var(--text-muted)' }}>저장 위치 </span>
+            {lastResult.path ? (
+              <>
+                <code style={{ wordBreak: 'break-all' }}>{lastResult.path}</code>
+                <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 8 }}
+                  onClick={() => onOpenFolder?.(lastResult.path)}>폴더 열기</button>
+                <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
+                  onClick={() => onSaveAs?.(lastResult.path)}>다른 폴더에 저장</button>
+              </>
+            ) : (
+              /* 서버가 경로를 안 준 경우 — 빈칸으로 두면 "저장 안 됨" 으로 오독한다. */
+              <em>서버가 경로를 알려주지 않았습니다 (생성은 완료).</em>
+            )}
+          </td>
+        </tr>
+      )}
       {prepIsOpen && (
         <tr>
           <td colSpan={6} style={{ background: 'var(--bg)' }}>

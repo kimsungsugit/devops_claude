@@ -3383,7 +3383,9 @@ def jenkins_suts_generate_async(
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종 중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    max_sequences: int = Form(24),
 ) -> Dict[str, Any]:
     from suts_generator import generate_suts
 

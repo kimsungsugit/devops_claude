@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 from backend.dependencies.admin import require_admin
 from backend.services import docgen_comment_coverage as _cov
 from backend.services import docgen_field_sources as _chain
+from backend.services import docgen_output as _out
 from backend.services import docgen_requirements as _req
 from backend.services import docgen_test_materials as _tm
 
@@ -873,3 +874,49 @@ def docgen_measure_source(req: MeasureSourceRequest) -> Dict[str, Any]:
     if str(req.doc_type or "").strip().lower() in ("sits", "suts"):
         out["test_materials"] = _tm.measure(req.source_root, sds_path=req.sds_path)
     return out
+
+
+class SaveAsRequest(BaseModel):
+    """생성된 산출물을 사용자가 고른 폴더로 내보낸다.
+
+    생성 위치 자체는 신뢰 루트 하위로 confine 돼 있어 바꿀 수 없다(경계). 그래서
+    "경로 선택" 은 **완료된 파일의 내보내기**로 푼다 — 근거는 `docgen_output` docstring.
+    """
+
+    src_path: str = Field(..., description="생성 응답의 output_path")
+    dest_dir: str = Field(..., description="사용자가 고른 폴더 (이미 존재해야 함)")
+    overwrite: bool = False
+
+
+# 파일시스템에 쓰는 동작이라 `adopt-doc-path` 와 같은 등급으로 막는다. 폴더 선택
+# (`/api/file-mode/browse-file`)이 이미 admin 전용이므로 여기만 열어 두면 비대칭이다.
+@router.post("/api/docgen/save-as", dependencies=[Depends(require_admin)])
+def docgen_save_as(req: SaveAsRequest) -> Dict[str, Any]:
+    """산출물을 지정 폴더로 복사한다. 거절 사유는 `code` 로 구분 가능하게 돌려준다."""
+    import shutil
+
+    # `local._allowed_request_roots()` 와 **같은 목록**이어야 한다("폴더는 열리는데
+    # 저장은 거절" 같은 모순 방지). 라우터끼리 얽지 않는 대신 드리프트 가드로 묶는다
+    # (`test_docgen_output.py::test_src_roots_match_local_router`).
+    _repo_root = Path(__file__).resolve().parents[2]
+
+    try:
+        src, dest = _out.resolve_save_target(
+            req.src_path,
+            req.dest_dir,
+            allowed_src_roots=_out.default_src_roots(_repo_root),
+            overwrite=bool(req.overwrite),
+        )
+    except _out.SaveTargetError as exc:
+        # 400 으로 내되 `code` 를 실어 화면이 "덮어쓸까요?" 같은 후속을 물을 수 있게 한다.
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc
+
+    try:
+        shutil.copy2(str(src), str(dest))
+    except Exception as exc:
+        _logger.warning("docgen save-as copy failed: %s -> %s: %s", src, dest, exc)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "copy_failed", "message": f"복사 실패: {exc}"},
+        ) from exc
+    return {"ok": True, "path": str(dest), "folder": str(dest.parent)}

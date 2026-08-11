@@ -118,6 +118,11 @@ async function _toError(res) {
       code = j.error.code || code;
     } else if (typeof j.detail === 'string') {
       msg = j.detail;
+    } else if (j?.detail && typeof j.detail === 'object') {
+      // FastAPI 는 `detail` 에 dict 를 실을 수 있다(`{code, message}`). 문자열만 보면
+      // 사용자에게 **원시 JSON 이 그대로** 뜨고, 호출부는 사유로 분기할 수 없다.
+      if (typeof j.detail.message === 'string') msg = j.detail.message;
+      if (typeof j.detail.code === 'string') code = j.detail.code;
     } else if (typeof j.message === 'string') {
       msg = j.message;
     } else if (j?.error?.code) {

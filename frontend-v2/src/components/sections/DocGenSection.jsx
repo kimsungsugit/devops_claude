@@ -5,6 +5,7 @@ import { isAbortError } from '../../impactPoll.js';
 import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
 import { persistDocPaths, useScmFallback } from '../../docGenHelpers.js';
 import { loadDocPaths, loadDocGenCaps, useDocPathsSync } from '../../sharedInputs.js';
+import { extractOutputPath } from '../../docgenOutputPath.js';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -184,7 +185,9 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
 
       setGenProgress(100);
       setGenStage(`${label} 생성 완료`);
-      setGenResult({ success: true, path: progress?.output_path || progress?.xlsm_path || '' });
+      // ⚠ `docType` 을 함께 싣는다 — 보드가 **어느 행에** 저장 경로를 붙일지 알아야 한다.
+      //   완료 시 `generating` 이 null 이 되므로 결과만으로는 문서를 특정할 수 없다.
+      setGenResult({ success: true, path: extractOutputPath(progress), docType });
       toast('success', `${label} 생성 완료`);
     } catch (e) {
       // 취소는 사용자 오류가 아니다 — 실패로 보고하지 않는다. 다만 조용히 return 만 하면
@@ -196,7 +199,7 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       }
       toast('error', `${label} 생성 실패: ${e.message}`);
       setGenStage(`오류: ${e.message}`);
-      setGenResult({ success: false, error: e.message });
+      setGenResult({ success: false, error: e.message, docType });
     } finally {
       setGenerating(null);
     }
