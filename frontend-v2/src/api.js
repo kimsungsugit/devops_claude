@@ -119,8 +119,10 @@ async function _toError(res) {
     } else if (typeof j.detail === 'string') {
       msg = j.detail;
     } else if (j?.detail && typeof j.detail === 'object') {
-      // FastAPI 는 `detail` 에 dict 를 실을 수 있다(`{code, message}`). 문자열만 보면
-      // 사용자에게 **원시 JSON 이 그대로** 뜨고, 호출부는 사유로 분기할 수 없다.
+      // 방어선. 이 앱의 자체 HTTPException 은 `http_exception_handler`
+      // (`backend/error_handler.py:84`)가 dict `detail` 을 `error.{code,message}` 로
+      // 바꿔 주므로 **위 첫 분기**가 잡는다. 여기까지 오는 건 그 핸들러를 안 타는
+      // 경로(starlette 기본 처리 등)뿐이고, 그때 원시 JSON 이 뜨는 걸 막는다.
       if (typeof j.detail.message === 'string') msg = j.detail.message;
       if (typeof j.detail.code === 'string') code = j.detail.code;
     } else if (typeof j.message === 'string') {

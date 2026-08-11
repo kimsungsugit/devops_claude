@@ -80,15 +80,32 @@ describe('오류 detail 이 객체일 때', () => {
   beforeEach(() => { origFetch = global.fetch; });
   afterEach(() => { global.fetch = origFetch; vi.restoreAllMocks(); });
 
-  it('code 와 message 를 뽑는다 — 못 뽑으면 화면에 원시 JSON 이 뜨고 분기도 못 한다', async () => {
+  it('**서버가 실제로 보내는 형태**에서 code 를 뽑는다 — 이걸 놓치면 덮어쓰기 확인이 안 뜬다', async () => {
+    // `http_exception_handler`(`backend/error_handler.py:84`)가 dict detail 을
+    // `{ok:false, error:{code,message}}` 로 바꾼다. 라이브 401 응답으로 확인한 형태다.
     global.fetch = vi.fn(async () => ({
       ok: false,
       status: 400,
-      text: async () => JSON.stringify({ detail: { code: 'dest_exists', message: '같은 이름의 파일이 이미 있습니다: a.xlsm' } }),
+      text: async () => JSON.stringify({
+        ok: false,
+        error: { code: 'dest_exists', message: '같은 이름의 파일이 이미 있습니다: a.xlsm' },
+      }),
     }));
     await expect(post('/api/docgen/save-as', {})).rejects.toMatchObject({
       code: 'dest_exists',
       message: '같은 이름의 파일이 이미 있습니다: a.xlsm',
+    });
+  });
+
+  it('핸들러를 안 타는 경로에서도 원시 JSON 을 노출하지 않는다(방어선)', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ detail: { code: 'dest_cloudium', message: '클라우디움에는 저장할 수 없습니다' } }),
+    }));
+    await expect(post('/x', {})).rejects.toMatchObject({
+      code: 'dest_cloudium',
+      message: '클라우디움에는 저장할 수 없습니다',
     });
   });
 
