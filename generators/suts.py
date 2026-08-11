@@ -1702,7 +1702,16 @@ def generate_suts_xlsm(
         if not seqs:
             seqs = [{"seq_num": 1, "inputs": {}, "expected": {}, "strategy": "N/A"}]
 
-        tc_id = f"SwUTC_{fid}"
+        # SUDS(설계 ID) — 확보하지 못하면 **빈칸**으로 둔다.
+        # ⚠ 이전 판은 `fid`(= 소스 파싱 순번 `SwUFn_{n:04d}`)를 그대로 적었다. 그건
+        #   SwUDS 가 부여한 설계 ID 가 아니라 이 실행에서 만든 번호라, 모양만 맞고
+        #   **다른 설계 요소를 가리킨다**(정본과 교집합 178/251 — 나머지는 오조준).
+        #   틀린 ID 가 추적성으로 보이는 것이 빈칸보다 나쁘다.
+        suds_id = str(unit.get("suds_id") or unit.get("design_id") or "").strip()
+        # 정본은 `TC_ID = "SwUTC_" + SUDS`(1,013/1,014). 설계 ID 를 확보한 경우에만
+        # 그 규칙을 따르고, 못 찾았으면 종전대로 내부 fid 로 만든다 — TC_ID 는 시트의
+        # 키라 비울 수 없기 때문이다(비우면 행을 식별할 수 없다).
+        tc_id = f"SwUTC_{suds_id or fid}"
         start_row = row_num
 
         # TC 정의 행 — 정본에서 이 행은 **변수명 행**이다. 시퀀스 번호·Test Method·
@@ -1714,12 +1723,6 @@ def generate_suts_xlsm(
         ws.cell(row=row_num, column=_COL_SAFETY,
                 value=resolve_safety_related(unit.get("asil"))).font = data_font
         ws.cell(row=row_num, column=_COL_SAFETY).alignment = center
-        # SUDS(설계 ID) — 확보하지 못하면 **빈칸**으로 둔다.
-        # ⚠ 이전 판은 `fid`(= 소스 파싱 순번 `SwUFn_{n:04d}`)를 그대로 적었다. 그건
-        #   SwUDS 가 부여한 설계 ID 가 아니라 이 실행에서 만든 번호라, 모양만 맞고
-        #   **다른 설계 요소를 가리킨다**(정본과 교집합 178/251 — 나머지는 오조준).
-        #   틀린 ID 가 추적성으로 보이는 것이 빈칸보다 나쁘다.
-        suds_id = str(unit.get("suds_id") or unit.get("design_id") or "").strip()
         if suds_id:
             ws.cell(row=row_num, column=_RELATED_COL, value=suds_id).font = data_font
             ws.cell(row=row_num, column=_RELATED_COL).alignment = center
@@ -2505,6 +2508,27 @@ def generate_suts(
                     _logger.info("UDS descriptions enriched for %d units", enriched_count)
             except Exception as _e:
                 _logger.warning("UDS description enrichment skipped: %s", _e)
+
+            # ── 설계 ID(SwUFn_xxxx) — SUDS 칸과 TC_ID 의 근거 ──────────────
+            # 정본 실측: `TC_ID = "SwUTC_" + SUDS` 가 1,013/1,014 에서 성립한다.
+            # ⚠ 못 찾으면 **비운다**. 예전엔 소스 파싱 순번(`SwUFn_{n:04d}`)을 넣어
+            #   모양만 맞고 다른 설계 요소를 가리켰다(정본과 교집합 178/251).
+            try:
+                from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
+                _design = load_uds_design_ids(_uds_local)
+                if _design.get("by_name"):
+                    _hit = 0
+                    for unit in units:
+                        did = resolve_design_id(_design, unit.get("name"))
+                        if did:
+                            unit["suds_id"] = did
+                            _hit += 1
+                    _logger.info(
+                        "UDS design IDs: %d/%d units matched (문서 %d ids · 동명이인 %d 제외)",
+                        _hit, len(units), len(_design["by_name"]), len(_design.get("ambiguous") or []),
+                    )
+            except Exception as _e:  # noqa: BLE001
+                _logger.warning("UDS design-id enrichment skipped: %s", _e)
 
     # ── HSIS signal enrichment ────────────────────────────────────────────
     # Uses HSIS xlsx to enrich: srs_req_ids (from related_id), variable
