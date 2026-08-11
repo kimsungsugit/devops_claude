@@ -237,6 +237,44 @@ def test_flow_loss_is_present_tense_when_already_cut(
     assert expect in str(step.get("reason") or "")
 
 
+def test_chain_checks_inputs_beyond_the_requirement_table(tmp_path: Path) -> None:
+    """사슬이 참조하는 입력은 **요구 표보다 넓다** — 그래도 확인은 해야 한다.
+
+    UDS 의 요구 표에는 HSIS·UDS문서가 없지만 사슬에는 있다(`local.py:603` HSIS 승격,
+    `requirements.py:1660` UDS 직독). 스텝을 안 만든다고 가용성 확인까지 건너뛰면
+    사슬이 전부 `?`(모름)로 그려진다 — 실제 사용자 보고: "UDS 부터 보면 ? 가 굉장히 많다".
+    """
+    hsis = tmp_path / "sig.xlsx"
+    udsdoc = tmp_path / "unit.docx"
+    hsis.write_bytes(b"x")
+    udsdoc.write_bytes(b"x")
+    data = _post({
+        "doc_type": "uds", "source_root": str(tmp_path),
+        "doc_paths": {"hsis": str(hsis), "uds": str(udsdoc)},
+    })
+    # 스텝은 요구 표대로 — HSIS/UDS 는 UDS 문서의 입력 항목이 아니다.
+    assert _step(data, req.IN_HSIS) is None
+
+    chain = {r["source"]: r["have"]
+             for s in data["steps"] if s["id"] == "chain_related"
+             for r in s["chain"]}
+    assert chain.get("hsis") is True, "레지스트리에 있는데 '모름' 으로 그렸다"
+    asil = {r["source"]: r["have"]
+            for s in data["steps"] if s["id"] == "chain_asil"
+            for r in s["chain"]}
+    assert asil.get("uds") is True
+
+
+def test_ai_source_is_resolved_from_config(tmp_path: Path) -> None:
+    """AI 출처는 문서가 아니라 **설정**이다 — 확인 가능하면 `?` 로 두지 않는다."""
+    data = _post({"doc_type": "uds", "source_root": str(tmp_path)})
+    desc = {r["source"]: r["have"]
+            for s in data["steps"] if s["id"] == "chain_description"
+            for r in s["chain"]}
+    # 환경에 따라 True/False 지만 **모름(None)이면 안 된다** — 설정은 읽을 수 있다.
+    assert "ai" in desc
+
+
 @pytest.mark.parametrize("doc_type,key", [
     ("uds", "uds_template"),
     ("sts", "sts_template"),

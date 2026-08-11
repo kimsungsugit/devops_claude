@@ -190,17 +190,36 @@ function ScmSection() {
       return;
     }
     try {
+      let saved = null;
       if (editMode) {
         // api() 헬퍼 사용 — X-User 헤더 자동 추가 + res.ok 검사 + 에러 throw.
         // 이전 raw fetch는 X-User 누락으로 401 silent failure 발생.
-        await api(`/api/scm/update/${editMode}`, {
+        saved = await api(`/api/scm/update/${editMode}`, {
           method: 'PUT',
           body: JSON.stringify(form),
         });
         toast('success', 'SCM 수정 완료');
       } else {
-        await post('/api/scm/register', form);
+        saved = await post('/api/scm/register', form);
         toast('success', 'SCM 등록 완료');
+      }
+      // ⚠ **서버가 모르는 필드는 조용히 버려진다**(`ScmLinkedDocs` 는 pydantic 기본
+      //   `extra='ignore'`). 저장은 200 으로 성공하고 값만 사라지므로, 사용자는
+      //   저장됐다고 믿는다 — 실제 사용자 보고: "어제 템플릿 다 등록하고 저장했는데
+      //   저장이 안 되어 있다". 응답과 대조해 **버려진 키를 이름으로** 알린다.
+      // ⚠ 응답을 못 받았으면 **대조하지 않는다** — 빈 객체와 비교하면 모든 항목이
+      //   "버려짐" 으로 오탐해 매번 경고가 뜬다.
+      const savedLinked = saved?.item?.linked_docs;
+      const dropped = !savedLinked ? [] : Object.entries(form.linked_docs || {})
+        .filter(([k, v]) => {
+          const has = Array.isArray(v) ? v.length > 0 : String(v || '').trim() !== '';
+          return has && !(k in savedLinked);
+        })
+        .map(([k]) => k);
+      if (dropped.length) {
+        toast('warning',
+          `저장되지 않은 항목: ${dropped.join(', ')} — 서버가 모르는 필드입니다. `
+          + '백엔드가 최신 버전인지 확인하세요.');
       }
       setShowForm(false);
       setEditMode(null);

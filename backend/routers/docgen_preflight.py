@@ -296,6 +296,29 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                            effect=optional.get(key, ""), **extra))
         available[key] = (state == S_OK)
 
+    # ── 1-b. 사슬이 참조하는 나머지 입력도 **확인은 한다** ────────────────────
+    #
+    # 요구 표(`required`+`optional`)는 "이 문서를 만들려면 무엇이 필요한가" 이고, 사슬은
+    # "어느 출처가 필드를 채울 수 있는가" 라 **후자가 더 넓다**. 예: UDS 의 요구 표에는
+    # HSIS·UDS문서가 없지만 사슬에는 있다(각각 `local.py:603` HSIS 승격,
+    # `requirements.py:1660` UDS 직독).
+    #
+    # 스텝을 만들지 않으면 `available` 에 키가 없어 사슬이 전부 `?`(모름)로 그려진다 —
+    # 실제로는 레지스트리에 등록돼 있는데도. 화면이 '모름' 투성이가 되면 쓸모가 없다.
+    # 그래서 **스텝은 요구 표대로 두되 가용성은 넓게 확인한다.**
+    for key, path in inputs.items():
+        if key in available or key == _req.IN_SOURCE_ROOT:
+            continue
+        available[key] = _probe_path(resolver, path)["state"] == S_OK
+
+    # AI 출처는 문서가 아니라 **설정**이다 — 키가 있으면 그 경로가 열려 있다.
+    try:
+        from workflow.ai import load_oai_config
+        available[_chain.INPUT_AI] = bool(load_oai_config(None))
+    except Exception:  # noqa: BLE001  # silent-ok
+        # 설정을 못 읽으면 '모름' 이 정답이다. `False`(없음)로 접으면 없는 결핍을 만든다.
+        pass
+
     # ── 2. 재료 — 요구 인식 ──────────────────────────────────────────────────
     swrs_path = inputs.get(_req.IN_SWRS, "")
     if swrs_path and available.get(_req.IN_SWRS):
