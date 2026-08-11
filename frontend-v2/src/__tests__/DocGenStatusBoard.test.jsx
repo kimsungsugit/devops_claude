@@ -420,19 +420,29 @@ describe('DocGenStatusBoard — 시험 결과 문서 원클릭 생성', () => {
     await waitFor(() => expect(within(tr).getByRole('alert')).toHaveTextContent(/test_date/));
   });
 
-  it('빌드 대상 프로젝트가 화면 범위와 다르면 조용히 만들지 않고 경고한다', async () => {
-    // 화면은 kjpds02_pv 범위인데 저장 폼의 project_id 는 HDPDM01(기본값).
+  it('양식 키가 지정되지 않으면 조용히 만들지 않고 경고한다', async () => {
+    // SCM 에 `builder_project_id` 가 없으면 빌더 폼 기본값(`HDPDM01`)이 그대로 쓰인다
+    // — 그러면 KJPDS02_PV 를 보면서 **남의 프로젝트 문서**가 나온다.
     mountBoard();
     const tr = await waitFor(() => rowOf('🧪 SUTR'));
-    expect(within(tr).getByText(/화면 범위\(kjpds02_pv\)와 빌드 대상이 다릅니다/)).toBeInTheDocument();
+    expect(within(tr).getByText(/양식 키가 지정되지 않아/)).toBeInTheDocument();
+    // 어느 값으로 만들어지는지 이름을 밝혀야 한다 — "기본값" 이라고만 하면 못 고친다.
+    // (표시 라벨과 경고문 두 곳에 나오므로 `getAllByText`.)
+    expect(within(tr).getAllByText('HDPDM01').length).toBeGreaterThan(0);
   });
 
-  it('범위가 일치하면 경고하지 않는다 (경고가 상시 표시면 무시된다)', async () => {
-    localStorage.setItem('devops_v2_swut_form', JSON.stringify({ project_id: 'KJPDS02_PV' }));
+  it('SCM 이 양식 키를 지정하면 경고하지 않고 그 값을 쓴다', async () => {
+    // ⚠ SCM id(`kjpds02_pv`)와 양식 키(`KJPDS02`)는 **다른 어휘**다 — 문자열이 같아야
+    //   정상인 게 아니다. 옛 판정은 둘을 비교해 정상 구성에도 경고를 띄웠다.
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({ project_id: 'HDPDM01' }));
     render(<DocGenStatusBoard job={JOB} genState={null}
-      analysisResult={{ matchedScm: { id: 'kjpds02_pv', name: 'KJPDS02_PV' } }} />);
+      analysisResult={{ matchedScm: {
+        id: 'kjpds02_pv', name: 'KJPDS02_PV', builder_project_id: 'KJPDS02',
+      } }} />);
     const tr = await waitFor(() => rowOf('🧪 SUTR'));
-    expect(within(tr).queryByText(/빌드 대상이 다릅니다/)).toBeNull();
+    expect(within(tr).queryByText(/양식 키가 지정되지 않아/)).toBeNull();
+    // 표시도 SCM 값을 따라야 한다(표시와 payload 가 갈리면 안 된다).
+    expect(within(tr).getByText('KJPDS02')).toBeInTheDocument();
   });
 
   it('통합 Summary 는 빌더 산출물 표에 중복되지 않는다', async () => {

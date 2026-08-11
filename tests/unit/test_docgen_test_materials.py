@@ -239,6 +239,29 @@ def test_template_prefix_merge_is_wired() -> None:
     )
 
 
+def test_builder_project_id_is_registrable() -> None:
+    """SCM id 와 양식 project_id 는 **다른 어휘**라 매핑을 등록할 수 있어야 한다.
+
+    실측: SCM `hdpdm01·kjpds02·kjpds02_pv` ↔ swut_meta `HDPDM01·KJPDS02`.
+    매핑이 없어 빌더 폼 기본값(`HDPDM01`)이 쓰였고, KJPDS02_PV 를 보면서 [생성]하면
+    **남의 프로젝트 문서**가 나왔다(사용자 보고).
+    """
+    from backend.schemas import ScmRegisterRequest, ScmRegistryEntry, ScmUpdateRequest
+
+    for model in (ScmRegistryEntry, ScmRegisterRequest, ScmUpdateRequest):
+        assert "builder_project_id" in model.model_fields, f"{model.__name__} 에 필드가 없다"
+
+
+def test_form_project_id_wins_over_registry() -> None:
+    """폼에 명시된 값이 레지스트리보다 우선이다 — 사용자가 그 자리에서 정한 값이다."""
+    data = _preflight({"doc_type": "sutr", "scm_id": "kjpds02_pv",
+                       "form": {"project_id": "KJPDS02"}})
+    step = _find(data, "report_template")
+    assert step is not None
+    # KJPDS02 는 양식 설정에 있으므로 '프로젝트 없음' 사유가 나오면 안 된다.
+    assert "양식 설정" not in str(step.get("reason") or "")
+
+
 def test_report_template_keys_are_mapped() -> None:
     from backend.routers.docgen_preflight import _TEST_REPORT_TEMPLATE_KEY
     from backend.services.docgen_requirements import TEST_REPORT_DOC_TYPES

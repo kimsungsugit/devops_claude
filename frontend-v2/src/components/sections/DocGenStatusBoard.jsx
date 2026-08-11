@@ -520,7 +520,13 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     return TEST_REPORT_ROWS.map(row => {
       const form = loadBuilderForm(row.builder);
       const version = versionEdit[row.key] ?? (form.release_sw_version || runVer);
-      const projectId = String(form.project_id || '');
+      // SCM 이 지정한 **양식 설정 키**가 있으면 그게 이긴다. 없으면 빌더 폼 값
+      // (기본이 `HDPDM01` 로 하드코딩돼 있어 남의 프로젝트 문서가 나오던 자리다).
+      // ⚠ 통합 Summary 의 `project_id` 는 프로젝트가 아니라 **마스터 양식 ID** 라
+      //   SCM 값으로 덮으면 안 된다 — 덮으면 양식을 못 찾는다.
+      const scmBuilderId = row.builder === 'swreport'
+        ? '' : String(analysisResult?.matchedScm?.builder_project_id || '').trim();
+      const projectId = scmBuilderId || String(form.project_id || '');
       return {
         ...row,
         form,
@@ -531,20 +537,25 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         // 화면 범위와 빌드 대상이 다르면 다른 프로젝트 문서를 만들게 된다 —
         // 조용히 진행하지 않고 행에 표시한다(자동 교정은 하지 않는다: swut_meta.json
         // 에 등록되지 않은 project_id 로 바꾸면 빌드가 통째로 실패한다).
-        // ⚠ 통합 Summary 의 `project_id` 는 **프로젝트가 아니라 마스터 양식 ID**다
-        //   (`ES95411`, `SWREPORT_DEFAULT_FORM` 주석 참조). SCM id 와 비교하면 항상
-        //   "다릅니다" 가 떠서, 사용자가 "ES95411 은 뭐야?" 라고 묻게 된다 — 거짓 경고다.
-        //   ⚠ `scmId` 는 SCM 등록 id 이고 `project_id` 는 양식 설정(swut_meta) 키라
-        //   애초에 다른 어휘다. 정확히 같을 때만 안전하다고 볼 수 있으므로 비교는
-        //   유지하되, 비교가 성립하지 않는 축은 제외한다.
-        scopeMismatch: row.builder !== 'swreport'
-          && !!(scmId && projectId && scmId.toLowerCase() !== projectId.toLowerCase()),
+        // ⚠ `scmId`(SCM 등록 id)와 `project_id`(양식 설정 키)는 **원래 다른 어휘**다 —
+        //   실측: SCM `kjpds02_pv` ↔ swut_meta `KJPDS02`. 둘을 문자열 비교하던 옛 판정은
+        //   정상 구성에도 "다릅니다" 를 띄웠다(거짓 경고).
+        //   진짜 위험은 **양식 키를 아무도 지정하지 않아 빌더 폼 기본값(`HDPDM01`)이
+        //   그대로 쓰이는 것**이다 — 그러면 남의 프로젝트 문서가 나온다. 그 상태만 알린다.
+        //   통합 Summary 는 `project_id` 가 마스터 양식 ID 라 이 판정 대상이 아니다.
+        needsBuilderId: row.builder !== 'swreport' && !!scmId && !scmBuilderId,
       };
     });
-  }, [runs, versionEdit, scmId]);
+    // ⚠ `builder_project_id` 를 deps 에 넣는다 — 빼면 SCM 에서 양식 키를 지정해도
+    //   행이 재계산되지 않아 **옛 project_id 로 빌드**된다(표시만 안 바뀌는 게 아니라
+    //   `generateReport` 가 `row.projectId` 를 payload 에 싣는다).
+  }, [runs, versionEdit, scmId, analysisResult?.matchedScm?.builder_project_id]);
 
   const generateReport = useCallback(async (row) => {
-    const form = { ...row.form, release_sw_version: row.version };
+    // ⚠ `project_id` 를 **payload 에도** 반영한다. 표시만 바꾸고 빌드에 안 넘기면
+    //   화면은 KJPDS02 라고 하는데 실제로는 HDPDM01 문서가 나온다 — 표시와 산출물이
+    //   갈리는 것이 원래 결함보다 나쁘다.
+    const form = { ...row.form, release_sw_version: row.version, project_id: row.projectId };
     const missing = missingRequiredFields(form);
     if (missing.length) {
       toast('warning', `필수 값이 비어 있습니다: ${missing.join(', ')} — 임의 값으로 채우지 않습니다.`);
@@ -696,9 +707,11 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                             <code>{row.projectId}</code></>
                         )}
                       </div>
-                      {row.scopeMismatch && (
+                      {row.needsBuilderId && (
                         <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
-                          ⚠ 화면 범위({scmId})와 빌드 대상이 다릅니다 — 탭에서 project_id 확인
+                          ⚠ {scmId} 에 시험 결과 양식 키가 지정되지 않아 기본값
+                          <code>{row.projectId}</code> 로 만듭니다 — 설정 &gt; SCM 에서
+                          builder_project_id 를 지정하세요
                         </div>
                       )}
                       {st.error && (

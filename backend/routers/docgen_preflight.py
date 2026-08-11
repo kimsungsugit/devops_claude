@@ -471,7 +471,18 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 없으면 [생성]을 눌러야 알 수 있었다.
     if req.doc_type in _req.TEST_REPORT_DOC_TYPES:
         tpl_key = _TEST_REPORT_TEMPLATE_KEY.get(req.doc_type, "")
+        # 폼에 명시된 값이 우선, 없으면 **SCM 이 지정한 양식 키**를 쓴다.
+        # SCM id 와 양식 project_id 는 다른 어휘라(예: `kjpds02_pv` ↔ `KJPDS02`)
+        # 레지스트리가 그 매핑을 갖는다.
         project_id = str(req.form.get("project_id") or "").strip()
+        if not project_id and req.scm_id:
+            try:
+                from backend.services.scm_registry import get_registry_entry
+                entry = get_registry_entry(req.scm_id)
+                project_id = str(getattr(entry, "builder_project_id", "") or "").strip()
+            except Exception:  # noqa: BLE001  # silent-ok
+                # 레지스트리를 못 읽으면 '미지정' 으로 두고 아래에서 사유를 낸다.
+                project_id = ""
         state, reason, value = S_UNMEASURED, "", ""
         if not project_id:
             state, reason = S_NEEDED, "대상 project_id 를 먼저 정해야 템플릿을 찾을 수 있습니다"

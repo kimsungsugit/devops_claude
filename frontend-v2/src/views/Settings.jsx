@@ -161,6 +161,9 @@ function ScmSection() {
       branch: '',
       base_ref: 'HEAD~1',
       source_root: '',
+      // 시험 결과 빌더가 쓸 양식 설정 키. SCM id 와 다른 어휘라 따로 지정한다
+      // (예: SCM `kjpds02_pv` → 양식 `KJPDS02`). 비우면 빌더 폼 기본값이 그대로 쓰인다.
+      builder_project_id: '',
       linked_docs: {
         srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '',
         // 문서별 생성 템플릿(UDS .docx / 시험 규격서 .xlsm) — 형식이 달라 키를 나눈다.
@@ -409,6 +412,19 @@ function ScmSection() {
               <SourceRootEditor
                 value={form.source_root}
                 onChange={v => setForm(p => ({ ...p, source_root: v }))}
+              />
+            </div>
+            <div className="field span-2">
+              <label>
+                시험 결과 양식 키 (builder_project_id)
+                <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
+                  {' '}— SCM id 와 다를 수 있습니다(예: {form.id || 'kjpds02_pv'} → KJPDS02)
+                </span>
+              </label>
+              <input
+                value={form.builder_project_id}
+                onChange={e => setForm(p => ({ ...p, builder_project_id: e.target.value }))}
+                placeholder="config/swut_meta.json 의 project_id — 비우면 빌더 폼 기본값"
               />
             </div>
           </div>

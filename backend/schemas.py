@@ -159,6 +159,18 @@ class ScmRegistryEntry(BaseModel):
     watch_patterns: List[str] = Field(default_factory=lambda: ["*.c", "*.h"])
     ignore_patterns: List[str] = Field(default_factory=list)
     webhook_secret_env: str = ""
+    # 시험 결과 빌더(SwUT/SwIT/통합)가 쓸 **양식 설정 키**.
+    #
+    # SCM id 와 `config/swut_meta.json` 의 project_id 는 **다른 어휘**다 — 실측:
+    #   SCM        hdpdm01 · kjpds02 · kjpds02_pv
+    #   swut_meta  HDPDM01 · KJPDS02            ← `kjpds02_pv` 가 없다
+    # 매핑이 없어서 빌더 폼의 하드코딩 기본값(`HDPDM01`)이 그대로 쓰였고, KJPDS02_PV 를
+    # 보면서 [생성]을 누르면 **남의 프로젝트 문서**가 나왔다(사용자 보고).
+    #
+    # ⚠ 자동 유추(`kjpds02_pv` → `KJPDS02`)를 하지 않는다 — 프로젝트 명명이 바뀌면
+    #   조용히 틀리고, 그 조용한 실패가 이 저장소의 반복 결함이다. 비우면 비운 대로
+    #   두고 화면이 "지정 필요" 라고 말한다.
+    builder_project_id: str = ""
     linked_docs: ScmLinkedDocs = Field(default_factory=ScmLinkedDocs)
     created_at: str = ""
     updated_at: str = ""
@@ -183,6 +195,8 @@ class ScmRegisterRequest(BaseModel):
     watch_patterns: List[str] = Field(default_factory=lambda: ["*.c", "*.h"])
     ignore_patterns: List[str] = Field(default_factory=list)
     webhook_secret_env: str = ""
+    # 시험 결과 빌더가 쓸 양식 설정 키(`ScmRegistryEntry.builder_project_id` 주석 참조).
+    builder_project_id: str = ""
     linked_docs: ScmLinkedDocs = Field(default_factory=ScmLinkedDocs)
 
 
@@ -198,6 +212,7 @@ class ScmUpdateRequest(BaseModel):
     watch_patterns: Optional[List[str]] = None
     ignore_patterns: Optional[List[str]] = None
     webhook_secret_env: Optional[str] = None
+    builder_project_id: Optional[str] = None
     linked_docs: Optional[ScmLinkedDocs] = None
 
 
