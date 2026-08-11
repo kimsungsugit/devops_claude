@@ -2187,26 +2187,37 @@ def validate_suts_xlsm(
 
     if "2.SW Unit Test Spec" in wb.sheetnames:
         ws = wb["2.SW Unit Test Spec"]
-        max_col = min(int(ws.max_column or 149), 149)
+        # ⚠ 레이아웃을 **하드코딩하지 않는다**. 예전엔 `min_row=7`·`max_col=149`·
+        #   `row[12]`(옛 Seq.No)·`row[13:62]`(옛 Input) 가 박혀 있었다. 정본 레이아웃
+        #   으로 바꾸자 검증기가 시퀀스 7,267건을 **1,576건으로** 셌다(-5,691).
+        #   파일은 멀쩡한데 검증기만 틀려서 정상 산출물을 결함으로 신고했다.
+        #   상수에서 파생하면 레이아웃이 또 바뀌어도 같이 따라간다.
+        max_col = min(int(ws.max_column or _RELATED_COL), _RELATED_COL)
         stats["max_col"] = max_col
 
         tc_count = 0
         seq_count = 0
         empty_io_tcs = 0
-        last_row = 6
+        last_row = _HEADER_ROW
         for row_idx, row in enumerate(
-            ws.iter_rows(min_row=7, max_col=max_col, values_only=True),
-            start=7,
+            ws.iter_rows(min_row=_DATA_START_ROW, max_col=max_col, values_only=True),
+            start=_DATA_START_ROW,
         ):
             last_row = row_idx
-            tc_id = row[2] if len(row) > 2 else None
+            tc_id = row[_COL_TC_ID - 1] if len(row) >= _COL_TC_ID else None
             if tc_id and str(tc_id).startswith("SwUTC"):
                 tc_count += 1
-                has_input = any(v not in (None, "") for v in row[13:min(62, len(row))])
-                has_output = any(v not in (None, "") for v in row[62:min(149, len(row))])
+                has_input = any(
+                    v not in (None, "")
+                    for v in row[_INPUT_COL_START - 1:min(_INPUT_COL_END, len(row))]
+                )
+                has_output = any(
+                    v not in (None, "")
+                    for v in row[_OUTPUT_COL_START - 1:min(_OUTPUT_COL_END, len(row))]
+                )
                 if not has_input and not has_output:
                     empty_io_tcs += 1
-            seq_val = row[12] if len(row) > 12 else None
+            seq_val = row[_SEQ_COL - 1] if len(row) >= _SEQ_COL else None
             if seq_val is not None and str(seq_val).strip():
                 seq_count += 1
 
@@ -3034,19 +3045,26 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
         # ⚠ 열 번호를 하드코딩하지 않는다 — 레이아웃 상수에서 파생한다. 예전엔
         #   `range(14,63)`·`column=11` 이 박혀 있어, 레이아웃이 바뀌면 검증기가
         #   조용히 0을 세고 그 0이 "이슈 없음"으로 통과했다(fail-open).
-        for r in range(_DATA_START_ROW, (ws.max_row or _DATA_START_ROW) + 1):
-            tc_id = ws.cell(row=r, column=_COL_TC_ID).value
+        #
+        # ⚠ `read_only=True` 에서 `ws.cell(row, col)` 랜덤 접근을 쓰지 말 것.
+        #   순차 스트리밍이라 되짚으면 **빈 셀을 돌려준다**. 실측(2026-08-11):
+        #   시퀀스 7,267건이 파일에 멀쩡히 있는데 검증기는 1,576건으로 셌다
+        #   (-5,691). 행이 1,975 → 8,219 로 늘자 증상이 드러났다. 파일이 아니라
+        #   **검증기가 틀린 것**이라, 그대로 뒀으면 정상 산출물을 결함으로 신고한다.
+        #   전체 스캔은 `iter_rows` 가 유일한 정답이다
+        #   (`[[reference_openpyxl_readonly_cell_perf]]` — 성능만이 아니라 정확성 문제).
+        _max_col = max(_OUTPUT_COL_END, _RELATED_COL)
+        for row in ws.iter_rows(min_row=_DATA_START_ROW, max_col=_max_col, values_only=True):
+            tc_id = row[_COL_TC_ID - 1] if len(row) >= _COL_TC_ID else None
             if tc_id and str(tc_id).startswith("SwUTC"):
                 tc_count += 1
                 total_inp += sum(
-                    1 for c in range(_INPUT_COL_START, _INPUT_COL_END + 1)
-                    if ws.cell(row=r, column=c).value
+                    1 for v in row[_INPUT_COL_START - 1:_INPUT_COL_END] if v not in (None, "")
                 )
                 total_out += sum(
-                    1 for c in range(_OUTPUT_COL_START, _OUTPUT_COL_END + 1)
-                    if ws.cell(row=r, column=c).value
+                    1 for v in row[_OUTPUT_COL_START - 1:_OUTPUT_COL_END] if v not in (None, "")
                 )
-            elif ws.cell(row=r, column=_SEQ_COL).value:
+            elif len(row) >= _SEQ_COL and row[_SEQ_COL - 1] not in (None, ""):
                 seq_count += 1
 
         stats["tc_count"] = tc_count

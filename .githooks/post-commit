@@ -1,0 +1,3 @@
+#!/bin/sh
+# AutoReport chained post-commit hook
+exec "D:/Project/Program/AutoReport/.githooks/post-commit"
