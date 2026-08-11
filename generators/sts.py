@@ -30,8 +30,23 @@ _REQ_ID_PAT = re.compile(
     r"\b(Sw(?:TR|TSR|NTR|NTSR|EI|CNF|ST|STR)_\d+)\b"
 )
 
-_TEST_METHODS = {"FIT", "FNCT", "RBT", "RVW", "ELCT"}
-_GEN_METHODS = {"AOR", "AOI", "AEC", "ABV", "ERG", "AFD", "ADF", "AUC", "STA", "ASV"}
+# 정본(KJPDS02_SwTS v1.02) 시트명. SwITS 의 `3.SW Integration Test Spec` 과 다르다.
+_SPEC_SHEET_NAME = "3.SW Test Spec"
+
+# ── 값 어휘 — **STS 정본의 Introduction 1.5/1.6** 이 출처다 ──────────────────
+#
+# ⚠ 같은 개념이라도 **문서마다 약어가 다르다**. 실측(2026-08-11):
+#     SwTS  1.5 Test Method  : Requirement-based test=RBT · Fault injection test=FIT
+#     SwTS  1.6 Generation   : Analysis of requirements=AOR · Equivalent class=ECA
+#                              · Boundary value analysis=BAA
+#     SwUTS 1.5 Test Method  : REQ · IFT · FI          ← 다른 약어
+#     SwUTS 1.6 Generation   : AOR · AEC · ABV · ERG   ← 다른 약어
+#   통일하지 말 것. 예전 판은 `FNCT`/`RVW`/`ELCT`/`ERG` 를 썼는데 **SwTS Introduction
+#   표에 없는 값**이라 문서를 읽는 사람이 대조할 표가 없었다.
+_TEST_METHODS = {"RBT", "FIT"}
+_GEN_METHODS = {"AOR", "ECA", "BAA"}
+_DEFAULT_TEST_METHOD = "RBT"   # 정본 실측: 102건 전부 RBT
+_DEFAULT_GEN_METHOD_STS = "AOR"  # 정본 실측: 102건 전부 AOR
 
 # 실행 산출물이 없는 검증방법. RVW 는 "소스 코드에서 구현부 확인" 같은 **사람이 읽는**
 # 활동이라(`_generate_review_steps`) 실행 시험과 증거 성격이 다르다.
@@ -914,7 +929,58 @@ _ERROR_GUARD_PAT = re.compile(
 )
 
 
+# 내부 휴리스틱이 내는 라벨 → **정본 Introduction 표의 약어**.
+# ⚠ 휴리스틱 자체는 유용하다(어떤 성격의 시험인지 구분한다). 문제는 그 결과 라벨이
+#   SwTS Introduction 1.5/1.6 표에 없는 값이라는 것이었다 — 문서를 읽는 사람이
+#   대조할 표가 없으면 그 칸은 근거가 아니라 장식이다.
+_METHOD_TO_STS_VOCAB = {
+    "RBT": "RBT", "FIT": "FIT",
+    "FNCT": "RBT",   # 기능 시험 = 요구 기반 시험
+    "RVW": "RBT",    # 리뷰도 요구 기반 확인으로 기록한다(정본에 RVW 칸이 없다)
+    "ELCT": "RBT",   # 전기/HW 신호 확인도 요구 기반
+}
+_GEN_TO_STS_VOCAB = {
+    "AOR": "AOR",
+    "AEC": "ECA", "ECA": "ECA",   # 등가 분할 — SwTS 는 ECA, SwUTS 는 AEC 로 쓴다
+    "ABV": "BAA", "BAA": "BAA",   # 경계값 분석 — SwTS 는 BAA, SwUTS 는 ABV
+    "ERG": "AOR", "AFD": "AOR", "ADF": "AOR", "STA": "AOR",
+    "AOI": "AOR", "AUC": "AOR", "ASV": "AOR",
+}
+
+
+def _safety_mark(asil: Any) -> str:
+    """`Safety Related` 칸 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
+
+    ⚠ 근거가 없을 때 `X` 로 단정하지 않는다. `X` 는 "확인했고 안전 관련이 아니다"
+    라는 주장이고, 모르는 것을 그렇게 적으면 under-classification 이다.
+    """
+    val = str(asil or "").strip().upper()
+    if val in ("A", "B", "C", "D") or val.startswith("ASIL"):
+        return "O"
+    if val == "QM":
+        return "X"
+    return ""
+
+
+def _to_sts_vocab(method: str, gen: str) -> Tuple[str, str]:
+    """휴리스틱 라벨을 정본 어휘로 좁힌다. 모르는 값은 정본 최빈값으로 떨어뜨린다."""
+    return (
+        _METHOD_TO_STS_VOCAB.get(str(method or "").strip().upper(), _DEFAULT_TEST_METHOD),
+        _GEN_TO_STS_VOCAB.get(str(gen or "").strip().upper(), _DEFAULT_GEN_METHOD_STS),
+    )
+
+
 def _determine_test_method(
+    req: Dict[str, Any],
+    func_info: Optional[Dict[str, Any]] = None,
+    logic_flow: Optional[List[Dict[str, Any]]] = None,
+    hsis_signals: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """(test_method, gen_method) — **정본 어휘로 정규화해서** 돌려준다."""
+    return _to_sts_vocab(*_determine_test_method_raw(req, func_info, logic_flow, hsis_signals))
+
+
+def _determine_test_method_raw(
     req: Dict[str, Any],
     func_info: Optional[Dict[str, Any]] = None,
     logic_flow: Optional[List[Dict[str, Any]]] = None,
@@ -1663,7 +1729,9 @@ def _build_tc_dict(
     return {
         "id": tc_id,
         "title": title[:120],
-        "safety_related": "X" if is_safety else "",
+        # ⚠ 정본은 `O`=안전 관련 / `X`=비안전 이다(실측 X 86 · O 15). 예전엔
+        #   `"X" if is_safety else ""` 라 **의미가 정반대**였다. SUTS 도 같은 결함이었다.
+        "safety_related": _safety_mark(req.get("asil")),
         "test_environment": test_env,
         "test_method": test_method,
         "gen_method": _format_gen_method(gen_method),  # numbered list if multiple
@@ -1849,7 +1917,10 @@ def generate_sts_xlsm(
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     # --- Main test spec sheet ---
-    sheet_name = "3.SW Integration Test Spec"
+    # ⚠ 정본(KJPDS02_SwTS v1.02)의 시트명은 `3.SW Test Spec` 이다. 예전엔
+    #   `3.SW Integration Test Spec`(= SwITS 의 시트명)에 SW 시험 명세를 쓰고 있었다.
+    #   시트명이 다르면 정본을 읽는 쪽이 이 시트를 못 찾거나 통합시험으로 오독한다.
+    sheet_name = _SPEC_SHEET_NAME
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -2647,7 +2718,9 @@ def generate_sts(
 # Document validation
 # ---------------------------------------------------------------------------
 
-_STS_SHEET_CANDIDATES = ("3.SW Integration Test Spec", "2.SW Test Spec")
+# 읽는 쪽도 **writer 와 같은 상수**를 본다. 예전엔 시트명이 문자열로 박혀 있어
+# writer 만 고치면 validator 가 "Missing sheet" 를 내며 조용히 갈라졌다.
+_STS_SHEET_CANDIDATES = (_SPEC_SHEET_NAME, "3.SW Integration Test Spec", "2.SW Test Spec")
 
 
 def _normalize_header(value: Any) -> str:
@@ -2835,10 +2908,11 @@ def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
     issues: List[str] = []
     stats: Dict[str, Any] = {"sheets": wb.sheetnames, "sheet_count": len(wb.sheetnames)}
 
-    if "3.SW Integration Test Spec" in wb.sheetnames:
-        ws = wb["3.SW Integration Test Spec"]
+    _sheet = next((n for n in _STS_SHEET_CANDIDATES if n in wb.sheetnames), None)
+    if _sheet:
+        ws = wb[_sheet]
         tc_count = 0
-        for r in range(7, (ws.max_row or 7) + 1):
+        for r in range(_HEADER_ROW + 1, (ws.max_row or _HEADER_ROW) + 1):
             tc_id = ws.cell(row=r, column=2).value
             if tc_id and str(tc_id).strip():
                 tc_count += 1
@@ -2846,7 +2920,7 @@ def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
         if tc_count == 0:
             issues.append("No test cases found in main sheet")
     else:
-        issues.append("Missing sheet: 3.SW Integration Test Spec")
+        issues.append(f"Missing sheet: {_SPEC_SHEET_NAME}")
 
     wb.close()
     stats["issues"] = issues

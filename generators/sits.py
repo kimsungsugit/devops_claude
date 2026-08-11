@@ -25,16 +25,67 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Column layout constants (1-based, matching reference SITS XLSM)
 # ---------------------------------------------------------------------------
-_TCID_COL = 2        # B  — TC ID (SwITC_xx) in header row
-_DESC_COL = 3        # C  — sub-case number in data rows
-_CHAIN_COL = 4       # D  — call chain in sub-case rows
-_GEN_COL = 5         # E  — Test Case Generation Method
-_PRECOND_COL = 6     # F  — Precondition value (sub-case rows)
-_INPUT_COL_START = 8   # H  — Input Param 1 name/value
-_INPUT_COL_END = 74    # BV — Input Param 67 (max)
-_EXP_COL_START = 75    # BW — Expected Param 1 name/value
-_EXP_COL_END = 144     # EQ — Expected Param 70 (max)
-_RELATED_COL = 145     # ER — Related ID (SwCom_xx, SwSTR_xx …)
+# ⚠ **납품 정본**(KJPDS02_PV_SwITS v1.02, 205열) 기준이다. 표준 템플릿 v0.10 이
+#   아니다 — 템플릿은 Param 10개 고정이라 실제 파라미터(입력 82 / 기대 113)를 못 담는다.
+#
+# 정본 실측(2026-08-11):
+#   시트    : `3.SW Integration Test Spec`  (예전엔 시트 `4.…` 를 따로 만들어 붙였다)
+#   r3 밴드 : B3:G3 'Test Case' · I3:CL3 'Input' · CM3:GU3 'Expected Result' · GV3 'Related ID'
+#   r4 헤더 : B TC ID · C4:D4 'Description' · E Safety Related · F Test Method
+#             · G Test Case Generation Method · H (서브케이스 번호) · I~ Param n · GV 'SwDS'
+#   r5~     : TC 행(변수명) 1개 + 서브케이스 행 N개. B/E/F/G/GV 는 **블록 전체 병합**
+#             (SUTS 와 다르다 — SUTS 는 Method 가 시퀀스 그룹 단위다)
+_BAND_ROW = 3
+_HEADER_ROW = 4
+_DATA_START_ROW = 5
+
+_TCID_COL = 2          # B  — TC ID (SwITC_xx)
+_DESC_COL = 3          # C  — 서브케이스 번호
+_CHAIN_COL = 4         # D  — call chain (정본도 여기에 'Interface : main -> …' 를 쓴다)
+_SAFETY_COL = 5        # E  — Safety Related (O/X)
+_METHOD_COL = 6        # F  — Test Method
+_GEN_COL = 7           # G  — Test Case Generation Method
+_SEQ_COL = 8           # H  — 서브케이스 번호(반복)
+_INPUT_COL_START = 9   # I  — Input Param 1
+_INPUT_COL_END = 90    # CL — Input Param 82
+_EXP_COL_START = 91    # CM — Expected Param 1
+_EXP_COL_END = 203     # GU — Expected Param 113
+_RELATED_COL = 204     # GV — Related ID (SwDS)
+
+# ── 값 어휘 — SwITS 정본 실측 ────────────────────────────────────────────────
+# ⚠ 결합자가 SwUTS 와 다르다. SwUTS 는 슬래시(`AOR/ABV`), SwITS 는 쉼표(`AOR, AEC`).
+#   실측: Method `REQ, IFT` 49 · `FI` 5 / Gen `AOR, AEC` 49 · `AOR/ABV` 5.
+_SITS_METHOD_DEFAULT = "REQ, IFT"   # 통합시험 기본 — 요구 기반 + 인터페이스 시험
+_SITS_METHOD_FAULT = "FI"           # 고장 주입
+_SITS_GEN_DEFAULT = "AOR, AEC"
+_SITS_GEN_BOUNDARY = "AOR/ABV"
+
+
+def _safety_mark(asil: Any) -> str:
+    """`Safety Related` 칸 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
+
+    ⚠ 근거 부재를 `X` 로 단정하지 않는다(under-classification). SUTS·STS 와 같은 규약.
+    """
+    val = str(asil or "").strip().upper()
+    if val in ("A", "B", "C", "D") or val.startswith("ASIL"):
+        return "O"
+    if val == "QM":
+        return "X"
+    return ""
+
+
+def _sits_test_method(itc: Dict[str, Any]) -> str:
+    """통합 TC 의 Test Method. 오류 전파 서브케이스를 가지면 고장 주입으로 본다."""
+    for sc in itc.get("sub_cases") or []:
+        if "ERR" in str(sc.get("strategy") or sc.get("case_label") or "").upper():
+            return _SITS_METHOD_FAULT
+    return _SITS_METHOD_DEFAULT
+
+
+def _sits_gen_method(gen: Any) -> str:
+    """생성기 라벨 → 정본 어휘. 경계값 계열이면 `AOR/ABV`, 그 외 `AOR, AEC`."""
+    g = str(gen or "").strip().upper()
+    return _SITS_GEN_BOUNDARY if ("ABV" in g or "BV" in g) else _SITS_GEN_DEFAULT
 
 _MAX_INPUT_PARAMS = _INPUT_COL_END - _INPUT_COL_START + 1   # 67
 _MAX_EXP_PARAMS = _EXP_COL_END - _EXP_COL_START + 1        # 70
@@ -45,10 +96,13 @@ _DETAIL_HEADERS = {
     _TCID_COL: "TC ID",
     _DESC_COL: "Description",
     _CHAIN_COL: "Call Chain",
+    _SAFETY_COL: "Safety Related",
+    _METHOD_COL: "Test Method",
     _GEN_COL: "Test Case Generation Method",
-    _PRECOND_COL: "Precondition",
     _RELATED_COL: "SwDS",
 }
+# ⚠ `Precondition` 열은 정본에 **없다**(그건 SwTS 정본의 열이다). 예전 판은 F열에
+#   Precondition 을 써서 정본의 `Test Method` 자리를 차지하고 있었다.
 # (`_MAX_SUBCASES = 16` 은 어디서도 참조되지 않는 죽은 상수였다 — 옆의 14 와 값이 달라
 #  "상한 16 이 걸린다" 는 오해를 부른다. 실제 상한은 아래 _DEFAULT_SUBCASES 뿐이다.)
 _DEFAULT_SUBCASES = 14  # 7 BV + 4 COND_COMB + 2 ERR_PROP + 2 GLOBAL
@@ -1256,7 +1310,9 @@ def generate_sits_xlsm(
     wrap = Alignment(wrap_text=True, vertical="top")
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    sheet_name = "4.SW Integration Test Spec"
+    # ⚠ 정본의 시트는 `3.SW Integration Test Spec` 이다. 예전엔 템플릿의 3번 시트를
+    #   놔둔 채 `4.…` 를 **따로 붙여** 한 파일에 빈 정본 시트와 채워진 사본이 공존했다.
+    sheet_name = "3.SW Integration Test Spec"
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -1283,17 +1339,17 @@ def generate_sits_xlsm(
                 pass
 
     # ── Row 5: group headers ────────────────────────────────────────────────
-    _fill_and_merge(5, _TCID_COL, _GEN_COL + 1, "Test Case")
-    _fill_and_merge(5, _INPUT_COL_START, _INPUT_COL_END, "Input")
-    _fill_and_merge(5, _EXP_COL_START, _EXP_COL_END, "Expected Result")
-    _fill_and_merge(5, _RELATED_COL, _RELATED_COL, "Related ID")
-    ws.row_dimensions[5].height = 18
+    _fill_and_merge(_BAND_ROW, _TCID_COL, _GEN_COL, "Test Case")
+    _fill_and_merge(_BAND_ROW, _INPUT_COL_START, _INPUT_COL_END, "Input")
+    _fill_and_merge(_BAND_ROW, _EXP_COL_START, _EXP_COL_END, "Expected Result")
+    _fill_and_merge(_BAND_ROW, _RELATED_COL, _RELATED_COL, "Related ID")
+    ws.row_dimensions[_BAND_ROW].height = 18
 
     # ── Row 6: detail headers ── 정의는 모듈 상수 `_DETAIL_HEADERS`(단일 출처) ──
     # 별칭이 아니라 사본 — 이후 누가 여기서 헤더를 덧쓰더라도 모듈 상수가 오염되지 않게.
     detail_headers: Dict[int, str] = dict(_DETAIL_HEADERS)
     for col_i in range(1, _RELATED_COL + 1):
-        cell = ws.cell(row=6, column=col_i)
+        cell = ws.cell(row=_HEADER_ROW, column=col_i)
         cell.fill = hdr_fill
         cell.border = thin
         cell.alignment = center
@@ -1304,15 +1360,17 @@ def generate_sits_xlsm(
             cell.value = f"Param {col_i - _INPUT_COL_START + 1}"
         elif _EXP_COL_START <= col_i <= _EXP_COL_END:
             cell.value = f"Param {col_i - _EXP_COL_START + 1}"
-    ws.row_dimensions[6].height = 30
+    ws.row_dimensions[_HEADER_ROW].height = 30
 
     # ── Column widths ────────────────────────────────────────────────────────
     ws.column_dimensions["A"].width = 1.0
     ws.column_dimensions[get_column_letter(_TCID_COL)].width = 14
     ws.column_dimensions[get_column_letter(_DESC_COL)].width = 10
     ws.column_dimensions[get_column_letter(_CHAIN_COL)].width = 40
+    ws.column_dimensions[get_column_letter(_SAFETY_COL)].width = 9
+    ws.column_dimensions[get_column_letter(_METHOD_COL)].width = 12
     ws.column_dimensions[get_column_letter(_GEN_COL)].width = 14
-    ws.column_dimensions[get_column_letter(_PRECOND_COL)].width = 10
+    ws.column_dimensions[get_column_letter(_SEQ_COL)].width = 5
     for ci in range(_INPUT_COL_START, _INPUT_COL_END + 1):
         ws.column_dimensions[get_column_letter(ci)].width = 9
     for ci in range(_EXP_COL_START, _EXP_COL_END + 1):
@@ -1320,7 +1378,7 @@ def generate_sits_xlsm(
     ws.column_dimensions[get_column_letter(_RELATED_COL)].width = 35
 
     # ── Data rows ────────────────────────────────────────────────────────────
-    current_row = 7
+    current_row = _DATA_START_ROW
     for itc in itcs:
         tc_id = itc["tc_id"]
         input_vars = itc.get("input_vars") or []
@@ -1339,7 +1397,19 @@ def generate_sits_xlsm(
         ws.cell(row=current_row, column=_DESC_COL, value=tc_desc).font = data_font
         ws.cell(row=current_row, column=_DESC_COL).border = thin
         ws.cell(row=current_row, column=_DESC_COL).alignment = wrap
-        ws.cell(row=current_row, column=_GEN_COL, value=gen_method).font = data_font
+        # Safety Related / Test Method — 정본은 TC 행에 쓰고 블록 전체로 병합한다
+        # (SUTS 와 다르다: SUTS 는 Method 가 시퀀스 그룹 단위다).
+        ws.cell(row=current_row, column=_SAFETY_COL,
+                value=_safety_mark(itc.get("asil"))).font = data_font
+        ws.cell(row=current_row, column=_SAFETY_COL).alignment = center
+        ws.cell(row=current_row, column=_SAFETY_COL).border = thin
+        ws.cell(row=current_row, column=_METHOD_COL,
+                value=_sits_test_method(itc)).font = data_font
+        ws.cell(row=current_row, column=_METHOD_COL).alignment = center
+        ws.cell(row=current_row, column=_METHOD_COL).border = thin
+        ws.cell(row=current_row, column=_GEN_COL,
+                value=_sits_gen_method(gen_method)).font = data_font
+        ws.cell(row=current_row, column=_GEN_COL).alignment = center
         ws.cell(row=current_row, column=_GEN_COL).border = thin
         ws.cell(row=current_row, column=_RELATED_COL, value=related_str).font = data_font
         ws.cell(row=current_row, column=_RELATED_COL).border = thin
@@ -1358,6 +1428,7 @@ def generate_sits_xlsm(
             ws.cell(row=current_row, column=col).border = thin
 
         ws.row_dimensions[current_row].height = 18
+        _tc_row = current_row
         current_row += 1
 
         # Sub-case rows
@@ -1373,8 +1444,10 @@ def generate_sits_xlsm(
                 ws.cell(row=current_row, column=_CHAIN_COL).alignment = wrap
             ws.cell(row=current_row, column=_CHAIN_COL).border = thin
 
-            ws.cell(row=current_row, column=_PRECOND_COL, value=sc.get("precondition", "")).font = data_font
-            ws.cell(row=current_row, column=_PRECOND_COL).border = thin
+            # 서브케이스 번호는 정본에서 C(Description 앞칸)와 H 두 곳에 온다.
+            ws.cell(row=current_row, column=_SEQ_COL, value=sc["case_num"]).font = data_font
+            ws.cell(row=current_row, column=_SEQ_COL).alignment = center
+            ws.cell(row=current_row, column=_SEQ_COL).border = thin
 
             # Input values
             sc_inputs = sc.get("inputs") or {}
@@ -1397,14 +1470,25 @@ def generate_sits_xlsm(
             ws.row_dimensions[current_row].height = 14
             current_row += 1
 
-    # Freeze panes at row 7 col C
-    ws.freeze_panes = "C7"
+        # TC 메타 열은 블록 전체 병합 — 정본이 그렇다(B5:B40 · E5:E40 · F5:F40 · G5:G40 · GV5:GV40).
+        _block_end = current_row - 1
+        if _block_end > _tc_row:
+            for mc in (_TCID_COL, _SAFETY_COL, _METHOD_COL, _GEN_COL, _RELATED_COL):
+                try:
+                    ws.merge_cells(start_row=_tc_row, start_column=mc,
+                                   end_row=_block_end, end_column=mc)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.debug("SITS TC merge skipped (col %d, %d:%d): %s",
+                                  mc, _tc_row, _block_end, exc)
+
+    # Freeze panes — 헤더 아래 첫 데이터 행에서 고정
+    ws.freeze_panes = f"C{_DATA_START_ROW}"
 
     # Save
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(out_path))
-    _logger.info("SITS XLSM saved: %s (rows=%d)", out_path.name, current_row - 7)
+    _logger.info("SITS XLSM saved: %s (rows=%d)", out_path.name, current_row - _DATA_START_ROW)
     return str(out_path)
 
 

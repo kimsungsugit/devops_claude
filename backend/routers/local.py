@@ -1952,16 +1952,21 @@ def local_traceability(
             try:
                 import openpyxl
                 wb = openpyxl.load_workbook(str(latest_sts), read_only=True, data_only=True)
-                if "3.SW Integration Test Spec" in wb.sheetnames:
-                    ws = wb["3.SW Integration Test Spec"]
+                # ⚠ 시트명을 문자열로 박지 않는다. STS 정본의 시트는 `3.SW Test Spec`
+                #   이고, 예전에 박혀 있던 `3.SW Integration Test Spec` 은 SwITS 의
+                #   시트명이라 정본을 읽으면 **한 건도 못 찾고 조용히 빈 목록**이 됐다.
+                from generators.sts import _STS_SHEET_CANDIDATES, STS_COL
+                _sheet = next((n for n in _STS_SHEET_CANDIDATES if n in wb.sheetnames), None)
+                if _sheet:
+                    ws = wb[_sheet]
                     for r in range(7, (ws.max_row or 7) + 1):
-                        tc_id = ws.cell(row=r, column=2).value
+                        tc_id = ws.cell(row=r, column=STS_COL["tc_id"]).value
                         if tc_id:
                             sts_test_cases.append({
                                 "tc_id": str(tc_id),
-                                "title": str(ws.cell(row=r, column=3).value or ""),
-                                "method": str(ws.cell(row=r, column=6).value or ""),
-                                "srs_id": str(ws.cell(row=r, column=13).value or ""),
+                                "title": str(ws.cell(row=r, column=STS_COL["title"]).value or ""),
+                                "method": str(ws.cell(row=r, column=STS_COL["test_method"]).value or ""),
+                                "srs_id": str(ws.cell(row=r, column=STS_COL["srs"]).value or ""),
                             })
                 wb.close()
             except Exception:

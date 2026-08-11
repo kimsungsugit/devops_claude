@@ -134,20 +134,29 @@ def test_canonical_suts_columns_come_from_generator_constant():
     from workflow.impact_doc_draft import canonical_suts_columns
 
     got = canonical_suts_columns()
-    assert got["fixed"][0] == "Component"       # 열 순서(2번 컬럼부터)
-    assert got["fixed"][1] == "TC ID"
+    # 열 순서는 **납품 정본**(KJPDS02_SwUTS v1.02) 기준이다 — B=Index 부터.
+    assert got["fixed"][0] == "Index"
+    assert got["fixed"][1] == "TC_ID"
+    assert got["fixed"][2] == "Unit"
     assert got["related"] == "SUDS"
     assert len(got["fixed"]) == len(_FIXED_HEADERS)
     assert all("\n" not in h for h in got["fixed"]), "TSV 셀에 개행이 들어가면 행이 깨진다"
-    assert "Safety Related" in got["fixed"]      # 개행 → 공백으로 편 것
+    assert "Safety Related" in got["fixed"]
+    # ⚠ STS 정본의 열이 SUTS 로 새어 들어오면 안 된다(예전 판이 그랬다 — 열이 밀렸다).
+    for leaked in ("Description", "Test Environment", "Precondition", "Sequence"):
+        assert leaked not in got["fixed"], f"{leaked} 는 STS 정본의 열이다"
 
 
 def test_canonical_sits_columns_come_from_generator_constant():
     from workflow.impact_doc_draft import canonical_sits_columns
 
     got = canonical_sits_columns()
+    # 열 순서는 **납품 정본**(KJPDS02_PV_SwITS v1.02) 기준.
     assert got["fixed"] == ["TC ID", "Description", "Call Chain",
-                            "Test Case Generation Method", "Precondition"]
+                            "Safety Related", "Test Method",
+                            "Test Case Generation Method"]
+    # ⚠ `Precondition` 은 SwTS 정본의 열이다 — SwITS 로 새어 들어오면 열이 밀린다.
+    assert "Precondition" not in got["fixed"]
     assert got["related"] == "SwDS"
 
 

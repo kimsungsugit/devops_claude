@@ -27,23 +27,68 @@ _logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_INPUT_COL_START = 14      # C14
-_INPUT_COL_END = 62        # C62  (max 49 input vars)
-_OUTPUT_COL_START = 63     # C63
-_OUTPUT_COL_END = 148      # C148 (max 86 output vars)
-_RELATED_COL = 149         # C149
-_SEQ_COL = 13              # C13
+# ── 시트 레이아웃 — **납품 정본 기준** (KJPDS02_SwUTS v1.02, 189열) ──────────
+#
+# ⚠ 회사 표준 템플릿(v0.10)이 아니라 **정본**을 따른다. 실측(2026-08-11):
+#   - 표준 템플릿 v0.10 = 28열. Input/Expected 가 `Param 1~10` 고정이고
+#     Safety Related·Test Method 열이 **없다**. 실제 함수는 파라미터가 최대 96개라
+#     템플릿 폭으로는 담기지 않는다.
+#   - 정본 v1.02 = 189열. 프로젝트가 템플릿을 확장한 형태이고, 이것이 납품물이다.
+#
+# ⚠ 이전 판은 셋 중 **어느 것도 아닌 제3의 레이아웃**이었다(149열). `Description`
+#   `Test Environment` `Precondition` `Sequence` 4열은 **STS 정본의 열**이라
+#   SUTS 에 와 있으면 안 된다 — 열이 밀려 정본 파서가 전부 잘못 읽는다.
+#
+# 정본 실측 구조:
+#   r3 밴드 : B3:G3 'Test Case' · H3:CZ3 'Input' · DA3:GF3 'Expected Result' · GG3 'Related ID'
+#   r4 헤더 : B Index · C TC_ID · D Unit · E Safety Related · F Test Method
+#             · G Test Case Generation Method · H ' '(시퀀스 번호) · I~ Inpt[n] · DA~ ExpR[n] · GG SUDS
+#   r5~     : TC 블록 = 변수명 행 1개 + 시퀀스 행 N개 (B/C/D/E/GG 는 블록 전체 병합)
+_BAND_ROW = 3
+_HEADER_ROW = 4
+_DATA_START_ROW = 5
 
-# Row 6 고정 컬럼 헤더(열 번호 → 라벨). `generate_suts_xlsm`이 시트에 쓰는 값이자,
-# 영향도 탭의 문서 초안이 Excel 붙여넣기 TSV 열 순서를 얻는 **단일 출처**다
-# (예전엔 함수 지역변수라 밖에서 못 읽어 재작성될 뻔했다 — 복제 금지).
+_COL_INDEX = 2             # B   Index (연번 — 정본은 1..1014 연속)
+_COL_TC_ID = 3             # C   TC_ID
+_COL_UNIT = 4              # D   Unit (함수명)
+_COL_SAFETY = 5            # E   Safety Related (O/X)
+_COL_METHOD = 6            # F   Test Method (REQ/FI) — **시퀀스 그룹 단위**
+_COL_GEN = 7               # G   Test Case Generation Method — 시퀀스 그룹 단위
+_SEQ_COL = 8               # H   시퀀스 번호 (헤더는 공백 한 칸 — 정본 그대로)
+_INPUT_COL_START = 9       # I   Inpt[0]
+_INPUT_COL_END = 104       # CZ  Inpt[95]
+_OUTPUT_COL_START = 105    # DA  ExpR[0]
+_OUTPUT_COL_END = 188      # GF  ExpR[83]
+_RELATED_COL = 189         # GG  SUDS
+
+# 헤더 행(열 번호 → 라벨). `generate_suts_xlsm`이 시트에 쓰는 값이자, 영향도 탭의
+# 문서 초안이 Excel 붙여넣기 TSV 열 순서를 얻는 **단일 출처**다(복제 금지).
 _FIXED_HEADERS = {
-    2: "Component", 3: "TC ID", 4: "Name", 5: "Description",
-    6: "Safety\nRelated", 7: "Test\nEnvironment", 8: "Test\nMethod",
-    9: "Gen.\nMethod", 10: "Precondition",
-    11: "Sequence", 12: "Test Case\nGen.Method", _SEQ_COL: "Seq.\nNo.",
+    _COL_INDEX: "Index",
+    _COL_TC_ID: "TC_ID",
+    _COL_UNIT: "Unit",
+    _COL_SAFETY: "Safety Related",
+    _COL_METHOD: "Test Method",
+    _COL_GEN: "Test Case Generation Method",
+    _SEQ_COL: " ",
 }
-_RELATED_HEADER = "SUDS"   # Row 6의 Related ID 컬럼 라벨
+_RELATED_HEADER = "SUDS"   # Related ID 컬럼 라벨
+
+# ── 값 어휘 — 정본과 Introduction(1.5/1.6)에서 온다 ─────────────────────────
+#
+# ⚠ 이전 판은 `FIT`/`FNCT`/`RVW` 를 썼다. 그건 **STS 어휘**이고 SwUTS Introduction
+#   1.5 표에 아예 없는 값이다. 정본 실측: REQ 1,437 · FI 815 (그 둘뿐).
+_METHOD_REQ = "REQ"        # Requirements based test — 유효 범위 시험
+_METHOD_FI = "FI"          # Fault Injection Test — 유효 범위 밖 시험
+# 유효 범위를 벗어나는 값을 넣는 전략 = 고장 주입. 정본도 경계 초과 시퀀스를 FI 로 묶는다
+# (첫 TC: seq 1~3 REQ / 4~7 FI).
+_FI_STRATEGIES = frozenset({"BV_MIN_INV", "BV_MAX_INV", "ERROR_PATH"})
+
+# ⚠ 결합자는 **문서마다 다르다**. SwUTS 정본은 슬래시(`AOR/ABV`), SwITS 정본은
+#   쉼표(`AOR, AEC`). 통일하지 말 것 — 각 정본을 따른다.
+#   정본 실측: AOR/ABV 1,638 · AOR/AEC 636 (그 둘뿐).
+_GEN_BOUNDARY = "AOR/ABV"  # 경계값 분석
+_GEN_EQUIV = "AOR/AEC"     # 등가 분할(조건·분기 조합)
 
 _MAX_SEQUENCES = 10
 _DEFAULT_SEQ_COUNT = 24  # 6 BV + 4 COND + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 6 MC/DC
@@ -617,8 +662,44 @@ def determine_gen_method(unit: Dict[str, Any]) -> str:
     return "AOR"
 
 
+def resolve_safety_related(asil: Any) -> str:
+    """정본의 `Safety Related` 칸 값 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
+
+    ⚠ 이전 판은 `"X" if is_safety else ""` 였다. **의미가 정반대**다 — 정본은
+    `O` 566 · `X` 311 로 두 값을 다 쓰고(실측), `O` 가 안전 관련이다. ASIL 을 가진
+    단위가 문서상 "비안전"으로 읽히고 있었다.
+
+    ⚠ 근거가 없을 때(`""`/`TBD`) **`X` 로 단정하지 않는다.** `X` 는 "확인했고 안전
+    관련이 아니다" 라는 주장이고, 모르는 것을 그렇게 적으면 under-classification 이다.
+    정본에도 빈칸이 137개 있다 — 빈칸이 정직한 표기다.
+    """
+    val = str(asil or "").strip().upper()
+    if val in ("A", "B", "C", "D") or val.startswith("ASIL"):
+        return "O"
+    if val == "QM":
+        return "X"
+    return ""
+
+
+def resolve_seq_test_method(strategy: Any) -> str:
+    """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다."""
+    return _METHOD_FI if str(strategy or "").strip() in _FI_STRATEGIES else _METHOD_REQ
+
+
+def resolve_seq_gen_method(strategy: Any) -> str:
+    """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
+    s = str(strategy or "").strip()
+    if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC"):
+        return _GEN_EQUIV
+    return _GEN_BOUNDARY
+
+
 def determine_test_method(unit: Dict[str, Any]) -> str:
-    """Infer a unit-test method label for the fixed SUTS columns."""
+    """Infer a unit-test method label for the fixed SUTS columns.
+
+    ⚠ 정본 시트에는 쓰이지 않는다(정본은 시퀀스 그룹별 `resolve_seq_test_method`).
+    Traceability 시트·요약 통계가 아직 쓰므로 남겨 둔다.
+    """
     logic = unit.get("logic_flow") or []
     has_conditions = any(n.get("type") in ("if", "switch") for n in logic if isinstance(n, dict))
     has_loops = any(n.get("type") == "loop" for n in logic if isinstance(n, dict))
@@ -1570,44 +1651,48 @@ def generate_suts_xlsm(
             except Exception:
                 pass
 
-    _fill_and_merge(5, 2, 2, "Component/Unit")
-    _fill_and_merge(5, 3, _SEQ_COL, "Test Case")       # cols 3–13
-    _fill_and_merge(5, _INPUT_COL_START, _INPUT_COL_END, "Input")
-    _fill_and_merge(5, _OUTPUT_COL_START, _OUTPUT_COL_END, "Expected Result")
-    _fill_and_merge(5, _RELATED_COL, _RELATED_COL, "Related ID")
-    ws.row_dimensions[5].height = 18
+    # 밴드 행 — 정본 실측: B3:G3 · H3:CZ3 · DA3:GF3 · GG3
+    # ⚠ 'Input' 밴드는 시퀀스 번호 열(H)부터 시작한다. 정본 그대로다.
+    _fill_and_merge(_BAND_ROW, _COL_INDEX, _COL_GEN, "Test Case")
+    _fill_and_merge(_BAND_ROW, _SEQ_COL, _INPUT_COL_END, "Input")
+    _fill_and_merge(_BAND_ROW, _OUTPUT_COL_START, _OUTPUT_COL_END, "Expected Result")
+    _fill_and_merge(_BAND_ROW, _RELATED_COL, _RELATED_COL, "Related ID")
+    ws.row_dimensions[_BAND_ROW].height = 18
 
-    # Row 6: sub-headers (fixed columns) — 정의는 모듈 상수 `_FIXED_HEADERS`(단일 출처).
-    # Cols 11 (K)=Sequence(action text), 12 (L)=Test Case Gen.Method(per-seq), 13 (M)=Seq No.
+    # 헤더 행 — 정의는 모듈 상수 `_FIXED_HEADERS`(단일 출처).
     for c, h in _FIXED_HEADERS.items():
-        cell = ws.cell(row=6, column=c, value=h)
+        cell = ws.cell(row=_HEADER_ROW, column=c, value=h)
         cell.font = hdr_font
         cell.fill = hdr_fill
         cell.border = thin
         cell.alignment = center
 
-    ws.cell(row=6, column=_RELATED_COL, value="SUDS").font = hdr_font
-    ws.cell(row=6, column=_RELATED_COL).fill = hdr_fill
-    ws.cell(row=6, column=_RELATED_COL).border = thin
-    ws.cell(row=6, column=_RELATED_COL).alignment = center
-    ws.row_dimensions[6].height = 34.5  # matches reference row 6 height
+    ws.cell(row=_HEADER_ROW, column=_RELATED_COL, value=_RELATED_HEADER).font = hdr_font
+    ws.cell(row=_HEADER_ROW, column=_RELATED_COL).fill = hdr_fill
+    ws.cell(row=_HEADER_ROW, column=_RELATED_COL).border = thin
+    ws.cell(row=_HEADER_ROW, column=_RELATED_COL).alignment = center
 
-    # Column widths
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 22
-    ws.column_dimensions["D"].width = 32
-    ws.column_dimensions["E"].width = 60.0  # Description (function prototype — matches reference)
-    ws.column_dimensions["F"].width = 9
-    ws.column_dimensions["G"].width = 12
-    ws.column_dimensions["H"].width = 10
-    ws.column_dimensions["I"].width = 12
-    ws.column_dimensions["J"].width = 26.75
-    ws.column_dimensions["K"].width = 52.75  # Sequence action text — matches reference
-    ws.column_dimensions["L"].width = 13.0   # Test Case Gen.Method per-seq — matches reference
-    ws.column_dimensions["M"].width = 7      # Seq. No.
+    # Inpt[n] / ExpR[n] 슬롯 라벨 — 정본은 헤더 행에 이 이름을 둔다(변수명은 TC 행).
+    for idx, col in enumerate(range(_INPUT_COL_START, _INPUT_COL_END + 1)):
+        cell = ws.cell(row=_HEADER_ROW, column=col, value=f"Inpt[{idx}]")
+        cell.font, cell.fill, cell.border, cell.alignment = hdr_font, hdr_fill, thin, center
+    for idx, col in enumerate(range(_OUTPUT_COL_START, _OUTPUT_COL_END + 1)):
+        cell = ws.cell(row=_HEADER_ROW, column=col, value=f"ExpR[{idx}]")
+        cell.font, cell.fill, cell.border, cell.alignment = hdr_font, hdr_fill, thin, center
+    ws.row_dimensions[_HEADER_ROW].height = 34.5
+
+    # Column widths — 정본 기준(고정 열만; Inpt/ExpR 는 변수명 길이로 아래에서 잡는다)
+    ws.column_dimensions["B"].width = 7       # Index
+    ws.column_dimensions["C"].width = 24      # TC_ID
+    ws.column_dimensions["D"].width = 34      # Unit
+    ws.column_dimensions["E"].width = 9       # Safety Related
+    ws.column_dimensions["F"].width = 11      # Test Method
+    ws.column_dimensions["G"].width = 14      # TC Generation Method
+    ws.column_dimensions["H"].width = 5       # 시퀀스 번호
+    ws.column_dimensions[get_column_letter(_RELATED_COL)].width = 16  # SUDS
 
     # --- Data rows ---
-    row_num = 7
+    row_num = _DATA_START_ROW
     tc_count = 0
     total_seq = 0
 
@@ -1618,49 +1703,26 @@ def generate_suts_xlsm(
             seqs = [{"seq_num": 1, "inputs": {}, "expected": {}, "strategy": "N/A"}]
 
         tc_id = f"SwUTC_{fid}"
-        gen_method = determine_gen_method(unit)
-        test_method = determine_test_method(unit)
-        description_parts = []
-        if unit.get("description"):
-            description_parts.append(str(unit["description"]).strip())
-        prototype = str(unit.get("prototype") or "").strip()
-        if prototype:
-            description_parts.append(prototype)
-        tc_description = "\n".join(part for part in description_parts if part)[:500]
-        is_safety = str(unit.get("asil") or "").strip().upper() not in ("", "QM", "TBD")
-        # SRS req IDs: append to description so they're visible in the TC row
-        srs_ids = str(unit.get("srs_req_ids") or "").strip()
-        if srs_ids:
-            tc_description = (tc_description + f"\n[SRS: {srs_ids}]").strip()
-        n_seq = len(seqs)
         start_row = row_num
 
-        # TC definition row — fixed meta columns (cols 11-13 are per-seq, left empty here)
-        _CENTER_TC = {6, 7, 8, 9}  # short single-value columns → center align
-        ws.cell(row=row_num, column=2, value=unit["component"]).font = data_font
-        ws.cell(row=row_num, column=3, value=tc_id).font = data_font
-        ws.cell(row=row_num, column=4, value=unit["name"]).font = data_font
-        ws.cell(row=row_num, column=5, value=tc_description).font = data_font
-        ws.cell(row=row_num, column=6, value="X" if is_safety else "").font = data_font
-        ws.cell(row=row_num, column=6).alignment = center
-        ws.cell(row=row_num, column=7, value=_DEFAULT_TEST_ENV).font = data_font
-        ws.cell(row=row_num, column=7).alignment = center
-        ws.cell(row=row_num, column=8, value=test_method).font = data_font
-        ws.cell(row=row_num, column=8).alignment = center
-        ws.cell(row=row_num, column=9, value=gen_method).font = data_font
-        ws.cell(row=row_num, column=9).alignment = center
-        # Precondition: include SRS req IDs so they're visible in TC row
-        precond_base = str(unit.get("precondition") or "").strip()
-        if srs_ids and srs_ids not in precond_base:
-            precondition_val = f"SRS: {srs_ids}\n{precond_base}".strip()
-        else:
-            precondition_val = precond_base
-        ws.cell(row=row_num, column=10, value=precondition_val).font = data_font
-        # Col L (12): TC-level gen_method — merged across all TC rows (matches reference)
-        ws.cell(row=row_num, column=12, value=gen_method).font = data_font
-        ws.cell(row=row_num, column=12).alignment = center
-        ws.cell(row=row_num, column=_RELATED_COL, value=fid).font = data_font
-        ws.cell(row=row_num, column=_RELATED_COL).alignment = center
+        # TC 정의 행 — 정본에서 이 행은 **변수명 행**이다. 시퀀스 번호·Test Method·
+        # TC Gen Method 는 여기 쓰지 않는다(아래 시퀀스 그룹에서 쓴다).
+        ws.cell(row=row_num, column=_COL_INDEX, value=tc_count + 1).font = data_font
+        ws.cell(row=row_num, column=_COL_INDEX).alignment = center
+        ws.cell(row=row_num, column=_COL_TC_ID, value=tc_id).font = data_font
+        ws.cell(row=row_num, column=_COL_UNIT, value=unit["name"]).font = data_font
+        ws.cell(row=row_num, column=_COL_SAFETY,
+                value=resolve_safety_related(unit.get("asil"))).font = data_font
+        ws.cell(row=row_num, column=_COL_SAFETY).alignment = center
+        # SUDS(설계 ID) — 확보하지 못하면 **빈칸**으로 둔다.
+        # ⚠ 이전 판은 `fid`(= 소스 파싱 순번 `SwUFn_{n:04d}`)를 그대로 적었다. 그건
+        #   SwUDS 가 부여한 설계 ID 가 아니라 이 실행에서 만든 번호라, 모양만 맞고
+        #   **다른 설계 요소를 가리킨다**(정본과 교집합 178/251 — 나머지는 오조준).
+        #   틀린 ID 가 추적성으로 보이는 것이 빈칸보다 나쁘다.
+        suds_id = str(unit.get("suds_id") or unit.get("design_id") or "").strip()
+        if suds_id:
+            ws.cell(row=row_num, column=_RELATED_COL, value=suds_id).font = data_font
+            ws.cell(row=row_num, column=_RELATED_COL).alignment = center
 
         # Input variable names in TC row
         input_vars = unit.get("input_vars", [])
@@ -1701,28 +1763,23 @@ def generate_suts_xlsm(
 
         row_num += 1
 
-        # Sequence rows
+        # 시퀀스 행 — Test Method / TC Gen Method 는 **연속된 같은 값끼리 묶어** 쓴다.
+        # 정본이 그렇게 돼 있다(첫 TC: seq 1~3 = REQ, 4~7 = FI 로 F열이 두 번 병합).
+        # 값이 바뀌는 지점에서만 쓰고, 아래 `_seq_groups` 로 병합한다.
+        _seq_groups: List[Tuple[int, int, str, str]] = []   # (start_row, end_row, method, gen)
         for seq in seqs:
             ws.cell(row=row_num, column=_SEQ_COL, value=seq["seq_num"]).font = data_font
             ws.cell(row=row_num, column=_SEQ_COL).alignment = center
             ws.cell(row=row_num, column=_SEQ_COL).border = thin
 
-            # Col K (11): Sequence — full action description text (matches reference "Sequence" col)
-            # Combine strategy tag + description into a readable action text
             strategy_val = str(seq.get("strategy", "") or "")
-            seq_desc = str(seq.get("description", "") or "")
-            if strategy_val and seq_desc:
-                sequence_text = f"[{strategy_val}] {seq_desc}"
-            elif seq_desc:
-                sequence_text = seq_desc
+            s_method = resolve_seq_test_method(strategy_val)
+            s_gen = resolve_seq_gen_method(strategy_val)
+            if _seq_groups and _seq_groups[-1][2] == s_method and _seq_groups[-1][3] == s_gen:
+                g = _seq_groups[-1]
+                _seq_groups[-1] = (g[0], row_num, g[2], g[3])
             else:
-                sequence_text = strategy_val
-            ws.cell(row=row_num, column=11, value=sequence_text).font = data_font
-            ws.cell(row=row_num, column=11).alignment = Alignment(wrap_text=True, vertical="top")
-            ws.cell(row=row_num, column=11).border = thin
-
-            # Col 12 (L) is TC-level gen_method, written only in tc_def_row and merged.
-            # No per-seq data written to col 12.
+                _seq_groups.append((row_num, row_num, s_method, s_gen))
 
             # Input values
             for vi, vname in enumerate(input_vars):
@@ -1751,11 +1808,27 @@ def generate_suts_xlsm(
             row_num += 1
             total_seq += 1
 
-        # Merge fixed TC-metadata columns across TC def row + all sequence rows
-        # Cols 11 (strategy), 12 (description), 13 (seq_no) are per-sequence — NOT merged
+        # Test Method / TC Gen Method — 그룹의 첫 행에 쓰고 그룹 범위로 병합한다.
+        for g_start, g_end, g_method, g_gen in _seq_groups:
+            for col, val in ((_COL_METHOD, g_method), (_COL_GEN, g_gen)):
+                cell = ws.cell(row=g_start, column=col, value=val)
+                cell.font = data_font
+                cell.alignment = center
+                cell.border = thin
+                if g_end > g_start:
+                    try:
+                        ws.merge_cells(start_row=g_start, start_column=col,
+                                       end_row=g_end, end_column=col)
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.debug("seq group merge skipped (%s%d:%d): %s",
+                                      get_column_letter(col), g_start, g_end, exc)
+
+        # TC 메타 열은 블록 전체 병합 — 정본과 같다(B/C/D/E/GG 가 5:12 처럼 덮인다).
+        # ⚠ Test Method(F)·TC Gen Method(G)는 **제외**한다. 시퀀스 그룹 단위라
+        #   블록 전체로 병합하면 REQ/FI 구분이 사라진다.
         end_row = row_num - 1
         tc_def_row = start_row
-        merge_cols = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, _RELATED_COL]  # 12=col L (TC gen method)
+        merge_cols = [_COL_INDEX, _COL_TC_ID, _COL_UNIT, _COL_SAFETY, _RELATED_COL]
         if end_row > tc_def_row:
             for mc in merge_cols:
                 try:
@@ -1763,8 +1836,9 @@ def generate_suts_xlsm(
                         start_row=tc_def_row, start_column=mc,
                         end_row=end_row, end_column=mc,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    _logger.debug("TC meta merge skipped (col %d, %d:%d): %s",
+                                  mc, tc_def_row, end_row, exc)
 
         tc_count += 1
 
@@ -1867,7 +1941,7 @@ def _write_suts_traceability_sheet(wb, units, border, hdr_fill, hdr_font, data_f
 def _create_suts_cover(wb, project_id, doc_id, version, asil_level):
     ws = wb.active
     ws.title = "Cover"
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     title_font = Font(name="맑은 고딕", size=24, bold=True)
     label_font = Font(name="맑은 고딕", size=9, bold=True)
     data_font = Font(name="맑은 고딕", size=9)
@@ -1928,7 +2002,7 @@ def _create_suts_cover(wb, project_id, doc_id, version, asil_level):
 
 
 def _create_suts_history(wb, version):
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     ws = wb.create_sheet("History")
     hdr_font = Font(name="맑은 고딕", size=10, bold=True)
     data_font = Font(name="맑은 고딕", size=9)
@@ -2669,10 +2743,10 @@ def generate_suts(
 def _lightweight_parse(source_root: str) -> Dict[str, Dict[str, Any]]:
     """Lightweight C source parsing when full report_generator is unavailable."""
     from report.c_parsing import (
-        _strip_c_comments,
         _extract_c_definitions,
         _extract_c_function_bodies,
         _extract_simple_call_names,
+        _strip_c_comments,
     )
 
     root = Path(source_root)
@@ -2895,13 +2969,22 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
         seq_count = 0
         total_inp = 0
         total_out = 0
-        for r in range(7, (ws.max_row or 7) + 1):
-            tc_id = ws.cell(row=r, column=3).value
+        # ⚠ 열 번호를 하드코딩하지 않는다 — 레이아웃 상수에서 파생한다. 예전엔
+        #   `range(14,63)`·`column=11` 이 박혀 있어, 레이아웃이 바뀌면 검증기가
+        #   조용히 0을 세고 그 0이 "이슈 없음"으로 통과했다(fail-open).
+        for r in range(_DATA_START_ROW, (ws.max_row or _DATA_START_ROW) + 1):
+            tc_id = ws.cell(row=r, column=_COL_TC_ID).value
             if tc_id and str(tc_id).startswith("SwUTC"):
                 tc_count += 1
-                total_inp += sum(1 for c in range(14, 63) if ws.cell(row=r, column=c).value)
-                total_out += sum(1 for c in range(63, 149) if ws.cell(row=r, column=c).value)
-            elif ws.cell(row=r, column=11).value:
+                total_inp += sum(
+                    1 for c in range(_INPUT_COL_START, _INPUT_COL_END + 1)
+                    if ws.cell(row=r, column=c).value
+                )
+                total_out += sum(
+                    1 for c in range(_OUTPUT_COL_START, _OUTPUT_COL_END + 1)
+                    if ws.cell(row=r, column=c).value
+                )
+            elif ws.cell(row=r, column=_SEQ_COL).value:
                 seq_count += 1
 
         stats["tc_count"] = tc_count

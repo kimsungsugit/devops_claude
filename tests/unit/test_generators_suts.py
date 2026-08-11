@@ -9,12 +9,12 @@ import pytest
 
 from generators.suts import (
     collect_unit_functions,
-    determine_test_method,
-    infer_variable_type,
-    get_boundary_values,
     determine_gen_method,
+    determine_test_method,
     generate_sequences,
     generate_suts_xlsm,
+    get_boundary_values,
+    infer_variable_type,
 )
 
 
@@ -203,16 +203,63 @@ class TestGenerateSutsWorkbook:
         generate_suts_xlsm(None, units, all_sequences, str(out_path), {"project_id": "TEST"})
 
         openpyxl = pytest.importorskip("openpyxl")
+        from generators.suts import (
+            _COL_GEN,
+            _COL_INDEX,
+            _COL_METHOD,
+            _COL_SAFETY,
+            _COL_TC_ID,
+            _COL_UNIT,
+            _DATA_START_ROW,
+            _SEQ_COL,
+        )
         wb = openpyxl.load_workbook(str(out_path), read_only=True, data_only=True)
         ws = wb["2.SW Unit Test Spec"]
-        assert ws.cell(row=7, column=4).value == "S_Motor_Init"
-        assert ws.cell(row=7, column=5).value
-        assert ws.cell(row=7, column=6).value == "X"
-        assert ws.cell(row=7, column=7).value == "SwTE_01"
-        assert ws.cell(row=7, column=8).value == "FNCT"
-        assert ws.cell(row=7, column=9).value
-        assert ws.cell(row=7, column=10).value == "Power on reset complete"
+        tc_row = _DATA_START_ROW          # 변수명 행(정본 구조)
+        seq_row = _DATA_START_ROW + 1     # 첫 시퀀스 행
+        assert ws.cell(row=tc_row, column=_COL_INDEX).value == 1
+        assert ws.cell(row=tc_row, column=_COL_TC_ID).value == "SwUTC_SwUFn_001"
+        assert ws.cell(row=tc_row, column=_COL_UNIT).value == "S_Motor_Init"
+        # ⚠ `O` 여야 한다. 예전엔 안전 관련에 `X` 를 찍어 **정본과 의미가 반대**였다.
+        assert ws.cell(row=tc_row, column=_COL_SAFETY).value == "O"
+        # Test Method / TC Gen Method 는 TC 행이 아니라 **시퀀스 그룹 행**에 온다.
+        assert ws.cell(row=tc_row, column=_COL_METHOD).value is None
+        assert ws.cell(row=seq_row, column=_SEQ_COL).value == 1
+        assert ws.cell(row=seq_row, column=_COL_METHOD).value == "REQ"
+        assert ws.cell(row=seq_row, column=_COL_GEN).value == "AOR/ABV"
         wb.close()
+
+    def test_out_of_range_sequences_are_marked_fault_injection(self, tmp_path):
+        """정본은 유효 범위 밖 시퀀스를 `FI` 로 묶는다 — 한 method 로 뭉치면 안 된다."""
+        from generators.suts import _COL_METHOD, _DATA_START_ROW, generate_suts_xlsm
+
+        units = [{
+            "fid": "SwUFn_001", "name": "f", "component": "SwCom_01",
+            "input_vars": ["a"], "output_vars": [], "asil": "QM",
+        }]
+        seqs = {"SwUFn_001": [
+            {"seq_num": 1, "strategy": "BV_MID", "inputs": {"a": 1}, "expected": {}},
+            {"seq_num": 2, "strategy": "BV_MAX_INV", "inputs": {"a": 256}, "expected": {}},
+        ]}
+        out = tmp_path / "fi.xlsx"
+        generate_suts_xlsm(None, units, seqs, str(out), {"project_id": "T"})
+
+        openpyxl = pytest.importorskip("openpyxl")
+        ws = openpyxl.load_workbook(str(out), read_only=True, data_only=True)["2.SW Unit Test Spec"]
+        assert ws.cell(row=_DATA_START_ROW + 1, column=_COL_METHOD).value == "REQ"
+        assert ws.cell(row=_DATA_START_ROW + 2, column=_COL_METHOD).value == "FI"
+
+    def test_safety_related_never_invents_a_verdict(self):
+        """근거 없는 ASIL 을 `X`(=확인했고 비안전)로 단정하지 않는다."""
+        from generators.suts import resolve_safety_related
+
+        assert resolve_safety_related("A") == "O"
+        assert resolve_safety_related("ASIL-B") == "O"
+        assert resolve_safety_related("QM") == "X"
+        # 모르는 것은 빈칸이다 — `X` 로 적으면 under-classification 이다.
+        assert resolve_safety_related("") == ""
+        assert resolve_safety_related("TBD") == ""
+        assert resolve_safety_related(None) == ""
 
 
 class TestResolvedDocInput:

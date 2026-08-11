@@ -6,13 +6,13 @@ from __future__ import annotations
 import pytest
 
 from generators.sts import (
-    parse_requirements_structured,
-    generate_test_cases,
-    generate_traceability_matrix,
-    generate_quality_report,
-    map_requirements_to_functions,
     _classify_req_type,
     _make_tc_id,
+    generate_quality_report,
+    generate_test_cases,
+    generate_traceability_matrix,
+    map_requirements_to_functions,
+    parse_requirements_structured,
 )
 
 
@@ -245,11 +245,12 @@ class TestStsColumnSchemaSsot:
         assert _COL_HEADERS == [label for _, _, label in _STS_SCHEMA]
 
     def test_writer_columns_match_schema(self, tmp_path):
-        from generators.sts import _HEADER_ROW, STS_COL
+        from generators.sts import _HEADER_ROW, _SPEC_SHEET_NAME, STS_COL
         openpyxl = pytest.importorskip("openpyxl")
         path = self._write(tmp_path, [self._tc()])
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb["3.SW Integration Test Spec"]
+        # ⚠ 정본 시트명. 예전엔 SwITS 의 `3.SW Integration Test Spec` 에 쓰고 있었다.
+        ws = wb[_SPEC_SHEET_NAME]
         r = _HEADER_ROW + 1
         assert ws.cell(row=r, column=STS_COL["tc_id"]).value == "STS_001"
         assert ws.cell(row=r, column=STS_COL["action"]).value == "입력을 최소값으로 설정"
@@ -306,11 +307,11 @@ class TestStsColumnSchemaSsot:
 
     def test_shifted_template_is_read_by_header(self, tmp_path):
         """템플릿 열이 밀려도 헤더 라벨로 따라간다(상수만 믿으면 엉뚱한 열을 읽는다)."""
-        from generators.sts import _COL_HEADERS, _HEADER_ROW, validate_sts_xlsm
+        from generators.sts import _COL_HEADERS, _HEADER_ROW, _SPEC_SHEET_NAME, validate_sts_xlsm
         openpyxl = pytest.importorskip("openpyxl")
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "3.SW Integration Test Spec"
+        ws.title = _SPEC_SHEET_NAME
         shift = 2
         for ci, hdr in enumerate(_COL_HEADERS, 1):
             ws.cell(row=_HEADER_ROW, column=ci + shift, value=hdr)
@@ -329,11 +330,11 @@ class TestStsColumnSchemaSsot:
 
     def test_missing_header_falls_back_and_warns(self, tmp_path):
         """헤더가 없는 산출물은 상수 위치로 읽되, 그 사실을 경고로 남긴다(침묵 금지)."""
-        from generators.sts import _HEADER_ROW, STS_COL, validate_sts_xlsm
+        from generators.sts import _HEADER_ROW, _SPEC_SHEET_NAME, STS_COL, validate_sts_xlsm
         openpyxl = pytest.importorskip("openpyxl")
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "3.SW Integration Test Spec"
+        ws.title = _SPEC_SHEET_NAME
         r = _HEADER_ROW + 1
         ws.cell(row=r, column=STS_COL["tc_id"], value="STS_001")
         ws.cell(row=r, column=STS_COL["action"], value="액션")
