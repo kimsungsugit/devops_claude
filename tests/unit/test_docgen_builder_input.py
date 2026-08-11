@@ -118,6 +118,29 @@ def test_local_only_resolution_is_gone(rel: str) -> None:
     assert not found, f"{rel}: 로컬 전용 직독 판정이 {len(found)}곳 남아 있다"
 
 
+_DIRECT_DOC_READ = re.compile(
+    r"Path\((srs|sds|uds|hsis|stp|template)_path\)\.expanduser\(\)\.resolve\(\)\s*\n"
+    r"\s*if p\.exists\(\)"
+)
+
+
+@pytest.mark.parametrize("rel", ["backend/routers/jenkins.py", "backend/routers/local.py"])
+def test_document_paths_are_not_probed_directly(rel: str) -> None:
+    """문서 경로에 `Path(...).exists()` 를 직접 쓰면 안 된다.
+
+    cloudium `U:` 에서 **`PermissionError` 가 그대로 전파**돼
+    `[WinError 5] 액세스가 거부되었습니다` 로 500 이 난다(실제 사용자 보고 — 화면에서
+    STS 를 만들다 이 오류를 봤다).
+
+    선택 입력은 이미 worker 경유였는데 `srs_path`(5곳)와 `template_path`(7곳)만 **별도
+    블록**이라 빠져 있었다 — 같은 판정이 여러 벌이면 한쪽만 고쳐진다는 이 저장소의
+    반복 결함 그대로다.
+    """
+    text = (REPO / rel).read_text(encoding="utf-8", errors="ignore")
+    found = _DIRECT_DOC_READ.findall(text)
+    assert not found, f"{rel}: 문서 경로 직독이 {len(found)}곳 남아 있다 {sorted(set(found))}"
+
+
 @pytest.mark.parametrize("rel", ["backend/routers/jenkins.py", "backend/routers/local.py"])
 def test_routers_use_shared_resolver(rel: str) -> None:
     text = (REPO / rel).read_text(encoding="utf-8", errors="ignore")

@@ -3176,10 +3176,13 @@ async def jenkins_sts_generate_async(
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
     srs_docx_path: Optional[str] = ""
+    # ⚠ 예전엔 `Path(srs_path).exists()` 직독이었다. cloudium `U:` 경로에서
+    #   **`PermissionError` 가 그대로 전파**돼 `[WinError 5] 액세스가 거부되었습니다` 로
+    #   500 이 났다(사용자 보고). 다른 선택 문서는 이미 worker 경유인데 SRS 만 별도
+    #   블록이라 빠져 있었다 — 같은 판정이 두 벌이면 한쪽만 고쳐진다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
     # 탈락한 요구사항 문서의 **사유**를 모은다 — 예전엔 `except Exception: continue`
     # 라 경로 오타·권한 없음·본문 0자가 전부 같은 침묵이었고, 마지막에 나오는
     # "SRS document is required" 가 원인과 무관한 안내가 됐다(실측: cloudium 모드에서
@@ -3240,10 +3243,11 @@ async def jenkins_sts_generate_async(
                         len(opt_skips), "; ".join(opt_skips)[:400])
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기(openpyxl/python-docx)가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "sts", f"sts_{_job_slug(job_url)}", tpl_path)
     project_config = {
         "project_id": project_id or "PROJECT",
@@ -3388,10 +3392,11 @@ def jenkins_suts_generate_async(
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기(openpyxl/python-docx)가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "suts", f"suts_{_job_slug(job_url)}", tpl_path)
     project_config = {
         "project_id": project_id or "PROJECT",

@@ -1839,10 +1839,11 @@ def local_traceability(
     )
 
     srs_docx: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError 를 그대로 던져 500 이 된다
+    #   (`jenkins.py` STS 핸들러와 같은 결함 — 판정이 5벌이라 한쪽만 고쳐졌었다).
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx = str(p)
+        srs_docx = _rbi(srs_path, label="SRS") or ""
 
     # Parse SDS component mapping (V-Model 설계 계층)
     # 추적 정화: sds_req_to_comps=컴포넌트+함수 전체(브리지/함수 표시용), sds_req_to_design_comps=
@@ -2218,10 +2219,10 @@ async def local_sts_generate(
 
     # Resolve SRS path
     srs_docx_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
 
     # Collect requirement text from paths/uploads
     req_paths_list = _parse_path_list(req_paths)
@@ -2319,10 +2320,11 @@ async def local_sts_generate(
 
     # Resolve template
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     # Output path
     base_dir = _resolve_report_dir(report_dir)
@@ -2414,10 +2416,10 @@ async def local_sts_generate_stream(
     reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
 
     req_paths_list = _parse_path_list(req_paths)
     req_texts: List[str] = []
@@ -2500,10 +2502,11 @@ async def local_sts_generate_stream(
                         len(opt_skips2), "; ".join(opt_skips2)[:400])
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sts", "sts_local", tpl_path)
@@ -2605,10 +2608,10 @@ async def local_sts_generate_async(
     reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
 
     req_paths_list = _parse_path_list(req_paths)
     req_texts: List[str] = []
@@ -2691,10 +2694,11 @@ async def local_sts_generate_async(
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sts", "sts_local", tpl_path)
@@ -2904,10 +2908,11 @@ def local_suts_generate(
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3008,10 +3013,11 @@ def local_suts_generate_stream(
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3132,10 +3138,11 @@ def local_suts_generate_async(
     )
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3331,10 +3338,11 @@ def local_sits_generate(
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3437,10 +3445,11 @@ def local_sits_generate_stream(
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3563,10 +3572,11 @@ def local_sits_generate_async(
     )
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     # 선택 입력 worker 경유. SITS 는 선택 문서가 5종(SRS·SDS·UDS·HSIS·STP)이라
     # 직독 시절엔 cloudium 에서 **다섯 개가 통째로** 빠진 채 만들어졌다.
