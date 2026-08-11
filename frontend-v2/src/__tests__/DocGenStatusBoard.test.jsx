@@ -322,6 +322,21 @@ describe('DocGenStatusBoard — 시험 결과 문서 원클릭 생성', () => {
     }
   });
 
+  it('통합 Summary 는 프로젝트가 아니라 **양식 ID** 로 표시한다', async () => {
+    // `ES95411` 은 마스터 양식 문서 ID 다(SWREPORT_DEFAULT_FORM 주석). '대상' 으로
+    // 쓰면 사용자가 "이 프로젝트가 왜 여기 있지" 라고 읽는다 — 실제 보고된 혼란.
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📊 통합 Summary'));
+    expect(within(tr).getByText(/양식/)).toBeInTheDocument();
+    expect(within(tr).queryByText(/대상/)).toBeNull();
+  });
+
+  it('통합 Summary 에는 범위 불일치 경고를 내지 않는다 — 비교 대상이 아니다', async () => {
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📊 통합 Summary'));
+    expect(within(tr).queryByText(/화면 범위/)).toBeNull();
+  });
+
   it('릴리스 버전이 없으면 생성이 막히고 "입력 필요" 라고 말한다', async () => {
     mountBoard();
     const tr = await waitFor(() => rowOf('🧪 SUTR'));

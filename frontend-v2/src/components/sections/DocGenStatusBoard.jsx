@@ -531,7 +531,14 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         // 화면 범위와 빌드 대상이 다르면 다른 프로젝트 문서를 만들게 된다 —
         // 조용히 진행하지 않고 행에 표시한다(자동 교정은 하지 않는다: swut_meta.json
         // 에 등록되지 않은 project_id 로 바꾸면 빌드가 통째로 실패한다).
-        scopeMismatch: !!(scmId && projectId && scmId.toLowerCase() !== projectId.toLowerCase()),
+        // ⚠ 통합 Summary 의 `project_id` 는 **프로젝트가 아니라 마스터 양식 ID**다
+        //   (`ES95411`, `SWREPORT_DEFAULT_FORM` 주석 참조). SCM id 와 비교하면 항상
+        //   "다릅니다" 가 떠서, 사용자가 "ES95411 은 뭐야?" 라고 묻게 된다 — 거짓 경고다.
+        //   ⚠ `scmId` 는 SCM 등록 id 이고 `project_id` 는 양식 설정(swut_meta) 키라
+        //   애초에 다른 어휘다. 정확히 같을 때만 안전하다고 볼 수 있으므로 비교는
+        //   유지하되, 비교가 성립하지 않는 축은 제외한다.
+        scopeMismatch: row.builder !== 'swreport'
+          && !!(scmId && projectId && scmId.toLowerCase() !== projectId.toLowerCase()),
       };
     });
   }, [runs, versionEdit, scmId]);
@@ -683,7 +690,11 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                       <strong>{row.icon} {row.label}</strong>
                       <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
                         {row.desc}
-                        {row.projectId && <> · 대상 <code>{row.projectId}</code></>}
+                        {/* 통합 Summary 의 값은 프로젝트가 아니라 **마스터 양식 ID** 다. */}
+                        {row.projectId && (
+                          <> · {row.builder === 'swreport' ? '양식' : '대상'}{' '}
+                            <code>{row.projectId}</code></>
+                        )}
                       </div>
                       {row.scopeMismatch && (
                         <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
