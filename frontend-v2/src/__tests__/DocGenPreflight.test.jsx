@@ -234,6 +234,42 @@ describe('DocGenPreflightPanel', () => {
     expect(screen.getByText('SwDS(설계서)')).toBeInTheDocument();
   });
 
+  // ── 입력 변수가 없는 unit — 사유를 나누지 않으면 전부 결함으로 읽힌다 ──────
+  //
+  // 실측(2026-08-12): 948 TC 중 338 건이 입력 0개. 그런데 정본도 1,005 중 172 건이
+  // 0 이다. 한 숫자로 합쳐 그리면 읽는 사람은 338 을 전부 결함으로 읽는다.
+
+  const zeroInputStep = (causes) => ({
+    id: 'suts_inputs', phase: 'material', state: 'degraded', label: '입력 변수가 없는 unit',
+    measured: { value: 183, of: 750, reference_pct: 17.1, causes },
+  });
+
+  it('사유별로 나눠 그린다 — 건수만 내면 판단이 안 된다', () => {
+    renderPanel(base([zeroInputStep({ no_params_no_globals: 79, param_string_unusable: 28 })]));
+    expect(screen.getByText(/파라미터·전역 없음 79/)).toBeInTheDocument();
+    expect(screen.getByText(/파라미터 문자열 손상 28/)).toBeInTheDocument();
+  });
+
+  it('정상 사유와 결함 사유를 같은 무게로 그리지 않는다', () => {
+    renderPanel(base([zeroInputStep({ no_params_no_globals: 79, dropped_by_name_filter: 5 })]));
+    const normal = screen.getByText(/파라미터·전역 없음 79/);
+    const defect = screen.getByText(/이름 추출이 버림 5/);
+    expect(defect).toHaveTextContent('⚠');
+    expect(normal).not.toHaveTextContent('⚠');
+    expect(defect.style.fontWeight).toBe('600');
+    expect(normal.style.fontWeight).not.toBe('600');
+  });
+
+  it('정본 기준선을 함께 보인다 — 건수만으로는 많은지 알 수 없다', () => {
+    renderPanel(base([zeroInputStep({ no_params_no_globals: 79 })]));
+    expect(screen.getByText(/정본 17\.1%/)).toBeInTheDocument();
+  });
+
+  it('사유가 0 건인 축은 그리지 않는다 — 없는 결함을 조치항목으로 만들지 않는다', () => {
+    renderPanel(base([zeroInputStep({ no_params_no_globals: 79, dropped_by_name_filter: 0 })]));
+    expect(screen.queryByText(/이름 추출이 버림/)).toBeNull();
+  });
+
   it('measured 의 partial 은 절단을 침묵시키지 않는다', () => {
     renderPanel(base([{
       id: 'comment_coverage', phase: 'material', state: 'degraded', label: '소스 주석',

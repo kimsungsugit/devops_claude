@@ -102,6 +102,49 @@ const VERDICT_VIEW = {
   blocked:        { tone: 'danger',  label: '진행 불가' },
 };
 
+/**
+ * 입력 변수가 없는 unit 의 **사유 분해**.
+ *
+ * ⚠ 사유를 안 나누면 판단이 불가능하다. 입력 0 은 정상일 수도 있고(파라미터도 전역도
+ *   없는 함수 — 정본도 1,005 중 172 건) 재료를 놓친 것일 수도 있다. 한 숫자로 합치면
+ *   읽는 사람은 전부 결함으로 읽는다.
+ * ⚠ 그래서 정상 사유와 결함 사유를 **같은 무게로 그리지 않는다.** 결함 쪽만 강조한다.
+ */
+const CAUSE_LABELS = {
+  no_params_no_globals:   { ko: '파라미터·전역 없음', defect: false },
+  write_only:             { ko: '전역을 쓰기만 함',   defect: false },
+  indirect_only:          { ko: '간접 접근만',        defect: false },
+  untagged:               { ko: '방향 태그 없음',     defect: true },
+  dropped_by_name_filter: { ko: '이름 추출이 버림',   defect: true },
+  param_string_unusable:  { ko: '파라미터 문자열 손상', defect: true },
+  other:                  { ko: '기타',               defect: true },
+};
+
+function CauseBreakdown({ causes }) {
+  const rows = Object.entries(causes || {}).filter(([, n]) => n > 0);
+  if (!rows.length) return null;
+  rows.sort((a, b) => b[1] - a[1]);
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      {rows.map(([key, n]) => {
+        const meta = CAUSE_LABELS[key] || { ko: key, defect: true };
+        return (
+          <span
+            key={key}
+            style={{
+              color: meta.defect ? 'var(--color-warning)' : 'var(--text-muted)',
+              fontWeight: meta.defect ? 600 : 400,
+            }}
+          >
+            {meta.ko} {n}
+            {meta.defect ? ' ⚠' : ''}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 /** 측정값 한 줄. **재지 못한 값은 숫자로 그리지 않는다.** */
 function Measured({ m }) {
   if (!m) return null;
@@ -122,6 +165,8 @@ function Measured({ m }) {
   if (m.api_default != null || m.generator_default != null) {
     parts.push(`현재 ${m.api_default ?? '—'} · 생성기 기본 ${m.generator_default ?? '—'}`);
   }
+  // 정본 기준선 — 건수만 보면 많은 건지 알 수 없다(정본도 17.1%가 입력 0개다).
+  if (m.reference_pct != null) parts.push(`정본 ${m.reference_pct}%`);
   if (!parts.length && m.headroom == null) return null;
   return (
     <span style={{ color: 'var(--text-muted)' }}>
@@ -302,6 +347,7 @@ export default function DocGenPreflightPanel({
                         <div style={{ color: 'var(--color-info)' }}>제안: {s.suggestion}</div>
                       )}
                       <Measured m={s.measured} />
+                      {s.measured?.causes && <CauseBreakdown causes={s.measured.causes} />}
                       {/* 콜체인은 SITS 문서 D열에 그대로 박힌다 — 화면도 실물을 보인다. */}
                       {s.sample?.call_chain && (
                         <div style={{ fontFamily: 'monospace', fontSize: 'var(--text-xs)', opacity: 0.8 }}>

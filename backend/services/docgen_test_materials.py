@@ -34,6 +34,7 @@ KJPDS02 는 후보 120 / 캡 120 으로 **경계에 정확히 닿아** 있다. �
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -171,6 +172,83 @@ def _measure_suts_types(fd: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_DIR_TAG_RE = re.compile(r"^\s*\[(IN|OUT|INOUT|INDIRECT)\]", re.I)
+
+
+def _dir_tag(entry: Any) -> str:
+    """전역 엔트리의 방향 태그. 태그가 없으면 빈 문자열(= 휴리스틱이 판정한 축)."""
+    m = _DIR_TAG_RE.match(str(entry or ""))
+    return m.group(1).upper() if m else ""
+
+
+def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[str, Any]:
+    """**입력 변수가 하나도 없는 unit** 과 그 사유.
+
+    입력이 없는 시퀀스는 넣을 값이 없어 시험이 성립하지 않는다. 실측(2026-08-12, KJPDS02):
+    948 TC 중 338 건이 입력 0개였는데 평균은 2.3 이라 기존 게이트를 그대로 통과했다.
+
+    ⚠ **0 이 전부 결함은 아니다.** 정본(1,005 unit)도 172 건이 입력 0개다 — 파라미터도
+      전역도 없는 함수가 실제로 있다. 그래서 건수만 내지 않고 **사유별로** 나눈다.
+      사유를 안 나누면 "정상 0" 과 "잃어버린 0" 이 한 숫자에 섞여 판단할 수가 없다.
+    """
+    from generators.suts import collect_unit_functions
+
+    try:
+        units = collect_unit_functions(fd, sds_map=sds_map or {})
+    except Exception as exc:  # noqa: BLE001 — 생성기 계열이 광범위
+        _logger.warning("test_materials: SUTS unit 수집 실패 — %s", exc, exc_info=True)
+        return {"measured": False, "reason": f"unit 수집 실패 ({type(exc).__name__})"}
+
+    by_name = {
+        str(i.get("name") or ""): i for i in (fd or {}).values() if isinstance(i, dict)
+    }
+    causes: Dict[str, int] = {}
+    samples: Dict[str, List[str]] = {}
+    no_input: List[str] = []
+    for u in units:
+        if u.get("input_vars"):
+            continue
+        name = str(u.get("name") or "")
+        no_input.append(name)
+        info = by_name.get(name) or {}
+        globs = list(info.get("globals_global") or []) + list(info.get("globals_static") or [])
+        tags = {_dir_tag(g) for g in globs}
+        params = list(info.get("inputs") or [])
+        if not params and not globs:
+            cause = "no_params_no_globals"    # 파라미터도 전역도 없다 — 정상일 수 있다
+        elif "IN" in tags or "INOUT" in tags:
+            # 읽는 전역이 분명히 있는데 입력 열이 비었다 = **이름 추출이 버렸다**.
+            # 실측된 경로: 이름 뒤 `(idx: …)`/`(range: …)` 꼬리, 로컬 임시 프리픽스 오탐,
+            # 2글자 이하 이름. 정상이 아니므로 다른 사유와 절대 섞지 않는다.
+            cause = "dropped_by_name_filter"
+        elif params and not tags:
+            # 파라미터 문자열은 있는데 이름이 안 나온다 — 주석 블록이 통째로 파라미터로
+            # 딸려온 경우가 대부분이다(Processor Expert 계열 `*_GetVal`).
+            cause = "param_string_unusable"
+        elif tags and tags <= {"INDIRECT"}:
+            cause = "indirect_only"           # 간접 접근뿐 — 직접 넣을 값이 없다
+        elif tags and tags <= {"OUT"}:
+            cause = "write_only"              # 전역을 쓰기만 한다
+        elif "" in tags:
+            cause = "untagged"                # 방향 태그가 없어 휴리스틱이 출력으로 보냈다
+        else:
+            cause = "other"
+        causes[cause] = causes.get(cause, 0) + 1
+        bucket = samples.setdefault(cause, [])
+        if len(bucket) < 8:
+            bucket.append(name)
+    return {
+        "measured": True,
+        "units": len(units),
+        "units_without_input": len(no_input),
+        # 정본 대비 기준선. "정상 0" 이 어느 정도인지 없이 건수만 보면 판단이 안 된다.
+        "reference_without_input": 172,
+        "reference_units": 1005,
+        "causes": causes,
+        "cause_samples": samples,
+    }
+
+
 def measure(source_root: str, *, sds_path: str = "") -> Dict[str, Any]:
     """시험 문서 재료를 측정한다. **느리다** — 전용 엔드포인트에서만 부를 것."""
     if not str(source_root or "").strip():
@@ -195,6 +273,7 @@ def measure(source_root: str, *, sds_path: str = "") -> Dict[str, Any]:
         "elapsed_s": round(time.time() - t0, 1),
         "sits": _measure_sits(fd, sds_map, sds_reason),
         "suts": _measure_suts_types(fd),
+        "suts_inputs": _measure_suts_inputs(fd, sds_map),
     }
     with _CACHE_LOCK:
         _CACHE[_key(source_root)] = (time.time(), result)

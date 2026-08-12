@@ -565,6 +565,36 @@ def _infer_return_type(prototype: str) -> str:
     return ret if ret else "void"
 
 
+# 파서가 이름 **뒤에** 붙이는 주석형 꼬리(`_format_param_entry`).
+#   `u8g_Hash (idx: u8t_Index)` · `ctx (range: 0x0 ~ 0xFFFFFFFF)` · `div (divisor: no 0)`
+# ⚠ 이름은 마지막 토큰에서 뽑는데 이 꼬리를 안 떼면 **꼬리가 이름이 된다**:
+#   · `(idx: u8t_Index)` → 이름이 `u8t_Index)` → `_LOCAL_TEMP_PATS`(`u8t_`)에 걸려 **전역이 통째로 사라진다**
+#   · `(range: … 0xFFFFFFFF)` → 이름이 `0xFFFFFFFF)` → 식별자가 아니라 **파라미터가 통째로 사라진다**
+# 실측(2026-08-12, KJPDS02 750함수): 입력 0개 unit 221 건 중 **57 건**이 이 경로였다.
+# `s_sha256_transform` 은 정본이 입력 9개를 적는데 우리는 0개였다.
+_PARAM_ANNOT_TAIL = re.compile(r"\s*\((?:idx|range|divisor)\s*:[^)]*\)\s*$", re.I)
+
+
+def _strip_param_annotations(s: str) -> str:
+    """이름 뒤 주석형 꼬리를 **전부** 뗀다(여러 개가 이어 붙는다)."""
+    out = str(s or "").strip()
+    while True:
+        stripped = _PARAM_ANNOT_TAIL.sub("", out)
+        if stripped == out:
+            return out
+        out = stripped
+
+
+# 파라미터 문자열이 **선언이 아닌** 경우. 상위 파서가 주석 블록을 통째로 파라미터 하나로
+# 딸려보내는 일이 있다(Processor Expert 계열 `*_GetVal` 실측 40건):
+#   `[IN] void) ** This method is implemented as a macro. … // if (Val == (U8) TRUE (range: …)`
+# ⚠ 이걸 그냥 두면 마지막 토큰인 **`TRUE` 가 변수명이 된다** — 없는 입력을 지어내는 것이라
+#   빈 칸보다 나쁘다(꼬리 주석 제거를 넣자마자 실제로 3건 발생했다). 선언이 아니면 **버린다**.
+#   버려진 건 게이트가 `param_string_unusable` 로 보고한다 — 침묵시키지 않는다.
+_PARAM_NOT_A_DECL = re.compile(r"/\*|\*/|//|\n")
+_PARAM_DECL_MAX_LEN = 120
+
+
 def _extract_var_names(raw_list: List[str]) -> List[str]:
     """Extract clean variable names from [IN]/[OUT] tagged param strings."""
     names: List[str] = []
@@ -572,6 +602,9 @@ def _extract_var_names(raw_list: List[str]) -> List[str]:
         s = str(raw).strip()
         s = re.sub(r"^\[(?:IN|OUT|INOUT)\]\s*", "", s)
         s = re.sub(r"^return\s+", "", s, flags=re.I)
+        s = _strip_param_annotations(s)
+        if _PARAM_NOT_A_DECL.search(s) or len(s) > _PARAM_DECL_MAX_LEN:
+            continue
         # Remove type qualifiers, keep only the symbol name
         parts = s.split()
         if not parts:
@@ -588,6 +621,7 @@ def _clean_global_name(g: str) -> str:
     s = str(g).strip()
     s = re.sub(r"^\[INDIRECT\]\s*", "", s)
     s = re.sub(r"^\[(?:IN|OUT|INOUT)\]\s*", "", s)
+    s = _strip_param_annotations(s)
     parts = s.split()
     return parts[-1].strip("*&;,") if parts else ""
 
@@ -3097,6 +3131,7 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
     from openpyxl import load_workbook
     wb = load_workbook(xlsm_path, read_only=True, data_only=True)
     issues: List[str] = []
+    warnings: List[str] = []
     stats: Dict[str, Any] = {"sheets": wb.sheetnames, "sheet_count": len(wb.sheetnames)}
 
     expected_sheets = ["Cover", "History", "1.Introduction", "1.Test Environment", "2.SW Unit Test Spec"]
@@ -3110,6 +3145,8 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
         seq_count = 0
         total_inp = 0
         total_out = 0
+        tc_no_inp = 0
+        tc_no_out = 0
         # ⚠ 열 번호를 하드코딩하지 않는다 — 레이아웃 상수에서 파생한다. 예전엔
         #   `range(14,63)`·`column=11` 이 박혀 있어, 레이아웃이 바뀌면 검증기가
         #   조용히 0을 세고 그 0이 "이슈 없음"으로 통과했다(fail-open).
@@ -3126,12 +3163,21 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
             tc_id = row[_COL_TC_ID - 1] if len(row) >= _COL_TC_ID else None
             if tc_id and str(tc_id).startswith("SwUTC"):
                 tc_count += 1
-                total_inp += sum(
+                _n_inp = sum(
                     1 for v in row[_INPUT_COL_START - 1:_INPUT_COL_END] if v not in (None, "")
                 )
-                total_out += sum(
+                _n_out = sum(
                     1 for v in row[_OUTPUT_COL_START - 1:_OUTPUT_COL_END] if v not in (None, "")
                 )
+                total_inp += _n_inp
+                total_out += _n_out
+                # ⚠ 평균은 0 을 숨긴다. 실측(2026-08-12): 948 TC 중 **338 건이 입력 0개**인데
+                #   평균은 2.0 이라 `avg_inp < 1` 게이트를 그대로 통과했다. 입력이 없는
+                #   시퀀스는 시험이 성립하지 않으므로 건수를 따로 센다.
+                if _n_inp == 0:
+                    tc_no_inp += 1
+                if _n_out == 0:
+                    tc_no_out += 1
             elif len(row) >= _SEQ_COL and row[_SEQ_COL - 1] not in (None, ""):
                 seq_count += 1
 
@@ -3140,6 +3186,9 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
         stats["avg_inp"] = round(total_inp / max(tc_count, 1), 1)
         stats["avg_out"] = round(total_out / max(tc_count, 1), 1)
         stats["avg_seq"] = round(seq_count / max(tc_count, 1), 1)
+        # 항상 싣는다 — 0 건이어도 키가 있어야 "재지 않았다" 와 "0 이었다" 가 구분된다.
+        stats["tc_without_input"] = tc_no_inp
+        stats["tc_without_expected"] = tc_no_out
 
         if tc_count == 0:
             issues.append("No test cases found")
@@ -3149,8 +3198,21 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
             issues.append(f"Low avg input vars: {stats['avg_inp']}")
         if stats["avg_out"] < 1:
             issues.append(f"Low avg output vars: {stats['avg_out']}")
+        # 경고는 `issues` 와 분리한다 — 입력 0개 TC 는 **정상일 수도 있다**(파라미터도
+        # 전역도 없는 함수. 정본도 1,005 중 172 건이 그렇다). `valid` 를 뒤집으면
+        # 정상 산출물이 실패로 신고된다. 다만 숨기지도 않는다.
+        if tc_count and tc_no_inp:
+            warnings.append(
+                f"입력 변수가 없는 TC {tc_no_inp}건 "
+                f"({tc_no_inp * 100.0 / tc_count:.1f}%) — 해당 시퀀스는 실행 값이 없다"
+            )
+        if tc_count and tc_no_out:
+            warnings.append(
+                f"기대 결과가 없는 TC {tc_no_out}건 ({tc_no_out * 100.0 / tc_count:.1f}%)"
+            )
 
     wb.close()
     stats["issues"] = issues
+    stats["warnings"] = warnings
     stats["valid"] = len(issues) == 0
     return stats

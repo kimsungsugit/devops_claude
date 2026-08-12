@@ -511,6 +511,33 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                             if t["fallback"] else ""),
                     samples=t.get("fallback_samples"),
                 ))
+            if req.doc_type == "suts":
+                # 입력 변수가 하나도 없는 unit — 그 시퀀스는 **넣을 값이 없어** 시험이
+                # 성립하지 않는다. ⚠ 0 이 전부 결함은 아니다(정본 1,005 중 172 건이 0).
+                # 그래서 건수만이 아니라 **사유별**로 낸다 — 안 나누면 "정상 0" 과
+                # "잃어버린 0" 이 한 숫자에 섞여 판단할 수가 없다.
+                z = tm.get("suts_inputs") or {}
+                if z.get("measured"):
+                    _n, _units = z["units_without_input"], max(z["units"], 1)
+                    _ref = z["reference_without_input"] * 100.0 / max(z["reference_units"], 1)
+                    _pct = _n * 100.0 / _units
+                    steps.append(_step(
+                        "suts_inputs", "material",
+                        S_OK if _pct <= _ref else S_DEGRADED,
+                        "입력 변수가 없는 unit",
+                        measured={"value": _n, "of": z["units"],
+                                  "causes": z.get("causes") or {},
+                                  "reference_pct": round(_ref, 1)},
+                        reason=(
+                            f"{_n}개({_pct:.1f}%) — 정본은 {_ref:.1f}% 입니다. "
+                            "사유가 `no_params_no_globals` 면 정상이고, 그 외는 재료를 놓친 것입니다"
+                            if _pct > _ref else ""
+                        ),
+                        samples=[
+                            f"{c}: {', '.join(v[:4])}"
+                            for c, v in (z.get("cause_samples") or {}).items()
+                        ],
+                    ))
 
     # ── 4. 사슬 — 각 필드를 채울 경로의 단계별 가용성 ─────────────────────────
     available[_chain.INPUT_CALL_GRAPH] = bool(available.get(_req.IN_SOURCE_ROOT))

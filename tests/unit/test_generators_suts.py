@@ -151,6 +151,93 @@ class TestGlobalDirectionTags:
         assert "s_LinFrame.LIN_data" in u["input_vars"]
 
 
+class TestParamAnnotationTail:
+    """이름 뒤 주석형 꼬리가 **이름을 삼키던** 경로.
+
+    파서는 이름 뒤에 `(idx: …)` · `(range: …)` · `(divisor: …)` 를 붙이는데
+    (`_format_param_entry`), 이름은 마지막 토큰에서 뽑는다. 꼬리를 안 떼면:
+
+    - `u8g_Hash (idx: u8t_Index)` → 이름이 `u8t_Index)` → `_LOCAL_TEMP_PATS`(`u8t_`)에
+      걸려 **전역이 통째로 사라진다**
+    - `ctx (range: … 0xFFFFFFFF)` → 이름이 `0xFFFFFFFF)` → 식별자가 아니라
+      **파라미터가 통째로 사라진다**
+
+    실측(2026-08-12, KJPDS02 750함수): 입력 0개 unit 221 → 151 (-70).
+    `s_sha256_transform` 은 정본이 입력 9개를 적는데 우리는 0개였다.
+    """
+
+    @pytest.mark.parametrize(
+        "raw,name",
+        [
+            ("[IN] u8g_Lib_Sha256_Hash (idx: u8t_Index)", "u8g_Lib_Sha256_Hash"),
+            ("[IN] g_DoorState_his (idx: u8t_i)", "g_DoorState_his"),
+            ("[OUT] g_Buf (idx: i) (range: 0x0 ~ 0xFF)", "g_Buf"),   # 꼬리가 이어 붙는다
+            ("[INOUT] s_LinFrame", "s_LinFrame"),                     # 꼬리 없는 것은 그대로
+        ],
+    )
+    def test_global_name_survives_annotation_tail(self, raw, name):
+        from generators.suts import _clean_global_name
+
+        assert _clean_global_name(raw) == name
+
+    @pytest.mark.parametrize(
+        "raw,names",
+        [
+            ("[IN] SHA256_CTX * ctx (range: 0x00000000 ~ 0xFFFFFFFF)", ["ctx"]),
+            ("[IN] const UINT8 * data (idx: bIndex) (range: 0x0 ~ 0xFF)", ["data"]),
+            ("[IN] U8 mode", ["mode"]),
+            ("[IN] U8 div (divisor: no 0)", ["div"]),
+        ],
+    )
+    def test_param_name_survives_annotation_tail(self, raw, names):
+        from generators.suts import _extract_var_names
+
+        assert _extract_var_names([raw]) == names
+
+    def test_annotation_inside_the_name_is_not_stripped(self):
+        """꼬리(끝)만 뗀다 — 중간의 괄호까지 지우면 다른 이름이 된다."""
+        from generators.suts import _strip_param_annotations
+
+        assert _strip_param_annotations("g_Fn (idx: i) tail") == "g_Fn (idx: i) tail"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # 상위 파서가 주석 블록을 파라미터 하나로 딸려보낸 실제 문자열(축약)
+            "[IN] void) ** This method is implemented as a macro. */ // if (Val == (U8) TRUE"
+            " (range: 0x00000000 ~ 0xFFFFFFFF)",
+            "[IN] U8 x /* 설명 */",
+            "[IN] " + "A" * 200,
+        ],
+    )
+    def test_garbage_param_string_yields_no_name(self, raw):
+        """⚠ 꼬리 주석 제거를 넣자마자 **`TRUE` 를 변수명으로 지어냈다**(실측 3건).
+
+        없는 입력을 만들면 빈 칸보다 나쁘다 — 근거처럼 보이기 때문이다. 선언이 아니면
+        버리고, 버렸다는 사실은 게이트가 `param_string_unusable` 로 보고한다.
+        """
+        from generators.suts import _extract_var_names
+
+        assert _extract_var_names([raw]) == []
+
+    def test_indexed_global_reaches_the_input_column(self):
+        """소비처 확인 — 여기서 빠지면 시퀀스에 넣을 값이 없다."""
+        details = {
+            "SwUFn_0101": {
+                "id": "SwUFn_0101",
+                "name": "s_Sha256_Hash_Init",
+                "prototype": "void s_Sha256_Hash_Init(void)",
+                "inputs": [],
+                "outputs": [],
+                "globals_global": ["[IN] u8g_Lib_Sha256_Hash (idx: u8t_Index)"],
+                "globals_static": [],
+                "logic_flow": [],
+            }
+        }
+        unit = collect_unit_functions(details, sds_map={})[0]
+        assert unit["input_vars"] == ["u8g_Lib_Sha256_Hash"]
+
+
 class TestInferVariableType:
     def test_uint8_prefix(self):
         result = infer_variable_type("u8_MotorSpeed")

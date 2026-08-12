@@ -138,6 +138,67 @@ def test_zero_variables_is_not_full_grounding() -> None:
     assert res["grounded"] == 0
 
 
+# ── 입력 변수가 없는 unit ───────────────────────────────────────────────────
+#
+# 입력이 없는 시퀀스는 넣을 값이 없어 시험이 성립하지 않는다. 실측(2026-08-12, KJPDS02):
+# 948 TC 중 **338 건이 입력 0개**인데 평균은 2.3 이라 `avg_inp < 1` 게이트를 그대로
+# 통과했다 — 평균이 0 을 숨긴 것이다.
+#
+# ⚠ 0 이 전부 결함은 아니다. 정본(1,005 unit)도 172 건이 입력 0개다. 그래서 건수만
+#   내면 판단이 안 되고 **사유별**로 나눠야 한다.
+
+def _unit(name: str, *, inputs=None, gg=None, gs=None) -> Dict[str, Any]:
+    return {
+        "id": "SwUFn_0101", "name": name, "prototype": f"void {name}(void)",
+        "inputs": list(inputs or []), "outputs": [],
+        "globals_global": list(gg or []), "globals_static": list(gs or []),
+        "logic_flow": [],
+    }
+
+
+def _causes(fd: Dict[str, Any]) -> Dict[str, int]:
+    res = tm._measure_suts_inputs(fd, {})
+    assert res["measured"] is True
+    return res["causes"]
+
+
+def test_no_params_no_globals_is_its_own_cause() -> None:
+    """파라미터도 전역도 없으면 입력 0 이 **정상**이다 — 결함과 섞으면 안 된다."""
+    assert _causes({"a": _unit("s_SysMain_Init")}) == {"no_params_no_globals": 1}
+
+
+def test_write_only_globals_are_named_separately() -> None:
+    fd = {"a": _unit("s_Init_Sys", gg=["[OUT] g_State"])}
+    assert _causes(fd) == {"write_only": 1}
+
+
+def test_indirect_only_is_named_separately() -> None:
+    fd = {"a": _unit("s_Cfg", gg=["[INDIRECT] g_Table"])}
+    assert _causes(fd) == {"indirect_only": 1}
+
+
+def test_readable_global_that_vanished_is_flagged_as_a_defect() -> None:
+    """읽는 전역이 분명히 있는데 입력 열이 비면 **이름 추출이 버린 것**이다.
+
+    정상 사유(`no_params_no_globals` 등)와 절대 같은 칸에 세지 않는다 — 섞이면
+    "정상 0" 뒤에 숨는다. 여기서는 2글자 이름이라 길이 필터에 걸린다.
+    """
+    fd = {"a": _unit("s_Fn", gg=["[IN] gX"])}
+    assert _causes(fd) == {"dropped_by_name_filter": 1}
+
+
+def test_reference_baseline_is_carried_so_the_count_is_judgeable() -> None:
+    """건수만 있으면 많은 건지 알 수 없다 — 정본 기준선을 함께 낸다."""
+    res = tm._measure_suts_inputs({"a": _unit("s_SysMain_Init")}, {})
+    assert res["reference_without_input"] and res["reference_units"]
+
+
+def test_units_with_input_are_not_counted() -> None:
+    fd = {"a": _unit("g_Fn", gg=["[IN] g_Speed"]), "b": _unit("s_SysMain_Init")}
+    res = tm._measure_suts_inputs(fd, {})
+    assert res["units_without_input"] == 1
+
+
 # ── measure() 실패 경로 ─────────────────────────────────────────────────────
 
 def test_measure_reports_reason_when_no_source() -> None:

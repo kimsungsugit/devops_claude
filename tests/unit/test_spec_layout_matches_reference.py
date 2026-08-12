@@ -291,3 +291,36 @@ def test_suts_validators_count_the_real_rows(tmp_path):
         assert st["tc_count"] == n_units, f"{label}: TC {st['tc_count']} != {n_units}"
         assert st["seq_count"] == n_units * n_seq, \
             f"{label}: seq {st['seq_count']} != {n_units * n_seq}"
+
+
+def test_suts_validator_does_not_let_the_average_hide_empty_inputs(tmp_path):
+    """⚠ 평균이 0 을 숨긴다.
+
+    라이브 실측(2026-08-12): 948 TC 중 **338 건이 입력 0개**인데 `avg_inp` 는 2.3 이라
+    `avg_inp < 1` 게이트를 그대로 통과했고 `valid: True · issues: []` 였다. 입력이 없는
+    시퀀스는 넣을 값이 없어 시험이 성립하지 않으므로 **건수를 따로** 센다.
+
+    ⚠ `issues` 가 아니라 `warnings` 다 — 입력 0개는 정상일 수도 있어(파라미터도 전역도
+      없는 함수. 정본도 1,005 중 172 건) `valid` 를 뒤집으면 정상 산출물이 실패로 신고된다.
+    """
+    pytest.importorskip("openpyxl")
+    from generators.suts import generate_suts_xlsm, validate_suts_output
+
+    units = [
+        {"fid": f"SwUFn_{i:04d}", "name": f"fn_{i}", "component": "SwCom_01",
+         # 4개 중 1개만 입력이 비어 있다 → 평균은 넉넉히 1 을 넘는다
+         "input_vars": [] if i == 0 else ["a", "b", "c"],
+         "output_vars": ["b"], "asil": "A"}
+        for i in range(4)
+    ]
+    seqs = {u["fid"]: [{"seq_num": 1, "strategy": "BV_MID",
+                        "inputs": {"a": 1}, "expected": {"b": 1}}] for u in units}
+    out = str(tmp_path / "avg.xlsx")
+    generate_suts_xlsm(None, units, seqs, out, {"project_id": "T"})
+
+    st = validate_suts_output(out)
+    assert st["avg_inp"] >= 1, "이 표본은 평균 게이트를 통과해야 의미가 있다"
+    assert st["issues"] == [], "평균 게이트는 여전히 통과한다"
+    assert st["tc_without_input"] == 1, "건수를 안 세면 338건이 평균 뒤에 숨는다"
+    assert any("입력" in w for w in st["warnings"]), "숨기지 않고 경고로 낸다"
+    assert st["valid"] is True, "정상일 수 있는 축으로 valid 를 뒤집지 않는다"
