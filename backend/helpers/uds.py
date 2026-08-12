@@ -669,7 +669,12 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v6: **유령 두 종을 지웠다** — 이건 회수가 아니라 *제거*라 캐시가 안 죽으면 프로덕션엔
+# (v7: 원문 읽기 캡 200KB → 2MB. `Generated_Code/IO_Map.h`(665KB)를 **29.4% 만** 읽고 있어
+#      매크로 정의 5,622 중 3,881 · extern 전역 363 중 251 이 사라졌다. 레지스터는 파일
+#      뒤쪽에 몰려 있어 `_PTT`(앞)는 살고 `_ADC0CTL`·`_SCI0CR2`·`_CPMUINT`(뒤)는 통째로
+#      없었다 — v5·v6 캐시엔 그 전역·매크로가 아예 없으므로 무효화하지 않으면 SFR 입력이
+#      계속 0개다.
+#  v6: **유령 두 종을 지웠다** — 이건 회수가 아니라 *제거*라 캐시가 안 죽으면 프로덕션엔
 #      유령이 그대로 남는다. ①주석 안의 프로토타입을 함수로 만들던 정규식 폴백(Processor
 #      Expert `*_GetVal` 3건 — 정본에 없는 함수의 시험 케이스였다) ②`@0x00FF9DF0U` 의 정수
 #      접미사가 남아 변수명이 `U` 가 되고, 매크로 토큰화(`123U`→`U`)와 맞물려 **324개 함수**
@@ -688,7 +693,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v6"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v7"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

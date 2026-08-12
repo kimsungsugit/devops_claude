@@ -244,17 +244,52 @@ def _read_bytes_resolver_aware(path: Path) -> bytes:
     return Path(path).read_bytes()
 
 
-def _read_text_limited(path: Path, max_bytes: int = 200000) -> str:
+# C 원문 읽기 상한.
+#
+# ⚠ **옛 기본값 200,000 은 조용히 자르는 캡이었고, 이 프로젝트에서 실제로 잘랐다.**
+#   실측(KJPDS02_PV, 2026-08-12):
+#     Generated_Code/IO_Map.h        680,639 B → 29.4% 만 읽음
+#       · 매크로 정의 5,622 중 **3,881 소실**
+#       · extern 전역 후보 363 중 **251 소실**
+#   레지스터 정의는 파일 뒤쪽에 몰려 있어 앞쪽 `_PTT`·`_FCLKDIV` 는 살아남고
+#   뒤쪽 `_ADC0CTL`·`_SCI0CR2`·`_CPMUINT`·`_ECCIE`·`_LP0IF` 는 통째로 사라진다.
+#   그래서 SFR 이 "부분적으로만" 인식되는 것처럼 보였다(파서 결함이 아니라 캡).
+#
+# ⚠ 이 캡은 **안전장치도 아니었다** — `_read_bytes_resolver_aware` 가 파일 전체를
+#   이미 메모리로 읽은 **뒤** 잘라내므로 I/O·피크메모리를 아끼지 못한다. 게다가
+#   tree-sitter 경로(`c_parser.parse_c_project`)는 같은 파일을 캡 없이 `read_bytes()`
+#   로 읽는다 — 즉 두 경로의 **비대칭**이라, 전역 선언은 잡히는데 그 전역을 가리키는
+#   매크로만 사라져 매크로 접기(`macro_globals_map`)가 조용히 죽었다.
+#
+# 상한 자체는 남긴다(병적으로 큰 생성 파일 방어). 대신 **닿으면 보고**한다 —
+# `_read_source_text` 가 절단 여부를 돌려주고 호출자가 WARNING 으로 올린다.
+_SRC_READ_MAX_BYTES = 2_000_000
+
+
+def _read_source_text(
+    path: Path, max_bytes: int = _SRC_READ_MAX_BYTES
+) -> Tuple[str, int, bool]:
+    """원문 텍스트와 함께 **원본 바이트 수 · 절단 여부**를 돌려준다.
+
+    `_read_text_limited` 는 절단을 조용히 한다. 호출자가 "잘렸다" 를 셀 수 있어야
+    "이 프로젝트엔 그 매크로가 원래 없다" 와 구분된다.
+    """
     try:
         data = _read_bytes_resolver_aware(path)
     except Exception:
-        return ""
-    if max_bytes and len(data) > max_bytes:
+        return "", 0, False
+    raw_len = len(data)
+    truncated = bool(max_bytes) and raw_len > max_bytes
+    if truncated:
         data = data[:max_bytes]
     try:
-        return data.decode("utf-8", errors="ignore")
+        return data.decode("utf-8", errors="ignore"), raw_len, truncated
     except Exception:
-        return ""
+        return "", raw_len, truncated
+
+
+def _read_text_limited(path: Path, max_bytes: int = _SRC_READ_MAX_BYTES) -> str:
+    return _read_source_text(path, max_bytes)[0]
 
 
 def _strip_c_comments(text: str) -> str:

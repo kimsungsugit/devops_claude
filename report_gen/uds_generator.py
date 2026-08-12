@@ -79,8 +79,10 @@ from report_gen.requirements import (
     _extract_table_section,
 )
 from report_gen.source_parser import (
+    _SRC_READ_MAX_BYTES,
     _scan_source_comment_patterns,
     _extract_c_macros,
+    _read_source_text,
     _read_text_limited,
     _strip_c_comments,
     _extract_c_prototypes,
@@ -476,8 +478,14 @@ def generate_uds_source_sections(
     doc_texts: List[str] = []
     _doxygen_tags_by_file: Dict[str, Dict[str, Dict[str, str]]] = {}
     _file_header_asil: Dict[str, str] = {}
+    # 원문 읽기 상한에 **닿은 파일**. 캡은 조용히 자르므로 닿았다는 사실을 남기지
+    # 않으면 "이 프로젝트엔 그 선언이 원래 없다" 와 구분되지 않는다
+    # (실측: 200KB 캡이 IO_Map.h 의 매크로 69% 를 지웠는데 로그가 한 줄도 없었다).
+    _read_truncated: List[Tuple[str, int]] = []
     for p in files:
-        raw = _read_text_limited(p)
+        raw, _raw_len, _cut = _read_source_text(p)
+        if _cut:
+            _read_truncated.append((str(p), _raw_len))
         text = _strip_c_comments(raw)
         reqs.extend(_extract_requirements_from_comments(raw))
         dox_tags = _extract_doxygen_asil_tags(raw)
@@ -893,18 +901,29 @@ def generate_uds_source_sections(
             "extern_dropped_prefix": _extern_dropped["prefix_mismatch"],
             "typeless_dropped": _typeless_dropped,
             "globals_kept": len(globals_info_map),
+            # 파일 **내부** 절단. 위 c_cap/h_cap 은 "파일 몇 개를 봤나" 이고 이건
+            # "본 파일을 끝까지 읽었나" 다 — 둘은 다른 축이라 따로 센다.
+            "read_truncated_files": len(_read_truncated),
+            "read_truncated_detail": [
+                {"file": f, "bytes": n, "cap": _SRC_READ_MAX_BYTES}
+                for f, n in _read_truncated[:10]
+            ],
         }
         _at_cap = (_scan_caps["c_total"] > _scan_caps["c_cap"]
                    or _scan_caps["h_total"] > _scan_caps["h_cap"])
-        (_logger.warning if _at_cap else _logger.info)(
+        (_logger.warning if (_at_cap or _read_truncated) else _logger.info)(
             "globals scan: kept=%d | .c %d/%d · .h %d/%d%s | extern +%d "
-            "(미사용 -%d · 접두사 -%d) | 타입없음 -%d",
+            "(미사용 -%d · 접두사 -%d) | 타입없음 -%d | 파일내부절단 %d%s",
             _globals_loss["globals_kept"],
             _globals_loss["c_scanned"], _scan_caps["c_total"],
             _globals_loss["h_scanned"], _scan_caps["h_total"],
             "  ⚠캡 도달 — 나머지 파일의 전역은 인식되지 않는다" if _at_cap else "",
             _extern_added, _extern_dropped["unused_in_source"],
             _extern_dropped["prefix_mismatch"], _typeless_dropped,
+            len(_read_truncated),
+            ("  ⚠" + ", ".join(f"{Path(f).name}({n:,}B>{_SRC_READ_MAX_BYTES:,})"
+                               for f, n in _read_truncated[:3])
+             if _read_truncated else ""),
         )
         macro_globals_map: Dict[str, List[str]] = {}
         # 매크로 이름 -> 확장형. 확장형이 곧 **문서에 적힐 이름**이다(`_PTT.Bits.PTT3`).
@@ -915,7 +934,6 @@ def generate_uds_source_sections(
         macro_expansion_map: Dict[str, str] = {}
         macro_call_map: Dict[str, List[str]] = {}
         if globals_info_map:
-            global_names = list(globals_info_map.keys())
             for row in macro_defs:
                 if len(row) >= 3:
                     m_name = str(row[0]).strip()
@@ -926,8 +944,14 @@ def generate_uds_source_sections(
                         macro_expansion_map[m_name] = re.sub(r"\s+", "", m_val)
                     # 전역명은 항상 식별자 토큰 → \bNAME\b ≡ 토큰 멤버십. m_val 1회 토큰화 후 O(1) in
                     # 검사로 per-global re.search(rf...) 재컴파일(대형 트리에서 파싱 지연 주요인) 제거.
-                    _m_toks = set(c_identifiers(m_val))
-                    hits = [g for g in global_names if g in _m_toks]
+                    #
+                    # ⚠ **토큰 쪽을 순회한다**(전역 목록이 아니라). 전역은 1,500개인데
+                    #   매크로 확장형의 토큰은 보통 1~3개다. 읽기 캡을 풀면서 매크로가
+                    #   3.2배(≈2,800 → 9,000)로 늘었는데, 전역을 순회하면 1,350만 번
+                    #   비교가 되고 토큰을 순회하면 2만 번이다. 결과 집합은 같다
+                    #   (아래 소비처는 전역별 플래그를 독립적으로 세우므로 **순서 무관**).
+                    #   순서는 캐시 산출물에 실리므로 `sorted` 로 고정한다.
+                    hits = sorted(t for t in set(c_identifiers(m_val)) if t in globals_info_map)
                     if hits:
                         macro_globals_map[m_name] = hits
                     call_hits: List[str] = []

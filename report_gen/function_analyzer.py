@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from report_gen.provenance import is_weak_source
-from workflow.code_parser.c_parser import blank_c_comments
+from workflow.code_parser.c_parser import blank_c_comments, c_identifiers
 from report_gen.utils import (
     _normalize_related_ids,
     _normalize_swufn_id,
@@ -181,103 +181,118 @@ def _split_param(param: str) -> Tuple[str, str, str]:
 _ACCESS_TAIL = r"(?:\s*(?:->|\.)\s*\w+|\s*\[[^\]]*\])*"
 
 
+def _new_usage_slot() -> Dict[str, Any]:
+    return {
+        "lhs": False,
+        "rhs": False,
+        "inout": False,
+        "lhs_idx": None,
+        "rhs_idx": None,
+        "members": set(),
+        "indexes": set(),
+        "divisor": False,
+    }
+
+
+def _scan_name_usage(lines: List[str], name: str, u: Dict[str, Any]) -> None:
+    """한 이름의 읽기/쓰기 방향을 라인 스캔으로 채운다.
+
+    ⚠ 전역 이름과 **매크로 이름**이 반드시 같은 판정을 쓰도록 단일 출처로 뺐다.
+      예전엔 매크로 경로가 판정을 복제하지 않고 `rhs = True` 를 **무조건** 세웠다.
+      그래서 `PTAD_PTADL4 = big_RESET;` 처럼 **쓰기만 하는 레지스터**가 읽기로
+      기록되고, 이어서 `_written` 이 `inout` 까지 세워 시험 **입력**으로 올라갔다.
+      실측(2026-08-12, KJPDS02): 읽기 캡을 풀어 매크로가 3.2배로 늘자 이 결함이
+      그대로 확대돼 "정본은 입력 0개인데 우리는 값을 낸" unit 이 34 → 44 로 늘었다.
+    """
+    for idx, line in enumerate(lines):
+        if not line.strip() or name not in line:
+            continue
+        for m in re.finditer(rf"\b{re.escape(name)}\b\s*(->|\.)\s*([A-Za-z_]\w*)", line):
+            u["members"].add(f"{name}{m.group(1)}{m.group(2)}")
+        for m in re.finditer(rf"\b{re.escape(name)}\b\s*\[\s*([^\]]+)\s*\]", line):
+            u["indexes"].add(m.group(1).strip())
+        if re.search(rf"/\s*\(?\s*\b{re.escape(name)}\b", line):
+            u["divisor"] = True
+        if re.search(
+            rf"(\+\+|--)\s*\b{re.escape(name)}\b"
+            rf"|\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+\+|--)",
+            line,
+        ):
+            u["lhs"] = True
+            u["rhs"] = True
+            u["inout"] = True
+            continue
+        if re.search(
+            rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)",
+            line,
+        ):
+            u["lhs"] = True
+            u["rhs"] = True
+            u["inout"] = True
+            continue
+        m_assign = re.search(rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*=(?!=)", line)
+        if m_assign:
+            u["lhs"] = True
+            if u["lhs_idx"] is None:
+                u["lhs_idx"] = idx
+            rhs = line[m_assign.end():]
+            if re.search(rf"\b{re.escape(name)}\b", rhs):
+                u["rhs"] = True
+                u["inout"] = True
+            continue
+        if re.search(rf"\b{re.escape(name)}\b", line):
+            u["rhs"] = True
+            if u["rhs_idx"] is None:
+                u["rhs_idx"] = idx
+
+
 def _collect_var_usage(
     body_text: str,
     var_names: List[str],
     macro_globals: Dict[str, List[str]] | None = None,
     macro_expansions: Dict[str, str] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    usage: Dict[str, Dict[str, Any]] = {
-        n: {
-            "lhs": False,
-            "rhs": False,
-            "inout": False,
-            "lhs_idx": None,
-            "rhs_idx": None,
-            "members": set(),
-            "indexes": set(),
-            "divisor": False,
-        }
-        for n in var_names
-    }
+    usage: Dict[str, Dict[str, Any]] = {n: _new_usage_slot() for n in var_names}
     if not body_text or not var_names:
         return usage
     text = _strip_comments_and_strings(body_text)
     lines = text.splitlines()
     if macro_globals:
         _expansions = macro_expansions or {}
+        # 본문을 **한 번만** 토큰화한다. 매크로 이름은 항상 식별자라 `\bNAME\b` 검색과
+        # 토큰 멤버십이 동치인데, 비용은 O(매크로) 정규식 vs O(1) 조회로 갈린다.
+        # ⚠ 이게 없으면 읽기 캡 해제가 그대로 폭탄이 된다 — 매크로 맵이 3.2배로 늘고
+        #   이 루프는 **함수마다** 도므로 1,157함수 × 10,000매크로 = 1,160만 회
+        #   재컴파일이다(re 캐시 512개라 전부 미스). 실측 파싱이 4.5분에서 수십 분이 된다.
+        _body_toks = set(c_identifiers(text))
         for m_name, globals_list in macro_globals.items():
             if not m_name or not globals_list:
                 continue
-            if not re.search(rf"\b{re.escape(m_name)}\b", text):
+            if m_name not in _body_toks:
                 continue
-            # 매크로에 **대입**하면 그 전역은 쓰기다. 본문엔 매크로 이름만 있어서 아래
-            # 라인 스캔(`\b{전역명}\b`)이 절대 못 본다 — 예: `PTT_PTT3 = big_RESET;`.
-            _written = bool(
-                re.search(rf"\b{re.escape(m_name)}\b\s*(?:\+\+|--|[-+*/%&|^]?=(?!=)|<<=|>>=)", text)
-                or re.search(rf"(?:\+\+|--)\s*\b{re.escape(m_name)}\b", text)
-            )
+            # 본문엔 매크로 이름만 있으므로 아래 전역 라인 스캔은 이 사용을 **절대**
+            # 못 본다(`PTT_PTT3 = big_RESET;`). 매크로 이름으로 같은 스캔을 돌려
+            # 방향을 구한 뒤, 그 방향을 전역에 합류시킨다.
+            mu = _new_usage_slot()
+            _scan_name_usage(lines, m_name, mu)
             for g in globals_list:
                 if g not in usage:
                     continue
-                usage[g]["rhs"] = True
-                if usage[g]["rhs_idx"] is None:
-                    usage[g]["rhs_idx"] = -1
-                if _written:
-                    usage[g]["lhs"] = True
-                    usage[g]["inout"] = True
+                u = usage[g]
+                # ⚠ **방향 축만** 합류시킨다. members/indexes 는 매크로 이름 기준이라
+                #   (`RXBUF0.foo`) 전역 경로로 쓸 수 없다 — 전역 쪽 이름은 아래 확장형이 준다.
+                for k in ("lhs", "rhs", "inout"):
+                    u[k] = bool(u[k]) or bool(mu[k])
+                for k in ("lhs_idx", "rhs_idx"):
+                    if u[k] is None and mu[k] is not None:
+                        u[k] = mu[k]
                 # 매크로 확장형을 멤버 경로로 등록한다. 이게 없으면 이름이 base 로만 남아
                 # `_PTT` 가 되는데, 정본은 비트 필드까지 적는다(`_PTT.Bits.PTT3`).
                 exp = str(_expansions.get(m_name) or "").strip()
                 if exp and exp != g and re.match(rf"^{re.escape(g)}\s*(?:\.|->|\[)", exp):
-                    usage[g]["members"].add(re.sub(r"\s+", "", exp))
-    for idx, line in enumerate(lines):
-        if not line.strip():
-            continue
-        for name in var_names:
-            if name not in line:
-                continue
-            u = usage[name]
-            for m in re.finditer(rf"\b{re.escape(name)}\b\s*(->|\.)\s*([A-Za-z_]\w*)", line):
-                u["members"].add(f"{name}{m.group(1)}{m.group(2)}")
-            for m in re.finditer(rf"\b{re.escape(name)}\b\s*\[\s*([^\]]+)\s*\]", line):
-                u["indexes"].add(m.group(1).strip())
-            if re.search(rf"/\s*\(?\s*\b{re.escape(name)}\b", line):
-                u["divisor"] = True
-            if re.search(
-                rf"(\+\+|--)\s*\b{re.escape(name)}\b"
-                rf"|\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+\+|--)",
-                line,
-            ):
-                u["lhs"] = True
-                u["rhs"] = True
-                u["inout"] = True
-                continue
-            if re.search(
-                rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)",
-                line,
-            ):
-                u["lhs"] = True
-                u["rhs"] = True
-                u["inout"] = True
-                continue
-            m_assign = re.search(
-                rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*=(?!=)",
-                line,
-            )
-            if m_assign:
-                u["lhs"] = True
-                if u["lhs_idx"] is None:
-                    u["lhs_idx"] = idx
-                rhs = line[m_assign.end() :]
-                if re.search(rf"\b{re.escape(name)}\b", rhs):
-                    u["rhs"] = True
-                    u["inout"] = True
-                continue
-            if re.search(rf"\b{re.escape(name)}\b", line):
-                u["rhs"] = True
-                if u["rhs_idx"] is None:
-                    u["rhs_idx"] = idx
+                    u["members"].add(re.sub(r"\s+", "", exp))
+    for name in var_names:
+        _scan_name_usage(lines, name, usage[name])
     for u in usage.values():
         if u["inout"]:
             continue

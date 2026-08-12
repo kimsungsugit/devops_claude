@@ -596,7 +596,11 @@ def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
     if not file_path or not name:
         return "", ""
     try:
-        text = _read_text_limited(Path(file_path), 200_000)
+        # ⚠ 여기 200_000 을 **박아두면** 선언이 파일 뒤쪽에 있는 전역의 타입 추론이
+        #   조용히 실패하고, 그 전역은 uds_generator 의 `typeless_dropped` 에서
+        #   통째로 사라진다(IO_Map.h 665KB 의 `_ADC0CTL` 계열이 그랬다).
+        #   상한은 `_SRC_READ_MAX_BYTES` 단일 출처를 따른다.
+        text = _read_text_limited(Path(file_path))
     except Exception:
         return "", ""
     name_re = re.escape(name)
