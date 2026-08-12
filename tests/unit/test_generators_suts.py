@@ -127,6 +127,34 @@ class TestGlobalDirectionTags:
         u = self._unit("[INDIRECT] s_LinFrame.LIN_PID")
         assert "s_LinFrame.LIN_PID" not in u["input_vars"]
 
+    @pytest.mark.parametrize("name", ["_SPI0SR.Bits.SPIF", "g_MotorState", "r_SCI0CR2.Byte"])
+    def test_two_hop_indirect_is_not_looser_than_one_hop(self, name):
+        """⚠ **같은 함정의 재발.** 2홉 전파는 `[INDIRECT2]` 로 태그되는데
+        `_DIR_TAG_PAT` 이 `INDIRECT` 만 알면 매칭에 실패해 "태그 없음" 으로 떨어지고,
+        프리픽스 휴리스틱이 `_`·`g_`·`r_` 로 시작하는 이름을 **입력으로 올린다**.
+
+        결과는 뒤집힌 판정이다 — 1홉은 입력에서 빼면서 2홉(= 더 먼 증거)은 넣는다.
+        실측(2026-08-12, KJPDS02): SPI 레지스터가 인식되자 `g_DrvIn_DRV8706SQ_Init` ·
+        `..._Left` · `s_IIM20670_Init` 3건이 정본엔 입력 0개인데 `_SPI0SR` 계열을
+        입력으로 냈다(읽기는 2홉 아래 `u16g_DrvIn_SPI_DataTransfer` 안에 있다).
+        """
+        one = self._unit(f"[INDIRECT] {name}")
+        two = self._unit(f"[INDIRECT2] {name}")
+        assert name not in one["input_vars"], "1홉 간접이 입력이면 이 테스트의 전제가 깨졌다"
+        assert name not in two["input_vars"], (
+            f"2홉 간접이 입력으로 올라갔다: {two['input_vars']} "
+            "— 증거가 멀수록 판정이 느슨해지면 안 된다"
+        )
+
+    def test_two_hop_tag_is_recognized_by_the_single_source(self):
+        """판정 복제 방지 — 태그 어휘는 `dir_tag` 한 곳에서만 정의한다."""
+        from generators.suts import dir_tag
+
+        assert dir_tag("[INDIRECT2] _SPI0SR") == "INDIRECT2"
+        assert dir_tag("[INDIRECT] _SPI0SR") == "INDIRECT"
+        assert dir_tag("[INOUT] x") == "INOUT"
+        assert dir_tag("_SPI0SR") == ""
+
     def test_untagged_keeps_prefix_heuristic(self):
         """무태그 529건은 기존 휴리스틱 그대로 — 태그 수정이 여길 건드리면 회귀다."""
         assert self._unit("s_LinFrame")["output_vars"] == ["s_LinFrame"]

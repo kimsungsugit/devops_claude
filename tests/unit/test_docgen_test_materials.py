@@ -223,6 +223,20 @@ def test_indirect_only_is_named_separately() -> None:
     assert _causes(fd) == {"indirect_only": 1}
 
 
+def test_two_hop_indirect_lands_in_the_same_bucket() -> None:
+    """⚠ 2홉 전파(`[INDIRECT2]`)도 간접이다.
+
+    사유 분포가 이걸 `other` 로 흘리면 조치 가능한 축을 못 짚는다. 게다가 옛 판은
+    여기 정규식을 복제해 두고 `INDIRECT` 만 알았는데, 진짜 소비처
+    (`generators.suts.collect_unit_functions`)는 그 사이 같은 항목을 **입력으로
+    올리고** 있었다 — 게이트가 보는 그림과 산출물이 서로 달랐다.
+    """
+    fd = {"a": _unit("s_Cfg", gg=["[INDIRECT2] g_Table"])}
+    assert _causes(fd) == {"indirect_only": 1}
+    fd2 = {"a": _unit("s_Cfg", gg=["[INDIRECT] g_A", "[INDIRECT2] g_B"])}
+    assert _causes(fd2) == {"indirect_only": 1}
+
+
 def test_readable_global_that_vanished_is_flagged_as_a_defect() -> None:
     """읽는 전역이 분명히 있는데 입력 열이 비면 **이름 추출이 버린 것**이다.
 

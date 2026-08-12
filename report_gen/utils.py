@@ -579,16 +579,31 @@ def _normalize_swcom_label(label: str) -> str:
     return text
 
 
+# 저장소가 오래 지고 있던 **죽은 폴백** 두 개(2026-08-12 발견).
+#
+# 아래 두 함수의 정규식이 raw 문자열 안에서 `\\b` · `\\s` 였다. raw 에서 `\\` 는
+# **리터럴 백슬래시**이므로 `\\b` 는 "역슬래시 다음에 b" 를 요구한다 — C 소스엔 그런
+# 문자열이 없으니 **한 번도 매치된 적이 없다**:
+#
+#     _infer_type_from_decl("extern volatile ADC0STSSTR _ADC0STS;", "_ADC0STS")  ->  ""
+#
+# 파일 자동 분할(`Auto-split from report_generator.py`) 때 한 단계 더 이스케이프된
+# 것으로 보이며, 둘 다 조용히 `""` 를 돌려주므로 "타입을 못 구했다" 와 구분되지 않았다.
+#
+# ⚠ 이 fix 는 KJPDS02 에서 **산출물을 바꾸지 않는다** — tree-sitter 가 이미 모든 전역에
+#   타입을 주고 있어 `typeless_dropped` 가 0 이다(실측). 즉 회수가 아니라 **폴백의
+#   복구**다. tree-sitter 가 실패하는 프로젝트에서만 효과가 있다. 없는 회수를
+#   있다고 적지 않기 위해 여기 명시한다.
 def _infer_type_from_decl(decl: str, name: str) -> str:
     if not decl or not name:
         return ""
     text = " ".join(decl.replace("\n", " ").split())
-    m = re.search(rf"(.+?)\\b{name}\\b", text)
+    m = re.search(rf"(.+?)\b{re.escape(name)}\b", text)
     if not m:
         return ""
     head = m.group(1)
-    head = re.sub(r"\\s*=", " ", head).strip()
-    head = re.sub(r"\\b(static|extern|const|volatile)\\b", "", head).strip()
+    head = re.sub(r"\s*=", " ", head).strip()
+    head = re.sub(r"\b(static|extern|const|volatile)\b", "", head).strip()
     return " ".join(head.split()).strip()
 
 
@@ -596,16 +611,14 @@ def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
     if not file_path or not name:
         return "", ""
     try:
-        # ⚠ 여기 200_000 을 **박아두면** 선언이 파일 뒤쪽에 있는 전역의 타입 추론이
-        #   조용히 실패하고, 그 전역은 uds_generator 의 `typeless_dropped` 에서
-        #   통째로 사라진다(IO_Map.h 665KB 의 `_ADC0CTL` 계열이 그랬다).
-        #   상한은 `_SRC_READ_MAX_BYTES` 단일 출처를 따른다.
+        # ⚠ 상한을 여기 박아두면(옛 판 `200_000`) 선언이 파일 뒤쪽에 있는 전역은
+        #   폴백조차 못 탄다. 상한은 `_SRC_READ_MAX_BYTES` 단일 출처를 따른다.
         text = _read_text_limited(Path(file_path))
     except Exception:
         return "", ""
     name_re = re.escape(name)
     try:
-        pattern = re.compile(rf"^\\s*(.+?)\\b{name_re}\\b\\s*(=|\\[|;)", re.M)
+        pattern = re.compile(rf"^\s*(.+?)\b{name_re}\b\s*(=|\[|;)", re.M)
     except re.error:
         return "", ""
     for match in pattern.finditer(text):
@@ -613,10 +626,10 @@ def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
         if "(" in decl:
             continue
         head = match.group(1)
-        head = re.sub(r"\\b(static|extern|const|volatile)\\b", "", head).strip()
+        head = re.sub(r"\b(static|extern|const|volatile)\b", "", head).strip()
         gtype = " ".join(head.split()).strip()
         init = ""
-        init_match = re.search(rf"\\b{name}\\b\\s*=\\s*([^;]+)", decl)
+        init_match = re.search(rf"\b{name_re}\b\s*=\s*([^;]+)", decl)
         if init_match:
             init = init_match.group(1).strip()
         if gtype:

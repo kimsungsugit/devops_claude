@@ -399,7 +399,27 @@ _REG_PAT = re.compile(r"^REG_|^lin_|^PS\.|^DiagData\.")
 # 실측(KJPDS02 파서 산출 750함수 중 전역 보유 556개): [IN] 1,423 · [OUT] 1,052 ·
 # **[INOUT] 305** · [INDIRECT] 1,114 · 무태그 529. `LinSend` 는 `[INOUT] s_LinFrame …` 를
 # 받고도 입력이 0개였고 같은 이름이 기대결과에만 실렸다(정본은 입력에 둔다).
-_DIR_TAG_PAT = re.compile(r"^\s*\[(IN|OUT|INOUT|INDIRECT)\]", re.I)
+#
+# ⚠ **`INDIRECT2` 를 빼먹으면 안 된다** — 같은 함정이 한 번 더 있었다. 2홉 전파는
+#   `[INDIRECT2]` 로 태그되는데(`report_gen/uds_generator.py:2107`), 이 정규식이
+#   `INDIRECT` 만 알면 `[INDIRECT2]` 는 매칭에 실패해 **"태그 없음"** 으로 떨어지고
+#   아래 프리픽스 휴리스틱을 탄다. 그 결과 **1홉(`[INDIRECT]`)은 입력에서 빼는데
+#   2홉은 입력으로 올리는**, 증거가 멀수록 느슨해지는 뒤집힌 판정이 됐다.
+#   실측(2026-08-12, KJPDS02): SPI 레지스터가 살아나자 `g_DrvIn_DRV8706SQ_Init` ·
+#   `..._Left` · `s_IIM20670_Init` 3건이 정본엔 입력 0개인데 `_SPI0SR` 계열을
+#   입력으로 냈다 — 읽기는 2홉 아래 `u16g_DrvIn_SPI_DataTransfer` 안에서 일어난다.
+_DIR_TAG_PAT = re.compile(r"^\s*\[(IN|OUT|INOUT|INDIRECT2|INDIRECT)\]", re.I)
+
+
+def dir_tag(entry: Any) -> str:
+    """전역 엔트리의 방향 태그(대문자). 태그가 없으면 빈 문자열.
+
+    **방향 태그 판정의 단일 출처.** 소비처가 각자 정규식을 들고 있으면 태그가
+    하나 늘 때 한쪽만 고쳐진다 — 이 저장소가 `[INOUT]`(A-1)과 `[INDIRECT2]`
+    두 번 겪은 실패다.
+    """
+    m = _DIR_TAG_PAT.match(str(entry or ""))
+    return m.group(1).upper() if m else ""
 
 
 def collect_unit_functions(
@@ -454,15 +474,16 @@ def collect_unit_functions(
                 continue
 
             tag = str(g).upper()
-            is_indirect = "[INDIRECT]" in tag
             is_in_global = g in globals_g_set
 
             role_in = False
             role_out = False
 
             # 방향 태그 — 앵커 매칭. `[INOUT]` 은 읽기·쓰기 **둘 다**다.
-            _dir = _DIR_TAG_PAT.match(str(g))
-            _dir_tag = _dir.group(1).upper() if _dir else ""
+            _dir_tag = dir_tag(g)
+            # ⚠ 간접 판정을 **파싱된 태그에서** 뽑는다. 예전의 `"[INDIRECT]" in tag` 는
+            #   `[INDIRECT2]` 를 못 봐서 2홉이 직접 사용처럼 통과했다.
+            is_indirect = _dir_tag.startswith("INDIRECT")
             if _dir_tag in {"IN", "INOUT"}:
                 role_in = True
             if _dir_tag in {"OUT", "INOUT"}:
@@ -528,9 +549,10 @@ def collect_unit_functions(
         # Collect indirect (global) vars for GLOBAL/VOID strategies
         indirect_vars: List[str] = []
         for g in globals_g + globals_s:
-            tag = str(g).upper()
             gn = _clean_global_name(g)
-            if gn and "[INDIRECT]" in tag and gn not in inp_set and gn not in out_set:
+            # ⚠ 2홉(`[INDIRECT2]`)도 간접이다 — 여기서 빠지면 GLOBAL/VOID 전략이
+            #   간접 변수를 하나도 못 받는다.
+            if gn and dir_tag(g).startswith("INDIRECT") and gn not in inp_set and gn not in out_set:
                 if gn not in indirect_vars and len(indirect_vars) < 5:
                     indirect_vars.append(gn)
 

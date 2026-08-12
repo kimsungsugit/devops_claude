@@ -172,13 +172,17 @@ def _measure_suts_types(fd: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-_DIR_TAG_RE = re.compile(r"^\s*\[(IN|OUT|INOUT|INDIRECT)\]", re.I)
-
-
 def _dir_tag(entry: Any) -> str:
-    """전역 엔트리의 방향 태그. 태그가 없으면 빈 문자열(= 휴리스틱이 판정한 축)."""
-    m = _DIR_TAG_RE.match(str(entry or ""))
-    return m.group(1).upper() if m else ""
+    """전역 엔트리의 방향 태그. 태그가 없으면 빈 문자열(= 휴리스틱이 판정한 축).
+
+    ⚠ 판정은 `generators.suts.dir_tag` **단일 출처**를 쓴다. 여기 정규식을 복제해
+      뒀다가 `[INDIRECT2]`(2홉 전파)를 못 읽어 사유 분포가 그걸 "태그 없음" 으로
+      셌다 — 그 사이 진짜 소비처(`collect_unit_functions`)는 같은 항목을 입력으로
+      올리고 있었으므로, **게이트가 보는 그림과 산출물이 서로 달랐다**.
+    """
+    from generators.suts import dir_tag
+
+    return dir_tag(entry)
 
 
 _RET_TYPE_RE = re.compile(r"^\s*([\w\s\*]+?)\s+\w+\s*\(")
@@ -250,8 +254,11 @@ def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[st
             # 파라미터 문자열은 있는데 이름이 안 나온다 — 주석 블록이 통째로 파라미터로
             # 딸려온 경우가 대부분이다(Processor Expert 계열 `*_GetVal`).
             cause = "param_string_unusable"
-        elif tags and tags <= {"INDIRECT"}:
-            cause = "indirect_only"           # 간접 접근뿐 — 직접 넣을 값이 없다
+        elif tags and tags <= {"INDIRECT", "INDIRECT2"}:
+            # 간접 접근뿐 — 직접 넣을 값이 없다.
+            # ⚠ **2홉(`INDIRECT2`)도 여기 속한다.** `{"INDIRECT"}` 만 보면 2홉만 가진
+            #   함수가 `other` 로 새고, 사유 분포가 조치 가능한 축을 못 짚는다.
+            cause = "indirect_only"
         elif tags and tags <= {"OUT"}:
             cause = "write_only"              # 전역을 쓰기만 한다
         elif "" in tags:
