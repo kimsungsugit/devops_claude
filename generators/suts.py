@@ -1622,6 +1622,12 @@ def generate_suts_xlsm(
     wrap = Alignment(wrap_text=True, vertical="top")
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+    # 정본을 템플릿으로 쓰면 **과거 개정 이력이 그대로 딸려온다**. 지우지 않고
+    # 다음 행에 이번 개정을 덧붙인다(사용자 결정, 2026-08-12) — 그게 개정 이력의
+    # 본래 쓰임이고, 지우면 문서가 어디서 왔는지 사라진다.
+    from generators.history_row import append_history_row
+    append_history_row(wb, version=version, description=str(cfg.get("history_note") or ""))
+
     sheet_name = "2.SW Unit Test Spec"
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -2340,8 +2346,14 @@ def generate_suts(
     uds_path: Optional[str] = None,
     hsis_path: Optional[str] = None,
     target_function_names: Optional[List[str]] = None,
+    scope: str = "suds",
 ) -> Dict[str, Any]:
     """Top-level SUTS generation pipeline.
+
+    Args (추가):
+        scope: `"suds"`(기본) = SwUDS 설계 ID 가 있는 함수만 — **정본과 같은 범위**.
+            `"source"` = 소스에서 찾은 함수 전부. SwUDS 문서가 없으면 `"suds"` 여도
+            좁히지 않고 그 사실을 보고한다.
 
     Args:
         source_root: Root directory of C source code
@@ -2573,6 +2585,43 @@ def generate_suts(
                     )
             except Exception as _e:  # noqa: BLE001
                 _logger.warning("UDS design-id enrichment skipped: %s", _e)
+
+    # ── 시험 범위 — 기본은 **SwUDS 기반**(정본과 같은 범위) ────────────────────
+    #
+    # SUTS 는 SwUDS(단위 설계서)를 근거로 만드는 문서다. 정본도 그렇다 — 정본 1,005
+    # 함수는 SwUDS 설계 ID 1,026 과 교집합 1,001 로 사실상 일치한다(실측 2026-08-11).
+    # 소스에는 그보다 많은 함수가 있고(실측 1,160), 그중 155개는 정본이 시험 대상으로
+    # 삼지 않는다(부트로더 계열 등).
+    #
+    # ⚠ 이건 앞서 걷어낸 `docs/uds_function_swcom_override.json` 필터와 **성질이 다르다**.
+    #   그건 저장소에 박힌 251개 목록이라 프로젝트가 바뀌어도 같은 걸로 잘랐다.
+    #   이건 **그 프로젝트의 SwUDS 문서**가 근거이고, 문서가 없으면 필터도 걸지 않는다.
+    #
+    # 범위를 좁힌 사실은 **반드시 보고한다** — 조용히 자르면 커버리지가 또 자기 자신을
+    # 분모로 삼게 된다.
+    _scope = str(scope or "suds").strip().lower()
+    _scope_note = ""
+    if _scope == "suds":
+        _with_id = [u for u in units if str(u.get("suds_id") or "").strip()]
+        if not _with_id:
+            _scope_note = (
+                "SwUDS 설계 ID 를 하나도 확보하지 못해 범위를 좁히지 않았습니다 "
+                "(SwUDS 문서가 없거나 읽지 못했습니다)."
+            )
+            _logger.warning("SUTS scope=suds: %s", _scope_note)
+        elif len(_with_id) < len(units):
+            _dropped = len(units) - len(_with_id)
+            _scope_note = (
+                f"SwUDS 기반 범위: 소스 {len(units)}개 중 설계 ID 가 있는 "
+                f"{len(_with_id)}개만 시험합니다 ({_dropped}개 제외 — SwUDS 에 없는 함수)."
+            )
+            _logger.info("SUTS scope=suds: %s", _scope_note)
+            units = _with_id
+    else:
+        _scope_note = f"소스 전체 범위: {len(units)}개 함수 전부를 시험합니다(SwUDS 미대조)."
+        _logger.info("SUTS scope=source: %s", _scope_note)
+    if _scope_note:
+        _progress(40, _scope_note)
 
     # ── HSIS signal enrichment ────────────────────────────────────────────
     # Uses HSIS xlsx to enrich: srs_req_ids (from related_id), variable

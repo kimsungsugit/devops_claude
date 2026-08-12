@@ -3157,6 +3157,9 @@ async def jenkins_sts_generate_async(
     req_paths: str = Form(""),
     req_files: List[UploadFile] = File(default_factory=list),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿을 무엇으로 삼을지는 백엔드가 정한다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다(판정 복제 금지).
+    reference_doc_path: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3242,12 +3245,15 @@ async def jenkins_sts_generate_async(
         _logger.warning("STS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
 
-    tpl_path: Optional[str] = None
-    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
-    #   worker 경유로 로컬화해야 생성기(openpyxl/python-docx)가 열 수 있다.
-    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
-    if template_path:
-        tpl_path = _rbi_t(template_path, label="템플릿")
+    # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
+    # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
+    # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유 로컬화가 필요하다.
+    from backend.services.docgen_template_source import resolve_template_for
+    tpl_path, _tpl_why = resolve_template_for(
+        "sts", registered_template=template_path, reference_doc=reference_doc_path,
+    )
+    _logger.info("%s 템플릿: %s", "sts".upper(), _tpl_why)
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "sts", f"sts_{_job_slug(job_url)}", tpl_path)
     project_config = {
         "project_id": project_id or "PROJECT",
@@ -3380,6 +3386,12 @@ def jenkins_suts_generate_async(
     build_selector: str = Form("lastSuccessfulBuild"),
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
+    # 같은 종류의 **납품 정본**. 템플릿을 무엇으로 삼을지는 백엔드가 정한다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다(판정 복제 금지).
+    reference_doc_path: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3393,12 +3405,15 @@ def jenkins_suts_generate_async(
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
-    tpl_path: Optional[str] = None
-    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
-    #   worker 경유로 로컬화해야 생성기(openpyxl/python-docx)가 열 수 있다.
-    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
-    if template_path:
-        tpl_path = _rbi_t(template_path, label="템플릿")
+    # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
+    # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
+    # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유 로컬화가 필요하다.
+    from backend.services.docgen_template_source import resolve_template_for
+    tpl_path, _tpl_why = resolve_template_for(
+        "suts", registered_template=template_path, reference_doc=reference_doc_path,
+    )
+    _logger.info("%s 템플릿: %s", "suts".upper(), _tpl_why)
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "suts", f"suts_{_job_slug(job_url)}", tpl_path)
     project_config = {
         "project_id": project_id or "PROJECT",
@@ -3416,6 +3431,7 @@ def jenkins_suts_generate_async(
         try:
             _set_progress("jenkins_suts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
             result = generate_suts(
+                scope=scope,
                 source_root=str(source_root_path),
                 output_path=str(out_path),
                 template_path=tpl_path,

@@ -1,6 +1,6 @@
 // 조회는 이 컴포넌트가 하지 않는다 — 부모(보드)가 행을 펼칠 때 받아 props 로 내린다.
 // 이유는 아래 컴포넌트 주석 참조.
-import { loadDocGenCaps, saveDocGenCap } from '../../sharedInputs.js';
+import { loadDocGenCaps, saveDocGenCap, saveDocGenChoice } from '../../sharedInputs.js';
 
 /**
  * 생성 상한 입력 — 캡은 **자료 부족이 아니라 사용자 결정**이라 그 자리에서 바꾼다.
@@ -9,6 +9,32 @@ import { loadDocGenCaps, saveDocGenCap } from '../../sharedInputs.js';
  * 되어 뜻이 정반대다). 비제어 입력이라 컴포넌트 상태가 없다 — 저장은 이벤트에서만
  * 일어나므로 effect 안의 setState 문제도 생기지 않는다.
  */
+/**
+ * 시험 **범위** 선택 — 캡과 마찬가지로 자료 부족이 아니라 사용자 결정이다.
+ *
+ * 기본은 `suds`(SwUDS 설계 ID 가 있는 함수만). SUTS 는 SwUDS 기반 문서이고 납품
+ * 정본도 그 범위다(실측: 정본 1,005 ↔ SwUDS 1,026, 교집합 1,001). 소스에는 그보다
+ * 많은 함수가 있어(1,160) 전부 시험하면 정본에 없는 항목이 섞인다.
+ *
+ * 빈 값을 저장하면 키가 지워져 **서버 기본값**을 쓴다 — 여기서 기본을 복제하지 않는다.
+ */
+function ScopeSelect({ onSaved }) {
+  const caps = loadDocGenCaps();
+  return (
+    <span style={{ whiteSpace: 'nowrap' }}>
+      <select
+        aria-label="SUTS 시험 범위"
+        defaultValue={caps.suts_scope || ''}
+        onChange={(e) => { saveDocGenChoice('suts_scope', e.target.value); onSaved?.(); }}
+        style={{ fontSize: 'var(--text-xs)' }}
+      >
+        <option value="">정본 기준 (SwUDS 설계 ID 보유 함수만)</option>
+        <option value="source">소스 전체 (SwUDS 미대조)</option>
+      </select>
+    </span>
+  );
+}
+
 function CapInput({ name, apiDefault, onSaved }) {
   const caps = loadDocGenCaps();
   return (
@@ -297,6 +323,8 @@ export default function DocGenPreflightPanel({
                       onSaved={onReload}
                     />
                   )}
+                  {/* 범위도 그 자리에서 고른다 — 캡과 같은 성격의 결정이다. */}
+                  {s.id === 'scope' && <ScopeSelect onSaved={onReload} />}
                   {Array.isArray(s.actions) && s.actions.length > 0 && (
                     <span style={{ whiteSpace: 'nowrap' }}>
                       {s.actions.map((a, i) => (

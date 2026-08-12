@@ -77,6 +77,11 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       const templatePath = (tplKey && (docPaths[tplKey] || linkedDocs[tplKey]))
         || docPaths.template || linkedDocs.template || '';
       if (templatePath) formData.append('template_path', templatePath);
+      // 같은 종류의 **납품 정본**. 무엇을 템플릿으로 쓸지는 **백엔드가 정한다**
+      // (`docgen_template_source`) — 여기서 고르면 판정이 두 벌이 된다.
+      // 정본을 쓰면 표지·이력·Introduction(표기 규약 표)이 납품본과 같아진다.
+      const referenceDoc = docPaths[docType] || linkedDocs[docType] || '';
+      if (referenceDoc) formData.append('reference_doc_path', referenceDoc);
       if (docType === 'uds' && templatePath) formData.append('uds_template_path', templatePath);
       // Pass linked doc paths
       const srsPath = docPaths.srs || linkedDocs.srs || '';
@@ -103,6 +108,12 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
         const caps = loadDocGenCaps();
         if (caps.max_flows) formData.append('max_flows', String(caps.max_flows));
         if (caps.max_subcases) formData.append('max_subcases', String(caps.max_subcases));
+      }
+      // SUTS 시험 범위 — 기본은 서버가 정한다(`suds` = SwUDS 설계 ID 가 있는 함수만,
+      // 정본과 같은 범위). 사용자가 준비 패널에서 `source`(소스 전체)를 고른 경우에만 보낸다.
+      if (docType === 'suts') {
+        const scope = String(loadDocGenCaps().suts_scope || '').trim();
+        if (scope) formData.append('scope', scope);
       }
       if (udsPath && docType !== 'uds') formData.append('uds_path', udsPath);
 

@@ -602,6 +602,20 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             actions=[{"kind": "input_value", "target": cap_name}],
         ))
 
+    # ── 5-b. 시험 범위 — 캡과 같은 성격의 **사용자 결정** ────────────────────
+    # SUTS 는 SwUDS(단위 설계서) 기반 문서다. 납품 정본도 그 범위이므로 기본은
+    # `suds`(설계 ID 가 있는 함수만)다. 소스에는 그보다 많은 함수가 있어(실측 1,160 vs
+    # 정본 1,005) 전부 시험하면 정본에 없는 항목이 섞인다 — 어느 쪽을 원하는지는
+    # 사람이 정한다. 기본값은 **생성기가 갖고 화면은 복제하지 않는다**.
+    if req.doc_type == "suts":
+        steps.append(_step(
+            "scope", "decision", S_OK, "시험 범위",
+            reason=(
+                "기본은 정본 기준입니다 — SwUDS 설계 ID 가 있는 함수만 시험합니다. "
+                "소스 전체를 시험하려면 바꾸세요(정본에 없는 함수가 포함됩니다)."
+            ),
+        ))
+
     # ── verdict — 오독 위험이 큰 순서로 ──────────────────────────────────────
     states = {s["state"] for s in steps}
     blocked = any(

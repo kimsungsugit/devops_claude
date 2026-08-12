@@ -2890,6 +2890,9 @@ def local_suts_generate(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -2952,6 +2955,7 @@ def local_suts_generate(
 
     try:
         result = generate_suts(
+            scope=scope,
             source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
             output_path=str(out_path),
             template_path=tpl_path,
@@ -2998,6 +3002,9 @@ def local_suts_generate_stream(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3066,6 +3073,7 @@ def local_suts_generate_stream(
     def _run():
         try:
             result = generate_suts(
+                scope=scope,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
@@ -3124,6 +3132,9 @@ def local_suts_generate_async(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3199,6 +3210,7 @@ def local_suts_generate_async(
             )
             _logger.info("[SUTS_ASYNC][%s] calling generate_suts ...", job_id)
             result = generate_suts(
+                scope=scope,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
@@ -3327,6 +3339,9 @@ def local_sits_generate(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다.
+    reference_doc_path: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3354,12 +3369,13 @@ def local_sits_generate(
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
-    tpl_path: Optional[str] = None
-    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
-    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
-    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
-    if template_path:
-        tpl_path = _rbi_t(template_path, label="템플릿")
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
+    # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
+    from backend.services.docgen_template_source import resolve_template_for
+    tpl_path, _tpl_why = resolve_template_for(
+        "sits", registered_template=template_path, reference_doc=reference_doc_path,
+    )
+    _logger.info("SITS 템플릿: %s", _tpl_why)
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3433,6 +3449,9 @@ def local_sits_generate_stream(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다.
+    reference_doc_path: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3461,12 +3480,13 @@ def local_sits_generate_stream(
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
-    tpl_path: Optional[str] = None
-    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
-    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
-    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
-    if template_path:
-        tpl_path = _rbi_t(template_path, label="템플릿")
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
+    # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
+    from backend.services.docgen_template_source import resolve_template_for
+    tpl_path, _tpl_why = resolve_template_for(
+        "sits", registered_template=template_path, reference_doc=reference_doc_path,
+    )
+    _logger.info("SITS 템플릿: %s", _tpl_why)
 
     from backend.services.resolver_helpers import resolve_builder_input
 
@@ -3557,6 +3577,9 @@ def local_sits_generate_async(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다.
+    reference_doc_path: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3588,12 +3611,13 @@ def local_sits_generate_async(
         job_id=job_id,
     )
 
-    tpl_path: Optional[str] = None
-    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
-    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
-    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
-    if template_path:
-        tpl_path = _rbi_t(template_path, label="템플릿")
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
+    # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
+    from backend.services.docgen_template_source import resolve_template_for
+    tpl_path, _tpl_why = resolve_template_for(
+        "sits", registered_template=template_path, reference_doc=reference_doc_path,
+    )
+    _logger.info("SITS 템플릿: %s", _tpl_why)
 
     # 선택 입력 worker 경유. SITS 는 선택 문서가 5종(SRS·SDS·UDS·HSIS·STP)이라
     # 직독 시절엔 cloudium 에서 **다섯 개가 통째로** 빠진 채 만들어졌다.

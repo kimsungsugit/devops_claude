@@ -56,6 +56,20 @@ export function saveDocGenCap(name, value) {
   return caps;
 }
 
+/** 문자열 선택지 하나 저장(예: SUTS 시험 범위). 빈 값이면 키를 지운다 = 서버 기본값.
+ *
+ * ⚠ `saveDocGenCap` 은 숫자 전용이라(`Number()` 로 접는다) 문자열을 넣으면 조용히
+ *   버려진다 — 같은 스토어를 쓰되 함수를 나눈다.
+ */
+export function saveDocGenChoice(name, value) {
+  const caps = loadDocGenCaps();
+  const v = String(value ?? '').trim();
+  if (!v) delete caps[name];
+  else caps[name] = v;
+  try { localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify(caps)); } catch (_e) { /* 용량 초과 */ }
+  return caps;
+}
+
 /** 공유 입력 객체 로드 (항상 객체 반환). */
 export function loadSharedInputs() {
   try {
