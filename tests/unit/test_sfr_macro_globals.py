@@ -21,6 +21,8 @@
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from generators.suts import collect_unit_functions
@@ -90,6 +92,73 @@ def wdi_globals(sfr_project):
         if isinstance(info, dict) and info.get("name") == "g_SysOs_WdiCtrl":
             return list(info.get("globals_global") or []) + list(info.get("globals_static") or [])
     pytest.fail("g_SysOs_WdiCtrl 를 파싱하지 못했다 — 이 테스트의 전제가 깨졌다")
+
+
+class TestGlobalsScanLoss:
+    """전역 인식에서 **잃은 것**을 산출물이 말하는지.
+
+    스캔 캡(.c 200 · .h 300) · 미사용 판정 · 접두사 필터 · 타입없음 드롭 — 네 지점이
+    전부 조용히 자른다. 기록이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
+    """
+
+    def test_payload_carries_the_loss_counters(self, sfr_project):
+        g = sfr_project.get("globals_scan")
+        assert isinstance(g, dict) and g.get("measured") is True
+        for k in ("c_total", "c_cap", "h_total", "h_cap", "extern_added",
+                  "extern_dropped_unused", "extern_dropped_prefix",
+                  "typeless_dropped", "globals_kept"):
+            assert k in g, f"{k} 가 없으면 그 축의 손실을 볼 수 없다"
+
+    def test_totals_are_reported_not_just_scanned(self, sfr_project):
+        """캡에 닿았는지는 **스캔 수만으로는 알 수 없다** — 총량이 함께 있어야 한다."""
+        g = sfr_project["globals_scan"]
+        assert g["c_scanned"] <= g["c_total"] and g["h_scanned"] <= g["h_total"]
+        assert g["c_cap"] and g["h_cap"]
+
+    def test_header_only_extern_is_recognized(self, tmp_path):
+        """**cross-file 전역이 실제로 해결되는지** — 이게 B 단계가 지키려는 행동이다.
+
+        정의는 다른 .c 에 있고 선언만 헤더에 있는 전역(`u8g_SystemReset_F` 같은)이
+        인식돼야 시험 입력이 선다.
+
+        ⚠ 인식 주체는 헤더 extern 스캔이 **아니라** `globals_detailed`(tree-sitter 전
+          파일 스캔)다. 실측으로 확인했다 — 헤더 extern 스캔을 타는 건수는 실제
+          프로젝트에서 0 이다(`extern_added: 0`). include 가드를 씌워도 마찬가지다.
+          그래서 그 스캔의 필터(미사용·접두사)는 **현행 파서에선 도달하지 않는 경로**이며,
+          카운터는 tree-sitter 가 실패했을 때를 위한 계측으로만 남아 있다.
+        """
+        (tmp_path / "ext.h").write_text(
+            "#ifndef EXT_H\n#define EXT_H\nextern U8 u8g_SystemReset_F;\n#endif\n",
+            encoding="utf-8")
+        (tmp_path / "m.c").write_text(
+            '#include "ext.h"\n'
+            "void f(void){ if( u8g_SystemReset_F == 0 ) { return; } }\n",
+            encoding="utf-8")
+        res = generate_uds_source_sections(str(tmp_path), preprocess=False)
+        globs = [
+            g
+            for info in (res.get("function_details") or {}).values()
+            if isinstance(info, dict) and info.get("name") == "f"
+            for g in (list(info.get("globals_global") or []) + list(info.get("globals_static") or []))
+        ]
+        assert any(g.endswith("u8g_SystemReset_F") for g in globs), \
+            "다른 파일에 정의된 전역을 못 잡으면 시험 입력이 서지 않는다"
+
+    def test_unmeasured_is_not_reported_as_zero_loss(self, monkeypatch, tmp_path):
+        """⚠ AST 파서가 없으면 이 값들은 **재지 못한 것**이다.
+
+        기본값을 0 으로 두면 화면이 "전역을 하나도 안 잃었다" 고 말한다. 그리고 애초에
+        바인딩이 없으면 페이로드 조립에서 `NameError` 로 생성이 통째로 죽는다
+        (이 커밋에서 실제로 그럴 뻔했다).
+        """
+        monkeypatch.setitem(sys.modules, "workflow.code_parser", None)
+        (tmp_path / "a.c").write_text("void f(void){ return; }\n", encoding="utf-8")
+        res = generate_uds_source_sections(str(tmp_path), preprocess=False)
+        g = res.get("globals_scan")
+        assert isinstance(g, dict), "폴백 경로에서 키가 아예 없으면 소비처가 터진다"
+        assert g.get("measured") is False
+        assert g.get("reason")
+        assert "globals_kept" not in g, "재지 못한 것을 0 으로 그리면 안 된다"
 
 
 class TestMacroHiddenRegisters:

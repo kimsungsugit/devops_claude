@@ -631,6 +631,12 @@ def generate_uds_source_sections(
         if str(fn.get("name") or "").strip()
     }
 
+    # 전역 인식 손실 계수. **AST 경로 밖에서도 반드시 바인딩돼 있어야 한다** — 아래
+    # 페이로드가 무조건 읽으므로, regex 폴백 경로에선 `NameError` 로 생성이 통째로 죽는다.
+    # ⚠ 기본값을 0 으로 두면 안 된다. "손실 0" 과 "재지 못함" 은 다른 말이고, 0 으로 두면
+    #   regex 폴백일 때 화면이 "전역을 하나도 안 잃었다" 고 말한다.
+    _globals_loss: Dict[str, Any] = {"measured": False, "reason": "AST 파서 미가용(regex 폴백)"}
+
     # AST 기반 보강 (가능 시)
     try:
         from workflow.code_parser import parse_c_project  # type: ignore
@@ -781,7 +787,13 @@ def generate_uds_source_sections(
                         "static": "true" if is_static else "false",
                         "desc": incoming_desc or str(prev.get("desc") or "").strip(),
                     }
-        for src_file in [f for f in files if f.suffix.lower() == ".c"][:200]:
+        # 스캔 캡에 실제로 닿는지 **센다**. 캡은 조용히 자르므로, 닿았는지를 기록하지 않으면
+        # "이 프로젝트엔 전역이 원래 없다" 와 "캡에서 잘렸다" 를 구분할 수 없다.
+        _c_files = [f for f in files if f.suffix.lower() == ".c"]
+        _h_files = [f for f in files if f.suffix.lower() == ".h"]
+        _scan_caps = {"c_total": len(_c_files), "c_cap": 200,
+                      "h_total": len(_h_files), "h_cap": 300}
+        for src_file in _c_files[:200]:
             try:
                 src_text = _src_read(src_file)
                 source_text_cache[str(src_file)] = src_text
@@ -812,7 +824,17 @@ def generate_uds_source_sections(
         #    (tree-sitter 전 파일 스캔)가 이미 잡고 있고, 진짜 원인은 선언 이름을
         #    주소 리터럴로 읽던 `_parse_c_declaration_statement` 쪽이었다.
         #    근거가 확인되지 않는 완화는 넣지 않는다.
-        for hdr_file in [f for f in files if f.suffix.lower() == ".h"][:300]:
+        # 이 필터들이 실제로 몇 건을 떨어뜨리는지 **센다**. 세지 않으면 "떨어뜨릴 게
+        # 없었다" 와 "떨어뜨렸다" 가 똑같이 조용하다.
+        #
+        # ⚠ 실측(2026-08-12, KJPDS02·HDPDM01): 이 루프가 추가하는 건수는 **0** 이다.
+        #   위 `globals_detailed`(tree-sitter 전 파일 스캔)가 헤더까지 이미 훑기 때문에
+        #   `ename in globals_info_map` 에서 전부 걸러진다(include 가드를 씌워도 같다).
+        #   즉 이 블록은 **tree-sitter 가 그 헤더를 파싱하지 못했을 때만** 동작하는
+        #   폴백이다. 아래 카운터는 그 폴백이 언젠가 실제로 도는지 보기 위한 계측이며,
+        #   지금은 도달하지 않으므로 테스트로 고정할 수 없다(가짜 테스트를 만들지 않는다).
+        _extern_dropped = {"unused_in_source": 0, "prefix_mismatch": 0}
+        for hdr_file in _h_files[:300]:
             try:
                 hdr_text = _src_read(hdr_file)
                 source_text_cache[str(hdr_file)] = hdr_text
@@ -831,8 +853,10 @@ def generate_uds_source_sections(
                 # 토큰집합 멤버십(O(1))으로 전체 .c full-text re.search를 대체.
                 used_in_source = used_in_body or (ename in _c_token_set)
                 if not used_in_source:
+                    _extern_dropped["unused_in_source"] += 1
                     continue
                 if (not any(ename.startswith(p) for p in _global_prefixes)) and not used_in_body:
+                    _extern_dropped["prefix_mismatch"] += 1
                     continue
                 globals_info_map[ename] = {
                     "type": etype,
@@ -846,10 +870,39 @@ def generate_uds_source_sections(
                 _extern_added += 1
         if _extern_added > 0:
             _logger.info("extern variable scan: added %d variables from headers", _extern_added)
+        _typeless_dropped = 0
         if globals_info_map:
+            _before = len(globals_info_map)
             globals_info_map = {
                 k: v for k, v in globals_info_map.items() if str(v.get("type") or "").strip()
             }
+            _typeless_dropped = _before - len(globals_info_map)
+        # 전역 인식에서 **잃은 것**을 한 줄로 낸다. 셋 다 조용히 자르는 지점이라, 기록이
+        # 없으면 "이 프로젝트엔 원래 없다" 로 오독한다. 캡에 닿으면 WARNING 으로 올린다
+        # (SITS `headroom` 과 같은 규약 — 절단 0 이 아니라 여유를 본다).
+        _globals_loss = {
+            "measured": True,
+            **_scan_caps,
+            "c_scanned": min(_scan_caps["c_total"], _scan_caps["c_cap"]),
+            "h_scanned": min(_scan_caps["h_total"], _scan_caps["h_cap"]),
+            "extern_added": _extern_added,
+            "extern_dropped_unused": _extern_dropped["unused_in_source"],
+            "extern_dropped_prefix": _extern_dropped["prefix_mismatch"],
+            "typeless_dropped": _typeless_dropped,
+            "globals_kept": len(globals_info_map),
+        }
+        _at_cap = (_scan_caps["c_total"] > _scan_caps["c_cap"]
+                   or _scan_caps["h_total"] > _scan_caps["h_cap"])
+        (_logger.warning if _at_cap else _logger.info)(
+            "globals scan: kept=%d | .c %d/%d · .h %d/%d%s | extern +%d "
+            "(미사용 -%d · 접두사 -%d) | 타입없음 -%d",
+            _globals_loss["globals_kept"],
+            _globals_loss["c_scanned"], _scan_caps["c_total"],
+            _globals_loss["h_scanned"], _scan_caps["h_total"],
+            "  ⚠캡 도달 — 나머지 파일의 전역은 인식되지 않는다" if _at_cap else "",
+            _extern_added, _extern_dropped["unused_in_source"],
+            _extern_dropped["prefix_mismatch"], _typeless_dropped,
+        )
         macro_globals_map: Dict[str, List[str]] = {}
         # 매크로 이름 -> 확장형. 확장형이 곧 **문서에 적힐 이름**이다(`_PTT.Bits.PTT3`).
         # 이게 없으면 base(`_PTT`)만 남아 정본과 다른 이름이 된다.
@@ -2081,6 +2134,9 @@ def generate_uds_source_sections(
         # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이
         # 다른 사본의 파일 변경을 놓치고(under-report) 낮은 ASIL로 오판한다. {name: {files, asil}}.
         "function_collisions": function_collisions,
+        # 전역 인식에서 **잃은 것**. 스캔 캡·미사용 판정·접두사 필터·타입없음 네 지점이
+        # 전부 조용히 자르므로, 이 값이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
+        "globals_scan": _globals_loss,
         "call_map": call_map,
         "calling_map": calling_map,
         "module_map": module_map,
