@@ -336,6 +336,9 @@ def generate_uds_source_sections(
     macro_defs: List[List[str]] = []
     calibration_params: List[List[str]] = []
     function_table_rows: List[List[str]] = []
+    # SwCom(mod_idx) 단위 함수 일련번호. `fn_id = SwUFn_{mod_idx}{counter}` 의 유일성을
+    # 이 카운터가 책임진다 — 파일 stem 별로 세면 같은 SwCom 안에서 ID 가 충돌한다.
+    _fn_counter_by_mod: Dict[int, int] = {}
     function_details: Dict[str, Dict[str, Any]] = {}
     function_details_by_name: Dict[str, Dict[str, Any]] = {}
     # {fid: body 앞부분}. AI 2차 description refinement(uds_ai)가 유일한 소비자다.
@@ -1030,7 +1033,16 @@ def generate_uds_source_sections(
                         next_module_idx += 1
                     mod_idx = module_ids.get(module_name, 0)
             module_map[name] = module_name
-            counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
+            # ⚠ counter 는 `fn_id` 의 **유일성을 책임진다**. 예전엔 `module_name`(파일 stem)
+            #   별로 셌는데 `fn_id` 는 `mod_idx`(SwCom 번호) + counter 로 만든다. 같은
+            #   SwCom 에 속한 파일이 여럿이면 **서로 다른 함수가 같은 fn_id 를 받고**
+            #   `function_details[fn_id] = detail` 이 조용히 덮어썼다.
+            #   실측(PDS128_FBL, 2026-08-12): c_parser 186함수 → 165개만 남고 `main.c` 는
+            #   24개 중 **5개만** 살아남았다(linuds 86 · lin 24 · main 5 가 전부
+            #   `SwUFn_3501` 부터 시작). 정본 대비 251개 누락의 주 원인이다.
+            #   SwCom 단위로 세는 것이 `SwUFn_{SwCom}{순번}` 체계의 원래 의도다.
+            counter = _fn_counter_by_mod.get(mod_idx, 0) + 1
+            _fn_counter_by_mod[mod_idx] = counter
             fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
             lname = name.lower()
             if lname.startswith("s_"):
@@ -1304,7 +1316,10 @@ def generate_uds_source_sections(
                             next_module_idx += 1
                         mod_idx = module_ids.get(module_name, 0)
                 module_map[name] = module_name
-                counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
+                # 위와 같은 이유로 SwCom(mod_idx) 단위로 센다 — **두 곳이 같이 움직여야
+                # 한다**(한쪽만 고치면 폴백 경로에서 같은 충돌이 그대로 남는다).
+                counter = _fn_counter_by_mod.get(mod_idx, 0) + 1
+                _fn_counter_by_mod[mod_idx] = counter
                 fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
                 fn_type = "Internal" if is_static else "I/F"
                 if name.lower().startswith("s_"):
