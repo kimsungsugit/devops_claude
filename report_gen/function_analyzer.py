@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from report_gen.provenance import is_weak_source
+from workflow.code_parser.c_parser import blank_c_comments
 from report_gen.utils import (
     _normalize_related_ids,
     _normalize_swufn_id,
@@ -73,6 +74,20 @@ def _extract_param_symbol(param_text: str) -> str:
 
 
 def _parse_signature_params(signature: str, tag_direction: bool = False) -> List[str]:
+    # ⚠ **주석부터 지운다.** LIN 스택처럼 파라미터마다 앞에 설명 주석을 다는 코드가 있다:
+    #       void lin_lld_sci_rx_response(
+    #           /* [IN] Length of response data expect to wait */
+    #           l_u8 msg_length )
+    #   주석을 남기면 세 곳이 동시에 망가진다(실측 2026-08-12, KJPDS02 23개 unit):
+    #     1. 주석이 `_split_param` 의 **타입 문자열**로 들어가 파라미터 엔트리가
+    #        `/* [IN] Length … */ l_u8 msg_length` 가 된다 → 소비처(`generators/suts.py`)
+    #        가 "선언이 아님" 으로 통째로 버려 **입력 열이 빈다**
+    #     2. `pointer_range = "*" in ptype` 이 주석의 `/*` 를 포인터로 읽어 포인터가
+    #        아닌 `l_u8` 에 `(range: 0x0 ~ 0xFFFFFFFF)` 를 붙인다 — **없는 근거**다
+    #     3. 주석 안의 콤마에서 `_split_signature_param_chunks` 가 쪼개
+    #        파라미터 하나가 **둘로 찢어진다**(`lin_tl_make_slaveres_pdu` 실측)
+    #   길이 보존 blank 라 아래 공백 정규화가 그대로 흡수한다.
+    signature = blank_c_comments(signature)
     if not signature or "(" not in signature or ")" not in signature:
         return []
     params = signature.split("(", 1)[1].rsplit(")", 1)[0].strip()
@@ -157,6 +172,15 @@ def _split_param(param: str) -> Tuple[str, str, str]:
     return type_text, name, array_part
 
 
+# 변수 이름 **뒤에** 올 수 있는 접근자 꼬리(`.f` · `->f` · `[i]`, 섞여서 반복).
+# ⚠ **첨자를 반드시 포함해야 한다.** 없으면 `arr[i] = f(i);` 가 대입으로 안 잡히고
+#   맨 아래 "이름이 보이면 읽기" 분기로 떨어져 **쓰기 전용 배열이 시험 입력이 된다**.
+#   실측(2026-08-12, KJPDS02): EEPROM read 계열
+#   `u8g_SysEepromCtrl_ProdDateInfo[u8t_Idx] = u8g_…_ReadProdDate((U16)u8t_Idx);` 4건이
+#   정본엔 입력 0개인데 우리는 입력으로 냈다.
+_ACCESS_TAIL = r"(?:\s*(?:->|\.)\s*\w+|\s*\[[^\]]*\])*"
+
+
 def _collect_var_usage(
     body_text: str,
     var_names: List[str],
@@ -221,7 +245,8 @@ def _collect_var_usage(
             if re.search(rf"/\s*\(?\s*\b{re.escape(name)}\b", line):
                 u["divisor"] = True
             if re.search(
-                rf"(\+\+|--)\s*\b{re.escape(name)}\b|\b{re.escape(name)}\b\s*(\+\+|--)",
+                rf"(\+\+|--)\s*\b{re.escape(name)}\b"
+                rf"|\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+\+|--)",
                 line,
             ):
                 u["lhs"] = True
@@ -229,7 +254,7 @@ def _collect_var_usage(
                 u["inout"] = True
                 continue
             if re.search(
-                rf"\b{re.escape(name)}\b(?:\s*(?:->|\.)\s*\w+)?\s*(\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)",
+                rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)",
                 line,
             ):
                 u["lhs"] = True
@@ -237,7 +262,7 @@ def _collect_var_usage(
                 u["inout"] = True
                 continue
             m_assign = re.search(
-                rf"\b{re.escape(name)}\b(?:\s*(?:->|\.)\s*\w+)?\s*=(?!=)",
+                rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*=(?!=)",
                 line,
             )
             if m_assign:

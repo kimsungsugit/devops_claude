@@ -56,6 +56,32 @@ def blank_c_comments(text: str) -> str:
     return text
 
 
+# C 식별자. **앞의 `\b` 가 이 정규식의 본체다.**
+#
+# `[A-Za-z_]\w*` 만 쓰면 정수 리터럴의 접미사가 식별자로 잡힌다:
+#   re.findall(r"[A-Za-z_]\w*", "123U")  ->  ['U']      ← `123U` 안의 `U`
+#   re.findall(r"[A-Za-z_]\w*", "0x1FUL") ->  ['x1FUL']  ← 통째로
+# `\b` 는 앞 글자가 `\w` 면 경계가 아니므로 둘 다 **아무것도** 내놓지 않는다(정답).
+#
+# ## 실측 피해 (2026-08-12, KJPDS02)
+#
+# 이 저장소엔 `U` 라는 전역이 하나 등록돼 있었다(`@0x00FF9DF0U` 오파싱 — 아래
+# `source_parser._parse_c_declaration_statement` 주석 참조). 그래서 두 결함이
+# 맞물렸다: `#define VectorNumber_VReserved123 123U` 의 확장형에서 `U` 가 나오고,
+# 그게 등록된 전역 이름과 일치해 매크로를 쓰는 **모든** 함수에 전역 `U` 가 붙었다.
+# 결과는 **324개 함수** — 이 프로젝트에서 가장 많이 붙은 "전역" 1위였다.
+# 그 함수들은 `U`(1글자)가 이름 필터에서 탈락하면서 입력 열이 통째로 비었다.
+#
+# 파라미터 이름 추출(`parse_param_name`)에서는 더 직접적이다:
+#   `U8 buf[10U]` -> ids[-1] 이 `buf` 가 아니라 **`U`** 였다.
+_C_IDENT_RE = re.compile(r"\b[A-Za-z_]\w*")
+
+
+def c_identifiers(text: str) -> List[str]:
+    """C 코드 조각에서 식별자 토큰만 뽑는다(정수 리터럴 접미사 제외)."""
+    return _C_IDENT_RE.findall(str(text or ""))
+
+
 @dataclass
 class CFunction:
     name: str

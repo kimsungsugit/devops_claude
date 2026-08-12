@@ -33,6 +33,7 @@ from report_gen.source_parser import _extract_c_definitions
 from workflow.code_parser.c_parser import (
     _extract_function_defs_regex_fallback,
     blank_c_comments,
+    c_identifiers,
 )
 
 # 실제 `Generated_Code/PS3_MOTOR_NSCS.c` 의 구조를 줄인 것
@@ -89,6 +90,32 @@ class TestBlankCComments:
 
     def test_empty_input(self):
         assert blank_c_comments("") == ""
+
+
+class TestCIdentifiers:
+    """정수 리터럴의 접미사를 식별자로 내놓지 않는지.
+
+    ⚠ 이 한 글자가 실제로 **324개 함수**를 오염시켰다 — `#define X 123U` 의 `U` 가
+      전역 이름으로 잡혀 그 매크로를 쓰는 모든 함수에 붙었다. 상세는
+      `tests/unit/test_phantom_inputs.py` 모듈 docstring.
+    """
+
+    @pytest.mark.parametrize(
+        "src,expected",
+        [
+            ("123U", []),
+            ("0x1FUL", []),
+            ("0x00FF9DF0U", []),
+            ("42", []),
+            ("( ( U8 )( 2U ) )", ["U8"]),
+            ("#define VectorNumber_VReserved123 123U", ["define", "VectorNumber_VReserved123"]),
+            ("_PTT.Bits.PTT3", ["_PTT", "Bits", "PTT3"]),
+            ("u8s_Buf[10U] = 0U;", ["u8s_Buf"]),
+            ("", []),
+        ],
+    )
+    def test_suffix_is_not_an_identifier(self, src, expected):
+        assert c_identifiers(src) == expected
 
 
 class TestPhantomFunctionsFromComments:

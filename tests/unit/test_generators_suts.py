@@ -206,7 +206,8 @@ class TestParamAnnotationTail:
             # 상위 파서가 주석 블록을 파라미터 하나로 딸려보낸 실제 문자열(축약)
             "[IN] void) ** This method is implemented as a macro. */ // if (Val == (U8) TRUE"
             " (range: 0x00000000 ~ 0xFFFFFFFF)",
-            "[IN] U8 x /* 설명 */",
+            # 주석 안의 콤마에서 파라미터가 쪼개져 코드 조각만 남은 것
+            "[IN] if positive = 0 */ l_u8 error_code",
             "[IN] " + "A" * 200,
         ],
     )
@@ -219,6 +220,30 @@ class TestParamAnnotationTail:
         from generators.suts import _extract_var_names
 
         assert _extract_var_names([raw]) == []
+
+    @pytest.mark.parametrize(
+        "raw,names",
+        [
+            # LIN 스택 실측 — 파라미터 앞에 설명 주석이 붙는다
+            ("[IN] /* [IN] Length of response data */ l_u8 msg_length", ["msg_length"]),
+            ("[IN] /* [IN] data area */ const l_u8* const data (idx: i, 0)", ["data"]),
+            ("[IN] U8 x /* 설명 */", ["x"]),
+            # 꼬리 안에 괄호가 중첩돼도 이름은 남는다
+            ("[IN] U8 buf (idx: ( ( U8 )( 2U ) ), ( ( U8 )( 8U ) ))", ["buf"]),
+        ],
+    )
+    def test_leading_comment_is_cleaned_not_rejected(self, raw, names):
+        """⚠ 이 축은 2026-08-12 에 **뒤집혔다**.
+
+        원래는 `/*` 가 있으면 통째로 버렸다(위 garbage 가드). 그런데 실측해보니 버려진
+        23개 unit 이 전부 `/* [IN] … */ l_u8 msg_length` 꼴의 **멀쩡한 선언**이었다 —
+        주석만 지우면 이름이 그대로 나온다. 그래서 "주석 있으면 거절"이 아니라
+        "주석을 지운 뒤 **선언 모양인지** 본다"로 바꿨다. 위 garbage 케이스들은
+        주석을 지워도 `)`·`=` 가 남아 여전히 거절된다.
+        """
+        from generators.suts import _extract_var_names
+
+        assert _extract_var_names([raw]) == names
 
     def test_indexed_global_reaches_the_input_column(self):
         """소비처 확인 — 여기서 빠지면 시퀀스에 넣을 값이 없다."""

@@ -141,6 +141,15 @@ class TestParseParamName:
     def test_empty(self):
         assert _parse_param_name("") == ""
 
+    @pytest.mark.parametrize("raw,name", [("U8 buf[10U]", "buf"), ("U16 a[0x1FUL]", "a")])
+    def test_integer_suffix_is_not_the_parameter_name(self, raw, name):
+        """⚠ `[A-Za-z_]\\w*` 는 `10U` 에서 `U` 를 내놓고, 그게 **마지막 토큰**이라 이름이 된다.
+
+        `workflow/test_helpers.py` · `workflow/pipeline.py` 에 같은 복제본이 있다 —
+        셋 다 같은 가드를 갖는다(한쪽만 고치면 드리프트한다).
+        """
+        assert _parse_param_name(raw) == name
+
 
 class TestAltBuffer:
     def test_swap(self):

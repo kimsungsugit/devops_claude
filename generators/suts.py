@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from generators._artifact_check import apply_write_back_check
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import _extract_sds_partition_map
+from workflow.code_parser.c_parser import blank_c_comments
 
 _logger = logging.getLogger(__name__)
 
@@ -574,15 +575,44 @@ def _infer_return_type(prototype: str) -> str:
 # `s_sha256_transform` 은 정본이 입력 9개를 적는데 우리는 0개였다.
 _PARAM_ANNOT_TAIL = re.compile(r"\s*\((?:idx|range|divisor)\s*:[^)]*\)\s*$", re.I)
 
+# 꼬리의 **시작**만 찾는다. 끝은 괄호를 세어서 찾아야 한다 — `idx:` 안에 괄호가 중첩되기
+# 때문이다(`_normalize_bracket_expr` 가 매크로를 못 접으면 원문이 그대로 실린다):
+#   `u8g_SysEepromCtrl_PartNoInfo (idx: ( ( U8 )( 2U ) ), ( ( U8 )( 8U ) ), …)`
+# `[^)]*\)` 는 첫 `)` 에서 멈춰 `\s*$` 가 안 맞으므로 **꼬리가 하나도 안 떨어진다**.
+# 그러면 마지막 토큰이 `))` 가 되고, 두 글자라 이름 필터에서 탈락해 **진짜 전역이 사라진다**
+# (실측 2026-08-12: `u8s_DeviceTypeChk_*` 2건).
+_PARAM_ANNOT_HEAD = re.compile(r"\s*\((?:idx|range|divisor)\s*:", re.I)
+
 
 def _strip_param_annotations(s: str) -> str:
-    """이름 뒤 주석형 꼬리를 **전부** 뗀다(여러 개가 이어 붙는다)."""
+    """이름 뒤 주석형 꼬리를 **전부** 뗀다(여러 개가 이어 붙고, 안에 괄호가 중첩된다)."""
     out = str(s or "").strip()
     while True:
         stripped = _PARAM_ANNOT_TAIL.sub("", out)
-        if stripped == out:
+        if stripped != out:
+            out = stripped
+            continue
+        # 중첩 괄호가 있어 위 `$` 앵커 정규식이 못 잡은 경우. **마지막** 꼬리 후보를
+        # 잡아 괄호를 세어 끝을 찾는다. 꼬리는 이름 **뒤에만** 붙으므로, 잘라낸 자리가
+        # 문자열 끝이 아니면 꼬리가 아니다 — 건드리지 않는다(이름 중간을 지우면 다른
+        # 이름이 된다).
+        matches = list(_PARAM_ANNOT_HEAD.finditer(out))
+        if not matches:
             return out
-        out = stripped
+        m = matches[-1]
+        depth = 0
+        end = len(out)
+        for i in range(out.index("(", m.start()), len(out)):
+            if out[i] == "(":
+                depth += 1
+            elif out[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if out[end:].strip():
+            return out
+        out = out[: m.start()].strip()
 
 
 # 파라미터 문자열이 **선언이 아닌** 경우. 상위 파서가 주석 블록을 통째로 파라미터 하나로
@@ -591,7 +621,14 @@ def _strip_param_annotations(s: str) -> str:
 # ⚠ 이걸 그냥 두면 마지막 토큰인 **`TRUE` 가 변수명이 된다** — 없는 입력을 지어내는 것이라
 #   빈 칸보다 나쁘다(꼬리 주석 제거를 넣자마자 실제로 3건 발생했다). 선언이 아니면 **버린다**.
 #   버려진 건 게이트가 `param_string_unusable` 로 보고한다 — 침묵시키지 않는다.
-_PARAM_NOT_A_DECL = re.compile(r"/\*|\*/|//|\n")
+# **선언자 모양** 검사. 타입·이름 토큰과 `*` `[]` `.` `->` 만 허용한다.
+# 괄호·대입·세미콜론이 있으면 선언이 아니다(주석 잔해나 코드 조각이 딸려온 것).
+#   OK : `l_u8 msg_length` · `const l_u8* const data` · `q * queue->queue_tail` · `buf[8]`
+#   NG : `void) ** This method is implemented as a macro. …` · `if positive = 0 l_u8 err`
+# ⚠ 여기서 통과시키면 **마지막 토큰이 이름이 된다** — 즉 없는 입력을 지어낸다. 빈 칸보다
+#   나쁘다(꼬리 주석 제거를 처음 넣었을 때 실제로 `TRUE` 3건이 그렇게 들어갔다).
+#   버려진 건 게이트가 `param_string_unusable` 로 보고한다 — 침묵시키지 않는다.
+_PARAM_DECL_SHAPE = re.compile(r"[A-Za-z_][\w\s\*\[\]\.>-]*")
 _PARAM_DECL_MAX_LEN = 120
 
 
@@ -602,8 +639,11 @@ def _extract_var_names(raw_list: List[str]) -> List[str]:
         s = str(raw).strip()
         s = re.sub(r"^\[(?:IN|OUT|INOUT)\]\s*", "", s)
         s = re.sub(r"^return\s+", "", s, flags=re.I)
-        s = _strip_param_annotations(s)
-        if _PARAM_NOT_A_DECL.search(s) or len(s) > _PARAM_DECL_MAX_LEN:
+        # 파라미터 앞에 붙은 설명 주석(`/* [IN] … */ l_u8 msg_length`)을 지운다.
+        # 생산자(`_parse_signature_params`)가 2026-08-12부터 안 붙이지만, **캐시된 산출물과
+        # 참조 SUDS 문서 경유분에는 남아 있다** — 소비처에서도 한 번 더 지워야 회복된다.
+        s = _strip_param_annotations(blank_c_comments(s).strip())
+        if len(s) > _PARAM_DECL_MAX_LEN or not _PARAM_DECL_SHAPE.fullmatch(s):
             continue
         # Remove type qualifiers, keep only the symbol name
         parts = s.split()

@@ -167,7 +167,14 @@ def _parse_c_declaration_statement(stmt: str) -> List[Dict[str, str]]:
     #   때문). 이 프로젝트 `Generated_Code/IO_Map.h` 한 파일에만 372건이라, 레지스터 전체가
     #   쓰레기 이름으로 들어가고 진짜 이름은 어디에도 없었다. `@` 는 C 토큰이 아니므로
     #   선언문에 나오면 배치 지정자로 봐도 안전하다.
-    compact = re.sub(r"@\s*(?:0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_]\w*)", " ", compact).strip()
+    # ⚠ **정수 접미사(`[uUlL]`)까지 먹어야 한다.** `@0x00FF9DF0U` 에서 `0[xX][0-9A-Fa-f]+`
+    #   는 `U` 앞에서 멈추므로(=16진수가 아님) `U` 한 글자가 선언문에 남고, 그게 마지막
+    #   토큰이라 **변수명이 `U` 가 된다**. 실측(SysOs_Main.c `g_FirmwareVersionInfo`):
+    #   그렇게 등록된 `U` 가 매크로 토큰화 결함(`123U`→`U`)과 맞물려 **324개 함수**에
+    #   전역으로 붙었다 — 이 프로젝트 전역 부착 1위가 존재하지 않는 변수였다.
+    compact = re.sub(
+        r"@\s*(?:0[xX][0-9A-Fa-f]+[uUlL]*|\d+[uUlL]*|[A-Za-z_]\w*)", " ", compact
+    ).strip()
 
     storage_words: List[str] = []
     qualifiers: List[str] = []

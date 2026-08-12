@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from workflow.test_helpers import (
     strip_c_comments,
     param_placeholder,
@@ -56,6 +58,20 @@ class TestParseParamName:
 
     def test_empty(self):
         assert parse_param_name("") == ""
+
+    @pytest.mark.parametrize(
+        "raw,name",
+        [
+            # ⚠ 정수 리터럴 접미사를 식별자로 읽으면 **이름이 `U` 가 된다**(마지막 토큰이라).
+            #   같은 결함이 uds 파서 쪽에서 324개 함수를 오염시켰다 —
+            #   `workflow/code_parser/c_parser.py::c_identifiers` 주석 참조.
+            ("U8 buf[10U]", "buf"),
+            ("U16 arr[0x1FUL]", "arr"),
+            ("const U8 * src", "src"),
+        ],
+    )
+    def test_integer_suffix_is_not_the_parameter_name(self, raw, name):
+        assert parse_param_name(raw) == name
 
 
 class TestAltBuffer:

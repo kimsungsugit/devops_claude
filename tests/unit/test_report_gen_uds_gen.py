@@ -481,6 +481,28 @@ class TestFunctionAnalyzerHelpers:
         result = _collect_var_usage("", ["x"])
         assert result["x"]["lhs"] is False
 
+    @pytest.mark.parametrize(
+        "body,lhs,rhs",
+        [
+            # ⚠ 첨자 대입 — 이걸 읽기로 세면 **쓰기 전용 배열이 시험 입력이 된다**.
+            #   실측(2026-08-12): EEPROM read 계열 4건이 정본엔 입력 0개인데 입력으로 나왔다.
+            ("g_Buf[ i ] = ReadEeprom( (U16)i );", True, False),
+            ("g_Buf[i].field = 3;", True, False),
+            ("g_Buf[i] += 1;", True, True),
+            ("g_Buf[i]++;", True, True),
+            # 진짜 읽기는 그대로 읽기여야 한다(회귀 가드)
+            ("x = g_Buf[ i ];", False, True),
+            ("if( g_Buf[i] == 3 ) { return; }", False, True),
+            # 읽고 쓰면 inout
+            ("g_Buf[i] = g_Buf[i] + 1;", True, True),
+        ],
+    )
+    def test_indexed_write_is_a_write_not_a_read(self, body, lhs, rhs):
+        from report_gen.function_analyzer import _collect_var_usage
+
+        u = _collect_var_usage(body, ["g_Buf"])["g_Buf"]
+        assert (u["lhs"], u["rhs"]) == (lhs, rhs), u
+
     def test_build_function_info_rows(self):
         from report_gen.function_analyzer import _build_function_info_rows
 

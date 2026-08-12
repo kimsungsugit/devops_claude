@@ -669,7 +669,13 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v5: SFR 전역이 살아났다 — ①`extern volatile PTTSTR _PTT @0x000002C0;` 의 이름을 주소
+# (v6: **유령 두 종을 지웠다** — 이건 회수가 아니라 *제거*라 캐시가 안 죽으면 프로덕션엔
+#      유령이 그대로 남는다. ①주석 안의 프로토타입을 함수로 만들던 정규식 폴백(Processor
+#      Expert `*_GetVal` 3건 — 정본에 없는 함수의 시험 케이스였다) ②`@0x00FF9DF0U` 의 정수
+#      접미사가 남아 변수명이 `U` 가 되고, 매크로 토큰화(`123U`→`U`)와 맞물려 **324개 함수**
+#      에 전역으로 붙던 것. 추가로 파라미터 앞 설명 주석을 지워 `l_u8 msg_length` 류 23개
+#      unit 의 입력이 살아난다.
+#  v5: SFR 전역이 살아났다 — ①`extern volatile PTTSTR _PTT @0x000002C0;` 의 이름을 주소
 #      리터럴(`x000002C0`)로 읽던 선언 파서 수정 ②매크로 확장형(`#define PTT_PTT3
 #      _PTT.Bits.PTT3`)을 멤버 경로로 등록. v4 캐시엔 이 전역들이 없으므로 무효화하지 않으면
 #      `g_SysOs_WdiCtrl` 입력이 계속 0개다(= fix 가 프로덕션에 도달 못 함).
@@ -682,7 +688,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v5"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v6"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

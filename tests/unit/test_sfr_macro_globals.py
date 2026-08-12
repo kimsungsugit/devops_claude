@@ -64,6 +64,18 @@ class TestAddressPlacementSuffix:
         got = _extract_c_global_candidates("extern U16 _TIM0 @TIM0_BASE;")
         assert [g["name"] for g in got] == ["_TIM0"]
 
+    @pytest.mark.parametrize("addr", ["0x00FF9DF0U", "0x1FUL", "0x20u", "4096U"])
+    def test_integer_suffix_on_the_address_is_also_eaten(self, addr):
+        """⚠ `0[xX][0-9A-Fa-f]+` 는 `U` 앞에서 멈춘다 — 남은 `U` 가 **이름이 된다**.
+
+        실측(SysOs_Main.c): 그렇게 등록된 전역 `U` 가 매크로 토큰화 결함과 맞물려
+        324개 함수에 붙었다. 상세는 `tests/unit/test_phantom_inputs.py`.
+        """
+        got = _extract_c_global_candidates(
+            f"static const volatile FirmwareVersionInfo_t g_Ver @{addr} = {{ 1 }};"
+        )
+        assert [g["name"] for g in got] == ["g_Ver"], got
+
     @pytest.mark.parametrize(
         "decl,name",
         [

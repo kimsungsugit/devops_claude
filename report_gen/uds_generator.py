@@ -47,6 +47,7 @@ from report_gen.source_parser import (
     _extract_doxygen_asil_tags,
     _extract_file_header_asil,
 )
+from workflow.code_parser.c_parser import c_identifiers  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
 from report_gen.function_analyzer import (
     _parse_signature_outputs,
     _is_static_var,
@@ -815,9 +816,11 @@ def generate_uds_source_sections(
         # extern 사용여부 판정을 위해 전체 .c 원문의 식별자 토큰집합을 1회만 만든다.
         # (기존: extern마다 모든 .c에 re.search full-text 스캔 → O(헤더×extern×전체.c). 대형
         #  트리에서 파싱 지연의 주요인. 토큰집합 in 검사로 O(extern)로 단축.)
+        # ⚠ 토큰화는 `c_identifiers`(= `\b` 앵커)여야 한다. `[A-Za-z_]\w*` 는 `2U` 의
+        #   `U` 를 식별자로 내놔 **1글자 유령 전역**을 "소스에서 쓰임"으로 통과시킨다.
         _c_token_set: Set[str] = set()
         for _src_text in c_source_texts:
-            _c_token_set.update(re.findall(r"[A-Za-z_]\w*", _src_text))
+            _c_token_set.update(c_identifiers(_src_text))
         # ⚠ 매크로 뒤에 숨은 SFR(`#define PTT_PTT3 _PTT.Bits.PTT3`)을 살리려고 이 필터에
         #    "매크로 경유 사용" 예외를 넣었다가 **뺐다**. 실측(KJPDS02 Sources/SYSTEM +
         #    Generated_Code): 예외를 꺼도 `_PTT` 는 그대로 해결된다 — `globals_detailed`
@@ -923,7 +926,7 @@ def generate_uds_source_sections(
                         macro_expansion_map[m_name] = re.sub(r"\s+", "", m_val)
                     # 전역명은 항상 식별자 토큰 → \bNAME\b ≡ 토큰 멤버십. m_val 1회 토큰화 후 O(1) in
                     # 검사로 per-global re.search(rf...) 재컴파일(대형 트리에서 파싱 지연 주요인) 제거.
-                    _m_toks = set(re.findall(r"[A-Za-z_]\w*", m_val))
+                    _m_toks = set(c_identifiers(m_val))
                     hits = [g for g in global_names if g in _m_toks]
                     if hits:
                         macro_globals_map[m_name] = hits
@@ -957,7 +960,7 @@ def generate_uds_source_sections(
                 accessed_globals = [g for g in used if g in globals_info_map]
                 if not accessed_globals and body:
                     # body 1회 토큰화 후 멤버십 — per-global re.search(rf...) 재컴파일 제거(위 macro 루프와 동일 관용구).
-                    _body_toks = set(re.findall(r"[A-Za-z_]\w*", body))
+                    _body_toks = set(c_identifiers(body))
                     for gname in list(globals_info_map.keys())[:500]:
                         if gname in _body_toks:
                             accessed_globals.append(gname)

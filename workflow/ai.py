@@ -2426,7 +2426,9 @@ def _param_placeholder(param: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_param_name(raw: str) -> str:
-    ids = re.findall(r"[A-Za-z_]\w*", raw or "")
+    # ⚠ `\b` 필수 — 없으면 `U8 buf[10U]` 의 이름이 `U` 가 된다.
+    #   근거는 `workflow/code_parser/c_parser.py::c_identifiers` (정규식 정본).
+    ids = re.findall(r"\b[A-Za-z_]\w*", raw or "")
     if not ids:
         return ""
     return ids[-1]
