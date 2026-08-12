@@ -245,3 +245,49 @@ def test_override_map_is_not_used_as_a_filter():
     body = src.read_text(encoding="utf-8", errors="ignore")
     assert "uds_function_swcom_override.json" in body
     assert "_ovr_only_names" in body
+
+
+def test_suts_validators_count_the_real_rows(tmp_path):
+    """검증기가 **정상 산출물을 결함으로 신고**하지 않는지.
+
+    라이브 실측(2026-08-11): 시퀀스 7,267건이 파일에 멀쩡히 있는데 검증기는
+    1,576건으로 셌다(-5,691). 원인 둘:
+      · `validate_suts_xlsm` 이 `min_row=7`·`max_col=149`·`row[12]` 로 **옛 레이아웃**을
+        하드코딩 — 정본 레이아웃(데이터 5행 시작, Seq.No=H)과 어긋났다
+      · `validate_suts_output` 이 `read_only=True` 에서 **랜덤 `.cell()`** 사용 —
+        순차 스트리밍이라 되짚으면 빈 셀을 돌려준다
+    행이 1,975 → 8,219 로 늘자 드러났다. 그대로 뒀으면 매 생성마다 오탐이다.
+    """
+    openpyxl = pytest.importorskip("openpyxl")
+    from generators.suts import (
+        generate_suts_xlsm,
+        validate_suts_output,
+        validate_suts_xlsm,
+    )
+
+    n_units, n_seq = 40, 12   # 480 시퀀스 — 헤더 오프셋이 틀리면 수치가 어긋난다
+    units = [
+        {"fid": f"SwUFn_{i:04d}", "name": f"fn_{i}", "component": "SwCom_01",
+         "input_vars": ["a"], "output_vars": ["b"], "asil": "A"}
+        for i in range(n_units)
+    ]
+    seqs = {
+        u["fid"]: [{"seq_num": k + 1, "strategy": "BV_MID",
+                    "inputs": {"a": k}, "expected": {"b": k}} for k in range(n_seq)]
+        for u in units
+    }
+    out = str(tmp_path / "v.xlsx")
+    generate_suts_xlsm(None, units, seqs, out, {"project_id": "T"})
+
+    wb = openpyxl.load_workbook(out, read_only=True, data_only=True)
+    try:
+        assert wb["2.SW Unit Test Spec"].max_row == 4 + n_units * (1 + n_seq)  # 밴드3+헤더4
+    finally:
+        wb.close()   # ⚠ read_only 워크북은 닫아야 Windows 에서 파일 핸들이 풀린다
+
+    for label, fn in (("xlsm", lambda q: validate_suts_xlsm(q)["stats"]),
+                      ("output", validate_suts_output)):
+        st = fn(out)
+        assert st["tc_count"] == n_units, f"{label}: TC {st['tc_count']} != {n_units}"
+        assert st["seq_count"] == n_units * n_seq, \
+            f"{label}: seq {st['seq_count']} != {n_units * n_seq}"
