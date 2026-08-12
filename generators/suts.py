@@ -390,6 +390,16 @@ _OUTPUT_PREFIXES = ("u8s_", "u16s_", "u32s_", "s16s_", "s32s_")
 # Hardware registers — typically both read and written
 _REG_PAT = re.compile(r"^REG_|^lin_|^PS\.|^DiagData\.")
 
+# 파서가 붙이는 방향 태그. **앵커 매칭이어야 한다** — 예전엔 `"[IN]" in tag` 였는데
+# `"[IN]" in "[INOUT] x"` 도 `"[OUT]" in "[INOUT] x"` 도 **둘 다 False** 다(`[INOUT]` 안에
+# `[IN]`·`[OUT]` 이 연속으로 들어있지 않다). 그래서 파서가 가장 정확하게 아는 축인
+# `[INOUT]` 이 통째로 "태그 없음"으로 떨어져 아래 프리픽스 휴리스틱을 타고, 대부분
+# `elif not is_in_global: role_out = True` 에 걸려 **출력 전용**이 됐다.
+# 실측(KJPDS02 파서 산출 750함수 중 전역 보유 556개): [IN] 1,423 · [OUT] 1,052 ·
+# **[INOUT] 305** · [INDIRECT] 1,114 · 무태그 529. `LinSend` 는 `[INOUT] s_LinFrame …` 를
+# 받고도 입력이 0개였고 같은 이름이 기대결과에만 실렸다(정본은 입력에 둔다).
+_DIR_TAG_PAT = re.compile(r"^\s*\[(IN|OUT|INOUT|INDIRECT)\]", re.I)
+
 
 def collect_unit_functions(
     function_details: Dict[str, Dict[str, Any]],
@@ -449,9 +459,18 @@ def collect_unit_functions(
             role_in = False
             role_out = False
 
-            if any(k in tag for k in ["[IN]", "READ", "RHS"]):
+            # 방향 태그 — 앵커 매칭. `[INOUT]` 은 읽기·쓰기 **둘 다**다.
+            _dir = _DIR_TAG_PAT.match(str(g))
+            _dir_tag = _dir.group(1).upper() if _dir else ""
+            if _dir_tag in {"IN", "INOUT"}:
                 role_in = True
-            if any(k in tag for k in ["[OUT]", "WRITE", "LHS"]):
+            if _dir_tag in {"OUT", "INOUT"}:
+                role_out = True
+
+            # 키워드 폴백 — 참조 SUDS 문서 경유 등 태그를 안 붙이는 생산자를 위해 남긴다.
+            if any(k in tag for k in ["READ", "RHS"]):
+                role_in = True
+            if any(k in tag for k in ["WRITE", "LHS"]):
                 role_out = True
 
             if not role_in and not role_out:

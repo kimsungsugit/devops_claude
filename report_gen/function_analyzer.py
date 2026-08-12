@@ -161,6 +161,7 @@ def _collect_var_usage(
     body_text: str,
     var_names: List[str],
     macro_globals: Dict[str, List[str]] | None = None,
+    macro_expansions: Dict[str, str] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     usage: Dict[str, Dict[str, Any]] = {
         n: {
@@ -180,15 +181,32 @@ def _collect_var_usage(
     text = _strip_comments_and_strings(body_text)
     lines = text.splitlines()
     if macro_globals:
+        _expansions = macro_expansions or {}
         for m_name, globals_list in macro_globals.items():
             if not m_name or not globals_list:
                 continue
-            if re.search(rf"\b{re.escape(m_name)}\b", text):
-                for g in globals_list:
-                    if g in usage:
-                        usage[g]["rhs"] = True
-                        if usage[g]["rhs_idx"] is None:
-                            usage[g]["rhs_idx"] = -1
+            if not re.search(rf"\b{re.escape(m_name)}\b", text):
+                continue
+            # 매크로에 **대입**하면 그 전역은 쓰기다. 본문엔 매크로 이름만 있어서 아래
+            # 라인 스캔(`\b{전역명}\b`)이 절대 못 본다 — 예: `PTT_PTT3 = big_RESET;`.
+            _written = bool(
+                re.search(rf"\b{re.escape(m_name)}\b\s*(?:\+\+|--|[-+*/%&|^]?=(?!=)|<<=|>>=)", text)
+                or re.search(rf"(?:\+\+|--)\s*\b{re.escape(m_name)}\b", text)
+            )
+            for g in globals_list:
+                if g not in usage:
+                    continue
+                usage[g]["rhs"] = True
+                if usage[g]["rhs_idx"] is None:
+                    usage[g]["rhs_idx"] = -1
+                if _written:
+                    usage[g]["lhs"] = True
+                    usage[g]["inout"] = True
+                # 매크로 확장형을 멤버 경로로 등록한다. 이게 없으면 이름이 base 로만 남아
+                # `_PTT` 가 되는데, 정본은 비트 필드까지 적는다(`_PTT.Bits.PTT3`).
+                exp = str(_expansions.get(m_name) or "").strip()
+                if exp and exp != g and re.match(rf"^{re.escape(g)}\s*(?:\.|->|\[)", exp):
+                    usage[g]["members"].add(re.sub(r"\s+", "", exp))
     for idx, line in enumerate(lines):
         if not line.strip():
             continue

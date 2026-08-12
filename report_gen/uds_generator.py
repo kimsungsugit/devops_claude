@@ -116,6 +116,15 @@ _logger = logging.getLogger("report_generator")
 # 프롬프트에 400자만 싣는다 — 그보다 크게 저장하면 캐시만 커지고 쓰이지 않는다.
 _BODY_SNIPPET_MAX = 400
 
+# object-like 매크로가 **전역 변수의 멤버/원소를 가리키는** 경우만 매칭한다.
+#   `#define PTT_PTT3  _PTT.Bits.PTT3`  ·  `#define RXBUF0  s_RxBuf[0]`
+# 상수 매크로(`#define MAX 255`)나 식(`#define HALF (x/2)`)은 걸리지 않아야 한다 —
+# 걸리면 전역이 아닌 이름이 globals_info_map 에 올라간다.
+_MACRO_MEMBER_PATH_RE = re.compile(
+    r"^([A-Za-z_]\w*)((?:\s*(?:\.|->)\s*[A-Za-z_]\w*|\s*\[[^\]]*\])+)$"
+)
+
+
 def generate_uds_logic_items(
     texts: List[str],
     mode: str,
@@ -797,6 +806,12 @@ def generate_uds_source_sections(
         _c_token_set: Set[str] = set()
         for _src_text in c_source_texts:
             _c_token_set.update(re.findall(r"[A-Za-z_]\w*", _src_text))
+        # ⚠ 매크로 뒤에 숨은 SFR(`#define PTT_PTT3 _PTT.Bits.PTT3`)을 살리려고 이 필터에
+        #    "매크로 경유 사용" 예외를 넣었다가 **뺐다**. 실측(KJPDS02 Sources/SYSTEM +
+        #    Generated_Code): 예외를 꺼도 `_PTT` 는 그대로 해결된다 — `globals_detailed`
+        #    (tree-sitter 전 파일 스캔)가 이미 잡고 있고, 진짜 원인은 선언 이름을
+        #    주소 리터럴로 읽던 `_parse_c_declaration_statement` 쪽이었다.
+        #    근거가 확인되지 않는 완화는 넣지 않는다.
         for hdr_file in [f for f in files if f.suffix.lower() == ".h"][:300]:
             try:
                 hdr_text = _src_read(hdr_file)
@@ -836,6 +851,12 @@ def generate_uds_source_sections(
                 k: v for k, v in globals_info_map.items() if str(v.get("type") or "").strip()
             }
         macro_globals_map: Dict[str, List[str]] = {}
+        # 매크로 이름 -> 확장형. 확장형이 곧 **문서에 적힐 이름**이다(`_PTT.Bits.PTT3`).
+        # 이게 없으면 base(`_PTT`)만 남아 정본과 다른 이름이 된다.
+        # ⚠ 아래 `_MACRO_MEMBER_PATH_RE` 필터는 **정확성 가드가 아니라 맵 크기 제한**이다.
+        #    실제로 "확장형이 이 전역의 멤버 경로인가" 판정은 `_collect_var_usage` 가 다시
+        #    한다(`^{g}(\.|->|\[)`). 필터를 빼도 결과는 같고 맵만 커진다(이 프로젝트 7,337개).
+        macro_expansion_map: Dict[str, str] = {}
         macro_call_map: Dict[str, List[str]] = {}
         if globals_info_map:
             global_names = list(globals_info_map.keys())
@@ -845,6 +866,8 @@ def generate_uds_source_sections(
                     m_val = str(row[2]).strip()
                     if not m_name or not m_val:
                         continue
+                    if _MACRO_MEMBER_PATH_RE.match(m_val):
+                        macro_expansion_map[m_name] = re.sub(r"\s+", "", m_val)
                     # 전역명은 항상 식별자 토큰 → \bNAME\b ≡ 토큰 멤버십. m_val 1회 토큰화 후 O(1) in
                     # 검사로 per-global re.search(rf...) 재컴파일(대형 트리에서 파싱 지연 주요인) 제거.
                     _m_toks = set(re.findall(r"[A-Za-z_]\w*", m_val))
@@ -1076,7 +1099,9 @@ def generate_uds_source_sections(
                         param_names.append(pname)
                 param_usage = _collect_var_usage(body_text, param_names)
                 global_names = list(globals_info_map.keys())
-                global_usage = _collect_var_usage(body_text, global_names, macro_globals_map)
+                global_usage = _collect_var_usage(
+                    body_text, global_names, macro_globals_map, macro_expansion_map
+                )
                 for p in params:
                     ptype, pname, array_part = _split_param(p)
                     if not pname:

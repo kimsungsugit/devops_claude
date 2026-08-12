@@ -669,7 +669,11 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v4: function_body_snippets 맵 — uds_ai의 AI 2차 description refinement가 읽는 body 앞 400자.
+# (v5: SFR 전역이 살아났다 — ①`extern volatile PTTSTR _PTT @0x000002C0;` 의 이름을 주소
+#      리터럴(`x000002C0`)로 읽던 선언 파서 수정 ②매크로 확장형(`#define PTT_PTT3
+#      _PTT.Bits.PTT3`)을 멤버 경로로 등록. v4 캐시엔 이 전역들이 없으므로 무효화하지 않으면
+#      `g_SysOs_WdiCtrl` 입력이 계속 0개다(= fix 가 프로덕션에 도달 못 함).
+#  v4: function_body_snippets 맵 — uds_ai의 AI 2차 description refinement가 읽는 body 앞 400자.
 #      생산자가 없어 그 패스가 **한 번도 실행된 적 없는 dead path**였다(uds_ai는 function_details의
 #      body_text를 읽는데 어느 detail 생성 지점도 그 키를 넣지 않는다). v3 캐시엔 이 맵이 없어
 #      무효화하지 않으면 fix가 프로덕션에 도달하지 못한다.
@@ -678,7 +682,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v4"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v5"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

@@ -81,6 +81,76 @@ class TestCollectUnitFunctions:
         assert units[0]["asil"] == "A"
 
 
+class TestGlobalDirectionTags:
+    """전역 변수의 방향 태그가 입력/기대결과 열로 어떻게 갈리는지.
+
+    ⚠ 실제로 겪은 결함: 판정이 `"[IN]" in tag` 였는데 `"[IN]" in "[INOUT] x"` 도
+      `"[OUT]" in "[INOUT] x"` 도 **둘 다 False** 다. 그래서 파서가 가장 정확하게 아는
+      `[INOUT]` 이 통째로 "태그 없음" 취급돼 프리픽스 휴리스틱으로 떨어졌고, 대부분
+      출력 전용이 됐다. 실측(KJPDS02 750함수): [INOUT] 305건 · 그 결과 입력 0개 TC 338건.
+      `LinSend` 가 `[INOUT] s_LinFrame …` 를 받고도 입력이 비었다.
+    """
+
+    @staticmethod
+    def _unit(*globals_static, prototype="void Fn_Under_Test(void)", **kw):
+        details = {
+            "SwUFn_0101": {
+                "id": "SwUFn_0101",
+                "name": "Fn_Under_Test",
+                "prototype": prototype,
+                "inputs": [],
+                "outputs": [],
+                "globals_global": list(kw.get("globals_global") or []),
+                "globals_static": list(globals_static),
+                "logic_flow": [],
+            }
+        }
+        return collect_unit_functions(details)[0]
+
+    def test_inout_lands_in_both_columns(self):
+        u = self._unit("[INOUT] s_LinFrame")
+        assert "s_LinFrame" in u["input_vars"], "[INOUT] 은 읽기이기도 하다 — 입력에 있어야 한다"
+        assert "s_LinFrame" in u["output_vars"], "[INOUT] 은 쓰기이기도 하다"
+
+    def test_in_tag_is_input_only(self):
+        u = self._unit("[IN] s_LinFrame")
+        assert u["input_vars"] == ["s_LinFrame"]
+        assert "s_LinFrame" not in u["output_vars"]
+
+    def test_out_tag_is_output_only(self):
+        u = self._unit("[OUT] s_LinFrame")
+        assert "s_LinFrame" not in u["input_vars"]
+        assert "s_LinFrame" in u["output_vars"]
+
+    def test_indirect_is_not_promoted_to_input(self):
+        """간접 접근은 시험이 직접 넣을 수 있는 입력이 아니다 — 현행 의미 유지."""
+        u = self._unit("[INDIRECT] s_LinFrame.LIN_PID")
+        assert "s_LinFrame.LIN_PID" not in u["input_vars"]
+
+    def test_untagged_keeps_prefix_heuristic(self):
+        """무태그 529건은 기존 휴리스틱 그대로 — 태그 수정이 여길 건드리면 회귀다."""
+        assert self._unit("s_LinFrame")["output_vars"] == ["s_LinFrame"]
+        assert self._unit("s_LinFrame")["input_vars"] == []
+        # g_ 접두사 전역은 읽기·쓰기 둘 다로 보던 기존 판정
+        u = self._unit(globals_global=["g_MotorState"])
+        assert "g_MotorState" in u["input_vars"] and "g_MotorState" in u["output_vars"]
+
+    def test_keyword_fallback_survives(self):
+        """READ/WRITE 폴백 — 태그를 안 붙이는 생산자용. 지우지 말 것.
+
+        ⚠ 현재 저장소에 이 표기를 내는 생산자는 **없다**(방어용 잔존). 그래서 이 테스트는
+          "동작한다"가 아니라 "지웠는지"를 지킨다. 이름은 마지막 토큰에서 뽑히므로
+          (`_clean_global_name`) 키워드가 앞에 오는 형태여야 성립한다.
+        """
+        assert "s_LinFrame" in self._unit("READ s_LinFrame")["input_vars"]
+        assert "s_LinFrame" in self._unit("WRITE s_LinFrame")["output_vars"]
+
+    def test_member_path_is_kept_verbatim(self):
+        """`s_LinFrame.LIN_data` 를 base 로 접으면 정본과 다른 이름이 된다."""
+        u = self._unit("[INOUT] s_LinFrame.LIN_data")
+        assert "s_LinFrame.LIN_data" in u["input_vars"]
+
+
 class TestInferVariableType:
     def test_uint8_prefix(self):
         result = infer_variable_type("u8_MotorSpeed")

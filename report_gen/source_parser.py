@@ -161,6 +161,13 @@ def _parse_c_declaration_statement(stmt: str) -> List[Dict[str, str]]:
         return []
     # Strip __attribute__((...)) annotations before parsing
     compact = re.sub(r"__attribute__\s*\(\(.*?\)\)", "", compact).strip()
+    # 절대주소 배치 접미사 `@0x000002C0` 제거 (Renesas/CodeWarrior 계열 SFR 선언).
+    # ⚠ 안 지우면 **주소 리터럴이 변수명이 된다** — `extern volatile PTTSTR _PTT @0x000002C0;`
+    #   이 `_PTT` 가 아니라 `x000002C0` 으로 등록됐다(선언자 마지막 토큰을 이름으로 잡기
+    #   때문). 이 프로젝트 `Generated_Code/IO_Map.h` 한 파일에만 372건이라, 레지스터 전체가
+    #   쓰레기 이름으로 들어가고 진짜 이름은 어디에도 없었다. `@` 는 C 토큰이 아니므로
+    #   선언문에 나오면 배치 지정자로 봐도 안전하다.
+    compact = re.sub(r"@\s*(?:0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_]\w*)", " ", compact).strip()
 
     storage_words: List[str] = []
     qualifiers: List[str] = []
