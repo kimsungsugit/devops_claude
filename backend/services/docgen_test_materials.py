@@ -181,6 +181,19 @@ def _dir_tag(entry: Any) -> str:
     return m.group(1).upper() if m else ""
 
 
+_RET_TYPE_RE = re.compile(r"^\s*([\w\s\*]+?)\s+\w+\s*\(")
+_RET_NOISE_RE = re.compile(r"\b(static|inline|extern|const|volatile)\b")
+
+
+def _returns_value(info: Dict[str, Any]) -> bool:
+    """이 함수가 **반환값을 가지는가**(void 가 아닌가)."""
+    m = _RET_TYPE_RE.match(str((info or {}).get("prototype") or ""))
+    if not m:
+        return False
+    t = _RET_NOISE_RE.sub("", m.group(1)).strip()
+    return bool(t) and t.lower() != "void"
+
+
 def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[str, Any]:
     """**입력 변수가 하나도 없는 unit** 과 그 사유.
 
@@ -214,7 +227,19 @@ def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[st
         globs = list(info.get("globals_global") or []) + list(info.get("globals_static") or [])
         tags = {_dir_tag(g) for g in globs}
         params = list(info.get("inputs") or [])
-        if not params and not globs:
+        stub_callees = [
+            c for c in (info.get("calls_list") or [])
+            if _returns_value(by_name.get(str(c)) or {})
+        ]
+        if not params and not globs and stub_callees:
+            # 파라미터도 전역도 없지만 **반환값 있는 함수를 호출**한다. 단위시험에서는
+            # 그 호출을 스텁으로 막고 반환값을 시험 입력으로 쓴다 — 정본이 실제로
+            # `s_UDS_RDBI_ValidateSingleFrame() return` 같은 표기로 그렇게 적는다.
+            # ⚠ **자동으로 채우지 않는다.** "비-void callee 를 전부 입력으로" 규칙을
+            #   정본과 대조하면 맞음 55 · 과다 148 (정밀도 27%)이다. 문서에 그 값을 박으면
+            #   근거처럼 보이는 오답이 148칸 생긴다. 그래서 값이 아니라 **후보로만** 알린다.
+            cause = "stub_return_candidate"
+        elif not params and not globs:
             cause = "no_params_no_globals"    # 파라미터도 전역도 없다 — 정상일 수 있다
         elif "IN" in tags or "INOUT" in tags:
             # 읽는 전역이 분명히 있는데 입력 열이 비었다 = **이름 추출이 버렸다**.
@@ -236,7 +261,11 @@ def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[st
         causes[cause] = causes.get(cause, 0) + 1
         bucket = samples.setdefault(cause, [])
         if len(bucket) < 8:
-            bucket.append(name)
+            # 스텁 후보는 **어느 호출을 막아야 하는지**까지 줘야 조치할 수 있다.
+            bucket.append(
+                f"{name} ← {', '.join(stub_callees[:3])}"
+                if cause == "stub_return_candidate" else name
+            )
     return {
         "measured": True,
         "units": len(units),

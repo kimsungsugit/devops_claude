@@ -258,6 +258,12 @@ def _strip_c_comments(text: str) -> str:
     return text
 
 
+# 주석 가리기는 **단일 출처**다 — 이 저장소가 반복해서 겪은 실패가 "판정 복제 후
+# 한쪽만 고침" 이라, 두 파서(c_parser 정규식 폴백 · 여기)가 같은 함수를 쓴다.
+# tree_sitter 유무와 무관하게 import 된다(c_parser 의 tree_sitter import 는 guarded).
+from workflow.code_parser.c_parser import blank_c_comments as _blank_c_comments  # noqa: E402
+
+
 def _extract_c_prototypes(text: str) -> List[Tuple[str, str, str, bool]]:
     """헤더에서 함수 프로토타입 추출. Returns [(name, params, return_type, is_extern)]."""
     if not text:
@@ -294,6 +300,9 @@ def _extract_c_definitions(text: str) -> List[Tuple[str, str, str, bool]]:
         return []
     # ISR() 매크로 프리프로세싱
     text = _preprocess_isr_macros(text)
+    # ⚠ 주석 안의 프로토타입을 함수로 만들지 않는다(`_blank_c_comments` 참조).
+    #   길이를 유지하므로 아래 offset 기반 처리와 어긋나지 않는다.
+    text = _blank_c_comments(text)
     keywords = {"if", "for", "while", "switch", "return", "sizeof"}
     results: List[Tuple[str, str, str, bool]] = []
     for match in re.finditer(

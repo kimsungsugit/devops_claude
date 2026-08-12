@@ -265,6 +265,16 @@ describe('DocGenPreflightPanel', () => {
     expect(screen.getByText(/정본 17\.1%/)).toBeInTheDocument();
   });
 
+  it('결정 필요 축은 결함도 정상도 아닌 제3의 톤으로 그린다', () => {
+    // 스텁 반환값은 사람이 정해야 하는 값이다. 결함(⚠)으로 칠하면 고쳐야 할 버그로
+    // 읽히고, 정상(muted)으로 칠하면 아무도 안 본다.
+    renderPanel(base([zeroInputStep({ stub_return_candidate: 12, no_params_no_globals: 79 })]));
+    const decide = screen.getByText(/스텁 반환값 지정 가능 12/);
+    expect(decide).not.toHaveTextContent('⚠');
+    expect(decide.style.fontWeight).toBe('600');
+    expect(decide.style.color).not.toBe(screen.getByText(/파라미터·전역 없음 79/).style.color);
+  });
+
   it('사유가 0 건인 축은 그리지 않는다 — 없는 결함을 조치항목으로 만들지 않는다', () => {
     renderPanel(base([zeroInputStep({ no_params_no_globals: 79, dropped_by_name_filter: 0 })]));
     expect(screen.queryByText(/이름 추출이 버림/)).toBeNull();

@@ -112,6 +112,9 @@ const VERDICT_VIEW = {
  */
 const CAUSE_LABELS = {
   no_params_no_globals:   { ko: '파라미터·전역 없음', defect: false },
+  // 값을 자동으로 채우지 않는 축 — 사람이 "이 호출을 스텁으로 막고 반환값을 넣는다" 를
+  // 결정해야 한다. 결함은 아니지만 정상도 아니라 **결정 필요**로 따로 칠한다.
+  stub_return_candidate:  { ko: '스텁 반환값 지정 가능', defect: false, decide: true },
   write_only:             { ko: '전역을 쓰기만 함',   defect: false },
   indirect_only:          { ko: '간접 접근만',        defect: false },
   untagged:               { ko: '방향 태그 없음',     defect: true },
@@ -128,13 +131,13 @@ function CauseBreakdown({ causes }) {
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
       {rows.map(([key, n]) => {
         const meta = CAUSE_LABELS[key] || { ko: key, defect: true };
+        const color = meta.defect
+          ? 'var(--color-warning)'
+          : meta.decide ? 'var(--color-info)' : 'var(--text-muted)';
         return (
           <span
             key={key}
-            style={{
-              color: meta.defect ? 'var(--color-warning)' : 'var(--text-muted)',
-              fontWeight: meta.defect ? 600 : 400,
-            }}
+            style={{ color, fontWeight: meta.defect || meta.decide ? 600 : 400 }}
           >
             {meta.ko} {n}
             {meta.defect ? ' ⚠' : ''}

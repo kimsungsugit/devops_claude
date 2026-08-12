@@ -167,6 +167,52 @@ def test_no_params_no_globals_is_its_own_cause() -> None:
     assert _causes({"a": _unit("s_SysMain_Init")}) == {"no_params_no_globals": 1}
 
 
+def test_stub_return_candidate_is_split_out_of_normal() -> None:
+    """반환값 있는 함수를 호출하면 **스텁 반환값을 입력으로 지정할 수 있다**.
+
+    정본이 `s_UDS_RDBI_ValidateSingleFrame() return` 같은 표기로 실제로 그렇게 적는다.
+    `no_params_no_globals`(정상)에 섞으면 시험 가능한 unit 이 "정상 0" 뒤에 숨는다.
+    """
+    fd = {
+        "a": {**_unit("s_SystemParamRead"), "calls_list": ["u8g_Read"]},
+        "b": {**_unit("s_Void_Caller"), "calls_list": ["s_DoWork"]},
+        "u8g_Read": _unit("u8g_Read"),
+        "s_DoWork": _unit("s_DoWork"),
+    }
+    fd["u8g_Read"]["prototype"] = "U8 u8g_Read(void)"
+    fd["s_DoWork"]["prototype"] = "void s_DoWork(void)"
+    causes = _causes(fd)
+    assert causes.get("stub_return_candidate") == 1, "비-void 를 호출하는 쪽만 후보다"
+    assert causes.get("no_params_no_globals") == 3, "void 호출자와 피호출자들은 정상 축"
+
+
+def test_stub_candidate_sample_names_the_call_to_stub() -> None:
+    """건수만으로는 조치할 수 없다 — 어느 호출을 막을지 이름이 있어야 한다."""
+    fd = {
+        "a": {**_unit("s_SystemParamRead"), "calls_list": ["u8g_Read"]},
+        "u8g_Read": {**_unit("u8g_Read"), "prototype": "U8 u8g_Read(void)"},
+    }
+    res = tm._measure_suts_inputs(fd, {})
+    assert any("u8g_Read" in s for s in res["cause_samples"]["stub_return_candidate"])
+
+
+def test_stub_candidate_does_not_fill_the_input_column() -> None:
+    """⚠ 값을 자동으로 넣지 않는다.
+
+    '비-void callee 를 전부 입력으로' 규칙은 정본 대조상 맞음 55 · 과다 148(정밀도 27%)
+    이다. 문서에 박으면 근거처럼 보이는 오답이 148칸 생긴다 — 빈 칸보다 나쁘다.
+    """
+    from generators.suts import collect_unit_functions
+
+    fd = {
+        "a": {**_unit("s_SystemParamRead"), "calls_list": ["u8g_Read"]},
+        "u8g_Read": {**_unit("u8g_Read"), "prototype": "U8 u8g_Read(void)"},
+    }
+    unit = next(u for u in collect_unit_functions(fd, sds_map={})
+                if u["name"] == "s_SystemParamRead")
+    assert unit["input_vars"] == [], "후보 표시일 뿐 값을 지어내면 안 된다"
+
+
 def test_write_only_globals_are_named_separately() -> None:
     fd = {"a": _unit("s_Init_Sys", gg=["[OUT] g_State"])}
     assert _causes(fd) == {"write_only": 1}

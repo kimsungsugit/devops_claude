@@ -16,6 +16,46 @@ except Exception:  # pragma: no cover
     c_language = None  # type: ignore
 
 
+def blank_c_comments(text: str) -> str:
+    """주석을 **길이·줄 수를 유지한 채** 공백으로 지운다.
+
+    ## 왜 지우기(strip)가 아니라 공백 채우기(blank)인가
+
+    통째로 제거하면 바이트 오프셋이 밀린다. `_extract_leading_comment(text_bytes,
+    start_byte)` 처럼 **오프셋으로 원문을 되짚는** 소비자가 엉뚱한 자리를 읽는다.
+    길이를 유지하면 원문과 1:1 이라 정규식 매칭만 주석을 피하고 서술 추출은 원문에서
+    그대로 한다.
+
+    ## 왜 필요한가 (실측 2026-08-12)
+
+    Processor Expert 가 만든 `Generated_Code/*.c` 는 매크로로 구현된 접근자의
+    프로토타입을 **주석 안에** 남긴다:
+
+        /*
+        bool PS3_MOTOR_NSCS_GetVal(void)
+
+        **  This method is implemented as a macro. See PS3_MOTOR_NSCS.h file.  **
+        */
+
+    tree-sitter 는 이 파일을 "함수 0개" 로 **정확히** 읽는다. 그런데 호출부의
+    `if not funcs:` 가 그걸 "파싱 실패" 로 보고 정규식 폴백을 돌렸고, 그 정규식이
+    주석을 훑어 **없는 함수를 만들어냈다**. 정본 SUTS 엔 이 접근자들이 하나도
+    없다 — 존재하지 않는 함수의 시험 케이스를 생성하고 있었다는 뜻이다.
+
+    ⚠ 문자열 리터럴 안의 `/*` 는 구분하지 않는다(기존 `_strip_c_comments` 와 동일한
+      한계). C 소스에서 드물고, 잘못 가려도 함수를 **덜** 찾을 뿐 지어내지는 않는다.
+    """
+    if not text:
+        return ""
+
+    def _blank(m) -> str:
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    text = re.sub(r"/\*.*?\*/", _blank, text, flags=re.S)
+    text = re.sub(r"//[^\n]*", _blank, text)
+    return text
+
+
 @dataclass
 class CFunction:
     name: str
@@ -562,7 +602,21 @@ def _extract_function_defs_regex_fallback(
     functions: List[CFunction] = []
     keywords = {"if", "for", "while", "switch", "return", "sizeof"}
     text_bytes = text.encode("utf-8", errors="ignore")
-    for match in _REGEX_DEF_PAT.finditer(text):
+    # ⚠ **주석 안에서 함수를 찾지 않는다.** Processor Expert 가 만든 `Generated_Code/*.c`
+    #   는 매크로로 구현된 접근자의 프로토타입을 주석에 남긴다:
+    #       /*
+    #       bool PS3_MOTOR_NSCS_GetVal(void)
+    #       **  This method is implemented as a macro. See ....h file.  **
+    #       */
+    #   tree-sitter 는 이 파일을 "함수 0개" 로 **정확히** 읽는데, 그러면 호출부의
+    #   `if not funcs:` 가 이 폴백을 돌려 정규식이 주석을 훑고 **없는 함수를 만들어냈다**.
+    #   파라미터 `[^;]*?` 가 주석 경계를 넘어 다음 함수의 `{` 까지 먹어 시그니처가 통째로
+    #   오염되기까지 했다. 정본 SUTS 엔 이 접근자들이 하나도 없다 — 존재하지 않는 함수의
+    #   시험 케이스를 만들고 있었다는 뜻이다.
+    #   ⚠ 매칭용 텍스트만 가린다. 본문·주석 추출은 원문(`text`/`text_bytes`)에서 하며,
+    #     `_blank_c_comments` 가 **길이를 유지**하므로 오프셋이 어긋나지 않는다.
+    scan_text = blank_c_comments(text)
+    for match in _REGEX_DEF_PAT.finditer(scan_text):
         prefix = str(match.group(1) or "").strip()
         name = str(match.group(2) or "").strip()
         params = " ".join(str(match.group(3) or "").replace("\n", " ").split())
