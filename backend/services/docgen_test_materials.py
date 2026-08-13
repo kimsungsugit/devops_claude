@@ -185,6 +185,22 @@ def _dir_tag(entry: Any) -> str:
     return dir_tag(entry)
 
 
+def _settable_globals(globs: List[Any], gim: Optional[Dict[str, Any]]) -> List[Any]:
+    """산출물이 **실제로 넣는** 전역만 남긴다(= const 억제 후).
+
+    ⚠ 방향 태그를 억제 **전** 목록에서 뽑으면 오분류가 난다: const 전역의 `[IN]` 이
+      남아 "읽는 전역이 있는데 입력 열이 비었다"(= 이름 추출이 버렸다, **결함**)로
+      찍힌다. 실제로는 우리가 의도적으로 뺀 것이다.
+    ⚠ 판정과 이름 정리 둘 다 `generators.suts` **단일 출처**를 쓴다. 여기 복제해 두면
+      소비처가 억제하는 집합과 이 패널이 세는 집합이 갈라진다(`_dir_tag` 주석의 전례).
+    """
+    from generators.suts import _clean_global_name, _is_const_global
+
+    if not gim:
+        return list(globs or [])          # 근거가 없으면 억제도 없다 — 그대로 센다
+    return [g for g in (globs or []) if not _is_const_global(_clean_global_name(g), gim)]
+
+
 _RET_TYPE_RE = re.compile(r"^\s*([\w\s\*]+?)\s+\w+\s*\(")
 _RET_NOISE_RE = re.compile(r"\b(static|inline|extern|const|volatile)\b")
 
@@ -198,7 +214,11 @@ def _returns_value(info: Dict[str, Any]) -> bool:
     return bool(t) and t.lower() != "void"
 
 
-def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[str, Any]:
+def _measure_suts_inputs(
+    fd: Dict[str, Any],
+    sds_map: Dict[str, Any],
+    globals_info_map: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """**입력 변수가 하나도 없는 unit** 과 그 사유.
 
     입력이 없는 시퀀스는 넣을 값이 없어 시험이 성립하지 않는다. 실측(2026-08-12, KJPDS02):
@@ -211,7 +231,9 @@ def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[st
     from generators.suts import collect_unit_functions
 
     try:
-        units = collect_unit_functions(fd, sds_map=sds_map or {})
+        # ⚠ `globals_info_map` 을 빠뜨리면 이 패널이 **실제 산출물과 다른 unit 목록**을
+        #   센다 — const 전역 억제가 여기서만 안 걸려 "입력 0개" 판정이 어긋난다.
+        units = collect_unit_functions(fd, globals_info_map or {}, sds_map=sds_map or {})
     except Exception as exc:  # noqa: BLE001 — 생성기 계열이 광범위
         _logger.warning("test_materials: SUTS unit 수집 실패 — %s", exc, exc_info=True)
         return {"measured": False, "reason": f"unit 수집 실패 ({type(exc).__name__})"}
@@ -229,7 +251,8 @@ def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[st
         no_input.append(name)
         info = by_name.get(name) or {}
         globs = list(info.get("globals_global") or []) + list(info.get("globals_static") or [])
-        tags = {_dir_tag(g) for g in globs}
+        settable = _settable_globals(globs, globals_info_map)
+        tags = {_dir_tag(g) for g in settable}
         params = list(info.get("inputs") or [])
         stub_callees = [
             c for c in (info.get("calls_list") or [])
@@ -245,6 +268,12 @@ def _measure_suts_inputs(fd: Dict[str, Any], sds_map: Dict[str, Any]) -> Dict[st
             cause = "stub_return_candidate"
         elif not params and not globs:
             cause = "no_params_no_globals"    # 파라미터도 전역도 없다 — 정상일 수 있다
+        elif globs and not settable:
+            # 읽는 전역이 **전부 const** 다 — 설정할 값이 없으니 입력 0 이 정상이다.
+            # ⚠ 이걸 안 나누면 아래 `dropped_by_name_filter`(= 이름 추출이 버렸다,
+            #   **결함**)로 잘못 분류된다. 의도한 억제를 결함으로 세면 사유 분포가
+            #   조치 가능한 축을 못 짚는다.
+            cause = "const_globals_only"
         elif "IN" in tags or "INOUT" in tags:
             # 읽는 전역이 분명히 있는데 입력 열이 비었다 = **이름 추출이 버렸다**.
             # 실측된 경로: 이름 뒤 `(idx: …)`/`(range: …)` 꼬리, 로컬 임시 프리픽스 오탐,
@@ -293,7 +322,11 @@ def measure(source_root: str, *, sds_path: str = "") -> Dict[str, Any]:
     t0 = time.time()
     try:
         from report_generator import generate_uds_source_sections
-        fd = (generate_uds_source_sections(source_root) or {}).get("function_details", {}) or {}
+        _sections = generate_uds_source_sections(source_root) or {}
+        fd = _sections.get("function_details", {}) or {}
+        # 전역 선언 정보(타입·배열 차원). 이걸 안 넘기면 아래 SUTS 측정이 실제
+        # 산출물과 다른 규칙으로 돈다 — `collect_unit_functions` 참조.
+        gim = _sections.get("globals_info_map") or {}
     except Exception as exc:  # noqa: BLE001 — 파서 계열이 광범위
         _logger.warning("test_materials: 소스 파싱 실패 — %s", exc, exc_info=True)
         return {"ok": False, "reason": f"소스 파싱 실패 ({type(exc).__name__}: {str(exc)[:140]})"}
@@ -309,7 +342,7 @@ def measure(source_root: str, *, sds_path: str = "") -> Dict[str, Any]:
         "elapsed_s": round(time.time() - t0, 1),
         "sits": _measure_sits(fd, sds_map, sds_reason),
         "suts": _measure_suts_types(fd),
-        "suts_inputs": _measure_suts_inputs(fd, sds_map),
+        "suts_inputs": _measure_suts_inputs(fd, sds_map, gim),
     }
     with _CACHE_LOCK:
         _CACHE[_key(source_root)] = (time.time(), result)

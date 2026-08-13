@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from generators._artifact_check import apply_write_back_check
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import _extract_sds_partition_map
+from report_gen.source_parser import is_const_type
 from workflow.code_parser.c_parser import blank_c_comments
 
 _logger = logging.getLogger(__name__)
@@ -425,6 +426,23 @@ def dir_tag(entry: Any) -> str:
     return m.group(1).upper() if m else ""
 
 
+def _is_const_global(name: str, gim: Optional[Dict[str, Dict[str, str]]]) -> bool:
+    """`const` 전역은 시험 입력으로 **설정할 수 없고** 기대결과로 **변하지도 않는다**.
+
+    실측(KJPDS02_PV 정본 1,005 unit): 정본 SUTS 는 const 전역을 입력 **0칸** · 기대
+    **0칸** — 어느 입도로도 단 한 번도 적지 않는다. 우리는 419칸(입력 160 · 기대 259)
+    을 냈고 그중 정본과 일치한 건 **0** 이다. 즉 억제의 대가가 0 이다.
+    `au32_Sha256RoundConstants[0..63]` 처럼 배열이면 원소 확장이 노이즈를 배로 불린다.
+
+    ⚠ 파라미터의 `const`(`const U8 *p`)는 **대상이 아니다** — 가리키는 곳이 읽기
+      전용일 뿐 그 버퍼는 시험이 채워 넣어야 하는 입력이다. 이 판정은 전역 루프에서만
+      쓴다.
+    ⚠ `gim` 이 비면 판정할 근거가 없어 **억제하지 않는다**. 호출부가 안 넘기면 산출물이
+      달라지므로, 아래 요약 로그가 그 사실을 명시한다(조용한 분기 금지).
+    """
+    return is_const_type(((gim or {}).get(name) or {}).get("type"))
+
+
 def collect_unit_functions(
     function_details: Dict[str, Dict[str, Any]],
     globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
@@ -445,6 +463,7 @@ def collect_unit_functions(
     if sds_map is None:
         sds_map = _load_default_sds_map()
     units: List[Dict[str, Any]] = []
+    _const_skipped = 0
 
     for fid, info in function_details.items():
         if not isinstance(info, dict):
@@ -472,6 +491,9 @@ def collect_unit_functions(
             if not gn or gn in _TYPE_NAMES:
                 continue
             if len(gn) <= 2 or not re.match(r"[A-Za-z_]", gn):
+                continue
+            if _is_const_global(gn, gim):
+                _const_skipped += 1
                 continue
             if _LOCAL_TEMP_PATS.match(gn):
                 continue
@@ -594,13 +616,20 @@ def collect_unit_functions(
              for u in units
              for axis in ("input", "output")
              for s in u["array_expansion"][axis]["skipped"]]
+    # ⚠ `globals_info_map` 이 없으면 const 판정 자체를 못 한다 — 같은 소스라도 산출물이
+    #   달라지므로 **명시**한다(조용한 분기는 이 저장소가 여러 번 데었다).
+    _const_note = (
+        f" | const 전역 억제 {_const_skipped}칸" if gim
+        else " | ⚠globals_info_map 없음 → const 억제 안 함"
+    )
     (_logger.warning if _skip else _logger.info)(
-        "Collected %d unit functions | 배열 확장 %d건%s",
+        "Collected %d unit functions | 배열 확장 %d건%s%s",
         len(units), _exp_n,
         ("  ⚠예산 부족으로 미확장 %d건: %s" % (
             len(_skip),
             ", ".join(f"{u}::{n}({k}원소, 여유 {r})" for u, n, k, r in _skip[:3]),
         )) if _skip else "",
+        _const_note,
     )
     return units
 

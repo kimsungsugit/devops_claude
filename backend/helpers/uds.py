@@ -669,7 +669,13 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v9: **다차원 배열이 산출물에서 통째로 빠져 있었다** — 크기가 없는 게 아니라 변수 자체가
+# (v10: `globals_info_map.type` 에 **`const` 한정자가 되살아났다**. tree-sitter 산출 타입엔
+#      const 가 없는데 그게 텍스트 스캔 값을 덮어써서 `static const UDSFuncEntry_t
+#      s_UdsFuncTbl[…]` 이 그냥 `UDSFuncEntry_t` 로 남아 있었다. const 는 "시험 입력으로
+#      설정할 수 없다"는 판정의 유일한 근거이고, 그 판정으로 SUTS 가 const 전역을 뺀다
+#      (정본은 const 전역을 입력 0칸·기대 0칸으로 **한 번도 안 적는다**. 우리는 419칸).
+#      구 캐시엔 const 가 안 실려 있어 무효화하지 않으면 억제가 조용히 안 걸린다.
+#  v9: **다차원 배열이 산출물에서 통째로 빠져 있었다** — 크기가 없는 게 아니라 변수 자체가
 #      없었다. `_extract_decl_name_and_type` 의 이름 정규식이 첨자를 `(?:\[[^\]]*\])?` 로
 #      **하나만** 허용해, `static U16 u16s_MovgAvgFltBuff[R][C];` 에서 정규식이 통째로
 #      실패하고 `_parse_c_declaration_statement` 가 빈 리스트를 냈다(파서 산출 1,157함수
@@ -707,7 +713,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v9"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v10"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

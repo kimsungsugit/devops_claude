@@ -131,6 +131,17 @@ def _split_decl_items(text: str) -> List[str]:
     return items
 
 
+# `const` 판정 **단일 출처**. 소비처가 셋이다(uds_generator 의 타입 병합 · generators/suts
+# 의 전역 억제 · 테스트). 이 저장소는 판정을 복제했다가 한쪽만 고쳐진 전례가 여러 번이다.
+# ⚠ 단어 경계 필수 — `constant_t` 같은 타입 이름이 걸리면 멀쩡한 전역을 지운다.
+_CONST_TYPE_RE = re.compile(r"\bconst\b", re.I)
+
+
+def is_const_type(type_text: Any) -> bool:
+    """선언 타입이 `const` 한정자를 갖는가. `None`·빈 값은 판정 불가 → False."""
+    return bool(_CONST_TYPE_RE.search(str(type_text or "")))
+
+
 # 선언자 **끝**의 배열 차원(`[60]` · `[MAX][2]` · 크기 미지정 `[]`).
 _DECL_ARRAY_DIM_RE = re.compile(r"((?:\s*\[[^\]]*\])+)\s*$")
 

@@ -81,6 +81,7 @@ from report_gen.requirements import (
 from report_gen.source_parser import (
     _SRC_READ_MAX_BYTES,
     _decl_array_dim,
+    is_const_type,
     _scan_source_comment_patterns,
     _extract_c_macros,
     _read_source_text,
@@ -791,8 +792,16 @@ def generate_uds_source_sections(
                     prev = globals_info_map.get(gname, {}) if isinstance(globals_info_map.get(gname), dict) else {}
                     incoming_desc = str(g.get("desc") or "").strip()
                     static_name_map[gname] = is_static
+                    # ⚠ tree-sitter 산출 타입(`gtype`)엔 **`const` 한정자가 없다**.
+                    #   텍스트 스캔(`prev`)은 갖고 있는데 여기서 통째로 덮여
+                    #   `static const UDSFuncEntry_t s_UdsFuncTbl[…]` 가 그냥
+                    #   `UDSFuncEntry_t` 로 남았다. const 는 "시험 입력으로 설정할 수
+                    #   없다"는 판정의 유일한 근거라 **한정자만** 되살린다.
+                    _gtype = gtype or str(prev.get("type") or "").strip()
+                    if is_const_type(prev.get("type")) and not is_const_type(_gtype):
+                        _gtype = f"const {_gtype}".strip()
                     globals_info_map[gname] = {
-                        "type": gtype or str(prev.get("type") or "").strip(),
+                        "type": _gtype,
                         # ⚠ tree-sitter 쪽(`globals_detailed`)엔 배열 차원 필드가 없다.
                         #   텍스트 스캔이 이미 채워둔 값을 **먼저** 쓰고, 없을 때만
                         #   선언문에서 뽑는다(`decl` 은 문장 전체라 다중 선언자면

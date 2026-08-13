@@ -275,6 +275,16 @@ describe('DocGenPreflightPanel', () => {
     expect(decide.style.color).not.toBe(screen.getByText(/파라미터·전역 없음 79/).style.color);
   });
 
+  it('const 전역만 읽는 unit 은 결함으로 칠하지 않는다', () => {
+    // 라벨이 없으면 폴백이 `defect: true` 로 칠한다 — **의도한 억제**가 조치항목이 된다.
+    // const 전역은 시험이 설정할 수 있는 값이 아니고, 정본도 어느 열에도 안 적는다.
+    renderPanel(base([zeroInputStep({ const_globals_only: 9, dropped_by_name_filter: 5 })]));
+    const ok = screen.getByText(/const 전역만 읽음 9/);
+    expect(ok).not.toHaveTextContent('⚠');
+    expect(ok.style.fontWeight).not.toBe('600');
+    expect(screen.getByText(/이름 추출이 버림 5/)).toHaveTextContent('⚠');
+  });
+
   it('사유가 0 건인 축은 그리지 않는다 — 없는 결함을 조치항목으로 만들지 않는다', () => {
     renderPanel(base([zeroInputStep({ no_params_no_globals: 79, dropped_by_name_filter: 0 })]));
     expect(screen.queryByText(/이름 추출이 버림/)).toBeNull();

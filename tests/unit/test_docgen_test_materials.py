@@ -259,6 +259,73 @@ def test_units_with_input_are_not_counted() -> None:
     assert res["units_without_input"] == 1
 
 
+# ── const 전역만 읽는 unit ──────────────────────────────────────────────────
+#
+# const 전역은 시험 입력으로 **설정할 수 없다**. 정본(KJPDS02_PV)은 const 전역을
+# 입력 0칸·기대 0칸으로 한 번도 적지 않아, 산출물에서 억제한다. 그러면 그 unit 은
+# 입력 0개가 되는데 — 그걸 `dropped_by_name_filter`(= 이름 추출이 버렸다, **결함**)
+# 로 세면 사유 분포가 조치 가능한 축을 못 짚는다. 의도한 억제는 별도 사유다.
+
+_CONST_GIM = {"au32_Rounds": {"type": "const U32", "array": "[4]"}}
+
+
+def test_const_only_unit_is_not_reported_as_a_defect() -> None:
+    fd = {"a": _unit("g_ConstOnly", gg=["[IN] au32_Rounds (size: 4)"])}
+    res = tm._measure_suts_inputs(fd, {}, _CONST_GIM)
+    assert res["causes"] == {"const_globals_only": 1}, res["causes"]
+
+
+def test_mixed_globals_are_not_const_only() -> None:
+    """⚠ const 가 아닌 전역이 **하나라도** 남으면 이 사유가 아니다.
+
+    입력이 0 으로 남는 조합을 써야 판정이 실제로 돌아간다 — 설정 가능한 전역이 하나라도
+    있으면 그 unit 은 입력이 생겨 애초에 세지 않는다(가드가 헛돌았던 자리).
+    여기선 남는 전역이 쓰기 전용이라 사유는 `write_only` 여야 한다.
+    """
+    fd = {"a": _unit("g_Mixed", gg=["[IN] au32_Rounds (size: 4)", "[OUT] u8g_Log"])}
+    res = tm._measure_suts_inputs(fd, {}, _CONST_GIM)
+    assert res["causes"] == {"write_only": 1}, res["causes"]
+
+
+def test_suppressed_const_does_not_leave_its_direction_tag_behind() -> None:
+    """⚠ 방향 태그를 억제 **전** 목록에서 뽑으면 오분류가 난다.
+
+    const 의 `[IN]` 이 남으면 "읽는 전역이 있는데 입력이 비었다"(= 이름 추출이 버렸다,
+    **결함**)로 찍힌다. 우리가 의도적으로 뺀 것을 결함으로 세면 안 된다.
+    """
+    fd = {"a": _unit("g_ConstPlusWrite", gg=["[IN] au32_Rounds (size: 4)", "[OUT] u8g_Log"])}
+    res = tm._measure_suts_inputs(fd, {}, _CONST_GIM)
+    assert "dropped_by_name_filter" not in res["causes"], res["causes"]
+
+
+def test_without_globals_info_map_the_old_cause_stands() -> None:
+    """근거가 없으면 억제도 안 하므로 이 사유도 안 붙는다(둘이 같이 움직여야 한다)."""
+    fd = {"a": _unit("g_ConstOnly", gg=["[IN] au32_Rounds (size: 4)"])}
+    res = tm._measure_suts_inputs(fd, {})
+    assert "const_globals_only" not in res["causes"], res["causes"]
+
+
+def test_measure_wires_globals_info_map_through(monkeypatch) -> None:
+    """⚠ 호출부 배선 앵커.
+
+    `_measure_suts_inputs` 만 단독으로 시험하면 `measure()` 가 그 인자를 **안 넘기는**
+    결함이 통째로 생존한다. 파서를 스텁으로 갈아 끼워 종단으로 확인한다.
+    """
+    import report_generator
+
+    sections = {
+        "function_details": {"a": _unit("g_ConstOnly", gg=["[IN] au32_Rounds (size: 4)"])},
+        "globals_info_map": _CONST_GIM,
+    }
+    monkeypatch.setattr(
+        report_generator, "generate_uds_source_sections", lambda *a, **k: sections
+    )
+    tm.clear_cache()
+    res = tm.measure("C:/__stubbed__")
+    assert res["ok"] is True, res
+    assert res["suts_inputs"]["causes"] == {"const_globals_only": 1}, res["suts_inputs"]
+
+
 # ── measure() 실패 경로 ─────────────────────────────────────────────────────
 
 def test_measure_reports_reason_when_no_source() -> None:

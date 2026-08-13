@@ -117,6 +117,10 @@ const CAUSE_LABELS = {
   stub_return_candidate:  { ko: '스텁 반환값 지정 가능', defect: false, decide: true },
   write_only:             { ko: '전역을 쓰기만 함',   defect: false },
   indirect_only:          { ko: '간접 접근만',        defect: false },
+  // 읽는 전역이 전부 `const` — 시험이 **설정할 수 있는 값이 없다**. 정본도 const
+  // 전역을 입력·기대 어느 열에도 안 적으므로 입력 0 이 정상이다.
+  // ⚠ 라벨이 없으면 아래 폴백이 `defect: true` 로 칠한다 — 의도한 억제가 결함으로 뜬다.
+  const_globals_only:     { ko: 'const 전역만 읽음',  defect: false },
   untagged:               { ko: '방향 태그 없음',     defect: true },
   dropped_by_name_filter: { ko: '이름 추출이 버림',   defect: true },
   param_string_unusable:  { ko: '파라미터 문자열 손상', defect: true },

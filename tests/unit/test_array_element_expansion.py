@@ -153,6 +153,7 @@ static S_T s_Buf[4];
 static U8 u8s_Unk[UNKNOWN_MAX];
 static U8 u8s_Sized[MAX_LEN];
 static U8 u8s_Plain;
+static const U8 u8s_ConstLut[4] = { 0U, 1U, 2U, 3U };
 static U16 u16s_Grid[3][MAX_ROW];
 static U8 u8s_Cube[2][2][2];
 void g_ArrayUser( void )
@@ -162,6 +163,7 @@ void g_ArrayUser( void )
     s_Buf->f = u8t_i;
     u8t_i = u8s_Unk[0];
     u8t_i = u8s_Sized[1];
+    u8t_i = u8s_ConstLut[1];
     u8s_Plain = u8t_i;
     return;
 }
@@ -503,6 +505,103 @@ class TestReturnSlot:
     def test_void_unit_gets_no_return(self):
         u = collect_unit_functions(_unit(proto="void Fn(void)"), sds_map={})[0]
         assert "return" not in u["output_vars"]
+
+
+# ---------------------------------------------------------------------------
+# const 전역 — 시험 입력으로 **설정할 수 없고** 기대결과로 **변하지도 않는다**
+#
+# 실측(KJPDS02_PV 정본 1,005 unit): 정본은 const 전역을 입력 0칸 · 기대 0칸 —
+# 어느 입도로도 한 번도 적지 않는다. 우리는 419칸(입력 160 · 기대 259)을 냈고
+# 일치는 0 이었다. 배열이면 원소 확장이 그 노이즈를 배로 불린다
+# (`au32_Sha256RoundConstants[0..63]` = 64칸).
+# ---------------------------------------------------------------------------
+class TestConstGlobalSuppression:
+    @pytest.mark.parametrize(
+        "gim, want",
+        [
+            ({"g": {"type": "const U32"}}, True),
+            ({"g": {"type": "const S16"}}, True),
+            ({"g": {"type": "CONST U8"}}, True),
+            ({"g": {"type": "U32"}}, False),
+            ({"g": {"type": "constant_t"}}, False),   # 단어 경계 — 타입 이름의 일부
+            ({"g": {}}, False),
+            ({}, False),
+            (None, False),
+        ],
+    )
+    def test_const_detection(self, gim, want):
+        from generators.suts import _is_const_global
+
+        assert _is_const_global("g", gim) is want
+
+    def test_const_global_is_not_listed_at_all(self):
+        """base 한 칸도 내지 않는다 — 정본이 어느 입도로도 안 적기 때문이다."""
+        u = collect_unit_functions(
+            _unit(gg=["[IN] au32_Rounds (size: 4)", "[IN] u8g_Speed"]),
+            {"au32_Rounds": {"type": "const U32", "array": "[4]"}},
+            sds_map={},
+        )[0]
+        assert "u8g_Speed" in u["input_vars"]
+        assert not any("au32_Rounds" in v for v in u["input_vars"]), u["input_vars"]
+        assert not any("au32_Rounds" in v for v in u["output_vars"]), u["output_vars"]
+
+    def test_const_suppression_also_covers_the_expected_column(self):
+        u = collect_unit_functions(
+            _unit(gg=["[OUT] s16s_Lut (size: 3)"]),
+            {"s16s_Lut": {"type": "const S16", "array": "[3]"}},
+            sds_map={},
+        )[0]
+        assert not any("s16s_Lut" in v for v in u["output_vars"]), u["output_vars"]
+
+    def test_non_const_global_is_untouched(self):
+        """회귀 가드 — 억제가 넓으면 지금 맞고 있는 4,832칸을 함께 지운다."""
+        u = collect_unit_functions(
+            _unit(gg=["[IN] u16s_AdcBuffer (size: 3)"]),
+            {"u16s_AdcBuffer": {"type": "U16", "array": "[3]"}},
+            sds_map={},
+        )[0]
+        assert u["input_vars"] == ["u16s_AdcBuffer[0]", "u16s_AdcBuffer[1]", "u16s_AdcBuffer[2]"]
+
+    def test_const_parameter_is_still_an_input(self):
+        """⚠ 파라미터의 `const` 는 **가리키는 곳**이 읽기 전용일 뿐이다.
+
+        그 버퍼는 시험이 채워 넣어야 하는 입력이라 억제 대상이 아니다.
+        """
+        u = collect_unit_functions(
+            _unit(inputs=["[IN] const U8 *pu8t_Src"], proto="void Fn(const U8 *pu8t_Src)"),
+            {"pu8t_Src": {"type": "const U8 *"}},
+            sds_map={},
+        )[0]
+        assert "pu8t_Src" in u["input_vars"], u["input_vars"]
+
+    def test_without_globals_info_map_nothing_is_suppressed(self):
+        """근거가 없으면 억제하지 않는다 — 요약 로그가 그 사실을 명시한다."""
+        u = collect_unit_functions(_unit(gg=["[IN] au32_Rounds (size: 4)"]), sds_map={})[0]
+        assert any("au32_Rounds" in v for v in u["input_vars"]), u["input_vars"]
+
+    def test_const_qualifier_survives_the_type_merge(self, array_project):
+        """⚠ 생산자 경로 앵커 — tree-sitter 산출 타입엔 `const` 가 **없다**.
+
+        그게 텍스트 스캔 값을 덮어써서 `static const UDSFuncEntry_t s_UdsFuncTbl[…]`
+        이 그냥 `UDSFuncEntry_t` 로 남았다. const 가 사라지면 위 억제가 통째로
+        헛돈다 — 소비처만 테스트하면 이 결함이 생존한다.
+        """
+        from report_gen.source_parser import is_const_type
+
+        gim = array_project.get("globals_info_map") or {}
+        entry = gim.get("u8s_ConstLut") or {}
+        assert entry, f"const 전역이 globals_info_map 에 없다: {sorted(gim)[:12]}"
+        assert is_const_type(entry.get("type")), entry
+
+    def test_const_global_is_absent_from_the_generated_unit(self, array_project):
+        """종단 — 실제 파싱을 지나 소비처까지 갔을 때 그 이름이 없어야 한다."""
+        units = collect_unit_functions(
+            array_project.get("function_details") or {},
+            array_project.get("globals_info_map") or {},
+            sds_map={},
+        )
+        u = next(x for x in units if x["name"] == "g_ArrayUser")
+        assert not any("u8s_ConstLut" in v for v in u["input_vars"] + u["output_vars"]), u
 
 
 class TestMultiDimProducer:
