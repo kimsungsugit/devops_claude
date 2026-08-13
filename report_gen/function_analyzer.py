@@ -241,6 +241,11 @@ def _split_param(param: str) -> Tuple[str, str, str]:
 #   정본엔 입력 0개인데 우리는 입력으로 냈다.
 _ACCESS_TAIL = r"(?:\s*(?:->|\.)\s*\w+|\s*\[[^\]]*\])*"
 
+# 멤버 접근 체인(`.a.b.c` · `->a->b`). **1회 이상** 반복이라 잎까지 문다.
+# ⚠ 첨자는 일부러 뺐다 — `arr[u8t_Idx].f` 를 이름으로 삼으면 지역 인덱스 변수가 문서에
+#   실린다. 첨자가 나오면 그 앞까지만 잡히고(현행과 동일) 원소 축은 배열 확장이 맡는다.
+_MEMBER_CHAIN_RE = r"(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+"
+
 
 def _new_usage_slot() -> Dict[str, Any]:
     return {
@@ -268,8 +273,12 @@ def _scan_name_usage(lines: List[str], name: str, u: Dict[str, Any]) -> None:
     for idx, line in enumerate(lines):
         if not line.strip() or name not in line:
             continue
-        for m in re.finditer(rf"\b{re.escape(name)}\b\s*(->|\.)\s*([A-Za-z_]\w*)", line):
-            u["members"].add(f"{name}{m.group(1)}{m.group(2)}")
+        # ⚠ 멤버 경로는 **한 단계로 끝나지 않는다**. `_FSTAT.Bits.CCIF` 를 한 링크만 잡으면
+        #   `_FSTAT.Bits`(= 존재하지 않는 잎)가 되어 정본과 영영 안 맞는다. 체인을 끝까지 문다.
+        #   실측(KJPDS02 .c): 직접 표기 2단 이상은 `PS.Add.DWord`·`t_Line.decel.*` 등 소수다
+        #   — 이 프로젝트의 레지스터 경로는 매크로 경로(아래 `_expansions`)로 들어온다.
+        for m in re.finditer(rf"\b{re.escape(name)}\b({_MEMBER_CHAIN_RE})", line):
+            u["members"].add(re.sub(r"\s+", "", f"{name}{m.group(1)}"))
         for m in re.finditer(rf"\b{re.escape(name)}\b\s*\[\s*([^\]]+)\s*\]", line):
             u["indexes"].add(m.group(1).strip())
         if re.search(rf"/\s*\(?\s*\b{re.escape(name)}\b", line):

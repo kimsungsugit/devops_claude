@@ -32,7 +32,12 @@ from __future__ import annotations
 
 import pytest
 
-from generators.suts import _array_sizes, _expand_array_entries, collect_unit_functions
+from generators.suts import (
+    _array_sizes,
+    _clean_global_name,
+    _expand_array_entries,
+    collect_unit_functions,
+)
 
 
 def _unit(name="Fn", *, inputs=None, outputs=None, gg=None, gs=None, proto="void Fn(void)"):
@@ -173,6 +178,18 @@ void g_MultiDimUser( U8 au8_Pair[2][3] )
     u16t_v = u16s_Grid[1][2];
     u8t_i = u8s_Cube[0][0][0];
     au8_Pair[0][0] = ( U8 )u16t_v;
+    return;
+}
+typedef struct { U8 CCIF; U8 ACCERR; } S_BITS_T;
+typedef struct { S_BITS_T Bits; U8 Byte; } S_REG_T;
+typedef struct { U16 u16_Addr; U8 u8_Data; } S_MSG_T;
+static S_REG_T s_Reg;
+void g_PtrUser( S_MSG_T* pst_Msg, U8 u8t_Scalar )
+{
+    U8 u8t_i;
+    u8t_i = s_Reg.Bits.CCIF;
+    u8t_i = pst_Msg->u8_Data;
+    pst_Msg->u16_Addr = ( U16 )u8t_Scalar;
     return;
 }
 """
@@ -617,3 +634,109 @@ class TestMultiDimProducer:
     def test_three_dim_global_carries_all_three(self, array_project):
         entry = next(g for g in _globals_of(array_project, "g_MultiDimUser") if "u8s_Cube" in g)
         assert "(size: 2x2x2)" in entry, entry
+
+
+# ---------------------------------------------------------------------------
+# 포인터 표기 — 정본(VectorCAST)은 `p[0]` · `p[0].m`, 우리는 `p` · `p->m` 이었다
+#
+# 실측(KJPDS02_PV, 2026-08-13): 화살표 표기만 맞춰도 입력 163칸 · 기대 124칸이
+# 과다 → 일치로 옮겨간다. hit+over 합이 before/after 동일 = **순수 이름 바꾸기**이고
+# 잃은 일치는 0 이다.
+#
+# ⚠ **맨이름 규칙(`p` → `p[0]`)은 일부러 넣지 않았다.** 정본 자신이 일관되지 않다 —
+#   `Values`·`Data`·`Addr` 는 `[0]` 으로 적지만 `pst_Queue`·`pst_Params`·`pt_Raw` 는
+#   맨이름으로 적는다. 규칙을 걸면 이미 맞던 이름 **78건**이 깨지고(입력 -14 순손실)
+#   기대는 +62 라 이득이 손실을 못 덮는다. 근거 없는 규칙은 넣지 않는다.
+# ---------------------------------------------------------------------------
+class TestPointerNotation:
+    @pytest.mark.parametrize(
+        "raw, want",
+        [
+            ("p->m", "p[0].m"),
+            ("pst_Params->u16_Addr1", "pst_Params[0].u16_Addr1"),
+            ("p -> m", "p[0].m"),
+            ("a->b->c", "a[0].b[0].c"),
+            ("plain", "plain"),
+            ("s.f", "s.f"),
+            ("arr[3]", "arr[3]"),
+            ("", ""),
+        ],
+    )
+    def test_arrow_becomes_index_zero_dot(self, raw, want):
+        from generators.suts import _vc_pointer_notation
+
+        assert _vc_pointer_notation(raw) == want
+
+    def test_param_member_reaches_the_unit_in_vectorcast_notation(self, array_project):
+        """종단 — 파싱부터 소비처까지 지나 `pst_Msg[0].u8_Data` 로 나와야 한다."""
+        units = collect_unit_functions(
+            array_project.get("function_details") or {},
+            array_project.get("globals_info_map") or {},
+            sds_map={},
+        )
+        u = next(x for x in units if x["name"] == "g_PtrUser")
+        assert "pst_Msg[0].u8_Data" in u["input_vars"], u["input_vars"]
+        assert "pst_Msg[0].u16_Addr" in u["output_vars"], u["output_vars"]
+
+    def test_no_arrow_survives_into_the_document(self, array_project):
+        """구조 가드 — 산출물 어디에도 C 화살표가 남으면 안 된다."""
+        units = collect_unit_functions(
+            array_project.get("function_details") or {},
+            array_project.get("globals_info_map") or {},
+            sds_map={},
+        )
+        leaked = [(u["name"], v) for u in units
+                  for v in u["input_vars"] + u["output_vars"] if "->" in v]
+        assert not leaked, leaked
+
+    def test_scalar_param_is_not_turned_into_an_element(self, array_project):
+        """⚠ 음성 대조군 — 포인터가 아닌 파라미터에 `[0]` 을 붙이면 없는 배열을 지어낸다."""
+        units = collect_unit_functions(
+            array_project.get("function_details") or {},
+            array_project.get("globals_info_map") or {},
+            sds_map={},
+        )
+        u = next(x for x in units if x["name"] == "g_PtrUser")
+        allv = u["input_vars"] + u["output_vars"]
+        assert "u8t_Scalar" in allv, allv
+        assert "u8t_Scalar[0]" not in allv, allv
+
+
+# ---------------------------------------------------------------------------
+# 멤버 접근 체인 — 한 단계만 물어 **존재하지 않는 잎**을 냈다
+#
+# `_FSTAT.Bits.CCIF` 가 `_FSTAT.Bits` 로 남았다. `Bits` 는 공용체 필드일 뿐 시험이
+# 값을 넣는 대상이 아니라, 정본과 영영 안 맞고 진짜 이름도 그 자리에 못 온다.
+# ---------------------------------------------------------------------------
+class TestMemberChain:
+    def test_direct_two_level_member_reaches_the_leaf(self, array_project):
+        """⚠ 회귀 앵커 — 고치기 전엔 `s_Reg.Bits` 에서 멈췄다."""
+        entries = _globals_of(array_project, "g_PtrUser")
+        assert any("s_Reg.Bits.CCIF" in g for g in entries), entries
+
+    def test_truncated_intermediate_is_not_emitted(self, array_project):
+        """중간 마디(`s_Reg.Bits`)는 잎이 아니다 — 이름으로 내면 안 된다."""
+        names = [_clean_global_name(g) for g in _globals_of(array_project, "g_PtrUser")]
+        assert "s_Reg.Bits" not in names, names
+
+    @pytest.mark.parametrize(
+        "body, name, want",
+        [
+            ("x = _FSTAT.Bits.CCIF;", "_FSTAT", "_FSTAT.Bits.CCIF"),
+            ("_PTAD.Overlap_STR.PTADLSTR.Byte = 1U;", "_PTAD", "_PTAD.Overlap_STR.PTADLSTR.Byte"),
+            ("y = p -> a -> b;", "p", "p->a->b"),
+            ("z = s.one;", "s", "s.one"),
+        ],
+    )
+    def test_scan_captures_the_whole_chain(self, body, name, want):
+        from report_gen.function_analyzer import _collect_var_usage
+
+        got = _collect_var_usage(body, [name])
+        assert want in got[name]["members"], got[name]["members"]
+
+    def test_variable_subscript_does_not_become_a_name(self):
+        """⚠ `arr[u8t_Idx].f` 를 이름으로 삼으면 **지역 인덱스 변수**가 문서에 실린다."""
+        from report_gen.function_analyzer import _collect_var_usage
+
+        got = _collect_var_usage("v = arr[u8t_Idx].f;", ["arr"])
+        assert not any("u8t_Idx" in m for m in got["arr"]["members"]), got["arr"]["members"]

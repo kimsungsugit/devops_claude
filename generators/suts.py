@@ -539,12 +539,16 @@ def collect_unit_functions(
                 elif not is_indirect:
                     role_in = True
 
-            if role_in and gn not in inp_set:
-                input_vars.append(gn)
-                inp_set.add(gn)
-            if role_out and gn not in out_set:
-                output_vars.append(gn)
-                out_set.add(gn)
+            # ⚠ 표기 정합은 **맨 마지막**에만 한다. 위의 `_is_const_global`·
+            #   `_LOCAL_TEMP_PATS`·프리픽스 판정은 전부 C 이름(`gn`)을 키로 쓰므로
+            #   먼저 바꾸면 그 조회들이 조용히 빗나간다.
+            gd = _vc_pointer_notation(gn)
+            if role_in and gd not in inp_set:
+                input_vars.append(gd)
+                inp_set.add(gd)
+            if role_out and gd not in out_set:
+                output_vars.append(gd)
+                out_set.add(gd)
 
         component = ""
         module = info.get("module_name", "")
@@ -725,6 +729,21 @@ _RETURN_SLOT_RE = re.compile(r"^return\b", re.I)
 _RETURN_VAR = "return"
 
 
+# 포인터 표기. 정본(VectorCAST)은 포인터 뒤에 **1원소 이상의 배열**을 잡아주므로
+# `p[0]` · `p[0].m` 으로 적는다. 우리 생산자는 C 문법 그대로 `p` · `p->m` 을 낸다 —
+# **같은 대상을 다르게 부르는 것**이라, 표기만 맞추면 과다와 미달이 동시에 닫힌다.
+# 실측(KJPDS02_PV 시뮬): 입력 163칸 · 기대 124칸이 과다→일치로 이동, **잃은 일치 0**.
+# ⚠ 생산자 계약(`[IN] word * Values`)은 건드리지 않는다 — UDS 상세설계엔 C 표기가 맞다.
+#   `return` 슬롯과 같은 방식이다(소비처에서만 교정).
+_ARROW_RE = re.compile(r"\s*->\s*")
+
+
+def _vc_pointer_notation(name: str) -> str:
+    """``p->m`` → ``p[0].m``. 화살표가 없으면 원본 그대로."""
+    s = str(name or "")
+    return _ARROW_RE.sub("[0].", s) if "->" in s else s
+
+
 def _extract_var_names(raw_list: List[str]) -> List[str]:
     """Extract clean variable names from [IN]/[OUT] tagged param strings."""
     names: List[str] = []
@@ -749,6 +768,7 @@ def _extract_var_names(raw_list: List[str]) -> List[str]:
         candidate = parts[-1].strip("*&;,")
         candidate = re.sub(r"\[.*?\]$", "", candidate)
         if candidate and re.match(r"[A-Za-z_]", candidate):
+            candidate = _vc_pointer_notation(candidate)
             if candidate not in names:
                 names.append(candidate)
     return names

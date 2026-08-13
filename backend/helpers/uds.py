@@ -669,7 +669,13 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v10: `globals_info_map.type` 에 **`const` 한정자가 되살아났다**. tree-sitter 산출 타입엔
+# (v11: 멤버 접근 경로를 **잎까지** 잡는다. `_scan_name_usage` 가 링크를 **한 단계만**
+#      물어 `_FSTAT.Bits.CCIF` 가 `_FSTAT.Bits` 로 남았다 — 존재하지 않는 잎이라 정본과
+#      영영 안 맞고, 그 자리에 있어야 할 진짜 이름도 못 나온다. 구 캐시엔 잘린 이름이
+#      실려 있으므로 무효화하지 않으면 소비처가 계속 그 이름을 본다.
+#      (실측 KJPDS02 `.c` 직접 표기 2단 이상은 `PS.Add.DWord`·`t_Line.decel.*` 등 소수 —
+#       이 프로젝트의 레지스터 경로는 매크로 확장으로 들어와 이미 잎까지 온다.)
+#  v10: `globals_info_map.type` 에 **`const` 한정자가 되살아났다**. tree-sitter 산출 타입엔
 #      const 가 없는데 그게 텍스트 스캔 값을 덮어써서 `static const UDSFuncEntry_t
 #      s_UdsFuncTbl[…]` 이 그냥 `UDSFuncEntry_t` 로 남아 있었다. const 는 "시험 입력으로
 #      설정할 수 없다"는 판정의 유일한 근거이고, 그 판정으로 SUTS 가 const 전역을 뺀다
@@ -713,7 +719,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v10"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v11"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
