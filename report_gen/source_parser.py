@@ -131,6 +131,37 @@ def _split_decl_items(text: str) -> List[str]:
     return items
 
 
+# 선언자 **끝**의 배열 차원(`[60]` · `[MAX][2]` · 크기 미지정 `[]`).
+_DECL_ARRAY_DIM_RE = re.compile(r"((?:\s*\[[^\]]*\])+)\s*$")
+
+
+def _decl_array_dim(decl: str) -> str:
+    """선언자에서 배열 차원만 뽑는다. 배열이 아니면 빈 문자열.
+
+    ⚠ `_extract_decl_name_and_type` 은 이 부분을 **버린다** — 정규식이
+      `(?:\\[[^\\]]*\\])?` 로 매치만 하고 캡처하지 않는다. 그래서
+      `static U8 u8s_DataBuffer[60];` 이 `{'name': …, 'type': 'U8'}` 로만 남고
+      크기 60 은 산출물 어디에도 없다(디스크 캐시 `static_vars` 로 확인).
+
+      정본 SUTS 는 배열을 **원소 단위로 펼쳐** 적는다 — 실측(KJPDS02_PV): 입력 엔트리
+      6,014 중 **3,023(50.3%)** 이 `name[N]` 형태이고, 134개 base 중 **120개가 모든
+      unit 에서 같은 개수**로 나온다(= 관찰된 접근 첨자가 아니라 선언 크기). 크기가
+      없으면 그 절반을 재현할 근거 자체가 없다.
+
+    ⚠ **`_extract_decl_name_and_type` 의 튜플 폭을 넓히지 않는다.** 테스트 4곳이
+      2-튜플로 언팩하고 있고, 이 저장소는 추출기 튜플이 3→4 로 넓어졌을 때 소비처
+      한 곳이 남아 `ValueError` 로 4개월간 조용히 깨진 전례가 있다
+      (`_scan_source_function_names` 주석 참조). 그래서 별도 함수로 뽑는다.
+    """
+    text = str(decl or "").strip().rstrip(";").split("=", 1)[0].strip()
+    if not text or "(" in text:  # 함수 포인터 선언자는 대상이 아니다
+        return ""
+    m = _DECL_ARRAY_DIM_RE.search(text)
+    if not m:
+        return ""
+    return re.sub(r"\s+", "", m.group(1))
+
+
 def _extract_decl_name_and_type(decl: str, base_type: str) -> Tuple[str, str]:
     text = str(decl or "").strip().rstrip(";")
     text = text.split("=", 1)[0].strip()
@@ -224,6 +255,8 @@ def _parse_c_declaration_statement(stmt: str) -> List[Dict[str, str]]:
             {
                 "name": name,
                 "type": dtype,
+                # 배열 차원(`[60]`). 정본이 원소 단위로 펼쳐 적는 근거다 — `_decl_array_dim` 주석 참조.
+                "array": _decl_array_dim(item),
                 "init": item.split("=", 1)[1].strip() if "=" in item else "",
                 "static": "true" if any(tok in _STATIC_STORAGE_WORDS for tok in storage_words) else "false",
                 "extern": "true" if any(tok.lower() == "extern" for tok in storage_words) else "false",
@@ -436,6 +469,7 @@ def _extract_c_global_candidates(text: str) -> List[Dict[str, str]]:
                 {
                     "name": gname,
                     "type": gtype,
+                    "array": str(item.get("array") or "").strip(),
                     "init": str(item.get("init") or "").strip(),
                     "static": str(item.get("static") or "false").strip().lower(),
                     "extern": str(item.get("extern") or "false").strip().lower(),

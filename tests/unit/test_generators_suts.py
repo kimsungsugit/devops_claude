@@ -201,6 +201,11 @@ class TestParamAnnotationTail:
             ("[IN] g_DoorState_his (idx: u8t_i)", "g_DoorState_his"),
             ("[OUT] g_Buf (idx: i) (range: 0x0 ~ 0xFF)", "g_Buf"),   # 꼬리가 이어 붙는다
             ("[INOUT] s_LinFrame", "s_LinFrame"),                     # 꼬리 없는 것은 그대로
+            # ⚠ 꼬리 키워드 목록은 정규식 **두 개**가 공유한다(`_PARAM_ANNOT_KEYS`).
+            #   새 꼬리를 목록에 안 넣으면 그 꼬리가 그대로 이름이 된다 — `(size: 60)` 은
+            #   배열 원소 확장이 쓸 꼬리다(정본 입력의 50.3%가 `name[N]` 원소 표기).
+            ("[IN] u8s_DataBuffer (size: 60)", "u8s_DataBuffer"),
+            ("[IN] u8s_DataBuffer (size: 60) (idx: u8t_Idx)", "u8s_DataBuffer"),
         ],
     )
     def test_global_name_survives_annotation_tail(self, raw, name):

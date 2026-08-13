@@ -669,7 +669,13 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v7: 원문 읽기 캡 200KB → 2MB. `Generated_Code/IO_Map.h`(665KB)를 **29.4% 만** 읽고 있어
+# (v8: `globals_info_map` 에 **배열 차원**(`array`: `[60]`)이 붙었다. 정본 SUTS 입력
+#      엔트리의 **50.3%(3,023/6,014)** 가 `name[N]` 원소 표기이고, 134개 base 중 120개가
+#      모든 unit 에서 같은 개수 = 관찰 첨자가 아니라 **선언 크기**다. 그 크기를 파서가
+#      통째로 버리고 있었다(`_extract_decl_name_and_type` 정규식이 `[...]` 를 매치만
+#      하고 캡처하지 않음). 구 캐시엔 이 필드가 없으므로 무효화하지 않으면 원소 확장
+#      소비처가 붙는 순간 **조용히 아무 일도 안 한다**.
+#  v7: 원문 읽기 캡 200KB → 2MB. `Generated_Code/IO_Map.h`(665KB)를 **29.4% 만** 읽고 있어
 #      매크로 정의 5,622 중 3,881 · extern 전역 363 중 251 이 사라졌다. 레지스터는 파일
 #      뒤쪽에 몰려 있어 `_PTT`(앞)는 살고 `_ADC0CTL`·`_SCI0CR2`·`_CPMUINT`(뒤)는 통째로
 #      없었다 — v5·v6 캐시엔 그 전역·매크로가 아예 없으므로 무효화하지 않으면 SFR 입력이
@@ -693,7 +699,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v7"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v8"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

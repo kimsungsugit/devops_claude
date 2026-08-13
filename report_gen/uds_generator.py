@@ -80,6 +80,7 @@ from report_gen.requirements import (
 )
 from report_gen.source_parser import (
     _SRC_READ_MAX_BYTES,
+    _decl_array_dim,
     _scan_source_comment_patterns,
     _extract_c_macros,
     _read_source_text,
@@ -501,6 +502,9 @@ def generate_uds_source_sections(
             prev = manual_globals_info_map.get(gname, {})
             manual_globals_info_map[gname] = {
                 "type": str(g.get("type") or prev.get("type") or "").strip(),
+                # 배열 차원(`[60]`). 정본은 배열을 원소 단위로 펼쳐 적는다 —
+                # `source_parser._decl_array_dim` 주석 참조.
+                "array": str(g.get("array") or prev.get("array") or "").strip(),
                 "file": str(p),
                 "range": str(prev.get("range") or "").strip(),
                 "init": str(g.get("init") or prev.get("init") or "").strip(),
@@ -789,6 +793,11 @@ def generate_uds_source_sections(
                     static_name_map[gname] = is_static
                     globals_info_map[gname] = {
                         "type": gtype or str(prev.get("type") or "").strip(),
+                        # ⚠ tree-sitter 쪽(`globals_detailed`)엔 배열 차원 필드가 없다.
+                        #   텍스트 스캔이 이미 채워둔 값을 **먼저** 쓰고, 없을 때만
+                        #   선언문에서 뽑는다(`decl` 은 문장 전체라 다중 선언자면
+                        #   마지막 것이 나온다 — 그래서 텍스트 스캔이 우선이다).
+                        "array": str(prev.get("array") or "").strip() or _decl_array_dim(gdecl),
                         "file": gfile or str(prev.get("file") or "").strip(),
                         "range": grange or str(prev.get("range") or "").strip(),
                         "init": str(g.get("init") or "").strip() or str(prev.get("init") or "").strip(),
