@@ -179,6 +179,127 @@ class TestGlobalDirectionTags:
         assert "s_LinFrame.LIN_data" in u["input_vars"]
 
 
+class TestKeywordFallbackIsAnchored:
+    """⚠ **substring 매칭의 세 번째 재발.**
+
+    폴백이 엔트리 **전체**를 `str(g).upper()` 로 훑었다:
+
+        if any(k in tag for k in ["READ", "RHS"]): role_in = True
+
+    그래서 **변수 이름 안의 글자**가 방향을 정한다 — `_ADC0STS.Bits.READY` 의 `READY`
+    안에 `READ` 가 들어 있다. 간접 억제(`is_indirect`)는 `if not role_in and not
+    role_out:` 블록 **안에만** 있으므로 통째로 건너뛰고, `[INDIRECT]` 가 입력이 된다.
+
+    실측(2026-08-13, KJPDS02 전역 엔트리 6,711): 이름 안에 키워드가 든 엔트리 **93건**
+    (63 unit · 변수 18종). `[INDIRECT*]` 27건은 억제를 건너뛰고, `[OUT]`+READ ·
+    `[IN]`+WRITE 29건은 파서 태그를 **뒤집어** 같은 이름이 양쪽 열에 실렸다.
+    반대로 **선두 토큰 키워드는 0건**이라 앵커로 좁혀도 잃는 게 없다.
+
+    같은 부류를 이 저장소가 이미 두 번 겪었다: `"[IN]" in "[INOUT] x"`(A-1) ·
+    `[INDIRECT2]` 미인식. 판정을 substring 으로 하면 **데이터가 판정을 바꾼다**.
+
+    ⚠ 아래 태그된 케이스들은 앵커(`^\\s*`)·토큰경계(`\\b`) **둘 중 하나만** 있어도
+      통과한다(태그된 엔트리는 `[` 로 시작하니 앵커에 안 걸리고, 이 프로젝트 이름들은
+      `_`·`Y` 가 뒤따라 `\\b` 에도 안 걸린다). 그래서 두 축을 **따로 겨누는** 테스트를
+      아래 `test_anchor_…` · `test_…whole_token…` 으로 각각 둔다 — 안 그러면 한쪽을
+      지워도 전부 초록이다.
+    """
+
+    _unit = staticmethod(TestGlobalDirectionTags._unit)
+
+    @pytest.mark.parametrize(
+        "entry,name",
+        [
+            ("[INDIRECT] _ADC0STS.Bits.READY", "_ADC0STS.Bits.READY"),
+            ("[INDIRECT2] _ADC0STS.Bits.READY", "_ADC0STS.Bits.READY"),
+            ("[INDIRECT] u8g_SleepReady_F", "u8g_SleepReady_F"),
+            ("[INDIRECT] g_u8ResponsePendingReady", "g_u8ResponsePendingReady"),
+        ],
+    )
+    def test_name_containing_read_does_not_escape_indirect_suppression(self, entry, name):
+        u = self._unit(entry)
+        assert name not in u["input_vars"], (
+            f"이름 안의 글자가 간접 억제를 뚫었다: {u['input_vars']}"
+        )
+
+    @pytest.mark.parametrize(
+        "entry,name",
+        [
+            ("[INDIRECT] u8g_SysUds_WriteData", "u8g_SysUds_WriteData"),
+            ("[INDIRECT2] u8g_DoorCtrl_EepWriteCmd", "u8g_DoorCtrl_EepWriteCmd"),
+        ],
+    )
+    def test_name_containing_write_does_not_escape_indirect_suppression(self, entry, name):
+        u = self._unit(entry)
+        assert name not in u["output_vars"], (
+            f"이름 안의 글자가 간접 억제를 뚫었다: {u['output_vars']}"
+        )
+
+    def test_out_tag_is_not_flipped_by_read_in_the_name(self):
+        """`[OUT] …Read…` 이 입력 열에도 실리면 한 행에서 같은 변수가 양쪽에 나온다.
+
+        실측 19건. 파서가 방향을 아는데 이름의 글자가 그걸 뒤집으면 안 된다.
+        """
+        u = self._unit("[OUT] u8g_SysEepromCtrl_TunningParamRead_F")
+        assert "u8g_SysEepromCtrl_TunningParamRead_F" in u["output_vars"]
+        assert "u8g_SysEepromCtrl_TunningParamRead_F" not in u["input_vars"]
+
+    def test_in_tag_is_not_flipped_by_write_in_the_name(self):
+        """반대 방향 — 실측 10건."""
+        u = self._unit("[IN] u8g_SysUds_WriteData")
+        assert "u8g_SysUds_WriteData" in u["input_vars"]
+        assert "u8g_SysUds_WriteData" not in u["output_vars"]
+
+    @pytest.mark.parametrize(
+        "keyword,column,other",
+        [("READ", "input_vars", "output_vars"), ("WRITE", "output_vars", "input_vars")],
+    )
+    def test_leading_keyword_still_works(self, keyword, column, other):
+        """음성 대조군 — 앵커로 좁혔다고 **정당한 폴백까지** 죽이면 안 된다."""
+        u = self._unit(f"{keyword} s_LinFrame")
+        assert "s_LinFrame" in u[column]
+        assert "s_LinFrame" not in u[other]
+
+    def test_keyword_must_be_a_whole_token_even_when_leading(self):
+        """**토큰 경계 축만** 겨눈다 — 앵커가 살아 있어도 `\\b` 가 없으면 깨진다.
+
+        `READYFLAG_s_Value` 는 선두라서 `^\\s*` 는 통과하지만 키워드가 아니라 변수
+        이름이다. 경계 없이 `READ` 만 보면 이 이름이 방향을 자칭한다.
+        """
+        u = self._unit("READYFLAG_s_Value")
+        assert "READYFLAG_s_Value" not in u["input_vars"], (
+            "`\\b` 경계가 없으면 이름이 키워드로 읽힌다"
+        )
+
+    def test_anchor_is_needed_even_when_the_keyword_is_a_whole_token(self):
+        """**앵커 축만** 겨눈다 — `\\b` 가 살아 있어도 `^\\s*` 가 없으면 깨진다.
+
+        `s_Cfg.READ` 는 무태그에 마지막 마디가 `READ` 라 경계가 성립한다. 앵커가
+        없으면(=엔트리 아무 데나 찾으면) 이 **이름**이 방향을 정한다. 무태그는
+        프리픽스 휴리스틱이 판정해야 하고, `s_` 는 출력 축이다.
+        """
+        u = self._unit("s_Cfg.READ")
+        assert "s_Cfg.READ" not in u["input_vars"], (
+            f"앵커가 없어 이름 끝의 토큰이 입력으로 승격됐다: {u['input_vars']}"
+        )
+        assert "s_Cfg.READ" in u["output_vars"], "무태그 프리픽스 휴리스틱이 죽었다"
+
+    def test_clean_name_contract_covers_every_tag(self):
+        """`_clean_global_name` 의 **계약** — 어떤 태그가 붙어도 맨 이름만 남는다.
+
+        ⚠ 이건 가드가 아니라 계약 테스트다. 태그 목록을 복제해 두든 단일 출처
+        (`_DIR_TAG_PAT`)를 쓰든 **양쪽 다 통과한다** — 이름을 마지막 토큰에서 뽑기
+        때문에 태그 제거가 관측에 안 드러난다. 그래서 이 저장소가 `[INDIRECT2]` 를
+        여기서만 빼먹고도 오래 몰랐다. 복제 제거는 재발 방지이지 동작 수정이 아니다.
+        """
+        from generators.suts import _clean_global_name
+
+        for t in ("[IN]", "[OUT]", "[INOUT]", "[INDIRECT]", "[INDIRECT2]"):
+            assert _clean_global_name(f"{t} u8g_Flag") == "u8g_Flag", t
+            # 타입이 앞에 붙어도(= 토큰이 여럿이어도) 이름만 남는다
+            assert _clean_global_name(f"{t} volatile U8 u8g_Flag") == "u8g_Flag", t
+
+
 class TestParamAnnotationTail:
     """이름 뒤 주석형 꼬리가 **이름을 삼키던** 경로.
 

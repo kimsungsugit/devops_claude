@@ -414,6 +414,11 @@ _REG_PAT = re.compile(r"^REG_|^lin_|^PS\.|^DiagData\.")
 #   입력으로 냈다 — 읽기는 2홉 아래 `u16g_DrvIn_SPI_DataTransfer` 안에서 일어난다.
 _DIR_TAG_PAT = re.compile(r"^\s*\[(IN|OUT|INOUT|INDIRECT2|INDIRECT)\]", re.I)
 
+# 태그를 안 붙이는 생산자(참조 SUDS 문서 경유 등)의 키워드 표기. **선두 토큰만** 본다 —
+# 엔트리 전체를 substring 매칭하면 변수 **이름 안의 글자**가 방향을 정한다(`…READY` 의
+# `READ`). 자세한 실측은 아래 `collect_unit_functions` 의 폴백 주석 참조.
+_KEYWORD_DIR_PAT = re.compile(r"^\s*(READ|WRITE|RHS|LHS)\b", re.I)
+
 
 def dir_tag(entry: Any) -> str:
     """전역 엔트리의 방향 태그(대문자). 태그가 없으면 빈 문자열.
@@ -498,7 +503,6 @@ def collect_unit_functions(
             if _LOCAL_TEMP_PATS.match(gn):
                 continue
 
-            tag = str(g).upper()
             is_in_global = g in globals_g_set
 
             role_in = False
@@ -514,11 +518,30 @@ def collect_unit_functions(
             if _dir_tag in {"OUT", "INOUT"}:
                 role_out = True
 
-            # 키워드 폴백 — 참조 SUDS 문서 경유 등 태그를 안 붙이는 생산자를 위해 남긴다.
-            if any(k in tag for k in ["READ", "RHS"]):
-                role_in = True
-            if any(k in tag for k in ["WRITE", "LHS"]):
-                role_out = True
+            # 키워드 폴백 — 참조 SUDS 문서 경유 등 태그를 **안 붙이는** 생산자를 위해 남긴다.
+            # ⚠ 예전엔 엔트리 **전체**를 substring 매칭했다(`"READ" in str(g).upper()`).
+            #   그래서 **변수 이름 안의 글자**가 방향을 정했다 — `[INDIRECT] _ADC0STS.Bits.READY`
+            #   의 `READY` 안에 `READ` 가 들어 있어 `role_in=True` 가 되고, 간접 억제는 아래
+            #   `if not role_in and not role_out:` 블록 안에만 있으므로 **통째로 건너뛴다**.
+            #   같은 부류의 substring 실패를 이 저장소가 `"[IN]" in "[INOUT] x"` 로 이미 겪었다.
+            #   실측(2026-08-13, KJPDS02 전역 엔트리 6,711): 이름 안에 키워드가 든 엔트리 93건
+            #   (63 unit · 변수 18종) — `[INDIRECT*]` 27건은 억제를 건너뛰고, `[OUT]`+READ ·
+            #   `[IN]`+WRITE 29건은 파서 태그를 **뒤집어** 같은 이름이 양쪽 열에 실렸다.
+            #   대표: `u8g_SysUds_WriteData` 24 · `_ADC0STS.Bits.READY` 7 · `u8g_SleepReady_F` 3.
+            # 그래서 **선두 토큰**만 본다. 이 표기를 내는 생산자는 키워드를 앞에 놓는다
+            # (`_clean_global_name` 이 마지막 토큰에서 이름을 뽑으므로 그래야 성립한다).
+            # 실측: 이 프로젝트에서 선두 토큰 키워드는 **0건** — 앵커로 좁혀도 잃는 게 없다.
+            # ⚠ "태그가 있으면 폴백을 건너뛴다"는 게이트를 따로 두지 **않았다**. 태그된
+            #   엔트리는 `[` 로 시작하니 앵커에 애초에 안 걸린다 — 그 게이트는 위 93건을
+            #   앵커와 **똑같이** 막아서, 둘 다 두면 하나를 지워도 테스트가 통과한다
+            #   (죽은 방어). 기제는 하나로 두고 그 하나를 뮤테이션으로 지킨다.
+            _kw = _KEYWORD_DIR_PAT.match(str(g))
+            if _kw:
+                _k = _kw.group(1).upper()
+                if _k in {"READ", "RHS"}:
+                    role_in = True
+                if _k in {"WRITE", "LHS"}:
+                    role_out = True
 
             if not role_in and not role_out:
                 if gn.startswith(_OUTPUT_PREFIXES):
@@ -867,9 +890,10 @@ def _expand_array_entries(
 
 
 def _clean_global_name(g: str) -> str:
-    s = str(g).strip()
-    s = re.sub(r"^\[INDIRECT\]\s*", "", s)
-    s = re.sub(r"^\[(?:IN|OUT|INOUT)\]\s*", "", s)
+    # 태그 제거는 `_DIR_TAG_PAT` **단일 출처**로 한다. 여기 목록을 따로 들고 있다가
+    # `[INDIRECT2]` 를 빼먹었었다 — 마지막 토큰을 취하는 아래 로직 덕에 우연히 살아
+    # 있었을 뿐, 태그가 하나 늘 때 한쪽만 고쳐지는 그 실패를 이 저장소가 두 번 겪었다.
+    s = _DIR_TAG_PAT.sub("", str(g).strip(), count=1).strip()
     s = _strip_param_annotations(s)
     parts = s.split()
     return parts[-1].strip("*&;,") if parts else ""
