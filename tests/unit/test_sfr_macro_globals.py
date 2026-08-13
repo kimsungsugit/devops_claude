@@ -91,11 +91,23 @@ class TestAddressPlacementSuffix:
 
 @pytest.fixture(scope="module")
 def sfr_project(tmp_path_factory):
+    """⚠ resolver 를 직접 local 로 고정한다 — conftest 의 `_default_local_resolver` 는
+    **함수 스코프** autouse 라 모듈 스코프 픽스처보다 **나중에** 돈다(pytest 셋업 순서는
+    session→module→function). 고정하지 않으면 머신의 영속 설정(cloudium)을 타고
+    worker IPC 로 파일을 읽으러 가며, xdist 전량 실행에서 간헐적으로 ERROR 가 난다.
+    """
+    from backend.services import file_resolver as fr
+
     d = tmp_path_factory.mktemp("sfr_src")
     (d / "IO_Map.h").write_text(_IO_MAP_H, encoding="utf-8")
     (d / "Sys.h").write_text(_SYS_H, encoding="utf-8")
     (d / "SysOs_Main.c").write_text(_MAIN_C, encoding="utf-8")
-    return generate_uds_source_sections(str(d), preprocess=False)
+    _saved = fr._resolver
+    fr._resolver = fr.LocalFileResolver()
+    try:
+        return generate_uds_source_sections(str(d), preprocess=False)
+    finally:
+        fr._resolver = _saved  # 원래 값 복원 — 고정하고 가면 다음 테스트가 물려받는다
 
 
 @pytest.fixture(scope="module")

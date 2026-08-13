@@ -1242,6 +1242,11 @@ def generate_uds_source_sections(
                         if norm:
                             index_vals.append(norm)
                     index_vals = list(dict.fromkeys(index_vals))
+                    # 선언 배열 차원. 정본은 배열을 원소 단위로 펼쳐 적으므로
+                    # (입력 엔트리의 50.3%) 소비처가 개수를 알아야 한다.
+                    # ⚠ **base 이름에만** 붙인다 — 멤버 경로(`s.f`)나 확장형
+                    #   (`_PTT.Bits.PTT3`)은 배열이 아니라 그 배열의 한 칸/필드다.
+                    _g_array = str((globals_info_map.get(gname) or {}).get("array") or "").strip()
                     for disp_name in names:
                         display = _format_param_entry(
                             disp_name,
@@ -1251,6 +1256,7 @@ def generate_uds_source_sections(
                             macro_value_map,
                             False,
                             bool(u.get("divisor")),
+                            size_hint=_g_array if disp_name == gname else "",
                         )
                         entry = f"[{direction}] {display}"
                         if _is_static_var(gname, static_name_map):

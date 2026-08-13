@@ -542,6 +542,13 @@ def collect_unit_functions(
         max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
         max_out = _OUTPUT_COL_END - _OUTPUT_COL_START + 1
 
+        # 배열을 원소 단위로 펼친다(정본과 같은 입도). 입력·기대 **양쪽** 이다 —
+        # 실측상 같은 unit 에서 양쪽에 펼쳐진 배열이 120건이라, 한쪽만 펼치면 한 행
+        # 안에서 같은 변수가 다른 이름으로 두 번 나온다.
+        _sizes = _array_sizes(inputs_raw, outputs_raw, globals_g, globals_s)
+        input_vars, _in_exp = _expand_array_entries(input_vars, _sizes, max_inp)
+        output_vars, _out_exp = _expand_array_entries(output_vars, _sizes, max_out)
+
         asil = str(info.get("asil") or "TBD").strip()
         if not asil or asil.upper() == "TBD":
             asil = _resolve_unit_asil(info, sds_map) or asil
@@ -563,6 +570,9 @@ def collect_unit_functions(
             "component": component,
             "input_vars": input_vars[:max_inp],
             "output_vars": output_vars[:max_out],
+            # 무엇을 펼쳤고 무엇을 예산 때문에 못 펼쳤나. 건너뛴 배열은 정본보다
+            # **입도가 낮은** 칸이 되므로 조용히 두면 "정본과 다르다"의 원인을 못 짚는다.
+            "array_expansion": {"input": _in_exp, "output": _out_exp},
             "indirect_vars": indirect_vars,
             "logic_flow": info.get("logic_flow") or [],
             "calls_list": info.get("calls_list") or [],
@@ -573,7 +583,22 @@ def collect_unit_functions(
         })
 
     units.sort(key=lambda u: u["fid"])
-    _logger.info("Collected %d unit functions", len(units))
+    # 배열 확장 집계. 건너뛴 게 있으면 WARNING 으로 올린다 — 예산 때문에 정본보다
+    # 입도가 낮아진 칸이 있다는 뜻이고, 그건 조용하면 안 된다.
+    _exp_n = sum(len(u["array_expansion"]["input"]["expanded"])
+                 + len(u["array_expansion"]["output"]["expanded"]) for u in units)
+    _skip = [(u["name"], s["name"], s["elements"], s["remaining"])
+             for u in units
+             for axis in ("input", "output")
+             for s in u["array_expansion"][axis]["skipped"]]
+    (_logger.warning if _skip else _logger.info)(
+        "Collected %d unit functions | 배열 확장 %d건%s",
+        len(units), _exp_n,
+        ("  ⚠예산 부족으로 미확장 %d건: %s" % (
+            len(_skip),
+            ", ".join(f"{u}::{n}({k}원소, 여유 {r})" for u, n, k, r in _skip[:3]),
+        )) if _skip else "",
+    )
     return units
 
 
@@ -681,6 +706,75 @@ def _extract_var_names(raw_list: List[str]) -> List[str]:
             if candidate not in names:
                 names.append(candidate)
     return names
+
+
+# 배열 원소 확장.
+#
+# 정본 SUTS 는 배열을 **원소 단위로** 적는다(실측 KJPDS02_PV):
+#   입력 엔트리 6,014 중 `name[N]` 3,023(50.3%) · 기대 5,389 중 2,716(50.4%)
+#   base 134 중 **120개가 모든 unit 에서 같은 개수** = 관찰 첨자가 아니라 선언 크기
+#   최대 원소 60 · 입력 unit당 최대 **96 = 열 상한 정확히**(초과 0) · 기대 84 = 상한
+#
+# ⚠ 상한을 넘기면 **펼치지 않고 base 이름을 그대로 둔다**. 원소를 잘라 넣으면
+#   "이 배열은 앞 k칸만 시험한다"는 없는 사실을 적게 되고, 뒤에 오는 **다른 변수**가
+#   통째로 밀려난다. 변수는 하나도 잃지 않고 입도만 낮추는 쪽이 정직하다.
+#   건너뛴 것은 `array_expansion` 으로 보고한다 — 침묵시키지 않는다.
+_SIZE_TAIL_RE = re.compile(r"\(\s*size\s*:\s*(\d+)\s*\)", re.I)
+# 파라미터 표시엔 선언 차원이 `buf[10]` 로 이미 들어 있다(`_format_param_entry`).
+# 이 필드에서 `[N]` 은 **항상 선언 크기**다(원소 표기를 내는 생산자가 없다).
+_PARAM_DIM_RE = re.compile(r"\[(\d+)\]\s*$")
+
+
+def _array_sizes(*raw_groups: List[str]) -> Dict[str, int]:
+    """원시 엔트리에서 `이름 → 원소 개수` 를 모은다."""
+    sizes: Dict[str, int] = {}
+    for group in raw_groups:
+        for raw in group or []:
+            s = str(raw or "")
+            m = _SIZE_TAIL_RE.search(s)
+            n = int(m.group(1)) if m else 0
+            if not n:
+                head = _strip_param_annotations(
+                    re.sub(r"^\[(?:IN|OUT|INOUT|INDIRECT2|INDIRECT)\]\s*", "", s.strip())
+                )
+                m2 = _PARAM_DIM_RE.search(head)
+                n = int(m2.group(1)) if m2 else 0
+            if n <= 1:
+                continue
+            name = _clean_global_name(s)
+            name = re.sub(r"\[\d+\]$", "", name)
+            if name:
+                sizes[name] = max(sizes.get(name, 0), n)
+    return sizes
+
+
+def _expand_array_entries(
+    names: List[str], sizes: Dict[str, int], budget: int
+) -> Tuple[List[str], Dict[str, Any]]:
+    """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**."""
+    out: List[str] = []
+    expanded: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    for nm in names:
+        n = sizes.get(nm, 0)
+        if n <= 1:
+            out.append(nm)
+            continue
+        remaining = budget - len(out)
+        # 남은 이름들도 최소 한 칸씩은 자리가 있어야 한다.
+        reserve = len(names) - names.index(nm) - 1
+        if n > remaining - reserve:
+            out.append(nm)
+            skipped.append({"name": nm, "elements": n, "remaining": max(0, remaining - reserve)})
+            continue
+        out.extend(f"{nm}[{i}]" for i in range(n))
+        expanded.append(nm)
+    return out, {
+        "expanded": expanded,
+        "skipped": skipped,
+        "budget": budget,
+        "used": len(out),
+    }
 
 
 def _clean_global_name(g: str) -> str:

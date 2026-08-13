@@ -736,12 +736,30 @@ def _format_param_entry(
     macro_map: Dict[str, str],
     pointer_range: bool,
     divisor: bool = False,
+    *,
+    size_hint: str = "",
 ) -> str:
+    """엔트리 표시 문자열. 꼬리는 **이름 뒤에만** 붙는다.
+
+    `size_hint` 는 **전역**의 선언 배열 차원(`[60]`)이다. 파라미터는 `array_part` 로
+    이미 `buf[10]` 을 만들지만 전역엔 그 자리가 없어, 정본이 원소 단위로 펼쳐 적는
+    배열(입력 엔트리의 50.3%)의 크기를 소비처(`generators/suts.py`)가 알 방법이
+    없었다. `(size: N)` 꼬리로 실어 보낸다 — 꼬리 목록은 `_PARAM_ANNOT_KEYS` 단일 출처.
+    """
     display = name
     if array_part:
         expr = array_part.strip()[1:-1]
         norm, _ = _normalize_bracket_expr(expr, macro_map)
         display = f"{display}[{norm}]" if norm else display
+    if size_hint:
+        expr = size_hint.strip()
+        if expr.startswith("[") and expr.endswith("]"):
+            expr = expr[1:-1]
+        norm, _ = _normalize_bracket_expr(expr, macro_map)
+        # 숫자로 접힌 것만 싣는다. `[MAX_LEN]` 처럼 못 접은 값을 실으면 소비처가
+        # 원소 개수를 알 수 없어 **확장을 조용히 건너뛴다** — 그건 크기가 없는 것과 같다.
+        if norm.isdigit():
+            display = f"{display} (size: {norm})"
     if index_values:
         display = f"{display} (idx: {', '.join(index_values)})"
     if pointer_range:
