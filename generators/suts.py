@@ -376,6 +376,9 @@ _TYPE_NAMES = {
     "uint8_t", "uint16_t", "uint32_t", "int8_t", "int16_t", "int32_t",
     "BOOL", "void", "char", "int", "float", "double", "long",
     "unsigned", "signed", "short", "const", "volatile", "static",
+    # LIN 스택·Processor Expert 타입. 반환값 슬롯 교정이 주 경로지만, 참조 SUDS
+    # 문서 경유분처럼 태그 없이 들어오는 입구를 위해 안전망으로 둔다.
+    "U64", "S64", "l_u8", "l_u16", "l_u32", "l_bool", "byte", "word", "bool", "dword",
 }
 
 # Local temp variable prefixes — these live on stack, not meaningful for unit test I/O
@@ -535,9 +538,9 @@ def collect_unit_functions(
         if not output_vars:
             ret_type = _infer_return_type(prototype)
             if ret_type and ret_type.lower() != "void":
-                ret_var = f"return_{name}"
-                output_vars.append(ret_var)
-                out_set.add(ret_var)
+                # 정본 표기와 같은 이름을 쓴다 — `return_<함수명>` 은 정본 어디에도 없다.
+                output_vars.append(_RETURN_VAR)
+                out_set.add(_RETURN_VAR)
 
         max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
         max_out = _OUTPUT_COL_END - _OUTPUT_COL_START + 1
@@ -683,12 +686,26 @@ _PARAM_DECL_SHAPE = re.compile(r"[A-Za-z_][\w\s\*\[\]\.>-]*")
 _PARAM_DECL_MAX_LEN = 120
 
 
+# 반환값 슬롯. 생산자 5곳이 `[OUT] return <타입>` 형태로 낸다(`function_analyzer`·
+# `backend/helpers/common`·`uds_generator`·`tools/generate_uds_local`·아래 3179행) —
+# **그 계약은 건드리지 않는다**. 문제는 소비처였다: `^return\s+` 를 지우고 마지막 토큰을
+# 취해 **타입 이름을 변수로** 냈다(실측 KJPDS02_PV 기대열 287건: `U8` 144 · `U16` 62 ·
+# `S16` 32 · `l_u8` 19 …). 정본은 반환값을 **`return`** 이라고 적는다(기대 엔트리 5,389
+# 중 `return` 290 · `return[0]` 7).
+_RETURN_SLOT_RE = re.compile(r"^return\b", re.I)
+_RETURN_VAR = "return"
+
+
 def _extract_var_names(raw_list: List[str]) -> List[str]:
     """Extract clean variable names from [IN]/[OUT] tagged param strings."""
     names: List[str] = []
     for raw in raw_list:
         s = str(raw).strip()
         s = re.sub(r"^\[(?:IN|OUT|INOUT)\]\s*", "", s)
+        if _RETURN_SLOT_RE.match(s):
+            if _RETURN_VAR not in names:
+                names.append(_RETURN_VAR)
+            continue
         s = re.sub(r"^return\s+", "", s, flags=re.I)
         # 파라미터 앞에 붙은 설명 주석(`/* [IN] … */ l_u8 msg_length`)을 지운다.
         # 생산자(`_parse_signature_params`)가 2026-08-12부터 안 붙이지만, **캐시된 산출물과
@@ -719,55 +736,78 @@ def _extract_var_names(raw_list: List[str]) -> List[str]:
 #   "이 배열은 앞 k칸만 시험한다"는 없는 사실을 적게 되고, 뒤에 오는 **다른 변수**가
 #   통째로 밀려난다. 변수는 하나도 잃지 않고 입도만 낮추는 쪽이 정직하다.
 #   건너뛴 것은 `array_expansion` 으로 보고한다 — 침묵시키지 않는다.
-_SIZE_TAIL_RE = re.compile(r"\(\s*size\s*:\s*(\d+)\s*\)", re.I)
-# 파라미터 표시엔 선언 차원이 `buf[10]` 로 이미 들어 있다(`_format_param_entry`).
+# 다차원은 `9x8` 로 실린다 — 차원을 곱해 버리면 `[i][j]` 를 복원할 수 없다.
+_SIZE_TAIL_RE = re.compile(r"\(\s*size\s*:\s*(\d+(?:\s*x\s*\d+)*)\s*\)", re.I)
+# 파라미터 표시엔 선언 차원이 `buf[10]`·`t[3][4]` 로 이미 들어 있다(`_format_param_entry`).
 # 이 필드에서 `[N]` 은 **항상 선언 크기**다(원소 표기를 내는 생산자가 없다).
-_PARAM_DIM_RE = re.compile(r"\[(\d+)\]\s*$")
+_PARAM_DIM_RE = re.compile(r"((?:\[\d+\])+)\s*$")
 
 
-def _array_sizes(*raw_groups: List[str]) -> Dict[str, int]:
-    """원시 엔트리에서 `이름 → 원소 개수` 를 모은다."""
-    sizes: Dict[str, int] = {}
+def _dim_product(dims: Tuple[int, ...]) -> int:
+    n = 1
+    for d in dims:
+        n *= int(d)
+    return n
+
+
+def _array_sizes(*raw_groups: List[str]) -> Dict[str, Tuple[int, ...]]:
+    """원시 엔트리에서 `이름 → 차원 튜플` 을 모은다(1차원도 `(60,)` 로 담는다)."""
+    sizes: Dict[str, Tuple[int, ...]] = {}
     for group in raw_groups:
         for raw in group or []:
             s = str(raw or "")
+            dims: Tuple[int, ...] = ()
             m = _SIZE_TAIL_RE.search(s)
-            n = int(m.group(1)) if m else 0
-            if not n:
+            if m:
+                dims = tuple(int(x) for x in re.findall(r"\d+", m.group(1)))
+            if not dims:
                 head = _strip_param_annotations(
                     re.sub(r"^\[(?:IN|OUT|INOUT|INDIRECT2|INDIRECT)\]\s*", "", s.strip())
                 )
                 m2 = _PARAM_DIM_RE.search(head)
-                n = int(m2.group(1)) if m2 else 0
-            if n <= 1:
+                if m2:
+                    dims = tuple(int(x) for x in re.findall(r"\d+", m2.group(1)))
+            if not dims or _dim_product(dims) <= 1:
                 continue
             name = _clean_global_name(s)
-            name = re.sub(r"\[\d+\]$", "", name)
-            if name:
-                sizes[name] = max(sizes.get(name, 0), n)
+            name = re.sub(r"(?:\[\d+\])+$", "", name)
+            if name and _dim_product(dims) > _dim_product(sizes.get(name) or ()):
+                sizes[name] = dims
     return sizes
 
 
+def _elem_suffixes(dims: Tuple[int, ...]) -> List[str]:
+    """`(9, 8)` → `['[0][0]', '[0][1]', …]` — 정본과 같은 row-major 순서."""
+    out = [""]
+    for d in dims:
+        out = [f"{pre}[{i}]" for pre in out for i in range(int(d))]
+    return out
+
+
 def _expand_array_entries(
-    names: List[str], sizes: Dict[str, int], budget: int
+    names: List[str], sizes: Dict[str, Tuple[int, ...]], budget: int
 ) -> Tuple[List[str], Dict[str, Any]]:
     """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**."""
     out: List[str] = []
     expanded: List[str] = []
     skipped: List[Dict[str, Any]] = []
-    for nm in names:
-        n = sizes.get(nm, 0)
+    total = len(names)
+    for pos, nm in enumerate(names):
+        dims = sizes.get(nm) or ()
+        n = _dim_product(dims) if dims else 0
         if n <= 1:
             out.append(nm)
             continue
         remaining = budget - len(out)
         # 남은 이름들도 최소 한 칸씩은 자리가 있어야 한다.
-        reserve = len(names) - names.index(nm) - 1
+        # ⚠ `names.index(nm)` 는 같은 이름이 두 번 들어오면 **첫 위치**를 돌려줘
+        #   예약분을 과다 계산한다 — 위치는 열거로 받는다.
+        reserve = total - pos - 1
         if n > remaining - reserve:
             out.append(nm)
             skipped.append({"name": nm, "elements": n, "remaining": max(0, remaining - reserve)})
             continue
-        out.extend(f"{nm}[{i}]" for i in range(n))
+        out.extend(nm + sfx for sfx in _elem_suffixes(dims))
         expanded.append(nm)
     return out, {
         "expanded": expanded,

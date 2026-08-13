@@ -52,15 +52,15 @@ def _unit(name="Fn", *, inputs=None, outputs=None, gg=None, gs=None, proto="void
 
 class TestArraySizes:
     def test_size_tail_is_read(self):
-        assert _array_sizes(["[IN] u16s_AdcBuffer (size: 9)"]) == {"u16s_AdcBuffer": 9}
+        assert _array_sizes(["[IN] u16s_AdcBuffer (size: 9)"]) == {"u16s_AdcBuffer": (9,)}
 
     def test_param_declaration_dim_is_read(self):
         """파라미터 표시엔 차원이 `buf[8]` 로 이미 들어 있다 — 이 필드에선 늘 선언 크기다."""
-        assert _array_sizes(["[IN] U8 buf[8]"]) == {"buf": 8}
+        assert _array_sizes(["[IN] U8 buf[8]"]) == {"buf": (8,)}
 
     def test_size_survives_other_tails(self):
         got = _array_sizes(["[IN] u8s_Buf (size: 4) (idx: i) (range: 0x0 ~ 0xFF)"])
-        assert got == {"u8s_Buf": 4}
+        assert got == {"u8s_Buf": (4,)}
 
     @pytest.mark.parametrize("raw", ["[IN] g_Plain", "[IN] u8s_Buf (size: 1)", "[IN] u8s_Buf (size: 0)"])
     def test_non_arrays_and_single_element_are_ignored(self, raw):
@@ -68,12 +68,12 @@ class TestArraySizes:
         assert _array_sizes([raw]) == {}
 
     def test_indirect_tags_are_stripped(self):
-        assert _array_sizes(["[INDIRECT2] u8s_Buf (size: 3)"]) == {"u8s_Buf": 3}
+        assert _array_sizes(["[INDIRECT2] u8s_Buf (size: 3)"]) == {"u8s_Buf": (3,)}
 
 
 class TestExpansion:
     def test_elements_are_zero_based_and_contiguous(self):
-        out, info = _expand_array_entries(["a"], {"a": 3}, 96)
+        out, info = _expand_array_entries(["a"], {"a": (3,)}, 96)
         assert out == ["a[0]", "a[1]", "a[2]"]
         assert info["expanded"] == ["a"] and info["skipped"] == []
 
@@ -82,23 +82,23 @@ class TestExpansion:
         assert out == ["x", "y"]
 
     def test_order_is_preserved(self):
-        out, _ = _expand_array_entries(["x", "a", "y"], {"a": 2}, 96)
+        out, _ = _expand_array_entries(["x", "a", "y"], {"a": (2,)}, 96)
         assert out == ["x", "a[0]", "a[1]", "y"]
 
     def test_budget_overflow_keeps_the_base_name(self):
         """⚠ 예산이 모자라면 **자르지 않고 안 펼친다** — 변수를 잃지 않는다."""
-        out, info = _expand_array_entries(["big"], {"big": 60}, 10)
+        out, info = _expand_array_entries(["big"], {"big": (60,)}, 10)
         assert out == ["big"]
         assert info["skipped"] == [{"name": "big", "elements": 60, "remaining": 10}]
 
     def test_later_variables_are_not_crowded_out(self):
         """확장이 뒤 변수를 밀어내면 그 변수가 캡에서 잘려 **통째로 사라진다**."""
-        out, info = _expand_array_entries(["big", "keep_me"], {"big": 8}, 8)
+        out, info = _expand_array_entries(["big", "keep_me"], {"big": (8,)}, 8)
         assert "keep_me" in out, f"뒤 변수가 밀려났다: {out}"
         assert info["skipped"] and info["skipped"][0]["name"] == "big"
 
     def test_expansion_uses_the_budget_when_it_fits_exactly(self):
-        out, info = _expand_array_entries(["a"], {"a": 4}, 4)
+        out, info = _expand_array_entries(["a"], {"a": (4,)}, 4)
         assert out == ["a[0]", "a[1]", "a[2]", "a[3]"] and not info["skipped"]
 
 
@@ -153,6 +153,8 @@ static S_T s_Buf[4];
 static U8 u8s_Unk[UNKNOWN_MAX];
 static U8 u8s_Sized[MAX_LEN];
 static U8 u8s_Plain;
+static U16 u16s_Grid[3][MAX_ROW];
+static U8 u8s_Cube[2][2][2];
 void g_ArrayUser( void )
 {
     U8 u8t_i;
@@ -163,8 +165,16 @@ void g_ArrayUser( void )
     u8s_Plain = u8t_i;
     return;
 }
+void g_MultiDimUser( U8 au8_Pair[2][3] )
+{
+    U16 u16t_v;
+    u16t_v = u16s_Grid[1][2];
+    u8t_i = u8s_Cube[0][0][0];
+    au8_Pair[0][0] = ( U8 )u16t_v;
+    return;
+}
 """
-_SRC_H = "#define MAX_LEN 6\n"
+_SRC_H = "#define MAX_LEN 6\n#define MAX_ROW 4\n"
 
 
 @pytest.fixture(scope="module")
@@ -234,3 +244,277 @@ class TestProducerEmitsSize:
     def test_non_array_global_has_no_size(self, array_project):
         entry = next((g for g in _globals_of(array_project) if "u8s_Plain" in g), "")
         assert entry and "(size:" not in entry, entry
+
+
+# ---------------------------------------------------------------------------
+# 다차원 배열 — 크기가 없는 게 아니라 **변수 자체가 사라졌다**
+#
+# 정본 실측(KJPDS02_PV): 입력 엔트리의 첨자 깊이 분포 {0: 2748, 1: 3138, 2: 128}.
+# 깊이 2 인 128 칸이 통째로 빠져 있었고(입력 71 · 기대 71 원소), 그 원인은 소비처가
+# 아니라 **선언자 정규식**이었다 — `(?:\[[^\]]*\])?` 가 첨자를 하나만 허용해
+# `static U16 u16s_MovgAvgFltBuff[R][C];` 가 파서 산출 어디에도 없었다.
+# ---------------------------------------------------------------------------
+class TestMultiDimDeclarationSurvives:
+    """⚠ 가장 날카로운 앵커: 고치기 전엔 이 선언이 **빈 리스트**를 냈다."""
+
+    @pytest.mark.parametrize(
+        "stmt, name, dim",
+        [
+            ("static U16 u16s_Grid[3][4];", "u16s_Grid", "[3][4]"),
+            ("S16 s16g_Tbl[5][7][7];", "s16g_Tbl", "[5][7][7]"),
+            ("static U16 b[R][C];", "b", "[R][C]"),
+            ("static U8 u8s_Flat[60];", "u8s_Flat", "[60]"),
+            ("U8 u8s_Open[];", "u8s_Open", "[]"),
+            ("U8 u8s_Plain;", "u8s_Plain", ""),
+        ],
+    )
+    def test_declarator_keeps_name_and_every_dimension(self, stmt, name, dim):
+        from report_gen.source_parser import _parse_c_declaration_statement
+
+        got = _parse_c_declaration_statement(stmt)
+        assert got, f"선언이 통째로 사라졌다: {stmt}"
+        assert got[0]["name"] == name and got[0]["array"] == dim, got
+
+
+class TestMultiDimParams:
+    """파라미터도 같은 결함이었다 — 이름이 **타입 쪽으로 넘어가** 식별 불가였다."""
+
+    @pytest.mark.parametrize(
+        "param, name",
+        [
+            ("S16 t[3][4]", "t"),
+            ("const U8 data[]", "data"),          # 빈 첨자도 이름을 삼켰다
+            ("U8 buf[8]", "buf"),                 # 회귀 가드(1차원)
+            ("const U8 *p", "p"),
+        ],
+    )
+    def test_name_is_recovered(self, param, name):
+        from report_gen.function_analyzer import _split_param
+
+        assert _split_param(param)[1] == name, _split_param(param)
+
+    def test_display_keeps_every_dimension(self):
+        """`t[3] [4]` 처럼 갈라지면 그건 이름이 아니라 문자열 쓰레기다."""
+        from report_gen.function_analyzer import _format_param_entry, _split_param
+
+        t, n, a = _split_param("S16 t[3][4]")
+        assert _format_param_entry(n, t, a, [], {}, False) == "S16 t[3][4]"
+
+    def test_macro_dimensions_are_folded_one_by_one(self):
+        from report_gen.function_analyzer import _format_param_entry, _split_param
+
+        mm = {"ROWS": "5", "COLS": "7"}
+        t, n, a = _split_param("S16 t[ROWS][COLS]")
+        assert _format_param_entry(n, t, a, [], mm, False) == "S16 t[5][7]"
+
+
+class TestMultiDimSizeTail:
+    def test_dimensions_are_carried_separately_not_multiplied(self):
+        """`9x8` 로 실어야 소비처가 `[i][j]` 를 만든다. 72 로 접으면 복원 불가다."""
+        from report_gen.function_analyzer import _format_param_entry
+
+        mm = {"R": "9", "C": "8"}
+        assert _format_param_entry("g", "", "", [], mm, False, size_hint="[R][C]") == "g (size: 9x8)"
+
+    def test_three_dimensions(self):
+        from report_gen.function_analyzer import _format_param_entry
+
+        assert _format_param_entry("g", "", "", [], {}, False, size_hint="[5][7][7]") == "g (size: 5x7x7)"
+
+    def test_one_unresolved_dimension_suppresses_the_whole_size(self):
+        """한 축이라도 모르면 원소 개수를 모르는 것이다 — 반쪽 크기는 거짓이다."""
+        from report_gen.function_analyzer import _format_param_entry
+
+        got = _format_param_entry("g", "", "", [], {"R": "9"}, False, size_hint="[R][UNKNOWN]")
+        assert "(size:" not in got, got
+
+    @pytest.mark.parametrize(
+        "raw, want",
+        [
+            ("[IN] g (size: 9x8)", {"g": (9, 8)}),
+            ("[IN] g (size: 5x7x7)", {"g": (5, 7, 7)}),
+            ("[IN] U8 t[3][4]", {"t": (3, 4)}),
+            ("[IN] g (size: 1x1)", {}),           # 원소 1개는 펼치지 않는다
+        ],
+    )
+    def test_sizes_are_parsed_as_dimension_tuples(self, raw, want):
+        assert _array_sizes([raw]) == want
+
+
+class TestMultiDimExpansion:
+    def test_row_major_order_matches_the_reference(self):
+        out, info = _expand_array_entries(["a"], {"a": (2, 3)}, 96)
+        assert out == ["a[0][0]", "a[0][1]", "a[0][2]", "a[1][0]", "a[1][1]", "a[1][2]"]
+        assert info["expanded"] == ["a"]
+
+    def test_budget_counts_the_product_not_the_first_dimension(self):
+        """`[5][7][7]` 은 5칸이 아니라 **245칸**이다 — 5로 세면 캡을 넘겨 뒤가 사라진다."""
+        out, info = _expand_array_entries(["tbl", "keep_me"], {"tbl": (5, 7, 7)}, 96)
+        assert out == ["tbl", "keep_me"]
+        assert info["skipped"] and info["skipped"][0]["elements"] == 245
+
+    def test_reserve_uses_the_actual_position_not_the_first_match(self):
+        """같은 **배열 이름**이 두 번 오면 `list.index` 가 첫 위치를 돌려줘 예약분을 과다 계산한다.
+
+        ⚠ 중복이 배열 **자신**이어야 결함이 드러난다 — 다른 이름이 중복이면
+          `list.index(nm)` 와 실제 위치가 같아 가드가 헛돈다(뮤테이션 생존).
+          자리가 남는데도 안 펼치는 **조용한 과소 산출**이다.
+        """
+        out, info = _expand_array_entries(["a", "b", "a"], {"a": (3,)}, 8)
+        assert out == ["a[0]", "a[1]", "a[2]", "b", "a[0]", "a[1]", "a[2]"], out
+        assert not info["skipped"], info["skipped"]
+
+    def test_end_to_end_two_dimensions(self):
+        u = collect_unit_functions(_unit(gg=["[IN] u16s_Grid (size: 3x2)"]), sds_map={})[0]
+        assert u["input_vars"] == [f"u16s_Grid[{i}][{j}]" for i in range(3) for j in range(2)]
+
+
+# ---------------------------------------------------------------------------
+# MISRA 캐스트 상수 — 다차원 fix 를 **무효화하던** 진짜 차단 지점
+#
+# KJPDS02 실측: 배열 차원에 쓰인 매크로 13종이 **전부** 캐스트+접미사 형태였다.
+#   ( ( U8 )( 9U ) ) · ( U8 )32U · (5U) · 2U · (REQ_DOWNLOAD_BLOCK_SIZE + 10u)
+# `_safe_eval_int` 의 문자 화이트리스트가 `U`·`L` 을 불허해 전부 안 접혔다 →
+# 배열 크기가 없는 것과 같아 확장이 조용히 건너뛰어졌다.
+# ---------------------------------------------------------------------------
+class TestMisraConstantFolding:
+    @pytest.mark.parametrize(
+        "value, want",
+        [
+            ("( ( U8 )( 9U ) )", 9),      # u8s_FIT_MAX_BUFFER
+            ("( ( U8 )( 16U ) )", 16),    # MAXHISNO
+            ("( U8 )32U", 32),            # SHA256_DIGEST_SIZE
+            ("(5U)", 5),                  # TEMP_LUT_SIZE
+            ("2U", 2),                    # PWM_CHANNEL_COUNT
+            ("( ( U8 )( 7 ) )", 7),       # SCAN_COUNT (접미사 없음)
+            ("0x1FU", 31),
+            ("10u + 6", 16),
+        ],
+    )
+    def test_cast_and_suffix_constants_fold(self, value, want):
+        from report_gen.function_analyzer import _safe_eval_int
+
+        assert _safe_eval_int(value) == want
+
+    @pytest.mark.parametrize("value", ["(UNKNOWN) + 3", "(A)", "UNKNOWN", "(SIZE) * 2", "SZ"])
+    def test_unknown_symbols_are_never_invented(self, value):
+        """⚠ `(UNKNOWN) + 3` 의 괄호까지 벗기면 `+ 3` 이 **3** 으로 평가된다.
+
+        모르는 크기를 숫자로 바꾸면 문서에 없는 사실이 박힌다 — None 이어야 한다.
+        """
+        from report_gen.function_analyzer import _safe_eval_int
+
+        assert _safe_eval_int(value) is None
+
+    def test_nested_macro_values_are_resolved(self):
+        """`#define A (B + 10u)` — 값 안에 또 매크로가 있으면 한 번만 돌아선 못 접는다."""
+        from report_gen.function_analyzer import _format_param_entry
+
+        mm = {"LINTP_DATA_LEN_MAX": "(REQ_BLK + 10u)", "REQ_BLK": "( ( U16 )( 512U ) )"}
+        got = _format_param_entry("g", "", "", [], mm, False, size_hint="[LINTP_DATA_LEN_MAX]")
+        assert got == "g (size: 522)", got
+
+    def test_self_referential_macro_terminates(self):
+        """`#define A A` 로 무한 치환에 빠지면 안 된다(상한이 있어야 한다)."""
+        from report_gen.function_analyzer import _subst_macros
+
+        assert _subst_macros("A", {"A": "A"}) == "A"
+
+    def test_only_identifiers_present_in_the_expression_are_substituted(self):
+        """맵 전체를 도는 대신 식에 **나타난** 이름만 본다(KJPDS02 는 매크로 5,622개)."""
+        from report_gen.function_analyzer import _subst_macros
+
+        assert _subst_macros("ROWS", {"ROWS": "3", "UNRELATED": "9"}) == "3"
+
+    def test_real_two_dim_macro_pair_folds(self):
+        """정본이 72원소로 적는 `u16s_MovgAvgFltBuff[9][8]` 의 실제 매크로 쌍."""
+        from report_gen.function_analyzer import _format_param_entry
+
+        mm = {"u8s_FIT_MAX_BUFFER": "( ( U8 )( 9U ) )", "u8g_LIB_FLT_MAX_CNT": "( ( U8 )( 8U ) )"}
+        got = _format_param_entry(
+            "u16s_MovgAvgFltBuff", "", "", [], mm, False,
+            size_hint="[u8s_FIT_MAX_BUFFER][u8g_LIB_FLT_MAX_CNT]",
+        )
+        assert got == "u16s_MovgAvgFltBuff (size: 9x8)", got
+
+
+# ---------------------------------------------------------------------------
+# 반환값 슬롯 — 우리는 그 자리에 **타입 이름**을 냈다
+#
+# 정본(KJPDS02_PV) 기대열 5,389 엔트리 중 `return` 290 · `return[0]` 7.
+# 우리는 287칸에 `U8`(144) `U16`(62) `S16`(32) `l_u8`(19) … 을 냈다 — 변수가 아니다.
+# 생산자 5곳의 `[OUT] return <타입>` 계약은 다른 소비처(impact_doc_draft·sits·backend
+# helpers)가 타입을 읽으므로 **그대로 두고**, SUTS 소비처에서만 이름을 교정한다.
+# ---------------------------------------------------------------------------
+class TestReturnSlot:
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "[OUT] return U8",
+            "[OUT] return U16 (range: 0 ~ 65535)",
+            "[OUT] return l_u8",
+            "[OUT] return const U8 *",
+            "return S16",
+        ],
+    )
+    def test_return_slot_becomes_the_word_return(self, raw):
+        from generators.suts import _extract_var_names
+
+        assert _extract_var_names([raw]) == ["return"], _extract_var_names([raw])
+
+    def test_type_name_is_never_emitted_as_a_variable(self):
+        from generators.suts import _extract_var_names
+
+        got = _extract_var_names(["[OUT] return U8", "[OUT] return U16"])
+        assert got == ["return"], got
+
+    def test_ordinary_params_are_untouched(self):
+        """회귀 가드 — `return` 으로 시작하지 않는 것은 예전 그대로 이름을 뽑는다."""
+        from generators.suts import _extract_var_names
+
+        assert _extract_var_names(["[IN] U8 u8g_Speed", "[OUT] S16 *ps16_Out"]) == [
+            "u8g_Speed", "ps16_Out",
+        ]
+
+    @pytest.mark.parametrize("raw", ["[OUT] returnValue", "[OUT] return_code", "[IN] returnCnt"])
+    def test_a_name_starting_with_return_is_not_swallowed(self, raw):
+        """⚠ `^return\\b` 의 **단어 경계**가 본체다.
+
+        경계가 없으면 `returnValue` 가 통째로 `return` 이 된다. 타입 토큰이 앞에
+        붙은 형태(`U8 returnValue`)는 애초에 `^return` 에 안 걸려 가드가 헛돈다 —
+        **맨 이름**으로 시험해야 결함이 드러난다(뮤테이션 생존).
+        """
+        from generators.suts import _extract_var_names
+
+        want = raw.split("] ", 1)[1]
+        assert _extract_var_names([raw]) == [want], _extract_var_names([raw])
+
+    def test_end_to_end_non_void_unit_reports_return(self):
+        u = collect_unit_functions(
+            _unit(outputs=["[OUT] return U16"], proto="U16 Fn(void)"), sds_map={}
+        )[0]
+        assert u["output_vars"] == ["return"], u["output_vars"]
+
+    def test_fallback_uses_the_same_name(self):
+        """출력이 하나도 없을 때의 폴백도 `return_<함수명>` 이 아니라 `return` 이다."""
+        u = collect_unit_functions(_unit(proto="U16 Fn(void)"), sds_map={})[0]
+        assert u["output_vars"] == ["return"], u["output_vars"]
+
+    def test_void_unit_gets_no_return(self):
+        u = collect_unit_functions(_unit(proto="void Fn(void)"), sds_map={})[0]
+        assert "return" not in u["output_vars"]
+
+
+class TestMultiDimProducer:
+    def test_multi_dim_global_is_not_lost(self, array_project):
+        """⚠ 회귀 앵커 — 고치기 전엔 이 전역이 산출물 **어디에도** 없었다."""
+        entries = _globals_of(array_project, "g_MultiDimUser")
+        assert any("u16s_Grid" in g for g in entries), entries
+
+    def test_multi_dim_global_carries_both_dimensions(self, array_project):
+        entry = next(g for g in _globals_of(array_project, "g_MultiDimUser") if "u16s_Grid" in g)
+        assert "(size: 3x4)" in entry, entry
+
+    def test_three_dim_global_carries_all_three(self, array_project):
+        entry = next(g for g in _globals_of(array_project, "g_MultiDimUser") if "u8s_Cube" in g)
+        assert "(size: 2x2x2)" in entry, entry

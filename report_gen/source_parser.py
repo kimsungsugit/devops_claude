@@ -171,7 +171,12 @@ def _extract_decl_name_and_type(decl: str, base_type: str) -> Tuple[str, str]:
     if m_func_ptr:
         name = str(m_func_ptr.group(1) or "").strip()
         return name, f"{base_type} *".strip()
-    m_name = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$", text)
+    # ⚠ 첨자는 **여러 개**일 수 있다(`[5][7][7]`). 하나만 허용하면 다차원 선언에서
+    #   정규식이 통째로 실패하고 `_parse_c_declaration_statement` 가 **빈 리스트**를
+    #   낸다 — 크기가 없는 게 아니라 **변수 자체가 사라진다**. 실측(KJPDS02):
+    #   `static U16 u16s_MovgAvgFltBuff[u8s_FIT_MAX_BUFFER][u8g_LIB_FLT_MAX_CNT];`
+    #   가 파서 산출 900함수 어디에도 없었다(정본은 72원소로 펼쳐 적는다).
+    m_name = re.search(r"([A-Za-z_]\w*)(?:\s*\[[^\]]*\])*\s*$", text)
     if not m_name:
         return "", ""
     name = str(m_name.group(1) or "").strip()

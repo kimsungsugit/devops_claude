@@ -128,11 +128,36 @@ def _strip_comments_and_strings(text: str) -> str:
     return text
 
 
+# 이 프로젝트(MISRA-C)는 상수를 **캐스트 + 정수 접미사**로 감싼다:
+#   #define u8s_FIT_MAX_BUFFER  ( ( U8 )( 9U ) )      #define TEMP_LUT_SIZE (5U)
+#   #define SHA256_DIGEST_SIZE  ( U8 )32U             #define PWM_CHANNEL_COUNT 2U
+# 아래 화이트리스트는 `U`·`L` 을 불허하므로 이런 값은 통째로 안 접히고 **배열 크기가
+# 조용히 사라진다**. 실측(KJPDS02): 배열 차원에 쓰인 매크로 13종이 **전부** 이 형태다.
+_INT_SUFFIX_RE = re.compile(r"\b(0[xX][0-9a-fA-F]+|\d+)[uUlL]+\b")
+# ⚠ 캐스트는 **뒤에 피연산자가 붙을 때만** 캐스트다. `(UNKNOWN) + 3` 의 괄호까지 지우면
+#   남은 `+ 3` 이 3 으로 평가돼 **모르는 값을 3 이라고 지어낸다**. 그래서 lookahead 로
+#   `(` 나 숫자가 바로 뒤따를 때만 벗긴다.
+_C_CAST_RE = re.compile(
+    r"\(\s*(?:const|volatile|signed|unsigned)?\s*[A-Za-z_]\w*\s*\**\s*\)\s*(?=[(\d])"
+)
+
+
+def _strip_c_literal_noise(expr: str) -> str:
+    """`( ( U8 )( 9U ) )` → `(  ( 9 ) )`. 캐스트는 중첩될 수 있어 반복한다(상한 4)."""
+    out = _INT_SUFFIX_RE.sub(r"\1", str(expr or ""))
+    for _ in range(4):
+        nxt = _C_CAST_RE.sub(" ", out)
+        if nxt == out:
+            break
+        out = nxt
+    return out
+
+
 def _safe_eval_int(expr: str) -> Optional[int]:
     if not expr:
         return None
     try:
-        expr = expr.strip()
+        expr = _strip_c_literal_noise(expr.strip())
         if not re.match(r"^[0-9xXa-fA-F\+\-\*/\(\)\s]+$", expr):
             return None
         return int(eval(expr, {"__builtins__": {}}, {}))
@@ -140,18 +165,49 @@ def _safe_eval_int(expr: str) -> Optional[int]:
         return None
 
 
+def _subst_macros(raw: str, macro_map: Dict[str, str], depth: int = 4) -> str:
+    """식에 **실제로 나타난** 식별자만 치환하고, 값이 또 매크로면 반복한다.
+
+    ⚠ 예전엔 매크로 맵 **전체**를 돌며 매번 `re.sub` 했다(KJPDS02 는 5,622개) —
+      느린 데다 **한 번만** 돌아서 `#define A (B + 10u)` 처럼 값 안에 또 매크로가
+      든 경우를 못 접었다.
+    """
+    for _ in range(depth):
+        # ⚠ `set` 순회 순서는 실행마다 달라진다. 어떤 매크로 값이 같은 라운드의 다른
+        #   매크로 이름을 품고 있으면 치환 순서가 결과를 바꿔 **산출물이 실행마다
+        #   달라진다**(캐시 시그니처가 무의미해진다). 정렬해 고정한다.
+        hits = sorted(n for n in set(re.findall(r"\b[A-Za-z_]\w*\b", raw))
+                      if macro_map.get(n))
+        if not hits:
+            break
+        for n in hits:
+            raw = re.sub(rf"\b{re.escape(n)}\b", str(macro_map[n]), raw)
+    return raw
+
+
 def _normalize_bracket_expr(expr: str, macro_map: Dict[str, str]) -> Tuple[str, Optional[int]]:
     raw = (expr or "").strip()
     if not raw:
         return "", None
-    for name, val in macro_map.items():
-        if not name or not val:
-            continue
-        raw = re.sub(rf"\b{re.escape(name)}\b", val, raw)
+    raw = _subst_macros(raw, macro_map)
     val = _safe_eval_int(raw)
     if val is not None:
         return str(val), val
     return raw, None
+
+
+# 선언 첨자는 여러 개일 수 있다(`[5][7][7]`). 통짜로 접으면 `[3][4]` 가 `3][4` 가 돼
+# `_safe_eval_int` 도 실패하고 `isdigit()` 도 거짓이라 **조용히 크기가 사라진다**.
+_DIM_RE = re.compile(r"\[([^\]]*)\]")
+
+
+def _normalize_dims(dims: str, macro_map: Dict[str, str]) -> List[str]:
+    """`[A][B]` → `['9', '8']`. 각 차원을 **따로** 접는다. 브래킷이 없으면 통째로 한 차원."""
+    raw = str(dims or "").strip()
+    if not raw:
+        return []
+    found = _DIM_RE.findall(raw) or [raw]
+    return [_normalize_bracket_expr(d, macro_map)[0] for d in found]
 
 
 def _split_param(param: str) -> Tuple[str, str, str]:
@@ -159,7 +215,12 @@ def _split_param(param: str) -> Tuple[str, str, str]:
     if not text:
         return "", "", ""
     array_part = ""
-    m = re.search(r"(\[[^\]]+\])\s*$", text)
+    # ⚠ 첨자는 **여러 개**(`[3][4]`)일 수도, **비어 있을**(`U8 data[]`) 수도 있다.
+    #   하나·비지 않음으로 가정하면 남은 텍스트가 `]` 로 끝나 아래 이름 정규식이
+    #   실패하고 **이름이 통째로 타입 쪽으로 넘어간다**(`S16 t[3][4]` → 이름 ''·
+    #   타입 'S16 t[3]' → 표기 `S16 t[3] [4]`). 이름이 없으면 소비처가 그 변수를
+    #   식별할 수 없다.
+    m = re.search(r"((?:\[[^\]]*\])+)\s*$", text)
     if m:
         array_part = m.group(1)
         text = text[: m.start()].strip()
@@ -748,18 +809,16 @@ def _format_param_entry(
     """
     display = name
     if array_part:
-        expr = array_part.strip()[1:-1]
-        norm, _ = _normalize_bracket_expr(expr, macro_map)
-        display = f"{display}[{norm}]" if norm else display
+        dims = _normalize_dims(array_part, macro_map)
+        if dims and all(dims):
+            display = display + "".join(f"[{d}]" for d in dims)
     if size_hint:
-        expr = size_hint.strip()
-        if expr.startswith("[") and expr.endswith("]"):
-            expr = expr[1:-1]
-        norm, _ = _normalize_bracket_expr(expr, macro_map)
+        dims = _normalize_dims(size_hint, macro_map)
         # 숫자로 접힌 것만 싣는다. `[MAX_LEN]` 처럼 못 접은 값을 실으면 소비처가
         # 원소 개수를 알 수 없어 **확장을 조용히 건너뛴다** — 그건 크기가 없는 것과 같다.
-        if norm.isdigit():
-            display = f"{display} (size: {norm})"
+        # 다차원은 `9x8` 로 싣는다(차원을 곱해 버리면 소비처가 `[i][j]` 를 못 만든다).
+        if dims and all(d.isdigit() for d in dims):
+            display = f"{display} (size: {'x'.join(dims)})"
     if index_values:
         display = f"{display} (idx: {', '.join(index_values)})"
     if pointer_range:

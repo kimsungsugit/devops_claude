@@ -669,7 +669,15 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 
 # 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
 # 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
-# (v8: `globals_info_map` 에 **배열 차원**(`array`: `[60]`)이 붙었다. 정본 SUTS 입력
+# (v9: **다차원 배열이 산출물에서 통째로 빠져 있었다** — 크기가 없는 게 아니라 변수 자체가
+#      없었다. `_extract_decl_name_and_type` 의 이름 정규식이 첨자를 `(?:\[[^\]]*\])?` 로
+#      **하나만** 허용해, `static U16 u16s_MovgAvgFltBuff[R][C];` 에서 정규식이 통째로
+#      실패하고 `_parse_c_declaration_statement` 가 빈 리스트를 냈다(파서 산출 1,157함수
+#      어디에도 없음). 파라미터도 같은 결함이라 `S16 t[3][4]` · `U8 data[]` 의 이름이
+#      타입 쪽으로 넘어가 식별 불가였다. 정본 실측: 입력 엔트리 첨자 깊이 {0:2748, 1:3138,
+#      **2:128**} — 깊이 2 인 128칸(입력 71 · 기대 71 원소)이 여기서 사라졌다. 구 캐시엔
+#      그 전역이 **없으므로** 무효화하지 않으면 fix 가 프로덕션에 도달하지 못한다.
+#  v8: `globals_info_map` 에 **배열 차원**(`array`: `[60]`)이 붙었다. 정본 SUTS 입력
 #      엔트리의 **50.3%(3,023/6,014)** 가 `name[N]` 원소 표기이고, 134개 base 중 120개가
 #      모든 unit 에서 같은 개수 = 관찰 첨자가 아니라 **선언 크기**다. 그 크기를 파서가
 #      통째로 버리고 있었다(`_extract_decl_name_and_type` 정규식이 `[...]` 를 매치만
@@ -699,7 +707,7 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v8"
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v9"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
