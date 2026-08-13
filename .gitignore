@@ -64,6 +64,10 @@ docs/*
 !docs/admin-operations.md
 project_docs/
 *.log
+# ⚠ 회전 로그(`backend.log.1`)는 `*.log` 에 안 걸린다 — 실측 21MB 짜리가 untracked 로
+#   남아 있었고, 이 저장소의 `chore(auto)` 잡은 오후 내내 돌며 쓸어 담는다.
+*.log.*
+logs/
 
 # === 대용량 / 바이너리 ===
 *.zip
