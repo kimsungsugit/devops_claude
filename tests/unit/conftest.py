@@ -44,6 +44,40 @@ def _default_admin_users(tmp_path_factory, monkeypatch, request):
     au._cache["admins"] = set()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _session_local_resolver():
+    """⚠ 함수 스코프 격리는 **module/session 스코프 fixture 를 못 덮는다.**
+
+    pytest 는 높은 스코프 fixture 를 먼저 세운다. 그래서 아래 `_default_local_resolver`
+    (함수 스코프)가 돌기 **전에** module 스코프 fixture 가 실행되고, 거기서 처음
+    파일을 만지면 `get_resolver()` 가 `config/file_mode.json`(영속)을 읽어
+    **머신 상태 그대로** lazy-init 된다. 실측(2026-08-14): module 스코프 fixture 가 본
+    `file_resolver._resolver` 는 `None` — 즉 격리가 한 번도 안 걸려 있었다.
+
+    이 머신은 `mode=cloudium` 이라, 그 fixture 들이 부르는
+    `generate_uds_source_sections` 의 경로 판정이 **Cloudium worker(127.0.0.1:8765)로**
+    나간다. 워커는 단일 프로세스라 `-n auto`(18 워커) 고부하에서 일부 probe 가 timeout
+    되고, `PermissionError: Cloudium worker 미응답` 이 fixture 에서 터진다 → 그 클래스
+    전체가 ERROR. 같은 트리가 **어떤 때는 통과하고 어떤 때는 막히는** 이유였다
+    (`test_phantom_inputs` 1건 / `test_macro_register_direction` 4건, pre-commit 은
+    `-x` 라 그대로 커밋 차단). 워커가 아예 없는 머신에서는 100% 실패한다.
+
+    ⚠ **원래 값을 복원한다.** 전역 싱글톤을 teardown 에서 특정 값으로 고정하면 그게
+      다음 누설이 된다(커밋 584833e 의 전례 — 그 반대 방향으로 16건이 깨졌다).
+    """
+    try:
+        from backend.services import file_resolver as fr
+    except ImportError:
+        yield
+        return
+    original = fr._resolver
+    fr._resolver = fr.LocalFileResolver()
+    try:
+        yield
+    finally:
+        fr._resolver = original
+
+
 @pytest.fixture(autouse=True)
 def _default_local_resolver(monkeypatch):
     """파일 resolver 를 local 로 고정 — 유닛 회귀가 **머신 설정에 의존하지 않도록**.
