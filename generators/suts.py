@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators.uds_unit_io import resolve_unit_io
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import _extract_sds_partition_map
 from report_gen.source_parser import is_const_type
@@ -452,6 +453,7 @@ def collect_unit_functions(
     function_details: Dict[str, Dict[str, Any]],
     globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
+    uds_io_map: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Collect and structure unit functions from report_generator output.
 
@@ -469,6 +471,10 @@ def collect_unit_functions(
         sds_map = _load_default_sds_map()
     units: List[Dict[str, Any]] = []
     _const_skipped = 0
+    # SwUDS 대체가 **몇 unit 에 걸렸나**. 0 이면 UDS 를 못 읽었다는 뜻이고 산출물이
+    # 달라지므로 아래 요약 로그에 싣는다(조용한 분기 금지 — 이 저장소가 여러 번 데었다).
+    _uds_in_units = 0
+    _uds_out_units = 0
 
     for fid, info in function_details.items():
         if not isinstance(info, dict):
@@ -609,6 +615,43 @@ def collect_unit_functions(
                 output_vars.append(_RETURN_VAR)
                 out_set.add(_RETURN_VAR)
 
+        # ── SwUDS 가 적은 이름으로 **대체** ──────────────────────────────────
+        # SUTS 는 SwUDS 를 근거로 만드는 문서다. 정본의 Inpt/ExpR 열은 소스 파싱이
+        # 아니라 SwUDS 의 `[ Input/Output Parameters ]` 표에서 온다.
+        # 실측(2026-08-14, KJPDS02_PV · 첨자 지운 이름 집합 기준):
+        #                       입력 재현율·과다      기대 재현율·과다
+        #   소스 파싱(옛 판)      84.3% · 617          84.0% · 550
+        #   **SwUDS**            88.0% · 110          83.6% · 348
+        #   SwUDS + 우리 `return` 표기                 **94.1%** · 358
+        # 더 많이 맞히면서 과다는 1/6 이다.
+        # ⚠ 대체는 **원소 확장 전에** 한다. 뒤에 하면 UDS 이름이 배열이어도 안 펼쳐져
+        #   정본 입도(`buf[0]`…)와 어긋난다.
+        # ⚠ UDS 가 그 축에 **아무것도 안 적었으면 우리 것을 유지**한다. 빈 목록으로
+        #   덮으면 "UDS 에 근거가 없다"와 "UDS 가 0개라고 했다"가 같아진다.
+        # ⚠ 정본이 쓰는 VectorCAST 표기(`return` · `f() p[0]() m`)는 UDS 에 없다 —
+        #   기대 축에서 그것만 남긴다(이게 기대 재현율 83.6→94.1%p 의 정체다).
+        _uds_rec = resolve_unit_io(uds_io_map, name)
+        if _uds_rec is not None:
+            # ⚠ UDS 는 반환값을 `Return` 으로, 정본 SUTS 는 `return` 으로 적는다.
+            #   대소문자만 다른 같은 것이라 그대로 두면 **한 행에 반환값이 두 번**
+            #   실리고 그중 하나는 정본에 없는 이름이 된다(실측 284칸 = 이 축 신규
+            #   과다의 85%). 표기는 `_RETURN_VAR` **한 곳**으로 모은다.
+            def _norm_uds(x: str) -> str:
+                y = _vc_pointer_notation(x)
+                return _RETURN_VAR if y.strip().lower() == _RETURN_VAR else y
+
+            _u_in = [_norm_uds(x) for x in (_uds_rec.get("inputs") or []) if x]
+            _u_out = [_norm_uds(x) for x in (_uds_rec.get("outputs") or []) if x]
+            if _u_in:
+                input_vars = list(dict.fromkeys(_u_in))
+                inp_set = set(input_vars)
+                _uds_in_units += 1
+            if _u_out:
+                _keep_vc = [v for v in output_vars if v == _RETURN_VAR or "()" in v]
+                output_vars = list(dict.fromkeys(_u_out + _keep_vc))
+                out_set = set(output_vars)
+                _uds_out_units += 1
+
         max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
         max_out = _OUTPUT_COL_END - _OUTPUT_COL_START + 1
 
@@ -666,6 +709,12 @@ def collect_unit_functions(
     _const_note = (
         f" | const 전역 억제 {_const_skipped}칸" if gim
         else " | ⚠globals_info_map 없음 → const 억제 안 함"
+    )
+    # SwUDS 대체가 안 걸렸으면 **소스 파싱 결과가 그대로 나간다** — 산출물이 달라지므로
+    # 조용히 두지 않는다(정본 대비 과다가 6배 나던 옛 판이 그 상태다).
+    _const_note += (
+        f" | SwUDS 이름 대체 입력 {_uds_in_units}/{len(units)} · 기대 {_uds_out_units}"
+        if uds_io_map else " | ⚠SwUDS 입출력 맵 없음 → 소스 파싱 이름 사용"
     )
     (_logger.warning if _skip else _logger.info)(
         "Collected %d unit functions | 배열 확장 %d건%s%s",
@@ -2837,7 +2886,20 @@ def generate_suts(
     _sds_map = _resolve_sds_map(sds_docx_path)
 
     _progress(30, "유닛 함수 수집 중")
-    units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map)
+    # ── SwUDS 입출력 표 — 시험 변수 이름의 **정본 출처** ──────────────────────
+    # ⚠ 여기서 읽는다. 아래 UDS 보강 블록(설명·설계 ID)은 `collect_unit_functions`
+    #   **뒤**라 늦다 — 이름 대체는 배열 원소 확장보다 앞서야 하고, 확장은 collect
+    #   안에서 일어난다. 문서를 두 번 materialize 하는 비용(cloudium 경유)은 감수한다.
+    _uds_io: Optional[Dict[str, Any]] = None
+    with _resolved_doc_input(uds_path, "UDS(입출력)") as _uds_io_local:
+        if _uds_io_local:
+            try:
+                from generators.uds_unit_io import load_uds_unit_io
+                _uds_io = load_uds_unit_io(_uds_io_local)
+            except Exception as _e:  # noqa: BLE001 — 실패하면 소스 파싱으로 간다
+                _logger.warning("SwUDS 입출력 읽기 실패 — 소스 파싱 이름을 쓴다: %s", _e)
+    units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map,
+                                   uds_io_map=_uds_io)
 
     if not units:
         _logger.warning("No unit functions found!")
