@@ -683,6 +683,34 @@ def _canonical_swcom_id(text: str) -> str:
     return f"SwCom_{int(m.group(1)):02d}" if m else ""
 
 
+# SDS 파티션 키를 **부분일치**로 찾을 때 쓰는 정규화 — 이 맵을 읽는 생성기
+# (`generators/sts.py` 요구 매핑, `generators/suts.py` ASIL 폴백)의 **단일 출처**다.
+# 예전엔 두 곳이 각자 `[^a-z0-9]` 로 복제하고 있었고, 그래서 한쪽만 고쳐질 수 있었다.
+_SDS_KEY_STRIP = re.compile(r"[\W_]", re.UNICODE)
+
+# 이름이 아니라 "값이 없다"는 표시. `n/a` 는 정규화하면 `na` 두 글자라
+# `s_SignalHandler`(`sig**na**lhandler`) 같은 아무 이름에나 걸리는데, 실측(KJPDS02_PV)
+# 에서 그 한 칸에 요구가 12개 달려 있었다.
+_SDS_PLACEHOLDER_KEYS = frozenset({"na", "tbd", "none", "null", "n", "x", "etc"})
+
+
+def normalize_sds_key(value: str) -> str:
+    """부분일치용 정규화 — 구두점·공백만 버리고 **한글은 남긴다**.
+
+    ⚠ `[^a-z0-9]` 로 지우면 한글이 통째로 사라진다. 그러면 파티션 이름
+    `차속에 따른 도어 open 방지` 가 `open` **한 단어**로 쪼그라들어
+    `u16s_MotorOpenCircuitRun`(모터 **단선** 검출)에 붙는다 — 커버리지 숫자는 오르고
+    내용은 틀린 링크다. 같은 식으로 `mcu 레지스터 이상감지`→`mcu`,
+    `고장진단 및 sbcm 송신`→`sbcm` 이 됐다.
+    """
+    return _SDS_KEY_STRIP.sub("", str(value or "").lower())
+
+
+def is_sds_placeholder_key(normalized: str) -> bool:
+    """정규화된 키가 `n/a`·`TBD` 류의 **근거 부재 표시**인가."""
+    return normalized in _SDS_PLACEHOLDER_KEYS
+
+
 def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     try:
         pass  # type: ignore

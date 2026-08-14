@@ -20,7 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from generators._artifact_check import apply_write_back_check
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.doc_kind import is_sds_filename
-from report_gen.requirements import _asil_max_of, _extract_sds_partition_map
+from report_gen.requirements import (
+    _asil_max_of,
+    _extract_sds_partition_map,
+    is_sds_placeholder_key,
+    normalize_sds_key,
+)
 from report_gen.source_parser import is_const_type
 from workflow.code_parser.c_parser import blank_c_comments
 
@@ -225,9 +230,17 @@ def _resolve_unit_asil(info: Dict[str, Any],
     ⚠ 다만 침묵하지는 않는다: 퍼지 매치의 후보 등급이 **갈리는데도** 하나를 집는
       경우가 실측 380건 중 **216건(57%)** 이다. 그건 사전 순서가 안전 등급을 정했다는
       뜻이라, `sds-fuzzy-conflict` 로 표시하고 호출부가 센다.
+
+    ## 정규화는 `report_gen.requirements.normalize_sds_key` **단일 출처**를 쓴다
+
+    예전엔 여기와 `sts.py::_lookup_sds_related_ids` 가 각자 `[^a-z0-9]` 를 복제하고
+    있었고, 그건 한글을 통째로 버려 `차속에 따른 도어 open 방지` 를 `open` 으로
+    쪼그라뜨린다. STS 쪽에서는 그 유령 키가 **틀린 요구 링크**를 만들었다.
+    여기서는 실측상 **값이 안 바뀐다**(868칸 · 일치 689 · over 88 · under 2 — 한글
+    보존/placeholder 배제 4개 조합이 전부 동일). 그래도 같이 옮긴다 — 복제를 남겨
+    두면 다음에 또 한쪽만 고쳐진다.
     """
-    def _norm(value: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+    _norm = normalize_sds_key
 
     module_name = str(info.get("module_name") or "").strip()
     candidates: List[str] = []
@@ -256,7 +269,7 @@ def _resolve_unit_asil(info: Dict[str, Any],
             continue
         for key, value in sds_map.items():
             nk = _norm(key)
-            if not nk:
+            if not nk or is_sds_placeholder_key(nk):
                 continue
             if nc == nk or nc in nk or nk in nc:
                 got = str(value.get("asil") or "").strip()

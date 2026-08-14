@@ -18,7 +18,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from report_gen.doc_kind import is_sds_filename
-from report_gen.requirements import _extract_sds_partition_map
+from report_gen.requirements import (
+    _extract_sds_partition_map,
+    is_sds_placeholder_key,
+    normalize_sds_key,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -187,8 +191,19 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
 
 
 def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
+    """SDS 파티션을 찾을 후보 이름들 — **함수 이름이 첫 후보**다.
+
+    ⚠ 예전 판은 `module_name` 파생만 냈다. 그런데 이 프로젝트 SDS 의 871 파티션 중
+    **588개가 `kind='function'`**(전부 `related` 보유)이고 키가 곧 함수 이름이다.
+    후보에 함수명이 없으면 그 588개는 **모듈명이 우연히 닮았을 때만** 걸린다.
+    실측(KJPDS02_PV): 함수명을 넣자 356개가 **정확 키**로 붙고, 요구 매핑이
+    43/68 → 48/68 로, 어느 요구에도 못 붙는 함수가 202 → 151 로 줄었다.
+    """
     module_name = str(info.get("module_name") or "").strip()
     candidates: List[str] = []
+    fn_name = str(info.get("name") or "").strip()
+    if fn_name:
+        candidates.append(fn_name)
     if module_name:
         candidates.append(module_name)
         base = re.sub(r"_pds$", "", module_name, flags=re.I)
@@ -203,23 +218,29 @@ def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
 
 
 def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]]) -> List[str]:
-    def _norm(value: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
-
-    for candidate in _function_sds_candidates(info):
+    candidates = _function_sds_candidates(info)
+    for candidate in candidates:
         direct = sds_map.get(candidate.lower())
         if direct and direct.get("related"):
             return [m.group(1) for m in _REQ_ID_PAT.finditer(str(direct.get("related") or ""))]
-    for candidate in _function_sds_candidates(info):
-        nc = _norm(candidate)
+    for candidate in candidates:
+        nc = normalize_sds_key(candidate)
         if not nc:
             continue
         for key, value in sds_map.items():
-            nk = _norm(key)
-            if not nk:
+            nk = normalize_sds_key(key)
+            if not nk or is_sds_placeholder_key(nk):
                 continue
             if nc == nk or nc in nk or nk in nc:
-                return [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
+                ids = [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
+                if ids:
+                    return ids
+                # `related` 가 빈 칸이면 **여기서 끝내지 않는다**. 실측 41건이 전부
+                # `(swdsg) software architecture design guideline….docx`(SDS 안의
+                # 문서 목록 행)에 걸려 탐색이 멈췄다 — `Lin` 이 `guide**lin**e` 에
+                # 걸린 것이다. 빈 칸은 "요구가 없다"가 아니라 **그 행이 파티션이
+                # 아니라는** 뜻이므로 다음 후보를 계속 본다.
+                continue
     return []
 
 
@@ -895,6 +916,7 @@ def map_requirements_to_functions(
     if sds_map is None:
         sds_map = _load_default_sds_map()
 
+    by_comment = by_sds = linkless = 0
     for fid, info in function_details.items():
         if not isinstance(info, dict):
             continue
@@ -906,10 +928,34 @@ def map_requirements_to_functions(
                 req_to_fids[rid].append(fid)
                 matched = True
         if matched:
+            by_comment += 1
             continue
+        hit = False
         for rid in _lookup_sds_related_ids(info, sds_map):
             if rid in req_to_fids and fid not in req_to_fids[rid]:
                 req_to_fids[rid].append(fid)
+            if rid in req_to_fids:
+                hit = True
+        by_sds += 1 if hit else 0
+        linkless += 0 if hit else 1
+
+    # ⚠ 침묵 금지 — 어느 요구가 **함수 근거 없이** TC 를 받는지 남긴다.
+    #   `generate_test_cases` 는 매핑이 빈 요구에도 TC 를 낸다(`_generate_review_steps`).
+    #   그래서 요구 커버리지는 100% 로 보이는데 그중 일부는 소스 근거가 0 이다.
+    #   실측(KJPDS02_PV): 68 요구 중 20 이 여기 해당하고, 그 20 중 16 은 SDS 의
+    #   `related` **에는 있다** — 우리가 그 파티션에 못 닿은 것이다.
+    unmapped = [r["id"] for r in requirements if not req_to_fids.get(r["id"])]
+    if unmapped:
+        _logger.warning(
+            "STS 요구-함수 매핑: %d/%d 요구가 함수에 안 붙었다 — 이 요구들의 TC 는 "
+            "소스 근거 없이 리뷰 절차로만 만들어진다: %s%s",
+            len(unmapped), len(requirements), ", ".join(unmapped[:12]),
+            " …" if len(unmapped) > 12 else "",
+        )
+    _logger.info(
+        "STS 요구-함수 매핑 경로: 주석 related %d · SDS 파티션 %d · 어느 요구에도 "
+        "못 붙은 함수 %d", by_comment, by_sds, linkless,
+    )
 
     return req_to_fids
 
