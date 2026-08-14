@@ -218,6 +218,80 @@ class TestVarNamesFollowReferenceNotation:
         assert not any("(" in v for v in expected), f"함수명 접두가 남았다: {expected}"
 
 
+class TestAsilComesFromInputDocuments:
+    """Safety Related 의 근거는 **입력문서**다 — 소스 주석만 보면 대부분 비안전이 된다.
+
+    실측(2026-08-14, KJPDS02_PV · 흐름 367):
+
+        축                              O     X   빈칸
+        소스 주석만 · TBD→QM 강등(현행)   86   281     0
+        SwUDS 함수 ASIL                211    94    62
+        SwUDS → SDS 상속 → 소스         213    94    60
+        (정본: O 43(79.6%) · X 11 · 빈칸 0)
+
+    현행은 **260건을 근거 없이 X** 로 찍고 있었다. SwUDS 에 함수별 ASIL 이 1,003건
+    있는데 한 건도 안 봤기 때문이다.
+    """
+
+    @staticmethod
+    def _fd():
+        def _f(name, file, calls):
+            return {"name": name, "file": file, "calls_list": list(calls), "inputs": [],
+                    "outputs": [], "globals_global": [], "globals_static": [], "asil": ""}
+
+        return {"F1": _f("Ap_Door_Run", "Ap_Door.c", ["Drv_Motor_Set"]),
+                "F2": _f("Drv_Motor_Set", "Drv_Motor.c", [])}
+
+    def test_uds_asil_is_first_source(self):
+        flows = collect_integration_flows(
+            self._fd(), uds_asil_map={"ap_door_run": "B"})
+        assert flows[0]["asil"] == "B"
+
+    def test_component_asil_is_inherited_from_sds(self):
+        """ISO 26262 — 함수는 소속 SW 컴포넌트의 등급을 상속한다."""
+        flows = collect_integration_flows(
+            self._fd(),
+            uds_swcom_map={"ap_door_run": ["SwCom_13"]},
+            sds_map={"swcom_13": {"asil": "C"}})
+        assert flows[0]["asil"] == "C"
+
+    def test_highest_grade_wins_across_components(self):
+        flows = collect_integration_flows(
+            self._fd(),
+            uds_swcom_map={"ap_door_run": ["SwCom_01", "SwCom_02"]},
+            sds_map={"swcom_01": {"asil": "QM"}, "swcom_02": {"asil": "D"}})
+        assert flows[0]["asil"] == "D"
+
+    def test_no_evidence_stays_blank_not_qm(self):
+        """근거 부재를 `QM`(= 안전요구 면제)으로 바꾸면 under-classification 이다."""
+        from generators.sits import _safety_mark
+
+        flows = collect_integration_flows(self._fd())
+        assert flows[0]["asil"] == ""
+        assert _safety_mark(flows[0]["asil"]) == ""
+
+    def test_tbd_is_not_downgraded(self):
+        """`TBD` 는 '정해지지 않았다' 이지 '비안전' 이 아니다."""
+        fd = self._fd()
+        fd["F1"]["asil"] = "TBD"
+        flows = collect_integration_flows(fd)
+        assert flows[0]["asil"] == ""
+
+    def test_dropped_distribution_does_not_call_unknown_qm(self):
+        """캡에 잘린 것의 등급 분포에서도 근거 없음을 QM 으로 세지 않는다."""
+        fd = {}
+        for i in range(4):
+            fd[f"F{i}"] = {"name": f"fn_{i:03d}", "file": f"M{i}.c",
+                           "calls_list": [f"c_{i}"], "inputs": [], "outputs": [],
+                           "globals_global": [], "globals_static": [], "asil": ""}
+            fd[f"C{i}"] = {"name": f"c_{i}", "file": f"O{i}.c", "calls_list": [],
+                           "inputs": [], "outputs": [], "globals_global": [],
+                           "globals_static": [], "asil": ""}
+        stats: dict = {}
+        collect_integration_flows(fd, max_flows=1, stats_out=stats)
+        assert "QM" not in (stats.get("dropped_asil_distribution") or {})
+
+
 class TestTcIdUsesDesignIds:
     """TC ID 는 **SwUDS 설계 ID** 를 쓴다.
 

@@ -84,6 +84,55 @@ def _safety_mark(asil: Any) -> str:
     return ""
 
 
+def _resolve_flow_asil(
+    fn_name: str,
+    info: Dict[str, Any],
+    uds_asil_map: Optional[Dict[str, str]] = None,
+    uds_swcom_map: Optional[Dict[str, List[str]]] = None,
+    sds_map: Optional[Dict[str, Dict[str, str]]] = None,
+) -> str:
+    """흐름의 ASIL — **입력문서 우선**, 근거가 없으면 빈 문자열.
+
+    우선순위:
+      ① SwUDS 가 함수마다 적어 둔 ASIL (`extract_function_asil_from_kv_tables`)
+      ② 그 함수가 속한 SwCom 의 ASIL 을 SDS 에서 상속(ISO 26262 — 함수는 소속 SW
+         컴포넌트의 등급을 상속한다). 여러 컴포넌트면 **가장 높은 등급**.
+      ③ 소스 주석(`@asil`)
+      ④ 없으면 **빈칸** — `QM` 으로 강등하지 않는다.
+
+    ## 왜 이 순서인가 (2026-08-14 실측, KJPDS02_PV · 흐름 367)
+
+        축                              O     X   빈칸
+        소스 주석만 · TBD→QM 강등(현행)   86   281     0
+        소스 주석만 · 강등 없이           86    21   260
+        SwUDS 함수 ASIL                211    94    62
+        SDS 컴포넌트 상속               215     0   152
+        **① → ② → ③**                 213    94    60
+        (정본: O 43(79.6%) · X 11 · 빈칸 0)
+
+    현행은 **260건을 근거 없이 `X`(비안전)로** 찍고 있었다. SwUDS 에 함수별 ASIL 이
+    1,003건(A 701 · QM 302) 있는데 한 건도 안 봤기 때문이다. `_safety_mark` 는 근거
+    부재를 빈칸으로 두도록 짜여 있었지만 그 앞의 `or "QM"` 이 그 경로를 죽였다 —
+    안전 등급을 **지어내지 않는다**는 이 저장소의 규약(SUTS·STS 와 동일)에 어긋난다.
+    """
+    name = str(fn_name or "")
+    got = str((uds_asil_map or {}).get(name.lower()) or "").strip()
+    if got:
+        return got
+    # ② 컴포넌트 상속 — SwUDS 가 준 SwCom 을 SDS 에서 찾아 가장 높은 등급을 취한다.
+    best, best_rank = "", len(_ASIL_RANK)
+    for com in (uds_swcom_map or {}).get(name.lower()) or []:
+        entry = (sds_map or {}).get(str(com).lower()) or (sds_map or {}).get(str(com))
+        cand = str((entry or {}).get("asil") or "").strip()
+        if cand and _asil_rank(cand) < best_rank:
+            best, best_rank = cand, _asil_rank(cand)
+    if best:
+        return best
+    # ③ 소스 주석. `TBD` 는 "정해지지 않았다" 이지 "비안전" 이 아니다 — 그대로 둔다.
+    src = str(info.get("asil") or "").strip()
+    return "" if src.upper() == "TBD" else src
+
+
 def _sits_test_method(itc: Dict[str, Any]) -> str:
     """통합 TC 의 Test Method. 오류 전파 서브케이스를 가지면 고장 주입으로 본다."""
     for sc in itc.get("sub_cases") or []:
@@ -236,8 +285,9 @@ def _parse_stp_document(stp_path: str) -> Dict[str, Any]:
 # Shared helpers (re-used from sts / suts patterns)
 # ---------------------------------------------------------------------------
 
-# SwUDS 함수→SwCom 맵 캐시. (경로, mtime_ns, size) → 맵. 53MB docx 를 매번 훑을 수 없다.
-_UDS_SWCOM_CACHE: Dict[str, Tuple[Tuple[int, int], Dict[str, List[str]]]] = {}
+# SwUDS 파생 맵 캐시. (경로, mtime_ns, size) → {"swcom": …, "asil": …}.
+# 53MB docx 를 매번, 그것도 소비처마다 따로 훑을 수 없다(`_load_uds_maps`).
+_UDS_SWCOM_CACHE: Dict[str, Tuple[Tuple[int, int], Dict[str, Any]]] = {}
 
 
 def load_uds_swcom_map(uds_path: Optional[str]) -> Dict[str, List[str]]:
@@ -269,22 +319,56 @@ def load_uds_swcom_map(uds_path: Optional[str]) -> Dict[str, List[str]]:
     except OSError as exc:
         _logger.warning("SITS: SwUDS 접근 실패 — SwCom 보강 생략: %s (%s)", raw, exc)
         return {}
+    return _load_uds_maps(p, sig).get("swcom") or {}
+
+
+def load_uds_asil_map(uds_path: Optional[str]) -> Dict[str, str]:
+    """SwUDS 가 함수마다 적어 둔 ASIL — `{함수명(소문자): 'A'|'QM'|…}`.
+
+    Safety Related 칸의 **1순위 근거**다(`_resolve_flow_asil`). 실측 1,003건
+    (A 701 · QM 302)이 들어 있는데 예전엔 한 건도 안 봤고, 소스 주석이 없는 260건이
+    `QM` 으로 강등돼 `X`(비안전)로 문서에 실렸다.
+    """
+    raw = str(uds_path or "").strip()
+    if not raw:
+        return {}
+    p = Path(raw)
+    try:
+        st = p.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError as exc:
+        _logger.warning("SITS: SwUDS 접근 실패 — ASIL 보강 생략: %s (%s)", raw, exc)
+        return {}
+    return _load_uds_maps(p, sig).get("asil") or {}
+
+
+def _load_uds_maps(p: Path, sig: Tuple[int, int]) -> Dict[str, Any]:
+    """SwUDS 를 **한 번만** 읽어 SwCom·ASIL 두 맵을 함께 뽑는다.
+
+    ⚠ 두 로더가 각자 `read_bytes()` 하면 53MB 문서를 두 번 읽는다. 소비처가 늘 때마다
+    비용이 배로 붙으므로 캐시를 문서 단위로 둔다.
+    """
     key = str(p.resolve()).lower()
     cached = _UDS_SWCOM_CACHE.get(key)
     if cached and cached[0] == sig:
         return cached[1]
+    out: Dict[str, Any] = {"swcom": {}, "asil": {}}
     try:
         from backend.services.iso26262_doc_asil_extractor import (
+            extract_function_asil_from_kv_tables,
             extract_function_swcom_from_kv_tables,
         )
-        m = extract_function_swcom_from_kv_tables(p.read_bytes()) or {}
+        data = p.read_bytes()
+        out["swcom"] = extract_function_swcom_from_kv_tables(data) or {}
+        out["asil"] = extract_function_asil_from_kv_tables(data) or {}
     except Exception as exc:  # noqa: BLE001 - 보강 실패는 보고하고 빈 맵으로 계속한다
-        _logger.warning("SITS: SwUDS SwCom 추출 실패(%s) — 합성 ID 로 내려간다: %s",
+        _logger.warning("SITS: SwUDS 추출 실패(%s) — 합성 ID·소스 ASIL 로 내려간다: %s",
                         type(exc).__name__, exc)
-        return {}
-    _UDS_SWCOM_CACHE[key] = (sig, m)
-    _logger.info("SITS: SwUDS 함수→SwCom 매핑 %d건 로드 (%s)", len(m), p.name)
-    return m
+        return out
+    _UDS_SWCOM_CACHE[key] = (sig, out)
+    _logger.info("SITS: SwUDS 로드 (%s) — 함수→SwCom %d건 · 함수 ASIL %d건",
+                 p.name, len(out["swcom"]), len(out["asil"]))
+    return out
 
 
 def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
@@ -665,7 +749,9 @@ def _select_flows_within_cap(
 
     dist: Dict[str, int] = {}
     for c in dropped:
-        key = str(c.get("asil") or "QM")
+        # ⚠ 근거 없는 것을 `QM`(= 안전요구 면제)으로 세면 "안전 관련은 안 잘렸다" 는
+        #   거짓 안심이 된다. 모르는 건 모른다고 센다.
+        key = str(c.get("asil") or "").strip() or "(근거없음)"
         dist[key] = dist.get(key, 0) + 1
     safety_dropped = sum(
         n for a, n in dist.items() if a.strip().upper() in ("A", "B", "C", "D")
@@ -719,6 +805,7 @@ def collect_integration_flows(
     stats_out: Optional[Dict[str, Any]] = None,
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
     uds_swcom_map: Optional[Dict[str, List[str]]] = None,
+    uds_asil_map: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -838,9 +925,11 @@ def collect_integration_flows(
 
         seen_entries.add(fn_name)
 
-        _cand_asil = str(info.get("asil") or "QM")
-        if _cand_asil in ("TBD", ""):
-            _cand_asil = "QM"
+        # ⚠ 예전엔 `str(info.get("asil") or "QM")` + `TBD → QM` 이었다. 소스 주석만 보고,
+        #   근거가 없으면 **비안전으로 단정**한 것이다(실측 260건). 입력문서를 본다.
+        _cand_asil = _resolve_flow_asil(
+            fn_name, info, uds_asil_map=uds_asil_map,
+            uds_swcom_map=uds_swcom_map, sds_map=sds_map)
 
         # ⚠ SwCom 은 **후보 전체**(알파벳순)에 대해 여기서 부여한다. 예전엔 캡 안쪽
         # 루프에서 부여돼 **ID 가 캡 값에 의존**했다 — 캡을 바꾸면 같은 모듈이 다른
@@ -2498,10 +2587,14 @@ def generate_sits(
     # Related ID 의 SwCom 축은 **SwUDS** 에서 온다(`load_uds_swcom_map` docstring — 정본과
     # 같은 표다). 못 얻으면 순번 합성 ID 로 내려가되 합성임이 산출물에 표시된다.
     _uds_swcom_map = load_uds_swcom_map(uds_path)
+    # Safety Related 의 1순위 근거도 SwUDS 다(`_resolve_flow_asil`) — 소스 주석만 보면
+    # 근거 없는 260건이 `QM`→`X`(비안전)로 실린다.
+    _uds_asil_map = load_uds_asil_map(uds_path)
     flow_stats: Dict[str, Any] = {}
     flows = collect_integration_flows(
         function_details, max_flows=max_flows, stats_out=flow_stats,
-        sds_map=_project_sds_map, uds_swcom_map=_uds_swcom_map)
+        sds_map=_project_sds_map, uds_swcom_map=_uds_swcom_map,
+        uds_asil_map=_uds_asil_map)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")
