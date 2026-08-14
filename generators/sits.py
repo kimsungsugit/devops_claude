@@ -337,11 +337,51 @@ def _infer_boundary_values(var_name: str) -> List[Any]:
 
 
 def _clean_var_name(raw: str) -> str:
-    """Extract clean variable name from annotated string like '[IN] u8g_Speed'."""
-    s = re.sub(r"\[.*?\]", "", raw).strip()
-    s = s.split("(")[0].strip()
-    s = re.sub(r"\s+", "_", s)
-    return s or raw[:40]
+    """`[IN] u8g_Speed` → `u8g_Speed`. 정본 표기 규칙은 SUTS 와 **같은 출처**를 쓴다.
+
+    ## 예전 판은 두 줄로 정반대 일을 했다
+
+        s = re.sub(r"\\[.*?\\]", "", raw)   # `[IN]` 태그와 함께 **배열 첨자까지** 지웠다
+        s = re.sub(r"\\s+", "_", s)         # 타입을 버리는 대신 **이름에 이어붙였다**
+
+    그래서 `const UINT8 * data` 가 `const_UINT8_*_data` 로, `return U8` 이
+    `return_UINT8` 로, `p->m` 이 `p->m` 그대로 산출물에 실렸다. 정본(VectorCAST)은
+    각각 `data` · `return` · `p[0].m` 이라고 적는다.
+
+    실측(2026-08-14, KJPDS02_PV): 정본 기대 656칸 중 **일치 0** · 입력 496 중 26(5.2%).
+    미달의 최대 축이 배열이나 수집 범위가 아니라 **이름 표기 자체**였다.
+
+    ## 복제하지 않는다
+
+    SUTS 가 다섯 라운드에 걸쳐 정본과 맞춰 놓은 규칙(`return` 슬롯 · 포인터 `[0].` ·
+    타입 한정자 제거 · 주석 제거)을 그대로 **호출**한다. 여기에 같은 로직을 다시 쓰면
+    한쪽만 고쳐지는 이 저장소의 반복 실패 모드가 된다(`_resolve_sds_map` 을 같은 이유로
+    이미 재사용하고 있다).
+
+    ⚠ 이름을 뽑지 못하면 **빈 문자열**이다(예전엔 `raw[:40]` 으로 원문 조각을 흘렸다).
+       호출부는 빈 값을 걸러야 한다.
+    """
+    from generators.suts import _extract_var_names
+    names = _extract_var_names([str(raw or "")])
+    return names[0] if names else ""
+
+
+def _clean_global_var_name(raw: str) -> str:
+    """전역 엔트리용 — `[INDIRECT] u8s_Flag` → `u8s_Flag`.
+
+    ⚠ 파라미터용(`_clean_var_name`)과 **다른 함수**여야 한다. 전역의 방향 태그는
+    `[IN]`/`[OUT]`/`[INOUT]` 말고도 `[INDIRECT]`·`[INDIRECT2]` 로 온다. 파라미터
+    정제기는 그 세 개만 벗기므로 `[INDIRECT] …` 는 남은 대괄호 때문에 형태 검사에서
+    **통째로 버려진다**.
+
+    실측(2026-08-14): 두 경로를 한 함수로 합쳤더니 정본과 맞던 입력 **9칸이 사라졌다**
+    — `u8s_E2EInitFlag_SBCM0`·`u8s_PrevCounter_SBCM0`·`g_DoorState`·
+    `u32s_SecuritySeed` 처럼 전부 전역이었다. SUTS 도 같은 이유로 두 함수를 나눠 두고
+    있고(`_clean_global_name` 은 태그 목록을 `_DIR_TAG_PAT` 단일 출처로 본다),
+    그 주석은 태그 하나를 빼먹어 같은 실패를 두 번 겪었다고 적어 두었다.
+    """
+    from generators.suts import _clean_global_name, _vc_pointer_notation
+    return _vc_pointer_notation(_clean_global_name(str(raw or "")))
 
 
 def _get_module_name(info: Dict[str, Any]) -> str:
@@ -783,7 +823,9 @@ def collect_integration_flows(
                             _ptr_params.add(_pname.lower())
         for raw in inputs_raw[:20]:
             vn = _clean_var_name(raw)
-            if vn.lower() not in _fn_name_set and vn not in {p[0] for p in input_pairs}:
+            # ⚠ 빈 이름 가드. 예전 `_clean_var_name` 은 무엇을 받든 문자열을 냈기에
+            #   (`raw[:40]` 폴백) 이 검사가 필요 없었다 — 이제는 못 뽑으면 빈 값이다.
+            if vn and vn.lower() not in _fn_name_set and vn not in {p[0] for p in input_pairs}:
                 input_pairs.append((vn, raw))
                 # Pointer param (*) is also an out-parameter
                 if vn.lower() in _ptr_params:
@@ -818,7 +860,7 @@ def collect_integration_flows(
 
         # Globals as additional observed inputs
         for g in (globals_g + globals_s)[:15]:
-            gn = _clean_var_name(g)
+            gn = _clean_global_var_name(g)
             if gn and gn.lower() not in _fn_name_set and gn not in {p[0] for p in input_pairs}:
                 input_pairs.append((gn, g))
 
@@ -836,19 +878,22 @@ def collect_integration_flows(
         for vn, raw in ptr_out_pairs:
             if vn not in {p[0] for p in exp_pairs}:
                 exp_pairs.append((vn, raw))
+        # ⚠ 정본은 이 칸에 **변수 이름만** 적는다 — `함수명() 변수` 같은 접두를 쓰지
+        #   않는다(정본 기대 1,172칸 중 괄호 접두 0건). 접두를 붙이면 같은 변수가 부르는
+        #   함수마다 다른 이름이 되어, 정본과 대조할 때 **한 칸도 맞지 않는다**.
+        #   어느 함수가 그 전역을 건드리는지는 Interface 체인이 이미 말해 준다.
         for callee in cross_calls[:5]:
             callee_info = name_to_info.get(callee)
             if callee_info:
                 for v in (callee_info.get("outputs") or [])[:5]:
-                    vn = f"{callee}() {_clean_var_name(v)}"
-                    if vn not in {p[0] for p in exp_pairs}:
+                    vn = _clean_var_name(v)
+                    if vn and vn.lower() not in _fn_name_set and vn not in {p[0] for p in exp_pairs}:
                         exp_pairs.append((vn, v))
                 # Callee globals as observable side-effect outputs
                 for g in ((callee_info.get("globals_global") or []) + (callee_info.get("globals_static") or []))[:4]:
-                    gn = _clean_var_name(g)
-                    label = f"{callee}() {gn}"
-                    if gn and gn.lower() not in _fn_name_set and label not in {p[0] for p in exp_pairs}:
-                        exp_pairs.append((label, g))
+                    gn = _clean_global_var_name(g)
+                    if gn and gn.lower() not in _fn_name_set and gn not in {p[0] for p in exp_pairs}:
+                        exp_pairs.append((gn, g))
 
         # If still no expected vars, mine global writes from logic_flow conditions
         if not exp_pairs:
@@ -862,9 +907,9 @@ def collect_integration_flows(
                 for node in (src_info.get("logic_flow") or [])[:20]:
                     for m in _GLOBAL_WRITE_RE.finditer(str(node.get("text", "") + node.get("condition", ""))):
                         gname = m.group(1)
-                        label = f"{src_fn}() {gname}"
-                        if label not in {p[0] for p in exp_pairs}:
-                            exp_pairs.append((label, gname))
+                        # 위와 같은 이유로 `함수명()` 접두를 붙이지 않는다(정본은 0건).
+                        if gname not in {p[0] for p in exp_pairs}:
+                            exp_pairs.append((gname, gname))
                 if len(exp_pairs) >= _MAX_EXP_PARAMS:
                     break
 
@@ -936,7 +981,7 @@ def collect_integration_flows(
         indirect_vars_list: List[str] = []
         for g in globals_g + globals_s:
             tag = str(g).upper()
-            gn = _clean_var_name(g)
+            gn = _clean_global_var_name(g)
             if gn and "[INDIRECT]" in tag and gn not in {p[0] for p in input_pairs}:
                 if gn not in indirect_vars_list and len(indirect_vars_list) < 5:
                     indirect_vars_list.append(gn)
@@ -946,7 +991,7 @@ def collect_integration_flows(
             if callee_info:
                 for g in (callee_info.get("globals_global") or [])[:5]:
                     tag = str(g).upper()
-                    gn = _clean_var_name(g)
+                    gn = _clean_global_var_name(g)
                     if gn and "[INDIRECT]" in tag and gn not in indirect_vars_list:
                         if len(indirect_vars_list) < 5:
                             indirect_vars_list.append(gn)

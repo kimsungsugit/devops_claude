@@ -111,6 +111,113 @@ class TestTransitiveCrossModuleQualifies:
         assert stats["cross_reach_hops"] >= 1
 
 
+class TestVarNamesFollowReferenceNotation:
+    """변수 이름은 정본(VectorCAST) 표기를 따른다 — SUTS 와 **같은 출처**로.
+
+    실측(2026-08-14, KJPDS02_PV): 정본 기대 656칸 중 **일치 0** · 입력 496 중 26(5.2%).
+    원인은 수집 범위가 아니라 이름 표기였다 — 옛 `_clean_var_name` 이 `[IN]` 태그와
+    함께 배열 첨자를 지우고, 타입을 버리는 대신 이름에 이어붙였다:
+    `const UINT8 * data` → `const_UINT8_*_data`, `return U8` → `return_UINT8`.
+    """
+
+    def test_type_tokens_are_dropped_not_glued(self):
+        from generators.sits import _clean_var_name
+
+        assert _clean_var_name("[IN] const UINT8 * data") == "data"
+        assert _clean_var_name("[IN] u8 u8g_Speed") == "u8g_Speed"
+
+    def test_return_slot_is_the_word_return(self):
+        """정본은 반환값을 `return` 이라 적는다 — 타입 이름이 아니다."""
+        from generators.sits import _clean_var_name
+
+        assert _clean_var_name("[OUT] return U8") == "return"
+
+    def test_pointer_member_uses_reference_notation(self):
+        """정본은 `p->m` 을 `p[0].m` 으로 적는다(VectorCAST 가 1원소 배열을 잡아준다)."""
+        from generators.sits import _clean_var_name
+
+        assert _clean_var_name("[IN] LinTpMessageType * msg->cfNum") == "msg[0].cfNum"
+
+    def test_unparseable_yields_empty_not_a_fragment(self):
+        """못 뽑으면 빈 값이다 — 예전엔 `raw[:40]` 으로 원문 조각을 흘렸다."""
+        from generators.sits import _clean_var_name
+
+        assert _clean_var_name("") == ""
+        assert _clean_var_name("[IN] ///") == ""
+
+    def test_global_tags_beyond_in_out_are_stripped(self):
+        """전역은 `[INDIRECT]`·`[INDIRECT2]` 로도 온다 — 파라미터 정제기는 그걸 못 벗긴다.
+
+        실측(2026-08-14): 두 경로를 한 함수로 합쳤더니 정본과 맞던 입력 **9칸**이
+        통째로 사라졌다(`u8s_E2EInitFlag_SBCM0`·`g_DoorState`·`u32s_SecuritySeed` 등
+        전부 전역). 형태 검사에서 남은 대괄호 때문에 버려진 것이다.
+        """
+        from generators.sits import _clean_global_var_name, _clean_var_name
+
+        assert _clean_global_var_name("[INDIRECT] u8s_E2EInitFlag_SBCM0") == "u8s_E2EInitFlag_SBCM0"
+        assert _clean_global_var_name("[INDIRECT2] g_DoorState") == "g_DoorState"
+        assert _clean_global_var_name("[OUT] u8 u32s_SecuritySeed") == "u32s_SecuritySeed"
+        # 대조군 — 파라미터 정제기는 이 태그를 벗기지 못한다(그래서 함수를 나눴다)
+        assert _clean_var_name("[INDIRECT] u8s_E2EInitFlag_SBCM0") == ""
+
+    def test_global_path_also_uses_reference_pointer_notation(self):
+        """전역 경로에도 `p->m` → `p[0].m` 이 걸린다.
+
+        (뮤테이션 생존으로 드러난 공백 — 파라미터 경로만 검사하면 전역 쪽 교정을
+        지워도 테스트가 전부 초록이다.)
+        """
+        from generators.sits import _clean_global_var_name
+
+        assert _clean_global_var_name("[INDIRECT] g_Ctx->state") == "g_Ctx[0].state"
+
+    def test_unparseable_input_does_not_enter_as_blank(self):
+        """이름을 못 뽑은 항목이 **빈 칸**으로 산출물에 들어가면 안 된다.
+
+        (뮤테이션 생존으로 드러난 공백 — 빈 값 가드를 지워도 잡히지 않았다.)
+        """
+        fd = {
+            "F1": {"name": "Entry_Fn", "file": "A.c", "calls_list": ["Callee_Fn"],
+                   "inputs": ["[IN] ///", "[IN] u8 u8g_Ok"], "outputs": [],
+                   "globals_global": [], "globals_static": [], "asil": "B"},
+            "F2": {"name": "Callee_Fn", "file": "B.c", "calls_list": [],
+                   "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                   "asil": "B"},
+        }
+        flows = collect_integration_flows(fd)
+        iv = flows[0]["input_vars"]
+        assert "u8g_Ok" in iv
+        assert "" not in iv, f"빈 이름이 실렸다: {iv}"
+
+    def test_global_inputs_survive_collection(self):
+        """단위 함수 수준이 아니라 **흐름 산출물**에서 살아남는지 본다."""
+        fd = {
+            "F1": {"name": "Entry_Fn", "file": "A.c", "calls_list": ["Callee_Fn"],
+                   "inputs": [], "outputs": [],
+                   "globals_global": ["[INDIRECT] u8s_E2EInitFlag_SBCM0"],
+                   "globals_static": [], "asil": "B"},
+            "F2": {"name": "Callee_Fn", "file": "B.c", "calls_list": [],
+                   "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                   "asil": "B"},
+        }
+        flows = collect_integration_flows(fd)
+        assert "u8s_E2EInitFlag_SBCM0" in flows[0]["input_vars"]
+
+    def test_expected_column_has_no_function_prefix(self):
+        """정본 기대 1,172칸 중 `함수명()` 접두는 0건 — 붙이면 한 칸도 안 맞는다."""
+        fd = {
+            "F1": {"name": "Entry_Fn", "file": "A.c", "calls_list": ["Callee_Fn"],
+                   "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                   "asil": "B"},
+            "F2": {"name": "Callee_Fn", "file": "B.c", "calls_list": [],
+                   "inputs": [], "outputs": ["[OUT] u8 u8g_Result"],
+                   "globals_global": ["[OUT] u8 g_State"], "globals_static": [], "asil": "B"},
+        }
+        flows = collect_integration_flows(fd)
+        expected = flows[0]["expected_vars"]
+        assert "u8g_Result" in expected, expected
+        assert not any("(" in v for v in expected), f"함수명 접두가 남았다: {expected}"
+
+
 class TestFlowStatsReachTheReport:
     """생산자가 낸 흐름 통계가 **리포트까지 도달**하는가.
 
