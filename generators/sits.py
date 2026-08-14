@@ -5,7 +5,7 @@ Generates XLSM output matching the reference SITS structure:
   - Columns: TC ID | Description | Call chain | Safety | Test Method | Gen Method |
              Input Param 1-82 | Expected Param 1-113 | Related ID
   - Sheets: Cover, History, 1.Introduction, 2.Test Environment,
-            3-1.SW Integration Strategy, `_SPEC_SHEET_NAME`
+            2.SW Integration Strategy(`_STRATEGY_SHEET_NAME`), `_SPEC_SHEET_NAME`
 
 ⚠ 시트 이름은 **상수 `_SPEC_SHEET_NAME` 하나**가 출처다. 라이터와 검증기가 각자
 문자열을 들고 있으면 한쪽만 고쳐진다 — 실제로 그랬다(라이터는 `3.…` 로 옮겼는데
@@ -21,7 +21,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
@@ -48,6 +48,50 @@ _DATA_START_ROW = 5
 
 # 시험 규격 시트 이름 — 라이터·검증기의 **단일 출처**(위 모듈 docstring 참조).
 _SPEC_SHEET_NAME = "3.SW Integration Test Spec"
+
+# 통합 전략 시트 — 정본은 `2.SW`, 등록 템플릿은 `2. SW`(공백) 다. 이름은 **템플릿이 준
+# 것을 그대로 둔다**(사용자 매크로가 시트명을 참조한다). 대신 찾을 때 공백·대소문자를
+# 무시해 두 표기를 같은 시트로 본다 — 이름이 어긋난 채로 새 시트를 만들면 한 파일에
+# 빈 정본 시트와 채워진 사본이 공존한다(`3.…`/`4.…` 에서 이미 겪은 결함).
+_STRATEGY_SHEET_NAME = "2.SW Integration Strategy"
+_RELID_CHECK_SHEET = "Related_ID 확인"
+_RELID_TIDY_SHEET = "Related_ID 정리"
+_END_OF_DOC = "< End of Document >"
+
+# 전략 시트 트리 상한. 체인(`_MAX_CHAIN_NODES`=100)과 **분리한다** — 체인은 한 칸에
+# `a -> b -> …` 문자열로 들어가 100 이면 이미 읽기 한계지만, 전략 시트는 행으로 펼치므로
+# 더 담을 수 있다(정본 최대 427노드/블록). 시트 전체 행 상한은 따로 둔다.
+_STRATEGY_MAX_NODES = 400
+_STRATEGY_MAX_ROWS = 20000
+_STRATEGY_MAX_DEPTH = 20
+
+# 통합 항목 ID 접두 — 정본은 시험 케이스(`SwITC_…`)와 통합 항목(`SwIT_…`)을 구별해
+# 근거 시트에는 후자를 쓴다. 두 시트를 연결하려면 이 변환이 **한 곳**에 있어야 한다.
+_TC_ID_PREFIX = "SwITC_"
+_INTEGRATION_ID_PREFIX = "SwIT_"
+
+
+def _integration_id(tc_id: str) -> str:
+    """`SwITC_SwUFn_0101_01` → `SwIT_SwUFn_0101_01`(정본 근거 시트 표기)."""
+    t = str(tc_id or "")
+    return _INTEGRATION_ID_PREFIX + t[len(_TC_ID_PREFIX):] if t.startswith(_TC_ID_PREFIX) else t
+
+# Related ID 를 진입점에서 몇 홉까지 모을 것인가. 정본 50 TC · 원소 340 대조(2026-08-14):
+#
+#     홉  재현율            과잉    정확일치
+#     0   142 (41.8%)         4      13     ← 진입 함수만(어휘만 넓힌 판)
+#     1   174 (51.2%)        17      22
+#     2   225 (66.2%)       134      24     ← 채택
+#     3   253 (74.4%)       302      26
+#     5   313 (92.1%)       557      27
+#
+# 3홉부터 한계효용이 뒤집힌다(재현 +8%p 에 과잉 +168). 과잉 302 중 293 은 정본이 **다른
+# TC 에서는 쓰는** ID 라 허위 추적은 아니지만, 한 칸에 그만큼 실리면 "이 통합 지점의 설계
+# 요소" 가 아니라 "이 서브트리 어딘가" 가 된다. 2홉이 그 경계다.
+_RELATED_CHAIN_DEPTH = 2
+_RELATED_CHAIN_NODES = 60
+# 한 칸에 실을 ID 상한(정본 최대 28개). 넘치면 자르되 **몇 개를 잘랐는지** 통계로 낸다.
+_MAX_RELATED_IDS = 40
 
 _TCID_COL = 2          # B  — TC ID (SwITC_xx)
 _DESC_COL = 3          # C  — 서브케이스 번호
@@ -342,32 +386,58 @@ def load_uds_asil_map(uds_path: Optional[str]) -> Dict[str, str]:
     return _load_uds_maps(p, sig).get("asil") or {}
 
 
-def _load_uds_maps(p: Path, sig: Tuple[int, int]) -> Dict[str, Any]:
-    """SwUDS 를 **한 번만** 읽어 SwCom·ASIL 두 맵을 함께 뽑는다.
+def load_uds_related_map(uds_path: Optional[str]) -> Dict[str, List[str]]:
+    """SwUDS `Related ID` 칸의 **토큰 전체** — `{함수명(소문자): [SwCom_NN, SwFn_NN, …]}`.
 
-    ⚠ 두 로더가 각자 `read_bytes()` 하면 53MB 문서를 두 번 읽는다. 소비처가 늘 때마다
+    `load_uds_swcom_map` 이 같은 칸에서 `SwCom_` 만 걸러 쓰는 좁은 판이다. Related 칸의
+    정본 어휘는 다섯 종(SwCom·SwFn·SwSTR·SwST·SwTK)이라 SwCom 만 쓰면 **19% 를 버린다**
+    (실측 1,298 토큰 중 246). SwCom 축은 SDS 컴포넌트 맵 키와 맞춰야 해서 계속 좁게 쓰고,
+    산출물 `Related ID` 칸은 이 넓은 판을 쓴다.
+    """
+    raw = str(uds_path or "").strip()
+    if not raw:
+        return {}
+    p = Path(raw)
+    try:
+        st = p.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError as exc:
+        _logger.warning("SITS: SwUDS 접근 실패 — Related ID 보강 생략: %s (%s)", raw, exc)
+        return {}
+    return _load_uds_maps(p, sig).get("related") or {}
+
+
+def _load_uds_maps(p: Path, sig: Tuple[int, int]) -> Dict[str, Any]:
+    """SwUDS 를 **한 번만** 읽어 Related·SwCom·ASIL 세 맵을 함께 뽑는다.
+
+    ⚠ 로더가 각자 `read_bytes()` 하면 53MB 문서를 그 수만큼 읽는다. 소비처가 늘 때마다
     비용이 배로 붙으므로 캐시를 문서 단위로 둔다.
     """
     key = str(p.resolve()).lower()
     cached = _UDS_SWCOM_CACHE.get(key)
     if cached and cached[0] == sig:
         return cached[1]
-    out: Dict[str, Any] = {"swcom": {}, "asil": {}}
+    out: Dict[str, Any] = {"swcom": {}, "asil": {}, "related": {}}
     try:
         from backend.services.iso26262_doc_asil_extractor import (
             extract_function_asil_from_kv_tables,
-            extract_function_swcom_from_kv_tables,
+            extract_function_related_ids_from_kv_tables,
         )
         data = p.read_bytes()
-        out["swcom"] = extract_function_swcom_from_kv_tables(data) or {}
+        # SwCom 판은 Related 판에서 거른다 — 문서를 두 번 훑지 않고, 두 축이 갈라지지도 않는다.
+        out["related"] = extract_function_related_ids_from_kv_tables(data) or {}
+        out["swcom"] = {n: coms for n, toks in out["related"].items()
+                        if (coms := [t for t in toks if t.startswith("SwCom_")])}
         out["asil"] = extract_function_asil_from_kv_tables(data) or {}
     except Exception as exc:  # noqa: BLE001 - 보강 실패는 보고하고 빈 맵으로 계속한다
         _logger.warning("SITS: SwUDS 추출 실패(%s) — 합성 ID·소스 ASIL 로 내려간다: %s",
                         type(exc).__name__, exc)
         return out
     _UDS_SWCOM_CACHE[key] = (sig, out)
-    _logger.info("SITS: SwUDS 로드 (%s) — 함수→SwCom %d건 · 함수 ASIL %d건",
-                 p.name, len(out["swcom"]), len(out["asil"]))
+    _logger.info("SITS: SwUDS 로드 (%s) — Related ID %d함수/%d토큰 · SwCom %d건 · ASIL %d건",
+                 p.name, len(out["related"]),
+                 sum(len(v) for v in out["related"].values()),
+                 len(out["swcom"]), len(out["asil"]))
     return out
 
 
@@ -694,6 +764,13 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     "chain_truncated_flows", "chain_max_nodes",
     # TC ID 축 — 설계 ID(SwUDS) 유래인지 파싱 순번인지
     "design_id_hits", "design_id_lookups", "design_id_map_entries",
+    # Related ID 축 — 진입 함수 자신인지 호출 트리 아래인지, 칸 상한에 잘렸는지
+    "related_chain_flows", "related_chain_ids", "related_chain_depth",
+    "related_truncated_ids",
+    # 근거 시트(전략 / Related_ID) 산출 실적 — 시트가 비어도 **왜 비었는지** 보이게
+    "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
+    "strategy_blocks_truncated",
+    "relid_check_rows", "relid_tidy_rows", "relid_index_rows",
 )
 
 _ASIL_RANK: Dict[str, int] = {"D": 0, "C": 1, "B": 2, "A": 3, "QM": 4}
@@ -806,6 +883,7 @@ def collect_integration_flows(
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
     uds_swcom_map: Optional[Dict[str, List[str]]] = None,
     uds_asil_map: Optional[Dict[str, str]] = None,
+    uds_related_map: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -846,10 +924,15 @@ def collect_integration_flows(
     _sds_lookups = 0        # 조회 시도한 함수 수
     _sds_key_hits = 0       # 맵에서 키가 잡힌 수
     _sds_swcom_hits = 0     # 실제로 SwCom 을 얻은 수 — 이 맵으로는 **구조적으로 0**(위 참조)
-    # ── SwUDS 축 — Related 칸의 실제 소스(`load_uds_swcom_map` docstring 참조) ──
+    # ── SwUDS 축 — Related 칸의 실제 소스(`load_uds_related_map` docstring 참조) ──
     _uds_swcom_lookups = 0  # 조회 시도한 함수 수
-    _uds_swcom_hits = 0     # SwUDS 에서 SwCom 을 실제로 얻은 함수 수
-    _uds_swcom_ids = 0      # 그렇게 얻은 SwCom ID 총 개수(함수당 다중 가능)
+    _uds_swcom_hits = 0     # SwUDS 에서 Related ID 를 실제로 얻은 함수 수
+    _uds_swcom_ids = 0      # 그렇게 얻은 ID 총 개수(함수당 다중 가능)
+    # 진입 함수 자신이 아니라 **호출 트리 아래**에서 온 ID — 근거의 거리가 다르므로
+    # 따로 센다(칸만 보면 둘을 구별할 수 없다).
+    _chain_rel_flows = 0
+    _chain_rel_ids = 0
+    _related_truncated = 0  # 칸 상한에 걸려 잘라낸 ID 수
     _sds_source = "argument" if sds_map is not None else "repo_docs_glob"
     if sds_map is None:
         sds_map = _load_default_sds_map()
@@ -865,10 +948,9 @@ def collect_integration_flows(
     # 전이 판정·체인 전개용 호출 그래프. **프로젝트 함수끼리의 호출만** 남긴다
     # (memset/printf 같은 외부 심볼은 파싱 그래프에 없고 통합 경로도 아니다).
     _module_of: Dict[str, str] = {n: _get_module_name(i) for n, i in name_to_info.items() if n}
-    _calls_map: Dict[str, List[str]] = {
-        n: [c for c in (i.get("calls_list") or []) if c in name_to_info]
-        for n, i in name_to_info.items() if n
-    }
+    # ⚠ 전략 시트도 같은 그래프를 쓴다 — 필터가 갈라지면 규격 시트의 체인과 전략 시트의
+    #   트리가 서로 다른 그래프가 되므로 **단일 빌더**를 공유한다(`_build_calls_map`).
+    _calls_map: Dict[str, List[str]] = _build_calls_map(function_details)
     _transitive_entries = 0       # 직접 경계 없이 전이로만 자격을 얻은 진입점 수
     _chain_truncated_total = 0    # 체인이 상한에 걸려 잘린 흐름 수(침묵 금지)
 
@@ -1149,15 +1231,41 @@ def collect_integration_flows(
         # ── Related IDs ──────────────────────────────────────────────────────
         # 정본 실측: 이 칸의 어휘는 SwCom 170 · SwFn 69 · SwSTR 62 · SwST 38 · SwTK 8 —
         # **설계/시험 요소 ID** 다. 요구 ID(SwTR_ 계열)는 0 건이다.
+        #
+        # ⚠ 두 가지를 좁게 잡고 있었다(2026-08-14 정본 50 TC · 원소 340개 대조):
+        #   ① 어휘 — `SwCom_` 만 남겨 SwFn/SwSTR/SwST/SwTK 를 버렸다
+        #   ② 범위 — **진입 함수 한 개**만 조회했다. 정본 340 원소 중 entry 자신으로
+        #      설명되는 건 142(41.8%) 뿐이고 나머지 198 은 **호출 트리 아래에서만** 온다
+        #      (정본은 `Related_ID 확인` 시트에서 트리 전체를 조회해 합집합을 만든다).
+        #   둘을 합친 재현율: 18.8% → 74.4%(트리 3홉). 아래 두 축이 그 수정이다.
         related_parts: List[str] = []
-        # ① SwUDS 가 함수마다 적어 둔 SwCom — 정본이 쓰는 바로 그 표다
-        #   (실측: 이 맵의 SwCom 33종 ↔ 정본 33종, 차집합 양쪽 0).
+        # ① 진입 함수 자신 — SwUDS 가 그 함수에 적어 둔 Related ID 전체
         _uds_swcom_lookups += 1
-        _uds_hit = list((uds_swcom_map or {}).get(fn_name.lower()) or [])
+        _rel_map = uds_related_map if uds_related_map is not None else (uds_swcom_map or {})
+        _uds_hit = list(_rel_map.get(fn_name.lower()) or [])
         if _uds_hit:
             _uds_swcom_hits += 1
             _uds_swcom_ids += len(_uds_hit)
             related_parts.extend(_uds_hit)
+        # ①-b 호출 트리 아래 함수들 — 진입 함수 뒤에 붙인다(앞쪽이 더 직접적인 근거다).
+        #     ⚠ 순서는 **거리 순**이다(체인의 깊이 우선 순서가 아니라). 상한에 걸릴 때
+        #       무엇이 먼저 담기느냐가 곧 회수이고, 진입점에 가까운 함수의 설계 요소가
+        #       그 통합 지점과 더 관련 있다(관측 대상에서 이미 검증된 같은 이유).
+        _chain_rel: List[str] = []
+        for _node in _bfs_call_order(fn_name, _calls_map, _RELATED_CHAIN_NODES,
+                                     max_depth=_RELATED_CHAIN_DEPTH)[1:]:
+            for _tok in _rel_map.get(_node.lower()) or []:
+                if _tok not in related_parts and _tok not in _chain_rel:
+                    _chain_rel.append(_tok)
+        if _chain_rel:
+            _chain_rel_flows += 1
+            _chain_rel_ids += len(_chain_rel)
+        related_parts.extend(_chain_rel)
+        # 여기까지가 **SwUDS 문서에 적혀 있는 것**이다. 아래 균형 조정(`_balance_related_ids`)
+        # 이 이 값을 지우지 못하게 표시해 둔다 — 그 함수는 "한 ID 가 흐름의 20% 를 넘으면
+        # 과집중" 으로 보고 지우는데, 정본 실측에서 `SwFn_42` 는 50 TC 중 15(30%)에 정당하게
+        # 쓰인다. 어휘를 넓힌 이번 라운드가 아니면 대상이 SwCom 뿐이라 드러나지 않던 구멍이다.
+        _doc_related: List[str] = list(related_parts)
         # ② 소스 주석/파서가 실어 준 ID
         for field in ("srs_req_ids", "related", "related_id"):
             val = info.get(field) or ""
@@ -1202,6 +1310,11 @@ def collect_integration_flows(
             if r and r not in seen_rel:
                 seen_rel.add(r)
                 deduped_related.append(r)
+        # 칸 상한 — 넘치면 자르되 **몇 개를 잘랐는지** 남긴다. 앞쪽(진입 함수 자신 →
+        # 가까운 호출)이 먼저 담기므로 잘리는 건 항상 가장 먼 근거다.
+        if len(deduped_related) > _MAX_RELATED_IDS:
+            _related_truncated += len(deduped_related) - _MAX_RELATED_IDS
+            deduped_related = deduped_related[:_MAX_RELATED_IDS]
 
         # Collect indirect (global) vars for GLOBAL strategy
         indirect_vars_list: List[str] = []
@@ -1243,6 +1356,8 @@ def collect_integration_flows(
             "related_ids": deduped_related,
             # related_ids 중 순번 기반 합성분(요구 추적성 분자에서 제외 — 위 삽입부 주석)
             "synthetic_related_ids": synthetic_related,
+            # SwUDS 문서에 실제로 적혀 있던 ID — 균형 조정이 지우면 안 되는 것들
+            "doc_related_ids": [r for r in _doc_related if r in seen_rel],
             "logic_flow": info.get("logic_flow") or [],
         })
 
@@ -1266,6 +1381,12 @@ def collect_integration_flows(
             # 체인 절단 — 0 이 아니면 그 흐름의 경로는 **전부가 아니다**.
             "chain_truncated_flows": _chain_truncated_total,
             "chain_max_nodes": _MAX_CHAIN_NODES,
+            # Related 축 — 진입 함수 자신 vs 호출 트리 아래. 근거의 거리가 다르므로
+            # 한 칸에 섞여 있어도 몇 개가 어디서 왔는지 여기서 보인다.
+            "related_chain_flows": _chain_rel_flows,
+            "related_chain_ids": _chain_rel_ids,
+            "related_chain_depth": _RELATED_CHAIN_DEPTH,
+            "related_truncated_ids": _related_truncated,
         })
     if _sds_lookups and not _sds_swcom_hits:
         # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
@@ -1332,7 +1453,13 @@ def _balance_related_ids(
         for rid in (flow.get("related_ids") or []):
             usage[rid] = usage.get(rid, 0) + 1
 
-    over_used = {rid for rid, cnt in usage.items() if cnt > max_count and not rid.startswith("SwCom_")}
+    # ⚠ **문서에 적혀 있는 ID 는 지우지 않는다.** 이 함수의 목적은 순번 합성 ID·소스 주석
+    #   유래가 전 흐름에 붙어 추적성이 100% 로 보이는 것을 막는 것이지, SwUDS 가 여러 함수에
+    #   정당하게 배정한 ID 를 걷어내는 게 아니다 — 정본 실측(50 TC)에서 `SwFn_42` 는 15건
+    #   (30%)에 쓰이므로 이 임계(20%)면 **정본에 있는 값이 지워진다**.
+    protected = {r for f in flows for r in (f.get("doc_related_ids") or [])}
+    over_used = {rid for rid, cnt in usage.items()
+                 if cnt > max_count and not rid.startswith("SwCom_") and rid not in protected}
     if not over_used:
         return flows
 
@@ -1831,49 +1958,328 @@ def _create_sits_test_env(wb, stp_context: Optional[Dict[str, Any]] = None) -> N
         )
 
 
-def _create_sits_strategy(wb, flows: List[Dict[str, Any]]) -> None:
-    """Create integration strategy sheet listing component call hierarchy."""
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    ws = wb.create_sheet("3-1.SW Integration Strategy")
-    hdr_font = Font(name="맑은 고딕", size=10, bold=True)
-    data_font = Font(name="맑은 고딕", size=9)
-    thin = Border(left=Side(style="thin"), right=Side(style="thin"),
-                  top=Side(style="thin"), bottom=Side(style="thin"))
-    hdr_fill = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+def _norm_sheet_key(name: Any) -> str:
+    """시트 이름 비교용 정규화 — 공백 제거 + 소문자(`2.SW…` ↔ `2. SW…`)."""
+    return re.sub(r"\s+", "", str(name or "")).lower()
 
-    ws["A1"] = "Software Integration Strategy"
-    ws["A1"].font = Font(name="맑은 고딕", size=12, bold=True)
-    ws["A3"] = "통합 순서 및 컴포넌트 경계 호출 목록:"
-    ws["A3"].font = hdr_font
 
-    # ⚠ 경계 근거(직접/전이)를 함께 낸다 — 같은 "Cross-Module Calls" 라도 진입점이
-    #   직접 넘은 것과 몇 홉 아래에서 넘은 것은 읽는 사람에게 다른 사실이다.
-    for ci, h in enumerate(["SwCom ID", "Module", "Entry Function",
-                            "경계", "Cross-Module Calls"], start=1):
-        c = ws.cell(row=5, column=ci, value=h)
-        c.font = hdr_font
-        c.fill = hdr_fill
-        c.border = thin
-        c.alignment = Alignment(horizontal="center", vertical="center")
+def _find_sheet(wb, name: str):
+    """정규화 이름이 같은 시트를 돌려준다(없으면 None). 표기 흔들림 흡수."""
+    want = _norm_sheet_key(name)
+    for sn in wb.sheetnames:
+        if _norm_sheet_key(sn) == want:
+            return wb[sn]
+    return None
 
-    # Deduplicate by swcom_id + entry_fn
-    seen: set = set()
-    row = 6
-    for f in flows:
-        key = (f["swcom_id"], f["entry_fn"])
-        if key in seen:
+
+def _build_strategy_tree(
+    entry: str,
+    calls_map: Dict[str, List[str]],
+    max_nodes: int,
+    max_depth: int,
+) -> Tuple[List[Tuple[int, str]], int]:
+    """호출 트리를 **경로별로** 편 `(상대깊이, 함수명)` 목록과 못 실은 함수 수.
+
+    ⚠ `_build_call_chain_nodes`(체인)와 **의도적으로 다르다**. 체인은 visited 기반이라
+    같은 함수가 한 번만 나오고(정본 3번 시트 실측: 중복 0/54), 전략 시트의 트리는 호출
+    경로마다 다시 펼쳐진다(정본 2번 시트 실측: `s_HistoryPushDoorState` 가 한 블록에서
+    5회 — 서로 다른 부모 밑에 각각). 한쪽 규칙을 다른 쪽에 쓰면 둘 다 정본과 어긋난다.
+
+    사이클은 **현재 경로**를 기준으로만 끊는다(형제 가지에서 같은 함수가 다시 나오는 건
+    재귀가 아니라 정상 호출이다).
+    """
+    out: List[Tuple[int, str]] = []
+    dropped: set = set()
+    stack: List[Tuple[str, int, Tuple[str, ...]]] = [(entry, 0, (entry,))]
+    while stack:
+        fn, depth, path = stack.pop()
+        if len(out) >= max_nodes:
+            dropped.add(fn)
             continue
-        seen.add(key)
-        calls_str = ", ".join(f["cross_calls"][:8])
-        via = "직접" if f.get("cross_via", "direct") == "direct" else "전이"
-        for ci, val in enumerate([f["swcom_id"], f["module_name"],
-                                   f["entry_fn"], via, calls_str], start=1):
-            c = ws.cell(row=row, column=ci, value=val)
-            c.font = data_font
-            c.border = thin
+        out.append((depth, fn))
+        if depth >= max_depth:
+            continue
+        for callee in reversed(calls_map.get(fn, [])):
+            if callee in path:      # 재귀 — 이 경로에서만 끊는다
+                continue
+            stack.append((callee, depth + 1, path + (callee,)))
+    return out, len(dropped)
+
+
+def _build_calls_map(function_details: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    """`{함수명: [프로젝트 내부 callee]}`. 외부 심볼(memset·printf 등)은 뺀다.
+
+    ⚠ `collect_integration_flows` 안쪽에도 같은 그래프가 필요하다 — 두 벌로 만들면 한쪽만
+      필터가 바뀌었을 때 전략 시트의 트리와 규격 시트의 체인이 **서로 다른 그래프**가 된다.
+    """
+    names = {str(i.get("name") or "") for i in function_details.values()
+             if isinstance(i, dict)}
+    names.discard("")
+    out: Dict[str, List[str]] = {}
+    for info in function_details.values():
+        if not isinstance(info, dict):
+            continue
+        n = str(info.get("name") or "")
+        if not n or n in out:
+            continue
+        out[n] = [c for c in (info.get("calls_list") or []) if c in names]
+    return out
+
+
+def _build_file_map(function_details: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """`{함수명: 파일명}` — 전략 시트 B열의 파일 목록에 쓴다(정본과 같은 자리)."""
+    out: Dict[str, str] = {}
+    for info in function_details.values():
+        if not isinstance(info, dict):
+            continue
+        n = str(info.get("name") or "")
+        if not n or n in out:
+            continue
+        raw = str(info.get("file") or info.get("file_name") or info.get("source_file") or "")
+        if raw:
+            out[n] = Path(raw).name
+    return out
+
+
+# 절대 깊이의 기준점. 정본 전략 시트의 `N depth` 는 진입점 기준 상대값이 아니라
+# **실행 시작점 기준**이다(`s_Ap_ExecuteControlFunctions` = 5 depth).
+_STRATEGY_ROOTS = ("main", "_EntryPoint")
+
+
+def _absolute_depth_map(
+    calls_map: Dict[str, List[str]],
+    roots: Sequence[str],
+    limit: int = 20000,
+) -> Dict[str, int]:
+    """루트(`main` 류)로부터의 **호출 깊이**. 정본 전략 시트의 `N depth` 가 이 값이다.
+
+    정본 실측: 블록 시작 depth 는 1 이 22개지만 `s_Ap_ExecuteControlFunctions` 는
+    `5 depth` 로 시작한다 — 진입점 기준 상대값이 아니라 **main 기준 절대값**이다.
+    루트에서 닿지 않는 진입점(ISR·`_EntryPoint` 등)은 그 자체가 실행 시작점이므로 1.
+    """
+    depth: Dict[str, int] = {}
+    queue: deque = deque()
+    for r in roots:
+        if r in calls_map and r not in depth:
+            depth[r] = 1
+            queue.append(r)
+    while queue and len(depth) < limit:
+        cur = queue.popleft()
+        for callee in calls_map.get(cur, []):
+            if callee not in depth:
+                depth[callee] = depth[cur] + 1
+                queue.append(callee)
+    return depth
+
+
+def _write_strategy_sheet(
+    wb,
+    flows: List[Dict[str, Any]],
+    calls_map: Dict[str, List[str]],
+    file_of: Dict[str, str],
+    depth_of: Dict[str, int],
+    stats_out: Optional[Dict[str, Any]] = None,
+    id_of_entry: Optional[Dict[str, str]] = None,
+) -> None:
+    """정본 `2.SW Integration Strategy` 를 채운다 — 통합 지점별 호출 트리.
+
+    정본 실측(v1.02): 39블록 · 2,303행 · 2,765셀. 블록 하나는
+
+        헤더행   C~ : `5 depth` … `15 depth`     ← 열 = 깊이
+        첫 행    B  : 통합 ID(`SwIT_SwUFn_0504_01`) · 깊이열 = 진입 함수
+        이후     B  : 그 트리가 걸치는 **파일 목록** · 깊이열 = 하위 함수(경로별 전개)
+
+    우리는 이 시트를 **템플릿 그대로**(제목·설명 2셀) 내보내고 있었다. 트리는 이미
+    `call_chain` 을 만들 때 갖고 있는 정보라 새로 계산할 것이 없다 — 안 쓰고 있었을 뿐이다.
+    """
+    from openpyxl.styles import Alignment, Font
+
+    ws = _find_sheet(wb, _STRATEGY_SHEET_NAME)
+    if ws is None:
+        ws = wb.create_sheet(_STRATEGY_SHEET_NAME)
+        ws.cell(row=1, column=1, value="Software Integration Strategy").font = Font(
+            name="맑은 고딕", size=12, bold=True)
+        ws.cell(row=4, column=1, value=(
+            "- 소프트웨어 테스트 계획서(STP)에서 정의한 SW Integration Strategy 에 따라 "
+            "다음과 같이 통합 순서를 정의한다."))
+
+    # 템플릿이 남긴 `< End of Document >` 는 지운다 — 트리를 그 위/아래 어디에 써도
+    # 문서 끝 표시가 본문 중간에 남으면 읽는 사람이 거기서 끝난 줄 안다.
+    end_row = 0
+    for r in range(1, min(int(ws.max_row or 1), 4000) + 1):
+        v = ws.cell(row=r, column=1).value
+        if v is not None and _END_OF_DOC in str(v):
+            ws.cell(row=r, column=1).value = None
+            end_row = r
+    hdr_font = Font(name="맑은 고딕", size=9, bold=True)
+    data_font = Font(name="맑은 고딕", size=9)
+    left = Alignment(horizontal="left", vertical="center")
+
+    row = max(6, end_row and 6 or 6)
+    blocks = truncated_blocks = 0
+    node_total = node_dropped = 0
+    for f in flows:
+        entry = str(f.get("entry_fn") or "")
+        if not entry:
+            continue
+        nodes, dropped = _build_strategy_tree(
+            entry, calls_map, _STRATEGY_MAX_NODES, _STRATEGY_MAX_DEPTH)
+        if not nodes:
+            continue
+        if row + len(nodes) + 2 > _STRATEGY_MAX_ROWS:
+            truncated_blocks += 1
+            continue
+        base = depth_of.get(entry, 1)
+        depths = sorted({base + d for d, _ in nodes})
+        # ── 헤더행: 열 = 깊이 ────────────────────────────────────────────────
+        col_of = {}
+        for i, d in enumerate(depths):
+            col = 3 + i          # C 부터
+            col_of[d] = col
+            c = ws.cell(row=row, column=col, value=f"{d} depth")
+            c.font = hdr_font
+            c.alignment = left
         row += 1
-        if row > 500:
-            break
+        # ── B열: 통합 ID + 이 트리가 걸치는 파일 목록 ────────────────────────
+        # ⚠ 여기 쓰는 ID 는 3번 시트의 TC ID 와 **연결되는 값**이어야 한다. 예전엔 내부
+        #   `flow_id`(`SwUFn_3596`)를 썼는데, 그건 규격 시트 어디에도 없는 이름이라 두 시트를
+        #   맞춰 볼 방법이 없었다(정본은 `SwITC_…` ↔ `SwIT_…` 로 접두만 다르다).
+        side: List[str] = [(id_of_entry or {}).get(entry)
+                           or str(f.get("flow_id") or entry)]
+        for _d, fn in nodes:
+            fp = str(file_of.get(fn) or "")
+            if fp and fp not in side:
+                side.append(fp)
+        for i, (d, fn) in enumerate(nodes):
+            if i < len(side):
+                ws.cell(row=row + i, column=2, value=side[i]).font = data_font
+            c = ws.cell(row=row + i, column=col_of[base + d], value=fn)
+            c.font = data_font
+            c.alignment = left
+        # 파일 목록이 트리보다 길면 남는 항목도 마저 적는다(조용히 버리지 않는다).
+        for j in range(len(nodes), len(side)):
+            ws.cell(row=row + j, column=2, value=side[j]).font = data_font
+        row += max(len(nodes), len(side)) + 1
+        blocks += 1
+        node_total += len(nodes)
+        node_dropped += dropped
+    ws.cell(row=row + 1, column=1, value=_END_OF_DOC).font = data_font
+
+    if stats_out is not None:
+        stats_out["strategy_blocks"] = blocks
+        stats_out["strategy_nodes"] = node_total
+        stats_out["strategy_nodes_dropped"] = node_dropped
+        stats_out["strategy_blocks_truncated"] = truncated_blocks
+    _logger.info("SITS: 전략 시트 — 블록 %d · 노드 %d(상한 초과 %d) · 행 상한으로 뺀 블록 %d",
+                 blocks, node_total, node_dropped, truncated_blocks)
+
+
+def _write_relid_sheets(
+    wb,
+    flows: List[Dict[str, Any]],
+    calls_map: Dict[str, List[str]],
+    file_of: Dict[str, str],
+    uds_related_map: Dict[str, List[str]],
+    design_ids: Optional[Dict[str, Any]] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
+    id_of_entry: Optional[Dict[str, str]] = None,
+) -> None:
+    """정본 `Related_ID 확인` / `Related_ID 정리` 를 채운다 — Related 칸의 **계산 근거**.
+
+    정본은 이 두 시트에서 Related ID 를 만들어 3번 시트로 옮긴다(실측: 3번 시트 55건 중
+    **43건이 `정리` D열과 문자 그대로 같고** 6건은 포함관계). 즉 이 시트들은 장식이 아니라
+    산출물의 근거표다 — 없으면 Related 칸이 어디서 왔는지 문서 안에서 확인할 방법이 없다.
+
+    `확인`  좌측: 트리 평탄화(A=통합ID·파일 / B=함수 / C=그 함수의 Related ID / D=블록 합집합)
+            우측: SwUDS 함수 인덱스(F=No / G=설계ID / H=함수명 / I=Related ID)
+    `정리`      : B=통합ID / C=진입 함수 / D=합집합
+
+    ⚠ 정본 `정리` 시트의 F~H 열(대조·`O` 표시)은 **사람이 검증한 흔적**이라 만들지 않는다.
+      생성기가 자기 출력을 자기가 `O` 로 표시하면 검증한 적 없는 것이 검증된 것처럼 보인다
+      (이 저장소가 `[[project_provenance_laundering]]` 에서 이미 겪은 형태다).
+    """
+    from openpyxl.styles import Font
+
+    hdr_font = Font(name="맑은 고딕", size=9, bold=True)
+    data_font = Font(name="맑은 고딕", size=9)
+
+    for name in (_RELID_CHECK_SHEET, _RELID_TIDY_SHEET):
+        old = _find_sheet(wb, name)
+        if old is not None:
+            del wb[old.title]
+    ws = wb.create_sheet(_RELID_CHECK_SHEET)
+    ws2 = wb.create_sheet(_RELID_TIDY_SHEET)
+
+    for col, label in ((1, "통합 ID / 파일"), (2, "함수"), (3, "Related ID"),
+                       (4, "블록 합집합")):
+        ws.cell(row=1, column=col, value=label).font = hdr_font
+    for col, label in ((6, "No"), (7, "ID"), (8, "Name"), (9, "RelatedID")):
+        ws.cell(row=1, column=col, value=label).font = hdr_font
+    for col, label in ((2, "통합 ID"), (3, "진입 함수"), (4, "Related ID(합집합)")):
+        ws2.cell(row=1, column=col, value=label).font = hdr_font
+
+    row = 2
+    trow = 2
+    for f in flows:
+        entry = str(f.get("entry_fn") or "")
+        if not entry:
+            continue
+        nodes, _dropped = _build_strategy_tree(
+            entry, calls_map, _STRATEGY_MAX_NODES, _STRATEGY_MAX_DEPTH)
+        if not nodes:
+            continue
+        if row + len(nodes) + 2 > _STRATEGY_MAX_ROWS:
+            continue
+        flow_id = (id_of_entry or {}).get(entry) or str(f.get("flow_id") or entry)
+        union = [x for x in (f.get("related_ids") or []) if x]
+        side = [flow_id]
+        for _d, fn in nodes:
+            fp = str(file_of.get(fn) or "")
+            if fp and fp not in side:
+                side.append(fp)
+        for i, (_d, fn) in enumerate(nodes):
+            if i < len(side):
+                ws.cell(row=row + i, column=1, value=side[i]).font = data_font
+            ws.cell(row=row + i, column=2, value=fn).font = data_font
+            own = ", ".join(uds_related_map.get(fn.lower()) or [])
+            if own:
+                ws.cell(row=row + i, column=3, value=own).font = data_font
+        ws.cell(row=row, column=4, value=", ".join(union)).font = data_font
+        row += max(len(nodes), len(side)) + 1
+
+        ws2.cell(row=trow, column=2, value=flow_id).font = data_font
+        ws2.cell(row=trow, column=3, value=entry).font = data_font
+        ws2.cell(row=trow, column=4, value=", ".join(union)).font = data_font
+        trow += 1
+
+    # ── 우측: SwUDS 함수 인덱스(정본과 같은 4열) ───────────────────────────
+    # ⚠ 이 맵의 키는 **소문자**다(문서 표기 흔들림 흡수용). 그대로 쓰면 두 가지가 깨진다:
+    #   ① 설계 ID 조회 — `design_ids["by_name"]` 은 원문 케이스 키라 전부 미스(G열 전멸)
+    #   ② 이름 표기 — 문서에 없는 `_entrypoint` 같은 이름이 산출물에 실린다
+    #   그래서 소문자 키로 조회하되 **원문 이름을 되살려** 적는다.
+    by_name = (design_ids or {}).get("by_name") or {}
+    design_by_lower: Dict[str, str] = {}
+    orig_name: Dict[str, str] = {}
+    for k, v in by_name.items():
+        design_by_lower.setdefault(str(k).lower(), str(v))
+        orig_name.setdefault(str(k).lower(), str(k))
+    for k in calls_map:
+        orig_name.setdefault(str(k).lower(), str(k))
+    idx_row = 2
+    for no, fn in enumerate(sorted(uds_related_map), start=1):
+        ws.cell(row=idx_row, column=6, value=no).font = data_font
+        ws.cell(row=idx_row, column=7, value=design_by_lower.get(fn, "")).font = data_font
+        ws.cell(row=idx_row, column=8, value=orig_name.get(fn, fn)).font = data_font
+        ws.cell(row=idx_row, column=9,
+                value=", ".join(uds_related_map.get(fn) or [])).font = data_font
+        idx_row += 1
+
+    if stats_out is not None:
+        stats_out["relid_check_rows"] = row - 2
+        stats_out["relid_tidy_rows"] = trow - 2
+        stats_out["relid_index_rows"] = idx_row - 2
+    _logger.info("SITS: Related_ID 시트 — 확인 %d행 · 정리 %d행 · SwUDS 인덱스 %d행",
+                 row - 2, trow - 2, idx_row - 2)
 
 
 def generate_sits_xlsm(
@@ -1883,8 +2289,15 @@ def generate_sits_xlsm(
     project_config: Optional[Dict[str, Any]] = None,
     flows: Optional[List[Dict[str, Any]]] = None,
     stp_context: Optional[Dict[str, Any]] = None,
+    strategy_context: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Generate SITS XLSM file matching the reference structure."""
+    """Generate SITS XLSM file matching the reference structure.
+
+    `strategy_context` 를 주면 근거 시트 두 벌(`2.SW Integration Strategy`,
+    `Related_ID 확인`/`정리`)을 함께 채운다:
+    `{calls_map, file_of, depth_of, uds_related_map, design_ids, stats_out}`.
+    안 주면 그 시트들은 템플릿 상태 그대로 나간다 — 조용히 빈 시트를 만들지는 않는다.
+    """
     try:
         import openpyxl
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -1908,7 +2321,10 @@ def generate_sits_xlsm(
         _create_sits_history(wb, version)
         _create_sits_intro(wb)
         _create_sits_test_env(wb, stp_context=stp_context)
-        _create_sits_strategy(wb, flows or [])
+        # 통합 전략 시트는 아래 `_write_strategy_sheet` 가 만든다(`strategy_context` 를 준
+        # 경우). 예전엔 여기서 `3-1.SW Integration Strategy` 라는 **다른 이름의 시트**를
+        # cross-calls 표로 따로 만들었는데, 정본 시트(`2.SW…`)를 채우게 된 지금은 한 파일에
+        # 같은 주제의 시트가 두 벌 남는다 — `3.`/`4.` 에서 이미 겪은 결함이라 제거했다.
         _logger.info("Created new SITS workbook (no template)")
 
     thin = Border(
@@ -2097,6 +2513,35 @@ def generate_sits_xlsm(
 
     # Freeze panes — 헤더 아래 첫 데이터 행에서 고정
     ws.freeze_panes = f"C{_DATA_START_ROW}"
+
+    # ── 근거 시트 — 통합 전략 트리 + Related ID 산출 근거 ────────────────────
+    # 시험 규격 시트를 다 쓴 뒤에 채운다(같은 flows 를 두 벌 쓰는 것이므로 순서 의존은
+    # 없지만, 실패해도 규격 시트는 이미 완성돼 있어야 한다).
+    if strategy_context:
+        _sctx = strategy_context
+        try:
+            # 근거 시트의 통합 ID 는 규격 시트 TC ID 에서 파생한다 — 두 시트를 맞춰 볼 수
+            # 없는 ID 를 적으면 근거표 구실을 못한다(정본: `SwITC_…` ↔ `SwIT_…`).
+            _id_of_entry: Dict[str, str] = {}
+            for _t in itcs or []:
+                _e = str(_t.get("entry_fn") or "")
+                if _e and _e not in _id_of_entry:
+                    _id_of_entry[_e] = _integration_id(str(_t.get("tc_id") or ""))
+            _write_strategy_sheet(
+                wb, flows or [],
+                _sctx.get("calls_map") or {}, _sctx.get("file_of") or {},
+                _sctx.get("depth_of") or {}, _sctx.get("stats_out"),
+                id_of_entry=_id_of_entry)
+            _write_relid_sheets(
+                wb, flows or [],
+                _sctx.get("calls_map") or {}, _sctx.get("file_of") or {},
+                _sctx.get("uds_related_map") or {}, _sctx.get("design_ids"),
+                _sctx.get("stats_out"), id_of_entry=_id_of_entry)
+        except Exception as exc:  # noqa: BLE001 — 근거 시트 실패가 규격 시트를 못 죽인다
+            _logger.warning("SITS: 근거 시트 생성 실패(%s) — 규격 시트는 그대로 저장한다: %s",
+                            type(exc).__name__, exc)
+            if isinstance(_sctx.get("stats_out"), dict):
+                _sctx["stats_out"]["strategy_error"] = f"{type(exc).__name__}: {exc}"
 
     # Save
     out_path = Path(output_path)
@@ -2590,11 +3035,13 @@ def generate_sits(
     # Safety Related 의 1순위 근거도 SwUDS 다(`_resolve_flow_asil`) — 소스 주석만 보면
     # 근거 없는 260건이 `QM`→`X`(비안전)로 실린다.
     _uds_asil_map = load_uds_asil_map(uds_path)
+    # Related 칸은 SwCom 만이 아니다(SwFn·SwSTR·SwST·SwTK) — 넓은 판을 따로 받는다.
+    _uds_related_map = load_uds_related_map(uds_path)
     flow_stats: Dict[str, Any] = {}
     flows = collect_integration_flows(
         function_details, max_flows=max_flows, stats_out=flow_stats,
         sds_map=_project_sds_map, uds_swcom_map=_uds_swcom_map,
-        uds_asil_map=_uds_asil_map)
+        uds_asil_map=_uds_asil_map, uds_related_map=_uds_related_map)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")
@@ -2640,6 +3087,19 @@ def generate_sits(
 
     # ── Stage 9: XLSM generation ─────────────────────────────────────────────
     _progress(80, "XLSM 파일 생성 중")
+    # 근거 시트용 컨텍스트. 호출 그래프·파일 귀속·절대 깊이는 이미 파싱해 둔 것에서
+    # 나오므로 새 IO 는 없다. `stats_out` 은 **같은 dict** 를 넘겨 시트 실적이 아래에서
+    # 품질 리포트로 합류하게 한다.
+    _calls_map_all = _build_calls_map(function_details)
+    _file_of = _build_file_map(function_details)
+    _strategy_ctx = {
+        "calls_map": _calls_map_all,
+        "file_of": _file_of,
+        "depth_of": _absolute_depth_map(_calls_map_all, _STRATEGY_ROOTS),
+        "uds_related_map": _uds_related_map,
+        "design_ids": _design_ids,
+        "stats_out": flow_stats,
+    }
     try:
         actual_output = generate_sits_xlsm(
             template_path=template_path,
@@ -2648,6 +3108,7 @@ def generate_sits(
             project_config=project_config,
             flows=flows,
             stp_context=stp_context,
+            strategy_context=_strategy_ctx,
         )
     except Exception as e:
         _logger.error("SITS: XLSM generation failed: %s", e)
@@ -2659,6 +3120,15 @@ def generate_sits(
             "elapsed_seconds": round(time.time() - t0, 1),
             "error": f"XLSM 생성 실패: {e}",
         }
+
+    # ⚠ 근거 시트 실적은 품질 리포트를 만든 **뒤에** 채워진다(시트를 그때 쓰므로).
+    #   그대로 두면 `_FLOW_COV_KEYS` 에 키를 넣어도 리포트엔 영영 안 실린다 — 같은 필터를
+    #   한 번 더 적용해 합류시킨다("보고를 추가했다" 와 "보고가 도달한다" 는 다른 문제다).
+    _late = {k: flow_stats[k] for k in _FLOW_COV_KEYS if k in flow_stats}
+    if _late:
+        quality_report.setdefault("integration_flow_coverage", {}).update(_late)
+    if flow_stats.get("strategy_error"):
+        quality_report["strategy_sheet_error"] = flow_stats["strategy_error"]
 
     # ── Stage 9.5: save intermediate JSON for VectorCAST export ─────────────
     try:
