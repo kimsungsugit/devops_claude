@@ -124,6 +124,13 @@ const CAUSE_LABELS = {
   untagged:               { ko: '방향 태그 없음',     defect: true },
   dropped_by_name_filter: { ko: '이름 추출이 버림',   defect: true },
   param_string_unusable:  { ko: '파라미터 문자열 손상', defect: true },
+  // ── STS 요구-함수 매핑의 사유 ──────────────────────────────────────────
+  // ⚠ 이 둘은 **다른 사람이 고칠 문제**다. 한 숫자로 합치면 조치 가능한 축이 안 보인다.
+  //   `unreached_in_sds` 는 SwDS 가 그 요구를 담고 있는데 우리가 그 파티션에 못 닿은
+  //   것 = 이쪽 결함. `absent_from_sds` 는 설계 문서가 그 요구를 안 이은 것 =
+  //   문서 간 추적 부재라 생성기가 고칠 수 없다 — 지어내지 않고 결정으로 넘긴다.
+  unreached_in_sds:       { ko: 'SwDS 엔 있는데 못 닿음', defect: true },
+  absent_from_sds:        { ko: 'SwDS 에 요구 자체가 없음', defect: false, decide: true },
   other:                  { ko: '기타',               defect: true },
 };
 

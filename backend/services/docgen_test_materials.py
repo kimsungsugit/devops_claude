@@ -11,6 +11,17 @@ UDS 는 "필드를 채우는" 문서지만 시험 문서는 **시험 케이스�
 | SITS SDS Related 보강 | 조회 84 → 키매칭 38 → **SwCom 0** | 맵 없음 |
 | SUTS 변수 타입 근거 확정 | 157/206 (76.2%) | 873/982 (88.9%) |
 
+## 뒤에 붙은 2축 (2026-08-14) — **사람이 판단해야 하는 것**을 화면으로 올린다
+
+| 축 | KJPDS02_PV 실측 |
+|---|---|
+| STS 요구-함수 매핑 (`sts_mapping`) | 68 중 **20 미매핑** — SwDS 엔 있는데 못 닿음 16 / SwDS 에 아예 없음 4 |
+| SUTS 안전 등급의 근거 (`suts_asil`) | 등급 962개 중 **425**(퍼지 181 + 후보 갈림 244)가 부분문자열 첫 일치 |
+
+⚠ STS 는 오래 이 파일 밖에 있었다. 그런데 STS 야말로 **재료가 없어도 TC 가 나온다** —
+매핑이 빈 요구는 `_generate_review_steps` 로 소스 근거 0 인 리뷰 절차가 채워지고,
+요구 커버리지는 100% 로 보인다. 안 재면 그 사실이 어디에도 안 나온다.
+
 ### ⚠ 캡은 "절단 0" 이 아니라 **"여유 N"** 을 봐야 한다
 
 KJPDS02 는 후보 120 / 캡 120 으로 **경계에 정확히 닿아** 있다. 지금은 절단 0 이지만
@@ -218,6 +229,8 @@ def _measure_suts_inputs(
     fd: Dict[str, Any],
     sds_map: Dict[str, Any],
     globals_info_map: Optional[Dict[str, Any]] = None,
+    *,
+    units_out: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """**입력 변수가 하나도 없는 unit** 과 그 사유.
 
@@ -227,6 +240,11 @@ def _measure_suts_inputs(
     ⚠ **0 이 전부 결함은 아니다.** 정본(1,005 unit)도 172 건이 입력 0개다 — 파라미터도
       전역도 없는 함수가 실제로 있다. 그래서 건수만 내지 않고 **사유별로** 나눈다.
       사유를 안 나누면 "정상 0" 과 "잃어버린 0" 이 한 숫자에 섞여 판단할 수가 없다.
+
+    Args:
+        units_out: 주면 수집한 unit 목록을 여기 담는다. `collect_unit_functions` 는
+            이 측정에서 가장 비싼 단계라, ASIL 근거 축(`_measure_suts_asil`)이 다시
+            부르면 같은 일을 두 번 한다. 저장소의 `stats_out` 규약과 같은 모양이다.
     """
     from generators.suts import collect_unit_functions
 
@@ -237,6 +255,8 @@ def _measure_suts_inputs(
     except Exception as exc:  # noqa: BLE001 — 생성기 계열이 광범위
         _logger.warning("test_materials: SUTS unit 수집 실패 — %s", exc, exc_info=True)
         return {"measured": False, "reason": f"unit 수집 실패 ({type(exc).__name__})"}
+    if units_out is not None:
+        units_out.extend(units)
 
     by_name = {
         str(i.get("name") or ""): i for i in (fd or {}).values() if isinstance(i, dict)
@@ -314,7 +334,125 @@ def _measure_suts_inputs(
     }
 
 
-def measure(source_root: str, *, sds_path: str = "") -> Dict[str, Any]:
+def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
+    """안전 판정(`Safety Related`)이 **무엇을 근거로** 정해졌나.
+
+    `_resolve_unit_asil` 은 SwUDS 가 침묵한 unit 의 등급을 SDS 파티션 이름의
+    **부분문자열 첫 일치**로 집는다. 그 규칙은 대안 6개를 다 재본 뒤 값을 그대로
+    두기로 한 것이지만(라운드 9), 그렇게 정해졌다는 사실까지 숨길 이유는 없다 —
+    ISO 26262 문서에서 등급의 근거는 읽는 사람이 알아야 한다.
+
+    실측(2026-08-14, KJPDS02_PV): 라이브 **28건**, SwUDS 를 끄면 **244건**.
+    즉 UDS 가 없는 프로젝트에서는 안전 등급의 상당수가 사전 순서로 정해진다.
+
+    ⚠ 건수를 `units_without_input` 처럼 "정상 기준선" 과 비교하지 않는다. 근거가 약한
+      건 몇 건까지가 정상이라는 기준선이 없다 — 0 이 기준이고 나머지는 전부 알림이다.
+    """
+    from report_gen.requirements import _asil_max_of
+
+    weak: List[str] = []
+    conflict: List[str] = []
+    graded = 0
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        # ⚠ 분모에 `TBD` 를 넣지 않는다. `asil` 은 등급을 못 찾아도 `TBD` 로 채워지므로
+        #   `str(...)` 진리값으로 세면 **전 unit 이 등급 있음**으로 잡히고, "1,157 중
+        #   425 가 약함" 이 "나머지 732 는 근거가 단단하다" 로 읽힌다. 등급 판정은
+        #   `_asil_max_of` 단일 출처(TBD·빈칸 → "")를 쓴다.
+        if _asil_max_of([str(u.get("asil") or "")]):
+            graded += 1
+        ev = str(u.get("asil_evidence") or "")
+        if ev == "sds-fuzzy-conflict":
+            conflict.append(str(u.get("name") or ""))
+        elif ev == "sds-fuzzy":
+            weak.append(str(u.get("name") or ""))
+    return {
+        "measured": True,
+        "units": len(units),
+        "graded": graded,
+        # `sds-fuzzy` = 부분문자열 첫 일치 · `sds-fuzzy-conflict` = 그 위에 **후보 등급이
+        # 갈리기까지** 한 것(= 사전 순서가 등급을 정했다). 둘을 합치면 심각도가 섞인다.
+        "fuzzy": len(weak),
+        "fuzzy_conflict": len(conflict),
+        "samples": (conflict[:6] + weak[:6])[:8],
+    }
+
+
+def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
+                         sds_reason: str, srs_path: str) -> Dict[str, Any]:
+    """요구가 **함수 근거를 갖고** 시험되는가.
+
+    `generate_test_cases` 는 매핑이 빈 요구에도 TC 를 낸다(`_generate_review_steps`).
+    그래서 요구 커버리지는 100% 로 보이는데 그 TC 들은 소스 근거가 0 이다 — 이 축이
+    없으면 그 사실이 어디에도 안 나온다.
+
+    실측(2026-08-14, KJPDS02_PV · 정본 SwRS/SwDS v3.01): 68 요구 중 **20** 이 미매핑.
+    그중 **16 은 SwDS 의 `related` 에는 있다**(우리가 그 파티션에 못 닿은 것 = 결함) ·
+    **4 는 SwDS 어디에도 없다**(설계가 그 요구를 안 이은 것 = 문서 간 추적 부재).
+    ⚠ 이 둘을 한 숫자로 합치면 조치할 수 있는 축이 안 보인다.
+    """
+    if not str(srs_path or "").strip():
+        return {"measured": False, "reason": "SwRS 경로가 지정되지 않았습니다"}
+    try:
+        from backend.services.resolver_helpers import materialize_via_resolver
+        local, reason = materialize_via_resolver(srs_path)
+        if not local:
+            return {"measured": False, "reason": reason or "SwRS 를 읽지 못했습니다"}
+        from generators.sts import (
+            _MAX_TC_PER_REQ,
+            _REQ_ID_PAT,
+            map_requirements_to_functions,
+            parse_srs_docx_tables,
+        )
+        reqs = parse_srs_docx_tables(str(local)) or []
+    except Exception as exc:  # noqa: BLE001 — docx/IPC 계열이 광범위
+        _logger.warning("test_materials: SwRS 요구 파싱 실패 — %s", exc, exc_info=True)
+        return {"measured": False,
+                "reason": f"SwRS 파싱 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+    if not reqs:
+        return {"measured": False, "reason": "SwRS 에서 요구를 찾지 못했습니다"}
+
+    # ⚠ `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)을 쓴다. 게이트가 그걸
+    #   쓰면 남의 프로젝트 요구 ID 로 잰 숫자를 보여 준다 — 명시적으로 `{}` 를 준다.
+    req_to_fids = map_requirements_to_functions(reqs, fd, sds_map=sds_map or {})
+    mentioned = {
+        m.group(1)
+        for v in (sds_map or {}).values() if isinstance(v, dict)
+        for m in _REQ_ID_PAT.finditer(str(v.get("related") or ""))
+    }
+    causes: Dict[str, int] = {}
+    samples: Dict[str, List[str]] = {}
+    for r in reqs:
+        rid = str(r.get("id") or "")
+        if req_to_fids.get(rid):
+            continue
+        cause = "unreached_in_sds" if rid in mentioned else "absent_from_sds"
+        causes[cause] = causes.get(cause, 0) + 1
+        bucket = samples.setdefault(cause, [])
+        if len(bucket) < 8:
+            bucket.append(rid)
+
+    # 요구당 TC 상한이 버리는 함수. ⚠ **하한**이다 — 한 함수가 여러 TC 를 내면 상한이
+    # 더 일찍 차므로 실제로는 더 빠진다(실측: 여기 계산 715 vs 실제 887).
+    cap = _MAX_TC_PER_REQ
+    mapped_fids = {f for v in req_to_fids.values() for f in v}
+    kept_fids = {f for v in req_to_fids.values() for f in v[:cap]}
+    return {
+        "measured": True,
+        "requirements": len(reqs),
+        "mapped": sum(1 for v in req_to_fids.values() if v),
+        "causes": causes,
+        "cause_samples": samples,
+        "sds_reason": sds_reason,
+        "cap": cap,
+        "mapped_functions": len(mapped_fids),
+        "functions_beyond_cap": len(mapped_fids - kept_fids),
+        "requirements_over_cap": sum(1 for v in req_to_fids.values() if len(v) > cap),
+    }
+
+
+def measure(source_root: str, *, sds_path: str = "", srs_path: str = "") -> Dict[str, Any]:
     """시험 문서 재료를 측정한다. **느리다** — 전용 엔드포인트에서만 부를 것."""
     if not str(source_root or "").strip():
         return {"ok": False, "reason": "소스 루트가 지정되지 않았습니다"}
@@ -336,13 +474,19 @@ def measure(source_root: str, *, sds_path: str = "") -> Dict[str, Any]:
         return {"ok": False, "reason": "소스에서 함수를 찾지 못했습니다", "functions": 0}
 
     sds_map, sds_reason = _load_sds_map(sds_path)
+    # ⚠ unit 수집은 이 측정에서 가장 비싼 단계다. 입력 축과 ASIL 근거 축이 **같은
+    #   목록**을 봐야 하기도 한다 — 따로 두 번 부르면 비용도 두 배고, 그 사이 규칙이
+    #   갈리면 두 패널이 서로 다른 그림을 보여 준다(`_dir_tag` 주석의 전례).
+    _units: List[Any] = []
     result = {
         "ok": True,
         "functions": len(fd),
         "elapsed_s": round(time.time() - t0, 1),
         "sits": _measure_sits(fd, sds_map, sds_reason),
         "suts": _measure_suts_types(fd),
-        "suts_inputs": _measure_suts_inputs(fd, sds_map, gim),
+        "suts_inputs": _measure_suts_inputs(fd, sds_map, gim, units_out=_units),
+        "suts_asil": _measure_suts_asil(_units),
+        "sts_mapping": _measure_sts_mapping(fd, sds_map, sds_reason, srs_path),
     }
     with _CACHE_LOCK:
         _CACHE[_key(source_root)] = (time.time(), result)

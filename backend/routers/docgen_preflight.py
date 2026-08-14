@@ -447,22 +447,27 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 actions=[{"kind": "measure_source"}],
             ))
 
-    # ── 3-b. 재료 — 시험 문서 전용 (SITS 흐름 / SUTS 타입) ───────────────────
+    # ── 3-b. 재료 — 시험 문서 전용 (STS 요구매핑 / SITS 흐름 / SUTS 타입) ─────
     #
     # UDS 는 필드를 채우지만 시험 문서는 **시험 케이스를 합성한다**. 재료가 없으면
     # 문서가 안 만들어지는 게 아니라 **틀린 시험값이 만들어진다**.
-    if req.doc_type in ("sits", "suts") and src and available.get(_req.IN_SOURCE_ROOT):
+    #
+    # ⚠ STS 는 오래 이 게이트 밖에 있었다. 그런데 STS 야말로 재료가 없어도 TC 가
+    #   나온다 — 매핑이 빈 요구는 `_generate_review_steps` 로 **소스 근거 0** 인
+    #   리뷰 절차가 채워지고, 요구 커버리지는 100% 로 보인다.
+    _MATERIAL_DOCS = ("sts", "sits", "suts")
+    _MATERIAL_LABEL = "요구 매핑 / 통합 흐름 / 변수 타입"
+    if req.doc_type in _MATERIAL_DOCS and src and available.get(_req.IN_SOURCE_ROOT):
         tm = _tm.cached(src) if _tm.has_cached(src) else None
         if tm is None:
             steps.append(_step(
-                "test_materials", "material", S_UNMEASURED,
-                "통합 흐름 / 변수 타입",
+                "test_materials", "material", S_UNMEASURED, _MATERIAL_LABEL,
                 reason="아직 측정하지 않았습니다 — 소스 파싱은 수십 초 이상 걸립니다",
                 actions=[{"kind": "measure_source"}],
             ))
         elif not tm.get("ok"):
             steps.append(_step("test_materials", "material", S_UNMEASURED,
-                               "통합 흐름 / 변수 타입", reason=str(tm.get("reason") or "")))
+                               _MATERIAL_LABEL, reason=str(tm.get("reason") or "")))
         else:
             if req.doc_type == "sits":
                 s = tm["sits"]
@@ -537,6 +542,75 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                             f"{c}: {', '.join(v[:4])}"
                             for c, v in (z.get("cause_samples") or {}).items()
                         ],
+                    ))
+                # 안전 판정의 **근거**. 값을 바꾸자는 게 아니라(대안 6개가 다 더 나빴다 —
+                # `suts._resolve_unit_asil`), 그 등급이 파티션 이름의 부분문자열 첫
+                # 일치로 정해졌다는 사실을 ISO 26262 문서 앞에서 숨기지 않는다.
+                a = tm.get("suts_asil") or {}
+                if a.get("measured"):
+                    _fz, _cf = a.get("fuzzy", 0), a.get("fuzzy_conflict", 0)
+                    steps.append(_step(
+                        "suts_asil_evidence", "material",
+                        S_OK if not (_fz or _cf) else S_DEGRADED,
+                        "안전 등급의 근거",
+                        measured={"value": _fz + _cf, "of": a.get("graded", 0),
+                                  "units": a.get("units", 0), "conflict": _cf},
+                        reason=(
+                            f"{_fz + _cf}개 unit 의 안전 등급이 SwDS 파티션 이름의 "
+                            f"**부분문자열 첫 일치**로 정해졌습니다"
+                            + (f" (그중 {_cf}개는 후보 등급까지 갈립니다 = 사전 순서가 "
+                               "등급을 정했습니다)" if _cf else "")
+                            + " — SwUDS 를 주면 그 표가 먼저 결정합니다"
+                            if (_fz or _cf) else ""
+                        ),
+                        samples=list(a.get("samples") or []),
+                    ))
+            if req.doc_type == "sts":
+                # 요구가 **함수 근거를 갖고** 시험되는가. 매핑이 빈 요구도 TC 는 나오므로
+                # (`_generate_review_steps`) 이 축이 없으면 근거 0 인 TC 가 커버리지
+                # 100% 뒤에 숨는다.
+                m = tm.get("sts_mapping") or {}
+                if not m.get("measured"):
+                    steps.append(_step(
+                        "sts_req_mapping", "material", S_UNMEASURED,
+                        "요구-함수 매핑", reason=str(m.get("reason") or ""),
+                    ))
+                else:
+                    _tot = max(int(m.get("requirements") or 0), 1)
+                    _mapped = int(m.get("mapped") or 0)
+                    _unmapped = _tot - _mapped
+                    steps.append(_step(
+                        "sts_req_mapping", "material",
+                        S_OK if not _unmapped else S_DEGRADED, "요구-함수 매핑",
+                        measured={"value": _mapped, "of": m.get("requirements"),
+                                  "causes": m.get("causes") or {}},
+                        reason=(
+                            f"{_unmapped}개 요구가 함수에 안 붙었습니다 — 그 요구의 TC 는 "
+                            "소스 근거 없이 리뷰 절차로만 만들어집니다"
+                            + (f" ({m['sds_reason']})" if m.get("sds_reason") else "")
+                            if _unmapped else ""
+                        ),
+                        samples=[
+                            f"{c}: {', '.join(v[:4])}"
+                            for c, v in (m.get("cause_samples") or {}).items()
+                        ],
+                    ))
+                    # ⚠ 상한이 버리는 함수는 **하한**이다. 한 함수가 여러 TC 를 내면
+                    #   상한이 더 일찍 차므로 실제로는 더 빠진다(실측 715 vs 887).
+                    _beyond = int(m.get("functions_beyond_cap") or 0)
+                    steps.append(_step(
+                        "sts_tc_cap", "material",
+                        S_OK if not _beyond else S_DEGRADED, "요구당 TC 상한",
+                        measured={"value": m.get("mapped_functions"), "cap": m.get("cap"),
+                                  "beyond_cap": _beyond,
+                                  "requirements_over_cap": m.get("requirements_over_cap")},
+                        reason=(
+                            f"매핑된 함수 {m.get('mapped_functions')}개 중 **최소** "
+                            f"{_beyond}개가 요구당 상한({m.get('cap')})에 걸려 시험되지 "
+                            f"않습니다. 남는 {m.get('cap')}개가 무엇인지는 관련성이 아니라 "
+                            "**함수 순서**가 정합니다"
+                            if _beyond else ""
+                        ),
                     ))
 
     # ── 4. 사슬 — 각 필드를 채울 경로의 단계별 가용성 ─────────────────────────
@@ -893,9 +967,13 @@ def docgen_comment_targets(req: CommentTargetsRequest) -> Dict[str, Any]:
 class MeasureSourceRequest(BaseModel):
     source_root: str
     max_files: int = 300
-    # 시험 문서(SITS/SUTS)면 통합 흐름·변수 타입까지 잰다. 파서가 달라 비용이 별개다.
+    # 시험 문서(STS/SITS/SUTS)면 통합 흐름·변수 타입·요구 매핑까지 잰다.
+    # 파서가 달라 비용이 별개다.
     doc_type: str = ""
     sds_path: str = ""
+    # STS 축(요구-함수 매핑)에만 쓴다. 없으면 그 축은 **미측정**으로 남는다 —
+    # 요구 목록이 없으면 "몇 개가 근거 없이 시험되는가" 를 셀 수가 없다.
+    srs_path: str = ""
 
 
 @router.post("/api/docgen/measure-source")
@@ -912,8 +990,9 @@ def docgen_measure_source(req: MeasureSourceRequest) -> Dict[str, Any]:
         "ok": True,
         "comment_coverage": _cov.measure(req.source_root, max_files=req.max_files),
     }
-    if str(req.doc_type or "").strip().lower() in ("sits", "suts"):
-        out["test_materials"] = _tm.measure(req.source_root, sds_path=req.sds_path)
+    if str(req.doc_type or "").strip().lower() in ("sts", "sits", "suts"):
+        out["test_materials"] = _tm.measure(
+            req.source_root, sds_path=req.sds_path, srs_path=req.srs_path)
     return out
 
 

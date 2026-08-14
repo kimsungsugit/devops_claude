@@ -285,6 +285,28 @@ describe('DocGenPreflightPanel', () => {
     expect(screen.getByText(/이름 추출이 버림 5/)).toHaveTextContent('⚠');
   });
 
+  // ── STS 요구-함수 매핑의 사유 (2026-08-14) ────────────────────────────────
+  //
+  // 미매핑 요구를 한 숫자로 합치면 **누가 고칠 문제인지**가 안 보인다. 실측
+  // (KJPDS02_PV) 20건 중 16 은 SwDS 가 담고 있는데 우리가 못 닿은 것(= 이쪽 결함),
+  // 4 는 SwDS 어디에도 없는 것(= 설계가 안 이은 것, 생성기가 고칠 수 없다).
+
+  const stsMappingStep = (causes) => ({
+    id: 'sts_req_mapping', phase: 'material', state: 'degraded', label: '요구-함수 매핑',
+    measured: { value: 48, of: 68, causes },
+  });
+
+  it('SwDS 에 요구 자체가 없는 축은 결함이 아니라 결정으로 그린다', () => {
+    renderPanel(base([stsMappingStep({ unreached_in_sds: 16, absent_from_sds: 4 })]));
+    const ours = screen.getByText(/SwDS 엔 있는데 못 닿음 16/);
+    const theirs = screen.getByText(/SwDS 에 요구 자체가 없음 4/);
+    expect(ours).toHaveTextContent('⚠');
+    expect(theirs).not.toHaveTextContent('⚠');
+    // 결정 축은 정상(muted)과도 달라야 한다 — muted 로 칠하면 아무도 안 본다.
+    expect(theirs.style.fontWeight).toBe('600');
+    expect(theirs.style.color).not.toBe(ours.style.color);
+  });
+
   it('사유가 0 건인 축은 그리지 않는다 — 없는 결함을 조치항목으로 만들지 않는다', () => {
     renderPanel(base([zeroInputStep({ no_params_no_globals: 79, dropped_by_name_filter: 0 })]));
     expect(screen.queryByText(/이름 추출이 버림/)).toBeNull();

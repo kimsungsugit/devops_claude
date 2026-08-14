@@ -12,6 +12,8 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const mockApi = vi.fn();
 const mockPost = vi.fn();
@@ -454,5 +456,29 @@ describe('DocGenStatusBoard — 시험 결과 문서 원클릭 생성', () => {
     // 보조 표에는 커버리지 계열만 남는다.
     expect(screen.getByText('SwUT 커버리지')).toBeInTheDocument();
     expect(screen.queryByText('통합 결과')).toBeNull();
+  });
+});
+
+// ── 재료 측정 요청에 SwRS 를 싣는가 (2026-08-14) ─────────────────────────────
+//
+// STS 축(요구-함수 매핑)은 **요구 목록**이 있어야 잰다. 안 보내면 게이트가
+// "SwRS 경로가 지정되지 않았습니다" 로 미측정에 머문다 — 조용히 틀리지는 않지만,
+// 그 축은 영원히 안 켜진다.
+//
+// ⚠ 이건 **구조 검사**다. 준비 패널을 열고 액션까지 눌러 재현하는 행동 검사가 더
+//   낫지만, 미측정 사유가 화면에 그대로 나오므로(=침묵 아님) 여기서는 요청 본문이
+//   두 문서를 다 싣는지만 못 박는다.
+describe('measure-source 요청 본문 (구조)', () => {
+  const SRC = fs.readFileSync(
+    path.join(process.cwd(), 'src/components/sections/DocGenStatusBoard.jsx'), 'utf8');
+
+  it('SwDS 와 SwRS 를 함께 보낸다', () => {
+    const call = SRC.slice(SRC.indexOf("'/api/docgen/measure-source'"));
+    const body = call.slice(0, call.indexOf('});') + 3);
+    expect(body).toMatch(/sds_path:/);
+    expect(body).toMatch(/srs_path:/);
+    // 경로 출처도 같아야 한다 — 한쪽만 설정(doc_paths)을 보면 두 축이 다른 프로젝트를 잰다.
+    expect(body).toMatch(/paths\.sds/);
+    expect(body).toMatch(/paths\.srs/);
   });
 });

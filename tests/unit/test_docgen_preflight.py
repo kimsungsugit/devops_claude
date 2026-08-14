@@ -453,3 +453,127 @@ def test_unmeasurable_source_does_not_mark_comment_absent(tmp_path: Path) -> Non
     assert chain is not None
     have = {r["source"]: r["have"] for r in chain["chain"]}
     assert have["comment"] is None, "측정 실패인데 '확인했고 없음' 으로 그렸다"
+
+
+# ── STS 재료 게이트 (2026-08-14 신설) ───────────────────────────────────────
+#
+# STS 는 오래 이 게이트 밖에 있었다(`doc_type in ("sits","suts")`). 그런데 STS 야말로
+# 재료가 없어도 TC 가 나온다 — 매핑이 빈 요구는 `_generate_review_steps` 로 **소스
+# 근거 0** 인 리뷰 절차가 채워지고, 요구 커버리지는 100% 로 보인다.
+
+def _sts_materials(**over) -> dict:
+    base = {
+        "ok": True, "functions": 10, "elapsed_s": 0.1,
+        "sits": {"flows_total": 0, "cap": 120, "headroom": 120, "at_cap_boundary": False,
+                 "sds_map_entries": 0, "sds_reason": "", "sds_lookups": 0,
+                 "sds_key_hits": 0, "sds_swcom_hits": 0, "sample_flow": None},
+        "suts": {"variables": 0, "grounded": 0, "fallback": 0, "fallback_samples": []},
+        "sts_mapping": {
+            "measured": True, "requirements": 68, "mapped": 48,
+            "causes": {"unreached_in_sds": 16, "absent_from_sds": 4},
+            "cause_samples": {"unreached_in_sds": ["SwTR_0108"],
+                              "absent_from_sds": ["SwNTSR_0101"]},
+            "sds_reason": "", "cap": 5, "mapped_functions": 1028,
+            "functions_beyond_cap": 925, "requirements_over_cap": 42,
+        },
+    }
+    base["sts_mapping"].update(over)
+    return base
+
+
+def _with_materials(tmp_path: Path, materials: dict, doc_type: str = "sts") -> dict:
+    import time as _time
+
+    from backend.services import docgen_test_materials as tm
+    root = str(tmp_path)           # 실재해야 재료 단계까지 간다(조건부 스킵 = 공허 통과)
+    tm.clear_cache()
+    tm._CACHE[tm._key(root)] = (_time.time(), materials)
+    try:
+        return _post({"doc_type": doc_type, "source_root": root})
+    finally:
+        tm.clear_cache()
+
+
+def test_sts_reaches_the_material_gate_at_all(tmp_path: Path) -> None:
+    """회귀 대상 — 이 조건이 `("sits","suts")` 였을 때 STS 는 단계 자체가 없었다."""
+    data = _with_materials(tmp_path, _sts_materials())
+    assert _step(data, "sts_req_mapping") is not None, "STS 가 재료 게이트에 못 들어왔다"
+
+
+def test_unmapped_requirements_are_named_with_their_cause(tmp_path: Path) -> None:
+    """건수만으로는 조치할 수 없다 — **누가 고칠 문제인지**가 사유로 갈려야 한다."""
+    step = _step(_with_materials(tmp_path, _sts_materials()), "sts_req_mapping")
+    assert step["state"] == "degraded"
+    assert step["measured"]["causes"] == {"unreached_in_sds": 16, "absent_from_sds": 4}
+    assert "리뷰 절차" in step["reason"], "근거 0 인 TC 가 나온다는 사실이 안 적혔다"
+
+
+def test_fully_mapped_requirements_are_quiet(tmp_path: Path) -> None:
+    """대조군 — 다 붙으면 조용하다(경고를 상시 켜 두면 아무도 안 본다)."""
+    step = _step(
+        _with_materials(tmp_path, _sts_materials(mapped=68, causes={}, cause_samples={})),
+        "sts_req_mapping")
+    # ⚠ `_step` 은 빈 값을 아예 안 싣는다 — `step["reason"]` 은 KeyError 다.
+    assert step["state"] == "ok" and not step.get("reason")
+
+
+def test_tc_cap_says_it_is_a_lower_bound_and_order_decides(tmp_path: Path) -> None:
+    """⚠ 두 가지를 반드시 말해야 한다.
+
+    ① 이 값은 **하한**이다(한 함수가 여러 TC 를 내면 상한이 더 일찍 찬다 —
+       실측 계산 715 vs `generate_test_cases` 실측 887).
+    ② 남는 5개가 무엇인지는 관련성이 아니라 **함수 순서**가 정한다.
+    """
+    step = _step(_with_materials(tmp_path, _sts_materials()), "sts_tc_cap")
+    assert step is not None and step["state"] == "degraded"
+    assert "최소" in step["reason"], "하한이라는 사실이 안 적혔다"
+    assert "순서" in step["reason"], "무엇이 남는지를 순서가 정한다는 사실이 안 적혔다"
+
+
+def test_sts_material_gate_never_blocks(tmp_path: Path) -> None:
+    """`degraded` 로 생성을 막지 않는다 — 막으면 실측상 아무도 문서를 못 만든다.
+
+    ⚠ verdict 자체는 다른 이유(필수 입력 미확보)로 blocked 일 수 있다. 그래서 전체
+    verdict 이 아니라 **이 두 단계가 차단 상태를 내는지**를 본다 — 안 그러면 이
+    테스트는 남의 실패에 얹혀 초록이 되거나 빨개진다.
+    """
+    data = _with_materials(tmp_path, _sts_materials())
+    for sid in ("sts_req_mapping", "sts_tc_cap"):
+        st = _step(data, sid)
+        assert st is not None, f"{sid} 단계가 없다"
+        assert st["state"] in ("ok", "degraded", "unmeasured"),             f"{sid} 가 차단 상태({st['state']})를 냈다"
+
+
+def test_unmeasured_sts_mapping_is_not_drawn_as_zero(tmp_path: Path) -> None:
+    """재지 못한 값을 0 으로 그리지 않는다(모듈 docstring 규약 3)."""
+    mats = _sts_materials()
+    mats["sts_mapping"] = {"measured": False, "reason": "SwRS 경로가 지정되지 않았습니다"}
+    step = _step(_with_materials(tmp_path, mats), "sts_req_mapping")
+    assert step["state"] == "unmeasured"
+    assert "SwRS" in step["reason"]
+    assert not step.get("measured"), "미측정인데 숫자를 실었다"
+
+
+def test_asil_evidence_axis_is_surfaced_for_suts(tmp_path: Path) -> None:
+    """안전 등급이 **부분문자열 첫 일치**로 정해졌다는 사실을 숨기지 않는다.
+
+    값을 바꾸자는 게 아니다(대안 6개가 다 더 나빴다 — `suts._resolve_unit_asil`).
+    ISO 26262 문서에서 등급의 근거는 읽는 사람이 알아야 한다.
+    """
+    mats = _sts_materials()
+    mats["suts_inputs"] = {"measured": False, "reason": "n/a"}
+    mats["suts_asil"] = {"measured": True, "units": 1157, "graded": 962,
+                         "fuzzy": 181, "fuzzy_conflict": 244, "samples": ["g_DrvIn_Main"]}
+    step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
+    assert step is not None and step["state"] == "degraded"
+    assert step["measured"] == {"value": 425, "of": 962, "units": 1157, "conflict": 244}
+    assert "갈립니다" in step["reason"], "충돌 건수를 따로 말하지 않았다"
+
+
+def test_asil_evidence_is_quiet_when_all_exact(tmp_path: Path) -> None:
+    mats = _sts_materials()
+    mats["suts_inputs"] = {"measured": False, "reason": "n/a"}
+    mats["suts_asil"] = {"measured": True, "units": 10, "graded": 10,
+                         "fuzzy": 0, "fuzzy_conflict": 0, "samples": []}
+    step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
+    assert step["state"] == "ok" and not step.get("reason")

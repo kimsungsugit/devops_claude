@@ -510,3 +510,137 @@ def test_test_report_form_fields_are_shared(doc_type: str) -> None:
     )
     assert doc_type in TEST_REPORT_DOC_TYPES
     assert "release_sw_version" in TEST_REPORT_FORM_FIELDS
+
+
+# ── STS 요구-함수 매핑 ──────────────────────────────────────────────────────
+#
+# `generate_test_cases` 는 매핑이 빈 요구에도 TC 를 낸다(`_generate_review_steps`).
+# 그래서 요구 커버리지는 100% 로 보이는데 그 TC 들은 소스 근거가 0 이다. 이 축이
+# 없으면 그 사실이 어디에도 안 나온다.
+
+def _sts_env(monkeypatch, reqs, *, srs="U:/x/SwRS.docx"):
+    """SwRS 파싱을 대신한다 — docx 를 만들지 않고 매핑 규칙만 겨눈다."""
+    import backend.services.resolver_helpers as _rh
+    import generators.sts as _gsts
+    monkeypatch.setattr(_rh, "materialize_via_resolver", lambda p: (p, ""))
+    monkeypatch.setattr(_gsts, "parse_srs_docx_tables", lambda p: list(reqs))
+    return srs
+
+
+def test_sts_mapping_needs_the_srs_and_says_so() -> None:
+    """요구 목록이 없으면 **미측정**이다 — 0 으로 그리지 않는다."""
+    res = tm._measure_sts_mapping({}, {}, "", "")
+    assert res["measured"] is False
+    assert "SwRS" in res["reason"]
+
+
+def test_sts_unmapped_splits_our_defect_from_design_gap(monkeypatch) -> None:
+    """미매핑을 한 숫자로 합치면 조치 가능한 축이 안 보인다.
+
+    실측(KJPDS02_PV): 20건 중 **16 은 SwDS 의 related 에 있다**(우리가 그 파티션에
+    못 닿은 것 = 결함) · **4 는 SwDS 어디에도 없다**(설계가 안 이은 것).
+    """
+    srs = _sts_env(monkeypatch, [{"id": "SwTR_0001"}, {"id": "SwTR_0002"}, {"id": "SwTR_0003"}])
+    fd = {"f1": {"id": "f1", "name": "S_Motor_Init", "module_name": "MotorCtrl", "related": ""}}
+    sds = {
+        "motorctrl": {"related": "SwTR_0001", "asil": "", "description": ""},
+        # SwTR_0002 는 SwDS 가 담고 있지만 어떤 함수도 이 파티션에 못 닿는다
+        "zzz_far_away": {"related": "SwTR_0002", "asil": "", "description": ""},
+        # SwTR_0003 은 SwDS 어디에도 없다
+    }
+    res = tm._measure_sts_mapping(fd, sds, "", srs)
+    assert res["measured"] is True
+    assert res["mapped"] == 1 and res["requirements"] == 3
+    assert res["causes"] == {"unreached_in_sds": 1, "absent_from_sds": 1}
+    assert res["cause_samples"]["absent_from_sds"] == ["SwTR_0003"]
+
+
+def test_sts_mapping_does_not_fall_back_to_repo_docs(monkeypatch) -> None:
+    """⚠ `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)을 쓴다.
+
+    게이트가 그걸 쓰면 남의 프로젝트 요구 ID 로 잰 숫자를 보여 준다. 맵이 비면
+    "매핑 0" 이 정답이다.
+    """
+    import generators.sts as _gsts
+    srs = _sts_env(monkeypatch, [{"id": "SwTR_0001"}])
+    called = {"n": 0}
+
+    def _boom():
+        called["n"] += 1
+        return {"motorctrl": {"related": "SwTR_0001", "asil": "", "description": ""}}
+
+    monkeypatch.setattr(_gsts, "_load_default_sds_map", _boom)
+    fd = {"f1": {"id": "f1", "name": "S_Motor_Init", "module_name": "MotorCtrl", "related": ""}}
+    res = tm._measure_sts_mapping(fd, {}, "SwDS 경로가 지정되지 않았습니다", srs)
+    assert called["n"] == 0, "저장소 docs/ 폴백을 탔다 — 남의 프로젝트로 잰 숫자다"
+    assert res["mapped"] == 0
+    assert res["sds_reason"], "맵이 없는 사유를 안 실으면 0 이 결함으로만 읽힌다"
+
+
+def test_sts_tc_cap_counts_functions_left_untested(monkeypatch) -> None:
+    """요구당 상한이 버리는 함수를 센다. ⚠ 이 값은 **하한**이다.
+
+    한 함수가 여러 TC 를 내면 상한이 더 일찍 차므로 실제로는 더 빠진다
+    (실측: 이 계산 715 vs `generate_test_cases` 실측 887).
+    """
+    from generators.sts import _MAX_TC_PER_REQ
+
+    n = _MAX_TC_PER_REQ + 3
+    srs = _sts_env(monkeypatch, [{"id": "SwTR_0001"}])
+    fd = {
+        f"f{i}": {"id": f"f{i}", "name": f"S_Fn_{i}", "module_name": f"Mod{i}", "related": ""}
+        for i in range(n)
+    }
+    sds = {f"mod{i}": {"related": "SwTR_0001", "asil": "", "description": ""} for i in range(n)}
+    res = tm._measure_sts_mapping(fd, sds, "", srs)
+    assert res["mapped_functions"] == n
+    assert res["functions_beyond_cap"] == n - _MAX_TC_PER_REQ
+    assert res["requirements_over_cap"] == 1
+
+
+# ── SUTS 안전 등급의 근거 ───────────────────────────────────────────────────
+
+def test_asil_denominator_excludes_tbd() -> None:
+    """⚠ `asil` 은 등급을 못 찾아도 `TBD` 로 채워진다.
+
+    진리값으로 세면 **전 unit 이 등급 있음**이 되고, "962 중 425 가 약함" 이
+    "나머지는 근거가 단단하다" 로 읽힌다. 실측에서 분모가 1,157 → 962 로 바뀌었다.
+    """
+    units = [
+        {"name": "a", "asil": "B", "asil_evidence": "sds-exact"},
+        {"name": "b", "asil": "TBD", "asil_evidence": ""},
+        {"name": "c", "asil": "", "asil_evidence": ""},
+    ]
+    assert tm._measure_suts_asil(units)["graded"] == 1
+
+
+def test_fuzzy_and_conflict_are_not_merged() -> None:
+    """부분문자열 매치와 **후보 등급까지 갈린 것**은 심각도가 다르다."""
+    units = [
+        {"name": "a", "asil": "B", "asil_evidence": "sds-fuzzy"},
+        {"name": "b", "asil": "C", "asil_evidence": "sds-fuzzy-conflict"},
+        {"name": "c", "asil": "D", "asil_evidence": "sds-exact"},
+    ]
+    res = tm._measure_suts_asil(units)
+    assert (res["fuzzy"], res["fuzzy_conflict"]) == (1, 1)
+    assert res["graded"] == 3
+
+
+def test_exact_evidence_alone_is_clean() -> None:
+    """대조군 — 근거가 정확 키뿐이면 이 축은 조용하다."""
+    units = [{"name": "a", "asil": "B", "asil_evidence": "sds-exact"}]
+    res = tm._measure_suts_asil(units)
+    assert (res["fuzzy"], res["fuzzy_conflict"]) == (0, 0)
+
+
+def test_units_are_collected_once_and_shared() -> None:
+    """⚠ `collect_unit_functions` 는 이 측정에서 가장 비싼 단계다.
+
+    입력 축과 ASIL 축이 따로 부르면 비용이 두 배고, 그 사이 규칙이 갈리면 두 패널이
+    **서로 다른 unit 목록**을 보여 준다(`_dir_tag` 주석의 전례).
+    """
+    fd = {"a": _unit("s_SysMain_Init")}
+    got: list = []
+    res = tm._measure_suts_inputs(fd, {}, units_out=got)
+    assert res["measured"] is True
+    assert len(got) == res["units"] and got, "units_out 이 안 채워졌다"
