@@ -368,14 +368,119 @@ def _parse_req_ids(text: str) -> List[str]:
     return re.findall(r"\bSw(?:TR|TSR|NTR|NTSR|ST|STR|Fn|Com)_\d+\b", text or "")
 
 
+def _reach_cross_module(
+    entry: str,
+    calls_map: Dict[str, List[str]],
+    module_of: Dict[str, str],
+    max_hop: int,
+) -> List[str]:
+    """`entry` 에서 `max_hop` 홉 이내에 닿는 **다른 모듈** 함수들(폭 우선 방문 순).
+
+    통합 시험의 대상은 "모듈 경계를 넘는 실행 경로"다. 그런데 계층 진입점
+    (`main` · `*_Main` · ISR · 프로토콜 파서)은 대개 **같은 모듈의 내부 함수만 직접
+    호출**하고, 실제 경계 횡단은 두세 홉 아래에서 일어난다. 직접 callee 만 보면 이런
+    진입점이 통째로 탈락한다.
+
+    실측(2026-08-14, KJPDS02_PV): 정본이 시험하는 통합지점 15개가 전부 이 경로로
+    빠져 있었다 — `main`(직접 호출 2개가 둘 다 같은 모듈) · `s_SysMain_Init` ·
+    `s_System_MainLoop` · `g_DrvIn_Main` · `g_DrvOut_Main` · `g_UDS_RDBI_Paser` ·
+    `g_UDS_WDBI_Paser` · `g_UDS_SessionCtrl` · `SCI0_ISR` · `LinRawToTp` 등.
+    """
+    my = (module_of.get(entry) or "").lower()
+    if not my:
+        return []
+    found: List[str] = []
+    seen = {entry}
+    frontier = [entry]
+    for _ in range(max(1, max_hop)):
+        nxt: List[str] = []
+        for fn in frontier:
+            for callee in calls_map.get(fn, []):
+                if callee in seen:
+                    continue
+                seen.add(callee)
+                if (module_of.get(callee) or "").lower() != my:
+                    found.append(callee)
+                else:
+                    # 같은 모듈이면 더 내려가 본다 — 경계는 그 아래에 있다.
+                    nxt.append(callee)
+        frontier = nxt
+        if not frontier:
+            break
+    return found
+
+
+def _build_call_chain_nodes(
+    entry: str,
+    calls_map: Dict[str, List[str]],
+    max_nodes: int,
+) -> Tuple[List[str], int]:
+    """호출 트리를 깊이 우선으로 편 방문 순서와, **상한에 막혀 못 넣은 함수 수**.
+
+    정본 실측(KJPDS02_PV_SwITS v1.02): 체인은
+    `Interface : main -> s_System_InitSequence -> s_SysMain_Init -> …` 처럼 **경로
+    전체**이고 길이 분포는 1~5홉 22 · 6~20홉 12 · 21~50홉 8 · 50홉 초과 5 (최대 92),
+    같은 함수가 두 번 나오는 TC 는 **0/54** 다(= visited 기반 전개).
+    우리는 `entry + 직접 cross callee 4개` = 최대 5홉만 적고 있었다.
+
+    ⚠ 상한을 넘으면 **자르되 몇 개를 못 실었는지 돌려준다**. 조용히 자르면 읽는 쪽이
+    "이 경로가 전부" 로 읽는다(이 저장소가 반복해서 물린 절단-침묵 패턴).
+    """
+    seen = {entry}
+    order = [entry]
+    dropped: set = set()
+    stack: List[Any] = [iter(calls_map.get(entry, []))]
+    while stack:
+        try:
+            callee = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if callee in seen:
+            continue
+        if len(order) >= max_nodes:
+            # 상한 초과분은 **고유 함수 단위**로 센다(같은 함수를 여러 번 만나도 1).
+            dropped.add(callee)
+            continue
+        seen.add(callee)
+        order.append(callee)
+        stack.append(iter(calls_map.get(callee, [])))
+    return order, len(dropped)
+
+
 # ---------------------------------------------------------------------------
 # Core: integration flow collection
 # ---------------------------------------------------------------------------
 
 # 통합 흐름 상한. 폭주 방지용 안전밸브이지 "이만큼만 시험하면 된다"는 뜻이 아니다.
-# 실측(KJPDS02 계열 900함수)에서는 흐름 145개 중 25개가 이 값에 걸린다 — 걸리면
-# 경고 + 품질 리포트(`integration_flow_coverage`)에 남으므로 값 조정은 보고 나서 판단할 것.
+#
+# ⚠ 이 값은 전이 판정(`_reach_cross_module`) 이전에 정해졌다. 실측(2026-08-14,
+#   KJPDS02_PV 1,157함수): 후보가 239 → **367** 로 늘었고 그중 **306개가 SwUDS 등재**다.
+#   즉 기본값 120 이면 설계가 인정한 통합 지점의 절반 이상이 규격에서 빠진다.
+#   값을 여기서 올리지 않는 이유는 프로젝트마다 규모가 다르기 때문이다 — 대신 잘린
+#   내역을 **보이게** 만들어 두었다: 경고 2줄(총량 / 그중 등재분) + 품질 리포트
+#   `integration_flow_coverage.dropped_in_design_doc_count`. 그 수치가 0 이 아니면
+#   호출자가 `max_flows` 를 올릴 근거가 된다.
 _DEFAULT_MAX_FLOWS = 120
+
+# 직접 callee 가 전부 같은 모듈일 때 **몇 홉까지 내려가** 경계를 찾을지.
+# (`_reach_cross_module` — 계층 진입점은 자기 모듈 안쪽만 직접 호출한다)
+_CROSS_REACH_HOPS = 3
+# 호출 체인 한 줄에 담을 함수 수 상한. 정본 실측 최대는 92 홉이다.
+_MAX_CHAIN_NODES = 100
+
+# `collect_integration_flows` 가 `stats_out` 에 싣는 **흐름 축** 키.
+# ⚠ 생산자와 품질 리포트가 이 목록 **하나**를 본다. 예전엔 리포트가 자기 화이트리스트를
+#   따로 들고 있어 생산자에 키를 추가해도 조용히 버려졌다 — 같은 결함을 두 번 겪었다.
+#   여기에 없는 흐름 키는 리포트에 도달하지 않으므로, 키를 늘리면 **여기부터** 고칠 것.
+#   (가드: `test_generators_sits.py::TestFlowStatsReachTheReport`)
+_FLOW_COV_KEYS: Tuple[str, ...] = (
+    "total_flows_found", "flows_emitted", "flows_dropped", "flow_emit_pct", "max_flows",
+    "dropped_safety_related_count", "dropped_asil_distribution", "dropped_entry_fns",
+    "dropped_in_design_doc_count",
+    "transitive_entries", "transitive_entries_emitted", "cross_reach_hops",
+    "chain_truncated_flows", "chain_max_nodes",
+)
 
 _ASIL_RANK: Dict[str, int] = {"D": 0, "C": 1, "B": 2, "A": 3, "QM": 4}
 
@@ -406,8 +511,24 @@ def _select_flows_within_cap(
 
     if max_flows is not None and 0 <= max_flows < total:
         indexed = list(enumerate(candidates))
-        # (등급, 알파벳 순번) — 같은 등급 안에서는 기존 순서를 그대로 지킨다(결정성 유지).
-        ranked = sorted(indexed, key=lambda t: (_asil_rank(t[1].get("asil")), t[0]))
+        # (등급, **설계 문서 등재 여부**, 알파벳 순번).
+        #
+        # ⚠ 가운데 항이 없으면 이 프로젝트에서는 사실상 **알파벳순 = 임의**다(후보가
+        #   거의 전부 QM 이다). 실측(2026-08-14, KJPDS02_PV): 후보 367 · 캡 200 에서
+        #   정본이 시험하는 통합지점 34개 중 **30개만** 살아남았고, 밀려난 것 중에는
+        #   직전 라운드까지 잘 나오던 `s_Ap_ExecuteControlFunctions`·
+        #   `s_SystemHashCalculate` 가 있었다 — 후보가 늘면 캡이 **기존 정답을 밀어낸다**.
+        #
+        #   SwUDS 등재 여부를 키에 넣으면 같은 캡에서 **34/34** 가 생존한다. 근거:
+        #   정본 통합지점은 34개 전부가 SwUDS 에 등재돼 있고(100%), 후보 전체로는
+        #   83.4%(306/367)라 미등재 61개가 먼저 밀린다. 필터로 쓰면 약하지만
+        #   **정렬 키로는 정확**하다. (호출 트리 크기·이름 패턴은 정본 보존율이
+        #   각각 35%·56% 로 오히려 나빠 기각했다.)
+        ranked = sorted(indexed, key=lambda t: (
+            _asil_rank(t[1].get("asil")),
+            0 if t[1].get("in_design_doc") else 1,
+            t[0],
+        ))
         keep_idx = {i for i, _ in ranked[:max_flows]}
         kept = [c for i, c in indexed if i in keep_idx]
         dropped = [c for i, c in indexed if i not in keep_idx]
@@ -430,6 +551,9 @@ def _select_flows_within_cap(
             "dropped_entry_fns": [str(c.get("fn_name") or "") for c in dropped],
             "dropped_asil_distribution": dist,
             "dropped_safety_related_count": safety_dropped,
+            # 잘린 것 중 **설계 문서에 등재된** 함수 수. 0 이 아니면 캡이 설계가
+            # 인정한 단위를 먹고 있다는 뜻이므로 캡 값을 다시 볼 신호다.
+            "dropped_in_design_doc_count": sum(1 for c in dropped if c.get("in_design_doc")),
         })
 
     if dropped:
@@ -439,6 +563,18 @@ def _select_flows_within_cap(
             "예: %s",
             total, len(kept), max_flows, len(dropped), safety_dropped,
             ", ".join(str(c.get("fn_name") or "") for c in dropped[:5]),
+        )
+    _doc_dropped = [c for c in dropped if c.get("in_design_doc")]
+    if _doc_dropped:
+        # 등재분까지 먹었다는 건 캡이 **설계가 인정한 단위**를 자르고 있다는 뜻이다.
+        # 실측(2026-08-14, KJPDS02_PV): 후보 367 중 등재 306, 캡 200 → 등재분 106개가
+        # 잘렸고 그 안에 정본 통합지점 3개(`s_System_MainLoop`·`s_SystemHashCalculate`·
+        # `s_SysEepromCtrl_WriteData_Direct`)가 있었다. 캡 값을 다시 볼 신호다.
+        _logger.warning(
+            "SITS: 그중 %d개는 **SwUDS 에 등재된** 통합 지점이다 — 캡(%s)이 설계가 인정한 "
+            "단위를 자르고 있다. 예: %s",
+            len(_doc_dropped), max_flows,
+            ", ".join(str(c.get("fn_name") or "") for c in _doc_dropped[:5]),
         )
 
     return kept
@@ -456,18 +592,26 @@ def collect_integration_flows(
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
-    An integration flow is a function that calls functions from a different
-    module (file).  Flows are grouped by the calling function (entry point).
+    통합 흐름 = **모듈 경계를 넘는 실행 경로의 진입점**이다. 경계를 직접 넘든
+    (`cross_via="direct"`), 같은 모듈 안쪽을 몇 홉 지나 넘든(`"transitive"`) 자격은
+    같다 — 계층 진입점(`main`·`*_Main`·ISR·프로토콜 파서)은 후자의 모양이고, 직접
+    callee 만 보던 판정에서 **정본 통합지점 15개가 통째로 빠졌다**(`_reach_cross_module`).
 
     Returns list of flow dicts:
-      { flow_id, entry_fn, call_chain, functions, module_name, swcom_id,
-        input_vars, expected_vars, asil, related_ids }
+      { flow_id, entry_fn, call_chain, cross_via, cross_calls, chain_dropped,
+        functions, module_name, swcom_id, input_vars, expected_vars, asil,
+        related_ids, synthetic_related_ids }
+
+    `call_chain` 은 정본과 같이 **경로 전체**다(`_build_call_chain_nodes`).
+    `chain_dropped` 가 0 이 아니면 그 경로는 상한에 걸려 잘린 것이다.
 
     Args:
         sds_map: Related ID 보강용 SDS 파티션 맵. None 이면 저장소 `docs/` 글롭
             (`_load_default_sds_map`)으로 폴백하는데 이는 **프로젝트 무관**이다
             — `sts.py`/`suts.py` 는 이미 같은 파라미터를 갖고 있었고 여기만 없어서
             **호출자가 대상 프로젝트의 SDS 를 줄 방법 자체가 없었다.**
+        uds_swcom_map: `{함수명(소문자): [SwCom_NN]}` — Related 칸 SwCom 의 **유일한
+            문서 근거**(`load_uds_swcom_map`). 주지 않으면 순번 합성 ID 로 내려간다.
 
     `stats_out` 를 주면 캡 절단 내역(총 후보 수·제외 수·제외분 ASIL 분포)과
     **SDS 보강 실적**(`sds_*` 키)을 채운다. 소비처에서 결과 길이로 되짚으면 절단을 못
@@ -500,6 +644,16 @@ def collect_integration_flows(
 
     # Set of all project function names (lower-case) for ISR-artefact filtering
     _fn_name_set: set = {n.lower() for n in name_to_info if n}
+
+    # 전이 판정·체인 전개용 호출 그래프. **프로젝트 함수끼리의 호출만** 남긴다
+    # (memset/printf 같은 외부 심볼은 파싱 그래프에 없고 통합 경로도 아니다).
+    _module_of: Dict[str, str] = {n: _get_module_name(i) for n, i in name_to_info.items() if n}
+    _calls_map: Dict[str, List[str]] = {
+        n: [c for c in (i.get("calls_list") or []) if c in name_to_info]
+        for n, i in name_to_info.items() if n
+    }
+    _transitive_entries = 0       # 직접 경계 없이 전이로만 자격을 얻은 진입점 수
+    _chain_truncated_total = 0    # 체인이 상한에 걸려 잘린 흐름 수(침묵 금지)
 
     swcom_counter: Dict[str, int] = {}
     flows: List[Dict[str, Any]] = []
@@ -540,8 +694,17 @@ def collect_integration_flows(
                 if callee_module and callee_module.lower() != my_module.lower():
                     cross_calls.append(callee)
 
+        # 직접 callee 가 전부 같은 모듈이어도, **몇 홉 아래에서** 경계를 넘으면 그건
+        # 통합 지점이다 — 계층 진입점(`main`·`*_Main`·ISR·파서)의 전형적인 모양이다.
+        # 이 폴백이 없을 때 정본 통합지점 15개가 통째로 빠졌다(`_reach_cross_module`).
+        _cross_via = "direct"
         if not cross_calls:
-            continue
+            cross_calls = _reach_cross_module(
+                fn_name, _calls_map, _module_of, _CROSS_REACH_HOPS)
+            if not cross_calls:
+                continue
+            _cross_via = "transitive"
+            _transitive_entries += 1
 
         seen_entries.add(fn_name)
 
@@ -559,6 +722,12 @@ def collect_integration_flows(
             "fn_name": fn_name,
             "my_module": my_module,
             "cross_calls": cross_calls,
+            # 경계를 **직접** 넘는지, 몇 홉 아래에서 넘는지. 같은 `cross_calls` 라도
+            # 근거가 다르므로 산출물·리포트가 구별할 수 있어야 한다.
+            "cross_via": _cross_via,
+            # 설계 문서(SwUDS)에 등재된 함수인가 — 캡 선별 키
+            # (`_select_flows_within_cap` 주석의 실측 근거 참조).
+            "in_design_doc": fn_name.lower() in (uds_swcom_map or {}),
             "asil": _cand_asil,
             "swcom_id": _infer_swcom_id(my_module, swcom_counter),
         })
@@ -574,9 +743,16 @@ def collect_integration_flows(
         my_module = _cand["my_module"]
         cross_calls = _cand["cross_calls"]
 
-        # Build call chain string
-        chain_parts = [fn_name] + cross_calls[:4]
-        call_chain = " -> ".join(chain_parts)
+        # ── Call chain — 정본은 **경로 전체**를 적는다 ────────────────────────
+        # 정본 실측(KJPDS02_PV_SwITS v1.02): `Interface : main -> s_System_InitSequence
+        # -> …` 로 최대 92 홉, 같은 함수 재등장 0/54(= visited 전개). 우리는
+        # `entry + 직접 cross callee 4개` = 최대 5 홉만 적어, 통합 경로가 아니라
+        # **첫 갈림길 몇 개**만 보여 주고 있었다.
+        _chain_nodes, _chain_dropped = _build_call_chain_nodes(
+            fn_name, _calls_map, _MAX_CHAIN_NODES)
+        call_chain = " -> ".join(_chain_nodes)
+        if _chain_dropped:
+            _chain_truncated_total += 1
 
         # Collect variables
         # Each entry stored as (display_name, annotated_raw) so that
@@ -779,8 +955,12 @@ def collect_integration_flows(
             "flow_id": fid,
             "entry_fn": fn_name,
             "call_chain": call_chain,
+            # 경계를 직접 넘는지(`direct`) 몇 홉 아래에서 넘는지(`transitive`).
+            "cross_via": _cand.get("cross_via", "direct"),
             "cross_calls": cross_calls,
-            "functions": [fn_name] + cross_calls,
+            # 체인이 상한에 걸려 못 실은 함수 수. 0 이 아니면 이 경로는 **전부가 아니다**.
+            "chain_dropped": _chain_dropped,
+            "functions": _chain_nodes,
             "module_name": my_module,
             "swcom_id": swcom_id,
             "input_vars": input_vars,
@@ -808,6 +988,13 @@ def collect_integration_flows(
             "uds_swcom_lookups": _uds_swcom_lookups,
             "uds_swcom_hits": _uds_swcom_hits,
             "uds_swcom_ids": _uds_swcom_ids,
+            # 경계 판정 축 — 직접 vs 전이. 전이분이 0 이면 계층 진입점이 다시 빠지고
+            # 있다는 뜻이므로 이 값이 회귀 신호가 된다.
+            "transitive_entries": _transitive_entries,
+            "cross_reach_hops": _CROSS_REACH_HOPS,
+            # 체인 절단 — 0 이 아니면 그 흐름의 경로는 **전부가 아니다**.
+            "chain_truncated_flows": _chain_truncated_total,
+            "chain_max_nodes": _MAX_CHAIN_NODES,
         })
     if _sds_lookups and not _sds_swcom_hits:
         # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
@@ -829,7 +1016,23 @@ def collect_integration_flows(
             "Related ID 는 순번 합성 SwCom 만 남는다 — 추적성 지표를 그대로 믿지 말 것.",
             _uds_swcom_lookups, len(uds_swcom_map),
         )
-    _logger.info("SITS: collected %d integration flows", len(flows))
+    if _chain_truncated_total:
+        _logger.warning(
+            "SITS: 호출 체인이 상한(%d)에 걸려 흐름 %d개에서 잘렸다 — 그 TC 의 "
+            "Interface 칸은 **경로 전부가 아니다**.",
+            _MAX_CHAIN_NODES, _chain_truncated_total,
+        )
+    # ⚠ `_transitive_entries` 는 **후보** 기준(Pass 1)이고 `flows` 는 캡 적용 후다.
+    #   방출된 쪽을 따로 세지 않으면 캡에 잘린 전이 후보가 직접분으로 둔갑한다.
+    _emitted_transitive = sum(1 for f in flows if f.get("cross_via") == "transitive")
+    _logger.info(
+        "SITS: collected %d integration flows (직접 경계 %d · 전이 경계 %d · %d홉까지 탐색"
+        " · 후보 단계 전이 %d)",
+        len(flows), len(flows) - _emitted_transitive, _emitted_transitive,
+        _CROSS_REACH_HOPS, _transitive_entries,
+    )
+    if stats_out is not None:
+        stats_out["transitive_entries_emitted"] = _emitted_transitive
     return flows
 
 
@@ -1336,7 +1539,10 @@ def _create_sits_strategy(wb, flows: List[Dict[str, Any]]) -> None:
     ws["A3"] = "통합 순서 및 컴포넌트 경계 호출 목록:"
     ws["A3"].font = hdr_font
 
-    for ci, h in enumerate(["SwCom ID", "Module", "Entry Function", "Cross-Module Calls"], start=1):
+    # ⚠ 경계 근거(직접/전이)를 함께 낸다 — 같은 "Cross-Module Calls" 라도 진입점이
+    #   직접 넘은 것과 몇 홉 아래에서 넘은 것은 읽는 사람에게 다른 사실이다.
+    for ci, h in enumerate(["SwCom ID", "Module", "Entry Function",
+                            "경계", "Cross-Module Calls"], start=1):
         c = ws.cell(row=5, column=ci, value=h)
         c.font = hdr_font
         c.fill = hdr_fill
@@ -1352,8 +1558,9 @@ def _create_sits_strategy(wb, flows: List[Dict[str, Any]]) -> None:
             continue
         seen.add(key)
         calls_str = ", ".join(f["cross_calls"][:8])
+        via = "직접" if f.get("cross_via", "direct") == "direct" else "전이"
         for ci, val in enumerate([f["swcom_id"], f["module_name"],
-                                   f["entry_fn"], calls_str], start=1):
+                                   f["entry_fn"], via, calls_str], start=1):
             c = ws.cell(row=row, column=ci, value=val)
             c.font = data_font
             c.border = thin
@@ -1649,17 +1856,12 @@ def generate_sits_quality_report(
     fs = flow_stats or {}
     flow_cov: Dict[str, Any] = {}
     if fs.get("total_flows_found") is not None:
-        _found = int(fs.get("total_flows_found") or 0)
-        flow_cov = {
-            "total_flows_found": _found,
-            "flows_emitted": int(fs.get("flows_emitted") or 0),
-            "flows_dropped": int(fs.get("flows_dropped") or 0),
-            "flow_emit_pct": fs.get("flow_emit_pct"),
-            "max_flows": fs.get("max_flows"),
-            "dropped_safety_related_count": int(fs.get("dropped_safety_related_count") or 0),
-            "dropped_asil_distribution": fs.get("dropped_asil_distribution") or {},
-            "dropped_entry_fns": list(fs.get("dropped_entry_fns") or []),
-        }
+        # ⚠ 키 목록은 `_FLOW_COV_KEYS` **하나**가 출처다. 예전엔 여기에 이름을 손으로
+        #   나열했는데, 생산자에 키를 추가해도 이 목록에 없으면 **조용히 버려졌다**.
+        #   같은 결함을 두 번 겪었다(2026-07-31 `sds_*`, 2026-08-14 전이/체인 축) —
+        #   두 번째에는 "전이 판정이 동작했는가" 를 리포트에서 확인할 수 없어,
+        #   캡에 잘린 정본 지점 3개의 원인 규명이 한 라운드 늦어졌다.
+        flow_cov = {k: fs[k] for k in _FLOW_COV_KEYS if k in fs}
 
     # SDS 기반 Related 보강 실적. **조건 없이** 싣는다 — 0 건이야말로 실어야 하는 값이다.
     # ⚠ 이걸 빠뜨렸다가 자체 감사에서 잡혔다: `collect_integration_flows` 가 `stats_out`

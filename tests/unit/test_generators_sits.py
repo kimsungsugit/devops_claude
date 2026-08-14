@@ -18,6 +18,25 @@ from generators.sits import (
 )
 
 
+def _fd_layered():
+    """계층 진입점 모양 — `main` 은 **같은 모듈** 함수만 직접 호출한다.
+
+    실제 경계 횡단은 두 홉 아래(`s_Init_Core` → `Drv_Spi_Write`)에서 일어난다.
+    정본이 시험하는 통합지점 15개가 전부 이 모양이라 1홉 판정에서 통째로 빠졌다.
+    """
+    def _f(name, file, calls):
+        return {"name": name, "file": file, "calls_list": list(calls),
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "asil": "B"}
+
+    return {
+        "F1": _f("main", "SysOs.c", ["s_System_Init"]),
+        "F2": _f("s_System_Init", "SysOs.c", ["s_Init_Core"]),
+        "F3": _f("s_Init_Core", "SysOs.c", ["Drv_Spi_Write"]),
+        "F4": _f("Drv_Spi_Write", "Drv_Spi.c", []),
+    }
+
+
 def _fd(*, related_by_name=None):
     """cross-module 호출 1건을 갖는 최소 function_details."""
     related_by_name = related_by_name or {}
@@ -50,6 +69,189 @@ class TestSyntheticSwComIsMarked:
         assert f["related_ids"], "합성 ID가 항상 들어간다는 전제가 깨졌다"
         assert f["synthetic_related_ids"] == [f["swcom_id"]]
         assert f["swcom_id"] in f["related_ids"]
+
+
+class TestTransitiveCrossModuleQualifies:
+    """계층 진입점은 **같은 모듈 안쪽만** 직접 호출한다 — 1홉 판정이면 통째로 빠진다.
+
+    실측(2026-08-14, KJPDS02_PV): 정본이 시험하는 통합지점 15개가 전부 이 경로로
+    누락됐다 — `main`(직접 호출 2개가 둘 다 같은 모듈) · `s_SysMain_Init` ·
+    `s_System_MainLoop` · `g_DrvIn_Main` · `g_UDS_RDBI_Paser` · `SCI0_ISR` 등.
+    """
+
+    def test_layered_entry_qualifies_via_transitive_reach(self):
+        flows = collect_integration_flows(_fd_layered())
+        entries = {f["entry_fn"] for f in flows}
+        assert "main" in entries, f"계층 진입점이 후보에서 빠졌다: {sorted(entries)}"
+
+    def test_transitive_qualification_is_labelled(self):
+        """직접 경계와 전이 경계는 근거가 다르다 — 산출물이 구별할 수 있어야 한다."""
+        flows = collect_integration_flows(_fd_layered())
+        by_entry = {f["entry_fn"]: f for f in flows}
+        assert by_entry["main"]["cross_via"] == "transitive"
+        # 대조군: 직접 경계를 넘는 흐름은 `direct` 로 남는다
+        direct = collect_integration_flows(_fd())
+        assert direct[0]["cross_via"] == "direct"
+
+    def test_hop_limit_is_respected(self):
+        """무한 전이가 아니다 — 상한 밖의 경계는 자격이 아니다."""
+        from generators.sits import _reach_cross_module
+
+        calls = {"a": ["b"], "b": ["c"], "c": ["d"], "d": []}
+        mods = {"a": "M1", "b": "M1", "c": "M1", "d": "M2"}
+        assert _reach_cross_module("a", calls, mods, max_hop=2) == []
+        assert _reach_cross_module("a", calls, mods, max_hop=3) == ["d"]
+
+    def test_transitive_count_is_reported(self):
+        """전이분이 0 이 되면 계층 진입점이 다시 빠진 것 — 회귀 신호로 쓰인다."""
+        stats: dict = {}
+        collect_integration_flows(_fd_layered(), stats_out=stats)
+        assert stats["transitive_entries"] >= 1
+        assert stats["transitive_entries_emitted"] >= 1
+        assert stats["cross_reach_hops"] >= 1
+
+
+class TestFlowStatsReachTheReport:
+    """생산자가 낸 흐름 통계가 **리포트까지 도달**하는가.
+
+    "보고를 추가했다" 와 "보고가 도달한다" 는 다른 문제다. 리포트가 자기 화이트리스트를
+    따로 들고 있어 새 키가 조용히 버려진 일이 두 번 있었다(2026-07-31 `sds_*`,
+    2026-08-14 전이/체인 축 — 후자는 캡에 잘린 정본 지점의 원인 규명을 한 라운드
+    늦췄다). 목록을 `_FLOW_COV_KEYS` 하나로 묶고 그 정합을 여기서 강제한다.
+    """
+
+    def test_no_flow_stat_is_silently_dropped(self):
+        from generators.sits import _FLOW_COV_KEYS
+
+        stats: dict = {}
+        collect_integration_flows(_fd_layered(), max_flows=1, stats_out=stats)
+        # 흐름 축 = SDS/SwUDS 보강 축을 뺀 나머지(그 둘은 별도 dict 로 나간다)
+        flow_keys = {k for k in stats if not k.startswith(("sds_", "uds_swcom_"))}
+        missing = sorted(flow_keys - set(_FLOW_COV_KEYS))
+        assert not missing, f"리포트에 실리지 않는 흐름 통계: {missing}"
+
+    def test_new_axes_are_actually_in_the_payload(self):
+        """목록에 있는 것과 실제로 실리는 것은 또 다르다 — 산출 payload 로 확인."""
+        stats: dict = {}
+        collect_integration_flows(_fd_layered(), max_flows=1, stats_out=stats)
+        cov = generate_sits_quality_report(
+            [], total_source_functions=4, flow_stats=stats)["integration_flow_coverage"]
+        for key in ("transitive_entries", "cross_reach_hops",
+                    "chain_truncated_flows", "dropped_in_design_doc_count"):
+            assert key in cov, f"{key} 가 리포트에 없다"
+
+
+class TestCapKeepsDesignDocumentedFlows:
+    """캡이 걸릴 때 **설계 문서(SwUDS)에 등재된** 흐름을 먼저 지킨다.
+
+    실측(2026-08-14, KJPDS02_PV): 후보 367 · 캡 200 에서 정본 통합지점 34개 중
+    알파벳순으로는 30개만 살아남았다 — 후보가 늘면 캡이 **기존 정답을 밀어낸다**.
+    등재 여부를 키에 넣으면 34/34 가 생존한다(정본 지점은 100% 등재, 후보 전체는 83.4%).
+    """
+
+    @staticmethod
+    def _fd_many(n):
+        out = {}
+        for i in range(n):
+            out[f"F{i}"] = {
+                "name": f"fn_{i:03d}", "file": f"M{i}.c", "calls_list": [f"callee_{i:03d}"],
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "asil": "QM",
+            }
+            out[f"C{i}"] = {
+                "name": f"callee_{i:03d}", "file": f"Other{i}.c", "calls_list": [],
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "asil": "QM",
+            }
+        return out
+
+    def test_documented_flow_survives_the_cap_over_alphabetical_order(self):
+        """알파벳 꼴찌라도 등재돼 있으면 살아남는다 — 이게 없으면 순서가 곧 운이다."""
+        fd = self._fd_many(6)
+        # 알파벳 마지막(fn_005)만 등재
+        flows = collect_integration_flows(
+            fd, max_flows=1, uds_swcom_map={"fn_005": ["SwCom_09"]})
+        assert [f["entry_fn"] for f in flows] == ["fn_005"]
+
+    def test_undocumented_are_dropped_first_and_counted(self):
+        stats: dict = {}
+        fd = self._fd_many(6)
+        collect_integration_flows(
+            fd, max_flows=2, stats_out=stats,
+            uds_swcom_map={"fn_004": ["SwCom_09"], "fn_005": ["SwCom_10"]})
+        assert set(stats["dropped_entry_fns"]) == {"fn_000", "fn_001", "fn_002", "fn_003"}
+        assert stats["dropped_in_design_doc_count"] == 0
+
+    def test_dropping_a_documented_flow_is_reported(self):
+        """등재분까지 잘리면 캡 값을 다시 볼 신호 — 그 사실이 수치로 나와야 한다."""
+        stats: dict = {}
+        fd = self._fd_many(4)
+        collect_integration_flows(
+            fd, max_flows=1, stats_out=stats,
+            uds_swcom_map={f"fn_{i:03d}": ["SwCom_01"] for i in range(4)})
+        assert stats["dropped_in_design_doc_count"] == 3
+
+    def test_dropping_a_documented_flow_warns(self, caplog):
+        """수치만 있고 아무도 안 보면 소용없다 — 로그로도 말한다."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="generators.sits"):
+            collect_integration_flows(
+                self._fd_many(4), max_flows=1,
+                uds_swcom_map={f"fn_{i:03d}": ["SwCom_01"] for i in range(4)})
+        msg = " ".join(r.getMessage() for r in caplog.records)
+        assert "SwUDS 에 등재된" in msg
+
+    def test_no_documented_drop_no_extra_warning(self, caplog):
+        """음성 대조군 — 미등재분만 잘리면 그 경고는 안 나온다(경고 피로 방지)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="generators.sits"):
+            collect_integration_flows(
+                self._fd_many(4), max_flows=1, uds_swcom_map={"fn_000": ["SwCom_01"]})
+        msgs = [r.getMessage() for r in caplog.records if "SwUDS 에 등재된" in r.getMessage()]
+        assert not msgs
+
+    def test_asil_still_outranks_documentation(self):
+        """안전 등급이 먼저다 — 등재 여부가 ASIL 을 뒤집으면 안 된다."""
+        fd = self._fd_many(2)
+        fd["F0"]["asil"] = "B"          # 미등재이지만 안전 관련
+        flows = collect_integration_flows(
+            fd, max_flows=1, uds_swcom_map={"fn_001": ["SwCom_09"]})
+        assert [f["entry_fn"] for f in flows] == ["fn_000"]
+
+
+class TestCallChainIsWholePath:
+    """정본은 경로 **전체**를 적는다(최대 92홉, 함수 재등장 0/54)."""
+
+    def test_chain_spans_the_whole_tree_not_just_direct_callees(self):
+        flows = collect_integration_flows(_fd_layered())
+        chain = next(f["call_chain"] for f in flows if f["entry_fn"] == "main")
+        assert chain.split(" -> ") == [
+            "main", "s_System_Init", "s_Init_Core", "Drv_Spi_Write",
+        ], chain
+
+    def test_cycles_do_not_repeat_or_hang(self):
+        from generators.sits import _build_call_chain_nodes
+
+        calls = {"a": ["b"], "b": ["c"], "c": ["a", "b"]}
+        nodes, dropped = _build_call_chain_nodes("a", calls, max_nodes=50)
+        assert nodes == ["a", "b", "c"] and dropped == 0
+
+    def test_truncation_is_counted_not_silent(self):
+        """자르는 건 괜찮다 — 자른 걸 **말하지 않는** 게 문제다."""
+        from generators.sits import _build_call_chain_nodes
+
+        calls = {"a": ["b", "c", "d"], "b": [], "c": [], "d": []}
+        nodes, dropped = _build_call_chain_nodes("a", calls, max_nodes=2)
+        assert nodes == ["a", "b"]
+        assert dropped == 2, "잘린 함수 수가 0 이면 소비처가 '경로 전부' 로 읽는다"
+
+    def test_truncated_flow_carries_the_count(self):
+        stats: dict = {}
+        flows = collect_integration_flows(_fd_layered(), stats_out=stats)
+        assert all("chain_dropped" in f for f in flows)
+        assert stats["chain_max_nodes"] >= 1
 
 
 class TestUdsSwComIsTheRealSource:
