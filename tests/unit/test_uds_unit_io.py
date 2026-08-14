@@ -320,3 +320,96 @@ class TestAsilSourcePolicy:
         assert u["asil"] == "A"
         assert "충돌 1건" in caplog.text, caplog.text
         assert "Fn_Under_Test" in caplog.text
+
+
+class TestSdsFallbackEvidence:
+    """SDS 파티션 폴백은 **값을 그대로 두고 근거만** 돌려준다.
+
+    ⚠ 값을 안 고친 건 게을러서가 아니라 **대안 6개가 다 더 나빴기 때문**이다
+    (실측 2026-08-14, KJPDS02_PV · SwUDS 를 끈 상태 · 정본이 채운 868칸):
+
+        현행 689(79.4%)·over 88 | 빈등급스킵 689·over 108 | 합의필요 563·over 18
+        max 621·over 176 | 정확키만 400·over 17 | 파일→SwCom 672·**under 46**
+
+    특히 "등급 없는 파티션에서 멈추는 건 버그" 라고 고치면 over 가 20 늘어난다.
+    그 멈춤을 만든 첫 매치가 `(swdsg) …design guideline….docx`(문서 목록 행)인데,
+    `Lin` 이 `guide**lin**e` 에 걸린 것이다 — 그런데도 결과는 그쪽이 정본에 가깝다.
+
+    그래서 이 테스트들은 **값 고정**(회귀 가드)과 **근거 분류**(신규 관측)를 함께 건다.
+    """
+
+    _details = staticmethod(TestUdsOverridesSourceNames._details)
+
+    def test_exact_partition_hit_is_labelled(self):
+        from generators.suts import _resolve_unit_asil
+
+        assert _resolve_unit_asil({"module_name": "MotorCtrl_PDS"},
+                                  {"motor control": {"asil": "A"}}) == ("A", "sds-exact")
+
+    def test_fuzzy_hit_is_labelled(self):
+        from generators.suts import _resolve_unit_asil
+
+        assert _resolve_unit_asil({"module_name": "MotorCtrl_PDS"},
+                                  {"motor control module": {"asil": "A"}}) == ("A", "sds-fuzzy")
+
+    def test_conflicting_candidates_are_flagged_not_silently_picked(self):
+        """후보 등급이 갈리는데 하나를 집는 경우 — 실측 380건 중 **216건(57%)**.
+
+        사전 순서가 안전 등급을 정했다는 뜻이라, 값은 그대로 두되 표시는 남긴다.
+        """
+        from generators.suts import _resolve_unit_asil
+
+        got, ev = _resolve_unit_asil({"module_name": "Lin"},
+                                     {"lin stack": {"asil": "A"}, "lin misc": {"asil": "QM"}})
+        assert ev == "sds-fuzzy-conflict"
+        assert got == "A", "채택값은 예전 그대로(첫 매치)여야 한다"
+
+    def test_empty_grade_first_match_still_stops_the_pick(self):
+        """⚠ **회귀 가드.** 등급 없는 파티션이 첫 매치면 예전처럼 거기서 값이 정해진다.
+
+        `Lin` 이 `(swdsg) … guideline ….docx` 에 걸리는 실제 경로다. 고치면 정본 대비
+        over 가 88 → 108 로 는다 — 고치고 싶어질 때 이 테스트가 막는다.
+        """
+        from generators.suts import _resolve_unit_asil
+
+        got, ev = _resolve_unit_asil(
+            {"module_name": "Lin"},
+            {"(swdsg) software architecture design guideline_v1.00.docx": {},
+             "lin stack": {"asil": "A"}})
+        assert got == "", f"등급 없는 첫 매치가 값을 안 정했다: {got!r}"
+        assert ev.startswith("sds-fuzzy")
+
+    def test_no_match_is_empty_evidence(self):
+        from generators.suts import _resolve_unit_asil
+
+        assert _resolve_unit_asil({"module_name": "ZZZ"}, {"motor": {"asil": "A"}}) == ("", "")
+
+    def test_unit_carries_the_evidence(self):
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "TBD"
+        d["SwUFn_0101"]["module_name"] = "Lin"
+        u = collect_unit_functions(d, sds_map={"lin stack": {"asil": "A"},
+                                               "lin misc": {"asil": "QM"}})[0]
+        assert u["asil_evidence"] == "sds-fuzzy-conflict", u
+
+    def test_uds_and_source_evidence_labels(self):
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "QM"
+        m = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": "A"}}}
+        assert collect_unit_functions(d, sds_map={}, uds_io_map=m)[0]["asil_evidence"] == "uds+source"
+        d2 = self._details()
+        d2["SwUFn_0101"]["asil"] = "TBD"
+        assert collect_unit_functions(d2, sds_map={}, uds_io_map=m)[0]["asil_evidence"] == "uds"
+
+    def test_weak_evidence_is_counted_in_the_summary(self, caplog):
+        """조용히 넘어가지 않는다 — 안전 문서에서 근거의 약함은 읽는 사람 몫이다."""
+        import logging
+
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "TBD"
+        d["SwUFn_0101"]["module_name"] = "Lin"
+        with caplog.at_level(logging.INFO, logger="generators.suts"):
+            collect_unit_functions(d, sds_map={"lin stack": {"asil": "A"},
+                                               "lin misc": {"asil": "QM"}})
+        assert "ASIL 근거 약함 1건" in caplog.text, caplog.text
+        assert "Fn_Under_Test" in caplog.text

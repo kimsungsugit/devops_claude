@@ -188,7 +188,44 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
     return merged
 
 
-def _resolve_unit_asil(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]]) -> str:
+def _resolve_unit_asil(info: Dict[str, Any],
+                       sds_map: Dict[str, Dict[str, str]]) -> Tuple[str, str]:
+    """모듈명으로 SDS 파티션의 ASIL 을 찾는다 → `(등급, 근거)`.
+
+    근거는 `"sds-exact"` · `"sds-fuzzy"` · `"sds-fuzzy-conflict"` · `""`(못 찾음).
+
+    ## ⚠ 값은 일부러 그대로 둔다 — 대안 6개를 다 재봤고 **하나도 이기지 못했다**
+
+    2단계 사슬이다: ①후보(모듈명·`_pds` 제거·토큰화)로 **정확 키** 조회(등급 있는 것만)
+    → ②정규화 후 **부분문자열 양방향** 매칭의 **첫 일치**를 그대로 채택(그 파티션에
+    등급이 없어도 거기서 멈춘다).
+
+    ②는 누가 봐도 허술하다. 실측(2026-08-14, KJPDS02_PV · SwUDS 를 끈 상태 =
+    UDS 없는 프로젝트 시뮬 · 정본이 `Safety Related` 를 채운 868칸):
+
+        정책                      일치            over  under  빈칸
+        **현행**                 689  79.4%       88     2     89
+        빈 등급 스킵+첫 매치        689  79.4%      108     2     69
+        빈 등급 스킵+가장 구체적     689  79.4%      108     2     69
+        후보들이 합의해야 채택       563  64.9%       18     2    285
+        max 등급                 621  71.5%      176     2     69
+        정확 키만(퍼지 폐지)        400  46.1%       17     2    449
+        파일→SwCom→SDS 정확조회    672  77.4%       89   **46**   61
+
+    · "등급 없는 파티션에서 멈추는 건 버그" 라고 고쳐보면 **더 나빠진다**. 실제로
+      멈추게 만든 첫 매치가 `(swdsg) software architecture design guideline…docx`
+      (문서 목록 행 — `Lin` 이 `guide**lin**e` 에 걸렸다)인데, 그 뒤에 있던 등급을
+      채워 넣으면 정본이 `X` 라 한 20칸이 전부 `O` 가 된다(over 88 → 108).
+    · `docs/component_map.json`(파일→`SwCom_NN`) 경유 정확 조회는 **under 를 2 → 46**
+      으로 키운다. under-classification 은 ISO 26262 에서 가장 위험한 방향이다.
+
+    그래서 **값은 안 건드리고 근거만 돌려준다.** 라이브에서는 어차피 SwUDS 표가
+    먼저 결정하므로(그쪽 방향 오류 0) 이 사슬은 UDS 가 침묵한 unit 에만 쓰인다.
+
+    ⚠ 다만 침묵하지는 않는다: 퍼지 매치의 후보 등급이 **갈리는데도** 하나를 집는
+      경우가 실측 380건 중 **216건(57%)** 이다. 그건 사전 순서가 안전 등급을 정했다는
+      뜻이라, `sds-fuzzy-conflict` 로 표시하고 호출부가 센다.
+    """
     def _norm(value: str) -> str:
         return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
@@ -207,7 +244,12 @@ def _resolve_unit_asil(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]])
     for candidate in candidates:
         direct = sds_map.get(candidate.lower())
         if direct and direct.get("asil"):
-            return str(direct["asil"]).strip()
+            return str(direct["asil"]).strip(), "sds-exact"
+    # ⚠ **한 번만 훑는다.** 채택값(= 첫 매치, 현행 그대로)과 "후보 등급이 갈리는가"를
+    #   같은 순회에서 얻는다. 근거를 재려고 두 번 돌면 같은 순회 규칙을 두 벌 들게 되고,
+    #   그러면 다음에 한쪽만 고쳐진다(이 저장소가 여러 번 겪은 모양).
+    picked: Optional[str] = None
+    grades: set[str] = set()
     for candidate in candidates:
         nc = _norm(candidate)
         if not nc:
@@ -217,8 +259,21 @@ def _resolve_unit_asil(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]])
             if not nk:
                 continue
             if nc == nk or nc in nk or nk in nc:
-                return str(value.get("asil") or "").strip()
-    return ""
+                got = str(value.get("asil") or "").strip()
+                if picked is None:
+                    picked = got          # 현행 채택 규칙: 첫 매치(빈 등급이어도 여기서 끝)
+                if got:
+                    grades.add(got.upper())
+            # 채택값과 "갈린다"가 둘 다 확정되면 더 봐도 결론이 안 바뀐다.
+            # (옛 판은 첫 매치에서 곧장 return 했으므로, 여기서 안 끊으면 파티션 871개를
+            #  함수마다 끝까지 훑는 순수 손해가 된다.)
+            if picked is not None and len(grades) > 1:
+                break
+        if picked is not None and len(grades) > 1:
+            break
+    if picked is None:
+        return "", ""
+    return picked, ("sds-fuzzy-conflict" if len(grades) > 1 else "sds-fuzzy")
 
 _SRS_REQ_ID_PAT = re.compile(
     r"\b(?:SW[_R]?|SRS|Sw|HDPDM\d*|SWR|SWS|SYSRS)[_-]?\d[\w_-]*",
@@ -478,6 +533,10 @@ def collect_unit_functions(
     # 소스 `@asil` 주석과 SwUDS 표가 **다른 등급**을 말하는 unit. max 로 올려 쓰되
     # 조용히 넘어가지 않는다 — 어느 쪽이 낡았는지는 사람이 판단할 문제다.
     _asil_conflicts: List[str] = []
+    # SDS 파티션 폴백이 **후보 등급이 갈리는데도** 하나를 집은 unit. 값은 예전 그대로지만
+    # (대안 6개가 다 더 나빴다 — `_resolve_unit_asil` 주석) 그 사실을 침묵시키지는 않는다:
+    # 사전 순서가 안전 등급을 정했다는 뜻이고, 안전 문서에서 그건 읽는 사람이 알아야 한다.
+    _asil_weak: List[str] = []
 
     for fid, info in function_details.items():
         if not isinstance(info, dict):
@@ -707,8 +766,15 @@ def collect_unit_functions(
         if _src_grade and _uds_grade and _src_grade != _uds_grade:
             _asil_conflicts.append(f"{name}(소스 {_src_grade} vs UDS {_uds_grade})")
         asil = _asil_max_of([_src_asil, _uds_asil])
+        _asil_evidence = ("uds+source" if _src_grade and _uds_grade
+                          else "uds" if _uds_grade else "source" if _src_grade else "")
         if not asil:
-            asil = _resolve_unit_asil(info, sds_map) or _src_asil or "TBD"
+            # SDS 파티션 폴백 — 값은 예전과 같다. 다만 그 값이 **모듈명 부분문자열
+            # 매칭의 첫 일치**라는 사실과, 후보 등급이 갈렸는지를 함께 받는다.
+            _sds_asil, _asil_evidence = _resolve_unit_asil(info, sds_map)
+            asil = _sds_asil or _src_asil or "TBD"
+            if _asil_evidence == "sds-fuzzy-conflict":
+                _asil_weak.append(name)
 
         # Collect indirect (global) vars for GLOBAL/VOID strategies
         indirect_vars: List[str] = []
@@ -735,6 +801,9 @@ def collect_unit_functions(
             "calls_list": info.get("calls_list") or [],
             "description": info.get("description", ""),
             "asil": asil,
+            # 그 등급이 **어디서 왔나**. `sds-fuzzy-conflict` 는 "모듈명 부분문자열
+            # 매칭에서 후보 등급이 갈렸고 그중 하나를 집었다" 는 뜻이다.
+            "asil_evidence": _asil_evidence,
             "srs_req_ids": srs_req_ids,
             "precondition": info.get("precondition", ""),
         })
@@ -762,6 +831,11 @@ def collect_unit_functions(
     )
     # ASIL 이 소스 주석과 문서에서 갈린 unit. max 로 올려 썼다는 사실을 남긴다 —
     # 어느 쪽이 낡았는지 판단은 사람 몫이고, 조용하면 그 판단 기회가 사라진다.
+    if _asil_weak:
+        _const_note += (
+            f" | ⚠ASIL 근거 약함 {len(_asil_weak)}건(SDS 모듈명 부분문자열 매칭에서 후보 등급이"
+            f" 갈림): " + ", ".join(_asil_weak[:3]) + (" …" if len(_asil_weak) > 3 else "")
+        )
     if _asil_conflicts:
         _const_note += (
             f" | ⚠ASIL 소스↔SwUDS 충돌 {len(_asil_conflicts)}건(높은 등급 채택): "
