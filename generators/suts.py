@@ -543,23 +543,41 @@ def collect_unit_functions(
                 if _k in {"WRITE", "LHS"}:
                     role_out = True
 
-            if not role_in and not role_out:
+            # 프리픽스 휴리스틱 — **태그를 못 받은 엔트리 전용**이다. 이름 규약으로
+            # 방향을 추측하는 것이라, 방향 근거가 있는 엔트리에 덮어씌우면 안 된다.
+            #
+            # ⚠ `[INDIRECT*]` 는 "이 함수 본문엔 없고 **피호출 함수 안에서** 쓰인다"는
+            #   뜻이라 방향 근거가 **아예 없다**. 그런데 예전엔 이 블록을 그대로 태워서
+            #   `if not is_indirect` 가드를 다섯 군데 흩뿌려 놓았고, 그 가드는 전부
+            #   `role_in` 에만 붙어 있었다 — 즉 **입력은 막고 기대결과는 무조건 냈다**.
+            #   `[INDIRECT] u8s_X` 는 기대결과로 나가고 `[INDIRECT] u8g_X` 는 통째로
+            #   사라지는, 접두사가 방향을 정하는 비대칭이었다.
+            #   실측(2026-08-14, KJPDS02_PV 정본 1,005 unit): 오로지 `[INDIRECT*]`
+            #   엔트리에서만 온 기대결과 칸 **1,777개 중 정본과 일치 0개**(정확 일치도
+            #   뿌리 일치도 0). 그중 798칸은 **정본이 기대결과 열을 통째로 비워둔**
+            #   unit 에 채워 넣은 것이다. 반대로 우리가 어느 열에도 안 낸 간접 이름
+            #   1,648개도 정본엔 입력·기대 **양쪽 모두 0** 이다 — 정본은 간접 접근
+            #   전역을 애초에 적지 않는다. 억제의 대가가 **0** 이라는 뜻이다
+            #   (`const` 전역 419칸 때와 같은 모양이다).
+            #   간접 전역은 여기서 버리는 게 아니라 아래 `indirect_vars` 로 가서
+            #   GLOBAL/VOID 시험 전략의 재료가 된다 — 열에 이름을 박지 않을 뿐이다.
+            # ⚠ 가드를 한 조건으로 모은 것도 의도다. 흩어 놓으면 하나를 지워도 나머지
+            #   넷이 같은 케이스를 막아 뮤테이션이 통째로 생존한다(이 저장소가 직전
+            #   라운드에서 겪은 '겹친 기제' 실패).
+            if not role_in and not role_out and not is_indirect:
                 if gn.startswith(_OUTPUT_PREFIXES):
                     role_out = True
                 elif gn.startswith(_INPUT_PREFIXES):
-                    if not is_indirect:
-                        role_in = True
+                    role_in = True
                 elif _REG_PAT.match(gn):
-                    if not is_indirect:
-                        role_in = True
+                    role_in = True
                     role_out = True
                 elif gn.startswith(("g_", "r_")):
-                    if not is_indirect:
-                        role_in = True
+                    role_in = True
                     role_out = True
                 elif not is_in_global:
                     role_out = True
-                elif not is_indirect:
+                else:
                     role_in = True
 
             # ⚠ 표기 정합은 **맨 마지막**에만 한다. 위의 `_is_const_global`·

@@ -300,6 +300,97 @@ class TestKeywordFallbackIsAnchored:
             assert _clean_global_name(f"{t} volatile U8 u8g_Flag") == "u8g_Flag", t
 
 
+class TestIndirectFillsNeitherColumn:
+    """`[INDIRECT*]` 는 **입력도 기대결과도 아니다** — 프리픽스가 방향을 대신 정하던 축.
+
+    간접 억제는 오래 `role_in` 쪽에만 붙어 있었다. 다섯 분기에 흩어진 `if not
+    is_indirect` 가드가 전부 입력만 막고, `role_out = True` 는 가드 **밖**이었다.
+    그래서 같은 `[INDIRECT]` 라도 이름 접두사가 방향을 정했다:
+
+        [INDIRECT] u8g_X  → 어느 열에도 안 나감      (입력 접두사 → 가드에 막힘)
+        [INDIRECT] u8s_X  → **기대결과로 나감**      (출력 접두사 → 가드 밖)
+        [INDIRECT] REG_X  → **기대결과로 나감**
+        [INDIRECT] s_Cfg  → **기대결과로 나감**      (static 스코프 폴백)
+
+    실측(2026-08-14, KJPDS02_PV 정본 1,005 unit): 오로지 `[INDIRECT*]` 엔트리에서만
+    온 기대결과 칸 **1,777개 중 정본 일치 0개**(정확·뿌리 둘 다 0). 그중 **798칸**은
+    정본이 기대결과 열을 통째로 비워둔 unit 에 채운 것이다. 반대로 우리가 어느 열에도
+    안 낸 간접 이름 1,648개도 정본엔 양쪽 모두 0 — 정본은 간접 전역을 **적지 않는다**.
+
+    간접 전역이 사라지는 건 아니다. `indirect_vars` 로 가서 GLOBAL/VOID 시험 전략의
+    재료가 된다(아래 `test_indirect_global_becomes_strategy_material`).
+    """
+
+    _unit = staticmethod(TestGlobalDirectionTags._unit)
+
+    @pytest.mark.parametrize("tag", ["[INDIRECT]", "[INDIRECT2]"])
+    @pytest.mark.parametrize(
+        "entry_name,kwargs",
+        [
+            ("u8s_MotorDuty", {}),                              # 출력 접두사
+            ("REG_PTT", {}),                                    # 레지스터
+            ("s_Cfg", {}),                                      # static 스코프 폴백
+            ("g_MotorState", {"as_global": True}),              # g_ 접두사
+            ("r_SCI0CR2.Byte", {"as_global": True}),            # r_ 접두사
+        ],
+    )
+    def test_indirect_is_in_neither_column(self, tag, entry_name, kwargs):
+        """접두사가 무엇이든 `[INDIRECT*]` 는 두 열 모두에 안 들어간다.
+
+        ⚠ 이 파라미터 목록은 `role_out = True` 를 켜던 **다섯 분기 전부**를 훑는다 —
+          하나만 겨누면 나머지 넷은 가드를 되돌려도 초록이다.
+        """
+        u = (self._unit(globals_global=[f"{tag} {entry_name}"])
+             if kwargs.get("as_global") else self._unit(f"{tag} {entry_name}"))
+        assert entry_name not in u["output_vars"], (
+            f"간접 접근이 기대결과가 됐다: {u['output_vars']} "
+            "— 정본은 간접 전역을 기대결과로 적지 않는다(실측 1,777칸 중 일치 0)"
+        )
+        assert entry_name not in u["input_vars"], f"간접이 입력이 됐다: {u['input_vars']}"
+
+    @pytest.mark.parametrize(
+        "entry_name,column,kwargs",
+        [
+            ("u8s_MotorDuty", "output_vars", {}),
+            ("REG_PTT", "output_vars", {}),
+            ("REG_PTT", "input_vars", {}),
+            ("s_Cfg", "output_vars", {}),
+            ("g_MotorState", "input_vars", {"as_global": True}),
+            ("g_MotorState", "output_vars", {"as_global": True}),
+            ("u8g_SystemReset_F", "input_vars", {"as_global": True}),
+        ],
+    )
+    def test_untagged_prefix_heuristic_is_untouched(self, entry_name, column, kwargs):
+        """**음성 대조군** — 간접을 막는다고 무태그 휴리스틱까지 죽이면 안 된다.
+
+        간접 억제를 "엔트리를 통째로 버린다"로 구현하면 이건 통과하지만, 게이트 조건을
+        `not _dir_tag` 같은 걸로 잘못 쓰면 여기서 깨진다. 무태그 529건이 걸린 축이다.
+        """
+        u = (self._unit(globals_global=[entry_name]) if kwargs.get("as_global")
+             else self._unit(entry_name))
+        assert entry_name in u[column], f"무태그 프리픽스 휴리스틱이 죽었다: {u}"
+
+    def test_indirect_global_becomes_strategy_material(self):
+        """열에서 빠진 간접 전역은 **사라지는 게 아니라** `indirect_vars` 로 간다.
+
+        ⚠ 이 단언은 이전 동작에서 **실패한다** — 예전엔 `u8s_` 가 기대결과 열에 들어가
+          `gn not in out_set` 조건에 걸려 `indirect_vars` 에서 제외됐다. 즉 이 테스트는
+          "재료로 남는다"를 실제로 구별한다(공허하지 않다).
+        """
+        u = self._unit("[INDIRECT] u8s_MotorDuty")
+        assert u["indirect_vars"] == ["u8s_MotorDuty"], (
+            f"간접 전역이 시험 재료로도 안 남았다: {u['indirect_vars']}"
+        )
+
+    def test_direction_tagged_entries_still_fill_columns(self):
+        """음성 대조군 2 — 게이트가 `[IN]`/`[OUT]`/`[INOUT]` 까지 삼키면 안 된다."""
+        assert "u8s_MotorDuty" in self._unit("[IN] u8s_MotorDuty")["input_vars"]
+        assert "u8s_MotorDuty" in self._unit("[OUT] u8s_MotorDuty")["output_vars"]
+        both = self._unit("[INOUT] u8s_MotorDuty")
+        assert "u8s_MotorDuty" in both["input_vars"]
+        assert "u8s_MotorDuty" in both["output_vars"]
+
+
 class TestParamAnnotationTail:
     """이름 뒤 주석형 꼬리가 **이름을 삼키던** 경로.
 
