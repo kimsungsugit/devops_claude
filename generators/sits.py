@@ -1,11 +1,16 @@
 """SITS (Software Integration Test Specification) auto-generation engine.
 
 Generates XLSM output matching the reference SITS structure:
-  - 77 TCs (SwITC_xx), 606 sub-cases
-  - Columns: TC ID | Description | Call chain | Gen Method | Precondition |
-             Input Param 1-67 | Expected Param 1-70 | Related ID
+  - TC 행(SwITC_xx) + 서브케이스 행
+  - Columns: TC ID | Description | Call chain | Safety | Test Method | Gen Method |
+             Input Param 1-82 | Expected Param 1-113 | Related ID
   - Sheets: Cover, History, 1.Introduction, 2.Test Environment,
-            3-1.SW Integration Strategy, 4.SW Integration Test Spec
+            3-1.SW Integration Strategy, `_SPEC_SHEET_NAME`
+
+⚠ 시트 이름은 **상수 `_SPEC_SHEET_NAME` 하나**가 출처다. 라이터와 검증기가 각자
+문자열을 들고 있으면 한쪽만 고쳐진다 — 실제로 그랬다(라이터는 `3.…` 로 옮겼는데
+`validate_sits_xlsm` 은 `4.…` 를 계속 찾아 **자기 산출물을 한 번도 못 읽었다**:
+TC 0 · sub-case 0 으로 보고하면서 "미검증" 처리, 2026-08-14 게이트 실측).
 """
 from __future__ import annotations
 
@@ -38,6 +43,9 @@ _logger = logging.getLogger(__name__)
 _BAND_ROW = 3
 _HEADER_ROW = 4
 _DATA_START_ROW = 5
+
+# 시험 규격 시트 이름 — 라이터·검증기의 **단일 출처**(위 모듈 docstring 참조).
+_SPEC_SHEET_NAME = "3.SW Integration Test Spec"
 
 _TCID_COL = 2          # B  — TC ID (SwITC_xx)
 _DESC_COL = 3          # C  — 서브케이스 번호
@@ -203,6 +211,57 @@ def _parse_stp_document(stp_path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Shared helpers (re-used from sts / suts patterns)
 # ---------------------------------------------------------------------------
+
+# SwUDS 함수→SwCom 맵 캐시. (경로, mtime_ns, size) → 맵. 53MB docx 를 매번 훑을 수 없다.
+_UDS_SWCOM_CACHE: Dict[str, Tuple[Tuple[int, int], Dict[str, List[str]]]] = {}
+
+
+def load_uds_swcom_map(uds_path: Optional[str]) -> Dict[str, List[str]]:
+    """SwUDS 가 함수마다 적어 둔 `Related ID` 에서 `{함수명(소문자): [SwCom_NN]}`.
+
+    ## 왜 이게 Related 칸의 소스인가
+
+    정본 실측(KJPDS02_PV_SwITS v1.02) — Related 칸의 어휘는 **설계/시험 요소 ID** 다:
+    `SwCom` 170회(33종) · `SwFn` 69 · `SwSTR` 62 · `SwST` 38 · `SwTK` 8.
+    요구 ID(`SwTR_`/`SwTSR_`/`SwNTR_`/`SwEI_`)는 **0 건**이다.
+
+    그리고 이 로더가 SwUDS 에서 뽑은 SwCom 33종은 **정본의 33종과 완전히 같다**
+    (교집합 33 · 차집합 양쪽 0 · 함수 매핑 1,025건, 2026-08-14 실측). 즉 정본은
+    바로 이 표를 근거로 Related 칸을 채운다.
+
+    ⚠ 대비 — SDS 파티션 맵은 이 칸의 소스가 **아니다**. 값 스키마 실측은
+    `{asil, canonical, component_description, description, kind, related}` 이고
+    함수 항목(588개)의 `related` 에 든 것은 전부 요구 ID다(설계 ID 토큰 0건).
+
+    실패는 빈 맵이다 — 그 경우 호출부는 합성 ID 로 내려가되 **합성임을 표시**해야 한다.
+    """
+    raw = str(uds_path or "").strip()
+    if not raw:
+        return {}
+    p = Path(raw)
+    try:
+        st = p.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError as exc:
+        _logger.warning("SITS: SwUDS 접근 실패 — SwCom 보강 생략: %s (%s)", raw, exc)
+        return {}
+    key = str(p.resolve()).lower()
+    cached = _UDS_SWCOM_CACHE.get(key)
+    if cached and cached[0] == sig:
+        return cached[1]
+    try:
+        from backend.services.iso26262_doc_asil_extractor import (
+            extract_function_swcom_from_kv_tables,
+        )
+        m = extract_function_swcom_from_kv_tables(p.read_bytes()) or {}
+    except Exception as exc:  # noqa: BLE001 - 보강 실패는 보고하고 빈 맵으로 계속한다
+        _logger.warning("SITS: SwUDS SwCom 추출 실패(%s) — 합성 ID 로 내려간다: %s",
+                        type(exc).__name__, exc)
+        return {}
+    _UDS_SWCOM_CACHE[key] = (sig, m)
+    _logger.info("SITS: SwUDS 함수→SwCom 매핑 %d건 로드 (%s)", len(m), p.name)
+    return m
+
 
 def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
     global _SDS_MAP_CACHE, _SDS_MAP_CACHE_MTIME
@@ -393,6 +452,7 @@ def collect_integration_flows(
     max_flows: Optional[int] = _DEFAULT_MAX_FLOWS,
     stats_out: Optional[Dict[str, Any]] = None,
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
+    uds_swcom_map: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -424,7 +484,11 @@ def collect_integration_flows(
     #   대신 0 을 **보이게** 만든다: 아래 카운터가 `stats_out` 으로 나간다.
     _sds_lookups = 0        # 조회 시도한 함수 수
     _sds_key_hits = 0       # 맵에서 키가 잡힌 수
-    _sds_swcom_hits = 0     # 실제로 SwCom 을 얻은 수
+    _sds_swcom_hits = 0     # 실제로 SwCom 을 얻은 수 — 이 맵으로는 **구조적으로 0**(위 참조)
+    # ── SwUDS 축 — Related 칸의 실제 소스(`load_uds_swcom_map` docstring 참조) ──
+    _uds_swcom_lookups = 0  # 조회 시도한 함수 수
+    _uds_swcom_hits = 0     # SwUDS 에서 SwCom 을 실제로 얻은 함수 수
+    _uds_swcom_ids = 0      # 그렇게 얻은 SwCom ID 총 개수(함수당 다중 가능)
     _sds_source = "argument" if sds_map is not None else "repo_docs_glob"
     if sds_map is None:
         sds_map = _load_default_sds_map()
@@ -635,14 +699,24 @@ def collect_integration_flows(
         # 선별 기준(등급)과 방출 값이 갈라질 수 있다.
         asil = _cand["asil"]
 
-        # Related IDs
+        # ── Related IDs ──────────────────────────────────────────────────────
+        # 정본 실측: 이 칸의 어휘는 SwCom 170 · SwFn 69 · SwSTR 62 · SwST 38 · SwTK 8 —
+        # **설계/시험 요소 ID** 다. 요구 ID(SwTR_ 계열)는 0 건이다.
         related_parts: List[str] = []
-        # from srs_req_ids field
+        # ① SwUDS 가 함수마다 적어 둔 SwCom — 정본이 쓰는 바로 그 표다
+        #   (실측: 이 맵의 SwCom 33종 ↔ 정본 33종, 차집합 양쪽 0).
+        _uds_swcom_lookups += 1
+        _uds_hit = list((uds_swcom_map or {}).get(fn_name.lower()) or [])
+        if _uds_hit:
+            _uds_swcom_hits += 1
+            _uds_swcom_ids += len(_uds_hit)
+            related_parts.extend(_uds_hit)
+        # ② 소스 주석/파서가 실어 준 ID
         for field in ("srs_req_ids", "related", "related_id"):
             val = info.get(field) or ""
             ids = _parse_req_ids(str(val))
             related_parts.extend(ids)
-        # from SDS map — 결과가 0 이어도 **왜 0 인지** 셀 수 있어야 한다(위 주석 참조).
+        # ③ from SDS map — 결과가 0 이어도 **왜 0 인지** 셀 수 있어야 한다(위 주석 참조).
         _sds_lookups += 1
         try:
             for cand in [fn_name, fn_name.lower()]:
@@ -663,9 +737,14 @@ def collect_integration_flows(
         # 요구 추적성 분자로 세면 항상 100%가 된다. 어느 ID가 합성인지 **삽입 지점에서**
         # 기록해 두어 품질 지표가 추측 없이 걸러낼 수 있게 한다.
         # (위 SDS map이 같은 ID를 이미 넣었다면 그건 문서 유래이므로 합성으로 치지 않는다.)
+        # ⚠ SwUDS 에서 **진짜** SwCom 을 얻었으면 합성값을 덧붙이지 않는다. 덧붙이면 한
+        #   칸에 문서 유래 SwCom 과 다른 컴포넌트를 가리키는 순번 합성값이 나란히 실리고,
+        #   셀만 보는 쪽은 둘을 구별할 방법이 없다(합성 표시는 `synthetic_related_ids`
+        #   에만 있고 산출물 셀에는 없다). 그 상태로 정본과 대조하면 모양이 같아 '일치'
+        #   로도 잡힌다 — 가장 나쁜 종류의 거짓 추적성이다.
         swcom_id = _cand["swcom_id"]   # Pass 1 에서 후보 전체 기준으로 부여됨
         synthetic_related: List[str] = []
-        if swcom_id not in related_parts:
+        if not _uds_hit and swcom_id not in related_parts:
             related_parts.insert(0, swcom_id)
             synthetic_related.append(swcom_id)
 
@@ -716,7 +795,7 @@ def collect_integration_flows(
             "logic_flow": info.get("logic_flow") or [],
         })
 
-    # SDS 보강 실적을 **반드시** 내보낸다. 0 을 침묵시키면 "보강이 동작한다" 로 읽힌다.
+    # 보강 실적을 **반드시** 내보낸다. 0 을 침묵시키면 "보강이 동작한다" 로 읽힌다.
     if stats_out is not None:
         stats_out.update({
             "sds_source": _sds_source,
@@ -724,13 +803,31 @@ def collect_integration_flows(
             "sds_lookups": _sds_lookups,
             "sds_key_hits": _sds_key_hits,
             "sds_swcom_hits": _sds_swcom_hits,
+            # SwUDS 축 — Related 칸의 실제 소스
+            "uds_swcom_map_entries": len(uds_swcom_map or {}),
+            "uds_swcom_lookups": _uds_swcom_lookups,
+            "uds_swcom_hits": _uds_swcom_hits,
+            "uds_swcom_ids": _uds_swcom_ids,
         })
     if _sds_lookups and not _sds_swcom_hits:
-        _logger.warning(
-            "SITS: SDS 기반 Related 보강이 %d회 조회에서 **0건** 산출했다 "
-            "(키 매칭 %d건, 맵 %d항목, 출처=%s). 맵 스키마에 swcom/component 필드가 "
-            "없거나 다른 프로젝트의 SDS 다 — Related ID 의 SwCom 축은 비어 있다.",
+        # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
+        #   함수 항목의 `related` 는 요구 ID 뿐 — 실측). 그래서 문장을 "설정이 잘못됐다"
+        #   가 아니라 사실대로 적고, SwUDS 축이 채웠는지를 같이 말한다.
+        _logger.info(
+            "SITS: SDS 맵에는 SwCom 축이 없다(조회 %d · 키매칭 %d · 맵 %d항목 · 출처=%s) "
+            "— Related 의 SwCom 은 SwUDS 축에서 온다: %d/%d 함수 · ID %d개.",
             _sds_lookups, _sds_key_hits, len(sds_map or {}), _sds_source,
+            _uds_swcom_hits, _uds_swcom_lookups, _uds_swcom_ids,
+        )
+    # ⚠ `None`(맵을 **주지 않은** 호출)과 `{}`(주려다 **비어서 온** 호출)는 다르다.
+    #   전자는 SwCom 보강을 의도하지 않은 경로(영향도 dry-run 등)라 경고하면 노이즈가
+    #   되고, 후자는 SwUDS 를 읽으려다 실패한 것이라 반드시 보여야 한다.
+    #   `generate_sits` 는 실패해도 `{}` 를 넘기므로 진짜 실패는 항상 잡힌다.
+    if uds_swcom_map is not None and _uds_swcom_lookups and not _uds_swcom_hits:
+        _logger.warning(
+            "SITS: SwUDS 기반 SwCom 보강이 %d회 조회에서 **0건** 산출했다(맵 %d항목). "
+            "Related ID 는 순번 합성 SwCom 만 남는다 — 추적성 지표를 그대로 믿지 말 것.",
+            _uds_swcom_lookups, len(uds_swcom_map),
         )
     _logger.info("SITS: collected %d integration flows", len(flows))
     return flows
@@ -1312,7 +1409,7 @@ def generate_sits_xlsm(
 
     # ⚠ 정본의 시트는 `3.SW Integration Test Spec` 이다. 예전엔 템플릿의 3번 시트를
     #   놔둔 채 `4.…` 를 **따로 붙여** 한 파일에 빈 정본 시트와 채워진 사본이 공존했다.
-    sheet_name = "3.SW Integration Test Spec"
+    sheet_name = _SPEC_SHEET_NAME
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -1583,6 +1680,20 @@ def generate_sits_quality_report(
             "yield_pct": round(100.0 * _hit / _lk, 2) if _lk else None,
         }
 
+    # SwUDS 축 — Related 칸의 **실제** SwCom 소스. 위 sds_enrich 가 0 인 것은 결함이
+    # 아니라 그 맵의 성질이고(스키마에 SwCom 이 없다), 실적은 여기서 봐야 한다.
+    uds_swcom_enrich: Dict[str, Any] = {}
+    if fs.get("uds_swcom_lookups") is not None:
+        _ulk = int(fs.get("uds_swcom_lookups") or 0)
+        _uhit = int(fs.get("uds_swcom_hits") or 0)
+        uds_swcom_enrich = {
+            "map_entries": int(fs.get("uds_swcom_map_entries") or 0),
+            "lookups": _ulk,
+            "hits": _uhit,
+            "ids": int(fs.get("uds_swcom_ids") or 0),
+            "yield_pct": round(100.0 * _uhit / _ulk, 2) if _ulk else None,
+        }
+
     return {
         "total_test_cases": total_tc,
         "total_sub_cases": total_sub,
@@ -1592,6 +1703,8 @@ def generate_sits_quality_report(
         # SDS 보강이 **어느 문서로 몇 건** 산출했는지. 저장소 폴백(프로젝트 무관)이면
         # source 로 드러난다.
         "sds_related_enrichment": sds_enrich,
+        # SwUDS 축 — Related 칸의 SwCom 은 여기서 온다(정본과 같은 표).
+        "uds_swcom_enrichment": uds_swcom_enrich,
         # Related ID **필드 보유율**(합성 포함) — 서식 채움 지표이지 추적성이 아니다.
         "with_related_count": with_related,
         "related_coverage_pct": related_pct,
@@ -1633,7 +1746,11 @@ def validate_sits_xlsm(xlsm_path: str) -> Dict[str, Any]:
     stats["sheets"] = wb.sheetnames
     stats["sheet_count"] = len(wb.sheetnames)
 
-    required_sheets = ["4.SW Integration Test Spec"]
+    # ⚠ 시트 이름·데이터 시작행은 **라이터와 같은 상수**를 쓴다. 문자열/숫자를 여기에
+    #   복제하면 라이터가 옮겨갈 때 리더만 뒤에 남는다 — 실제로 시트는 `4.…`(라이터는
+    #   `3.…` 로 이동), 시작행은 7(라이터는 5)로 굳어 있었고, 그래서 이 검증기는
+    #   **자기 산출물을 한 줄도 못 읽으면서** TC 0 · sub-case 0 을 보고했다.
+    required_sheets = [_SPEC_SHEET_NAME]
     for s in required_sheets:
         if s not in wb.sheetnames:
             issues.append(f"Missing required sheet: {s}")
@@ -1641,9 +1758,9 @@ def validate_sits_xlsm(xlsm_path: str) -> Dict[str, Any]:
     tc_count = 0
     sub_count = 0
 
-    if "4.SW Integration Test Spec" in wb.sheetnames:
-        ws = wb["4.SW Integration Test Spec"]
-        for row in ws.iter_rows(min_row=7, values_only=True):
+    if _SPEC_SHEET_NAME in wb.sheetnames:
+        ws = wb[_SPEC_SHEET_NAME]
+        for row in ws.iter_rows(min_row=_DATA_START_ROW, values_only=True):
             if not row:
                 continue
             tc_id_val = row[_TCID_COL - 1] if len(row) >= _TCID_COL else None
@@ -1955,10 +2072,13 @@ def generate_sits(
 
     # ── Stage 6: collect integration flows ───────────────────────────────────
     _progress(40, "통합 흐름 수집 중")
+    # Related ID 의 SwCom 축은 **SwUDS** 에서 온다(`load_uds_swcom_map` docstring — 정본과
+    # 같은 표다). 못 얻으면 순번 합성 ID 로 내려가되 합성임이 산출물에 표시된다.
+    _uds_swcom_map = load_uds_swcom_map(uds_path)
     flow_stats: Dict[str, Any] = {}
     flows = collect_integration_flows(
         function_details, max_flows=max_flows, stats_out=flow_stats,
-        sds_map=_project_sds_map)
+        sds_map=_project_sds_map, uds_swcom_map=_uds_swcom_map)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")

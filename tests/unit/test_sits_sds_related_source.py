@@ -23,6 +23,24 @@
 **대체 필드를 추측하지 않았다.** 틀린 SwCom 을 추적성 열에 넣는 건 0건보다 나쁘다.
 대신 ①호출자가 프로젝트 SDS 를 줄 수 있게 하고 ②0 을 **보고**한다.
 SUTS 가 같은 결함을 이미 고쳐 뒀으므로(`suts._resolve_sds_map`) 그 헬퍼를 **재사용**한다.
+
+## 후속 (2026-08-14) — 추측하지 않고 **다른 문서**에서 찾았다
+
+정본 대조로 두 사실이 확정됐다:
+
+* 이 맵으로는 **구조적으로 0** 이다. 실 프로젝트 SDS(871 파티션) 값 필드 합집합은
+  `{asil, canonical, component_description, description, kind, related}` 이고, 함수
+  항목 588개의 `related` 는 **전부 요구 ID**(`SwTR_`/`SwTSR_`/`SwNTR_`/`SwEI_`)다 —
+  설계 ID 토큰 0건. 그래서 "있는 필드로 바꾸면" 이번엔 **틀린 어휘로 채워진다**.
+* 정본 SITS 의 Related 칸 어휘는 `SwCom` 170회(33종)·`SwFn` 69·`SwSTR` 62·`SwST` 38·
+  `SwTK` 8 이고 요구 ID 는 **0 건**이다. 그리고 **SwUDS** 에서 뽑은 함수→SwCom 매핑
+  (1,025건)의 SwCom 33종은 정본 33종과 **차집합 양쪽 0** 이다.
+
+→ SwCom 축의 소스는 SDS 가 아니라 **SwUDS**(`sits.load_uds_swcom_map`)다. SDS 축은
+경고 대신 **사실 보고(INFO)** 로 내려갔다: 사용자가 고칠 수 있는 설정 문제가 아니라
+그 맵의 성질이므로, WARNING 으로 두면 영원히 울리는 노이즈가 된다.
+⚠ 그 강등 때문에 `test_zero_yield_warns` 가 잠시 **UDS 축 경고를 대신 잡아** 초록으로
+남았다(같은 문장에 "0건"·"SwCom" 이 들어간다). 두 축을 각각 겨누도록 갈라 놨다.
 """
 from __future__ import annotations
 
@@ -125,22 +143,52 @@ class TestZeroIsReported:
         assert stats["sds_key_hits"] == 0
         assert stats["sds_swcom_hits"] == 0
 
-    def test_zero_yield_warns(self, caplog):
-        """조회했는데 산출 0 이면 **경고**한다 — 침묵하면 "동작한다" 로 읽힌다.
+    def test_sds_axis_reports_its_structural_zero(self, caplog):
+        """SDS 축은 **사실 보고(INFO)** 다 — 이 맵엔 SwCom 필드가 아예 없다.
 
+        WARNING 이 아닌 이유: 사용자가 다른 SDS 를 지정해도 결과는 같다(스키마의 성질).
+        그래도 침묵시키지는 않는다 — 0 이라는 사실 자체는 보고돼야 한다.
+        뮤테이션: 보고 블록을 지우면 실패.
+        """
+        with caplog.at_level(logging.INFO, logger="generators.sits"):
+            sits.collect_integration_flows(_flow_payload(), max_flows=10,
+                                           stats_out={}, sds_map={"nope": {"swcom": "S"}})
+        sds_msgs = [r.getMessage() for r in caplog.records if "SDS 맵에는 SwCom 축이 없다" in r.getMessage()]
+        assert sds_msgs, "SDS 축 0건이 어느 레벨로도 보고되지 않는다"
+        assert all(r.levelno < logging.WARNING for r in caplog.records
+                   if "SDS 맵에는" in r.getMessage()), "구조적 0 을 경고로 올리면 노이즈가 된다"
+
+    def test_uds_axis_zero_yield_warns(self, caplog):
+        """SwCom 의 **실제** 소스(SwUDS)가 0건이면 경고한다.
+
+        이쪽은 고칠 수 있는 문제다(문서 미지정·파싱 실패) — Related 가 전부 순번 합성
+        으로 떨어지므로 추적성 지표를 그대로 믿으면 안 된다.
         뮤테이션: 경고 블록을 지우면 실패.
         """
         with caplog.at_level(logging.WARNING, logger="generators.sits"):
             sits.collect_integration_flows(_flow_payload(), max_flows=10,
-                                           stats_out={}, sds_map={"nope": {"swcom": "S"}})
+                                           stats_out={}, uds_swcom_map={})
         msg = " ".join(r.getMessage() for r in caplog.records)
-        assert "0건" in msg and "SwCom" in msg
+        assert "SwUDS" in msg and "0건" in msg
+
+    def test_absent_map_is_not_warned(self, caplog):
+        """맵을 **주지 않은** 호출(None)은 경고하지 않는다 — 보강을 의도하지 않은 경로다.
+
+        `{}`(주려다 비어서 온 것)와 구별한다. 둘을 같게 보면 영향도 dry-run 처럼
+        SwCom 을 안 쓰는 호출자마다 경고가 울려 진짜 실패가 묻힌다.
+        """
+        with caplog.at_level(logging.WARNING, logger="generators.sits"):
+            sits.collect_integration_flows(_flow_payload(), max_flows=10, stats_out={})
+        msgs = [r.getMessage() for r in caplog.records if "SwUDS" in r.getMessage()]
+        assert not msgs, f"맵 미지정인데 경고했다: {msgs}"
 
     def test_no_warning_when_enrichment_works(self, caplog):
-        """음성 대조군 — 정상 동작 시엔 경고하지 않는다(경고 피로 방지)."""
+        """음성 대조군 — 두 축 다 채워지면 경고하지 않는다(경고 피로 방지)."""
         with caplog.at_level(logging.WARNING, logger="generators.sits"):
-            sits.collect_integration_flows(_flow_payload(), max_flows=10,
-                                           stats_out={}, sds_map={"Task_10ms": {"swcom": "S7"}})
+            sits.collect_integration_flows(
+                _flow_payload(), max_flows=10, stats_out={},
+                sds_map={"Task_10ms": {"swcom": "S7"}},
+                uds_swcom_map={"task_10ms": ["SwCom_07"]})
         msgs = [r.getMessage() for r in caplog.records if "0건" in r.getMessage()]
         assert not msgs
 

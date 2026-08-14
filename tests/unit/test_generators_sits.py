@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 from generators.sits import (
+    _DATA_START_ROW,
     _DESC_COL,
+    _SPEC_SHEET_NAME,
     _TCID_COL,
     collect_integration_flows,
     generate_sits_quality_report,
+    generate_sits_xlsm,
     validate_sits_xlsm,
 )
 
@@ -47,6 +50,79 @@ class TestSyntheticSwComIsMarked:
         assert f["related_ids"], "합성 ID가 항상 들어간다는 전제가 깨졌다"
         assert f["synthetic_related_ids"] == [f["swcom_id"]]
         assert f["swcom_id"] in f["related_ids"]
+
+
+class TestUdsSwComIsTheRealSource:
+    """Related 칸의 SwCom 은 **SwUDS** 에서 온다.
+
+    정본 실측(KJPDS02_PV_SwITS v1.02): Related 어휘는 SwCom 170회(33종)·SwFn 69·
+    SwSTR 62·SwST 38·SwTK 8 이고 요구 ID 는 0 건이다. 그리고 SwUDS 에서 뽑은 SwCom
+    33종은 정본 33종과 **차집합 양쪽 0** — 정본이 근거로 삼는 표가 바로 그것이다.
+    (SDS 파티션 맵에는 SwCom 축이 아예 없다: 함수 588개의 `related` 는 전부 요구 ID)
+    """
+
+    def test_uds_swcom_lands_in_related_ids(self):
+        flows = collect_integration_flows(
+            _fd(), uds_swcom_map={"ap_door_run": ["SwCom_13", "SwCom_14"]})
+        f = flows[0]
+        assert "SwCom_13" in f["related_ids"] and "SwCom_14" in f["related_ids"]
+
+    def test_uds_swcom_is_not_marked_synthetic(self):
+        """문서 유래이므로 추적성 분자에 들어가야 한다 — 합성으로 찍히면 0% 로 샌다."""
+        flows = collect_integration_flows(
+            _fd(), uds_swcom_map={"ap_door_run": ["SwCom_13"]})
+        assert flows[0]["synthetic_related_ids"] == []
+
+    def test_synthetic_id_is_not_appended_next_to_a_real_one(self):
+        """진짜 SwCom 이 있으면 순번 합성값을 **덧붙이지 않는다**.
+
+        덧붙이면 한 칸에 문서 유래 SwCom 과 다른 컴포넌트를 가리키는 합성값이 나란히
+        실리고, 셀만 보는 쪽은 구별할 수 없다(합성 표시는 셀에 없다).
+        """
+        flows = collect_integration_flows(
+            _fd(), uds_swcom_map={"ap_door_run": ["SwCom_13"]})
+        f = flows[0]
+        assert f["related_ids"] == ["SwCom_13"], f"합성값이 섞였다: {f['related_ids']}"
+        assert f["swcom_id"] not in f["related_ids"]
+
+    def test_missing_function_falls_back_to_marked_synthetic(self):
+        """맵에 없는 함수는 합성으로 내려가되 **합성임이 표시**된다."""
+        flows = collect_integration_flows(
+            _fd(), uds_swcom_map={"someone_else": ["SwCom_13"]})
+        f = flows[0]
+        assert f["synthetic_related_ids"] == [f["swcom_id"]]
+        assert "SwCom_13" not in f["related_ids"]
+
+    def test_enrichment_yield_is_reported(self):
+        """0 건이면 0 건이라고 말해야 한다 — 침묵하면 '보강이 돈다'로 읽힌다."""
+        stats: dict = {}
+        collect_integration_flows(_fd(), stats_out=stats,
+                                  uds_swcom_map={"ap_door_run": ["SwCom_13"]})
+        assert stats["uds_swcom_lookups"] >= 1
+        assert stats["uds_swcom_hits"] == 1
+        assert stats["uds_swcom_ids"] == 1
+
+        empty: dict = {}
+        collect_integration_flows(_fd(), stats_out=empty, uds_swcom_map={})
+        assert empty["uds_swcom_hits"] == 0
+        assert empty["uds_swcom_map_entries"] == 0
+
+
+class TestLoadUdsSwComMap:
+    def test_blank_and_missing_paths_are_empty_maps(self, tmp_path):
+        from generators.sits import load_uds_swcom_map
+
+        assert load_uds_swcom_map(None) == {}
+        assert load_uds_swcom_map("") == {}
+        assert load_uds_swcom_map(str(tmp_path / "nope.docx")) == {}
+
+    def test_unreadable_docx_does_not_raise(self, tmp_path):
+        """추출 실패는 빈 맵이다 — 생성 전체를 세우지 않는다(합성으로 내려간다)."""
+        from generators.sits import load_uds_swcom_map
+
+        p = tmp_path / "broken.docx"
+        p.write_bytes(b"not a docx")
+        assert load_uds_swcom_map(str(p)) == {}
 
 
 class TestQualityReportSeparatesAxes:
@@ -266,15 +342,23 @@ class TestQualityReportExposesFlowCap:
 # ---------------------------------------------------------------------------
 
 def _write_min_sits(path, sub_labels):
-    """TC 1건 + 주어진 라벨의 sub-case 행을 갖는 최소 SITS 시트."""
+    """TC 1건 + 주어진 라벨의 sub-case 행을 갖는 최소 SITS 시트.
+
+    ⚠ 시트 이름·시작행은 **라이터와 같은 상수**로 짓는다. 예전엔 여기서 `"4.SW …"` 와
+    행 `7` 을 손으로 적었는데, 그건 라이터가 `3.…`/행 `5` 로 옮긴 뒤에도 이 테스트가
+    초록으로 남는다는 뜻이었다 — 실제로 그렇게 됐다(검증기가 산출물을 한 줄도 못 읽는
+    동안 이 파일의 5개 테스트는 전부 통과했다). 왕복 가드는 아래 별도 클래스.
+    """
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "4.SW Integration Test Spec"
-    ws.cell(row=7, column=_TCID_COL, value="SwITC_01")
-    ws.cell(row=7, column=_DESC_COL, value="Verify integration: Ap_Door_Run → Drv_Motor_Set")
-    for i, label in enumerate(sub_labels, start=8):
+    assert ws is not None
+    ws.title = _SPEC_SHEET_NAME
+    ws.cell(row=_DATA_START_ROW, column=_TCID_COL, value="SwITC_01")
+    ws.cell(row=_DATA_START_ROW, column=_DESC_COL,
+            value="Verify integration: Ap_Door_Run → Drv_Motor_Set")
+    for i, label in enumerate(sub_labels, start=_DATA_START_ROW + 1):
         ws.cell(row=i, column=_DESC_COL, value=label)   # sub-case 행엔 TC ID 없음
     wb.save(str(path))
     return str(path)
@@ -317,3 +401,66 @@ class TestValidatorCountsLabelledSubCases:
         p = _write_min_sits(tmp_path / "s.xlsx", ["COND_1 [a]"])
         st = validate_sits_xlsm(p)["stats"]
         assert (st["tc_count"], st["sub_case_count"]) == (1, 1)
+
+
+# ---------------------------------------------------------------------------
+# 라이터 → 검증기 왕복 — 시트 이름·시작행이 갈라지면 여기서만 잡힌다
+# ---------------------------------------------------------------------------
+
+def _round_trip_itcs(n_tc: int = 2, n_sub: int = 3):
+    return [{
+        "tc_id": f"SwITC_{i:02d}",
+        "gen_method": "ABV",
+        "entry_fn": f"fn_{i}",
+        "call_chain": f"fn_{i} -> callee_a -> callee_b",
+        "module_name": "M.c",
+        "input_vars": ["u8_A"],
+        "expected_vars": ["u8_B"],
+        "related_ids": ["SwCom_01"],
+        "synthetic_related_ids": ["SwCom_01"],
+        "asil": "B",
+        "sub_cases": [{
+            "case_num": j + 1,
+            "case_label": f"COND_{j + 1} [경계]",
+            "call_chain": "",
+            "precondition": "1",
+            "inputs": {"u8_A": j},
+            "expected": {"u8_B": j},
+        } for j in range(n_sub)],
+    } for i in range(1, n_tc + 1)]
+
+
+class TestWriterReaderRoundTrip:
+    """검증기가 **라이터가 실제로 쓴 파일**을 읽는지 본다.
+
+    위 `TestValidatorCountsLabelledSubCases` 는 시트를 손으로 지어 검증기 로직만 봤다.
+    그래서 시트 이름이 `4.…`(리더) ↔ `3.…`(라이터)로, 시작행이 `7` ↔ `5` 로 갈라진
+    채로도 5개 테스트가 전부 초록이었고, 실 프로젝트 게이트에서 TC 200 · sub-case
+    1,400 짜리 산출물을 **0 · 0 으로 보고**했다(2026-08-14 실측).
+
+    이 클래스는 두 결함 각각을 따로 겨눈다 — 하나가 나머지를 가리지 않도록.
+    """
+
+    def test_validator_reads_back_what_writer_wrote(self, tmp_path):
+        out = tmp_path / "rt.xlsx"
+        generate_sits_xlsm(None, _round_trip_itcs(n_tc=2, n_sub=3), str(out))
+        res = validate_sits_xlsm(str(out))
+        assert res["stats"].get("tc_count") == 2, f"TC 를 되읽지 못했다: {res['issues']}"
+        assert res["stats"].get("sub_case_count") == 6
+
+    def test_writer_sheet_name_is_the_one_validator_requires(self, tmp_path):
+        """시트 이름 축 단독 — 라이터가 만든 시트가 검증기 필수 목록과 같은 이름인가."""
+        import openpyxl
+
+        out = tmp_path / "rt.xlsx"
+        generate_sits_xlsm(None, _round_trip_itcs(n_tc=1, n_sub=1), str(out))
+        assert _SPEC_SHEET_NAME in openpyxl.load_workbook(str(out)).sheetnames
+        assert not any("Missing required sheet" in i
+                       for i in validate_sits_xlsm(str(out))["issues"])
+
+    def test_first_data_row_is_not_skipped(self, tmp_path):
+        """시작행 축 단독 — TC 1건·sub 1건만 있으면 시작행이 밀렸을 때 둘 다 0 이 된다."""
+        out = tmp_path / "rt.xlsx"
+        generate_sits_xlsm(None, _round_trip_itcs(n_tc=1, n_sub=1), str(out))
+        st = validate_sits_xlsm(str(out))["stats"]
+        assert (st.get("tc_count"), st.get("sub_case_count")) == (1, 1)
