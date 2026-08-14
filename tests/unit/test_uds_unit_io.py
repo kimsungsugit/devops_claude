@@ -66,7 +66,18 @@ class TestParseUnitIo:
         path = _docx(_para("SwUFn_0102: g_SysOs_WdiCtrl") + _fn_table(_STD), tmp_path)
         rec = resolve_unit_io(load_uds_unit_io(path), "g_SysOs_WdiCtrl")
         assert rec == {"inputs": ["u8g_SystemReset_F", "_PTT.Bits.PTT4"],
-                       "outputs": ["_PTT.Bits.PTT3"]}
+                       "outputs": ["_PTT.Bits.PTT3"], "asil": ""}
+
+    def test_reads_asil_from_the_function_information_block(self, tmp_path):
+        """ASIL 은 같은 표의 `ASIL` 행이다 — 안전 판정(O/X)의 근거가 된다."""
+        tbl = _STD.replace(_row("Name", "g_SysOs_WdiCtrl"),
+                           _row("Name", "g_SysOs_WdiCtrl") + _row("ASIL", "A"))
+        path = _docx(_para("SwUFn_0102: g_SysOs_WdiCtrl") + _fn_table(tbl), tmp_path)
+        rec = resolve_unit_io(load_uds_unit_io(path), "g_SysOs_WdiCtrl")
+        assert rec is not None and rec["asil"] == "A"
+        assert rec["inputs"] == ["u8g_SystemReset_F", "_PTT.Bits.PTT4"], (
+            "ASIL 행이 파라미터 구간 판정을 흔들면 안 된다"
+        )
 
     def test_used_globals_row_is_not_a_direction(self, tmp_path):
         """⚠ `사용 전역변수` 는 방향이 없다 — 양쪽 축에 넣으면 과다가 110→1,079 로 터진다.
@@ -212,3 +223,100 @@ class TestUdsOverridesSourceNames:
         u = collect_unit_functions(d, sds_map={}, uds_io_map=m)[0]
         assert u["output_vars"].count("return") == 1, u["output_vars"]
         assert "Return" not in u["output_vars"], f"대문자 표기가 남았다: {u['output_vars']}"
+
+
+class TestAsilSourcePolicy:
+    """ASIL(=`Safety Related` O/X)의 출처 — **max(소스 `@asil`, SwUDS 표) > SDS 퍼지매칭**.
+
+    실측(2026-08-14, KJPDS02_PV · 정본이 `Safety Related` 를 **채운** 868칸):
+
+        출처            건수   일치            방향 오류
+        SDS 퍼지매칭     666    489 (73.4%)    **over 88**  ← 비안전을 안전으로
+        소스 `@asil`     202    200 (99.0%)    under 2      ← 안전을 비안전으로
+
+    같은 칸을 SwUDS ASIL 로 채우면 **방향 오류 0**. 교차표에 `A→X` · `QM→O` 가 한 건도
+    없다(UDS A → 정본 O 562 · 빈칸 137 · X **0** / UDS QM → 정본 X 302 · O **0**).
+
+    정책 실측: 현재 689(79.4%) · 소스>UDS 864 · **max 865(99.7%)** · UDS만 855.
+    """
+
+    _details = staticmethod(TestUdsOverridesSourceNames._details)
+
+    def _asil(self, src, uds_asil, sds_map=None):
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = src
+        m = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": uds_asil}}}
+        return collect_unit_functions(d, sds_map=sds_map if sds_map is not None else {},
+                                      uds_io_map=m)[0]["asil"]
+
+    def test_uds_fills_asil_when_source_has_no_tag(self):
+        assert self._asil("TBD", "A") == "A"
+
+    def test_higher_grade_wins_when_they_disagree(self):
+        """⚠ **under-classification 방지.** 소스 주석이 낡아 QM 인데 설계서가 A 면 A 다.
+
+        실측 충돌 1건(`s_ApiOut_u8bit_DataUpdate_A`: 소스 QM · UDS A)에서 정본은 `O`.
+        내리는 쪽으로 합의하면 안전 요구를 면제해 버린다.
+        """
+        assert self._asil("QM", "A") == "A"
+        assert self._asil("A", "QM") == "A", "반대 방향도 내리지 않는다"
+
+    def test_uds_na_is_not_a_grade(self):
+        """`N/A` 는 등급이 아니다 — 등급으로 읽으면 근거 없는 값이 생긴다."""
+        assert self._asil("TBD", "N/A") == "TBD"
+
+    def test_sds_fuzzy_match_is_only_the_last_resort(self):
+        """SDS 퍼지매칭(모듈명 **부분문자열**)은 마지막이다 — over 88건의 출처다."""
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "TBD"
+        d["SwUFn_0101"]["module_name"] = "MotorCtrl_PDS"
+        sds = {"motor control": {"asil": "QM"}}
+        m = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": "A"}}}
+        got = collect_unit_functions(d, sds_map=sds, uds_io_map=m)[0]["asil"]
+        assert got == "A", f"UDS 가 있는데 SDS 퍼지매칭이 이겼다: {got}"
+        # UDS 가 없을 때만 퍼지매칭이 쓰인다(회귀 가드 — 통째로 끊으면 안 된다)
+        m2 = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": ""}}}
+        assert collect_unit_functions(d, sds_map=sds, uds_io_map=m2)[0]["asil"] == "QM"
+
+    def test_no_uds_map_keeps_the_old_chain(self):
+        """음성 대조군 — UDS 를 못 읽으면 예전 사슬(소스 → SDS)이 그대로 돌아야 한다."""
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "TBD"
+        d["SwUFn_0101"]["module_name"] = "MotorCtrl_PDS"
+        assert collect_unit_functions(d, sds_map={"motor control": {"asil": "QM"}})[0]["asil"] == "QM"
+
+    def test_asil_maps_to_the_safety_cell(self):
+        """열에 실리는 건 등급이 아니라 O/X 다 — 그 변환까지 이어지는지 본다."""
+        from generators.suts import resolve_safety_related
+
+        assert resolve_safety_related(self._asil("QM", "A")) == "O"
+        assert resolve_safety_related(self._asil("TBD", "QM")) == "X"
+        assert resolve_safety_related(self._asil("TBD", "N/A")) == "", "근거 없으면 빈칸"
+
+    def test_missing_source_tag_is_not_a_conflict(self, caplog):
+        """⚠ `TBD`(근거 없음)는 **반대 주장이 아니다** — 충돌로 세면 안 된다.
+
+        첫 판이 문자열이 비었는지만 봐서 `TBD vs A` 를 충돌로 잡았고, 경고가
+        **778건**을 외쳤다(실측). 그러면 진짜 충돌 1건이 그 안에 묻힌다.
+        """
+        import logging
+
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "TBD"
+        m = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": "A"}}}
+        with caplog.at_level(logging.INFO, logger="generators.suts"):
+            collect_unit_functions(d, sds_map={}, uds_io_map=m)
+        assert "충돌" not in caplog.text, f"근거 없음을 충돌로 셌다: {caplog.text}"
+
+    def test_real_conflict_is_reported_not_silently_upgraded(self, caplog):
+        """진짜 충돌(양쪽 다 등급)은 **세어서 보고**한다 — 조용한 승격 금지."""
+        import logging
+
+        d = self._details()
+        d["SwUFn_0101"]["asil"] = "QM"
+        m = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": "A"}}}
+        with caplog.at_level(logging.INFO, logger="generators.suts"):
+            u = collect_unit_functions(d, sds_map={}, uds_io_map=m)[0]
+        assert u["asil"] == "A"
+        assert "충돌 1건" in caplog.text, caplog.text
+        assert "Fn_Under_Test" in caplog.text

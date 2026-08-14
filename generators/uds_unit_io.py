@@ -132,10 +132,14 @@ def _cell_lines(tc) -> List[str]:
     return out
 
 
-def _parse_table(tbl) -> Dict[str, List[str]]:
-    """함수 표 하나 → `{"inputs": [...], "outputs": [...]}`."""
+def _parse_table(tbl) -> Dict[str, Any]:
+    """함수 표 하나 → `{"inputs": [...], "outputs": [...], "asil": "..."}`.
+
+    ASIL 은 `[ Function Information ]` 블록의 `ASIL` 행이다(값 예: `A` · `QM` · `N/A`).
+    """
     inputs: List[str] = []
     outputs: List[str] = []
+    asil = ""
     mode = ""
     for tr in tbl.findall(f"{_W}tr"):
         cells = [" ".join(_cell_lines(tc)) for tc in tr.findall(f"{_W}tc")]
@@ -153,6 +157,8 @@ def _parse_table(tbl) -> Dict[str, List[str]]:
             continue
         # 표 머리행(`No | Name | …`)과 키-값 행(`ID | SwUFn_0101`)은 데이터가 아니다.
         if not re.fullmatch(r"\d+", head):
+            if head.upper() == "ASIL" and len(cells) > 1:
+                asil = cells[1].strip()
             if head and not head[0].isdigit():
                 # `선행조건` · `Called Function` 등을 만나면 파라미터 구간이 끝난 것이다.
                 if head not in ("No",):
@@ -163,7 +169,7 @@ def _parse_table(tbl) -> Dict[str, List[str]]:
         nm = clean_param_name(cells[1])
         if nm:
             (inputs if mode == "in" else outputs).append(nm)
-    return {"inputs": inputs, "outputs": outputs}
+    return {"inputs": inputs, "outputs": outputs, "asil": asil}
 
 
 def load_uds_unit_io(uds_path: Any) -> Dict[str, Any]:

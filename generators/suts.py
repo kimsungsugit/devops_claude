@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from generators._artifact_check import apply_write_back_check
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.doc_kind import is_sds_filename
-from report_gen.requirements import _extract_sds_partition_map
+from report_gen.requirements import _asil_max_of, _extract_sds_partition_map
 from report_gen.source_parser import is_const_type
 from workflow.code_parser.c_parser import blank_c_comments
 
@@ -475,6 +475,9 @@ def collect_unit_functions(
     # 달라지므로 아래 요약 로그에 싣는다(조용한 분기 금지 — 이 저장소가 여러 번 데었다).
     _uds_in_units = 0
     _uds_out_units = 0
+    # 소스 `@asil` 주석과 SwUDS 표가 **다른 등급**을 말하는 unit. max 로 올려 쓰되
+    # 조용히 넘어가지 않는다 — 어느 쪽이 낡았는지는 사람이 판단할 문제다.
+    _asil_conflicts: List[str] = []
 
     for fid, info in function_details.items():
         if not isinstance(info, dict):
@@ -662,9 +665,50 @@ def collect_unit_functions(
         input_vars, _in_exp = _expand_array_entries(input_vars, _sizes, max_inp)
         output_vars, _out_exp = _expand_array_entries(output_vars, _sizes, max_out)
 
-        asil = str(info.get("asil") or "TBD").strip()
-        if not asil or asil.upper() == "TBD":
-            asil = _resolve_unit_asil(info, sds_map) or asil
+        # ── ASIL — `Safety Related` 칸(O/X)의 근거 ─────────────────────────
+        #
+        # 우선순위: **max(소스 `@asil` 주석, SwUDS 표)** > SDS 파티션 퍼지매칭.
+        #
+        # 예전엔 소스 태그가 없으면 곧장 `_resolve_unit_asil` 로 갔는데, 그건 모듈명을
+        # **부분문자열**로 SDS 파티션에 맞추는 판정이다(`nc in nk or nk in nc`, 첫
+        # 일치 채택). 그 결과가 정본과 이만큼 어긋났다 —
+        # 실측(2026-08-14, KJPDS02_PV · 정본이 `Safety Related` 를 **채운** 868칸):
+        #
+        #   출처            건수   일치            방향오류
+        #   SDS 퍼지매칭     666    489 (73.4%)    **over 88**   ← 비안전을 안전으로
+        #   소스 `@asil`     202    200 (99.0%)    under 2       ← 안전을 비안전으로
+        #
+        # 같은 unit 을 SwUDS 표의 ASIL 로 채우면 **방향 오류 0**(퍼지매칭 구간 663/666,
+        # 소스 태그 구간 201/202). 교차표에 A→X · QM→O 가 **한 건도 없다**:
+        #   UDS A → 정본 O 562 · 정본 빈칸 137 · 정본 X **0**
+        #   UDS QM → 정본 X 302 · 정본 O **0**
+        # (정본 빈칸 137 은 한 덩어리 연속 구간[행 496~632, MotorCtrl 계열]이라
+        #  정본 자신의 미기재다. 우리는 근거가 있으므로 채운다.)
+        #
+        # 정책 비교(같은 868칸 기준): 현재 689(79.4%) · 소스>UDS 864 · **max 865(99.7%)**
+        # · UDS만 855. max 를 고른 이유는 두 가지다:
+        #   ① under-classification(안전 요구 면제)이 ISO 26262 에서 더 위험한 방향인데
+        #      max 는 등급을 **내리지 않는다**.
+        #   ② 이 저장소가 추적성 배선에서 이미 같은 결론을 냈다(first-wins 로 하향
+        #      101건 → max 병합).
+        # 실측 충돌은 **1건**뿐이고(`s_ApiOut_u8bit_DataUpdate_A` 소스 QM vs UDS A)
+        # 정본은 `O` 다 — UDS 가 맞다. 그래도 충돌은 **세어서 보고**한다(조용한 승격 금지).
+        #
+        # ⚠ 등급 비교는 `report_gen.requirements._asil_max_of` **단일 출처**로 한다.
+        #   이 저장소엔 ASIL 순위표가 이미 여러 벌 있고(하나는 정렬용 역순이다) 여기
+        #   또 만들면 다음에 한쪽만 고쳐진다.
+        _src_asil = str(info.get("asil") or "").strip()
+        _uds_asil = str((_uds_rec or {}).get("asil") or "").strip()
+        # ⚠ 충돌은 **양쪽 다 실제 등급일 때만**이다. `TBD`·`N/A` 는 "근거 없음"이지
+        #   반대 주장이 아니다. 문자열이 비었는지만 보면 `TBD vs A` 가 충돌로 잡혀
+        #   경고가 **778건**을 외친다(실측) — 그러면 진짜 충돌 1건이 그 안에 묻힌다.
+        #   늑대를 778번 외치는 경고는 없는 것만 못하다.
+        _src_grade, _uds_grade = _asil_max_of([_src_asil]), _asil_max_of([_uds_asil])
+        if _src_grade and _uds_grade and _src_grade != _uds_grade:
+            _asil_conflicts.append(f"{name}(소스 {_src_grade} vs UDS {_uds_grade})")
+        asil = _asil_max_of([_src_asil, _uds_asil])
+        if not asil:
+            asil = _resolve_unit_asil(info, sds_map) or _src_asil or "TBD"
 
         # Collect indirect (global) vars for GLOBAL/VOID strategies
         indirect_vars: List[str] = []
@@ -716,6 +760,14 @@ def collect_unit_functions(
         f" | SwUDS 이름 대체 입력 {_uds_in_units}/{len(units)} · 기대 {_uds_out_units}"
         if uds_io_map else " | ⚠SwUDS 입출력 맵 없음 → 소스 파싱 이름 사용"
     )
+    # ASIL 이 소스 주석과 문서에서 갈린 unit. max 로 올려 썼다는 사실을 남긴다 —
+    # 어느 쪽이 낡았는지 판단은 사람 몫이고, 조용하면 그 판단 기회가 사라진다.
+    if _asil_conflicts:
+        _const_note += (
+            f" | ⚠ASIL 소스↔SwUDS 충돌 {len(_asil_conflicts)}건(높은 등급 채택): "
+            + ", ".join(_asil_conflicts[:3])
+            + (" …" if len(_asil_conflicts) > 3 else "")
+        )
     (_logger.warning if _skip else _logger.info)(
         "Collected %d unit functions | 배열 확장 %d건%s%s",
         len(units), _exp_n,
