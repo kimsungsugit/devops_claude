@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
 from report_gen.doc_kind import is_sds_filename
 
 _logger = logging.getLogger(__name__)
@@ -91,8 +92,30 @@ def _sits_test_method(itc: Dict[str, Any]) -> str:
     return _SITS_METHOD_DEFAULT
 
 
-def _sits_gen_method(gen: Any) -> str:
-    """생성기 라벨 → 정본 어휘. 경계값 계열이면 `AOR/ABV`, 그 외 `AOR, AEC`."""
+def _sits_gen_method(gen: Any, test_method: Optional[str] = None) -> str:
+    """정본 어휘의 Gen Method. **Test Method 와 짝**이다.
+
+    정본 실측(KJPDS02_PV_SwITS v1.02, 54건 — 다른 조합 **0건**):
+
+        REQ, IFT  ↔  AOR, AEC      49
+        FI        ↔  AOR/ABV        5
+
+    ⚠ 예전엔 생성기 내부 라벨(`gen`)만 보고 독립으로 정했는데, 그 라벨을 만드는
+    `_determine_gen_method_for_flow` 의 **네 분기가 모두 `ABV` 를 포함**한다
+    (`AOR, ABV` · `ABV, AEC` · `ABV` · `ABV, AEC`). 그래서 `AOR, AEC` 가지는
+    **한 번도 발생한 적이 없고**, 실 산출물 367건이 전부 `REQ, IFT` × `AOR/ABV` —
+    정본에 0건인 조합 — 이었다(2026-08-14 실측).
+
+    ⚠ 기존 단위 테스트가 `_sits_gen_method("AEC") == "AOR, AEC"` 를 단언하며 초록이었다.
+    생성기가 순수 `"AEC"` 를 **낼 수 없으므로** 그 경로는 도달 불가였다 — 실 입력이
+    아닌 값으로 검증하면 "동작한다" 는 인상만 남는다.
+
+    `test_method` 를 주면 그 짝을 따른다. 생략하면 구 동작(라벨 기반)이라 하위 호환은
+    되지만 정본 짝을 보장하지 못한다 — 라이터는 반드시 넘긴다.
+    """
+    if test_method is not None:
+        m = str(test_method).strip().upper()
+        return _SITS_GEN_BOUNDARY if m.startswith(_SITS_METHOD_FAULT) else _SITS_GEN_DEFAULT
     g = str(gen or "").strip().upper()
     return _SITS_GEN_BOUNDARY if ("ABV" in g or "BV" in g) else _SITS_GEN_DEFAULT
 
@@ -585,6 +608,8 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     "dropped_in_design_doc_count",
     "transitive_entries", "transitive_entries_emitted", "cross_reach_hops",
     "chain_truncated_flows", "chain_max_nodes",
+    # TC ID 축 — 설계 ID(SwUDS) 유래인지 파싱 순번인지
+    "design_id_hits", "design_id_lookups", "design_id_map_entries",
 )
 
 _ASIL_RANK: Dict[str, int] = {"D": 0, "C": 1, "B": 2, "A": 3, "QM": 4}
@@ -1470,15 +1495,35 @@ def generate_itc_list(
     flows: List[Dict[str, Any]],
     max_subcases: int = _DEFAULT_SUBCASES,
     stp_environments: Optional[List[str]] = None,
+    design_ids: Optional[Dict[str, Any]] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Generate list of Integration Test Cases from flows.
 
     Each ITC has:
       tc_id, gen_method, input_vars, expected_vars, related_ids, sub_cases
+
+    ## TC ID 는 **SwUDS 설계 ID** 를 쓴다
+
+    정본 실측(KJPDS02_PV_SwITS v1.02, 54건): `SwITC_SwUFn_0101_01` 12 ·
+    `SwITC_SwUFn_0110` 37 · `SwITC_FI_SwFn_07` 5 — 전부 설계 ID 기반이다.
+    우리는 파싱 순번(`SwITC_01`)을 써서 정본과 **교집합 0** 이었다(2026-08-14 실측).
+    SUTS 가 같은 결함을 이미 고쳐 뒀고(`TC_ID = "SwUTC_" + SUDS` 로 1,013/1,014 일치)
+    그 해석기(`generators.uds_design_ids`)를 **그대로 재사용**한다.
+
+    ⚠ 설계 ID 를 못 찾으면 **순번으로 돌아간다**(`SwITC_NN`). SUTS 는 그 칸을 비우지만
+    여기서는 TC ID 가 문서 식별자라 비울 수 없다 — 대신 모양이 달라 구별되고,
+    `stats_out["design_id_hits"]` 로 몇 건이 문서 근거인지 셀 수 있다.
     """
     itcs: List[Dict[str, Any]] = []
+    _design_hits = 0
     for idx, flow in enumerate(flows, start=1):
-        tc_id = f"SwITC_{idx:02d}"
+        _sid = resolve_design_id(design_ids, flow.get("entry_fn")) if design_ids else ""
+        if _sid:
+            _design_hits += 1
+            tc_id = f"SwITC_{_sid}"
+        else:
+            tc_id = f"SwITC_{idx:02d}"
         gen_method = _determine_gen_method_for_flow(flow)
         sub_cases = _generate_sub_cases(
             flow, max_cases=max_subcases,
@@ -1509,8 +1554,24 @@ def generate_itc_list(
             "sub_cases": sub_cases,
             "asil": flow["asil"],
         })
-    _logger.info("SITS: generated %d ITCs, %d total sub-cases",
-                 len(itcs), sum(len(t["sub_cases"]) for t in itcs))
+    if stats_out is not None:
+        stats_out.update({
+            "design_id_hits": _design_hits,
+            "design_id_lookups": len(itcs),
+            "design_id_map_entries": len((design_ids or {}).get("by_name") or {}),
+        })
+    _logger.info(
+        "SITS: generated %d ITCs, %d total sub-cases (TC ID 중 설계 ID 유래 %d · 순번 %d)",
+        len(itcs), sum(len(t["sub_cases"]) for t in itcs), _design_hits,
+        len(itcs) - _design_hits,
+    )
+    if itcs and not _design_hits:
+        # 전부 순번이면 TC ID 축이 정본과 **한 건도** 안 맞는다. 조용히 넘기지 않는다.
+        _logger.warning(
+            "SITS: TC ID 가 전부 파싱 순번이다(설계 ID 0/%d · 맵 %d항목). 정본은 "
+            "`SwITC_SwUFn_xxxx` 형태이므로 이 축은 대조 불가다 — SwUDS 경로를 확인할 것.",
+            len(itcs), len((design_ids or {}).get("by_name") or {}),
+        )
     return itcs
 
 
@@ -1864,12 +1925,15 @@ def generate_sits_xlsm(
                 value=_safety_mark(itc.get("asil"))).font = data_font
         ws.cell(row=current_row, column=_SAFETY_COL).alignment = center
         ws.cell(row=current_row, column=_SAFETY_COL).border = thin
+        # ⚠ Gen 은 Method 에서 유도한다 — 정본에서 둘은 짝이다(`_sits_gen_method`).
+        #   독립으로 정하면 정본에 없는 조합이 나온다(실측: 367건 전부 그랬다).
+        _test_method = _sits_test_method(itc)
         ws.cell(row=current_row, column=_METHOD_COL,
-                value=_sits_test_method(itc)).font = data_font
+                value=_test_method).font = data_font
         ws.cell(row=current_row, column=_METHOD_COL).alignment = center
         ws.cell(row=current_row, column=_METHOD_COL).border = thin
         ws.cell(row=current_row, column=_GEN_COL,
-                value=_sits_gen_method(gen_method)).font = data_font
+                value=_sits_gen_method(gen_method, _test_method)).font = data_font
         ws.cell(row=current_row, column=_GEN_COL).alignment = center
         ws.cell(row=current_row, column=_GEN_COL).border = thin
         ws.cell(row=current_row, column=_RELATED_COL, value=related_str).font = data_font
@@ -2467,7 +2531,12 @@ def generate_sits(
     # ── Stage 7: generate ITCs ───────────────────────────────────────────────
     _progress(60, "통합 테스트 케이스 생성 중")
     stp_envs = stp_context.get("environments") or []
-    itcs = generate_itc_list(flows, max_subcases=max_subcases, stp_environments=stp_envs or None)
+    # TC ID 는 **SwUDS 설계 ID** 를 쓴다(`generate_itc_list` docstring — 정본 실측).
+    # 못 얻으면 순번으로 내려가되 그 사실이 로그·리포트에 남는다.
+    _design_ids = load_uds_design_ids(uds_path) if uds_path else None
+    itcs = generate_itc_list(flows, max_subcases=max_subcases,
+                             stp_environments=stp_envs or None,
+                             design_ids=_design_ids, stats_out=flow_stats)
 
     _progress(65, f"{len(itcs)}개 TC, {sum(len(t['sub_cases']) for t in itcs)}개 sub-case 생성 완료")
 

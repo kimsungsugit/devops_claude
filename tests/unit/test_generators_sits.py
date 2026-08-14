@@ -218,6 +218,111 @@ class TestVarNamesFollowReferenceNotation:
         assert not any("(" in v for v in expected), f"함수명 접두가 남았다: {expected}"
 
 
+class TestTcIdUsesDesignIds:
+    """TC ID 는 **SwUDS 설계 ID** 를 쓴다.
+
+    정본 실측(54건): `SwITC_SwUFn_0101_01` 12 · `SwITC_SwUFn_0110` 37 ·
+    `SwITC_FI_SwFn_07` 5 — 전부 설계 ID 기반이고 우리 파싱 순번(`SwITC_01`)과는
+    **교집합 0** 이었다. SUTS 가 같은 결함을 이미 고쳐 뒀다(1,013/1,014 일치).
+    """
+
+    @staticmethod
+    def _flows():
+        return [{"entry_fn": "Ap_Door_Run", "call_chain": "Ap_Door_Run -> x",
+                 "module_name": "Ap_Door", "input_vars": [], "expected_vars": [],
+                 "related_ids": ["SwCom_01"], "synthetic_related_ids": [],
+                 "asil": "B", "logic_flow": [], "cross_calls": []}]
+
+    def test_design_id_becomes_the_tc_id(self):
+        from generators.sits import generate_itc_list
+
+        itcs = generate_itc_list(self._flows(),
+                                 design_ids={"by_name": {"Ap_Door_Run": "SwUFn_0101"}})
+        assert itcs[0]["tc_id"] == "SwITC_SwUFn_0101"
+
+    def test_missing_design_id_falls_back_to_sequence(self):
+        """TC ID 는 문서 식별자라 비울 수 없다 — 대신 모양이 달라 구별된다."""
+        from generators.sits import generate_itc_list
+
+        itcs = generate_itc_list(self._flows(), design_ids={"by_name": {}})
+        assert itcs[0]["tc_id"] == "SwITC_01"
+
+    def test_hit_count_is_reported(self):
+        """몇 건이 문서 근거인지 세어야 '정본과 대조 가능한가' 를 알 수 있다."""
+        from generators.sits import generate_itc_list
+
+        stats: dict = {}
+        generate_itc_list(self._flows(), design_ids={"by_name": {"Ap_Door_Run": "SwUFn_0101"}},
+                          stats_out=stats)
+        assert stats["design_id_hits"] == 1
+        assert stats["design_id_lookups"] == 1
+
+    def test_zero_hits_warns(self, caplog):
+        """전부 순번이면 TC ID 축이 정본과 한 건도 안 맞는다 — 침묵 금지."""
+        import logging
+
+        from generators.sits import generate_itc_list
+
+        with caplog.at_level(logging.WARNING, logger="generators.sits"):
+            generate_itc_list(self._flows(), design_ids={"by_name": {}})
+        assert any("파싱 순번" in r.getMessage() for r in caplog.records)
+
+
+class TestGenMethodPairsWithTestMethod:
+    """Gen Method 는 Test Method 와 **짝**이다.
+
+    정본 실측(54건 — 다른 조합 0건): `REQ, IFT ↔ AOR, AEC` 49 · `FI ↔ AOR/ABV` 5.
+    독립으로 정했더니 실 산출물 367건이 전부 `REQ, IFT` × `AOR/ABV` 였다 —
+    정본에 **0건**인 조합이다(2026-08-14 실측).
+    """
+
+    def test_default_method_gets_aec(self):
+        from generators.sits import _sits_gen_method
+
+        assert _sits_gen_method("ABV", "REQ, IFT") == "AOR, AEC"
+        assert _sits_gen_method("AOR, ABV", "REQ, IFT") == "AOR, AEC"
+
+    def test_fault_injection_gets_abv(self):
+        from generators.sits import _sits_gen_method
+
+        assert _sits_gen_method("AEC", "FI") == "AOR/ABV"
+
+    def test_every_internal_label_would_have_collapsed_to_abv(self):
+        """회귀 앵커 — 내부 라벨 생성기의 **모든 분기**가 `ABV` 를 낸다.
+
+        그래서 라벨만 보는 판정으로는 `AOR, AEC` 가 영구 미발생이었다. 이 사실이
+        바뀌면(누가 AEC 전용 분기를 넣으면) 이 테스트가 알려 준다.
+        """
+        from generators.sits import _determine_gen_method_for_flow
+
+        cases = [
+            {"cross_calls": ["a", "b", "c"], "input_vars": [], "logic_flow": []},
+            {"cross_calls": [], "input_vars": ["x"], "logic_flow": [{"type": "if"}]},
+            {"cross_calls": [], "input_vars": ["x", "y", "z"], "logic_flow": []},
+            {"cross_calls": [], "input_vars": [], "logic_flow": []},
+        ]
+        labels = [_determine_gen_method_for_flow(f) for f in cases]
+        assert all("ABV" in v for v in labels), labels
+
+    def test_written_cells_use_a_pair_the_reference_actually_has(self, tmp_path):
+        """산출물 셀에서 확인한다 — 헬퍼만 보면 라이터가 안 넘길 수 있다."""
+        import openpyxl
+
+        from generators.sits import _GEN_COL, _METHOD_COL, _SPEC_SHEET_NAME
+
+        out = tmp_path / "pair.xlsx"
+        generate_sits_xlsm(None, _round_trip_itcs(n_tc=2, n_sub=2), str(out))
+        ws = openpyxl.load_workbook(str(out))[_SPEC_SHEET_NAME]
+        pairs = set()
+        for row in ws.iter_rows(min_row=1, values_only=True):
+            m = row[_METHOD_COL - 1] if len(row) >= _METHOD_COL else None
+            g = row[_GEN_COL - 1] if len(row) >= _GEN_COL else None
+            if m and g and str(m) not in ("Test Method",):
+                pairs.add((str(m), str(g)))
+        assert pairs <= {("REQ, IFT", "AOR, AEC"), ("FI", "AOR/ABV")}, (
+            f"정본에 없는 Method×Gen 조합이 실렸다: {pairs}")
+
+
 class TestObservablesSpanTheWholePath:
     """관측 대상(입력·기대)은 **경로 전체**에서 모은다 — 체인과 같은 범위로.
 
@@ -357,10 +462,18 @@ class TestFlowStatsReachTheReport:
     """
 
     def test_no_flow_stat_is_silently_dropped(self):
-        from generators.sits import _FLOW_COV_KEYS
+        """`flow_stats` 에 키를 넣는 **모든 생산자**를 훑는다.
+
+        ⚠ 처음엔 `collect_integration_flows` 하나만 검사했다. 나중에
+        `generate_itc_list` 가 같은 dict 에 `design_id_*` 를 넣자, 그 키들을
+        `_FLOW_COV_KEYS` 에서 지워도 이 가드가 **초록으로 남았다**(뮤테이션 생존).
+        단일 출처를 만들어도 "누가 그 dict 에 쓰는가" 를 다 알아야 가드가 선다.
+        """
+        from generators.sits import _FLOW_COV_KEYS, generate_itc_list
 
         stats: dict = {}
-        collect_integration_flows(_fd_layered(), max_flows=1, stats_out=stats)
+        flows = collect_integration_flows(_fd_layered(), max_flows=1, stats_out=stats)
+        generate_itc_list(flows, design_ids={"by_name": {}}, stats_out=stats)
         # 흐름 축 = SDS/SwUDS 보강 축을 뺀 나머지(그 둘은 별도 dict 로 나간다)
         flow_keys = {k for k in stats if not k.startswith(("sds_", "uds_swcom_"))}
         missing = sorted(flow_keys - set(_FLOW_COV_KEYS))
