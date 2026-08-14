@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -450,6 +451,50 @@ def _reach_cross_module(
     return found
 
 
+def _bfs_call_order(
+    entry: str,
+    calls_map: Dict[str, List[str]],
+    limit: int,
+    max_depth: Optional[int] = None,
+) -> List[str]:
+    """`entry` 로부터 **거리 순**(가까운 함수 먼저)으로 호출 그래프를 훑은 방문 순서.
+
+    ## 왜 체인(DFS)과 다른 순서를 쓰나
+
+    체인은 "이 통합 경로가 어디를 지나는가" 를 **서술**하는 것이라 깊이 우선이 정본과
+    같은 모양이다. 반면 관측 대상(입력·기대)은 열 상한(입력 82 · 기대 113)에 묶여
+    있어 **무엇을 먼저 담느냐가 곧 회수**다 — 후보가 상한의 3~8배나 된다
+    (`s_SysMain_Init` 636개 · `main` 417개).
+
+    실측(2026-08-14, KJPDS02_PV · 정본 입력 716 · 기대 910):
+
+        수집 범위·순서          입력 회수   기대 회수
+        현행(entry+직접 callee)   108        129
+        경로 전체 · 깊이 우선      195        253
+        경로 전체 · **거리 순**    213        281
+        상한 없음(이론 최대)       324        393
+
+    깊이 우선은 한 갈래로 멀리 내려가 상한을 써 버린다. 거리 순은 진입점 주변을 먼저
+    채우는데, 정본이 적는 관측 대상이 거기 몰려 있다.
+    """
+    seen = {entry}
+    order = [entry]
+    queue = deque([(entry, 0)])
+    while queue and len(order) < limit:
+        cur, depth = queue.popleft()
+        if max_depth is not None and depth >= max_depth:
+            continue
+        for callee in calls_map.get(cur, []):
+            if callee in seen:
+                continue
+            seen.add(callee)
+            order.append(callee)
+            queue.append((callee, depth + 1))
+            if len(order) >= limit:
+                break
+    return order
+
+
 def _build_call_chain_nodes(
     entry: str,
     calls_map: Dict[str, List[str]],
@@ -508,6 +553,26 @@ _DEFAULT_MAX_FLOWS = 120
 _CROSS_REACH_HOPS = 3
 # 호출 체인 한 줄에 담을 함수 수 상한. 정본 실측 최대는 92 홉이다.
 _MAX_CHAIN_NODES = 100
+
+# 관측 대상(입력·기대)을 모을 때 훑는 경로 함수 수 상한.
+_VAR_SCAN_NODES = 200
+
+# 관측 대상을 모을 **깊이** 상한. 회수와 정밀도의 균형점이다.
+#
+# 실측(2026-08-14, KJPDS02_PV · 정본 입력 716 · 기대 910 · 열 상한 82/113):
+#
+#     깊이   입력 일치 / 총량 (정밀도)     기대 일치 / 총량 (정밀도)
+#      1        108 /  471 (22.9%)          129 /  475 (27.2%)
+#    **2**    **187 /  888 (21.1%)**      **219 /  951 (23.0%)**
+#      3        205 / 1161 (17.7%)          268 / 1274 (21.0%)
+#      5+       213 / 1295 (16.4%)          281 / 1408 (20.0%)
+#
+# 깊이 2 는 회수의 88%(입력)·78%(기대)를 얻으면서 총량은 무제한 대비 31% 적고,
+# 정밀도는 1홉 수준을 지킨다. 더 멀리 가면 **먼 전역이 가까운 것을 열에서 밀어낸다**
+# — 열이 82칸뿐이라 "많이 담기" 는 곧 "잘못 담기" 다.
+# ⚠ 정밀도 20%대가 상한인 이유: 정본은 VectorCAST 실행 결과로 관측 대상을 고르고
+#   우리는 정적 호출 그래프만 본다. 실행 데이터 없이 더 좁히면 회수가 먼저 무너진다.
+_VAR_SCAN_DEPTH = 2
 
 # `collect_integration_flows` 가 `stats_out` 에 싣는 **흐름 축** 키.
 # ⚠ 생산자와 품질 리포트가 이 목록 **하나**를 본다. 예전엔 리포트가 자기 화이트리스트를
@@ -864,6 +929,32 @@ def collect_integration_flows(
             if gn and gn.lower() not in _fn_name_set and gn not in {p[0] for p in input_pairs}:
                 input_pairs.append((gn, g))
 
+        # ── 관측 대상을 **경로 전체**로 넓힌다 ────────────────────────────────
+        # 체인은 R2 에서 경로 전체(최대 100홉)로 폈는데 변수 수집은 `entry + 직접
+        # callee 4개` 에 그대로 묶여 있었다 — 두 축이 어긋난 채였다. 실측(2026-08-14):
+        # 정본 미달의 **98.7%(입력)·94.5%(기대)** 가 "뿌리조차 없음" 이었고, 그 대부분이
+        # 경로상 함수들의 전역이다(`main` TC 에 정본이 적는 `u8g_Cpu_OnLvdStatusChanged_F`
+        # 처럼). 회수: 입력 108 → 213 · 기대 129 → 281 (정본 716 / 910 기준).
+        #
+        # 순서는 **거리 순**(`_bfs_call_order`)이다 — 후보가 상한의 3~8배라 무엇을 먼저
+        # 담느냐가 곧 회수이고, 깊이 우선은 한 갈래로 멀리 내려가 상한을 써 버린다.
+        _var_nodes = _bfs_call_order(
+            fn_name, _calls_map, _VAR_SCAN_NODES, max_depth=_VAR_SCAN_DEPTH)
+        for _node in _var_nodes:
+            if len(input_pairs) >= _MAX_INPUT_PARAMS:
+                break
+            _ni = name_to_info.get(_node)
+            if not _ni or _node == fn_name:
+                continue      # entry 자신은 위에서 이미 훑었다
+            _seen_in = {p[0] for p in input_pairs}
+            for _g in ((_ni.get("globals_global") or []) + (_ni.get("globals_static") or [])):
+                if len(input_pairs) >= _MAX_INPUT_PARAMS:
+                    break
+                _gn = _clean_global_var_name(_g)
+                if _gn and _gn.lower() not in _fn_name_set and _gn not in _seen_in:
+                    _seen_in.add(_gn)
+                    input_pairs.append((_gn, _g))
+
         input_vars: List[str] = [p[0] for p in input_pairs[:_MAX_INPUT_PARAMS]]
         # Keep annotated raws for type inference
         input_raws: List[str] = [p[1] for p in input_pairs[:_MAX_INPUT_PARAMS]]
@@ -894,6 +985,27 @@ def collect_integration_flows(
                     gn = _clean_global_var_name(g)
                     if gn and gn.lower() not in _fn_name_set and gn not in {p[0] for p in exp_pairs}:
                         exp_pairs.append((gn, g))
+
+        # 입력과 같은 이유로 기대도 **경로 전체**를 본다(위 입력부 주석 참조).
+        # 회수: 기대 129 → 281 (정본 910 기준).
+        for _node in _var_nodes:
+            if len(exp_pairs) >= _MAX_EXP_PARAMS:
+                break
+            _ni = name_to_info.get(_node)
+            if not _ni or _node == fn_name:
+                continue
+            _seen_exp = {p[0] for p in exp_pairs}
+            for _raw, _cleaner in (
+                [(x, _clean_var_name) for x in (_ni.get("outputs") or [])]
+                + [(x, _clean_global_var_name)
+                   for x in ((_ni.get("globals_global") or []) + (_ni.get("globals_static") or []))]
+            ):
+                if len(exp_pairs) >= _MAX_EXP_PARAMS:
+                    break
+                _nm = _cleaner(_raw)
+                if _nm and _nm.lower() not in _fn_name_set and _nm not in _seen_exp:
+                    _seen_exp.add(_nm)
+                    exp_pairs.append((_nm, _raw))
 
         # If still no expected vars, mine global writes from logic_flow conditions
         if not exp_pairs:

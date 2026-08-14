@@ -218,6 +218,135 @@ class TestVarNamesFollowReferenceNotation:
         assert not any("(" in v for v in expected), f"함수명 접두가 남았다: {expected}"
 
 
+class TestObservablesSpanTheWholePath:
+    """관측 대상(입력·기대)은 **경로 전체**에서 모은다 — 체인과 같은 범위로.
+
+    R2 에서 체인은 경로 전체(최대 100홉)로 폈는데 변수 수집은 `entry + 직접 callee 4개`
+    에 묶여 있었다. 실측(2026-08-14): 정본 미달의 **98.7%(입력)·94.5%(기대)** 가
+    "뿌리조차 없음" 이었고 그 대부분이 경로상 함수들의 전역이다.
+    회수 — 입력 108 → 213 · 기대 129 → 281 (정본 716 / 910 기준).
+    """
+
+    @staticmethod
+    def _fd_deep():
+        """경계 **너머** 함수의 전역·출력 — 1홉 수집으로는 절대 닿지 않는다.
+
+        ⚠ `Boundary_Fn` 은 `cross_calls` 에 들어가므로 기존 1홉 로직으로도 잡힌다.
+        경로 확장을 실제로 겨누려면 **그보다 한 단계 더 먼** 함수를 봐야 한다 —
+        이 구분을 안 해서 첫 뮤테이션에서 "기대 경로 확장 제거" 가 생존했다.
+        """
+        def _f(name, file, calls, g=None, out=None):
+            return {"name": name, "file": file, "calls_list": list(calls),
+                    "inputs": [], "outputs": list(out or []),
+                    "globals_global": list(g or []), "globals_static": [], "asil": "B"}
+
+        return {
+            "F1": _f("Entry_Fn", "A.c", ["Mid_Fn"]),
+            "F2": _f("Mid_Fn", "A.c", ["Deep_Fn"]),
+            "F3": _f("Deep_Fn", "A.c", ["Boundary_Fn"]),
+            "F4": _f("Boundary_Fn", "B.c", ["Far_Fn"]),
+            # 경계 너머 — cross_calls 에 없고 직접 callee 도 아니다
+            "F5": _f("Far_Fn", "B.c", [],
+                     g=["[INDIRECT] u8g_FarGlobal"], out=["[OUT] u8 u8g_FarResult"]),
+        }
+
+    def test_far_global_becomes_an_input(self):
+        flows = collect_integration_flows(self._fd_deep())
+        assert "u8g_FarGlobal" in flows[0]["input_vars"], flows[0]["input_vars"]
+
+    def test_far_output_becomes_expected(self):
+        flows = collect_integration_flows(self._fd_deep())
+        assert "u8g_FarResult" in flows[0]["expected_vars"], flows[0]["expected_vars"]
+
+    def test_column_caps_are_respected(self):
+        """경로를 넓혀도 열 상한은 넘지 않는다 — 넘으면 라이터가 조용히 자른다."""
+        from generators.sits import _MAX_EXP_PARAMS, _MAX_INPUT_PARAMS
+
+        fd = {"F0": {"name": "Entry_Fn", "file": "A.c", "calls_list": ["N000"],
+                     "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                     "asil": "B"}}
+        # 각 노드가 전역 5개씩 — 상한을 훌쩍 넘는 후보를 만든다
+        for i in range(60):
+            nxt = [f"N{i + 1:03d}"] if i < 59 else []
+            fd[f"N{i}"] = {
+                "name": f"N{i:03d}", "file": ("B.c" if i == 0 else "A.c"),
+                "calls_list": nxt, "inputs": [],
+                "outputs": [f"[OUT] u8 u8g_Out_{i}_{j}" for j in range(5)],
+                "globals_global": [f"[INDIRECT] u8g_G_{i}_{j}" for j in range(5)],
+                "globals_static": [], "asil": "B"}
+        flows = collect_integration_flows(fd)
+        assert len(flows[0]["input_vars"]) <= _MAX_INPUT_PARAMS
+        assert len(flows[0]["expected_vars"]) <= _MAX_EXP_PARAMS
+
+    def test_depth_is_bounded(self):
+        """무한히 멀리 가지 않는다 — 열이 82칸뿐이라 '많이 담기'는 곧 '잘못 담기'다.
+
+        실측(정본 기준): 깊이 2 는 회수의 88%(입력)를 얻으면서 총량은 무제한 대비
+        31% 적고 정밀도는 1홉 수준(21.1%)을 지킨다. 깊이 5 면 정밀도가 16.4% 로 떨어진다.
+        """
+        from generators.sits import _VAR_SCAN_DEPTH, _bfs_call_order
+
+        assert _VAR_SCAN_DEPTH >= 1
+        calls = {"a": ["b"], "b": ["c"], "c": ["d"], "d": []}
+        assert _bfs_call_order("a", calls, 99, max_depth=2) == ["a", "b", "c"]
+        assert _bfs_call_order("a", calls, 99, max_depth=None) == ["a", "b", "c", "d"]
+
+    def test_collector_respects_the_depth_bound(self):
+        """헬퍼가 아니라 **수집부**가 깊이 상한을 거는지 본다."""
+        def _f(name, file, calls, g):
+            return {"name": name, "file": file, "calls_list": list(calls), "inputs": [],
+                    "outputs": [], "globals_global": list(g), "globals_static": [],
+                    "asil": "B"}
+
+        fd = {
+            "E": _f("Entry_Fn", "A.c", ["H1"], []),
+            "1": _f("H1", "B.c", ["H2"], ["[INDIRECT] u8g_Hop1"]),
+            "2": _f("H2", "B.c", ["H3"], ["[INDIRECT] u8g_Hop2"]),
+            "3": _f("H3", "B.c", ["H4"], ["[INDIRECT] u8g_Hop3"]),
+            "4": _f("H4", "B.c", [], ["[INDIRECT] u8g_Hop4"]),
+        }
+        iv = collect_integration_flows(fd)[0]["input_vars"]
+        assert "u8g_Hop1" in iv and "u8g_Hop2" in iv
+        assert "u8g_Hop4" not in iv, f"깊이 상한이 안 걸렸다: {iv}"
+
+    def test_order_is_by_distance_not_depth(self):
+        """가까운 함수를 먼저 담는다 — 상한이 있는 한 순서가 곧 회수다.
+
+        ⚠ 그래프가 대칭이면 큐를 스택으로 바꿔도 결과가 같다(첫 뮤테이션에서 그 판이
+        생존했다). **가지가 갈라진 뒤 각 가지가 또 갈라지는** 모양이라야 FIFO/LIFO 가
+        갈린다 — limit 로 잘랐을 때 BFS 는 형제를, DFS 는 한 갈래 자식을 담는다.
+        """
+        from generators.sits import _bfs_call_order
+
+        calls = {"a": ["b", "c"], "b": ["d", "e"], "c": ["f", "g"],
+                 "d": [], "e": [], "f": [], "g": []}
+        assert _bfs_call_order("a", calls, 5) == ["a", "b", "c", "d", "e"]
+        assert _bfs_call_order("a", calls, 3) == ["a", "b", "c"]
+
+    def test_collector_actually_uses_distance_order(self):
+        """헬퍼가 아니라 **수집부**가 그 순서를 쓰는지 본다.
+
+        (헬퍼만 단독 검사하면 소비처가 깊이 순으로 바뀌어도 초록이다 — 첫 뮤테이션에서
+        "거리 순 → 깊이 순" 이 그렇게 생존했다.)
+        """
+        def _f(name, file, calls, g):
+            return {"name": name, "file": file, "calls_list": list(calls), "inputs": [],
+                    "outputs": [], "globals_global": list(g), "globals_static": [],
+                    "asil": "B"}
+
+        # entry → (near_a, near_b) · near_a → deep. 상한을 좁히면
+        #   거리 순 = near_a·near_b 의 전역 · 깊이 순 = near_a·deep 의 전역
+        fd = {
+            "E": _f("Entry_Fn", "A.c", ["Near_A", "Near_B"], []),
+            "A": _f("Near_A", "A.c", ["Deep_Fn"], ["[INDIRECT] u8g_NearA"] * 1),
+            "B": _f("Near_B", "B.c", [], ["[INDIRECT] u8g_NearB"]),
+            "D": _f("Deep_Fn", "A.c", [], ["[INDIRECT] u8g_Deep"]),
+        }
+        iv = collect_integration_flows(fd)[0]["input_vars"]
+        assert iv.index("u8g_NearB") < iv.index("u8g_Deep"), (
+            f"거리 순이 아니다(형제보다 자식이 먼저 담겼다): {iv}")
+
+
 class TestFlowStatsReachTheReport:
     """생산자가 낸 흐름 통계가 **리포트까지 도달**하는가.
 
