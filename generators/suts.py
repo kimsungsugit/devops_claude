@@ -552,6 +552,12 @@ def collect_unit_functions(
         _rd = _decl_dims_from_array_field(str((_ri or {}).get("array") or ""))
         if _rd and _dim_product(_rd) > 1:
             _root_sizes[str(_rn)] = _rd
+    # 전역 선언 타입도 unit 마다 안 바뀐다. 안에서 만들면 전역 1,525개 × unit 1,157개
+    # = 176만 회를 헛돈다(정규식 치환 포함).
+    _decl_types = _declared_type_map(gim)
+    # 중간 마디 배열을 되살린 이름 수. 이 경로는 **틀린 이름을 고치는** 것이라
+    # 0 이면 "고칠 게 없었다"인지 "배선이 끊겼다"인지 구분이 안 된다 → 요약에 싣는다.
+    _mid_fixed = 0
     if sds_map is None:
         sds_map = _load_default_sds_map()
     units: List[Dict[str, Any]] = []
@@ -754,11 +760,22 @@ def collect_unit_functions(
             inputs_raw, outputs_raw, globals_g, globals_s,
             globals_info=gim, struct_members=struct_members,
         )
+        # 중간 마디는 unit 마다 파라미터 타입이 달라 **여기서** 만든다(전역만인
+        # `_root_sizes` 와 달리 루프 밖으로 못 뺀다).
+        _mid_in: Dict[str, Tuple[int, Tuple[int, ...]]] = {}
+        _mid_out: Dict[str, Tuple[int, Tuple[int, ...]]] = {}
+        if struct_members:
+            _rtypes = _root_type_hints(
+                inputs_raw, outputs_raw, globals_g, globals_s, declared_types=_decl_types
+            )
+            _mid_in = _mid_member_sizes(input_vars, _rtypes, struct_members)
+            _mid_out = _mid_member_sizes(output_vars, _rtypes, struct_members)
+            _mid_fixed += len(_mid_in) + len(_mid_out)
         input_vars, _in_exp = _expand_array_entries(
-            input_vars, _sizes, max_inp, root_sizes=_root_sizes
+            input_vars, _sizes, max_inp, root_sizes=_root_sizes, mid_sizes=_mid_in
         )
         output_vars, _out_exp = _expand_array_entries(
-            output_vars, _sizes, max_out, root_sizes=_root_sizes
+            output_vars, _sizes, max_out, root_sizes=_root_sizes, mid_sizes=_mid_out
         )
 
         # ── ASIL — `Safety Related` 칸(O/X)의 근거 ─────────────────────────
@@ -870,6 +887,13 @@ def collect_unit_functions(
     _const_note += (
         f" | SwUDS 이름 대체 입력 {_uds_in_units}/{len(units)} · 기대 {_uds_out_units}"
         if uds_io_map else " | ⚠SwUDS 입출력 맵 없음 → 소스 파싱 이름 사용"
+    )
+    # 중간 마디 배열 복원. 이건 입도 조정이 아니라 **불성립 이름 교정**이라
+    # (배열에 `.멤버` 는 못 붙인다) 0 건이면 "고칠 게 없었다"인지 "배선이 끊겼다"인지
+    # 구분이 안 된다 — 구조체 맵 유무와 함께 남긴다.
+    _const_note += (
+        f" | 중간마디 배열 복원 {_mid_fixed}칸"
+        if struct_members else " | ⚠구조체 멤버 맵 없음 → 중간마디 배열 복원 안 함"
     )
     # ASIL 이 소스 주석과 문서에서 갈린 unit. max 로 올려 썼다는 사실을 남긴다 —
     # 어느 쪽이 낡았는지 판단은 사람 몫이고, 조용하면 그 판단 기회가 사라진다.
@@ -1116,6 +1140,93 @@ def _struct_member_dims(
     return _decl_dims_from_array_field(str((struct_members.get(ty) or {}).get(rest) or ""))
 
 
+def _declared_type_map(globals_info: Optional[Dict[str, Dict[str, str]]]) -> Dict[str, str]:
+    """전역 선언의 `이름 → 타입`. unit 마다 안 바뀌므로 **루프 밖에서 한 번** 만든다."""
+    return {
+        str(_gn): _ty
+        for _gn, _gi in (globals_info or {}).items()
+        if (_ty := _CV_QUALIFIER_RE.sub("", str((_gi or {}).get("type") or "")).strip())
+    }
+
+
+def _root_type_hints(
+    *raw_groups: List[str],
+    declared_types: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """root 이름 → 구조체 **타입 이름**.
+
+    원시 엔트리는 타입을 앞에 달고 온다(`[INOUT] ST_SAFE_WRITE_QUEUE* pst_Queue->ast_Queue`).
+    파라미터는 전역 선언에 없으므로 이 접두가 **유일한** 타입 출처다.
+    ⚠ 프로토타입을 소스에서 다시 파싱하지 않는다 — 같은 판정을 두 벌 두면 한쪽만
+      고쳐지는 실패를 이 저장소가 반복해 겪었다. 타입은 이미 엔트리 안에 있다.
+    ⚠ 전역 **선언**이 이긴다. 엔트리 접두는 호출 지점 표기라, 어긋나면 선언이 옳다.
+    """
+    hints: Dict[str, str] = {}
+    for group in raw_groups:
+        for raw in group or []:
+            s = _DIR_TAG_PAT.sub("", str(raw or "").strip(), count=1).strip()
+            s = _strip_param_annotations(s)
+            # `return U8` 은 선언이 아니라 반환 슬롯이다. 그냥 두면 `{"U8": "return"}`
+            # 이라는 뒤집힌 항목이 생긴다 — 지금은 무해하지만 이름이 곧 root 키다.
+            if _RETURN_SLOT_RE.match(s):
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                continue
+            # 마지막 토큰이 이름, 그 앞이 타입. `p->m` · `p[0].m` 은 root 만 취한다.
+            root = re.split(r"->|\.", parts[-1].strip("*&;,"), maxsplit=1)[0]
+            root = re.sub(r"(?:\[[^\]]*\])+$", "", root)
+            ty = _CV_QUALIFIER_RE.sub("", " ".join(parts[:-1])).replace("*", " ").strip()
+            ty = ty.split()[-1] if ty.split() else ""
+            if root and ty and root not in hints:
+                hints[root] = ty
+    hints.update(declared_types or {})
+    return hints
+
+
+def _mid_member_sizes(
+    names: List[str],
+    root_types: Dict[str, str],
+    struct_members: Dict[str, Dict[str, str]],
+) -> Dict[str, Tuple[int, Tuple[int, ...]]]:
+    r"""`A.B.C` 에서 **중간** 마디가 선언 배열이면 `{이름: (마디 인덱스, 차원)}`.
+
+    ## 왜 꼬리(`sizes`)와 따로 필요한가 — 이 이름들은 **C 로 성립하지 않는다**
+
+    `pst_Queue[0].ast_Queue.u16_Addr1` 의 `ast_Queue` 는
+    `ST_SAFE_WRITE_QUEUE_ENTRY ast_Queue[16]` 이다. **배열에 `.멤버` 는 못 붙인다.**
+    첨자를 잃은 경로는 SwUDS 이름 대체에서 온다 — 문서는 `ast_Queue[x]`(자리표시자)
+    · `ast_Queue[16]`(선언 크기)로 적는데 `uds_unit_io.clean_param_name` 이 첨자를
+    **의도적으로** 전부 뗀다(문서 숫자를 믿으면 없는 원소를 만든다: UDS `CSL[9]` vs
+    소스 `U8 CSL[8]`). 그 규칙은 옳다 — 다만 **되붙일 자리**가 꼬리와 root 뿐이라
+    중간 마디가 갈 곳이 없었다. 크기는 여기서도 **소스에서만** 얻는다.
+
+    ⚠ 파라미터 타입을 **꼬리**에 쓰지 않는다. 11차 실측이 일치 +34 에 과다 +176
+      이었다(`SHA256_CTX.buffer[64]` 통째 확장). 꼬리는 안 펼쳐도 이름이 성립하니
+      그건 취향이지만, 중간 마디는 안 붙이면 **틀린 이름**이라 성격이 다르다.
+    """
+    out: Dict[str, Tuple[int, Tuple[int, ...]]] = {}
+    for nm in names:
+        # ⚠ `len(parts) < 3` 조기 탈출을 두지 않는다 — 아래 `range(1, len(parts) - 1)`
+        #   이 이미 빈 범위가 되어 같은 것을 두 번 막는다. 겹친 가드는 방어가 아니라
+        #   뮤테이션이 통째로 사는 사각이다(11차에서 같은 판단으로 두 개를 뺐다).
+        parts = str(nm or "").split(".")
+        root = re.sub(r"(?:\[[^\]]*\])+$", "", parts[0])
+        members = struct_members.get(root_types.get(root) or "") or {}
+        if not members:
+            continue
+        # 마지막 마디는 제외한다 — 그건 `sizes` 가 이미 맡는다.
+        for k in range(1, len(parts) - 1):
+            if "[" in parts[k]:
+                break
+            path = ".".join(p.split("[")[0] for p in parts[1:k + 1])
+            dims = _decl_dims_from_array_field(str(members.get(path) or ""))
+            if dims and _dim_product(dims) > 1:
+                out[nm] = (k, dims)
+                break
+    return out
+
+
 def _array_sizes(
     *raw_groups: List[str],
     globals_info: Optional[Dict[str, Dict[str, str]]] = None,
@@ -1187,27 +1298,40 @@ def _expand_array_entries(
     sizes: Dict[str, Tuple[int, ...]],
     budget: int,
     root_sizes: Optional[Dict[str, Tuple[int, ...]]] = None,
+    mid_sizes: Optional[Dict[str, Tuple[int, Tuple[int, ...]]]] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**.
 
-    첨자가 붙는 자리는 둘이다:
+    첨자가 붙는 자리는 셋이고, 전부 "몇 번째 마디 뒤에 붙나"의 다른 값이다:
+      · `mid_sizes`  — **중간** 마디(`X.arr.m` → `X.arr[0].m`). 아래 순서 주의.
       · `sizes`      — 이름 **꼬리**(`u8s_Buf` → `u8s_Buf[0]`, `PS.Data` → `PS.Data[0]`)
       · `root_sizes` — 점 있는 이름의 **root 뒤**(`g_Ph.u8_Max` → `g_Ph[0].u8_Max`).
         구조체 **배열**의 멤버라 정본이 첨자를 root 에 붙인다. 꼬리에 붙이면
         `g_Ph.u8_Max[0]` 이라는 **없는 대상**이 된다.
+
+    ⚠ **중간이 꼬리보다 먼저다.** 한 이름에서 둘 다 배열이면(이 프로젝트엔 0건),
+      꼬리만 펼친 `A.B.C[0]` 은 `A.B` 가 배열이라 **여전히 불성립**이지만, 중간만
+      펼친 `A.B[0].C` 는 C 를 통째 배열로 읽는 **성립하는** 이름이다. 덜 틀린 쪽을
+      고른다.
     """
     out: List[str] = []
     expanded: List[str] = []
     skipped: List[Dict[str, Any]] = []
     total = len(names)
     for pos, nm in enumerate(names):
-        dims = sizes.get(nm) or ()
-        at_root = False
+        at_node = -1
+        dims: Tuple[int, ...] = ()
+        _mid = (mid_sizes or {}).get(nm)
+        if _mid:
+            at_node, dims = _mid
+        if not dims:
+            dims = sizes.get(nm) or ()
         if not dims and root_sizes and "." in nm:
             # 첨자가 이미 붙은 root(`ctx[0]`)는 키가 안 맞아 조회가 실패한다 —
             # 별도 가드를 두면 겹쳐서 막게 되고, 그건 방어가 아니라 사각이다.
             dims = root_sizes.get(nm.split(".", 1)[0]) or ()
-            at_root = bool(dims)
+            if dims:
+                at_node = 0
         n = _dim_product(dims) if dims else 0
         if n <= 1:
             out.append(nm)
@@ -1221,9 +1345,13 @@ def _expand_array_entries(
             out.append(nm)
             skipped.append({"name": nm, "elements": n, "remaining": max(0, remaining - reserve)})
             continue
-        if at_root:
-            _root, _, _rest = nm.partition(".")
-            out.extend(f"{_root}{sfx}.{_rest}" for sfx in _elem_suffixes(dims))
+        if at_node >= 0:
+            # 마디 `at_node` **뒤에** 첨자를 넣는다. root 는 `at_node == 0` 인 특수형일
+            # 뿐이라 삽입 로직을 따로 두지 않는다(같은 일을 두 벌 두면 한쪽만 고쳐진다).
+            _parts = nm.split(".")
+            _head = ".".join(_parts[: at_node + 1])
+            _tail = ".".join(_parts[at_node + 1:])
+            out.extend(f"{_head}{sfx}.{_tail}" for sfx in _elem_suffixes(dims))
         else:
             out.extend(nm + sfx for sfx in _elem_suffixes(dims))
         expanded.append(nm)
