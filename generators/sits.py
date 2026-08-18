@@ -115,6 +115,51 @@ _SITS_METHOD_FAULT = "FI"           # 고장 주입
 _SITS_GEN_DEFAULT = "AOR, AEC"
 _SITS_GEN_BOUNDARY = "AOR/ABV"
 
+# ── Introduction 1.5 / 1.6 — 이 문서가 **자기 어휘를 정의하는 곳** ──────────
+#
+# ⚠ 감사자는 3번 시트의 `REQ, IFT` · `FI` 를 보고 1.5 표에서 그 코드를 찾는다.
+#   그런데 저장소 템플릿의 1.5 는 **하드웨어 통합시험 판**(`FNCT`/`FIT`/`ELCT`)이라,
+#   우리가 내는 코드가 **문서 안에 정의되지 않은 값**이었다(실측: 정본 v1.02 는
+#   REQ/IFT/RUT/SEP/FI). 같은 결함을 SwUTS 가 먼저 겪고 3번 시트만 고쳤는데
+#   (`suts.py` `_METHOD_REQ` 주석), SITS 는 그 반대로 3번 시트만 고치고 Introduction 을
+#   두었다. 두 곳이 갈라지지 않게 **여기 하나**를 두고 양쪽이 참조한다.
+#
+# 정본(KJPDS02_PV_SwITS v1.02 Introduction) 원문 그대로. ASIL 열은 그 문서의 값이며
+# 우리가 판정에 쓰지 않는다(문서가 선언하는 적용 범위일 뿐 — 지어내지 않는다).
+_INTRO_TEST_METHODS: Tuple[Tuple[str, str, str], ...] = (
+    ("Requirements-based Test", "REQ", "A,B,C,D"),
+    ("Interface Test", "IFT", "A,B,C,D"),
+    ("Resource Usage Test", "RUT", "A,B,C,D"),
+    ("System Error Protection Analysis", "SEP", "A,B,C,D"),
+    ("Fault Injection Test", "FI", "B,C,D"),
+)
+_INTRO_GEN_METHODS: Tuple[Tuple[str, str, str], ...] = (
+    ("Analysis Of Requirement", "AOR", "A,B,C,D"),
+    ("Analysis Of internal and external Interface", "AOI", "B,C,D"),
+    ("generation and Analysis of Equivalence Classes", "AEC", "C,D"),
+    ("Analysis of Boundary Values", "ABV", "C,D"),
+    ("knowledge or experience based ERror guessing", "ERG", "A,B,C,D"),
+    ("Analysis of Funtional Depedency", "AFD", "C,D"),
+    ("Analysis of common limit conditions, sequences and sources of Dependent Failures",
+     "ADF", "C,D"),
+    ("Analysis of environment codition and operational Use Cases", "AUC", "B,C,D"),
+    ("STAndard if existing", "STA", "-"),
+    ("Analysis of Significant Variables", "ASV", "A,B,C,D"),
+)
+
+
+def _intro_codes(rows: Tuple[Tuple[str, str, str], ...]) -> frozenset:
+    return frozenset(a for _n, a, _l in rows)
+
+
+def _split_method_codes(value: Any) -> List[str]:
+    """`"REQ, IFT"` · `"AOR/ABV"` → `["REQ","IFT"]` · `["AOR","ABV"]`.
+
+    결합자는 문서마다 다르다(SwITS 는 Test Method 가 쉼표, Gen Method 가 슬래시).
+    판정은 **코드 단위**로 해야 하므로 둘 다 분리한다.
+    """
+    return [p for p in (t.strip() for t in re.split(r"[,/]", str(value or ""))) if p]
+
 
 def _safety_mark(asil: Any) -> str:
     """`Safety Related` 칸 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
@@ -179,11 +224,27 @@ def _resolve_flow_asil(
 
 
 def _sits_test_method(itc: Dict[str, Any]) -> str:
-    """통합 TC 의 Test Method. 오류 전파 서브케이스를 가지면 고장 주입으로 본다."""
-    for sc in itc.get("sub_cases") or []:
-        if "ERR" in str(sc.get("strategy") or sc.get("case_label") or "").upper():
-            return _SITS_METHOD_FAULT
-    return _SITS_METHOD_DEFAULT
+    """통합 TC 의 Test Method — **전용 FI TC 인가**로 판정한다.
+
+    ⚠ 예전 판은 "오류 전파 서브케이스를 하나라도 가지면 TC 전체가 FI" 였다.
+      그런데 정본(KJPDS02_PV_SwITS v1.02)에서 FI 는 **전용 TC** 다:
+
+          REQ, IFT ↔ AOR, AEC   49건   (동등분할 — 무효 등가류 EC1/EC7 포함)
+          FI       ↔ AOR/ABV     5건   (경계값분석 · `SwITC_FI_SwFn_NN`)
+
+      즉 정본은 무효 경계 서브케이스를 가진 TC 를 FI 로 올리지 **않는다** —
+      Test Method 와 Gen Method 가 짝이라 AEC 를 쓰면서 FI 인 조합이 0건이다.
+
+    ⚠ 옛 판정은 **살아 있는 지뢰**였다. `_generate_sub_cases` 의 오류전파 블록
+      (`ERR_PROP_*`)은 `len(sub_cases) < max_cases` 가드에 막혀 있는데, 기본
+      경계값이 정확히 7개라 `max_subcases=7` 이면 예산이 꽉 차 한 번도 안 돈다.
+      예산을 조금만 올리면(기본값 `_DEFAULT_SUBCASES=14` 포함) **전 TC 가 FI 로
+      뒤집힌다** — 실측: max 7 → `REQ, IFT` · max 10/14 → `FI`.
+      영향도 재생성(`impact_orchestrator._run_sits_generation`)은 이 인자를 안 넘겨
+      기본값 14 를 쓰므로, 그 경로의 산출물은 **전 TC 가 FI** 였다.
+    """
+    m = str(itc.get("test_method") or "").strip()
+    return m or _SITS_METHOD_DEFAULT
 
 
 def _sits_gen_method(gen: Any, test_method: Optional[str] = None) -> str:
@@ -832,6 +893,8 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     # 배열 원소 펼침 축 — 정본과 같은 입도로 냈는가, 예산에 걸려 못 펼쳤는가
     "array_expanded_inputs", "array_expanded_expected", "array_elements_emitted",
     "array_skipped_budget", "array_size_map_entries", "array_struct_types",
+    # FI 축 — 0 이 "요청 없음"인지 "요청했는데 못 냄"인지 구분되게
+    "fi_emitted", "fi_requested", "fi_unresolved",
     # 근거 시트(전략 / Related_ID) 산출 실적 — 시트가 비어도 **왜 비었는지** 보이게
     "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
     "strategy_blocks_truncated",
@@ -1849,6 +1912,8 @@ def generate_itc_list(
     stp_environments: Optional[List[str]] = None,
     design_ids: Optional[Dict[str, Any]] = None,
     stats_out: Optional[Dict[str, Any]] = None,
+    # ⚠ 신규 인자는 **맨 끝**에 붙인다(위치 인자 호출부가 조용히 다른 값에 바인딩된다).
+    fi_flows: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Generate list of Integration Test Cases from flows.
 
@@ -1895,6 +1960,10 @@ def generate_itc_list(
                 effective_expected_vars = list(first_exp.keys())[:_MAX_EXP_PARAMS]
         itcs.append({
             "tc_id": tc_id,
+            # Test Method 는 **여기서 확정**한다. 예전엔 라이터가 서브케이스 라벨을
+            # 훑어 추론했는데, 오류전파 서브케이스 하나로 TC 전체가 FI 로 뒤집혔다
+            # (`_sits_test_method` 주석의 지뢰). 정본은 FI 를 전용 TC 로만 쓴다.
+            "test_method": _SITS_METHOD_DEFAULT,
             "gen_method": gen_method,
             "entry_fn": flow["entry_fn"],
             "call_chain": flow["call_chain"],
@@ -1908,12 +1977,61 @@ def generate_itc_list(
             "sub_cases": sub_cases,
             "asil": flow["asil"],
         })
+    # ── 전용 FI(고장 주입) TC ────────────────────────────────────────────
+    # ⚠ **선별은 유도하지 않고 입력으로 받는다.** 정본의 FI 5건
+    #   (`SwITC_FI_SwFn_07/34/36/37/41`)이 무엇으로 골렸는지 8가지 근거를 전부
+    #   실측했는데 하나도 재현하지 못했다:
+    #     logic_flow 오류어휘 0/5 · SySM 안전메커니즘 추적 0/5(집합 자체가 어긋남)
+    #     ASIL 5/5지만 39/41 선택(무용) · 이름 휴리스틱 5/5지만 24선택(4.8배)
+    #     오류/진단 전역 3/5 · 상태값 반환 3/5 · 둘의 교집합 2/5
+    #     SwUDS 문서에 "fault injection" 어휘 0회 · 소스에 `@fault`/`@fi` 태그 0건
+    #       (`@fi` 108건은 전부 **`@file`** — substring 위양성)
+    #   정본의 5건은 사람의 안전분석(FMEA/FTA)에서 나온 선택이다. 추측해서
+    #   Test Method 칸에 근거 없는 FI 를 붙이면 감사 문서가 검증 유형을 거짓 진술한다.
+    _fi_emitted = 0
+    for _ff in (fi_flows or []):
+        _did = str(_ff.get("fi_design_id") or "").strip()
+        if not _did:
+            continue
+        _fi_sub = _generate_sub_cases(
+            _ff, max_cases=max_subcases, stp_environments=stp_environments,
+            gen_method=_SITS_GEN_BOUNDARY,
+        )
+        itcs.append({
+            # 정본 형태: `SwITC_FI_SwFn_07`. (`_integration_id` 는 `SwITC_`→`SwIT_`
+            #  변환기라 여기 쓰면 접두가 통째로 빠진다.)
+            "tc_id": f"{_TC_ID_PREFIX}FI_{_did}",
+            "test_method": _SITS_METHOD_FAULT,
+            # 정본 실측: FI 는 **항상** `AOR/ABV`(경계값분석)와 짝이다.
+            "gen_method": _SITS_GEN_BOUNDARY,
+            "entry_fn": _ff.get("entry_fn", ""),
+            "call_chain": _ff.get("call_chain", ""),
+            "module_name": _ff.get("module_name", ""),
+            "input_vars": list(_ff.get("input_vars") or []),
+            "expected_vars": list(_ff.get("expected_vars") or []),
+            "related_ids": list(_ff.get("related_ids") or []),
+            "synthetic_related_ids": list(_ff.get("synthetic_related_ids") or []),
+            "req_ids": list(_ff.get("req_ids") or []),
+            "sub_cases": _fi_sub,
+            "asil": _ff.get("asil", ""),
+        })
+        _fi_emitted += 1
     if stats_out is not None:
         stats_out.update({
             "design_id_hits": _design_hits,
             "design_id_lookups": len(itcs),
             "design_id_map_entries": len((design_ids or {}).get("by_name") or {}),
+            # FI 축 — 0 이 "요청이 없었다"인지 "요청했는데 못 냈다"인지 구분되게.
+            "fi_emitted": _fi_emitted,
+            "fi_requested": len(fi_flows or []),
         })
+    if not _fi_emitted:
+        # 침묵 금지: 정본에는 FI 축이 있다. 0 인 이유를 산출 시점에 남긴다.
+        _logger.info(
+            "SITS: 전용 FI TC 0건 — 고장주입 대상(설계 ID)이 지정되지 않았다. "
+            "정본은 SwFn 설계 요소 5건을 FI 로 두는데, 그 선별은 안전분석 산출물이라 "
+            "소스/SwUDS/SRS 에서 유도되지 않는다(8가지 근거 실측 — 코드 주석 참조).",
+        )
     _logger.info(
         "SITS: generated %d ITCs, %d total sub-cases (TC ID 중 설계 ID 유래 %d · 순번 %d)",
         len(itcs), sum(len(t["sub_cases"]) for t in itcs), _design_hits,
@@ -1932,6 +2050,133 @@ def generate_itc_list(
 # ---------------------------------------------------------------------------
 # Excel generation
 # ---------------------------------------------------------------------------
+
+def _find_ws(wb, *candidates: str):
+    """여러 표기 후보 중 먼저 맞는 시트(`Introduction` ↔ `1.Introduction`).
+
+    ⚠ 이름 정규화는 `_find_sheet` **단일 출처**를 쓴다. 여기서 다시 쓰면 라벨 변종
+      대응이 한쪽에만 반영돼 두 축의 답이 갈라진다(이 파일이 이미 겪은 형태).
+    """
+    for c in candidates:
+        ws = _find_sheet(wb, c)
+        if ws is not None:
+            return ws
+    return None
+
+
+def _fill_sits_front_matter(
+    wb,
+    project_id: str,
+    doc_id: str,
+    version: str,
+    front_matter: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Cover / Introduction / Test Environment 를 실제 값으로 채운다.
+
+    ⚠ 저장소 템플릿의 앞부분은 **하드웨어 통합시험 판**이 그대로 남아 있다. 실측
+      (2026-08-18, 등록 템플릿 재생성본):
+
+          1.5 Test Method   `FUnctional Testing/FNCT` · `Fault Injection Testing/FIT`
+                            · `Electrical Testing/ELCT`
+          1.3 용어사전       `"HDPDM01 Glossary"` ← **다른 프로젝트 이름**
+          1.4 Reference     File Name 열 전부 빈칸 · Note 가 "HW 요구사항 명세서"
+          1.1 Purpose       `XXXX 프로젝트`
+          Cover             `HKY-[P_Name]-SwITS-2895` · `v0.10` · `Unspecified`
+                            · `202X.XX.XX` · `XXXX`
+
+      그런데 3번 시트는 `REQ, IFT` · `FI` 를 쓴다 — **문서가 자기 안에서 정의하지 않은
+      코드를 쓰고 있었다.** 감사자가 1.5 표를 펴면 그 코드가 없다.
+      어휘는 `_INTRO_TEST_METHODS`/`_INTRO_GEN_METHODS` **하나**에서 온다.
+
+    ⚠ 1.2 Scope 의 "하드웨어 통합 테스트 사양" 문구는 **정본도 그대로**다(그쪽 템플릿
+      상속). 정본과 같은 것을 '고치면' 오히려 멀어지므로 손대지 않는다.
+
+    Returns: 채운 항목 통계(무엇을 못 채웠는지도 보이게).
+    """
+    fm = front_matter or {}
+    stats: Dict[str, Any] = {"cover": 0, "intro": 0, "refs": 0,
+                             "test_methods": 0, "gen_methods": 0, "missing": []}
+
+    # ── Cover ────────────────────────────────────────────────────────────
+    ws = _find_ws(wb, "Cover")
+    if ws is not None:
+        for cell, val in (("G26", doc_id), ("G27", version),
+                          ("G28", fm.get("status") or "Open"),
+                          ("G29", fm.get("date") or ""), ("G30", fm.get("author") or "")):
+            if val:
+                ws[cell] = val
+                stats["cover"] += 1
+    else:
+        stats["missing"].append("Cover")
+
+    # ── Introduction ─────────────────────────────────────────────────────
+    ws = _find_ws(wb, "Introduction", "1.Introduction")
+    if ws is None:
+        stats["missing"].append("Introduction")
+        return stats
+
+    # 1.1 Purpose — 프로젝트 이름. 템플릿은 `XXXX` 를 박아 둔다.
+    b4 = str(ws["B4"].value or "")
+    if b4:
+        ws["B4"] = re.sub(r"XXXX|\[P_Name\]", project_id, b4)
+        stats["intro"] += 1
+    # 1.3 용어사전 — 템플릿엔 **다른 프로젝트** 이름이 들어 있다.
+    b15 = str(ws["B15"].value or "")
+    if b15:
+        ws["B15"] = f'"{fm.get("glossary") or (project_id + " Glossary")}"을 참조한다'
+        stats["intro"] += 1
+
+    # 1.4 Reference — 실제로 읽은 입력 문서. 없으면 그 줄은 비워 둔다(지어내지 않는다).
+    for i, (fname, note) in enumerate((fm.get("references") or [])[:4]):
+        r = 20 + i
+        ws.cell(row=r, column=2, value=fname)
+        # Note 열은 템플릿 D / 정본 E — 이미 값이 있는 열에 쓴다(둘 다 비면 D).
+        note_col = 5 if str(ws.cell(row=19, column=5).value or "").strip() else 4
+        ws.cell(row=r, column=note_col, value=note)
+        stats["refs"] += 1
+
+    # 1.5 / 1.6 — 어휘 표를 **문서가 실제로 쓰는 값**으로. 헤더 행을 찾아 그 아래에 쓴다.
+    def _fill_table(header_text: str, rows) -> int:
+        hdr = None
+        for r in range(1, min(ws.max_row, 80) + 1):
+            if str(ws.cell(row=r, column=2).value or "").strip().startswith(header_text):
+                hdr = r
+                break
+        if hdr is None:
+            stats["missing"].append(header_text)
+            return 0
+        # 헤더(`Method | 약어 | ASIL`) 바로 아래부터
+        start = hdr + 2
+        from copy import copy as _copy
+        n = 0
+        for i, (name, abbr, asil) in enumerate(rows):
+            r = start + i
+            for col, val in ((2, name), (4, abbr), (5, asil)):
+                c = ws.cell(row=r, column=col)
+                if i > 0:  # 늘어난 행은 첫 행 서식을 따라간다(무서식 행이 튀지 않게)
+                    src = ws.cell(row=start, column=col)
+                    c.font, c.border = _copy(src.font), _copy(src.border)
+                    c.alignment, c.fill = _copy(src.alignment), _copy(src.fill)
+                c.value = val
+            n += 1
+        return n
+
+    stats["test_methods"] = _fill_table("1.5 Test Method", _INTRO_TEST_METHODS)
+    stats["gen_methods"] = _fill_table("1.6 Test Case Generation Method", _INTRO_GEN_METHODS)
+
+    # ── Test Environment — 정본은 환경 ID(`SwITE_01`)를 적는다 ────────────
+    ws_env = _find_ws(wb, "1.Test Environment", "2.Test Environment")
+    env_id = str(fm.get("test_env_id") or "").strip()
+    if ws_env is not None and env_id:
+        for r in range(1, min(ws_env.max_row, 20) + 1):
+            v = str(ws_env.cell(row=r, column=2).value or "")
+            if "통합테스트 환경" in v and env_id not in v:
+                ws_env.cell(row=r, column=2,
+                            value=f"SwTP에 정의된 {env_id} SW 통합테스트 환경을 사용함.")
+                stats["intro"] += 1
+                break
+    return stats
+
 
 def _create_sits_cover(
     wb, project_id: str, doc_id: str, version: str, asil_level: str,
@@ -2050,6 +2295,32 @@ def _create_sits_intro(wb) -> None:
         "본 문서는 소프트웨어 컴포넌트 간 통합 인터페이스 및 "
         "통합 테스트 케이스를 정의한다."
     )
+    # ⚠ 1.3~1.6 이 통째로 없었다. 특히 **1.5 는 이 문서가 자기 Test Method 어휘를
+    #   정의하는 곳**이라, 없으면 3번 시트의 `REQ, IFT`·`FI` 가 문서 안에서 정의되지
+    #   않은 코드가 된다(템플릿 경로는 하드웨어 판이 남아 있어 같은 결과였다).
+    #   행 배치는 정본(KJPDS02_PV_SwITS v1.02)과 같게 둔다 — 채움 함수는 헤더 텍스트로
+    #   찾으므로 배치가 흔들려도 동작하지만, 사람이 두 문서를 나란히 볼 때가 있다.
+    _hdr = Font(name="맑은 고딕", size=10, bold=True)
+    _body = Font(name="맑은 고딕", size=9)
+    ws["B14"] = "1.3 Terms, Abbreviations and Definitions"
+    ws["B14"].font = _hdr
+    ws["B15"] = '"Glossary"을 참조한다'
+    ws["B15"].font = _body
+    ws["B18"] = "1.4 Reference"
+    ws["B18"].font = _hdr
+    ws["B19"], ws["E19"] = "File Name", "Note"
+    ws["B19"].font = ws["E19"].font = _hdr
+
+    def _table(row0: int, title: str, rows) -> None:
+        ws.cell(row=row0, column=2, value=title).font = _hdr
+        for ci, lab in ((2, "Method"), (4, "약어"), (5, "ASIL")):
+            ws.cell(row=row0 + 1, column=ci, value=lab).font = _hdr
+        for i, (name, abbr, asil) in enumerate(rows):
+            for ci, val in ((2, name), (4, abbr), (5, asil)):
+                ws.cell(row=row0 + 2 + i, column=ci, value=val).font = _body
+
+    _table(26, "1.5 Test Method", _INTRO_TEST_METHODS)
+    _table(35, "1.6 Test Case Generation Method", _INTRO_GEN_METHODS)
 
 
 def _create_sits_test_env(wb, stp_context: Optional[Dict[str, Any]] = None) -> None:
@@ -2428,6 +2699,8 @@ def generate_sits_xlsm(
     flows: Optional[List[Dict[str, Any]]] = None,
     stp_context: Optional[Dict[str, Any]] = None,
     strategy_context: Optional[Dict[str, Any]] = None,
+    # ⚠ 신규 인자는 **맨 끝**에 붙인다(위치 인자 호출부가 조용히 다른 값에 바인딩된다).
+    front_matter: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate SITS XLSM file matching the reference structure.
 
@@ -2459,11 +2732,36 @@ def generate_sits_xlsm(
         _create_sits_history(wb, version)
         _create_sits_intro(wb)
         _create_sits_test_env(wb, stp_context=stp_context)
+        # ⚠ 무템플릿 경로가 만드는 시트 이름은 정본과 다르다(`1.Introduction` ·
+        #   `2.Test Environment` vs 정본 `Introduction` · `1.Test Environment`).
+        #   아래 채움은 두 표기를 모두 찾으므로 어느 경로든 같은 값이 들어간다.
         # 통합 전략 시트는 아래 `_write_strategy_sheet` 가 만든다(`strategy_context` 를 준
         # 경우). 예전엔 여기서 `3-1.SW Integration Strategy` 라는 **다른 이름의 시트**를
         # cross-calls 표로 따로 만들었는데, 정본 시트(`2.SW…`)를 채우게 된 지금은 한 파일에
         # 같은 주제의 시트가 두 벌 남는다 — `3.`/`4.` 에서 이미 겪은 결함이라 제거했다.
         _logger.info("Created new SITS workbook (no template)")
+
+    # 템플릿이든 신규든 **앞부분은 반드시 채운다**. 템플릿의 1.5 표는 하드웨어
+    # 통합시험 어휘(FNCT/FIT/ELCT)라, 두지 않으면 3번 시트가 쓰는 REQ/IFT/FI 가
+    # 이 문서 안에서 정의되지 않은 코드가 된다(`_fill_sits_front_matter` 참조).
+    try:
+        _fm_stats = _fill_sits_front_matter(wb, project_id, doc_id, version,
+                                            front_matter=front_matter)
+        if _fm_stats.get("missing"):
+            _logger.warning("SITS: 앞부분 시트 일부를 못 찾았다 — %s",
+                            ", ".join(str(x) for x in _fm_stats["missing"]))
+        _logger.info(
+            "SITS: 앞부분 채움 — Cover %d · Introduction %d · Reference %d행 · "
+            "1.5 %d행 · 1.6 %d행",
+            _fm_stats.get("cover", 0), _fm_stats.get("intro", 0),
+            _fm_stats.get("refs", 0), _fm_stats.get("test_methods", 0),
+            _fm_stats.get("gen_methods", 0),
+        )
+        if strategy_context is not None and strategy_context.get("stats_out") is not None:
+            strategy_context["stats_out"]["front_matter"] = _fm_stats
+    except Exception as _fm_exc:  # noqa: BLE001 — 앞부분 실패로 규격 시트를 잃지 않는다
+        _logger.warning("SITS: 앞부분 채움 실패(%s) — 규격 시트는 그대로 진행: %s",
+                        type(_fm_exc).__name__, _fm_exc)
 
     thin = Border(
         left=Side(style="thin"), right=Side(style="thin"),
@@ -2975,6 +3273,11 @@ def generate_sits(
     # ⚠ 신규 인자는 **맨 끝**에 붙인다. 중간에 끼우면 위치 인자로 부르는 호출부가
     #    조용히 다른 값에 바인딩된다(현재 호출부 4곳은 전부 키워드지만 계약은 지킨다).
     max_flows: int = _DEFAULT_MAX_FLOWS,
+    # 고장 주입 대상 **설계 ID**(예: `["SwFn_07", "SwFn_34"]`). 이 선별은 안전분석
+    # 산출물이라 소스/문서에서 유도되지 않는다 — 8가지 근거 실측은
+    # `generate_itc_list` 의 FI 블록 주석 참조. 주지 않으면 전용 FI TC 는 0건이고
+    # 그 사실이 로그와 `fi_requested`(=0)로 남는다.
+    fi_design_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Top-level SITS generation pipeline.
 
@@ -3223,9 +3526,41 @@ def generate_sits(
     # TC ID 는 **SwUDS 설계 ID** 를 쓴다(`generate_itc_list` docstring — 정본 실측).
     # 못 얻으면 순번으로 내려가되 그 사실이 로그·리포트에 남는다.
     _design_ids = load_uds_design_ids(uds_path) if uds_path else None
+    # ── 전용 FI TC 의 대상 흐름 ────────────────────────────────────────
+    # 지정된 설계 ID 를 SwUDS Related 맵으로 역인덱스해 그 설계 요소를 실현하는
+    # 함수들의 흐름을 찾는다. 못 찾은 ID 는 **조용히 버리지 않고** 센다
+    # (요청은 있었는데 0 건 나가는 것과 요청이 없던 것은 다른 말이다).
+    _fi_flows: List[Dict[str, Any]] = []
+    _fi_unresolved: List[str] = []
+    if fi_design_ids:
+        _by_design: Dict[str, List[str]] = {}
+        for _fn, _toks in (_uds_related_map or {}).items():
+            for _tk in _toks or []:
+                _by_design.setdefault(str(_tk), []).append(str(_fn))
+        _flow_by_fn = {str(f.get("entry_fn") or "").lower(): f for f in flows}
+        for _did in fi_design_ids:
+            _did = str(_did or "").strip()
+            if not _did:
+                continue
+            _hit = next((_flow_by_fn[_f.lower()] for _f in _by_design.get(_did, [])
+                         if _f.lower() in _flow_by_fn), None)
+            if _hit is None:
+                _fi_unresolved.append(_did)
+                continue
+            _fi_flows.append({**_hit, "fi_design_id": _did})
+        if _fi_unresolved:
+            _logger.warning(
+                "SITS: FI 대상 %d건이 통합 흐름에 없어 TC 를 못 냈다: %s "
+                "(SwUDS Related 맵 %d함수 · 흐름 %d개)",
+                len(_fi_unresolved), ", ".join(_fi_unresolved[:8]),
+                len(_uds_related_map or {}), len(flows),
+            )
     itcs = generate_itc_list(flows, max_subcases=max_subcases,
                              stp_environments=stp_envs or None,
-                             design_ids=_design_ids, stats_out=flow_stats)
+                             design_ids=_design_ids, stats_out=flow_stats,
+                             fi_flows=_fi_flows or None)
+    if flow_stats is not None:
+        flow_stats["fi_unresolved"] = len(_fi_unresolved)
 
     _progress(65, f"{len(itcs)}개 TC, {sum(len(t['sub_cases']) for t in itcs)}개 sub-case 생성 완료")
 
@@ -3250,6 +3585,26 @@ def generate_sits(
         "stats_out": flow_stats,
     }
     try:
+        # ── Introduction 1.4 Reference — **실제로 읽은** 입력 문서만 싣는다 ──
+        #   정본은 Glossary/SwRS/SDS/SwTP 4행을 파일명+버전까지 적는다. 우리 템플릿은
+        #   File Name 열이 통째로 비어 있고 Note 는 "HW 요구사항 명세서" 였다.
+        #   ⚠ 못 읽은 문서의 줄은 **비워 둔다** — 참조했다고 적으면 문서가 거짓말한다.
+        _refs: List[Tuple[str, str]] = []
+        for _p, _note in ((srs_docx_path, "SW 요구사항 명세서"),
+                          (sds_docx_path, "SW 아키텍처 설계서"),
+                          (uds_path, "SW 상세 설계서"),
+                          (stp_path, "SW 테스트 계획서")):
+            if _p:
+                _refs.append((Path(str(_p)).name, _note))
+        _front = {
+            "date": datetime.now().astimezone().strftime("%Y.%m.%d"),
+            "author": (project_config or {}).get("author") or "",
+            "status": (project_config or {}).get("status") or "Open",
+            "glossary": f"{(project_config or {}).get('project_id') or 'PROJECT'} Glossary",
+            "references": _refs,
+            # 정본은 환경 ID(`SwITE_01`)를 적는다. STP 에서 못 얻으면 안 적는다.
+            "test_env_id": (stp_context or {}).get("integration_env_id") or "",
+        }
         actual_output = generate_sits_xlsm(
             template_path=template_path,
             itcs=itcs,
@@ -3258,6 +3613,7 @@ def generate_sits(
             flows=flows,
             stp_context=stp_context,
             strategy_context=_strategy_ctx,
+            front_matter=_front,
         )
     except Exception as e:
         _logger.error("SITS: XLSM generation failed: %s", e)

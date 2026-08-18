@@ -148,8 +148,17 @@ def test_sits_vocabulary_uses_comma_not_slash():
     assert (_SITS_GEN_DEFAULT, _SITS_GEN_BOUNDARY) == ("AOR, AEC", "AOR/ABV")
     assert _sits_gen_method("AEC") == "AOR, AEC"
     assert _sits_gen_method("ABV") == "AOR/ABV"
-    assert _sits_test_method({"sub_cases": [{"strategy": "BV_MIN"}]}) == "REQ, IFT"
-    assert _sits_test_method({"sub_cases": [{"strategy": "ERR_PROP"}]}) == "FI"
+    # ⚠ 예전 판은 "서브케이스에 ERR 이 있으면 TC 전체가 FI" 였고 이 테스트가 그걸
+    #   고정하고 있었다. 정본은 FI 를 **전용 TC** 로만 쓴다 — 실측 54건에서
+    #   `REQ, IFT`↔`AOR, AEC` 49 · `FI`↔`AOR/ABV` 5, 다른 조합 **0건**이다.
+    #   즉 무효 경계 서브케이스를 가진 TC 를 FI 로 올리지 않는다.
+    #   게다가 옛 판정은 **살아 있는 지뢰**였다: 오류전파 서브케이스가
+    #   `max_subcases=7` 에서만 예산에 막혀 안 생겼고, 기본값 14 로 부르면
+    #   **전 TC 가 FI 로 뒤집혔다**(영향도 재생성 경로가 그랬다).
+    #   → Test Method 는 TC 생성 시점에 확정한다(`generate_itc_list`).
+    assert _sits_test_method({"test_method": _SITS_METHOD_DEFAULT}) == "REQ, IFT"
+    assert _sits_test_method({"test_method": _SITS_METHOD_FAULT}) == "FI"
+    assert _sits_test_method({"sub_cases": [{"strategy": "ERR_PROP"}]}) == "REQ, IFT"
 
 
 # ─── 세 문서 공통: Safety Related 표기 ───────────────────────────────────────

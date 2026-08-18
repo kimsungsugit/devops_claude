@@ -2167,6 +2167,11 @@ def _run_suts_generation(entry: Any, target_functions: List[str] | None = None) 
     }
 
 
+# 로컬 생성 라우터(`backend/routers/local.py` 의 `max_subcases: int = Form(7)`) 3곳과
+# 같은 값. 생성기 기본값은 14 라, 안 맞추면 경로마다 문서 모양이 달라진다.
+_SITS_DEFAULT_SUBCASES = 7
+
+
 def _run_sits_generation(entry: Any) -> Dict[str, Any]:
     """Regenerate SITS for the given registry entry.
 
@@ -2204,6 +2209,11 @@ def _run_sits_generation(entry: Any) -> Dict[str, Any]:
         uds_path=uds_path,
         hsis_path=hsis_path,
         stp_path=stp_path,
+        # ⚠ 안 넘기면 생성기 기본값(14)을 쓴다. 로컬 생성 라우터 3곳은 전부 7 이라
+        #   **같은 프로젝트인데 경로마다 서브케이스 수가 달라진다**. 문서 모양이
+        #   갈리지 않게 맞춘다(옛 판에서는 이 차이가 Test Method 를 전 TC FI 로
+        #   뒤집기까지 했다 — `_sits_test_method` 주석).
+        max_subcases=_SITS_DEFAULT_SUBCASES,
     )
     return {
         "output_path": str(out_path),
