@@ -71,6 +71,7 @@ from report_gen.function_analyzer import (
 )
 from report_gen.requirements import (
     _load_component_map,
+    component_verify_of,
     _extract_requirements_from_comments,
     _collect_section_lines,
     _normalize_table_row,
@@ -457,20 +458,12 @@ def generate_uds_source_sections(
             if ext not in allowed:
                 continue
             if component_map:
-                # 경로 기반 매칭 우선 (동일 파일명 충돌 해결)
-                mapped = None
-                fp_norm = str(p).replace("\\", "/")
-                for cm_key in component_map:
-                    if "/" in cm_key and fp_norm.endswith(cm_key):
-                        mapped = component_map[cm_key]
-                        break
-                # 파일명 fallback
-                if not mapped or not isinstance(mapped, dict):
-                    mapped = component_map.get(p.name) or component_map.get(p.stem)
-                if isinstance(mapped, dict):
-                    verify = str(mapped.get("verify") or "").strip().upper()
-                    if verify == "X":
-                        continue
+                # 판정은 `requirements.component_verify_of` **단일 출처**다.
+                # ⚠ 이 필터는 아래 `parse_c_project`(AST) 경로엔 안 걸린다 —
+                #   그쪽은 루트를 따로 훑는다. 그래서 verify=X 파일의 함수가
+                #   산출물에 남고, 그 사실은 `generators/suts` 가 보고한다.
+                if component_verify_of(p, component_map) == "X":
+                    continue
             files.append(p)
             ext_counts[ext] = ext_counts.get(ext, 0) + 1
             try:

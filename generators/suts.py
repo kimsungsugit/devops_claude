@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from generators.uds_unit_io import resolve_unit_io
+from report_gen.requirements import _load_component_map, component_verify_of
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _asil_max_of,
@@ -537,6 +538,13 @@ def collect_unit_functions(
             대상 프로젝트의 SDS를 알고 있으면 `load_sds_map_from`으로 만들어 넘길 것.
     """
     gim = globals_info_map or {}
+    # 시험 범위 판정용. 실패해도 산출물은 그대로 나가야 하므로 빈 맵으로 떨어진다
+    # (판정 불가와 '면제 아님'을 섞지 않도록 아래 요약이 맵 부재를 명시한다).
+    try:
+        _cmap = _load_component_map()
+    except Exception as _cm_exc:  # noqa: BLE001 — 보고용 부가 정보다
+        _logger.warning("component_map 로드 실패 — 시험 범위 보고 생략: %s", _cm_exc)
+        _cmap = {}
     # 구조체 **배열** 전역(`SlipDetectPhase_t g_SlipDetectPhases[4]`)의 첨자는 root 에
     # 붙는다. unit 마다 안 바뀌므로 루프 **밖에서** 한 번만 만든다.
     _root_sizes: Dict[str, Tuple[int, ...]] = {}
@@ -815,7 +823,12 @@ def collect_unit_functions(
                 if gn not in indirect_vars and len(indirect_vars) < 5:
                     indirect_vars.append(gn)
 
+        # 이 unit 이 온 파일의 시험 범위 판정(`O`/`X`/빈값). 값을 거르지는 **않는다** —
+        # SUTS 에서 시험을 빼는 건 사람이 할 결정이다. 다만 조용하면 그 결정 기회가
+        # 사라지므로 unit 에 남기고 아래 요약 로그에 센다.
+        _verify = component_verify_of(info.get("file"), _cmap)
         units.append({
+            "verify_scope": _verify,
             "fid": fid,
             "name": name,
             "prototype": prototype,
@@ -871,6 +884,19 @@ def collect_unit_functions(
             + ", ".join(_asil_conflicts[:3])
             + (" …" if len(_asil_conflicts) > 3 else "")
         )
+    # 시험 범위 불일치 — `component_map` 이 면제(X)로 적은 파일에서 온 unit.
+    # ⚠ `uds_generator` 의 파일 수집은 X 를 건너뛰지만 **AST 파서 경로는 루트를 따로
+    #   훑어 그 필터를 안 탄다**. 그래서 X 유래 함수가 여기까지 온다. 실측
+    #   (KJPDS02_PV): 정본에 없는 unit 152개 중 45개가 X 유래 — 정본은 1,005개 중
+    #   24개만 X 다. 지우지 않고 **세어서 보고**한다(범위 결정은 사람 몫).
+    _scope_x = [u["name"] for u in units if u.get("verify_scope") == "X"]
+    _scope_note = (
+        f" | ⚠시험 면제(component_map verify=X) 파일 유래 unit {len(_scope_x)}개: "
+        + ", ".join(_scope_x[:3]) + (" …" if len(_scope_x) > 3 else "")
+    ) if _scope_x else (
+        "" if _cmap else " | ⚠component_map 없음 → 시험 범위 판정 안 함"
+    )
+    _const_note += _scope_note
     (_logger.warning if _skip else _logger.info)(
         "Collected %d unit functions | 배열 확장 %d건%s%s",
         len(units), _exp_n,

@@ -1161,6 +1161,41 @@ def annotate_sds_coarse(rows: Optional[List[Dict[str, Any]]]) -> Tuple[int, int]
     return total, coarse_count
 
 
+def resolve_component_entry(
+    file_path: Any, component_map: Optional[Dict[str, Dict[str, str]]]
+) -> Dict[str, str]:
+    """소스 파일 경로 → component_map 엔트리. 못 찾으면 빈 dict.
+
+    **경로 키 우선, 파일명 폴백**이다. 순서가 뒤바뀌면 같은 파일명이 여러 트리에
+    있을 때 엉뚱한 컴포넌트로 붙는다(맵이 그 충돌을 풀려고 경로 키를 둔다).
+
+    ⚠ 이 판정은 두 곳이 쓴다 — `uds_generator` 의 파일 수집(verify=X 건너뛰기)과
+      `generators/suts` 의 시험 범위 보고. 예전엔 전자에 인라인으로만 있어서
+      **AST 파서 경로(`parse_c_project`)가 필터를 통째로 우회**했고, 그 사실이
+      어디에도 안 남았다(실측: 우리만 내는 unit 152개 중 45개가 verify=X 유래.
+      정본은 1,005개 중 24개뿐). 판정을 복제하지 말고 여기를 부를 것.
+    """
+    if not component_map:
+        return {}
+    fp = str(file_path or "").replace("\\", "/").strip()
+    if not fp:
+        return {}
+    for key, val in component_map.items():
+        if "/" in key and fp.endswith(key) and isinstance(val, dict):
+            return val
+    name = fp.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    got = component_map.get(name) or component_map.get(stem)
+    return got if isinstance(got, dict) else {}
+
+
+def component_verify_of(
+    file_path: Any, component_map: Optional[Dict[str, Dict[str, str]]]
+) -> str:
+    """`'O'`(시험 대상) · `'X'`(면제) · `''`(맵에 없음/미기재)."""
+    return str((resolve_component_entry(file_path, component_map) or {}).get("verify") or "").strip().upper()
+
+
 def _load_component_map() -> Dict[str, Dict[str, str]]:
     # report_gen/docs/ → 프로젝트 루트 docs/ 순으로 탐색
     candidates = [
