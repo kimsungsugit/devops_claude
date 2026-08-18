@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from backend.services.iso26262_doc_asil_extractor import _RELATED_PREFIX_CANON
 from generators._artifact_check import apply_write_back_check
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
 from report_gen.doc_kind import is_sds_filename
@@ -767,6 +768,9 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     # Related ID 축 — 진입 함수 자신인지 호출 트리 아래인지, 칸 상한에 잘렸는지
     "related_chain_flows", "related_chain_ids", "related_chain_depth",
     "related_truncated_ids",
+    # 요구 ID 축 — 이 칸에는 **안 실리는** 링크. 실리지 않는다고 세지 않으면
+    # "그런 링크가 없다" 와 구별되지 않는다.
+    "req_id_flows", "req_id_total",
     # 근거 시트(전략 / Related_ID) 산출 실적 — 시트가 비어도 **왜 비었는지** 보이게
     "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
     "strategy_blocks_truncated",
@@ -933,6 +937,9 @@ def collect_integration_flows(
     _chain_rel_flows = 0
     _chain_rel_ids = 0
     _related_truncated = 0  # 칸 상한에 걸려 잘라낸 ID 수
+    # 요구 ID 축 — Related 칸의 값이 아니라서 빼지만(아래 ②) 버리지는 않는다.
+    _req_id_flows = 0       # 요구 ID 링크를 가진 흐름 수
+    _req_id_total = 0       # 그렇게 얻은 요구 ID 총 개수
     _sds_source = "argument" if sds_map is not None else "repo_docs_glob"
     if sds_map is None:
         sds_map = _load_default_sds_map()
@@ -1266,11 +1273,26 @@ def collect_integration_flows(
         # 과집중" 으로 보고 지우는데, 정본 실측에서 `SwFn_42` 는 50 TC 중 15(30%)에 정당하게
         # 쓰인다. 어휘를 넓힌 이번 라운드가 아니면 대상이 SwCom 뿐이라 드러나지 않던 구멍이다.
         _doc_related: List[str] = list(related_parts)
-        # ② 소스 주석/파서가 실어 준 ID
+        # ② 소스 주석/SRS 경로가 실어 준 ID — **요구 ID 는 이 칸의 값이 아니다.**
+        #    정본(KJPDS02_PV v1.02)에서 이 칸의 부제는 문자 그대로 `SwDS` 이고,
+        #    49 TC · 342 토큰 중 요구 ID(SwTR/SwTSR/SwNTR…)는 **0 건**이다. 어휘
+        #    판정은 `_RELATED_PREFIX_CANON`(SwUDS `Related ID` 칸 어휘의 단일 출처)
+        #    하나로 한다 — 여기에 접두 목록을 다시 적으면 한쪽만 고쳐진다.
+        #    ⚠ 칸에서 뺀다고 **버리지는 않는다**. 이 링크 자체는 진짜다: 실측 13건이
+        #    전부 SRS 설명문이 함수를 명시적으로 부르는 경우였다("s_SysMain_Init( )
+        #    초기화 함수 호출" · "Cpu_SRAM_ECC( ) 함수를 호출한다"). 칸이 틀렸을 뿐
+        #    이라 `req_ids` 로 분리해 내보낸다 — 지금까지는 설계 칸에 섞여 있어서
+        #    **요구 링크로 세지도, 보이지도 않았다**.
+        req_ids: List[str] = []
         for field in ("srs_req_ids", "related", "related_id"):
-            val = info.get(field) or ""
-            ids = _parse_req_ids(str(val))
-            related_parts.extend(ids)
+            for _tok in _parse_req_ids(str(info.get(field) or "")):
+                if _tok.split("_")[0].upper() in _RELATED_PREFIX_CANON:
+                    related_parts.append(_tok)      # 설계 어휘 — 이 칸이 맞다
+                elif _tok not in req_ids:
+                    req_ids.append(_tok)
+        if req_ids:
+            _req_id_flows += 1
+            _req_id_total += len(req_ids)
         # ③ from SDS map — 결과가 0 이어도 **왜 0 인지** 셀 수 있어야 한다(위 주석 참조).
         _sds_lookups += 1
         try:
@@ -1358,6 +1380,9 @@ def collect_integration_flows(
             "synthetic_related_ids": synthetic_related,
             # SwUDS 문서에 실제로 적혀 있던 ID — 균형 조정이 지우면 안 되는 것들
             "doc_related_ids": [r for r in _doc_related if r in seen_rel],
+            # SRS/주석 유래 **요구** ID. Related 칸에는 안 싣는다(정본 0건) —
+            # 칸이 아니라 데이터로 남겨 하류가 제대로 된 브리지를 만들 수 있게 한다.
+            "req_ids": req_ids,
             "logic_flow": info.get("logic_flow") or [],
         })
 
@@ -1387,6 +1412,9 @@ def collect_integration_flows(
             "related_chain_ids": _chain_rel_ids,
             "related_chain_depth": _RELATED_CHAIN_DEPTH,
             "related_truncated_ids": _related_truncated,
+            # 요구 ID 축 — 칸에서 뺀 만큼 여기서 보여야 "없다" 와 구별된다.
+            "req_id_flows": _req_id_flows,
+            "req_id_total": _req_id_total,
         })
     if _sds_lookups and not _sds_swcom_hits:
         # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
@@ -1767,6 +1795,8 @@ def generate_itc_list(
             "expected_vars": effective_expected_vars,
             "related_ids": flow["related_ids"],
             "synthetic_related_ids": flow.get("synthetic_related_ids") or [],
+            # Related 칸에는 안 나가지만 중간 JSON 으로는 내보낸다(아래 참조).
+            "req_ids": flow.get("req_ids") or [],
             "sub_cases": sub_cases,
             "asil": flow["asil"],
         })
@@ -3148,7 +3178,10 @@ def generate_sits(
                     "module_name": itc["module_name"],
                     "gen_method": itc["gen_method"],
                     "asil": itc.get("asil", "QM"),
-                    "metadata": {"related_ids": itc["related_ids"]},
+                    # `related_ids` 는 설계 요소(SwDS 칸), `req_ids` 는 SRS 유래 요구
+                    # 링크다. 둘을 한 칸에 섞으면 감사자가 구별할 수 없어 분리했다.
+                    "metadata": {"related_ids": itc["related_ids"],
+                                 "req_ids": itc.get("req_ids") or []},
                     "sub_cases": [
                         {
                             "case_num": sc.get("case_num", i + 1),

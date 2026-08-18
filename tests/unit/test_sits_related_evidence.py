@@ -163,6 +163,85 @@ class TestRelatedIdSpansTheCallTree:
             x for x in flows if x["entry_fn"] == "Ap_Door_Run")["related_ids"]
 
 
+class TestRequirementIdsNeverReachTheRelatedCell:
+    """정본 Related 칸(부제가 문자 그대로 `SwDS`)의 어휘는 **설계 요소뿐**이다.
+
+    실측(KJPDS02_PV_SwITS v1.02): 49 TC · 342 토큰 중 요구 ID(SwTR/SwTSR/SwNTR)는
+    **0 건**. 우리 산출물에는 13 토큰이 섞여 있었고, 전부 `srs_req_ids`(SRS 설명문에
+    함수명이 단어로 등장) 경로였다.
+
+    ⚠ 검사는 **산출물 셀**에서 한다. 수집 함수만 단독으로 보면 그 뒤의 조립
+    (트리 → 요구 → SDS → 합성 → 중복제거 → 상한절단)과 균형 조정을 지나며 값이 다시
+    섞이는 것을 놓친다 — 이 저장소가 이미 겪은 형태다(수집만 고치고 조립은 그대로).
+    """
+
+    _RELATED_COL = 204   # 정본과 동일(GV) — 마지막 열
+
+    def _fd_with_req_ids(self):
+        fd = _fd_related()
+        # 라이브에서 요구 ID 가 실리던 세 필드를 전부 재현한다.
+        fd["F1"]["srs_req_ids"] = "SwTR_0301, SwTSR_0209"
+        fd["F2"]["related"] = "SwNTR_0402"
+        # 한 필드에 요구·설계가 **섞여** 오는 경우 — 요구만 빼고 설계는 남겨야 한다.
+        # (F4 `Reg_Write` 는 리프라 통합 흐름 진입점이 안 된다 = 그 필드는 읽히지도
+        #  않는다. 검사는 반드시 **진입점이 되는 함수**에 붙일 것.)
+        fd["F3"]["related_id"] = "SwNTSR_0101, SwFn_77"
+        return fd
+
+    def test_requirement_ids_are_absent_from_the_generated_cell(self, tmp_path):
+        import openpyxl
+
+        from generators.sits import generate_itc_list
+
+        fd = self._fd_with_req_ids()
+        flows = collect_integration_flows(fd, uds_related_map=_REL_MAP)
+        itcs = generate_itc_list(flows, max_subcases=1)
+        out = tmp_path / "reqid.xlsx"
+        generate_sits_xlsm(None, itcs, str(out), flows=flows)
+
+        ws = openpyxl.load_workbook(str(out))["3.SW Integration Test Spec"]
+        cells = [str(ws.cell(row=r, column=self._RELATED_COL).value or "")
+                 for r in range(1, ws.max_row + 1)]
+        blob = " ".join(cells)
+        for bad in ("SwTR_", "SwTSR_", "SwNTR_", "SwNTSR_"):
+            assert bad not in blob, f"Related 칸에 요구 ID 접두 {bad} 가 실렸다: {blob[:300]}"
+        # 음성 대조군 — 어휘를 통째로 비워서 통과한 것이 아니다.
+        assert "SwCom_01" in blob, blob[:300]
+
+    def test_design_vocabulary_from_the_same_fields_still_lands(self, tmp_path):
+        """요구 ID 만 걸러야 한다 — 같은 필드에 온 설계 어휘까지 버리면 과잉 수정이다."""
+        import openpyxl
+
+        from generators.sits import generate_itc_list
+
+        fd = self._fd_with_req_ids()
+        flows = collect_integration_flows(fd, uds_related_map=_REL_MAP)
+        itcs = generate_itc_list(flows, max_subcases=1)
+        out = tmp_path / "reqid2.xlsx"
+        generate_sits_xlsm(None, itcs, str(out), flows=flows)
+        ws = openpyxl.load_workbook(str(out))["3.SW Integration Test Spec"]
+        blob = " ".join(str(ws.cell(row=r, column=self._RELATED_COL).value or "")
+                        for r in range(1, ws.max_row + 1))
+        assert "SwFn_77" in blob, f"`related` 에 온 설계 ID 까지 버렸다: {blob[:300]}"
+
+    def test_the_link_is_kept_as_data_not_discarded(self):
+        """칸에서 뺐다고 링크를 없애지 않는다 — SRS 가 함수를 명시적으로 부른 진짜 링크다."""
+        stats: dict = {}
+        flows = collect_integration_flows(
+            self._fd_with_req_ids(), uds_related_map=_REL_MAP, stats_out=stats)
+        by_fn = {f["entry_fn"]: f for f in flows}
+        assert set(by_fn["Ap_Door_Run"]["req_ids"]) == {"SwTR_0301", "SwTSR_0209"}, by_fn
+        assert by_fn["Hal_Pwm_Set"]["req_ids"] == ["SwNTSR_0101"], by_fn["Hal_Pwm_Set"]
+        assert "SwFn_77" in by_fn["Hal_Pwm_Set"]["related_ids"], "설계 ID 까지 버렸다"
+        assert stats["req_id_flows"] >= 1 and stats["req_id_total"] >= 3, stats
+
+    def test_req_id_stats_reach_the_quality_report(self):
+        """생산자가 낸 키는 리포트까지 도달해야 한다(R2 가 고친 결함의 재발 방지)."""
+        from generators.sits import _FLOW_COV_KEYS
+
+        assert {"req_id_flows", "req_id_total"} <= set(_FLOW_COV_KEYS), _FLOW_COV_KEYS
+
+
 class TestBalancingDoesNotEraseDocumentedIds:
     """균형 조정(`_balance_related_ids`)은 순번 합성·주석 유래를 겨눈 것이지 문서 값이 아니다.
 
