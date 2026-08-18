@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import pytest
 
+from report_gen.source_parser import extract_struct_member_arrays
 from generators.suts import (
     _array_sizes,
     _decl_dims_from_array_field,
+    _struct_member_dims,
     _clean_global_name,
     _expand_array_entries,
     collect_unit_functions,
@@ -832,3 +834,208 @@ class TestGlobalSizeFallback:
             uds_io_map={"by_name": {"RealTime": {"inputs": ["u8s_DataBuffer"], "outputs": []}}},
         )
         assert units[0]["input_vars"] == ["u8s_DataBuffer"]
+
+
+class TestStructMemberArrays:
+    r"""구조체 멤버 배열 — 정본은 `DiagData.CloseFailure[0..2]` 로 적는다.
+
+    ## 왜 (KJPDS02_PV 실측, 2026-08-18)
+
+    이 저장소는 struct **본문을 한 번도 읽지 않았다**(`type_defs` 는 주석 표 섹션이라
+    멤버 차원이 없다). 그래서 멤버 배열이 base 한 칸으로 나갔다:
+
+        s_LinFrame.LIN_data   정본 8원소  ←  우리 ['s_LinFrame.LIN_data']
+        DiagData.CloseFailure 정본 3원소  ←  우리 ['DiagData.CloseFailure']
+
+    첨자가 붙는 자리가 **둘**이라는 게 이 축의 핵심이다:
+
+        멤버가 배열      PS.Data              → PS.Data[0..7]        (꼬리)
+        root 가 배열     g_Ph.u8_MaxCount     → g_Ph[0..3].u8_MaxCount (root 뒤)
+
+    꼬리/​root 를 바꿔 붙이면 `g_Ph.u8_MaxCount[0]` 이라는 **없는 대상**이 된다.
+
+    실측(오프라인 시뮬): 일치 +136 · 과다 **-12** · 사라진 맞춤 0.
+
+    ## ⚠ 파라미터 타입까지 열지 않는다
+
+    포인터 파라미터(`SHA256_CTX *ctx`)의 타입을 프로토타입에서 끌어오면 닿는 칸이
+    늘지만 실측 **일치 +34 에 과다 +176** 이었다 — `SHA256_CTX.buffer[64]` 를 통째로
+    펼치는 게 원인이고 정본이 지지하지 않는다.
+    """
+
+    _SM = {"st_s_DTC": {"CloseFailure": "[3]"}, "ProgramStruct": {"Add.ByteArray": "[4]"}}
+    _GI = {"DiagData": {"array": "", "type": "st_s_DTC"},
+           "PS": {"array": "", "type": "ProgramStruct"}}
+
+    def test_member_dims_via_root_type(self):
+        got = _array_sizes(["[IN] DiagData.CloseFailure"],
+                           globals_info=self._GI, struct_members=self._SM)
+        assert got == {"DiagData.CloseFailure": (3,)}
+
+    def test_nested_union_member_path(self):
+        """중첩 union 은 `Add.ByteArray` 경로로 잡힌다."""
+        got = _array_sizes(["[OUT] PS.Add.ByteArray"],
+                           globals_info=self._GI, struct_members=self._SM)
+        assert got == {"PS.Add.ByteArray": (4,)}
+
+    def test_const_qualifier_on_root_type_is_stripped(self):
+        got = _array_sizes(["[IN] DiagData.CloseFailure"],
+                           globals_info={"DiagData": {"array": "", "type": "const st_s_DTC"}},
+                           struct_members=self._SM)
+        assert got == {"DiagData.CloseFailure": (3,)}
+
+    def test_unknown_type_or_member_is_not_guessed(self):
+        """음성 대조군 — 타입도 멤버도 모르면 **아무것도 만들지 않는다**."""
+        assert _array_sizes(["[IN] Foo.bar"], globals_info={}, struct_members=self._SM) == {}
+        assert _array_sizes(["[IN] DiagData.NoSuch"],
+                            globals_info=self._GI, struct_members=self._SM) == {}
+
+    def test_pointer_param_root_is_not_resolved(self):
+        """⚠ root 에 이미 첨자가 있으면(포인터 표기) 이 경로를 타지 않는다."""
+        assert _struct_member_dims("ctx[0].state", self._GI, self._SM) == ()
+
+    def test_root_array_puts_index_after_root_not_tail(self):
+        out, info = _expand_array_entries(
+            ["g_Ph.u8_Max"], {}, 96, root_sizes={"g_Ph": (4,)}
+        )
+        assert out == [f"g_Ph[{i}].u8_Max" for i in range(4)]
+        assert info["expanded"] == ["g_Ph.u8_Max"]
+
+    def test_member_size_wins_over_root_size(self):
+        """멤버 자신이 배열이면 꼬리에 붙는다 — root 배열보다 우선."""
+        out, _ = _expand_array_entries(
+            ["PS.Data"], {"PS.Data": (2,)}, 96, root_sizes={"PS": (3,)}
+        )
+        assert out == ["PS.Data[0]", "PS.Data[1]"]
+
+    def test_root_expansion_respects_budget(self):
+        """예산이 모자라면 root 확장도 **자르지 않고 안 펼친다**."""
+        out, info = _expand_array_entries(
+            ["a.m", "keep"], {}, 4, root_sizes={"a": (8,)}
+        )
+        assert out == ["a.m", "keep"] and info["skipped"][0]["name"] == "a.m"
+
+    def test_wired_end_to_end(self):
+        """⚠ 배선 테스트 — 헬퍼만 보면 호출부가 값을 버리는 걸 못 본다."""
+        units = collect_unit_functions(
+            _unit("Fn", gg=["[IN] DiagData.CloseFailure"]),
+            self._GI, sds_map={}, struct_members=self._SM,
+        )
+        assert units[0]["input_vars"] == [f"DiagData.CloseFailure[{i}]" for i in range(3)]
+
+    def test_wired_root_array_end_to_end(self):
+        units = collect_unit_functions(
+            _unit("Fn", gg=["[IN] g_Ph.u8_Max"]),
+            {"g_Ph": {"array": "[4]", "type": "SlipDetectPhase_t"}}, sds_map={},
+        )
+        assert units[0]["input_vars"] == [f"g_Ph[{i}].u8_Max" for i in range(4)]
+
+    def test_no_struct_map_changes_nothing(self):
+        """음성 대조군 — 맵이 없으면 이전과 동일하게 base 한 칸."""
+        units = collect_unit_functions(
+            _unit("Fn", gg=["[IN] DiagData.CloseFailure"]), self._GI, sds_map={},
+        )
+        assert units[0]["input_vars"] == ["DiagData.CloseFailure"]
+
+
+class TestStructExpansionGuards:
+    r"""위 클래스의 뮤테이션 생존 3건을 메운다 — 전부 **테스트 공백**이었다.
+
+    ⚠ `test_pointer_param_root_is_not_resolved` 는 **공허했다**: `ctx` 의 타입이
+      애초에 맵에 없어 가드를 지워도 `()` 가 나왔다. 가드가 실제로 막는지 보려면
+      **타입이 풀리는데도 첨자 때문에 막히는** 경우를 써야 한다.
+    """
+
+    _SM = {"SHA256_CTX": {"state": "[8]"}, "T": {"Data": "[2]"}}
+
+    def test_subscripted_root_does_not_resolve_but_bare_root_does(self):
+        """`ctx[0].state`(포인터 표기)는 안 걸리고 `ctx.state` 는 걸린다.
+
+        ⚠ 이 동작을 **따로 가드로 막지 않는다** — `globals_info` 키가 맨 이름이라
+          `ctx[0]` 조회가 이미 실패한다. 겹쳐 막으면 뮤테이션이 통째로 살아남는다
+          (5차 라운드에서 같은 판단으로 죽은 게이트를 뺐다). 여기서는 가드가 아니라
+          **관측되는 결과**를 고정한다.
+        """
+        gi = {"ctx": {"array": "", "type": "SHA256_CTX"}}
+        assert _struct_member_dims("ctx[0].state", gi, self._SM) == ()
+        assert _struct_member_dims("ctx.state", gi, self._SM) == (8,)
+
+    def test_root_expansion_leaves_already_subscripted_root_alone(self):
+        out, info = _expand_array_entries(
+            ["ctx[0].state"], {}, 96, root_sizes={"ctx": (4,)}
+        )
+        assert out == ["ctx[0].state"] and not info["expanded"]
+
+    def test_nested_block_members_do_not_leak_to_top_level(self):
+        """N8 — 중첩 블록 멤버가 최상위 이름으로 새면 없는 경로가 생긴다.
+
+        `ByteArray` 는 `Add.ByteArray` 로만 닿아야 한다. 최상위로 새면
+        `PS.ByteArray` 라는 존재하지 않는 이름이 문서에 실린다.
+
+        ⚠ 중첩 블록의 **두 번째** 배열 멤버라야 샌다. `;` 로 끊으면 첫 멤버가 든
+          조각엔 여는 중괄호가 같이 붙어 정규식이 어차피 실패하기 때문이다 —
+          한 개짜리로 쓴 초판은 제거 로직을 지워도 통과해 **공허**했다.
+        """
+        src = """
+        typedef struct
+        {
+            UINT8 Data[8];
+            union
+            {
+                UINT8   ByteArray[4];
+                UINT8   Spare[2];
+                UINT32  DWord;
+            } Add;
+        } ProgramStruct;
+        """
+        got = extract_struct_member_arrays(src)["ProgramStruct"]
+        assert got.get("Data") == "[8]"
+        assert got.get("Add.ByteArray") == "[4]"
+        assert got.get("Add.Spare") == "[2]"
+        assert "ByteArray" not in got and "Spare" not in got, f"중첩 멤버가 샜다: {got}"
+
+    def test_balanced_block_finds_outer_close_not_inner(self):
+        """N9 — 중괄호 균형이 깨지면 중첩 union 을 가진 타입이 통째로 사라진다."""
+        src = "typedef struct { union { int a[2]; } U; int b[3]; } Outer;"
+        got = extract_struct_member_arrays(src)
+        assert "Outer" in got, f"중첩 union 때문에 타입을 놓쳤다: {got}"
+        assert got["Outer"].get("b") == "[3]"
+        assert got["Outer"].get("U.a") == "[2]"
+
+    def test_trailing_comments_do_not_hide_members(self):
+        """⚠ 라이브에서만 8칸이 조용히 사라졌던 자리다.
+
+        멤버를 `;` 로 끊으므로 앞 멤버의 **꼬리 주석**이 다음 조각 머리에 붙는다:
+
+            UINT8 dataIndex;    /* Current data byte index */
+            UINT8 dataBuffer[8];
+
+        조각이 `/* … */ UINT8 dataBuffer[8]` 로 시작해 앵커에 안 걸린다.
+        `LIN_FRAME` 은 멤버에 주석이 없어 **우연히** 통과했고, 주석이 달린
+        `LIN_INT_CTRL` 만 통째로 빠졌다 — 오프라인 시뮬(주석 제거본 사용)에서는
+        안 보이고 라이브에서만 났다.
+        """
+        src = """
+        typedef struct {
+            UINT8 dataIndex;            /* Current data byte index */
+            UINT8 dataBuffer[8];        /* Data buffer */
+            UINT8 checksum;             // line comment
+            UINT8 tail[2];
+        } LIN_INT_CTRL;
+        """
+        got = extract_struct_member_arrays(src)["LIN_INT_CTRL"]
+        assert got.get("dataBuffer") == "[8]", f"주석이 멤버를 가렸다: {got}"
+        assert got.get("tail") == "[2]", f"줄 주석이 멤버를 가렸다: {got}"
+
+    def test_comment_inside_dimension_is_not_mistaken_for_size(self):
+        """음성 대조군 — 주석 안 숫자를 크기로 줍지 않는다."""
+        got = extract_struct_member_arrays(
+            "typedef struct { /* 99 */ UINT8 b[3]; } C;"
+        )
+        assert got["C"].get("b") == "[3]"
+
+    def test_pointer_member_is_not_treated_as_array(self):
+        """음성 대조군 — `UINT8 *p[4]` 는 원소 수가 아니라 포인터 개수다."""
+        got = extract_struct_member_arrays("typedef struct { UINT8 *p[4]; UINT8 q[5]; } P;")
+        assert got["P"].get("q") == "[5]"
+        assert "p" not in got["P"], f"포인터 멤버가 배열로 잡혔다: {got['P']}"

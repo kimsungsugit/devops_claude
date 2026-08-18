@@ -7,7 +7,7 @@ import csv
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Set
 
 _logger = logging.getLogger("report_generator")
 
@@ -465,6 +465,100 @@ def _extract_c_macro_defs(text: str) -> List[Tuple[str, str]]:
         if name:
             results.append((name, val))
     return results
+
+
+# 구조체/공용체 멤버의 **배열 차원**. 정본 SUTS 는 `DiagData.CloseFailure[0..2]` 처럼
+# 멤버 배열도 원소 단위로 적는데, 이 저장소는 struct 본문을 **한 번도 읽지 않았다**
+# (`type_defs` 는 주석 표 섹션이라 멤버 차원이 없다). 실측 KJPDS02_PV: 정본 미달
+# 1,511칸 중 112칸이 이 축 하나다.
+#
+# ⚠ 본문은 **중괄호 균형**으로 자른다. 정규식 `\{(.*?)\}` 는 중첩 union 에서 안쪽
+#   `}` 에 멈춰 `ProgramStruct`(안에 `union {…} Add;`)의 멤버를 통째로 놓친다.
+_STRUCT_HEAD_RE = re.compile(r"typedef\s+(?:struct|union)\b[^{;]*\{")
+_STRUCT_TAIL_RE = re.compile(r"\s*(\w+)\s*;")
+_INNER_HEAD_RE = re.compile(r"(?:struct|union)\s*\{")
+# 멤버 선언: `UINT8 LIN_data[LIN_MAX_DATA_BYTES];` · `S16 t[3][4];`
+# ⚠ **줄 시작에 기대지 않는다** — `typedef struct { int a[2]; int b[3]; } T;` 처럼
+#   한 줄에 여러 멤버가 오면 `^...$` 를 `re.M` 으로 걸어도 첫 개만 잡고 나머지를
+#   조용히 버린다. 멤버 구분자는 줄바꿈이 아니라 `;` 다.
+# ⚠ 포인터 멤버(`UINT8 *p[4]`)는 제외한다 — 원소 수가 아니라 포인터 개수라
+#   시험 변수로 펼치면 없는 대상을 적게 된다.
+_STRUCT_MEMBER_RE = re.compile(
+    r"^\s*(?:(?:const|volatile|static)\s+)*[A-Za-z_]\w*\s+"
+    r"(\w+)\s*((?:\[[^\]]*\])+)\s*$"
+)
+
+
+def _iter_struct_members(body: str) -> Iterator[Tuple[str, str]]:
+    """`;` 로 끊어 멤버 선언을 훑는다(줄바꿈 위치와 무관)."""
+    for seg in str(body or "").split(";"):
+        m = _STRUCT_MEMBER_RE.match(seg)
+        if m:
+            yield m.group(1), m.group(2)
+
+
+def _balanced_block(text: str, open_at: int) -> int:
+    """`text[open_at] == '{'` 에서 짝이 맞는 `}` 위치. 못 찾으면 -1."""
+    depth = 0
+    for j in range(open_at, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def extract_struct_member_arrays(text: str) -> Dict[str, Dict[str, str]]:
+    """`타입명 → {멤버경로: 차원문자열}`. 차원은 **접기 전 원문**(`[LIN_MAX_DATA_BYTES]`).
+
+    매크로 접기는 파일 전체를 다 읽은 뒤에야 가능하므로(값이 다른 헤더에 있다)
+    여기서는 원문만 모으고, 접기는 호출부(`uds_generator`)가 `_normalize_dims` 로 한다.
+
+    이름 붙은 중첩 블록은 `Add.ByteArray` 처럼 **경로**로 편다.
+
+    ⚠ 주석은 **여기서** 지운다 — 호출부가 지웠겠거니 하면 안 된다. 멤버를 `;` 로
+      끊는데 `UINT8 dataIndex;  /* … */\\n UINT8 dataBuffer[8];` 에서는 조각이
+      `/* … */ UINT8 dataBuffer[8]` 로 시작해 앵커에 걸리지 않는다. 실측:
+      `LIN_INT_CTRL` 이 통째로 빠졌는데 `LIN_FRAME` 은 **멤버에 주석이 없어서**
+      우연히 통과해, 라이브에서만 8칸이 조용히 사라졌다.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if not text:
+        return out
+    text = _strip_c_comments(text)
+    for head in _STRUCT_HEAD_RE.finditer(text):
+        i = text.index("{", head.start())
+        j = _balanced_block(text, i)
+        if j < 0:
+            continue
+        tail = _STRUCT_TAIL_RE.match(text, j + 1)
+        if not tail:
+            continue
+        body = text[i + 1:j]
+        members = out.setdefault(tail.group(1), {})
+        # ① 최상위 멤버 — 중첩 블록을 지운 뒤 훑는다(안쪽 멤버가 밖으로 새지 않게).
+        flat = body
+        for _ in range(6):
+            nxt = re.sub(r"\{[^{}]*\}", " ", flat)
+            if nxt == flat:
+                break
+            flat = nxt
+        for mname, dims in _iter_struct_members(flat):
+            members.setdefault(mname, dims)
+        # ② 이름 붙은 중첩 블록 → `외부.내부`
+        for inner in _INNER_HEAD_RE.finditer(body):
+            ii = body.index("{", inner.start())
+            jj = _balanced_block(body, ii)
+            if jj < 0:
+                continue
+            iname = _STRUCT_TAIL_RE.match(body, jj + 1)
+            if not iname:
+                continue
+            for mname, dims in _iter_struct_members(body[ii + 1:jj]):
+                members.setdefault(f"{iname.group(1)}.{mname}", dims)
+    return out
 
 
 def _extract_c_global_candidates(text: str) -> List[Dict[str, str]]:

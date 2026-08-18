@@ -523,6 +523,7 @@ def collect_unit_functions(
     globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
     uds_io_map: Optional[Dict[str, Any]] = None,
+    struct_members: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Collect and structure unit functions from report_generator output.
 
@@ -536,6 +537,13 @@ def collect_unit_functions(
             대상 프로젝트의 SDS를 알고 있으면 `load_sds_map_from`으로 만들어 넘길 것.
     """
     gim = globals_info_map or {}
+    # 구조체 **배열** 전역(`SlipDetectPhase_t g_SlipDetectPhases[4]`)의 첨자는 root 에
+    # 붙는다. unit 마다 안 바뀌므로 루프 **밖에서** 한 번만 만든다.
+    _root_sizes: Dict[str, Tuple[int, ...]] = {}
+    for _rn, _ri in gim.items():
+        _rd = _decl_dims_from_array_field(str((_ri or {}).get("array") or ""))
+        if _rd and _dim_product(_rd) > 1:
+            _root_sizes[str(_rn)] = _rd
     if sds_map is None:
         sds_map = _load_default_sds_map()
     units: List[Dict[str, Any]] = []
@@ -735,10 +743,15 @@ def collect_unit_functions(
         # 실측상 같은 unit 에서 양쪽에 펼쳐진 배열이 120건이라, 한쪽만 펼치면 한 행
         # 안에서 같은 변수가 다른 이름으로 두 번 나온다.
         _sizes = _array_sizes(
-            inputs_raw, outputs_raw, globals_g, globals_s, globals_info=gim
+            inputs_raw, outputs_raw, globals_g, globals_s,
+            globals_info=gim, struct_members=struct_members,
         )
-        input_vars, _in_exp = _expand_array_entries(input_vars, _sizes, max_inp)
-        output_vars, _out_exp = _expand_array_entries(output_vars, _sizes, max_out)
+        input_vars, _in_exp = _expand_array_entries(
+            input_vars, _sizes, max_inp, root_sizes=_root_sizes
+        )
+        output_vars, _out_exp = _expand_array_entries(
+            output_vars, _sizes, max_out, root_sizes=_root_sizes
+        )
 
         # ── ASIL — `Safety Related` 칸(O/X)의 근거 ─────────────────────────
         #
@@ -1024,6 +1037,11 @@ _SIZE_TAIL_RE = re.compile(r"\(\s*size\s*:\s*(\d+(?:\s*x\s*\d+)*)\s*\)", re.I)
 _PARAM_DIM_RE = re.compile(r"((?:\[\d+\])+)\s*$")
 
 
+# 타입 문자열의 한정자. `const st_s_DTC` 처럼 붙어 오면 struct 정의를 못 찾는다.
+# ⚠ 단어 경계 필수 — 없으면 `constant_t` 의 `const` 까지 지워 타입 이름이 깨진다.
+_CV_QUALIFIER_RE = re.compile(r"\b(?:const|volatile|static)\b")
+
+
 def _dim_product(dims: Tuple[int, ...]) -> int:
     n = 1
     for d in dims:
@@ -1048,13 +1066,39 @@ def _decl_dims_from_array_field(text: str) -> Tuple[int, ...]:
     return tuple(int(n) for n in nums)
 
 
+def _struct_member_dims(
+    name: str,
+    globals_info: Dict[str, Dict[str, str]],
+    struct_members: Dict[str, Dict[str, str]],
+) -> Tuple[int, ...]:
+    """`s_LinFrame.LIN_data` → `(8,)`. 구조체 **정의**에서 멤버 배열 차원을 찾는다.
+
+    root 의 타입을 `globals_info` 에서 얻어 `struct_members[타입][멤버경로]` 를 본다.
+    ⚠ 포인터 파라미터(`ctx`·`pst_Queue`)는 root 타입을 모르므로 여기서 안 걸린다 —
+      의도적이다. 파라미터 타입까지 열면 실측상 일치 +34 에 과다 +176 이었다
+      (`SHA256_CTX.buffer[64]` 를 통째로 펼쳐서). 정본이 지지하지 않는다.
+    """
+    # ⚠ `ctx[0].state` 처럼 root 에 첨자가 붙은 포인터 표기는 여기서 **자동으로**
+    #   걸러진다 — `globals_info` 키는 맨 이름(`ctx`)이라 `ctx[0]` 조회가 실패한다.
+    #   `"[" in root` 가드를 따로 두면 같은 것을 두 번 막아 뮤테이션이 살아남는다.
+    root, _, rest = str(name or "").partition(".")
+    if not rest:
+        return ()
+    ty = _CV_QUALIFIER_RE.sub("", str((globals_info.get(root) or {}).get("type") or "")).strip()
+    if not ty:
+        return ()
+    return _decl_dims_from_array_field(str((struct_members.get(ty) or {}).get(rest) or ""))
+
+
 def _array_sizes(
     *raw_groups: List[str],
     globals_info: Optional[Dict[str, Dict[str, str]]] = None,
+    struct_members: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Tuple[int, ...]]:
     """원시 엔트리에서 `이름 → 차원 튜플` 을 모은다(1차원도 `(60,)` 로 담는다).
 
     `globals_info` 는 **폴백 전용**이다 — unit 지역 엔트리의 `(size: N)` 이 우선한다.
+    `struct_members` 는 `타입 → {멤버경로: "[8]"}` 로, 점 있는 이름의 꼬리 확장에 쓴다.
     """
     sizes: Dict[str, Tuple[int, ...]] = {}
     for group in raw_groups:
@@ -1089,6 +1133,18 @@ def _array_sizes(
         _gdims = _decl_dims_from_array_field(str((_ginfo or {}).get("array") or ""))
         if _gdims and _dim_product(_gdims) > 1:
             sizes[_key] = _gdims
+    # 구조체 멤버 배열 — `DiagData.CloseFailure` 는 전역맵에 **이름 자체가 없다**
+    # (전역은 `DiagData` 뿐). 타입을 거쳐 struct 정의에서 차원을 얻는다.
+    if struct_members:
+        _gi = globals_info or {}
+        for _grp in raw_groups:
+            for _raw in _grp or []:
+                _nm = _clean_global_name(str(_raw or ""))
+                if not _nm or "." not in _nm or _nm in sizes:
+                    continue
+                _mdims = _struct_member_dims(_nm, _gi, struct_members)
+                if _mdims and _dim_product(_mdims) > 1:
+                    sizes[_nm] = _mdims
     return sizes
 
 
@@ -1101,15 +1157,31 @@ def _elem_suffixes(dims: Tuple[int, ...]) -> List[str]:
 
 
 def _expand_array_entries(
-    names: List[str], sizes: Dict[str, Tuple[int, ...]], budget: int
+    names: List[str],
+    sizes: Dict[str, Tuple[int, ...]],
+    budget: int,
+    root_sizes: Optional[Dict[str, Tuple[int, ...]]] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
-    """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**."""
+    """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**.
+
+    첨자가 붙는 자리는 둘이다:
+      · `sizes`      — 이름 **꼬리**(`u8s_Buf` → `u8s_Buf[0]`, `PS.Data` → `PS.Data[0]`)
+      · `root_sizes` — 점 있는 이름의 **root 뒤**(`g_Ph.u8_Max` → `g_Ph[0].u8_Max`).
+        구조체 **배열**의 멤버라 정본이 첨자를 root 에 붙인다. 꼬리에 붙이면
+        `g_Ph.u8_Max[0]` 이라는 **없는 대상**이 된다.
+    """
     out: List[str] = []
     expanded: List[str] = []
     skipped: List[Dict[str, Any]] = []
     total = len(names)
     for pos, nm in enumerate(names):
         dims = sizes.get(nm) or ()
+        at_root = False
+        if not dims and root_sizes and "." in nm:
+            # 첨자가 이미 붙은 root(`ctx[0]`)는 키가 안 맞아 조회가 실패한다 —
+            # 별도 가드를 두면 겹쳐서 막게 되고, 그건 방어가 아니라 사각이다.
+            dims = root_sizes.get(nm.split(".", 1)[0]) or ()
+            at_root = bool(dims)
         n = _dim_product(dims) if dims else 0
         if n <= 1:
             out.append(nm)
@@ -1123,7 +1195,11 @@ def _expand_array_entries(
             out.append(nm)
             skipped.append({"name": nm, "elements": n, "remaining": max(0, remaining - reserve)})
             continue
-        out.extend(nm + sfx for sfx in _elem_suffixes(dims))
+        if at_root:
+            _root, _, _rest = nm.partition(".")
+            out.extend(f"{_root}{sfx}.{_rest}" for sfx in _elem_suffixes(dims))
+        else:
+            out.extend(nm + sfx for sfx in _elem_suffixes(dims))
         expanded.append(nm)
     return out, {
         "expanded": expanded,
@@ -3076,7 +3152,8 @@ def generate_suts(
             except Exception as _e:  # noqa: BLE001 — 실패하면 소스 파싱으로 간다
                 _logger.warning("SwUDS 입출력 읽기 실패 — 소스 파싱 이름을 쓴다: %s", _e)
     units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map,
-                                   uds_io_map=_uds_io)
+                                   uds_io_map=_uds_io,
+                                   struct_members=report_data.get("struct_member_arrays") or {})
 
     if not units:
         _logger.warning("No unit functions found!")

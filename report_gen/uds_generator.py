@@ -58,6 +58,7 @@ from report_gen.function_analyzer import (
     _normalize_symbol_name,
     _enhance_function_description,
     _normalize_bracket_expr,
+    _normalize_dims,
     _is_generic_description,
     _collect_var_usage,
     _extract_logic_terminal_paths,
@@ -91,6 +92,7 @@ from report_gen.source_parser import (
     _extract_c_global_candidates,
     _extract_c_function_bodies,
     _extract_c_macro_defs,
+    extract_struct_member_arrays,
     _extract_c_definitions,
     _extract_local_static_candidates,
     _extract_fallback_call_names,
@@ -342,6 +344,12 @@ def generate_uds_source_sections(
     reqs: List[str] = []
     common_macros: List[str] = []
     type_defs: List[str] = []
+    # 구조체/공용체 멤버의 배열 차원(접기 전 원문). 정본 SUTS 는 멤버 배열도
+    # 원소 단위로 적는다 — `source_parser.extract_struct_member_arrays` 주석 참조.
+    struct_member_arrays_raw: Dict[str, Dict[str, str]] = {}
+    # ⚠ 함수 스코프에 둔다 — 접기는 `if parse_c_project is not None:` 안에서만
+    #   일어나는데 payload 는 밖에서 쓴다. 안에 선언하면 파서 부재 시 NameError.
+    struct_member_arrays: Dict[str, Dict[str, str]] = {}
     param_defs: List[str] = []
     version_defs: List[str] = []
     global_data: List[str] = []
@@ -496,6 +504,8 @@ def generate_uds_source_sections(
         hdr_asil = _extract_file_header_asil(raw)
         if hdr_asil:
             _file_header_asil[str(p)] = hdr_asil
+        for _sty, _smm in extract_struct_member_arrays(text).items():
+            struct_member_arrays_raw.setdefault(_sty, {}).update(_smm)
         for g in _extract_c_global_candidates(text):
             gname = str(g.get("name") or "").strip()
             if not gname:
@@ -756,6 +766,19 @@ def generate_uds_source_sections(
             cols = _normalize_table_row(row)
             if len(cols) >= 3:
                 macro_value_map[str(cols[0]).strip()] = str(cols[2]).strip()
+        # 멤버 차원 접기는 **매크로 맵이 완성된 뒤**에 한다 — `[LIN_MAX_DATA_BYTES]`
+        # 처럼 값이 다른 헤더에 있는 경우가 흔해서 파일 단위로는 못 접는다.
+        # ⚠ 접히지 않은 차원은 **버린다**. `[SIGNATURE_SIZE]` 에서 숫자만 긁으면
+        #   없는 크기를 지어내게 된다(`generators/suts._decl_dims_from_array_field`
+        #   와 같은 이유).
+        for _sty, _smm in struct_member_arrays_raw.items():
+            for _mname, _mdims in _smm.items():
+                _dims = _normalize_dims(_mdims, macro_value_map)
+                if _dims and all(str(x).strip().isdigit() for x in _dims):
+                    struct_member_arrays.setdefault(_sty, {})[_mname] = "".join(
+                        f"[{int(x)}]" for x in _dims
+                    )
+
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):
@@ -2192,6 +2215,8 @@ def generate_uds_source_sections(
         "calling_map": calling_map,
         "module_map": module_map,
         "globals_info_map": globals_info_map,
+        # 타입 → {멤버경로: "[8]"} — 접힌 선언 차원만 담는다.
+        "struct_member_arrays": struct_member_arrays,
         "common_macros": common_macros,
         "type_defs": type_defs,
         "param_defs": param_defs,
