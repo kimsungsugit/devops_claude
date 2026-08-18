@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from copy import copy
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -733,7 +734,9 @@ def collect_unit_functions(
         # 배열을 원소 단위로 펼친다(정본과 같은 입도). 입력·기대 **양쪽** 이다 —
         # 실측상 같은 unit 에서 양쪽에 펼쳐진 배열이 120건이라, 한쪽만 펼치면 한 행
         # 안에서 같은 변수가 다른 이름으로 두 번 나온다.
-        _sizes = _array_sizes(inputs_raw, outputs_raw, globals_g, globals_s)
+        _sizes = _array_sizes(
+            inputs_raw, outputs_raw, globals_g, globals_s, globals_info=gim
+        )
         input_vars, _in_exp = _expand_array_entries(input_vars, _sizes, max_inp)
         output_vars, _out_exp = _expand_array_entries(output_vars, _sizes, max_out)
 
@@ -1028,8 +1031,31 @@ def _dim_product(dims: Tuple[int, ...]) -> int:
     return n
 
 
-def _array_sizes(*raw_groups: List[str]) -> Dict[str, Tuple[int, ...]]:
-    """원시 엔트리에서 `이름 → 차원 튜플` 을 모은다(1차원도 `(60,)` 로 담는다)."""
+@lru_cache(maxsize=4096)
+def _decl_dims_from_array_field(text: str) -> Tuple[int, ...]:
+    r"""`globals_info_map` 의 `array` 문자열(`'[5][7][7]'`)을 차원 튜플로.
+
+    ⚠ `re.findall(r"\d+")` 로 뽑으면 `[DATA_LEN2]` 같은 **매크로 이름 속 숫자**를
+      주워 없는 크기를 지어낸다. 대괄호 개수와 숫자 차원 개수가 **정확히 일치**할
+      때만 인정하고, 하나라도 비숫자면 전부 버린다(`[SIGNATURE_SIZE]` → `()`).
+    """
+    t = str(text or "").strip()
+    if not t:
+        return ()
+    nums = re.findall(r"\[(\d+)\]", t)
+    if not nums or len(nums) != t.count("["):
+        return ()
+    return tuple(int(n) for n in nums)
+
+
+def _array_sizes(
+    *raw_groups: List[str],
+    globals_info: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, Tuple[int, ...]]:
+    """원시 엔트리에서 `이름 → 차원 튜플` 을 모은다(1차원도 `(60,)` 로 담는다).
+
+    `globals_info` 는 **폴백 전용**이다 — unit 지역 엔트리의 `(size: N)` 이 우선한다.
+    """
     sizes: Dict[str, Tuple[int, ...]] = {}
     for group in raw_groups:
         for raw in group or []:
@@ -1051,6 +1077,18 @@ def _array_sizes(*raw_groups: List[str]) -> Dict[str, Tuple[int, ...]]:
             name = re.sub(r"(?:\[\d+\])+$", "", name)
             if name and _dim_product(dims) > _dim_product(sizes.get(name) or ()):
                 sizes[name] = dims
+    # ⚠ 7차 라운드에서 입출력 **이름**을 SwUDS 문서로 대체하면서 사각이 생겼다:
+    #   문서 유래 이름은 대응하는 소스 엔트리가 없어 `(size: N)` 꼬리도 없다. 선언
+    #   크기는 `globals_info_map` 에 이미 있는데 여기서 한 번도 안 봤다 —
+    #   `u8s_DataBuffer[60]` 이 `s_UDS_RDBI_RealTimeMonitor` 에서 base 한 칸으로
+    #   나가 정본 60칸과 어긋났다(실측: 입력 일치 +60 · 과다 -1 · 사라진 맞춤 0).
+    for _gname, _ginfo in (globals_info or {}).items():
+        _key = str(_gname or "")
+        if not _key or _key in sizes:
+            continue
+        _gdims = _decl_dims_from_array_field(str((_ginfo or {}).get("array") or ""))
+        if _gdims and _dim_product(_gdims) > 1:
+            sizes[_key] = _gdims
     return sizes
 
 

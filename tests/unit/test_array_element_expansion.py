@@ -34,6 +34,7 @@ import pytest
 
 from generators.suts import (
     _array_sizes,
+    _decl_dims_from_array_field,
     _clean_global_name,
     _expand_array_entries,
     collect_unit_functions,
@@ -740,3 +741,94 @@ class TestMemberChain:
 
         got = _collect_var_usage("v = arr[u8t_Idx].f;", ["arr"])
         assert not any("u8t_Idx" in m for m in got["arr"]["members"]), got["arr"]["members"]
+
+
+class TestGlobalSizeFallback:
+    """선언 크기를 `globals_info_map` 에서도 찾는다.
+
+    ## 왜 (KJPDS02_PV 실측, 2026-08-18)
+
+    7차 라운드에서 입출력 **이름**을 SwUDS 문서로 대체하면서 사각이 생겼다. 문서에서
+    온 이름은 대응하는 소스 엔트리가 없으니 `(size: N)` 꼬리도 없다 — 그런데 선언
+    크기는 `globals_info_map` 에 이미 `array: '[60]'` 로 들어 있었고 `_array_sizes`
+    는 그걸 한 번도 보지 않았다.
+
+        s_UDS_RDBI_RealTimeMonitor::u8s_DataBuffer
+            정본 60원소  ←  우리 ['u8s_DataBuffer'] 한 칸
+            그 unit 의 globals_global 18개 중 DataBuffer 엔트리 **0개**
+            globals_info_map['u8s_DataBuffer'] = {'array': '[60]', 'type': 'U8'}
+
+    오프라인 시뮬 실측: 입력 일치 5,110 → **5,170**(+60) · 과다 1,056 → **1,055**(-1)
+    · **사라진 맞춤 0**. 기대 축은 ±0(그 unit 이 기대 열을 쓰지 않는다).
+
+    ## ⚠ 관찰 첨자(`(idx: ...)`)로 바꾸자는 유혹은 **재고 기각**했다
+
+    파서는 `(idx: 4, 2, 3, 1, 0)` 로 실제 접근 첨자도 낸다. 그걸 쓰면 지어낸 칸이
+    0 이지만 맞추는 칸이 폭락한다 — 정본 168쌍 기준:
+
+        size 전량확장(현행) : 정확일치 146 · 맞춘칸 4,308 · 지어낸칸 841
+        idx 관찰확장        : 정확일치  10 · 맞춘칸   454 · 지어낸칸   0
+
+    정본은 관찰 첨자가 아니라 **선언 크기**로 적는다(base 134 중 120이 모든 unit 에서
+    같은 개수). idx 는 하한일 뿐이다.
+    """
+
+    def test_array_field_is_parsed(self):
+        assert _decl_dims_from_array_field("[60]") == (60,)
+        assert _decl_dims_from_array_field("[5][7][7]") == (5, 7, 7)
+
+    def test_macro_sized_array_is_rejected_not_guessed(self):
+        r"""⚠ `[SIGNATURE_SIZE]` 에서 숫자만 긁으면 **없는 크기를 지어낸다**.
+
+        `[DATA_LEN2]` 는 `re.findall(r"\d+")` 로 뽑으면 `2` 가 나온다 — 2원소
+        배열이라는 거짓말이다. 대괄호 수와 숫자 차원 수가 어긋나면 전부 버린다.
+        """
+        assert _decl_dims_from_array_field("[SIGNATURE_SIZE]") == ()
+        assert _decl_dims_from_array_field("[DATA_LEN2]") == ()
+        assert _decl_dims_from_array_field("[4][MAX_LEN]") == ()
+        assert _decl_dims_from_array_field("") == ()
+        assert _decl_dims_from_array_field("[]") == ()
+
+    def test_fallback_supplies_size_when_entry_has_none(self):
+        got = _array_sizes(
+            ["[IN] u8s_DataBuffer"],
+            globals_info={"u8s_DataBuffer": {"array": "[60]", "type": "U8"}},
+        )
+        assert got == {"u8s_DataBuffer": (60,)}
+
+    def test_local_entry_wins_over_global_info(self):
+        """unit 지역 엔트리가 **우선**이다 — 폴백은 빈자리만 채운다."""
+        got = _array_sizes(
+            ["[IN] buf (size: 9x8)"],
+            globals_info={"buf": {"array": "[3]", "type": "U8"}},
+        )
+        assert got == {"buf": (9, 8)}
+
+    def test_non_array_global_is_not_expanded(self):
+        """음성 대조군 — 스칼라 전역을 폴백이 배열로 만들면 회귀다."""
+        assert _array_sizes([], globals_info={"g_State": {"array": "", "type": "U8"}}) == {}
+        assert _array_sizes([], globals_info={"g_P": {"array": "[1]", "type": "U8"}}) == {}
+
+    def test_wired_through_collect_unit_functions(self):
+        """⚠ 헬퍼만 테스트하면 **호출부가 값을 버리는 것**을 못 본다.
+
+        이 저장소가 직전 라운드에서 정확히 그렇게 뮤테이션을 놓쳤다(M10 생존).
+        실제 결함 모양 그대로 — 이름은 SwUDS 에서 오고 크기는 전역맵에만 있다.
+        """
+        units = collect_unit_functions(
+            _unit("RealTime", gg=["[IN] g_Other"]),
+            {"u8s_DataBuffer": {"array": "[4]", "type": "U8"}},
+            sds_map={},
+            uds_io_map={"by_name": {"RealTime": {"inputs": ["u8s_DataBuffer"], "outputs": []}}},
+        )
+        assert units[0]["input_vars"] == [f"u8s_DataBuffer[{i}]" for i in range(4)]
+
+    def test_wiring_negative_control(self):
+        """폴백이 없어야 할 때 안 걸리는지 — 같은 경로, 크기 없는 전역."""
+        units = collect_unit_functions(
+            _unit("RealTime", gg=["[IN] g_Other"]),
+            {"u8s_DataBuffer": {"array": "[SIGNATURE_SIZE]", "type": "U8"}},
+            sds_map={},
+            uds_io_map={"by_name": {"RealTime": {"inputs": ["u8s_DataBuffer"], "outputs": []}}},
+        )
+        assert units[0]["input_vars"] == ["u8s_DataBuffer"]
