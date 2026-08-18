@@ -719,7 +719,13 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
 #  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
 #      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v11"
+#  v12: struct_member_arrays — 구조체 **멤버 배열**의 선언 차원(`{타입: {멤버: "[8]"}}`).
+#      커밋 018019d 가 `uds_generator` 산출에 이 키를 새로 넣었는데 버전을 안 올려,
+#      소스가 안 바뀐 프로젝트에서는 v11 캐시가 계속 히트해 **키가 없는 채로** 나갔다
+#      (실측 kjpds02_pv: `struct_member_arrays` 0). SUTS·SITS 둘 다 이 키로 멤버 배열을
+#      원소 단위로 펼치므로, 무효화 없이는 두 산출물 모두에서 fix 가 발화하지 않는다
+#      — 위 v3/v4 주석이 경고한 것과 **같은 실패의 세 번째**다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v12"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

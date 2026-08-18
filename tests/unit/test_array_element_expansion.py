@@ -110,6 +110,47 @@ class TestExpansion:
         assert out == ["a[0]", "a[1]", "a[2]", "a[3]"] and not info["skipped"]
 
 
+class TestParallelListStaysInStep:
+    """부속 리스트를 함께 펼치는 축 — 안 쓰면 **짝이 조용히 어긋난다**.
+
+    SITS 는 이름과 원문을 인덱스로 짝짓는다(`expected_raws[ev_idx]`). 이름만 늘어나면
+    원소마다 **다른 변수의** 타입·경계값이 붙는데, 값이 틀리는 게 아니라 짝이 밀리는
+    것이라 산출물만 봐서는 안 보인다.
+    """
+
+    def test_parallel_is_duplicated_per_element(self):
+        out, info = _expand_array_entries(
+            ["a", "b"], {"a": (3,)}, 96, parallel=["RAW_A", "RAW_B"])
+        assert out == ["a[0]", "a[1]", "a[2]", "b"]
+        assert info["parallel"] == ["RAW_A", "RAW_A", "RAW_A", "RAW_B"]
+
+    def test_parallel_follows_the_budget_skip(self):
+        """안 펼친 이름은 부속도 한 칸이다 — 여기가 어긋나면 뒤가 전부 밀린다."""
+        out, info = _expand_array_entries(
+            ["big", "keep"], {"big": (60,)}, 10, parallel=["R1", "R2"])
+        assert out == ["big", "keep"]
+        assert info["parallel"] == ["R1", "R2"]
+
+    def test_parallel_length_always_matches_out(self):
+        out, info = _expand_array_entries(
+            ["x", "a", "y"], {"a": (2,)}, 96, parallel=["RX", "RA", "RY"])
+        assert len(info["parallel"]) == len(out)
+        assert info["parallel"] == ["RX", "RA", "RA", "RY"]
+
+    def test_mismatched_length_is_refused_not_trimmed(self):
+        """길이가 다르면 짝이 이미 깨진 것이다 — 잘라 맞추면 그 사실이 사라진다."""
+        import pytest
+
+        with pytest.raises(ValueError, match="parallel"):
+            _expand_array_entries(["a", "b"], {}, 96, parallel=["only_one"])
+
+    def test_without_parallel_nothing_changes(self):
+        """기존 호출부(SUTS)는 영향이 없어야 한다."""
+        out, info = _expand_array_entries(["a"], {"a": (2,)}, 96)
+        assert out == ["a[0]", "a[1]"]
+        assert info["parallel"] is None
+
+
 class TestEndToEnd:
     def test_global_array_becomes_elements(self):
         u = collect_unit_functions(_unit(gg=["[IN] u16s_AdcBuffer (size: 9)"]), sds_map={})[0]

@@ -1299,6 +1299,7 @@ def _expand_array_entries(
     budget: int,
     root_sizes: Optional[Dict[str, Tuple[int, ...]]] = None,
     mid_sizes: Optional[Dict[str, Tuple[int, Tuple[int, ...]]]] = None,
+    parallel: Optional[List[str]] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**.
 
@@ -1313,7 +1314,20 @@ def _expand_array_entries(
       꼬리만 펼친 `A.B.C[0]` 은 `A.B` 가 배열이라 **여전히 불성립**이지만, 중간만
       펼친 `A.B[0].C` 는 C 를 통째 배열로 읽는 **성립하는** 이름이다. 덜 틀린 쪽을
       고른다.
+
+    `parallel` 은 `names` 와 **같은 길이**인 부속 리스트다(예: 태그 붙은 원문).
+    주면 같은 배수로 함께 펼쳐 `stats["parallel"]` 로 돌려준다 — 원소는 base 의
+    값을 그대로 복제한다(한 배열의 원소는 타입도 경계값도 같다).
+    ⚠ 이름을 **인덱스로** 원문과 짝짓는 소비처가 있으면 이걸 안 쓰는 순간 짝이
+      조용히 어긋난다 — 잘못된 값이 나오는 게 아니라 **다른 변수의** 값이 붙는다.
+      SITS 가 그렇다(`expected_raws[ev_idx]`). SUTS 는 이름 기반 추론이라 안 쓴다.
     """
+    par_in = list(parallel) if parallel is not None else None
+    if par_in is not None and len(par_in) != len(names):
+        # 길이가 다르면 짝이 이미 깨진 것이다. 조용히 잘라 맞추면 그 사실이 사라진다.
+        raise ValueError(
+            f"parallel 길이 불일치: names={len(names)} parallel={len(par_in)}")
+    par_out: List[str] = []
     out: List[str] = []
     expanded: List[str] = []
     skipped: List[Dict[str, Any]] = []
@@ -1335,6 +1349,8 @@ def _expand_array_entries(
         n = _dim_product(dims) if dims else 0
         if n <= 1:
             out.append(nm)
+            if par_in is not None:
+                par_out.append(par_in[pos])
             continue
         remaining = budget - len(out)
         # 남은 이름들도 최소 한 칸씩은 자리가 있어야 한다.
@@ -1343,6 +1359,8 @@ def _expand_array_entries(
         reserve = total - pos - 1
         if n > remaining - reserve:
             out.append(nm)
+            if par_in is not None:
+                par_out.append(par_in[pos])
             skipped.append({"name": nm, "elements": n, "remaining": max(0, remaining - reserve)})
             continue
         if at_node >= 0:
@@ -1354,12 +1372,16 @@ def _expand_array_entries(
             out.extend(f"{_head}{sfx}.{_tail}" for sfx in _elem_suffixes(dims))
         else:
             out.extend(nm + sfx for sfx in _elem_suffixes(dims))
+        if par_in is not None:
+            par_out.extend([par_in[pos]] * n)
         expanded.append(nm)
     return out, {
         "expanded": expanded,
         "skipped": skipped,
         "budget": budget,
         "used": len(out),
+        # 부속 리스트를 함께 펼친 결과(`parallel` 을 준 경우에만). 길이는 항상 out 과 같다.
+        "parallel": par_out if par_in is not None else None,
     }
 
 

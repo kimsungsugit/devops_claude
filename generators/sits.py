@@ -213,8 +213,10 @@ def _sits_gen_method(gen: Any, test_method: Optional[str] = None) -> str:
     g = str(gen or "").strip().upper()
     return _SITS_GEN_BOUNDARY if ("ABV" in g or "BV" in g) else _SITS_GEN_DEFAULT
 
-_MAX_INPUT_PARAMS = _INPUT_COL_END - _INPUT_COL_START + 1   # 67
-_MAX_EXP_PARAMS = _EXP_COL_END - _EXP_COL_START + 1        # 70
+# ⚠ 주석의 숫자는 **옛 레이아웃**(67/70)이었다. 실제 값은 정본과 같은 82/113 이다
+#   — 배열 펼침 예산이 이 값이라 숫자를 잘못 읽으면 15+43칸을 안 쓰는 줄 안다.
+_MAX_INPUT_PARAMS = _INPUT_COL_END - _INPUT_COL_START + 1   # 82 (I~CL)
+_MAX_EXP_PARAMS = _EXP_COL_END - _EXP_COL_START + 1         # 113 (CM~GU)
 
 # Row 6 상세 헤더(열 번호 → 라벨). `generate_sits_xlsm`이 시트에 쓰는 값이자, 영향도 탭의
 # 문서 초안이 Excel 붙여넣기 TSV 열 순서를 얻는 **단일 출처**다(복제 금지 — suts와 동일 원칙).
@@ -587,6 +589,62 @@ def _parse_req_ids(text: str) -> List[str]:
     return re.findall(r"\bSw(?:TR|TSR|NTR|NTSR|ST|STR|Fn|Com)_\d+\b", text or "")
 
 
+def _expand_arrays(
+    names: List[str],
+    raws: List[str],
+    budget: int,
+    globals_info: Dict[str, Dict[str, str]],
+    struct_members: Dict[str, Dict[str, str]],
+    root_sizes: Dict[str, Tuple[int, ...]],
+) -> Tuple[List[str], List[str], int, int, int]:
+    """배열 이름을 원소로 펼친다 — 판정은 **전부 SUTS 자산**에 위임한다.
+
+    정본(KJPDS02_PV_SwITS v1.02)은 배열을 원소 단위로 적는다:
+    `g_sys_error_his[0]`…`[15]` · `u8g_SysEepromCtrl_PartNoInfo[0]`…`[9]`.
+    우리는 base 한 칸으로 내고 있었다 — 같은 대상을 **다른 입도로** 부르는 것이라
+    과다와 미달이 동시에 생긴다(실측: 정본 `[N]` 셀 414 vs 우리 179).
+
+    ⚠ 크기 규칙을 여기서 다시 쓰지 않는다. `_array_sizes`/`_expand_array_entries` 는
+      SUTS 가 여러 라운드에 걸쳐 맞춰 둔 것이고(선언 크기 vs 관찰 첨자, 다차원,
+      구조체 배열의 root 첨자, 예산 부족 시 **펼치지 않고 base 유지**), 복제하면
+      한쪽만 고쳐진다. `uds_unit_io.py` 가 못 박은 규약(문서의 `[N]` 은 선언 크기라
+      떼고 실제 펼침은 소스 크기로)도 그 안에 이미 들어 있다.
+
+    ⚠ `raws` 를 **함께** 펼친다. SITS 는 이름과 원문을 인덱스로 짝짓는다
+      (`expected_raws[ev_idx]`) — 이름만 늘리면 원소마다 **다른 변수의** 타입·경계값이
+      붙는다. 값이 틀리는 게 아니라 짝이 어긋나는 것이라 눈으로 안 보인다.
+
+    Returns: `(names, raws, 펼친 이름 수, 예산부족 건너뜀, 방출 원소 수)`
+    """
+    if not names:
+        return names, raws, 0, 0, 0
+    from generators.suts import (
+        _array_sizes,
+        _declared_type_map,
+        _expand_array_entries,
+        _mid_member_sizes,
+        _root_type_hints,
+    )
+
+    sizes = _array_sizes(raws, globals_info=globals_info, struct_members=struct_members)
+    mid: Dict[str, Tuple[int, Tuple[int, ...]]] = {}
+    if struct_members:
+        _rtypes = _root_type_hints(raws, declared_types=_declared_type_map(globals_info))
+        mid = _mid_member_sizes(names, _rtypes, struct_members)
+    out, st = _expand_array_entries(
+        names, sizes, budget, root_sizes=root_sizes or None, mid_sizes=mid or None,
+        parallel=raws,
+    )
+    par = st.get("parallel")
+    # 계약 위반은 조용히 넘기지 않는다 — 짝이 어긋난 채로 나가면 원소마다 엉뚱한
+    # 타입이 붙고, 그건 산출물만 봐서는 절대 안 보인다.
+    if par is None or len(par) != len(out):
+        raise RuntimeError(
+            f"배열 펼침 부속 리스트 불일치: names={len(out)} raws={len(par or [])}")
+    return (out, par, len(st.get("expanded") or []), len(st.get("skipped") or []),
+            max(0, len(out) - len(names)))
+
+
 def _reach_cross_module(
     entry: str,
     calls_map: Dict[str, List[str]],
@@ -771,6 +829,9 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     # 요구 ID 축 — 이 칸에는 **안 실리는** 링크. 실리지 않는다고 세지 않으면
     # "그런 링크가 없다" 와 구별되지 않는다.
     "req_id_flows", "req_id_total",
+    # 배열 원소 펼침 축 — 정본과 같은 입도로 냈는가, 예산에 걸려 못 펼쳤는가
+    "array_expanded_inputs", "array_expanded_expected", "array_elements_emitted",
+    "array_skipped_budget", "array_size_map_entries", "array_struct_types",
     # 근거 시트(전략 / Related_ID) 산출 실적 — 시트가 비어도 **왜 비었는지** 보이게
     "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
     "strategy_blocks_truncated",
@@ -888,6 +949,9 @@ def collect_integration_flows(
     uds_swcom_map: Optional[Dict[str, List[str]]] = None,
     uds_asil_map: Optional[Dict[str, str]] = None,
     uds_related_map: Optional[Dict[str, List[str]]] = None,
+    # ⚠ 신규 인자는 **맨 끝**에 붙인다(위치 인자 호출부가 조용히 다른 값에 바인딩된다).
+    globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
+    struct_members: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -911,6 +975,10 @@ def collect_integration_flows(
             **호출자가 대상 프로젝트의 SDS 를 줄 방법 자체가 없었다.**
         uds_swcom_map: `{함수명(소문자): [SwCom_NN]}` — Related 칸 SwCom 의 **유일한
             문서 근거**(`load_uds_swcom_map`). 주지 않으면 순번 합성 ID 로 내려간다.
+        globals_info_map / struct_members: 배열 **선언 크기**의 출처
+            (`generate_uds_source_sections` 의 `globals_info_map`/`struct_member_arrays`).
+            정본은 배열을 `g_sys_error_his[0]`…`[15]` 처럼 **원소 단위**로 적는다 —
+            안 주면 base 한 칸으로 나가 정본 열과 입도가 어긋난다.
 
     `stats_out` 를 주면 캡 절단 내역(총 후보 수·제외 수·제외분 ASIL 분포)과
     **SDS 보강 실적**(`sds_*` 키)을 채운다. 소비처에서 결과 길이로 되짚으면 절단을 못
@@ -940,6 +1008,23 @@ def collect_integration_flows(
     # 요구 ID 축 — Related 칸의 값이 아니라서 빼지만(아래 ②) 버리지는 않는다.
     _req_id_flows = 0       # 요구 ID 링크를 가진 흐름 수
     _req_id_total = 0       # 그렇게 얻은 요구 ID 총 개수
+    # 배열 원소 펼침 — 예산에 걸려 **못 펼친** 것도 센다(0 만 보면 "펼칠 게 없었다"
+    # 인지 "배선이 끊겼다"인지 구분이 안 된다).
+    _arr_expanded_in = 0
+    _arr_expanded_exp = 0
+    _arr_skipped = 0
+    _arr_elements = 0
+    # 배열 선언 크기는 흐름마다 안 바뀐다 — 루프 **밖에서** 한 번만 만든다
+    # (SUTS 가 같은 이유로 unit 루프 밖에 둔다: 전역 1,525 × 흐름 367 헛돔 방지).
+    _gim = globals_info_map or {}
+    _smem = struct_members or {}
+    _root_sizes: Dict[str, Tuple[int, ...]] = {}
+    if _gim:
+        from generators.suts import _decl_dims_from_array_field, _dim_product
+        for _rn, _ri in _gim.items():
+            _rd = _decl_dims_from_array_field(str((_ri or {}).get("array") or ""))
+            if _rd and _dim_product(_rd) > 1:
+                _root_sizes[str(_rn)] = _rd
     _sds_source = "argument" if sds_map is not None else "repo_docs_glob"
     if sds_map is None:
         sds_map = _load_default_sds_map()
@@ -1161,6 +1246,11 @@ def collect_integration_flows(
         input_vars: List[str] = [p[0] for p in input_pairs[:_MAX_INPUT_PARAMS]]
         # Keep annotated raws for type inference
         input_raws: List[str] = [p[1] for p in input_pairs[:_MAX_INPUT_PARAMS]]
+        input_vars, input_raws, _n_in, _n_skip, _n_el = _expand_arrays(
+            input_vars, input_raws, _MAX_INPUT_PARAMS, _gim, _smem, _root_sizes)
+        _arr_expanded_in += _n_in
+        _arr_skipped += _n_skip
+        _arr_elements += _n_el
 
         # Expected: own outputs + pointer out-params + callee outputs + callee globals
         exp_pairs: List[Tuple[str, str]] = []
@@ -1230,6 +1320,13 @@ def collect_integration_flows(
 
         expected_vars: List[str] = [p[0] for p in exp_pairs[:_MAX_EXP_PARAMS]]
         expected_raws: List[str] = [p[1] for p in exp_pairs[:_MAX_EXP_PARAMS]]
+        # ⚠ 입력·기대 **양쪽** 이다. 한쪽만 펼치면 한 행 안에서 같은 변수가 다른
+        #   이름으로 두 번 나온다(SUTS 가 실측 120건으로 확인한 함정).
+        expected_vars, expected_raws, _n_ex, _n_skip2, _n_el2 = _expand_arrays(
+            expected_vars, expected_raws, _MAX_EXP_PARAMS, _gim, _smem, _root_sizes)
+        _arr_expanded_exp += _n_ex
+        _arr_skipped += _n_skip2
+        _arr_elements += _n_el2
 
         # ASIL — Pass 1 에서 정규화한 값을 그대로 쓴다. 여기서 다시 계산하면
         # 선별 기준(등급)과 방출 값이 갈라질 수 있다.
@@ -1415,6 +1512,17 @@ def collect_integration_flows(
             # 요구 ID 축 — 칸에서 뺀 만큼 여기서 보여야 "없다" 와 구별된다.
             "req_id_flows": _req_id_flows,
             "req_id_total": _req_id_total,
+            # 배열 원소 펼침 — 0 이면 배선이 끊긴 것인지 펼칠 게 없었던 것인지
+            # `array_size_map_entries` 로 구분된다.
+            "array_expanded_inputs": _arr_expanded_in,
+            "array_expanded_expected": _arr_expanded_exp,
+            "array_elements_emitted": _arr_elements,
+            "array_skipped_budget": _arr_skipped,
+            "array_size_map_entries": len(_root_sizes) + len(_gim),
+            # ⚠ 구조체 멤버 배열은 **별도 축**이다. 위 값에 합치면 0 인지 아닌지 안 보이고,
+            #   실제로 이 키가 캐시에 없어 0 인 채로 돌던 것을 진단하는 데 한 라운드가 들었다
+            #   (`_SOURCE_SECTIONS_SCHEMA_VERSION` v12 참조).
+            "array_struct_types": len(_smem),
         })
     if _sds_lookups and not _sds_swcom_hits:
         # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
@@ -2981,6 +3089,11 @@ def generate_sits(
             from report_generator import generate_uds_source_sections
             report_data = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
         function_details = report_data.get("function_details", {})
+        # 배열 **선언 크기**의 출처. 이걸 안 꺼내면 흐름 수집이 `(size: N)` 꼬리가
+        # 붙은 엔트리만 펼치고, 문서 유래 이름(꼬리 없음)은 base 한 칸으로 나간다
+        # — SUTS 가 7차 라운드에서 겪은 사각과 같은 형태다.
+        _globals_info_map = report_data.get("globals_info_map", {}) or {}
+        _struct_members = report_data.get("struct_member_arrays", {}) or {}
         total_source_functions = len(function_details)
         if not function_details:
             raise ValueError("No function_details in source parse result")
@@ -2989,6 +3102,11 @@ def generate_sits(
         try:
             from generators.suts import _lightweight_parse
             function_details = _lightweight_parse(_first_root)
+            # 경량 파서는 전역 선언표를 안 만든다 — 없는 것을 빈 맵으로 둔다
+            # (그러면 `(size: N)` 꼬리가 있는 엔트리만 펼쳐지고, 그 사실은
+            #  `array_size_map_entries` 0 으로 보인다).
+            _globals_info_map = {}
+            _struct_members = {}
             total_source_functions = len(function_details)
         except Exception as e2:
             _logger.error("SITS: lightweight parse also failed: %s", e2)
@@ -3071,7 +3189,8 @@ def generate_sits(
     flows = collect_integration_flows(
         function_details, max_flows=max_flows, stats_out=flow_stats,
         sds_map=_project_sds_map, uds_swcom_map=_uds_swcom_map,
-        uds_asil_map=_uds_asil_map, uds_related_map=_uds_related_map)
+        uds_asil_map=_uds_asil_map, uds_related_map=_uds_related_map,
+        globals_info_map=_globals_info_map, struct_members=_struct_members)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")
