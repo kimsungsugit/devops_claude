@@ -117,6 +117,7 @@ from backend.services.report_parsers import (
 from backend.user_context import wrap_with_user
 
 # 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.
+from report_gen import uds_related as _uds_related
 from report_gen.trace_link_table import build_link_table
 from report_gen.utils import build_function_details_by_name
 
@@ -4120,45 +4121,11 @@ _UDS_MAPPING_TTL = 1800.0
 _UDS_MAPPING_SCHEMA_VERSION = "v2"
 
 
-def _docx_tables_text(data: bytes) -> Optional[List[List[List[str]]]]:
-    """docx bytes → tables[행[셀텍스트]]. 손상 docx 복구 fallback 포함.
-
-    정상 파일은 python-docx로 읽는다. 임베디드 이미지 CRC 오류 등으로 python-docx가
-    실패해도 추적성 매핑은 이미지와 무관한 '표'에서만 추출하므로, word/document.xml만
-    직접 스트리밍 파싱해 표를 복구한다(손상 미디어 파트 우회). document.xml까지 손상돼
-    파싱 불가하면 None.
-    """
-    import io as _io
-    # 1) 정상 경로 — python-docx
-    try:
-        import docx as _docx
-        doc = _docx.Document(_io.BytesIO(data))
-        return [[[c.text for c in r.cells] for r in t.rows] for t in doc.tables]
-    except Exception:
-        pass
-    # 2) 손상 fallback — document.xml만 직접 파싱 (이미지 등 손상 파트 우회).
-    #    document.xml은 수십 MB일 수 있어 iterparse + elem.clear()로 메모리 방어.
-    try:
-        import xml.etree.ElementTree as _ET
-        import zipfile as _zip
-        W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-        tables: List[List[List[str]]] = []
-        with _zip.ZipFile(_io.BytesIO(data)) as zf:
-            with zf.open("word/document.xml") as f:
-                for _event, elem in _ET.iterparse(f, events=("end",)):
-                    if elem.tag != W + "tbl":
-                        continue
-                    rows: List[List[str]] = []
-                    for tr in elem.findall(W + "tr"):
-                        rows.append([
-                            "".join(t.text or "" for t in tc.iter(W + "t"))
-                            for tc in tr.findall(W + "tc")
-                        ])
-                    tables.append(rows)
-                    elem.clear()
-        return tables
-    except Exception:
-        return None
+# ⚠ 파싱 규약은 `report_gen/uds_related.py` **단일 출처**다. 예전엔 이 함수와 아래
+#   Function Information 순회가 여기에만 있었는데, STS 요구-함수 매핑도 같은 표를
+#   읽어야 해서 복제 위험이 생겼다 — 복제하면 한쪽만 고쳐진다(이 저장소의 반복 결함).
+#   이름은 유지한다(테스트·호출부가 `J._docx_tables_text` 로 참조).
+_docx_tables_text = _uds_related.docx_tables_text
 
 
 def _uds_mapping_cache_get(ck: str) -> Optional[Dict[str, Any]]:
@@ -4202,8 +4169,6 @@ def _jenkins_uds_extract_mapping_impl(uds_path: str, _ck: str) -> Dict[str, Any]
     `_ck` 는 라우트가 만든 캐시 키를 그대로 받는다(양쪽이 키를 따로 만들면 조회는 miss,
     쓰기는 다른 칸에 들어가 캐시가 영원히 안 맞는다).
     """
-    import re as _re
-
     from backend.services.file_resolver import get_resolver
     _now = time.time()
     resolver = get_resolver()
@@ -4235,62 +4200,26 @@ def _jenkins_uds_extract_mapping_impl(uds_path: str, _ck: str) -> Dict[str, Any]
     # 매트릭스는 (1) 함수명 bridge + (2) 설계ID→SDS→SRS bridge로 연결하되, 둘 다 못 잡는
     # 함수도 있으므로 전체 목록을 별도 전달해 "UDS 함수" 컬럼이 채워지게 한다.
     all_funcs: set = set()
-    for rows in tables_text:
-        if len(rows) < 4:
-            continue
-        first_cell = (rows[0][0] if rows[0] else "").strip()
-        if "Function Information" not in first_cell:
-            continue
-
-        func_id = ""
-        func_name = ""
-        req_refs = []
-        for cells in rows:
-            cells = [str(c).strip() for c in cells]
-            label = cells[0] if cells else ""
-            # python-docx는 병합셀을 grid로 펼쳐 값이 cells[2]에 오지만, document.xml
-            # 직접 파싱(손상 docx fallback)은 실제 w:tc만 추출해 값이 cells[1]에 온다.
-            # 두 경우 모두 커버: 3+셀이면 [2], 2셀이면 마지막 셀.
-            if len(cells) > 2:
-                value = cells[2]
-            elif len(cells) > 1:
-                value = cells[1]
-            else:
-                value = ""
-            # 값 셀이 라벨을 그대로 echo하는 템플릿/빈 표(cells=['Name','Name',…])는 junk다.
-            # 이 echo가 func_name='Name'·func_id='ID'로 harvest돼 설계-ID bridge를 통해 요구
-            # 추적성에 '함수'로 유입되면 over-trace를 만든다(deep-review C1: HDPDM01 32/56
-            # 요구 오염, SWEI_01은 전량 junk). 정상 표는 value≠label이라 무영향.
-            # case-불문 비교 — 'Name'라벨↔'name'값 같은 변형 echo도 소스에서 제거(I5).
-            if value and value.lower() == label.lower():
-                value = ""
-            if label == "ID":
-                func_id = value
-            elif label == "Name":
-                func_name = value
-            elif label.lower().replace("_", " ").startswith("related id"):
-                # 설계 요구 참조는 "Related ID" 행에만 있다. 과거엔 모든 행의 모든
-                # 셀을 훑어 "Called/Calling Function" 행의 SwUFn 함수 ID까지 요구참조로
-                # 오수집했다. 행 한정 + [A-Za-z](SwFn 등 CamelCase 설계ID 포착 — 구
-                # [A-Z]{2,}는 소문자 섞인 SwFn·SwCom을 통째로 놓쳤다).
-                for c in cells:
-                    req_refs.extend(_re.findall(r"Sw[A-Za-z]{2,}_\d+", c))
-
-        if func_name:
-            all_funcs.add(func_name)
+    # 표 순회·echo 가드·Related ID 행 한정은 `report_gen/uds_related.py` 단일 출처.
+    for _row in _uds_related.extract_function_related_rows(tables_text):
+        func_name = _row["name"]
+        func_id = _row["id"]
+        all_funcs.add(func_name)
+        if func_id:
+            all_funcs.add(func_id)
+        for rid in _row["design_ids"]:
+            if rid not in req_to_sources:
+                req_to_sources[rid] = set()
+            req_to_sources[rid].add(func_name)
+            # rank1 fix: func_id(SwUFn_NNNN)도 source로 등록한다. VectorCAST 원본
+            # 리포트는 testcase를 SwUFn ID로 식별하므로(예 SwUFn_0133.001),
+            # func_name(예 'main')만으로는 join이 0건이 된다. SwUFn ID를 함께
+            # 노출해 vcast subprogram(SwUFn_NNNN 정규화)과 매칭되게 한다.
+            # ⚠ 이것은 **vcast 조인용 표시**다. 소스 파서의 SwUFn 번호와는 체계가
+            #   달라(실측 43쌍 중 35쌍 불일치) 소스 함수 조인에 쓰면 안 된다
+            #   — `report_gen/uds_related.py` 모듈 docstring 참조.
             if func_id:
-                all_funcs.add(func_id)
-            req_refs = sorted(set(req_refs) - {func_id})
-            for rid in req_refs:
-                if rid not in req_to_sources:
-                    req_to_sources[rid] = set()
-                req_to_sources[rid].add(func_name)
-                # rank1 fix: func_id(SwUFn_NNNN)도 source로 등록한다. VectorCAST 원본
-                # 리포트는 testcase를 SwUFn ID로 식별하므로(예 SwUFn_0133.001),
-                # func_name(예 'main')만으로는 join이 0건이 된다. SwUFn ID를 함께
-                # 노출해 vcast subprogram(SwUFn_NNNN 정규화)과 매칭되게 한다.
-                if func_id:
-                    req_to_sources[rid].add(func_id)
+                req_to_sources[rid].add(func_id)
 
     # Convert to mapping_pairs format expected by traceability-matrix API
     mapping_pairs = []

@@ -895,10 +895,80 @@ def _classify_req_type(req_id: str) -> str:
 # Phase 1: Requirement -> Function mapping
 # ---------------------------------------------------------------------------
 
+def load_uds_design_ids(uds_path: str) -> Dict[str, List[str]]:
+    """SwUDS 함수표 → ``함수 이름(lower) → [설계 ID]``. 설계-ID 브리지의 좌측 끝.
+
+    ## 왜 필요한가 (실측 2026-08-18, KJPDS02_PV)
+
+    함수 이름·모듈 이름으로 SwDS 파티션을 찾는 기존 사슬은 `kind='function'` 파티션
+    588개만 닿는다. 그런데 **어떤 요구는 그 kind 에 아예 없다** — 68 요구 중 20 이
+    미매핑이었고, 그중 16 이 걸린 SwDS 파티션의 kind 는::
+
+        design_id 19 · table_row 12 · design_element 4   ← `function` 0
+
+    즉 `swfn_35`(설계 ID) 나 `차속에 따른 도어 open 방지`(한글 기능명)가 키다.
+    함수 이름이 그런 키를 닮을 리 없으므로 **구조적으로 못 닿는다**. 이름을 더 세게
+    비벼도 안 되고, 비비면 오히려 유령 매칭이 는다.
+
+    SwUDS 문서는 함수마다 "이 함수가 구현하는 설계 요소"를 `Related ID` 로 적어 둔다.
+    그 설계 ID 로 SwDS 설계 파티션을 찾으면 요구에 닿는다 — 추적성 매트릭스가 이미
+    쓰는 브리지와 **같은 구조**다(`report_gen/requirements.py::design_to_reqs`).
+
+    ## ⚠ SwCom 을 뺀다
+
+    `_DESIGN_ID_BRIDGE_RE`(SwFn/SwSTR/SwST/SwTK)만 통과시킨다. SwCom 은 컴포넌트
+    레벨이라 fan-out 만 폭증시킨다 — 실측: 요구당 링크 중앙 138 → **4**, 최대
+    1068 → 110, 합 16,461 → 766. 그러면서 위 16 건은 **16/16 그대로** 닿는다.
+
+    ## ⚠ 이름으로만 잇는다
+
+    반환 키가 `SwUFn` ID 가 아니라 **함수 이름**인 이유는 `report_gen/uds_related.py`
+    모듈 docstring 에 있다(문서와 소스의 SwUFn 번호 체계가 다르다 — 43쌍 중 35쌍 불일치).
+    """
+    raw = str(uds_path or "").strip()
+    if not raw:
+        return {}
+    p = Path(raw)
+    try:
+        data = p.read_bytes()
+    except OSError as exc:
+        _logger.warning("SwUDS 를 읽지 못해 설계-ID 브리지가 꺼진다 — %s (%s)", raw, exc)
+        return {}
+    from report_gen.requirements import _DESIGN_ID_BRIDGE_RE
+    from report_gen.uds_related import docx_tables_text, extract_function_related_rows
+
+    tables = docx_tables_text(data)
+    if tables is None:
+        # ⚠ 못 읽은 것을 "설계 ID 가 없다" 로 접지 않는다.
+        _logger.warning("SwUDS 표를 파싱하지 못해 설계-ID 브리지가 꺼진다(문서 손상 가능): %s", raw)
+        return {}
+    out: Dict[str, List[str]] = {}
+    total = kept = 0
+    for row in extract_function_related_rows(tables):
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        ids = [d for d in (row.get("design_ids") or [])]
+        total += len(ids)
+        tight = [d for d in ids if _DESIGN_ID_BRIDGE_RE.match(str(d).upper())]
+        kept += len(tight)
+        if tight:
+            bucket = out.setdefault(name.lower(), [])
+            for d in tight:
+                if d not in bucket:
+                    bucket.append(d)
+    _logger.info(
+        "SwUDS 설계-ID 브리지: 함수 %d개 · 설계 ID %d개 채택(SwCom 등 %d개 제외) — 출처=%s",
+        len(out), kept, total - kept, raw,
+    )
+    return out
+
+
 def map_requirements_to_functions(
     requirements: List[Dict[str, Any]],
     function_details: Dict[str, Dict[str, Any]],
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
+    uds_design_ids: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, List[str]]:
     """Map requirement IDs to lists of function IDs (fid).
 
@@ -911,6 +981,9 @@ def map_requirements_to_functions(
             이 폴백에서 나왔다(폴백을 끄면 0/63). 요구 ID(`SwTR_0101` 등)는
             프로젝트 간 네임스페이스가 겹쳐 오매핑이 걸러지지도 않으므로,
             호출자가 대상 프로젝트의 SDS를 알고 있으면 반드시 넘길 것.
+        uds_design_ids: `함수 이름(lower) → [설계 ID]` (`load_uds_design_ids`).
+            이름으로 SwDS 를 못 찾는 요구를 **설계 ID 경유**로 잇는 3티어.
+            None/빈 dict 면 그 티어는 **꺼진다** — 없는 것을 있는 척하지 않는다.
     """
     req_to_fids: Dict[str, List[str]] = {r["id"]: [] for r in requirements}
     if sds_map is None:
@@ -939,11 +1012,43 @@ def map_requirements_to_functions(
         by_sds += 1 if hit else 0
         linkless += 0 if hit else 1
 
+    # ── 3티어: 설계-ID 브리지 (SwUDS Related ID → 설계 ID → SwDS → 요구) ──────
+    # ⚠ 위 두 티어를 **건드리지 않고 별도 패스**로 돈다. 위 루프는 주석 매칭 시
+    #   `continue` 로 SDS 티어를 건너뛰므로, 그 안에 끼워 넣으면 기존 링크 구성이
+    #   조용히 달라진다. 여기서는 기존 결과에 **더하기만** 한다.
+    #   실측(KJPDS02_PV): 요구 48/68 → **64/68** · 링크 8,397 → 8,667(+3.2%) ·
+    #   요구당 링크 중앙 76 → 58(내려간다 — 작은 링크 집합을 가진 요구가 늘어서).
+    by_design = 0
+    if uds_design_ids:
+        for fid, info in function_details.items():
+            if not isinstance(info, dict):
+                continue
+            # ⚠ **이름**으로만 조인한다. `fid`(SwUFn 번호)로 조인하면 문서와 소스의
+            #   번호 체계가 달라 오귀속이 된다(실측 43쌍 중 35쌍 불일치, 오귀속 링크
+            #   276건) — `report_gen/uds_related.py` 모듈 docstring 참조.
+            name = str(info.get("name") or "").strip().lower()
+            if not name:
+                continue
+            gained = False
+            for did in uds_design_ids.get(name) or ():
+                entry = sds_map.get(str(did).lower())
+                if not entry:
+                    continue
+                for m in _REQ_ID_PAT.finditer(str(entry.get("related") or "")):
+                    rid = m.group(1)
+                    if rid in req_to_fids and fid not in req_to_fids[rid]:
+                        req_to_fids[rid].append(fid)
+                        gained = True
+            if gained:
+                by_design += 1
+
     # ⚠ 침묵 금지 — 어느 요구가 **함수 근거 없이** TC 를 받는지 남긴다.
     #   `generate_test_cases` 는 매핑이 빈 요구에도 TC 를 낸다(`_generate_review_steps`).
     #   그래서 요구 커버리지는 100% 로 보이는데 그중 일부는 소스 근거가 0 이다.
-    #   실측(KJPDS02_PV): 68 요구 중 20 이 여기 해당하고, 그 20 중 16 은 SDS 의
-    #   `related` **에는 있다** — 우리가 그 파티션에 못 닿은 것이다.
+    #   실측(KJPDS02_PV): 브리지 전엔 68 요구 중 20 이 여기 해당했고, 그 20 중 16 은
+    #   SDS 의 `related` **에는 있었다**(우리가 그 파티션에 못 닿은 것). 설계-ID 브리지
+    #   도입 후 **4** 로 줄었고, 남은 4 는 SwDS 어디에도 없다 = 문서 간 추적 부재라
+    #   코드로 고칠 것이 아니다.
     unmapped = [r["id"] for r in requirements if not req_to_fids.get(r["id"])]
     if unmapped:
         _logger.warning(
@@ -953,8 +1058,10 @@ def map_requirements_to_functions(
             " …" if len(unmapped) > 12 else "",
         )
     _logger.info(
-        "STS 요구-함수 매핑 경로: 주석 related %d · SDS 파티션 %d · 어느 요구에도 "
-        "못 붙은 함수 %d", by_comment, by_sds, linkless,
+        "STS 요구-함수 매핑 경로: 주석 related %d · SDS 파티션 %d · 설계-ID 브리지 %d "
+        "(브리지 %s) · 이름/주석으로는 어느 요구에도 못 붙은 함수 %d",
+        by_comment, by_sds, by_design,
+        "켜짐" if uds_design_ids else "꺼짐(SwUDS 미지정)", linkless,
     )
 
     return req_to_fids
@@ -2626,12 +2733,22 @@ def generate_sts(
             _logger.warning("SDS를 지정했으나 파티션 0건 — 요구-함수 매핑이 저장소 docs/ "
                             "폴백(프로젝트 무관)으로 넘어간다: %s", sds_docx_path)
 
+    # 설계-ID 브리지의 좌측 끝. SwUDS 를 안 주면 **꺼진다** — 실측상 그 상태에서
+    # 요구 매핑은 48/68 이고, 브리지가 켜지면 64/68 이다(`load_uds_design_ids` 참조).
+    uds_design_ids: Dict[str, List[str]] = {}
+
     if uds_path:
         _progress(8, "UDS 함수 설명 로드 중")
         uds_descs = _load_uds_descriptions(uds_path)
         if uds_descs:
             _logger.info("UDS descriptions loaded (%d entries)", len(uds_descs))
             _merge_uds_into_function_details(function_details, uds_descs)
+        uds_design_ids = load_uds_design_ids(uds_path)
+    else:
+        _logger.warning(
+            "SwUDS 미지정 — 설계-ID 브리지가 꺼진다. SwDS 의 설계 파티션"
+            "(`design_id`/`design_element`)에만 걸린 요구는 함수 근거 없이 리뷰 TC 로만 "
+            "만들어진다(실측 KJPDS02_PV: 16 요구)")
 
     if stp_path:
         _progress(9, "STP 시험 전략 로드 중")
@@ -2664,7 +2781,8 @@ def generate_sts(
 
     _progress(30, "요구사항-함수 매핑 중")
     req_to_fids = map_requirements_to_functions(reqs, function_details,
-                                                sds_map=sds_partition_map)
+                                                sds_map=sds_partition_map,
+                                                uds_design_ids=uds_design_ids)
     mapped = sum(1 for v in req_to_fids.values() if v)
     _progress(40, f"{mapped}/{len(reqs)}개 요구사항 매핑 완료")
 

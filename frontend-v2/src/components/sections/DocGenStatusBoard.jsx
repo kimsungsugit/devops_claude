@@ -498,6 +498,9 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           doc_type: prepOpen || '',
           sds_path: paths.sds || analysisResult?.matchedScm?.linked_docs?.sds || '',
           srs_path: paths.srs || analysisResult?.matchedScm?.linked_docs?.srs || '',
+          // SwUDS 는 설계-ID 브리지의 좌측 끝이다. 안 보내면 브리지가 꺼진 채로 재고,
+          // 게이트가 실제 산출물보다 나쁜 숫자를 보고한다(실측 요구 48/68 vs 64/68).
+          uds_path: paths.uds || analysisResult?.matchedScm?.linked_docs?.uds || '',
         });
         if (prepOpen) loadPrep(prepOpen);
       } catch (e) {

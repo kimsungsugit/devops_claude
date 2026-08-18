@@ -481,4 +481,13 @@ describe('measure-source 요청 본문 (구조)', () => {
     expect(body).toMatch(/paths\.sds/);
     expect(body).toMatch(/paths\.srs/);
   });
+
+  // 설계-ID 브리지의 좌측 끝. 안 보내면 브리지가 꺼진 채로 재고, 게이트가 실제
+  // 산출물보다 나쁜 숫자를 보고한다(실측 KJPDS02_PV: 요구 48/68 vs 64/68).
+  it('SwUDS 도 함께 보낸다 (설계-ID 브리지)', () => {
+    const call = SRC.slice(SRC.indexOf("'/api/docgen/measure-source'"));
+    const body = call.slice(0, call.indexOf('});') + 3);
+    expect(body).toMatch(/uds_path:/);
+    expect(body).toMatch(/paths\.uds/);
+  });
 });

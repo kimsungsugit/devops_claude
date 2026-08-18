@@ -380,7 +380,8 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
 
 
 def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
-                         sds_reason: str, srs_path: str) -> Dict[str, Any]:
+                         sds_reason: str, srs_path: str,
+                         uds_path: str = "") -> Dict[str, Any]:
     """요구가 **함수 근거를 갖고** 시험되는가.
 
     `generate_test_cases` 는 매핑이 빈 요구에도 TC 를 낸다(`_generate_review_steps`).
@@ -391,6 +392,15 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
     그중 **16 은 SwDS 의 `related` 에는 있다**(우리가 그 파티션에 못 닿은 것 = 결함) ·
     **4 는 SwDS 어디에도 없다**(설계가 그 요구를 안 이은 것 = 문서 간 추적 부재).
     ⚠ 이 둘을 한 숫자로 합치면 조치할 수 있는 축이 안 보인다.
+
+    ## 설계-ID 브리지 (2026-08-18)
+
+    그 16 이 걸린 SwDS 파티션의 kind 는 `design_id` 19 · `table_row` 12 ·
+    `design_element` 4 — **`function` 0** 이었다. 함수 이름으로는 구조적으로 못 닿는
+    키(`swfn_35`, `차속에 따른 도어 open 방지`)라, SwUDS 의 `Related ID`(설계 ID)를
+    경유해야 닿는다. 그래서 이 측정도 **SwUDS 를 받는다** — 안 받으면 브리지가 꺼진
+    상태를 재게 되고, 게이트가 산출물보다 나쁜 숫자를 보고한다.
+    ⚠ `uds_path` 가 없으면 그 사실을 `bridge` 로 **명시**한다(빠진 것을 0 으로 접지 않는다).
     """
     if not str(srs_path or "").strip():
         return {"measured": False, "reason": "SwRS 경로가 지정되지 않았습니다"}
@@ -402,6 +412,7 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
         from generators.sts import (
             _MAX_TC_PER_REQ,
             _REQ_ID_PAT,
+            load_uds_design_ids,
             map_requirements_to_functions,
             parse_srs_docx_tables,
         )
@@ -413,9 +424,30 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
     if not reqs:
         return {"measured": False, "reason": "SwRS 에서 요구를 찾지 못했습니다"}
 
+    # ⚠ SwUDS 를 실체화해서(worker 경유) 설계-ID 브리지를 **산출물과 같은 조건**으로 켠다.
+    #   여기서 안 켜면 게이트가 실제 생성물보다 나쁜 숫자를 보고한다(48 vs 64).
+    bridge: Dict[str, Any] = {"on": False, "reason": "SwUDS 경로가 지정되지 않았습니다"}
+    uds_design_ids: Dict[str, Any] = {}
+    if str(uds_path or "").strip():
+        try:
+            from backend.services.resolver_helpers import resolve_builder_input
+            _local_uds = resolve_builder_input(uds_path, label="SwUDS")
+            if not _local_uds:
+                bridge = {"on": False, "reason": "SwUDS 를 읽지 못했습니다"}
+            else:
+                uds_design_ids = load_uds_design_ids(_local_uds) or {}
+                bridge = ({"on": True, "functions": len(uds_design_ids)}
+                          if uds_design_ids else
+                          {"on": False, "reason": "SwUDS 에서 설계 ID 를 찾지 못했습니다"})
+        except Exception as exc:  # noqa: BLE001 — docx/IPC 계열이 광범위
+            _logger.warning("test_materials: SwUDS 설계-ID 브리지 실패 — %s", exc, exc_info=True)
+            bridge = {"on": False,
+                      "reason": f"SwUDS 파싱 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+
     # ⚠ `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)을 쓴다. 게이트가 그걸
     #   쓰면 남의 프로젝트 요구 ID 로 잰 숫자를 보여 준다 — 명시적으로 `{}` 를 준다.
-    req_to_fids = map_requirements_to_functions(reqs, fd, sds_map=sds_map or {})
+    req_to_fids = map_requirements_to_functions(
+        reqs, fd, sds_map=sds_map or {}, uds_design_ids=uds_design_ids or None)
     mentioned = {
         m.group(1)
         for v in (sds_map or {}).values() if isinstance(v, dict)
@@ -445,6 +477,7 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
         "causes": causes,
         "cause_samples": samples,
         "sds_reason": sds_reason,
+        "bridge": bridge,
         "cap": cap,
         "mapped_functions": len(mapped_fids),
         "functions_beyond_cap": len(mapped_fids - kept_fids),
@@ -452,7 +485,8 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
     }
 
 
-def measure(source_root: str, *, sds_path: str = "", srs_path: str = "") -> Dict[str, Any]:
+def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
+            uds_path: str = "") -> Dict[str, Any]:
     """시험 문서 재료를 측정한다. **느리다** — 전용 엔드포인트에서만 부를 것."""
     if not str(source_root or "").strip():
         return {"ok": False, "reason": "소스 루트가 지정되지 않았습니다"}
@@ -486,7 +520,7 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "") -> Dict
         "suts": _measure_suts_types(fd),
         "suts_inputs": _measure_suts_inputs(fd, sds_map, gim, units_out=_units),
         "suts_asil": _measure_suts_asil(_units),
-        "sts_mapping": _measure_sts_mapping(fd, sds_map, sds_reason, srs_path),
+        "sts_mapping": _measure_sts_mapping(fd, sds_map, sds_reason, srs_path, uds_path),
     }
     with _CACHE_LOCK:
         _CACHE[_key(source_root)] = (time.time(), result)

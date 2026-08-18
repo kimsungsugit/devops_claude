@@ -644,3 +644,67 @@ def test_units_are_collected_once_and_shared() -> None:
     res = tm._measure_suts_inputs(fd, {}, units_out=got)
     assert res["measured"] is True
     assert len(got) == res["units"] and got, "units_out 이 안 채워졌다"
+
+
+# ── 설계-ID 브리지 — 게이트가 산출물과 **같은 조건**으로 재는가 ──────────────
+
+def test_sts_mapping_reports_the_bridge_is_off(monkeypatch) -> None:
+    """SwUDS 를 안 주면 브리지가 꺼진다 — 그 사실을 **말해야** 한다.
+
+    안 그러면 `unreached_in_sds` 가 코드 결함처럼 읽히는데, 실제로는 입력을 안 준
+    것일 수 있다(실측 KJPDS02_PV: 요구 48/68 vs 64/68 = 16 요구 차이).
+    """
+    srs = _sts_env(monkeypatch, [{"id": "SwTR_0001"}])
+    res = tm._measure_sts_mapping({}, {}, "", srs)
+    assert res["bridge"]["on"] is False
+    assert "SwUDS" in res["bridge"]["reason"]
+
+
+def test_sts_mapping_turns_the_bridge_on_with_uds(monkeypatch, tmp_path) -> None:
+    """SwUDS 를 주면 설계 파티션에만 걸린 요구가 매핑된다."""
+    docx = pytest.importorskip("docx")
+    d = docx.Document()
+    tb = d.add_table(rows=4, cols=3)
+    for i, (label, value) in enumerate([("[ Function Information ]", ""), ("ID", "SwUFn_0101"),
+                                        ("Name", "S_Motor_Init"), ("Related ID", "SwFn_30")]):
+        tb.rows[i].cells[0].text = label
+        tb.rows[i].cells[2].text = value
+    uds = tmp_path / "uds.docx"
+    d.save(str(uds))
+
+    srs = _sts_env(monkeypatch, [{"id": "SwTR_0606"}])
+    fd = {"f1": {"id": "f1", "name": "S_Motor_Init", "module_name": "MotorCtrl", "related": ""}}
+    # 설계 ID 키 — 함수 이름 사슬로는 구조적으로 못 닿는다
+    sds = {"swfn_30": {"kind": "design_id", "related": "SwTR_0606"}}
+
+    off = tm._measure_sts_mapping(fd, sds, "", srs)
+    assert off["mapped"] == 0 and off["causes"] == {"unreached_in_sds": 1}
+
+    on = tm._measure_sts_mapping(fd, sds, "", srs, str(uds))
+    assert on["bridge"] == {"on": True, "functions": 1}
+    assert on["mapped"] == 1 and on["causes"] == {}
+
+
+def test_measure_passes_uds_path_through(monkeypatch) -> None:
+    """`measure()` 가 uds_path 를 흘리지 않으면 게이트만 브리지가 꺼진다.
+
+    ⚠ 헬퍼 단독 테스트는 호출부가 값을 버리는 것을 못 본다 — 여기서 배선을 본다.
+    """
+    seen = {}
+
+    def _fake(fd, sds_map, sds_reason, srs_path, uds_path=""):
+        seen["uds"] = uds_path
+        return {"measured": False, "reason": "stub"}
+
+    monkeypatch.setattr(tm, "_measure_sts_mapping", _fake)
+    monkeypatch.setattr(tm, "_load_sds_map", lambda p: ({}, ""))
+    monkeypatch.setattr(tm, "_measure_sits", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_measure_suts_types", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_measure_suts_inputs", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_measure_suts_asil", lambda *a, **k: {})
+    import report_generator as _rg
+    monkeypatch.setattr(_rg, "generate_uds_source_sections",
+                        lambda root: {"function_details": {"f": {"name": "f"}}})
+    tm.clear_cache()
+    tm.measure("C:/src", sds_path="s.docx", srs_path="r.docx", uds_path="u.docx")
+    assert seen["uds"] == "u.docx"

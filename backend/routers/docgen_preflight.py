@@ -579,15 +579,25 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     _tot = max(int(m.get("requirements") or 0), 1)
                     _mapped = int(m.get("mapped") or 0)
                     _unmapped = _tot - _mapped
+                    # 설계-ID 브리지가 꺼져 있으면 **그것부터** 말한다. 안 그러면
+                    # "SwDS 엔 있는데 못 닿음" 이 코드 결함처럼 읽히는데, 실제로는
+                    # SwUDS 를 안 줘서 브리지가 안 돈 것일 수 있다(실측 16 요구 차이).
+                    _br = m.get("bridge") or {}
+                    _br_off = "" if _br.get("on") else (
+                        f" · 설계-ID 브리지 꺼짐({_br.get('reason') or '사유 미상'}) — "
+                        "SwUDS 를 주면 설계 파티션에만 걸린 요구까지 닿습니다"
+                    )
                     steps.append(_step(
                         "sts_req_mapping", "material",
                         S_OK if not _unmapped else S_DEGRADED, "요구-함수 매핑",
                         measured={"value": _mapped, "of": m.get("requirements"),
-                                  "causes": m.get("causes") or {}},
+                                  "causes": m.get("causes") or {},
+                                  "bridge": _br},
                         reason=(
                             f"{_unmapped}개 요구가 함수에 안 붙었습니다 — 그 요구의 TC 는 "
                             "소스 근거 없이 리뷰 절차로만 만들어집니다"
                             + (f" ({m['sds_reason']})" if m.get("sds_reason") else "")
+                            + _br_off
                             if _unmapped else ""
                         ),
                         samples=[
@@ -974,6 +984,9 @@ class MeasureSourceRequest(BaseModel):
     # STS 축(요구-함수 매핑)에만 쓴다. 없으면 그 축은 **미측정**으로 남는다 —
     # 요구 목록이 없으면 "몇 개가 근거 없이 시험되는가" 를 셀 수가 없다.
     srs_path: str = ""
+    # 설계-ID 브리지(SwUDS Related ID → 설계 ID → SwDS → 요구)의 좌측 끝.
+    # 없으면 브리지가 **꺼진 채로** 재고, 그 사실을 `sts_mapping.bridge` 로 낸다.
+    uds_path: str = ""
 
 
 @router.post("/api/docgen/measure-source")
@@ -992,7 +1005,8 @@ def docgen_measure_source(req: MeasureSourceRequest) -> Dict[str, Any]:
     }
     if str(req.doc_type or "").strip().lower() in ("sts", "sits", "suts"):
         out["test_materials"] = _tm.measure(
-            req.source_root, sds_path=req.sds_path, srs_path=req.srs_path)
+            req.source_root, sds_path=req.sds_path, srs_path=req.srs_path,
+            uds_path=req.uds_path)
     return out
 
 

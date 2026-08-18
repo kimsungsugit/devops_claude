@@ -577,3 +577,44 @@ def test_asil_evidence_is_quiet_when_all_exact(tmp_path: Path) -> None:
                          "fuzzy": 0, "fuzzy_conflict": 0, "samples": []}
     step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
     assert step["state"] == "ok" and not step.get("reason")
+
+
+# ── 설계-ID 브리지 상태가 화면에 나오는가 ────────────────────────────────────
+
+def test_bridge_off_is_named_in_the_reason(tmp_path: Path) -> None:
+    """브리지가 꺼진 채로 잰 숫자를 그냥 내면 결함으로 오독된다.
+
+    실측(KJPDS02_PV): SwUDS 없이 48/68 · 주면 64/68. 즉 `unreached_in_sds` 16 은
+    **코드 결함이 아니라 입력 부재**일 수 있다 — 어느 쪽인지 화면이 말해야 한다.
+    """
+    step = _step(
+        _with_materials(tmp_path, _sts_materials(
+            bridge={"on": False, "reason": "SwUDS 경로가 지정되지 않았습니다"})),
+        "sts_req_mapping")
+    assert step["measured"]["bridge"]["on"] is False
+    assert "설계-ID 브리지 꺼짐" in step["reason"]
+    assert "SwUDS" in step["reason"]
+
+
+def test_bridge_on_does_not_add_the_hint(tmp_path: Path) -> None:
+    """대조군 — 브리지가 켜져 있으면 그 문구가 안 붙는다(상시 경고 금지)."""
+    step = _step(
+        _with_materials(tmp_path, _sts_materials(bridge={"on": True, "functions": 1157})),
+        "sts_req_mapping")
+    assert step["measured"]["bridge"]["on"] is True
+    assert "브리지 꺼짐" not in step["reason"]
+    assert "리뷰 절차" in step["reason"], "미매핑 자체는 여전히 보고돼야 한다"
+
+
+def test_measure_source_forwards_uds_path(monkeypatch, tmp_path: Path) -> None:
+    """엔드포인트가 uds_path 를 흘리지 않으면 게이트만 브리지가 꺼진다."""
+    from backend.routers import docgen_preflight as dp
+    seen = {}
+    monkeypatch.setattr(dp._tm, "measure",
+                        lambda root, **kw: seen.update(kw) or {"ok": True})
+    monkeypatch.setattr(dp._cov, "measure", lambda root, **kw: {"ok": True})
+    r = client.post("/api/docgen/measure-source", headers=HEADERS, json={
+        "source_root": str(tmp_path), "doc_type": "sts",
+        "sds_path": "s.docx", "srs_path": "r.docx", "uds_path": "u.docx"})
+    assert r.status_code == 200
+    assert seen.get("uds_path") == "u.docx"
