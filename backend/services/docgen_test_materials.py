@@ -105,13 +105,60 @@ def _load_sds_map(sds_path: str) -> Tuple[Dict[str, Any], str]:
 
 
 def _measure_sits(fd: Dict[str, Any], sds_map: Dict[str, Any],
-                  sds_reason: str) -> Dict[str, Any]:
-    from generators.sits import _DEFAULT_MAX_FLOWS, collect_integration_flows
+                  sds_reason: str, uds_path: str = "") -> Dict[str, Any]:
+    """통합 흐름과 그 **Related/Safety 근거**를 잰다.
+
+    ⚠ 이 칸들을 실제로 채우는 건 SwDS 가 아니라 **SwUDS** 다. SDS 파티션 맵의 값
+    스키마에는 SwCom 축이 아예 없어 `sds_swcom_hits` 는 **구조적으로 0** 이고
+    (`test_sits_sds_related_source.py:33-36` 이 문서화), Safety 칸의 1순위 근거도
+    SwUDS 함수 ASIL 이다. 그래서 SwUDS 를 안 받으면 게이트는 **보강이 꺼진 상태**를
+    재게 되고, 산출물보다 나쁜 숫자를 보고한다 — 실측으로는 "SwCom 0건, 추적성 열이
+    합성 ID 만 남습니다" 를 보여주는데 라이브 생성기는 같은 프로젝트에서 SwCom
+    **699 토큰**을 채운다(방향이 반대로 읽힌다).
+    같은 이유로 `_measure_sts_mapping` 은 이미 `uds_path` 를 받는다 — 그 수정에서
+    이 함수만 빠져 있었다.
+    ⚠ `uds_path` 가 없으면 그 사실을 `uds` 로 **명시**한다(빠진 것을 0 으로 접지 않는다).
+    """
+    from generators.sits import (
+        _DEFAULT_MAX_FLOWS,
+        collect_integration_flows,
+        load_uds_asil_map,
+        load_uds_related_map,
+        load_uds_swcom_map,
+    )
+
+    # ⚠ 없을 때 `{}` 가 아니라 **None** 을 넘긴다. `collect_integration_flows` 는
+    #   `uds_related_map is None` 일 때만 swcom 맵으로 폴백하므로, 빈 dict 를 주면
+    #   폴백까지 꺼져 현행보다 나쁜 조건이 된다.
+    uds: Dict[str, Any] = {"on": False, "reason": "SwUDS 경로가 지정되지 않았습니다"}
+    _uds_swcom = _uds_asil = _uds_related = None
+    if str(uds_path or "").strip():
+        try:
+            from backend.services.resolver_helpers import resolve_builder_input
+            _local_uds = resolve_builder_input(uds_path, label="SwUDS")
+            if not _local_uds:
+                uds = {"on": False, "reason": "SwUDS 를 읽지 못했습니다"}
+            else:
+                _uds_swcom = load_uds_swcom_map(_local_uds) or {}
+                _uds_asil = load_uds_asil_map(_local_uds) or {}
+                _uds_related = load_uds_related_map(_local_uds) or {}
+                uds = ({"on": True, "functions": len(_uds_related),
+                        "asil_functions": len(_uds_asil)}
+                       if _uds_related else
+                       {"on": False, "reason": "SwUDS 에서 Related ID 를 찾지 못했습니다"})
+        except Exception as exc:  # noqa: BLE001 — docx/IPC 계열이 광범위
+            _logger.warning("test_materials: SwUDS Related/ASIL 맵 실패 — %s", exc,
+                            exc_info=True)
+            uds = {"on": False,
+                   "reason": f"SwUDS 파싱 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
 
     stats: Dict[str, Any] = {}
     # 캡을 **걸지 않고** 후보 총량을 잰다. 결과 길이로 되짚으면 절단을 못 본다
     # (`collect_integration_flows` docstring 이 못박아 둔 계약).
-    flows = collect_integration_flows(fd, max_flows=None, stats_out=stats, sds_map=sds_map)
+    flows = collect_integration_flows(
+        fd, max_flows=None, stats_out=stats, sds_map=sds_map,
+        uds_swcom_map=_uds_swcom, uds_asil_map=_uds_asil,
+        uds_related_map=_uds_related)
     total = int(stats.get("total_flows_found") or len(flows))
     cap = _DEFAULT_MAX_FLOWS
     headroom = cap - total
@@ -139,8 +186,26 @@ def _measure_sits(fd: Dict[str, Any], sds_map: Dict[str, Any],
         "sds_lookups": stats.get("sds_lookups"),
         "sds_key_hits": stats.get("sds_key_hits"),
         # 실측상 실 SwDS 를 줘도 0 이다(맵 필드가 `kind` 뿐이라 코드가 읽는
-        # `swcom`/`component` 가 없다). 그 0 을 **숨기지 않고** 올린다.
+        # `swcom`/`component` 가 없다). 그 0 을 **숨기지 않고** 올린다 —
+        # 다만 **판정 근거는 아니다**(구조적 0 을 결함으로 읽으면 항상 빨간불).
         "sds_swcom_hits": stats.get("sds_swcom_hits"),
+        # ── Related/Safety 를 실제로 채우는 축 ──────────────────────────
+        "uds": uds,
+        "uds_lookups": stats.get("uds_swcom_lookups"),
+        "uds_hits": stats.get("uds_swcom_hits"),
+        "uds_related_ids": stats.get("uds_swcom_ids"),
+        # 진입 함수 자신이 아니라 호출 트리 아래에서 온 근거(거리가 다르다)
+        "related_chain_flows": stats.get("related_chain_flows"),
+        "related_chain_ids": stats.get("related_chain_ids"),
+        # Related 칸에는 안 실리는 SRS 유래 요구 링크(정본 어휘가 설계 ID 뿐).
+        # ⚠ **이 경로의 0 은 "링크가 없다" 가 아니다** — 이 측정은 SRS enrichment
+        #   (`generate_sits` 의 SwRS 설명문 매칭)를 타지 않으므로 항상 0 에 가깝다.
+        #   라이브 산출물은 같은 프로젝트에서 12흐름/13개를 낸다. 화면에 이 값을 그대로
+        #   띄우면 방금 SwDS 축에서 고친 것과 **같은 오독**이 한 층 위에 생기므로,
+        #   패널에는 싣지 않고 여기서 사유와 함께만 남긴다.
+        "req_id_flows": stats.get("req_id_flows"),
+        "req_id_total": stats.get("req_id_total"),
+        "req_id_scope": "source_only",   # SRS enrichment 미포함
         "sample_flow": sample,
     }
 
@@ -516,7 +581,7 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         "ok": True,
         "functions": len(fd),
         "elapsed_s": round(time.time() - t0, 1),
-        "sits": _measure_sits(fd, sds_map, sds_reason),
+        "sits": _measure_sits(fd, sds_map, sds_reason, uds_path),
         "suts": _measure_suts_types(fd),
         "suts_inputs": _measure_suts_inputs(fd, sds_map, gim, units_out=_units),
         "suts_asil": _measure_suts_asil(_units),

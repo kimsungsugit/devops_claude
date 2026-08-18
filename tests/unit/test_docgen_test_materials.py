@@ -92,6 +92,80 @@ def test_sds_swcom_zero_is_surfaced_not_hidden() -> None:
     assert res["sds_reason"]
 
 
+def _swuds_docx(pairs: dict[str, str]) -> bytes:
+    """`{함수명: Related ID 문자열}` → SwUDS v3.02 세로 kv 표 docx."""
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    for name, related in pairs.items():
+        t = doc.add_table(rows=0, cols=2)
+        for label, value in (("Name", name), ("Related ID", related)):
+            cells = t.add_row().cells
+            cells[0].text = label
+            cells[1].text = value
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_uds_axis_is_dark_without_a_path() -> None:
+    """SwUDS 를 안 주면 그 사실을 **명시**한다 — 빠진 것을 0 으로 접지 않는다."""
+    res = tm._measure_sits(_cross_module_details(2), {}, "")
+    assert res["uds"]["on"] is False
+    assert res["uds"]["reason"], "SwUDS 부재 사유가 비어 있다"
+    assert not res["uds_hits"]
+
+
+def test_uds_related_map_is_actually_wired_through(tmp_path) -> None:
+    """게이트가 **산출물과 같은 조건**으로 재는가.
+
+    ⚠ 이 배선이 없으면 게이트는 SwDS 축(구조적으로 0)만 보고 "SwCom 0건 —
+    추적성 열이 합성 ID 만 남습니다" 를 띄우는데, 라이브 생성기는 같은 프로젝트에서
+    SwCom 699 토큰을 채운다. 값이 틀린 게 아니라 **반대로 읽힌다**.
+    """
+    fd = _cross_module_details(2)
+    entry_names = [v["name"] for v in fd.values() if v["name"].endswith("_Entry")]
+    uds = tmp_path / "swuds.docx"
+    uds.write_bytes(_swuds_docx({n: "SwCom_01, SwFn_09" for n in entry_names}))
+
+    res = tm._measure_sits(fd, {}, "", str(uds))
+    assert res["uds"]["on"] is True, res["uds"]
+    assert res["uds_hits"] == len(entry_names), res
+    assert res["uds_related_ids"] >= 2 * len(entry_names), res
+    # SwDS 축은 여전히 보인다 — 판정에서 뺐다고 숨기지는 않는다.
+    assert "sds_swcom_hits" in res
+
+
+def test_measure_passes_uds_path_to_the_sits_axis(monkeypatch, tmp_path) -> None:
+    """`measure()` 가 uds_path 를 SITS 측정까지 내려보내는가(STS 만 받던 결함)."""
+    seen: dict = {}
+
+    def _fake(fd, sds_map, sds_reason, uds_path=""):
+        seen["uds_path"] = uds_path
+        return {"flows_total": 0, "cap": 1, "headroom": 1, "at_cap_boundary": False}
+
+    monkeypatch.setattr(tm, "_measure_sits", _fake)
+    monkeypatch.setattr(tm, "_measure_suts_types", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_measure_suts_inputs", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_measure_suts_asil", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_measure_sts_mapping", lambda *a, **k: {})
+    monkeypatch.setattr(tm, "_load_sds_map", lambda p: ({}, ""))
+    import report_generator as _rg
+
+    monkeypatch.setattr(
+        _rg, "generate_uds_source_sections",
+        lambda root: {"function_details": {"F": _fn("f", "a.c", [])},
+                      "globals_info_map": {}})
+    tm.clear_cache()
+    try:
+        tm.measure(str(tmp_path), uds_path="X:/swuds.docx")
+    finally:
+        tm.clear_cache()
+    assert seen["uds_path"] == "X:/swuds.docx", seen
+
+
 def test_sample_flow_carries_call_chain() -> None:
     """콜체인이 문서 D열에 그대로 박히므로 화면도 그걸 보여야 한다."""
     fd = _cross_module_details(2)

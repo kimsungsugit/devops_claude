@@ -237,6 +237,57 @@ def test_flow_loss_is_present_tense_when_already_cut(
     assert expect in str(step.get("reason") or "")
 
 
+def _sits_materials(**over) -> dict:
+    base = {
+        "ok": True, "functions": 10, "elapsed_s": 0.1,
+        "sits": {"flows_total": 10, "cap": 120, "headroom": 110,
+                 "at_cap_boundary": False,
+                 "sds_map_entries": 763, "sds_reason": "", "sds_lookups": 10,
+                 "sds_key_hits": 38, "sds_swcom_hits": 0,   # ← 구조적으로 0
+                 "uds": {"on": True, "functions": 1026, "asil_functions": 1003},
+                 "uds_lookups": 10, "uds_hits": 9, "uds_related_ids": 27,
+                 "related_chain_flows": 5, "related_chain_ids": 12,
+                 "req_id_flows": 0, "req_id_total": 0,
+                 "sample_flow": None},
+        "suts": {"variables": 0, "grounded": 0, "fallback": 0, "fallback_samples": []},
+    }
+    base["sits"].update(over)
+    return base
+
+
+def test_related_step_judges_on_the_axis_that_fills_the_column(tmp_path: Path) -> None:
+    """SwDS 축은 **구조적으로 0** 이라 그걸로 판정하면 영구 빨간불이다.
+
+    실측: 실 SwDS 763항목을 줘도 SwCom 0건인데, 라이브 생성기는 같은 프로젝트에서
+    SwUDS 경유로 SwCom **699 토큰**을 채운다. 판정을 SwDS 에 두면 게이트가
+    "추적성 열이 합성 ID 만 남습니다" 로 산출물과 **정반대**를 말한다.
+    """
+    data = _with_materials(tmp_path, _sits_materials(), doc_type="sits")
+    step = _step(data, "sits_related_source")
+    assert step is not None, "재료 단계에 도달하지 못했다 — 이 테스트가 아무것도 검증 못 한다"
+    assert step["state"] == "ok", step
+    assert not str(step.get("reason") or ""), step
+    # SwDS 0 은 **숨기지 않는다** — 판정에서 뺐을 뿐이다.
+    assert step["measured"]["sds_swcom_hits"] == 0, step
+    assert step["measured"]["value"] == 9, step
+
+
+def test_related_step_degrades_and_names_swuds_when_the_axis_is_dark(
+        tmp_path: Path) -> None:
+    """사유가 **SwUDS** 를 가리켜야 한다 — 예전엔 엉뚱하게 SwDS 를 가리켰다."""
+    data = _with_materials(
+        tmp_path,
+        _sits_materials(uds={"on": False, "reason": "SwUDS 경로가 지정되지 않았습니다"},
+                        uds_hits=0, uds_related_ids=0),
+        doc_type="sits")
+    step = _step(data, "sits_related_source")
+    assert step is not None
+    assert step["state"] == "degraded", step
+    reason = str(step.get("reason") or "")
+    assert "SwUDS" in reason, reason
+    assert "SwDS 를 읽었지만" not in reason, reason
+
+
 def test_chain_checks_inputs_beyond_the_requirement_table(tmp_path: Path) -> None:
     """사슬이 참조하는 입력은 **요구 표보다 넓다** — 그래도 확인은 해야 한다.
 

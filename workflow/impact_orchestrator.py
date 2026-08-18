@@ -1395,6 +1395,11 @@ def _build_doc_proposal(
     sts_tc_cap: int = 6,
     step_cap: int = 6,
     kv_cap: int = 12,
+    # ⚠ 신규 인자는 **맨 끝**에 붙인다(위치 인자 호출부가 조용히 다른 값에 바인딩된다).
+    #   SwDS/SwUDS 경로 — 안 주면 SITS 초안이 저장소 `docs/` 글롭(**프로젝트 무관**)을
+    #   읽고 TC ID 가 순번이 된다. 아래 SITS 블록 주석 참조.
+    sds_path: str = "",
+    uds_path: str = "",
 ) -> Dict[str, Any]:
     """직접 변경 함수(changed_set)에 대해 **문서 생성기(suts/sits/sts)를 그대로 재사용**해
     '문서를 직접 생성하는 것처럼' 구체적인 시험 초안(콜체인·경계값 입력·기대출력)을 결정론으로
@@ -1556,14 +1561,50 @@ def _build_doc_proposal(
     # ── SITS: collect_integration_flows(전체 필요 — cross-module callee 판정) → 대상 entry 필터 → itc ──
     # max_flows는 전체 함수 수 이상으로 — 기본 120 캡에 대상이 정렬순서상 잘려나가는 것을 막는다.
     try:
-        from generators.sits import collect_integration_flows, generate_itc_list
+        from generators.sits import (
+            collect_integration_flows,
+            generate_itc_list,
+            load_uds_asil_map,
+            load_uds_design_ids,
+            load_uds_related_map,
+            load_uds_swcom_map,
+        )
 
-        _flows = collect_integration_flows(fdmap, max_flows=max(120, len(fdmap))) or []
+        # ⚠ 이 카드는 "문서를 직접 생성하는 것처럼" 보여주는 게 목적이다. 그런데
+        #   맵을 안 넘기면 라이브 산출물과 **다른 값**이 나온다:
+        #     · `sds_map=None`  → `_load_default_sds_map()` = 저장소 `docs/` 글롭.
+        #       대상이 KJPDS02 인데 HDPDM01 문서를 읽는다(`sits.py` 가 명시 경고).
+        #     · `design_ids` 없음 → TC ID 가 전부 순번 `SwITC_NN` 이라, 카드에서 본
+        #       TC 를 실제 문서(`SwITC_SwUFn_0101`)에서 **찾을 수 없다**.
+        #     · SwUDS 맵 없음 → Related 는 합성 SwCom 만, Safety 는 소스 주석만.
+        #   전부 best-effort 라 실패해도 카드가 없어지지 않는다(아래 except).
+        _sds_map = None
+        if str(sds_path or "").strip():
+            try:
+                from generators.suts import _resolve_sds_map
+                _sds_map = _resolve_sds_map(sds_path)
+            except Exception as _e:  # noqa: BLE001 — 없으면 폴백하되 사유는 남긴다
+                logger.debug("doc_proposal SITS sds_map 해석 실패: %s", _e)
+        _u = str(uds_path or "").strip()
+        _uds_swcom = load_uds_swcom_map(_u) if _u else None
+        _uds_asil = load_uds_asil_map(_u) if _u else None
+        _uds_related = load_uds_related_map(_u) if _u else None
+        _design_ids = load_uds_design_ids(_u) if _u else None
+        if _sds_map is None and not _u and warn_sink is not None:
+            warn_sink.append(
+                "문서 생성 초안: SITS 가 SwDS/SwUDS 없이 합성됐습니다 — TC ID 가 순번이라 "
+                "실제 문서에서 같은 ID 를 찾을 수 없습니다")
+
+        _flows = collect_integration_flows(
+            fdmap, max_flows=max(120, len(fdmap)), sds_map=_sds_map,
+            uds_swcom_map=_uds_swcom, uds_asil_map=_uds_asil,
+            uds_related_map=_uds_related) or []
         _tgt_flows = [
             f for f in _flows
             if str(f.get("entry_fn") or "").strip().lower() in changed_set
         ]
-        for _itc in (generate_itc_list(_tgt_flows) if _tgt_flows else []):
+        for _itc in (generate_itc_list(_tgt_flows, design_ids=_design_ids)
+                     if _tgt_flows else []):
             _nm = str(_itc.get("entry_fn") or "").strip().lower()
             if _nm not in changed_set or _nm in out["sits"]:
                 continue
@@ -3148,7 +3189,10 @@ def run_impact_update(
         # (소스가 안 잡히는 환경이 곧 문서는 읽히는 환경이라, 없으면 화면에 골격만 남는다).
         doc_proposal = _build_doc_proposal(
             sections, _changed_set, warn_sink=warnings,
-            doc_content=doc_content, change_details=change_details)
+            doc_content=doc_content, change_details=change_details,
+            # 등록 SCM 의 실제 문서 — 없으면 SITS 초안이 저장소 `docs/` 글롭을 읽는다.
+            sds_path=str(_resolve_existing(getattr(_lk, "sds", "") or "") or ""),
+            uds_path=str(_resolve_existing(getattr(_lk, "uds", "") or "") or ""))
         # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap
         # + 직전 스냅샷 대비 delta(회귀). vectorcast 미연결/RAG metrics 없음 → available=False(분석 계속).
         coverage_gap: Dict[str, Any] = {"available": False}

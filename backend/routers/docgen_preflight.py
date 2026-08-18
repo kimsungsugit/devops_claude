@@ -490,17 +490,30 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     ),
                     sample=s.get("sample_flow"),
                 ))
-                # SwCom 보강 0 건은 **숨기지 않는다** — 실측상 실 SwDS 를 줘도 0 이다.
-                swcom_hits = s.get("sds_swcom_hits")
+                # ⚠ Related 칸을 실제로 채우는 건 SwDS 가 아니라 **SwUDS** 다. SDS 파티션
+                #   맵에는 SwCom 축이 아예 없어 `sds_swcom_hits` 는 **구조적으로 0** 이고
+                #   (`_measure_sits` docstring), 그걸 판정에 쓰면 이 스텝은 **영구 빨간불**
+                #   이면서 문구는 "추적성 열이 합성 ID 만 남습니다" 라 산출물과 정반대를
+                #   말한다 — 라이브 실측으로 같은 프로젝트에서 SwCom **699 토큰**이 실린다.
+                #   판정은 SwUDS 축으로 옮기고, SwDS 0 은 참고값으로 계속 노출한다
+                #   (0 을 숨기는 것과 0 으로 판정하는 것은 다른 문제다).
+                uds_hits = s.get("uds_hits")
+                uds_info = s.get("uds") or {}
                 steps.append(_step(
-                    "sits_sds_related", "material",
-                    S_OK if swcom_hits else S_DEGRADED, "SwDS 기반 Related 보강",
-                    measured={"value": swcom_hits, "lookups": s.get("sds_lookups"),
-                              "key_hits": s.get("sds_key_hits"),
-                              "map_entries": s.get("sds_map_entries")},
-                    reason=(s.get("sds_reason") or
-                            ("SwDS 를 읽었지만 SwCom 을 하나도 얻지 못했습니다 — "
-                             "추적성 열이 합성 ID 만 남습니다" if not swcom_hits else "")),
+                    "sits_related_source", "material",
+                    S_OK if uds_hits else S_DEGRADED, "Related ID 보강 (SwUDS)",
+                    measured={"value": uds_hits, "lookups": s.get("uds_lookups"),
+                              "related_ids": s.get("uds_related_ids"),
+                              # 진입 함수 자신 vs 호출 트리 아래 — 근거의 거리가 다르다
+                              "chain_flows": s.get("related_chain_flows"),
+                              "chain_ids": s.get("related_chain_ids"),
+                              # SwDS 축은 구조적으로 0 — 숨기지 않되 판정엔 안 쓴다
+                              "sds_swcom_hits": s.get("sds_swcom_hits"),
+                              "sds_map_entries": s.get("sds_map_entries")},
+                    reason=("" if uds_hits else
+                            (str(uds_info.get("reason") or "")
+                             or "SwUDS 를 읽었지만 Related ID 를 하나도 얻지 못했습니다 — "
+                                "추적성 열이 합성 ID 만 남습니다")),
                 ))
             if req.doc_type in ("suts", "sits"):
                 t = tm["suts"]

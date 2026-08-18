@@ -581,10 +581,15 @@ def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=N
         lambda unit, max_seq=6, type_cache=None: (suts_seq if suts_seq is not None
                                                   else [{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}]),
     )
+    # ⚠ `**k` 를 받는다 — 안 받으면 호출부가 인자를 늘렸을 때 TypeError 가 나고,
+    #   그 예외는 `_build_doc_proposal` 의 best-effort except 에 먹혀 **카드가 조용히
+    #   사라진다**(초록으로 보이는 게 아니라 엉뚱한 KeyError 로 나타난다). 실제 배선이
+    #   맞는지는 아래 `test_doc_proposal_sits_uses_the_registered_project_documents` 가 본다.
     monkeypatch.setattr(
         gsits, "collect_integration_flows",
-        lambda fdmap, max_flows=120: (sits_flows if sits_flows is not None
-                                      else [{"entry_fn": "s_foo", "call_chain": "s_foo -> s_dep"}]),
+        lambda fdmap, max_flows=120, **k: (sits_flows if sits_flows is not None
+                                           else [{"entry_fn": "s_foo",
+                                                  "call_chain": "s_foo -> s_dep"}]),
     )
     monkeypatch.setattr(
         gsits, "generate_itc_list",
@@ -619,6 +624,59 @@ def test_build_doc_proposal_reuses_generators_scoped_to_changed(monkeypatch):
     assert out["sits"]["s_foo"]["call_chain"] == "s_foo -> s_dep"      # 실 통합 콜체인
     assert out["sits"]["s_foo"]["sub_cases"][0]["expected"] == {"ret": "0"}
     assert out["sts"]["s_foo"][0][0]["action"] == "call s_foo"          # 시험 절차 스텝
+
+
+def test_doc_proposal_sits_uses_the_registered_project_documents(monkeypatch, tmp_path):
+    """SITS 초안이 **등록 문서**로 합성되는가.
+
+    안 넘기면 `collect_integration_flows(sds_map=None)` 이 `_load_default_sds_map()`
+    = 저장소 `docs/` 글롭을 탄다 — 대상이 KJPDS02 인데 HDPDM01 문서를 읽는다. 게다가
+    `generate_itc_list(design_ids=None)` 이면 TC ID 가 전부 순번 `SwITC_NN` 이라
+    **카드에서 본 TC 를 실제 문서에서 찾을 수 없다**(문서는 `SwITC_SwUFn_0101`).
+    """
+    import generators.sits as gsits
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    seen: dict = {}
+    _stub_generators(monkeypatch)
+    monkeypatch.setattr(
+        gsits, "collect_integration_flows",
+        lambda fdmap, max_flows=120, **k: (seen.update(k) or
+                                           [{"entry_fn": "s_foo",
+                                             "call_chain": "s_foo -> s_dep"}]))
+    monkeypatch.setattr(
+        gsits, "generate_itc_list",
+        lambda flows, **k: (seen.update({"design_ids": k.get("design_ids")}) or
+                            [{"entry_fn": f["entry_fn"], "call_chain": f["call_chain"],
+                              "tc_id": "SwITC_SwUFn_0101", "sub_cases": []}
+                             for f in flows]))
+    monkeypatch.setattr(gsits, "load_uds_swcom_map", lambda p: {"s_foo": ["SwCom_01"]})
+    monkeypatch.setattr(gsits, "load_uds_asil_map", lambda p: {"s_foo": "B"})
+    monkeypatch.setattr(gsits, "load_uds_related_map", lambda p: {"s_foo": ["SwCom_01"]})
+    monkeypatch.setattr(gsits, "load_uds_design_ids", lambda p: {"by_name": {"s_foo": "SwUFn_0101"}})
+
+    uds = tmp_path / "swuds.docx"
+    uds.write_bytes(b"x")
+    fd = {"f1": {"name": "s_foo", "prototype": "U16 s_foo(U16 x)",
+                 "logic_flow": [], "calls_list": []}}
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"}, uds_path=str(uds))
+
+    assert seen.get("uds_related_map"), "SwUDS Related 맵이 생성기에 안 갔다"
+    assert seen.get("uds_asil_map"), "SwUDS ASIL 맵이 안 갔다 — Safety 칸이 소스 주석만 본다"
+    assert seen.get("design_ids"), "설계 ID 가 안 갔다 — TC ID 가 순번이 된다"
+    assert out["sits"]["s_foo"]["tc_id"] == "SwITC_SwUFn_0101", out["sits"]
+
+
+def test_doc_proposal_warns_when_sits_is_synthesized_without_documents(monkeypatch):
+    """문서 없이 합성했으면 **그 사실을 말한다** — 카드만 보면 진짜 TC ID 처럼 보인다."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    warns: list = []
+    _stub_generators(monkeypatch)
+    fd = {"f1": {"name": "s_foo", "prototype": "U16 s_foo(U16 x)",
+                 "logic_flow": [], "calls_list": []}}
+    _build_doc_proposal(_proposal_sections(fd), {"s_foo"}, warn_sink=warns)
+    assert any("TC ID" in w and "순번" in w for w in warns), warns
 
 
 def test_build_doc_proposal_empty_changed_set_returns_empty(monkeypatch):
