@@ -558,8 +558,13 @@ def collect_unit_functions(
     _decl_types = _declared_type_map(gim)
     # 반환값이 있는 함수 집합. 이것도 unit 마다 안 바뀐다.
     _nonvoid = _nonvoid_function_names(function_details)
+    # 피호출의 `[OUT]` 파라미터 맵. 위와 같은 자리다(unit 마다 안 바뀐다).
+    _out_params = _out_param_names_by_function(function_details)
     # stub return 으로 되살린 칸 수 — 아래 요약 로그가 센다.
     _stub_added = 0
+    # stub 출력 파라미터로 되살린 칸 수. **return 과 따로 센다** — 합치면 어느
+    # 경로가 얼마를 냈는지 못 갈라서 회귀를 눈으로 못 본다.
+    _stub_op_added = 0
     # 예산 절단 — 무경고로 버려지는 칸 수.
     _trunc_in = _trunc_out = _trunc_units = 0
     # 중간 마디 배열을 되살린 이름 수. 이 경로는 **틀린 이름을 고치는** 것이라
@@ -770,6 +775,15 @@ def collect_unit_functions(
             input_vars = list(dict.fromkeys(list(input_vars) + _stubs))
             inp_set = set(input_vars)
             _stub_added += len(input_vars) - _before_stub
+        # ── 그 stub 이 출력 파라미터에 써 넣는 값도 시험 입력이다 ────────
+        # ⚠ 반환값 뒤에 둔다 — 정본은 같은 피호출의 `() return` 을 먼저 적는다.
+        #   앞에 두면 예산이 빠듯한 unit 에서 순서만으로 맞춤이 뒤바뀐다.
+        _stub_ops = _stub_out_param_names(info.get("calls_list"), _nonvoid, _out_params)
+        if _stub_ops:
+            _before_op = len(input_vars)
+            input_vars = list(dict.fromkeys(list(input_vars) + _stub_ops))
+            inp_set = set(input_vars)
+            _stub_op_added += len(input_vars) - _before_op
 
         max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
         max_out = _OUTPUT_COL_END - _OUTPUT_COL_START + 1
@@ -965,6 +979,12 @@ def collect_unit_functions(
     _const_note += (
         f" | stub return {_stub_added}칸(비-void {len(_nonvoid)}개)"
         if _nonvoid else " | ⚠비-void 함수 0개 → stub return 판정 안 함"
+    )
+    # ⚠ return 과 **합쳐 세지 않는다** — 두 경로는 근거가 같지만 정밀도가 다르고
+    #   (42.8% vs 34.3%), 합치면 어느 쪽이 회귀했는지 로그로 못 가른다.
+    _const_note += (
+        f" | stub 출력파라미터 {_stub_op_added}칸(대상 함수 {len(_out_params)}개)"
+        if _out_params else " | ⚠[OUT] 파라미터를 가진 함수 0개 → stub 출력파라미터 판정 안 함"
     )
     if _trunc_units:
         _const_note += (
@@ -1426,6 +1446,90 @@ def _nonvoid_function_names(function_details: Dict[str, Dict[str, Any]]) -> Set[
             if _RETURN_SLOT_RE.match(s):
                 out.add(nm)
                 break
+    return out
+
+
+def _out_param_names_by_function(
+    function_details: Dict[str, Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """함수 이름 → 그 함수의 `[OUT]` **파라미터** 이름들(반환값은 뺀다).
+
+    `_nonvoid_function_names` 와 같은 자리에서 **한 번만** 만든다(unit 마다 안 바뀐다).
+
+    ⚠ **`outputs` 키도 봐야 한다.** R23 측정 첫 판은 `inputs` 만 훑어 표적 22 중 15 를
+      "파서가 태깅을 안 한다" 로 오판했다 — `sf_TryAddU32` 의 `sum` 은 `inputs` 이 아니라
+      `outputs: [OUT] UINT32 * sum` 에 실려 있었다. 한 분류로 몰리면 데이터가 아니라
+      조회 경로부터 의심할 것(이 시리즈에서 네 번째다).
+
+    이름 추출은 `_extract_var_names` 를 그대로 쓴다 — 같은 판정을 두 벌 두면 한쪽만
+    고쳐진다(이 시리즈의 반복 실패다).
+    """
+    out: Dict[str, List[str]] = {}
+    for _d in (function_details or {}).values():
+        if not isinstance(_d, dict):
+            continue
+        nm = str(_d.get("name") or "")
+        if not nm:
+            continue
+        acc: List[str] = []
+        for key in ("inputs", "outputs"):
+            for raw in (_d.get(key) or []):
+                m = _DIR_TAG_PAT.match(str(raw or ""))
+                if not m or m.group(1).upper() != "OUT":
+                    continue
+                for got in _extract_var_names([str(raw)]):
+                    if got != _RETURN_VAR and got not in acc:
+                        acc.append(got)
+        if acc:
+            out[nm] = acc
+    return out
+
+
+def _stub_out_param_names(
+    calls_list: Any,
+    nonvoid: Set[str],
+    out_params: Dict[str, List[str]],
+) -> List[str]:
+    """stub 된 피호출이 **출력 파라미터에 써 넣는 값** — 정본의 시험 **입력**이다.
+
+    `_stub_return_names` 와 같은 계열이다. VectorCAST 가 피호출을 stub 하면 반환값뿐
+    아니라 포인터 출력 파라미터도 주입해야 하므로, 정본 Inpt 열에
+    `EEPROM_GetByte() Data[0]` · `sf_TryAddU32() sum[0]` 이 실린다.
+
+    실측(KJPDS02_PV, 2026-08-19 · R23):
+        정본 표적  입력 22칸 · 기대 10칸
+        후보 규칙                     생산   적중   과다   정밀도
+          조건 없음([OUT] 전부)        154     12    142     7.8%
+          **비-void 피호출만**          35     12     23    34.3%   ← 채택
+          out-param 1개뿐               43      9     34    20.9%
+          비-void ∧ 1개뿐               28      9     19    32.1%
+
+    **비-void 조인이 같은 적중 12 를 과다 142→23 으로 낸다.** 우리가 이미
+    `X() return` 을 내는 대상과 정확히 겹치는 집합이라 근거도 같다 — stub 되는
+    함수만 그 출력 파라미터를 주입받는다.
+
+    ⚠ **접미 `[0]` 은 R22 를 뒤집는 게 아니다.** R22 가 기각한 건 *배열 변수*에
+      `[0]` 을 붙이는 것이고(정본의 지배 표기가 base 라 4,895칸 손실), 여기 피호출
+      출력 파라미터는 정본이 **일관되게 `[0]`** 으로 적는다. 두 표기를 다 재봤다:
+      `[0]` 적중 12 · 접미 없음 적중 **0**. 이름족이 다르면 표기도 다르다.
+
+    ⚠ **입력 열 전용이다.** 기대 열 표적 10칸은 적중 0 이었다 — 8칸이 2단 중첩 표기
+      (`s_sha256_accumulate_state() pt_WorkState[0]() u32t_A`)고 2칸은 피호출이 아니라
+      레지스터 매크로(`_PTT() Byte`)다. 낼 수 없는 걸 내는 척하지 않는다.
+    """
+    seen: Set[str] = set()
+    out: List[str] = []
+    for c in (calls_list or []):
+        nm = str(c or "").strip()
+        # 비-void 판정이 곧 "stub 대상" 판정이다. `nm and` 를 겹쳐 두지 않는다 —
+        # 빈 이름은 `nonvoid` 에 애초에 안 들어간다(`_stub_return_names` 와 같은 이유).
+        if nm not in nonvoid:
+            continue
+        for p in (out_params.get(nm) or ()):
+            cell = f"{nm}() {p}[0]"
+            if cell not in seen:
+                seen.add(cell)
+                out.append(cell)
     return out
 
 
