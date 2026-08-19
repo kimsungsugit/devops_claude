@@ -329,7 +329,12 @@ _TYPE_BOUNDARIES: Dict[str, Dict[str, Any]] = {
     "uint8":    {"min_inv": -1,     "min": 0,      "mid": 127,   "max": 255,     "max_inv": 256},
     "uint16_t": {"min_inv": -1,     "min": 0,      "mid": 32767, "max": 65535,   "max_inv": 65536},
     "uint16":   {"min_inv": -1,     "min": 0,      "mid": 32767, "max": 65535,   "max_inv": 65536},
-    "uint32_t": {"min_inv": -1,     "min": 0,      "mid": 2**15, "max": 2**32-1, "max_inv": 2**32},
+    # ⚠ mid 는 **부호 없는 폭의 중앙**이다: uint8=2**7-1(127) · uint16=2**15-1(32767).
+    #   uint32 만 `2**15`(32768) 로 적혀 있었다 — 2**15-1 도 2**31-1 도 아닌 값이라
+    #   오타로 보이고, 실측이 그걸 뒷받침한다: 정본 SUTS(KJPDS02_PV)에서 **32768 은
+    #   uint32 칸에 0회** 등장하고 정본은 같은 자리에 `0x7FFFFFFF`(2**31-1)를 쓴다.
+    #   그 값을 우리가 못 내던 칸이 52개였다(R25 실측).
+    "uint32_t": {"min_inv": -1,     "min": 0,      "mid": 2**31-1, "max": 2**32-1, "max_inv": 2**32},
     "int8_t":   {"min_inv": -129,   "min": -128,   "mid": 0,     "max": 127,     "max_inv": 128},
     "int16_t":  {"min_inv": -32769, "min": -32768, "mid": 0,     "max": 32767,   "max_inv": 32768},
     "int16":    {"min_inv": -32769, "min": -32768, "mid": 0,     "max": 32767,   "max_inv": 32768},
