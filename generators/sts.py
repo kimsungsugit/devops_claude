@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators.safety_marks import is_safety_asil
+from generators.safety_marks import resolve_safety_related as _safety_mark_impl
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _extract_sds_partition_map,
@@ -1101,18 +1103,10 @@ _GEN_TO_STS_VOCAB = {
 }
 
 
-def _safety_mark(asil: Any) -> str:
-    """`Safety Related` 칸 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
-
-    ⚠ 근거가 없을 때 `X` 로 단정하지 않는다. `X` 는 "확인했고 안전 관련이 아니다"
-    라는 주장이고, 모르는 것을 그렇게 적으면 under-classification 이다.
-    """
-    val = str(asil or "").strip().upper()
-    if val in ("A", "B", "C", "D") or val.startswith("ASIL"):
-        return "O"
-    if val == "QM":
-        return "X"
-    return ""
+# `Safety Related` 칸 — 구현은 `generators/safety_marks.py` 가 단일 출처다.
+# ⚠ 이 파일에 다시 쓰지 말 것. 안전 판정을 고친 커밋 3건(fe9481e·e69b9dd·fb385d8)이
+#   **여기에는 한 번도 안 닿았다** — 복제가 있으면 그 다음 수정도 같은 길을 간다.
+_safety_mark = _safety_mark_impl
 
 
 def _to_sts_vocab(method: str, gen: str) -> Tuple[str, str]:
@@ -1724,9 +1718,7 @@ def generate_test_cases(
     truncated_reqs: List[str] = []
 
     project_asil = str(config.get("asil_level") or config.get("asil") or "").strip()
-    _proj_is_safety = bool(
-        project_asil and "QM" not in project_asil.upper() and project_asil.upper() != "TBD"
-    )
+    _proj_is_safety = is_safety_asil(project_asil)
 
     all_tcs: List[Dict[str, Any]] = []
 
@@ -1739,7 +1731,7 @@ def generate_test_cases(
         if not req_asil and _proj_is_safety:
             req_asil = project_asil
             req["asil"] = project_asil
-        is_safety = bool(req_asil and "QM" not in req_asil.upper() and req_asil.upper() != "TBD")
+        is_safety = is_safety_asil(req_asil)
 
         if not fids:
             method, gen = _determine_test_method(req, hsis_signals=hsis_signals)
@@ -1835,7 +1827,7 @@ def _build_tc_dict(
         precond_parts.append(f"시스템 초기화 완료")
         precond_parts.append(f"{func_name}() 호출 가능 상태")
     asil_val = str(req.get("asil") or "").strip()
-    if asil_val and "QM" not in asil_val.upper() and asil_val.upper() not in ("TBD", ""):
+    if is_safety_asil(asil_val):
         precond_parts.append(f"ASIL {asil_val} 안전 조건 충족")
 
     # Extract variable names from step actions
@@ -1869,7 +1861,7 @@ def _build_tc_dict(
 
     fs_req = ""
     asil = str(req.get("asil") or "").strip()
-    if asil and "QM" not in asil.upper() and asil.upper() != "TBD":
+    if is_safety_asil(asil):
         related_id = req.get("related_id", "")
         sys_ids = re.findall(r"Sy\w+_\d+", related_id)
         if sys_ids:

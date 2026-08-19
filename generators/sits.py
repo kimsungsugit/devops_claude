@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from backend.services.iso26262_doc_asil_extractor import _RELATED_PREFIX_CANON
 from generators._artifact_check import apply_write_back_check
+from generators.safety_marks import resolve_safety_related
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
 from report_gen.doc_kind import is_sds_filename
 
@@ -161,17 +162,10 @@ def _split_method_codes(value: Any) -> List[str]:
     return [p for p in (t.strip() for t in re.split(r"[,/]", str(value or ""))) if p]
 
 
-def _safety_mark(asil: Any) -> str:
-    """`Safety Related` 칸 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
-
-    ⚠ 근거 부재를 `X` 로 단정하지 않는다(under-classification). SUTS·STS 와 같은 규약.
-    """
-    val = str(asil or "").strip().upper()
-    if val in ("A", "B", "C", "D") or val.startswith("ASIL"):
-        return "O"
-    if val == "QM":
-        return "X"
-    return ""
+# `Safety Related` 칸 — 구현은 `generators/safety_marks.py` 가 단일 출처다.
+# ⚠ 여기에 다시 쓰지 말 것. 예전엔 STS·SUTS·SITS 가 각자 한 벌씩 들고 있었고, 안전 판정
+#   수정 커밋 3건이 그중 `sts.py` 에는 한 번도 안 닿았다.
+_safety_mark = resolve_safety_related
 
 
 def _resolve_flow_asil(

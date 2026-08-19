@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.requirements import _load_component_map, component_verify_of
 from report_gen.doc_kind import is_sds_filename
@@ -1484,23 +1485,10 @@ def determine_gen_method(unit: Dict[str, Any]) -> str:
     return "AOR"
 
 
-def resolve_safety_related(asil: Any) -> str:
-    """정본의 `Safety Related` 칸 값 — `O`(안전 관련) / `X`(비안전) / 빈칸(근거 없음).
-
-    ⚠ 이전 판은 `"X" if is_safety else ""` 였다. **의미가 정반대**다 — 정본은
-    `O` 566 · `X` 311 로 두 값을 다 쓰고(실측), `O` 가 안전 관련이다. ASIL 을 가진
-    단위가 문서상 "비안전"으로 읽히고 있었다.
-
-    ⚠ 근거가 없을 때(`""`/`TBD`) **`X` 로 단정하지 않는다.** `X` 는 "확인했고 안전
-    관련이 아니다" 라는 주장이고, 모르는 것을 그렇게 적으면 under-classification 이다.
-    정본에도 빈칸이 137개 있다 — 빈칸이 정직한 표기다.
-    """
-    val = str(asil or "").strip().upper()
-    if val in ("A", "B", "C", "D") or val.startswith("ASIL"):
-        return "O"
-    if val == "QM":
-        return "X"
-    return ""
+# 정본의 `Safety Related` 칸 값 — 구현은 `generators/safety_marks.py` 가 단일 출처다.
+# 이 이름은 **유지한다**(외부 호출부·테스트가 여기서 가져간다). 규약·실측 근거는 그쪽
+# 모듈 docstring 참조.
+resolve_safety_related = _resolve_safety_related
 
 
 def resolve_seq_test_method(strategy: Any) -> str:
