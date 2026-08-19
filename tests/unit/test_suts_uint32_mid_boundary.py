@@ -75,6 +75,32 @@ class TestCrossGeneratorParity:
         )
 
 
+class TestStsAlsoConsumesThisTable:
+    """⚠ 이 표는 **SUTS 전용이 아니다** — STS 도 쓴다. 처음엔 이걸 안 밝히고 고쳤다.
+
+    `generators/sts.py:_generate_simple_steps` 가 `get_boundary_values` 를 lazy import
+    해서 TC1(Normal path) 스텝에 `f"{vname}={bnd['mid']}"` 로 **직접 문자열을 박는다**.
+    즉 uint32 mid 를 바꾸면 **STS 문서 본문도 바뀐다**. 복제본이 아니라 같은 표를
+    공유하므로 값은 자동으로 따라오지만, 소비처가 둘이라는 사실 자체를 고정해 둔다 —
+    다음 사람이 "SUTS 만 바뀐다" 고 읽고 STS 회귀를 안 돌리면 곤란하다.
+    """
+
+    def test_sts_step_text_carries_corrected_mid(self):
+        from generators.sts import _generate_simple_steps
+
+        steps = _generate_simple_steps({
+            "name": "r25_sts_probe",
+            "inputs": ["u32g_Counter"],
+            "calls_list": [],
+            "output": "",
+        })
+        flat = " ".join(
+            str(v) for tc in steps for step in tc for v in step.values()
+        )
+        assert str(U32_MID) in flat, "STS TC1 이 교정된 mid 를 안 쓴다"
+        assert str(OLD_WRONG_MID) not in flat, "STS 에 옛 값이 남았다"
+
+
 class TestObservableInGeneratedSequences:
     """상수가 아니라 **산출물**을 단언한다. 소비처가 mid 를 안 쓰면 상수만 맞고 끝난다."""
 

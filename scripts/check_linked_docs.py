@@ -53,12 +53,16 @@ REGISTRY = REPO / "config" / "scm_registry.json"
 def _bootstrap_resolver():
     """backend lifespan(main.py) 과 동일한 prefix 병합을 재현한다."""
     notes: list[str] = []
-    # ⚠ prefix 병합보다 **먼저** .env 를 읽어야 한다. 워커 포트(CLOUDIUM_WORKER_PORT)
-    # 같은 접속 설정이 여기서 정해지는데, 독립 스크립트는 uvicorn 을 안 거치므로
-    # main.py 의 load_dotenv 가 돌지 않는다. 빠뜨리면 백엔드는 새 포트를 보고
-    # 스크립트만 **기본 포트**를 봐서, 같은 트리에서 한쪽만 "worker 미응답" 이 난다
-    # (2026-08-19 실측: .env 로 8766 으로 옮겼는데 스크립트는 8765 를 계속 봤다).
+    # prefix 병합보다 **먼저** .env 를 읽는다 — 독립 스크립트는 uvicorn 을 안 거치므로
+    # main.py 의 load_dotenv 가 돌지 않고, `DEVOPS_*` 같은 설정이 통째로 비어 버린다.
     # override=False → 이미 설정된 환경 변수가 우선. main.py:37 과 동일한 계약.
+    #
+    # ⚠ **워커 접속 설정(CLOUDIUM_*)은 이제 여기 의존하지 않는다.** 그건
+    # `backend/services/file_resolver._cloudium_setting()` 이 `.env` 를 폴백으로 직접
+    # 읽어 해결한다 — 진입점마다 load_dotenv 를 복제하면 **복제한 곳만** 고쳐지기
+    # 때문이다(2026-08-19 실사고: 포트를 8766 으로 옮겼더니 이 부트스트랩을 안 거치는
+    # 스크립트가 전부 8765 를 봐서 "worker 미응답"). 새 진입점을 만들 때
+    # **CLOUDIUM 포트 때문에** 여기를 복사할 필요는 없다.
     try:
         from dotenv import load_dotenv as _load_dotenv
 

@@ -125,11 +125,66 @@ def _gate_process_name() -> str:
     return os.getenv("CLOUDIUM_GATE_PROCESS", DEFAULT_GATE_PROCESS).strip() or DEFAULT_GATE_PROCESS
 
 
-def _worker_endpoint() -> "tuple[str, int]":
-    host = os.getenv("CLOUDIUM_WORKER_HOST", DEFAULT_WORKER_HOST).strip() or DEFAULT_WORKER_HOST
+# `.env` 폴백 캐시 — (해석했나, {키: 값}). 파일을 매 호출마다 읽지 않기 위함이며
+# 백엔드의 load_dotenv 와 같은 수명 계약이다(기동 시 1회 읽고 재기동까지 유지).
+# 동시성: 위 `_gate_cache` 와 같은 **atomic tuple snapshot** 관례를 따른다. 두 스레드가
+# 동시에 miss 해도 같은 파일을 두 번 읽을 뿐 결과가 같고, 튜플 재바인딩은 원자적이라
+# 찢어진 상태가 관측되지 않는다. lock 을 걸 만큼의 이득이 없다.
+_env_file_cache: "tuple[bool, Dict[str, str]]" = (False, {})
+
+
+def _env_file_values() -> Dict[str, str]:
+    """저장소 `.env` 의 CLOUDIUM_* 값. **os.environ 은 건드리지 않는다.**
+
+    왜 여기 있나 — 워커 접속 설정을 **진입점마다** 읽으면 한쪽만 고쳐진다.
+    실제로 그랬다(2026-08-19): `.env` 로 포트를 8766 으로 옮겼더니 `backend/main.py`
+    의 load_dotenv 를 타는 백엔드만 새 포트를 보고, uvicorn 을 안 거치는 **독립
+    스크립트는 전부 기본 8765** 를 봐서 "worker 미응답" 으로 죽었다. 진입점마다
+    load_dotenv 를 복제하는 건 같은 결함을 진입점 수만큼 만드는 것이다.
+
+    포트가 무엇인지 정의하는 모듈이 여기이므로, 폴백도 여기 둔다. 계약:
+      · `os.environ` 이 이기고(명시 설정 우선), 없을 때만 파일을 본다
+      · 파일 내용을 환경에 주입하지 않는다 — 다른 모듈의 동작을 몰래 바꾸지 않기 위해
+      · import 시점 부작용 없음(첫 호출 때 lazy)
+    """
+    global _env_file_cache
+    if _env_file_cache[0]:
+        return _env_file_cache[1]
+    vals: Dict[str, str] = {}
     try:
-        port = int(os.getenv("CLOUDIUM_WORKER_PORT", str(DEFAULT_WORKER_PORT)))
+        raw = (_PROJECT_ROOT / ".env").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raw = ""          # .env 없음/못 읽음 = 폴백 없음. 기본값으로 간다
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        if k.startswith("CLOUDIUM_"):
+            vals[k] = v.strip().strip('"').strip("'")
+    _env_file_cache = (True, vals)
+    return vals
+
+
+def _cloudium_setting(key: str, default: str) -> str:
+    """CLOUDIUM_* 설정 하나 — 환경변수 > `.env` > 기본값."""
+    v = (os.getenv(key) or "").strip()
+    if v:
+        return v
+    return (_env_file_values().get(key) or "").strip() or default
+
+
+def _worker_endpoint() -> "tuple[str, int]":
+    host = _cloudium_setting("CLOUDIUM_WORKER_HOST", DEFAULT_WORKER_HOST)
+    try:
+        port = int(_cloudium_setting("CLOUDIUM_WORKER_PORT", str(DEFAULT_WORKER_PORT)))
     except ValueError:
+        # 숫자가 아니면 조용히 기본값으로 가되 **한 번은 알린다** — 설정이 무시되는
+        # 걸 모르면 "포트를 바꿨는데 왜 안 되지" 로 진단이 헛돈다.
+        _logger.warning(
+            "CLOUDIUM_WORKER_PORT 를 숫자로 못 읽었다 — 기본 %d 로 간다", DEFAULT_WORKER_PORT
+        )
         port = DEFAULT_WORKER_PORT
     return host, port
 

@@ -42,6 +42,35 @@ def _ready_budget_s() -> float:
         return 8.0
 
 
+def _port_held_by_other() -> "tuple[bool, int]":
+    """워커 포트를 **다른 프로세스**가 쥐고 있나. 반환 ``(그렇다, 포트)``.
+
+    호출부는 ping 이 이미 실패한 뒤에만 쓴다. 그 상태에서 TCP 연결이 **되면**
+    누군가 듣고 있는데 우리 워커가 아니라는 뜻이다.
+
+    왜 굳이 가르나 — 이 둘은 **처방이 정반대**인데 증상이 같다:
+
+      · 아직 안 떴다        → 기다리면 된다(타임아웃을 늘리는 게 맞다)
+      · 남이 포트를 쥐었다  → **아무리 기다려도 안 된다**. 포트를 옮겨야 한다
+
+    2026-08-19 실사고: 무관한 앱이 8765 를 점유해 워커가 바인딩에서 죽었는데,
+    `worker.py` 의 TCP 서버가 `allow_reuse_address=True`(SO_REUSEADDR) 라 Windows 가
+    익숙한 10048("포트 사용 중") 대신 **10013("액세스 권한")** 을 돌려준다. 그래서
+    로그만 보면 권한 문제로 읽히고, 여기가 "타임아웃을 늘리라" 고 안내하면 사용자는
+    영원히 낫지 않는 처방을 따르게 된다.
+    """
+    import socket
+
+    from backend.services.file_resolver import _worker_endpoint
+
+    host, port = _worker_endpoint()
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True, port
+    except OSError:
+        return False, port
+
+
 def _wait_ready(budget_s: float, *, poll_s: float = 0.25) -> tuple[bool, float]:
     """worker 가 ping 에 응답할 때까지 **상한 내에서** 기다린다. 반환 ``(준비됨, 대기초)``.
 
@@ -110,14 +139,30 @@ def ensure_cloudium_worker_running() -> dict:
             ready, waited = _wait_ready(_ready_budget_s())
             if ready:
                 _log.info("Cloudium worker spawned + ready in %.1fs: %s", waited, worker_exe)
-            else:
-                _log.warning(
-                    "Cloudium worker spawned but NOT ready after %.1fs — 기동 직후 문서 요청이 "
-                    "403(접근 거부)로 보일 수 있다. worker 를 직접 실행하거나 "
-                    "CLOUDIUM_WORKER_READY_TIMEOUT 을 늘릴 것: %s", waited, worker_exe,
-                )
-            return {"action": "spawned", "path": str(worker_exe),
-                    "ready": ready, "waited_s": round(waited, 1)}
+            result = {"action": "spawned", "path": str(worker_exe),
+                      "ready": ready, "waited_s": round(waited, 1)}
+            if not ready:
+                # ⚠ '안 떴다' 와 '남이 포트를 쥐었다' 는 처방이 정반대다. 안 가르면
+                #   포트 충돌인데 "타임아웃을 늘리라" 고 안내하게 되고, 그 처방은
+                #   **영원히 듣지 않는다**(2026-08-19 실사고 — 위 `_port_held_by_other`).
+                taken, port = _port_held_by_other()
+                if taken:
+                    result["port_conflict"] = True
+                    result["port"] = port
+                    _log.warning(
+                        "Cloudium worker 기동 실패 — 포트 %d 를 **다른 프로세스가 점유** 중이다. "
+                        "타임아웃 문제가 아니므로 늘려도 안 된다. worker 는 SO_REUSEADDR 를 쓰므로 "
+                        "바인딩이 WinError 10013('액세스 권한')으로 죽어 권한 문제처럼 보인다. "
+                        "점유자 확인: netstat -ano | findstr \":%d \" · 해결: 그 프로세스를 내리거나 "
+                        ".env 의 CLOUDIUM_WORKER_PORT 를 빈 포트로 바꾸고 백엔드 재기동", port, port,
+                    )
+                else:
+                    _log.warning(
+                        "Cloudium worker spawned but NOT ready after %.1fs — 기동 직후 문서 요청이 "
+                        "403(접근 거부)로 보일 수 있다. worker 를 직접 실행하거나 "
+                        "CLOUDIUM_WORKER_READY_TIMEOUT 을 늘릴 것: %s", waited, worker_exe,
+                    )
+            return result
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("Cloudium worker auto-start failed: %s", e)
             return {"action": "failed", "error": str(e)}

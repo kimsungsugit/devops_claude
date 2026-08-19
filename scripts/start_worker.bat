@@ -7,6 +7,11 @@ echo ============================================
 echo  ARIA Cloudium Worker (file IPC)
 echo ============================================
 echo.
+echo  [i] 평소엔 이걸 안 돌려도 된다 - 백엔드가 기동하면서
+echo      워커를 auto-start 한다(backend\main.py 의 ensure_cloudium_worker_running).
+echo      이 스크립트는 (a) 백엔드 없이 워커만 점검할 때
+echo      (b) 포트 충돌을 WinError 10013 대신 사람 말로 보고받을 때 쓴다.
+echo.
 
 REM --- 포트 단일 출처 = .env --------------------------------------------------
 REM 백엔드도 같은 .env 를 읽는다(backend\main.py 의 load_dotenv). 여기서 값을
