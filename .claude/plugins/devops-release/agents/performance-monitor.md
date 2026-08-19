@@ -1,7 +1,7 @@
 ---
 name: performance-monitor
 description: "엔드포인트 응답시간 실측, 시스템 자원(/metrics) 확인, 문서 생성·LLM 호출 지연 분석으로 병목을 식별하는 에이전트"
-model: sonnet
+model: opus
 tools:
   - Bash
   - Read

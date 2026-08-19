@@ -124,7 +124,7 @@ while round <= MAX_ROUNDS:
        - 프론트엔드 코드 패턴 (R1~R7)
        - ISO 26262 (F1~F8): MISRA-C, ASIL, 추적성
        - X1~X9 비정형 비판 — **시나리오 / timeline / 트리** 의무 (deep-reviewer.md 참조)
-       - deep-reviewer 호출 실패(403 등) 시 sonnet reviewer로 폴백, 그래도 실패하면 메인 에이전트 미니 체크리스트 11개
+       - deep-reviewer 호출 실패(403 등) 시 reviewer 로 폴백(모델은 같고 **의무가 얕다** — X1~X9 전수·timeline·트리가 빠진다), 그래도 실패하면 메인 에이전트 미니 체크리스트 11개
     
     2. 종합 품질 검사 실행:
        .venv/Scripts/python.exe scripts/quality_check.py --round {round} --json

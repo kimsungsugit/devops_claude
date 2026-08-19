@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: 코드리뷰, 보안/성능/예외처리 검토, ISO 26262 안전성 검증, 누락 테스트 확인을 담당하는 리뷰 에이전트
-model: sonnet
+model: opus
 tools:
   - Read
   - Glob

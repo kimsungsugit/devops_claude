@@ -1,7 +1,7 @@
 ---
 name: db-manager
 description: "SQLite 3계층(품질/챗/RAG) 스키마·무결성 점검, 백업, 모델↔테이블 drift 감지를 수행하는 에이전트"
-model: sonnet
+model: opus
 tools:
   - Bash
   - Read

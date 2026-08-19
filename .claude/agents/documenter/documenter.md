@@ -1,7 +1,7 @@
 ---
 name: documenter
 description: 계획서, 설계서, 변경내역, 사용설명서, 결과보고서 등 프로젝트 문서를 작성하는 문서화 에이전트
-model: sonnet
+model: opus
 tools:
   - Read
   - Write

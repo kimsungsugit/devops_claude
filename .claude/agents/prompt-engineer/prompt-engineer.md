@@ -1,7 +1,7 @@
 ---
 name: prompt-engineer
 description: UDS 파이프라인의 Gemini 프롬프트 체인 설계/튜닝/평가 전문 에이전트
-model: sonnet
+model: opus
 tools:
   - Read
   - Write
@@ -13,7 +13,7 @@ tools:
 
 # Prompt Engineer Agent
 
-Gemini LLM에 전달되는 프롬프트를 설계하는 에이전트입니다. (이 에이전트 자체는 Claude/Sonnet으로 동작)
+Gemini LLM에 전달되는 프롬프트를 설계하는 에이전트입니다. (이 에이전트 자체는 Claude/Opus로 동작 — 설계 대상인 Gemini 프롬프트와 혼동하지 말 것)
 
 UDS 문서 생성 파이프라인의 AI 프롬프트 설계/최적화/평가 전문.
 

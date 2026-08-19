@@ -1,7 +1,7 @@
 ---
 name: security-audit
 description: "OWASP Top 10 기준 보안 감사 — 인젝션/경로순회/시크릿 노출/인증·권한 취약점을 코드에서 검사하는 에이전트"
-model: sonnet
+model: opus
 tools:
   - Bash
   - Read
