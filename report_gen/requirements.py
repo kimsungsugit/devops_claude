@@ -3240,8 +3240,33 @@ def generate_uds_traceability_matrix(
             "unmapped_sds_name_variant": sum(
                 1 for u in unmapped_vcast if u.get("sds_name_hits") and not u.get("sds_reqs")
             ),
+            # ⚠⚠ 이 수치를 "콜그래프 roll-up 으로 없앨 수 있다"고 읽지 말 것 — **재 셌고, 안 된다.**
+            #
+            # 백로그에 "SRS 미추적 Phase 3 — 콜그래프 roll-up"(leaf 를 지배 조상의 요구로
+            # 승계)이 세 번 올라왔다. 2026-08-19 에 실측으로 종결한다.
+            #
+            #   KJPDS02_PV 콜그래프(함수 1157·엣지 1476) leaf 514건의 도달 루트 분포
+            #     297(57.8%) 호출자 없음 · **163(31.7%) 단일 지배 조상** · 36 2~3 · 18 4+
+            #   → 구조적 전제(단일 조상)는 3분의 1쯤 성립한다. 문제는 그 다음이다:
+            #
+            #   추적된 조상이 **정확히 1개**인 미추적 함수 4건 → **4건 전부 조상이 다중 요구**
+            #   추적 함수 349개의 요구 수 분포: 단일 요구는 33개뿐 · 나머지는 2~17개
+            #
+            # 즉 조상이 하나여도 그 조상이 요구 2~17개를 달고 있어, 승계하면 leaf 하나가
+            # 요구 여러 개에 붙는다. 이건 커밋 `52e4b08`(SDS 컴포넌트 24배 과대표기 정화)이
+            # **정확히 막은 fan-out** 의 반대 방향이다 — 그때는 부모 related 를 인터페이스
+            # 함수에 상속시켜 16 SwCom 이 382 로 부풀었다. 방향만 뒤집힌 같은 결함이다.
+            #
+            # 게다가 고칠 대상이 없다: 실측(build_125) `unmapped_app_design_gap` = **0**,
+            # `covered` = **68/68**. 바뀌는 건 화면의 미추적 숫자(627→~3)뿐이고, 대가는
+            # 감사 문서에 근거 없는 링크가 늘어나는 것이다.
+            #
+            # 가드: `tests/unit/test_srs_untraced_no_ancestor_rollup.py`
+            #
             # SRS 미추적이지만 UDS 단위설계엔 존재하는 함수 수 — '시험+단위설계 완료, SDS
             # 아키텍처 roll-up만 누락'(정당한 입도차). KJPDS02 실데이터 661/662.
+            # ⚠ 여기서 'roll-up' 은 **설계 문서 계층**(leaf 가 부모 SwUFn 아래 설계됨) 이야기지
+            #   콜그래프 승계가 아니다. 근거는 `in_uds`(UDS 등재)이지 호출 관계가 아니다.
             # (unmapped_sds_linked와 동일 패턴: 캐시 trace_summary.json·감사·문서화용 집계이며,
             #  프론트 루트 뱃지는 unmapped_vcast list의 in_uds로 직접 재계산해 표시·카운트 동기 보장.)
             "unmapped_uds_linked": sum(1 for u in unmapped_vcast if u.get("in_uds")),
