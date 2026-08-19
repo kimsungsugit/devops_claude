@@ -3,7 +3,7 @@ import logging
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -13,6 +13,7 @@ from backend.schemas import (
     VCastGenerateExcelRequest,
     VCastProcessJenkinsRequest,
 )
+from backend.services.output_paths import drop_empty_reservation, reserve_unique_path
 from backend.services.paths import safe_resolve_under
 from backend.services.vcast_excel_generator import generate_metrics_excel, generate_testcase_excel
 from backend.services.vcast_parser import (
@@ -239,6 +240,7 @@ async def vcast_parse(
 @router.post("/api/vcast/generate-excel")
 def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
     """파싱된 데이터로 Excel 리포트 생성"""
+    reserved: Optional[Path] = None
     try:
         if not isinstance(req.parsed_data, dict):
             raise HTTPException(status_code=400, detail="parsed_data must be an object")
@@ -250,16 +252,35 @@ def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # 파일명 생성
+        # ⚠ `output_filename` 은 **클라이언트가 준 문자열**이다. `output_dir / filename` 은
+        #   봉인이 아니다 — `../` 는 물론이고 **절대경로는 기준 디렉터리를 통째로 대체한다**
+        #   (실측: `Path("D:/…/vcast_excel") / "C:/Windows/Temp/x.xlsx"` == `C:/Windows/Temp/x.xlsx`).
+        #   확장자 강제(`.xlsx`)가 유일한 제약이었으므로 백엔드 프로세스가 쓸 수 있는 곳의
+        #   **임의 .xlsx 를 덮어쓸 수 있었다** — 입력 요구문서(`260105/docs/*.xlsx`) 포함.
+        #   같은 파일의 다운로드 엔드포인트(`vcast_download_report`)는 이미
+        #   `safe_resolve_under` 를 쓴다. **읽기만 봉인하고 쓰기를 열어 둔 비대칭**이었다.
         if req.output_filename:
             filename = req.output_filename
             if not filename.endswith(".xlsx"):
                 filename += ".xlsx"
+            try:
+                want = safe_resolve_under(output_dir, filename)
+            except ValueError as exc:
+                # 클라이언트 입력 문제다 — `except Exception` 이 500 으로 뭉개지 않게 먼저 낸다.
+                raise HTTPException(status_code=400, detail=f"invalid output_filename: {exc}")
         else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"vcast_report_{ts}.xlsx"
-        
-        output_path = output_dir / filename
-        
+            want = output_dir / f"vcast_report_{ts}.xlsx"
+
+        # ⚠ 프론트가 보내는 이름은 **날짜(일) 단위**다
+        #   (`ReportGenSection.jsx`: `vcast_${type}_${YYYYMMDD}.xlsx`). "같은 초 경합"이
+        #   아니라 **같은 날이면 확정 충돌**이고, 키에 사용자·프로젝트가 없다. 선점하지
+        #   않으면 나중 요청이 앞 사용자의 산출물을 덮고, FileResponse 는 그걸 내려준다.
+        want.parent.mkdir(parents=True, exist_ok=True)
+        output_path = reserve_unique_path(want)
+        reserved = output_path
+        filename = output_path.name
+
         # Metrics 리포트인 경우
         if mode == "Metrics" or "statement_data" in req.parsed_data or "functions_data" in req.parsed_data:
             from backend.services.vcast_parser import (
@@ -412,8 +433,10 @@ def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
                 raise HTTPException(status_code=500, detail="Excel generation failed")
     
     except HTTPException:
+        drop_empty_reservation(reserved)
         raise
     except Exception as e:
+        drop_empty_reservation(reserved)
         tb = traceback.format_exc()
         print(tb)
         raise HTTPException(status_code=500, detail=f"Excel generation error: {str(e)}")

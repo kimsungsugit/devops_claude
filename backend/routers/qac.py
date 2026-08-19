@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse
 
 from backend.helpers.jenkins import _jenkins_sts_dir, _jenkins_suts_dir, _resolve_cached_build_root
 from backend.services.jenkins_helpers import _job_slug
+from backend.services.output_paths import drop_empty_reservation, reserve_unique_path
+from backend.services.paths import safe_resolve_under
 from backend.services.qac_excel_generator import generate_qac_excel
 from backend.services.qac_parser import QACDataManager, parse_qac_report
 from backend.services.report_parsers import _normalize_prqa_path
@@ -251,7 +253,10 @@ def _write_qac_impact_report(
         stem = _job_slug(job_url)
         safe_fn = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in function_name).strip("_") or "function"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"qac_impact_{stem}_{safe_fn}_{ts}.md"
+        # ⚠ `reports/qac_impact` 는 전 사용자 공유다. 키가 job+함수뿐이라 같은 함수를
+        #   두 사람이 같은 초에 분석하면 한쪽 리포트가 사라진다.
+        from backend.services.output_paths import reserve_unique_path
+        out_path = reserve_unique_path(out_dir / f"qac_impact_{stem}_{safe_fn}_{ts}.md")
         summary = payload.get("summary") or {}
         compare = payload.get("compare") or {}
         lines = [
@@ -432,10 +437,15 @@ def qac_jenkins_generate_excel(
     use_old = old_version if old_version is not None else (True if inferred_old is None else inferred_old)
     output_dir = repo_root / "reports" / "qac_excel"
     output_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"qac_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    output_path = output_dir / filename
+    # ⚠ `reports/qac_excel` 은 전 사용자 공유다 — 키가 job+초뿐이라 같은 job 을 두 사람이
+    #   같은 초에 뽑으면 한쪽이 남의 리포트를 받는다.
+    output_path = reserve_unique_path(
+        output_dir / f"qac_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+    filename = output_path.name
     qac_manager = parse_qac_report(target, bool(use_old))
     if not generate_qac_excel(qac_manager, output_path):
+        # 선점만 남은 0바이트 파일이 `/api/qac/reports` 목록에 뜨지 않게.
+        drop_empty_reservation(output_path)
         raise HTTPException(status_code=500, detail="Excel generation failed")
     return FileResponse(
         str(output_path),
@@ -480,12 +490,24 @@ async def qac_generate_excel(
             qac_manager = parse_qac_report(tmp_path, old_version)
             output_dir = repo_root / "reports" / "qac_excel"
             output_dir.mkdir(parents=True, exist_ok=True)
+            # ⚠ `output_filename` 은 **클라이언트가 준 쿼리 파라미터**다. `output_dir / …`
+            #   는 봉인이 아니다 — `../` 도, 기준 디렉터리를 통째로 대체하는 절대경로도
+            #   통과한다. 같은 파일의 다운로드(`qac_download_report`)는 이미
+            #   `safe_resolve_under` 를 쓴다 — **읽기만 봉인된 비대칭**이었다.
+            #   (`/api/vcast/generate-excel` 에 같은 결함이 있었다 — 같은 패턴의 다른 입구.)
             if output_filename:
                 filename = output_filename if output_filename.endswith(".xlsx") else f"{output_filename}.xlsx"
+                try:
+                    want = safe_resolve_under(output_dir, filename)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=f"invalid output_filename: {exc}")
             else:
-                filename = f"qac_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            output_path = output_dir / filename
+                want = output_dir / f"qac_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            want.parent.mkdir(parents=True, exist_ok=True)
+            output_path = reserve_unique_path(want)
+            filename = output_path.name
             if not generate_qac_excel(qac_manager, output_path):
+                drop_empty_reservation(output_path)
                 raise HTTPException(status_code=500, detail="Excel generation failed")
             return FileResponse(
                 str(output_path),
@@ -545,9 +567,12 @@ def qac_generate_excel_from_path(body: Dict[str, Any]) -> FileResponse:
         qac_manager = parse_qac_report(p, old_version)
         output_dir = repo_root / "reports" / "qac_excel"
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"qac_{p.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        output_path = output_dir / filename
+        # ⚠ 키가 입력 파일 stem 뿐이다 — 같은 HTML 을 두 사람이 같은 초에 변환하면 겹친다.
+        output_path = reserve_unique_path(
+            output_dir / f"qac_{p.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        filename = output_path.name
         if not generate_qac_excel(qac_manager, output_path):
+            drop_empty_reservation(output_path)
             raise HTTPException(status_code=500, detail="Excel generation failed")
         return FileResponse(str(output_path), filename=filename,
                             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

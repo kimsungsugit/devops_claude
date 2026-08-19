@@ -30,8 +30,12 @@ ISO 26262 산출물에서 이건 단순 덮어쓰기가 아니다 — **A 가 �
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+from typing import Optional
+
+_logger = logging.getLogger("devops_api")
 
 # 같은 초에 같은 키로 이만큼 겹치면 그건 다른 문제다 — 무한 루프 대신 명시 실패.
 _MAX_ATTEMPTS = 50
@@ -66,6 +70,24 @@ def reserve_unique_path(path: Path) -> Path:
         f"산출물 경로를 선점하지 못했다({_MAX_ATTEMPTS}회 전부 점유): {path} — "
         "같은 초에 같은 키로 과도한 동시 생성이 일어나고 있다"
     )
+
+
+def drop_empty_reservation(path: Optional[Path]) -> None:
+    """선점만 하고 생성이 실패했으면 0바이트 파일을 치운다.
+
+    선점은 원자성을 위해 **먼저 0바이트 파일을 만든다**(위 trade-off). 생성이 실패하면
+    그게 남아 리포트 목록 API 에 **열리지 않는 산출물**로 뜬다 —
+    `/api/qac/reports`·`/api/vcast/reports` 는 디렉터리를 glob 해서 그대로 보여준다.
+
+    ⚠ **크기 0 인 것만** 지운다. 내용이 들어간 부분 산출물은 진단 근거라 손대지 않는다.
+    """
+    if path is None:
+        return
+    try:
+        if path.is_file() and path.stat().st_size == 0:
+            path.unlink()
+    except OSError as exc:  # 정리 실패가 본래 오류를 가리면 안 된다
+        _logger.debug("빈 선점 파일 정리 실패 %s: %s", path, exc)
 
 
 def reserve_unique_dir(path: Path) -> Path:
