@@ -251,7 +251,57 @@ class _Handler(socketserver.StreamRequestHandler):
 
 class _ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
-    allow_reuse_address = True
+
+    # ⚠ **Windows 에서 SO_REUSEADDR 은 POSIX 와 뜻이 다르다.** 재시작 편의가 아니라
+    #   **남이 이미 바인딩한 포트를 가로챌 수 있게** 한다. 켜 두면 두 방향 다 뚫린다.
+    #
+    #   2026-08-19 실증(사고가 아니라 실제로 일으켰다): 두 번째 프로세스가 **살아 있는
+    #   워커의 포트를 뺏어** `netstat` 에 리스너가 둘이 됐다. 뺏은 쪽은 Cloudium 권한이
+    #   없으므로 그리로 간 요청은 조용히 실패한다 — 게이트는 초록인데 파일만 안 읽힌다.
+    #
+    #   끄면 손해가 있을 줄 알았는데 **재보니 없었다**(같은 트리 실측):
+    #
+    #       설정                A 가로채기 차단   B 즉시 재바인딩
+    #       REUSEADDR(옛판)     ❌ 뚫림           ✅ 된다
+    #       **끔(현행)**        ✅ 차단(10048)    ✅ 된다
+    #       EXCLUSIVEADDRUSE    ✅ 차단(10048)    ✅ 된다
+    #
+    #   상대가 REUSEADDR 로 들어오는 비대칭 케이스도 끄기만 하면 막힌다(상대가 10013).
+    #   `SO_EXCLUSIVEADDRUSE` 는 그 위에 얹어도 **관측되는 이득이 0** 이라 안 쓴다 —
+    #   죽은 방어를 넣으면 뮤테이션이 통째로 살아남는다.
+    #
+    #   덤: 진짜 충돌일 때 에러가 10013("액세스 권한") 대신 **10048("포트 사용 중")**
+    #   으로 바뀌어 원인이 바로 읽힌다.
+    #
+    #   ⚠ 이 값은 `dist/excel_rename_gui_v2.exe` 를 **다시 빌드해야** 반영된다.
+    allow_reuse_address = False
+
+
+def bind_failure_message(host: str, port: int, exc: OSError) -> str:
+    """바인딩 실패를 **사람이 읽을 수 있는 말**로. 트레이스백만 내면 오독한다.
+
+    Windows 에서 이 상황의 에러 코드는 두 가지로 갈린다:
+
+      · 10048 WSAEADDRINUSE  "포트 사용 중"          ← 현행(REUSEADDR 끔)
+      · 10013 WSAEACCES      "액세스 권한…"          ← 옛 판(REUSEADDR 켬)일 때
+
+    옛 판이 문제였다 — **포트 충돌인데 권한 문제로 읽힌다**(2026-08-19 실사고:
+    무관한 앱이 8765 를 점유해 이 경로로 죽었고, 로그만 보고 권한을 의심하느라
+    진단이 한참 헛돌았다). 지금은 위 `_ThreadingTCPServer` 가 REUSEADDR 을 끄므로
+    10048 이 나지만, **이미 배포된 exe 는 옛 판**이라 10013 도 계속 들어온다.
+    둘 다 같은 안내로 받는다.
+    """
+    code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    hint = ""
+    if code in (10013, 10048, 98, 13):
+        hint = (
+            f"\n\n포트 {port} 를 **다른 프로세스가 이미 쓰고 있습니다.**\n"
+            f"(WinError 10013 '액세스 권한' 으로 보이더라도 권한 문제가 아니라 포트 충돌입니다)\n\n"
+            f"확인:  netstat -ano | findstr \":{port} \"\n"
+            f"해결1: 그 PID 프로세스를 종료\n"
+            f"해결2: 저장소 .env 의 CLOUDIUM_WORKER_PORT 를 빈 포트로 바꾸고 백엔드 재기동"
+        )
+    return f"Cloudium Worker 를 {host}:{port} 에 열 수 없습니다.\n{exc}{hint}"
 
 
 def _start_tcp_server(host: str, port: int) -> _ThreadingTCPServer:
@@ -270,7 +320,11 @@ def _run_gui(host: str, port: int) -> int:
         from tkinter import filedialog, messagebox, ttk
     except ImportError:
         # tkinter 미설치 (headless) — 백그라운드만으로 동작
-        srv = _start_tcp_server(host, port)
+        try:
+            srv = _start_tcp_server(host, port)
+        except OSError as exc:
+            print(bind_failure_message(host, port, exc), file=sys.stderr)
+            return 2
         try:
             while True:
                 time.sleep(60)
@@ -278,7 +332,23 @@ def _run_gui(host: str, port: int) -> int:
             srv.shutdown()
         return 0
 
-    server = _start_tcp_server(host, port)
+    try:
+        server = _start_tcp_server(host, port)
+    except OSError as exc:
+        # ⚠ 이 exe 는 `--noconsole` GUI 다 — **print 는 아무 데도 안 보인다.**
+        #   트레이스백만 남기면 사용자는 "그냥 안 켜진다" 로 겪는다. 대화상자로 알린다.
+        msg = bind_failure_message(host, port, exc)
+        try:
+            _err_root = tk.Tk()
+            _err_root.withdraw()
+            messagebox.showerror("Cloudium Worker - 기동 실패", msg)
+            _err_root.destroy()
+        except Exception:  # noqa: BLE001  # silent-ok
+            # 대화상자를 못 띄우는 상황(디스플레이 없음 등)에서도 **아래 stderr 출력은
+            # 반드시 나간다** — 삼키는 게 아니라 보고 경로가 둘이고 하나가 실패한 것.
+            pass
+        print(msg, file=sys.stderr)
+        return 2
 
     root = tk.Tk()
     root.title("Excel Rename GUI v2 - Cloudium Worker")

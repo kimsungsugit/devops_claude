@@ -63,6 +63,54 @@ class TestPrecedence:
         assert fr._worker_endpoint()[0] == "127.0.0.5"
 
 
+class TestFamilyIsConsistent:
+    """⚠ 처음엔 **포트·host 만** 폴백을 태워서 "어떤 키는 되고 어떤 키는 안 된다" 는
+    예측 불가능한 상태를 만들었다. 워커 접속/권한 가족은 통째로 같이 간다.
+    """
+
+    @pytest.mark.parametrize("key", [
+        "CLOUDIUM_WORKER_PORT", "CLOUDIUM_WORKER_HOST",
+        "CLOUDIUM_GATE_PROCESS", "CLOUDIUM_ALLOWED_PREFIXES",
+    ])
+    def test_family_keys_read_env_file(self, monkeypatch, key):
+        _stub_env_file(monkeypatch, {key: "sentinel-value"})
+        monkeypatch.delenv(key, raising=False)
+        assert fr._cloudium_setting(key, "fallback") == "sentinel-value"
+
+    def test_gate_process_goes_through_the_same_path(self, monkeypatch):
+        """진입점이 헬퍼를 안 쓰고 os.getenv 를 직접 부르면 이 단언이 깨진다."""
+        _stub_env_file(monkeypatch, {"CLOUDIUM_GATE_PROCESS": "other_worker.exe"})
+        monkeypatch.delenv("CLOUDIUM_GATE_PROCESS", raising=False)
+        assert fr._gate_process_name() == "other_worker.exe"
+
+    def test_allowed_prefixes_goes_through_the_same_path(self, monkeypatch):
+        _stub_env_file(monkeypatch, {"CLOUDIUM_ALLOWED_PREFIXES": "Z:/a,Z:/b"})
+        monkeypatch.delenv("CLOUDIUM_ALLOWED_PREFIXES", raising=False)
+        r = fr.CloudiumFileResolver()
+        assert r.allowed_prefixes == ["Z:/a", "Z:/b"]
+
+    def test_file_mode_is_deliberately_excluded(self, monkeypatch, tmp_path):
+        """⛔ `DEVOPS_FILE_MODE` 는 뺀 것이다 — 넣으면 테스트 격리가 조용히 뚫린다.
+
+        빠뜨린 게 아니라 결정이라는 걸 고정한다. 누가 "정합을 맞춘다" 며 넣으면
+        여기서 걸린다(사유는 `_cloudium_setting` docstring).
+
+        ⚠ 캐시를 직접 채우는 `_stub_env_file` 로는 이걸 못 잰다 — **접두 필터가
+          파일 파싱 단계에 있어서** 스텁은 그 경로를 아예 안 탄다(첫 판이 그래서
+          거짓 실패했다). 실제 파일을 읽혀야 한다.
+        """
+        (tmp_path / ".env").write_text(
+            "DEVOPS_FILE_MODE=cloudium\nCLOUDIUM_WORKER_PORT=8772\n", encoding="utf-8")
+        monkeypatch.setattr(fr, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.delenv("DEVOPS_FILE_MODE", raising=False)
+        fr._env_file_cache = (False, {})
+        vals = fr._env_file_values()
+        assert vals.get("CLOUDIUM_WORKER_PORT") == "8772", "폴백 자체가 안 돌면 공허하다"
+        assert "DEVOPS_FILE_MODE" not in vals, (
+            "파일 모드를 .env 로 끌어들이면 conftest 의 테스트 격리가 조용히 뚫린다"
+        )
+
+
 class TestNoEnvironPollution:
     """⚠ 첫 판은 **뮤테이션이 살아남았다**. `_env_file_cache` 를 미리 채워 두면
     `_env_file_values()` 가 캐시에서 즉시 반환해 **주입이 일어나는 코드 경로를 아예

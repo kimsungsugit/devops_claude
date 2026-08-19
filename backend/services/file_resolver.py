@@ -122,7 +122,9 @@ _gate_cache: "tuple[str, bool, float]" = ("", False, 0.0)
 
 
 def _gate_process_name() -> str:
-    return os.getenv("CLOUDIUM_GATE_PROCESS", DEFAULT_GATE_PROCESS).strip() or DEFAULT_GATE_PROCESS
+    # `_cloudium_setting` 경유 — 아래 §CLOUDIUM_* 설정 경계 참조. 포트만 `.env` 를 보고
+    # 이건 안 보면 "어떤 키는 되고 어떤 키는 안 된다" 는 **예측 불가능한 상태**가 된다.
+    return _cloudium_setting("CLOUDIUM_GATE_PROCESS", DEFAULT_GATE_PROCESS)
 
 
 # `.env` 폴백 캐시 — (해석했나, {키: 값}). 파일을 매 호출마다 읽지 않기 위함이며
@@ -168,7 +170,27 @@ def _env_file_values() -> Dict[str, str]:
 
 
 def _cloudium_setting(key: str, default: str) -> str:
-    """CLOUDIUM_* 설정 하나 — 환경변수 > `.env` > 기본값."""
+    """CLOUDIUM_* 설정 하나 — **환경변수 > `.env` > 기본값**.
+
+    ── 이 폴백의 경계 (일부러 좁다) ─────────────────────────────────────────
+    적용: `CLOUDIUM_WORKER_PORT` · `CLOUDIUM_WORKER_HOST` ·
+          `CLOUDIUM_GATE_PROCESS` · `CLOUDIUM_ALLOWED_PREFIXES`
+          → 전부 **워커 접속/권한 경로** 설정이라 독립 스크립트도 백엔드와 같은 값을
+            봐야 한다. 한둘만 적용하면 "어떤 키는 되고 어떤 키는 안 된다" 는
+            예측 불가능한 상태가 되므로 이 가족은 통째로 넣는다.
+
+    ⛔ **`DEVOPS_FILE_MODE` 는 일부러 뺐다.** 두 가지 이유가 있다:
+       ① 파일 모드는 `config/file_mode.json` **영속값이 이미 우선**한다
+          (영속 > env > local). env 폴백을 더해도 대개 안 읽힌다.
+       ② 테스트 격리를 깬다 — 이 저장소는 `file_resolver._resolver` 전역 누설로
+          단독 실행 16건이 깨진 전례가 있고(커밋 584833e), conftest 가 머신 상태
+          (`config/file_mode.json`)로부터 테스트를 **격리**한다. 저장소 `.env` 를
+          모드 결정에 끌어들이면 그 격리가 조용히 뚫린다.
+
+    ⛔ `CLOUDIUM_AUTO_START_WORKER` · `CLOUDIUM_WORKER_READY_TIMEOUT` 도 안 넣는다 —
+       `cloudium_worker_launcher` 는 **백엔드 프로세스에서만** 쓰이고 거기선 이미
+       `main.py` 의 load_dotenv 가 돌았다. 넣어도 바뀌는 게 없다.
+    """
     v = (os.getenv(key) or "").strip()
     if v:
         return v
@@ -336,7 +358,7 @@ class CloudiumFileResolver(LocalFileResolver):
         port: Optional[int] = None,
         **_kwargs,
     ):
-        raw = allowed_prefixes or os.getenv("CLOUDIUM_ALLOWED_PREFIXES", "")
+        raw = allowed_prefixes or _cloudium_setting("CLOUDIUM_ALLOWED_PREFIXES", "")
         self.allowed_prefixes = [p.strip() for p in raw.split(",") if p.strip()]
         self.gate_process = (gate_process or _gate_process_name()).strip() or DEFAULT_GATE_PROCESS
         env_host, env_port = _worker_endpoint()

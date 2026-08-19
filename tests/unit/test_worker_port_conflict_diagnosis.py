@@ -62,6 +62,33 @@ class TestPortHeldDetection:
         assert taken is True
         assert port == squatter
 
+    def test_our_own_slow_worker_is_not_a_conflict(self, monkeypatch):
+        """⚠ **연결만으로 단정하면 안 된다.**
+
+        우리 워커가 이미 바인딩했는데 ping 응답만 늦으면(GUI 기동 중·부하) 연결은
+        성공한다. 그걸 충돌로 부르면 사용자가 **멀쩡한 포트를 옮기게** 된다 —
+        고치려던 오진단의 정반대 방향이다.
+        """
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        monkeypatch.setattr(
+            "backend.services.file_resolver._worker_endpoint",
+            lambda: ("127.0.0.1", port),
+        )
+        # 재확인 ping 이 pong 을 받는 상황 = 듣고 있는 게 우리 워커다
+        monkeypatch.setattr(
+            "backend.services.file_resolver._ping_worker",
+            lambda *a, **k: True,
+        )
+        try:
+            taken, got = L._port_held_by_other()
+        finally:
+            s.close()
+        assert taken is False, "우리 워커(느린 응답)를 남의 점유로 오진단했다"
+        assert got == port
+
     def test_free_port_is_not_reported_as_conflict(self, monkeypatch):
         """빈 포트를 충돌로 부르면 반대 방향 오진단이다 — 애먼 포트를 옮기게 된다."""
         s = socket.socket()

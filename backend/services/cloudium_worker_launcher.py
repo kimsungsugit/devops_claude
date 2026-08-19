@@ -42,6 +42,12 @@ def _ready_budget_s() -> float:
         return 8.0
 
 
+# 충돌 확정 전 재확인 ping 의 타임아웃. `file_resolver._PING_TIMEOUT`(0.5s)은 게이트
+# **live-ness** 검사용이라 짧다. 여기선 반대로 **틀린 단정을 피하는 게** 목적이라 넉넉히
+# 준다 — 1회만 더 쓰는 비용이고, 이 경로는 이미 실패가 확정된 뒤라 지연이 문제되지 않는다.
+_CONFIRM_PING_TIMEOUT = 2.0
+
+
 def _port_held_by_other() -> "tuple[bool, int]":
     """워커 포트를 **다른 프로세스**가 쥐고 있나. 반환 ``(그렇다, 포트)``.
 
@@ -61,14 +67,24 @@ def _port_held_by_other() -> "tuple[bool, int]":
     """
     import socket
 
-    from backend.services.file_resolver import _worker_endpoint
+    from backend.services.file_resolver import _ping_worker, _worker_endpoint
 
     host, port = _worker_endpoint()
     try:
         with socket.create_connection((host, port), timeout=0.5):
-            return True, port
+            pass
     except OSError:
+        return False, port          # 아무도 안 듣는다 = 충돌 아님(그냥 안 뜬 것)
+
+    # ⚠ **연결만으로 단정하지 않는다.** 우리 워커가 이미 바인딩했는데 ping 응답만
+    #   늦은 경우(GUI 기동 중·부하)에도 연결은 성공한다. 그걸 충돌로 부르면 사용자를
+    #   **멀쩡한 포트를 옮기게** 만든다 — 위 표의 반대 방향 오진단이다.
+    #   그래서 넉넉한 타임아웃으로 한 번 더 물어본다. pong 이 오면 우리 것이다.
+    #   (판정 불가 쪽으로 기울인다: 충돌을 놓치면 로그가 한 줄 덜 친절할 뿐이지만,
+    #    없는 충돌을 외치면 사람이 엉뚱한 조치를 한다.)
+    if _ping_worker(host, port, timeout=_CONFIRM_PING_TIMEOUT):
         return False, port
+    return True, port
 
 
 def _wait_ready(budget_s: float, *, poll_s: float = 0.25) -> tuple[bool, float]:
