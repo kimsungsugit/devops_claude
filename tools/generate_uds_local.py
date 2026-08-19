@@ -1,26 +1,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-import sys
-import time
-import logging
-import tempfile
-import subprocess
-from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 repo_root = Path(r"D:\Project\devops\260105")
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
+import report_generator as rg  # noqa: E402
 from workflow import rag as ragmod
 from workflow.ai import load_oai_config
 from workflow.rag import get_kb
-import report_generator as rg
 
 
 def _load_repo_module(rel_module: str):

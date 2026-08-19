@@ -2,13 +2,8 @@
 from __future__ import annotations
 
 import sys
-import json
-import tempfile
-import zipfile
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
@@ -21,9 +16,9 @@ from backend.helpers.jenkins import (
     _jenkins_suts_dir,
     _jenkins_templates_dir,
     _load_uds_meta,
+    _matches_filters,
     _normalize_filter_tokens,
     _normalize_jenkins_cache_root,
-    _matches_filters,
     _resolve_cached_build_root,
     _save_uds_meta,
     _uds_meta_path,

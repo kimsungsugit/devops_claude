@@ -23,7 +23,6 @@ from __future__ import annotations
 
 from typing import Final
 
-
 # ---- Excel cell fill 색상 (openpyxl PatternFill start_color/end_color) ----
 
 # 연한 노란 (warm pastel yellow, #FFEB9C). 사용자 입력 필요 셀 배경.

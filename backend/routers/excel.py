@@ -1,16 +1,14 @@
 """Auto-generated router: excel"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
-import json
-import traceback
 import logging
 from pathlib import Path
+from typing import Any, Dict
+
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from backend.schemas import (
     ExcelCompareRequest,
 )
-from backend.services.excel_compare import compare_excel_files, ExcelCompareItem
+from backend.services.excel_compare import ExcelCompareItem, compare_excel_files
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")

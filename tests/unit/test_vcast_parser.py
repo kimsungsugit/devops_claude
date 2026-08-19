@@ -1,13 +1,11 @@
 """VectorCAST Parser 단위 테스트"""
 from pathlib import Path
+
 import pytest
 
 from backend.services.vcast_parser import (
-    VectorCASTParser,
-    VCASTVersion,
-    ReportType,
     CoverageItem,
-    MatricsType,
+    ReportType,
     VIMLib,
     parse_vcast_report,
 )

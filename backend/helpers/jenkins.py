@@ -1,13 +1,10 @@
 """Jenkins-specific domain helpers."""
-import re
-import os
-import json
-import shutil
 import logging
+import shutil
 import zipfile
-from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 try:
     from fastapi import HTTPException
@@ -19,22 +16,18 @@ try:
 except ImportError:
     JenkinsPublishRequest = None  # type: ignore[assignment,misc]
 
+from backend.helpers.common import (
+    _read_json,
+    _set_progress,
+    _write_json,
+)
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
+from backend.services.paths import is_under_any
 from backend.services.report_parsers import (
     build_report_summary,
     classify_report_group,
     find_local_jenkins_report_dir,
     write_report_index,
-)
-from backend.services.paths import is_under_any
-
-import config
-
-from backend.helpers.common import (
-    _read_json,
-    _write_json,
-    _set_progress,
-    _is_relative_to,
 )
 
 _logger = logging.getLogger("devops_api")

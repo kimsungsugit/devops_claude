@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 # Common Utilities for DevOps Workflow (v30.2: Safety Enhanced)
 
-import shutil
 import glob
 import os
-import json
-import sys
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 import analysis_tools as tools
 from utils.log import get_logger
 
@@ -367,7 +366,9 @@ def get_git_meta(project_root: Path) -> Dict[str, Optional[str]]:
 
 def check_llm_connection(config_path: str) -> Tuple[bool, str]:
     """LLM 서버(Ollama) 연결 상태를 확인합니다."""
-    import requests, json
+    import json
+
+    import requests
     try:
         if Path(config_path).exists():
             cfg = json.loads(Path(config_path).read_text())

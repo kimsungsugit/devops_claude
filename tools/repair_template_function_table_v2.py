@@ -3,13 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document  # type: ignore
-from docx.oxml.text.paragraph import CT_P  # type: ignore
+from docx.oxml import OxmlElement  # type: ignore
 from docx.oxml.table import CT_Tbl  # type: ignore
+from docx.oxml.text.paragraph import CT_P  # type: ignore
 from docx.table import Table  # type: ignore
 from docx.text.paragraph import Paragraph  # type: ignore
-from docx.oxml import OxmlElement  # type: ignore
-from docx.oxml.ns import qn  # type: ignore
-
 
 LABELS = [
     "[ Function Information ]",

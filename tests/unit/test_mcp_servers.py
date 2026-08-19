@@ -5,9 +5,7 @@ import json
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:

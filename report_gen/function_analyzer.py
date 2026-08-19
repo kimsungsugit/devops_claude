@@ -1,24 +1,19 @@
 """report_gen.function_analyzer - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
-import csv
 import logging
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from report_gen.provenance import is_weak_source
-from workflow.code_parser.c_parser import blank_c_comments, c_identifiers
 from report_gen.utils import (
+    _dedupe_multiline_text,
+    _extract_call_names,
+    _normalize_asil_value,
+    _normalize_call_field,
     _normalize_related_ids,
     _normalize_swufn_id,
-    _extract_call_names,
-    _normalize_call_field,
-    _dedupe_multiline_text,
-    _normalize_asil_value,
 )
+from workflow.code_parser.c_parser import blank_c_comments, c_identifiers
 
 _logger = logging.getLogger("report_generator")
 

@@ -6,9 +6,8 @@ QAC 리포트를 Excel 형식으로 생성합니다.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
 
-from backend.services.qac_parser import QACDataManager, MatrixItem, HISItem
+from backend.services.qac_parser import HISItem, MatrixItem, QACDataManager
 from backend.services.vcast_excel_generator import (
     ILLEGAL_CHARACTERS_RE,
     XlsCellStyle,
@@ -19,7 +18,7 @@ try:
     from openpyxl import Workbook
     from openpyxl.chart import BarChart, PieChart, Reference
     from openpyxl.chart.series import DataPoint
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 except ImportError:
     Workbook = None

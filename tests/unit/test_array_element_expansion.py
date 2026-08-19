@@ -32,15 +32,15 @@ from __future__ import annotations
 
 import pytest
 
-from report_gen.source_parser import extract_struct_member_arrays
 from generators.suts import (
     _array_sizes,
-    _decl_dims_from_array_field,
-    _struct_member_dims,
     _clean_global_name,
+    _decl_dims_from_array_field,
     _expand_array_entries,
+    _struct_member_dims,
     collect_unit_functions,
 )
+from report_gen.source_parser import extract_struct_member_arrays
 
 
 def _unit(name="Fn", *, inputs=None, outputs=None, gg=None, gs=None, proto="void Fn(void)"):

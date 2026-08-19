@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import analysis_tools as tools
-import config
 from utils.log import get_logger
+
 from . import stubs
 from .common import create_backup, standardize_result
 

@@ -6,7 +6,6 @@ import sys
 import zipfile
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import patch
 
 import pytest
 
@@ -15,16 +14,16 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from backend.helpers.uds import (
-    _compute_quick_quality_gate,
-    _derive_quality_reason_codes,
     _build_quality_action_hints,
     _build_quality_evaluation,
-    _parse_quality_gate_report,
+    _compute_quick_quality_gate,
+    _compute_uds_mapping_summary,
+    _derive_quality_reason_codes,
     _parse_accuracy_report,
+    _parse_quality_gate_report,
+    _slice_page,
     _to_swcom_from_fn,
     _validate_docx_template_bytes,
-    _slice_page,
-    _compute_uds_mapping_summary,
 )
 
 

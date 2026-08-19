@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from pathlib import Path
-import sys
 
 repo_root = Path(r"D:\Project\devops\260105")
 if str(repo_root) not in sys.path:

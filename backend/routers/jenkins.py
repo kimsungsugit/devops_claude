@@ -11,8 +11,6 @@ import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from backend.routers._safety import run_blocking as _run_blocking
-from backend.services.resolver_helpers import read_requirement_doc
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -21,7 +19,6 @@ from fastapi.responses import FileResponse
 
 import config
 from backend.cache import KeyedBuildLocks
-from backend.services.output_paths import reserve_unique_path
 from backend.helpers import (
     _apply_uds_view_filters,
     _build_excel_artifact_payload,
@@ -61,6 +58,7 @@ from backend.helpers import (
     load_vectorcast_project_config,
 )
 from backend.helpers.sds import is_sds_filename, is_srs_filename
+from backend.routers._safety import run_blocking as _run_blocking
 from backend.schemas import (
     CallTreePreviewRequest,
     CodeSonarRequest,
@@ -107,6 +105,7 @@ from backend.services.jenkins_service import (
     sync_local_reports,
 )
 from backend.services.local_service import run_svn, svn_info_url
+from backend.services.output_paths import reserve_unique_path
 from backend.services.paths import is_under_any, safe_resolve_under
 from backend.services.report_parsers import (
     build_report_summary,
@@ -114,6 +113,7 @@ from backend.services.report_parsers import (
     resolve_code_metrics,
     resolve_scm_vcast_metrics,
 )
+from backend.services.resolver_helpers import read_requirement_doc
 from backend.user_context import wrap_with_user
 
 # 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.

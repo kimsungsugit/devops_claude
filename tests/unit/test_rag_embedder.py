@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-import numpy as np
 
 
 class TestEmbedRandom:
@@ -68,7 +67,7 @@ class TestCosineSimilarity:
 
 class TestCache:
     def test_cache_put_get(self, monkeypatch):
-        from workflow.rag.embedder import _cache_put, _cache_get, _embed_cache
+        from workflow.rag.embedder import _cache_get, _cache_put, _embed_cache
         # C3 — 캐시는 이제 설정 dim 과 일치하는 벡터만 담는다(혼합차원 방지). 이 테스트의
         # 2-차원 벡터가 담기도록 dim 을 2 로 고정.
         monkeypatch.setattr("workflow.rag.embedder.get_embed_dim", lambda: 2)
@@ -85,7 +84,7 @@ class TestCache:
         assert _cache_get("nonexistent") is None
 
     def test_cache_lru_eviction(self, monkeypatch):
-        from workflow.rag.embedder import _cache_put, _cache_get, _embed_cache
+        from workflow.rag.embedder import _cache_get, _cache_put, _embed_cache
         _embed_cache.clear()
         # _cache_put calls _get_cache_max() which reads config, so mock it
         monkeypatch.setattr("workflow.rag.embedder._get_cache_max", lambda: 3)

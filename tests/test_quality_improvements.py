@@ -3,12 +3,11 @@ Unit tests for UDS quality improvements.
 Verifies each phase's improvements work correctly.
 """
 
-import sys
-import os
-import json
 import re
-import pytest
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -28,6 +27,7 @@ class TestPhase2InputOutputParsing:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -68,7 +68,7 @@ class TestPhase2StaticNaming:
     """Phase 2: Static variable naming convention detection."""
 
     def test_static_prefixes_config(self):
-        from config import STATIC_VAR_PREFIXES, GLOBAL_VAR_PREFIXES
+        from config import GLOBAL_VAR_PREFIXES, STATIC_VAR_PREFIXES
         assert "u8s_" in STATIC_VAR_PREFIXES
         assert "u8g_" in GLOBAL_VAR_PREFIXES
 
@@ -77,6 +77,7 @@ class TestPhase2StaticNaming:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -205,17 +206,19 @@ class TestPhase6FuzzyMatching:
     """Phase 6: Fuzzy function matching."""
 
     def test_case_insensitive_match(self):
-        from report_generator import generate_uds_function_mapping
         # Can't fully test without mocking, but verify function exists and signature
         import inspect
+
+        from report_generator import generate_uds_function_mapping
         sig = inspect.signature(generate_uds_function_mapping)
         params = list(sig.parameters.keys())
         assert "texts" in params
         assert "source_root" in params
 
     def test_traceability_accepts_function_details(self):
-        from report_generator import generate_uds_traceability_mapping
         import inspect
+
+        from report_generator import generate_uds_traceability_mapping
         sig = inspect.signature(generate_uds_traceability_mapping)
         params = list(sig.parameters.keys())
         assert "function_details" in params
@@ -229,6 +232,7 @@ class TestQualityScore:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -290,6 +294,7 @@ class TestPhase2V2CallingMetric:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -491,12 +496,12 @@ class TestPhase3QualityBaseline:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
 
     def test_tbd_asil_zero(self, ref_fn_map):
-        from report_generator import _classify_description_quality
         tbd_count = sum(
             1 for v in ref_fn_map.values()
             if isinstance(v, dict) and str(v.get("asil") or "").strip().upper() == "TBD"
@@ -676,7 +681,8 @@ class TestPhase5E2EGeneration:
 
     def test_e2e_docx_generation_and_parsing(self, generated_payload, tmp_path: Path):
         import docx
-        from report_generator import generate_uds_docx, _extract_function_info_from_docx
+
+        from report_generator import _extract_function_info_from_docx, generate_uds_docx
 
         out_path = str(tmp_path / "e2e_test.docx")
         payload = dict(generated_payload)
@@ -717,6 +723,7 @@ class TestPhase5TemplateFormat:
     def test_run_based_replacement_preserves_formatting(self):
         import docx
         from docx.shared import Pt, RGBColor
+
         from report_generator import _replace_docx_text
         doc = docx.Document()
         p = doc.add_paragraph()
@@ -734,6 +741,7 @@ class TestPhase5TemplateFormat:
 
     def test_header_footer_placeholder_detection(self):
         import docx
+
         from report_generator import _template_has_placeholders
         doc = docx.Document()
         doc.add_paragraph("No placeholders here.")
@@ -744,6 +752,7 @@ class TestPhase5TemplateFormat:
 
     def test_table_cell_replacement(self):
         import docx
+
         from report_generator import _replace_docx_text
         doc = docx.Document()
         table = doc.add_table(rows=1, cols=1)
@@ -844,6 +853,7 @@ class TestPhase5DescSource:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)

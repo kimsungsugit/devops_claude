@@ -32,7 +32,6 @@ from typing import Iterable
 # 본 모듈은 backend.services 하위라 workflow 의존성은 정적 OK.
 from workflow.code_parser.c_parser import parse_c_project
 
-
 # Hyundai 컨벤션 — 함수명 또는 Related ID 주석에서 SwUFn_NNNN 추출.
 _FUNCTION_ID_RE = re.compile(r"(SwUFn_\d+)")
 

@@ -1,42 +1,36 @@
 """Unit tests for backend/helpers/common.py pure utility functions."""
 from __future__ import annotations
 
-import json
-import os
 import sys
-import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from backend.helpers.common import (
+    _build_excel_artifact_summary,
+    _compact_symbol_simple,
     _extract_param_name_simple,
     _has_meaningful_value,
     _has_trace_token,
+    _infer_related_id_simple,
+    _is_allowed_req_doc,
     _is_relative_to,
     _json_safe,
     _normalize_asil_simple,
     _normalize_field_source,
     _normalize_symbol_simple,
-    _compact_symbol_simple,
     _parse_path_list,
-    _parse_signature_params_simple,
     _parse_signature_outputs_simple,
+    _parse_signature_params_simple,
     _read_json,
     _safe_extract_zip,
     _safe_int,
     _split_csv,
     _split_signature_params,
     _write_json,
-    _build_excel_artifact_summary,
-    _infer_related_id_simple,
-    _is_allowed_req_doc,
 )
 
 

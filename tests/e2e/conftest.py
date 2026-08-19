@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+
 import pytest
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:5173")

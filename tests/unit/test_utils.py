@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from utils.types import safe_dict, safe_list, fmt_bool, safe_int, safe_float
-from utils.text import trim_text, strip_c_comments, normalize_whitespace, split_sentences, title_case_first
-from utils.file_io import read_text_limited, read_text_safe, write_text_safe, load_json_safe, write_json_safe
+from utils.file_io import load_json_safe, read_text_limited, read_text_safe, write_json_safe, write_text_safe
+from utils.text import normalize_whitespace, split_sentences, strip_c_comments, title_case_first, trim_text
+from utils.types import fmt_bool, safe_dict, safe_float, safe_int, safe_list
 
 
 class TestSafeDict:

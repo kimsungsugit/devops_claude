@@ -1,13 +1,10 @@
 """report_gen.source_parser - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
-import csv
 import logging
-import time
+import os
+import re
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Set
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 _logger = logging.getLogger("report_generator")
 
@@ -639,8 +636,8 @@ def _extract_local_static_candidates_ast(body_text: str) -> Optional[List[str]]:
     unavailable or parsing fails (caller falls back to regex).
     """
     try:
-        from tree_sitter import Language, Parser  # type: ignore
         import tree_sitter_c as tsc  # type: ignore
+        from tree_sitter import Language, Parser  # type: ignore
     except ImportError:
         return None
 

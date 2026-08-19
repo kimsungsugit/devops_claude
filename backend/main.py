@@ -21,9 +21,8 @@ import logging
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
 
 repo_root = Path(__file__).resolve().parents[1]
 if str(repo_root) not in sys.path:

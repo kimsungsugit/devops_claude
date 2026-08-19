@@ -6,12 +6,12 @@ from __future__ import annotations
 import pytest
 
 from workflow.test_helpers import (
-    strip_c_comments,
-    param_placeholder,
-    parse_param_name,
     alt_buffer,
     build_call_variants,
     is_simple_signature,
+    param_placeholder,
+    parse_param_name,
+    strip_c_comments,
 )
 
 

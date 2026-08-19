@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -121,9 +121,13 @@ class TestSwUDSConsistencyIntegration:
     def test_swuds_function_ids_added_to_consistency_when_all_match(self, tmp_path):
         """SwUTS 모든 함수가 SwUDS에 있으면 PASS."""
         import openpyxl
-        from backend.services.swut_coverage_aggregator import build_coverage_report, CoverageBuildMeta
+
+        from backend.services.swut_coverage_aggregator import CoverageBuildMeta, build_coverage_report
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         # session: SwUFn_0001 만 보유
         env = EnvironmentData(
@@ -172,9 +176,13 @@ class TestSwUDSConsistencyIntegration:
     def test_swuds_missing_function_marked_fail(self, tmp_path):
         """SwUDS에는 있는데 SwUTS에 없는 함수가 있으면 FAIL."""
         import openpyxl
-        from backend.services.swut_coverage_aggregator import build_coverage_report, CoverageBuildMeta
+
+        from backend.services.swut_coverage_aggregator import CoverageBuildMeta, build_coverage_report
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         env = EnvironmentData(
             env_name="SWTE_01", component_name="X",
@@ -218,9 +226,13 @@ class TestSwUDSConsistencyIntegration:
     def test_swuds_not_provided_partial_label_kept(self, tmp_path):
         """swuds_function_ids=None이면 incomplete_sheets에 partial 라벨 유지."""
         import openpyxl
-        from backend.services.swut_coverage_aggregator import build_coverage_report, CoverageBuildMeta
+
+        from backend.services.swut_coverage_aggregator import CoverageBuildMeta, build_coverage_report
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         env = EnvironmentData(
             env_name="SWTE_01", component_name="X",

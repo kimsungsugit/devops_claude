@@ -12,7 +12,6 @@ import re
 import tempfile
 import time
 from contextlib import contextmanager
-from copy import copy
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -21,11 +20,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.uds_unit_io import resolve_unit_io
-from report_gen.requirements import _load_component_map, component_verify_of
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _asil_max_of,
     _extract_sds_partition_map,
+    _load_component_map,
+    component_verify_of,
     is_sds_placeholder_key,
     normalize_sds_key,
 )
@@ -395,7 +395,7 @@ def _get_strategy_label(strat_name: str, input_vars: Optional[List[str]] = None,
     if strat_name == "MCDC_BASE":
         return "MC/DC baseline: 모든 조건 True → 결정 True 확인"
     if strat_name.startswith("MCDC_"):
-        return f"MC/DC: 개별 조건 토글 → 결정 결과 변화 확인 (ASIL D)"
+        return "MC/DC: 개별 조건 토글 → 결정 결과 변화 확인 (ASIL D)"
     return strat_name
 
 # Domain-keyword based float boundaries for physical/engineering signals
@@ -2324,7 +2324,6 @@ def _ai_call_with_retry(agent_call_fn, ai_config, messages, *,
                          timeout: int = _AI_TIMEOUT_SEC,
                          temperature: float = 0.2) -> str:
     """Wrapper around agent_call with timeout and retry logic."""
-    import json as _json
     import threading
 
     last_err: Optional[Exception] = None

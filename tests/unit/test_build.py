@@ -2,10 +2,6 @@
 """Unit tests for workflow.build pure helper functions."""
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from workflow.build import (
     _guess_targets_from_testname,
     _overall_tests_ok,

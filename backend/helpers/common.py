@@ -1,26 +1,17 @@
 """Common utility functions for the helpers package."""
-import re
-import os
-import sys
 import csv
 import json
-import time
-import shutil
-import hashlib
 import logging
+import re
+import shutil
 import tempfile
-import zipfile
 import traceback
-import subprocess
-import threading
-from copy import deepcopy
-from io import BytesIO
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set
-from functools import lru_cache
-from time import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from fastapi import HTTPException, UploadFile
@@ -33,11 +24,14 @@ try:
 except ImportError:
     JenkinsPublishRequest = None  # type: ignore[assignment,misc]
 
-import config
+from backend.state import (
+    jenkins_progress as _jenkins_progress,
+)
+from backend.state import (
+    jenkins_progress_latest as _jenkins_progress_latest,
+)
 from backend.state import (
     jenkins_progress_lock as _jenkins_progress_lock,
-    jenkins_progress as _jenkins_progress,
-    jenkins_progress_latest as _jenkins_progress_latest,
 )
 
 _logger = logging.getLogger("devops_api")

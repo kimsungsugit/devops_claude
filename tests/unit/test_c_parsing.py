@@ -4,16 +4,16 @@
 from __future__ import annotations
 
 from report.c_parsing import (
-    _strip_c_comments,
-    _extract_c_prototypes,
     _extract_c_definitions,
     _extract_c_function_bodies,
-    _extract_simple_call_names,
-    _extract_c_macros,
-    _extract_c_macro_defs,
     _extract_c_global_candidates,
+    _extract_c_macro_defs,
+    _extract_c_macros,
+    _extract_c_prototypes,
+    _extract_simple_call_names,
+    _strip_c_comments,
 )
-from workflow.code_parser.c_parser import _parse_comment_fields, _extract_function_defs_regex_fallback
+from workflow.code_parser.c_parser import _extract_function_defs_regex_fallback, _parse_comment_fields
 
 
 class TestStripCComments:

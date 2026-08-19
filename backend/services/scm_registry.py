@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -20,10 +20,10 @@ from backend.schemas import (
     ScmUpdateRequest,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = REPO_ROOT / "config" / "scm_registry.json"
 import threading as _threading
+
 _REGISTRY_LOCK = FileLock(str(REGISTRY_PATH) + ".lock", timeout=10) if FileLock else _threading.Lock()
 
 

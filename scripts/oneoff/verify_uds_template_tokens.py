@@ -22,7 +22,6 @@ from report_gen.docx_builder import (
     _replace_reference_table_paragraph,
 )
 
-
 TEMPLATE = ROOT / "docs" / "(HDPDM01_SUDS)_template_tokenized.docx"
 OUT = ROOT / "docs" / "_uds_token_verify_sample.docx"
 

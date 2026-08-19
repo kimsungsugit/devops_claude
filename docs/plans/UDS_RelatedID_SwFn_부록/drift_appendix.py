@@ -128,6 +128,7 @@ with (OUT / "appendix_C_doc_code_drift.tsv").open("w", encoding="utf-8-sig", new
         f.write(f"{fn}\t{cls}\t{why}\n")
 
 import collections  # noqa: E402
+
 print("분류:", dict(collections.Counter(c for _, c, _ in rows)))
 for fn, cls, why in sorted(rows, key=lambda r: (r[1], r[0]))[:20]:
     print(f"  [{cls:13}] {fn}  — {why}")

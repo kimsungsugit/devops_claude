@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from openpyxl import load_workbook
 
-
 _TC_SHEET = "2.SW Unit Test Spec"
 _DATA_START_ROW = 7
 _COMPONENT_COL = 2

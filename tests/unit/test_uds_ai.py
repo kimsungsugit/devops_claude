@@ -7,18 +7,18 @@ import json
 from unittest.mock import patch
 
 from workflow.uds_ai import (
-    _trim_text,
+    _build_section_prompt,
+    _collect_function_set,
+    _dynamic_max_retries,
+    _extract_json_payload,
     _normalize_evidence_item,
     _normalize_evidence_list,
     _normalize_section,
-    _extract_json_payload,
     _parse_decision,
     _quality_warnings,
-    _validate_sections,
     _repair_missing_sections,
-    _build_section_prompt,
-    _dynamic_max_retries,
-    _collect_function_set,
+    _trim_text,
+    _validate_sections,
 )
 
 

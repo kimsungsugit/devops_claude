@@ -4,8 +4,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
-from workflow.function_module_map import build_function_module_index
 
+from workflow.function_module_map import build_function_module_index
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CHANGE_DIR = REPO_ROOT / "reports" / "impact_changes"

@@ -2,13 +2,11 @@
 """Unit tests for workflow.rag.chunker text splitting functions."""
 from __future__ import annotations
 
-import pytest
-
 from workflow.rag.chunker import (
+    REQ_ID_PATTERN,
+    _chunk_by_req_ids,
     _chunk_text,
     _extract_req_ids_from_text,
-    _chunk_by_req_ids,
-    REQ_ID_PATTERN,
 )
 
 

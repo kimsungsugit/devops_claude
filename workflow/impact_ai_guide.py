@@ -306,11 +306,11 @@ def analyze_cross_document_impact(
 def _build_guide_prompt_context(ctx: ImpactGuideContext, risk: RiskAssessment) -> str:
     """Build context string for LLM prompt."""
     lines = [
-        f"## 변경 분석 컨텍스트",
+        "## 변경 분석 컨텍스트",
         f"- 리스크 등급: {risk.grade} (점수: {risk.score}/100)",
         f"- 최대 ASIL: {risk.max_asil}",
         f"- ASIL 에스컬레이션: {'예' if risk.asil_escalation else '아니오'}",
-        f"",
+        "",
         f"## 변경된 함수 ({len(ctx.changed_types)}개)",
     ]
     for fn, ct in list(ctx.changed_types.items())[:20]:
@@ -326,7 +326,7 @@ def _build_guide_prompt_context(ctx: ImpactGuideContext, risk: RiskAssessment) -
                     lines.append(f"- {fn}")
 
     if ctx.suts_tcs:
-        lines.append(f"\n## 기존 테스트 케이스")
+        lines.append("\n## 기존 테스트 케이스")
         for fn, tcs in list(ctx.suts_tcs.items())[:10]:
             lines.append(f"- {fn}: {', '.join(tcs[:5])}")
 
@@ -756,13 +756,13 @@ def generate_impact_guide(ctx: ImpactGuideContext) -> ImpactGuide:
 def _deterministic_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> str:
     """Generate summary without LLM."""
     lines = [
-        f"# 영향도 분석 요약",
-        f"",
+        "# 영향도 분석 요약",
+        "",
         f"**리스크 등급**: {risk.grade} (점수: {risk.score}/100)",
         f"**최대 ASIL**: {risk.max_asil}",
         f"**ASIL 에스컬레이션**: {'예 — 안전 관련 함수 직접 변경' if risk.asil_escalation else '아니오'}",
-        f"",
-        f"## 변경 범위",
+        "",
+        "## 변경 범위",
         f"- 직접 변경: {len(ctx.changed_types)}개 함수",
     ]
 
@@ -770,16 +770,16 @@ def _deterministic_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> str
     lines.append(f"- 간접 영향: {total_impacted}개 함수")
 
     if risk.affected_safety_functions:
-        lines.append(f"")
-        lines.append(f"## 안전 관련 함수")
+        lines.append("")
+        lines.append("## 안전 관련 함수")
         for sf in risk.affected_safety_functions[:5]:
             lines.append(f"- {sf}")
 
     change_counts: Dict[str, int] = {}
     for ct in ctx.changed_types.values():
         change_counts[ct] = change_counts.get(ct, 0) + 1
-    lines.append(f"")
-    lines.append(f"## 변경 유형 분포")
+    lines.append("")
+    lines.append("## 변경 유형 분포")
     for ct, cnt in sorted(change_counts.items(), key=lambda x: -x[1]):
         lines.append(f"- {ct}: {cnt}건")
 

@@ -473,8 +473,8 @@ def reject_upload_in_cloudium(*files) -> None:
     (`{ok, code: "CLOUDIUM_BLOCKED", detail}`)로 변환. frontend가 단일
     분기 로직으로 cloudium 정책 위반 식별 가능.
     """
-    from backend.services.file_resolver import CloudiumFileResolver, get_resolver
     from backend.middleware import CloudiumBlockedException
+    from backend.services.file_resolver import CloudiumFileResolver, get_resolver
     if not isinstance(get_resolver(), CloudiumFileResolver):
         return
     for f in files:

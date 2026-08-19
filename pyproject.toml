@@ -26,5 +26,12 @@ target-version = "py312"
 select = ["E", "F", "I"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# `__init__.py` 의 미사용 import 는 **패키지 공개 API 재export** 다 — 결함이 아니다.
+# ruff 도 이 자리엔 자동수정을 주지 않는다(제안만 한다). 이 저장소는 이미 일부
+# 파일에 `# noqa: F401` 을 손으로 달아 같은 의도를 표시해 왔다(backend/helpers 등).
+# 규칙을 파일 단위로 끄는 게 관행이자 정확한 표현이다 — 실측 132건이 전부 이 형태.
+"__init__.py" = ["F401"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["backend", "workflow", "report_gen", "generators"]

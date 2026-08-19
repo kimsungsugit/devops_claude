@@ -28,7 +28,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Set
 
-
 # evidence excerpt에서 함수명 추출 — 라인 (uds_ai.py:91-92 source_file와 동일 정규식 패턴 활용)
 _FUNCTION_NAME_RE = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
 # evidence excerpt에서 line range hint 추출 — "L123" / "line 45-67" / "lines 100~120"

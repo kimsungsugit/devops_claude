@@ -11,7 +11,6 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from copy import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1824,7 +1823,7 @@ def _build_tc_dict(
     if sw_state:
         precond_parts.append(f"S/W State: {sw_state}")
     if func_name:
-        precond_parts.append(f"시스템 초기화 완료")
+        precond_parts.append("시스템 초기화 완료")
         precond_parts.append(f"{func_name}() 호출 가능 상태")
     asil_val = str(req.get("asil") or "").strip()
     if is_safety_asil(asil_val):
@@ -2255,7 +2254,6 @@ def _create_cover_sheet(wb, project_id, doc_id, version, asil_level):
     ws = wb.active
     ws.title = "Cover"
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    from openpyxl.utils import get_column_letter
 
     title_font = Font(name="맑은 고딕", size=24, bold=True)
     label_font = Font(name="맑은 고딕", size=9, bold=True)
@@ -3109,8 +3107,8 @@ def generate_sts_validation_report(
         "",
         "## 1. 구조 검증",
         "",
-        f"| 항목 | 값 |",
-        f"|------|-----|",
+        "| 항목 | 값 |",
+        "|------|-----|",
         f"| 시트 수 | {stats.get('sheet_count', 0)} |",
         f"| 시트 목록 | {', '.join(stats.get('sheets', []))} |",
         f"| TC 수 | {stats.get('tc_count', 0)} |",
@@ -3126,8 +3124,8 @@ def generate_sts_validation_report(
         lines.extend([
             "## 2. 품질 지표",
             "",
-            f"| 항목 | 값 |",
-            f"|------|-----|",
+            "| 항목 | 값 |",
+            "|------|-----|",
             f"| 총 TC 수 | {qr.get('total_test_cases', 0)} |",
             f"| 완전한 TC 수 | {qr.get('complete_test_cases', 0)} ({qr.get('completeness_pct', 0)}%) |",
             f"| 안전 관련 TC | {qr.get('safety_test_cases', 0)} |",

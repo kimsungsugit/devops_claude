@@ -7,7 +7,6 @@ sentinel breakdown 라벨을 만든다. 카테고리는 SwUT/SwIT 동일해야 �
 """
 from __future__ import annotations
 
-
 # 알려진 warning prefix — known_prefixes에 매칭 안 되면 'other' 카테고리로 분류.
 # F6 Round 4 NW7/NW8 fix에서 정의. NF3에서 단일 출처로 추출.
 # 라운드 C 추가: [semantic] (llm_semantic_validator) + [judge] (LLM-as-a-Judge).

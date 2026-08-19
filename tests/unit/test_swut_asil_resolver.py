@@ -12,8 +12,8 @@ import pytest
 
 from backend.services.swut_asil_resolver import (
     AsilResolveResult,
-    _normalize_asil,
     _extract_function_id,
+    _normalize_asil,
     resolve_function_asil_map,
 )
 

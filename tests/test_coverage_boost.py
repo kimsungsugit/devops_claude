@@ -3,13 +3,10 @@ Coverage boost tests for report_generator.py.
 Targets uncovered utility, parsing, generation, and report functions.
 """
 import sys
-import os
-import re
-import json
 import tempfile
-import pytest
 from pathlib import Path
-from typing import Dict, Any
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -232,6 +229,7 @@ class TestAiSectionHelpers:
 class TestDocxTextHelpers:
     def test_add_docx_text_block(self):
         import docx
+
         from report_generator import _add_docx_text_block
         doc = docx.Document()
         _add_docx_text_block(doc, "Line 1\n2.1 Section Title\nLine 3")
@@ -240,6 +238,7 @@ class TestDocxTextHelpers:
 
     def test_add_docx_text_block_empty(self):
         import docx
+
         from report_generator import _add_docx_text_block
         doc = docx.Document()
         _add_docx_text_block(doc, "")
@@ -373,9 +372,14 @@ U16 g_Speed = 100;
 
     def test_empty_inputs(self):
         from report_generator import (
-            _strip_c_comments, _extract_c_prototypes, _extract_c_definitions,
-            _extract_c_function_bodies, _extract_simple_call_names,
-            _extract_c_macros, _extract_c_macro_defs, _extract_c_global_candidates,
+            _extract_c_definitions,
+            _extract_c_function_bodies,
+            _extract_c_global_candidates,
+            _extract_c_macro_defs,
+            _extract_c_macros,
+            _extract_c_prototypes,
+            _extract_simple_call_names,
+            _strip_c_comments,
         )
         assert _strip_c_comments("") == ""
         assert _extract_c_prototypes("") == []
@@ -477,6 +481,7 @@ class TestDocxGeneration:
 
     def test_generate_docx_has_function_tables(self, mock_uds_payload, tmp_path):
         import docx
+
         from report_generator import generate_uds_docx
         out = tmp_path / "test_fn.docx"
         generate_uds_docx(None, mock_uds_payload, str(out))
@@ -514,7 +519,8 @@ class TestDocxGeneration:
 
     def test_roundtrip_parse(self, mock_uds_payload, tmp_path):
         import docx
-        from report_generator import generate_uds_docx, _extract_function_info_from_docx
+
+        from report_generator import _extract_function_info_from_docx, generate_uds_docx
         out = tmp_path / "roundtrip.docx"
         generate_uds_docx(None, mock_uds_payload, str(out))
         doc = docx.Document(str(out))
@@ -572,8 +578,8 @@ class TestQualityGateReport:
 
 class TestBuildViewPayload:
     def test_build_view_payload(self, mock_uds_payload, tmp_path):
-        import docx
-        from report_generator import generate_uds_docx, build_uds_view_payload
+
+        from report_generator import build_uds_view_payload, generate_uds_docx
         docx_path = tmp_path / "view_test.docx"
         generate_uds_docx(None, mock_uds_payload, str(docx_path))
         result = build_uds_view_payload(str(docx_path))
@@ -587,7 +593,7 @@ class TestBuildViewPayload:
 
 class TestSwcomContextReport:
     def test_swcom_context_report(self, mock_uds_payload, tmp_path):
-        from report_generator import generate_uds_docx, generate_swcom_context_report
+        from report_generator import generate_swcom_context_report, generate_uds_docx
         docx_path = tmp_path / "swcom_src.docx"
         generate_uds_docx(None, mock_uds_payload, str(docx_path))
         out = tmp_path / "swcom_ctx.md"
@@ -826,6 +832,7 @@ class TestDocxGenerationExtended:
 
     def test_docx_with_template(self, mock_uds_payload, tmp_path):
         import docx
+
         from report_generator import generate_uds_docx
         tpl = tmp_path / "template.docx"
         doc = docx.Document()

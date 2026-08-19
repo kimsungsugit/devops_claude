@@ -4,20 +4,18 @@ import datetime as _dt
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import config
-
-from backend.services.jenkins_client import JenkinsClient, JenkinsServerClient
 from backend.services.jenkins_adapter import ensure_frontend_summary
+from backend.services.jenkins_client import JenkinsClient, JenkinsServerClient
+from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _norm_job_url, _safe_artifact_path
 from backend.services.local_service import (
     run_git,
     run_svn,
     svn_date_revision_map,
     svn_revision_at_date,
 )
-from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _norm_job_url, _safe_artifact_path
-
 
 _logger = logging.getLogger("devops_api.jenkins_service")
 
@@ -166,8 +164,8 @@ def _robust_rmtree(path: Path) -> None:
     there fails with PermissionError and leaves debris that confuses the next
     `svn checkout`."""
     import os
-    import stat
     import shutil
+    import stat
 
     def _on_error(func, target, exc_info):
         try:

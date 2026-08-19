@@ -14,18 +14,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pytest
 
-from backend.services.chat_history_db import init_db, get_engine, reset_engine, get_session
-from backend.services.chat_history_models import ChatHistoryBase, ChatConversation, ChatMessage
+from backend.services.chat_history_db import get_engine, get_session, init_db, reset_engine  # noqa: E402
+from backend.services.chat_history_models import ChatMessage  # noqa: E402
 from backend.services.chat_history_service import (
     _auto_title,
-    save_message_pair,
+    delete_conversation,
+    list_conversations,
     load_history,
     load_history_as_chat_items,
-    list_conversations,
-    delete_conversation,
+    save_message_pair,
     update_title,
 )
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────
 

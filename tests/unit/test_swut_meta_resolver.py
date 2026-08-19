@@ -321,6 +321,7 @@ class TestResolveSwudsMapsOutWarnings:
 
     def test_out_warnings_on_permission_error(self, monkeypatch):
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(
@@ -345,6 +346,7 @@ class TestResolveSwudsMapsOutWarnings:
     def test_out_warnings_default_none_backward_compat(self, monkeypatch):
         """out_warnings 미전달 (기존 호출자) — 예외 없이 빈 맵 반환 계약 유지."""
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(
@@ -360,6 +362,7 @@ class TestResolveSwudsMapsOutWarnings:
 
     def test_out_warnings_on_parse_not_ok(self, monkeypatch):
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(
@@ -376,6 +379,7 @@ class TestResolveSwudsMapsOutWarnings:
     def test_apply_function_asil_map_propagates_swuds_failure(self, monkeypatch):
         """apply_function_asil_map 경유 시 session.parse_warnings에 사유 누적."""
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(mod, "resolve_c_source_root", lambda req, pid: "")

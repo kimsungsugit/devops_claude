@@ -17,13 +17,9 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
-
 import types  # noqa: E402
-
-import pytest
+from pathlib import Path
+from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
 # 무거운 외부 의존성 stub 처리
@@ -68,7 +64,6 @@ def _ensure_stubs() -> None:
 _ensure_stubs()
 
 import workflow.pipeline as pipeline_mod  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # _cmake_quote

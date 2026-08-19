@@ -1,19 +1,17 @@
 """Unit tests for workflow.common helper functions."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from workflow.common import (
+    Issue,
     PipelineStopRequested,
     check_stop,
-    Issue,
-    normalize_whitespace,
-    standardize_result,
-    read_excerpt,
     create_backup,
+    normalize_whitespace,
+    read_excerpt,
     restore_from_backup,
+    standardize_result,
 )
 
 

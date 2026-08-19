@@ -9,12 +9,12 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.parse import urlparse
-from html import escape
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

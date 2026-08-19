@@ -5,18 +5,17 @@ Runs the same measurements and compares with baseline_before.json.
 
 import json
 import sys
-import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from tests.quality_baseline import (
-    _measure_srs_parsing,
-    _measure_sds_parsing,
-    _measure_reference_suds_extraction,
     _measure_code_analysis,
     _measure_json_parsing,
+    _measure_reference_suds_extraction,
+    _measure_sds_parsing,
+    _measure_srs_parsing,
 )
 
 

@@ -1,6 +1,7 @@
 """report_gen.validation - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
+import json
+import logging
 
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
@@ -8,21 +9,16 @@ import re
 #   KEY_FN_STATICS = "globals_static"  — static vars used by the function
 # Legacy: older sidecar JSONs may use bare "globals" key → fall back to it when
 # reading (see _extract_payload_function_details / row.get("globals_global") or row.get("globals"))
-import os
-import json
-import csv
-import logging
-import time
+import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from report_gen.docx_builder import _iter_template_blocks
 from report_gen.function_analyzer import (
-    _normalize_symbol_name,
-    _is_generic_description,
     _classify_description_quality,
+    _is_generic_description,
+    _normalize_symbol_name,
 )
 from report_gen.gate_report import parse_gate_report, to_percent_text_map
 from report_gen.provenance import SOURCE_ALIASES
@@ -1657,7 +1653,7 @@ def generate_asil_related_confidence_report(
     lines.append("")
     lines.append(f"- Total functions: `{total}`")
     lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
-    lines.append(f"- Low confidence threshold: `< 0.80`")
+    lines.append("- Low confidence threshold: `< 0.80`")
     # ⚠ 범례는 `src_labels` 에서 **파생**시킨다. 예전엔 하드코딩 문자열이라 새 라벨이
     #    생겨도 범례에 안 나타났다 — 표에는 찍히는데 범례엔 없는 라벨이 생긴다.
     lines.append("- Source categories: " + " / ".join(f"`{v}`" for v in src_labels.values()))

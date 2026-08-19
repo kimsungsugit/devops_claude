@@ -26,97 +26,89 @@ KEY_MOD_STATICS = "static_vars"     # module-level: static var definitions table
 # Legacy key kept for backward compat when reading old sidecar JSON files
 KEY_FN_GLOBALS_LEGACY = "globals"
 # ---------------------------------------------------------------------------
-import os
 import json
-import csv
 import logging
-import time
+import os  # noqa: E402
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
-from io import BytesIO, StringIO
 from html import escape
+from pathlib import Path  # noqa: E402
+from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: E402
 
 from report.constants import (
     DEFAULT_TYPE_RANGES,
-    UDS_SERVICE_TABLE,
-    UDS_DID_PATTERNS,
-    UDS_SERVICE_ID_PATTERNS,
 )
-from report_gen.source_parser import (
-    _extract_doxygen_asil_tags,
-    _extract_file_header_asil,
-)
-from workflow.code_parser.c_parser import c_identifiers  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
 from report_gen.function_analyzer import (
-    _parse_signature_outputs,
-    _is_static_var,
-    _fallback_function_description,
-    _parse_signature_params,
-    _extract_logic_flow,
-    _extract_condition_branch_calls,
-    _normalize_symbol_name,
+    _collect_var_usage,
+    _enhance_description_text,
     _enhance_function_description,
+    _extract_condition_branch_calls,
+    _extract_logic_flow,
+    _extract_logic_terminal_paths,
+    _extract_primary_condition,
+    _extract_return_type,
+    _fallback_function_description,
+    _format_param_entry,
+    _infer_precondition_from_body,
+    _is_generic_description,
+    _is_static_var,
     _normalize_bracket_expr,
     _normalize_dims,
-    _is_generic_description,
-    _collect_var_usage,
-    _extract_logic_terminal_paths,
-    _format_param_entry,
-    _enhance_description_text,
-    _extract_return_type,
+    _normalize_symbol_name,
+    _parse_signature_outputs,
+    _parse_signature_params,
     _split_param,
-    _extract_primary_condition,
-    _infer_precondition_from_body,
 )
 from report_gen.requirements import (
-    _load_component_map,
-    component_verify_of,
-    _extract_requirements_from_comments,
     _collect_section_lines,
-    _normalize_table_row,
-    _split_doc_function_blocks,
     _extract_function_blocks,
+    _extract_requirements_from_comments,
     _extract_state_tokens,
     _extract_table_section,
+    _load_component_map,
+    _normalize_table_row,
+    _split_doc_function_blocks,
+    component_verify_of,
 )
 from report_gen.source_parser import (
     _SRC_READ_MAX_BYTES,
     _decl_array_dim,
-    is_const_type,
-    _scan_source_comment_patterns,
+    _extract_c_definitions,
+    _extract_c_function_bodies,
+    _extract_c_global_candidates,
+    _extract_c_macro_defs,
     _extract_c_macros,
+    _extract_c_prototypes,
+    _extract_doxygen_asil_tags,
+    _extract_fallback_call_names,
+    _extract_file_header_asil,
+    _extract_function_pointer_call_targets,
+    _extract_local_static_candidates,
+    _extract_macro_call_names,
     _read_source_text,
     _read_text_limited,
+    _scan_source_comment_patterns,
     _strip_c_comments,
-    _extract_c_prototypes,
-    _extract_c_global_candidates,
-    _extract_c_function_bodies,
-    _extract_c_macro_defs,
     extract_struct_member_arrays,
-    _extract_c_definitions,
-    _extract_local_static_candidates,
-    _extract_fallback_call_names,
-    _extract_macro_call_names,
-    _extract_function_pointer_call_targets,
+    is_const_type,
 )
 from report_gen.uds_text import (
-    _merge_logic_ai_items,
-    _apply_uds_rules,
-    _merge_section_text,
     _ai_document_text,
-    _uds_lines_to_html,
     _ai_evidence_lines,
+    _apply_uds_rules,
+    _merge_logic_ai_items,
+    _merge_section_text,
+    _uds_lines_to_html,
     _uds_logic_html,
 )
 from report_gen.utils import (
-    _normalize_swcom_label,
-    _infer_type_from_decl,
     _extract_simple_call_names,
-    _safe_dict,
+    _infer_type_from_decl,
     _infer_type_from_file,
+    _normalize_swcom_label,
+    _safe_dict,
     function_name_key,
 )
+from workflow.code_parser.c_parser import c_identifiers  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
 
 _logger = logging.getLogger("report_generator")
 
@@ -1838,7 +1830,7 @@ def generate_uds_source_sections(
 
     interfaces_lines = interfaces or ["N/A"]
 
-    from report.constants import UDS_SERVICE_TABLE, UDS_DID_PATTERNS, UDS_SERVICE_ID_PATTERNS
+    from report.constants import UDS_DID_PATTERNS, UDS_SERVICE_ID_PATTERNS, UDS_SERVICE_TABLE
     did_entries: List[str] = []
     service_entries: List[str] = []
     did_function_map: Dict[str, List[str]] = {}

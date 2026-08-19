@@ -10,8 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
-from backend.helpers.jenkins import _resolve_cached_build_root
-from backend.helpers.jenkins import _jenkins_sts_dir, _jenkins_suts_dir
+from backend.helpers.jenkins import _jenkins_sts_dir, _jenkins_suts_dir, _resolve_cached_build_root
 from backend.services.jenkins_helpers import _job_slug
 from backend.services.qac_excel_generator import generate_qac_excel
 from backend.services.qac_parser import QACDataManager, parse_qac_report

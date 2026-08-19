@@ -17,9 +17,9 @@ import shlex
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Sequence
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import config  # type: ignore  # 프로젝트 config (있으면 사용)
 
@@ -696,7 +696,7 @@ def run_doxygen(project_root: Path, output_dir: Path) -> Dict[str, Any]:
     
     # Doxyfile이 없으면 기본 설정으로 생성
     if not cfg_path.exists():
-        print(f"[doxygen] Doxyfile not found, generating default configuration...")
+        print("[doxygen] Doxyfile not found, generating default configuration...")
         try:
             # output_dir을 project_root 기준 상대 경로로 변환
             try:
@@ -816,7 +816,7 @@ def generate_coverage_report(project_root: Path, reports_dir: Path, build_dir: P
             gcovr_cmd = None
         if gcovr_cmd is None:
             res["reason"] = "gcovr_not_found"
-            print(f"[coverage] gcovr not found in PATH. Please install gcovr to generate coverage reports.")
+            print("[coverage] gcovr not found in PATH. Please install gcovr to generate coverage reports.")
             return res
     
     # .gcda 파일 검색 및 상세 로깅
@@ -837,9 +837,9 @@ def generate_coverage_report(project_root: Path, reports_dir: Path, build_dir: P
                 try:
                     cache_content = cmake_cache.read_text(encoding="utf-8", errors="ignore")
                     if "DEVOPS_COVERAGE:BOOL=ON" in cache_content:
-                        print(f"[coverage] CMakeCache.txt shows DEVOPS_COVERAGE=ON")
+                        print("[coverage] CMakeCache.txt shows DEVOPS_COVERAGE=ON")
                     else:
-                        print(f"[coverage] CMakeCache.txt shows DEVOPS_COVERAGE=OFF or not set")
+                        print("[coverage] CMakeCache.txt shows DEVOPS_COVERAGE=OFF or not set")
                 except Exception:
                     pass
         return res

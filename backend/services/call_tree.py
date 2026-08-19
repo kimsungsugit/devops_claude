@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import re
-import json
 import csv
 import io
+import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
-
 
 _CODE_EXTS = {".c", ".h", ".cpp", ".hpp"}
 _KEYWORDS = {

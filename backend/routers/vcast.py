@@ -1,28 +1,26 @@
 """Auto-generated router: vcast"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
-import json
-import traceback
 import logging
-from pathlib import Path
+import traceback
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
 
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
+
+from backend.helpers import _resolve_cached_build_root
 from backend.schemas import (
     VCastGenerateExcelRequest,
-    VCastParseRequest,
     VCastProcessJenkinsRequest,
 )
-from backend.helpers import _resolve_cached_build_root
-from backend.services.vcast_parser import (
-    VectorCASTParser,
-    VCASTVersion,
-    ReportType,
-    parse_vcast_report,
-    MetricsBank,
-)
-from backend.services.vcast_excel_generator import generate_testcase_excel, generate_metrics_excel
 from backend.services.paths import safe_resolve_under
+from backend.services.vcast_excel_generator import generate_metrics_excel, generate_testcase_excel
+from backend.services.vcast_parser import (
+    MetricsBank,
+    ReportType,
+    VCASTVersion,
+    parse_vcast_report,
+)
 
 repo_root = Path(__file__).resolve().parents[2]
 
@@ -265,12 +263,12 @@ def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
         # Metrics 리포트인 경우
         if mode == "Metrics" or "statement_data" in req.parsed_data or "functions_data" in req.parsed_data:
             from backend.services.vcast_parser import (
-                MetricsBank,
-                MatixDataBank,
-                MatricStatementItem,
-                MatricFunCallItem,
                 CoverageItem,
+                MatixDataBank,
+                MatricFunCallItem,
+                MatricStatementItem,
                 MatricsType,
+                MetricsBank,
             )
             
             metrics_bank = MetricsBank()
@@ -599,10 +597,10 @@ async def vcast_test_summary(req: Request) -> Dict[str, Any]:
         previous = body.get("previous_data")
 
         from backend.services.test_summary_service import (
-            classify_failures_bulk,
-            build_unit_breakdown,
-            evaluate_quality_gates,
             build_trend_analysis,
+            build_unit_breakdown,
+            classify_failures_bulk,
+            evaluate_quality_gates,
             generate_executive_summary,
         )
 

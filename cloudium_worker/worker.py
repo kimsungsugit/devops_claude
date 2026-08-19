@@ -267,7 +267,7 @@ def _start_tcp_server(host: str, port: int) -> _ThreadingTCPServer:
 def _run_gui(host: str, port: int) -> int:
     try:
         import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
+        from tkinter import filedialog, messagebox, ttk
     except ImportError:
         # tkinter 미설치 (headless) — 백그라운드만으로 동작
         srv = _start_tcp_server(host, port)

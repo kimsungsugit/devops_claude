@@ -1,17 +1,16 @@
 """Tests for backend.services.test_summary_service."""
-import pytest
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.services.test_summary_service import (
+    build_requirement_test_map,
+    build_trend_analysis,
+    build_unit_breakdown,
     classify_failure,
     classify_failures_bulk,
-    build_unit_breakdown,
     evaluate_quality_gates,
-    build_trend_analysis,
-    build_requirement_test_map,
     generate_executive_summary,
 )
 

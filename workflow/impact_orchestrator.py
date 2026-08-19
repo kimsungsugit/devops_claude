@@ -2039,7 +2039,7 @@ def _write_review_artifact(
                 lines.append("- UDS 기능 설명(description) 섹션: 내부 동작/로직 변경 반영")
                 lines.append("- outputs 필드: 반환값·출력 범위 변경 여부 확인")
                 if src_calls:
-                    lines.append(f"- calls_list 섹션: 호출 함수 추가/제거 반영")
+                    lines.append("- calls_list 섹션: 호출 함수 추가/제거 반영")
             elif kind in ("SIGNATURE", "HEADER"):
                 lines.append("- inputs 필드: 파라미터 추가·삭제·타입 변경 반영")
                 lines.append("- outputs 필드: 반환 타입 변경 반영")

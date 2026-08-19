@@ -1,20 +1,34 @@
 """Auto-generated router: sessions"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from typing import Any, Dict, List, Optional, Tuple
-import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
-import traceback
-import logging
-from time import time
 import uuid
 import zipfile
-import asyncio
+from datetime import datetime
 from pathlib import Path
+from time import time
+from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
+
+from backend.helpers import (
+    _augment_path,
+    _collect_tool_paths,
+    _create_zip_file,
+    _exports_dir,
+    _invalidate_session_cache,
+    _load_session_meta,
+    _read_json,
+    _resolve_base_dir,
+    _resolve_source_root_from_cfg,
+    _save_session_meta,
+    _session_dir,
+    _track_process,
+    _write_json,
+)
 from backend.schemas import (
     ReportZipRequest,
     RunRequest,
@@ -22,13 +36,12 @@ from backend.schemas import (
     SessionNamePayload,
     StopRequest,
 )
-from datetime import datetime
-from backend.helpers import _augment_path, _collect_tool_paths, _create_zip_file, _exports_dir, _invalidate_session_cache, _load_session_meta, _read_json, _resolve_base_dir, _resolve_source_root_from_cfg, _save_session_meta, _session_dir, _track_process, _write_json
 from backend.services.files import list_log_candidates, list_report_files, read_csv_rows, tail_text
 from backend.services.paths import safe_resolve_under
-from backend.services.report_parsers import build_report_summary, build_report_comparisons, find_project_report_dirs
-from backend.state import session_list_cache as _session_list_cache, SESSION_CACHE_TTL as _SESSION_CACHE_TTL
+from backend.services.report_parsers import build_report_comparisons, build_report_summary, find_project_report_dirs
+from backend.state import SESSION_CACHE_TTL as _SESSION_CACHE_TTL
 from backend.state import running_processes  # /api/run/stop 소유권 대조 — stop_run 참조
+from backend.state import session_list_cache as _session_list_cache
 
 repo_root = Path(__file__).resolve().parents[2]
 

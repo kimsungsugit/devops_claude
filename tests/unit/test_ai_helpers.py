@@ -2,30 +2,26 @@
 """Unit tests for workflow.ai pure helper functions (no LLM calls)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from workflow.ai import (
+    _alt_buffer,
     _extract_gemini_text,
     _extract_json_from_reply,
+    _extract_test_body,
     _format_rag_context,
     _has_test_main,
-    _extract_test_body,
+    _is_simple_signature,
     _looks_like_c_family_code,
+    _make_unified_diff,
     _param_placeholder,
-    _parse_param_name,
-    _alt_buffer,
     _parse_list_str,
+    _parse_param_name,
     _parse_review_decision,
     _parse_search_replace_blocks,
-    _make_unified_diff,
-    _is_simple_signature,
     _role_system_prompt,
-    _plan_has_requirement_id,
     _validate_plan_obj,
 )
 

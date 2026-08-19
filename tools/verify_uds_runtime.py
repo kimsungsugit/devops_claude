@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 REPO_ROOT = Path(r"D:/Project/devops/260105")
 if str(REPO_ROOT) not in sys.path:

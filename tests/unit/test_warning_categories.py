@@ -4,8 +4,8 @@ SwUT/SwIT routers의 breakdown 라벨 단일 출처 — NW7/NW8 검증을 모듈
 """
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

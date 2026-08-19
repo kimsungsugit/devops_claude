@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 _TMP_ROOT = Path(__file__).resolve().parents[1] / ".codex_tmp"
 _TMP_ROOT.mkdir(parents=True, exist_ok=True)
 

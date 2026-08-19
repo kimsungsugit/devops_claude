@@ -206,8 +206,8 @@ def _patch_folder_parse(monkeypatch, *, exec_results, tc_files=None):
 
     실제 VC2025_LAYOUT을 재사용해 extract_env(suffix-strip) 동작까지 검증한다.
     """
-    import backend.services.swut_input_adapter as SA
     import backend.services.file_resolver as FR
+    import backend.services.swut_input_adapter as SA
 
     if tc_files is None:
         tc_files = ["SwUT_01_Lib_sha256_TestCaseDataReport.html"]

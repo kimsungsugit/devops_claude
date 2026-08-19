@@ -4,12 +4,12 @@ Run: python -m backend.mcp.stdio_server
 """
 from __future__ import annotations
 
+# Flush stderr immediately so error messages appear before process exit
+import functools
 import json
 import sys
 from pathlib import Path
 
-# Flush stderr immediately so error messages appear before process exit
-import functools
 print = functools.partial(print, flush=True)  # noqa: A001 — intentional shadow
 
 # Ensure project root is on sys.path

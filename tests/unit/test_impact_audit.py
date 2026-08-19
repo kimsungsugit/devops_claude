@@ -24,8 +24,9 @@ def _lock_json(impact_audit, scm_id="hdpdm01"):
 
 
 def test_run_lock_acquire_release(tmp_path, monkeypatch):
-    from workflow import impact_audit
     import threading
+
+    from workflow import impact_audit
 
     _isolate_locks(impact_audit, tmp_path, monkeypatch)
 

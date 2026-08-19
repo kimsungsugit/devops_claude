@@ -28,10 +28,10 @@ from __future__ import annotations
 import base64
 import contextvars
 import json
-import os
-import sys
-import socket
 import logging
+import os
+import socket
+import sys
 import time
 import unicodedata
 import uuid

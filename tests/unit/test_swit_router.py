@@ -5,8 +5,8 @@ StreamingResponse 헤더 검증.
 """
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.main import app  # noqa: E402
-
 
 client = TestClient(app)
 
@@ -254,10 +253,10 @@ class TestSwitSitrEndpointRegistration:
 
     def test_sitr_shares_coverage_semaphore(self):
         """Semaphore(2) — Coverage와 SITR 동일 인스턴스 공유."""
-        from backend.routers.swit import _BUILD_SEMAPHORE
         # 모듈 단일 instance — Coverage build_swit_coverage / SITR build_swit_sitr
         # 모두 `_BUILD_SEMAPHORE` 사용 (소스 검사로 충분).
         import backend.routers.swit as swit_mod
+        from backend.routers.swit import _BUILD_SEMAPHORE
         src = swit_mod.__file__
         with open(src, encoding="utf-8") as f:
             content = f.read()
@@ -492,8 +491,9 @@ class TestSwitConfigFallback50:
 
     def test_read_template_bytes_empty_both_returns_400(self, tmp_path, monkeypatch):
         """req.template_path 빈 + config의 swit_coverage_template 빈 슬롯 → 400 raise (사용자가 swut_meta.json 미설정 시 명시 에러)."""
-        from backend.routers.swit import _read_template_bytes
         from fastapi import HTTPException
+
+        from backend.routers.swit import _read_template_bytes
         self._setup_cfg(tmp_path, monkeypatch, {
             "projects": {"HDPDM01": {"template_paths": {"swit_coverage_template": ""}}}
         })
@@ -504,8 +504,9 @@ class TestSwitConfigFallback50:
 
     def test_read_template_bytes_sitr_kind_uses_swit_sitr_key(self, tmp_path, monkeypatch):
         """kind='sitr' → swit_sitr_template config 키 사용."""
-        from backend.routers.swit import _read_template_bytes
         from fastapi import HTTPException
+
+        from backend.routers.swit import _read_template_bytes
         self._setup_cfg(tmp_path, monkeypatch, {
             "projects": {"HDPDM01": {"template_paths": {"swit_sitr_template": ""}}}
         })
@@ -516,8 +517,9 @@ class TestSwitConfigFallback50:
 
     def test_read_template_bytes_switcr_kind_uses_switcr_key(self, tmp_path, monkeypatch):
         """kind='switcr' uses switcr_template config key."""
-        from backend.routers.swit import _read_template_bytes
         from fastapi import HTTPException
+
+        from backend.routers.swit import _read_template_bytes
         self._setup_cfg(tmp_path, monkeypatch, {
             "projects": {"HDPDM01": {"template_paths": {"switcr_template": ""}}}
         })
@@ -674,6 +676,7 @@ class TestSwitConfigFallback50:
     def test_coverage_build_passes_swits_map_to_builder(self, monkeypatch):
         """SwITCV도 SwITS spec parse 결과를 Traceability writer로 전달."""
         import io
+
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITBuildRequest
         from backend.services.swit_coverage_aggregator import SwitCoverageBuildResult
@@ -727,6 +730,7 @@ class TestSwitConfigFallback50:
         (list kwarg)로 collector에 전달한다.
         """
         import io
+
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITBuildRequest
         from backend.services.swit_coverage_aggregator import SwitCoverageBuildResult
@@ -778,6 +782,7 @@ class TestSwitConfigFallback50:
         B2 대칭 이후 — 단일 config 폴더도 ``log_folders=[folder]`` list kwarg로 전달.
         """
         import io
+
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITSitrBuildRequest
         from backend.services.swit_sitr_aggregator import SwitSitrBuildResult
@@ -908,8 +913,9 @@ class TestSheetNameSubstring53fix:
 
     def test_swit_coverage_aggregator_matches_swit_v202_sheet_names(self):
         """SwIT v2.02 양식의 '1.Test Summary' 시트가 substring 매칭으로 발견됨."""
-        from backend.services import swit_coverage_aggregator as mod
         import inspect
+
+        from backend.services import swit_coverage_aggregator as mod
         src = inspect.getsource(mod)
         assert '"test summary" in n.lower()' in src or "'test summary' in n.lower()" in src, (
             "swit_coverage_aggregator가 'test summary' substring 매칭 안 함 — 53차 fix 누락"
@@ -917,8 +923,9 @@ class TestSheetNameSubstring53fix:
 
     def test_swit_sitr_aggregator_matches_swit_v202_sheet_names(self):
         """SITR도 동일 — Test Summary + Deviation + Test Log substring 매칭."""
-        from backend.services import swit_sitr_aggregator as mod
         import inspect
+
+        from backend.services import swit_sitr_aggregator as mod
         src = inspect.getsource(mod)
         for keyword in ("test summary", "deviation", "test log"):
             assert (f'"{keyword}" in n.lower()' in src

@@ -5,19 +5,21 @@
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
-import contextvars
 from pathlib import Path
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from backend.services.auth_service import (
     TokenError,
     decode_token,
     is_dev_mode_x_user_fallback_enabled,
 )
+
 # 48차 W45: users.get_user를 top-level import (이전 47차 W35: lazy import).
 # circular 안전 — users.py가 user_context 미참조.
 from backend.services.users import get_user as _users_get_user

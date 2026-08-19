@@ -9,7 +9,7 @@ modules (e.g. report_gen.uds_generator) should import from
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 
 def _strip_c_comments(text: str) -> str:

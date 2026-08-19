@@ -1,8 +1,6 @@
 """Unit tests for report_gen.validation pure-logic functions."""
 from __future__ import annotations
 
-import pytest
-
 
 class TestValidCallNames:
     def test_filters_keywords_and_short_upper(self):
@@ -249,6 +247,7 @@ class TestLoadUdsPayloadForDocx:
 
     def test_loads_payload_json(self, tmp_path):
         import json
+
         from report_gen.validation import _load_uds_payload_for_docx
 
         docx_path = tmp_path / "test.docx"
@@ -347,8 +346,9 @@ class TestValidateUdsDocxStructure:
         assert any("not found" in i for i in result["issues"])
 
     def test_docx_not_installed(self, monkeypatch):
-        from report_gen.validation import validate_uds_docx_structure
         import builtins
+
+        from report_gen.validation import validate_uds_docx_structure
 
         original_import = builtins.__import__
 

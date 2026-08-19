@@ -14,7 +14,6 @@ import config
 
 from .paths import safe_resolve_under
 
-
 _logger = logging.getLogger(__name__)
 
 

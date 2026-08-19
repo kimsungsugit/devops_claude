@@ -446,6 +446,7 @@ class TestSwudsAsilFallback32:
     def test_swuds_only_fallback_when_no_c_source(self, monkeypatch):
         """c_source 없고 swuds만 → SwUDS 결과 사용."""
         from backend.routers import swut as swut_router
+
         # 54차 T281 — swut_meta_resolver로 redirect
         from backend.services import swut_meta_resolver as meta_resolver_mod
         # 라운드 89: 단일 parse seam resolve_swuds_maps.
@@ -487,6 +488,7 @@ class TestSummaryHeaderTruncation21:
     def test_large_asil_d_list_truncated_to_valid_json(self):
         """ASIL D 함수 100개 → 헤더 1024B 초과 → list 길이로 축약된 valid JSON."""
         import json
+
         from backend.routers.swut import _build_result_to_response
 
         # 큰 asil_d_function_ids list (100 개 × 13B ≈ 1500B)
@@ -516,6 +518,7 @@ class TestSummaryHeaderTruncation21:
         """1024B 이하 summary는 그대로 전달."""
         import json
         from io import BytesIO
+
         from backend.routers.swut import _build_result_to_response
 
         summary = {
@@ -546,6 +549,7 @@ class TestWarningsSentinelBreakdownRound3NC1:
     def test_warnings_truncated_with_category_breakdown(self):
         import json
         from io import BytesIO
+
         from backend.routers.swut import _build_result_to_response
 
         # production-realistic — stamp summary 메시지에 "ambiguous skipped:" 포함
@@ -739,6 +743,7 @@ class TestConfigCache:
     def test_lru_cache_invalidates_on_mtime_change(self, tmp_path, monkeypatch):
         """mtime이 변하면 cache miss → reload."""
         import time
+
         from backend.routers import swut as swut_mod
         from backend.services import swut_meta_resolver as resolver_mod
 
@@ -824,9 +829,9 @@ class TestSwutConfigFallback50:
         self, monkeypatch,
     ):
         """SwUTCR reason/action C scan must reuse the system-dir guard."""
+        import backend.services.swut_asil_resolver as asil_resolver
         from backend.routers import swut as swut_mod
         from backend.schemas import SwUTBuildRequest
-        import backend.services.swut_asil_resolver as asil_resolver
 
         monkeypatch.setattr(asil_resolver, "is_blocked_source_root", lambda _p: True)
 
@@ -1062,6 +1067,7 @@ class TestAsyncMigration:
     def test_endpoint_uses_to_thread(self):
         """source code에 asyncio.to_thread 사용 + get_event_loop 미사용 검증."""
         import inspect
+
         from backend.routers import swut as swut_mod
 
         src = inspect.getsource(swut_mod)
@@ -1101,6 +1107,7 @@ class TestStreamingResponse14:
     def test_streaming_response_used_not_plain_response(self):
         """W1a: source code에 StreamingResponse 사용 확인."""
         import inspect
+
         from backend.routers import swut as swut_mod
 
         src = inspect.getsource(swut_mod)
@@ -1134,8 +1141,9 @@ class TestStreamingResponse14:
 
     def test_iter_bytesio_yields_chunks(self):
         """W1: _iter_bytesio가 chunk별 yield + 빈 data 시 종료."""
-        from backend.routers.swut import _iter_bytesio
         import io as _io
+
+        from backend.routers.swut import _iter_bytesio
 
         data = b"x" * (200 * 1024)  # 200KB → 64KB chunk 4개
         buf = _io.BytesIO(data)
@@ -1164,6 +1172,7 @@ class TestSutrSwudsIntegration17:
         ) as build_mock:
             # build_sutr mock — io.BytesIO 결과 반환
             import io as _io
+
             from backend.services.swut_sutr_aggregator import SutrBuildResult
             build_mock.return_value = SutrBuildResult(
                 ok=True, xlsm_io=_io.BytesIO(b"PK\x03\x04test"),
@@ -1233,6 +1242,7 @@ class TestConsistencyCheckEndpoint18:
     def test_endpoint_returns_consistency_report_json(self):
         """200: 정상 호출 시 ConsistencyReport.to_dict() 형식."""
         from unittest.mock import MagicMock
+
         from backend.services.swut_consistency_checker import ConsistencyReport
 
         mock_report = ConsistencyReport(ok=True, issues=[], parse_warnings=[])
@@ -1295,7 +1305,7 @@ class TestMemoryMonitor20:
 
     def test_returns_float_when_psutil_available(self):
         """psutil 설치된 환경에서는 양수 float 반환."""
-        from backend.routers._safety import get_process_memory_mb, _HAS_PSUTIL
+        from backend.routers._safety import _HAS_PSUTIL, get_process_memory_mb
         result = get_process_memory_mb()
         if _HAS_PSUTIL:
             assert isinstance(result, float)
@@ -1316,6 +1326,7 @@ class TestMemoryMonitor20:
     def test_returns_none_on_psutil_error(self):
         """psutil.Process가 예외 던지면 silent None."""
         from unittest.mock import patch as _patch
+
         from backend.routers import _safety as safety_mod
         if not safety_mod._HAS_PSUTIL:
             return  # psutil 미설치 환경 skip
@@ -1707,6 +1718,7 @@ class TestSwutcrSpecFiResolve107:
     def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
         """resolve_swuts_path의 config fallback을 hermetic하게 격리."""
         import json as _json
+
         from backend.services import swut_meta_resolver as resolver_mod
         cfg_path = tmp_path / "swut_meta.json"
         cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")

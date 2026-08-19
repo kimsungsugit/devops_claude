@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 from workflow.change_trigger import ChangeTrigger
 from workflow.impact_orchestrator import ImpactOptions, run_impact_update
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JOB_DIR = REPO_ROOT / "reports" / "impact_jobs"
 _JOB_LOCK = threading.Lock()

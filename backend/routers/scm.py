@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.dependencies.admin import require_admin
 from backend.schemas import ScmLinkedDocs, ScmRegisterRequest, ScmUpdateRequest
+from backend.services.local_service import svn_info_url
 from backend.services.scm_registry import (
     ScmValidationError,
     delete_entry,
@@ -19,7 +20,6 @@ from backend.services.scm_registry import (
     replace_linked_docs,
     update_entry,
 )
-from backend.services.local_service import svn_info_url
 from workflow.impact_audit import list_impact_audits
 from workflow.impact_changes import (
     build_timeline,
@@ -29,7 +29,6 @@ from workflow.impact_changes import (
     load_change_log,
 )
 from workflow.impact_jobs import list_job_summaries, list_jobs, load_job
-
 
 router = APIRouter()
 
@@ -142,12 +141,13 @@ def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
     N15: _MERGE_LOCK으로 read-modify-write race 차단.
     """
     import os
+
+    from backend.helpers.common import _parse_path_list
     from backend.services.file_resolver import (
         CloudiumFileResolver,
         get_resolver,
         switch_mode,
     )
-    from backend.helpers.common import _parse_path_list
 
     with _MERGE_LOCK:
         resolver = get_resolver()

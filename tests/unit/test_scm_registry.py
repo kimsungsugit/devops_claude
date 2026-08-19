@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_registry_create_update_delete(tmp_path, monkeypatch):
     from backend.schemas import ScmLinkedDocs, ScmRegisterRequest, ScmUpdateRequest
@@ -208,6 +206,7 @@ def test_resolve_credentials_does_not_match_reverse_direction(tmp_path, monkeypa
 def test_register_rejects_blacklisted_env_name(tmp_path, monkeypatch):
     """`scm_password_env=PATH` must be rejected (not silently accepted)."""
     import pytest
+
     from backend.schemas import ScmLinkedDocs, ScmRegisterRequest
     from backend.services import scm_registry
 
@@ -229,6 +228,7 @@ def test_register_rejects_blacklisted_env_name(tmp_path, monkeypatch):
 
 def test_register_rejects_invalid_env_identifier(tmp_path, monkeypatch):
     import pytest
+
     from backend.schemas import ScmLinkedDocs, ScmRegisterRequest
     from backend.services import scm_registry
 

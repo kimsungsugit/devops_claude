@@ -7,9 +7,9 @@ to determine the full impact set of functions that need UDS regeneration.
 
 from __future__ import annotations
 
-import subprocess
-import re
 import logging
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 

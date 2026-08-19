@@ -13,11 +13,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # 테스트 대상 임포트 (의존성 최소화)
@@ -25,9 +20,12 @@ import pytest
 # workflow/__init__.py 가 pipeline/common/ai 를 연쇄 임포트하므로
 # workflow 패키지를 빈 ModuleType으로 등록하여 __init__ 실행을 방지하고,
 # 외부 의존성(analysis_tools, config 등)은 개별 stub으로 처리한다.
-
 import types  # noqa: E402
+from pathlib import Path
+from typing import Any, Dict
+from unittest.mock import MagicMock, patch
 
+import pytest
 
 # Snapshot of `config` attributes that this stub overwrites — restored in a
 # module-scoped teardown so other tests in the suite don't observe poisoned

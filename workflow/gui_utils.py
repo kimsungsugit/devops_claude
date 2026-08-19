@@ -5,29 +5,28 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import shutil
-import threading
-import time
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
-import platform
-import hashlib
+import threading
+import time
 import uuid
-import zipfile
-from pathlib import Path
-from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional, Callable
-
 import xml.etree.ElementTree as ET
-import pandas as pd
-import lizard  # 코드 복잡도 분석
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import workflow       # 실제 파이프라인 (workflow.run_cli 노출)
-import report_generator
+import lizard  # 코드 복잡도 분석
+import pandas as pd
+
 import config
+import workflow  # 실제 파이프라인 (workflow.run_cli 노출)
 from utils.log import get_logger
 
 _logger = get_logger(__name__)
@@ -2491,7 +2490,7 @@ def load_lizard_dataframe(report_dir: Path) -> Optional["pd.DataFrame"]:
     - fallback rglob(*lizard*.csv, *complexity*.csv)  (최대 30개 후보)
     """
     try:
-        import pandas as pd  # type: ignore
+        pass  # type: ignore
     except Exception:
         return None
 
@@ -2793,7 +2792,7 @@ def clean_lizard_dataframe(df: Optional["pd.DataFrame"]) -> Optional["pd.DataFra
     if df is None:
         return None
     try:
-        import pandas as pd  # type: ignore
+        pass  # type: ignore
     except Exception:
         return df
 
@@ -3038,7 +3037,7 @@ def function_keys_from_lizard(df: Optional["pd.DataFrame"]) -> set[str]:
     if df is None:
         return set()
     try:
-        import pandas as pd  # type: ignore
+        pass  # type: ignore
     except Exception:
         return set()
 
