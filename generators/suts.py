@@ -1388,6 +1388,11 @@ def _observed_idx_map(
                 continue
             idxs = tuple(sorted({int(re.sub(r"[uUlL]+$", "", t)) for t in toks}))
             if len(idxs) <= 1:
+                # 첨자가 하나면 `x` → `x[0]` 로 **표기만** 바뀌고 폭은 그대로다.
+                # ⚠ 그 표기 변경은 R22 에서 전수 측정해 **기각**했다: 정본은 base
+                #   표기를 압도적으로 쓴다(우리가 base 로 낸 쌍 중 정본도 base =
+                #   입력 2,600/3,489 · 기대 2,295/2,635). `[0]` 을 붙이면 **4,895칸**
+                #   을 잃고, 손실 0 인 판별 규칙이 없다(`(idx:)` 로 좁혀도 손실 1~8).
                 continue
             # 같은 이름이 여러 슬롯에 오면 **넓은 쪽**을 쓴다. 좁은 쪽을 채택하면
             # 정본이 적는 원소를 빠뜨린다(under-specification = under-testing).
