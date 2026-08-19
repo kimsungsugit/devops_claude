@@ -565,6 +565,9 @@ def collect_unit_functions(
     # 중간 마디 배열을 되살린 이름 수. 이 경로는 **틀린 이름을 고치는** 것이라
     # 0 이면 "고칠 게 없었다"인지 "배선이 끊겼다"인지 구분이 안 된다 → 요약에 싣는다.
     _mid_fixed = 0
+    # 선언이 아니라 **관찰 첨자**로 폭을 정한 이름 수. 근거가 약한 경로이므로
+    # 선언 크기 확장과 합쳐 세지 않는다 — 합치면 "선언으로 펼쳤다" 로 읽힌다.
+    _obs_expanded = 0
     if sds_map is None:
         sds_map = _load_default_sds_map()
     units: List[Dict[str, Any]] = []
@@ -789,12 +792,21 @@ def collect_unit_functions(
             _mid_in = _mid_member_sizes(input_vars, _rtypes, struct_members)
             _mid_out = _mid_member_sizes(output_vars, _rtypes, struct_members)
             _mid_fixed += len(_mid_in) + len(_mid_out)
+        # 선언 크기가 없는 **포인터 버퍼**의 폭 — 본문에서 관찰된 리터럴 첨자.
+        # 방향 태그로 열이 갈린다(`_observed_idx_map` 독스트링에 실측 표).
+        _raws = [inputs_raw, outputs_raw, globals_g, globals_s]
+        _obs_in = _observed_idx_map(_raws, {"IN"})
+        _obs_out = _observed_idx_map(_raws, {"OUT"})
         input_vars, _in_exp = _expand_array_entries(
-            input_vars, _sizes, max_inp, root_sizes=_root_sizes, mid_sizes=_mid_in
+            input_vars, _sizes, max_inp, root_sizes=_root_sizes, mid_sizes=_mid_in,
+            observed_idx=_obs_in,
         )
         output_vars, _out_exp = _expand_array_entries(
-            output_vars, _sizes, max_out, root_sizes=_root_sizes, mid_sizes=_mid_out
+            output_vars, _sizes, max_out, root_sizes=_root_sizes, mid_sizes=_mid_out,
+            observed_idx=_obs_out,
         )
+        _obs_expanded += len(_in_exp.get("observed") or []) + \
+            len(_out_exp.get("observed") or [])
 
         # ── ASIL — `Safety Related` 칸(O/X)의 근거 ─────────────────────────
         #
@@ -920,6 +932,9 @@ def collect_unit_functions(
         f" | 중간마디 배열 복원 {_mid_fixed}칸"
         if struct_members else " | ⚠구조체 멤버 맵 없음 → 중간마디 배열 복원 안 함"
     )
+    # 관찰 첨자로 폭을 정한 포인터 버퍼. **선언 크기 확장과 따로** 센다 — 근거가
+    # 본문 등장 첨자뿐이라 배열보다 좁을 수 있고, 그 사실이 수치에 남아야 한다.
+    _const_note += f" | 관찰첨자 확장 {_obs_expanded}건"
     # ASIL 이 소스 주석과 문서에서 갈린 unit. max 로 올려 썼다는 사실을 남긴다 —
     # 어느 쪽이 낡았는지 판단은 사람 몫이고, 조용하면 그 판단 기회가 사라진다.
     if _asil_weak:
@@ -1121,6 +1136,16 @@ _SIZE_TAIL_RE = re.compile(r"\(\s*size\s*:\s*(\d+(?:\s*x\s*\d+)*)\s*\)", re.I)
 # 이 필드에서 `[N]` 은 **항상 선언 크기**다(원소 표기를 내는 생산자가 없다).
 _PARAM_DIM_RE = re.compile(r"((?:\[\d+\])+)\s*$")
 
+# 본문에서 **관찰된** 첨자(`_scan_name_usage` → `_format_param_entry` 의 `(idx: …)`).
+# 선언 크기가 없는 **포인터 버퍼**의 유일한 폭 신호다 — 포인터는 원소 수가 선언에
+# 없고 호출자만 안다(`U8 *pu8t_ResponseBuffer`).
+#
+# ⚠ R10 이 관찰 첨자를 기각한 건 **선언 크기가 있는 배열**에서다(일치 146 → 10 폭락).
+#   그래서 아래 소비처는 `(size:)` 로 차원을 얻지 못했을 때**만** 이걸 본다. 두 신호가
+#   경합하면 선언이 이긴다 — 관찰은 본문에 등장한 첨자뿐이라 배열보다 좁다.
+_OBS_IDX_TAIL_RE = re.compile(r"\(\s*idx\s*:\s*([^)]*)\)", re.I)
+_OBS_IDX_LITERAL_RE = re.compile(r"^\d+[uUlL]*$")
+
 
 # 타입 문자열의 한정자. `const st_s_DTC` 처럼 붙어 오면 struct 정의를 못 찾는다.
 # ⚠ 단어 경계 필수 — 없으면 `constant_t` 의 `const` 까지 지워 타입 이름이 깨진다.
@@ -1320,6 +1345,57 @@ def _array_sizes(
     return sizes
 
 
+def _observed_idx_map(
+    raw_groups: List[List[str]],
+    want_tags: Set[str],
+) -> Dict[str, Tuple[int, ...]]:
+    """`이름 → 본문에서 관찰된 리터럴 첨자` — **선언 크기가 없는 포인터 버퍼**용.
+
+    정본 SUTS 는 포인터 버퍼도 원소 단위로 적는다(`pu8t_ResponseBuffer[0..39]` 40칸).
+    선언에 크기가 없으니 폭을 지어낼 수 없고, 본문이 실제로 만진 첨자만이 근거다.
+
+    **방향 태그로 열이 갈린다** — 정본 실측(KJPDS02_PV, 손실 0 조합 탐색):
+
+        [IN]  → 읽는 원소를 **입력** 열에      적중 28 · 과다  1
+        [OUT] → 쓰는 원소를 **기대** 열에      적중 53 · 과다  0
+        둘 다                                  적중 81 · 과다  1 · **사라진 맞춤 0**
+        [OUT] 를 양쪽에 (대조군)               적중 63 · 과다 43 · 사라진 맞춤 1
+
+    `[INOUT]` 은 넣지 않는다 — 적중이 **한 칸도 안 늘고**(81 그대로) 정본에 없는
+    unit 의 과다만 커진다. `[INDIRECT*]` 도 같은 이유로 제외다.
+
+    ⚠ **첨자가 하나라도 변수식이면 그 슬롯을 통째로 버린다**(`(idx: index)` ·
+      `(idx: u32t_HashOffset | 1U)`). 리터럴만 골라 쓰면 폭이 임의로 좁아져
+      "이 배열은 이 칸만 시험한다" 는 없는 사실을 적게 된다.
+    ⚠ `(size:)` 가 같이 붙은 슬롯도 버린다 — 선언 크기가 이겨야 한다(R10).
+    """
+    out: Dict[str, Tuple[int, ...]] = {}
+    for group in raw_groups:
+        for raw in group or []:
+            s = str(raw or "")
+            m = _OBS_IDX_TAIL_RE.search(s)
+            if not m or _SIZE_TAIL_RE.search(s):
+                continue
+            tag = _DIR_TAG_PAT.match(s)
+            if not tag or tag.group(1).upper() not in want_tags:
+                continue
+            toks = [t.strip() for t in m.group(1).split(",") if t.strip()]
+            if not toks or not all(_OBS_IDX_LITERAL_RE.match(t) for t in toks):
+                continue
+            name = _clean_global_name(s)
+            name = re.sub(r"(?:\[\d+\])+$", "", name)
+            if not name:
+                continue
+            idxs = tuple(sorted({int(re.sub(r"[uUlL]+$", "", t)) for t in toks}))
+            if len(idxs) <= 1:
+                continue
+            # 같은 이름이 여러 슬롯에 오면 **넓은 쪽**을 쓴다. 좁은 쪽을 채택하면
+            # 정본이 적는 원소를 빠뜨린다(under-specification = under-testing).
+            if len(idxs) > len(out.get(name) or ()):
+                out[name] = idxs
+    return out
+
+
 def _nonvoid_function_names(function_details: Dict[str, Dict[str, Any]]) -> Set[str]:
     """반환값이 있는 함수 이름 집합.
 
@@ -1398,6 +1474,7 @@ def _expand_array_entries(
     root_sizes: Optional[Dict[str, Tuple[int, ...]]] = None,
     mid_sizes: Optional[Dict[str, Tuple[int, Tuple[int, ...]]]] = None,
     parallel: Optional[List[str]] = None,
+    observed_idx: Optional[Dict[str, Tuple[int, ...]]] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """배열 이름을 원소로 펼친다. 예산이 모자라면 **펼치지 않고 그대로 둔다**.
 
@@ -1428,6 +1505,7 @@ def _expand_array_entries(
     par_out: List[str] = []
     out: List[str] = []
     expanded: List[str] = []
+    observed: List[str] = []
     skipped: List[Dict[str, Any]] = []
     total = len(names)
     for pos, nm in enumerate(names):
@@ -1444,7 +1522,19 @@ def _expand_array_entries(
             dims = root_sizes.get(nm.split(".", 1)[0]) or ()
             if dims:
                 at_node = 0
-        n = _dim_product(dims) if dims else 0
+        if dims:
+            sfxs = _elem_suffixes(dims)
+        else:
+            # 선언 크기를 **어느 경로로도** 못 얻은 이름에만 관찰 첨자를 쓴다.
+            # 순서가 곧 정책이다 — 위에서 dims 가 잡히면 여기 오지 않는다(R10).
+            #
+            # ⚠ `at_node = -1` 을 여기 두지 않는다. 위 두 경로(`_mid_member_sizes` ·
+            #   `root_sizes`)는 **dims 가 있을 때만** at_node 를 세우므로 여기 도달한
+            #   시점에 at_node 는 이미 -1 이다. 겹쳐 막으면 방어가 아니라 뮤테이션이
+            #   통째로 사는 사각이 된다(이 파일이 같은 판단으로 이미 두 개를 뺐다).
+            _obs = (observed_idx or {}).get(nm) or ()
+            sfxs = [f"[{i}]" for i in _obs]
+        n = len(sfxs)
         if n <= 1:
             out.append(nm)
             if par_in is not None:
@@ -1467,14 +1557,19 @@ def _expand_array_entries(
             _parts = nm.split(".")
             _head = ".".join(_parts[: at_node + 1])
             _tail = ".".join(_parts[at_node + 1:])
-            out.extend(f"{_head}{sfx}.{_tail}" for sfx in _elem_suffixes(dims))
+            out.extend(f"{_head}{sfx}.{_tail}" for sfx in sfxs)
         else:
-            out.extend(nm + sfx for sfx in _elem_suffixes(dims))
+            out.extend(nm + sfx for sfx in sfxs)
         if par_in is not None:
             par_out.extend([par_in[pos]] * n)
         expanded.append(nm)
+        if not dims:
+            # 선언이 아니라 **관찰**로 폭을 정한 것 — 근거가 약한 쪽이므로 분리해
+            # 보고한다. 합쳐 세면 "선언 크기로 펼쳤다" 로 읽혀 근거가 부풀려진다.
+            observed.append(nm)
     return out, {
         "expanded": expanded,
+        "observed": observed,
         "skipped": skipped,
         "budget": budget,
         "used": len(out),

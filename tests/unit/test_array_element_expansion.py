@@ -37,6 +37,7 @@ from generators.suts import (
     _clean_global_name,
     _decl_dims_from_array_field,
     _expand_array_entries,
+    _observed_idx_map,
     _struct_member_dims,
     collect_unit_functions,
 )
@@ -1080,3 +1081,173 @@ class TestStructExpansionGuards:
         got = extract_struct_member_arrays("typedef struct { UINT8 *p[4]; UINT8 q[5]; } P;")
         assert got["P"].get("q") == "[5]"
         assert "p" not in got["P"], f"포인터 멤버가 배열로 잡혔다: {got['P']}"
+
+
+class TestObservedIndexExpansion:
+    """선언 크기가 없는 **포인터 버퍼**를 본문 관찰 첨자로 펼치는 경로 (R21).
+
+    ## 왜 (KJPDS02_PV 정본 실측, 2026-08-19)
+
+    정본은 포인터 버퍼도 원소 단위로 적는데(`pu8t_ResponseBuffer[0..39]` 40칸),
+    포인터는 원소 수가 **선언에 없다** — 호출자만 안다. 본문이 실제로 만진 첨자만이
+    근거이고, 파서는 그걸 이미 `(idx: …)` 로 싣고 있었다(소비처가 안 썼을 뿐).
+
+    ## 방향 태그로 **열이 갈린다** — 손실 0 조합 탐색 실측
+
+        [IN]  → 입력 열   적중 28 · 과다  1
+        [OUT] → 기대 열   적중 53 · 과다  0
+        둘 다             적중 81 · 과다  1 · **사라진 맞춤 0**
+        [OUT] 를 양쪽에   적중 63 · 과다 43 · 사라진 맞춤 1   ← 대조군
+
+    라이브 적용 결과: 입력 5,432 → **5,459** · 기대 4,927 → **4,980** · 과다 +1 ·
+    사라진 맞춤 **0**(집합 비교).
+
+    ⚠ `[INOUT]` 은 넣지 않는다 — 적중이 **한 칸도 안 늘고**(81 그대로) 과다만 는다.
+    ⚠ 선언 크기가 잡히면 그쪽이 이긴다. R10 이 관찰 첨자를 기각한 게 바로 그 경우라
+      (일치 146 → 10 폭락) 순서가 곧 정책이다.
+    """
+
+    # ── 맵 생산 ────────────────────────────────────────────────────────────
+    def test_literal_indexes_are_collected_for_matching_tag(self):
+        got = _observed_idx_map([["[IN] const UINT8 * version (idx: 0, 1, 3, 2)"]], {"IN"})
+        assert got == {"version": (0, 1, 2, 3)}
+
+    def test_other_direction_tag_is_not_collected(self):
+        """방향이 곧 열이다 — `[OUT]` 을 입력 맵에 넣으면 대조군(과다 43)이 된다."""
+        raw = [["[OUT] U8 * pu8t_Resp (idx: 0, 1)"]]
+        assert _observed_idx_map(raw, {"IN"}) == {}
+        assert _observed_idx_map(raw, {"OUT"}) == {"pu8t_Resp": (0, 1)}
+
+    @pytest.mark.parametrize("tag", ["INOUT", "INDIRECT", "INDIRECT2"])
+    def test_inout_and_indirect_are_excluded(self, tag):
+        """⚠ `"[IN]" in "[INOUT] x"` 류의 substring 실패를 이 저장소가 4번 겪었다."""
+        raw = [[f"[{tag}] U8 * buf (idx: 0, 1, 2)"]]
+        assert _observed_idx_map(raw, {"IN"}) == {}
+        assert _observed_idx_map(raw, {"OUT"}) == {}
+
+    def test_variable_index_drops_the_whole_slot(self):
+        """리터럴만 골라 쓰면 폭이 임의로 좁아져 **없는 사실**을 적게 된다."""
+        assert _observed_idx_map(
+            [["[IN] U8 * buf (idx: 0, 1, u8t_Idx)"]], {"IN"}
+        ) == {}
+
+    @pytest.mark.parametrize("expr", ["7*8", "3 * 8", "0x10", "3abc"])
+    def test_arithmetic_index_is_not_a_literal(self, expr):
+        """⚠ 정규식 앵커(`$`)가 없으면 `7*8` 이 리터럴로 통과하고 `int()` 가 **터진다**.
+
+        `7*8` 은 가정이 아니다 — 정본 SUTS 가 `lin_tl_rx_queue.tl_pdu[7*8]` 로 41칸
+        적고 있고, 같은 표기가 본문 첨자로도 온다. 크래시는 조용하지 않지만
+        파이프라인 전체를 세운다.
+        """
+        assert _observed_idx_map([[f"[IN] U8 * buf (idx: 0, {expr})"]], {"IN"}) == {}
+
+    def test_declared_size_wins_over_observation(self):
+        """`(size:)` 가 같이 붙으면 관찰은 버린다 — R10 이 기각한 경우다."""
+        assert _observed_idx_map(
+            [["[IN] u8s_Buf (size: 8) (idx: 0, 1)"]], {"IN"}
+        ) == {}
+
+    def test_single_index_is_not_an_expansion(self):
+        assert _observed_idx_map([["[IN] U8 * buf (idx: 3)"]], {"IN"}) == {}
+
+    def test_widest_slot_wins_when_name_repeats(self):
+        """좁은 쪽을 채택하면 정본이 적는 원소를 빠뜨린다(under-testing)."""
+        got = _observed_idx_map(
+            [["[IN] U8 * buf (idx: 0, 1)"], ["[IN] U8 * buf (idx: 0, 1, 2, 3)"]], {"IN"}
+        )
+        assert got == {"buf": (0, 1, 2, 3)}
+
+    # ── 확장 ───────────────────────────────────────────────────────────────
+    def test_expand_uses_observed_indexes_verbatim(self):
+        """정본 첨자는 **불연속일 수 있다**(`pu8t_ResponseBuffer` 는 0..39 중 관찰분).
+
+        `_elem_suffixes` 처럼 `0..n-1` 을 만들면 관찰하지 않은 칸을 지어내게 된다.
+        """
+        out, stats = _expand_array_entries(
+            ["buf"], {}, 96, observed_idx={"buf": (2, 5, 9)}
+        )
+        assert out == ["buf[2]", "buf[5]", "buf[9]"]
+        assert stats["observed"] == ["buf"]
+
+    def test_declared_dims_take_priority_over_observed(self):
+        out, stats = _expand_array_entries(
+            ["buf"], {"buf": (3,)}, 96, observed_idx={"buf": (7, 8)}
+        )
+        assert out == ["buf[0]", "buf[1]", "buf[2]"]
+        assert stats["observed"] == [], "선언이 있는데 관찰로 펼쳤다 — R10 재발"
+
+    def test_observed_expansion_respects_the_budget(self):
+        """예산을 넘기면 펼치지 않는다 — 잘라 넣으면 뒤 변수가 사라진다."""
+        out, stats = _expand_array_entries(
+            ["buf"], {}, 4, observed_idx={"buf": tuple(range(10))}
+        )
+        assert out == ["buf"]
+        assert stats["skipped"] and stats["skipped"][0]["elements"] == 10
+        assert stats["observed"] == []
+
+    def test_observed_is_reported_separately_from_declared(self):
+        """합쳐 세면 "선언 크기로 펼쳤다" 로 읽혀 근거가 부풀려진다."""
+        _, stats = _expand_array_entries(
+            ["a", "b"], {"a": (2,)}, 96, observed_idx={"b": (0, 1)}
+        )
+        assert stats["expanded"] == ["a", "b"]
+        assert stats["observed"] == ["b"]
+
+    # ── 호출부 배선 (헬퍼 단독 테스트는 값 폐기를 못 본다) ────────────────
+    def test_wired_in_input_column_for_in_tag(self):
+        u = collect_unit_functions(
+            _unit(inputs=["[IN] const UINT8 * version (idx: 0, 1, 3, 2)"],
+                  proto="void Fn(const UINT8 *version)"),
+            sds_map={},
+        )[0]
+        assert u["input_vars"] == ["version[0]", "version[1]", "version[2]", "version[3]"]
+
+    def test_wired_in_expected_column_for_out_tag(self):
+        u = collect_unit_functions(
+            _unit(outputs=["[OUT] U16 * Values (idx: 1, 0, 2)"],
+                  proto="void Fn(U16 *Values)"),
+            sds_map={},
+        )[0]
+        assert u["output_vars"] == ["Values[0]", "Values[1]", "Values[2]"]
+
+    def test_out_tag_does_not_expand_the_input_column(self):
+        """정본은 `[OUT]` 버퍼를 **입력 열엔 base 한 칸**으로 적는다.
+
+        양쪽에 적용하면 `sf_ReadAppVersion::versionOut` 의 맞춤이 사라진다
+        (대조군 실측: 적중 63 · 과다 43 · **사라진 맞춤 1**).
+
+        ⚠ 이름이 **입력 열에도 실려 있어야** 이 축이 재어진다. 기대 열에만 두면
+          입력 열은 애초에 그 이름을 안 내므로 잘못된 구현도 그냥 통과한다 —
+          첫 판이 그랬고 뮤테이션(M12)이 살아남아 드러났다.
+        """
+        u = collect_unit_functions(
+            _unit(inputs=["[IN] U8 * versionOut"],
+                  outputs=["[OUT] U8 * versionOut (idx: 0, 1, 2, 3)"],
+                  proto="void Fn(U8 *versionOut)"),
+            sds_map={},
+        )[0]
+        assert u["input_vars"] == ["versionOut"], \
+            f"입력 열이 관찰 첨자로 펼쳐졌다: {u['input_vars']}"
+        assert u["output_vars"] == [f"versionOut[{i}]" for i in range(4)]
+
+    def test_inout_tag_is_not_wired_to_either_column(self):
+        """`[INOUT]` 은 적중을 **한 칸도 안 늘리고**(81 그대로) 과다만 늘린다.
+
+        ⚠ 헬퍼 단독 테스트는 호출부가 어떤 태그 집합을 넘기는지 못 본다 —
+          `{"OUT"}` 을 `{"OUT", "INOUT"}` 으로 바꾸는 뮤테이션(M15)이 살아남았다.
+        """
+        u = collect_unit_functions(
+            _unit(inputs=["[INOUT] U8 * shared (idx: 0, 1, 2)"],
+                  outputs=["[INOUT] U8 * shared (idx: 0, 1, 2)"],
+                  proto="void Fn(U8 *shared)"),
+            sds_map={},
+        )[0]
+        assert u["input_vars"] == ["shared"], f"입력: {u['input_vars']}"
+        assert u["output_vars"] == ["shared"], f"기대: {u['output_vars']}"
+
+    def test_plain_pointer_without_observation_is_untouched(self):
+        """음성 대조군 — 관찰 첨자가 없으면 base 한 칸 그대로다(크기를 지어내지 않는다)."""
+        u = collect_unit_functions(
+            _unit(inputs=["[IN] U8 * raw"], proto="void Fn(U8 *raw)"), sds_map={}
+        )[0]
+        assert u["input_vars"] == ["raw"]
