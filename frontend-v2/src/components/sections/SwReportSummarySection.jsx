@@ -82,7 +82,7 @@ export default function SwReportSummarySection() {
       }
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
         clearTimeout(timerId);
-        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       });
       downloadCleanupRef.current = [];
     };
@@ -124,7 +124,7 @@ export default function SwReportSummarySection() {
     a.click();
     document.body.removeChild(a);
     const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       downloadCleanupRef.current = downloadCleanupRef.current.filter(
         item => item.timerId !== timerId,
       );
@@ -209,7 +209,7 @@ export default function SwReportSummarySection() {
           } else if (j?.message) {
             msg = j.message;
           }
-        } catch (e) {
+        } catch (_e) {
           // body가 JSON이 아닌 경우 (예: 502 HTML) — HTTP status만 표시
         }
         if (mountedRef.current) {

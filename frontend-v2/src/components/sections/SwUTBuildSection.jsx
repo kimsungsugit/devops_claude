@@ -93,7 +93,7 @@ export default function SwUTBuildSection() {
       // F5: 보류 중인 revoke timer를 정리하고, blob URL을 즉시 revoke
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
         clearTimeout(timerId);
-        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       });
       downloadCleanupRef.current = [];
     };
@@ -120,7 +120,7 @@ export default function SwUTBuildSection() {
     document.body.removeChild(a);
     // F5: timer + url을 ref에 저장 — unmount 시 cleanup
     const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       downloadCleanupRef.current = downloadCleanupRef.current.filter(
         item => item.timerId !== timerId,
       );
@@ -188,7 +188,7 @@ export default function SwUTBuildSection() {
           } else if (j?.message) {
             msg = j.message;
           }
-        } catch (e) {
+        } catch (_e) {
           // body가 JSON이 아닌 경우 (예: 502 HTML) — HTTP status만 표시
         }
         if (mountedRef.current) {
@@ -258,7 +258,7 @@ export default function SwUTBuildSection() {
           else if (typeof j?.detail === 'string') msg = j.detail;
           else if (j?.error?.message) msg = j.error.message;
           else if (j?.message) msg = j.message;
-        } catch (e) { /* non-JSON body */ }
+        } catch (_e) { /* non-JSON body */ }
         if (mountedRef.current) toast('error', `일관성 검증 실패: ${msg}`);
         return;
       }

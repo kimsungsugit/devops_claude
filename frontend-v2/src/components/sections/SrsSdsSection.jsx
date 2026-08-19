@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { api, post, getUsername, authHeaders, buildUrl } from '../../api.js';
+import { api, post, authHeaders, buildUrl } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
@@ -209,7 +209,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
           }
           setLinkedDocs(activeDocs);
         }
-      } catch (_) {}
+      } catch (_) { /* 갱신 실패 → 기존 linkedDocs 유지(화면을 비우지 않는다) */ }
     }
 
     // Debug: log activeDocs state

@@ -60,7 +60,7 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
           const scmData = await api('/api/scm/list');
           const items = scmData?.items || (Array.isArray(scmData) ? scmData : []);
           if (items.length > 0) scm = items[0];
-        } catch (_) {}
+        } catch (_) { /* SCM 조회 실패 → scm 미설정 → 아래에서 linkedDocs {} 로 진행 */ }
       }
       const linkedDocs = scm?.linked_docs || {};
 
@@ -117,7 +117,6 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       }
       if (udsPath && docType !== 'uds') formData.append('uds_path', udsPath);
 
-      const user = getUsername();
       // SITS uses /api/local/ endpoint with urlencoded; others use /api/jenkins/ with FormData
       const apiPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
       let fetchBody, fetchHeaders;
@@ -294,20 +293,6 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       toast('info', `${label} 임시 경로 초기화 → SCM 등록 경로 사용`);
     }
   };
-
-  // Merge input docs: SCM linked_docs + localStorage
-  const inputDocs = [
-    { key: 'srs', label: 'SRS', desc: '소프트웨어 요구사항 사양서', path: localDocPaths.srs || linkedDocs.srs || '' },
-    { key: 'sds', label: 'SDS', desc: '소프트웨어 설계 사양서', path: localDocPaths.sds || linkedDocs.sds || '' },
-    { key: 'hsis', label: 'HSIS', desc: 'HW/SW 인터페이스 사양서', path: linkedDocs.hsis || '' },
-    { key: 'stp', label: 'STP', desc: '소프트웨어 시험 계획서', path: linkedDocs.stp || '' },
-  ];
-  const outputDocs = [
-    { key: 'uds', label: 'UDS', desc: 'Unit Design Specification', path: linkedDocs.uds || '' },
-    { key: 'sts', label: 'STS', desc: 'Software Test Specification', path: linkedDocs.sts || '' },
-    { key: 'suts', label: 'SUTS', desc: 'SW Unit Test Specification', path: linkedDocs.suts || '' },
-    { key: 'sits', label: 'SITS', desc: 'SW Integration Test Spec', path: linkedDocs.sits || '' },
-  ];
 
   const [docPreview, setDocPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -561,7 +546,7 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
         const listData = await api(`/api/jenkins/${docType}/list?${qs}`);
         const items = listData?.items || [];
         if (items.length > 0) formData.append('filename', items[0].filename || items[0].name || '');
-      } catch (_) {}
+      } catch (_) { /* 목록 조회 실패 → filename 미첨부(서버가 최신본을 고른다) */ }
       const endpoint = docType === 'sits' ? '/api/local/sits/export-vectorcast' : `/api/jenkins/${docType}/export-vectorcast`;
       const res = await fetch(endpoint, { method: 'POST', body: formData, headers: authHeaders() });
       if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
@@ -785,13 +770,13 @@ function DocPreviewPanel({ docPreview, previewSheet, onSwitchSheet, onGotoPage, 
         const startRow = page * PREVIEW_PAGE_SIZE;
         const hasMore = !!sheet.has_more;
 
-        const renderCell = (cell, ci) => {
+        const renderCell = (cell, _ci) => {
           const val = String(cell ?? '');
           // Render image if cell starts with __IMG__
           if (val.startsWith('__IMG__') && val.length > 7) {
             const imgId = val.slice(7);
-            const docPath = docPreview.data?.filename;
-            // Find original path from allDocs
+            // 원본 경로는 `docPreview._path` 를 쓴다(아래) — 예전엔 여기서
+            // `docPreview.data?.filename` 을 잡아 뒀는데 쓰이지 않았다.
             return <img src={`/api/preview-image?path=${encodeURIComponent(docPreview._path || '')}&image_id=${encodeURIComponent(imgId)}`}
                         alt="diagram" style={{ maxWidth: fullscreen ? 400 : 200, maxHeight: fullscreen ? 300 : 150 }}
                         onError={e => { e.target.style.display = 'none'; }} />;

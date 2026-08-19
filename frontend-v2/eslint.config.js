@@ -36,11 +36,17 @@ export default defineConfig([
       // ESLint 9 는 caughtErrors:"all" 이 기본이므로, 이 저장소에 30곳 있는
       // `catch (_) { /* ignore */ }` 관용구가 전부 error 가 된다. 의도적 무시임을
       // 밑줄 접두사로 표시하는 관행을 그대로 인정한다.
+      // (B) `const { token, ...rest } = cfg` — **빼고 나머지를 쓰는** 관용구.
+      // JS 에 이걸 달리 쓸 방법이 없다(`delete` 는 원본을 바꾼다). 이름을 `_token` 으로
+      // 바꾸는 건 **틀린 수정**이다 — 그러면 `token` 이 `rest` 에 남아 localStorage 에
+      // 저장된다. 즉 이 위반은 코드 결함이 아니라 **설정 구멍**이었다.
+      // 실측: `api.js:278` 이 정확히 이 형태다(Jenkins 토큰을 저장 전에 떼어낸다).
       'no-unused-vars': ['error', {
         varsIgnorePattern: '^[A-Z_]',
         args: 'after-used',
         argsIgnorePattern: '^_',
         caughtErrorsIgnorePattern: '^_',
+        ignoreRestSiblings: true,
       }],
     },
   },

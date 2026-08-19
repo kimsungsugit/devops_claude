@@ -130,7 +130,7 @@ async function _toError(res) {
     } else if (j?.error?.code) {
       code = j.error.code;
     }
-  } catch (_) {}
+  } catch (_) { /* 본문이 JSON 이 아니다 → msg 는 원문 텍스트 그대로 쓴다 */ }
   const err = new Error(msg);
   err.status = res.status;
   err.code = code;
@@ -218,7 +218,8 @@ async function _postSseInternal(path, body, { onEvent, signal } = {}, _retried =
     }
     if (!evData) return;
     let parsed = evData;
-    try { parsed = JSON.parse(evData); } catch (_) {}
+    // SSE 이벤트가 JSON 이 아닐 수 있다 → 파싱 실패면 원문 문자열을 그대로 넘긴다.
+    try { parsed = JSON.parse(evData); } catch (_) { /* 원문 유지 */ }
     onEvent(evType, parsed);
   };
 
@@ -329,7 +330,8 @@ export async function uploadServerUdsTemplate(file) {
   if (!res.ok) {
     const text = await res.text();
     let msg = text || `HTTP ${res.status}`;
-    try { const j = JSON.parse(text); if (j?.detail) msg = j.detail; } catch (_) {}
+    // 서버가 JSON 이 아닌 오류 본문을 줄 수 있다 → 그땐 원문을 메시지로 쓴다.
+    try { const j = JSON.parse(text); if (j?.detail) msg = j.detail; } catch (_) { /* 원문 유지 */ }
     throw new Error(msg);
   }
   return res.json();

@@ -93,7 +93,7 @@ export default function SwITBuildSection() {
       }
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
         clearTimeout(timerId);
-        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       });
       downloadCleanupRef.current = [];
     };
@@ -119,7 +119,7 @@ export default function SwITBuildSection() {
     a.click();
     document.body.removeChild(a);
     const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       downloadCleanupRef.current = downloadCleanupRef.current.filter(
         item => item.timerId !== timerId,
       );
@@ -185,7 +185,7 @@ export default function SwITBuildSection() {
           } else if (j?.message) {
             msg = j.message;
           }
-        } catch (e) { /* non-JSON body */ }
+        } catch (_e) { /* non-JSON body */ }
         if (mountedRef.current) {
           toast('error', `${kind.toUpperCase()} 빌드 실패: ${msg}`);
         }
@@ -243,7 +243,7 @@ export default function SwITBuildSection() {
           const j = await res.json();
           if (Array.isArray(j?.detail)) msg = formatDetailMessage(j.detail);
           else if (typeof j?.detail === 'string') msg = j.detail;
-        } catch (e) { /* non-JSON */ }
+        } catch (_e) { /* non-JSON */ }
         if (mountedRef.current) toast('error', `미리보기 실패: ${msg}`);
         return;
       }
@@ -297,7 +297,7 @@ export default function SwITBuildSection() {
           else if (typeof j?.detail === 'string') msg = j.detail;
           else if (j?.error?.message) msg = j.error.message;
           else if (j?.message) msg = j.message;
-        } catch (e) { /* non-JSON body */ }
+        } catch (_e) { /* non-JSON body */ }
         if (mountedRef.current) toast('error', `일관성 검증 실패: ${msg}`);
         return;
       }

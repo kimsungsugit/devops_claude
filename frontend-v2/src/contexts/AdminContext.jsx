@@ -92,7 +92,7 @@ export function AdminProvider({ children }) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
-    } catch (e) {
+    } catch (_e) {
       // 네트워크 오류 — graceful + W4 retry 예약
       if (!isMountedRef.current) return;
       setState({

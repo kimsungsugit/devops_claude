@@ -415,7 +415,7 @@ function VCastPanel({ job, analysisResult }) {
     }
     setGenerating(true);
     try {
-      const data = await post('/api/vcast/generate-excel', {
+      await post('/api/vcast/generate-excel', {
         parsed_data: parsedData?.data ?? parsedData,
         mode: reportType === 'Metrics' ? 'Metrics' : 'TestReport',
         output_filename: `vcast_${reportType.toLowerCase()}_${new Date().toISOString().slice(0,10).replace(/-/g,'')}.xlsx`,
