@@ -18,6 +18,10 @@ from __future__ import annotations
 import io
 from typing import Any, Dict, List, Optional
 
+# SW 검증으로 인정하는 시험 밴드 — 목록의 **단일 출처**. 여기서 다시 나열하면
+# 화면·백엔드와 조용히 갈라진다(그게 이 파일이 겪은 결함이다).
+from report_gen.trace_link_table import _SW_TEST_BANDS
+
 # DoS 가드 — 인증 뒤이고 클라이언트가 echo하는 자기 데이터지만, 단일 요청으로 거대한
 # 시트 생성을 막는다(실데이터 상한의 넉넉한 배수: req ~1k, SDS열 ~1k, 링크 ~50k).
 _MAX_ROWS = 20000
@@ -467,12 +471,19 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
         cls = _req_class(rid)
         verified = ", ".join(k for k in ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST") if bands.get(k)) or "없음"
         if bands.get("SDS") and not bands.get("SITS"):
-            alt = (cls == "nonfunctional" and (bands.get("SyTS") or bands.get("STS"))) \
-                or (cls == "interface" and (bands.get("HSIS") or bands.get("SyITS")))
+            # 결정1(wide): 시스템시험(SyTS/SyITS)은 SW 검증으로 **인정하지 않는다**.
+            #  - 비기능: SW 요구시험(STS)만 대체 인정
+            #  - 인터페이스: HSIS 실현(설계 구조적 근거)만 인정
+            # 프론트 `SrsSdsSection.jsx` 의 `_alt` 와 같은 규칙이다. 예전엔 여기만
+            # `SyTS or STS` · `HSIS or SyITS` 라, **감사 문서가 화면보다 관대**했다 —
+            # SyTS 로만 검증된 SW 요구가 화면에서는 갭인데 증빙에서는 갭이 아니었다.
+            alt = (cls == "nonfunctional" and bands.get("STS")) \
+                or (cls == "interface" and bands.get("HSIS"))
             if not alt:
                 sits_gap.append({"rid": rid, "cls": cls, "verified": verified})
         if bands.get("SDS") and not bands.get("UDS") and not bands.get("HSIS"):
-            has_test = any(bands.get(k) for k in ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST"))
+            # ⚠ 밴드 목록을 **여기 다시 적지 않는다** — 복제가 이 결함의 원인이었다.
+            has_test = any(bands.get(k) for k in _SW_TEST_BANDS)
             if not (cls == "nonfunctional" and has_test):
                 uds_gap.append({"rid": rid, "cls": cls, "verified": verified})
     app_leaf = [u for u in umv if str(u.get("layer")) == "APP_LEAF"]

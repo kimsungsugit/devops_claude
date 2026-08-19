@@ -202,21 +202,56 @@ def _finding_text(wb):
     )
 
 
-def test_finding_sheet_credits_alternative_verification():
-    """비기능(SyTS/STS)·인터페이스(HSIS/SyITS) 대체검증 요구는 진짜 갭에서 제외(프론트 gapStats lockstep)."""
+def test_finding_sheet_credits_only_sw_level_alternative_verification():
+    """대체검증은 **SW 레벨 시험만** 인정한다(결정1 wide).
+
+    ⚠ 이 테스트는 2026-08-19 에 **뒤집혔다**. 예전 판은 docstring 에 "프론트 gapStats
+      lockstep" 이라 써 놓고서 `syts_tests` 만 가진 `SwNTR_1` 이 갭에서 **제외되는
+      것**을 assert 했다 — 즉 감사 XLSX 가 화면보다 관대한 상태를 **테스트가 고정하고
+      있었다**. 초록이라고 정합인 게 아니다.
+
+      프론트(`SrsSdsSection.jsx` `_alt`)와 백엔드(`jenkins.py _row_has_sw_tests`)는
+      이미 SyTS/SyITS 를 SW 검증에서 뺐다. 밴드 목록의 출처는
+      `report_gen/trace_link_table.py:_SW_TEST_BANDS` 하나다.
+    """
     m = {"rows": [
         # 기능요구 SITS 갭(UDS 있어 UDS 갭은 아님)
         {"requirement_id": "SwTR_1", "sds_components": ["a"], "source_ids": ["f1"],
          "suts_tests": [{"unit": "f1"}], "sts_tests": [{"testcase": "T"}]},
-        # 비기능 대체검증(SyTS) → SITS/UDS 갭 제외
+        # 비기능 + 시스템시험만 → **대체검증 아님**. 갭으로 표시돼야 한다.
         {"requirement_id": "SwNTR_1", "sds_components": ["b"], "syts_tests": [{"testcase": "T"}]},
-        # 인터페이스 대체검증(HSIS) → SITS/UDS 갭 제외
+        # 비기능 + SW 요구시험(STS) → 대체검증 인정 → 갭 제외
+        {"requirement_id": "SwNTR_2", "sds_components": ["b2"], "sts_tests": [{"testcase": "T"}]},
+        # 인터페이스 + HSIS 실현 → 대체검증 인정 → 갭 제외
         {"requirement_id": "SwEI_1", "sds_components": ["c"], "hsis_signals": ["sig"]},
+        # 인터페이스 + SyITS 만 → **대체검증 아님**. 갭으로 표시돼야 한다.
+        {"requirement_id": "SwEI_2", "sds_components": ["c2"], "syits_tests": [{"testcase": "T"}]},
     ], "link_table": {}}
     text = _finding_text(_open(build_trace_xlsx(m)))
     assert "SwTR_1" in text          # 기능요구 갭은 표시
-    assert "SwNTR_1" not in text     # 비기능 대체검증은 제외(은폐 아님·정직화)
-    assert "SwEI_1" not in text      # 인터페이스 대체검증은 제외
+    assert "SwNTR_1" in text         # ← 뒤집힌 자리: 시스템시험만으론 대체검증 아님
+    assert "SwEI_2" in text          # ← 뒤집힌 자리: SyITS 만으론 대체검증 아님
+    assert "SwNTR_2" not in text     # SW 요구시험 대체검증은 제외(은폐 아님·정직화)
+    assert "SwEI_1" not in text      # HSIS 실현 대체검증은 제외
+
+
+def test_sw_test_bands_are_not_relisted_in_the_judgment():
+    """**판정** 자리에 밴드 목록이 다시 적히지 않는가 — 복제가 이 결함의 원인이었다.
+
+    ⚠ 표시용 열거는 금지 대상이 아니다. `verified` 칸은 SyTS 로 검증됐다는 **사실**을
+      감사자에게 보여야 하고, 커버리지 한 줄은 10밴드를 다 적는 게 맞다. 금지되는 건
+      "무엇을 SW 검증으로 **인정하느냐**" 를 여기서 따로 정하는 것이다.
+      (이 테스트를 파일 전체 검색으로 쓰면 정당한 표시 열거까지 잡는다 — 실제로 잡았다.)
+    """
+    import pathlib
+
+    src = pathlib.Path("report_gen/trace_matrix_xlsx.py").read_text(encoding="utf-8")
+    assert "_SW_TEST_BANDS" in src, "단일 출처를 안 쓰고 있다"
+    judgment = [ln for ln in src.splitlines()
+                if ln.strip().startswith(("alt = ", "or (cls ==", "has_test = "))]
+    assert judgment, "판정 라인을 못 찾았다 — 이름이 바뀌었으면 이 가드부터 고칠 것"
+    for ln in judgment:
+        assert "SyTS" not in ln and "SyITS" not in ln, f"판정에 시스템시험이 남아 있다: {ln!r}"
 
 
 def test_finding_sheet_lists_app_leaf_with_safety():
