@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+from backend.services.output_paths import reserve_unique_path
+
 try:
     from filelock import FileLock
 except ImportError:
@@ -191,11 +193,13 @@ def write_impact_audit(payload: Dict[str, Any]) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     scm = _lock_key(str(payload.get("scm_id") or ""))  # alnum/_/- 로 안전화
     base = f"impact_{ts}" if scm == "default" else f"impact_{ts}_{scm}"
-    out = AUDIT_DIR / f"{base}.json"
-    _n = 1
-    while out.exists():  # 같은 초·같은 scm 재실행에서도 덮어쓰지 않는다
-        out = AUDIT_DIR / f"{base}_{_n}.json"
-        _n += 1
+    # ⚠ 예전엔 `while out.exists(): …` 로 비켜갔는데 그건 **TOCTOU** 다 — 두 실행이 같은
+    #   순간에 '없음'을 보면 둘 다 같은 이름을 고르고, 막으려던 덮어쓰기가 그대로 남는다.
+    #   하필 이 파일이 "무엇을 왜 분석/제외했는지"의 **유일한 durable 레코드**라, 여기서의
+    #   손실은 곧 추적성 손실이다. `os.O_CREAT|O_EXCL` 로 커널이 원자 보장하게 바꾼다.
+    #   ⚠ 중복 시 접미사가 `_1` → `_2` 로 바뀐다(첫 중복분만). 읽기는 `impact_*.json`
+    #     glob + `run_id=stem` 이라 호환된다.
+    out = reserve_unique_path(AUDIT_DIR / f"{base}.json")
     _save_json(out, payload)
     return out
 

@@ -291,6 +291,8 @@ def _build_local_excel_output(base_dir: Path, category: str, stem: str, template
     ts = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:4]}"
     suffix = _pick_excel_suffix(template_path)
     filename = f"{stem}_{ts}{suffix}"
+    # path-collision-ok: `ts` 에 이미 `uuid4().hex[:4]` 가 붙어 있다(위 줄). 선점으로
+    #   바꾸면 정상 경로의 파일명까지 달라지므로 여기선 난수 유일성을 유지한다.
     return filename, target_dir / filename
 
 
@@ -824,16 +826,21 @@ def local_reports_generate(req: LocalReportGenerateRequest) -> Dict[str, Any]:
     out_dir = _local_reports_dir(report_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ⚠ 키가 **하나도 없는** 이름이다(ts 뿐). `output_paths` 모듈이 최악의 사례로 지목한
+    #   바로 그 자리 — 다른 사용자·다른 프로젝트여도 같은 초면 그냥 부딪힌다.
+    #   두 형식은 **각각** 선점한다. 응답이 파일명을 명시로 실어 보내므로(`outputs`)
+    #   docx/xlsx 의 비켜간 번호가 서로 달라도 클라이언트가 이름을 조립하지 않는다.
+    from backend.services.output_paths import reserve_unique_path
     base = f"local_report_{ts}"
     formats = [str(f).lower() for f in (req.formats or [])]
 
     outputs: List[Dict[str, Any]] = []
     if "docx" in formats:
-        out_path = out_dir / f"{base}.docx"
+        out_path = reserve_unique_path(out_dir / f"{base}.docx")
         generate_local_docx(summary, out_path)
         outputs.append({"file": out_path.name, "path": str(out_path)})
     if "xlsx" in formats:
-        out_path = out_dir / f"{base}.xlsx"
+        out_path = reserve_unique_path(out_dir / f"{base}.xlsx")
         generate_local_xlsx(summary, out_path)
         outputs.append({"file": out_path.name, "path": str(out_path)})
 
@@ -1181,7 +1188,10 @@ async def local_uds_generate(
     out_dir = _local_uds_dir(report_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"uds_local_{ts}.docx"
+    # ⚠ 키 없음(ts 뿐) — 동기 생성과 비동기 잡(`local_uds_generate_async`)이 **같은
+    #   이름 규칙**을 쓴다. 둘이 같은 초에 겹치면 한쪽이 다른 쪽 UDS 를 덮는다.
+    from backend.services.output_paths import reserve_unique_path
+    out_path = reserve_unique_path(out_dir / f"uds_local_{ts}.docx")
     tpl_path = None
     template_applied = False
     if template_file and template_file.filename and template_bytes:
@@ -1605,7 +1615,9 @@ async def local_uds_generate_async(
             out_dir = _local_uds_dir(report_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = out_dir / f"uds_local_{ts}.docx"
+            # ⚠ 동기 경로(`local_uds_generate`)와 **이름 규칙이 같다** — 위 주석 참조.
+            from backend.services.output_paths import reserve_unique_path
+            out_path = reserve_unique_path(out_dir / f"uds_local_{ts}.docx")
 
             tpl_path = None
             if template_bytes:
@@ -3910,8 +3922,12 @@ def local_sits_export_vectorcast(
         )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    package_name = f"sits_vectorcast_{ts}"
-    out_dir = base_dir / "vectorcast" / package_name
+    # ⚠ 형제인 SUTS(`local_suts_export_vectorcast`)는 같은 부모(`base_dir/vectorcast`)에
+    #   같은 형태의 **키 없는** 이름을 만들면서 `reserve_unique_dir` 로 선점한다. 여기만
+    #   맨 경로였다 — 같은 패턴의 다른 입구가 남은 전형적인 자리다.
+    from backend.services.output_paths import reserve_unique_dir
+    out_dir = reserve_unique_dir(base_dir / "vectorcast" / f"sits_vectorcast_{ts}")
+    package_name = out_dir.name
 
     # source_root / compiler 설정
     _first_root = source_root.split(",")[0].strip() if source_root else ""

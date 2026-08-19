@@ -37,6 +37,7 @@ from backend.schemas import (
     StopRequest,
 )
 from backend.services.files import list_log_candidates, list_report_files, read_csv_rows, tail_text
+from backend.services.output_paths import reserve_unique_path
 from backend.services.paths import safe_resolve_under
 from backend.services.report_parsers import build_report_comparisons, build_report_summary, find_project_report_dirs
 from backend.state import SESSION_CACHE_TTL as _SESSION_CACHE_TTL
@@ -194,7 +195,9 @@ def export_session(session_id: str, base: Optional[str] = None) -> Dict[str, Any
     out_dir = _exports_dir(str(base_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"session_{session_id}_{ts}.zip"
+    # ⚠ `_exports_dir` 는 **전 사용자 공유**다(`DEFAULT_REPORT_DIR/exports`). 같은 세션을
+    #   두 번 내보내면 같은 초에 같은 경로가 나오고, 뒤 zip 이 앞 zip 을 덮는다.
+    out_path = reserve_unique_path(out_dir / f"session_{session_id}_{ts}.zip")
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in session_dir.rglob("*"):
             if p.is_file():
@@ -344,8 +347,10 @@ def session_report_files_download_zip(session_id: str, base: Optional[str] = Non
     out_dir = _exports_dir(str(base_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"session_{session_id}_reports_{ts}.zip"
-    
+    # ⚠ **전체 다운로드**와 **선별 다운로드**(아래 `…/zip/select`)가 이름 규칙까지
+    #   똑같다 — 같은 세션·같은 초면 내용이 다른 두 zip 이 한 경로를 두고 겹친다.
+    out_path = reserve_unique_path(out_dir / f"session_{session_id}_reports_{ts}.zip")
+
     # 파일 수를 먼저 확인하여 작은 경우만 동기 처리
     file_count = sum(1 for _ in session_dir.rglob("*") if _.is_file())
     if file_count > 1000:
@@ -370,7 +375,8 @@ def session_report_files_download_zip_select(
     out_dir = _exports_dir(str(base_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"session_{session_id}_reports_{ts}.zip"
+    # ⚠ 위 전체 다운로드와 **같은 이름 규칙**이다 — 선점 없이는 서로를 덮는다.
+    out_path = reserve_unique_path(out_dir / f"session_{session_id}_reports_{ts}.zip")
     paths = req.paths or []
     if not paths:
         raise HTTPException(status_code=400, detail="paths required")

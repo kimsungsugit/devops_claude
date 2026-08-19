@@ -264,6 +264,8 @@ def export_session_archive(session_dir: Path, out_dir: Path) -> Optional[Path]:
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"session_{session_dir.name}_{ts}.zip"
+        # path-collision-ok: 데스크톱 GUI(tkinter) 전용 — 단일 사용자 로컬 실행이라
+        #   교차 사용자 충돌 자체가 없다. 서버 경로는 `backend/routers/sessions.py`.
         out_path = out_dir / name
         with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in session_dir.rglob("*"):

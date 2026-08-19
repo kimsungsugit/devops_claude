@@ -105,7 +105,7 @@ from backend.services.jenkins_service import (
     sync_local_reports,
 )
 from backend.services.local_service import run_svn, svn_info_url
-from backend.services.output_paths import reserve_unique_path
+from backend.services.output_paths import reserve_unique_dir, reserve_unique_path
 from backend.services.paths import is_under_any, safe_resolve_under
 from backend.services.report_parsers import (
     build_report_summary,
@@ -2520,8 +2520,12 @@ async def jenkins_uds_generate(
                 continue
             suffix = Path(f.filename).suffix.lower() or ".png"
             safe_name = "".join(c for c in Path(f.filename).stem if c.isalnum() or c in ("-", "_"))
-            out_name = f"logic_{safe_name}_{ts_logic}{suffix}"
-            out_path = logic_dir / out_name
+            # ⚠ 이름의 유일성이 **업로드 파일명**에만 걸려 있다. 두 사용자가 같은 초에
+            #   `diagram.png` 를 올리면 같은 경로다 — 게다가 한글 등으로 stem 이 전부
+            #   걸러지면 `logic__{ts}` 로 수렴해 충돌 확률이 더 올라간다. 아래 `url` 은
+            #   **선점된 이름**으로 만들어야 남의 그림을 가리키지 않는다.
+            out_path = reserve_unique_path(logic_dir / f"logic_{safe_name}_{ts_logic}{suffix}")
+            out_name = out_path.name
             out_path.write_bytes(await f.read())
             logic_items.append(
                 {
@@ -3564,9 +3568,13 @@ def jenkins_suts_export_vectorcast(
     effective_project_id = str(project_id or cfg.get("project_id") or "VECTORCAST").strip()
     effective_source_root = resolved_source_root or str(cfg.get("source_root") or "").strip()
 
-    package_name = f"suts_vectorcast_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    package_dir = _jenkins_exports_dir(cache_root) / "vectorcast" / package_name
-    package_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠ `mkdir(exist_ok=True)` 는 폴더를 **공유**시켜 안의 산출물이 서로 덮어써진다.
+    #   local 쪽 쌍둥이 두 개(`local_suts_export_vectorcast`·`local_sits_export_vectorcast`)는
+    #   `reserve_unique_dir` 로 비켜간다. 여기만 남아 있었다.
+    package_dir = reserve_unique_dir(
+        _jenkins_exports_dir(cache_root) / "vectorcast"
+        / f"suts_vectorcast_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    package_name = package_dir.name
     intermediate_json = package_dir / "suts_vectorcast_model.json"
     warnings_md = package_dir / "suts_vectorcast_warnings.md"
 
@@ -5564,14 +5572,18 @@ def jenkins_call_tree_save(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     fmt = str(req.output_format or "json").strip().lower()
     if fmt not in ("json", "html", "csv"):
         raise HTTPException(status_code=400, detail="invalid output_format")
+    # ⚠ 키가 job+build 뿐이라 **사용자가 안 들어간다** — 같은 job 의 콜트리를 두 사람이
+    #   같은 초에 저장하면 같은 경로다. 같은 파일의 리포트 zip(`:5881`)·Excel(`:198`)은
+    #   이미 선점한다. 여기만 맨 경로였다.
+    stem = f"jenkins_call_tree_{job_slug}_{sel}_{ts}"
     if fmt == "html":
-        out_path = out_dir / f"jenkins_call_tree_{job_slug}_{sel}_{ts}.html"
+        out_path = reserve_unique_path(out_dir / f"{stem}.html")
         out_path.write_text(call_tree_to_html(payload, req.html_template), encoding="utf-8")
     elif fmt == "csv":
-        out_path = out_dir / f"jenkins_call_tree_{job_slug}_{sel}_{ts}.csv"
+        out_path = reserve_unique_path(out_dir / f"{stem}.csv")
         out_path.write_text(call_tree_to_csv(payload), encoding="utf-8")
     else:
-        out_path = out_dir / f"jenkins_call_tree_{job_slug}_{sel}_{ts}.json"
+        out_path = reserve_unique_path(out_dir / f"{stem}.json")
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"filename": out_path.name, "path": str(out_path), "format": fmt}
 

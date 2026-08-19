@@ -408,6 +408,8 @@ def _agent_log(log_dir: Path, role: str, content: str) -> None:
     tools.ensure_dir(log_dir)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     ts_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # path-collision-ok: 에이전트 대화 **로그**다 — 사용자에게 내려가는 산출물이 아니고,
+    #   같은 초의 두 항목은 append 로 이어 붙는 게 오히려 맞다.
     fname = log_dir / f"agent_{ts}.md"
 
     if role in ("error", "retry", "warning"):
@@ -2278,6 +2280,7 @@ def apply_search_replace(
             patch_path: Optional[Path] = None
             if diff_text:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # path-collision-ok: 내부 진단용 패치 덤프. 산출물 아님.
                 patch_path = patch_dir / f"{tf.name}.{ts}.patch"
                 tmp = patch_path.with_suffix(patch_path.suffix + ".tmp")
                 tmp.write_text(diff_text, encoding="utf-8")

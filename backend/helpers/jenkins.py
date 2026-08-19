@@ -203,8 +203,11 @@ def _jenkins_report_publish_impl(req: JenkinsPublishRequest, job_id: str = "") -
     try:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         job_slug = _job_slug(req.job_url)
-        dest_dir = (report_dir / "local_upload" / job_slug / ts).resolve()
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        # ⚠ `mkdir(exist_ok=True)` 는 폴더를 **공유**시킨다 — 같은 job 을 같은 초에 두 번
+        #   올리면 두 업로드가 한 폴더에 섞이고 같은 이름의 파일은 서로 덮는다.
+        #   폴더 자체를 원자 선점해 비켜간다.
+        from backend.services.output_paths import reserve_unique_dir
+        dest_dir = reserve_unique_dir(report_dir / "local_upload" / job_slug / ts).resolve()
         files = [p for p in source_dir.rglob("*") if p.is_file()]
         total = max(1, len(files))
         copied = 0

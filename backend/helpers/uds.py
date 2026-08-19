@@ -1620,8 +1620,12 @@ def _uds_generate_from_paths(
                 continue
             suffix = p.suffix.lower() or ".png"
             safe_name = "".join(c for c in p.stem if c.isalnum() or c in ("-", "_"))
-            out_name = f"logic_{safe_name}_{ts_logic}{suffix}"
-            out_path = logic_dir / out_name
+            # ⚠ 라우터 쪽 쌍둥이(`backend/routers/jenkins.py` 의 logic 업로드)와 **같은
+            #   이름 규칙**이다. 유일성이 업로드 파일명에만 걸려 있어 같은 초에 같은
+            #   이름이면 덮어쓴다. `url` 은 **선점된 이름**으로 만든다.
+            from backend.services.output_paths import reserve_unique_path
+            out_path = reserve_unique_path(logic_dir / f"logic_{safe_name}_{ts_logic}{suffix}")
+            out_name = out_path.name
             try:
                 out_path.write_bytes(p.read_bytes())
             except Exception:
@@ -1803,7 +1807,10 @@ def _uds_generate_from_paths(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = _jenkins_exports_dir(cache_root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"uds_spec_{job_slug}_{ts}.docx"
+    # ⚠ `backend/routers/jenkins.py` 의 쌍둥이(`uds_spec_{job_slug}_{ts}.docx`)는 이미
+    #   선점한다. 이름 규칙이 글자까지 같은데 여기만 맨 경로였다.
+    from backend.services.output_paths import reserve_unique_path
+    out_path = reserve_unique_path(out_dir / f"uds_spec_{job_slug}_{ts}.docx")
     tpl = str(template_path).strip() or None
     _generate_docx_with_retry(tpl, uds_payload, out_path)
     summary = uds_payload.get("summary")
