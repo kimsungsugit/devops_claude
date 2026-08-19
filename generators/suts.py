@@ -16,7 +16,7 @@ from copy import copy
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
@@ -556,6 +556,12 @@ def collect_unit_functions(
     # 전역 선언 타입도 unit 마다 안 바뀐다. 안에서 만들면 전역 1,525개 × unit 1,157개
     # = 176만 회를 헛돈다(정규식 치환 포함).
     _decl_types = _declared_type_map(gim)
+    # 반환값이 있는 함수 집합. 이것도 unit 마다 안 바뀐다.
+    _nonvoid = _nonvoid_function_names(function_details)
+    # stub return 으로 되살린 칸 수 — 아래 요약 로그가 센다.
+    _stub_added = 0
+    # 예산 절단 — 무경고로 버려지는 칸 수.
+    _trunc_in = _trunc_out = _trunc_units = 0
     # 중간 마디 배열을 되살린 이름 수. 이 경로는 **틀린 이름을 고치는** 것이라
     # 0 이면 "고칠 게 없었다"인지 "배선이 끊겼다"인지 구분이 안 된다 → 요약에 싣는다.
     _mid_fixed = 0
@@ -751,6 +757,17 @@ def collect_unit_functions(
                 out_set = set(output_vars)
                 _uds_out_units += 1
 
+        # ── 피호출 함수의 반환값을 시험 입력으로 ────────────────────────
+        # ⚠ 위 SwUDS 대체가 `input_vars` 를 **통째로 교체**하므로 반드시 그 **뒤**다.
+        #   그리고 예산(`max_inp`) 계산 **앞**이라야 배열 확장이 이 칸까지 셈한다.
+        # ⚠ 기대 열에는 넣지 않는다 — 정본 ExpR 의 stub return 은 0칸이다.
+        _stubs = _stub_return_names(info.get("calls_list"), _nonvoid)
+        if _stubs:
+            _before_stub = len(input_vars)
+            input_vars = list(dict.fromkeys(list(input_vars) + _stubs))
+            inp_set = set(input_vars)
+            _stub_added += len(input_vars) - _before_stub
+
         max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
         max_out = _OUTPUT_COL_END - _OUTPUT_COL_START + 1
 
@@ -844,6 +861,13 @@ def collect_unit_functions(
         # 이 unit 이 온 파일의 시험 범위 판정(`O`/`X`/빈값). 값을 거르지는 **않는다** —
         # SUTS 에서 시험을 빼는 건 사람이 할 결정이다. 다만 조용하면 그 결정 기회가
         # 사라지므로 unit 에 남기고 아래 요약 로그에 센다.
+        # ⚠ 아래 `input_vars[:max_inp]` 는 **경고 없이** 자른다. 배열 확장은
+        #   `array_expansion.skipped` 로 보고하지만 이 최종 절단은 어디에도 안 남아,
+        #   "정본과 다르다"의 원인을 못 짚는 침묵 표면이었다. 세어서 요약에 낸다.
+        _trunc_in += max(0, len(input_vars) - max_inp)
+        _trunc_out += max(0, len(output_vars) - max_out)
+        if len(input_vars) > max_inp or len(output_vars) > max_out:
+            _trunc_units += 1
         _verify = component_verify_of(info.get("file"), _cmap)
         units.append({
             "verify_scope": _verify,
@@ -921,6 +945,16 @@ def collect_unit_functions(
     ) if _scope_x else (
         "" if _cmap else " | ⚠component_map 없음 → 시험 범위 판정 안 함"
     )
+    # ⚠ 비-void 함수가 0 이면 "stub 0칸" 이 아니라 **판정 못 함**이다 — 파서가
+    #   `[OUT] return` 을 안 냈다는 뜻이라 축이 통째로 죽는다. 구분해서 말한다.
+    _const_note += (
+        f" | stub return {_stub_added}칸(비-void {len(_nonvoid)}개)"
+        if _nonvoid else " | ⚠비-void 함수 0개 → stub return 판정 안 함"
+    )
+    if _trunc_units:
+        _const_note += (
+            f" | ⚠예산 절단 {_trunc_units}unit(입력 {_trunc_in}칸·기대 {_trunc_out}칸)"
+        )
     _const_note += _scope_note
     (_logger.warning if _skip else _logger.info)(
         "Collected %d unit functions | 배열 확장 %d건%s%s",
@@ -1284,6 +1318,69 @@ def _array_sizes(
                 if _mdims and _dim_product(_mdims) > 1:
                     sizes[_nm] = _mdims
     return sizes
+
+
+def _nonvoid_function_names(function_details: Dict[str, Dict[str, Any]]) -> Set[str]:
+    """반환값이 있는 함수 이름 집합.
+
+    unit 마다 안 바뀌므로 **루프 밖에서 한 번** 만든다(`_declared_type_map` 과 같은 자리 —
+    13차에 전역 맵을 루프 안에서 만들어 176만 회 헛돈 전례가 있다).
+
+    판정은 파서가 낸 `[OUT] return <타입>` 슬롯으로만 한다. 프로토타입을 다시 파싱하지
+    않는다 — 같은 판정을 두 벌 두면 한쪽만 고쳐진다(이 시리즈의 반복 실패다).
+    태그 제거와 슬롯 판정은 기존 `_DIR_TAG_PAT` · `_RETURN_SLOT_RE` 를 그대로 쓴다.
+    """
+    out: Set[str] = set()
+    for _d in (function_details or {}).values():
+        # ⚠ 엔트리가 dict 가 아닐 수 있다(`{"SwUFn_001": "not_a_dict"}`) — 본 루프는
+        #   그걸 이미 견디므로 여기서 크래시하면 **없던 실패를 새로 만드는** 것이다.
+        #   `isinstance` 가 None 도 함께 거르므로 `(_d or {})` 를 겹쳐 두지 않는다.
+        if not isinstance(_d, dict):
+            continue
+        nm = str(_d.get("name") or "")
+        if not nm:
+            continue
+        for o in (_d.get("outputs") or []):
+            s = _DIR_TAG_PAT.sub("", str(o or "").strip(), count=1).strip()
+            if _RETURN_SLOT_RE.match(s):
+                out.add(nm)
+                break
+    return out
+
+
+def _stub_return_names(calls_list: Any, nonvoid: Set[str]) -> List[str]:
+    """이 unit 이 호출하는 **비-void** 함수의 반환값 — 정본의 시험 **입력**이다.
+
+    VectorCAST 는 피호출 함수를 stub 하고 그 반환값을 주입하므로, 정본 Inpt 열에
+    `u16g_Conv_AngleToPulse() return` 이 실린다. 우리는 이걸 한 번도 안 냈다(0칸).
+
+    실측(KJPDS02_PV, 2026-08-19):
+        정본 입력 stub 칸 198 · 136 unit · 피호출 함수 **100% 가 비-void**
+        후보 규칙       일치   채운행 과다   정밀도
+          calls_list    189       253        42.8%   ← 채택
+          called         81       156        34.2%
+          calling(역방향)  0       230         0.0%
+          logic 등장분만 178       250        41.6%   ← 필터가 오히려 나쁘다
+          파일 경계     채택 79.9% vs 미채택 69.9% — 방향이 반대라 신호 아님
+
+    ⚠ **정본이 어느 callee 를 stub 하는지 가르는 정적 신호는 없다**(위 4개 전부 실패).
+      다음 라운드가 같은 데를 다시 파지 않도록 숫자를 남긴다. 그럼에도 채택한 이유는
+      4차(맨이름)·12차(통짜 표기) 기각과 성격이 다르기 때문이다 — 저 둘은 **순손실**과
+      **근거 부족**이었고, 여기는 사라진 맞춤 0 에 순증 +189 다. 과다 253 도 지어낸
+      이름이 아니라 **실제로 호출하는 비-void 함수**라 stub 가능한 실재 대상이다.
+
+    ⚠ **입력 열 전용이다.** 정본 기대 열의 stub return 은 **0칸**이다.
+    """
+    seen: Set[str] = set()
+    out: List[str] = []
+    for c in (calls_list or []):
+        nm = str(c or "").strip()
+        # `nm and` 를 앞에 두지 않는다 — 빈 이름은 `nonvoid` 에 애초에 안 들어간다
+        # (`_nonvoid_function_names` 가 거른다). 겹쳐 막으면 뮤테이션이 통째로 산다.
+        if nm in nonvoid and nm not in seen:
+            seen.add(nm)
+            out.append(f"{nm}() {_RETURN_VAR}")
+    return out
 
 
 def _elem_suffixes(dims: Tuple[int, ...]) -> List[str]:
