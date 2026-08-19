@@ -893,12 +893,38 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     # 배열 원소 펼침 축 — 정본과 같은 입도로 냈는가, 예산에 걸려 못 펼쳤는가
     "array_expanded_inputs", "array_expanded_expected", "array_elements_emitted",
     "array_skipped_budget", "array_size_map_entries", "array_struct_types",
+    # 관측 대상 선별 축 — 열이 찬 것과 후보를 못 담은 것이 구별되게
+    "var_selection_basis", "var_scan_depth", "var_scan_nodes_max",
+    "var_candidates_input", "var_candidates_expected",
+    "var_budget_cut_input", "var_budget_cut_expected",
     # FI 축 — 0 이 "요청 없음"인지 "요청했는데 못 냄"인지 구분되게
     "fi_emitted", "fi_requested", "fi_unresolved",
     # 근거 시트(전략 / Related_ID) 산출 실적 — 시트가 비어도 **왜 비었는지** 보이게
     "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
     "strategy_blocks_truncated",
     "relid_check_rows", "relid_tidy_rows", "relid_index_rows",
+)
+
+# 그중 **손실 축** — "몇 개를 못 실었나". 요약 표면(영향도 카드)은 전 키를 싣기엔
+# 좁으므로 이 부분집합만 싣는다.
+#
+# ⚠ 새 손실 키를 만들면 **여기에도 넣는다**. 소비처가 손으로 고르면 키를 늘려도 조용히
+#   빠진다 — 이 저장소가 같은 결함을 세 층에서 겪었다(생산자→리포트, 리포트→평가기,
+#   리포트→영향도). 이름 규약(`dropped`/`truncated`/`skipped`/`unresolved`/`cut`)을
+#   따르는 키가 여기 없으면 `test_sits_var_selection_axis.py` 가 실패한다.
+_FLOW_LOSS_KEYS: Tuple[str, ...] = (
+    "flows_dropped", "dropped_safety_related_count", "dropped_in_design_doc_count",
+    # ⚠ 아래 둘은 스칼라가 아니다(분포 dict · 함수명 list). 그래도 **손실 축이라**
+    #   여기 있어야 한다 — 소비처가 모양 때문에 빼면 "무엇을 잃었는지" 가 사라진다.
+    #   요약 표면은 dict 는 `k=v` 로, list 는 건수로 접어서 싣는다.
+    "dropped_asil_distribution", "dropped_entry_fns",
+    "chain_truncated_flows", "related_truncated_ids", "array_skipped_budget",
+    "fi_unresolved", "strategy_nodes_dropped", "strategy_blocks_truncated",
+    "var_budget_cut_input", "var_budget_cut_expected",
+)
+# 위 규약을 검사할 때 쓰는 어휘 — 가드와 문서가 같은 목록을 본다.
+_FLOW_LOSS_NAME_MARKERS: Tuple[str, ...] = (
+    "dropped", "truncated", "skipped", "unresolved", "_cut_",
 )
 
 _ASIL_RANK: Dict[str, int] = {"D": 0, "C": 1, "B": 2, "A": 3, "QM": 4}
@@ -1077,6 +1103,17 @@ def collect_integration_flows(
     _arr_expanded_exp = 0
     _arr_skipped = 0
     _arr_elements = 0
+    # 관측 대상 선별 축 — **후보가 몇 개였는지**를 센다.
+    #
+    # 정본은 관측 대상을 VectorCAST 실행 결과에서 고르고 우리는 정적 호출 그래프만
+    # 본다. 깊이는 이미 최적점에서 멈춰 있고(`_VAR_SCAN_DEPTH` 주석의 깊이별 실측 표),
+    # 남은 격차는 **더 담아서** 줄지 않는다 — 후보가 열 상한의 3~8배라 더 담는 건 곧
+    # 잘못 담는 것이다. 그래서 이 축은 닫지 않고 **보이게** 만든다: 산출물만 보면
+    # 82칸이 찬 것과 후보 400개 중 82개만 실린 것이 구별되지 않는다.
+    _var_cand_in = 0
+    _var_cand_exp = 0
+    _var_budget_cut_in = 0
+    _var_budget_cut_exp = 0
     # 배열 선언 크기는 흐름마다 안 바뀐다 — 루프 **밖에서** 한 번만 만든다
     # (SUTS 가 같은 이유로 unit 루프 밖에 둔다: 전역 1,525 × 흐름 367 헛돔 방지).
     _gim = globals_info_map or {}
@@ -1291,20 +1328,24 @@ def collect_integration_flows(
         # 담느냐가 곧 회수이고, 깊이 우선은 한 갈래로 멀리 내려가 상한을 써 버린다.
         _var_nodes = _bfs_call_order(
             fn_name, _calls_map, _VAR_SCAN_NODES, max_depth=_VAR_SCAN_DEPTH)
+        #
+        # ⚠ 예산이 차도 **멈추지 않고 후보를 끝까지 센다**. 담는 규칙은 그대로다
+        #   (`input_pairs` 결과는 이전과 동일) — 세기만 추가한다. 예전엔 상한에서
+        #   `break` 해 버려 "82칸을 채웠다" 와 "후보 400 중 82 만 담았다" 가 산출물에서
+        #   같은 모양이었다.
+        _cand_in: set = {p[0] for p in input_pairs}
         for _node in _var_nodes:
-            if len(input_pairs) >= _MAX_INPUT_PARAMS:
-                break
             _ni = name_to_info.get(_node)
             if not _ni or _node == fn_name:
                 continue      # entry 자신은 위에서 이미 훑었다
-            _seen_in = {p[0] for p in input_pairs}
             for _g in ((_ni.get("globals_global") or []) + (_ni.get("globals_static") or [])):
-                if len(input_pairs) >= _MAX_INPUT_PARAMS:
-                    break
                 _gn = _clean_global_var_name(_g)
-                if _gn and _gn.lower() not in _fn_name_set and _gn not in _seen_in:
-                    _seen_in.add(_gn)
-                    input_pairs.append((_gn, _g))
+                if _gn and _gn.lower() not in _fn_name_set and _gn not in _cand_in:
+                    _cand_in.add(_gn)
+                    if len(input_pairs) < _MAX_INPUT_PARAMS:
+                        input_pairs.append((_gn, _g))
+        _var_cand_in += len(_cand_in)
+        _var_budget_cut_in += max(0, len(_cand_in) - len(input_pairs))
 
         input_vars: List[str] = [p[0] for p in input_pairs[:_MAX_INPUT_PARAMS]]
         # Keep annotated raws for type inference
@@ -1344,24 +1385,24 @@ def collect_integration_flows(
 
         # 입력과 같은 이유로 기대도 **경로 전체**를 본다(위 입력부 주석 참조).
         # 회수: 기대 129 → 281 (정본 910 기준).
+        # 입력과 같은 이유로 후보를 끝까지 센다(위 입력부 주석 참조).
+        _cand_exp: set = {p[0] for p in exp_pairs}
         for _node in _var_nodes:
-            if len(exp_pairs) >= _MAX_EXP_PARAMS:
-                break
             _ni = name_to_info.get(_node)
             if not _ni or _node == fn_name:
                 continue
-            _seen_exp = {p[0] for p in exp_pairs}
             for _raw, _cleaner in (
                 [(x, _clean_var_name) for x in (_ni.get("outputs") or [])]
                 + [(x, _clean_global_var_name)
                    for x in ((_ni.get("globals_global") or []) + (_ni.get("globals_static") or []))]
             ):
-                if len(exp_pairs) >= _MAX_EXP_PARAMS:
-                    break
                 _nm = _cleaner(_raw)
-                if _nm and _nm.lower() not in _fn_name_set and _nm not in _seen_exp:
-                    _seen_exp.add(_nm)
-                    exp_pairs.append((_nm, _raw))
+                if _nm and _nm.lower() not in _fn_name_set and _nm not in _cand_exp:
+                    _cand_exp.add(_nm)
+                    if len(exp_pairs) < _MAX_EXP_PARAMS:
+                        exp_pairs.append((_nm, _raw))
+        _var_cand_exp += len(_cand_exp)
+        _var_budget_cut_exp += max(0, len(_cand_exp) - len(exp_pairs))
 
         # If still no expected vars, mine global writes from logic_flow conditions
         if not exp_pairs:
@@ -1586,6 +1627,16 @@ def collect_integration_flows(
             #   실제로 이 키가 캐시에 없어 0 인 채로 돌던 것을 진단하는 데 한 라운드가 들었다
             #   (`_SOURCE_SECTIONS_SCHEMA_VERSION` v12 참조).
             "array_struct_types": len(_smem),
+            # 관측 대상 선별 축 — 정본과의 남은 격차가 **여기**다. 닫지 않고 보이게 한다.
+            #   basis 가 static_call_graph 인 한 정본(VectorCAST 실행 관측)과는
+            #   원리적으로 다른 집합이 나온다. 값을 지어내지 않고 사실을 적는다.
+            "var_selection_basis": "static_call_graph",
+            "var_scan_depth": _VAR_SCAN_DEPTH,
+            "var_scan_nodes_max": _VAR_SCAN_NODES,
+            "var_candidates_input": _var_cand_in,
+            "var_candidates_expected": _var_cand_exp,
+            "var_budget_cut_input": _var_budget_cut_in,
+            "var_budget_cut_expected": _var_budget_cut_exp,
         })
     if _sds_lookups and not _sds_swcom_hits:
         # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
