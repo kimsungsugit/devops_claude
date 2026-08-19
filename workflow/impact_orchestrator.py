@@ -129,6 +129,43 @@ def _as_str_list(v: Any) -> List[str]:
     return []
 
 
+def _flow_loss_fields(flow: Any) -> Dict[str, Any]:
+    """SITS 흐름 지표 중 **손실 축**만 카드용 필드로 옮긴다.
+
+    키 목록은 `generators/sits.py:_FLOW_LOSS_KEYS` **하나**가 출처다 — 여기서 다시
+    나열하면 생성기가 손실 키를 늘려도 카드는 조용히 옛 목록만 싣는다(이 저장소가
+    같은 결함을 세 층에서 겪었다).
+
+    ⚠ 값이 0 이면 **싣지 않는다**. 손실 0 은 정상이라 카드에 줄을 더할 이유가 없고,
+      렌더러가 빈 값 줄을 생략하는 규약과도 맞는다. 반대로 0 이 아닌데 안 실리는 일은
+      없어야 하므로 필터는 "0 또는 빈값"으로만 한다(키 이름으로 거르지 않는다).
+
+    ⚠ 무거운 생성기 모듈을 임포트 실패로 죽이지 않는다 — 영향도 리포트는 SITS 없이도
+      돌아야 한다. 실패하면 손실 축만 빠지고 나머지 카드는 그대로 나간다.
+    """
+    if not isinstance(flow, dict) or not flow:
+        return {}
+    try:
+        from generators.sits import _FLOW_LOSS_KEYS
+    except Exception as exc:      # pragma: no cover - 임포트 환경 의존
+        logger.debug("SITS 손실 축 키를 못 읽었다: %s", exc)
+        return {}
+    out: Dict[str, Any] = {}
+    for k in _FLOW_LOSS_KEYS:
+        v = flow.get(k)
+        if v is None or v == "" or v == 0 or v == [] or v == {}:
+            continue
+        if isinstance(v, dict):
+            # 분포는 `B=2, QM=5` 로 접는다 — 카드 한 줄에 들어가고 무엇을 잃었는지 남는다.
+            out[f"flow_{k}"] = ", ".join(f"{kk}={vv}" for kk, vv in sorted(v.items()))
+        elif isinstance(v, (list, tuple)):
+            # 목록은 건수로. 이름 전부를 카드에 쏟으면 나머지 줄이 안 보인다.
+            out[f"flow_{k}"] = len(v)
+        else:
+            out[f"flow_{k}"] = v
+    return out
+
+
 def _load_linked_doc_summary(linked_doc: str) -> Dict[str, Any]:
     if not linked_doc:
         return {}
@@ -162,6 +199,11 @@ def _load_linked_doc_summary(linked_doc: str) -> Dict[str, Any]:
         "flow_emit_pct": flow.get("flow_emit_pct", ""),
         "flows_dropped": flow.get("flows_dropped", ""),
         "dropped_safety_related_flows": flow.get("dropped_safety_related_count", ""),
+        # ⚠ 위 3키는 이름을 유지하되(기존 렌더러가 이 이름으로 읽는다) **나머지 손실
+        #   축을 손으로 나열하지 않는다**. 예전엔 평가기와 여기가 같은 3키를 각자
+        #   손으로 들고 있어, 생성기에 손실 키를 추가해도 두 곳 다 조용히 빠졌다.
+        #   출처는 `generators/sits.py:_FLOW_LOSS_KEYS` 하나다.
+        **_flow_loss_fields(flow),
         # ── 생성기가 남긴 경고 — 예전엔 통째로 유실됐다 ──
         # ⚠ **순회 대상**을 먼저 검사한다. `or []` 만으로는 int 가 오면 TypeError 로
         # 영향도 리포트 전체가 죽고, str 이 오면 **글자 단위로 순회**해 경고 수백 줄이

@@ -259,12 +259,33 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     # 이유는 기존 프로젝트의 pass/fail 을 뒤집지 않기 위해서다(정책 결정 사항).
     flow_cov = quality_report.get("integration_flow_coverage") or {}
     if flow_cov.get("total_flows_found") is not None:
+        # 이 세 이름은 **유지한다** — 기존 소비처가 이 이름으로 읽는다.
         metrics.append(_metric("flow_emit_pct", _safe_float(flow_cov, "flow_emit_pct")))
         metrics.append(_metric("flows_dropped", _safe_float(flow_cov, "flows_dropped")))
         metrics.append(
             _metric("dropped_safety_related_flows",
                     _safe_float(flow_cov, "dropped_safety_related_count")),
         )
+        # ⚠ 나머지는 **손으로 고르지 않는다**. 예전엔 위 3개가 화이트리스트 전부라
+        #   생산자(`generators/sits.py:_FLOW_COV_KEYS`)에 키를 추가해도 평가기까지
+        #   오지 않았다 — 생산자→리포트 사이에서 이미 한 번 겪은 결함이 한 층 위에
+        #   그대로 있었다. 여기서는 **리포트 dict 자체를 출처로** 훑는다.
+        _named = {"flow_emit_pct", "flows_dropped", "dropped_safety_related_count"}
+        _unrepresentable: List[str] = []
+        for _k in sorted(flow_cov):
+            if _k in _named:
+                continue
+            _v = flow_cov[_k]
+            # bool 은 int 의 하위형이라 먼저 걸러야 True 가 1.0 으로 새지 않는다.
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                _unrepresentable.append(_k)
+                continue
+            metrics.append(_metric(f"flow_{_k}", float(_v)))
+        if _unrepresentable:
+            # 숫자가 아니라 못 실은 키가 **몇 개인지**는 남긴다. 조용히 빠지면
+            # "그런 축이 없다" 와 구별되지 않는다.
+            _logger.debug("SITS 흐름 지표 중 수치화 불가: %s", ", ".join(_unrepresentable))
+            metrics.append(_metric("flow_metrics_unrepresentable", float(len(_unrepresentable))))
     return metrics
 
 
