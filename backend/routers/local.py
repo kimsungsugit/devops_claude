@@ -3334,6 +3334,16 @@ def local_suts_view(filename: str, report_dir: Optional[str] = None) -> Dict[str
     )
 
 
+def _split_fi_design_ids(raw: str) -> List[str]:
+    """콤마/공백 구분 문자열 → 설계 ID 목록.
+
+    ⚠ 빈 토큰을 버리되 **알 수 없는 ID 는 여기서 거르지 않는다**. 존재 여부 판정은
+      생성기가 SwUDS Related 맵으로 하고, 못 찾은 ID 는 `fi_unresolved` 로 보고된다.
+      여기서 미리 걸러내면 "요청했는데 못 냈다" 가 "요청이 없었다" 로 둔갑한다.
+    """
+    return [t for t in (s.strip() for s in str(raw or "").replace(";", ",").split(",")) if t]
+
+
 @router.post("/api/local/sits/generate")
 def local_sits_generate(
     request: Request,
@@ -3356,6 +3366,12 @@ def local_sits_generate(
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
     stp_path: str = Form(""),
+    # 오류 주입(FI) 시험을 낼 설계 ID — 콤마 구분. **입력이지 추론이 아니다.**
+    # 어느 통합 지점을 오류 주입으로 시험할지는 8가지 독립 근거(전략 라벨·오류 경로·
+    # 반환 경로·ASIL·시나리오 텍스트 등) 어느 것으로도 정본과 맞지 않았다(R8 실측).
+    # 지어내는 대신 받는다. 비우면 FI TC 는 0건이고, 그 사실은 품질 리포트의
+    # `fi_requested`/`fi_emitted`/`fi_unresolved` 로 남는다.
+    fi_design_ids: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate SITS (Software Integration Test Specification) Excel from source code."""
     from sits_generator import generate_sits
@@ -3413,6 +3429,7 @@ def local_sits_generate(
             uds_path=uds_file,
             hsis_path=hsis_file,
             stp_path=stp_file,
+            fi_design_ids=_split_fi_design_ids(fi_design_ids),
             ai_config=_load_sts_ai_config(),
         )
     except Exception as e:
