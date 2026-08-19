@@ -565,6 +565,10 @@ def collect_unit_functions(
     # stub 출력 파라미터로 되살린 칸 수. **return 과 따로 센다** — 합치면 어느
     # 경로가 얼마를 냈는지 못 갈라서 회귀를 눈으로 못 본다.
     _stub_op_added = 0
+    # SwUDS 대체가 지운 **파라미터**를 되돌린 칸 수. 위 둘과 또 따로 센다 —
+    # 세 경로가 한 숫자에 뭉치면 어느 축이 죽었는지 로그로 못 본다.
+    _param_restored = 0
+    _param_restored_units = 0
     # 예산 절단 — 무경고로 버려지는 칸 수.
     _trunc_in = _trunc_out = _trunc_units = 0
     # 중간 마디 배열을 되살린 이름 수. 이 경로는 **틀린 이름을 고치는** 것이라
@@ -604,6 +608,20 @@ def collect_unit_functions(
 
         input_vars: List[str] = _extract_var_names(inputs_raw)
         output_vars: List[str] = _extract_var_names(outputs_raw)
+
+        # 파라미터 슬롯에서 온 **루트 이름**만 따로 붙잡아 둔다. 아래 SwUDS 대체는
+        # `input_vars` 를 통짜로 교체하므로 여기서 안 잡으면 그대로 사라진다.
+        # ⚠ 멤버 경로(`p[0].m`)는 뺀다 — 멤버까지 되돌리면 정밀도가 50% → 14.2% 로
+        #   떨어진다(R24 P8 vs P6). SwUDS 가 root 를 적고 멤버를 골랐다면 **선별**이다.
+        # ⚠ `[`·`(` 는 따로 안 막는다. `_extract_var_names` 가 배열 첨자를 떼고
+        #   `->` 를 `[0].` 로 바꾸므로 **`[` 는 항상 `.` 를 동반**하고 `(` 는 shape
+        #   검사에서 이미 막힌다(실측 KJPDS02_PV: `[` 단독 0건 · `(` 0건). 조건을
+        #   더 얹으면 죽은 방어가 되어 뮤테이션이 통째로 살아남는다.
+        # `return` 은 다르다 — 생산자가 반환 슬롯을 `inputs` 에 싣는 판이 실재하므로
+        # (R23 이 `[OUT] U8 * p` 를 `inputs` 에서 만났다) 구조적으로 도달 가능하다.
+        _param_roots: List[str] = [
+            v for v in input_vars if v != _RETURN_VAR and "." not in v
+        ]
 
         inp_set = set(input_vars)
         out_set = set(output_vars)
@@ -759,6 +777,30 @@ def collect_unit_functions(
                 input_vars = list(dict.fromkeys(_u_in))
                 inp_set = set(input_vars)
                 _uds_in_units += 1
+                # ── SwUDS 가 빠뜨린 **파라미터**를 되돌린다 ──────────────
+                # 통짜 교체라 SwUDS 표에 없는 파라미터는 시험 입력에서 사라진다.
+                # 파라미터는 정의상 시험 입력이므로 그 누락은 **under-testing** 이다.
+                # 실측(R24, KJPDS02_PV — 대체가 지운 입력 527칸 기준):
+                #   되살릴 대상          생산   적중   과다   정밀도
+                #   전부(합집합)          527     37    490     7.0%   ← 기각
+                #   전역만                409     16    393     3.9%   ← 기각
+                #   파라미터 멤버 포함     118     21     97    17.8%
+                #   **파라미터 루트만**    22     11     11    50.0%   ← 채택
+                #   그중 SwUDS 가 root 를 아예 안 적은 것  5/5 = **100%**
+                # 실제 사례가 규칙을 설명한다 — SwUDS 쪽 오타·누락이다:
+                #   `prv_ComputeQ15Ratio`      파라미터 `val`  ↔ SwUDS `Val`
+                #   `s_ApplyTemperatureCompensation` `s16_Ratio` ↔ SwUDS `s16t_Ratio`
+                #   `g_Lib_SafeWriteQueue_EnqueueWrite` 콜백 2개를 SwUDS 가 누락
+                # ⚠ **입력 열 전용**이다. 같은 규칙을 기대 열에 걸면 정밀도 1.2%
+                #   (생산 86 · 적중 1) — 정본 ExpR 은 파라미터를 그렇게 안 적는다.
+                # ⚠ 멤버 경로까지 되돌리지 않는다. SwUDS 가 root 를 적고 멤버를
+                #   골랐다면 그건 **선별**이고, 거기 우리가 멤버를 더 얹는 건 추측이다.
+                _restore = [p for p in _param_roots if p not in inp_set]
+                if _restore:
+                    input_vars = list(dict.fromkeys(input_vars + _restore))
+                    inp_set = set(input_vars)
+                    _param_restored += len(_restore)
+                    _param_restored_units += 1
             if _u_out:
                 _keep_vc = [v for v in output_vars if v == _RETURN_VAR or "()" in v]
                 output_vars = list(dict.fromkeys(_u_out + _keep_vc))
@@ -938,6 +980,12 @@ def collect_unit_functions(
     _const_note += (
         f" | SwUDS 이름 대체 입력 {_uds_in_units}/{len(units)} · 기대 {_uds_out_units}"
         if uds_io_map else " | ⚠SwUDS 입출력 맵 없음 → 소스 파싱 이름 사용"
+    )
+    # 대체가 지운 파라미터를 되돌린 양. **SwUDS 대체가 걸린 unit 이 있을 때만** 의미가
+    # 있으므로 0 을 "고칠 게 없었다"로 읽히게 두지 않는다 — 대체 자체가 없었으면 그렇게 적는다.
+    _const_note += (
+        f" | 대체가 지운 파라미터 복원 {_param_restored}칸({_param_restored_units} unit)"
+        if _uds_in_units else " | ⚠SwUDS 입력 대체 0 unit → 파라미터 복원 판정 안 함"
     )
     # 중간 마디 배열 복원. 이건 입도 조정이 아니라 **불성립 이름 교정**이라
     # (배열에 `.멤버` 는 못 붙인다) 0 건이면 "고칠 게 없었다"인지 "배선이 끊겼다"인지
