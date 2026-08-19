@@ -48,6 +48,63 @@ def _ready_budget_s() -> float:
 _CONFIRM_PING_TIMEOUT = 2.0
 
 
+def _worker_version_report() -> dict:
+    """도는 워커가 **소스와 같은 판인지** 본다. 다르면 exe 재빌드가 필요하다는 뜻.
+
+    왜 필요한가 — `dist/excel_rename_gui_v2.exe` 는 gitignore 대상이라 소스를 고쳐도
+    **배포본은 그대로다.** 그 어긋남은 아무 신호도 안 낸다: 게이트는 초록이고 read 도
+    되는데 고친 동작만 빠져 있다. 2026-08-19 에 `allow_reuse_address` 를 껐는데 도는
+    exe 는 옛 판이라 포트 가로채기가 여전히 가능했다 — 그런 걸 눈으로 잡을 수는 없다.
+
+    기대값은 **소스 상수를 직접 읽는다**(`cloudium_worker.worker.WORKER_VERSION`).
+    두 벌로 적으면 그것부터 갈라진다. 워커 모듈은 최상단에서 tkinter 를 import 하지
+    않으므로(GUI 는 `_run_gui` 안에서 lazy) 백엔드가 import 해도 안전하다.
+
+    조회 실패는 **모른다고 말한다** — 낡음/최신 어느 쪽으로도 단정하지 않는다.
+    """
+    import json
+    import socket
+
+    from backend.services.file_resolver import _worker_endpoint
+
+    try:
+        from cloudium_worker.worker import WORKER_VERSION as expected
+    except Exception as exc:  # noqa: BLE001 — 소스 부재/임포트 실패도 '모름'이다
+        return {"worker_version": None, "version_check": f"unavailable({type(exc).__name__})"}
+
+    host, port = _worker_endpoint()
+    try:
+        with socket.create_connection((host, port), timeout=2.0) as s:
+            s.sendall(json.dumps({"id": "v", "op": "version", "args": {}}).encode() + b"\n")
+            s.settimeout(2.0)
+            buf = b""
+            while b"\n" not in buf and len(buf) < 4096:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        running = json.loads(buf.split(b"\n", 1)[0].decode("utf-8")).get("result")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"worker_version": None,
+                "version_check": f"unavailable({type(exc).__name__})"}
+
+    if running == expected:
+        return {"worker_version": running, "version_check": "match"}
+    # ⚠ 방향을 단정하지 않는다. 흔한 건 "exe 가 낡음" 이지만 **소스를 되돌린 경우**
+    #   (옛 커밋 체크아웃 등)엔 exe 가 더 새 판이다. "낡았다" 고 적으면 그 경우엔
+    #   거짓말이 된다 — 두 값을 다 보여주고 판단은 사람에게 넘긴다.
+    #   조치(재빌드)는 어느 방향이든 같으므로 안내는 유지한다.
+    _log.warning(
+        "Cloudium worker 판이 소스와 **어긋난다** — 도는 exe %s · 소스 %s. "
+        "`cloudium_worker/worker.py` 를 고쳐도 exe 를 다시 빌드하지 않으면 반영되지 "
+        "않는다(반대로 소스를 되돌렸다면 exe 쪽이 새 판이다). 재빌드: "
+        "pyinstaller --onefile --name excel_rename_gui_v2 --noconsole "
+        "cloudium_worker\\worker.py", running, expected,
+    )
+    return {"worker_version": running, "expected_worker_version": expected,
+            "version_check": "stale_exe"}
+
+
 def _port_held_by_other() -> "tuple[bool, int]":
     """워커 포트를 **다른 프로세스**가 쥐고 있나. 반환 ``(그렇다, 포트)``.
 
@@ -126,7 +183,9 @@ def ensure_cloudium_worker_running() -> dict:
     # W2: force=True로 TTL 캐시 우회 — 가장 최근 상태 확보.
     with _SPAWN_LOCK:
         if is_gate_running(force=True):
-            return {"action": "already_running"}
+            # ⚠ 여기가 **평상시 경로**다(워커가 이미 떠 있음). spawn 쪽에만 버전 점검을
+            #   달면 재기동해도 낡은 exe 를 영영 못 본다 — 정작 매번 지나는 길이 여기다.
+            return {"action": "already_running", **_worker_version_report()}
 
         worker_exe = _REPO_ROOT / "dist" / "excel_rename_gui_v2.exe"
         if not worker_exe.exists():
@@ -157,6 +216,8 @@ def ensure_cloudium_worker_running() -> dict:
                 _log.info("Cloudium worker spawned + ready in %.1fs: %s", waited, worker_exe)
             result = {"action": "spawned", "path": str(worker_exe),
                       "ready": ready, "waited_s": round(waited, 1)}
+            if ready:
+                result.update(_worker_version_report())
             if not ready:
                 # ⚠ '안 떴다' 와 '남이 포트를 쥐었다' 는 처방이 정반대다. 안 가르면
                 #   포트 충돌인데 "타임아웃을 늘리라" 고 안내하게 되고, 그 처방은

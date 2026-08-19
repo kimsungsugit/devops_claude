@@ -108,6 +108,32 @@ class TestBindFailureMessage:
         exc.winerror = 10013
         assert "권한 문제가 아니라" in worker.bind_failure_message("h", 1, exc)
 
+    def test_dialog_ttl_is_read_at_call_time(self, monkeypatch):
+        """⚠ import 시점에 얼리면 재로드 없이는 바꿀 수도 잴 수도 없다.
+
+        이 저장소는 기본 인자를 def 시점에 얼려 두고 "튜닝했다" 고 믿었다가 실험
+        자체가 no-op 이던 전례가 있다(`file_resolver._ping_worker` docstring).
+        """
+        monkeypatch.setenv("CLOUDIUM_WORKER_ERR_DIALOG_TTL", "3.5")
+        assert worker.err_dialog_ttl_s() == 3.5
+        monkeypatch.delenv("CLOUDIUM_WORKER_ERR_DIALOG_TTL")
+        assert worker.err_dialog_ttl_s() == worker._ERR_DIALOG_TTL_DEFAULT_S
+
+    def test_dialog_ttl_default_is_bounded(self):
+        """무인 spawn 이 대화상자에 붙잡히지 않으려면 기본값이 **유한**해야 한다."""
+        ttl = worker.err_dialog_ttl_s()
+        assert 0 < ttl <= 120, f"기본 TTL 이 비었거나 과하다: {ttl}"
+
+    @pytest.mark.parametrize("bad", ["", "   ", "abc", "1,5"])
+    def test_bad_ttl_falls_back(self, monkeypatch, bad):
+        monkeypatch.setenv("CLOUDIUM_WORKER_ERR_DIALOG_TTL", bad)
+        assert worker.err_dialog_ttl_s() == worker._ERR_DIALOG_TTL_DEFAULT_S
+
+    def test_ttl_zero_means_no_dialog(self, monkeypatch):
+        """0 이하면 대화상자를 안 띄운다 — 주석에 적었으면 동작도 그래야 한다."""
+        monkeypatch.setenv("CLOUDIUM_WORKER_ERR_DIALOG_TTL", "0")
+        assert worker.err_dialog_ttl_s() <= 0
+
     def test_unrelated_error_gets_no_false_hint(self):
         """포트 충돌이 아닌데 '포트를 옮기라' 고 하면 반대 방향 오진단이다."""
         exc = OSError()

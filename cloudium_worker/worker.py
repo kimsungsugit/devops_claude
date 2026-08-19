@@ -43,7 +43,18 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-WORKER_VERSION = "1.0"
+# ⚠ **동작이 바뀌면 반드시 올린다.** 이 파일은 `dist/excel_rename_gui_v2.exe` 로
+# 빌드되는데 exe 는 gitignore 대상이라, 소스를 고쳐도 **배포본은 그대로**다. 그 어긋남을
+# 아무도 감지 못 하면 "고쳤는데 왜 그대로지" 가 된다(2026-08-19: allow_reuse_address 를
+# 껐는데 도는 exe 는 옛 판이라 여전히 가로채기가 가능했다).
+#
+# 백엔드는 이 상수를 **소스에서 직접 읽어 기대값으로 삼고**, 워커가 IPC `version` 으로
+# 답한 값과 다르면 "재빌드 필요" 를 명시 보고한다(`cloudium_worker_launcher`).
+# 그래서 여기만 올리면 드리프트가 자동으로 보인다 — 두 벌로 적지 말 것.
+#
+#   1.0 → 1.1  SO_REUSEADDR 끔(포트 가로채기 차단) + 바인딩 실패 대화상자 안내
+#   1.1 → 1.2  그 대화상자가 무인 spawn 을 붙잡지 않도록 상한 뒤 자동 닫힘
+WORKER_VERSION = "1.2"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
@@ -277,6 +288,29 @@ class _ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = False
 
 
+_ERR_DIALOG_TTL_DEFAULT_S = 20.0
+
+
+def err_dialog_ttl_s() -> float:
+    """기동 실패 대화상자가 스스로 닫히기까지의 시간(초).
+
+    사람이 읽을 만큼은 주되 **무인 spawn 이 영원히 남지 않도록** 상한을 둔다.
+    0 이하면 대화상자를 아예 안 띄우고 stderr 로만 남긴다.
+
+    ⚠ 모듈 상수가 아니라 **함수**인 이유: import 시점에 얼어붙으면 재로드 없이는
+      바꿀 수도 잴 수도 없다(재로드는 다른 테스트의 모듈 상태를 흔든다). 이 저장소는
+      기본 인자를 def 시점에 얼려 두고 "튜닝했다" 고 믿었다가 실험 자체가 no-op 이던
+      전례가 있다(`file_resolver._ping_worker` docstring).
+    """
+    raw = (os.environ.get("CLOUDIUM_WORKER_ERR_DIALOG_TTL") or "").strip()
+    if not raw:
+        return _ERR_DIALOG_TTL_DEFAULT_S
+    try:
+        return float(raw)
+    except ValueError:
+        return _ERR_DIALOG_TTL_DEFAULT_S
+
+
 def bind_failure_message(host: str, port: int, exc: OSError) -> str:
     """바인딩 실패를 **사람이 읽을 수 있는 말**로. 트레이스백만 내면 오독한다.
 
@@ -339,10 +373,27 @@ def _run_gui(host: str, port: int) -> int:
         #   트레이스백만 남기면 사용자는 "그냥 안 켜진다" 로 겪는다. 대화상자로 알린다.
         msg = bind_failure_message(host, port, exc)
         try:
+            _ttl = err_dialog_ttl_s()
+            if _ttl <= 0:
+                raise RuntimeError("dialog disabled")   # 아래 stderr 경로로 간다
             _err_root = tk.Tk()
             _err_root.withdraw()
+            # ⚠ **모달은 아무도 안 누르면 영원히 대기한다.** 이 exe 는 백엔드가
+            #   detached 로 띄우므로 클릭할 사람이 없다. 이 저장소는 같은 형태로
+            #   테스트 스위트가 25분간 hang 한 전례가 있다("HTTP 가 tkinter 모달").
+            #   → 상한 뒤 root 를 파괴해 모달이 **스스로 닫히게** 한다.
+            #
+            #   ⚠ 이건 **예방이지 관측된 사고의 수정이 아니다.** 한때 워커 프로세스가
+            #   둘로 보여 "바인딩에 진 쪽이 모달을 들고 남았다" 로 진단했는데 **틀렸다** —
+            #   `--onefile` PyInstaller 는 부트로더가 자기를 재실행하므로 **한 번 띄워도
+            #   항상 2개**다(부모/자식 관계로 확인: 34580 의 부모가 44216). 실제로 모달이
+            #   프로세스를 붙잡은 사례는 아직 없다. 그래도 무인 spawn 경로라 상한을 둔다.
+            _err_root.after(int(_ttl * 1000), _err_root.destroy)
             messagebox.showerror("Cloudium Worker - 기동 실패", msg)
-            _err_root.destroy()
+            try:
+                _err_root.destroy()
+            except tk.TclError:
+                pass          # after() 가 이미 파괴함 = 정상 경로
         except Exception:  # noqa: BLE001  # silent-ok
             # 대화상자를 못 띄우는 상황(디스플레이 없음 등)에서도 **아래 stderr 출력은
             # 반드시 나간다** — 삼키는 게 아니라 보고 경로가 둘이고 하나가 실패한 것.

@@ -54,10 +54,23 @@ def test_ensure_returns_disabled_when_env_off(monkeypatch):
 
 
 def test_ensure_returns_already_running_when_gate_alive():
+    """⚠ 반환 dict 는 **가산 확장**된다 — 완전 일치로 묶지 않는다.
+
+    2026-08-19 에 `version_check`/`worker_version`(exe↔소스 드리프트 감지)이 붙으면서
+    `== {"action": "already_running"}` 이 깨졌다. 키가 늘어나는 게 결함이 아니라
+    **완전 일치 단언이 그 확장을 못 견디는 형태**였다. 여기서 지켜야 할 계약은
+    "action 이 already_running 이다" 이지 "키가 정확히 하나다" 가 아니다.
+
+    ⚠ 버전 조회는 실제 소켓을 연다. 머신에 워커가 떠 있으면 그쪽으로 나가므로
+      **단위 테스트에서는 막는다**(환경에 따라 결과가 달라지면 격리가 깨진다).
+    """
     with patch.object(launcher, "_REPO_ROOT") as _, \
+         patch.object(launcher, "_worker_version_report",
+                      return_value={"version_check": "stubbed"}), \
          patch("backend.services.file_resolver.is_gate_running", return_value=True):
         result = launcher.ensure_cloudium_worker_running()
-    assert result == {"action": "already_running"}
+    assert result["action"] == "already_running"
+    assert result["version_check"] == "stubbed"
 
 
 def test_ensure_returns_exe_missing_when_no_file(tmp_path):
