@@ -53,6 +53,22 @@ REGISTRY = REPO / "config" / "scm_registry.json"
 def _bootstrap_resolver():
     """backend lifespan(main.py) 과 동일한 prefix 병합을 재현한다."""
     notes: list[str] = []
+    # ⚠ prefix 병합보다 **먼저** .env 를 읽어야 한다. 워커 포트(CLOUDIUM_WORKER_PORT)
+    # 같은 접속 설정이 여기서 정해지는데, 독립 스크립트는 uvicorn 을 안 거치므로
+    # main.py 의 load_dotenv 가 돌지 않는다. 빠뜨리면 백엔드는 새 포트를 보고
+    # 스크립트만 **기본 포트**를 봐서, 같은 트리에서 한쪽만 "worker 미응답" 이 난다
+    # (2026-08-19 실측: .env 로 8766 으로 옮겼는데 스크립트는 8765 를 계속 봤다).
+    # override=False → 이미 설정된 환경 변수가 우선. main.py:37 과 동일한 계약.
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+
+        _env = REPO / ".env"
+        _load_dotenv(_env, override=False)
+        notes.append(f".env 로드: {'있음' if _env.exists() else '없음'} ({_env})")
+    except ImportError:
+        # 조용히 넘기지 않는다 — 포트/모드가 기본값으로 떨어진 채 도는 것이
+        # '설정대로 돈다' 로 오독되면 진단이 통째로 헛돈다.
+        notes.append("⚠ python-dotenv 미설치 — .env 무시. 접속 설정은 **기본값**이다")
     try:
         from backend.routers.scm import merge_all_scm_paths_to_cloudium
         notes.append(f"SCM prefix 병합: {merge_all_scm_paths_to_cloudium()}")
