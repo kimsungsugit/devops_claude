@@ -523,9 +523,13 @@ def vcast_process_jenkins(req: VCastProcessJenkinsRequest) -> Dict[str, Any]:
                 "functions_units": len(parsed.functions_data or {}),
             })
         return result
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Process error: {str(e)}")
+
+    # ⚠ 이 try 안에서 404("cached build not found" 등)를 내는데 아래가 먹고 있었다.
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.error("vcast Jenkins 처리 실패:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Jenkins 리포트 처리 중 오류 발생")
 
 
 @router.get("/api/vcast/reports")
@@ -555,19 +559,30 @@ def vcast_download_report(filename: str) -> FileResponse:
     """생성된 Excel 리포트 다운로드"""
     try:
         reports_dir = repo_root / "reports" / "vcast_excel"
-        file_path = safe_resolve_under(reports_dir, filename)
-        
+        try:
+            file_path = safe_resolve_under(reports_dir, filename)
+        except ValueError as exc:
+            # 경로 이탈은 **클라이언트 오류**다. 500 으로 보내면 공격 시도가 서버 장애로
+            # 집계되고, 정상 오타와도 구분이 안 된다.
+            raise HTTPException(status_code=400, detail=f"invalid filename: {exc}")
+
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail="Report file not found")
-        
+
         return FileResponse(
             str(file_path),
-            filename=filename,
+            filename=file_path.name,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
+
+    # ⚠ 실측: 이게 없으면 위 404 가 **500 "Download error: 404: Report file not found"** 로
+    #   나간다. 의도한 상태코드가 통째로 사라지고, 내부 예외 문자열(절대경로 포함 가능)이
+    #   응답에 실려 나간다.
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.error("vcast 리포트 다운로드 실패:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="리포트 다운로드 중 오류 발생")
 
 
 @router.post("/api/vcast/scan-folder")
