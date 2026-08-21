@@ -258,8 +258,16 @@ class TestExportsRouter:
         assert r.status_code == 422
 
     def test_pdf_report_with_sections(self):
-        """POST /api/exports/pdf/report with temp output path generates PDF."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        """POST /api/exports/pdf/report with temp output path generates PDF.
+
+        ⚠ 원래 시스템 temp(`tempfile.TemporaryDirectory()`)에 썼는데, 그건 허용 루트
+          **밖**이라 `output_path` 봉인(2026-08-19) 이후 403 이 된다. 이 테스트의 주제는
+          "PDF 가 만들어지나"이지 "임의 경로에 쓸 수 있나"가 아니므로 위 `local_tmpdir()`
+          을 쓴다 — 2026-08-04 `/api/local/*` 감사가 **같은 상황에서 이미 낸 결론**이고
+          (이 파일 :60 주석), 그때 만든 헬퍼다. 임의 경로 쓰기가 **막히는지**는
+          `test_router_status_and_write_confinement.py` 가 따로 고정한다.
+        """
+        with local_tmpdir() as tmpdir:
             out_path = str(Path(tmpdir) / "test_report.pdf")
             r = client.post(
                 "/api/exports/pdf/report",

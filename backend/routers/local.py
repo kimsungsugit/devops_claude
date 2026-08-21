@@ -112,7 +112,7 @@ from backend.services.local_service import (
     search_in_files,
     write_file_text,
 )
-from backend.services.paths import is_under_any, safe_resolve_under
+from backend.services.paths import confine, is_under_any, safe_resolve_under, trusted_roots
 from backend.user_context import wrap_with_user
 from report_gen.provenance import has_evidence_value, is_weak_source
 from report_gen.utils import build_function_details_by_name
@@ -179,8 +179,13 @@ _logger = logging.getLogger("devops_api")
 #    않고 `local_service` 함수를 in-process 로 부르며 자체 가드가 있다 — 건드리지 않는다.
 
 def _allowed_request_roots() -> List[Path]:
-    """요청자가 base 로 지정할 수 있는 최상위 경로. `:4157` 과 같은 목록이다."""
-    return [(Path.home() / ".devops_pro_cache").resolve(), repo_root.resolve()]
+    """요청자가 base 로 지정할 수 있는 최상위 경로. `:4157` 과 같은 목록이다.
+
+    ⚠ 정의는 `backend/services/paths.trusted_roots()` **단일 출처**로 옮겼다(2026-08-19).
+      같은 판정이 세 벌로 흩어져 있었고, 그 사이로 봉인이 아예 없는 엔드포인트가 남아
+      있었다. 집합은 그대로다 — 여기서 넓히면 이 20곳이 조용히 함께 넓어진다.
+    """
+    return list(trusted_roots())
 
 
 # base 확정을 통과해도 **내용을 내주면 안 되는** 것들. 전부 `repo_root` 밑이라
@@ -4272,7 +4277,11 @@ def local_generate_component_map(
     if not source_root:
         raise HTTPException(status_code=400, detail="source_root 필요")
     from report_gen.project_setup import generate_component_map_from_sds
-    out_path = str(Path(output_dir or "docs") / "component_map.json") if output_dir else "docs/component_map.json"
+    # ⚠ `sds_path`/`source_root` 는 봉인하지 않는다 — 요구문서·소스는 저장소 밖에 사는 것이
+    #   이 앱의 설계다. 하지만 **쓰기 위치**는 다르다: `output_dir` 은 클라이언트 문자열이고
+    #   프론트는 아예 보내지 않는다(기본 `docs/`). 임의 위치에 쓸 근거가 없다.
+    out_path = (str(confine(output_dir, what="output_dir") / "component_map.json")
+                if output_dir else "docs/component_map.json")
     result = generate_component_map_from_sds(sds_path, source_root, output_path=out_path)
     return {"ok": True, **result}
 
@@ -4286,7 +4295,9 @@ def local_generate_override(
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path (레퍼런스 UDS) 필요")
     from report_gen.project_setup import generate_override_from_reference_uds
-    out_path = str(Path(output_dir or "docs") / "uds_function_swcom_override.json") if output_dir else "docs/uds_function_swcom_override.json"
+    # ⚠ 위 generate-component-map 과 같은 판정 — 읽기(`uds_path`)는 열고 쓰기만 봉인한다.
+    out_path = (str(confine(output_dir, what="output_dir") / "uds_function_swcom_override.json")
+                if output_dir else "docs/uds_function_swcom_override.json")
     result = generate_override_from_reference_uds(uds_path, output_path=out_path)
     return {"ok": True, **result}
 
