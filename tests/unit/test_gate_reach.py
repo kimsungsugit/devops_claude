@@ -42,17 +42,19 @@ _GATES = {
 # ⚠ 면제는 "괜찮다" 가 아니라 **기록된 부채**다. 지우려면 사유가 해소돼야 한다.
 _EXEMPT: dict[str, str] = {
     "test_coverage_boost.py": (
-        "2026-08-21 실측: 3개 루트 파일 합계 196건이 **1 failed / 20 errors / 561초**. "
-        "①`mock_function_details`·`mock_uds_payload` fixture 부재(옛 Docker 구성 잔재) "
-        "②561초는 pre-commit 예산 900초에 unit 550초와 함께 못 들어간다 "
-        "③`test_quality_improvements.py::test_finalize_asil_default_qm` 은 **삭제된 "
-        "QM 기본값**을 요구한다 — 근거 부재를 QM(안전요구 면제)으로 채우는 건 "
-        "under-classification 이라 되살리면 안 되고, 안전 등급 판단은 사용자 결정이다 "
-        "(`report_gen/function_analyzer.py:1218` 주석 · 규칙: 안전 테스트 자동 수정 금지)."
+        "2026-08-21 실측: 87 passed + **20 errors / 303초**. errors 는 전부 "
+        "`mock_uds_payload`·`mock_function_details` fixture 부재(저장소 어디에도 정의가 "
+        "없다 — 파일 헤더 `# /app/tests/...` 가 말해주듯 옛 Docker 구성 잔재)다. "
+        "fixture 를 **지어내면** 잘못된 입력으로 통과하는 테스트가 되므로 손대지 않았다. "
+        "303초도 pre-commit 예산(900초, 현 사용 372초)에 넣기엔 부담이라 함께 보류한다. "
+        "⚠ 해소 순서: 먼저 두 fixture 의 **정본 shape 를 찾거나 결정**하고, 그 다음 시간."
     ),
-    "test_json_parsing.py": "위 test_coverage_boost.py 와 같은 사유 — 세 파일이 한 묶음이다.",
-    "test_quality_improvements.py": "위 test_coverage_boost.py 와 같은 사유 (ASIL 항목이 여기 있다).",
 }
+# ⚠ 처음엔 여기에 세 파일이 다 있었다. "루트 3파일 합계 196건 / 1 failed / 20 errors /
+#   561초" 를 **한 묶음**으로 보고 같은 사유를 붙였기 때문이다. 파일별로 다시 재니
+#   전혀 달랐다 — `test_quality_improvements.py` 는 25초에 전부 통과(게이트 편입),
+#   `test_json_parsing.py` 는 애초에 **테스트가 0개**였다(스크립트형 fake-green — 진짜
+#   테스트 7개로 승격). **합계를 인용하기 전에 분해할 것.**
 
 
 def _test_dirs() -> list[str]:
@@ -80,15 +82,27 @@ def _gate_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
 
 
-def _covers(text: str, dirname: str) -> bool:
-    """pytest 호출이 이 디렉터리를 포함하는가.
+def _is_ignored(text: str, name: str) -> bool:
+    """게이트가 `--ignore=tests/<name>` 으로 **명시 제외**하는가.
 
-    `tests/<dir>/` 를 직접 적었거나, `tests/` 통째로 돌리면 도달로 본다.
+    ⚠ 이게 없으면 `pytest tests/ --ignore=tests/X` 를 보고 X 를 '도달'로 오판한다.
+      게이트를 `tests/` 통째로 바꾸는 순간 모든 면제가 조용히 무효가 되는 구멍이다.
     """
-    if re.search(rf"pytest[^\n]*\btests/{re.escape(dirname)}\b", text):
+    return bool(re.search(rf"--ignore=tests/{re.escape(name)}\b", text))
+
+
+def _covers(text: str, name: str) -> bool:
+    """pytest 호출이 이 디렉터리/파일을 실제로 돌리는가.
+
+    `tests/<name>` 을 직접 적었거나 `tests/` 통째로 돌리면 도달 — 단
+    `--ignore` 로 빠졌으면 도달이 아니다.
+    """
+    if _is_ignored(text, name):
+        return False
+    if re.search(rf"pytest[^\n]*\btests/{re.escape(name)}\b", text):
         return True
     # `pytest tests/ ...` — 하위 전부
-    return bool(re.search(r"pytest[^\n]*\btests/(?![\w-])", text))
+    return bool(re.search(r"pytest[^\n]*\btests/(?![\w.-])", text))
 
 
 def test_every_test_directory_is_reachable_by_some_gate():

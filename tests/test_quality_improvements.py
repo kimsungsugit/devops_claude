@@ -375,20 +375,58 @@ class TestPhase2V2CommentKeywords:
 
 
 class TestPhase3TbdResolve:
-    """Phase 3: ASIL TBD resolution via module inheritance and QM default."""
+    """ASIL 은 **지어내지 않는다** — 근거가 없으면 빈 값이다.
 
-    def test_finalize_asil_default_qm(self):
+    ⚠ 이 클래스는 원래 "QM default" 를 검증했다. 그 동작은
+      `report_gen/function_analyzer.py` 에서 **의도적으로 삭제**됐다(주석: "근거의 부재를
+      등급 주장으로 바꾸지 않는다"). `QM` 은 "안전 요구 면제" 라는 **적극적 주장**이라,
+      등급을 모르는 함수에 그걸 채우면 under-classification 이다(ISO 26262).
+
+    ⚠ 그런데 이 파일은 어떤 게이트도 돌리지 않는 `tests/` 루트에 있어(2026-08-21 발견)
+      **삭제된 동작을 요구하는 테스트가 그대로 살아 있었다.** 되살리며 "실패하니까"
+      코드를 QM 쪽으로 되돌렸다면 안전 등급이 조용히 낮아졌을 것이다.
+      → 현행 계약(사용자 결정: "none 은 none, tbd 면 tbd")을 고정한다.
+    """
+
+    def test_absent_asil_stays_empty_not_qm(self):
+        """등급 근거가 없으면 **빈 값**이다. `QM` 으로 채우지 않는다."""
         from report_generator import _finalize_function_fields
-        info = {"name": "test_func", "description": "does stuff"}
-        result = _finalize_function_fields(info)
-        assert result["asil"] != "TBD", "ASIL should not be TBD"
-        assert "QM" in result["asil"] or result["asil"] in {"A", "B", "C", "D"}
+        result = _finalize_function_fields({"name": "test_func", "description": "does stuff"})
+        assert result["asil"] == "", (
+            f"근거 없는 함수에 등급이 붙었다: {result['asil']!r} — "
+            "`QM` 은 '안전 요구 면제'라는 주장이라 근거 부재를 그걸로 채우면 "
+            "under-classification 이다"
+        )
+
+    def test_tbd_stays_tbd(self):
+        """`TBD`(미정)를 빈 값(근거 없음)으로 접지 않는다 — 둘은 다른 상태다."""
+        from report_generator import _finalize_function_fields
+        result = _finalize_function_fields(
+            {"name": "test_func", "description": "d", "asil": "TBD"})
+        assert result["asil"] == "TBD", (
+            f"TBD 가 {result['asil']!r} 로 바뀌었다 — '미정'과 '아예 없음'이 같아지면 "
+            "무엇을 더 조사해야 하는지가 사라진다"
+        )
+
+    def test_na_is_preserved(self):
+        """`N/A` 도 원래 표기 그대로 — 정규화는 값을 다듬는 것이지 지우는 게 아니다."""
+        from report_generator import _finalize_function_fields
+        result = _finalize_function_fields(
+            {"name": "test_func", "description": "d", "asil": "N/A"})
+        assert result["asil"] == "N/A"
 
     def test_finalize_asil_preserves_existing(self):
         from report_generator import _finalize_function_fields
         info = {"name": "test_func", "description": "test", "asil": "B"}
         result = _finalize_function_fields(info)
         assert result["asil"] == "B"
+
+    def test_case_is_normalized_but_grade_is_not_invented(self):
+        """소문자 등급은 대문자로 — 이건 **표기 정규화**지 등급 부여가 아니다."""
+        from report_generator import _finalize_function_fields
+        result = _finalize_function_fields(
+            {"name": "test_func", "description": "d", "asil": "d"})
+        assert result["asil"] == "D"
 
 
 class TestPhase3DescQuality:

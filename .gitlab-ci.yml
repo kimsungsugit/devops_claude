@@ -119,7 +119,7 @@ unit-tests:
     # ⚠ `tests/integration/`·`tests/e2e/` 추가(2026-08-21). 이 게이트가 `tests/unit/` 만
     #   돌아서 integration 56건이 17일간 401 로 죽어 있었는데 아무도 몰랐다.
     #   `tests/` 루트 직속 3파일은 아직 제외 — 사유는 tests/unit/test_gate_reach.py `_EXEMPT`.
-    - python -m pytest tests/unit/ tests/integration/ tests/e2e/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
+    - python -m pytest tests/ --ignore=tests/test_coverage_boost.py -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

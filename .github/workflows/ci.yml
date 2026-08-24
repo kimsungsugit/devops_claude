@@ -104,7 +104,7 @@ jobs:
           #   ID 가 달려 "시험이 있다" 는 근거로 쓰인다. 되살린 뒤 74 passed.
           #   `tests/` 루트 직속 3파일(196건)은 아직 제외 — 사유는
           #   `tests/unit/test_gate_reach.py` 의 `_EXEMPT` 에 적혀 있다.
-          python -m pytest tests/unit/ tests/integration/ tests/e2e/ -q -rs --tb=short \
+          python -m pytest tests/ --ignore=tests/test_coverage_boost.py -q -rs --tb=short \
             --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts \
             --cov-report=term-missing --cov-report=html:htmlcov \
             --cov-fail-under=40
