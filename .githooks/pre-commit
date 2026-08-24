@@ -171,31 +171,44 @@ if [ -d "tests/unit" ]; then
     # (도구 부재를 clean 으로 읽지 않는다 = 이 저장소의 anti-fake-green 계약).
     if "$PROJECT_PY" -c "import xdist" >/dev/null 2>&1; then
         PYTEST_PAR="-n auto"
-        echo "[3/3] Running unit tests (병렬 -n auto, 실측 ~3분 / timeout 900s)..."
+        echo "[3/3] Running tests: unit + integration + e2e (병렬 -n auto, 실측 372초 / timeout 900s)..."
     else
         PYTEST_PAR=""
-        echo "[3/3] Running unit tests (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
-        echo "   ⚠️  직렬은 실측 590s 라 예산 900s 까지 여유가 310초뿐이다."
+        echo "[3/3] Running tests: unit + integration + e2e (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
+        echo "   ⚠️  직렬은 실측 590s+ 라 예산 900s 를 넘길 가능성이 높다(integration 추가분 포함)."
         echo "       설치 권장: $PROJECT_PY -m pip install pytest-xdist"
     fi
     # `-k 30`: TERM 30초 뒤에도 살아 있으면 KILL. 병렬 실행은 워커가 손자 프로세스라
     # TERM 만으로는 남을 수 있다(hang 이면 특히). 남은 워커가 다음 실행의 CPU 를 먹으면
     # "왜 갑자기 느리지" 로 오진하게 된다.
-    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/unit/ $PYTEST_PAR -x -q --tb=short 2>&1)
+    # ⚠ `tests/integration/`·`tests/e2e/` 를 **추가**했다(2026-08-21). 예전엔 이 게이트가
+    #   `tests/unit/` 만 돌았고, 그래서 integration 56건이 커밋 1b6bb99(2026-08-04) 이후
+    #   **17일 동안 전부 401 로 죽어 있었는데 스위트는 초록이었다.** 거기엔 ISO 26262
+    #   추적성 ID 가 달려 "시험이 있다" 는 문서 근거로 쓰인다.
+    #   ⚠ 죽은 스위트의 피해는 "회귀를 못 잡는다" 로 끝나지 않는다 — **낡은 계약을 보존한다.**
+    #     되살려 보니 `/api/run/stop` 이 임의 PID 에 200 을 주던(=백엔드를 통째로 죽일 수
+    #     있던) 시절의 기대가 그대로 남아 있었다.
+    #   예산: **합산 실측 372초**(7,087 passed / 10 skipped, `-n auto` 18코어, 2026-08-21).
+    #   900s 까지 여유 **528초**. ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
+    #   로 적었는데 **틀렸다** — 그 550s·96s 는 다른 작업과 동시 실행 중에 잰 값이라
+    #   부하가 섞여 있었다. 따로 잰 수를 더하지 말고 **합쳐서 한 번 잴 것**.
+    #   `tests/` 루트 직속 3파일(196건, 561s)은 **아직 제외** — 사유는
+    #   `tests/unit/test_gate_reach.py` 의 `_EXEMPT` 에 있고, 그 가드가 새 사각지대를 막는다.
+    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/unit/ tests/integration/ tests/e2e/ $PYTEST_PAR -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
     if [ $TEST_EXIT -eq 124 ]; then
-        echo "❌ Unit tests가 900s 예산을 넘겼다. Commit aborted."
+        echo "❌ 테스트가 900s 예산을 넘겼다. Commit aborted."
         echo "   이 저장소에서 예산 초과의 실체는 대부분 **hang** 이었다(데드락·모달 대화상자)."
         echo "   미검증을 통과로 바꾸지 않는다 — 원인을 먼저 확인할 것:"
-        echo "        $PROJECT_PY -m pytest tests/unit/ -x -q --tb=short --durations=20"
+        echo "        $PROJECT_PY -m pytest tests/unit/ tests/integration/ tests/e2e/ -x -q --tb=short --durations=20"
         echo "   장비가 느린 것뿐이라고 판단되면 --no-verify 로 넘길 수 있다(의식적 결정)."
         exit 1
     elif [ $TEST_EXIT -ne 0 ]; then
-        echo "❌ Unit tests failed. Commit aborted."
+        echo "❌ Tests failed. Commit aborted."
         exit 1
     else
-        echo "✅ Unit tests passed"
+        echo "✅ Tests passed (unit + integration + e2e)"
     fi
 else
     echo "[3/3] No unit test directory found, skipping tests"

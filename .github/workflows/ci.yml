@@ -97,7 +97,14 @@ jobs:
           #   (6066596)에 사유 없이 들어와 19건이 계속 미검증이었다. 지금 파일엔 CI 적대적
           #   요소가 없고(절대경로·네트워크·tkinter·subprocess 0건), windows·xdist·UTF-8
           #   조건에서 19 passed 를 확인했다. 다시 제외해야 한다면 **사유를 여기 적을 것**.
-          python -m pytest tests/unit/ -q -rs --tb=short \
+          #
+          # ⚠ `tests/integration/` 을 **추가**했다(2026-08-21). 이 게이트가 `tests/unit/` 만
+          #   돌아서, integration 56건이 커밋 1b6bb99(2026-08-04) 이후 **17일 동안 전부 401 로
+          #   죽어 있었는데 아무도 몰랐다**. 거기엔 `STS-EXPORTS-001` 같은 ISO 26262 추적성
+          #   ID 가 달려 "시험이 있다" 는 근거로 쓰인다. 되살린 뒤 74 passed.
+          #   `tests/` 루트 직속 3파일(196건)은 아직 제외 — 사유는
+          #   `tests/unit/test_gate_reach.py` 의 `_EXEMPT` 에 적혀 있다.
+          python -m pytest tests/unit/ tests/integration/ tests/e2e/ -q -rs --tb=short \
             --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts \
             --cov-report=term-missing --cov-report=html:htmlcov \
             --cov-fail-under=40

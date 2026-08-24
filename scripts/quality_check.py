@@ -19,7 +19,7 @@ Checks:
 나온 FAIL 을 진짜 회귀로 믿을 수 있다). 한때 test_routers.py 가 단독 14 F / 전체 0 F
 였는데, 원인은 test_file_resolver_cloudium.py 가 teardown 에서 전역 resolver 를
 Local 로 **고정**(복원이 아니라)하고 가는 누설이었다 → 수정됨(584833e).
-`tests/unit/conftest.py` 의 `_default_local_resolver` / `_default_admin_users` 가
+`tests/conftest.py` 의 `_default_local_resolver` / `_default_admin_users` 가
 머신 상태로부터 격리한다. **전역 싱글톤을 teardown 에서 특정 값으로 고정하지 말 것 —
 반드시 원래 값 복원.**
 
@@ -341,7 +341,7 @@ changed_files = [_unquote_diff_path(f.strip()) for f in changed_raw.splitlines()
 # 한때 sha256(_ROUND + git diff + git diff --cached)를 키로 결과를 캐시했으나,
 # 그 키는 **tracked diff만** 담는 반면 실제 검사(pytest/ruff/vite/vitest)는
 # 워킹 트리 전체 + 설치된 의존성 + env를 읽는다 → 키가 진짜 입력의 진부분집합.
-# 실증: untracked `tests/unit/conftest.py`가 import를 깨뜨려도 키가 그대로라
+# 실증: untracked `tests/conftest.py`가 import를 깨뜨려도 키가 그대로라
 # cache hit → 진실이 critical=1/fix_required인데 PASS/proceed를 반환했다.
 # 즉 캐시가 이 스크립트의 유일한 존재 이유(= 안 돌렸으면 PASS라고 쓰지 않기)를
 # 스스로 깨뜨렸다. 게다가 round가 매 턴 교대(0↔1/2/3)라 단일 슬롯 hit률은
@@ -401,7 +401,7 @@ else:
 #   모듈 스코프는 교차 모듈 회귀를 못 잡는다. 이 게이트는 advisory이며
 #   전체 회귀를 대신하지 않는다.
 # ⚠ 단독 실행 전제: 각 테스트 파일이 단독으로 통과해야 여기 FAIL 을 믿을 수 있다
-#   (격리 규약은 위 독스트링 + tests/unit/conftest.py 참조).
+#   (격리 규약은 위 독스트링 + tests/conftest.py 참조 — 2026-08-21 unit/ 에서 이동).
 def _module_tests(files: list[str]) -> list[str]:
     targets: set[str] = set()
     for f in files:

@@ -116,7 +116,10 @@ unit-tests:
     # scripts 포함 — 훅(quality_check/posttool_dispatch/ruff_ratchet 등)이 커버리지
     # 게이트에 보이게(pyproject source 와 정합). fail-under 는 25 유지(GitLab 러너는
     # core+dev 만 설치해 테스트 폐포가 축소 — 축소 환경 커버리지 미측정이라 상향 보류).
-    - python -m pytest tests/unit/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
+    # ⚠ `tests/integration/`·`tests/e2e/` 추가(2026-08-21). 이 게이트가 `tests/unit/` 만
+    #   돌아서 integration 56건이 17일간 401 로 죽어 있었는데 아무도 몰랐다.
+    #   `tests/` 루트 직속 3파일은 아직 제외 — 사유는 tests/unit/test_gate_reach.py `_EXEMPT`.
+    - python -m pytest tests/unit/ tests/integration/ tests/e2e/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

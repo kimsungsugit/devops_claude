@@ -62,9 +62,26 @@ class TestTimeoutIsFailClosed:
         assert "commit allowed" not in m.group(1).lower()
 
     def test_test_failure_still_aborts(self, hook_src):
-        """대조군: 원래 있던 '테스트 실패 → 중단'이 살아 있어야 한다."""
-        assert re.search(r"Unit tests failed.*?\n\s*exit 1", hook_src, re.S), \
-            "테스트 실패 시 중단이 사라졌다"
+        """대조군: 원래 있던 '테스트 실패 → 중단'이 살아 있어야 한다.
+
+        ⚠ 예전엔 `"Unit tests failed"` 라는 **문구**를 앵커로 삼았다. 2026-08-21 에
+          게이트 범위가 `tests/unit/` → `tests/unit/ tests/integration/ tests/e2e/` 로
+          넓어지며 그 문구가 부정확해져 `"Tests failed"` 로 바뀌었고, **동작은 그대로인데
+          이 테스트만 깨졌다.** 문구는 계약이 아니다 — 계약은 "pytest 종료코드가 0이 아니면
+          커밋을 중단한다" 는 **제어 흐름**이다. 그래서 위 `test_timeout_branch_aborts` 와
+          같은 방식(분기 본문을 잘라서 검사)으로 바꿨다. 느슨해진 게 아니라, 이제 문구를
+          바꿔도 안 깨지고 **분기를 지우면 깨진다**.
+        """
+        m = re.search(r"TEST_EXIT -ne 0\s*\];?\s*then(.*?)(?:^\s*elif |^\s*else\b)",
+                      hook_src, re.S | re.M)
+        assert m, (
+            "테스트 실패 분기(`$TEST_EXIT -ne 0`)를 못 찾았다 — 구조가 바뀌었으면 "
+            "이 테스트도 갱신할 것. 분기가 사라졌다면 그게 회귀다."
+        )
+        body = m.group(1)
+        assert "exit 1" in body, (
+            "테스트가 실패했는데 커밋을 통과시킨다 — 실패한 회귀가 '게이트 통과'로 "
+            f"기록된다. 분기 본문:\n{body}")
 
 
 class TestParallelIsOptionalButExplicit:
