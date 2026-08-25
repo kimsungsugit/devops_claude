@@ -211,6 +211,42 @@ def _uds_record_kwargs(
     return kwargs
 
 
+def resolve_registered_uds_template() -> str:
+    """local UDS 생성이 쓸 템플릿 — **서버 등록본이 먼저**, 없으면 정본 SUDS.
+
+    우선순위: `config.resolve_uds_template_path()`(admin `/api/config/uds-template`
+    저장분 → `UDS_TEMPLATE_PATH` env) → `config.UDS_REF_SUDS_PATH` → 빈 문자열.
+
+    ⚠ **왜 함수로 뺐나**: 예전엔 이 판정이 `local_uds_generate` 핸들러 안에 인라인이었고,
+    등록본을 아예 조회하지 않고 곧장 `UDS_REF_SUDS_PATH` 로 폴백했다. 그래서 이 경로에서는
+    **관리자가 무엇을 등록하든 매번 정본 SUDS 가 템플릿으로 쓰였다**. jenkins 동기/비동기는
+    빈 값을 `None` 으로 넘겨 `generate_uds_docx` 안에서 해석하므로 정상이었다 —
+    **local 경로만 어긋나 있었다.**
+
+    인라인으로 두면 가드가 "대입문이 있는가" 같은 **모양**밖에 못 본다. 실제로 그렇게
+    썼다가 `if False:` 로 분기를 죽이는 뮤테이션 2건이 통째로 살아남았다. 함수로 빼면
+    호출 한 번으로 **결과**를 단언할 수 있다.
+
+    Returns:
+        존재가 확인된 경로, 또는 빈 문자열(= 템플릿 없음). 지어내지 않는다.
+    """
+    try:
+        from config import resolve_uds_template_path
+        registered = str(resolve_uds_template_path() or "").strip()
+    except Exception as exc:   # noqa: BLE001 - 아래 정본 폴백으로 이어간다
+        registered = ""
+        _logger.warning("등록 템플릿 해석 실패(%s) — 정본 SUDS 로 폴백한다: %s",
+                        type(exc).__name__, exc)
+    if registered:
+        return registered
+    try:
+        import config
+        ref = Path(str(getattr(config, "UDS_REF_SUDS_PATH", "") or ""))
+    except Exception:   # noqa: BLE001 - 정본 경로 해석 실패는 "템플릿 없음"
+        return ""
+    return str(ref) if str(ref) and ref.exists() else ""
+
+
 def _uds_artifact_fidelity(out_path: Any) -> Dict[str, Any]:
     """생성된 DOCX 에 payload 함수가 **실제로 몇 개 들어갔는지** 잰다.
 

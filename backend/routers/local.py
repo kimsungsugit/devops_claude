@@ -60,6 +60,7 @@ from backend.helpers import (
     build_vectorcast_metadata,
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
+    resolve_registered_uds_template,
 )
 from backend.helpers.sds import build_sds_view_model, is_sds_filename, is_srs_filename
 from backend.schemas import (
@@ -1214,14 +1215,10 @@ async def local_uds_generate(
         except Exception:
             template_applied = False
     if not tpl_path:
-        # Use SUDS reference as default template for 4-level SUDS structure
-        try:
-            from config import UDS_REF_SUDS_PATH
-            _ref_path = Path(UDS_REF_SUDS_PATH)
-        except Exception:
-            _ref_path = Path(__file__).resolve().parents[2] / "docs" / "(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx"
-        if _ref_path.exists():
-            tpl_path = str(_ref_path)
+        # 서버 등록본(admin `/api/config/uds-template`) → 정본 SUDS 순.
+        # 판정은 `resolve_registered_uds_template()` 단일 출처다 — 예전엔 이게
+        # 인라인이었고 등록본을 아예 조회하지 않아 **관리자 지정이 무효**였다.
+        tpl_path = resolve_registered_uds_template()
     try:
         # Inject ai_config into payload for subprocess to use in function desc enhancement
         _uds_ai_cfg = _load_sts_ai_config()
