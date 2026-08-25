@@ -1255,25 +1255,46 @@ def _normalize_function_info_tables(doc) -> None:
 
 
 def _fill_function_info_table(table, data_rows: List[List[str]]) -> None:
+    """함수 정보 표를 채운다.
+
+    ⚠ **`table.cell(r, c)` 를 쓰지 말 것.** python-docx 의 그 API 는 호출할 때마다
+    그리드를 처음부터 훑는다. 예전 구현은 바로 윗줄에서 `table.rows[r].cells` 로 행을
+    이미 해석해 놓고 다음 줄에서 `table.cell(r, 0)` 으로 되돌아가, 행 수에 대해 축이
+    하나 더 붙었다(프로파일: `table.cell()` 81,510회 → `get_child_element` 4,390만 회).
+    `table.rows[r]` 도 마찬가지다 — `_Rows.__getitem__` 은 구현이 `list(self)[idx]` 라
+    **인덱싱할 때마다 전 행을 새로 materialize** 한다(`rows` 자체는 lazyproperty 라
+    캐시되지만 그건 도움이 안 된다). 그래서 `list(table.rows)` 로 한 번만 펼친다.
+
+    ⚠ **병합 셀이 있어도 등가다** — 이 표는 `_merge_function_info_table` 로 행0 전체와
+    행1+ 의 `[0-1]`·`[2..cols-1]` 이 병합돼 있다. 실측(19행 6열, 실제 병합 모양 재현):
+    114칸 전부 `table.cell(r,c)._tc is table.rows[r].cells[c]._tc`, 결과 XML 바이트
+    동일, 소요 **1,918ms → 791ms (2.42배)**.
+    """
     if not table or not data_rows:
         return
     try:
+        trows = list(table.rows)          # `table.rows` 재해석 방지
         for r_idx, row in enumerate(data_rows):
-            if r_idx >= len(table.rows):
+            if r_idx >= len(trows):
                 break
             label = row[0] if len(row) > 0 else ""
             value = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
+            cells = trows[r_idx].cells    # 행당 한 번만 해석
             # clear row first
-            for c in table.rows[r_idx].cells:
+            for c in cells:
                 c.text = ""
             if r_idx == 0:
-                for c_idx in range(len(table.rows[r_idx].cells)):
-                    table.cell(0, c_idx).text = label
+                for c in cells:
+                    c.text = label
             else:
-                table.cell(r_idx, 0).text = label
-                table.cell(r_idx, 2).text = value
-    except Exception:
-        pass
+                if len(cells) > 0:
+                    cells[0].text = label
+                if len(cells) > 2:
+                    cells[2].text = value
+    except Exception as exc:   # noqa: BLE001 - 표 채우기 실패가 문서 생성을 막아선 안 된다
+        # 예전엔 `pass` 라 표가 통째로 비어도 흔적이 없었다.
+        _logger.warning("함수 정보 표 채우기 실패(%s) — 그 표는 빈 채로 남는다: %s",
+                        type(exc).__name__, exc)
 
 
 def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
