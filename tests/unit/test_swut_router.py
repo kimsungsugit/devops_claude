@@ -1067,11 +1067,10 @@ class TestAsyncMigration:
 
     def test_endpoint_uses_to_thread(self):
         """source code에 asyncio.to_thread 사용 + get_event_loop 미사용 검증."""
-        import inspect
-
         from backend.routers import swut as swut_mod
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(swut_mod)
+        src = source_of(swut_mod)
         assert "asyncio.to_thread" in src
         assert "asyncio.get_event_loop()" not in src
         assert "loop.run_in_executor" not in src
@@ -1107,11 +1106,10 @@ class TestStreamingResponse14:
 
     def test_streaming_response_used_not_plain_response(self):
         """W1a: source code에 StreamingResponse 사용 확인."""
-        import inspect
-
         from backend.routers import swut as swut_mod
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(swut_mod)
+        src = source_of(swut_mod)
         assert "StreamingResponse" in src
         assert "_iter_bytesio" in src
         # plain Response(content=bytes) 사용 회피 확인 — bytes 그대로 전송하지 않음

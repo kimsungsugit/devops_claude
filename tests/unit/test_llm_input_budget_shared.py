@@ -20,6 +20,8 @@ import inspect
 
 import pytest
 
+from tests.unit._source_probe import source_of
+
 # ---------------------------------------------------------------------------
 # 1) 모듈 레벨 단일 출처 — 구현이 llm_call 안에 갇혀 있으면 안 된다
 # ---------------------------------------------------------------------------
@@ -37,7 +39,7 @@ class TestTrimmerIsModuleLevel:
         """`llm_call` 안에 구현이 다시 생기면 두 egress 가 조용히 갈라진다."""
         from workflow import ai
 
-        src = inspect.getsource(ai.llm_call)
+        src = source_of(ai.llm_call)
         for name in ("def _truncate_middle", "def _summarize_text"):
             assert name not in src, (
                 f"{name} 이 llm_call 안에 다시 정의됐다 — 어댑터 egress 는 그걸 못 쓴다")
@@ -46,7 +48,7 @@ class TestTrimmerIsModuleLevel:
         """위임을 끊고 자체 구현으로 되돌리면 여기서 걸린다."""
         from workflow import ai
 
-        src = inspect.getsource(ai.llm_call)
+        src = source_of(ai.llm_call)
         assert "trim_messages_to_token_budget(" in src
 
 
@@ -178,7 +180,7 @@ class TestEveryAdapterIsWired:
     def test_generate_calls_trim_outgoing(self, adapter_name):
         from workflow import llm_adapters as mod
 
-        src = inspect.getsource(getattr(mod, adapter_name).generate)
+        src = source_of(getattr(mod, adapter_name).generate)
         tree = ast.parse(inspect.cleandoc(src))
         called = {
             node.func.id
@@ -194,5 +196,5 @@ class TestEveryAdapterIsWired:
         """`_trim` 을 만들고 반환 dict 에 안 넣으면 절단이 다시 침묵한다."""
         from workflow import llm_adapters as mod
 
-        src = inspect.getsource(getattr(mod, adapter_name).generate)
+        src = source_of(getattr(mod, adapter_name).generate)
         assert "**_trim" in src, f"{adapter_name} 가 절단 정보를 호출자에게 안 돌려준다"

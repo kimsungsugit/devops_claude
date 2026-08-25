@@ -1676,11 +1676,10 @@ class TestSynthesisSitesAreMarked:
         return out
 
     def test_flatten_sub_functions_marks_synthesized(self):
-        import inspect
-
         from backend.services import swut_input_adapter as m
+        from tests.unit._source_probe import source_of
 
-        missing = self._unmarked_literal_synthesis(inspect.getsource(m.flatten_sub_functions))
+        missing = self._unmarked_literal_synthesis(source_of(m.flatten_sub_functions))
         assert missing == [], f"표식 없는 합성 CoverageStats: {missing}"
 
     def test_swit_template_alignment_marks_synthesized(self):

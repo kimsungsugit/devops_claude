@@ -23,17 +23,17 @@
 from __future__ import annotations
 
 import ast
-import inspect
 from pathlib import Path
 
 import pytest
 
 import workflow.ai as ai
+from tests.unit._source_probe import source_of
 
 
 def _gemini_error_assignments() -> list[str]:
     """`llm_call` 안에서 `meta_out["error"] = …` 우변 텍스트를 순서대로 모은다."""
-    tree = ast.parse(inspect.getsource(ai.llm_call))
+    tree = ast.parse(source_of(ai.llm_call))
     out: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -69,7 +69,7 @@ class TestErrorLabelIsNeverSilentlyReplaced:
         network_denied / 재시도 소진). `find()` 로 첫 매치를 잡으면 성공 경로를 보게 되어
         영원히 통과하거나 영원히 실패한다 — 재시도 소진 블록을 앵커로 특정한다.
         """
-        source = inspect.getsource(ai.llm_call)
+        source = source_of(ai.llm_call)
         anchor = 'Gemini(Legacy SDK) failed after retries'
         idx = source.find(anchor)
         assert idx > 0, "legacy 재시도 소진 블록을 못 찾았다"
@@ -89,7 +89,7 @@ class TestErrorLabelIsNeverSilentlyReplaced:
             (OpenAI/Ollama 포함)의 마지막 줄이다.
         이걸 구분하지 않고 전수로 걸면 정당한 대입을 오탐한다(실제로 한 번 걸렸다).
         """
-        source = inspect.getsource(ai.llm_call)
+        source = source_of(ai.llm_call)
         terminals = [
             ("Gemini(New SDK) failed after retries", 'meta_out.get("error") or last_err'),
             ("Gemini(Legacy SDK) failed after retries", 'meta_out.get("error") or last_err'),

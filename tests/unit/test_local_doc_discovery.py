@@ -66,11 +66,11 @@ class TestAllSitesUseTheHelper:
         docstring 안의 '경위 설명' 은 코드가 아니므로 AST 로 실제 호출만 본다.
         """
         import ast
-        import inspect
 
         import backend.routers.local as mod
+        from tests.unit._source_probe import source_of
 
-        tree = ast.parse(inspect.getsource(mod))
+        tree = ast.parse(source_of(mod))
         offenders = [
             ast.unparse(node)[:120]
             for node in ast.walk(tree)
@@ -89,12 +89,12 @@ class TestAllSitesUseTheHelper:
         자동 탐색이 유일한 출처다 — 대체가 아니므로 허용.
         """
         import ast
-        import inspect
 
         import backend.routers.local as mod
+        from tests.unit._source_probe import source_of
 
         gated = {"_discover_srs_docx", "_discover_sds_docx", "_discover_hsis_path"}
-        tree = ast.parse(inspect.getsource(mod))
+        tree = ast.parse(source_of(mod))
         # _doc_or_discovered 에 **인자로** 넘어간 이름은 호출이 아니라 참조다.
         direct_calls = [
             node.func.id

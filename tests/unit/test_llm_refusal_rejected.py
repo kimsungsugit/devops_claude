@@ -45,7 +45,6 @@
 """
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -56,6 +55,7 @@ from report_gen.function_analyzer import (
     _is_generic_description,
     is_llm_refusal,
 )
+from tests.unit._source_probe import source_of
 
 # 패턴 하나당 **그 패턴만** 담은 표본. 한 문장이 여러 패턴을 동시에 만족하면 패턴을
 # 지워도 다른 패턴이 덮어 뮤테이션이 살아남는다 — 실제로 그렇게 한 번 생존했다
@@ -136,7 +136,7 @@ class TestAcceptanceGateRejectsRefusals:
     def test_batch_gate_calls_the_detector(self):
         from workflow import uds_ai
 
-        source = inspect.getsource(uds_ai)
+        source = source_of(uds_ai)
         assert "is_llm_refusal(desc)" in source, (
             "AI 설명 채택 관문이 거절문 검사를 안 부른다 — `len > min_len` 이 유일한 "
             "내용 관문으로 돌아갔다"

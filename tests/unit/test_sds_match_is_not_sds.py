@@ -52,7 +52,6 @@
 from __future__ import annotations
 
 import ast
-import inspect
 import re
 from pathlib import Path
 
@@ -64,6 +63,7 @@ from report_gen.provenance import (
     canonical_source,
     is_weak_source,
 )
+from tests.unit._source_probe import source_of
 
 VALIDATION = Path(__file__).resolve().parents[2] / "report_gen" / "validation.py"
 
@@ -72,7 +72,7 @@ def _literal_table(name: str) -> dict:
     """`generate_asil_related_confidence_report` 안의 리터럴 dict 를 AST 로 읽는다."""
     import report_gen.validation as validation
 
-    source = inspect.getsource(validation.generate_asil_related_confidence_report)
+    source = source_of(validation.generate_asil_related_confidence_report)
     match = re.search(rf"    {name} = (\{{.*?\n    \}})\n", source, re.S)
     assert match, f"{name} 리터럴 표를 못 찾았다 — 구조가 바뀌었으면 이 헬퍼부터 고칠 것"
     return ast.literal_eval(match.group(1))

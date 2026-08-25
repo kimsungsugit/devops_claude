@@ -81,8 +81,8 @@ def test_blank_entries_do_not_count_as_user_supplied(repo_defaults, req_arg, sds
 
 def test_structure_guard_no_unconditional_append():
     """구조 가드 — `user + defaults` 무조건 이어붙이기가 되살아나면 잡는다."""
-    import inspect
-    src = inspect.getsource(local_mod._resolve_req_doc_sets)
+    from tests.unit._source_probe import source_of
+    src = source_of(local_mod._resolve_req_doc_sets)
     for bad in ('list(req_doc_paths or []) + list(defaults',
                 'list(sds_doc_paths or []) + list(defaults'):
         assert bad not in src, f"저장소 docs/ 무조건 병합이 되살아났다: {bad!r}"

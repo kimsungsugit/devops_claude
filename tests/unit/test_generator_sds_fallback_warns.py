@@ -76,9 +76,8 @@ def test_fallback_still_returns_data(name, monkeypatch):
 
 def test_sds_file_selection_uses_shared_classifier():
     """폴백의 파일 선별도 공용 판정이어야 `SwDS` 표기를 놓치지 않는다."""
-    import inspect
-
     from generators import sits, sts, suts
+    from tests.unit._source_probe import source_of
     for mod in (sts, suts, sits):
-        src = inspect.getsource(mod._load_default_sds_map)
+        src = source_of(mod._load_default_sds_map)
         assert "is_sds_filename" in src, f"{mod.__name__}: 공용 판정을 안 쓴다"

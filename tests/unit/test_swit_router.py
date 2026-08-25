@@ -914,20 +914,18 @@ class TestSheetNameSubstring53fix:
 
     def test_swit_coverage_aggregator_matches_swit_v202_sheet_names(self):
         """SwIT v2.02 양식의 '1.Test Summary' 시트가 substring 매칭으로 발견됨."""
-        import inspect
-
         from backend.services import swit_coverage_aggregator as mod
-        src = inspect.getsource(mod)
+        from tests.unit._source_probe import source_of
+        src = source_of(mod)
         assert '"test summary" in n.lower()' in src or "'test summary' in n.lower()" in src, (
             "swit_coverage_aggregator가 'test summary' substring 매칭 안 함 — 53차 fix 누락"
         )
 
     def test_swit_sitr_aggregator_matches_swit_v202_sheet_names(self):
         """SITR도 동일 — Test Summary + Deviation + Test Log substring 매칭."""
-        import inspect
-
         from backend.services import swit_sitr_aggregator as mod
-        src = inspect.getsource(mod)
+        from tests.unit._source_probe import source_of
+        src = source_of(mod)
         for keyword in ("test summary", "deviation", "test log"):
             assert (f'"{keyword}" in n.lower()' in src
                     or f"'{keyword}' in n.lower()" in src), (

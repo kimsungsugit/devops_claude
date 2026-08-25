@@ -844,12 +844,11 @@ class TestVectorcastSourceParity:
 
 def test_router_and_preflight_share_one_config_reader() -> None:
     """라우터가 config 를 **직접** 읽으면 세 번째 복제가 되살아난다."""
-    import inspect
-
     from backend.routers import swit as swit_mod
     from backend.routers import swut as swut_mod
+    from tests.unit._source_probe import source_of
     for mod, fn in ((swut_mod, "_resolve_swut_log_folders"), (swit_mod, "_resolve_swit_log_folders")):
-        src = inspect.getsource(getattr(mod, fn))
+        src = source_of(getattr(mod, fn))
         assert "config_log_folders" in src, f"{fn} 이 단일 출처를 안 쓴다"
         for key in ("swut_log_folders", "swit_log_folder", "log_folders\", {}"):
             assert f'cfg.get("{key}' not in src, f"{fn} 이 config 를 직접 읽는다: {key}"
@@ -943,9 +942,8 @@ class TestSpecDocSourceAndRequirement:
 
 def test_router_uses_the_shared_spec_path_judgment() -> None:
     """`resolve_swuts_path` 가 config 를 직접 파면 판정이 두 벌이 된다."""
-    import inspect
-
     from backend.services.swut_meta_resolver import resolve_swuts_path
-    src = inspect.getsource(resolve_swuts_path)
+    from tests.unit._source_probe import source_of
+    src = source_of(resolve_swuts_path)
     assert "config_spec_path" in src
     assert 'cfg.get("swits_docx_path")' not in src

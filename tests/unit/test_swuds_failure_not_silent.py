@@ -235,10 +235,10 @@ def test_consistency_intro_does_not_blame_missing_option():
 
 def test_consistency_intro_carries_reason_when_known():
     """사유를 알면 문서에 싣는다 — 빌드 로그를 못 보는 감사자를 위해."""
-    import inspect
+    from tests.unit._source_probe import source_of
 
     mod = pytest.importorskip("backend.services.swut_coverage_aggregator")
-    src = inspect.getsource(mod._write_consistency_sheet)
+    src = source_of(mod._write_consistency_sheet)
     assert "swuds_skip_reason" in src
     assert "사유:" in src, "사유를 알 때 그 값을 문구에 넣는 분기가 있어야 한다"
     assert "수행되지 않았다" in src, "미검증 사실 자체는 두 분기 모두에서 명시돼야 한다"

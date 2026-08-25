@@ -113,11 +113,11 @@ class TestAgentCallRetriesOnTruncation:
 
     def test_truncated_branch_exists_in_agent_call(self):
         import ast
-        import inspect
 
+        from tests.unit._source_probe import source_of
         from workflow import ai as ai_mod
 
-        src = inspect.getsource(ai_mod.agent_call)
+        src = source_of(ai_mod.agent_call)
         tree = ast.parse(src)
         found = any(
             isinstance(n, ast.Constant) and n.value == "truncated"
@@ -318,11 +318,10 @@ class TestFallbackBranchIsNotAWeakerCopy:
 
     @staticmethod
     def _fallback_src() -> str:
-        import inspect
-
+        from tests.unit._source_probe import source_of
         from workflow import ai as ai_mod
 
-        src = inspect.getsource(ai_mod.llm_call)
+        src = source_of(ai_mod.llm_call)
         i = src.find("is_bad_request and fallback_model")
         assert i > 0, "폴백 분기를 못 찾았다 — 구조가 바뀌었으면 이 테스트도 갱신할 것"
         return src[i:i + 1800]
@@ -390,20 +389,18 @@ class TestAdapterStackSharesTheJudgment:
     @pytest.mark.parametrize("adapter_name", ["GeminiAdapter", "OpenAIAdapter", "AnthropicAdapter"])
     def test_every_adapter_returns_completion_meta(self, adapter_name):
         """세 어댑터 중 하나라도 빠지면 그 공급자에서만 결함이 남는다."""
-        import inspect
-
+        from tests.unit._source_probe import source_of
         from workflow import llm_adapters as mod
 
-        src = inspect.getsource(getattr(mod, adapter_name).generate)
+        src = source_of(getattr(mod, adapter_name).generate)
         assert "_completion_meta" in src, f"{adapter_name} 가 완결성/모델 정보를 안 낸다"
 
     def test_judgment_is_not_duplicated_in_adapters(self):
         """어댑터가 자체 판정 목록을 만들면 ai.py 와 갈라진다."""
-        import inspect
-
+        from tests.unit._source_probe import source_of
         from workflow import llm_adapters as mod
 
-        src = inspect.getsource(mod)
+        src = source_of(mod)
         assert "note_finish_reason_value" in src, "판정을 ai.py 단일 출처에서 안 가져온다"
         assert "_OK_FINISH_REASONS" not in src, "어댑터가 정상종료 목록을 복제했다"
 
@@ -412,11 +409,10 @@ class TestAnthropicChatPathIsConsistent:
     """같은 챗이 공급자에 따라 다르게 정직하면 안 된다."""
 
     def test_truncated_response_is_not_returned_as_answer(self):
-        import inspect
-
         from backend.services import assistant_service as svc
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(svc._call_anthropic)
+        src = source_of(svc._call_anthropic)
         assert 'result.get("truncated")' in src, (
             "Anthropic 경로만 잘린 답변을 완결 답변으로 돌려준다 "
             "(agent_call 경로는 절단을 재시도 사유로 다룬다)")
@@ -490,21 +486,19 @@ class TestOutgoingSecretRedaction:
         assert sanitize_messages(["문자열", None])[0] == "문자열"
 
     def test_llm_call_sanitizes_before_sending(self):
-        import inspect
-
+        from tests.unit._source_probe import source_of
         from workflow import ai as ai_mod
 
-        src = inspect.getsource(ai_mod.llm_call)
+        src = source_of(ai_mod.llm_call)
         assert "sanitize_messages(messages)" in src
         # 절단 **뒤**여야 한다 — 앞이면 `[REDACTED:...]` 가 잘려 시크릿 일부가 남는다
         assert src.index("_trim_messages_to_token_budget(messages") < src.index("sanitize_messages(messages)")
 
     @pytest.mark.parametrize("adapter_name", ["GeminiAdapter", "OpenAIAdapter", "AnthropicAdapter"])
     def test_every_adapter_sanitizes(self, adapter_name):
-        import inspect
-
+        from tests.unit._source_probe import source_of
         from workflow import llm_adapters as mod
 
-        src = inspect.getsource(getattr(mod, adapter_name).generate)
+        src = source_of(getattr(mod, adapter_name).generate)
         assert "_sanitize_outgoing(messages)" in src, f"{adapter_name} 는 프롬프트를 안 가린다"
 

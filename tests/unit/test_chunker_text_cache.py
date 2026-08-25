@@ -130,7 +130,7 @@ class TestUncachedPathStillWorks:
         assert chunker._read_text_uncached(p) == '{"k": 1}'
 
     def test_wrapper_delegates(self):
-        import inspect
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(chunker._read_text_from_file)
+        src = source_of(chunker._read_text_from_file)
         assert "_read_text_uncached" in src, "캐시 미스 시 실제 추출을 안 한다"

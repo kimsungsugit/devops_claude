@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-import inspect
+from tests.unit._source_probe import source_of
 
 
 def test_uds_rag_enrich_default_off(monkeypatch):
@@ -31,7 +31,7 @@ def test_knowledgebase_has_no_load_method():
 def test_docx_builder_rag_block_fixed_and_gated():
     """generate_uds_docx 의 RAG 보강 블록이 dead 호출 제거 + 게이트 적용 상태인지."""
     import report_gen.docx_builder as db
-    src = inspect.getsource(db.generate_uds_docx)
+    src = source_of(db.generate_uds_docx)
     # 1) 존재하지 않는 메서드 호출 제거(회귀 방지)
     assert "_kb.load()" not in src
     # 2) 보강 경로 자체는 유지(KnowledgeBase 사용)

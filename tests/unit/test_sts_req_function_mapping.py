@@ -204,14 +204,13 @@ class TestSdsKeyNormalizationIsSingleSource:
         ⚠ 파일 전체를 훑으면 `sts._normalize_header`(엑셀 헤더 라벨 정규화 — 도메인이
         다르고 그 템플릿 헤더는 전부 영문이다)까지 잡혀 가드가 거짓말을 한다.
         """
-        import inspect
-
         from generators.sts import _lookup_sds_related_ids
         from generators.suts import _resolve_unit_asil
+        from tests.unit._source_probe import source_of
         for fn in (_lookup_sds_related_ids, _resolve_unit_asil):
             # docstring 은 **뺀다** — 두 함수 다 "예전엔 `[^a-z0-9]` 였다"를 본문에
             # 적어 두었고, 그 설명 때문에 가드가 자기 자신을 잡으면 안 된다.
-            src = inspect.getsource(fn).replace(fn.__doc__ or "\0", "")
+            src = source_of(fn).replace(fn.__doc__ or "\0", "")
             assert not re.search(r"\[\^a-z0-9\]", src), (
                 f"{fn.__qualname__} 이 ASCII 전용 정규화를 다시 들고 있다 — "
                 "report_gen.requirements.normalize_sds_key 를 쓸 것")

@@ -35,9 +35,9 @@ PV 자동 Exception 정책(`_pv_auto_exception`, `:994` 사용자 결정 "PV 기
 """
 from __future__ import annotations
 
-import inspect
-
 import pytest
+
+from tests.unit._source_probe import source_of
 
 pytest.importorskip("openpyxl")
 
@@ -192,7 +192,7 @@ class TestUnmeasuredIsNotStampedAsException:
     def test_stamp_site_distinguishes_unmeasured(self):
         from backend.services import swut_coverage_aggregator as mod
 
-        source = inspect.getsource(mod)
+        source = source_of(mod)
         assert "_stmt_unmeasured = int(fc.statement.total or 0) <= 0" in source, (
             "미측정 판정이 사라졌다 — `not passed` 만으로 Exception 을 찍으면 "
             "한 번도 재지 않은 행이 '면제 결정된 행' 으로 기록된다"
@@ -204,7 +204,7 @@ class TestUnmeasuredIsNotStampedAsException:
         """면제 **정책** 자체는 이 라운드 범위가 아니다 — 사용자 결정."""
         from backend.services import swut_coverage_aggregator as mod
 
-        source = inspect.getsource(mod)
+        source = source_of(mod)
         assert "_pv_auto_exception = not has_component_col" in source, (
             "PV 자동 예외 정책이 바뀌었다 — `:994` 사용자 결정('PV 기준 유지')을 "
             "건드리려면 별도 판단이 필요하다"

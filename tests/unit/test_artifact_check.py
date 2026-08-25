@@ -12,11 +12,11 @@ SUTS 는 `expected_tc_range`/`expected_seq_range` 인자를 **가지고 있었�
 from __future__ import annotations
 
 import ast
-import inspect
 
 import pytest
 
 from generators._artifact_check import apply_write_back_check, compare_generated_vs_written
+from tests.unit._source_probe import source_of
 
 
 class TestCompareGeneratedVsWritten:
@@ -112,7 +112,7 @@ class TestAllThreePipelinesAreWired:
         import importlib
 
         mod = importlib.import_module(module_name)
-        tree = ast.parse(inspect.getsource(getattr(mod, func_name)))
+        tree = ast.parse(source_of(getattr(mod, func_name)))
         called = {
             node.func.id
             for node in ast.walk(tree)

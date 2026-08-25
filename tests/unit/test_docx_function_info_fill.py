@@ -20,9 +20,9 @@
 """
 from __future__ import annotations
 
-import inspect
-
 import pytest
+
+from tests.unit._source_probe import source_of
 
 docx = pytest.importorskip("docx", reason="python-docx 없음")
 
@@ -148,7 +148,7 @@ class TestAccessPathContract:
     def test_source_does_not_call_table_cell(self):
         """⚠ `table.cell(` 이 다시 들어오면 O(n²) 축이 되살아난다. 문서/주석이 아니라
         **실제 호출**만 잡도록 소스에서 확인한다."""
-        src = inspect.getsource(_fill_function_info_table)
+        src = source_of(_fill_function_info_table)
         body = src.split('"""', 2)[-1]          # docstring 제외(거기엔 설명으로 등장한다)
         assert "table.cell(" not in body, "table.cell() 로 되돌아갔다"
 

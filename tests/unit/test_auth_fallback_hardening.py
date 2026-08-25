@@ -29,11 +29,12 @@
 """
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 
 import pytest
+
+from tests.unit._source_probe import source_of
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -44,7 +45,7 @@ class TestBestEffortPathIsNotMoreLenientThanStrict:
     def test_broken_bearer_does_not_fall_back_to_x_user(self):
         import backend.user_context as uc
 
-        source = inspect.getsource(uc.UserContextMiddleware.dispatch)
+        source = source_of(uc.UserContextMiddleware.dispatch)
         assert "if user is None and err is None and is_dev_mode_x_user_fallback_enabled():" in source, (
             "best-effort 경로가 JWT 오류(`err`)를 무시하고 X-User 로 내려간다 — "
             "엄격 경로가 401 로 막는 조합(깨진 Bearer + X-User: <admin>)이 여기서 통과한다"
@@ -54,7 +55,7 @@ class TestBestEffortPathIsNotMoreLenientThanStrict:
         """대조군 — 엄격 경로의 기존 동작이 그대로인지."""
         import backend.user_context as uc
 
-        source = inspect.getsource(uc.UserContextMiddleware.dispatch)
+        source = source_of(uc.UserContextMiddleware.dispatch)
         assert "TOKEN_INVALID" in source or "jwt_error" in source
 
 

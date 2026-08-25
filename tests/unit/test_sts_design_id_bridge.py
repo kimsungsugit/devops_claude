@@ -234,10 +234,9 @@ class TestParserIsASingleSource:
         ⚠ 주석은 제외한다 — 왜 여기 없는지를 설명하는 주석까지 걸리면 이 가드는
           자기 설명을 금지하는 셈이 된다.
         """
-        import inspect
-
         from backend.routers import jenkins
-        code = [ln for ln in inspect.getsource(jenkins).splitlines()
+        from tests.unit._source_probe import source_of
+        code = [ln for ln in source_of(jenkins).splitlines()
                 if not ln.lstrip().startswith("#")]
         assert not [ln for ln in code if "Function Information" in ln], (
             "라우터가 표 순회를 다시 구현했다 — report_gen/uds_related.py 를 쓸 것")
