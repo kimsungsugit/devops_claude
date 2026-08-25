@@ -49,7 +49,7 @@ from report_gen import (  # noqa: F401
     _ai_section_text,
     _apply_sentence_rules,
     _apply_uds_rules,
-    _build_function_info_rows,
+    _build_function_info_layout,
     _build_global_rows,
     _build_req_map_from_doc_paths,
     _build_req_map_from_texts,

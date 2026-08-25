@@ -1,5 +1,5 @@
 # tests/unit/test_docx_function_info_fill.py
-"""`_fill_function_info_table` 의 **등가성 + 접근 경로** 계약.
+"""`_fill_function_info_table` 의 **등가성 + 접근 경로 + 행 종류** 계약.
 
 ## 왜 이 테스트가 있나
 
@@ -15,8 +15,17 @@
     114칸 전부 `table.cell(r,c)._tc is table.rows[r].cells[c]._tc`
     결과 XML 바이트 동일 · 1,918ms → 791ms (2.42배)
 
-이 파일은 그 등가성을 **참조 구현과의 XML 비교**로 고정한다. 수치만 적어 두면 다음
-사람이 `table.cell()` 로 되돌려도 아무도 모른다.
+## P2-3 이후 — 행 종류가 셋이 됐다
+
+정본 배치를 따르면서 입력은 `List[List[str]]` 에서 `List[(kind, cells)]` 로 바뀌었다.
+`full`(전체폭) / `pair`(라벨+값) / `grid`(6칸 독립) 셋이고, **grid 를 pair 로 잘못 쓰면
+파라미터가 통째로 사라진다**. 그래서 이 파일은 두 가지를 함께 고정한다:
+
+1. `full`/`pair` 는 P2-3 **이전 구현과 결과 XML 이 같다**(참조 구현과 직접 비교)
+2. `grid` 는 6칸이 각각 독립으로 채워진다
+
+수치와 규칙만 적어 두면 다음 사람이 `table.cell()` 로 되돌리거나 grid 를 접어도
+아무도 모른다.
 """
 from __future__ import annotations
 
@@ -29,6 +38,12 @@ docx = pytest.importorskip("docx", reason="python-docx 없음")
 from report_gen.docx_builder import (  # noqa: E402
     _fill_function_info_table,
     _merge_function_info_table,
+)
+from report_gen.function_analyzer import (  # noqa: E402
+    FN_ROW_FULL,
+    FN_ROW_GRID,
+    FN_ROW_PAIR,
+    PARAM_GRID_HEADER,
 )
 
 _COLS, _ROWS = 6, 19          # 정본 Function Information 표 모양
@@ -43,7 +58,19 @@ def _build(merged: bool = True, cols: int = _COLS, rows: int = _ROWS):
 
 
 def _data(n: int = _ROWS):
+    """P2-3 **이전** 모양의 행 목록 — 참조 구현(`_reference_fill`)의 입력이다."""
     return [[f"L{i}", "", f"V{i}"] for i in range(n)]
+
+
+def _lay(rows):
+    """`_data()` 모양을 새 배치로 옮긴다 — 행0 전체폭 + 나머지 라벨/값(예전과 동일)."""
+    out = []
+    for idx, r in enumerate(rows):
+        if idx == 0:
+            out.append((FN_ROW_FULL, [r[0]]))
+        else:
+            out.append((FN_ROW_PAIR, list(r)))
+    return out
 
 
 def _reference_fill(table, data_rows):
@@ -69,7 +96,7 @@ class TestEquivalence:
         """⚠ 이게 핵심 — 병합 여부와 무관하게 **결과 XML 이 같아야** 한다."""
         a, b = _build(merged), _build(merged)
         _reference_fill(a, _data())
-        _fill_function_info_table(b, _data())
+        _fill_function_info_table(b, _lay(_data()))
         assert a._tbl.xml == b._tbl.xml
 
     @pytest.mark.parametrize("cols", [2, 3, 4, 6], ids=lambda c: f"{c}열")
@@ -87,9 +114,22 @@ class TestEquivalence:
             _reference_fill(a, rows)
         except Exception:                      # noqa: BLE001 - 옛 구현은 여기서 죽는 게 정상
             pass
-        _fill_function_info_table(b, rows)
-        assert [[c.text for c in r.cells] for r in a.rows] ==                [[c.text for c in r.cells] for r in b.rows]
+        _fill_function_info_table(b, _lay(rows))
+        assert [[c.text for c in r.cells] for r in a.rows] == \
+               [[c.text for c in r.cells] for r in b.rows]
         assert a._tbl.xml == b._tbl.xml
+
+    def test_packed_pair_row_keeps_the_old_value_column(self):
+        """⚠ 좁은 표는 라벨/값 쌍을 한 행에 여러 개 접어 넣는다(`[k1,v1,k2,v2]`).
+        값 칸을 `cells_text[-1]` 로 고르면 첫 쌍의 라벨에 **마지막 쌍의 값**이 붙는다.
+        P2-3 이전 계약은 `row[2]`(=k2) 이므로 그대로여야 한다.
+
+        (행 0 은 전체 병합이라 라벨/값 두 칸이 같은 셀이 된다 — 행 1 에서 본다.)"""
+        t = _build()
+        _fill_function_info_table(
+            t, [(FN_ROW_FULL, ["hdr"]), (FN_ROW_PAIR, ["k1", "v1", "k2", "v2"])])
+        assert t.cell(1, 0).text == "k1"
+        assert t.cell(1, 2).text == "k2", "접힌 행의 값 칸 선택이 바뀌었다"
 
     def test_merged_cells_resolve_to_the_same_element(self):
         """두 접근 경로가 같은 `<w:tc>` 를 가리키는지 — 등가성의 근거."""
@@ -103,14 +143,14 @@ class TestEquivalence:
 class TestFillBehaviour:
     def test_label_and_value_land_in_the_right_columns(self):
         t = _build()
-        _fill_function_info_table(t, _data())
+        _fill_function_info_table(t, _lay(_data()))
         assert t.cell(1, 0).text == "L1"
         assert t.cell(1, 2).text == "V1"
 
     def test_header_row_is_filled_across(self):
         """행 0 은 전체 병합이라 어느 칸을 봐도 라벨이어야 한다."""
         t = _build()
-        _fill_function_info_table(t, _data())
+        _fill_function_info_table(t, _lay(_data()))
         assert {c.text for c in t.rows[0].cells} == {"L0"}
 
     def test_more_data_rows_than_table_rows_is_truncated_not_crashed(self, caplog):
@@ -122,16 +162,16 @@ class TestFillBehaviour:
         """
         t = _build()
         with caplog.at_level("WARNING", logger="report_generator"):
-            _fill_function_info_table(t, _data(_ROWS + 40))
+            _fill_function_info_table(t, _lay(_data(_ROWS + 40)))
         assert t.cell(_ROWS - 1, 0).text == f"L{_ROWS - 1}"
         assert "채우기 실패" not in caplog.text, (
             "정상 절단인데 예외 경로로 빠졌다 — 행 초과 가드가 사라졌는지 볼 것"
         )
 
     def test_two_column_row_falls_back_to_index_one(self):
-        """`row` 가 2칸뿐이면 값은 `row[1]` 이다(기존 계약)."""
+        """`cells` 가 2칸뿐이면 값은 `[1]` 이다(기존 계약). 새 배치의 `pair` 행이 바로 이 모양이다."""
         t = _build()
-        _fill_function_info_table(t, [["L0", "V0"], ["L1", "V1"]])
+        _fill_function_info_table(t, [(FN_ROW_PAIR, ["L0", "V0"]), (FN_ROW_PAIR, ["L1", "V1"])])
         assert t.cell(1, 2).text == "V1"
 
     @pytest.mark.parametrize("bad", [None, []], ids=["표없음", "데이터없음"])
@@ -139,9 +179,51 @@ class TestFillBehaviour:
         """음성 대조군 — 빈 입력에 손대면 안 된다."""
         t = _build()
         before = t._tbl.xml
-        _fill_function_info_table(t if bad is not None else None, bad if bad is not None else _data())
+        _fill_function_info_table(
+            t if bad is not None else None,
+            bad if bad is not None else _lay(_data()),
+        )
         if bad is not None:
             assert t._tbl.xml == before
+
+
+class TestGridRows:
+    """P2-3 — 파라미터 그리드는 **6칸이 각각 독립**이다."""
+
+    def _grid_table(self, cols: int = _COLS):
+        d = docx.Document()
+        t = d.add_table(rows=3, cols=cols)
+        layout = [
+            (FN_ROW_FULL, ["[ Input Parameters ]"]),
+            (FN_ROW_GRID, list(PARAM_GRID_HEADER)),
+            (FN_ROW_GRID, ["1", "u8s_Flag", "U8", "0 ~ 255", "0x00", "설명"]),
+        ]
+        _merge_function_info_table(t, cols, layout)
+        _fill_function_info_table(t, layout)
+        return t
+
+    def test_every_grid_cell_is_written(self):
+        t = self._grid_table()
+        assert [c.text for c in t.rows[1].cells] == list(PARAM_GRID_HEADER)
+        assert [c.text for c in t.rows[2].cells] == ["1", "u8s_Flag", "U8", "0 ~ 255", "0x00", "설명"]
+
+    def test_grid_row_is_not_merged_into_label_value(self):
+        """⚠ 이게 무너지면 파라미터가 통째로 사라진다 — 정본 6칸이 2칸으로 접힌다."""
+        t = self._grid_table()
+        distinct = len({id(c._tc) for c in t.rows[2].cells})
+        assert distinct == _COLS, f"그리드 행이 {distinct}칸으로 접혔다"
+
+    def test_section_header_row_spans_the_whole_width(self):
+        t = self._grid_table()
+        assert {c.text for c in t.rows[0].cells} == {"[ Input Parameters ]"}
+        assert len({id(c._tc) for c in t.rows[0].cells}) == 1
+
+    def test_seventh_column_is_folded_into_the_last_grid_cell(self):
+        """실측 템플릿 415개 중 124개가 7열이다. 정본 그리드는 6칸이므로 꼬리를 합친다."""
+        t = self._grid_table(cols=7)
+        assert len({id(c._tc) for c in t.rows[2].cells}) == 6
+        assert t.rows[2].cells[5].text == "설명"
+        assert t.rows[2].cells[6].text == "설명", "꼬리 칸이 마지막 그리드 칸과 병합되지 않았다"
 
 
 class TestAccessPathContract:
@@ -173,7 +255,7 @@ class TestAccessPathContract:
         monkeypatch.setattr(_Rows, "__getitem__", _counting, raising=True)
         t = _build()
         calls["n"] = 0                     # 표 구성(_merge…)이 쓴 건 세지 않는다
-        _fill_function_info_table(t, _data(n))
+        _fill_function_info_table(t, _lay(_data(n)))
         assert calls["n"] == 0, (
             f"{n}행에서 _Rows.__getitem__ 을 {calls['n']}회 불렀다 — "
             "`list(table.rows)` 로 한 번만 펼칠 것"
@@ -189,6 +271,6 @@ class TestFailureIsNotSilent:
                 raise RuntimeError("boom")
 
         with caplog.at_level("WARNING", logger="report_generator"):
-            _fill_function_info_table(_Boom(), _data())
+            _fill_function_info_table(_Boom(), _lay(_data()))
         assert "함수 정보 표 채우기 실패" in caplog.text, caplog.text
         assert "RuntimeError" in caplog.text, "예외 종류를 안 남기면 원인을 못 짚는다"

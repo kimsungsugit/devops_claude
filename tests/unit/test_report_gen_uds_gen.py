@@ -503,8 +503,8 @@ class TestFunctionAnalyzerHelpers:
         u = _collect_var_usage(body, ["g_Buf"])["g_Buf"]
         assert (u["lhs"], u["rhs"]) == (lhs, rhs), u
 
-    def test_build_function_info_rows(self):
-        from report_gen.function_analyzer import _build_function_info_rows
+    def test_build_function_info_layout(self):
+        from report_gen.function_analyzer import _build_function_info_layout
 
         info = {
             "id": "SwUFn_0101",
@@ -514,8 +514,8 @@ class TestFunctionAnalyzerHelpers:
             "asil": "B",
             "related": "SwTR_001",
         }
-        rows = _build_function_info_rows(info, 6)
-        assert len(rows) > 0
+        layout = _build_function_info_layout(info, 6)
+        assert len(layout) > 0
         # Check that ID row is present
-        flat = str(rows)
+        flat = str(layout)
         assert "SwUFn_0101" in flat

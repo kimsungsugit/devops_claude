@@ -24,7 +24,11 @@ from report.constants import (
     LOGIC_MAX_GRANDCHILDREN_DEFAULT,
 )
 from report_gen.function_analyzer import (
-    _build_function_info_rows,
+    FN_ROW_FULL,
+    FN_ROW_GRID,
+    FN_ROW_PAIR,
+    PARAM_GRID_COLS,
+    _build_function_info_layout,
     _enhance_description_text,
     _enhance_function_description,
     _fallback_function_description,
@@ -33,6 +37,7 @@ from report_gen.function_analyzer import (
     _normalize_symbol_name,
     _parse_signature_outputs,
     _parse_signature_params,
+    resolve_param_grid_entries,
 )
 from report_gen.provenance import is_weak_source, unrecorded_source
 from report_gen.requirements import (
@@ -1221,19 +1226,85 @@ def _render_swcom_overview_image(swcoms: List[str], out_path: Path) -> Optional[
     return str(out_path)
 
 
-def _merge_function_info_table(table, cols: int) -> None:
+def _merge_function_info_table(table, cols: int, layout=None) -> None:
+    """함수 정보 표의 셀을 행 종류에 맞게 병합한다.
+
+    `layout` 이 있으면 행마다 종류(`full`/`pair`/`grid`)를 보고 병합한다. 없으면
+    P2-3 이전과 같은 균일 병합(행0 전체 + 나머지 라벨/값)이라, 문서에서 읽어 온
+    표를 다시 정규화하는 경로는 그대로 동작한다.
+
+    ⚠ **`grid` 행은 병합하지 않는다.** 정본의 `No|Name|Type|Value Range|Reset
+    Value|Description` 은 6칸이 각각 독립이고, 여길 라벨/값으로 병합하면 파라미터가
+    통째로 사라진다. 표가 6열보다 넓으면(실측 템플릿 415개 중 124개가 7열) 남는
+    꼬리만 마지막 칸에 합쳐 정본과 같은 6칸으로 보이게 한다.
+    """
     if not table or cols < 4:
         return
     try:
-        if len(table.rows) >= 1:
-            table.cell(0, 0).merge(table.cell(0, cols - 1))
-        for r_idx in range(1, len(table.rows)):
+        kinds = [str(k) for k, _ in (layout or [])]
+        n_rows = len(table.rows)
+        for r_idx in range(n_rows):
+            if r_idx < len(kinds):
+                kind = kinds[r_idx]
+            else:
+                kind = FN_ROW_FULL if r_idx == 0 else FN_ROW_PAIR
+            if kind == FN_ROW_GRID:
+                if cols > PARAM_GRID_COLS:
+                    table.cell(r_idx, PARAM_GRID_COLS - 1).merge(table.cell(r_idx, cols - 1))
+                continue
+            if kind == FN_ROW_FULL:
+                table.cell(r_idx, 0).merge(table.cell(r_idx, cols - 1))
+                continue
             if cols >= 2:
                 table.cell(r_idx, 0).merge(table.cell(r_idx, 1))
             if cols >= 4:
                 table.cell(r_idx, 2).merge(table.cell(r_idx, cols - 1))
     except Exception:
         pass
+
+
+def _infer_function_info_layout(table):
+    """이미 만들어진 표에서 행 종류를 되짚는다 — 문서 후처리 정규화용.
+
+    ⚠ 왜 필요한가: `_normalize_function_info_tables` 는 완성된 문서를 훑어 표를 다시
+    병합하는데, P2-3 이 넣은 파라미터 그리드는 병합 대상이 **아니다**. 종류를 모르고
+    균일 병합하면 방금 쓴 파라미터 행이 라벨/값 두 칸으로 접혀 통째로 사라진다.
+
+    ⚠ **셀 개수로 판정하면 안 된다.** 처음엔 "칸이 3개 이상이면 그리드" 로 썼는데,
+    아직 한 번도 병합되지 않은 라벨/값 표도 6칸이라 **정규화가 통째로 죽었다**
+    (음성 대조군이 잡았다). 그래서 정본 배치의 **내용**으로 판정한다 —
+    `report_gen.requirements._extract_function_info_from_docx` 가 같은 문서를 되읽을 때
+    쓰는 것과 같은 상태기계다(섹션 머리 → 그리드 헤더 → 번호로 시작하는 데이터 행).
+    """
+    layout = []
+    try:
+        in_params = False
+        for r_idx, row in enumerate(list(table.rows)):
+            cells = [str(c.text or "").strip() for c in row.cells]
+            first = cells[0] if cells else ""
+            norm = re.sub(r"[\[\]\s]+", " ", first).strip().lower()
+            if r_idx == 0:
+                layout.append((FN_ROW_FULL, []))
+                continue
+            if norm in ("input parameters", "output parameters", "input paramters"):
+                in_params = True
+                layout.append((FN_ROW_FULL, []))
+                continue
+            if in_params:
+                lowered = {c.lower() for c in cells}
+                if "no" in lowered and ("name" in lowered or "type" in lowered):
+                    layout.append((FN_ROW_GRID, []))
+                    continue
+                if first[:1].isdigit():
+                    layout.append((FN_ROW_GRID, []))
+                    continue
+                in_params = False
+            layout.append((FN_ROW_PAIR, []))
+    except Exception as exc:   # noqa: BLE001 - 되짚기 실패가 문서 생성을 막아선 안 된다
+        _logger.warning("함수 정보 표 행 종류 추론 실패(%s) — 균일 병합으로 되돌린다: %s",
+                        type(exc).__name__, exc)
+        return None
+    return layout
 
 
 def _normalize_function_info_tables(doc) -> None:
@@ -1249,12 +1320,12 @@ def _normalize_function_info_tables(doc) -> None:
             cols = len(table.columns)
             for cell in table.rows[0].cells:
                 cell.text = "[ Function Information ]"
-            _merge_function_info_table(table, cols)
+            _merge_function_info_table(table, cols, _infer_function_info_layout(table))
     except Exception:
         pass
 
 
-def _fill_function_info_table(table, data_rows: List[List[str]]) -> None:
+def _fill_function_info_table(table, layout) -> None:
     """함수 정보 표를 채운다.
 
     ⚠ **`table.cell(r, c)` 를 쓰지 말 것.** python-docx 의 그 API 는 호출할 때마다
@@ -1270,27 +1341,40 @@ def _fill_function_info_table(table, data_rows: List[List[str]]) -> None:
     114칸 전부 `table.cell(r,c)._tc is table.rows[r].cells[c]._tc`, 결과 XML 바이트
     동일, 소요 **1,918ms → 791ms (2.42배)**.
     """
-    if not table or not data_rows:
+    if not table or not layout:
         return
     try:
         trows = list(table.rows)          # `table.rows` 재해석 방지
-        for r_idx, row in enumerate(data_rows):
+        for r_idx, (kind, cells_text) in enumerate(layout):
             if r_idx >= len(trows):
                 break
-            label = row[0] if len(row) > 0 else ""
-            value = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
             cells = trows[r_idx].cells    # 행당 한 번만 해석
             # clear row first
             for c in cells:
                 c.text = ""
-            if r_idx == 0:
+            if kind == FN_ROW_GRID:
+                for c_idx, val in enumerate(cells_text[:len(cells)]):
+                    cells[c_idx].text = str(val)
+                continue
+            if kind == FN_ROW_FULL:
+                head = str(cells_text[0]) if cells_text else ""
                 for c in cells:
-                    c.text = label
+                    c.text = head
+                continue
+            # ⚠ 값 칸 선택은 P2-3 이전과 **글자 그대로 같게** 둔다. 좁은 표(6열 미만)는
+            #   라벨/값 쌍을 한 행에 여러 개 접어 넣으므로(`_pack_pairs_into_rows`)
+            #   `cells_text[-1]` 을 쓰면 첫 쌍의 라벨에 마지막 쌍의 값이 붙는다.
+            label = str(cells_text[0]) if len(cells_text) > 0 else ""
+            if len(cells_text) > 2:
+                value = str(cells_text[2])
+            elif len(cells_text) > 1:
+                value = str(cells_text[1])
             else:
-                if len(cells) > 0:
-                    cells[0].text = label
-                if len(cells) > 2:
-                    cells[2].text = value
+                value = ""
+            if len(cells) > 0:
+                cells[0].text = label
+            if len(cells) > 2:
+                cells[2].text = value
     except Exception as exc:   # noqa: BLE001 - 표 채우기 실패가 문서 생성을 막아선 안 된다
         # 예전엔 `pass` 라 표가 통째로 비어도 흔적이 없었다.
         _logger.warning("함수 정보 표 채우기 실패(%s) — 그 표는 빈 채로 남는다: %s",
@@ -3299,12 +3383,18 @@ def generate_uds_docx(
                         parts = [mapping.get(k, "") for k in globals_format_order]
                         out.append(globals_format_sep.join([p for p in parts if p]))
                 return out
+            # ⚠ 파라미터 그리드는 전역이 **표시 문자열로 납작해지기 전에** 뽑는다.
+            #   `_format_globals` 가 지나가면 `Name=… | Type=… | Range=…` 한 줄이 되어
+            #   타입·범위·초기값이 구조로는 사라진다.
+            _grid_in, _grid_out = resolve_param_grid_entries(info, globals_info_map)
             info["globals_global"] = _format_globals(info.get("globals_global") or [])
             info["globals_static"] = _format_globals(info.get("globals_static") or [])
             info_for_rows = dict(info)
+            info_for_rows["_param_grid_inputs"] = _grid_in
+            info_for_rows["_param_grid_outputs"] = _grid_out
             if payload.get("show_mapping_evidence"):
                 info_for_rows["show_mapping_evidence"] = True
-            data_rows = _build_function_info_rows(info_for_rows, cols)
+            data_rows = _build_function_info_layout(info_for_rows, cols)
             calls_list = list(dict.fromkeys(callee_names))
             if not calls_list:
                 calls_list = _extract_call_names(str(info.get("called") or ""))
@@ -3344,14 +3434,17 @@ def generate_uds_docx(
                     return_path_text=str(info.get("logic_return_path") or ""),
                     error_path_text=str(info.get("logic_error_path") or ""),
                 )
-            if logic_img:
-                for r in data_rows:
-                    if r and "Logic Diagram" in r[0]:
-                        r[1] = Path(logic_img).name
-                        break
-            data_rows = [["[ Function Information ]"] * cols] + data_rows
-            func_table = _add_blank_table(doc, rows, cols, style, None, None)
-            _merge_function_info_table(func_table, cols)
+            # ⚠ 예전엔 여기서 Logic Diagram 행의 값 칸에 이미지 **파일명**을 넣었다.
+            #   6·7열(실측상 유일하게 도달하는 폭)에선 라벨 사본 칸에 써서 화면에 나온
+            #   적이 없는 죽은 쓰기였고, 새 배치에선 살아나 `logic` 본문을 덮는다.
+            #   이미지는 아래 `_insert_logic_image_in_table` 이 그 칸에 직접 넣으므로
+            #   파일명은 어차피 필요 없다 — 죽은 쓰기를 되살리는 대신 지운다.
+            data_rows = [(FN_ROW_FULL, ["[ Function Information ]"])] + data_rows
+            # ⚠ 템플릿이 준 행 수는 **정본 함수의 파라미터 개수**에서 온 것이라 우리
+            #   함수와 다르다. 고정하면 늘어난 파라미터가 조용히 잘린다(무템플릿 경로는
+            #   예전부터 `max` 였다 — 같은 표를 두 경로가 다르게 자르고 있었다).
+            func_table = _add_blank_table(doc, max(len(data_rows), rows), cols, style, None, None)
+            _merge_function_info_table(func_table, cols, data_rows)
             _fill_function_info_table(func_table, data_rows)
             if logic_img:
                 inserted = _insert_logic_image_in_table(func_table, cols, str(logic_img))
@@ -3965,7 +4058,10 @@ def generate_uds_docx(
             if _ai_desc and len(_ai_desc) > len(_existing_desc):
                 _inf2["description"] = _ai_desc
 
-        _data_rows = _build_function_info_rows(_inf2, _cols)
+        _g_in, _g_out = resolve_param_grid_entries(_inf2, globals_info_map)
+        _inf2["_param_grid_inputs"] = _g_in
+        _inf2["_param_grid_outputs"] = _g_out
+        _data_rows = _build_function_info_layout(_inf2, _cols)
         # Attempt logic diagram
         _logic_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(_inf2.get("id") or _fn_key or "fn")).strip("_")
         _logic_img_path = Path(out).parent / "logic" / f"{_logic_key}.png"
@@ -3983,15 +4079,10 @@ def generate_uds_docx(
                 max_depth=int(payload.get("logic_max_depth") or LOGIC_MAX_DEPTH_DEFAULT),
                 module_map=module_map if isinstance(module_map, dict) else None,
             )
-        if _logic_img:
-            for _r in _data_rows:
-                if _r and "Logic Diagram" in _r[0]:
-                    _r[1] = Path(_logic_img).name
-                    break
-        _data_rows = [["[ Function Information ]"] * _cols] + _data_rows
+        _data_rows = [(FN_ROW_FULL, ["[ Function Information ]"])] + _data_rows
         _rows_per_fn = max(len(_data_rows), rows)
         _ft = _add_blank_table(doc, _rows_per_fn, _cols, style, None, None)
-        _merge_function_info_table(_ft, _cols)
+        _merge_function_info_table(_ft, _cols, _data_rows)
         _fill_function_info_table(_ft, _data_rows)
         if _logic_img:
             if not _insert_logic_image_in_table(_ft, _cols, str(_logic_img)):

@@ -1286,7 +1286,8 @@ def _infer_precondition_from_body(body: str, func_name: str = "") -> str:
     return ""
 
 
-def _build_function_info_rows(info: Dict[str, Any], cols: int) -> List[List[str]]:
+def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """함수 정보 표의 라벨/값 쌍. **배치와 무관한 내용만** 여기서 정한다."""
     info = _finalize_function_fields(info)
     name_text = str(info.get("name") or "").strip()
     name_norm = re.sub(r"[^a-z0-9_]", "", name_text.lower())
@@ -1334,7 +1335,14 @@ def _build_function_info_rows(info: Dict[str, Any], cols: int) -> List[List[str]
             formatted_inputs.append(f"{_classify_param_direction(p)} {p}")
     pairs.append(("Input Parameters", "\n".join(formatted_inputs) if formatted_inputs else "N/A"))
     pairs.append(("Output Parameters", "\n".join([str(x) for x in outputs if x]) if outputs else "N/A"))
-    pairs.append(("Precondition", str(info.get("precondition") or "") or "N/A"))
+    # ⚠ 라벨은 정본 표기를 따른다. 정본 416 블록 중 414 가 `선행조건`(한글)이고
+    #   `Called Function`·`Calling Function` 은 영문이다 — 한 표 안에서 언어가
+    #   섞이는 것이 정본의 실제 모양이다. `report_gen.requirements` 의 되읽기는
+    #   두 표기를 이미 모두 받는다(`{"precondition", "선행조건"}`).
+    #   ⚠ 다만 `Used Globals (Global)/(Static)` 은 정본에 없는 **우리 필드**라
+    #     정본의 `사용 전역변수`(한 행)로 합치지 않는다 — 합치면 전역/정적 구분이
+    #     사라진다(계획 결정 3: 정본은 하한선이지 상한선이 아니다).
+    pairs.append(("선행조건", str(info.get("precondition") or "") or "N/A"))
     globals_global = info.get("globals_global") or []
     globals_static = info.get("globals_static") or []
     pairs.append(
@@ -1353,12 +1361,262 @@ def _build_function_info_rows(info: Dict[str, Any], cols: int) -> List[List[str]
     pairs.append(("Calling Function", _normalize_call_field(str(info.get("calling") or "")) or "N/A"))
     pairs.append(("Logic Diagram", str(info.get("logic") or "")))
 
+    return pairs
+
+
+# ── 정본(HDPDM01 SUDS) 함수 정보 표의 행 배치 모델 ────────────────────────────
+#
+# 실측(2026-08-25, `docs/(HDPDM01_SUDS) … v1.07_240213.docx` 416 블록 전수):
+# 405 블록이 **글자 그대로 같은 라벨 순서**를 쓴다(나머지 11 은 `Paramters` 오타 19건
+# 포함 표기 흔들림). 그 배치는 행이 세 종류다 — 한 종류로 뭉개면 파라미터가 함수당
+# 한 칸에 다 들어가고, 그게 P2-3 이전 우리 산출물이었다.
+#
+#   full : 전체 폭 한 칸        `[ Function Information ]` · `[ Input Parameters ]` …
+#   pair : 라벨[0-1] + 값[2..]  ID / Name / Prototype / …
+#   grid : 6칸 독립             `No|Name|Type|Value Range|Reset Value|Description` 와 그 데이터
+#
+# ⚠ 이 상수는 `docx_builder._merge_function_info_table` / `_fill_function_info_table`
+#   이 **함께** 본다. 종류를 늘리면 그 두 곳이 같이 움직여야 한다.
+FN_ROW_FULL = "full"
+FN_ROW_PAIR = "pair"
+FN_ROW_GRID = "grid"
+
+# 정본 파라미터 그리드의 열. 순서가 곧 계약이다 — `report_gen.requirements`
+# `_parse_param_row` 가 같은 순서로 되읽는다.
+PARAM_GRID_HEADER: List[str] = [
+    "No", "Name", "Type", "Value Range", "Reset Value", "Description",
+]
+PARAM_GRID_COLS = len(PARAM_GRID_HEADER)
+
+# 파라미터 셀 길이 상한. 정본 실측 중앙값은 9자(p90 14자)인데 우리 `range`/`init` 엔
+# 배열 초기화 블록이 통째로 들어 있는 것이 28건 있다(최대 2,106자). 그대로 쓰면 표
+# 한 칸이 문서 한 쪽을 먹는다. ⚠ 자를 땐 **자른 사실과 원래 길이를 남긴다** — 이
+# 저장소가 반복해 고쳐 온 것이 "조용한 절단"이다.
+PARAM_CELL_MAX = 120
+
+_DIRECTION_TAG_RE = re.compile(r"^\[(INOUT|INDIRECT2|INDIRECT|IN|OUT)\]\s*(.*)$", re.I)
+
+# 방향 태그 → 어느 열로 보낼 것인가. 정본 실측(2026-08-25, 교집합 394 함수)으로 정했다:
+#
+#   태그        입력만  기대만  둘다  정본에 없음   → 입력   → 기대
+#   IN            687      5     5        126     84.1%    1.2%
+#   OUT             2    795     0        101      0.2%   88.5%
+#   INOUT           3     57   234         35     72.0%   88.4%
+#   INDIRECT        3      2     0        504      0.6%    0.4%
+#   INDIRECT2       1      0     0        234      0.4%    0.0%
+#
+# INOUT 은 **양쪽에 다 적는 것이 정본**이다(적중 329 중 234 가 둘 다). 한쪽만 적으면
+# 그 234 를 통째로 놓친다. INDIRECT 계열은 정본이 사실상 안 적으므로(1.0% / 0.4%)
+# 그리드에 넣지 않는다 — 대신 `Used Globals` 행에는 그대로 남아 정보가 사라지진 않는다.
+_TAG_TO_COLUMNS: Dict[str, Tuple[bool, bool]] = {
+    "IN": (True, False),
+    "OUT": (False, True),
+    "INOUT": (True, True),
+    "INDIRECT": (False, False),
+    "INDIRECT2": (False, False),
+}
+
+# 정본이 Value Range 에 쓰는 소수 표기 — 허용값 열거(`0x0000, 0x08DC, 0x09A6`).
+# 리터럴/식별자 2개 이상이 쉼표로 이어진 것만 인정한다.
+_VALUE_ENUM_RE = re.compile(r"^[\w.+\-]+(?:\s*,\s*[\w.+\-]+)+$")
+
+_NA = "N/A"
+_PLACEHOLDER_PARAM_NAMES = {"", "(none)", "none", "n/a", "na", "-", "void", "tbd"}
+
+
+def split_direction_tag(raw: str) -> Tuple[str, str]:
+    """`"[INOUT] REG_PTT.Bits.PTT3"` → `("INOUT", "REG_PTT.Bits.PTT3")`.
+
+    태그가 없으면 `("", 원문)`. 태그는 대문자로 정규화한다.
+    """
+    text = str(raw or "").strip()
+    m = _DIRECTION_TAG_RE.match(text)
+    if not m:
+        return "", text
+    return m.group(1).upper(), m.group(2).strip()
+
+
+def _param_cell(value: Any) -> str:
+    """표 한 칸 값으로 정규화. 비면 `N/A`, 길면 **자른 사실을 남기고** 자른다."""
+    text = re.sub(r"\s+", " ", str(value if value is not None else "")).strip()
+    if not text or text.lower() in {"n/a", "na", "-", "none"}:
+        return _NA
+    if len(text) > PARAM_CELL_MAX:
+        keep = text[:PARAM_CELL_MAX].rstrip()
+        return f"{keep}… (전체 {len(text)}자에서 잘림)"
+    return text
+
+
+def _default_type_ranges() -> Dict[str, str]:
+    try:
+        from report.constants import DEFAULT_TYPE_RANGES
+        return dict(DEFAULT_TYPE_RANGES)
+    except Exception as exc:   # noqa: BLE001 - 상수 부재가 문서 생성을 막아선 안 된다
+        _logger.warning(
+            "타입 폭 표(DEFAULT_TYPE_RANGES) 로드 실패(%s) — '타입 폭' 표시 없이 "
+            "range 를 그대로 적는다: %s", type(exc).__name__, exc)
+        return {}
+
+
+def _param_type_text(ginfo: Dict[str, Any]) -> str:
+    """`Type` 열. 정본은 배열을 `U16 Array` 로 적으므로 차원 유무를 반영한다."""
+    base = str(ginfo.get("type") or "").strip()
+    if not base:
+        return _NA
+    if str(ginfo.get("array") or "").strip():
+        return _param_cell(f"{base} Array")
+    return _param_cell(base)
+
+
+def _param_value_range(ginfo: Dict[str, Any],
+                       type_ranges: Optional[Dict[str, str]] = None) -> str:
+    """`Value Range` 열.
+
+    ⚠ **정본과 우리는 이 칸에서 다른 주장을 한다.** 정본은 설계상의 의미 범위를 적고
+    (`0x00 ~ 0x01`), 우리 `range` 는 실측 92.9%(395/425)가 **타입 폭 그대로**다
+    (`U16` → `0 ~ 65535`). 아무 표시 없이 적으면 "설계가 전 범위를 허용한다"는, 우리가
+    세운 적 없는 주장이 된다 — 이 저장소가 이미 한 번 고친 출처 세탁과 같은 모양이다.
+    그래서 타입 폭과 **글자 그대로 같으면 그 사실을 함께 적는다**.
+
+    ⚠ **범위가 아닌 값은 이 칸에 넣지 않는다.** 우리 `range` 필드엔 범위를 못 구했을
+    때 초기값이 대신 들어온다(`uds_generator.py` 의 `if not resolved and init:` 폴백) —
+    실측으로 초기화 블록 13건 · 캐스트식/단일 초기값 17건이 그렇게 섞여 있었고, 그중
+    18칸이 실제 산출물의 Value Range 로 나갔다(`( (  U8 )( 0x00U ) )`). 정본은 그 칸에
+    범위(`~`) 92.9% · 허용값 열거(`0x00, 0x01`) 1.3% · `N/A` 5.6% 만 적고 캐스트식은
+    **한 번도 안 적는다**. 초기값은 `Reset Value` 열이 이미 싣는다.
+    """
+    raw = re.sub(r"\s+", " ", str(ginfo.get("range") or "")).strip()
+    if not raw:
+        return _NA
+    if "~" not in raw:
+        # 정본의 소수 표기 — 허용값 열거(`0x0000, 0x08DC, 0x09A6`). 그 외(초기화 블록·
+        # 캐스트식·단일 초기값·파서 조각 `}`)는 범위에 대한 주장이 아니다.
+        return _param_cell(raw) if _VALUE_ENUM_RE.match(raw) else _NA
+    ranges = type_ranges if type_ranges is not None else _default_type_ranges()
+    base_type = re.sub(r"^\s*const\s+", "", str(ginfo.get("type") or "").strip())
+    width = str(ranges.get(base_type) or "").strip()
+    if width and re.sub(r"\s+", "", width) == re.sub(r"\s+", "", raw):
+        return _param_cell(f"{raw} (타입 폭)")
+    return _param_cell(raw)
+
+
+def _param_grid_row(no: int, display_name: str, ginfo: Dict[str, Any],
+                    type_ranges: Optional[Dict[str, str]] = None) -> List[str]:
+    return [
+        str(no),
+        _param_cell(display_name),
+        _param_type_text(ginfo),
+        _param_value_range(ginfo, type_ranges),
+        _param_cell(ginfo.get("init")),
+        _param_cell(ginfo.get("desc")),
+    ]
+
+
+def _empty_param_grid_row() -> List[str]:
+    """파라미터가 없을 때의 행. 정본도 `1 | N/A × 5` 한 줄을 적는다."""
+    return ["1"] + [_NA] * (PARAM_GRID_COLS - 1)
+
+
+def resolve_param_grid_entries(
+    info: Dict[str, Any],
+    globals_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[List[List[str]], List[List[str]]]:
+    """함수 하나의 (입력 그리드 행, 기대 그리드 행)을 만든다.
+
+    ⚠ **`docx_builder` 가 전역 목록을 표시 문자열로 납작하게 만들기 *전에*** 불러야
+    한다. `_format_globals` 가 지나가면 `Name=… | Type=… | Range=…` 한 줄이 되어
+    구조가 사라진다.
+
+    원천은 넷이다 — 시그니처 파라미터(`inputs`/`outputs`)와 사용 전역
+    (`globals_global`/`globals_static`). 정본이 시그니처만 적는 문서가 아님은
+    실측으로 확인됐다: 정본 Input 실값의 75.1%가 전역/정적이고, prototype 이 `void`
+    인데 I/O 가 적힌 함수가 310/416(74.5%)이다.
+    """
+    gmap = globals_info_map if isinstance(globals_info_map, dict) else {}
+    type_ranges = _default_type_ranges()
+    seen: Dict[str, set] = {"in": set(), "out": set()}
+    grids: Dict[str, List[List[str]]] = {"in": [], "out": []}
+
+    def _emit(bucket: str, display_name: str, ginfo: Dict[str, Any]) -> None:
+        key = display_name.strip().lower()
+        if not key or key in seen[bucket]:
+            return
+        seen[bucket].add(key)
+        grids[bucket].append(
+            _param_grid_row(len(grids[bucket]) + 1, display_name, ginfo, type_ranges))
+
+    for source_key, default_tag in (
+        ("inputs", "IN"), ("outputs", "OUT"),
+        ("globals_global", ""), ("globals_static", ""),
+    ):
+        for raw in info.get(source_key) or []:
+            tag, base = split_direction_tag(str(raw or ""))
+            tag = tag or default_tag
+            if base.lower() in _PLACEHOLDER_PARAM_NAMES:
+                continue
+            to_in, to_out = _TAG_TO_COLUMNS.get(
+                tag, (source_key == "inputs", source_key == "outputs"))
+            if not (to_in or to_out):
+                continue
+            lookup = re.split(r"(?:->|\.|\[)", base)[0].strip()
+            ginfo = gmap.get(lookup) if isinstance(gmap.get(lookup), dict) else {}
+            if to_in:
+                _emit("in", base, ginfo or {})
+            if to_out:
+                _emit("out", base, ginfo or {})
+
+    return (grids["in"] or [_empty_param_grid_row()],
+            grids["out"] or [_empty_param_grid_row()])
+
+
+def _pack_pairs_into_rows(pairs: List[Tuple[str, str]], cols: int) -> List[List[str]]:
+    """좁은 표용 — 라벨/값 쌍을 한 행에 여러 개 접어 넣는다(P2-3 이전 동작 그대로)."""
+    cells_per_row = max(2, cols // 2 * 2)
+    pairs_per_row = max(1, cells_per_row // 2)
     rows: List[List[str]] = []
-    if cols >= 6:
-        for k, v in pairs:
-            row = [k, k, v, v, v, v]
-            rows.append(row[:cols])
-        return rows
+    row: List[str] = []
+    for idx, (k, v) in enumerate(pairs):
+        row.extend([k, v])
+        if (idx + 1) % pairs_per_row == 0:
+            rows.append(row[:cells_per_row])
+            row = []
+    if row:
+        while len(row) < cells_per_row:
+            row.append("")
+        rows.append(row[:cells_per_row])
+    return rows
+
+
+def _build_function_info_layout(info: Dict[str, Any], cols: int) -> List[Tuple[str, List[str]]]:
+    """함수 정보 표의 **행 종류 + 칸 값** 목록.
+
+    `cols >= PARAM_GRID_COLS` 일 때만 정본 6열 그리드로 전개한다. 그보다 좁은 표는
+    그리드가 물리적으로 안 들어가므로 예전 그대로 라벨/값 쌍으로 접어 넣는다
+    (실측상 이 저장소가 쓰는 템플릿은 6열 아니면 7열이라 좁은 경로는 폴백 전용이다).
+
+    그리드 데이터는 호출자가 `_param_grid_inputs`/`_param_grid_outputs` 로 미리
+    넣어 준다(전역이 표시 문자열로 납작해지기 전에 뽑아야 하므로). 없으면 여기서
+    `resolve_param_grid_entries` 로 직접 만든다 — 폴백이지 정상 경로가 아니다.
+    """
+    pairs = _function_info_pairs(info)
+    if cols < PARAM_GRID_COLS:
+        return [(FN_ROW_PAIR, cells) for cells in _pack_pairs_into_rows(pairs, cols)]
+
+    grid_in = info.get("_param_grid_inputs")
+    grid_out = info.get("_param_grid_outputs")
+    if not isinstance(grid_in, list) or not isinstance(grid_out, list):
+        grid_in, grid_out = resolve_param_grid_entries(info, info.get("_globals_info_map"))
+
+    layout: List[Tuple[str, List[str]]] = []
+    for key, value in pairs:
+        if key in ("Input Parameters", "Output Parameters"):
+            rows = grid_in if key == "Input Parameters" else grid_out
+            layout.append((FN_ROW_FULL, [f"[ {key} ]"]))
+            layout.append((FN_ROW_GRID, list(PARAM_GRID_HEADER)))
+            layout.extend((FN_ROW_GRID, list(r)) for r in (rows or [_empty_param_grid_row()]))
+        else:
+            layout.append((FN_ROW_PAIR, [key, value]))
+    return layout
     cells_per_row = max(2, cols // 2 * 2)
     pairs_per_row = max(1, cells_per_row // 2)
     row: List[str] = []

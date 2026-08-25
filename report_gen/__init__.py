@@ -34,7 +34,9 @@ from report_gen.docx_builder import (
 
 # --- function_analyzer ---
 from report_gen.function_analyzer import (
-    _build_function_info_rows,
+    PARAM_GRID_COLS,
+    PARAM_GRID_HEADER,
+    _build_function_info_layout,
     _classify_description_quality,
     _classify_param_direction,
     _collect_var_usage,
