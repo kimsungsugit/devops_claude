@@ -113,3 +113,143 @@ class TestGateStagesArePresent:
         assert re.search(r'\$\{?PROJECT_PY\}?" *-m pytest|\$PROJECT_PY" -m pytest',
                          hook_src) or '"$PROJECT_PY" -m pytest' in hook_src, \
             "pytest 를 프로젝트 venv 로 안 돌린다"
+
+
+# ── [4/4] index 무결성 ────────────────────────────────────────────────────────
+#
+# 2026-08-25 실사고: 이 훅이 **통과시킨** 커밋 2건(`04cf6a9`·`c19290a`)의 트리가 3파일뿐
+# 이었고 나머지 1,208개가 삭제로 기록됐다. 워킹트리는 멀쩡했고 `--no-verify` 로는 같은
+# 명령이 정상 커밋됐다 — 훅이 도는 동안 무언가가 index 를 덮어썼다는 뜻이다.
+# 원인은 아직 특정 못 했다(저장소를 복제해 동일 환경에서 `pytest tests/` 7,309건을 돌렸을 때
+# index 는 한 번도 안 변했다 — 테스트 스위트는 범인이 아니다). 원인을 모르는 채로도 결과는
+# 막는다: 시작/종료 스테이징이 다르면 중단.
+#
+# ⚠ 이 클래스는 **소스 문자열이 아니라 동작**을 시험한다. 훅에서 가드 두 조각을 그대로
+#   떼어내 임시 저장소의 진짜 pre-commit 으로 돌린다 — 문구만 남고 로직이 죽는 경우
+#   (뮤테이션 생존)를 막기 위해서다.
+_GUARD_BEFORE_RE = re.compile(r"^# 0b\..*?^STAGED_STATUS_BEFORE=.*?$", re.S | re.M)
+_GUARD_AFTER_RE = re.compile(r"^# 4\. index 무결성.*?^set -e$", re.S | re.M)
+
+
+def _git_env() -> dict:
+    """git 이 '다른 저장소로 갈 때 지우라'고 지정한 변수를 제거한 환경.
+
+    pre-commit 훅 아래에서 pytest 가 돌면 `GIT_INDEX_FILE` 등이 상속된다. 상대경로면
+    무해했지만(실측), 절대경로가 섞이는 순간 임시 저장소에 건 `git add` 가 **실 저장소
+    index 를 덮어쓴다**(1,212→3 실증). 진단 도구가 진단 대상을 망가뜨리지 않게 잘라낸다.
+    """
+    import os
+    import subprocess as sp
+
+    env = dict(os.environ)
+    names = sp.run(["git", "rev-parse", "--local-env-vars"],
+                   capture_output=True, text=True).stdout.split()
+    for n in names or ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_PREFIX"):
+        env.pop(n, None)
+    return env
+
+
+class TestIndexIntegrityGateIsFailClosed:
+    def test_guard_fragments_exist(self, hook_src):
+        """가드가 통째로 사라지면 아래 동작 시험이 조용히 skip 되므로 먼저 존재를 고정한다."""
+        assert _GUARD_BEFORE_RE.search(hook_src), "시작 시점 스테이징 기록(# 0b)이 없다"
+        assert _GUARD_AFTER_RE.search(hook_src), "종료 시점 대조(# 4)가 없다"
+
+    @pytest.mark.parametrize(
+        ("label", "middle", "expect_rc"),
+        [
+            ("대조군 — 게이트가 index 를 안 건드림", "", 0),
+            ("뮤테이션 — 게이트 도중 index 가 비워짐", "git read-tree --empty\n", 1),
+        ],
+    )
+    def test_guard_blocks_only_when_index_changes(
+        self, hook_src, tmp_path, label, middle, expect_rc
+    ):
+        import shutil
+        import subprocess as sp
+
+        if not shutil.which("bash") or not shutil.which("git"):
+            pytest.skip("bash/git 없음")
+
+        before = _GUARD_BEFORE_RE.search(hook_src).group(0)
+        after = _GUARD_AFTER_RE.search(hook_src).group(0)
+        env = _git_env()
+
+        def g(*args):
+            return sp.run(["git", *args], cwd=tmp_path, capture_output=True,
+                          text=True, env=env, timeout=120)
+
+        (tmp_path / "scripts").mkdir()
+        for i in range(5):
+            (tmp_path / f"f{i}.txt").write_text(f"v{i}\n", encoding="utf-8")
+        (tmp_path / "scripts" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        g("init", "-q", ".")
+        g("add", "-A")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+
+        (tmp_path / "f0.txt").write_text("changed\n", encoding="utf-8")
+        g("add", "f0.txt")
+
+        hook = tmp_path / ".git" / "hooks" / "pre-commit"
+        hook.write_text(
+            "#!/bin/bash\nset -e\n" + before + "\n\n" + middle + "\n" + after + "\n",
+            encoding="utf-8", newline="\n",
+        )
+        hook.chmod(0o755)
+
+        r = g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "probe")
+        assert r.returncode == expect_rc, (
+            f"{label}: rc={r.returncode} (기대 {expect_rc})\n{r.stdout}\n{r.stderr}"
+        )
+        if expect_rc:
+            # 막았다는 사실만이 아니라 **왜** 막았는지도 말해야 사람이 복구할 수 있다.
+            assert "스테이징 내용이 바뀌었다" in (r.stdout + r.stderr)
+            assert "git reset --mixed" in (r.stdout + r.stderr)
+
+
+# ── 훅 파일의 줄끝 ────────────────────────────────────────────────────────────
+#
+# `.gitattributes` 가 이미 못박아 뒀다: `.githooks/* text eol=lf`
+#   "Shell scripts and git hooks must keep LF on all platforms — bash on Windows
+#    (msys2 / git-bash) refuses to execute scripts with CRLF line endings."
+#
+# 그런데 **아무도 검사하지 않았다.** `.gitattributes` 는 커밋 시 정규화를 지시할 뿐,
+# 워킹트리 파일이 CRLF 로 바뀌는 것은 못 막는다. 그리고 git 이 실행하는 것은
+# 워킹트리 파일이다.
+#
+# 2026-08-25 실사고: Python 의 `Path.write_text()` 로 훅을 저장했더니 Windows 기본
+# 개행 변환이 걸려 파일 전체가 CRLF(276줄)가 됐다. `bash -n` 은 통과하고 커밋 diff 도
+# 정상으로 보인다(git 이 읽을 때 정규화하므로) — **게이트가 죽어도 화면상 증거가 없다.**
+# 이 저장소가 가장 싫어하는 형태의 실패다.
+class TestHookFilesKeepLf:
+    def test_githooks_are_lf_in_working_tree(self):
+        import subprocess as sp
+
+        hooks_dir = _ROOT / ".githooks"
+        if not hooks_dir.is_dir():
+            pytest.skip(".githooks 없음")
+
+        offenders = []
+        checked = 0
+        for p in sorted(hooks_dir.iterdir()):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(_ROOT).as_posix()
+            # 판정은 확장자 추측이 아니라 **git 에게 묻는다** — `*.ps1 text eol=crlf` 처럼
+            # CRLF 가 정답인 파일을 위반으로 오판하지 않기 위해.
+            r = sp.run(["git", "-C", str(_ROOT), "check-attr", "eol", "--", rel],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+            want = r.stdout.rsplit(":", 1)[-1].strip() if r.stdout else "unspecified"
+            if want != "lf":
+                continue
+            checked += 1
+            crlf = p.read_bytes().count(b"\r\n")
+            if crlf:
+                offenders.append(f"{rel}: CRLF {crlf}줄")
+
+        # 하나도 안 셌으면 이 테스트는 공허하게 통과한다 — 그것도 실패로 본다.
+        assert checked > 0, ".gitattributes 가 .githooks/* 에 eol=lf 를 안 걸고 있다"
+        assert not offenders, (
+            "훅이 CRLF 다 — Windows bash 가 실행을 거부해 게이트가 통째로 죽는다:\n  "
+            + "\n  ".join(offenders)
+        )

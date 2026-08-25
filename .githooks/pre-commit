@@ -38,6 +38,10 @@ if ! STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM); then
     exit 1
 fi
 
+# 0b. 게이트가 도는 동안 index 가 바뀌면 **검사한 것과 커밋되는 것이 달라진다.**
+#     시작 시점을 기록해 두고 맨 끝에서 대조한다(아래 [4/4]).
+STAGED_STATUS_BEFORE=$(git diff --cached --name-status)
+
 # 1. Python syntax check on staged .py files
 STAGED_PY=$(printf '%s\n' "$STAGED_ALL" | grep '\.py$' || true)
 if [ -n "$STAGED_PY" ]; then
@@ -171,10 +175,10 @@ if [ -d "tests/unit" ]; then
     # (도구 부재를 clean 으로 읽지 않는다 = 이 저장소의 anti-fake-green 계약).
     if "$PROJECT_PY" -c "import xdist" >/dev/null 2>&1; then
         PYTEST_PAR="-n auto"
-        echo "[3/3] Running tests: unit + integration + e2e (병렬 -n auto, 실측 310초 / timeout 900s)..."
+        echo "[3/3] Running tests: tests/ 전체 (병렬 -n auto, 실측 310~433초 / timeout 900s)..."
     else
         PYTEST_PAR=""
-        echo "[3/3] Running tests: unit + integration + e2e (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
+        echo "[3/3] Running tests: tests/ 전체 (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
         echo "   ⚠️  직렬은 실측 590s+ 라 예산 900s 를 넘길 가능성이 높다(integration 추가분 포함)."
         echo "       설치 권장: $PROJECT_PY -m pip install pytest-xdist"
     fi
@@ -188,31 +192,85 @@ if [ -d "tests/unit" ]; then
     #   ⚠ 죽은 스위트의 피해는 "회귀를 못 잡는다" 로 끝나지 않는다 — **낡은 계약을 보존한다.**
     #     되살려 보니 `/api/run/stop` 이 임의 PID 에 200 을 주던(=백엔드를 통째로 죽일 수
     #     있던) 시절의 기대가 그대로 남아 있었다.
-    #   예산: **합산 실측 310초**(7,181 passed / 16 skipped, -n auto 18코어, 2026-08-21).
-    #   900s 까지 여유 **590초**. ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
+    #   예산: **실측 310~433초**(7,288 passed / 16 skipped, -n auto 18코어, 2026-08-21).
+#   ⚠ 같은 규모가 310·372·433초로 갈렸다 — 동시 실행 부하 차이다. **단일 수치로 믿지 말 것.**
+    #   최악 관측(433초) 기준 900s 까지 여유 **467초**. ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
     #   로 적었는데 **틀렸다** — 그 550s·96s 는 다른 작업과 동시 실행 중에 잰 값이라
     #   부하가 섞여 있었다. 따로 잰 수를 더하지 말고 **합쳐서 한 번 잴 것**.
     #   `tests/` 루트 직속 3파일(196건, 561s)은 **아직 제외** — 사유는
     #   `tests/unit/test_gate_reach.py` 의 `_EXEMPT` 에 있고, 그 가드가 새 사각지대를 막는다.
-    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/ --ignore=tests/test_coverage_boost.py $PYTEST_PAR -x -q --tb=short 2>&1)
+    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
+    # ⚠ **전문을 파일로 남긴다.** 위 `tail -20` 은 화면용이고, 실패 시엔 그걸로 부족하다:
+    #   `-x --tb=short` 의 마지막 20줄은 보통 요약줄과 로그 몇 줄뿐이라 FAILURES 블록·
+    #   captured log·단언 전문이 통째로 잘린다.
+    #   2026-08-21 실사고: `test_list_dir` 이 403 으로 **한 번** 깨졌는데 20줄만 남아
+    #   ①어느 403 인지(admin gate vs 경로 봉인 — 둘 다 WARNING 을 남긴다) ②단언 전문
+    #   (`assert 40...` 로 잘렸다) 을 못 봤다. 재실행 3회는 전부 통과해 **재현된 그 한 번의
+    #   증거를 버린 셈**이 됐다. 간헐 실패에선 이게 치명적이다.
+    if [ $TEST_EXIT -ne 0 ]; then
+        mkdir -p .codex_tmp 2>/dev/null
+        FAIL_LOG=".codex_tmp/precommit_test_failure.log"
+        printf '%s\n' "$TEST_OUTPUT" > "$FAIL_LOG" 2>/dev/null \
+            && echo "   📄 전체 출력: $FAIL_LOG ($(wc -l < "$FAIL_LOG" 2>/dev/null || echo '?') 줄)" \
+            || echo "   ⚠️  전체 출력을 파일로 못 남겼다 — 위 20줄이 전부다."
+    fi
     if [ $TEST_EXIT -eq 124 ]; then
         echo "❌ 테스트가 900s 예산을 넘겼다. Commit aborted."
         echo "   이 저장소에서 예산 초과의 실체는 대부분 **hang** 이었다(데드락·모달 대화상자)."
         echo "   미검증을 통과로 바꾸지 않는다 — 원인을 먼저 확인할 것:"
-        echo "        $PROJECT_PY -m pytest tests/ --ignore=tests/test_coverage_boost.py -x -q --tb=short --durations=20"
+        echo "        $PROJECT_PY -m pytest tests/ -x -q --tb=short --durations=20"
         echo "   장비가 느린 것뿐이라고 판단되면 --no-verify 로 넘길 수 있다(의식적 결정)."
         exit 1
     elif [ $TEST_EXIT -ne 0 ]; then
         echo "❌ Tests failed. Commit aborted."
         exit 1
     else
-        echo "✅ Tests passed (unit + integration + e2e)"
+        echo "✅ Tests passed (tests/ 전체 — 제외 0)"
     fi
 else
     echo "[3/3] No unit test directory found, skipping tests"
 fi
+set -e
+
+# 4. index 무결성 — 게이트가 도는 동안 스테이징 내용이 바뀌지 않았는지 (fail-closed)
+#
+# 2026-08-25 실사고: 이 훅이 **통과시킨** 커밋 2건(`04cf6a9`·`c19290a`)의 트리가 **3파일뿐**
+# 이었다. 나머지 1,208개가 전부 삭제로 기록됐는데 워킹트리는 멀쩡했고, `--no-verify` 로 같은
+# 명령을 돌리면 정상 커밋됐다. 즉 **훅이 도는 동안 무언가가 index 를 다른 내용으로 덮어썼다.**
+#
+# 원인은 아직 특정 못 했다. 저장소를 복제해 훅과 **동일한 환경**(GIT_INDEX_FILE=.git/index,
+# cwd=저장소 루트)에서 `pytest tests/` 7,309건을 돌렸을 때 index 는 **한 번도 안 변했다**
+# — 테스트 스위트는 범인이 아니다(대조군 확보). 상대경로 GIT_INDEX_FILE 상속도 실측상
+# 임시 저장소를 오염시키지 않았다(50→50). 절대경로였다면 1,212→3 으로 무너진다(실증).
+#
+# 원인을 모르는 채로도 **결과는 막을 수 있다**: 검사 시작 시점과 끝 시점의 스테이징 내용이
+# 다르면 커밋을 중단한다. 미검증 내용을 커밋으로 내보내지 않는다.
+set +e
+STAGED_STATUS_AFTER=$(git diff --cached --name-status)
+if [ $? -ne 0 ]; then
+    echo "❌ [4/4] 검사 후 git diff --cached 실패 — index 상태를 확인할 수 없다."
+    echo "   확인 실패를 '이상 없음' 으로 접지 않는다. Commit aborted."
+    exit 1
+fi
+if [ "$STAGED_STATUS_BEFORE" != "$STAGED_STATUS_AFTER" ]; then
+    N_BEFORE=$(printf '%s
+' "$STAGED_STATUS_BEFORE" | grep -c .)
+    N_AFTER=$(printf '%s
+' "$STAGED_STATUS_AFTER"  | grep -c .)
+    N_DEL=$(printf '%s
+' "$STAGED_STATUS_AFTER" | grep -c '^D')
+    echo "❌ [4/4] 게이트가 도는 동안 스테이징 내용이 바뀌었다 — 검사한 것과 커밋될 것이 다르다."
+    echo "   검사 시작: ${N_BEFORE} 항목 / 검사 종료: ${N_AFTER} 항목"
+    if [ "${N_DEL:-0}" -gt 0 ]; then
+        echo "   ⚠️  삭제 ${N_DEL} 건이 스테이징돼 있다 — 2026-08-25 에 저장소를 통째로 지울 뻔한"
+        echo "       그 형태다. index 를 먼저 되돌릴 것:  git reset --mixed"
+    fi
+    echo "   Commit aborted."
+    exit 1
+fi
+echo "✅ [4/4] index 무결성 OK (스테이징 ${#STAGED_STATUS_AFTER}B 불변)"
 set -e
 
 echo "=== Pre-commit checks passed ==="
