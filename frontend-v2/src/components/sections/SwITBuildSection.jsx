@@ -42,8 +42,12 @@ function formatDetailMessage(detail) {
   return '';
 }
 
-export default function SwITBuildSection() {
+export default function SwITBuildSection({ analysisResult }) {
   const toast = useToast();
+  // 보드(생성 현황)와 **같은 SCM 귀속**을 싣는다. 안 실으면 백엔드가 요청에서
+  // `scm_id` 를 못 찾아 quality run 이 프로젝트에 안 붙고, 방금 만든 문서가
+  // 생성 현황 보드에서 계속 '미생성' 으로 남는다(2026-08-24 라이브 실측).
+  const scmId = analysisResult?.matchedScm?.id || '';
   const [building, setBuilding] = useState(null);
   const [lastSummary, setLastSummary] = useState(null);
   const [lastWarnings, setLastWarnings] = useState([]);
@@ -163,7 +167,7 @@ export default function SwITBuildSection() {
     try {
       // UI 전용 키 strip + log_folders 배열 변환은 공유 모듈 단일 출처
       // (backend 우선순위: log_folders > log_folder > config swit_log_folders > 단수).
-      const payload = toBuildPayload('swit', form);
+      const payload = { ...toBuildPayload('swit', form), scm_id: scmId };
       const res = await fetch(buildUrl(`/api/swit/${kind}/build`), {
         method: 'POST',
         headers: {
@@ -219,7 +223,7 @@ export default function SwITBuildSection() {
       if (mountedRef.current) setBuilding(null);
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [form, toast]);
+  }, [form, toast, scmId]);
 
   // 38차 W4: log_folder dry-run preview — 빌드 전 release 후보 + 자동 선택 미리보기
   const runLogFolderPreview = useCallback(async () => {

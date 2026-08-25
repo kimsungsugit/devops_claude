@@ -49,8 +49,12 @@ function buildPayload(form) {
   return toBuildPayload('swreport', form);
 }
 
-export default function SwReportSummarySection() {
+export default function SwReportSummarySection({ analysisResult }) {
   const toast = useToast();
+  // 보드(생성 현황)와 **같은 SCM 귀속**을 싣는다. 안 실으면 백엔드가 요청에서
+  // `scm_id` 를 못 찾아 quality run 이 프로젝트에 안 붙고, 방금 만든 문서가
+  // 생성 현황 보드에서 계속 '미생성' 으로 남는다(2026-08-24 라이브 실측).
+  const scmId = analysisResult?.matchedScm?.id || '';
   const [form, setForm] = useState(loadSavedForm);
   // 입력 일원화: Settings 공유값 변경을 같은 세션에서 미변경 필드에 즉시 반영.
   useSharedInputSync('swreport', setForm, STORAGE_KEY);
@@ -133,7 +137,10 @@ export default function SwReportSummarySection() {
   };
 
   // 필수 입력 + 사용자 이름 공통 검증. 통과 시 user 반환, 실패 시 null.
-  const validateCommon = () => {
+  // useCallback: 아래 두 빌드 콜백의 deps 에 넣기 위해 참조를 안정화한다. 매 렌더
+  //   재생성되던 시절에도 `form` 이 deps 라 결과는 같았지만, 정적으로 증명이 안 돼
+  //   react-hooks/exhaustive-deps 가 계속 경고했다(레거시 backlog — 실제로 해소한다).
+  const validateCommon = useCallback(() => {
     if (!form.project_id) { toast('warning', 'project_id 필수'); return null; }
     if (!form.release_sw_version) { toast('warning', 'release_sw_version 필수'); return null; }
     if (!form.test_date) { toast('warning', 'test_date 필수'); return null; }
@@ -145,7 +152,7 @@ export default function SwReportSummarySection() {
     const user = getUsername();
     if (!user) { toast('warning', '사용자 이름이 설정되지 않음 — Settings 확인'); return null; }
     return user;
-  };
+  }, [form, toast]);
 
   // 미리보기 — JSON 응답이므로 api.js post() 헬퍼 사용 (raw fetch 금지, mini-checklist X9).
   const runPreview = useCallback(async () => {
@@ -154,7 +161,7 @@ export default function SwReportSummarySection() {
     setPreview(null);
     setLastWarnings([]);
     try {
-      const payload = buildPayload(form);
+      const payload = { ...buildPayload(form), scm_id: scmId };
       const data = await post('/api/swreport/summary/preview', payload);
       if (!mountedRef.current) return;
       setPreview(data);
@@ -173,7 +180,7 @@ export default function SwReportSummarySection() {
     } finally {
       if (mountedRef.current) setPreviewing(false);
     }
-  }, [form, toast]);
+  }, [form, toast, scmId, validateCommon]);
 
   // Excel 빌드·다운로드 — xlsm blob 응답이므로 raw fetch + authHeaders() + res.ok 명시 검사.
   const runBuild = useCallback(async () => {
@@ -187,7 +194,7 @@ export default function SwReportSummarySection() {
     abortRef.current = controller;
 
     try {
-      const payload = buildPayload(form);
+      const payload = { ...buildPayload(form), scm_id: scmId };
       const res = await fetch(buildUrl('/api/swreport/summary/build'), {
         method: 'POST',
         headers: {
@@ -249,7 +256,7 @@ export default function SwReportSummarySection() {
       if (mountedRef.current) setBuilding(false);
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [form, toast]);
+  }, [form, toast, scmId, validateCommon]);
 
   const busy = previewing || building;
   const summary = preview?.summary || null;
