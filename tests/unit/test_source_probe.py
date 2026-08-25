@@ -189,9 +189,8 @@ class TestItFailsLoudlyInsteadOfGuessing:
 _DEFERRED = {
     "tests/unit/test_router_status_and_write_confinement.py":
         "2026-08-25 동시 세션이 편집 중(미커밋). 그 작업이 들어오면 변환할 것",
-    "tests/unit/test_uds_param_grid.py":
-        "2026-08-25 동시 세션이 작성 중인 신규 파일(untracked). 두 곳 다 모듈 단위라 "
-        "줄밀림에는 면역이고 linecache 창만 남는다 — 그 작업이 들어오면 변환할 것",
+    # `test_uds_param_grid.py` 는 커밋 `7539713` 으로 들어온 뒤 변환하고 여기서 뺐다 —
+    # 아래 `test_deferred_entries_retire_themselves` 가 실패로 그 시점을 알려 준 것이다.
 }
 
 

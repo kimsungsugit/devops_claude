@@ -290,11 +290,10 @@ class TestCallSitesStayInSync:
     겪은 사고가 "복제본 둘 중 하나만 고침" 이라, 구조로 못박는다."""
 
     def _calls(self, fn_name):
-        import inspect
-
         from report_gen import docx_builder
+        from tests.unit._source_probe import source_of
 
-        tree = ast.parse(inspect.getsource(docx_builder))
+        tree = ast.parse(source_of(docx_builder))
         found = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -315,11 +314,10 @@ class TestCallSitesStayInSync:
         """⚠ 템플릿 경로는 예전에 템플릿이 준 행 수로 **고정**이라, 늘어난 파라미터가
         조용히 잘렸다. 무템플릿 경로는 예전부터 `max` 였다 — 같은 표를 두 경로가
         다르게 자르고 있었다."""
-        import inspect
-
         from report_gen import docx_builder
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(docx_builder)
+        src = source_of(docx_builder)
         assert src.count("max(len(data_rows), rows)") == 1, "템플릿 경로의 행 수 확장이 사라졌다"
         assert src.count("max(len(_data_rows), rows)") == 1, "무템플릿 경로의 행 수 확장이 사라졌다"
 

@@ -646,7 +646,12 @@ label {
 
 .step-icon { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
 .step-label { flex: 1; font-weight: 500; }
-.step-msg { font-size: var(--text-sm); color: var(--text-muted); }
+/* 준비 게이트 사유에는 **파일명이 통째로** 들어간다(부재 시 그 폴더의 실제 파일 목록).
+   `KJPDS02_DV_Fault_Injection_TestResult_v1.01_251205_R.xlsx` 처럼 공백 없는 57자 토큰은
+   기본 줄바꿈으로 안 끊겨 패널 밖으로 삐져나간다 — 260px 폭에서 실측(넘침이지 잘림은
+   아니라 옆 내용과 겹친다). ⚠ `break-word` 가 아니라 **`anywhere`** 여야 한다: 전자는
+   min-content 크기를 안 줄여서 flex 항목(`.step-label { flex: 1 }`)이 여전히 안 줄어든다. */
+.step-msg { font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
 
 /* ── Artifact list ── */
 .artifact-list {
