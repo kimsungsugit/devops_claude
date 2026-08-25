@@ -738,6 +738,91 @@ def test_test_report_doc_types_get_form_and_template_steps(doc_type) -> None:
         assert f"form_{field}" in ids, f"{doc_type}: {field} 단계 없음"
 
 
+class _ListingResolver:
+    """`exists` 는 전부 False, `list_dir` 은 주어진 이름을 낸다. 호출 경로를 기록한다."""
+
+    mode = "local"
+
+    def __init__(self, names, raise_on_list: Exception | None = None) -> None:
+        self.names = list(names)
+        self.raise_on_list = raise_on_list
+        self.listed: list[str] = []
+
+    def exists(self, path: str) -> bool:
+        return False
+
+    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
+                 include_dirs: bool = False):
+        self.listed.append(str(path))
+        if self.raise_on_list is not None:
+            raise self.raise_on_list
+        return [str(Path(path) / n) for n in self.names]
+
+
+class TestMissingTemplateNamesWhatIsActuallyThere:
+    """양식이 없을 때 **그 폴더에 뭐가 있는지**를 화면이 말한다.
+
+    2026-08-25 실측: `es95411_template` 이 가리키던 v1.02 산출물이 v2.01 세대로 교체되며
+    파일명 자체가 바뀌어 사라졌는데, 화면은 "양식 파일을 찾지 못했습니다" 만 냈다. 그
+    문장만으로는 ①이름이 바뀐 건지 ②폴더가 옮겨진 건지 ③배포된 적이 없는 건지 구분할 수
+    없어, 사람이 U: 드라이브를 직접 열어야 했다. 같은 형태로 그날 두 번 걸렸다.
+    """
+
+    TPL_KEY = "coverage_report_template"          # doc_type `swut` 이 보는 키
+
+    def _template_folder(self) -> str:
+        from backend.services.swut_meta_resolver import load_meta_from_config
+        meta = load_meta_from_config("HDPDM01") or {}
+        return str(Path(str((meta.get("template_paths") or {})[self.TPL_KEY])).parent)
+
+    def _reason(self, monkeypatch, resolver) -> tuple[str, str]:
+        from backend.services import file_resolver as fr
+        monkeypatch.setattr(fr, "get_resolver", lambda: resolver)
+        data = _post({"doc_type": "swut", "form": {"project_id": "HDPDM01"}})
+        step = _step(data, "report_template")
+        assert step is not None, "양식 단계가 없다"
+        # ⚠ `reason` 은 빈 값이면 아예 실리지 않는다(정상 단계) — `[...]` 로 읽으면 KeyError.
+        return step["state"], step.get("reason", "")
+
+    def test_reason_lists_the_actual_files(self, monkeypatch) -> None:
+        r = _ListingResolver(["(KJPDS02_SwTR) Software Test Result_v2.01_260629_R.xlsx",
+                              "(KJPDS02_SwTCV) Software Test Coverage Result_v2.01_R.xlsx"])
+        state, reason = self._reason(monkeypatch, r)
+        assert state == "missing", reason
+        assert "SwTR" in reason and "SwTCV" in reason, (
+            f"폴더의 실제 파일이 사유에 없다 — 사람이 드라이브를 직접 열어야 한다: {reason}")
+
+    def test_ok_template_costs_no_extra_listing(self, monkeypatch) -> None:
+        """⚠ 있을 때도 폴더를 훑으면 U: 드라이브 IPC 왕복이 **매 판정마다** 늘어난다."""
+        r = _ListingResolver([])
+        r.exists = lambda path: True          # type: ignore[method-assign]
+        folder = self._template_folder()
+        self._reason(monkeypatch, r)
+        assert folder not in r.listed, f"양식이 있는데도 폴더를 훑었다: {r.listed}"
+
+    def test_listing_failure_is_reported_not_swallowed(self, monkeypatch) -> None:
+        """'폴더도 못 봤다' 와 '폴더가 비었다' 는 다른 사실이다."""
+        state, reason = self._reason(
+            monkeypatch, _ListingResolver([], raise_on_list=TimeoutError("U: 응답 없음")))
+        assert state == "missing", reason
+        assert "확인하지 못했습니다" in reason and "TimeoutError" in reason, reason
+
+    def test_empty_listing_does_not_claim_the_folder_exists(self, monkeypatch) -> None:
+        """resolver 계약상 **빈 폴더와 없는 폴더는 구분되지 않는다** — 단정하면 거짓말이다."""
+        state, reason = self._reason(monkeypatch, _ListingResolver([]))
+        assert state == "missing", reason
+        assert "비어 있거나 폴더 자체가 없습니다" in reason, reason
+
+    def test_long_listing_says_how_many_were_elided(self) -> None:
+        """조용한 절단은 '그 폴더엔 이것뿐' 으로 오독된다."""
+        from backend.routers.docgen_preflight import _folder_contents_hint
+        r = _ListingResolver([f"f{i:02}.xlsm" for i in range(12)])
+        hint = _folder_contents_hint(r, str(Path("U:/x/y") / "target.xlsm"), cap=8)
+        assert "f00.xlsm" in hint and "f07.xlsm" in hint
+        assert "f08.xlsm" not in hint, "cap 을 안 지켰다"
+        assert "외 4건" in hint, f"절단을 침묵했다: {hint}"
+
+
 def test_form_values_are_read_not_ignored() -> None:
     """폼을 실으면 판정이 **바뀌어야** 한다 — 안 바뀌면 `form` 이 버려진 것이다."""
     without = _post({"doc_type": "swutcr"})
