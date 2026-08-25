@@ -578,8 +578,16 @@ RAG_EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "gemini-embedding-001").stri
 RAG_EMBED_DIM = int(os.environ.get("RAG_EMBED_DIM", "768") or 768)
 
 # ---------------- UDS Generation Constants ----------------
-UDS_MAX_SOURCE_FILES = 1200
-UDS_MAX_ITEMS_PER_CATEGORY = 120
+# ⚠ `UDS_MAX_SOURCE_FILES` / `UDS_MAX_FUNCTION_ITEMS` 는 **위(§UDS/Source Parsing 성능
+#   설정)에서 env 로 읽는다**. 예전엔 여기서 `UDS_MAX_SOURCE_FILES = 1200` 을 다시
+#   할당했는데, 파이썬은 나중 할당이 이기므로 `DEVOPS_UDS_MAX_FILES` 가 **영구 무효**
+#   였다 — 환경변수를 넣어도 언제나 1200 이었고 아무 경고도 없었다.
+#   여기 상수를 늘릴 때는 위에 같은 이름이 없는지 먼저 볼 것.
+#
+#   함께 있던 `UDS_MAX_ITEMS_PER_CATEGORY = 120` 도 지웠다. 소비처가 저장소 전체에
+#   **0곳**이었고(실제 절단은 `UDS_MAX_FUNCTION_ITEMS` 가 한다 —
+#   `report_gen/uds_generator.py` 의 `max_items`), 이름이 비슷해 어느 쪽이 진짜인지
+#   헷갈리게 만들 뿐이었다.
 UDS_TRIM_MAX_CHARS = 24000
 UDS_STYLE_EXCERPT_MAX_CHARS = 12000
 UDS_FRONT_MATTER_LINES = 120

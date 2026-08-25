@@ -112,10 +112,12 @@ from backend.helpers.uds import (  # noqa: F401
     _parse_accuracy_report,
     _parse_quality_gate_report,
     _parse_signature_params,
+    _record_uds_run,
     _run_impact_analysis_for_uds,
     _slice_page,
     _to_swcom_from_fn,
     _uds_generate_from_paths,
+    _uds_record_kwargs,
     _validate_docx_template_bytes,
     _write_residual_tbd_report,
 )

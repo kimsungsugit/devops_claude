@@ -2394,6 +2394,8 @@ async def jenkins_uds_generate(
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
+    # 소요 시간은 sts/suts/sits 와 같은 축(핸들러 진입 기준)으로 잰다.
+    _t0 = time.time()
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), *(logic_files or []), *(files or []), component_list)
     _first_root = source_root.split(",")[0].strip() if source_root else ""
@@ -2681,15 +2683,28 @@ async def jenkins_uds_generate(
 
     # Quality DB recording (non-fatal)
     try:
-        from backend.helpers import _compute_quick_quality_gate, _enrich_function_quality_fields
-        from workflow.quality.recorder import record_uds_run
+        from backend.helpers import (
+            _compute_quick_quality_gate,
+            _enrich_function_quality_fields,
+            _record_uds_run,
+        )
         # local 경로와 동일하게 enrich 후 quick_gate 계산 → 경로 간 점수 일관성.
         _enrich_function_quality_fields(uds_payload)
-        record_uds_run(
+        # 기록은 `_record_uds_run` 단일 관문(helpers/uds.py) — 인자 구성도 산출물
+        # 충실도도 거기 한 곳에만 둔다.
+        _record_uds_run(
             _compute_quick_quality_gate(uds_payload),
-            # local 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
-            project_root=str(source_root or ""),
-            output_path=str(out_path),
+            # ⚠ `ai_used=False` 는 의도다 — **이 경로에는 AI 섹션 생성 단계가 없다**
+            #   (generate-async 와 달리 `generate_uds_ai_sections` 호출부가 없음).
+            #   설정 파일에 적힌 모델명을 여기서 기록하면 "그 모델이 이 문서를 만들었다"
+            #   는 거짓이 DB 에 남는다. 근거 없는 값은 채우지 않는다.
+            source_root=source_root, out_path=out_path, t0=_t0,
+            ai_used=False,
+            extra_meta={
+                "entry": "jenkins_generate_sync",
+                "ai_stage": "absent",
+                "build_selector": str(build_selector or ""),
+            },
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (sts/suts/sits 의 동일 블록이 NameError 를

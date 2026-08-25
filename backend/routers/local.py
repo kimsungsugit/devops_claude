@@ -42,6 +42,7 @@ from backend.helpers import (
     _parse_component_map_file,
     _parse_path_list,
     _read_excel_artifact_sidecar,
+    _record_uds_run,
     _resolve_local_report_path,
     _resolve_local_sits_path,
     _resolve_local_sts_path,
@@ -920,6 +921,8 @@ async def local_uds_generate(
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
     req_id = (request.headers.get("x-req-id") or "").strip() or f"uds-gen-{int(time.time() * 1000)}"
+    # 소요 시간은 sts/suts/sits 와 같은 축(함수 진입 기준)으로 잰다.
+    _t0 = time.time()
     _logger.info("[UDS_GENERATE][%s] start source_root=%s test_mode=%s", req_id, source_root, bool(test_mode))
     template_bytes: Optional[bytes] = None
     template_warning = ""
@@ -1252,15 +1255,17 @@ async def local_uds_generate(
         )
         # Quality DB recording (non-fatal)
         try:
-            from workflow.quality.recorder import record_uds_run
             # project_root 는 sts/suts/sits 와 **같은 어휘**(source_root)로 넘긴다 —
             # recorder 가 이 값으로 scm_id 를 해결한다. 예전엔 UDS 만 아무것도 안
             # 넘겨서 DB 의 uds 행이 3/3 전부 NULL 이었고, 그래서 "이 프로젝트의 UDS
             # 품질" 을 물을 수단이 없었다.
-            record_uds_run(
+            # 기록은 `_record_uds_run` 단일 관문(helpers/uds.py) — 다섯 호출부가 각자
+            # 채우면 경로마다 다른 열이 비어 "어느 경로로 만들었나" 가 섞인다.
+            _record_uds_run(
                 quality_evaluation,
-                project_root=str(source_root or ""),
-                output_path=str(out_path),
+                source_root=source_root, out_path=out_path, t0=_t0,
+                ai_used=bool(ai_enable),
+                extra_meta={"entry": "local_generate", "mode": "doc_only"},
             )
         except Exception:
             # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
@@ -1364,12 +1369,12 @@ async def local_uds_generate(
     )
     # Quality DB recording (non-fatal)
     try:
-        from workflow.quality.recorder import record_uds_run
         # doc_only 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
-        record_uds_run(
+        _record_uds_run(
             quality_evaluation,
-            project_root=str(source_root or ""),
-            output_path=str(out_path),
+            source_root=source_root, out_path=out_path, t0=_t0,
+            ai_used=bool(ai_enable),
+            extra_meta={"entry": "local_generate", "mode": "full"},
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
@@ -1430,6 +1435,8 @@ async def local_uds_generate_async(
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    # 소요 시간은 sts/suts/sits 와 같은 축(함수 진입 기준)으로 잰다.
+    _t0 = time.time()
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
@@ -1656,12 +1663,12 @@ async def local_uds_generate_async(
 
             # Quality DB recording (non-fatal)
             try:
-                from workflow.quality.recorder import record_uds_run
                 # 동기 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
-                record_uds_run(
+                _record_uds_run(
                     quick_qg,
-                    project_root=str(source_root or ""),
-                    output_path=str(out_path),
+                    source_root=source_root, out_path=out_path, t0=_t0,
+                    ai_used=bool(ai_enable),
+                    extra_meta={"entry": "local_generate_async"},
                 )
             except Exception:
                 # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).

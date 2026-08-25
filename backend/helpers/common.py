@@ -106,6 +106,38 @@ def _has_meaningful_value(value: Any) -> bool:
     return text.upper() not in {"N/A", "TBD", "-"}
 
 
+# 인터페이스 칸이 "없음" 을 뜻하는 표기들. `[IN] (none)` 처럼 방향 태그가 앞에 붙어
+# 오므로 벗겨내고 본다.
+_INTERFACE_EMPTY_TOKENS = {"", "(none)", "none", "n/a", "na", "tbd", "-", "()"}
+_DIRECTION_TAG_RE = re.compile(r"^(?:Name\s*=\s*)?\[(?:IN|OUT|INOUT)\]\s*", re.I)
+
+
+def _has_real_interface_value(value: Any) -> bool:
+    """인터페이스 칸(inputs/outputs 등)에 **실제 항목**이 있는가.
+
+    ``_has_meaningful_value`` 와 **다른 질문**이라 따로 둔다 — 합치지 말 것:
+
+      · ``_has_meaningful_value``  = "이 칸에 정보를 적었나"
+        → ``['[IN] (none)']`` 은 **참**이다. 파라미터가 없는 ``void f(void)`` 에
+          "없음" 이라고 적은 것은 정확한 기술이고, 이걸 미채움으로 세면 정상 함수를
+          벌하게 된다(실측: payload 350함수 중 278이 `(none)` 인데 **전부 진짜 void**,
+          prototype 에 파라미터가 있는데 `(none)` 인 경우는 0건이었다).
+
+      · ``_has_real_interface_value`` = "실제로 주고받는 항목이 있나"
+        → ``['[IN] (none)']`` 은 **거짓**이다.
+
+    두 축을 섞으면 ``input_fill 98.3%`` 같은 수치가 "입력이 잘 채워졌다" 로 읽힌다.
+    실제로는 그 중 79.4%가 "없음" 표기였다. 게이트 판정은 앞 축이 계속 맡고, 이 축은
+    **참고지표**로 나란히 남겨 오독을 막는다.
+    """
+    items = value if isinstance(value, list) else ([value] if value is not None else [])
+    for x in items:
+        body = _DIRECTION_TAG_RE.sub("", str(x or "").strip()).strip()
+        if body.lower() not in _INTERFACE_EMPTY_TOKENS:
+            return True
+    return False
+
+
 def _normalize_field_source(value: Any) -> str:
     src = str(value or "").strip().lower()
     if src in {"comment", "sds", "srs", "reference", "rule", "inference"}:

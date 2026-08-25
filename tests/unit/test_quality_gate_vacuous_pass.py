@@ -188,7 +188,19 @@ class TestUdsThresholdLoss:
         """
         import config
         data = self._uds()
-        data["quick_gate"]["rates"].update({"global_fill": 50.0, "static_fill": 30.0})
+        # 참고지표를 **전부** 높게 채운다. 게이트를 잃으면 점수가 `_pct` 로 끝나는 모든
+        # 지표의 평균이 되므로, 일부만 채우면 나머지가 0.0 으로 잡혀 방향이 뒤집힌다 —
+        # 그건 계약("참고지표가 높으면 오를 수 있다")의 반증이 아니라 **데이터 부족**이다.
+        # 2026-08-24 에 참고지표 5개(input_real/output_real + trusted 3축)가 추가되면서
+        # 실제로 그렇게 뒤집혔다. 위 docstring 이 말하는 "방향은 데이터에 달렸다" 가 이것.
+        # ⚠ 참고지표가 늘면 여기도 함께 채울 것. 게이트가 살아 있을 때의 점수는 threshold
+        #   보유 지표만 쓰므로 참고지표를 늘려도 변하지 않는다(실측 72.00 → 72.00).
+        data["quick_gate"]["rates"].update({
+            "global_fill": 50.0, "static_fill": 30.0,
+            "input_real_fill": 80.0, "output_real_fill": 80.0,
+            "description_trusted_fill": 90.0, "asil_trusted_fill": 90.0,
+            "related_trusted_fill": 90.0,
+        })
         gated_score = compute_overall_score(evaluate_uds(data))
         monkeypatch.setattr(config, "UDS_QUALITY_GATE_THRESHOLDS", {}, raising=False)
         ungated_score = compute_overall_score(evaluate_uds(data))

@@ -6,7 +6,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import zipfile
 from copy import deepcopy
 from datetime import datetime
@@ -71,6 +70,7 @@ from backend.helpers.common import (
     _api_logger,
     _compact_symbol_simple,
     _has_meaningful_value,
+    _has_real_interface_value,
     _infer_related_id_simple,
     _is_allowed_req_doc,
     _is_trusted_source_for_field,
@@ -156,6 +156,172 @@ def _gen_stats_result_fields(out_path: Path) -> Dict[str, Any]:
     }
 
 
+def _resolve_uds_ai_model() -> str:
+    """이 실행이 실제로 쓴 AI 모델명. 모르면 빈 문자열 — 지어내지 않는다.
+
+    출처를 ``workflow.ai.load_oai_config`` 하나로 둔다. ``generate_uds_ai_sections``
+    가 내부에서 부르는 바로 그 함수라(``workflow/uds_ai.py`` 의 ``load_oai_config(None)``),
+    여기서 설정을 따로 읽으면 DB 에 남는 모델명과 실제로 문서를 만든 모델이 갈릴 수 있다.
+    DB 가 답해야 하는 질문은 "무엇으로 설정돼 있었나" 가 아니라 **"무엇이 만들었나"** 다.
+    """
+    try:
+        from workflow.ai import load_oai_config
+        cfg = load_oai_config(None)
+        if isinstance(cfg, dict):
+            return str(cfg.get("model") or "").strip()
+    except Exception:
+        _logger.debug("UDS ai_model 해석 실패 — 기록은 계속한다", exc_info=True)
+    return ""
+
+
+def _uds_record_kwargs(
+    *,
+    source_root: Any,
+    out_path: Any,
+    t0: Optional[float] = None,
+    ai_used: bool = False,
+    extra_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """``record_uds_run`` 에 실을 인자를 한 곳에서 만든다.
+
+    UDS 는 생성 진입점이 4개(jenkins 동기/비동기 · local 동기/비동기)라 기록 호출부가
+    다섯이다. 인자를 각자 채우면 경로마다 다른 열이 비어 "어느 경로로 만들었나" 가
+    섞인다 — 실제로 그래서 ``elapsed_sec``·``ai_model``·``scm_id``·``meta_json`` 이
+    **uds 행만 전부 NULL** 이었다(sts/suts/sits 는 셋 다 싣는다).
+
+    ⚠ ``ai_used=False`` 면 ``ai_model`` 을 **싣지 않는다**. jenkins 동기 경로는 AI 섹션
+    생성 단계 자체가 없어서, 설정 파일에 적힌 모델명을 기록하면 그 문서를 그 모델이
+    만들었다는 거짓이 된다. 근거 없는 값을 채우지 않는 것이 이 저장소의 규약이다.
+    """
+    kwargs: Dict[str, Any] = {
+        "project_root": str(source_root or ""),
+        "output_path": str(out_path),
+    }
+    if t0 is not None:
+        kwargs["elapsed_sec"] = max(0.0, time() - float(t0))
+    meta: Dict[str, Any] = {"ai_used": bool(ai_used)}
+    if ai_used:
+        model = _resolve_uds_ai_model()
+        if model:
+            kwargs["ai_model"] = model
+            meta["ai_model"] = model
+    if extra_meta:
+        meta.update({k: v for k, v in extra_meta.items() if v is not None})
+    kwargs["meta"] = meta
+    return kwargs
+
+
+def _uds_artifact_fidelity(out_path: Any) -> Dict[str, Any]:
+    """생성된 DOCX 에 payload 함수가 **실제로 몇 개 들어갔는지** 잰다.
+
+    게이트(`_compute_quick_quality_gate`)는 **payload 만** 본다. 그래서 payload 가
+    완벽하면 문서가 비어 있어도 만점이 나온다. 실측(2026-08-24, `reports/quality.sqlite`
+    를 sidecar 와 조인):
+
+        run 660·661 : payload 5개 중 문서 반영 **0개**, 빈 heading 419개 → gate PASS · 점수 **100.0**
+        run 674     : payload 350개 중 252개(72.0%), 미반영 98개        → gate PASS · 점수 99.5
+
+    ⚠ **생성 성공/실패 판정은 여기서 뒤집지 않는다.** `_run_docx_in_subprocess` 의
+    주석이 사유를 대고 있다 — 템플릿이 의도된 부분집합일 수 있어 뒤집으면 대량 오탐이다.
+    대신 수치를 게이트와 **같은 자리**(Quality DB)에 참고지표로 나란히 남겨, 만점 옆에
+    반영률 0.0 이 보이게 한다. 판정 변경은 베이스라인을 쌓은 뒤 결정할 일이다.
+
+    대조 문구와 "대조 불가" 판정은 `generators/_artifact_check.py` 를 그대로 쓴다 —
+    STS/SUTS/SITS 가 쓰는 바로 그 함수다. 규칙을 복제하면 한쪽만 고쳐진다.
+
+    Returns:
+        `measured=False` 는 **미측정**이다(sidecar 부재/분모 0). 반영률 0% 와 다르며,
+        미측정을 0.0 으로 기록하면 "문서가 비었다" 는 거짓이 DB 에 남는다.
+
+    ⚠ 원시 건수를 `counts` 로 내보내지 않는 것은 의도다 — recorder 는 `counts` 에서
+      `total_functions` 하나만 읽으므로 나머지는 **죽은 쓰기**가 된다(뮤테이션 M10 이
+      생존해서 드러났다). 건수는 `meta_json` 으로 실제 저장되는 `meta` 에만 싣는다.
+    """
+    from generators._artifact_check import apply_write_back_check
+
+    stats = _read_gen_stats(Path(str(out_path))) if out_path else {}
+    payload_n = stats.get("payload_functions")
+    matched_n = stats.get("matched_functions")
+    if not isinstance(payload_n, int) or payload_n <= 0 or not isinstance(matched_n, int):
+        reason = "sidecar 없음" if not stats else f"분모 없음(payload_functions={payload_n!r})"
+        return {"measured": False, "rates": {},
+                "meta": {"artifact_fidelity": {"measured": False, "reason": reason}}}
+
+    # expected(생성했다고 주장한 수) ↔ written(파일에서 되읽은 수) 대조.
+    validation = apply_write_back_check(
+        {"valid": True, "issues": [], "stats": {"payload_functions": matched_n}},
+        {"payload_functions": payload_n},
+    )
+    check = (validation.get("stats") or {}).get("write_back_check") or {}
+    return {
+        "measured": True,
+        "rates": {"artifact_match_fill": round((matched_n / payload_n) * 100.0, 1)},
+        "meta": {"artifact_fidelity": {
+            "measured": True,
+            "payload_functions": payload_n,
+            "matched_functions": matched_n,
+            "unmatched_payload_count": stats.get("unmatched_payload_count"),
+            "empty_heading_count": stats.get("empty_heading_count"),
+            "deleted_heading_count": stats.get("deleted_heading_count"),
+            "write_back_passed": bool(check.get("passed")),
+            "mismatches": list(check.get("mismatches") or []),
+        }},
+    }
+
+
+def _with_artifact_fidelity(
+    quality_eval: Dict[str, Any], fidelity: Dict[str, Any],
+) -> Dict[str, Any]:
+    """충실도 rates/counts 를 quick_gate 에 얹은 **사본**을 낸다.
+
+    ⚠ 원본을 제자리 수정하지 않는다 — 호출부(`local.py`)가 같은 dict 를 API 응답으로도
+    돌려주므로, 여기서 건드리면 응답 모양이 조용히 바뀐다.
+
+    ⚠ 미측정이면 아무것도 넣지 않는다. 0.0 을 넣으면 `evaluate_uds` 가 그걸 "반영률 0%"
+    로 기록해, 재본 적 없는 것이 최악값으로 둔갑한다.
+    """
+    data = dict(quality_eval or {})
+    if not fidelity.get("measured"):
+        return data
+    inner = data.get("quick_gate")
+    if isinstance(inner, dict):
+        qg = dict(inner)
+        data["quick_gate"] = qg
+    else:
+        qg = data
+    qg["rates"] = {**(qg.get("rates") or {}), **fidelity["rates"]}
+    return data
+
+
+def _record_uds_run(
+    quality_eval: Dict[str, Any],
+    *,
+    source_root: Any,
+    out_path: Any,
+    t0: Optional[float] = None,
+    ai_used: bool = False,
+    extra_meta: Optional[Dict[str, Any]] = None,
+) -> int:
+    """UDS 품질 기록의 **단일 관문** — 다섯 호출부가 전부 여기를 지난다.
+
+    호출부가 `record_uds_run` 을 직접 부르면 산출물 충실도를 다섯 곳에 복제해야 하고,
+    그러면 한쪽만 고쳐진다(이 저장소가 반복해 겪은 패턴). 인자 구성은
+    `_uds_record_kwargs`, 충실도는 `_uds_artifact_fidelity` 가 맡고 여기서 합친다.
+    """
+    from workflow.quality.recorder import record_uds_run
+
+    fidelity = _uds_artifact_fidelity(out_path)
+    meta = dict(extra_meta or {})
+    meta.update(fidelity["meta"])
+    return record_uds_run(
+        _with_artifact_fidelity(quality_eval, fidelity),
+        **_uds_record_kwargs(
+            source_root=source_root, out_path=out_path, t0=t0,
+            ai_used=ai_used, extra_meta=meta,
+        ),
+    )
+
+
 def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     by_name = uds_payload.get("function_details_by_name")
     rows: List[Dict[str, Any]] = []
@@ -180,7 +346,9 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
                 "called_fill": 0.0,
                 "calling_fill": 0.0,
                 "input_fill": 0.0,
+                "input_real_fill": 0.0,
                 "output_fill": 0.0,
+                "output_real_fill": 0.0,
                 "global_fill": 0.0,
                 "static_fill": 0.0,
                 "description_fill": 0.0,
@@ -195,7 +363,9 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
                 "with_called": 0,
                 "with_calling": 0,
                 "with_input": 0,
+                "with_input_real": 0,
                 "with_output": 0,
+                "with_output_real": 0,
                 "with_global": 0,
                 "with_static": 0,
                 "with_description": 0,
@@ -207,6 +377,11 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
             },
             "confidence_gate_pass": False,
         }
+    # 실질 채움 — `[IN] (none)`(= 파라미터 없음)을 제외한 축. 게이트는 위 축이 그대로
+    # 맡고 이건 **참고**다. 두 축을 나란히 둬야 `input_fill 98.3%` 가 "입력이 잘 채워졌다"
+    # 로 오독되지 않는다(실측: 그 중 79.4%가 "없음" 표기였고, 전부 진짜 void 함수였다).
+    with_input_real = sum(1 for r in rows if _has_real_interface_value(r.get("inputs")))
+    with_output_real = sum(1 for r in rows if _has_real_interface_value(r.get("outputs")))
     with_input = sum(1 for r in rows if _has_meaningful_value(r.get("inputs")))
     with_output = sum(1 for r in rows if _has_meaningful_value(r.get("outputs")))
     with_called = sum(1 for r in rows if _has_meaningful_value(r.get("called") or r.get("calls_list")))
@@ -234,6 +409,8 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     called_rate = round((with_called / total) * 100.0, 1)
     calling_rate = round((with_calling / total) * 100.0, 1)
+    input_real_rate = round((with_input_real / total) * 100.0, 1)
+    output_real_rate = round((with_output_real / total) * 100.0, 1)
     input_rate = round((with_input / total) * 100.0, 1)
     output_rate = round((with_output / total) * 100.0, 1)
     global_rate = round((with_global / total) * 100.0, 1)
@@ -266,7 +443,9 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
             "called_fill": called_rate,
             "calling_fill": calling_rate,
             "input_fill": input_rate,
+            "input_real_fill": input_real_rate,
             "output_fill": output_rate,
+            "output_real_fill": output_real_rate,
             "global_fill": global_rate,
             "static_fill": static_rate,
             "description_fill": description_rate,
@@ -281,7 +460,9 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
             "with_called": with_called,
             "with_calling": with_calling,
             "with_input": with_input,
+            "with_input_real": with_input_real,
             "with_output": with_output,
+            "with_output_real": with_output_real,
             "with_global": with_global,
             "with_static": with_static,
             "with_description": with_description,
@@ -1548,6 +1729,9 @@ def _uds_generate_from_paths(
             payload.update(extra)
         progress_cb(stage, payload)
 
+    # 소요 시간은 **함수 진입부터** 잰다 — sts/suts/sits 와 같은 축이라야 비교가 된다.
+    # ⚠ 이 모듈은 `from time import time` 이라 `time.time()` 이 아니라 `time()` 이다.
+    _t0 = time()
     build_root = _resolve_cached_build_root(job_url, cache_root, build_selector)
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
@@ -1918,14 +2102,23 @@ def _uds_generate_from_paths(
 
     # Quality DB recording (non-fatal)
     try:
-        from workflow.quality.recorder import record_uds_run
         # local 경로와 동일하게 enrich 후 quick_gate 계산 → 경로 간 점수 일관성.
         _enrich_function_quality_fields(uds_payload)
-        record_uds_run(
+        # 기록은 `_record_uds_run` 단일 관문 — 다섯 호출부가 각자 인자를 채우면
+        # 경로마다 다른 열이 비어 "어느 경로로 만들었나" 가 섞인다. 산출물 충실도도
+        # 여기서만 붙는다(복제하면 한쪽만 고쳐진다).
+        # scm_id 는 넘기지 않는다: 이 경로가 아는 건 job_url/cache_root 뿐이라
+        # 여기서 지어내느니 recorder 가 project_root 로 해결하게 둔다.
+        _record_uds_run(
             _compute_quick_quality_gate(uds_payload),
-            # local 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
-            project_root=str(source_root or ""),
-            output_path=str(out_path),
+            source_root=source_root,
+            out_path=out_path,
+            t0=_t0,
+            ai_used=bool(ai_enable and ai_sections),
+            extra_meta={
+                "entry": "jenkins_generate_async",
+                "build_selector": str(build_selector or ""),
+            },
         )
     except Exception:
         # non-fatal 은 유지하되 **침묵은 금지**. sts/suts/sits 의 동일한
