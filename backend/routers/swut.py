@@ -316,19 +316,11 @@ def _build_result_to_response(
                 ensure_ascii=True,
             )
 
-    _warnings_str = json.dumps(warnings, ensure_ascii=True)
-    if len(_warnings_str) > 1024:
-        # F6 Round 5 NF3 fix: breakdown 카테고리 단일 출처
-        # (`backend.services.warning_categories`) 사용 — SwUT/SwIT prefix 동시 변경
-        # 누락 방지. Round 3 NC1 partial + Round 4 NW7/NW8 fix는 그 모듈에 통합.
-        from backend.services.warning_categories import format_breakdown_label
-        _warnings_str = json.dumps(
-            [
-                f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
-                f"breakdown: {format_breakdown_label(warnings)})"
-            ],
-            ensure_ascii=True,
-        )
+    # 예산 초과 시 **들어가는 만큼 싣고 못 실은 개수를 말한다** — 예전엔 본문을 통째로
+    # 버려서, 방금 낸 경고가 사용자에게 닿지 않았다(2026-08-25 SwITCR 17건 실측).
+    # 판정/포맷은 `warning_categories` 단일 출처 — 라우터 3곳이 갈라지지 않게.
+    from backend.services.warning_categories import warnings_header_json
+    _warnings_str = warnings_header_json(warnings)
 
     headers = {
         "Content-Disposition": (

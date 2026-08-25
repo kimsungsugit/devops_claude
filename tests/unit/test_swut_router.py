@@ -549,6 +549,7 @@ class TestWarningsSentinelBreakdownRound3NC1:
 
     def test_warnings_truncated_with_category_breakdown(self):
         import json
+        import re
         from io import BytesIO
 
         from backend.routers.swut import _build_result_to_response
@@ -575,8 +576,8 @@ class TestWarningsSentinelBreakdownRound3NC1:
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         parsed = json.loads(res.headers.get("X-SwUT-Warnings"))
-        assert isinstance(parsed, list) and len(parsed) == 1
-        msg = parsed[0]
+        assert isinstance(parsed, list) and parsed
+        msg = parsed[0]                      # sentinel 은 **맨 앞** — 스크롤 없이 보여야 한다
         # NW7 검증: ambiguous는 정확히 20 (stamp summary +1 오분류 안 됨)
         assert "ambiguous=20" in msg, f"NW7 회귀 — ambiguous miscount: {msg}"
         # hmr는 ambiguous 20 + stamp summary 1 = 21
@@ -585,7 +586,15 @@ class TestWarningsSentinelBreakdownRound3NC1:
         assert "layout=5" in msg
         # NW8 검증: 비-category warning (기타 일반 warning 14건) → other 카테고리
         assert "other=14" in msg, f"NW8 회귀 — uncategorized 누락: {msg}"
-        assert f"{len(warnings)} warnings" in msg
+
+        # 2026-08-25: 본문을 **통째로 버리지 않는다.** 예전엔 개수만 남겨서, 바로 그
+        # 빌드에서 새로 낸 경고가 사용자에게 닿지 않았다(SwITCR 17건 실측).
+        assert len(parsed) > 1, "경고 본문이 하나도 안 실렸다 — 개수만 남았다"
+        dropped = int(re.search(r"\+(\d+) warnings", msg).group(1))
+        assert dropped + len(parsed) - 1 == len(warnings), (
+            f"실린 {len(parsed) - 1} + 생략 {dropped} != 전체 {len(warnings)} — "
+            "캡끼리 숫자가 안 맞는다")
+        assert len(res.headers["X-SwUT-Warnings"]) <= 1024, "예산을 넘겼다"
 
 
 class TestXUserHeader:

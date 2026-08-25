@@ -249,16 +249,42 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
     return resolver.read_bytes(tpath)
 
 
-def _read_optional_config_file(req_path: str, project_id: str, config_key: str) -> bytes | None:
-    """Read optional SwITCR evidence workbook from request path or project config."""
+def _read_optional_config_file(
+    req_path: str, project_id: str, config_key: str,
+    *, out_warnings: list[str] | None = None,
+) -> bytes | None:
+    """SwITCR 의 **선택** 증빙 워크북을 요청 경로 또는 프로젝트 config 에서 읽는다.
+
+    ⚠ 2026-08-25 실측: 여기가 optional 이 아니었다. 경로가 config 에 **있고 파일만 없으면**
+      `FileNotFoundError` 가 그대로 404 로 나가 SwITCR 이 통째로 안 만들어졌다. KJPDS02 는
+      `fault_injection_result`(DV 세대 산출물이 PV v2.01 로 교체되며 소멸)와
+      `switcr_reference`(클라우드 동기화로 파일명 뭉개짐) 둘 다 이 상태여서, 준비 게이트는
+      "준비 완료" 인데 빌드는 404 였다 — 게이트와 빌드가 다른 조건으로 재고 있었다.
+
+    ⚠ 조용히 넘기지 않는다. 선택 증빙이 빠진 산출물은 근거가 그만큼 얇은 것이고, 그 사실이
+      화면에 보여야 한다 — `out_warnings` 로 올린다.
+    ⚠ `PermissionError` 는 **그대로 올린다**. 허용목록/워커 문제는 '파일이 없다' 와 조치가
+      다르고, 이 저장소는 확인 실패를 부재로 접지 않는다(`docgen_preflight._probe_path`
+      와 같은 규약).
+    """
     resolver = get_resolver()
     path = (req_path or "").strip()
+    source = "요청"
     if not path:
         cfg = _load_meta_from_config(project_id)
         path = str((cfg.get("template_paths", {}) or {}).get(config_key) or "").strip()
+        source = "config"
     if not path:
         return None
-    return resolver.read_bytes(path)
+    try:
+        return resolver.read_bytes(path)
+    except FileNotFoundError:
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[evidence] {config_key}: {source} 에 등록된 파일이 없어 이 증빙 "
+                f"없이 만들었습니다 — {path}"
+            )
+        return None
 
 
 def _discover_metric_report_bytes(resolver: Any, log_folders: list[str]) -> list[bytes]:
@@ -399,17 +425,11 @@ def _build_result_to_response(
                 ensure_ascii=True,
             )
 
-    _warnings_str = json.dumps(warnings, ensure_ascii=True)
-    if len(_warnings_str) > 1024:
-        # F6 Round 5 NF3 fix: SwUT와 동일 `warning_categories` 단일 출처 사용.
-        from backend.services.warning_categories import format_breakdown_label
-        _warnings_str = json.dumps(
-            [
-                f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
-                f"breakdown: {format_breakdown_label(warnings)})"
-            ],
-            ensure_ascii=True,
-        )
+    # 예산 초과 시 **들어가는 만큼 싣고 못 실은 개수를 말한다** — 예전엔 본문을 통째로
+    # 버려서, 방금 낸 경고가 사용자에게 닿지 않았다(2026-08-25 SwITCR 17건 실측).
+    # 판정/포맷은 `warning_categories` 단일 출처 — 라우터 3곳이 갈라지지 않게.
+    from backend.services.warning_categories import warnings_header_json
+    _warnings_str = warnings_header_json(warnings)
 
     headers = {
         "Content-Disposition": (
@@ -811,17 +831,24 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
     swits_map = _resolver_resolve_swuts_test_specs(
         req, req.project_id, out_warnings=_swits_warnings,
     )
+    # ⚠ 넷 다 **선택** 입력이다. 등록만 돼 있고 파일이 없어도 빌드는 계속하되, 빠진
+    #   증빙을 경고로 남긴다(아래에서 `result.warnings` 로 합류).
+    _optional_warnings: list[str] = []
     switcv_bytes = _read_optional_config_file(
         req.switcv_path, req.project_id, "swit_coverage_template",
+        out_warnings=_optional_warnings,
     )
     switr_bytes = _read_optional_config_file(
         req.switr_path, req.project_id, "swit_sitr_template",
+        out_warnings=_optional_warnings,
     )
     fault_injection_bytes = _read_optional_config_file(
         req.fault_injection_result_path, req.project_id, "fault_injection_result",
+        out_warnings=_optional_warnings,
     )
     switcr_reference_bytes = _read_optional_config_file(
         getattr(req, "switcr_reference_path", ""), req.project_id, "switcr_reference",
+        out_warnings=_optional_warnings,
     )
     result: SwitcrBuildResult = build_switcr_report(
         session,
@@ -835,6 +862,8 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
     )
     if _swits_warnings:
         result.warnings.extend(_swits_warnings)
+    if _optional_warnings:
+        result.warnings.extend(_optional_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwITCR build failed (ok=False)")
     _record_test_quality(req, meta, result.summary, doc_type="switcr")

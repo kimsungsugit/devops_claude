@@ -4,8 +4,12 @@ SwUT/SwIT routers의 breakdown 라벨 단일 출처 — NW7/NW8 검증을 모듈
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -13,6 +17,7 @@ from backend.services.warning_categories import (  # noqa: E402
     KNOWN_WARNING_PREFIXES,
     categorize_warnings,
     format_breakdown_label,
+    warnings_header_json,
 )
 
 
@@ -20,9 +25,10 @@ class TestCategorizeWarnings:
     def test_empty_list_zero_counts(self):
         result = categorize_warnings([])
         # 라운드 C: semantic/judge prefix 추가 (LLM hallucination 검증)
+        # 2026-08-25: evidence 추가 — 등록됐는데 파일이 없는 선택 증빙
         assert result == {
             "ambiguous": 0, "hmr": 0, "swuts": 0, "layout": 0,
-            "semantic": 0, "judge": 0, "extraction": 0, "other": 0,
+            "semantic": 0, "judge": 0, "extraction": 0, "evidence": 0, "other": 0,
         }
 
     def test_nw7_ambiguous_precise_not_substring(self):
@@ -87,9 +93,11 @@ class TestFormatBreakdownLabel:
 
     def test_known_prefixes_constant(self):
         """NF3 단일 출처 — KNOWN_WARNING_PREFIXES tuple.
-        라운드 C: [semantic]/[judge] 추가 (LLM hallucination 검증)."""
+        라운드 C: [semantic]/[judge] 추가 (LLM hallucination 검증).
+        2026-08-25: [evidence] 추가 — 선택 증빙 부재."""
         assert KNOWN_WARNING_PREFIXES == (
             "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]", "[extraction]",
+            "[evidence]",
         )
 
     def test_hierarchical_hint_when_ambiguous_and_hmr_both_present_round7_nw11(self):
@@ -128,3 +136,126 @@ class TestFormatBreakdownLabel:
         assert result["judge"] == 1
         assert result["hmr"] == 1
         assert result["other"] == 1  # 기타 — known prefix 아님
+
+
+class TestEvidenceCategory:
+    """선택 증빙 부재가 `other` 로 묻히면, 헤더 한도 초과 시 **증빙이 빠졌다는 사실
+    자체**가 화면에서 사라진다.
+
+    2026-08-25 실측: KJPDS02 SwITCR 빌드가 경고 17건을 냈는데 전부 `other=17` 이라
+    `(17 warnings — 헤더 한도 초과로 생략, breakdown: other=17)` 만 보였다.
+    """
+
+    def test_evidence_prefix_is_counted(self):
+        warnings = [
+            "[evidence] fault_injection_result: config 에 등록된 파일이 없어 …",
+            "[evidence] switcr_reference: config 에 등록된 파일이 없어 …",
+            "[hmr] stamped",
+        ]
+        result = categorize_warnings(warnings)
+        assert result["evidence"] == 2, result
+        assert result["other"] == 0, "알려진 prefix 인데 other 로도 셌다"
+
+    def test_evidence_shows_up_in_the_label(self):
+        label = format_breakdown_label(["[evidence] x", "[evidence] y", "무분류"])
+        assert "evidence=2" in label, label
+        assert "other=1" in label, label
+
+    def test_router_message_actually_carries_the_prefix(self):
+        """⚠ 카테고리를 만들어도 라우터가 그 prefix 로 안 쓰면 아무 효과가 없다."""
+        from backend.routers import swit as mod
+        from tests.unit._source_probe import source_of
+        src = source_of(mod._read_optional_config_file)
+        assert '"[evidence] {config_key}' in src, (
+            "선택 증빙 경고가 등록된 prefix 로 안 나간다 — other 로 묻힌다")
+
+
+class TestWarningsHeaderJson:
+    """예산 초과 시 **본문을 통째로 버리지 않는다.**
+
+    2026-08-25 실측: SwITCR 빌드가 경고 17건을 냈는데 헤더엔
+    `(17 warnings — 헤더 한도 초과로 생략, breakdown: other=17)` 뿐이었다. 바로 그
+    빌드에서 새로 낸 "선택 증빙이 빠졌다" 경고가 사용자에게 닿지 않았다 — 이 저장소의
+    정직성은 경고를 사람이 **읽는 것**에 걸려 있으므로, 개수만 남기는 건 침묵에 가깝다.
+    """
+
+    BUDGET = 1024
+
+    def _big(self, n=60):
+        return [f"[hmr] 함수 '{i:03}' 에서 다중 unit_file 로 모호합니다" for i in range(n)]
+
+    def test_within_budget_is_unchanged(self):
+        small = ["[hmr] a", "기타"]
+        assert json.loads(warnings_header_json(small)) == small
+
+    def test_over_budget_keeps_some_text(self):
+        parsed = json.loads(warnings_header_json(self._big()))
+        assert len(parsed) > 1, "개수만 남았다 — 본문이 하나도 안 실렸다"
+
+    def test_sentinel_is_first(self):
+        """뒤에 두면 스크롤 안 하는 화면에서 '더 있다' 가 안 보인다."""
+        parsed = json.loads(warnings_header_json(self._big()))
+        assert parsed[0].startswith("(+") and "생략" in parsed[0], parsed[0]
+
+    def test_counts_add_up(self):
+        warnings = self._big()
+        parsed = json.loads(warnings_header_json(warnings))
+        dropped = int(re.search(r"\+(\d+) warnings", parsed[0]).group(1))
+        assert dropped + len(parsed) - 1 == len(warnings), (
+            f"실린 {len(parsed) - 1} + 생략 {dropped} != 전체 {len(warnings)}")
+
+    def test_result_fits_the_budget(self):
+        assert len(warnings_header_json(self._big(400))) <= self.BUDGET
+
+    def test_breakdown_counts_all_not_just_kept(self):
+        """남긴 것만 세면 화면 숫자와 산출물이 어긋난다."""
+        warnings = self._big(50) + ["[evidence] x"] * 7
+        parsed = json.loads(warnings_header_json(warnings))
+        assert "hmr=50" in parsed[0] and "evidence=7" in parsed[0], parsed[0]
+
+    def test_single_oversized_warning_still_valid_json(self):
+        """경고 하나가 예산보다 크면 본문은 못 싣는다 — 그래도 JSON 은 유효해야 한다.
+
+        ⚠ 예전 코드가 고친 결함이 이것이다(30차 W21): 문자열을 중간에서 자르면
+          프론트 `JSON.parse` 가 깨진다.
+        """
+        out = warnings_header_json(["가" * 4000])
+        parsed = json.loads(out)                      # 깨지면 여기서 실패
+        assert len(parsed) == 1 and "1 warnings" in parsed[0], parsed
+        assert len(out) <= self.BUDGET
+
+    def test_tiny_budget_degrades_but_stays_valid_json(self):
+        """예산이 sentinel 보다도 작으면 본문을 포기한다 — **그래도 유효 JSON** 이어야 한다.
+
+        ⚠ 이 분기는 기본 예산(1024B)에서는 거의 안 밟힌다. 안 밟히는 분기는 뮤테이션이
+          통째로 생존한다(실측: `return out[:budget]` 를 심어도 아무 테스트가 안 죽었다).
+          그래서 예산을 인자로 낮춰 **명시적으로** 밟는다.
+        ⚠ 문자열을 중간에서 자르면 프론트 `JSON.parse` 가 깨진다 — 30차 W21 회귀.
+        """
+        out = warnings_header_json(self._big(30), budget=60)
+        parsed = json.loads(out)                  # 깨지면 여기서 실패
+        assert len(parsed) == 1, parsed
+        assert "30 warnings" in parsed[0], parsed[0]
+
+    def test_empty_is_empty(self):
+        assert json.loads(warnings_header_json([])) == []
+
+
+class TestAllThreeRoutersUseTheSharedTruncation:
+    """한 곳만 고치면 나머지가 잠복한다 — swreport 는 실제로 breakdown 이 없었다."""
+
+    @pytest.mark.parametrize("mod_name", ["swut", "swit", "swreport"])
+    def test_router_delegates_to_the_helper(self, mod_name):
+        import importlib
+
+        from tests.unit._source_probe import source_of
+        mod = importlib.import_module(f"backend.routers.{mod_name}")
+        src = source_of(mod._build_result_to_response)
+        assert "warnings_header_json(warnings)" in src, (
+            f"{mod_name} 가 자체 절단 로직을 들고 있다 — 판정이 갈라진다")
+        # ⚠ `헤더 한도 초과로 생략` 자체로는 못 잡는다 — **summary(ASIL ids) 절단**이
+        #   같은 문구를 정당하게 쓴다. 경고 축만 겨냥한다.
+        assert "warnings)} warnings" not in src, (
+            f"{mod_name} 가 경고 sentinel 을 직접 만든다 — 복제본이다")
+        assert "format_breakdown_label" not in src, (
+            f"{mod_name} 가 breakdown 라벨을 직접 만든다 — 판정이 갈라진다")

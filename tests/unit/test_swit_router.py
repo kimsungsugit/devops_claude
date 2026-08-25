@@ -1309,3 +1309,125 @@ class TestQualityRecordingWiring:
 
         mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="switcr")
         assert seen["scm_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# SwITCR 선택 증빙 — 등록만 돼 있고 파일이 없어도 빌드는 계속돼야 한다
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRes:
+    """`read_bytes` 가 경로별로 정해진 결과를 낸다(값 / 예외)."""
+
+    mode = "local"
+
+    def __init__(self, table):
+        self.table = dict(table)
+        self.reads = []
+
+    def read_bytes(self, path):
+        self.reads.append(path)
+        out = self.table.get(path)
+        if isinstance(out, Exception):
+            raise out
+        if out is None:
+            raise FileNotFoundError(f"no such file: {path}")
+        return out
+
+
+class TestOptionalSwitcrEvidenceIsActuallyOptional:
+    """`_read_optional_config_file` 이 optional 이 아니었다.
+
+    2026-08-25 실측: KJPDS02 SwITCR 이 **404 로 아예 안 만들어졌다.** config 에 등록된
+    `fault_injection_result`(DV 세대 산출물이 PV v2.01 로 교체되며 소멸)와
+    `switcr_reference`(클라우드 동기화로 파일명 뭉개짐)가 둘 다 실재하지 않는데
+    `resolver.read_bytes` 예외가 그대로 404 로 나갔다. 준비 게이트는 "준비 완료"라
+    했으므로, 게이트와 빌드가 **다른 조건으로 재고 있었다**.
+    """
+
+    KEY = "fault_injection_result"
+    CFG = {"template_paths": {KEY: "U:/x/gone.xlsx"}}
+
+    def _mod(self, monkeypatch, res):
+        from backend.routers import swit as mod
+        monkeypatch.setattr(mod, "get_resolver", lambda: res)
+        monkeypatch.setattr(mod, "_load_meta_from_config", lambda _pid: dict(self.CFG))
+        return mod
+
+    def test_missing_configured_file_does_not_kill_the_build(self, monkeypatch):
+        mod = self._mod(monkeypatch, _FakeRes({}))
+        assert mod._read_optional_config_file("", "KJPDS02", self.KEY) is None
+
+    def test_missing_configured_file_is_warned(self, monkeypatch):
+        """조용히 넘기면 증빙이 얇아진 걸 아무도 모른다."""
+        mod = self._mod(monkeypatch, _FakeRes({}))
+        warns = []
+        mod._read_optional_config_file("", "KJPDS02", self.KEY, out_warnings=warns)
+        assert len(warns) == 1, warns
+        assert self.KEY in warns[0] and "gone.xlsx" in warns[0], warns[0]
+
+    def test_unconfigured_path_is_silent(self, monkeypatch):
+        """등록조차 안 된 건 결손이 아니다 — 경고로 시끄럽게 하지 않는다."""
+        from backend.routers import swit as mod
+        monkeypatch.setattr(mod, "get_resolver", lambda: _FakeRes({}))
+        monkeypatch.setattr(mod, "_load_meta_from_config", lambda _pid: {"template_paths": {}})
+        warns = []
+        assert mod._read_optional_config_file("", "KJPDS02", self.KEY, out_warnings=warns) is None
+        assert warns == []
+
+    def test_permission_error_still_propagates(self, monkeypatch):
+        """허용목록/워커 문제는 '파일이 없다' 와 조치가 다르다 — 부재로 접지 않는다."""
+        res = _FakeRes({"U:/x/gone.xlsx": PermissionError("허용되지 않은 경로")})
+        mod = self._mod(monkeypatch, res)
+        warns = []
+        with pytest.raises(PermissionError):
+            mod._read_optional_config_file("", "KJPDS02", self.KEY, out_warnings=warns)
+        assert warns == [], "권한 오류를 경고로 강등하면 조용히 넘어간다"
+
+    def test_present_file_returns_bytes(self, monkeypatch):
+        res = _FakeRes({"U:/x/gone.xlsx": b"PK\x03\x04data"})
+        mod = self._mod(monkeypatch, res)
+        warns = []
+        assert mod._read_optional_config_file(
+            "", "KJPDS02", self.KEY, out_warnings=warns) == b"PK\x03\x04data"
+        assert warns == []
+
+    def test_request_path_wins_over_config(self, monkeypatch):
+        res = _FakeRes({"C:/req/given.xlsx": b"REQ"})
+        mod = self._mod(monkeypatch, res)
+        assert mod._read_optional_config_file(
+            "C:/req/given.xlsx", "KJPDS02", self.KEY) == b"REQ"
+        assert res.reads == ["C:/req/given.xlsx"]
+
+
+class TestSwitcrCallSitesCollectTheWarnings:
+    """⚠ 헬퍼가 경고를 **낼 수 있는 것**과 호출부가 **받아서 응답에 싣는 것**은 별개다.
+
+    이 저장소는 인자만 달고 호출부가 안 넘긴 전례가 있다(`swut.py` 의 `_swuds_warnings`
+    — 주석이 "AST 호출부 검사가 잡아냈다"고 남겨 뒀다).
+    """
+
+    def _src(self):
+        from backend.routers import swit as mod
+        from tests.unit._source_probe import source_of
+
+        return source_of(mod._do_switcr_build)
+
+    def test_every_optional_read_passes_out_warnings(self):
+        import ast
+
+        tree = ast.parse(self._src())
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_read_optional_config_file"
+        ]
+        assert len(calls) == 4, f"선택 입력 호출부를 {len(calls)}개만 찾았다 — 앵커가 깨졌다"
+        bare = [ast.unparse(c)[:60] for c in calls
+                if not any(k.arg == "out_warnings" for k in c.keywords)]
+        assert bare == [], f"경고를 안 받는 호출부가 남았다: {bare}"
+
+    def test_collected_warnings_reach_the_result(self):
+        src = self._src()
+        assert "result.warnings.extend(_optional_warnings)" in src, (
+            "모아만 두고 응답에 안 실으면 화면에는 아무것도 안 뜬다")
