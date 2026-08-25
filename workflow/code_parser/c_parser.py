@@ -388,6 +388,45 @@ def _extract_calls_from_body_text(body_text: str) -> List[str]:
     return sorted(calls)
 
 
+def _is_trailing_comment(text: str, comment_start: int) -> bool:
+    """`/*` 앞에 **같은 줄의 코드**가 있으면 그 주석은 앞 선언에 달린 꼬리 주석이다.
+
+    ⚠ 이걸 안 보면 다음 선언이 **직전 선언의 설명을 가져간다**. 실측(PDS64_RD):
+    전역 선언 809개 중 **411개(50.8%)** 가 그렇게 남의 설명을 달고 있었다 —
+    `REG_PTT` 가 `REG_PPSE` 의 `Port E Polarity Select Register` 를 받는 식으로,
+    MCU 헤더처럼 꼬리 주석으로 적는 파일은 전체가 한 칸씩 밀린다:
+
+        volatile PPSESTR REG_PPSE;   /* Port E Polarity Select Register */  <- 이 주석이
+        volatile PTTSTR  REG_PTT;                                           <- 여기로 갔다
+
+    설계서에 "이 레지스터는 X 다" 를 **틀리게** 적는 것이라 값 부재보다 나쁘다.
+    앞줄 전체가 주석인 정상 leading 주석은 `/*` 앞이 비어 있어 영향받지 않는다
+    (함수 실측 368개 중 정상 353 유지 · 오배치 9만 차단).
+    """
+    line_start = text.rfind("\n", 0, comment_start) + 1
+    return bool(text[line_start:comment_start].strip())
+
+
+def _extract_trailing_comment(src: bytes, end_byte: int) -> str:
+    """선언이 끝난 **같은 줄**에 달린 주석. 없으면 빈 문자열.
+
+    꼬리 주석은 지금까지 통째로 버리던 정보다(PDS64_RD 실측 425개). 위
+    `_is_trailing_comment` 가 남의 것을 차단하면 분모가 비므로 자기 것을 되살린다.
+    """
+    try:
+        rest = src[end_byte:].decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    line = rest.split("\n", 1)[0]
+    m = re.search(r"/\*(.*?)\*/", line, re.S)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"//(.*)$", line)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
 def _extract_leading_comment(src: bytes, start_byte: int) -> str:
     try:
         text = src[:start_byte].decode("utf-8", errors="ignore")
@@ -401,7 +440,7 @@ def _extract_leading_comment(src: bytes, start_byte: int) -> str:
         start_idx = text.rfind("/*", 0, end_idx)
         if start_idx != -1:
             tail = text[end_idx + 2 :].strip()
-            if not tail:
+            if not tail and not _is_trailing_comment(text, start_idx):
                 return text[start_idx + 2 : end_idx].strip()
     # Line comments
     lines = text.splitlines()
@@ -724,7 +763,11 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
             if m:
                 range_text = f"{m.group(1)} ~ {m.group(2)}"
                 range_source = "decl"
-        comment = _extract_leading_comment(src, node.start_byte)
+        # ⚠ 자기 **꼬리** 주석이 먼저다. MCU 헤더처럼 `U8 x;  /* 설명 */` 형식이면
+        #   앞 주석 자리엔 직전 선언의 꼬리 주석밖에 없다(`_is_trailing_comment`).
+        comment = _extract_trailing_comment(src, node.end_byte) or _extract_leading_comment(
+            src, node.start_byte
+        )
         desc_text = ""
         if comment:
             dtext, _, _, _, rtext, _, _ = _parse_comment_fields(comment)

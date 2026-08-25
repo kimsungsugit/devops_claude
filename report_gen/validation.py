@@ -549,7 +549,35 @@ def generate_swcom_context_report(docx_path: str, out_path: str) -> str:
     return str(out)
 
 
+def _empty_swcom() -> Dict[str, Any]:
+    return {"global": {"count": 0, "rows": {}}, "static": {"count": 0, "rows": {}}}
+
+
+def _value_verdict(column: str, ref_value: Any, our_value: Any):
+    """값 동일성 판정 — `uds_reference_parity` 의 **단일 출처**를 쓴다.
+
+    여기에 두 번째 정의를 두면 한쪽만 고쳐져 갈린다. 모듈을 못 읽으면 문자열 비교로
+    떨어지되, 그 사실이 결과에 드러나도록 사유를 붙인다(조용한 열화 금지).
+    """
+    try:
+        from report_gen.uds_reference_parity import value_verdict
+    except Exception:                              # noqa: BLE001 - 아래에서 사유를 낸다
+        same = str(ref_value or "").strip() == str(our_value or "").strip()
+        return same, "정확일치" if same else "값 불일치(표기 정규화 없음)"
+    return value_verdict(column, ref_value, our_value)
+
+
 def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_path: str, out_path: str) -> str:
+    """정본 ↔ 생성물 SwCom 컨텍스트 diff.
+
+    ⚠ 예전엔 **행 수만** 셌다. 개수가 같아도 다른 변수를 적고 있을 수 있고, 같은
+    변수라도 Type/Value Range 가 다를 수 있다 — 개수 diff 는 그 둘을 통째로 놓친다.
+    이제 세 층으로 낸다: 개수 → 이름 집합 → 값(공통 이름 위에서).
+
+    값 판정은 `uds_reference_parity.value_verdict` 를 **재사용**한다. 여기에 두 번째
+    정의를 두면 한쪽만 고쳐져 갈린다(이 저장소가 반복해 겪은 판정 복제 패턴).
+    표기차(`0x00 ~ 0xFF` = `0 ~ 255`)를 불일치로 세면 지표가 거짓으로 나빠진다.
+    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -558,9 +586,10 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
         out.write_text(f"# SwCom Context Diff Report\n\n- error: {exc}\n", encoding="utf-8")
         return str(out)
 
-    def _collect(path: str) -> Dict[str, Dict[str, int]]:
+    def _collect(path: str) -> Dict[str, Dict[str, Any]]:
+        """`{SwCom: {"global": {"count": n, "rows": {이름: (type, range, reset, desc)}}, ...}}`"""
         doc = docx.Document(str(path))
-        rows: Dict[str, Dict[str, int]] = {}
+        rows: Dict[str, Dict[str, Any]] = {}
         current_sw = ""
         pending = ""
         expected_header = "name|type|value range|reset value|description"
@@ -572,7 +601,7 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
                 m = re.search(r"\b(SwCom_\d+)\b", text, flags=re.I)
                 if m:
                     current_sw = m.group(1).replace("swcom", "SwCom")
-                    rows.setdefault(current_sw, {"global": 0, "static": 0})
+                    rows.setdefault(current_sw, _empty_swcom())
                 if re.search(r"\bGlobal variables\b", text, flags=re.I):
                     pending = "global"
                 elif re.search(r"\bStatic Variables\b", text, flags=re.I):
@@ -590,7 +619,17 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
             if expected_header not in header:
                 continue
             cnt = max(0, len(block.rows) - 1)
-            rows.setdefault(current_sw, {"global": 0, "static": 0})[pending] += cnt
+            bucket = rows.setdefault(current_sw, _empty_swcom())[pending]
+            bucket["count"] += cnt
+            for r in block.rows[1:]:
+                cells = [(c.text or "").strip() for c in r.cells]
+                name = cells[0] if cells else ""
+                if not name or name.upper() in ("N/A", "TBD", "-"):
+                    continue
+                # ⚠ setdefault — 같은 이름이 두 번 나오면 **먼저 나온 것**을 남긴다.
+                #   dict 덮어쓰기로 행을 침묵 소실한 전례(SUTS R25 66행)가 있다.
+                bucket["rows"].setdefault(name, tuple(
+                    (cells[i] if len(cells) > i else "") for i in (1, 2, 3, 4)))
         return rows
 
     try:
@@ -617,19 +656,78 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
     lines.append(f"- Only in target: `{len(only_tgt)}`")
     lines.extend([f"  - {x}" for x in only_tgt[:40]] if only_tgt else ["  - none"])
     lines.append("")
-    lines.append("## Differences")
+    lines.append("## Row Count Differences")
     diff_count = 0
     for sw in sw_all:
-        r = ref.get(sw, {"global": 0, "static": 0})
-        t = tgt.get(sw, {"global": 0, "static": 0})
-        if r != t:
+        r = ref.get(sw, _empty_swcom())
+        t = tgt.get(sw, _empty_swcom())
+        rg, rs = r["global"]["count"], r["static"]["count"]
+        tg, ts = t["global"]["count"], t["static"]["count"]
+        if (rg, rs) != (tg, ts):
             diff_count += 1
-            lines.append(
-                f"- {sw}: global `{r.get('global',0)}` -> `{t.get('global',0)}`, "
-                f"static `{r.get('static',0)}` -> `{t.get('static',0)}`"
-            )
+            lines.append(f"- {sw}: global `{rg}` -> `{tg}`, static `{rs}` -> `{ts}`")
     if diff_count == 0:
         lines.append("- none")
+
+    # --- 이름 축 --------------------------------------------------------------
+    # ⚠ 개수가 같아도 **다른 변수**를 적고 있을 수 있다. 개수 diff 만 보면 안 보인다.
+    lines.append("")
+    lines.append("## Name Sets")
+    for section in ("global", "static"):
+        ref_names = {(sw, n) for sw in sw_all
+                     for n in ref.get(sw, _empty_swcom())[section]["rows"]}
+        tgt_names = {(sw, n) for sw in sw_all
+                     for n in tgt.get(sw, _empty_swcom())[section]["rows"]}
+        hit = ref_names & tgt_names
+        missing = sorted(ref_names - tgt_names)
+        extra = sorted(tgt_names - ref_names)
+        recall = f"{len(hit) / len(ref_names) * 100:.1f}%" if ref_names else "미측정(정본 0행)"
+        lines.append(f"- {section}: reference `{len(ref_names)}` · target `{len(tgt_names)}` "
+                     f"· matched `{len(hit)}` · recall `{recall}`")
+        lines.append(f"  - only in reference (`{len(missing)}`):")
+        lines.extend([f"    - {sw} `{n}`" for sw, n in missing[:40]] or ["    - none"])
+        # 정본에 없는 것은 결함이 아니라 정보량이다 — 개수만 낸다(결정 3).
+        lines.append(f"  - only in target (`{len(extra)}`, 정본은 하한선이므로 결함 아님)")
+
+    # --- 값 축 ----------------------------------------------------------------
+    # ⚠ 이름 축과 **섞어 인용하지 말 것**. 두 축은 실측에서 30%p 벌어진다.
+    lines.append("")
+    lines.append("## Value Cells (matched names only)")
+    columns = ("type", "range", "reset", "desc")
+    for section in ("global", "static"):
+        stats = {c: {"n": 0, "same": 0, "notation": 0, "missing": 0, "diff": 0} for c in columns}
+        samples: List[str] = []
+        for sw in sw_all:
+            r_rows = ref.get(sw, _empty_swcom())[section]["rows"]
+            t_rows = tgt.get(sw, _empty_swcom())[section]["rows"]
+            for name in sorted(set(r_rows) & set(t_rows)):
+                for idx, column in enumerate(columns):
+                    ref_val, our_val = r_rows[name][idx], t_rows[name][idx]
+                    # 정본이 "근거 없음" 이라 적은 칸은 재현 대상이 아니다.
+                    if str(ref_val).strip().upper() in ("", "N/A", "NA", "-", "TBD"):
+                        continue
+                    stats[column]["n"] += 1
+                    if str(our_val).strip().upper() in ("", "N/A", "NA", "-", "TBD"):
+                        stats[column]["missing"] += 1
+                        continue
+                    same, reason = _value_verdict(column, ref_val, our_val)
+                    if same:
+                        stats[column]["same" if reason == "정확일치" else "notation"] += 1
+                    else:
+                        stats[column]["diff"] += 1
+                        if len(samples) < 20:
+                            samples.append(f"  - {sw} `{name}` {column}: "
+                                           f"ref `{str(ref_val)[:40]}` -> `{str(our_val)[:40]}`")
+        for column in columns:
+            s = stats[column]
+            hit = s["same"] + s["notation"]
+            pct = f"{hit / s['n'] * 100:.1f}%" if s["n"] else "미측정(분모 0)"
+            lines.append(f"- {section}/{column}: denominator `{s['n']}` · reproduced `{hit}` "
+                         f"({pct}) = exact `{s['same']}` + notation `{s['notation']}` "
+                         f"| missing `{s['missing']}` · mismatch `{s['diff']}`")
+        lines.append(f"  - mismatch samples ({section}):")
+        lines.extend(samples[:20] or ["  - none"])
+
     out.write_text("\n".join(lines), encoding="utf-8")
     return str(out)
 

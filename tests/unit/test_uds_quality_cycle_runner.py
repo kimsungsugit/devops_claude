@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit._source_probe import source_of
+
 _ROOT = Path(__file__).resolve().parents[2]
 _RUNNER = _ROOT / "scripts" / "uds" / "uds_quality_cycle.py"
 _PS1 = _ROOT / "scripts" / "uds" / "run_quality_cycle.ps1"
@@ -198,3 +200,80 @@ class TestTokenIsNotFabricated:
         h = mod._auth_headers("someone")
         assert seen["tv"] == 7, "저장소의 token_version 을 안 읽고 0 을 썼다"
         assert h["Authorization"] == "Bearer T"
+
+
+class TestReferenceParityAxis:
+    """정본 대비 축(P3-3) — **미측정을 0% 로 적지 않는지**가 본체다.
+
+    게이트 rates 도 산출물 충실도도 "정본이라면 무엇을 적었을까" 는 재지 않는다.
+    이 축이 그 자리를 채우는데, 실패를 0% 로 적으면 재본 적 없는 실행이 최악값으로
+    둔갑해 다음 라운드가 "개선됐다" 는 거짓 델타를 본다.
+    """
+
+    def test_empty_reference_is_unmeasured_with_a_reason(self, mod):
+        out = mod._reference_parity({"response": {"path": "x.docx"}}, "")
+        assert out["measured"] is False and "정본" in out["reason"]
+
+    def test_missing_reference_file_is_unmeasured(self, mod, tmp_path):
+        out = mod._reference_parity({"response": {"path": "x.docx"}},
+                                    str(tmp_path / "nope.docx"))
+        assert out["measured"] is False and "정본 없음" in out["reason"]
+
+    def test_missing_artifact_is_unmeasured(self, mod, tmp_path):
+        ref = tmp_path / "ref.docx"
+        ref.write_bytes(b"x")
+        out = mod._reference_parity({"response": {"path": str(tmp_path / "gone.docx")}}, str(ref))
+        assert out["measured"] is False and "산출물 없음" in out["reason"]
+
+    def test_no_artifact_path_is_unmeasured(self, mod, tmp_path):
+        ref = tmp_path / "ref.docx"
+        ref.write_bytes(b"x")
+        out = mod._reference_parity({"response": {}}, str(ref))
+        assert out["measured"] is False and "산출물 경로" in out["reason"]
+
+    def test_a_broken_docx_is_unmeasured_not_zero(self, mod, tmp_path):
+        """⚠ 예외를 0% 로 적으면 '정본을 하나도 못 따라갔다' 로 읽힌다."""
+        ref, art = tmp_path / "ref.docx", tmp_path / "a.docx"
+        ref.write_bytes(b"not a zip")
+        art.write_bytes(b"not a zip")
+        out = mod._reference_parity({"response": {"path": str(art)}}, str(ref))
+        assert out["measured"] is False and "대조 실패" in out["reason"]
+
+    def test_summary_keeps_the_two_axes_apart(self, mod):
+        """이름 축과 값 축을 한 숫자로 합치면 30%p 격차가 사라진다."""
+        parity = {
+            "measured": True, "joined_functions": 394,
+            "axes": {"in": {"name_axis": {"recall_pct": 83.1, "precision_pct": 84.7},
+                            "value_axis": {"range": {"reproduced_pct": 27.8}}}},
+        }
+        flat = mod._parity_summary(parity)
+        assert flat["in_name_recall_pct"] == 83.1
+        assert flat["in_value_range_pct"] == 27.8
+        assert "in_recall_pct" not in flat, "두 축을 한 키로 합치면 안 된다"
+
+    def test_summary_passes_unmeasured_through(self, mod):
+        flat = mod._parity_summary({"measured": False, "reason": "정본 없음"})
+        assert flat == {"measured": False, "reason": "정본 없음"}
+
+    def test_compare_carries_parity_from_the_runs(self, mod):
+        """⚠ 비교 시점에 다시 계산하면 베이스라인 산출물이 지워진 뒤엔 미측정이 된다."""
+        def _run(pct):
+            return {"status_code": 200,
+                    "response": {"quick_quality_gate": {"counts": {"total_functions": 1},
+                                                        "rates": {}}},
+                    "reference_parity": {
+                        "measured": True, "joined_functions": 1,
+                        "axes": {"in": {"name_axis": {"recall_pct": pct, "precision_pct": pct},
+                                        "value_axis": {}}}}}
+        out = mod._compare(_run(70.0), _run(83.1))
+        assert out["reference_parity"]["prev"]["in_name_recall_pct"] == 70.0
+        assert out["reference_parity"]["cur"]["in_name_recall_pct"] == 83.1
+
+    def test_run_stores_parity_before_saving(self, mod):
+        """저장 전에 실어야 산출물이 살아 있을 때 잰다."""
+        body = source_of(mod.main)
+        assert 'run["reference_parity"] = _reference_parity(' in body
+        assert body.index("reference_parity") < body.index("_save_json(run_out, run)")
+
+    def test_reference_flag_exists(self, mod):
+        assert '"--reference"' in source_of(mod.main)

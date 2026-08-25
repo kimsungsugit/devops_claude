@@ -14,7 +14,7 @@ repo_root = Path(__file__).resolve().parents[2]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from backend.main import app
+from backend.main import app  # noqa: E402 - 위 sys.path 삽입 뒤라야 import 된다
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -43,6 +43,20 @@ def _resolve_user(explicit: str = "") -> str:
         "[ERROR] 토큰을 발급할 사용자를 못 정했다. `--user <이름>` 으로 지정하거나 "
         "config/admin_users.json 에 admin 을 등록할 것."
     )
+
+
+def _default_reference() -> str:
+    """정본 SUDS 기본 경로. 못 읽으면 빈 문자열 — 그때는 대조를 **안 한다**.
+
+    ⚠ `import config` 가 다른 저장소를 잡을 수 있어(`tools/*.py` 가 260105 를
+    `sys.path[0]` 에 넣는다) 실패를 조용히 넘기지 않고 빈 값으로 떨어뜨린다.
+    빈 값이면 `_reference_parity` 가 사유를 붙여 미측정으로 보고한다.
+    """
+    try:
+        import config
+        return str(getattr(config, "UDS_REF_SUDS_PATH", "") or "")
+    except Exception:                              # noqa: BLE001 - 미측정으로 떨어뜨린다
+        return ""
 
 
 def _auth_headers(username: str) -> Dict[str, str]:
@@ -137,6 +151,57 @@ _ORDERED_RATE_KEYS = [
 ]
 
 
+def _reference_parity(run: Dict[str, Any], reference: str) -> Dict[str, Any]:
+    """정본 대비 재현율 — **이름 축과 값 축을 따로** 낸다.
+
+    게이트 rates 도 산출물 충실도도 "정본이라면 무엇을 적었을까" 는 재지 않는다.
+    SUTS 시리즈가 26라운드로 관리하는 축인데 UDS 에만 없었다.
+
+    ⚠ 두 축을 섞어 인용하지 말 것. 실측(2026-08-25) 이름 축 83.1% 인데 Value Range
+    값 축은 27.8% 다. 이름만 인용하면 값 축을 통째로 숨긴다.
+
+    ⚠ 정본이 **다른 프로젝트**면 수치의 뜻이 달라진다. 그래서 `reference_path` 를
+    같이 남긴다 — 라이터의 `_reference_identity_verdict` 가 값 주입은 이미 막지만,
+    측정값을 인용할 사람에겐 무엇과 견줬는지가 필요하다.
+
+    `measured=False` 는 **미측정**이다. 0% 로 적으면 재본 적 없는 실행이 최악값으로
+    둔갑한다.
+    """
+    if not str(reference or "").strip():
+        return {"measured": False, "reason": "정본 경로가 비어 있다(--reference)"}
+    ref_path = Path(reference)
+    if not ref_path.exists():
+        return {"measured": False, "reason": f"정본 없음: {ref_path}"}
+    out = str(((run.get("response") or {}).get("path")) or "")
+    if not out:
+        return {"measured": False, "reason": "응답에 산출물 경로가 없다"}
+    if not Path(out).exists():
+        return {"measured": False, "reason": f"산출물 없음: {out}"}
+    try:
+        from report_gen.uds_reference_parity import compare
+    except Exception as exc:                       # noqa: BLE001 - 미측정으로 보고한다
+        return {"measured": False, "reason": f"대조 모듈 로드 실패: {exc}"}
+    try:
+        result = compare(str(ref_path), out)
+    except Exception as exc:                       # noqa: BLE001 - 미측정으로 보고한다
+        return {"measured": False, "reason": f"대조 실패: {exc}"}
+    result["reference_path"] = str(ref_path)
+    return result
+
+
+def _parity_summary(parity: Dict[str, Any]) -> Dict[str, Any]:
+    """비교 표에 실을 납작한 요약. 값 축은 열마다 따로 — 합치면 축이 섞인다."""
+    if not parity.get("measured"):
+        return {"measured": False, "reason": parity.get("reason")}
+    flat: Dict[str, Any] = {"measured": True, "joined_functions": parity.get("joined_functions")}
+    for axis, node in (parity.get("axes") or {}).items():
+        flat[f"{axis}_name_recall_pct"] = (node.get("name_axis") or {}).get("recall_pct")
+        flat[f"{axis}_name_precision_pct"] = (node.get("name_axis") or {}).get("precision_pct")
+        for column, stats in (node.get("value_axis") or {}).items():
+            flat[f"{axis}_value_{column}_pct"] = stats.get("reproduced_pct")
+    return flat
+
+
 def _artifact_fidelity(run: Dict[str, Any]) -> Dict[str, Any]:
     """산출물 충실도 — **문서에 실제로 들어간 함수 수**.
 
@@ -227,6 +292,12 @@ def _compare(prev: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
             "removed": sorted(prev_codes - cur_codes),
         },
         "artifact_fidelity": {"prev": _artifact_fidelity(prev), "cur": _artifact_fidelity(cur)},
+        # 정본 대비는 **실행에 저장된 것**을 그대로 옮긴다. 여기서 다시 계산하면
+        # 베이스라인 쪽 산출물이 이미 지워졌을 때 조용히 미측정이 된다.
+        "reference_parity": {
+            "prev": _parity_summary(prev.get("reference_parity") or {}),
+            "cur": _parity_summary(cur.get("reference_parity") or {}),
+        },
         "hard_fail": bool(len(hard_fail_reasons) > 0),
         "hard_fail_reasons": hard_fail_reasons,
         "soft_fail": bool(len(soft_fail_reasons) > 0),
@@ -268,12 +339,16 @@ def main() -> None:
     ap.add_argument("--ai-detailed", action="store_true")
     ap.add_argument("--rag-top-k", type=int, default=12)
     ap.add_argument("--user", default="", help="토큰 발급 사용자(기본: admin_users.json 의 첫 admin)")
+    ap.add_argument("--reference", default=_default_reference(),
+                    help="정본 SUDS 경로(빈 값이면 정본 대조를 하지 않는다)")
     ap.add_argument("--baseline-out", default="reports/uds_local/quality_baseline.json")
     ap.add_argument("--run-out", default="reports/uds_local/quality_run.json")
     ap.add_argument("--compare-out", default="reports/uds_local/quality_compare.json")
     args = ap.parse_args()
 
     run = _run_once(args)
+    # ⚠ 저장 **전에** 실어야 한다. 나중에 계산하면 산출물이 지워진 뒤엔 못 잰다.
+    run["reference_parity"] = _reference_parity(run, args.reference)
     run_out = Path(args.run_out)
     _save_json(run_out, run)
 
