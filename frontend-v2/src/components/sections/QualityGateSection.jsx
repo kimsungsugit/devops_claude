@@ -49,10 +49,12 @@ const DOC_TYPES = [
   { value: '', label: '전체' },
   { value: 'uds', label: 'UDS' }, { value: 'sts', label: 'STS' },
   { value: 'suts', label: 'SUTS' }, { value: 'sits', label: 'SITS' },
-  // swut/swit = 커버리지 결과, sutr/sitr = 시험 **결과 보고서**. 평가기가 달라
-  // (커버리지 축 vs 실행률·통과율) 한 항목으로 합치면 지표가 섞인다.
-  { value: 'swut', label: 'SwUT 커버리지' }, { value: 'swit', label: 'SwIT 커버리지' },
+  // 레벨별로 산출물이 셋이고 **평가기가 셋 다 다르다** — 커버리지 축(swut/swit) vs
+  // 실행률·통과율(sutr/sitr) vs 종합(swutcr/switcr, 분모 키가 `total_tcs`). 한 항목으로
+  // 합치면 지표가 섞인다. 목록에서 빠지면 '전체' 로만 보이고 개별 조회가 안 된다.
+  { value: 'swut', label: 'SwUTCV(커버리지)' }, { value: 'swit', label: 'SwITCV(커버리지)' },
   { value: 'sutr', label: 'SUTR' }, { value: 'sitr', label: 'SITR' },
+  { value: 'swutcr', label: 'SwUTCR' }, { value: 'switcr', label: 'SwITCR' },
   { value: 'swsa', label: 'SwSA' }, { value: 'swreport', label: '통합 Summary' },
 ];
 

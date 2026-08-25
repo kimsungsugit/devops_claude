@@ -43,6 +43,18 @@ _UDS_ADVICE = {
         "low_advice": "함수 출력/반환값 정보가 누락되었습니다. void 함수의 포인터 출력 파라미터를 확인하세요.",
         "threshold": 90.0,
     },
+    # ── 산출물 충실도(비게이트) ── 위 축들은 전부 **payload** 를 재는데, 이건 문서에
+    #    실제로 들어간 수다. 라이터가 템플릿 주도라 대응 heading 이 없는 함수는 조용히
+    #    빠지므로, payload 가 완벽하면 문서가 비어 있어도 만점이 나온다
+    #    (실측 run 660·661 = 반영 0/5 인데 점수 100.0).
+    #    `threshold: None` 은 의도다 — 템플릿이 **의도된 부분집합**일 수 있어 지금
+    #    판정에 넣으면 대량 오탐이다. `flow_emit_pct` 와 같은 취급으로 **라벨 정본**만
+    #    둔다(제안은 발화하지 않는다). 임계는 베이스라인을 쌓은 뒤 정할 일이다.
+    "artifact_match_pct": {
+        "label": "문서 반영률(payload 대비)",
+        "low_advice": "생성된 함수 중 일부만 DOCX 에 들어갔습니다. 템플릿에 대응 heading 이 없으면 그 함수는 문서에 존재하지 않습니다 — 템플릿과 소스의 함수 집합이 같은 프로젝트인지, heading 이름 규칙이 맞는지 확인하세요. 0% 면 템플릿이 통째로 다른 프로젝트의 것일 수 있습니다.",
+        "threshold": None,
+    },
 }
 
 _STS_ADVICE = {
@@ -195,6 +207,35 @@ _TEST_RESULT_ADVICE = {
     },
 }
 
+# SwUTCR/SwITCR(종합결과서) — 축은 SUTR/SITR 과 같지만 **분모 키가 다르다**
+# (`total` 이 아니라 `total_tcs` — `evaluate_comprehensive_result` docstring 참조).
+# 표를 재사용하지 않고 따로 두는 이유는 조치문이 다르기 때문이다: 종합결과서의 미실행은
+# "로그를 더 모아라" 가 아니라 **"어느 레벨 산출물이 비었는가"** 로 되짚어야 한다.
+_COMPREHENSIVE_ADVICE = {
+    "test_execution_pct": {
+        "label": "시험 실행률(종합)",
+        "low_advice": "종합결과서가 집계한 TC 중 실행되지 않은 것이 있습니다. 종합결과서는 커버리지·결과·Fault Injection 을 한 장으로 합치므로, 실행률이 낮으면 **어느 레벨 산출물이 비었는지** 먼저 보세요 — 증적 시트가 빈 채로 나가도 빌드는 성공합니다.",
+        "threshold": 100.0,
+    },
+    "pass_rate_pct": {
+        "label": "통과율(미실행 포함, 종합)",
+        "low_advice": "실패했거나 실행되지 않은 TC 가 있습니다. 실행률이 함께 낮다면 원인은 실패가 아니라 미실행입니다 — 두 지표를 같이 보세요.",
+        "threshold": 100.0,
+    },
+    "executed_pass_rate_pct": {
+        "label": "실행분 통과율(문서 표기값)",
+        "low_advice": "문서 Summary 시트에 찍히는 값입니다. 이 값이 100%인데 위 통과율이 낮다면 **돌린 것은 다 통과했지만 안 돌린 것이 있다**는 뜻입니다.",
+        "threshold": None,
+    },
+    "qualified_function_count": {
+        "label": "자격 함수 수",
+        # threshold 가 없으므로 제안은 발화하지 않는다 — 라벨 정본으로만 둔다
+        # (`deviation_cases` 와 같은 취급). 절대수는 프로젝트 규모에 비례해 hard-fail 부적합.
+        "low_advice": "자동 판정 대상이 아닙니다(프로젝트 규모에 비례하는 절대수). VectorCAST 원시 함수 수와 다르면 종합결과서가 override 를 적용한 것이며, 그 사유는 빌드 warnings 에 남습니다.",
+        "threshold": None,
+    },
+}
+
 # SwSA(MISRA/HIS 정적·안전분석) — HIS pass% 만 게이트(위반 절대수는 제안 부적합).
 _SWSA_ADVICE = {
     "his_pass_pct": {
@@ -279,6 +320,10 @@ def suggest_improvements(
             advice_rules = _SWUT_ADVICE
         elif doc_type in ("sutr", "sitr"):
             advice_rules = _TEST_RESULT_ADVICE
+        elif doc_type in ("swutcr", "switcr"):
+            # ⚠ 위 분기에 합치지 말 것 — 같은 지표 이름을 쓰지만 분모 출처가 다르고
+            #   조치문도 다르다(`_COMPREHENSIVE_ADVICE` 주석).
+            advice_rules = _COMPREHENSIVE_ADVICE
         elif doc_type == "swreport":
             advice_rules = _SWREPORT_ADVICE
         elif doc_type == "swsa":

@@ -92,8 +92,59 @@ def evaluate_uds(quality_eval: Dict[str, Any]) -> MetricList:
 
     # 참고지표 — quick_gate 도 게이트에서 제외. 전역/정적 변수 적은 정상 모듈의 구조적
     # 저평가를 막기 위해 값은 기록하되 threshold=None → overall_score/gate 미반영.
+    # ⚠ `config.UDS_QUALITY_GATE_THRESHOLDS` 에 `global_min`/`static_min` 이 있지만
+    #   **일부러 안 쓴다**. 미배선 결함으로 보고 게이트에 붙이지 말 것 — 붙이면 위 사유대로
+    #   정상 모듈이 떨어진다. `_compute_quick_quality_gate` 의 `gate_pass` 도 같은 7축만 본다.
     for metric_name, rate_key in (("global_pct", "global_fill"), ("static_pct", "static_fill")):
         metrics.append(_metric(metric_name, _rate_val(rate_key, metric_name)))
+
+    # 실질 인터페이스 채움 — `input_pct`/`output_pct` 와 **다른 질문**이라 나란히 둔다.
+    #   input_pct       = "입력 칸에 정보를 적었나"      (`[IN] (none)` 도 채움)
+    #   input_real_pct  = "실제로 주고받는 항목이 있나"   (`(none)` 은 미채움)
+    # 앞 축만 보면 98.3% 라 "입력이 잘 채워졌다" 로 읽히는데, 그 중 79.4%가 "없음"
+    # 표기였다. 뒤 축을 함께 남겨 그 사실이 DB 에서 보이게 한다.
+    # ⚠ threshold 를 붙이지 않는 것은 의도다 — `(none)` 은 void 함수의 **정확한** 기술이라
+    #   낮다고 결함이 아니다. 판정은 앞 축이 계속 맡는다.
+    for metric_name, rate_key in (
+        ("input_real_pct", "input_real_fill"),
+        ("output_real_pct", "output_real_fill"),
+    ):
+        metrics.append(_metric(metric_name, _rate_val(rate_key, metric_name)))
+
+    # 근거(신뢰 출처) 축 — 값만 기록하고 판정은 `confidence_gate_pass` 가 그대로 한다.
+    #
+    # ISO 26262 관점에서 물어야 할 것은 "칸이 채워졌나"(fill)가 아니라 **"근거가 있나"**
+    # (trusted)다. 생산자는 이 셋을 이미 계산해 `rates` 에 싣는데
+    # (`backend/helpers/uds.py` `_compute_quick_quality_gate`), 여기서 지표로 옮기지
+    # 않아 **DB 에는 `confidence_gate_pass` boolean 하나로 뭉개져 남았다** — 떨어져도
+    # 셋 중 어느 축인지 알 수 없고, 추이도 볼 수 없었다.
+    #
+    # ⚠ threshold 를 붙이지 않는 것은 의도다. 붙이면 `compute_gate_verdict` 가 이 셋을
+    #   게이트로 세어 `confidence_gate_pass` 와 **이중 판정**이 된다. 판정 주체는 하나로
+    #   두고, 여기서는 "어느 축이 얼마였나" 만 남긴다.
+    for metric_name, rate_key in (
+        ("description_trusted_pct", "description_trusted_fill"),
+        ("asil_trusted_pct", "asil_trusted_fill"),
+        ("related_trusted_pct", "related_trusted_fill"),
+    ):
+        metrics.append(_metric(metric_name, _rate_val(rate_key, metric_name)))
+
+    # 산출물 충실도 — payload 가 아니라 **문서에 실제로 들어간 수**를 본다.
+    #
+    # 위 지표는 전부 payload 를 재는데, 이 라이터는 템플릿 주도라 대응 heading 이 없는
+    # 함수는 문서에서 조용히 사라진다. 그래서 payload 가 완벽하면 **문서가 비어 있어도
+    # 만점**이 나온다. 실측(2026-08-24, `reports/quality.sqlite` ⋈ gen_stats sidecar):
+    #   run 660·661 = 문서 반영 **0/5**(빈 heading 419) 인데 gate PASS · 점수 **100.0**
+    #   run 674     = 252/350(72.0%), 미반영 98        인데 gate PASS · 점수 99.5
+    #
+    # ⚠ `if` 가 핵심이다 — 키가 없으면 `_rate_val` 이 **0.0** 을 돌려주므로, 무조건
+    #   넣으면 sidecar 가 없어 **재본 적 없는 실행**이 "반영률 0%" 로 기록된다.
+    #   미측정과 최악값을 같은 숫자로 적는 것은 이 저장소가 반복해 고쳐 온 결함이다.
+    # ⚠ threshold 를 붙이지 않는 것도 의도다. 템플릿이 **의도된 부분집합**일 수 있어
+    #   지금 판정에 넣으면 대량 오탐이 된다(`_run_docx_in_subprocess` 주석과 같은 사유).
+    #   베이스라인을 쌓은 뒤 정할 일이고, 그 전까지는 수치를 만점 옆에 보이게만 한다.
+    if "artifact_match_fill" in rates:
+        metrics.append(_metric("artifact_match_pct", _safe_float(rates, "artifact_match_fill")))
 
     # Accuracy 메트릭
     accuracy = quality_eval.get("accuracy") or {}
@@ -413,6 +464,65 @@ def evaluate_test_result(summary: Dict[str, Any]) -> MetricList:
     metrics.append(_metric("failed_tcs", _safe_float(summary, "failed")))
     metrics.append(_metric("deviation_cases", _safe_float(summary, "deviation_cases_written")))
     metrics.append(_metric("environments", _safe_float(summary, "environments")))
+    return metrics
+
+
+def evaluate_comprehensive_result(summary: Dict[str, Any]) -> MetricList:
+    """SwUTCR/SwITCR(**종합**결과서) summary -> MetricList.
+
+    ## 왜 ``evaluate_test_result`` 를 재사용하지 않나 — 분모 키가 다르다
+
+    SUTR/SITR 은 총 TC 를 ``total`` 로 내지만(``swut_sutr_aggregator.py:1292``),
+    종합결과서는 ``total_tcs`` 로 낸다(``swut_comprehensive_aggregator.py:1078``).
+    ``_safe_float`` 는 부재를 ``0.0`` 으로 접고 통과율은 ``tested / max(total, 1.0)`` 이므로,
+    종합결과서를 ``evaluate_test_result`` 에 넣으면 **분모가 1 로 고정돼 tested 가 그대로
+    백분율이 된다** — 실행 TC 200 건이 실행률 20000% 로 기록된다. 게이트가 없느니만 못하다.
+
+    키 폴백(``total`` 이 없으면 ``total_tcs``)으로 한 함수에 합치지 않는 이유는 두 산출물이
+    같은 스키마라는 잘못된 신호를 남기기 때문이다. 종합결과서는 커버리지 축(함수 수)까지
+    함께 담는 **다른 문서**다.
+
+    ## 게이트 축은 SUTR/SITR 과 동일하다
+
+    분모의 출처만 다를 뿐 "미실행을 분모에 포함한 ``passed/total``" 규약은 그대로다
+    (``evaluate_test_result`` 주석 참조 — ``passed/tested`` 로 걸면 스위트의 10% 만 돌려도
+    100% 가 되어 시험 공백이 은폐된다).
+
+    함수 수는 프로젝트 규모에 비례하는 절대수라 hard-fail 에 부적합하다 → **비게이트
+    참고지표**로만 남긴다(``evaluate_swsa`` 가 MISRA 위반 수에 대해 내린 것과 같은 판단).
+    """
+    metrics: MetricList = []
+    total = _safe_float(summary, "total_tcs")
+    tested = _safe_float(summary, "tested")
+    passed = _safe_float(summary, "passed")
+
+    # 분모 0 은 recorder 의 빈-산출물 skip 이 먼저 걸러내지만 외부 직접 호출도 있으므로
+    # 여기서도 0除 를 막는다(분자도 0 이라 결과는 0.0 — 0/0 을 100% 로 접지 않는다).
+    metrics.append(
+        _metric("test_execution_pct", round(tested / max(total, 1.0) * 100, 2), threshold=100.0),
+    )
+    metrics.append(
+        _metric("pass_rate_pct", round(passed / max(total, 1.0) * 100, 2), threshold=100.0),
+    )
+    metrics.append(
+        _metric("executed_pass_rate_pct", round(passed / max(tested, 1.0) * 100, 2)),
+    )
+
+    metrics.append(_metric("total_tcs", total))
+    metrics.append(_metric("tested_tcs", tested))
+    metrics.append(_metric("failed_tcs", _safe_float(summary, "failed")))
+    metrics.append(_metric("environments", _safe_float(summary, "environments")))
+    metrics.append(_metric("function_rows", _safe_float(summary, "function_rows")))
+
+    # 자격 함수 수 — 키가 산출물마다 다르고(SwUTCR/SwITCR), override 가 없으면 ``None`` 이다.
+    # **있는 것만** 싣는다: 없는 축을 0 으로 채우면 "함수 0개" 라는 없는 사실을 보고하게 된다.
+    for key in (
+        "swutcr_qualified_function_count", "switcr_qualified_function_count",
+        "swutcr_raw_function_count", "switcr_function_count",
+    ):
+        if isinstance(summary, dict) and summary.get(key) is not None:
+            metrics.append(_metric("qualified_function_count", _safe_float(summary, key)))
+            break
     return metrics
 
 

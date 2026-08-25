@@ -127,8 +127,12 @@ def _resolve_swut_log_folders(req: SwUTBuildRequest) -> list[str]:
     우선순위:
         1. req.log_folders (비어있지 않으면 — APP+BOOT 다중 폴더)
         2. req.log_folder (기존 단일)
-        3. config `swut_log_folders` (신규 list 키 — config 에이전트 담당)
-        4. config `swut_log_folder` (기존 단일 str)
+        3·4. config 폴백 — `swut_meta_resolver.config_log_folders` 단일 출처
+
+    ⚠ config 폴백을 여기서 **직접 읽지 않는다**. 같은 판정이 SwIT 라우터와 생성 준비
+    점검(preflight)에도 필요한데, 복제하면 게이트가 라우터와 다른 곳을 보게 된다 —
+    실측으로 preflight 가 "경로 미지정 → 진행 불가" 를 냈는데 같은 요청의 빌드는 config
+    폴백으로 성공했다(`config_log_folders` docstring).
     """
     if req.log_folders:
         folders = [f for f in req.log_folders if f]
@@ -136,14 +140,9 @@ def _resolve_swut_log_folders(req: SwUTBuildRequest) -> list[str]:
             return folders
     if req.log_folder:
         return [req.log_folder]
-    cfg = _load_meta_from_config(req.project_id)
-    cfg_list = cfg.get("swut_log_folders")
-    if isinstance(cfg_list, (list, tuple)):
-        folders = [str(f) for f in cfg_list if f]
-        if folders:
-            return folders
-    single = cfg.get("swut_log_folder")
-    return [str(single)] if single else []
+    from backend.services.swut_meta_resolver import config_log_folders
+    # config 읽기는 **이 모듈의 캐시 wrapper** 로 한다(테스트 seam 보존).
+    return config_log_folders(_load_meta_from_config(req.project_id), "swut")
 
 
 def _resolve_swut_log_folder(req: SwUTBuildRequest) -> str | None:
@@ -674,6 +673,7 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
         record_run(
             "swut", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
             meta={
                 "asil_level": str(getattr(meta, "asil_level", "") or ""),
                 "kind": "coverage",
@@ -695,30 +695,39 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     )
 
 
-def _record_sutr_quality(
-    req: SwUTBuildRequest, meta: Any, summary: dict[str, Any],
+def _record_test_quality(
+    req: SwUTBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str,
 ) -> None:
-    """SUTR 빌드 1회를 Quality DB 에 기록 (non-fatal).
+    """SUTR / SwUTCR 빌드 1회를 Quality DB 에 기록 (non-fatal).
 
     Coverage 빌드에만 기록이 있어 **SUTR 은 몇 번을 만들어도 이력이 남지 않았다** —
     생성 현황 화면이 방금 만든 문서를 계속 "미생성" 으로 표시했다. doc_type 을
     `swut` 이 아니라 `sutr` 로 두는 이유는 두 산출물의 summary 스키마가 달라서다
     (커버리지 평가기에 넣으면 측정하지도 않은 축이 0% FAIL 로 둔갑 — evaluator 참조).
 
-    SUTR 경로가 둘(표준/spec-based)이라 호출부도 둘이다. 블록을 그대로 복제하면
-    한쪽만 고쳐지므로 함수로 묶는다.
+    **SwUTCR 이 같은 상태였다**(2026-08-21 — 빌드는 되는데 기록이 없어 보드가 영구히
+    "미생성"). 종합결과서는 또 다른 doc_type(`swutcr`)으로 기록한다: summary 의 총 TC 키가
+    SUTR 의 `total` 이 아니라 `total_tcs` 라, `evaluate_test_result` 에 넣으면 분모가 0 으로
+    접혀 **실행률이 tested 값 그대로 폭주**한다(evaluate_comprehensive_result docstring 참조).
+
+    호출부가 셋이다(SUTR 표준/spec-based + SwUTCR). 블록을 복제하면 한쪽만 고쳐지므로
+    doc_type 만 인자로 받아 함수 하나로 묶는다. **기본값을 두지 않는 것도 의도다** —
+    빠뜨린 호출이 조용히 `sutr` 로 기록되면 종합결과서가 SUTR 행을 덮어쓴다.
     """
     try:
         from workflow.quality.recorder import record_test_result_run
         record_test_result_run(
-            "sutr", summary,
+            doc_type, summary,
             project_id=str(getattr(req, "project_id", "") or ""),
             asil_level=str(getattr(meta, "asil_level", "") or ""),
             release_sw_version=str(getattr(req, "release_sw_version", "") or ""),
+            # 화면이 아는 프로젝트 축을 그대로 넘긴다. 비면 recorder 가 project_id 에서
+            # 추측하는데 그 추측이 틀리는 실환경이 있다(schemas.py `scm_id` 주석).
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
-        _logger.exception("SUTR quality record skipped (non-fatal)")
+        _logger.exception("%s quality record skipped (non-fatal)", doc_type.upper())
 
 
 def _is_sutr_spec_based(req: SwUTBuildRequest, cfg: dict[str, Any]) -> bool:
@@ -792,7 +801,7 @@ def _do_sutr_build_spec_based(
             status_code=500,
             detail=f"spec-based SUTR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
-    _record_sutr_quality(req, meta, result.summary)
+    _record_test_quality(req, meta, result.summary, doc_type="sutr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -865,7 +874,7 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
-    _record_sutr_quality(req, meta, result.summary)
+    _record_test_quality(req, meta, result.summary, doc_type="sutr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -1005,6 +1014,7 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         result.warnings.extend(fi_spec_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwUTCR build failed (ok=False)")
+    _record_test_quality(req, meta, result.summary, doc_type="swutcr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

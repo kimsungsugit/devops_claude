@@ -97,15 +97,40 @@ _TEMPLATE_EXPECTED_EXT = {
     "sits": (".xlsm", ".xlsx"),
 }
 
+# doc_type → `config/swut_meta.json` `template_paths` 의 양식 키.
+# 정본은 라우터의 `_read_template_bytes` 다(`swut.py:241` · `swit.py:235`) — 거기서 config
+# fallback 키를 고르므로, 여기가 갈라지면 게이트는 "양식 있음" 이라 하고 빌드는 400 을 낸다.
 _TEST_REPORT_TEMPLATE_KEY = {
+    "swut": "coverage_report_template",
     "sutr": "sutr_template",
+    "swutcr": "swutcr_template",
+    "swit": "swit_coverage_template",
     "sitr": "swit_sitr_template",
+    "switcr": "switcr_template",
     "swreport": "es95411_template",
 }
 
 
+# 시험 결과 6종 → VectorCAST 로그의 **시리즈**. 통합 Summary(`swreport`)는 로그가 아니라
+# 레벨별 산출물을 읽으므로 여기 없다.
+_TEST_REPORT_LOG_SERIES = {
+    "swut": "swut", "sutr": "swut", "swutcr": "swut",
+    "swit": "swit", "sitr": "swit", "switcr": "swit",
+}
+
+# 대응 시험 규격서가 **필수가 될 수 있는** 문서 — spec-based 빌드 경로를 가진 둘뿐이다.
+# (커버리지·종합결과는 같은 규격서를 읽지만 없어도 빌드가 죽지 않는다.)
+_SPEC_REQUIRED_SERIES = {"sutr": "swut", "sitr": "swit"}
+
+
 class PreflightRequest(BaseModel):
-    doc_type: str = Field(..., description="uds/sts/suts/sits/sutr/sitr/swreport")
+    doc_type: str = Field(
+        ...,
+        description=(
+            "uds/sts/suts/sits · swut/sutr/swutcr · swit/sitr/switcr · swreport "
+            "(swut/swit 은 커버리지 리포트 — Quality DB doc_type 과 같은 어휘를 쓴다)"
+        ),
+    )
     scm_id: str = Field("", description="SCM 레지스트리 id — 경로의 기본 출처")
     # 설정 > SCM 우선순위는 프론트 정책(`sharedInputs.js`)이며 여기서 뒤집지 않는다.
     # 생성 핸들러가 이미 받는 것과 같은 표면이라 새 입력 표면이 아니다.
@@ -169,6 +194,23 @@ def _suggest_revision(resolver: Any, path: str) -> str:
     return cands[0] if len(cands) == 1 else ""
 
 
+def _builder_project_id(req: PreflightRequest) -> str:
+    """빌더 `project_id`(예: "KJPDS02") — 폼 값이 우선, 없으면 SCM 이 선언한 값.
+
+    ⚠ SCM id 와 다른 어휘다(`kjpds02_pv` ↔ `KJPDS02`). 레지스트리가 그 매핑을 갖는다.
+    """
+    pid = str(req.form.get("project_id") or "").strip()
+    if pid or not req.scm_id:
+        return pid
+    try:
+        from backend.services.scm_registry import get_registry_entry
+        entry = get_registry_entry(req.scm_id)
+        return str(getattr(entry, "builder_project_id", "") or "").strip()
+    except Exception:  # noqa: BLE001 — 레지스트리 로딩 계열이 광범위
+        # 못 읽으면 '미지정' 으로 두고 소비처가 사유를 낸다(지어내지 않는다).
+        return ""
+
+
 def _resolve_inputs(req: PreflightRequest) -> Dict[str, str]:
     """입력 키 → 경로. 우선순위는 **설정(doc_paths) > SCM 레지스트리**(기존 정책)."""
     from backend.services.scm_registry import get_registry_entry
@@ -197,6 +239,33 @@ def _resolve_inputs(req: PreflightRequest) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if source_root:
         out[_req.IN_SOURCE_ROOT] = source_root
+
+    # 시험 결과 6종의 VectorCAST 자료는 **라우터와 같은 출처**에서 온다.
+    #
+    # ⚠ `linked_docs.vectorcast` 를 쓰면 안 된다 — 그건 RAG(json) 경로이고 Sw* 빌더가
+    #   여는 것은 VectorCAST **로그 폴더**다. 다른 자료를 확인하고 "있다/없다" 를 말하면
+    #   게이트가 조용히 딴소리를 한다.
+    # ⚠ 이 폴백을 안 보면 게이트가 **거짓 차단**을 낸다(2026-08-24 실측): 보드에서
+    #   SwUTCR 이 정상 생성되는데 준비 점검은 "경로 미지정 → 진행 불가" 였다.
+    series = _TEST_REPORT_LOG_SERIES.get(str(req.doc_type or "").strip().lower())
+    if series:
+        pid = _builder_project_id(req)
+        if pid:
+            from backend.services.swut_meta_resolver import (
+                config_log_folders_for,
+                config_spec_path_for,
+            )
+            folders = config_log_folders_for(pid, series)
+            if folders:
+                # 복수 폴더(APP+BOOT)는 콤마로 잇는다 — 아래 probe 가 조각별로 본다.
+                out[_req.IN_VCAST] = ",".join(folders)
+            # 대응 시험 규격서(SwUTS/SwITS)도 같은 이유로 config 를 본다. 이것도
+            # `linked_docs` 엔 없고 `swut_meta.json` 에만 등록돼 있어, 안 보면
+            # **등록돼 있는데도** "경로가 지정되지 않았습니다" 가 뜬다.
+            if _req.IN_SPEC_DOC not in out:
+                spec_path = config_spec_path_for(pid, series)
+                if spec_path:
+                    out[_req.IN_SPEC_DOC] = spec_path
     for doc_key, input_key in _DOC_KEY_TO_INPUT.items():
         if doc_key == "template":
             # 문서별 템플릿을 먼저 보고, 없으면 공용 `template`(구 설정) 로 폴백한다.
@@ -268,6 +337,27 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # ── 1. 입력 ──────────────────────────────────────────────────────────────
     required = list(spec.get("required") or [])
     optional: Dict[str, str] = dict(spec.get("optional") or {})
+
+    # 대응 시험 규격서는 **프로젝트마다 필수 여부가 다르다.**
+    #
+    # `sutr_spec_based`/`sitr_spec_based` 가 켜진 프로젝트에서는 결과 문서의
+    # `3.Test Log` 시트를 규격서 시트 **통째 복사**로 만든다. 그래서 규격서가 없으면
+    # 선택 입력이 빠지는 게 아니라 라우터가 **HTTP 400** 을 낸다 — 표에 `optional` 로
+    # 박아 두면 게이트가 "없어도 됩니다" 라고 **거짓말**을 하게 된다(2026-08-24 실측).
+    # HDPDM01 처럼 꺼진 프로젝트에서는 그대로 선택 입력이다 — 그래서 config 를 읽는다.
+    #
+    # ⚠ 승격 대상은 **SUTR/SITR 뿐**이다. 커버리지·종합결과는 같은 규격서를 쓰지만
+    #   없어도 빌드가 성공한다(TC 대조가 빠지고 FI 칸이 노란 강조로 남을 뿐) — 실측으로
+    #   `resolve_swuts_test_specs` 가 `None` 을 돌려주고 그대로 진행한다. 넷까지 required
+    #   로 올리면 이번엔 게이트가 **반대 방향으로** 거짓말한다(막을 이유가 없는데 막음).
+    _spec_series = _SPEC_REQUIRED_SERIES.get(str(req.doc_type or "").strip().lower())
+    if _spec_series and _req.IN_SPEC_DOC in optional:
+        _pid = _builder_project_id(req)
+        if _pid:
+            from backend.services.swut_meta_resolver import config_spec_is_required_for
+            if config_spec_is_required_for(_pid, _spec_series):
+                required.append(_req.IN_SPEC_DOC)
+                optional.pop(_req.IN_SPEC_DOC, None)
     for key in required + [k for k in optional if k not in required]:
         label = _req.INPUT_LABELS.get(key, key)
         is_required = key in required
@@ -282,6 +372,30 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 actions=[{"kind": "pick_path", "target": _INPUT_TO_DOC_KEY.get(key, key)}],
             ))
             available[key] = False
+            continue
+
+        if key == _req.IN_VCAST and "," in path:
+            # APP+BOOT 처럼 폴더가 여럿이면 **전부** 확인한다. 첫 개만 보면 두 번째가
+            # 사라져도 "확인됨" 이 되고, 산출물은 절반만 담긴 채로 나간다.
+            parts = [x.strip() for x in path.split(",") if x.strip()]
+            probes = [(x, _probe_path(resolver, x)) for x in parts]
+            bad = [(x, r) for x, r in probes if r["state"] != S_OK]
+            if not bad:
+                st, why = S_OK, ""
+            elif len(bad) == len(probes):
+                st, why = S_MISSING, "등록된 로그 폴더를 하나도 찾지 못했습니다"
+            else:
+                # 일부만 없는 것은 "없음" 이 아니라 **부분 결손**이다 — 빌드는 되고
+                # 산출물만 줄어든다. 그 사실을 말하고 막지는 않는다.
+                st = S_DEGRADED
+                why = (f"{len(parts)}개 중 {len(bad)}개를 찾지 못했습니다: "
+                       + "; ".join(Path(x).name for x, _ in bad))
+            steps.append(_step(
+                key, "input", st, label, required=is_required, value=path,
+                reason=why, effect=optional.get(key, ""),
+                measured={"folders": len(parts), "missing": len(bad)},
+            ))
+            available[key] = (st == S_OK)
             continue
 
         if key == _req.IN_SOURCE_ROOT:

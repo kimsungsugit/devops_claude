@@ -320,8 +320,11 @@ def _resolve_swit_log_folders(req: "SwITBuildRequest | SwITSitrBuildRequest") ->
     SwUT `_resolve_swut_log_folders` 패턴 동일. 우선순위:
         1. req.log_folders (비어있지 않으면 — APP+BOOT 다중 폴더)
         2. req.log_folder (기존 단일)
-        3. config `swit_log_folders` (신규 list 키 — KJPDS02 PV APP+BOOT)
-        4. config `swit_log_folder` (기존 단일 str) / log_folders dict 키
+        3·4. config 폴백 — `swut_meta_resolver.config_log_folders` 단일 출처
+             (SwIT 만 있는 `log_folders` dict 폴백도 거기 담겨 있다)
+
+    ⚠ SwUT 라우터와 같은 이유로 config 를 직접 읽지 않는다 — preflight 가 세 번째
+    복제가 될 뻔했고, 갈라지면 게이트가 거짓 차단을 낸다.
     """
     if req.log_folders:
         folders = [f for f in req.log_folders if f]
@@ -329,20 +332,9 @@ def _resolve_swit_log_folders(req: "SwITBuildRequest | SwITSitrBuildRequest") ->
             return folders
     if req.log_folder:
         return [req.log_folder]
-    cfg = _load_meta_from_config(req.project_id)
-    cfg_list = cfg.get("swit_log_folders")
-    if isinstance(cfg_list, (list, tuple)):
-        folders = [str(f) for f in cfg_list if f]
-        if folders:
-            return folders
-    log_folders = cfg.get("log_folders", {}) or {}
-    single = (
-        cfg.get("swit_log_folder")
-        or log_folders.get("swit")
-        or log_folders.get("integration")
-        or None
-    )
-    return [str(single)] if single else []
+    from backend.services.swut_meta_resolver import config_log_folders
+    # config 읽기는 **이 모듈의 캐시 wrapper** 로 한다(테스트 seam 보존).
+    return config_log_folders(_load_meta_from_config(req.project_id), "swit")
 
 
 def _resolve_swit_log_folder(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str | None:
@@ -567,6 +559,7 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         record_run(
             "swit", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
             meta={
                 "asil_level": str(getattr(meta, "asil_level", "") or ""),
                 "kind": "coverage",
@@ -600,28 +593,39 @@ async def build_swit_coverage(
         )
 
 
-def _record_sitr_quality(
-    req: SwITSitrBuildRequest, meta: Any, summary: dict[str, Any],
+def _record_test_quality(
+    req: SwITBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str,
 ) -> None:
-    """SITR 빌드 1회를 Quality DB 에 기록 (non-fatal) — swut.py `_record_sutr_quality` 대칭.
+    """SITR / SwITCR 빌드 1회를 Quality DB 에 기록 (non-fatal) — swut.py `_record_test_quality` 대칭.
 
     Coverage 빌드에만 기록이 있어 SITR 은 만들어도 이력이 남지 않았다. doc_type 을
     `swit` 이 아니라 `sitr` 로 두는 이유는 summary 스키마가 커버리지와 달라서다
     (`total/tested/passed/failed` — evaluator.evaluate_test_result 참조).
 
-    SITR 경로도 둘(표준/spec-based)이라 호출부가 둘이다 — 복제 대신 함수로 묶는다.
+    **SwITCR 이 같은 상태였다**(2026-08-21). 종합결과서는 `switcr` doc_type 으로 기록한다 —
+    총 TC 키가 SITR 의 `total` 이 아니라 `total_tcs`(`swit_comprehensive_aggregator.py:1478`)
+    라 시험 결과 평가기에 넣으면 분모가 0 으로 접혀 실행률이 폭주한다
+    (evaluator.evaluate_comprehensive_result 참조).
+
+    호출부가 셋이다(SITR 표준/spec-based + SwITCR). `req` 타입을 부모 `SwITBuildRequest` 로
+    넓힌 것도 그래서다 — `SwITSitrBuildRequest` 는 그 하위라 그대로 들어온다.
+    **doc_type 에 기본값을 두지 않는 것도 의도다**: 빠뜨린 호출이 조용히 `sitr` 로 기록되면
+    종합결과서가 SITR 행을 덮어쓴다.
     """
     try:
         from workflow.quality.recorder import record_test_result_run
         record_test_result_run(
-            "sitr", summary,
+            doc_type, summary,
             project_id=str(getattr(req, "project_id", "") or ""),
             asil_level=str(getattr(meta, "asil_level", "") or ""),
             release_sw_version=str(getattr(req, "release_sw_version", "") or ""),
+            # 화면이 아는 프로젝트 축을 그대로 넘긴다. 비면 recorder 가 project_id 에서
+            # 추측하는데 그 추측이 틀리는 실환경이 있다(schemas.py `scm_id` 주석).
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
-        _logger.exception("SITR quality record skipped (non-fatal)")
+        _logger.exception("%s quality record skipped (non-fatal)", doc_type.upper())
 
 
 def _is_sitr_spec_based(req: SwITSitrBuildRequest, cfg: dict[str, Any]) -> bool:
@@ -695,7 +699,7 @@ def _do_swit_sitr_build_spec_based(
             status_code=500,
             detail=f"spec-based SwITR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
-    _record_sitr_quality(req, meta, result.summary)
+    _record_test_quality(req, meta, result.summary, doc_type="sitr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -757,7 +761,7 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
-    _record_sitr_quality(req, meta, result.summary)
+    _record_test_quality(req, meta, result.summary, doc_type="sitr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -833,6 +837,7 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
         result.warnings.extend(_swits_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwITCR build failed (ok=False)")
+    _record_test_quality(req, meta, result.summary, doc_type="switcr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

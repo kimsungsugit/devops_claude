@@ -669,3 +669,283 @@ def test_measure_source_forwards_uds_path(monkeypatch, tmp_path: Path) -> None:
         "sds_path": "s.docx", "srs_path": "r.docx", "uds_path": "u.docx"})
     assert r.status_code == 200
     assert seen.get("uds_path") == "u.docx"
+
+
+# ── 시험 결과 6종 + 통합 1종 — 양식 키가 라우터와 **같은가** ──────────────────
+#
+# `_TEST_REPORT_TEMPLATE_KEY` 는 라우터 `_read_template_bytes` 의 config fallback 키를
+# 손으로 옮겨 적은 **복제**다. 갈라지면 증상이 고약하다: 게이트는 "양식 있음"이라 하고
+# 빌드는 400 을 낸다 — 사용자는 준비 점검을 통과한 뒤에 실패를 본다.
+#
+# 그래서 소스를 읽어 비교하지 않고 **라우터에게 직접 물어본다**: 빈 config 로 부르면
+# 400 detail 에 자기가 찾던 키 이름을 적어 준다. 그 값이 정본이다.
+
+
+class TestReportTemplateKeyParity:
+    # doc_type → (라우터 모듈, `_read_template_bytes` 의 kind 인자)
+    ROUTES = {
+        "swut": ("swut", "coverage"),
+        "sutr": ("swut", "sutr"),
+        "swutcr": ("swut", "swutcr"),
+        "swit": ("swit", "coverage"),
+        "sitr": ("swit", "sitr"),
+        "switcr": ("swit", "switcr"),
+    }
+
+    @pytest.mark.parametrize("doc_type", sorted(ROUTES))
+    def test_key_matches_router(self, doc_type, monkeypatch) -> None:
+        import importlib
+
+        from fastapi import HTTPException
+
+        from backend.routers.docgen_preflight import _TEST_REPORT_TEMPLATE_KEY
+
+        mod_name, kind = self.ROUTES[doc_type]
+        mod = importlib.import_module(f"backend.routers.{mod_name}")
+        monkeypatch.setattr(mod, "_load_meta_from_config", lambda _pid: {"template_paths": {}})
+        with pytest.raises(HTTPException) as ei:
+            mod._read_template_bytes("", "HDPDM01", kind)
+        detail = str(ei.value.detail)
+        expected = _TEST_REPORT_TEMPLATE_KEY[doc_type]
+        assert f"'{expected}'" in detail, (
+            f"{doc_type}: preflight 는 '{expected}' 를 보는데 라우터는 다른 키를 찾는다 — {detail}"
+        )
+
+    def test_swreport_key_is_the_first_router_fallback(self) -> None:
+        """통합 Summary 만 라우터가 **키 여러 개를 순서대로** 본다 — 첫 키가 정본이다."""
+        from backend.routers.docgen_preflight import _TEST_REPORT_TEMPLATE_KEY
+        from backend.routers.swreport import _TEMPLATE_CONFIG_KEYS
+        assert _TEST_REPORT_TEMPLATE_KEY["swreport"] == _TEMPLATE_CONFIG_KEYS[0]
+
+    def test_every_test_report_doc_type_has_a_key(self) -> None:
+        """키가 없으면 `.get(..., "")` 이 빈 문자열을 주고, 게이트는 '등록 안 됨'을
+        **모든 프로젝트에** 보고한다(거짓 차단)."""
+        from backend.routers.docgen_preflight import _TEST_REPORT_TEMPLATE_KEY
+        for dt in req.TEST_REPORT_DOC_TYPES:
+            assert _TEST_REPORT_TEMPLATE_KEY.get(dt), f"{dt}: 양식 키 미등록"
+
+
+# ── 시험 결과 6종이 실제로 게이트를 받는가 ───────────────────────────────────
+
+@pytest.mark.parametrize("doc_type", ["swut", "sutr", "swutcr", "swit", "sitr", "switcr"])
+def test_test_report_doc_types_get_form_and_template_steps(doc_type) -> None:
+    """커버리지 2종(`swut`/`swit`)이 빠져 있으면 보드의 [준비] 가 빈 패널을 연다."""
+    data = _post({"doc_type": doc_type})
+    assert data["unknown_doc_type"] is False
+    ids = {s["id"] for s in data["steps"]}
+    assert "report_template" in ids, f"{doc_type}: 양식 단계 없음"
+    for field in req.TEST_REPORT_FORM_FIELDS:
+        assert f"form_{field}" in ids, f"{doc_type}: {field} 단계 없음"
+
+
+def test_form_values_are_read_not_ignored() -> None:
+    """폼을 실으면 판정이 **바뀌어야** 한다 — 안 바뀌면 `form` 이 버려진 것이다."""
+    without = _post({"doc_type": "swutcr"})
+    with_form = _post({
+        "doc_type": "swutcr",
+        "form": {"project_id": "HDPDM01", "release_sw_version": "1.02", "test_date": "2026-08-24"},
+    })
+    for field in req.TEST_REPORT_FORM_FIELDS:
+        assert _step(without, f"form_{field}")["state"] == "needed", field
+        assert _step(with_form, f"form_{field}")["state"] == "ok", field
+
+
+def test_coverage_doc_type_keeps_the_quality_db_vocabulary() -> None:
+    """커버리지 키를 `swutcv` 로 바꾸면 그동안 쌓인 이력이 전부 '미생성' 이 된다.
+
+    Quality DB 는 `record_run("swut", …)` 으로 쌓아 왔고 보드는 그 doc_type 으로 조회한다.
+    """
+    assert "swut" in req.DOC_REQUIREMENTS
+    assert "swit" in req.DOC_REQUIREMENTS
+    assert "swutcv" not in req.DOC_REQUIREMENTS
+    assert "switcv" not in req.DOC_REQUIREMENTS
+    assert "커버리지" in req.DOC_REQUIREMENTS["swut"]["label"]
+    assert "커버리지" in req.DOC_REQUIREMENTS["swit"]["label"]
+
+
+def test_handlers_point_at_real_endpoints() -> None:
+    """`handler` 문자열이 실재하는 라우트여야 한다 — 없는 경로를 안내하면 조치가 막힌다."""
+    routes = {f"{m} {r.path}" for r in app.routes
+              for m in (getattr(r, "methods", None) or set())}
+    for dt in req.doc_types():
+        handler = req.requirements_for(dt)["handler"]
+        assert handler in routes, f"{dt}: {handler} 라우트가 없다"
+
+
+# ── VectorCAST 로그: 게이트가 **라우터와 같은 곳**을 보는가 ──────────────────
+#
+# 2026-08-24 라이브 실측: 보드에서 SwUTCR 이 정상 생성되는데 준비 점검은
+# "VectorCAST 결과 경로가 지정되지 않았습니다 → 진행 불가" 였다. 라우터는
+# `config/swut_meta.json` 의 `swut_log_folders` 로 폴백하는데 게이트가 그 출처를 몰랐다.
+# **거짓 차단은 게이트를 무시하게 만든다** — 없느니만 못하다.
+
+
+class TestVectorcastSourceParity:
+    SERIES = {"swut": "swut", "sutr": "swut", "swutcr": "swut",
+              "swit": "swit", "sitr": "swit", "switcr": "swit"}
+
+    def test_series_map_covers_the_six(self) -> None:
+        from backend.routers.docgen_preflight import _TEST_REPORT_LOG_SERIES
+        assert _TEST_REPORT_LOG_SERIES == self.SERIES
+        # 통합 Summary 는 로그가 아니라 레벨별 산출물을 읽는다 — 넣으면 없는 단계가 생긴다.
+        assert "swreport" not in _TEST_REPORT_LOG_SERIES
+
+    @pytest.mark.parametrize("doc_type", sorted(SERIES))
+    def test_config_fallback_is_the_same_source_the_router_uses(
+        self, doc_type, monkeypatch, tmp_path,
+    ) -> None:
+        """게이트가 본 경로 == 라우터가 빌드에 쓸 경로."""
+        from backend.services import swut_meta_resolver as res
+        series = self.SERIES[doc_type]
+        folder = tmp_path / f"{series}_log"
+        folder.mkdir()
+        monkeypatch.setattr(
+            res, "config_log_folders_for",
+            lambda pid, s: [str(folder)] if (pid == "PRJ" and s == series) else [],
+        )
+        data = _post({
+            "doc_type": doc_type, "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        step = _step(data, "vectorcast")
+        assert step is not None, f"{doc_type}: vectorcast 단계가 없다"
+        assert step["state"] == "ok", f"{doc_type}: {step.get('reason')}"
+        assert str(folder) in str(step.get("value", ""))
+
+    def test_partial_missing_is_degraded_not_ok(self, monkeypatch, tmp_path) -> None:
+        """APP+BOOT 중 하나만 없으면 **부분 결손**이다 — 첫 개만 보고 '확인됨' 하면
+        산출물이 절반만 담긴 채로 나간다."""
+        from backend.services import swut_meta_resolver as res
+        good = tmp_path / "APP"
+        good.mkdir()
+        gone = tmp_path / "BOOT_없음"
+        monkeypatch.setattr(res, "config_log_folders_for", lambda pid, s: [str(good), str(gone)])
+        data = _post({
+            "doc_type": "swutcr", "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        step = _step(data, "vectorcast")
+        assert step["state"] == "degraded", step
+        assert step["measured"] == {"folders": 2, "missing": 1}
+        assert "BOOT_없음" in step["reason"]
+
+    def test_all_missing_is_missing(self, monkeypatch, tmp_path) -> None:
+        from backend.services import swut_meta_resolver as res
+        monkeypatch.setattr(
+            res, "config_log_folders_for",
+            lambda pid, s: [str(tmp_path / "없음1"), str(tmp_path / "없음2")],
+        )
+        data = _post({
+            "doc_type": "swutcr", "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        assert _step(data, "vectorcast")["state"] == "missing"
+
+
+def test_router_and_preflight_share_one_config_reader() -> None:
+    """라우터가 config 를 **직접** 읽으면 세 번째 복제가 되살아난다."""
+    import inspect
+
+    from backend.routers import swit as swit_mod
+    from backend.routers import swut as swut_mod
+    for mod, fn in ((swut_mod, "_resolve_swut_log_folders"), (swit_mod, "_resolve_swit_log_folders")):
+        src = inspect.getsource(getattr(mod, fn))
+        assert "config_log_folders" in src, f"{fn} 이 단일 출처를 안 쓴다"
+        for key in ("swut_log_folders", "swit_log_folder", "log_folders\", {}"):
+            assert f'cfg.get("{key}' not in src, f"{fn} 이 config 를 직접 읽는다: {key}"
+
+
+# ── 대응 시험 규격서: 출처 · 필수 여부 ──────────────────────────────────────
+#
+# 2026-08-24 실측으로 드러난 두 결함:
+#   B. 규격서가 `swut_meta.json` 에 **등록돼 있는데** 게이트는 SCM 만 보고
+#      "경로가 지정되지 않았습니다" 라고 했다 (VectorCAST 와 같은 결함).
+#   A. `sutr_spec_based=true` 프로젝트에서 규격서가 없으면 라우터가 **400** 을 내는데
+#      표는 `optional` 이라 게이트가 "없어도 됩니다" 라고 **거짓말**을 했다.
+
+
+class TestSpecDocSourceAndRequirement:
+    @pytest.mark.parametrize(
+        "doc_type,series",
+        [("swut", "swut"), ("sutr", "swut"), ("swutcr", "swut"),
+         ("swit", "swit"), ("sitr", "swit"), ("switcr", "swit")],
+    )
+    def test_config_registered_spec_is_found(self, doc_type, series, monkeypatch, tmp_path):
+        """B — config 에 등록된 규격서를 게이트가 찾는다."""
+        from backend.services import swut_meta_resolver as res
+        spec = tmp_path / f"{series}_spec.xlsm"
+        spec.write_bytes(b"x")
+        monkeypatch.setattr(res, "config_log_folders_for", lambda pid, s: [])
+        monkeypatch.setattr(
+            res, "config_spec_path_for",
+            lambda pid, s: str(spec) if (pid == "PRJ" and s == series) else "",
+        )
+        monkeypatch.setattr(res, "config_spec_is_required_for", lambda pid, s: False)
+        data = _post({
+            "doc_type": doc_type, "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        step = _step(data, "spec_doc")
+        assert step is not None, f"{doc_type}: spec_doc 단계가 없다"
+        assert step["state"] == "ok", f"{doc_type}: {step.get('reason')}"
+        assert str(spec) == step.get("value")
+
+    @pytest.mark.parametrize("doc_type,series", [("sutr", "swut"), ("sitr", "swit")])
+    def test_spec_based_project_marks_it_required(self, doc_type, series, monkeypatch, tmp_path):
+        """A — spec-based 프로젝트에서는 규격서가 required 다(없으면 라우터가 400)."""
+        from backend.services import swut_meta_resolver as res
+        monkeypatch.setattr(res, "config_log_folders_for", lambda pid, s: [])
+        monkeypatch.setattr(res, "config_spec_path_for", lambda pid, s: "")
+        monkeypatch.setattr(res, "config_spec_is_required_for", lambda pid, s: True)
+        data = _post({
+            "doc_type": doc_type, "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        step = _step(data, "spec_doc")
+        assert step["required"] is True, step
+        # 필수인데 없으면 **막아야** 한다 — needs_decision 으로 접으면 400 을 예고 못 한다.
+        assert step["state"] == "missing", step
+        assert data["verdict"] == "blocked"
+
+    @pytest.mark.parametrize("doc_type,series", [("sutr", "swut"), ("sitr", "swit")])
+    def test_non_spec_based_project_keeps_it_optional(self, doc_type, series, monkeypatch):
+        """HDPDM01 처럼 꺼진 프로젝트에서는 그대로 선택 입력 — 반대 방향 거짓말 금지."""
+        from backend.services import swut_meta_resolver as res
+        monkeypatch.setattr(res, "config_log_folders_for", lambda pid, s: [])
+        monkeypatch.setattr(res, "config_spec_path_for", lambda pid, s: "")
+        monkeypatch.setattr(res, "config_spec_is_required_for", lambda pid, s: False)
+        data = _post({
+            "doc_type": doc_type, "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        step = _step(data, "spec_doc")
+        assert not step.get("required"), step
+        assert step["effect"], "선택 입력은 **없으면 무슨 일이 생기는지** 를 달고 있어야 한다"
+
+    @pytest.mark.parametrize("doc_type", ["swut", "swutcr", "swit", "switcr"])
+    def test_coverage_and_comprehensive_never_promote(self, doc_type, monkeypatch):
+        """커버리지·종합결과는 규격서 없이도 빌드가 성공한다 — 막을 이유가 없다."""
+        from backend.services import swut_meta_resolver as res
+        monkeypatch.setattr(res, "config_log_folders_for", lambda pid, s: [])
+        monkeypatch.setattr(res, "config_spec_path_for", lambda pid, s: "")
+        # spec_based 가 켜져 있어도 이 넷은 승격되면 안 된다.
+        monkeypatch.setattr(res, "config_spec_is_required_for", lambda pid, s: True)
+        data = _post({
+            "doc_type": doc_type, "scm_id": "",
+            "form": {"project_id": "PRJ", "release_sw_version": "1.0", "test_date": "2026-08-24"},
+        })
+        assert not _step(data, "spec_doc").get("required"), doc_type
+
+    def test_promotion_map_is_only_the_two_spec_based_docs(self):
+        from backend.routers.docgen_preflight import _SPEC_REQUIRED_SERIES
+        assert _SPEC_REQUIRED_SERIES == {"sutr": "swut", "sitr": "swit"}
+
+
+def test_router_uses_the_shared_spec_path_judgment() -> None:
+    """`resolve_swuts_path` 가 config 를 직접 파면 판정이 두 벌이 된다."""
+    import inspect
+
+    from backend.services.swut_meta_resolver import resolve_swuts_path
+    src = inspect.getsource(resolve_swuts_path)
+    assert "config_spec_path" in src
+    assert 'cfg.get("swits_docx_path")' not in src

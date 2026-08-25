@@ -38,9 +38,17 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from workflow.quality.advisor import _SWUT_ADVICE, _TEST_RESULT_ADVICE  # noqa: E402
+from workflow.quality.advisor import (  # noqa: E402
+    _COMPREHENSIVE_ADVICE,
+    _SWUT_ADVICE,
+    _TEST_RESULT_ADVICE,
+)
 from workflow.quality.db import get_session, init_db  # noqa: E402
-from workflow.quality.evaluator import evaluate_coverage, evaluate_test_result  # noqa: E402
+from workflow.quality.evaluator import (  # noqa: E402
+    evaluate_comprehensive_result,
+    evaluate_coverage,
+    evaluate_test_result,
+)
 from workflow.quality.models import GenerationRun  # noqa: E402
 from workflow.quality.recorder import record_run, record_test_result_run  # noqa: E402
 
@@ -53,6 +61,19 @@ SUTR_SUMMARY = {
     "failed": 4,
     "deviation_cases_written": 2,
     "test_log_rows_written": 80,
+}
+
+# 실제 SwUTCR 빌드 summary 의 부분집합 (`swut_comprehensive_aggregator.py` 의 dict 그대로).
+# ⚠ **`total` 키가 없다** — 총 TC 는 `total_tcs` 다. 이 한 글자 차이가 아래 테스트의 전부다.
+SWUTCR_SUMMARY = {
+    "environments": 3,
+    "total_tcs": 100,
+    "tested": 80,
+    "passed": 76,
+    "failed": 4,
+    "function_rows": 169,
+    "swutcr_qualified_function_count": 150,
+    "swutcr_raw_function_count": 169,
 }
 
 
@@ -175,3 +196,105 @@ def test_advice_reaches_sutr_runs(qdb):
     metrics = {s["metric"] for s in (out.get("suggestions") or [])}
     # 실행률·통과율 둘 다 미달이므로 제안이 나와야 한다(빈 제안 = 배선 누락).
     assert "test_execution_pct" in metrics
+
+
+# ── 4. 종합결과서(SwUTCR/SwITCR) — **분모 키가 또 다르다** ────────────────────
+#
+# 이 저장소가 같은 함정에 두 번 빠졌다. 1차는 위 §2(커버리지 평가기에 SUTR 을 넣어
+# 측정하지 않은 축으로 FAIL 을 지어냄), 2차가 여기다: SUTR 평가기에 종합결과서를
+# 넣으면 분모(`total`)가 없어 `_safe_float` 가 0 으로 접고, `max(total, 1.0)` 때문에
+# **tested 값이 그대로 백분율**이 된다. FAIL 을 지어내는 것보다 나쁘다 — 게이트가
+# 100% 를 훌쩍 넘겨 통과하므로 **아무도 이상을 못 느낀다.**
+
+
+def test_comprehensive_denominator_is_total_tcs():
+    m = _by_name(evaluate_comprehensive_result(SWUTCR_SUMMARY))
+    # 100 개 중 80 개 실행 → 80%. 분모를 `total` 로 바꾸면 8000.0 이 되어 여기서 죽는다.
+    assert m["test_execution_pct"]["value"] == 80.0
+    assert m["pass_rate_pct"]["value"] == 76.0
+    # 문서 Summary 시트 표기값은 실행분 기준 — 두 축을 함께 보여야 공백이 드러난다.
+    assert m["executed_pass_rate_pct"]["value"] == 95.0
+
+
+def test_sutr_evaluator_on_comprehensive_summary_is_absurd():
+    """**음성 대조군** — 왜 평가기를 나눴는지 수치로 못 박는다.
+
+    이 단언이 깨졌다면 `evaluate_test_result` 가 `total_tcs` 폴백을 얻은 것이다.
+    그건 개선이 아니라 두 산출물이 같은 스키마라는 잘못된 신호다 — 나눈 이유가
+    분모만이 아니기 때문이다(종합결과서는 커버리지 축까지 함께 담는 다른 문서다).
+    """
+    m = _by_name(evaluate_test_result(SWUTCR_SUMMARY))
+    assert m["test_execution_pct"]["value"] == 8000.0
+
+
+def test_comprehensive_scale_metrics_are_not_gated():
+    """규모(함수 수·환경 수)는 프로젝트에 비례하는 절대수 — hard-fail 부적합."""
+    by_name = _by_name(evaluate_comprehensive_result(SWUTCR_SUMMARY))
+    assert by_name["qualified_function_count"]["value"] == 150.0
+    for name in ("qualified_function_count", "function_rows", "environments",
+                 "total_tcs", "tested_tcs", "failed_tcs"):
+        assert by_name[name]["threshold"] is None, name
+    # 게이트 축은 둘뿐이다 — 늘리면 여기서 알아차린다.
+    gated = {x["metric_name"] for x in evaluate_comprehensive_result(SWUTCR_SUMMARY)
+             if x["threshold"] is not None}
+    assert gated == {"test_execution_pct", "pass_rate_pct"}
+
+
+def test_comprehensive_absent_function_count_is_not_zero():
+    """없는 축을 0 으로 채우면 '함수 0개' 라는 **없는 사실**을 보고하게 된다."""
+    summary = {k: v for k, v in SWUTCR_SUMMARY.items()
+               if k not in ("swutcr_qualified_function_count", "swutcr_raw_function_count")}
+    names = {x["metric_name"] for x in evaluate_comprehensive_result(summary)}
+    assert "qualified_function_count" not in names
+
+
+def test_switcr_uses_its_own_function_count_key():
+    """SwITCR 은 키 이름이 다르다(`switcr_*`) — 한쪽만 보면 SwIT 축이 통째로 빈다."""
+    summary = dict(SWUTCR_SUMMARY)
+    del summary["swutcr_qualified_function_count"]
+    del summary["swutcr_raw_function_count"]
+    summary["switcr_qualified_function_count"] = 88
+    m = _by_name(evaluate_comprehensive_result(summary))
+    assert m["qualified_function_count"]["value"] == 88.0
+
+
+def test_recorder_dispatches_comprehensive_doc_types(qdb):
+    for doc_type in ("swutcr", "switcr"):
+        run_id = record_run(doc_type, SWUTCR_SUMMARY, project_root="HDPDM01", db_path=qdb)
+        assert run_id > 0, doc_type
+        init_db(qdb)
+        with get_session(qdb) as s:
+            run = s.query(GenerationRun).filter_by(id=run_id).one()
+            scores = {sc.metric_name: sc.value for sc in run.scores}
+            assert scores["test_execution_pct"] == 80.0, doc_type
+            # 커버리지로도 SUTR 로도 채점되지 않았다.
+            assert "statement_coverage_pct" not in scores, doc_type
+            # 규모 분모는 TC 수다. `total` 키를 보면 0 이 되어 **규모 0 인 실행**처럼 보인다.
+            assert run.summary.fn_count == 100, doc_type
+
+
+def test_comprehensive_empty_output_is_skipped_by_total_tcs(qdb):
+    """빈 산출물 skip 도 같은 키를 봐야 한다 — `total` 을 보면 **전부** skip 된다."""
+    assert record_run("swutcr", {"total_tcs": 0, "tested": 0}, db_path=qdb) == -1
+    assert record_run("switcr", {"total_tcs": 0, "tested": 0}, db_path=qdb) == -1
+    # 과하게 넓지 않은지 — 비지 않은 것은 기록돼야 한다.
+    assert record_run("swutcr", {"total_tcs": 5, "tested": 5, "passed": 5}, db_path=qdb) > 0
+
+
+def test_comprehensive_advice_table_is_its_own():
+    """SUTR 표를 재사용하면 조치문이 틀린다 — 종합결과서의 미실행은 '로그를 더 모아라'
+    가 아니라 '어느 레벨 산출물이 비었는가' 로 되짚어야 한다."""
+    assert _COMPREHENSIVE_ADVICE is not _TEST_RESULT_ADVICE
+    assert _COMPREHENSIVE_ADVICE is not _SWUT_ADVICE
+    assert "test_execution_pct" in _COMPREHENSIVE_ADVICE
+    assert "statement_coverage_pct" not in _COMPREHENSIVE_ADVICE
+
+
+def test_advice_reaches_comprehensive_runs(qdb):
+    """doc_type 분기가 없으면 advisor 가 '규칙이 정의되지 않았습니다' 로 답한다."""
+    from workflow.quality.advisor import suggest_improvements
+    run_id = record_run("swutcr", SWUTCR_SUMMARY, project_root="HDPDM01", db_path=qdb)
+    out = suggest_improvements(run_id, db_path=qdb)
+    metrics = {s["metric"] for s in (out.get("suggestions") or [])}
+    assert "test_execution_pct" in metrics
+    assert "정의되지 않았습니다" not in (out.get("summary") or "")

@@ -72,6 +72,70 @@ def load_meta_from_config(project_id: str) -> dict[str, Any]:
     return cfg.get("projects", {}).get(project_id, {}) or {}
 
 
+# VectorCAST 로그 폴더의 **config fallback 키** — 시리즈별 단일 출처.
+#
+# ⚠ 이 표가 왜 여기 있나 (2026-08-24). 같은 판정이 세 곳에 필요하다: SwUT 라우터,
+# SwIT 라우터, 그리고 생성 준비 점검(preflight). 앞의 둘은 각자 복제돼 있었고 세 번째를
+# 또 복제하려던 참이었다. 그러면 **게이트가 라우터와 다른 곳을 보게 된다** — 실측으로
+# preflight 가 "VectorCAST 결과 경로가 지정되지 않았습니다 → 진행 불가" 를 냈는데 같은
+# 요청의 빌드는 config 폴백으로 정상 성공했다. 거짓 차단은 게이트를 무시하게 만든다.
+_LOG_FOLDER_CONFIG_KEYS: dict[str, dict[str, Any]] = {
+    "swut": {"list": "swut_log_folders", "single": "swut_log_folder", "dict_keys": ()},
+    # SwIT 만 `log_folders` dict 폴백이 하나 더 있다(과거 키). 없애면 구 config 가 죽는다.
+    "swit": {
+        "list": "swit_log_folders",
+        "single": "swit_log_folder",
+        "dict_keys": ("swit", "integration"),
+    },
+}
+
+
+def config_log_folders(cfg: dict[str, Any], series: str) -> list[str]:
+    """project config **dict 에서** VectorCAST 로그 폴더를 뽑는다 — 요청값은 보지 않는다.
+
+    ⚠ config 를 **여기서 읽지 않고 인자로 받는** 것은 의도다. 라우터는 자기 모듈의
+    `_load_meta_from_config`(캐시·테스트 seam)를 이미 갖고 있는데, 이 함수가 config 를
+    직접 읽으면 그 seam 을 우회해 **회귀가 실제 머신 config 를 읽는다**(2026-08-24 실측:
+    라우터 회귀 12건이 tmp config 대신 실 파일을 읽어 깨졌다). 판정만 단일 출처로 두고
+    읽기는 호출부에 남긴다. config 를 안 가진 호출부는 `config_log_folders_for` 를 쓴다.
+
+    우선순위: list 키 → 단일 키 → (SwIT 전용) `log_folders` dict.
+
+    Args:
+        cfg: `load_meta_from_config(project_id)` 결과(프로젝트 단위 dict).
+        series: ``"swut"`` 또는 ``"swit"``.
+
+    Returns:
+        폴더 경로 목록. 등록이 없으면 빈 목록(= 지어내지 않는다).
+    """
+    keys = _LOG_FOLDER_CONFIG_KEYS.get(str(series or "").strip().lower())
+    if not keys:
+        return []
+    cfg = cfg or {}
+    raw_list = cfg.get(keys["list"])
+    if isinstance(raw_list, (list, tuple)):
+        folders = [str(f) for f in raw_list if f]
+        if folders:
+            return folders
+    single = cfg.get(keys["single"])
+    if not single:
+        nested = cfg.get("log_folders", {}) or {}
+        for k in keys["dict_keys"]:
+            if nested.get(k):
+                single = nested[k]
+                break
+    return [str(single)] if single else []
+
+
+def config_log_folders_for(project_id: str, series: str) -> list[str]:
+    """config 를 직접 읽어 `config_log_folders` 를 부르는 편의 래퍼.
+
+    라우터는 자기 캐시 wrapper 를 쓰므로 이걸 쓰지 않는다 — 소비처는 요청 객체가 없는
+    쪽(생성 준비 점검)이다.
+    """
+    return config_log_folders(load_meta_from_config(project_id), series)
+
+
 def resolve_swuds_path(req: Any, project_id: str) -> str:
     """49차 — req.swuds_docx_path 우선, 비면 config의 project별 값 fallback.
 
@@ -114,6 +178,55 @@ def resolve_c_source_root(req: Any, project_id: str) -> str:
     return (cfg.get("c_source_root") or "").strip()
 
 
+def config_spec_path(cfg: dict[str, Any], series: str) -> str:
+    """project config **dict 에서** 대응 시험 규격서(SwUTS/SwITS) 경로를 뽑는다.
+
+    ⚠ `config_log_folders` 와 같은 이유로 config 를 인자로 받는다 — 읽기는 호출부에,
+    판정만 여기에. 소비처가 셋이다: `resolve_swuts_path`(라우터 경유)와 생성 준비
+    점검(preflight), 그리고 아래 `config_spec_path_for`.
+
+    SwIT 은 SwITS 를 먼저 보고 없으면 SwUTS 로 떨어진다(기존 동작 보존).
+    """
+    cfg = cfg or {}
+    iso_docs = cfg.get("iso26262_docs", {}) or {}
+    if str(series or "").strip().lower() == "swit":
+        return (
+            cfg.get("swits_docx_path")
+            or iso_docs.get("swits_xlsm_path")
+            or cfg.get("swuts_docx_path")
+            or iso_docs.get("swuts_xlsm_path")
+            or ""
+        ).strip()
+    return (
+        cfg.get("swuts_docx_path")
+        or iso_docs.get("swuts_xlsm_path")
+        or ""
+    ).strip()
+
+
+def config_spec_path_for(project_id: str, series: str) -> str:
+    """config 를 직접 읽어 `config_spec_path` 를 부르는 편의 래퍼(요청 객체 없는 쪽 용)."""
+    return config_spec_path(load_meta_from_config(project_id), series)
+
+
+def config_spec_is_required(cfg: dict[str, Any], series: str) -> bool:
+    """규격서가 **필수**인가 — `sutr_spec_based`/`sitr_spec_based` 가 정한다.
+
+    spec-based 빌드는 결과 문서의 `3.Test Log` 시트를 **규격서 시트 통째 복사**로 만든다
+    (`_do_sutr_build_spec_based`). 그래서 규격서가 없으면 선택 입력이 빠지는 게 아니라
+    라우터가 **HTTP 400** 을 낸다 — 게이트가 "없어도 됩니다" 라고 말하면 거짓이다.
+
+    ⚠ **프로젝트마다 다르다.** 표에 고정으로 박으면 안 되고 config 를 읽어 판정해야 한다
+    (HDPDM01 은 `false` 라 그쪽에선 여전히 선택 입력이다).
+    """
+    key = "sitr_spec_based" if str(series or "").strip().lower() == "swit" else "sutr_spec_based"
+    return bool((cfg or {}).get(key, False))
+
+
+def config_spec_is_required_for(project_id: str, series: str) -> bool:
+    return config_spec_is_required(load_meta_from_config(project_id), series)
+
+
 def resolve_swuts_path(req: Any, project_id: str) -> str:
     """60차 F6-A — req.swuts_docx_path 우선, 비면 config의 project별 값 fallback.
 
@@ -134,22 +247,9 @@ def resolve_swuts_path(req: Any, project_id: str) -> str:
     req_value = getattr(req, "swuts_docx_path", "") or ""
     if req_value:
         return req_value
-    cfg = load_meta_from_config(project_id)
-    iso_docs = cfg.get("iso26262_docs", {}) or {}
-    req_type = type(req).__name__.lower()
-    if req_type.startswith("swit"):
-        return (
-            cfg.get("swits_docx_path")
-            or iso_docs.get("swits_xlsm_path")
-            or cfg.get("swuts_docx_path")
-            or iso_docs.get("swuts_xlsm_path")
-            or ""
-        ).strip()
-    return (
-        cfg.get("swuts_docx_path")
-        or iso_docs.get("swuts_xlsm_path")
-        or ""
-    ).strip()
+    series = "swit" if type(req).__name__.lower().startswith("swit") else "swut"
+    # 판정은 `config_spec_path` 단일 출처. config 읽기는 여기(기존 테스트 seam) 유지.
+    return config_spec_path(load_meta_from_config(project_id), series)
 
 
 def resolve_swuts_test_specs(

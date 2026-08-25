@@ -39,7 +39,18 @@ const DOC_ROWS = [
 ];
 
 /**
- * 시험 **결과** 문서 — 보드에서 바로 만든다.
+ * 시험 **결과** 문서 — 보드에서 바로 만든다. 레벨(SwUT/SwIT)로 나눈 **6종 + 통합 1종**.
+ *
+ * ## 왜 레벨별로 나눴나
+ *
+ * 한 레벨의 셋(커버리지·결과·종합결과)은 **같은 VectorCAST 세션에서 나오는 한 벌**이라
+ * 서로를 보며 판단한다 — 종합결과서의 실행률이 낮으면 같은 표의 커버리지 행을 먼저 본다.
+ * 7행을 한 표에 늘어놓으면 그 짝이 안 보이고, SwUT 것과 SwIT 것이 섞여 읽힌다.
+ *
+ * ⚠ 커버리지 행의 `key` 가 `swutcv`/`switcv` 가 **아니라** `swut`/`swit` 인 것은 의도다.
+ * Quality DB 가 이미 그 doc_type 으로 이력을 쌓아 왔고(`routers/swut.py` `record_run`),
+ * 이 보드는 `latestByType[row.key]` 로 조회한다 — 새 어휘를 만들면 그동안 쌓인 이력이
+ * 전부 "미생성" 으로 보인다.
  *
  * 예전엔 이 셋을 만들려면 각자의 서브탭에 들어가 15~20개 필드를 채워야 했다. 그런데
  * 그 값 대부분은 이미 어딘가에 있다(직전 빌드의 저장 폼, 설정>입력 자료 공유값,
@@ -52,29 +63,67 @@ const DOC_ROWS = [
  *
  * `builder` = swBuilderForms 의 폼 종류, `key` = quality DB 의 doc_type.
  */
-const TEST_REPORT_ROWS = [
+const TEST_LEVEL_GROUPS = [
   {
-    key: 'sutr', label: 'SUTR', icon: '🧪', desc: 'SW 단위시험 결과',
-    builder: 'swut', endpoint: '/api/swut/sutr/build', sub: 'swut', fallbackName: 'sutr.xlsm',
+    id: 'swut', title: 'SW 단위시험 (SwUT)',
+    hint: '셋 다 같은 VectorCAST 세션에서 나온다 — 순서 제약은 없다',
+    rows: [
+      {
+        key: 'swut', label: 'SwUTCV', icon: '📊', desc: '단위시험 커버리지',
+        builder: 'swut', endpoint: '/api/swut/coverage/build', sub: 'swut',
+        fallbackName: 'swut_coverage.xlsx',
+      },
+      {
+        key: 'sutr', label: 'SUTR', icon: '🧪', desc: 'SW 단위시험 결과',
+        builder: 'swut', endpoint: '/api/swut/sutr/build', sub: 'swut', fallbackName: 'sutr.xlsm',
+      },
+      {
+        key: 'swutcr', label: 'SwUTCR', icon: '📚', desc: '단위시험 종합결과',
+        builder: 'swut', endpoint: '/api/swut/swutcr/build', sub: 'swut', fallbackName: 'swutcr.xlsm',
+      },
+    ],
   },
   {
-    key: 'sitr', label: 'SITR', icon: '🔗', desc: 'SW 통합시험 결과',
-    builder: 'swit', endpoint: '/api/swit/sitr/build', sub: 'swit', fallbackName: 'sitr.xlsm',
+    id: 'swit', title: 'SW 통합시험 (SwIT)',
+    hint: '셋 다 같은 VectorCAST 세션에서 나온다 — 순서 제약은 없다',
+    rows: [
+      {
+        key: 'swit', label: 'SwITCV', icon: '📊', desc: '통합시험 커버리지',
+        builder: 'swit', endpoint: '/api/swit/coverage/build', sub: 'swit',
+        fallbackName: 'swit_coverage.xlsx',
+      },
+      {
+        key: 'sitr', label: 'SITR', icon: '🔗', desc: 'SW 통합시험 결과',
+        builder: 'swit', endpoint: '/api/swit/sitr/build', sub: 'swit', fallbackName: 'sitr.xlsm',
+      },
+      {
+        key: 'switcr', label: 'SwITCR', icon: '📚', desc: '통합시험 종합결과',
+        builder: 'swit', endpoint: '/api/swit/switcr/build', sub: 'swit', fallbackName: 'switcr.xlsm',
+      },
+    ],
   },
   {
-    key: 'swreport', label: '통합 Summary', icon: '📊', desc: '전 레벨 결과 roll-up',
-    builder: 'swreport', endpoint: '/api/swreport/summary/build', sub: 'swreport',
-    fallbackName: 'swreport_summary.xlsm',
+    id: 'swreport', title: '통합 결과',
+    hint: '레벨별 산출물을 되읽어 합친다 — 없는 산출물은 빈 시트로 나간다',
+    rows: [
+      {
+        key: 'swreport', label: '통합 Summary', icon: '📊', desc: '전 레벨 결과 roll-up',
+        builder: 'swreport', endpoint: '/api/swreport/summary/build', sub: 'swreport',
+        fallbackName: 'swreport_summary.xlsm',
+      },
+    ],
   },
 ];
+
+/** 위 그룹의 평탄화 — 행 계산(`reportRows`)은 그룹과 무관하므로 한 번만 돈다. */
+const TEST_REPORT_ROWS = TEST_LEVEL_GROUPS.flatMap(g => g.rows);
 
 // 보조 표 — 커버리지/정적분석 산출물. **이력이 있는 것만** 보여준다(없는 걸 '미생성'
 // 으로 줄 세우면 안 쓰는 빌더까지 결함처럼 읽힌다). 각 행은 해당 서브탭으로 이동한다.
 // `swreport` 는 위 시험 결과 표로 옮겼다 — 두 표에 같은 행을 두면 어느 쪽이 최신인지
-// 화면이 두 번 답하게 된다.
+// 화면이 두 번 답하게 된다. **커버리지 2종(`swut`/`swit`)도 같은 이유로 옮겼다** — 이제
+// 레벨별 표에서 생성까지 되므로 여기 남겨두면 같은 run 이 두 곳에 뜬다.
 const BUILDER_ROWS = [
-  { key: 'swut', label: 'SwUT 커버리지', sub: 'swut' },
-  { key: 'swit', label: 'SwIT 커버리지', sub: 'swit' },
   { key: 'swsa', label: 'SwSA 정적분석', sub: 'swsa' },
 ];
 
@@ -99,6 +148,24 @@ const METRIC_LABELS = {
   // 시험 결과 보고서(SUTR/SITR) — 커버리지와 다른 축이다.
   test_execution_pct: '시험 실행률', executed_pass_rate_pct: '실행분 통과율',
   deviation_cases: '편차 건수', tested_tcs: '실행 TC', failed_tcs: '실패 TC',
+  // 종합결과서(SwUTCR/SwITCR) 참고지표 — 게이트 대상이 아니라 **규모**다.
+  // 백분율이 아니므로 `fmtPct` 로 찍으면 안 된다(소비처는 `EvidenceDetail` 뿐이고
+  // 거기서는 threshold 유무로 갈라 표시한다).
+  total_tcs: '총 TC', environments: '시험 환경 수', function_rows: '함수 행 수',
+  qualified_function_count: '자격 함수 수',
+  // UDS 참고지표 — 위 `input_pct`/`output_pct` 와 **다른 질문**이라 라벨을 구분한다.
+  //   input_pct      = "입력 칸에 정보를 적었나"    (`[IN] (none)` 도 채움으로 셈)
+  //   input_real_pct = "실제로 주고받는 항목이 있나" (`(none)` 은 미채움)
+  // 실측 98.3% vs 18.9%. 라벨이 같으면 화면에서 두 수치가 모순으로 읽힌다.
+  input_real_pct: '입력(실제 항목)', output_real_pct: '출력(실제 항목)',
+  // 근거(신뢰 출처) 축 — "칸이 찼나" 가 아니라 "근거가 있나". 판정은 confidence gate 가 한다.
+  description_trusted_pct: '설명 근거율', asil_trusted_pct: 'ASIL 근거율',
+  related_trusted_pct: 'Related ID 근거율',
+  // 산출물 충실도 — 위 축들이 payload 를 재는 것과 달리 **문서에 실제로 들어간 수**다.
+  // payload 가 완벽해도 템플릿에 heading 이 없으면 문서에서 사라지므로, 만점 옆에
+  // 이 값이 낮게 뜨는 조합이 실제로 있었다(실측 run 660·661 = 점수 100.0 / 반영률 0.0).
+  // 값이 아예 없으면 **미측정**이다 — 0% 로 보이지 않게 생산자가 키를 안 싣는다.
+  artifact_match_pct: '문서 반영률',
 };
 
 const metricLabel = (code) => METRIC_LABELS[code] || code;
@@ -389,19 +456,32 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
   const [prep, setPrep] = useState({});                // {docType: {data, loading, error}}
 
   /**
+   * 준비 패널을 **다시** 부를 때 쓸 폼(doc_type → form).
+   *
+   * `handlePrepAction` 은 `reportRows` 보다 **먼저** 정의된다(아래 blob 유틸의 TDZ 주석과
+   * 같은 제약 — deps 배열은 렌더 시점에 평가된다). 그래서 행에서 폼을 끌어올 수 없어
+   * ref 로 옮긴다. 안 하면 액션 후 재조회가 폼 없이 돌아 **필수값이 방금 채워졌는데도
+   * "값이 필요합니다"** 로 되돌아간다.
+   */
+  const prepFormRef = useRef({});
+
+  /**
    * 결정 질문 — **preflight 와 별도**로 뒤따라 채운다.
    *
    * 문장을 LLM 이 쓰므로 수 초가 걸린다. 한 응답에 묶으면 준비 상태 표시 전체가 그걸
    * 기다린다. 실패해도 준비 패널은 그대로 살아 있어야 하므로 조용히 비운다
    * (서버가 LLM 없이도 룰 문장으로 답하므로 여기까지 오는 실패는 네트워크뿐이다).
    */
-  const loadQuestions = useCallback(async (docType) => {
+  const loadQuestions = useCallback(async (docType, form) => {
     try {
       const res = await post('/api/docgen/questions', {
         doc_type: docType,
         scm_id: scmId || '',
         source_root: analysisResult?.matchedScm?.source_root || '',
         doc_paths: loadDocPaths() || {},
+        // 시험 결과 6종은 폼 필수값(project_id/버전/시험일)이 결정 항목이라 폼 없이 물으면
+        // **항상 같은 질문**이 돌아온다. `loadPrep` 과 같은 값을 싣는다.
+        form: form || {},
       });
       setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), questions: res } }));
     } catch (e) {
@@ -412,7 +492,16 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     }
   }, [scmId, analysisResult]);
 
-  const loadPrep = useCallback(async (docType) => {
+  /**
+   * 준비 점검. `form` 은 **시험 결과 6종 전용**이다.
+   *
+   * ⚠ 안 실으면 게이트가 항상 "필수값 없음" 을 보고한다 — 백엔드
+   * `PreflightRequest.form` 은 프론트 `missingRequiredFields` 판정을 흡수해 **판정이
+   * 두 벌이 되지 않게** 하려고 만든 필드라, 비면 판정이 두 벌이 되는 게 아니라
+   * 한 벌이 거짓말을 한다. 양식 템플릿 조회도 `form.project_id` 로 시작한다.
+   */
+  const loadPrep = useCallback(async (docType, form) => {
+    prepFormRef.current[docType] = form || {};
     setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), loading: true } }));
     try {
       const res = await post('/api/docgen/preflight', {
@@ -424,6 +513,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         // 화면이 보고 있는 job/캐시를 알아야 한다.
         job_url: job?.url || '',
         cache_root: analysisResult?.cacheRoot || '',
+        form: form || {},
       });
       // 200 + error 를 성공으로 삼지 않는다.
       if (res?.error) {
@@ -432,7 +522,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       }
       setPrep(p => ({ ...p, [docType]: { loading: false, data: res, error: '' } }));
       // 준비 상태를 먼저 그리고 질문은 뒤따라 채운다(LLM 이라 느리다).
-      loadQuestions(docType);
+      loadQuestions(docType, form);
     } catch (e) {
       setPrep(p => ({
         ...p,
@@ -442,10 +532,10 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     // `job` 은 빌드 캐시 확인에 쓰인다 — 빼면 프로젝트를 바꿔도 옛 job 으로 판정한다.
   }, [scmId, analysisResult, job, loadQuestions]);
 
-  const togglePrep = useCallback((docType) => {
+  const togglePrep = useCallback((docType, form) => {
     if (prepOpen === docType) { setPrepOpen(null); return; }
     setPrepOpen(docType);
-    if (!prep[docType]?.data) loadPrep(docType);
+    if (!prep[docType]?.data) loadPrep(docType, form);
   }, [prepOpen, prep, loadPrep]);
 
   // ── blob 다운로드 유틸 ───────────────────────────────────────────────────
@@ -502,7 +592,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           // 게이트가 실제 산출물보다 나쁜 숫자를 보고한다(실측 요구 48/68 vs 64/68).
           uds_path: paths.uds || analysisResult?.matchedScm?.linked_docs?.uds || '',
         });
-        if (prepOpen) loadPrep(prepOpen);
+        if (prepOpen) loadPrep(prepOpen, prepFormRef.current[prepOpen]);
       } catch (e) {
         toast('error', `소스 측정 실패: ${e?.message || e}`);
       }
@@ -522,7 +612,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         });
         notifyScmRegistryChanged();
         toast('success', `${step?.label || '문서'} 경로를 교체했습니다: ${res?.new || ''}`);
-        if (prepOpen) loadPrep(prepOpen);
+        if (prepOpen) loadPrep(prepOpen, prepFormRef.current[prepOpen]);
       } catch (e) {
         // 403(관리자 전용)은 장애가 아니라 권한 상태다.
         const msg = String(e?.message || e);
@@ -595,6 +685,18 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         form,
         version,
         projectId,
+        // ⚠ 빌드 payload 와 준비 점검 payload 를 **같은 값**으로 둔다. 갈라지면 게이트가
+        //   본 것과 실제로 만들어지는 것이 달라진다 — 그건 게이트가 없는 것보다 나쁘다.
+        //
+        // ⚠ `scm_id` 를 함께 싣는 이유(2026-08-24 라이브 실측): 안 실으면 백엔드가
+        //   `project_id` 에서 프로젝트 축을 **추측**하는데, 문자열 "KJPDS02" 가 SCM entry
+        //   `kjpds02` 의 id 이면서 동시에 `kjpds02_pv` 의 builder_project_id 라 추측이
+        //   `kjpds02` 로 빗나갔다. 그러면 이 보드(`kjpds02_pv` 로 조회)는 **방금 만든
+        //   문서를 영영 "미생성"** 으로 표시한다 — 빌드도 기록도 정상인데 화면만 침묵한다.
+        //   문자열만으로 갈리지 않는 모호함이라, 아는 쪽인 화면이 실어 보낸다.
+        payloadForm: {
+          ...form, release_sw_version: version, project_id: projectId, scm_id: scmId || '',
+        },
         versionSource: versionEdit[row.key] != null ? 'input'
           : form.release_sw_version ? 'saved' : (runVer ? 'run' : 'none'),
         // 화면 범위와 빌드 대상이 다르면 다른 프로젝트 문서를 만들게 된다 —
@@ -614,11 +716,17 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     //   `generateReport` 가 `row.projectId` 를 payload 에 싣는다).
   }, [runs, versionEdit, scmId, analysisResult?.matchedScm?.builder_project_id]);
 
+  /** 그룹 렌더가 행 정의를 계산된 행으로 바꿔 끼우려고 쓴다. */
+  const reportRowByKey = useMemo(
+    () => Object.fromEntries(reportRows.map(r => [r.key, r])),
+    [reportRows],
+  );
+
   const generateReport = useCallback(async (row) => {
     // ⚠ `project_id` 를 **payload 에도** 반영한다. 표시만 바꾸고 빌드에 안 넘기면
     //   화면은 KJPDS02 라고 하는데 실제로는 HDPDM01 문서가 나온다 — 표시와 산출물이
     //   갈리는 것이 원래 결함보다 나쁘다.
-    const form = { ...row.form, release_sw_version: row.version, project_id: row.projectId };
+    const form = row.payloadForm;
     const missing = missingRequiredFields(form);
     if (missing.length) {
       toast('warning', `필수 값이 비어 있습니다: ${missing.join(', ')} — 임의 값으로 채우지 않습니다.`);
@@ -736,102 +844,63 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         )}
       </div>
 
-      <div className="panel" style={{ marginTop: 'var(--sp-4)' }}>
-        <div className="panel-header">
-          <span className="panel-title">시험 결과 문서</span>
-          <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-            나머지 입력은 직전 빌드·공유 설정·프로젝트 config 기본값
-          </span>
-        </div>
-        <div style={{ overflowX: 'auto' }}>
-          <table className="board-table">
-            <thead>
-              <tr>
-                <th>문서</th>
-                <th>상태</th>
-                <th style={{ textAlign: 'right' }}>점수</th>
-                <th>왜 이 점수인가</th>
-                <th>릴리스 버전</th>
-                <th>생성 시각</th>
-                <th aria-label="작업" />
-              </tr>
-            </thead>
-            <tbody>
-              {reportRows.map(row => {
-                const run = latestByType[row.key];
-                const st = reportState[row.key] || {};
-                const v = st.busy ? { tone: 'info', label: '생성 중' } : verdictOf(run);
-                return (
-                  <tr key={row.key}>
-                    <td>
-                      <strong>{row.icon} {row.label}</strong>
-                      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                        {row.desc}
-                        {/* 통합 Summary 의 값은 프로젝트가 아니라 **마스터 양식 ID** 다. */}
-                        {row.projectId && (
-                          <> · {row.builder === 'swreport' ? '양식' : '대상'}{' '}
-                            <code>{row.projectId}</code></>
-                        )}
-                      </div>
-                      {row.needsBuilderId && (
-                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
-                          ⚠ {scmId} 에 시험 결과 양식 키가 지정되지 않아 기본값
-                          <code>{row.projectId}</code> 로 만듭니다 — 설정 &gt; SCM 에서
-                          builder_project_id 를 지정하세요
-                        </div>
-                      )}
-                      {st.error && (
-                        <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>
-                          {st.error}
-                        </div>
-                      )}
-                    </td>
-                    <td><Pill tone={v.tone}>{v.label}</Pill></td>
-                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                      {fmtScore(run?.summary?.overall_score)}
-                      <DeltaMark delta={run?.summary?.score_delta} />
-                    </td>
-                    <td style={{ fontSize: 'var(--text-xs)' }}>{whyOf(run, v)}</td>
-                    <td>
-                      {/* 디폴트가 없는 유일한 필수값. 비어 있으면 지어내지 않고 요구한다. */}
-                      <input
-                        type="text"
-                        aria-label={`${row.label} 릴리스 SW 버전`}
-                        value={row.version}
-                        placeholder="예: 1.02"
-                        onChange={e => setVersionEdit(p => ({ ...p, [row.key]: e.target.value }))}
-                        style={{ width: 84, fontSize: 'var(--text-xs)' }}
-                      />
-                      <div style={{ fontSize: 'var(--text-xs)', color: row.version ? 'var(--text-muted)' : 'var(--color-warning)' }}>
-                        {row.version
-                          ? { input: '직접 입력', saved: '직전 빌드값', run: '직전 실행 기록' }[row.versionSource]
-                          : '입력 필요'}
-                      </div>
-                    </td>
-                    <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                      {fmtWhen(run?.created_at)}
-                    </td>
-                    <td style={{ whiteSpace: 'nowrap' }}>
-                      <button
-                        type="button" className="btn-primary btn-sm"
-                        onClick={() => generateReport(row)}
-                        disabled={!!st.busy || !row.version}
-                        title={row.version ? '' : '릴리스 SW 버전을 입력하세요 — 임의 값으로 채우지 않습니다.'}
-                      >
-                        {st.busy ? '생성 중…' : '생성'}
-                      </button>
-                      <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
-                        onClick={() => onNavigateSub?.(row.sub)}>
-                        세부 →
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+      {/* 릴리스 버전만 사람이 정한다 — 나머지는 이미 어딘가에 있고, 없는 값을 지어내지 않는다. */}
+      <div style={{ marginTop: 'var(--sp-4)', fontSize: 'var(--text-sm)' }}>
+        <strong>시험 결과 문서</strong>
+        <span style={{ marginLeft: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          릴리스 버전만 입력하면 나머지는 직전 빌드·공유 설정·프로젝트 config 기본값으로
+          만듭니다. 세부 조정은 각 탭에서.
+        </span>
       </div>
+
+      {TEST_LEVEL_GROUPS.map(group => (
+        <div className="panel" style={{ marginTop: 'var(--sp-2)' }} key={group.id}>
+          <div className="panel-header">
+            <span className="panel-title">{group.title}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              {group.hint}
+            </span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="board-table">
+              <thead>
+                <tr>
+                  <th>문서</th>
+                  <th>상태</th>
+                  <th style={{ textAlign: 'right' }}>점수</th>
+                  <th>왜 이 점수인가</th>
+                  <th>릴리스 버전</th>
+                  <th>생성 시각</th>
+                  <th aria-label="작업" />
+                </tr>
+              </thead>
+              <tbody>
+                {group.rows.map(def => {
+                  const row = reportRowByKey[def.key];
+                  if (!row) return null;
+                  return (
+                    <TestReportRow
+                      key={row.key}
+                      row={row}
+                      run={latestByType[row.key]}
+                      state={reportState[row.key]}
+                      scmId={scmId}
+                      onVersionChange={v => setVersionEdit(pv => ({ ...pv, [row.key]: v }))}
+                      onGenerate={() => generateReport(row)}
+                      onNavigateSub={() => onNavigateSub?.(row.sub)}
+                      prepIsOpen={prepOpen === row.key}
+                      prepState={prep[row.key]}
+                      onTogglePrep={() => togglePrep(row.key, row.payloadForm)}
+                      onPrepReload={() => loadPrep(row.key, row.payloadForm)}
+                      onPrepAction={handlePrepAction}
+                    />
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
 
       {builderRows.length > 0 && (
         <div className="panel" style={{ marginTop: 'var(--sp-4)' }}>
@@ -881,6 +950,114 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * 시험 결과 문서 한 행 + 준비 점검 펼침.
+ *
+ * `DOC_ROWS` 의 `FragmentRow` 와 형제지만 **열 구성이 다르다**(릴리스 버전 열이 있어
+ * 7열 — `colSpan` 을 6 으로 두면 펼침 패널이 표 밖으로 삐져나간다). 근거 펼침은
+ * 붙이지 않는다 — 6종의 quality 이력이 쌓인 뒤에 판단할 일이다(범위 밖, 사용자 결정).
+ *
+ * ⚠ 준비 점검 payload 는 `row.payloadForm` 으로 **빌드와 같은 값**을 쓴다. 게이트가 본
+ * 폼과 실제 빌드 폼이 다르면 "준비 완료" 뒤에 400 이 난다.
+ *
+ * @internal 테스트에서 단독 렌더하려고 내보낸다.
+ */
+export function TestReportRow({
+  row, run, state, scmId, onVersionChange, onGenerate, onNavigateSub,
+  prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction,
+}) {
+  const st = state || {};
+  const v = st.busy ? { tone: 'info', label: '생성 중' } : verdictOf(run);
+  return (
+    <>
+      <tr>
+        <td>
+          <strong>{row.icon} {row.label}</strong>
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            {row.desc}
+            {/* 통합 Summary 의 값은 프로젝트가 아니라 **마스터 양식 ID** 다. */}
+            {row.projectId && (
+              <> · {row.builder === 'swreport' ? '양식' : '대상'}{' '}
+                <code>{row.projectId}</code></>
+            )}
+          </div>
+          {row.needsBuilderId && (
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
+              ⚠ {scmId} 에 시험 결과 양식 키가 지정되지 않아 기본값
+              <code>{row.projectId}</code> 로 만듭니다 — 설정 &gt; SCM 에서
+              builder_project_id 를 지정하세요
+            </div>
+          )}
+          {st.error && (
+            <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>
+              {st.error}
+            </div>
+          )}
+        </td>
+        <td><Pill tone={v.tone}>{v.label}</Pill></td>
+        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+          {fmtScore(run?.summary?.overall_score)}
+          <DeltaMark delta={run?.summary?.score_delta} />
+        </td>
+        <td style={{ fontSize: 'var(--text-xs)' }}>{whyOf(run, v)}</td>
+        <td>
+          {/* 디폴트가 없는 유일한 필수값. 비어 있으면 지어내지 않고 요구한다. */}
+          <input
+            type="text"
+            aria-label={`${row.label} 릴리스 SW 버전`}
+            value={row.version}
+            placeholder="예: 1.02"
+            onChange={e => onVersionChange(e.target.value)}
+            style={{ width: 84, fontSize: 'var(--text-xs)' }}
+          />
+          <div style={{ fontSize: 'var(--text-xs)', color: row.version ? 'var(--text-muted)' : 'var(--color-warning)' }}>
+            {row.version
+              ? { input: '직접 입력', saved: '직전 빌드값', run: '직전 실행 기록' }[row.versionSource]
+              : '입력 필요'}
+          </div>
+        </td>
+        <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          {fmtWhen(run?.created_at)}
+        </td>
+        <td style={{ whiteSpace: 'nowrap' }}>
+          <button
+            type="button" className="btn-primary btn-sm"
+            onClick={onGenerate}
+            disabled={!!st.busy || !row.version}
+            title={row.version ? '' : '릴리스 SW 버전을 입력하세요 — 임의 값으로 채우지 않습니다.'}
+          >
+            {st.busy ? '생성 중…' : '생성'}
+          </button>
+          {/* 생성 **전** 조건 — 버전이 비어도 열 수 있어야 한다(무엇이 비었는지 알려주는 게 이 패널의 일). */}
+          <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
+            onClick={onTogglePrep} aria-expanded={prepIsOpen}>
+            {prepIsOpen ? '접기' : '준비'}
+          </button>
+          <button type="button" className="btn-secondary btn-sm" style={{ marginLeft: 4 }}
+            onClick={onNavigateSub}>
+            세부 →
+          </button>
+        </td>
+      </tr>
+      {prepIsOpen && (
+        <tr>
+          <td colSpan={7} style={{ background: 'var(--bg)' }}>
+            <DocGenPreflightPanel
+              data={prepState?.data}
+              loading={!!prepState?.loading}
+              error={prepState?.error || ''}
+              questions={prepState?.questions}
+              questionsError={prepState?.questionsError || ''}
+              onReload={onPrepReload}
+              onAction={onPrepAction}
+            />
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 

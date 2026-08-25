@@ -1,9 +1,32 @@
 # SwIT Builder (Software Integration Test, 33~35차 라운드~)
 
-> CLAUDE.md on-demand 레퍼런스 — SwIT Coverage/SITR/Consistency 빌더 작업 시 참조.
+> CLAUDE.md on-demand 레퍼런스 — SwIT Coverage(SwITCV)/SITR/**SwITCR**/Consistency 빌더 작업 시 참조.
 > 관련: [`swut_builder.md`](swut_builder.md), [`visual-marking-and-design-tokens.md`](visual-marking-and-design-tokens.md)
 
 ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프라 **81% 재활용**.
+
+## 산출물 3종 (생성 현황 보드 게이트 대상)
+
+`/api/swit/*` 도 SwUT 과 대칭으로 산출물 **셋**을 낸다. 세 endpoint 모두 동기 blob 응답이고
+`require_admin` + Semaphore(capacity 2)를 공유한다.
+
+| 산출물 | endpoint | 확장자 | 양식 config 키 | Quality doc_type | 총 TC 키 |
+|--------|----------|--------|----------------|------------------|----------|
+| **SwITCV** (커버리지) | `POST /api/swit/coverage/build` | xlsx | `swit_coverage_template` | `swit` | `total_tcs` |
+| **SITR** (시험 결과) | `POST /api/swit/sitr/build` | xlsm | `swit_sitr_template` | `sitr` | `total` |
+| **SwITCR** (종합 결과) | `POST /api/swit/switcr/build` | xlsm | `switcr_template` | `switcr` | `total_tcs` |
+
+⚠ **SwUT 과 같은 분모 함정이 여기도 있다** — SITR 만 `total`, 나머지 둘은 `total_tcs` 다.
+자세한 근거는 [`swut_builder.md`](swut_builder.md) `## 산출물 3종` 참조. 커버리지의
+doc_type 이 `switcv` 가 아니라 **`swit`** 인 것도 같은 이유(기존 이력 보존)다.
+
+**SwITCR 시트** — `cover` / `summary` / `it101` / `it201` / `it301` / `it401` / `it701` /
+`2.Test Log` / `4.Coverage` / `FI_Test Case` / `history` / `AuditLog`.
+
+⚠ **SwITCR 만 다른 산출물을 되읽는다.** SwITCV·SITR·Fault Injection 규격서를 입력으로 받아
+증적 시트를 채우는데, 셋 다 config fallback 이 있어 **없어도 빌드가 죽지 않고 그 시트가 빈
+채로 나간다**. 즉 결핍이 조용하다 — 생성 현황 보드의 준비 점검이 이 셋을 선택 입력으로
+표시하는 이유다(`backend/services/docgen_requirements.py` `IN_LEVEL_ARTIFACTS`).
 
 ## 33차 — Coverage Report v2.02 (xlsx)
 - 회사 v2.02 양식 (HDPDM01 NE_GN7). 시트 구조: Cover / Test Summary / 1.Traceability / 2.Consistency / 3.Coverage / History (SwUT v3.01과 동일)

@@ -12,9 +12,19 @@
 
 ## ⚠ 이 표는 핸들러 계약의 복제다
 
-`required` 는 각 `generate-async` 핸들러가 실제로 400 을 내는 조건과 **일치해야** 한다.
-손으로 쓴 표라 드리프트한다 — `tests/unit/test_docgen_requirements.py` 가 핸들러 소스와
-대조한다. 핸들러를 고치면 여기도 고칠 것.
+`required` 는 각 핸들러가 실제로 400 을 내는 조건과 **일치해야** 한다. 손으로 쓴 표라
+드리프트한다. 핸들러를 고치면 여기도 고칠 것.
+
+⚠ 이 문단은 오래 `tests/unit/test_docgen_requirements.py` 가 핸들러 소스와 대조한다고
+적어 뒀는데 **그 파일은 존재한 적이 없다**(2026-08-21 실측). 지금 실재하는 대조는:
+
+- `tests/unit/test_docgen_preflight.py::test_handlers_point_at_real_endpoints`
+  — `handler` 문자열이 FastAPI 라우트 표에 실재하는가
+- 같은 파일 `TestReportTemplateKeyParity` — 시험 결과 6종의 양식 키가 라우터와 같은가
+- `tests/unit/test_sw_builder_form_schema_parity.py` — 빌더 폼 키가 request schema 에 있는가
+
+`required` 목록 자체를 핸들러 소스와 자동 대조하는 검사는 **아직 없다**. 아래 주석의
+줄 번호가 그 자리를 대신하고 있으므로, 핸들러를 옮기면 줄 번호도 함께 고칠 것.
 
 ## ⚠ 캡은 "부족" 이 아니라 **사용자 결정**이다
 
@@ -28,6 +38,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 # 입력 키 — `docgen_field_sources.INPUT_*` 와 같은 어휘를 쓰되, 문서 생성 입력에는
@@ -78,6 +89,27 @@ def _doc(
     }
 
 
+def _uds_cap(name: str, fallback: int) -> int:
+    """UDS 절단 상한의 **현재 유효값**. 상수를 여기 복제하지 않는다.
+
+    `config` 는 환경변수로 덮어쓸 수 있으므로(`DEVOPS_UDS_MAX_FILES` 등) 숫자를 이
+    파일에 적어 두면 화면이 실제와 다른 상한을 공시하게 된다 — 그건 공시가 없느니만
+    못하다. 읽기 실패 시에만 생성기와 같은 폴백값을 쓴다.
+    """
+    try:
+        import config as _cfg
+        return int(getattr(_cfg, name, fallback))
+    except Exception:  # silent-ok: 계약 조회는 실패해도 화면이 떠야 한다
+        # 침묵하되 **사유를 남긴다**. config import 가 깨지면 이 폴백값이 실제 상한과
+        # 다를 수 있는데, 그때 화면은 "1200개까지 읽습니다" 라고 말하면서 생성기는 다른
+        # 수로 자른다. 로그가 없으면 그 어긋남을 되짚을 방법이 없다.
+        logging.getLogger("devops_api").debug(
+            "UDS caps 공시값을 config 에서 못 읽었다 (%s) — 폴백 %s 로 공시한다",
+            name, fallback, exc_info=True,
+        )
+        return fallback
+
+
 DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
     "uds": _doc(
         label="UDS(단위 상세 설계)",
@@ -88,7 +120,25 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             IN_TEMPLATE: "기본 양식으로 만듭니다",
         },
         fields=["asil", "related", "description"],
-        caps={},
+        # UDS 도 조용히 자른다 — sts/suts/sits 는 상한을 공시하는데 UDS 만 `caps={}` 라
+        # "잘린 것이 있다" 를 화면이 말할 수 없었다. 값의 출처는 `config` 이고 실제 절단은
+        # `report_gen/uds_generator.py` 의 `max_files`/`max_items` 가 한다.
+        # ⚠ `api: None` 은 의도 — UDS 생성 요청에는 상한 파라미터가 없어 **호출자가 조절할
+        #   수 없다**(sits 의 `max_flows` 와 다른 점). 바꾸려면 환경변수를 써야 한다.
+        caps={
+            "max_source_files": {
+                "api": None, "generator": _uds_cap("UDS_MAX_SOURCE_FILES", 1200),
+                "env": "DEVOPS_UDS_MAX_FILES",
+                "effect": "소스 파일 상한 — 넘는 파일은 **읽지 않으므로 그 안의 함수가 "
+                          "문서에 아예 없습니다**",
+            },
+            "max_items_per_category": {
+                "api": None, "generator": _uds_cap("UDS_MAX_FUNCTION_ITEMS", 120),
+                "env": "DEVOPS_UDS_MAX_ITEMS",
+                "effect": "인터페이스/내부/매크로/타입 등 **분류별** 항목 상한 — 넘는 "
+                          "항목은 규격에서 빠집니다",
+            },
+        },
         handler="POST /api/jenkins/uds/generate-async",
     ),
     "sts": _doc(
@@ -145,6 +195,19 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
                                       "**잘린 흐름은 시험 규격에 존재하지 않습니다**"}},
         handler="POST /api/local/sits/generate-async",
     ),
+    # ── SwUT 3종 ────────────────────────────────────────────────────────────
+    # ⚠ 커버리지의 키가 `swutcv` 가 아니라 **`swut`** 인 것은 의도다. Quality DB 가
+    #   커버리지 실행을 이미 `swut` doc_type 으로 쌓아 왔고(`routers/swut.py:673`
+    #   `record_run("swut", …)`), 생성 현황 보드는 그 doc_type 으로 이력을 찾는다.
+    #   여기서 새 어휘를 만들면 그동안 쌓인 이력이 전부 "미생성" 으로 보인다.
+    "swut": _doc(
+        label="SwUTCV(단위시험 커버리지)",
+        required=[IN_VCAST],
+        optional={IN_SPEC_DOC: "SwUTS 규격서와 TC 대조를 못 합니다"},
+        fields=[],
+        caps={},
+        handler="POST /api/swut/coverage/build",
+    ),
     "sutr": _doc(
         label="SUTR(SW 단위시험 결과)",
         required=[IN_VCAST],
@@ -153,6 +216,23 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         caps={},
         handler="POST /api/swut/sutr/build",
     ),
+    "swutcr": _doc(
+        label="SwUTCR(단위시험 종합결과)",
+        required=[IN_VCAST],
+        optional={IN_SPEC_DOC: "SwUTS 규격서와 TC 대조를 못 합니다"},
+        fields=[],
+        caps={},
+        handler="POST /api/swut/swutcr/build",
+    ),
+    # ── SwIT 3종 ────────────────────────────────────────────────────────────
+    "swit": _doc(
+        label="SwITCV(통합시험 커버리지)",
+        required=[IN_VCAST],
+        optional={IN_SPEC_DOC: "SwITS 규격서와 TC 대조를 못 합니다"},
+        fields=[],
+        caps={},
+        handler="POST /api/swit/coverage/build",
+    ),
     "sitr": _doc(
         label="SITR(SW 통합시험 결과)",
         required=[IN_VCAST],
@@ -160,6 +240,19 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         fields=[],
         caps={},
         handler="POST /api/swit/sitr/build",
+    ),
+    "switcr": _doc(
+        label="SwITCR(통합시험 종합결과)",
+        required=[IN_VCAST],
+        optional={
+            IN_SPEC_DOC: "SwITS 규격서와 TC 대조를 못 합니다",
+            # SwITCR 만 다른 산출물을 되읽어 증적 시트를 채운다(`swit.py:_do_switcr_build`).
+            # 셋 다 config fallback 이 있어 없으면 빌드가 죽는 게 아니라 **그 시트가 빈다**.
+            IN_LEVEL_ARTIFACTS: "SwITCV·SwITR·Fault Injection 증적 시트가 빈 채로 나옵니다",
+        },
+        fields=[],
+        caps={},
+        handler="POST /api/swit/switcr/build",
     ),
     "swreport": _doc(
         label="통합 Summary",
@@ -175,7 +268,14 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
 # 와 같은 목록이며, preflight 가 이 판정을 흡수해 프론트 복제를 없앤다.
 TEST_REPORT_FORM_FIELDS: List[str] = ["project_id", "release_sw_version", "test_date"]
 
-TEST_REPORT_DOC_TYPES = frozenset({"sutr", "sitr", "swreport"})
+# 이 집합에 들면 preflight 가 ① `config/swut_meta.json` 의 양식 등록 여부(`report_template`
+# 스텝)와 ② 위 폼 필수 3값을 검사한다. SwUT/SwIT 6종 전부 같은 검사가 필요하다 — 양식 키만
+# 서로 다르고(`docgen_preflight._TEST_REPORT_TEMPLATE_KEY`), 폼은 같은 스키마를 공유한다.
+TEST_REPORT_DOC_TYPES = frozenset({
+    "swut", "sutr", "swutcr",
+    "swit", "sitr", "switcr",
+    "swreport",
+})
 
 
 def doc_types() -> List[str]:

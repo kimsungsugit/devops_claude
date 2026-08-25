@@ -447,15 +447,90 @@ describe('DocGenStatusBoard — 시험 결과 문서 원클릭 생성', () => {
     expect(within(tr).getByText('KJPDS02')).toBeInTheDocument();
   });
 
-  it('통합 Summary 는 빌더 산출물 표에 중복되지 않는다', async () => {
+  it('한 산출물이 두 표에 동시에 나오지 않는다', async () => {
+    // 같은 run 이 두 표에 뜨면 어느 쪽이 최신인지 화면이 **두 번 답한다**. 커버리지 2종은
+    // 레벨 표에서 생성까지 되므로 보조 표(`빌더 산출물`)에서 빠져야 한다.
     mockApi.mockResolvedValue({
-      runs: [run({ doc_type: 'swreport', id: 9 }), run({ doc_type: 'swut', id: 8 })], total: 2,
+      runs: [
+        run({ doc_type: 'swreport', id: 9 }), run({ doc_type: 'swut', id: 8 }),
+        run({ doc_type: 'swit', id: 7 }), run({ doc_type: 'swsa', id: 6 }),
+      ],
+      total: 4,
     });
     mountBoard();
     await waitFor(() => rowOf('📊 통합 Summary'));
-    // 보조 표에는 커버리지 계열만 남는다.
-    expect(screen.getByText('SwUT 커버리지')).toBeInTheDocument();
-    expect(screen.queryByText('통합 결과')).toBeNull();
+    // 보조 표의 옛 라벨은 사라졌다 — 이력이 있어도(위 runs) 다시 나타나면 안 된다.
+    expect(screen.queryByText('SwUT 커버리지')).toBeNull();
+    expect(screen.queryByText('SwIT 커버리지')).toBeNull();
+    // 정적분석만 남는다(생성 경로가 보드에 없어 여전히 탭 이동 전용).
+    expect(screen.getByText('SwSA 정적분석')).toBeInTheDocument();
+    // 각 산출물 행은 정확히 한 번.
+    for (const label of ['📊 SwUTCV', '📊 SwITCV', '📊 통합 Summary']) {
+      expect(screen.getAllByText(new RegExp(`^${label}$`))).toHaveLength(1);
+    }
+  });
+
+  it('SwUT·SwIT 표가 각각 3행을 낸다 (커버리지·결과·종합결과)', async () => {
+    mountBoard();
+    await waitFor(() => rowOf('🧪 SUTR'));
+    for (const label of ['📊 SwUTCV', '🧪 SUTR', '📚 SwUTCR',
+                         '📊 SwITCV', '🔗 SITR', '📚 SwITCR']) {
+      expect(rowOf(label)).toBeTruthy();
+    }
+  });
+
+  it('6종이 각자의 엔드포인트로 나간다 — 한 곳으로 몰리지 않는다', async () => {
+    // ⚠ 이 표가 갈리면 SwUTCR 을 눌렀는데 SUTR 이 만들어진다. 라벨은 맞고 산출물만
+    //   틀리므로 화면으로는 알 수 없다.
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({
+      project_id: 'HDPDM01', release_sw_version: '1.02', test_date: '2026-08-24',
+    }));
+    localStorage.setItem('devops_v2_swit_form', JSON.stringify({
+      project_id: 'HDPDM01', release_sw_version: '1.02', test_date: '2026-08-24',
+    }));
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      headers: { get: () => null },
+      blob: async () => new Blob(['x']),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    mountBoard();
+    const expected = [
+      ['📊 SwUTCV', '/api/swut/coverage/build'],
+      ['🧪 SUTR', '/api/swut/sutr/build'],
+      ['📚 SwUTCR', '/api/swut/swutcr/build'],
+      ['📊 SwITCV', '/api/swit/coverage/build'],
+      ['🔗 SITR', '/api/swit/sitr/build'],
+      ['📚 SwITCR', '/api/swit/switcr/build'],
+    ];
+    await waitFor(() => rowOf('📊 SwUTCV'));
+    for (const [label, endpoint] of expected) {
+      fetchMock.mockClear();
+      await user.click(within(rowOf(label)).getByRole('button', { name: '생성' }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(fetchMock.mock.calls[0][0]).toBe(endpoint);
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it('준비 점검이 빌더 폼을 함께 싣는다 (안 실으면 항상 "필수값 없음")', async () => {
+    // 백엔드 `PreflightRequest.form` 은 프론트 판정을 흡수하려고 만든 필드다 — 비면
+    // 판정이 두 벌이 되는 게 아니라 **한 벌이 거짓말**을 한다(양식 조회도 project_id 로 시작).
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({
+      project_id: 'HDPDM01', release_sw_version: '1.02', test_date: '2026-08-24',
+    }));
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📚 SwUTCR'));
+    await user.click(within(tr).getByRole('button', { name: '준비' }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      '/api/docgen/preflight', expect.objectContaining({ doc_type: 'swutcr' }),
+    ));
+    const body = mockPost.mock.calls.find(c => c[0] === '/api/docgen/preflight')[1];
+    expect(body.form).toEqual(expect.objectContaining({
+      project_id: 'HDPDM01', release_sw_version: '1.02', test_date: '2026-08-24',
+    }));
   });
 });
 

@@ -856,6 +856,15 @@ class SwUTBuildRequest(BaseModel):
 
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
+    # 품질 이력의 **프로젝트 축**. 화면이 아는 SCM entry id 를 그대로 실어 보낸다.
+    #
+    # ⚠ 없으면 recorder 가 `project_root`(= 빌더 project_id)에서 **추측**하는데, 그 추측이
+    #   틀리는 실환경이 있다(2026-08-24 실측): 문자열 "KJPDS02" 가 SCM entry `kjpds02` 의
+    #   **id** 이면서 동시에 `kjpds02_pv` 의 **builder_project_id** 다. `resolve_scm_id` 는
+    #   id 정확일치를 먼저 잡아 PV 산출물을 ToolDev 프로젝트로 귀속시켰고, 생성 현황 보드는
+    #   `kjpds02_pv` 로 조회하므로 **방금 만든 문서가 영영 "미생성"** 이었다. 문자열만으로는
+    #   갈리지 않는 모호함이라 추측으로 풀 수 없다 — 아는 쪽(화면)이 실어 보내야 한다.
+    scm_id: str = Field("", max_length=100)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
     # 13차 W7: $ anchor 추가 — garbage suffix 차단
     test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
@@ -981,6 +990,15 @@ class SwITBuildRequest(BaseModel):
 
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
+    # 품질 이력의 **프로젝트 축**. 화면이 아는 SCM entry id 를 그대로 실어 보낸다.
+    #
+    # ⚠ 없으면 recorder 가 `project_root`(= 빌더 project_id)에서 **추측**하는데, 그 추측이
+    #   틀리는 실환경이 있다(2026-08-24 실측): 문자열 "KJPDS02" 가 SCM entry `kjpds02` 의
+    #   **id** 이면서 동시에 `kjpds02_pv` 의 **builder_project_id** 다. `resolve_scm_id` 는
+    #   id 정확일치를 먼저 잡아 PV 산출물을 ToolDev 프로젝트로 귀속시켰고, 생성 현황 보드는
+    #   `kjpds02_pv` 로 조회하므로 **방금 만든 문서가 영영 "미생성"** 이었다. 문자열만으로는
+    #   갈리지 않는 모호함이라 추측으로 풀 수 없다 — 아는 쪽(화면)이 실어 보내야 한다.
+    scm_id: str = Field("", max_length=100)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
     test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 
@@ -1331,6 +1349,15 @@ class SwReportBuildRequest(BaseModel):
 
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
+    # 품질 이력의 **프로젝트 축**. 화면이 아는 SCM entry id 를 그대로 실어 보낸다.
+    #
+    # ⚠ 없으면 recorder 가 `project_root`(= 빌더 project_id)에서 **추측**하는데, 그 추측이
+    #   틀리는 실환경이 있다(2026-08-24 실측): 문자열 "KJPDS02" 가 SCM entry `kjpds02` 의
+    #   **id** 이면서 동시에 `kjpds02_pv` 의 **builder_project_id** 다. `resolve_scm_id` 는
+    #   id 정확일치를 먼저 잡아 PV 산출물을 ToolDev 프로젝트로 귀속시켰고, 생성 현황 보드는
+    #   `kjpds02_pv` 로 조회하므로 **방금 만든 문서가 영영 "미생성"** 이었다. 문자열만으로는
+    #   갈리지 않는 모호함이라 추측으로 풀 수 없다 — 아는 쪽(화면)이 실어 보내야 한다.
+    scm_id: str = Field("", max_length=100)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
     test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 

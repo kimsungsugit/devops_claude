@@ -140,6 +140,9 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
         record_run(
             "swreport", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
+            # ⚠ 통합 Summary 의 `project_id` 는 프로젝트가 아니라 **마스터 양식 ID**(ES95411)
+            #   라 project_root 에서 프로젝트를 추측할 수가 없다. 화면이 아는 축을 싣는다.
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
             meta={"release_sw_version": getattr(req, "release_sw_version", "")},
         )
     except Exception:

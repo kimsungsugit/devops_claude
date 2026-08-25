@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from workflow.quality.evaluator import (
     compute_gate_verdict,
     compute_overall_score,
+    evaluate_comprehensive_result,
     evaluate_coverage,
     evaluate_sits,
     evaluate_sts,
@@ -54,7 +55,10 @@ def record_run(
             _empty = int(_qd.get("total_test_cases") or 0) <= 0
         elif _dt == "swreport":
             _empty = int(_qd.get("performed_count") or 0) <= 0
-        elif _dt in ("swut", "swit"):
+        elif _dt in ("swut", "swit", "swutcr", "switcr"):
+            # 종합결과서(swutcr/switcr)도 커버리지와 **같은 `total_tcs` 키**를 쓴다
+            # (`swut_comprehensive_aggregator.py:1078`). 바로 아래 SUTR/SITR 분기와
+            # 헷갈리지 말 것 — 시험 결과 보고서만 `total` 이다.
             _empty = int(_qd.get("total_tcs") or 0) <= 0
         elif _dt in ("sutr", "sitr"):
             # 시험 결과 보고서 summary 는 `total_tcs` 가 아니라 `total` 이다 —
@@ -192,6 +196,11 @@ def _record_run_impl(
         # 커버리지 문서(swut/swit)와 **다른 평가기** — 시험 결과 보고서는 커버리지 축을
         # 내지 않으므로 evaluate_coverage 에 넣으면 미측정 축이 0% FAIL 로 둔갑한다.
         metrics = evaluate_test_result(quality_data)
+    elif doc_type in ("swutcr", "switcr"):
+        # 종합결과서는 **또 다른 평가기**다 — 총 TC 키가 `total` 이 아니라 `total_tcs` 라,
+        # 바로 위 evaluate_test_result 에 넣으면 분모가 0 으로 접혀 실행률이 폭주한다
+        # (tested 200건 → 20000%). evaluate_comprehensive_result docstring 참조.
+        metrics = evaluate_comprehensive_result(quality_data)
     elif doc_type == "swsa":
         metrics = evaluate_swsa(quality_data)
     else:
@@ -348,6 +357,11 @@ def _record_run_impl(
             # `total_test_cases`(다른 문서군의 키)를 찾다 못 찾고 0 이 되어, 규모가
             # 0 인 실행처럼 보인다.
             fn_count = int(quality_data.get("total") or 0)
+        elif doc_type in ("swutcr", "switcr"):
+            # 종합결과서도 분모는 TC 수다(위 SUTR/SITR 과 같은 축). 다만 키가 `total` 이
+            # 아니라 `total_tcs` 라 위 분기에 합칠 수 없다 — 합치면 0 이 되어 규모가
+            # 0 인 실행처럼 보인다.
+            fn_count = int(quality_data.get("total_tcs") or 0)
         elif doc_type == "swsa":
             fn_count = int(quality_data.get("his_metric_count") or 0)
         else:
