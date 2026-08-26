@@ -92,6 +92,21 @@ def skeleton(name: Any) -> str:
     return base_symbol(_ANNOT.sub("", str(name or "")))
 
 
+def row_key(name: Any) -> str:
+    """행을 **잃지 않는** 색인 키 — 멤버 경로·첨자를 살린 정규형.
+
+    ⚠ 예전엔 `base_symbol` 을 키로 썼다. 그러면 `REG_PTT` 와 `REG_PTT.Bits.PTT3` 가
+    같은 키(`reg_ptt`)라 **뒤엣것이 조용히 사라진다**. 실측(2026-08-26):
+    우리 산출물 2,837행 중 **431행(15.2%)**, 정본 2,936행 중 **185행(6.3%)** 이
+    그렇게 없어졌고 — 손실이 **비대칭**이라 정밀도가 부풀려져 있었다.
+    (같은 부류를 SUTS R25 가 dict 덮어쓰기로 66행 잃으며 겪었다.)
+
+    구조(`.` `[]` 꼬리)는 **살린다** — 지우면 `REG_PTT.Bits.PTT3` 가 다시 뭉갠다.
+    공백만 접고 `->` 는 `.` 로 통일한 뒤 소문자로.
+    """
+    return re.sub(r"\s+", "", str(name or "")).replace("->", ".").lower()
+
+
 def _cell_text(tc) -> str:
     """⚠ `itertext()` 만 쓰면 여러 줄 셀이 한 덩어리로 뭉개진다.
 
@@ -171,8 +186,10 @@ def _parse_one_block(rows: Sequence[Sequence[str]]) -> Optional[Dict[str, Any]]:
         pname = row[1].strip()
         if not pname or _is_na(pname):
             continue
+        # ⚠ 키는 `row_key` — `base_symbol` 로 색인하면 `REG_PTT` 와
+        #   `REG_PTT.Bits.PTT3` 가 같은 칸을 다투다 한쪽이 조용히 사라진다.
         params[axis].setdefault(
-            base_symbol(pname),
+            row_key(pname),
             (pname, row[2].strip(), row[3].strip(), row[4].strip(), row[5].strip()),
         )
     return {"name": name, "labels": labels, "params": params} if name else None
@@ -234,9 +251,23 @@ def value_verdict(column: str, ref_value: Any, our_value: Any) -> Tuple[bool, st
 
 
 def _axis_cells(blocks: Dict[str, Dict[str, Any]], keys: Iterable[str], axis: str):
-    return {(fn, sym): row
+    """`{(함수, row_key): 행}` — 행을 하나도 잃지 않는다."""
+    return {(fn, key): row
             for fn in keys
-            for sym, row in blocks[fn]["params"][axis].items()}
+            for key, row in blocks[fn]["params"][axis].items()}
+
+
+def _symbol_rows(cells: Dict[Tuple[str, str], Sequence[str]]) -> Dict[Tuple[str, str], Sequence[str]]:
+    """행 사전을 **이름 축 관점**(함수, base_symbol)으로 접는다.
+
+    접는 것 자체는 의도다 — 이름 축은 "그 변수를 적었는가" 를 묻지 멤버까지 따지지
+    않는다. ⚠ 다만 **접기 전 원본 행 사전을 그대로 두는 것**이 중요하다. 예전엔
+    파서가 이 접기를 미리 해 버려 값 축이 볼 행이 사라졌다.
+    """
+    folded: Dict[Tuple[str, str], Sequence[str]] = {}
+    for (fn, _key), row in cells.items():
+        folded.setdefault((fn, base_symbol(row[0])), row)
+    return folded
 
 
 def _classify_shortfall(missing, ref_cells, our_cells, our_other_cells) -> Counter:
@@ -305,13 +336,29 @@ def compare(ref_path: str, our_path: str,
     for axis, label in (("in", "입력"), ("out", "기대")):
         other = "out" if axis == "in" else "in"
         ref_cells, our_cells = ref_by_axis[axis], our_by_axis[axis]
-        hit = set(ref_cells) & set(our_cells)
-        missing = set(ref_cells) - set(our_cells)
-        extra = set(our_cells) - set(ref_cells)
+
+        # 이름 축은 **base_symbol 집합**이다 — 입도차(`REG_PTT` vs `REG_PTT.Bits.PTT3`)
+        # 를 같은 이름으로 본다. 이건 의도된 거칠기다.
+        ref_syms = _symbol_rows(ref_cells)
+        our_syms = _symbol_rows(our_cells)
+        our_other_syms = _symbol_rows(our_by_axis[other])
+        ref_other_syms = _symbol_rows(ref_by_axis[other])
+        hit = set(ref_syms) & set(our_syms)
+        missing = set(ref_syms) - set(our_syms)
+        extra = set(our_syms) - set(ref_syms)
+
+        # ⚠ 값 축은 **이름이 정확히 같은 행**만 비교한다. base_symbol 로 묶으면
+        #   `REG_PTT`(레지스터 전체)의 Type 을 정본의 `REG_PTT.Bits.PTT3`(비트 하나)와
+        #   맞대게 되어 `PTTSTR` vs `U8` 이 **거짓 불일치**로 나온다 — 다른 대상이다.
+        value_hit = set(ref_cells) & set(our_cells)
+        # 이름은 닿았는데(같은 base) 정확 이름이 달라 값을 못 재는 칸.
+        granularity_gap = len([k for k in ref_cells
+                               if k not in our_cells
+                               and (k[0], base_symbol(ref_cells[k][0])) in hit])
 
         columns: Dict[str, Any] = {}
         for idx, column in enumerate(VALUE_COLUMNS, start=1):
-            scored = [k for k in hit if not _is_na(ref_cells[k][idx])]
+            scored = [k for k in value_hit if not _is_na(ref_cells[k][idx])]
             counts: Counter = Counter()
             samples: List[Dict[str, str]] = []
             for key in scored:
@@ -330,7 +377,7 @@ def compare(ref_path: str, our_path: str,
             reproduced = counts["정확일치"] + counts["표기차"]
             columns[column] = {
                 "denominator": len(scored),
-                "reference_na_excluded": len(hit) - len(scored),
+                "reference_na_excluded": len(value_hit) - len(scored),
                 "reproduced": reproduced,
                 "reproduced_pct": _pct(reproduced, len(scored)),
                 "exact": counts["정확일치"],
@@ -342,19 +389,29 @@ def compare(ref_path: str, our_path: str,
 
         axes[axis] = {
             "label": label,
-            "reference_cells": len(ref_cells),
-            "our_cells": len(our_cells),
+            # 행 수와 심볼 수는 **다른 것**이다. 예전엔 파서가 심볼로 접은 결과를
+            # `*_cells` 라 부르며 행 수인 척했다(우리 431행·정본 185행 침묵 소실).
+            "reference_rows": len(ref_cells),
+            "our_rows": len(our_cells),
+            "reference_cells": len(ref_syms),      # 이름 축 분모(= 고유 base_symbol)
+            "our_cells": len(our_syms),
             "name_axis": {
                 "hit": len(hit),
-                "recall_pct": _pct(len(hit), len(ref_cells)),
-                "precision_pct": _pct(len(hit), len(our_cells)),
+                "recall_pct": _pct(len(hit), len(ref_syms)),
+                "precision_pct": _pct(len(hit), len(our_syms)),
                 "shortfall": len(missing),
                 "shortfall_kinds": dict(_classify_shortfall(
-                    missing, ref_cells, our_cells, our_by_axis[other])),
+                    missing, ref_syms, our_syms, our_other_syms)),
                 "excess": len(extra),
-                "excess_kinds": dict(_classify_excess(extra, ref_by_axis[other], known)),
+                "excess_kinds": dict(_classify_excess(extra, ref_other_syms, known)),
             },
             "value_axis": columns,
+            # 이름은 닿았는데 정확 이름이 달라 값을 못 잰 정본 행. 값 축 분모가 왜
+            # 이름 축보다 작은지를 **수치로** 설명한다(침묵하면 축소가 안 보인다).
+            "value_join": {
+                "exact_name_hit": len(value_hit),
+                "granularity_gap": granularity_gap,
+            },
         }
 
     return {

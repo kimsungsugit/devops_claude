@@ -324,3 +324,113 @@ class TestSurvivedMutantsClosed:
         path = _make_docx(tmp_path / "split.docx", [first, second])
         row = parity.parse_function_info(path)["foo"]["params"]["in"]["u8g_a"]
         assert row[1] == "U8" and row[4] == "first", "뒤 표가 앞 표를 덮었다"
+
+
+class TestRowsAreNotLostToKeyCollision:
+    """`REG_PTT` 와 `REG_PTT.Bits.PTT3` 가 같은 칸을 다투다 한쪽이 사라지던 것.
+
+    ## 무엇이 문제였나 (실측 2026-08-26)
+
+    색인 키가 `base_symbol` 이라 멤버 경로가 베이스와 **같은 키**였다. `setdefault` 는
+    먼저 온 것을 남기므로 뒤엣것이 조용히 없어진다:
+
+    | | 원문 그리드 행(비-N/A) | 파서가 낸 행 | 손실 |
+    |---|---:|---:|---:|
+    | 우리 산출물 | 2,837 | 2,406 | **431 (15.2%)** |
+    | 정본 | 2,936 | 2,751 | **185 (6.3%)** |
+
+    ⚠ 손실이 **비대칭**이라 정밀도가 부풀려져 있었다. 그리고 값 축은 베이스 행의 Type 을
+    정본의 멤버 행 Type 과 맞대 `PTTSTR` vs `U8` 같은 **거짓 불일치**를 냈다.
+
+    ⚠ 이 사각 때문에 "우리 산출물엔 멤버 경로가 0칸" 이라고 적었는데 **틀렸다** —
+    실제로는 335칸(고유 162)이고 그중 149개가 정본과 정확히 일치한다.
+    """
+
+    def test_base_and_member_row_both_survive(self, tmp_path):
+        path = _make_docx(tmp_path / "x.docx", [_block(
+            "f", inputs=[
+                ["REG_PTT", "PTTSTR", "N/A", "N/A", "포트 T"],
+                ["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", "PT3 비트"],
+            ])])
+        rows = parity.parse_function_info(path)["f"]["params"]["in"]
+        assert len(rows) == 2, f"행이 사라졌다: {rows}"
+        names = {r[0] for r in rows.values()}
+        assert names == {"REG_PTT", "REG_PTT.Bits.PTT3"}
+
+    def test_arrow_and_dot_are_the_same_key_shape(self):
+        assert parity.row_key("ReqMsg->data[0]") == parity.row_key("ReqMsg . data [0]".replace(" ", ""))
+        assert parity.row_key("REG_PTT.Bits.PTT3") != parity.row_key("REG_PTT")
+
+    def test_an_identical_name_twice_is_still_one_row(self, tmp_path):
+        """같은 이름이 두 번이면 같은 변수다 — 그건 접는 게 맞다."""
+        path = _make_docx(tmp_path / "y.docx", [_block(
+            "f", inputs=[["u8g_A", "U8", "N/A", "N/A", ""],
+                         ["u8g_A", "U8", "N/A", "N/A", ""]])])
+        assert len(parity.parse_function_info(path)["f"]["params"]["in"]) == 1
+
+
+class TestNameAxisFoldsButValueAxisDoesNot:
+    def _pair(self, tmp_path, ref_rows, our_rows):
+        ref = _make_docx(tmp_path / "ref.docx", [_block("f", inputs=ref_rows)])
+        our = _make_docx(tmp_path / "our.docx", [_block("f", inputs=our_rows)])
+        return parity.compare(ref, our)["axes"]["in"]
+
+    def test_name_axis_treats_a_member_path_as_the_same_symbol(self, tmp_path):
+        """입도차 허용은 **의도**다 — 이름 축은 '그 변수를 적었는가' 를 묻는다."""
+        axis = self._pair(
+            tmp_path,
+            [["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", "PT3"]],
+            [["REG_PTT", "PTTSTR", "N/A", "N/A", "포트 T"]],
+        )
+        assert axis["name_axis"]["recall_pct"] == 100.0
+
+    def test_value_axis_does_not_compare_different_objects(self, tmp_path):
+        """⚠ 베이스와 멤버는 **다른 대상**이다 — Type 을 맞대면 거짓 불일치가 된다."""
+        axis = self._pair(
+            tmp_path,
+            [["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", "PT3"]],
+            [["REG_PTT", "PTTSTR", "N/A", "N/A", "포트 T"]],
+        )
+        assert axis["value_axis"]["type"]["denominator"] == 0
+        assert axis["value_axis"]["type"]["reproduced_pct"] is None
+        assert axis["value_join"]["granularity_gap"] == 1
+
+    def test_an_exact_name_match_is_still_value_compared(self, tmp_path):
+        """⚠ 음성 대조군 — 정확 이름까지 막으면 값 축이 통째로 죽는다."""
+        axis = self._pair(
+            tmp_path,
+            [["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", "PT3"]],
+            [["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", "PT3"]],
+        )
+        assert axis["value_axis"]["type"]["denominator"] == 1
+        assert axis["value_axis"]["type"]["reproduced_pct"] == 100.0
+        assert axis["value_join"]["granularity_gap"] == 0
+
+    def test_rows_and_symbols_are_reported_separately(self, tmp_path):
+        """행 수와 심볼 수를 한 이름으로 부르면 손실이 안 보인다."""
+        axis = self._pair(
+            tmp_path,
+            [["REG_PTT", "PTTSTR", "N/A", "N/A", ""],
+             ["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", ""]],
+            [["REG_PTT", "PTTSTR", "N/A", "N/A", ""]],
+        )
+        assert axis["reference_rows"] == 2
+        assert axis["reference_cells"] == 1          # 고유 base_symbol
+        assert axis["our_rows"] == 1
+        # ⚠ 재현율 분모는 **심볼 수**다. 행 수(2)로 나누면 같은 변수를 두 번 세어
+        #   50% 로 떨어진다 — 입도차를 미달로 오라벨하는 것이다.
+        assert axis["name_axis"]["recall_pct"] == 100.0
+
+    def test_precision_denominator_is_symbols_on_our_side_too(self, tmp_path):
+        """⚠ 재현율의 거울 — **우리** 쪽이 여러 행→한 심볼인 경우를 안 만들면
+        정밀도 분모를 행 수로 바꿔도 시험이 아무것도 안 막는다."""
+        axis = self._pair(
+            tmp_path,
+            [["REG_PTT", "PTTSTR", "N/A", "N/A", ""]],
+            [["REG_PTT", "PTTSTR", "N/A", "N/A", ""],
+             ["REG_PTT.Bits.PTT3", "U8", "0 ~ 1", "N/A", ""]],
+        )
+        assert axis["our_rows"] == 2
+        assert axis["our_cells"] == 1
+        assert axis["name_axis"]["precision_pct"] == 100.0
+        assert axis["name_axis"]["excess"] == 0, "같은 변수의 멤버 행을 과다로 세면 안 된다"
