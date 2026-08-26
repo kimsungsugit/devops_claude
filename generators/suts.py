@@ -21,6 +21,7 @@ from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.doc_kind import is_sds_filename
+from report_gen.function_analyzer import split_param_annotations
 from report_gen.requirements import (
     _asil_max_of,
     _extract_sds_partition_map,
@@ -1077,47 +1078,17 @@ def _infer_return_type(prototype: str) -> str:
 # ⚠ 꼬리 키워드는 **한 곳**에서만 정의한다. 아래 두 정규식이 같은 목록을 각자 들고
 #   있으면 새 꼬리를 추가할 때 하나만 고쳐지고, 그 꼬리가 그대로 **이름이 된다**.
 #   (같은 부류의 실패를 이 저장소가 `[INOUT]`·`[INDIRECT2]` 로 두 번 겪었다.)
-_PARAM_ANNOT_KEYS = "idx|range|divisor|size"
-_PARAM_ANNOT_TAIL = re.compile(rf"\s*\((?:{_PARAM_ANNOT_KEYS})\s*:[^)]*\)\s*$", re.I)
-
-# 꼬리의 **시작**만 찾는다. 끝은 괄호를 세어서 찾아야 한다 — `idx:` 안에 괄호가 중첩되기
-# 때문이다(`_normalize_bracket_expr` 가 매크로를 못 접으면 원문이 그대로 실린다):
-#   `u8g_SysEepromCtrl_PartNoInfo (idx: ( ( U8 )( 2U ) ), ( ( U8 )( 8U ) ), …)`
-# `[^)]*\)` 는 첫 `)` 에서 멈춰 `\s*$` 가 안 맞으므로 **꼬리가 하나도 안 떨어진다**.
-# 그러면 마지막 토큰이 `))` 가 되고, 두 글자라 이름 필터에서 탈락해 **진짜 전역이 사라진다**
-# (실측 2026-08-12: `u8s_DeviceTypeChk_*` 2건).
-_PARAM_ANNOT_HEAD = re.compile(rf"\s*\((?:{_PARAM_ANNOT_KEYS})\s*:", re.I)
+# ⚠ 정의는 **생산자**(`report_gen/function_analyzer.py`)에 있다. 여기에 사본을 두면
+#   새 꼬리를 추가할 때 한쪽만 고쳐지고 그 꼬리가 그대로 이름이 된다.
+#   중첩 괄호 처리도 그쪽 `split_param_annotations` 한 곳에만 있다:
+#   `[^)]*\)` 는 첫 `)` 에서 멈추므로 `$` 앵커 정규식만으로는 꼬리가 안 떨어지고,
+#   마지막 토큰이 `))` 가 되어 이름 필터에서 탈락 → **진짜 전역이 사라진다**
+#   (실측 2026-08-12: `u8s_DeviceTypeChk_*` 2건).
 
 
 def _strip_param_annotations(s: str) -> str:
     """이름 뒤 주석형 꼬리를 **전부** 뗀다(여러 개가 이어 붙고, 안에 괄호가 중첩된다)."""
-    out = str(s or "").strip()
-    while True:
-        stripped = _PARAM_ANNOT_TAIL.sub("", out)
-        if stripped != out:
-            out = stripped
-            continue
-        # 중첩 괄호가 있어 위 `$` 앵커 정규식이 못 잡은 경우. **마지막** 꼬리 후보를
-        # 잡아 괄호를 세어 끝을 찾는다. 꼬리는 이름 **뒤에만** 붙으므로, 잘라낸 자리가
-        # 문자열 끝이 아니면 꼬리가 아니다 — 건드리지 않는다(이름 중간을 지우면 다른
-        # 이름이 된다).
-        matches = list(_PARAM_ANNOT_HEAD.finditer(out))
-        if not matches:
-            return out
-        m = matches[-1]
-        depth = 0
-        end = len(out)
-        for i in range(out.index("(", m.start()), len(out)):
-            if out[i] == "(":
-                depth += 1
-            elif out[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if out[end:].strip():
-            return out
-        out = out[: m.start()].strip()
+    return split_param_annotations(s)[0]
 
 
 # 파라미터 문자열이 **선언이 아닌** 경우. 상위 파서가 주석 블록을 통째로 파라미터 하나로

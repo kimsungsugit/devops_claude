@@ -1423,6 +1423,112 @@ _VALUE_ENUM_RE = re.compile(r"^[\w.+\-]+(?:\s*,\s*[\w.+\-]+)+$")
 _NA = "N/A"
 _PLACEHOLDER_PARAM_NAMES = {"", "(none)", "none", "n/a", "na", "-", "void", "tbd"}
 
+# 이름 **뒤에** 붙는 주석형 꼬리(`_format_param_entry` 가 만든다).
+#   `u8g_Hash (idx: u8t_Index)` · `ctx (range: 0x0 ~ 0xFFFFFFFF)` · `buf (size: 8)`
+# ⚠ 꼬리 키워드는 **한 곳**에서만 정의한다 — 목록이 갈리면 새 꼬리를 추가할 때 한쪽만
+#   고쳐지고 그 꼬리가 그대로 **이름이 된다**(`[INOUT]`·`[INDIRECT2]` 로 두 번 겪었다).
+#   생산자가 여기이므로 정의도 여기 둔다. `generators/suts.py` 가 이것을 import 한다.
+_PARAM_ANNOT_KEYS = "idx|range|divisor|size"
+_PARAM_ANNOT_TAIL = re.compile(rf"\s*\((?:{_PARAM_ANNOT_KEYS})\s*:[^)]*\)\s*$", re.I)
+
+# 꼬리의 **시작**만 찾는다. 끝은 괄호를 세어서 찾아야 한다 — `idx:` 안에 괄호가 중첩되기
+# 때문이다(매크로를 못 접으면 원문이 그대로 실린다):
+#   `u8g_SysEepromCtrl_PartNoInfo (idx: ( ( U8 )( 2U ) ), ( ( U8 )( 8U ) ), …)`
+# `[^)]*\)` 는 첫 `)` 에서 멈춰 `\s*$` 가 안 맞으므로 **꼬리가 하나도 안 떨어진다**.
+_PARAM_ANNOT_HEAD = re.compile(rf"\s*\((?:{_PARAM_ANNOT_KEYS})\s*:", re.I)
+_ANNOT_KIND = re.compile(rf"^\((?P<k>{_PARAM_ANNOT_KEYS})\s*:\s*(?P<v>.*)\)$", re.I | re.S)
+
+# `return S16` / `U8 u8t_Data` / `enum en_g_State u8s_Data` / `U16 buf[8]`
+_RET_HEAD = re.compile(r"^return\b\s*(?P<type>.*)$", re.I)
+_TYPED_NAME = re.compile(
+    r"^(?P<type>(?:struct|union|enum)\s+[A-Za-z_]\w*|(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*\s*\**)"
+    r"\s+(?P<name>[A-Za-z_]\w*(?:\[[^\]]*\])*)$"
+)
+
+
+def split_param_annotations(raw: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """이름과 주석형 꼬리를 **분리**한다(버리지 않는다).
+
+    `"u16s_Buf (size: 8) (idx: 0, 1)"` → `("u16s_Buf", [("idx", "0, 1"), ("size", "8")])`
+
+    꼬리는 뒤에서부터 떨어지므로 반환 목록은 **역순**이다 — 호출부는 `dict()` 로 받거나
+    순서에 기대지 말 것. 잘라낸 자리가 문자열 끝이 아니면 꼬리가 아니다(이름 중간을
+    지우면 다른 이름이 된다).
+    """
+    out = str(raw or "").strip()
+    tails: List[Tuple[str, str]] = []
+
+    def _record(chunk: str) -> None:
+        m = _ANNOT_KIND.match(chunk.strip())
+        if m:
+            tails.append((m.group("k").lower(), " ".join(m.group("v").split())))
+
+    while True:
+        m_tail = _PARAM_ANNOT_TAIL.search(out)
+        if m_tail:
+            _record(m_tail.group(0))
+            out = out[: m_tail.start()].strip()
+            continue
+        matches = list(_PARAM_ANNOT_HEAD.finditer(out))
+        if not matches:
+            return out, tails
+        m = matches[-1]
+        depth = 0
+        end = len(out)
+        for i in range(out.index("(", m.start()), len(out)):
+            if out[i] == "(":
+                depth += 1
+            elif out[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if out[end:].strip():
+            return out, tails
+        _record(out[m.start():end])
+        out = out[: m.start()].strip()
+
+
+def split_param_display(display: str) -> Tuple[str, Dict[str, str]]:
+    """이름 칸에 섞여 들어온 **타입·범위·주석을 제 열로** 돌려보낸다.
+
+    정본 Name 칸 2,751개는 단일 심볼(80.5%) · 멤버 경로(14.9%) · 첨자(3.3%) 뿐이고
+    타입이나 범위를 이름 칸에 적는 일이 **한 번도 없다**. 우리는 2,406칸 중 233칸이
+    그랬다: `(size: 8)` 100 · `return S16 (range: …)` 81 · `U8 u8t_Data` 36 ·
+    `(divisor: no 0)` 16.
+
+    ⚠ **단순 strip 금지.** `return S16 (range: …)` 에서 마지막 토큰을 취하면 `S16` 이
+    되어 반환값 표시가 **타입 이름으로 둔갑**한다 — 지표는 오르고 이름은 더 틀린다.
+    그래서 `return` 을 타입+이름 규칙보다 **먼저** 판정한다.
+
+    배열은 정본 표기를 따른다: `buf (size: 8)` → `buf[8]` (정본 92칸이 이 모양).
+    """
+    base, tails = split_param_annotations(display)
+    kinds = dict(tails)
+    extra: Dict[str, str] = {}
+
+    size = kinds.pop("size", "")
+    if size and not base.endswith("]"):
+        base = base + "".join(f"[{d}]" for d in size.split("x") if d)
+    if kinds.get("range"):
+        extra["range"] = kinds["range"]
+    notes = [f"{k}: {v}" for k, v in tails if k in ("idx", "divisor")]
+    if notes:
+        extra["note"] = " / ".join(reversed(notes))
+
+    m_ret = _RET_HEAD.match(base)
+    if m_ret:                                   # ⚠ 타입+이름 규칙보다 먼저 — 위 주석 참조
+        rtype = m_ret.group("type").strip()
+        if rtype:
+            extra["type"] = rtype
+        return "return", extra
+
+    m_typed = _TYPED_NAME.match(base)
+    if m_typed:
+        extra["type"] = " ".join(m_typed.group("type").split())
+        return m_typed.group("name"), extra
+    return base, extra
+
 
 def split_direction_tag(raw: str) -> Tuple[str, str]:
     """`"[INOUT] REG_PTT.Bits.PTT3"` → `("INOUT", "REG_PTT.Bits.PTT3")`.
@@ -1501,14 +1607,31 @@ def _param_value_range(ginfo: Dict[str, Any],
 
 
 def _param_grid_row(no: int, display_name: str, ginfo: Dict[str, Any],
-                    type_ranges: Optional[Dict[str, str]] = None) -> List[str]:
+                    type_ranges: Optional[Dict[str, str]] = None,
+                    extra: Optional[Dict[str, str]] = None) -> List[str]:
+    """그리드 한 행. `extra` 는 이름 칸에서 **되찾은** 타입/범위/주석이다.
+
+    ⚠ 전역 정보(`ginfo`)가 권위다 — `extra` 는 그 칸이 비었을 때만 채운다. 시그니처
+    파라미터와 반환값은 전역이 아니라 `ginfo` 가 없고, 그 정보가 지금까지 이름 칸에
+    실려 있었다.
+    """
+    ex = extra or {}
+    type_text = _param_type_text(ginfo)
+    if type_text == _NA and ex.get("type"):
+        type_text = _param_cell(ex["type"])
+    range_text = _param_value_range(ginfo, type_ranges)
+    if range_text == _NA and ex.get("range"):
+        range_text = _param_cell(ex["range"])
+    desc = re.sub(r"\s+", " ", str(ginfo.get("desc") or "")).strip()
+    if ex.get("note"):
+        desc = f"{desc} ({ex['note']})".strip() if desc else ex["note"]
     return [
         str(no),
         _param_cell(display_name),
-        _param_type_text(ginfo),
-        _param_value_range(ginfo, type_ranges),
+        type_text,
+        range_text,
         _param_cell(ginfo.get("init")),
-        _param_cell(ginfo.get("desc")),
+        _param_cell(desc),
     ]
 
 
@@ -1537,13 +1660,16 @@ def resolve_param_grid_entries(
     seen: Dict[str, set] = {"in": set(), "out": set()}
     grids: Dict[str, List[List[str]]] = {"in": [], "out": []}
 
-    def _emit(bucket: str, display_name: str, ginfo: Dict[str, Any]) -> None:
-        key = display_name.strip().lower()
+    def _emit(bucket: str, name: str, ginfo: Dict[str, Any],
+              extra: Optional[Dict[str, str]] = None) -> None:
+        # ⚠ 중복 판정은 **분해된 이름**으로 한다. 꼬리째로 비교하면 같은 변수의
+        #   `buf (size: 2)` 와 `buf (size: 2) (idx: …)` 가 두 행이 된다.
+        key = name.strip().lower()
         if not key or key in seen[bucket]:
             return
         seen[bucket].add(key)
         grids[bucket].append(
-            _param_grid_row(len(grids[bucket]) + 1, display_name, ginfo, type_ranges))
+            _param_grid_row(len(grids[bucket]) + 1, name, ginfo, type_ranges, extra))
 
     for source_key, default_tag in (
         ("inputs", "IN"), ("outputs", "OUT"),
@@ -1558,12 +1684,16 @@ def resolve_param_grid_entries(
                 tag, (source_key == "inputs", source_key == "outputs"))
             if not (to_in or to_out):
                 continue
-            lookup = re.split(r"(?:->|\.|\[)", base)[0].strip()
+            # ⚠ 분해를 **조회보다 먼저** 한다. 꼬리가 붙은 채로 찾으면
+            #   `u16s_AdcBuffer (size: 8)` 이 gmap 에 없어 Type/Range/Desc 가 통째로
+            #   N/A 가 된다(실측 100칸).
+            name, extra = split_param_display(base)
+            lookup = re.split(r"(?:->|\.|\[)", name)[0].strip()
             ginfo = gmap.get(lookup) if isinstance(gmap.get(lookup), dict) else {}
             if to_in:
-                _emit("in", base, ginfo or {})
+                _emit("in", name, ginfo or {}, extra)
             if to_out:
-                _emit("out", base, ginfo or {})
+                _emit("out", name, ginfo or {}, extra)
 
     return (grids["in"] or [_empty_param_grid_row()],
             grids["out"] or [_empty_param_grid_row()])
