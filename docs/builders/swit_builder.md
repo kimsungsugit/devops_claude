@@ -81,6 +81,63 @@ KJPDS02 PV 정본(`… SwITCV … v2.01_260629_R.xlsx`) 실측:
 밀려도 통과해서 결함을 못 잡는다 — 예전 픽스처가 헤더 없이 DV 열에만 기입해 **코드의
 거울**이던 것이 이 결함을 통과시킨 원인이다.
 
+## SwITR 증거 읽기 — 시트명·열 (2026-08-26 실측)
+
+SwITCR 은 SwITR 을 되읽어 TC 집계를 증거로 삼는다. 정본 배치는 **코드가 가정하던 것과 달랐고**,
+그 결과 `sitr_test_log_tcs` / `sitr_pass_count` / `sitr_fail_count` 세 키가 늘 부재였다.
+
+| | 코드가 보던 곳 | 정본 실측 |
+|---|---|---|
+| 시트 | `2.Test Log` (정확 매칭) | **`3.Test Log`** |
+| TC ID 열 | `row[5]` = F | **B** (세로 병합) |
+| Pass/Fail 열 | `row[-12:]` (뒤에서 12칸) | **AL** (max_col=319) |
+
+⚠ **행을 세면 틀린다.** TC ID 가 세로 병합이라 병합 그룹 54개 / 결과 셀 630개가 나오는데
+문서가 말하는 Total 은 **611** 이다. 그래서 이제 `1.Test Summary` 의 Total 행을 **먼저** 쓴다:
+
+    r17  Type | Number of TCs Tested | Number of TCs Passed | Number of TCs Failed | not executed
+    r18  Requirements Based TC   581  581  0  0
+    r19  Interface TC            (빈 칸 — 미수행)
+    r20  Fault Injection TC       30   30  0  0
+    r21  Total                   611  611  0  0        <- 이 행을 쓴다
+
+부분합을 우리가 더하지 않는다 — 합산 규칙이 양식마다 다르다. Total 한 칸이라도 수가 아니면
+**통째로 포기**한다(절반짜리 근거 금지). 라벨을 못 찾으면 `1.Test Summary` 가 없는 판(v1.01)
+으로 보고 `N.Test Log` 행 세기로 접는데, 그때도 시트명·열은 **탐지**한다.
+
+⚠ SwITCV 에도 `1.Test Summary` 가 있지만 `Number of TCs Tested` 블록이 없다 — 라벨 기반이라
+자동으로 걸러진다(같은 함수가 두 워크북에 쓰인다).
+
+### 곁가지 — 읽어도 쓰지 않던 두 번째 배선
+
+`_write_it101` 이 `sitr_*` 를 **`switcv_summary`**(커버리지 쪽 dict)에서 찾고 있었다. 그 키는
+SwITR 워크북에서만 나오고, 게다가 이 함수는 `switr_summary` 를 인자로 받지도 않았다. 즉 읽기를
+고쳐도 IT101 에는 안 닿았다. 인자를 넘기고 조회 대상을 바꿨다.
+
+### 대조 — 이 읽기를 쓸모 있게 만드는 부분
+
+읽기만 고치면 값은 `or` 폴백 자리에 조용히 앉을 뿐이다(KJPDS02 는 세션이 이미 611 을 주므로
+산출물 숫자는 그대로다). 그래서 **세션 실측 ↔ 승인 문서가 다르면 경고**한다
+(`_switr_divergence_warnings`, prefix `[evidence]`).
+
+- 일치는 **조용하다** — 정상을 경고로 채우면 진짜 경고가 묻힌다
+- 한쪽이 없으면 건너뛴다 — **부재는 불일치가 아니다**
+- 산출물에는 세션 값을 싣고, 그 사실을 경고문에 적는다
+
+실측(KJPDS02 PV): 세션 611/611/0 · 문서 611/611/0 → 경고 없음. 대조군으로 세션을 600 으로
+바꾸면 `[evidence] 총 TC: VectorCAST 세션 600 와 SwITR 문서 611 가 다릅니다` 가 뜬다.
+
+⚠ **`sitr_*` 를 단언하는 테스트가 0건이었다** — 그래서 죽은 읽기가 안 잡혔다. 회귀 가드는
+`tests/unit/test_swit_comprehensive_aggregator.py` `TestSwitrEvidenceIsActuallyRead` /
+`TestSessionVsSwitrDivergenceIsReported` / `TestIt101ReadsSitrKeysFromTheSwitrDict`
+(뮤테이션 12/12).
+
+### 아직 못 잰 것
+
+`_load_fault_injection_summary` 도 시트명 정확 매칭(`FI_Test Case`, 실패 시 **첫 시트**로 폴백)
++ 열 하드코딩(3/2/15~19/4/5/6)이다. **FI 정본 파일이 실물로 없어 대조 불가**라 손대지 않았다
+(그 부재는 빌드 경고로 나간다). 파일이 확보되면 위와 같은 방식으로 잴 것.
+
 ## 33차 — Coverage Report v2.02 (xlsx)
 - 회사 v2.02 양식 (HDPDM01 NE_GN7). 시트 구조: Cover / Test Summary / 1.Traceability / 2.Consistency / 3.Coverage / History (SwUT v3.01과 동일)
 - 입력: VectorCAST log (`U:\...\08.SW 통합테스트\03.Test Result\01.Log\v<VER>_<DATE>\`)

@@ -118,6 +118,158 @@ class SwitcrBuildResult:
         }
 
 
+#: 세션 실측 ↔ SwITR 문서 대조 축 (표시 라벨, agg 키, 문서 키).
+_SWITR_CROSSCHECK_AXES = (
+    ("총 TC", "total_tcs", "sitr_test_log_tcs"),
+    ("통과 TC", "passed", "sitr_pass_count"),
+    ("실패 TC", "failed", "sitr_fail_count"),
+)
+
+
+def _switr_divergence_warnings(
+    agg: dict[str, Any], switr_summary: dict[str, Any],
+) -> list[str]:
+    """VectorCAST 세션과 승인된 SwITR 문서가 다르면 경고 문자열을 낸다.
+
+    ⚠ 이 대조는 2026-08-26 까지 **한 번도 일어나지 않았다** — SwITR 을 1.1MB 나 읽어
+      놓고 시트명(`3.Test Log` vs 코드의 `2.Test Log`)과 TC 열(B vs 코드의 F)이 어긋나
+      `sitr_*` 세 키가 늘 부재였기 때문이다. 읽기만 고치면 값은 `or` 폴백 자리에 조용히
+      앉을 뿐이라, **어긋남을 말해야** 읽은 값이 쓸모가 있다.
+
+    ⚠ 한쪽이 없으면 건너뛴다 — **부재는 불일치가 아니다.** 없는 증거를 0 으로 접어
+      "문서가 0 건이라고 한다" 는 없는 사실을 만들지 않는다.
+    ⚠ 일치를 경고로 남기지 않는다 — 정상은 조용해야 한다.
+    """
+    out: list[str] = []
+    for label, agg_key, doc_key in _SWITR_CROSSCHECK_AXES:
+        live = agg.get(agg_key)
+        doc = switr_summary.get(doc_key)
+        if not isinstance(live, (int, float)) or not isinstance(doc, (int, float)):
+            continue
+        if int(live) != int(doc):
+            out.append(
+                f"[evidence] {label}: VectorCAST 세션 {int(live)} 와 SwITR 문서 "
+                f"{int(doc)} 가 다릅니다 — 산출물에는 세션 값을 실었습니다"
+            )
+    return out
+
+
+#: SwITR `1.Test Summary` 집계 블록의 헤더 라벨 → 우리 키.
+_SITR_TC_HEADERS = (
+    ("sitr_test_log_tcs", "number of tcs tested"),
+    ("sitr_pass_count", "number of tcs passed"),
+    ("sitr_fail_count", "number of tcs failed"),
+)
+
+
+def _sitr_summary_from_test_summary(wb: Any) -> dict[str, Any]:
+    """SwITR `1.Test Summary` 의 **Total 행**(문서가 스스로 말하는 집계)을 읽는다.
+
+    ⚠ Test Log 행 세기보다 이걸 **먼저** 쓴다. 정본 실측(2026-08-26)에서 `3.Test Log` 는
+      TC ID 가 세로 병합이라 병합 그룹이 54개, 결과 셀이 630개인데 문서의 Total 은 611 이다
+      — 행을 세는 접근 자체가 이 양식에서 틀린 답을 낸다.
+
+    라벨로만 찾는다(행·열 상수 없음). 못 찾으면 **빈 dict** 를 낸다 — 없는 집계를 0 으로
+    지어내지 않는다. SwITCV 에도 같은 이름의 시트가 있지만 이 블록이 없어 여기서 걸러진다.
+    """
+    ws = None
+    for name in getattr(wb, "sheetnames", []) or []:
+        if "testsummary" in "".join(str(name).split()).lower():
+            ws = wb[name]
+            break
+    if ws is None:
+        return {}
+    max_r = min(int(getattr(ws, "max_row", 0) or 0), 80)
+    max_c = min(int(getattr(ws, "max_column", 0) or 0), 20)
+
+    header_row = None
+    cols: dict[str, int] = {}
+    for r in range(1, max_r + 1):
+        found: dict[str, int] = {}
+        for c in range(1, max_c + 1):
+            label = str(ws.cell(r, c).value or "").strip().lower()
+            for key, want in _SITR_TC_HEADERS:
+                if label == want:
+                    found[key] = c
+        if len(found) == len(_SITR_TC_HEADERS):
+            header_row, cols = r, found
+            break
+    if header_row is None:
+        return {}
+
+    # 헤더 아래에서 `Total` 행을 찾는다. 부분합(Requirements Based / Fault Injection …)을
+    # 우리가 더하지 않는다 — 문서가 합쳐 둔 값을 그대로 쓴다(합산 규칙이 양식마다 다르다).
+    for r in range(header_row + 1, min(header_row + 20, max_r) + 1):
+        is_total = any(
+            str(ws.cell(r, c).value or "").strip().lower() == "total"
+            for c in range(1, min(max_c, 4) + 1)
+        )
+        if not is_total:
+            continue
+        out: dict[str, Any] = {}
+        for key, _ in _SITR_TC_HEADERS:
+            value = ws.cell(r, cols[key]).value
+            if not isinstance(value, (int, float)):
+                return {}          # 한 칸이라도 수가 아니면 통째로 포기(부분 신뢰 금지)
+            out[key] = int(value)
+        return out
+    return {}
+
+
+def _sitr_summary_from_test_log(wb: Any) -> dict[str, Any]:
+    """`N.Test Log` 시트에서 TC 행을 센다 — `1.Test Summary` 가 없는 판(v1.01)용 폴백.
+
+    ⚠ 시트명을 정확 매칭하지 않는다. 회사 정본은 `3.Test Log` 인데 예전 코드가
+      `"2.Test Log"` 만 봐서 **한 번도 읽힌 적이 없었다**(2026-08-26 실측).
+    ⚠ TC ID 열도 상수가 아니다. 예전 코드는 `row[5]`(F열) 고정이었는데 정본은 **B열**이다.
+    """
+    ws = None
+    for name in getattr(wb, "sheetnames", []) or []:
+        if "testlog" in "".join(str(name).split()).lower():
+            ws = wb[name]
+            break
+    if ws is None:
+        return {}
+    max_r = min(int(getattr(ws, "max_row", 0) or 0), 400)
+    max_c = min(int(getattr(ws, "max_column", 0) or 0), 60)
+
+    tc_col = verdict_col = None
+    tc_hits: dict[int, int] = {}
+    verdict_hits: dict[int, int] = {}
+    for r in range(1, max_r + 1):
+        for c in range(1, max_c + 1):
+            value = str(ws.cell(r, c).value or "").strip()
+            if value.startswith("SwITC"):
+                tc_hits[c] = tc_hits.get(c, 0) + 1
+            elif value in ("Pass", "Fail", "PASS", "FAIL", "OK", "NG"):
+                verdict_hits[c] = verdict_hits.get(c, 0) + 1
+    if tc_hits:
+        tc_col = max(tc_hits, key=lambda c: tc_hits[c])
+    if verdict_hits:
+        verdict_col = max(verdict_hits, key=lambda c: verdict_hits[c])
+    if tc_col is None:
+        return {}
+
+    full_r = int(getattr(ws, "max_row", 0) or 0)
+    tc_count = pass_count = fail_count = 0
+    for r in range(1, full_r + 1):
+        if not str(ws.cell(r, tc_col).value or "").strip().startswith("SwITC"):
+            continue
+        tc_count += 1
+        if verdict_col is None:
+            continue
+        verdict = str(ws.cell(r, verdict_col).value or "").strip().lower()
+        if verdict in ("fail", "ng"):
+            fail_count += 1
+        elif verdict in ("pass", "ok"):
+            pass_count += 1
+    return {
+        "sitr_test_log_tcs": tc_count,
+        "sitr_pass_count": pass_count,
+        "sitr_fail_count": fail_count,
+    }
+
+
 def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False) -> dict[str, Any]:
     """Extract compact evidence from an existing SwITCV/SwITR workbook."""
     if not bytes_value or openpyxl is None:
@@ -218,24 +370,14 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
             out["function_calls_total"] = _pick(6, 0, call_rows)
             out["function_calls_fail_count"] = _pick(6, 1, call_fail)
             out["function_calls_exception_count"] = _pick(6, 2, call_exc)
-        test_log = wb["2.Test Log"] if "2.Test Log" in wb.sheetnames else None
-        if test_log is not None:
-            tc_count = 0
-            pass_count = 0
-            fail_count = 0
-            for row in test_log.iter_rows(min_row=4, values_only=True):
-                tc_id = str(row[5] or "").strip() if len(row) > 5 else ""
-                if not tc_id.startswith("SwITC"):
-                    continue
-                tc_count += 1
-                row_text = " ".join(str(v or "") for v in row[-12:])
-                if "Fail" in row_text:
-                    fail_count += 1
-                elif "Pass" in row_text or "OK" in row_text:
-                    pass_count += 1
-            out["sitr_test_log_tcs"] = tc_count
-            out["sitr_pass_count"] = pass_count
-            out["sitr_fail_count"] = fail_count
+        # ⚠ 2026-08-26 실측 — SwITR 증거 읽기가 **통째로 죽어 있었다.** 두 이유가 겹쳤다:
+        #   ① 시트명을 `"2.Test Log"` 로 정확 매칭했는데 정본은 `3.Test Log` 다
+        #   ② TC ID 열을 `row[5]`(F) 로 박았는데 정본은 **B열**이다
+        #   그래서 `sitr_*` 세 키가 늘 부재였고, 이걸 폴백으로 쓰던 자리는 전부 세션 값만
+        #   봤다 — 승인된 결과 문서와의 **대조가 한 번도 일어나지 않았다.**
+        # 문서가 스스로 말하는 집계를 먼저 쓰고, 없을 때만 행을 센다.
+        sitr = _sitr_summary_from_test_summary(wb) or _sitr_summary_from_test_log(wb)
+        out.update(sitr)
         return out
     finally:
         wb.close()
@@ -800,7 +942,14 @@ def _write_it101(
     cfg: dict[str, Any],
     switcv_summary: dict[str, Any],
     warnings: list[str],
+    switr_summary: dict[str, Any] | None = None,
 ) -> int:
+    """IT101(4.1 커버리지 집계 + 4.2/4.3 미달성 표)를 쓴다.
+
+    ⚠ 2026-08-26 — `sitr_*` 키를 **`switcv_summary` 에서 찾고 있었다.** 그 키는 SwITR
+      워크북에서만 나오므로 늘 부재였고(게다가 이 함수는 `switr_summary` 를 받지도 않았다),
+      TC 수·통과 수는 세션 값만 보고 승인 문서와 대조되지 않았다.
+    """
     _write_common_header(ws, meta, cfg)
     safe_write(ws, 60, 4, "VectorCast")
     safe_write(ws, 61, 4, "2025.sp4")
@@ -811,17 +960,18 @@ def _write_it101(
     safe_write(ws, 68, 3, "HKY-KJPDS02-SwTP-2881")
     safe_write(ws, 5, 9, "=H79")
     function_count = _function_count(agg, switcv_summary)
-    failed_tcs = agg.get("failed", 0) or switcv_summary.get("sitr_fail_count", 0) or 0
+    _switr = switr_summary or {}
+    failed_tcs = agg.get("failed", 0) or _switr.get("sitr_fail_count", 0) or 0
     details = list(switcv_summary.get("coverage_fail_details") or [])
     function_fail = _int_value(switcv_summary.get("functions_fail_count"))
     function_exception = _int_value(switcv_summary.get("functions_exception_count"))
     call_fail = _int_value(switcv_summary.get("function_calls_fail_count"))
     call_exception = _int_value(switcv_summary.get("function_calls_exception_count"))
-    total_tcs = agg.get("total_tcs") or switcv_summary.get("sitr_test_log_tcs") or 0
-    passed_tcs = agg.get("passed") or switcv_summary.get("sitr_pass_count") or 0
+    total_tcs = agg.get("total_tcs") or _switr.get("sitr_test_log_tcs") or 0
+    passed_tcs = agg.get("passed") or _switr.get("sitr_pass_count") or 0
     it101_tc_total = _int_value(
         (cfg.get("switcr_metadata", {}) or {}).get("it101_tc_total"),
-        _int_value(switcv_summary.get("sitr_test_log_tcs"), _int_value(total_tcs)),
+        _int_value(_switr.get("sitr_test_log_tcs"), _int_value(total_tcs)),
     )
     call_total = switcv_summary.get("function_calls_total") or function_count
 
@@ -1491,6 +1641,8 @@ def build_switcr_report(
         function_name_to_swufn_from_suds=agg.get("function_name_to_swufn_from_suds"),
     )
 
+    warnings.extend(_switr_divergence_warnings(agg, switr_summary))
+
     summary: dict[str, Any] = {
         "environments": len(session.environments),
         "total_tcs": agg.get("total_tcs", 0) or switr_summary.get("sitr_test_log_tcs", 0),
@@ -1518,6 +1670,7 @@ def build_switcr_report(
     if it101 is not None:
         summary["it101_failure_rows"] = _write_it101(
             it101, meta, agg, cfg, switcv_summary, warnings,
+            switr_summary=switr_summary,
         )
     else:
         incomplete_sheets.append("1.IT101")

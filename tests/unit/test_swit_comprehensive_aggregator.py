@@ -672,3 +672,186 @@ class TestIt201It301EvidenceGuard:
         # row 80 = 의도적 N/A(동적메모리 제외) → 그대로(마킹 아님)
         assert ws["L80"].value == "N/A"
         assert any("IT401" in w and "자원사용" in w for w in warns)
+
+
+def _switr_canonical_workbook(
+    *,
+    sheet_name: str = "3.Test Log",
+    summary: tuple[int, int, int] | None = (611, 611, 0),
+    total_label: str = "Total",
+) -> bytes:
+    """회사 정본 SwITR 형태 — 2026-08-26 실측 배치 그대로.
+
+    시트 `Cover / History / 1.Test Summary / 2.Deviation / 3.Test Log`.
+    `1.Test Summary` r17 헤더 + r18/r20 부분합 + r21 Total, `3.Test Log` 는 TC ID 가
+    **B열**(세로 병합이라 행 수 != TC 수).
+
+    ⚠ 예전 픽스처는 `2.Test Log` 에 TC 를 F열로 넣어 **코드의 거울**이었다. 그래서
+      "시트명도 열도 정본과 다르다" 는 사실이 한 번도 드러나지 않았다.
+    """
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    wb.create_sheet("Cover")
+    wb.create_sheet("History")
+    ts = wb.create_sheet("1.Test Summary")
+    if summary is not None:
+        tested, passed, failed = summary
+        ts["B17"], ts["C17"] = "Type", "Number of TCs Tested"
+        ts["D17"], ts["E17"] = "Number of TCs Passed", "Number of TCs Failed"
+        ts["F17"] = "Number of TCs not executed"
+        ts["B18"], ts["C18"], ts["D18"], ts["E18"] = "Requirements Based TC", 581, 581, 0
+        ts["B20"], ts["C20"], ts["D20"], ts["E20"] = "Fault Injection TC", 30, 30, 0
+        ts["B21"] = total_label
+        ts["C21"], ts["D21"], ts["E21"] = tested, passed, failed
+    wb.create_sheet("2.Deviation")
+    log = wb.create_sheet(sheet_name)
+    log["B5"] = "Test Case"
+    for i, (tc, verdict) in enumerate((
+        ("SwITC_SwUFn_0101_01", "Pass"),
+        ("SwITC_SwUFn_0102_01", "Pass"),
+        ("SwITC_SwUFn_0103_01", "Fail"),
+    )):
+        r = 7 + i
+        log.cell(r, 2).value = tc          # B열 — 정본 배치
+        log.cell(r, 38).value = verdict    # AL열
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class TestSwitrEvidenceIsActuallyRead:
+    """SwITR 증거 읽기가 정본에서 **동작하는지** — 2026-08-26 실측 결함.
+
+    예전 코드는 시트를 `"2.Test Log"` 로 정확 매칭하고 TC ID 열을 `row[5]`(F) 로 박아
+    두었다. 정본은 `3.Test Log` / **B열**이라 둘 다 빗나갔고, `sitr_*` 세 키가 늘 부재였다.
+    그 키들은 `or` 폴백 자리에만 쓰여 아무도 안 죽었고, **단언하는 테스트가 0건**이라
+    아무도 못 봤다.
+    """
+
+    def _load(self, data: bytes) -> dict:
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        return _load_workbook_summary(data, keep_vba=False)
+
+    def test_canonical_switr_yields_the_documents_own_total(self):
+        out = self._load(_switr_canonical_workbook())
+        assert out["sitr_test_log_tcs"] == 611     # 고치기 전엔 키 자체가 없었다
+        assert out["sitr_pass_count"] == 611
+        assert out["sitr_fail_count"] == 0
+
+    def test_row_counting_would_have_given_the_wrong_number(self):
+        """행을 세면 3 이 나온다 — 문서 Total 은 611. 세는 접근이 이 양식엔 안 맞는다."""
+        out = self._load(_switr_canonical_workbook())
+        assert out["sitr_test_log_tcs"] != 3
+
+    def test_falls_back_to_test_log_when_no_summary_block(self):
+        """`1.Test Summary` 집계가 없는 판(v1.01)은 행을 센다 — 시트명/열은 탐지."""
+        out = self._load(_switr_canonical_workbook(summary=None))
+        assert out["sitr_test_log_tcs"] == 3       # B열 TC 3건
+        assert out["sitr_pass_count"] == 2
+        assert out["sitr_fail_count"] == 1
+
+    def test_legacy_two_dot_test_log_still_works(self):
+        """예전 판(`2.Test Log`)도 계속 읽힌다 — 정본을 고치며 깨뜨리지 않는다."""
+        out = self._load(_switr_canonical_workbook(sheet_name="2.Test Log", summary=None))
+        assert out["sitr_test_log_tcs"] == 3
+
+    def test_absent_block_yields_no_keys_not_zeros(self):
+        """집계도 로그도 없으면 **키를 안 만든다** — 0 으로 지어내면 '문서가 0건이라 한다'
+        는 없는 사실이 된다."""
+        wb = openpyxl.Workbook()
+        wb.active.title = "Cover"
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = self._load(buf.getvalue())
+        assert "sitr_test_log_tcs" not in out
+        assert "sitr_pass_count" not in out
+
+    def test_non_numeric_total_is_rejected_wholesale(self):
+        """Total 한 칸이라도 수가 아니면 통째로 포기한다(부분 신뢰 금지) → 로그 폴백."""
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ts = wb.create_sheet("1.Test Summary")
+        ts["C17"], ts["D17"], ts["E17"] = (
+            "Number of TCs Tested", "Number of TCs Passed", "Number of TCs Failed")
+        ts["B21"], ts["C21"], ts["D21"], ts["E21"] = "Total", "-", 611, 0
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = self._load(buf.getvalue())
+        # ⚠ **한 키도** 남으면 안 된다. `return {}` 대신 그 칸만 건너뛰면 611/0 이
+        #   부분적으로 살아남아 "문서가 611 통과라 한다" 는 절반짜리 근거가 된다.
+        assert "sitr_test_log_tcs" not in out
+        assert "sitr_pass_count" not in out
+        assert "sitr_fail_count" not in out
+
+    def test_swutcv_style_summary_sheet_is_not_mistaken(self):
+        """SwITCV 에도 `1.Test Summary` 가 있지만 TC 집계 블록이 없다 — 오염 금지."""
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B9"], ts["C9"] = "Target Pass Ratio", 1
+        ts["B12"], ts["C12"] = "추적성 커버리지", "정합성 커버리지"
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = self._load(buf.getvalue())
+        assert "sitr_pass_count" not in out
+
+
+class TestSessionVsSwitrDivergenceIsReported:
+    """세션 실측 ↔ 승인 문서 대조 — 읽기를 고쳐도 말하지 않으면 폴백에 앉을 뿐이다."""
+
+    def _warn(self, agg, doc):
+        from backend.services.swit_comprehensive_aggregator import (
+            _switr_divergence_warnings,
+        )
+        return _switr_divergence_warnings(agg, doc)
+
+    def test_divergence_is_reported_with_both_numbers(self):
+        out = self._warn({"total_tcs": 611, "passed": 611, "failed": 0},
+                         {"sitr_test_log_tcs": 600, "sitr_pass_count": 611,
+                          "sitr_fail_count": 0})
+        assert len(out) == 1
+        assert "611" in out[0] and "600" in out[0]
+        assert out[0].startswith("[evidence]")     # 분류기가 아는 prefix 여야 화면에 닿는다
+
+    def test_agreement_is_silent(self):
+        assert self._warn({"total_tcs": 611, "passed": 611, "failed": 0},
+                          {"sitr_test_log_tcs": 611, "sitr_pass_count": 611,
+                           "sitr_fail_count": 0}) == []
+
+    def test_missing_side_is_not_a_divergence(self):
+        """부재 != 불일치. 없는 증거를 0 으로 접으면 없는 사실을 만든다."""
+        assert self._warn({"total_tcs": 611}, {}) == []
+        assert self._warn({}, {"sitr_test_log_tcs": 611}) == []
+        assert self._warn({"total_tcs": 611}, {"sitr_test_log_tcs": None}) == []
+
+    def test_every_axis_is_checked(self):
+        out = self._warn({"total_tcs": 1, "passed": 2, "failed": 3},
+                         {"sitr_test_log_tcs": 9, "sitr_pass_count": 9,
+                          "sitr_fail_count": 9})
+        assert len(out) == 3
+
+
+class TestIt101ReadsSitrKeysFromTheSwitrDict:
+    """IT101 이 `sitr_*` 를 **SwITCV** dict 에서 찾고 있었다 — 늘 부재였다."""
+
+    def test_no_sitr_lookup_against_the_coverage_summary(self):
+        from backend.services.swit_comprehensive_aggregator import _write_it101
+        from tests.unit._source_probe import source_of
+        src = source_of(_write_it101)
+        assert 'switcv_summary.get("sitr_' not in src, "SwITCV dict 에서 SITR 키를 찾는다"
+        assert "_switr.get(" in src, "SwITR dict 를 안 쓴다"
+
+    def test_call_site_passes_the_switr_summary(self):
+        import ast
+
+        from backend.services import swit_comprehensive_aggregator as mod
+        from tests.unit._source_probe import source_of
+        tree = ast.parse(source_of(mod))
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_write_it101"
+        ]
+        assert len(calls) == 1, f"호출부가 {len(calls)}곳 — 가드 대상 재확인 필요"
+        assert any(k.arg == "switr_summary" for k in calls[0].keywords), (
+            "호출부가 switr_summary 를 안 넘긴다"
+        )
