@@ -199,7 +199,19 @@ def _sitr_summary_from_test_summary(wb: Any) -> dict[str, Any]:
 
     # 헤더 아래에서 `Total` 행을 찾는다. 부분합(Requirements Based / Fault Injection …)을
     # 우리가 더하지 않는다 — 문서가 합쳐 둔 값을 그대로 쓴다(합산 규칙이 양식마다 다르다).
+    #
+    # ⚠ **블록 경계를 넘지 않는다.** 회사 SwITR 양식은 같은 시트에 섹션을 여러 개 쌓고
+    #   각각 자기 `Total` 행을 갖는다. HDPDM01 v0.10 양식(2026-08-26 실측)은 TC 블록에
+    #   Total 행이 **없고** 바로 아래 `■ Requirements/Design Coverage` 블록에 `Total`
+    #   (108/108/0)이 있다 — 경계를 안 지키면 **요구 커버리지 108 을 TC 108건으로**
+    #   읽는다. KJPDS02 에서 안 터진 건 그 칸이 비어 있어 아래 전량거부에 걸린 우연이다.
+    #   섹션 머리글은 이 양식군에서 `■` 로 시작한다.
     for r in range(header_row + 1, min(header_row + 20, max_r) + 1):
+        if any(
+            str(ws.cell(r, c).value or "").strip().startswith("■")
+            for c in range(1, min(max_c, 4) + 1)
+        ):
+            break                          # 다음 섹션 시작 — 여기서 끊는다
         is_total = any(
             str(ws.cell(r, c).value or "").strip().lower() == "total"
             for c in range(1, min(max_c, 4) + 1)

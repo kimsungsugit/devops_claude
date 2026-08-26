@@ -855,3 +855,127 @@ class TestIt101ReadsSitrKeysFromTheSwitrDict:
         assert any(k.arg == "switr_summary" for k in calls[0].keywords), (
             "호출부가 switr_summary 를 안 넘긴다"
         )
+
+
+class TestTotalRowMustBelongToTheTcBlock:
+    """같은 시트의 **다른 섹션** Total 을 집지 않는다 — 2026-08-26 HDPDM01 실측.
+
+    회사 SwITR 양식은 한 시트에 섹션을 쌓고 각각 자기 `Total` 행을 갖는다. HDPDM01 v0.10
+    양식은 TC 블록에 Total 이 **없고** 바로 아래 `■ Requirements/Design Coverage` 블록에
+    Total 이 있다. 경계를 안 지키면 **요구 커버리지 수를 TC 수로** 읽는다.
+
+    ⚠ KJPDS02 에서 이게 안 터진 건 그 칸이 비어 있어 전량거부에 걸린 **우연**이다.
+      숫자가 차 있으면 조용히 틀린 값을 낸다 — 재현 스크립트로 108/108/0 을 실증했다.
+    """
+
+    def _sheet(self, *, tc_total_row: bool, req_numbers: bool):
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B17"] = "Total Number of TCs"
+        ts["C17"], ts["D17"], ts["E17"] = (
+            "Number of TCs Tested", "Number of TCs Passed", "Number of TCs Failed")
+        if tc_total_row:
+            ts["B18"], ts["C18"], ts["D18"], ts["E18"] = "Total", 42, 40, 2
+        ts["B20"] = "■  Requirements/Design Coverage"
+        ts["B21"], ts["C21"], ts["D21"], ts["E21"] = (
+            "Source", "Total Number of Requirements", "covered", "not covered")
+        ts["B22"] = "SwITS"
+        ts["B23"] = "Total"
+        if req_numbers:
+            ts["C23"], ts["D23"], ts["E23"] = 108, 108, 0
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def _parse(self, data: bytes) -> dict:
+        from backend.services.swit_comprehensive_aggregator import (
+            _sitr_summary_from_test_summary,
+        )
+        return _sitr_summary_from_test_summary(
+            openpyxl.load_workbook(io.BytesIO(data), data_only=True))
+
+    def test_requirements_total_is_not_read_as_tc_total(self):
+        """TC 블록에 Total 이 없으면 **아무 것도 내지 않는다** — 아래 블록을 넘보지 않는다."""
+        out = self._parse(self._sheet(tc_total_row=False, req_numbers=True))
+        assert out == {}, f"남의 블록 Total 을 집었다: {out}"
+
+    def test_the_dangerous_row_really_is_reachable(self):
+        """가드가 헛돌지 않음을 보인다 — 경계만 없으면 실제로 108 을 집는 배치다.
+
+        (경계 검사를 뺀 것과 같은 조건: TC 블록 안에 그 숫자를 두면 읽힌다.)"""
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B17"] = "Total Number of TCs"
+        ts["C17"], ts["D17"], ts["E17"] = (
+            "Number of TCs Tested", "Number of TCs Passed", "Number of TCs Failed")
+        ts["B23"], ts["C23"], ts["D23"], ts["E23"] = "Total", 108, 108, 0   # ■ 없음
+        buf = io.BytesIO()
+        wb.save(buf)
+        assert self._parse(buf.getvalue())["sitr_test_log_tcs"] == 108
+
+    def test_tc_block_total_is_still_read(self):
+        """경계를 세워도 제 블록 Total 은 그대로 읽는다(과잉 차단 금지)."""
+        out = self._parse(self._sheet(tc_total_row=True, req_numbers=True))
+        assert out == {"sitr_test_log_tcs": 42, "sitr_pass_count": 40, "sitr_fail_count": 2}
+
+
+class TestSwitcvDvLayoutFromRealTemplate:
+    """DV(11열) 배치 — HDPDM01 `(XXXX_SwITCV) … v0.10` 실물에서 뜬 그대로.
+
+    PV 만 정본으로 갖고 있어 DV 는 한동안 픽스처로만 검증됐다. 2026-08-26 에 회사 표준
+    양식(HDPDM01 등록분)이 진짜 DV 판임을 실측해 그 배치를 여기 고정한다.
+    """
+
+    #: r9/r10 헤더 + r11~ 데이터. 요약 헤더는 r4, 값은 r5/r6 (E~H).
+    def _dv_workbook(self) -> bytes:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "4.Coverage"
+        ws["B4"] = "Coverage"
+        ws["E4"], ws["F4"], ws["G4"], ws["H4"] = (
+            "Total", "Fail Count", "Exception", "Coverage")
+        ws["B5"], ws["E5"], ws["F5"], ws["G5"], ws["H5"] = "Functions", 5, 0, 0, 1
+        ws["B6"], ws["E6"], ws["F6"], ws["G6"], ws["H6"] = "Function Calls", 5, 1, 0, 0.8
+        ws["B9"], ws["C9"], ws["D9"] = "No", "Component", "Unit"
+        ws["F9"], ws["G9"], ws["H9"], ws["K9"], ws["L9"] = (
+            "Functions", "Exception", "Function Called", "Exception", "File")
+        ws["D10"], ws["E10"] = "ID", "Name"
+        ws["H10"], ws["I10"], ws["J10"] = "Count", "Total", "Pass"
+        rows = [
+            (1, "SWTE_01", "SwUFn_0101", "main", "O", None, 6, 6, "O"),
+            (2, None, "SwUFn_0102", "Fun_A", "O", None, 2, 1, "X"),
+            (3, None, "SwUFn_0103", "Fun_B", "O", None, 5, 5, "O"),
+        ]
+        for i, values in enumerate(rows):
+            r = 11 + i
+            for offset, value in enumerate(values):
+                if value is not None:
+                    ws.cell(r, 2 + offset).value = value
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_component_label_selects_the_dv_base(self):
+        from backend.services.excel_layout_resolver import (
+            coverage_column_base,
+            coverage_summary_col,
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(self._dv_workbook()), data_only=True)
+        ws = wb["4.Coverage"]
+        assert coverage_column_base(ws) == 4                      # PV 면 3
+        assert coverage_summary_col(ws, base=4) == 5              # E열 Total
+
+    def test_summary_and_details_match_the_real_template(self):
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        out = _load_workbook_summary(self._dv_workbook())
+        assert out["functions_total"] == 5
+        assert out["functions_fail_count"] == 0
+        assert out["functions_exception_count"] == 0
+        assert out["function_calls_total"] == 5
+        details = out["coverage_fail_details"]
+        assert len(details) == 1                                  # J12='X' 한 건
+        assert details[0]["kind"] == "호출커버리지"
+        assert details[0]["unit_id"] == "SwUFn_0102"              # 밀리면 'Fun_A'
+        assert details[0]["function"] == "Fun_A"

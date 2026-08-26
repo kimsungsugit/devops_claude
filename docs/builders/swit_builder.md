@@ -41,6 +41,13 @@ doc_type 이 `switcv` 가 아니라 **`swit`** 인 것도 같은 이유(기존 �
 요약 블록(r4 헤더 / r5 Functions / r6 Function Calls)도 같은 한 칸만큼 밀린다 —
 `Total | Fail Count | Exception | Coverage` 연속 4칸. DV 는 E~H, PV 는 D~G.
 
+**두 판 모두 실물로 확인됐다** (2026-08-26):
+
+| 판 | 실물 | 근거 |
+|---|---|---|
+| PV(10열) | KJPDS02 `… SwITCV … v2.01_260629_R.xlsx` | Component 없음, `D5=1014` |
+| DV(11열) | HDPDM01 `(XXXX_SwITCV) … v0.10` (회사 표준 양식) | `C9='Component'`, `E5=5` |
+
 KJPDS02 PV 정본(`… SwITCV … v2.01_260629_R.xlsx`) 실측:
 
     D5=1014(Total)  E5=4(Fail)   F5=4(Exc)   G5=1(Coverage)
@@ -107,6 +114,13 @@ SwITCR 은 SwITR 을 되읽어 TC 집계를 증거로 삼는다. 정본 배치�
 
 ⚠ SwITCV 에도 `1.Test Summary` 가 있지만 `Number of TCs Tested` 블록이 없다 — 라벨 기반이라
 자동으로 걸러진다(같은 함수가 두 워크북에 쓰인다).
+
+⚠ **Total 행 탐색은 블록 경계를 넘지 않는다.** 이 양식군은 한 시트에 섹션을 쌓고 각각 자기
+`Total` 행을 갖는다. HDPDM01 v0.10 양식은 TC 블록에 Total 이 **없고** 바로 아래
+`■ Requirements/Design Coverage` 블록에 Total 이 있다 — 경계를 안 지키면 **요구 커버리지
+108 을 TC 108건으로** 읽는다(재현 실증). 섹션 머리글은 `■` 로 시작하므로 그걸 만나면 끊는다.
+KJPDS02 에서 안 터진 건 그 칸이 비어 있어 전량거부에 걸린 **우연**이다 — 숫자가 차 있으면
+조용히 틀린 값이 나온다.
 
 ### 곁가지 — 읽어도 쓰지 않던 두 번째 배선
 
