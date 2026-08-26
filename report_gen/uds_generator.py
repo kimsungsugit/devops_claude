@@ -37,6 +37,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: E402
 from report.constants import (
     DEFAULT_TYPE_RANGES,
 )
+from report_gen.c_reset import (  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
+    collect_reset_assignments,
+    placed_global_names,
+    resolve_reset,
+)
 from report_gen.c_return import returns_value  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
 from report_gen.function_analyzer import (
     _collect_var_usage,
@@ -341,6 +346,12 @@ def generate_uds_source_sections(
     type_defs: List[str] = []
     # 구조체/공용체 멤버의 배열 차원(접기 전 원문). 정본 SUTS 는 멤버 배열도
     # 원소 단위로 적는다 — `source_parser.extract_struct_member_arrays` 주석 참조.
+    # 리셋/초기화 이름 함수 안의 전역 대입 — `Reset Value` 열의 유일한 소스 근거다.
+    # ⚠ 실측: 이 대입을 안 보고 "정적 저장기간 → 0" 만 쓰면 정밀도가 96.5% → 93.7%
+    #   로 내려가고, 실패가 하필 `u8g_ApiIn_LinRx_*` 외부 인터페이스 신호 34칸에 몰린다.
+    _reset_assigns: Dict[str, List[Tuple[str, str]]] = {}
+    # 배치 주소(`@0x…`)로 선언된 변수 — 리셋 값이 MCU 데이터시트에 있어 소스엔 없다.
+    _placed_globals: Set[str] = set()
     struct_member_arrays_raw: Dict[str, Dict[str, str]] = {}
     # 타입 -> {멤버경로: {type, array, bits, desc}}. 배열 차원만 담는 위 맵과
     # **키는 같고 값이 다르다** — 소비처 계약(SUTS/SITS)이 달라 따로 낸다.
@@ -487,6 +498,8 @@ def generate_uds_source_sections(
         if _cut:
             _read_truncated.append((str(p), _raw_len))
         text = _strip_c_comments(raw)
+        # ⚠ 주석이 지워진 `text` 로 본다 — 주석 안 선언을 세면 없는 레지스터가 생긴다.
+        _placed_globals.update(placed_global_names(text))
         reqs.extend(_extract_requirements_from_comments(raw))
         dox_tags = _extract_doxygen_asil_tags(raw)
         if dox_tags:
@@ -539,6 +552,10 @@ def generate_uds_source_sections(
                 macro_defs.append([m_name, "", m_val, ""])
         else:
             body_map = _extract_c_function_bodies(text)
+            # 리셋/초기화 함수의 전역 대입을 모은다(같은 `body_map` 재사용 — 추가 파싱 0).
+            # ⚠ 헤더(`.h`)는 여기 안 온다. 헤더에 `static` 초기화 함수가 있으면 못 본다.
+            for _rvar, _rrows in collect_reset_assignments(body_map).items():
+                _reset_assigns.setdefault(_rvar, []).extend(_rrows)
             for name, params, ret_type, is_static in _extract_c_definitions(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 if name.startswith("g_"):
@@ -834,6 +851,23 @@ def generate_uds_source_sections(
                         "static": "true" if is_static else "false",
                         "desc": incoming_desc or str(prev.get("desc") or "").strip(),
                     }
+        # ── Reset Value 판정 (판정은 `report_gen.c_reset` **단일 출처**) ──────────
+        # 값과 **출처**를 함께 낸다. 정본은 같은 심볼에 두 값을 적는 곳이 16심볼·100칸
+        # (4.6%) 인데, 그게 "C 정적 저장기간(0)" 과 "리셋 함수가 넣는 값" 이 섞인
+        # 결과다. 표시 없이 값만 적으면 그 모호함을 그대로 물려받는다.
+        _reset_stats: Dict[str, int] = {}
+        for _gname, _ginfo in globals_info_map.items():
+            _cell, _src = resolve_reset(
+                _ginfo, _reset_assigns.get(_gname), macro_value_map,
+                placed=_gname in _placed_globals)
+            _ginfo["reset"] = _cell
+            _ginfo["reset_source"] = _src
+            _reset_stats[_src] = _reset_stats.get(_src, 0) + 1
+        _logger.info(
+            "reset 판정: %s",
+            " · ".join(f"{k} {v}" for k, v in sorted(
+                _reset_stats.items(), key=lambda kv: -kv[1])) or "(전역 없음)")
+
         # 스캔 캡에 실제로 닿는지 **센다**. 캡은 조용히 자르므로, 닿았는지를 기록하지 않으면
         # "이 프로젝트엔 전역이 원래 없다" 와 "캡에서 잘렸다" 를 구분할 수 없다.
         _c_files = [f for f in files if f.suffix.lower() == ".c"]

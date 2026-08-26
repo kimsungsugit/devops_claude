@@ -1612,6 +1612,23 @@ def _param_value_range(ginfo: Dict[str, Any],
     return _param_cell(raw)
 
 
+def _param_reset_text(ginfo: Optional[Dict[str, Any]]) -> str:
+    """`Reset Value` 열. **판정은 `report_gen.c_reset` 단일 출처**이고 여기선 표시만.
+
+    값에 출처가 붙어 나온다(`0x03 (Reset 함수)` · `0x00 (정적 저장기간)`). 정본의 이
+    열은 뜻이 하나가 아니다 — 같은 심볼에 두 값을 적는 곳이 16심볼·100칸(4.6%)이고,
+    그게 "C 정적 저장기간" 과 "리셋 함수가 넣는 값" 이 섞인 결과다. 표시 없이 값만
+    적으면 우리도 그 모호함을 물려받는다(`Value Range` 의 `(타입 폭)` 과 같은 결정).
+
+    ⚠ `reset` **키가 아예 없을 때만** 옛 동작(`init`)으로 떨어진다 — 구 캐시 payload
+      호환이다. 키가 있는데 빈 값이면 그건 "판정이 돌았고 **모른다**" 이므로 N/A 다.
+    """
+    info = ginfo if isinstance(ginfo, dict) else {}
+    if "reset" in info:
+        return _param_cell(info.get("reset"))
+    return _param_cell(info.get("init"))
+
+
 def _param_grid_row(no: int, display_name: str, ginfo: Dict[str, Any],
                     type_ranges: Optional[Dict[str, str]] = None,
                     extra: Optional[Dict[str, str]] = None) -> List[str]:
@@ -1636,7 +1653,7 @@ def _param_grid_row(no: int, display_name: str, ginfo: Dict[str, Any],
         _param_cell(display_name),
         type_text,
         range_text,
-        _param_cell(ginfo.get("init")),
+        _param_reset_text(ginfo),
         _param_cell(desc),
     ]
 
@@ -1699,7 +1716,12 @@ def _member_grid_info(name: str, base_ginfo: Dict[str, Any],
         "array": str(rec.get("array") or "").strip(),
         "range": value_range,
         # 멤버의 리셋 값은 MCU 데이터시트에 있고 소스엔 없다 — 비운다.
+        # ⚠ `reset` 키를 **명시로** 둔다. ⚠ 지금은 `init` 도 비어 있어 이 줄을 지워도
+        #   관측이 안 바뀐다(뮤테이션으로 확인한 **등가**다). 그래도 남긴다 — 이 dict 에
+        #   나중에 베이스 값이 하나라도 들어오면 `_param_reset_text` 의 구-payload
+        #   폴백이 그걸 Reset 열에 실어 보낸다. 그때 이 줄이 유일한 방어다.
         "init": "",
+        "reset": "",
         "desc": desc,
     }
 

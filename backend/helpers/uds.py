@@ -950,7 +950,11 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      않게 하는 유일한 출처. v13 캐시엔 이 키가 **아예 없어** 무효화하지 않으면
 #      멤버 행이 전부 N/A 로 나간다(키 부재 → 해석 불가 → 빈 레코드). 키를 새로
 #      넣고 버전을 안 올려 fix 가 프로덕션에서 죽었던 것이 바로 위 v12 다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v14"
+#  v15: `globals_info_map` 에 `reset`/`reset_source` 추가 — Reset Value 열이 이제
+#      선언·리셋 함수 대입·정적 저장기간 중 어느 근거인지까지 싣는다. v14 캐시엔 그
+#      키가 없어 `_param_reset_text` 가 옛 폴백(`init`)으로 떨어지므로, 무효화하지
+#      않으면 소스가 안 바뀐 프로젝트에서 이 판정이 **한 번도 안 돈다**(v12 와 같은 실패).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v15"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

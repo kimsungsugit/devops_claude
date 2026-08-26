@@ -242,6 +242,14 @@ def value_verdict(column: str, ref_value: Any, our_value: Any) -> Tuple[bool, st
         if _strip_array(ref).lower() == _strip_array(ours).lower():
             return True, "표기차(배열/대소문자)"
         return False, "값 불일치"
+    if column == "reset":
+        # ⚠ 숫자 열이다. `0x00` 과 `0` 과 `0x0000` 은 **같은 값**이고, 우리 칸엔
+        #   출처가 붙는다(`0x03 (Reset 함수)`). 문자열로만 비교하면 range 축이
+        #   0.0% 로 나왔던 것과 똑같이 거짓으로 나빠진다(SUTS R26 교훈).
+        r_num, o_num = _int_of(_ANNOT.sub("", ref).strip()), _int_of(_ANNOT.sub("", ours).strip())
+        if r_num is not None and o_num is not None:
+            return (True, "표기차(16진↔10진)") if r_num == o_num else (False, "값 불일치")
+        return False, "값 불일치"
     if _norm_ident(ref) and _norm_ident(ref) == _norm_ident(ours):
         return True, "표기차(공백/기호)"
     return False, "값 불일치"
