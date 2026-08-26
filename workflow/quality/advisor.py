@@ -169,6 +169,67 @@ _SWUT_ADVICE = {
 }
 
 # SwReport 통합 Summary roll-up — P/F verdict 집계(커버리지 아님).
+_SWIT_COVERAGE_ADVICE = {
+    # SwITCV 는 구문/분기 문서가 아니다 — 정본 4.Coverage 가 싣는 두 줄이 곧 축이다.
+    # (`evaluator.evaluate_swit_coverage` docstring 참조)
+    "function_achievement_pct": {
+        "label": "함수 달성률(Functions)",
+        "low_advice": "통합시험에서 커버리지를 달성하지 못한 함수가 있습니다. 아래 '미달성 함수 수'가 가리키는 함수의 호출 경로가 통합 하니스에 포함됐는지, 상위 호출자 TC 가 있는지 확인하세요.",
+        "threshold": 100.0,
+    },
+    "function_call_coverage_pct": {
+        "label": "함수 호출 커버리지(Function Calls)",
+        "low_advice": "실행되지 않은 함수 호출문(call site)이 남아 있습니다. 조건 분기 안쪽의 호출은 그 분기를 타는 입력을 줘야 실행됩니다 — 미달 함수의 호출 조건을 먼저 보세요.",
+        "threshold": 100.0,
+    },
+    "swit_functions_total": {
+        "label": "대상 함수 수(양식 universe)",
+        "low_advice": "SwITCV 양식이 정의한 승인 함수 목록의 크기입니다. VectorCAST 원시 행 수와 다른 것이 정상입니다(양식 순서·범위를 따릅니다).",
+        "threshold": None,
+    },
+    "swit_functions_fail": {
+        "label": "미달성 함수 수",
+        "low_advice": "달성률 100% 를 막는 실제 건수입니다. 백분율보다 이 수를 보고 대상 함수를 특정하세요.",
+        "threshold": None,
+    },
+    "swit_function_calls_fail_functions": {
+        "label": "호출 미달 함수 수",
+        "low_advice": "호출문 일부가 미실행인 함수의 수입니다(함수 자체는 달성했을 수 있습니다).",
+        "threshold": None,
+    },
+    "swit_function_calls_na_functions": {
+        "label": "호출 없음(N/A) 함수 수",
+        "low_advice": "호출문이 0 이라 호출 커버리지 분모에서 빠진 함수입니다(정본도 Pass='O'). 이 값이 크면 호출 커버리지 백분율의 근거 범위가 좁다는 뜻입니다.",
+        "threshold": None,
+    },
+    "vcast_raw_statement_pct": {
+        "label": "(참고) VectorCAST 원시 구문 커버리지",
+        "low_advice": "문서에는 싣지 않는 값입니다 — SwITCV 는 구문 커버리지 산출물이 아닙니다. 통합 로그 자체의 실측치이며 판정에 반영되지 않습니다.",
+        "threshold": None,
+    },
+    "vcast_raw_branch_pct": {
+        "label": "(참고) VectorCAST 원시 분기 커버리지",
+        "low_advice": "위 구문 커버리지와 같은 성격의 참고값입니다(비게이트).",
+        "threshold": None,
+    },
+    "vcast_raw_measured_functions": {
+        "label": "(참고) 원시 실측 함수 수",
+        "low_advice": "0 이면 통합 로그에서 커버리지를 하나도 읽지 못했다는 뜻입니다 — 로그 폴더/산출물 수집을 확인하세요.",
+        "threshold": None,
+    },
+    "pass_rate_pct": {
+        "label": "시험 통과율",
+        "low_advice": "실패했거나 실행되지 않은 TC 가 있습니다. 미실행 TC 도 분모에 포함됩니다.",
+        "threshold": 100.0,
+    },
+    "total_tcs": {
+        "label": "총 TC 수",
+        "low_advice": "통합시험 세션이 담은 TC 총수입니다.",
+        "threshold": None,
+    },
+}
+
+
 _SWREPORT_ADVICE = {
     "pass_rate_pct": {
         "label": "통합 통과율(Pass Rate)",
@@ -316,8 +377,12 @@ def suggest_improvements(
             advice_rules = _STS_ADVICE
         elif doc_type == "suts":
             advice_rules = _SUTS_ADVICE
-        elif doc_type in ("swut", "swit"):
+        elif doc_type == "swut":
             advice_rules = _SWUT_ADVICE
+        elif doc_type == "swit":
+            # SwUT 와 **다른 표** — SwITCV 는 구문/분기가 아니라 Functions 달성 +
+            # Function Calls 를 싣는 문서라 지표 이름도 조치문도 다르다.
+            advice_rules = _SWIT_COVERAGE_ADVICE
         elif doc_type in ("sutr", "sitr"):
             advice_rules = _TEST_RESULT_ADVICE
         elif doc_type in ("swutcr", "switcr"):

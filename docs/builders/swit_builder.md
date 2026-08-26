@@ -122,6 +122,39 @@ SwITCR 은 SwITR 을 되읽어 TC 집계를 증거로 삼는다. 정본 배치�
 KJPDS02 에서 안 터진 건 그 칸이 비어 있어 전량거부에 걸린 **우연**이다 — 숫자가 차 있으면
 조용히 틀린 값이 나온다.
 
+## SwITCV 품질 게이트 축 (2026-08-26)
+
+SwITCV 는 **구문/분기 커버리지 문서가 아니다.** `_align_function_rows_to_template` 이
+각 함수 행의 statement/branch 를 `measured=False` 인 O/X 표식(1/1·0/1)으로 덮어쓴다 —
+정본 `4.Coverage` 요약이 싣는 값이 그 두 줄이기 때문이다:
+
+    Functions       Total | Fail Count | Exception | Coverage
+    Function Calls  Total | Fail Count | Exception | Coverage
+
+그래서 `compute_coverage_rollup` 은 SwIT 에서 **항상** 전 축 None 을 낸다. 그게 정상이다.
+
+⚠ **그 상태를 `evaluate_coverage` 로 채점하면 안 된다.** `_safe_float` 가 None 을 0.0 으로
+접어 `statement_coverage_pct = 0 < 100` → FAIL 인데, **시험을 아무리 더해도 사라지지 않는
+구조적 FAIL** 이다. 게다가 정작 정본이 지목하는 미달은 어느 지표에도 안 뜬다. 실측
+(KJPDS02 PV, 2026-08-26):
+
+| | 옛 게이트(`evaluate_coverage`) | 지금(`evaluate_swit_coverage`) |
+|---|---|---|
+| 게이트 축 | `statement_coverage_pct` **0.0** (미측정) | 함수 달성률 **99.61%** · 호출 커버리지 **97.91%** |
+| 보이는 미달 | 없음 | Functions **4건** · Function Calls **21건** |
+| 게이트 지표 수 | 2 (실질 1 — pass_rate 는 늘 100%) | 3 |
+| 점수 / 판정 | 50.0 / FAIL | 66.25 / FAIL |
+
+즉 **완화가 아니라 강화**다. 미달 4건은 `SwUFn_1005 / 1167 / 3519 / 3554` 로, 정본 요약의
+`Fail Count=4` 와 일치한다(호출 미달 21건도 정본 21 과 일치).
+
+SwUTCV(`swut`)는 **진짜** 구문 커버리지를 낸다(실측 99.45% / 1014 함수). 그래서 recorder·
+advisor 분기는 `swut` ↔ `swit` 으로 갈라져 있고, 한쪽만 고치면 다시 붙는다.
+
+정렬이 버리는 원시 VectorCAST 커버리지(31.59% / 712 함수)는 `vcast_raw_*` **비게이트**
+참고지표로 보존한다 — 안 남기면 "측정했는데 문서가 안 싣는다" 와 "측정 자체를 못 했다" 가
+화면에서 같아 보인다.
+
 ### 곁가지 — 읽어도 쓰지 않던 두 번째 배선
 
 `_write_it101` 이 `sitr_*` 를 **`switcv_summary`**(커버리지 쪽 dict)에서 찾고 있었다. 그 키는

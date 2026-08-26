@@ -12,6 +12,7 @@ from workflow.quality.evaluator import (
     compute_overall_score,
     evaluate_comprehensive_result,
     evaluate_coverage,
+    evaluate_swit_coverage,
     evaluate_sits,
     evaluate_sts,
     evaluate_suts,
@@ -189,9 +190,17 @@ def _record_run_impl(
         metrics = evaluate_sits(quality_data)
     elif doc_type == "swreport":
         metrics = evaluate_swreport(quality_data)
-    elif doc_type in ("swut", "swit"):
+    elif doc_type == "swut":
         _meta = kwargs.get("meta") or {}
         metrics = evaluate_coverage(quality_data, asil=_meta.get("asil_level"))
+    elif doc_type == "swit":
+        # SwUT 와 **다른 평가기** — SwITCV 는 구문/분기를 O/X 표식으로 덮어쓰므로
+        # evaluate_coverage 에 넣으면 재지도 않은 축이 0% 영구 FAIL 이 되고, 정작
+        # 정본이 지목하는 미달(Functions/Function Calls)은 어느 지표에도 안 뜬다.
+        # evaluate_swit_coverage docstring 참조. SwUTCV 는 실측 구문 커버리지를
+        # 내므로(실측 99.45%/1014함수) 위 분기 그대로 둔다.
+        _meta = kwargs.get("meta") or {}
+        metrics = evaluate_swit_coverage(quality_data, asil=_meta.get("asil_level"))
     elif doc_type in ("sutr", "sitr"):
         # 커버리지 문서(swut/swit)와 **다른 평가기** — 시험 결과 보고서는 커버리지 축을
         # 내지 않으므로 evaluate_coverage 에 넣으면 미측정 축이 0% FAIL 로 둔갑한다.

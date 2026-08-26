@@ -40,6 +40,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from workflow.quality.advisor import (  # noqa: E402
     _COMPREHENSIVE_ADVICE,
+    _SWIT_COVERAGE_ADVICE,
     _SWUT_ADVICE,
     _TEST_RESULT_ADVICE,
 )
@@ -47,6 +48,7 @@ from workflow.quality.db import get_session, init_db  # noqa: E402
 from workflow.quality.evaluator import (  # noqa: E402
     evaluate_comprehensive_result,
     evaluate_coverage,
+    evaluate_swit_coverage,
     evaluate_test_result,
 )
 from workflow.quality.models import GenerationRun  # noqa: E402
@@ -298,3 +300,89 @@ def test_advice_reaches_comprehensive_runs(qdb):
     metrics = {s["metric"] for s in (out.get("suggestions") or [])}
     assert "test_execution_pct" in metrics
     assert "정의되지 않았습니다" not in (out.get("summary") or "")
+
+
+# ── SwITCV — 커버리지 문서지만 **구문/분기 문서는 아니다** ────────────────────
+# 2026-08-26 KJPDS02 PV 실측: 빌더가 statement/branch 를 O/X 표식으로 덮어쓰므로
+# roll-up 은 늘 None 이고, evaluate_coverage 에 넣으면 0% 영구 FAIL 이 된다.
+SWITCV_SUMMARY = {
+    "environments": 45,
+    "total_tcs": 611, "passed": 611, "failed": 0,
+    "function_rows": 1014,
+    "overall_statement_pct": None, "overall_branch_pct": None, "overall_mcdc_pct": None,
+    "measured_functions": {"statement": 0, "branch": 0, "mcdc": 0},
+    "synthesized_rows": 1014,
+    "vcast_raw_statement_pct": 31.59, "vcast_raw_branch_pct": 26.54,
+    "vcast_raw_measured_functions": 712,
+    "swit_functions_total": 1014, "swit_functions_achieved": 1010, "swit_functions_fail": 4,
+    "swit_function_calls_functions": 590, "swit_function_calls_na_functions": 424,
+    "swit_function_calls_covered": 1643, "swit_function_calls_total": 1678,
+    "swit_function_calls_fail_functions": 21,
+}
+
+
+def test_recorder_splits_swit_from_swut(qdb):
+    """swut 은 실측 구문 커버리지를 내고 swit 은 안 낸다 — 같은 평가기를 쓰면 안 된다."""
+    run_id = record_run("swit", SWITCV_SUMMARY, project_root="KJPDS02", db_path=qdb)
+    assert run_id > 0
+    init_db(qdb)
+    with get_session(qdb) as s:
+        run = s.query(GenerationRun).filter_by(id=run_id).one()
+        scores = {sc.metric_name: sc.value for sc in run.scores}
+        gated = {sc.metric_name for sc in run.scores if sc.threshold is not None}
+    # 문서 자신의 축으로 채점한다.
+    assert scores["function_achievement_pct"] == 99.61
+    assert scores["function_call_coverage_pct"] == 97.91
+    # 재지도 않은 축은 아예 기록되지 않는다(0.0 으로도 남기지 않는다).
+    assert "statement_coverage_pct" not in scores
+    assert "mcdc_coverage_pct" not in scores
+    assert gated == {"function_achievement_pct", "function_call_coverage_pct", "pass_rate_pct"}
+
+
+def test_swut_still_uses_the_coverage_evaluator(qdb):
+    """과잉 분기 방지 — SwUTCV 는 진짜 구문 커버리지를 내므로 그대로 채점돼야 한다."""
+    run_id = record_run(
+        "swut",
+        {"overall_statement_pct": 99.45, "overall_branch_pct": 95.0,
+         "measured_functions": {"statement": 1014}, "synthesized_rows": 0,
+         "passed": 10, "failed": 0, "total_tcs": 10},
+        project_root="KJPDS02", db_path=qdb,
+    )
+    assert run_id > 0
+    init_db(qdb)
+    with get_session(qdb) as s:
+        run = s.query(GenerationRun).filter_by(id=run_id).one()
+        scores = {sc.metric_name: sc.value for sc in run.scores}
+    assert scores["statement_coverage_pct"] == 99.45
+    assert "function_achievement_pct" not in scores
+
+
+def test_swit_advice_table_is_its_own():
+    """SwUT 표를 재사용하면 '구문 커버리지가 100% 미만입니다' 라는 틀린 조치가 나간다."""
+    assert _SWIT_COVERAGE_ADVICE is not _SWUT_ADVICE
+    assert "function_achievement_pct" in _SWIT_COVERAGE_ADVICE
+    assert "statement_coverage_pct" not in _SWIT_COVERAGE_ADVICE
+
+
+def test_advice_reaches_swit_runs(qdb):
+    """doc_type 분기가 없으면 advisor 가 '규칙이 정의되지 않았습니다' 로 답한다."""
+    from workflow.quality.advisor import suggest_improvements
+    run_id = record_run("swit", SWITCV_SUMMARY, project_root="KJPDS02", db_path=qdb)
+    out = suggest_improvements(run_id, db_path=qdb)
+    metrics = {s["metric"] for s in (out.get("suggestions") or [])}
+    assert "function_achievement_pct" in metrics
+    assert "정의되지 않았습니다" not in (out.get("summary") or "")
+
+
+def test_swit_gate_would_have_been_unfixable_before():
+    """가드가 헛돌지 않음을 보인다 — 옛 경로로는 어떤 시험을 더 해도 FAIL 이다."""
+    old = {m["metric_name"]: m for m in evaluate_coverage(SWITCV_SUMMARY)}
+    assert old["statement_coverage_pct"]["gate_pass"] is False
+    # 함수 달성/호출을 100% 로 만들어도 옛 평가기는 여전히 FAIL 이다.
+    perfect = {**SWITCV_SUMMARY, "swit_functions_achieved": 1014,
+               "swit_function_calls_covered": 1678}
+    still = {m["metric_name"]: m for m in evaluate_coverage(perfect)}
+    assert still["statement_coverage_pct"]["gate_pass"] is False
+    # 새 평가기에서는 통과한다.
+    now = [m for m in evaluate_swit_coverage(perfect) if m["threshold"] is not None]
+    assert now and all(m["gate_pass"] for m in now)

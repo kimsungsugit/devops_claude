@@ -64,13 +64,43 @@ def test_swut_asil_d_suggests_branch_mcdc(tmp_db):
     assert "statement_coverage_pct" not in metrics  # 통과 → 제안 없음
 
 
-def test_swit_uses_same_rules_as_swut(tmp_db):
+def test_swit_has_its_own_rules_not_swuts(tmp_db):
+    """2026-08-26 — SwIT 은 SwUT 표를 **더는 공유하지 않는다**.
+
+    옛 판은 `statement_coverage_pct` 제안이 나오는지를 봤다. 그런데 SwITCV 는 구문
+    커버리지를 재지 않는 문서라(빌더가 O/X 표식으로 덮어쓴다) 그 제안은 "실행되지 않은
+    코드 라인을 위한 TC를 추가하라" 는 **실행 불가능한 조치**였다. 지금은 정본
+    `4.Coverage` 가 싣는 축으로 제안한다 — `evaluate_swit_coverage` docstring 참조.
+    """
     rid = _make_run(tmp_db, "swit", [
-        ("statement_coverage_pct", 60.0, False, 100.0),
+        ("function_achievement_pct", 99.61, False, 100.0),
+        ("function_call_coverage_pct", 97.91, False, 100.0),
         ("pass_rate_pct", 100.0, True, 100.0),
     ])
     res = suggest_improvements(rid, db_path=tmp_db)
     assert res["unsupported"] is False
+    metrics = {s["metric"] for s in res["suggestions"]}
+    assert "function_achievement_pct" in metrics
+    assert "function_call_coverage_pct" in metrics
+
+
+def test_swit_no_longer_advises_statement_coverage(tmp_db):
+    """SwUT 표가 되붙으면 이 테스트가 잡는다 — 재지 않는 축의 조치문은 나가면 안 된다."""
+    rid = _make_run(tmp_db, "swit", [
+        ("statement_coverage_pct", 0.0, False, 100.0),   # 옛 경로가 남기던 값
+        ("pass_rate_pct", 100.0, True, 100.0),
+    ])
+    res = suggest_improvements(rid, db_path=tmp_db)
+    assert not any(s["metric"] == "statement_coverage_pct" for s in res["suggestions"])
+
+
+def test_swut_still_advises_statement_coverage(tmp_db):
+    """과잉 분리 방지 — SwUTCV 는 실측 구문 커버리지를 내므로 조치문이 그대로여야 한다."""
+    rid = _make_run(tmp_db, "swut", [
+        ("statement_coverage_pct", 60.0, False, 100.0),
+        ("pass_rate_pct", 100.0, True, 100.0),
+    ])
+    res = suggest_improvements(rid, db_path=tmp_db)
     assert any(s["metric"] == "statement_coverage_pct" for s in res["suggestions"])
 
 

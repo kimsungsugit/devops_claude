@@ -419,6 +419,94 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     return metrics
 
 
+def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) -> MetricList:
+    """SwIT Coverage Report(SwITCV) summary -> MetricList.
+
+    ## 왜 ``evaluate_coverage`` 를 재사용하지 않나
+
+    SwITCV 는 **구문/분기/MC-DC 문서가 아니다.** 빌더의
+    ``_align_function_rows_to_template`` 이 각 함수 행의 statement/branch 를
+    `measured=False` 인 O/X 표식(1/1·0/1)으로 덮어쓴다 — 회사 정본 4.Coverage 가
+    싣는 값이 그 두 줄(Functions / Function Calls)이기 때문이다. 그래서
+    ``compute_coverage_rollup`` 은 SwIT 에서 **항상** 전 축 None 을 낸다.
+
+    그 상태로 ``evaluate_coverage`` 에 넣으면 ``_safe_float`` 가 None 을 0.0 으로
+    접어 ``statement_coverage_pct=0 < 100`` → **문서가 재지도 않는 축으로 FAIL 을
+    지어낸다.** 게다가 그 FAIL 은 어떤 시험을 더 해도 사라지지 않는다(구조적 영구
+    FAIL). 같은 결함을 ``evaluate_test_result`` / ``evaluate_comprehensive_result``
+    가 이미 두 번 겪었다 — 거기 docstring 참조.
+
+    실제 피해는 가짜 FAIL 보다 **진짜 미달의 은폐** 쪽이 크다. 2026-08-26 KJPDS02
+    PV 실측: 게이트는 ``statement 0%`` 로 FAIL 을 내면서, 정작 정본이 지목한
+    미달성 Functions 4건(SwUFn_1005/1167/3519/3554)과 미달 Function Calls 21건은
+    **어느 지표에도 나타나지 않았다**.
+
+    ## 게이트 축
+
+    ``function_achievement_pct`` / ``function_call_coverage_pct`` 둘 다 100%
+    threshold. ASIL 무관하게 건다 — 통합시험의 함수 달성/호출 커버리지는 등급별
+    선택 축이 아니라 SwITCV 가 보고하도록 정의된 값 자체다.
+
+    ⚠ 이건 완화가 아니라 **강화**다. 종전엔 ``pass_rate_pct`` 하나만 실질 게이트였고
+      (나머지는 미측정 0% 고정) 그건 늘 100% 였다. 위 실측 문서는 새 축에서
+      99.61% / 97.91% 로 **정직하게** 미달한다.
+    """
+    metrics: MetricList = []
+
+    fn_total = _safe_float(summary, "swit_functions_total")
+    fn_achieved = _safe_float(summary, "swit_functions_achieved")
+    metrics.append(
+        _metric("function_achievement_pct",
+                round(fn_achieved / max(fn_total, 1.0) * 100, 2), threshold=100.0),
+    )
+
+    calls_total = _safe_float(summary, "swit_function_calls_total")
+    calls_covered = _safe_float(summary, "swit_function_calls_covered")
+    # 분모 0 = Metric report 부재(레거시 경로) — 그땐 호출 축을 재지 못한 것이므로
+    # 0% FAIL 을 지어내지 않고 **미평가**(threshold None)로 둔다. 위 docstring 이
+    # 지적한 그 함정을 이 함수 안에서 되풀이하지 않기 위한 분기다.
+    metrics.append(
+        _metric("function_call_coverage_pct",
+                round(calls_covered / max(calls_total, 1.0) * 100, 2),
+                threshold=100.0 if calls_total > 0 else None),
+    )
+
+    # 참고지표 — 절대수는 threshold 부적합(`evaluate_swsa` 와 같은 판단).
+    metrics.append(_metric("swit_functions_total", fn_total))
+    metrics.append(_metric("swit_functions_fail", _safe_float(summary, "swit_functions_fail")))
+    metrics.append(
+        _metric("swit_function_calls_fail_functions",
+                _safe_float(summary, "swit_function_calls_fail_functions")),
+    )
+    # 호출이 없어 분모에서 빠진 함수 수 — 분모가 조용히 줄지 않게 함께 노출한다.
+    metrics.append(
+        _metric("swit_function_calls_na_functions",
+                _safe_float(summary, "swit_function_calls_na_functions")),
+    )
+
+    # 정렬 전 VectorCAST 원시 커버리지 — **비게이트**. 문서가 안 싣는 값이지만
+    # "측정은 했다" 를 남겨야 미측정과 구분된다(빌더 summary 주석 참조).
+    for key, name in (
+        ("vcast_raw_statement_pct", "vcast_raw_statement_pct"),
+        ("vcast_raw_branch_pct", "vcast_raw_branch_pct"),
+    ):
+        raw = summary.get(key)
+        if isinstance(raw, (int, float)):
+            metrics.append(_metric(name, float(raw)))
+    metrics.append(
+        _metric("vcast_raw_measured_functions",
+                _safe_float(summary, "vcast_raw_measured_functions")),
+    )
+
+    # 시험 통과율은 커버리지 평가기와 같은 계산을 쓴다(미실행 TC 를 분모에 포함).
+    passed = _safe_float(summary, "passed")
+    tested = passed + _safe_float(summary, "failed")
+    denom = tested + _safe_float(summary, "not_executed")
+    metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2), threshold=100.0))
+    metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
+    return metrics
+
+
 def evaluate_test_result(summary: Dict[str, Any]) -> MetricList:
     """SUTR/SITR(시험 **결과** 보고서) summary -> MetricList.
 

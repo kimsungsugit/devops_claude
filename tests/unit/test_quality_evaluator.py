@@ -11,6 +11,7 @@ from workflow.quality.evaluator import (
     evaluate_sits,
     evaluate_sts,
     evaluate_suts,
+    evaluate_swit_coverage,
     evaluate_swreport,
     evaluate_swsa,
     evaluate_uds,
@@ -264,6 +265,108 @@ class TestEvaluateCoverage:
         assert by_name["mcdc_coverage_pct"]["threshold"] is None
         assert by_name["branch_coverage_pct"]["threshold"] is None
         assert by_name["statement_coverage_pct"]["threshold"] == 100.0
+
+
+class TestEvaluateSwitCoverage:
+    """SwITCV 는 구문/분기 문서가 아니다 — 그 축으로 채점하면 영구 FAIL 이 된다.
+
+    2026-08-26 KJPDS02 PV 실측이 근거다. 빌더의 `_align_function_rows_to_template`
+    이 statement/branch 를 `measured=False` 인 O/X 표식으로 덮어쓰므로
+    `compute_coverage_rollup` 은 SwIT 에서 **항상** None 을 낸다. 그 상태로
+    `evaluate_coverage` 에 넣으면 `_safe_float` 가 0.0 으로 접어 FAIL 인데,
+    시험을 아무리 더해도 사라지지 않는다. 그리고 정작 정본이 지목한 미달
+    (Functions 4건 · Function Calls 21건)은 어느 지표에도 안 뜬다.
+    """
+
+    #: 2026-08-26 KJPDS02 PV 실측값 그대로 — 정본 4.Coverage 요약과 일치.
+    CANON = {
+        "swit_functions_total": 1014,
+        "swit_functions_achieved": 1010,
+        "swit_functions_fail": 4,
+        "swit_function_calls_functions": 590,
+        "swit_function_calls_na_functions": 424,
+        "swit_function_calls_covered": 1643,
+        "swit_function_calls_total": 1678,
+        "swit_function_calls_fail_functions": 21,
+        # 정렬이 죽인 축 — SwIT summary 에는 늘 None 으로 실린다.
+        "overall_statement_pct": None,
+        "overall_branch_pct": None,
+        "overall_mcdc_pct": None,
+        "vcast_raw_statement_pct": 31.59,
+        "vcast_raw_branch_pct": 26.54,
+        "vcast_raw_measured_functions": 712,
+        "passed": 611, "failed": 0, "total_tcs": 611,
+    }
+
+    def _by_name(self, summary=None):
+        return {m["metric_name"]: m
+                for m in evaluate_swit_coverage(summary if summary is not None else self.CANON)}
+
+    def test_gates_are_the_documents_own_axes(self):
+        by = self._by_name()
+        assert by["function_achievement_pct"]["value"] == 99.61      # 1010/1014
+        assert by["function_achievement_pct"]["threshold"] == 100.0
+        assert by["function_call_coverage_pct"]["value"] == 97.91    # 1643/1678
+        assert by["function_call_coverage_pct"]["threshold"] == 100.0
+
+    def test_unmeasured_statement_axis_is_not_gated(self):
+        """회귀 핵심 — 재지도 않은 축으로 FAIL 을 지어내지 않는다."""
+        by = self._by_name()
+        for dead in ("statement_coverage_pct", "branch_coverage_pct", "mcdc_coverage_pct"):
+            assert dead not in by, f"{dead} 이 SwIT 게이트에 남아 있다"
+
+    def test_the_old_evaluator_really_did_fail_on_it(self):
+        """가드가 헛돌지 않음을 보인다 — 같은 summary 를 옛 평가기에 넣으면 FAIL 이다."""
+        old = {m["metric_name"]: m for m in evaluate_coverage(self.CANON)}
+        assert old["statement_coverage_pct"]["value"] == 0.0
+        assert old["statement_coverage_pct"]["gate_pass"] is False
+        # 그리고 정본이 지목한 미달은 옛 평가기 어디에도 없다.
+        assert "swit_functions_fail" not in old
+        assert "function_call_coverage_pct" not in old
+
+    def test_real_shortfalls_are_reported(self):
+        by = self._by_name()
+        assert by["swit_functions_fail"]["value"] == 4.0
+        assert by["swit_function_calls_fail_functions"]["value"] == 21.0
+        # 절대수는 점수에 반영하지 않는다(참고지표).
+        assert by["swit_functions_fail"]["threshold"] is None
+        assert by["swit_function_calls_fail_functions"]["threshold"] is None
+
+    def test_na_denominator_shrink_is_visible(self):
+        """호출 0 함수 424개를 분모에서 뺐다는 사실이 화면에 남아야 한다."""
+        assert self._by_name()["swit_function_calls_na_functions"]["value"] == 424.0
+
+    def test_missing_metric_report_leaves_call_axis_unjudged(self):
+        """Metric report 부재(분모 0)면 0% FAIL 이 아니라 **미평가**다.
+
+        이 함수가 고치려는 바로 그 함정을 함수 안에서 되풀이하지 않는지 본다.
+        """
+        by = self._by_name({**self.CANON, "swit_function_calls_total": 0,
+                            "swit_function_calls_covered": 0})
+        assert by["function_call_coverage_pct"]["threshold"] is None
+        assert by["function_call_coverage_pct"]["gate_pass"] is None
+
+    def test_raw_vcast_coverage_is_kept_as_reference(self):
+        """정렬이 버린 원시 실측을 남긴다 — 미측정과 구분되어야 한다."""
+        by = self._by_name()
+        assert by["vcast_raw_statement_pct"]["value"] == 31.59
+        assert by["vcast_raw_statement_pct"]["threshold"] is None   # 비게이트
+        assert by["vcast_raw_measured_functions"]["value"] == 712.0
+
+    def test_raw_keys_absent_do_not_fabricate_zero(self):
+        """원시 값이 없으면 0.0 을 지어내 싣지 않는다(부재 != 0%)."""
+        lean = {k: v for k, v in self.CANON.items() if not k.startswith("vcast_raw_")}
+        by = self._by_name(lean)
+        assert "vcast_raw_statement_pct" not in by
+        assert "vcast_raw_branch_pct" not in by
+
+    def test_perfect_document_passes(self):
+        by = self._by_name({**self.CANON,
+                            "swit_functions_achieved": 1014, "swit_functions_fail": 0,
+                            "swit_function_calls_covered": 1678,
+                            "swit_function_calls_fail_functions": 0})
+        gated = [m for m in by.values() if m["threshold"] is not None]
+        assert gated and all(m["gate_pass"] for m in gated)
 
 
 class TestEvaluateSwSA:

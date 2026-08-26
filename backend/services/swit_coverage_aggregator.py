@@ -495,6 +495,53 @@ def _align_function_rows_to_template(
             )
 
 
+def _swit_coverage_axes(function_rows: list) -> dict[str, Any]:
+    """정렬된 SwIT 행 → 회사 정본 4.Coverage 요약과 같은 축.
+
+    SwITCV 는 구문/분기 커버리지 문서가 아니다. 정본 요약 블록이 싣는 값은 두 줄이다:
+
+        Functions       Total | Fail Count | Exception | Coverage
+        Function Calls  Total | Fail Count | Exception | Coverage
+
+    `_align_function_rows_to_template` 이 각 행에 남긴 표식에서 그대로 센다:
+
+    * ``swit_function_present`` — Metric report 제공 시 **커버리지 달성**
+      (functions_covered >= functions_total), 미제공 시 '로그에 있음'.
+    * ``function_calls_coverage`` — Metric report 실측(covered/total). 호출이 없는
+      leaf 함수는 ``swit_calls_na`` 로 표시돼 분모에서 빠진다(정본도 Pass='O').
+
+    ⚠ 분모에서 N/A 를 빼는 것이 곧 관대함은 아니다 — 호출이 0 인 함수를 0/0=0% 로
+      세면 leaf 가 많은 프로젝트가 통째로 FAIL 이 된다. 대신 몇 개를 뺐는지
+      (`swit_function_calls_na_functions`)를 함께 남겨 분모가 조용히 줄지 않게 한다.
+    """
+    total = len(function_rows)
+    achieved = sum(1 for fc in function_rows
+                   if getattr(fc, "swit_function_present", False))
+    measured_calls = [
+        fc for fc in function_rows
+        if getattr(getattr(fc, "function_calls_coverage", None), "measured", True)
+        and getattr(getattr(fc, "function_calls_coverage", None), "total", 0) > 0
+    ]
+    calls_covered = sum(fc.function_calls_coverage.covered for fc in measured_calls)
+    calls_total = sum(fc.function_calls_coverage.total for fc in measured_calls)
+    calls_fail_fns = sum(
+        1 for fc in measured_calls
+        if fc.function_calls_coverage.covered < fc.function_calls_coverage.total
+    )
+    return {
+        "swit_functions_total": total,
+        "swit_functions_achieved": achieved,
+        "swit_functions_fail": total - achieved,
+        "swit_function_calls_functions": len(measured_calls),
+        "swit_function_calls_na_functions": sum(
+            1 for fc in function_rows if getattr(fc, "swit_calls_na", False)
+        ),
+        "swit_function_calls_covered": calls_covered,
+        "swit_function_calls_total": calls_total,
+        "swit_function_calls_fail_functions": calls_fail_fns,
+    }
+
+
 def _component_from_swufn(unit_id: str) -> str:
     import re
     m = re.search(r"SwUFn_(\d{2})\d{2}", unit_id or "", re.IGNORECASE)
@@ -742,6 +789,13 @@ def build_swit_coverage_report(
                 f"고유 함수 {len(merged_metrics_by_name)}개 (Functions 달성+Function Calls 실측 소스)"
             )
 
+    # 2026-08-26 — 정렬은 statement/branch 를 **O/X 표식으로 덮어쓴다**(아래 참조).
+    # 그래서 VectorCAST IT 로그의 원시 구문/분기 커버리지는 정렬 직후 사라진다.
+    # 게이트에는 쓰지 않되(통합시험 산출물의 축이 아니다) **참고지표로 보존**한다 —
+    # 안 남기면 "측정했는데 문서가 안 싣는다" 와 "측정 자체를 못 했다" 가 화면에서
+    # 같아 보인다(실측: 원시 stmt 31.59%/712함수 → 정렬 후 None/0함수).
+    _raw_rollup = compute_coverage_rollup(agg.get("function_rows") or [])
+
     # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 85 T1903 + 86 T2001: unmapped fc list.
     _align_function_rows_to_template(
         agg, coverage_template_rows, out_warnings=warnings,
@@ -764,7 +818,19 @@ def build_swit_coverage_report(
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
         # Quality DB 기록용 커버리지 roll-up (구문/분기/MC-DC %). SwUT와 동일 헬퍼.
+        # ⚠ 정렬을 거친 뒤라 SwIT 에서는 전 축이 `measured=False` → 전부 None 이다.
+        #   그게 정상이다 — SwITCV 4.Coverage 는 구문/분기가 아니라 **Functions 달성
+        #   O/X + Function Calls** 를 싣는 문서다. 게이트는 아래 `swit_*` 축으로 건다.
         **compute_coverage_rollup(agg.get("function_rows") or []),
+        # 정렬 전 원시 VectorCAST 커버리지 — 비게이트 참고지표(위 주석 참조).
+        "vcast_raw_statement_pct": _raw_rollup.get("overall_statement_pct"),
+        "vcast_raw_branch_pct": _raw_rollup.get("overall_branch_pct"),
+        "vcast_raw_measured_functions": (
+            (_raw_rollup.get("measured_functions") or {}).get("statement")
+        ),
+        # SwIT 실물 커버리지 축 — 회사 정본 4.Coverage 요약 블록과 같은 값
+        # (2026-08-26 KJPDS02 PV 실측 대조: Functions Fail=4 / Calls Fail=21 일치).
+        **_swit_coverage_axes(agg.get("function_rows") or []),
         # 30차 W21 + 31차 W29 + 32차 W28: ASIL 분포 + 등급별 함수 ID + 정책 메타.
         "asil_distribution": asil_distribution,
         "asil_b_function_ids": ids_by_asil.get("B", []),
