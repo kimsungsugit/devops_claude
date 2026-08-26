@@ -68,6 +68,10 @@ from backend.services.swit_sitr_aggregator import (
     build_swit_sitr_report,
 )
 from backend.services.swut_meta_resolver import (
+    TemplateNotResolved,
+    read_template_from_keys,
+)
+from backend.services.swut_meta_resolver import (
     apply_function_asil_map as _resolver_apply_function_asil_map,
 )
 from backend.services.swut_meta_resolver import (
@@ -240,14 +244,13 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
     key = key_by_kind.get(kind)
     if key is None:
         raise HTTPException(status_code=400, detail=f"unknown SwIT template kind: {kind}")
-    tpath = (tmpl_cfg.get(key) or "").strip()
-    if not tpath:
-        raise HTTPException(
-            status_code=400,
-            detail=f"template_path 미지정 + config/swut_meta.json에 '{key}' 없음 ({project_id})",
+    # 2026-08-26 — swut 과 lockstep. 부재 사유를 폴더 내용과 함께 400 으로 낸다.
+    try:
+        return read_template_from_keys(
+            resolver, tmpl_cfg, (key,), project_id=project_id, label=f"SwIT {kind}",
         )
-    return resolver.read_bytes(tpath)
-
+    except TemplateNotResolved as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 def _read_optional_config_file(
     req_path: str, project_id: str, config_key: str,

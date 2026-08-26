@@ -39,7 +39,11 @@ from backend.services.swreport_summary_aggregator import (
     build_summary_report,
     preview_summary_report,
 )
-from backend.services.swut_meta_resolver import load_meta_from_config
+from backend.services.swut_meta_resolver import (
+    TemplateNotResolved,
+    load_meta_from_config,
+    read_template_from_keys,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -92,17 +96,18 @@ def _resolve_template_bytes(req: SwReportBuildRequest) -> bytes:
         return resolver.read_bytes(req.template_path)
     cfg = load_meta_from_config(req.project_id)
     tmpl_cfg = cfg.get("template_paths", {}) if isinstance(cfg, dict) else {}
-    for key in _TEMPLATE_CONFIG_KEYS:
-        tpath = tmpl_cfg.get(key, "")
-        if tpath:
-            return resolver.read_bytes(tpath)
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "template_path 미지정 + config에 ES95411 template 없음 "
-            f"({req.project_id} — keys: {', '.join(_TEMPLATE_CONFIG_KEYS)})"
-        ),
-    )
+    # ⚠ 예전엔 "값이 있는 첫 키" 에서 곧장 read 했다 — 그 경로가 낡으면 뒤 후보를
+    #   시도조차 못 하고 raw FileNotFoundError 가 500 으로 나갔다. 실측:
+    #   `es95411_template` 이 v1.02 를 가리키는데 그 세대가 v2.01_260629_R 로
+    #   교체돼 사라졌다. 이제 읽힐 때까지 순회하고, 실패해도 어느 키가 왜
+    #   안 됐는지 폴더 내용과 함께 400 으로 낸다(준비 게이트와 같은 문장).
+    try:
+        return read_template_from_keys(
+            resolver, tmpl_cfg, _TEMPLATE_CONFIG_KEYS,
+            project_id=req.project_id, label="ES95411 통합 Summary",
+        )
+    except TemplateNotResolved as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _resolve_source_workbooks(

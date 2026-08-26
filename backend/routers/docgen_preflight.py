@@ -41,6 +41,9 @@ from backend.services import docgen_field_sources as _chain
 from backend.services import docgen_output as _out
 from backend.services import docgen_requirements as _req
 from backend.services import docgen_test_materials as _tm
+from backend.services.swut_meta_resolver import (
+    folder_contents_hint as _resolver_folder_contents_hint,
+)
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api.docgen_preflight")
@@ -161,36 +164,9 @@ def _probe_path(resolver: Any, path: str) -> Dict[str, Any]:
         return {"state": S_UNMEASURED, "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
 
 
-def _folder_contents_hint(resolver: Any, path: str, cap: int = 8) -> str:
-    """등록 파일이 없을 때 **그 폴더에 실제로 뭐가 있는지** 문장으로 낸다.
-
-    "찾지 못했습니다" 만으로는 ①이름이 바뀐 건지 ②폴더가 통째로 옮겨진 건지 ③애초에
-    배포된 적이 없는 건지 화면에서 구분할 수 없다. 2026-08-25 에 같은 형태로 두 번
-    걸렸다 — 등록 경로에 실재하지 않는 `1220 진행` 세그먼트가 있던 건, 그리고 v1.02
-    산출물이 v2.01 세대로 교체되며 파일명 자체가 바뀐 건(ES95411).
-
-    ⚠ 이건 판정이 아니라 **증거**다. 후보를 고르지 않는다 — `_suggest_revision` 이
-      "여럿이면 안 고른다" 로 이미 정한 규약을 여기서 뒤집지 않는다.
-    ⚠ IPC 왕복이 한 번 더 든다. 호출부가 **부재일 때만** 부를 것(후보 루프에서 부르면
-      후보 수만큼 곱해진다).
-    """
-    parent = str(Path(path).parent)
-    if not parent or parent == ".":
-        return ""
-    try:
-        entries = resolver.list_dir(parent, pattern="*") or []
-    except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
-        # 침묵하지 않는다 — "폴더도 못 봤다" 와 "폴더가 비었다" 는 다른 사실이다.
-        return f" — 그 폴더도 확인하지 못했습니다 ({type(exc).__name__})."
-    names = sorted({
-        Path(str(n.get("name") if isinstance(n, dict) else n)).name for n in entries
-    } - {""})
-    if not names:
-        # ⚠ resolver 계약상 **빈 폴더와 없는 폴더가 구분되지 않는다** — 두 모드가 같은
-        #   이유로 못 한다(`file_resolver.py` 의 `list_dir` 주석). 단정하지 않는다.
-        return f" — 그 폴더는 비어 있거나 폴더 자체가 없습니다: {parent}"
-    more = f" 외 {len(names) - cap}건" if len(names) > cap else ""
-    return " — 같은 폴더의 실제 파일: " + ", ".join(names[:cap]) + more + "."
+# 2026-08-26 — 본체를 `swut_meta_resolver.folder_contents_hint` 로 올렸다.
+# 빌드 경로(라우터 3종)가 같은 문장을 써야 같은 부재에 화면이 두 말을 하지 않는다.
+_folder_contents_hint = _resolver_folder_contents_hint
 
 
 def _suggest_revision(resolver: Any, path: str) -> str:

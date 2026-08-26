@@ -83,6 +83,10 @@ _BUILD_SEMAPHORE = asyncio.Semaphore(3)
 # 라우터 layer에는 monkeypatch 호환을 위한 thin wrapper만 유지.
 from backend.services import swut_meta_resolver as _resolver_mod  # noqa: E402
 from backend.services.swut_meta_resolver import (  # noqa: E402
+    TemplateNotResolved,
+    read_template_from_keys,
+)
+from backend.services.swut_meta_resolver import (  # noqa: E402
     apply_function_asil_map as _resolver_apply_function_asil_map,
 )
 from backend.services.swut_meta_resolver import (
@@ -243,13 +247,14 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
         key = "swutcr_template"
     else:
         key = "sutr_template"
-    tpath = tmpl_cfg.get(key, "")
-    if not tpath:
-        raise HTTPException(
-            status_code=400,
-            detail=f"template_path 미지정 + config에 '{key}' 없음 ({project_id})",
+    # 2026-08-26 — 부재를 raw FileNotFoundError(500) 로 흘리지 않는다. 준비 게이트가
+    # 내던 "같은 폴더의 실제 파일" 안내를 빌드 경로도 함께 쓴다(단일 출처).
+    try:
+        return read_template_from_keys(
+            resolver, tmpl_cfg, (key,), project_id=project_id, label=f"SwUT {kind}",
         )
-    return resolver.read_bytes(tpath)
+    except TemplateNotResolved as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 _CHUNK_SIZE = 64 * 1024  # 64KB — starlette 기본 chunk와 일치

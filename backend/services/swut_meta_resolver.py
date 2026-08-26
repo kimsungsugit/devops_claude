@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -628,3 +629,80 @@ __all__ = [
     "resolve_hmr_html_path",
     "resolve_hmr_html_bytes",
 ]
+
+
+def folder_contents_hint(resolver: Any, path: str, cap: int = 8) -> str:
+    """등록 파일이 없을 때 **그 폴더에 실제로 뭐가 있는지** 문장으로 낸다.
+
+    "찾지 못했습니다" 만으로는 ①이름이 바뀐 건지 ②폴더가 통째로 옮겨진 건지 ③애초에
+    배포된 적이 없는 건지 화면에서 구분할 수 없다(커밋 `62c7243`).
+
+    2026-08-26 에 **준비 게이트에만** 이 안내가 있고 빌드 경로엔 없다는 걸 실측했다 —
+    `[준비]` 를 누르면 폴더 내용을 보여 주는데 `[생성]` 을 누르면 raw
+    `FileNotFoundError` 가 500 으로 나간다. 같은 부재에 화면이 두 말을 하지 않도록
+    여기로 올려 두 경로가 함께 쓴다.
+
+    ⚠ 이건 판정이 아니라 **증거**다. 후보를 고르지 않는다.
+    ⚠ IPC 왕복이 한 번 더 든다. 호출부가 **부재일 때만** 부를 것.
+    """
+    parent = str(Path(path).parent)
+    if not parent or parent == ".":
+        return ""
+    try:
+        entries = resolver.list_dir(parent, pattern="*") or []
+    except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
+        # 침묵하지 않는다 — "폴더도 못 봤다" 와 "폴더가 비었다" 는 다른 사실이다.
+        return f" — 그 폴더도 확인하지 못했습니다 ({type(exc).__name__})."
+    names = sorted({
+        Path(str(n.get("name") if isinstance(n, dict) else n)).name for n in entries
+    } - {""})
+    if not names:
+        # ⚠ resolver 계약상 **빈 폴더와 없는 폴더가 구분되지 않는다**(`file_resolver.py`
+        #   의 `list_dir` 주석). 단정하지 않는다.
+        return f" — 그 폴더는 비어 있거나 폴더 자체가 없습니다: {parent}"
+    more = f" 외 {len(names) - cap}건" if len(names) > cap else ""
+    return " — 같은 폴더의 실제 파일: " + ", ".join(names[:cap]) + more + "."
+
+
+class TemplateNotResolved(RuntimeError):
+    """양식 후보를 하나도 읽지 못했다 — 라우터가 400 으로 변환한다."""
+
+
+def read_template_from_keys(
+    resolver: Any,
+    template_paths: dict,
+    keys: "tuple[str, ...]",
+    *,
+    project_id: str,
+    label: str,
+) -> bytes:
+    """config `template_paths` 의 후보 키를 **읽힐 때까지** 순회해 bytes 를 낸다.
+
+    ⚠ 예전엔 "값이 있는 첫 키" 에서 곧장 `read_bytes` 를 불렀다. 그 경로가 낡았으면
+      **뒤 후보를 시도조차 못 하고** raw `FileNotFoundError` 가 500 으로 나갔다
+      (2026-08-26 실측: KJPDS02 `es95411_template` 이 v1.02 파일을 가리키는데 그
+      세대가 v2.01_260629_R 로 교체돼 사라졌다). 값이 있다 != 읽힌다.
+
+    실패해도 **어느 키를 어떤 이유로 건너뛰었는지** 전부 문장에 남긴다 — 조용히
+    다음 후보로 넘어가면 "왜 다른 양식이 쓰였는지" 를 나중에 설명할 수 없다.
+    """
+    tried: list[str] = []
+    for key in keys:
+        # ⚠ 키 이름을 **작은따옴표로 감싼다.** `test_docgen_preflight` 의
+        #   `TestReportTemplateKeyParity` 가 준비 게이트 키 ↔ 라우터 키 일치를
+        #   이 문장에서 `'<key>'` 로 읽는다 — 따옴표를 빼면 그 가드가 조용히 죽는다.
+        tpath = str((template_paths or {}).get(key) or "").strip()
+        if not tpath:
+            tried.append(f"'{key}'=미등록")
+            continue
+        try:
+            return resolver.read_bytes(tpath)
+        except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
+            tried.append(
+                f"'{key}'={type(exc).__name__}"
+                + folder_contents_hint(resolver, tpath)
+            )
+    raise TemplateNotResolved(
+        f"{label} 양식을 읽지 못했습니다 ({project_id}). 시도한 후보: "
+        + " | ".join(tried)
+    )
