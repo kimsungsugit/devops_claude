@@ -194,6 +194,63 @@ def _find_ident(node) -> Optional[str]:
     return None
 
 
+# 선언 노드에서 **이름이 아닌** 자리
+_DECL_SKIP_TYPES = frozenset({"storage_class_specifier", "type_qualifier", ";", ","})
+
+
+def _decl_ident(node) -> str:
+    """선언 노드에서 **선언자**의 이름만 찾는다 — 타입 자리는 보지 않는다.
+
+    ⚠ `_find_ident(node)` 는 깊이우선이라 타입 자리까지 판다. 그래서
+
+        static enum { en_s_Buzzer_Stop = 0x01U, ... } s_BuzzerState;
+
+    에서 첫 **열거자** `en_s_Buzzer_Stop` 을 변수명으로 집어낸다. 진짜 변수
+    `s_BuzzerState` 는 목록에서 통째로 사라지고, 설계서에는 **존재하지 않는
+    정적 변수**가 실린다 — 값 부재보다 나쁜, 틀린 주장이다.
+
+    실측(PDS64_RD): 전역/정적 선언 809개 중 2개(`s_BuzzerState`·`s_MotorState`)가
+    이 모양이고, 산출물 Type 칸 24개가 그 때문에 `enum }` 또는 열거자 본문이었다
+    (정본 2,751칸 중 중괄호 포함은 0개).
+    """
+    type_node = node.child_by_field_name("type")
+    type_id = type_node.id if type_node is not None else None
+    for child in node.children:
+        if type_id is not None and child.id == type_id:
+            continue
+        if child.type in _DECL_SKIP_TYPES:
+            continue
+        name = _find_ident(child)
+        if name:
+            return name
+    return ""
+
+
+# `enum {`, `struct tag {`, `union {` … — 본문을 가진 집합체 타입
+_RE_AGGREGATE_BODY = re.compile(r"^(struct|union|enum)\b\s*([A-Za-z_]\w*)?\s*\{")
+
+
+def _normalize_type_text(type_text: str) -> str:
+    """본문을 가진 집합체 타입을 **태그 형태**로 줄인다.
+
+    `enum { en_s_Stop = 0x01U, ... }` 는 타입 *이름* 이 아니라 정의다. 그대로
+    Type 칸에 넣으면 설계서 표가 깨지고, 줄바꿈이 접히면 `enum }` 같은 조각이 된다.
+    태그가 있으면 `enum en_g_State`, 없으면 `enum` — 둘 다 사실이고 지어내지 않는다.
+
+    ⚠ `\\{` 요구를 빼도 **실소스에서는 결과가 안 바뀐다**(PDS64_RD 고유 타입 문자열
+      374개 중 차이 0 — `enum en_g_State` 는 어느 판으로도 그대로다). 반례는
+      `"enum en_g_State extra"` 처럼 C 타입이 아닌 문자열뿐이다. 즉 이 조건은
+      뮤테이션으로 관측되지 않는다 — 그래도 "본문이 있을 때만 줄인다" 는 의도를
+      코드에 남기려고 유지한다. (등가 뮤턴트를 쫓지 말 것.)
+    """
+    text = " ".join((type_text or "").split())
+    m = _RE_AGGREGATE_BODY.match(text)
+    if not m:
+        return text
+    kind, tag = m.group(1), m.group(2)
+    return f"{kind} {tag}" if tag else kind
+
+
 def _walk(node):
     stack = [node]
     while stack:
@@ -739,7 +796,7 @@ def _extract_globals(root, src: bytes) -> List[str]:
         # Skip function prototypes/declarations at global scope.
         if "(" in decl_text and ")" in decl_text:
             continue
-        name = _find_ident(node) or ""
+        name = _decl_ident(node)
         if name and name not in globals_list:
             globals_list.append(name)
     return globals_list
@@ -751,7 +808,8 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
         if node.type != "declaration":
             continue
         type_node = node.child_by_field_name("type")
-        type_text = _node_text(src, type_node).strip() if type_node else ""
+        # ⚠ 익명 집합체는 본문이 통째로 들어온다 — 타입 *이름* 으로 줄인다.
+        type_text = _normalize_type_text(_node_text(src, type_node)) if type_node else ""
         decl_text = _node_text(src, node)
         # Skip function declarations/prototypes and function pointer typedef-like declarations.
         if "(" in decl_text and ")" in decl_text:
@@ -759,7 +817,11 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
         range_text = ""
         range_source = ""
         if decl_text:
-            m = re.search(r"(0x[0-9A-Fa-f]+|\\d+)\\s*~\\s*(0x[0-9A-Fa-f]+|\\d+)", decl_text)
+            # ⚠ 이 정규식은 `\\d`·`\\s` 로 적혀 있었다. raw string 안의 `\\` 는 **리터럴
+            #   백슬래시**라 C 소스에는 결코 없는 문자를 요구했고, `range_source="decl"`
+            #   은 한 번도 발화한 적이 없다. (PDS64_RD 에서는 고쳐도 0건 — 이 소스는
+            #   선언문에 범위를 적지 않는다. 범위를 적는 소스에서 침묵하던 결함이다.)
+            m = re.search(r"(0x[0-9A-Fa-f]+|\d+)\s*~\s*(0x[0-9A-Fa-f]+|\d+)", decl_text)
             if m:
                 range_text = f"{m.group(1)} ~ {m.group(2)}"
                 range_source = "decl"
@@ -800,7 +862,7 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
                 }
             )
         if not handled:
-            name = _find_ident(node) or ""
+            name = _decl_ident(node)
             if name:
                 results.append(
                     {

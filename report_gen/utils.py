@@ -594,6 +594,26 @@ def _normalize_swcom_label(label: str) -> str:
 #   타입을 주고 있어 `typeless_dropped` 가 0 이다(실측). 즉 회수가 아니라 **폴백의
 #   복구**다. tree-sitter 가 실패하는 프로젝트에서만 효과가 있다. 없는 회수를
 #   있다고 적지 않기 위해 여기 명시한다.
+# 타입 자리로 인정할 모양: (struct|union|enum) 태그? + 식별자 1개 이상 + 포인터
+_RE_TYPE_HEAD = re.compile(r"^(?:(?:struct|union|enum)\s+)?[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)*\s*\**$")
+
+
+def _is_type_head(text: str) -> bool:
+    """'선언의 타입 자리' 로 인정할 수 있는 모양인가.
+
+    ⚠ 아래 두 폴백은 정규식으로 이름 앞부분을 잘라 타입이라 부르는데, **'선언' 이라는
+    개념이 없다.** 그래서 선언이 아닌 줄에서도 타입을 만들어 낸다:
+
+        `}   s_BuzzerState;`          ->  '}'                (익명 enum 의 닫는 줄)
+        `s_BuzzerState = en_s_Stop;`  ->  's_BuzzerState ='   (그냥 대입문)
+
+    이렇게 만든 값이 그대로 ISO 26262 설계서 Type 칸에 실렸다 — 실측 산출물 2,406칸 중
+    24칸이 `enum }` 또는 열거자 본문이었고, 정본 2,751칸 중 중괄호 포함은 **0개**다.
+    모양이 아니면 `""` 를 돌려 "타입을 못 구했다" 로 남긴다(지어내지 않는다).
+    """
+    return bool(_RE_TYPE_HEAD.match((text or "").strip()))
+
+
 def _infer_type_from_decl(decl: str, name: str) -> str:
     if not decl or not name:
         return ""
@@ -604,7 +624,8 @@ def _infer_type_from_decl(decl: str, name: str) -> str:
     head = m.group(1)
     head = re.sub(r"\s*=", " ", head).strip()
     head = re.sub(r"\b(static|extern|const|volatile)\b", "", head).strip()
-    return " ".join(head.split()).strip()
+    head = " ".join(head.split()).strip()
+    return head if _is_type_head(head) else ""
 
 
 def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
@@ -632,7 +653,9 @@ def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
         init_match = re.search(rf"\b{name_re}\b\s*=\s*([^;]+)", decl)
         if init_match:
             init = init_match.group(1).strip()
-        if gtype:
+        # ⚠ 모양이 아니면 **다음 후보로 넘어간다**. 파일 뒤쪽에 진짜 선언이 있을 수 있고,
+        #   여기서 `}` 를 돌려주면 그게 그대로 설계서 Type 칸이 된다(`_is_type_head`).
+        if gtype and _is_type_head(gtype):
             return gtype, init
     return "", ""
 

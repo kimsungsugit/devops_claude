@@ -2826,32 +2826,14 @@ def generate_uds_docx(
                 if any("Function Information" in c for c in header_texts):
                     function_info_template = (rows_t, cols_t, style_t, header_rows_t)
                     break
-        swufn_table_spec: Dict[str, Tuple[int, int, Any]] = {}
-        for idx_t, (kind_t, payload_t) in enumerate(blocks):
-            if kind_t != "heading":
-                continue
-            level_t, title_t = payload_t
-            m = re.search(r"(swufn_\\d+)", str(title_t), re.I)
-            if not m:
-                continue
-            swufn_id = m.group(1).upper()
-            for look_ahead in range(idx_t + 1, len(blocks)):
-                kind_la, payload_la = blocks[look_ahead]
-                if kind_la == "heading":
-                    try:
-                        level_la = int(payload_la[0])
-                    except Exception:
-                        level_la = level_t
-                    if level_la <= level_t:
-                        break
-                    continue
-                if kind_la == "table":
-                    rows_la, cols_la, style_la, header_rows_la, _ctx_titles_la = payload_la
-                    if header_rows_la:
-                        header_texts = [str(c or "").strip() for row in header_rows_la for c in row]
-                        if any("Function Information" in c for c in header_texts):
-                            swufn_table_spec[swufn_id] = (rows_la, cols_la, style_la)
-                            break
+        # ⚠ 여기 있던 `swufn_table_spec` 은 **도달 불가 중복**이라 지웠다.
+        #   빌드 정규식이 `r"(swufn_\\d+)"` — raw string 안의 `\\` 는 리터럴 백슬래시라
+        #   heading 제목에 결코 매치되지 않아 dict 는 항상 비었고, 조회부(아래
+        #   `target_idx` 분기 바로 위)도 같은 죽은 정규식을 써서 한 번도 적중하지 못했다.
+        #   살아 있는 경로는 `target_idx` 전방탐색이고, **같은 표를 같은 방식으로 찾는다**.
+        #   실측(tokenized 템플릿·정본 SUDS 양쪽, gate 통과 heading 429개):
+        #   두 경로의 (rows, cols, style) 이 **429/429 동일**했다.
+        #   → 고쳐서 되살리면 한 번도 돈 적 없는 코드를 켜는 것이고 얻는 게 없다.
         for row in function_table_rows:
             if len(row) < 5:
                 continue
@@ -3598,10 +3580,9 @@ def generate_uds_docx(
                                 if any("Function Information" in c for c in header_texts):
                                     target_idx = look_ahead
                                     break
-                    swufn_match = re.search(r"(swufn_\\d+)", key, re.I)
-                    if swufn_match and swufn_match.group(1).upper() in swufn_table_spec:
-                        rows, cols, style = swufn_table_spec[swufn_match.group(1).upper()]
-                    elif target_idx is not None:
+                    # (`swufn_table_spec` 조회는 제거 — 위 2829 주석 참조. 이 전방탐색이
+                    #  같은 표를 찾아내며 실측 429/429 동일했다.)
+                    if target_idx is not None:
                         rows, cols, style, _header_rows, _ctx_titles = blocks[target_idx][1]
                     elif function_info_template:
                         rows, cols, style, _header_rows = function_info_template
