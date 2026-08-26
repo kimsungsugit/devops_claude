@@ -30,16 +30,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-# 라운드 96-fix W-D — 로그 측 silent drop 추적용 SwUFn ID 추출
-_RE_SWUFN_ID = re.compile(r"SwUFn_\d+", re.IGNORECASE)
-
 try:
     import openpyxl
     from openpyxl.workbook.workbook import Workbook
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
-from backend.services.excel_layout_resolver import inspect_swit_layout
+from backend.services.excel_layout_resolver import (
+    coverage_column_base,
+    inspect_swit_layout,
+)
 from backend.services.excel_template_utils import (
     auto_expand_row_block,
     build_release_history_row,
@@ -68,6 +68,10 @@ from backend.services.swut_input_adapter import (
     aggregate_session,
     compute_coverage_rollup,
 )
+
+# 라운드 96-fix W-D — 로그 측 silent drop 추적용 SwUFn ID 추출.
+# 2026-08-26: import 사이에 있어 이 파일 전체가 E402(6건)였다 — noqa 로 덮지 않고 옮겨 해소.
+_RE_SWUFN_ID = re.compile(r"SwUFn_\d+", re.IGNORECASE)
 
 
 @dataclass
@@ -279,19 +283,11 @@ def _extract_template_coverage_rows(ws: Any) -> list[tuple[str, str, Any]]:
     if ws is None:
         return rows
     # 라운드 102 (2026-06-24) — DV 11열(Component 있음)/PV 10열(Component 없음) 적응.
-    # DV: No=B(2), Component=C(3), Unit ID=D(4), Name=E(5).
-    # PV: No=B(2), Unit ID=C(3), Name=D(4) — Component 없어 한 칸 왼쪽.
-    # 헤더에서 'Component' 라벨 유무로 판정 (writing path has_component_col와 동일 기준).
-    _has_comp = False
-    for _hr in range(1, min(ws.max_row + 1, 12)):
-        for _hc in range(1, min(ws.max_column + 1, 14)):
-            if str(ws.cell(_hr, _hc).value or "").strip() == "Component":
-                _has_comp = True
-                break
-        if _has_comp:
-            break
-    _unit_col = 4 if _has_comp else 3
-    _name_col = 5 if _has_comp else 4
+    # 2026-08-26: 인라인 복제본을 `excel_layout_resolver.coverage_column_base` 로 올렸다.
+    # 같은 판정이 두 벌이라 **`swit_comprehensive._load_workbook_summary` 는 라운드 102
+    # 수정에서 빠진 채 DV 에 고정**돼 PV SwITCV 를 한 칸씩 밀려 읽고 있었다.
+    _unit_col = coverage_column_base(ws)
+    _name_col = _unit_col + 1
     for row_idx in range(1, ws.max_row + 1):
         no_value = ws.cell(row_idx, 2).value
         unit_id = str(ws.cell(row_idx, _unit_col).value or "").strip()

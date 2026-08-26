@@ -28,6 +28,59 @@ doc_type 이 `switcv` 가 아니라 **`swit`** 인 것도 같은 이유(기존 �
 채로 나간다**. 즉 결핍이 조용하다 — 생성 현황 보드의 준비 점검이 이 셋을 선택 입력으로
 표시하는 이유다(`backend/services/docgen_requirements.py` `IN_LEVEL_ARTIFACTS`).
 
+## SwITCV `4.Coverage` 레이아웃 — DV(11열) / PV(10열) (2026-08-26 실측)
+
+**Component 열 하나 차이로 그 오른쪽 전부가 한 칸씩 밀린다.** 열을 상수로 박으면 조용히
+틀린 값을 읽는다. 판정은 `excel_layout_resolver.coverage_column_base()` **단일 출처**를 쓸 것.
+
+| | No | Component | Unit ID | Name | Functions | Exception | Called Count | Total | Pass | Exception | File |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **DV(11열)** | B | C | D | E | F | G | H | I | J | K | L |
+| **PV(10열)** | B | — | C | D | E | F | G | H | I | J | K |
+
+요약 블록(r4 헤더 / r5 Functions / r6 Function Calls)도 같은 한 칸만큼 밀린다 —
+`Total | Fail Count | Exception | Coverage` 연속 4칸. DV 는 E~H, PV 는 D~G.
+
+KJPDS02 PV 정본(`… SwITCV … v2.01_260629_R.xlsx`) 실측:
+
+    D5=1014(Total)  E5=4(Fail)   F5=4(Exc)   G5=1(Coverage)
+    D6=1014(Total)  E6=21(Fail)  F6=21(Exc)  G6=1(Coverage)
+    데이터 1014행(r11~r1024) + 마감 TOTAL 행 r1025 + `< End of Document >` r1027
+
+⚠ **`4.Coverage` 를 정확 매칭으로 찾지 말 것** — 회사 SwUTCV 정본의 시트명은
+`4. Coverage`(점 뒤 공백)다. `find_coverage_sheet()` 를 쓸 것.
+
+⚠ **헤더 라벨에 오타가 실재한다** (`Excpetion`). 그래서 `Fail Count`/`Exception` 은 라벨로
+찾지 않고 `Total` 만 라벨로 찾은 뒤 `+1 / +2` 로 잡는다.
+
+### 이 결함이 오래 산 이유 (2026-08-26 수정 전)
+
+`swit_comprehensive_aggregator._load_workbook_summary` 가 DV 에 고정돼 PV 정본을 한 칸씩
+밀려 읽었다. 라운드 102 가 같은 파일의 `_extract_template_coverage_rows` 만 DV/PV 적응을
+시키고 이 함수를 빠뜨린, **복제본이 갈라진** 형태다. 증상이 조용했던 건 밀린 자리의 값이
+우연히 같았기 때문이다 — `Fail Count`(4)와 `Exception`(4)이 같은 수라 "fail 은 맞네" 로
+보였고, 정작 `Total`(1014)이 `Fail Count`(4)로 읽혀 **253배 과소** 보고됐다.
+
+결과(KJPDS02 PV SwITCR 실측 대조):
+
+| | 수정 전 | 수정 후 | 정본 |
+|---|---|---|---|
+| IT101 `E75` Functions Total | 4 | **1014** | 1014 |
+| IT101 `E76` Function Calls Total | 21 | **1014** | 1014 |
+| IT101 `K75/K76` Exception | 1 / 1 | **4 / 21** | 4 / 21 |
+| IT101 4.1 판정 `=IF(E=F+I+K,…)` | **Fail / Fail** | Pass / Pass | Pass |
+| IT101 4.2 미달성 표 | "해당사항 없음" | **10건 + 외 15건** | 25건 |
+| quality `qualified_function_count` | 4.0 | **1014.0** | — |
+
+⚠ 판정이 **Fail 로 뒤집혀 있었고**, 실재하는 미달성 25건(함수 4 + 호출 21)이
+"해당사항 없음" 으로 나갔다 — ISO 26262 감사 산출물에서 거짓 부정이다.
+회귀 가드는 `tests/unit/test_swit_comprehensive_aggregator.py`
+`TestSwitcvPvLayoutIsNotReadOneColumnOff` (뮤테이션 8/8).
+
+⚠ 가드는 **Total / Fail Count / Exception 을 전부 다른 값**으로 둔다. 세 값이 같으면 한 칸
+밀려도 통과해서 결함을 못 잡는다 — 예전 픽스처가 헤더 없이 DV 열에만 기입해 **코드의
+거울**이던 것이 이 결함을 통과시킨 원인이다.
+
 ## 33차 — Coverage Report v2.02 (xlsx)
 - 회사 v2.02 양식 (HDPDM01 NE_GN7). 시트 구조: Cover / Test Summary / 1.Traceability / 2.Consistency / 3.Coverage / History (SwUT v3.01과 동일)
 - 입력: VectorCAST log (`U:\...\08.SW 통합테스트\03.Test Result\01.Log\v<VER>_<DATE>\`)

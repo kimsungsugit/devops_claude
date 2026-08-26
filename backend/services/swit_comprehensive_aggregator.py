@@ -18,6 +18,11 @@ try:
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
+from backend.services.excel_layout_resolver import (
+    coverage_column_base,
+    coverage_summary_col,
+    find_coverage_sheet,
+)
 from backend.services.excel_template_utils import (
     build_release_history_row,
     dot_date,
@@ -131,28 +136,43 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
             "sheet_names": list(wb.sheetnames),
             "sheet_count": len(wb.sheetnames),
         }
-        cov = wb["4.Coverage"] if "4.Coverage" in wb.sheetnames else None
+        cov = find_coverage_sheet(wb)
         if cov is not None:
-            # 요약셀 E5/F5/G5/E6/F6/G6은 회사 템플릿 수식이라 openpyxl이 cached=None으로
-            # 저장 → data_only 읽기 시 항상 None (roll-up이 함수 fail/exception을 0으로
+            # 요약셀(r5/r6)은 회사 템플릿 수식이라 openpyxl이 cached=None으로 저장 →
+            # data_only 읽기 시 항상 None (roll-up이 함수 fail/exception을 0으로
             # 오인식해 거짓 100% 커버리지 표기, ISO 26262 무결성 결함). 데이터행(SwITCV
             # function/call 경로는 O/X·count·exception 모두 리터럴, swut_coverage 라102)
             # 에서 집계해 채운다. 셀에 리터럴 캐시값이 있으면(외부 재계산본) 그 값 우선.
+            #
+            # ⚠ 2026-08-26 실측 — 여기 열 번호가 **DV(11열) 판에 고정**돼 있었다.
+            #   라운드 102 가 같은 파일의 `_extract_template_coverage_rows` 만 DV/PV
+            #   적응시키고 이 함수를 빠뜨려, KJPDS02 PV(10열) SwITCV 에서 **전 열이 한 칸씩
+            #   밀렸다**: `functions_total` 이 Total(1014) 대신 Fail Count(4) 를 읽어
+            #   253배 과소 보고했고, `function_result` 는 O/X 열이 아니라 Exception 열을
+            #   읽어 `coverage_fail_details` 가 통째로 비었다 — 실재하는 커버리지 미달성
+            #   4건(SwUFn_1005/1167/3519/3554)이 SwITCR 에 "해당사항 없음"으로 나갔다.
+            #   판정은 `excel_layout_resolver` 단일 출처를 쓴다(복제하지 말 것).
+            base = coverage_column_base(cov)
+            total_col = coverage_summary_col(cov, base=base)
             fn_total = fn_fail = fn_exc = 0
             call_rows = call_fail = call_exc = 0
             fail_details: list[dict[str, Any]] = []
             for row_idx in range(11, cov.max_row + 1):
-                unit_id = str(cov.cell(row_idx, 4).value or "").strip()
-                name = str(cov.cell(row_idx, 5).value or "").strip()
+                unit_id = str(cov.cell(row_idx, base).value or "").strip()
+                name = str(cov.cell(row_idx, base + 1).value or "").strip()
                 if not (unit_id or name):
                     continue
-                function_result = cov.cell(row_idx, 6).value
-                function_exception = cov.cell(row_idx, 7).value
-                call_count = cov.cell(row_idx, 8).value
-                call_total = cov.cell(row_idx, 9).value
-                call_result = cov.cell(row_idx, 10).value
-                call_exception = cov.cell(row_idx, 11).value
-                note = str(cov.cell(row_idx, 12).value or "").strip()
+                # 마감 TOTAL 행은 함수가 아니다 — 세면 합계가 1 늘어난다
+                # (`_extract_template_coverage_rows` 와 같은 방어).
+                if unit_id.lower() == "total" or name.lower() == "total":
+                    continue
+                function_result = cov.cell(row_idx, base + 2).value
+                function_exception = cov.cell(row_idx, base + 3).value
+                call_count = cov.cell(row_idx, base + 4).value
+                call_total = cov.cell(row_idx, base + 5).value
+                call_result = cov.cell(row_idx, base + 6).value
+                call_exception = cov.cell(row_idx, base + 7).value
+                note = str(cov.cell(row_idx, base + 8).value or "").strip()
                 fn_total += 1
                 if function_result == "X":
                     fn_fail += 1
@@ -184,22 +204,20 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
                     })
             out["coverage_fail_details"] = fail_details
             # 요약: 셀 리터럴 캐시값 우선, 없으면(수식→None) 데이터행 집계값.
-            _e5, _f5, _g5 = cov["E5"].value, cov["F5"].value, cov["G5"].value
-            _e6, _f6, _g6 = cov["E6"].value, cov["F6"].value, cov["G6"].value
-            out["functions_total"] = _e5 if isinstance(_e5, (int, float)) else fn_total
-            out["functions_fail_count"] = _f5 if isinstance(_f5, (int, float)) else fn_fail
-            out["functions_exception_count"] = (
-                _g5 if isinstance(_g5, (int, float)) else fn_exc
-            )
-            out["function_calls_total"] = (
-                _e6 if isinstance(_e6, (int, float)) else call_rows
-            )
-            out["function_calls_fail_count"] = (
-                _f6 if isinstance(_f6, (int, float)) else call_fail
-            )
-            out["function_calls_exception_count"] = (
-                _g6 if isinstance(_g6, (int, float)) else call_exc
-            )
+            # 열은 `Total | Fail Count | Exception` 연속 3칸 (헤더 라벨로 찾은 total_col 기준).
+            def _cell(row: int, col: int) -> Any:
+                return cov.cell(row, col).value
+
+            def _pick(row: int, offset: int, fallback: int) -> Any:
+                value = _cell(row, total_col + offset)
+                return value if isinstance(value, (int, float)) else fallback
+
+            out["functions_total"] = _pick(5, 0, fn_total)
+            out["functions_fail_count"] = _pick(5, 1, fn_fail)
+            out["functions_exception_count"] = _pick(5, 2, fn_exc)
+            out["function_calls_total"] = _pick(6, 0, call_rows)
+            out["function_calls_fail_count"] = _pick(6, 1, call_fail)
+            out["function_calls_exception_count"] = _pick(6, 2, call_exc)
         test_log = wb["2.Test Log"] if "2.Test Log" in wb.sheetnames else None
         if test_log is not None:
             tc_count = 0

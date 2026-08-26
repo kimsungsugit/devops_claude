@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 
 import openpyxl
+import pytest
 
 from backend.services.swit_comprehensive_aggregator import (
     SwitcrBuildMeta,
@@ -41,22 +42,74 @@ def _minimal_switcr_template() -> bytes:
     return buf.getvalue()
 
 
-def _switcv_workbook() -> bytes:
+#: 회사 SwITCV 정본은 두 판이 유통되고 **Component 열 하나 차이로 오른쪽 전부가 밀린다.**
+#:   DV(11열): No=B, Component=C, Unit ID=D, Name=E, Functions=F …
+#:   PV(10열): No=B,              Unit ID=C, Name=D, Functions=E …
+_SWITCV_LAYOUTS = ("DV", "PV")
+
+
+def _write_switcv_sheet(
+    ws,
+    layout: str,
+    rows: list[tuple],
+    summary: tuple[tuple, tuple] | None,
+) -> None:
+    """SwITCV `4.Coverage` 시트를 **헤더까지** 정본 형태로 쓴다.
+
+    ⚠ 헤더를 빠뜨리지 말 것. 데이터만 두면 `coverage_column_base` 가 'Component'
+      라벨을 못 찾아 무조건 PV 로 접히고, 그러면 **픽스처가 코드의 거울**이 된다 —
+      2026-08-26 이전 픽스처가 정확히 그 상태(헤더 없이 DV 열에 기입)여서
+      `_load_workbook_summary` 의 DV 고정 결함을 한 번도 못 잡았다.
+
+    rows: (unit_id, name, func_result, func_exc, ccount, ctotal, call_result, call_exc, note)
+    summary: ((f_total, f_fail, f_exc), (c_total, c_fail, c_exc)) — None 이면 수식(빈 셀) 재현
+    """
+    base = 4 if layout == "DV" else 3          # Unit ID 열
+    if layout == "DV":
+        ws.cell(9, 3).value = "Component"      # 이 라벨 하나가 판을 가른다
+    ws.cell(9, 2).value = "No"
+    ws.cell(9, base).value = "Unit"
+    ws.cell(10, base).value = "ID"
+    ws.cell(10, base + 1).value = "Name"
+    ws.cell(9, base + 2).value = "Functions"
+    ws.cell(9, base + 3).value = "Exception"
+    ws.cell(9, base + 4).value = "Function Called"
+    ws.cell(10, base + 4).value = "Count"
+    ws.cell(10, base + 5).value = "Total"
+    ws.cell(10, base + 6).value = "Pass"
+    ws.cell(9, base + 7).value = "Exception"
+    ws.cell(9, base + 8).value = "File"
+
+    # 요약 블록 — 헤더 r4 `Total | Fail Count | Exception | Coverage`, 값 r5/r6.
+    total_col = base + 1
+    ws.cell(4, 2).value = "Coverage"
+    for offset, label in enumerate(("Total", "Fail Count", "Exception", "Coverage")):
+        ws.cell(4, total_col + offset).value = label
+    ws.cell(5, 2).value = "Functions"
+    ws.cell(6, 2).value = "Function Calls"
+    if summary is not None:
+        (f_total, f_fail, f_exc), (c_total, c_fail, c_exc) = summary
+        for row, trio in ((5, (f_total, f_fail, f_exc)), (6, (c_total, c_fail, c_exc))):
+            for offset, value in enumerate(trio):
+                ws.cell(row, total_col + offset).value = value
+
+    for i, row in enumerate(rows):
+        r = 11 + i
+        ws.cell(r, 2).value = i + 1
+        for offset, value in enumerate(row):
+            if value is not None:
+                ws.cell(r, base + offset).value = value
+
+
+def _switcv_workbook(layout: str = "DV") -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "4.Coverage"
-    ws["E5"] = 570
-    ws["F5"] = 1
-    ws["G5"] = 1
-    ws["E6"] = 570
-    ws["F6"] = 0
-    ws["G6"] = 0
-    ws.cell(11, 4).value = "SwUFn_0101"
-    ws.cell(11, 5).value = "FunctionA"
-    ws.cell(11, 6).value = "X"
-    ws.cell(11, 7).value = "O"
-    ws.cell(11, 10).value = "O"
-    ws.cell(11, 12).value = "SwITCR 참고"
+    _write_switcv_sheet(
+        ws, layout,
+        [("SwUFn_0101", "FunctionA", "X", "O", None, None, "O", None, "SwITCR 참고")],
+        ((570, 1, 1), (570, 0, 0)),
+    )
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -285,45 +338,37 @@ class TestSwitcrCoverDeepReviewerW1W2:
         assert ws.cell(21, 15).value == "6.IT601"  # 원명 유지분은 원명 참조 (desync 차단)
 
 
-def _switcv_workbook_formula_summary() -> bytes:
-    """요약셀(E5..G6)을 비워 수식→data_only None 을 모사. 실제 SwITCV는 이 셀들이
-    회사 템플릿 수식이라 openpyxl이 cached=None 으로 저장한다. 데이터행은 SwITCV
-    function/call 경로와 동일하게 O/X·count·exception 모두 리터럴."""
+def _switcv_workbook_formula_summary(layout: str = "DV") -> bytes:
+    """요약셀을 비워 수식→data_only None 을 모사. 실제 SwITCV는 이 셀들이 회사 템플릿
+    수식이라 openpyxl이 cached=None 으로 저장한다. 데이터행은 SwITCV function/call
+    경로와 동일하게 O/X·count·exception 모두 리터럴."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "4.Coverage"
-    # E5..G6 미기입 (None) — 수식 캐시 부재 재현
-    rows = [
-        # unit_id, name, func_result, func_exc, ccount, ctotal, call_result, call_exc
-        ("SwUFn_0101", "FuncA", "X", "O", 2, 3, "X", "O"),
-        ("SwUFn_0102", "FuncB", "O", None, 3, 3, "O", None),
-        ("SwUFn_0103", "FuncC", "O", None, None, None, "O", None),
-    ]
-    for i, (uid, nm, fr, fe, cc, ct, cr, ce) in enumerate(rows):
-        r = 11 + i
-        ws.cell(r, 4).value = uid
-        ws.cell(r, 5).value = nm
-        ws.cell(r, 6).value = fr
-        if fe is not None:
-            ws.cell(r, 7).value = fe
-        if cc is not None:
-            ws.cell(r, 8).value = cc
-        if ct is not None:
-            ws.cell(r, 9).value = ct
-        ws.cell(r, 10).value = cr
-        if ce is not None:
-            ws.cell(r, 11).value = ce
+    _write_switcv_sheet(
+        ws, layout,
+        [
+            ("SwUFn_0101", "FuncA", "X", "O", 2, 3, "X", "O", None),
+            ("SwUFn_0102", "FuncB", "O", None, 3, 3, "O", None, None),
+            ("SwUFn_0103", "FuncC", "O", None, None, None, "O", None, None),
+        ],
+        None,          # 요약셀 미기입 → 수식 캐시 부재 재현
+    )
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def test_load_workbook_summary_computes_from_rows_when_summary_blank():
+@pytest.mark.parametrize("layout", _SWITCV_LAYOUTS)
+def test_load_workbook_summary_computes_from_rows_when_summary_blank(layout):
     """후속 결함 회귀 — 요약셀이 수식(data_only None)이어도 roll-up이 데이터행에서
     함수/호출 fail·exception 을 정확 집계 (거짓 100% 커버리지 차단). 이전엔 None→0
-    으로 fail/exception 이 0 처리되어 coverage_fail_details(정상)와 모순이었다."""
+    으로 fail/exception 이 0 처리되어 coverage_fail_details(정상)와 모순이었다.
+
+    2026-08-26 — DV/PV **두 판 모두** 돈다. 예전엔 DV 열에만 돌아서, PV 정본에서
+    전 열이 한 칸씩 밀리던 결함을 이 테스트가 통과시켜 줬다."""
     from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
-    out = _load_workbook_summary(_switcv_workbook_formula_summary())
+    out = _load_workbook_summary(_switcv_workbook_formula_summary(layout))
     assert out["functions_total"] == 3
     assert out["functions_fail_count"] == 1
     assert out["functions_exception_count"] == 1
@@ -333,13 +378,182 @@ def test_load_workbook_summary_computes_from_rows_when_summary_blank():
     assert len(out["coverage_fail_details"]) == 2  # func X + call X (동일 행)
 
 
-def test_load_workbook_summary_prefers_literal_summary_cells():
+@pytest.mark.parametrize("layout", _SWITCV_LAYOUTS)
+def test_load_workbook_summary_prefers_literal_summary_cells(layout):
     """셀에 리터럴 캐시값이 있으면(외부 재계산본) 데이터행 집계보다 우선."""
     from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
-    out = _load_workbook_summary(_switcv_workbook())  # E5=570/F5=1/G5=1 리터럴
+    out = _load_workbook_summary(_switcv_workbook(layout))  # Total=570/Fail=1/Exc=1
     assert out["functions_total"] == 570
     assert out["functions_fail_count"] == 1
     assert out["functions_exception_count"] == 1
+
+
+@pytest.mark.parametrize("layout", _SWITCV_LAYOUTS)
+def test_data_rows_are_read_at_the_right_columns(layout):
+    """요약셀이 리터럴이어도 **데이터 행은 따로** 읽는다 — 두 경로가 각각 밀릴 수 있다.
+
+    ⚠ 이 단언이 없으면 요약 라벨 탐지가 정답을 내는 덕에 열 판정이 무력화돼도
+      위 테스트가 통과한다(뮤테이션 L6 생존으로 실증). 요약과 데이터는 **다른 축**이다.
+    """
+    from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+    details = _load_workbook_summary(_switcv_workbook(layout))["coverage_fail_details"]
+    fn = next(d for d in details if d["kind"] == "함수커버리지")
+    assert fn["unit_id"] == "SwUFn_0101"      # 밀리면 함수명("FunctionA")이 들어온다
+    assert fn["function"] == "FunctionA"      # 밀리면 O/X 값("X")이 들어온다
+    assert fn["exception"] == "O"
+    assert fn["note"] == "SwITCR 참고"        # 마지막 열(File) — 오른쪽 끝까지 정합
+
+
+class TestSwitcvPvLayoutIsNotReadOneColumnOff:
+    """KJPDS02 PV 정본(10열) 회귀 가드 — 2026-08-26 실측 결함.
+
+    `_load_workbook_summary` 가 DV(11열)에 고정돼 있어 PV SwITCV 에서 **전 열이 한 칸씩
+    밀렸다.** 증상이 조용했던 이유는 밀린 자리의 값이 우연히 같았기 때문이다:
+    `Fail Count` 와 `Exception` 이 둘 다 4 라 "fail 은 맞네" 로 보였고, 정작
+    `Total`(1014)이 `Fail Count`(4)로 읽혀 **253배 과소** 보고됐다.
+
+    그래서 이 가드는 **Total / Fail Count / Exception 을 전부 다른 값**으로 쓴다.
+    세 값이 같으면 한 칸 밀려도 통과하므로 결함을 못 잡는다
+    (guard must change the observable).
+    """
+
+    #: 정본 실측 배치(`(KJPDS02_SwITCV) … v2.01_260629_R.xlsx` D5/E5/F5, D6/E6/F6).
+    #: 실제 파일은 Exception 이 Fail 과 같은 값이라, 밀림을 관측 가능하게 하려고
+    #: Exception 만 다른 수로 바꿨다(Total 은 실측 그대로).
+    CANON = ((1014, 4, 40), (1014, 21, 7))
+
+    def _pv_workbook(self) -> bytes:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "4.Coverage"
+        _write_switcv_sheet(
+            ws, "PV",
+            [("SwUFn_1005", "ADC0_stop_current_workaround", "X", "O",
+              1, 2, "X", "O", "cov.c")],
+            self.CANON,
+        )
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_total_is_total_not_fail_count(self):
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        out = _load_workbook_summary(self._pv_workbook())
+        assert out["functions_total"] == 1014        # 밀리면 4 가 나온다
+        assert out["function_calls_total"] == 1014   # 밀리면 21 이 나온다
+
+    def test_exception_is_exception_not_coverage_ratio(self):
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        out = _load_workbook_summary(self._pv_workbook())
+        assert out["functions_fail_count"] == 4
+        assert out["functions_exception_count"] == 40   # 밀리면 Coverage 열을 읽는다
+        assert out["function_calls_fail_count"] == 21
+        assert out["function_calls_exception_count"] == 7
+
+    def test_failed_rows_are_reported_not_swallowed(self):
+        """밀려 읽으면 O/X 자리에서 Exception 열을 보게 돼 X 가 없어지고,
+        SwITCR 이 실재하는 미달성을 '해당사항 없음' 으로 내보낸다."""
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        details = _load_workbook_summary(self._pv_workbook())["coverage_fail_details"]
+        kinds = [d["kind"] for d in details]
+        assert "함수커버리지" in kinds
+        assert "호출커버리지" in kinds
+        fn = next(d for d in details if d["kind"] == "함수커버리지")
+        assert fn["unit_id"] == "SwUFn_1005"                      # 밀리면 함수명이 들어온다
+        assert fn["function"] == "ADC0_stop_current_workaround"   # 밀리면 "X" 가 들어온다
+
+    def test_trailing_total_row_is_not_counted_as_a_function(self):
+        """마감 TOTAL 행을 함수로 세면 합계가 1 늘어난다(정본 실측 1015 vs 1014)."""
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "4.Coverage"
+        _write_switcv_sheet(
+            ws, "PV",
+            [("SwUFn_0101", "FuncA", "O", None, 1, 1, "O", None, None),
+             ("Total", "Total", None, None, None, None, None, None, None)],
+            None,                      # 요약셀 비움 → 행집계 경로를 강제로 밟는다
+        )
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = _load_workbook_summary(buf.getvalue())
+        assert out["functions_total"] == 1
+
+
+class TestCoverageSheetNameIsMatchedLoosely:
+    """회사 SwUTCV 정본의 시트명은 `4. Coverage`(점 뒤 공백)다 — 2026-08-26 실측.
+
+    정확 매칭이면 통째로 놓치고, 커버리지 증거가 **조용히 0** 이 된다."""
+
+    def test_sheet_with_space_after_dot_is_found(self):
+        from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "4. Coverage"           # 공백 있음
+        _write_switcv_sheet(
+            ws, "PV",
+            [("SwUFn_0101", "FuncA", "X", None, 1, 2, "O", None, None)],
+            ((7, 1, 0), (7, 0, 0)),
+        )
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = _load_workbook_summary(buf.getvalue())
+        assert out["functions_total"] == 7
+        assert len(out["coverage_fail_details"]) == 1
+
+
+class TestSummaryColumnPrefersTheHeaderLabel:
+    """요약 열은 **헤더 라벨 우선**, 없을 때만 `base + 1` 폴백.
+
+    ⚠ 실물 두 판(SwITCV PV / SwUTCV DV)은 라벨 위치와 폴백이 마침 일치해서, 라벨
+      탐지를 통째로 들어내도 아무 테스트가 안 깨졌다(뮤테이션 L7 생존). 계약을
+      관측 가능하게 만들려면 **둘이 갈리는 워크북**으로 고정해야 한다.
+    """
+
+    def _sheet(self, total_col: int | None):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        if total_col is not None:
+            ws.cell(4, total_col).value = "Total"
+        return ws
+
+    def test_label_wins_over_the_fallback(self):
+        from backend.services.excel_layout_resolver import coverage_summary_col
+        ws = self._sheet(total_col=7)          # 폴백(base+1=4)과 다른 자리
+        assert coverage_summary_col(ws, base=3) == 7
+
+    def test_fallback_is_used_when_no_label(self):
+        from backend.services.excel_layout_resolver import coverage_summary_col
+        ws = self._sheet(total_col=None)
+        assert coverage_summary_col(ws, base=3) == 4   # PV
+        assert coverage_summary_col(ws, base=4) == 5   # DV
+
+    def test_label_match_is_case_insensitive_and_trimmed(self):
+        from backend.services.excel_layout_resolver import coverage_summary_col
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(4, 6).value = "  TOTAL "
+        assert coverage_summary_col(ws, base=3) == 6
+
+
+class TestColumnBaseHasASingleSource:
+    """열 판정 복제 금지 — 라운드 102 가 한쪽만 고쳐 이 결함이 났다.
+
+    두 aggregator 가 각자 Component 라벨을 스캔하고 있었고 그중 하나만 DV/PV 적응을
+    받았다. 어제 세 라우터의 헤더 절단 로직을 `warnings_header_json` 으로 합친 것과
+    같은 이유다."""
+
+    def test_both_aggregators_use_the_shared_detector(self):
+        from backend.services import swit_comprehensive_aggregator as comp
+        from backend.services import swit_coverage_aggregator as cov
+        from tests.unit._source_probe import source_of
+
+        for mod in (comp, cov):
+            src = source_of(mod)
+            assert "coverage_column_base" in src, f"{mod.__name__}: 공유 판정 미사용"
+            assert 'strip() == "Component"' not in src, (
+                f"{mod.__name__}: Component 스캔 복제본이 되살아났다"
+            )
 
 
 class TestIt201It301EvidenceGuard:
