@@ -942,7 +942,11 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      (실측 kjpds02_pv: `struct_member_arrays` 0). SUTS·SITS 둘 다 이 키로 멤버 배열을
 #      원소 단위로 펼치므로, 무효화 없이는 두 산출물 모두에서 fix 가 발화하지 않는다
 #      — 위 v3/v4 주석이 경고한 것과 **같은 실패의 세 번째**다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v12"
+#  v13: `__interrupt void` 의 구분 공백 복원(`source_parser._extract_c_prototypes`).
+#      v12 캐시에는 `__interruptvoid` 라는 존재하지 않는 타입이 그대로 박혀 있어
+#      (실측: 캐시 6개 파일), 무효화하지 않으면 소스가 안 바뀐 프로젝트에서
+#      **파서 fix 가 프로덕션에서 발화하지 않는다** — 위 v3/v4/v12 와 같은 실패.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v13"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

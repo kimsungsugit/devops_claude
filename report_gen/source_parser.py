@@ -368,7 +368,10 @@ def _extract_c_prototypes(text: str) -> List[Tuple[str, str, str, bool]]:
         name = match.group(4)
         params = " ".join(match.group(5).replace("\n", " ").split())
         if interrupt_prefix:
-            ret_type = f"{interrupt_prefix}{ret_type}"
+            # ⚠ 구분 공백 필수. 없으면 `__interruptvoid` 라는 존재하지 않는 타입이 되어
+            #   정확일치 판정 사이트가 "반환값 있음" 으로 읽는다(실측: 산출물 34칸).
+            #   판정은 `report_gen.c_return.returns_value` 단일 출처를 쓸 것.
+            ret_type = f"{interrupt_prefix} {ret_type}"
         results.append((name, params, ret_type, is_extern))
     return results
 

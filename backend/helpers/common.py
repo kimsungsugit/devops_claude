@@ -33,6 +33,7 @@ from backend.state import (
 from backend.state import (
     jenkins_progress_lock as _jenkins_progress_lock,
 )
+from report_gen.c_return import returns_value
 
 _logger = logging.getLogger("devops_api")
 _api_logger = _logger
@@ -405,7 +406,7 @@ def _parse_signature_outputs_simple(signature: str) -> List[str]:
     ret = " ".join(pieces[:-1]) if len(pieces) >= 2 else pieces[0]
     ret = ret.strip()
     outputs: List[str] = []
-    if ret and ret.lower() != "void":
+    if returns_value(ret):
         outputs.append(f"[OUT] return {ret}")
     m = re.search(r"\((.*)\)", sig)
     inner = str(m.group(1) if m else "").strip()

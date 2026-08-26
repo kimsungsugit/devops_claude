@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from report_gen.c_return import returns_value
 from report_gen.provenance import is_weak_source
 from report_gen.utils import (
     _dedupe_multiline_text,
@@ -862,7 +863,7 @@ def _parse_signature_outputs(signature: str, func_name: str) -> List[str]:
         head = signature.split(func_name, 1)[0] if func_name and func_name in signature else signature
         head = re.sub(r"\b(static|extern|inline)\b", "", head).strip()
         head = " ".join(head.split())
-        if head and "void" not in head:
+        if returns_value(head):
             outputs.append(f"[OUT] return {head}")
     for param in _parse_signature_params(signature):
         param_norm = " ".join(param.split())

@@ -50,6 +50,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from report_gen.c_return import returns_value
+
 _logger = logging.getLogger("devops_api.docgen_test_materials")
 
 # `function_details` 캐시. `docgen_comment_coverage` 의 것과 **다른 파서**의 산출이라
@@ -278,7 +280,6 @@ def _settable_globals(globs: List[Any], gim: Optional[Dict[str, Any]]) -> List[A
 
 
 _RET_TYPE_RE = re.compile(r"^\s*([\w\s\*]+?)\s+\w+\s*\(")
-_RET_NOISE_RE = re.compile(r"\b(static|inline|extern|const|volatile)\b")
 
 
 def _returns_value(info: Dict[str, Any]) -> bool:
@@ -286,8 +287,7 @@ def _returns_value(info: Dict[str, Any]) -> bool:
     m = _RET_TYPE_RE.match(str((info or {}).get("prototype") or ""))
     if not m:
         return False
-    t = _RET_NOISE_RE.sub("", m.group(1)).strip()
-    return bool(t) and t.lower() != "void"
+    return returns_value(m.group(1))
 
 
 def _measure_suts_inputs(

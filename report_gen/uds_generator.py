@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: E402
 from report.constants import (
     DEFAULT_TYPE_RANGES,
 )
+from report_gen.c_return import returns_value  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
 from report_gen.function_analyzer import (
     _collect_var_usage,
     _enhance_description_text,
@@ -1299,7 +1300,7 @@ def generate_uds_source_sections(
                         globals_static.append(ls_name)
                         local_static_set.add(ls_name)
             return_type = _extract_return_type(signature, name)
-            if return_type and "void" not in return_type:
+            if returns_value(return_type):
                 m = re.search(r"\b(U8|U16|U32|S8|S16|S32)\b", return_type)
                 base = m.group(1) if m else return_type.split()[-1]
                 range_text = DEFAULT_TYPE_RANGES.get(base, "")

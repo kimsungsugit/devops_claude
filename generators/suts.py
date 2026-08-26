@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.uds_unit_io import resolve_unit_io
+from report_gen.c_return import returns_value
 from report_gen.doc_kind import is_sds_filename
 from report_gen.function_analyzer import split_param_annotations
 from report_gen.requirements import (
@@ -747,7 +748,7 @@ def collect_unit_functions(
 
         if not output_vars:
             ret_type = _infer_return_type(prototype)
-            if ret_type and ret_type.lower() != "void":
+            if returns_value(ret_type):
                 # 정본 표기와 같은 이름을 쓴다 — `return_<함수명>` 은 정본 어디에도 없다.
                 output_vars.append(_RETURN_VAR)
                 out_set.add(_RETURN_VAR)
@@ -1869,7 +1870,10 @@ def generate_sequences(
     if not input_vars and not output_vars:
         fn_name = unit.get("name", "function")
         prototype = unit.get("prototype", "")
-        is_void_return = "void" in prototype.split("(")[0].lower() if "(" in prototype else True
+        # ⚠ 예전엔 `"void" in prototype.split("(")[0].lower()` 였다 — 자른 앞쪽엔 **함수 이름도**
+        #   들어 있어 `void_check()` 같은 이름이면 반환값이 있어도 void 로 읽힌다.
+        #   판정은 `report_gen.c_return.returns_value` 단일 출처를 쓴다.
+        is_void_return = not returns_value(_infer_return_type(prototype))
         calls_list = unit.get("calls_list") or []
         logic_flow = unit.get("logic_flow") or []
 
@@ -4087,7 +4091,7 @@ def _lw_parse_outputs(sig: str, name: str) -> List[str]:
         return []
     head = sig.split(name, 1)[0] if name in sig else sig
     head = re.sub(r"\b(static|extern|inline)\b", "", head).strip()
-    if head and "void" not in head.lower():
+    if returns_value(head):
         return [f"[OUT] return {head.strip()}"]
     return []
 
