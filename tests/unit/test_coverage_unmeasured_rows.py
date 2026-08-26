@@ -91,14 +91,18 @@ def _sheet_with(rows):
     return ws, DATA_START + len(rows) - 1
 
 
-def _run(rows):
+def _run(rows, *, stats=None):
+    """기존 호출부 호환을 위해 반환은 `(ws, warnings)` 2-tuple 그대로 둔다.
+
+    `stats` 를 주면 `out_stats` 로 전달돼 그 dict 가 채워진다(2026-08-26 신설).
+    """
     ws, last = _sheet_with(rows)
     warnings: list[str] = []
     _write_spec_totals(
         ws, data_start=DATA_START, last_data_row=last,
         unit_id_col=UNIT_ID_COL, no_col=UNIT_ID_COL - 1,
         stmt_count_col=STMT_COUNT_COL, branch_count_col=BRANCH_COUNT_COL,
-        out_warnings=warnings,
+        out_warnings=warnings, out_stats=stats,
     )
     return ws, warnings
 
@@ -209,3 +213,146 @@ class TestUnmeasuredIsNotStampedAsException:
             "PV 자동 예외 정책이 바뀌었다 — `:994` 사용자 결정('PV 기준 유지')을 "
             "건드리려면 별도 판단이 필요하다"
         )
+
+
+class TestDocumentValueReachesTheGate:
+    """문서에 찍은 값이 **호출부로 돌아오는가** — 2026-08-26.
+
+    이 양식은 미달 행의 Exception 을 'O' 로 상쇄해 요약을 100% 로 만든다(PV 정책,
+    `:994` 사용자 결정). 게이트는 raw `covered/total` 로 채점하므로 두 숫자가 갈린다.
+    실측(KJPDS02 PV): 게이트 99.45% ↔ 문서 100%. 예전엔 그 격차가 summary 에 없어
+    **어디에도 안 보였다** — 감사자가 문서만 보면 "달성", 화면만 보면 "미달"이다.
+
+    ⚠ 숫자를 게이트 쪽에서 다시 세면 판정이 두 벌이 되어 드리프트한다(이 저장소가
+      `_load_workbook_summary` 에서 겪은 그 결함). 라이터의 스캔 결과를 그대로 넘긴다.
+    """
+
+    def test_gap_between_document_and_raw_is_visible(self):
+        stats: dict = {}
+        ws, _ = _run([
+            ("ok", 10, 10, False, 5, 5, False),
+            ("ng", 8, 10, True, 4, 5, True),      # 미달 + 면제
+        ], stats=stats)
+        assert stats["coverage_fail_statement_functions"] == 1
+        assert stats["coverage_exception_statement_functions"] == 1
+        assert stats["doc_reported_statement_pct"] == 100.0     # (2-1+1)/2
+        # 문서 셀과 **같은 값**이어야 한다 — 두 벌이면 여기서 갈린다.
+        assert _get(ws, 5, 6) == 1 and _get(ws, 5, 7) == 1
+
+    def test_unexcused_shortfall_is_not_offset(self):
+        """면제가 없으면 문서도 100% 라고 쓰지 않는다(과잉 상쇄 방지)."""
+        stats: dict = {}
+        _run([
+            ("ok", 10, 10, False, 5, 5, False),
+            ("ng", 8, 10, False, 4, 5, False),
+        ], stats=stats)
+        assert stats["coverage_exception_statement_functions"] == 0
+        assert stats["doc_reported_statement_pct"] == 50.0       # (2-1+0)/2
+
+    def test_unmeasured_rows_reported_and_excluded(self):
+        stats: dict = {}
+        _run([
+            ("ok", 10, 10, False, 5, 5, False),
+            ("none", 0, 0, False, 0, 0, False),
+        ], stats=stats)
+        assert stats["coverage_unmeasured_statement_rows"] == 1
+        assert stats["doc_reported_statement_pct"] == 100.0      # 미측정은 분모에서 뺀다
+
+    def test_all_unmeasured_writes_no_number(self):
+        """실측 0행이면 문서도 숫자를 안 쓴다 — stats 도 0 을 지어내지 않는다."""
+        stats: dict = {}
+        ws, _ = _run([("none", 0, 0, False, 0, 0, False)], stats=stats)
+        assert "doc_reported_statement_pct" not in stats
+        assert _get(ws, 5, 8) == "미측정"
+
+    def test_out_stats_is_optional(self):
+        """기존 호출부(미전달)가 깨지지 않는다."""
+        ws, _ = _run([("ok", 10, 10, False, 5, 5, False)])
+        assert _get(ws, 5, 5) == 1
+
+
+class TestStatsWiringSurvivesTheChain:
+    """`out_stats` 가 **빌더 → 시트 라이터 → TOTALS** 전 구간을 통과하는가.
+
+    ⚠ 2026-08-26 실측 사고: 위 `TestDocumentValueReachesTheGate` 는 `_write_spec_totals`
+      를 **직접** 불러서 통과했지만, 라이브에서는 값이 quality DB 에 하나도 안 남았다.
+      링크 중 하나만 끊겨도 말단 테스트는 전부 초록이다(뮤테이션 E1 이 실제로 생존했다).
+      그래서 여기서는 함수 안이 아니라 **함수 사이**를 잰다.
+    """
+
+    def test_sheet_writer_forwards_out_stats(self, monkeypatch):
+        """`_write_coverage_sheet` → `_write_spec_totals` 링크."""
+        import backend.services.swut_coverage_aggregator as mod
+
+        seen: dict = {}
+
+        def _spy(ws, **kw):
+            seen.update(kw)
+            if kw.get("out_stats") is not None:
+                kw["out_stats"]["_probe"] = 1
+
+        monkeypatch.setattr(mod, "_write_spec_totals", _spy)
+        ws, agg = _spec_based_sheet_and_agg()
+        stats: dict = {}
+        mod._write_coverage_sheet(ws, agg, out_stats=stats)
+        assert seen, "_write_spec_totals 가 호출되지 않았다 — spec_based 분기 확인"
+        assert stats.get("_probe") == 1, "out_stats 가 TOTALS 로 전달되지 않는다"
+
+    def test_builder_merges_stats_into_summary(self, monkeypatch):
+        """`build_coverage_report` → 시트 라이터 → `summary` 링크.
+
+        빌더가 dict 를 만들어 넘기고 **그 결과를 summary 에 합치는지**만 본다.
+        (라이터 내부는 위 테스트가 따로 잰다.)
+        """
+        import backend.services.swut_coverage_aggregator as mod
+
+        def _spy(ws, agg, **kw):
+            assert "out_stats" in kw, "빌더가 out_stats 를 넘기지 않는다"
+            assert isinstance(kw["out_stats"], dict)
+            kw["out_stats"]["doc_reported_statement_pct"] = 42.0
+            return 3
+
+        monkeypatch.setattr(mod, "_write_coverage_sheet", _spy)
+        session, meta, template = _minimal_build_inputs()
+        result = mod.build_coverage_report(session, meta, template)
+        assert result.ok
+        assert result.summary.get("doc_reported_statement_pct") == 42.0, (
+            "라이터가 채운 값이 summary 에 합쳐지지 않는다 — quality DB 에 안 남는다"
+        )
+
+
+def _spec_based_sheet_and_agg():
+    """`spec_based` 가 켜지는 최소 조건 — Component 헤더 + SwUDS 이름→ID 맵."""
+    from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+
+    ws = _new_sheet()
+    # header_row 탐지용: 'No' 와 'Component' 가 같은 행에 있어야 한다.
+    ws.cell(row=1, column=2).value = "No"
+    ws.cell(row=1, column=3).value = "Component"
+    ws.cell(row=1, column=4).value = "Unit ID"
+    ws.cell(row=1, column=5).value = "Name"
+    fc = FunctionCoverage(
+        unit_id="SwUFn_0001", name="fn_a",
+        statement=CoverageStats(covered=10, total=10),
+        branch=CoverageStats(covered=5, total=5),
+    )
+    agg = {
+        "function_rows": [fc],
+        "function_name_to_swufn_from_suds": {"fn_a": "SwUFn_0001"},
+    }
+    return ws, agg
+
+
+def _minimal_build_inputs():
+    """빌더를 태울 최소 입력 — 기존 스위트의 픽스처를 재사용한다."""
+    from tests.unit.test_swut_aggregators import (
+        CoverageBuildMeta,
+        _build_coverage_template,
+        _make_session,
+    )
+
+    return (
+        _make_session(),
+        CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19"),
+        _build_coverage_template(),
+    )

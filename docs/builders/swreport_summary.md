@@ -46,6 +46,41 @@ default. 헤더 블록 값 열도 라벨 우측 첫 비어있지 않은 셀로 �
 조기 발견용). 검증: 표준 v1.02(24/24 + 컬럼 14개 자동매핑) + 우측 이동 레이아웃
 테스트(`test_column_autodetect_shifted_layout`) 양쪽 통과.
 
+## ⚠ ES95411 양식이 어디에도 없다 (2026-08-26 실측)
+
+KJPDS02 `template_paths.es95411_template` 이 가리키는
+`(KJPDS02_ES95411) ES95411 Test Result Report_v1.02_260324.xlsm` 은 **실재하지 않는다.**
+등록 경로 폴더는 물론 그 아래 `PV_2631` · `backup` · `backup/1.DV` 까지 전수 확인했고,
+**회사 공용 양식 트리**(`★개발템플릿 Version3`)도 깊이 4까지 훑었다 — `ES95411` 이라는
+이름은 **0건**이다.
+
+같은 자리에서 대신 나온 것:
+
+| 위치 | 파일 | 시트 |
+|---|---|---|
+| 프로젝트 `11.SW 테스트/02.Test Result/02.Result Report` | `(KJPDS02_SwTR) Software Test Result_v2.01_260629_R.xlsx` | Cover · History · 1.Test Summary · 2.Test Log |
+| 공용 양식 `11.SW 테스트/03.최종 보고서` | `(XXXX_SwTCR) Software Test Comprehesive Result_v0.10_XXXXXX.xlsm` | **27시트** |
+
+**후신 후보는 `SwTR` 이 아니라 `SwTCR` 이다.** SwTR 은 Cover/Test Summary/Test Log 4시트짜리
+**SwT 레벨 산출물**이라 roll-up 이 아니다. 반면 SwTCR 27시트는 이렇게 생겼다:
+
+    Cover · History · Guideline · 검증 항목 · Summary
+    1.ST101 … 10.ST1001      (SW 테스트 10)
+    11.UT101 … 13.UT301      (단위시험 3)
+    14.IT101 … 21.IT801      (통합시험 8)
+    통합검증_BTB
+
+전 레벨(ST+UT+IT)을 한 파일에 담는 **마스터 roll-up** — ES95411 이 하던 역할 그대로다.
+대조군인 SwITCR 공용 양식은 12시트(IT101~IT801)뿐이라 레벨 하나만 담는다.
+
+계층도 맞아떨어진다: `09.SW 단위 테스트`→SwUTCR / `10.SW 통합 테스트`→SwITCR /
+`11.SW 테스트`→**SwTCR**.
+
+⚠ **아직 config 를 바꾸지 않았다.** 근거는 강하지만 "ES95411(사내 문서번호)이 표준 템플릿
+Version3 에서 SwTCR 로 개명됐다" 는 **문서 체계에 대한 판단**이고, 틀리면 통합 Summary 가
+엉뚱한 양식으로 나간다. 확인되면 `es95411_template` 을 SwTCR 경로로 바꾸고 파서의 시트
+탐지(`NN.<TestID>`)가 27시트 배치에서도 도는지 재검증할 것.
+
 **일반화 경계** — 회사 ES95411 표준 폼(동일 한글 라벨, 'Summary' 시트, 'NN.<ID>'
 detail 시트 명명)을 쓰는 프로젝트면 동작. 라벨/구조가 근본적으로 다른 폼은
 `_HEADER_LABEL_MAP`(표 헤더)·detail Result 블록 라벨(분석차수/Tester/P/F/준비/수행/

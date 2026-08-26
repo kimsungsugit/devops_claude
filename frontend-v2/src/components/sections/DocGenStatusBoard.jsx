@@ -163,6 +163,13 @@ const METRIC_LABELS = {
   vcast_raw_statement_pct: '(참고) 원시 구문 커버리지',
   vcast_raw_branch_pct: '(참고) 원시 분기 커버리지',
   vcast_raw_measured_functions: '(참고) 원시 실측 함수 수',
+  // SwUTCV — 문서는 Exception 으로 상쇄해 100% 로 적힌다. 게이트(raw)와의 격차를 보인다.
+  doc_reported_statement_pct: '(문서 표기) 구문 커버리지',
+  doc_reported_branch_pct: '(문서 표기) 분기 커버리지',
+  coverage_fail_statement_functions: '구문 미달 함수 수',
+  coverage_fail_branch_functions: '분기 미달 함수 수',
+  coverage_exception_statement_functions: '구문 면제 함수 수',
+  coverage_exception_branch_functions: '분기 면제 함수 수',
   // UDS 참고지표 — 위 `input_pct`/`output_pct` 와 **다른 질문**이라 라벨을 구분한다.
   //   input_pct      = "입력 칸에 정보를 적었나"    (`[IN] (none)` 도 채움으로 셈)
   //   input_real_pct = "실제로 주고받는 항목이 있나" (`(none)` 은 미채움)

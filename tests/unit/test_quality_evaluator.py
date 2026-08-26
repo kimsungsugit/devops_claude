@@ -267,6 +267,71 @@ class TestEvaluateCoverage:
         assert by_name["statement_coverage_pct"]["threshold"] == 100.0
 
 
+class TestCoverageDocumentGap:
+    """문서가 적는 값과 게이트 값이 다르면 **그 격차가 보여야** 한다.
+
+    SwUTCV(PV 정본 양식)는 미달 행의 Exception 을 'O' 로 일괄 처리해 요약 Coverage 를
+    `(분모 - Fail + Exception)/분모` = **100%** 로 만든다(회사 감사본 정합 — 사용자
+    결정). 게이트는 raw `covered/total` 로 채점한다. 실측(KJPDS02 PV 2026-08-26):
+    게이트 99.45% ↔ 문서 100%.
+
+    ⚠ 격차를 안 남기면 감사자가 문서만 볼 때 "달성", 화면만 볼 때 "미달"이고
+      **왜 다른지 어디에도 없다**. 어느 쪽도 지우지 않고 둘 다 남긴다.
+    """
+
+    CANON = {
+        "overall_statement_pct": 99.45, "overall_branch_pct": 98.64,
+        "measured_functions": {"statement": 1014, "branch": 1014, "mcdc": 0},
+        "synthesized_rows": 0,
+        "passed": 6882, "failed": 0, "total_tcs": 6882,
+        "coverage_fail_statement_functions": 23,
+        "coverage_fail_branch_functions": 33,
+        "coverage_exception_statement_functions": 23,
+        "coverage_exception_branch_functions": 33,
+        "doc_reported_statement_pct": 100.0,
+        "doc_reported_branch_pct": 100.0,
+    }
+
+    def _by(self, summary=None):
+        return {m["metric_name"]: m
+                for m in evaluate_coverage(summary if summary is not None else self.CANON,
+                                           asil="A")}
+
+    def test_both_numbers_are_recorded(self):
+        by = self._by()
+        assert by["statement_coverage_pct"]["value"] == 99.45      # 게이트(raw)
+        assert by["doc_reported_statement_pct"]["value"] == 100.0  # 문서 표기
+        assert by["statement_coverage_pct"]["gate_pass"] is False
+        # 문서 표기는 **채점하지 않는다** — 면제에 개별 사유가 없다.
+        assert by["doc_reported_statement_pct"]["threshold"] is None
+
+    def test_shortfall_counts_are_actionable(self):
+        by = self._by()
+        assert by["coverage_fail_statement_functions"]["value"] == 23.0
+        assert by["coverage_fail_branch_functions"]["value"] == 33.0
+
+    def test_all_shortfalls_auto_excused_is_visible(self):
+        """미달 수 == 면제 수 면 '전부 자동 면제' 다 — 그 사실이 화면에 남아야 한다."""
+        by = self._by()
+        assert (by["coverage_exception_statement_functions"]["value"]
+                == by["coverage_fail_statement_functions"]["value"] == 23.0)
+
+    def test_absent_document_values_are_not_fabricated(self):
+        """면제 축이 없는 산출물(구 양식)에 0 을 지어내지 않는다."""
+        lean = {k: v for k, v in self.CANON.items()
+                if not k.startswith(("doc_reported_", "coverage_fail_", "coverage_exception_"))}
+        by = self._by(lean)
+        for k in ("doc_reported_statement_pct", "coverage_fail_statement_functions",
+                  "coverage_exception_branch_functions"):
+            assert k not in by, k
+
+    def test_unmeasured_document_value_is_omitted_not_zero(self):
+        """문서가 '미측정' 이라고 쓴 경우 — 0% 로 바꾸면 '측정했고 0%' 가 된다."""
+        by = self._by({**self.CANON, "doc_reported_statement_pct": None})
+        assert "doc_reported_statement_pct" not in by
+        assert by["doc_reported_branch_pct"]["value"] == 100.0   # 다른 축은 그대로
+
+
 class TestEvaluateSwitCoverage:
     """SwITCV 는 구문/분기 문서가 아니다 — 그 축으로 채점하면 영구 FAIL 이 된다.
 

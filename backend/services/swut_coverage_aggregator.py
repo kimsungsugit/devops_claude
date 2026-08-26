@@ -617,6 +617,7 @@ def _write_coverage_sheet(
     out_warnings: list[str] | None = None,
     is_swit_caller: bool = False,
     c_function_map: dict[str, dict[str, Any]] | None = None,
+    out_stats: dict[str, Any] | None = None,
 ) -> int:
     """3. Coverage 시트 — per-function Statement/Branch/Exception 표.
 
@@ -1262,6 +1263,7 @@ def _write_coverage_sheet(
             stmt_count_col=stmt_count_col,
             branch_count_col=branch_count_col,
             out_warnings=out_warnings,
+            out_stats=out_stats,
         )
         if out_warnings is not None:
             out_warnings.append(
@@ -1433,6 +1435,7 @@ def _write_spec_totals(
     unit_id_col: int, no_col: int,
     stmt_count_col: int, branch_count_col: int,
     out_warnings: list[str] | None = None,
+    out_stats: dict[str, Any] | None = None,
 ) -> None:
     """라운드 103 — 회사 감사본(KJPDS02 v0.10 PV) 4.Coverage 단일 TOTALS 행 + 요약.
 
@@ -1553,6 +1556,32 @@ def _write_spec_totals(
     _set(6, 6, branch_fail)
     _set(6, 7, branch_exc)
     _set(6, 8, _cov_branch if _cov_branch is not None else "미측정")
+    # 2026-08-26 — 문서에 찍히는 값을 **그대로** 호출부로 돌려준다.
+    #
+    # ⚠ 왜 필요한가: 이 양식(PV 정본)은 미달 행의 Exception 을 'O' 로 일괄 처리해
+    #   요약 Coverage 를 `(분모 - Fail + Exception)/분모` = **100%** 로 만든다
+    #   (:994 사용자 결정 — 회사 감사본 정합). 그런데 품질 게이트는 raw
+    #   `covered/total` 로 채점한다. 실측(KJPDS02 PV): 문서 100% ↔ 게이트 99.45%.
+    #   **같은 산출물을 두고 두 숫자가 다른데 그 격차가 어디에도 안 남았다.**
+    #   감사자가 문서만 보면 "달성", 화면만 보면 "미달"이고 왜 다른지 설명이 없다.
+    #   숫자를 여기서 다시 세면 판정이 두 벌이 되므로(이 저장소가 반복해 겪은 드리프트)
+    #   **라이터가 이미 시트를 스캔해 얻은 값 그대로** 넘긴다.
+    if out_stats is not None:
+        out_stats.update({
+            "coverage_fail_statement_functions": stmt_fail,
+            "coverage_fail_branch_functions": branch_fail,
+            "coverage_exception_statement_functions": stmt_exc,
+            "coverage_exception_branch_functions": branch_exc,
+            "coverage_unmeasured_statement_rows": stmt_unmeasured,
+            "coverage_unmeasured_branch_rows": branch_unmeasured,
+        })
+        # ⚠ 미측정이면 문서도 숫자를 안 쓴다("미측정"). 여기서 0.0 을 지어내지 않는다 —
+        #   부재와 0% 를 같은 값으로 만드는 건 이 파일이 이미 두 번 고친 결함이다.
+        if _cov_stmt is not None:
+            out_stats["doc_reported_statement_pct"] = round(_cov_stmt * 100, 2)
+        if _cov_branch is not None:
+            out_stats["doc_reported_branch_pct"] = round(_cov_branch * 100, 2)
+
     if (stmt_unmeasured or branch_unmeasured) and out_warnings is not None:
         out_warnings.append(
             f"[spec-cov] 미측정(Total=0) 행 — Statement {stmt_unmeasured}건 / "
@@ -3544,11 +3573,17 @@ def build_coverage_report(
         # (a) enhance_function_coverage_with_file로 dedup key 정확성 향상
         # (b) update_cross_refs_after_row_expansion으로 cross-ref formula 동적 갱신
         # (c) auto_expand_row_block + push_sentinel_to_last_row로 양식 row 확장 + sentinel push
+        # 2026-08-26 — 문서가 적는 값(면제 상쇄 후 Coverage)과 미달/면제 건수를 받아
+        # summary 로 올린다. 게이트는 raw 로 채점하되 **문서와의 격차가 보이게** 한다
+        # (`_write_spec_totals` 의 out_stats 주석 참조).
+        _cov_stats: dict[str, Any] = {}
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
             c_function_map=session.c_function_map or None,
+            out_stats=_cov_stats,
         )
         summary["coverage_rows_written"] = n_written
+        summary.update(_cov_stats)
 
     # 1.Traceability — T133 본격 작성 (TC×Function 매트릭스)
     # 라운드 F7 D1 fix: incomplete_sheets에 실제 시트 이름 보고 — 회사 표준은

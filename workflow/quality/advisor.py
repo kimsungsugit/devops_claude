@@ -146,6 +146,39 @@ _SWUT_ADVICE = {
         "low_advice": "실측이 아니라 '로그에 있음'을 1/1 로 표현한 행입니다. 집계에서는 제외되지만, 이 값이 크면 문서의 O/X 표기 대부분이 실측 근거가 없다는 뜻입니다.",
         "threshold": None,
     },
+    # ── 문서가 적는 값과의 격차 (2026-08-26) ─────────────────────────────
+    # PV 정본 양식은 미달을 Exception 'O' 로 일괄 면제해 요약을 100% 로 만든다.
+    # 게이트는 raw 로 채점하므로 두 숫자가 갈린다 — 격차를 화면에 남긴다.
+    "doc_reported_statement_pct": {
+        "label": "(문서 표기) 구문 커버리지",
+        "low_advice": "산출물 요약에 실제로 찍히는 값입니다. 위 실측치보다 높다면 그 차이는 Exception(면제) 처리분입니다 — 면제 사유가 문서에 적혀 있는지 확인하세요.",
+        "threshold": None,
+    },
+    "doc_reported_branch_pct": {
+        "label": "(문서 표기) 분기 커버리지",
+        "low_advice": "위 구문 항목과 같은 성격입니다(면제 상쇄 후 값).",
+        "threshold": None,
+    },
+    "coverage_fail_statement_functions": {
+        "label": "구문 미달 함수 수",
+        "low_advice": "백분율보다 이 수를 보고 대상 함수를 특정하세요. 산출물 4.Coverage 의 Statement Pass 열이 'X' 인 행입니다.",
+        "threshold": None,
+    },
+    "coverage_fail_branch_functions": {
+        "label": "분기 미달 함수 수",
+        "low_advice": "Branch Pass 열이 'X' 인 행의 수입니다.",
+        "threshold": None,
+    },
+    "coverage_exception_statement_functions": {
+        "label": "구문 면제(Exception) 함수 수",
+        "low_advice": "문서가 Exception 으로 상쇄한 건수입니다. 미달 수와 같다면 **전부 자동 면제**됐다는 뜻이고, 그 면제에는 개별 사유가 붙어 있지 않습니다 — ISO 26262 감사에서 사유를 요구받는 지점입니다.",
+        "threshold": None,
+    },
+    "coverage_exception_branch_functions": {
+        "label": "분기 면제(Exception) 함수 수",
+        "low_advice": "위 구문 항목과 같습니다.",
+        "threshold": None,
+    },
     "statement_coverage_pct": {
         "label": "구문 커버리지(Statement)",
         "low_advice": "구문 커버리지가 100% 미만입니다(전 ASIL 필수). 실행되지 않은 코드 라인을 위한 TC를 추가하고, VectorCAST 빌드 산출물(.cov)이 최신인지·대상 함수가 테스트 하니스에 포함됐는지 확인하세요.",

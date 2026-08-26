@@ -416,6 +416,30 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2), threshold=100.0))
 
     metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
+
+    # ── 문서가 적는 값과의 격차 (2026-08-26) ─────────────────────────────────
+    # SwUTCV(PV 정본 양식)는 미달 행의 Exception 을 'O' 로 일괄 처리해 요약
+    # Coverage 를 `(분모 - Fail + Exception)/분모` = **100%** 로 만든다(회사 감사본
+    # 정합 — 사용자 결정). 게이트는 raw `covered/total` 로 채점하므로 두 숫자가
+    # 갈린다. 실측(KJPDS02 PV 2026-08-26): 게이트 99.45% ↔ 문서 100%.
+    #
+    # ⚠ 어느 쪽도 지우지 않는다. 게이트 축은 raw 그대로 두되(면제는 근거 Note 없이
+    #   일괄 부여되므로 그걸 통과로 접으면 미달이 사라진다), **문서가 뭐라고 적혀
+    #   나가는지**를 함께 남긴다. 안 남기면 감사자가 문서만 볼 때 "달성", 화면만 볼 때
+    #   "미달"인데 왜 다른지 어디에도 설명이 없다.
+    # ⚠ 부재를 0 으로 접지 않는다 — 미측정이면 문서도 숫자를 안 쓴다.
+    for key in ("doc_reported_statement_pct", "doc_reported_branch_pct"):
+        raw = summary.get(key)
+        if isinstance(raw, (int, float)):
+            metrics.append(_metric(key, float(raw)))
+    for key in (
+        "coverage_fail_statement_functions",
+        "coverage_fail_branch_functions",
+        "coverage_exception_statement_functions",
+        "coverage_exception_branch_functions",
+    ):
+        if key in summary:
+            metrics.append(_metric(key, _safe_float(summary, key)))
     return metrics
 
 
