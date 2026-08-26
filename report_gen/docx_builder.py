@@ -2046,6 +2046,9 @@ def generate_uds_docx(
         call_relation_mode = "code"
     module_map = payload.get("module_map", {}) or {}
     globals_info_map = payload.get("globals_info_map", {}) or {}
+    # 구조체/공용체 멤버의 타입·비트폭·자기 주석. 없으면 멤버 경로 행은 N/A 로 남는다
+    # (베이스의 값을 물려주지 않는다 — `function_analyzer._member_grid_info`).
+    struct_member_types = payload.get("struct_member_types", {}) or {}
     globals_format_order = payload.get("globals_format_order") or GLOBALS_FORMAT_ORDER
     globals_format_sep = payload.get("globals_format_sep") or GLOBALS_FORMAT_SEP
     globals_format_with_labels = payload.get("globals_format_with_labels", GLOBALS_FORMAT_WITH_LABELS)
@@ -3368,7 +3371,8 @@ def generate_uds_docx(
             # ⚠ 파라미터 그리드는 전역이 **표시 문자열로 납작해지기 전에** 뽑는다.
             #   `_format_globals` 가 지나가면 `Name=… | Type=… | Range=…` 한 줄이 되어
             #   타입·범위·초기값이 구조로는 사라진다.
-            _grid_in, _grid_out = resolve_param_grid_entries(info, globals_info_map)
+            _grid_in, _grid_out = resolve_param_grid_entries(
+                info, globals_info_map, struct_member_types)
             info["globals_global"] = _format_globals(info.get("globals_global") or [])
             info["globals_static"] = _format_globals(info.get("globals_static") or [])
             info_for_rows = dict(info)
@@ -4039,7 +4043,8 @@ def generate_uds_docx(
             if _ai_desc and len(_ai_desc) > len(_existing_desc):
                 _inf2["description"] = _ai_desc
 
-        _g_in, _g_out = resolve_param_grid_entries(_inf2, globals_info_map)
+        _g_in, _g_out = resolve_param_grid_entries(
+            _inf2, globals_info_map, struct_member_types)
         _inf2["_param_grid_inputs"] = _g_in
         _inf2["_param_grid_outputs"] = _g_out
         _data_rows = _build_function_info_layout(_inf2, _cols)

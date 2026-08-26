@@ -946,7 +946,11 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
 #      v12 캐시에는 `__interruptvoid` 라는 존재하지 않는 타입이 그대로 박혀 있어
 #      (실측: 캐시 6개 파일), 무효화하지 않으면 소스가 안 바뀐 프로젝트에서
 #      **파서 fix 가 프로덕션에서 발화하지 않는다** — 위 v3/v4/v12 와 같은 실패.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v13"
+#  v14: `struct_member_types` 신설 — 멤버 경로 행이 베이스 심볼의 레코드를 이지
+#      않게 하는 유일한 출처. v13 캐시엔 이 키가 **아예 없어** 무효화하지 않으면
+#      멤버 행이 전부 N/A 로 나간다(키 부재 → 해석 불가 → 빈 레코드). 키를 새로
+#      넣고 버전을 안 올려 fix 가 프로덕션에서 죽었던 것이 바로 위 v12 다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v14"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

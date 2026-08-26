@@ -90,6 +90,7 @@ from report_gen.source_parser import (
     _scan_source_comment_patterns,
     _strip_c_comments,
     extract_struct_member_arrays,
+    extract_struct_member_types,
     is_const_type,
 )
 from report_gen.uds_text import (
@@ -341,6 +342,9 @@ def generate_uds_source_sections(
     # 구조체/공용체 멤버의 배열 차원(접기 전 원문). 정본 SUTS 는 멤버 배열도
     # 원소 단위로 적는다 — `source_parser.extract_struct_member_arrays` 주석 참조.
     struct_member_arrays_raw: Dict[str, Dict[str, str]] = {}
+    # 타입 -> {멤버경로: {type, array, bits, desc}}. 배열 차원만 담는 위 맵과
+    # **키는 같고 값이 다르다** — 소비처 계약(SUTS/SITS)이 달라 따로 낸다.
+    struct_member_types: Dict[str, Dict[str, Dict[str, str]]] = {}
     # ⚠ 함수 스코프에 둔다 — 접기는 `if parse_c_project is not None:` 안에서만
     #   일어나는데 payload 는 밖에서 쓴다. 안에 선언하면 파서 부재 시 NameError.
     struct_member_arrays: Dict[str, Dict[str, str]] = {}
@@ -492,6 +496,13 @@ def generate_uds_source_sections(
             _file_header_asil[str(p)] = hdr_asil
         for _sty, _smm in extract_struct_member_arrays(text).items():
             struct_member_arrays_raw.setdefault(_sty, {}).update(_smm)
+        # ⚠ **`raw`** 를 넘긴다. `text` 는 주석이 지워진 판이라 멤버의 자기 주석이
+        #    통째로 사라진다(그 함수가 내부에서 길이 보존 blank 를 다시 한다).
+        for _sty, _smt in extract_struct_member_types(raw).items():
+            _dst = struct_member_types.setdefault(_sty, {})
+            for _mname, _mrec in _smt.items():
+                # first-wins. dict 덮어쓰기로 행을 침묵 소실한 전례(SUTS R25 66행).
+                _dst.setdefault(_mname, _mrec)
         for g in _extract_c_global_candidates(text):
             gname = str(g.get("name") or "").strip()
             if not gname:
@@ -2203,6 +2214,9 @@ def generate_uds_source_sections(
         "globals_info_map": globals_info_map,
         # 타입 → {멤버경로: "[8]"} — 접힌 선언 차원만 담는다.
         "struct_member_arrays": struct_member_arrays,
+        # 타입 -> {멤버경로: {type, array, bits, desc}} — 멤버 행이 베이스의
+        # 레코드를 이지 않게 하는 유일한 출처(`_member_grid_info`).
+        "struct_member_types": struct_member_types,
         "common_macros": common_macros,
         "type_defs": type_defs,
         "param_defs": param_defs,

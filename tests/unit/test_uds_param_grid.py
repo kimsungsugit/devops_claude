@@ -189,12 +189,23 @@ class TestColumns:
         assert grid_in[0][4] == "0x00"
         assert grid_in[0][5] == "System Reset Flag"
 
-    def test_member_path_looks_up_the_base_symbol(self):
-        """`REG_PTT.Bits.PTT3` 의 타입은 `REG_PTT` 에 달려 있다."""
+    def test_member_path_does_not_borrow_the_base_type(self):
+        """⚠ 이 테스트는 **기대가 뒤집혔다** (R8, 2026-08-26).
+
+        예전엔 `REG_PTT.Bits.PTT3` 의 타입을 `PTTSTR`(레지스터 전체 공용체)로 적는 게
+        맞다고 봤다. 실측으로 틀린 것이 확인됐다 — 그 이름은 **비트 하나**를 가리키고
+        정본은 그 칸에 `U8` 을 적는다. 산출물의 멤버 경로 행 335개가 그렇게 베이스의
+        Type/Range/Reset/Desc 를 이고 있었고, 그 행들의 정본 대비 재현율은 4개 열
+        **전부 0.0%**(n=281)였다(같은 문서의 단일 심볼 행은 type 92.9%).
+
+        멤버 표(`struct_member_types`)를 주면 `U8` 이 되고, 못 주면 **N/A** 다 —
+        베이스의 값을 대신 적지 않는다. 그 계약은
+        `tests/unit/test_struct_member_types.py` 가 지킨다.
+        """
         grid_in, _ = resolve_param_grid_entries(
             _info(inputs=["[IN] REG_PTT.Bits.PTT3"]), _GIM)
         assert grid_in[0][1] == "REG_PTT.Bits.PTT3"
-        assert grid_in[0][2] == "PTTSTR"
+        assert grid_in[0][2] == "N/A", "베이스 타입을 물려받았다"
 
     def test_unknown_symbol_degrades_to_na_not_to_a_guess(self):
         """근거가 없으면 `N/A` 다 — 타입을 지어내지 않는다."""

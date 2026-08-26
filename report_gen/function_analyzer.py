@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from report_gen.c_return import returns_value
 from report_gen.provenance import is_weak_source
+
+# ⚠ 반대 방향(`source_parser` → 여기)은 함수 안에서만 부른다(`# lazy: circular dep`).
+#    이쪽은 모듈 수준으로 둬도 순환하지 않는다 — `source_parser` 는 import 시점에
+#    `function_analyzer` 를 건드리지 않는다.
+from report_gen.source_parser import resolve_struct_member
 from report_gen.utils import (
     _dedupe_multiline_text,
     _extract_call_names,
@@ -1641,9 +1646,68 @@ def _empty_param_grid_row() -> List[str]:
     return ["1"] + [_NA] * (PARAM_GRID_COLS - 1)
 
 
+_MEMBER_HEAD_RE = re.compile(r"(?:->|\.)")
+
+
+def _member_path_of(name: str) -> str:
+    """`REG_ADC0STS.Bits.READY` → `Bits.READY`. 첨자만 있는 이름은 빈 문자열.
+
+    ⚠ 첨자(`arr[3]`)와 멤버(`s.m`)는 **다른 축**이다. `arr[3]` 은 같은 배열의
+      원소라 타입·범위·설명이 베이스의 것과 같지만, `s.m` 은 **다른 대상**이다.
+      한 규칙으로 묶으면 멀쩡한 배열 행까지 비운다(실측: 우리 첨자 행 2개).
+    """
+    parts = _MEMBER_HEAD_RE.split(str(name or ""), 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _member_grid_info(name: str, base_ginfo: Dict[str, Any],
+                      member_types: Optional[Dict[str, Any]],
+                      type_ranges: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """멤버 경로 행이 쓸 레코드. 못 풀면 **빈 레코드**(= 전 칸 N/A).
+
+    ⚠ 베이스의 레코드를 그대로 물려주면 이름은 비트 하나를 가리키는데 값이
+      레지스터 전체를 말하게 된다. 실측(2026-08-26 산출물 직독): 멤버 경로 행
+      **335개**가 Type/Range/Reset/Desc **네 칸 전부** 베이스 값을 이고 있었고,
+      정본 대비 재현율이 그 행들만 4개 열 전부 **0.0%**(n=273)였다 — 같은 문서의
+      단일 심볼 행은 type 93.7% 다. 값 부재가 아니라 **다른 대상의 값**이었다.
+    """
+    path = _member_path_of(name)
+    if not path:
+        return base_ginfo
+    rec = resolve_struct_member(
+        member_types, str((base_ginfo or {}).get("type") or "").strip(), path)
+    if not isinstance(rec, dict) or not rec:
+        return {}
+    mtype = str(rec.get("type") or "").strip()
+    bits = str(rec.get("bits") or "").strip()
+    if bits.isdigit() and 0 < int(bits) <= 32:
+        # ⚠ 출처를 함께 적는다. 비트 폭은 **설계가 정한 범위가 아니라** 그 필드가
+        #   표현할 수 있는 폭이다 — 표시 없이 적으면 우리가 세운 적 없는 주장이
+        #   된다(이 저장소가 `(타입 폭)` 에서 이미 한 번 고친 출처 세탁).
+        value_range = f"0 ~ {(1 << int(bits)) - 1} (비트 폭)"
+    else:
+        value_range = str((type_ranges or {}).get(mtype) or "").strip()
+    desc = str(rec.get("desc") or "").strip()
+    if not desc and "." not in path and str(rec.get("parent") or "") == "union":
+        # ⚠ **전폭 별칭에 한해서만** 베이스 설명을 쓴다. union 의 최상위 멤버
+        #   (`REG_ADC0STS.Byte`)는 레지스터 전체와 같은 저장소라 그 설명이 맞고,
+        #   정본도 그 칸에 레지스터 설명을 적는다. 반면 `Bits.READY` 는 비트
+        #   하나라 **다른 대상**이다 — 거기까지 물려주면 원래 결함으로 되돌아간다.
+        desc = str((base_ginfo or {}).get("desc") or "").strip()
+    return {
+        "type": mtype,
+        "array": str(rec.get("array") or "").strip(),
+        "range": value_range,
+        # 멤버의 리셋 값은 MCU 데이터시트에 있고 소스엔 없다 — 비운다.
+        "init": "",
+        "desc": desc,
+    }
+
+
 def resolve_param_grid_entries(
     info: Dict[str, Any],
     globals_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    struct_member_types: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
 ) -> Tuple[List[List[str]], List[List[str]]]:
     """함수 하나의 (입력 그리드 행, 기대 그리드 행)을 만든다.
 
@@ -1657,6 +1721,7 @@ def resolve_param_grid_entries(
     인데 I/O 가 적힌 함수가 310/416(74.5%)이다.
     """
     gmap = globals_info_map if isinstance(globals_info_map, dict) else {}
+    smap = struct_member_types if isinstance(struct_member_types, dict) else {}
     type_ranges = _default_type_ranges()
     seen: Dict[str, set] = {"in": set(), "out": set()}
     grids: Dict[str, List[List[str]]] = {"in": [], "out": []}
@@ -1691,6 +1756,9 @@ def resolve_param_grid_entries(
             name, extra = split_param_display(base)
             lookup = re.split(r"(?:->|\.|\[)", name)[0].strip()
             ginfo = gmap.get(lookup) if isinstance(gmap.get(lookup), dict) else {}
+            # ⚠ 멤버 경로면 **베이스의 레코드를 물려주지 않는다** — 이름은 비트 하나를
+            #   가리키는데 값이 레지스터 전체를 말하게 된다(아래 `_member_grid_info`).
+            ginfo = _member_grid_info(name, ginfo or {}, smap, type_ranges)
             if to_in:
                 _emit("in", name, ginfo or {}, extra)
             if to_out:
@@ -1736,7 +1804,8 @@ def _build_function_info_layout(info: Dict[str, Any], cols: int) -> List[Tuple[s
     grid_in = info.get("_param_grid_inputs")
     grid_out = info.get("_param_grid_outputs")
     if not isinstance(grid_in, list) or not isinstance(grid_out, list):
-        grid_in, grid_out = resolve_param_grid_entries(info, info.get("_globals_info_map"))
+        grid_in, grid_out = resolve_param_grid_entries(
+            info, info.get("_globals_info_map"), info.get("_struct_member_types"))
 
     layout: List[Tuple[str, List[str]]] = []
     for key, value in pairs:

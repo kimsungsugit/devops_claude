@@ -474,9 +474,12 @@ def _extract_c_macro_defs(text: str) -> List[Tuple[str, str]]:
 #
 # ⚠ 본문은 **중괄호 균형**으로 자른다. 정규식 `\{(.*?)\}` 는 중첩 union 에서 안쪽
 #   `}` 에 멈춰 `ProgramStruct`(안에 `union {…} Add;`)의 멤버를 통째로 놓친다.
-_STRUCT_HEAD_RE = re.compile(r"typedef\s+(?:struct|union)\b[^{;]*\{")
+#: ⚠ 1번 그룹은 `struct` / `union` 이다 — union 멤버는 **베이스 전체와 같은 저장소**라
+#:   전폭 별칭(`REG_X.Byte`)에 레지스터 설명을 쓸 수 있는지 판단하는 근거가 된다.
+#:   기존 소비자(`extract_struct_member_arrays`)는 `.start()` 만 쓰므로 영향 없다.
+_STRUCT_HEAD_RE = re.compile(r"typedef\s+(struct|union)\b[^{;]*\{")
 _STRUCT_TAIL_RE = re.compile(r"\s*(\w+)\s*;")
-_INNER_HEAD_RE = re.compile(r"(?:struct|union)\s*\{")
+_INNER_HEAD_RE = re.compile(r"(struct|union)\s*\{")
 # 멤버 선언: `UINT8 LIN_data[LIN_MAX_DATA_BYTES];` · `S16 t[3][4];`
 # ⚠ **줄 시작에 기대지 않는다** — `typedef struct { int a[2]; int b[3]; } T;` 처럼
 #   한 줄에 여러 멤버가 오면 `^...$` 를 `re.M` 으로 걸어도 첫 개만 잡고 나머지를
@@ -559,6 +562,184 @@ def extract_struct_member_arrays(text: str) -> Dict[str, Dict[str, str]]:
             for mname, dims in _iter_struct_members(body[ii + 1:jj]):
                 members.setdefault(f"{iname.group(1)}.{mname}", dims)
     return out
+
+
+# 구조체/공용체 멤버의 **타입 · 비트폭 · 자기 주석**.
+#
+# ⚠ 배열 차원만 담는 위 `extract_struct_member_arrays` 와 **키는 같고 값이 다르다**.
+#   그 함수의 반환형(`{타입: {멤버: "[8]"}}`)은 SUTS/SITS 와 캐시 키
+#   `struct_member_arrays` 가 이미 쓰고 있어 넓히면 소비처 계약이 깨진다 → 따로 낸다.
+#
+# 왜 필요한가 (실측 2026-08-26 · 산출물 46.8MB 직독): 멤버 경로 행 **335개**가
+# Type/Range/Reset/Desc **네 칸 전부** 베이스 심볼의 값을 이고 있었다.
+# `REG_ADC0STS.Bits.READY` 는 1비트 필드인데 Type 칸이 `ADC0STSSTR`(레지스터 전체
+# 공용체)였다. 정본 대비 재현율이 멤버 행만 4개 열 전부 **0.0%**(n=273)이고 단일
+# 심볼 행은 type **93.7%** 다 — 값 부재가 아니라 **다른 대상의 값**이었다.
+_MEMBER_NEST_MAX = 6
+# 멤버 선언: `U8 Byte` · `U8 READY :1` · `UINT8 buf[8]` · `lin_tl_pdu_data *tl_pdu`
+# ⚠ 별표가 이름에 붙는 형태(`T   *p`)를 놓치면 그 타입의 멤버가 통째로 안 잡힌다
+#   (실측: `lin_transport_layer_queue::tl_pdu` 12칸).
+_MEMBER_DECL_RE = re.compile(
+    r"^\s*((?:(?:const|volatile|static)\s+)*[A-Za-z_]\w*)"
+    r"(?:\s*(\*+)\s*|\s+)(\w+)\s*(?:((?:\[[^\]]*\])+)|:\s*(\d+))?\s*$"
+)
+
+
+def _top_level_member_segments(masked: str):
+    """깊이 0 의 `;` 로만 끊어 `(시작, 세미콜론 위치)` 를 낸다.
+
+    ⚠ 위 `extract_struct_member_arrays` 는 중첩 블록을 **먼저 지우고** 훑는다. 그러면
+      오프셋이 밀려 원문에서 꼬리 주석을 되짚을 수 없다. 깊이를 세면 위치가 보존된다.
+    """
+    depth = 0
+    start = 0
+    for i, ch in enumerate(masked):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            yield start, i
+            start = i + 1
+
+
+def _member_trailing_comment(raw_body: str, semi_pos: int) -> str:
+    """선언이 끝난 **같은 줄**의 주석. 없으면 빈 문자열.
+
+    ⚠ `;` 로 끊은 조각의 **머리** 주석을 그대로 쓰면 앞 멤버의 설명이 다음 멤버로
+      간다. 전역에서 같은 밀림이 809개 중 **411개**였다(Phase 3, `_is_trailing_comment`).
+      설계서에 "이 필드는 X 다" 를 **틀리게** 적는 것이라 빈 칸보다 나쁘다.
+
+    ⚠ 멤버 **위**에 따로 붙은 leading 주석은 쓰지 않는다 — MCU 헤더에선 그 자리가
+      절 제목(`/*** PARTID0 - Part ID Register 0; 0x00000000 ***/`)이라 필드 설명이
+      아니다. 못 가져오는 건 손실이지만 틀리게 가져오는 것보다 낫다.
+    """
+    line = str(raw_body)[semi_pos + 1:].split("\n", 1)[0]
+    m = re.search(r"/\*(.*?)\*/", line)
+    if m:
+        return _clean_comment_text(m.group(1))
+    m = re.search(r"//(.*)$", line)
+    return _clean_comment_text(m.group(1)) if m else ""
+
+
+def _clean_comment_text(text: str) -> str:
+    """Doxygen 표식(`/**<` · `/*!` · `/***`)의 잔재를 걷어낸다.
+
+    안 하면 `/**< PDU data */` 가 `*< PDU data` 로 문서에 나간다 — 내용은 맞지만
+    설계서 칸에 파서 부스러기를 실어 보내는 셈이다.
+    """
+    return re.sub(r"[*\s]+$", "", re.sub(r"^[*<!\s]+", "", str(text or "")))
+
+
+def _walk_member_types(raw: str, masked: str, kind: str = "struct",
+                       depth: int = 0) -> Dict[str, Dict[str, str]]:
+    """이름 붙은 중첩 블록을 **재귀로** 편다.
+
+    실물에 3단이 있다 — `REG_PARTID.Overlap_STR.PARTID0STR.Bits.ID0`. 1단만 펴면
+    그런 행이 통째로 안 풀린다(실측 55칸이 그 형태였다).
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if depth > _MEMBER_NEST_MAX:
+        return out
+    for seg_start, semi in _top_level_member_segments(masked):
+        m = _MEMBER_DECL_RE.match(masked[seg_start:semi])
+        if not m:
+            continue
+        star = f" {m.group(2)}" if m.group(2) else ""
+        out.setdefault(m.group(3), {
+            "type": (m.group(1).strip() + star).strip(),
+            "array": m.group(4) or "",
+            "bits": m.group(5) or "",
+            "desc": _member_trailing_comment(raw, semi),
+            # union 멤버는 **베이스 전체와 같은 저장소**다. 그 사실이 없으면
+            # `REG_X.Byte` 같은 전폭 별칭 행에서 레지스터 설명을 쓸 수 있는지
+            # 판단할 수 없다 — 정본도 그 칸엔 레지스터 설명을 적는다
+            # (`REG_ADC0STS.Byte` → `ADC0STS / ADC Status Register`).
+            "parent": kind,
+        })
+    pos = 0
+    while True:
+        inner = _INNER_HEAD_RE.search(masked, pos)
+        if not inner:
+            break
+        i = masked.index("{", inner.start())
+        j = _balanced_block(masked, i)
+        if j < 0:
+            break
+        pos = j + 1
+        tail = _STRUCT_TAIL_RE.match(masked, j + 1)
+        if not tail:
+            continue
+        for mname, rec in _walk_member_types(
+                raw[i + 1:j], masked[i + 1:j],
+                inner.group(1), depth + 1).items():
+            out.setdefault(f"{tail.group(1)}.{mname}", rec)
+    return out
+
+
+def extract_struct_member_types(text: str) -> Dict[str, Dict[str, Dict[str, str]]]:
+    """`타입명 -> {멤버경로: {type, array, bits, desc}}`.
+
+    주석은 **가린다(blank)** — 지우면 길이가 줄어 원문 오프셋으로 꼬리 주석을 되짚을
+    수 없다(`blank_c_comments` 가 그러라고 있는 단일 출처다).
+    """
+    out: Dict[str, Dict[str, Dict[str, str]]] = {}
+    if not text:
+        return out
+    masked = _blank_c_comments(text)
+    for head in _STRUCT_HEAD_RE.finditer(masked):
+        i = masked.index("{", head.start())
+        j = _balanced_block(masked, i)
+        if j < 0:
+            continue
+        tail = _STRUCT_TAIL_RE.match(masked, j + 1)
+        if not tail:
+            continue
+        members = out.setdefault(tail.group(1), {})
+        for mname, rec in _walk_member_types(
+                text[i + 1:j], masked[i + 1:j], head.group(1)).items():
+            members.setdefault(mname, rec)
+    return out
+
+
+def resolve_struct_member(member_types: Optional[Dict[str, Dict[str, Dict[str, str]]]],
+                          base_type: str,
+                          path: str) -> Optional[Dict[str, str]]:
+    """`ADC0STSSTR` + `Bits.READY` -> 그 멤버의 레코드. 못 찾으면 `None`.
+
+    ⚠ **못 찾았을 때 베이스의 레코드를 대신 주지 않는다.** 이름은 비트 하나를
+      가리키는데 값이 레지스터 전체를 말하면, 빈 칸이면 하지 않았을 주장을
+      **틀리게** 하는 것이다.
+
+    경로는 한 마디씩 따라간다 — 중간 마디가 또 다른 typedef 라도 이어진다.
+    """
+    if not isinstance(member_types, dict):
+        return None
+    base = str(base_type or "").strip()
+    trail = str(path or "").strip()
+    if not base or not trail:
+        return None
+    cur, rest = base, trail
+    for _ in range(_MEMBER_NEST_MAX + 1):
+        table = member_types.get(cur) or {}
+        # ① 남은 경로 **전체**를 먼저 본다. 익명 중첩 블록은 `Bits.READY` 처럼
+        #    점 있는 한 개의 키로 들어 있어, 마디로 쪼개면 `Bits` 에서 끊긴다.
+        whole = table.get(rest)
+        if isinstance(whole, dict):
+            return whole
+        # ② 안 되면 한 마디만 소비하고 그 타입으로 내려간다(중간 마디가 typedef).
+        seg, _dot, tail = rest.partition(".")
+        seg = re.sub(r"\[.*$", "", seg).strip()
+        hit = table.get(seg) if seg else None
+        if not isinstance(hit, dict):
+            return None
+        if not tail:
+            return hit
+        words = re.sub(r"\s*\*+$", "", str(hit.get("type") or "")).split()
+        cur, rest = (words[-1] if words else ""), tail
+        if not cur:
+            return None
+    return None
 
 
 def _extract_c_global_candidates(text: str) -> List[Dict[str, str]]:
