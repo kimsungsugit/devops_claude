@@ -40,21 +40,18 @@ _GATES = {
 # 면제 — **사유 필수**. 비워 두는 게 정상이다.
 #
 # ⚠ 면제는 "괜찮다" 가 아니라 **기록된 부채**다. 지우려면 사유가 해소돼야 한다.
-_EXEMPT: dict[str, str] = {
-    "test_coverage_boost.py": (
-        "2026-08-21 실측: 87 passed + **20 errors / 303초**. errors 는 전부 "
-        "`mock_uds_payload`·`mock_function_details` fixture 부재(저장소 어디에도 정의가 "
-        "없다 — 파일 헤더 `# /app/tests/...` 가 말해주듯 옛 Docker 구성 잔재)다. "
-        "fixture 를 **지어내면** 잘못된 입력으로 통과하는 테스트가 되므로 손대지 않았다. "
-        "303초도 pre-commit 예산(900초, 현 사용 372초)에 넣기엔 부담이라 함께 보류한다. "
-        "⚠ 해소 순서: 먼저 두 fixture 의 **정본 shape 를 찾거나 결정**하고, 그 다음 시간."
-    ),
-}
-# ⚠ 처음엔 여기에 세 파일이 다 있었다. "루트 3파일 합계 196건 / 1 failed / 20 errors /
-#   561초" 를 **한 묶음**으로 보고 같은 사유를 붙였기 때문이다. 파일별로 다시 재니
-#   전혀 달랐다 — `test_quality_improvements.py` 는 25초에 전부 통과(게이트 편입),
-#   `test_json_parsing.py` 는 애초에 **테스트가 0개**였다(스크립트형 fake-green — 진짜
-#   테스트 7개로 승격). **합계를 인용하기 전에 분해할 것.**
+_EXEMPT: dict[str, str] = {}
+# ⚠ **비어 있는 게 정상이다.** 2026-08-21 한때 여기에 루트 3파일이 다 들어 있었는데,
+#   "합계 196건 / 1 failed / 20 errors / 561초" 를 **한 묶음**으로 보고 같은 사유를
+#   붙였기 때문이다. 파일별로 다시 재니 전혀 달랐고, 셋 다 해소돼 게이트에 들어갔다:
+#
+#     test_json_parsing.py            테스트 **0개**(스크립트형 fake-green) -> 진짜 7개로 승격
+#     test_quality_improvements.py    25초 전부 통과                        -> 그대로 편입
+#     test_coverage_boost.py          20 errors / 303초 -> **107 passed / 14초**
+#                                     (fixture 2개 복원 + 저장소 고정 입력 차단)
+#
+#   **합계를 인용하기 전에 분해할 것** — 한 묶음으로 본 탓에 멀쩡한 두 파일까지
+#   17일 더 사각지대에 둘 뻔했다.
 
 
 def _test_dirs() -> list[str]:

@@ -91,6 +91,37 @@ def mock_api_client():
 
 
 @pytest.fixture()
+def no_reference_suds(monkeypatch, tmp_path):
+    """생성기가 **저장소 고정 입력**을 읽는 것을 막는다 — 느리고, 값이 섞인다.
+
+    막는 것 둘:
+
+      · `config.UDS_REF_SUDS_PATH` — 기본값이 저장소 `docs/` 의 HDPDM01 SUDS(**40.7MB**).
+        읽으면 **다른 프로젝트 문서의 값**이 섞여 계측 단정이 흔들린다.
+      · `config.resolve_uds_template_path()` — `template_path=None` 은 "템플릿 없음" 이
+        아니라 저장소 기본 템플릿(**430 heading**)을 끌어온다.
+
+    ⚠ 실측(2026-08-21, `tests/test_coverage_boost.py`): 이 둘을 안 막으면
+      `generate_uds_docx(None, {}, out)` 가 **429초**다(빈 payload인데도). 프로파일상
+      `_build_function_info_table` 429회 → `_merge_function_info_table` 858회 →
+      python-docx `table.cell()` 81,510회 → `get_child_element` **4,390만 회**.
+      `table.cell()` 이 접근마다 셀 목록을 재구성해 O(n^2) 가 되는 축이다.
+
+    ⚠ **autouse 가 아니다.** 폴백 경로 자체를 검증하는 테스트는 이걸 쓰면 안 된다.
+      모듈 전체에 걸려면 `pytestmark = pytest.mark.usefixtures("no_reference_suds")`.
+
+    ⚠ 이 저장소에 같은 내용이 이미 3벌 있다(`tests/unit/test_uds_docx_gen_stats.py` 의
+      autouse `_no_reference_suds`, `test_asil_no_fabrication.py`, `test_provenance_
+      vocabulary.py`). 새 사용처는 **여기를 쓸 것** — 복제를 늘리지 않는다.
+    """
+    import config
+
+    monkeypatch.setattr(config, "UDS_REF_SUDS_PATH",
+                        str(tmp_path / "no_such_reference.docx"), raising=False)
+    monkeypatch.setattr(config, "resolve_uds_template_path", lambda: "", raising=False)
+
+
+@pytest.fixture()
 def fixtures_dir() -> Path:
     """`tests/fixtures/` — sample.c 등 정적 입력.
 

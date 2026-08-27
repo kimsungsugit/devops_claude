@@ -247,3 +247,32 @@ class TestTrustedRootsHaveASingleSource:
         monkeypatch.setattr(config, "JENKINS_SERVER_ROOTS", ["C:/Windows"], raising=False)
         roots = [str(p) for p in trusted_roots()]
         assert not any("Windows" in r for r in roots), roots
+
+    def test_roots_survive_a_stubbed_config_module(self, monkeypatch):
+        """⚠ `sys.modules["config"]` 가 갈려도 신뢰 루트는 그대로여야 한다.
+
+        실사고(2026-08-21): `trusted_roots()` 가 `import config` 후 `config.__file__` 의
+        부모를 저장소 루트로 삼았다. 그런데 이 저장소의 테스트 3개가 실제로
+        `sys.modules["config"] = <stub>` 을 한다(`tests/unit/test_workflow_ai.py:98` 등).
+        같은 xdist 워커에 그게 먼저 걸리면 루트가 **stub 경로**로 바뀌어
+        `/api/local/list-dir` 이 403 이 됐다 — pre-commit 이 4,949번째에서 잡았고
+        단독 실행으로는 재현되지 않는 **비결정 실패**였다.
+
+        테스트 안정성 이전에 **보안 경계가 가변 모듈 상태에 의존**하는 게 결함이다.
+        지금은 `paths.py` 자신의 `__file__` 에서 유도한다 — 갈아끼울 수 없다.
+        """
+        import sys
+        import types
+
+        before = [str(p) for p in trusted_roots()]
+
+        stub = types.ModuleType("config")
+        stub.__file__ = r"C:\somewhere\else\config.py"
+        monkeypatch.setitem(sys.modules, "config", stub)
+
+        after = [str(p) for p in trusted_roots()]
+        assert after == before, (
+            "config 모듈을 갈아끼웠더니 신뢰 루트가 바뀌었다 — 경로 봉인이 "
+            f"임의 모듈 상태에 좌우된다.\n  before={before}\n  after ={after}"
+        )
+        assert not any("somewhere" in r for r in after), after

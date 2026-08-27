@@ -74,12 +74,24 @@ def is_under_any(path: Path, roots: Iterable[Path]) -> bool:
 
 
 def _repo_root() -> Path:
-    try:
-        import config
-        return Path(config.__file__).resolve().parent
-    except (ImportError, AttributeError, TypeError, OSError):
-        # config 를 못 읽는 건 스크립트 단독 실행 정도다. CWD 로 떨어지되 **넓히지는** 않는다.
-        return Path.cwd().resolve()
+    """저장소 루트 — **이 파일의 위치**에서 유도한다(`backend/services/paths.py`).
+
+    ⚠ 예전엔 `import config` 후 `config.__file__` 의 부모를 썼다. **틀렸다.**
+      `config` 는 모듈 참조라 언제든 갈아끼울 수 있고, 이 저장소의 테스트 3개가 실제로
+      `sys.modules["config"] = <stub>` 을 한다(`tests/unit/test_workflow_ai.py:98` 등).
+      그러면 신뢰 루트가 통째로 **stub 의 경로**로 바뀐다 — 실측:
+
+          정상    -> D:/Project/devops/Release_claude
+          stub 후 -> C:/somewhere/else
+
+      결과는 `-n auto` 에서 같은 워커에 그 테스트가 먼저 걸린 경우 `/api/local/*` 가
+      403 이 되는 **비결정 실패**였고(2026-08-21 pre-commit 이 잡았다), 더 나쁜 건
+      **보안 경계가 가변 모듈 상태에 의존**한다는 점이다.
+
+      `__file__` 은 갈아끼울 수 없고 import 도 필요 없다. `parents[2]` =
+      `paths.py` -> `services` -> `backend` -> **저장소 루트**.
+    """
+    return Path(__file__).resolve().parents[2]
 
 
 def trusted_roots() -> List[Path]:
