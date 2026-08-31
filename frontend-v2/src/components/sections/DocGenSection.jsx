@@ -156,9 +156,10 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       // 같은 종류의 **납품 정본**. 무엇을 템플릿으로 쓸지는 **백엔드가 정한다**
       // (`docgen_template_source`) — 여기서 고르면 판정이 두 벌이 된다.
       // ⚠ 정본이 주는 것은 **문서 종류마다 다르다**(실측 2026-08-31):
-      //   시트 기반(STS/SUTS/SITS, xlsm) = 표지·이력·Introduction 이 납품본과 같아진다.
-      //   UDS(docx) = 표지가 아니라 **함수 heading 집합**이다 — 표준 템플릿으로는
-      //   분석 함수 57개 중 0개가 문서에 실렸고 정본으로는 57개 전부였다.
+      //   시트 기반(STS/SUTS/SITS, xlsm) = 시트를 통째로 복사해 표지·이력이 따라온다.
+      //   UDS(docx) = 본문을 재작성하지만 표지·이력도 원본을 되살린다. 다만 반영률이
+      //   갈리는 축은 **함수 heading 집합**이다 — 표준 템플릿으로는 분석 함수 57개 중
+      //   0개가 문서에 실렸고 정본으로는 57개 전부였다.
       //   문구는 백엔드 `docgen_template_source` 가 문서 종류별로 낸다.
       const referenceDoc = docPaths[docType] || linkedDocs[docType] || '';
       if (referenceDoc) formData.append('reference_doc_path', referenceDoc);

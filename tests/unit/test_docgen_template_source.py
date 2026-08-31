@@ -125,14 +125,26 @@ def test_routers_pass_reference_doc_to_the_single_rule():
 
 class TestTemplateReasonMatchesTheBuilder:
 
-    def test_uds_does_not_promise_what_the_docx_path_loses(self):
+    def test_uds_names_the_axis_that_actually_differs(self):
+        """docx 에서 정본이 주는 **가장 큰 것**은 표지가 아니라 함수 heading 집합이다.
+
+        표지·이력은 R9 로 시트 빌더처럼 따라오게 됐지만, 반영률이 0% ↔ 100% 로
+        갈리는 축은 heading 집합뿐이다. 그걸 안 말하면 "왜 문서에 함수가 없나" 의
+        답이 사라진다.
+        """
         from backend.services.docgen_template_source import choose_template_source
 
         _, why = choose_template_source("uds", registered_template="std.docx",
                                         reference_doc="ref.docx", prefer_reference=True)
-        assert "납품본과 같아집니다" not in why, (
-            f"docx 는 표지·이력 데이터를 옮기지 않는데 그렇다고 말한다: {why}")
-        assert "따라오지 않습니다" in why, f"잃는 것을 말하지 않는다: {why}"
+        assert "이 프로젝트 함수가 문서에 실립니다" in why, f"함수 축이 빠졌다: {why}"
+
+    def test_uds_warns_that_the_cover_and_history_carry_over(self):
+        """따라오는 것은 **좋기만 한 것이 아니다** — 정본의 버전 표기와 이력이 온다."""
+        from backend.services.docgen_template_source import choose_template_source
+
+        _, why = choose_template_source("uds", registered_template="std.docx",
+                                        reference_doc="ref.docx", prefer_reference=True)
+        assert "정본 그대로" in why, f"정본 표기가 딸려오는 사실을 말하지 않는다: {why}"
 
     def test_sheet_builders_keep_the_promise_they_can_keep(self):
         """시트 빌더까지 같이 약하게 만들면 **맞는 말을 지우는** 셈이다."""
@@ -142,7 +154,8 @@ class TestTemplateReasonMatchesTheBuilder:
             _, why = choose_template_source(kind, registered_template="std.xlsm",
                                             reference_doc="ref.xlsm", prefer_reference=True)
             assert "납품본과 같아집니다" in why, f"{kind}: {why}"
-            assert "따라오지 않습니다" not in why, f"{kind}: {why}"
+            # 시트 빌더에는 heading 집합 축이 없다 — 붙이면 없는 통제를 말하는 셈이다.
+            assert "함수 heading 집합" not in why, f"{kind}: {why}"
 
     def test_choosing_the_standard_template_warns_uds_may_come_out_empty(self):
         """표준 템플릿을 고르면 UDS 는 **함수가 하나도 안 실릴 수 있다**(실측 0/57).
@@ -177,4 +190,4 @@ class TestTemplateReasonMatchesTheBuilder:
                                              reference_doc="ref.docx", prefer_reference=False)
         assert picked == "ref.docx"
         assert "표준 템플릿 미등록" in why, f"다른 가지를 탔다: {why}"
-        assert "따라오지 않습니다" in why, f"폴백 가지만 옛 문구다: {why}"
+        assert "정본 그대로" in why, f"폴백 가지만 옛 문구다: {why}"

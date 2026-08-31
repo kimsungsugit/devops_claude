@@ -1496,7 +1496,124 @@ def _template_has_placeholders(doc) -> bool:
     return False
 
 
+def _para_text(p_el) -> str:
+    """문단 텍스트 — python-docx `Paragraph.text` **＋ 콘텐츠 컨트롤(`w:sdt`) 안의 런**.
+
+    `p.text` 는 `w:p` **직속** `w:r` 만 이어붙인다. 그래서 값이 `w:sdt` 로 감싸인 자리를
+    통째로 놓쳤고, 재작성 경로가 그 문단을 다시 쓰면서 **문장 한복판이 비었다**
+    (실측: 템플릿 `이 문서는 [Project Name] 프로젝트를 위한…` → 산출물
+    `이 문서는  프로젝트를 위한…`). 구멍은 오타로 읽혀 검토에서 넘어간다.
+
+    ⚠ 텍스트박스(`w:txbxContent`)와 하이퍼링크(`w:hyperlink`)는 **제외한다**:
+      - 텍스트박스에는 표준 템플릿의 "■ 작성 내용" **작성 지침 상자**가 들어 있다.
+        본문으로 끌어오면 납품 문서에 지침이 실린다.
+      - 하이퍼링크에는 템플릿의 **옛 목차 항목**이 산다. 포함하면 생성기가 새로 넣는
+        목차와 별개로 평문 목차가 한 벌 더 복제된다.
+      둘 다 `p.text` 도 읽지 않으므로 이 제외는 **현행 동작 그대로**다.
+    """
+    try:
+        nodes = p_el.xpath(
+            ".//w:t[not(ancestor::w:txbxContent) and not(ancestor::w:hyperlink)]")
+    except Exception:   # noqa: BLE001 - XPath 미지원 요소는 텍스트 없음으로
+        return ""
+    return "".join(n.text or "" for n in nodes)
+
+
+def _append_body_block(doc, el) -> None:
+    """원본 요소를 본문 끝(단, `w:sectPr` **앞**)에 되붙인다.
+
+    ⚠ `body.append(el)` 을 쓰면 `w:sectPr` **뒤**로 간다. python-docx 의
+      `add_paragraph`/`add_table` 은 스키마 순서를 지켜 `sectPr` 앞에 넣으므로,
+      두 방식을 섞으면 되살린 블록만 문서 맨 끝으로 밀린다 — 실측으로 표지와
+      이력·참조 표가 그렇게 문서 끝(구역 속성 뒤)으로 갔다.
+    """
+    from docx.oxml.ns import qn  # type: ignore
+    body = doc._body._element  # type: ignore[attr-defined]
+    sect = body.find(qn("w:sectPr"))
+    if sect is not None:
+        sect.addprevious(el)
+    else:
+        body.append(el)
+
+
+def _fill_bracket_project_name(doc, project: str) -> int:
+    """템플릿의 `[Project Name]` 표식을 실제 프로젝트명으로 채운다.
+
+    표준 템플릿은 표지·Introduction 의 프로젝트명 자리에 이 표식을 두고, 콘텐츠
+    컨트롤(`w:sdt`)로 `dc:subject` 에 바인딩해 둔다(실측 8곳). 표식을 **지우기만**
+    하면 `이 문서는  프로젝트를 위한…` 처럼 문장에 구멍이 남고, 구멍은 오타로 읽혀
+    검토에서 그냥 넘어간다.
+
+    ⚠ 값이 없거나 폴백 기본값(`UDS Spec`)이면 **표식을 그대로 둔다** — 없는 이름을
+      지어내지 않는다(`[Project Name]` 이 그대로 보이면 채워야 할 자리임이 드러난다).
+    ⚠ 토큰 치환 경로와 재작성 경로 **둘 다** 이 함수를 지난다. 재작성 경로만 고치면
+      토큰 템플릿을 쓰는 프로젝트에서 같은 구멍이 남는다.
+
+    Returns:
+        치환한 `w:t` 노드 수.
+    """
+    from docx.oxml.ns import qn  # type: ignore
+    name = str(project or "").strip()
+    if not name or name.lower() == "uds spec":
+        return 0
+    try:
+        body = doc._body._element  # type: ignore[attr-defined]
+    except Exception:   # noqa: BLE001 - 채우기 실패가 생성을 막지는 않는다
+        return 0
+    n = 0
+    for t in body.iter(qn("w:t")):
+        if t.text and "[Project Name]" in t.text:
+            t.text = t.text.replace("[Project Name]", name)
+            n += 1
+    if n:
+        try:
+            # 표지 sdt 가 `dc:subject` 에 바인딩돼 있어, 문서 속성도 맞춰 두면
+            # Word 가 필드를 갱신해도 같은 값이 나온다.
+            doc.core_properties.subject = name
+        except Exception:   # noqa: BLE001 - 보너스라 실패해도 무방
+            pass
+    return n
+
+
+def _is_toc_sdt(sdt_el) -> bool:
+    """목차 빌딩블록인가 — `docPartGallery` 가 Word 의 표준 표식이다.
+
+    표지는 `"Cover Pages"`, 목차는 `"Table of Contents"`. 목차 sdt 를 보존하면
+    생성기가 새로 넣는 목차와 **두 벌**이 된다.
+    """
+    from docx.oxml.ns import qn  # type: ignore
+    try:
+        vals = [str(g.get(qn("w:val")) or "").strip().lower()
+                for g in sdt_el.iter(qn("w:docPartGallery"))]
+    except Exception:   # noqa: BLE001 - 표식을 못 읽으면 목차로 단정하지 않는다
+        return False
+    return any("table of contents" in v for v in vals)
+
+
 def _iter_template_blocks(doc):
+    """(하위호환) body 직속 `w:p`/`w:tbl` **래퍼 객체**만 문서 순서대로.
+
+    ⚠ 이 이름의 계약은 **객체 리스트**다. `report_gen/validation.py` 두 곳이
+      duck typing(`hasattr(block, "text")` / `hasattr(block, "rows")`)으로 소비하므로
+      `(kind, obj)` 튜플로 바꾸면 **전부 조용히 건너뛴다** — 실제로 그렇게 바꿨다가
+      SwCom 정본 diff 가 통째로 빈 리포트를 냈다(가드 9건이 잡았다).
+      새 축(표지 등 raw 블록)은 아래 `_iter_body_blocks` 로 낸다.
+    """
+    return [obj for kind, obj in _iter_body_blocks(doc) if kind != "raw"]
+
+
+def _iter_body_blocks(doc):
+    """body 직속 자식을 **문서 순서대로** `(kind, obj)` 로 낸다.
+
+    kind: `"para"`(Paragraph) · `"table"`(Table) · `"raw"`(그 밖의 블록 요소).
+
+    ⚠ 오래 `w:p`/`w:tbl` 만 냈다. Word 는 **표지를 body 직속 `w:sdt`** 로 넣기 때문에
+      (`docPartGallery="Cover Pages"`) 그 표지가 여기서 통째로 사라졌고, 재작성 경로는
+      "정본을 쓰면 표지가 납품본과 같아진다" 고 공시하면서 실제로는 표지를 **잃었다**.
+      실측: 표준 템플릿·정본 **둘 다 body[0] 이 표지 sdt**(정본은 `KJPDS02 / v2.08`).
+      `w:sectPr`·북마크처럼 보이는 내용이 없는 자식은 계속 무시한다.
+    """
+    from docx.oxml.ns import qn  # type: ignore
     try:
         from docx.oxml.table import CT_Tbl  # type: ignore
         from docx.oxml.text.paragraph import CT_P  # type: ignore
@@ -1508,9 +1625,11 @@ def _iter_template_blocks(doc):
     blocks = []
     for child in parent.iterchildren():
         if isinstance(child, CT_P):
-            blocks.append(Paragraph(child, doc))
+            blocks.append(("para", Paragraph(child, doc)))
         elif isinstance(child, CT_Tbl):
-            blocks.append(Table(child, doc))
+            blocks.append(("table", Table(child, doc)))
+        elif child.tag == qn("w:sdt") and not _is_toc_sdt(child):
+            blocks.append(("raw", child))
     return blocks
 
 
@@ -1535,9 +1654,15 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
         "value range",
         "reset",
     }
-    for item in _iter_template_blocks(doc):
-        if hasattr(item, "style") and hasattr(item, "text"):
-            text = (item.text or "").strip()
+    for kind_in, item in _iter_body_blocks(doc):
+        if kind_in == "raw":
+            # 표지 같은 구조 블록은 **원본 요소 그대로** 들고 간다. 텍스트로 풀면
+            # 그림·서식·바인딩이 다 날아간다. 참조만 잡으므로 복사 비용은 없다
+            # (`_clear_docx_body` 가 detach 해도 이 참조가 요소를 살려 둔다).
+            blocks.append(("raw", item))
+            continue
+        if kind_in == "para":
+            text = _para_text(item._element).strip()
             if not text or not item.style:
                 continue
             name = str(getattr(item.style, "name", "") or "")
@@ -1555,7 +1680,7 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
                 stack = stack[: level - 1]
             stack.append(text)
             blocks.append(("heading", (level, text)))
-        elif hasattr(item, "rows") and hasattr(item, "columns"):
+        elif kind_in == "table":
             try:
                 rows = len(item.rows)
                 cols = len(item.columns)
@@ -1570,7 +1695,11 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
                         return any(k in row_text for k in header_keywords)
                     if _is_header(first) and not _is_header(second):
                         header_rows = header_rows[:1]
-                blocks.append(("table", (rows, cols, style, header_rows, list(stack))))
+                # 6번째로 **원본 표 요소**를 들고 간다. 생성기가 채우지 않는 표
+                # (이력·참조 등)는 모양만 복제하면 데이터 행이 빈칸으로 나가는데,
+                # 빈칸은 "이력 없음" 으로 읽힌다(실측: 정본 이력 29행이 헤더만 남음).
+                blocks.append(("table",
+                               (rows, cols, style, header_rows, list(stack), item._element)))
             except Exception:
                 continue
     return blocks
@@ -1587,7 +1716,7 @@ def _extract_template_section_block_map(doc) -> Dict[str, List[Dict[str, str]]]:
     current_title = ""
     current_entries: List[Dict[str, str]] = []
     for p in doc.paragraphs:
-        text = (p.text or "").strip()
+        text = _para_text(p._element).strip()
         style_name = str(getattr(p.style, "name", "") or "")
         level = 0
         if text and style_name.startswith("Heading"):
@@ -1650,7 +1779,7 @@ def _extract_template_section_map(doc) -> Dict[str, str]:
     current_title = ""
     current_lines: List[str] = []
     for p in doc.paragraphs:
-        text = (p.text or "").strip()
+        text = _para_text(p._element).strip()
         if not text:
             continue
         style = str(getattr(p.style, "name", "") or "")
@@ -2781,6 +2910,11 @@ def generate_uds_docx(
         #    single-line tokens (and as a fallback for any stray
         #    {{REFERENCE_TABLE}} paragraph we didn't catch above).
         _replace_docx_text(doc, replacements)
+        # 3) 대괄호 표식(`[Project Name]`)은 `{{토큰}}` 이 아니라 위 치환이 못 잡는다.
+        #    표지·Introduction 이 이 자리를 쓴다 — 두 경로 모두에 적용해야 한다.
+        _n_proj = _fill_bracket_project_name(doc, str(project))
+        if _n_proj:
+            _logger.info("템플릿 `[Project Name]` %d곳을 %r 로 채웠다", _n_proj, str(project))
         if _template_has_placeholders(doc):
             # 토큰 치환 전용 템플릿 — SwUFn 표를 순회하지 않으므로 함수 반영률 개념이 없다.
             # 통계를 **안 남기면** 소비처가 "통계 부재 = 문제 없음" 으로 읽으므로 mode 를
@@ -2801,6 +2935,19 @@ def generate_uds_docx(
         template_section_map = _extract_template_section_map(doc)
         template_section_block_map = _extract_template_section_block_map(doc)
         _clear_docx_body(doc)
+        # 표지 같은 **선행 구조 블록**은 자동 목차보다 먼저 나가야 한다. 루프에만
+        # 맡기면 아래 "목차 마커가 없으면 목차를 넣는다" 가 먼저 실행돼 목차 다음에
+        # 표지가 오는 문서가 된다.
+        _restored_blocks = 0      # 표지 등 원본 그대로 되살린 구조 블록
+        _preserved_tables = 0     # 생성기가 채우지 않아 원본을 유지한 표
+        _lead_raw = 0
+        while _lead_raw < len(blocks) and blocks[_lead_raw][0] == "raw":
+            try:
+                _append_body_block(doc, blocks[_lead_raw][1])
+                _restored_blocks += 1
+            except Exception:   # noqa: BLE001 - 표지 복원 실패가 생성을 막지는 않는다
+                _logger.warning("표지 블록 복원 실패 — 표지 없이 계속한다", exc_info=True)
+            _lead_raw += 1
         has_contents_marker = False
         skip_table_idx = -1
         for kind, block in blocks:
@@ -2823,7 +2970,7 @@ def generate_uds_docx(
         for kind_t, payload_t in blocks:
             if kind_t != "table":
                 continue
-            rows_t, cols_t, style_t, header_rows_t, _ctx_titles_t = payload_t
+            rows_t, cols_t, style_t, header_rows_t, _ctx_titles_t, _el_t = payload_t
             if header_rows_t:
                 header_texts = [str(c or "").strip() for row in header_rows_t for c in row]
                 if any("Function Information" in c for c in header_texts):
@@ -3015,6 +3162,9 @@ def generate_uds_docx(
         def _next_block_kind(blocks_list, start_idx: int) -> str:
             for j in range(start_idx + 1, len(blocks_list)):
                 kind_j, payload_j = blocks_list[j]
+                if kind_j == "raw":
+                    # 표지 같은 구조 블록은 "다음에 오는 것" 판정 대상이 아니다.
+                    continue
                 if kind_j == "para":
                     text_j = str(payload_j.get("text") or "").strip()
                     if not text_j:
@@ -3578,7 +3728,8 @@ def generate_uds_docx(
                                 break
                             continue
                         if kind_la == "table":
-                            rows_la, cols_la, style_la, header_rows_la, _ctx_titles_la = payload_la
+                            (rows_la, cols_la, style_la, header_rows_la,
+                             _ctx_titles_la, _el_la) = payload_la
                             if header_rows_la:
                                 header_texts = [str(c or "").strip() for row in header_rows_la for c in row]
                                 if any("Function Information" in c for c in header_texts):
@@ -3587,7 +3738,8 @@ def generate_uds_docx(
                     # (`swufn_table_spec` 조회는 제거 — 위 2829 주석 참조. 이 전방탐색이
                     #  같은 표를 찾아내며 실측 429/429 동일했다.)
                     if target_idx is not None:
-                        rows, cols, style, _header_rows, _ctx_titles = blocks[target_idx][1]
+                        (rows, cols, style, _header_rows,
+                         _ctx_titles, _el_ti) = blocks[target_idx][1]
                     elif function_info_template:
                         rows, cols, style, _header_rows = function_info_template
                     else:
@@ -3601,7 +3753,7 @@ def generate_uds_docx(
                 if skip_table_idx == idx:
                     skip_table_idx = -1
                     continue
-                rows, cols, style, header_rows, ctx_titles = payload_block
+                rows, cols, style, header_rows, ctx_titles, tbl_el = payload_block
                 ctx_text = " > ".join(ctx_titles).lower() if ctx_titles else ""
                 current_swcom = _current_swcom_id()
                 current_swcom_label = _current_swcom_label()
@@ -3697,7 +3849,29 @@ def generate_uds_docx(
                     data_rows = _filter_rows_by_swcom(data_rows, current_swcom, current_swcom_label)
                     if not data_rows and cols >= 4:
                         data_rows = [["N/A", "N/A", "N/A", "N/A"]]
-                _add_blank_table(doc, rows, cols, style, header_rows, data_rows)
+                if data_rows is None and tbl_el is not None:
+                    # 위 사슬이 하나도 안 걸렸다 = **생성기가 소유하지 않는 표**(이력·
+                    # 참조 등)다. 모양만 복제하면 데이터 행이 빈칸으로 나가고, 빈칸은
+                    # "이력 없음" 으로 읽힌다 — 실측으로 정본 이력 29행이 헤더만 남았다.
+                    # ⚠ `data_rows == []` 는 다르다: 생성기가 소유하는데 **채울 게
+                    #   없다**는 뜻이라 빈 표가 정답이다. `None` 과 접지 말 것.
+                    # ⚠ 새로 만들지 않으므로 오히려 빠르다(정본은 표 1,165개).
+                    try:
+                        _append_body_block(doc, tbl_el)
+                        _preserved_tables += 1
+                    except Exception:   # noqa: BLE001 - 실패하면 종전대로 빈 표
+                        _logger.warning("원본 표 복원 실패 — 빈 표로 대체", exc_info=True)
+                        _add_blank_table(doc, rows, cols, style, header_rows, None)
+                else:
+                    _add_blank_table(doc, rows, cols, style, header_rows, data_rows)
+            elif kind == "raw":
+                # 선행 블록은 위에서 이미 붙였다(자동 목차보다 앞서야 해서).
+                if idx >= _lead_raw:
+                    try:
+                        _append_body_block(doc, payload_block)
+                        _restored_blocks += 1
+                    except Exception:   # noqa: BLE001
+                        _logger.warning("구조 블록 복원 실패", exc_info=True)
             elif kind == "para":
                 text = str(payload_block.get("text") or "").strip()
                 if not text:
@@ -3760,6 +3934,11 @@ def generate_uds_docx(
                 round(100.0 * len(_matched_fn_names) / len(_payload_fn_names), 2)
                 if _payload_fn_names else None      # 분모 0 = 미측정(0% 아님)
             ),
+            # 템플릿에서 **그대로 가져온** 것. 보존은 옳지만(표지·이력이 그래야 한다)
+            # 템플릿이 남의 프로젝트 문서면 그 값이 그대로 실리므로 침묵하면 안 된다.
+            # 신원 판정(`template_identity`)과 짝으로 읽으라고 같이 낸다.
+            "restored_template_blocks": _restored_blocks,
+            "preserved_template_tables": _preserved_tables,
             # 참조 SUDS 를 얼마나·왜 적용했는지. 로그에만 남기면 산출물 검토자가 못 본다.
             "reference_suds": _ref_stats,
         }

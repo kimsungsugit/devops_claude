@@ -145,6 +145,10 @@ def _gen_stats_result_fields(out_path: Path) -> Dict[str, Any]:
             #    "보고를 추가하는 것과 보고가 도달하는 것은 다르다" 가 여기서 재발한다.
             #    (§6 후보 9 의 `template_identity` 가 정확히 그 자리였다.)
             "template_identity": stats.get("template_identity"),
+            # 템플릿에서 그대로 가져온 것(표지 블록·이력/참조 표). 신원과 짝으로 읽는다 —
+            # 남의 프로젝트 템플릿이면 이 수만큼 남의 내용이 산출물에 실린 것이다.
+            "restored_template_blocks": stats.get("restored_template_blocks"),
+            "preserved_template_tables": stats.get("preserved_template_tables"),
             "payload_functions": stats.get("payload_functions"),
             "matched_functions": stats.get("matched_functions"),
             "match_pct": stats.get("match_pct"),      # 분모 0 이면 None(미측정)
