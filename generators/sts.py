@@ -1225,6 +1225,7 @@ def _generate_steps_from_flow(
     logic_flow: List[Dict[str, Any]],
     func_info: Dict[str, Any],
     max_steps: int = _MAX_STEPS_PER_TC,
+    max_tc: int = _MAX_TC_PER_REQ,
 ) -> List[List[Dict[str, str]]]:
     """Generate multiple test-case step-lists from a function's logic flow.
 
@@ -1238,7 +1239,7 @@ def _generate_steps_from_flow(
     normal_steps: List[Dict[str, str]] = []
     branch_tcs: List[List[Dict[str, str]]] = []
 
-    _walk_flow_nodes(logic_flow, normal_steps, branch_tcs, depth=0)
+    _walk_flow_nodes(logic_flow, normal_steps, branch_tcs, depth=0, max_tc=max_tc)
 
     # Generate an error-path TC if any guard-like condition exists
     error_tc = _generate_error_path_tc(logic_flow, normal_steps)
@@ -1255,7 +1256,11 @@ def _generate_steps_from_flow(
     for tc in test_cases:
         tc[:] = tc[:max_steps]
 
-    return test_cases[:_MAX_TC_PER_REQ]
+    # ⚠ 오래 이 줄이 모듈 상수(5)를 직참조했다. 바깥 루프(`generate_test_cases`)는
+    #   사용자 상한을 지키는데 여기서 **함수당** 5 로 다시 잘라서, 함수 하나에 매핑된
+    #   요구는 상한을 20 으로 올려도 산출이 5 에서 멈췄다 — 이름은 `요구당` 인데
+    #   실제로는 `함수당` 이 더 세게 걸리던 것.
+    return test_cases[:max_tc]
 
 
 def _walk_flow_nodes(
@@ -1263,6 +1268,7 @@ def _walk_flow_nodes(
     prefix_steps: List[Dict[str, str]],
     branch_tcs: List[List[Dict[str, str]]],
     depth: int,
+    max_tc: int = _MAX_TC_PER_REQ,
 ) -> None:
     """Recursively walk logic flow nodes, expanding nested branches into TCs."""
     max_depth = 4
@@ -1293,10 +1299,13 @@ def _walk_flow_nodes(
                 "action": f"조건 충족 설정: {cond}",
                 "expected": "조건 분기 → True 경로 진입",
             })
-            _expand_branch_body(true_body, true_steps, branch_tcs, depth, max_depth)
+            _expand_branch_body(true_body, true_steps, branch_tcs, depth, max_depth,
+                                max_tc=max_tc)
             branch_tcs.append(true_steps)
 
-            for ei, elif_node in enumerate(elif_chains[:_MAX_TC_PER_REQ - 2]):
+            # 참/거짓 두 갈래 몫으로 2 를 뺀다. 상한이 2 이하면 else-if 확장은 없다 —
+            # `max()` 없이 두면 `[:-1]` 이 되어 "마지막 하나를 버린다" 는 **다른 뜻**이 된다.
+            for ei, elif_node in enumerate(elif_chains[:max(0, max_tc - 2)]):
                 econd = elif_node.get("condition", f"else-if #{ei+1}")
                 ebody = elif_node.get("body", elif_node.get("true_body", []))
                 elif_steps = list(prefix_steps)
@@ -1305,7 +1314,8 @@ def _walk_flow_nodes(
                     "expected": f"else-if 분기 #{ei+1} 진입",
                 })
                 if isinstance(ebody, list):
-                    _expand_branch_body(ebody, elif_steps, branch_tcs, depth, max_depth)
+                    _expand_branch_body(ebody, elif_steps, branch_tcs, depth, max_depth,
+                                        max_tc=max_tc)
                 branch_tcs.append(elif_steps)
 
             false_steps = list(prefix_steps)
@@ -1314,7 +1324,8 @@ def _walk_flow_nodes(
                 "expected": "조건 분기 → False/else 경로 진입",
             })
             if false_body:
-                _expand_branch_body(false_body, false_steps, branch_tcs, depth, max_depth)
+                _expand_branch_body(false_body, false_steps, branch_tcs, depth, max_depth,
+                                    max_tc=max_tc)
                 branch_tcs.append(false_steps)
 
         elif ntype == "switch":
@@ -1322,7 +1333,7 @@ def _walk_flow_nodes(
             cases = node.get("cases", [])
             default_calls = node.get("default_calls", [])
 
-            for case in cases[:_MAX_TC_PER_REQ]:
+            for case in cases[:max_tc]:
                 case_steps = list(prefix_steps)
                 label = case.get("label", "?")
                 case_steps.append({
@@ -1338,7 +1349,8 @@ def _walk_flow_nodes(
                                 "expected": f"{cn} 정상 실행",
                             })
                     elif isinstance(case_body[0], dict) and depth < max_depth:
-                        _walk_flow_nodes(case_body, case_steps, branch_tcs, depth + 1)
+                        _walk_flow_nodes(case_body, case_steps, branch_tcs, depth + 1,
+                                         max_tc=max_tc)
                 branch_tcs.append(case_steps)
 
             if default_calls:
@@ -1389,6 +1401,7 @@ def _expand_branch_body(
     branch_tcs: List[List[Dict[str, str]]],
     depth: int,
     max_depth: int,
+    max_tc: int = _MAX_TC_PER_REQ,
 ) -> None:
     """Expand sub-nodes inside a branch body, recursing into nested branches."""
     for sub in body:
@@ -1405,11 +1418,11 @@ def _expand_branch_body(
                 "expected": f"반환값: {v}" if v else "정상 반환",
             })
         elif st == "if" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1, max_tc=max_tc)
         elif st == "switch" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1, max_tc=max_tc)
         elif st == "loop" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1, max_tc=max_tc)
         elif st == "assign":
             var = sub.get("var", "")
             val = sub.get("value", "")
@@ -1418,12 +1431,9 @@ def _expand_branch_body(
                     "action": f"{var} = {val} 설정 확인",
                     "expected": f"{var} 값 변경 정상",
                 })
-        elif st == "if" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
-        elif st == "switch" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
-        elif st == "loop" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+        # ⚠ 여기 있던 `if`/`switch`/`loop` 3분기는 **같은 사슬 위쪽과 조건이 글자까지
+        #   동일**해서 한 번도 실행되지 않았다(앞선 `elif` 가 항상 먼저 잡는다).
+        #   `max_tc` 를 거기까지 넘기면 의미 있는 코드처럼 보이므로 지운다.
 
 
 def _generate_error_path_tc(
@@ -1764,7 +1774,8 @@ def generate_test_cases(
                 continue
             logic_flow = info.get("logic_flow") or []
             method, gen = _determine_test_method(req, info, logic_flow, hsis_signals=hsis_signals)
-            step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps)
+            step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps,
+                                                  max_tc=max_tc)
 
             for steps in step_sets:
                 if tc_counter >= max_tc:

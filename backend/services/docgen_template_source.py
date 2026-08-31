@@ -28,6 +28,29 @@
 ⚠ 정본을 템플릿으로 쓰면 **정본의 History 시트가 그대로 딸려온다**(과거 개정 이력).
    그건 연속성 측면에선 맞고 "새 문서" 관점에선 낡은 값이다 — 어느 쪽이 맞는지는
    프로젝트 규약이라 여기서 정하지 않고 사유 문자열로 드러낸다.
+
+## ⚠ UDS(docx)는 위 표와 **다른 경로**다 (실측 2026-08-31)
+
+위 실측은 SwUTS(**xlsm**)다. 시트 기반 빌더는 시트를 통째로 복사하므로 표지·이력이
+정말 따라온다. UDS 는 docx 이고 `docx_builder` 가 본문을 **재작성**한다
+(`_extract_template_blocks` → `_clear_docx_body` → 블록 재구성).
+
+KJPDS02_PV 정본(53MB) vs 표준 템플릿 v0.10, 소스 25파일/57함수로 실제 생성해 비교:
+
+| | 표준 템플릿 | 정본 |
+|---|---|---|
+| 소요 / 산출물 | 17초 / 375KB | **1,116.5초** / 64.4MB |
+| payload 함수 반영 | **0/57 (0.0%)** | **57/57 (100.0%)** |
+| SwUFn heading | 8개(자리표시자) | 1,035개(실제 함수명) |
+| 텍스트박스(표지) | 32 → **0** | 20 → **0** |
+| 콘텐츠 컨트롤 | 13 → **0** | 9 → **0** |
+| 표 데이터 행 | 헤더만, 나머지 **빈칸** | 〃 |
+
+즉 docx 에서 정본이 주는 것은 표지가 아니라 **함수 heading 집합**이고(그래서 반영률이
+0% → 100% 로 갈린다), 표지·이력 데이터·콘텐츠 컨트롤 값은 **어느 템플릿이든 유실된다**
+(`p.text` 가 `w:sdt`·`wps:txbx` 안의 런을 못 읽고, 표는 `(행수,열수,style,헤더)` 로만
+담기기 때문). 사유 문구를 문서 종류별로 가르는 이유가 이것이다 — 한 문장으로 뭉치면
+둘 중 한쪽에는 반드시 거짓이 된다.
 """
 from __future__ import annotations
 
@@ -69,6 +92,44 @@ def prefer_reference_from(choice: str) -> bool:
     return str(choice or "").strip().lower() != TEMPLATE_SOURCE_STANDARD
 
 
+# 시트 기반 빌더(xlsm)는 템플릿 **시트를 통째로** 복사하므로 표지·이력이 실제로
+# 따라온다. docx(UDS)는 본문을 **재작성**하므로 그렇지 않다 — 아래 두 함수가 그 차이를
+# 문장으로 만든다. 한 문장으로 뭉치면 둘 중 하나에는 반드시 거짓이 된다.
+_SHEET_BASED = ("sts", "suts", "sits")
+
+
+def _reference_gain(kind: str) -> str:
+    """정본을 템플릿으로 삼아 **실제로 얻는 것**."""
+    if kind in _SHEET_BASED:
+        return ("표지·이력·Introduction(표기 규약 표)이 납품본과 같아집니다. "
+                "명세 시트는 새로 씁니다.")
+    # UDS(docx) — 얻는 것은 표지가 아니라 **함수 heading 집합**이다. 이 라이터는
+    # 템플릿의 heading 을 순회하며 payload 함수를 찾으므로, 템플릿에 없는 함수는
+    # 문서에 안 들어간다. 실측: 자리표시자 템플릿 0/57 → 정본 57/57.
+    return ("정본의 함수 heading 집합을 그대로 써서 **이 프로젝트 함수가 문서에 실립니다** "
+            "— 실측으로 표준 템플릿은 57개 중 0개, 정본은 57개 전부였습니다. "
+            "명세 본문은 새로 씁니다.")
+
+
+def _reference_caveat(kind: str) -> str:
+    """정본을 템플릿으로 삼을 때 **따라오지 않는 것**(침묵하면 거짓 공시가 된다)."""
+    if kind in _SHEET_BASED:
+        return (" ⚠ 정본의 History 시트가 과거 개정 이력째로 딸려옵니다 — "
+                "새 문서로 낼 때는 그 시트를 확인하세요.")
+    return (" ⚠ docx 는 본문 **구조만** 복제합니다: 표지(텍스트박스)·표의 데이터 행·"
+            "콘텐츠 컨트롤 값은 따라오지 않습니다(실측 텍스트박스 32→0, 이력 표는 "
+            "헤더만 남음). 정본이 크면 오래 걸립니다 — 53MB 정본으로 18분 37초, "
+            "표준 템플릿은 17초였습니다.")
+
+
+def _standard_caveat(kind: str) -> str:
+    """표준 템플릿을 고른 쪽의 대가. UDS 는 이게 **문서를 통째로 비운다**."""
+    if kind in _SHEET_BASED:
+        return ""
+    return (" ⚠ UDS 는 템플릿의 heading 집합이 곧 문서의 함수 목록이라, 자리표시자만 있는 "
+            "표준 템플릿이면 분석한 함수가 **하나도 실리지 않습니다**(실측 0/57).")
+
+
 def choose_template_source(
     doc_type: str,
     *,
@@ -91,16 +152,17 @@ def choose_template_source(
 
     if prefer_reference and ref:
         return ref, (
-            f"{kind.upper()} 정본을 템플릿으로 사용합니다 — 표지·이력·Introduction"
-            f"(표기 규약 표)이 납품본과 같아집니다. 명세 시트는 새로 씁니다."
+            f"{kind.upper()} 정본을 템플릿으로 사용합니다 — {_reference_gain(kind)}"
+            f"{_reference_caveat(kind)}"
         )
     if tpl:
-        why = f"{kind.upper()} 표준 템플릿을 사용합니다."
+        why = f"{kind.upper()} 표준 템플릿을 사용합니다.{_standard_caveat(kind)}"
         if prefer_reference and not ref:
             why += " (정본이 등록돼 있지 않아 폴백했습니다 — Introduction 시트가 없을 수 있습니다.)"
         return tpl, why
     if ref:
-        return ref, f"{kind.upper()} 정본을 템플릿으로 사용합니다 (표준 템플릿 미등록)."
+        return ref, (f"{kind.upper()} 정본을 템플릿으로 사용합니다 (표준 템플릿 미등록) — "
+                     f"{_reference_gain(kind)}{_reference_caveat(kind)}")
     return "", f"{kind.upper()} 템플릿이 없어 서식 없이 생성합니다."
 
 

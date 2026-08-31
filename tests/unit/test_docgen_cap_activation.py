@@ -384,3 +384,179 @@ def test_file_scan_gets_no_suggestion_even_when_categories_have_one():
     # 사용자는 그 값을 넣고 "이제 다 담긴다" 고 믿는다.
     assert pf._cap_suggested_from_truncation("max_source_files", tm) is None
     assert pf._cap_suggested_from_truncation("max_items_per_category", tm) == 3881
+
+
+# ── `max_tc_per_req` 의 두 번째 축 ─────────────────────────────────────────
+
+class TestTcCapReachesThePerFunctionAxis:
+    """상한 이름은 `요구당` 인데 **함수당**이 더 세게 걸리던 자리.
+
+    `generate_test_cases` 는 `config` 에서 상한을 읽어 함수 루프를 끊는다(이 축은 오래
+    정상이었다). 그런데 `_generate_steps_from_flow` 가 마지막에
+    `test_cases[:_MAX_TC_PER_REQ]` 로 **모듈 상수**를 직참조해서, 함수 하나에 매핑된
+    요구는 상한을 아무리 올려도 5 에서 멈췄다. `max_steps_per_tc` 가 라운드 7 전에
+    있던 자리와 같은 형태다.
+    """
+
+    @staticmethod
+    def _switch_flow(n_cases: int):
+        """분기 n 개짜리 switch — 함수 하나로 TC 를 n 개 만들 수 있는 최소 재료."""
+        return [{
+            "type": "switch",
+            "expr": "mode",
+            "cases": [{"label": f"CASE_{i}", "body": [f"handler_{i}"]} for i in range(n_cases)],
+            "default_calls": [],
+        }]
+
+    def test_one_function_can_exceed_the_module_constant(self):
+        from generators import sts
+
+        flow = self._switch_flow(12)
+        info = {"name": "fn_switch", "params": [], "return_type": "void"}
+        got = sts._generate_steps_from_flow(flow, info, max_tc=12)
+        assert len(got) == 12, (
+            f"함수 하나가 낸 TC 가 {len(got)}개 — 모듈 상수 5 에 걸려 있다. "
+            "사용자가 상한을 올려도 산출이 안 늘어난다")
+
+    def test_the_default_is_unchanged(self):
+        """기본값에서는 예전과 똑같아야 한다 — 이 fix 는 상한을 **올릴 때만** 달라진다."""
+        from generators import sts
+
+        flow = self._switch_flow(12)
+        info = {"name": "fn_switch", "params": [], "return_type": "void"}
+        assert len(sts._generate_steps_from_flow(flow, info)) == sts._MAX_TC_PER_REQ
+
+    def test_generate_test_cases_carries_the_config_value_all_the_way_down(self):
+        """end-to-end: 요구 1개 · 함수 1개 · 분기 12개.
+
+        바깥 루프만 고쳐져 있으면 여기서 5 가 나온다(함수가 하나뿐이라 루프가 끊길
+        일이 없고, 안쪽 상수가 유일한 제약이 된다).
+        """
+        from generators import sts
+
+        req_row = {"id": "SRS-001", "title": "모드 처리", "req_type": "기능"}
+        details = {"F1": {"name": "fn_switch", "params": [], "return_type": "void",
+                          "logic_flow": self._switch_flow(12)}}
+        tcs = sts.generate_test_cases(
+            [req_row], details, {"SRS-001": ["F1"]},
+            project_config={"max_tc_per_req": 12},
+        )
+        assert len(tcs) == 12, f"{len(tcs)}개 — config 값이 안쪽 축까지 안 내려간다"
+
+    @staticmethod
+    def _sibling_ifs(n: int):
+        """형제 `if` n 개 — 각각 참/거짓 두 갈래라 TC 재료가 2n 개 생긴다.
+
+        ⚠ switch 로는 이 시험이 안 된다. switch 는 `cases[:max_tc]` 가 **먼저** 자르므로
+          마지막 슬라이스를 지워도 개수가 같아, "상한을 아예 안 자른다" 는 회귀를 못 본다.
+        """
+        return [{
+            "type": "if",
+            "condition": f"flag_{i} == 1",
+            "true_body": [{"type": "call", "name": f"on_{i}"}],
+            "false_body": [{"type": "call", "name": f"off_{i}"}],
+            "elif_chains": [],
+        } for i in range(n)]
+
+    def test_lowering_the_cap_still_bites(self):
+        """올리는 쪽만 보면 '상한을 무시하게 만든' 회귀를 못 잡는다."""
+        from generators import sts
+
+        flow = self._sibling_ifs(4)
+        info = {"name": "fn_many_ifs", "params": [], "return_type": "void"}
+        # 먼저 **재료가 상한보다 많다**는 것을 확인한다 — 안 그러면 아래 단언이
+        # "자르는 걸 봤다" 가 아니라 "재료가 원래 적었다" 를 통과시킨다.
+        assert len(sts._generate_steps_from_flow(flow, info, max_tc=99)) > 3
+        assert len(sts._generate_steps_from_flow(flow, info, max_tc=3)) == 3
+
+
+class TestElifExpansionNeverInverts:
+    """`elif_chains[:max_tc - 2]` 는 상한이 2 이하일 때 **음수 슬라이스**가 된다.
+
+    `[:-1]` 은 "0개" 가 아니라 "마지막 하나만 버린다" 는 **반대 뜻**이다. 반환값
+    (`test_cases[:max_tc]`)만 보면 어차피 잘려서 안 보이므로, out 파라미터를 그대로
+    받는 `_walk_flow_nodes` 수준에서 잰다.
+    """
+
+    @staticmethod
+    def _if_with_elifs(n: int):
+        return [{
+            "type": "if",
+            "condition": "x > 0",
+            "true_body": [],
+            "false_body": [{"type": "return", "value": "0"}],
+            "elif_chains": [{"condition": f"x == {i}", "body": []} for i in range(n)],
+        }]
+
+    def test_cap_of_one_expands_no_elif_branch(self):
+        from generators import sts
+
+        branch_tcs: list = []
+        sts._walk_flow_nodes(self._if_with_elifs(3), [], branch_tcs, depth=0, max_tc=1)
+        labels = [s["action"] for tc in branch_tcs for s in tc]
+        assert not [a for a in labels if "else-if" in a], (
+            f"상한 1 인데 else-if 분기가 확장됐다 — 음수 슬라이스다: {labels}")
+        # 참/거짓 두 갈래는 남는다(그건 이 상한이 자르는 대상이 아니다).
+        assert len(branch_tcs) == 2
+
+    def test_a_generous_cap_expands_every_elif(self):
+        from generators import sts
+
+        branch_tcs: list = []
+        sts._walk_flow_nodes(self._if_with_elifs(3), [], branch_tcs, depth=0, max_tc=9)
+        n_elif = len([1 for tc in branch_tcs for s in tc if "else-if" in s["action"]])
+        assert n_elif == 3, f"else-if {n_elif}개 — 상한을 올려도 확장이 안 늘어난다"
+
+
+def test_nested_branch_bodies_get_the_same_cap():
+    """분기 **안쪽**의 switch 도 같은 상한을 받는가.
+
+    `_expand_branch_body` → `_walk_flow_nodes` 재귀에 상한을 안 넘기면, 바깥은 12 로
+    확장되는데 한 겹 안쪽만 5 로 잘린다(같은 문서 안에서 깊이에 따라 상한이 달라진다).
+    """
+    from generators import sts
+
+    inner_switch = {
+        "type": "switch", "expr": "sub", "default_calls": [],
+        "cases": [{"label": f"S{i}", "body": [f"inner_{i}"]} for i in range(8)],
+    }
+    branch_tcs: list = []
+    sts._expand_branch_body([inner_switch], [], branch_tcs, depth=0, max_depth=4, max_tc=8)
+    labels = [s["action"] for tc in branch_tcs for s in tc]
+    got = len([a for a in labels if a.startswith("sub = S")])
+    assert got == 8, f"안쪽 switch 분기가 {got}개 — 재귀가 상한을 안 받는다"
+
+
+def test_the_gate_discloses_both_axes_of_the_tc_cap():
+    """상한이 **두 축**에 걸린다는 사실이 공시 문구에 남아 있는가.
+
+    이 시리즈가 고치는 대상은 결국 **게이트가 하는 말**이다. 코드가 두 축을 다 자르는데
+    문구가 함수 루프만 말하면, 함수 1개짜리 요구에서 상한을 올린 사용자는 왜 산출이
+    안 늘어나는지 알 길이 없다(고치기 전이 정확히 그 상태였다).
+    """
+    effect = str(req.DOC_REQUIREMENTS["sts"]["caps"]["max_tc_per_req"]["effect"])
+    assert "함수 하나" in effect, (
+        f"함수당 축이 공시에서 사라졌다: {effect!r}")
+
+
+def test_expand_branch_body_has_no_unreachable_duplicate_arm():
+    """같은 `if/elif` 사슬에 **글자까지 같은 조건**이 두 번 있으면 뒤쪽은 죽은 코드다.
+
+    실제로 `if`/`switch`/`loop` 3분기가 그렇게 중복돼 있었다. 지웠고, 다시 들어오면
+    (예: 병합 사고) 여기서 잡는다 — 죽은 분기는 `max_tc` 같은 인자를 넘겨도 아무 일도
+    안 하면서 "처리한다" 는 인상만 준다.
+    """
+    import ast
+    import inspect as _inspect
+
+    from generators import sts
+
+    tree = ast.parse(_inspect.getsource(sts._expand_branch_body))
+    fn = tree.body[0]
+    loop = next(n for n in ast.walk(fn) if isinstance(n, ast.For))
+    conditions, node = [], next(s for s in loop.body if isinstance(s, ast.If))
+    while isinstance(node, ast.If):
+        conditions.append(ast.dump(node.test))
+        node = node.orelse[0] if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If) else None
+    dupes = [c for c in conditions if conditions.count(c) > 1]
+    assert not dupes, f"도달 불가 중복 분기 {len(dupes)}개"

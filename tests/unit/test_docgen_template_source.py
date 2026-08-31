@@ -115,3 +115,66 @@ def test_routers_pass_reference_doc_to_the_single_rule():
             f"{rel}: {sorted(used - declared)} 가 reference_doc_path 를 선언 없이 쓴다 (NameError)"
         )
         assert used == declared, f"{rel}: 선언만 하고 안 쓰는 곳 {sorted(declared - used)}"
+
+
+# ── 템플릿 사유는 **문서 종류마다 다른 사실**을 말해야 한다 ────────────────
+#
+# 실측(2026-08-31): docx 재작성 경로는 표지(텍스트박스 32→0)·표 데이터 행·콘텐츠
+# 컨트롤 값을 잃는다. 시트 기반 빌더(xlsm)는 시트를 통째로 복사하므로 안 잃는다.
+# 한 문장으로 뭉치면 둘 중 하나에는 반드시 거짓이 된다.
+
+class TestTemplateReasonMatchesTheBuilder:
+
+    def test_uds_does_not_promise_what_the_docx_path_loses(self):
+        from backend.services.docgen_template_source import choose_template_source
+
+        _, why = choose_template_source("uds", registered_template="std.docx",
+                                        reference_doc="ref.docx", prefer_reference=True)
+        assert "납품본과 같아집니다" not in why, (
+            f"docx 는 표지·이력 데이터를 옮기지 않는데 그렇다고 말한다: {why}")
+        assert "따라오지 않습니다" in why, f"잃는 것을 말하지 않는다: {why}"
+
+    def test_sheet_builders_keep_the_promise_they_can_keep(self):
+        """시트 빌더까지 같이 약하게 만들면 **맞는 말을 지우는** 셈이다."""
+        from backend.services.docgen_template_source import choose_template_source
+
+        for kind in ("sts", "suts", "sits"):
+            _, why = choose_template_source(kind, registered_template="std.xlsm",
+                                            reference_doc="ref.xlsm", prefer_reference=True)
+            assert "납품본과 같아집니다" in why, f"{kind}: {why}"
+            assert "따라오지 않습니다" not in why, f"{kind}: {why}"
+
+    def test_choosing_the_standard_template_warns_uds_may_come_out_empty(self):
+        """표준 템플릿을 고르면 UDS 는 **함수가 하나도 안 실릴 수 있다**(실측 0/57).
+
+        이 경고가 없으면 사용자는 "왜 내 문서에 함수가 없나" 를 알 길이 없다 —
+        생성은 성공하고 파일도 만들어지기 때문이다.
+        """
+        from backend.services.docgen_template_source import choose_template_source
+
+        _, why = choose_template_source("uds", registered_template="std.docx",
+                                        reference_doc="ref.docx", prefer_reference=False)
+        assert "하나도 실리지 않습니다" in why, f"빈 문서 위험을 말하지 않는다: {why}"
+
+    def test_sheet_builders_get_no_empty_document_warning(self):
+        """시트 빌더엔 해당 없는 경고다 — 아무 데나 붙이면 경고가 소음이 된다."""
+        from backend.services.docgen_template_source import choose_template_source
+
+        for kind in ("sts", "suts", "sits"):
+            _, why = choose_template_source(kind, registered_template="std.xlsm",
+                                            reference_doc="", prefer_reference=False)
+            assert "하나도 실리지 않습니다" not in why, f"{kind}: {why}"
+
+    def test_the_fallback_branch_says_the_same_thing(self):
+        """표준 템플릿을 **골랐는데 등록본이 없어** 정본으로 떨어지는 가지(④).
+
+        ⚠ `prefer_reference=True` 로는 여기 못 온다 — 첫 가지가 먼저 잡는다. 그렇게
+          썼다가 뮤턴트(폴백 가지에서만 caveat 제거)가 살아남았다.
+        """
+        from backend.services.docgen_template_source import choose_template_source
+
+        picked, why = choose_template_source("uds", registered_template="",
+                                             reference_doc="ref.docx", prefer_reference=False)
+        assert picked == "ref.docx"
+        assert "표준 템플릿 미등록" in why, f"다른 가지를 탔다: {why}"
+        assert "따라오지 않습니다" in why, f"폴백 가지만 옛 문구다: {why}"

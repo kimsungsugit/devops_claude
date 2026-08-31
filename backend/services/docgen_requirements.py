@@ -240,8 +240,13 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             IN_TEMPLATE: "기본 양식으로 만듭니다(회사 표준 서식이 아닐 수 있습니다)",
         },
         fields=["related"],
+        # ⚠ 이 상한은 **두 축**에 걸린다: 요구에 매핑된 함수 루프(`generate_test_cases`)
+        #   와 함수 하나의 분기 확장(`_generate_steps_from_flow`). 오래 뒤 축만 모듈
+        #   상수 5 를 직참조해서, 함수 1개짜리 요구는 상한을 올려도 5 에서 멈췄다.
         caps={"max_tc_per_req": {"api": 5, "generator": 5, "adjustable": True,
-                                 "effect": "요구당 시험 케이스 상한 — 넘는 함수는 시험 없이 남습니다"},
+                                 "effect": "요구당 시험 케이스 상한 — 넘는 함수는 시험 없이 "
+                                           "남고, 함수 하나가 내는 분기 TC 도 같은 상한에 "
+                                           "잘립니다"},
               # ⚠ 오래 조정 불가였다 — `generators/sts.py:64` 의 순수 코드 상수를
               #   `:1255,1685,2525` 가 직접 참조해 env 조차 없었다. 이제 셋 다 인자로
               #   받고 `generate_test_cases` 가 `config` 에서 읽는다(`max_tc_per_req` 와
