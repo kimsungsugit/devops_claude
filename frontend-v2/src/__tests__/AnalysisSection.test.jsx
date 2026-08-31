@@ -41,6 +41,8 @@ vi.mock('../api.js', () => ({
   post: vi.fn(),
   api: vi.fn(),
   defaultCacheRoot: vi.fn(() => ''),
+  // 폴백 사슬은 api.js 의 `resolveCacheRoot` 단일 출처다 — 여기서는 실제 사슬을 흉내낸다.
+  resolveCacheRoot: vi.fn((ar, job, cfg) => ar?.cacheRoot || cfg?.cacheRoot || ''),
 }));
 
 const { default: AnalysisSection } = await import('../components/sections/AnalysisSection.jsx');

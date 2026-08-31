@@ -288,7 +288,26 @@ _DETAIL_HEADERS = {
 #   Precondition 을 써서 정본의 `Test Method` 자리를 차지하고 있었다.
 # (`_MAX_SUBCASES = 16` 은 어디서도 참조되지 않는 죽은 상수였다 — 옆의 14 와 값이 달라
 #  "상한 16 이 걸린다" 는 오해를 부른다. 실제 상한은 아래 _DEFAULT_SUBCASES 뿐이다.)
-_DEFAULT_SUBCASES = 14  # 7 BV + 4 COND_COMB + 2 ERR_PROP + 2 GLOBAL
+_DEFAULT_SUBCASES = 14  # ⚠ 카탈로그 전체가 아니라 **캡**이다 — 아래 _SUBCASE_CATALOG_MAX 참조
+
+# 서브케이스 전략 후보의 **이론적 최대**. `_generate_sub_cases` 의 append 지점 합이다:
+_SUBCASE_BV_MAX = 7        # 경계값 — `_BOUNDARY_SETS` 의 값 개수(모든 타입 7)
+_SUBCASE_COND_MAX = 4      # GAP A 조건 조합 — `min(4, len(input_vars))`
+_SUBCASE_ERR_PROP_MAX = 2  # GAP C 오류 전파 — min_inv / max_inv
+_SUBCASE_GLOBAL_MAX = 2    # GAP D 전역 상태 — `indirect_vars[:2]`
+_SUBCASE_CATALOG_MAX = (
+    _SUBCASE_BV_MAX + _SUBCASE_COND_MAX + _SUBCASE_ERR_PROP_MAX + _SUBCASE_GLOBAL_MAX
+)  # = 15
+
+# ⚠ **`_DEFAULT_SUBCASES`(14)는 카탈로그(15)보다 하나 작다.** 오래 이 자리에
+#   `14  # 7 BV + 4 COND_COMB + 2 ERR_PROP + 2 GLOBAL` 라 적혀 있었는데 그 합은 **15** 다 —
+#   숫자와 주석이 서로 다른 말을 하고 있었고, 준비 게이트가 주석 쪽이 아니라 값(14)을
+#   "후보 전량" 으로 공시하는 바람에 `max_subcases=14` 를 **손실 없음(ok)** 으로 판정하고
+#   15 를 고른 사용자에게는 "14 이상은 더 담을 것이 없습니다" 라고 **틀린 말**을 했다.
+#   실측(입력 4개+전역 2개 이상인 흐름): max=14 → 14개 · max=15 → 15개.
+#   같은 계열의 결함을 SUTS 가 이미 냈다(주석 합 29 vs 실제 30 — `suts._STRATEGY_CATALOG_MAX`).
+#   그래서 두 상수 모두 **실행으로** 고정한다: `tests/unit/test_generator_catalog_max.py`
+#   가 최대 입력을 만들어 실제 산출 개수와 대조하므로 손으로 센 수가 다시 새지 않는다.
 
 # Boundary value sets for common C types — 7 values per type:
 #   min_inv | min_valid | low_mid | mid | high_mid | max_valid | max_inv

@@ -72,6 +72,40 @@ describe('useScmFallback', () => {
     await act(() => new Promise(r => setTimeout(r, 60)));
     expect(apiMock.mock.calls.length).toBe(1);
   });
+
+  // ── 모호한 프로젝트를 임의로 고르지 않는다 (2026-08-31) ────────────────────
+  //
+  // 예전엔 `analysisResult?.scmList?.[0]` 과 `/api/scm/list` 의 `items[0]` 로 **무조건
+  // 첫 항목**을 집었다. 이 훅이 먹이는 '문서 현황' 표는 그 순간 남의 프로젝트 연결문서를
+  // 보여 주고, `registerVcast` 는 남의 `source_root` 로 패키지를 등록한다.
+  // 실측: 이 저장소 레지스트리엔 프로젝트가 3개 등록돼 있다.
+  it('등록이 여럿이고 매칭이 없으면 아무것도 고르지 않는다', async () => {
+    apiMock.mockImplementation(async () => ({
+      items: [{ id: 'a', source_root: '/a' }, { id: 'b', source_root: '/b' }],
+    }));
+    const { result } = renderHook(() => useScmFallback({
+      scmList: [{ id: 'a', source_root: '/a' }, { id: 'b', source_root: '/b' }],
+    }));
+    await act(() => new Promise(r => setTimeout(r, 60)));
+    // 모르는 것은 모른다고 둔다 — 표는 `-` 를 보이고, 남의 경로를 보이지 않는다.
+    expect(result.current[0]).toBeNull();
+  });
+
+  it('등록이 하나뿐이면 그대로 쓴다 — 오귀속이 불가능하다', async () => {
+    apiMock.mockImplementation(async () => ({ items: [{ id: 'only', source_root: '/only' }] }));
+    const { result } = renderHook(() => useScmFallback({}));
+    await waitFor(() => expect(result.current[0]?.id).toBe('only'));
+  });
+
+  it('매칭된 항목이 있으면 목록이 여럿이어도 그것을 쓴다', async () => {
+    const { result } = renderHook(() => useScmFallback({
+      matchedScm: { id: 'matched', source_root: '/m' },
+      scmList: [{ id: 'a', source_root: '/a' }, { id: 'b', source_root: '/b' }],
+    }));
+    await act(() => new Promise(r => setTimeout(r, 40)));
+    expect(result.current[0]?.id).toBe('matched');
+    expect(apiMock).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

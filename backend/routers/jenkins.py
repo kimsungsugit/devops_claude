@@ -2383,6 +2383,15 @@ async def jenkins_uds_generate(
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),
     template_path: str = Form(""),
+    # 동기 판도 같은 계약을 받는다 — 한쪽만 받으면 두 입구가 같은 요청에 다른 문서를
+    # 만든다(이 저장소가 반복해 밟은 '쌍둥이 한쪽만 고침' 패턴).
+    reference_doc_path: str = Form(""),
+    template_source: str = Form(""),
+    # 생성 상한 — 준비 게이트 `4. 결정할 것` 에서 고른 값. 오래 요청 파라미터가 아예
+    # 없어 환경변수로만 바꿀 수 있었고, 게이트는 그 사실을 "조정 불가" 로만 말했다.
+    # `None` = 미설정 = 생성기(=config) 기본값. 숫자를 여기 복제하지 않는다.
+    max_source_files: Optional[int] = Form(None),
+    max_items_per_category: Optional[int] = Form(None),
     source_root: str = Form(""),
     source_only: bool = Form(False),
     req_files: List[UploadFile] = File(default_factory=list),
@@ -2492,6 +2501,8 @@ async def jenkins_uds_generate(
             generate_uds_source_sections,
             str(source_root_path),
             component_map=component_map if component_map else None,
+            max_files=max_source_files,
+            max_items=max_items_per_category,
         )
     sds_doc_paths: List[str] = []
     for p in req_doc_paths:
@@ -2609,7 +2620,17 @@ async def jenkins_uds_generate(
     # 초 단위 ts — 동시 생성 시 UDS 산출물이 서로를 덮어쓴다(ISO 26262 산출물이라
     # '남의 문서를 받는' 결과가 된다). 원자 선점으로 비켜간다.
     out_path = reserve_unique_path(out_dir / f"uds_spec_{job_slug}_{ts}.docx")
-    tpl = str(template_path).strip() or None
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 비동기 판과 같은 함수.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    _uds_tpl, _uds_tpl_why = resolve_template_for(
+        "uds", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("UDS 템플릿: %s", _uds_tpl_why)
+    tpl = str(_uds_tpl or "").strip() or None
     await _run_blocking(_generate_docx_with_retry, tpl, uds_payload, out_path)
     _write_uds_payload_sidecar(out_path, uds_payload)
     residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})
@@ -2737,6 +2758,18 @@ async def jenkins_uds_generate_async(
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),
     template_path: str = Form(""),
+    # ⚠ 오래 이 두 개가 **없었다**. 프론트는 `reference_doc_path` 를 보내고 있었고
+    #   FastAPI 는 미선언 Form 필드를 조용히 버리므로, 준비 게이트가 "UDS 정본을
+    #   템플릿으로 사용합니다 / 설정한 표준 템플릿은 쓰이지 않습니다" 라고 공시하는
+    #   동안 실제로는 정확히 그 반대가 일어났다(정본 폐기·표준 템플릿 사용).
+    #   같은 함정을 `asil_level` 이 이미 밟았다(`DocGenSection.jsx` 주석 참조).
+    reference_doc_path: str = Form(""),
+    template_source: str = Form(""),
+    # 생성 상한 — 준비 게이트 `4. 결정할 것` 에서 고른 값. 오래 요청 파라미터가 아예
+    # 없어 환경변수로만 바꿀 수 있었고, 게이트는 그 사실을 "조정 불가" 로만 말했다.
+    # `None` = 미설정 = 생성기(=config) 기본값. 숫자를 여기 복제하지 않는다.
+    max_source_files: Optional[int] = Form(None),
+    max_items_per_category: Optional[int] = Form(None),
     source_root: str = Form(""),
     source_only: bool = Form(False),
     req_files: List[UploadFile] = File(default_factory=list),
@@ -2880,13 +2913,30 @@ async def jenkins_uds_generate_async(
             job_id=job_id,
         )
 
+    # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`) — sts/suts/sits
+    # 와 같은 함수를 쓴다. 어느 쪽을 쓸지는 사용자가 준비 게이트에서 고른다
+    # (`template_source`); 미설정이면 서버 기본(정본 우선)이다.
+    # ⚠ 여기서 해석(worker 경유 로컬화)까지 해야 cloudium `U:` 템플릿이 열린다 —
+    #   UDS 는 오래 원문 경로를 그대로 넘겨 그쪽에서 조용히 서식 없이 만들어졌다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    _uds_tpl, _uds_tpl_why = resolve_template_for(
+        "uds", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("UDS 템플릿: %s", _uds_tpl_why)
+
     def _worker() -> None:
         try:
             result = _uds_generate_from_paths(
                 job_url=job_url,
                 cache_root=cache_root,
                 build_selector=build_selector,
-                template_path=template_path,
+                template_path=_uds_tpl or "",
+                max_source_files=max_source_files,
+                max_items_per_category=max_items_per_category,
                 source_root=source_root,
                 source_only=source_only,
                 req_file_paths=req_file_paths,
@@ -3180,10 +3230,16 @@ async def jenkins_sts_generate_async(
     # 같은 종류의 **납품 정본**. 템플릿을 무엇으로 삼을지는 백엔드가 정한다
     # (`docgen_template_source`) — 프론트는 데이터만 준다(판정 복제 금지).
     reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     from sts_generator import generate_sts
@@ -3269,9 +3325,13 @@ async def jenkins_sts_generate_async(
     # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
     # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
     # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유 로컬화가 필요하다.
-    from backend.services.docgen_template_source import resolve_template_for
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
     tpl_path, _tpl_why = resolve_template_for(
         "sts", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("%s 템플릿: %s", "sts".upper(), _tpl_why)
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "sts", f"sts_{_job_slug(job_url)}", tpl_path)
@@ -3281,6 +3341,7 @@ async def jenkins_sts_generate_async(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
     _set_progress("jenkins_sts", job_url, build_selector, {"stage": "start", "percent": 1, "message": "STS start", "done": False, "error": ""}, job_id=job_id)
@@ -3412,6 +3473,9 @@ def jenkins_suts_generate_async(
     # 같은 종류의 **납품 정본**. 템플릿을 무엇으로 삼을지는 백엔드가 정한다
     # (`docgen_template_source`) — 프론트는 데이터만 준다(판정 복제 금지).
     reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3429,9 +3493,13 @@ def jenkins_suts_generate_async(
     # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
     # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
     # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유 로컬화가 필요하다.
-    from backend.services.docgen_template_source import resolve_template_for
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
     tpl_path, _tpl_why = resolve_template_for(
         "suts", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("%s 템플릿: %s", "suts".upper(), _tpl_why)
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "suts", f"suts_{_job_slug(job_url)}", tpl_path)

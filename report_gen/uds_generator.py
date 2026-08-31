@@ -280,7 +280,15 @@ def generate_uds_source_sections(
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
     preprocess: bool = True,
+    max_files: Optional[int] = None,
+    max_items: Optional[int] = None,
 ) -> Dict[str, Any]:   # 값은 str·list·dict 혼합(function_details 등) — 과거 Dict[str, str]는 오기
+    """`max_files`/`max_items` 는 **호출자 상한**. `None` 이면 `config` 기본값을 쓴다.
+
+    ⚠ 숫자를 여기 복제하지 않는다 — 기본값의 단일 출처는 `config.UDS_MAX_SOURCE_FILES`/
+      `UDS_MAX_FUNCTION_ITEMS`(환경변수로 덮임)이고, 준비 게이트의 공시도 거기서 읽는다
+      (`docgen_requirements._uds_cap`). `generators/sts.py` 의 `max_tc_per_req` 와 같은 규약.
+    """
     # 콤마/세미콜론 구분 복수 소스 루트 지원
     _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
 
@@ -329,11 +337,16 @@ def generate_uds_source_sections(
     allowed = {".c", ".h", ".cpp", ".hpp"}
     try:
         import config as _cfg
-        max_files = getattr(_cfg, "UDS_MAX_SOURCE_FILES", 1200)
-        max_items = getattr(_cfg, "UDS_MAX_FUNCTION_ITEMS", 120)
+        _cfg_max_files = getattr(_cfg, "UDS_MAX_SOURCE_FILES", 1200)
+        _cfg_max_items = getattr(_cfg, "UDS_MAX_FUNCTION_ITEMS", 120)
     except Exception:
-        max_files = 1200
-        max_items = 120
+        _cfg_max_files = 1200
+        _cfg_max_items = 120
+    # 호출자가 준 값이 있으면 그것, 없으면 config. `0`·음수는 "전부 자르라" 가 아니라
+    # 미설정으로 본다 — 저장소가 이미 그 규약이고(`sharedInputs.js::saveDocGenCap`),
+    # 여기서 다르게 읽으면 같은 값에 화면과 생성기가 반대말을 한다.
+    max_files = int(max_files) if isinstance(max_files, int) and max_files > 0 else _cfg_max_files
+    max_items = int(max_items) if isinstance(max_items, int) and max_items > 0 else _cfg_max_items
     files: List[Path] = []
     ext_counts: Dict[str, int] = {}
     top_dirs: Dict[str, int] = {}
@@ -1694,17 +1707,43 @@ def generate_uds_source_sections(
             out.append(item)
         return out
 
-    interfaces = _unique(interfaces)[:max_items]
-    internals = _unique(internals)[:max_items]
-    unknowns = _unique(unknowns)[:max_items]
-    macros = _unique(macros)[:max_items]
-    reqs = _unique(reqs)[:max_items]
-    common_macros = _unique(common_macros)[:max_items]
-    type_defs = _unique(type_defs)[:max_items]
-    param_defs = _unique(param_defs)[:max_items]
-    version_defs = _unique(version_defs)[:max_items]
-    global_data = _unique(global_data)[: max_items * 2]
-    macro_defs = macro_defs[: max_items * 2]
+    # 카테고리 절단 — **무엇을 잘랐는지 남긴다.**
+    #
+    # ⚠ 아래 11개 축은 오래 조용히 잘렸다. 같은 함수의 전역 축(`_globals_loss`)은
+    #   "기록이 없으면 '이 프로젝트엔 원래 없다' 로 오독한다" 는 이유로 손실을 남기는데
+    #   카테고리 축만 빠져 있던 **비대칭**이다. 실측(KJPDS02_RD + FBL): 소스의
+    #   `#define` 이 12,941개인데 분류 상한은 120 이다 — 준비 게이트가 이 상한을
+    #   공시하면서도 "실제로 자르고 있는가" 는 말할 수 없었던 이유가 여기에 있었다.
+    _cat_loss: Dict[str, Dict[str, int]] = {}
+
+    def _cap_items(name: str, items: List[Any], cap: int, *, dedupe: bool = True) -> List[Any]:
+        vals = _unique(items) if dedupe else list(items)
+        total = len(vals)
+        if total > cap:
+            _cat_loss[name] = {"total": total, "cap": cap, "dropped": total - cap}
+        return vals[:cap]
+
+    interfaces = _cap_items("interfaces", interfaces, max_items)
+    internals = _cap_items("internals", internals, max_items)
+    unknowns = _cap_items("unknowns", unknowns, max_items)
+    macros = _cap_items("macros", macros, max_items)
+    reqs = _cap_items("reqs", reqs, max_items)
+    common_macros = _cap_items("common_macros", common_macros, max_items)
+    type_defs = _cap_items("type_defs", type_defs, max_items)
+    param_defs = _cap_items("param_defs", param_defs, max_items)
+    version_defs = _cap_items("version_defs", version_defs, max_items)
+    global_data = _cap_items("global_data", global_data, max_items * 2)
+    # ⚠ 원본이 여기만 `_unique` 를 거치지 않았다 — 동작을 바꾸지 않고 셈만 붙인다.
+    macro_defs = _cap_items("macro_defs", macro_defs, max_items * 2, dedupe=False)
+    if _cat_loss:
+        # 전역 축과 같은 등급으로 올린다. 이게 없으면 규격서에서 빠진 항목이 어디에도
+        # 안 남아 "원래 그만큼뿐" 으로 읽힌다.
+        _logger.warning(
+            "UDS 카테고리 상한(max_items=%d)에 걸려 %s",
+            max_items,
+            " · ".join(f"{k} {v['total']}→{v['cap']}(-{v['dropped']})"
+                       for k, v in sorted(_cat_loss.items())),
+        )
     if param_defs:
         for row in param_defs:
             cols = _normalize_table_row(row)
@@ -1827,7 +1866,10 @@ def generate_uds_source_sections(
         f"Public interfaces: {len(interfaces)}, Internal functions: {len(internals)}, Global data: {len(global_data)}",
     ]
     if truncated:
-        overview_lines.append("Scan truncated to first 400 files.")
+        # ⚠ 오래 `400` 이 하드코딩돼 있었다. 실제 상한은 `UDS_MAX_SOURCE_FILES`(기본
+        #   1200, `DEVOPS_UDS_MAX_FILES` 로 덮임)라 어느 경우에도 맞지 않았고, 바로 위
+        #   `Files scanned: {file_count}` 와 **인접한 두 줄이 다른 수**를 말했다.
+        overview_lines.append(f"Scan truncated to first {max_files} files.")
 
     requirements_lines: List[str] = []
     for row in common_macros:
@@ -2242,6 +2284,23 @@ def generate_uds_source_sections(
         # 전역 인식에서 **잃은 것**. 스캔 캡·미사용 판정·접두사 필터·타입없음 네 지점이
         # 전부 조용히 자르므로, 이 값이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
         "globals_scan": _globals_loss,
+        # 카테고리 절단(인터페이스/내부/매크로/타입…). `globals_scan` 과 같은 규약 —
+        # **잘린 것을 남긴다**. 준비 게이트의 `max_items_per_category` 공시가 실제로
+        # 무엇을 잘랐는지 이 값으로만 알 수 있다.
+        "category_caps": {
+            "measured": True,
+            "cap": max_items,
+            "truncated": _cat_loss,
+            "any_truncated": bool(_cat_loss),
+        },
+        # 파일 스캔 절단. ⚠ `truncated` 는 상한에 닿는 즉시 서고 곧바로 break 하므로
+        # **전체 파일 수는 모른다** — 지어내지 않고 "닿았다" 는 사실만 낸다.
+        "file_scan": {
+            "measured": True,
+            "cap": max_files,
+            "scanned": len(files),
+            "truncated": bool(truncated),
+        },
         "call_map": call_map,
         "calling_map": calling_map,
         "module_map": module_map,

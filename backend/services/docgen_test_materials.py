@@ -39,7 +39,9 @@ KJPDS02 는 후보 120 / 캡 120 으로 **경계에 정확히 닿아** 있다. �
 ## ⚠ 무겁다 — 요청 안에서 돌리지 말 것
 
 `generate_uds_source_sections` 는 실측 41초(350함수)~368초(750함수)다. `measure()` 는
-전용 엔드포인트에서만 부르고, preflight 는 `has_cached()` 로 캐시 유무만 본다
+전용 엔드포인트에서만 부르고, preflight 는 `cached()` 로 **있으면 가져오고 없으면 None**
+을 받는다(예전엔 `has_cached()` 로 먼저 묻고 또 `cached()` 를 불렀는데, 둘 다 신선도
+서명을 계산하느라 소스 트리를 걸어서 한 요청에 4번 걸었다)
 (`docgen_comment_coverage` 와 같은 규약).
 """
 from __future__ import annotations
@@ -48,6 +50,7 @@ import logging
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from report_gen.c_return import returns_value
@@ -56,13 +59,79 @@ _logger = logging.getLogger("devops_api.docgen_test_materials")
 
 # `function_details` 캐시. `docgen_comment_coverage` 의 것과 **다른 파서**의 산출이라
 # 따로 둔다(그쪽은 `parse_c_project`, 여기는 `generate_uds_source_sections`).
-_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+# `(잰 시각, 결과, 내용 서명 또는 None)`. 서명이 `None` 이면 그 항목은 TTL 로만 판정한다
+# (cloudium 원격 경로 — worker IPC 에 `stat` op 이 없다).
+_CACHE: Dict[str, Tuple[float, Dict[str, Any], Optional[str]]] = {}
 _CACHE_LOCK = threading.RLock()
 _CACHE_TTL_S = 900.0
 
 
-def _key(source_root: str) -> str:
-    return str(source_root or "").strip().lower()
+def _key(source_root: str, sds_path: str = "", srs_path: str = "",
+         uds_path: str = "") -> str:
+    """캐시 키 — **결과를 바꾸는 입력을 전부** 담는다.
+
+    ⚠ 오래 `source_root` 하나였다. 그런데 `measure()` 는 SwDS·SwRS·SwUDS 를 읽어
+    `sts_mapping`(요구-함수 매핑·설계 ID 브리지)과 `sits` 를 만든다. 그래서 설정에서
+    SwDS 를 다른 문서로 바꿔도 **소스 루트가 같으면 캐시가 그대로 맞았고**, 준비 게이트는
+    이미 교체된 문서로 잰 수치를 최대 15분(TTL) 동안 "지금 값" 으로 보고했다.
+
+    같은 규약을 `docgen_comment_coverage` 가 이미 쓴다(`max_files` 를 키에 넣는다) —
+    결과를 바꾸는 인자는 키에 들어간다.
+
+    ⚠ 파일 **내용** 변경(같은 경로, 편집됨)은 여기서 못 잡는다. mtime 조회가 cloudium
+      worker IPC 라 preflight 마다 물으면 비싸다. 그 축은 TTL 이 담당한다.
+    """
+    parts = [str(p or "").strip().lower().replace("\\", "/")
+             for p in (source_root, sds_path, srs_path, uds_path)]
+    return "\x1f".join(parts)
+
+
+def _doc_signature(paths: Tuple[str, ...]) -> Optional[str]:
+    """문서 경로들의 `(경로, mtime, size)` 서명. 하나라도 로컬 stat 불가면 `None`.
+
+    `None` 은 "안 바뀌었다" 가 아니라 **"모른다"** 다 — 호출부는 그때 TTL 로 떨어지고,
+    화면에는 "변경 감지 불가" 로 표시한다. 추정으로 최신이라고 말하지 않는다.
+    """
+    import hashlib
+    h = hashlib.sha1()
+    for raw in paths:
+        p = str(raw or "").strip()
+        if not p:
+            continue          # 미지정은 서명 대상이 아니다(있고 없고는 키가 이미 구분한다)
+        try:
+            st = Path(p).stat()
+        except Exception:      # noqa: BLE001 - cloudium U: 는 PermissionError, 부재는 OSError
+            return None        # 원격/부재 → 서명 불가
+        h.update(p.encode("utf-8", "ignore"))
+        h.update(str(st.st_mtime_ns).encode())
+        h.update(str(st.st_size).encode())
+    return h.hexdigest()
+
+
+def signature_for(source_root: str, sds_path: str = "", srs_path: str = "",
+                  uds_path: str = "") -> Optional[str]:
+    """측정 입력의 내용 서명 — 같은 경로를 **편집한 경우**를 잡는다.
+
+    ⚠ 캐시 키(`_key`)는 경로만 담는다. 그래서 SwDS 를 열어 고치고 저장해도 키가 같아
+      최대 TTL(15분) 동안 옛 수치가 "지금 값" 으로 보고됐다. 소스 쪽은 이미 같은 형태의
+      서명을 `backend/helpers/uds._source_root_signature` 가 갖고 있으므로 **되쓴다** —
+      여기서 다시 구현하면 파서 스키마 버전 같은 축이 한쪽에만 반영된다.
+
+    cloudium(`U:`)은 worker IPC 에 `stat` op 이 없어 서명이 불가능하다. 그 경우 `None`
+    이고, 조회부는 TTL 판정으로 되돌아간다(기존 동작 유지).
+    """
+    # ⚠ **시간 기반 메모를 두지 않는다.** 1초짜리 메모를 얹어 봤더니 "문서를 고치면
+    #   즉시 무효화된다" 는 가드가 그 창 동안 거짓이 됐다(회귀 테스트가 잡았다) — 이
+    #   모듈이 이번에 없앤 stale 과 **같은 성격의 지연**을 스스로 만드는 셈이다.
+    #   중복 계산은 호출부에서 없앤다(`docgen_preflight` 가 `has_cached`+`cached` 두 번
+    #   묻던 것을 `cached()` 한 번으로).
+    try:
+        from backend.helpers.uds import _source_root_signature
+        src_sig = _source_root_signature(source_root, 100000)
+    except Exception:  # noqa: BLE001 - 서명 불가는 "모른다"
+        src_sig = None
+    doc_sig = _doc_signature((sds_path, srs_path, uds_path))
+    return None if (src_sig is None or doc_sig is None) else f"{src_sig}|{doc_sig}"
 
 
 def clear_cache() -> None:
@@ -70,18 +139,43 @@ def clear_cache() -> None:
         _CACHE.clear()
 
 
-def has_cached(source_root: str) -> bool:
-    """측정된 결과가 있는가 — preflight 가 이걸 먼저 본다."""
-    with _CACHE_LOCK:
-        hit = _CACHE.get(_key(source_root))
-        return bool(hit and (time.time() - hit[0]) < _CACHE_TTL_S)
+def _fresh(hit: Optional[Tuple[Any, ...]], sig: Optional[str]) -> bool:
+    """캐시 항목이 지금 쓸 수 있는가 — TTL **그리고** (알 수 있으면) 내용 서명."""
+    if not hit or (time.time() - hit[0]) >= _CACHE_TTL_S:
+        return False
+    stored = hit[2] if len(hit) > 2 else None
+    # 어느 한쪽이라도 서명을 모르면 대조하지 않는다(=TTL 만으로 판단). 모르는 것을
+    # "다르다" 로 읽으면 cloudium 에서 캐시가 영영 안 맞아 매번 수십 초 재측정이 된다.
+    if sig is None or stored is None:
+        return True
+    return stored == sig
 
 
-def cached(source_root: str) -> Optional[Dict[str, Any]]:
+def has_cached(source_root: str, *, sds_path: str = "", srs_path: str = "",
+               uds_path: str = "") -> bool:
+    """측정된 결과가 있는가 — preflight 가 이걸 먼저 본다.
+
+    ⚠ 호출부는 `measure()` 에 넘긴 것과 **같은 경로**를 넘겨야 한다. 안 그러면 캐시가
+      영영 안 맞아 게이트가 계속 `unmeasured` 다. 그래서 양쪽 다 `_resolve_inputs`
+      한 곳에서 경로를 얻는다(`test_docgen_preflight.py` 가 그 일치를 강제한다).
+    """
+    sig = signature_for(source_root, sds_path, srs_path, uds_path)
     with _CACHE_LOCK:
-        hit = _CACHE.get(_key(source_root))
-        if hit and (time.time() - hit[0]) < _CACHE_TTL_S:
-            return hit[1]
+        return _fresh(_CACHE.get(_key(source_root, sds_path, srs_path, uds_path)), sig)
+
+
+def cached(source_root: str, *, sds_path: str = "", srs_path: str = "",
+           uds_path: str = "") -> Optional[Dict[str, Any]]:
+    sig = signature_for(source_root, sds_path, srs_path, uds_path)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(_key(source_root, sds_path, srs_path, uds_path))
+        if _fresh(hit, sig):
+            out = dict(hit[1])
+            # 언제 잰 것인지와 **변경을 감지할 수 있는지**를 함께 싣는다. 신선도를
+            # 말하지 않으면 15분 전 수치가 방금 잰 것처럼 보인다.
+            out["measured_at"] = hit[0]
+            out["freshness"] = "verified" if (len(hit) > 2 and hit[2]) else "ttl_only"
+            return out
     return None
 
 
@@ -418,6 +512,13 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
     weak: List[str] = []
     conflict: List[str] = []
     graded = 0
+    # 등급별 분포. **MC/DC 필수 여부(ASIL D)가 여기서만 나온다** — 준비 게이트의 SUTS
+    # 상한 경고가 "ASIL D 는 MC/DC 필수" 라는 일반론에 머물러, QM 전용 프로젝트에는
+    # 소음이고 정작 ASIL D 프로젝트에서는 몇 개가 걸리는지 말하지 못했다.
+    # ⚠ 등급을 못 찾은 unit 은 `ungraded` 로 **따로** 센다. `QM` 으로 접으면 근거 부재가
+    #   "안전 요구 없음" 이 되어 under-classification 이다(저장소 규약: 지어내지 않는다).
+    by_grade: Dict[str, int] = {}
+    ungraded = 0
     for u in units:
         if not isinstance(u, dict):
             continue
@@ -425,8 +526,12 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
         #   `str(...)` 진리값으로 세면 **전 unit 이 등급 있음**으로 잡히고, "1,157 중
         #   425 가 약함" 이 "나머지 732 는 근거가 단단하다" 로 읽힌다. 등급 판정은
         #   `_asil_max_of` 단일 출처(TBD·빈칸 → "")를 쓴다.
-        if _asil_max_of([str(u.get("asil") or "")]):
+        _g = _asil_max_of([str(u.get("asil") or "")])
+        if _g:
             graded += 1
+            by_grade[_g] = by_grade.get(_g, 0) + 1
+        else:
+            ungraded += 1
         ev = str(u.get("asil_evidence") or "")
         if ev == "sds-fuzzy-conflict":
             conflict.append(str(u.get("name") or ""))
@@ -440,6 +545,9 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
         # 갈리기까지** 한 것(= 사전 순서가 등급을 정했다). 둘을 합치면 심각도가 섞인다.
         "fuzzy": len(weak),
         "fuzzy_conflict": len(conflict),
+        # 등급 분포 + **등급을 못 찾은 수**. 둘을 합치지 않는다(위 주석).
+        "by_grade": by_grade,
+        "ungraded": ungraded,
         "samples": (conflict[:6] + weak[:6])[:8],
     }
 
@@ -547,7 +655,37 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
         "mapped_functions": len(mapped_fids),
         "functions_beyond_cap": len(mapped_fids - kept_fids),
         "requirements_over_cap": sum(1 for v in req_to_fids.values() if len(v) > cap),
+        # 상한을 얼마로 올려야 절단이 사라지는가 — 사용자가 숫자를 추측하지 않게 한다.
+        # ⚠ 위 `functions_beyond_cap` 이 하한이듯 이것도 **하한**이다(한 함수가 여러
+        #   TC 를 내면 더 필요하다). "이 값이면 전부" 가 아니라 "최소 이만큼" 이다.
+        "max_functions_per_req": max((len(v) for v in req_to_fids.values()), default=0),
+        # 요구별 매핑 함수 목록(고유 인덱스). 준비 게이트가 **사용자가 정한 상한**으로
+        # 절단량을 다시 재려면 이게 필요하다 — 위 `functions_beyond_cap` 은 하드코딩
+        # 기본값(5) 기준이라, 상한을 바꿔도 그대로면 두 행이 서로 다른 캡을 말한다.
+        # ⚠ 이름 대신 int 인덱스로 담는다(메모리). 재계산은 원래와 **같은 방식**이어야
+        #   하므로 집합 차(고유 함수 수)로 세야 하고, 그래서 분포만으로는 부족하다.
+        "req_fid_lists": _fid_lists(req_to_fids),
     }
+
+
+def _fid_lists(req_to_fids: Dict[str, List[Any]]) -> List[List[int]]:
+    """요구별 함수 목록을 **고유 인덱스**로 접는다 — 순서를 보존한다.
+
+    순서가 곧 절단 결과다(`generators/sts.py` 는 앞에서 자른다). 이름을 그대로 담으면
+    캐시가 커지므로 인덱스로 바꾸되, 요구 안의 순서는 그대로 둔다.
+    """
+    index: Dict[Any, int] = {}
+    out: List[List[int]] = []
+    for fids in req_to_fids.values():
+        if not fids:
+            continue
+        row: List[int] = []
+        for f in fids:
+            if f not in index:
+                index[f] = len(index)
+            row.append(index[f])
+        out.append(row)
+    return out
 
 
 def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
@@ -586,7 +724,16 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         "suts_inputs": _measure_suts_inputs(fd, sds_map, gim, units_out=_units),
         "suts_asil": _measure_suts_asil(_units),
         "sts_mapping": _measure_sts_mapping(fd, sds_map, sds_reason, srs_path, uds_path),
+        # UDS 분류 상한이 **실제로 무엇을 잘랐는가**(`uds_generator` 의 `category_caps`).
+        # 같은 파서를 이미 돌렸으므로 추가 비용이 0 이다. 준비 게이트는 이 값이 있을
+        # 때만 "지금 잘리고 있다" 를 말할 수 있다 — 없으면 상한만 공시할 뿐이다.
+        "uds_category_caps": _sections.get("category_caps") or {},
+        # 소스 파일 상한(1200)에 닿았는가. 닿으면 그 뒤 파일의 함수가 규격서에 **아예
+        # 없다** — 게이트가 이 값 없이는 "확인됨" 이라고만 말할 수 있었다.
+        "uds_file_scan": _sections.get("file_scan") or {},
     }
+    _sig = signature_for(source_root, sds_path, srs_path, uds_path)
     with _CACHE_LOCK:
-        _CACHE[_key(source_root)] = (time.time(), result)
+        _CACHE[_key(source_root, sds_path, srs_path, uds_path)] = (
+            time.time(), result, _sig)
     return result

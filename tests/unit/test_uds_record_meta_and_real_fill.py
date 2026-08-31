@@ -353,14 +353,26 @@ class TestTruncationCapsAreHonest:
         assert hasattr(cfg, "UDS_MAX_FUNCTION_ITEMS")
 
     def test_uds_declares_its_caps(self):
-        """UDS 도 상한을 공시한다 — 예전엔 `caps={}` 라 화면이 절단을 말할 수 없었다."""
+        """UDS 도 상한을 공시하고, 이제 **요청으로 조정한다**.
+
+        이력: `caps={}` → 화면이 절단을 말할 수 없었다 → 공시는 하되
+        `api: None`(조정 불가) → 이제 `Form(None)` 으로 받는다. 마지막 단계에서
+        `api` 는 **`Form(None)` 의 실효 기본값**이라 생성기 기본과 같아야 한다
+        (`test_docgen_cap_wiring_parity::test_every_adjustable_cap_matches_handler`
+        가 그 규약을 강제한다).
+        """
         from backend.services.docgen_requirements import requirements_for
         caps = requirements_for("uds").get("caps") or {}
         assert set(caps) == {"max_source_files", "max_items_per_category"}
         for key, cap in caps.items():
             assert cap["effect"].strip(), f"{key}: 잘리면 무슨 일이 나는지 적혀 있어야 한다"
-            assert cap["api"] is None, "UDS 생성 요청에는 상한 파라미터가 없다"
+            assert cap["adjustable"] is True, f"{key}: 요청으로 조정할 수 있어야 한다"
+            assert cap["api"] == cap["generator"], (
+                f"{key}: Form(None) 이라 실효 기본값은 생성기 기본과 같아야 한다")
             assert isinstance(cap["generator"], int) and cap["generator"] > 0
+            # 기본값의 출처는 계속 밝힌다 — 조정 가능해졌다고 이 정보가 사라지면
+            # 화면의 "기본 1200" 이 어디서 온 수인지 알 수 없다.
+            assert cap["env"].startswith("DEVOPS_UDS_"), key
 
     def test_declared_caps_track_config_not_a_copy(self):
         """공시값은 `config` 를 읽어야 한다 — 숫자를 복제하면 실제와 갈린다."""

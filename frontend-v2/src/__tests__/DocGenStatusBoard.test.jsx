@@ -9,11 +9,12 @@
  *   - `QualityDashboard` 가 `gate_pass ?? (score >= 70)` 로 **통과를 지어냈다**.
  *   - 백엔드가 `all([])`=True 라 **검사 0건을 PASS 로 기록**했다(fail-closed 로 수정).
  */
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DOCGEN_CAPS_KEY, saveDocGenCap } from '../sharedInputs.js';
 
 const mockApi = vi.fn();
 const mockPost = vi.fn();
@@ -25,8 +26,15 @@ vi.mock('../api.js', () => ({
   buildUrl: (p) => p,
   // 실제 헤더 조립은 api.js 의 책임 — 여기서는 **붙었는지**만 본다(X9).
   authHeaders: () => ({ Authorization: 'Bearer T', 'X-User': 'u' }),
+  // ⚠ 실제 폴백 사슬을 흉내낸다. 빈 문자열로 뭉개면 "게이트가 생성과 같은 캐시 루트를
+  //   본다" 는 단언이 vacuous 해진다(둘 다 '' 라 항상 같다).
+  resolveCacheRoot: (ar, job, cfg) =>
+    ar?.cacheRoot || (job?.url ? '.devops_pro_cache/u' : '') || cfg?.cacheRoot || '',
 }));
-vi.mock('../App.jsx', () => ({ useToast: () => mockToast }));
+vi.mock('../App.jsx', () => ({
+  useToast: () => mockToast,
+  useJenkinsCfg: () => ({ cfg: { cacheRoot: '.cache', buildSelector: 'lastSuccessfulBuild' }, update: () => {} }),
+}));
 
 const { default: DocGenStatusBoard } = await import('../components/sections/DocGenStatusBoard.jsx');
 
@@ -534,35 +542,197 @@ describe('DocGenStatusBoard — 시험 결과 문서 원클릭 생성', () => {
   });
 });
 
-// ── 재료 측정 요청에 SwRS 를 싣는가 (2026-08-14) ─────────────────────────────
+// ── 재료 측정 요청이 서버 해석에 필요한 것을 싣는가 (2026-08-14 → 2026-08-31) ──
 //
-// STS 축(요구-함수 매핑)은 **요구 목록**이 있어야 잰다. 안 보내면 게이트가
-// "SwRS 경로가 지정되지 않았습니다" 로 미측정에 머문다 — 조용히 틀리지는 않지만,
-// 그 축은 영원히 안 켜진다.
+// STS 축(요구-함수 매핑)은 SwRS 요구 목록이, 설계-ID 브리지는 SwUDS 가 있어야 켜진다.
+// 안 실으면 그 축은 영원히 안 켜진다.
 //
-// ⚠ 이건 **구조 검사**다. 준비 패널을 열고 액션까지 눌러 재현하는 행동 검사가 더
-//   낫지만, 미측정 사유가 화면에 그대로 나오므로(=침묵 아님) 여기서는 요청 본문이
-//   두 문서를 다 싣는지만 못 박는다.
-describe('measure-source 요청 본문 (구조)', () => {
-  const SRC = fs.readFileSync(
-    path.join(process.cwd(), 'src/components/sections/DocGenStatusBoard.jsx'), 'utf8');
+// ⚠ 2026-08-31: 예전엔 **화면이 경로를 직접 골랐고**(`paths.sds || linked_docs.sds`)
+//   이 자리에 그 소스를 grep 하는 구조 검사가 있었다. 그건 백엔드 우선순위 규칙의
+//   복제라, 조금만 갈리면 preflight 의 캐시 조회 키와 어긋나 **측정을 해도 게이트가
+//   계속 "아직 재지 않았습니다"** 로 남는다. 이제 해석은 서버(`_resolve_inputs`)가 하고
+//   화면은 `scm_id`+`doc_paths` 만 싣는다 — 그래서 **행동 검사**로 바꾼다.
+describe('measure-source 요청 본문', () => {
+  it('서버가 경로를 해석할 수 있는 두 값을 싣는다 (판정 복제 없이)', async () => {
+    localStorage.setItem('devops_v2_doc_paths', JSON.stringify({
+      sds: 'U:/docs/SwDS.docx', srs: 'U:/docs/SwRS.docx', uds: 'U:/docs/SwUDS.docx',
+    }));
+    const user = userEvent.setup();
+    mockPost.mockImplementation((url) => {
+      if (url === '/api/docgen/preflight') {
+        return Promise.resolve({
+          ok: true, doc_type: 'sits', label: 'SITS', verdict: 'unknown', file_mode: 'local',
+          steps: [{
+            id: 'test_materials', phase: 'material', state: 'unmeasured', label: '재료',
+            reason: '아직 측정하지 않았습니다', actions: [{ kind: 'measure_source' }],
+          }],
+        });
+      }
+      return Promise.resolve({ ok: true });
+    });
+    mountBoard({ analysisResult: { matchedScm: { id: 'kjpds02_pv', source_root: 'D:/src' } } });
+    const tr = await waitFor(() => rowOf('📕 SITS'));
+    await user.click(within(tr).getByRole('button', { name: '준비' }));
+    await user.click(await screen.findByRole('button', { name: '소스 측정' }));
 
-  it('SwDS 와 SwRS 를 함께 보낸다', () => {
-    const call = SRC.slice(SRC.indexOf("'/api/docgen/measure-source'"));
-    const body = call.slice(0, call.indexOf('});') + 3);
-    expect(body).toMatch(/sds_path:/);
-    expect(body).toMatch(/srs_path:/);
-    // 경로 출처도 같아야 한다 — 한쪽만 설정(doc_paths)을 보면 두 축이 다른 프로젝트를 잰다.
-    expect(body).toMatch(/paths\.sds/);
-    expect(body).toMatch(/paths\.srs/);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      '/api/docgen/measure-source', expect.objectContaining({ doc_type: 'sits' })));
+    const body = mockPost.mock.calls.find(c => c[0] === '/api/docgen/measure-source')[1];
+    expect(body.scm_id).toBe('kjpds02_pv');
+    expect(body.doc_paths).toEqual(expect.objectContaining({
+      sds: 'U:/docs/SwDS.docx', srs: 'U:/docs/SwRS.docx', uds: 'U:/docs/SwUDS.docx',
+    }));
+    // 화면이 다시 경로를 고르기 시작하면 캐시 키가 갈린다 — 그 회귀를 못 박는다.
+    expect(body.sds_path).toBeUndefined();
+    expect(body.srs_path).toBeUndefined();
+    expect(body.uds_path).toBeUndefined();
+  });
+});
+
+// ── 늦게 온 옛 판정이 새 판정을 덮는가 (2026-08-30) ──────────────────────────
+//
+// preflight 비용은 소스 측정 캐시 유무로 수십 배 차이가 나서, 먼저 띄운 요청이 나중에
+// 도착하는 일이 실제로 일어난다. 순번 대조가 없으면 늦게 온 **옛 판정**이 새 판정을
+// 덮어써서, 상한을 방금 올렸는데 화면은 계속 "아직 정하지 않았습니다" 로 남는다 —
+// 이 패널이 없애려던 증상(고른 값이 반영 안 된 것처럼 보임) 그 자체다.
+describe('DocGenStatusBoard — 응답 역전', () => {
+  it('늦게 도착한 옛 preflight 응답이 새 판정을 덮지 않는다', async () => {
+    const capStep = (state, reason) => ({
+      id: 'cap_max_flows', phase: 'decision', state, label: 'max_flows', reason,
+      measured: { api_default: 120, generator_default: 120, adjustable: true, suggested: 145 },
+    });
+    const payload = (state, reason) => ({
+      ok: true, doc_type: 'sits', label: 'SITS', verdict: 'needs_decision',
+      file_mode: 'local', steps: [capStep(state, reason)],
+    });
+
+    const pending = [];
+    mockPost.mockImplementation((url) => {
+      if (url !== '/api/docgen/preflight') return Promise.resolve({ suggestions: [] });
+      return new Promise(resolve => pending.push(resolve));
+    });
+
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📕 SITS'));
+    await user.click(within(tr).getByRole('button', { name: '준비' }));
+
+    // 1) 첫 조회는 정상적으로 도착한다.
+    await waitFor(() => expect(pending.length).toBe(1));
+    pending[0](payload('needed', '아직 정하지 않아 기본값 120 로 만듭니다'));
+    await screen.findByText(/아직 정하지 않아/);
+
+    // 2) 값을 정하고(=재조회) → 그 응답이 아직 안 온 사이에 3) 다시 재조회한다.
+    await user.click(screen.getByRole('button', { name: /전부 145/ }));
+    await waitFor(() => expect(pending.length).toBe(2));
+    // 값이 이미 제안값이라 버튼은 사라진다(없는 조치를 만들지 않는 규약) — 두 번째
+    // 재조회는 입력칸 blur 로 낸다. 실제 사용자도 그렇게 낸다.
+    fireEvent.blur(screen.getByLabelText('max_flows 상한'));
+    await waitFor(() => expect(pending.length).toBe(3));
+
+    // 최신(3번) 이 먼저 도착하고, 옛것(2번)이 뒤늦게 도착한다.
+    pending[2](payload('ok', '145 로 정했습니다 — 전량을 담습니다'));
+    await screen.findByText(/전량을 담습니다/);
+    pending[1](payload('needed', '아직 정하지 않아 기본값 120 로 만듭니다'));
+
+    // 옛 판정이 되살아나면 안 된다.
+    await waitFor(() => expect(screen.getByText(/전량을 담습니다/)).toBeInTheDocument());
+    expect(screen.queryByText(/아직 정하지 않아/)).toBeNull();
+  });
+});
+
+/**
+ * 게이트가 판정하는 대상이 **생성이 쓰는 대상과 같은가**.
+ *
+ * 게이트는 `cache_root` 를 `analysisResult?.cacheRoot || ''` 만 썼는데 생성 요청은
+ * `analysisResult?.cacheRoot || defaultCacheRoot(job.url) || cfg.cacheRoot` 세 단계를 탔다.
+ * 빈 문자열이면 백엔드가 `~/.devops_pro_cache` 로 떨어져(`_normalize_jenkins_cache_root`)
+ * 화면이 쓰는 `.devops_pro_cache/<user>` 와 **다른 폴더**를 본다 → UDS 빌드 캐시를
+ * "없음(진행 불가)" 으로 보고하는데 정작 생성은 성공한다. 게이트가 생성과 반대말을 한다.
+ */
+describe('DocGenStatusBoard — 게이트가 생성과 같은 것을 본다', () => {
+  const prepCall = () =>
+    mockPost.mock.calls.find(([u]) => String(u).includes('/api/docgen/preflight'));
+
+  it('분석 결과에 캐시 루트가 없어도 빈 값으로 판정하지 않는다', async () => {
+    const user = userEvent.setup();
+    // cacheRoot 가 없는 analysisResult — 영향 탭이 null 에서 만드는 경로의 형태다.
+    render(<DocGenStatusBoard job={JOB} analysisResult={{ matchedScm: { id: 'p', name: 'P' } }}
+      genState={null} />);
+    await waitFor(() => expect(rowOf('📘 UDS')).toBeTruthy());
+    await user.click(within(rowOf('📘 UDS')).getByRole('button', { name: '준비' }));
+    await waitFor(() => expect(prepCall()).toBeTruthy());
+    expect(prepCall()[1].cache_root).toBe('.devops_pro_cache/u');
   });
 
-  // 설계-ID 브리지의 좌측 끝. 안 보내면 브리지가 꺼진 채로 재고, 게이트가 실제
-  // 산출물보다 나쁜 숫자를 보고한다(실측 KJPDS02_PV: 요구 48/68 vs 64/68).
-  it('SwUDS 도 함께 보낸다 (설계-ID 브리지)', () => {
-    const call = SRC.slice(SRC.indexOf("'/api/docgen/measure-source'"));
-    const body = call.slice(0, call.indexOf('});') + 3);
-    expect(body).toMatch(/uds_path:/);
-    expect(body).toMatch(/paths\.uds/);
+  it('분석 결과의 캐시 루트가 있으면 그것이 이긴다', async () => {
+    const user = userEvent.setup();
+    render(<DocGenStatusBoard job={JOB}
+      analysisResult={{ matchedScm: { id: 'p', name: 'P' }, cacheRoot: 'X:/explicit' }}
+      genState={null} />);
+    await waitFor(() => expect(rowOf('📘 UDS')).toBeTruthy());
+    await user.click(within(rowOf('📘 UDS')).getByRole('button', { name: '준비' }));
+    await waitFor(() => expect(prepCall()).toBeTruthy());
+    expect(prepCall()[1].cache_root).toBe('X:/explicit');
+  });
+
+  it('판정에 쓰는 상한은 **그 프로젝트 칸**에서 온다', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      `${DOCGEN_CAPS_KEY}::${JOB.url.replace(/\/+$/, '').toLowerCase()}`,
+      JSON.stringify({ max_flows: 321 }));
+    localStorage.setItem(
+      `${DOCGEN_CAPS_KEY}::http://ci/job/other`, JSON.stringify({ max_flows: 999 }));
+    render(<DocGenStatusBoard job={JOB} analysisResult={{ matchedScm: { id: 'p', name: 'P' } }}
+      genState={null} />);
+    await waitFor(() => expect(rowOf('📘 UDS')).toBeTruthy());
+    await user.click(within(rowOf('📘 UDS')).getByRole('button', { name: '준비' }));
+    await waitFor(() => expect(prepCall()).toBeTruthy());
+    expect(prepCall()[1].caps.max_flows).toBe(321);
+  });
+
+  it('상한이 바뀌면 펼쳐 둔 행을 **다시 판정한다**', async () => {
+    const user = userEvent.setup();
+    render(<DocGenStatusBoard job={JOB} analysisResult={{ matchedScm: { id: 'p', name: 'P' } }}
+      genState={null} />);
+    await waitFor(() => expect(rowOf('📘 UDS')).toBeTruthy());
+    await user.click(within(rowOf('📘 UDS')).getByRole('button', { name: '준비' }));
+    await waitFor(() => expect(prepCall()).toBeTruthy());
+    const before = mockPost.mock.calls.filter(
+      ([u]) => String(u).includes('/api/docgen/preflight')).length;
+
+    // 다른 화면(패널의 입력칸·다른 탭)에서 상한이 바뀐 상황.
+    saveDocGenCap('max_flows', 55, JOB.url.replace(/\/+$/, '').toLowerCase());
+
+    // 통지가 없으면 이 행은 옛 판정을 그대로 들고 있다 — 같은 화면의 두 줄이 다른 말을 한다.
+    await waitFor(() => {
+      const after = mockPost.mock.calls.filter(
+        ([u]) => String(u).includes('/api/docgen/preflight')).length;
+      expect(after).toBeGreaterThan(before);
+    }, { timeout: 3000 });
+  });
+});
+
+/**
+ * 결과 뭉치가 **통째로 다른 Job 의 것**이면 아래 판정 전부가 남의 프로젝트 얘기다.
+ * 생성은 `DocGenSection` 이 같은 판정으로 거부하므로, 보드는 그 사실을 미리 말한다 —
+ * 버튼을 눌러 보고서야 알게 되면 안 된다.
+ */
+describe('DocGenStatusBoard — 다른 Job 의 분석 결과를 조용히 쓰지 않는다', () => {
+  it('결과가 다른 Job 의 것이면 경고를 띄운다', async () => {
+    render(<DocGenStatusBoard job={JOB}
+      analysisResult={{ jobUrl: 'http://ci/job/OTHER', matchedScm: { id: 'p', name: 'P' } }}
+      genState={null} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/현재 프로젝트의 것이 아닙니다/);
+    // 사유만 말하고 해소 방법을 안 주면 사용자는 막힌 채로 남는다.
+    expect(alert.textContent).toMatch(/대시보드/);
+  });
+
+  it('같은 Job 이면 경고를 띄우지 않는다 (상시 경고는 곧 무시된다)', async () => {
+    render(<DocGenStatusBoard job={JOB}
+      analysisResult={{ jobUrl: JOB.url, matchedScm: { id: 'p', name: 'P' } }} genState={null} />);
+    await waitFor(() => expect(rowOf('📘 UDS')).toBeTruthy());
+    expect(screen.queryByText(/현재 프로젝트의 것이 아닙니다/)).toBeNull();
   });
 });

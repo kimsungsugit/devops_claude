@@ -348,6 +348,28 @@ export function defaultCacheRoot(jobUrl) {
   return `.devops_pro_cache/${safeUser}`;
 }
 
+/**
+ * 화면이 쓰는 캐시 루트 — **모든 소비처가 같은 폴백 사슬을 타야 한다.**
+ *
+ * ⚠ 빈 문자열을 보내면 백엔드가 `~/.devops_pro_cache` 로 떨어진다
+ * (`backend/helpers/jenkins.py:_normalize_jenkins_cache_root`) — 화면이 쓰는
+ * `.devops_pro_cache/<user>` 와 **완전히 다른 폴더**다. 그래서 한 곳만 폴백을 덜 타면
+ * 그 화면만 조용히 딴 디렉터리를 본다.
+ *
+ * 실제로 그랬다: 준비 게이트는 `analysisResult?.cacheRoot || ''` 만 썼는데 생성 요청은
+ * 세 단계를 다 탔다. `analysisResult` 가 부분적으로만 채워진 상태(영향 탭이 `null` 에서
+ * 만드는 경로)에서 게이트는 UDS 빌드 캐시를 "없음" 으로 보고 **막힌 것처럼** 그리고,
+ * 정작 생성은 성공한다. 게이트가 생성과 반대말을 하는 형태라 신뢰를 통째로 잃는다.
+ *
+ * @param {object|null} analysisResult 대시보드 분석 결과(있으면 그 안의 값이 정답)
+ * @param {object|null} job            현재 Jenkins job (`{url}`)
+ * @param {object|null} cfg            Jenkins 설정(`{cacheRoot}`)
+ * @returns {string} 캐시 루트(전부 비면 빈 문자열)
+ */
+export function resolveCacheRoot(analysisResult, job, cfg) {
+  return analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg?.cacheRoot || '';
+}
+
 /** Build status → pill tone */
 export function buildTone(result) {
   if (!result) return 'neutral';

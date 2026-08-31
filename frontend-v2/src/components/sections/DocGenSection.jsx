@@ -1,11 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { api, post, defaultCacheRoot, getUsername, authHeaders } from '../../api.js';
+import { api, post, resolveCacheRoot, authHeaders } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import { isAbortError } from '../../impactPoll.js';
 import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
-import { persistDocPaths, useScmFallback } from '../../docGenHelpers.js';
-import { loadDocPaths, loadDocGenCaps, useDocPathsSync } from '../../sharedInputs.js';
+import { persistDocPaths, useScmFallback, soleScmEntry, docGenCapsScope } from '../../docGenHelpers.js';
+import { loadDocPaths, loadDocGenCaps, loadSharedInputs, useDocPathsSync } from '../../sharedInputs.js';
 import { extractOutputPath } from '../../docgenOutputPath.js';
+import { contextConflict, mismatchText } from '../../impactGuard.js';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -27,10 +28,47 @@ const BUILDER_TABS = [
   { id: 'swreport', label: '통합 결과', icon: '📊', desc: '전 레벨 통합 Summary' },
 ];
 
+/**
+ * 사용자가 준비 게이트에서 정한 **생성 상한·범위** → 요청 폼 키. `{저장소 키: 폼 키}`.
+ *
+ * ⚠ **정본은 `backend/services/docgen_requirements.py` 의 `adjustable` 캡이다.** 이 표가
+ * 그것과 갈라지면 둘 중 하나가 된다: 게이트에서 고른 값이 조용히 안 실리거나(= 거짓 통제
+ * — 사용자는 고쳤다고 믿는데 문서는 그대로), 서버가 안 받는 키를 보내거나(= 죽은 코드.
+ * FastAPI 는 미선언 Form 필드를 **조용히 무시**하므로 실서비스에선 절대 안 드러난다).
+ * 드리프트는 `tests/unit/test_docgen_cap_wiring_parity.py` 가 막는다.
+ *
+ * ⚠ preflight 응답의 값을 쓰지 않는 이유: 보드에서 **게이트를 펼치지 않고 바로 [생성]**
+ * 을 누르는 것이 기본 경로라 그 시점에 응답이 없을 수 있다. 없으면 상한이 조용히 빠진다.
+ *
+ * UDS 가 없는 것은 의도다 — 그 두 상한은 API 가 받지 않아 환경변수로만 조정된다.
+ */
+const CAP_PARAMS = {
+  uds: {
+    max_source_files: 'max_source_files',
+    max_items_per_category: 'max_items_per_category',
+    template_source: 'template_source',
+  },
+  sts: {
+    max_tc_per_req: 'max_tc_per_req',
+    max_steps_per_tc: 'max_steps_per_tc',
+    template_source: 'template_source',
+  },
+  suts: {
+    max_sequences: 'max_sequences',
+    suts_scope: 'scope',
+    template_source: 'template_source',
+  },
+  sits: {
+    max_subcases: 'max_subcases',
+    max_flows: 'max_flows',
+    template_source: 'template_source',
+  },
+};
+
 export default function DocGenSection({ job, analysisResult, onNavigateSub, onGenState, onRegisterGenerate }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
-  const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
+  const cacheRoot = resolveCacheRoot(analysisResult, job, cfg);
 
   const [generating, setGenerating] = useState(null);
   const [genStage, setGenStage] = useState('');     // current stage text
@@ -43,6 +81,23 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
 
   const generateDoc = useCallback(async (docType) => {
     if (!job?.url) { toast('warning', '프로젝트를 먼저 선택하세요.'); return; }
+    // ── 출처 대조 (생성 **직전**, 되돌릴 수 없는 쪽이라 fail-closed) ──────────
+    //
+    // 이 요청은 `job_url`(현재 화면)과 `source_root`·`linked_docs`(analysisResult 의
+    // matchedScm)를 **함께** 싣는다. 둘이 다른 프로젝트의 것일 수 있는 경로가 실재한다:
+    // `Detail.switchProject` 는 `setSelectedJob(B)` 를 await 앞에서 하고 뒤이은
+    // `loadProjectFromCache(B)` 가 throw 하면 토스트만 띄운다 → `job=B × analysisResult=A`
+    // 가 그대로 남는다(`impactGuard.contextConflict` docstring 에 기록된 경로).
+    //
+    // 그 상태로 만들면 **B 의 문서가 A 의 소스·연결문서로** 만들어지고, 표지·추적성·
+    // 품질 이력까지 전부 그 조합으로 남는다 — ISO 26262 산출물의 오귀속이라 되돌리기
+    // 어렵다. 읽기 화면 4곳(SrsSds·Scm·Impact·ProjectSummary)은 이미 이 가드를 쓰는데
+    // 정작 **산출물을 만드는 쪽에만 없었다**. 표시는 모순만 막고, 생성은 거부한다.
+    const _ctx = contextConflict(analysisResult, job.url);
+    if (_ctx.conflict) {
+      toast('error', `생성을 멈췄습니다 — ${mismatchText(_ctx.reason)}`);
+      return;
+    }
     const label = DOC_TYPES.find(d => d.key === docType)?.label || docType.toUpperCase();
     setGenerating(docType);
     setGenStage(`${label} 생성 준비 중...`);
@@ -53,14 +108,35 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       // Prefer the Dashboard-matched SCM entry (driven by pickScmForJob /
       // manual dropdown override). Falling back to scmList[0] would silently
       // generate docs against the wrong project's source_root and linked_docs.
-      let scm = analysisResult?.matchedScm || analysisResult?.scmList?.[0];
+      //
+      // ⚠ 바로 위 주석이 경고하는 그 일을 **아래 두 줄이 실제로 하고 있었다** —
+      //   `scmList[0]` 과 `/api/scm/list` 의 `items[0]` 둘 다 무조건 첫 항목을 집었다.
+      //   실측: 이 저장소의 레지스트리에는 프로젝트가 **3개**(hdpdm01·kjpds02·kjpds02_pv)
+      //   등록돼 있어, 매칭이 안 되면 항상 hdpdm01 의 소스로 남의 문서를 만든다.
+      //   생성 현황 보드는 같은 자리에서 이미 "scmList[0] 폴백은 쓰지 않는다" 고
+      //   적어 두었는데, 정작 생성 경로만 그 규칙 밖에 있었다.
+      //
+      //   그래서 **모호하지 않을 때만** 자동으로 고른다(후보가 정확히 하나). 후보가
+      //   여럿인데 매칭이 없으면 고르지 않고 멈춘다 — 임의 선택은 조용히 틀리지만
+      //   거부는 시끄럽게 틀린다. 대시보드에 SCM 수동 지정이 있어 해소 경로도 있다.
+      //   판정은 `docGenHelpers.soleScmEntry` 단일 출처다 — 같은 폴백이 `useScmFallback`
+      //   에도 있어서, 여기서 새로 적으면 그 훅이 먹이는 '문서 현황' 표와 갈린다.
+      let scm = analysisResult?.matchedScm || soleScmEntry(analysisResult?.scmList);
+      let scmAmbiguous = !scm && (analysisResult?.scmList?.length || 0) > 1;
       // Fallback: fetch from SCM API if not in analysisResult
       if (!scm?.source_root) {
         try {
           const scmData = await api('/api/scm/list');
           const items = scmData?.items || (Array.isArray(scmData) ? scmData : []);
-          if (items.length > 0) scm = items[0];
+          const sole = soleScmEntry(items);
+          if (sole) scm = sole;
+          else if (items.length > 1 && !scm) scmAmbiguous = true;
         } catch (_) { /* SCM 조회 실패 → scm 미설정 → 아래에서 linkedDocs {} 로 진행 */ }
+      }
+      if (scmAmbiguous) {
+        throw new Error(
+          '어느 프로젝트의 소스로 만들지 확정할 수 없습니다 — SCM 등록이 여러 개인데 '
+          + '이 Job 과 매칭된 항목이 없습니다. 대시보드에서 SCM 을 직접 지정한 뒤 다시 시도하세요.');
       }
       const linkedDocs = scm?.linked_docs || {};
 
@@ -82,7 +158,6 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       // 정본을 쓰면 표지·이력·Introduction(표기 규약 표)이 납품본과 같아진다.
       const referenceDoc = docPaths[docType] || linkedDocs[docType] || '';
       if (referenceDoc) formData.append('reference_doc_path', referenceDoc);
-      if (docType === 'uds' && templatePath) formData.append('uds_template_path', templatePath);
       // Pass linked doc paths
       const srsPath = docPaths.srs || linkedDocs.srs || '';
       const sdsPath = docPaths.sds || linkedDocs.sds || '';
@@ -104,17 +179,31 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       // 생성 상한 — **설정된 것만** 보낸다. 안 보내면 생성기 기본값이 쓰이고, 그게
       // 단일 출처다(여기서 숫자를 복제하면 생성기 상수와 갈라진다).
       // 실측 kjpds02_pv: 통합 흐름 145 라 기본 120 으로는 25개가 규격에서 빠진다.
-      if (docType === 'sits') {
-        const caps = loadDocGenCaps();
-        if (caps.max_flows) formData.append('max_flows', String(caps.max_flows));
-        if (caps.max_subcases) formData.append('max_subcases', String(caps.max_subcases));
+      // 범위(SUTS `scope`)도 같은 표에 있다 — 기본은 서버가 정하고(`suds` = SwUDS 설계
+      // ID 가 있는 함수만, 정본과 같은 범위), 사용자가 고른 경우에만 보낸다.
+      // 상한은 **프로젝트별**이다. 게이트 패널과 같은 스코프 함수를 쓴다 —
+      // 여기서 다르게 계산하면 화면이 보여 준 값과 실제로 실리는 값이 갈린다.
+      const caps = loadDocGenCaps(docGenCapsScope(job));
+      for (const [storeKey, formKey] of Object.entries(CAP_PARAMS[docType] || {})) {
+        const v = caps[storeKey];
+        // 숫자 상한은 스토어가 이미 0·음수·빈값에서 키를 지운다(`sharedInputs.js:50-57`).
+        // 여기서 `if (v)` 로 접으면 그 규약을 두 벌로 만드는 셈이라 미설정만 거른다.
+        if (v === undefined || v === null || String(v).trim() === '') continue;
+        formData.append(formKey, String(v).trim());
       }
-      // SUTS 시험 범위 — 기본은 서버가 정한다(`suds` = SwUDS 설계 ID 가 있는 함수만,
-      // 정본과 같은 범위). 사용자가 준비 패널에서 `source`(소스 전체)를 고른 경우에만 보낸다.
-      if (docType === 'suts') {
-        const scope = String(loadDocGenCaps().suts_scope || '').trim();
-        if (scope) formData.append('scope', scope);
-      }
+      // 프로젝트 ASIL 등급 — 상한과 달리 **문서 내용을 바꾼다**(`generators/sts.py:1719`
+      // 가 요구별 ASIL 빈 칸을 이 값으로 역채움하고 안전 관련 갈래를 가른다).
+      // 백엔드는 오래 `Form("")` 로 받고 있었고 Sw* 빌더 폼엔 입력칸이 있는데,
+      // 문서 4종만 배선이 빠져 **항상 빈 값**으로 생성됐다.
+      // ⚠ 비어 있으면 보내지 않는다 — 여기서 `QM` 같은 기본값을 채우면 근거 없는 등급을
+      //   지어내는 것이고, 하류가 그걸 사실로 쓴다.
+      // ⚠ **UDS 는 제외**다. 그 핸들러는 `asil_level` 을 선언하지 않아 FastAPI 가 조용히
+      //   버린다 — 보내면 죽은 코드이고, 게이트에 통제를 그리면 거짓 통제가 된다.
+      //   UDS 의 ASIL 은 함수별 증거(`@asil` → SwDS → `TBD`)에서 온다.
+      //   (같은 이유로 `uds_template_path` 전송도 지웠다 — 그 핸들러에 없는 필드였다.)
+      const _asil = docType === 'uds'
+        ? '' : String(loadSharedInputs()?.asil_level || '').trim();
+      if (_asil) formData.append('asil_level', _asil);
       if (udsPath && docType !== 'uds') formData.append('uds_path', udsPath);
 
       // SITS uses /api/local/ endpoint with urlencoded; others use /api/jenkins/ with FormData

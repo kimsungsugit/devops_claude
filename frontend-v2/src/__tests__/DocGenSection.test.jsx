@@ -39,6 +39,10 @@ vi.mock('../api.js', () => ({
   api: vi.fn().mockResolvedValue({ items: [] }),
   post: vi.fn(),
   defaultCacheRoot: vi.fn(() => ''),
+  // ⚠ 실제 폴백 사슬을 그대로 흉내낸다 — `vi.fn(() => '')` 로 뭉개면 "게이트와 생성이
+  //   같은 캐시 루트를 쓴다" 는 단언이 vacuous 해진다(둘 다 빈 문자열이라 항상 같다).
+  resolveCacheRoot: vi.fn((ar, job, cfg) =>
+    ar?.cacheRoot || (job?.url ? '.devops_pro_cache/testuser' : '') || cfg?.cacheRoot || ''),
   getUsername: vi.fn(() => 'testuser'),
   authHeaders: vi.fn(() => ({ 'X-User': 'testuser' })),
 }));
@@ -51,6 +55,7 @@ globalThis.fetch = vi.fn(() =>
 const { default: DocGenSection } = await import('../components/sections/DocGenSection.jsx');
 // 폴러는 별도 모듈 — 컴포넌트 파일에서 export 하면 Fast Refresh 가 깨진다.
 const { pollProgress, pollStsProgress } = await import('../docGenPoll.js');
+const { DOCGEN_CAPS_KEY } = await import('../sharedInputs.js');
 
 
 /* ── 픽스처 ── */
@@ -579,4 +584,250 @@ describe('DocGenSection — VectorCAST 패키지 목록이 실패를 숨기지 �
       globalThis.confirm = savedConfirm;
     }
   });
+});
+
+/**
+ * 게이트에서 정한 생성 상한이 **실제 요청에 실리는지**.
+ *
+ * 원래 결함: 준비 게이트가 상한 입력칸을 그리고 값도 localStorage 에 저장했는데, 생성
+ * 요청은 SITS 것만 실었다. STS `max_tc_per_req` 는 아무도 읽지 않아서 — 사용자가 상한을
+ * 올려도 문서는 그대로였다(게이트 실측: 매핑 함수 1,028개 중 최소 925개가 계속 무시험).
+ *
+ * 그래서 렌더가 아니라 **요청 바디**를 단언한다. 그게 유일한 관측량이다.
+ */
+describe('DocGenSection — 게이트에서 정한 상한이 요청에 실린다', () => {
+  const genCall = () =>
+    globalThis.fetch.mock.calls.find(([u]) => String(u).includes('/generate-async'));
+
+  // ⚠ `/SUTS/` 로는 못 찾는다 — 'SUTS 패키지 등록' 버튼이 따로 있어 2개가 매칭된다.
+  const clickDoc = async (name) => {
+    const user = userEvent.setup();
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+    await user.click(await screen.findByRole('button', { name }));
+    await waitFor(() => expect(genCall()).toBeTruthy(), { timeout: 6000 });
+    return genCall()[1].body;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    globalThis.fetch = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/generate-async') ? { job_id: 'j1' } : { packages: [] }),
+      text: async () => '',
+    }));
+    api.mockResolvedValue({ items: [] });
+  });
+
+  it('STS: 사용자가 정한 상한이 실린다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ max_tc_per_req: 12 }));
+    const body = await clickDoc(/STS 생성/);
+    // 존재만 단언하면 "항상 기본값을 보낸다" 뮤턴트가 산다 — 값을 본다.
+    expect(body.get('max_tc_per_req')).toBe('12');
+  }, 20000);
+
+  it('STS: 미설정이면 키 자체를 안 보낸다 — 생성기 기본값이 단일 출처다', async () => {
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('max_tc_per_req')).toBeNull();
+  }, 20000);
+
+  it('UDS 요청에 다른 문서의 상한이 섞이지 않는다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ max_tc_per_req: 12, max_sequences: 8 }));
+    const body = await clickDoc(/UDS 생성/);
+    // FastAPI 는 미선언 Form 필드를 **조용히 무시**하므로 실서비스에선 절대 안 드러난다.
+    expect(body.get('max_tc_per_req')).toBeNull();
+    expect(body.get('max_sequences')).toBeNull();
+  }, 20000);
+
+  // ── 프로젝트 ASIL 등급 (2026-08-31) ──────────────────────────────────────
+  //
+  // 상한과 달리 이 값은 **문서 내용을 바꾼다** — `generators/sts.py:1719` 가 요구별
+  // ASIL 빈 칸을 이 값으로 역채움하고 `is_safety_asil` 판정이 시험 갈래를 가른다.
+  // 백엔드는 오래 `Form("")` 로 받고 있었는데 문서 4종만 배선이 빠져 항상 빈 값이었다.
+  it('설정한 ASIL 등급이 문서 4종 요청에 실린다', async () => {
+    localStorage.setItem('devops_v2_shared_inputs', JSON.stringify({ asil_level: 'ASIL D' }));
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('asil_level')).toBe('ASIL D');
+  }, 20000);
+
+  it('ASIL 미설정이면 키를 안 보낸다 — QM 같은 기본값을 지어내지 않는다', async () => {
+    const body = await clickDoc(/STS 생성/);
+    // 여기서 기본값을 채우면 근거 없는 등급을 하류가 사실로 쓴다.
+    expect(body.get('asil_level')).toBeNull();
+  }, 20000);
+
+  it('SUTS: 시퀀스 상한과 시험 범위가 함께 실린다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ max_sequences: 8, suts_scope: 'source' }));
+    const body = await clickDoc(/SUTS 생성/);
+    expect(body.get('max_sequences')).toBe('8');
+    // 저장소 키(suts_scope)와 폼 키(scope)가 다른 유일한 항목이다.
+    expect(body.get('scope')).toBe('source');
+  }, 20000);
+
+  it('SITS 는 urlencoded 라 형식이 다르다 — 그래도 실린다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ max_flows: 200 }));
+    const body = await clickDoc(/SITS 생성/);
+    expect(new URLSearchParams(String(body)).get('max_flows')).toBe('200');
+  }, 20000);
+
+  // ── 이번 라운드에 배선된 값들 (2026-08-31) ────────────────────────────────
+  //
+  // 셋 다 "게이트에는 있는데 요청에는 없던" 것들이다. FastAPI 는 미선언 Form 필드를
+  // 조용히 무시하므로, 반대로 **보내는 쪽이 빠져도** 아무 오류 없이 문서만 안 바뀐다.
+
+  it('UDS: 정본 경로가 실린다 — 게이트가 "정본을 씁니다" 라고 말하는 근거다', async () => {
+    localStorage.setItem('devops_v2_doc_paths', JSON.stringify({ uds: 'D:/ref/SUDS.docx' }));
+    const body = await clickDoc(/UDS 생성/);
+    expect(body.get('reference_doc_path')).toBe('D:/ref/SUDS.docx');
+  }, 20000);
+
+  it('UDS: 핸들러에 없는 uds_template_path 를 더는 보내지 않는다', async () => {
+    localStorage.setItem('devops_v2_doc_paths', JSON.stringify({ uds_template: 'D:/tpl/t.docx' }));
+    const body = await clickDoc(/UDS 생성/);
+    expect(body.get('template_path')).toBe('D:/tpl/t.docx');
+    // 선언되지 않은 필드라 서버가 버린다 — 죽은 코드는 다음 사람을 헷갈리게 한다.
+    expect(body.get('uds_template_path')).toBeNull();
+  }, 20000);
+
+  it('UDS: 소스/분류 상한이 실린다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({
+      max_source_files: 2000, max_items_per_category: 500,
+    }));
+    const body = await clickDoc(/UDS 생성/);
+    expect(body.get('max_source_files')).toBe('2000');
+    expect(body.get('max_items_per_category')).toBe('500');
+  }, 20000);
+
+  it('STS: 스텝 상한이 실린다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ max_steps_per_tc: 40 }));
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('max_steps_per_tc')).toBe('40');
+  }, 20000);
+
+  it.each([
+    ['UDS', /UDS 생성/], ['STS', /STS 생성/], ['SUTS', /SUTS 생성/],
+  ])('%s: 템플릿 출처 선택이 실린다', async (_label, re) => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ template_source: 'standard' }));
+    const body = await clickDoc(re);
+    expect(body.get('template_source')).toBe('standard');
+  }, 20000);
+
+  it('SITS: 템플릿 출처 선택이 실린다 (urlencoded)', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ template_source: 'standard' }));
+    const body = await clickDoc(/SITS 생성/);
+    expect(new URLSearchParams(String(body)).get('template_source')).toBe('standard');
+  }, 20000);
+
+  it('상한은 **그 프로젝트에만** 적용된다', async () => {
+    // A 에서 정한 값을 스코프 키에 직접 넣는다(=A 화면에서 저장한 상태).
+    localStorage.setItem(
+      `${DOCGEN_CAPS_KEY}::http://jenkins/job/other-job`,
+      JSON.stringify({ max_tc_per_req: 99 }));
+    // 지금 화면은 test-job 이다 — 남의 상한이 따라오면 안 된다.
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('max_tc_per_req')).toBeNull();
+  }, 20000);
+
+  it('평면 키에 남아 있던 옛 값은 현재 프로젝트로 **1회 이관**된다', async () => {
+    localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify({ max_tc_per_req: 7 }));
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('max_tc_per_req')).toBe('7');
+    // 평면 키를 남기면 **다음 프로젝트가 또 상속**받아 원래 결함이 되살아난다.
+    expect(localStorage.getItem(DOCGEN_CAPS_KEY)).toBeNull();
+    expect(JSON.parse(
+      localStorage.getItem(`${DOCGEN_CAPS_KEY}::http://jenkins/job/test-job`),
+    ).max_tc_per_req).toBe(7);
+  }, 20000);
+});
+
+/**
+ * 생성 요청의 **출처 대조** — 이 요청은 `job_url`(현재 화면)과 `source_root`·`linked_docs`
+ * (analysisResult 의 matchedScm)를 함께 싣는다. 둘이 다른 프로젝트의 것이면 B 의 문서가
+ * A 의 소스로 만들어지고, 표지·추적성·품질 이력이 전부 그 조합으로 남는다.
+ *
+ * 그 조합이 생기는 경로는 실재하고 이미 문서화돼 있다(`impactGuard.contextConflict`):
+ * `Detail.switchProject` 는 `setSelectedJob(B)` 를 await 앞에서 하고, 뒤이은
+ * `loadProjectFromCache(B)` 가 throw 하면 토스트만 띄운다 → `job=B × analysisResult=A`.
+ *
+ * 읽기 화면 4곳은 이미 이 가드를 쓰는데 **산출물을 만드는 쪽에만 없었다.**
+ */
+describe('DocGenSection — 남의 프로젝트 자료로 만들지 않는다', () => {
+  const genCall = () =>
+    globalThis.fetch.mock.calls.find(([u]) => String(u).includes('/generate-async'));
+
+  const clickSts = async (analysisResult) => {
+    const user = userEvent.setup();
+    render(<DocGenSection job={makeJob()} analysisResult={analysisResult} />);
+    await user.click(await screen.findByRole('button', { name: /STS 생성/ }));
+    return user;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    globalThis.fetch = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/generate-async') ? { job_id: 'j1' } : { packages: [] }),
+      text: async () => '',
+    }));
+    api.mockResolvedValue({ items: [] });
+  });
+
+  it('분석 결과가 다른 Job 의 것이면 생성 자체를 보내지 않는다', async () => {
+    await clickSts({
+      // 화면의 job 은 test-job 인데 분석 결과는 other-job 의 것이다.
+      jobUrl: 'http://jenkins/job/other-job/',
+      cacheRoot: '.cache',
+      matchedScm: { id: 'other', source_root: '/other/src', linked_docs: {} },
+      scmList: [{ id: 'other', source_root: '/other/src', linked_docs: {} }],
+    });
+    // 관측량은 토스트가 아니라 **요청이 안 나갔다**는 사실이다.
+    await waitFor(() => expect(mockToast).toHaveBeenCalled());
+    expect(genCall()).toBeFalsy();
+    const [tone, msg] = mockToast.mock.calls.at(-1);
+    expect(tone).toBe('error');
+    expect(String(msg)).toMatch(/다른 Job/);
+  }, 20000);
+
+  it('같은 Job 이면 평소대로 생성한다 (가드가 정상 경로를 막지 않는다)', async () => {
+    await clickSts({
+      jobUrl: 'http://jenkins/job/test-job/',
+      cacheRoot: '.cache',
+      matchedScm: { id: 'scm1', source_root: '/src', linked_docs: {} },
+      scmList: [{ id: 'scm1', source_root: '/src', linked_docs: {} }],
+    });
+    await waitFor(() => expect(genCall()).toBeTruthy(), { timeout: 6000 });
+    expect(genCall()[1].body.get('source_root')).toBe('/src');
+  }, 20000);
+
+  it('SCM 이 여럿인데 매칭이 없으면 임의로 고르지 않는다', async () => {
+    // 실측: 이 저장소 레지스트리엔 hdpdm01·kjpds02·kjpds02_pv 셋이 등록돼 있다.
+    // 예전 코드는 `scmList[0]` 를 그냥 집어 항상 hdpdm01 의 소스로 만들었다.
+    await clickSts({
+      cacheRoot: '.cache',
+      scmList: [
+        { id: 'hdpdm01', source_root: '/a/src', linked_docs: {} },
+        { id: 'kjpds02', source_root: '/b/src', linked_docs: {} },
+      ],
+    });
+    await waitFor(() => expect(mockToast).toHaveBeenCalled());
+    expect(genCall()).toBeFalsy();
+  }, 20000);
+
+  it('SCM 이 하나뿐이면 매칭이 없어도 그대로 쓴다 (오귀속이 불가능하다)', async () => {
+    await clickSts({
+      cacheRoot: '.cache',
+      scmList: [{ id: 'only', source_root: '/only/src', linked_docs: {} }],
+    });
+    await waitFor(() => expect(genCall()).toBeTruthy(), { timeout: 6000 });
+    expect(genCall()[1].body.get('source_root')).toBe('/only/src');
+  }, 20000);
+
+  it('analysisResult 에 캐시 루트가 없어도 빈 값을 보내지 않는다', async () => {
+    // 빈 문자열을 보내면 백엔드가 `~/.devops_pro_cache` 로 떨어져 화면이 쓰는
+    // `.devops_pro_cache/<user>` 와 **다른 폴더**를 본다.
+    await clickSts({ scmList: [{ id: 'only', source_root: '/only/src', linked_docs: {} }] });
+    await waitFor(() => expect(genCall()).toBeTruthy(), { timeout: 6000 });
+    expect(genCall()[1].body.get('cache_root')).toBe('.devops_pro_cache/testuser');
+  }, 20000);
 });

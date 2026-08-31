@@ -104,7 +104,93 @@ _GEN_BOUNDARY = "AOR/ABV"  # 경계값 분석
 _GEN_EQUIV = "AOR/AEC"     # 등가 분할(조건·분기 조합)
 
 _MAX_SEQUENCES = 10
-_DEFAULT_SEQ_COUNT = 24  # 6 BV + 4 COND + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 6 MC/DC
+# 전략 카탈로그의 **이론적 최대는 30** 이다(실측, `generate_sequences` 의 append 지점):
+#   6 BV + 4 COND_COMB + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 7 MC/DC(BASE 1 + 토글 6)
+#
+# ⚠ 그러므로 24 는 "카탈로그 전체" 가 아니라 **캡**이다. 예전 주석은 `6 MC/DC` 로 적어
+#   `MCDC_BASE` 를 빠뜨렸고 합도 29 였다 — 그 숫자가 화면 공시문까지 번져 사용자에게
+#   "24종 중 이 수만큼" 이라고 잘못 말했다.
+# ⚠ MC/DC 는 `strategies` 의 **맨 끝**(GAP 6)이고 `_cap`(:2043 `strategies[:max_seq]`)이
+#   앞에서 자르므로, **switch-case 가 있는 함수는 기본값 24 에서도 MC/DC 가 빠진다**
+#   (switch 6개면 MC/DC 7 → 1). ISO 26262 ASIL D 는 MC/DC 가 필수다.
+_DEFAULT_SEQ_COUNT = 24
+_STRATEGY_CATALOG_MAX = 30
+
+# 시험 범위의 **유일한 정의**. 준비 게이트(`docgen_preflight`)도 이걸 import 한다.
+SCOPE_REFERENCE = "suds"    # SwUDS 설계 ID 가 있는 함수만 — 정본과 같은 범위(기본)
+SCOPE_SOURCE = "source"     # 소스에서 찾은 함수 전부 — SwUDS 미대조
+SCOPES = (SCOPE_REFERENCE, SCOPE_SOURCE)
+
+
+def normalize_scope(scope: Any) -> "tuple[str, str]":
+    """``(정규화된 범위, 알 수 없었던 원본 or "")``.
+
+    ⚠ 예전엔 `if _scope == "suds": … else: 소스 전체` 였다. 그래서 `suds` 가 **아닌
+    모든 값**(오타·옛 저장값·미래의 세 번째 범위)이 조용히 **가장 넓은 범위**로 떨어져,
+    정본에 없는 함수가 ISO 26262 산출물에 들어갔다. 게다가 준비 게이트는 반대로
+    `== "source"` 로 판정해서 같은 값에 **"정본 기준"** 이라고 안심시켰다 —
+    한 값에 두 화면이 반대말을 했다.
+
+    모르는 값은 **문서화된 기본값**(`suds`, 좁은 쪽)으로 떨어지고, 그 사실을 함께 돌려준다.
+    """
+    raw = str(scope or "").strip()
+    low = raw.lower()
+    if not low:
+        return SCOPE_REFERENCE, ""
+    if low in SCOPES:
+        return low, ""
+    return SCOPE_REFERENCE, raw
+
+
+def apply_scope(units: List[Dict[str, Any]],
+                scope: Any) -> "tuple[List[Dict[str, Any]], List[str]]":
+    """시험 범위를 적용해 ``(남길 unit, 보고할 문장들)`` 을 돌려준다.
+
+    SUTS 는 SwUDS(단위 설계서)를 근거로 만드는 문서이고 정본도 그 범위다 — 정본 1,005
+    함수는 SwUDS 설계 ID 1,026 과 교집합 1,001 로 사실상 일치한다(실측 2026-08-11).
+    소스에는 그보다 많은 함수가 있고(실측 1,160), 그중 155개는 정본이 시험 대상으로
+    삼지 않는다(부트로더 계열 등).
+
+    ⚠ 이건 걷어낸 `docs/uds_function_swcom_override.json` 필터와 **성질이 다르다**.
+      그건 저장소에 박힌 251개 목록이라 프로젝트가 바뀌어도 같은 걸로 잘랐다. 이건
+      **그 프로젝트의 SwUDS 문서**가 근거이고, 문서가 없으면 필터도 걸지 않는다.
+
+    ⚠ 범위를 좁힌 사실은 **반드시 보고한다** — 조용히 자르면 커버리지가 또 자기 자신을
+      분모로 삼는다. 그래서 판정과 보고를 한 함수에 묶어 둔다(호출부가 문장만 버리는
+      일을 막는다).
+
+    ⚠ 본체에 인라인으로 두면 시험할 수가 없어, 가장 무거운 판정(어떤 함수가 ISO 26262
+      산출물에 들어가는가)이 **전체 생성 없이는 검증 불가**였다. 그래서 뽑아 둔다.
+    """
+    notes: List[str] = []
+    _scope, _bad = normalize_scope(scope)
+    if _bad:
+        # 알 수 없는 값을 조용히 넘기지 않는다. 예전엔 `suds` 가 아닌 **모든** 값이
+        # `else` 로 흘러 **가장 넓은 범위**(SwUDS 미대조)가 됐다 — 정본에 없는 함수가
+        # ISO 26262 산출물에 들어가는데 아무 데도 안 남았다.
+        msg = f"알 수 없는 시험 범위 `{_bad}` — 기본값 `suds`(정본 기준)로 진행합니다."
+        _logger.warning("SUTS scope: %s", msg)
+        notes.append(msg)
+    if _scope == SCOPE_REFERENCE:
+        with_id = [u for u in units if str(u.get("suds_id") or "").strip()]
+        if not with_id:
+            msg = ("SwUDS 설계 ID 를 하나도 확보하지 못해 범위를 좁히지 않았습니다 "
+                   "(SwUDS 문서가 없거나 읽지 못했습니다).")
+            _logger.warning("SUTS scope=suds: %s", msg)
+            notes.append(msg)
+        elif len(with_id) < len(units):
+            msg = (f"SwUDS 기반 범위: 소스 {len(units)}개 중 설계 ID 가 있는 "
+                   f"{len(with_id)}개만 시험합니다 "
+                   f"({len(units) - len(with_id)}개 제외 — SwUDS 에 없는 함수).")
+            _logger.info("SUTS scope=suds: %s", msg)
+            notes.append(msg)
+            units = with_id
+    else:
+        msg = f"소스 전체 범위: {len(units)}개 함수 전부를 시험합니다(SwUDS 미대조)."
+        _logger.info("SUTS scope=source: %s", msg)
+        notes.append(msg)
+    return units, notes
+
 
 _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
 _DEFAULT_GEN_METHOD = "AEC, ABV"
@@ -3751,29 +3837,9 @@ def generate_suts(
     #
     # 범위를 좁힌 사실은 **반드시 보고한다** — 조용히 자르면 커버리지가 또 자기 자신을
     # 분모로 삼게 된다.
-    _scope = str(scope or "suds").strip().lower()
-    _scope_note = ""
-    if _scope == "suds":
-        _with_id = [u for u in units if str(u.get("suds_id") or "").strip()]
-        if not _with_id:
-            _scope_note = (
-                "SwUDS 설계 ID 를 하나도 확보하지 못해 범위를 좁히지 않았습니다 "
-                "(SwUDS 문서가 없거나 읽지 못했습니다)."
-            )
-            _logger.warning("SUTS scope=suds: %s", _scope_note)
-        elif len(_with_id) < len(units):
-            _dropped = len(units) - len(_with_id)
-            _scope_note = (
-                f"SwUDS 기반 범위: 소스 {len(units)}개 중 설계 ID 가 있는 "
-                f"{len(_with_id)}개만 시험합니다 ({_dropped}개 제외 — SwUDS 에 없는 함수)."
-            )
-            _logger.info("SUTS scope=suds: %s", _scope_note)
-            units = _with_id
-    else:
-        _scope_note = f"소스 전체 범위: {len(units)}개 함수 전부를 시험합니다(SwUDS 미대조)."
-        _logger.info("SUTS scope=source: %s", _scope_note)
-    if _scope_note:
-        _progress(40, _scope_note)
+    units, _scope_notes = apply_scope(units, scope)
+    for _n in _scope_notes:
+        _progress(40, _n)
 
     # ── HSIS signal enrichment ────────────────────────────────────────────
     # Uses HSIS xlsx to enrich: srs_req_ids (from related_id), variable

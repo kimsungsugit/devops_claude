@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict
 
 import pytest
@@ -782,3 +783,101 @@ def test_measure_passes_uds_path_through(monkeypatch) -> None:
     tm.clear_cache()
     tm.measure("C:/src", sds_path="s.docx", srs_path="r.docx", uds_path="u.docx")
     assert seen["uds"] == "u.docx"
+
+
+def test_grade_distribution_keeps_ungraded_separate() -> None:
+    """등급 분포를 세되 **등급을 못 찾은 것을 QM 으로 접지 않는다**.
+
+    접으면 근거 부재가 "안전 요구 없음" 이 되어 under-classification 이다 — 이 저장소는
+    "none 은 none, tbd 면 tbd" 를 사용자 결정으로 못박았다. 준비 게이트의 MC/DC 경고가
+    이 분포를 그대로 읽으므로, 여기서 접히면 ASIL D 프로젝트에 거짓 안심이 나간다.
+    """
+    units = [
+        {"name": "a", "asil": "D", "asil_evidence": "sds-exact"},
+        {"name": "b", "asil": "D", "asil_evidence": "sds-exact"},
+        {"name": "c", "asil": "QM", "asil_evidence": "sds-exact"},
+        {"name": "d", "asil": "TBD", "asil_evidence": ""},
+        {"name": "e", "asil": "", "asil_evidence": ""},
+    ]
+    res = tm._measure_suts_asil(units)
+    assert res["by_grade"].get("D") == 2
+    assert res["ungraded"] == 2, res
+    # 등급 없는 2건이 QM 으로 새어 들어가면 안 된다.
+    assert res["by_grade"].get("QM", 0) == 1, res["by_grade"]
+    assert sum(res["by_grade"].values()) == res["graded"]
+
+
+# ── 측정 신선도 (2026-08-31) ────────────────────────────────────────────────
+#
+# 캐시 키는 **경로만** 담는다. 그래서 SwDS 를 열어 고치고 저장해도 키가 같아, 최대
+# TTL(15분) 동안 옛 수치가 "지금 값" 으로 보고됐다 — 게이트가 이미 교체된 자료로 잰
+# 숫자를 근거로 "준비 완료" 를 말할 수 있었다는 뜻이다.
+#
+# 소스 쪽 서명은 `backend/helpers/uds._source_root_signature` 를 되쓴다. cloudium(`U:`)은
+# worker IPC 에 `stat` op 이 없어 서명이 불가능하고, 그때는 **모른다고 말한다**.
+
+
+class TestMeasurementFreshness:
+    def test_editing_a_document_invalidates_the_cache(self, tmp_path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.c").write_text("int f(void){return 0;}", encoding="utf-8")
+        doc = tmp_path / "sds.docx"
+        doc.write_text("v1", encoding="utf-8")
+
+        tm.clear_cache()
+        key = tm._key(str(src), str(doc), "", "")
+        tm._CACHE[key] = (time.time(), {"ok": True},
+                          tm.signature_for(str(src), str(doc)))
+        assert tm.has_cached(str(src), sds_path=str(doc)) is True
+
+        doc.write_text("v2 — 내용이 바뀌었다", encoding="utf-8")
+        assert tm.has_cached(str(src), sds_path=str(doc)) is False, (
+            "같은 경로를 고쳤는데 캐시가 그대로 유효하다 — 옛 수치가 지금 값으로 나간다")
+
+    def test_unknown_signature_falls_back_to_ttl_not_to_a_miss(self) -> None:
+        """서명을 **모르는** 경우(cloudium)를 "다르다" 로 읽으면 안 된다.
+
+        읽으면 캐시가 영영 안 맞아 매 조회마다 수십 초 재측정이 걸린다 — 원격 사용자
+        에게는 게이트가 사실상 못 쓰는 물건이 된다.
+        """
+        hit = (time.time(), {"ok": True}, None)
+        assert tm._fresh(hit, "abc") is True      # 저장된 서명을 모른다
+        assert tm._fresh((time.time(), {"ok": True}, "abc"), None) is True  # 지금 못 잰다
+        assert tm._fresh((time.time(), {"ok": True}, "abc"), "abc") is True
+        assert tm._fresh((time.time(), {"ok": True}, "abc"), "xyz") is False
+
+    def test_ttl_still_expires_even_with_a_matching_signature(self) -> None:
+        """서명이 같아도 TTL 은 산다 — 서명은 **추가** 조건이지 대체가 아니다."""
+        old = (time.time() - tm._CACHE_TTL_S - 1, {"ok": True}, "same")
+        assert tm._fresh(old, "same") is False
+
+    def test_remote_paths_have_no_signature(self) -> None:
+        assert tm.signature_for("U:/nowhere/src", "U:/nowhere/x.docx") is None
+
+    def test_cached_reports_when_it_was_measured_and_whether_it_can_tell(
+            self, tmp_path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.c").write_text("int f(void){return 0;}", encoding="utf-8")
+        tm.clear_cache()
+        tm._CACHE[tm._key(str(src), "", "", "")] = (
+            time.time(), {"ok": True}, tm.signature_for(str(src)))
+        got = tm.cached(str(src))
+        assert got["freshness"] == "verified"
+        assert isinstance(got["measured_at"], float)
+
+        tm.clear_cache()
+        tm._CACHE[tm._key(str(src), "", "", "")] = (time.time(), {"ok": True}, None)
+        got = tm.cached(str(src))
+        # 모르는 것을 "verified" 로 그리면 화면이 감지하지 못하는 변경을 감지한다고 말한다.
+        assert got["freshness"] == "ttl_only"
+
+    def test_cached_does_not_mutate_the_stored_payload(self, tmp_path) -> None:
+        """신선도 필드를 **저장본에 섞지 않는다** — 섞으면 다음 조회가 남의 시각을 읽고,
+        `measure()` 가 돌려준 dict 에도 없던 키가 생긴다."""
+        tm.clear_cache()
+        payload = {"ok": True}
+        tm._CACHE[tm._key("C:/x", "", "", "")] = (time.time(), payload, None)
+        tm.cached("C:/x")
+        assert "measured_at" not in payload and "freshness" not in payload

@@ -45,6 +45,30 @@ _DOC_KEYS: Dict[str, Tuple[str, str]] = {
 }
 
 
+# 템플릿 출처 선택지 — **철자의 단일 출처**.
+#
+# 이 토큰은 프론트(`<select value>`) · 라우터(`Form`) · 게이트(공시) 세 곳을 지난다.
+# 한 곳만 철자가 어긋나면 조용히 기본값으로 떨어지고, 그 결과는 "고른 적 없음" 과
+# 화면상 구분되지 않는다 — 사용자는 골랐다고 믿는데 문서는 그대로다.
+TEMPLATE_SOURCE_REFERENCE = "reference"
+TEMPLATE_SOURCE_STANDARD = "standard"
+# 빈 문자열 = 미설정 = 서버 기본. 저장소가 빈 값에서 키를 지우는 규약과 짝이다
+# (`sharedInputs.js::saveDocGenChoice`) — 여기서 기본값을 복제하지 않기 위함이다.
+TEMPLATE_SOURCE_CHOICES: Tuple[str, ...] = (
+    "", TEMPLATE_SOURCE_REFERENCE, TEMPLATE_SOURCE_STANDARD,
+)
+
+
+def prefer_reference_from(choice: str) -> bool:
+    """선택 토큰 → `prefer_reference`.
+
+    `standard` **만** 정본 우선을 끈다. 미설정·미지값은 서버 기본(정본 우선)이다 —
+    모르는 값에서 동작이 갈리면 같은 저장값에 게이트와 생성기가 반대말을 한다
+    (`_suts_normalize_scope` 가 같은 이유로 생성기 정의를 되쓴다).
+    """
+    return str(choice or "").strip().lower() != TEMPLATE_SOURCE_STANDARD
+
+
 def choose_template_source(
     doc_type: str,
     *,

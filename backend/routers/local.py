@@ -2233,6 +2233,9 @@ async def local_sts_generate(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
@@ -2362,6 +2365,7 @@ async def local_sts_generate(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
 
@@ -2430,6 +2434,9 @@ async def local_sts_generate_stream(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
 ):
     """Generate STS with SSE progress streaming."""
@@ -2543,6 +2550,7 @@ async def local_sts_generate_stream(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
 
@@ -2626,6 +2634,9 @@ async def local_sts_generate_async(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
@@ -2735,6 +2746,7 @@ async def local_sts_generate_async(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
 
@@ -3373,6 +3385,9 @@ def local_sits_generate(
     # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
     # (`docgen_template_source`) — 프론트는 데이터만 준다.
     reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3408,9 +3423,13 @@ def local_sits_generate(
 
     # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
     # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
-    from backend.services.docgen_template_source import resolve_template_for
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
     tpl_path, _tpl_why = resolve_template_for(
         "sits", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("SITS 템플릿: %s", _tpl_why)
 
@@ -3490,6 +3509,9 @@ def local_sits_generate_stream(
     # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
     # (`docgen_template_source`) — 프론트는 데이터만 준다.
     reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3520,9 +3542,13 @@ def local_sits_generate_stream(
 
     # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
     # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
-    from backend.services.docgen_template_source import resolve_template_for
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
     tpl_path, _tpl_why = resolve_template_for(
         "sits", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("SITS 템플릿: %s", _tpl_why)
 
@@ -3618,6 +3644,9 @@ def local_sits_generate_async(
     # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
     # (`docgen_template_source`) — 프론트는 데이터만 준다.
     reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
@@ -3651,9 +3680,13 @@ def local_sits_generate_async(
 
     # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
     # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
-    from backend.services.docgen_template_source import resolve_template_for
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
     tpl_path, _tpl_why = resolve_template_for(
         "sits", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("SITS 템플릿: %s", _tpl_why)
 

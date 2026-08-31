@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { api, post, buildUrl, authHeaders } from '../../api.js';
-import { useToast } from '../../App.jsx';
+import { api, post, buildUrl, authHeaders, resolveCacheRoot } from '../../api.js';
+import { useJenkinsCfg, useToast } from '../../App.jsx';
 import { loadBuilderForm, toBuildPayload, missingRequiredFields } from '../../swBuilderForms.js';
 import DocGenPreflightPanel from './DocGenPreflightPanel.jsx';
-import { loadDocPaths } from '../../sharedInputs.js';
+import { loadDocPaths, loadDocGenCaps, loadSharedInputs, useDocGenCapsSync } from '../../sharedInputs.js';
+import { docGenCapsScope } from '../../docGenHelpers.js';
 import { notifyScmRegistryChanged } from '../../scmLinkedDocs.js';
+import { contextConflict, mismatchText } from '../../impactGuard.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -309,6 +311,7 @@ function DeltaMark({ delta }) {
 
 export default function DocGenStatusBoard({ job, analysisResult, genState, onGenerate, onNavigateSub }) {
   const toast = useToast();
+  const { cfg } = useJenkinsCfg();
   const [runs, setRuns] = useState(null);      // null = 미조회, [] = 조회했고 없음
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -319,6 +322,13 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
   // `scmList[0]` 폴백은 쓰지 않는다(다중 등록 환경에서 남의 프로젝트 이력을 그린다).
   const scmId = analysisResult?.matchedScm?.id || '';
   const scmName = analysisResult?.matchedScm?.name || analysisResult?.matchedScm?.id || '';
+  // 게이트가 보는 캐시 루트 = **생성이 쓰는 캐시 루트**(`resolveCacheRoot` 단일 출처).
+  const cacheRoot = resolveCacheRoot(analysisResult, job, cfg);
+  // 상한/선택지 저장 칸 — **생성 요청과 같은 함수**로 구한다. 갈리면 게이트가 보여 준
+  // 값과 실제로 실리는 값이 달라진다(`resolveCacheRoot` 와 같은 사유).
+  const capsScope = docGenCapsScope(job);
+  // 결과 뭉치가 지금 보고 있는 Job 의 것인가 — 생성 거부와 **같은 판정**을 쓴다.
+  const ctxConflict = contextConflict(analysisResult, job?.url);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -483,13 +493,28 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
   const prepFormRef = useRef({});
 
   /**
+   * 조회 세대 번호(doc_type → n). **응답은 발행 순서대로 오지 않는다.**
+   *
+   * preflight 비용은 소스 측정 캐시 유무로 수십 배 차이가 나서, 먼저 띄운 요청이
+   * 나중에 도착하는 일이 실제로 일어난다. 그러면 늦게 온 **옛 판정**이 새 판정을
+   * 덮어쓴다 — 상한을 방금 올렸는데 화면은 계속 "아직 정하지 않았습니다" 다.
+   * 이 패널이 없애려던 증상(고른 값이 반영 안 된 것처럼 보임) 그 자체라 그냥 둘 수 없다.
+   *
+   * 취소(AbortController) 대신 **세대 대조**를 쓴다 — 서버 계산은 이미 끝나 캐시에
+   * 남으므로 끊어서 얻을 게 없고, 늦은 응답을 버리기만 하면 된다.
+   */
+  const prepSeqRef = useRef({});
+
+  /**
    * 결정 질문 — **preflight 와 별도**로 뒤따라 채운다.
    *
    * 문장을 LLM 이 쓰므로 수 초가 걸린다. 한 응답에 묶으면 준비 상태 표시 전체가 그걸
    * 기다린다. 실패해도 준비 패널은 그대로 살아 있어야 하므로 조용히 비운다
    * (서버가 LLM 없이도 룰 문장으로 답하므로 여기까지 오는 실패는 네트워크뿐이다).
    */
-  const loadQuestions = useCallback(async (docType, form) => {
+  const loadQuestions = useCallback(async (docType, form, seq) => {
+    // 질문은 preflight 와 **같은 세대**에 속한다 — 그 사이 재조회가 있었으면 버린다.
+    const fresh = () => seq == null || prepSeqRef.current[docType] === seq;
     try {
       const res = await post('/api/docgen/questions', {
         doc_type: docType,
@@ -499,15 +524,22 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         // 시험 결과 6종은 폼 필수값(project_id/버전/시험일)이 결정 항목이라 폼 없이 물으면
         // **항상 같은 질문**이 돌아온다. `loadPrep` 과 같은 값을 싣는다.
         form: form || {},
+        // 상한도 마찬가지다 — 안 실으면 사용자가 방금 정한 값을 두고도 질문이 계속
+        // "조정할까요?" 로 돌아온다.
+        caps: loadDocGenCaps(capsScope) || {},
+        // 생성이 보내는 것과 **같은 값**이어야 게이트가 같은 문서를 판정한다.
+        asil_level: String(loadSharedInputs()?.asil_level || '').trim(),
       });
+      if (!fresh()) return;
       setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), questions: res } }));
     } catch (e) {
+      if (!fresh()) return;
       setPrep(p => ({
         ...p,
         [docType]: { ...(p[docType] || {}), questionsError: e?.message || '질문을 불러오지 못했습니다.' },
       }));
     }
-  }, [scmId, analysisResult]);
+  }, [scmId, analysisResult, capsScope]);
 
   /**
    * 준비 점검. `form` 은 **시험 결과 6종 전용**이다.
@@ -519,6 +551,9 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
    */
   const loadPrep = useCallback(async (docType, form) => {
     prepFormRef.current[docType] = form || {};
+    const seq = (prepSeqRef.current[docType] || 0) + 1;
+    prepSeqRef.current[docType] = seq;
+    const fresh = () => prepSeqRef.current[docType] === seq;
     setPrep(p => ({ ...p, [docType]: { ...(p[docType] || {}), loading: true } }));
     try {
       const res = await post('/api/docgen/preflight', {
@@ -529,9 +564,21 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         // UDS 는 Jenkins 빌드 캐시가 있어야 시작한다 — 게이트가 그걸 확인하려면
         // 화면이 보고 있는 job/캐시를 알아야 한다.
         job_url: job?.url || '',
-        cache_root: analysisResult?.cacheRoot || '',
+        // ⚠ 생성 요청과 **같은 폴백 사슬**을 타야 한다(`resolveCacheRoot`).
+        //   빈 값이면 백엔드가 `~/.devops_pro_cache` 로 떨어져 화면이 쓰는
+        //   `.devops_pro_cache/<user>` 와 다른 폴더를 보고, UDS 빌드 캐시를
+        //   "없음"(=진행 불가)으로 보고하면서 정작 생성은 성공한다.
+        cache_root: cacheRoot,
         form: form || {},
+        // 사용자가 이 화면에서 정한 상한. **판정에만** 쓴다(정했는가 / 안 정했는가) —
+        // 안 실으면 값을 넣어도 게이트는 계속 "결정 필요" 라 자기 선택이 반영됐는지
+        // 알 수 없고, 4개 문서가 영원히 `준비 완료` 에 닿지 못한다.
+        caps: loadDocGenCaps(capsScope) || {},
+        // 생성이 보내는 것과 **같은 값**이어야 게이트가 같은 문서를 판정한다.
+        asil_level: String(loadSharedInputs()?.asil_level || '').trim(),
       });
+      // 늦게 온 옛 응답은 버린다 — 새 판정을 덮으면 방금 고른 값이 사라져 보인다.
+      if (!fresh()) return;
       // 200 + error 를 성공으로 삼지 않는다.
       if (res?.error) {
         setPrep(p => ({ ...p, [docType]: { loading: false, error: String(res.error) } }));
@@ -539,15 +586,29 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       }
       setPrep(p => ({ ...p, [docType]: { loading: false, data: res, error: '' } }));
       // 준비 상태를 먼저 그리고 질문은 뒤따라 채운다(LLM 이라 느리다).
-      loadQuestions(docType, form);
+      loadQuestions(docType, form, seq);
     } catch (e) {
+      if (!fresh()) return;
       setPrep(p => ({
         ...p,
         [docType]: { loading: false, error: e?.message || '준비 상태를 확인하지 못했습니다.' },
       }));
     }
     // `job` 은 빌드 캐시 확인에 쓰인다 — 빼면 프로젝트를 바꿔도 옛 job 으로 판정한다.
-  }, [scmId, analysisResult, job, loadQuestions]);
+    // `cacheRoot` 는 `cfg` 에서도 오므로 파생값을 직접 구독한다(설정만 바꾸면
+    // `analysisResult`·`job` 이 그대로라 옛 캐시 루트로 계속 판정하게 된다).
+  }, [scmId, analysisResult, job, cacheRoot, capsScope, loadQuestions]);
+
+  // 상한/선택지가 바뀌면 **펼쳐져 있는 행을 다시 판정**한다.
+  //
+  // ⚠ 오래 통지가 없었다. 입력칸의 `onSaved` 는 그 행만 되불렀으므로, 같은 상한이
+  //   걸린 다른 행(같은 소스를 재는 문서들)은 옛 판정을 그대로 들고 있었다 — 한 화면의
+  //   두 줄이 같은 값에 대해 다른 말을 한다. 다른 탭에서 바뀐 경우도 같은 경로로 온다.
+  const reloadOpenPrep = useCallback(() => {
+    if (!prepOpen) return;
+    loadPrep(prepOpen, prepFormRef.current[prepOpen] || {});
+  }, [prepOpen, loadPrep]);
+  useDocGenCapsSync(reloadOpenPrep);
 
   const togglePrep = useCallback((docType, form) => {
     if (prepOpen === docType) { setPrepOpen(null); return; }
@@ -595,19 +656,19 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       if (!root) { toast('warning', '소스 루트가 없습니다 — SCM 설정을 확인하세요.'); return; }
       toast('info', '소스를 측정합니다 — 수십 초 이상 걸릴 수 있습니다.');
       try {
-        // 시험 문서(STS/SITS/SUTS)는 요구 매핑·통합 흐름·변수 타입까지 잰다.
-        // SwDS 는 SITS 의 Related 보강 실적과 STS 요구 매핑에 필요하고(맵이 없으면
-        // 그 축이 측정 불가), SwRS 는 STS 의 **요구 목록**이라 없으면 "몇 개가 근거
-        // 없이 시험되는가" 를 셀 수가 없다.
-        const paths = loadDocPaths() || {};
+        // 시험 문서(STS/SITS/SUTS)는 요구 매핑·통합 흐름·변수 타입까지, UDS 는 분류별·
+        // 파일 스캔 상한의 실제 절단량까지 잰다.
+        //
+        // ⚠ 어느 문서로 잴지는 **서버가 정한다**(`_resolve_inputs`). 예전엔 여기서
+        //   `paths.sds || matchedScm.linked_docs.sds` 로 직접 골랐는데, 그건 백엔드
+        //   우선순위 규칙의 복제라 조금만 갈려도 preflight 의 캐시 조회 키와 어긋난다 —
+        //   측정을 해도 게이트가 계속 "아직 재지 않았습니다" 로 남는다. `loadPrep` 과
+        //   **같은 두 값**만 싣는다.
         await post('/api/docgen/measure-source', {
           source_root: root,
           doc_type: prepOpen || '',
-          sds_path: paths.sds || analysisResult?.matchedScm?.linked_docs?.sds || '',
-          srs_path: paths.srs || analysisResult?.matchedScm?.linked_docs?.srs || '',
-          // SwUDS 는 설계-ID 브리지의 좌측 끝이다. 안 보내면 브리지가 꺼진 채로 재고,
-          // 게이트가 실제 산출물보다 나쁜 숫자를 보고한다(실측 요구 48/68 vs 64/68).
-          uds_path: paths.uds || analysisResult?.matchedScm?.linked_docs?.uds || '',
+          scm_id: scmId || '',
+          doc_paths: loadDocPaths() || {},
         });
         if (prepOpen) loadPrep(prepOpen, prepFormRef.current[prepOpen]);
       } catch (e) {
@@ -790,6 +851,20 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           </span>
         </div>
 
+        {/* 결과 뭉치가 **통째로 다른 Job 의 것**이면 아래 모든 판정이 남의 프로젝트 얘기다.
+            생성은 `DocGenSection.generateDoc` 이 같은 판정으로 **거부**하므로, 여기서는
+            왜 거부되는지를 미리 말한다(버튼을 눌러 보고서야 알게 되면 안 된다). */}
+        {ctxConflict.conflict && (
+          <div role="alert" style={{
+            marginBottom: 'var(--sp-3)', fontSize: 'var(--text-sm)',
+            color: 'var(--color-danger)',
+          }}>
+            ⚠ 이 화면의 분석 결과가 현재 프로젝트의 것이 아닙니다 — {mismatchText(ctxConflict.reason)}.
+            아래 준비 점검과 점수는 <strong>다른 프로젝트</strong>의 자료로 계산됐을 수 있고,
+            문서 생성은 막혀 있습니다.
+          </div>
+        )}
+
         {/* 프로젝트 스코프를 화면이 말해야 한다 — 어느 프로젝트 이력인지 모르면 숫자가 무의미하다 */}
         <div style={{ marginBottom: 'var(--sp-3)', fontSize: 'var(--text-sm)' }}>
           {scmId ? (
@@ -844,6 +919,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                     onSaveAs={handleSaveAs}
                     prepIsOpen={prepOpen === row.key}
                     prepState={prep[row.key]}
+                    capsScope={capsScope}
                     onTogglePrep={() => togglePrep(row.key)}
                     onPrepReload={() => loadPrep(row.key)}
                     onPrepAction={handlePrepAction}
@@ -907,6 +983,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                       onNavigateSub={() => onNavigateSub?.(row.sub)}
                       prepIsOpen={prepOpen === row.key}
                       prepState={prep[row.key]}
+                    capsScope={capsScope}
                       onTogglePrep={() => togglePrep(row.key, row.payloadForm)}
                       onPrepReload={() => loadPrep(row.key, row.payloadForm)}
                       onPrepAction={handlePrepAction}
@@ -984,7 +1061,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
  */
 export function TestReportRow({
   row, run, state, scmId, onVersionChange, onGenerate, onNavigateSub,
-  prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction,
+  prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction, capsScope,
 }) {
   const st = state || {};
   const v = st.busy ? { tone: 'info', label: '생성 중' } : verdictOf(run);
@@ -1070,6 +1147,7 @@ export function TestReportRow({
               questionsError={prepState?.questionsError || ''}
               onReload={onPrepReload}
               onAction={onPrepAction}
+              scope={capsScope}
             />
           </td>
         </tr>
@@ -1088,7 +1166,7 @@ export function TestReportRow({
 /** @internal 테스트에서 단독 렌더하려고 내보낸다(보드 전체 마운트는 이 행을 못 겨눈다). */
 export function FragmentRow({
   row, run, busy, genState, verdict, isOpen, detail, onToggle, onGenerate, disabled,
-  prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction,
+  prepIsOpen, prepState, onTogglePrep, onPrepReload, onPrepAction, capsScope,
   lastResult, onOpenFolder, onSaveAs,
 }) {
   const pct = busy ? Number(genState?.progress || 0) : null;
@@ -1171,6 +1249,7 @@ export function FragmentRow({
               questionsError={prepState?.questionsError || ''}
               onReload={onPrepReload}
               onAction={onPrepAction}
+              scope={capsScope}
             />
           </td>
         </tr>

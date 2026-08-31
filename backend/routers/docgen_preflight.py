@@ -29,8 +29,9 @@ IPC) 경유**다 — 이 저장소의 하드 제약이다.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -146,12 +147,255 @@ class PreflightRequest(BaseModel):
     job_url: str = ""
     cache_root: str = ""
     build_selector: str = "lastSuccessfulBuild"
+    # 사용자가 화면에서 정한 생성 상한(localStorage `devops_v2_docgen_caps`).
+    #
+    # ⚠ `Dict[str, Any]` 인 것은 의도다 — 같은 스토어에 `suts_scope` 같은 **문자열**
+    #   선택지가 섞여 있어(`sharedInputs.js:64` `saveDocGenChoice`) `Dict[str, int]`
+    #   로 받으면 그 키 하나 때문에 요청 전체가 422 로 죽는다.
+    # ⚠ 이 값은 **판정에만** 쓴다(정했는가 / 안 정했는가). 생성 파라미터는 생성
+    #   요청이 따로 싣는다 — 여기로 문서를 만들지 않는다.
+    caps: Dict[str, Any] = Field(default_factory=dict)
+    # 프로젝트 ASIL 등급(설정 > 공통 메타). 상한과 달리 **문서 내용을 바꾼다** —
+    # `generators/sts.py:1719` 가 이 값으로 요구별 ASIL 이 빈 칸을 역채움하고,
+    # `is_safety_asil` 판정이 시험 생성 갈래를 가른다. 표지의 "ASIL Level" 칸도 이것이다.
+    # ⚠ 빈 값을 `QM` 으로 접지 않는다 — 근거 부재를 "안전 요구 없음" 으로 바꾸면
+    #   under-classification 이다(저장소 규약: 지어내지 않는다).
+    asil_level: str = ""
 
 
 def _step(step_id: str, phase: str, state: str, label: str, **extra: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {"id": step_id, "phase": phase, "state": state, "label": label}
     out.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
     return out
+
+
+def _cap_user_value(caps: Dict[str, Any], name: str) -> Optional[int]:
+    """사용자가 화면에서 정한 상한. **안 정한 것과 0 을 구분한다.**
+
+    프론트 규약(`sharedInputs.js:50-57`)은 빈 값·0·음수면 **키를 지운다** = 생성기
+    기본값을 쓴다는 뜻이다. 그 규약을 여기서 되풀이하지 않고 그대로 존중한다 — 0 이
+    실려 오면 사용자가 고른 값이 아니라 스토어가 깨진 것이므로 '안 정함' 으로 본다.
+    같은 스토어에 문자열 선택지(`suts_scope`)가 섞여 있어 형 변환 실패도 '안 정함' 이다.
+    """
+    raw = caps.get(name)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+# 이 축은 절단량을 **잴 방법이 아예 없다**. `unmeasured` 로 두면 verdict 가 영구
+# 고착되므로(원래 고치려던 결함) `ok` 로 두되 측정하지 않는다는 사실을 말한다.
+_NO_MEASURE = object()
+
+# cap 이름 → 소스 파싱 캐시에서 그 절단을 담는 키.
+_CAP_TRUNCATION_KEY = {
+    "max_items_per_category": "uds_category_caps",
+    "max_source_files": "uds_file_scan",
+}
+
+
+def _cap_truncation(cap_name: str, tm: Dict[str, Any]) -> Any:
+    """이 상한이 **지금 자르고 있는가**.
+
+    Returns:
+        ``_NO_MEASURE`` 측정 경로가 없는 축 · ``None`` 잴 수 있는데 아직 안 쟀다 ·
+        ``{}`` 쟀고 안 자른다 · ``{"measured": …, "reason": …}`` 쟀고 자른다.
+
+    ⚠ 넷을 서로 접지 않는다. 특히 "안 쟀다" 를 "안 자른다" 로 접으면 이 모듈 docstring
+    §3("재지 못한 값을 `0` 으로 그리지 않는다")을 스스로 어긴다.
+    """
+    key = _CAP_TRUNCATION_KEY.get(cap_name)
+    if not key:
+        return _NO_MEASURE
+    box = tm.get(key) or {}
+    if not box.get("measured"):
+        return None
+    if key == "uds_category_caps":
+        tr = box.get("truncated") or {}
+        if not tr:
+            return {}
+        dropped = sum(int(v.get("dropped") or 0) for v in tr.values())
+        worst_k, worst_v = max(tr.items(), key=lambda kv: int(kv[1].get("dropped") or 0))
+        return {
+            "measured": {"truncated": tr, "dropped_total": dropped},
+            "reason": (f"지금 {dropped}개 항목이 상한에 걸려 규격에서 빠집니다 "
+                       f"(가장 큰 축 `{worst_k}` {worst_v.get('total')}→{worst_v.get('cap')})"),
+        }
+    if not box.get("truncated"):
+        return {}
+    return {
+        "measured": {"scanned": box.get("scanned"), "truncated": True},
+        "reason": (f"소스 파일 상한({box.get('cap')})에 닿았습니다 — 그 뒤 파일의 함수는 "
+                   "문서에 아예 없습니다"),
+    }
+
+
+# "전량" 의 **출처**. 둘은 서로 다른 강도의 주장이라 같은 문장을 쓰면 안 된다.
+#   measured — 이 소스를 실제로 세어 나온 수. `전량 145 중 95개가 빠진다` 가 참이다.
+#   catalog  — 생성기 전략 후보의 **이론적 최대**. 함수마다 후보 수가 달라 그만큼
+#              나오는 함수는 거의 없다. 이걸 measured 처럼 단언하면 손실을 부풀린다.
+_SUG_MEASURED = "measured"
+_SUG_CATALOG = "catalog"
+
+
+def _cap_full_total(cap_name: str, cap: Dict[str, Any],
+                    tm: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """"전부 담으려면 얼마" 와 **그 수를 어디서 얻었는가**.
+
+    Returns:
+        ``_NO_MEASURE`` 이 상한엔 '전량' 을 잴 축이 아예 없다 · ``None`` 잴 수 있는데
+        아직 안 쟀다 · ``{"value", "basis"}`` 쟀다.
+
+    ⚠ 앞의 둘을 접으면 안 된다. `_NO_MEASURE` 를 `None` 으로 접으면 영영 안 나올 답을
+      기다리며 verdict 가 `unknown` 에 고착되고, 반대로 접으면 곧 나올 답을 "측정하지
+      않습니다" 로 덮어 **실제 손실이 화면에서 사라진다**(둘 다 실측으로 겪었다).
+
+    ⚠ 판정(전량 대비 얼마가 빠지는가)은 여기 값 하나로만 한다. 예전엔 `generator`
+    기본값으로 세는 경로가 섞여 있어, 흐름이 145 인데 120 기준으로 세는 바람에
+    50 으로 낮춘 손실을 95 가 아니라 70 으로 보고했다.
+    """
+    if cap_name == "max_tc_per_req":
+        raw, basis = (tm.get("sts_mapping") or {}).get("max_functions_per_req"), _SUG_MEASURED
+    elif cap_name == "max_flows":
+        raw, basis = (tm.get("sits") or {}).get("flows_total"), _SUG_MEASURED
+    elif cap_name in ("max_subcases", "max_sequences"):
+        # 생성기가 만들 수 있는 후보 전량. API 기본이 그보다 작으면 그 차이가 손실 **상한**이다.
+        # ⚠ SUTS 는 `generator`(24)가 **캡**이라 그걸로 재면 `n <= api` 가 되어 조치
+        #   제안이 영영 안 뜬다 — 전략 카탈로그 최대(30)를 써야 한다.
+        raw, basis = (cap.get("catalog_max") or cap.get("generator")), _SUG_CATALOG
+    else:
+        return _NO_MEASURE
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return {"value": n, "basis": basis} if n > 0 else None
+
+
+def _cap_measured_at(cap_name: str, tm: Dict[str, Any]) -> Optional[int]:
+    """그 절단 통계를 **어느 상한으로** 쟀는가. 모르면 `None`."""
+    box = tm.get(_CAP_TRUNCATION_KEY.get(cap_name) or "") or {}
+    try:
+        return int(box.get("cap"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _cap_suggested_from_truncation(cap_name: str, tm: Dict[str, Any]) -> Optional[int]:
+    """"전부 담으려면 얼마" — **측정에서 확실히 알 수 있을 때만**.
+
+    ⚠ `max_source_files` 는 여기 없다. 스캔이 상한에 닿는 즉시 멈춰서 전체 파일 수를
+      모르기 때문이다(`uds_generator.py` 의 `file_scan` 주석). 모르는 수를 제안으로
+      내면 사용자는 그 값을 넣고 "이제 전부 담긴다" 고 믿는다 — 이 모듈이 금지하는
+      바로 그 형태다.
+    """
+    if cap_name != "max_items_per_category":
+        return None
+    tr = (tm.get("uds_category_caps") or {}).get("truncated") or {}
+    totals = []
+    for v in tr.values():
+        try:
+            totals.append(int(v.get("total")))
+        except (TypeError, ValueError):
+            continue
+    # 상한은 **분류마다** 걸리므로, 하나도 안 빠지려면 가장 큰 분류를 담아야 한다.
+    return max(totals) if totals else None
+
+
+def _linked_docs(req: "PreflightRequest") -> Dict[str, Any]:
+    """레지스트리의 `linked_docs`. 없으면 빈 dict — 조회 실패를 "없음" 과 섞지 않는다."""
+    if not req.scm_id:
+        return {}
+    try:
+        from backend.services.scm_registry import get_registry_entry
+        entry = get_registry_entry(req.scm_id)
+        return entry.linked_docs.model_dump(mode="json") if entry is not None else {}
+    except Exception:  # silent-ok: 공시는 실패해도 화면이 떠야 한다
+        logging.getLogger("devops_api").debug("linked_docs 조회 실패", exc_info=True)
+        return {}
+
+
+def _reference_doc_for(req: "PreflightRequest", *, linked: Dict[str, Any]) -> str:
+    """같은 종류의 **납품 정본** 경로.
+
+    ⚠ 우선순위는 프론트 생성 요청(`DocGenSection.jsx`: `docPaths[docType] ||
+      linkedDocs[docType]`)과 **같아야** 한다. 갈리면 게이트가 이번 생성에 쓰이지 않을
+      파일을 "실제로 쓸 템플릿" 이라고 이름 댄다.
+
+    ⚠ `_resolve_inputs` 로는 못 얻는다 — 거기 `_DOC_KEY_TO_INPUT` 은 `srs`/`sds`/`uds`
+      같은 **근거 문서** 키만 담고, 정본 키(`sts`/`suts`/`sits`)는 없다.
+    """
+    key = str(req.doc_type or "").strip().lower()
+    v = str(req.doc_paths.get(key) or "").strip()
+    if v:
+        return v
+    raw = linked.get(key)
+    return str((raw[0] if isinstance(raw, list) and raw else raw) or "").strip()
+
+
+def _tm_lookup_paths(inputs: Dict[str, str]) -> Dict[str, str]:
+    """측정 캐시를 찾을(그리고 채울) 문서 경로 — **`_resolve_inputs` 결과에서만** 만든다.
+
+    측정과 조회가 각자 경로를 구하면 문자열이 조금만 달라도 캐시가 영영 안 맞아
+    게이트가 계속 `unmeasured` 로 남는다. 그래서 두 경로 모두 이 함수를 통한다.
+    """
+    return {
+        "sds_path": str(inputs.get(_req.IN_SWDS) or ""),
+        "srs_path": str(inputs.get(_req.IN_SWRS) or ""),
+        "uds_path": str(inputs.get(_req.IN_UDS_DOC) or ""),
+    }
+
+
+def _suts_normalize_scope(scope: Any) -> "tuple[str, str]":
+    """시험 범위 정규화 — **정의는 생성기가 갖는다**(`generators.suts.normalize_scope`).
+
+    화면이 규칙을 복제하면 여집합을 보게 되고, 그때 같은 값에 두 화면이 반대말을 한다
+    (실측: `sud` → 게이트 "정본 기준" / 생성기 "소스 전체").
+
+    ⚠ import 실패 시에도 화면은 떠야 하므로 폴백을 두되, **폴백도 같은 방향**(모르는
+      값은 좁은 쪽)이어야 한다. 넓은 쪽으로 떨어지면 폴백이 원래 결함을 되살린다.
+    """
+    try:
+        from generators.suts import normalize_scope
+        return normalize_scope(scope)
+    except Exception:  # silent-ok: 공시는 실패해도 화면이 떠야 한다
+        logging.getLogger("devops_api").debug(
+            "SUTS scope 정규화를 생성기에서 못 읽었다 — 폴백", exc_info=True)
+        raw = str(scope or "").strip()
+        low = raw.lower()
+        if not low or low == "suds":
+            return "suds", ""
+        return ("source", "") if low == "source" else ("suds", raw)
+
+
+def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int],
+               full: Optional[int]) -> Optional[Dict[str, Any]]:
+    """SUTS 시퀀스 상한이 **이 소스에서** MC/DC 를 자르는가.
+
+    `generators/suts` 는 MC/DC 전략을 목록 **맨 끝**에 붙이고 `strategies[:max_seq]` 로
+    앞에서 자른다. 그래서 상한이 후보 최대보다 작으면 MC/DC 가 가장 먼저 사라진다 —
+    ASIL D 는 MC/DC 가 필수(ISO 26262-6)라 그 프로젝트에선 규격 미달로 직결된다.
+
+    지금까지 게이트는 이 사실을 **일반론**으로만 적었다: QM 전용 프로젝트에는 읽을
+    이유 없는 소음이고, 정작 ASIL D 프로젝트에서는 몇 개가 걸리는지 말하지 못했다.
+    등급 분포는 이미 재고 있으므로(`suts_asil.by_grade`) 새로 재지 않는다.
+
+    ⚠ 안 쟀으면 ``None`` — 등급을 모른다는 사실을 "ASIL D 없음" 으로 접지 않는다.
+    """
+    a = tm.get("suts_asil") or {}
+    if not a.get("measured"):
+        return None
+    by_grade = a.get("by_grade")
+    if not isinstance(by_grade, dict):
+        return None
+    d = int(by_grade.get("D") or 0)
+    c = int(by_grade.get("C") or 0)
+    cut = isinstance(eff, int) and isinstance(full, int) and eff < full
+    return {"asil_d": d, "asil_c": c, "mcdc_at_risk": bool(cut and d)}
 
 
 def _probe_path(resolver: Any, path: str) -> Dict[str, Any]:
@@ -455,6 +699,76 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                            effect=optional.get(key, ""), **extra))
         available[key] = (state == S_OK)
 
+    # ── 1-b. **실제로 쓸 템플릿** — 위 `template` 행이 그것이 아닐 수 있다 ────
+    #
+    # 생성은 `docgen_template_source.choose_template_source` 로 정하고, 그 규칙은
+    # **정본(납품본)이 있으면 정본을 쓴다**(`prefer_reference=True`, 호출부 5곳 전부
+    # 기본값). 그런데 게이트는 오래 설정한 표준 템플릿 경로만 보여 줬다. 그래서:
+    #
+    #   - 정본이 등록돼 있으면 화면이 **쓰이지도 않을 파일**에 ✓ 를 줬다.
+    #   - 그 표준 템플릿이 접근 불가면 `error` 로 그려 **막힌 것처럼** 보였는데,
+    #     실제 생성은 정본으로 멀쩡히 돌았다(반대 방향 거짓말).
+    #
+    # 템플릿이 무엇이냐는 사소하지 않다 — 표지·이력·Introduction(표기 규약 표)이 전부
+    # 거기서 온다(`docgen_template_source` 모듈 docstring).
+    #
+    # ⚠ 규칙을 여기 복제하지 않는다. 같은 함수를 부른다(순수 경로 선택이라 IO 없음).
+    if req.doc_type in ("uds", "sts", "suts", "sits"):
+        _ref = _reference_doc_for(req, linked=_linked_docs(req))
+        _tpl = inputs.get(_req.IN_TEMPLATE, "")
+        try:
+            from backend.services.docgen_template_source import (
+                choose_template_source,
+                prefer_reference_from,
+            )
+            # ⚠ 사용자가 고른 값을 **반영해서** 공시한다. 기본값을 하드코딩하면 사용자가
+            #   "표준 템플릿 우선" 을 골라도 이 행은 계속 정본을 이름 댄다 —
+            #   `suts_scope` 가 같은 이유로 `req.caps` 를 읽는다(같은 파일 5-b).
+            _chosen, _why = choose_template_source(
+                req.doc_type, registered_template=_tpl, reference_doc=_ref,
+                prefer_reference=prefer_reference_from(
+                    req.caps.get("template_source")),
+            )
+        except Exception:  # silent-ok: 공시는 실패해도 화면이 떠야 한다
+            logging.getLogger("devops_api").debug("템플릿 선택 공시 실패", exc_info=True)
+            _chosen, _why = "", ""
+        if _why:
+            _shadowed = bool(_tpl and _chosen and _chosen != _tpl)
+            _tail = ""
+            if _shadowed:
+                _tail += (f" ⚠ 설정한 표준 템플릿(`{Path(_tpl).name}`)은 이번 생성에 "
+                          f"**쓰이지 않습니다**.")
+                # 폴백은 **정본을 골랐을 때만** 뜻이 있다. 표준 템플릿을 고른 상태에서
+                # "실패하면 표준 템플릿으로" 라고 쓰면 자기 자신을 가리키는 헛말이다.
+                _tail += " 정본을 못 읽으면 표준 템플릿으로 한 번 더 시도합니다."
+            # 고른 파일이 **열리는지**까지 본다. 선택만 공시하고 접근을 안 보면,
+            # 못 여는 파일을 "이걸로 만듭니다" 라고 이름 대는 셈이다.
+            _tpl_state = S_OK if _chosen else S_DEGRADED
+            if _chosen:
+                _probe = (_probe_path(resolver, _chosen) if _chosen != _tpl
+                          else {"state": S_OK if available.get(_req.IN_TEMPLATE) else S_MISSING,
+                                "reason": ""})
+                if _probe["state"] != S_OK:
+                    _tpl_state = S_DEGRADED
+                    _tail += (f" ⚠ 그런데 이 파일을 열지 못합니다"
+                              f"{(' — ' + _probe['reason']) if _probe['reason'] else ''}"
+                              f" — {'표준 템플릿으로 폴백합니다' if _shadowed else '서식 없이 생성됩니다'}.")
+            # phase 는 **`decision`** 이다 — 이제 이 행에 선택지가 붙는다. 자료가
+            # 부족해서가 아니라 사람이 정하는 축이므로 캡·범위와 같은 자리에 온다.
+            _tpl_choice = (spec.get("choices") or {}).get("template_source") or {}
+            steps.append(_step(
+                "template_source", "decision", _tpl_state, "템플릿 출처",
+                value=_chosen or "",
+                measured={"registered": _tpl or None, "reference": _ref or None,
+                          "shadowed": _shadowed or None,
+                          # 화면이 옵션 목록을 복제하지 않도록 **서버가 내려준다**.
+                          # `choice` 가 있으면 패널이 그 자리에 `<select>` 를 그린다.
+                          "choice": "template_source" if _tpl_choice else None,
+                          "options": _tpl_choice.get("options") or None,
+                          "picked": str(req.caps.get("template_source") or "")},
+                reason=_why + _tail,
+            ))
+
     # ── 1-a. UDS 는 Jenkins **빌드 캐시**가 있어야 시작한다 ───────────────────
     #
     # `_uds_generate_from_paths`(`backend/helpers/uds.py:1504`)가 **맨 첫 줄에서**
@@ -579,8 +893,15 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     #   리뷰 절차가 채워지고, 요구 커버리지는 100% 로 보인다.
     _MATERIAL_DOCS = ("sts", "sits", "suts")
     _MATERIAL_LABEL = "요구 매핑 / 통합 흐름 / 변수 타입"
+    # ⚠ 캐시 조회에 **측정 때와 같은 문서 경로**를 넘긴다. 예전엔 키가 `source_root`
+    #   하나라, 설정에서 SwDS 를 바꿔도 캐시가 그대로 맞아 이미 교체된 문서로 잰 수치를
+    #   최대 15분 동안 "지금 값" 으로 보고했다. 양쪽이 같은 `_resolve_inputs` 를 쓴다.
+    _tm_paths = _tm_lookup_paths(inputs)
     if req.doc_type in _MATERIAL_DOCS and src and available.get(_req.IN_SOURCE_ROOT):
-        tm = _tm.cached(src) if _tm.has_cached(src) else None
+        # ⚠ `has_cached()` 로 먼저 묻지 않는다 — 둘 다 내용 서명을 계산하느라 소스
+        #   트리를 os.walk 한다(실측 99파일 33ms). `cached()` 는 없으면 `None` 이라
+        #   물음 하나로 충분하다.
+        tm = _tm.cached(src, **_tm_paths)
         if tm is None:
             steps.append(_step(
                 "test_materials", "material", S_UNMEASURED, _MATERIAL_LABEL,
@@ -591,24 +912,62 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             steps.append(_step("test_materials", "material", S_UNMEASURED,
                                _MATERIAL_LABEL, reason=str(tm.get("reason") or "")))
         else:
+            # ── 이 수치가 **언제** 잰 것인가 ──────────────────────────────────
+            #
+            # 아래 행들은 전부 캐시된 측정에서 나온다(파싱이 수십 초라 요청 안에서 다시
+            # 재지 않는다). 그런데 화면은 그 사실을 말하지 않아 15분 전 수치가 방금 잰
+            # 것처럼 보였다. 게다가 캐시 키는 **경로만** 담아서, 같은 경로의 SwDS 를
+            # 열어 고쳐도 키가 같아 옛 수치가 그대로 유효로 남았다.
+            #
+            # 이제 로컬 경로면 `(mtime,size)` 서명으로 내용 변경까지 잡는다. cloudium
+            # (`U:`)은 worker IPC 에 `stat` op 이 없어 잡을 수 없다 — 그 사실을 숨기지
+            # 않고 `ttl_only` 로 표시한다. 모르는 것을 최신이라고 말하지 않는다.
+            _meas_at = tm.get("measured_at")
+            _fresh_kind = str(tm.get("freshness") or "")
+            if _meas_at:
+                _age_min = max(0, int((time.time() - float(_meas_at)) // 60))
+                _verified = _fresh_kind == "verified"
+                steps.append(_step(
+                    "materials_freshness", "material",
+                    S_OK if _verified else S_DEGRADED, "측정 시점",
+                    measured={"age_minutes": _age_min, "freshness": _fresh_kind or None},
+                    reason=(
+                        f"{_age_min}분 전에 잰 값입니다 — 소스·문서가 바뀌면 자동으로 "
+                        f"다시 잽니다(내용 서명 대조)."
+                        if _verified else
+                        f"{_age_min}분 전에 잰 값입니다. ⚠ 원격 경로라 **파일이 바뀌어도 "
+                        f"감지하지 못합니다** — 최대 15분 동안 옛 수치가 그대로 보입니다. "
+                        f"문서를 고쳤다면 [소스 측정]으로 다시 재세요."
+                    ),
+                    actions=[{"kind": "measure_source"}],
+                ))
             if req.doc_type == "sits":
                 s = tm["sits"]
                 # ⚠ "절단 0" 이 아니라 **여유**를 본다. 실측: KJPDS02 는 후보 120 /
                 #   캡 120 으로 여유가 0 이라, 함수가 하나만 늘어도 조용히 잘린다.
+                # ⚠ 측정은 **생성기 기본 캡**(120)으로 잰 것이다. 사용자가 상한을
+                #   정했으면 그 값으로 다시 재야 한다 — 안 그러면 같은 패널의 두 행이
+                #   서로 다른 캡을 말한다. 실측: 50 으로 낮췄는데 이 행은 계속
+                #   "25개가 빠집니다"(실제 95) = **70건 과소보고**, 200 으로 올려도
+                #   "빠집니다" 라고 했다. `flows_total` 은 캡 없이 잰 후보 총량이라
+                #   재측정 없이 계산된다(`docgen_test_materials._measure_sits`).
+                _eff_flows = _cap_user_value(req.caps, "max_flows") or int(s["cap"] or 0)
+                _flow_head = _eff_flows - int(s["flows_total"] or 0)
                 steps.append(_step(
                     "sits_flows", "material",
-                    S_DEGRADED if s["at_cap_boundary"] else S_OK, "통합 흐름",
-                    measured={"value": s["flows_total"], "of": s["cap"],
-                              "headroom": s["headroom"]},
+                    S_DEGRADED if _flow_head <= 0 else S_OK, "통합 흐름",
+                    measured={"value": s["flows_total"], "of": _eff_flows,
+                              "headroom": _flow_head},
                     # ⚠ 이미 잘리는 것과 곧 잘릴 것은 다른 말이다. 라이브에서 여유가
                     #   **-25**(즉 25개가 이미 빠지는 중)인데 "함수가 늘면 잘리기
                     #   시작한다" 는 미래형 문구가 나왔다 — 현재 손실을 예고로 읽게 한다.
                     reason=(
-                        f"흐름 {abs(s['headroom'])}개가 상한을 넘어 시험 규격에서 빠집니다 "
-                        "— 안전등급이 높은 쪽부터 남지만, 빠진 흐름은 문서에 존재하지 않습니다"
-                        if isinstance(s["headroom"], int) and s["headroom"] < 0
+                        f"흐름 {abs(_flow_head)}개가 상한({_eff_flows})을 넘어 시험 규격에서 "
+                        "빠집니다 — 안전등급이 높은 쪽부터 남지만, 빠진 흐름은 문서에 "
+                        "존재하지 않습니다"
+                        if _flow_head < 0
                         else ("여유가 없습니다 — 함수가 늘면 그 순간부터 흐름이 잘립니다"
-                              if s["at_cap_boundary"] else "")
+                              if _flow_head == 0 else "")
                     ),
                     sample=s.get("sample_flow"),
                 ))
@@ -742,17 +1101,31 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     ))
                     # ⚠ 상한이 버리는 함수는 **하한**이다. 한 함수가 여러 TC 를 내면
                     #   상한이 더 일찍 차므로 실제로는 더 빠진다(실측 715 vs 887).
-                    _beyond = int(m.get("functions_beyond_cap") or 0)
+                    # 사용자가 상한을 정했으면 그 값으로 다시 센다(SITS 와 같은 이유).
+                    # 재계산은 원래와 **같은 방식**이어야 한다 — 요구별 목록에서 앞
+                    # `cap` 개만 남기고 **고유 함수 집합의 차**를 센다. 분포 합으로
+                    # 세면 여러 요구에 걸친 함수를 중복 계상해 과대보고가 된다.
+                    _eff_tc = (_cap_user_value(req.caps, "max_tc_per_req")
+                               or int(m.get("cap") or 0))
+                    _lists = m.get("req_fid_lists") or []
+                    if _lists and _eff_tc > 0:
+                        _all = {f for row in _lists for f in row}
+                        _kept = {f for row in _lists for f in row[:_eff_tc]}
+                        _beyond = len(_all - _kept)
+                        _over = sum(1 for row in _lists if len(row) > _eff_tc)
+                    else:
+                        _beyond = int(m.get("functions_beyond_cap") or 0)
+                        _over = m.get("requirements_over_cap")
                     steps.append(_step(
                         "sts_tc_cap", "material",
                         S_OK if not _beyond else S_DEGRADED, "요구당 TC 상한",
-                        measured={"value": m.get("mapped_functions"), "cap": m.get("cap"),
+                        measured={"value": m.get("mapped_functions"), "cap": _eff_tc,
                                   "beyond_cap": _beyond,
-                                  "requirements_over_cap": m.get("requirements_over_cap")},
+                                  "requirements_over_cap": _over},
                         reason=(
                             f"매핑된 함수 {m.get('mapped_functions')}개 중 **최소** "
-                            f"{_beyond}개가 요구당 상한({m.get('cap')})에 걸려 시험되지 "
-                            f"않습니다. 남는 {m.get('cap')}개가 무엇인지는 관련성이 아니라 "
+                            f"{_beyond}개가 요구당 상한({_eff_tc})에 걸려 시험되지 "
+                            f"않습니다. 남는 {_eff_tc}개가 무엇인지는 관련성이 아니라 "
                             "**함수 순서**가 정합니다"
                             if _beyond else ""
                         ),
@@ -844,12 +1217,221 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             ))
 
     # ── 5. 캡 — 자료 부족이 아니라 사용자 결정 ───────────────────────────────
+    #
+    # ⚠ 예전엔 **모든** 캡을 무조건 `S_NEEDED` 로 냈다. 그래서 UDS/STS/SUTS/SITS 는
+    #   입력을 아무리 완비해도 verdict 가 영원히 `needs_decision` 이라 "준비 완료" 가
+    #   한 번도 뜨지 않았다 — 게이트의 최상위 신호가 죽어 있었다. 게다가 조정할 수
+    #   **없는** 캡까지 "결정 필요" 라 해서, 사용자가 할 수 없는 일을 조치 목록에 남겼다.
+    #   이제 셋을 가른다: 조정 불가(공시) / 사용자가 정함 / 아직 안 정함.
+    # 조정 불가 상한이라도 **실제로 자르고 있는지**는 말해야 한다. `ok` 로만 두면
+    # "안 잘린다" 로 읽혀, 상한을 공시하는 이유 자체가 사라진다.
+    #
+    # 소스 파싱 캐시(`docgen_test_materials`)에 절단 통계가 있으면 그것으로 판정하고,
+    # 없으면 재지 않는다(측정은 실측 41~368초). 캐시 키는 소스 루트 + **그때 쓴 문서
+    # 경로**라, 같은 자료로 잰 다른 문서 게이트의 측정은 여기서도 그대로 쓰인다.
+    _tm_cached: Dict[str, Any] = {}
+    if src and available.get(_req.IN_SOURCE_ROOT):
+        _tm_cached = _tm.cached(src, **_tm_paths) or {}
+
     for cap_name, cap in (spec.get("caps") or {}).items():
+        adjustable = bool(cap.get("adjustable"))
+        measured: Dict[str, Any] = {
+            "api_default": cap.get("api"),
+            "generator_default": cap.get("generator"),
+            "adjustable": adjustable,
+        }
+        reason = str(cap.get("effect") or "")
+        if not adjustable:
+            # 왜 못 바꾸는지를 반드시 말한다. **env 와 코드 상수는 다른 말이다** —
+            # 뭉뚱그리면 있지도 않은 환경변수를 찾아 헤매게 된다.
+            env = str(cap.get("env") or "")
+            via = (f"환경변수 `{env}` 로만 조정할 수 있습니다" if env
+                   else "코드 상수로 고정돼 있어 화면에서 바꿀 수단이 없습니다")
+            measured["adjust_via"] = via
+            reason = f"{reason} — {via}" if reason else via
+            # 3단 사다리 — 안 재봤음 / 재봤고 자름 / 재봤고 안 자름.
+            # ⚠ 예전엔 셋을 전부 `ok` 로 접었다. 조정 못 하는 상한이라도 **지금 자르고
+            #   있으면** 그 사실이 상태에 나와야 한다. `degraded` 는 차단이 아니다(§2).
+            _obs = _cap_truncation(cap_name, _tm_cached)
+            if _obs is _NO_MEASURE:
+                state = S_OK
+                reason = f"{reason} (이 상한의 절단량은 측정하지 않습니다)"
+            elif _obs is None:
+                state = S_UNMEASURED
+                reason = f"{reason} (절단 여부는 아직 재지 않았습니다)"
+            elif _obs:
+                state = S_DEGRADED
+                measured.update(_obs["measured"])
+                reason = f"{_obs['reason']} — {via}"
+            else:
+                state = S_OK
+        else:
+            # ⚠ 판정은 **실효값**으로 한다 — 사용자가 정했으면 그 값, 아니면 API 기본값.
+            #   예전엔 `picked` 로만 재서 같은 산출에 두 판정이 나왔다: SUTS 를 안 건드리면
+            #   `needed`(손실 언급 없음), 기본값과 **똑같은 24** 를 직접 넣으면 `degraded`
+            #   "6개가 빠집니다". 만들어지는 문서는 완전히 같은데 게이트가 문서가 아니라
+            #   **사용자의 타이핑**을 재고 있었다. 그 반대편 결함이 더 크다 — STS 는 기본
+            #   5 로 두면 매핑 함수 1,028개 중 상당수가 무시험인데, 아무 숫자도 안 넣은
+            #   기본 상태에서는 게이트가 그 손실을 한 번도 말하지 않았다.
+            picked = _cap_user_value(req.caps, cap_name)
+            if picked is not None:
+                measured["user_value"] = picked
+            # ⚠ 조정 가능해졌다고 `env` 를 지우지 않는다. 요청에 값을 안 실으면 그
+            #   환경변수가 **서버 기본값을 정한다** — 화면이 그걸 안 말하면 "기본 1200"
+            #   이 어디서 온 수인지 알 방법이 없다(예전엔 "이것으로만 조정 가능" 이라는
+            #   더 강한 말로 실려 있었고, 그 문장만 지우면 정보까지 함께 사라졌다).
+            _env = str(cap.get("env") or "")
+            if _env:
+                measured["default_from_env"] = _env
+                reason = f"{reason} (서버 기본값은 환경변수 `{_env}` 가 정합니다)"
+            _api = cap.get("api")
+            eff = picked if picked is not None else (_api if isinstance(_api, int) else None)
+            _tot = _cap_full_total(cap_name, cap, _tm_cached)
+            if _tot is None:
+                # 잴 수 있는 축인데 아직 안 쟀다 → `ok` 도 `needed` 도 아니다. 여기서
+                # `needed` 를 내면 "결정하라" 면서 결정에 필요한 수를 못 주는 꼴이 된다.
+                state = S_UNMEASURED
+                reason = f"{reason} (전량을 아직 재지 않아 이 상한이 자르는지 알 수 없습니다)"
+            elif _tot is _NO_MEASURE:
+                # ── 전량은 못 재도 **지금 자르는가**는 잴 수 있는 축이 있다 ────────
+                #
+                # UDS 두 상한이 그렇다. `uds_file_scan` 은 상한에 닿는 즉시 break 하므로
+                # 전체 파일 수를 **모른다**(`uds_generator.py` 주석). 그래서 "전부 담으려면
+                # 얼마" 는 못 말하지만 "지금 잘리고 있다" 는 정확히 말할 수 있다.
+                #
+                # ⚠ 이 사다리는 원래 **조정 불가** 가지에만 있었다. 두 상한을 조정
+                #   가능으로 바꾸면서 그대로 두었더니, 실제로 잘리고 있는데도 행이
+                #   `unmeasured` 로 바뀌어 **측정된 손실이 화면에서 사라졌다**(기존
+                #   가드 5건이 잡았다). 조정 가능 여부는 손실 보고와 직교한다.
+                _obs = _cap_truncation(cap_name, _tm_cached)
+                if _obs is _NO_MEASURE:
+                    # 전량도 절단량도 잴 축이 없다(STS `max_steps_per_tc`). `unmeasured`
+                    # 로 두면 verdict 가 영구 고착된다 — `ok` 로 두되 안 잰다고 말한다.
+                    state = S_OK
+                    reason = f"{reason} (이 상한의 절단량은 측정하지 않습니다)"
+                elif _obs is None:
+                    # 이 가지는 '전량' 이 아니라 **절단 여부**를 재는 축이다. 위쪽
+                    # 문구를 그대로 쓰면 재고 있는 대상이 뭔지 어긋난다.
+                    state = S_UNMEASURED
+                    reason = f"{reason} (절단 여부는 아직 재지 않았습니다)"
+                elif _obs:
+                    state = S_DEGRADED
+                    measured.update(_obs["measured"])
+                    _sug = _cap_suggested_from_truncation(cap_name, _tm_cached)
+                    if _sug is not None:
+                        measured["suggested"] = _sug
+                        measured["suggested_basis"] = _SUG_MEASURED
+                    reason = f"{reason} — {_obs['reason']}"
+                    if picked is not None and picked != _cap_measured_at(cap_name, _tm_cached):
+                        # 측정은 **그때 쓰던 상한**으로 잰 것이다. 사용자가 값을 바꿨는데
+                        # 그 사실을 안 밝히면 지금 고른 값으로 잰 수치처럼 읽힌다.
+                        reason += (f" (이 수치는 상한 "
+                                   f"{_cap_measured_at(cap_name, _tm_cached)} 으로 잰 것입니다 "
+                                   f"— {picked} 로 다시 만들면 달라집니다)")
+                else:
+                    state = S_OK
+                    reason = f"{reason} — 측정 기준 이 상한에 걸려 빠지는 항목은 없습니다"
+            elif eff is None:
+                state = S_NEEDED   # adjustable 인데 api 기본이 없다 = 계약 불일치(가드가 잡는다)
+            else:
+                _full, _basis = int(_tot["value"]), _tot["basis"]
+                _short = _full - eff
+                if _short > 0:
+                    measured["suggested"] = _full
+                    measured["suggested_basis"] = _basis
+                    measured["below_full"] = _short
+                    # ⚠ 두 축의 주장 강도가 다르다. 실측 축은 "빠진다", 카탈로그 축은
+                    #   "최대 …까지 빠질 수 있다" — 후자를 단언으로 쓰면 손실을 부풀린다.
+                    _loss = (f"전량 {_full} 중 {_short}개가 빠집니다"
+                             if _basis == _SUG_MEASURED else
+                             f"후보 최대 {_full}종 중 **최대 {_short}종**까지 빠질 수 있습니다"
+                             f"(함수마다 후보 수가 달라 실제 손실은 더 적을 수 있습니다)")
+                    # 아직 안 정했으면 **결정 대기**, 정했으면 받아들인 degrade 다.
+                    # 둘 다 손실은 같은 문장으로 말한다.
+                    if picked is None:
+                        state = S_NEEDED
+                        reason = f"{reason} — 아직 정하지 않아 기본값 {eff} 로 만듭니다. {_loss}"
+                    else:
+                        # `ok` 로 두면 "정했다" 가 "충분하다" 로 읽힌다
+                        # (degraded 는 차단이 아니다 — 모듈 규약 §2).
+                        state = S_DEGRADED
+                        reason = f"{reason} — {eff} 로 정했습니다. {_loss}"
+                else:
+                    # 전량을 담는다 → 결정할 것이 없다. 예전엔 이 경우에도 `needed` 라
+                    # 4개 문서가 `준비 완료` 에 닿을 수 없었다(고치려던 결함 그 자체).
+                    state = S_OK
+                    if picked is not None and eff > _full:
+                        # 상한의 상한 — 이 이상 올려도 담을 것이 없다. 막지는 않는다.
+                        measured["over_suggested"] = True
+                        reason = (f"{reason} — {eff} 로 정했지만 {_full} 이상은 "
+                                  f"더 담을 것이 없습니다")
+                # ASIL 축은 이 상한에서만 실질이 있다 — MC/DC 가 맨 끝이라 먼저 잘린다.
+                # 일반론("ASIL D 는 MC/DC 필수")을 **이 소스의 수**로 바꾼다.
+                if cap_name == "max_sequences":
+                    _risk = _mcdc_risk(_tm_cached, eff, _full)
+                    if _risk is not None:
+                        measured.update(_risk)
+                        if _risk["mcdc_at_risk"]:
+                            reason += (f" ⚠ 이 소스에 **ASIL D 함수가 {_risk['asil_d']}개** "
+                                       f"있습니다 — MC/DC 는 전략 목록 맨 끝이라 이 상한에 "
+                                       f"가장 먼저 잘립니다(ISO 26262-6: ASIL D 는 MC/DC 필수)")
+                        elif not _risk["asil_d"]:
+                            # 없는 위험을 경고로 남겨 두면 진짜 경고가 묻힌다.
+                            reason += " (측정 기준 이 소스에 ASIL D 함수는 없습니다)"
+                        else:
+                            # ASIL D 는 있는데 상한이 후보 전량을 담는 경우. 앞의 정적
+                            # 문구("MC/DC 가 맨 끝이라 잘립니다")가 그대로 남으면 `ok`
+                            # 행에 살아 있는 경고가 붙어 **자기모순**이 된다 —
+                            # 그 문장은 기본값을 말한 것이지 지금 고른 값이 아니다.
+                            reason += (f" (상한이 후보 전량이라 ASIL D 함수 "
+                                       f"{_risk['asil_d']}개의 MC/DC 도 잘리지 않습니다)")
+        # ⚠ `input_value` 액션을 붙이지 않는다. 조정 가능하면 입력칸이 그 행에 있고,
+        #   조정 불가면 누를 이유가 없다. 예전엔 무조건 붙어서, 누르면 보드가
+        #   "해당 빌더 탭에서 조정합니다"(`DocGenStatusBoard.jsx:668`)라며 **그런 탭이
+        #   없는 곳**으로 사용자를 보냈다.
+        #
+        # 대신 **못 잰 행에는 재는 수단**을 준다. 이걸 빼면 "아직 재지 않았습니다" 가
+        # 막다른 길이 된다 — UDS 는 재는 버튼이 어디에도 없어(`measure_source` 는
+        # sts/sits/suts 행에만 붙었다) 두 상한이 영영 `unmeasured` 로 남고 verdict 가
+        # `unknown` 에 고착됐다. 상태만 정직해지고 사용자는 아무것도 할 수 없던 셈이다.
+        _cap_actions = ([{"kind": "measure_source"}]
+                        if state == S_UNMEASURED and src and available.get(_req.IN_SOURCE_ROOT)
+                        else [])
+        steps.append(_step(f"cap_{cap_name}", "decision", state, cap_name,
+                           measured=measured, reason=reason, actions=_cap_actions))
+
+    # ── 5-a. ASIL 등급 — 상한과 달리 **문서 내용을 바꾼다** ──────────────────
+    #
+    # `generators/sts.py:1719` 는 이 값으로 요구별 ASIL 빈 칸을 역채움하고,
+    # `is_safety_asil` 판정이 시험 생성 갈래를 가른다. 표지의 "ASIL Level" 칸도 이것이다.
+    # 그런데 화면은 오래 이 값을 **보내지 않았다** — 백엔드는 `Form("")` 로 받고 있었고
+    # Sw* 빌더 폼엔 입력칸이 있는데, 문서 4종만 배선이 빠져 항상 빈 값으로 생성됐다.
+    #
+    # ⚠ 빈 값을 `QM` 으로 채우지 않는다. 근거 없는 등급을 지어내면 하류가 그걸 사실로
+    #   쓴다(저장소 규약 `[[project_asil_no_fabrication]]`). 대신 **무엇이 달라지는지**를
+    #   말하고 사람이 정하게 둔다.
+    # ⚠ **UDS 는 제외한다.** 핸들러(`/api/jenkins/uds/generate-async`)가 `asil_level` 을
+    #   선언하지 않아 보내도 FastAPI 가 조용히 버린다 — 행을 내면 사용자는 골랐다고 믿는데
+    #   문서는 그대로인 **거짓 통제**가 된다(2026-08-31 에 실제로 그렇게 만들었다).
+    #   받게 고치는 것도 답이 아니다: UDS 의 ASIL 은 함수별 증거에서 온다
+    #   (`uds_generator:1408` — Doxygen `@asil` → SwDS 맵 → 없으면 `TBD`, 출처는
+    #   `asil_source` 에 남는다). 프로젝트 기본값을 주입하면 정직한 `TBD` 전체를 지어낸
+    #   등급으로 덮는다(`[[project_asil_no_fabrication]]`). UDS 의 ASIL 표면은 이미
+    #   `chain_asil` 행이 맡고 있으므로 여기 또 내면 두 목소리가 된다.
+    if req.doc_type in ("sts", "suts", "sits"):
+        _asil = str(req.asil_level or "").strip().upper()
         steps.append(_step(
-            f"cap_{cap_name}", "decision", S_NEEDED, cap_name,
-            measured={"api_default": cap.get("api"), "generator_default": cap.get("generator")},
-            reason=cap.get("effect", ""),
-            actions=[{"kind": "input_value", "target": cap_name}],
+            "asil_level", "decision", S_OK if _asil else S_NEEDED, "프로젝트 ASIL 등급",
+            measured={"value": _asil or None},
+            reason=(
+                f"**{_asil}** 로 만듭니다 — 요구별 ASIL 이 빈 칸은 이 값으로 채워지고, "
+                f"안전 관련 판정이 그에 따라 갈립니다."
+                if _asil else
+                "설정되지 않았습니다 — 표지의 ASIL 칸이 비고, 요구별 ASIL 이 빈 항목은 "
+                "**빈 채로 남습니다**(안전 관련 시험 갈래가 켜지지 않습니다). "
+                "빈 값을 QM 으로 채우지는 않습니다 — 근거 없는 등급은 지어내지 않습니다. "
+                "옆에서 바로 고르세요(설정 > 공통 메타 > ASIL 레벨과 같은 값입니다)."
+            ),
         ))
 
     # ── 5-b. 시험 범위 — 캡과 같은 성격의 **사용자 결정** ────────────────────
@@ -858,12 +1440,30 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 정본 1,005) 전부 시험하면 정본에 없는 항목이 섞인다 — 어느 쪽을 원하는지는
     # 사람이 정한다. 기본값은 **생성기가 갖고 화면은 복제하지 않는다**.
     if req.doc_type == "suts":
+        # ⚠ 사용자가 고른 값을 읽어야 한다. 안 읽으면 화면의 `<select>` 는 "소스 전체" 를
+        #   보이는데 바로 옆 문구는 "기본은 정본 기준입니다" 라 **자기모순**이 된다.
+        # ⚠ 판정 규칙을 여기에 **복제하지 않는다**. 예전엔 게이트가 `== "source"`, 생성기가
+        #   `== "suds" else 전체` 라 서로 여집합을 봤다 — `sud` 같은 값 하나에 게이트는
+        #   "정본 기준", 생성기는 "소스 전체" 로 **반대말**을 했다(그쪽이 위험한 방향).
+        _scope, _scope_bad = _suts_normalize_scope(req.caps.get("suts_scope"))
+        _scope_reason = (
+            "현재 **소스 전체**입니다 — SwUDS 와 대조하지 않으므로 정본에 없는 함수가 "
+            "규격서에 들어갑니다(실측 소스 1,160 vs 정본 1,005)."
+            if _scope == "source" else
+            "기본은 정본 기준입니다 — SwUDS 설계 ID 가 있는 함수만 시험합니다. "
+            "소스 전체를 시험하려면 바꾸세요(정본에 없는 함수가 포함됩니다)."
+        )
+        _scope_choice = (spec.get("choices") or {}).get("suts_scope") or {}
         steps.append(_step(
-            "scope", "decision", S_OK, "시험 범위",
-            reason=(
-                "기본은 정본 기준입니다 — SwUDS 설계 ID 가 있는 함수만 시험합니다. "
-                "소스 전체를 시험하려면 바꾸세요(정본에 없는 함수가 포함됩니다)."
-            ),
+            "scope", "decision", S_OK if not _scope_bad else S_DEGRADED, "시험 범위",
+            measured={"value": _scope, "stored": _scope_bad or None,
+                      # 옵션의 단일 출처는 `docgen_requirements` 의 `choices` 표다.
+                      # 오래 화면·라우터·가드가 각자 목록을 손으로 들고 있었다.
+                      "choice": "suts_scope" if _scope_choice else None,
+                      "options": _scope_choice.get("options") or None,
+                      "picked": str(req.caps.get("suts_scope") or "")},
+            reason=(f"저장된 값 `{_scope_bad}` 을 알 수 없어 기본값으로 되돌렸습니다 — "
+                    f"{_scope_reason}" if _scope_bad else _scope_reason),
         ))
 
     # ── verdict — 오독 위험이 큰 순서로 ──────────────────────────────────────
@@ -1116,9 +1716,15 @@ def docgen_comment_targets(req: CommentTargetsRequest) -> Dict[str, Any]:
 class MeasureSourceRequest(BaseModel):
     source_root: str
     max_files: int = 300
-    # 시험 문서(STS/SITS/SUTS)면 통합 흐름·변수 타입·요구 매핑까지 잰다.
-    # 파서가 달라 비용이 별개다.
+    # 시험 문서(STS/SITS/SUTS)면 통합 흐름·변수 타입·요구 매핑까지, UDS 면 분류별·
+    # 파일 스캔 상한의 **실제 절단량**까지 잰다. 파서가 달라 비용이 별개다.
     doc_type: str = ""
+    # ⚠ 아래 세 경로는 **직접 지정 시에만** 쓴다. 기본은 `scm_id`+`doc_paths` 로
+    #   서버가 `_resolve_inputs` 를 돌려 정한다 — 프론트가 제 나름의 우선순위로
+    #   경로를 고르면 **판정이 두 벌**이 되고, 그 결과 preflight 의 캐시 조회 키와
+    #   어긋나 측정을 해도 게이트가 계속 `unmeasured` 로 남는다.
+    scm_id: str = ""
+    doc_paths: Dict[str, str] = Field(default_factory=dict)
     sds_path: str = ""
     # STS 축(요구-함수 매핑)에만 쓴다. 없으면 그 축은 **미측정**으로 남는다 —
     # 요구 목록이 없으면 "몇 개가 근거 없이 시험되는가" 를 셀 수가 없다.
@@ -1142,10 +1748,26 @@ def docgen_measure_source(req: MeasureSourceRequest) -> Dict[str, Any]:
         "ok": True,
         "comment_coverage": _cov.measure(req.source_root, max_files=req.max_files),
     }
-    if str(req.doc_type or "").strip().lower() in ("sts", "sits", "suts"):
-        out["test_materials"] = _tm.measure(
-            req.source_root, sds_path=req.sds_path, srs_path=req.srs_path,
-            uds_path=req.uds_path)
+    # ⚠ `uds` 가 여기 들어 있어야 한다. UDS 게이트의 두 상한(`max_source_files`·
+    #   `max_items_per_category`)이 **실제로 자르고 있는가** 는 `_tm.measure` 가 내는
+    #   `uds_category_caps`/`uds_file_scan` 에서만 나온다. 오래 시험 문서 3종만 재서,
+    #   UDS 행에 `소스 측정` 버튼을 붙여도 눌러 봐야 그 통계가 안 채워졌다 —
+    #   200 과 토스트만 돌아오고 화면은 그대로인 **거짓 통제**가 된다.
+    if str(req.doc_type or "").strip().lower() in ("sts", "sits", "suts", "uds"):
+        # 경로 해석은 **게이트와 같은 함수**로 한다. 그래야 캐시 키가 맞고, 어느 문서를
+        # 근거로 쟀는지에 대해 두 화면이 같은 말을 한다. 명시 인자는 덮어쓰기로만 둔다.
+        _resolved = _tm_lookup_paths(_resolve_inputs(PreflightRequest(
+            doc_type=req.doc_type or "uds", scm_id=req.scm_id,
+            doc_paths=req.doc_paths, source_root=req.source_root,
+        )))
+        paths = {
+            "sds_path": req.sds_path or _resolved["sds_path"],
+            "srs_path": req.srs_path or _resolved["srs_path"],
+            "uds_path": req.uds_path or _resolved["uds_path"],
+        }
+        out["test_materials"] = _tm.measure(req.source_root, **paths)
+        # 어느 문서로 쟀는지를 응답에 남긴다 — 캐시가 안 맞을 때 되짚을 유일한 단서다.
+        out["measured_with"] = paths
     return out
 
 

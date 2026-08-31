@@ -1,6 +1,9 @@
 // 조회는 이 컴포넌트가 하지 않는다 — 부모(보드)가 행을 펼칠 때 받아 props 로 내린다.
 // 이유는 아래 컴포넌트 주석 참조.
-import { loadDocGenCaps, saveDocGenCap, saveDocGenChoice } from '../../sharedInputs.js';
+import {
+  loadDocGenCaps, saveDocGenCap, saveDocGenChoice,
+  loadSharedInputs, saveSharedInputs,
+} from '../../sharedInputs.js';
 
 /**
  * 생성 상한 입력 — 캡은 **자료 부족이 아니라 사용자 결정**이라 그 자리에서 바꾼다.
@@ -18,37 +21,108 @@ import { loadDocGenCaps, saveDocGenCap, saveDocGenChoice } from '../../sharedInp
  *
  * 빈 값을 저장하면 키가 지워져 **서버 기본값**을 쓴다 — 여기서 기본을 복제하지 않는다.
  */
-function ScopeSelect({ onSaved }) {
-  const caps = loadDocGenCaps();
+function ChoiceSelect({ name, label, options, scope, onSaved }) {
+  const caps = loadDocGenCaps(scope);
+  const opts = Array.isArray(options) && options.length > 0 ? options : null;
+  // 서버가 옵션을 못 내려주면 **선택기를 그리지 않는다**. 여기서 목록을 지어내면
+  // 화면이 서버가 받지 않는 값을 제시하게 되고, 그건 다시 거짓 통제다.
+  if (!opts) return null;
+  // 값이 같은 옵션이 둘이면 `<select>` 가 첫 항목만 고른다 — 표에서 라벨만 다르게
+  // 적었을 때 조용히 한쪽이 사라지므로 값 기준으로 접는다.
+  const seen = new Set();
+  const uniq = opts.filter(o => (seen.has(o.value) ? false : (seen.add(o.value), true)));
   return (
     <span style={{ whiteSpace: 'nowrap' }}>
       <select
-        aria-label="SUTS 시험 범위"
-        defaultValue={caps.suts_scope || ''}
-        onChange={(e) => { saveDocGenChoice('suts_scope', e.target.value); onSaved?.(); }}
+        aria-label={label || name}
+        defaultValue={caps[name] ?? ''}
+        onChange={(e) => { saveDocGenChoice(name, e.target.value, scope); onSaved?.(); }}
         style={{ fontSize: 'var(--text-xs)' }}
       >
-        <option value="">정본 기준 (SwUDS 설계 ID 보유 함수만)</option>
-        <option value="source">소스 전체 (SwUDS 미대조)</option>
+        {uniq.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </span>
   );
 }
 
-function CapInput({ name, apiDefault, onSaved }) {
-  const caps = loadDocGenCaps();
+/** "전부 N" 버튼의 설명. **N 의 출처가 두 가지**라 같은 문장을 쓰면 한쪽이 거짓이 된다.
+ *
+ * `measured` 는 이 소스를 실제로 센 값이라 "전부 담으려면 최소 N" 이 참이지만,
+ * `catalog` 는 생성기 전략 후보의 **이론적 최대**라 그만큼 나오는 함수가 거의 없다.
+ * 후자에까지 "측정값 기준" 이라 적으면 재지도 않은 수를 측정치로 파는 셈이다.
+ */
+function suggestTitle(suggested, basis) {
+  return basis === 'catalog'
+    ? `생성기 후보 최대 ${suggested}종 — 어떤 함수도 잘리지 않게 하려면 이 값입니다(측정치가 아닙니다)`
+    : `측정값 기준 — 전부 담으려면 최소 ${suggested} 이어야 합니다`;
+}
+
+/**
+ * 프로젝트 ASIL 등급 — **그 자리에서 정한다**.
+ *
+ * 상한과 달리 이 값은 문서 내용을 바꾼다(요구별 ASIL 빈 칸 역채움 · 안전 관련 시험 갈래).
+ * 게이트가 "결정 필요" 라고만 하고 설정 탭으로 보내면, 이 패널이 스스로 세운 원칙
+ * ("캡은 그 자리에서 바꾼다 — 다른 탭으로 보내면 결정 흐름이 끊긴다")을 어긴다.
+ *
+ * ⚠ 빈 값은 **빈 채로** 저장한다. `QM` 을 기본으로 넣으면 근거 없는 등급을 지어내는
+ *   것이고, 하류(요구 ASIL 역채움·안전 판정)가 그걸 사실로 쓴다.
+ * ⚠ 저장소는 공유 입력(설정 > 공통 메타)과 **같은 칸**이다 — 여기만의 사본을 만들면
+ *   Sw* 빌더와 값이 갈린다.
+ */
+const ASIL_CHOICES = ['ASIL A', 'ASIL B', 'ASIL C', 'ASIL D', 'QM'];
+
+function AsilSelect({ onSaved }) {
+  const current = String(loadSharedInputs()?.asil_level || '');
+  return (
+    <span style={{ whiteSpace: 'nowrap' }}>
+      <select
+        aria-label="프로젝트 ASIL 등급"
+        defaultValue={current}
+        onChange={(e) => {
+          saveSharedInputs({ ...loadSharedInputs(), asil_level: e.target.value });
+          onSaved?.();
+        }}
+        style={{ fontSize: 'var(--text-xs)' }}
+      >
+        <option value="">미지정 (등급을 지어내지 않습니다)</option>
+        {ASIL_CHOICES.map(v => <option key={v} value={v}>{v}</option>)}
+      </select>
+    </span>
+  );
+}
+
+function CapInput({ name, apiDefault, suggested, suggestedBasis, scope, onSaved }) {
+  const caps = loadDocGenCaps(scope);
+  const current = caps[name];
   return (
     <span style={{ whiteSpace: 'nowrap' }}>
       <input
+        /* 비제어 입력이라 `defaultValue` 는 마운트 때만 반영된다. 아래 [전부] 버튼으로
+           값을 바꾸면 저장은 되는데 칸은 그대로여서 "안 먹혔다" 로 읽힌다 — key 로
+           리마운트해 화면과 저장값을 같게 유지한다. */
+        key={`${name}-${current ?? ''}`}
         type="number"
         min="1"
         aria-label={`${name} 상한`}
-        defaultValue={caps[name] ?? ''}
+        defaultValue={current ?? ''}
         placeholder={apiDefault != null ? String(apiDefault) : ''}
-        onChange={(e) => saveDocGenCap(name, e.target.value)}
+        onChange={(e) => saveDocGenCap(name, e.target.value, scope)}
         onBlur={() => onSaved?.()}
         style={{ width: 72, fontSize: 'var(--text-xs)' }}
       />
+      {/* 상한을 올리라고만 하고 **얼마로** 올릴지 안 알려주면 사용자는 숫자를 추측한다.
+          서버가 실제 측정에서 낸 값이 있을 때만 뜬다(없으면 지어내지 않는다). */}
+      {suggested != null && current !== suggested && (
+        <button
+          type="button"
+          className="btn-secondary btn-sm"
+          style={{ marginLeft: 4 }}
+          title={suggestTitle(suggested, suggestedBasis)}
+          onClick={() => { saveDocGenCap(name, suggested, scope); onSaved?.(); }}
+        >
+          전부 {suggested}
+        </button>
+      )}
     </span>
   );
 }
@@ -159,6 +233,26 @@ function CauseBreakdown({ causes }) {
   );
 }
 
+/**
+ * 게이트 문장의 `**강조**` 를 실제 강조로 그린다.
+ *
+ * 백엔드 사유 문자열은 오래 `**…**` 로 **가장 중요한 절**을 표시해 왔다(preflight 만
+ * 141곳). 그런데 화면은 그것을 평문으로 뿌려서 별표가 그대로 보였고, 강조하려던
+ * 바로 그 문장이 오히려 읽기 나빠졌다 — "잘린 흐름은 **시험 규격에 존재하지
+ * 않습니다**", "이 소스에 **ASIL D 함수가 37개** 있습니다" 같은, 이 패널에서 사람이
+ * 반드시 봐야 하는 절들이다.
+ *
+ * ⚠ 마크다운 렌더러를 들이지 않는다. 이 축 하나만 필요하고, 임의 마크업을 해석하면
+ *   서버 문자열이 화면 구조를 바꿀 수 있다. 짝이 안 맞는 `**` 는 그냥 평문으로 남는다.
+ */
+function Emphasis({ text }) {
+  const s = String(text ?? '');
+  if (!s.includes('**')) return s;
+  const parts = s.split(/\*\*([^*]+)\*\*/g);
+  // split 결과는 [평문, 강조, 평문, 강조, …] 로 홀수 인덱스가 캡처분이다.
+  return parts.map((p, i) => (i % 2 ? <strong key={i}>{p}</strong> : p));
+}
+
 /** 측정값 한 줄. **재지 못한 값은 숫자로 그리지 않는다.** */
 function Measured({ m }) {
   if (!m) return null;
@@ -177,7 +271,18 @@ function Measured({ m }) {
   if (m.key_hits != null) parts.push(`키매칭 ${m.key_hits}`);
   if (m.map_entries != null) parts.push(`맵 ${m.map_entries}항목`);
   if (m.api_default != null || m.generator_default != null) {
-    parts.push(`현재 ${m.api_default ?? '—'} · 생성기 기본 ${m.generator_default ?? '—'}`);
+    // ⚠ 이 패널에서 `—` 는 **'재지 못함'** 전용 기호다(상단 화면 규약). 조정할 수 없는
+    //   상한은 재지 못한 게 아니라 **확정적으로 알려져 있다** — `현재 —` 로 그리면
+    //   "값이 비었다" 로 읽혀 자기 규약을 어긴다.
+    if (m.adjustable === false) {
+      parts.push(`현재 ${m.generator_default ?? '—'} (고정)`);
+    } else if (m.user_value != null) {
+      // 정한 값을 되읽어 보인다 — 없으면 200 을 넣어도 화면은 계속 기본값을 "현재"
+      // 라고 불러 자기 선택이 반영됐는지 알 수 없다.
+      parts.push(`현재 ${m.user_value} (직접 지정) · 생성기 기본 ${m.generator_default ?? '—'}`);
+    } else {
+      parts.push(`현재 ${m.api_default ?? '—'} · 생성기 기본 ${m.generator_default ?? '—'}`);
+    }
   }
   // 정본 기준선 — 건수만 보면 많은 건지 알 수 없다(정본도 17.1%가 입력 0개다).
   if (m.reference_pct != null) parts.push(`정본 ${m.reference_pct}%`);
@@ -271,13 +376,13 @@ function QuestionList({ payload, error }) {
             )}
             <div className="step-msg">
               {q.body}
+              {/* ⚠ 이건 **누를 수 있는 선택지가 아니다.** pill 로 그리면 버튼처럼
+                  보이는데 클릭 핸들러가 없어 눌러도 아무 일이 없다 — 화면이 없는
+                  통제를 약속하는 셈이다. 실제 결정은 [생성]을 누르거나(그대로 진행)
+                  자료를 채우는 것이므로, 고를 것이 아니라 **읽을 것**으로 그린다. */}
               {Array.isArray(q.options) && q.options.length > 0 && (
-                <div style={{ marginTop: 4 }}>
-                  {q.options.map(o => (
-                    <span key={o.value} className="pill pill-neutral" style={{ marginRight: 4 }}>
-                      {o.label}
-                    </span>
-                  ))}
+                <div style={{ marginTop: 4, color: 'var(--text-muted)' }}>
+                  고를 수 있는 것: {q.options.map(o => o.label).join(' / ')}
                 </div>
               )}
             </div>
@@ -289,7 +394,7 @@ function QuestionList({ payload, error }) {
 }
 
 export default function DocGenPreflightPanel({
-  data, loading, error, questions, questionsError, onReload, onAction,
+  data, loading, error, questions, questionsError, onReload, onAction, scope,
 }) {
   if (loading && !data) {
     return <div style={{ padding: 'var(--sp-3)', fontSize: 'var(--text-xs)' }}>준비 상태를 확인하는 중…</div>;
@@ -348,7 +453,7 @@ export default function DocGenPreflightPanel({
                     {s.required && <span style={{ color: 'var(--color-danger)' }}> *</span>}
                     <div className="step-msg">
                       {/* 사유가 곧 사용자가 할 일이다. 없으면 상태 뜻이라도 말한다. */}
-                      {s.reason || v.tone}
+                      <Emphasis text={s.reason || v.tone} />
                       {s.effect && (
                         <div style={{ color: 'var(--color-warning)' }}>없이 진행하면: {s.effect}</div>
                       )}
@@ -375,16 +480,34 @@ export default function DocGenPreflightPanel({
                       {Array.isArray(s.chain) && s.chain.length > 0 && <ChainRows chain={s.chain} />}
                     </div>
                   </span>
-                  {/* 캡은 그 자리에서 바꾼다 — 다른 탭으로 보내면 결정 흐름이 끊긴다. */}
-                  {s.id?.startsWith('cap_') && (
+                  {/* 캡은 그 자리에서 바꾼다 — 다른 탭으로 보내면 결정 흐름이 끊긴다.
+                      ⚠ 단 **조정할 수 있는 것만** 입력칸을 낸다. 못 바꾸는 상한에
+                      입력칸을 그리면 사용자는 고쳤다고 믿는데 문서는 그대로다(그 값은
+                      요청에 실리지도 않는다). 어디서 바꾸는지는 `reason` 이 말한다. */}
+                  {s.id?.startsWith('cap_') && s.measured?.adjustable !== false && (
                     <CapInput
                       name={s.id.slice(4)}
                       apiDefault={s.measured?.api_default}
+                      suggested={s.measured?.suggested}
+                      suggestedBasis={s.measured?.suggested_basis}
+                      scope={scope}
                       onSaved={onReload}
                     />
                   )}
-                  {/* 범위도 그 자리에서 고른다 — 캡과 같은 성격의 결정이다. */}
-                  {s.id === 'scope' && <ScopeSelect onSaved={onReload} />}
+                  {/* 열거 선택(범위·템플릿 출처)도 그 자리에서 고른다 — 캡과 같은 성격의
+                      결정이다. 어떤 행에 무엇을 그릴지는 **서버가 정한다**(`measured.choice`)
+                      — 화면이 id 를 손으로 나열하면 새 선택지가 조용히 안 그려진다. */}
+                  {s.measured?.choice && (
+                    <ChoiceSelect
+                      name={s.measured.choice}
+                      label={s.label}
+                      options={s.measured.options}
+                      scope={scope}
+                      onSaved={onReload}
+                    />
+                  )}
+                  {/* ASIL 도 그 자리에서 정한다 — 설정 탭으로 보내면 결정 흐름이 끊긴다. */}
+                  {s.id === 'asil_level' && <AsilSelect onSaved={onReload} />}
                   {Array.isArray(s.actions) && s.actions.length > 0 && (
                     <span style={{ whiteSpace: 'nowrap' }}>
                       {s.actions.map((a, i) => (

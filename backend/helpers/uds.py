@@ -872,14 +872,20 @@ def _to_swcom_from_fn(info: Dict[str, Any]) -> str:
     return f"SwCom_{m.group(1)}" if m else "UNMAPPED"
 
 
-def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) -> Path:
-    """디스크 영속 캐시 파일 경로(정규화 source_root+preprocess의 sha1). repo_root(모듈 전역, parents[2]).
+def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True,
+                                     max_files: int = 0, max_items: int = 0) -> Path:
+    """디스크 영속 캐시 파일 경로(정규화 source_root+preprocess+상한의 sha1). repo_root(모듈 전역, parents[2]).
 
     preprocess를 키에 포함 — impact(preprocess=False)와 문서생성(True)의 섹션은 내용이 달라
     같은 소스라도 별도 캐시 파일이어야 교차오염이 없다.
+
+    ⚠ **상한도 키다.** 상한은 `generate_uds_source_sections` 의 산출을 실제로 자르므로
+      (읽는 파일 수·분류별 항목 수), 키에서 빠지면 상한을 올려도 옛 상한으로 만든 payload
+      가 돌아온다 — 사용자는 게이트에서 값을 올렸는데 문서는 그대로다.
     """
     import hashlib
-    _key = os.path.normcase(str(source_root or "").strip()) + f"|pp={int(bool(preprocess))}"
+    _key = (os.path.normcase(str(source_root or "").strip())
+            + f"|pp={int(bool(preprocess))}|mf={int(max_files or 0)}|mi={int(max_items or 0)}")
     _h = hashlib.sha1(_key.encode("utf-8", "ignore")).hexdigest()[:16]
     return repo_root / ".devops_pro_cache" / "source_sections" / f"{_h}.json"
 
@@ -997,7 +1003,25 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
     return f"{_SOURCE_SECTIONS_SCHEMA_VERSION}:{count}:{h.hexdigest()}"
 
 
-def _get_source_sections_cached(source_root: str, max_files: int = 1200, preprocess: bool = True) -> Dict[str, Any]:
+def _get_source_sections_cached(source_root: str, max_files: Optional[int] = None,
+                                preprocess: bool = True,
+                                max_items: Optional[int] = None) -> Dict[str, Any]:
+    """소스 인덱스 — TTL + (경로,mtime,size) 시그니처 캐시.
+
+    ⚠ `max_files` 는 오래 **시그니처 계산에만** 쓰였고 파싱에는 넘어가지 않았다. 즉
+      `/api/code/*` 가 선언한 `max_files` 질의 파라미터는 받아만 두고 아무 일도 하지
+      않는 **거짓 통제**였다. 이제 파싱까지 넘기고, 그래서 **캐시 키에도 들어가야** 한다.
+    ⚠ 기본값을 숫자로 적지 않는다(예전엔 `1200`). `config` 가 환경변수로 덮이면
+      `DEVOPS_UDS_MAX_FILES=77` 인데도 시그니처는 1200개로 계산되어 어긋났다.
+    """
+    try:
+        import config as _cfg_caps
+        _def_files = int(getattr(_cfg_caps, "UDS_MAX_SOURCE_FILES", 1200))
+        _def_items = int(getattr(_cfg_caps, "UDS_MAX_FUNCTION_ITEMS", 120))
+    except Exception:   # noqa: BLE001 - config 부재는 생성기와 같은 폴백으로
+        _def_files, _def_items = 1200, 120
+    max_files = int(max_files) if isinstance(max_files, int) and max_files > 0 else _def_files
+    max_items = int(max_items) if isinstance(max_items, int) and max_items > 0 else _def_items
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 전달
     _first = (source_root or "").split(",")[0].strip()
     # cloudium 모드면 worker IPC resolver로 검증(원격 경로는 로컬 resolve/exists로 못 잡음).
@@ -1017,7 +1041,9 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
         _ok = _root_chk.exists() and _root_chk.is_dir()
     if not _ok:
         raise HTTPException(status_code=400, detail="source_root not found or not directory")
-    key = f"{source_root}\x00pp={int(bool(preprocess))}"  # 캐시 키: 전체 경로 + preprocess(교차오염 방지)
+    # 캐시 키: 전체 경로 + preprocess + **상한**(교차오염 방지). 상한이 빠지면
+    # `/api/code/call-graph?max_files=200` 의 결과가 문서생성(1200)과 한 칸을 공유한다.
+    key = f"{source_root}\x00pp={int(bool(preprocess))}\x00mf={max_files}\x00mi={max_items}"
     now = time()
     # 소스 시그니처(경로,mtime,size,스키마버전)를 먼저 계산 — 인메모리 TTL 캐시도 시그니처로 검증한다.
     # 과거엔 TTL 캐시가 mtime을 안 봐서, 소스를 편집하고 30분 내 재실행하면 **편집 전 함수 집합으로
@@ -1037,7 +1063,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
     _log = _logging.getLogger("uvicorn.error")
     # 디스크 영속 캐시(로컬 소스만): 재기동/크래시 후 첫 요청의 풀 재파싱(수십분)을 회피한다.
     # (경로,mtime,size) 시그니처가 일치하면 파싱 없이 로드. cloudium은 시그니처=None → skip.
-    _disk_path = _source_sections_disk_cache_path(source_root, preprocess)
+    _disk_path = _source_sections_disk_cache_path(source_root, preprocess, max_files, max_items)
     if _sig:
         try:
             if _disk_path.exists():
@@ -1053,7 +1079,8 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
             _log.debug("source_sections disk cache read failed: %s", _dc_exc)
     _log.info("[source_sections] Parsing started for %s", key)
     t0 = time()
-    sections = generate_uds_source_sections(source_root, preprocess=preprocess)  # 콤마 구분 그대로 전달
+    sections = generate_uds_source_sections(  # 콤마 구분 그대로 전달
+        source_root, preprocess=preprocess, max_files=max_files, max_items=max_items)
     elapsed = time() - t0
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
     with _source_sections_cache_lock:
@@ -1768,6 +1795,10 @@ def _uds_generate_from_paths(
     rag_categories: Optional[List[str]] = None,
     progress_cb: Optional[Any] = None,
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
+    # 생성 상한 — 준비 게이트의 `cap_max_source_files`/`cap_max_items_per_category` 가
+    # 이 두 값으로 내려온다. `None` 이면 `config` 기본값(환경변수로 덮임)이 쓰인다.
+    max_source_files: Optional[int] = None,
+    max_items_per_category: Optional[int] = None,
 ) -> Dict[str, Any]:
     def _progress(stage: str, percent: int, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
         if not progress_cb:
@@ -1835,6 +1866,8 @@ def _uds_generate_from_paths(
         source_sections = generate_uds_source_sections(
             str(source_root_path),
             component_map=component_map if component_map else None,
+            max_files=max_source_files,
+            max_items=max_items_per_category,
         )
 
     _progress("requirements_build", 60, "요구사항 정리")

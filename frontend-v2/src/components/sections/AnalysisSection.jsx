@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { post, api } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
-import { defaultCacheRoot } from '../../api.js';
+import { resolveCacheRoot } from '../../api.js';
 import { saModules } from '../../staticAnalysis.js';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
@@ -514,7 +514,7 @@ function SaCodeEyeModule({ m }) {
 export default function AnalysisSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
-  const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
+  const cacheRoot = resolveCacheRoot(analysisResult, job, cfg);
 
   const [complexity, setComplexity] = useState(null);
   const [complexityLoading, setComplexityLoading] = useState(false);

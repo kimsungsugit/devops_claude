@@ -34,6 +34,50 @@ export const DOCGEN_CAPS_KEY = 'devops_v2_docgen_caps';
 //   유발하고(그 반대도) 무관한 필드가 흔들린다.
 export const SHARED_EVENT = 'aria-shared-inputs-changed';
 export const DOC_PATHS_EVENT = 'aria-doc-paths-changed';
+// 생성 상한/선택지 변경. 위 둘과 **또 따로** 둔다 — 상한 저장이 Sw* 폼이나 문서 경로
+// 재sync 를 유발하면 무관한 필드가 흔들린다(같은 이유로 위 두 개도 분리돼 있다).
+export const DOCGEN_CAPS_EVENT = 'aria-docgen-caps-changed';
+
+/**
+ * 상한 저장 칸의 키 — **프로젝트마다 따로**.
+ *
+ * ⚠ 오래 평면 키 하나였다. 그래서 A 프로젝트에서 `max_sequences` 를 낮추거나
+ *   `suts_scope='source'` 로 바꾸면, 프로젝트를 B 로 바꿔도 그 값이 그대로 따라가
+ *   **B 의 문서가 조용히 다른 규칙으로 만들어졌다**. 상한은 소스 규모에 따라 정하는
+ *   값이라 프로젝트를 넘어가는 순간 근거를 잃는다.
+ *
+ * `scope` 가 비면 평면 키(현행) — 프로젝트가 아직 안 정해진 화면에서 값을 잃지 않는다.
+ */
+export function capsKeyFor(scope) {
+  const s = String(scope || '').trim();
+  return s ? `${DOCGEN_CAPS_KEY}::${s}` : DOCGEN_CAPS_KEY;
+}
+
+function readCaps(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch (_e) { return {}; }
+}
+
+/**
+ * 평면 키 → 스코프 키 **1회 이관**.
+ *
+ * ⚠ 옮긴 뒤 평면 키를 **지운다**. 남겨 두면 다음 프로젝트가 첫 조회에서 또 같은 값을
+ *   상속받아 원래 결함이 그대로 되살아난다. 이관 시점의 활성 프로젝트가 값을 가져가는
+ *   것은 의도다 — 그 값은 그 화면에서 입력된 것이 거의 확실하다.
+ */
+function migrateFlatCaps(key) {
+  if (key === DOCGEN_CAPS_KEY) return;
+  try {
+    if (localStorage.getItem(key) != null) return;          // 이미 스코프 값이 있다
+    const flat = localStorage.getItem(DOCGEN_CAPS_KEY);
+    if (flat == null) return;
+    if (Object.keys(readCaps(DOCGEN_CAPS_KEY)).length === 0) return;
+    localStorage.setItem(key, flat);
+    localStorage.removeItem(DOCGEN_CAPS_KEY);
+  } catch (_e) { /* 스토리지 접근 불가 — 이관 없이 진행 */ }
+}
 
 /**
  * 생성 상한 로드 — `{max_flows: 200, ...}`. 항상 객체.
@@ -41,33 +85,38 @@ export const DOC_PATHS_EVENT = 'aria-doc-paths-changed';
  * ⚠ **미설정과 0 을 구분한다.** 키가 없으면 서버에 아무것도 보내지 않아 생성기 기본값이
  * 쓰인다. `0` 을 보내면 "흐름을 하나도 만들지 마라" 가 되어 뜻이 정반대다.
  */
-export function loadDocGenCaps() {
-  try { return JSON.parse(localStorage.getItem(DOCGEN_CAPS_KEY) || '{}') || {}; }
-  catch (_e) { return {}; }
+export function loadDocGenCaps(scope) {
+  const key = capsKeyFor(scope);
+  migrateFlatCaps(key);
+  return readCaps(key);
 }
 
-/** 상한 하나 저장. 빈 값이면 **키를 지운다**(= 생성기 기본값으로 되돌린다). */
-export function saveDocGenCap(name, value) {
-  const caps = loadDocGenCaps();
-  const n = Number(value);
-  if (value === '' || value == null || !Number.isFinite(n) || n <= 0) delete caps[name];
-  else caps[name] = Math.trunc(n);
-  try { localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify(caps)); } catch (_e) { /* 용량 초과 */ }
+function writeCaps(key, caps) {
+  try { localStorage.setItem(key, JSON.stringify(caps)); } catch (_e) { /* 용량 초과 */ }
+  notifyDocGenCapsChange();
   return caps;
 }
 
-/** 문자열 선택지 하나 저장(예: SUTS 시험 범위). 빈 값이면 키를 지운다 = 서버 기본값.
+/** 상한 하나 저장. 빈 값이면 **키를 지운다**(= 생성기 기본값으로 되돌린다). */
+export function saveDocGenCap(name, value, scope) {
+  const caps = loadDocGenCaps(scope);
+  const n = Number(value);
+  if (value === '' || value == null || !Number.isFinite(n) || n <= 0) delete caps[name];
+  else caps[name] = Math.trunc(n);
+  return writeCaps(capsKeyFor(scope), caps);
+}
+
+/** 문자열 선택지 하나 저장(예: SUTS 시험 범위, 템플릿 출처). 빈 값이면 키를 지운다 = 서버 기본값.
  *
  * ⚠ `saveDocGenCap` 은 숫자 전용이라(`Number()` 로 접는다) 문자열을 넣으면 조용히
  *   버려진다 — 같은 스토어를 쓰되 함수를 나눈다.
  */
-export function saveDocGenChoice(name, value) {
-  const caps = loadDocGenCaps();
+export function saveDocGenChoice(name, value, scope) {
+  const caps = loadDocGenCaps(scope);
   const v = String(value ?? '').trim();
   if (!v) delete caps[name];
   else caps[name] = v;
-  try { localStorage.setItem(DOCGEN_CAPS_KEY, JSON.stringify(caps)); } catch (_e) { /* 용량 초과 */ }
-  return caps;
+  return writeCaps(capsKeyFor(scope), caps);
 }
 
 /** 공유 입력 객체 로드 (항상 객체 반환). */
@@ -97,6 +146,7 @@ function makeNotifier(eventName) {
 
 const notifySharedChange = makeNotifier(SHARED_EVENT);
 const notifyDocPathsChange = makeNotifier(DOC_PATHS_EVENT);
+const notifyDocGenCapsChange = makeNotifier(DOCGEN_CAPS_EVENT);
 
 /** 공유 입력 전체 저장 + 같은 탭 구독자에게 변경 알림(디바운스). */
 export function saveSharedInputs(obj) {
@@ -379,6 +429,32 @@ export function useDocPathsSync(onChange) {
     window.addEventListener('storage', onStorage);
     return () => {
       window.removeEventListener(DOC_PATHS_EVENT, sync);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [onChange]);
+}
+
+/**
+ * 상한/선택지가 바뀌면 알려 준다 — 준비 게이트가 **바뀐 값으로 다시 판정**해야 한다.
+ *
+ * ⚠ 오래 통지가 없었다. 패널 안의 입력칸은 `onSaved` 콜백으로 그 행만 재조회했지만,
+ *   같은 보드의 **다른 문서 행**과 생성 버튼은 옛 값을 그대로 보고 있었다. 상한 하나가
+ *   여러 문서의 판정에 걸리는 경우(같은 소스를 재는 행들)에 두 행이 다른 말을 한다.
+ *
+ * 다른 탭에서 바뀐 경우까지 잡으려면 `storage` 도 본다 — 다만 키가 스코프별이라
+ * 접두사로 판정한다(`capsKeyFor`).
+ */
+export function useDocGenCapsSync(onChange) {
+  useEffect(() => {
+    if (typeof onChange !== 'function') return undefined;
+    const sync = () => onChange();
+    const onStorage = (e) => {
+      if (!e || e.key == null || String(e.key).startsWith(DOCGEN_CAPS_KEY)) sync();
+    };
+    window.addEventListener(DOCGEN_CAPS_EVENT, sync);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DOCGEN_CAPS_EVENT, sync);
       window.removeEventListener('storage', onStorage);
     };
   }, [onChange]);

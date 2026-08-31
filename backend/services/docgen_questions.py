@@ -36,14 +36,23 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 _logger = logging.getLogger("devops_api.docgen_questions")
 
 # 질문 캐시 — 같은 측정값이면 같은 문장이다. LLM 을 행 펼침마다 부르지 않는다.
-_CACHE: Dict[str, Any] = {}
+#
+# ⚠ **상한이 있어야 한다.** 키는 측정값 전체의 해시라 상한을 하나 바꿀 때마다 새 키가
+#   생긴다(캡 입력칸은 blur 마다 재조회한다). TTL 만 두면 만료된 항목도 **다시 조회될 때만**
+#   버려지므로, 한 번 쓰고 안 돌아오는 키가 프로세스 수명 내내 남는다. 이 서버는
+#   `--reload` 없이 며칠씩 떠 있다.
+_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _CACHE_LOCK = threading.RLock()
 _CACHE_TTL_S = 1800.0
+# 화면 하나가 문서 11종 × 결정 몇 개를 오가는 정도는 넉넉히 담고, 그 위로는 오래된 것부터
+# 버린다(LRU). 캐시가 비어도 결과는 같다 — 느려질 뿐이라 안전하게 버릴 수 있다.
+_CACHE_MAX = 256
 
 # 숫자 토큰. 천단위 콤마·소수점을 한 덩어리로 잡는다.
 _NUM = re.compile(r"\d+(?:[.,]\d+)*")
@@ -128,18 +137,50 @@ def _questions_from_steps(doc_type: str, steps: List[Dict[str, Any]]) -> List[Di
             flow = (by_id.get("sits_flows") or {}).get("measured") or {}
             headroom = flow.get("headroom")
             at_boundary = isinstance(headroom, int) and headroom <= 0
-            severity = "high" if (cap_name == "max_flows" and at_boundary) else "medium"
+            # `adjustable` 이 정본이다. 다만 그 키가 없던 옛 payload 도 받아야 하므로
+            # **같은 사실의 다른 표현**인 `api_default is not None` 을 폴백으로 쓴다.
+            adjustable = bool(m.get("adjustable", api_default is not None))
+            user_value = m.get("user_value")
+            # 스텝이 `ok` 면 **결정할 것이 없다** — 전량을 담고 있다는 뜻이다.
+            # 예전엔 캡이 늘 `needed` 라 이 분기가 사실상 항상 참이었는데, 이제 상한이
+            # 전량을 담으면 `ok` 가 나온다. 그때도 "조정할까요?" 를 물으면 스텝은 ✓ 인데
+            # 질문은 결정을 요구하는 **두 목소리**가 된다. 조정 못 하는 상한은 결정이
+            # 아니라 공시라 남긴다(그게 그 행의 존재 이유다).
+            if state == "ok" and adjustable:
+                continue
+            # 조정할 수 없는 상한은 **결정이 아니라 공시**다 — 사용자가 할 수 없는 일을
+            # 결정 목록 상단에 올리면 진짜 결정이 묻힌다.
+            severity = ("high" if (cap_name == "max_flows" and at_boundary)
+                        else "medium" if adjustable else "low")
             facts = {"cap": cap_name, "api_default": api_default,
                      "generator_default": m.get("generator_default"),
                      "effect": str(s.get("reason") or "")}
             if cap_name == "max_flows" and headroom is not None:
                 facts["headroom"] = headroom
                 facts["flows_total"] = flow.get("value")
+            if not adjustable and m.get("adjust_via"):
+                facts["adjust_via"] = str(m["adjust_via"])
+            if user_value is not None:
+                facts["user_value"] = user_value
             # ⚠ `api_default is None` 은 **API 가 이 값을 받지 않는다**는 뜻이다.
             #   "현재 None" 으로 흘리면 사용자는 값이 비었다고 읽는다.
-            current = (f"현재 {api_default}" if api_default is not None
-                       else "이 상한은 화면에서 조정할 수 없습니다(생성기 기본값 고정)")
-            head = (f"{cap_name} 상한 — 지금 잘리고 있습니다" if at_boundary and cap_name == "max_flows"
+            if not adjustable:
+                current = "이 상한은 화면에서 조정할 수 없습니다"
+                if m.get("adjust_via"):
+                    current += f" — {m['adjust_via']}"
+            elif user_value is not None:
+                # 정한 값을 되읽어 보인다. 이게 없으면 사용자가 200 을 넣어도 화면은
+                # 계속 기본값을 "현재" 라고 불러 자기 선택이 반영됐는지 알 수 없다.
+                current = f"현재 {user_value}(직접 지정)"
+            else:
+                current = f"현재 {api_default}"
+            # ⚠ 못 잰 상한에 "조정할까요?" 를 물으면, 조정에 필요한 수를 못 주면서
+            #   결정을 요구하는 꼴이다. 먼저 할 일은 재는 것이다.
+            head = (f"{cap_name} 상한 — 지금 잘리고 있습니다"
+                    if at_boundary and cap_name == "max_flows"
+                    else f"{cap_name} 상한 — 자르는지 아직 재지 않았습니다"
+                    if state == "unmeasured"
+                    else f"{cap_name} 상한 — 무엇이 빠지는지 알아두세요" if not adjustable
                     else f"{cap_name} 상한을 조정할까요?")
             body = f"{current}, 생성기 기본값은 {m.get('generator_default')} 입니다. {s.get('reason') or ''}"
             if at_boundary and cap_name == "max_flows":
@@ -244,7 +285,11 @@ def build_questions(doc_type: str, steps: List[Dict[str, Any]], *,
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
         if hit and (time.time() - hit[0]) < _CACHE_TTL_S:
+            _CACHE.move_to_end(key)          # LRU — 방금 쓴 것을 뒤로
             return hit[1]
+        # ⚠ 여기서 만료분을 지우지 않는다 — **아래 쓰기 경로가 이미 전량을 청소**하고
+        #   같은 키를 다시 넣는다. 여기 `del` 을 두면 하는 일이 없으면서 뭔가 하는 것처럼
+        #   보이는 줄이 된다(뮤테이션으로 확인: 지워도 관측 가능한 차이가 없었다).
 
     llm_used = False
     llm_reason = ""
@@ -272,6 +317,14 @@ def build_questions(doc_type: str, steps: List[Dict[str, Any]], *,
     out = {"questions": questions, "llm_used": llm_used, "llm_reason": llm_reason}
     with _CACHE_LOCK:
         _CACHE[key] = (time.time(), out)
+        _CACHE.move_to_end(key)
+        # ⚠ 만료 청소만으로는 부족하다 — 만료 전에 상한을 넘길 수 있고(캡을 여러 번
+        #   바꾸면 30분 안에 수백 키가 난다), 그때 오래된 것부터 버려야 한다.
+        now = time.time()
+        for _k in [k for k, v in _CACHE.items() if (now - v[0]) >= _CACHE_TTL_S]:
+            del _CACHE[_k]
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.popitem(last=False)
     return out
 
 

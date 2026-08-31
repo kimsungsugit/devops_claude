@@ -1224,6 +1224,7 @@ def _format_gen_method(gen: str) -> str:
 def _generate_steps_from_flow(
     logic_flow: List[Dict[str, Any]],
     func_info: Dict[str, Any],
+    max_steps: int = _MAX_STEPS_PER_TC,
 ) -> List[List[Dict[str, str]]]:
     """Generate multiple test-case step-lists from a function's logic flow.
 
@@ -1252,7 +1253,7 @@ def _generate_steps_from_flow(
         test_cases = _generate_simple_steps(func_info)
 
     for tc in test_cases:
-        tc[:] = tc[:_MAX_STEPS_PER_TC]
+        tc[:] = tc[:max_steps]
 
     return test_cases[:_MAX_TC_PER_REQ]
 
@@ -1655,7 +1656,8 @@ def _generate_simple_steps(
     return [tc1, tc2, tc3]
 
 
-def _generate_review_steps(req: Dict[str, Any]) -> List[List[Dict[str, str]]]:
+def _generate_review_steps(req: Dict[str, Any],
+                           max_steps: int = _MAX_STEPS_PER_TC) -> List[List[Dict[str, str]]]:
     """Generate review-based TC steps when no function is mapped."""
     desc = req.get("description") or req.get("name") or req.get("id", "")
     verification = req.get("verification", "")
@@ -1682,7 +1684,7 @@ def _generate_review_steps(req: Dict[str, Any]) -> List[List[Dict[str, str]]]:
             "expected": f"시스템 {precond} 상태 진입 확인",
         })
 
-    return [steps[:_MAX_STEPS_PER_TC]]
+    return [steps[:max_steps]]
 
 
 # ---------------------------------------------------------------------------
@@ -1709,6 +1711,12 @@ def generate_test_cases(
     """
     config = project_config or {}
     max_tc = config.get("max_tc_per_req", _MAX_TC_PER_REQ)
+    # ⚠ 오래 `_MAX_STEPS_PER_TC` 를 세 곳(`_generate_steps_from_flow`·
+    #   `_generate_review_steps`·`_parse_sts_ai_response`)이 **직참조**해서 요청으로는
+    #   바꿀 수 없었다. 준비 게이트는 그 사실을 "조정 불가(코드 상수)" 로 정직하게
+    #   표시했지만, 그건 못 고치는 이유였지 못 고쳐야 할 이유는 아니었다.
+    #   `max_tc_per_req` 와 **같은 경로**를 쓴다 — 기본값은 여전히 모듈 상수다.
+    max_steps = config.get("max_steps_per_tc") or _MAX_STEPS_PER_TC
     test_env = config.get("default_test_env", _DEFAULT_TEST_ENV)
 
     # 캡 **전** 총량을 먼저 센다 — 소비처에서 결과 길이로 되짚으면 절단을 못 본다.
@@ -1734,7 +1742,7 @@ def generate_test_cases(
 
         if not fids:
             method, gen = _determine_test_method(req, hsis_signals=hsis_signals)
-            step_sets = _generate_review_steps(req)
+            step_sets = _generate_review_steps(req, max_steps=max_steps)
             for idx, steps in enumerate(step_sets[:max_tc]):
                 tc_id = _make_tc_id(rid, idx + 1)
                 all_tcs.append(_build_tc_dict(
@@ -1756,7 +1764,7 @@ def generate_test_cases(
                 continue
             logic_flow = info.get("logic_flow") or []
             method, gen = _determine_test_method(req, info, logic_flow, hsis_signals=hsis_signals)
-            step_sets = _generate_steps_from_flow(logic_flow, info)
+            step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps)
 
             for steps in step_sets:
                 if tc_counter >= max_tc:
@@ -2494,7 +2502,8 @@ def _sts_ai_call_with_retry(agent_call_fn, ai_config, messages, *,
     return ""
 
 
-def _parse_sts_ai_response(reply: str) -> Optional[Dict[str, Any]]:
+def _parse_sts_ai_response(reply: str,
+                           max_steps: int = _MAX_STEPS_PER_TC) -> Optional[Dict[str, Any]]:
     """Parse and validate STS AI JSON response."""
     import json as _json
     if not reply:
@@ -2522,7 +2531,7 @@ def _parse_sts_ai_response(reply: str) -> Optional[Dict[str, Any]]:
     ai_steps = payload.get("steps")
     if isinstance(ai_steps, list) and ai_steps:
         cleaned = []
-        for s in ai_steps[:_MAX_STEPS_PER_TC]:
+        for s in ai_steps[:max_steps]:
             if isinstance(s, dict) and isinstance(s.get("action"), str) and isinstance(s.get("expected"), str):
                 cleaned.append({"action": s["action"], "expected": s["expected"]})
         if cleaned:
@@ -2538,8 +2547,14 @@ def enhance_test_cases_with_ai(
     sds_summary: str = "",
     stp_context: str = "",
     hsis_signals: Optional[Dict[str, Any]] = None,
+    max_steps: int = _MAX_STEPS_PER_TC,
 ) -> List[Dict[str, Any]]:
-    """Enhance test case descriptions using Gemini AI with timeout/retry."""
+    """Enhance test case descriptions using Gemini AI with timeout/retry.
+
+    ⚠ `max_steps` 를 안 받으면 AI 보강 스텝만 **다른 상한**을 갖는다. 사용자가 상한을
+      올려 놓고 AI 를 켜면 규칙 생성분은 늘고 AI 교체분만 15개에서 잘려, 같은 문서
+      안에서 TC 마다 스텝 상한이 달라진다.
+    """
     if not ai_config:
         _logger.info("AI enhancement skipped (no config)")
         return test_cases
@@ -2615,7 +2630,7 @@ def enhance_test_cases_with_ai(
             ],
         )
 
-        validated = _parse_sts_ai_response(reply)
+        validated = _parse_sts_ai_response(reply, max_steps=max_steps)
         if validated:
             if "description" in validated:
                 tc["description"] = validated["description"]
@@ -2800,6 +2815,7 @@ def generate_sts(
             sds_summary=sds_summary,
             stp_context=stp_ctx,
             hsis_signals=hsis_signals or None,
+            max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
         )
         _progress(75, "AI 향상 완료")
 

@@ -174,7 +174,8 @@ def test_flow_cap_at_boundary_is_high_severity() -> None:
         {"id": "sits_flows", "phase": "material", "state": "degraded", "label": "통합 흐름",
          "measured": {"value": 145, "of": 120, "headroom": -25}},
         {"id": "cap_max_flows", "phase": "decision", "state": "needed", "label": "max_flows",
-         "reason": "통합 흐름 상한", "measured": {"api_default": None, "generator_default": 120}},
+         "reason": "통합 흐름 상한",
+         "measured": {"api_default": 120, "generator_default": 120, "adjustable": True}},
     ]
     out = q.build_questions("sits", steps, use_llm=False)
     cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
@@ -188,7 +189,8 @@ def test_flow_cap_with_headroom_stays_medium() -> None:
         {"id": "sits_flows", "phase": "material", "state": "ok", "label": "통합 흐름",
          "measured": {"value": 84, "of": 120, "headroom": 36}},
         {"id": "cap_max_flows", "phase": "decision", "state": "needed", "label": "max_flows",
-         "reason": "통합 흐름 상한", "measured": {"api_default": None, "generator_default": 120}},
+         "reason": "통합 흐름 상한",
+         "measured": {"api_default": 120, "generator_default": 120, "adjustable": True}},
     ]
     out = q.build_questions("sits", steps, use_llm=False)
     cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
@@ -215,3 +217,145 @@ def test_facts_carry_measurements_not_prose() -> None:
     out = q.build_questions("sits", _steps(), use_llm=False)
     cap = next(i for i in out["questions"] if i["id"] == "cap_max_subcases")
     assert set(cap["facts"]) >= {"cap", "api_default", "generator_default"}
+
+
+def test_settled_cap_is_not_asked_again() -> None:
+    """스텝이 `ok` 면 질문 목록에도 없어야 한다 — **두 목소리 금지**.
+
+    예전엔 캡이 늘 `needed` 라 이 분기가 사실상 항상 참이었다. 이제 상한이 전량을
+    담으면 `ok` 가 나오는데, 그때도 "조정할까요?" 를 물으면 준비 패널은 ✓ 를 그리고
+    질문 목록은 결정을 요구한다 — 같은 사실에 화면이 두 말을 한다.
+    """
+    steps = [
+        {"id": "cap_max_flows", "phase": "decision", "state": "ok", "label": "max_flows",
+         "reason": "통합 흐름 상한",
+         "measured": {"api_default": 120, "generator_default": 120, "adjustable": True,
+                      "user_value": 145}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    assert not [i for i in out["questions"] if i["id"] == "cap_max_flows"], out["questions"]
+
+
+def test_unmeasured_cap_asks_to_measure_not_to_choose() -> None:
+    """못 잰 상한에 "조정할까요?" 를 물으면 **조정에 필요한 수를 못 주면서** 결정을
+    요구하는 꼴이다. 먼저 할 일은 재는 것이고, 질문 제목이 그렇게 말해야 한다."""
+    steps = [
+        {"id": "cap_max_flows", "phase": "decision", "state": "unmeasured", "label": "max_flows",
+         "reason": "통합 흐름 상한 (전량을 아직 재지 않아 이 상한이 자르는지 알 수 없습니다)",
+         "measured": {"api_default": 120, "generator_default": 120, "adjustable": True}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
+    assert "재지 않았습니다" in cap["title"], cap["title"]
+    assert "조정할까요" not in cap["title"], cap["title"]
+
+
+def test_unadjustable_cap_is_still_disclosed_when_ok() -> None:
+    """조정 못 하는 상한은 `ok` 여도 남긴다 — 그건 결정이 아니라 **공시**이고,
+    그 행이 존재하는 이유 자체다(음성 대조군: 위 suppression 이 과하게 먹지 않는가)."""
+    steps = [
+        {"id": "cap_max_steps_per_tc", "phase": "decision", "state": "ok",
+         "label": "max_steps_per_tc", "reason": "TC 당 스텝 상한",
+         "measured": {"api_default": None, "generator_default": 15, "adjustable": False,
+                      "adjust_via": "코드 상수로 고정돼 있어 화면에서 바꿀 수단이 없습니다"}},
+    ]
+    out = q.build_questions("sts", steps, use_llm=False)
+    assert [i for i in out["questions"] if i["id"] == "cap_max_steps_per_tc"]
+
+
+def test_boundary_does_not_resurrect_a_false_cut_claim() -> None:
+    """여유 0 이라도 **상한이 전량을 담으면** "지금 잘리고 있습니다" 는 거짓이다.
+
+    `at_boundary` 는 흐름 수와 상한이 **같다**는 뜻이라 아직 잘린 것이 없다. 예전 문구는
+    그 상태에도 "지금 잘리고 있습니다"(severity high)를 냈다. 경계 경고 자체는 준비
+    패널의 `sits_flows` 행(`여유가 없습니다`)이 계속 들고 있으므로 여기서 중복하지 않는다.
+    """
+    steps = [
+        {"id": "sits_flows", "phase": "material", "state": "degraded", "label": "통합 흐름",
+         "measured": {"value": 145, "of": 145, "headroom": 0}},
+        {"id": "cap_max_flows", "phase": "decision", "state": "ok", "label": "max_flows",
+         "reason": "통합 흐름 상한",
+         "measured": {"api_default": 120, "generator_default": 120, "adjustable": True,
+                      "user_value": 145}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    assert not [i for i in out["questions"] if i["id"] == "cap_max_flows"]
+
+
+def test_real_cut_still_raises_a_high_severity_question() -> None:
+    """음성 대조군 — **진짜 잘리는** 경우(상한 미설정 + 흐름 초과)는 그대로 high 다.
+    위 억제가 과하게 먹어 진짜 경고까지 지우지 않는지 본다."""
+    steps = [
+        {"id": "sits_flows", "phase": "material", "state": "degraded", "label": "통합 흐름",
+         "measured": {"value": 145, "of": 120, "headroom": -25}},
+        {"id": "cap_max_flows", "phase": "decision", "state": "needed", "label": "max_flows",
+         "reason": "통합 흐름 상한 — 전량 145 중 25개가 빠집니다",
+         "measured": {"api_default": 120, "generator_default": 120, "adjustable": True,
+                      "suggested": 145, "below_full": 25}},
+    ]
+    out = q.build_questions("sits", steps, use_llm=False)
+    cap = next(i for i in out["questions"] if i["id"] == "cap_max_flows")
+    assert cap["severity"] == "high"
+    assert "지금 잘리고 있습니다" in cap["title"]
+
+
+def test_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """캐시가 **무한히 자라지 않는다.**
+
+    키는 측정값 전체의 해시라 상한 입력칸을 한 번 blur 할 때마다 새 키가 생긴다. TTL 만
+    두면 만료된 항목도 *다시 조회될 때만* 버려지므로, 한 번 쓰고 안 돌아오는 키는
+    프로세스 수명 내내 남는다(이 서버는 `--reload` 없이 며칠씩 떠 있다).
+
+    ⚠ 관측량은 "코드에 상한 상수가 있다" 가 아니라 **실제 사전 크기**다 — 상수만 보면
+      sweep 을 지워도 통과한다.
+    """
+    monkeypatch.setattr(q, "_CACHE_MAX", 8)
+    for i in range(60):
+        steps = [{"id": "cap_max_flows", "phase": "decision", "state": "needed",
+                  "label": "max_flows", "reason": "흐름 상한",
+                  "measured": {"api_default": 120, "generator_default": 120,
+                               "adjustable": True, "user_value": i}}]
+        q.build_questions("sits", steps, use_llm=False)
+    assert len(q._CACHE) <= 8, f"캐시가 상한을 넘었다: {len(q._CACHE)}"
+
+
+def test_cache_evicts_the_oldest_not_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """상한을 넘겨도 **최근에 쓴 키는 살아남는다**(LRU 이지 통째 비우기가 아니다).
+
+    ⚠ 이 단언이 없으면 위 크기 테스트는 `_CACHE.clear()` 로도 통과한다 — 캐시가 있으나
+      마나 해지고 LLM 을 행 펼침마다 부르게 된다. 그래서 **상한을 실제로 넘긴 뒤**
+      오래된 키가 빠지고 최근 키가 남는 것을 함께 본다(뮤테이션 M54 가 여기서 죽는다).
+    """
+    monkeypatch.setattr(q, "_CACHE_MAX", 4)
+
+    def ask(n):
+        return q.build_questions("sits", [{
+            "id": "cap_max_flows", "phase": "decision", "state": "needed",
+            "label": "max_flows", "reason": "흐름 상한",
+            "measured": {"api_default": 120, "generator_default": 120,
+                         "adjustable": True, "user_value": n}}], use_llm=False)
+
+    first = ask(1)
+    for n in (2, 3, 4):
+        ask(n)
+    assert ask(1) is first, "상한 안에서는 그대로 있어야 한다"   # 1 을 맨 뒤로
+
+    ask(5)      # 상한 초과 → 가장 오래된 2 가 빠진다
+    ask(6)      # → 3 이 빠진다
+    assert len(q._CACHE) == 4
+    # 방금 쓴 쪽은 살아 있다(clear() 뮤턴트는 여기서 죽는다).
+    assert ask(6) is not None and ask(1) is first
+    # 가장 오래된 것은 빠졌다(= 아무것도 안 버리는 뮤턴트는 크기 단언에서 죽는다).
+    assert ask(2) is not first
+
+
+def test_expired_entries_are_dropped_not_just_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """만료된 항목은 **버려진다** — 읽을 때 무시만 하면 자리를 계속 차지한다."""
+    monkeypatch.setattr(q, "_CACHE_TTL_S", -1.0)   # 넣는 즉시 만료
+    for i in range(5):
+        q.build_questions("sits", [{"id": "cap_max_flows", "phase": "decision", "state": "needed",
+                                    "label": "max_flows", "reason": "흐름 상한",
+                                    "measured": {"api_default": 120, "generator_default": 120,
+                                                 "adjustable": True, "user_value": i}}],
+                          use_llm=False)
+    assert len(q._CACHE) <= 1, f"만료분이 쌓였다: {len(q._CACHE)}"
