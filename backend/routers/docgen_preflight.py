@@ -65,6 +65,20 @@ V_UNKNOWN = "unknown"
 V_DEGRADED = "degraded"
 V_READY = "ready"
 
+# ── phase 어휘 — **화면과 lockstep** ────────────────────────────────────────
+#
+# 패널은 `PHASE_ORDER` 를 돌며 `steps.filter(s => s.phase === p)` 로 그린다. 그래서
+# 여기에만 있고 화면에 없는 phase 는 **에러도 경고도 없이 통째로 사라진다** — 서버는
+# 행을 냈고 사용자는 못 본다. 이 저장소가 반복해 겪은 침묵 그대로다.
+# 드리프트는 `tests/unit/test_docgen_preflight_phases.py` 가 양쪽에서 실측해 막는다.
+PH_ACCESS = "access"
+PH_INPUT = "input"
+PH_MATERIAL = "material"
+PH_CHAIN = "chain"
+PH_DECISION = "decision"
+PH_HISTORY = "history"      # 직전 생성의 결말 — 지금의 입력이 아니라 **기록**이다
+PHASES = (PH_ACCESS, PH_INPUT, PH_MATERIAL, PH_CHAIN, PH_DECISION, PH_HISTORY)
+
 # 레지스트리 `linked_docs` 키 → 이 모듈의 입력 키.
 _DOC_KEY_TO_INPUT = {
     "srs": _req.IN_SWRS,
@@ -548,6 +562,135 @@ def _read_doc_material(path: str) -> Dict[str, Any]:
         return {"ok": True, "reason": "", "chars": len(text), "items": None,
                 "items_reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
     return {"ok": True, "reason": "", "chars": len(text), "items": items}
+
+
+def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
+    """직전 생성이 **어떻게 끝났는지** 한 행으로. 기록이 없으면 `None`.
+
+    ## 왜 게이트에 이 축이 필요한가 (실측 근거는 `docgen_last_run` 모듈 docstring)
+
+    게이트의 나머지 행은 전부 *지금의 입력*을 잰다. 그래서 직전 시도가 통째로 실패했어도
+    (실측: 2026-08-10·08-11 재시도 사다리 끝까지 실패, 산출물 없음) 다음에 게이트를 열면
+    "준비 완료" 였다. 무엇이 준비됐는지는 맞지만 **무슨 일이 있었는지**는 어디에도 없었다.
+
+    ## 상태를 고른 이유
+
+    - 실패·타임아웃·예외 → `degraded`(**차단 아님**). 원인이 사라졌는지 게이트는 알 수
+      없으니 막지 않는다. 대신 "눌러도 되지만 같은 실패를 볼 수 있다" 를 말한다. 성공한
+      생성이 한 번 나오면 이 행은 스스로 ✓ 로 돌아온다 — 원인이 사라졌음을 증명하는
+      유일한 사건이 그것이라서, **자기 해소되는** 판정이다.
+    - 성공했지만 **한 개도 안 실림** → `degraded`. 반영률이 낮은 것은 템플릿이 의도된
+      부분집합일 수 있어 뒤집지 않는다는 것이 기존 결정이다(`_run_docx_in_subprocess`).
+      다만 0 은 부분집합이 아니라 전무다.
+    - `started` → `unmeasured`. 진행 중이거나 프로세스가 중단된 것이라 **결말을 모른다**.
+    - 기록 없음 → **행을 내지 않는다**(모듈 docstring의 고착 사유).
+
+    ⚠ UDS 전용이다. 체크포인트를 쓰는 것은 `_generate_docx_with_retry` 뿐이므로
+      (실측: 저장소에 `stage.json` 쓰기 지점 1곳) 다른 문서 종류에 이 행을 내면
+      "기록이 없다"가 곧 "생성한 적 없다"로 오독된다.
+    """
+    if str(req.doc_type or "").strip().lower() != "uds":
+        return None
+    from backend.services.docgen_last_run import (
+        STATUS_EXCEPTION,
+        STATUS_FAILED,
+        STATUS_STARTED,
+        STATUS_SUCCESS,
+        STATUS_TIMEOUT,
+        last_retry_stage,
+        last_uds_run,
+    )
+
+    run = last_uds_run(req.cache_root, req.job_url)
+    if not run:
+        return None
+
+    when = f"({run['when']}) " if run["when"] else ""
+    stage = f"`{run['stage']}` 단계" if run["stage"] else "생성"
+    status = run["status"]
+    measured: Dict[str, Any] = {
+        "status": status or None, "stage": run["stage"] or None,
+        "artifact": run["artifact"], "artifact_exists": run["artifact_exists"],
+        "empty_headings": run["empty_heading_count"],
+    }
+    # 반영률은 `Measured` 가 이미 아는 두 키로 낸다 — 화면이 새 키를 배우지 않아도 보인다.
+    if run["measurable"]:
+        measured["value"] = run["matched_functions"]
+        measured["of"] = run["payload_functions"]
+
+    if status == STATUS_SUCCESS:
+        tail = (f" 내용 없이 남은 heading {run['empty_heading_count']}개."
+                if isinstance(run["empty_heading_count"], int)
+                and run["empty_heading_count"] > 0 else "")
+        if not run["measurable"]:
+            # ⚠ "잴 수 없다" 에는 **두 가지**가 있고 뜻이 정반대다.
+            #   ① payload 가 0 이라고 **기록됐다** → 실을 것이 없었다는 사실(결함).
+            #   ② 수치 자체가 기록에 없다 → 아무것도 모른다(미측정).
+            #   둘을 한 문장으로 합치면 ②에 대고 "실을 함수가 0개" 라는 거짓을 말한다.
+            if run["payload_functions"] == 0:
+                return _step(
+                    "last_run", PH_HISTORY, S_DEGRADED, "직전 생성", measured=measured,
+                    reason=(f"{when}{stage}까지 가서 파일은 만들어졌지만 **문서에 실을 함수가 "
+                            f"0개**였습니다 — 만들어진 것은 템플릿 서식뿐입니다."
+                            f"{tail} 분석이 함수를 하나도 내지 못한 것이므로 소스 경로와 "
+                            f"빌드 캐시를 먼저 확인하세요."),
+                )
+            return _step(
+                "last_run", PH_HISTORY, S_UNMEASURED, "직전 생성", measured=measured,
+                reason=(f"{when}성공했지만 **반영률이 기록되지 않았습니다** — 재지 못한 "
+                        f"것이지 0% 가 아닙니다.{tail} 다음 생성부터는 기록됩니다."),
+            )
+        if run["matched_functions"] == 0:
+            return _step(
+                "last_run", PH_HISTORY, S_DEGRADED, "직전 생성", measured=measured,
+                reason=(f"{when}성공했지만 **분석 함수 {run['payload_functions']}개가 문서에 "
+                        f"하나도 실리지 않았습니다**.{tail} 템플릿의 heading 집합이 이 "
+                        f"프로젝트 함수와 맞는지 확인하세요 — 위 '템플릿 출처' 행이 "
+                        f"이번에 쓸 파일을 이름 댑니다."),
+            )
+        return _step(
+            "last_run", PH_HISTORY, S_OK, "직전 생성", measured=measured,
+            reason=(f"{when}성공 — 분석 함수 {run['payload_functions']}개 중 "
+                    f"**{run['matched_functions']}개**가 문서에 실렸습니다.{tail}"),
+        )
+
+    if status in (STATUS_FAILED, STATUS_TIMEOUT, STATUS_EXCEPTION):
+        if status == STATUS_TIMEOUT:
+            limit = run["timeout_seconds"]
+            head = (f"{when}**시간이 초과**돼 끝났습니다 — {stage}"
+                    f"{f', 상한 {limit}초' if limit else ''}.")
+        else:
+            head = f"{when}{stage}에서 **실패**했습니다."
+        cause = f" 원인: `{run['cause']}`" if run["cause"] else ""
+        # 산출물 부재는 결말을 뒷받침하는 독립 증거다 — 있으면 그것도 말한다(부분 산출).
+        artifact = ("" if run["artifact_exists"]
+                    else " 산출물 파일도 남지 않았습니다.")
+        # 체크포인트는 단계마다 **덮어쓰인다** — 남아 있는 것이 마지막으로 시도한 단계다.
+        # 그게 사다리의 끝이면 재시도가 하나도 살리지 못했다는 뜻이라, 같은 '실패' 라도
+        # 무게가 다르다. 사다리 정의는 생성기와 **같은 출처**를 읽는다(복제 아님).
+        exhausted = ""
+        if run["stage"] and run["stage"] == last_retry_stage():
+            exhausted = " 재시도 사다리의 **마지막 단계**까지 전부 실패했습니다."
+        return _step(
+            "last_run", PH_HISTORY, S_DEGRADED, "직전 생성", measured=measured,
+            reason=(f"{head}{cause}{artifact}{exhausted} 원인이 그대로면 이번에도 같은 "
+                    f"곳에서 멈춥니다 — 생성 자체는 막지 않습니다."),
+        )
+
+    if status == STATUS_STARTED:
+        return _step(
+            "last_run", PH_HISTORY, S_UNMEASURED, "직전 생성", measured=measured,
+            reason=(f"{when}{stage}가 시작된 기록만 있고 **끝이 기록되지 않았습니다** — "
+                    f"지금 진행 중이거나 프로세스가 중단된 것입니다. 성공으로 읽지 "
+                    f"않습니다."),
+        )
+
+    # 모르는 결말 — 코드를 그대로 보인다(지어내지 않는다).
+    return _step(
+        "last_run", PH_HISTORY, S_UNMEASURED, "직전 생성", measured=measured,
+        reason=(f"{when}기록의 결말이 `{status or '없음'}` 이라 해석하지 못했습니다 — "
+                f"기록 파일: {run['artifact']}.stage.json"),
+    )
 
 
 @router.post("/api/docgen/preflight")
@@ -1465,6 +1608,14 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             reason=(f"저장된 값 `{_scope_bad}` 을 알 수 없어 기본값으로 되돌렸습니다 — "
                     f"{_scope_reason}" if _scope_bad else _scope_reason),
         ))
+
+    # ── 5-c. 직전 생성의 결말 — 지금의 입력이 아니라 **기록**이다 ─────────────
+    # 판정을 여기 인라인하지 않는다. 인라인이면 가드가 "행이 있는가" 같은 모양밖에 못
+    # 보고, 실제 결말별 판정은 전체 생성 없이는 검증할 수 없다(라운드 4가 `apply_scope`
+    # 를 추출한 것과 같은 사유).
+    _last = _last_run_step(req)
+    if _last:
+        steps.append(_last)
 
     # ── verdict — 오독 위험이 큰 순서로 ──────────────────────────────────────
     states = {s["state"] for s in steps}

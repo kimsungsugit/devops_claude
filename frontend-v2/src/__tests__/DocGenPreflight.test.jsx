@@ -635,3 +635,49 @@ describe('DocGenPreflightPanel — 선택지', () => {
     expect(screen.getByLabelText('템플릿 출처').value).toBe('standard');
   });
 });
+
+describe('직전 생성 결과 (history phase)', () => {
+  // ⚠ 패널은 `PHASE_ORDER` 를 돌며 `filter(s => s.phase === p)` 로 그린다. 목록에 없는
+  //   phase 의 행은 **에러도 경고도 없이** 사라지므로, 서버가 새 phase 를 내면 화면도
+  //   같이 늘어났는지 여기서 실측한다(구조 대조는 test_docgen_preflight_phases.py).
+  const historyStep = (over = {}) => ({
+    id: 'last_run', phase: 'history', state: 'degraded', label: '직전 생성',
+    reason: '(08/11 09:35) `degraded_light` 단계에서 실패했습니다.',
+    measured: { status: 'failed', stage: 'degraded_light', artifact_exists: false },
+    ...over,
+  });
+
+  it('history 행이 화면에 그려진다 — 목록에 없으면 통째로 사라진다', () => {
+    renderPanel(base([historyStep()]));
+    expect(screen.getByText('직전 생성')).toBeInTheDocument();
+    expect(screen.getByText(/단계에서 실패했습니다/)).toBeInTheDocument();
+  });
+
+  it('소제목이 phase 코드가 아니라 사람 말이다', () => {
+    renderPanel(base([historyStep()]));
+    expect(screen.getByText('5. 직전 생성 결과')).toBeInTheDocument();
+    expect(screen.queryByText('history')).toBeNull();
+  });
+
+  it('직전 실패는 경고 톤이지 error 톤이 아니다 — 생성을 막지 않기 때문', () => {
+    const { container } = renderPanel(base([historyStep()]));
+    expect(container.querySelector('.pipeline-step.step-warn')).toBeTruthy();
+    expect(container.querySelector('.pipeline-step.step-error')).toBeNull();
+  });
+
+  it('반영률은 이미 있는 두 키로 그려진다 — 화면이 새 키를 배우지 않아도 된다', () => {
+    renderPanel(base([historyStep({
+      state: 'ok', measured: { value: 57, of: 57 },
+      reason: '성공 — 분석 함수 57개 중 57개가 문서에 실렸습니다.',
+    })], 'ready'));
+    expect(screen.getByText(/57 \/ 57/)).toBeInTheDocument();
+  });
+
+  it('기록이 없으면 소제목 자체가 안 뜬다 — 빈 절은 "생성한 적 없음"을 흐린다', () => {
+    renderPanel(base([{
+      id: 'template_source', phase: 'decision', state: 'ok', label: '템플릿 출처',
+      reason: '정본을 씁니다',
+    }], 'ready'));
+    expect(screen.queryByText('5. 직전 생성 결과')).toBeNull();
+  });
+});

@@ -159,14 +159,24 @@ const STATE_VIEW = {
   needed:     { icon: '?', cls: 'step-active', tone: '결정 필요' },
 };
 
+/**
+ * phase → 제목. **백엔드 `PHASES` 와 lockstep이다**
+ * (`backend/routers/docgen_preflight.py`).
+ *
+ * ⚠ 아래 `PHASE_ORDER` 에 없는 phase 의 행은 `filter` 에서 **에러도 경고도 없이 사라진다**
+ *   — 서버는 행을 냈는데 사용자는 못 본다. 그래서 백엔드가 phase 를 늘리면 여기도 늘려야
+ *   하고, 그 드리프트는 `tests/unit/test_docgen_preflight_phases.py` 가 양쪽을 읽어 막는다.
+ */
 const PHASE_TITLES = {
   access:   '0. 접근',
   input:    '1. 입력 자료',
   material: '2. 재료',
   chain:    '3. 채울 수 있는 경로',
   decision: '4. 결정할 것',
+  // 지금의 입력이 아니라 **기록**이다 — 그래서 위 흐름 뒤에 따로 온다.
+  history:  '5. 직전 생성 결과',
 };
-const PHASE_ORDER = ['access', 'input', 'material', 'chain', 'decision'];
+const PHASE_ORDER = ['access', 'input', 'material', 'chain', 'decision', 'history'];
 
 const VERDICT_VIEW = {
   ready:          { tone: 'success', label: '준비 완료' },

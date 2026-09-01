@@ -14,12 +14,18 @@
 
 두 경우 모두 "수치를 남겼다" 는 사실은 맞지만, 산출물을 검토하는 사람에게는
 여전히 보이지 않았다. 게이트가 있는데 발화하지 않는 것과 같다.
+
+## 갱신 (2026-09-01, 라운드 11)
+
+R2 의 괄호 — "checkpoint 는 write-only" — 는 **더 이상 사실이 아니다**. 준비 게이트가
+`backend/services/docgen_last_run.py` 로 읽어 "직전 생성" 행으로 공시한다. 아래
+`TestCheckpointIsRead` 가 그 자리를 대신하며, **옛 가드가 왜 그 변화를 놓쳤는지**를
+같이 기록한다(가드가 사실이 아니라 한 줄짜리 철자를 재고 있었다).
 """
 from __future__ import annotations
 
 import ast
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -146,49 +152,53 @@ class TestUdsFidelityReachesResult:
 
 
 # --------------------------------------------------------------
-# 측정된 사실의 기록 — checkpoint 는 write-only 다
+# R3 — checkpoint 도 읽힌다 (2026-09-01, 라운드 11에서 뒤집힘)
 # --------------------------------------------------------------
 
-class TestCheckpointIsWriteOnly:
-    def test_stage_checkpoint_has_no_reader(self):
-        """`<out>.docx.stage.json` 을 **읽는** 코드가 저장소에 없다(실측).
+class TestCheckpointIsRead:
+    """`<out>.docx.stage.json` 은 **더 이상 write-only 가 아니다.**
 
-        이 사실 때문에 checkpoint 만으로는 침묵이 해소되지 않는다 — 위 R2 배선이
-        필요했던 이유다. 나중에 reader 가 생기면 여기서 실패하므로, 그때 이 기록을
-        갱신하면 된다.
-        """
-        # ⚠ `Path("backend").rglob("*")` 는 **`backend/.venv` 까지 훑는다** — 실측
-        #   70,189 엔트리 / 21.5초. 벤더 트리를 제외하지 않으면 테스트가 스위트 예산을
-        #   혼자 먹는다(처음 작성 시 이 파일 하나가 253초였다).
-        #   `rglob` 는 걸러도 **순회 자체**가 비싸므로 `os.walk` 로 가지치기한다.
-        _VENDOR = {".venv", "venv", "node_modules", "site-packages", "__pycache__",
-                   ".git", ".pytest_cache", "dist", "build"}
-        readers = []
-        for root in ("backend", "frontend-v2/src", "workflow", "generators", "report_gen"):
-            if not Path(root).exists():
-                continue
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [d for d in dirnames if d not in _VENDOR]
-                for fname in filenames:
-                    if not fname.endswith((".py", ".js", ".jsx")):
-                        continue
-                    p = Path(dirpath) / fname
-                    try:
-                        src = p.read_text(encoding="utf-8", errors="ignore")
-                    except OSError:
-                        continue
-                    if "stage.json" not in src:
-                        continue
-                    for i, line in enumerate(src.splitlines(), 1):
-                        if "stage.json" not in line:
-                            continue
-                        # 쓰기(정의/write_text)는 제외하고 **읽기** 패턴만 센다
-                        if any(t in line for t in
-                               ("read_text", "json.load", "open(", "fetch(")):
-                            readers.append(f"{p}:{i}")
-        assert not readers, (
-            f"checkpoint reader 가 생겼다 — R2 기록을 갱신할 것: {readers}"
-        )
+    ## 옛 기록과 그것을 지키던 가드가 왜 틀렸나
+
+    여기엔 원래 `test_stage_checkpoint_has_no_reader` 가 있었다 — 저장소를 훑어
+    "`stage.json` 이 든 줄에 `read_text`/`json.load`/`open(`/`fetch(` 가 함께 있는가" 로
+    reader 를 셌고, "나중에 reader 가 생기면 여기서 실패한다" 고 적혀 있었다.
+
+    라운드 11이 실제로 reader 를 만들었는데 **그 가드는 그대로 통과했다.** 새 reader 가
+    경로를 상수(`CHECKPOINT_SUFFIX`)로 두고 읽기는 다른 줄에서 하기 때문이다 — 실측:
+    `docgen_last_run.py` 에서 `stage.json` 이 있는 줄은 3개고 그중 읽기 토큰을 가진 줄은
+    **0개**다. 가드가 잰 것은 *사실*이 아니라 **한 줄짜리 철자 습관**이었다.
+
+    그래서 대체물은 같은 방식으로 세지 않는다. **읽는 함수가 있는가**(구조)와 **그 값이
+    응답에 실리는가**(행동)를 각각 단언한다 — 이 파일의 다른 두 축(R1·R2)이 쓰는 방식과
+    같다. 어느 줄에 어떤 토큰이 있는지는 이제 아무것도 증명하지 않는다.
+    """
+
+    @pytest.mark.parametrize(
+        "fn", ["find_last_run_checkpoint", "summarize_last_run", "last_uds_run"])
+    def test_reader_functions_exist(self, fn):
+        tree = ast.parse(
+            Path("backend/services/docgen_last_run.py").read_text(encoding="utf-8"))
+        names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        assert fn in names
+
+    def test_reader_actually_reads_a_checkpoint(self, tmp_path):
+        """행동 축 — 파일을 놓고 사실이 나오는지 본다(이름만 맞으면 통과하지 않게)."""
+        from backend.services.docgen_last_run import CHECKPOINT_SUFFIX, summarize_last_run
+        cp = tmp_path / f"uds_spec_demo_20260901_120000{CHECKPOINT_SUFFIX}"
+        cp.write_text(json.dumps({
+            "stage": "full", "status": "success",
+            "gen_stats": {"payload_functions": 57, "matched_functions": 57},
+        }), encoding="utf-8")
+        run = summarize_last_run(cp)
+        assert run is not None
+        assert (run["status"], run["matched_functions"]) == ("success", 57)
+
+    def test_the_gate_surfaces_it(self):
+        """배선 축 — 읽기만 하고 `steps` 에 안 실으면 침묵은 그대로다."""
+        src = Path("backend/routers/docgen_preflight.py").read_text(encoding="utf-8")
+        assert "_last = _last_run_step(req)" in src
+        assert "steps.append(_last)" in src
 
     @pytest.mark.parametrize("fn", ["_read_gen_stats", "_gen_stats_result_fields"])
     def test_sidecar_readers_exist(self, fn):

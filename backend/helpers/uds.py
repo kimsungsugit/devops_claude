@@ -1587,7 +1587,11 @@ def _generate_docx_with_retry(
             os.close(fd)
         except Exception:
             pass
-        checkpoint = out_path.with_suffix(".docx.stage.json")
+        # ⚠ 접미사는 **읽는 쪽과 같은 상수**를 쓴다. 준비 게이트가 이 파일을 글로브로
+        #   찾아 직전 생성의 결말을 공시하는데(`docgen_last_run`), 리터럴이 양쪽에 있으면
+        #   한쪽만 바뀌었을 때 아무것도 못 찾고 그건 "생성한 적 없음" 과 구분되지 않는다.
+        from backend.services.docgen_last_run import CHECKPOINT_SUFFIX
+        checkpoint = out_path.with_suffix(CHECKPOINT_SUFFIX)
         try:
             payload_file.write_text(json.dumps(stage_payload, ensure_ascii=False), encoding="utf-8")
             checkpoint.write_text(
