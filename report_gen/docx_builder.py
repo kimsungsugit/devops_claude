@@ -1633,27 +1633,55 @@ def _iter_body_blocks(doc):
     return blocks
 
 
+_HEADER_KEYWORDS = frozenset({
+    "file name",
+    "version",
+    "date",
+    "note",
+    "macro",
+    "type",
+    "define",
+    "description",
+    "parameter",
+    "component",
+    "function",
+    "comment",
+    "data name",
+    "data type",
+    "value range",
+    "reset",
+})
+
+
+def _looks_like_header_row(cells: List[str]) -> bool:
+    """1행이 헤더처럼 보이는가 — **관대하게** 본다(부분문자열).
+
+    배너 셀(`[ Function Information ]`)처럼 라벨과 정확히 같지 않은 헤더가 실제로
+    있어서, 여기서 엄격하게 보면 정상 표 1,035개가 판정을 잃는다(실측).
+    """
+    joined = " ".join(c.lower() for c in cells if c).strip()
+    return any(k in joined for k in _HEADER_KEYWORDS)
+
+
+def _is_header_label_row(cells: List[str]) -> bool:
+    """2행이 **헤더의 둘째 줄**인가 — 엄격하게 본다(셀 완전일치).
+
+    ⚠ 여기가 부분문자열이면 템플릿의 **예시 데이터 행**이 헤더로 굳는다. 데이터 행은
+      긴 설명을 달고 다녀서 `type`·`version`·`reset` 같은 낱말이 값 안에 우연히 들어
+      있기 때문이다 — 실측으로 `VERSION1`·`CPU_POWER_ON_RESET`·`APP_FIRMWARE_VERSION_ADDR`
+      같은 **남의 값 6행이 산출물에 그대로 실렸다**. 헤더의 둘째 줄은 순수 라벨
+      (`ID`/`Name`/`Type`)이므로 셀 하나라도 라벨과 **정확히** 같을 것을 요구한다.
+      정본·표준 템플릿 1,194표 전수 대조: 의도한 7건만 바뀌고 회귀 0건.
+    """
+    for c in cells:
+        if re.sub(r"\s+", " ", str(c or "")).strip().lower() in _HEADER_KEYWORDS:
+            return True
+    return False
+
+
 def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
     blocks: List[Tuple[str, Any]] = []
     stack: List[str] = []
-    header_keywords = {
-        "file name",
-        "version",
-        "date",
-        "note",
-        "macro",
-        "type",
-        "define",
-        "description",
-        "parameter",
-        "component",
-        "function",
-        "comment",
-        "data name",
-        "data type",
-        "value range",
-        "reset",
-    }
     for kind_in, item in _iter_body_blocks(doc):
         if kind_in == "raw":
             # 표지 같은 구조 블록은 **원본 요소 그대로** 들고 간다. 텍스트로 풀면
@@ -1689,11 +1717,8 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
                 for r in item.rows[:2]:
                     header_rows.append([c.text.strip() for c in r.cells])
                 if len(header_rows) == 2:
-                    first = " ".join([c.lower() for c in header_rows[0] if c]).strip()
-                    second = " ".join([c.lower() for c in header_rows[1] if c]).strip()
-                    def _is_header(row_text: str) -> bool:
-                        return any(k in row_text for k in header_keywords)
-                    if _is_header(first) and not _is_header(second):
+                    if (_looks_like_header_row(header_rows[0])
+                            and not _is_header_label_row(header_rows[1])):
                         header_rows = header_rows[:1]
                 # 6번째로 **원본 표 요소**를 들고 간다. 생성기가 채우지 않는 표
                 # (이력·참조 등)는 모양만 복제하면 데이터 행이 빈칸으로 나가는데,
@@ -1831,6 +1856,17 @@ def _add_blank_table(
         row_offset = min(len(header_rows), rows)
     if data_rows:
         max_rows = rows - row_offset
+        if len(data_rows) > max_rows:
+            # ⚠ 여기서 잘린 행은 **아무 데도 안 남는다**. 실측(표준 템플릿 v0.10):
+            #   호출부가 템플릿 행수를 넘기는 바람에 6개 표에서 1,144행이 사라졌고
+            #   `Software Unit Tables` 는 함수 57개 중 15개만 실렸는데, 경고가 없어
+            #   문서만 보면 "함수가 15개뿐인 프로젝트" 로 읽혔다. 호출부는 전부
+            #   데이터에 맞춰 잡도록 고쳤지만, 새 호출부가 다시 그러면 보이게 한다.
+            _logger.warning(
+                "표 행수 부족으로 데이터 %d행 중 %d행만 기록한다(-%d행) — "
+                "표 크기를 데이터에 맞춰 잡을 것",
+                len(data_rows), max(max_rows, 0), len(data_rows) - max(max_rows, 0),
+            )
         for r_idx, row in enumerate(data_rows[:max_rows]):
             for c_idx, val in enumerate(row[:cols]):
                 table.cell(row_offset + r_idx, c_idx).text = str(val) if val is not None else ""
@@ -2940,6 +2976,9 @@ def generate_uds_docx(
         # 표지가 오는 문서가 된다.
         _restored_blocks = 0      # 표지 등 원본 그대로 되살린 구조 블록
         _preserved_tables = 0     # 생성기가 채우지 않아 원본을 유지한 표
+        _rows_recovered = 0       # 템플릿 행수였다면 잘렸을 데이터 행
+        _rows_trimmed = 0         # 템플릿 행수였다면 남았을 빈 행
+        _unattributed_swcoms: Set[str] = set()   # 전역변수를 귀속시키지 못한 컴포넌트
         _lead_raw = 0
         while _lead_raw < len(blocks) and blocks[_lead_raw][0] == "raw":
             try:
@@ -3105,7 +3144,21 @@ def generate_uds_docx(
                 return list(dict.fromkeys(selected))
             file_names = swcom_function_files.get(swcom_id, set())
             if not file_names:
-                return names
+                # ⚠ 여기서 `names`(**전체**)를 돌려주면 귀속에 실패한 컴포넌트 표에
+                #   이 프로젝트 전역변수가 통째로 실린다. `swcom_function_files` 는
+                #   **payload 의** function_table_rows 로만 만들어지므로, 템플릿이
+                #   payload 보다 넓으면(정본이 늘 그렇다) 대부분의 컴포넌트가 여기로
+                #   온다. 실측(KJPDS02_PV 정본, payload 는 SwCom_01 뿐): 컴포넌트별
+                #   전역/정적 표 64개 중 43개가 366개를 통째로 받았고, 그게 템플릿
+                #   행수(2~5행)에 잘려 **1~4개만** 남는 바람에 "그 컴포넌트의 전역
+                #   변수" 처럼 보였다. 표 크기를 데이터에 맞추자 8,562행으로 드러났다.
+                # ⚠ 문서 레벨 표(`swcom_id` 없음)는 전체가 맞다 — 실측: 표준 템플릿의
+                #   전역/정적 표 4개는 **전부** 문서 레벨, 정본의 64개는 **전부**
+                #   SwCom 아래다. 그래서 두 경우를 갈라야 한다.
+                if not swcom_id:
+                    return names
+                _unattributed_swcoms.add(swcom_id)
+                return []
             file_stems = {_norm_stem(Path(x).stem) for x in file_names}
             for n in names:
                 info_g = globals_info_map.get(n, {}) if isinstance(globals_info_map, dict) else {}
@@ -3863,7 +3916,19 @@ def generate_uds_docx(
                         _logger.warning("원본 표 복원 실패 — 빈 표로 대체", exc_info=True)
                         _add_blank_table(doc, rows, cols, style, header_rows, None)
                 else:
-                    _add_blank_table(doc, rows, cols, style, header_rows, data_rows)
+                    # 표 크기는 **데이터**가 정한다. 템플릿 행수를 그대로 쓰면 두
+                    # 방향으로 조용히 틀린다:
+                    #  · 데이터가 많으면 잘린다 — 실측(표준 템플릿) 6개 표에서 1,144행
+                    #    소실, `Software Unit Tables` 는 함수 57개 중 15개만 실렸다.
+                    #  · 데이터가 적으면 빈 행이 남는다 — 실측(정본) 문서 전체 행의
+                    #    28.2%가 완전 빈 행, `Software Unit Tables` 1,037행 중 978행.
+                    # 같은 파일의 비-템플릿 경로 11곳은 이미 `max(len(rows) + 1, 2)` 로
+                    # 데이터에 맞춰 잡는다 — 이 경로만 예외였다.
+                    _n_hdr = min(len(header_rows or []), rows)
+                    _want = _n_hdr + len(data_rows)
+                    _rows_recovered += max(0, len(data_rows) - max(rows - _n_hdr, 0))
+                    _rows_trimmed += max(0, rows - _want)
+                    _add_blank_table(doc, max(_want, 1), cols, style, header_rows, data_rows)
             elif kind == "raw":
                 # 선행 블록은 위에서 이미 붙였다(자동 목차보다 앞서야 해서).
                 if idx >= _lead_raw:
@@ -3939,9 +4004,22 @@ def generate_uds_docx(
             # 신원 판정(`template_identity`)과 짝으로 읽으라고 같이 낸다.
             "restored_template_blocks": _restored_blocks,
             "preserved_template_tables": _preserved_tables,
+            "table_rows_recovered": _rows_recovered,
+            "table_rows_blank_trimmed": _rows_trimmed,
+            "swcom_globals_unattributed": len(_unattributed_swcoms),
             # 참조 SUDS 를 얼마나·왜 적용했는지. 로그에만 남기면 산출물 검토자가 못 본다.
             "reference_suds": _ref_stats,
         }
+        if _unattributed_swcoms:
+            # 빈 표는 "이 컴포넌트엔 전역변수가 없다" 로 읽힌다 — 실제로는 **모른다** 다.
+            # 침묵하면 그 오독을 못 막으므로 어느 컴포넌트인지까지 남긴다.
+            _logger.warning(
+                "전역/정적 변수를 귀속시키지 못한 컴포넌트 %d개 — 해당 표를 비웠다"
+                "(전체를 싣던 종전 동작은 남의 컴포넌트에 이 프로젝트 전역변수를 전부 "
+                "실었다). 대상: %s. payload 에 그 컴포넌트의 함수가 없으면 이렇게 된다 — "
+                "템플릿이 payload 보다 넓은지 확인할 것.",
+                len(_unattributed_swcoms), ", ".join(sorted(_unattributed_swcoms)[:12]),
+            )
         if _ref_stats["safety_fields_blocked"]:
             _logger.warning(
                 "참조 SUDS 의 ASIL·Related %d건을 적용하지 않았다 — 프로젝트 신원 미확인(%s). "

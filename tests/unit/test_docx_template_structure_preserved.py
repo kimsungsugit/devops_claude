@@ -107,10 +107,10 @@ def _build_template(path: Path) -> Path:
     for c, v in zip(t2.rows[0].cells, ("Macro name", "Type", "Define", "Description"),
                    strict=False):
         c.text = v
-    # ⚠ 예시 행에 헤더 낱말(`macro`/`version` 등)이 들어가면 `_extract_template_blocks`
-    #   의 2행 헤더 판정이 **부분문자열**이라 그 행을 헤더로 오인한다(`TPL_MACRO` 의
-    #   'macro'). 그러면 소유 표인데도 예시 행이 헤더로 굳어 산출물에 남는다 — 이
-    #   파일이 재는 축이 아니므로 걸리지 않는 값을 쓴다. (별개 결함으로 보고함)
+    # ⚠ 예시 행에 헤더 낱말이 들어가면 2행 헤더 판정이 그 행을 헤더로 오인해
+    #   산출물에 남던 결함이 있었다(2026-09-01 수정 — 판정이 비대칭이 됐다).
+    #   그 축은 `test_docx_table_sizing_and_headers.py` 가 실제 템플릿 값으로 잰다.
+    #   여기서는 축을 하나만 두려고 계속 걸리지 않는 값을 쓴다.
     for c, v in zip(t2.rows[1].cells, ("EXAMPLE_ROW", "U8", "1", "보기"), strict=False):
         c.text = v
 

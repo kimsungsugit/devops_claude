@@ -149,6 +149,9 @@ def _gen_stats_result_fields(out_path: Path) -> Dict[str, Any]:
             # 남의 프로젝트 템플릿이면 이 수만큼 남의 내용이 산출물에 실린 것이다.
             "restored_template_blocks": stats.get("restored_template_blocks"),
             "preserved_template_tables": stats.get("preserved_template_tables"),
+            "table_rows_recovered": stats.get("table_rows_recovered"),
+            "table_rows_blank_trimmed": stats.get("table_rows_blank_trimmed"),
+            "swcom_globals_unattributed": stats.get("swcom_globals_unattributed"),
             "payload_functions": stats.get("payload_functions"),
             "matched_functions": stats.get("matched_functions"),
             "match_pct": stats.get("match_pct"),      # 분모 0 이면 None(미측정)

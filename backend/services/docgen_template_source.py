@@ -131,7 +131,8 @@ def _standard_caveat(kind: str) -> str:
     if kind in _SHEET_BASED:
         return ""
     return (" ⚠ UDS 는 템플릿의 heading 집합이 곧 문서의 함수 목록이라, 자리표시자만 있는 "
-            "표준 템플릿이면 분석한 함수가 **하나도 실리지 않습니다**(실측 0/57).")
+            "표준 템플릿이면 분석한 함수가 **상세 절로는 하나도 실리지 않습니다**"
+            "(실측 0/57 — `Software Unit Tables` 목록에는 57개 전부 실립니다).")
 
 
 def choose_template_source(

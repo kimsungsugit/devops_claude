@@ -168,6 +168,11 @@ class TestTemplateReasonMatchesTheBuilder:
         _, why = choose_template_source("uds", registered_template="std.docx",
                                         reference_doc="ref.docx", prefer_reference=False)
         assert "하나도 실리지 않습니다" in why, f"빈 문서 위험을 말하지 않는다: {why}"
+        # ⚠ 어느 축이 비는지까지 말해야 한다. 2026-09-01 에 표 행수를 데이터에 맞추면서
+        #   `Software Unit Tables` 는 57개 전부 싣게 됐다(그 전엔 15개만) — "하나도"
+        #   만 남기면 이제 **문서를 열면 반증되는 문장**이 된다.
+        assert "상세 절" in why, f"어느 축이 비는지 말하지 않는다: {why}"
+        assert "Software Unit Tables" in why, f"실리는 축을 빠뜨렸다: {why}"
 
     def test_sheet_builders_get_no_empty_document_warning(self):
         """시트 빌더엔 해당 없는 경고다 — 아무 데나 붙이면 경고가 소음이 된다."""
