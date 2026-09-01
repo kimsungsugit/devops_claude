@@ -114,10 +114,18 @@ class TestEveryPathConsultsTheRegistration:
         ⚠ 인라인일 때는 가드가 "대입문이 있는가" 같은 **모양**밖에 못 봤고, 분기를
         `if False:` 로 죽이는 뮤테이션 2건이 통째로 살아남았다. 헬퍼로 빼서 아래
         `TestResolverBehaviour` 가 **결과**를 단언한다.
+
+        ⚠ 2026-09-01(라운드 12): 요구 대상이 **로컬화하는 형제**로 바뀌었다. 등록본을
+        찾는 것만으로는 부족하다 — 그 경로가 `U:` 면 생성 서브프로세스가 열지 못해
+        재시도 3단계가 전부 `PackageNotFoundError` 로 죽는다(실측 08-10·08-11).
+        raw 형제를 라우터가 부르는 것 자체는
+        `test_uds_template_localization.py::test_routers_never_call_the_raw_resolver`
+        가 금지한다 — 여기서는 **대체가 실제로 들어갔는지**를 본다.
         """
         assigns = _assignments_to("backend/routers/local.py", "local_uds_generate", "tpl_path")
-        assert any("resolve_registered_uds_template()" in rhs for _, rhs in assigns), (
-            "local 경로가 공용 해석기를 안 쓴다 — 등록본이 무시될 수 있다"
+        assert any("resolve_registered_uds_template_local()" in rhs for _, rhs in assigns), (
+            "local 경로가 공용 해석기를 안 쓴다 — 등록본이 무시되거나, 쓰더라도 "
+            "cloudium 경로를 로컬화하지 않아 생성이 죽는다"
         )
         assert not any("UDS_REF_SUDS_PATH" in rhs for _, rhs in assigns), (
             "정본을 tpl_path 에 직접 채우고 있다 — 등록본보다 앞설 위험"

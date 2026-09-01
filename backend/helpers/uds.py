@@ -11,7 +11,7 @@ from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -157,6 +157,10 @@ def _gen_stats_result_fields(out_path: Path) -> Dict[str, Any]:
             "match_pct": stats.get("match_pct"),      # 분모 0 이면 None(미측정)
             "unmatched_payload_count": stats.get("unmatched_payload_count"),
             "empty_heading_count": stats.get("empty_heading_count"),
+            # **지운** heading — 비워 둔 것과 다른 사실이다. 둘을 같이 봐야
+            # "왜 문서가 얇아졌나" 에 답할 수 있다(`keep` 이면 0).
+            "dropped_heading_count": stats.get("dropped_heading_count"),
+            "unmatched_headings_mode": stats.get("unmatched_headings_mode"),
             "deleted_heading_count": stats.get("deleted_heading_count"),
             "reference_suds": stats.get("reference_suds"),
         },
@@ -254,6 +258,32 @@ def resolve_registered_uds_template() -> str:
     return str(ref) if str(ref) and ref.exists() else ""
 
 
+def resolve_registered_uds_template_local() -> Optional[str]:
+    """등록 템플릿을 **생성기가 직접 열 수 있는 경로**로. 없으면 `None`.
+
+    ⚠ 형제 함수 `resolve_registered_uds_template()` 의 결과를 **그대로 쓰면 안 된다**.
+      UDS 생성은 서브프로세스에서 `docx.Document(path)` 로 직접 여니 cloudium worker 가
+      닿지 않는다 — `U:` 등록본이면 재시도 3단계가 전부 `PackageNotFoundError` 로 죽는다.
+      가정이 아니라 실측이다: 캐시에 남은 2026-08-10·08-11 실패 기록의 마지막 줄이 정확히
+      그 모양이고, 경로가 `U:/…/01.SwUDS/(XXXX_SwUDS)…docx` 다.
+
+    ⚠ **왜 또 함수로 빼나**: 형제 함수의 docstring 이 이미 그 사유를 적어 뒀다 — 인라인이면
+      가드가 "대입문이 있는가" 같은 모양밖에 못 보고, 실제로 그렇게 뒀다가 분기를 죽이는
+      뮤테이션 2건이 통째로 살아남았다. 호출 한 번으로 **결과**를 단언할 수 있어야 한다.
+
+    Returns:
+        해석된 로컬 경로, 또는 `None`(등록 없음 / 해석 실패). **원 경로를 흘려보내지
+        않는다** — 그러면 같은 실패가 하류에서 나고 사유만 사라진다. 사유는
+        `resolve_builder_input` 이 로그에 남긴다.
+    """
+    registered = resolve_registered_uds_template()
+    if not registered:
+        return None
+    from backend.services.resolver_helpers import resolve_builder_input
+
+    return resolve_builder_input(registered, label="UDS 템플릿")
+
+
 def _uds_artifact_fidelity(out_path: Any) -> Dict[str, Any]:
     """생성된 DOCX 에 payload 함수가 **실제로 몇 개 들어갔는지** 잰다.
 
@@ -305,6 +335,9 @@ def _uds_artifact_fidelity(out_path: Any) -> Dict[str, Any]:
             "matched_functions": matched_n,
             "unmatched_payload_count": stats.get("unmatched_payload_count"),
             "empty_heading_count": stats.get("empty_heading_count"),
+            # Quality DB 의 meta 로도 간다 — 문서가 얇아진 사유를 기록이 설명해야 한다.
+            "dropped_heading_count": stats.get("dropped_heading_count"),
+            "unmatched_headings_mode": stats.get("unmatched_headings_mode"),
             "deleted_heading_count": stats.get("deleted_heading_count"),
             "write_back_passed": bool(check.get("passed")),
             "mismatches": list(check.get("mismatches") or []),
@@ -1592,6 +1625,25 @@ def _generate_docx_with_retry(
         #   한쪽만 바뀌었을 때 아무것도 못 찾고 그건 "생성한 적 없음" 과 구분되지 않는다.
         from backend.services.docgen_last_run import CHECKPOINT_SUFFIX
         checkpoint = out_path.with_suffix(CHECKPOINT_SUFFIX)
+        # ⚠ 체크포인트는 단계마다 **덮어써진다**. 시작 시각을 `started` 레코드에만 두면
+        #   종결 레코드가 그것을 지워, 이 생성이 **얼마나 걸렸는지** 를 되살릴 방법이
+        #   없어진다(실측: 남아 있는 기록 3건 전부 `ended_at` 만 있다). 그래서 시작
+        #   시각과 타이머를 여기서 한 번 잡고 네 갈래 종결이 **전부** 옮겨 싣는다.
+        _started_at = datetime.now().isoformat(timespec="seconds")
+        _t0 = monotonic()
+
+        def _finish(record: Dict[str, Any]) -> Dict[str, Any]:
+            """종결 레코드 공통 필드 — 시작·종료·소요·그 단계의 예산.
+
+            ⚠ `elapsed_seconds` 는 **이 단계 하나**의 소요다. 앞 단계들의 소요는 덮어써져
+              원래부터 남지 않으므로 사다리 전체의 합이 아니다(합으로 읽히면 거짓이다).
+            """
+            record["started_at"] = _started_at
+            record["ended_at"] = datetime.now().isoformat(timespec="seconds")
+            record["elapsed_seconds"] = round(monotonic() - _t0, 1)
+            record["timeout_seconds"] = timeout_seconds
+            return record
+
         try:
             payload_file.write_text(json.dumps(stage_payload, ensure_ascii=False), encoding="utf-8")
             checkpoint.write_text(
@@ -1600,7 +1652,7 @@ def _generate_docx_with_retry(
                         "stage": stage,
                         "status": "started",
                         "timeout_seconds": timeout_seconds,
-                        "started_at": datetime.now().isoformat(timespec="seconds"),
+                        "started_at": _started_at,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1631,12 +1683,11 @@ def _generate_docx_with_retry(
                 # 성공/실패 판정은 **바꾸지 않는다**(템플릿이 의도된 부분집합일 수 있어
                 # 뒤집으면 대량 오탐) — 대신 수치를 checkpoint 에 실어 침묵을 없앤다.
                 gen_stats = _read_gen_stats(out_path)
-                record: Dict[str, Any] = {
+                record: Dict[str, Any] = _finish({
                     "stage": stage,
                     "status": "success",
-                    "ended_at": datetime.now().isoformat(timespec="seconds"),
                     "stdout_tail": (run.stdout or "")[-1000:],
-                }
+                })
                 if gen_stats:
                     record["gen_stats"] = gen_stats
                     unmatched = gen_stats.get("unmatched_payload_count")
@@ -1662,13 +1713,12 @@ def _generate_docx_with_retry(
             err = ((run.stderr or "") + "\n" + (run.stdout or "")).strip()[-2000:]
             checkpoint.write_text(
                 json.dumps(
-                    {
+                    _finish({
                         "stage": stage,
                         "status": "failed",
                         "returncode": run.returncode,
-                        "ended_at": datetime.now().isoformat(timespec="seconds"),
                         "error_tail": err,
-                    },
+                    }),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1678,12 +1728,10 @@ def _generate_docx_with_retry(
         except subprocess.TimeoutExpired:
             checkpoint.write_text(
                 json.dumps(
-                    {
+                    _finish({
                         "stage": stage,
                         "status": "timeout",
-                        "ended_at": datetime.now().isoformat(timespec="seconds"),
-                        "timeout_seconds": timeout_seconds,
-                    },
+                    }),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1693,12 +1741,11 @@ def _generate_docx_with_retry(
         except Exception as exc:
             checkpoint.write_text(
                 json.dumps(
-                    {
+                    _finish({
                         "stage": stage,
                         "status": "exception",
-                        "ended_at": datetime.now().isoformat(timespec="seconds"),
                         "error": str(exc),
-                    },
+                    }),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1711,7 +1758,16 @@ def _generate_docx_with_retry(
             except Exception:
                 pass
 
-    stages = getattr(config, "UDS_DOCX_RETRY_STAGES", [("full", 0, 2400), ("degraded_ai_off", 1, 1800), ("degraded_light", 2, 900)])
+    # ⚠ 단계 목록을 여기 복제하지 않는다. 예전엔 `getattr(config, …, [("full",0,2400),…])`
+    #   로 리터럴 폴백을 달아 뒀는데, config 의 실제 예산은 **7200/3600/1800** 이라
+    #   3배 차이였다. 죽은 폴백이 문서·기억에 옮겨 적히면서 "full 예산 2400초" 라는
+    #   틀린 사실이 돌아다녔다(라운드 12 착수 실측에서 발견). 준비 게이트도 같은
+    #   `config` 를 직독한다(`docgen_last_run.retry_stage_budget`).
+    stages = list(getattr(config, "UDS_DOCX_RETRY_STAGES", None) or ())
+    if not stages:
+        raise RuntimeError(
+            "config.UDS_DOCX_RETRY_STAGES 가 비어 있다 — 재시도 예산을 지어내지 않는다."
+        )
     max_retries = max(1, int(retries))
     selected = stages[:max_retries] if max_retries <= len(stages) else stages
     last_error = ""
@@ -1810,6 +1866,9 @@ def _uds_generate_from_paths(
     # 이 두 값으로 내려온다. `None` 이면 `config` 기본값(환경변수로 덮임)이 쓰인다.
     max_source_files: Optional[int] = None,
     max_items_per_category: Optional[int] = None,
+    # 정본에만 있는 남의 함수 절을 남길지 지울지 — 기본은 `""`(= keep, 종전 동작).
+    # 정규화는 `docx_builder.normalize_unmatched_headings` 단일 출처가 한다.
+    unmatched_headings: str = "",
 ) -> Dict[str, Any]:
     def _progress(stage: str, percent: int, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
         if not progress_cb:
@@ -2062,6 +2121,7 @@ def _uds_generate_from_paths(
         "logic_max_children": logic_max_children,
         "logic_max_grandchildren": logic_max_grandchildren,
         "logic_max_depth": logic_max_depth,
+        "unmatched_headings": unmatched_headings,
     }
     impact_path = _run_impact_analysis_for_uds(
         source_root_path,

@@ -121,6 +121,7 @@ from backend.helpers.uds import (  # noqa: F401
     _validate_docx_template_bytes,
     _write_residual_tbd_report,
     resolve_registered_uds_template,
+    resolve_registered_uds_template_local,
 )
 
 # --- vectorcast ---

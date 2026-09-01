@@ -1226,6 +1226,42 @@ def _render_swcom_overview_image(swcoms: List[str], out_path: Path) -> Optional[
     return str(out_path)
 
 
+# ── 정본에만 있는 남의 함수 heading 을 어떻게 할 것인가 ──────────────────────
+#
+# 정본을 템플릿으로 쓰면 heading 이 그 문서 전체(실측 KJPDS02 정본 1,035개)만큼 오는데
+# 이번 분석의 payload 는 그 부분집합이다(실측 57개). 나머지는 빈 `[ Function Information ]`
+# 서식으로 남는다 — 문서 행의 23%. 그게 옳은지는 **사람이 정한다**:
+#
+#   · 남기면(`keep`) 무엇이 분석되지 않았는지 문서에 드러난다.
+#   · 지우면(`drop`) 분석한 함수만 담긴 문서가 된다 — 정본을 부분집합으로 쓰는 경우.
+#
+# 기본은 `keep`(= 종전 동작)이라 **고르기 전까지 산출물은 바뀌지 않는다**.
+UNMATCHED_HEADINGS_KEEP = "keep"
+UNMATCHED_HEADINGS_DROP = "drop"
+UNMATCHED_HEADINGS_CHOICES = (UNMATCHED_HEADINGS_KEEP, UNMATCHED_HEADINGS_DROP)
+
+# 함수 절의 heading 인가. ⚠ **한 곳에만** 둔다 — 세는 쪽과 지우는 쪽이 각자 리터럴을
+# 들고 있으면 `\b` 하나 빠진 것만으로 두 집합이 갈린다(이 라운드에서 실제로 겪었다).
+_SWUFN_HEADING_RE = re.compile(r"\bswufn_\d+\b", re.I)
+
+
+def normalize_unmatched_headings(value: Any) -> "Tuple[str, str]":
+    """``(정규화된 값, 알 수 없었던 원본 or "")``.
+
+    ⚠ 모르는 값은 **안 지우는 쪽**(`keep`)으로 떨어진다. 반대로 두면 오타 하나에
+      문서가 조용히 얇아지고, 그건 되돌릴 수 없는 방향의 실수다.
+      `generators.suts.normalize_scope` 와 **같은 계약**이다 — 게이트가 이 함수를
+      import 해서 쓰므로 규칙이 두 곳에 갈리지 않는다.
+    """
+    raw = str(value or "").strip()
+    low = raw.lower()
+    if not low:
+        return UNMATCHED_HEADINGS_KEEP, ""
+    if low in UNMATCHED_HEADINGS_CHOICES:
+        return low, ""
+    return UNMATCHED_HEADINGS_KEEP, raw
+
+
 def _merge_function_info_table(table, cols: int, layout=None) -> None:
     """함수 정보 표의 셀을 행 종류에 맞게 병합한다.
 
@@ -3273,6 +3309,41 @@ def generate_uds_docx(
         _empty_headings: List[str] = []
         _deleted_headings: List[str] = []
         _boilerplate_headings: List[str] = []
+        # 지운 것과 비워 둔 것은 **다른 사실**이다 — 한 칸에 합치면 산출물을 설명 못 한다.
+        _dropped_headings: List[str] = []
+        _unmatched_mode, _unmatched_bad = normalize_unmatched_headings(
+            payload.get("unmatched_headings"))
+        if _unmatched_bad:
+            _logger.warning(
+                "unmatched_headings=%r 를 알 수 없어 기본값(%s)으로 진행한다",
+                _unmatched_bad, UNMATCHED_HEADINGS_KEEP)
+        _drop_unmatched = _unmatched_mode == UNMATCHED_HEADINGS_DROP
+        # >0 이면 그 레벨 이하의 heading 을 만날 때까지 **절 전체**를 버린다.
+        # heading 만 지우고 본문을 남기면 내용이 엉뚱한 절에 붙는다.
+        _drop_until_level = 0
+
+        def _fn_match_kind(title_text: str, info: Any) -> str:
+            """heading 하나의 분류 — ``matched`` | ``deleted`` | ``boilerplate`` | ``empty``.
+
+            ⚠ 판정을 **여기 하나에만** 둔다. 아래 `_note_fn_match`(계측)와 본문 루프의
+              "지울 것인가"(산출)가 같은 규칙을 봐야 한다 — 규칙이 갈리면 세는 것과
+              지우는 것이 서로 다른 집합이 되고, 그러면 수치가 산출물을 설명하지 못한다.
+            """
+            name = ""
+            if isinstance(info, dict):
+                name = _normalize_symbol_name(str(info.get("name") or "")).lower()
+            # `_finalize_function_fields` 가 만들지 **않는** 필드들 — 있으면 진짜 내용이다.
+            has_hard_content = isinstance(info, dict) and any(
+                info.get(k) for k in ("prototype", "inputs", "outputs", "logic")
+            )
+            known = bool(name) and name in _payload_fn_names
+            if known and has_hard_content:
+                return "matched"
+            if _deleted_marker.search(str(title_text)):
+                return "deleted"
+            if known:
+                return "boilerplate"
+            return "empty"
 
         def _note_fn_match(title_text: str, info: Any) -> None:
             """heading 하나가 payload 로 채워졌는지 vs 빈 껍데기인지 분류.
@@ -3296,19 +3367,13 @@ def generate_uds_docx(
             prototype/inputs/outputs/logic 이 전무한 함수는 갭으로 잡히는데, 단위 상세 설계
             문서 기준으로는 그게 맞다.
             """
-            name = ""
-            if isinstance(info, dict):
-                name = _normalize_symbol_name(str(info.get("name") or "")).lower()
-            # `_finalize_function_fields` 가 만들지 **않는** 필드들 — 있으면 진짜 내용이다.
-            has_hard_content = isinstance(info, dict) and any(
-                info.get(k) for k in ("prototype", "inputs", "outputs", "logic")
-            )
-            known = bool(name) and name in _payload_fn_names
-            if known and has_hard_content:
-                _matched_fn_names.add(name)
-            elif _deleted_marker.search(str(title_text)):
+            kind = _fn_match_kind(title_text, info)
+            if kind == "matched":
+                _matched_fn_names.add(
+                    _normalize_symbol_name(str((info or {}).get("name") or "")).lower())
+            elif kind == "deleted":
                 _deleted_headings.append(str(title_text)[:200])
-            elif known:
+            elif kind == "boilerplate":
                 # 이름은 payload 에 있는데 내용이 전부 합성이다 — 갭이지만 원인이 다르다.
                 _boilerplate_headings.append(str(title_text)[:200])
             else:
@@ -3653,10 +3718,41 @@ def generate_uds_docx(
                         doc.add_paragraph("[Logic Diagram not available]")
             return func_table
 
+        def _block_level(payload_la: Any, fallback: int) -> int:
+            # heading payload 는 `(level, title)` 이지만 레벨이 문자열로 오는 템플릿이
+            # 있다. 못 읽으면 호출부가 준 fallback 이 맞다(같은 파일의 기존 전방탐색도
+            # 같은 처리를 한다). 판정은 바뀌지 않는다.
+            try:
+                return int(payload_la[0])
+            except Exception:  # silent-ok — 레벨 파싱 실패는 fallback 이 정답이다
+                return fallback
+
         for idx, block in enumerate(blocks):
             kind, payload_block = block
+            # 버리는 중이면 **다음 형제/상위 heading 까지** 전부 버린다(본문·표 포함).
+            # heading 만 지우고 아래를 남기면 그 내용이 엉뚱한 절에 붙는다.
+            if _drop_until_level:
+                if kind == "heading" and _block_level(payload_block,
+                                                      _drop_until_level) <= _drop_until_level:
+                    _drop_until_level = 0
+                else:
+                    continue
             if kind == "heading":
                 level, title = payload_block
+                # ── payload 에 없는 남의 함수 절 — 지울 것인가 ────────────────
+                # 판정은 계측(`_note_fn_match`)과 **같은 함수**를 쓴다. 규칙이 갈리면
+                # 세는 집합과 지우는 집합이 달라져 수치가 산출물을 설명하지 못한다.
+                # `(삭제)` 표기 heading 은 `empty` 가 아니라 `deleted` 라 여기 안 걸린다 —
+                # 템플릿이 의도해서 비운 자리이므로 그대로 둔다.
+                if _drop_unmatched:
+                    _key_peek = str(title).strip().lower()
+                    if (_SWUFN_HEADING_RE.search(_key_peek)
+                            and _fn_match_kind(
+                                str(title),
+                                _resolve_function_info(str(title), _key_peek)) == "empty"):
+                        _dropped_headings.append(str(title)[:200])
+                        _drop_until_level = _block_level(payload_block, 1)
+                        continue
                 if len(heading_stack) >= level:
                     heading_stack = heading_stack[: level - 1]
                 heading_stack.append(str(title))
@@ -3768,7 +3864,7 @@ def generate_uds_docx(
                     else:
                         doc.add_paragraph("N/A")
 
-                if re.search(r"\bswufn_\d+\b", key, flags=re.I):
+                if _SWUFN_HEADING_RE.search(key):
                     target_idx = None
                     for look_ahead in range(idx + 1, len(blocks)):
                         kind_la, payload_la = blocks[look_ahead]
@@ -3989,6 +4085,11 @@ def generate_uds_docx(
             # 실제 갭 — 삭제 표기 heading 은 여기서 제외한다(아래 별도 축).
             "empty_heading_count": len(_empty_headings),
             "empty_heading_sample": _empty_headings[:_STAT_SAMPLE_CAP],
+            # **지운** heading — 비워 둔 것과 다른 사실이다. `keep` 이면 0 이고, `drop` 이면
+            # 그만큼이 위 `empty_heading_count` 에서 이리로 옮겨 온다(합은 보존된다).
+            "dropped_heading_count": len(_dropped_headings),
+            "dropped_heading_sample": _dropped_headings[:_STAT_SAMPLE_CAP],
+            "unmatched_headings_mode": _unmatched_mode,
             # 의도된 빈 heading(템플릿이 "삭제" 로 표기) — 갭 아님. 섞으면 경고가 오탐이 된다.
             "deleted_heading_count": len(_deleted_headings),
             "deleted_heading_sample": _deleted_headings[:_STAT_SAMPLE_CAP],

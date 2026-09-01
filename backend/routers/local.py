@@ -60,7 +60,7 @@ from backend.helpers import (
     build_vectorcast_metadata,
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
-    resolve_registered_uds_template,
+    resolve_registered_uds_template_local,
 )
 from backend.helpers.sds import build_sds_view_model, is_sds_filename, is_srs_filename
 from backend.schemas import (
@@ -1218,7 +1218,16 @@ async def local_uds_generate(
         # 서버 등록본(admin `/api/config/uds-template`) → 정본 SUDS 순.
         # 판정은 `resolve_registered_uds_template()` 단일 출처다 — 예전엔 이게
         # 인라인이었고 등록본을 아예 조회하지 않아 **관리자 지정이 무효**였다.
-        tpl_path = resolve_registered_uds_template()
+        #
+        # ⚠ 원 경로를 그대로 넘기면 안 된다. 생성은 서브프로세스에서
+        #   `docx.Document(path)` 로 **직접** 여니 cloudium worker 가 닿지 않는다 —
+        #   `U:` 등록본이면 재시도 3단계가 전부 `PackageNotFoundError` 로 죽는다.
+        #   가정이 아니라 실측이다: 캐시의 08-10·08-11 실패 기록 마지막 줄이 정확히
+        #   그 모양이고 경로가 `U:/…/01.SwUDS/(XXXX_SwUDS)…docx` 다. jenkins 쪽 UDS
+        #   2곳은 `resolve_template_for` 로 이미 로컬화했고 **이 경로만 남아 있었다**.
+        #   해석 실패는 `None`(= 템플릿 없이 생성)이고, 사유는 resolver 가 로그에 남긴다
+        #   — 원 경로를 흘려보내면 같은 실패가 하류에서 나고 사유가 사라진다.
+        tpl_path = resolve_registered_uds_template_local()
     try:
         # Inject ai_config into payload for subprocess to use in function desc enhancement
         _uds_ai_cfg = _load_sts_ai_config()

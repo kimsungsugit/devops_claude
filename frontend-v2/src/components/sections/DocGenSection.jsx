@@ -47,6 +47,7 @@ const CAP_PARAMS = {
     max_source_files: 'max_source_files',
     max_items_per_category: 'max_items_per_category',
     template_source: 'template_source',
+    unmatched_headings: 'unmatched_headings',
   },
   sts: {
     max_tc_per_req: 'max_tc_per_req',

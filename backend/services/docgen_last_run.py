@@ -85,6 +85,27 @@ def last_retry_stage() -> str:
         return ""
 
 
+def retry_stage_budget(stage: str) -> Optional[int]:
+    """그 단계에 주어진 **예산(초)**. 모르면 `None` — 지어내지 않는다.
+
+    ⚠ 숫자를 여기 복제하지 않는다. 복제한 리터럴이 실제와 **3배** 어긋나 있던 전례가
+      있다: `_generate_docx_with_retry` 의 죽은 폴백이 `full=2400` 이었는데 config 의
+      실제 값은 `7200` 이라, 그 리터럴을 옮겨 적은 기록이 "full 예산 2400초" 라는 틀린
+      사실을 퍼뜨렸다(라운드 12 착수 실측). `last_retry_stage` 와 같은 규약이다.
+    """
+    name = str(stage or "").strip()
+    if not name:
+        return None
+    try:
+        import config
+        for row in getattr(config, "UDS_DOCX_RETRY_STAGES", None) or []:
+            if str(row[0]) == name:
+                return int(row[2])
+    except Exception:  # silent-ok — 예산을 못 읽으면 그 문장만 빠진다(판정 불변)
+        return None
+    return None
+
+
 def find_last_run_checkpoint(cache_root: str, job_url: str) -> Optional[Path]:
     """이 프로젝트의 **가장 최근** UDS 생성 체크포인트.
 
@@ -162,6 +183,16 @@ def summarize_last_run(checkpoint: Path) -> Optional[Dict[str, Any]]:
     if not isinstance(record, dict):
         return None
 
+    # ⚠ 소요는 **이 단계 하나**의 것이다. 체크포인트는 단계마다 덮어써지므로 앞 단계의
+    #   소요는 원래부터 남지 않는다 — 사다리 전체 합으로 읽히면 거짓이 된다.
+    #   옛 기록(라운드 12 이전)엔 `elapsed_seconds` 자체가 없다 → `None`(미측정).
+    _elapsed = record.get("elapsed_seconds")
+    _stage = str(record.get("stage") or "").strip()
+    # `timeout` 레코드의 `timeout_seconds` 가 곧 그 단계의 예산이다. 없으면 config 직독.
+    _budget = record.get("timeout_seconds")
+    if not (isinstance(_budget, (int, float)) and not isinstance(_budget, bool) and _budget > 0):
+        _budget = retry_stage_budget(_stage)
+
     artifact = _artifact_of(checkpoint)
     stats = record.get("gen_stats")
     stats = stats if isinstance(stats, dict) else {}
@@ -173,6 +204,12 @@ def summarize_last_run(checkpoint: Path) -> Optional[Dict[str, Any]]:
         "status": str(record.get("status") or "").strip(),
         "stage": str(record.get("stage") or "").strip(),
         "when": _when(record),
+        "elapsed_seconds": (float(_elapsed)
+                            if isinstance(_elapsed, (int, float)) and not isinstance(_elapsed, bool)
+                            else None),
+        "budget_seconds": (int(_budget)
+                           if isinstance(_budget, (int, float)) and not isinstance(_budget, bool)
+                           and _budget > 0 else None),
         "artifact": artifact.name,
         # 실패한 생성은 파일을 남기지 않는다 — 그 사실이 결말을 뒷받침한다.
         "artifact_exists": artifact.exists(),
@@ -183,6 +220,10 @@ def summarize_last_run(checkpoint: Path) -> Optional[Dict[str, Any]]:
         "payload_functions": payload if isinstance(payload, int) else None,
         "matched_functions": matched if isinstance(matched, int) else None,
         "empty_heading_count": stats.get("empty_heading_count"),
+        # 라운드 12 — **지운** heading. 비워 둔 것과 다른 사실이라 칸을 나눈다:
+        # 직전 실행이 `drop` 이었으면 "남았다" 가 아니라 "지웠다" 가 맞는 말이다.
+        "dropped_heading_count": stats.get("dropped_heading_count"),
+        "unmatched_headings_mode": stats.get("unmatched_headings_mode"),
         "unmatched_payload_count": stats.get("unmatched_payload_count"),
         # 라운드 9·10 이 심은 관측량 — 있으면 싣고 없으면 없는 대로 둔다(옛 기록엔 없다).
         "restored_template_blocks": stats.get("restored_template_blocks"),

@@ -139,6 +139,43 @@ def _template_source_choice() -> Dict[str, Any]:
     }
 
 
+def _unmatched_headings_choice() -> Dict[str, Any]:
+    """UDS 전용 — **정본에만 있는 남의 함수 절**을 남길지 지울지.
+
+    정본을 템플릿으로 쓰면 heading 이 그 문서 전체만큼 온다(실측 KJPDS02 정본 1,035개)
+    반면 이번 분석의 payload 는 부분집합이다(실측 57개). 나머지는 빈
+    `[ Function Information ]` 서식으로 남는다 — 문서 행의 23%.
+
+    어느 쪽이 옳은지는 **판단 축**이라 게이트에 올린다:
+      · 남기면 무엇이 분석되지 않았는지 문서에 드러난다(= 종전 동작).
+      · 지우면 분석한 함수만 담긴 문서가 된다 — 정본을 부분집합으로 쓰는 경우.
+
+    옵션 값의 철자는 `report_gen.docx_builder.UNMATCHED_HEADINGS_*` 단일 출처를 쓴다.
+    """
+    from report_gen.docx_builder import (
+        UNMATCHED_HEADINGS_DROP,
+        UNMATCHED_HEADINGS_KEEP,
+    )
+    return {
+        "param": "unmatched_headings",
+        "row": "unmatched_headings",
+        # `api: ""` = 미설정이 곧 서버 기본(남긴다). 기본값의 정의는
+        # `normalize_unmatched_headings` 가 갖고 여기서 복제하지 않는다.
+        "api": "",
+        "adjustable": True,
+        "options": [
+            {"value": "", "label": "남긴다 (기본)"},
+            {"value": UNMATCHED_HEADINGS_KEEP, "label": "남긴다 — 빠진 함수가 드러납니다"},
+            {"value": UNMATCHED_HEADINGS_DROP, "label": "지운다 — 분석한 함수만 담습니다"},
+        ],
+        "effect": "정본 템플릿의 함수 절 중 **이번 분석에 없는 것**을 어떻게 할지 정합니다. "
+                  "실측(KJPDS02 정본): heading 1,035개 중 978개가 빈 서식으로 남습니다"
+                  "(문서 행의 23%). 지우면 그 절이 통째로 빠져 문서가 얇아지므로, 정본을 "
+                  "**부분집합으로 쓰는 경우**에만 고르세요. `(삭제)` 로 표기된 heading 은 "
+                  "어느 쪽이든 그대로 둡니다 — 템플릿이 의도해서 비운 자리입니다.",
+    }
+
+
 def _suts_catalog_max(fallback: int = 30) -> int:
     """SUTS 전략 후보의 **이론적 최대**. 숫자를 여기 복제하지 않는다.
 
@@ -226,7 +263,10 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
                           "항목은 규격에서 빠집니다",
             },
         },
-        choices={"template_source": _template_source_choice()},
+        choices={
+            "template_source": _template_source_choice(),
+            "unmatched_headings": _unmatched_headings_choice(),
+        },
         handler="POST /api/jenkins/uds/generate-async",
     ),
     "sts": _doc(

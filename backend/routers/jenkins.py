@@ -2392,6 +2392,9 @@ async def jenkins_uds_generate(
     # `None` = 미설정 = 생성기(=config) 기본값. 숫자를 여기 복제하지 않는다.
     max_source_files: Optional[int] = Form(None),
     max_items_per_category: Optional[int] = Form(None),
+    # 정본에만 있는 남의 함수 절을 남길지(`""`/`keep`) 지울지(`drop`).
+    # ⚠ 기본값은 빈 문자열이라 **고르기 전까지 산출물이 바뀌지 않는다**.
+    unmatched_headings: str = Form(""),
     source_root: str = Form(""),
     source_only: bool = Form(False),
     req_files: List[UploadFile] = File(default_factory=list),
@@ -2600,6 +2603,7 @@ async def jenkins_uds_generate(
         "show_mapping_evidence": bool(show_mapping_evidence),
         "srs_texts": srs_texts,
         "sds_texts": sds_texts,
+        "unmatched_headings": unmatched_headings,
     }
     impact_path = _run_impact_analysis_for_uds(
         source_root_path,
@@ -2770,6 +2774,9 @@ async def jenkins_uds_generate_async(
     # `None` = 미설정 = 생성기(=config) 기본값. 숫자를 여기 복제하지 않는다.
     max_source_files: Optional[int] = Form(None),
     max_items_per_category: Optional[int] = Form(None),
+    # 정본에만 있는 남의 함수 절을 남길지(`""`/`keep`) 지울지(`drop`).
+    # ⚠ 기본값은 빈 문자열이라 **고르기 전까지 산출물이 바뀌지 않는다**.
+    unmatched_headings: str = Form(""),
     source_root: str = Form(""),
     source_only: bool = Form(False),
     req_files: List[UploadFile] = File(default_factory=list),
@@ -2937,6 +2944,7 @@ async def jenkins_uds_generate_async(
                 template_path=_uds_tpl or "",
                 max_source_files=max_source_files,
                 max_items_per_category=max_items_per_category,
+                unmatched_headings=unmatched_headings,
                 source_root=source_root,
                 source_only=source_only,
                 req_file_paths=req_file_paths,

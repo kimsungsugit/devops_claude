@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -564,6 +564,30 @@ def _read_doc_material(path: str) -> Dict[str, Any]:
     return {"ok": True, "reason": "", "chars": len(text), "items": items}
 
 
+def _uds_normalize_unmatched(value: Any) -> "tuple[str, str]":
+    """남의 함수 절 처리 정규화 — **정의는 생성기가 갖는다**
+    (`report_gen.docx_builder.normalize_unmatched_headings`).
+
+    ⚠ 폴백도 **같은 방향**(모르는 값은 안 지우는 쪽)이어야 한다. 반대로 떨어지면
+      폴백이 문서를 조용히 얇게 만든다 — `_suts_normalize_scope` 와 같은 규약이다.
+    """
+    try:
+        from report_gen.docx_builder import normalize_unmatched_headings
+        return normalize_unmatched_headings(value)
+    except Exception:  # silent-ok: 공시는 실패해도 화면이 떠야 한다
+        logging.getLogger("devops_api").debug(
+            "unmatched_headings 정규화를 생성기에서 못 읽었다 — 폴백", exc_info=True)
+        raw = str(value or "").strip()
+        return ("drop" if raw.lower() == "drop" else "keep",
+                "" if raw.lower() in ("", "keep", "drop") else raw)
+
+
+# 직전 소요가 그 단계 예산의 이 비율 이상이면 경고로 올린다. **측정된 값끼리의 비**이지
+# 다음 실행에 대한 추정이 아니다 — 소스 파일 수로 다음 소요를 곱해 예측하지 않는다
+# (이 저장소의 `unmeasured` 규약: 모르는 것은 모른다고 적는다).
+_TIGHT_BUDGET_RATIO = 0.8
+
+
 def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
     """직전 생성이 **어떻게 끝났는지** 한 행으로. 기록이 없으면 `None`.
 
@@ -612,7 +636,30 @@ def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
         "status": status or None, "stage": run["stage"] or None,
         "artifact": run["artifact"], "artifact_exists": run["artifact_exists"],
         "empty_headings": run["empty_heading_count"],
+        "dropped_headings": run["dropped_heading_count"],
+        # ⚠ `Measured` 가 그리는 키로 낸다 — 화면이 안 읽는 키에 실으면 기록만 남고
+        #   아무도 못 보는 쓰기 전용 관측량이 된다(이 저장소가 반복해 고친 형태다).
+        "elapsed_seconds": run["elapsed_seconds"],
+        "budget_seconds": run["budget_seconds"],
     }
+
+    def _duration_note() -> Tuple[str, bool]:
+        """`(소요 문장, 예산에 근접한가)`.
+
+        ⚠ 못 잰 것은 **말하지 않는다**. 라운드 12 이전 기록엔 `elapsed_seconds` 가 아예
+          없어서(체크포인트가 단계마다 덮어써지며 시작 시각이 지워졌다) `None` 이다 —
+          0초로 접으면 "즉시 끝났다" 는 거짓이 된다.
+        """
+        el, bud = run["elapsed_seconds"], run["budget_seconds"]
+        if not isinstance(el, (int, float)):
+            return "", False
+        if not isinstance(bud, int) or bud <= 0:
+            return f" 이 단계 소요 {el:.0f}초.", False
+        ratio = el / bud
+        return (f" 이 단계 소요 **{el:.0f}초**(예산 {bud}초의 {ratio * 100:.0f}%).",
+                ratio >= _TIGHT_BUDGET_RATIO)
+
+    _dur, _tight = _duration_note()
     # 반영률은 `Measured` 가 이미 아는 두 키로 낸다 — 화면이 새 키를 배우지 않아도 보인다.
     if run["measurable"]:
         measured["value"] = run["matched_functions"]
@@ -622,6 +669,7 @@ def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
         tail = (f" 내용 없이 남은 heading {run['empty_heading_count']}개."
                 if isinstance(run["empty_heading_count"], int)
                 and run["empty_heading_count"] > 0 else "")
+        tail += _dur
         if not run["measurable"]:
             # ⚠ "잴 수 없다" 에는 **두 가지**가 있고 뜻이 정반대다.
             #   ① payload 가 0 이라고 **기록됐다** → 실을 것이 없었다는 사실(결함).
@@ -648,17 +696,27 @@ def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
                         f"프로젝트 함수와 맞는지 확인하세요 — 위 '템플릿 출처' 행이 "
                         f"이번에 쓸 파일을 이름 댑니다."),
             )
+        # 성공했지만 **예산에 닿아 있었다** — 다음 생성이 조금만 커지면 이 단계는
+        # 시간 초과로 끊기고 payload 를 줄인 다음 단계(예산은 더 짧다)로 내려간다.
+        # 그건 산출물이 조용히 얇아진다는 뜻이라, 성공이어도 미리 말한다.
+        _budget_warn = (" ⚠ 예산의 대부분을 썼습니다 — 소스가 늘거나 템플릿이 커지면 "
+                        "다음 생성은 이 단계에서 끊기고, **payload 를 줄인 다음 단계**"
+                        "(예산은 더 짧습니다)로 내려갑니다." if _tight else "")
         return _step(
-            "last_run", PH_HISTORY, S_OK, "직전 생성", measured=measured,
+            "last_run", PH_HISTORY, S_DEGRADED if _tight else S_OK, "직전 생성",
+            measured=measured,
             reason=(f"{when}성공 — 분석 함수 {run['payload_functions']}개 중 "
-                    f"**{run['matched_functions']}개**가 문서에 실렸습니다.{tail}"),
+                    f"**{run['matched_functions']}개**가 문서에 실렸습니다.{tail}"
+                    f"{_budget_warn}"),
         )
 
     if status in (STATUS_FAILED, STATUS_TIMEOUT, STATUS_EXCEPTION):
         if status == STATUS_TIMEOUT:
+            # 상한은 `_dur` 이 "예산 N초" 로 이미 말한다 — 둘 다 쓰면 같은 수를 두 번
+            # 적는다. 소요를 못 잰 옛 기록에서만 여기서 상한을 든다.
             limit = run["timeout_seconds"]
             head = (f"{when}**시간이 초과**돼 끝났습니다 — {stage}"
-                    f"{f', 상한 {limit}초' if limit else ''}.")
+                    f"{f', 상한 {limit}초' if limit and not _dur else ''}.")
         else:
             head = f"{when}{stage}에서 **실패**했습니다."
         cause = f" 원인: `{run['cause']}`" if run["cause"] else ""
@@ -673,8 +731,8 @@ def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
             exhausted = " 재시도 사다리의 **마지막 단계**까지 전부 실패했습니다."
         return _step(
             "last_run", PH_HISTORY, S_DEGRADED, "직전 생성", measured=measured,
-            reason=(f"{head}{cause}{artifact}{exhausted} 원인이 그대로면 이번에도 같은 "
-                    f"곳에서 멈춥니다 — 생성 자체는 막지 않습니다."),
+            reason=(f"{head}{cause}{artifact}{exhausted}{_dur} 원인이 그대로면 이번에도 "
+                    f"같은 곳에서 멈춥니다 — 생성 자체는 막지 않습니다."),
         )
 
     if status == STATUS_STARTED:
@@ -1614,6 +1672,48 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 보고, 실제 결말별 판정은 전체 생성 없이는 검증할 수 없다(라운드 4가 `apply_scope`
     # 를 추출한 것과 같은 사유).
     _last = _last_run_step(req)
+
+    # ── 5-d. 정본에만 있는 남의 함수 절 — 남길 것인가 ────────────────────────
+    # 판단 축이라 **고르게 한다**. 다만 근거 없이 물으면 사용자는 답할 수 없으므로,
+    # 직전 생성이 실제로 몇 개를 빈 서식으로 남겼는지를 같은 행에서 말한다
+    # (그 수는 이미 읽어 온 기록에 있다 — 다시 조회하지 않는다).
+    if req.doc_type == "uds":
+        _um, _um_bad = _uds_normalize_unmatched(req.caps.get("unmatched_headings"))
+        _um_choice = (spec.get("choices") or {}).get("unmatched_headings") or {}
+        _um_measured = (_last or {}).get("measured") or {}
+        _um_last = _um_measured.get("empty_headings")
+        _um_dropped = _um_measured.get("dropped_headings")
+        if isinstance(_um_dropped, int) and _um_dropped > 0:
+            # ⚠ 직전 실행이 이미 `drop` 이었으면 그 수는 `empty` 가 아니라 여기 있다.
+            #   `empty` 만 보면 "직전엔 0개가 남았다" = "지울 이유가 없다" 로 읽혀,
+            #   방금 지운 사실이 다음 판단에서 사라진다.
+            _um_evidence = f" 직전 생성에서는 **{_um_dropped}개**를 지웠습니다."
+        elif isinstance(_um_last, int):
+            # 0 도 근거다 — "이 템플릿에서는 남는 게 없었다" 는 고를 이유가 없다는 뜻이다.
+            _um_evidence = f" 직전 생성에서는 **{_um_last}개**가 그렇게 남았습니다."
+        else:
+            # 기록이 없으면 수를 지어내지 않는다 — 재고 나서 고르라고 말한다.
+            _um_evidence = " 직전 생성 기록이 없어 몇 개인지는 **아직 재지 못했습니다**."
+        _um_reason = (
+            "이번 분석에 없는 함수 절을 **지웁니다** — 분석한 함수만 담긴 문서가 됩니다. "
+            "정본을 부분집합으로 쓰는 경우가 아니라면 되돌리세요."
+            if _um == "drop" else
+            "정본 템플릿에 있고 이번 분석에 없는 함수 절은 **빈 서식으로 남습니다** — "
+            "무엇이 분석되지 않았는지 문서에 드러납니다(기본)."
+        ) + _um_evidence
+        steps.append(_step(
+            "unmatched_headings", "decision", S_OK if not _um_bad else S_DEGRADED,
+            "남의 함수 절", measured={
+                # ⚠ `of` 를 쓰지 않는다 — `Measured` 가 `value / of` 로 그리므로
+                #   "keep / 978" 이라는 뜻 없는 분수가 된다. 수는 사유 문장에 있다.
+                "value": _um, "stored": _um_bad or None,
+                "choice": "unmatched_headings" if _um_choice else None,
+                "options": _um_choice.get("options") or None,
+                "picked": str(req.caps.get("unmatched_headings") or "")},
+            reason=(f"저장된 값 `{_um_bad}` 을 알 수 없어 기본값으로 되돌렸습니다 — "
+                    f"{_um_reason}" if _um_bad else _um_reason),
+        ))
+
     if _last:
         steps.append(_last)
 

@@ -589,6 +589,26 @@ describe('DocGenPreflightPanel — 선택지', () => {
     expect([...sel.options].map(o => o.value)).toEqual(['', 'standard']);
   });
 
+  // 라운드 12 — 판단 축(정본에만 있는 남의 함수 절)도 같은 기계로 그려져야 한다.
+  // 화면이 id 를 손으로 나열하던 시절이면 이 행은 조용히 안 그려졌을 자리다.
+  it('새 선택지도 같은 기계로 그려진다 — 화면이 id 를 배우지 않아도 된다', () => {
+    renderPanel(base([choiceStep({
+      id: 'unmatched_headings', label: '남의 함수 절', value: 'keep',
+      measured: {
+        choice: 'unmatched_headings',
+        options: [
+          { value: '', label: '남긴다 (기본)' },
+          { value: 'drop', label: '지운다 — 분석한 함수만 담습니다' },
+        ],
+        picked: '',
+      },
+      reason: '빈 서식으로 남습니다. 직전 생성에서는 978개가 그렇게 남았습니다.',
+    })]));
+    const sel = screen.getByLabelText('남의 함수 절');
+    expect([...sel.options].map(o => o.value)).toEqual(['', 'drop']);
+    expect(screen.getByText(/978개가 그렇게 남았습니다/)).toBeInTheDocument();
+  });
+
   it('고르면 저장되고 재조회가 걸린다', () => {
     const onReload = vi.fn();
     renderPanel(base([choiceStep()]), { onReload, scope: 'job-a' });
@@ -671,6 +691,25 @@ describe('직전 생성 결과 (history phase)', () => {
       reason: '성공 — 분석 함수 57개 중 57개가 문서에 실렸습니다.',
     })], 'ready'));
     expect(screen.getByText(/57 \/ 57/)).toBeInTheDocument();
+  });
+
+  it('소요와 예산을 함께 그린다 — 소요만으로는 많은 건지 알 수 없다', () => {
+    renderPanel(base([historyStep({
+      state: 'ok',
+      measured: { value: 57, of: 57, elapsed_seconds: 809.4, budget_seconds: 7200 },
+      reason: '성공 — 분석 함수 57개 중 57개가 문서에 실렸습니다.',
+    })], 'ready'));
+    expect(screen.getByText(/소요 809초 \/ 예산 7200초/)).toBeInTheDocument();
+  });
+
+  it('소요를 못 잰 옛 기록은 아무 말도 하지 않는다 — 0초로 그리면 거짓이다', () => {
+    renderPanel(base([historyStep({
+      state: 'ok',
+      measured: { value: 57, of: 57, elapsed_seconds: null, budget_seconds: 7200 },
+      reason: '성공 — 분석 함수 57개 중 57개가 문서에 실렸습니다.',
+    })], 'ready'));
+    expect(screen.queryByText(/소요/)).toBeNull();
+    expect(screen.queryByText(/예산/)).toBeNull();
   });
 
   it('기록이 없으면 소제목 자체가 안 뜬다 — 빈 절은 "생성한 적 없음"을 흐린다', () => {

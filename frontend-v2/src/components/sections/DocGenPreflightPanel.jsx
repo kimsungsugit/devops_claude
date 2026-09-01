@@ -274,6 +274,13 @@ function Measured({ m }) {
     parts.push(`설명 ${m.filled} (실질 ${m.substantive})`);
   }
   if (m.chars != null) parts.push(`본문 ${m.chars.toLocaleString()}자`);
+  // 직전 생성의 소요와 그 단계 예산. 예산 없이 소요만 있으면 '많은 건지' 알 수 없고,
+  // 소요가 없으면(라운드 12 이전 기록) 아무 말도 하지 않는다 — 0 으로 접으면 거짓이다.
+  if (m.elapsed_seconds != null) {
+    parts.push(m.budget_seconds != null
+      ? `소요 ${Math.round(m.elapsed_seconds)}초 / 예산 ${m.budget_seconds}초`
+      : `소요 ${Math.round(m.elapsed_seconds)}초`);
+  }
   if (m.scanned_files != null) parts.push(`스캔 ${m.scanned_files}파일`);
   if (m.fallback != null) parts.push(`폴백 ${m.fallback}`);
   // SwDS 보강 실적 — 조회는 되는데 산출이 0 인 상태를 드러내려면 세 값이 다 필요하다.
