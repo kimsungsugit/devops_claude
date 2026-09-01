@@ -25,6 +25,7 @@ import pytest
 
 pytest.importorskip("docx", reason="python-docx 없음")
 
+import report_gen.docx_builder as db_module  # noqa: E402
 from report_gen.docx_builder import (  # noqa: E402
     UNMATCHED_HEADINGS_DROP,
     UNMATCHED_HEADINGS_KEEP,
@@ -210,6 +211,56 @@ class TestTheNumberReachesTheSurfaces:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 의도된 빈칸과 갭을 가르는 **어휘** — 실측으로 고정한다
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestTheDeletedMarkerVocabulary:
+    """`drop` 이 생기면서 이 마커는 계측이 아니라 **산출**을 가른다.
+
+    놓치면 템플릿이 의도해서 비운 자리가 문서에서 사라진다. 그래서 어휘를 짐작하지 않고
+    실문서 4종(SwUFn heading **2,505개**)을 전수 조사했다 — 괄호 주석은 147건뿐이고
+    종류는 아래가 전부다(2026-09-01):
+
+        (New) 48 · (NEW) 10 · (new) 1 · (삭제) 10 · (New, 삭제) 1 ·
+        (Interface -> Internal 이동) 4 · (Internal -> Interface 이동) 2
+
+    ⚠ `이동` 은 삭제가 **아니다**. 함수는 다른 절에 살아 있으므로 payload 에 있으면
+      그쪽에서 반영되고, 없으면 다른 미반영 heading 과 같은 처지다. 어휘를 넓히면
+      실측 근거 없이 `drop` 의 예외만 늘어난다.
+    """
+
+    def _marker(self):
+        """생성기가 실제로 쓰는 정규식을 **소스에서 꺼낸다**(패턴을 복제하지 않는다)."""
+        import ast
+        import re as _re
+
+        src = Path(db_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign)
+                    and any(getattr(t, "id", "") == "_deleted_marker" for t in node.targets)):
+                pat = node.value.args[0].value       # re.compile(<여기>, re.I)
+                return _re.compile(pat, _re.I)
+        raise AssertionError("_deleted_marker 를 못 찾았다 — 이름이 바뀌었으면 가드도 따라가야 한다")
+
+    @pytest.mark.parametrize("annotation", ["(삭제)", "(New, 삭제)"])
+    def test_deletion_vocabulary_is_matched(self, annotation: str) -> None:
+        assert self._marker().search(f"SwUFn_001: foo {annotation}")
+
+    @pytest.mark.parametrize("annotation", [
+        "(New)", "(NEW)", "(new)",
+        "(Interface -> Internal 이동)", "(Internal -> Interface 이동)",
+    ])
+    def test_non_deletion_vocabulary_is_not_matched(self, annotation: str) -> None:
+        """이걸 삭제로 세면 **갭이 의도된 빈칸으로 위장**된다(반대 방향 거짓)."""
+        assert not self._marker().search(f"SwUFn_001: foo {annotation}")
+
+    def test_plain_heading_is_not_matched(self) -> None:
+        """주석 없는 heading 이 2,505 중 2,358 이다 — 여기가 어긋나면 전부 면제된다."""
+        assert not self._marker().search("SwUFn_001: s_Init_CPU")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 인자가 **생성기까지 흘러가는가** — 받는 것과 넘기는 것은 다르다
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -347,6 +398,64 @@ class TestTheGateOffersTheChoice:
         # `from X import Y` 는 Y 가 없으면 ImportError — 폴백 가지를 실제로 태운다.
         monkeypatch.delattr(db, "normalize_unmatched_headings")
         assert _uds_normalize_unmatched(raw)[0] == want
+
+    def test_slow_previous_run_points_at_this_lever(self, tmp_path: Path) -> None:
+        """소요와 이 선택은 **같은 원인**을 공유한다 — 그 사실을 그 자리에서 말한다.
+
+        실측(HDPDM01 정본, 빈 heading 402개): keep 278초 · drop 39.1초. 빈 서식을
+        만드는 일이 소요의 86% 였다. 직전이 오래 걸렸는데 이 지렛대를 안 알려주면
+        사용자는 상한만 만지다 만다.
+        """
+        import json as _json
+
+        from backend.services import docgen_last_run as lr
+        from backend.services.jenkins_helpers import _job_slug
+
+        job = "http://192.168.110.40:7000/job/DEMO_PV/"
+        out_dir = tmp_path / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{lr.ARTIFACT_PREFIX}{_job_slug(job)}_20260901_120000.docx"
+                   f"{lr.CHECKPOINT_SUFFIX}").write_text(_json.dumps({
+            "stage": "full", "status": "success", "elapsed_seconds": 278.0,
+            "timeout_seconds": 7200,
+            "gen_stats": {"payload_functions": 8, "matched_functions": 8,
+                          "empty_heading_count": 402, "dropped_heading_count": 0},
+        }, ensure_ascii=False), encoding="utf-8")
+
+        from backend.routers.docgen_preflight import PreflightRequest, _compute_preflight
+
+        res = _compute_preflight(PreflightRequest(
+            doc_type="uds", job_url=job, cache_root=str(tmp_path)))
+        row = [s for s in res["steps"] if s["id"] == "unmatched_headings"][0]
+        assert "402개" in row["reason"]
+        assert "소요의 대부분" in row["reason"], row["reason"]
+
+    def test_without_a_measured_duration_it_does_not_claim_the_lever(
+        self, tmp_path: Path,
+    ) -> None:
+        """소요를 못 잰 옛 기록에 대고 '시간의 대부분' 이라 말하면 지어낸 것이다."""
+        import json as _json
+
+        from backend.services import docgen_last_run as lr
+        from backend.services.jenkins_helpers import _job_slug
+
+        job = "http://192.168.110.40:7000/job/DEMO_PV/"
+        out_dir = tmp_path / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{lr.ARTIFACT_PREFIX}{_job_slug(job)}_20260901_120000.docx"
+                   f"{lr.CHECKPOINT_SUFFIX}").write_text(_json.dumps({
+            "stage": "full", "status": "success",
+            "gen_stats": {"payload_functions": 8, "matched_functions": 8,
+                          "empty_heading_count": 402},
+        }, ensure_ascii=False), encoding="utf-8")
+
+        from backend.routers.docgen_preflight import PreflightRequest, _compute_preflight
+
+        res = _compute_preflight(PreflightRequest(
+            doc_type="uds", job_url=job, cache_root=str(tmp_path)))
+        row = [s for s in res["steps"] if s["id"] == "unmatched_headings"][0]
+        assert "402개" in row["reason"]
+        assert "소요의 대부분" not in row["reason"]
 
     @pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
     def test_other_doc_types_have_no_such_row(self, doc_type: str) -> None:

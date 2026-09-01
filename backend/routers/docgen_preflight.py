@@ -1683,6 +1683,13 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         _um_measured = (_last or {}).get("measured") or {}
         _um_last = _um_measured.get("empty_headings")
         _um_dropped = _um_measured.get("dropped_headings")
+        # 소요와 이 선택은 **같은 원인**을 공유한다 — 빈 서식을 만드는 일이 생성 시간의
+        # 대부분이다(실측 HDPDM01 정본: 빈 heading 402개에서 278초, 지우면 39초).
+        # 직전이 오래 걸렸다면 여기가 지렛대라는 사실을 그 자리에서 말한다.
+        _um_elapsed = _um_measured.get("elapsed_seconds")
+        _um_time = (" 직전 생성 소요의 대부분이 그 서식을 만드는 데 쓰입니다."
+                    if isinstance(_um_elapsed, (int, float))
+                    and isinstance(_um_last, int) and _um_last > 0 else "")
         if isinstance(_um_dropped, int) and _um_dropped > 0:
             # ⚠ 직전 실행이 이미 `drop` 이었으면 그 수는 `empty` 가 아니라 여기 있다.
             #   `empty` 만 보면 "직전엔 0개가 남았다" = "지울 이유가 없다" 로 읽혀,
@@ -1700,7 +1707,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             if _um == "drop" else
             "정본 템플릿에 있고 이번 분석에 없는 함수 절은 **빈 서식으로 남습니다** — "
             "무엇이 분석되지 않았는지 문서에 드러납니다(기본)."
-        ) + _um_evidence
+        ) + _um_evidence + _um_time
         steps.append(_step(
             "unmatched_headings", "decision", S_OK if not _um_bad else S_DEGRADED,
             "남의 함수 절", measured={
