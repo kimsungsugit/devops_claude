@@ -763,8 +763,48 @@ def _parse_accuracy_report(path: Optional[Path]) -> Dict[str, Any]:
     return out
 
 
+def _quality_threshold(thresholds: Any, key: str) -> Optional[float]:
+    """품질 임계값 — **0 은 유효한 값**이다("이 축은 보지 않는다").
+
+    예전엔 호출부마다 `(thresholds or {}).get(key) or <리터럴>` 이었다. `0.0` 이 falsy 라
+    운영자가 축을 끄려고 `UDS_CALLED_MIN=0` 을 넣으면 **가장 엄격한 기본값으로 뒤집혔다**.
+
+    실측(2026-09-02): 12개 임계를 전부 0 으로 두면
+      · `gate_pass` 는 `rate >= thresholds["called_min"]` 로 **직접 비교**하므로 True
+      · 사유 코드는 12건 전부 `*_LOW`
+    → **통과 판정인데 사유는 전부 미달**. 판정과 사유가 정면으로 모순됐다.
+
+    기본값은 `config.UDS_QUALITY_GATE_THRESHOLDS` **단일 출처**에서 온다. 리터럴을
+    호출부에 복제하면 config 가 바뀔 때 조용히 갈리고, 그 숫자가 사실 행세를 한다.
+
+    Returns:
+        `None` 이면 **어디에도 임계가 없다** = 그 축은 판정할 수 없다. 호출부는 사유를
+        만들지 않는다 — 없는 임계를 지어내 미달이라고 말하지 않는다.
+    """
+    src = thresholds if isinstance(thresholds, dict) else {}
+    if key in src:
+        try:
+            return float(src[key])
+        except (TypeError, ValueError):
+            _logger.warning("품질 임계 %s 가 숫자가 아니다(%r) — config 기본값으로", key, src[key])
+    fallback = getattr(config, "UDS_QUALITY_GATE_THRESHOLDS", None) or {}
+    try:
+        return float(fallback[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _derive_quality_reason_codes(quick_gate: Dict[str, Any], template_warning: str = "") -> List[str]:
     codes: List[str] = []
+
+    def _below(value: float, key: str) -> bool:
+        """`gate_pass` 와 **같은 임계·같은 부등호**로 판단한다(`>=` 의 여집합).
+
+        임계가 없으면 사유를 만들지 않는다 — `_quality_threshold` 계약 참조.
+        """
+        limit = _quality_threshold(thresholds, key)
+        return limit is not None and value < limit
+
     rates = quick_gate.get("rates") if isinstance(quick_gate, dict) else {}
     thresholds = quick_gate.get("thresholds") if isinstance(quick_gate, dict) else {}
     total = int((quick_gate.get("counts") or {}).get("total_functions") or 0) if isinstance(quick_gate, dict) else 0
@@ -782,31 +822,31 @@ def _derive_quality_reason_codes(quick_gate: Dict[str, Any], template_warning: s
     desc_trust = float((rates or {}).get("description_trusted_fill") or 0.0)
     asil_trust = float((rates or {}).get("asil_trusted_fill") or 0.0)
     rel_trust = float((rates or {}).get("related_trusted_fill") or 0.0)
-    if called < float((thresholds or {}).get("called_min") or 95.0):
+    if _below(called, "called_min"):
         codes.append("CALLED_LOW")
     if calling <= 0.0:
         codes.append("CALLING_ZERO")
-    elif calling < float((thresholds or {}).get("calling_min") or 95.0):
+    elif _below(calling, "calling_min"):
         codes.append("CALLING_LOW")
-    if inp < float((thresholds or {}).get("input_min") or 90.0):
+    if _below(inp, "input_min"):
         codes.append("INPUT_PARSE_LOW")
-    if outp < float((thresholds or {}).get("output_min") or 90.0):
+    if _below(outp, "output_min"):
         codes.append("OUTPUT_PARSE_LOW")
-    if gbl < float((thresholds or {}).get("global_min") or 40.0):
+    if _below(gbl, "global_min"):
         codes.append("GLOBAL_PARSE_LOW")
-    if stc < float((thresholds or {}).get("static_min") or 20.0):
+    if _below(stc, "static_min"):
         codes.append("STATIC_PARSE_LOW")
-    if desc < float((thresholds or {}).get("description_min") or 90.0):
+    if _below(desc, "description_min"):
         codes.append("DESCRIPTION_LOW")
-    if asil < float((thresholds or {}).get("asil_min") or 50.0):
+    if _below(asil, "asil_min"):
         codes.append("ASIL_LOW")
-    if rel < float((thresholds or {}).get("related_min") or 70.0):
+    if _below(rel, "related_min"):
         codes.append("RELATED_ID_LOW")
-    if desc_trust < float((thresholds or {}).get("description_trusted_min") or 60.0):
+    if _below(desc_trust, "description_trusted_min"):
         codes.append("DESCRIPTION_TRUST_LOW")
-    if asil_trust < float((thresholds or {}).get("asil_trusted_min") or 40.0):
+    if _below(asil_trust, "asil_trusted_min"):
         codes.append("ASIL_TRUST_LOW")
-    if rel_trust < float((thresholds or {}).get("related_trusted_min") or 50.0):
+    if _below(rel_trust, "related_trusted_min"):
         codes.append("RELATED_ID_TRUST_LOW")
     if template_warning:
         codes.append("TEMPLATE_INVALID")
