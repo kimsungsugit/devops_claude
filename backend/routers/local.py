@@ -1873,10 +1873,15 @@ def local_traceability(
         프론트가 ASIL 카드(`ResultPanel.jsx:354`)·밴드 KPI(`SummaryOverviewTab.jsx:157`)·
         파이프라인 건강도(`pipelineHealth.js:18,78`)를 그리는 데 쓰는 키들인데, 이 함수는
         **하나도 만들지 않는다**. 만드는 것은 `jenkins.py::_cache_trace_summary` 뿐이다.
-      · `safety_pct` 는 여기에만 있고 읽는 곳이 없다. 게다가 분모가 `max(safety_total, 1)`
-        이라 **ASIL 요구가 0건이면 0.0%** 가 된다 — "미측정"을 "안전 커버리지 0%"로
-        뒤집는 형태다(저장소가 R15/R17 에서 고친 것과 같은 계열). 배선하기 전에 분모부터
-        고쳐야 한다. 지금은 소비처가 없어 **잠복** 상태다.
+      · `safety_*` 는 여기에만 있었고 읽는 곳이 없었다. **2026-09-02 에 살아 있는 경로로
+        옮겼다** — `jenkins.py::_cache_trace_summary` 가 같은 규칙으로 `safety_total`/
+        `safety_covered`/`safety_pct` 를 캐시에 싣고, 화면 3곳(대시보드 카드·추적성
+        상세탭·개요 KPI)이 `frontend-v2/src/asilCoverage.js` 단일 판정으로 그린다.
+        분모도 함께 고쳤다: `max(safety_total, 1)` 은 **ASIL 요구 0건을 0.0%** 로 만들어
+        "미측정"을 "안전 커버리지 0%"라는 없는 경보로 뒤집었다(R15/R17 과 같은 계열).
+        이제 분모가 0 이면 `None` 이고 화면은 `—` 로 그린다. 아래 이 함수의 값도 같은
+        규칙으로 맞춰 뒀다 — 죽은 경로라도 **틀린 공식을 남기면 다음 사람이 정본으로
+        읽는다**(이 사태가 정확히 그렇게 시작했다).
 
     아래 본문의 "Jenkins 경로와 lockstep" 주석들은 **지금의 계약이 아니라 과거의 의도**다.
     라이브 판정은 `jenkins.py::_cache_trace_summary` 와 `_row_has_sw_tests` 에 있다.
@@ -2225,7 +2230,11 @@ def local_traceability(
             "full_coverage_pct": round((covered + partial) / max(total, 1) * 100, 1),
             "safety_total": safety_total,
             "safety_covered": safety_covered,
-            "safety_pct": round(safety_covered / max(safety_total, 1) * 100, 1),
+            # ⚠ 분모 0 은 `None`(미측정)이다. 예전엔 `max(safety_total, 1)` 이라 ASIL 요구가
+            # 0건이면 **0.0%** 가 나왔다 — "안전 커버리지 0%" 는 심각한 경보인데 사실은
+            # 잴 대상이 없다는 뜻이다. 살아 있는 경로(jenkins.py `_cache_trace_summary`)와
+            # 프론트(`asilCoverage.js`)가 같은 규칙을 쓴다.
+            "safety_pct": round(safety_covered / safety_total * 100, 1) if safety_total > 0 else None,
             # 정화: 실 설계 컴포넌트 distinct 수(함수 fan-out 제외) — Jenkins 경로와 동일 의미.
             # **행 기준**으로 센다(annotate_sds_coarse 반환값). 예전엔 sds_req_to_design_comps
             # 전량을 셌는데, 거기엔 매트릭스 행이 없는 요구(SRS 에 없는 ID)의 컴포넌트까지 들어가

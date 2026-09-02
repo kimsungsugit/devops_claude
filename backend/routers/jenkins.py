@@ -4025,6 +4025,15 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         uncovered += total - (covered + partial + uncovered)
     coverage_pct = round(covered / total * 100, 1) if total > 0 else 0.0
 
+    # 안전 요구(ASIL A~D) 커버리지 — 위 단일 패스가 만든 asil_distribution 에서 파생한다.
+    # 따로 세지 않는 이유: 판정이 둘이 되면 같은 문서가 표면에 따라 다른 값을 낸다.
+    # QM 은 비안전이라, 미상(UNKNOWN)은 **판단 불가**라 분모에서 뺀다 — 근거 부재를 QM 으로
+    # 바꾸면 under-classification 이다. 뺀 사실은 asil_unknown_count 로 화면에 함께 나간다.
+    # 프론트 단일 출처: frontend-v2/src/asilCoverage.js `deriveSafetyCoverage` (같은 규칙).
+    _SAFETY_GRADES = ("D", "C", "B", "A")
+    safety_total = sum(int((asil_distribution.get(_g) or {}).get("total", 0)) for _g in _SAFETY_GRADES)
+    safety_covered = sum(int((asil_distribution.get(_g) or {}).get("covered", 0)) for _g in _SAFETY_GRADES)
+
     # (link_table / asil_cov는 위 단일 패스에서 이미 추출 — has_asil/gap/unknown은 아래 payload에서 재사용)
 
     # ID 정합성 감사(trace_integrity) — 대시보드 quick-load가 충돌/dangling/placeholder를
@@ -4047,6 +4056,12 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "asil_unknown_count": int(asil_cov.get("unknown_count") or 0),
         # ASIL 등급분포(등급→{total,covered}) + 밴드별 연결 요구 수 — 대시보드 카드 상세 요약용.
         "asil_distribution": asil_distribution,
+        # 안전 요구(ASIL A~D) 커버리지. ⚠ 분모가 0 이면 `None` 이다 — **0.0 이 아니다**.
+        # 등급 붙은 요구가 하나도 없는 프로젝트에서 0.0 을 내면 "안전 커버리지 0%" 라는
+        # 없는 경보가 된다(잴 대상이 없다는 뜻인데). 미측정 ≠ 0 ≠ 통과.
+        "safety_total": safety_total,
+        "safety_covered": safety_covered,
+        "safety_pct": round(safety_covered / safety_total * 100, 1) if safety_total > 0 else None,
         "band_counts": band_counts,
         # ID 정합성 감사(trace_integrity) — 충돌/dangling/placeholder 카운트 + clean 플래그.
         "integrity_clean": bool(integ_stats.get("clean", True)),

@@ -10,6 +10,7 @@ import {
 } from '../../sharedInputs.js';
 import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
 import { runVectorcastRagJob } from '../../vcastRagJob.js';
+import { deriveSafetyCoverage, safetyCoverageText } from '../../asilCoverage.js';
 
 // 추적성 매트릭스 입력 문서 11종 — 설계(SRS/SDS/UDS)·인터페이스(HSIS)·SW시험(STS/SUTS/SITS)
 // ·시스템(SyRS상위/SyTS/SyITS)·계획(STP). '입력 문서 현황' 패널과 가림 판정이 **같은 목록**을
@@ -1345,6 +1346,26 @@ function TraceExtraSummary({ coverage, extra, onFilter }) {
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 6, color: 'var(--fg)' }}>
             ASIL 등급별 분포·커버리지 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 등급별 요구사항 수와 검증(충족) 비율</span>
           </div>
+          {/* 안전 요구 커버리지 — 대시보드 카드(ResultPanel)와 **같은 함수**로 판정한다.
+              각자 세면 같은 문서가 표면에 따라 다른 값을 낸다(저장소가 반복해 겪은 형태). */}
+          {(() => {
+            const sc = deriveSafetyCoverage(extra.asilRows);
+            const t = safetyCoverageText(sc);
+            if (!t) return null;
+            const col = t.unmeasured ? 'var(--text-muted)'
+              : sc.pct >= 70 ? COVERAGE_COLORS.covered.fg
+                : sc.pct >= 30 ? COVERAGE_COLORS.partial.fg : COVERAGE_COLORS.uncovered.fg;
+            return (
+              <div style={{ marginBottom: 8, padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--fg)' }}>안전 요구(ASIL A~D) 커버리지</span>{' '}
+                <span style={{ fontSize: 15, fontWeight: 800, color: col }}>{t.value}</span>{' '}
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {t.detail}</span>
+                {t.note && (
+                  <div style={{ fontSize: 11, color: 'var(--color-warning, #b45309)', marginTop: 3 }}>⚠ {t.note}</div>
+                )}
+              </div>
+            );
+          })()}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {extra.asilRows.map(a => {
               const pct = a.total ? Math.round((a.covered / a.total) * 100) : 0;

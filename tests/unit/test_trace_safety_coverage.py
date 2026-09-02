@@ -1,0 +1,222 @@
+"""안전 요구(ASIL A~D) 커버리지 — 분모 0 은 **0% 가 아니라 미측정**이다.
+
+배경: 이 지표는 원래 `/api/local/traceability`(호출자 0인 죽은 경로) 안에만 있었고
+분모가 `max(safety_total, 1)` 이었다. 그대로 화면에 배선했으면 ASIL 등급이 붙은 요구가
+하나도 없는 프로젝트에서 **"안전 요구 커버리지 0%"** 라는 없는 경보가 떴을 것이다.
+사실은 잴 대상이 없다는 뜻이다(저장소 규약: 미측정 ≠ 0 ≠ 통과).
+
+판정 출처는 둘이고 **같은 규칙**이어야 한다:
+  · 백엔드  `backend/routers/jenkins.py::_cache_trace_summary` (대시보드 캐시)
+  · 프론트  `frontend-v2/src/asilCoverage.js::deriveSafetyCoverage` (두 표면 공용)
+프론트 쪽 행동 검증은 `frontend-v2/src/__tests__/asilCoverage.test.js`.
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from backend.routers.jenkins import _cache_trace_summary
+from backend.schemas import UdsTraceabilityMatrixRequest
+from tests.unit._source_probe import source_of
+
+JOB_URL = "http://ci.example/job/SAFETY_TEST"
+
+
+def _row(rid: str, asil: str, *, covered: bool) -> dict:
+    """행 하나. `covered` 면 설계(SDS)와 SW 시험(STS)을 둘 다 채운다."""
+    row: dict = {"requirement_id": rid, "asil": asil}
+    if covered:
+        row["sds_components"] = ["SwCom_01"]
+        row["sts_tests"] = [{"source": "STS", "testcase": f"TC_{rid}"}]
+    return row
+
+
+def _payload(tmp_path: Path, rows: list) -> dict:
+    """`_cache_trace_summary` 를 실제로 태우고 기록된 JSON 을 돌려준다."""
+    from backend.routers.jenkins import _job_slug
+
+    build = tmp_path / "jenkins" / _job_slug(JOB_URL) / "build_1"
+    build.mkdir(parents=True)
+    req = UdsTraceabilityMatrixRequest(job_url=JOB_URL, cache_root=str(tmp_path))
+    _cache_trace_summary({"rows": rows, "summary": {}, "total_requirements": len(rows)}, req)
+    written = build / "report" / "trace_matrix_summary.json"
+    assert written.exists(), "요약이 기록되지 않았다 — 픽스처가 빌드 루트를 못 찾았다"
+    return json.loads(written.read_text(encoding="utf-8"))
+
+
+# ── 분모 0 ────────────────────────────────────────────────────────────────────
+
+def test_no_asil_requirements_is_unmeasured_not_zero(tmp_path):
+    """ASIL A~D 가 0건이면 `safety_pct` 는 **None** — 0.0 이면 없는 경보를 만든다."""
+    data = _payload(tmp_path, [
+        _row("SwR_01", "QM", covered=True),
+        _row("SwR_02", "", covered=False),
+    ])
+    assert data["safety_total"] == 0
+    assert data["safety_covered"] == 0
+    assert data["safety_pct"] is None, "분모 0 을 0.0 으로 접으면 '안전 커버리지 0%' 로 읽힌다"
+
+
+def test_zero_denominator_is_not_confused_with_a_real_zero(tmp_path):
+    """진짜 0%(안전 요구는 있는데 하나도 추적 안 됨)와 **구별**된다."""
+    real_zero = _payload(tmp_path / "a", [_row("SwR_01", "C", covered=False)])
+    assert real_zero["safety_total"] == 1
+    assert real_zero["safety_pct"] == 0.0          # 이건 진짜 0%
+
+    no_target = _payload(tmp_path / "b", [_row("SwR_01", "QM", covered=True)])
+    assert no_target["safety_pct"] is None         # 이건 잴 대상 없음
+    assert real_zero["safety_pct"] != no_target["safety_pct"]
+
+
+# ── 무엇을 세고 무엇을 빼는가 ────────────────────────────────────────────────
+
+def test_only_asil_a_to_d_counts(tmp_path):
+    """QM(비안전)과 미상(판단 불가)은 분모에서 빠진다."""
+    data = _payload(tmp_path, [
+        _row("SwR_01", "D", covered=True),
+        _row("SwR_02", "A", covered=False),
+        _row("SwR_03", "QM", covered=True),      # 비안전 — 제외
+        _row("SwR_04", "", covered=True),        # 미상 — 제외
+        _row("SwR_05", "ASIL D", covered=True),  # 정규화 실패 → 미상 — 제외
+    ])
+    assert data["safety_total"] == 2, "QM·미상이 분모에 섞였다"
+    assert data["safety_covered"] == 1
+    assert data["safety_pct"] == 50.0
+
+
+def test_unknown_is_excluded_but_still_reported(tmp_path):
+    """미상을 분모에서 뺐다는 사실이 화면에 닿을 수 있어야 한다.
+
+    안 그러면 "안전 요구 100%" 가 **"안전 요구는 전부 검증됨"** 으로 읽힌다 —
+    실측 KJPDS02_PV 가 정확히 그 형태다(A 62/62 = 100%, 미상 4건).
+    """
+    data = _payload(tmp_path, [
+        _row("SwR_01", "A", covered=True),
+        _row("SwR_02", "", covered=True),
+        _row("SwR_03", "", covered=False),
+    ])
+    assert data["safety_pct"] == 100.0
+    assert (data["asil_distribution"].get("UNKNOWN") or {}).get("total") == 2, \
+        "미상 건수가 어디에도 안 남으면 100% 가 '전부 검증됨' 으로 오독된다"
+
+
+def test_derived_from_the_same_distribution_not_a_second_count(tmp_path):
+    """판정을 늘리지 않는다 — 같은 payload 의 `asil_distribution` 과 산술적으로 일치."""
+    data = _payload(tmp_path, [
+        _row("SwR_01", "D", covered=True),
+        _row("SwR_02", "C", covered=True),
+        _row("SwR_03", "B", covered=False),
+        _row("SwR_04", "A", covered=True),
+        _row("SwR_05", "QM", covered=True),
+    ])
+    dist = data["asil_distribution"]
+    assert data["safety_total"] == sum(dist[g]["total"] for g in ("D", "C", "B", "A") if g in dist)
+    assert data["safety_covered"] == sum(dist[g]["covered"] for g in ("D", "C", "B", "A") if g in dist)
+
+
+# ── 프론트 ↔ 백엔드 lockstep ─────────────────────────────────────────────────
+
+_JS = Path(__file__).resolve().parents[2] / "frontend-v2" / "src" / "asilCoverage.js"
+
+
+def _js_array(name: str) -> list:
+    m = re.search(rf"export const {name} = \[(.*?)\];", _JS.read_text(encoding="utf-8"), re.S)
+    assert m, f"{name} 을 asilCoverage.js 에서 못 찾았다"
+    return re.findall(r"'([^']+)'", m.group(1))
+
+
+def test_safety_grades_match_between_backend_and_frontend():
+    """두 판정이 **같은 등급 집합**을 쓴다 — 갈리면 같은 문서가 표면마다 다른 값을 낸다."""
+    src = source_of(_cache_trace_summary)
+    m = re.search(r'_SAFETY_GRADES = \((.*?)\)', src, re.S)
+    assert m, "백엔드 _SAFETY_GRADES 를 못 찾았다"
+    backend = re.findall(r'"([^"]+)"', m.group(1))
+    assert backend == _js_array("SAFETY_GRADES"), \
+        f"등급 집합 불일치 — backend={backend} frontend={_js_array('SAFETY_GRADES')}"
+
+
+def test_frontend_knows_both_unknown_spellings():
+    """백엔드는 'UNKNOWN', 상세탭 파생은 '미상' 을 쓴다 — 헬퍼가 **둘 다** 알아야 한다.
+
+    하나만 알면 그 표면에서 미상 건수가 조용히 0 이 되고, 경고 문구가 사라진다.
+    """
+    assert set(_js_array("UNKNOWN_GRADE_KEYS")) == {"UNKNOWN", "미상"}
+
+
+# ── 죽은 경로도 같은 규칙 ────────────────────────────────────────────────────
+
+def test_dead_local_endpoint_uses_the_same_denominator_rule():
+    """`local.py` 의 `safety_pct` 도 `max(..., 1)` 이 아니다.
+
+    호출자가 없더라도 틀린 공식을 남겨 두면 다음 사람이 그걸 정본으로 읽는다 —
+    이 사태가 정확히 그렇게 시작했다.
+    """
+    src = (Path(__file__).resolve().parents[2] / "backend" / "routers" / "local.py").read_text(encoding="utf-8")
+    line = next((L for L in src.splitlines() if '"safety_pct"' in L), None)
+    assert line is not None, "local.py 의 safety_pct 가 사라졌다 — 이 가드를 갱신할 것"
+    assert "max(safety_total, 1)" not in line, "분모 0 을 1 로 바꾸면 미측정이 0% 가 된다"
+    assert "if safety_total > 0 else None" in line
+
+
+@pytest.mark.parametrize("grade", ["D", "C", "B", "A"])
+def test_every_safety_grade_is_counted(tmp_path, grade):
+    """등급 하나가 집합에서 빠지면 그 등급 요구가 통째로 분모에서 사라진다."""
+    data = _payload(tmp_path / grade, [_row("SwR_01", grade, covered=True)])
+    assert data["safety_total"] == 1, f"ASIL {grade} 가 안전 등급으로 안 세어졌다"
+    assert data["safety_pct"] == 100.0
+
+# ── 판정 복제 금지 ────────────────────────────────────────────────────────────
+
+_SURFACES = {
+    "대시보드 카드": "frontend-v2/src/components/ResultPanel.jsx",
+    "추적성 상세탭": "frontend-v2/src/components/sections/SrsSdsSection.jsx",
+    "개요 KPI": "frontend-v2/src/components/sections/SummaryOverviewTab.jsx",
+}
+_REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("label,rel", sorted(_SURFACES.items()))
+def test_every_surface_uses_the_shared_helper(label, rel):
+    """세 표면이 전부 `asilCoverage.js` 를 쓴다 — 각자 계산하면 값이 갈린다.
+
+    렌더 자체는 ResultPanel 만 행동 테스트로 덮인다(`TraceExtraSummary` 는 export 가
+    없어 단독 마운트 불가). 남는 위험은 **그 자리에서 직접 세는 것**이라 여기서 막는다.
+    """
+    src = (_REPO / rel).read_text(encoding="utf-8")
+
+    # ⚠ `"asilCoverage.js" in src` 로는 안 된다 — 그 문자열은 **주석**에도 있어서
+    #   import 를 통째로 지운 뮤턴트가 생존했다(2026-09-02 실측). import 문 자체를 본다.
+    imports = [
+        L for L in src.splitlines()
+        if L.lstrip().startswith("import ") and "asilCoverage.js" in L
+    ]
+    assert imports, f"{label}: asilCoverage.js 를 import 하는 **문장**이 없다"
+    assert any("deriveSafetyCoverage" in L for L in imports), \
+        f"{label}: deriveSafetyCoverage 를 들여오지 않는다 — {imports}"
+
+    # 호출도 실제로 한다(주석이 아니라 코드에서).
+    calls = [
+        L for L in src.splitlines()
+        if "deriveSafetyCoverage(" in L and not L.lstrip().startswith(("//", "*", "/*"))
+    ]
+    assert calls, f"{label}: 공용 파생을 호출하는 코드가 없다(주석만 있다)"
+    # 자체 계산의 흔적 — **안전 등급만** 담은 완결된 배열이 있으면 그 자리에서 세고 있다.
+    # ⚠ 첫 판은 부분문자열 "'D', 'C', 'B', 'A'" 를 봤는데, 그건 등급 칩의 **표시 순서**
+    #   배열(['D','C','B','A','QM','UNKNOWN'])에도 들어 있어 멀쩡한 코드를 결함으로
+    #   신고했다. 가드가 사실이 아니라 철자를 재면 그렇게 된다 — 닫는 괄호까지 본다.
+    for smell in ("['D', 'C', 'B', 'A']", '("D", "C", "B", "A")'):
+        assert smell not in src, f"{label}: 안전 등급 집합을 직접 나열한다 — 판정이 둘이 된다"
+
+
+def test_helper_is_the_only_place_that_names_safety_grades():
+    """안전 등급 집합이 프론트에 **한 곳**만 있어야 한다."""
+    hits = [
+        p.relative_to(_REPO).as_posix()
+        for p in (_REPO / "frontend-v2" / "src").rglob("*.js*")
+        if "SAFETY_GRADES" in p.read_text(encoding="utf-8")
+    ]
+    non_test = [h for h in hits if "__tests__" not in h]
+    assert non_test == ["frontend-v2/src/asilCoverage.js"],         f"안전 등급 집합이 여러 곳에 있다 — {non_test}"

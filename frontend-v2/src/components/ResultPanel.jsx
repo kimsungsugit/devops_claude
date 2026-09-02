@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import StatusBadge from './StatusBadge.jsx';
 import { buildTone, post } from '../api.js';
+import { deriveSafetyCoverage, safetyCoverageText } from '../asilCoverage.js';
 
 /* ── Constants ── */
 const _CHANGE_TYPE_KO = {
@@ -356,6 +357,28 @@ function TraceSummaryCard({ summary, loading, onRefresh }) {
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>
             ASIL 등급별 분포 <span style={{ fontWeight: 400 }}>· 추적 존재율(검증 충분성 아님)</span>
           </div>
+          {/* 안전 요구(ASIL A~D) 커버리지 — 등급 칩보다 **먼저** 온다. ISO 26262 에서 먼저
+              답해야 하는 질문이 "안전 요구는 얼마나 추적됐나" 이기 때문이다.
+              판정은 asilCoverage.js 단일 출처(상세탭·개요탭과 같은 함수). 백엔드
+              safety_pct 가 없는 옛 캐시에서도 asil_distribution 으로 바로 파생된다. */}
+          {(() => {
+            const t = safetyCoverageText(deriveSafetyCoverage(summary.asil_distribution));
+            if (!t) return null;
+            const sc = deriveSafetyCoverage(summary.asil_distribution);
+            const col = t.unmeasured ? 'var(--text-muted)'
+              : sc.pct >= GATE_PASS ? 'var(--color-success)'
+                : sc.pct >= GATE_WARN ? 'var(--color-warning)' : 'var(--color-danger)';
+            return (
+              <div style={{ marginBottom: 8, padding: '6px 9px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-elevated, var(--surface))' }}>
+                <span style={{ fontSize: 11, fontWeight: 700 }}>안전 요구(ASIL A~D) 커버리지</span>{' '}
+                <span style={{ fontSize: 13, fontWeight: 800, color: col }}>{t.value}</span>{' '}
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {t.detail}</span>
+                {t.note && (
+                  <div style={{ fontSize: 10, color: 'var(--color-warning)', marginTop: 2 }}>⚠ {t.note}</div>
+                )}
+              </div>
+            );
+          })()}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {['D', 'C', 'B', 'A', 'QM', 'UNKNOWN'].filter((g) => summary.asil_distribution[g]).map((g) => {
               const c = summary.asil_distribution[g];

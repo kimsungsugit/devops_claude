@@ -2,6 +2,7 @@ import { HorizontalBar, RingGauge } from '../charts.jsx';
 import { CoverageDonut, QualityGateBadge, classifyGate } from '../ResultPanel.jsx';
 import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import { SHOW, PANEL, fmtInt, pctOrNull } from './summaryCommon.js';
+import { deriveSafetyCoverage, safetyCoverageText } from '../../asilCoverage.js';
 
 /**
  * 개요 서브탭 — "이 프로젝트 지금 어떤 상태인가"를 한 화면에서 답한다.
@@ -165,6 +166,16 @@ export default function SummaryOverviewTab({
                 <MiniKpi label="미추적 요구" value={fmtInt(trace.uncovered)} tone={(trace.uncovered || 0) > 0 ? 'var(--color-warning)' : undefined} />
                 <MiniKpi label="ASIL 시험 미달" value={fmtInt(trace.asil_gap_count)} tone={(trace.asil_gap_count || 0) > 0 ? 'var(--color-danger)' : undefined} />
                 <MiniKpi label="ASIL 미상" value={fmtInt(trace.asil_unknown_count)} tone={(trace.asil_unknown_count || 0) > 0 ? 'var(--color-warning)' : undefined} />
+                {/* 안전 요구(ASIL A~D) 커버리지 — 판정은 asilCoverage.js 단일 출처.
+                    ⚠ 분모 0 은 `—` 다(0% 아님). 등급 붙은 요구가 없으면 잴 대상이 없는 것이지
+                    커버리지가 0 인 게 아니다. 미상 건수는 옆 칸(ASIL 미상)에 이미 나온다. */}
+                {(() => {
+                  const t = safetyCoverageText(deriveSafetyCoverage(trace.asil_distribution));
+                  if (!t) return null;
+                  const pct = deriveSafetyCoverage(trace.asil_distribution).pct;
+                  return <MiniKpi label="안전요구 커버리지" value={t.value}
+                    tone={t.unmeasured ? undefined : pct < 100 ? 'var(--color-warning)' : undefined} />;
+                })()}
                 {/* dangling 은 '오참조 의심'(suspect)만 결함 — foreign(계층참조)은 SDS Related ID 의
                     설계ID(SwFn_/SwST_)라 V-model 상 정상이고 상세 패널도 결함에서 뺀다. 구 캐시 폴백. */}
                 <MiniKpi label="ID 정합성" value={fmtInt((trace.integrity_collision_count || 0) + (trace.integrity_dangling_suspect_count ?? trace.integrity_dangling_count ?? 0))} />
