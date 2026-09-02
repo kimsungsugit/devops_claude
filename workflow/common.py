@@ -139,16 +139,58 @@ def read_excerpt(p: Path, max_lines: int = 120) -> str:
       파일 읽는 동안 Ctrl+C 가 안 먹는다. `Exception` 으로 좁히면 그 둘만 통과시키고
       **삼키는 범위는 그대로**다.
 
-    ⚠ `except OSError` 로 더 좁혔더니 `pytest -n auto` 워커가 죽었다(2026-09-02 실측:
-      `ValueError: I/O operation on closed file`). 즉 이 자리는 **OSError 아닌 실패도
-      실제로 난다** — 맨 `except:` 가 그걸 4년째 덮고 있었다는 뜻이다. 그 실패의 정체를
-      규명하기 전에 범위를 좁히면 조용하던 결함이 **크래시로** 바뀐다. 여기서는
-      `KeyboardInterrupt` 만 되찾고, 좁히는 것은 별도로 잰 뒤에 한다.  # silent-ok
+    ⚠ 2026-09-02 정정 — 직전 판은 "이 자리엔 OSError 아닌 실패도 실제로 난다"고 적고
+      범위를 넓혀 뒀다. **틀렸다.** 근거였던 `pytest -n auto` 워커 사망(`ValueError:
+      I/O operation on closed file`)은 이 except 와 무관했다. 계측으로 확인한 실측:
+
+        · 삼킨 예외를 전량 기록하고 전체 스위트를 2회 — 기록된 건 **`FileNotFoundError`
+          단 1건**(= OSError, `test_common.py::test_nonexistent` 의 의도된 것)
+        · `except OSError` 와 **동일 동작**(비-OSError 는 재던지기)으로 전량 실행 —
+          8,476 passed / exit 0, 워커 사망 없음
+
+      즉 그때의 사망은 **스위트가 도는 동안 소스를 편집한 것**이 유력하다(저장소가 이미
+      기록해 둔 거짓 실패 기전). 정체를 모르는 실패를 근거로 범위를 넓히면, 실재하지 않는
+      결함을 지키느라 진짜 예외까지 계속 삼킨다.
+
+    ⚠ 그래서 `OSError` 로 좁히되, 삼킨 것은 `_record_swallowed` 로 **관측 가능**하게 둔다
+      (`ARIA_READ_EXCERPT_TRACE` 미설정이면 부담 0). 침묵을 없앨 수 없다면 최소한
+      보이게는 해 둔다.  # silent-ok
     """
     try:
         return "\n".join(p.read_text(encoding="utf-8", errors="ignore").splitlines()[:max_lines])
-    except Exception:      # noqa: BLE001 — 위 주석 참조(OSError 로 좁히면 워커가 죽는다)
+    except OSError as exc:
+        _record_swallowed(p, exc)
         return ""
+
+
+def _record_swallowed(p: Any, exc: BaseException) -> None:
+    """`read_excerpt` 가 삼킨 예외를 기록한다 — **계측 전용, 동작 불변**.
+
+    `ARIA_READ_EXCERPT_TRACE` 가 설정된 경우에만 그 경로(+`.<pid>`)에 append 한다.
+    미설정이면 아무 일도 하지 않으므로 운영 경로 부담은 0 이다.
+
+    왜 로거가 아니라 파일인가 — 이 자리에서 나는 실패의 유력 후보가
+    `ValueError: I/O operation on closed file` 이다. 그런 상황에서 stdout/logger 로
+    쓰면 **계측기 자신이 같은 실패로 죽어** 아무 기록도 안 남는다.
+
+    ⚠ 계측기는 절대 본 흐름을 깨지 않는다 — 자기 실패는 삼킨다.
+    """
+    dest = os.environ.get("ARIA_READ_EXCERPT_TRACE") or ""
+    if not dest:
+        return
+    try:
+        import traceback
+        with open(f"{dest}.{os.getpid()}", "a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"=== {type(exc).__module__}.{type(exc).__name__}: {exc}\n")
+            fh.write(f"    path={p!r}  type={type(p).__name__}\n")
+            fh.write("-- 호출 스택 --" + chr(10))
+            fh.write("".join(traceback.format_stack(limit=14)))
+            fh.write("-- 예외 traceback --" + chr(10))
+            fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            fh.write("\n")
+    except Exception:
+        pass   # silent-ok — 계측기가 본 흐름을 깨면 안 된다
+
 
 def list_targets(project_root: Path, targets_glob: str) -> List[Path]:
     """

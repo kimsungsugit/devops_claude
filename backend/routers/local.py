@@ -1856,7 +1856,31 @@ def local_traceability(
     sds_path: str = Form(""),
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
-    """Build full traceability matrix: SRS -> Functions -> Test Cases."""
+    """Build full traceability matrix: SRS -> Functions -> Test Cases.
+
+    ⚠ **현재 이 저장소 안에서 호출하는 곳이 없다** (2026-09-02 전수 실측):
+
+      · `frontend-v2/` 에서 `/api/local/traceability` 참조 **0회**. 추적성 화면이 실제로
+        쓰는 것은 파일 모드와 무관하게 `/api/jenkins/uds/traceability-matrix` 와
+        `/api/jenkins/uds/trace-summary` 다(`SrsSdsSection.jsx:570` · `ResultPanel.jsx:71`
+        · `traceMatrix.js:211` · `ProjectSummarySection.jsx:302`).
+      · 템플릿 리터럴로 경로를 조립하는 자리도 없다(동적 호출 0).
+      · `tests/` 참조 **0회**.
+
+    그래서 아래 `_derive`/`safety_*` 는 **화면에 닿지 않는다**. 특히:
+
+      · `asil_distribution` · `asil_gap_count` · `asil_unknown_count` · `band_counts` —
+        프론트가 ASIL 카드(`ResultPanel.jsx:354`)·밴드 KPI(`SummaryOverviewTab.jsx:157`)·
+        파이프라인 건강도(`pipelineHealth.js:18,78`)를 그리는 데 쓰는 키들인데, 이 함수는
+        **하나도 만들지 않는다**. 만드는 것은 `jenkins.py::_cache_trace_summary` 뿐이다.
+      · `safety_pct` 는 여기에만 있고 읽는 곳이 없다. 게다가 분모가 `max(safety_total, 1)`
+        이라 **ASIL 요구가 0건이면 0.0%** 가 된다 — "미측정"을 "안전 커버리지 0%"로
+        뒤집는 형태다(저장소가 R15/R17 에서 고친 것과 같은 계열). 배선하기 전에 분모부터
+        고쳐야 한다. 지금은 소비처가 없어 **잠복** 상태다.
+
+    아래 본문의 "Jenkins 경로와 lockstep" 주석들은 **지금의 계약이 아니라 과거의 의도**다.
+    라이브 판정은 `jenkins.py::_cache_trace_summary` 와 `_row_has_sw_tests` 에 있다.
+    """
     from report_gen.requirements import (
         _extract_sds_partition_map,
         _normalize_req_id,

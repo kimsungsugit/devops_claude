@@ -59,7 +59,11 @@ export default function Dashboard({ onGoDetail }) {
   const [aggLoading, setAggLoading] = useState(false);
   const [filter, setFilter] = useState('');
   const [offlineUrl, setOfflineUrl] = useState('');   // 오프라인 캐시 보기 Job URL 입력
-  const filterInputName = useRef(`job-filter-${Math.random().toString(36).slice(2, 10)}`).current;
+  // ⚠ 자동완성 방지용 — **마운트마다 달라야** 브라우저가 이 필드를 학습하지 못한다.
+  //   useRef(expr) 는 expr 을 매 렌더 재평가하면서 첫 값만 쓰므로 낭비 + 렌더 순수성
+  //   위반이다. useState 지연 초기화는 마운트당 1회만 평가한다. (useId 는 트리 위치
+  //   기준으로 **고정**이라 자동완성 방지 목적에 못 쓴다.)
+  const [filterInputName] = useState(() => `job-filter-${Math.random().toString(36).slice(2, 10)}`);
   const [favorites, setFavorites] = useState(() => {
     try { return JSON.parse(localStorage.getItem('devops_fav_jobs') || '[]'); } catch { return []; }
   });
@@ -491,7 +495,11 @@ export default function Dashboard({ onGoDetail }) {
     }
   }, [cfg, toast, setSelectedJob, setAnalysisResult, onGoDetail]);
 
-  autoRunRef.current = runAnalysis;
+  // 렌더가 아니라 **커밋 후**에 쓴다. React 는 커밋하지 않고 렌더할 수 있어
+  // (StrictMode 이중 렌더·동시성 중단·Suspense) 렌더 중 쓰기는 버려진 렌더의
+  // 함수를 ref 에 남길 수 있다. 읽는 곳은 job 클릭 → setTimeout(100ms) 이라
+  // 커밋 후 대입으로도 항상 최신이다.
+  useEffect(() => { autoRunRef.current = runAnalysis; }, [runAnalysis]);
 
   const stopAnalysis = () => {
     abortRef.current?.abort();

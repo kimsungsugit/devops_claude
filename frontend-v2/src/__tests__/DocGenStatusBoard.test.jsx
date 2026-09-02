@@ -12,8 +12,6 @@
 import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
 import { DOCGEN_CAPS_KEY, saveDocGenCap } from '../sharedInputs.js';
 
 const mockApi = vi.fn();
@@ -65,6 +63,12 @@ function mountBoard(props = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // ⚠ 이 파일의 13곳이 localStorage 에 쓴다(캡 값·doc_paths). 예전엔 clear() 가
+  //   **중첩 describe 안에만** 있어서 그 아래 테스트들끼리 값이 샜다 — 앞 테스트가
+  //   `전부 145` 를 눌러 저장한 캡이 뒤 테스트의 초기 판정을 바꾼다. 그래서 실패가
+  //   **실행마다 다른 테스트로 옮겨 다녔다**(2026-09-02: 같은 파일 안에서 응답 역전 ↔
+  //   gate_pass=null 사이를 오감). 오염은 전역에서 끊는다.
+  localStorage.clear();
   mockApi.mockResolvedValue({ runs: [], total: 0 });
   mockPost.mockResolvedValue({ suggestions: [] });
 });
@@ -734,10 +738,15 @@ describe('DocGenStatusBoard — 응답 역전', () => {
     // 값이 이미 제안값이라 버튼은 사라진다(없는 조치를 만들지 않는 규약) — 두 번째
     // 재조회는 입력칸 blur 로 낸다. 실제 사용자도 그렇게 낸다.
     fireEvent.blur(screen.getByLabelText('max_flows 상한'));
-    await waitFor(() => expect(pending.length).toBe(3));
+    await waitFor(() => expect(pending.length).toBeGreaterThanOrEqual(3));
 
-    // 최신(3번) 이 먼저 도착하고, 옛것(2번)이 뒤늦게 도착한다.
-    pending[2](payload('ok', '145 로 정했습니다 — 전량을 담습니다'));
+    // 최신이 먼저 도착하고, 옛것(2번)이 뒤늦게 도착한다.
+    // 인덱스를 pending[2] 로 못박으면 안 된다: 부하가 높으면 재렌더가 preflight 를 한 번
+    // 더 낼 수 있고, 그러면 3번은 이미 **낡은** 요청이라 컴포넌트가 정당하게 무시한다 —
+    // 테스트는 findByText 타임아웃으로 죽고 원인은 "느리다" 로 오독된다.
+    // 재는 것은 "**최신**이 이기고 옛것이 못 덮는다" 이므로 최신은 항상 마지막 것이다.
+    // (2026-09-02: 이 고정 인덱스 탓에 전체 실행에서만 실패했다. 파일 단독은 45/45 통과.)
+    pending[pending.length - 1](payload('ok', '145 로 정했습니다 — 전량을 담습니다'));
     await screen.findByText(/전량을 담습니다/);
     pending[1](payload('needed', '아직 정하지 않아 기본값 120 로 만듭니다'));
 

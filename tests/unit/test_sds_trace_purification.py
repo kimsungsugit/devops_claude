@@ -163,17 +163,60 @@ def test_coverage_and_asil_invariant_under_purification():
                   "folded_component_ids": ["swcom_14", "door control"]})    # 접기 후(33 상태)
 
     b_row, a_row = before["rows"][0], after["rows"][0]
-    # 설계 연결 여부(has_design 의 SDS 절) 완전 일치
+    b_sum, a_sum = before["summary"], after["summary"]
+
+    # ── 무엇이 달라져도 되는지를 **화이트리스트**로 못박는다 ──────────────────
+    #
+    # ⚠ 2026-09-02: 여기 있던 커버리지 단언은 **한 번도 아무것도 재지 않았다**.
+    #   `for key in ("coverage_pct", "full_coverage_pct", "safety_pct"):`
+    #       assert before["summary"].get(key) == after["summary"].get(key)
+    #   그 세 키는 `generate_uds_traceability_matrix` 의 summary 에 **존재하지 않는다**
+    #   (`coverage_pct` 계열은 `jenkins.py::_cache_trace_summary` 가 따로 파생하고,
+    #    `safety_pct` 는 죽은 `/api/local/traceability` 안에만 있다). `.get()` 이 양쪽
+    #   모두 `None` 을 돌려주니 `None == None` — 주석은 "커버리지 지표 완전 일치"라고
+    #   적혀 있는데 실제로는 **빈 단언 3개**였다.
+    #
+    # 그래서 "고른 몇 개가 같다"가 아니라 **"허용한 것 말고는 전부 같다"** 로 뒤집는다.
+    # 이러면 나중에 summary 에 키가 늘어도 자동으로 덮이고, 없는 키를 비교하는 방식으로
+    # 다시 빈 단언이 되는 길이 막힌다.
+    SUMMARY_MAY_CHANGE = {"total_sds_components"}   # 접기가 줄이는 것은 SDS 밴드 수치뿐
+    ROW_MAY_CHANGE = {"sds_components", "sds_functions"}
+
+    _assert_same_except(b_sum, a_sum, SUMMARY_MAY_CHANGE, "summary")
+    _assert_same_except(b_row, a_row, ROW_MAY_CHANGE, "row")
+
+    # 설계 연결 여부(has_design 의 SDS 절) — 허용 키 안에서도 **판정은** 불변이어야 한다
     assert (bool(b_row["sds_components"]) or bool(b_row["sds_functions"])) is \
            (bool(a_row["sds_components"]) or bool(a_row["sds_functions"]))
-    # 행 ASIL 완전 일치 — 롤업은 sds_list(전체) 기반이라 접기와 무관
-    assert b_row.get("asil") == a_row.get("asil")
-    # 커버리지 지표 완전 일치
-    for key in ("coverage_pct", "full_coverage_pct", "safety_pct"):
-        assert before["summary"].get(key) == after["summary"].get(key), key
-    # 밴드 수치만 내려간다
-    assert after["summary"]["total_sds_components"] < before["summary"]["total_sds_components"]
-    assert after["summary"]["mapped_sds_count"] <= before["summary"]["mapped_sds_count"]
+    # 밴드 수치는 실제로 내려간다(= 픽스처가 접기를 정말 일으켰다)
+    assert a_sum["total_sds_components"] < b_sum["total_sds_components"]
+    assert a_sum["mapped_sds_count"] <= b_sum["mapped_sds_count"]
+
+
+def _assert_same_except(before, after, may_change, label):
+    """`may_change` 를 뺀 **모든** 키가 같은지 본다 — 빈 단언이 될 수 없게.
+
+    세 가지를 함께 강제한다:
+      1. 키 집합이 같다 (한쪽에만 생긴 키를 `.get()` 이 `None` 으로 뭉개지 못하게)
+      2. `may_change` 의 키가 **실제로 존재한다** (오타·삭제된 키를 허용 목록에 남겨
+         두면 그 항목은 아무 일도 안 한다)
+      3. `may_change` 중 **최소 하나는 실제로 달라졌다** (안 달라졌다면 픽스처가
+         변화를 못 만든 것이고, 그러면 이 테스트 전체가 vacuous 다)
+    """
+    assert set(before) == set(after), (
+        f"{label}: 키 집합이 다르다 — "
+        f"before-only={sorted(set(before) - set(after))} "
+        f"after-only={sorted(set(after) - set(before))}"
+    )
+    missing = sorted(k for k in may_change if k not in before)
+    assert not missing, f"{label}: 허용 목록에 없는 키가 있다(오타/삭제?) — {missing}"
+    for key in sorted(set(before) - may_change):
+        assert before[key] == after[key], f"{label}[{key}]: {before[key]!r} -> {after[key]!r}"
+    changed = sorted(k for k in may_change if before[k] != after[k])
+    assert changed, (
+        f"{label}: 허용한 키가 하나도 안 변했다 — 픽스처가 접기를 못 일으켰고, "
+        f"그러면 이 비교는 아무것도 재지 않는다 (may_change={sorted(may_change)})"
+    )
 
 
 # ── 거친 입도 단일 출처 (Jenkins ↔ local lockstep) ──────────────────────────
