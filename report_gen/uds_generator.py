@@ -26,15 +26,15 @@ KEY_MOD_STATICS = "static_vars"     # module-level: static var definitions table
 # Legacy key kept for backward compat when reading old sidecar JSON files
 KEY_FN_GLOBALS_LEGACY = "globals"
 # ---------------------------------------------------------------------------
-import json
-import logging
+import json  # noqa: E402
+import logging  # noqa: E402
 import os  # noqa: E402
-from datetime import datetime
-from html import escape
+from datetime import datetime  # noqa: E402
+from html import escape  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: E402
 
-from report.constants import (
+from report.constants import (  # noqa: E402
     DEFAULT_TYPE_RANGES,
 )
 from report_gen.c_reset import (  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
@@ -43,7 +43,7 @@ from report_gen.c_reset import (  # noqa: E402 (import 블록 전체가 상수 �
     resolve_reset,
 )
 from report_gen.c_return import returns_value  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
-from report_gen.function_analyzer import (
+from report_gen.function_analyzer import (  # noqa: E402
     _collect_var_usage,
     _enhance_description_text,
     _enhance_function_description,
@@ -64,7 +64,7 @@ from report_gen.function_analyzer import (
     _parse_signature_params,
     _split_param,
 )
-from report_gen.requirements import (
+from report_gen.requirements import (  # noqa: E402
     _collect_section_lines,
     _extract_function_blocks,
     _extract_requirements_from_comments,
@@ -75,7 +75,7 @@ from report_gen.requirements import (
     _split_doc_function_blocks,
     component_verify_of,
 )
-from report_gen.source_parser import (
+from report_gen.source_parser import (  # noqa: E402
     _SRC_READ_MAX_BYTES,
     _decl_array_dim,
     _extract_c_definitions,
@@ -98,7 +98,7 @@ from report_gen.source_parser import (
     extract_struct_member_types,
     is_const_type,
 )
-from report_gen.uds_text import (
+from report_gen.uds_text import (  # noqa: E402
     _ai_document_text,
     _ai_evidence_lines,
     _apply_uds_rules,
@@ -107,7 +107,7 @@ from report_gen.uds_text import (
     _uds_lines_to_html,
     _uds_logic_html,
 )
-from report_gen.utils import (
+from report_gen.utils import (  # noqa: E402
     _extract_simple_call_names,
     _infer_type_from_decl,
     _infer_type_from_file,

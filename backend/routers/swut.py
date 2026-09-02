@@ -89,22 +89,22 @@ from backend.services.swut_meta_resolver import (  # noqa: E402
 from backend.services.swut_meta_resolver import (  # noqa: E402
     apply_function_asil_map as _resolver_apply_function_asil_map,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_c_source_root as _resolver_resolve_c_source_root,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_function_asil_map as _resolver_resolve_swuds_function_asil_map,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_path as _resolver_resolve_swuds_path,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
 )
 

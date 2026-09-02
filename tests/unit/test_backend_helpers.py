@@ -9,7 +9,7 @@ _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.helpers.common import (
+from backend.helpers.common import (  # noqa: E402
     _build_excel_artifact_summary,
     _compact_symbol_simple,
     _extract_param_name_simple,

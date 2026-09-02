@@ -28,7 +28,7 @@ repo_root = Path(__file__).resolve().parents[1]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-import os
+import os  # noqa: E402
 
 # 49차 — .env 자동 로드 (JWT_SECRET / BOOTSTRAP_ADMIN_USER 등). uvicorn은 .env 자동 로드
 # 안 함 — 사용자가 매번 env 수동 설정하지 않도록 backend startup 시 1회 로드.
@@ -127,7 +127,7 @@ def _attach_file_log() -> str:
 
 _LOG_FILE_PATH = _attach_file_log()
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager  # noqa: E402
 
 
 @asynccontextmanager

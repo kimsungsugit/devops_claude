@@ -11,7 +11,7 @@ _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.helpers.session import (
+from backend.helpers.session import (  # noqa: E402
     _augment_path,
     _exports_dir,
     _invalidate_session_cache,

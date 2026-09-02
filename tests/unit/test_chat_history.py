@@ -12,11 +12,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import pytest
+import pytest  # noqa: E402
 
 from backend.services.chat_history_db import get_engine, get_session, init_db, reset_engine  # noqa: E402
 from backend.services.chat_history_models import ChatMessage  # noqa: E402
-from backend.services.chat_history_service import (
+from backend.services.chat_history_service import (  # noqa: E402
     _auto_title,
     delete_conversation,
     list_conversations,

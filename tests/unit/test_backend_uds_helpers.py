@@ -13,7 +13,7 @@ _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.helpers.uds import (
+from backend.helpers.uds import (  # noqa: E402
     _build_quality_action_hints,
     _build_quality_evaluation,
     _compute_quick_quality_gate,

@@ -96,12 +96,12 @@ try:
 except Exception:  # pragma: no cover
     requests = None  # type: ignore
 
-import analysis_tools as tools
-import config
-from utils.log import get_logger
+import analysis_tools as tools  # noqa: E402
+import config  # noqa: E402
+from utils.log import get_logger  # noqa: E402
 
-from . import static
-from .common import create_backup, read_excerpt
+from . import static  # noqa: E402
+from .common import create_backup, read_excerpt  # noqa: E402
 
 logger = get_logger(__name__)
 

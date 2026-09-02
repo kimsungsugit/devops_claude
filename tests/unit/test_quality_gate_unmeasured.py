@@ -156,6 +156,26 @@ class TestUnmeasuredIsNeitherPassNorFail:
         assert "잰 적 없음" in joined, joined
         assert "## Unmeasured Gates" in text
 
+    def test_the_list_length_equals_the_reported_count(self, no_proto):
+        """⚠ 절에 붙인 **설명 한 줄**이 항목으로 세어지면 안 된다.
+
+        라운드 15 가 `## Unmeasured Gates` 아래에 들여쓴 주석("흔한 원인: …")을 달았는데
+        `_bullet_list` 가 `strip()` 후 판정해 그 줄을 게이트로 셌다 — 머리글은 `2` 인데
+        목록은 **3개**였다(2026-09-02 실측). 지금은 목록 길이를 쓰는 소비처가 없지만,
+        생기는 순간 그대로 틀린다. 이 저장소가 반복해 겪은 함정이라 등식으로 못박는다.
+        """
+        _, got = no_proto
+        assert len(got["unmeasured_gates"]) == got["unmeasured_count"]
+
+    def test_the_explanatory_note_is_still_in_the_document(self, no_proto):
+        """대조군 — 주석을 **지운 것이 아니라** 항목으로 세지 않을 뿐이다.
+
+        사람이 읽는 사유가 사라지면 이 절을 만든 이유가 없어진다.
+        """
+        text, _ = no_proto
+        assert "흔한 원인" in text
+        assert "전역 변수" in text
+
     def test_the_denominator_counts_only_measured_gates(self, no_proto):
         """못 잰 축을 분모에 남기면 통과율이 근거 없이 낮아진다."""
         _, got = no_proto

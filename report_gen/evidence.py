@@ -131,9 +131,18 @@ def _as_float(text: Optional[str]) -> Optional[float]:
 
 
 def _bullet_list(lines: List[str]) -> List[str]:
-    """`- x` 목록. 생산자가 비었을 때 쓰는 `- none` 은 빈 목록으로 본다."""
+    """`- x` 목록. 생산자가 비었을 때 쓰는 `- none` 은 빈 목록으로 본다.
+
+    ⚠ **들여쓴 하위 불릿은 앞 항목의 설명이지 항목이 아니다.** 예전엔 `strip()` 후에
+      판정해 들여쓰기를 지웠고, `## Unmeasured Gates` 에 붙인 주석 한 줄이 게이트 하나로
+      세어졌다 — 머리글은 `2` 인데 목록은 **3개**(2026-09-02 실측, 라운드 15가 만든 결함).
+      지금은 그 목록 길이를 개수로 쓰는 소비처가 없지만, 생기는 순간 그대로 틀린다.
+      이 저장소가 반복해 겪은 "절단·부속 줄을 개수로 되짚기" 함정이라 여기서 막는다.
+    """
     out = []
     for line in lines:
+        if line[:1].isspace():          # 들여쓴 부속 줄 — 항목이 아니다
+            continue
         s = line.strip()
         if not s.startswith("- "):
             continue

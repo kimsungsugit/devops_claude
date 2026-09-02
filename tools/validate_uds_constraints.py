@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import report_generator as rg
+import report_generator as rg  # noqa: E402
 
 
 def _build_payload(source_root: str) -> Dict[str, object]:

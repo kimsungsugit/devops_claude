@@ -80,7 +80,7 @@ try:
 except Exception:  # pragma: no cover
     psycopg2 = None  # type: ignore
 
-import config
+import config  # noqa: E402
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:

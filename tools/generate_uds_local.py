@@ -19,9 +19,9 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 import report_generator as rg  # noqa: E402
-from workflow import rag as ragmod
-from workflow.ai import load_oai_config
-from workflow.rag import get_kb
+from workflow import rag as ragmod  # noqa: E402
+from workflow.ai import load_oai_config  # noqa: E402
+from workflow.rag import get_kb  # noqa: E402
 
 
 def _load_repo_module(rel_module: str):

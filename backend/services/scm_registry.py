@@ -22,7 +22,7 @@ from backend.schemas import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = REPO_ROOT / "config" / "scm_registry.json"
-import threading as _threading
+import threading as _threading  # noqa: E402
 
 _REGISTRY_LOCK = FileLock(str(REGISTRY_PATH) + ".lock", timeout=10) if FileLock else _threading.Lock()
 
@@ -205,7 +205,7 @@ DEFAULT_SCM_PASSWORD_ENV = "DEVOPS_SCM_PASSWORD"
 #   - Must look like a shell env identifier ([A-Z_][A-Z0-9_]*).
 #   - Reject well-known system variables whose values must not be interpreted
 #     as passwords (a common footgun when copy-pasting configs).
-import re as _re_env
+import re as _re_env  # noqa: E402
 
 _ENV_NAME_PATTERN = _re_env.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
 _ENV_NAME_BLACKLIST = frozenset(

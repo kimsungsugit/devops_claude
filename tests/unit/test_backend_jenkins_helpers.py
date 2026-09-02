@@ -9,7 +9,7 @@ _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.helpers.jenkins import (
+from backend.helpers.jenkins import (  # noqa: E402
     _jenkins_exports_dir,
     _jenkins_logic_dir,
     _jenkins_sts_dir,
