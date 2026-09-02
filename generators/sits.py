@@ -3184,21 +3184,29 @@ def generate_sits_quality_report(
 def validate_sits_xlsm(xlsm_path: str) -> Dict[str, Any]:
     """Validate generated SITS XLSM for structural and data quality."""
     issues: List[str] = []
+    # ⚠ 형제 검증기(`sts.validate_sts_xlsm`)는 경고를 5종 내는데 여기엔 키조차
+    #   없었다. 그런데 API 는 세 문서 종류 모두에 `warnings` 를 실어 내보낸다
+    #   (`backend/helpers/common.py::_build_excel_artifact_payload`). SITS 는
+    #   **항상 "경고 없음"** 으로 읽혔다 — 점검이 하나도 없다는 사실이 빈 배열에 숨었다.
+    warnings: List[str] = []
     stats: Dict[str, Any] = {}
 
     try:
         from openpyxl import load_workbook
     except ImportError:
-        return {"valid": False, "issues": ["openpyxl not installed"], "stats": {}}
+        return {"valid": False, "issues": ["openpyxl not installed"],
+                "warnings": [], "stats": {}}
 
     p = Path(xlsm_path)
     if not p.exists():
-        return {"valid": False, "issues": [f"File not found: {xlsm_path}"], "stats": {}}
+        return {"valid": False, "issues": [f"File not found: {xlsm_path}"],
+                "warnings": [], "stats": {}}
 
     try:
         wb = load_workbook(str(p), read_only=True, data_only=True)
     except Exception as e:
-        return {"valid": False, "issues": [f"Cannot open: {e}"], "stats": {}}
+        return {"valid": False, "issues": [f"Cannot open: {e}"],
+                "warnings": warnings, "stats": {}}
 
     stats["sheets"] = wb.sheetnames
     stats["sheet_count"] = len(wb.sheetnames)
@@ -3245,9 +3253,14 @@ def validate_sits_xlsm(xlsm_path: str) -> Dict[str, Any]:
             issues.append("No test cases (SwITC_*) found")
         if sub_count == 0:
             issues.append("No sub-cases found")
+        elif tc_count and sub_count < tc_count:
+            # 임계를 발명하지 않는다 — "sub-case 가 TC 수보다 적다" 는 산술적 사실만.
+            warnings.append(f"{tc_count - sub_count} ITCs have no sub-case "
+                            f"(sub {sub_count} < tc {tc_count})")
 
     wb.close()
-    return {"valid": len(issues) == 0, "issues": issues, "stats": stats}
+    return {"valid": len(issues) == 0, "issues": issues,
+            "warnings": warnings, "stats": stats}
 
 
 # ---------------------------------------------------------------------------
@@ -3259,10 +3272,16 @@ def generate_sits_validation_report(
     quality_report: Optional[Dict[str, Any]] = None,
     validation: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Write .validation.md file next to XLSM and return its path."""
+    """Write .validation.md file next to XLSM and return its path.
+
+    ⚠ `warnings` 는 `valid` 판정을 바꾸지 않는다 — 리포트에 자리를 만들어야만
+      사람 눈에 닿는다. 예전엔 검증기·리포트 양쪽에 그 자리가 없어, API 가 내보내는
+      `warnings: []` 가 "점검했고 깨끗함" 으로 읽혔다.
+    """
     validation_data = validation if isinstance(validation, dict) else validate_sits_xlsm(xlsm_path)
     stats = validation_data.get("stats", {})
     issues = validation_data.get("issues", [])
+    warnings = validation_data.get("warnings", [])
     qr = quality_report or {}
 
     lines = [
@@ -3310,6 +3329,13 @@ def generate_sits_validation_report(
             lines.append(f"- ❌ {iss}")
     else:
         lines += ["## 3. 이슈", "", "- 이슈 없음"]
+
+    # ⚠ 경고는 `issues` 와 달리 `valid` 판정을 바꾸지 않는다 — 그래서 리포트에
+    #   자리가 없으면 아무 데도 안 남는다. STS 리포트에는 있던 절이다.
+    if warnings:
+        lines += ["", "## 4. 경고", ""]
+        for w in warnings:
+            lines.append(f"- ⚠ {w}")
 
     report_path = Path(xlsm_path).with_suffix(".validation.md")
     report_path.write_text("\n".join(lines), encoding="utf-8")

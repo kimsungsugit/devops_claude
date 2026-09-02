@@ -3383,6 +3383,14 @@ def validate_suts_xlsm(
     """Validate generated SUTS XLSM for structural and data quality.
 
     Returns dict with 'valid' bool, 'issues' list, 'warnings' list, and 'stats' dict.
+
+    ⚠ 이 문장은 오랫동안 **거짓이었다**: `warnings` 는 선언만 돼 있고 한 번도 채워지지
+      않았으며, 4개 반환 경로 중 2곳엔 키 자체가 없었다. 그런데 API 는 세 문서 종류
+      모두에 `warnings` 를 실어 내보내(`backend/helpers/common.py::
+      _build_excel_artifact_payload` 가 `validation` 을 본문째 전달)
+      **항상 "경고 없음"** 으로 읽혔다 — 점검이 하나도 없다는 사실이 빈 배열에 숨었다.
+      `issues` 는 `valid` 를 뒤집지만 `warnings` 는 안 뒤집는다. 그래서 경고는
+      리포트에 자리가 있어야만 사람 눈에 닿는다.
     """
     issues: List[str] = []
     warnings: List[str] = []
@@ -3400,7 +3408,8 @@ def validate_suts_xlsm(
     try:
         wb = load_workbook(str(p), read_only=True, data_only=True)
     except Exception as e:
-        return {"valid": False, "issues": [f"Cannot open: {e}"], "stats": {}}
+        return {"valid": False, "issues": [f"Cannot open: {e}"],
+                "warnings": warnings, "stats": {}}
 
     required_sheets = ["2.SW Unit Test Spec"]
     for s in required_sheets:
@@ -3464,6 +3473,15 @@ def validate_suts_xlsm(
             issues.append("No test sequences found")
         if empty_io_tcs > tc_count * 0.5:
             issues.append(f"Over 50% TCs lack I/O variables ({empty_io_tcs}/{tc_count})")
+        elif empty_io_tcs:
+            # ⚠ 50% **이하**는 예전에 통째로 침묵했다 — TC 절반이 I/O 없이 나가도
+            #   `issues` 가 비어 `valid=True` 이고 리포트는 아무 말도 안 했다.
+            #   임계를 새로 발명하지 않는다: "0 보다 크다" 는 산술적 사실만 적는다.
+            warnings.append(f"{empty_io_tcs}/{tc_count} TCs lack I/O variables")
+        if tc_count and seq_count < tc_count:
+            # 시퀀스가 TC 수보다 적다 = 일부 TC 에 시험 절차가 없다. 역시 사실 그대로.
+            warnings.append(f"{tc_count - seq_count} TCs have no test sequence "
+                            f"(seq {seq_count} < tc {tc_count})")
 
         if expected_tc_range:
             lo, hi = expected_tc_range
@@ -3476,7 +3494,11 @@ def validate_suts_xlsm(
                 issues.append(f"Sequence count {seq_count} outside expected range [{lo}, {hi}]")
 
     wb.close()
-    return {"valid": len(issues) == 0, "issues": issues, "stats": stats}
+    # ⚠ `warnings` 는 **모든** 반환 경로에 있어야 한다. 예전엔 4경로 중 2곳에만
+    #   있었고 docstring 은 항상 준다고 적혀 있었다 — 소비처가 `result["warnings"]`
+    #   로 읽으면 경로에 따라 KeyError 였다.
+    return {"valid": len(issues) == 0, "issues": issues,
+            "warnings": warnings, "stats": stats}
 
 
 @contextmanager
@@ -4201,6 +4223,7 @@ def generate_suts_validation_report(
     validation_data = validation if isinstance(validation, dict) else validate_suts_xlsm(xlsm_path)
     stats = validation_data.get("stats", {})
     issues = validation_data.get("issues", [])
+    warnings = validation_data.get("warnings", [])
     qr = quality_report or {}
 
     tc_count = stats.get("tc_count", 0)
@@ -4284,6 +4307,14 @@ def generate_suts_validation_report(
         lines.extend(["## 4. Issues", ""])
         for i in issues:
             lines.append(f"- {i}")
+        lines.append("")
+
+    # ⚠ 형제 리포트(STS)에는 있는데 여기엔 절 자체가 없었다 — 검증기가 경고를
+    #   만들어도 리포트에 닿을 길이 없었다는 뜻이다(그래서 아무도 안 만들었다).
+    if warnings:
+        lines.extend(["## 5. Warnings", ""])
+        for w in warnings:
+            lines.append(f"- ⚠ {w}")
         lines.append("")
 
     out_path = Path(xlsm_path).with_suffix(".validation.md")

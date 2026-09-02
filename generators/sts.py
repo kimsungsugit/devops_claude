@@ -2859,7 +2859,9 @@ def generate_sts(
 
     validation_report_path = ""
     try:
-        validation_report_path = generate_sts_validation_report(out, quality)
+        # ⚠ 위에서 만든 `validation` 을 **넘긴다**. 안 넘기면 리포트가 재검증하면서
+        #   write-back 대조 결과와 "검증 실행 실패(미검증)" 상태를 통째로 잃는다.
+        validation_report_path = generate_sts_validation_report(out, quality, validation=validation)
         _logger.info("STS validation report: %s", validation_report_path)
     except Exception as _vr:
         _logger.warning("STS validation report generation skipped: %s", _vr)
@@ -3112,12 +3114,24 @@ def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
 def generate_sts_validation_report(
     xlsm_path: str,
     quality_report: Optional[Dict[str, Any]] = None,
+    validation: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate a validation report markdown for STS XLSM.
 
     Writes a .validation.md file next to the XLSM and returns its path.
+
+    ⚠ `validation` 을 **받아야 한다**. 예전엔 인자가 없어 호출부가 만들어 둔 판정을
+      버리고 `validate_sts_xlsm` 을 **처음부터 다시** 돌렸다. 그래서 리포트에서 사라지던 것:
+
+      1. `apply_write_back_check` 결과 — 생성 수 ↔ 파일 기록 수 대조. 불일치면
+         `valid=False` + `issues` 인데, 재검증은 그걸 모르므로 리포트는 **PASS 로 적었다**.
+      2. 검증이 크래시했을 때 호출부가 세운 fail-closed 상태
+         (`valid:False` + "검증 실행 실패(미검증)") — 재검증이 성공하면 통째로 지워졌다.
+
+      형제 두 리포트(`generate_suts_validation_report`·`generate_sits_validation_report`)는
+      이미 이 인자를 받는다. 셋 중 하나만 빠져 있었다.
     """
-    validation = validate_sts_xlsm(xlsm_path)
+    validation = validation if isinstance(validation, dict) else validate_sts_xlsm(xlsm_path)
     stats = validation.get("stats", {})
     issues = validation.get("issues", [])
     warnings = validation.get("warnings", [])
