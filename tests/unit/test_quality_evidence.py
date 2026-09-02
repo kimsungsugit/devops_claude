@@ -212,7 +212,14 @@ class TestDocxValidationParsing:
         assert read_docx_validation(p)["ok"] is None
 
     def test_fields_absent_in_old_reports_are_none_not_zero(self, sidecars):
-        """신판에만 있는 필드는 None(미측정) — 0 으로 접으면 '누락 없음' 이 된다."""
+        """구판 리포트에 없는 필드는 None(미측정) — 0 으로 접으면 '누락 없음' 이 된다.
+
+        ⚠ 이 테스트는 **음성 대조군일 뿐**이다. 손으로 쓴 구판 .md 를 먹이므로,
+          리더가 라벨을 통째로 잘못 알고 있어도 통과한다 — 실제로 2026-09-01 까지
+          세 필드가 **한 번도** 채워진 적이 없었는데 이 테스트는 내내 초록이었다.
+          양성(진짜 라이터가 쓴 파일에서 수치가 복원되는가)은
+          `tests/unit/test_validation_report_roundtrip.py` 가 잰다. 둘은 세트다.
+        """
         from report_gen.evidence import read_docx_validation
 
         got = read_docx_validation(sidecars.with_suffix(".validation.md"))

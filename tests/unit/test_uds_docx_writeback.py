@@ -184,8 +184,15 @@ class TestInputComparison:
         rep = tmp_path / "v.md"
         generate_uds_validation_report(str(doc), str(rep))
         txt = rep.read_text(encoding="utf-8")
-        assert "`120건`" in txt, txt
+        # ⚠ 여기서 재는 것은 **개수**(절단 전 120)이지 서식이 아니다. 예전엔
+        #   `` `120건` `` 리터럴을 단언해서, 단위를 backtick 밖으로 옮기자 의미가
+        #   그대로인데 죽었다. 철자를 재는 가드는 사실이 바뀔 때가 아니라 표기가
+        #   바뀔 때 운다 — 값은 리더가 실제로 뽑아 오는 경로로 확인한다.
+        from report_gen.evidence import read_docx_validation
+
+        assert read_docx_validation(rep)["missing_from_docx"] == 120, txt
         assert "50건" not in txt, "절단된 리스트 길이를 개수로 썼다"
+        assert "`50`" not in txt, "절단된 리스트 길이를 개수로 썼다"
 
     def test_perfect_match_has_no_input_warning(self, tmp_path):
         """대조군 — 다 맞으면 경고가 없어야 한다(경고 남발 방지)."""

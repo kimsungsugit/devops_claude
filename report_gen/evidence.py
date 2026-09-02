@@ -30,6 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import report_gen.validation_labels as VL
 from report_gen.gate_report import parse_gate_report
 
 _logger = logging.getLogger("report_gen.evidence")
@@ -90,7 +91,7 @@ def _kv(lines: List[str]) -> Dict[str, str]:
     for line in lines:
         m = _KV_RE.match(line.strip())
         if m:
-            got[m.group(1).strip()] = m.group(2).strip()
+            got[_norm_label(m.group(1))] = m.group(2).strip()
     return got
 
 
@@ -99,6 +100,27 @@ def _as_int(text: Optional[str]) -> Optional[int]:
         return int(str(text).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _as_count(text: Optional[str]) -> Optional[int]:
+    """건수 값 — **구판 산출물이 backtick 안에 단위를 넣었다**(`` `120건` ``).
+
+    `_as_int` 는 그걸 `None` 으로 떨어뜨린다. 라벨을 고쳐도 값이 안 들어오는 두 번째
+    겹이라 따로 둔다. `_as_int` 를 관대하게 만들지 않는 것은 의도다 — `Tables` 같은
+    필드는 단위가 붙을 일이 없고, 거기까지 느슨해지면 쓰레기를 숫자로 읽는다.
+    """
+    raw = str(text or "").strip()
+    m = re.match(r"^(-?\d+)", raw)
+    return int(m.group(1)) if m else None
+
+
+def _norm_label(key: str) -> str:
+    """라벨 키 정규화 — 사람이 읽는 `⚠` 접두를 떼어 낸다.
+
+    라이터는 눈에 띄라고 `- ⚠ 데이터 없는 …` 로 쓴다. 그 장식을 상수에 넣으면
+    라벨 상수가 표현 형식에 묶이므로, 대조 직전에 여기서 벗긴다.
+    """
+    return str(key or "").lstrip("⚠ \t").strip()
 
 
 def _as_float(text: Optional[str]) -> Optional[float]:
@@ -250,10 +272,24 @@ def read_docx_validation(path: Path) -> Dict[str, Any]:
         "swufn_headings": _as_int(head.get("SwUFn headings")),
         "function_info_tables": _as_int(head.get("FunctionInfo tables")),
         "logic_rows": _as_int(head.get("Logic rows")),
-        # 아래 셋은 신판 산출물에만 있다 — 없으면 None(미측정)이지 0 이 아니다.
-        "expected_functions": _as_int(head.get("Expected functions")),
-        "matched_functions": _as_int(head.get("Matched functions")),
-        "missing_from_docx": _as_int(head.get("Missing from docx")),
+        # ── 입력 대비 대조 ──────────────────────────────────────────────────
+        # ⚠ 라벨은 `validation_labels` 단일 출처다. 예전엔 여기가 영문
+        #   ("Expected functions" 등)을 찾는데 라이터는 한국어를 써서, 세 필드가
+        #   **한 번도** 채워진 적이 없었다(2026-09-01 실측). 예외도 안 나고 값만
+        #   사라지므로 눈으로는 안 보인다 — 왕복 가드
+        #   `tests/unit/test_validation_report_roundtrip.py` 가 이걸 막는다.
+        # ⚠ 없으면 None(미측정)이지 0 이 아니다. 0 은 "누락 없음" 으로 읽힌다.
+        "expected_functions": _as_count(head.get(VL.LABEL_EXPECTED_FUNCTIONS)),
+        "matched_functions": _as_count(head.get(VL.LABEL_MATCHED_FUNCTIONS)),
+        "missing_from_docx": _as_count(head.get(VL.LABEL_MISSING_FROM_DOCX)),
+        # 빈 명세로 나간 heading 수 — "이 문서가 껍데기인가" 의 직접 지표인데
+        # 리더에 대응 키가 아예 없어 화면에 닿은 적이 없다.
+        "headings_without_payload": _as_count(
+            head.get(VL.LABEL_HEADINGS_WITHOUT_PAYLOAD)),
+        # `drop` 으로 문서에서 통째로 뺀 절. 이게 없으면 위 수치가 **남은 것만**
+        # 센다는 사실이 사라져, 얇아진 문서가 완결된 것처럼 보인다.
+        "dropped_headings": _as_count(head.get(VL.LABEL_DROPPED_HEADINGS)),
+        "unmatched_headings_mode": (head.get(VL.LABEL_UNMATCHED_MODE) or None),
         "issues": _bullet_list(sec.get("Issues", [])),
     }
 

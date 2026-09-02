@@ -14,6 +14,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# `.validation.md` 줄 라벨 — 라이터와 리더(`evidence.py`)의 **단일 출처**.
+# 모듈 통째로 들고 다니는 것은 의도다: `from ... import LABEL_X` 로 풀면 이름이 이
+# 파일에 복제돼, 상수를 한 곳에 둔 이유가 없어진다.
+import report_gen.validation_labels as VL
 from report_gen.docx_builder import _iter_template_blocks
 from report_gen.function_analyzer import (
     _classify_description_quality,
@@ -141,6 +145,31 @@ def _payload_function_names(sidecar: Path) -> Tuple[set, str]:
     return {n for n in names if n}, ""
 
 
+def _read_drop_stats(docx_path: Path) -> Tuple[Optional[int], Optional[str]]:
+    """`<out>.gen_stats.json` 에서 `(제거된 heading 수, 처리 모드)`.
+
+    ⚠ 부재/파싱 실패는 **`(None, None)` = 미측정**이다. `(0, "keep")` 로 접으면
+      "제거 없음" 이라는 **거짓 단언**이 되고, 이 함수는 정확히 그 거짓을 막으려고 있다.
+    """
+    try:
+        from report_gen.docx_builder import gen_stats_path
+        p = gen_stats_path(str(docx_path))
+        if not p.exists():
+            return None, None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:   # noqa: BLE001 - 통계 부재는 검증 실패가 아니다
+        _logger.warning("생성 통계 sidecar 를 읽지 못해 제거 heading 은 미측정(%s)", exc)
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    n = data.get("dropped_heading_count")
+    mode = data.get("unmatched_headings_mode")
+    return (
+        n if isinstance(n, int) and not isinstance(n, bool) else None,
+        str(mode) if isinstance(mode, str) and mode.strip() else None,
+    )
+
+
 def _docx_heading_function_names(doc: Any) -> set:
     """DOCX 의 `SwUFn_NNNN: name` 형태 heading 에서 함수명 집합."""
     out: set = set()
@@ -262,6 +291,25 @@ def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
                 result["warnings"].append(
                     f"템플릿 heading {len(_empty)}개에 대응 소스 함수가 없다 — "
                     f"**빈 함수 명세**로 출력된다(예: {', '.join(_empty[:5])})")
+    # ── 제거된 heading ── 위 수치는 전부 **남은 문서**를 센 것이다. `unmatched_headings=drop`
+    # 이면 대응 소스가 없는 절이 문서에서 통째로 빠지므로, "데이터 없는 heading" 이 줄고
+    # 리포트는 거의 완결된 문서처럼 보인다. 실측(5절 템플릿, payload 1함수):
+    #   keep → SwUFn 5 / 빈 heading 4건        drop → SwUFn 2 / 빈 heading 1건, ok=True
+    # 즉 3개가 사라졌다는 사실이 증거 어디에도 없었다. 이 저장소가 반복해 고쳐 온
+    # **절단의 침묵**이고, `.validation.md` 는 증거 번들로 실려 나간다.
+    #
+    # 지운 수와 모드는 라이터가 이미 `<out>.gen_stats.json` 에 남긴다 — 읽기만 하면 된다.
+    # ⚠ 사이드카가 없으면 **모드를 추정하지 않는다**. `keep` 으로 가정하면 "제거 없음"
+    #    이라는 거짓이 되고, 그게 바로 여기서 고치는 결함이다.
+    _drop_n, _drop_mode = _read_drop_stats(path)
+    result["dropped_heading_count"] = _drop_n
+    result["unmatched_headings_mode"] = _drop_mode
+    if isinstance(_drop_n, int) and _drop_n > 0:
+        result["warnings"].append(
+            f"대응 소스 함수가 없는 heading {_drop_n}개는 **문서에서 제거**됐다"
+            f"(남의 함수 절 처리=`{_drop_mode or '미상'}`) — 위 '데이터 없는 템플릿 "
+            f"heading' 수치는 **남은 것만** 센다"
+        )
     if result["function_info_table_count"] != result["swufn_heading_count"]:
         result["issues"].append(
             f"SwUFn headings({result['swufn_heading_count']}) != FunctionInfo tables({result['function_info_table_count']})"
@@ -291,12 +339,17 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
     lines.append(f"- Logic rows with image: `{report.get('logic_with_image_count')}`")
     # ── 입력 대비 대조 ── 위 수치는 전부 문서 **내부** 값이다. 입력이 몇 개였는지 같이
     # 보여야 "429개 섹션" 이 완결의 증거인지 빈 껍데기인지 판단할 수 있다.
+    # ⚠ 라벨은 `validation_labels` 단일 출처다. 여기서 문자열을 직접 쓰면 리더
+    #   (`evidence.py`)와 갈리고, 갈려도 아무도 안 죽고 값만 사라진다 — 영문/한국어가
+    #   어긋나 세 필드가 한 번도 채워진 적 없던 결함이 정확히 그것이었다.
+    # ⚠ 단위(`건`)는 backtick **밖**이다. 안에 넣으면 `int()` 가 실패해 키를 고쳐도
+    #   값이 안 들어온다(구판 산출물이 그랬고, 리더는 둘 다 읽는 관용을 유지한다).
     _exp = report.get("expected_functions", "__absent__")
     if _exp is None:
-        lines.append("- Payload 함수 수: `대조 불가(사이드카 없음/읽기 실패)`")
+        lines.append(f"- {VL.LABEL_EXPECTED_FUNCTIONS}: `{VL.VALUE_UNCOMPARABLE}`")
     elif _exp != "__absent__":
-        lines.append(f"- Payload 함수 수: `{_exp}`")
-        lines.append(f"- 문서에 실린 함수(매칭): `{report.get('matched_functions')}`")
+        lines.append(f"- {VL.LABEL_EXPECTED_FUNCTIONS}: `{_exp}`")
+        lines.append(f"- {VL.LABEL_MATCHED_FUNCTIONS}: `{report.get('matched_functions')}`")
         # ⚠ 개수는 **절단 전** 값(`*_count`)을 쓴다. 아래 리스트는 예시용으로 50개까지만
         # 담기므로 그 길이를 개수로 쓰면 629건이 "50건" 이 된다.
         _miss = report.get("payload_functions_missing_from_docx") or []
@@ -304,9 +357,20 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
         _miss_n = report.get("missing_from_docx_count", len(_miss))
         _empty_n = report.get("headings_without_payload_count", len(_emptyh))
         if _miss_n:
-            lines.append(f"- ⚠ 문서에 없는 소스 함수: `{_miss_n}건` (예: {', '.join(_miss[:5])})")
+            lines.append(f"- ⚠ {VL.LABEL_MISSING_FROM_DOCX}: `{_miss_n}`건 "
+                         f"(예: {', '.join(_miss[:5])})")
         if _empty_n:
-            lines.append(f"- ⚠ 데이터 없는 템플릿 heading: `{_empty_n}건` (예: {', '.join(_emptyh[:5])})")
+            lines.append(f"- ⚠ {VL.LABEL_HEADINGS_WITHOUT_PAYLOAD}: `{_empty_n}`건 "
+                         f"(예: {', '.join(_emptyh[:5])})")
+    # ── 제거된 heading ── 위 "데이터 없는 heading" 은 **남은 것만** 센다. 제거 수가
+    # 여기 없으면 `drop` 산출물이 거의 완결된 문서로 보인다(실측 4건 → 1건).
+    # 미측정(`None`)이면 줄을 쓰지 않는다 — 0 으로 적으면 "제거 없음" 이라는 거짓이 된다.
+    _drop_n = report.get("dropped_heading_count")
+    _drop_mode = report.get("unmatched_headings_mode")
+    if isinstance(_drop_n, int):
+        lines.append(f"- ⚠ {VL.LABEL_DROPPED_HEADINGS}: `{_drop_n}`건")
+    if _drop_mode:
+        lines.append(f"- {VL.LABEL_UNMATCHED_MODE}: `{_drop_mode}`")
     lines.append("")
     issues = report.get("issues") or []
     lines.append("## Issues")

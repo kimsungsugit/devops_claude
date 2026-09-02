@@ -1413,6 +1413,16 @@ function EvidenceDetail({ run, detail }) {
                 DOCX 구조 검증 {val.ok === true ? 'OK' : val.ok === false ? '문제 있음' : '판정 불가'}
                 {val.issues?.length > 0 && ` · 지적 ${val.issues.length}건`}
                 {val.missing_from_docx != null && ` · 문서에 빠진 함수 ${val.missing_from_docx}개`}
+                {/* 빈 명세로 나간 heading — "이 문서가 껍데기인가" 의 직접 지표.
+                    리더에 대응 키가 없어 여태 화면에 닿은 적이 없었다. */}
+                {val.headings_without_payload != null
+                  && ` · 빈 명세 heading ${val.headings_without_payload}개`}
+                {/* `drop` 으로 통째로 뺀 절. 이걸 안 그리면 위 수치가 **남은 것만**
+                    센다는 사실이 사라져, 얇아진 문서가 완결된 것처럼 보인다. */}
+                {val.dropped_headings != null && val.dropped_headings > 0 && (
+                  <> · <strong>제거된 heading {val.dropped_headings}개</strong>
+                    {' — 위 수치는 남은 것만 센다'}</>
+                )}
               </li>
             ) : (
               <li style={{ color: 'var(--text-muted)' }}>구조 검증 근거 없음 — {val?.reason || '사유 미상'}</li>

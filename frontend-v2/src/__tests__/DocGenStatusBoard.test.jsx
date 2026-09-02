@@ -224,6 +224,61 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     expect(screen.getByText(/문서에 빠진 함수 9개/)).toBeInTheDocument();
   });
 
+  // ⚠ 아래 두 건은 라운드 14 에서 생겼다. `drop` 은 대응 소스가 없는 절을 문서에서
+  //    빼므로 "빈 명세 heading" 수가 **줄어든다** — 그 사실이 화면에 없으면 얇아진
+  //    문서가 완결된 것처럼 보인다(실측: 빈 heading 4건 → 1건, OK 는 양쪽 다 True).
+  it('제거된 절이 있으면 개수와 "남은 것만 센다" 를 함께 보인다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: { present: false, reason: '없음' },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: {
+            present: true, ok: true, issues: [],
+            headings_without_payload: 1, dropped_headings: 402,
+            unmatched_headings_mode: 'drop',
+          },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/제거된 heading 402개/)).toBeInTheDocument());
+    expect(screen.getByText(/빈 명세 heading 1개/)).toBeInTheDocument();
+    expect(screen.getByText(/남은 것만 센다/)).toBeInTheDocument();
+  });
+
+  it('제거가 0건이면 제거 문구를 만들지 않는다 (음성 대조군)', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: { present: false, reason: '없음' },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: {
+            present: true, ok: true, issues: [],
+            headings_without_payload: 4, dropped_headings: 0,
+            unmatched_headings_mode: 'keep',
+          },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/빈 명세 heading 4개/)).toBeInTheDocument());
+    expect(screen.queryByText(/제거된 heading/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/남은 것만 센다/)).not.toBeInTheDocument();
+  });
+
   it('근거 조회가 실패해도 조용히 비우지 않고 알린다', async () => {
     mockApi.mockImplementation((path) => {
       if (String(path).includes('/evidence')) return Promise.reject(new Error('503 unavailable'));
