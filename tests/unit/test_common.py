@@ -107,6 +107,18 @@ class TestReadExcerpt:
         with pytest.raises(ValueError):
             read_excerpt(Boom())
 
+    def test_malformed_path_is_not_disguised_as_empty(self):
+        """NUL 경로는 `read_text` 가 `ValueError` 를 낸다 — **잡지 않는다**(실 Path 로 실증).
+
+        이건 읽기 실패가 아니라 **경로가 망가진 것**이다. `""` 로 바꾸면 소비처 5곳이
+        AI 에게 "코드가 비어 있다"는 **틀린 사실**을 전달한다. 안 나는 경우를 위해
+        catch 를 넓히는 건 R19 에서 틀렸다고 확인한 그 행동이라, 여기서는 넓히지 않는다.
+        """
+        import pathlib
+
+        with pytest.raises(ValueError):
+            read_excerpt(pathlib.Path("bad\x00name.c"))
+
     def test_records_what_it_swallowed(self, tmp_path, monkeypatch):
         """삼킨 것은 **관측 가능**해야 한다 — 침묵을 없앨 수 없으면 보이게라도 둔다."""
         dest = tmp_path / "trace.log"

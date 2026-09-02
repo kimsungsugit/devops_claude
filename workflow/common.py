@@ -155,6 +155,14 @@ def read_excerpt(p: Path, max_lines: int = 120) -> str:
     ⚠ 그래서 `OSError` 로 좁히되, 삼킨 것은 `_record_swallowed` 로 **관측 가능**하게 둔다
       (`ARIA_READ_EXCERPT_TRACE` 미설정이면 부담 0). 침묵을 없앨 수 없다면 최소한
       보이게는 해 둔다.  # silent-ok
+
+    ⚠ `OSError` 가 아닌데 `read_text` 가 낼 수 있는 것이 하나 있다 — 경로에 NUL 이
+      들어가면 `ValueError: embedded null character` 다(실측). **일부러 안 잡는다.**
+      호출부 5곳은 정적분석기 출력(`_dedup_static_issues`)과 프로젝트 glob 에서 경로를
+      만들어 실제로는 안 나오고(전체 스위트 2회 관측 0), 무엇보다 그건 **읽기 실패가
+      아니라 경로가 망가진 것**이다. `""` 로 바꾸면 AI 에게 "코드가 비어 있다"는
+      **틀린 사실**로 전달된다. 안 나는 경우를 위해 범위를 넓히는 건 바로 위에서
+      틀렸다고 확인한 그 행동이다.
     """
     try:
         return "\n".join(p.read_text(encoding="utf-8", errors="ignore").splitlines()[:max_lines])
