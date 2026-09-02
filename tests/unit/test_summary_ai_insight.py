@@ -483,11 +483,17 @@ def _td_fixture():
     }
 
 
-def test_prompt_version_and_sections_v5():
+def test_prompt_version_and_sections():
+    """⚠ 이름에 버전을 박지 않는다 — 올릴 때마다 이름이 낡아 거짓말이 된다.
+
+    v5 bump: N5 아키텍처 payload 확장.
+    v6 bump: role_guidance 프롬프트에 안전 커버리지 읽는 법 추가 + trace 입력에 safety 블록.
+             둘 다 **LLM 이 받는 것**이 바뀐 것이라 전 AI 캐시가 자연 미스여야 한다
+             (probe 가 생성 버튼을 노출). 버전을 안 올리면 옛 결과가 새 안내로 만든 것인 척 산다.
+    """
     from workflow.summary_ai_insight import SECTIONS
 
-    # v5 bump(N5 아키텍처 payload 확장) — 전 AI 캐시 자연 미스(probe가 생성 버튼 노출)
-    assert PROMPT_VERSION == 5
+    assert PROMPT_VERSION == 6
     assert SECTIONS == ("rules", "mistakes", "roles", "architecture", "testing")
 
 
@@ -574,3 +580,252 @@ def test_architecture_payload_cycles_and_module_symbol_vocab():
     assert sec["items"][1]["functions"] == ["APP"]      # 모듈명이 어휘를 통과
     # 결정론 블록에도 cycles 병합
     assert res["deterministic"]["architecture"]["cycles"]["file_sccs"][0]["size"] == 2
+
+
+# ── 안전 요구(ASIL A~D) 커버리지가 AI 입력까지 닿는가 ────────────────────────
+#
+# R24 가 화면 3곳에 배선했고 AI 입력만 남아 있었다. 필드만 넣고 안내를 안 넣으면
+# LLM 이 `pct: null` 을 "커버리지 0%" 로 읽는다 — 화면에서 막은 오독 그대로다.
+# 실측 shape 는 KJPDS02_PV(A 62/62 = 100%, QM 2, 미상 4).
+
+_KJPDS02_DIST = {"A": {"total": 62, "covered": 62},
+                 "QM": {"total": 2, "covered": 2},
+                 "UNKNOWN": {"total": 4, "covered": 4}}
+
+
+def _trace(dist, **over):
+    t = {"has_data": True, "total_requirements": 68, "covered": 68, "uncovered": 0,
+         "asil_gap_count": 0, "asil_unknown_count": 0}
+    if dist is not None:
+        t["asil_distribution"] = dist
+    t.update(over)
+    return t
+
+
+def test_curate_carries_safety_coverage():
+    """실측 shape: 안전 62/62 = 100% 인데 **미상 4건이 분모 밖**이라는 사실이 같이 간다."""
+    from workflow.summary_ai_insight import TRACE_SAFETY_NOTE, curate_trace_summary
+
+    s = curate_trace_summary(_trace(_KJPDS02_DIST))["safety"]
+    assert (s["total"], s["covered"], s["pct"]) == (62, 62, 100.0)
+    assert s["unknown"] == 4, "미상 건수가 빠지면 100% 가 '안전 요구 전부 검증됨' 으로 읽힌다"
+    assert s["note"] == TRACE_SAFETY_NOTE
+
+
+def test_zero_denominator_reaches_the_llm_as_null_not_zero():
+    """등급 붙은 요구가 0건이면 `pct` 는 **null** — LLM 에 직렬화된 문자열까지 확인한다.
+
+    dict 에서만 None 이고 어딘가에서 0 으로 접히면 프롬프트 안내가 무의미해진다.
+    """
+    from workflow.summary_ai_insight import curate_trace_summary
+
+    s = curate_trace_summary(_trace({"QM": {"total": 5, "covered": 5}}))["safety"]
+    assert s["total"] == 0 and s["pct"] is None
+    blob = json.dumps({"trace": curate_trace_summary(_trace({"QM": {"total": 5, "covered": 5}}))},
+                      ensure_ascii=False, default=str)
+    assert '"pct": null' in blob, "직렬화에서 0 으로 접히면 '커버리지 0%' 로 읽힌다"
+    assert '"pct": 0' not in blob
+
+
+def test_old_cache_without_distribution_says_nothing_rather_than_zero():
+    """등급 분포가 없는 옛 캐시(실측: 저장소 캐시 6건 중 2건)는 **침묵**한다.
+
+    0 으로 접으면 "안전 요구 0건" 이라는 없는 사실이 생긴다.
+    """
+    from workflow.summary_ai_insight import curate_trace_summary, derive_safety_coverage
+
+    assert derive_safety_coverage(_trace(None)) is None
+    assert derive_safety_coverage(_trace({})) is None
+    assert "safety" not in curate_trace_summary(_trace(None))
+
+
+def test_unknown_axis_is_the_distribution_not_asil_unknown_count():
+    """`safety.unknown` 은 **등급분포** 축이다 — `asil_unknown_count`(링크테이블 축)가 아니다.
+
+    후자는 등급 데이터가 전무하면 0 으로 강제된다(report_gen/trace_link_table.py) — 즉
+    "등급이 하나도 없다" 는 최악의 경우에 침묵한다. 그걸 '분모에서 뺀 건수'로 쓰면
+    분모 밖 건수가 0 으로 보고돼 100% 가 '전부 검증됨' 이 된다.
+    """
+    from workflow.summary_ai_insight import derive_safety_coverage
+
+    s = derive_safety_coverage(_trace(
+        {"A": {"total": 1, "covered": 1}, "UNKNOWN": {"total": 3, "covered": 0}},
+        asil_unknown_count=0,          # 링크테이블 축은 0 이라고 말한다
+    ))
+    assert s["unknown"] == 3, "링크테이블 축(0)을 따라가면 미상 3건이 침묵한다"
+
+
+def test_both_unknown_spellings_are_counted():
+    """백엔드는 'UNKNOWN', 상세탭 파생은 '미상' — 하나만 알면 그 표면에서 경고가 사라진다."""
+    from workflow.summary_ai_insight import derive_safety_coverage
+
+    s = derive_safety_coverage(_trace({"A": {"total": 1, "covered": 1},
+                                       "미상": {"total": 2, "covered": 0}}))
+    assert s["unknown"] == 2
+
+
+def test_qm_never_enters_the_denominator():
+    """QM 은 비안전이다 — 분모에 섞이면 안전 커버리지가 희석된다."""
+    from workflow.summary_ai_insight import derive_safety_coverage
+
+    s = derive_safety_coverage(_trace({"C": {"total": 2, "covered": 1},
+                                       "QM": {"total": 98, "covered": 98}}))
+    assert (s["total"], s["covered"], s["pct"]) == (2, 1, 50.0)
+
+
+def test_safety_shortfall_is_a_gap_and_leads_the_list():
+    """안전 요구 미확보는 gap 이고 **맨 앞**이다(프롬프트 심각도: 안전 > 회귀 > 부채)."""
+    from workflow.summary_ai_insight import build_deterministic_insight, curate_trace_summary
+
+    ts = curate_trace_summary(_trace({"D": {"total": 10, "covered": 6}}, uncovered=7))
+    gaps = build_deterministic_insight(_inp(trace_summary=ts, vcast_failures=[], signals=[]))["gaps"]
+    assert gaps[0] == {"kind": "safety_uncovered", "count": 4, "safety_total": 10}
+    assert [g["kind"] for g in gaps].count("safety_uncovered") == 1
+
+
+def test_full_safety_coverage_is_not_a_gap():
+    """62/62 는 gap 이 아니다 — 없는 조치 항목을 만들지 않는다."""
+    from workflow.summary_ai_insight import build_deterministic_insight, curate_trace_summary
+
+    ts = curate_trace_summary(_trace(_KJPDS02_DIST))
+    gaps = build_deterministic_insight(_inp(trace_summary=ts, vcast_failures=[], signals=[]))["gaps"]
+    assert not any(g["kind"] == "safety_uncovered" for g in gaps)
+
+
+def test_zero_denominator_is_not_a_gap():
+    """잴 대상이 없는 것과 미달은 다르다 — QM 전용 프로젝트에 없는 결함을 만들지 않는다."""
+    from workflow.summary_ai_insight import build_deterministic_insight, curate_trace_summary
+
+    ts = curate_trace_summary(_trace({"QM": {"total": 5, "covered": 0}}))
+    gaps = build_deterministic_insight(_inp(trace_summary=ts, vcast_failures=[], signals=[]))["gaps"]
+    assert not any(g["kind"] == "safety_uncovered" for g in gaps)
+
+
+def test_raw_cache_path_gets_the_gap_too():
+    """큐레이션을 안 거친 raw 캐시로 들어와도 같은 gap 이 난다 — 호출 경로가 둘이다."""
+    from workflow.summary_ai_insight import build_deterministic_insight
+
+    gaps = build_deterministic_insight(
+        _inp(trace_summary=_trace({"B": {"total": 4, "covered": 1}}), vcast_failures=[], signals=[]))["gaps"]
+    assert {"kind": "safety_uncovered", "count": 3, "safety_total": 4} in gaps
+
+
+def test_deterministic_tester_guidance_cites_the_safety_numbers():
+    """LLM 없이도 근거에 실수치가 인용된다(프롬프트 규칙: 수치 없는 일반론 금지)."""
+    from workflow.summary_ai_insight import curate_trace_summary, generate_summary_insight
+
+    res = generate_summary_insight(
+        _inp(trace_summary=curate_trace_summary(_trace({"D": {"total": 10, "covered": 6}})),
+             vcast_failures=[], delta=None, signals=[]),
+        use_llm=False,
+    )
+    tester = res["sections"]["roles"]["tester"]
+    hit = next((t for t in tester if "안전 요구" in t["action"]), None)
+    assert hit is not None, "안전 미확보 4건이 권고에 안 나온다"
+    assert "10건" in hit["basis"] and "4건" in hit["basis"]
+
+
+def test_prompt_tells_the_llm_how_to_read_safety():
+    """필드만 주고 읽는 법을 안 주면 `pct: null` 이 '커버리지 0%' 가 된다.
+
+    프롬프트는 LLM 에 실제로 실려 나가는 텍스트다 — 세 가지 오독을 전부 명시해야 한다.
+    """
+    from prompts import load_prompt
+
+    p = load_prompt("summary_role_guidance")
+    assert "safety" in p
+    assert "잴 대상이 없음" in p, "(a) null 을 0% 로 읽지 말라는 안내가 없다"
+    assert "감사 finding" in p, "(b) 미상 분모 밖 + 등급 미할당이 finding 이라는 안내가 없다"
+    assert "두 번 세지" in p, "(c) uncovered 와 이중계상 금지 안내가 없다"
+
+
+def test_safety_block_actually_reaches_the_llm_payload():
+    """`enrich_role_guidance` 가 실제로 직렬화해 보내는 payload 에 safety 가 들어 있는가."""
+    from workflow.summary_ai_insight import (
+        build_deterministic_insight,
+        curate_trace_summary,
+        enrich_role_guidance,
+    )
+
+    seen = {}
+
+    def _fake(cfg, messages, role=None, stage=None):
+        seen["user"] = messages[-1]["content"]
+        seen["system"] = messages[0]["content"]
+        return json.dumps({"developer": [{"priority": 1, "action": "a", "basis": "b"}],
+                           "tester": [{"priority": 1, "action": "a", "basis": "b"}]})
+
+    inp = _inp(trace_summary=curate_trace_summary(_trace({"D": {"total": 10, "covered": 6}})),
+               vcast_failures=[], signals=[])
+    enrich_role_guidance({"model": "x"}, inp, build_deterministic_insight(inp), agent_call=_fake)
+    assert '"safety"' in seen["user"], "안전 블록이 LLM 에 안 간다"
+    assert '"pct": 60.0' in seen["user"]
+    assert "잴 대상이 없음" in seen["system"], "읽는 법(system 프롬프트)이 같이 안 간다"
+
+
+# ── 프롬프트 변경 ↔ 캐시 무효화 lockstep ─────────────────────────────────────
+#
+# `compute_cache_key` 지문에 PROMPT_VERSION 이 들어 있다("모델/프롬프트/입력이 바뀌면
+# 키가 바뀐다"). 그런데 버전은 **손으로 올리는 상수**라, 프롬프트 파일만 고치고 잊으면
+# 옛 캐시가 새 안내로 만든 결과인 척 그대로 돌아온다 — 화면엔 아무 표시도 없다.
+#
+# 프롬프트를 의도적으로 고쳤다면: PROMPT_VERSION 을 올리고 아래 digest 를 함께 갱신할 것.
+# (실패 메시지가 새 digest 를 알려준다.)
+
+_PROMPT_FILES = [
+    "summary_rule_insight",
+    "summary_mistake_patterns",
+    "summary_architecture",
+    "summary_testing",
+    "summary_role_guidance",
+]
+_PROMPT_DIGEST_AT_VERSION = (6, "899e72d36c83f253")
+
+
+def _prompts_digest() -> str:
+    import hashlib
+
+    from prompts import load_prompt
+
+    h = hashlib.sha256()
+    for name in _PROMPT_FILES:
+        h.update(name.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(load_prompt(name).replace("\r\n", "\n").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
+def test_prompt_change_requires_a_version_bump():
+    """프롬프트 본문이 바뀌었는데 PROMPT_VERSION 이 그대로면 옛 캐시가 stale 로 산다."""
+    from workflow.summary_ai_insight import PROMPT_VERSION
+
+    pinned_version, pinned_digest = _PROMPT_DIGEST_AT_VERSION
+    actual = _prompts_digest()
+    if actual == pinned_digest:
+        assert PROMPT_VERSION == pinned_version, (
+            f"프롬프트는 그대로인데 PROMPT_VERSION 이 {PROMPT_VERSION} 로 바뀌었다 — "
+            f"핀({pinned_version})도 함께 갱신할 것"
+        )
+        return
+    assert PROMPT_VERSION > pinned_version, (
+        f"프롬프트 본문이 바뀌었다(digest {pinned_digest} → {actual}). "
+        f"PROMPT_VERSION 을 {pinned_version} 에서 올리고 이 파일의 "
+        f"_PROMPT_DIGEST_AT_VERSION 을 ({PROMPT_VERSION}, \"{actual}\") 로 갱신할 것 — "
+        "안 올리면 옛 캐시가 새 프롬프트로 만든 결과인 척 돌아온다."
+    )
+
+
+def test_prompt_version_is_in_the_cache_key(monkeypatch):
+    """버전을 올려도 키에 안 들어가면 무의미하다 — 지문에 실제로 반영되는지 본다.
+
+    ⚠ 전역 상수를 손으로 되돌리지 않는다(`monkeypatch`). 저장소 격리 규약: teardown 에서
+    "특정 값으로 고정" 하지 말고 원래 값을 복원할 것 — 누설되면 단독 실행이 깨진다.
+    """
+    import workflow.summary_ai_insight as mod
+
+    inp = _inp()
+    before = mod.compute_cache_key(inp, "gemini-x")
+    monkeypatch.setattr(mod, "PROMPT_VERSION", mod.PROMPT_VERSION + 1)
+    after = mod.compute_cache_key(inp, "gemini-x")
+    assert before != after, "PROMPT_VERSION 이 캐시 키에 안 들어간다 — 프롬프트 갱신이 무효화를 못 낸다"

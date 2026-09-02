@@ -128,14 +128,49 @@ def _js_array(name: str) -> list:
     return re.findall(r"'([^']+)'", m.group(1))
 
 
+def _py_tuple(src: str, name: str) -> list:
+    m = re.search(rf"{name} = \((.*?)\)", src, re.S)
+    assert m, f"{name} 을 못 찾았다"
+    return re.findall(r'"([^"]+)"', m.group(1))
+
+
 def test_safety_grades_match_between_backend_and_frontend():
     """두 판정이 **같은 등급 집합**을 쓴다 — 갈리면 같은 문서가 표면마다 다른 값을 낸다."""
-    src = source_of(_cache_trace_summary)
-    m = re.search(r'_SAFETY_GRADES = \((.*?)\)', src, re.S)
-    assert m, "백엔드 _SAFETY_GRADES 를 못 찾았다"
-    backend = re.findall(r'"([^"]+)"', m.group(1))
+    backend = _py_tuple(source_of(_cache_trace_summary), "_SAFETY_GRADES")
     assert backend == _js_array("SAFETY_GRADES"), \
         f"등급 집합 불일치 — backend={backend} frontend={_js_array('SAFETY_GRADES')}"
+
+
+def test_ai_input_uses_the_same_grade_set_as_the_screen():
+    """AI 입력(`summary_ai_insight`)도 같은 등급 집합이다 — 판정 자리가 셋이 됐다.
+
+    파이썬↔JS 경계라 리터럴을 공유할 수 없다. 갈리면 화면은 "안전 62/62" 인데
+    AI 는 다른 분모로 권고를 쓴다 — 같은 프로젝트를 두고 두 값이 도는 형태.
+    """
+    from workflow.summary_ai_insight import _SAFETY_GRADES, _UNKNOWN_GRADE_KEYS
+
+    assert list(_SAFETY_GRADES) == _js_array("SAFETY_GRADES"), \
+        f"AI 입력 등급 집합이 화면과 다르다 — ai={list(_SAFETY_GRADES)}"
+    assert list(_SAFETY_GRADES) == _py_tuple(source_of(_cache_trace_summary), "_SAFETY_GRADES"), \
+        "AI 입력 등급 집합이 백엔드 캐시와 다르다"
+    # 미상 철자도 같이 안다 — 하나만 알면 그 축에서 미상 건수가 조용히 0 이 된다.
+    assert set(_UNKNOWN_GRADE_KEYS) == set(_js_array("UNKNOWN_GRADE_KEYS")) == {"UNKNOWN", "미상"}
+
+
+def test_ai_input_derives_instead_of_reading_the_cached_percent():
+    """AI 입력은 `safety_pct` 를 읽지 않고 **분포에서 다시 판정**한다.
+
+    옛 캐시엔 `safety_*` 가 없다(실측: 저장소 캐시 6건 중 KJPDS02_PV 4건 포함 전부).
+    캐시 값을 읽는 구현이면 화면엔 보이는 지표가 AI 입력에선 통째로 사라진다.
+    """
+    from workflow.summary_ai_insight import derive_safety_coverage
+
+    old_cache = {  # safety_* 없음 — 2026-09-02 이전 캐시 shape
+        "has_data": True,
+        "asil_distribution": {"A": {"total": 62, "covered": 62}, "UNKNOWN": {"total": 4, "covered": 4}},
+    }
+    s = derive_safety_coverage(old_cache)
+    assert s is not None and s["pct"] == 100.0 and s["unknown"] == 4
 
 
 def test_frontend_knows_both_unknown_spellings():

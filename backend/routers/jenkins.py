@@ -4028,8 +4028,14 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
     # 안전 요구(ASIL A~D) 커버리지 — 위 단일 패스가 만든 asil_distribution 에서 파생한다.
     # 따로 세지 않는 이유: 판정이 둘이 되면 같은 문서가 표면에 따라 다른 값을 낸다.
     # QM 은 비안전이라, 미상(UNKNOWN)은 **판단 불가**라 분모에서 뺀다 — 근거 부재를 QM 으로
-    # 바꾸면 under-classification 이다. 뺀 사실은 asil_unknown_count 로 화면에 함께 나간다.
+    # 바꾸면 under-classification 이다. 뺀 사실은 **이 분포의 UNKNOWN 건수**로 화면에 함께 나간다.
+    # ⚠ `asil_unknown_count`(바로 아래 payload)가 아니다 — 그건 link_table 축이고 등급 데이터가
+    #   전무하면 0 으로 강제된다(report_gen/trace_link_table.py `unknown_count`). 즉 "등급이 하나도
+    #   없다" 는 최악의 경우에 0 을 내므로 '분모에서 뺀 건수'로 쓰면 안 된다. 실측(2026-09-02):
+    #   등급 전무 3행 → asil_unknown_count=0 · 분포 UNKNOWN=3. 오늘 KJPDS02_PV 는 둘 다 4 라
+    #   우연히 같아 보인다.
     # 프론트 단일 출처: frontend-v2/src/asilCoverage.js `deriveSafetyCoverage` (같은 규칙).
+    # AI 입력 단일 출처: workflow/summary_ai_insight.py `derive_safety_coverage` (같은 규칙).
     _SAFETY_GRADES = ("D", "C", "B", "A")
     safety_total = sum(int((asil_distribution.get(_g) or {}).get("total", 0)) for _g in _SAFETY_GRADES)
     safety_covered = sum(int((asil_distribution.get(_g) or {}).get("covered", 0)) for _g in _SAFETY_GRADES)

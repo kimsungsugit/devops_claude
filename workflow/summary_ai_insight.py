@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # v4: testing 섹션 + arch payload에 cycles/module_graph + rules에 공식 설명(RCFInfo) 주입(Phase M).
 # v5(N5): architecture payload에 asil_interference·global_coupling·coverage_complexity·
 #         indirect_calls/encapsulation 추가(+환각 필터 어휘 확장).
-PROMPT_VERSION = 5
+PROMPT_VERSION = 6
 SECTIONS = ("rules", "mistakes", "roles", "architecture", "testing")
 EXCERPT_MAX_FILES = 4
 EXCERPT_MAX_BYTES_PER_FILE = 4096
@@ -135,6 +135,65 @@ TRACE_UNTRACED_NOTE = (
     "실제 조치 대상은 design_gap(단위설계 미명세)뿐이다(기확립 진단 — 총계를 조치 항목으로 만들지 말 것)."
 )
 
+TRACE_SAFETY_NOTE = (
+    "safety 는 ASIL A~D 요구만의 추적 커버리지다 — QM(비안전)과 등급 미상(판단 불가)은 분모 밖이다. "
+    "pct 가 null 이면 0% 가 아니라 '잴 대상이 없음'(등급 붙은 요구 0건)이므로 커버리지 미달로 쓰지 말 것. "
+    "unknown 은 분모에서 뺀 건수이며 등급 미할당 자체가 감사 finding 이므로, unknown>0 인데 pct=100 을 "
+    "'안전 요구 전부 검증됨'으로 단정하지 말 것. uncovered(전체 요구 축)와 겹칠 수 있으니 같은 요구를 "
+    "두 번 세지 말 것."
+)
+
+# 안전 등급 집합 — 프론트 단일 출처 `frontend-v2/src/asilCoverage.js` 와 lockstep.
+# 백엔드 `jenkins.py::_cache_trace_summary` 도 같은 튜플을 쓴다(세 곳 정합 가드 있음).
+_SAFETY_GRADES = ("D", "C", "B", "A")
+# 미상 철자 두 가지 — 백엔드 캐시는 'UNKNOWN', 상세탭 파생은 '미상'. 하나만 알면 그 표면에서
+# 미상 경고가 조용히 사라진다(asilCoverage.js 와 동일 규약).
+_UNKNOWN_GRADE_KEYS = ("UNKNOWN", "미상")
+
+
+def derive_safety_coverage(trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """ASIL A~D 요구의 추적 커버리지 — **화면과 같은 규칙으로** 판정한다.
+
+    입력은 `asil_distribution`(등급 → {total, covered}) 하나다. 캐시가 실어주는
+    `safety_pct` 를 읽지 않고 같은 원천에서 다시 파생하는 이유:
+
+      · 옛 캐시엔 `safety_*` 가 아예 없다(2026-09-02 이전 — 실측: 저장소 캐시 **6건 전부**.
+        그중 4건은 `asil_distribution` 은 있어 여기서 되살아나고, 2건[2026-06-27]은 분포도 없어
+        아래 규칙대로 침묵한다). 캐시 값을 읽는 구현이면 화면엔 보이는 지표가 AI 입력에선 사라진다.
+      · 프론트 `asilCoverage.js::deriveSafetyCoverage` 도 같은 이유로 분포에서 파생한다.
+        **같은 입력·같은 규칙**이라야 AI 와 화면이 같은 프로젝트를 두고 다른 값을 말하지 않는다.
+
+    ⚠ 분모가 0 이면 `pct` 는 **None** 이다(0.0 아님). 등급 붙은 요구가 없다는 뜻이지
+    커버리지가 0 이라는 뜻이 아니다 — 저장소 규약: 미측정 ≠ 0 ≠ 통과.
+
+    등급 분포 자체가 없으면(옛 캐시) `None` 을 돌려준다. 0 으로 접으면 "안전 요구 0건" 이라는
+    없는 사실이 생긴다.
+    """
+    if not isinstance(trace, dict):
+        return None
+    dist = trace.get("asil_distribution")
+    if not isinstance(dist, dict) or not dist:
+        return None
+
+    def _n(grade: str, field: str) -> int:
+        cell = dist.get(grade)
+        if not isinstance(cell, dict):
+            return 0
+        try:
+            return int(cell.get(field) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    total = sum(_n(g, "total") for g in _SAFETY_GRADES)
+    covered = sum(_n(g, "covered") for g in _SAFETY_GRADES)
+    return {
+        "total": total,
+        "covered": covered,
+        "pct": round(covered / total * 100, 1) if total > 0 else None,
+        "unknown": sum(_n(k, "total") for k in _UNKNOWN_GRADE_KEYS),
+        "note": TRACE_SAFETY_NOTE,
+    }
+
 
 def curate_trace_summary(trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """AI 입력용 trace 컨텍스트 큐레이션 — raw 관측치가 조치 항목으로 오변환되는 것 차단.
@@ -176,6 +235,13 @@ def curate_trace_summary(trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
             "placeholder_count": _i(trace, "integrity_placeholder_count"),
         },
     }
+    # 안전 요구(ASIL A~D) 커버리지 — 조치 축이다(ISO 26262 심각도 1순위).
+    # ⚠ `asil_unknown_count`(링크테이블 축)와 `safety.unknown`(등급분포 축)은 **다른 수**다.
+    #   전자는 등급 데이터가 전무하면 0 으로 강제된다(report_gen/trace_link_table.py) — 즉
+    #   "하나도 등급이 없다" 는 최악의 경우에 오히려 침묵한다. 화면이 쓰는 건 후자다.
+    safety = derive_safety_coverage(trace)
+    if safety is not None:
+        out["safety"] = safety
     if _i(raw, "vcast_input_rows"):
         design_gap = _i(raw, "unmapped_design_gap") or 0
         app_design_gap = _i(raw, "unmapped_app_design_gap")
@@ -272,6 +338,13 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
     gaps: List[Dict[str, Any]] = []
     ts = inp.trace_summary or {}
     if ts.get("has_data"):
+        # 안전 요구 미확보 — 심각도 1순위라 gap 목록 맨 앞이다(프롬프트 규칙: 안전 > 회귀 > 부채).
+        # 큐레이션본(`safety`)과 raw 캐시(`asil_distribution`) 양쪽 수용 — 호출 경로가 둘이다.
+        _safety = ts.get("safety") if isinstance(ts.get("safety"), dict) else derive_safety_coverage(ts)
+        if isinstance(_safety, dict):
+            _st, _sc = _safety.get("total"), _safety.get("covered")
+            if isinstance(_st, int) and isinstance(_sc, int) and _st > 0 and _sc < _st:
+                gaps.append({"kind": "safety_uncovered", "count": _st - _sc, "safety_total": _st})
         for kind, key in (
             ("trace_uncovered", "uncovered"),
             ("asil_test_gap", "asil_gap_count"),
@@ -411,6 +484,11 @@ def _deterministic_role_guidance(det: Dict[str, Any], inp: SummaryInsightInput) 
     for g in det["gaps"]:
         if g["kind"] == "test_failures":
             tester.append({"action": "실패 테스트케이스 원인 분석·재실행 우선", "basis": f"실패 TC {g['count']}건"})
+        elif g["kind"] == "safety_uncovered":
+            tester.append({
+                "action": "안전 요구(ASIL A~D) 중 설계·시험 추적이 끊긴 항목 우선 보강",
+                "basis": f"안전 요구 {g.get('safety_total')}건 중 추적 미확보 {g['count']}건",
+            })
         elif g["kind"] == "asil_test_gap":
             tester.append({"action": "ASIL 등급 대비 시험 수준 미달 요구 보강", "basis": f"ASIL 시험 미달 {g['count']}건"})
         elif g["kind"] == "trace_uncovered":
