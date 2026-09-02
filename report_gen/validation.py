@@ -972,8 +972,31 @@ def generate_uds_field_quality_gate_report(
         if has_related and has_supported_calls:
             supported_traceable += 1
 
-    def _rate(v: int, base: int) -> float:
-        return 0.0 if base <= 0 else float(v) / float(base)
+    def _rate(v: int, base: int) -> Optional[float]:
+        """분모가 없으면 **`None`(미측정)**. 0.0 이 아니다.
+
+        예전엔 `0.0` 을 냈고, `failed` 가 그걸 임계 미달로 세어 **잴 수 없는 축을
+        실패로 계상**했다. 실측(2026-09-02, 실 산출물 127개 전수):
+          · 분모 0 지표가 있는 리포트 29개 → **29개 전부 `Gate pass: False`**
+          · 실제 429함수 KJPDS02_PV: `Input fill 0/0`·`Output fill 0/0` 둘 다 0.0% 로
+            실패 계상 → 실패 8건 중 2건이 근거 없는 것이었다
+        원인은 "채울 게 없었다" 가 아니라 **못 쟀다** 였다 — 그 문서의 SwUFn 항목은
+        상당수가 전역 변수라 prototype 이 비어 있고(429행 중 2행만 존재), 입력/출력
+        슬롯 자체를 셀 수 없다.
+
+        같은 형태를 이 저장소가 이미 고쳤다: 문서가 재지 않는 축으로 채점해 영구 FAIL 을
+        만들면, 그 상시 실패가 **진짜 미달을 가린다**(SwITCV 게이트 축 오류).
+        """
+        return None if base <= 0 else float(v) / float(base)
+
+    def _pct(rate: Optional[float]) -> str:
+        """지표 줄의 괄호 안 — 미측정은 `%` 를 쓰지 않는다.
+
+        ⚠ 이 표기가 곧 계약이다. `gate_report.parse_gate_report` 는 괄호 안에서 `%` 를
+          못 찾으면 `percent=None` 을 내고 `to_rate_map` 이 그 키를 건너뛴다. 즉
+          "0% 로 잰 것" 과 "못 잰 것" 이 하류에서도 구분된다.
+        """
+        return "미측정 — 분모 0" if rate is None else f"{rate * 100:.1f}%"
 
     asil_non_tbd = total - tbd_asil
     related_non_tbd = total - tbd_related
@@ -996,41 +1019,52 @@ def generate_uds_field_quality_gate_report(
         "direct_traceability_rate": _rate(direct_traceable, total),
         "direct_called_fill_applicable_rate": _rate(direct_called_ok, direct_call_applicable),
     }
-    failed = [k for k, v in metrics.items() if v < gate.get(k, 0.0)]
+    # ⚠ 잰 것만 채점한다. 미측정을 임계와 비교하면 `None < 0.1` 로 죽거나(예전 코드에선
+    #   0.0 이라 조용히 실패했다) 근거 없는 실패가 된다.
+    failed = [k for k, v in metrics.items()
+              if v is not None and v < gate.get(k, 0.0)]
+    unmeasured = [k for k, v in metrics.items() if v is None]
+    measured_n = len(metrics) - len(unmeasured)
 
     lines: List[str] = []
     lines.append("# UDS Field Quality Gate Report")
     lines.append("")
     lines.append(f"- Target DOCX: `{docx_path}`")
     lines.append(f"- Total functions: `{total}`")
-    lines.append(f"- Gate pass: `{'False' if failed else 'True'}`")
-    lines.append(f"- Gates: `{len(metrics) - len(failed)}` / `{len(metrics)}` passed")
+    # ⚠ `Gate pass` 는 보수 방향을 유지한다 — 미측정이 있으면 통과가 아니다.
+    #   (`gate_report.py` 의 "판정 불가는 통과가 아님" 과 같은 규약. 미측정을 빼면서
+    #    통과로 접으면 이번 수정이 fail-open 이 된다.)
+    #   실 산출물의 판정은 이 변경으로 **바뀌지 않는다** — 바뀌는 건 "왜 False 인가" 다.
+    lines.append(f"- Gate pass: `{'False' if (failed or unmeasured) else 'True'}`")
+    # 분모는 **잰 지표 수**다. 못 잰 것을 분모에 남기면 통과율이 근거 없이 낮아진다.
+    lines.append(f"- Gates: `{measured_n - len(failed)}` / `{measured_n}` passed")
+    lines.append(f"- Unmeasured gates: `{len(unmeasured)}`")
     lines.append("")
     lines.append("## Metrics")
-    lines.append(f"- Description fill: `{desc_ok}` / `{total}` ({metrics['description_fill_rate']*100:.1f}%)")
-    lines.append(f"- Input fill: `{input_ok}` / `{input_base}` ({metrics['input_fill_rate']*100:.1f}%)")
-    lines.append(f"- Output fill: `{output_ok}` / `{output_base}` ({metrics['output_fill_rate']*100:.1f}%)")
-    lines.append(f"- Globals(Global) fill: `{gg_ok}` / `{total}` ({metrics['globals_global_fill_rate']*100:.1f}%)")
-    lines.append(f"- Globals(Static) fill: `{gs_ok}` / `{total}` ({metrics['globals_static_fill_rate']*100:.1f}%)")
-    lines.append(f"- Called fill (supported): `{called_ok}` / `{total}` ({metrics['called_fill_rate']*100:.1f}%)")
-    lines.append(f"- Calling fill: `{calling_ok}` / `{total}` ({metrics['calling_fill_rate']*100:.1f}%)")
-    lines.append(f"- Direct called fill: `{direct_called_ok}` / `{total}` ({metrics['direct_called_fill_rate']*100:.1f}%)")
-    lines.append(f"- Direct called fill (applicable): `{direct_called_ok}` / `{direct_call_applicable}` ({metrics['direct_called_fill_applicable_rate']*100:.1f}%)")
-    lines.append(f"- Leaf / no-call functions: `{leaf_function_count}` / `{total}` ({_rate(leaf_function_count, total)*100:.1f}%)")
-    lines.append(f"- Indirect call support: `{indirect_support_ok}` / `{total}` ({_rate(indirect_support_ok, total)*100:.1f}%)")
-    lines.append(f"- ASIL non-TBD: `{asil_non_tbd}` / `{total}` ({metrics['asil_non_tbd_rate']*100:.1f}%)")
-    lines.append(f"- Related non-TBD: `{related_non_tbd}` / `{total}` ({metrics['related_non_tbd_rate']*100:.1f}%)")
-    lines.append(f"- Traceability (Related + Supported Call): `{traceable}` / `{total}` ({metrics['traceability_rate']*100:.1f}%)")
-    lines.append(f"- Direct traceability: `{direct_traceable}` / `{total}` ({metrics['direct_traceability_rate']*100:.1f}%)")
+    lines.append(f"- Description fill: `{desc_ok}` / `{total}` ({_pct(metrics['description_fill_rate'])})")
+    lines.append(f"- Input fill: `{input_ok}` / `{input_base}` ({_pct(metrics['input_fill_rate'])})")
+    lines.append(f"- Output fill: `{output_ok}` / `{output_base}` ({_pct(metrics['output_fill_rate'])})")
+    lines.append(f"- Globals(Global) fill: `{gg_ok}` / `{total}` ({_pct(metrics['globals_global_fill_rate'])})")
+    lines.append(f"- Globals(Static) fill: `{gs_ok}` / `{total}` ({_pct(metrics['globals_static_fill_rate'])})")
+    lines.append(f"- Called fill (supported): `{called_ok}` / `{total}` ({_pct(metrics['called_fill_rate'])})")
+    lines.append(f"- Calling fill: `{calling_ok}` / `{total}` ({_pct(metrics['calling_fill_rate'])})")
+    lines.append(f"- Direct called fill: `{direct_called_ok}` / `{total}` ({_pct(metrics['direct_called_fill_rate'])})")
+    lines.append(f"- Direct called fill (applicable): `{direct_called_ok}` / `{direct_call_applicable}` ({_pct(metrics['direct_called_fill_applicable_rate'])})")
+    lines.append(f"- Leaf / no-call functions: `{leaf_function_count}` / `{total}` ({_pct(_rate(leaf_function_count, total))})")
+    lines.append(f"- Indirect call support: `{indirect_support_ok}` / `{total}` ({_pct(_rate(indirect_support_ok, total))})")
+    lines.append(f"- ASIL non-TBD: `{asil_non_tbd}` / `{total}` ({_pct(metrics['asil_non_tbd_rate'])})")
+    lines.append(f"- Related non-TBD: `{related_non_tbd}` / `{total}` ({_pct(metrics['related_non_tbd_rate'])})")
+    lines.append(f"- Traceability (Related + Supported Call): `{traceable}` / `{total}` ({_pct(metrics['traceability_rate'])})")
+    lines.append(f"- Direct traceability: `{direct_traceable}` / `{total}` ({_pct(metrics['direct_traceability_rate'])})")
     lines.append("")
     lines.append("## TBD Residual")
     lines.append(f"- ASIL TBD: `{tbd_asil}` / `{total}`")
     lines.append(f"- Related TBD: `{tbd_related}` / `{total}`")
     lines.append("")
     lines.append("## Description Quality Grade")
-    lines.append(f"- High (comment/SDS/reference): `{desc_high}` ({_rate(desc_high, total)*100:.1f}%)")
-    lines.append(f"- Medium (keyword inference): `{desc_med}` ({_rate(desc_med, total)*100:.1f}%)")
-    lines.append(f"- Low (generic template): `{desc_low}` ({_rate(desc_low, total)*100:.1f}%)")
+    lines.append(f"- High (comment/SDS/reference): `{desc_high}` ({_pct(_rate(desc_high, total))})")
+    lines.append(f"- Medium (keyword inference): `{desc_med}` ({_pct(_rate(desc_med, total))})")
+    lines.append(f"- Low (generic template): `{desc_low}` ({_pct(_rate(desc_low, total))})")
     lines.append("")
     lines.append("## Thresholds")
     for k, v in gate.items():
@@ -1040,9 +1074,21 @@ def generate_uds_field_quality_gate_report(
     if failed:
         for k in failed:
             guide = _gate_improvement_guide.get(k, "")
-            lines.append(f"- **{k}**: {metrics[k]*100:.1f}% < {gate[k]*100:.1f}%")
+            lines.append(f"- **{k}**: {_pct(metrics[k])} < {gate[k]*100:.1f}%")
             if guide:
                 lines.append(f"  - 개선 가이드: {guide}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    # ── 미측정 게이트 ── 실패와 **같은 목록에 섞지 않는다**. 섞으면 읽는 사람이 전부
+    # 고칠 거리로 읽고(실측: 실패 8건 중 2건이 그랬다), 상시 실패가 진짜 미달을 가린다.
+    lines.append("## Unmeasured Gates")
+    if unmeasured:
+        for k in unmeasured:
+            lines.append(f"- **{k}**: 분모가 0이라 이 축은 채점하지 않았다 "
+                         f"(0% 가 아니라 **잰 적 없음**)")
+        lines.append("  - 흔한 원인: 문서의 SwUFn 항목이 함수가 아니라 전역 변수라 "
+                     "Prototype 칸이 비어 있으면 입력/출력 슬롯 자체를 셀 수 없다.")
     else:
         lines.append("- none")
     lines.append("")
@@ -1053,7 +1099,18 @@ def generate_uds_field_quality_gate_report(
         lines.append("- SRS 문서를 추가하면 요구사항 추적성을 크게 향상시킬 수 있습니다.")
     if desc_low > total * 0.3:
         lines.append("- 소스 코드에 Doxygen 주석(@brief)을 추가하면 Description 품질이 향상됩니다.")
-    if not failed and not (tbd_asil > total * 0.5 or tbd_related > total * 0.5 or desc_low > total * 0.3):
+    # ⚠ 미측정이 남아 있으면 "다 통과했다" 고 말하지 않는다.
+    #   이 분기는 **이 라운드의 수정이 만들어 낸** 출구를 막는다: 미측정을 `failed` 에서
+    #   빼자 `Total functions: 0` 같은 문서(실 산출물 4건)에서 `failed` 가 **비게 되고**,
+    #   아래 `elif` 조건이 참이 되어 "모든 품질 게이트를 통과했습니다" 가 나간다.
+    #   (구판에서는 그 문서도 실패 7건을 달고 있어 이 문장이 안 나갔다 — 즉 새로 생길
+    #    뻔한 거짓이다. 뮤테이션 M223 이 이 분기를 지우면 실제로 그 문장이 나온다.)
+    #   판정 값을 고치면 **그 값을 말로 옮기는 산문도 같이** 봐야 한다.
+    if unmeasured:
+        lines.append(
+            f"- 지표 {len(unmeasured)}개를 **재지 못했습니다**(분모 0) — 통과 여부를 "
+            f"말할 수 없습니다. `## Unmeasured Gates` 참조.")
+    elif not failed and not (tbd_asil > total * 0.5 or tbd_related > total * 0.5 or desc_low > total * 0.3):
         lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다.")
 
     out = Path(out_path)

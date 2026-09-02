@@ -224,6 +224,57 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     expect(screen.getByText(/문서에 빠진 함수 9개/)).toBeInTheDocument();
   });
 
+  // ⚠ 라운드 15 — 분모 0 인 축은 채점하지 않는다. 이 수가 화면에 없으면 "5/11" 이
+  //    "6건 미달" 로만 읽혀, 잴 수 없던 축까지 고칠 거리로 보인다.
+  it('미측정 게이트가 있으면 개수와 "0% 아님" 을 함께 보인다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: {
+            present: true, gates_passed: 5, gates_total: 11, total_functions: 429,
+            unmeasured_count: 2,
+            unmeasured_gates: ['**input_fill_rate**: 분모가 0'],
+          },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: { present: false, reason: '없음' },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/미측정 2개/)).toBeInTheDocument());
+    expect(screen.getByText(/0% 아님/)).toBeInTheDocument();
+  });
+
+  it('구판 리포트(미측정 항목 없음)엔 미측정 문구를 만들지 않는다 (음성 대조군)', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: {
+            present: true, gates_passed: 5, gates_total: 13, total_functions: 429,
+            unmeasured_count: null, unmeasured_gates: [],
+          },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: { present: false, reason: '없음' },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/게이트 항목 5 \/ 13 통과/)).toBeInTheDocument());
+    expect(screen.queryByText(/미측정/)).not.toBeInTheDocument();
+  });
+
   // ⚠ 아래 두 건은 라운드 14 에서 생겼다. `drop` 은 대응 소스가 없는 절을 문서에서
   //    빼므로 "빈 명세 heading" 수가 **줄어든다** — 그 사실이 화면에 없으면 얇아진
   //    문서가 완결된 것처럼 보인다(실측: 빈 heading 4건 → 1건, OK 는 양쪽 다 True).

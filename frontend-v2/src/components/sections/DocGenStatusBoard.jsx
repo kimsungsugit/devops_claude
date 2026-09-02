@@ -1372,6 +1372,12 @@ function EvidenceDetail({ run, detail }) {
                 <li>
                   게이트 항목 {gate.gates_passed ?? '—'} / {gate.gates_total ?? '—'} 통과
                   {gate.total_functions != null && ` · 함수 ${gate.total_functions}개`}
+                  {/* 분모 0 인 축은 채점하지 않는다. 이 수가 없으면 "5/11" 이
+                      "6건이 미달" 로만 읽혀, 못 잰 축까지 고칠 거리로 보인다. */}
+                  {gate.unmeasured_count != null && gate.unmeasured_count > 0 && (
+                    <> · <strong>미측정 {gate.unmeasured_count}개</strong>
+                      {' — 잴 수 없어 채점에서 뺀 축(0% 아님)'}</>
+                  )}
                 </li>
                 {gate.tbd_residual?.asil_tbd && (
                   <li>

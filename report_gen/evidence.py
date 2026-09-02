@@ -215,6 +215,12 @@ def read_gate_report(path: Path) -> Dict[str, Any]:
         "tbd_residual": tbd,
         "description_quality": desc_quality,
         "failed_gates": failed,
+        # ── 미측정 게이트 ── 실패와 **같은 수로 세면 안 된다**. 분모가 0인 축(예: 문서의
+        # SwUFn 항목이 전역 변수라 Prototype 이 비어 입력/출력 슬롯을 셀 수 없다)을 예전엔
+        # 0.0% 로 적어 실패로 계상했다 — 실 산출물 429함수에서 실패 8건 중 2건이 그랬다.
+        # 없으면 `None`(구판 산출물) 이지 0 이 아니다.
+        "unmeasured_gates": _bullet_list(sec.get("Unmeasured Gates", [])),
+        "unmeasured_count": _as_count(head.get("Unmeasured gates")),
     }
 
 
