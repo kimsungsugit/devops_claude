@@ -42,7 +42,6 @@ def _names_from_field(text: str) -> Set[str]:
 
 def _build_expected_maps(source_sections: Dict[str, object]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, str]]:
     details_by_name = source_sections.get("function_details_by_name", {}) or {}
-    module_map = source_sections.get("module_map", {}) or {}
     exp_called: Dict[str, Set[str]] = {}
     exp_calling: Dict[str, Set[str]] = {}
     fn_to_swcom: Dict[str, str] = {}

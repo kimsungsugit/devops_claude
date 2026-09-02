@@ -227,7 +227,6 @@ def _parse_c_declaration_statement(stmt: str) -> List[Dict[str, str]]:
     idx = 0
     while idx < len(tokens):
         tok = tokens[idx]
-        upper_tok = tok.upper()
         lower_tok = tok.lower()
         if tok in _STATIC_STORAGE_WORDS:
             storage_words.append(tok)

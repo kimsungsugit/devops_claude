@@ -423,7 +423,6 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
         ptype = cells[2].strip() if len(cells) > 2 else ""
         vrange = cells[3].strip() if len(cells) > 3 else ""
         reset = cells[4].strip() if len(cells) > 4 else ""
-        desc = cells[5].strip() if len(cells) > 5 else ""
         if not name or name.upper() in {"N/A", "-", "NONE"}:
             return ""
         parts = [name]

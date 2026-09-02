@@ -274,7 +274,7 @@ class TestGenerateUdsConstraintsReport:
             }
         }
         out = tmp_path / "constraints.md"
-        result = generate_uds_constraints_report(payload, str(out))
+        generate_uds_constraints_report(payload, str(out))   # 파일 생성이 목적
         assert (tmp_path / "constraints.md").exists()
         text = out.read_text(encoding="utf-8")
         assert "UDS Constraint" in text

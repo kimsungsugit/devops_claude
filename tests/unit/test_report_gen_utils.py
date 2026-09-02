@@ -167,7 +167,7 @@ class TestGenerateMarkdownSummary:
             "exit_code": 0,
             "generated_at": "2025-01-01T00:00:00",
         }
-        result = generate_markdown_summary(summary, str(out))
+        generate_markdown_summary(summary, str(out))   # 파일 생성이 목적
         assert out.exists()
         text = out.read_text(encoding="utf-8")
         assert "# project" in text.lower() or "project" in text.lower()

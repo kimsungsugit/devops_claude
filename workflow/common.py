@@ -128,10 +128,26 @@ def normalize_whitespace(s: str) -> str:
     return " ".join(s.split())
 
 def read_excerpt(p: Path, max_lines: int = 120) -> str:
-    """파일의 내용을 읽어오되, 너무 길면 앞부분만 잘라서 반환합니다."""
-    try: 
+    """파일의 내용을 읽어오되, 너무 길면 앞부분만 잘라서 반환합니다.
+
+    ⚠ 실패하면 `""` 다 — 그리고 그 `""` 는 **AI 입력으로 그대로 간다**
+      (`workflow/ai.py:2276·2310·3391`, `workflow/pipeline.py:1578·3268`). 즉 읽기가
+      실패하면 "코드를 못 읽었다" 가 아니라 **코드가 비어 있다**는 뜻으로 전달된다.
+      반환형을 바꾸면 소비처 5곳이 흔들리므로 계약은 그대로 둔다.
+
+    ⚠ 예전엔 맨 `except:` 였다. 그건 `KeyboardInterrupt`·`SystemExit` 까지 삼켜
+      파일 읽는 동안 Ctrl+C 가 안 먹는다. `Exception` 으로 좁히면 그 둘만 통과시키고
+      **삼키는 범위는 그대로**다.
+
+    ⚠ `except OSError` 로 더 좁혔더니 `pytest -n auto` 워커가 죽었다(2026-09-02 실측:
+      `ValueError: I/O operation on closed file`). 즉 이 자리는 **OSError 아닌 실패도
+      실제로 난다** — 맨 `except:` 가 그걸 4년째 덮고 있었다는 뜻이다. 그 실패의 정체를
+      규명하기 전에 범위를 좁히면 조용하던 결함이 **크래시로** 바뀐다. 여기서는
+      `KeyboardInterrupt` 만 되찾고, 좁히는 것은 별도로 잰 뒤에 한다.  # silent-ok
+    """
+    try:
         return "\n".join(p.read_text(encoding="utf-8", errors="ignore").splitlines()[:max_lines])
-    except: 
+    except Exception:      # noqa: BLE001 — 위 주석 참조(OSError 로 좁히면 워커가 죽는다)
         return ""
 
 def list_targets(project_root: Path, targets_glob: str) -> List[Path]:

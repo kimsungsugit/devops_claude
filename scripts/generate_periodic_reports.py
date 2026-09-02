@@ -2078,7 +2078,6 @@ def render_html_dashboard(today: date, cards: list[dict[str, Any]]) -> str:
             "monthly": "tone-monthly",
         }.get(card["report_type"], "tone-default")
         is_jira_plan = card["report_type"] == "jira_plan"
-        is_jira_result = card["report_type"] == "jira_result"
         board_html = ""
         if is_jira_plan:
             result_sections = {}

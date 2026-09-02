@@ -48,7 +48,6 @@ def generate_component_map_from_sds(
     swcom_entries: Dict[str, Dict[str, str]] = {}
     for key, info in sds_map.items():
         asil = info.get("asil", "")
-        related = info.get("related", "")
         # SwCom ID 추출
         swcom_match = re.search(r"SwCom[_\s-]*(\d+)", key, re.I)
         if swcom_match:
