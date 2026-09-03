@@ -851,3 +851,76 @@ describe('DocGenStatusBoard — 다른 Job 의 분석 결과를 조용히 쓰지
     expect(screen.queryByText(/현재 프로젝트의 것이 아닙니다/)).toBeNull();
   });
 });
+
+// ── 조치 버튼은 서버가 준 레지스트리 키로 교체한다 (2026-09-03 감사 P-1) ─────────
+//
+// `step.id` 는 입력 키(`swrs`/`swds`/`uds_doc`)이고 `adopt-doc-path` 는 레지스트리 키
+// (`srs`/`sds`/`uds`)만 받는다. 보드가 `step.id` 를 보내던 동안 대표 조치 버튼은
+// `hsis`/`stp`(두 키가 같은 둘) 빼고 전부 `400 알 수 없는 문서 키` 였다.
+describe('adopt_suggestion — doc_key 는 action.target 이다', () => {
+  it('step.id(입력 키)가 아니라 action.target(레지스트리 키)을 보낸다', async () => {
+    const user = userEvent.setup();
+    mockPost.mockImplementation((url) => {
+      if (url === '/api/docgen/preflight') {
+        return Promise.resolve({
+          ok: true, doc_type: 'uds', label: 'UDS', verdict: 'blocked', file_mode: 'local',
+          steps: [{
+            id: 'swrs', phase: 'input', state: 'stale_path', label: 'SwRS(요구사항)',
+            required: true, value: 'U:/docs/SwRS_v2.03.docx', suggestion: 'SwRS_v3.01_R.docx',
+            reason: '등록 경로에 파일이 없습니다. 같은 폴더의 개정본으로 보입니다',
+            actions: [{ kind: 'adopt_suggestion', value: 'SwRS_v3.01_R.docx', target: 'srs' }],
+          }],
+        });
+      }
+      if (url === '/api/docgen/adopt-doc-path') {
+        return Promise.resolve({ ok: true, new: 'U:/docs/SwRS_v3.01_R.docx' });
+      }
+      return Promise.resolve({ ok: true });
+    });
+    mountBoard({ analysisResult: { matchedScm: { id: 'kjpds02_pv', source_root: 'D:/src' } } });
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '준비' }));
+    await user.click(await screen.findByRole('button', { name: /이 파일로 교체/ }));
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      '/api/docgen/adopt-doc-path', expect.objectContaining({ doc_key: 'srs' })));
+    const body = mockPost.mock.calls.find(c => c[0] === '/api/docgen/adopt-doc-path')[1];
+    expect(body.scm_id).toBe('kjpds02_pv');
+    expect(body.filename).toBe('SwRS_v3.01_R.docx');
+    // 입력 키가 새어 나가면 서버가 400 을 낸다 — 그 회귀를 못 박는다.
+    expect(body.doc_key).not.toBe('swrs');
+  });
+});
+
+// ── 통합 Summary 준비 점검은 빌드와 **같은 shape** 을 싣는다 (2026-09-03 감사 P-2) ──
+//
+// 서버는 라우터와 같은 키 `source_paths`(배열)만 읽는다. 원본 폼(`source_paths_text`
+// textarea)을 보내면 레벨별 산출물을 게이트가 영영 못 본다.
+describe('통합 Summary 준비 점검 — form.source_paths', () => {
+  it('textarea 를 배열 source_paths 로 바꿔 싣고 source_paths_text 는 보내지 않는다', async () => {
+    localStorage.setItem('devops_v2_swreport_form', JSON.stringify({
+      project_id: 'ES95411', release_sw_version: '1.02',
+      source_paths_text: 'U:/out/SwUTCR.xlsm\nU:/out/SwITCR.xlsm\n',
+    }));
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({ ok: true, doc_type: 'swreport', label: '통합 Summary',
+      verdict: 'ready', file_mode: 'local', steps: [] });
+    mountBoard({ analysisResult: { matchedScm: { id: 'kjpds02_pv', source_root: 'D:/src' } } });
+    const tr = await waitFor(() => rowOf('📊 통합 Summary'));
+    await user.click(within(tr).getByRole('button', { name: '준비' }));
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      '/api/docgen/preflight', expect.objectContaining({ doc_type: 'swreport' })));
+    const body = mockPost.mock.calls.find(c => c[0] === '/api/docgen/preflight')[1];
+    expect(body.form.source_paths).toEqual(['U:/out/SwUTCR.xlsm', 'U:/out/SwITCR.xlsm']);
+    expect(body.form.source_paths_text).toBeUndefined();
+
+    // [다시 확인](재조회) 경로도 같은 shape 이어야 한다 — 두 진입이 갈리면 한쪽만 고쳐진다.
+    await user.click(await screen.findByRole('button', { name: '다시 확인' }));
+    await waitFor(() => expect(
+      mockPost.mock.calls.filter(c => c[0] === '/api/docgen/preflight').length).toBe(2));
+    const again = mockPost.mock.calls.filter(c => c[0] === '/api/docgen/preflight')[1][1];
+    expect(again.form.source_paths).toEqual(['U:/out/SwUTCR.xlsm', 'U:/out/SwITCR.xlsm']);
+    expect(again.form.source_paths_text).toBeUndefined();
+  });
+});

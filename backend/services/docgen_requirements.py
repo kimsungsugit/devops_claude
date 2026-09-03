@@ -439,8 +439,18 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
     ),
     "swreport": _doc(
         label="통합 Summary",
-        required=[IN_LEVEL_ARTIFACTS],
-        optional={},
+        # 라우터는 `source_paths` 가 비면 **양식 자체**를 source 로 다시 채운다
+        # (`swreport.py::_resolve_source_workbooks` — "template-self"). 빌드는 되지만 레벨별
+        # 결과(SwUTCR/SwITCR/SwSA)가 반영되지 않는다 — 그러니 `required` 가 아니라 "없으면
+        # 무슨 일이 생기는가" 를 단 선택 입력이다.
+        # ⚠ 예전엔 `required=[IN_LEVEL_ARTIFACTS]` 인데 게이트가 이 키를 채우는 곳이 하나도
+        #   없어 통합 Summary 준비 점검이 **영구 `진행 불가`** 였다(2026-09-03 감사 P-2).
+        #   지금은 `_resolve_inputs_with_origin` 이 폼의 `source_paths` 를 읽는다 — 라우터와
+        #   같은 자리다.
+        required=[],
+        optional={
+            IN_LEVEL_ARTIFACTS: "레벨별 결과가 반영되지 않고 양식 자체를 다시 채운 단일 파일이 나옵니다",
+        },
         fields=[],
         caps={},
         handler="POST /api/swreport/summary/build",

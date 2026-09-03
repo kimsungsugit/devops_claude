@@ -58,7 +58,7 @@ def _read_meta_config_raw(mtime: float) -> dict[str, Any]:  # noqa: ARG001
     try:
         with open(_META_CONFIG_PATH, encoding="utf-8") as f:
             return json.load(f) or {}
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:   # ValueError ⊃ JSONDecodeError·UnicodeDecodeError
         _logger.warning("swut_meta.json load failed: %s", e)
         return {}
 
@@ -71,6 +71,39 @@ def load_meta_from_config(project_id: str) -> dict[str, Any]:
         return {}
     cfg = _read_meta_config_raw(mtime)
     return cfg.get("projects", {}).get(project_id, {}) or {}
+
+
+class MetaConfigUnreadable(RuntimeError):
+    """`config/swut_meta.json` 이 **있는데 읽을 수 없다** — 부재·미등록과 다른 사실."""
+
+
+def load_meta_from_config_strict(project_id: str) -> dict[str, Any]:
+    """`load_meta_from_config` 와 같되, 파일이 있는데 못 읽으면 **예외**다.
+
+    빌드 경로는 못 읽은 config 를 `{}` 로 접어 폴백을 타는 게 맞다(생성은 계속돼야 한다).
+    그러나 **준비 게이트**가 같은 `{}` 를 받으면 "이 프로젝트가 양식 설정에 없다"(missing)
+    로 그려 required 행을 **진행 불가**로 굳힌다 — 실제로는 파일이 깨졌거나 잠긴 것인데
+    사람은 등록을 다시 하러 간다(2026-09-03 감사 P-3①). 게이트는 이 변형을 쓴다.
+
+    - 파일 없음 → `{}`(등록 없음이 정직하다).
+    - 파일 있음 + 읽기/파싱 실패 → `MetaConfigUnreadable`(모름 — `unmeasured`).
+    - 프로젝트 미등록 → `{}`.
+
+    값은 `load_meta_from_config` 에서 온다(같은 캐시·같은 테스트 seam) — 여기서는 **읽을 수
+    있는가** 만 먼저 확인한다. 값까지 따로 읽으면 라우터 회귀가 config 를 갈아 끼우는
+    seam(`monkeypatch.setattr(swut_meta_resolver, "load_meta_from_config", …)`)을 우회해
+    실 머신 파일을 읽는다 — 2026-08-24 에 라우터 회귀 12건이 그렇게 깨졌던 형태다.
+    """
+    if os.path.isfile(_META_CONFIG_PATH):
+        try:
+            with open(_META_CONFIG_PATH, encoding="utf-8") as f:
+                json.load(f)
+        # ⚠ `ValueError` 가 `JSONDecodeError` 와 `UnicodeDecodeError` 둘 다 덮는다 — 후자만
+        #   빠뜨리면 "config 가 깨졌다" 의 대표 형태(잘못된 바이트)가 500 으로 새어 나간다.
+        except (OSError, ValueError) as e:
+            name = os.path.basename(_META_CONFIG_PATH)   # 서버 절대경로는 화면에 내지 않는다
+            raise MetaConfigUnreadable(f"{name}: {type(e).__name__}: {str(e)[:120]}") from e
+    return load_meta_from_config(project_id)
 
 
 # VectorCAST 로그 폴더의 **config fallback 키** — 시리즈별 단일 출처.

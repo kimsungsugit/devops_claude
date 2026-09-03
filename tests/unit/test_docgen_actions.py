@@ -55,6 +55,30 @@ def test_adopt_unknown_entry_is_404() -> None:
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize("doc_key", ["swrs", "swds", "uds_doc", "template"])
+def test_adopt_rejects_input_keys_and_the_dead_shared_template_key(doc_key: str) -> None:
+    """입력 키(`swrs`…)와 공용 `template` 은 레지스트리 키가 아니다 — 400 이어야 한다.
+
+    보드가 `step.id`(입력 키)를 그대로 보내던 동안 이 엔드포인트는 `hsis`/`stp` 빼고 전부
+    400 이었다(2026-09-03 감사 P-1). 서버가 액션에 `target` 을 실어 주는 것이 수정이고,
+    여기서는 옛 payload 가 여전히 **명시적으로** 거부되는지 본다(조용히 엉뚱한 키에 쓰지
+    않는다). `template` 은 `ScmLinkedDocs` 에 없는 필드라 화이트리스트에서도 뺐다.
+    """
+    r = client.post("/api/docgen/adopt-doc-path", headers=HEADERS,
+                    json={"scm_id": "any", "doc_key": doc_key, "filename": "x.docx"})
+    assert r.status_code == 400, r.text
+    assert "문서 키" in str((r.json().get("error") or {}).get("message", ""))
+
+
+@pytest.mark.parametrize("doc_key", ["srs", "sds", "uds", "hsis", "stp", "uds_template", "sts_template"])
+def test_adopt_accepts_registry_keys_past_the_whitelist(doc_key: str) -> None:
+    """레지스트리 키는 화이트리스트를 지나 entry 조회(404)까지 간다."""
+    r = client.post("/api/docgen/adopt-doc-path", headers=HEADERS,
+                    json={"scm_id": "__no_such_entry__", "doc_key": doc_key,
+                          "filename": "x.docx"})
+    assert r.status_code == 404, r.text
+
+
 # ── 주석 보강 대상 ──────────────────────────────────────────────────────────
 
 def test_comment_targets_requires_measurement_first(tmp_path: Path) -> None:

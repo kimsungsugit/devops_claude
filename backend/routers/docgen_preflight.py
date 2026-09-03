@@ -99,6 +99,18 @@ _TEMPLATE_KEY_BY_DOC = {
     "sits": "sits_template",
 }
 
+# `adopt-doc-path` 가 교체할 수 있는 **레지스트리 키**. 공용 `template` 은 뺀다 —
+# `ScmLinkedDocs` 에 그 필드가 없어(`uds_template` 등만 있다) 화이트리스트를 통과해도
+# "기존 등록 경로가 없습니다" 400 으로 끝난다. 설정(doc_paths)의 공용 `template` 은
+# 여전히 입력으로 읽지만, 레지스트리 교체 대상은 아니다(2026-09-03 감사 P-1).
+_ADOPTABLE_DOC_KEYS = frozenset(
+    k for k in _DOC_KEY_TO_INPUT if k != "template"
+) | frozenset(_TEMPLATE_KEY_BY_DOC.values())
+
+# `_resolve_inputs_with_origin` 이 origins 에 남기는 **마커** — 양식 설정 파일이 있는데
+# 읽지 못했다. 입력 키가 아니라서 `inputs` 에는 절대 들어가지 않는다.
+_CONFIG_UNREADABLE = "__meta_config_unreadable__"
+
 # 시험 **결과** 문서의 양식은 SCM 레지스트리가 아니라 `config/swut_meta.json` 의
 # `template_paths` 가 프로젝트별로 관리한다(정본을 옮기면 갈라진다). 여기 있는 것은
 # **어느 키를 봐야 하는가** 뿐이다.
@@ -412,14 +424,115 @@ def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int],
     return {"asil_d": d, "asil_c": c, "mcdc_at_risk": bool(cut and d)}
 
 
+def _permission_error_kind(message: str) -> str:
+    """`PermissionError` 가 실어 온 **사실**을 가른다 — `worker` / `prefix` / `other`.
+
+    `file_resolver.CloudiumFileResolver` 는 서로 다른 세 사실에 같은 예외형을 쓴다:
+    worker 연결 실패·미응답(`_ipc_call`/`_ensure_gate`, "Cloudium worker …"),
+    허용 prefix 밖 경로 차단(`_check_allowed`, "allowed_prefixes"/"차단"),
+    그리고 worker 가 되돌려 준 OS 권한 오류. 화면의 조치는 셋이 다르다 — 첫째는 워커
+    실행, 둘째는 SCM/파일 모드에서 prefix 등록, 셋째는 권한. 문장으로만 가를 수 있다
+    (예외형이 하나라서) — 그래서 표지 어구만 본다.
+    """
+    text = str(message or "")
+    # worker 문장을 먼저 본다 — read-only 차단 문구("write_text 차단.")에도 "차단" 이 있어
+    # 순서를 바꾸면 그쪽이 prefix 로 오분류된다(현재 `exists` 경로에선 도달 불가지만 헬퍼는 범용).
+    if "cloudium worker" in text.lower():
+        return "worker"
+    # `_check_allowed` 의 두 문장: 허용목록 **미설정**("allowed_prefixes 미설정 … 외부 경로
+    # 차단됨") 과 허용목록 밖("허용되지 않은 경로 접근 차단됨") — 실무의 거의 전부는 후자다.
+    if any(tok in text for tok in ("allowed_prefixes", "외부 경로 차단", "허용되지 않은 경로")):
+        return "prefix"
+    return "other"
+
+
 def _probe_path(resolver: Any, path: str) -> Dict[str, Any]:
-    """존재 3상태. ⚠ 확인 실패를 `missing` 으로 접지 않는다(`scm.py:294` 와 같은 규약)."""
+    """존재 3상태. ⚠ 확인 실패를 `missing` 으로 접지 않는다(`scm.py:294` 와 같은 규약).
+
+    `kind` 는 `S_ERROR` 일 때만 뜻이 있다(`_permission_error_kind`). 예전엔 prefix 밖
+    경로도 worker 연결 실패와 같은 `S_ERROR` 하나라, 화면이 이미 돌고 있는 워커를
+    "실행하세요" 라고 안내했다(2026-09-03 감사 P-3③).
+    """
     try:
-        return {"state": S_OK if resolver.exists(path) else S_MISSING, "reason": ""}
+        return {"state": S_OK if resolver.exists(path) else S_MISSING, "reason": "", "kind": ""}
     except PermissionError as exc:
-        return {"state": S_ERROR, "reason": f"접근 거부 — {str(exc)[:160]}"}
+        kind = _permission_error_kind(str(exc))
+        if kind == "prefix":
+            return {"state": S_ERROR, "kind": kind,
+                    "reason": f"허용 경로(allowed_prefixes) 밖 — {str(exc)[:160]}"}
+        return {"state": S_ERROR, "kind": kind, "reason": f"접근 거부 — {str(exc)[:160]}"}
     except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
-        return {"state": S_UNMEASURED, "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+        return {"state": S_UNMEASURED, "kind": "",
+                "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+
+
+def _mark_available(available: Dict[str, bool], key: str, state: str) -> None:
+    """입력 가용성 — **3상태**로 적는다.
+
+    `S_OK` → True, 확인했고 없음(`missing`/`stale`) → False, 그리고 **확인하지 못한 것**
+    (`unmeasured`/`error`)은 **키를 만들지 않는다**. `docgen_field_sources.chain_state` 는
+    키가 없으면 "모름"(`have=None`) 으로 그린다 — 예전의 `(state == S_OK)` 는 확인 실패를
+    "확인했고 없음"(✗) 으로 접었고, 같은 파일이 주석 커버리지에서 정확히 그것을 금지해
+    두고도 입력 행에서는 어기고 있었다(2026-09-03 감사 P-3②).
+    """
+    if state == S_OK:
+        available[key] = True
+    elif state in (S_MISSING, S_STALE):
+        available[key] = False
+
+
+def _revision_actions(
+    key: str, origin: Optional[Dict[str, str]], suggestion: str,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """개정본 채택 액션 — **어느 레지스트리 키를 바꿀지**(`target`)를 함께 싣는다.
+
+    화면은 `step.id`(입력 키 `swrs`/`swds`/`uds_doc`)만 알고 `adopt-doc-path` 는
+    레지스트리 키(`srs`/`sds`/`uds`)만 받는다. `target` 이 없던 동안 보드가 `step.id` 를
+    그대로 보내 대표 조치 버튼이 `400 알 수 없는 문서 키: swrs` 였다 — `hsis`/`stp` 만
+    두 키가 같아 우연히 동작했다(2026-09-03 감사 P-1).
+
+    설정(doc_paths)에서 온 경로는 레지스트리 교체 대상이 **아니다** — 교체해도 설정이 계속
+    레지스트리를 가려 화면은 그대로다. 그때는 어디서 바꿔야 하는지를 사유로 말한다.
+    """
+    src = (origin or {}).get("from", "")
+    reg_key = str((origin or {}).get("key") or _INPUT_TO_DOC_KEY.get(key, key))
+    if src == "registry" and reg_key in _ADOPTABLE_DOC_KEYS:
+        return ([{"kind": "adopt_suggestion", "value": suggestion, "target": reg_key}], "")
+    # ⚠ 채택할 수 없는 출처는 **어디서 바꾸는지**를 반드시 말한다. 기본값을 침묵으로 두면
+    #   새 출처가 생길 때마다 "안내 없는 pick_path" 가 조용히 늘어난다(R26 리뷰 W2/X5).
+    note = _ORIGIN_GUIDANCE.get(src) or _ORIGIN_GUIDANCE["__unknown__"]
+    return ([{"kind": "pick_path", "target": reg_key}], note)
+
+
+# 출처 → 개정본을 채택할 수 없을 때 사용자가 고칠 자리. 미등록 출처는 `__unknown__` 으로
+# 떨어지되 **문장은 있다**(어디서든 침묵하지 않는다).
+# ⚠ `form`(레벨별 산출물)·`request`(source_root) 는 지금 stale 분기에 **도달하지 않는다** —
+#   둘 다 개정본 제안을 하지 않는 자기 분기를 탄다. 죽은 코드가 아니라 "출처가 생기면 문장도
+#   있어야 한다" 는 표의 완결성이다(R26 리뷰 FI1).
+_ORIGIN_GUIDANCE = {
+    "doc_paths": "설정(입력 자료)에 지정된 경로라 레지스트리 교체 대상이 아닙니다 — 설정에서 바꾸세요",
+    "config": "양식 설정(config/swut_meta.json)에 등록된 경로입니다 — 그 파일에서 바꾸세요",
+    "form": "빌더 탭의 입력 폼에서 온 경로입니다 — 폼에서 바꾸세요",
+    "request": "이 요청이 직접 지정한 경로입니다 — 요청 값을 바꾸세요",
+    "__unknown__": "이 경로의 출처를 특정하지 못해 자동 채택하지 않습니다 — 등록한 곳에서 바꾸세요",
+}
+
+# 레벨별 산출물(통합 Summary `source_paths`)의 결합 구분자. 콤마는 경로에 쓰일 수 있어
+# (`…\Report,APP\x.xlsm` 실측) 오분할된다 — 개행은 경로에 못 들어간다(R26 리뷰 W1).
+_MULTI_SEP_LEVEL = "\n"
+
+
+def _split_multi(key: str, path: str) -> List[str]:
+    """다중 경로 입력을 조각으로. VectorCAST 는 콤마(config 규약), 산출물은 개행."""
+    if key == _req.IN_LEVEL_ARTIFACTS:
+        sep = _MULTI_SEP_LEVEL
+    elif key == _req.IN_VCAST:
+        sep = ","
+    else:
+        # 일반 문서 경로는 자르지 않는다 — `…\Report,APP\SwRS.docx` 를 콤마로 자르면 W1 과
+        # 같은 오분할이 접근 probe 에 남는다(리뷰 NI1).
+        return [str(path or "").strip()] if str(path or "").strip() else []
+    return [x.strip() for x in str(path or "").split(sep) if x.strip()]
 
 
 # 2026-08-26 — 본체를 `swut_meta_resolver.folder_contents_hint` 로 올렸다.
@@ -452,10 +565,14 @@ def _suggest_revision(resolver: Any, path: str) -> str:
         kind = is_sds_filename
     cands: List[str] = []
     for n in names:
-        name = str(n.get("name") if isinstance(n, dict) else n)
+        # ⚠ **파일명만** 낸다. resolver 의 `list_dir` 은 전체 경로를 돌려주는데(로컬·worker
+        #   둘 다), 그걸 그대로 `suggestion` 에 실으면 보드가 `adopt-doc-path` 에 전체
+        #   경로를 보내고 그 엔드포인트는 "파일명만 지정할 수 있습니다" 로 400 을 낸다 —
+        #   같은 버튼의 두 번째 400 이었다(2026-09-03 감사 P-1, 가드 실행에서 드러남).
+        name = Path(str(n.get("name") if isinstance(n, dict) else n)).name
         if not name or name == p.name:
             continue
-        if kind is None or kind(Path(name).name):
+        if kind is None or kind(name):
             cands.append(name)
     return cands[0] if len(cands) == 1 else ""
 
@@ -478,33 +595,69 @@ def _builder_project_id(req: PreflightRequest) -> str:
 
 
 def _resolve_inputs(req: PreflightRequest) -> Dict[str, str]:
-    """입력 키 → 경로. 우선순위는 **설정(doc_paths) > SCM 레지스트리**(기존 정책)."""
+    """입력 키 → 경로 (출처 없이). 계약 유지용 어댑터 — 순회는 `_resolve_inputs_with_origin` 한 곳뿐."""
+    return _resolve_inputs_with_origin(req)[0]
+
+
+def _resolve_inputs_with_origin(
+    req: PreflightRequest,
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+    """입력 키 → 경로, 그리고 **그 경로가 어디서 왔는지**.
+
+    우선순위는 **설정(doc_paths) > SCM 레지스트리**(기존 정책). 출처는
+    `{"from": "doc_paths"|"registry"|"config"|"form"|"request", "key": <그쪽 키>}` 다.
+    조치 액션이 출처를 알아야 한다 — 레지스트리에서 온 낡은 경로는 `adopt-doc-path` 로
+    교체할 수 있지만, 설정에서 온 경로는 교체해도 설정이 계속 가린다(P-1).
+    """
     from backend.services.scm_registry import get_registry_entry
 
     linked: Dict[str, Any] = {}
     source_root = req.source_root
+    source_root_from = "request" if source_root else ""
     if req.scm_id:
         entry = get_registry_entry(req.scm_id)
         if entry is not None:
             linked = entry.linked_docs.model_dump(mode="json")
-            source_root = source_root or (entry.source_root or "")
+            if not source_root and entry.source_root:
+                source_root, source_root_from = entry.source_root, "registry"
 
-    def _pick(*keys: str) -> str:
+    def _pick(*keys: str) -> Tuple[str, Dict[str, str]]:
         """설정(doc_paths) > 레지스트리 순, 그리고 **앞선 키가 이긴다**."""
         for key in keys:
             v = str(req.doc_paths.get(key) or "").strip()
             if v:
-                return v
+                return v, {"from": "doc_paths", "key": key}
         for key in keys:
             raw = linked.get(key)
             v = str((raw[0] if isinstance(raw, list) and raw else raw) or "").strip()
             if v:
-                return v
-        return ""
+                return v, {"from": "registry", "key": key}
+        return "", {}
 
     out: Dict[str, str] = {}
+    origins: Dict[str, Dict[str, str]] = {}
     if source_root:
         out[_req.IN_SOURCE_ROOT] = source_root
+        origins[_req.IN_SOURCE_ROOT] = {"from": source_root_from, "key": "source_root"}
+
+    # 통합 Summary 의 레벨별 산출물은 레지스트리·config 어디에도 등록되지 않는다 —
+    # 라우터(`swreport.py::_resolve_source_workbooks`)가 요청의 `source_paths` 를 읽고,
+    # 비면 양식 자체를 source 로 쓴다(template-self). 게이트도 **같은 자리(폼)** 를 본다.
+    # ⚠ 예전엔 이 키가 `required` 인데 채우는 곳이 없어 통합 Summary 준비 점검이
+    #   **영구 `진행 불가`** 였다(2026-09-03 감사 P-2). 리스트는 콤마로 이어 아래 probe 가
+    #   조각별로 본다(VectorCAST 복수 폴더와 같은 규약).
+    raw_paths = req.form.get("source_paths") if isinstance(req.form, dict) else None
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]           # 문자열 하나를 조용히 버리지 않는다
+    if isinstance(raw_paths, list):
+        # 목록은 **라우터와 같은 함수**로 만든다 — 라우터는 이 목록을 전부 읽으므로 하나라도
+        # 없으면 빌드가 죽는다(부분 결손 아님). 게이트가 자기 규칙으로 목록을 만들면
+        # "진행해도 된다" 고 한 조건에서 생성이 500 을 낸다(R26 리뷰 C1).
+        from backend.routers.swreport import planned_source_paths
+        parts = planned_source_paths(raw_paths)
+        if parts:
+            out[_req.IN_LEVEL_ARTIFACTS] = _MULTI_SEP_LEVEL.join(parts)
+            origins[_req.IN_LEVEL_ARTIFACTS] = {"from": "form", "key": "source_paths"}
 
     # 시험 결과 6종의 VectorCAST 자료는 **라우터와 같은 출처**에서 온다.
     #
@@ -518,13 +671,27 @@ def _resolve_inputs(req: PreflightRequest) -> Dict[str, str]:
         pid = _builder_project_id(req)
         if pid:
             from backend.services.swut_meta_resolver import (
+                MetaConfigUnreadable,
                 config_log_folders_for,
                 config_spec_path_for,
+                load_meta_from_config_strict,
             )
+            # ⚠ **읽을 수 있는가**를 먼저 확인한다(strict 로더). 값은 아래 `*_for` 함수가
+            #   같은 캐시로 읽는다 — 그 둘이 라우터 회귀의 seam 이라 여기서 값까지 직접
+            #   읽으면 seam 을 우회한다. 못 읽었으면 아래 두 키가 "경로가 지정되지 않았습니다"
+            #   (missing) 로 그려져 required 입력이 **진행 불가**가 된다 → 마커를 남기고
+            #   입력 루프가 `unmeasured` 로 낸다(P-3①).
+            try:
+                load_meta_from_config_strict(pid)
+            except MetaConfigUnreadable as exc:
+                # `key` 는 "그쪽 키" 계약을 지킨다 — 예외 문장은 `error` 에 따로 둔다.
+                origins[_CONFIG_UNREADABLE] = {"from": "config", "key": "swut_meta.json",
+                                               "error": str(exc)[:200]}
             folders = config_log_folders_for(pid, series)
             if folders:
                 # 복수 폴더(APP+BOOT)는 콤마로 잇는다 — 아래 probe 가 조각별로 본다.
                 out[_req.IN_VCAST] = ",".join(folders)
+                origins[_req.IN_VCAST] = {"from": "config", "key": f"{series}_log_folders"}
             # 대응 시험 규격서(SwUTS/SwITS)도 같은 이유로 config 를 본다. 이것도
             # `linked_docs` 엔 없고 `swut_meta.json` 에만 등록돼 있어, 안 보면
             # **등록돼 있는데도** "경로가 지정되지 않았습니다" 가 뜬다.
@@ -532,17 +699,21 @@ def _resolve_inputs(req: PreflightRequest) -> Dict[str, str]:
                 spec_path = config_spec_path_for(pid, series)
                 if spec_path:
                     out[_req.IN_SPEC_DOC] = spec_path
+                    origins[_req.IN_SPEC_DOC] = {"from": "config", "key": f"{series}s_docx_path"}
     for doc_key, input_key in _DOC_KEY_TO_INPUT.items():
         if doc_key == "template":
             # 문서별 템플릿을 먼저 보고, 없으면 공용 `template`(구 설정) 로 폴백한다.
             # 형식이 다른 자리에 같은 경로를 넣던 것이 원래 결함이므로 전용 키가 우선이다.
+            # ⚠ 레지스트리엔 공용 `template` 필드가 없다(`ScmLinkedDocs`) — 그 폴백은
+            #   설정(doc_paths) 쪽에서만 실제로 값이 나온다.
             specific = _TEMPLATE_KEY_BY_DOC.get(str(req.doc_type or "").strip().lower())
-            v = _pick(specific, "template") if specific else _pick("template")
+            v, origin = _pick(specific, "template") if specific else _pick("template")
         else:
-            v = _pick(doc_key)
+            v, origin = _pick(doc_key)
         if v:
             out[input_key] = v
-    return out
+            origins[input_key] = origin
+    return out, origins
 
 
 def _read_doc_material(path: str) -> Dict[str, Any]:
@@ -768,19 +939,25 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
 
     spec = _req.requirements_for(req.doc_type)
     resolver = get_resolver()
-    inputs = _resolve_inputs(req)
+    inputs, origins = _resolve_inputs_with_origin(req)
     steps: List[Dict[str, Any]] = []
     available: Dict[str, bool] = {}
 
     # ── 0. 접근 — cloudium 이면 worker 가 살아 있어야 한다 ────────────────────
     mode = getattr(resolver, "mode", "local")
     if mode != "local":
+        # 다중값 키(콤마/개행 결합)는 **첫 조각**으로 잰다 — 결합 문자열 자체는 존재하지
+        # 않는 합성 경로다(리뷰 I1).
         probe_target = next(
-            (p for k, p in inputs.items() if k != _req.IN_SOURCE_ROOT), ""
+            ((_split_multi(k, p) or [""])[0] for k, p in inputs.items()
+             if k != _req.IN_SOURCE_ROOT), "",
         )
         if probe_target:
             res = _probe_path(resolver, probe_target)
-            if res["state"] == S_ERROR:
+            # ⚠ worker 연결 실패일 때만 "워커를 실행하세요" 다. 허용 prefix 밖 경로도
+            #   같은 `S_ERROR` 로 오는데, 그건 워커가 아니라 등록의 문제라 아래 입력 행이
+            #   `open_scm` 으로 안내한다(P-3③).
+            if res["state"] == S_ERROR and res.get("kind") == "worker":
                 steps.append(_step(
                     "worker", "access", S_ERROR, "Cloudium worker",
                     reason=res["reason"],
@@ -811,11 +988,28 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             if config_spec_is_required_for(_pid, _spec_series):
                 required.append(_req.IN_SPEC_DOC)
                 optional.pop(_req.IN_SPEC_DOC, None)
+    config_unreadable = origins.get(_CONFIG_UNREADABLE)
+    if config_unreadable:
+        # 양식 설정 파일이 있는데 못 읽었다 — 아래 config 유래 입력들이 "미지정" 으로
+        # 보이는 이유가 이것이다. 한 번만, 판정 없이(`unmeasured`) 말한다.
+        steps.append(_step(
+            "meta_config", "access", S_UNMEASURED, "양식 설정(swut_meta.json)",
+            reason=f"읽지 못했습니다 — {config_unreadable.get('error', '')}",
+        ))
     for key in required + [k for k in optional if k not in required]:
         label = _req.INPUT_LABELS.get(key, key)
         is_required = key in required
         path = inputs.get(key, "")
         if not path:
+            if config_unreadable and key in (_req.IN_VCAST, _req.IN_SPEC_DOC):
+                # config 에서 왔을 키가 비어 있는데 그 config 를 못 읽었다 — "미지정"
+                # 이 아니라 **모름**이다. missing 으로 접으면 required 가 곧 진행 불가다.
+                steps.append(_step(
+                    key, "input", S_UNMEASURED, label, required=is_required,
+                    reason="양식 설정을 읽지 못해 확인할 수 없습니다",
+                    effect=optional.get(key, ""),
+                ))
+                continue
             state = S_MISSING if is_required else S_NEEDED
             steps.append(_step(
                 key, "input", state, label,
@@ -827,28 +1021,52 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             available[key] = False
             continue
 
-        if key == _req.IN_VCAST and "," in path:
+        # ⚠ 레벨별 산출물은 **항목 수와 무관하게** 이 분기다 — 1개짜리 목록을 단일 경로 분기로
+        #   보내면 `required` 승격이 빠져 "준비 완료" 인데 생성은 500 이다(리뷰 확인 패스 C1).
+        if key == _req.IN_LEVEL_ARTIFACTS or (
+            key == _req.IN_VCAST and len(_split_multi(key, path)) > 1
+        ):
             # APP+BOOT 처럼 폴더가 여럿이면 **전부** 확인한다. 첫 개만 보면 두 번째가
             # 사라져도 "확인됨" 이 되고, 산출물은 절반만 담긴 채로 나간다.
-            parts = [x.strip() for x in path.split(",") if x.strip()]
+            # 통합 Summary 의 레벨별 산출물(`source_paths`)도 같은 규약이다.
+            is_level = key == _req.IN_LEVEL_ARTIFACTS
+            noun = "산출물" if is_level else "로그 폴더"
+            parts = _split_multi(key, path)
             probes = [(x, _probe_path(resolver, x)) for x in parts]
             bad = [(x, r) for x, r in probes if r["state"] != S_OK]
-            if not bad:
+            unknown = [(x, r) for x, r in probes if r["state"] in (S_UNMEASURED, S_ERROR)]
+            if unknown:
+                # ⚠ 조각 하나라도 **확인 못 했으면** 전체가 모름이다. `bad` 로 접으면
+                #   "하나도 찾지 못했습니다"(없음) 가 되어 required 가 곧 진행 불가 —
+                #   이 라운드가 단일 경로에서 없앤 접기가 옆 분기에 남아 있었다(리뷰 C2).
+                st = S_ERROR if any(r["state"] == S_ERROR for _, r in unknown) else S_UNMEASURED
+                why = (f"{len(parts)}개 중 {len(unknown)}개를 확인하지 못했습니다: "
+                       + "; ".join(f"{Path(x).name} ({r['reason']})" for x, r in unknown))
+            elif not bad:
                 st, why = S_OK, ""
             elif len(bad) == len(probes):
-                st, why = S_MISSING, "등록된 로그 폴더를 하나도 찾지 못했습니다"
+                st, why = S_MISSING, f"등록된 {noun} 중 하나도 찾지 못했습니다"
+            elif is_level:
+                # 통합 Summary 는 목록을 **전부** 읽는다(`swreport.planned_source_paths`) —
+                # 하나만 없어도 빌드가 500 이다. 부분 결손이 아니라 차단이다(리뷰 C1).
+                st = S_MISSING
+                why = (f"{len(parts)}개 중 {len(bad)}개를 찾지 못했습니다 — 하나라도 없으면 "
+                       "생성이 실패합니다: " + "; ".join(Path(x).name for x, _ in bad))
             else:
-                # 일부만 없는 것은 "없음" 이 아니라 **부분 결손**이다 — 빌드는 되고
-                # 산출물만 줄어든다. 그 사실을 말하고 막지는 않는다.
+                # VectorCAST 로그 폴더는 일부만 없어도 빌드가 되고 산출물만 줄어든다 —
+                # **부분 결손**이다. 그 사실을 말하고 막지는 않는다.
                 st = S_DEGRADED
                 why = (f"{len(parts)}개 중 {len(bad)}개를 찾지 못했습니다: "
                        + "; ".join(Path(x).name for x, _ in bad))
             steps.append(_step(
-                key, "input", st, label, required=is_required, value=path,
-                reason=why, effect=optional.get(key, ""),
-                measured={"folders": len(parts), "missing": len(bad)},
+                key, "input", st, label,
+                # 목록을 **지정했으면** 그 전부가 있어야 한다 — 선택 입력이라도 빈 목록과
+                # "지정했는데 깨진 목록" 은 다르다.
+                required=is_required or (is_level and st in (S_MISSING, S_ERROR)),
+                value=path, reason=why, effect=optional.get(key, ""),
+                measured={"folders": len(parts), "missing": len(bad), "unknown": len(unknown)},
             ))
-            available[key] = (st == S_OK)
+            _mark_available(available, key, st)
             continue
 
         if key == _req.IN_SOURCE_ROOT:
@@ -866,13 +1084,20 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         res = _probe_path(resolver, path)
         state = res["state"]
         extra: Dict[str, Any] = {"value": path, "reason": res["reason"]}
+        if state == S_ERROR and res.get("kind") == "prefix":
+            # 워커는 살아 있는데 이 경로가 허용 prefix 밖이다 — 조치는 워커 실행이 아니라
+            # SCM/파일 모드에 prefix 를 등록하는 것이다.
+            extra["actions"] = [{"kind": "open_scm"}]
         if state == S_MISSING:
             suggestion = _suggest_revision(resolver, path)
             if suggestion:
                 state = S_STALE
                 extra["suggestion"] = suggestion
                 extra["reason"] = "등록 경로에 파일이 없습니다. 같은 폴더의 개정본으로 보입니다"
-                extra["actions"] = [{"kind": "adopt_suggestion", "value": suggestion}]
+                acts, note = _revision_actions(key, origins.get(key), suggestion)
+                extra["actions"] = acts
+                if note:
+                    extra["reason"] += " — " + note
             else:
                 extra["reason"] = "파일이 없습니다 — 경로가 바뀌었을 수 있습니다"
                 extra["actions"] = [{"kind": "pick_path",
@@ -893,12 +1118,15 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     if _probe_path(resolver, str(cand))["state"] == S_OK:
                         state = S_STALE
                         extra["suggestion"] = cand.name
-                        extra["actions"] = [{"kind": "adopt_suggestion", "value": cand.name}]
+                        acts, note = _revision_actions(key, origins.get(key), cand.name)
+                        extra["actions"] = acts
+                        if note:
+                            extra["reason"] += " — " + note
                         break
 
         steps.append(_step(key, "input", state, label, required=is_required,
                            effect=optional.get(key, ""), **extra))
-        available[key] = (state == S_OK)
+        _mark_available(available, key, state)
 
     # ── 1-b. **실제로 쓸 템플릿** — 위 `template` 행이 그것이 아닐 수 있다 ────
     #
@@ -1010,9 +1238,12 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 실제로는 레지스트리에 등록돼 있는데도. 화면이 '모름' 투성이가 되면 쓸모가 없다.
     # 그래서 **스텝은 요구 표대로 두되 가용성은 넓게 확인한다.**
     for key, path in inputs.items():
-        if key in available or key == _req.IN_SOURCE_ROOT:
+        if key in available or key in (_req.IN_SOURCE_ROOT, _req.IN_VCAST, _req.IN_LEVEL_ARTIFACTS):
+            # 다중 경로 키는 위에서 조각별로 이미 판정했다 — 결합 문자열을 통째로 다시 probe 하면
+            # 로컬 리졸버가 False 를 내 "확인했고 없음" 으로 뒤집는다(리뷰 NW2).
             continue
-        available[key] = _probe_path(resolver, path)["state"] == S_OK
+        # ⚠ 3상태다 — `== S_OK` 로 접으면 확인 실패가 "확인했고 없음"(✗) 이 된다(P-3②).
+        _mark_available(available, key, _probe_path(resolver, path)["state"])
 
     # AI 출처는 문서가 아니라 **설정**이다 — 키가 있으면 그 경로가 열려 있다.
     try:
@@ -1338,13 +1569,17 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         rows = _chain.chain_state(field, available)
         grounded = [r for r in rows if r["grounded"]]
         have_any = any(r["have"] is True for r in grounded)
+        # ⚠ 전부 `None`(확인 못 함)이면 "확보되지 않았다" 가 아니라 **모른다**다(리뷰 W5).
+        all_unknown = bool(grounded) and all(r["have"] is None for r in grounded)
         steps.append(_step(
             f"chain_{field}", "chain",
-            S_OK if have_any else S_DEGRADED,
+            S_OK if have_any else (S_UNMEASURED if all_unknown else S_DEGRADED),
             f"{_chain.FIELD_LABELS.get(field, field)} 출처",
             chain=grounded,
             # ⚠ 칸 수를 예고하지 않는다(모듈 docstring 규약).
-            reason="" if have_any else "근거 있는 출처가 하나도 확보되지 않았습니다",
+            reason=("" if have_any else
+                    "출처를 하나도 확인하지 못했습니다" if all_unknown else
+                    "근거 있는 출처가 하나도 확보되지 않았습니다"),
         ))
 
     # ── 4-a. 시험 결과 3종 — **양식 템플릿** ─────────────────────────────────
@@ -1373,14 +1608,22 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         if not project_id:
             state, reason = S_NEEDED, "대상 project_id 를 먼저 정해야 템플릿을 찾을 수 있습니다"
         else:
+            meta: Optional[Dict[str, Any]]
             try:
-                from backend.services.swut_meta_resolver import load_meta_from_config
-                meta = load_meta_from_config(project_id) or {}
+                # ⚠ strict 변형이다 — 빌드용 `load_meta_from_config` 는 읽기 실패를 `{}` 로
+                #   삼켜 "프로젝트 미등록" 과 구별이 안 된다. 게이트가 그 `{}` 를 받으면
+                #   "설정에 없다"(missing) → required → **진행 불가**로 굳는다 — config 를
+                #   못 읽은 순간 시험 결과 6종 전부가 차단됐다(2026-09-03 감사 P-3①).
+                from backend.services.swut_meta_resolver import load_meta_from_config_strict
+                meta = load_meta_from_config_strict(project_id) or {}
             except Exception as exc:  # noqa: BLE001 — config 로딩 계열이 광범위
-                meta = {}
+                # 읽기 실패는 `None`(모름)이다 — `{}`(없음)과 접지 않는다.
+                meta = None
                 reason = f"양식 설정을 읽지 못했습니다 ({type(exc).__name__}: {str(exc)[:100]})"
             paths = (meta or {}).get("template_paths") or {}
-            if not meta:
+            if meta is None:
+                state = S_UNMEASURED
+            elif not meta:
                 state = S_MISSING
                 reason = reason or (f"`{project_id}` 가 양식 설정(swut_meta)에 없습니다 — "
                                     "회사 표준 양식을 찾을 수 없습니다")
@@ -1852,7 +2095,8 @@ def docgen_attribution(req: AttributionRequest) -> Dict[str, Any]:
             first = path.split(",")[0].strip()
             available[key] = bool(first) and Path(first).expanduser().is_dir()
         else:
-            available[key] = _probe_path(resolver, path)["state"] == S_OK
+            # preflight 와 같은 3상태(`_mark_available`) — 확인 실패는 키를 만들지 않는다.
+            _mark_available(available, key, _probe_path(resolver, path)["state"])
 
     dist_by_field = {
         "asil": _chain.parse_source_distribution(conf.get("asil_sources")),
@@ -1908,7 +2152,10 @@ def docgen_adopt_doc_path(req: AdoptDocPathRequest) -> Dict[str, Any]:
 
     doc_key = str(req.doc_key or "").strip().lower()
     # 문서별 템플릿 키(`uds_template` 등)도 교체 대상이다 — 템플릿도 개정되며 파일명이 바뀐다.
-    if doc_key not in _DOC_KEY_TO_INPUT and doc_key not in set(_TEMPLATE_KEY_BY_DOC.values()):
+    # ⚠ 화이트리스트와 **스키마 필드**를 둘 다 본다 — 목록에 있어도 `ScmLinkedDocs` 에
+    #   없는 키(예전의 공용 `template`)는 아래 `linked.get` 이 늘 None 이라 "기존 등록
+    #   경로가 없습니다" 로만 끝났다. 어느 쪽이 갈려도 여기서 400 으로 드러난다.
+    if doc_key not in _ADOPTABLE_DOC_KEYS or doc_key not in ScmLinkedDocs.model_fields:
         raise HTTPException(status_code=400, detail=f"알 수 없는 문서 키: {req.doc_key}")
 
     name = str(req.filename or "").strip()

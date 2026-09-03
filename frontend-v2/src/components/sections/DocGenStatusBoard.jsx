@@ -685,8 +685,12 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       // 굳고, 이번엔 설정이 SCM 을 가려 더 안 보인다.
       if (!scmId) { toast('warning', 'SCM 프로젝트가 매칭되지 않아 교체할 수 없습니다.'); return; }
       try {
+        // ⚠ `doc_key` 는 서버가 액션에 실어 준 **레지스트리 키**(`action.target`)다.
+        //   `step.id` 는 입력 키(`swrs`/`swds`/`uds_doc`)라 `adopt-doc-path` 가 모른다 —
+        //   그걸 보내던 동안 이 버튼은 `hsis`/`stp` 빼고 전부 400 이었다(2026-09-03).
+        //   `step.id` 폴백은 두 키가 같은 옛 서버 응답과의 호환일 뿐이다.
         const res = await post('/api/docgen/adopt-doc-path', {
-          scm_id: scmId, doc_key: step?.id || '', filename: action?.value || '',
+          scm_id: scmId, doc_key: action?.target || step?.id || '', filename: action?.value || '',
         });
         notifyScmRegistryChanged();
         toast('success', `${step?.label || '문서'} 경로를 교체했습니다: ${res?.new || ''}`);
@@ -984,8 +988,12 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
                       prepIsOpen={prepOpen === row.key}
                       prepState={prep[row.key]}
                     capsScope={capsScope}
-                      onTogglePrep={() => togglePrep(row.key, row.payloadForm)}
-                      onPrepReload={() => loadPrep(row.key, row.payloadForm)}
+                      /* 준비 점검에는 **빌드가 보내는 것과 같은 shape** 을 싣는다 —
+                         `toBuildPayload` 가 `source_paths_text`(textarea) 를 `source_paths`
+                         배열로 바꾼다. 원본 폼을 보내면 통합 Summary 의 레벨별 산출물을
+                         게이트가 영영 못 본다(서버는 라우터와 같은 키 `source_paths` 만 읽는다). */
+                      onTogglePrep={() => togglePrep(row.key, toBuildPayload(row.builder, row.payloadForm))}
+                      onPrepReload={() => loadPrep(row.key, toBuildPayload(row.builder, row.payloadForm))}
                       onPrepAction={handlePrepAction}
                     />
                   );

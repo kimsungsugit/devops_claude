@@ -110,21 +110,29 @@ def _resolve_template_bytes(req: SwReportBuildRequest) -> bytes:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def planned_source_paths(source_paths: list[str] | None) -> list[str]:
+    """빌드가 **실제로 읽을** 레벨별 산출물 경로 — 판정 단일 출처.
+
+    빈 항목만 걸러내고 나머지는 **전부** `read_bytes` 한다. 즉 하나라도 없으면 부분 결손이
+    아니라 빌드 실패(500)다. 준비 게이트(`docgen_preflight`)가 이 함수를 그대로 불러 같은
+    목록을 확인한다 — 게이트가 자기 규칙으로 목록을 만들면 "진행해도 된다" 고 한 조건에서
+    생성이 죽는다(2026-09-03 R26 리뷰 C1). 목록이 비면 호출자는 양식 자체를 source 로 쓴다.
+    """
+    return [str(p).strip() for p in (source_paths or []) if str(p or "").strip()]
+
+
 def _resolve_source_workbooks(
     req: SwReportBuildRequest, template_bytes: bytes,
 ) -> list[tuple[str, bytes]]:
     """source_paths를 resolver로 read. 비면 template 자체를 source로 (단일파일 refresh)."""
     resolver = get_resolver()
-    if not req.source_paths:
+    paths = planned_source_paths(req.source_paths)
+    if not paths:
         return [("template-self", template_bytes)]
     out: list[tuple[str, bytes]] = []
-    for p in req.source_paths:
-        if not p:
-            continue
+    for p in paths:
         label = p.replace("\\", "/").rsplit("/", 1)[-1] or p
         out.append((label, resolver.read_bytes(p)))
-    if not out:
-        return [("template-self", template_bytes)]
     return out
 
 

@@ -827,7 +827,14 @@ def test_template_suggestion_only_when_the_file_exists(tmp_path: Path) -> None:
     assert s2 is not None
     assert s2["state"] == "stale_path"
     assert s2["suggestion"] == "spec.xlsm"
-    assert any(a["kind"] == "adopt_suggestion" for a in (s2.get("actions") or []))
+    # ⚠ 설정(doc_paths)에서 온 경로는 **레지스트리 교체 대상이 아니다**(2026-09-03 P-1) —
+    #   교체해도 설정이 레지스트리를 계속 가려 화면은 그대로다. 그래서 `pick_path` 로
+    #   어디서 바꿔야 하는지 말한다. 레지스트리 출처면 `adopt_suggestion` + `target` 이다
+    #   (`test_docgen_preflight_r26.py`).
+    kinds = {a["kind"] for a in (s2.get("actions") or [])}
+    assert "adopt_suggestion" not in kinds, s2.get("actions")
+    assert "pick_path" in kinds, s2.get("actions")
+    assert "설정" in s2.get("reason", "")
 
 
 def test_uds_template_wants_docx(tmp_path: Path) -> None:
@@ -1138,9 +1145,13 @@ class TestReportTemplateKeyParity:
 
 # ── 시험 결과 6종이 실제로 게이트를 받는가 ───────────────────────────────────
 
-@pytest.mark.parametrize("doc_type", ["swut", "sutr", "swutcr", "swit", "sitr", "switcr"])
+@pytest.mark.parametrize("doc_type", ["swut", "sutr", "swutcr", "swit", "sitr", "switcr", "swreport"])
 def test_test_report_doc_types_get_form_and_template_steps(doc_type) -> None:
-    """커버리지 2종(`swut`/`swit`)이 빠져 있으면 보드의 [준비] 가 빈 패널을 연다."""
+    """커버리지 2종(`swut`/`swit`)이 빠져 있으면 보드의 [준비] 가 빈 패널을 연다.
+
+    `swreport` 도 같은 표에 있어야 한다 — 빠져 있던 동안 통합 Summary 의 영구 `진행 불가`
+    (2026-09-03 감사 P-2)를 아무 가드도 보지 못했다.
+    """
     data = _post({"doc_type": doc_type})
     assert data["unknown_doc_type"] is False
     ids = {s["id"] for s in data["steps"]}
@@ -1322,7 +1333,7 @@ class TestVectorcastSourceParity:
         })
         step = _step(data, "vectorcast")
         assert step["state"] == "degraded", step
-        assert step["measured"] == {"folders": 2, "missing": 1}
+        assert step["measured"] == {"folders": 2, "missing": 1, "unknown": 0}
         assert "BOOT_없음" in step["reason"]
 
     def test_all_missing_is_missing(self, monkeypatch, tmp_path) -> None:
