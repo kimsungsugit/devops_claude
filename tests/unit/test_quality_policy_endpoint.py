@@ -115,13 +115,13 @@ class TestPolicyEndpoint:
 
         맵과 config 키가 같아도 이름 문자열이 틀리면 화면 안내가 거짓이 된다.
         """
-        import importlib
-
-        import config as config_mod
         from backend.routers.quality import _GATE_ENV_NAMES
+        from tests.unit._config_reload import reexec_config
 
+        # ⚠ `importlib.reload` 대신 같은 파일 재실행 — sys.path 그림자(tools/generate_uds_local.py) 아래서는
+        #   reload 가 외부 트리의 config.py 를 실행해 이 단언이 순서에 따라 갈린다(R30 리뷰 I7).
         monkeypatch.setenv(_GATE_ENV_NAMES["called_min"], "12.5")
-        reloaded = importlib.reload(config_mod)
+        reloaded = reexec_config()
         try:
             assert reloaded.UDS_QUALITY_GATE_THRESHOLDS["called_min"] == 12.5, (
                 f"{_GATE_ENV_NAMES['called_min']} 로 덮이지 않는다 — 화면이 안내하는 "
@@ -129,7 +129,7 @@ class TestPolicyEndpoint:
             )
         finally:
             monkeypatch.delenv(_GATE_ENV_NAMES["called_min"], raising=False)
-            importlib.reload(config_mod)
+            reexec_config()
 
     def test_values_are_effective_not_literals(self, client, monkeypatch):
         """리터럴이 아니라 지금 프로세스의 실효값을 낸다."""

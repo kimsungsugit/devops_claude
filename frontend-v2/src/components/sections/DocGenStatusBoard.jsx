@@ -1427,6 +1427,39 @@ function EvidenceDetail({ run, detail }) {
                     {' — 미상·미기재가 많을수록 추적성 판정이 약해진다'}
                   </li>
                 )}
+                {/* (R30 Q-2) 무엇을 채점했는가 — payload 가 없으면 문서를 되읽은 것이라 설명 출처를 알 수 없고
+                    (High 0 이 정상), payload 가 있어도 잰 집합은 문서 ∩ payload 다. 이 두 줄이 없으면
+                    "429항목 문서 통과" 로 읽힌다. */}
+                {gate.payload_present === false && (
+                  <li>
+                    {/* "없음" 과 "있는데 못 읽음" 은 다르다(리뷰 W1) — 후자는 생성 직후 재채점(torn read) 신호다 */}
+                    {gate.payload_read_error
+                      ? <>payload 사이드카 <strong>읽기 실패</strong>({gate.payload_read_error})</>
+                      : <>payload 사이드카 없음</>}
+                    {' — '}<strong>문서 자기 대조</strong>
+                    {' (설명 출처를 알 수 없어 근거 있음 0 이 정상, 채움률만 유효)'}
+                  </li>
+                )}
+                {gate.entries_not_in_payload?.count > 0 && (
+                  <li>
+                    문서 항목 {gate.entries_not_in_payload.total} 중{' '}
+                    <strong>{gate.entries_not_in_payload.count}</strong>
+                    {'개는 payload 에 없음(생성되지 않은 서식) — 채점 밖'}
+                    {/* 통과가 무엇에 대한 통과인가 — 실측: 426 중 18개 채점으로 PASS 가 된 문서가 있다 */}
+                    {gate.scored_entries?.total > 0 && (
+                      <>{' · 통과/실패는 채점된 '}<strong>{gate.scored_entries.count}</strong>
+                        {'개 기준(문서 커버리지 '}
+                        {(gate.scored_entries.count / gate.scored_entries.total * 100).toFixed(1)}%)</>
+                    )}
+                  </li>
+                )}
+                {gate.payload_not_in_document?.count > 0 && (
+                  <li>
+                    소스 함수 <strong>{gate.payload_not_in_document.count}</strong>
+                    {' / '}{gate.payload_not_in_document.total}
+                    {'개가 문서에 없음 — 채점 밖(문서에 없는 함수를 문서 품질로 세지 않는다)'}
+                  </li>
+                )}
                 {gate.description_quality?.high && (
                   <li>
                     설명 출처: 근거 있음 {gate.description_quality.high.count}

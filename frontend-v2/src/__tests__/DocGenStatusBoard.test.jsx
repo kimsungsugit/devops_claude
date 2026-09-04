@@ -297,6 +297,53 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     expect(screen.queryByText(/Related ID 미기재/)).not.toBeInTheDocument();   // 0 이면 안 만든다
   });
 
+  // ⚠ 라운드 30 (Q-2) — 무엇을 채점했는가. payload 없음 = 문서 자기 대조(근거 있음 0 이 정상),
+  //    payload 있음 = 문서 ∩ payload 만 채점. 이 두 사실이 없으면 "429항목 문서 통과" 로 읽힌다.
+  it('payload 가 없으면 "문서 자기 대조" 를, 있으면 문서·payload 차집합을 보인다', async () => {
+    const evid = (gate) => Promise.resolve({
+      run_id: 1, output_path_present: true, sidecars_expected: true,
+      gate_report: { present: true, gates_passed: 8, gates_total: 10, total_functions: 5, ...gate },
+      confidence: { present: false, reason: '없음' }, docx_validate: { present: false, reason: '없음' },
+    });
+    mockApi.mockImplementation((path) => String(path).includes('/evidence')
+      ? evid({ payload_present: false, document_entries: 429 })
+      : Promise.resolve({ runs: [run()], total: 1 }));
+    const user = userEvent.setup();
+    const { unmount } = mountBoard();
+    let tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    await waitFor(() => expect(screen.getByText(/문서 자기 대조/)).toBeInTheDocument());
+    expect(screen.getByText(/payload 사이드카 없음/)).toBeInTheDocument();
+    expect(screen.queryByText(/읽기 실패/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/payload 에 없음/)).not.toBeInTheDocument();
+    unmount();
+
+    // "없음" 과 "있는데 못 읽음" 은 다르다(리뷰 W1) — 후자는 생성 직후 재채점(torn read) 신호
+    mockApi.mockImplementation((path) => String(path).includes('/evidence')
+      ? evid({ payload_present: false, payload_read_error: 'u.payload.json: JSONDecodeError: x', document_entries: 429 })
+      : Promise.resolve({ runs: [run()], total: 1 }));
+    const second = mountBoard();
+    tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    await waitFor(() => expect(screen.getByText(/읽기 실패/).closest('li')).toHaveTextContent(/JSONDecodeError/));
+    expect(screen.queryByText(/payload 사이드카 없음/)).not.toBeInTheDocument();
+    second.unmount();
+
+    mockApi.mockImplementation((path) => String(path).includes('/evidence')
+      ? evid({ payload_present: true, payload_file: 'u.payload.json', document_entries: 429,
+               entries_not_in_payload: { count: 424, total: 429 }, scored_entries: { count: 5, total: 429 },
+               payload_not_in_document: { count: 5, total: 5 } })
+      : Promise.resolve({ runs: [run()], total: 1 }));
+    mountBoard();
+    tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    await waitFor(() => expect(screen.getByText(/payload 에 없음/)).toHaveTextContent(/424/));
+    // 통과가 무엇에 대한 통과인가 — 채점된 5개 기준, 커버리지 1.2%
+    expect(screen.getByText(/payload 에 없음/)).toHaveTextContent(/채점된 5개 기준\(문서 커버리지 1\.2%\)/);
+    expect(screen.getByText(/문서에 없음/)).toHaveTextContent(/5 \/ 5/);
+    expect(screen.queryByText(/문서 자기 대조/)).not.toBeInTheDocument();
+  });
+
   it('구판 리포트에 임계 없음·부분 측정·미기재 키가 없으면 그 문구를 만들지 않는다', async () => {
     mockApi.mockImplementation((path) => {
       if (String(path).includes('/evidence')) {

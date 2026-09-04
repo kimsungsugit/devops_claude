@@ -102,6 +102,28 @@ def _as_int(text: Optional[str]) -> Optional[int]:
         return None
 
 
+def _payload_present(text: Optional[str]) -> Optional[bool]:
+    """head `- Payload:` 의 backtick 값 — `none` 이면 False, 파일명이면 True, 줄이 없으면(구판) None."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    return raw.lower() != "none"
+
+
+def _payload_read_error(lines: List[str]) -> Optional[str]:
+    for line in lines:
+        s = line.strip()
+        if s.lower().startswith("- payload:") and "읽기 실패" in s:
+            m = re.search(r"읽기 실패 `([^`]*)`", s)
+            return m.group(1) if m else "읽기 실패"
+    return None
+
+
+def _payload_file(text: Optional[str]) -> Optional[str]:
+    raw = str(text or "").strip()
+    return raw if raw and raw.lower() != "none" else None
+
+
 def _head_ratio(lines: List[str], label: str) -> Optional[Dict[str, int]]:
     """head 의 ``- Label: `N` / `M` `` 줄 → `{count, total}`. 없으면 `None`(0 이 아니다).
 
@@ -249,6 +271,19 @@ def read_gate_report(path: Path) -> Dict[str, Any]:
         # `Gate pass` 를 False 로 붙들지만 해당 없음은 붙들지 않는다. 구판은 `None`.
         "not_applicable_gates": _bullet_list(sec.get("Not Applicable Gates", [])),
         "not_applicable_count": _as_count(head.get("Not applicable gates")),
+        # ── 무엇을 채점했는가 (R30 Q-2) ── payload 유무와 문서와의 차집합. 구판은 전부 `None`.
+        #   `payload_present` 가 False 면 설명 출처는 문서 자기 대조(generated_doc)라 High 가 0 인 게 정상이다.
+        "payload_present": _payload_present(head.get("Payload")),
+        "payload_file": _payload_file(head.get("Payload")),
+        # 리뷰 W1: "없음" 과 "있는데 못 읽음" 은 다르다 — 못 읽은 사유가 있으면 그 문장(구판·정상 None)
+        "payload_read_error": _payload_read_error(sec.get("", [])),
+        # 리뷰 W3: 행 수 ≠ 함수 수 — 같은 이름 SwUFn 이 여럿이면 한 payload 행이 복제 채점된다
+        "distinct_scored_functions": _as_count(head.get("Distinct scored functions")),
+        "document_entries": _as_count(head.get("Document entries")),
+        # 채점 집합 / 문서 항목 — 판정 밖이지만 "무엇에 대한 통과인가" 의 분모. 구판 None.
+        "scored_entries": _head_ratio(sec.get("", []), "Scored entries"),
+        "entries_not_in_payload": _head_ratio(sec.get("", []), "Document entries not in payload"),
+        "payload_not_in_document": _head_ratio(sec.get("", []), "Payload functions not in document"),
         # 잰 값은 있는데 임계 표에 키가 없는 축(리뷰 W4) — FAIL 에 사유가 붙으려면 리더가 세야 한다
         "ungated_gates": _bullet_list(sec.get("Ungated Metrics", [])),
         "ungated_count": _as_count(head.get("Ungated metrics")),

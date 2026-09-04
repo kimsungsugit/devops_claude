@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -56,7 +55,7 @@ def _reloaded_config(env: Dict[str, Optional[str]]):
     리뷰 W3: `finally: importlib.reload(config)` 가 monkeypatch teardown 보다 먼저 돌면 지워진 env 로
     config 가 재빌드돼 세션 나머지 동안 `UDS_SIDECAR_*` 가 무시된다(실증: 후속 테스트가 0.7 를 봤다).
     """
-    import config as config_mod
+    from tests.unit._config_reload import reexec_config
 
     saved = {k: os.environ.get(k) for k in env}
     for k, v in env.items():
@@ -65,14 +64,16 @@ def _reloaded_config(env: Dict[str, Optional[str]]):
         else:
             os.environ[k] = v
     try:
-        yield importlib.reload(config_mod)
+        # ⚠ `importlib.reload` 가 아니다 — sys.path 가 외부 트리로 그림자져 있으면(tools/generate_uds_local.py
+        #   import 이후) reload 는 **다른 config.py** 를 실행한다(리뷰 I7 2차 원인). 같은 파일을 재실행한다.
+        yield reexec_config()
     finally:
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        importlib.reload(config_mod)
+        reexec_config()
 
 
 def _doc_per_fn(tmp: Path, per_fn: Sequence[Sequence[Tuple[str, str]]], name: str = "u.docx") -> Path:
@@ -164,7 +165,10 @@ class TestNotApplicableIsNotUnmeasured:
 
     def test_all_void_prototypes_are_not_applicable_and_do_not_hold_gate_pass(self, tmp_path):
         """모든 Prototype 을 읽었고 슬롯 있는 함수가 0 → 잴 대상이 없다. `Gate pass` 를 붙들지 않는다."""
-        d = _doc_per_fn(tmp_path, [_fn("void fn_1(void)"), _fn("void fn_2(void)")])
+        # (R30) payload 없는 문서 자기 대조는 설명 출처가 generated_doc 이라 30자 이하 설명은 Low 로 떨어져
+        # "Doxygen 주석" 권고가 붙고 "모두 통과" 산문이 안 나온다 — 여기선 산문을 보려고 긴 설명을 준다.
+        long_desc = "이 함수는 센서 원시값을 읽어 보정 계수를 곱한 뒤 전역 버퍼에 저장한다"
+        d = _doc_per_fn(tmp_path, [_fn("void fn_1(void)", desc=long_desc), _fn("void fn_2(void)", desc=long_desc)])
         text, got = _run(d, tmp_path / "na.quality_gate.md", thresholds=_ALL_ZERO)
         assert got["not_applicable_count"] == 2
         assert got["unmeasured_count"] == 0

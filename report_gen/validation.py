@@ -32,21 +32,78 @@ from report_gen.utils import _extract_call_names, _safe_dict
 _logger = logging.getLogger("report_generator")
 
 
-def _load_uds_payload_for_docx(docx_path: str) -> Dict[str, Any]:
+def _load_uds_payload_with_source(docx_path: str) -> Tuple[Dict[str, Any], Optional[Path]]:
+    """`(payload, 읽은 파일)`. 없으면 `({}, None)`. 읽기 실패 사유가 필요하면 `_load_uds_payload_detailed`.
+
+    (R30 Q-2) 후보가 `*.payload.full.json` 두 이름뿐이었는데 **그 이름을 쓰는 라이터가 코드에 없다**
+    (디스크의 33개는 2026-02~03 옛 하네스 산출물). 실 라이터 5곳은 전부 `*.payload.json` 이라 품질 게이트는
+    payload 를 한 번도 못 읽고 **자기 산출물 DOCX 를 되읽어** 채점했다 — 그 경로에서 설명 출처가 `reference`
+    (신뢰 출처)로 붙어 High 등급이 "비어 있지 않음" 과 동의어였다(출처 세탁).
+    옛 이름은 legacy 로 남기되 **읽은 파일을 리포트에 적는다**.
+    """
+    data, src, _err = _load_uds_payload_detailed(docx_path)
+    return data, src
+
+
+def _load_uds_payload_detailed(docx_path: str) -> Tuple[Dict[str, Any], Optional[Path], Optional[str]]:
+    """`(payload, 읽은 파일, 읽기 실패 사유)`.
+
+    ⚠ 순서가 계약이다(리뷰 C2): 현행 라이터의 `.payload.json` 은 DOCX **직후**에 쓰이고, legacy
+      `*.payload.full.json` 은 DOCX **이전** 스냅샷이다(실측 mtime: full 09:52:05 → docx 10:03:25 → json
+      10:03:26, 8쌍 중 1쌍은 `globals_static` 36함수가 다르다). legacy 를 먼저 고르면 문서를 만든 값이 아니라
+      그 이전 값으로 채점한다.
+    ⚠ "파일 없음" 과 "있는데 못 읽음" 은 다르다(리뷰 W1) — 후자를 `없음` 으로 내면 채점 모드가 문서 자기 대조로
+      조용히 바뀐다. 마지막 실패 사유를 함께 돌려준다(뒤 후보가 성공하면 그쪽을 쓴다).
+    """
     docx = Path(docx_path)
     candidates = [
-        docx.with_suffix(".docx.payload.full.json"),
-        docx.with_suffix(".payload.full.json"),
+        docx.with_suffix(".payload.json"),             # 현행 라이터 5곳 — DOCX 직후 기록
+        docx.with_suffix(".docx.payload.full.json"),   # legacy(라이터 없음) — DOCX 이전 스냅샷
+        docx.with_suffix(".payload.full.json"),        # legacy
     ]
+    last_error: Optional[str] = None
     for cand in candidates:
         try:
             if cand.exists():
                 data = json.loads(cand.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    return data
-        except Exception:
+                    return data, cand, None
+                last_error = f"{cand.name}: JSON 최상위가 객체가 아니다"
+        except Exception as exc:
+            last_error = f"{cand.name}: {type(exc).__name__}: {exc}"
+            _logger.warning("payload 사이드카를 읽지 못했다 — 다음 후보로: %s", last_error)
             continue
-    return {}
+    return {}, None, last_error
+
+
+def _load_uds_payload_for_docx(docx_path: str) -> Dict[str, Any]:
+    """호환 shim — 프로덕션 호출자 0(테스트만). 새 코드는 `_load_uds_payload_with_source` 를 쓸 것."""
+    return _load_uds_payload_with_source(docx_path)[0]
+
+
+def _is_none_marker_list(v: Any) -> bool:
+    """`["[IN] (none)"]` 처럼 **전부** "없음 표기" 인 인터페이스 값 — 채움으로 세되(evaluator 규약) note 로 드러낸다."""
+    items = v if isinstance(v, list) else [v]
+    texts = [str(x or "").strip() for x in items]
+    texts = [t for t in texts if t]
+    if not texts:
+        return False
+    for t in texts:
+        core = re.sub(r"^\[(IN|OUT|IN/OUT)\]\s*", "", t, flags=re.I).strip().lower()
+        if core not in {"(none)", "none", "n/a", "na", "tbd", "-", "()"}:
+            return False
+    return True
+
+
+def _merge_payload_over_doc(doc_row: Dict[str, Any], payload_row: Dict[str, Any]) -> Dict[str, Any]:
+    """문서 행 위에 payload 값을 덮는다 — **비어 있지 않은 값만**. payload 가 진실 출처(prototype·inputs·
+    outputs·globals 는 문서 셀보다 소스 파서 값이 정확하다)지만, payload 에 없는 칸까지 지우진 않는다."""
+    merged = dict(doc_row)
+    for k, v in payload_row.items():
+        if v is None or (isinstance(v, (str, list, dict)) and not v):
+            continue
+        merged[k] = v
+    return merged
 
 
 def _valid_call_names(value: Any) -> List[str]:
@@ -842,6 +899,12 @@ def generate_uds_field_quality_gate_report(
     out_path: str,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> str:
+    """UDS 사이드카 품질 게이트(`.quality_gate.md`).
+
+    ⚠ 전제: `docx_path` 는 **이 저장소가 생성한 산출물**이다(프로덕션 호출 4곳 전부 `out_path`). payload 가 없으면
+      문서를 되읽어 채점하는데 그때 설명 출처는 `generated_doc`(유래 불명)으로 강제한다 — 외부 정본 SUDS 를 이
+      함수에 넣으면 그 전제가 거짓이라 High 가 구조적으로 0 이다(리뷰 I5).
+    """
     try:
         import docx  # type: ignore
     except Exception as exc:
@@ -886,16 +949,39 @@ def generate_uds_field_quality_gate_report(
 
     doc = docx.Document(str(docx_path))
     doc_map = _extract_function_info_from_docx(doc)
-    payload = _load_uds_payload_for_docx(docx_path)
+    payload, payload_file, payload_read_error = _load_uds_payload_detailed(docx_path)
     payload_by_name = _payload_function_details_by_name(payload)
-    payload_details = payload.get("function_details") or {}
-    if isinstance(payload_details, dict) and payload_details:
-        base_items = [info for info in payload_details.values() if isinstance(info, dict)]
-    elif payload_by_name:
-        base_items = list(payload_by_name.values())
+    doc_rows = [row for row in doc_map.values() if isinstance(row, dict)]
+    document_entries = len(doc_rows)
+    # ── 채점 집합 (R30 Q-2) ── payload 가 있으면 **문서 ∩ payload** 다.
+    #   · payload 전체를 세면 문서에 없는 함수를 "문서 품질" 로 채점한다 — 실측: 429항목 문서의 payload 는
+    #     함수 5개고 그 5개가 **문서에 하나도 없다**(템플릿 heading 미매칭). 그 5개로 채점하면 문서와 무관한 점수다.
+    #   · 문서 전체를 세면 payload 에 없는 항목(생성되지 않은 템플릿 stub 419개)이 빈 칸으로 분모에 들어가
+    #     채움률을 끌어내린다 — 그건 필드 품질이 아니라 **문서 커버리지**의 축이고 `.validation.md` 가 이미 센다.
+    #   그래서 교집합을 채점하고, 양쪽 차집합은 head 에 수로 적는다(잰 것 ≠ 문서 전체임을 숨기지 않는다).
+    # ⚠ 분기 조건은 **파일을 읽었는가**다(리뷰 C1). `payload_by_name` 으로 갈리면 "읽었는데 함수 0개"(라이터
+    #   `local.py`/`jenkins.py` 는 빈 dict 도 쓴다)가 문서 자기 대조로 떨어지면서 head 는 payload 를 읽었다고
+    #   광고하고 차집합엔 `None` 이 찍힌다. 함수 0개 = 교집합 0 = 전 축 미측정이 맞다.
+    scored_name_keys: List[str] = []
+    if payload_file is not None:
+        base_items = []
+        for row in doc_rows:
+            nk = _normalize_symbol_name(str(row.get("name") or "")).lower()
+            info = payload_by_name.get(nk) if nk else None
+            if isinstance(info, dict):
+                base_items.append(_merge_payload_over_doc(row, info))
+                scored_name_keys.append(nk)
+        doc_name_keys = {_normalize_symbol_name(str(r.get("name") or "")).lower() for r in doc_rows}
+        entries_not_in_payload = document_entries - len(base_items)
+        payload_not_in_document = sum(1 for k in payload_by_name if k not in doc_name_keys)
     else:
-        base_items = [row for row in doc_map.values() if isinstance(row, dict)]
+        base_items = doc_rows
+        entries_not_in_payload = None
+        payload_not_in_document = None
     total = len(base_items)
+    # 리뷰 W3: 같은 함수명이 여러 SwUFn 에 있으면 한 payload 행이 여러 문서 행에 복제 채점된다 — 실측 418항목
+    # 문서에서 344행 ← 구별 함수 326개(`main` 이 세 곳). `Total functions` 는 행 수지 함수 수가 아니다.
+    distinct_scored = len(set(scored_name_keys)) if payload_file is not None else None
 
     def _filled(v: Any) -> bool:
         s = str(v or "").strip()
@@ -932,6 +1018,8 @@ def generate_uds_field_quality_gate_report(
     asil_filled = 0          # R29 Q-5: 빈 칸·N/A 도 TBD 와 같이 미기재 — quick gate 와 같은 규칙
     related_filled = 0
     proto_readable = 0       # R29 Q-4: Prototype 을 읽은 함수 — 슬롯을 셀 수 있었던 범위
+    input_none_marker = 0    # 리뷰 I4: 채움으로 센 것 중 "(none)" 표기(파라미터 없음) — 사이드카엔 _real 동반축이 없다
+    output_none_marker = 0
     input_ok_applicable = 0  # 슬롯이 **있는** 함수 중 채워진 것 (분자는 분모 안에서만)
     output_ok_applicable = 0
     desc_high = 0
@@ -950,9 +1038,12 @@ def generate_uds_field_quality_gate_report(
         desc_value = payload_info.get("description") if payload_info else row.get("description")
         if _filled_desc(desc_value):
             desc_ok += 1
+        # ⚠ 출처 세탁 차단(R30 Q-2): payload 가 없어 **자기 산출물을 되읽은** 설명은 유래를 알 수 없다 —
+        #   DOCX 추출기는 그걸 `reference`(정본에서 읽음 = 신뢰 출처)로 붙이는데, 여기선 `generated_doc`
+        #   (약한 출처, provenance 표 0.30)이다. 그래야 High 가 "비어 있지 않음" 과 동의어가 되지 않는다.
         dq = _classify_description_quality(
             str((payload_info.get("description") if payload_info else row.get("description")) or ""),
-            str((payload_info.get("description_source") if payload_info else row.get("description_source")) or ""),
+            str(payload_info.get("description_source") or "") if payload_info else "generated_doc",
         )
         if dq == "high":
             desc_high += 1
@@ -985,12 +1076,16 @@ def generate_uds_field_quality_gate_report(
             input_ok += 1
             if has_input_slot:
                 input_ok_applicable += 1
+            if _is_none_marker_list(row.get("inputs")):
+                input_none_marker += 1
         if has_output_slot:
             output_applicable += 1
         if _filled_list(row.get("outputs")):
             output_ok += 1
             if has_output_slot:
                 output_ok_applicable += 1
+            if _is_none_marker_list(row.get("outputs")):
+                output_none_marker += 1
         gg = row.get("globals_global")
         if gg is None:
             gg = row.get("globals")
@@ -1128,6 +1223,33 @@ def generate_uds_field_quality_gate_report(
     lines.append("")
     lines.append(f"- Target DOCX: `{docx_path}`")
     lines.append(f"- Total functions: `{total}`")
+    # ── 무엇을 채점했는가 (R30 Q-2) ── payload 유무·읽은 파일·문서와의 차집합. 잰 집합이 문서 전체가 아닐 때
+    #    그 사실이 head 에 없으면 "429항목 문서가 통과" 로 읽힌다.
+    if payload_file is not None:
+        _fn_note = " (함수 0개 — 생성 결과가 비어 있어 교집합 0)" if not payload_by_name else ""
+        lines.append(f"- Payload: `{payload_file.name}` · functions `{len(payload_by_name)}`{_fn_note}")
+        # 리뷰 F3: ASIL/Related/호출 값은 **payload(파서) 기준**이다 — 문서 셀과 다를 수 있다(실측 344행 중 11행의
+        # Related ID 계열이 달랐다). 어느 쪽을 쟀는지 적는다.
+        lines.append("- Scored fields source: `payload` — ASIL·Related·호출 값은 파서 값이며 문서 셀과 다를 수 있다")
+        lines.append(f"- Document entries: `{document_entries}` · scored (document ∩ payload): `{total}`")
+        # ⚠ 커버리지는 **필드 품질과 다른 축**이라 판정에 넣지 않는다(임계를 새로 만드는 건 정책 — 계획서 §8).
+        #   그래도 수는 head 에 둔다: 재채점 실측에서 426항목 중 18개만 생성된 문서가 그 18개로 `Gate pass: True`
+        #   가 됐다. "통과" 가 무엇에 대한 통과인지 이 줄이 없으면 읽는 사람이 모른다.
+        #   ⚠ 괄호를 쓰지 않는다(리뷰 W2) — `- L: \`n\` / \`m\` (x)` 는 지표 포맷이라 파서가 지표로 잡는다.
+        lines.append(f"- Scored entries: `{total}` / `{document_entries}` — 문서 커버리지 "
+                     f"{_pct(_rate(total, document_entries))}, 판정 밖")
+        lines.append(f"- Distinct scored functions: `{distinct_scored}` — 같은 이름의 SwUFn 이 여럿이면 행 수 > 함수 수")
+        lines.append(f"- Document entries not in payload: `{entries_not_in_payload}` / `{document_entries}`")
+        lines.append(f"- Payload functions not in document: `{payload_not_in_document}` / `{len(payload_by_name)}`")
+    else:
+        if payload_read_error:
+            # 리뷰 W1: "없음" 이 아니라 "있는데 못 읽음" — 채점 모드가 바뀐 이유를 리포트에 남긴다
+            lines.append(f"- Payload: `none` — 읽기 실패 `{payload_read_error}` → 문서 자기 대조"
+                         "(설명 출처를 알 수 없어 `generated_doc` 으로 채점)")
+        else:
+            lines.append("- Payload: `none` — 문서 자기 대조(설명 출처를 알 수 없어 `generated_doc` 으로 채점)")
+        lines.append("- Scored fields source: `document` — 문서 셀을 되읽은 값")
+        lines.append(f"- Document entries: `{document_entries}` · scored (document ∩ payload): `{total}`")
     # ⚠ `Gate pass` 는 보수 방향을 유지한다 — 미측정이 있으면 통과가 아니다.
     #   (`gate_report.py` 의 "판정 불가는 통과가 아님" 과 같은 규약. 미측정을 빼면서
     #    통과로 접으면 이번 수정이 fail-open 이 된다.)
@@ -1153,6 +1275,10 @@ def generate_uds_field_quality_gate_report(
         lines.append(f"  - note: 입력이 채워졌지만 슬롯을 셀 수 없는 함수 {input_ok - input_ok_applicable}개 — "
                      "분모 밖이라 채움률에 넣지 않는다(예전엔 분자가 분모를 끌어올렸다)")
     lines.append(f"- Output fill: `{output_ok_applicable}` / `{output_applicable}` ({_pct(output_rate, output_na)})")
+    if input_none_marker or output_none_marker:
+        lines.append(f"  - note: 채움으로 센 것 중 \"(none)\" 표기(파라미터 없음) — 입력 {input_none_marker}개 · 출력 "
+                     f"{output_none_marker}개. quick gate 규약과 같이 채움으로 세되, 실 인터페이스 채움은 "
+                     "quick gate 의 input_real_fill/output_real_fill 참조")
     if output_ok > output_ok_applicable:
         lines.append(f"  - note: 출력이 채워졌지만 슬롯을 셀 수 없는 함수 {output_ok - output_ok_applicable}개 — "
                      "분모 밖이라 채움률에 넣지 않는다")
@@ -1190,6 +1316,12 @@ def generate_uds_field_quality_gate_report(
     lines.append(f"- High (comment/SDS/reference): `{desc_high}` ({_pct(_rate(desc_high, total))})")
     lines.append(f"- Medium (keyword inference): `{desc_med}` ({_pct(_rate(desc_med, total))})")
     lines.append(f"- Low (generic template): `{desc_low}` ({_pct(_rate(desc_low, total))})")
+    if payload_file is None:
+        lines.append("  - 문서 자기 대조 — 설명의 유래를 알 수 없어 전부 `generated_doc`(약한 출처)로 분류했다. "
+                     "High 는 payload 사이드카가 있어야 나온다(예전엔 되읽은 설명에 `reference` 가 붙어 전부 High 였다).")
+    if entries_not_in_payload:
+        lines.append(f"  - 문서 항목 {entries_not_in_payload}개는 payload 에 없어(생성되지 않은 서식) 채점 밖이다 — "
+                     "문서 커버리지는 `.validation.md` 의 빈 heading 축이 잰다.")
     lines.append("")
     lines.append("## Thresholds")
     lines.append(f"- source: `{threshold_source}`")
@@ -1262,11 +1394,16 @@ def generate_uds_field_quality_gate_report(
     if unmeasured or ungated:
         pass  # 위에서 각각 말했다 — "모두 통과" 산문으로 떨어지지 않게 막는 분기
     elif not failed and not (tbd_asil > total * 0.5 or tbd_related > total * 0.5 or desc_low > total * 0.3):
+        # 통과가 **무엇에 대한** 통과인지 — 생성되지 않은 항목이 있으면 그 수를 같은 문장에 둔다.
+        _cov = ""
+        if entries_not_in_payload:
+            _cov = (f" ⚠ 단, 문서 항목 {document_entries}개 중 {entries_not_in_payload}개는 생성되지 않아 채점 밖입니다"
+                    f" — 생성된 {total}개 기준 통과, 문서 커버리지 {_pct(_rate(total, document_entries))}.")
         if not_applicable:
             lines.append(f"- 채점한 게이트는 모두 통과했습니다(해당 없음 {len(not_applicable)}개는 판정 밖). "
-                         "정기적인 재검증을 권장합니다.")
+                         "정기적인 재검증을 권장합니다." + _cov)
         else:
-            lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다.")
+            lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다." + _cov)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

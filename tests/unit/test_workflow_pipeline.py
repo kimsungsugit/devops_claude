@@ -35,7 +35,15 @@ def _ensure_stubs() -> None:
         MagicMock(get_logger=MagicMock(return_value=MagicMock())),
     )
 
-    _config = sys.modules.get("config") or MagicMock()
+    # ⚠ 실 `config` 를 먼저 올린다(R30 리뷰 I7). 예전엔 수집 시점에 `config` 가 아직 import 되지 않았으면
+    #   MagicMock 을 `sys.modules["config"]` 에 **영구 설치**해, 뒤에 수집·실행되는 다른 모듈의 `import config`
+    #   가 전부 Mock 을 받았다(`importlib.reload(config)` 가 TypeError — `tests/unit -k "…quality…"` 선택에서
+    #   `test_quality_gate_r29` 2건 실패, 전량 게이트에선 conftest 가 먼저 올려 두어 안 보였다). 실 모듈은
+    #   가볍고 import 부작용이 없으므로 stub 이 아니라 그 위에 속성만 덮는다.
+    try:
+        import config as _config  # noqa: F811 — 실 모듈 위에 속성만 덮는다
+    except ImportError:  # config 를 못 올리는 환경에서만 옛 stub 경로
+        _config = sys.modules.get("config") or MagicMock()
     _config.DEFAULT_OAI_CONFIG_PATH = None  # type: ignore[attr-defined]
     _config.DEFAULT_LLM_MODEL = "gpt-4.1-mini"  # type: ignore[attr-defined]
     _config.DEFAULT_LLM_NUM_PREDICT = 8192  # type: ignore[attr-defined]
