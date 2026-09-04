@@ -119,6 +119,7 @@ from backend.user_context import wrap_with_user
 
 # 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.
 from report_gen import uds_related as _uds_related
+from report_gen.atomic_io import atomic_write_text
 from report_gen.trace_link_table import build_link_table
 from report_gen.utils import build_function_details_by_name
 
@@ -181,7 +182,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
             "summary": summary,
             "function_details": details,
         }
-        sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
         return sidecar
     except Exception as exc:
         _logger.warning("jenkins uds payload sidecar write skipped: %s", exc)

@@ -36,6 +36,7 @@ from backend.state import (
 from backend.state import (
     uds_view_cache_lock as _uds_view_cache_lock,
 )
+from report_gen.atomic_io import atomic_write_text
 from report_gen.gate_report import (
     parse_gate_report,
     parse_scoring_scope,
@@ -534,11 +535,27 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     }
     # 축 목록은 `QUICK_GATE_AXES`/`CONFIDENCE_GATE_AXES` 단일 출처 — `/api/quality/policy` 가
     # 같은 튜플로 "이 키는 판정에 쓰인다" 를 공시한다(R29). `>=` 직접 비교라 임계 0 은 "축 끔".
-    gate_pass = all(_rates_by_key[r] >= thresholds[t] for r, t in QUICK_GATE_AXES)
-    confidence_gate_pass = all(_rates_by_key[r] >= thresholds[t] for r, t in CONFIDENCE_GATE_AXES)
+    # (R32 Q-10) 예전엔 `thresholds[t]` 직접 첨자라 config 표에 키 하나가 없으면 KeyError → 호출부의
+    #   non-fatal except 가 삼켜 **품질 기록이 통째로 유실**됐다(가장 조용한 실패). 없는 임계는 그 축을
+    #   판정할 수 없다는 뜻이므로 통과로 접지 않고(`all([])` 함정) **fail-closed** 하며, 어느 키가 없었는지
+    #   `thresholds_missing` 으로 남긴다. `_quality_threshold` 는 config 폴백까지 본 뒤에야 None 을 낸다.
+    #   라이브 config 는 12키 전부 있어 발화 0 — 코드 결함만.
+    thresholds_missing: List[str] = sorted(
+        {t for _, t in (*QUICK_GATE_AXES, *CONFIDENCE_GATE_AXES) if _quality_threshold(thresholds, t) is None}
+    )
+
+    def _axis_pass(rate_key: str, thr_key: str) -> bool:
+        thr = _quality_threshold(thresholds, thr_key)
+        return thr is not None and _rates_by_key[rate_key] >= thr
+
+    gate_pass = all(_axis_pass(r, t) for r, t in QUICK_GATE_AXES)
+    confidence_gate_pass = all(_axis_pass(r, t) for r, t in CONFIDENCE_GATE_AXES)
+    if thresholds_missing:
+        _logger.warning("UDS quick gate: 임계 없는 축 %s — 해당 판정은 fail-closed", thresholds_missing)
     return {
         "gate_pass": bool(gate_pass),
         "thresholds": thresholds,
+        "thresholds_missing": thresholds_missing,
         "rates": {
             "called_fill": called_rate,
             "calling_fill": calling_rate,
@@ -974,8 +991,20 @@ def _build_quality_evaluation(
     *,
     template_warning: str = "",
     doc_only_mode: bool = False,
+    quality_gate_error: str = "",
 ) -> Dict[str, Any]:
+    """quick gate ∧ 신뢰도 ∧ 사이드카 리포트 병합 판정.
+
+    `quality_gate_error` — (R32, R31 리뷰 I12) 사이드카 **생성이 실패**(타임아웃/예외)했을 때 호출부가 넘기는
+    사유. 예전엔 실패하면 `quality_gate_path=None` 만 넘어와 아래 `absent`(리포트를 안 만든 doc_only 와
+    같은 상태)로 접혀 **quick_only 로 강등된 채 PASS** 가 가능했다 — 생성 실패가 판정을 느슨하게 만드는
+    fail-open. 사유가 있으면 `report_unreadable` 과 같은 급으로 fail-closed 한다.
+    """
     report_gate = _parse_quality_gate_report(quality_gate_path)
+    if quality_gate_error and not doc_only_mode and quality_gate_path is None:
+        report_gate = dict(report_gate)
+        report_gate["gate_pass_status"] = "generation_failed"
+        report_gate["error"] = str(quality_gate_error)
     report_acc = _parse_accuracy_report(accuracy_path)
     reason_codes = _derive_quality_reason_codes(quick_gate, template_warning=template_warning)
     action_hints = _build_quality_action_hints(reason_codes)
@@ -990,7 +1019,7 @@ def _build_quality_evaluation(
         # In doc-only mode, additional reports are intentionally skipped.
         merged_pass = bool(quick_pass and confidence_pass)
         gate_source = "quick_only"
-    elif report_status in {"ambiguous", "not_found", "read_error"}:
+    elif report_status in {"ambiguous", "not_found", "read_error", "generation_failed"}:
         # ⚠ "리포트가 없다" 와 "리포트가 있는데 못 읽었다" 는 다르다.
         #    아래 `absent` 는 리포트를 안 만든 경우라 병합에서 빼는 게 맞지만,
         #    파일이 있는데 판정을 못 뽑은 경우(모호/누락/읽기실패)를 같이 빼면
@@ -999,7 +1028,7 @@ def _build_quality_evaluation(
         #    골라 False 를 내던 것보다 되레 느슨해지므로, 여기서는 fail-closed 한다.
         #    이 저장소 규약: 미측정을 통과로 바꾸지 않는다.
         merged_pass = False
-        gate_source = "report_unreadable"
+        gate_source = "report_generation_failed" if report_status == "generation_failed" else "report_unreadable"
     elif report_pass is None:
         # status == "absent" — 리포트 자체가 생성되지 않았다(타임아웃·doc_only 등).
         merged_pass = bool(quick_pass and confidence_pass)
@@ -2282,7 +2311,10 @@ def _uds_generate_from_paths(
     summary["mapping"] = _compute_uds_mapping_summary(uds_payload.get("function_details") or {})
     sidecar_path = out_path.with_suffix(".payload.json")
     try:
-        sidecar_path.write_text(
+        # (R32 W2) 원자 기록 — 품질 게이트가 생성 직후 이 파일을 읽는다. `write_text` 는 truncate 창이
+        # 있어 반쪽 JSON 을 읽은 채점기가 DOCX 자기 대조로 조용히 강등된다(`report_gen/atomic_io.py`).
+        atomic_write_text(
+            sidecar_path,
             json.dumps(
                 {
                     "docx_path": str(out_path),
@@ -2292,10 +2324,10 @@ def _uds_generate_from_paths(
                 ensure_ascii=False,
                 indent=2,
             ),
-            encoding="utf-8",
         )
     except Exception:
-        pass
+        # payload 사이드카가 없으면 채점기는 문서 자기 대조로 떨어진다 — 그 사실은 로그에 남아야 한다.
+        _logger.warning("UDS payload sidecar write skipped: %s", sidecar_path, exc_info=True)
     residual_tbd_path = _write_residual_tbd_report(out_path, summary.get("mapping") or {})
     validation_path = out_path.with_suffix(".validation.md")
     ok_validation, _ = _run_report_with_timeout(

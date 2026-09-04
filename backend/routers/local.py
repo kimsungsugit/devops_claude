@@ -116,6 +116,7 @@ from backend.services.local_service import (
 )
 from backend.services.paths import confine, is_under_any, safe_resolve_under, trusted_roots
 from backend.user_context import wrap_with_user
+from report_gen.atomic_io import atomic_write_text
 from report_gen.provenance import has_evidence_value, is_weak_source
 from report_gen.utils import build_function_details_by_name
 from report_generator import (
@@ -325,7 +326,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
             "summary": summary,
             "function_details": details,
         }
-        sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
         return sidecar
     except Exception as exc:
         _logger.warning("uds payload sidecar write skipped: %s", exc)
@@ -1345,7 +1347,7 @@ async def local_uds_generate(
     if not ok_constraints:
         constraints_path = None
     quality_gate_path = out_path.with_suffix(".quality_gate.md")
-    ok_quality_gate, _ = await _run_blocking(
+    ok_quality_gate, quality_gate_error = await _run_blocking(
         _run_report_with_timeout,
         lambda: generate_uds_field_quality_gate_report(str(out_path), str(quality_gate_path)),
         timeout_seconds=report_timeout_short,
@@ -1362,6 +1364,8 @@ async def local_uds_generate(
         accuracy_path=accuracy_path,
         template_warning=template_warning,
         doc_only_mode=False,
+        # (R32 I12) 생성 실패는 '리포트 없음' 이 아니다 — quick_only 강등 대신 fail-closed.
+        quality_gate_error=("" if ok_quality_gate else (quality_gate_error or "field quality gate report failed")),
     )
     # Quality DB recording (non-fatal)
     try:

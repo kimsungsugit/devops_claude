@@ -57,6 +57,8 @@ def _load_repo_module(rel_module: str, package: str = "report_gen"):
 
 has_evidence_value = _load_repo_module("provenance").has_evidence_value
 build_function_details_by_name = _load_repo_module("utils").build_function_details_by_name
+# (R32 W2) payload 사이드카 원자 기록 — 같은 이유로 `_load_repo_module` 경유(직접 import 는 260105 트리로 해석된다).
+atomic_write_text = _load_repo_module("atomic_io").atomic_write_text
 # 체크포인트 이름 규칙은 라이터·리더와 **같은 상수**다(`docgen_last_run.py` — stdlib 만 쓰는
 # 잎 모듈이라 위 그림자 없이 파일로 열 수 있다). 여기 리터럴 3곳이 그 계약 밖에 있었고
 # 가드는 `helpers/uds.py` 만 봤다(2026-09-03 R27 H-2).
@@ -518,9 +520,12 @@ def _write_uds_payload_sidecar(output_path: Path, uds_payload: dict) -> Path | N
             "summary": summary,
             "function_details": details,
         }
-        sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
         return sidecar
-    except Exception:
+    except Exception as exc:
+        # payload 사이드카가 없으면 채점기는 문서 자기 대조로 떨어진다 — 그 사실은 남아야 한다(§7d).
+        logging.getLogger("uds_local").warning("UDS payload sidecar write skipped: %s (%s)", sidecar, exc)
         return None
 
 

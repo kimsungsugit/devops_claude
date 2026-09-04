@@ -113,15 +113,34 @@ class TestGateVerdict:
     ("coverage", lambda: evaluate_coverage({})),
     ("swsa", lambda: evaluate_swsa({})),
 ])
+def test_every_evaluator_is_fail_closed_on_empty_input(name, fn):
+    """빈 입력 = 데이터 없음 → fail-closed 여야 한다(미측정을 통과로 바꾸지 않는다).
+
+    (R32 B-9) 분모 0 인 축은 비게이트(`_gate_if_applicable`)라 suts/sits/swsa 는 빈 입력에서 게이트 항목이
+    0개가 되고, 그땐 `compute_gate_verdict` 가 `no_gated_metric` 으로 **판정 불가**를 낸다 — "0% FAIL" 이
+    아니라 "잴 것이 없었다" 다. 둘 다 fail-closed 이므로 여기서는 그 둘만 허용한다.
+    """
+    v = compute_gate_verdict(fn())
+    assert v["gate_pass"] is False, f"{name}: 빈 입력인데 통과"
+    assert v["gated_count"] >= 1 or v["reason"] == "no_gated_metric", name
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("uds", lambda: evaluate_uds({})),
+    ("sts", lambda: evaluate_sts({"total_test_cases": 1})),
+    ("suts", lambda: evaluate_suts({"total_test_cases": 1})),
+    ("sits", lambda: evaluate_sits({"total_test_cases": 1})),
+    ("swreport", lambda: evaluate_swreport({})),
+    ("coverage", lambda: evaluate_coverage({})),
+    ("swsa", lambda: evaluate_swsa({"his_metrics": [{"total": 1, "fail": 0, "unbinned": 0}]})),
+])
 def test_every_evaluator_gates_at_least_one_metric(name, fn):
-    """빈 입력에서도 게이트 대상이 0개면 그 doc_type 은 판정 불가 상태로 기록된다.
+    """**실 문서 형태**(분모 ≥1)에서 게이트 대상이 0개면 그 doc_type 은 판정이 성립하지 않는다.
 
     지표를 추가하다 threshold 를 다 떼면 이 테스트가 깨지면서 알려준다.
     """
     v = compute_gate_verdict(fn())
     assert v["gated_count"] >= 1, f"{name}: 게이트 항목 0개 — 판정이 성립하지 않는다"
-    # 빈 입력 = 데이터 없음 → fail-closed 여야 한다(미측정을 통과로 바꾸지 않는다)
-    assert v["gate_pass"] is False, f"{name}: 빈 입력인데 통과"
 
 
 # ==============================================================

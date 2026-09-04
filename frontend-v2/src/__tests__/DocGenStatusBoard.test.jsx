@@ -567,6 +567,83 @@ describe('DocGenStatusBoard — 프로젝트 스코프와 진행', () => {
     expect(onGenerate).toHaveBeenCalledWith('sts');
   });
 
+  // (R32 Q-10) 근거 캐시의 키는 run.id 다 — 펼친 채로 생성이 끝나 새 run 이 오면 옛 run 의 사이드카를 그대로
+  // 두지 않고 새 run 의 근거를 다시 받는다.
+  it('펼친 채로 이력이 갱신되면 새 run 의 근거를 다시 받는다', async () => {
+    let listCall = 0;
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/evidence')) {
+        const id = p.match(/runs\/(\d+)\/evidence/)[1];
+        return Promise.resolve({
+          run_id: Number(id), output_path_present: true, sidecars_expected: true,
+          gate_report: { present: true, gates_passed: Number(id), gates_total: 13, total_functions: 5 },
+          confidence: { present: false, reason: 'x' }, docx_validate: { present: false, reason: 'x' },
+        });
+      }
+      listCall += 1;
+      return Promise.resolve({ runs: [run({ id: listCall === 1 ? 1 : 2 })], total: 1 });
+    });
+    mockPost.mockResolvedValue({});
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DocGenStatusBoard job={JOB} analysisResult={ANALYSIS}
+        genState={{ docType: 'uds', stage: '진행', progress: 50, result: null }} />
+    );
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    await waitFor(() => expect(screen.getByText(/게이트 항목 1 \/ 13 통과/)).toBeInTheDocument());
+
+    rerender(
+      <DocGenStatusBoard job={JOB} analysisResult={ANALYSIS}
+        genState={{ docType: null, stage: '완료', progress: 100, result: { success: true } }} />
+    );
+    await waitFor(() => expect(screen.getByText(/게이트 항목 2 \/ 13 통과/)).toBeInTheDocument());
+    const evidenceCalls = mockApi.mock.calls.map(c => String(c[0])).filter(p => p.includes('/evidence'));
+    expect(evidenceCalls).toEqual(['/api/quality/runs/1/evidence', '/api/quality/runs/2/evidence']);
+  });
+
+  // (R32 W6) 응답 역전: run1 근거가 늦게 도착해도 run2 판정 옆에 run1 사이드카를 그리지 않는다.
+  it('늦게 도착한 옛 run 의 근거 응답은 버린다', async () => {
+    let listCall = 0;
+    let resolveRun1;
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/runs/1/evidence')) return new Promise((res) => { resolveRun1 = res; });
+      if (p.includes('/runs/2/evidence')) {
+        return Promise.resolve({ run_id: 2, output_path_present: true, sidecars_expected: true,
+          gate_report: { present: true, gates_passed: 2, gates_total: 13, total_functions: 5 },
+          confidence: { present: false, reason: 'x' }, docx_validate: { present: false, reason: 'x' } });
+      }
+      listCall += 1;
+      return Promise.resolve({ runs: [run({ id: listCall === 1 ? 1 : 2 })], total: 1 });
+    });
+    mockPost.mockResolvedValue({});
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DocGenStatusBoard job={JOB} analysisResult={ANALYSIS}
+        genState={{ docType: 'uds', stage: '진행', progress: 50, result: null }} />
+    );
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    await waitFor(() => expect(resolveRun1).toBeTypeOf('function'));
+
+    rerender(
+      <DocGenStatusBoard job={JOB} analysisResult={ANALYSIS}
+        genState={{ docType: null, stage: '완료', progress: 100, result: { success: true } }} />
+    );
+    await waitFor(() => expect(screen.getByText(/게이트 항목 2 \/ 13 통과/)).toBeInTheDocument());
+    // 이제서야 run1 응답이 도착한다 — 화면은 run2 근거를 유지해야 한다.
+    resolveRun1({ run_id: 1, output_path_present: true, sidecars_expected: true,
+      gate_report: { present: true, gates_passed: 1, gates_total: 13, total_functions: 5 },
+      confidence: { present: false, reason: 'x' }, docx_validate: { present: false, reason: 'x' } });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.getByText(/게이트 항목 2 \/ 13 통과/)).toBeInTheDocument();
+    expect(screen.queryByText(/게이트 항목 1 \/ 13 통과/)).toBeNull();
+    const evidenceCalls = mockApi.mock.calls.map(c => String(c[0])).filter(p => p.includes('/evidence'));
+    expect(evidenceCalls).toEqual(['/api/quality/runs/1/evidence', '/api/quality/runs/2/evidence']);
+  });
+
   it('생성이 끝나면 이력을 다시 읽는다', async () => {
     const { rerender } = render(
       <DocGenStatusBoard job={JOB} analysisResult={ANALYSIS}

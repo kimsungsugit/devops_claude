@@ -6,42 +6,80 @@ from typing import Any, Dict, List
 
 _logger = logging.getLogger("workflow.quality.advisor")
 
+
+def _uds_gate_threshold(key: str, fallback: float) -> float:
+    """UDS 축의 rule 폴백 임계 — `config.UDS_QUALITY_GATE_THRESHOLDS` **단일 출처**에서 읽는다.
+
+    (R32 Q-10) 예전엔 아래 표에 95/95/90/50/70/90/90 이 리터럴로 복제돼 있었다. `suggest_improvements`
+    는 DB 에 기록된 `score.threshold` 를 먼저 쓰므로 평소엔 안 보이지만, DB 임계가 None 인 행(구판·
+    threshold 미기록)에서는 이 리터럴이 판정 기준이 된다 — 운영자가 env 로 임계를 바꾸면 게이트와
+    제안이 **다른 숫자**로 갈린다. config 를 못 읽으면(독립 스크립트 등) 옛 리터럴을 그대로 쓴다.
+
+    ⚠ **호출 시점**에 읽는다(리뷰 W5). import 시점에 굳히면 `reexec_config()`·env 변경 뒤 config 는 바뀌는데
+    이 표만 옛 값이라, 없애려던 "게이트와 제안이 다른 숫자" 가 리터럴 축에서 스냅샷 축으로 옮겨갈 뿐이다.
+    """
+    try:
+        import config
+        table = getattr(config, "UDS_QUALITY_GATE_THRESHOLDS", None) or {}
+        v = table.get(key)
+        return float(v) if v is not None else float(fallback)
+    except Exception as exc:   # noqa: BLE001 - config 부재/오류는 리터럴 폴백(제안 표는 판정이 아니다)
+        # 임계가 리터럴로 되돌아간 사실은 남아야 한다 — 그 숫자가 조용히 사실 행세를 한다(§7d).
+        _logger.warning("advisor: config 임계 %s 를 못 읽어 리터럴 %s 로 폴백: %s", key, fallback, exc)
+        return float(fallback)
+
+
+def _rule_threshold(rule: Dict[str, Any]) -> Any:
+    """규칙의 폴백 임계 — `threshold_key` 가 있으면 **지금** config 에서 읽고, 없으면 리터럴."""
+    key = rule.get("threshold_key")
+    if key:
+        return _uds_gate_threshold(str(key), float(rule.get("threshold") or 0.0))
+    return rule.get("threshold")
+
+
 # 메트릭별 개선 제안 규칙
 _UDS_ADVICE = {
     "called_pct": {
         "label": "Called Functions 커버리지",
         "low_advice": "콜 트리 분석 결과가 누락되었을 수 있습니다. include 경로를 확인하고, 외부 함수 매핑(CALL_TREE_EXTERNAL_MAP)을 추가하세요.",
         "threshold": 95.0,
+        "threshold_key": "called_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "calling_pct": {
         "label": "Calling Functions 커버리지",
         "low_advice": "호출 관계가 불완전합니다. 소스 파일 glob 패턴(DEFAULT_TARGETS_GLOB)을 확장하거나, 헤더 파일 경로를 추가하세요.",
         "threshold": 95.0,
+        "threshold_key": "calling_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "description_pct": {
         "label": "함수 설명 완성도",
         "low_advice": "함수 설명이 부족합니다. 소스 코드에 Doxygen 주석을 추가하거나, SDS 문서 경로를 지정하여 AI가 참조하도록 하세요. ref_suds_path 설정을 확인하세요.",
         "threshold": 90.0,
+        "threshold_key": "description_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "asil_pct": {
         "label": "ASIL 레벨 지정율",
         "low_advice": "ASIL 레벨이 TBD인 함수가 많습니다. SDS/SRS 문서에서 안전 요구사항을 매핑하거나, project_config에 기본 ASIL 레벨을 설정하세요.",
         "threshold": 50.0,
+        "threshold_key": "asil_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "related_pct": {
         "label": "요구사항 추적성",
         "low_advice": "SRS/SDS 요구사항 ID 연결이 부족합니다. req_docs_paths에 요구사항 문서를 추가하고, RAG KB에 요구사항을 ingest하세요.",
         "threshold": 70.0,
+        "threshold_key": "related_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "input_pct": {
         "label": "입력 파라미터 완성도",
         "low_advice": "함수 입력 파라미터 정보가 누락되었습니다. 소스 코드의 함수 프로토타입이 정확한지 확인하세요.",
         "threshold": 90.0,
+        "threshold_key": "input_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "output_pct": {
         "label": "출력 파라미터 완성도",
         "low_advice": "함수 출력/반환값 정보가 누락되었습니다. void 함수의 포인터 출력 파라미터를 확인하세요.",
         "threshold": 90.0,
+        "threshold_key": "output_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     # ── 산출물 충실도(비게이트) ── 위 축들은 전부 **payload** 를 재는데, 이건 문서에
     #    실제로 들어간 수다. 라이터가 템플릿 주도라 대응 heading 이 없는 함수는 조용히
@@ -431,8 +469,17 @@ def suggest_improvements(
         else:
             advice_rules = {}
 
+        # (R32, 리뷰 W2) 게이트 항목이 0개인 run 은 **판정 불가**다 — 그런데 rule 폴백 임계는 평가기가 "지어내지
+        # 않겠다" 고 뺀 축(B-9: 분모 0 → threshold None)의 0.0 을 다시 임계와 비교해 "긴급 미달" 을 만든다
+        # (swsa `his_metrics` 전부 total 0 실측: 요약은 판정 불가, 제안은 his_pass 0.0 < 80 high). 판정 불가에
+        # 미달 사유를 붙이는 건 R31 Q-7 이 지운 모순이라, 검사 규모 0 이면 제안을 만들지 않는다.
+        _gated_obj = scores.get("gated_metric_count")
+        _gated_zero = bool(_gated_obj is not None and _gated_obj.value is not None and int(_gated_obj.value) == 0)
+
         suggestions: List[Dict[str, Any]] = []
         for metric_name, rule in advice_rules.items():
+            if _gated_zero:
+                break
             score_obj = scores.get(metric_name)
             if not score_obj:
                 continue
@@ -444,7 +491,7 @@ def suggest_improvements(
             # (overall_pass 처럼 evaluator가 threshold 미저장이나 rule엔 threshold 가 있는
             #  메트릭은 rule 폴백으로 제안 생성 — 정상.) DB·rule 둘 다 None 이면
             #  (ASIL 미해당 branch/mcdc 같은 참고지표) 게이트 비대상 → 과잉 제안 방지로 skip.
-            rule_threshold = rule.get("threshold")
+            rule_threshold = _rule_threshold(rule)
             if score_obj.threshold is not None:
                 threshold = score_obj.threshold
             elif rule_threshold is not None:

@@ -3183,23 +3183,28 @@ def generate_sts_validation_report(
                 lines.append(f"| {k} | {v} |")
             lines.append("")
 
+    # (R32 Q-10, 리뷰 W4) TC 0건이면 비율 항목은 정의되지 않는다 — 예전엔 `if tc_count else True` 로 통과로
+    #   접어 **빈 STS 가 5개 중 4개를 통과**했다(형제 SUTS 와 같은 결함, 같은 라운드에 같은 형태로 고친다).
+    #   해당 없음(`None`)은 분모에서 빼고 `N/A` 로 적는다 — 통과도 실패도 아니다.
+    _tc = stats.get("tc_count", 0)
     gate_items = [
-        ("TC 존재", stats.get("tc_count", 0) > 0),
-        ("빈 제목 < 30%", stats.get("empty_title_tcs", 0) <= stats.get("tc_count", 1) * 0.3 if stats.get("tc_count") else True),
-        ("스텝 존재 > 50%", stats.get("no_step_tcs", 0) < stats.get("tc_count", 1) * 0.5 if stats.get("tc_count") else True),
-        ("기대값 존재 > 50%", stats.get("no_expected_tcs", 0) < stats.get("tc_count", 1) * 0.5 if stats.get("tc_count") else True),
-        ("요구사항 연결 존재", stats.get("reqs_linked", 0) > 0 if stats.get("tc_count") else True),
+        ("TC 존재", _tc > 0),
+        ("빈 제목 < 30%", (stats.get("empty_title_tcs", 0) <= _tc * 0.3) if _tc else None),
+        ("스텝 존재 > 50%", (stats.get("no_step_tcs", 0) < _tc * 0.5) if _tc else None),
+        ("기대값 존재 > 50%", (stats.get("no_expected_tcs", 0) < _tc * 0.5) if _tc else None),
+        ("요구사항 연결 존재", (stats.get("reqs_linked", 0) > 0) if _tc else None),
     ]
-    passed = sum(1 for _, ok in gate_items if ok)
+    applicable = [(name, ok) for name, ok in gate_items if ok is not None]
+    passed = sum(1 for _, ok in applicable if ok)
 
     lines.extend([
-        f"## 3. Quality Gate ({passed}/{len(gate_items)})",
+        f"## 3. Quality Gate ({passed}/{len(applicable)})",
         "",
         "| 항목 | 결과 |",
         "|------|------|",
     ])
     for name, ok in gate_items:
-        lines.append(f"| {name} | {'PASS' if ok else 'FAIL'} |")
+        lines.append(f"| {name} | {'N/A (TC 없음)' if ok is None else ('PASS' if ok else 'FAIL')} |")
     lines.append("")
 
     if issues:

@@ -2,7 +2,6 @@
 # Re-import common dependencies
 import json
 import logging
-import os
 
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
@@ -11,7 +10,6 @@ import os
 # Legacy: older sidecar JSONs may use bare "globals" key → fall back to it when
 # reading (see _extract_payload_function_details / row.get("globals_global") or row.get("globals"))
 import re
-import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -20,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # 모듈 통째로 들고 다니는 것은 의도다: `from ... import LABEL_X` 로 풀면 이름이 이
 # 파일에 복제돼, 상수를 한 곳에 둔 이유가 없어진다.
 import report_gen.validation_labels as VL
+from report_gen.atomic_io import atomic_write_text
 from report_gen.docx_builder import _iter_template_blocks
 from report_gen.function_analyzer import (
     _classify_description_quality,
@@ -27,34 +26,17 @@ from report_gen.function_analyzer import (
     _normalize_symbol_name,
 )
 from report_gen.gate_report import has_meaningful_value, parse_gate_report, to_percent_text_map
-from report_gen.provenance import SOURCE_ALIASES
+from report_gen.provenance import SOURCE_ALIASES, has_evidence_value, is_weak_source, unrecorded_source
 from report_gen.requirements import _extract_function_info_from_docx
 from report_gen.utils import _extract_call_names, _safe_dict
 
 _logger = logging.getLogger("report_generator")
 
 
-def _atomic_write_text(out: Path, text: str) -> None:
-    """사이드카를 **임시 파일에 쓰고 `os.replace`** 로 바꿔 넣는다.
-
-    (R31, R30 리뷰 X1 편입) `.quality_gate.md`·`.validation.md`·`.field_confidence.md` 는 생성 직후 재채점·
-    증거 패널이 읽는다. `write_text` 는 열기(truncate)→쓰기라, 그 사이에 읽으면 **빈 파일 또는 앞부분만**
-    보인다 — 리더는 그걸 "payload 없음/Gate pass 부재" 로 읽어 채점 모드가 조용히 바뀐다(torn read).
-    `os.replace` 는 같은 볼륨 안에서 원자적이다. 실패하면 임시 파일을 지우고 예외를 그대로 올린다 —
-    옛 내용이 있으면 옛 내용이 남고, 반쯤 쓰인 파일은 절대 그 이름을 갖지 않는다.
-    """
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # 이름에 pid+난수 — 같은 경로를 두 프로세스가 동시에 쓰면 고정 이름은 서로의 tmp 를 truncate 한다(리뷰 I4).
-    tmp = out.with_name(f"{out.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, out)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass  # silent-ok: 임시 파일 정리 실패는 원래 예외를 가리면 안 된다
-        raise
+# (R32) 원자 기록은 `report_gen/atomic_io.py` 단일 출처 — `.payload.json` 라이터 5곳과 같은 함수다.
+#   이름은 유지한다: 이 파일의 세 사이드카 라이터가 이 이름으로 부르고, 가드(`test_quality_gate_r31.py`)가
+#   그 호출을 단언한다.
+_atomic_write_text = atomic_write_text
 
 
 def _load_uds_payload_with_source(docx_path: str) -> Tuple[Dict[str, Any], Optional[Path]]:
@@ -1926,13 +1908,20 @@ def generate_asil_related_confidence_report(
                     cur_asil = str(info.get("asil") or "").strip()
                     cur_rel = str(info.get("related") or "").strip()
                     cur_desc_src = str(info.get("description_source") or "").strip().lower()
+                    cur_asil_src = str(info.get("asil_source") or "").strip().lower()
                     cur_rel_src = str(info.get("related_source") or "").strip().lower()
                     doc_desc = str(row.get("description") or "").strip()
                     doc_asil = str(row.get("asil") or "").strip()
                     doc_rel = str(row.get("related") or "").strip()
                     comment_desc = str(info.get("comment_description") or "").strip()
-                    weak_desc_src = cur_desc_src in {"", "inference", "rule"}
-                    weak_rel_src = cur_rel_src in {"", "inference", "rule"}
+                    # (R32 Q-9) 세 필드가 **같은 예외 판정**을 쓴다 — 예전엔 desc/related 만 `{"", "inference",
+                    #   "rule"}` 리터럴로 가드하고 ASIL 은 가드가 없어, 강한 출처(SRS/SDS)가 명시한 `TBD` 를
+                    #   문서에서 회수한 값이 덮을 수 있었다(라이브 payload 126개 실측: ASIL 빈 값 52건은 전부
+                    #   `inference` 라 발화 0). 리터럴 대신 `provenance.is_weak_source` 를 쓴다 — 리터럴 집합은
+                    #   `default`/`generated_doc`/`module_inherit` 을 강함으로 오분류했다(그 모듈이 생긴 이유).
+                    weak_desc_src = is_weak_source(cur_desc_src)
+                    weak_asil_src = is_weak_source(cur_asil_src)
+                    weak_rel_src = is_weak_source(cur_rel_src)
                     if comment_desc and not _is_generic_description(comment_desc) and weak_desc_src:
                         info["description"] = comment_desc
                         info["description_source"] = "comment"
@@ -1943,7 +1932,7 @@ def generate_asil_related_confidence_report(
                         if (not cur_desc) or _is_generic_description(cur_desc):
                             info["description"] = doc_desc
                             info["description_source"] = "generated_doc"
-                    if (not cur_asil or cur_asil in {"TBD", "N/A", "-"}) and doc_asil:
+                    if (not cur_asil or cur_asil in {"TBD", "N/A", "-"}) and doc_asil and weak_asil_src:
                         info["asil"] = doc_asil
                         info["asil_source"] = "generated_doc"
                     if (not cur_rel or cur_rel in {"TBD", "N/A", "-"}) and doc_rel and weak_rel_src:
@@ -2027,10 +2016,23 @@ def generate_asil_related_confidence_report(
             unknown_src_values[s] = unknown_src_values.get(s, 0) + 1
         return "unknown"
 
-    def _score_for(info: Dict[str, Any]) -> float:
-        ds = _norm_src(info.get("description_source"))
-        asrc = _norm_src(info.get("asil_source"))
-        rsrc = _norm_src(info.get("related_source"))
+    def _effective_src(info: Dict[str, Any], field_name: str) -> str:
+        """필드의 **실효 출처** — 값이 없으면 출처 라벨을 믿지 않는다. 표·분포·근거·점수가 전부 이걸 쓴다.
+
+        (R32 Q-9) 출처 라벨은 "이 값이 어디서 왔는가" 다. 값이 자리표시자(빈칸/TBD/N/A)인데 라벨이
+        `sds` 면 그 칸은 *근거는 있는데 내용이 없다* 는 불가능한 상태이고, 라벨만 보면 0.95 를 받는다
+        (`provenance.has_evidence_value` docstring). 값이 없으면 `unrecorded_source` 가 주는 `default`(0.30)
+        로 잰다 — 라이브 payload 126개 실측: 강한 출처+빈 값 0건, `inference`+빈 ASIL 52건(0.60→0.30).
+        ⚠ 점수만 바꾸고 표엔 원 라벨을 찍으면 리포트가 자기 평균을 재현하지 못한다(리뷰 W7: 범례로 계산한
+          0.617 ≠ 적힌 0.517). 그래서 여기 **한 번** 구한 라벨을 행·분포·근거·점수가 같이 쓴다 — 미지
+          라벨 집계(`unknown_src_values`)도 한 번만 센다(예전엔 표와 점수에서 두 번 불러 정확히 2배였다).
+        """
+        src = _norm_src(info.get(f"{field_name}_source"))
+        if not has_evidence_value(info.get(field_name)):
+            return unrecorded_source(info.get(field_name))
+        return src
+
+    def _score_of_srcs(ds: str, asrc: str, rsrc: str) -> float:
         return (src_score.get(ds, 0.6) + src_score.get(asrc, 0.6) + src_score.get(rsrc, 0.6)) / 3.0
 
     def _evidence_for(info: Dict[str, Any], src: str, field_name: str) -> str:
@@ -2057,6 +2059,9 @@ def generate_asil_related_confidence_report(
             return "함수명/ID 기반 룰로 할당됨"
         if src == "generated_doc":
             return "생성 UDS DOCX 에서 회수 — 원 유래 미확인(payload 에 출처가 없었다)"
+        if src == "default":
+            # 값이 자리표시자라 출처 라벨과 무관하게 여기로 온다(`_effective_src`) — "추론" 이라고 적으면 거짓이다.
+            return "값 없음(빈칸/TBD) — 근거 미기록"
         return "코드/문맥 기반 추론"
 
     def _overall_grade(score: float) -> str:
@@ -2100,9 +2105,9 @@ def generate_asil_related_confidence_report(
             swcom = f"SwCom_{m_sw.group(1)}"
         swstats = by_swcom.setdefault(swcom, {"total": 0, "low": 0})
         swstats["total"] += 1
-        ds = _norm_src(info.get("description_source"))
-        asrc = _norm_src(info.get("asil_source"))
-        rsrc = _norm_src(info.get("related_source"))
+        ds = _effective_src(info, "description")
+        asrc = _effective_src(info, "asil")
+        rsrc = _effective_src(info, "related")
         desc_count[ds] = desc_count.get(ds, 0) + 1
         asil_count[asrc] = asil_count.get(asrc, 0) + 1
         rel_count[rsrc] = rel_count.get(rsrc, 0) + 1
@@ -2138,7 +2143,7 @@ def generate_asil_related_confidence_report(
                 op_counts["rel_backed_by_hsis"] += 1
             if "code" not in rel_evidence_set and "hsis" not in rel_evidence_set:
                 op_counts["rel_doc_only"] += 1
-        score = _score_for(info)
+        score = _score_of_srcs(ds, asrc, rsrc)
         all_rows.append(
             (
                 score,
@@ -2191,7 +2196,14 @@ def generate_asil_related_confidence_report(
     lines.append("# ASIL/Related ID Confidence Report")
     lines.append("")
     lines.append(f"- Total functions: `{total}`")
-    lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
+    if total > 0:
+        lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
+    else:
+        # (R32 Q-9) 채점 대상이 0개면 평균이 정의되지 않는다. 예전엔 `0.000` / `D`(최하 등급)로 적혀
+        # 리더(`evidence.read_confidence_report`)가 "신뢰도 D" 로 그렸다 — 라이브 사이드카 56개 중 2개가
+        # 이 상태다. 미측정을 최악값으로 적지 않는다: 리더의 `_as_float` 가 숫자가 아니면 `None` 을 낸다.
+        lines.append("- Overall confidence score: `n/a` (grade: `n/a`)")
+        lines.append("- ⚠ 채점 대상 함수 0개 — 점수·등급 미측정(최하 등급이 아니다)")
     lines.append("- Low confidence threshold: `< 0.80`")
     # ⚠ 범례는 `src_labels` 에서 **파생**시킨다. 예전엔 하드코딩 문자열이라 새 라벨이
     #    생겨도 범례에 안 나타났다 — 표에는 찍히는데 범례엔 없는 라벨이 생긴다.

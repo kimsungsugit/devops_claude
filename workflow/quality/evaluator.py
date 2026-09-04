@@ -23,6 +23,20 @@ def _metric(name: str, value: float, *, threshold: Optional[float] = None) -> Me
     }
 
 
+def _gate_if_applicable(threshold: float, denominator: float) -> Optional[float]:
+    """(R32 B-9) 분모 0 → `None`(비게이트). **해당 없음은 미측정이 아니고 0% 도 아니다.**
+
+    `evaluate_swit_coverage` 의 `threshold=100.0 if calls_total > 0 else None` 을 규약으로 올린 것이다.
+    분모가 0 이면 그 비율은 정의되지 않는데, `_safe_float` 가 그걸 `0.0` 으로 접어 `threshold` 와
+    비교하면 **없는 결함(0% FAIL)을 지어낸다**. 판정에서 빼고, 분모(`total_test_cases` 등)는 참고지표로
+    같이 남겨 "왜 판정이 없나" 가 DB 만 보고도 보이게 한다.
+
+    ⚠ 키 자체가 없는 경우(미측정)는 이 함수의 대상이 **아니다** — 그건 fail-closed(FAIL + 사유 지표)로
+    남긴다(`evaluate_coverage`·`evaluate_sits` 주석의 규약). 두 상태를 같은 `None` 으로 접지 말 것.
+    """
+    return threshold if denominator > 0 else None
+
+
 def _safe_float(d: Any, key: str, default: float = 0.0) -> float:
     """dict에서 안전하게 float 추출."""
     if not isinstance(d, dict):
@@ -146,12 +160,22 @@ def evaluate_uds(quality_eval: Dict[str, Any]) -> MetricList:
     if "artifact_match_fill" in rates:
         metrics.append(_metric("artifact_match_pct", _safe_float(rates, "artifact_match_fill")))
 
-    # Accuracy 메트릭
+    # Accuracy 메트릭 — `.accuracy.md` 의 exact-match 비율.
+    # ⚠ (R32 Q-9) 이 축은 **한 번도 기록된 적이 없었다**(라이브 DB 2,016 run 중 `accuracy_*` 행 0).
+    #   생산자 `_parse_accuracy_report` 는 `called_exact_match`/`calling_exact_match` 키를 내는데
+    #   여기는 `called_pct`/`calling_pct` 를 읽었다 — 키가 안 맞아 `_safe_float` 가 0.0 을 돌려주고
+    #   `> 0` 필터가 그 0 을 버렸다. 즉 두 결함이 서로를 가렸다: 필터가 없었으면 "정확도 0%" 라는
+    #   거짓이 기록됐을 것이고, 필터 때문에 축이 통째로 사라졌다.
+    #   생산자 키를 읽고, **값이 있으면 0.0 도 기록**한다(0% 실측은 버릴 값이 아니다). 없으면 안 낸다.
     accuracy = quality_eval.get("accuracy") or {}
-    for acc_key in ["called_pct", "calling_pct"]:
-        acc_val = _safe_float(accuracy, acc_key)
-        if acc_val > 0:
-            metrics.append(_metric(f"accuracy_{acc_key}", acc_val))
+    for acc_key, src_keys in (
+        ("called_pct", ("called_exact_match", "called_pct")),
+        ("calling_pct", ("calling_exact_match", "calling_pct")),
+    ):
+        for src in src_keys:
+            if isinstance(accuracy, dict) and accuracy.get(src) is not None:
+                metrics.append(_metric(f"accuracy_{acc_key}", _safe_float(accuracy, src)))
+                break
 
     # Gate pass 메트릭
     metrics.append(
@@ -191,7 +215,17 @@ def evaluate_sts(quality_report: Dict[str, Any]) -> MetricList:
     # (지표 라벨·조언이 "요구사항 ID와 연결되지 않은 TC" 를 말하므로 의미가 맞다).
     req_cov = quality_report.get("requirement_coverage") or {}
     cov_pct = _safe_float(req_cov, "covered_pct", default=_safe_float(req_cov, "pct"))
+    # (R32) ⚠ 여기엔 B-9(분모 0 → 비게이트)를 **적용하지 않는다**. STS 는 요구 기반 시험 문서라 "요구 0개" 는
+    #   해당 없음이 아니라 **요구 문서를 못 읽었다**는 뜻이다. 리뷰(W1) 실측: 비게이트로 빼면 `completeness_pct`
+    #   하나만 남아 `gate_pass=True·100.0` 이 나왔고, 그걸 막는 건 다른 모듈의 다른 키(`recorder` 의
+    #   `total_test_cases<=0` skip)뿐이었다. 요구 0개·키 부재·dict 부재는 전부 fail-closed(0.0 FAIL) 이고,
+    #   그 사유를 `requirement_coverage_unmeasured`(1.0) 와 분모 `total_requirements` 로 남긴다.
+    _req_total = req_cov.get("total_reqs") if isinstance(req_cov, dict) else None
+    _req_total_f = _safe_float(req_cov, "total_reqs")
     metrics.append(_metric("requirement_coverage_pct", cov_pct, threshold=70.0))
+    metrics.append(_metric("requirement_coverage_unmeasured",
+                           1.0 if (not req_cov or _req_total is None or _req_total_f <= 0) else 0.0))
+    metrics.append(_metric("total_requirements", _req_total_f))
 
     # 실행 시험 기준 커버리지 — **비게이트**(현 pass/fail 을 바꾸지 않기 위해).
     # 위 값은 코드 리뷰(RVW)로만 덮인 요구도 포함하므로 둘이 갈린다.
@@ -243,9 +277,11 @@ def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
                     _safe_float(quality_report, "function_coverage_pct"), threshold=80.0),
         )
 
-    # I/O 커버리지
+    # I/O 커버리지 — (R32 B-9) TC 0건이면 비율이 정의되지 않으므로 비게이트. `total_test_cases` 가
+    #   0 인 사실은 아래 참고지표로 남는다(라이브 실측: 12 run 전부 TC>0 — 0.0 두 건은 TC 253 의 실측 0%).
     metrics.append(
-        _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"), threshold=70.0),
+        _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"),
+                threshold=_gate_if_applicable(70.0, total)),
     )
 
     # 시퀀스 충실도 (avg/6 상한 100%)
@@ -278,9 +314,13 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     # 모든 flow에 순번 기반 SwCom_XX를 무조건 삽입하므로 그 값은 사실상 항상 100%였다 →
     # 요구 링크가 0건이어도 threshold 70을 통과했다. 구 리포트엔 새 키가 없어 0.0으로
     # 떨어지고 게이트가 실패하는데, 그게 "미측정을 통과로 바꾸지 않는" fail-closed 방향이다.
+    # (R32 B-9) TC 0건이면 두 비율 모두 정의되지 않는다 → 비게이트. 게이트 축이 하나도 안 남으면
+    #   `compute_gate_verdict` 가 `no_gated_metric` 으로 **판정 불가**를 낸다 — "0% FAIL" 이 아니라
+    #   "잴 것이 없었다" 가 기록된다. 키 부재(구판)는 위 주석대로 fail-closed 그대로다.
     metrics.append(
         _metric("requirement_traceability_pct",
-                _safe_float(quality_report, "requirement_traceability_pct"), threshold=70.0),
+                _safe_float(quality_report, "requirement_traceability_pct"),
+                threshold=_gate_if_applicable(70.0, total)),
     )
     # Related ID 필드 보유율은 서식 채움 지표로 별도 보존(게이트 미반영 — threshold 없음).
     metrics.append(
@@ -292,7 +332,8 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     )
     # I/O 커버리지 (입출력 변수 보유 TC 비율)
     metrics.append(
-        _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"), threshold=60.0),
+        _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"),
+                threshold=_gate_if_applicable(60.0, total)),
     )
     # 테스트 방법 다양성 (생성 방법 종류 수 / 3, 상한 100%)
     methods = quality_report.get("gen_method_distribution") or {}
@@ -654,8 +695,12 @@ def evaluate_swsa(quality_data: Dict[str, Any]) -> MetricList:
             continue
         passed = total - _safe_float(m, "fail") - _safe_float(m, "unbinned")
         rates.append(max(0.0, passed) / total * 100)
+    # (R32 B-9) 잰 metric 이 0개(전부 total 0)면 평균이 정의되지 않는다 — `0.0 FAIL` 을 지어내지
+    #   않고 비게이트로 둔다. 잰 metric 수는 참고지표로 남긴다(라이브 실측: swsa run 0건 — 코드 결함만).
     his_pass = round(sum(rates) / len(rates), 2) if rates else 0.0
-    metrics.append(_metric("his_pass_pct", his_pass, threshold=80.0))
+    metrics.append(_metric("his_pass_pct", his_pass,
+                           threshold=_gate_if_applicable(80.0, float(len(rates)))))
+    metrics.append(_metric("his_metrics_measured", float(len(rates))))
 
     # 위반 수 — 참고지표(threshold 없음). QAC extraction_failed 시 호출자가 미포함.
     metrics.append(_metric("misra_active_violations", _safe_float(quality_data, "misra_active")))

@@ -33,8 +33,10 @@ from backend.state import (
 from backend.state import (
     jenkins_progress_lock as _jenkins_progress_lock,
 )
+from report_gen.atomic_io import atomic_write_text
 from report_gen.c_return import returns_value
 from report_gen.gate_report import has_meaningful_value
+from report_gen.provenance import canonical_source
 
 _logger = logging.getLogger("devops_api")
 _api_logger = _logger
@@ -136,9 +138,23 @@ def _has_real_interface_value(value: Any) -> bool:
     return False
 
 
+# 신뢰 판정이 아는 6개 라벨. ⚠ 이건 **판정용** 축약이지 표시용 어휘가 아니다 — 사람에게 보여줄 땐
+#   `provenance.canonical_source()` + `validation.src_labels` 를 쓴다(`docgen_field_sources.py` 머리글).
+_TRUST_VOCAB = frozenset({"comment", "sds", "srs", "reference", "rule", "inference"})
+
+
 def _normalize_field_source(value: Any) -> str:
-    src = str(value or "").strip().lower()
-    if src in {"comment", "sds", "srs", "reference", "rule", "inference"}:
+    """출처 라벨 → 신뢰 판정용 6개 라벨. 어휘 밖은 `inference`(= 신뢰하지 않음).
+
+    (R32 Q-10) 별칭은 `provenance.SOURCE_ALIASES` **단일 출처**로 먼저 접는다. 예전엔 여기가 별칭을
+    몰라 `hsis`(정본 인터페이스 문서, 신뢰도 리포트에선 `sds`=0.95)를 `inference` 로 접었다 — 같은
+    필드를 신뢰도 리포트는 "강함", 채움률 게이트는 "불신" 으로 다르게 판정한 것이다.
+    라이브 payload 126개 실측: `hsis` 0건 · `sds_match` 3,104 · `srs_default_qm` 51 — 뒤 둘은 별칭
+    표에서도 강한 출처가 **아니므로**(`sds_match` 는 일부러 별칭 없음, `srs_default_qm`→`default`)
+    이 함수의 결과가 바뀌지 않는다. 즉 판정 이동 0, 두 판정기의 어휘만 하나로 합쳤다.
+    """
+    src = canonical_source(value)
+    if src in _TRUST_VOCAB:
         return src
     return "inference"
 
@@ -311,7 +327,8 @@ def _write_excel_artifact_sidecar(out_path: Path, artifact_type: str, payload: D
         data = _json_safe(payload if isinstance(payload, dict) else {})
         if not isinstance(data.get("summary"), dict):
             data["summary"] = _build_excel_artifact_summary(artifact_type, data.get("raw_result") or data)
-        sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — `_read_excel_artifact_sidecar` 가 같은 파일을 읽는다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(data, ensure_ascii=False, indent=2))
         return sidecar
     except Exception as exc:
         _logger.warning("excel payload sidecar write skipped: %s", exc)

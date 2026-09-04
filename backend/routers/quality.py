@@ -53,6 +53,21 @@ def _gate_reason(scores) -> Optional[str]:
     return None
 
 
+def _gate_definition(scores) -> Optional[str]:
+    """`gate_definition:<src>` 마커 행의 정의 이름. 없으면 None(구 run — 정의 미기록).
+
+    (R32, 리뷰 W3) `quality_summaries.gate_pass` 는 7축 판정만 담고(§8 #3), 병합 판정(quick ∧ 신뢰도 ∧ 사이드카)
+    의 결과는 이 마커에만 남는다. 사이드카 생성 실패(`report_generation_failed`)·판독 불가(`report_unreadable`)
+    는 병합 판정이 **False** 인데 요약은 True 라, 화면이 마커를 안 보면 그 FAIL 은 어디에도 그려지지 않는다.
+    """
+    for s in (scores or []):
+        name = str(getattr(s, "metric_name", "") or "")
+        if name.startswith("gate_definition:"):
+            code = name[len("gate_definition:"):].strip()
+            return code or None
+    return None
+
+
 def _gated_metric_count(scores) -> Optional[int]:
     """`gated_metric_count` 지표 행의 값. 없으면 None(구 run — 검사 규모 미기록) 이지 0 이 아니다."""
     for s in (scores or []):
@@ -89,6 +104,8 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
         # 인 목록·추세는 검사 0건을 알 길이 없었고, 게이트 화면 목록은 그 run 을 FAIL 로 그렸다.
         # None = 미기록(구 run) — 0 과 다르다.
         "gated_metric_count": _gated_metric_count(getattr(run, "scores", None)),
+        # (R32 W3) 어느 정의로 나온 판정인지 — 사이드카 실패/판독 불가는 여기로만 드러난다.
+        "gate_definition": _gate_definition(getattr(run, "scores", None)),
         # 저장은 tz-naive UTC(datetime.now(utc)) → 응답에 UTC offset 명시.
         # (naive isoformat 은 'Z' 없어 JS가 로컬해석 → KST 등에서 날짜 하루 밀림)
         "created_at": (
@@ -318,6 +335,7 @@ def get_trend(
                     # 목록(`_run_to_dict`)과 같은 두 키 — 세 표면이 같은 근거로 판정을 그린다.
                     "gate_reason": _gate_reason(r.scores),
                     "gated_metric_count": _gated_metric_count(r.scores),
+                    "gate_definition": _gate_definition(r.scores),
                 }
                 for r in runs
             ],

@@ -7,7 +7,7 @@ import { loadDocPaths, loadDocGenCaps, loadSharedInputs, useDocGenCapsSync } fro
 import { docGenCapsScope } from '../../docGenHelpers.js';
 import { notifyScmRegistryChanged } from '../../scmLinkedDocs.js';
 import { contextConflict, mismatchText } from '../../impactGuard.js';
-import { verdictOf, REASON_TEXT } from '../../gateVerdict.js';
+import { verdictOf, reasonTextOf } from '../../gateVerdict.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -206,7 +206,7 @@ function whyOf(run, verdict) {
   if (!run) return '아직 생성하지 않음';
   // 분기는 `code` 로 — 라벨(표시용 한국어)로 분기하면 라벨을 고칠 때 조용히 갈린다(리뷰 W1).
   if (verdict.code === 'INDETERMINATE') {
-    return REASON_TEXT[run.gate_reason] || REASON_TEXT.no_gated_metric;
+    return reasonTextOf(run);
   }
   const scores = run.scores || [];
   if (verdict.code === 'FAIL') {
@@ -366,12 +366,9 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     return { pass, judged };
   }, [latestByType]);
 
-  const toggleExpand = useCallback(async (docType) => {
-    if (expanded === docType) { setExpanded(null); return; }
-    setExpanded(docType);
-    const run = latestByType[docType];
-    if (!run || detail[docType]) return;   // 이미 받았으면 재요청하지 않는다
-    setDetail(prev => ({ ...prev, [docType]: { loading: true } }));
+  /** run 하나의 근거·제안·원인 귀속을 받는다. `detail[docType].runId` 가 곧 캐시 키다. */
+  const fetchDetail = useCallback(async (docType, run) => {
+    setDetail(prev => ({ ...prev, [docType]: { loading: true, runId: run.id } }));
     try {
       // 근거(사이드카)·조치 제안·원인 귀속을 함께. 하나가 실패해도 나머지는 보여준다.
       const [ev, ad, at] = await Promise.allSettled([
@@ -384,10 +381,13 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           doc_paths: loadDocPaths() || {},
         }),
       ]);
-      setDetail(prev => ({
+      // (R32 W6) 응답 역전: run1 조회가 in-flight 인 채로 run2 로 바뀌었으면 run1 응답은 버린다 — 안 버리면
+      // 새 run 판정 옆에 옛 run 사이드카가 한 번 그려지고 effect 가 run2 를 다시 받는다(왕복 3회).
+      setDetail(prev => (prev[docType]?.runId !== run.id ? prev : {
         ...prev,
         [docType]: {
           loading: false,
+          runId: run.id,
           evidence: ev.status === 'fulfilled' ? ev.value : null,
           evidenceError: ev.status === 'rejected' ? (ev.reason?.message || '근거 조회 실패') : '',
           advice: ad.status === 'fulfilled' ? ad.value : null,
@@ -398,9 +398,27 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
         },
       }));
     } catch (e) {
-      setDetail(prev => ({ ...prev, [docType]: { loading: false, error: e?.message || '조회 실패' } }));
+      setDetail(prev => (prev[docType]?.runId !== run.id ? prev
+        : { ...prev, [docType]: { loading: false, runId: run.id, error: e?.message || '조회 실패' } }));
     }
-  }, [expanded, latestByType, detail, scmId, analysisResult]);
+  }, [scmId, analysisResult]);
+
+  // 펼침 토글만 한다 — 조회는 아래 effect **한 곳**이 맡는다(조건을 두 곳에 두면 한쪽만 고쳐진다).
+  const toggleExpand = useCallback((docType) => {
+    setExpanded(prev => (prev === docType ? null : docType));
+  }, []);
+
+  // (R32 Q-10) 캐시 키는 doc_type 이 아니라 **run.id** 다. 예전엔 펼침 핸들러가 `detail[docType]` 만 보고
+  // "이미 받았으면 재요청하지 않는다" 라, 생성이 끝나 이력이 갱신돼도 펼침에는 **직전 run 의 근거**가 그대로
+  // 남았다(새 run 의 판정 옆에 옛 run 의 사이드카). 펼쳐진 doc_type 의 최신 run 과 받아 둔 근거의 run 이
+  // 다르면 — 처음 펼쳤을 때든, 펼친 채로 이력이 갱신됐을 때든 — 다시 받는다.
+  const expandedRun = expanded ? latestByType[expanded] : null;
+  const expandedDetailRunId = expanded ? detail[expanded]?.runId : null;
+  useEffect(() => {
+    if (!expanded || !expandedRun) return;
+    if (expandedDetailRunId === expandedRun.id) return;
+    fetchDetail(expanded, expandedRun);
+  }, [expanded, expandedRun, expandedDetailRunId, fetchDetail]);
 
   /** 산출물이 **어디에 저장됐는지** 를 화면에서 바로 열게 한다(경로만 보여주면 찾아가야 한다). */
   const handleOpenFolder = useCallback(async (path) => {

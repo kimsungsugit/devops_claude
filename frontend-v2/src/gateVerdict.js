@@ -16,7 +16,33 @@
 /** 게이트 사유 코드 → 사람이 읽는 문장. 없는 코드는 코드 그대로. */
 export const REASON_TEXT = {
   no_gated_metric: '검사 항목이 0개 — 판정이 성립하지 않는다',
+  // (R32 W3) 병합 판정의 사이드카 축이 실패한 경우 — 요약의 gate_pass 는 7축만 본 값이라 여기서 갈린다.
+  report_generation_failed: '사이드카(.quality_gate.md) 생성 실패 — 병합 판정을 내릴 수 없다',
+  report_unreadable: '사이드카(.quality_gate.md)를 읽을 수 없음 — 병합 판정을 내릴 수 없다',
 };
+
+/** 병합 판정이 성립하지 않는 게이트 정의 — 요약 `gate_pass` 가 True 여도 판정 불가로 그린다. */
+export const INDETERMINATE_DEFINITIONS = Object.freeze(['report_generation_failed', 'report_unreadable']);
+
+/** `gate_definition` — 목록/추세는 top-level 로, 상세는 `gate_definition:<src>` 지표 행으로 온다. 없으면 null. */
+export function gateDefinitionOf(run) {
+  if (!run) return null;
+  if (typeof run.gate_definition === 'string' && run.gate_definition) return run.gate_definition;
+  const row = Array.isArray(run.scores)
+    ? run.scores.find((s) => String(s?.metric_name || '').startsWith('gate_definition:')) : null;
+  if (!row) return null;
+  const code = String(row.metric_name).slice('gate_definition:'.length);
+  return code || null;
+}
+
+/** 판정 불가의 사유 텍스트 — `gate_reason` 이 없으면 게이트 정의에서, 그래도 없으면 검사 0건 문장. */
+export function reasonTextOf(run) {
+  if (!run) return REASON_TEXT.no_gated_metric;
+  if (run.gate_reason && REASON_TEXT[run.gate_reason]) return REASON_TEXT[run.gate_reason];
+  const def = gateDefinitionOf(run);
+  if (def && INDETERMINATE_DEFINITIONS.includes(def)) return REASON_TEXT[def];
+  return REASON_TEXT.no_gated_metric;
+}
 
 /** `gated_metric_count` — 목록/추세는 top-level 로, 상세는 `scores` 행으로 온다. 둘 다 없으면 null(미기록). */
 export function gatedCountOf(run) {
@@ -46,6 +72,11 @@ export function verdictOf(run) {
   if (run.gate_reason === 'no_gated_metric' || gated === 0) {
     return { code: 'INDETERMINATE', tone: 'warning', label: '판정 불가' };
   }
+  // (R32 W3) 사이드카 축이 실패/판독 불가면 병합 판정은 False 인데 요약은 7축 True 다 — PASS 로 그리지 않는다.
+  const def = gateDefinitionOf(run);
+  if (def && INDETERMINATE_DEFINITIONS.includes(def)) {
+    return { code: 'INDETERMINATE', tone: 'warning', label: '판정 불가' };
+  }
   const gp = run.summary?.gate_pass;
   if (gp === true) return { code: 'PASS', tone: 'success', label: 'PASS' };
   if (gp === false) return { code: 'FAIL', tone: 'danger', label: 'FAIL' };
@@ -62,6 +93,7 @@ export function trendVerdictOf(item) {
     summary: { gate_pass: item.gate_pass ?? null },
     gate_reason: item.gate_reason ?? null,
     gated_metric_count: item.gated_metric_count ?? null,
+    gate_definition: item.gate_definition ?? null,
   });
 }
 

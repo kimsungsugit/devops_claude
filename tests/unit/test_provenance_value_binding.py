@@ -154,6 +154,19 @@ class TestGenerateUdsLocalShadowTrap:
             "`_load_repo_module(...)` 를 쓸 것"
         )
 
+    @pytest.fixture(autouse=True)
+    def _this_repos_report_generator_first(self):
+        """단독 실행 순서 의존 제거(R32 실측 — HEAD 대조군에서도 이 파일 단독은 3건 실패).
+
+        도구는 import 시점에 `sys.path[0]` 에 260105 트리를 꽂고 `import report_generator` 를 하는데,
+        전체 스위트에선 다른 테스트가 이미 **이 저장소의** `report_generator` 를 올려 둬 캐시가 이긴다.
+        단독으로 돌리면 260105 판이 올라오고, 그 판의 `from report_gen import _build_function_info_rows` 가
+        이미 캐시된 이 저장소 `report_gen` 에서 실패한다(`_config_reload.py` 머리글의 그 부작용). 전체
+        스위트와 같은 전제를 여기서 명시한다 — 근본(도구의 sys.path 변형)은 R33 후보.
+        """
+        import report_generator  # noqa: F401 — 캐시 선점이 목적
+        yield
+
     @pytest.mark.parametrize("rel_module", ["provenance", "utils"])
     def test_loader_resolves_this_repo(self, rel_module):
         from tools import generate_uds_local
@@ -219,23 +232,52 @@ class TestRequirementsSdsMatchNeedsAValue:
 
 
 class TestEmptyValueNeverScoresAsStrongSource:
-    """끝단 계약 — 빈 값에 강한 출처가 붙는 조합이 만들어지지 않는다.
+    """끝단 계약 — 빈 값에 강한 출처가 붙는 조합이 만들어지지 않고, 만들어져도 **강한 점수를 받지 않는다**.
 
-    유입 3곳을 닫았으므로 남은 위험은 '누가 새로 만드는 것'이다. `_score_for` 자체는
-    바꾸지 않았다(값 유무를 점수에 반영하는 건 별개 정책이고, 실측상 그 변경은
-    ASIL·Related 가 둘 다 없는 함수를 D→A 로 **승격**시킨다 — 방향이 반대다).
+    유입 3곳을 닫았으므로 남은 위험은 '누가 새로 만드는 것'이었고, 그 마지막 층을 R32 가 닫았다:
+    `_score_for` 가 값 유무를 본다(`_effective_src` — 값이 자리표시자면 출처 라벨과 무관하게 `default` 0.30).
+
+    ⚠ 예전 이 클래스는 "`_score_for` 는 바꾸지 않았다 — 값 유무를 반영하면 ASIL·Related 가 둘 다 없는 함수를
+    D→A 로 **승격**시킨다(방향이 반대)" 로 현행을 잠가 두었다. 그 우려는 **빈 필드를 평균에서 빼는 구현**에
+    대한 것이고, R32 는 빈 값을 최저점으로 넣으므로 방향은 하향뿐이다 — 라이브 payload 17,027함수 전수:
+    상향 **0** · 하향 52 · 동일 16,975(리포트 71개 재채점: 6개 ≤0.003 하락, 등급 이동 0).
     """
 
-    def test_score_for_still_ignores_value_presence(self):
-        """현행 동작을 명시적으로 고정 — 바뀌면 이 계약을 다시 판단해야 한다."""
+    def test_score_sees_value_presence_and_never_promotes(self, tmp_path):
+        """빈 값은 강한 라벨이 붙어 있어도 0.30 — 라벨만 보던 옛 식보다 **높아질 수 없다**."""
+        import re
+
+        from report_gen.validation import generate_asil_related_confidence_report
+
+        def _score(payload, name):
+            out = tmp_path / f"{name}.md"
+            generate_asil_related_confidence_report(payload, str(out))
+            m = re.search(r"Overall confidence score: `([\d.]+)` \(grade: `([A-D])`\)", out.read_text(encoding="utf-8"))
+            assert m, out.read_text(encoding="utf-8")[:400]
+            return float(m.group(1)), m.group(2)
+
+        strong_empty = {"function_details_by_name": {"f": {
+            "id": "SwUFn_01", "name": "f",
+            "description": "Reads sensor", "description_source": "sds",
+            "asil": "", "asil_source": "sds",
+            "related": "", "related_source": "sds",
+        }}}
+        score, grade = _score(strong_empty, "empty")
+        # 라벨만 보면 (0.95×3)/3 = 0.95 → A. 값을 보면 (0.95+0.30+0.30)/3 = 0.517 → D.
+        assert score == pytest.approx(0.517, abs=1e-3)
+        assert grade == "D"
+        # 값이 있으면 라벨 점수 그대로 — 새 규칙은 값 없는 칸만 내린다(0.95×3/3 은 부동소수로 0.9499… → B).
+        full = {"function_details_by_name": {"f": {**strong_empty["function_details_by_name"]["f"], "asil": "B", "related": "SwFn_01"}}}
+        full_score, full_grade = _score(full, "full")
+        assert full_score == pytest.approx(0.95, abs=1e-3)
+        assert full_grade in {"A", "B"}
+
+    def test_the_value_check_lives_in_the_effective_source_helper(self):
+        """구조 잠금 — 값 유무 판정은 `_effective_src` 한 곳(표·분포·근거·점수가 같이 쓴다)."""
         import report_gen.validation as validation
 
         source = Path(validation.__file__).read_text(encoding="utf-8")
-        assert "def _score_for(info: Dict[str, Any]) -> float:" in source
-        # 값 유무 검사가 들어오면 이 단언이 깨지고, 그때 후보 11 을 다시 연다.
-        idx = source.index("def _score_for(info: Dict[str, Any]) -> float:")
-        body = source[idx : idx + 500]
-        assert "has_evidence_value" not in body, (
-            "_score_for 가 값 유무를 보기 시작했다 — 후보 11 의 정책 결정(빈 값 점수 처리)이 "
-            "바뀐 것이므로 계획서 §6 11행과 이 테스트를 함께 갱신할 것"
-        )
+        idx = source.index("def _effective_src(info: Dict[str, Any], field_name: str) -> str:")
+        body = source[idx: idx + 1600]
+        assert "has_evidence_value(info.get(field_name))" in body
+        assert "unrecorded_source(info.get(field_name))" in body

@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
-  verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, REASON_TEXT, TONE_COLOR, VERDICT_CODES,
+  verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, gateDefinitionOf, reasonTextOf,
+  REASON_TEXT, TONE_COLOR, VERDICT_CODES,
 } from '../gateVerdict.js';
 
 describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
@@ -36,6 +37,26 @@ describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
   it('scores 행의 gated_metric_count=0 도 잡는다 (상세 형태)', () => {
     const run = { summary: { gate_pass: false }, scores: [{ metric_name: 'gated_metric_count', value: 0 }] };
     expect(verdictOf(run).label).toBe('판정 불가');
+  });
+
+  // (R32 W3) 병합 판정의 사이드카 축이 실패하면 요약 gate_pass 는 7축 True 인데 병합은 False 다 — PASS 로 그리지 않는다.
+  it('gate_definition=report_generation_failed 이면 gate_pass=true 여도 판정 불가', () => {
+    const v = verdictOf({ summary: { gate_pass: true }, gate_definition: 'report_generation_failed', gated_metric_count: 7 });
+    expect(v.code).toBe('INDETERMINATE');
+    expect(reasonTextOf({ gate_definition: 'report_generation_failed' })).toMatch(/생성 실패/);
+    expect(verdictOf({ summary: { gate_pass: true }, gate_definition: 'report_unreadable' }).code).toBe('INDETERMINATE');
+  });
+
+  it('scores 행의 gate_definition 마커도 잡고, 정상 정의는 판정을 바꾸지 않는다', () => {
+    const run = { summary: { gate_pass: true }, scores: [{ metric_name: 'gate_definition:report_generation_failed', value: 1 }] };
+    expect(verdictOf(run).code).toBe('INDETERMINATE');
+    expect(gateDefinitionOf(run)).toBe('report_generation_failed');
+    expect(verdictOf({ summary: { gate_pass: true }, gate_definition: 'quick_confidence_and_report' }).code).toBe('PASS');
+    expect(gateDefinitionOf({})).toBeNull();
+  });
+
+  it('추세 항목의 gate_definition 도 같은 판정기로 간다', () => {
+    expect(trendVerdictOf({ gate_pass: true, gate_definition: 'report_generation_failed' }).code).toBe('INDETERMINATE');
   });
 
   it('gated_metric_count 미기록(null)은 0 이 아니다 — 판정은 gate_pass 를 따른다', () => {

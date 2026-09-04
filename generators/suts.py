@@ -4282,25 +4282,29 @@ def generate_suts_validation_report(
                 lines.append(f"| {k} | {v} |")
             lines.append("")
 
+    # (R32 Q-10) TC 가 0건이면 "I/O 없는 TC 비율"·"평균 시퀀스" 는 정의되지 않는다. 예전엔 `if tc_count
+    #   else True` 로 **통과**로 접어 빈 문서가 5개 중 3개를 통과했다(TC 존재·시퀀스 존재만 FAIL).
+    #   해당 없음(`None`)은 분모에서 빼고 표에는 `N/A` 로 적는다 — 통과도 실패도 아니다.
     gate_items = [
         ("TC 존재", tc_count > 0),
         ("시퀀스 존재", seq_count > 0),
-        ("I/O 없는 TC < 50%", empty_io <= tc_count * 0.5 if tc_count else True),
-        ("TC당 평균 시퀀스 >= 2", stats.get("avg_seq_per_tc", 0) >= 2 if tc_count else True),
+        ("I/O 없는 TC < 50%", (empty_io <= tc_count * 0.5) if tc_count else None),
+        ("TC당 평균 시퀀스 >= 2", (stats.get("avg_seq_per_tc", 0) >= 2) if tc_count else None),
         # ⚠ 미측정(None)을 통과로 접지 않는다 — 못 잰 것을 "이상 없음" 으로 만들면
         #   게이트가 fail-open 이 된다. TC 가 있으면 그건 그것대로 별도 항목이 본다.
         ("함수 커버리지 측정됨", (qr or {}).get("function_coverage_pct") is not None),
     ]
-    passed = sum(1 for _, ok in gate_items if ok)
+    applicable = [(name, ok) for name, ok in gate_items if ok is not None]
+    passed = sum(1 for _, ok in applicable if ok)
 
     lines.extend([
-        f"## 3. Quality Gate ({passed}/{len(gate_items)})",
+        f"## 3. Quality Gate ({passed}/{len(applicable)})",
         "",
         "| 항목 | 결과 |",
         "|------|------|",
     ])
     for name, ok in gate_items:
-        lines.append(f"| {name} | {'PASS' if ok else 'FAIL'} |")
+        lines.append(f"| {name} | {'N/A (TC 없음)' if ok is None else ('PASS' if ok else 'FAIL')} |")
     lines.append("")
 
     if issues:
