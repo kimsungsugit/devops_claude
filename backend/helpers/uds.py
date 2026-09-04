@@ -38,6 +38,7 @@ from backend.state import (
 )
 from report_gen.gate_report import (
     parse_gate_report,
+    parse_scoring_scope,
     to_rate_map,
 )
 from report_generator import (
@@ -753,7 +754,12 @@ def _parse_quality_gate_report(path: Optional[Path]) -> Dict[str, Any]:
     `gate_pass=None` 은 **판정 불가**(파일 없음 / 읽기 실패 / `Gate pass:` 부재 또는 2회 이상)
     이지 통과가 아니다 — 아래 `_build_quality_evaluation` 이 그 구분을 유지한다.
     """
-    out: Dict[str, Any] = {"gate_pass": None, "rates": {}, "gate_pass_status": "absent"}
+    out: Dict[str, Any] = {
+        "gate_pass": None, "rates": {}, "gate_pass_status": "absent",
+        # (R31, R30 리뷰 편입) 사이드카가 **무엇을** 채점했는지 — 한 실행에 함수 수가 셋(DB `fn_count` ·
+        # 사이드카 채점 집합 · 문서 항목)인데 서로 참조가 없었다. 구판 사이드카는 None.
+        "scored_entries": None, "document_entries": None, "distinct_scored_functions": None,
+    }
     if not path or not path.exists():
         return out
     try:
@@ -766,6 +772,10 @@ def _parse_quality_gate_report(path: Optional[Path]) -> Dict[str, Any]:
     out["gate_pass"] = parsed.get("gate_pass")
     out["gate_pass_status"] = parsed.get("gate_pass_status")
     out["rates"] = to_rate_map(parsed)
+    scope = parse_scoring_scope(text)
+    out["scored_entries"] = scope.get("scored_entries")
+    out["document_entries"] = scope.get("document_entries")
+    out["distinct_scored_functions"] = scope.get("distinct_scored_functions")
     return out
 
 
@@ -817,8 +827,68 @@ def _quality_threshold(thresholds: Any, key: str) -> Optional[float]:
         return None
 
 
+# 사유 코드 ↔ 판정 축. **판정식(`QUICK_GATE_AXES`+`CONFIDENCE_GATE_AXES`)과 같은 튜플에서만 사유를 만든다.**
+# (R31 Q-7) 예전엔 `global_min`/`static_min` 도 사유로 나갔는데 그 두 축은 판정에 없다
+#   (`workflow/quality/evaluator.py` 가 의도적으로 제외) → **통과 판정에 미달 사유**가 붙었다.
+#   그 둘은 아래 `_derive_quality_info_codes` 의 정보 등급으로 내려간다(문구는 그대로).
+_REASON_CODE_BY_THRESHOLD_KEY: Dict[str, str] = {
+    "called_min": "CALLED_LOW",
+    "calling_min": "CALLING_LOW",
+    "input_min": "INPUT_PARSE_LOW",
+    "output_min": "OUTPUT_PARSE_LOW",
+    "description_min": "DESCRIPTION_LOW",
+    "asil_min": "ASIL_LOW",
+    "related_min": "RELATED_ID_LOW",
+    "description_trusted_min": "DESCRIPTION_TRUST_LOW",
+    "asil_trusted_min": "ASIL_TRUST_LOW",
+    "related_trusted_min": "RELATED_ID_TRUST_LOW",
+}
+# 정보 등급 — 잰 값은 있지만 **판정에 쓰이지 않는** 축. 사유와 섞이면 "통과인데 미달" 이 된다.
+_INFO_CODE_BY_THRESHOLD_KEY: Dict[str, str] = {
+    "global_min": "GLOBAL_PARSE_LOW",
+    "static_min": "STATIC_PARSE_LOW",
+}
+
+
+def _quality_rate(rates: Any, key: str) -> float:
+    try:
+        return float((rates or {}).get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _quality_total_functions(quick_gate: Any) -> int:
+    if not isinstance(quick_gate, dict):
+        return 0
+    try:
+        return int((quick_gate.get("counts") or {}).get("total_functions") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _derive_quality_reason_codes(quick_gate: Dict[str, Any], template_warning: str = "") -> List[str]:
+    """`gate_pass`/`confidence_gate_pass` 가 **False 인 이유**만 낸다.
+
+    계약(R31 Q-7): 사유는 판정 축(`QUICK_GATE_AXES` 7 + `CONFIDENCE_GATE_AXES` 3)에서만 파생한다.
+    판정이 True 인데 사유가 붙는 조합은 만들지 않는다 —
+      · `NO_FUNCTIONS` 면 **조기 반환**. 예전엔 계속 진행해 `or 0.0` 이 12개 `*_LOW` 를 전부 붙였다
+        (함수 0개의 미달률은 측정이 아니다).
+      · `CALLING_ZERO` 는 `calling` 축이 **켜져 있을 때만** 사유다(0 < 임계 = 진짜 미달의 특수형).
+        축이 꺼져 있으면(임계 0/부재) 판정은 통과이므로 정보 코드로 내려간다.
+      · `global`/`static` 은 판정 축이 아니다 → `_derive_quality_info_codes`.
+    `TEMPLATE_INVALID` 는 함수 수와 무관한 별도 축이라 조기 반환에도 붙는다.
+    """
+    if not isinstance(quick_gate, dict):
+        quick_gate = {}
     codes: List[str] = []
+    if _quality_total_functions(quick_gate) <= 0:
+        codes.append("NO_FUNCTIONS")
+        if template_warning:
+            codes.append("TEMPLATE_INVALID")
+        return codes
+
+    rates = quick_gate.get("rates")
+    thresholds = quick_gate.get("thresholds")
 
     def _below(value: float, key: str) -> bool:
         """`gate_pass` 와 **같은 임계·같은 부등호**로 판단한다(`>=` 의 여집합).
@@ -828,51 +898,38 @@ def _derive_quality_reason_codes(quick_gate: Dict[str, Any], template_warning: s
         limit = _quality_threshold(thresholds, key)
         return limit is not None and value < limit
 
-    rates = quick_gate.get("rates") if isinstance(quick_gate, dict) else {}
-    thresholds = quick_gate.get("thresholds") if isinstance(quick_gate, dict) else {}
-    total = int((quick_gate.get("counts") or {}).get("total_functions") or 0) if isinstance(quick_gate, dict) else 0
-    if total <= 0:
-        codes.append("NO_FUNCTIONS")
-    called = float((rates or {}).get("called_fill") or 0.0)
-    calling = float((rates or {}).get("calling_fill") or 0.0)
-    inp = float((rates or {}).get("input_fill") or 0.0)
-    outp = float((rates or {}).get("output_fill") or 0.0)
-    gbl = float((rates or {}).get("global_fill") or 0.0)
-    stc = float((rates or {}).get("static_fill") or 0.0)
-    desc = float((rates or {}).get("description_fill") or 0.0)
-    asil = float((rates or {}).get("asil_fill") or 0.0)
-    rel = float((rates or {}).get("related_fill") or 0.0)
-    desc_trust = float((rates or {}).get("description_trusted_fill") or 0.0)
-    asil_trust = float((rates or {}).get("asil_trusted_fill") or 0.0)
-    rel_trust = float((rates or {}).get("related_trusted_fill") or 0.0)
-    if _below(called, "called_min"):
-        codes.append("CALLED_LOW")
-    if calling <= 0.0:
-        codes.append("CALLING_ZERO")
-    elif _below(calling, "calling_min"):
-        codes.append("CALLING_LOW")
-    if _below(inp, "input_min"):
-        codes.append("INPUT_PARSE_LOW")
-    if _below(outp, "output_min"):
-        codes.append("OUTPUT_PARSE_LOW")
-    if _below(gbl, "global_min"):
-        codes.append("GLOBAL_PARSE_LOW")
-    if _below(stc, "static_min"):
-        codes.append("STATIC_PARSE_LOW")
-    if _below(desc, "description_min"):
-        codes.append("DESCRIPTION_LOW")
-    if _below(asil, "asil_min"):
-        codes.append("ASIL_LOW")
-    if _below(rel, "related_min"):
-        codes.append("RELATED_ID_LOW")
-    if _below(desc_trust, "description_trusted_min"):
-        codes.append("DESCRIPTION_TRUST_LOW")
-    if _below(asil_trust, "asil_trusted_min"):
-        codes.append("ASIL_TRUST_LOW")
-    if _below(rel_trust, "related_trusted_min"):
-        codes.append("RELATED_ID_TRUST_LOW")
+    for rate_key, thr_key in (*QUICK_GATE_AXES, *CONFIDENCE_GATE_AXES):
+        value = _quality_rate(rates, rate_key)
+        if not _below(value, thr_key):
+            continue
+        if thr_key == "calling_min" and value <= 0.0:
+            codes.append("CALLING_ZERO")      # 미달의 특수형 — 파서가 안 돈 신호
+        else:
+            codes.append(_REASON_CODE_BY_THRESHOLD_KEY[thr_key])
     if template_warning:
         codes.append("TEMPLATE_INVALID")
+    return list(dict.fromkeys(codes))
+
+
+def _derive_quality_info_codes(quick_gate: Dict[str, Any]) -> List[str]:
+    """판정에 쓰이지 않는 진단 — 사유가 아니다(통과 판정과 나란히 있어도 모순이 아니다).
+
+    · `GLOBAL_PARSE_LOW`/`STATIC_PARSE_LOW`: config 에 임계는 있지만 판정 축이 아닌 두 축.
+    · `CALLING_ZERO`: `calling` 축이 꺼져 있는데(임계 0/부재) 값이 0 — 파서가 안 돈 사실은 남긴다.
+    함수 0개면 잰 값이 없으므로 빈 목록(`NO_FUNCTIONS` 가 사유 쪽에 있다).
+    """
+    if not isinstance(quick_gate, dict) or _quality_total_functions(quick_gate) <= 0:
+        return []
+    rates = quick_gate.get("rates")
+    thresholds = quick_gate.get("thresholds")
+    codes: List[str] = []
+    calling_limit = _quality_threshold(thresholds, "calling_min")
+    if _quality_rate(rates, "calling_fill") <= 0.0 and not (calling_limit is not None and calling_limit > 0):
+        codes.append("CALLING_ZERO")
+    for rate_key, thr_key in (("global_fill", "global_min"), ("static_fill", "static_min")):
+        limit = _quality_threshold(thresholds, thr_key)
+        if limit is not None and _quality_rate(rates, rate_key) < limit:
+            codes.append(_INFO_CODE_BY_THRESHOLD_KEY[thr_key])
     return list(dict.fromkeys(codes))
 
 
@@ -922,6 +979,9 @@ def _build_quality_evaluation(
     report_acc = _parse_accuracy_report(accuracy_path)
     reason_codes = _derive_quality_reason_codes(quick_gate, template_warning=template_warning)
     action_hints = _build_quality_action_hints(reason_codes)
+    # (R31 Q-7) 판정 축 밖의 진단은 사유와 **다른 키**로 — 같은 목록에 섞이면 통과 판정에 미달 사유가 붙는다.
+    info_codes = _derive_quality_info_codes(quick_gate)
+    info_hints = _build_quality_action_hints(info_codes)
     quick_pass = bool((quick_gate or {}).get("gate_pass"))
     confidence_pass = bool((quick_gate or {}).get("confidence_gate_pass"))
     report_pass = report_gate.get("gate_pass")
@@ -961,6 +1021,9 @@ def _build_quality_evaluation(
         "accuracy": report_acc,
         "reason_codes": reason_codes,
         "action_hints": action_hints,
+        # 판정 밖 진단(global/static 채움률·꺼진 calling 축의 0) — 사유가 아니라 정보다.
+        "info_codes": info_codes,
+        "info_hints": info_hints,
         "template_warning": template_warning,
         "policy": policy,
     }

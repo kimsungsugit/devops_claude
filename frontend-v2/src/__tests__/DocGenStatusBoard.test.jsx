@@ -228,6 +228,58 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     expect(screen.getByText(/문서에 빠진 함수 9개/)).toBeInTheDocument();
   });
 
+  // (R31 Q-8) 라이터가 쓰던 경고 절과 '대조 불가' 가 리더를 거쳐 화면까지 온다.
+  it('구조 검증: 대조 불가는 "누락 없음" 이 아니라 미검증으로, 경고 절은 목록으로 보인다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: { present: false, reason: '없음' },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: {
+            present: true, ok: true, issues: [], missing_from_docx: null, uncomparable: true,
+            warnings: ['payload 사이드카 없음(spec.payload.json) — 입력 대비 대조 불가(미검증)'],
+          },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText('입력 대비 대조 불가', { selector: 'strong' })).toBeInTheDocument());
+    expect(screen.queryByText(/문서에 빠진 함수/)).toBeNull();
+    const list = screen.getByRole('list', { name: '구조 검증 경고' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(list).getByText(/payload 사이드카 없음/)).toBeInTheDocument();
+  });
+
+  it('구조 검증: 대조했고 누락 0 이면 0개라고 말한다 (예전엔 줄이 없어 영원히 안 보였다)', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: { present: false, reason: '없음' },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: { present: true, ok: true, issues: [], missing_from_docx: 0,
+            headings_without_payload: 0, uncomparable: false, warnings: [] },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/문서에 빠진 함수 0개/)).toBeInTheDocument());
+    expect(screen.getByText(/빈 명세 heading 0개/)).toBeInTheDocument();
+    expect(screen.queryByText(/입력 대비 대조 불가/)).toBeNull();
+    expect(screen.queryByRole('list', { name: '구조 검증 경고' })).toBeNull();
+  });
+
   // ⚠ 라운드 15 — 분모 0 인 축은 채점하지 않는다. 이 수가 화면에 없으면 "5/11" 이
   //    "6건 미달" 로만 읽혀, 잴 수 없던 축까지 고칠 거리로 보인다.
   it('미측정 게이트가 있으면 개수와 "0% 아님" 을 함께 보인다', async () => {

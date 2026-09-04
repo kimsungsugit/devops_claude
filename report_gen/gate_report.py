@@ -43,6 +43,7 @@ from typing import Any, Dict, Optional, Tuple
 
 __all__ = [
     "parse_gate_report",
+    "parse_scoring_scope",
     "to_rate_map",
     "to_percent_text_map",
     "has_meaningful_value",
@@ -165,3 +166,50 @@ def to_percent_text_map(parsed: Dict[str, Any]) -> Dict[str, str]:
     """`report_gen/validation.py` 가 쓰던 `metrics`(`"71.4%"` 원문 문자열) 모양으로 변환."""
     metrics = parsed.get("metrics") or {}
     return {k: str((v or {}).get("raw") or "") for k, v in metrics.items()}
+
+
+# (R30/R31) head 의 채점 범위 줄 — ``- Scored entries: `18` / `426` — …`` · ``- Document entries: `426` · …``
+# ⚠ 이 줄들은 일부러 `(…)` 를 붙이지 않는다(붙이면 `_METRIC_RE` 가 지표로 오인 — R30 리뷰 W2).
+_HEAD_RATIO_RE = re.compile(r"`(\d+)`\s*/\s*`(\d+)`")
+_HEAD_INT_RE = re.compile(r"`(-?\d+)`")
+
+
+def _head_line(text: str, label: str) -> Optional[str]:
+    want = f"- {label}:".lower()
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if line.startswith("## "):
+            break                      # head 는 첫 절 제목 전까지
+        if line.lower().startswith(want):
+            return line
+    return None
+
+
+def parse_scoring_scope(text: str) -> Dict[str, Any]:
+    """사이드카가 **무엇을** 채점했는지 — `report_gen/evidence.py` 와 `backend/helpers/uds.py` 의 단일 출처.
+
+    한 실행에 함수 수가 셋이다: DB `fn_count`(payload 전체) · 사이드카 채점 집합(문서 ∩ payload) ·
+    문서 항목. 셋이 서로를 참조하지 않아 "429함수 통과" 가 18개 채점의 결과일 수 있었다(R30 재채점 실측).
+    구판 사이드카엔 줄이 없다 → 전부 `None`(0 이 아니다).
+
+    반환:
+        scored_entries             {count, total} | None   채점 집합 / 문서 항목
+        document_entries           int | None
+        distinct_scored_functions  int | None              같은 이름 SwUFn 복제 채점 제외
+    """
+    out: Dict[str, Any] = {
+        "scored_entries": None, "document_entries": None, "distinct_scored_functions": None,
+    }
+    line = _head_line(text, "Scored entries")
+    if line:
+        m = _HEAD_RATIO_RE.search(line)
+        if m:
+            out["scored_entries"] = {"count": int(m.group(1)), "total": int(m.group(2))}
+    for key, label in (("document_entries", "Document entries"),
+                       ("distinct_scored_functions", "Distinct scored functions")):
+        line = _head_line(text, label)
+        if line:
+            m = _HEAD_INT_RE.search(line)
+            if m:
+                out[key] = int(m.group(1))
+    return out

@@ -102,6 +102,7 @@ from backend.helpers.uds import (  # noqa: F401
     _build_test_cases_for_signature,
     _compute_quick_quality_gate,
     _compute_uds_mapping_summary,
+    _derive_quality_info_codes,
     _derive_quality_reason_codes,
     _enrich_function_quality_fields,
     _extract_call_graph_payload,

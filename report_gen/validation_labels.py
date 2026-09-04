@@ -42,7 +42,13 @@ LABEL_UNMATCHED_MODE = "남의 함수 절 처리"
 # 값 없이 대조 자체가 불가능했을 때 쓰는 문구 — 0 이나 통과와 구분된다.
 VALUE_UNCOMPARABLE = "대조 불가(사이드카 없음/읽기 실패)"
 
+# ── 절 제목 (R31 Q-8) ────────────────────────────────────────────────────────
+# `## Warnings (입력 대비)` — 라이터는 쓰는데 리더가 안 읽어 "payload 없음 — 대조 불가",
+# "소스 함수 629개가 문서에 없다" 가 화면에 닿은 적이 없었다. 라벨과 같은 이유로 여기 둔다.
+SECTION_WARNINGS = "Warnings (입력 대비)"
+
 __all__ = [
+    "SECTION_WARNINGS",
     "LABEL_EXPECTED_FUNCTIONS",
     "LABEL_MATCHED_FUNCTIONS",
     "LABEL_MISSING_FROM_DOCX",

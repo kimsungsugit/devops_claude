@@ -53,6 +53,18 @@ def _gate_reason(scores) -> Optional[str]:
     return None
 
 
+def _gated_metric_count(scores) -> Optional[int]:
+    """`gated_metric_count` 지표 행의 값. 없으면 None(구 run — 검사 규모 미기록) 이지 0 이 아니다."""
+    for s in (scores or []):
+        if str(getattr(s, "metric_name", "") or "") == "gated_metric_count":
+            v = getattr(s, "value", None)
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
     """GenerationRun ORM → API 응답 dict."""
     d: Dict[str, Any] = {
@@ -73,6 +85,10 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
         # None = 사유 없음(정상 판정) — 사유 미기록(구 run)과는 구분되지 않는다는
         # 한계가 있고, 그건 `gated_metric_count` 부재로 따로 드러난다.
         "gate_reason": _gate_reason(getattr(run, "scores", None)),
+        # (R31 Q-6) 검사 규모를 **목록에서도** 낸다. 예전엔 `scores` 에만 있어 `include_scores=false`
+        # 인 목록·추세는 검사 0건을 알 길이 없었고, 게이트 화면 목록은 그 run 을 FAIL 로 그렸다.
+        # None = 미기록(구 run) — 0 과 다르다.
+        "gated_metric_count": _gated_metric_count(getattr(run, "scores", None)),
         # 저장은 tz-naive UTC(datetime.now(utc)) → 응답에 UTC offset 명시.
         # (naive isoformat 은 'Z' 없어 JS가 로컬해석 → KST 등에서 날짜 하루 밀림)
         "created_at": (
@@ -262,7 +278,12 @@ def get_trend(
 
     dt = (doc_type or "").lower().strip()
     with get_session() as session:
-        q = session.query(GenerationRun).join(QualitySummary)
+        from sqlalchemy.orm import selectinload
+
+        # (R31 Q-6) 추세 막대가 `gate_pass` 만 보면 검사 0건(no_gated_metric)이 **빨간 막대**가 된다 —
+        # 캡션은 "회색=판정 없음" 을 약속하는데 사유가 응답에 없었다. 사유·검사 규모를 같이 싣는다.
+        q = (session.query(GenerationRun).join(QualitySummary)
+             .options(selectinload(GenerationRun.scores)))
         # 프론트 "전체"(doc_type 생략) → 미필터. list_runs 와 동일한 전체 조회 의미.
         if dt and dt != "all":
             q = q.filter(GenerationRun.doc_type == dt)
@@ -293,6 +314,9 @@ def get_trend(
                     "overall_score": r.summary.overall_score if r.summary else None,
                     "gate_pass": r.summary.gate_pass if r.summary else None,
                     "score_delta": r.summary.score_delta if r.summary else None,
+                    # 목록(`_run_to_dict`)과 같은 두 키 — 세 표면이 같은 근거로 판정을 그린다.
+                    "gate_reason": _gate_reason(r.scores),
+                    "gated_metric_count": _gated_metric_count(r.scores),
                 }
                 for r in runs
             ],

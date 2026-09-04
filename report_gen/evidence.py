@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import report_gen.validation_labels as VL
-from report_gen.gate_report import parse_gate_report
+from report_gen.gate_report import parse_gate_report, parse_scoring_scope
 
 _logger = logging.getLogger("report_gen.evidence")
 
@@ -198,6 +198,7 @@ def read_gate_report(path: Path) -> Dict[str, Any]:
         return _absent("사이드카 읽기 실패 (.quality_gate.md)")
 
     parsed = parse_gate_report(text)  # gate_pass 판정은 단일 출처에 위임
+    scope = parse_scoring_scope(text)  # 채점 범위 3키도 같은 모듈
     sec = _sections(text)
     head = _kv(sec.get("", []))
 
@@ -277,11 +278,13 @@ def read_gate_report(path: Path) -> Dict[str, Any]:
         "payload_file": _payload_file(head.get("Payload")),
         # 리뷰 W1: "없음" 과 "있는데 못 읽음" 은 다르다 — 못 읽은 사유가 있으면 그 문장(구판·정상 None)
         "payload_read_error": _payload_read_error(sec.get("", [])),
-        # 리뷰 W3: 행 수 ≠ 함수 수 — 같은 이름 SwUFn 이 여럿이면 한 payload 행이 복제 채점된다
-        "distinct_scored_functions": _as_count(head.get("Distinct scored functions")),
-        "document_entries": _as_count(head.get("Document entries")),
+        # 리뷰 W3: 행 수 ≠ 함수 수 — 같은 이름 SwUFn 이 여럿이면 한 payload 행이 복제 채점된다.
+        # (R31) 세 키는 `gate_report.parse_scoring_scope` 단일 출처 — `backend/helpers/uds.py` 의
+        # `report_gate` 와 같은 함수로 읽어 API 와 증거 패널이 다른 수를 낼 수 없게 한다.
+        "distinct_scored_functions": scope["distinct_scored_functions"],
+        "document_entries": scope["document_entries"],
         # 채점 집합 / 문서 항목 — 판정 밖이지만 "무엇에 대한 통과인가" 의 분모. 구판 None.
-        "scored_entries": _head_ratio(sec.get("", []), "Scored entries"),
+        "scored_entries": scope["scored_entries"],
         "entries_not_in_payload": _head_ratio(sec.get("", []), "Document entries not in payload"),
         "payload_not_in_document": _head_ratio(sec.get("", []), "Payload functions not in document"),
         # 잰 값은 있는데 임계 표에 키가 없는 축(리뷰 W4) — FAIL 에 사유가 붙으려면 리더가 세야 한다
@@ -367,7 +370,24 @@ def read_docx_validation(path: Path) -> Dict[str, Any]:
         "dropped_headings": _as_count(head.get(VL.LABEL_DROPPED_HEADINGS)),
         "unmatched_headings_mode": (head.get(VL.LABEL_UNMATCHED_MODE) or None),
         "issues": _bullet_list(sec.get("Issues", [])),
+        # ── (R31 Q-8) 라이터↔리더 누수 ──
+        # ① 경고 절(제목은 `VL.SECTION_WARNINGS` — 여기 리터럴로 적지 않는다) — "payload 없음 — 대조 불가",
+        #    "소스 함수 629개가 문서에 없다" 를 라이터는 쓰는데 리더가 안 읽어 화면에 닿은 적이 없었다.
+        #    `ok` 를 바꾸지 않는 공시라 목록째 낸다.
+        "warnings": _bullet_list(sec.get(VL.SECTION_WARNINGS, [])),
+        # ② `대조 불가` 는 위 `_as_count` 에서 `None` 으로 떨어져 **줄이 없는 구판과 같아 보였다**.
+        #    True = 대조 자체를 못 함(사이드카 없음/읽기 실패) · False = 대조함(수치 있음) · None = 줄 없음(구판)
+        "uncomparable": _uncomparable(head.get(VL.LABEL_EXPECTED_FUNCTIONS)),
     }
+
+
+def _uncomparable(text: Optional[str]) -> Optional[bool]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw == VL.VALUE_UNCOMPARABLE:
+        return True
+    return False if _as_count(raw) is not None else None
 
 
 def read_evidence(docx_path: str) -> Dict[str, Any]:

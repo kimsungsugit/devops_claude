@@ -73,9 +73,18 @@ class TestZeroIsARealThreshold:
 
     def test_calling_zero_survives_because_it_is_not_a_threshold(self):
         """대조군 — `CALLING_ZERO` 는 "데이터가 아예 없다" 는 **진단**이지 임계 판정이
-        아니다. 임계를 껐다고 사라지면 파서가 안 돈 사실까지 숨긴다."""
-        got = _codes(_zero_rates(), {k: 0.0 for k in THRESHOLD_KEYS})
-        assert got == ["CALLING_ZERO"], got
+        아니다. 임계를 껐다고 사라지면 파서가 안 돈 사실까지 숨긴다.
+
+        (R31 Q-7) 단, 축을 껐으면 판정은 **통과**이므로 그 진단은 사유 목록이 아니라
+        정보 목록(`_derive_quality_info_codes`)에 남는다 — 통과 판정에 사유가 붙으면 모순.
+        """
+        from backend.helpers.uds import _derive_quality_info_codes
+
+        thr = {k: 0.0 for k in THRESHOLD_KEYS}
+        assert _codes(_zero_rates(), thr) == [], "축이 전부 꺼졌으면 사유는 0개"
+        info = _derive_quality_info_codes(
+            {"rates": _zero_rates(), "thresholds": thr, "counts": {"total_functions": 100}})
+        assert "CALLING_ZERO" in info, "진단은 사라지면 안 된다 — 정보 등급으로 남는다"
 
     @pytest.mark.parametrize("rate_key,thr_key,code", GATED_PAIRS)
     def test_each_axis_can_be_switched_off_individually(self, rate_key, thr_key, code):

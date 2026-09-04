@@ -476,9 +476,12 @@ def suggest_improvements(
         suggestions.sort(key=lambda x: (priority_order.get(x["priority"], 9), -x["gap"]))
 
         # 요약 메시지
-        overall = summary.overall_score if summary else 0.0
-        gate = summary.gate_pass if summary else False
+        # (R31 Q-6) 요약 행이 없으면 **판정 없음**(None)이다. 예전엔 `0.0`·`False` 로 접어
+        # "품질 점수 0.0 -- 게이트 미통과" 라는 문장을 지어냈다 — 기록이 없는 것과 미통과는 다르다.
+        overall = summary.overall_score if summary else None
+        gate = summary.gate_pass if summary else None
         high_count = sum(1 for s in suggestions if s["priority"] == "high")
+        score_txt = f"{overall:.1f}" if overall is not None else "—"
 
         # 게이트 대상이 0개였던 실행은 "통과/미통과" 로 말할 수 없다 — 검사 자체를 안 했다.
         # recorder 가 `gated_metric_count` 를 남기므로 그 값으로 판별한다(부재=구 실행 → None).
@@ -488,8 +491,15 @@ def suggest_improvements(
         unsupported = not advice_rules
         if gated_count == 0:
             summary_text = (
-                f"품질 점수 {overall:.1f}/100 -- **게이트 항목이 0개**라 판정이 성립하지 "
+                f"품질 점수 {score_txt}/100 -- **게이트 항목이 0개**라 판정이 성립하지 "
                 f"않습니다(통과 아님). threshold 설정 또는 doc_type '{doc_type}' 을 확인하세요."
+            )
+        elif summary is None:
+            # `quality_summaries.gate_pass` 는 NOT NULL 이라 "요약은 있는데 판정 None" 은 없다 — 판정 없음은
+            # 요약 행 부재뿐이다(recorder 는 항상 만들지만 외부 삭제·부분 복구는 가능).
+            summary_text = (
+                "품질 요약이 기록되지 않아 **판정 없음**입니다(통과도 실패도 아님). "
+                f"run {run_id} 의 quality_summaries 행이 없습니다."
             )
         elif unsupported:
             # 미정의 doc_type(예: sits 등)을 '모든 항목 통과'(품질 양호)로 위장하지 않는다.
@@ -498,15 +508,15 @@ def suggest_improvements(
             # 게이트는 미통과인데 제안이 0건 = 실패한 지표에 advice 규칙이 없는 경우다.
             # '모든 항목 통과' 로 말하면 게이트 결과와 정면으로 모순된다.
             summary_text = (
-                f"품질 점수 {overall:.1f}/100 -- 게이트 미통과이지만 해당 지표에 개선 제안 "
+                f"품질 점수 {score_txt}/100 -- 게이트 미통과이지만 해당 지표에 개선 제안 "
                 f"규칙이 없습니다. 실패 지표는 quality_scores 의 gate_pass=false 행을 확인하세요."
             )
         elif not suggestions:
-            summary_text = f"품질 점수 {overall:.1f}/100 -- 모든 항목이 임계값을 통과했습니다."
+            summary_text = f"품질 점수 {score_txt}/100 -- 모든 항목이 임계값을 통과했습니다."
         elif gate:
-            summary_text = f"품질 점수 {overall:.1f}/100 -- 게이트 통과. {len(suggestions)}개 항목 개선 가능."
+            summary_text = f"품질 점수 {score_txt}/100 -- 게이트 통과. {len(suggestions)}개 항목 개선 가능."
         else:
-            summary_text = f"품질 점수 {overall:.1f}/100 -- 게이트 미통과. {high_count}개 긴급 개선 필요."
+            summary_text = f"품질 점수 {score_txt}/100 -- 게이트 미통과. {high_count}개 긴급 개선 필요."
 
         return {
             "run_id": run_id,

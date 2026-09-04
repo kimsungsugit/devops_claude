@@ -83,6 +83,43 @@ describe('QualityGateSection — 서버 판정을 그대로 쓴다', () => {
     expect(within(tr).getByText('판정 없음')).toBeInTheDocument();
     expect(within(tr).getByText('—')).toBeInTheDocument();
   });
+
+  // (R31 Q-6) 같은 run 을 보드는 "판정 불가", 이 목록은 "FAIL" 로 그렸다 — 판정기를 한 곳으로.
+  it('목록: gate_reason=no_gated_metric 이면 gate_pass=false 여도 FAIL 이 아니라 판정 불가다', async () => {
+    stubApi({ runs: [runRow({ id: 4, gate_reason: 'no_gated_metric',
+      summary: { overall_score: 0, gate_pass: false } })] });
+    render(<QualityGateSection />);
+    const tr = await waitFor(() => screen.getByText('#4').closest('tr'));
+    expect(within(tr).getByText('판정 불가')).toBeInTheDocument();
+    expect(within(tr).queryByText('FAIL')).toBeNull();
+  });
+
+  it('목록: top-level gated_metric_count=0 (scores 없음)만으로도 판정 불가다', async () => {
+    stubApi({ runs: [runRow({ id: 5, gated_metric_count: 0,
+      summary: { overall_score: 0, gate_pass: false } })] });
+    render(<QualityGateSection />);
+    const tr = await waitFor(() => screen.getByText('#5').closest('tr'));
+    expect(within(tr).getByText('판정 불가')).toBeInTheDocument();
+  });
+
+  it('추세: 검사 0건 막대는 빨강(FAIL)이 아니라 판정 불가 색·라벨이다', async () => {
+    stubApi({ trend: [
+      { run_id: 11, doc_type: 'uds', created_at: '2026-08-07T01:00:00+00:00', overall_score: 40,
+        gate_pass: false, gate_reason: 'no_gated_metric', gated_metric_count: 0 },
+      { run_id: 12, doc_type: 'uds', created_at: '2026-08-08T01:00:00+00:00', overall_score: 60,
+        gate_pass: false, gate_reason: null, gated_metric_count: 7 },
+    ] });
+    const user = userEvent.setup();
+    const { container } = render(<QualityGateSection />);
+    await waitFor(() => expect(mockApi).toHaveBeenCalled());
+    await user.click(screen.getByRole('tab', { name: '점수 추세' }));
+    await waitFor(() => expect(container.querySelectorAll('rect[data-verdict]').length).toBe(2));
+    const bars = [...container.querySelectorAll('rect[data-verdict]')];
+    expect(bars.map(b => b.getAttribute('data-verdict'))).toEqual(['판정 불가', 'FAIL']);
+    expect(bars[0].getAttribute('fill')).not.toBe(bars[1].getAttribute('fill'));
+    expect(bars[0].getAttribute('fill')).not.toMatch(/danger/);
+    expect(bars[0].querySelector('title').textContent).toMatch(/판정 불가/);
+  });
 });
 
 describe('QualityGateSection — 근거의 미기록을 명시한다', () => {

@@ -7,6 +7,7 @@ import { loadDocPaths, loadDocGenCaps, loadSharedInputs, useDocGenCapsSync } fro
 import { docGenCapsScope } from '../../docGenHelpers.js';
 import { notifyScmRegistryChanged } from '../../scmLinkedDocs.js';
 import { contextConflict, mismatchText } from '../../impactGuard.js';
+import { verdictOf, REASON_TEXT } from '../../gateVerdict.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -189,27 +190,11 @@ const METRIC_LABELS = {
 
 const metricLabel = (code) => METRIC_LABELS[code] || code;
 
-/** 게이트 사유 코드 → 사람이 읽는 문장. 없는 코드는 코드 그대로. */
-const REASON_TEXT = {
-  no_gated_metric: '검사 항목이 0개 — 판정이 성립하지 않는다',
-};
+// (R31 Q-6) 판정·사유 문구는 `gateVerdict.js` 단일 출처 — 여기 로컬 `verdictOf` 를 다시 만들면
+// 게이트 화면·추세와 갈린다(`__tests__/gateVerdict.test.jsx` 가 막는다).
 
 const fmtPct = (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`);
 const fmtScore = (v) => (v == null ? '—' : Number(v).toFixed(1));
-
-/** 서버 판정 그대로. **null 을 통과로 접지 않는다.** */
-function verdictOf(run) {
-  if (!run) return { tone: 'neutral', label: '미생성' };
-  const gp = run.summary?.gate_pass;
-  // 검사 규모가 0이면 PASS/FAIL 어느 쪽도 의미가 없다 — 사유가 있으면 그게 우선.
-  const gated = run.scores?.find(s => s.metric_name === 'gated_metric_count');
-  if (run.gate_reason === 'no_gated_metric' || (gated && Number(gated.value) === 0)) {
-    return { tone: 'warning', label: '판정 불가' };
-  }
-  if (gp === true) return { tone: 'success', label: 'PASS' };
-  if (gp === false) return { tone: 'danger', label: 'FAIL' };
-  return { tone: 'neutral', label: '판정 없음' };
-}
 
 /**
  * "왜 이 점수인가" 한 줄.
@@ -1498,6 +1483,20 @@ function EvidenceDetail({ run, detail }) {
                 {val.dropped_headings != null && val.dropped_headings > 0 && (
                   <> · <strong>제거된 heading {val.dropped_headings}개</strong>
                     {' — 위 수치는 남은 것만 센다'}</>
+                )}
+                {/* (R31 Q-8 ②) `대조 불가` 는 리더에서 None 으로 떨어져 **줄이 없는 구판과 같아 보였다** —
+                    "빠진 함수 N개" 가 없는 것이 '누락 없음' 이 아니라 '대조 못 함' 인 경우다. */}
+                {val.uncomparable === true && (
+                  <> · <strong>입력 대비 대조 불가</strong>
+                    {' — payload 사이드카 없음/읽기 실패(누락 0건이 아니라 미검증)'}</>
+                )}
+                {/* (R31 Q-8 ①) 라이터가 `## Warnings (입력 대비)` 에 쓰던 문장들 — "소스 함수 629개가 문서에
+                    없다" 같은 공시가 여태 화면에 닿은 적이 없었다. `ok` 를 바꾸지 않는 공시라 목록으로. */}
+                {val.warnings?.length > 0 && (
+                  <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 'var(--text-xs)' }}
+                    aria-label="구조 검증 경고">
+                    {val.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
                 )}
               </li>
             ) : (

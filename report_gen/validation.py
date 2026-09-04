@@ -2,6 +2,7 @@
 # Re-import common dependencies
 import json
 import logging
+import os
 
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
@@ -30,6 +31,28 @@ from report_gen.requirements import _extract_function_info_from_docx
 from report_gen.utils import _extract_call_names, _safe_dict
 
 _logger = logging.getLogger("report_generator")
+
+
+def _atomic_write_text(out: Path, text: str) -> None:
+    """사이드카를 **임시 파일에 쓰고 `os.replace`** 로 바꿔 넣는다.
+
+    (R31, R30 리뷰 X1 편입) `.quality_gate.md`·`.validation.md`·`.field_confidence.md` 는 생성 직후 재채점·
+    증거 패널이 읽는다. `write_text` 는 열기(truncate)→쓰기라, 그 사이에 읽으면 **빈 파일 또는 앞부분만**
+    보인다 — 리더는 그걸 "payload 없음/Gate pass 부재" 로 읽어 채점 모드가 조용히 바뀐다(torn read).
+    `os.replace` 는 같은 볼륨 안에서 원자적이다. 실패하면 임시 파일을 지우고 예외를 그대로 올린다 —
+    옛 내용이 있으면 옛 내용이 남고, 반쯤 쓰인 파일은 절대 그 이름을 갖지 않는다.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass  # silent-ok: 임시 파일 정리 실패는 원래 예외를 가리면 안 된다
+        raise
 
 
 def _load_uds_payload_with_source(docx_path: str) -> Tuple[Dict[str, Any], Optional[Path]]:
@@ -413,12 +436,16 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
         _emptyh = report.get("docx_headings_without_payload") or []
         _miss_n = report.get("missing_from_docx_count", len(_miss))
         _empty_n = report.get("headings_without_payload_count", len(_emptyh))
-        if _miss_n:
-            lines.append(f"- ⚠ {VL.LABEL_MISSING_FROM_DOCX}: `{_miss_n}`건 "
-                         f"(예: {', '.join(_miss[:5])})")
-        if _empty_n:
-            lines.append(f"- ⚠ {VL.LABEL_HEADINGS_WITHOUT_PAYLOAD}: `{_empty_n}`건 "
-                         f"(예: {', '.join(_emptyh[:5])})")
+        # (R31 Q-8 ③) **0 도 쓴다.** 예전엔 `if _miss_n:` 이라 0 이면 줄이 없었고, 리더는 줄 없음을
+        # `None`(미측정)으로 읽어 "누락 0건 확인" 이 화면에 **영구히** 안 나왔다 — 대조를 했는데 안 한 것과
+        # 같아 보였다. 계약: 대조했으면 0 은 `0`, 대조 못 했으면 줄 자체가 없다(None).
+        # `⚠` 는 사람이 읽는 장식이라 0 이 아닐 때만 붙인다(리더는 접두를 벗기고 라벨을 맞춘다).
+        _miss_mark = "⚠ " if _miss_n else ""
+        _miss_ex = f" (예: {', '.join(_miss[:5])})" if _miss_n else ""
+        lines.append(f"- {_miss_mark}{VL.LABEL_MISSING_FROM_DOCX}: `{int(_miss_n)}`건{_miss_ex}")
+        _empty_mark = "⚠ " if _empty_n else ""
+        _empty_ex = f" (예: {', '.join(_emptyh[:5])})" if _empty_n else ""
+        lines.append(f"- {_empty_mark}{VL.LABEL_HEADINGS_WITHOUT_PAYLOAD}: `{int(_empty_n)}`건{_empty_ex}")
     # ── 제거된 heading ── 위 "데이터 없는 heading" 은 **남은 것만** 센다. 제거 수가
     # 여기 없으면 `drop` 산출물이 거의 완결된 문서로 보인다(실측 4건 → 1건).
     # 미측정(`None`)이면 줄을 쓰지 않는다 — 0 으로 적으면 "제거 없음" 이라는 거짓이 된다.
@@ -440,7 +467,8 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
     # ⚠ warnings 는 `ok` 판정을 바꾸지 않는다(템플릿이 부분집합을 담는 게 의도일 수 있다).
     # 대신 수치를 드러내 "ok=True 니까 다 들어갔다" 는 오독을 막는다.
     warnings_list = report.get("warnings") or []
-    lines.append("## Warnings (입력 대비)")
+    # (R31 Q-8 ①) 절 제목도 라벨과 같은 단일 출처 — 리더(`evidence.py`)가 같은 상수로 찾는다.
+    lines.append(f"## {VL.SECTION_WARNINGS}")
     if warnings_list:
         for w in warnings_list:
             lines.append(f"- {w}")
@@ -450,7 +478,7 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
     lines.append("## Top Headers")
     for row in report.get("top_headers") or []:
         lines.append(f"- {row.get('count')}: {row.get('header')}")
-    out.write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write_text(out, "\n".join(lines))
     return str(out)
 
 
@@ -1405,10 +1433,8 @@ def generate_uds_field_quality_gate_report(
         else:
             lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다." + _cov)
 
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return str(out)
+    _atomic_write_text(Path(out_path), "\n".join(lines))
+    return str(Path(out_path))
 
 
 def generate_uds_delta_report(
@@ -2252,7 +2278,5 @@ def generate_asil_related_confidence_report(
             lines.append(f"  - desc evidence: {dev[:180] if dev else 'N/A'}")
             lines.append(f"  - asil evidence: {aev[:180] if aev else (asil_v or 'N/A')}")
             lines.append(f"  - related evidence: {rev[:180] if rev else (rel_v or 'N/A')}")
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return str(out)
+    _atomic_write_text(Path(out_path), "\n".join(lines))
+    return str(Path(out_path))

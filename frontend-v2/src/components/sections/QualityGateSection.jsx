@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api, post } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
+import { verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR } from '../../gateVerdict.js';
 
 /**
  * QualityGateSection — 품질 게이트 **세부**. 이력 · 추세 · 정책.
@@ -58,12 +59,9 @@ const DOC_TYPES = [
   { value: 'swsa', label: 'SwSA' }, { value: 'swreport', label: '통합 Summary' },
 ];
 
-/** 서버 판정을 **그대로** — 프론트 재계산 금지(`?? (score>=70)` 을 되살리지 말 것). */
-function gateLabel(gatePass) {
-  if (gatePass === true) return { text: 'PASS', tone: 'success' };
-  if (gatePass === false) return { text: 'FAIL', tone: 'danger' };
-  return { text: '판정 없음', tone: 'neutral' };
-}
+// (R31 Q-6) run 판정은 `gateVerdict.js::verdictOf` 단일 출처 — 예전엔 여기 로컬 `gateLabel` 이
+// `summary.gate_pass` 만 봐서 검사 0건(no_gated_metric) run 을 보드는 "판정 불가", 이 목록은 "FAIL" 로
+// 그렸다. 프론트 재계산 금지(`?? (score>=70)` 을 되살리지 말 것)는 그 모듈이 지킨다.
 
 /** scores 에서 검사 규모/정의 마커/사유를 뽑는다. 없으면 `null`(= 미기록). */
 function readRunMeta(run) {
@@ -95,8 +93,9 @@ function TrendChart({ data }) {
   const bw = Math.max(4, Math.min(26, (cw - gap * data.length) / data.length));
   const offX = padL + (cw - (bw + gap) * data.length) / 2;
 
-  const toneOf = (gp) => (gp === true ? 'var(--color-success)'
-    : gp === false ? 'var(--color-danger)' : 'var(--text-muted)');
+  // 막대 색·툴팁 라벨은 목록과 **같은 판정기**에서 — `/trend` 가 `gate_reason`·`gated_metric_count` 를
+  // 실으므로 검사 0건은 빨강이 아니라 경고색 "판정 불가" 다(캡션 약속과 일치).
+  const verdictOfBar = (d) => trendVerdictOf(d);
 
   return (
     <>
@@ -121,10 +120,12 @@ function TrendChart({ data }) {
           const stamp = when ? `${when.getMonth() + 1}/${when.getDate()}` : `#${d.run_id}`;
           return (
             <g key={`${d.run_id}-${i}`}>
-              <rect x={x} y={y} width={bw} height={barH} rx="2" fill={toneOf(d.gate_pass)}>
+              <rect x={x} y={y} width={bw} height={barH} rx="2"
+                fill={TONE_COLOR[verdictOfBar(d).tone] || TONE_COLOR.neutral}
+                data-verdict={verdictOfBar(d).label}>
                 <title>
                   {`#${d.run_id} ${d.doc_type || ''} ${score.toFixed(1)}점 · `}
-                  {d.gate_pass === true ? 'PASS' : d.gate_pass === false ? 'FAIL' : '판정 없음'}
+                  {verdictOfBar(d).label}
                   {d.created_at ? ` · ${fmtWhen(d.created_at)}` : ''}
                 </title>
               </rect>
@@ -375,7 +376,7 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
               </thead>
               <tbody>
                 {runs.map((r) => {
-                  const g = gateLabel(r?.summary?.gate_pass ?? null);
+                  const g = verdictOf(r);
                   return (
                     <tr key={r.id}>
                       <td>#{r.id}</td>
@@ -389,7 +390,7 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                         {r?.summary ? Number(r.summary.overall_score).toFixed(1) : '—'}
                       </td>
-                      <td><StatusBadge tone={g.tone}>{g.text}</StatusBadge></td>
+                      <td><StatusBadge tone={g.tone}>{g.label}</StatusBadge></td>
                       <td>
                         <button type="button" className="btn-secondary btn-sm"
                           onClick={() => openRun(r.id)} aria-expanded={openId === r.id}>
@@ -434,7 +435,7 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                       <thead><tr><th>지표</th><th style={{ textAlign: 'right' }}>값</th><th style={{ textAlign: 'right' }}>임계</th><th>판정</th></tr></thead>
                       <tbody>
                         {(detail.run.scores || []).map((s, i) => {
-                          const g = gateLabel(s?.gate_pass ?? null);
+                          const g = metricVerdictOf(s?.gate_pass ?? null);
                           return (
                             <tr key={`${s.metric_name}-${i}`}>
                               <td>{s.metric_name}</td>
@@ -444,7 +445,7 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                               <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                                 {s.threshold == null ? '—(비게이트)' : Number(s.threshold).toFixed(2)}
                               </td>
-                              <td><StatusBadge tone={g.tone}>{g.text}</StatusBadge></td>
+                              <td><StatusBadge tone={g.tone}>{g.label}</StatusBadge></td>
                             </tr>
                           );
                         })}
