@@ -9,12 +9,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
-  verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, REASON_TEXT, TONE_COLOR,
+  verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, REASON_TEXT, TONE_COLOR, VERDICT_CODES,
 } from '../gateVerdict.js';
 
 describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
   it('run 이 없으면 미생성', () => {
-    expect(verdictOf(null)).toEqual({ tone: 'neutral', label: '미생성' });
+    expect(verdictOf(null)).toEqual({ code: 'ABSENT', tone: 'neutral', label: '미생성' });
   });
 
   it('gate_pass true/false/null', () => {
@@ -26,7 +26,7 @@ describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
 
   it('gate_reason=no_gated_metric 이면 gate_pass=true 여도 판정 불가', () => {
     const v = verdictOf({ summary: { gate_pass: true }, gate_reason: 'no_gated_metric' });
-    expect(v).toEqual({ tone: 'warning', label: '판정 불가' });
+    expect(v).toEqual({ code: 'INDETERMINATE', tone: 'warning', label: '판정 불가' });
   });
 
   it('top-level gated_metric_count=0 이면 사유가 없어도 판정 불가 (목록/추세 형태)', () => {
@@ -47,6 +47,15 @@ describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
 
   it('점수로 통과를 지어내지 않는다', () => {
     expect(verdictOf({ summary: { overall_score: 99, gate_pass: null } }).label).toBe('판정 없음');
+  });
+
+  it('모든 판정에 code 가 있고 code 집합은 고정이다 (소비처는 code 로 분기)', () => {
+    const cases = [null, { summary: { gate_pass: true } }, { summary: { gate_pass: false } },
+      { summary: null }, { gate_reason: 'no_gated_metric' }];
+    const codes = cases.map((c) => verdictOf(c).code);
+    expect(codes).toEqual(['ABSENT', 'PASS', 'FAIL', 'NONE', 'INDETERMINATE']);
+    for (const c of codes) expect(VERDICT_CODES).toContain(c);
+    expect(metricVerdictOf(null).code).toBe('NONE');
   });
 });
 
@@ -93,7 +102,9 @@ describe('판정 로직은 gateVerdict.js 한 곳에만 있다', () => {
       expect(src).toMatch(/from\s+'\.\.\/\.\.\/gateVerdict\.js'/);
       // 로컬 정의(함수 선언·화살표 대입) 어느 형태도 안 된다.
       expect(src).not.toMatch(/function\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf)\s*\(/);
-      expect(src).not.toMatch(/const\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf)\s*=/);
+      expect(src).not.toMatch(/(const|let|var)\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf)\s*=/);
+      // 소비처는 `code` 로 분기한다 — 라벨 문자열 비교가 남으면 라벨을 고칠 때 KPI 분모가 조용히 바뀐다(리뷰 W1).
+      expect(src).not.toMatch(/\.label\s*===\s*['"](PASS|FAIL|판정 불가|판정 없음|미생성)['"]/);
       // 판정식 자체의 복제 — `gate_pass === true ? 'PASS'` 류가 컴포넌트에 다시 생기면 걸린다.
       expect(src).not.toMatch(/gate_pass\s*===\s*true\s*\?\s*['"]PASS/);
       expect(src).not.toMatch(/\?\?\s*\(\s*score\s*>=\s*70\s*\)/);
@@ -110,7 +121,7 @@ describe('판정 로직은 gateVerdict.js 한 곳에만 있다', () => {
           walk(full);
         } else if (/\.(js|jsx)$/.test(name) && !full.endsWith('gateVerdict.js')) {
           const s = stripComments(fs.readFileSync(full, 'utf-8'));
-          if (/function\s+verdictOf\s*\(|const\s+verdictOf\s*=/.test(s)) offenders.push(path.relative(SRC, full));
+          if (/function\s+verdictOf\s*\(|(const|let|var)\s+verdictOf\s*=/.test(s)) offenders.push(path.relative(SRC, full));
         }
       }
     };

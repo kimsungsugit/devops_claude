@@ -204,11 +204,12 @@ const fmtScore = (v) => (v == null ? '—' : Number(v).toFixed(1));
  */
 function whyOf(run, verdict) {
   if (!run) return '아직 생성하지 않음';
-  if (verdict.label === '판정 불가') {
+  // 분기는 `code` 로 — 라벨(표시용 한국어)로 분기하면 라벨을 고칠 때 조용히 갈린다(리뷰 W1).
+  if (verdict.code === 'INDETERMINATE') {
     return REASON_TEXT[run.gate_reason] || REASON_TEXT.no_gated_metric;
   }
   const scores = run.scores || [];
-  if (verdict.label === 'FAIL') {
+  if (verdict.code === 'FAIL') {
     // 실패 지표 중 임계와의 격차가 가장 큰 것 하나 — 조치 우선순위가 곧 이유다.
     const failed = scores
       .filter(s => s.gate_pass === false && s.threshold != null && s.value != null)
@@ -221,7 +222,7 @@ function whyOf(run, verdict) {
     }
     return '실패 지표가 기록되지 않음 — 근거 보기로 확인';
   }
-  if (verdict.label === 'PASS') {
+  if (verdict.code === 'PASS') {
     const gatedCount = scores.filter(s => s.threshold != null).length;
     return gatedCount ? `게이트 ${gatedCount}개 항목 전부 통과` : '통과 (지표 미기록)';
   }
@@ -359,8 +360,8 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
     let pass = 0, judged = 0;
     for (const row of DOC_ROWS) {
       const v = verdictOf(latestByType[row.key]);
-      if (v.label === 'PASS') { pass++; judged++; }
-      else if (v.label === 'FAIL') judged++;
+      if (v.code === 'PASS') { pass++; judged++; }
+      else if (v.code === 'FAIL') judged++;
     }
     return { pass, judged };
   }, [latestByType]);
@@ -1495,7 +1496,8 @@ function EvidenceDetail({ run, detail }) {
                 {val.warnings?.length > 0 && (
                   <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 'var(--text-xs)' }}
                     aria-label="구조 검증 경고">
-                    {val.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                    {/* 라이터 문장은 마크다운 강조(`**`)를 쓴다 — 화면에선 별표가 그대로 보이므로 벗긴다 */}
+                    {val.warnings.map((w, i) => <li key={i}>{String(w).replace(/\*\*/g, '')}</li>)}
                   </ul>
                 )}
               </li>

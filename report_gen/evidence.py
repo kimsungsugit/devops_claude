@@ -374,7 +374,8 @@ def read_docx_validation(path: Path) -> Dict[str, Any]:
         # ① 경고 절(제목은 `VL.SECTION_WARNINGS` — 여기 리터럴로 적지 않는다) — "payload 없음 — 대조 불가",
         #    "소스 함수 629개가 문서에 없다" 를 라이터는 쓰는데 리더가 안 읽어 화면에 닿은 적이 없었다.
         #    `ok` 를 바꾸지 않는 공시라 목록째 낸다.
-        "warnings": _bullet_list(sec.get(VL.SECTION_WARNINGS, [])),
+        #    절이 없는 구판은 `None`(미상) — `[]`(경고 0건) 로 접으면 아랫줄 `uncomparable` 과 규약이 갈린다(리뷰 I6).
+        "warnings": (_bullet_list(sec[VL.SECTION_WARNINGS]) if VL.SECTION_WARNINGS in sec else None),
         # ② `대조 불가` 는 위 `_as_count` 에서 `None` 으로 떨어져 **줄이 없는 구판과 같아 보였다**.
         #    True = 대조 자체를 못 함(사이드카 없음/읽기 실패) · False = 대조함(수치 있음) · None = 줄 없음(구판)
         "uncomparable": _uncomparable(head.get(VL.LABEL_EXPECTED_FUNCTIONS)),

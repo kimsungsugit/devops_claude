@@ -171,7 +171,8 @@ def to_percent_text_map(parsed: Dict[str, Any]) -> Dict[str, str]:
 # (R30/R31) head 의 채점 범위 줄 — ``- Scored entries: `18` / `426` — …`` · ``- Document entries: `426` · …``
 # ⚠ 이 줄들은 일부러 `(…)` 를 붙이지 않는다(붙이면 `_METRIC_RE` 가 지표로 오인 — R30 리뷰 W2).
 _HEAD_RATIO_RE = re.compile(r"`(\d+)`\s*/\s*`(\d+)`")
-_HEAD_INT_RE = re.compile(r"`(-?\d+)`")
+# 닫는 backtick 을 요구하지 않는다 — `validation_labels` 계약대로 구판의 `` `426건` `` 도 읽는다(리뷰 I1).
+_HEAD_INT_RE = re.compile(r"`(-?\d+)")
 
 
 def _head_line(text: str, label: str) -> Optional[str]:

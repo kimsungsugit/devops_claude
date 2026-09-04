@@ -269,6 +269,8 @@ def get_trend(
 ) -> Dict[str, Any]:
     """시계열 점수 추이. doc_type 생략 또는 'all'이면 전 doc_type 통합 추이."""
     try:
+        from sqlalchemy.orm import selectinload
+
         from workflow.quality.db import get_session, init_db
         from workflow.quality.models import GenerationRun, QualitySummary
     except ImportError:
@@ -278,12 +280,11 @@ def get_trend(
 
     dt = (doc_type or "").lower().strip()
     with get_session() as session:
-        from sqlalchemy.orm import selectinload
-
         # (R31 Q-6) 추세 막대가 `gate_pass` 만 보면 검사 0건(no_gated_metric)이 **빨간 막대**가 된다 —
         # 캡션은 "회색=판정 없음" 을 약속하는데 사유가 응답에 없었다. 사유·검사 규모를 같이 싣는다.
+        # `summary` 도 미리 적재한다 — `join` 은 관계를 채우지 않아 `last_n=100` 이면 100 왕복이었다(리뷰 I3).
         q = (session.query(GenerationRun).join(QualitySummary)
-             .options(selectinload(GenerationRun.scores)))
+             .options(selectinload(GenerationRun.scores), selectinload(GenerationRun.summary)))
         # 프론트 "전체"(doc_type 생략) → 미필터. list_runs 와 동일한 전체 조회 의미.
         if dt and dt != "all":
             q = q.filter(GenerationRun.doc_type == dt)

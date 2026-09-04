@@ -364,13 +364,14 @@ class TestWarningsReachTheReader:
                                                missing_from_docx_count=0, headings_without_payload_count=0))
         assert read_docx_validation(out)["warnings"] == []
 
-    def test_old_artifact_without_the_section_is_empty_list(self, tmp_path):
+    def test_old_artifact_without_the_section_is_none_not_empty(self, tmp_path):
+        """절이 없는 구판은 `None`(미상)이다 — `[]` 로 접으면 '경고 0건' 이 되어 `uncomparable` 과 규약이 갈린다(리뷰 I6)."""
         from report_gen.evidence import read_docx_validation
 
         p = tmp_path / "old.validation.md"
         p.write_text("# UDS Validation Report\n\n- OK: `True`\n\n## Issues\n- none\n", encoding="utf-8")
         got = read_docx_validation(p)
-        assert got["warnings"] == []
+        assert got["warnings"] is None
         assert got["uncomparable"] is None, "줄 자체가 없는 구판은 None(미상) — True/False 어느 쪽도 아니다"
 
     def test_section_title_is_the_shared_constant_on_both_sides(self):
@@ -399,7 +400,7 @@ class TestSidecarsAreWrittenAtomically:
         out = tmp_path / "a" / "x.quality_gate.md"
         _atomic_write_text(out, "hello")
         assert out.read_text(encoding="utf-8") == "hello"
-        assert not (tmp_path / "a" / "x.quality_gate.md.tmp").exists()
+        assert list((tmp_path / "a").glob("*.tmp")) == []
 
     def test_failed_replace_keeps_the_old_file_and_raises(self, tmp_path, monkeypatch):
         """반쯤 쓰인 파일이 그 이름을 갖는 일이 없다 — 옛 내용이 남고 예외는 올라온다."""
@@ -415,10 +416,42 @@ class TestSidecarsAreWrittenAtomically:
         with pytest.raises(OSError):
             _atomic_write_text(out, "NEW")
         assert out.read_text(encoding="utf-8") == "OLD"
-        assert not out.with_name(out.name + ".tmp").exists(), "임시 파일이 남으면 다음 읽기가 그걸 집는다"
+        assert list(tmp_path.glob("*.tmp")) == [], "임시 파일이 남으면 다음 읽기가 그걸 집는다"
+
+    def test_tmp_name_is_unique_per_process(self, tmp_path, monkeypatch):
+        """고정 이름이면 같은 경로를 동시에 쓰는 두 프로세스가 서로의 tmp 를 truncate 한다(리뷰 I4)."""
+        from report_gen.validation import _atomic_write_text
+
+        seen = []
+        real = os.replace
+
+        def _spy(src, dst):
+            seen.append(Path(src).name)
+            real(src, dst)
+
+        monkeypatch.setattr(os, "replace", _spy)
+        out = tmp_path / "x.md"
+        _atomic_write_text(out, "a")
+        _atomic_write_text(out, "b")
+        assert len(set(seen)) == 2 and all(f".{os.getpid()}." in n for n in seen)
+
+    def test_validation_report_writer_really_goes_through_replace(self, tmp_path, monkeypatch):
+        """행동 검사(리뷰 I7): 라이터를 실제로 돌리고 `os.replace` 를 막으면 예외가 올라오고 옛 파일이 남는다."""
+        out = tmp_path / "r.validation.md"
+        out.write_text("OLD", encoding="utf-8")
+        monkeypatch.setattr(os, "replace", lambda _s, _d: (_ for _ in ()).throw(OSError("locked")))
+        with pytest.raises(OSError):
+            _write_validation(tmp_path, dict(_BASE, expected_functions=None))
+        assert out.read_text(encoding="utf-8") == "OLD"
+        assert list(tmp_path.glob("*.tmp")) == []
 
     def test_the_three_evidence_sidecars_use_it(self):
-        """증거 3종(`SIDECAR_SUFFIXES`)의 라이터가 전부 원자 기록을 탄다 — 하나라도 `write_text` 로 돌아가면 걸린다."""
+        """증거 3종(`SIDECAR_SUFFIXES`)의 라이터가 전부 원자 기록을 탄다.
+
+        성공 경로의 `write_text` 는 형태를 가리지 않고 잡는다(`out.write_text`·`Path(out_path).write_text` …) —
+        허용되는 유일한 `write_text` 는 `import docx` 실패 시 error 한 줄을 쓰는 앞부분뿐이라 마커 앞만 면제한다.
+        마커가 사라지면 조용히 약해지지 않고 여기서 실패한다.
+        """
         from report_gen.validation import (
             generate_asil_related_confidence_report,
             generate_uds_field_quality_gate_report,
@@ -426,13 +459,14 @@ class TestSidecarsAreWrittenAtomically:
         )
         from tests.unit._source_probe import source_of
 
+        marker = "lines: List[str] = []"
         for fn in (generate_uds_validation_report, generate_uds_field_quality_gate_report,
                    generate_asil_related_confidence_report):
             src = source_of(fn)
-            assert "_atomic_write_text(" in src, fn.__name__
-            body_after_try = src.split("lines: List[str] = []", 1)[-1]
-            assert 'out.write_text("\\n".join(lines)' not in body_after_try, (
-                f"{fn.__name__} 의 성공 경로가 비원자 write_text 로 돌아갔다")
+            assert marker in src, f"{fn.__name__}: 성공 경로 마커가 사라졌다 — 이 가드를 같이 손볼 것"
+            body = src.split(marker, 1)[1]
+            assert "_atomic_write_text(" in body, fn.__name__
+            assert ".write_text(" not in body, f"{fn.__name__} 의 성공 경로가 비원자 write_text 로 돌아갔다"
 
 
 # ==============================================================
@@ -463,6 +497,13 @@ class TestReportGateCarriesTheScoringScope:
         got = parse_scoring_scope(_GATE_MD)
         assert got == {"scored_entries": {"count": 18, "total": 426},
                        "document_entries": 426, "distinct_scored_functions": 17}
+
+    def test_unit_inside_backticks_still_parses(self):
+        """`validation_labels` 계약 — 구판이 backtick 안에 단위를 넣어도 읽는다(리뷰 I1)."""
+        from report_gen.gate_report import parse_scoring_scope
+
+        got = parse_scoring_scope("# R\n\n- Document entries: `426건`\n- Distinct scored functions: `17개`\n")
+        assert got["document_entries"] == 426 and got["distinct_scored_functions"] == 17
 
     def test_old_sidecar_is_none_not_zero(self):
         from report_gen.gate_report import parse_scoring_scope

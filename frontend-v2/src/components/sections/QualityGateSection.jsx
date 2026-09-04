@@ -138,7 +138,7 @@ function TrendChart({ data }) {
         })}
       </svg>
       <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-        막대 색은 <strong>서버 게이트 판정</strong>이다(회색 = 판정 없음). 높이는
+        막대 색은 <strong>서버 게이트 판정</strong>이다(회색 = 판정 없음 · 경고색 = 판정 불가, 검사 항목 0개). 높이는
         <code> overall_score</code> 이고 이 값은 임계 있는 지표의 평균이라
         <strong> 게이트 통과선과 다른 척도</strong>다 — 그래서 기준선을 긋지 않는다.
         막대 간격은 균일하며 <strong>시간 간격을 나타내지 않는다</strong>.

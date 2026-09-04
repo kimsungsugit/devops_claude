@@ -228,6 +228,20 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     expect(screen.getByText(/문서에 빠진 함수 9개/)).toBeInTheDocument();
   });
 
+  // (R31 리뷰 W1) 헤더 KPI 의 분모는 판정 code 로 센다 — 라벨 문자열로 세면 라벨을 고칠 때 조용히 바뀐다.
+  it('헤더 KPI: PASS 1 · FAIL 1 · 판정 불가 1 · 미생성 이면 "게이트 1/2 PASS"', async () => {
+    mockApi.mockImplementation((path) => String(path).includes('/evidence')
+      ? Promise.resolve({})
+      : Promise.resolve({ runs: [
+        run({ id: 1, doc_type: 'uds', summary: { overall_score: 90, gate_pass: true } }),
+        run({ id: 2, doc_type: 'sts', summary: { overall_score: 10, gate_pass: false } }),
+        run({ id: 3, doc_type: 'suts', gate_reason: 'no_gated_metric', summary: { overall_score: 0, gate_pass: false },
+          scores: [{ metric_name: 'gated_metric_count', value: 0, gate_pass: null, threshold: null }] }),
+      ], total: 3 }));
+    mountBoard();
+    await waitFor(() => expect(screen.getByText(/게이트 1\/2 PASS/)).toBeInTheDocument());
+  });
+
   // (R31 Q-8) 라이터가 쓰던 경고 절과 '대조 불가' 가 리더를 거쳐 화면까지 온다.
   it('구조 검증: 대조 불가는 "누락 없음" 이 아니라 미검증으로, 경고 절은 목록으로 보인다', async () => {
     mockApi.mockImplementation((path) => {

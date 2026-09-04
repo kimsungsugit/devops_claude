@@ -257,8 +257,15 @@ def _compare(prev: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
             row["delta"] = None
             row["note"] = "prev 에만 있음" if key not in c_gate else "cur 에만 있음(신규 축)"
         delta[key] = row
-    prev_codes = set((((prev.get("response") or {}).get("quality_evaluation") or {}).get("reason_codes") or []))
-    cur_codes = set((((cur.get("response") or {}).get("quality_evaluation") or {}).get("reason_codes") or []))
+    _prev_ev = ((prev.get("response") or {}).get("quality_evaluation") or {})
+    _cur_ev = ((cur.get("response") or {}).get("quality_evaluation") or {})
+    prev_codes = set(_prev_ev.get("reason_codes") or [])
+    cur_codes = set(_cur_ev.get("reason_codes") or [])
+    # (R31 리뷰 W3) 판정 밖 진단은 `info_codes` 로 갈라졌다(GLOBAL/STATIC_PARSE_LOW · 꺼진 축의 CALLING_ZERO).
+    # prev 의 사유가 cur 의 정보에 있으면 "해소" 가 아니라 **재분류**다 — `removed` 로 세면 거짓 개선이 찍힌다.
+    prev_info = set(_prev_ev.get("info_codes") or [])
+    cur_info = set(_cur_ev.get("info_codes") or [])
+    reclassified = (prev_codes - cur_codes) & cur_info
     soft_fail_reasons = []
     hard_fail_reasons = []
     for metric_name, row in delta.items():
@@ -289,8 +296,11 @@ def _compare(prev: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
             "prev": sorted(prev_codes),
             "cur": sorted(cur_codes),
             "added": sorted(cur_codes - prev_codes),
-            "removed": sorted(prev_codes - cur_codes),
+            "removed": sorted((prev_codes - cur_codes) - reclassified),
+            # 사유 → 정보로 옮겨간 코드(값은 그대로일 수 있다). 개선으로 읽지 말 것.
+            "reclassified_to_info": sorted(reclassified),
         },
+        "info_codes": {"prev": sorted(prev_info), "cur": sorted(cur_info)},
         "artifact_fidelity": {"prev": _artifact_fidelity(prev), "cur": _artifact_fidelity(cur)},
         # 정본 대비는 **실행에 저장된 것**을 그대로 옮긴다. 여기서 다시 계산하면
         # 베이스라인 쪽 산출물이 이미 지워졌을 때 조용히 미측정이 된다.

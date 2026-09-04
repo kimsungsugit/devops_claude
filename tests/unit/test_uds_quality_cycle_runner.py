@@ -88,6 +88,19 @@ class TestMissingIsNotZero:
         rates = mod._compare(_run(_BASE), _run(_BASE))["rates"]
         assert all(r["delta"] == 0.0 for r in rates.values()), rates
 
+    def test_reclassified_reason_is_not_reported_as_removed(self, mod):
+        """(R31 리뷰 W3) 사유 → 정보로 **재분류**된 코드를 `removed`(해소)로 세면 거짓 개선이 기록된다."""
+        prev = _run(_BASE)
+        prev["response"]["quality_evaluation"] = {"reason_codes": ["GLOBAL_PARSE_LOW", "CALLED_LOW"]}
+        cur = _run(_BASE)
+        cur["response"]["quality_evaluation"] = {"reason_codes": ["CALLED_LOW"], "info_codes": ["GLOBAL_PARSE_LOW"]}
+        codes = mod._compare(prev, cur)["reason_codes"]
+        assert codes["removed"] == []
+        assert codes["reclassified_to_info"] == ["GLOBAL_PARSE_LOW"]
+        # 대조군 — 정말 사라진 코드는 여전히 removed 다
+        cur["response"]["quality_evaluation"] = {"reason_codes": ["CALLED_LOW"], "info_codes": []}
+        assert mod._compare(prev, cur)["reason_codes"]["removed"] == ["GLOBAL_PARSE_LOW"]
+
     def test_regression_still_soft_fails(self, mod):
         """기존 계약 회귀 방지 — -3.0%p 초과 하락은 여전히 soft_fail 이어야 한다."""
         cmp_ = mod._compare(_run(_BASE), _run({**_BASE, "input_fill": 80.0}))

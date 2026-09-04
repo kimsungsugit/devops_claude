@@ -11,6 +11,7 @@ import os
 # Legacy: older sidecar JSONs may use bare "globals" key → fall back to it when
 # reading (see _extract_payload_function_details / row.get("globals_global") or row.get("globals"))
 import re
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -43,7 +44,8 @@ def _atomic_write_text(out: Path, text: str) -> None:
     옛 내용이 있으면 옛 내용이 남고, 반쯤 쓰인 파일은 절대 그 이름을 갖지 않는다.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
+    # 이름에 pid+난수 — 같은 경로를 두 프로세스가 동시에 쓰면 고정 이름은 서로의 tmp 를 truncate 한다(리뷰 I4).
+    tmp = out.with_name(f"{out.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, out)

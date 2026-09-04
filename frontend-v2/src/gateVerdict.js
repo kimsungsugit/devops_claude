@@ -41,16 +41,19 @@ export function gatedCountOf(run) {
  * (추세 항목은 `gate_pass` 가 top-level 이라 호출부가 감싼다).
  */
 export function verdictOf(run) {
-  if (!run) return { tone: 'neutral', label: '미생성' };
+  if (!run) return { code: 'ABSENT', tone: 'neutral', label: '미생성' };
   const gated = gatedCountOf(run);
   if (run.gate_reason === 'no_gated_metric' || gated === 0) {
-    return { tone: 'warning', label: '판정 불가' };
+    return { code: 'INDETERMINATE', tone: 'warning', label: '판정 불가' };
   }
   const gp = run.summary?.gate_pass;
-  if (gp === true) return { tone: 'success', label: 'PASS' };
-  if (gp === false) return { tone: 'danger', label: 'FAIL' };
-  return { tone: 'neutral', label: '판정 없음' };
+  if (gp === true) return { code: 'PASS', tone: 'success', label: 'PASS' };
+  if (gp === false) return { code: 'FAIL', tone: 'danger', label: 'FAIL' };
+  return { code: 'NONE', tone: 'neutral', label: '판정 없음' };
 }
+
+/** 소비처는 `label`(표시용 한국어)이 아니라 `code` 로 분기한다 — 라벨을 고치면 KPI 분모가 조용히 바뀐다(리뷰 W1). */
+export const VERDICT_CODES = Object.freeze(['ABSENT', 'INDETERMINATE', 'PASS', 'FAIL', 'NONE']);
 
 /** 추세 항목(`/api/quality/trend`)은 `gate_pass` 가 top-level 이다 — 같은 판정기로 보낸다. */
 export function trendVerdictOf(item) {
@@ -64,9 +67,9 @@ export function trendVerdictOf(item) {
 
 /** 지표 한 행의 판정(run 판정과 다른 단위). `null` 은 비게이트/미기록 = 판정 없음. */
 export function metricVerdictOf(gatePass) {
-  if (gatePass === true) return { tone: 'success', label: 'PASS' };
-  if (gatePass === false) return { tone: 'danger', label: 'FAIL' };
-  return { tone: 'neutral', label: '판정 없음' };
+  if (gatePass === true) return { code: 'PASS', tone: 'success', label: 'PASS' };
+  if (gatePass === false) return { code: 'FAIL', tone: 'danger', label: 'FAIL' };
+  return { code: 'NONE', tone: 'neutral', label: '판정 없음' };
 }
 
 /** 판정 톤 → 막대/배지 색. 색을 세 화면이 각자 고르지 않게 한 곳에 둔다. */
