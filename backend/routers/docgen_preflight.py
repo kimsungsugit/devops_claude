@@ -141,6 +141,42 @@ _TEST_REPORT_TEMPLATE_KEY = {
 }
 
 
+# 라우터의 **1순위** — 폼이 양식을 명시하면 config 키는 아예 보지 않는다
+# (`swreport._resolve_template_bytes` / `swut._read_template_bytes` / `swit._read_template_bytes`
+# 셋 다 `if template_path: return resolver.read_bytes(template_path)` 가 첫 줄이다).
+# 게이트가 이 분기를 안 보면 config 에 키가 없는 프로젝트(실측 HDPDM01: swreport·swutcr·
+# switcr 3키 전무)는 폼에 양식을 넣어도 영구 `진행 불가` 다(R28 리뷰 C1).
+_REPORT_TEMPLATE_FORM_KEY = {
+    "swut": "coverage_template_path",
+    "sutr": "sutr_template_path",
+    "swutcr": "swutcr_template_path",
+    "swit": "coverage_template_path",
+    "sitr": "sitr_template_path",
+    "switcr": "switcr_template_path",
+    "swreport": "template_path",
+}
+
+
+def _report_template_form_key(doc_type: str) -> str:
+    return _REPORT_TEMPLATE_FORM_KEY.get(str(doc_type or "").strip().lower(), "")
+
+
+def _report_template_keys(doc_type: str) -> Tuple[str, ...]:
+    """라우터가 **실제로 순회하는** 양식 키 목록(순서 포함).
+
+    SwUT/SwIT 는 키 하나지만 통합 Summary 는 `swreport._TEMPLATE_CONFIG_KEYS` 3키를
+    **읽힐 때까지** 순회한다(`_resolve_template_bytes`). 게이트가 첫 키만 보면 1순위만 낡고
+    2·3순위가 멀쩡한 프로젝트에서 "양식 없음 → 진행 불가" 라는 거짓 차단을 낸다(생성은
+    성공 — 감사 P-4①). 표는 복제하지 않고 라우터 상수를 가져온다.
+    """
+    dt = str(doc_type or "").strip().lower()
+    if dt == "swreport":
+        from backend.routers.swreport import _TEMPLATE_CONFIG_KEYS
+        return tuple(_TEMPLATE_CONFIG_KEYS)
+    k = _TEST_REPORT_TEMPLATE_KEY.get(dt, "")
+    return (k,) if k else ()
+
+
 # 시험 결과 6종 → VectorCAST 로그의 **시리즈**. 통합 Summary(`swreport`)는 로그가 아니라
 # 레벨별 산출물을 읽으므로 여기 없다.
 _TEST_REPORT_LOG_SERIES = {
@@ -302,6 +338,36 @@ def _cap_full_total(cap_name: str, cap: Dict[str, Any],
     return {"value": n, "basis": basis} if n > 0 else None
 
 
+def _recount_category_truncation(tr: Any, measured_at: Optional[int],
+                                 picked: int) -> Optional[Tuple[Dict[str, Dict[str, int]], int]]:
+    """분류별 절단을 사용자 상한으로 다시 센다. 못 세면 ``None``(옛 실측을 그대로 둔다).
+
+    ⚠ 생성기는 분류마다 같은 상한을 쓰지 않는다 — `global_data`·`macro_defs` 는 `max_items * 2`
+      (`uds_generator.py`). 분류의 `cap` 이 측정 상한의 몇 배인지를 그 dict 에서 읽어 같은
+      배수로 올린다. `picked` 를 전 분류에 그대로 쓰면 ×2 분류에서 3배 과대보고가 난다
+      (R28 리뷰 C2 실증: total 300/cap 240/dropped 60 을 180 으로).
+    ⚠ `total`·`cap` 이 정수가 아닌 분류가 하나라도 있으면 **전체를 포기**한다 — `None` 을
+      0 으로 접으면 "전부 담깁니다"(false green) 가 된다(리뷰 W1).
+    """
+    if not isinstance(tr, dict) or not tr or not isinstance(measured_at, int) or measured_at <= 0:
+        return None
+    out: Dict[str, Dict[str, int]] = {}
+    total_dropped = 0
+    for name, v in tr.items():
+        if not isinstance(v, dict):
+            return None
+        total, cap = v.get("total"), v.get("cap")
+        if (not isinstance(total, int) or isinstance(total, bool)
+                or not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0):
+            return None
+        mult = max(1, cap // measured_at)
+        new_cap = picked * mult
+        dropped = max(0, total - new_cap)
+        out[str(name)] = {"total": total, "cap": new_cap, "dropped": dropped}
+        total_dropped += dropped
+    return out, total_dropped
+
+
 def _cap_measured_at(cap_name: str, tm: Dict[str, Any]) -> Optional[int]:
     """그 절단 통계를 **어느 상한으로** 쟀는가. 모르면 `None`."""
     box = tm.get(_CAP_TRUNCATION_KEY.get(cap_name) or "") or {}
@@ -416,7 +482,9 @@ def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int],
     if not a.get("measured"):
         return None
     by_grade = a.get("by_grade")
-    if not isinstance(by_grade, dict):
+    # ⚠ 빈 dict 는 "등급을 하나도 못 읽었다" 이지 "ASIL D 없음" 이 아니다 — 통과시키면
+    #   `d=0` 이 "이 소스에 ASIL D 함수는 없습니다" 라는 단언이 된다(감사 P-6②).
+    if not isinstance(by_grade, dict) or not by_grade:
         return None
     d = int(by_grade.get("D") or 0)
     c = int(by_grade.get("C") or 0)
@@ -563,6 +631,11 @@ def _suggest_revision(resolver: Any, path: str) -> str:
         kind = is_srs_filename
     elif is_sds_filename(p.name):
         kind = is_sds_filename
+    if kind is None:
+        # ⚠ 종류를 못 가르는 파일(템플릿·HSIS·STP 등)엔 제안하지 않는다. 예전엔 같은 확장자
+        #   **아무 파일**이나 후보로 삼아, 폴더에 다른 .docx 가 하나만 있으면 그걸 "개정본"
+        #   이라 불렀다 — 무관한 문서를 레지스트리에 심을 수 있다(감사 P-6⑨). 짐작하지 않는다.
+        return ""
     cands: List[str] = []
     for n in names:
         # ⚠ **파일명만** 낸다. resolver 의 `list_dir` 은 전체 경로를 돌려주는데(로컬·worker
@@ -621,17 +694,20 @@ def _resolve_inputs_with_origin(
             if not source_root and entry.source_root:
                 source_root, source_root_from = entry.source_root, "registry"
 
-    def _pick(*keys: str) -> Tuple[str, Dict[str, str]]:
-        """설정(doc_paths) > 레지스트리 순, 그리고 **앞선 키가 이긴다**."""
-        for key in keys:
-            v = str(req.doc_paths.get(key) or "").strip()
-            if v:
-                return v, {"from": "doc_paths", "key": key}
-        for key in keys:
-            raw = linked.get(key)
-            v = str((raw[0] if isinstance(raw, list) and raw else raw) or "").strip()
-            if v:
-                return v, {"from": "registry", "key": key}
+    def _pick(key: str) -> Tuple[str, Dict[str, str]]:
+        """**한 키**를 설정(doc_paths) > 레지스트리 순으로.
+
+        ⚠ 일부러 단일 키다. 예전 `_pick(a, b)` 는 doc_paths 전 키 → 레지스트리 전 키였는데,
+          그게 생성 요청(전용키 두 출처 → 공용키)과 어긋나 게이트가 쓰이지 않을 파일에 ✓ 를
+          줬다(감사 P-4②). 우선순위가 필요한 자리는 호출부가 키마다 한 번씩 부른다.
+        """
+        v = str(req.doc_paths.get(key) or "").strip()
+        if v:
+            return v, {"from": "doc_paths", "key": key}
+        raw = linked.get(key)
+        v = str((raw[0] if isinstance(raw, list) and raw else raw) or "").strip()
+        if v:
+            return v, {"from": "registry", "key": key}
         return "", {}
 
     out: Dict[str, str] = {}
@@ -707,7 +783,17 @@ def _resolve_inputs_with_origin(
             # ⚠ 레지스트리엔 공용 `template` 필드가 없다(`ScmLinkedDocs`) — 그 폴백은
             #   설정(doc_paths) 쪽에서만 실제로 값이 나온다.
             specific = _TEMPLATE_KEY_BY_DOC.get(str(req.doc_type or "").strip().lower())
-            v, origin = _pick(specific, "template") if specific else _pick("template")
+            # ⚠ 우선순위는 **생성 요청과 lockstep** 이다(`DocGenSection.jsx` 의
+            #   `docPaths[tplKey] || linkedDocs[tplKey] || docPaths.template || linkedDocs.template`):
+            #   전용 키를 두 출처에서 먼저 보고, 없을 때만 공용 키. 예전 `_pick(specific, "template")`
+            #   은 doc_paths 전 키 → 레지스트리 전 키라, `doc_paths.template=A` + `linked.uds_template=B`
+            #   면 게이트 A ✓ · 생성 B — 쓰이지도 않을 파일에 ✓ 를 줬다(감사 P-4②).
+            if specific:
+                v, origin = _pick(specific)
+                if not v:
+                    v, origin = _pick("template")
+            else:
+                v, origin = _pick("template")
         else:
             v, origin = _pick(doc_key)
         if v:
@@ -804,12 +890,16 @@ def _last_run_step(req: PreflightRequest) -> Optional[Dict[str, Any]]:
     stage = f"`{run['stage']}` 단계" if run["stage"] else "생성"
     status = run["status"]
     measured: Dict[str, Any] = {
-        "status": status or None, "stage": run["stage"] or None,
-        "artifact": run["artifact"], "artifact_exists": run["artifact_exists"],
+        # ⚠ `Measured` 가 그리는 키(`elapsed_seconds`/`budget_seconds`/`value`/`of`)와 이 파일의
+        #   결정 행이 읽는 키(`empty_headings`/`dropped_headings`/`unmatched_mode`)만 낸다.
+        #   예전엔 `status`/`stage`/`artifact`/`artifact_exists` 도 실었는데 **아무도 안 읽었다**
+        #   — 이 주석이 금지한다던 쓰기 전용 관측량을 같은 dict 가 만들고 있었다(감사 P-5②).
+        #   결말·단계·산출물 유무는 아래 `reason` 문장이 사람에게 말한다.
         "empty_headings": run["empty_heading_count"],
         "dropped_headings": run["dropped_heading_count"],
-        # ⚠ `Measured` 가 그리는 키로 낸다 — 화면이 안 읽는 키에 실으면 기록만 남고
-        #   아무도 못 보는 쓰기 전용 관측량이 된다(이 저장소가 반복해 고친 형태다).
+        # 직전 실행이 어느 모드였는지는 **기록값**이다 — `dropped > 0` 로 추론하면 `drop` 인데
+        # 지운 게 0개인 실행이 `keep` 처럼 읽힌다(감사 P-5①).
+        "unmatched_mode": run.get("unmatched_headings_mode") or None,
         "elapsed_seconds": run["elapsed_seconds"],
         "budget_seconds": run["budget_seconds"],
     }
@@ -928,6 +1018,14 @@ def docgen_preflight(req: PreflightRequest) -> Dict[str, Any]:
     return _compute_preflight(req)
 
 
+def _normalize_doc_type(req: PreflightRequest) -> PreflightRequest:
+    """`doc_type` 은 입구에서 한 번 정규화한다 — 12곳의 날것 비교가 `"UDS"` 를 조용히
+    통과시켜 행이 사라졌다(감사 P-6⑦). 두 엔드포인트(preflight·questions)가 같은 객체를
+    쓰게 하려고 함수로 뺐다(리뷰 I1: questions 가 정규화 전 값을 응답·캐시 키에 썼다)."""
+    _dt = str(req.doc_type or "").strip().lower()
+    return req if _dt == req.doc_type else req.model_copy(update={"doc_type": _dt})
+
+
 def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     """preflight 판정 본체.
 
@@ -937,6 +1035,10 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     """
     from backend.services.file_resolver import get_resolver
 
+    # doc_type 은 **입구에서 한 번** 정규화한다 — 아래 문서별 분기 12곳이 날것으로 비교해
+    # `"UDS"`(대문자·공백)면 caps/choices 는 UDS 것인데 템플릿·빌드 캐시·history 행이
+    # 조용히 사라지고 verdict 만 초록이었다(2026-09-03 감사 P-6⑦).
+    req = _normalize_doc_type(req)
     spec = _req.requirements_for(req.doc_type)
     resolver = get_resolver()
     inputs, origins = _resolve_inputs_with_origin(req)
@@ -1303,10 +1405,18 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                          if (cov["substantive_gap"] or filled < fn) else []),
             ))
             available[_chain.INPUT_SOURCE_COMMENT] = bool(subst)
+            # ⚠ 유무가 아니라 **비율**로 판정한다(형제 `comment_coverage` 와 같은 50%). 435
+            #   함수 중 1개에만 태그가 있어도 ✓ 였다(감사 P-6③). 없는 것은 근거 부재일 뿐
+            #   결함이 아니므로 degraded(차단 아님)이고, 사유에 수를 적는다.
+            _asil_n = int(cov["asil"]["filled"] or 0)
+            _asil_state = (S_UNMEASURED if fn <= 0
+                           else S_OK if _asil_n >= fn * 0.5 else S_DEGRADED)
             steps.append(_step(
-                "asil_tags", "material",
-                S_OK if cov["asil"]["filled"] else S_DEGRADED, "소스 @asil 태그",
-                measured={"value": cov["asil"]["filled"], "of": fn},
+                "asil_tags", "material", _asil_state, "소스 @asil 태그",
+                measured={"value": _asil_n, "of": fn},
+                reason=("함수를 하나도 읽지 못해 비율을 잴 수 없습니다" if _asil_state == S_UNMEASURED else
+                        "" if _asil_state == S_OK else
+                        f"@asil 태그가 있는 함수 {_asil_n}/{fn} — 나머지 등급은 SDS·SwUDS 에서 와야 합니다"),
             ))
         else:
             steps.append(_step(
@@ -1417,6 +1527,11 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     S_OK if uds_hits else S_DEGRADED, "Related ID 보강 (SwUDS)",
                     measured={"value": uds_hits, "lookups": s.get("uds_lookups"),
                               "related_ids": s.get("uds_related_ids"),
+                              # 패널 `Measured` 가 읽는 이름으로 낸다 — `key_hits`·`map_entries` 는
+                              # 화면에 그리는 코드가 있는데 서버가 한 번도 내지 않아 영구 dead
+                              # 줄이었다(감사 P-5③).
+                              "key_hits": s.get("sds_key_hits"),
+                              "map_entries": s.get("sds_map_entries"),
                               # 진입 함수 자신 vs 호출 트리 아래 — 근거의 거리가 다르다
                               "chain_flows": s.get("related_chain_flows"),
                               "chain_ids": s.get("related_chain_ids"),
@@ -1431,13 +1546,19 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             if req.doc_type in ("suts", "sits"):
                 t = tm["suts"]
                 total = t["variables"]
+                # ⚠ 변수 0개는 "근거 없음" 이 아니라 **모름**이다 — 예전엔 사유 문장 없는
+                #   침묵 degraded 였다(R28 리뷰 W6).
+                _types_state = (S_UNMEASURED if not total
+                                else S_OK if t["fallback"] == 0 else S_DEGRADED)
                 steps.append(_step(
-                    "suts_types", "material",
-                    S_OK if total and t["fallback"] == 0 else S_DEGRADED,
+                    "suts_types", "material", _types_state,
                     "입출력 변수 타입 근거",
                     measured={"value": t["grounded"], "of": total,
                               "fallback": t["fallback"]},
-                    reason=(f"{t['fallback']}개가 근거 없이 uint8_t(0~255)로 채워집니다 — "
+                    reason=("입출력 변수를 하나도 모으지 못해 타입 근거를 잴 수 없습니다 — "
+                            "SwUDS/SDS 경로와 소스 매칭을 확인하세요"
+                            if _types_state == S_UNMEASURED else
+                            f"{t['fallback']}개가 근거 없이 uint8_t(0~255)로 채워집니다 — "
                             "실제 폭이 다르면 경계값 시험이 틀립니다"
                             if t["fallback"] else ""),
                     samples=t.get("fallback_samples"),
@@ -1452,14 +1573,20 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     _n, _units = z["units_without_input"], max(z["units"], 1)
                     _ref = z["reference_without_input"] * 100.0 / max(z["reference_units"], 1)
                     _pct = _n * 100.0 / _units
+                    # ⚠ unit 을 하나도 못 모았으면 `0/1 = 0%` 가 "문제 없음 ✓" 으로 둔갑한다
+                    #   (감사 P-6④). 분모 0 은 모름이다.
+                    _units_state = (S_UNMEASURED if int(z["units"] or 0) <= 0
+                                    else S_OK if _pct <= _ref else S_DEGRADED)
                     steps.append(_step(
                         "suts_inputs", "material",
-                        S_OK if _pct <= _ref else S_DEGRADED,
+                        _units_state,
                         "입력 변수가 없는 unit",
                         measured={"value": _n, "of": z["units"],
                                   "causes": z.get("causes") or {},
                                   "reference_pct": round(_ref, 1)},
                         reason=(
+                            "unit 을 하나도 모으지 못해 비율을 잴 수 없습니다 — SwUDS/SDS 경로와 소스 매칭을 확인하세요"
+                            if _units_state == S_UNMEASURED else
                             f"{_n}개({_pct:.1f}%) — 정본은 {_ref:.1f}% 입니다. "
                             "사유가 `no_params_no_globals` 면 정상이고, 그 외는 재료를 놓친 것입니다"
                             if _pct > _ref else ""
@@ -1591,7 +1718,10 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     #   그리고 `swut_meta` 에 등록된 프로젝트는 둘뿐인데 SCM 은 셋이다.
     # 없으면 [생성]을 눌러야 알 수 있었다.
     if req.doc_type in _req.TEST_REPORT_DOC_TYPES:
-        tpl_key = _TEST_REPORT_TEMPLATE_KEY.get(req.doc_type, "")
+        tpl_keys = _report_template_keys(req.doc_type)
+        tpl_key = tpl_keys[0] if tpl_keys else ""
+        form_key = _report_template_form_key(req.doc_type)
+        form_tpl = str(req.form.get(form_key) or "").strip() if form_key else ""
         # 폼에 명시된 값이 우선, 없으면 **SCM 이 지정한 양식 키**를 쓴다.
         # SCM id 와 양식 project_id 는 다른 어휘라(예: `kjpds02_pv` ↔ `KJPDS02`)
         # 레지스트리가 그 매핑을 갖는다.
@@ -1605,7 +1735,23 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 # 레지스트리를 못 읽으면 '미지정' 으로 두고 아래에서 사유를 낸다.
                 project_id = ""
         state, reason, value = S_UNMEASURED, "", ""
-        if not project_id:
+        if form_tpl:
+            # 라우터와 같은 1순위 — 폼이 양식을 줬으면 config 는 **보지 않는다**. 여기서
+            # config 키를 재면 "등록돼 있지 않습니다" 가 폼 사용자에게 거짓이 되고, 조치
+            # (`open_scm`)를 따라가도 이미 정답인 폼은 그대로다(R28 리뷰 C1 실증).
+            value = form_tpl
+            probe = _probe_path(resolver, form_tpl)
+            state = probe["state"]
+            reason = (f"폼 `{form_key}` 로 지정한 양식입니다 — config 양식 키는 쓰이지 않습니다"
+                      if state == S_OK else
+                      f"폼 `{form_key}` 로 지정한 양식 — {probe['reason'] or '파일을 찾지 못했습니다'}")
+            if state == S_MISSING:
+                reason += _folder_contents_hint(resolver, form_tpl)
+        elif not tpl_keys:
+            # 문서 종류에 양식 키가 정의돼 있지 않다 — 가드(`test_every_test_report_doc_type_has_a_key`)
+            # 가 막지만, 새 종류가 표를 빠뜨리면 "`` 양식" 같은 빈 문장을 내지 않는다.
+            reason = f"`{req.doc_type}` 의 양식 키가 정의되지 않았습니다 — 게이트 표를 고쳐야 합니다"
+        elif not project_id:
             state, reason = S_NEEDED, "대상 project_id 를 먼저 정해야 템플릿을 찾을 수 있습니다"
         else:
             meta: Optional[Dict[str, Any]]
@@ -1627,18 +1773,44 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 state = S_MISSING
                 reason = reason or (f"`{project_id}` 가 양식 설정(swut_meta)에 없습니다 — "
                                     "회사 표준 양식을 찾을 수 없습니다")
-            elif not paths.get(tpl_key):
-                state = S_MISSING
-                reason = f"`{project_id}` 에 `{tpl_key}` 양식이 등록돼 있지 않습니다"
             else:
-                value = str(paths[tpl_key])
-                probe = _probe_path(resolver, value)
-                state = probe["state"]
-                reason = probe["reason"] or ("" if state == S_OK else "양식 파일을 찾지 못했습니다")
-                if state == S_MISSING:
-                    # 등록 경로만 보여 주면 "왜 없는지" 를 사람이 U: 드라이브를 열어
-                    # 확인해야 한다. 그 폴더의 실제 파일을 함께 낸다(증거이지 판정 아님).
-                    reason += _folder_contents_hint(resolver, value)
+                # 라우터와 **같은 순서**로 등록된 키를 순회해 처음 읽히는 것을 쓴다.
+                registered = [(k, str(paths.get(k) or "").strip()) for k in tpl_keys
+                              if str(paths.get(k) or "").strip()]
+                if not registered:
+                    state = S_MISSING
+                    _more = (f" (폴백 키 {', '.join(f'`{k}`' for k in tpl_keys[1:])} 도 미등록)"
+                             if len(tpl_keys) > 1 else "")
+                    reason = f"`{project_id}` 에 `{tpl_key}` 양식이 등록돼 있지 않습니다{_more}"
+                else:
+                    chosen: Optional[Tuple[str, str]] = None
+                    probes: List[Tuple[str, str, Dict[str, Any]]] = []
+                    for k, v in registered:
+                        pr = _probe_path(resolver, v)
+                        probes.append((k, v, pr))
+                        if pr["state"] == S_OK:
+                            chosen = (k, v)
+                            break
+                    if chosen is not None:
+                        k, value = chosen
+                        state = S_OK
+                        reason = ("" if k == registered[0][0] else
+                                  f"1순위 `{registered[0][0]}` 파일이 없어 라우터와 같은 순서로 "
+                                  f"`{k}` 를 씁니다")
+                    else:
+                        k, value, pr = probes[0]
+                        state = pr["state"]
+                        reason = pr["reason"] or ("" if state == S_OK else "양식 파일을 찾지 못했습니다")
+                        if state == S_MISSING:
+                            # 등록 경로만 보여 주면 "왜 없는지" 를 사람이 U: 드라이브를 열어
+                            # 확인해야 한다. 그 폴더의 실제 파일을 함께 낸다(증거이지 판정 아님).
+                            reason += _folder_contents_hint(resolver, value)
+                        if len(probes) > 1:
+                            # 라우터는 실패 시 "시도한 후보" 전부를 말한다(`read_template_from_keys`).
+                            # 같은 부재에 게이트가 덜 말하면 안 된다 — IPC 를 N 번 치르고 첫
+                            # 것만 보고하던 자리다(R28 리뷰 W4).
+                            reason += " — 시도한 후보: " + " · ".join(
+                                f"`{pk}`={pp['reason'] or pp['state']}" for pk, _pv, pp in probes)
         steps.append(_step(
             "report_template", "input", state, "결과 양식(템플릿)",
             required=True, value=value, reason=reason,
@@ -1765,12 +1937,41 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     if _sug is not None:
                         measured["suggested"] = _sug
                         measured["suggested_basis"] = _SUG_MEASURED
+                    _base = reason
                     reason = f"{reason} — {_obs['reason']}"
-                    if picked is not None and picked != _cap_measured_at(cap_name, _tm_cached):
+                    _at = _cap_measured_at(cap_name, _tm_cached)
+                    _tr = (_obs["measured"] or {}).get("truncated") if isinstance(_obs, dict) else None
+                    _recount = (_recount_category_truncation(_tr, _at, picked)
+                                if (cap_name == "max_items_per_category" and picked is not None
+                                    and _at is not None and picked > _at) else None)
+                    if _recount is not None:
+                        # ⚠ 분류 상한은 **재계산할 수 있다** — 측정 캐시가 분류별 `total`·`cap` 을
+                        #   갖고 있다. 상한을 올렸는데 "지금 N개가 빠집니다" 를 옛 상한 값으로
+                        #   계속 말하면 STS/SITS 가 고친 과소·과대보고와 같은 결함이다(감사
+                        #   P-6①). 내리는 경우는 절단되지 않던 분류의 총수를 몰라 재계산 불가.
+                        #   `truncated` 도 같은 값으로 **새 dict 를** 싣는다 — 옛 dropped 와 새
+                        #   dropped_total 이 한 응답에서 갈리면 안 되고(리뷰 X6), 캐시 객체를
+                        #   제자리 수정하면 전 사용자 캐시가 오염된다(리뷰 I2).
+                        _new_tr, _re = _recount
+                        measured["truncated"] = _new_tr
+                        measured["dropped_total"] = _re
+                        if _re == 0:
+                            state = S_OK
+                            measured.pop("suggested", None)
+                            measured.pop("suggested_basis", None)
+                            reason = (f"{_base} — 상한 {picked} 로는 측정된 절단 항목이 전부 "
+                                      f"담깁니다(상한 {_at} 실측을 재계산)")
+                        else:
+                            _worst = max(_new_tr.items(), key=lambda kv: kv[1]["dropped"])
+                            reason = (f"{_base} — 상한 {picked} 로도 {_re}개 항목이 빠집니다"
+                                      f"(가장 큰 축 `{_worst[0]}` {_worst[1]['total']}→{_worst[1]['cap']}, "
+                                      f"상한 {_at} 실측을 재계산)")
+                    elif picked is not None and _at is not None and picked != _at:
                         # 측정은 **그때 쓰던 상한**으로 잰 것이다. 사용자가 값을 바꿨는데
                         # 그 사실을 안 밝히면 지금 고른 값으로 잰 수치처럼 읽힌다.
-                        reason += (f" (이 수치는 상한 "
-                                   f"{_cap_measured_at(cap_name, _tm_cached)} 으로 잰 것입니다 "
+                        # (`_at` 을 모르면 이 문장을 쓰지 않는다 — "상한 None 으로" 가 화면에
+                        #  나갔던 자리다. 감사 P-6⑤)
+                        reason += (f" (이 수치는 상한 {_at} 으로 잰 것입니다 "
                                    f"— {picked} 로 다시 만들면 달라집니다)")
                 else:
                     state = S_OK
@@ -1933,11 +2134,20 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         _um_time = (" 직전 생성 소요의 대부분이 그 서식을 만드는 데 쓰입니다."
                     if isinstance(_um_elapsed, (int, float))
                     and isinstance(_um_last, int) and _um_last > 0 else "")
-        if isinstance(_um_dropped, int) and _um_dropped > 0:
+        _um_mode = _um_measured.get("unmatched_mode")
+        if _um_mode == "drop" or (isinstance(_um_dropped, int) and _um_dropped > 0):
             # ⚠ 직전 실행이 이미 `drop` 이었으면 그 수는 `empty` 가 아니라 여기 있다.
             #   `empty` 만 보면 "직전엔 0개가 남았다" = "지울 이유가 없다" 로 읽혀,
-            #   방금 지운 사실이 다음 판단에서 사라진다.
-            _um_evidence = f" 직전 생성에서는 **{_um_dropped}개**를 지웠습니다."
+            #   방금 지운 사실이 다음 판단에서 사라진다. 모드는 **기록값**으로 본다 —
+            #   `dropped > 0` 추론만 쓰면 `drop` 인데 지운 게 0개인 실행을 `keep` 으로 읽는다.
+            if isinstance(_um_dropped, int):
+                _um_evidence = f" 직전 생성은 `drop` 으로 **{_um_dropped}개**를 지웠습니다."
+            else:
+                # 모드는 기록됐는데 수가 없다(옛/부분 기록) — 0 으로 접지 않는다(리뷰 W3).
+                _um_evidence = " 직전 생성은 `drop` 이었지만 지운 수는 기록되지 않았습니다."
+            if isinstance(_um_last, int) and _um_last > 0:
+                # `drop` 이어도 다른 사유로 남은 빈 heading 은 있을 수 있다 — 두 사실은 배타가 아니다.
+                _um_evidence += f" 그래도 **{_um_last}개**가 빈 서식으로 남았습니다."
         elif isinstance(_um_last, int):
             # 0 도 근거다 — "이 템플릿에서는 남는 게 없었다" 는 고를 이유가 없다는 뜻이다.
             _um_evidence = f" 직전 생성에서는 **{_um_last}개**가 그렇게 남았습니다."
@@ -2011,6 +2221,7 @@ def docgen_questions(req: PreflightRequest) -> Dict[str, Any]:
     """
     from backend.services import docgen_questions as _q
 
+    req = _normalize_doc_type(req)
     pf = _compute_preflight(req)
     built = _q.build_questions(req.doc_type, pf.get("steps") or [])
     return {

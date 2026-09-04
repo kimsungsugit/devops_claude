@@ -663,7 +663,10 @@ describe('직전 생성 결과 (history phase)', () => {
   const historyStep = (over = {}) => ({
     id: 'last_run', phase: 'history', state: 'degraded', label: '직전 생성',
     reason: '(08/11 09:35) `degraded_light` 단계에서 실패했습니다.',
-    measured: { status: 'failed', stage: 'degraded_light', artifact_exists: false },
+    // ⚠ 서버(`_last_run_step`)가 내는 키만 — `status`/`stage`/`artifact_exists` 는 2026-09-04
+    //   R28 에 발행을 끊었다(아무도 안 읽던 쓰기 전용 관측량). 결말은 `reason` 문장에 있다.
+    measured: { empty_headings: 0, dropped_headings: null, unmatched_mode: 'keep',
+                elapsed_seconds: 40, budget_seconds: 7200 },
     ...over,
   });
 

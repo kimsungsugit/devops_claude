@@ -40,7 +40,8 @@ const BUILDER_TABS = [
  * ⚠ preflight 응답의 값을 쓰지 않는 이유: 보드에서 **게이트를 펼치지 않고 바로 [생성]**
  * 을 누르는 것이 기본 경로라 그 시점에 응답이 없을 수 있다. 없으면 상한이 조용히 빠진다.
  *
- * UDS 가 없는 것은 의도다 — 그 두 상한은 API 가 받지 않아 환경변수로만 조정된다.
+ * UDS 도 있다 — 두 상한(`max_source_files`/`max_items_per_category`)은 R10 이후 API 가
+ * 받는다. (이 자리에 "UDS 가 없는 것은 의도" 라는 옛 문장이 표 바로 위에 남아 있었다.)
  */
 const CAP_PARAMS = {
   uds: {

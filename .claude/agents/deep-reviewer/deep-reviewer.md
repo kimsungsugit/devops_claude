@@ -105,7 +105,7 @@ toast / UI 에러 / 로그 메시지가 사용자에게 의미 있는 형태인�
 
 ### X9 — raw fetch silent failure
 
-frontend 변경 시 `await fetch(` / `= fetch(` 직접 호출이 `api.js`의 api/post/postSse 헬퍼를 우회하면서 (a) `X-User` 헤더 누락 + (b) `res.ok` 미검사를 동시에 저지르면 401/403/500 응답을 silent로 삼켜 success 토스트로 위장한다. 어느 호출이 어떤 상태코드를 어떻게 삼키는지 시나리오로 명시. JSON body는 `api()` 헬퍼로 전환, FormData(multipart)는 raw fetch가 정당하나 X-User + res.ok 검사는 필수.
+frontend 변경 시 `await fetch(` / `= fetch(` 직접 호출이 `api.js`의 api/post/postSse 헬퍼를 우회하면서 (a) **`authHeaders()` 미부착**(X-User 만으론 통과 아님 — 커밋 `1b6bb99` 이후 Bearer 없이는 401, self-review.md #11) + (b) `res.ok` 미검사를 동시에 저지르면 401/403/500 응답을 silent로 삼켜 success 토스트로 위장한다. 어느 호출이 어떤 상태코드를 어떻게 삼키는지 시나리오로 명시. JSON body는 `api()` 헬퍼로 전환, FormData(multipart)는 raw fetch가 정당하나 `authHeaders()` + res.ok 검사는 필수.
 
 ## 적응형 루프 안에서의 동작
 

@@ -12,7 +12,8 @@
 | 2026-08-11 | failed | 〃 |
 
 체크포인트(`<out>.docx.stage.json`)에 전부 적혀 있었지만 **읽는 코드가 저장소에 없었다**
-(`test_report_reachability.py::TestCheckpointIsWriteOnly` 가 그 사실을 기록해 뒀다).
+(`test_report_reachability.py::TestCheckpointIsRead` — R11 이전 이름은 `TestCheckpointIsWriteOnly`
+였고 리더가 생기며 뒤집혔다).
 
 ## 규약 — 접지 않는다
 

@@ -7,8 +7,9 @@ UDS 생성은 매번 `<out>.docx.stage.json` 체크포인트를 남긴다
 끝났는지, 성공했다면 payload 함수가 몇 개나 문서에 들어갔는지가 전부 적혀 있다.
 
 그런데 **그 파일을 읽는 코드가 저장소 전체에 없었다.** 그 사실 자체가
-`tests/unit/test_report_reachability.py::TestCheckpointIsWriteOnly` 에 기록돼 있었고,
-"나중에 reader 가 생기면 여기서 실패하므로 그때 기록을 갱신하면 된다" 고 적혀 있다.
+`tests/unit/test_report_reachability.py::TestCheckpointIsRead` 에 기록돼 있다 — R11 이전엔
+`TestCheckpointIsWriteOnly` 로 "읽는 코드가 없다" 를 단언했고, 이 모듈이 생기며 그 클래스가
+"읽는 코드가 있다" 로 뒤집혔다(옛 이름을 여기 남겨 두면 존재하지 않는 테스트를 인용하게 된다).
 
 사용자 캐시(`hbrnd2/exports`)의 실제 기록 3건 — 게이트는 셋 다 몰랐다:
 

@@ -90,7 +90,7 @@ grep 패턴으로 잡히지 않는 설계·동시성·계약 일관성 류 결�
 | X6 | 데이터 일관성 | 캐시·메모이즈·sentinel 파일 무효화 트리거가 변경된 데이터 흐름과 동기화되는지 점검. 캐시 키에 누락된 식별자(scm_id, build_number 등)가 있는지 확인 |
 | X7 | fallback / 기본값 | 빈 배열/null/undefined 분기가 진짜 빈 데이터를 표현하는지(`items[0]` 같은 silent wrong-pick, `?? '기본값'`이 실제 의미 있는 값인지) 점검 |
 | X8 | 에러 메시지 / 사용자 영향 | toast/UI 에러가 사용자에게 의미 있는 형태인지(stack trace 노출, "실패" 같은 모호한 문구, 외부 시스템 식별자 노출). silent failure 여부 확인 |
-| X9 | raw fetch silent failure | frontend 변경 시 `await fetch(` / `= fetch(` 호출이 (a) `api.js`의 api/post/postSse 헬퍼 미사용 raw + (b) `X-User` 헤더 누락 + (c) `res.ok` 미검사 — 3조건 동시 충족 시 401/403/500을 silent로 삼켜 success 토스트로 위장. api.js 제외하고 grep(자세한 명령은 self-review.md #11) 후 각 호출의 헤더/검사 검증. JSON body는 `api()` 헬퍼로, FormData(multipart)는 raw 정당하나 X-User+res.ok 명시 필수 |
+| X9 | raw fetch silent failure | frontend 변경 시 `await fetch(` / `= fetch(` 호출이 (a) `api.js`의 api/post/postSse 헬퍼 미사용 raw + (b) **`authHeaders()` 미부착**(X-User 만으론 통과 아님 — 커밋 `1b6bb99` 이후 Bearer 없이는 401, self-review.md #11) + (c) `res.ok` 미검사 — 3조건 동시 충족 시 401/403/500을 silent로 삼켜 success 토스트로 위장. api.js 제외하고 grep(자세한 명령은 self-review.md #11) 후 각 호출의 헤더/검사 검증. JSON body는 `api()` 헬퍼로, FormData(multipart)는 raw 정당하나 `authHeaders()`+res.ok 명시 필수 |
 
 ### 검토 깊이 자동 판정
 
