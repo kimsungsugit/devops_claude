@@ -197,8 +197,9 @@ if [ -d "tests/unit" ]; then
     #   최악 관측(433초) 기준 900s 까지 여유 **467초**. ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
     #   로 적었는데 **틀렸다** — 그 550s·96s 는 다른 작업과 동시 실행 중에 잰 값이라
     #   부하가 섞여 있었다. 따로 잰 수를 더하지 말고 **합쳐서 한 번 잴 것**.
-    #   `tests/` 루트 직속 3파일(196건, 561s)은 **아직 제외** — 사유는
-    #   `tests/unit/test_gate_reach.py` 의 `_EXEMPT` 에 있고, 그 가드가 새 사각지대를 막는다.
+    #   루트 직속 3파일도 편입돼 **제외 0** — `tests/unit/test_gate_reach.py` 의 `_EXEMPT = {}`
+    #   가 비어 있는 것이 정상이고, 그 가드가 새 사각지대를 막는다(2026-09-03 정정: 이 줄이
+    #   4곳에서 게이트를 실제보다 약하게 서술하고 있었다).
     TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20

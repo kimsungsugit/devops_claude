@@ -389,6 +389,27 @@ describe('ProjectSummarySection (서브탭 재구성)', () => {
     expect(mockPost.mock.calls.some(([u]) => String(u).includes('uds/trace-summary'))).toBe(true);
   });
 
+  // ── ASIL 미상은 분포에서 파생한다 (2026-09-03 R27 H-3) ────────────────────────
+  //
+  // `asil_unknown_count` 는 링크테이블 축이라 등급 데이터가 **전무하면 0 으로 강제**된다 —
+  // "등급이 하나도 없다" 는 최악의 경우에 화면이 "ASIL 미상 0" 으로 침묵했다(R25 실측:
+  // 등급 전무 3행 → asil_unknown_count=0 · 분포 UNKNOWN=3).
+  it('등급 데이터가 전무하면 "ASIL 미상 0" 이 아니라 "등급 데이터 없음" 을 말한다', async () => {
+    mockTrace = { ...TRACE, asil_has: false, asil_unknown_count: 0, asil_distribution: {} };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('ASIL 등급 데이터 없음')).toBeInTheDocument();
+    expect(screen.queryByText(/ASIL 미상 0/)).toBeNull();
+    // ⚠ 개요 탭(`SummaryOverviewTab`)의 같은 KPI 는 `SHOW.traceability=false` 뒤라 **렌더되지
+    //   않는다** — 거기도 같은 규칙으로 고쳤지만 여기서 단언할 수 없다(숨김 표면).
+  });
+
+  it('미상 건수는 asil_unknown_count 가 아니라 분포의 UNKNOWN 에서 온다', async () => {
+    mockTrace = { ...TRACE, asil_unknown_count: 0,
+      asil_distribution: { A: { total: 5, covered: 5 }, UNKNOWN: { total: 3, covered: 0 } } };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('ASIL 미상 3')).toBeInTheDocument();
+  });
+
   it('구 3그룹은 서브탭이 됐다 — 헤딩이 아니라 탭으로 이동한다', async () => {
     const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);

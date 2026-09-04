@@ -24,8 +24,8 @@ from workflow.ai import load_oai_config  # noqa: E402
 from workflow.rag import get_kb  # noqa: E402
 
 
-def _load_repo_module(rel_module: str):
-    """**이 저장소의** `report_gen/<rel_module>.py` 를 파일 경로로 직접 연다.
+def _load_repo_module(rel_module: str, package: str = "report_gen"):
+    """**이 저장소의** `<package>/<rel_module>.py`(기본 `report_gen/`)를 파일 경로로 직접 연다.
 
     ⚠ 이 파일에서 `from report_gen.X import …` 를 쓰면 안 된다. 위 16-18행이
     `sys.path` **최상단**에 `D:/Project/devops/260105` 를 밀어넣는데 그 트리에도
@@ -46,10 +46,10 @@ def _load_repo_module(rel_module: str):
     """
     import importlib.util
 
-    path = Path(__file__).resolve().parent.parent / "report_gen" / f"{rel_module}.py"
+    path = Path(__file__).resolve().parent.parent / package / f"{rel_module}.py"
     spec = importlib.util.spec_from_file_location(f"_aria_repo_{rel_module}", path)
     if spec is None or spec.loader is None:      # pragma: no cover - 파일 부재
-        raise ImportError(f"report_gen/{rel_module}.py 정본을 열 수 없다: {path}")
+        raise ImportError(f"{package}/{rel_module}.py 정본을 열 수 없다: {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -57,6 +57,10 @@ def _load_repo_module(rel_module: str):
 
 has_evidence_value = _load_repo_module("provenance").has_evidence_value
 build_function_details_by_name = _load_repo_module("utils").build_function_details_by_name
+# 체크포인트 이름 규칙은 라이터·리더와 **같은 상수**다(`docgen_last_run.py` — stdlib 만 쓰는
+# 잎 모듈이라 위 그림자 없이 파일로 열 수 있다). 여기 리터럴 3곳이 그 계약 밖에 있었고
+# 가드는 `helpers/uds.py` 만 봤다(2026-09-03 R27 H-2).
+CHECKPOINT_SUFFIX = _load_repo_module("docgen_last_run", package="backend/services").CHECKPOINT_SUFFIX
 
 
 def _iter_udf_identifiers(info: dict) -> set[str]:
@@ -338,7 +342,7 @@ def _generate_docx_with_subprocess(
     work_dir = output_path.parent
     work_dir.mkdir(parents=True, exist_ok=True)
     payload_file = Path(tempfile.mkstemp(prefix="uds_payload_", suffix=".json", dir=str(work_dir))[1])
-    checkpoint = output_path.with_suffix(".docx.stage.json")
+    checkpoint = output_path.with_suffix(CHECKPOINT_SUFFIX)
     stage_payload_file = output_path.with_suffix(f".docx.payload.{stage}.json")
     try:
         payload_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -457,7 +461,7 @@ def _load_json(path: Path) -> dict:
 
 
 def _find_resume_candidate(out_dir: Path, retry_stages: list[tuple[str, int, int]]) -> tuple[Path, int] | None:
-    stage_files = sorted(out_dir.glob("*.docx.stage.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    stage_files = sorted(out_dir.glob(f"*{CHECKPOINT_SUFFIX}"), key=lambda p: p.stat().st_mtime, reverse=True)
     stage_order = [name for name, _, _ in retry_stages]
     for stage_file in stage_files:
         info = _load_json(stage_file)
@@ -472,7 +476,9 @@ def _find_resume_candidate(out_dir: Path, retry_stages: list[tuple[str, int, int
             out_path = Path(out_path_text)
         else:
             raw = str(stage_file)
-            out_path = Path(raw[:-11] if raw.endswith(".stage.json") else raw.replace(".stage.json", ""))
+            # `x.docx.stage.json` → `x.docx` — 접미사 길이를 손으로 세지 않는다(예전 `[:-11]`).
+            # 위 glob 이 `*{CHECKPOINT_SUFFIX}` 라 여기 오는 파일명은 항상 그 접미사로 끝난다.
+            out_path = Path(raw[:-len(CHECKPOINT_SUFFIX)] + ".docx")
         payload_path_text = str(info.get("stage_payload_path") or "").strip()
         if payload_path_text:
             payload_path = Path(payload_path_text)

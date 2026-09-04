@@ -172,7 +172,7 @@ def test_coverage_and_asil_invariant_under_purification():
     #       assert before["summary"].get(key) == after["summary"].get(key)
     #   그 세 키는 `generate_uds_traceability_matrix` 의 summary 에 **존재하지 않는다**
     #   (`coverage_pct` 계열은 `jenkins.py::_cache_trace_summary` 가 따로 파생하고,
-    #    `safety_pct` 는 죽은 `/api/local/traceability` 안에만 있다). `.get()` 이 양쪽
+    #    `safety_pct` 는 (2026-09-03 에 제거된) `/api/local/traceability` 안에만 있었다). `.get()` 이 양쪽
     #   모두 `None` 을 돌려주니 `None == None` — 주석은 "커버리지 지표 완전 일치"라고
     #   적혀 있는데 실제로는 **빈 단언 3개**였다.
     #
@@ -283,9 +283,14 @@ def test_both_modes_use_the_shared_coarse_helper():
     local_src = (root / "backend" / "routers" / "local.py").read_text(encoding="utf-8", errors="ignore")
     req_src = (root / "report_gen" / "requirements.py").read_text(encoding="utf-8", errors="ignore")
 
-    assert "annotate_sds_coarse(rows)" in local_src, "local 경로가 공용 헬퍼를 안 쓴다"
-    assert '"sds_coarse_count": sds_coarse_count' in local_src, "local summary 에 키가 없다"
-    # local 이 분모를 자기 식으로 다시 세면 안 된다.
+    # ⚠ 2026-09-03(R27 B-2): `/api/local/traceability` 는 **제거됐다**(호출자 0 실측). "두 모드"
+    #   중 local 쪽은 더 이상 존재하지 않으므로, 이 가드가 지키는 것은 ①제거가 되돌아오지
+    #   않는다 ②살아 있는 경로(`report_gen/requirements.py` 헬퍼)에 판정식이 한 곳뿐이다 — 둘이다.
+    #   되살릴 일이 생기면 그 경로도 `annotate_sds_coarse(rows)` 를 써야 한다(아래 두 단언을
+    #   local 에 다시 걸 것).
+    from backend.main import app
+    assert "/api/local/traceability" not in {getattr(r, "path", "") for r in app.routes}, (
+        "제거한 죽은 엔드포인트가 되살아났다")
     assert "len({c for cs in sds_req_to_design_comps.values() for c in cs})" not in local_src
     # 판정식은 헬퍼 안에만 있어야 한다.
     assert req_src.count("_SDS_COARSE_RATIO * total") == 1

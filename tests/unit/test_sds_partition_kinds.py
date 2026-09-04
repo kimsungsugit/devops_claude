@@ -247,7 +247,10 @@ def test_routers_do_not_reimplement_sds_classification():
                 f"{rel} 가 SDS 분류를 재구현하고 있다: {token!r}. "
                 f"판정은 report_gen.requirements.build_sds_component_maps 단일 출처."
             )
-        assert "build_sds_component_maps" in src, f"{rel} 가 단일 출처를 쓰지 않는다"
+    # 단일 출처 사용 단언은 **살아 있는 소비자**(jenkins)에만. local 의 추적성 엔드포인트는
+    # 2026-09-03(R27 B-2) 제거됐다 — 금지 토큰 검사(위)는 local 에도 계속 건다.
+    jenkins_src = (REPO_ROOT / "backend/routers/jenkins.py").read_text(encoding="utf-8")
+    assert "build_sds_component_maps" in jenkins_src, "jenkins 가 단일 출처를 쓰지 않는다"
 
 
 # ── 실 문서 canary ──────────────────────────────────────────────────────────

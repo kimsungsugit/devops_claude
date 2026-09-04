@@ -165,10 +165,22 @@ export default function SummaryOverviewTab({
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 6 }}>
                 <MiniKpi label="미추적 요구" value={fmtInt(trace.uncovered)} tone={(trace.uncovered || 0) > 0 ? 'var(--color-warning)' : undefined} />
                 <MiniKpi label="ASIL 시험 미달" value={fmtInt(trace.asil_gap_count)} tone={(trace.asil_gap_count || 0) > 0 ? 'var(--color-danger)' : undefined} />
-                <MiniKpi label="ASIL 미상" value={fmtInt(trace.asil_unknown_count)} tone={(trace.asil_unknown_count || 0) > 0 ? 'var(--color-warning)' : undefined} />
+                {(() => {
+                  // 미상 건수는 `asil_distribution.UNKNOWN` 에서 파생한다(asilCoverage.js).
+                  // `asil_unknown_count` 는 등급 데이터가 **전무하면 0 으로 강제**돼 최악의
+                  // 경우에 침묵한다(R25 실측: 등급 전무 3행 → asil_unknown_count=0 · 분포
+                  // UNKNOWN=3). 등급 데이터가 없으면 0 이 아니라 **"등급 없음"** 이다.
+                  if (trace.asil_has === false) {
+                    return <MiniKpi label="ASIL 미상" value="등급 없음" tone="var(--color-warning)" />;
+                  }
+                  const sc = deriveSafetyCoverage(trace.asil_distribution);
+                  const n = sc.hasData ? sc.unknown : (trace.asil_unknown_count || 0);
+                  return <MiniKpi label="ASIL 미상" value={fmtInt(n)} tone={n > 0 ? 'var(--color-warning)' : undefined} />;
+                })()}
                 {/* 안전 요구(ASIL A~D) 커버리지 — 판정은 asilCoverage.js 단일 출처.
                     ⚠ 분모 0 은 `—` 다(0% 아님). 등급 붙은 요구가 없으면 잴 대상이 없는 것이지
-                    커버리지가 0 인 게 아니다. 미상 건수는 옆 칸(ASIL 미상)에 이미 나온다. */}
+                    커버리지가 0 인 게 아니다. 미상 건수는 옆 칸(ASIL 미상)에 나온다 — 단
+                    등급 데이터가 전무하면 그 칸은 수가 아니라 "등급 없음" 이다. */}
                 {(() => {
                   const t = safetyCoverageText(deriveSafetyCoverage(trace.asil_distribution));
                   if (!t) return null;

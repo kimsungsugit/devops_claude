@@ -35,7 +35,6 @@ AST 로 전수 조사한 결과 `except Exception` 이 4xx 를 먹는 자리는 
 """
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -45,6 +44,12 @@ from backend.routers import exports as X
 from backend.routers import local as L
 from backend.routers import vcast as V
 from backend.services.paths import is_under_any, trusted_roots
+
+# ⚠ `inspect.getsource` 가 아니라 `source_of` 다 — 전자는 import 당시 줄 번호를 **지금
+#   파일**에 적용해, 게이트가 도는 동안 파일이 저장되면 남의 함수를 본다(`test_source_probe`).
+#   2026-08-25 엔 이 파일이 다른 세션의 미커밋 편집 중이라 `_DEFERRED` 로 면제됐는데, 그
+#   사유가 만료된 뒤에도 9일간 남아 있었다(2026-09-03 R27 H-1).
+from tests.unit._source_probe import source_of
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -127,7 +132,7 @@ class TestNoHandlerRebuildsTheDefect:
     ⚠ 주석은 걷어내고 본다. 결함을 설명한 주석이 바로 그 문자열을 담고 있어, 원문 전체
       검색은 자기 설명에 걸린다(이 저장소에서 이미 한 번 겪었다).
 
-    ⚠ 함수 경계는 **문자열 마커가 아니라 `inspect.getsource`** 로 잡는다. 처음엔 "다음
+    ⚠ 함수 경계는 **문자열 마커가 아니라 `source_of`(파일 정본 AST)** 로 잡는다. 처음엔 "다음
       함수 이름"을 끝 마커로 썼는데, 마지막 함수는 그 마커가 아예 없어 슬라이스가 파일
       끝까지 갔다 — 뒤에 다른 함수가 붙으면 **남의 핸들러를 보고 통과**한다.
     """
@@ -145,7 +150,7 @@ class TestNoHandlerRebuildsTheDefect:
 
     def test_http_exception_is_reraised_first(self, sites):
         for name, fn in sites:
-            code = [ln for ln in inspect.getsource(fn).splitlines()
+            code = [ln for ln in source_of(fn).splitlines()
                     if not ln.lstrip().startswith("#")]
             assert any("except HTTPException" in ln for ln in code), (
                 f"{name}: HTTPException 재-raise 가 사라졌다 — 4xx 가 500 이 된다")
@@ -214,7 +219,7 @@ class TestReadPathsStayOpenOnPurpose:
     """
 
     def test_source_path_is_not_confined(self):
-        src = inspect.getsource(X.convert_to_pdf)
+        src = source_of(X.convert_to_pdf)
         code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
         joined = "\n".join(code)
         assert "confine(req.output_path" in joined, "쓰기 봉인이 사라졌다"
@@ -223,7 +228,7 @@ class TestReadPathsStayOpenOnPurpose:
 
     def test_sds_and_uds_reads_are_not_confined(self):
         for fn in (L.local_generate_component_map, L.local_generate_override):
-            src = inspect.getsource(fn)
+            src = source_of(fn)
             code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
             assert "confine(output_dir" in code, f"{fn.__name__}: 쓰기 봉인이 사라졌다"
             for read_arg in ("sds_path", "source_root", "uds_path"):

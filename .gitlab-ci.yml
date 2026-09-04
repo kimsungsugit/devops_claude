@@ -47,7 +47,12 @@ ruff-eslint-frontmatter:
   variables:
     GIT_DEPTH: "0"   # before-SHA 가 여러 커밋 뒤일 수 있어 전체 이력 필요
   before_script:
-    - python -m pip install --no-build-isolation ruff pyyaml 2>$null; $true
+    # ⚠ `2>$null; $true` 를 뗐다(2026-09-03) — 아래 unit-tests 잡과 같은 규약: 설치 실패를
+    #   **보이게** 하되 러너 동작을 로컬에서 검증할 수 없어 죽이지는 않는다.
+    - |
+      python -m pip install --no-build-isolation ruff pyyaml
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: ruff/pyyaml 설치 실패(exit $LASTEXITCODE) — 아래 ratchet 이 DISABLED 로 실패할 수 있다" }
+      $global:LASTEXITCODE = 0
   script:
     - echo "=== Ruff ratchet + frontmatter (changed only) ==="
     - |
@@ -112,14 +117,20 @@ unit-tests:
   script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
-    - python -m pip install --no-build-isolation pytest-cov 2>$null; $true
+    - |
+      python -m pip install --no-build-isolation pytest-cov
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: pytest-cov 설치 실패(exit $LASTEXITCODE) — 커버리지 옵션이 거부돼 테스트가 안 돌 수 있다" }
+      $global:LASTEXITCODE = 0
     # scripts 포함 — 훅(quality_check/posttool_dispatch/ruff_ratchet 등)이 커버리지
     # 게이트에 보이게(pyproject source 와 정합). fail-under 는 25 유지(GitLab 러너는
     # core+dev 만 설치해 테스트 폐포가 축소 — 축소 환경 커버리지 미측정이라 상향 보류).
     # ⚠ `tests/integration/`·`tests/e2e/` 추가(2026-08-21). 이 게이트가 `tests/unit/` 만
     #   돌아서 integration 56건이 17일간 401 로 죽어 있었는데 아무도 몰랐다.
-    #   `tests/` 루트 직속 3파일은 아직 제외 — 사유는 tests/unit/test_gate_reach.py `_EXEMPT`.
-    - python -m pytest tests/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
+    #   루트 직속 3파일도 편입돼 **제외 0** — `tests/unit/test_gate_reach.py` 의 `_EXEMPT = {}`
+    #   가 비어 있는 것이 정상이고, 그 가드가 새 사각지대를 막는다(2026-09-03 정정).
+    # `-n auto`: 로컬 pre-commit 과 같은 병렬 실행(xdist 는 requirements-dev.txt). 직렬은
+    #   같은 스위트가 3배 이상 걸렸다(2026-09-03 B-1).
+    - python -m pytest tests/ -q -n auto --dist loadfile --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

@@ -5,6 +5,7 @@ import { pickScmForJob } from '../../projectLoader.js';
 import { targetConsistent } from '../../impactGuard.js';
 import { classifyGate } from '../ResultPanel.jsx';
 import { buildTraceMatrix } from '../../traceMatrix.js';
+import { deriveSafetyCoverage } from '../../asilCoverage.js';
 import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
 import { clearArchMetricsCache } from '../../archMetricsCache.js';
 import PipelineHealthStrip from './PipelineHealthStrip.jsx';
@@ -387,7 +388,15 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
       }
       if ((t.uncovered || 0) > 0) list.push({ label: `미추적 요구 ${t.uncovered}`, sev: 'warn', to: GO_TRACE });
       if ((t.asil_gap_count || 0) > 0) list.push({ label: `ASIL 시험 미달 ${t.asil_gap_count}`, sev: 'danger', to: GO_TRACE });
-      if ((t.asil_unknown_count || 0) > 0) list.push({ label: `ASIL 미상 ${t.asil_unknown_count}`, sev: 'warn', to: GO_TRACE });
+      // 미상은 `asil_distribution.UNKNOWN` 에서 파생(asilCoverage.js). `asil_unknown_count` 는
+      // 등급 데이터가 전무하면 0 으로 강제돼 최악의 경우에 침묵한다 — 그 경우는 "등급 없음" 이다.
+      if (t.asil_has === false) {
+        list.push({ label: 'ASIL 등급 데이터 없음', sev: 'warn', to: GO_TRACE });
+      } else {
+        const sc = deriveSafetyCoverage(t.asil_distribution);
+        const unknownN = sc.hasData ? sc.unknown : (t.asil_unknown_count || 0);
+        if (unknownN > 0) list.push({ label: `ASIL 미상 ${unknownN}`, sev: 'warn', to: GO_TRACE });
+      }
       // dangling 은 '오참조 의심'(suspect)만 결함이다. foreign(계층참조 — SDS Related ID 에
       // 적힌 SwFn_/SwST_ 같은 설계ID)은 V-model 상 정상이라 상세 패널도 '정합성 ✓' 판정에서
       // 제외한다(SrsSdsSection `integNoDefect`). 전량을 세면 같은 문서를 배너는 6건, 상세는

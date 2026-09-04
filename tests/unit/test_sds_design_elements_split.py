@@ -132,11 +132,12 @@ def test_design_only_requirement_stays_covered():
 
 @pytest.mark.parametrize("path,token", [
     ("backend/routers/jenkins.py", 'row.get("sds_design_elements")'),
-    ("backend/routers/local.py", 'r.get("sds_design_elements")'),
+    # `backend/routers/local.py` 의 `/api/local/traceability` 는 2026-09-03(R27 B-2) 제거 —
+    # 호출자 0인 죽은 사본이었다. 살아 있는 site 는 jenkins + 프론트 둘이다.
     ("frontend-v2/src/components/sections/SrsSdsSection.jsx", "'sds_design_elements'"),
 ])
-def test_has_design_three_site_lockstep(path, token):
-    """3-site 중 한 곳만 빠지면 그 표면에서만 커버리지가 조용히 떨어진다."""
+def test_has_design_live_site_lockstep(path, token):
+    """살아 있는 site(jenkins·프론트) 중 한 곳만 빠지면 그 표면에서만 커버리지가 조용히 떨어진다."""
     from pathlib import Path
 
     text = (Path(__file__).resolve().parents[2] / path).read_text(encoding="utf-8", errors="ignore")
@@ -144,11 +145,15 @@ def test_has_design_three_site_lockstep(path, token):
 
 
 def test_both_backend_modes_emit_the_field():
-    """Jenkins/local 두 경로가 같은 키를 내야 프론트가 모드에 따라 갈리지 않는다."""
+    """생산자(`report_gen/requirements.py`)와 jenkins 경로가 같은 키를 내야 프론트가 갈리지 않는다.
+
+    (local 모드 추적성 엔드포인트는 2026-09-03 R27 B-2 에서 제거 — 추적성 화면은 파일 모드와
+    무관하게 `/api/jenkins/uds/*` 를 쓴다.)
+    """
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    for path in ("backend/routers/local.py", "report_gen/requirements.py"):
+    for path in ("report_gen/requirements.py",):
         text = (root / path).read_text(encoding="utf-8", errors="ignore")
         assert '"sds_design_elements"' in text, path
     jenkins = (root / "backend" / "routers" / "jenkins.py").read_text(encoding="utf-8", errors="ignore")

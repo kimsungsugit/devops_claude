@@ -186,11 +186,13 @@ class TestItFailsLoudlyInsteadOfGuessing:
 #
 # ⚠ 남의 미커밋 작업을 내가 고치면 그쪽 저장이 내 쓰기를 덮거나 반대가 된다. 그래서
 #   "지금은 안 고친다" 를 침묵이 아니라 **목록**으로 남긴다. 침묵하면 사각이 된다.
-_DEFERRED = {
-    "tests/unit/test_router_status_and_write_confinement.py":
-        "2026-08-25 동시 세션이 편집 중(미커밋). 그 작업이 들어오면 변환할 것",
+_DEFERRED: dict[str, str] = {
     # `test_uds_param_grid.py` 는 커밋 `7539713` 으로 들어온 뒤 변환하고 여기서 뺐다 —
     # 아래 `test_deferred_entries_retire_themselves` 가 실패로 그 시점을 알려 준 것이다.
+    # `test_router_status_and_write_confinement.py` 는 "미커밋" 사유로 2026-08-25 에 면제됐는데
+    # 08-27 에 커밋된 뒤에도 **9일간 남아 있었다** — 아래 가드가 `why` 를 단언하지 않아
+    # 사유 만료를 못 봤다(2026-09-03 R27 H-1). 이제 "미커밋" 사유는 대상이 실제로 미커밋일
+    # 때만 유효하다(`test_uncommitted_deferrals_are_really_uncommitted`).
 }
 
 
@@ -243,3 +245,46 @@ class TestTestsDoNotUseBareGetsource:
             assert path in scan, f"_DEFERRED 의 {path} 가 없어졌다 — 항목을 지울 것"
             assert scan[path], (
                 f"_DEFERRED 의 {path} 에 더는 맨 getsource 가 없다 — 면제를 지울 것 ({why})")
+
+    def test_uncommitted_deferrals_are_really_uncommitted(self):
+        """"미커밋" 을 사유로 든 면제는 대상이 **실제로** 미커밋(변경/미추적)일 때만 유효하다.
+
+        가드가 `why` 를 단언하지 않으면 사유가 만료돼도 면제가 조용히 산다 — 위 항목이 정확히
+        그렇게 9일을 살았다. 사실을 재는 축(git 상태)을 하나 더 세운다.
+        """
+        _assert_uncommitted_deferrals(_DEFERRED)
+
+    def test_the_uncommitted_check_actually_fires(self):
+        """`_DEFERRED` 가 비어 있으면 위 가드는 루프를 한 번도 안 돈다(공허 통과) — 합성 항목으로
+        판정부가 **실제로 실패하는지** 한 번 증명한다(R27 리뷰 W7).
+
+        실행기를 주입해 **git 워킹트리 상태와 무관**하게 잰다 — 실파일이 깨끗하다는 사실에
+        기대면 그 파일을 손대는 날 무관한 이유로 붉어진다(확인 패스 N2).
+        """
+        class _Clean:
+            returncode, stdout = 0, ""       # git status --porcelain 이 "깨끗함" 을 낸 것
+        with pytest.raises(AssertionError, match="사유가 만료"):
+            _assert_uncommitted_deferrals({"x/y.py": "동시 세션이 편집 중(미커밋)"},
+                                          runner=lambda *a, **k: _Clean())
+
+        class _Dirty:
+            returncode, stdout = 0, " M x/y.py\n"
+        _assert_uncommitted_deferrals({"x/y.py": "동시 세션이 편집 중(미커밋)"},
+                                      runner=lambda *a, **k: _Dirty())   # 통과해야 한다
+
+
+def _assert_uncommitted_deferrals(deferred: dict[str, str], *, runner=None) -> None:
+    """'미커밋' 사유 면제의 대상이 git 워킹트리에서 실제로 변경/미추적인지 단언한다."""
+    import subprocess
+    run = runner or subprocess.run
+    for path, why in deferred.items():
+        if "미커밋" not in why:
+            continue
+        proc = run(
+            ["git", "status", "--porcelain", "--", path],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(REPO),
+        )
+        assert proc.returncode == 0, f"git status 실패(rc={proc.returncode}) — 판정 불가"
+        assert proc.stdout.strip(), (
+            f"_DEFERRED 의 {path} 사유는 '미커밋' 인데 워킹트리가 깨끗하다 — 사유가 "
+            f"만료됐다. 변환하고 면제를 지울 것 ({why})")

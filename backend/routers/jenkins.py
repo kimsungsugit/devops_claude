@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 
 import config
 from backend.cache import KeyedBuildLocks
+from backend.dependencies.admin import require_admin
 from backend.helpers import (
     _apply_uds_view_filters,
     _build_excel_artifact_payload,
@@ -5520,8 +5521,24 @@ def jenkins_syits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     return jenkins_syts_extract_traceability({**body, "source_label": "SyITS"})
 
 
-@router.post("/api/jenkins/uds/publish")
+@router.post("/api/jenkins/uds/publish", dependencies=[Depends(require_admin)])
 def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
+    """산출물을 저장소 `docs/` 로 게시한다 — **admin 전용**.
+
+    2026-09-03 까지 이 라우터엔 권한 의존성이 0 이라 로그인만으로 저장소 안에 파일을 쓸 수
+    있었다(계획서 §8 #7 승인: 빌더(evidence 생성)와 같은 급 `require_admin`). 미검토
+    산출물의 게시 차단은 검토 기록 기능이 자리 잡은 뒤 재론한다.
+
+    ⚠ `target_dir` 은 **저장소 `docs/` 아래**로 봉인한다(R27 리뷰 C1). 예전엔
+    `repo_root / target_dir` 를 그대로 `resolve()` 해 `../../X` 도, `D:/X`(pathlib 은 우측
+    절대경로가 좌측을 대체한다)도 통과해 저장소 밖 임의 디렉터리를 **만들고 썼다** — 실증됨.
+    docstring 이 "docs/ 로 게시" 라 단정하는데 코드가 그걸 강제하지 않던 자리다.
+    저장소 안 호출자는 0(frontend·tests)이지만 외부 도구가 부를 수 있어 제거 대신 봉인한다.
+    """
+    docs_root = (repo_root / "docs").resolve()
+    docs_dir = (repo_root / req.target_dir).resolve()
+    if not is_under_any(docs_dir, [docs_root]):
+        raise HTTPException(status_code=403, detail="target_dir 는 저장소 docs/ 아래여야 합니다")
     out_dir = _jenkins_exports_dir(req.cache_root)
     try:
         target = safe_resolve_under(out_dir, req.filename)
@@ -5529,10 +5546,23 @@ def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
-    docs_dir = (repo_root / req.target_dir).resolve()
     docs_dir.mkdir(parents=True, exist_ok=True)
     out_path = docs_dir / target.name
-    out_path.write_bytes(target.read_bytes())
+    # 임시 파일 + `os.replace` — 두 admin 이 같은 이름을 동시에 게시하면 `write_bytes` 가
+    # 인터리브돼 문서가 찢긴다(리뷰 X1). 교체는 원자적이다.
+    # ⚠ 임시 이름은 **요청마다 유일**해야 한다(`mkstemp`). 파일명에서 결정적으로 만들면 경합이
+    #   tmp 로 옮겨갈 뿐이고, 먼저 끝난 쪽이 tmp 를 옮긴 뒤 두 번째 `os.replace` 가
+    #   `FileNotFoundError` 로 500 을 낸다(확인 패스 N1).
+    fd, tmp_name = tempfile.mkstemp(dir=str(docs_dir), prefix=out_path.name + ".", suffix=".publishing")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(target.read_bytes())
+        os.replace(tmp_path, out_path)
+    finally:
+        # 쓰기 도중 실패하면 잔여물을 남기지 않는다(N4).
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
     return {"ok": True, "path": str(out_path)}
 
 

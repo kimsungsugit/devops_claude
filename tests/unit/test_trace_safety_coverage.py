@@ -1,6 +1,6 @@
 """안전 요구(ASIL A~D) 커버리지 — 분모 0 은 **0% 가 아니라 미측정**이다.
 
-배경: 이 지표는 원래 `/api/local/traceability`(호출자 0인 죽은 경로) 안에만 있었고
+배경: 이 지표는 원래 `/api/local/traceability`(호출자 0인 죽은 경로 — 2026-09-03 R27 에서 제거) 안에만 있었고
 분모가 `max(safety_total, 1)` 이었다. 그대로 화면에 배선했으면 ASIL 등급이 붙은 요구가
 하나도 없는 프로젝트에서 **"안전 요구 커버리지 0%"** 라는 없는 경보가 떴을 것이다.
 사실은 잴 대상이 없다는 뜻이다(저장소 규약: 미측정 ≠ 0 ≠ 통과).
@@ -183,17 +183,23 @@ def test_frontend_knows_both_unknown_spellings():
 
 # ── 죽은 경로도 같은 규칙 ────────────────────────────────────────────────────
 
-def test_dead_local_endpoint_uses_the_same_denominator_rule():
-    """`local.py` 의 `safety_pct` 도 `max(..., 1)` 이 아니다.
+def test_dead_local_endpoint_is_gone_and_no_bad_formula_survives():
+    """죽은 `/api/local/traceability` 는 **제거됐다**(2026-09-03 R27 B-2, 계획서 §8 #4).
 
-    호출자가 없더라도 틀린 공식을 남겨 두면 다음 사람이 그걸 정본으로 읽는다 —
-    이 사태가 정확히 그렇게 시작했다.
+    호출자가 없더라도 틀린 공식을 남겨 두면 다음 사람이 그걸 정본으로 읽는다 — 이 사태가
+    정확히 그렇게 시작했다. 예전 이 가드는 죽은 사본의 공식이 옳은지 봤는데, 사본 자체를
+    없앴으므로 이제 ①엔드포인트가 되살아나지 않고 ②`max(safety_total, 1)` 접기가 라우터
+    어디에도 없다는 것을 본다.
     """
-    src = (Path(__file__).resolve().parents[2] / "backend" / "routers" / "local.py").read_text(encoding="utf-8")
-    line = next((L for L in src.splitlines() if '"safety_pct"' in L), None)
-    assert line is not None, "local.py 의 safety_pct 가 사라졌다 — 이 가드를 갱신할 것"
-    assert "max(safety_total, 1)" not in line, "분모 0 을 1 로 바꾸면 미측정이 0% 가 된다"
-    assert "if safety_total > 0 else None" in line
+    routers = Path(__file__).resolve().parents[2] / "backend" / "routers"
+    local_src = (routers / "local.py").read_text(encoding="utf-8")
+    from backend.main import app
+    assert "/api/local/traceability" not in {getattr(r, "path", "") for r in app.routes}, (
+        "제거한 죽은 엔드포인트가 되살아났다")
+    assert '"safety_pct"' not in local_src, "safety_* 사본이 local.py 에 다시 생겼다 — 정본은 jenkins.py 다"
+    for p in routers.glob("*.py"):
+        assert "max(safety_total, 1)" not in p.read_text(encoding="utf-8", errors="ignore"), (
+            f"{p.name}: 분모 0 을 1 로 바꾸면 미측정이 0% 가 된다")
 
 
 @pytest.mark.parametrize("grade", ["D", "C", "B", "A"])

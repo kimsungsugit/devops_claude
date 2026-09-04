@@ -357,6 +357,32 @@ class TestNamingIsBoundToTheWriters:
         assert "out_path.with_suffix(CHECKPOINT_SUFFIX)" in src
         assert '.with_suffix(".docx.stage.json")' not in src, "리터럴이 되살아났다"
 
+    def test_no_checkpoint_literal_anywhere_but_the_constant(self) -> None:
+        """이름 규칙 리터럴은 **정의 한 곳**에만 있다 — 저장소 전체(도구 포함)를 센다.
+
+        예전 가드는 `helpers/uds.py` 만 봐서 `tools/generate_uds_local.py` 의 리터럴 3곳이
+        계약 밖에서 살았다(2026-09-03 R27 H-2). 세 번째 복제였다.
+        """
+        import subprocess
+        # **파이썬 문자열 리터럴**만 센다(`".docx.stage.json"` / `'.docx.stage.json'`) —
+        # docstring 산문의 `` `<out>.docx.stage.json` `` 은 규칙 복제가 아니다.
+        # `-F` 고정 문자열(`.` 이 임의 문자가 되지 않게) · `--untracked` 로 훅 시점의 신규 파일도
+        # 본다 · **rc 를 검사한다** — git 이 실패하면 stdout 이 비어 `offenders=[]` 로 거짓
+        # 통과하던 fail-open 이 있었다(R27 리뷰 W1).
+        proc = subprocess.run(
+            ["git", "grep", "-n", "-F", "--untracked",
+             "-e", '".docx.stage.json"', "-e", "'.docx.stage.json'", "--",
+             "backend", "tools", "scripts", "report_gen", "workflow", "generators"],
+            capture_output=True, text=True, encoding="utf-8",
+            cwd=str(Path(__file__).resolve().parents[2]),
+        )
+        assert proc.returncode in (0, 1), f"git grep 실패(rc={proc.returncode}) — 판정 불가: {proc.stderr[:200]}"
+        out = proc.stdout.splitlines()
+        offenders = [ln for ln in out
+                     if not ln.startswith("backend/services/docgen_last_run.py:")
+                     and not ln.split(":", 2)[-1].lstrip().startswith("#")]
+        assert not offenders, "체크포인트 이름 규칙 리터럴이 정의 밖에 있다:\n" + "\n".join(offenders)
+
     @pytest.mark.parametrize("path", ["backend/helpers/uds.py",
                                       "backend/routers/jenkins.py"])
     def test_both_writers_use_the_artifact_prefix(self, path: str) -> None:
