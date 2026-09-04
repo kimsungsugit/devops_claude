@@ -24,7 +24,7 @@ from report_gen.function_analyzer import (
     _is_generic_description,
     _normalize_symbol_name,
 )
-from report_gen.gate_report import parse_gate_report, to_percent_text_map
+from report_gen.gate_report import has_meaningful_value, parse_gate_report, to_percent_text_map
 from report_gen.provenance import SOURCE_ALIASES
 from report_gen.requirements import _extract_function_info_from_docx
 from report_gen.utils import _extract_call_names, _safe_dict
@@ -796,6 +796,47 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
     return str(out)
 
 
+# 사이드카 임계의 **내장 폴백** — `config` 를 못 읽는 실행 환경용. 값은 `config.UDS_SIDECAR_GATE_THRESHOLDS`
+# 와 같아야 한다(`tests/unit/test_quality_gate_r29.py` 가 lockstep 을 잰다). 리포트는 어느 쪽을 썼는지
+# `- Threshold source:` 로 적는다.
+_SIDECAR_GATE_FALLBACK: Dict[str, float] = {
+    "description_fill_rate": 0.70,
+    "input_fill_rate": 0.20,
+    "output_fill_rate": 0.10,
+    "globals_global_fill_rate": 0.35,
+    "globals_static_fill_rate": 0.15,
+    "called_fill_rate": 0.50,
+    "calling_fill_rate": 0.25,
+    "asil_non_tbd_rate": 0.30,
+    "related_non_tbd_rate": 0.30,
+    "traceability_rate": 0.20,
+}
+
+
+def _sidecar_gate_thresholds() -> Tuple[Dict[str, float], str]:
+    """`(임계 표, 출처 문자열)`. config 표가 있으면 그것, 아니면 내장 폴백 — 출처를 함께 낸다."""
+    table: Any = None
+    cfg_file: Optional[str] = None
+    try:
+        import config as _cfg
+        cfg_file = str(getattr(_cfg, "__file__", "") or "") or None
+        table = getattr(_cfg, "UDS_SIDECAR_GATE_THRESHOLDS", None)
+    except ImportError as exc:  # config 미로딩(독립 실행) — 폴백으로, 단 출처와 로그에 적는다
+        _logger.warning("config 모듈을 읽지 못했다 — 사이드카 임계는 내장 폴백을 쓴다(env 조정 무효): %s", exc)
+        table = None
+    if isinstance(table, dict) and table:
+        try:
+            return ({str(k): float(v) for k, v in table.items()},
+                    f"config.UDS_SIDECAR_GATE_THRESHOLDS ({cfg_file or '?'})")
+        except (TypeError, ValueError):
+            _logger.warning("config.UDS_SIDECAR_GATE_THRESHOLDS 에 숫자가 아닌 값 — 내장 폴백으로")
+    # ⚠ "config 를 못 읽었다" 와 "다른 config 를 읽었다" 는 다르다(리뷰 W5). `tools/generate_uds_local.py`
+    #   는 sys.path 맨 앞에 외부 트리(`D:/Project/devops/260105`)를 넣어 **그쪽 config.py** 가 잡히고,
+    #   거기엔 이 표가 없다 — 그러면 env 조정이 무효인 채 폴백을 쓴다. 어느 파일이었는지 적는다.
+    where = f"config={cfg_file} 에 표 없음" if cfg_file else "config 미로딩"
+    return dict(_SIDECAR_GATE_FALLBACK), f"builtin fallback ({where} — env 조정 무효)"
+
+
 def generate_uds_field_quality_gate_report(
     docx_path: str,
     out_path: str,
@@ -809,18 +850,27 @@ def generate_uds_field_quality_gate_report(
         out.write_text(f"# UDS Field Quality Gate Report\n\n- error: {exc}\n", encoding="utf-8")
         return str(out)
 
-    gate = {
-        "description_fill_rate": 0.70,
-        "input_fill_rate": 0.20,
-        "output_fill_rate": 0.10,
-        "globals_global_fill_rate": 0.35,
-        "globals_static_fill_rate": 0.15,
-        "called_fill_rate": 0.50,
-        "calling_fill_rate": 0.25,
-        "asil_non_tbd_rate": 0.30,
-        "related_non_tbd_rate": 0.30,
-        "traceability_rate": 0.20,
-    }
+    # ── 임계 (R29 Q-3) ── 값은 `config.UDS_SIDECAR_GATE_THRESHOLDS` **한 곳**에서 온다.
+    #   이전엔 여기 리터럴이었고 어디에도 공시되지 않았다. 호출부가 `UDS_QUALITY_GATE_THRESHOLDS`
+    #   (키 `*_min`, 0~100)를 넘겨도 키가 달라 `if k in gate` 에서 **조용히 무시**됐다 — 그래서
+    #   무시한 키를 리포트에 적는다(침묵 금지).
+    gate, threshold_source = _sidecar_gate_thresholds()
+    ignored_threshold_keys: List[str] = []
+    if isinstance(thresholds, dict):
+        overridden: List[str] = []
+        for k, v in thresholds.items():
+            if k not in gate:
+                ignored_threshold_keys.append(str(k))
+                continue
+            try:
+                gate[k] = float(v)
+                overridden.append(str(k))
+            except (TypeError, ValueError):
+                ignored_threshold_keys.append(f"{k}(숫자 아님)")
+        if overridden:
+            threshold_source += " + caller override: " + ", ".join(overridden)
+        if ignored_threshold_keys:
+            _logger.warning("사이드카 임계에 없는 키를 넘겼다 — 무시: %s", ignored_threshold_keys)
     _gate_improvement_guide = {
         "description_fill_rate": "코드 주석에 @brief 태그를 추가하거나, SDS 문서의 함수 설명을 보완하세요.",
         "input_fill_rate": "함수 시그니처의 파라미터에 @param 태그를 추가하세요.",
@@ -833,13 +883,6 @@ def generate_uds_field_quality_gate_report(
         "related_non_tbd_rate": "SRS 문서의 요구사항 ID를 함수와 매핑하거나, @requirement 태그를 추가하세요.",
         "traceability_rate": "DID/서비스 매핑을 확인하고, 코드 내 UDS 서비스 핸들러에 요구사항 ID를 연결하세요.",
     }
-    if isinstance(thresholds, dict):
-        for k, v in thresholds.items():
-            if k in gate:
-                try:
-                    gate[k] = float(v)
-                except Exception:
-                    pass
 
     doc = docx.Document(str(docx_path))
     doc_map = _extract_function_info_from_docx(doc)
@@ -886,6 +929,11 @@ def generate_uds_field_quality_gate_report(
     calling_ok = 0
     tbd_asil = 0
     tbd_related = 0
+    asil_filled = 0          # R29 Q-5: 빈 칸·N/A 도 TBD 와 같이 미기재 — quick gate 와 같은 규칙
+    related_filled = 0
+    proto_readable = 0       # R29 Q-4: Prototype 을 읽은 함수 — 슬롯을 셀 수 있었던 범위
+    input_ok_applicable = 0  # 슬롯이 **있는** 함수 중 채워진 것 (분자는 분모 안에서만)
+    output_ok_applicable = 0
     desc_high = 0
     desc_med = 0
     desc_low = 0
@@ -903,8 +951,8 @@ def generate_uds_field_quality_gate_report(
         if _filled_desc(desc_value):
             desc_ok += 1
         dq = _classify_description_quality(
-            str(payload_info.get("description") if payload_info else row.get("description") or ""),
-            str(payload_info.get("description_source") if payload_info else row.get("description_source") or ""),
+            str((payload_info.get("description") if payload_info else row.get("description")) or ""),
+            str((payload_info.get("description_source") if payload_info else row.get("description_source")) or ""),
         )
         if dq == "high":
             desc_high += 1
@@ -912,22 +960,37 @@ def generate_uds_field_quality_gate_report(
             desc_med += 1
         else:
             desc_low += 1
-        asil_value = str(payload_info.get("asil") if payload_info else row.get("asil") or "").strip().upper()
+        # ⚠ 괄호가 계약이다(리뷰 C1): `str(a if p else b or "")` 는 payload 갈래에서 `None` 을
+        #   `"None"` 으로 만들어 has_meaningful_value 가 **참**이 됐다 — 빈 ASIL 이 기재로.
+        asil_value = str((payload_info.get("asil") if payload_info else row.get("asil")) or "").strip().upper()
         if asil_value == "TBD":
             tbd_asil += 1
-        related_value = str(payload_info.get("related") if payload_info else row.get("related") or "").strip()
+        if has_meaningful_value(asil_value):
+            asil_filled += 1
+        related_value = str((payload_info.get("related") if payload_info else row.get("related")) or "").strip()
         if related_value.upper() == "TBD":
             tbd_related += 1
+        if has_meaningful_value(related_value):
+            related_filled += 1
         proto = str(row.get("prototype") or "").strip()
+        # 리뷰 W1: 비어 있지 않음 ≠ 읽었음. `N/A`·`-`·괄호 없는 전역변수 행·절단된 시그니처가
+        # 진짜 `void f(void)` 와 같은 리포트를 냈다 — 파라미터 목록까지 있어야 "읽었다" 다.
+        if has_meaningful_value(proto) and "(" in proto and ")" in proto:
+            proto_readable += 1
         has_input_slot = _has_doc_input_slot(proto)
+        has_output_slot = _has_doc_output_slot(proto)
         if has_input_slot:
             input_applicable += 1
         if _filled_list(row.get("inputs")):
             input_ok += 1
-        if _has_doc_output_slot(proto):
+            if has_input_slot:
+                input_ok_applicable += 1
+        if has_output_slot:
             output_applicable += 1
         if _filled_list(row.get("outputs")):
             output_ok += 1
+            if has_output_slot:
+                output_ok_applicable += 1
         gg = row.get("globals_global")
         if gg is None:
             gg = row.get("globals")
@@ -965,8 +1028,8 @@ def generate_uds_field_quality_gate_report(
         if has_supported_calls:
             called_ok += 1
             supported_called_ok += 1
-        related_text = related_value.strip().upper()
-        has_related = bool(related_text) and related_text not in {"TBD", "N/A", "-"}
+        # 판정 어휘는 quick gate 와 **같은 함수**(R29 Q-5) — 여기만 집합을 따로 들면 갈린다
+        has_related = has_meaningful_value(related_value)
         if has_related and has_direct_calls:
             direct_traceable += 1
         if has_related and has_supported_calls:
@@ -989,42 +1052,76 @@ def generate_uds_field_quality_gate_report(
         """
         return None if base <= 0 else float(v) / float(base)
 
-    def _pct(rate: Optional[float]) -> str:
-        """지표 줄의 괄호 안 — 미측정은 `%` 를 쓰지 않는다.
+    def _pct(rate: Optional[float], not_applicable: bool = False) -> str:
+        """지표 줄의 괄호 안 — 미측정·해당 없음은 `%` 를 쓰지 않는다.
 
         ⚠ 이 표기가 곧 계약이다. `gate_report.parse_gate_report` 는 괄호 안에서 `%` 를
           못 찾으면 `percent=None` 을 내고 `to_rate_map` 이 그 키를 건너뛴다. 즉
-          "0% 로 잰 것" 과 "못 잰 것" 이 하류에서도 구분된다.
+          "0% 로 잰 것" 과 "못 잰 것"·"잴 대상이 없는 것" 이 하류에서도 구분된다.
         """
+        if not_applicable:
+            return "해당 없음 — 대상 0"
         return "미측정 — 분모 0" if rate is None else f"{rate * 100:.1f}%"
 
-    asil_non_tbd = total - tbd_asil
-    related_non_tbd = total - tbd_related
     traceable = supported_traceable
 
-    input_base = max(input_ok, input_applicable)
-    output_base = max(output_ok, output_applicable)
-    metrics = {
+    # ── 입력/출력 분모 (R29 Q-4) ──
+    # 분모는 **슬롯이 있는 함수(applicable)** 뿐이고 분자도 그 안에서만 센다. 예전엔
+    # `max(ok, applicable)` 라 applicable 0 인데 inputs 가 5개면 **100%** 였다 — 분자가
+    # 분모를 끌어올려 "슬롯을 셀 수 없는 함수의 입력" 이 채움률로 둔갑했다.
+    # 분모 0 은 두 갈래다 — 같은 버킷에 넣으면 "해당 없음" 문서가 영구 `Gate pass: False` 다:
+    #   해당 없음(not_applicable) — 모든 함수의 Prototype 을 읽었는데 슬롯 있는 함수가 0.
+    #                               잴 대상이 없으니 **판정에서 뺀다**(통과도 실패도 아니다).
+    #   미측정(unmeasured)        — Prototype 을 못 읽은 함수가 있어 슬롯을 셀 수 없었다.
+    #                               잴 대상이 있을지 모르니 `Gate pass` 는 False 로 붙든다.
+    proto_unreadable = total - proto_readable
+
+    def _io_axis(ok_in_scope: int, applicable: int) -> Tuple[Optional[float], bool]:
+        if applicable > 0:
+            return _rate(ok_in_scope, applicable), False
+        if total > 0 and proto_unreadable == 0:
+            return None, True
+        return None, False
+
+    input_rate, input_na = _io_axis(input_ok_applicable, input_applicable)
+    output_rate, output_na = _io_axis(output_ok_applicable, output_applicable)
+    not_applicable_axes = {k for k, na in (("input_fill_rate", input_na),
+                                           ("output_fill_rate", output_na)) if na}
+
+    # ── 채점 축 (R29 Q-1) ── `metrics` 는 **임계가 있는 축만** 담는다. 예전엔 임계 없는
+    # `direct_*` 3축이 여기 섞여 `gate.get(k, 0.0)` 비교로 **구조적으로 절대 실패하지 않는
+    # 통과** 3건을 `Gates: N / M` 의 M 에 보탰다(11 중 3이 공짜 통과). 임계 없는 축은
+    # 아래 `informational` 로 — 값은 그대로 적되 판정엔 넣지 않는다.
+    metrics: Dict[str, Optional[float]] = {
         "description_fill_rate": _rate(desc_ok, total),
-        "input_fill_rate": _rate(input_ok, input_base),
-        "output_fill_rate": _rate(output_ok, output_base),
+        "input_fill_rate": input_rate,
+        "output_fill_rate": output_rate,
         "globals_global_fill_rate": _rate(gg_ok, total),
         "globals_static_fill_rate": _rate(gs_ok, total),
         "called_fill_rate": _rate(called_ok, total),
         "calling_fill_rate": _rate(calling_ok, total),
-        "asil_non_tbd_rate": _rate(asil_non_tbd, total),
-        "related_non_tbd_rate": _rate(related_non_tbd, total),
+        # R29 Q-5: 분자는 "기재된 것"(빈 칸·N/A 제외) — 예전엔 `total - tbd` 라 빈 칸이 통과였다
+        "asil_non_tbd_rate": _rate(asil_filled, total),
+        "related_non_tbd_rate": _rate(related_filled, total),
         "traceability_rate": _rate(traceable, total),
+    }
+    informational: Dict[str, Optional[float]] = {
         "direct_called_fill_rate": _rate(direct_called_ok, total),
         "direct_traceability_rate": _rate(direct_traceable, total),
         "direct_called_fill_applicable_rate": _rate(direct_called_ok, direct_call_applicable),
     }
+    # 임계 표에만 있고 재지 않는 축 — 조용히 통과로 세지 않고 이름을 적는다
+    ignored_threshold_keys.extend(f"{k}(측정 축 없음)" for k in gate if k not in metrics)
+    gated_keys = [k for k in metrics if k in gate]
     # ⚠ 잰 것만 채점한다. 미측정을 임계와 비교하면 `None < 0.1` 로 죽거나(예전 코드에선
     #   0.0 이라 조용히 실패했다) 근거 없는 실패가 된다.
-    failed = [k for k, v in metrics.items()
-              if v is not None and v < gate.get(k, 0.0)]
-    unmeasured = [k for k, v in metrics.items() if v is None]
-    measured_n = len(metrics) - len(unmeasured)
+    failed = [k for k in gated_keys
+              if metrics[k] is not None and metrics[k] < gate[k]]
+    not_applicable = [k for k in gated_keys if k in not_applicable_axes]
+    unmeasured = [k for k in gated_keys
+                  if metrics[k] is None and k not in not_applicable_axes]
+    ungated = [k for k in metrics if k not in gate]        # 임계 표에서 빠진 측정 축(있으면 결함)
+    measured_n = len(gated_keys) - len(unmeasured) - len(not_applicable)
 
     lines: List[str] = []
     lines.append("# UDS Field Quality Gate Report")
@@ -1034,32 +1131,60 @@ def generate_uds_field_quality_gate_report(
     # ⚠ `Gate pass` 는 보수 방향을 유지한다 — 미측정이 있으면 통과가 아니다.
     #   (`gate_report.py` 의 "판정 불가는 통과가 아님" 과 같은 규약. 미측정을 빼면서
     #    통과로 접으면 이번 수정이 fail-open 이 된다.)
-    #   실 산출물의 판정은 이 변경으로 **바뀌지 않는다** — 바뀌는 건 "왜 False 인가" 다.
-    lines.append(f"- Gate pass: `{'False' if (failed or unmeasured) else 'True'}`")
-    # 분모는 **잰 지표 수**다. 못 잰 것을 분모에 남기면 통과율이 근거 없이 낮아진다.
+    #   해당 없음(not_applicable)은 붙들지 않는다 — 잴 대상이 없는 축은 판정 밖이다.
+    #   임계 표에서 빠진 측정 축(`ungated`)이 있으면 판정할 수 없다 — 통과가 아니다.
+    lines.append(f"- Gate pass: `{'False' if (failed or unmeasured or ungated) else 'True'}`")
+    # 분모는 **임계가 있고 잰 지표 수**다. 못 잰 것·대상 없는 것·임계 없는 것을 분모에
+    # 남기면 통과율이 근거 없이 오르내린다.
     lines.append(f"- Gates: `{measured_n - len(failed)}` / `{measured_n}` passed")
     lines.append(f"- Unmeasured gates: `{len(unmeasured)}`")
+    lines.append(f"- Not applicable gates: `{len(not_applicable)}`")
+    lines.append(f"- Ungated metrics: `{len(ungated)}`")
+    lines.append(f"- Informational metrics (no threshold): `{len(informational)}`")
+    # 리뷰 W2: applicable > 0 이면 못 읽은 함수는 분모에서 빠진 채 부분집합으로 채점된다 — 그 사실을
+    # head 에 둔다(하위 note 는 리더가 안 읽는다). 비율로 강등할지는 정책(실 데이터 408/426 문서 존재).
+    lines.append(f"- Prototype unreadable: `{proto_unreadable}` / `{total}`")
+    lines.append(f"- Threshold source: `{threshold_source}`")
     lines.append("")
     lines.append("## Metrics")
     lines.append(f"- Description fill: `{desc_ok}` / `{total}` ({_pct(metrics['description_fill_rate'])})")
-    lines.append(f"- Input fill: `{input_ok}` / `{input_base}` ({_pct(metrics['input_fill_rate'])})")
-    lines.append(f"- Output fill: `{output_ok}` / `{output_base}` ({_pct(metrics['output_fill_rate'])})")
+    lines.append(f"- Input fill: `{input_ok_applicable}` / `{input_applicable}` ({_pct(input_rate, input_na)})")
+    if input_ok > input_ok_applicable:
+        lines.append(f"  - note: 입력이 채워졌지만 슬롯을 셀 수 없는 함수 {input_ok - input_ok_applicable}개 — "
+                     "분모 밖이라 채움률에 넣지 않는다(예전엔 분자가 분모를 끌어올렸다)")
+    lines.append(f"- Output fill: `{output_ok_applicable}` / `{output_applicable}` ({_pct(output_rate, output_na)})")
+    if output_ok > output_ok_applicable:
+        lines.append(f"  - note: 출력이 채워졌지만 슬롯을 셀 수 없는 함수 {output_ok - output_ok_applicable}개 — "
+                     "분모 밖이라 채움률에 넣지 않는다")
+    if proto_unreadable > 0:
+        lines.append(f"  - note: Prototype 을 읽지 못한 함수 {proto_unreadable}개(전체 {total}) — "
+                     "입력/출력 둘 다 그 함수는 슬롯을 셀 수 없어 분모에 없다(head `Prototype unreadable`)")
     lines.append(f"- Globals(Global) fill: `{gg_ok}` / `{total}` ({_pct(metrics['globals_global_fill_rate'])})")
     lines.append(f"- Globals(Static) fill: `{gs_ok}` / `{total}` ({_pct(metrics['globals_static_fill_rate'])})")
     lines.append(f"- Called fill (supported): `{called_ok}` / `{total}` ({_pct(metrics['called_fill_rate'])})")
     lines.append(f"- Calling fill: `{calling_ok}` / `{total}` ({_pct(metrics['calling_fill_rate'])})")
-    lines.append(f"- Direct called fill: `{direct_called_ok}` / `{total}` ({_pct(metrics['direct_called_fill_rate'])})")
-    lines.append(f"- Direct called fill (applicable): `{direct_called_ok}` / `{direct_call_applicable}` ({_pct(metrics['direct_called_fill_applicable_rate'])})")
+    lines.append(f"- ASIL non-TBD: `{asil_filled}` / `{total}` ({_pct(metrics['asil_non_tbd_rate'])})")
+    lines.append(f"- Related non-TBD: `{related_filled}` / `{total}` ({_pct(metrics['related_non_tbd_rate'])})")
+    lines.append("  - note: 빈 칸·N/A·`-` 도 TBD 와 같이 미기재로 센다(quick gate 와 같은 규칙) — "
+                 "예전엔 `전체 - TBD` 라 빈 칸이 기재로 계상됐다")
+    lines.append(f"- Traceability (Related + Supported Call): `{traceable}` / `{total}` ({_pct(metrics['traceability_rate'])})")
+    lines.append("")
+    # ── 임계 없는 축 ── 값은 남기되 `Gates: N / M` 에 넣지 않는다(R29 Q-1).
+    lines.append("## Informational (no threshold)")
+    lines.append(f"- Direct called fill: `{direct_called_ok}` / `{total}` ({_pct(informational['direct_called_fill_rate'])})")
+    lines.append(f"- Direct called fill (applicable): `{direct_called_ok}` / `{direct_call_applicable}` "
+                 f"({_pct(informational['direct_called_fill_applicable_rate'], total > 0 and direct_call_applicable == 0)})")
     lines.append(f"- Leaf / no-call functions: `{leaf_function_count}` / `{total}` ({_pct(_rate(leaf_function_count, total))})")
     lines.append(f"- Indirect call support: `{indirect_support_ok}` / `{total}` ({_pct(_rate(indirect_support_ok, total))})")
-    lines.append(f"- ASIL non-TBD: `{asil_non_tbd}` / `{total}` ({_pct(metrics['asil_non_tbd_rate'])})")
-    lines.append(f"- Related non-TBD: `{related_non_tbd}` / `{total}` ({_pct(metrics['related_non_tbd_rate'])})")
-    lines.append(f"- Traceability (Related + Supported Call): `{traceable}` / `{total}` ({_pct(metrics['traceability_rate'])})")
-    lines.append(f"- Direct traceability: `{direct_traceable}` / `{total}` ({_pct(metrics['direct_traceability_rate'])})")
+    lines.append(f"- Direct traceability: `{direct_traceable}` / `{total}` ({_pct(informational['direct_traceability_rate'])})")
+    lines.append("  - 임계가 없어 판정에 쓰이지 않는다 — 예전엔 `Gates` 분모에 섞여 '공짜 통과' 로 세어졌다")
     lines.append("")
     lines.append("## TBD Residual")
     lines.append(f"- ASIL TBD: `{tbd_asil}` / `{total}`")
+    lines.append(f"- ASIL unfilled: `{total - asil_filled - tbd_asil}` / `{total}`")
     lines.append(f"- Related TBD: `{tbd_related}` / `{total}`")
+    lines.append(f"- Related unfilled: `{total - related_filled - tbd_related}` / `{total}`")
+    lines.append("  - unfilled = 빈 칸 · N/A · `-` (TBD 는 위 줄에 따로) — 기재 + TBD + unfilled = 전체")
     lines.append("")
     lines.append("## Description Quality Grade")
     lines.append(f"- High (comment/SDS/reference): `{desc_high}` ({_pct(_rate(desc_high, total))})")
@@ -1067,8 +1192,12 @@ def generate_uds_field_quality_gate_report(
     lines.append(f"- Low (generic template): `{desc_low}` ({_pct(_rate(desc_low, total))})")
     lines.append("")
     lines.append("## Thresholds")
+    lines.append(f"- source: `{threshold_source}`")
     for k, v in gate.items():
         lines.append(f"- {k}: `{v*100:.1f}%`")
+    if ignored_threshold_keys:
+        # 넘겨받았지만 이 채점이 쓰지 않는 키 — 조용히 버리면 "config 를 넘겼으니 적용됐겠지" 가 된다
+        lines.append(f"- ignored keys: `{', '.join(ignored_threshold_keys)}`")
     lines.append("")
     lines.append("## Failed Gates")
     if failed:
@@ -1092,6 +1221,23 @@ def generate_uds_field_quality_gate_report(
     else:
         lines.append("- none")
     lines.append("")
+    # ── 해당 없음 ── 미측정과 **다른 버킷**이다(R29 Q-4). 못 잰 게 아니라 잴 대상이 없다.
+    lines.append("## Not Applicable Gates")
+    if not_applicable:
+        for k in not_applicable:
+            lines.append(f"- **{k}**: 대상 0 — 모든 함수의 Prototype 을 파라미터 목록까지 읽었고 이 슬롯이 있는 "
+                         f"함수가 없다 (판정에서 뺀다 — 통과도 실패도 아니다)")
+        lines.append("  - 해당 없음은 `Gate pass` 를 붙들지 않는다. 미측정(못 잼)과 갈라 두지 않으면 "
+                     "입출력이 없는 문서가 영구 `False` 가 된다.")
+    else:
+        lines.append("- none")
+    lines.append("")
+    if ungated:
+        lines.append("## Ungated Metrics")
+        for k in ungated:
+            lines.append(f"- **{k}**: 잰 값은 있는데 임계 표에 키가 없다 — 판정할 수 없어 `Gate pass` 는 False 다")
+        lines.append("  - 미측정(못 잼)과 다르다: 값은 `## Metrics` 에 그대로 있다. 없는 건 임계다.")
+        lines.append("")
     lines.append("## Improvement Recommendations")
     if tbd_asil > total * 0.5:
         lines.append("- SDS 문서를 추가하면 ASIL 정확도를 크게 향상시킬 수 있습니다.")
@@ -1108,10 +1254,19 @@ def generate_uds_field_quality_gate_report(
     #   판정 값을 고치면 **그 값을 말로 옮기는 산문도 같이** 봐야 한다.
     if unmeasured:
         lines.append(
-            f"- 지표 {len(unmeasured)}개를 **재지 못했습니다**(분모 0) — 통과 여부를 "
-            f"말할 수 없습니다. `## Unmeasured Gates` 참조.")
+            f"- 지표 {len(unmeasured)}개를 **재지 못했습니다**(분모 0) — 통과 여부를 말할 수 없습니다. "
+            "`## Unmeasured Gates` 참조.")
+    if ungated:
+        lines.append(
+            f"- 지표 {len(ungated)}개는 쟀지만 **임계가 없어 판정할 수 없습니다** — `## Ungated Metrics` 참조.")
+    if unmeasured or ungated:
+        pass  # 위에서 각각 말했다 — "모두 통과" 산문으로 떨어지지 않게 막는 분기
     elif not failed and not (tbd_asil > total * 0.5 or tbd_related > total * 0.5 or desc_low > total * 0.3):
-        lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다.")
+        if not_applicable:
+            lines.append(f"- 채점한 게이트는 모두 통과했습니다(해당 없음 {len(not_applicable)}개는 판정 밖). "
+                         "정기적인 재검증을 권장합니다.")
+        else:
+            lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다.")
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

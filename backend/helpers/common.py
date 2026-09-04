@@ -34,6 +34,7 @@ from backend.state import (
     jenkins_progress_lock as _jenkins_progress_lock,
 )
 from report_gen.c_return import returns_value
+from report_gen.gate_report import has_meaningful_value
 
 _logger = logging.getLogger("devops_api")
 _api_logger = _logger
@@ -97,14 +98,10 @@ def _mtime_or_zero(path: Optional[Path]) -> float:
     return 0.0
 
 
-def _has_meaningful_value(value: Any) -> bool:
-    if isinstance(value, list):
-        items = [str(x).strip() for x in value if str(x).strip()]
-        return len(items) > 0
-    text = str(value or "").strip()
-    if not text:
-        return False
-    return text.upper() not in {"N/A", "TBD", "-"}
+# "이 칸에 정보를 적었나" — 정의는 `report_gen.gate_report.has_meaningful_value` **하나**다.
+# (R29) 사이드카 채점이 같은 축을 다른 규칙(`TBD` 만 제외)으로 세어 빈 ASIL/Related 를
+# 통과로 계상했다. 여기 본문을 다시 쓰면 그 갈림이 되살아난다 — alias 로만 둔다.
+_has_meaningful_value = has_meaningful_value
 
 
 # 인터페이스 칸이 "없음" 을 뜻하는 표기들. `[IN] (none)` 처럼 방향 태그가 앞에 붙어

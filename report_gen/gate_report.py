@@ -45,8 +45,28 @@ __all__ = [
     "parse_gate_report",
     "to_rate_map",
     "to_percent_text_map",
+    "has_meaningful_value",
     "UDS_RATE_KEY_SOURCES",
 ]
+
+
+# "이 칸에 정보를 적었나" — 빈 값·`N/A`·`TBD`·`-` 는 적지 않은 것이다.
+#
+# ⚠ (R29, 2026-09-04) 두 리포트가 **같은 이름의 축을 다른 수로** 냈다: quick gate
+#   (`backend/helpers/uds.py`)는 이 함수로 세고, 사이드카(`report_gen/validation.py`)는
+#   `TBD` 만 세어 `total - tbd` 로 냈다 → **빈 ASIL/Related 가 사이드카에선 통과**로 계상.
+#   판정 어휘를 한 곳에 두고 둘 다 여기서 가져간다(`backend/helpers/common.py` 는 alias).
+_EMPTY_TOKENS = frozenset({"N/A", "TBD", "-"})
+
+
+def has_meaningful_value(value: Any) -> bool:
+    if isinstance(value, list):
+        items = [str(x).strip() for x in value if str(x).strip()]
+        return len(items) > 0
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return text.upper() not in _EMPTY_TOKENS
 
 # 앞의 `- ` 를 요구하지 않는다. 요구하면 "검토 의견" 문장 속 `Gate pass: True` 를
 # 못 세어 **모호성을 감지하지 못한 채** 첫/마지막 매치 문제가 되살아난다.

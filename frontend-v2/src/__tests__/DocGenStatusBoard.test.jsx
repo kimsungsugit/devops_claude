@@ -255,6 +255,75 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     expect(screen.getByText(/0% 아님/)).toBeInTheDocument();
   });
 
+  // ⚠ 라운드 29 (Q-4) — 해당 없음은 미측정과 **다른 버킷**이다. 못 잰 게 아니라 잴 대상이
+  //    없어 판정 밖이고 Gate pass 를 붙들지 않는다. 같은 문구로 접으면 "못 쟀다" 로 읽힌다.
+  it('해당 없음 게이트가 있으면 개수와 "판정 밖(미측정 아님)" 을 함께 보인다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: {
+            present: true, gates_passed: 8, gates_total: 8, total_functions: 12,
+            unmeasured_count: 0, unmeasured_gates: [],
+            not_applicable_count: 2, not_applicable_gates: ['**input_fill_rate**: 대상 0', '**output_fill_rate**: 대상 0'],
+            ungated_count: 1, ungated_gates: ['**traceability_rate**: 임계 없음'],
+            prototype_unreadable: { count: 408, total: 426 },
+            tbd_residual: {
+              asil_tbd: { count: 0, total: 426 }, asil_unfilled: { count: 17, total: 426 },
+              related_tbd: { count: 372, total: 426 }, related_unfilled: { count: 0, total: 426 },
+            },
+          },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: { present: false, reason: '없음' },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/해당 없음 2개/)).toBeInTheDocument());
+    expect(screen.getByText(/판정 밖\(미측정 아님\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/미측정 \d+개/)).not.toBeInTheDocument();
+    // 리뷰 W4 — 임계 없는 축은 사유 없는 FAIL 이 되지 않게 이름을 단다
+    expect(screen.getByText(/임계 없음 1개/)).toBeInTheDocument();
+    // 리뷰 W2 — 부분 측정: "8 / 8" 이 426 중 8개만 본 값일 수 있다
+    expect(screen.getByText(/Prototype 을 읽지 못한 함수/)).toHaveTextContent(/408/);
+    expect(screen.getByText(/나머지 함수로만 잰 값/)).toBeInTheDocument();
+    // 리뷰 I3 — TBD 가 0 이어도 미기재는 보인다(그게 asil_non_tbd_rate FAIL 의 사유다)
+    expect(screen.getByText(/ASIL 미기재/)).toHaveTextContent(/17/);
+    expect(screen.queryByText(/Related ID 미기재/)).not.toBeInTheDocument();   // 0 이면 안 만든다
+  });
+
+  it('구판 리포트에 임계 없음·부분 측정·미기재 키가 없으면 그 문구를 만들지 않는다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: true,
+          gate_report: {
+            present: true, gates_passed: 5, gates_total: 13, total_functions: 429,
+            tbd_residual: { asil_tbd: { count: 3, total: 429 } },
+          },
+          confidence: { present: false, reason: '없음' },
+          docx_validate: { present: false, reason: '없음' },
+        });
+      }
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    await waitFor(() => expect(screen.getByText(/게이트 항목 5 \/ 13 통과/)).toBeInTheDocument());
+    expect(screen.queryByText(/임계 없음/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Prototype 을 읽지 못한 함수/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ASIL 미기재/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Related ID 미기재/)).not.toBeInTheDocument();
+  });
+
   it('구판 리포트(미측정 항목 없음)엔 미측정 문구를 만들지 않는다 (음성 대조군)', async () => {
     mockApi.mockImplementation((path) => {
       if (String(path).includes('/evidence')) {

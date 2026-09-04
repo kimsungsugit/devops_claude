@@ -179,7 +179,9 @@ class TestUnmeasuredIsNeitherPassNorFail:
     def test_the_denominator_counts_only_measured_gates(self, no_proto):
         """못 잰 축을 분모에 남기면 통과율이 근거 없이 낮아진다."""
         _, got = no_proto
-        assert got["gates_total"] == 11        # 13 - 미측정 2
+        # (R29 Q-1) 분모는 **임계가 있는 축 10** 에서 미측정 2 를 뺀 8 이다. 예전 11 은
+        # 임계 없는 `direct_*` 3축을 "공짜 통과" 로 분모에 섞은 값이었다.
+        assert got["gates_total"] == 8
         assert got["gates_passed"] + len(got["failed_gates"]) == got["gates_total"]
 
     def test_unmeasured_alone_does_not_make_it_pass(self, tmp_path):

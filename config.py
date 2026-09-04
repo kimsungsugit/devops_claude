@@ -181,6 +181,26 @@ UDS_QUALITY_WARNING_THRESHOLDS = {
     "related_trusted_warn": 35.0,
 }
 
+# ---------------- UDS 사이드카(.quality_gate.md) 게이트 임계값 ----------------
+# ⚠ 위 `UDS_QUALITY_GATE_THRESHOLDS` 와 **다른 벌**이다. 키(`*_fill_rate`)·스케일(0~1 비율)·값이
+#   전부 다르다(예: description 0.70 vs `description_min` 90). 두 판정은
+#   `backend/helpers/uds.py` 에서 AND 된다(quick gate ∧ 신뢰도 ∧ 사이드카).
+# (R29, 2026-09-04) 값 불변으로 `report_gen/validation.py` 함수 안 리터럴에서 승격했다 — 그때까지
+#   이 벌은 어디에도 공시되지 않았고, 호출부가 위 표를 넘겨도 키가 달라 **조용히 무시**됐다.
+#   두 벌을 하나로 합칠지는 정책 결정(계획서 §8 #2) — 합치면 판정이 대량 이동한다.
+UDS_SIDECAR_GATE_THRESHOLDS = {
+    "description_fill_rate": _safe_float("UDS_SIDECAR_DESCRIPTION_FILL_RATE", 0.70),
+    "input_fill_rate": _safe_float("UDS_SIDECAR_INPUT_FILL_RATE", 0.20),
+    "output_fill_rate": _safe_float("UDS_SIDECAR_OUTPUT_FILL_RATE", 0.10),
+    "globals_global_fill_rate": _safe_float("UDS_SIDECAR_GLOBALS_GLOBAL_FILL_RATE", 0.35),
+    "globals_static_fill_rate": _safe_float("UDS_SIDECAR_GLOBALS_STATIC_FILL_RATE", 0.15),
+    "called_fill_rate": _safe_float("UDS_SIDECAR_CALLED_FILL_RATE", 0.50),
+    "calling_fill_rate": _safe_float("UDS_SIDECAR_CALLING_FILL_RATE", 0.25),
+    "asil_non_tbd_rate": _safe_float("UDS_SIDECAR_ASIL_NON_TBD_RATE", 0.30),
+    "related_non_tbd_rate": _safe_float("UDS_SIDECAR_RELATED_NON_TBD_RATE", 0.30),
+    "traceability_rate": _safe_float("UDS_SIDECAR_TRACEABILITY_RATE", 0.20),
+}
+
 # ---------------- UDS Hallucination 검출 (라운드 C T509) ----------------
 # llm_semantic_validator + LLM-as-a-Judge + confidence-based dynamic retry.
 # 환경 변수로 운영 시 opt-out 가능 (예: UDS_JUDGE_ENABLED=0).

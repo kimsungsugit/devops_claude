@@ -398,6 +398,27 @@ def _record_uds_run(
     )
 
 
+# quick gate 가 **실제로 판정에 쓰는** 축 — `(rates 키, config.UDS_QUALITY_GATE_THRESHOLDS 키)`.
+# (R29) `/api/quality/policy` 는 12키 전부 "적용됨 — 판정에 쓰인다" 로 공시했는데 판정식은
+#   7키(gate) + 3키(신뢰도) 였고 `global_min`/`static_min` 은 사유 코드에만 쓰였다
+#   (`workflow/quality/evaluator.py` 가 의도적으로 제외 — 정상 모듈의 구조적 저평가).
+#   판정식과 공시가 같은 튜플을 읽게 해 둘이 갈리지 않게 한다.
+QUICK_GATE_AXES: Tuple[Tuple[str, str], ...] = (
+    ("called_fill", "called_min"),
+    ("calling_fill", "calling_min"),
+    ("input_fill", "input_min"),
+    ("output_fill", "output_min"),
+    ("description_fill", "description_min"),
+    ("asil_fill", "asil_min"),
+    ("related_fill", "related_min"),
+)
+CONFIDENCE_GATE_AXES: Tuple[Tuple[str, str], ...] = (
+    ("description_trusted_fill", "description_trusted_min"),
+    ("asil_trusted_fill", "asil_trusted_min"),
+    ("related_trusted_fill", "related_trusted_min"),
+)
+
+
 def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     by_name = uds_payload.get("function_details_by_name")
     rows: List[Dict[str, Any]] = []
@@ -498,20 +519,22 @@ def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     asil_trusted_rate = round((with_asil_trusted / total) * 100.0, 1)
     related_trusted_rate = round((with_related_trusted / total) * 100.0, 1)
     thresholds = dict(_thresholds)
-    gate_pass = (
-        called_rate >= thresholds["called_min"]
-        and calling_rate >= thresholds["calling_min"]
-        and input_rate >= thresholds["input_min"]
-        and output_rate >= thresholds["output_min"]
-        and description_rate >= thresholds["description_min"]
-        and asil_rate >= thresholds["asil_min"]
-        and related_rate >= thresholds["related_min"]
-    )
-    confidence_gate_pass = (
-        description_trusted_rate >= thresholds["description_trusted_min"]
-        and asil_trusted_rate >= thresholds["asil_trusted_min"]
-        and related_trusted_rate >= thresholds["related_trusted_min"]
-    )
+    _rates_by_key = {
+        "called_fill": called_rate,
+        "calling_fill": calling_rate,
+        "input_fill": input_rate,
+        "output_fill": output_rate,
+        "description_fill": description_rate,
+        "asil_fill": asil_rate,
+        "related_fill": related_rate,
+        "description_trusted_fill": description_trusted_rate,
+        "asil_trusted_fill": asil_trusted_rate,
+        "related_trusted_fill": related_trusted_rate,
+    }
+    # 축 목록은 `QUICK_GATE_AXES`/`CONFIDENCE_GATE_AXES` 단일 출처 — `/api/quality/policy` 가
+    # 같은 튜플로 "이 키는 판정에 쓰인다" 를 공시한다(R29). `>=` 직접 비교라 임계 0 은 "축 끔".
+    gate_pass = all(_rates_by_key[r] >= thresholds[t] for r, t in QUICK_GATE_AXES)
+    confidence_gate_pass = all(_rates_by_key[r] >= thresholds[t] for r, t in CONFIDENCE_GATE_AXES)
     return {
         "gate_pass": bool(gate_pass),
         "thresholds": thresholds,

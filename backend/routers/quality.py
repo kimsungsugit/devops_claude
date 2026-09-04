@@ -318,16 +318,49 @@ _GATE_ENV_NAMES = {
     "related_trusted_min": "UDS_RELATED_TRUSTED_MIN",
 }
 
+# (R29 Q-3) 사이드카 임계 10키 — `config.UDS_SIDECAR_GATE_THRESHOLDS` 와 한 세트. 같은 가드가 잰다.
+_SIDECAR_ENV_NAMES = {
+    "description_fill_rate": "UDS_SIDECAR_DESCRIPTION_FILL_RATE",
+    "input_fill_rate": "UDS_SIDECAR_INPUT_FILL_RATE",
+    "output_fill_rate": "UDS_SIDECAR_OUTPUT_FILL_RATE",
+    "globals_global_fill_rate": "UDS_SIDECAR_GLOBALS_GLOBAL_FILL_RATE",
+    "globals_static_fill_rate": "UDS_SIDECAR_GLOBALS_STATIC_FILL_RATE",
+    "called_fill_rate": "UDS_SIDECAR_CALLED_FILL_RATE",
+    "calling_fill_rate": "UDS_SIDECAR_CALLING_FILL_RATE",
+    "asil_non_tbd_rate": "UDS_SIDECAR_ASIL_NON_TBD_RATE",
+    "related_non_tbd_rate": "UDS_SIDECAR_RELATED_NON_TBD_RATE",
+    "traceability_rate": "UDS_SIDECAR_TRACEABILITY_RATE",
+}
+
+_ROLE_LABELS = {
+    "gate": "판정에 쓰인다",
+    "confidence_gate": "신뢰도 판정에 쓰인다 (quick gate 와 AND)",
+    "reason_only": "사유 코드에만 쓰인다 — 판정식에 없다",
+}
+
+
+def _gate_key_roles() -> Dict[str, str]:
+    """임계 키 → 역할. **판정식이 읽는 튜플**(`backend/helpers/uds.py`)에서 파생한다 — 여기
+    목록을 따로 들면 판정식과 공시가 갈린다(그게 R29 이전의 결함이었다)."""
+    from backend.helpers.uds import CONFIDENCE_GATE_AXES, QUICK_GATE_AXES
+
+    roles = {t: "gate" for _, t in QUICK_GATE_AXES}
+    roles.update({t: "confidence_gate" for _, t in CONFIDENCE_GATE_AXES})
+    for k in _GATE_ENV_NAMES:
+        roles.setdefault(k, "reason_only")
+    return roles
+
 
 @router.get("/policy")
 def get_policy() -> Dict[str, Any]:
     """게이트 정책값 **읽기 전용** 노출 (§6-1 G4).
 
-    화면이 임계값을 다시 정의하지 않게 하는 것이 목적이다. 세 표를 **라벨과 함께** 낸다:
+    화면이 임계값을 다시 정의하지 않게 하는 것이 목적이다. 네 표를 **라벨과 함께** 낸다:
 
     | 표 | 상태 | 근거 |
     |---|---|---|
-    | `UDS_QUALITY_GATE_THRESHOLDS` | `applied` (조정 가능) | 12키 각각 전용 env 이름으로 덮인다 |
+    | `UDS_QUALITY_GATE_THRESHOLDS` | `applied` (조정 가능) | 12키 각각 전용 env — 단 **역할이 셋**이다: 판정식 7 · 신뢰도 판정 3 · 사유 전용 2(`global_min`/`static_min`). 키별 `role` 은 판정식이 읽는 `QUICK_GATE_AXES`/`CONFIDENCE_GATE_AXES` 에서 파생(R29) |
+    | `UDS_SIDECAR_GATE_THRESHOLDS` | `applied` (조정 가능) | 사이드카(`.quality_gate.md`) 판정의 **별개 벌**(키 `*_fill_rate`, 0~1). quick gate 와 AND 된다. R29 전엔 함수 안 리터럴이라 공시 0 |
     | `UDS_QUALITY_WARNING_THRESHOLDS` | `defined_unused` | 판정 참조 0건 · env 훅 0개 |
     | `TEST_QUALITY_GATES_BY_ASIL` | `defined_unused` | 사용 0건 · env 훅 0개 |
 
@@ -351,14 +384,22 @@ def get_policy() -> Dict[str, Any]:
     gate = dict(getattr(config, "UDS_QUALITY_GATE_THRESHOLDS", {}) or {})
     warn = dict(getattr(config, "UDS_QUALITY_WARNING_THRESHOLDS", {}) or {})
     asil = dict(getattr(config, "TEST_QUALITY_GATES_BY_ASIL", {}) or {})
+    sidecar = dict(getattr(config, "UDS_SIDECAR_GATE_THRESHOLDS", {}) or {})
+    roles = _gate_key_roles()
+    role_counts = {r: sum(1 for k in gate if roles.get(k) == r) for r in _ROLE_LABELS}
 
     return {
         "tables": [
             {
                 "key": "UDS_QUALITY_GATE_THRESHOLDS",
-                "label": "UDS 품질 게이트 임계값",
+                "label": "UDS 품질 게이트 임계값 (quick gate · 0~100)",
                 "status": "applied",
-                "status_label": "적용됨 — 판정에 쓰인다",
+                # (R29 Q-3) "12키 전부 판정에 쓰인다" 는 거짓이었다 — 판정식은 7 + 신뢰도 3,
+                # 나머지 2(`global_min`/`static_min`)는 사유 코드에만 쓰인다. 키별 `role` 로 갈라 낸다.
+                "status_label": (
+                    f"적용됨 — 판정 {role_counts['gate']} · 신뢰도 판정 {role_counts['confidence_gate']} · "
+                    f"사유 전용 {role_counts['reason_only']}"
+                ),
                 "adjustable": "env",
                 "adjustable_label": "키별 환경변수로 조정 가능",
                 "entries": [
@@ -368,8 +409,29 @@ def get_policy() -> Dict[str, Any]:
                         "env_name": _GATE_ENV_NAMES.get(k),
                         # 이 프로세스에서 실제로 덮였는가(리터럴과 실효값이 갈리는지 확인용)
                         "env_set": bool(os.environ.get(_GATE_ENV_NAMES.get(k) or "")),
+                        "role": roles.get(k, "unknown"),
+                        "role_label": _ROLE_LABELS.get(roles.get(k, "unknown"), "역할 미상 — 판정식에 없다"),
                     }
                     for k, v in sorted(gate.items())
+                ],
+            },
+            {
+                "key": "UDS_SIDECAR_GATE_THRESHOLDS",
+                "label": "UDS 사이드카(.quality_gate.md) 게이트 임계값 (비율 0~1)",
+                "status": "applied",
+                "status_label": "적용됨 — 사이드카 판정에 쓰인다 (quick gate 와 AND)",
+                "adjustable": "env",
+                "adjustable_label": "키별 환경변수로 조정 가능",
+                "entries": [
+                    {
+                        "key": k,
+                        "value": v,
+                        "env_name": _SIDECAR_ENV_NAMES.get(k),
+                        "env_set": bool(os.environ.get(_SIDECAR_ENV_NAMES.get(k) or "")),
+                        "role": "gate",
+                        "role_label": _ROLE_LABELS["gate"],
+                    }
+                    for k, v in sorted(sidecar.items())
                 ],
             },
             {

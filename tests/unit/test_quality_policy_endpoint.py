@@ -58,12 +58,14 @@ class TestRunDetailContract:
 
 
 class TestPolicyEndpoint:
-    def test_returns_three_tables(self, client):
+    def test_returns_four_tables(self, client):
+        """(R29 Q-3) 사이드카 임계 벌이 네 번째 표로 공시된다 — 그 전엔 어디에도 없었다."""
         res = client.get("/api/quality/policy")
         assert res.status_code == 200
         keys = [t["key"] for t in res.json()["tables"]]
         assert keys == [
             "UDS_QUALITY_GATE_THRESHOLDS",
+            "UDS_SIDECAR_GATE_THRESHOLDS",
             "UDS_QUALITY_WARNING_THRESHOLDS",
             "TEST_QUALITY_GATES_BY_ASIL",
         ]

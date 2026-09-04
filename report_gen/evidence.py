@@ -102,6 +102,20 @@ def _as_int(text: Optional[str]) -> Optional[int]:
         return None
 
 
+def _head_ratio(lines: List[str], label: str) -> Optional[Dict[str, int]]:
+    """head 의 ``- Label: `N` / `M` `` 줄 → `{count, total}`. 없으면 `None`(0 이 아니다).
+
+    ⚠ `_kv` 는 **첫 backtick 값만** 잡는다 — 비율 줄을 `_kv` 로 읽으면 분모가 사라진다.
+      그래서 줄을 직접 찾아 `_RATIO_RE` 로 판다.
+    """
+    want = f"- {label}:".lower()
+    for line in lines:
+        if line.strip().lower().startswith(want):
+            m = _RATIO_RE.search(line)
+            return {"count": int(m.group(1)), "total": int(m.group(2))} if m else None
+    return None
+
+
 def _as_count(text: Optional[str]) -> Optional[int]:
     """건수 값 — **구판 산출물이 backtick 안에 단위를 넣었다**(`` `120건` ``).
 
@@ -230,6 +244,18 @@ def read_gate_report(path: Path) -> Dict[str, Any]:
         # 없으면 `None`(구판 산출물) 이지 0 이 아니다.
         "unmeasured_gates": _bullet_list(sec.get("Unmeasured Gates", [])),
         "unmeasured_count": _as_count(head.get("Unmeasured gates")),
+        # ── 해당 없음(R29 Q-4) ── "못 잰 것" 과 다르다: 대상이 0 이라 **판정에서 뺀** 축
+        # (예: 모든 함수의 Prototype 을 읽었는데 입력 슬롯이 있는 함수가 0). 미측정은
+        # `Gate pass` 를 False 로 붙들지만 해당 없음은 붙들지 않는다. 구판은 `None`.
+        "not_applicable_gates": _bullet_list(sec.get("Not Applicable Gates", [])),
+        "not_applicable_count": _as_count(head.get("Not applicable gates")),
+        # 잰 값은 있는데 임계 표에 키가 없는 축(리뷰 W4) — FAIL 에 사유가 붙으려면 리더가 세야 한다
+        "ungated_gates": _bullet_list(sec.get("Ungated Metrics", [])),
+        "ungated_count": _as_count(head.get("Ungated metrics")),
+        # 부분 측정(리뷰 W2): Prototype 을 못 읽은 함수는 입출력 분모에서 빠진 채 나머지로 채점된다
+        "prototype_unreadable": _head_ratio(sec.get("", []), "Prototype unreadable"),
+        # 어느 임계 벌로 채점했는지(R29 Q-3) — 구판은 `None`(공시된 적 없음)
+        "threshold_source": (str(head.get("Threshold source") or "").strip("` ") or None),
     }
 
 

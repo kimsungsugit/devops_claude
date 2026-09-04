@@ -512,13 +512,17 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                   </h3>
                   <div style={{ overflowX: 'auto' }}>
                     <table className="board-table">
-                      <thead><tr><th>키</th><th>값</th><th>환경변수</th></tr></thead>
+                      {/* 역할 열은 서버가 주는 라벨 그대로 — "적용됨" 표 안에서도 판정식에 없는
+                          키(사유 전용)가 있다(R29 Q-3). 프론트가 역할을 계산하지 않는다.
+                          미사용 표엔 열을 내지 않는다 — 전 행 '—' 면 "역할 미상" 과 "표 미사용" 이 안 갈린다. */}
+                      <thead><tr><th>키</th><th>값</th><th>환경변수</th>{t.status === 'applied' && <th>역할</th>}</tr></thead>
                       <tbody>
                         {(t.entries || []).map((e) => (
                           <tr key={e.key}>
                             <td>{e.key}</td>
                             <td>{typeof e.value === 'object' ? JSON.stringify(e.value) : String(e.value)}</td>
                             <td>{e.env_name || '—'}{e.env_set ? ' (설정됨)' : ''}</td>
+                            {t.status === 'applied' && <td>{e.role_label || '—'}</td>}
                           </tr>
                         ))}
                       </tbody>

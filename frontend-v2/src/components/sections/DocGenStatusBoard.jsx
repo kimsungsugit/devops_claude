@@ -1386,7 +1386,28 @@ function EvidenceDetail({ run, detail }) {
                     <> · <strong>미측정 {gate.unmeasured_count}개</strong>
                       {' — 잴 수 없어 채점에서 뺀 축(0% 아님)'}</>
                   )}
+                  {/* (R29 Q-4) 해당 없음은 미측정과 다르다 — 못 잰 게 아니라 잴 대상이 없어
+                      판정 밖이고, Gate pass 를 붙들지 않는다. 같은 문구로 접으면 "못 쟀다" 로 읽힌다. */}
+                  {gate.not_applicable_count != null && gate.not_applicable_count > 0 && (
+                    <> · <strong>해당 없음 {gate.not_applicable_count}개</strong>
+                      {' — 잴 대상이 없어 판정 밖(미측정 아님)'}</>
+                  )}
+                  {/* 잰 값은 있는데 임계 표에 키가 없는 축 — 이게 있으면 Gate pass 는 False 인데
+                      "N / N 통과" 만 보이면 사유 없는 FAIL 이 된다(리뷰 W4). */}
+                  {gate.ungated_count != null && gate.ungated_count > 0 && (
+                    <> · <strong>임계 없음 {gate.ungated_count}개</strong>
+                      {' — 쟀지만 판정할 수 없어 Gate pass 가 False'}</>
+                  )}
                 </li>
+                {/* 부분 측정(리뷰 W2): Prototype 을 못 읽은 함수는 입출력 분모에서 빠진 채 나머지로 채점된다.
+                    "8 / 8 (100%)" 가 426함수 중 8개만 본 값일 수 있다 — 그 사실을 옆에 둔다. */}
+                {gate.prototype_unreadable?.count > 0 && (
+                  <li>
+                    Prototype 을 읽지 못한 함수 <strong>{gate.prototype_unreadable.count}</strong>
+                    {' / '}{gate.prototype_unreadable.total}
+                    {' — 입력/출력 채움률은 나머지 함수로만 잰 값'}
+                  </li>
+                )}
                 {gate.tbd_residual?.asil_tbd && (
                   <li>
                     ASIL 미상(TBD) <strong>{gate.tbd_residual.asil_tbd.count}</strong>
@@ -1395,7 +1416,15 @@ function EvidenceDetail({ run, detail }) {
                       <> · Related ID 미상 <strong>{gate.tbd_residual.related_tbd.count}</strong>
                         {' / '}{gate.tbd_residual.related_tbd.total}</>
                     )}
-                    {' — 미상이 많을수록 추적성 판정이 약해진다'}
+                    {/* (R29 Q-5) 미기재(빈 칸·N/A·-)는 TBD 와 별도 축 — DOCX 경로에선 TBD 가 항상 0 이라
+                        이 수가 없으면 asil_non_tbd_rate FAIL 의 사유가 화면에 없다(리뷰 I3). */}
+                    {gate.tbd_residual.asil_unfilled?.count > 0 && (
+                      <> · ASIL 미기재 <strong>{gate.tbd_residual.asil_unfilled.count}</strong></>
+                    )}
+                    {gate.tbd_residual.related_unfilled?.count > 0 && (
+                      <> · Related ID 미기재 <strong>{gate.tbd_residual.related_unfilled.count}</strong></>
+                    )}
+                    {' — 미상·미기재가 많을수록 추적성 판정이 약해진다'}
                   </li>
                 )}
                 {gate.description_quality?.high && (

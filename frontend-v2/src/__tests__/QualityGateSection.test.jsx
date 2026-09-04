@@ -196,6 +196,49 @@ describe('QualityGateSection — lazy 조회', () => {
   });
 });
 
+describe('QualityGateSection — 정책값 역할 열 (R29 Q-3)', () => {
+  // "적용됨" 표 안에도 판정식에 없는 키(사유 전용)가 있다. 역할은 서버 라벨 그대로 —
+  // 프론트가 키 이름으로 역할을 추측하면 판정식과 공시가 다시 갈린다.
+  it('서버가 준 role_label 을 키마다 그대로 보이고, 없으면 — 다', async () => {
+    stubApi({
+      policy: {
+        notes: [],
+        tables: [{
+          key: 'UDS_QUALITY_GATE_THRESHOLDS', label: 'UDS 품질 게이트 임계값',
+          status: 'applied', status_label: '적용됨 — 판정 7 · 신뢰도 판정 3 · 사유 전용 2',
+          adjustable: 'env', adjustable_label: '키별 환경변수로 조정 가능',
+          entries: [
+            { key: 'called_min', value: 95, env_name: 'UDS_CALLED_MIN', env_set: false, role: 'gate', role_label: '판정에 쓰인다' },
+            { key: 'global_min', value: 40, env_name: 'UDS_GLOBAL_MIN', env_set: false, role: 'reason_only', role_label: '사유 코드에만 쓰인다 — 판정식에 없다' },
+            { key: 'legacy_key', value: 1, env_name: null, env_set: false },
+          ],
+        }, {
+          // 미사용 표 — 역할 열이 붙으면 전 행 '—' 라 "역할 미상" 과 "표 미사용" 이 안 갈린다(리뷰 I5)
+          key: 'UDS_QUALITY_WARNING_THRESHOLDS', label: "UDS '주의' 밴드",
+          status: 'defined_unused', status_label: '정의만 있고 판정에 안 쓰인다',
+          adjustable: 'code', adjustable_label: '코드 상수 — env 훅 없음',
+          entries: [{ key: 'called_warn', value: 85, env_name: null, env_set: false }],
+        }],
+      },
+    });
+    const user = userEvent.setup();
+    render(<QualityGateSection />);
+    await user.click(screen.getByRole('tab', { name: '정책값' }));
+
+    await waitFor(() => expect(screen.getByRole('columnheader', { name: '역할' })).toBeInTheDocument());
+    const rows = screen.getAllByRole('row');
+    const rowOf = (key) => rows.find((r) => within(r).queryByText(key));
+    expect(within(rowOf('called_min')).getByText('판정에 쓰인다')).toBeInTheDocument();
+    expect(within(rowOf('global_min')).getByText(/사유 코드에만 쓰인다/)).toBeInTheDocument();
+    expect(within(rowOf('legacy_key')).getAllByText('—').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/사유 전용 2/)).toBeInTheDocument();
+    // 적용 표에만 역할 열 — 미사용 표의 행은 셀이 3개다
+    expect(screen.getAllByRole('columnheader', { name: '역할' })).toHaveLength(1);
+    expect(within(rowOf('called_warn')).getAllByRole('cell')).toHaveLength(3);
+    expect(within(rowOf('called_min')).getAllByRole('cell')).toHaveLength(4);
+  });
+});
+
 describe('QualityGateSection — 프로젝트 스코프 (두 진입을 한 컴포넌트로)', () => {
   it('analysisResult 가 있으면 그 프로젝트로 좁힌다', async () => {
     render(<QualityGateSection analysisResult={{ matchedScm: { id: 'kjpds02', name: 'KJPDS02' } }} />);
