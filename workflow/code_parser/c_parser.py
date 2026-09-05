@@ -16,6 +16,72 @@ except Exception:  # pragma: no cover
     c_language = None  # type: ignore
 
 
+def blank_c_comments(text: str) -> str:
+    """주석을 **길이·줄 수를 유지한 채** 공백으로 지운다.
+
+    ## 왜 지우기(strip)가 아니라 공백 채우기(blank)인가
+
+    통째로 제거하면 바이트 오프셋이 밀린다. `_extract_leading_comment(text_bytes,
+    start_byte)` 처럼 **오프셋으로 원문을 되짚는** 소비자가 엉뚱한 자리를 읽는다.
+    길이를 유지하면 원문과 1:1 이라 정규식 매칭만 주석을 피하고 서술 추출은 원문에서
+    그대로 한다.
+
+    ## 왜 필요한가 (실측 2026-08-12)
+
+    Processor Expert 가 만든 `Generated_Code/*.c` 는 매크로로 구현된 접근자의
+    프로토타입을 **주석 안에** 남긴다:
+
+        /*
+        bool PS3_MOTOR_NSCS_GetVal(void)
+
+        **  This method is implemented as a macro. See PS3_MOTOR_NSCS.h file.  **
+        */
+
+    tree-sitter 는 이 파일을 "함수 0개" 로 **정확히** 읽는다. 그런데 호출부의
+    `if not funcs:` 가 그걸 "파싱 실패" 로 보고 정규식 폴백을 돌렸고, 그 정규식이
+    주석을 훑어 **없는 함수를 만들어냈다**. 정본 SUTS 엔 이 접근자들이 하나도
+    없다 — 존재하지 않는 함수의 시험 케이스를 생성하고 있었다는 뜻이다.
+
+    ⚠ 문자열 리터럴 안의 `/*` 는 구분하지 않는다(기존 `_strip_c_comments` 와 동일한
+      한계). C 소스에서 드물고, 잘못 가려도 함수를 **덜** 찾을 뿐 지어내지는 않는다.
+    """
+    if not text:
+        return ""
+
+    def _blank(m) -> str:
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    text = re.sub(r"/\*.*?\*/", _blank, text, flags=re.S)
+    text = re.sub(r"//[^\n]*", _blank, text)
+    return text
+
+
+# C 식별자. **앞의 `\b` 가 이 정규식의 본체다.**
+#
+# `[A-Za-z_]\w*` 만 쓰면 정수 리터럴의 접미사가 식별자로 잡힌다:
+#   re.findall(r"[A-Za-z_]\w*", "123U")  ->  ['U']      ← `123U` 안의 `U`
+#   re.findall(r"[A-Za-z_]\w*", "0x1FUL") ->  ['x1FUL']  ← 통째로
+# `\b` 는 앞 글자가 `\w` 면 경계가 아니므로 둘 다 **아무것도** 내놓지 않는다(정답).
+#
+# ## 실측 피해 (2026-08-12, KJPDS02)
+#
+# 이 저장소엔 `U` 라는 전역이 하나 등록돼 있었다(`@0x00FF9DF0U` 오파싱 — 아래
+# `source_parser._parse_c_declaration_statement` 주석 참조). 그래서 두 결함이
+# 맞물렸다: `#define VectorNumber_VReserved123 123U` 의 확장형에서 `U` 가 나오고,
+# 그게 등록된 전역 이름과 일치해 매크로를 쓰는 **모든** 함수에 전역 `U` 가 붙었다.
+# 결과는 **324개 함수** — 이 프로젝트에서 가장 많이 붙은 "전역" 1위였다.
+# 그 함수들은 `U`(1글자)가 이름 필터에서 탈락하면서 입력 열이 통째로 비었다.
+#
+# 파라미터 이름 추출(`parse_param_name`)에서는 더 직접적이다:
+#   `U8 buf[10U]` -> ids[-1] 이 `buf` 가 아니라 **`U`** 였다.
+_C_IDENT_RE = re.compile(r"\b[A-Za-z_]\w*")
+
+
+def c_identifiers(text: str) -> List[str]:
+    """C 코드 조각에서 식별자 토큰만 뽑는다(정수 리터럴 접미사 제외)."""
+    return _C_IDENT_RE.findall(str(text or ""))
+
+
 @dataclass
 class CFunction:
     name: str
@@ -29,8 +95,10 @@ class CFunction:
     comment_related: str
     comment_precondition: str
     body_text: str
-    comment_params: List[Dict[str, str]] = None  # [{"name": "x", "desc": "..."}]
+    comment_params: Optional[List[Dict[str, str]]] = None  # [{"name": "x", "desc": "..."}]
     comment_return: str = ""
+    func_refs: Optional[List[str]] = None      # &foo/pfn=foo/f(foo) — 함수포인터 참조(엣지 승격 후보)
+    pointer_calls: Optional[List[str]] = None  # (*p)()/obj->h()/pfn() — 간접 호출 사이트(배지)
 
 
 def _run_preprocessor(
@@ -126,6 +194,63 @@ def _find_ident(node) -> Optional[str]:
     return None
 
 
+# 선언 노드에서 **이름이 아닌** 자리
+_DECL_SKIP_TYPES = frozenset({"storage_class_specifier", "type_qualifier", ";", ","})
+
+
+def _decl_ident(node) -> str:
+    """선언 노드에서 **선언자**의 이름만 찾는다 — 타입 자리는 보지 않는다.
+
+    ⚠ `_find_ident(node)` 는 깊이우선이라 타입 자리까지 판다. 그래서
+
+        static enum { en_s_Buzzer_Stop = 0x01U, ... } s_BuzzerState;
+
+    에서 첫 **열거자** `en_s_Buzzer_Stop` 을 변수명으로 집어낸다. 진짜 변수
+    `s_BuzzerState` 는 목록에서 통째로 사라지고, 설계서에는 **존재하지 않는
+    정적 변수**가 실린다 — 값 부재보다 나쁜, 틀린 주장이다.
+
+    실측(PDS64_RD): 전역/정적 선언 809개 중 2개(`s_BuzzerState`·`s_MotorState`)가
+    이 모양이고, 산출물 Type 칸 24개가 그 때문에 `enum }` 또는 열거자 본문이었다
+    (정본 2,751칸 중 중괄호 포함은 0개).
+    """
+    type_node = node.child_by_field_name("type")
+    type_id = type_node.id if type_node is not None else None
+    for child in node.children:
+        if type_id is not None and child.id == type_id:
+            continue
+        if child.type in _DECL_SKIP_TYPES:
+            continue
+        name = _find_ident(child)
+        if name:
+            return name
+    return ""
+
+
+# `enum {`, `struct tag {`, `union {` … — 본문을 가진 집합체 타입
+_RE_AGGREGATE_BODY = re.compile(r"^(struct|union|enum)\b\s*([A-Za-z_]\w*)?\s*\{")
+
+
+def _normalize_type_text(type_text: str) -> str:
+    """본문을 가진 집합체 타입을 **태그 형태**로 줄인다.
+
+    `enum { en_s_Stop = 0x01U, ... }` 는 타입 *이름* 이 아니라 정의다. 그대로
+    Type 칸에 넣으면 설계서 표가 깨지고, 줄바꿈이 접히면 `enum }` 같은 조각이 된다.
+    태그가 있으면 `enum en_g_State`, 없으면 `enum` — 둘 다 사실이고 지어내지 않는다.
+
+    ⚠ `\\{` 요구를 빼도 **실소스에서는 결과가 안 바뀐다**(PDS64_RD 고유 타입 문자열
+      374개 중 차이 0 — `enum en_g_State` 는 어느 판으로도 그대로다). 반례는
+      `"enum en_g_State extra"` 처럼 C 타입이 아닌 문자열뿐이다. 즉 이 조건은
+      뮤테이션으로 관측되지 않는다 — 그래도 "본문이 있을 때만 줄인다" 는 의도를
+      코드에 남기려고 유지한다. (등가 뮤턴트를 쫓지 말 것.)
+    """
+    text = " ".join((type_text or "").split())
+    m = _RE_AGGREGATE_BODY.match(text)
+    if not m:
+        return text
+    kind, tag = m.group(1), m.group(2)
+    return f"{kind} {tag}" if tag else kind
+
+
 def _walk(node):
     stack = [node]
     while stack:
@@ -140,6 +265,11 @@ _CALLBACK_REGISTER_PATTERNS = re.compile(
     re.I,
 )
 
+# 함수포인터/콜백 관례 이름 — identifier 호출이 이 패턴이면 간접호출 후보로 본다(대상은 known
+# 필터로 최종 판정). 구조적 간접호출((*p)()/obj->h()/tbl[i]())은 이름과 무관하게 잡는다.
+# 'fp'(부동소수/프레임포인터 관례)는 실측상 참양성 0·타 프로젝트 거짓양성 위험만 있어 제외.
+_PTR_CALL_NAME = re.compile(r"(^|_)(pfn|pfunc|cb|callback|handler|hook)\d*(_|$)", re.I)
+
 _STD_LIB_FUNCS = frozenset({
     "printf", "sprintf", "snprintf", "fprintf", "scanf", "sscanf",
     "malloc", "calloc", "realloc", "free",
@@ -149,6 +279,46 @@ _STD_LIB_FUNCS = frozenset({
     "abs", "labs", "fabs", "sqrt", "pow", "log", "exp",
     "assert", "exit", "abort",
 })
+
+# 문/제어 키워드 — function_definition으로 오파싱되는 아티팩트(예: 매크로가 만든 `if(...)`) 방어.
+_C_STMT_KEYWORDS = frozenset({"if", "for", "while", "switch", "return", "sizeof", "do", "else"})
+
+# tree-sitter는 전처리기를 평가하지 않아 #if 0(죽은 코드)·#if 1 분기 본문을 그대로 파싱한다.
+# preprocess=False 경로에서 죽은 코드의 함수 정의가 들어오면 동명 함수가 ASIL resolver/call-tree의
+# last-wins로 활성 정의를 덮어 안전분류(ASIL D→B)·엣지를 왜곡한다 → 비활성 분기 함수를 제외한다.
+_FALSY_COND = frozenset({"0", "0u", "0U", "0ul", "0UL", "(0)", "false", "FALSE"})
+_TRUTHY_COND = frozenset({"1", "1u", "1U", "(1)", "true", "TRUE"})
+
+
+def _dead_function_nodes(root, src: bytes) -> Set[int]:
+    """비활성 전처리 분기의 function_definition 노드 id 집합.
+
+    - `#if 0 … [#else …] #endif` → then-분기(else/elif 이전) 함수는 죽음.
+    - `#if 1 … #else … #endif`   → else/elif(alternative) 분기 함수는 죽음(중첩 서브트리 포함).
+    보수성 원칙: literal 0/1만 판정하고 `#elif` 조건은 평가하지 않는다. 그 결과 `#if 0 / #elif 1 / #else`의
+    도달불가 `#else`, `#if 0 / #elif 0`의 죽은 `#elif`는 **살아남을 수 있다(과대포함)**. 이는 의도된 tradeoff —
+    영향/추적 도구에서 과대포함(죽은 함수 몇 개 더 노출)은 안전 방향이며, 실함수를 숨기거나 지우거나 ASIL을
+    강등하지 않는다(적대 검증 확인). 정밀 pruning이 필요하면 전처리(preprocess=True) 또는 elif 체인 평가를 추가하라.
+    """
+    dead: Set[int] = set()
+    for node in _walk(root):
+        if node.type != "preproc_if":
+            continue
+        cond = node.child_by_field_name("condition")
+        cond_txt = _node_text(src, cond).strip() if cond is not None else ""
+        alt = node.child_by_field_name("alternative")
+        if cond_txt in _FALSY_COND:
+            for ch in node.children:
+                if ch is alt or ch.type in ("preproc_else", "preproc_elif"):
+                    continue  # else/elif(활성 후보)는 살림
+                for d in _walk(ch):
+                    if d.type == "function_definition":
+                        dead.add(d.id)
+        elif cond_txt in _TRUTHY_COND and alt is not None:
+            for d in _walk(alt):
+                if d.type == "function_definition":
+                    dead.add(d.id)
+    return dead
 
 _REGEX_DEF_PAT = re.compile(
     r"^[\t ]*((?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
@@ -197,6 +367,72 @@ def _extract_calls(func_node, src: bytes) -> List[str]:
     return sorted(calls - _STD_LIB_FUNCS)
 
 
+def _extract_func_refs(func_node, src: bytes) -> List[str]:
+    """직접 호출은 아니나 함수를 '참조'하는 지점 — &foo 주소취득 / pfn = foo 대입 /
+    f(..., foo, ...) 인자 전달. call_tree가 known 함수와의 교집합만 엣지로 승격해
+    함수포인터 등록으로 인한 도달성(거짓 루트)을 복원한다. 변수 참조는 known 필터로 탈락."""
+    out: Set[str] = set()
+    body = func_node.child_by_field_name("body")
+    if not body:
+        return []
+    for node in _walk(body):
+        t = node.type
+        if t == "pointer_expression":
+            # &foo(주소취득)만 — *p(역참조)는 제외. 연산자는 첫 자식.
+            if _node_text(src, node).lstrip().startswith("&"):
+                arg = node.child_by_field_name("argument")
+                if arg is not None and arg.type == "identifier":
+                    out.add(arg.text.decode("utf-8", errors="ignore"))
+        elif t == "assignment_expression":
+            right = node.child_by_field_name("right")
+            if right is not None and right.type == "identifier":
+                out.add(right.text.decode("utf-8", errors="ignore"))
+        elif t == "call_expression":
+            args = node.child_by_field_name("arguments")
+            if args is not None:
+                for a in args.children:
+                    if a.type == "identifier":
+                        out.add(a.text.decode("utf-8", errors="ignore"))
+    return sorted(out)
+
+
+def _extract_pointer_calls(func_node, src: bytes) -> List[str]:
+    """함수포인터/콜백을 통한 간접 호출 사이트(대상 미해결) — 정적 콜트리가 대상을 못 잇는 지점.
+    (*p)() 역참조 · obj->h()/obj.h() 멤버 · tbl[i]() 첨자, 그리고 pfn/cb/handler 관례 이름
+    identifier 호출을 수집한다. call_tree가 known으로 해결되는 항목은 제외하고 미해결분만 배지로 노출."""
+    out: Set[str] = set()
+    body = func_node.child_by_field_name("body")
+    if not body:
+        return []
+    for node in _walk(body):
+        if node.type != "call_expression":
+            continue
+        target = node.child_by_field_name("function")
+        if target is None:
+            continue
+        tt = target.type
+        if tt in ("field_expression", "subscript_expression"):
+            out.add(_node_text(src, target).strip())
+        elif tt == "pointer_expression":
+            ident = _find_ident(target)
+            if ident:
+                out.add(ident)
+        elif tt == "parenthesized_expression":
+            # (*pfn)() 역참조만 — (type)(x)/(expr)(x) 캐스트·괄호식은 제외(오탐 방지).
+            inner = next((ch for ch in target.children if ch.type == "pointer_expression"), None)
+            if inner is not None:
+                ident = _find_ident(inner)
+                if ident:
+                    out.add(ident)
+        elif tt == "identifier":
+            nm = target.text.decode("utf-8", errors="ignore")
+            # not isupper(): 전대문자는 함수형 매크로(CALLBACK_HANDLER 등) 관례 → 간접호출 아님.
+            # _extract_calls의 콜백 인자/대입 가드(isupper 제외)와 동일 정책으로 거짓 ⚡배지 방지.
+            if _PTR_CALL_NAME.search(nm) and not nm.isupper():
+                out.add(nm)
+    return sorted(out)
+
+
 def _extract_calls_from_body_text(body_text: str) -> List[str]:
     calls: Set[str] = set()
     for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", str(body_text or "")):
@@ -207,6 +443,45 @@ def _extract_calls_from_body_text(body_text: str) -> List[str]:
             continue
         calls.add(name)
     return sorted(calls)
+
+
+def _is_trailing_comment(text: str, comment_start: int) -> bool:
+    """`/*` 앞에 **같은 줄의 코드**가 있으면 그 주석은 앞 선언에 달린 꼬리 주석이다.
+
+    ⚠ 이걸 안 보면 다음 선언이 **직전 선언의 설명을 가져간다**. 실측(PDS64_RD):
+    전역 선언 809개 중 **411개(50.8%)** 가 그렇게 남의 설명을 달고 있었다 —
+    `REG_PTT` 가 `REG_PPSE` 의 `Port E Polarity Select Register` 를 받는 식으로,
+    MCU 헤더처럼 꼬리 주석으로 적는 파일은 전체가 한 칸씩 밀린다:
+
+        volatile PPSESTR REG_PPSE;   /* Port E Polarity Select Register */  <- 이 주석이
+        volatile PTTSTR  REG_PTT;                                           <- 여기로 갔다
+
+    설계서에 "이 레지스터는 X 다" 를 **틀리게** 적는 것이라 값 부재보다 나쁘다.
+    앞줄 전체가 주석인 정상 leading 주석은 `/*` 앞이 비어 있어 영향받지 않는다
+    (함수 실측 368개 중 정상 353 유지 · 오배치 9만 차단).
+    """
+    line_start = text.rfind("\n", 0, comment_start) + 1
+    return bool(text[line_start:comment_start].strip())
+
+
+def _extract_trailing_comment(src: bytes, end_byte: int) -> str:
+    """선언이 끝난 **같은 줄**에 달린 주석. 없으면 빈 문자열.
+
+    꼬리 주석은 지금까지 통째로 버리던 정보다(PDS64_RD 실측 425개). 위
+    `_is_trailing_comment` 가 남의 것을 차단하면 분모가 비므로 자기 것을 되살린다.
+    """
+    try:
+        rest = src[end_byte:].decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    line = rest.split("\n", 1)[0]
+    m = re.search(r"/\*(.*?)\*/", line, re.S)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"//(.*)$", line)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 
 def _extract_leading_comment(src: bytes, start_byte: int) -> str:
@@ -222,7 +497,7 @@ def _extract_leading_comment(src: bytes, start_byte: int) -> str:
         start_idx = text.rfind("/*", 0, end_idx)
         if start_idx != -1:
             tail = text[end_idx + 2 :].strip()
-            if not tail:
+            if not tail and not _is_trailing_comment(text, start_idx):
                 return text[start_idx + 2 : end_idx].strip()
     # Line comments
     lines = text.splitlines()
@@ -240,6 +515,26 @@ def _extract_leading_comment(src: bytes, start_byte: int) -> str:
     return "\n".join(reversed(collected)).strip()
 
 
+# _parse_comment_fields의 인라인 regex를 모듈 레벨로 승격 — 함수 주석 라인마다 호출돼
+# Python re 캐시(512)를 넘겨 재컴파일 폭주하던 병목(프로파일 실측 ~53s) 제거.
+_RE_NOISE_SEP = re.compile(r"[-=*#_/\\.\s]{4,}")
+_RE_BIT_REGISTERS = re.compile(r"\b\d+\s*-\s*BIT\s+REGISTERS\b", re.I)
+_RE_REGISTERS = re.compile(r"\bREGISTERS?\b", re.I)
+_RE_SEP3 = re.compile(r"[*=-]{3,}")
+_RE_C_BRIEF = re.compile(r"@brief\s+(.*)", re.I)
+_RE_C_DETAILS = re.compile(r"@details?\s+(.*)", re.I)
+_RE_C_ASIL = re.compile(r"\bASIL\b[:\s-]+([A-Za-z0-9-]+)", re.I)
+_RE_C_RELATED = re.compile(r"\bRelated ID\b[:\s]+(.+)", re.I)
+_RE_C_PRECOND = re.compile(r"(?:@pre|Pre-?condition|Precondition|Require(?:ment)?)\b[:\s]+(.+)", re.I)
+_RE_C_PRECOND_KO = re.compile(r"선행조건[:\s]+(.+)")
+_RE_C_RANGE = re.compile(r"\bRange\b[:\s]+(.+)", re.I)
+_RE_C_VALUE_RANGE = re.compile(r"\bValue Range\b[:\s]+(.+)", re.I)
+_RE_C_DESC = re.compile(r"\bDescription\b[:\s]+(.+)", re.I)
+_RE_C_PARAM = re.compile(r"@param\s+(?:\[(?:in|out|in,\s*out)\]\s*)?(\w+)\s*(.*)", re.I)
+_RE_C_RETURN = re.compile(r"@(?:return|retval)\s+(.*)", re.I)
+_RE_C_TAG_SKIP = re.compile(r"@(?:note|see|warning|file|author|date|version|since|deprecated|todo|bug|throws|exception)\b", re.I)
+
+
 def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[Dict[str, str]], str]:
     """Returns (desc, asil, related, precondition, range_text, params, return_desc)."""
     if not comment:
@@ -255,11 +550,11 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         t = (text or "").strip()
         if not t:
             return True
-        if re.fullmatch(r"[-=*#_/\\.\s]{4,}", t):
+        if _RE_NOISE_SEP.fullmatch(t):
             return True
-        if re.search(r"\b\d+\s*-\s*BIT\s+REGISTERS\b", t, flags=re.I):
+        if _RE_BIT_REGISTERS.search(t):
             return True
-        if re.search(r"\bREGISTERS?\b", t, flags=re.I) and re.search(r"[*=-]{3,}", t):
+        if _RE_REGISTERS.search(t) and _RE_SEP3.search(t):
             return True
         return False
     brief_lines: List[str] = []
@@ -269,12 +564,12 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         line = raw.strip().lstrip("*").strip()
         if not line:
             continue
-        m_brief = re.match(r"@brief\s+(.*)", line, flags=re.I)
+        m_brief = _RE_C_BRIEF.match(line)
         if m_brief:
             brief_lines.append(m_brief.group(1).strip())
             in_details = False
             continue
-        m_details = re.match(r"@details?\s+(.*)", line, flags=re.I)
+        m_details = _RE_C_DETAILS.match(line)
         if m_details:
             details_lines.append(m_details.group(1).strip())
             in_details = True
@@ -285,46 +580,46 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         if line.startswith("@"):
             in_details = False
         if not asil:
-            m = re.search(r"\bASIL\b[:\s-]+([A-Za-z0-9-]+)", line, flags=re.I)
+            m = _RE_C_ASIL.search(line)
             if m:
                 asil = m.group(1).strip()
                 continue
         if not related:
-            m = re.search(r"\bRelated ID\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_RELATED.search(line)
             if m:
                 related = m.group(1).strip()
                 continue
         if not precondition:
-            m = re.search(r"(?:@pre|Pre-?condition|Precondition|Require(?:ment)?)\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_PRECOND.search(line)
             if m:
                 precondition = m.group(1).strip()
                 continue
-            m = re.search(r"선행조건[:\s]+(.+)", line)
+            m = _RE_C_PRECOND_KO.search(line)
             if m:
                 precondition = m.group(1).strip()
                 continue
         if not range_text:
-            m = re.search(r"\bRange\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_RANGE.search(line)
             if m:
                 range_text = m.group(1).strip()
                 continue
-            m = re.search(r"\bValue Range\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_VALUE_RANGE.search(line)
             if m:
                 range_text = m.group(1).strip()
                 continue
         if not desc:
-            m = re.search(r"\bDescription\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_DESC.search(line)
             if m:
                 cand = m.group(1).strip()
                 if not _is_noise_desc(cand):
                     desc = cand
                 continue
-        m_param = re.match(r"@param\s+(?:\[(?:in|out|in,\s*out)\]\s*)?(\w+)\s*(.*)", line, flags=re.I)
+        m_param = _RE_C_PARAM.match(line)
         if m_param:
             params.append({"name": m_param.group(1).strip(), "desc": m_param.group(2).strip()})
             in_details = False
             continue
-        m_ret = re.match(r"@(?:return|retval)\s+(.*)", line, flags=re.I)
+        m_ret = _RE_C_RETURN.match(line)
         if m_ret:
             return_desc = m_ret.group(1).strip()
             in_details = False
@@ -332,7 +627,7 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         if not desc:
             if _is_noise_desc(line):
                 continue
-            if re.match(r"@(?:note|see|warning|file|author|date|version|since|deprecated|todo|bug|throws|exception)\b", line, flags=re.I):
+            if _RE_C_TAG_SKIP.match(line):
                 continue
             desc = line
     if not desc and brief_lines:
@@ -363,18 +658,26 @@ def _extract_function_defs(
     root, src: bytes, file_path: str, globals_set: Set[str]
 ) -> List[CFunction]:
     functions: List[CFunction] = []
-    for node in root.children:
-        if node.type != "function_definition":
+    # root.children(직계)만 보면 #if/#ifdef(preproc_if) 안에 감싼 함수 정의를 통째로 놓쳐(이 코드베이스의
+    # 안전 관련 파일 다수) tree-sitter가 0개→전 파일 regex 폴백되던 결함. 전체 트리를 순회해 어느 깊이의
+    # function_definition도 잡는다(C는 함수 중첩 불가 → 중복 처리 없음).
+    # 단 #if 0(죽은 코드) 분기 함수는 제외 — 동명 활성 함수의 ASIL/엣지를 last-wins로 덮는 안전결함 방지.
+    dead = _dead_function_nodes(root, src)
+    for node in _walk(root):
+        if node.type != "function_definition" or node.id in dead:
             continue
         decl = node.child_by_field_name("declarator")
         decl_text = _node_text(src, decl) if decl else ""
         name = _find_ident(decl) if decl else None
-        if not name:
+        if not name or name in _C_STMT_KEYWORDS:
+            # 매크로/K&R 등으로 `if(...)`가 function_definition으로 오파싱되는 아티팩트 방어(regex 폴백과 동일 정책).
             continue
         prefix = _node_text(src, node.child_by_field_name("type")) or ""
         is_static = "static" in prefix
         signature = (prefix + " " + decl_text).strip()
         calls = _extract_calls(node, src)
+        func_refs = _extract_func_refs(node, src)
+        pointer_calls = _extract_pointer_calls(node, src)
         used_globals: Set[str] = set()
         body = node.child_by_field_name("body")
         body_text = _node_text(src, body) if body else ""
@@ -404,6 +707,8 @@ def _extract_function_defs(
                 body_text=body_text,
                 comment_params=c_params or None,
                 comment_return=c_return,
+                func_refs=func_refs,
+                pointer_calls=pointer_calls,
             )
         )
     return functions
@@ -419,7 +724,21 @@ def _extract_function_defs_regex_fallback(
     functions: List[CFunction] = []
     keywords = {"if", "for", "while", "switch", "return", "sizeof"}
     text_bytes = text.encode("utf-8", errors="ignore")
-    for match in _REGEX_DEF_PAT.finditer(text):
+    # ⚠ **주석 안에서 함수를 찾지 않는다.** Processor Expert 가 만든 `Generated_Code/*.c`
+    #   는 매크로로 구현된 접근자의 프로토타입을 주석에 남긴다:
+    #       /*
+    #       bool PS3_MOTOR_NSCS_GetVal(void)
+    #       **  This method is implemented as a macro. See ....h file.  **
+    #       */
+    #   tree-sitter 는 이 파일을 "함수 0개" 로 **정확히** 읽는데, 그러면 호출부의
+    #   `if not funcs:` 가 이 폴백을 돌려 정규식이 주석을 훑고 **없는 함수를 만들어냈다**.
+    #   파라미터 `[^;]*?` 가 주석 경계를 넘어 다음 함수의 `{` 까지 먹어 시그니처가 통째로
+    #   오염되기까지 했다. 정본 SUTS 엔 이 접근자들이 하나도 없다 — 존재하지 않는 함수의
+    #   시험 케이스를 만들고 있었다는 뜻이다.
+    #   ⚠ 매칭용 텍스트만 가린다. 본문·주석 추출은 원문(`text`/`text_bytes`)에서 하며,
+    #     `_blank_c_comments` 가 **길이를 유지**하므로 오프셋이 어긋나지 않는다.
+    scan_text = blank_c_comments(text)
+    for match in _REGEX_DEF_PAT.finditer(scan_text):
         prefix = str(match.group(1) or "").strip()
         name = str(match.group(2) or "").strip()
         params = " ".join(str(match.group(3) or "").replace("\n", " ").split())
@@ -477,7 +796,7 @@ def _extract_globals(root, src: bytes) -> List[str]:
         # Skip function prototypes/declarations at global scope.
         if "(" in decl_text and ")" in decl_text:
             continue
-        name = _find_ident(node) or ""
+        name = _decl_ident(node)
         if name and name not in globals_list:
             globals_list.append(name)
     return globals_list
@@ -489,7 +808,8 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
         if node.type != "declaration":
             continue
         type_node = node.child_by_field_name("type")
-        type_text = _node_text(src, type_node).strip() if type_node else ""
+        # ⚠ 익명 집합체는 본문이 통째로 들어온다 — 타입 *이름* 으로 줄인다.
+        type_text = _normalize_type_text(_node_text(src, type_node)) if type_node else ""
         decl_text = _node_text(src, node)
         # Skip function declarations/prototypes and function pointer typedef-like declarations.
         if "(" in decl_text and ")" in decl_text:
@@ -497,11 +817,19 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
         range_text = ""
         range_source = ""
         if decl_text:
-            m = re.search(r"(0x[0-9A-Fa-f]+|\\d+)\\s*~\\s*(0x[0-9A-Fa-f]+|\\d+)", decl_text)
+            # ⚠ 이 정규식은 `\\d`·`\\s` 로 적혀 있었다. raw string 안의 `\\` 는 **리터럴
+            #   백슬래시**라 C 소스에는 결코 없는 문자를 요구했고, `range_source="decl"`
+            #   은 한 번도 발화한 적이 없다. (PDS64_RD 에서는 고쳐도 0건 — 이 소스는
+            #   선언문에 범위를 적지 않는다. 범위를 적는 소스에서 침묵하던 결함이다.)
+            m = re.search(r"(0x[0-9A-Fa-f]+|\d+)\s*~\s*(0x[0-9A-Fa-f]+|\d+)", decl_text)
             if m:
                 range_text = f"{m.group(1)} ~ {m.group(2)}"
                 range_source = "decl"
-        comment = _extract_leading_comment(src, node.start_byte)
+        # ⚠ 자기 **꼬리** 주석이 먼저다. MCU 헤더처럼 `U8 x;  /* 설명 */` 형식이면
+        #   앞 주석 자리엔 직전 선언의 꼬리 주석밖에 없다(`_is_trailing_comment`).
+        comment = _extract_trailing_comment(src, node.end_byte) or _extract_leading_comment(
+            src, node.start_byte
+        )
         desc_text = ""
         if comment:
             dtext, _, _, _, rtext, _, _ = _parse_comment_fields(comment)
@@ -534,7 +862,7 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
                 }
             )
         if not handled:
-            name = _find_ident(node) or ""
+            name = _decl_ident(node)
             if name:
                 results.append(
                     {
@@ -551,6 +879,51 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
     return results
 
 
+def _make_parser():
+    """tree_sitter 버전차/capsule 1회성 소비 함정을 흡수하는 견고한 파서 생성.
+
+    구버전 API `Parser.set_language`는 최신 tree_sitter에서 제거됐는데, 실패한 set_language 호출이
+    c_language() capsule을 소비해 이후 `Language(capsule)`이 '빈 문법'이 되는 함정이 있다 — 파싱은
+    되나 function_definition 0개가 되어 전 파일이 조용히 regex 폴백되고, 엔진은 import 유무만 보고
+    'tree-sitter'로 오표기됐다(정밀 엔진이 실제로는 regex였음). 시도마다 capsule을 새로 얻고, 실제
+    C 스니펫에서 function_definition이 나오는지 검증한 뒤 반환한다. 모두 실패하면 None(→regex 폴백)."""
+    if Parser is None or c_language is None:
+        return None
+
+    def _valid(p) -> bool:
+        try:
+            t = p.parse(b"int _ts_probe(void){return 0;}")
+            return any(n.type == "function_definition" for n in _walk(t.root_node))
+        except Exception:
+            return False
+
+    if Language is not None:
+        # 1) 최신 권장: Parser(Language(capsule))
+        try:
+            p = Parser(Language(c_language()))
+            if _valid(p):
+                return p
+        except Exception:
+            pass
+        # 2) .language 속성 대입(중간 버전)
+        try:
+            p = Parser()
+            p.language = Language(c_language())
+            if _valid(p):
+                return p
+        except Exception:
+            pass
+    # 3) 구버전: set_language(capsule)
+    try:
+        p = Parser()
+        p.set_language(c_language())
+        if _valid(p):
+            return p
+    except Exception:
+        pass
+    return None
+
+
 def parse_c_project(
     source_root: str,
     *,
@@ -559,27 +932,17 @@ def parse_c_project(
     include_dirs: Optional[List[str]] = None,
     defines: Optional[List[str]] = None,
     cpp_path: str = "gcc",
-) -> Dict[str, List[Dict[str, any]]]:
+) -> Dict[str, object]:
     root = Path(source_root).resolve()
     if not root.exists():
         return {"functions": [], "globals": [], "scanned": []}
     allowed = {".c", ".h", ".cpp", ".hpp"}
-    functions: List[Dict[str, any]] = []
+    functions: List[Dict[str, object]] = []
     globals_list: Set[str] = set()
     globals_detailed: List[Dict[str, str]] = []
     scanned: List[str] = []
     preprocess_stats: Dict[str, int] = {"gcc": 0, "clang": 0, "no-preprocess": 0}
-    parser = None
-    if Parser is not None and c_language is not None:
-        parser = Parser()
-        lang = c_language()
-        try:
-            parser.set_language(lang)
-        except Exception:
-            if Language is not None:
-                parser.language = Language(lang)
-            else:
-                raise
+    parser = _make_parser()
     count = 0
     for dirpath, _, filenames in os.walk(root):
         for name in filenames:
@@ -614,6 +977,7 @@ def parse_c_project(
                 raw_text = ""
             file_globals: Set[str] = set()
             funcs: List[CFunction] = []
+            root_node = None
             if parser is not None:
                 tree = parser.parse(data)
                 root_node = tree.root_node
@@ -635,12 +999,13 @@ def parse_c_project(
                         "comment_related": f.comment_related,
                         "comment_precondition": f.comment_precondition,
                         "body": f.body_text,
+                        "func_refs": f.func_refs or [],
+                        "pointer_calls": f.pointer_calls or [],
                     }
                 )
-            if parser is not None:
-                tree = parser.parse(data)
-                root_node = tree.root_node
-                for g in _extract_globals(root_node, data):
+            if root_node is not None:
+                # 776에서 이미 파싱한 root_node 재사용(재파싱 제거). file_globals도 778 결과 재사용.
+                for g in file_globals:
                     if not g:
                         continue
                     globals_list.add(g)
@@ -662,4 +1027,6 @@ def parse_c_project(
         "globals_detailed": globals_detailed,
         "scanned": scanned,
         "preprocess_stats": preprocess_stats,
+        # 실제 파서 성공 여부를 정직하게 노출 — import 유무가 아니라 검증된 tree-sitter 파서인지.
+        "parser_engine": "tree-sitter" if parser is not None else "regex-fallback",
     }

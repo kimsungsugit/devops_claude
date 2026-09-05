@@ -1,22 +1,25 @@
 """report_gen.function_analyzer - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
-import csv
 import logging
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
+from report_gen.c_return import returns_value
+from report_gen.provenance import is_weak_source
+
+# ⚠ 반대 방향(`source_parser` → 여기)은 함수 안에서만 부른다(`# lazy: circular dep`).
+#    이쪽은 모듈 수준으로 둬도 순환하지 않는다 — `source_parser` 는 import 시점에
+#    `function_analyzer` 를 건드리지 않는다.
+from report_gen.source_parser import resolve_struct_member
 from report_gen.utils import (
+    _dedupe_multiline_text,
+    _extract_call_names,
+    _normalize_asil_value,
+    _normalize_call_field,
     _normalize_related_ids,
     _normalize_swufn_id,
-    _extract_call_names,
-    _normalize_call_field,
-    _dedupe_multiline_text,
-    _normalize_asil_value,
 )
+from workflow.code_parser.c_parser import blank_c_comments, c_identifiers
 
 _logger = logging.getLogger("report_generator")
 
@@ -72,6 +75,20 @@ def _extract_param_symbol(param_text: str) -> str:
 
 
 def _parse_signature_params(signature: str, tag_direction: bool = False) -> List[str]:
+    # ⚠ **주석부터 지운다.** LIN 스택처럼 파라미터마다 앞에 설명 주석을 다는 코드가 있다:
+    #       void lin_lld_sci_rx_response(
+    #           /* [IN] Length of response data expect to wait */
+    #           l_u8 msg_length )
+    #   주석을 남기면 세 곳이 동시에 망가진다(실측 2026-08-12, KJPDS02 23개 unit):
+    #     1. 주석이 `_split_param` 의 **타입 문자열**로 들어가 파라미터 엔트리가
+    #        `/* [IN] Length … */ l_u8 msg_length` 가 된다 → 소비처(`generators/suts.py`)
+    #        가 "선언이 아님" 으로 통째로 버려 **입력 열이 빈다**
+    #     2. `pointer_range = "*" in ptype` 이 주석의 `/*` 를 포인터로 읽어 포인터가
+    #        아닌 `l_u8` 에 `(range: 0x0 ~ 0xFFFFFFFF)` 를 붙인다 — **없는 근거**다
+    #     3. 주석 안의 콤마에서 `_split_signature_param_chunks` 가 쪼개
+    #        파라미터 하나가 **둘로 찢어진다**(`lin_tl_make_slaveres_pdu` 실측)
+    #   길이 보존 blank 라 아래 공백 정규화가 그대로 흡수한다.
+    signature = blank_c_comments(signature)
     if not signature or "(" not in signature or ")" not in signature:
         return []
     params = signature.split("(", 1)[1].rsplit(")", 1)[0].strip()
@@ -112,11 +129,36 @@ def _strip_comments_and_strings(text: str) -> str:
     return text
 
 
+# 이 프로젝트(MISRA-C)는 상수를 **캐스트 + 정수 접미사**로 감싼다:
+#   #define u8s_FIT_MAX_BUFFER  ( ( U8 )( 9U ) )      #define TEMP_LUT_SIZE (5U)
+#   #define SHA256_DIGEST_SIZE  ( U8 )32U             #define PWM_CHANNEL_COUNT 2U
+# 아래 화이트리스트는 `U`·`L` 을 불허하므로 이런 값은 통째로 안 접히고 **배열 크기가
+# 조용히 사라진다**. 실측(KJPDS02): 배열 차원에 쓰인 매크로 13종이 **전부** 이 형태다.
+_INT_SUFFIX_RE = re.compile(r"\b(0[xX][0-9a-fA-F]+|\d+)[uUlL]+\b")
+# ⚠ 캐스트는 **뒤에 피연산자가 붙을 때만** 캐스트다. `(UNKNOWN) + 3` 의 괄호까지 지우면
+#   남은 `+ 3` 이 3 으로 평가돼 **모르는 값을 3 이라고 지어낸다**. 그래서 lookahead 로
+#   `(` 나 숫자가 바로 뒤따를 때만 벗긴다.
+_C_CAST_RE = re.compile(
+    r"\(\s*(?:const|volatile|signed|unsigned)?\s*[A-Za-z_]\w*\s*\**\s*\)\s*(?=[(\d])"
+)
+
+
+def _strip_c_literal_noise(expr: str) -> str:
+    """`( ( U8 )( 9U ) )` → `(  ( 9 ) )`. 캐스트는 중첩될 수 있어 반복한다(상한 4)."""
+    out = _INT_SUFFIX_RE.sub(r"\1", str(expr or ""))
+    for _ in range(4):
+        nxt = _C_CAST_RE.sub(" ", out)
+        if nxt == out:
+            break
+        out = nxt
+    return out
+
+
 def _safe_eval_int(expr: str) -> Optional[int]:
     if not expr:
         return None
     try:
-        expr = expr.strip()
+        expr = _strip_c_literal_noise(expr.strip())
         if not re.match(r"^[0-9xXa-fA-F\+\-\*/\(\)\s]+$", expr):
             return None
         return int(eval(expr, {"__builtins__": {}}, {}))
@@ -124,18 +166,49 @@ def _safe_eval_int(expr: str) -> Optional[int]:
         return None
 
 
+def _subst_macros(raw: str, macro_map: Dict[str, str], depth: int = 4) -> str:
+    """식에 **실제로 나타난** 식별자만 치환하고, 값이 또 매크로면 반복한다.
+
+    ⚠ 예전엔 매크로 맵 **전체**를 돌며 매번 `re.sub` 했다(KJPDS02 는 5,622개) —
+      느린 데다 **한 번만** 돌아서 `#define A (B + 10u)` 처럼 값 안에 또 매크로가
+      든 경우를 못 접었다.
+    """
+    for _ in range(depth):
+        # ⚠ `set` 순회 순서는 실행마다 달라진다. 어떤 매크로 값이 같은 라운드의 다른
+        #   매크로 이름을 품고 있으면 치환 순서가 결과를 바꿔 **산출물이 실행마다
+        #   달라진다**(캐시 시그니처가 무의미해진다). 정렬해 고정한다.
+        hits = sorted(n for n in set(re.findall(r"\b[A-Za-z_]\w*\b", raw))
+                      if macro_map.get(n))
+        if not hits:
+            break
+        for n in hits:
+            raw = re.sub(rf"\b{re.escape(n)}\b", str(macro_map[n]), raw)
+    return raw
+
+
 def _normalize_bracket_expr(expr: str, macro_map: Dict[str, str]) -> Tuple[str, Optional[int]]:
     raw = (expr or "").strip()
     if not raw:
         return "", None
-    for name, val in macro_map.items():
-        if not name or not val:
-            continue
-        raw = re.sub(rf"\b{re.escape(name)}\b", val, raw)
+    raw = _subst_macros(raw, macro_map)
     val = _safe_eval_int(raw)
     if val is not None:
         return str(val), val
     return raw, None
+
+
+# 선언 첨자는 여러 개일 수 있다(`[5][7][7]`). 통짜로 접으면 `[3][4]` 가 `3][4` 가 돼
+# `_safe_eval_int` 도 실패하고 `isdigit()` 도 거짓이라 **조용히 크기가 사라진다**.
+_DIM_RE = re.compile(r"\[([^\]]*)\]")
+
+
+def _normalize_dims(dims: str, macro_map: Dict[str, str]) -> List[str]:
+    """`[A][B]` → `['9', '8']`. 각 차원을 **따로** 접는다. 브래킷이 없으면 통째로 한 차원."""
+    raw = str(dims or "").strip()
+    if not raw:
+        return []
+    found = _DIM_RE.findall(raw) or [raw]
+    return [_normalize_bracket_expr(d, macro_map)[0] for d in found]
 
 
 def _split_param(param: str) -> Tuple[str, str, str]:
@@ -143,7 +216,12 @@ def _split_param(param: str) -> Tuple[str, str, str]:
     if not text:
         return "", "", ""
     array_part = ""
-    m = re.search(r"(\[[^\]]+\])\s*$", text)
+    # ⚠ 첨자는 **여러 개**(`[3][4]`)일 수도, **비어 있을**(`U8 data[]`) 수도 있다.
+    #   하나·비지 않음으로 가정하면 남은 텍스트가 `]` 로 끝나 아래 이름 정규식이
+    #   실패하고 **이름이 통째로 타입 쪽으로 넘어간다**(`S16 t[3][4]` → 이름 ''·
+    #   타입 'S16 t[3]' → 표기 `S16 t[3] [4]`). 이름이 없으면 소비처가 그 변수를
+    #   식별할 수 없다.
+    m = re.search(r"((?:\[[^\]]*\])+)\s*$", text)
     if m:
         array_part = m.group(1)
         text = text[: m.start()].strip()
@@ -156,84 +234,136 @@ def _split_param(param: str) -> Tuple[str, str, str]:
     return type_text, name, array_part
 
 
+# 변수 이름 **뒤에** 올 수 있는 접근자 꼬리(`.f` · `->f` · `[i]`, 섞여서 반복).
+# ⚠ **첨자를 반드시 포함해야 한다.** 없으면 `arr[i] = f(i);` 가 대입으로 안 잡히고
+#   맨 아래 "이름이 보이면 읽기" 분기로 떨어져 **쓰기 전용 배열이 시험 입력이 된다**.
+#   실측(2026-08-12, KJPDS02): EEPROM read 계열
+#   `u8g_SysEepromCtrl_ProdDateInfo[u8t_Idx] = u8g_…_ReadProdDate((U16)u8t_Idx);` 4건이
+#   정본엔 입력 0개인데 우리는 입력으로 냈다.
+_ACCESS_TAIL = r"(?:\s*(?:->|\.)\s*\w+|\s*\[[^\]]*\])*"
+
+# 멤버 접근 체인(`.a.b.c` · `->a->b`). **1회 이상** 반복이라 잎까지 문다.
+# ⚠ 첨자는 일부러 뺐다 — `arr[u8t_Idx].f` 를 이름으로 삼으면 지역 인덱스 변수가 문서에
+#   실린다. 첨자가 나오면 그 앞까지만 잡히고(현행과 동일) 원소 축은 배열 확장이 맡는다.
+_MEMBER_CHAIN_RE = r"(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+"
+
+
+def _new_usage_slot() -> Dict[str, Any]:
+    return {
+        "lhs": False,
+        "rhs": False,
+        "inout": False,
+        "lhs_idx": None,
+        "rhs_idx": None,
+        "members": set(),
+        "indexes": set(),
+        "divisor": False,
+    }
+
+
+def _scan_name_usage(lines: List[str], name: str, u: Dict[str, Any]) -> None:
+    """한 이름의 읽기/쓰기 방향을 라인 스캔으로 채운다.
+
+    ⚠ 전역 이름과 **매크로 이름**이 반드시 같은 판정을 쓰도록 단일 출처로 뺐다.
+      예전엔 매크로 경로가 판정을 복제하지 않고 `rhs = True` 를 **무조건** 세웠다.
+      그래서 `PTAD_PTADL4 = big_RESET;` 처럼 **쓰기만 하는 레지스터**가 읽기로
+      기록되고, 이어서 `_written` 이 `inout` 까지 세워 시험 **입력**으로 올라갔다.
+      실측(2026-08-12, KJPDS02): 읽기 캡을 풀어 매크로가 3.2배로 늘자 이 결함이
+      그대로 확대돼 "정본은 입력 0개인데 우리는 값을 낸" unit 이 34 → 44 로 늘었다.
+    """
+    for idx, line in enumerate(lines):
+        if not line.strip() or name not in line:
+            continue
+        # ⚠ 멤버 경로는 **한 단계로 끝나지 않는다**. `_FSTAT.Bits.CCIF` 를 한 링크만 잡으면
+        #   `_FSTAT.Bits`(= 존재하지 않는 잎)가 되어 정본과 영영 안 맞는다. 체인을 끝까지 문다.
+        #   실측(KJPDS02 .c): 직접 표기 2단 이상은 `PS.Add.DWord`·`t_Line.decel.*` 등 소수다
+        #   — 이 프로젝트의 레지스터 경로는 매크로 경로(아래 `_expansions`)로 들어온다.
+        for m in re.finditer(rf"\b{re.escape(name)}\b({_MEMBER_CHAIN_RE})", line):
+            u["members"].add(re.sub(r"\s+", "", f"{name}{m.group(1)}"))
+        for m in re.finditer(rf"\b{re.escape(name)}\b\s*\[\s*([^\]]+)\s*\]", line):
+            u["indexes"].add(m.group(1).strip())
+        if re.search(rf"/\s*\(?\s*\b{re.escape(name)}\b", line):
+            u["divisor"] = True
+        if re.search(
+            rf"(\+\+|--)\s*\b{re.escape(name)}\b"
+            rf"|\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+\+|--)",
+            line,
+        ):
+            u["lhs"] = True
+            u["rhs"] = True
+            u["inout"] = True
+            continue
+        if re.search(
+            rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*(\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)",
+            line,
+        ):
+            u["lhs"] = True
+            u["rhs"] = True
+            u["inout"] = True
+            continue
+        m_assign = re.search(rf"\b{re.escape(name)}\b{_ACCESS_TAIL}\s*=(?!=)", line)
+        if m_assign:
+            u["lhs"] = True
+            if u["lhs_idx"] is None:
+                u["lhs_idx"] = idx
+            rhs = line[m_assign.end():]
+            if re.search(rf"\b{re.escape(name)}\b", rhs):
+                u["rhs"] = True
+                u["inout"] = True
+            continue
+        if re.search(rf"\b{re.escape(name)}\b", line):
+            u["rhs"] = True
+            if u["rhs_idx"] is None:
+                u["rhs_idx"] = idx
+
+
 def _collect_var_usage(
     body_text: str,
     var_names: List[str],
     macro_globals: Dict[str, List[str]] | None = None,
+    macro_expansions: Dict[str, str] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    usage: Dict[str, Dict[str, Any]] = {
-        n: {
-            "lhs": False,
-            "rhs": False,
-            "inout": False,
-            "lhs_idx": None,
-            "rhs_idx": None,
-            "members": set(),
-            "indexes": set(),
-            "divisor": False,
-        }
-        for n in var_names
-    }
+    usage: Dict[str, Dict[str, Any]] = {n: _new_usage_slot() for n in var_names}
     if not body_text or not var_names:
         return usage
     text = _strip_comments_and_strings(body_text)
     lines = text.splitlines()
     if macro_globals:
+        _expansions = macro_expansions or {}
+        # 본문을 **한 번만** 토큰화한다. 매크로 이름은 항상 식별자라 `\bNAME\b` 검색과
+        # 토큰 멤버십이 동치인데, 비용은 O(매크로) 정규식 vs O(1) 조회로 갈린다.
+        # ⚠ 이게 없으면 읽기 캡 해제가 그대로 폭탄이 된다 — 매크로 맵이 3.2배로 늘고
+        #   이 루프는 **함수마다** 도므로 1,157함수 × 10,000매크로 = 1,160만 회
+        #   재컴파일이다(re 캐시 512개라 전부 미스). 실측 파싱이 4.5분에서 수십 분이 된다.
+        _body_toks = set(c_identifiers(text))
         for m_name, globals_list in macro_globals.items():
             if not m_name or not globals_list:
                 continue
-            if re.search(rf"\b{re.escape(m_name)}\b", text):
-                for g in globals_list:
-                    if g in usage:
-                        usage[g]["rhs"] = True
-                        if usage[g]["rhs_idx"] is None:
-                            usage[g]["rhs_idx"] = -1
-    for idx, line in enumerate(lines):
-        if not line.strip():
-            continue
-        for name in var_names:
-            if name not in line:
+            if m_name not in _body_toks:
                 continue
-            u = usage[name]
-            for m in re.finditer(rf"\b{re.escape(name)}\b\s*(->|\.)\s*([A-Za-z_]\w*)", line):
-                u["members"].add(f"{name}{m.group(1)}{m.group(2)}")
-            for m in re.finditer(rf"\b{re.escape(name)}\b\s*\[\s*([^\]]+)\s*\]", line):
-                u["indexes"].add(m.group(1).strip())
-            if re.search(rf"/\s*\(?\s*\b{re.escape(name)}\b", line):
-                u["divisor"] = True
-            if re.search(
-                rf"(\+\+|--)\s*\b{re.escape(name)}\b|\b{re.escape(name)}\b\s*(\+\+|--)",
-                line,
-            ):
-                u["lhs"] = True
-                u["rhs"] = True
-                u["inout"] = True
-                continue
-            if re.search(
-                rf"\b{re.escape(name)}\b(?:\s*(?:->|\.)\s*\w+)?\s*(\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)",
-                line,
-            ):
-                u["lhs"] = True
-                u["rhs"] = True
-                u["inout"] = True
-                continue
-            m_assign = re.search(
-                rf"\b{re.escape(name)}\b(?:\s*(?:->|\.)\s*\w+)?\s*=(?!=)",
-                line,
-            )
-            if m_assign:
-                u["lhs"] = True
-                if u["lhs_idx"] is None:
-                    u["lhs_idx"] = idx
-                rhs = line[m_assign.end() :]
-                if re.search(rf"\b{re.escape(name)}\b", rhs):
-                    u["rhs"] = True
-                    u["inout"] = True
-                continue
-            if re.search(rf"\b{re.escape(name)}\b", line):
-                u["rhs"] = True
-                if u["rhs_idx"] is None:
-                    u["rhs_idx"] = idx
+            # 본문엔 매크로 이름만 있으므로 아래 전역 라인 스캔은 이 사용을 **절대**
+            # 못 본다(`PTT_PTT3 = big_RESET;`). 매크로 이름으로 같은 스캔을 돌려
+            # 방향을 구한 뒤, 그 방향을 전역에 합류시킨다.
+            mu = _new_usage_slot()
+            _scan_name_usage(lines, m_name, mu)
+            for g in globals_list:
+                if g not in usage:
+                    continue
+                u = usage[g]
+                # ⚠ **방향 축만** 합류시킨다. members/indexes 는 매크로 이름 기준이라
+                #   (`RXBUF0.foo`) 전역 경로로 쓸 수 없다 — 전역 쪽 이름은 아래 확장형이 준다.
+                for k in ("lhs", "rhs", "inout"):
+                    u[k] = bool(u[k]) or bool(mu[k])
+                for k in ("lhs_idx", "rhs_idx"):
+                    if u[k] is None and mu[k] is not None:
+                        u[k] = mu[k]
+                # 매크로 확장형을 멤버 경로로 등록한다. 이게 없으면 이름이 base 로만 남아
+                # `_PTT` 가 되는데, 정본은 비트 필드까지 적는다(`_PTT.Bits.PTT3`).
+                exp = str(_expansions.get(m_name) or "").strip()
+                if exp and exp != g and re.match(rf"^{re.escape(g)}\s*(?:\.|->|\[)", exp):
+                    u["members"].add(re.sub(r"\s+", "", exp))
+    for name in var_names:
+        _scan_name_usage(lines, name, usage[name])
     for u in usage.values():
         if u["inout"]:
             continue
@@ -677,12 +807,28 @@ def _format_param_entry(
     macro_map: Dict[str, str],
     pointer_range: bool,
     divisor: bool = False,
+    *,
+    size_hint: str = "",
 ) -> str:
+    """엔트리 표시 문자열. 꼬리는 **이름 뒤에만** 붙는다.
+
+    `size_hint` 는 **전역**의 선언 배열 차원(`[60]`)이다. 파라미터는 `array_part` 로
+    이미 `buf[10]` 을 만들지만 전역엔 그 자리가 없어, 정본이 원소 단위로 펼쳐 적는
+    배열(입력 엔트리의 50.3%)의 크기를 소비처(`generators/suts.py`)가 알 방법이
+    없었다. `(size: N)` 꼬리로 실어 보낸다 — 꼬리 목록은 `_PARAM_ANNOT_KEYS` 단일 출처.
+    """
     display = name
     if array_part:
-        expr = array_part.strip()[1:-1]
-        norm, _ = _normalize_bracket_expr(expr, macro_map)
-        display = f"{display}[{norm}]" if norm else display
+        dims = _normalize_dims(array_part, macro_map)
+        if dims and all(dims):
+            display = display + "".join(f"[{d}]" for d in dims)
+    if size_hint:
+        dims = _normalize_dims(size_hint, macro_map)
+        # 숫자로 접힌 것만 싣는다. `[MAX_LEN]` 처럼 못 접은 값을 실으면 소비처가
+        # 원소 개수를 알 수 없어 **확장을 조용히 건너뛴다** — 그건 크기가 없는 것과 같다.
+        # 다차원은 `9x8` 로 싣는다(차원을 곱해 버리면 소비처가 `[i][j]` 를 못 만든다).
+        if dims and all(d.isdigit() for d in dims):
+            display = f"{display} (size: {'x'.join(dims)})"
     if index_values:
         display = f"{display} (idx: {', '.join(index_values)})"
     if pointer_range:
@@ -722,7 +868,7 @@ def _parse_signature_outputs(signature: str, func_name: str) -> List[str]:
         head = signature.split(func_name, 1)[0] if func_name and func_name in signature else signature
         head = re.sub(r"\b(static|extern|inline)\b", "", head).strip()
         head = " ".join(head.split())
-        if head and "void" not in head:
+        if returns_value(head):
             outputs.append(f"[OUT] return {head}")
     for param in _parse_signature_params(signature):
         param_norm = " ".join(param.split())
@@ -789,6 +935,48 @@ def _fallback_function_description(
     return f"{name}: {context} 모듈에서 {action}."
 
 
+# LLM 이 **작업을 거절한 문장**. 설명이 아니라 거절이므로 어떤 출처 등급으로도
+# 산출물에 실리면 안 된다.
+#
+# ⚠ `_GENERIC_DESC_PATTERNS`(아래)와 **다른 축**이다. 그쪽은 "내용이 없는 상투구" 라
+#   더 나은 문구로 **보강**하면 되지만, 거절문은 보강 대상이 아니라 **거부** 대상이다.
+#   실제로 `_is_generic_description("I'm sorry, I cannot generate a description…")`
+#   은 `False` 를 돌려준다 — 상투구 목록으로는 안 잡힌다(실측).
+#
+# 출처: 삭제한 `workflow/ai_validator.py::validate_llm_response` 의 `banned_patterns`.
+# 그 모듈은 프로덕션 호출자가 0이라 **한 번도 발화한 적이 없었고**(§6 후보 10), 6개
+# 공개 API 중 4개는 live 구현과 중복이었다. 중복이 아닌 유일한 검사가 이것이라
+# 여기로 옮기고 나머지는 지웠다. ⚠ 같이 있던 `min_length=20` 은 **가져오지 않았다** —
+# 실사용 채택 기준이 `len > 5`(1패스)/`len > 10`(2패스)라, 20자로 올리면 6~20자
+# 정상 한국어 설명이 새로 거절된다.
+_LLM_REFUSAL_PATTERNS = (
+    "as an ai",
+    "i'm sorry",
+    "i am sorry",
+    "i cannot",
+    "i can't",
+    "죄송합니다",
+    "제공할 수 없습니다",
+    "생성할 수 없습니다",
+    "답변할 수 없습니다",
+)
+
+
+def is_llm_refusal(text: Any) -> bool:
+    """LLM 이 거절한 문장인가 — **판정 단일 출처**.
+
+    소비처 둘이 리터럴로 각자 적으면 이 저장소가 네 번 겪은 "복제 → 한쪽만 고쳐짐" 이
+    된다:
+      - `workflow/uds_ai.py::_process_batch`  AI 설명 **채택 관문**
+      - `report_gen/function_analyzer.py::_finalize_function_fields`
+        `trusted_desc` 화이트리스트가 `"ai"` 를 내용검사에서 면제하던 자리
+    """
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(p in lowered for p in _LLM_REFUSAL_PATTERNS)
+
+
 _GENERIC_DESC_PATTERNS = [
     "auto-generated from",
     "함수의 동작을 수행한다",
@@ -842,7 +1030,7 @@ def _classify_description_quality(
         return "high"
     if _is_generic_description(s):
         return "low"
-    if src in {"inference", "module_inherit", "default", "rule", ""}:
+    if is_weak_source(src):
         if len(s) > 30:
             return "medium"
         return "low"
@@ -993,6 +1181,23 @@ def _finalize_function_fields(info: Dict[str, Any]) -> Dict[str, Any]:
     name_text = str(out.get("name") or "").strip()
     desc_raw = str(out.get("description") or "").strip()
     desc_source = str(out.get("description_source") or "").strip().lower()
+    # ⚠ **거절문은 설명이 아니다** — 값이 없는 것과 같이 취급한다(§6 후보 10).
+    #    신뢰 출처(`ai`/`comment`/`sds`/`reference`)는 아래에서 내용검사를 **면제**받아
+    #    원문 그대로 통과하므로, 여기서 비우지 않으면 "I'm sorry, I cannot generate…"
+    #    같은 문장이 납품 UDS 의 설명 칸에 그대로 실린다.
+    #    ⚠ `trusted_desc = … and not is_llm_refusal(…)` 만으로는 **부족했다**: else 분기의
+    #      `_enhance_description_text` 는 상투구가 아닌 텍스트를 그대로 돌려주고
+    #      `_is_generic_description(거절문)` 은 False 라, 거절문이 살아남는다(실측).
+    #      값을 비워 폴백 생성으로 보내야 한다.
+    if desc_raw and is_llm_refusal(desc_raw):
+        _logger.warning(
+            "함수 %s 의 설명이 모델 거절문이라 채택하지 않는다(출처=%s): %.60s",
+            name_text or "?", desc_source or "-", desc_raw,
+        )
+        desc_raw = ""
+        desc_source = ""
+        out["description"] = ""
+        out["description_source"] = ""
     trusted_desc = desc_source in {"ai", "comment", "sds", "reference"}
     if not desc_raw:
         desc_raw = _fallback_function_description(
@@ -1016,10 +1221,15 @@ def _finalize_function_fields(info: Dict[str, Any]) -> Dict[str, Any]:
             )
             out["description_source"] = out.get("description_source") or "inference"
         out["description"] = desc_enhanced
-    if not str(out.get("asil") or "").strip():
-        out["asil"] = "QM"
-        out["asil_source"] = out.get("asil_source") or "default"
-    out["asil"] = _normalize_asil_value(str(out.get("asil") or ""))
+    # ⚠ 예전엔 `if not asil: asil="QM"; asil_source="default"` 였다. 지웠다 —
+    #   근거의 부재를 등급 주장으로 바꾸지 않는다(`docx_builder._inherit_module_asil` 참조).
+    # ⚠ 정규화 결과를 **무조건 대입**하던 것도 고쳤다. `_normalize_asil_value` 는
+    #   `"TBD"`/`"N/A"`/`"-"` 를 빈 문자열로 접는다(계약: `tests/unit/test_report_gen.py:79`).
+    #   순위 비교(`requirements.py:2237`)에선 그게 맞지만, 값 칸에 그대로 대입하면
+    #   **"미정"(TBD)과 "아예 없음"(빈칸)이 같은 것이 된다.** 정규화는 값을 다듬는
+    #   것이지 지우는 게 아니므로, 등급을 못 뽑으면 원래 표기를 보존한다.
+    _asil_norm = _normalize_asil_value(str(out.get("asil") or ""))
+    out["asil"] = _asil_norm if _asil_norm else str(out.get("asil") or "").strip()
     if not str(out.get("related") or "").strip():
         out["related"] = "TBD"
         out["related_source"] = out.get("related_source") or "inference"
@@ -1082,7 +1292,8 @@ def _infer_precondition_from_body(body: str, func_name: str = "") -> str:
     return ""
 
 
-def _build_function_info_rows(info: Dict[str, Any], cols: int) -> List[List[str]]:
+def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """함수 정보 표의 라벨/값 쌍. **배치와 무관한 내용만** 여기서 정한다."""
     info = _finalize_function_fields(info)
     name_text = str(info.get("name") or "").strip()
     name_norm = re.sub(r"[^a-z0-9_]", "", name_text.lower())
@@ -1130,7 +1341,14 @@ def _build_function_info_rows(info: Dict[str, Any], cols: int) -> List[List[str]
             formatted_inputs.append(f"{_classify_param_direction(p)} {p}")
     pairs.append(("Input Parameters", "\n".join(formatted_inputs) if formatted_inputs else "N/A"))
     pairs.append(("Output Parameters", "\n".join([str(x) for x in outputs if x]) if outputs else "N/A"))
-    pairs.append(("Precondition", str(info.get("precondition") or "") or "N/A"))
+    # ⚠ 라벨은 정본 표기를 따른다. 정본 416 블록 중 414 가 `선행조건`(한글)이고
+    #   `Called Function`·`Calling Function` 은 영문이다 — 한 표 안에서 언어가
+    #   섞이는 것이 정본의 실제 모양이다. `report_gen.requirements` 의 되읽기는
+    #   두 표기를 이미 모두 받는다(`{"precondition", "선행조건"}`).
+    #   ⚠ 다만 `Used Globals (Global)/(Static)` 은 정본에 없는 **우리 필드**라
+    #     정본의 `사용 전역변수`(한 행)로 합치지 않는다 — 합치면 전역/정적 구분이
+    #     사라진다(계획 결정 3: 정본은 하한선이지 상한선이 아니다).
+    pairs.append(("선행조건", str(info.get("precondition") or "") or "N/A"))
     globals_global = info.get("globals_global") or []
     globals_static = info.get("globals_static") or []
     pairs.append(
@@ -1149,12 +1367,478 @@ def _build_function_info_rows(info: Dict[str, Any], cols: int) -> List[List[str]
     pairs.append(("Calling Function", _normalize_call_field(str(info.get("calling") or "")) or "N/A"))
     pairs.append(("Logic Diagram", str(info.get("logic") or "")))
 
+    return pairs
+
+
+# ── 정본(HDPDM01 SUDS) 함수 정보 표의 행 배치 모델 ────────────────────────────
+#
+# 실측(2026-08-25, `docs/(HDPDM01_SUDS) … v1.07_240213.docx` 416 블록 전수):
+# 405 블록이 **글자 그대로 같은 라벨 순서**를 쓴다(나머지 11 은 `Paramters` 오타 19건
+# 포함 표기 흔들림). 그 배치는 행이 세 종류다 — 한 종류로 뭉개면 파라미터가 함수당
+# 한 칸에 다 들어가고, 그게 P2-3 이전 우리 산출물이었다.
+#
+#   full : 전체 폭 한 칸        `[ Function Information ]` · `[ Input Parameters ]` …
+#   pair : 라벨[0-1] + 값[2..]  ID / Name / Prototype / …
+#   grid : 6칸 독립             `No|Name|Type|Value Range|Reset Value|Description` 와 그 데이터
+#
+# ⚠ 이 상수는 `docx_builder._merge_function_info_table` / `_fill_function_info_table`
+#   이 **함께** 본다. 종류를 늘리면 그 두 곳이 같이 움직여야 한다.
+FN_ROW_FULL = "full"
+FN_ROW_PAIR = "pair"
+FN_ROW_GRID = "grid"
+
+# 정본 파라미터 그리드의 열. 순서가 곧 계약이다 — `report_gen.requirements`
+# `_parse_param_row` 가 같은 순서로 되읽는다.
+PARAM_GRID_HEADER: List[str] = [
+    "No", "Name", "Type", "Value Range", "Reset Value", "Description",
+]
+PARAM_GRID_COLS = len(PARAM_GRID_HEADER)
+
+# 파라미터 셀 길이 상한. 정본 실측 중앙값은 9자(p90 14자)인데 우리 `range`/`init` 엔
+# 배열 초기화 블록이 통째로 들어 있는 것이 28건 있다(최대 2,106자). 그대로 쓰면 표
+# 한 칸이 문서 한 쪽을 먹는다. ⚠ 자를 땐 **자른 사실과 원래 길이를 남긴다** — 이
+# 저장소가 반복해 고쳐 온 것이 "조용한 절단"이다.
+PARAM_CELL_MAX = 120
+
+_DIRECTION_TAG_RE = re.compile(r"^\[(INOUT|INDIRECT2|INDIRECT|IN|OUT)\]\s*(.*)$", re.I)
+
+# 방향 태그 → 어느 열로 보낼 것인가. 정본 실측(2026-08-25, 교집합 394 함수)으로 정했다:
+#
+#   태그        입력만  기대만  둘다  정본에 없음   → 입력   → 기대
+#   IN            687      5     5        126     84.1%    1.2%
+#   OUT             2    795     0        101      0.2%   88.5%
+#   INOUT           3     57   234         35     72.0%   88.4%
+#   INDIRECT        3      2     0        504      0.6%    0.4%
+#   INDIRECT2       1      0     0        234      0.4%    0.0%
+#
+# INOUT 은 **양쪽에 다 적는 것이 정본**이다(적중 329 중 234 가 둘 다). 한쪽만 적으면
+# 그 234 를 통째로 놓친다. INDIRECT 계열은 정본이 사실상 안 적으므로(1.0% / 0.4%)
+# 그리드에 넣지 않는다 — 대신 `Used Globals` 행에는 그대로 남아 정보가 사라지진 않는다.
+_TAG_TO_COLUMNS: Dict[str, Tuple[bool, bool]] = {
+    "IN": (True, False),
+    "OUT": (False, True),
+    "INOUT": (True, True),
+    "INDIRECT": (False, False),
+    "INDIRECT2": (False, False),
+}
+
+# 정본이 Value Range 에 쓰는 소수 표기 — 허용값 열거(`0x0000, 0x08DC, 0x09A6`).
+# 리터럴/식별자 2개 이상이 쉼표로 이어진 것만 인정한다.
+_VALUE_ENUM_RE = re.compile(r"^[\w.+\-]+(?:\s*,\s*[\w.+\-]+)+$")
+
+_NA = "N/A"
+_PLACEHOLDER_PARAM_NAMES = {"", "(none)", "none", "n/a", "na", "-", "void", "tbd"}
+
+# 이름 **뒤에** 붙는 주석형 꼬리(`_format_param_entry` 가 만든다).
+#   `u8g_Hash (idx: u8t_Index)` · `ctx (range: 0x0 ~ 0xFFFFFFFF)` · `buf (size: 8)`
+# ⚠ 꼬리 키워드는 **한 곳**에서만 정의한다 — 목록이 갈리면 새 꼬리를 추가할 때 한쪽만
+#   고쳐지고 그 꼬리가 그대로 **이름이 된다**(`[INOUT]`·`[INDIRECT2]` 로 두 번 겪었다).
+#   생산자가 여기이므로 정의도 여기 둔다. `generators/suts.py` 가 이것을 import 한다.
+_PARAM_ANNOT_KEYS = "idx|range|divisor|size"
+_PARAM_ANNOT_TAIL = re.compile(rf"\s*\((?:{_PARAM_ANNOT_KEYS})\s*:[^)]*\)\s*$", re.I)
+
+# 꼬리의 **시작**만 찾는다. 끝은 괄호를 세어서 찾아야 한다 — `idx:` 안에 괄호가 중첩되기
+# 때문이다(매크로를 못 접으면 원문이 그대로 실린다):
+#   `u8g_SysEepromCtrl_PartNoInfo (idx: ( ( U8 )( 2U ) ), ( ( U8 )( 8U ) ), …)`
+# `[^)]*\)` 는 첫 `)` 에서 멈춰 `\s*$` 가 안 맞으므로 **꼬리가 하나도 안 떨어진다**.
+_PARAM_ANNOT_HEAD = re.compile(rf"\s*\((?:{_PARAM_ANNOT_KEYS})\s*:", re.I)
+_ANNOT_KIND = re.compile(rf"^\((?P<k>{_PARAM_ANNOT_KEYS})\s*:\s*(?P<v>.*)\)$", re.I | re.S)
+
+# `return S16` / `U8 u8t_Data` / `enum en_g_State u8s_Data` / `U16 buf[8]`
+_RET_HEAD = re.compile(r"^return\b\s*(?P<type>.*)$", re.I)
+_TYPED_NAME = re.compile(
+    r"^(?P<type>(?:struct|union|enum)\s+[A-Za-z_]\w*|(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*\s*\**)"
+    r"\s+(?P<name>[A-Za-z_]\w*(?:\[[^\]]*\])*)$"
+)
+
+
+def split_param_annotations(raw: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """이름과 주석형 꼬리를 **분리**한다(버리지 않는다).
+
+    `"u16s_Buf (size: 8) (idx: 0, 1)"` → `("u16s_Buf", [("idx", "0, 1"), ("size", "8")])`
+
+    꼬리는 뒤에서부터 떨어지므로 반환 목록은 **역순**이다 — 호출부는 `dict()` 로 받거나
+    순서에 기대지 말 것. 잘라낸 자리가 문자열 끝이 아니면 꼬리가 아니다(이름 중간을
+    지우면 다른 이름이 된다).
+    """
+    out = str(raw or "").strip()
+    tails: List[Tuple[str, str]] = []
+
+    def _record(chunk: str) -> None:
+        m = _ANNOT_KIND.match(chunk.strip())
+        if m:
+            tails.append((m.group("k").lower(), " ".join(m.group("v").split())))
+
+    while True:
+        m_tail = _PARAM_ANNOT_TAIL.search(out)
+        if m_tail:
+            _record(m_tail.group(0))
+            out = out[: m_tail.start()].strip()
+            continue
+        matches = list(_PARAM_ANNOT_HEAD.finditer(out))
+        if not matches:
+            return out, tails
+        m = matches[-1]
+        depth = 0
+        end = len(out)
+        for i in range(out.index("(", m.start()), len(out)):
+            if out[i] == "(":
+                depth += 1
+            elif out[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if out[end:].strip():
+            return out, tails
+        _record(out[m.start():end])
+        out = out[: m.start()].strip()
+
+
+def split_param_display(display: str) -> Tuple[str, Dict[str, str]]:
+    """이름 칸에 섞여 들어온 **타입·범위·주석을 제 열로** 돌려보낸다.
+
+    정본 Name 칸 2,751개는 단일 심볼(80.5%) · 멤버 경로(14.9%) · 첨자(3.3%) 뿐이고
+    타입이나 범위를 이름 칸에 적는 일이 **한 번도 없다**. 우리는 2,406칸 중 233칸이
+    그랬다: `(size: 8)` 100 · `return S16 (range: …)` 81 · `U8 u8t_Data` 36 ·
+    `(divisor: no 0)` 16.
+
+    ⚠ **단순 strip 금지.** `return S16 (range: …)` 에서 마지막 토큰을 취하면 `S16` 이
+    되어 반환값 표시가 **타입 이름으로 둔갑**한다 — 지표는 오르고 이름은 더 틀린다.
+    그래서 `return` 을 타입+이름 규칙보다 **먼저** 판정한다.
+
+    배열은 정본 표기를 따른다: `buf (size: 8)` → `buf[8]` (정본 92칸이 이 모양).
+    """
+    base, tails = split_param_annotations(display)
+    kinds = dict(tails)
+    extra: Dict[str, str] = {}
+
+    size = kinds.pop("size", "")
+    if size and not base.endswith("]"):
+        base = base + "".join(f"[{d}]" for d in size.split("x") if d)
+    if kinds.get("range"):
+        extra["range"] = kinds["range"]
+    notes = [f"{k}: {v}" for k, v in tails if k in ("idx", "divisor")]
+    if notes:
+        extra["note"] = " / ".join(reversed(notes))
+
+    m_ret = _RET_HEAD.match(base)
+    if m_ret:                                   # ⚠ 타입+이름 규칙보다 먼저 — 위 주석 참조
+        rtype = m_ret.group("type").strip()
+        if rtype:
+            extra["type"] = rtype
+        return "return", extra
+
+    m_typed = _TYPED_NAME.match(base)
+    if m_typed:
+        extra["type"] = " ".join(m_typed.group("type").split())
+        return m_typed.group("name"), extra
+    return base, extra
+
+
+def split_direction_tag(raw: str) -> Tuple[str, str]:
+    """`"[INOUT] REG_PTT.Bits.PTT3"` → `("INOUT", "REG_PTT.Bits.PTT3")`.
+
+    태그가 없으면 `("", 원문)`. 태그는 대문자로 정규화한다.
+    """
+    text = str(raw or "").strip()
+    m = _DIRECTION_TAG_RE.match(text)
+    if not m:
+        return "", text
+    return m.group(1).upper(), m.group(2).strip()
+
+
+def _param_cell(value: Any) -> str:
+    """표 한 칸 값으로 정규화. 비면 `N/A`, 길면 **자른 사실을 남기고** 자른다."""
+    text = re.sub(r"\s+", " ", str(value if value is not None else "")).strip()
+    if not text or text.lower() in {"n/a", "na", "-", "none"}:
+        return _NA
+    if len(text) > PARAM_CELL_MAX:
+        keep = text[:PARAM_CELL_MAX].rstrip()
+        return f"{keep}… (전체 {len(text)}자에서 잘림)"
+    return text
+
+
+def _default_type_ranges() -> Dict[str, str]:
+    try:
+        from report.constants import DEFAULT_TYPE_RANGES
+        return dict(DEFAULT_TYPE_RANGES)
+    except Exception as exc:   # noqa: BLE001 - 상수 부재가 문서 생성을 막아선 안 된다
+        _logger.warning(
+            "타입 폭 표(DEFAULT_TYPE_RANGES) 로드 실패(%s) — '타입 폭' 표시 없이 "
+            "range 를 그대로 적는다: %s", type(exc).__name__, exc)
+        return {}
+
+
+def _param_type_text(ginfo: Dict[str, Any]) -> str:
+    """`Type` 열. 정본은 배열을 `U16 Array` 로 적으므로 차원 유무를 반영한다."""
+    base = str(ginfo.get("type") or "").strip()
+    if not base:
+        return _NA
+    if str(ginfo.get("array") or "").strip():
+        return _param_cell(f"{base} Array")
+    return _param_cell(base)
+
+
+def _param_value_range(ginfo: Dict[str, Any],
+                       type_ranges: Optional[Dict[str, str]] = None) -> str:
+    """`Value Range` 열.
+
+    ⚠ **정본과 우리는 이 칸에서 다른 주장을 한다.** 정본은 설계상의 의미 범위를 적고
+    (`0x00 ~ 0x01`), 우리 `range` 는 실측 92.9%(395/425)가 **타입 폭 그대로**다
+    (`U16` → `0 ~ 65535`). 아무 표시 없이 적으면 "설계가 전 범위를 허용한다"는, 우리가
+    세운 적 없는 주장이 된다 — 이 저장소가 이미 한 번 고친 출처 세탁과 같은 모양이다.
+    그래서 타입 폭과 **글자 그대로 같으면 그 사실을 함께 적는다**.
+
+    ⚠ **범위가 아닌 값은 이 칸에 넣지 않는다.** 우리 `range` 필드엔 범위를 못 구했을
+    때 초기값이 대신 들어온다(`uds_generator.py` 의 `if not resolved and init:` 폴백) —
+    실측으로 초기화 블록 13건 · 캐스트식/단일 초기값 17건이 그렇게 섞여 있었고, 그중
+    18칸이 실제 산출물의 Value Range 로 나갔다(`( (  U8 )( 0x00U ) )`). 정본은 그 칸에
+    범위(`~`) 92.9% · 허용값 열거(`0x00, 0x01`) 1.3% · `N/A` 5.6% 만 적고 캐스트식은
+    **한 번도 안 적는다**. 초기값은 `Reset Value` 열이 이미 싣는다.
+    """
+    raw = re.sub(r"\s+", " ", str(ginfo.get("range") or "")).strip()
+    if not raw:
+        return _NA
+    if "~" not in raw:
+        # 정본의 소수 표기 — 허용값 열거(`0x0000, 0x08DC, 0x09A6`). 그 외(초기화 블록·
+        # 캐스트식·단일 초기값·파서 조각 `}`)는 범위에 대한 주장이 아니다.
+        return _param_cell(raw) if _VALUE_ENUM_RE.match(raw) else _NA
+    ranges = type_ranges if type_ranges is not None else _default_type_ranges()
+    base_type = re.sub(r"^\s*const\s+", "", str(ginfo.get("type") or "").strip())
+    width = str(ranges.get(base_type) or "").strip()
+    if width and re.sub(r"\s+", "", width) == re.sub(r"\s+", "", raw):
+        return _param_cell(f"{raw} (타입 폭)")
+    return _param_cell(raw)
+
+
+def _param_reset_text(ginfo: Optional[Dict[str, Any]]) -> str:
+    """`Reset Value` 열. **판정은 `report_gen.c_reset` 단일 출처**이고 여기선 표시만.
+
+    값에 출처가 붙어 나온다(`0x03 (Reset 함수)` · `0x00 (정적 저장기간)`). 정본의 이
+    열은 뜻이 하나가 아니다 — 같은 심볼에 두 값을 적는 곳이 16심볼·100칸(4.6%)이고,
+    그게 "C 정적 저장기간" 과 "리셋 함수가 넣는 값" 이 섞인 결과다. 표시 없이 값만
+    적으면 우리도 그 모호함을 물려받는다(`Value Range` 의 `(타입 폭)` 과 같은 결정).
+
+    ⚠ `reset` **키가 아예 없을 때만** 옛 동작(`init`)으로 떨어진다 — 구 캐시 payload
+      호환이다. 키가 있는데 빈 값이면 그건 "판정이 돌았고 **모른다**" 이므로 N/A 다.
+    """
+    info = ginfo if isinstance(ginfo, dict) else {}
+    if "reset" in info:
+        return _param_cell(info.get("reset"))
+    return _param_cell(info.get("init"))
+
+
+def _param_grid_row(no: int, display_name: str, ginfo: Dict[str, Any],
+                    type_ranges: Optional[Dict[str, str]] = None,
+                    extra: Optional[Dict[str, str]] = None) -> List[str]:
+    """그리드 한 행. `extra` 는 이름 칸에서 **되찾은** 타입/범위/주석이다.
+
+    ⚠ 전역 정보(`ginfo`)가 권위다 — `extra` 는 그 칸이 비었을 때만 채운다. 시그니처
+    파라미터와 반환값은 전역이 아니라 `ginfo` 가 없고, 그 정보가 지금까지 이름 칸에
+    실려 있었다.
+    """
+    ex = extra or {}
+    type_text = _param_type_text(ginfo)
+    if type_text == _NA and ex.get("type"):
+        type_text = _param_cell(ex["type"])
+    range_text = _param_value_range(ginfo, type_ranges)
+    if range_text == _NA and ex.get("range"):
+        range_text = _param_cell(ex["range"])
+    desc = re.sub(r"\s+", " ", str(ginfo.get("desc") or "")).strip()
+    if ex.get("note"):
+        desc = f"{desc} ({ex['note']})".strip() if desc else ex["note"]
+    return [
+        str(no),
+        _param_cell(display_name),
+        type_text,
+        range_text,
+        _param_reset_text(ginfo),
+        _param_cell(desc),
+    ]
+
+
+def _empty_param_grid_row() -> List[str]:
+    """파라미터가 없을 때의 행. 정본도 `1 | N/A × 5` 한 줄을 적는다."""
+    return ["1"] + [_NA] * (PARAM_GRID_COLS - 1)
+
+
+_MEMBER_HEAD_RE = re.compile(r"(?:->|\.)")
+
+
+def _member_path_of(name: str) -> str:
+    """`REG_ADC0STS.Bits.READY` → `Bits.READY`. 첨자만 있는 이름은 빈 문자열.
+
+    ⚠ 첨자(`arr[3]`)와 멤버(`s.m`)는 **다른 축**이다. `arr[3]` 은 같은 배열의
+      원소라 타입·범위·설명이 베이스의 것과 같지만, `s.m` 은 **다른 대상**이다.
+      한 규칙으로 묶으면 멀쩡한 배열 행까지 비운다(실측: 우리 첨자 행 2개).
+    """
+    parts = _MEMBER_HEAD_RE.split(str(name or ""), 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _member_grid_info(name: str, base_ginfo: Dict[str, Any],
+                      member_types: Optional[Dict[str, Any]],
+                      type_ranges: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """멤버 경로 행이 쓸 레코드. 못 풀면 **빈 레코드**(= 전 칸 N/A).
+
+    ⚠ 베이스의 레코드를 그대로 물려주면 이름은 비트 하나를 가리키는데 값이
+      레지스터 전체를 말하게 된다. 실측(2026-08-26 산출물 직독): 멤버 경로 행
+      **335개**가 Type/Range/Reset/Desc **네 칸 전부** 베이스 값을 이고 있었고,
+      정본 대비 재현율이 그 행들만 4개 열 전부 **0.0%**(n=273)였다 — 같은 문서의
+      단일 심볼 행은 type 93.7% 다. 값 부재가 아니라 **다른 대상의 값**이었다.
+    """
+    path = _member_path_of(name)
+    if not path:
+        return base_ginfo
+    rec = resolve_struct_member(
+        member_types, str((base_ginfo or {}).get("type") or "").strip(), path)
+    if not isinstance(rec, dict) or not rec:
+        return {}
+    mtype = str(rec.get("type") or "").strip()
+    bits = str(rec.get("bits") or "").strip()
+    if bits.isdigit() and 0 < int(bits) <= 32:
+        # ⚠ 출처를 함께 적는다. 비트 폭은 **설계가 정한 범위가 아니라** 그 필드가
+        #   표현할 수 있는 폭이다 — 표시 없이 적으면 우리가 세운 적 없는 주장이
+        #   된다(이 저장소가 `(타입 폭)` 에서 이미 한 번 고친 출처 세탁).
+        value_range = f"0 ~ {(1 << int(bits)) - 1} (비트 폭)"
+    else:
+        value_range = str((type_ranges or {}).get(mtype) or "").strip()
+    desc = str(rec.get("desc") or "").strip()
+    if not desc and "." not in path and str(rec.get("parent") or "") == "union":
+        # ⚠ **전폭 별칭에 한해서만** 베이스 설명을 쓴다. union 의 최상위 멤버
+        #   (`REG_ADC0STS.Byte`)는 레지스터 전체와 같은 저장소라 그 설명이 맞고,
+        #   정본도 그 칸에 레지스터 설명을 적는다. 반면 `Bits.READY` 는 비트
+        #   하나라 **다른 대상**이다 — 거기까지 물려주면 원래 결함으로 되돌아간다.
+        desc = str((base_ginfo or {}).get("desc") or "").strip()
+    return {
+        "type": mtype,
+        "array": str(rec.get("array") or "").strip(),
+        "range": value_range,
+        # 멤버의 리셋 값은 MCU 데이터시트에 있고 소스엔 없다 — 비운다.
+        # ⚠ `reset` 키를 **명시로** 둔다. ⚠ 지금은 `init` 도 비어 있어 이 줄을 지워도
+        #   관측이 안 바뀐다(뮤테이션으로 확인한 **등가**다). 그래도 남긴다 — 이 dict 에
+        #   나중에 베이스 값이 하나라도 들어오면 `_param_reset_text` 의 구-payload
+        #   폴백이 그걸 Reset 열에 실어 보낸다. 그때 이 줄이 유일한 방어다.
+        "init": "",
+        "reset": "",
+        "desc": desc,
+    }
+
+
+def resolve_param_grid_entries(
+    info: Dict[str, Any],
+    globals_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    struct_member_types: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
+) -> Tuple[List[List[str]], List[List[str]]]:
+    """함수 하나의 (입력 그리드 행, 기대 그리드 행)을 만든다.
+
+    ⚠ **`docx_builder` 가 전역 목록을 표시 문자열로 납작하게 만들기 *전에*** 불러야
+    한다. `_format_globals` 가 지나가면 `Name=… | Type=… | Range=…` 한 줄이 되어
+    구조가 사라진다.
+
+    원천은 넷이다 — 시그니처 파라미터(`inputs`/`outputs`)와 사용 전역
+    (`globals_global`/`globals_static`). 정본이 시그니처만 적는 문서가 아님은
+    실측으로 확인됐다: 정본 Input 실값의 75.1%가 전역/정적이고, prototype 이 `void`
+    인데 I/O 가 적힌 함수가 310/416(74.5%)이다.
+    """
+    gmap = globals_info_map if isinstance(globals_info_map, dict) else {}
+    smap = struct_member_types if isinstance(struct_member_types, dict) else {}
+    type_ranges = _default_type_ranges()
+    seen: Dict[str, set] = {"in": set(), "out": set()}
+    grids: Dict[str, List[List[str]]] = {"in": [], "out": []}
+
+    def _emit(bucket: str, name: str, ginfo: Dict[str, Any],
+              extra: Optional[Dict[str, str]] = None) -> None:
+        # ⚠ 중복 판정은 **분해된 이름**으로 한다. 꼬리째로 비교하면 같은 변수의
+        #   `buf (size: 2)` 와 `buf (size: 2) (idx: …)` 가 두 행이 된다.
+        key = name.strip().lower()
+        if not key or key in seen[bucket]:
+            return
+        seen[bucket].add(key)
+        grids[bucket].append(
+            _param_grid_row(len(grids[bucket]) + 1, name, ginfo, type_ranges, extra))
+
+    for source_key, default_tag in (
+        ("inputs", "IN"), ("outputs", "OUT"),
+        ("globals_global", ""), ("globals_static", ""),
+    ):
+        for raw in info.get(source_key) or []:
+            tag, base = split_direction_tag(str(raw or ""))
+            tag = tag or default_tag
+            if base.lower() in _PLACEHOLDER_PARAM_NAMES:
+                continue
+            to_in, to_out = _TAG_TO_COLUMNS.get(
+                tag, (source_key == "inputs", source_key == "outputs"))
+            if not (to_in or to_out):
+                continue
+            # ⚠ 분해를 **조회보다 먼저** 한다. 꼬리가 붙은 채로 찾으면
+            #   `u16s_AdcBuffer (size: 8)` 이 gmap 에 없어 Type/Range/Desc 가 통째로
+            #   N/A 가 된다(실측 100칸).
+            name, extra = split_param_display(base)
+            lookup = re.split(r"(?:->|\.|\[)", name)[0].strip()
+            ginfo = gmap.get(lookup) if isinstance(gmap.get(lookup), dict) else {}
+            # ⚠ 멤버 경로면 **베이스의 레코드를 물려주지 않는다** — 이름은 비트 하나를
+            #   가리키는데 값이 레지스터 전체를 말하게 된다(아래 `_member_grid_info`).
+            ginfo = _member_grid_info(name, ginfo or {}, smap, type_ranges)
+            if to_in:
+                _emit("in", name, ginfo or {}, extra)
+            if to_out:
+                _emit("out", name, ginfo or {}, extra)
+
+    return (grids["in"] or [_empty_param_grid_row()],
+            grids["out"] or [_empty_param_grid_row()])
+
+
+def _pack_pairs_into_rows(pairs: List[Tuple[str, str]], cols: int) -> List[List[str]]:
+    """좁은 표용 — 라벨/값 쌍을 한 행에 여러 개 접어 넣는다(P2-3 이전 동작 그대로)."""
+    cells_per_row = max(2, cols // 2 * 2)
+    pairs_per_row = max(1, cells_per_row // 2)
     rows: List[List[str]] = []
-    if cols >= 6:
-        for k, v in pairs:
-            row = [k, k, v, v, v, v]
-            rows.append(row[:cols])
-        return rows
+    row: List[str] = []
+    for idx, (k, v) in enumerate(pairs):
+        row.extend([k, v])
+        if (idx + 1) % pairs_per_row == 0:
+            rows.append(row[:cells_per_row])
+            row = []
+    if row:
+        while len(row) < cells_per_row:
+            row.append("")
+        rows.append(row[:cells_per_row])
+    return rows
+
+
+def _build_function_info_layout(info: Dict[str, Any], cols: int) -> List[Tuple[str, List[str]]]:
+    """함수 정보 표의 **행 종류 + 칸 값** 목록.
+
+    `cols >= PARAM_GRID_COLS` 일 때만 정본 6열 그리드로 전개한다. 그보다 좁은 표는
+    그리드가 물리적으로 안 들어가므로 예전 그대로 라벨/값 쌍으로 접어 넣는다
+    (실측상 이 저장소가 쓰는 템플릿은 6열 아니면 7열이라 좁은 경로는 폴백 전용이다).
+
+    그리드 데이터는 호출자가 `_param_grid_inputs`/`_param_grid_outputs` 로 미리
+    넣어 준다(전역이 표시 문자열로 납작해지기 전에 뽑아야 하므로). 없으면 여기서
+    `resolve_param_grid_entries` 로 직접 만든다 — 폴백이지 정상 경로가 아니다.
+    """
+    pairs = _function_info_pairs(info)
+    if cols < PARAM_GRID_COLS:
+        return [(FN_ROW_PAIR, cells) for cells in _pack_pairs_into_rows(pairs, cols)]
+
+    grid_in = info.get("_param_grid_inputs")
+    grid_out = info.get("_param_grid_outputs")
+    if not isinstance(grid_in, list) or not isinstance(grid_out, list):
+        grid_in, grid_out = resolve_param_grid_entries(
+            info, info.get("_globals_info_map"), info.get("_struct_member_types"))
+
+    layout: List[Tuple[str, List[str]]] = []
+    for key, value in pairs:
+        if key in ("Input Parameters", "Output Parameters"):
+            rows = grid_in if key == "Input Parameters" else grid_out
+            layout.append((FN_ROW_FULL, [f"[ {key} ]"]))
+            layout.append((FN_ROW_GRID, list(PARAM_GRID_HEADER)))
+            layout.extend((FN_ROW_GRID, list(r)) for r in (rows or [_empty_param_grid_row()]))
+        else:
+            layout.append((FN_ROW_PAIR, [key, value]))
+    return layout
     cells_per_row = max(2, cols // 2 * 2)
     pairs_per_row = max(1, cells_per_row // 2)
     row: List[str] = []

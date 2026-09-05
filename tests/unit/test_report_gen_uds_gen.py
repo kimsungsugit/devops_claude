@@ -450,7 +450,12 @@ class TestFunctionAnalyzerHelpers:
             "calling": "",
         }
         result = _finalize_function_fields(info)
-        assert result["asil"] == "QM"
+        # ⚠ 2026-07-31: 예전엔 `"QM"` 을 기대했다. 근거가 없을 때 QM(= 안전 관련 아님)을
+        #   지어내던 동작을 지웠다 — 근거의 부재를 등급 주장으로 바꾸지 않는다.
+        #   `related`/`precondition` 의 자리표시자는 안전 판정이 아니라 서식이라 유지한다.
+        assert result["asil"] == ""
+        assert not str(result.get("asil_source") or "").strip(), (
+            "값을 채우지 않았는데 출처를 적었다 — 없는 근거를 기록한 것이다")
         assert result["related"] == "TBD"
         assert result["precondition"] == "N/A"
         assert isinstance(result["inputs"], list)
@@ -476,8 +481,30 @@ class TestFunctionAnalyzerHelpers:
         result = _collect_var_usage("", ["x"])
         assert result["x"]["lhs"] is False
 
-    def test_build_function_info_rows(self):
-        from report_gen.function_analyzer import _build_function_info_rows
+    @pytest.mark.parametrize(
+        "body,lhs,rhs",
+        [
+            # ⚠ 첨자 대입 — 이걸 읽기로 세면 **쓰기 전용 배열이 시험 입력이 된다**.
+            #   실측(2026-08-12): EEPROM read 계열 4건이 정본엔 입력 0개인데 입력으로 나왔다.
+            ("g_Buf[ i ] = ReadEeprom( (U16)i );", True, False),
+            ("g_Buf[i].field = 3;", True, False),
+            ("g_Buf[i] += 1;", True, True),
+            ("g_Buf[i]++;", True, True),
+            # 진짜 읽기는 그대로 읽기여야 한다(회귀 가드)
+            ("x = g_Buf[ i ];", False, True),
+            ("if( g_Buf[i] == 3 ) { return; }", False, True),
+            # 읽고 쓰면 inout
+            ("g_Buf[i] = g_Buf[i] + 1;", True, True),
+        ],
+    )
+    def test_indexed_write_is_a_write_not_a_read(self, body, lhs, rhs):
+        from report_gen.function_analyzer import _collect_var_usage
+
+        u = _collect_var_usage(body, ["g_Buf"])["g_Buf"]
+        assert (u["lhs"], u["rhs"]) == (lhs, rhs), u
+
+    def test_build_function_info_layout(self):
+        from report_gen.function_analyzer import _build_function_info_layout
 
         info = {
             "id": "SwUFn_0101",
@@ -487,8 +514,8 @@ class TestFunctionAnalyzerHelpers:
             "asil": "B",
             "related": "SwTR_001",
         }
-        rows = _build_function_info_rows(info, 6)
-        assert len(rows) > 0
+        layout = _build_function_info_layout(info, 6)
+        assert len(layout) > 0
         # Check that ID row is present
-        flat = str(rows)
+        flat = str(layout)
         assert "SwUFn_0101" in flat

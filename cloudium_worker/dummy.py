@@ -17,7 +17,7 @@ import sys
 def main() -> int:
     try:
         import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
+        from tkinter import filedialog, messagebox, ttk
     except ImportError:
         # tkinter 미설치 환경 (희귀) — silent exit
         return 1

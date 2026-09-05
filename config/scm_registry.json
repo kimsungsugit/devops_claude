@@ -16,16 +16,27 @@
       ],
       "ignore_patterns": [],
       "webhook_secret_env": "",
+      "builder_project_id": "",
       "linked_docs": {
-        "uds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
-        "sts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/03.Test Specification/01.STS/(HDPDM01_STS) Software Test Specification_v1.02_230116.xlsm",
-        "suts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/02.Test Specification/01.SUTS/(HDPDM01_SUTS) Software Unit Test Specification_v3.01_240221_R.xlsm",
-        "sits": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/02.Test Specification/01.SITS/(HDPDM01_SITS) Software Integration Test Specification_v2.02_240219.xlsm",
-        "srs": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/01.SW 요구사항/01.SRS/(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
-        "sds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/03.SW 아키텍처 설계/02.SDS/(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
-        "hsis": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/02.시스템 아키텍처 설계/03.HSIS/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
-        "stp": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/02.Test Plan/01.STP/(HDPDM01_STP) Software Test Plan_v1.01_20230113_B.docx",
-        "vectorcast": []
+        "uds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
+        "sts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/03.Test Specification/01.STS/(HDPDM01_STS) Software Test Specification_v1.02_230116.xlsm",
+        "suts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/02.Test Specification/01.SUTS/(HDPDM01_SUTS) Software Unit Test Specification_v3.01_240221_R.xlsm",
+        "sits": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/02.Test Specification/01.SITS/(HDPDM01_SITS) Software Integration Test Specification_v2.02_240219.xlsm",
+        "srs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/01.SW 요구사항/01.SRS/(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
+        "sds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/03.SW 아키텍처 설계/02.SDS/(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
+        "hsis": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/02.시스템 아키텍처 설계/03.HSIS/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
+        "stp": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/02.Test Plan/01.STP/(HDPDM01_STP) Software Test Plan_v1.01_20230113_B.docx",
+        "syrs": "",
+        "syts": "",
+        "syits": "",
+        "vectorcast": [],
+        "uds_template": "",
+        "sts_template": "",
+        "suts_template": "",
+        "sits_template": "",
+        "codesonar": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/09.정적분석/01.Static Aanlysis"
+        ]
       },
       "created_at": "2026-03-23T14:10:41",
       "updated_at": "2026-06-15T12:19:14",
@@ -40,7 +51,7 @@
       "scm_username": "kss1119",
       "scm_password_env": "",
       "branch": "",
-      "base_ref": "",
+      "base_ref": "1018",
       "source_root": "C:\\Project\\Ados\\NE1AW_PORTING,C:\\Project\\Ados\\PDS128_FBL",
       "watch_patterns": [
         "*.c",
@@ -48,25 +59,83 @@
       ],
       "ignore_patterns": [],
       "webhook_secret_env": "",
+      "builder_project_id": "",
       "linked_docs": {
-        "uds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
-        "sts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/11.SW 테스트/01.Test Specification/01.SwTS/(KJPDS02_SwTS) Software Test Specification_v1.01_251205_R.xlsm",
-        "suts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/01.Test Specification/01.SwUTS/(KJPDS02_PV_SwUTS) Software Unit Test Specification_v0.10_260615.xlsm",
-        "sits": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS/(KJPDS02_PV_SwITS) Software Integration Test Specification_v0.10_260616.xlsm",
-        "srs": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/01.SW 요구사항/01.SwRS/(KJPDS02_SwRS) Software Requirements Specification_v2.03_20260405.docx",
-        "sds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/03.SW 아키텍처 설계/01.SwDS/(KJPDS02_SwDS) Software Architecture Design Specification_v2.03_20260405.docx",
-        "hsis": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/02.시스템 아키텍처 설계/02.HSIS/(KJPDS02_HSIS) Hardware Software Interface Specification_v2.01_260401_R.xlsx",
-        "stp": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/07.SW 테스트 계획/01.SwTP/(KJPDS02_SwTP) Software Test Plan_v1.03_260408.docx",
+        "uds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
+        "sts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/11.SW 테스트/01.Test Specification/01.SwTS/(KJPDS02_SwTS) Software Test Specification_v1.01_251205_R.xlsm",
+        "suts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/01.Test Specification/01.SwUTS/(KJPDS02_PV_SwUTS) Software Unit Test Specification_v1.02_260615.xlsm",
+        "sits": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS/(KJPDS02_PV_SwITS) Software Integration Test Specification_v1.02_260616.xlsm",
+        "srs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/01.SW 요구사항/01.SwRS/(KJPDS02_SwRS) Software Requirements Specification_v2.03_20260405.docx",
+        "sds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/03.SW 아키텍처 설계/01.SwDS/(KJPDS02_SwDS) Software Architecture Design Specification_v2.03_20260405.docx",
+        "hsis": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/02.시스템 아키텍처 설계/02.HSIS/(KJPDS02_HSIS) Hardware Software Interface Specification_v2.01_260401_R.xlsx",
+        "stp": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/07.SW 테스트 계획/01.SwTP/(KJPDS02_SwTP) Software Test Plan_v1.04_260624.docx",
+        "syrs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/01.시스템 요구사항/01.SyRS/(KJPDS02_SyRS) System Requirements Specification_v2.03_260330.docx",
+        "syts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/06.시스템 테스트/01.Test Specification/01.SyTS/(KJPDS02_SyTS) System Test Specification_v1.02_260318.xlsm",
+        "syits": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/05.시스템 통합테스트/01.Test Specification/01.SyITS/(KJPDS02_SyITS) System Integration Test Specification_v1.02_260324.xlsm",
         "vectorcast": [
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/1.APP_UT_report_260604",
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/2.BOOT_UT_report_260604/Report_sort",
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/1.APP_IT_Report_260604",
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/2.BOOT_IT_Report_260604/Report",
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/08.SW 정적분석/01.Log/PV"
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/1.APP_UT_report_260611",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/2.BOOT_UT_report_260604",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/1.APP_IT_Report_260610",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/2.BOOT_IT_Report_260610"
+        ],
+        "uds_template": "",
+        "sts_template": "",
+        "suts_template": "",
+        "sits_template": "",
+        "codesonar": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/08.SW 정적분석/01.Log/PV"
         ]
       },
       "created_at": "2026-04-21T15:02:58",
-      "updated_at": "2026-06-18T17:17:05",
+      "updated_at": "2026-07-06T19:45:00",
+      "last_triggered": "",
+      "last_revision": ""
+    },
+    {
+      "id": "kjpds02_pv",
+      "name": "KJPDS02_PV",
+      "scm_type": "svn",
+      "scm_url": "svn://192.168.110.33/ADOS/NE1AW_PORTING",
+      "scm_username": "kss1119",
+      "scm_password_env": "",
+      "branch": "",
+      "base_ref": "1018",
+      "source_root": "C:\\Project\\Ados\\NE1AW_PORTING,C:\\Project\\Ados\\PDS128_FBL",
+      "watch_patterns": [
+        "*.c",
+        "*.h"
+      ],
+      "ignore_patterns": [],
+      "webhook_secret_env": "",
+      "builder_project_id": "KJPDS02",
+      "linked_docs": {
+        "uds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v3.02_260XXX.docx",
+        "sts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/11.SW 테스트/01.Test Specification/01.SwTS/(KJPDS02_SwTS) Software Test Specification_v2.01_260629_R.xlsm",
+        "suts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/01.Test Specification/01.SwUTS/(KJPDS02_SwUTS) Software Unit Test Specification_v2.01_260629_R.xlsm",
+        "sits": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS/(KJPDS02_SwITS) Software Integration Test Specification_v2.01_260629_R.xlsm",
+        "srs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/01.SW 요구사항/01.SwRS/(KJPDS02_SwRS) Software Requirements Specification_v3.01_20260410_R.docx",
+        "sds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/03.SW 아키텍처 설계/01.SwDS/(KJPDS02_SwDS) Software Architecture Design Specification_v3.01_20260410_R.docx",
+        "hsis": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/02.시스템 아키텍처 설계/02.HSIS/(KJPDS02_HSIS) Hardware Software Interface Specification_v2.01_260401_R.xlsx",
+        "stp": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/07.SW 테스트 계획/01.SwTP/(KJPDS02_SwTP) Software Test Plan_v2.01_260629_R.docx",
+        "syrs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/01.시스템 요구사항/01.SyRS/(KJPDS02_SyRS) System Requirements Specification_v3.01_260401_R.docx",
+        "syts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/06.시스템 테스트/01.Test Specification/01.SyTS/(KJPDS02_SyTS) System Test Specification_v1.02_260318.xlsm",
+        "syits": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/05.시스템 통합테스트/01.Test Specification/01.SyITS/(KJPDS02_SyITS) System Integration Test Specification_v1.02_260324.xlsm",
+        "vectorcast": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/2.PV_2631/1.APP_UT_report_260611",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/2.PV_2631/2.BOOT_UT_report_260604",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/2.PV_v2631/1.APP_IT_Report_260610",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/2.PV_v2631/2.BOOT_IT_Report_260610"
+        ],
+        "uds_template": "U:/연구소/2000 연구소 공용/2200 개발 사양/2220 개발표준 Template/★개발템플릿 Version3/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(XXXX_SwUDS) Software Unit Design Specification_v0.10_2XXXXX.docx",
+        "sts_template": "U:/연구소/2000 연구소 공용/2200 개발 사양/2220 개발표준 Template/★개발템플릿 Version3/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/11.SW 테스트/01.Test Specification/01.SwTS/(XXXX_SwTS) Software Test Specification_v0.10_2XXXXX.xlsm",
+        "suts_template": "\\",
+        "sits_template": "",
+        "codesonar": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/08.SW 정적분석/01.Log/2.PV_v2631"
+        ]
+      },
+      "created_at": "2026-07-06T09:33:48",
+      "updated_at": "2026-09-04T09:37:06",
       "last_triggered": "",
       "last_revision": ""
     }

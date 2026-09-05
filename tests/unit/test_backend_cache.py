@@ -6,13 +6,11 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.cache import TTLCache, cached_response, invalidate_cache
+from backend.cache import TTLCache, cached_response, invalidate_cache  # noqa: E402
 
 
 class TestTTLCache:

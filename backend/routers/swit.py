@@ -36,6 +36,7 @@ from backend.schemas import (
     LogFolderPreviewRequest,
     SwITBuildRequest,
     SwITConsistencyCheckRequest,
+    SwITDocSummaryRequest,
     SwITSitrBuildRequest,
 )
 
@@ -51,7 +52,11 @@ from backend.services.swit_comprehensive_aggregator import (
     SwitcrBuildResult,
     build_switcr_report,
 )
-from backend.services.swit_consistency_checker import check_swit_consistency
+from backend.services.swit_consistency_checker import (
+    check_swit_consistency,
+    summarize_swit_coverage_report,
+    summarize_swit_test_report,
+)
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
     build_swit_coverage_report,
@@ -61,6 +66,10 @@ from backend.services.swit_meta import SwitCoverageBuildMeta, SwitSitrBuildMeta
 from backend.services.swit_sitr_aggregator import (
     SwitSitrBuildResult,
     build_swit_sitr_report,
+)
+from backend.services.swut_meta_resolver import (
+    TemplateNotResolved,
+    read_template_from_keys,
 )
 from backend.services.swut_meta_resolver import (
     apply_function_asil_map as _resolver_apply_function_asil_map,
@@ -99,7 +108,8 @@ def _load_meta_from_config(project_id: str) -> dict[str, Any]:
 
 _logger = logging.getLogger(__name__)
 
-# 41차 W3: 라우터 전체 admin only — 4 endpoint 모두 require_admin 적용 (40차 통합).
+# 41차 W3: 라우터 전체 admin only — router dependencies=[Depends(require_admin)]로
+# 모든 endpoint에 일괄 적용 (신규 endpoint 자동 포함; 개수 명시는 drift 방지 위해 지양).
 # endpoint signature에서 `_admin: str = Depends(require_admin)` 중복 제거.
 router = APIRouter(
     prefix="/api/swit",
@@ -234,25 +244,93 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
     key = key_by_kind.get(kind)
     if key is None:
         raise HTTPException(status_code=400, detail=f"unknown SwIT template kind: {kind}")
-    tpath = (tmpl_cfg.get(key) or "").strip()
-    if not tpath:
-        raise HTTPException(
-            status_code=400,
-            detail=f"template_path 미지정 + config/swut_meta.json에 '{key}' 없음 ({project_id})",
+    # 2026-08-26 — swut 과 lockstep. 부재 사유를 폴더 내용과 함께 400 으로 낸다.
+    try:
+        return read_template_from_keys(
+            resolver, tmpl_cfg, (key,), project_id=project_id, label=f"SwIT {kind}",
         )
-    return resolver.read_bytes(tpath)
+    except TemplateNotResolved as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+def _read_optional_config_file(
+    req_path: str, project_id: str, config_key: str,
+    *, out_warnings: list[str] | None = None,
+) -> bytes | None:
+    """SwITCR 의 **선택** 증빙 워크북을 요청 경로 또는 프로젝트 config 에서 읽는다.
 
-def _read_optional_config_file(req_path: str, project_id: str, config_key: str) -> bytes | None:
-    """Read optional SwITCR evidence workbook from request path or project config."""
+    ⚠ 2026-08-25 실측: 여기가 optional 이 아니었다. 경로가 config 에 **있고 파일만 없으면**
+      `FileNotFoundError` 가 그대로 404 로 나가 SwITCR 이 통째로 안 만들어졌다. KJPDS02 는
+      `fault_injection_result`(DV 세대 산출물이 PV v2.01 로 교체되며 소멸)와
+      `switcr_reference`(클라우드 동기화로 파일명 뭉개짐) 둘 다 이 상태여서, 준비 게이트는
+      "준비 완료" 인데 빌드는 404 였다 — 게이트와 빌드가 다른 조건으로 재고 있었다.
+
+    ⚠ 조용히 넘기지 않는다. 선택 증빙이 빠진 산출물은 근거가 그만큼 얇은 것이고, 그 사실이
+      화면에 보여야 한다 — `out_warnings` 로 올린다.
+    ⚠ `PermissionError` 는 **그대로 올린다**. 허용목록/워커 문제는 '파일이 없다' 와 조치가
+      다르고, 이 저장소는 확인 실패를 부재로 접지 않는다(`docgen_preflight._probe_path`
+      와 같은 규약).
+    """
     resolver = get_resolver()
     path = (req_path or "").strip()
+    source = "요청"
     if not path:
         cfg = _load_meta_from_config(project_id)
         path = str((cfg.get("template_paths", {}) or {}).get(config_key) or "").strip()
+        source = "config"
     if not path:
         return None
-    return resolver.read_bytes(path)
+    try:
+        return resolver.read_bytes(path)
+    except FileNotFoundError:
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[evidence] {config_key}: {source} 에 등록된 파일이 없어 이 증빙 "
+                f"없이 만들었습니다 — {path}"
+            )
+        return None
+
+
+def _discover_metric_report_bytes(resolver: Any, log_folders: list[str]) -> list[bytes]:
+    """라운드 102 (2026-06-24) — IT 로그 폴더에서 VectorCAST Metric report HTML 자동 발견.
+
+    SwITCV Functions O/X(커버리지 달성) + Function Called 실측 소스. 회사 PV IT 로그는
+    각 폴더에 `*_Metric_report_*.html`(APP) 또는 `*_IT_*.html`(BOOT, 일반명) 형태로
+    Metrics Report를 둔다(04.MetricsReport 서브폴더 아님). 파일명이 일정치 않아
+    content-detect: .html을 읽어 parse_hmr_html ok 여부로 판별. 폴더당 html 소수라
+    저렴. 실패/부재는 silent(값 정확도 미적용 → 기존 동작 fallback).
+    """
+    import os as _os
+
+    from backend.services.vcast_hmr_parser import parse_hmr_html as _php
+    out: list[bytes] = []
+    # 라운드 102 reviewer X6 — log_folders는 config 순서(APP→BOOT) 결정적이나,
+    # 폴더 내 list_dir 반환 순서는 드라이브/OS 의존(NTFS mtime/SMB 서버순). 폴더당
+    # metric html은 보통 1개라 positional 매칭에 영향 없지만, 다중 html 폴더 대비
+    # 사전순 정렬로 결정성 확보 (동명함수 positional 매칭 안정화).
+    for folder in log_folders or []:
+        try:
+            entries = sorted(resolver.list_dir(folder), key=lambda x: str(x).lower())
+        except Exception:
+            continue
+        for e in entries:
+            # reviewer W1 — basename만 추출해 `..` 등 traversal 토큰 원천 차단
+            # (defense-in-depth; resolver 게이트와 별개 레이어).
+            base = _os.path.basename(str(e).rstrip("\\/").replace("\\", "/"))
+            if not base.lower().endswith((".html", ".htm")):
+                continue
+            full = e if (e.startswith("U:") or e.startswith("/")) else folder.rstrip("\\/") + "\\" + base
+            try:
+                data = resolver.read_bytes(full)
+            except Exception:
+                continue
+            if not data:
+                continue
+            try:
+                if _php(data).ok:
+                    out.append(data)
+            except Exception:
+                continue
+    return out
 
 
 def _resolve_swit_swuds_path(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
@@ -271,8 +349,11 @@ def _resolve_swit_log_folders(req: "SwITBuildRequest | SwITSitrBuildRequest") ->
     SwUT `_resolve_swut_log_folders` 패턴 동일. 우선순위:
         1. req.log_folders (비어있지 않으면 — APP+BOOT 다중 폴더)
         2. req.log_folder (기존 단일)
-        3. config `swit_log_folders` (신규 list 키 — KJPDS02 PV APP+BOOT)
-        4. config `swit_log_folder` (기존 단일 str) / log_folders dict 키
+        3·4. config 폴백 — `swut_meta_resolver.config_log_folders` 단일 출처
+             (SwIT 만 있는 `log_folders` dict 폴백도 거기 담겨 있다)
+
+    ⚠ SwUT 라우터와 같은 이유로 config 를 직접 읽지 않는다 — preflight 가 세 번째
+    복제가 될 뻔했고, 갈라지면 게이트가 거짓 차단을 낸다.
     """
     if req.log_folders:
         folders = [f for f in req.log_folders if f]
@@ -280,20 +361,9 @@ def _resolve_swit_log_folders(req: "SwITBuildRequest | SwITSitrBuildRequest") ->
             return folders
     if req.log_folder:
         return [req.log_folder]
-    cfg = _load_meta_from_config(req.project_id)
-    cfg_list = cfg.get("swit_log_folders")
-    if isinstance(cfg_list, (list, tuple)):
-        folders = [str(f) for f in cfg_list if f]
-        if folders:
-            return folders
-    log_folders = cfg.get("log_folders", {}) or {}
-    single = (
-        cfg.get("swit_log_folder")
-        or log_folders.get("swit")
-        or log_folders.get("integration")
-        or None
-    )
-    return [str(single)] if single else []
+    from backend.services.swut_meta_resolver import config_log_folders
+    # config 읽기는 **이 모듈의 캐시 wrapper** 로 한다(테스트 seam 보존).
+    return config_log_folders(_load_meta_from_config(req.project_id), "swit")
 
 
 def _resolve_swit_log_folder(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str | None:
@@ -358,17 +428,11 @@ def _build_result_to_response(
                 ensure_ascii=True,
             )
 
-    _warnings_str = json.dumps(warnings, ensure_ascii=True)
-    if len(_warnings_str) > 1024:
-        # F6 Round 5 NF3 fix: SwUT와 동일 `warning_categories` 단일 출처 사용.
-        from backend.services.warning_categories import format_breakdown_label
-        _warnings_str = json.dumps(
-            [
-                f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
-                f"breakdown: {format_breakdown_label(warnings)})"
-            ],
-            ensure_ascii=True,
-        )
+    # 예산 초과 시 **들어가는 만큼 싣고 못 실은 개수를 말한다** — 예전엔 본문을 통째로
+    # 버려서, 방금 낸 경고가 사용자에게 닿지 않았다(2026-08-25 SwITCR 17건 실측).
+    # 판정/포맷은 `warning_categories` 단일 출처 — 라우터 3곳이 갈라지지 않게.
+    from backend.services.warning_categories import warnings_header_json
+    _warnings_str = warnings_header_json(warnings)
 
     headers = {
         "Content-Disposition": (
@@ -392,9 +456,18 @@ def _build_result_to_response(
 # 38차 I2: _run_build_safely 함수 제거 → backend/routers/_safety.run_build_safely 사용.
 
 
-def _resolve_swuds_function_ids(req: SwITBuildRequest) -> set[str] | None:
-    """Thin wrapper — SwUT 32차 + 49차 정책 동일 (54차 DRY 통합)."""
-    return _resolver_resolve_swuds_function_ids(req, req.project_id)
+def _resolve_swuds_function_ids(
+    req: SwITBuildRequest,
+    out_warnings: list[str] | None = None,
+) -> set[str] | None:
+    """Thin wrapper — SwUT 32차 + 49차 정책 동일 (54차 DRY 통합).
+
+    `out_warnings` 는 2026-08-04 추가 — SwUT 쪽과 lockstep. 상세는
+    `swut_meta_resolver.resolve_swuds_function_ids` docstring.
+    """
+    return _resolver_resolve_swuds_function_ids(
+        req, req.project_id, out_warnings=out_warnings,
+    )
 
 
 def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
@@ -465,13 +538,23 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     # 51차 — Coverage 양식 전용 path 사용 (config fallback: swit_coverage_template).
     template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_swit_coverage_meta(req)
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: SwUDS 읽기/parse 실패 사유 누적 (SwUT 와 lockstep).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report 매핑.
     # F6 Round 1 W1: hmr 실패 사유 누적 (silent 차단).
     _hmr_warnings: list[str] = []
     hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
         req, req.project_id, out_warnings=_hmr_warnings,
     )
+    # 라운드 102 (2026-06-24) — IT 로그 폴더의 Metric report HTML 자동 발견 →
+    # Functions O/X(달성) + Function Called 실측 산출 소스 (HMR 명시 path 없어도 동작).
+    _metric_report_bytes = _discover_metric_report_bytes(resolver, log_folders)
+    if _metric_report_bytes:
+        _hmr_warnings.append(
+            f"[swit-cov] Metric report 자동발견 {len(_metric_report_bytes)}건 "
+            "(IT 로그 폴더) — Functions 달성+Function Calls 실측 적용"
+        )
     # 60차 F6-A / 라운드 73 T807: SwITS spec 전체를 Traceability에 활용.
     # SwITCV도 SITR과 동일하게 spec parse 실패 사유를 warnings로 노출한다.
     _swits_warnings: list[str] = []
@@ -482,13 +565,33 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         session, meta, template_bytes, swuds_function_ids=swuds_fn_ids,
         hmr_html_bytes=hmr_html_bytes,
         swits_map=swits_map,
+        hmr_html_bytes_list=_metric_report_bytes or None,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)
     if _swits_warnings:
         result.warnings.extend(_swits_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT 빌드 실패 (ok=False)")
+    # Quality DB recording (non-fatal). SwIT Coverage 빌더 = 통합 커버리지 출처.
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "swit", result.summary,
+            project_root=str(getattr(req, "project_id", "") or ""),
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
+            meta={
+                "asil_level": str(getattr(meta, "asil_level", "") or ""),
+                "kind": "coverage",
+                "release_sw_version": str(getattr(req, "release_sw_version", "") or ""),
+            },
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwIT quality record skipped (non-fatal)")
     return _build_result_to_response(
         content_io=result.xlsx_io,
         filename=result.filename,
@@ -511,6 +614,41 @@ async def build_swit_coverage(
             run_build_safely, series="swit", kind="coverage",
             build_fn=_do_swit_coverage_build, req=req, logger=_logger,
         )
+
+
+def _record_test_quality(
+    req: SwITBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str,
+) -> None:
+    """SITR / SwITCR 빌드 1회를 Quality DB 에 기록 (non-fatal) — swut.py `_record_test_quality` 대칭.
+
+    Coverage 빌드에만 기록이 있어 SITR 은 만들어도 이력이 남지 않았다. doc_type 을
+    `swit` 이 아니라 `sitr` 로 두는 이유는 summary 스키마가 커버리지와 달라서다
+    (`total/tested/passed/failed` — evaluator.evaluate_test_result 참조).
+
+    **SwITCR 이 같은 상태였다**(2026-08-21). 종합결과서는 `switcr` doc_type 으로 기록한다 —
+    총 TC 키가 SITR 의 `total` 이 아니라 `total_tcs`(`swit_comprehensive_aggregator.py:1478`)
+    라 시험 결과 평가기에 넣으면 분모가 0 으로 접혀 실행률이 폭주한다
+    (evaluator.evaluate_comprehensive_result 참조).
+
+    호출부가 셋이다(SITR 표준/spec-based + SwITCR). `req` 타입을 부모 `SwITBuildRequest` 로
+    넓힌 것도 그래서다 — `SwITSitrBuildRequest` 는 그 하위라 그대로 들어온다.
+    **doc_type 에 기본값을 두지 않는 것도 의도다**: 빠뜨린 호출이 조용히 `sitr` 로 기록되면
+    종합결과서가 SITR 행을 덮어쓴다.
+    """
+    try:
+        from workflow.quality.recorder import record_test_result_run
+        record_test_result_run(
+            doc_type, summary,
+            project_id=str(getattr(req, "project_id", "") or ""),
+            asil_level=str(getattr(meta, "asil_level", "") or ""),
+            release_sw_version=str(getattr(req, "release_sw_version", "") or ""),
+            # 화면이 아는 프로젝트 축을 그대로 넘긴다. 비면 recorder 가 project_id 에서
+            # 추측하는데 그 추측이 틀리는 실환경이 있다(schemas.py `scm_id` 주석).
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("%s quality record skipped (non-fatal)", doc_type.upper())
 
 
 def _is_sitr_spec_based(req: SwITSitrBuildRequest, cfg: dict[str, Any]) -> bool:
@@ -584,6 +722,7 @@ def _do_swit_sitr_build_spec_based(
             status_code=500,
             detail=f"spec-based SwITR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
+    _record_test_quality(req, meta, result.summary, doc_type="sitr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -623,7 +762,9 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
 
     # 51차 — SITR 양식 전용 path 사용 (config fallback: swit_sitr_template).
     template_bytes = _read_template_bytes(req.sitr_template_path, req.project_id, "sitr")
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: 실패 사유 누적 (SwIT coverage / SwUT 3경로와 lockstep).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-A: SwITS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
     # F6 Round 1 W1: spec 실패 사유 누적 (silent 차단).
     _swuts_warnings: list[str] = []
@@ -635,11 +776,15 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _swuts_warnings:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
+    _record_test_quality(req, meta, result.summary, doc_type="sitr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -689,17 +834,24 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
     swits_map = _resolver_resolve_swuts_test_specs(
         req, req.project_id, out_warnings=_swits_warnings,
     )
+    # ⚠ 넷 다 **선택** 입력이다. 등록만 돼 있고 파일이 없어도 빌드는 계속하되, 빠진
+    #   증빙을 경고로 남긴다(아래에서 `result.warnings` 로 합류).
+    _optional_warnings: list[str] = []
     switcv_bytes = _read_optional_config_file(
         req.switcv_path, req.project_id, "swit_coverage_template",
+        out_warnings=_optional_warnings,
     )
     switr_bytes = _read_optional_config_file(
         req.switr_path, req.project_id, "swit_sitr_template",
+        out_warnings=_optional_warnings,
     )
     fault_injection_bytes = _read_optional_config_file(
         req.fault_injection_result_path, req.project_id, "fault_injection_result",
+        out_warnings=_optional_warnings,
     )
     switcr_reference_bytes = _read_optional_config_file(
         getattr(req, "switcr_reference_path", ""), req.project_id, "switcr_reference",
+        out_warnings=_optional_warnings,
     )
     result: SwitcrBuildResult = build_switcr_report(
         session,
@@ -713,8 +865,11 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
     )
     if _swits_warnings:
         result.warnings.extend(_swits_warnings)
+    if _optional_warnings:
+        result.warnings.extend(_optional_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwITCR build failed (ok=False)")
+    _record_test_quality(req, meta, result.summary, doc_type="switcr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -765,6 +920,34 @@ async def swit_consistency_check(
     return await asyncio.to_thread(
         run_consistency_safely, series="swit",
         check_fn=_do_swit_consistency_check, req=req, logger=_logger,
+    )
+
+
+def _do_swit_doc_summary(req: SwITDocSummaryRequest) -> dict[str, Any]:
+    """단일 산출물(Coverage xlsx | SITR xlsm) bytes를 읽어 해당 결과 요약만 추출(비교 없음).
+
+    정합성 검증(_do_swit_consistency_check)은 두 문서를 cross-validate하지만, 여기서는
+    빌더 산출물 1개만으로 그 문서의 결과(미커버 함수·Exception·Final Result 또는
+    SITR 통과/실패/미실행/Deviation)를 바로 본다.
+    """
+    resolver = get_resolver()
+    data = resolver.read_bytes(req.path)
+    if req.kind == "coverage":
+        return summarize_swit_coverage_report(data)
+    return summarize_swit_test_report(data)
+
+
+@router.post("/doc/summary")
+async def swit_doc_summary(req: SwITDocSummaryRequest) -> dict[str, Any]:
+    """SwITCV Coverage 또는 SITR 산출물 1개를 직접 파싱해 결과 요약 반환.
+
+    35차 정합성 비교(/consistency/check)의 단일 문서판 — 두 문서 쌍이 없어도
+    한 산출물의 결과를 표시. read-only, Semaphore 미적용.
+    """
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swit",
+        check_fn=_do_swit_doc_summary, req=req, logger=_logger,
+        req_summary=f"doc kind={req.kind} path={req.path[:80]}",
     )
 
 

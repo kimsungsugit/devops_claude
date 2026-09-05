@@ -60,6 +60,15 @@ class CoverageStats:
     covered: int = 0
     total: int = 0
     coverage_pct: float = 0.0  # 0.0~1.0
+    # ⚠ 2026-07-29 — 이 타입은 **실측값과 합성값을 함께 나른다**. 합성값은 커버리지를
+    # 잰 결과가 아니라 "로그에 존재함/없음" 을 1/1·0/1 로 표현한 표식이다
+    # (`swit_coverage_aggregator._align_function_rows_to_template`,
+    #  `flatten_sub_functions`). 구분자가 없어서 소비처가 둘을 같이 합산했고, 실측:
+    #     HMR 미제공(전부 합성) → overall_statement_pct = **100.0**  ← 측정 0건인데
+    #     실측 30% + 합성 19개  → 41.18  (11.18%p 부풀림)
+    # 100.0 은 evaluator 의 statement_coverage_pct(threshold=100) 게이트를 통과한다.
+    # 값 자체는 그대로 두되(문서 O/X 표기가 이걸 쓴다) 집계에서 걸러낼 수 있게 표시만 한다.
+    measured: bool = True
 
     @property
     def passed(self) -> bool:
@@ -81,6 +90,12 @@ class FunctionCoverage:
     statement: CoverageStats = field(default_factory=CoverageStats)
     branch: CoverageStats = field(default_factory=CoverageStats)
     mcdc: CoverageStats = field(default_factory=CoverageStats)
+    # 2026-07-23 — AggregateCoverage 'Functions'(함수 진입) 컬럼 전용 필드. 과거
+    # extract_aggregate_coverage 가 %-셀을 위치로 배정해 이 컬럼을 mcdc 로 오표기했다
+    # (IT 리포트 3번째 컬럼=Functions 인데 mcdc 로 → ISO 26262 거짓 MC/DC). 헤더 기반
+    # 매핑으로 분리 보관. 대시보드 권위 함수커버리지는 Metric report grand_totals.functions
+    # (HMR, 헤더인식)라 여긴 파서 정확성/미오표기 보장용 (기본 미표시). backward-compat default.
+    function_coverage: CoverageStats = field(default_factory=CoverageStats)
     complexity: int = 0
     # 59차 F4-C 신규 — KJPDS02 v1.01 양식 row 6 'Function Calls' coverage.
     # v2.02/v3.01 양식에서는 빈 CoverageStats (default) — writer가 skip.
@@ -97,6 +112,11 @@ class FunctionCoverage:
     # (예: 'SysOs_Main'). sub_functions: parent module name. c_parser only: 빈 string
     # (fc.file basename로 대체). backward-compat default `""`.
     component_name: str = ""
+    # 2026-06-24 — 소속 VectorCAST 환경명 (예 'SwUT_01_Lib_sha256'). SwUTCV
+    # 4.Coverage 'Component' 열 stamp source. 회사 감사본은 env_name.upper()
+    # (예 SWUT_01_LIB_SHA256)를 환경별 세로병합 — 레퍼런스 직접 비교 확인.
+    # aggregate_session flatten 시 env.env_name 주입. 미주입/비-spec 시 빈 string.
+    env_name: str = ""
 
 
 @dataclass
@@ -221,6 +241,16 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     function_gap_lines: dict[str, dict[str, list]] = {}  # 2026-06-18 Item 2
 
     for env in session.environments:
+        # 2026-06-24 — flatten 시 각 함수에 소속 환경명 주입 (SwUTCV Component
+        # 환경별 세로병합 source). 각 fc는 정확히 한 env.function_coverage 소속이라
+        # in-place set 안전 (idempotent guard + 신규 top-level str 필드, 빌드별 독립
+        # session). **dataclasses.replace 불가**: SwIT 등은 fc에 setattr로 동적 속성
+        # (swit_function_present / swit_template_no_value 등)을 붙여 aggregate_session을
+        # 통과시키는데, replace는 dataclass 필드만 복사해 이 속성들을 소실시켜 SwIT
+        # 커버리지 'X' 마킹이 깨진다(reviewer Critical#1 권고는 이 이유로 기각). None 방어(or []).
+        for _fc in (env.function_coverage or []):
+            if not getattr(_fc, "env_name", ""):
+                _fc.env_name = env.env_name
         all_functions.extend(env.function_coverage)
         for tc_name, tc_list in env.test_cases.items():
             total += len(tc_list) if tc_list else 1
@@ -297,6 +327,209 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         # 2026-06-18 Item 2 — 함수명→{statements/branches: [(line, src)]} 미커버 line.
         "function_gap_lines": function_gap_lines,
         "deviated": 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Final Test Result 판정 — SUTR / SITR / Coverage 공용 단일 출처
+# ---------------------------------------------------------------------------
+#
+# 회귀 대상(2026-07-29 실측): `Final Test Result` 셀에 **집계와 무관한 정적 상수**가
+# 찍히고 있었다. 각 BuildMeta 의 `final_test_result` 기본값("OK" / Coverage 는 "PASS")이
+# 그대로 시트에 들어가는데, 라우터·워크플로 어디에서도 그 값을 계산해 대입하지 않는다
+# (grep 0건 — 테스트조차 정적 기본값을 단언하고 있었다). 결과:
+#
+#     시나리오                     Actual Pass ratio    Final Test Result
+#     전부 실패 (passed=0/failed=5)          0.0                   OK   ← 거짓 PASS
+#     전부 미실행 (tested=0)         (사용자 입력 필요)              OK   ← 증거 0인데 OK
+#
+# 한 문서 안에서 "Pass ratio 0.0" 과 "Final Test Result: OK" 가 나란히 찍혔고 경고도
+# 0건이었다. ISO 26262 산출물에서 이건 라이브 거짓 PASS 다.
+#
+# 판정을 여기 한 곳에만 둔다 — 같은 판정을 여러 빌더에 복제했다가 한쪽만 고쳐져
+# 다른 쪽이 잠복한 전례가 반복됐다(`_is_hsis_data_row`, `_ratchet_core`,
+# `generators/_artifact_check.py` 단일화).
+
+# 문서별 판정 어휘. key = 각 BuildMeta 의 기존 `final_test_result` 기본값(= 긍정 토큰).
+# 값 = (긍정, 부정, 미실행). 기존 기본값을 긍정 토큰으로 재사용하므로 **전부 통과인
+# 산출물은 오늘과 글자 그대로 같은 값**이 나온다(하위호환).
+_VERDICT_VOCAB: dict[str, tuple[str, str, str]] = {
+    "OK": ("OK", "NG", "N/A"),        # SUTR / SITR / comprehensive
+    "PASS": ("PASS", "FAIL", "N/A"),  # Coverage
+    "Pass": ("Pass", "Fail", "N/A"),
+}
+
+
+def compute_final_result(
+    agg: dict[str, Any],
+    *,
+    positive_token: str = "OK",
+) -> dict[str, Any]:
+    """실측 집계에서 Final Test Result 를 도출한다.
+
+    Args:
+        agg: `aggregate_session()` 결과 (`tested`/`passed`/`failed`/`not_executed`)
+        positive_token: 이 문서의 "합격" 표기. 각 BuildMeta 의 기존 기본값을 그대로 넘긴다.
+
+    Returns:
+        {"verdict": "ok"|"ng"|"na", "display": str, "reason": str}
+
+    판정 순서(순서가 의미를 바꾼다):
+        1. 실행된 TC 가 0 → `na`. **`ok` 아님** — 아무것도 안 돌렸으면 합격 근거가 없다.
+           여기서 `ng` 로 쓰면 "시험했는데 실패" 라는 다른 거짓말이 된다.
+        2. failed 또는 not_executed 가 1건이라도 있으면 → `ng`.
+        3. 그 외 → `ok`.
+
+    ⚠ 승인 deviation 은 이 값을 **바꾸지 않는다**. deviation 은 별도 release gate
+    후보이지 raw 판정의 수정 수단이 아니다(계획서 UTR-001 원칙).
+    """
+    pos, neg, na = _VERDICT_VOCAB.get(
+        str(positive_token or "").strip(),
+        # 미지 어휘: 긍정 토큰만 그대로 쓰고 부정은 보수적으로 NG. 긍정과 절대 같지 않게.
+        (str(positive_token or "OK"), "NG", "N/A"),
+    )
+
+    def _n(key: str) -> int:
+        try:
+            return int(agg.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    tested = _n("tested")
+    failed = _n("failed")
+    not_executed = _n("not_executed")
+
+    if tested <= 0:
+        return {
+            "verdict": "na",
+            "display": na,
+            "reason": f"실행된 TC 0건(총 {_n('total')}건, 미실행 {not_executed}건) — 합격 근거 없음",
+        }
+    if failed > 0 or not_executed > 0:
+        return {
+            "verdict": "ng",
+            "display": neg,
+            "reason": f"실패 {failed}건 / 미실행 {not_executed}건 (실행 {tested}건)",
+        }
+    return {
+        "verdict": "ok",
+        "display": pos,
+        "reason": f"실행 {tested}건 전부 통과",
+    }
+
+
+def compute_coverage_final_result(
+    function_rows: list,
+    *,
+    positive_token: str = "PASS",
+) -> dict[str, Any]:
+    """Coverage 문서용 Final Test Result — **커버리지 달성** 기준(pass/fail 아님).
+
+    ⚠ `compute_final_result` 와 분리한 이유: Coverage 산출물의 Final Test Result 는
+    "TC 가 통과했는가" 가 아니라 "커버리지가 채워졌는가" 다. 실제로 KJPDS02 v1.01
+    템플릿의 해당 셀은 `=IF(AND(B13=C9,...),"OK","NG")` 라는 **커버리지 비교 수식**이다.
+    두 문서에 같은 pass/fail 판정을 쓰면 의미가 뒤바뀐다.
+
+    판정:
+        1. 실측(`total > 0`) 함수가 하나도 없으면 → `na`. 측정 자체를 안 했다.
+        2. `total > 0 and covered < total` 인 함수가 하나라도 있으면 → `ng`.
+           (술어는 `backend/routers/swut.py::_coverage_stats_incomplete` 와 동일 규칙)
+        3. 그 외 → `ok`.
+
+    목표치(%) 대비 판정이 아니라 **미달 함수 존재 여부**로 본다 — 목표치보다 보수적이고,
+    저장소가 이미 쓰는 술어와 같아서 두 판정이 갈라지지 않는다.
+    """
+    pos, neg, na = _VERDICT_VOCAB.get(
+        str(positive_token or "").strip(),
+        (str(positive_token or "PASS"), "NG", "N/A"),
+    )
+
+    measured = 0
+    incomplete: list[str] = []
+    for fc in function_rows or []:
+        for attr in ("statement", "branch"):
+            st = getattr(fc, attr, None)
+            total = int(getattr(st, "total", 0) or 0)
+            covered = int(getattr(st, "covered", 0) or 0)
+            # 합성 표식(measured=False)은 달성 판정 근거가 아니다 — 전부 합성이면 `na`.
+            if total <= 0 or not getattr(st, "measured", True):
+                continue
+            measured += 1
+            if covered < total:
+                name = str(getattr(fc, "name", "") or getattr(fc, "unit_id", "") or "?")
+                if name not in incomplete:
+                    incomplete.append(name)
+
+    if measured == 0:
+        return {
+            "verdict": "na",
+            "display": na,
+            "reason": f"실측 커버리지 0건(함수 {len(function_rows or [])}개) — 달성 근거 없음",
+        }
+    if incomplete:
+        return {
+            "verdict": "ng",
+            "display": neg,
+            "reason": (
+                f"미달 함수 {len(incomplete)}개 (예: {', '.join(incomplete[:5])})"
+            ),
+        }
+    return {
+        "verdict": "ok",
+        "display": pos,
+        "reason": f"실측 {measured}개 축 전부 100%",
+    }
+
+
+def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
+    """FunctionCoverage list → 전체 구문/분기/MC-DC 커버리지 % (0~100).
+
+    Quality DB 기록용 roll-up. **total>0 인 함수만 합산** — c_parser-only 함수는
+    covered/total=0 이라 분모를 부풀려 커버리지를 가짜로 낮춘다. VectorCAST 실측분만
+    ISO 26262 coverage 로 인정. MC-DC 는 FunctionCoverage.mcdc(:83)에 파싱돼 있으나
+    그동안 어느 summary 에도 노출 안 되던 dead 데이터 — 여기서 표면화한다.
+    """
+    def _rows(attr: str) -> list:
+        # `measured=False` 는 커버리지를 잰 값이 아니라 존재 표식(1/1·0/1)이다 — 합산 제외.
+        return [
+            getattr(fc, attr) for fc in function_rows
+            if getattr(fc, attr).total > 0 and getattr(getattr(fc, attr), "measured", True)
+        ]
+
+    def _pct(attr: str) -> float | None:
+        rows = _rows(attr)
+        tot = sum(st.total for st in rows)
+        if tot <= 0:
+            # ⚠ 예전엔 0.0 이었다 — "측정 안 함"과 "실측 0%"가 같은 값이 됐다.
+            # None = 미측정. 게이트는 이 값을 **미평가**로 다뤄야 한다(0 으로 강등해
+            # FAIL 시키는 것도 정직하지 않다).
+            return None
+        return round(sum(st.covered for st in rows) / tot * 100, 2)
+
+    # deep-review C1 — 라벨 무관 데이터 가드: mcdc 컬럼이 함수-진입 커버리지로 퇴화(전 함수
+    # pairs.total=1·분기 변동)했으면 Quality DB overall_mcdc_pct 를 거짓값(예 53%) 대신 0 으로
+    # 중화(진짜 MC/DC 아님을 정직 반영 — ASIL D 100% 게이트는 어차피 미충족이나 값 위조 차단).
+    _mcdc_degenerate = _is_degenerate_pairs(
+        [fc.mcdc.total for fc in function_rows],
+        [fc.branch.total for fc in function_rows],
+    )
+    return {
+        "overall_statement_pct": _pct("statement"),
+        "overall_branch_pct": _pct("branch"),
+        "overall_mcdc_pct": 0.0 if _mcdc_degenerate else _pct("mcdc"),
+        "functions_with_coverage": sum(1 for fc in function_rows if fc.statement.total > 0),
+        # 분모가 몇 개 함수에서 왔는지 — 백분율만 보면 "1개 함수 100%"와
+        # "200개 함수 100%"가 같아 보인다. 미측정(None)과도 함께 읽어야 한다.
+        "measured_functions": {
+            "statement": len(_rows("statement")),
+            "branch": len(_rows("branch")),
+            "mcdc": len(_rows("mcdc")),
+        },
+        # 실측 아닌 존재-표식으로 채워진 행 수(집계에서 제외된 분량).
+        "synthesized_rows": sum(
+            1 for fc in function_rows
+            if not getattr(fc.statement, "measured", True)
+        ),
     }
 
 
@@ -440,8 +673,101 @@ def _parse_metric_cell(text: str) -> CoverageStats:
     return CoverageStats(covered=covered, total=total, coverage_pct=pct / 100.0)
 
 
-def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage], FunctionCoverage]:
+def _classify_metric_label(label: str) -> str | None:
+    """AggregateCoverage metric 컬럼 헤더 라벨 → FunctionCoverage 필드명(또는 None=미인식).
+
+    2026-07-23 안전 fix — 과거 파서는 %-셀을 순서대로 statement/branch/mcdc 로 **위치 배정**해,
+    IT AggregateReport 의 3번째 컬럼(Functions=함수 진입 커버리지)을 MC/DC 로 오표기했다
+    (ISO 26262 거짓 안전지표). 이 함수는 실제 헤더 라벨로 컬럼을 판별한다.
+
+    ⚠ 순서 주의: 'Function Calls' 가 'Function' 을 포함하므로 call 을 먼저 판정.
+    미인식 라벨은 None 을 돌려 **절대 mcdc 로 추정하지 않는다**(fail-safe).
+
+    2026-07-23 deep-review W1 — VectorCAST 의 실제 MC/DC 컬럼 용어는 **'Pairs'** 다
+    (build-bundle 헤더인식 파서 jenkins_adapter.parse_vcast_metrics_report 와 일관). 'Pairs'
+    를 인식 못 하면 진짜 MC/DC 를 침묵 드롭하므로 'pair' 도 mcdc 로 매핑한다('call' 은 위에서
+    이미 처리돼 'function calls' 오인 없음). 단 라벨은 양방향 불신 대상이라, 라벨로 mcdc 에
+    배정돼도 데이터 분포는 _is_degenerate_pairs 로 재검증(퇴화 함수-진입이면 중화)된다.
+    """
+    n = re.sub(r"\s+", "", (label or "").lower())
+    if not n:
+        return None
+    if "call" in n:                         # "functioncalls" / "calls"
+        return "function_calls_coverage"
+    if "function" in n:                     # "functions"
+        return "function_coverage"
+    if ("mc" in n and "dc" in n) or "pair" in n:   # "mcdc"/"mc/dc"/"mc|dc"/"mc-dc"/"pairs"
+        return "mcdc"
+    if "statement" in n:                    # "statements" 또는 결합 "statement+branch"
+        return "statement"
+    if "branch" in n:
+        return "branch"
+    return None
+
+
+def _is_degenerate_pairs(pairs_totals: list, branch_totals: list) -> bool:
+    """MC/DC(pairs) 컬럼이 실제 MC/DC 가 아니라 '함수-진입 커버리지'로 퇴화했는지 판정.
+
+    2026-07-23 deep-review C1 — 헤더 라벨('MC/DC'·'Pairs')은 양방향으로 신뢰 불가
+    (MC/DC→거짓유입, Pairs→진짜드롭)하므로 **데이터 분포로 검증**한다. 퇴화 지문:
+    **전 함수 pairs.total 이 정확히 1**(무결정 함수의 0 도, 복합조건 함수의 ≥2 도 없는 단일
+    스파이크) = 함수당 1 = 함수-진입을 pairs 로 위장. 진짜 MC/DC 는 무결정 함수(pairs=0)와
+    복합조건 함수(pairs≥2)가 섞여 분포가 반드시 흩어진다.
+
+    오탐 방지 3중 가드:
+    - n<8: 소표본 우연 방지(판정 보류→False)
+    - set(pairs.total)!={1}: 0 또는 ≥2 가 하나라도 있으면 진짜(→False)
+    - max(branch.total)<=2: 전부 단일-if(branch=2,pair=1)인 자명 코드베이스는 정당하므로 제외.
+      분기>2 함수가 있는데 전 함수 pairs=1 이면 진짜 MC/DC 로 물리적 불가(다중결정→pairs≥2 강제,
+      switch→pairs=0) → 퇴화로 확정.
+    """
+    if len(pairs_totals) < 8:
+        return False
+    if {int(p or 0) for p in pairs_totals} != {1}:
+        return False
+    return max((int(b or 0) for b in branch_totals), default=0) > 2
+
+
+def _map_metric_columns(table, warn) -> list[str | None] | None:
+    """table 헤더의 col_metric 라벨을 순서대로 필드에 매핑. 헤더 미검출 시 None(=위치 폴백).
+
+    header row = %-값이 아닌 라벨 텍스트를 담은 col_metric ``<th>`` 를 가진 첫 tr(thead 우선).
+    각 index → 필드명(또는 None=미인식컬럼). 미인식 컬럼은 warn 후 None(배정 안 함).
+    """
+    thead = table.find("thead")
+    search_rows = thead.find_all("tr") if thead is not None else table.find_all("tr")
+    header_ths: list = []
+    for tr in search_rows:
+        ths = [th for th in tr.find_all("th") if "col_metric" in (th.get("class") or [])]
+        if not ths:
+            continue
+        # 값(%-패턴) 행(TOTALS 등)은 헤더가 아니므로 skip — 라벨 행만 채택
+        if any(_RE_PCT.search(th.get_text(" ", strip=True)) for th in ths):
+            continue
+        header_ths = ths
+        break
+    if not header_ths:
+        warn("[aggregate-coverage] col_metric 헤더 미검출 — 위치기반 폴백(statement/branch만, MC/DC 미측정)")
+        return None
+    mapping: list[str | None] = []
+    for th in header_ths:
+        label = th.get_text(" ", strip=True)
+        fld = _classify_metric_label(label)
+        if fld is None:
+            warn(f"[aggregate-coverage] 미인식 metric 컬럼 '{label}' — 배정 안 함(mcdc 추정 금지)")
+        mapping.append(fld)
+    return mapping
+
+
+def extract_aggregate_coverage(
+    html_bytes: bytes,
+    out_warnings: list | None = None,
+) -> tuple[list[FunctionCoverage], FunctionCoverage]:
     """SWTE AggregateCoverage HTML → per-function metrics + GRAND TOTALS.
+
+    2026-07-23 — 컬럼을 **헤더 라벨 기반**으로 매핑한다(과거 위치 배정은 IT 3번째 컬럼
+    Functions 를 mcdc 로 오표기해 거짓 MC/DC 를 냈다). ``mcdc`` 는 헤더가 실제 MC/DC 인
+    컬럼에서만 채운다. ``out_warnings`` 가 주어지면 미인식/폴백 사유를 append.
 
     Returns:
         (functions, grand_total) — functions 리스트와 합산 행.
@@ -467,6 +793,13 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     if table is None:
         return ([], FunctionCoverage())
 
+    def _warn(msg: str) -> None:
+        if out_warnings is not None:
+            out_warnings.append(msg)
+
+    # 2026-07-23 안전 fix — 헤더 기반 컬럼 매핑(None 이면 위치 폴백). mcdc 는 실제 MC/DC 컬럼에서만.
+    metric_field_by_idx = _map_metric_columns(table, _warn)
+
     functions: list[FunctionCoverage] = []
     grand_total = FunctionCoverage(unit_id="GRAND_TOTALS", name="GRAND TOTALS")
 
@@ -479,6 +812,7 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     # fix: 빈 first cell이면 이전 component_name 유지 + second cell (Subprogram)이 함수명.
     rows = table.find_all("tr")
     current_component = ""
+    _asym_warned = False  # 헤더-데이터 col_metric 비대칭 경고 1회만(flood 방지)
     for row in rows:
         cells = row.find_all(["th", "td"])
         if len(cells) < 4:
@@ -511,7 +845,6 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
             continue
 
         metric_cells = [c.get_text(" ", strip=True) for c in cells]
-        metrics = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
 
         # 라운드 77 T1202 — component_name 명시 주입 (R10 C3 anomaly fix).
         fc = FunctionCoverage(
@@ -526,12 +859,41 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
             fc.complexity = cplx
         except StopIteration:
             pass
-        if len(metrics) >= 1:
-            fc.statement = metrics[0]
-        if len(metrics) >= 2:
-            fc.branch = metrics[1]
-        if len(metrics) >= 3:
-            fc.mcdc = metrics[2]
+
+        # 2026-07-23 — 헤더 기반 metric 배정. mcdc 는 실제 MC/DC 컬럼에서만 채운다
+        # (과거 metrics[2]→mcdc 위치배정이 IT Functions 컬럼을 거짓 MC/DC 로 표기).
+        if metric_field_by_idx is not None:
+            # col_metric 셀을 순서대로 헤더 매핑 필드에 배정(빈 셀도 위치 보존 — 정렬 어긋남 방지).
+            metric_tds = [c for c in cells if "col_metric" in (c.get("class") or [])]
+            if metric_tds:
+                for _i, _td in enumerate(metric_tds):
+                    if _i >= len(metric_field_by_idx):
+                        break
+                    _fld = metric_field_by_idx[_i]
+                    if not _fld:
+                        continue
+                    _txt = _td.get_text(" ", strip=True)
+                    if _RE_PCT.search(_txt):
+                        setattr(fc, _fld, _parse_metric_cell(_txt))
+            else:
+                # deep-review W1 — 헤더엔 col_metric 이 있으나 이 데이터행 셀엔 없는 비대칭 양식.
+                # 침묵 0-커버리지(under-report) 대신 statement/branch 위치폴백(mcdc 는 안전 공백) + 1회 warn.
+                _prow = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
+                if _prow:
+                    if len(_prow) >= 1:
+                        fc.statement = _prow[0]
+                    if len(_prow) >= 2:
+                        fc.branch = _prow[1]
+                    if not _asym_warned:
+                        _asym_warned = True
+                        _warn("[aggregate-coverage] 데이터행 col_metric 부재(헤더-데이터 비대칭) — statement/branch 위치폴백, MC/DC 미측정")
+        else:
+            # 폴백(헤더 미인식): statement/branch 만 위치배정, mcdc 는 안전상 비움.
+            metrics = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
+            if len(metrics) >= 1:
+                fc.statement = metrics[0]
+            if len(metrics) >= 2:
+                fc.branch = metrics[1]
 
         if "GRAND TOTAL" in function_name.upper() or "TOTAL" in function_name.upper():
             grand_total = fc
@@ -636,7 +998,9 @@ def _parse_aggregate_coverage_via_temp(
     `MetricsBank.sub_functions` 네스트 구조 반환 — `flatten_sub_functions`에 전달.
     """
     from backend.services.vcast_parser import (
-        ReportType, VCASTVersion, parse_vcast_report,
+        ReportType,
+        VCASTVersion,
+        parse_vcast_report,
     )
     data = _read_via_resolver(resolver, html_path)
     with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tf:
@@ -700,10 +1064,13 @@ def flatten_sub_functions(
                 continue
             seen_names.add(name)
             unit_id = f"SwUFn_{safe_comp}_{mod_idx}_{order}"
+            # measured=False — executed 불리언에서 만든 1/1·0/1 표식이지 구문 커버리지
+            # 측정값이 아니다. 실측과 섞어 합산하면 분모가 함수 수로 바뀐다.
             stats = CoverageStats(
                 covered=1 if executed else 0,
                 total=1,
                 coverage_pct=1.0 if executed else 0.0,
+                measured=False,
             )
             out.append(FunctionCoverage(
                 unit_id=unit_id,
@@ -1803,7 +2170,8 @@ def collect_from_log_folder(
         )
         try:
             data = _read_via_resolver(resolver, cov_path)
-            funcs, total = extract_aggregate_coverage(data)
+            # deep-review W2 — 파서 경고(미인식 컬럼/비대칭 폴백)를 빌더 감사로그(parse_errors)에 남김.
+            funcs, total = extract_aggregate_coverage(data, out_warnings=env_data.parse_errors)
             env_data.function_coverage = funcs
             env_data.grand_total = total
             # 2026-06-18 Item 2 — 동일 HTML annotated source에서 함수별 미커버 line
@@ -2184,7 +2552,8 @@ def collect_from_jenkins_cache(
             try:
                 with open(cov_path, "rb") as fh:
                     cov_data = fh.read()
-                funcs, total = extract_aggregate_coverage(cov_data)
+                # deep-review W2 — 파서 경고를 빌더 감사로그(parse_errors)에 남김.
+                funcs, total = extract_aggregate_coverage(cov_data, out_warnings=env_data.parse_errors)
                 env_data.function_coverage = funcs
                 env_data.grand_total = total
                 # 2026-06-18 Item 2 — 미커버 line 추출 (fail-safe).

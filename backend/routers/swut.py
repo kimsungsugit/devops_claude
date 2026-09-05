@@ -39,6 +39,7 @@ from backend.schemas import (
     SwUTBrowseRequest,
     SwUTBuildRequest,
     SwUTConsistencyCheckRequest,
+    SwUTDocSummaryRequest,
 )
 from backend.services.file_resolver import get_resolver
 from backend.services.path_mode_check import check_log_folder_mode_compat
@@ -46,7 +47,11 @@ from backend.services.swut_comprehensive_aggregator import (
     SwutcrBuildMeta,
     build_swutcr_report,
 )
-from backend.services.swut_consistency_checker import check_swut_consistency
+from backend.services.swut_consistency_checker import (
+    check_swut_consistency,
+    summarize_coverage_report,
+    summarize_test_report,
+)
 from backend.services.swut_coverage_aggregator import (
     CoverageBuildMeta,
     build_coverage_report,
@@ -57,7 +62,8 @@ from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
 
-# 41차 W3: 라우터 전체 admin only — 5 endpoint 모두 require_admin 적용 (40차 통합).
+# 41차 W3: 라우터 전체 admin only — router dependencies=[Depends(require_admin)]로
+# 모든 endpoint에 일괄 적용 (신규 endpoint 자동 포함; 개수 명시는 drift 방지 위해 지양).
 router = APIRouter(
     prefix="/api/swut",
     tags=["swut"],
@@ -77,24 +83,28 @@ _BUILD_SEMAPHORE = asyncio.Semaphore(3)
 # 라우터 layer에는 monkeypatch 호환을 위한 thin wrapper만 유지.
 from backend.services import swut_meta_resolver as _resolver_mod  # noqa: E402
 from backend.services.swut_meta_resolver import (  # noqa: E402
+    TemplateNotResolved,
+    read_template_from_keys,
+)
+from backend.services.swut_meta_resolver import (  # noqa: E402
     apply_function_asil_map as _resolver_apply_function_asil_map,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_c_source_root as _resolver_resolve_c_source_root,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_function_asil_map as _resolver_resolve_swuds_function_asil_map,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_path as _resolver_resolve_swuds_path,
 )
-from backend.services.swut_meta_resolver import (
+from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
 )
 
@@ -121,8 +131,12 @@ def _resolve_swut_log_folders(req: SwUTBuildRequest) -> list[str]:
     우선순위:
         1. req.log_folders (비어있지 않으면 — APP+BOOT 다중 폴더)
         2. req.log_folder (기존 단일)
-        3. config `swut_log_folders` (신규 list 키 — config 에이전트 담당)
-        4. config `swut_log_folder` (기존 단일 str)
+        3·4. config 폴백 — `swut_meta_resolver.config_log_folders` 단일 출처
+
+    ⚠ config 폴백을 여기서 **직접 읽지 않는다**. 같은 판정이 SwIT 라우터와 생성 준비
+    점검(preflight)에도 필요한데, 복제하면 게이트가 라우터와 다른 곳을 보게 된다 —
+    실측으로 preflight 가 "경로 미지정 → 진행 불가" 를 냈는데 같은 요청의 빌드는 config
+    폴백으로 성공했다(`config_log_folders` docstring).
     """
     if req.log_folders:
         folders = [f for f in req.log_folders if f]
@@ -130,14 +144,9 @@ def _resolve_swut_log_folders(req: SwUTBuildRequest) -> list[str]:
             return folders
     if req.log_folder:
         return [req.log_folder]
-    cfg = _load_meta_from_config(req.project_id)
-    cfg_list = cfg.get("swut_log_folders")
-    if isinstance(cfg_list, (list, tuple)):
-        folders = [str(f) for f in cfg_list if f]
-        if folders:
-            return folders
-    single = cfg.get("swut_log_folder")
-    return [str(single)] if single else []
+    from backend.services.swut_meta_resolver import config_log_folders
+    # config 읽기는 **이 모듈의 캐시 wrapper** 로 한다(테스트 seam 보존).
+    return config_log_folders(_load_meta_from_config(req.project_id), "swut")
 
 
 def _resolve_swut_log_folder(req: SwUTBuildRequest) -> str | None:
@@ -238,13 +247,14 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
         key = "swutcr_template"
     else:
         key = "sutr_template"
-    tpath = tmpl_cfg.get(key, "")
-    if not tpath:
-        raise HTTPException(
-            status_code=400,
-            detail=f"template_path 미지정 + config에 '{key}' 없음 ({project_id})",
+    # 2026-08-26 — 부재를 raw FileNotFoundError(500) 로 흘리지 않는다. 준비 게이트가
+    # 내던 "같은 폴더의 실제 파일" 안내를 빌드 경로도 함께 쓴다(단일 출처).
+    try:
+        return read_template_from_keys(
+            resolver, tmpl_cfg, (key,), project_id=project_id, label=f"SwUT {kind}",
         )
-    return resolver.read_bytes(tpath)
+    except TemplateNotResolved as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 _CHUNK_SIZE = 64 * 1024  # 64KB — starlette 기본 chunk와 일치
@@ -311,19 +321,11 @@ def _build_result_to_response(
                 ensure_ascii=True,
             )
 
-    _warnings_str = json.dumps(warnings, ensure_ascii=True)
-    if len(_warnings_str) > 1024:
-        # F6 Round 5 NF3 fix: breakdown 카테고리 단일 출처
-        # (`backend.services.warning_categories`) 사용 — SwUT/SwIT prefix 동시 변경
-        # 누락 방지. Round 3 NC1 partial + Round 4 NW7/NW8 fix는 그 모듈에 통합.
-        from backend.services.warning_categories import format_breakdown_label
-        _warnings_str = json.dumps(
-            [
-                f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
-                f"breakdown: {format_breakdown_label(warnings)})"
-            ],
-            ensure_ascii=True,
-        )
+    # 예산 초과 시 **들어가는 만큼 싣고 못 실은 개수를 말한다** — 예전엔 본문을 통째로
+    # 버려서, 방금 낸 경고가 사용자에게 닿지 않았다(2026-08-25 SwITCR 17건 실측).
+    # 판정/포맷은 `warning_categories` 단일 출처 — 라우터 3곳이 갈라지지 않게.
+    from backend.services.warning_categories import warnings_header_json
+    _warnings_str = warnings_header_json(warnings)
 
     headers = {
         "Content-Disposition": (
@@ -362,9 +364,19 @@ def _resolve_c_source_root(req: SwUTBuildRequest) -> str:
     return _resolver_resolve_c_source_root(req, req.project_id)
 
 
-def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
-    """Thin wrapper — 16차/49차 정책 동일."""
-    return _resolver_resolve_swuds_function_ids(req, req.project_id)
+def _resolve_swuds_function_ids(
+    req: SwUTBuildRequest,
+    out_warnings: list[str] | None = None,
+) -> set[str] | None:
+    """Thin wrapper — 16차/49차 정책 동일.
+
+    `out_warnings` 는 2026-08-04 추가 — 읽기/parse 실패가 산출물까지 도달하도록
+    (형제 hmr/swuts 와 대칭). 넘기지 않으면 예전처럼 침묵하므로 **호출처가 반드시
+    넘긴다**.
+    """
+    return _resolver_resolve_swuds_function_ids(
+        req, req.project_id, out_warnings=out_warnings,
+    )
 
 
 def _resolve_swuds_function_asil_map(req: SwUTBuildRequest) -> dict[str, str]:
@@ -624,7 +636,10 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     # 51차 — Coverage 양식 전용 path 사용 (config fallback: coverage_report_template).
     template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_coverage_meta(req)
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: SwUDS 읽기/parse 실패 사유 누적 (hmr/swuts 와 대칭 — 과거 이 한 줄만
+    # 침묵해서, cloudium 차단으로 SwUDS 검증이 통째로 빠져도 산출물이 조용했다).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report에서 함수별
     # Function Calls coverage 추출 → 3.Coverage 시트 row 6 stamp (KJPDS02 v1.01).
     # F6 Round 1 W1: hmr read 실패 시 result.warnings에 사유 push (silent 차단).
@@ -639,13 +654,32 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     result = build_coverage_report(session, meta, template_bytes,
                                     swuds_function_ids=swuds_fn_ids,
                                     swuts_map=swuts_map,
-                                    hmr_html_bytes=hmr_html_bytes)
+                                    hmr_html_bytes=hmr_html_bytes,
+                                    swuds_skip_reason="; ".join(_swuds_warnings))
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)
     if _swuts_warnings:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
+    # Quality DB recording (non-fatal). Coverage 빌더 = SwUT 커버리지(구문/분기/MC-DC) 출처.
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "swut", result.summary,
+            project_root=str(getattr(req, "project_id", "") or ""),
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
+            meta={
+                "asil_level": str(getattr(meta, "asil_level", "") or ""),
+                "kind": "coverage",
+                "release_sw_version": str(getattr(req, "release_sw_version", "") or ""),
+            },
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwUT quality record skipped (non-fatal)")
     return _build_result_to_response(
         content_io=result.xlsx_io,
         filename=result.filename,
@@ -656,6 +690,41 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ),
     )
+
+
+def _record_test_quality(
+    req: SwUTBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str,
+) -> None:
+    """SUTR / SwUTCR 빌드 1회를 Quality DB 에 기록 (non-fatal).
+
+    Coverage 빌드에만 기록이 있어 **SUTR 은 몇 번을 만들어도 이력이 남지 않았다** —
+    생성 현황 화면이 방금 만든 문서를 계속 "미생성" 으로 표시했다. doc_type 을
+    `swut` 이 아니라 `sutr` 로 두는 이유는 두 산출물의 summary 스키마가 달라서다
+    (커버리지 평가기에 넣으면 측정하지도 않은 축이 0% FAIL 로 둔갑 — evaluator 참조).
+
+    **SwUTCR 이 같은 상태였다**(2026-08-21 — 빌드는 되는데 기록이 없어 보드가 영구히
+    "미생성"). 종합결과서는 또 다른 doc_type(`swutcr`)으로 기록한다: summary 의 총 TC 키가
+    SUTR 의 `total` 이 아니라 `total_tcs` 라, `evaluate_test_result` 에 넣으면 분모가 0 으로
+    접혀 **실행률이 tested 값 그대로 폭주**한다(evaluate_comprehensive_result docstring 참조).
+
+    호출부가 셋이다(SUTR 표준/spec-based + SwUTCR). 블록을 복제하면 한쪽만 고쳐지므로
+    doc_type 만 인자로 받아 함수 하나로 묶는다. **기본값을 두지 않는 것도 의도다** —
+    빠뜨린 호출이 조용히 `sutr` 로 기록되면 종합결과서가 SUTR 행을 덮어쓴다.
+    """
+    try:
+        from workflow.quality.recorder import record_test_result_run
+        record_test_result_run(
+            doc_type, summary,
+            project_id=str(getattr(req, "project_id", "") or ""),
+            asil_level=str(getattr(meta, "asil_level", "") or ""),
+            release_sw_version=str(getattr(req, "release_sw_version", "") or ""),
+            # 화면이 아는 프로젝트 축을 그대로 넘긴다. 비면 recorder 가 project_id 에서
+            # 추측하는데 그 추측이 틀리는 실환경이 있다(schemas.py `scm_id` 주석).
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("%s quality record skipped (non-fatal)", doc_type.upper())
 
 
 def _is_sutr_spec_based(req: SwUTBuildRequest, cfg: dict[str, Any]) -> bool:
@@ -729,6 +798,7 @@ def _do_sutr_build_spec_based(
             status_code=500,
             detail=f"spec-based SUTR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
+    _record_test_quality(req, meta, result.summary, doc_type="sutr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -778,7 +848,9 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     # 51차 — SUTR 양식 전용 path 사용 (config fallback: sutr_template).
     template_bytes = _read_template_bytes(req.sutr_template_path, req.project_id, "sutr")
     # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: 실패 사유 누적도 Coverage 와 대칭 (아래 warnings extend 참조).
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     # 60차 F6-A: SwUTS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
     # None이면 build_sutr 내부에서 기존 하드코딩 fallback (backward-compat).
     # F6 Round 1 W1: parse/read 실패 사유는 result.warnings에 push (silent 차단).
@@ -791,11 +863,15 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if _swuts_warnings:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
+    _record_test_quality(req, meta, result.summary, doc_type="sutr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -891,7 +967,11 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         _apply_vcast_source_fallback(session, resolver, _lf)
     template_bytes = _read_template_bytes(req.swutcr_template_path, req.project_id, "swutcr")
     meta = _build_swutcr_meta(req)
-    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 2026-08-04: SwUTCR 도 나머지 4경로와 동일하게 SwUDS 실패 사유를 누적한다.
+    # (이 경로는 첫 배선 때 빠뜨렸고 AST 호출부 검사가 잡아냈다 — 함수에 인자를
+    #  다는 것과 호출처가 넘기는 것은 별개 명제라는 증거.)
+    _swuds_warnings: list[str] = []
+    swuds_fn_ids = _resolve_swuds_function_ids(req, out_warnings=_swuds_warnings)
     hmr_warnings: list[str] = []
     hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
         req, req.project_id, out_warnings=hmr_warnings,
@@ -919,7 +999,10 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         swuts_map=swuts_map,
         hmr_html_bytes=hmr_html_bytes,
         spec_fi=spec_fi,
+        swuds_skip_reason="; ".join(_swuds_warnings),
     )
+    if _swuds_warnings:
+        result.warnings.extend(_swuds_warnings)
     if hmr_warnings:
         result.warnings.extend(hmr_warnings)
     if swuts_warnings:
@@ -928,6 +1011,7 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         result.warnings.extend(fi_spec_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwUTCR build failed (ok=False)")
+    _record_test_quality(req, meta, result.summary, doc_type="swutcr")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -1004,6 +1088,33 @@ async def consistency_check(
     return await asyncio.to_thread(
         run_consistency_safely, series="swut",
         check_fn=_do_consistency_check, req=req, logger=_logger,
+    )
+
+
+def _do_swut_doc_summary(req: SwUTDocSummaryRequest) -> dict[str, Any]:
+    """단일 산출물(SwUTCV Coverage xlsx | SUTR xlsm) bytes를 읽어 결과 요약만 추출(비교 없음).
+
+    정합성 검증(_do_consistency_check)은 두 문서를 cross-validate하지만, 여기서는
+    빌더 산출물 1개만으로 그 문서의 결과(미커버 함수·Exception·Final Result 또는
+    SUTR 통과/실패/미실행/Deviation)를 바로 본다.
+    """
+    resolver = get_resolver()
+    data = resolver.read_bytes(req.path)
+    if req.kind == "coverage":
+        return summarize_coverage_report(data)
+    return summarize_test_report(data)
+
+
+@router.post("/doc/summary")
+async def swut_doc_summary(req: SwUTDocSummaryRequest) -> dict[str, Any]:
+    """SwUTCV Coverage 또는 SUTR 산출물 1개를 직접 파싱해 결과 요약 반환.
+
+    18차 정합성 비교(/consistency/check)의 단일 문서판 — read-only, Semaphore 미적용.
+    """
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swut",
+        check_fn=_do_swut_doc_summary, req=req, logger=_logger,
+        req_summary=f"doc kind={req.kind} path={req.path[:80]}",
     )
 
 

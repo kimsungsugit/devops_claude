@@ -52,4 +52,34 @@ def require_jwt_user(request: Request) -> str:
     return user
 
 
-__all__ = ["require_jwt_user"]
+def require_user() -> str:
+    """**로그인만** 요구 — admin 권한도, Bearer 강제도 하지 않는다.
+
+    조회 전용 endpoint 용이다. 세 단계의 중간 칸을 채운다:
+
+    | Depends | 요구 | 쓰임 |
+    |---|---|---|
+    | `require_jwt_user` | Bearer 필수(X-User 거부) | logout·비밀번호 변경 등 파괴적 작업 |
+    | **`require_user`** | 신원만(미들웨어 판정 그대로) | 조회 — 품질 이력·게이트 근거 |
+    | `require_admin` | 신원 + admin 등록 | 빌더 실행·evidence 생성 |
+
+    Bearer 를 강제하지 않는 이유: 미들웨어가 이미 신원을 세우고, 이 계층은 데이터를
+    **바꾸지 않는다**. `DEV_MODE_X_USER_FALLBACK` 환경에서 X-User 로 들어온 요청까지
+    막으면 개발 중 조회 화면이 통째로 401 이 된다(파괴적 작업과 달리 그 대가가 없다).
+
+    Returns:
+        인증된 사용자 이름.
+
+    Raises:
+        HTTPException 401 AUTH_REQUIRED — 미들웨어가 신원을 못 세운 경우.
+    """
+    user = get_current_user()
+    if not user or user == "default":
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "AUTH_REQUIRED", "message": "로그인 필요"},
+        )
+    return user
+
+
+__all__ = ["require_jwt_user", "require_user"]

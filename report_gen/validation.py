@@ -1,6 +1,7 @@
 """report_gen.validation - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
+import json
+import logging
 
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
@@ -8,43 +9,108 @@ import re
 #   KEY_FN_STATICS = "globals_static"  — static vars used by the function
 # Legacy: older sidecar JSONs may use bare "globals" key → fall back to it when
 # reading (see _extract_payload_function_details / row.get("globals_global") or row.get("globals"))
-import os
-import json
-import csv
-import logging
-import time
+import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+# `.validation.md` 줄 라벨 — 라이터와 리더(`evidence.py`)의 **단일 출처**.
+# 모듈 통째로 들고 다니는 것은 의도다: `from ... import LABEL_X` 로 풀면 이름이 이
+# 파일에 복제돼, 상수를 한 곳에 둔 이유가 없어진다.
+import report_gen.validation_labels as VL
+from report_gen.atomic_io import atomic_write_text
 from report_gen.docx_builder import _iter_template_blocks
 from report_gen.function_analyzer import (
-    _normalize_symbol_name,
-    _is_generic_description,
     _classify_description_quality,
+    _is_generic_description,
+    _normalize_symbol_name,
 )
+from report_gen.gate_report import has_meaningful_value, parse_gate_report, to_percent_text_map
+from report_gen.provenance import SOURCE_ALIASES, has_evidence_value, is_weak_source, unrecorded_source
 from report_gen.requirements import _extract_function_info_from_docx
 from report_gen.utils import _extract_call_names, _safe_dict
 
 _logger = logging.getLogger("report_generator")
 
 
-def _load_uds_payload_for_docx(docx_path: str) -> Dict[str, Any]:
+# (R32) 원자 기록은 `report_gen/atomic_io.py` 단일 출처 — `.payload.json` 라이터 5곳과 같은 함수다.
+#   이름은 유지한다: 이 파일의 세 사이드카 라이터가 이 이름으로 부르고, 가드(`test_quality_gate_r31.py`)가
+#   그 호출을 단언한다.
+_atomic_write_text = atomic_write_text
+
+
+def _load_uds_payload_with_source(docx_path: str) -> Tuple[Dict[str, Any], Optional[Path]]:
+    """`(payload, 읽은 파일)`. 없으면 `({}, None)`. 읽기 실패 사유가 필요하면 `_load_uds_payload_detailed`.
+
+    (R30 Q-2) 후보가 `*.payload.full.json` 두 이름뿐이었는데 **그 이름을 쓰는 라이터가 코드에 없다**
+    (디스크의 33개는 2026-02~03 옛 하네스 산출물). 실 라이터 5곳은 전부 `*.payload.json` 이라 품질 게이트는
+    payload 를 한 번도 못 읽고 **자기 산출물 DOCX 를 되읽어** 채점했다 — 그 경로에서 설명 출처가 `reference`
+    (신뢰 출처)로 붙어 High 등급이 "비어 있지 않음" 과 동의어였다(출처 세탁).
+    옛 이름은 legacy 로 남기되 **읽은 파일을 리포트에 적는다**.
+    """
+    data, src, _err = _load_uds_payload_detailed(docx_path)
+    return data, src
+
+
+def _load_uds_payload_detailed(docx_path: str) -> Tuple[Dict[str, Any], Optional[Path], Optional[str]]:
+    """`(payload, 읽은 파일, 읽기 실패 사유)`.
+
+    ⚠ 순서가 계약이다(리뷰 C2): 현행 라이터의 `.payload.json` 은 DOCX **직후**에 쓰이고, legacy
+      `*.payload.full.json` 은 DOCX **이전** 스냅샷이다(실측 mtime: full 09:52:05 → docx 10:03:25 → json
+      10:03:26, 8쌍 중 1쌍은 `globals_static` 36함수가 다르다). legacy 를 먼저 고르면 문서를 만든 값이 아니라
+      그 이전 값으로 채점한다.
+    ⚠ "파일 없음" 과 "있는데 못 읽음" 은 다르다(리뷰 W1) — 후자를 `없음` 으로 내면 채점 모드가 문서 자기 대조로
+      조용히 바뀐다. 마지막 실패 사유를 함께 돌려준다(뒤 후보가 성공하면 그쪽을 쓴다).
+    """
     docx = Path(docx_path)
     candidates = [
-        docx.with_suffix(".docx.payload.full.json"),
-        docx.with_suffix(".payload.full.json"),
+        docx.with_suffix(".payload.json"),             # 현행 라이터 5곳 — DOCX 직후 기록
+        docx.with_suffix(".docx.payload.full.json"),   # legacy(라이터 없음) — DOCX 이전 스냅샷
+        docx.with_suffix(".payload.full.json"),        # legacy
     ]
+    last_error: Optional[str] = None
     for cand in candidates:
         try:
             if cand.exists():
                 data = json.loads(cand.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    return data
-        except Exception:
+                    return data, cand, None
+                last_error = f"{cand.name}: JSON 최상위가 객체가 아니다"
+        except Exception as exc:
+            last_error = f"{cand.name}: {type(exc).__name__}: {exc}"
+            _logger.warning("payload 사이드카를 읽지 못했다 — 다음 후보로: %s", last_error)
             continue
-    return {}
+    return {}, None, last_error
+
+
+def _load_uds_payload_for_docx(docx_path: str) -> Dict[str, Any]:
+    """호환 shim — 프로덕션 호출자 0(테스트만). 새 코드는 `_load_uds_payload_with_source` 를 쓸 것."""
+    return _load_uds_payload_with_source(docx_path)[0]
+
+
+def _is_none_marker_list(v: Any) -> bool:
+    """`["[IN] (none)"]` 처럼 **전부** "없음 표기" 인 인터페이스 값 — 채움으로 세되(evaluator 규약) note 로 드러낸다."""
+    items = v if isinstance(v, list) else [v]
+    texts = [str(x or "").strip() for x in items]
+    texts = [t for t in texts if t]
+    if not texts:
+        return False
+    for t in texts:
+        core = re.sub(r"^\[(IN|OUT|IN/OUT)\]\s*", "", t, flags=re.I).strip().lower()
+        if core not in {"(none)", "none", "n/a", "na", "tbd", "-", "()"}:
+            return False
+    return True
+
+
+def _merge_payload_over_doc(doc_row: Dict[str, Any], payload_row: Dict[str, Any]) -> Dict[str, Any]:
+    """문서 행 위에 payload 값을 덮는다 — **비어 있지 않은 값만**. payload 가 진실 출처(prototype·inputs·
+    outputs·globals 는 문서 셀보다 소스 파서 값이 정확하다)지만, payload 에 없는 칸까지 지우진 않는다."""
+    merged = dict(doc_row)
+    for k, v in payload_row.items():
+        if v is None or (isinstance(v, (str, list, dict)) and not v):
+            continue
+        merged[k] = v
+    return merged
 
 
 def _valid_call_names(value: Any) -> List[str]:
@@ -110,6 +176,80 @@ def _has_doc_input_slot(prototype: str) -> bool:
         return False
     return True
 
+def _norm_fn_key(name: Any) -> str:
+    """함수명 매칭 키 — **빌더가 쓰는 정규화를 그대로 재사용**한다.
+
+    검증기가 자체 정규화를 만들면 빌더는 매칭했는데 검증기는 "누락" 이라 하는(또는 그 반대)
+    거짓 보고가 난다. 실측: 정확일치 기준 교집합 211 vs 빌더 정규화 기준 271 — 60건 차이.
+    """
+    # 지연 import — docx_builder 는 python-docx 를 요구하고, 이 모듈은 그것 없이도
+    # 다른 검증에 쓰인다. import 실패 시 소문자 폴백은 **더 느슨한** 매칭이라
+    # "누락" 을 과다 보고할 뿐 없는 함수를 있다고 하지 않는다(안전한 방향).
+    try:
+        from report_gen.docx_builder import _normalize_symbol_name
+    except ImportError:
+        return str(name or "").strip().lower()
+    return _normalize_symbol_name(str(name or "")).lower()
+
+
+def _payload_function_names(sidecar: Path) -> Tuple[set, str]:
+    """`*.payload.json` 사이드카에서 함수명 집합. 실패하면 (빈집합, 사유)."""
+    try:
+        raw = json.loads(sidecar.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return set(), f"{type(exc).__name__}: {exc}"
+    details = raw.get("function_details") if isinstance(raw, dict) else None
+    if not isinstance(details, dict):
+        return set(), "function_details 가 dict 가 아니다"
+    names = {
+        _norm_fn_key(v.get("name"))
+        for v in details.values()
+        if isinstance(v, dict) and str(v.get("name") or "").strip()
+    }
+    return {n for n in names if n}, ""
+
+
+def _read_drop_stats(docx_path: Path) -> Tuple[Optional[int], Optional[str]]:
+    """`<out>.gen_stats.json` 에서 `(제거된 heading 수, 처리 모드)`.
+
+    ⚠ 부재/파싱 실패는 **`(None, None)` = 미측정**이다. `(0, "keep")` 로 접으면
+      "제거 없음" 이라는 **거짓 단언**이 되고, 이 함수는 정확히 그 거짓을 막으려고 있다.
+    """
+    try:
+        from report_gen.docx_builder import gen_stats_path
+        p = gen_stats_path(str(docx_path))
+        if not p.exists():
+            return None, None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:   # noqa: BLE001 - 통계 부재는 검증 실패가 아니다
+        _logger.warning("생성 통계 sidecar 를 읽지 못해 제거 heading 은 미측정(%s)", exc)
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    n = data.get("dropped_heading_count")
+    mode = data.get("unmatched_headings_mode")
+    return (
+        n if isinstance(n, int) and not isinstance(n, bool) else None,
+        str(mode) if isinstance(mode, str) and mode.strip() else None,
+    )
+
+
+def _docx_heading_function_names(doc: Any) -> set:
+    """DOCX 의 `SwUFn_NNNN: name` 형태 heading 에서 함수명 집합."""
+    out: set = set()
+    for para in getattr(doc, "paragraphs", []) or []:
+        style = str(getattr(getattr(para, "style", None), "name", "") or "")
+        if not style.startswith("Heading"):
+            continue
+        text = (getattr(para, "text", "") or "").strip()
+        m = re.search(r"\bSwUFn_\d+\b\s*[:\-]?\s*(.+)", text, flags=re.I)
+        if m:
+            key = _norm_fn_key(m.group(1))
+            if key:
+                out.add(key)
+    return out
+
+
 def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "docx_path": docx_path,
@@ -168,6 +308,72 @@ def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
         {"header": h, "count": c}
         for h, c in header_counter.most_common(10)
     ]
+
+    # ── 입력 대비 대조 ────────────────────────────────────────────────────────
+    # 위 검사는 전부 **문서 내부 정합성**이다(heading 수 ↔ 표 수, logic 행 ↔ 이미지).
+    # "몇 개가 들어와야 했는가" 를 안 보므로 양방향 불일치가 통째로 침묵했다. 실측:
+    #
+    #   payload 함수 1개든 100개든 → 문서는 항상 SwUFn 섹션 429개, ok=True, issues 0건
+    #   실 데이터(소스 900 / 템플릿 421, 빌더 정규화 기준 교집합 271):
+    #     · 문서에 못 실리는 소스 함수  629개 (69.9%)  ← 조용히 누락
+    #     · 데이터 없는 템플릿 heading  150개          ← 빈 함수 명세로 출력
+    #
+    # DOCX 는 XLSM 라이터와 달리 **템플릿 주도**다(이미 있는 SwUFn heading 을 함수명으로
+    # 매칭해 채운다). 템플릿이 부분집합을 담는 게 의도일 수 있으므로 `ok` 판정은 건드리지
+    # 않고(기존 verdict 뒤집기 금지) `warnings` 로 수치를 드러낸다.
+    result.setdefault("warnings", [])
+    _sidecar = path.with_suffix(".payload.json")
+    if not _sidecar.exists():
+        # ⚠ 대조를 **못 한** 것이지 통과가 아니다. 이 구분이 없으면 사이드카가 사라진
+        # 산출물이 "대조하고 깨끗함" 과 같아 보인다.
+        result["expected_functions"] = None
+        result["warnings"].append(
+            f"payload 사이드카 없음({_sidecar.name}) — 입력 대비 대조 불가(미검증)")
+    else:
+        _pay_names, _pay_err = _payload_function_names(_sidecar)
+        if _pay_err:
+            result["expected_functions"] = None
+            result["warnings"].append(f"payload 사이드카를 읽지 못해 대조 불가: {_pay_err}")
+        else:
+            _doc_names = _docx_heading_function_names(doc)
+            _matched = _pay_names & _doc_names
+            result["expected_functions"] = len(_pay_names)
+            result["matched_functions"] = len(_matched)
+            _missing = sorted(_pay_names - _doc_names)
+            _empty = sorted(_doc_names - _pay_names)
+            # ⚠ 개수는 **절단 전**에 따로 담는다. 소비처가 절단된 리스트 길이로 개수를
+            # 되짚으면 629건이 "50건" 이 된다(이 저장소가 반복해 겪은 함정).
+            result["missing_from_docx_count"] = len(_missing)
+            result["headings_without_payload_count"] = len(_empty)
+            result["payload_functions_missing_from_docx"] = _missing[:50]
+            result["docx_headings_without_payload"] = _empty[:50]
+            if _missing:
+                result["warnings"].append(
+                    f"소스 함수 {len(_missing)}개가 문서에 없다 — 템플릿에 대응 SwUFn "
+                    f"heading 이 없어 조용히 빠졌다(예: {', '.join(_missing[:5])})")
+            if _empty:
+                result["warnings"].append(
+                    f"템플릿 heading {len(_empty)}개에 대응 소스 함수가 없다 — "
+                    f"**빈 함수 명세**로 출력된다(예: {', '.join(_empty[:5])})")
+    # ── 제거된 heading ── 위 수치는 전부 **남은 문서**를 센 것이다. `unmatched_headings=drop`
+    # 이면 대응 소스가 없는 절이 문서에서 통째로 빠지므로, "데이터 없는 heading" 이 줄고
+    # 리포트는 거의 완결된 문서처럼 보인다. 실측(5절 템플릿, payload 1함수):
+    #   keep → SwUFn 5 / 빈 heading 4건        drop → SwUFn 2 / 빈 heading 1건, ok=True
+    # 즉 3개가 사라졌다는 사실이 증거 어디에도 없었다. 이 저장소가 반복해 고쳐 온
+    # **절단의 침묵**이고, `.validation.md` 는 증거 번들로 실려 나간다.
+    #
+    # 지운 수와 모드는 라이터가 이미 `<out>.gen_stats.json` 에 남긴다 — 읽기만 하면 된다.
+    # ⚠ 사이드카가 없으면 **모드를 추정하지 않는다**. `keep` 으로 가정하면 "제거 없음"
+    #    이라는 거짓이 되고, 그게 바로 여기서 고치는 결함이다.
+    _drop_n, _drop_mode = _read_drop_stats(path)
+    result["dropped_heading_count"] = _drop_n
+    result["unmatched_headings_mode"] = _drop_mode
+    if isinstance(_drop_n, int) and _drop_n > 0:
+        result["warnings"].append(
+            f"대응 소스 함수가 없는 heading {_drop_n}개는 **문서에서 제거**됐다"
+            f"(남의 함수 절 처리=`{_drop_mode or '미상'}`) — 위 '데이터 없는 템플릿 "
+            f"heading' 수치는 **남은 것만** 센다"
+        )
     if result["function_info_table_count"] != result["swufn_heading_count"]:
         result["issues"].append(
             f"SwUFn headings({result['swufn_heading_count']}) != FunctionInfo tables({result['function_info_table_count']})"
@@ -195,6 +401,44 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
     lines.append(f"- FunctionInfo tables: `{report.get('function_info_table_count')}`")
     lines.append(f"- Logic rows: `{report.get('logic_row_count')}`")
     lines.append(f"- Logic rows with image: `{report.get('logic_with_image_count')}`")
+    # ── 입력 대비 대조 ── 위 수치는 전부 문서 **내부** 값이다. 입력이 몇 개였는지 같이
+    # 보여야 "429개 섹션" 이 완결의 증거인지 빈 껍데기인지 판단할 수 있다.
+    # ⚠ 라벨은 `validation_labels` 단일 출처다. 여기서 문자열을 직접 쓰면 리더
+    #   (`evidence.py`)와 갈리고, 갈려도 아무도 안 죽고 값만 사라진다 — 영문/한국어가
+    #   어긋나 세 필드가 한 번도 채워진 적 없던 결함이 정확히 그것이었다.
+    # ⚠ 단위(`건`)는 backtick **밖**이다. 안에 넣으면 `int()` 가 실패해 키를 고쳐도
+    #   값이 안 들어온다(구판 산출물이 그랬고, 리더는 둘 다 읽는 관용을 유지한다).
+    _exp = report.get("expected_functions", "__absent__")
+    if _exp is None:
+        lines.append(f"- {VL.LABEL_EXPECTED_FUNCTIONS}: `{VL.VALUE_UNCOMPARABLE}`")
+    elif _exp != "__absent__":
+        lines.append(f"- {VL.LABEL_EXPECTED_FUNCTIONS}: `{_exp}`")
+        lines.append(f"- {VL.LABEL_MATCHED_FUNCTIONS}: `{report.get('matched_functions')}`")
+        # ⚠ 개수는 **절단 전** 값(`*_count`)을 쓴다. 아래 리스트는 예시용으로 50개까지만
+        # 담기므로 그 길이를 개수로 쓰면 629건이 "50건" 이 된다.
+        _miss = report.get("payload_functions_missing_from_docx") or []
+        _emptyh = report.get("docx_headings_without_payload") or []
+        _miss_n = report.get("missing_from_docx_count", len(_miss))
+        _empty_n = report.get("headings_without_payload_count", len(_emptyh))
+        # (R31 Q-8 ③) **0 도 쓴다.** 예전엔 `if _miss_n:` 이라 0 이면 줄이 없었고, 리더는 줄 없음을
+        # `None`(미측정)으로 읽어 "누락 0건 확인" 이 화면에 **영구히** 안 나왔다 — 대조를 했는데 안 한 것과
+        # 같아 보였다. 계약: 대조했으면 0 은 `0`, 대조 못 했으면 줄 자체가 없다(None).
+        # `⚠` 는 사람이 읽는 장식이라 0 이 아닐 때만 붙인다(리더는 접두를 벗기고 라벨을 맞춘다).
+        _miss_mark = "⚠ " if _miss_n else ""
+        _miss_ex = f" (예: {', '.join(_miss[:5])})" if _miss_n else ""
+        lines.append(f"- {_miss_mark}{VL.LABEL_MISSING_FROM_DOCX}: `{int(_miss_n)}`건{_miss_ex}")
+        _empty_mark = "⚠ " if _empty_n else ""
+        _empty_ex = f" (예: {', '.join(_emptyh[:5])})" if _empty_n else ""
+        lines.append(f"- {_empty_mark}{VL.LABEL_HEADINGS_WITHOUT_PAYLOAD}: `{int(_empty_n)}`건{_empty_ex}")
+    # ── 제거된 heading ── 위 "데이터 없는 heading" 은 **남은 것만** 센다. 제거 수가
+    # 여기 없으면 `drop` 산출물이 거의 완결된 문서로 보인다(실측 4건 → 1건).
+    # 미측정(`None`)이면 줄을 쓰지 않는다 — 0 으로 적으면 "제거 없음" 이라는 거짓이 된다.
+    _drop_n = report.get("dropped_heading_count")
+    _drop_mode = report.get("unmatched_headings_mode")
+    if isinstance(_drop_n, int):
+        lines.append(f"- ⚠ {VL.LABEL_DROPPED_HEADINGS}: `{_drop_n}`건")
+    if _drop_mode:
+        lines.append(f"- {VL.LABEL_UNMATCHED_MODE}: `{_drop_mode}`")
     lines.append("")
     issues = report.get("issues") or []
     lines.append("## Issues")
@@ -204,10 +448,21 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
     else:
         lines.append("- none")
     lines.append("")
+    # ⚠ warnings 는 `ok` 판정을 바꾸지 않는다(템플릿이 부분집합을 담는 게 의도일 수 있다).
+    # 대신 수치를 드러내 "ok=True 니까 다 들어갔다" 는 오독을 막는다.
+    warnings_list = report.get("warnings") or []
+    # (R31 Q-8 ①) 절 제목도 라벨과 같은 단일 출처 — 리더(`evidence.py`)가 같은 상수로 찾는다.
+    lines.append(f"## {VL.SECTION_WARNINGS}")
+    if warnings_list:
+        for w in warnings_list:
+            lines.append(f"- {w}")
+    else:
+        lines.append("- none")
+    lines.append("")
     lines.append("## Top Headers")
     for row in report.get("top_headers") or []:
         lines.append(f"- {row.get('count')}: {row.get('header')}")
-    out.write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write_text(out, "\n".join(lines))
     return str(out)
 
 
@@ -427,7 +682,35 @@ def generate_swcom_context_report(docx_path: str, out_path: str) -> str:
     return str(out)
 
 
+def _empty_swcom() -> Dict[str, Any]:
+    return {"global": {"count": 0, "rows": {}}, "static": {"count": 0, "rows": {}}}
+
+
+def _value_verdict(column: str, ref_value: Any, our_value: Any):
+    """값 동일성 판정 — `uds_reference_parity` 의 **단일 출처**를 쓴다.
+
+    여기에 두 번째 정의를 두면 한쪽만 고쳐져 갈린다. 모듈을 못 읽으면 문자열 비교로
+    떨어지되, 그 사실이 결과에 드러나도록 사유를 붙인다(조용한 열화 금지).
+    """
+    try:
+        from report_gen.uds_reference_parity import value_verdict
+    except Exception:                              # noqa: BLE001 - 아래에서 사유를 낸다
+        same = str(ref_value or "").strip() == str(our_value or "").strip()
+        return same, "정확일치" if same else "값 불일치(표기 정규화 없음)"
+    return value_verdict(column, ref_value, our_value)
+
+
 def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_path: str, out_path: str) -> str:
+    """정본 ↔ 생성물 SwCom 컨텍스트 diff.
+
+    ⚠ 예전엔 **행 수만** 셌다. 개수가 같아도 다른 변수를 적고 있을 수 있고, 같은
+    변수라도 Type/Value Range 가 다를 수 있다 — 개수 diff 는 그 둘을 통째로 놓친다.
+    이제 세 층으로 낸다: 개수 → 이름 집합 → 값(공통 이름 위에서).
+
+    값 판정은 `uds_reference_parity.value_verdict` 를 **재사용**한다. 여기에 두 번째
+    정의를 두면 한쪽만 고쳐져 갈린다(이 저장소가 반복해 겪은 판정 복제 패턴).
+    표기차(`0x00 ~ 0xFF` = `0 ~ 255`)를 불일치로 세면 지표가 거짓으로 나빠진다.
+    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -436,9 +719,10 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
         out.write_text(f"# SwCom Context Diff Report\n\n- error: {exc}\n", encoding="utf-8")
         return str(out)
 
-    def _collect(path: str) -> Dict[str, Dict[str, int]]:
+    def _collect(path: str) -> Dict[str, Dict[str, Any]]:
+        """`{SwCom: {"global": {"count": n, "rows": {이름: (type, range, reset, desc)}}, ...}}`"""
         doc = docx.Document(str(path))
-        rows: Dict[str, Dict[str, int]] = {}
+        rows: Dict[str, Dict[str, Any]] = {}
         current_sw = ""
         pending = ""
         expected_header = "name|type|value range|reset value|description"
@@ -450,7 +734,7 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
                 m = re.search(r"\b(SwCom_\d+)\b", text, flags=re.I)
                 if m:
                     current_sw = m.group(1).replace("swcom", "SwCom")
-                    rows.setdefault(current_sw, {"global": 0, "static": 0})
+                    rows.setdefault(current_sw, _empty_swcom())
                 if re.search(r"\bGlobal variables\b", text, flags=re.I):
                     pending = "global"
                 elif re.search(r"\bStatic Variables\b", text, flags=re.I):
@@ -468,7 +752,17 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
             if expected_header not in header:
                 continue
             cnt = max(0, len(block.rows) - 1)
-            rows.setdefault(current_sw, {"global": 0, "static": 0})[pending] += cnt
+            bucket = rows.setdefault(current_sw, _empty_swcom())[pending]
+            bucket["count"] += cnt
+            for r in block.rows[1:]:
+                cells = [(c.text or "").strip() for c in r.cells]
+                name = cells[0] if cells else ""
+                if not name or name.upper() in ("N/A", "TBD", "-"):
+                    continue
+                # ⚠ setdefault — 같은 이름이 두 번 나오면 **먼저 나온 것**을 남긴다.
+                #   dict 덮어쓰기로 행을 침묵 소실한 전례(SUTS R25 66행)가 있다.
+                bucket["rows"].setdefault(name, tuple(
+                    (cells[i] if len(cells) > i else "") for i in (1, 2, 3, 4)))
         return rows
 
     try:
@@ -495,21 +789,121 @@ def generate_swcom_context_diff_report(reference_docx_path: str, target_docx_pat
     lines.append(f"- Only in target: `{len(only_tgt)}`")
     lines.extend([f"  - {x}" for x in only_tgt[:40]] if only_tgt else ["  - none"])
     lines.append("")
-    lines.append("## Differences")
+    lines.append("## Row Count Differences")
     diff_count = 0
     for sw in sw_all:
-        r = ref.get(sw, {"global": 0, "static": 0})
-        t = tgt.get(sw, {"global": 0, "static": 0})
-        if r != t:
+        r = ref.get(sw, _empty_swcom())
+        t = tgt.get(sw, _empty_swcom())
+        rg, rs = r["global"]["count"], r["static"]["count"]
+        tg, ts = t["global"]["count"], t["static"]["count"]
+        if (rg, rs) != (tg, ts):
             diff_count += 1
-            lines.append(
-                f"- {sw}: global `{r.get('global',0)}` -> `{t.get('global',0)}`, "
-                f"static `{r.get('static',0)}` -> `{t.get('static',0)}`"
-            )
+            lines.append(f"- {sw}: global `{rg}` -> `{tg}`, static `{rs}` -> `{ts}`")
     if diff_count == 0:
         lines.append("- none")
+
+    # --- 이름 축 --------------------------------------------------------------
+    # ⚠ 개수가 같아도 **다른 변수**를 적고 있을 수 있다. 개수 diff 만 보면 안 보인다.
+    lines.append("")
+    lines.append("## Name Sets")
+    for section in ("global", "static"):
+        ref_names = {(sw, n) for sw in sw_all
+                     for n in ref.get(sw, _empty_swcom())[section]["rows"]}
+        tgt_names = {(sw, n) for sw in sw_all
+                     for n in tgt.get(sw, _empty_swcom())[section]["rows"]}
+        hit = ref_names & tgt_names
+        missing = sorted(ref_names - tgt_names)
+        extra = sorted(tgt_names - ref_names)
+        recall = f"{len(hit) / len(ref_names) * 100:.1f}%" if ref_names else "미측정(정본 0행)"
+        lines.append(f"- {section}: reference `{len(ref_names)}` · target `{len(tgt_names)}` "
+                     f"· matched `{len(hit)}` · recall `{recall}`")
+        lines.append(f"  - only in reference (`{len(missing)}`):")
+        lines.extend([f"    - {sw} `{n}`" for sw, n in missing[:40]] or ["    - none"])
+        # 정본에 없는 것은 결함이 아니라 정보량이다 — 개수만 낸다(결정 3).
+        lines.append(f"  - only in target (`{len(extra)}`, 정본은 하한선이므로 결함 아님)")
+
+    # --- 값 축 ----------------------------------------------------------------
+    # ⚠ 이름 축과 **섞어 인용하지 말 것**. 두 축은 실측에서 30%p 벌어진다.
+    lines.append("")
+    lines.append("## Value Cells (matched names only)")
+    columns = ("type", "range", "reset", "desc")
+    for section in ("global", "static"):
+        stats = {c: {"n": 0, "same": 0, "notation": 0, "missing": 0, "diff": 0} for c in columns}
+        samples: List[str] = []
+        for sw in sw_all:
+            r_rows = ref.get(sw, _empty_swcom())[section]["rows"]
+            t_rows = tgt.get(sw, _empty_swcom())[section]["rows"]
+            for name in sorted(set(r_rows) & set(t_rows)):
+                for idx, column in enumerate(columns):
+                    ref_val, our_val = r_rows[name][idx], t_rows[name][idx]
+                    # 정본이 "근거 없음" 이라 적은 칸은 재현 대상이 아니다.
+                    if str(ref_val).strip().upper() in ("", "N/A", "NA", "-", "TBD"):
+                        continue
+                    stats[column]["n"] += 1
+                    if str(our_val).strip().upper() in ("", "N/A", "NA", "-", "TBD"):
+                        stats[column]["missing"] += 1
+                        continue
+                    same, reason = _value_verdict(column, ref_val, our_val)
+                    if same:
+                        stats[column]["same" if reason == "정확일치" else "notation"] += 1
+                    else:
+                        stats[column]["diff"] += 1
+                        if len(samples) < 20:
+                            samples.append(f"  - {sw} `{name}` {column}: "
+                                           f"ref `{str(ref_val)[:40]}` -> `{str(our_val)[:40]}`")
+        for column in columns:
+            s = stats[column]
+            hit = s["same"] + s["notation"]
+            pct = f"{hit / s['n'] * 100:.1f}%" if s["n"] else "미측정(분모 0)"
+            lines.append(f"- {section}/{column}: denominator `{s['n']}` · reproduced `{hit}` "
+                         f"({pct}) = exact `{s['same']}` + notation `{s['notation']}` "
+                         f"| missing `{s['missing']}` · mismatch `{s['diff']}`")
+        lines.append(f"  - mismatch samples ({section}):")
+        lines.extend(samples[:20] or ["  - none"])
+
     out.write_text("\n".join(lines), encoding="utf-8")
     return str(out)
+
+
+# 사이드카 임계의 **내장 폴백** — `config` 를 못 읽는 실행 환경용. 값은 `config.UDS_SIDECAR_GATE_THRESHOLDS`
+# 와 같아야 한다(`tests/unit/test_quality_gate_r29.py` 가 lockstep 을 잰다). 리포트는 어느 쪽을 썼는지
+# `- Threshold source:` 로 적는다.
+_SIDECAR_GATE_FALLBACK: Dict[str, float] = {
+    "description_fill_rate": 0.70,
+    "input_fill_rate": 0.20,
+    "output_fill_rate": 0.10,
+    "globals_global_fill_rate": 0.35,
+    "globals_static_fill_rate": 0.15,
+    "called_fill_rate": 0.50,
+    "calling_fill_rate": 0.25,
+    "asil_non_tbd_rate": 0.30,
+    "related_non_tbd_rate": 0.30,
+    "traceability_rate": 0.20,
+}
+
+
+def _sidecar_gate_thresholds() -> Tuple[Dict[str, float], str]:
+    """`(임계 표, 출처 문자열)`. config 표가 있으면 그것, 아니면 내장 폴백 — 출처를 함께 낸다."""
+    table: Any = None
+    cfg_file: Optional[str] = None
+    try:
+        import config as _cfg
+        cfg_file = str(getattr(_cfg, "__file__", "") or "") or None
+        table = getattr(_cfg, "UDS_SIDECAR_GATE_THRESHOLDS", None)
+    except ImportError as exc:  # config 미로딩(독립 실행) — 폴백으로, 단 출처와 로그에 적는다
+        _logger.warning("config 모듈을 읽지 못했다 — 사이드카 임계는 내장 폴백을 쓴다(env 조정 무효): %s", exc)
+        table = None
+    if isinstance(table, dict) and table:
+        try:
+            return ({str(k): float(v) for k, v in table.items()},
+                    f"config.UDS_SIDECAR_GATE_THRESHOLDS ({cfg_file or '?'})")
+        except (TypeError, ValueError):
+            _logger.warning("config.UDS_SIDECAR_GATE_THRESHOLDS 에 숫자가 아닌 값 — 내장 폴백으로")
+    # ⚠ "config 를 못 읽었다" 와 "다른 config 를 읽었다" 는 다르다(리뷰 W5). `tools/generate_uds_local.py`
+    #   는 sys.path 맨 앞에 외부 트리(`D:/Project/devops/260105`)를 넣어 **그쪽 config.py** 가 잡히고,
+    #   거기엔 이 표가 없다 — 그러면 env 조정이 무효인 채 폴백을 쓴다. 어느 파일이었는지 적는다.
+    where = f"config={cfg_file} 에 표 없음" if cfg_file else "config 미로딩"
+    return dict(_SIDECAR_GATE_FALLBACK), f"builtin fallback ({where} — env 조정 무효)"
 
 
 def generate_uds_field_quality_gate_report(
@@ -517,6 +911,12 @@ def generate_uds_field_quality_gate_report(
     out_path: str,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> str:
+    """UDS 사이드카 품질 게이트(`.quality_gate.md`).
+
+    ⚠ 전제: `docx_path` 는 **이 저장소가 생성한 산출물**이다(프로덕션 호출 4곳 전부 `out_path`). payload 가 없으면
+      문서를 되읽어 채점하는데 그때 설명 출처는 `generated_doc`(유래 불명)으로 강제한다 — 외부 정본 SUDS 를 이
+      함수에 넣으면 그 전제가 거짓이라 High 가 구조적으로 0 이다(리뷰 I5).
+    """
     try:
         import docx  # type: ignore
     except Exception as exc:
@@ -525,18 +925,27 @@ def generate_uds_field_quality_gate_report(
         out.write_text(f"# UDS Field Quality Gate Report\n\n- error: {exc}\n", encoding="utf-8")
         return str(out)
 
-    gate = {
-        "description_fill_rate": 0.70,
-        "input_fill_rate": 0.20,
-        "output_fill_rate": 0.10,
-        "globals_global_fill_rate": 0.35,
-        "globals_static_fill_rate": 0.15,
-        "called_fill_rate": 0.50,
-        "calling_fill_rate": 0.25,
-        "asil_non_tbd_rate": 0.30,
-        "related_non_tbd_rate": 0.30,
-        "traceability_rate": 0.20,
-    }
+    # ── 임계 (R29 Q-3) ── 값은 `config.UDS_SIDECAR_GATE_THRESHOLDS` **한 곳**에서 온다.
+    #   이전엔 여기 리터럴이었고 어디에도 공시되지 않았다. 호출부가 `UDS_QUALITY_GATE_THRESHOLDS`
+    #   (키 `*_min`, 0~100)를 넘겨도 키가 달라 `if k in gate` 에서 **조용히 무시**됐다 — 그래서
+    #   무시한 키를 리포트에 적는다(침묵 금지).
+    gate, threshold_source = _sidecar_gate_thresholds()
+    ignored_threshold_keys: List[str] = []
+    if isinstance(thresholds, dict):
+        overridden: List[str] = []
+        for k, v in thresholds.items():
+            if k not in gate:
+                ignored_threshold_keys.append(str(k))
+                continue
+            try:
+                gate[k] = float(v)
+                overridden.append(str(k))
+            except (TypeError, ValueError):
+                ignored_threshold_keys.append(f"{k}(숫자 아님)")
+        if overridden:
+            threshold_source += " + caller override: " + ", ".join(overridden)
+        if ignored_threshold_keys:
+            _logger.warning("사이드카 임계에 없는 키를 넘겼다 — 무시: %s", ignored_threshold_keys)
     _gate_improvement_guide = {
         "description_fill_rate": "코드 주석에 @brief 태그를 추가하거나, SDS 문서의 함수 설명을 보완하세요.",
         "input_fill_rate": "함수 시그니처의 파라미터에 @param 태그를 추가하세요.",
@@ -549,26 +958,42 @@ def generate_uds_field_quality_gate_report(
         "related_non_tbd_rate": "SRS 문서의 요구사항 ID를 함수와 매핑하거나, @requirement 태그를 추가하세요.",
         "traceability_rate": "DID/서비스 매핑을 확인하고, 코드 내 UDS 서비스 핸들러에 요구사항 ID를 연결하세요.",
     }
-    if isinstance(thresholds, dict):
-        for k, v in thresholds.items():
-            if k in gate:
-                try:
-                    gate[k] = float(v)
-                except Exception:
-                    pass
 
     doc = docx.Document(str(docx_path))
     doc_map = _extract_function_info_from_docx(doc)
-    payload = _load_uds_payload_for_docx(docx_path)
+    payload, payload_file, payload_read_error = _load_uds_payload_detailed(docx_path)
     payload_by_name = _payload_function_details_by_name(payload)
-    payload_details = payload.get("function_details") or {}
-    if isinstance(payload_details, dict) and payload_details:
-        base_items = [info for info in payload_details.values() if isinstance(info, dict)]
-    elif payload_by_name:
-        base_items = list(payload_by_name.values())
+    doc_rows = [row for row in doc_map.values() if isinstance(row, dict)]
+    document_entries = len(doc_rows)
+    # ── 채점 집합 (R30 Q-2) ── payload 가 있으면 **문서 ∩ payload** 다.
+    #   · payload 전체를 세면 문서에 없는 함수를 "문서 품질" 로 채점한다 — 실측: 429항목 문서의 payload 는
+    #     함수 5개고 그 5개가 **문서에 하나도 없다**(템플릿 heading 미매칭). 그 5개로 채점하면 문서와 무관한 점수다.
+    #   · 문서 전체를 세면 payload 에 없는 항목(생성되지 않은 템플릿 stub 419개)이 빈 칸으로 분모에 들어가
+    #     채움률을 끌어내린다 — 그건 필드 품질이 아니라 **문서 커버리지**의 축이고 `.validation.md` 가 이미 센다.
+    #   그래서 교집합을 채점하고, 양쪽 차집합은 head 에 수로 적는다(잰 것 ≠ 문서 전체임을 숨기지 않는다).
+    # ⚠ 분기 조건은 **파일을 읽었는가**다(리뷰 C1). `payload_by_name` 으로 갈리면 "읽었는데 함수 0개"(라이터
+    #   `local.py`/`jenkins.py` 는 빈 dict 도 쓴다)가 문서 자기 대조로 떨어지면서 head 는 payload 를 읽었다고
+    #   광고하고 차집합엔 `None` 이 찍힌다. 함수 0개 = 교집합 0 = 전 축 미측정이 맞다.
+    scored_name_keys: List[str] = []
+    if payload_file is not None:
+        base_items = []
+        for row in doc_rows:
+            nk = _normalize_symbol_name(str(row.get("name") or "")).lower()
+            info = payload_by_name.get(nk) if nk else None
+            if isinstance(info, dict):
+                base_items.append(_merge_payload_over_doc(row, info))
+                scored_name_keys.append(nk)
+        doc_name_keys = {_normalize_symbol_name(str(r.get("name") or "")).lower() for r in doc_rows}
+        entries_not_in_payload = document_entries - len(base_items)
+        payload_not_in_document = sum(1 for k in payload_by_name if k not in doc_name_keys)
     else:
-        base_items = [row for row in doc_map.values() if isinstance(row, dict)]
+        base_items = doc_rows
+        entries_not_in_payload = None
+        payload_not_in_document = None
     total = len(base_items)
+    # 리뷰 W3: 같은 함수명이 여러 SwUFn 에 있으면 한 payload 행이 여러 문서 행에 복제 채점된다 — 실측 418항목
+    # 문서에서 344행 ← 구별 함수 326개(`main` 이 세 곳). `Total functions` 는 행 수지 함수 수가 아니다.
+    distinct_scored = len(set(scored_name_keys)) if payload_file is not None else None
 
     def _filled(v: Any) -> bool:
         s = str(v or "").strip()
@@ -602,6 +1027,13 @@ def generate_uds_field_quality_gate_report(
     calling_ok = 0
     tbd_asil = 0
     tbd_related = 0
+    asil_filled = 0          # R29 Q-5: 빈 칸·N/A 도 TBD 와 같이 미기재 — quick gate 와 같은 규칙
+    related_filled = 0
+    proto_readable = 0       # R29 Q-4: Prototype 을 읽은 함수 — 슬롯을 셀 수 있었던 범위
+    input_none_marker = 0    # 리뷰 I4: 채움으로 센 것 중 "(none)" 표기(파라미터 없음) — 사이드카엔 _real 동반축이 없다
+    output_none_marker = 0
+    input_ok_applicable = 0  # 슬롯이 **있는** 함수 중 채워진 것 (분자는 분모 안에서만)
+    output_ok_applicable = 0
     desc_high = 0
     desc_med = 0
     desc_low = 0
@@ -618,9 +1050,12 @@ def generate_uds_field_quality_gate_report(
         desc_value = payload_info.get("description") if payload_info else row.get("description")
         if _filled_desc(desc_value):
             desc_ok += 1
+        # ⚠ 출처 세탁 차단(R30 Q-2): payload 가 없어 **자기 산출물을 되읽은** 설명은 유래를 알 수 없다 —
+        #   DOCX 추출기는 그걸 `reference`(정본에서 읽음 = 신뢰 출처)로 붙이는데, 여기선 `generated_doc`
+        #   (약한 출처, provenance 표 0.30)이다. 그래야 High 가 "비어 있지 않음" 과 동의어가 되지 않는다.
         dq = _classify_description_quality(
-            str(payload_info.get("description") if payload_info else row.get("description") or ""),
-            str(payload_info.get("description_source") if payload_info else row.get("description_source") or ""),
+            str((payload_info.get("description") if payload_info else row.get("description")) or ""),
+            str(payload_info.get("description_source") or "") if payload_info else "generated_doc",
         )
         if dq == "high":
             desc_high += 1
@@ -628,22 +1063,41 @@ def generate_uds_field_quality_gate_report(
             desc_med += 1
         else:
             desc_low += 1
-        asil_value = str(payload_info.get("asil") if payload_info else row.get("asil") or "").strip().upper()
+        # ⚠ 괄호가 계약이다(리뷰 C1): `str(a if p else b or "")` 는 payload 갈래에서 `None` 을
+        #   `"None"` 으로 만들어 has_meaningful_value 가 **참**이 됐다 — 빈 ASIL 이 기재로.
+        asil_value = str((payload_info.get("asil") if payload_info else row.get("asil")) or "").strip().upper()
         if asil_value == "TBD":
             tbd_asil += 1
-        related_value = str(payload_info.get("related") if payload_info else row.get("related") or "").strip()
+        if has_meaningful_value(asil_value):
+            asil_filled += 1
+        related_value = str((payload_info.get("related") if payload_info else row.get("related")) or "").strip()
         if related_value.upper() == "TBD":
             tbd_related += 1
+        if has_meaningful_value(related_value):
+            related_filled += 1
         proto = str(row.get("prototype") or "").strip()
+        # 리뷰 W1: 비어 있지 않음 ≠ 읽었음. `N/A`·`-`·괄호 없는 전역변수 행·절단된 시그니처가
+        # 진짜 `void f(void)` 와 같은 리포트를 냈다 — 파라미터 목록까지 있어야 "읽었다" 다.
+        if has_meaningful_value(proto) and "(" in proto and ")" in proto:
+            proto_readable += 1
         has_input_slot = _has_doc_input_slot(proto)
+        has_output_slot = _has_doc_output_slot(proto)
         if has_input_slot:
             input_applicable += 1
         if _filled_list(row.get("inputs")):
             input_ok += 1
-        if _has_doc_output_slot(proto):
+            if has_input_slot:
+                input_ok_applicable += 1
+            if _is_none_marker_list(row.get("inputs")):
+                input_none_marker += 1
+        if has_output_slot:
             output_applicable += 1
         if _filled_list(row.get("outputs")):
             output_ok += 1
+            if has_output_slot:
+                output_ok_applicable += 1
+            if _is_none_marker_list(row.get("outputs")):
+                output_none_marker += 1
         gg = row.get("globals_global")
         if gg is None:
             gg = row.get("globals")
@@ -681,87 +1135,253 @@ def generate_uds_field_quality_gate_report(
         if has_supported_calls:
             called_ok += 1
             supported_called_ok += 1
-        related_text = related_value.strip().upper()
-        has_related = bool(related_text) and related_text not in {"TBD", "N/A", "-"}
+        # 판정 어휘는 quick gate 와 **같은 함수**(R29 Q-5) — 여기만 집합을 따로 들면 갈린다
+        has_related = has_meaningful_value(related_value)
         if has_related and has_direct_calls:
             direct_traceable += 1
         if has_related and has_supported_calls:
             supported_traceable += 1
 
-    def _rate(v: int, base: int) -> float:
-        return 0.0 if base <= 0 else float(v) / float(base)
+    def _rate(v: int, base: int) -> Optional[float]:
+        """분모가 없으면 **`None`(미측정)**. 0.0 이 아니다.
 
-    asil_non_tbd = total - tbd_asil
-    related_non_tbd = total - tbd_related
+        예전엔 `0.0` 을 냈고, `failed` 가 그걸 임계 미달로 세어 **잴 수 없는 축을
+        실패로 계상**했다. 실측(2026-09-02, 실 산출물 127개 전수):
+          · 분모 0 지표가 있는 리포트 29개 → **29개 전부 `Gate pass: False`**
+          · 실제 429함수 KJPDS02_PV: `Input fill 0/0`·`Output fill 0/0` 둘 다 0.0% 로
+            실패 계상 → 실패 8건 중 2건이 근거 없는 것이었다
+        원인은 "채울 게 없었다" 가 아니라 **못 쟀다** 였다 — 그 문서의 SwUFn 항목은
+        상당수가 전역 변수라 prototype 이 비어 있고(429행 중 2행만 존재), 입력/출력
+        슬롯 자체를 셀 수 없다.
+
+        같은 형태를 이 저장소가 이미 고쳤다: 문서가 재지 않는 축으로 채점해 영구 FAIL 을
+        만들면, 그 상시 실패가 **진짜 미달을 가린다**(SwITCV 게이트 축 오류).
+        """
+        return None if base <= 0 else float(v) / float(base)
+
+    def _pct(rate: Optional[float], not_applicable: bool = False) -> str:
+        """지표 줄의 괄호 안 — 미측정·해당 없음은 `%` 를 쓰지 않는다.
+
+        ⚠ 이 표기가 곧 계약이다. `gate_report.parse_gate_report` 는 괄호 안에서 `%` 를
+          못 찾으면 `percent=None` 을 내고 `to_rate_map` 이 그 키를 건너뛴다. 즉
+          "0% 로 잰 것" 과 "못 잰 것"·"잴 대상이 없는 것" 이 하류에서도 구분된다.
+        """
+        if not_applicable:
+            return "해당 없음 — 대상 0"
+        return "미측정 — 분모 0" if rate is None else f"{rate * 100:.1f}%"
+
     traceable = supported_traceable
 
-    input_base = max(input_ok, input_applicable)
-    output_base = max(output_ok, output_applicable)
-    metrics = {
+    # ── 입력/출력 분모 (R29 Q-4) ──
+    # 분모는 **슬롯이 있는 함수(applicable)** 뿐이고 분자도 그 안에서만 센다. 예전엔
+    # `max(ok, applicable)` 라 applicable 0 인데 inputs 가 5개면 **100%** 였다 — 분자가
+    # 분모를 끌어올려 "슬롯을 셀 수 없는 함수의 입력" 이 채움률로 둔갑했다.
+    # 분모 0 은 두 갈래다 — 같은 버킷에 넣으면 "해당 없음" 문서가 영구 `Gate pass: False` 다:
+    #   해당 없음(not_applicable) — 모든 함수의 Prototype 을 읽었는데 슬롯 있는 함수가 0.
+    #                               잴 대상이 없으니 **판정에서 뺀다**(통과도 실패도 아니다).
+    #   미측정(unmeasured)        — Prototype 을 못 읽은 함수가 있어 슬롯을 셀 수 없었다.
+    #                               잴 대상이 있을지 모르니 `Gate pass` 는 False 로 붙든다.
+    proto_unreadable = total - proto_readable
+
+    def _io_axis(ok_in_scope: int, applicable: int) -> Tuple[Optional[float], bool]:
+        if applicable > 0:
+            return _rate(ok_in_scope, applicable), False
+        if total > 0 and proto_unreadable == 0:
+            return None, True
+        return None, False
+
+    input_rate, input_na = _io_axis(input_ok_applicable, input_applicable)
+    output_rate, output_na = _io_axis(output_ok_applicable, output_applicable)
+    not_applicable_axes = {k for k, na in (("input_fill_rate", input_na),
+                                           ("output_fill_rate", output_na)) if na}
+
+    # ── 채점 축 (R29 Q-1) ── `metrics` 는 **임계가 있는 축만** 담는다. 예전엔 임계 없는
+    # `direct_*` 3축이 여기 섞여 `gate.get(k, 0.0)` 비교로 **구조적으로 절대 실패하지 않는
+    # 통과** 3건을 `Gates: N / M` 의 M 에 보탰다(11 중 3이 공짜 통과). 임계 없는 축은
+    # 아래 `informational` 로 — 값은 그대로 적되 판정엔 넣지 않는다.
+    metrics: Dict[str, Optional[float]] = {
         "description_fill_rate": _rate(desc_ok, total),
-        "input_fill_rate": _rate(input_ok, input_base),
-        "output_fill_rate": _rate(output_ok, output_base),
+        "input_fill_rate": input_rate,
+        "output_fill_rate": output_rate,
         "globals_global_fill_rate": _rate(gg_ok, total),
         "globals_static_fill_rate": _rate(gs_ok, total),
         "called_fill_rate": _rate(called_ok, total),
         "calling_fill_rate": _rate(calling_ok, total),
-        "asil_non_tbd_rate": _rate(asil_non_tbd, total),
-        "related_non_tbd_rate": _rate(related_non_tbd, total),
+        # R29 Q-5: 분자는 "기재된 것"(빈 칸·N/A 제외) — 예전엔 `total - tbd` 라 빈 칸이 통과였다
+        "asil_non_tbd_rate": _rate(asil_filled, total),
+        "related_non_tbd_rate": _rate(related_filled, total),
         "traceability_rate": _rate(traceable, total),
+    }
+    informational: Dict[str, Optional[float]] = {
         "direct_called_fill_rate": _rate(direct_called_ok, total),
         "direct_traceability_rate": _rate(direct_traceable, total),
         "direct_called_fill_applicable_rate": _rate(direct_called_ok, direct_call_applicable),
     }
-    failed = [k for k, v in metrics.items() if v < gate.get(k, 0.0)]
+    # 임계 표에만 있고 재지 않는 축 — 조용히 통과로 세지 않고 이름을 적는다
+    ignored_threshold_keys.extend(f"{k}(측정 축 없음)" for k in gate if k not in metrics)
+    gated_keys = [k for k in metrics if k in gate]
+    # ⚠ 잰 것만 채점한다. 미측정을 임계와 비교하면 `None < 0.1` 로 죽거나(예전 코드에선
+    #   0.0 이라 조용히 실패했다) 근거 없는 실패가 된다.
+    failed = [k for k in gated_keys
+              if metrics[k] is not None and metrics[k] < gate[k]]
+    not_applicable = [k for k in gated_keys if k in not_applicable_axes]
+    unmeasured = [k for k in gated_keys
+                  if metrics[k] is None and k not in not_applicable_axes]
+    ungated = [k for k in metrics if k not in gate]        # 임계 표에서 빠진 측정 축(있으면 결함)
+    measured_n = len(gated_keys) - len(unmeasured) - len(not_applicable)
 
     lines: List[str] = []
     lines.append("# UDS Field Quality Gate Report")
     lines.append("")
     lines.append(f"- Target DOCX: `{docx_path}`")
     lines.append(f"- Total functions: `{total}`")
-    lines.append(f"- Gate pass: `{'False' if failed else 'True'}`")
-    lines.append(f"- Gates: `{len(metrics) - len(failed)}` / `{len(metrics)}` passed")
+    # ── 무엇을 채점했는가 (R30 Q-2) ── payload 유무·읽은 파일·문서와의 차집합. 잰 집합이 문서 전체가 아닐 때
+    #    그 사실이 head 에 없으면 "429항목 문서가 통과" 로 읽힌다.
+    if payload_file is not None:
+        _fn_note = " (함수 0개 — 생성 결과가 비어 있어 교집합 0)" if not payload_by_name else ""
+        lines.append(f"- Payload: `{payload_file.name}` · functions `{len(payload_by_name)}`{_fn_note}")
+        # 리뷰 F3: ASIL/Related/호출 값은 **payload(파서) 기준**이다 — 문서 셀과 다를 수 있다(실측 344행 중 11행의
+        # Related ID 계열이 달랐다). 어느 쪽을 쟀는지 적는다.
+        lines.append("- Scored fields source: `payload` — ASIL·Related·호출 값은 파서 값이며 문서 셀과 다를 수 있다")
+        lines.append(f"- Document entries: `{document_entries}` · scored (document ∩ payload): `{total}`")
+        # ⚠ 커버리지는 **필드 품질과 다른 축**이라 판정에 넣지 않는다(임계를 새로 만드는 건 정책 — 계획서 §8).
+        #   그래도 수는 head 에 둔다: 재채점 실측에서 426항목 중 18개만 생성된 문서가 그 18개로 `Gate pass: True`
+        #   가 됐다. "통과" 가 무엇에 대한 통과인지 이 줄이 없으면 읽는 사람이 모른다.
+        #   ⚠ 괄호를 쓰지 않는다(리뷰 W2) — `- L: \`n\` / \`m\` (x)` 는 지표 포맷이라 파서가 지표로 잡는다.
+        lines.append(f"- Scored entries: `{total}` / `{document_entries}` — 문서 커버리지 "
+                     f"{_pct(_rate(total, document_entries))}, 판정 밖")
+        lines.append(f"- Distinct scored functions: `{distinct_scored}` — 같은 이름의 SwUFn 이 여럿이면 행 수 > 함수 수")
+        lines.append(f"- Document entries not in payload: `{entries_not_in_payload}` / `{document_entries}`")
+        lines.append(f"- Payload functions not in document: `{payload_not_in_document}` / `{len(payload_by_name)}`")
+    else:
+        if payload_read_error:
+            # 리뷰 W1: "없음" 이 아니라 "있는데 못 읽음" — 채점 모드가 바뀐 이유를 리포트에 남긴다
+            lines.append(f"- Payload: `none` — 읽기 실패 `{payload_read_error}` → 문서 자기 대조"
+                         "(설명 출처를 알 수 없어 `generated_doc` 으로 채점)")
+        else:
+            lines.append("- Payload: `none` — 문서 자기 대조(설명 출처를 알 수 없어 `generated_doc` 으로 채점)")
+        lines.append("- Scored fields source: `document` — 문서 셀을 되읽은 값")
+        lines.append(f"- Document entries: `{document_entries}` · scored (document ∩ payload): `{total}`")
+    # ⚠ `Gate pass` 는 보수 방향을 유지한다 — 미측정이 있으면 통과가 아니다.
+    #   (`gate_report.py` 의 "판정 불가는 통과가 아님" 과 같은 규약. 미측정을 빼면서
+    #    통과로 접으면 이번 수정이 fail-open 이 된다.)
+    #   해당 없음(not_applicable)은 붙들지 않는다 — 잴 대상이 없는 축은 판정 밖이다.
+    #   임계 표에서 빠진 측정 축(`ungated`)이 있으면 판정할 수 없다 — 통과가 아니다.
+    lines.append(f"- Gate pass: `{'False' if (failed or unmeasured or ungated) else 'True'}`")
+    # 분모는 **임계가 있고 잰 지표 수**다. 못 잰 것·대상 없는 것·임계 없는 것을 분모에
+    # 남기면 통과율이 근거 없이 오르내린다.
+    lines.append(f"- Gates: `{measured_n - len(failed)}` / `{measured_n}` passed")
+    lines.append(f"- Unmeasured gates: `{len(unmeasured)}`")
+    lines.append(f"- Not applicable gates: `{len(not_applicable)}`")
+    lines.append(f"- Ungated metrics: `{len(ungated)}`")
+    lines.append(f"- Informational metrics (no threshold): `{len(informational)}`")
+    # 리뷰 W2: applicable > 0 이면 못 읽은 함수는 분모에서 빠진 채 부분집합으로 채점된다 — 그 사실을
+    # head 에 둔다(하위 note 는 리더가 안 읽는다). 비율로 강등할지는 정책(실 데이터 408/426 문서 존재).
+    lines.append(f"- Prototype unreadable: `{proto_unreadable}` / `{total}`")
+    lines.append(f"- Threshold source: `{threshold_source}`")
     lines.append("")
     lines.append("## Metrics")
-    lines.append(f"- Description fill: `{desc_ok}` / `{total}` ({metrics['description_fill_rate']*100:.1f}%)")
-    lines.append(f"- Input fill: `{input_ok}` / `{input_base}` ({metrics['input_fill_rate']*100:.1f}%)")
-    lines.append(f"- Output fill: `{output_ok}` / `{output_base}` ({metrics['output_fill_rate']*100:.1f}%)")
-    lines.append(f"- Globals(Global) fill: `{gg_ok}` / `{total}` ({metrics['globals_global_fill_rate']*100:.1f}%)")
-    lines.append(f"- Globals(Static) fill: `{gs_ok}` / `{total}` ({metrics['globals_static_fill_rate']*100:.1f}%)")
-    lines.append(f"- Called fill (supported): `{called_ok}` / `{total}` ({metrics['called_fill_rate']*100:.1f}%)")
-    lines.append(f"- Calling fill: `{calling_ok}` / `{total}` ({metrics['calling_fill_rate']*100:.1f}%)")
-    lines.append(f"- Direct called fill: `{direct_called_ok}` / `{total}` ({metrics['direct_called_fill_rate']*100:.1f}%)")
-    lines.append(f"- Direct called fill (applicable): `{direct_called_ok}` / `{direct_call_applicable}` ({metrics['direct_called_fill_applicable_rate']*100:.1f}%)")
-    lines.append(f"- Leaf / no-call functions: `{leaf_function_count}` / `{total}` ({_rate(leaf_function_count, total)*100:.1f}%)")
-    lines.append(f"- Indirect call support: `{indirect_support_ok}` / `{total}` ({_rate(indirect_support_ok, total)*100:.1f}%)")
-    lines.append(f"- ASIL non-TBD: `{asil_non_tbd}` / `{total}` ({metrics['asil_non_tbd_rate']*100:.1f}%)")
-    lines.append(f"- Related non-TBD: `{related_non_tbd}` / `{total}` ({metrics['related_non_tbd_rate']*100:.1f}%)")
-    lines.append(f"- Traceability (Related + Supported Call): `{traceable}` / `{total}` ({metrics['traceability_rate']*100:.1f}%)")
-    lines.append(f"- Direct traceability: `{direct_traceable}` / `{total}` ({metrics['direct_traceability_rate']*100:.1f}%)")
+    lines.append(f"- Description fill: `{desc_ok}` / `{total}` ({_pct(metrics['description_fill_rate'])})")
+    lines.append(f"- Input fill: `{input_ok_applicable}` / `{input_applicable}` ({_pct(input_rate, input_na)})")
+    if input_ok > input_ok_applicable:
+        lines.append(f"  - note: 입력이 채워졌지만 슬롯을 셀 수 없는 함수 {input_ok - input_ok_applicable}개 — "
+                     "분모 밖이라 채움률에 넣지 않는다(예전엔 분자가 분모를 끌어올렸다)")
+    lines.append(f"- Output fill: `{output_ok_applicable}` / `{output_applicable}` ({_pct(output_rate, output_na)})")
+    if input_none_marker or output_none_marker:
+        lines.append(f"  - note: 채움으로 센 것 중 \"(none)\" 표기(파라미터 없음) — 입력 {input_none_marker}개 · 출력 "
+                     f"{output_none_marker}개. quick gate 규약과 같이 채움으로 세되, 실 인터페이스 채움은 "
+                     "quick gate 의 input_real_fill/output_real_fill 참조")
+    if output_ok > output_ok_applicable:
+        lines.append(f"  - note: 출력이 채워졌지만 슬롯을 셀 수 없는 함수 {output_ok - output_ok_applicable}개 — "
+                     "분모 밖이라 채움률에 넣지 않는다")
+    if proto_unreadable > 0:
+        lines.append(f"  - note: Prototype 을 읽지 못한 함수 {proto_unreadable}개(전체 {total}) — "
+                     "입력/출력 둘 다 그 함수는 슬롯을 셀 수 없어 분모에 없다(head `Prototype unreadable`)")
+    lines.append(f"- Globals(Global) fill: `{gg_ok}` / `{total}` ({_pct(metrics['globals_global_fill_rate'])})")
+    lines.append(f"- Globals(Static) fill: `{gs_ok}` / `{total}` ({_pct(metrics['globals_static_fill_rate'])})")
+    lines.append(f"- Called fill (supported): `{called_ok}` / `{total}` ({_pct(metrics['called_fill_rate'])})")
+    lines.append(f"- Calling fill: `{calling_ok}` / `{total}` ({_pct(metrics['calling_fill_rate'])})")
+    lines.append(f"- ASIL non-TBD: `{asil_filled}` / `{total}` ({_pct(metrics['asil_non_tbd_rate'])})")
+    lines.append(f"- Related non-TBD: `{related_filled}` / `{total}` ({_pct(metrics['related_non_tbd_rate'])})")
+    lines.append("  - note: 빈 칸·N/A·`-` 도 TBD 와 같이 미기재로 센다(quick gate 와 같은 규칙) — "
+                 "예전엔 `전체 - TBD` 라 빈 칸이 기재로 계상됐다")
+    lines.append(f"- Traceability (Related + Supported Call): `{traceable}` / `{total}` ({_pct(metrics['traceability_rate'])})")
+    lines.append("")
+    # ── 임계 없는 축 ── 값은 남기되 `Gates: N / M` 에 넣지 않는다(R29 Q-1).
+    lines.append("## Informational (no threshold)")
+    lines.append(f"- Direct called fill: `{direct_called_ok}` / `{total}` ({_pct(informational['direct_called_fill_rate'])})")
+    lines.append(f"- Direct called fill (applicable): `{direct_called_ok}` / `{direct_call_applicable}` "
+                 f"({_pct(informational['direct_called_fill_applicable_rate'], total > 0 and direct_call_applicable == 0)})")
+    lines.append(f"- Leaf / no-call functions: `{leaf_function_count}` / `{total}` ({_pct(_rate(leaf_function_count, total))})")
+    lines.append(f"- Indirect call support: `{indirect_support_ok}` / `{total}` ({_pct(_rate(indirect_support_ok, total))})")
+    lines.append(f"- Direct traceability: `{direct_traceable}` / `{total}` ({_pct(informational['direct_traceability_rate'])})")
+    lines.append("  - 임계가 없어 판정에 쓰이지 않는다 — 예전엔 `Gates` 분모에 섞여 '공짜 통과' 로 세어졌다")
     lines.append("")
     lines.append("## TBD Residual")
     lines.append(f"- ASIL TBD: `{tbd_asil}` / `{total}`")
+    lines.append(f"- ASIL unfilled: `{total - asil_filled - tbd_asil}` / `{total}`")
     lines.append(f"- Related TBD: `{tbd_related}` / `{total}`")
+    lines.append(f"- Related unfilled: `{total - related_filled - tbd_related}` / `{total}`")
+    lines.append("  - unfilled = 빈 칸 · N/A · `-` (TBD 는 위 줄에 따로) — 기재 + TBD + unfilled = 전체")
     lines.append("")
     lines.append("## Description Quality Grade")
-    lines.append(f"- High (comment/SDS/reference): `{desc_high}` ({_rate(desc_high, total)*100:.1f}%)")
-    lines.append(f"- Medium (keyword inference): `{desc_med}` ({_rate(desc_med, total)*100:.1f}%)")
-    lines.append(f"- Low (generic template): `{desc_low}` ({_rate(desc_low, total)*100:.1f}%)")
+    lines.append(f"- High (comment/SDS/reference): `{desc_high}` ({_pct(_rate(desc_high, total))})")
+    lines.append(f"- Medium (keyword inference): `{desc_med}` ({_pct(_rate(desc_med, total))})")
+    lines.append(f"- Low (generic template): `{desc_low}` ({_pct(_rate(desc_low, total))})")
+    if payload_file is None:
+        lines.append("  - 문서 자기 대조 — 설명의 유래를 알 수 없어 전부 `generated_doc`(약한 출처)로 분류했다. "
+                     "High 는 payload 사이드카가 있어야 나온다(예전엔 되읽은 설명에 `reference` 가 붙어 전부 High 였다).")
+    if entries_not_in_payload:
+        lines.append(f"  - 문서 항목 {entries_not_in_payload}개는 payload 에 없어(생성되지 않은 서식) 채점 밖이다 — "
+                     "문서 커버리지는 `.validation.md` 의 빈 heading 축이 잰다.")
     lines.append("")
     lines.append("## Thresholds")
+    lines.append(f"- source: `{threshold_source}`")
     for k, v in gate.items():
         lines.append(f"- {k}: `{v*100:.1f}%`")
+    if ignored_threshold_keys:
+        # 넘겨받았지만 이 채점이 쓰지 않는 키 — 조용히 버리면 "config 를 넘겼으니 적용됐겠지" 가 된다
+        lines.append(f"- ignored keys: `{', '.join(ignored_threshold_keys)}`")
     lines.append("")
     lines.append("## Failed Gates")
     if failed:
         for k in failed:
             guide = _gate_improvement_guide.get(k, "")
-            lines.append(f"- **{k}**: {metrics[k]*100:.1f}% < {gate[k]*100:.1f}%")
+            lines.append(f"- **{k}**: {_pct(metrics[k])} < {gate[k]*100:.1f}%")
             if guide:
                 lines.append(f"  - 개선 가이드: {guide}")
     else:
         lines.append("- none")
     lines.append("")
+    # ── 미측정 게이트 ── 실패와 **같은 목록에 섞지 않는다**. 섞으면 읽는 사람이 전부
+    # 고칠 거리로 읽고(실측: 실패 8건 중 2건이 그랬다), 상시 실패가 진짜 미달을 가린다.
+    lines.append("## Unmeasured Gates")
+    if unmeasured:
+        for k in unmeasured:
+            lines.append(f"- **{k}**: 분모가 0이라 이 축은 채점하지 않았다 "
+                         f"(0% 가 아니라 **잰 적 없음**)")
+        lines.append("  - 흔한 원인: 문서의 SwUFn 항목이 함수가 아니라 전역 변수라 "
+                     "Prototype 칸이 비어 있으면 입력/출력 슬롯 자체를 셀 수 없다.")
+    else:
+        lines.append("- none")
+    lines.append("")
+    # ── 해당 없음 ── 미측정과 **다른 버킷**이다(R29 Q-4). 못 잰 게 아니라 잴 대상이 없다.
+    lines.append("## Not Applicable Gates")
+    if not_applicable:
+        for k in not_applicable:
+            lines.append(f"- **{k}**: 대상 0 — 모든 함수의 Prototype 을 파라미터 목록까지 읽었고 이 슬롯이 있는 "
+                         f"함수가 없다 (판정에서 뺀다 — 통과도 실패도 아니다)")
+        lines.append("  - 해당 없음은 `Gate pass` 를 붙들지 않는다. 미측정(못 잼)과 갈라 두지 않으면 "
+                     "입출력이 없는 문서가 영구 `False` 가 된다.")
+    else:
+        lines.append("- none")
+    lines.append("")
+    if ungated:
+        lines.append("## Ungated Metrics")
+        for k in ungated:
+            lines.append(f"- **{k}**: 잰 값은 있는데 임계 표에 키가 없다 — 판정할 수 없어 `Gate pass` 는 False 다")
+        lines.append("  - 미측정(못 잼)과 다르다: 값은 `## Metrics` 에 그대로 있다. 없는 건 임계다.")
+        lines.append("")
     lines.append("## Improvement Recommendations")
     if tbd_asil > total * 0.5:
         lines.append("- SDS 문서를 추가하면 ASIL 정확도를 크게 향상시킬 수 있습니다.")
@@ -769,13 +1389,36 @@ def generate_uds_field_quality_gate_report(
         lines.append("- SRS 문서를 추가하면 요구사항 추적성을 크게 향상시킬 수 있습니다.")
     if desc_low > total * 0.3:
         lines.append("- 소스 코드에 Doxygen 주석(@brief)을 추가하면 Description 품질이 향상됩니다.")
-    if not failed and not (tbd_asil > total * 0.5 or tbd_related > total * 0.5 or desc_low > total * 0.3):
-        lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다.")
+    # ⚠ 미측정이 남아 있으면 "다 통과했다" 고 말하지 않는다.
+    #   이 분기는 **이 라운드의 수정이 만들어 낸** 출구를 막는다: 미측정을 `failed` 에서
+    #   빼자 `Total functions: 0` 같은 문서(실 산출물 4건)에서 `failed` 가 **비게 되고**,
+    #   아래 `elif` 조건이 참이 되어 "모든 품질 게이트를 통과했습니다" 가 나간다.
+    #   (구판에서는 그 문서도 실패 7건을 달고 있어 이 문장이 안 나갔다 — 즉 새로 생길
+    #    뻔한 거짓이다. 뮤테이션 M223 이 이 분기를 지우면 실제로 그 문장이 나온다.)
+    #   판정 값을 고치면 **그 값을 말로 옮기는 산문도 같이** 봐야 한다.
+    if unmeasured:
+        lines.append(
+            f"- 지표 {len(unmeasured)}개를 **재지 못했습니다**(분모 0) — 통과 여부를 말할 수 없습니다. "
+            "`## Unmeasured Gates` 참조.")
+    if ungated:
+        lines.append(
+            f"- 지표 {len(ungated)}개는 쟀지만 **임계가 없어 판정할 수 없습니다** — `## Ungated Metrics` 참조.")
+    if unmeasured or ungated:
+        pass  # 위에서 각각 말했다 — "모두 통과" 산문으로 떨어지지 않게 막는 분기
+    elif not failed and not (tbd_asil > total * 0.5 or tbd_related > total * 0.5 or desc_low > total * 0.3):
+        # 통과가 **무엇에 대한** 통과인지 — 생성되지 않은 항목이 있으면 그 수를 같은 문장에 둔다.
+        _cov = ""
+        if entries_not_in_payload:
+            _cov = (f" ⚠ 단, 문서 항목 {document_entries}개 중 {entries_not_in_payload}개는 생성되지 않아 채점 밖입니다"
+                    f" — 생성된 {total}개 기준 통과, 문서 커버리지 {_pct(_rate(total, document_entries))}.")
+        if not_applicable:
+            lines.append(f"- 채점한 게이트는 모두 통과했습니다(해당 없음 {len(not_applicable)}개는 판정 밖). "
+                         "정기적인 재검증을 권장합니다." + _cov)
+        else:
+            lines.append("- 모든 품질 게이트를 통과했습니다. 정기적인 재검증을 권장합니다." + _cov)
 
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return str(out)
+    _atomic_write_text(Path(out_path), "\n".join(lines))
+    return str(Path(out_path))
 
 
 def generate_uds_delta_report(
@@ -944,20 +1587,20 @@ def _parse_accuracy_summary(text: str) -> Dict[str, Any]:
 
 
 def _parse_quality_gate_summary(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"gate_pass": "", "metrics": {}}
-    for raw in str(text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        m_gate = re.search(r"gate pass:\s*`?(true|false)`?", line, flags=re.I)
-        if m_gate:
-            out["gate_pass"] = str(m_gate.group(1)).lower()
-            continue
-        m_metric = re.search(r"-\s*([^:]+):\s*`?\d+`?\s*/\s*`?\d+`?\s*\(([^)]+)\)", line)
-        if m_metric:
-            key = re.sub(r"[^a-z0-9]+", "_", str(m_metric.group(1)).strip().lower()).strip("_")
-            out.setdefault("metrics", {})[key] = str(m_metric.group(2)).strip()
-    return out
+    """조회용 게이트 요약. 판정은 `report_gen.gate_report` **단일 출처**에 위임한다.
+
+    ⚠ 계약 변경(2026-08-03): `gate_pass` 가 `''`/`'true'`/`'false'` **문자열**에서
+    `None`/`True`/`False` **bool** 로 바뀌었다. 예전 문자열 계약은 두 가지가 잘못됐다 —
+    ① 같은 파일을 읽는 `uds.py::_parse_quality_gate_report` 는 bool 을 내서 타입이 갈렸고
+    ② **JS 에서 `'false'` 는 truthy** 라 이 값이 화면에 닿으면 FAIL 이 PASS 로 그려진다.
+    전환 시점에 이 키의 프론트 소비자는 0건이었다(view endpoint 3개를 호출하는 코드 자체가 없음).
+    """
+    parsed = parse_gate_report(text)
+    return {
+        "gate_pass": parsed.get("gate_pass"),
+        "gate_pass_status": parsed.get("gate_pass_status"),
+        "metrics": to_percent_text_map(parsed),
+    }
 
 
 def build_uds_view_payload(
@@ -1169,18 +1812,14 @@ def generate_asil_related_confidence_report(
                 desc = str(row.get("description") or "").strip()
                 asil = str(row.get("asil") or "").strip()
                 rel = str(row.get("related") or "").strip()
-                desc_src = "inference" if (not desc or _is_generic_description(desc)) else "reference"
-                asil_src = "inference"
-                rel_src = "inference"
-                if asil and asil not in {"TBD", "N/A", "-"}:
-                    asil_src = "sds"
-                if rel and rel not in {"TBD", "N/A", "-"}:
-                    if re.search(r"\bSw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+\b", rel):
-                        rel_src = "srs"
-                    elif re.search(r"\bSwCom_\d+\b", rel, flags=re.I):
-                        rel_src = "rule"
-                    else:
-                        rel_src = "reference"
+                # ⚠ 여기서 읽은 문서는 **우리가 방금 쓴 산출물**(`generated_docx_path`)이다.
+                #   예전엔 값의 모양만 보고 `sds`(0.95)·`srs`(0.95)·`rule`·`reference` 를
+                #   붙였다 — 즉 자기 출력을 되읽어 출처를 만들어냈다. 값의 진짜 유래는
+                #   "생성 문서" 하나뿐이고 그 안의 값이 애초에 어디서 왔는지는 이 계층이
+                #   모른다. 모른다는 사실을 그대로 적는다(`generated_doc`, 0.30).
+                desc_src = "generated_doc" if desc else "inference"
+                asil_src = "generated_doc" if (asil and asil not in {"TBD", "N/A", "-"}) else "inference"
+                rel_src = "generated_doc" if (rel and rel not in {"TBD", "N/A", "-"}) else "inference"
                 rebuilt_from_doc[name] = {
                     "id": str(row.get("id") or ""),
                     "name": str(row.get("name") or ""),
@@ -1220,6 +1859,29 @@ def generate_asil_related_confidence_report(
                     fid = str(row.get("id") or "").strip()
                     if fid:
                         by_id_from_doc[fid] = row
+                # ⚠ **호출자의 payload 를 건드리지 않는다.**
+                #
+                # `details_by_name` 은 `payload["function_details_by_name"]` 그 자체이고,
+                # 그 값들은 `function_details` 와 **같은 객체**다(docx_builder 의 재결합
+                # 이후 특히). 아래 병합을 그 객체에 직접 하면 리포트가 입력을 변경한다.
+                # 실측(2026-08-03) — 함수 5개 payload 에 이 리포트를 돌리면:
+                #
+                #     asil_fill 0.0 -> 100.0 · description_fill 0.0 -> 100.0
+                #     related_fill 0.0 -> 100.0   (전부 `*_source = generated_doc`)
+                #
+                # 그리고 라우터는 이 리포트 **뒤에** quick gate 를 계산해 DB 에 넣는다
+                # (`jenkins.py` L2600->L2634, `helpers/uds.py` L1827->L1860,
+                #  `local.py` 의 두 번째 기록 L1197->L1236). 즉 **출처를 감사해야 할
+                # 리포트가 자기가 감사할 게이트를 부풀린다**. fill 카운터는 출처를 안 보므로
+                # §5-13 이 `generated_doc`=0.30 으로 정직화한 것과 무관하게 100% 로 잡힌다.
+                #
+                # 부수 효과로 후보 15(리포트 timeout 시 payload 제자리 변경 경합)도 닫힌다 —
+                # 타임아웃된 스레드가 계속 돌아도 이제 남의 payload 를 못 만진다.
+                # 병합 결과는 이 리포트의 **자기 분석용**이므로 사본이면 충분하다.
+                details_by_name = {
+                    k: (dict(v) if isinstance(v, dict) else v)
+                    for k, v in details_by_name.items()
+                }
                 for name, info in list(details_by_name.items()):
                     if not isinstance(info, dict):
                         continue
@@ -1246,64 +1908,131 @@ def generate_asil_related_confidence_report(
                     cur_asil = str(info.get("asil") or "").strip()
                     cur_rel = str(info.get("related") or "").strip()
                     cur_desc_src = str(info.get("description_source") or "").strip().lower()
+                    cur_asil_src = str(info.get("asil_source") or "").strip().lower()
                     cur_rel_src = str(info.get("related_source") or "").strip().lower()
                     doc_desc = str(row.get("description") or "").strip()
                     doc_asil = str(row.get("asil") or "").strip()
                     doc_rel = str(row.get("related") or "").strip()
                     comment_desc = str(info.get("comment_description") or "").strip()
-                    weak_desc_src = cur_desc_src in {"", "inference", "rule"}
-                    weak_rel_src = cur_rel_src in {"", "inference", "rule"}
+                    # (R32 Q-9) 세 필드가 **같은 예외 판정**을 쓴다 — 예전엔 desc/related 만 `{"", "inference",
+                    #   "rule"}` 리터럴로 가드하고 ASIL 은 가드가 없어, 강한 출처(SRS/SDS)가 명시한 `TBD` 를
+                    #   문서에서 회수한 값이 덮을 수 있었다(라이브 payload 126개 실측: ASIL 빈 값 52건은 전부
+                    #   `inference` 라 발화 0). 리터럴 대신 `provenance.is_weak_source` 를 쓴다 — 리터럴 집합은
+                    #   `default`/`generated_doc`/`module_inherit` 을 강함으로 오분류했다(그 모듈이 생긴 이유).
+                    weak_desc_src = is_weak_source(cur_desc_src)
+                    weak_asil_src = is_weak_source(cur_asil_src)
+                    weak_rel_src = is_weak_source(cur_rel_src)
                     if comment_desc and not _is_generic_description(comment_desc) and weak_desc_src:
                         info["description"] = comment_desc
                         info["description_source"] = "comment"
                     elif doc_desc and doc_desc.upper() not in {"N/A", "TBD", "-"} and weak_desc_src:
                         # Prioritize explicit document text over inferred prose.
+                        # ⚠ 값을 실제로 가져왔을 때만 출처를 바꾼다. 예전엔 값을 안 바꾸고도
+                        #   출처만 `reference` 로 올렸다 — 근거 없는 등급 상승이다.
                         if (not cur_desc) or _is_generic_description(cur_desc):
                             info["description"] = doc_desc
-                        info["description_source"] = "reference"
-                    if (not cur_asil or cur_asil in {"TBD", "N/A", "-"}) and doc_asil:
+                            info["description_source"] = "generated_doc"
+                    if (not cur_asil or cur_asil in {"TBD", "N/A", "-"}) and doc_asil and weak_asil_src:
                         info["asil"] = doc_asil
-                        info["asil_source"] = "sds"
+                        info["asil_source"] = "generated_doc"
                     if (not cur_rel or cur_rel in {"TBD", "N/A", "-"}) and doc_rel and weak_rel_src:
                         info["related"] = doc_rel
-                        if re.search(r"\bSw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+\b", doc_rel):
-                            info["related_source"] = "srs"
-                        elif re.search(r"\bSwCom_\d+\b", doc_rel, flags=re.I):
-                            info["related_source"] = "rule"
-                        else:
-                            info["related_source"] = "reference"
+                        # ID 가 `SwFn_07` 모양이라는 건 "SRS 를 참조했다" 는 증거가 아니라
+                        # 그냥 문자열 모양이다. 모양으로 출처를 지어내지 않는다.
+                        info["related_source"] = "generated_doc"
 
+    # ⚠ 2026-07-29 — 이 어휘와 **실제 생산 어휘가 벌어져 있었다.** 코드가 실제로 넣는
+    # 값 중 `uds`·`swcom`·`rag`·`module_inherit`·`default`·`srs_default_qm`·`call_graph`
+    # 는 전부 미지값이라 조용히 `inference`(0.60)로 접혔다. 양방향으로 틀린다:
+    #   - 문서 유래(`uds`/`swcom`)가 0.95 여야 하는데 0.60 (과소)
+    #   - 근거 없는 기본값(`default`/`srs_default_qm`)이 실제 추론과 **동급** (과대)
+    # 게다가 표에는 "추론" 이라고 **찍혀서** 리뷰어가 그 분류를 사실로 읽는다.
     src_labels = {
         "comment": "주석",
         "sds": "SDS",
+        # ⚠ `sds`(0.95)의 별칭이 **아니다**. 생산 지점(`requirements.py:1593-1598`)이
+        #   *"설명을 SDS 에서 가져왔을 때"* 의 else 분기라, 이 라벨의 뜻은 정확히
+        #   *"함수는 SDS 에 매핑됐지만 설명은 SDS 유래가 아니다"* 다. 라벨 문구가
+        #   그 뜻을 말해야 리뷰어가 표를 사실로 오독하지 않는다.
+        "sds_match": "SDS 매핑(설명은 SDS 유래 아님)",
         "srs": "SRS",
+        "uds": "UDS",              # requirements.py:1436, impact_orchestrator.py:369
+        "swcom": "SDS component",  # impact_orchestrator.py:608
         "reference": "레퍼런스",
-        "rule": "룰",
         "ai": "AI",
+        "rag": "지식베이스",         # docx_builder.py:2124
+        "call_graph": "콜그래프",    # docx_builder.py:2268 (calls_source)
+        "rule": "룰",
+        "module_inherit": "모듈 상속",  # docx_builder.py:1897
         "inference": "추론",
+        "default": "기본값(근거 없음)",  # docx_builder.py:1900, helpers/uds.py
+        # 이 리포트가 **자기 산출물**(생성 UDS DOCX)에서 회수한 값. 원 유래는 이 계층이
+        # 모른다 — 되읽었다는 사실만 안다. `unknown` 과 점수는 같지만 원인이 달라서
+        # 별도 라벨을 둔다(이건 어휘 드리프트가 아니라 payload 결손의 신호다).
+        "generated_doc": "생성 문서 회수(원 유래 불명)",
+        "unknown": "미상(분류 불가)",
     }
     src_score = {
         "comment": 1.00,
         "sds": 0.95,
         "srs": 0.95,
+        "uds": 0.95,
+        "swcom": 0.95,
         "reference": 0.90,
         "ai": 0.85,
+        "rag": 0.85,
+        "call_graph": 0.80,
+        # SDS 매핑은 실제 근거지만 **설명 문구는 SDS 유래가 아니다** — 매핑이라는 보조
+        # 증거 하나뿐이라 `call_graph` 와 같은 티어. 예전엔 별칭으로 `sds`(0.95)를 받았다.
+        # ⚠ `WEAK_SCORE_MAX`(0.75) 아래로 내리지 말 것 — `is_weak_source()` 가 True 가
+        #   되어 RAG·AI·HSIS 덮어쓰기 3경로가 열린다(점수 정직화가 아니라 내용 변경).
+        "sds_match": 0.80,
         "rule": 0.75,
+        "module_inherit": 0.70,   # 모듈에서 물려받음 — 명시 규칙보다 약하다
         "inference": 0.60,
+        # 근거가 **없어서** 쓴 값. 추론보다 낮아야 한다 — 추론은 최소한 무언가를 보고 한 것이다.
+        "default": 0.30,
+        # 자기 산출물 회수. 문서에 적혀 있다는 사실은 그 값이 **옳다는 근거가 아니다**
+        # (우리가 쓴 것이므로). 원 유래 불명이니 `unknown` 과 같은 0.30.
+        "generated_doc": 0.30,
+        # 어휘에 없는 값. 조용히 '추론' 으로 접지 않는다 — 모른다는 사실 자체가 정보다.
+        "unknown": 0.30,
     }
+    # ⚠ 별칭 표는 `report_gen/provenance.py::SOURCE_ALIASES` 단일 출처다.
+    #   여기 리터럴로 다시 적으면 `is_weak_source()` 와 갈라진다 — 실제로 갈라져서
+    #   `srs_default_qm` 이 **점수 0.30(최약체)인데 판정은 강함**이 됐고, 더 나은
+    #   근거가 그 칸을 못 덮었다(2026-07-31).
+    _src_aliases = dict(SOURCE_ALIASES)
+    # 미지값을 모아 보고서에 노출한다(어휘 드리프트를 조용히 흡수하지 않는다).
+    unknown_src_values: Dict[str, int] = {}
 
     def _norm_src(v: Any) -> str:
         s = str(v or "").strip().lower()
-        if s == "sds_match":
-            return "sds"
-        if s == "hsis":
-            return "sds"
-        return s if s in src_labels else "inference"
+        if s in _src_aliases:
+            return _src_aliases[s]
+        if s in src_labels:
+            return s
+        if s:
+            unknown_src_values[s] = unknown_src_values.get(s, 0) + 1
+        return "unknown"
 
-    def _score_for(info: Dict[str, Any]) -> float:
-        ds = _norm_src(info.get("description_source"))
-        asrc = _norm_src(info.get("asil_source"))
-        rsrc = _norm_src(info.get("related_source"))
+    def _effective_src(info: Dict[str, Any], field_name: str) -> str:
+        """필드의 **실효 출처** — 값이 없으면 출처 라벨을 믿지 않는다. 표·분포·근거·점수가 전부 이걸 쓴다.
+
+        (R32 Q-9) 출처 라벨은 "이 값이 어디서 왔는가" 다. 값이 자리표시자(빈칸/TBD/N/A)인데 라벨이
+        `sds` 면 그 칸은 *근거는 있는데 내용이 없다* 는 불가능한 상태이고, 라벨만 보면 0.95 를 받는다
+        (`provenance.has_evidence_value` docstring). 값이 없으면 `unrecorded_source` 가 주는 `default`(0.30)
+        로 잰다 — 라이브 payload 126개 실측: 강한 출처+빈 값 0건, `inference`+빈 ASIL 52건(0.60→0.30).
+        ⚠ 점수만 바꾸고 표엔 원 라벨을 찍으면 리포트가 자기 평균을 재현하지 못한다(리뷰 W7: 범례로 계산한
+          0.617 ≠ 적힌 0.517). 그래서 여기 **한 번** 구한 라벨을 행·분포·근거·점수가 같이 쓴다 — 미지
+          라벨 집계(`unknown_src_values`)도 한 번만 센다(예전엔 표와 점수에서 두 번 불러 정확히 2배였다).
+        """
+        src = _norm_src(info.get(f"{field_name}_source"))
+        if not has_evidence_value(info.get(field_name)):
+            return unrecorded_source(info.get(field_name))
+        return src
+
+    def _score_of_srcs(ds: str, asrc: str, rsrc: str) -> float:
         return (src_score.get(ds, 0.6) + src_score.get(asrc, 0.6) + src_score.get(rsrc, 0.6)) / 3.0
 
     def _evidence_for(info: Dict[str, Any], src: str, field_name: str) -> str:
@@ -1316,6 +2045,10 @@ def generate_asil_related_confidence_report(
                 return str(info.get("comment_related") or info.get("related") or "").strip()
         if src == "sds":
             return "SDS 매핑 규칙에 의해 보강됨"
+        if src == "sds_match":
+            # ⚠ 예전엔 별칭으로 접혀 위 `sds` 문구("보강됨")를 그대로 받았다. 이 라벨은
+            #    설명이 SDS 에서 오지 **않은** 경우라, 그 문구는 거짓 근거였다.
+            return "함수가 SDS 에 매핑됨 — 다만 이 설명 문구는 SDS 유래가 아니다"
         if src == "srs":
             return "SRS 요구사항 ID/ASIL 추출 규칙에 의해 보강됨"
         if src == "reference":
@@ -1324,6 +2057,11 @@ def generate_asil_related_confidence_report(
             return "AI(Gemini) 모델이 코드 컨텍스트로 생성"
         if src == "rule":
             return "함수명/ID 기반 룰로 할당됨"
+        if src == "generated_doc":
+            return "생성 UDS DOCX 에서 회수 — 원 유래 미확인(payload 에 출처가 없었다)"
+        if src == "default":
+            # 값이 자리표시자라 출처 라벨과 무관하게 여기로 온다(`_effective_src`) — "추론" 이라고 적으면 거짓이다.
+            return "값 없음(빈칸/TBD) — 근거 미기록"
         return "코드/문맥 기반 추론"
 
     def _overall_grade(score: float) -> str:
@@ -1367,9 +2105,9 @@ def generate_asil_related_confidence_report(
             swcom = f"SwCom_{m_sw.group(1)}"
         swstats = by_swcom.setdefault(swcom, {"total": 0, "low": 0})
         swstats["total"] += 1
-        ds = _norm_src(info.get("description_source"))
-        asrc = _norm_src(info.get("asil_source"))
-        rsrc = _norm_src(info.get("related_source"))
+        ds = _effective_src(info, "description")
+        asrc = _effective_src(info, "asil")
+        rsrc = _effective_src(info, "related")
         desc_count[ds] = desc_count.get(ds, 0) + 1
         asil_count[asrc] = asil_count.get(asrc, 0) + 1
         rel_count[rsrc] = rel_count.get(rsrc, 0) + 1
@@ -1405,7 +2143,7 @@ def generate_asil_related_confidence_report(
                 op_counts["rel_backed_by_hsis"] += 1
             if "code" not in rel_evidence_set and "hsis" not in rel_evidence_set:
                 op_counts["rel_doc_only"] += 1
-        score = _score_for(info)
+        score = _score_of_srcs(ds, asrc, rsrc)
         all_rows.append(
             (
                 score,
@@ -1458,9 +2196,32 @@ def generate_asil_related_confidence_report(
     lines.append("# ASIL/Related ID Confidence Report")
     lines.append("")
     lines.append(f"- Total functions: `{total}`")
-    lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
-    lines.append(f"- Low confidence threshold: `< 0.80`")
-    lines.append("- Source categories: `SDS / SRS / 주석 / 추론` (레퍼런스/룰 포함)")
+    if total > 0:
+        lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
+    else:
+        # (R32 Q-9) 채점 대상이 0개면 평균이 정의되지 않는다. 예전엔 `0.000` / `D`(최하 등급)로 적혀
+        # 리더(`evidence.read_confidence_report`)가 "신뢰도 D" 로 그렸다 — 라이브 사이드카 56개 중 2개가
+        # 이 상태다. 미측정을 최악값으로 적지 않는다: 리더의 `_as_float` 가 숫자가 아니면 `None` 을 낸다.
+        lines.append("- Overall confidence score: `n/a` (grade: `n/a`)")
+        lines.append("- ⚠ 채점 대상 함수 0개 — 점수·등급 미측정(최하 등급이 아니다)")
+    lines.append("- Low confidence threshold: `< 0.80`")
+    # ⚠ 범례는 `src_labels` 에서 **파생**시킨다. 예전엔 하드코딩 문자열이라 새 라벨이
+    #    생겨도 범례에 안 나타났다 — 표에는 찍히는데 범례엔 없는 라벨이 생긴다.
+    lines.append("- Source categories: " + " / ".join(f"`{v}`" for v in src_labels.values()))
+    lines.append(
+        "  - ⚠ `SDS` 와 `SDS 매핑(설명은 SDS 유래 아님)` 은 다르다 — 후자는 함수가 SDS 에 "
+        "매핑됐다는 뜻일 뿐이고 **설명 문구의 출처는 SDS 가 아니다**(보조 증거 0.80)."
+    )
+    # ⚠ 어휘에 없는 출처값을 조용히 '추론' 으로 접지 않는다. 접으면 리뷰어가 표에 찍힌
+    # "추론" 을 사실로 읽는다 — 실제로는 분류를 못 한 것이다. 여기서 명시한다.
+    if unknown_src_values:
+        _uk = ", ".join(f"`{k}`×{v}" for k, v in sorted(unknown_src_values.items(),
+                                                        key=lambda x: (-x[1], x[0]))[:20])
+        lines.append(
+            f"- ⚠ **분류 불가 출처값 {len(unknown_src_values)}종**: {_uk} — "
+            "어휘에 없어 `미상(0.30)` 으로 계산했다. 생산 지점이 새 출처를 추가했다면 "
+            "`report_gen/validation.py` 의 `src_labels`/`src_score` 에 등급과 함께 등록할 것."
+        )
     lines.append("")
     lines.extend(_dump_counter("Description Source", desc_count))
     lines.extend(_dump_counter("ASIL Source", asil_count))
@@ -1531,7 +2292,5 @@ def generate_asil_related_confidence_report(
             lines.append(f"  - desc evidence: {dev[:180] if dev else 'N/A'}")
             lines.append(f"  - asil evidence: {aev[:180] if aev else (asil_v or 'N/A')}")
             lines.append(f"  - related evidence: {rev[:180] if rev else (rel_v or 'N/A')}")
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return str(out)
+    _atomic_write_text(Path(out_path), "\n".join(lines))
+    return str(Path(out_path))

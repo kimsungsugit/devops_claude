@@ -1,6 +1,6 @@
 {
   "name": "devops-release",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "DevOps Release 자동화 플러그인 - 문서생성(UDS/STS/SUTS/SITS), 코드리뷰, 영향도분석, CI/CD 통합",
   "author": {
     "name": "kimsungsu"
@@ -13,7 +13,7 @@
 
   "userConfig": {
     "backend_url": {
-      "description": "Backend API URL (e.g. http://127.0.0.1:8000)",
+      "description": "Backend API URL (e.g. http://127.0.0.1:9000)",
       "sensitive": false
     },
     "jenkins_url": {

@@ -1,26 +1,68 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-import sys
-import time
-import logging
-import tempfile
-import subprocess
-from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 repo_root = Path(r"D:\Project\devops\260105")
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from workflow import rag as ragmod
-from workflow.ai import load_oai_config
-from workflow.rag import get_kb
-import report_generator as rg
+import report_generator as rg  # noqa: E402
+from workflow import rag as ragmod  # noqa: E402
+from workflow.ai import load_oai_config  # noqa: E402
+from workflow.rag import get_kb  # noqa: E402
+
+
+def _load_repo_module(rel_module: str, package: str = "report_gen"):
+    """**이 저장소의** `<package>/<rel_module>.py`(기본 `report_gen/`)를 파일 경로로 직접 연다.
+
+    ⚠ 이 파일에서 `from report_gen.X import …` 를 쓰면 안 된다. 위 16-18행이
+    `sys.path` **최상단**에 `D:/Project/devops/260105` 를 밀어넣는데 그 트리에도
+    `report_gen/` 패키지가 있어 전부 그쪽으로 해석된다. 실측(2026-08-04):
+
+        report_gen           -> D:\\Project\\devops\\260105\\report_gen\\__init__.py
+        report_gen.provenance -> ModuleNotFoundError (그 트리엔 파일이 없다)
+        report_gen.utils      -> D:\\Project\\devops\\260105\\report_gen\\utils.py (576줄,
+                                 이 저장소 판은 622줄 — **다른 파일**이다)
+
+    실제로 이것 때문에 조용히 깨져 있던 배선이 있었다: `build_function_details_by_name`
+    (§6 후보 21 C3, 커밋 `fc246d7` 의 함수명 키 단일화)은 이 저장소 `utils.py:33` 에만
+    있어서, 여기서 import 하면 **ImportError 로 죽는다**. 즉 그 fix 는 이 도구 경로에서
+    한 번도 도달한 적이 없다. 같은 그림자가 §6 후보 14 를 기각시킨 사유 중 하나이기도 하다.
+
+    판정·구현을 여기 다시 적으면 이 저장소가 네 번 겪은 "복제 → 한쪽만 고쳐짐" 이 되므로
+    정본 파일을 로드한다.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / package / f"{rel_module}.py"
+    spec = importlib.util.spec_from_file_location(f"_aria_repo_{rel_module}", path)
+    if spec is None or spec.loader is None:      # pragma: no cover - 파일 부재
+        raise ImportError(f"{package}/{rel_module}.py 정본을 열 수 없다: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+has_evidence_value = _load_repo_module("provenance").has_evidence_value
+build_function_details_by_name = _load_repo_module("utils").build_function_details_by_name
+# (R32 W2) payload 사이드카 원자 기록 — 같은 이유로 `_load_repo_module` 경유(직접 import 는 260105 트리로 해석된다).
+atomic_write_text = _load_repo_module("atomic_io").atomic_write_text
+# 체크포인트 이름 규칙은 라이터·리더와 **같은 상수**다(`docgen_last_run.py` — stdlib 만 쓰는
+# 잎 모듈이라 위 그림자 없이 파일로 열 수 있다). 여기 리터럴 3곳이 그 계약 밖에 있었고
+# 가드는 `helpers/uds.py` 만 봤다(2026-09-03 R27 H-2).
+CHECKPOINT_SUFFIX = _load_repo_module("docgen_last_run", package="backend/services").CHECKPOINT_SUFFIX
 
 
 def _iter_udf_identifiers(info: dict) -> set[str]:
@@ -203,7 +245,13 @@ def _enrich_source_sections_with_docs(
                         info["hsis_related_ids"] = hsis_related_ids
                     _append_evidence(info, "description_evidence_sources", "hsis")
                     _append_evidence(info, "related_evidence_sources", "hsis")
-                    if str(info.get("description_source") or "").strip() in {"", "inference"}:
+                    # ⚠ **값이 있을 때만** 올린다 — `hsis` 는 별칭이 `sds`(0.95)라, 설명이
+                    #    빈 칸인데 라벨만 올리면 빈 칸이 최상급 점수를 받는다.
+                    #    (`backend/routers/local.py` 의 같은 승격과 lockstep)
+                    if (
+                        has_evidence_value(info.get("description"))
+                        and str(info.get("description_source") or "").strip() in {"", "inference"}
+                    ):
                         info["description_source"] = "hsis"
                     elif str(info.get("description_source") or "").strip() in {"sds", "sds_match"}:
                         info["description_source_detail"] = "hsis+sds_match"
@@ -235,15 +283,12 @@ def _enrich_source_sections_with_docs(
         if str(info.get("related_source") or "").strip() in {"sds", "hsis", "srs"}:
             _append_evidence(info, "related_evidence_sources", str(info.get("related_source") or "").strip())
 
-    rebuilt_by_name: dict[str, dict] = {}
-    for info in details.values():
-        if not isinstance(info, dict):
-            continue
-        name = str(info.get("name") or "").strip()
-        if name:
-            rebuilt_by_name[name] = info
+    # ⚠ 여기도 `.strip()` 만 해서 **원형 대소문자**를 키로 썼다(local.py 와 같은 결함).
+    #    조회는 전부 소문자라 대문자 포함 함수를 통째로 못 찾았다.
+    # ⚠ `from report_gen.utils import …` 였는데 그건 260105 트리로 해석돼 **ImportError**
+    #    였다(이 함수 전체가 죽는다). 모듈 상단 `_load_repo_module` 참조.
     sections["function_details"] = details
-    sections["function_details_by_name"] = rebuilt_by_name
+    sections["function_details_by_name"] = build_function_details_by_name(details)
     return sections
 
 
@@ -299,7 +344,7 @@ def _generate_docx_with_subprocess(
     work_dir = output_path.parent
     work_dir.mkdir(parents=True, exist_ok=True)
     payload_file = Path(tempfile.mkstemp(prefix="uds_payload_", suffix=".json", dir=str(work_dir))[1])
-    checkpoint = output_path.with_suffix(".docx.stage.json")
+    checkpoint = output_path.with_suffix(CHECKPOINT_SUFFIX)
     stage_payload_file = output_path.with_suffix(f".docx.payload.{stage}.json")
     try:
         payload_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -418,7 +463,7 @@ def _load_json(path: Path) -> dict:
 
 
 def _find_resume_candidate(out_dir: Path, retry_stages: list[tuple[str, int, int]]) -> tuple[Path, int] | None:
-    stage_files = sorted(out_dir.glob("*.docx.stage.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    stage_files = sorted(out_dir.glob(f"*{CHECKPOINT_SUFFIX}"), key=lambda p: p.stat().st_mtime, reverse=True)
     stage_order = [name for name, _, _ in retry_stages]
     for stage_file in stage_files:
         info = _load_json(stage_file)
@@ -433,7 +478,9 @@ def _find_resume_candidate(out_dir: Path, retry_stages: list[tuple[str, int, int
             out_path = Path(out_path_text)
         else:
             raw = str(stage_file)
-            out_path = Path(raw[:-11] if raw.endswith(".stage.json") else raw.replace(".stage.json", ""))
+            # `x.docx.stage.json` → `x.docx` — 접미사 길이를 손으로 세지 않는다(예전 `[:-11]`).
+            # 위 glob 이 `*{CHECKPOINT_SUFFIX}` 라 여기 오는 파일명은 항상 그 접미사로 끝난다.
+            out_path = Path(raw[:-len(CHECKPOINT_SUFFIX)] + ".docx")
         payload_path_text = str(info.get("stage_payload_path") or "").strip()
         if payload_path_text:
             payload_path = Path(payload_path_text)
@@ -473,9 +520,12 @@ def _write_uds_payload_sidecar(output_path: Path, uds_payload: dict) -> Path | N
             "summary": summary,
             "function_details": details,
         }
-        sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
         return sidecar
-    except Exception:
+    except Exception as exc:
+        # payload 사이드카가 없으면 채점기는 문서 자기 대조로 떨어진다 — 그 사실은 남아야 한다(§7d).
+        logging.getLogger("uds_local").warning("UDS payload sidecar write skipped: %s (%s)", sidecar, exc)
         return None
 
 

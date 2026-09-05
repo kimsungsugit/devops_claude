@@ -3,64 +3,7 @@
  * Renders only when 2+ projects are available.
  */
 
-function HorizontalBar({ label, value, max, color, suffix = '' }) {
-  const pct = max > 0 ? (value / max) * 100 : 0;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-1)' }}>
-      <span
-        style={{ width: 120, fontSize: 'var(--text-xs)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 }}
-        title={label}
-      >
-        {label}
-      </span>
-      <div style={{ flex: 1, height: 16, background: 'var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 'var(--radius-sm)', transition: 'width 0.4s' }} />
-      </div>
-      <span style={{ width: 55, textAlign: 'right', fontSize: 'var(--text-xs)', fontWeight: 600, flexShrink: 0 }}>
-        {typeof value === 'number' && !suffix ? value.toLocaleString() : value}{suffix}
-      </span>
-    </div>
-  );
-}
-
-function DonutChart({ segments, size = 100, strokeWidth = 16 }) {
-  const total = segments.reduce((s, seg) => s + seg.value, 0);
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-
-  // Pre-compute offsets to avoid mutation inside render
-  const arcs = segments.reduce((acc, seg) => {
-    const pct = total > 0 ? seg.value / total : 0;
-    const dashLen = pct * circumference;
-    const prevOffset = acc.length > 0 ? acc[acc.length - 1].offset + acc[acc.length - 1].dashLen : 0;
-    acc.push({ ...seg, dashLen, offset: prevOffset });
-    return acc;
-  }, []);
-
-  return (
-    <div style={{ position: 'relative', width: size, height: size }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        {arcs.map((arc, i) => (
-          <circle
-            key={i}
-            cx={size / 2}
-            cy={size / 2}
-            r={radius}
-            fill="none"
-            stroke={arc.color}
-            strokeWidth={strokeWidth}
-            strokeDasharray={`${arc.dashLen} ${circumference - arc.dashLen}`}
-            strokeDashoffset={-arc.offset}
-          />
-        ))}
-      </svg>
-      <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', textAlign: 'center' }}>
-        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}>{total}</div>
-        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>프로젝트</div>
-      </div>
-    </div>
-  );
-}
+import { HorizontalBar, DonutChart } from './charts.jsx';
 
 export default function AggregateCharts({ projects, buildStats }) {
   if (!projects || projects.length < 1) return null;
@@ -106,6 +49,7 @@ export default function AggregateCharts({ projects, buildStats }) {
             ].filter(s => s.value > 0)}
             size={80}
             strokeWidth={12}
+            centerSub="프로젝트"
           />
           <div>
             {buildCounts.success > 0 && (
@@ -150,7 +94,7 @@ export default function AggregateCharts({ projects, buildStats }) {
 
       {/* 2. Coverage comparison */}
       <div className="panel" style={{ boxShadow: 'none', padding: 'var(--sp-3)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)', color: 'var(--text-muted)' }}>커버리지 비교 (%)</div>
+        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)', color: 'var(--text-muted)' }}>구문 커버리지 (UT 기준, %)</div>
         {projects.map(p => (
           <HorizontalBar
             key={p.job_url}
@@ -161,6 +105,29 @@ export default function AggregateCharts({ projects, buildStats }) {
             suffix="%"
           />
         ))}
+        {/* 구문 커버리지는 UT 기준(coverage_basis='ut_statement')이 대시보드 표준값. 빌드는 vcast_ut_statements,
+            SCM은 coverage_ut를 씀. UT 구문을 못 뽑아 다른 기준으로 대체된 프로젝트만 폭로한다(침묵 혼재 방지 —
+            과거 'scm_vcast 지표 상이' 상시 각주를 basis 조건부로 대체). */}
+        {(() => {
+          const BASIS_LABEL = {
+            it_statement: 'IT 구문', it_functions: 'IT 함수',
+            combined_statement: 'UT+IT 합산', build_line: '빌드 라인커버',
+          };
+          const nonUt = projects.filter(p => p.coverage_source != null && p.coverage_basis && p.coverage_basis !== 'ut_statement');
+          if (nonUt.length === 0) return null;
+          return (
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+              * <b>{nonUt.map(p => `${p.name || '?'}(${BASIS_LABEL[p.coverage_basis] || p.coverage_basis})`).join(', ')}</b> — UT 구문 커버리지 미산출로 대체 지표 표시, 절대 비교 주의
+            </div>
+          );
+        })()}
+        {/* 커버리지가 빌드·SCM 이력 모두 없어 0으로 뜨면 '진짜 0'과 구분(침묵 0 방지).
+            빌드 line_rate가 0.0 플레이스홀더면 null이 아니라 coverage_source가 null이므로 그걸로 판정. */}
+        {projects.some(p => p.coverage_source == null) && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            † 일부 프로젝트는 커버리지 미집계(빌드·SCM 로드 이력 모두 없음)로 <b>0 표시</b> — 실제 0 아님
+          </div>
+        )}
       </div>
 
       {/* 3. PRQA diagnostics comparison */}
@@ -206,6 +173,12 @@ export default function AggregateCharts({ projects, buildStats }) {
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--color-info)', borderRadius: 2, marginRight: 4 }} />UT</span>
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--color-purple)', borderRadius: 2, marginRight: 4 }} />IT</span>
         </div>
+        {/* 빌드에 TC가 없어 SCM 로드 이력(VectorCAST)에서 회수한 개수임을 표기. */}
+        {projects.some(p => p.tests_source === 'scm_vcast') && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            * 일부 프로젝트 TC 수는 SCM 로드 이력의 <b>VectorCAST UT/IT 개수</b>
+          </div>
+        )}
       </div>
 
       {/* 5. Code size comparison */}
@@ -220,6 +193,18 @@ export default function AggregateCharts({ projects, buildStats }) {
             color="var(--accent)"
           />
         ))}
+        {/* lizard NLOC(순수)과 QAC LOC(헤더 포함)이 섞이면 프로젝트 간 절대 비교가 부정확 — 정직 표기(silent 혼재 방지). */}
+        {projects.some(p => p.code_metrics_source === 'qac') && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            * 일부 프로젝트는 lizard 미산출로 <b>QAC LOC(헤더 포함)</b>으로 대체 — 절대 비교 주의
+          </div>
+        )}
+        {/* 완전 부재(lizard·QAC 둘 다 없음) 프로젝트는 0으로 뜨는데 '진짜 0'과 구분되도록 사유를 명시(침묵 0 방지). */}
+        {projects.some(p => p.code_metrics_reason) && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            † 일부 프로젝트는 코드 규모 산출물이 없어 <b>0(미집계)</b>으로 표시 — 실제 0 아님
+          </div>
+        )}
       </div>
 
       {/* 6. PRQA compliance rate comparison */}

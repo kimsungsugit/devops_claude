@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 VECTORCAST_CONFIG_DIR = _REPO_ROOT / "config" / "vectorcast_projects"
 

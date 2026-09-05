@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="description" content="ARIA 중간 발표 — 현재 코드 기준 구현 완성도 87% (축별 완성도 x 코드 비중 가중평균, 2026-07-29 실측)">
+<title>ARIA 개발 완성도 — 현재 코드 기준</title>
+<style>
+  :root{
+    --ink:#12263c; --ink-2:#33506e; --muted:#6c8199; --faint:#93a6b8;
+    --navy:#2f5474; --navy-d:#1d3c58; --navy-l:#4a7ba4;
+    --sky:#62b7e8; --sky-soft:#d8edfa; --teal:#43a5be;
+    --amber:#c9781a; --amber-soft:#fdf0dc;
+    --line:#dbe4ec; --line-2:#eef3f7; --track:#e4ebf2;
+    --paper:#ffffff; --tint:#f5f9fc;
+    --w:1280px; --h:720px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    background:#5b6a78; display:grid; place-items:center; overflow:hidden;
+    font-family:"맑은 고딕","Malgun Gothic","Pretendard","Noto Sans KR",system-ui,sans-serif;
+    color:var(--ink); word-break:keep-all; -webkit-font-smoothing:antialiased;
+  }
+  #stage{width:100vw; height:100vh; display:grid; place-items:center;}
+  .slide{
+    width:var(--w); height:var(--h); flex:none; background:var(--paper);
+    position:relative; overflow:hidden; transform-origin:center center;
+    box-shadow:0 24px 70px rgba(0,0,0,.35);
+    display:flex; flex-direction:column;
+    padding:26px 40px 0;
+  }
+  .slide::before{
+    content:""; position:absolute; inset:0 0 auto; height:5px;
+    background:linear-gradient(90deg,var(--navy) 0 40.6%,var(--navy-l) 40.6% 66.2%,var(--teal) 66.2% 90.5%,var(--sky) 90.5% 96.2%,#a9d6ef 96.2% 100%);
+  }
+
+  /* ── header ─────────────────────────────────────── */
+  header{display:flex; align-items:flex-end; justify-content:space-between;
+         border-bottom:1.5px solid var(--line); padding-bottom:11px; flex:none;}
+  .h-l{display:flex; align-items:baseline; gap:12px;}
+  .sec-no{font-size:15px; font-weight:800; color:var(--sky); letter-spacing:.02em;}
+  h1{font-size:26px; font-weight:800; letter-spacing:-.02em; color:var(--navy-d);}
+  .h-sub{font-size:13.5px; color:var(--muted); font-weight:600; padding-bottom:2px;}
+  .h-r{text-align:right; font-size:11.5px; color:var(--faint); line-height:1.5; font-weight:600;}
+  .h-r b{color:var(--ink-2); font-weight:700;}
+
+  /* ── body grid ──────────────────────────────────── */
+  .body{
+    flex:1; display:grid; min-height:0;
+    grid-template-columns:322px 1fr; grid-template-rows:1fr auto;
+    grid-template-areas:"hero axes" "stats rem";
+    gap:17px 28px; padding:18px 0 0;
+  }
+  .hero{grid-area:hero;} .axes{grid-area:axes;} .stats{grid-area:stats;} .rem{grid-area:rem;}
+  .axes{display:flex; flex-direction:column; min-width:0;}
+
+  .hero{
+    border:1.5px solid var(--line); border-radius:15px; padding:20px 22px 18px;
+    background:linear-gradient(165deg,#f7fbfe 0%,#eef6fc 100%); position:relative; overflow:hidden;
+    display:flex; flex-direction:column; justify-content:center;
+  }
+  .hero::after{content:""; position:absolute; right:-34px; top:-34px; width:134px; height:134px;
+               border-radius:50%; background:rgba(98,183,232,.14);}
+  .hero-lab{font-size:12.5px; font-weight:800; color:var(--navy-l); letter-spacing:.08em; text-transform:uppercase;}
+  .hero-num{display:flex; align-items:baseline; gap:5px; margin:4px 0 8px;}
+  .hero-num b{font-size:116px; font-weight:800; line-height:.92; letter-spacing:-.05em; color:var(--navy-d);
+              font-variant-numeric:tabular-nums;}
+  .hero-num span{font-size:45px; font-weight:800; color:var(--navy); letter-spacing:-.02em;}
+  .hero-cap{font-size:17px; font-weight:700; color:var(--ink-2); line-height:1.46; position:relative;}
+  .hero-cap em{font-style:normal; color:var(--navy); font-weight:800;}
+
+  .stats{display:grid; grid-template-rows:repeat(3,1fr); gap:10px;}
+  .stat{border:1px solid var(--line); border-radius:10px; padding:8px 14px; background:var(--paper);
+        display:flex; align-items:center; gap:13px;}
+  .stat b{flex:none; min-width:74px; font-size:25px; font-weight:800; color:var(--navy-d);
+          letter-spacing:-.03em; font-variant-numeric:tabular-nums; line-height:1.1;}
+  .stat .lab{min-width:0;}
+  .stat i{display:block; font-style:normal; font-size:11.8px; color:var(--muted); font-weight:700;
+          line-height:1.24;}
+  .stat u{display:block; text-decoration:none; font-size:10.2px; color:var(--faint); font-weight:600;
+          margin-top:1.5px; line-height:1.24;}
+
+  /* right */
+  .blk-h{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:11px; flex:none;}
+  .blk-h h2{font-size:16.5px; font-weight:800; color:var(--navy-d); letter-spacing:-.015em;}
+  .blk-h span{font-size:11.4px; color:var(--muted); font-weight:650;}
+
+  .bars{flex:1; display:flex; flex-direction:column; justify-content:space-between; gap:12px;}
+  .row{display:grid; grid-template-columns:212px 44px 1fr 46px; align-items:center; gap:11px;
+       position:relative; padding:1px 0;}
+  .r-name{font-size:13.8px; font-weight:750; color:var(--ink); line-height:1.3;}
+  .r-name small{display:block; font-size:10.8px; color:var(--faint); font-weight:650; letter-spacing:-.01em;
+                margin-top:1px;}
+  .r-wt{font-size:11.6px; color:var(--muted); font-weight:750; text-align:right; font-variant-numeric:tabular-nums;}
+  .bar{height:23px; border-radius:5px; background:var(--track); position:relative; overflow:hidden;}
+  .fill{height:100%; border-radius:5px; background:var(--navy); position:relative;}
+  .fill::after{content:""; position:absolute; right:0; top:0; bottom:0; width:3px; background:rgba(255,255,255,.42);}
+  .row:nth-child(2) .fill{background:#35608a;}
+  .row:nth-child(3) .fill{background:#3d6c96;}
+  .row:nth-child(4) .fill{background:#4477a1;}
+  .row:nth-child(5) .fill{background:#4b82ac;}
+  /* 배포·운영 준비 — 성격이 다른 축(코드량으로 못 재는 영역)이라 색으로 구분 */
+  .row.last{margin-top:2px; padding-top:8px; border-top:1px dashed #d7e0e9;}
+  .row.last .fill{background:var(--amber);}
+  .row.last .r-pct{color:#9a5a10;}
+  .r-pct{font-size:15px; font-weight:800; color:var(--navy-d); text-align:right;
+         font-variant-numeric:tabular-nums;}
+  .tip{
+    position:absolute; left:224px; top:calc(100% + 5px); z-index:20; width:540px;
+    background:var(--navy-d); color:#eaf3fa; font-size:11.2px; line-height:1.52; font-weight:600;
+    padding:9px 12px; border-radius:8px; box-shadow:0 10px 26px rgba(11,32,54,.3);
+    opacity:0; visibility:hidden; transition:opacity .13s ease; pointer-events:none;
+  }
+  .tip b{color:#a8dbf8; font-weight:800;}
+  .row:hover .tip{opacity:1; visibility:visible;}
+
+  /* remaining */
+  .rem{border-top:1.5px solid var(--line); padding-top:14px; display:flex; flex-direction:column;}
+  .cards{flex:1; display:grid; grid-template-columns:repeat(3,1fr); gap:11px;}
+  .card{border:1px solid var(--line); border-left:3.5px solid var(--amber); border-radius:9px;
+        padding:11px 13px 12px; background:#fffdfa;}
+  .card h3{font-size:12.8px; font-weight:800; color:#8a5310; margin-bottom:4px; letter-spacing:-.01em;}
+  .card p{font-size:11.4px; color:var(--ink-2); line-height:1.5; font-weight:600;}
+  .card em{font-style:normal; color:var(--muted); font-weight:700;}
+
+  /* ── milestone strip ────────────────────────────── */
+  .ms{flex:none; margin-top:16px; padding:13px 0 0; border-top:1.5px solid var(--line);}
+  .ms-track{display:grid; grid-template-columns:repeat(6,1fr); gap:0; position:relative;}
+  .ms-track::before{content:""; position:absolute; left:8.33%; right:8.33%; top:5.5px; height:2px; background:var(--track);}
+  .ms-track::after{content:""; position:absolute; left:8.33%; width:50%; top:5.5px; height:2px; background:var(--navy-l);}
+  .ms-i{position:relative; text-align:center; padding-top:16px;}
+  .ms-i::before{content:""; position:absolute; top:0; left:50%; transform:translateX(-50%);
+                width:12px; height:12px; border-radius:50%; background:var(--paper);
+                border:2.5px solid var(--track); box-sizing:border-box;}
+  .ms-i.done::before{background:var(--navy-l); border-color:var(--navy-l);}
+  .ms-i.now::before{background:var(--sky); border-color:var(--navy-d); width:15px; height:15px; top:-1.5px;
+                    box-shadow:0 0 0 3.5px rgba(98,183,232,.28);}
+  .ms-i b{display:block; font-size:11.6px; font-weight:800; color:var(--ink-2); letter-spacing:-.01em;}
+  .ms-i i{display:block; font-style:normal; font-size:10.4px; color:var(--faint); font-weight:700; margin-top:1px;}
+  .ms-i.now b{color:var(--navy-d);} .ms-i.now i{color:var(--navy-l);}
+  .ms-i.todo b{color:var(--muted);}
+
+  /* ── footer ─────────────────────────────────────── */
+  footer{flex:none; margin-top:12px; padding:9px 0 12px; border-top:1px solid var(--line-2);
+         display:flex; justify-content:space-between; align-items:center; gap:24px;}
+  .fn{font-size:10.4px; color:var(--faint); line-height:1.52; font-weight:600;}
+  .fn b{color:var(--muted); font-weight:750;}
+  .fn-r{font-size:10.4px; color:var(--faint); font-weight:700; text-align:right; white-space:nowrap;}
+
+  /* 인쇄 = PPT 슬라이드와 동일한 13.333in x 7.5in (16:9) 1페이지 */
+  @media print{
+    @page{size:13.333in 7.5in; margin:0;}
+    html,body{background:#fff; display:block; width:13.333in; height:7.5in;}
+    #stage{width:auto; height:auto; display:block;}
+    .slide{transform:none !important; box-shadow:none; width:13.333in; height:7.5in;}
+    *{-webkit-print-color-adjust:exact; print-color-adjust:exact;}
+    .tip{display:none;}
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+<section class="slide" id="slide" role="img"
+  aria-label="ARIA 개발 완성도 — 현재 코드 기준 87퍼센트. 문서생성 88, 시스템·인프라 90, 분석·추적성 85, LLM 보강 90, RAG·지식축적 75퍼센트.">
+
+  <header>
+    <div class="h-l">
+      <span class="sec-no">5.</span>
+      <h1>개발 완성도</h1>
+      <span class="h-sub">— 현재 코드 실측 기준</span>
+    </div>
+    <div class="h-r">
+      기준일 <b>2026.07.29</b> · 착수 후 <b>4개월</b> 경과<br>
+      개발 커밋 <b>685</b>회 (2026.03.30 ~ 07.29)
+    </div>
+  </header>
+
+  <div class="body">
+    <!-- ── 히어로 ─────────────────────────────── -->
+    <div class="hero">
+      <div class="hero-lab">Overall</div>
+      <div class="hero-num"><b>78</b><span>%</span></div>
+      <div class="hero-cap"><em>정식 배포(10.31)</em> 기준<br>완성도</div>
+    </div>
+
+    <!-- ── 축별 막대 ──────────────────────────── -->
+    <div class="axes">
+        <div class="blk-h">
+          <h2>축별 완성도</h2>
+          <span>가중치 = 기능 5축은 코드 비중(실측) × 85%, 배포·운영은 15% 고정</span>
+        </div>
+        <div class="bars">
+
+          <div class="row">
+            <div class="r-name">문서생성<small>UDS · STS · SUTS · SITS · VectorCAST 결과</small></div>
+            <div class="r-wt">34.5%</div>
+            <div class="bar"><div class="fill" style="width:85%"></div></div>
+            <div class="r-pct">85%</div>
+            <div class="tip"><b>구현됨</b> 4종 규격서 생성기 + 결과보고서 5종 빌더(SwUTR·SwITR·커버리지·통합Summary), 회사 표준 템플릿 호환<br>
+              <b>잔여</b> 감사본 정합 4건(BOOT 매칭·Deviation·안전판정·수식캐시), 명세↔VectorCAST TC ID 왕복, 실검증이 일부 프로젝트에 편중</div>
+          </div>
+
+          <div class="row">
+            <div class="r-name">시스템·인프라<small>SCM · Jenkins · Revision · 권한 · 화면</small></div>
+            <div class="r-wt">21.8%</div>
+            <div class="bar"><div class="fill" style="width:88%"></div></div>
+            <div class="r-pct">88%</div>
+            <div class="tip"><b>구현됨</b> SVN/Git 체크아웃과 빌드별 Revision 고정(14/14 일치 검증), Jenkins 산출물 수집, 인증·권한, 보안 워커 연동, 검증 CI<br>
+              <b>잔여</b> 화면 간소화, 다중 사용자 동시 운영 검증</div>
+          </div>
+
+          <div class="row">
+            <div class="r-name">분석·추적성<small>10밴드 추적 · 영향도 · 정적분석 · 품질</small></div>
+            <div class="r-wt">20.7%</div>
+            <div class="bar"><div class="fill" style="width:82%"></div></div>
+            <div class="r-pct">82%</div>
+            <div class="tip"><b>구현됨</b> 10밴드 추적 매트릭스와 전용 파서, 변경 영향도, 정적분석 4종 통합, 품질 이력 DB, 아키텍처·룰 상충 분석<br>
+              <b>잔여</b> 요구 미추적 역추적 로직·콜그래프 roll-up, 시스템레벨 커버 정의 반영</div>
+          </div>
+
+          <div class="row">
+            <div class="r-name">LLM 보강<small>결정론 코어 + 초안·설명·검토 제안</small></div>
+            <div class="r-wt">4.8%</div>
+            <div class="bar"><div class="fill" style="width:85%"></div></div>
+            <div class="r-pct">85%</div>
+            <div class="tip"><b>구현됨</b> 수치·연결관계는 결정론 엔진이 확정하고 LLM은 검증된 근거 위에서만 보강, 어댑터 3종, 의미 검증기, 승인 게이트<br>
+              <b>잔여</b> LLM 컨텍스트 공통 게이트웨이 단일화, 문서별 프롬프트 품질 편차</div>
+          </div>
+
+          <div class="row">
+            <div class="r-name">RAG·지식축적<small>청킹 · 임베딩 · 하이브리드 검색 · 어시스턴트</small></div>
+            <div class="r-wt">3.2%</div>
+            <div class="bar"><div class="fill" style="width:70%"></div></div>
+            <div class="r-pct">70%</div>
+            <div class="tip"><b>구현됨</b> 문서·소스·시험 근거 인덱싱, 하이브리드 검색, 근거 기반 어시스턴트(승인 게이트·이력)<br>
+              <b>잔여</b> 승인 산출물의 Revision 단위 재사용 루프, 조직 KB 프로젝트·보안 경계, 실운영 축적량 초기</div>
+          </div>
+
+          <div class="row last">
+            <div class="r-name">배포·운영 준비<small>설치 패키징 · 사용자 문서 · 운영 인수</small></div>
+            <div class="r-wt">15.0%</div>
+            <div class="bar"><div class="fill" style="width:40%"></div></div>
+            <div class="r-pct">40%</div>
+            <div class="tip"><b>구현됨</b> 사용자 PC 실사용 중, 자동 기동 스크립트, 환경설정 관리, 검증 CI(문법·시험·린트)<br>
+              <b>잔여</b> 설치 패키지(현재 수동 가상환경 구성), 사용자 매뉴얼, 운영 이관·인수 절차, 배포 자동화 — <b>코드량으로 재지 못하는 영역이라 별도 축으로 분리</b></div>
+          </div>
+
+        </div>
+    </div>
+
+    <!-- ── 실측 지표 ──────────────────────────── -->
+    <div class="stats">
+      <div class="stat"><b>5,520</b><span class="lab"><i>자동화 시험(건)</i><u>백엔드 4,526 / 화면 994</u></span></div>
+      <div class="stat"><b>303</b><span class="lab"><i>API 엔드포인트</i><u>라우터 22 · 서비스 88</u></span></div>
+      <div class="stat"><b>36</b><span class="lab"><i>화면 기능 섹션</i><u>대시보드·결과·품질·설정</u></span></div>
+    </div>
+
+    <!-- ── 잔여 ───────────────────────────────── -->
+    <div class="rem">
+      <div class="blk-h">
+        <h2>잔여 22% — 무엇이 남았나</h2>
+        <span>새 기능 개발이 아니라 근거·정합을 닫고 운영으로 넘기는 작업</span>
+      </div>
+      <div class="cards">
+        <div class="card">
+          <h3>근거·정합 강화 <em>~10.16</em></h3>
+          <p>실패·미실행이 합격으로 보이지 않도록 판정 차단, 커버리지 분자·분모 원시값 보존, 명세와 실행결과의 시험 ID 왕복 연결</p>
+        </div>
+        <div class="card">
+          <h3>추적성 · 화면 간소화 <em>~10.16</em></h3>
+          <p>요구 미추적 구간의 역추적 정확도와 호출 그래프 상향 집계, 시스템 레벨 범위 정의 반영, 화면 정리</p>
+        </div>
+        <div class="card">
+          <h3>배포 · 운영 이관 <em>~10.31</em></h3>
+          <p>설치 패키지와 배포 자동화, 사용자 매뉴얼, 운영 인수 절차와 완료 보고 — <em>가장 크게 남은 축</em></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 마일스톤 ───────────────────────────────── -->
+  <div class="ms">
+    <div class="ms-track">
+      <div class="ms-i done"><b>요구·상세설계</b><i>~04.17 완료</i></div>
+      <div class="ms-i done"><b>GUI·기능·설정</b><i>~05.29 완료</i></div>
+      <div class="ms-i done"><b>품질팀 연동</b><i>~07.22 완료</i></div>
+      <div class="ms-i now"><b>중간보고</b><i>~07.30 · 현재</i></div>
+      <div class="ms-i todo"><b>간소화·고도화</b><i>~10.16</i></div>
+      <div class="ms-i todo"><b>완료보고·정식배포</b><i>~10.31</i></div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="fn">
+      <b>산정 기준</b> — 축별 완성도는 구현·검증 상태(코드·시험·실산출물 확인)와 잔여 작업 목록으로 판정. 가중치는 기능 5축이 제품 코드 비중 실측치 × 85%, 배포·운영 준비는 코드량으로 잴 수 없어 정식 배포 요건으로 15% 고정.<br>
+      <b>이 수치가 아닌 것</b> — ISO 26262 준수율, 시험 통과율, 문서 자동생성 정확도. 문서의 최종 적합성·ASIL 확정·승인은 사람의 판단 영역으로 유지된다.
+    </div>
+    <div class="fn-r">ARIA 중간 보고서<br>R&amp;D 연구소 연구총괄팀</div>
+  </footer>
+
+</section>
+</div>
+
+<script>
+  // 16:9 고정 캔버스를 뷰포트에 맞춰 축소/확대 (캡처 시 픽셀 정확도 유지)
+  (function () {
+    var slide = document.getElementById('slide');
+    function fit() {
+      var s = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+      slide.style.transform = 'scale(' + s + ')';
+    }
+    window.addEventListener('resize', fit);
+    fit();
+  })();
+</script>
+</body>
+</html>

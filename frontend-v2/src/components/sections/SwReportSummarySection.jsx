@@ -3,7 +3,10 @@ import { getUsername, authHeaders, post } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
-import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
+import { isAbortError } from '../../impactPoll.js';
+import { useSharedInputSync, markTouched } from '../../sharedInputs.js';
+// 폼 기본값·payload 조립은 생성 현황 보드와 **공유** (복제 시 두 경로가 다른 문서를 낸다).
+import { BUILDER_SPECS, loadBuilderForm, toBuildPayload } from '../../swBuilderForms.js';
 
 // API base 해석 — SwUTBuildSection과 동일 (raw fetch blob 전용. JSON은 api.js post() 사용).
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -14,39 +17,12 @@ function buildUrl(path) {
   return API_BASE.replace(/\/$/, '') + path;
 }
 
-const STORAGE_KEY = 'devops_v2_swreport_form';
-
-// 폼 기본값. source_paths_text는 UI 전용 (textarea 여러 줄) — payload 만들 때
-// 줄단위 split → trim → 빈줄 제거하여 source_paths 배열로 변환하고, 이 키 자체는
-// payload에서 제거한다 (backend SwReportBuildRequest extra='forbid' 422 회피).
-const DEFAULT_FORM = {
-  project_id: 'ES95411',
-  release_sw_version: '',
-  test_date: '',
-  // ES95411 마스터 양식(xlsm) 경로 — 비면 backend config fallback.
-  template_path: '',
-  // UI 전용 필드 — 레벨별 산출물 경로 (한 줄당 1개, 최대 16). payload에선 source_paths 배열로 변환.
-  source_paths_text: '',
-  // 선택 메타 (SwUT 폼 수준)
-  project_full_name: '',
-  asil_level: 'ASIL B',
-  phase: '',
-  product: '',
-  test_target: '',
-  test_engineer: '',
-};
+// 폼 기본값·localStorage 키·UI 전용 키 strip 은 swBuilderForms.js 단일 출처
+// (생성 현황 보드가 같은 payload 로 원클릭 생성한다).
+const STORAGE_KEY = BUILDER_SPECS.swreport.storageKey;
 
 function loadSavedForm() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10), ...saved };
-    // 입력 일원화: touched가 아닌(prefill) 매핑 필드만 공유 기본값으로 채움(사용자 입력·빈값 보존).
-    const touched = resolveTouched('swreport', STORAGE_KEY, saved);
-    return applySharedDefaults(base, touched, sharedDefaultsFor('swreport', loadSharedInputs()));
-  } catch (e) {
-    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
-    return applySharedDefaults(base, new Set(), sharedDefaultsFor('swreport', loadSharedInputs()));
-  }
+  return loadBuilderForm('swreport');
 }
 
 // FastAPI 422 detail(배열/문자열/객체)을 사람이 읽을 한 줄로 정규화.
@@ -68,17 +44,17 @@ function formatDetailMessage(detail) {
 // 폼 → 백엔드 payload 변환 (preview/build 공용).
 // source_paths_text(UI 전용)는 제거하고 source_paths 배열로 변환한다.
 function buildPayload(form) {
-  // source_paths_text는 backend schema(extra='forbid')에 없으므로 반드시 strip.
-  const { source_paths_text: _spText, ...payload } = form;
-  const sourcePaths = (form.source_paths_text || '')
-    .split('\n').map(s => s.trim()).filter(Boolean);
-  // 비어있으면 키 자체를 보내지 않음 — backend는 template 자체를 source로 refresh.
-  if (sourcePaths.length > 0) payload.source_paths = sourcePaths;
-  return payload;
+  // strip + 배열 변환은 공유 모듈. 비어있으면 키 자체를 보내지 않는다 —
+  // backend 는 template 자체를 source 로 refresh 한다.
+  return toBuildPayload('swreport', form);
 }
 
-export default function SwReportSummarySection() {
+export default function SwReportSummarySection({ analysisResult }) {
   const toast = useToast();
+  // 보드(생성 현황)와 **같은 SCM 귀속**을 싣는다. 안 실으면 백엔드가 요청에서
+  // `scm_id` 를 못 찾아 quality run 이 프로젝트에 안 붙고, 방금 만든 문서가
+  // 생성 현황 보드에서 계속 '미생성' 으로 남는다(2026-08-24 라이브 실측).
+  const scmId = analysisResult?.matchedScm?.id || '';
   const [form, setForm] = useState(loadSavedForm);
   // 입력 일원화: Settings 공유값 변경을 같은 세션에서 미변경 필드에 즉시 반영.
   useSharedInputSync('swreport', setForm, STORAGE_KEY);
@@ -110,7 +86,7 @@ export default function SwReportSummarySection() {
       }
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
         clearTimeout(timerId);
-        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       });
       downloadCleanupRef.current = [];
     };
@@ -152,7 +128,7 @@ export default function SwReportSummarySection() {
     a.click();
     document.body.removeChild(a);
     const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       downloadCleanupRef.current = downloadCleanupRef.current.filter(
         item => item.timerId !== timerId,
       );
@@ -161,7 +137,10 @@ export default function SwReportSummarySection() {
   };
 
   // 필수 입력 + 사용자 이름 공통 검증. 통과 시 user 반환, 실패 시 null.
-  const validateCommon = () => {
+  // useCallback: 아래 두 빌드 콜백의 deps 에 넣기 위해 참조를 안정화한다. 매 렌더
+  //   재생성되던 시절에도 `form` 이 deps 라 결과는 같았지만, 정적으로 증명이 안 돼
+  //   react-hooks/exhaustive-deps 가 계속 경고했다(레거시 backlog — 실제로 해소한다).
+  const validateCommon = useCallback(() => {
     if (!form.project_id) { toast('warning', 'project_id 필수'); return null; }
     if (!form.release_sw_version) { toast('warning', 'release_sw_version 필수'); return null; }
     if (!form.test_date) { toast('warning', 'test_date 필수'); return null; }
@@ -173,7 +152,7 @@ export default function SwReportSummarySection() {
     const user = getUsername();
     if (!user) { toast('warning', '사용자 이름이 설정되지 않음 — Settings 확인'); return null; }
     return user;
-  };
+  }, [form, toast]);
 
   // 미리보기 — JSON 응답이므로 api.js post() 헬퍼 사용 (raw fetch 금지, mini-checklist X9).
   const runPreview = useCallback(async () => {
@@ -182,7 +161,7 @@ export default function SwReportSummarySection() {
     setPreview(null);
     setLastWarnings([]);
     try {
-      const payload = buildPayload(form);
+      const payload = { ...buildPayload(form), scm_id: scmId };
       const data = await post('/api/swreport/summary/preview', payload);
       if (!mountedRef.current) return;
       setPreview(data);
@@ -201,7 +180,7 @@ export default function SwReportSummarySection() {
     } finally {
       if (mountedRef.current) setPreviewing(false);
     }
-  }, [form, toast]);
+  }, [form, toast, scmId, validateCommon]);
 
   // Excel 빌드·다운로드 — xlsm blob 응답이므로 raw fetch + authHeaders() + res.ok 명시 검사.
   const runBuild = useCallback(async () => {
@@ -215,7 +194,7 @@ export default function SwReportSummarySection() {
     abortRef.current = controller;
 
     try {
-      const payload = buildPayload(form);
+      const payload = { ...buildPayload(form), scm_id: scmId };
       const res = await fetch(buildUrl('/api/swreport/summary/build'), {
         method: 'POST',
         headers: {
@@ -237,7 +216,7 @@ export default function SwReportSummarySection() {
           } else if (j?.message) {
             msg = j.message;
           }
-        } catch (e) {
+        } catch (_e) {
           // body가 JSON이 아닌 경우 (예: 502 HTML) — HTTP status만 표시
         }
         if (mountedRef.current) {
@@ -269,7 +248,7 @@ export default function SwReportSummarySection() {
       triggerDownload(blob, filename);
       toast('success', `통합 Summary ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) {
         toast('error', `Summary 빌드 실패: ${e?.message || e}`);
       }
@@ -277,7 +256,7 @@ export default function SwReportSummarySection() {
       if (mountedRef.current) setBuilding(false);
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [form, toast]);
+  }, [form, toast, scmId, validateCommon]);
 
   const busy = previewing || building;
   const summary = preview?.summary || null;

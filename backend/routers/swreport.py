@@ -39,7 +39,11 @@ from backend.services.swreport_summary_aggregator import (
     build_summary_report,
     preview_summary_report,
 )
-from backend.services.swut_meta_resolver import load_meta_from_config
+from backend.services.swut_meta_resolver import (
+    TemplateNotResolved,
+    load_meta_from_config,
+    read_template_from_keys,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -92,17 +96,29 @@ def _resolve_template_bytes(req: SwReportBuildRequest) -> bytes:
         return resolver.read_bytes(req.template_path)
     cfg = load_meta_from_config(req.project_id)
     tmpl_cfg = cfg.get("template_paths", {}) if isinstance(cfg, dict) else {}
-    for key in _TEMPLATE_CONFIG_KEYS:
-        tpath = tmpl_cfg.get(key, "")
-        if tpath:
-            return resolver.read_bytes(tpath)
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "template_path 미지정 + config에 ES95411 template 없음 "
-            f"({req.project_id} — keys: {', '.join(_TEMPLATE_CONFIG_KEYS)})"
-        ),
-    )
+    # ⚠ 예전엔 "값이 있는 첫 키" 에서 곧장 read 했다 — 그 경로가 낡으면 뒤 후보를
+    #   시도조차 못 하고 raw FileNotFoundError 가 500 으로 나갔다. 실측:
+    #   `es95411_template` 이 v1.02 를 가리키는데 그 세대가 v2.01_260629_R 로
+    #   교체돼 사라졌다. 이제 읽힐 때까지 순회하고, 실패해도 어느 키가 왜
+    #   안 됐는지 폴더 내용과 함께 400 으로 낸다(준비 게이트와 같은 문장).
+    try:
+        return read_template_from_keys(
+            resolver, tmpl_cfg, _TEMPLATE_CONFIG_KEYS,
+            project_id=req.project_id, label="ES95411 통합 Summary",
+        )
+    except TemplateNotResolved as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def planned_source_paths(source_paths: list[str] | None) -> list[str]:
+    """빌드가 **실제로 읽을** 레벨별 산출물 경로 — 판정 단일 출처.
+
+    빈 항목만 걸러내고 나머지는 **전부** `read_bytes` 한다. 즉 하나라도 없으면 부분 결손이
+    아니라 빌드 실패(500)다. 준비 게이트(`docgen_preflight`)가 이 함수를 그대로 불러 같은
+    목록을 확인한다 — 게이트가 자기 규칙으로 목록을 만들면 "진행해도 된다" 고 한 조건에서
+    생성이 죽는다(2026-09-03 R26 리뷰 C1). 목록이 비면 호출자는 양식 자체를 source 로 쓴다.
+    """
+    return [str(p).strip() for p in (source_paths or []) if str(p or "").strip()]
 
 
 def _resolve_source_workbooks(
@@ -110,16 +126,13 @@ def _resolve_source_workbooks(
 ) -> list[tuple[str, bytes]]:
     """source_paths를 resolver로 read. 비면 template 자체를 source로 (단일파일 refresh)."""
     resolver = get_resolver()
-    if not req.source_paths:
+    paths = planned_source_paths(req.source_paths)
+    if not paths:
         return [("template-self", template_bytes)]
     out: list[tuple[str, bytes]] = []
-    for p in req.source_paths:
-        if not p:
-            continue
+    for p in paths:
         label = p.replace("\\", "/").rsplit("/", 1)[-1] or p
         out.append((label, resolver.read_bytes(p)))
-    if not out:
-        return [("template-self", template_bytes)]
     return out
 
 
@@ -134,6 +147,20 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
     result = build_summary_report(template_bytes, sources, _build_meta(req))
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwReport Summary build failed (ok=False)")
+    # Quality DB recording (non-fatal). output_path 없음(BytesIO 응답, Cloudium read-only).
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "swreport", result.summary,
+            project_root=str(getattr(req, "project_id", "") or ""),
+            # ⚠ 통합 Summary 의 `project_id` 는 프로젝트가 아니라 **마스터 양식 ID**(ES95411)
+            #   라 project_root 에서 프로젝트를 추측할 수가 없다. 화면이 아는 축을 싣는다.
+            scm_id=str(getattr(req, "scm_id", "") or "") or None,
+            meta={"release_sw_version": getattr(req, "release_sw_version", "")},
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwReport quality record skipped (non-fatal)")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -169,12 +196,11 @@ def _build_result_to_response(
         except json.JSONDecodeError:
             summary_str = json.dumps({"_truncated": True}, ensure_ascii=True)
 
-    warnings_str = json.dumps(warnings, ensure_ascii=True)
-    if len(warnings_str) > 1024:
-        warnings_str = json.dumps(
-            [f"({len(warnings)} warnings — 헤더 한도 초과로 생략, 산출물 확인)"],
-            ensure_ascii=True,
-        )
+    # 예산 초과 시 **들어가는 만큼 싣고 못 실은 개수를 말한다** — 예전엔 본문을 통째로
+    # 버려서, 방금 낸 경고가 사용자에게 닿지 않았다(2026-08-25 SwITCR 17건 실측).
+    # 판정/포맷은 `warning_categories` 단일 출처 — 라우터 3곳이 갈라지지 않게.
+    from backend.services.warning_categories import warnings_header_json
+    warnings_str = warnings_header_json(warnings)
 
     headers = {
         "Content-Disposition": (

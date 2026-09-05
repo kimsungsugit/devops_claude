@@ -1,8 +1,34 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { api, post, getUsername } from '../../api.js';
+import { api, post, authHeaders, buildUrl } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
+import { impactConflict, contextConflict, mismatchText } from '../../impactGuard.js';
+import { saveTraceMatrix, loadTraceMatrixByKey, loadTraceMatrixByBinding } from '../../traceMatrixStore.js';
+import {
+  loadDocPaths, saveDocPaths, useDocPathsSync, docPathsOverridingScm,
+} from '../../sharedInputs.js';
+import { useRegistryLinkedDocs } from '../../scmLinkedDocs.js';
+import { runVectorcastRagJob } from '../../vcastRagJob.js';
+import { deriveSafetyCoverage, safetyCoverageText } from '../../asilCoverage.js';
+
+// 추적성 매트릭스 입력 문서 11종 — 설계(SRS/SDS/UDS)·인터페이스(HSIS)·SW시험(STS/SUTS/SITS)
+// ·시스템(SyRS상위/SyTS/SyITS)·계획(STP). '입력 문서 현황' 패널과 가림 판정이 **같은 목록**을
+// 써야 한다 — 따로 두면 한쪽에만 키를 추가했을 때 그 문서만 조용히 판정에서 빠진다.
+const DOC_STATUS_ROWS = [
+  { label: 'SRS', key: 'srs', grp: 'design' },
+  { label: 'SDS', key: 'sds', grp: 'design' },
+  { label: 'UDS', key: 'uds', grp: 'design' },
+  { label: 'HSIS', key: 'hsis', grp: 'interface' },
+  { label: 'STS', key: 'sts', grp: 'test' },
+  { label: 'SUTS', key: 'suts', grp: 'test' },
+  { label: 'SITS', key: 'sits', grp: 'test' },
+  { label: 'SyRS↑', key: 'syrs', grp: 'system' },
+  { label: 'SyTS', key: 'syts', grp: 'system' },
+  { label: 'SyITS', key: 'syits', grp: 'system' },
+  { label: 'STP', key: 'stp', grp: 'plan' },
+];
+const DOC_STATUS_KEYS = DOC_STATUS_ROWS.map(r => r.key);
 
 export default function SrsSdsSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -13,17 +39,75 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState('');  // step description
   const [warnings, setWarnings] = useState([]);           // partial failure warnings
-  const matrixCacheRef = useRef(null);                     // cache key + data
+  const [notices, setNotices] = useState([]);             // 정보성 요약(경고 아님) — 추적성 참고 배너
+  // 표시 중인 매트릭스가 방금 생성한 fresh인지, 저장분에서 복원됐는지(모듈캐시/localStorage) 구분.
+  // stale을 fresh로 위장하지 않기 위한 정직성 표식 — 복원 시 {savedAt} 세팅, fresh 생성 시 null.
+  const [restoredMeta, setRestoredMeta] = useState(null);
 
-  const localDocPaths = useMemo(() => {
-    try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
-  }, []);
+  // 영향도 분석(ImpactGuideSection)에서 넘어온 focus(영향 함수 집합) — 1회 소비.
+  // 있으면 매트릭스를 그 함수들로 자동 필터해 "이 변경이 닿는 요구사항/시험/공백"만 보여준다.
+  const [traceFocus, setTraceFocus] = useState(() => {
+    try {
+      const raw = localStorage.getItem('devops_v2_trace_focus');
+      if (!raw) return null;
+      localStorage.removeItem('devops_v2_trace_focus');  // 1회 소비(stale 방지)
+      const o = JSON.parse(raw);
+      if (o && Array.isArray(o.functions) && o.functions.length && Date.now() - (o.ts || 0) < 120000) return o;
+    } catch (_) { /* ignore */ }
+    return null;
+  });
+  const _autoLoadedRef = useRef(false);
+  // VectorCAST 잡 폴링이 언마운트 후에도 최대 12분 계속 도는 걸 막는 생존 가드.
+  // 이 섹션은 keep-alive(display:none)라 언마운트가 드물지만, Detail 뷰가 통째로 사라질 때
+  // 폴링만 남는 것을 방지한다(가드 자체는 3줄이라 보험으로 둔다).
+  const _aliveRef = useRef(true);
+  useEffect(() => { _aliveRef.current = true; return () => { _aliveRef.current = false; }; }, []);
 
-  // Prefer the registry entry matched by Dashboard for THIS job; fall back to
-  // scmList[0] only when no match was recorded (single-project setups).
-  const activeScm = analysisResult?.matchedScm || analysisResult?.scmList?.[0];
+  // ⚠ 예전엔 `useMemo(…, [])` 였다 — **마운트 시 1회만** 읽는다는 뜻이다. 그런데 이
+  //   섹션은 keep-alive(display:none)라 재마운트되지 않으므로, Settings 에서 문서 경로를
+  //   바꿔도 전체 새로고침 전까지 옛 경로로 activeDocs → 추적성 매트릭스가 만들어졌다.
+  //   (사용자 보고: "설정에서 저장하면 프로젝트 탭 문서가 업데이트돼야 하는데 안 된다")
+  const [localDocPaths, setLocalDocPaths] = useState(loadDocPaths);
+  useDocPathsSync(setLocalDocPaths);
+
+  // ⚠ 이 섹션에서 오귀속 피해가 가장 큰 건 아래 "영향 분석 결과" 패널이 아니라 activeScm이다.
+  // activeScm.linked_docs가 docPaths → loadMatrix로 흘러 추적성 매트릭스(SRS→SDS→UDS→STS→
+  // SUTS→SITS) 전체의 입력이 되기 때문. 결과 뭉치가 통째로 옛 Job의 것이면(Detail.switchProject의
+  // 캐시 로드 실패 등) 헤더는 새 Job인데 매트릭스는 옛 프로젝트 규격서로 그려진다.
+  // impactData가 null이면 impactConflict는 no_impact로 통과시키므로 여기선 contextConflict가
+  // 필요하다 — 그게 결과 뭉치 전체의 stale을 보는 유일한 축이다.
+  const _ctxConflict = contextConflict(analysisResult, job?.url);
+  const _staleContext = _ctxConflict.conflict;
+  // Prefer the registry entry matched by Dashboard for THIS job.
+  // ⚠ scmList[0] 폴백은 **단일 프로젝트일 때만** 쓴다. 다중 레지스트리에서 자동매칭이 실패한
+  // 상태(matchedScm=null)에 [0]을 집으면 다른 프로젝트의 규격서로 매트릭스를 그리면서 화면상
+  // 정상으로 보인다. Dashboard(자동매칭 실패 시 건너뜀)·ImpactGuideSection(폴백 제거)과 정책 통일.
+  const _scmList = Array.isArray(analysisResult?.scmList) ? analysisResult.scmList : [];
+  const activeScm = _staleContext
+    ? null
+    : (analysisResult?.matchedScm || (_scmList.length === 1 ? _scmList[0] : null));
+  // 자동매칭 실패로 SCM을 못 정한 상태 — 조용히 비우면 '문서 미설정'으로 오독된다.
+  const scmAmbiguous = !_staleContext && !activeScm && _scmList.length > 1;
+  // SCM linked docs (for loadMatrix + UI)
+  // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
+  const scmLinkedDocs = activeScm?.linked_docs;
+  const scmId = activeScm?.id || '';
+  // `/api/scm/list` 레지스트리 최신본(실패 시 분석 스냅샷 폴백) — **이 하나가 곧
+  // "지금 유효한 SCM 문서"** 다. 구현은 `scmLinkedDocs.js` 단일 출처
+  // (ProjectSummarySection 도 같은 훅을 쓴다 — 복제하면 또 한쪽만 고쳐진다).
+  const [linkedDocs, setLinkedDocs] = useRegistryLinkedDocs(scmId, scmLinkedDocs);
+
+  // ⚠ SCM 문서의 출처는 **여기 하나**여야 한다.
+  //   예전엔 `activeScm?.linked_docs`(=분석 시점 스냅샷)를 따로 읽는 `scmLinked` 가 있었고,
+  //   아래 '입력 문서 현황' 패널과 docPaths 가 그걸 썼다. 그런데 그 스냅샷은 분석 이후
+  //   레지스트리/Settings 에서 경로를 바꿔도 **절대 갱신되지 않는다.**
+  //   86~109행 주석이 바로 그 문제를 서술하는데(“옛 경로를 고집해 … 새로고침·분석
+  //   재실행으로도 안 고쳐졌다”), 그 수정은 loadMatrix 쪽만 linkedDocs 를 쓰게 했고
+  //   패널은 스냅샷에 남겨 뒀다 — 같은 결함을 한쪽만 고친 것이다.
+  //   증상: localStorage 에 없는 문서(예: SUTS)만 옛 경로로 남아 "SUTS만 안 바뀐다".
+  const scmLinked = linkedDocs || {};
+
   // Merge: SCM linked_docs takes priority, then localStorage
-  const scmLinked = activeScm?.linked_docs || {};
   const docPaths = useMemo(() => ({
     srs: localDocPaths.srs || scmLinked.srs || '',
     sds: localDocPaths.sds || scmLinked.sds || '',
@@ -31,11 +115,41 @@ export default function SrsSdsSection({ job, analysisResult }) {
     stp: localDocPaths.stp || scmLinked.stp || '',
   }), [localDocPaths, scmLinked.srs, scmLinked.sds, scmLinked.hsis, scmLinked.stp]);
 
-  // SCM linked docs (for loadMatrix + UI)
-  // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
-  const scmLinkedDocs = activeScm?.linked_docs;
-  const scmId = activeScm?.id || '';
-  const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
+  // 설정(localStorage)이 SCM 최신본을 가리고 있는 문서 키. 우선순위 자체는 그대로 두되
+  // (직접 입력을 덮지 않는 게 정책이다) 가려졌다는 **사실을 숨기지 않는다** — 이게 안 보이면
+  // 사용자에겐 "설정에서 저장했는데 안 바뀐다"로만 보인다.
+  const overriddenKeys = useMemo(
+    () => docPathsOverridingScm(localDocPaths, scmLinked, DOC_STATUS_KEYS),
+    [localDocPaths, scmLinked],
+  );
+
+  // 등록된 SCM 문서가 **실제로 있는지**. 예전엔 경로 문자열이 비어있지 않다는 것만 보고
+  // '등록됨' 배지를 달았다 — 존재를 확인한 적이 없다. 문서가 개정되며 파일명이 바뀌면
+  // 배지는 등록됨인데 매트릭스는 "SRS 없음"으로 실패해, 사용자에겐 "있는데 없다고 나온다"가
+  // 된다(실제 보고). 레지스트리 경로만 확인한다(설정 직접 입력값은 서버가 모른다).
+  // 결과에 **어느 scmId 것인지**를 함께 담는다 — 프로젝트를 바꾸면 앞 항목의 확인 결과가
+  // 새 항목 배지로 새어 "다른 프로젝트 파일이 없다"고 표시된다.
+  const [docExistsRaw, setDocExistsRaw] = useState(null);
+  useEffect(() => {
+    if (!scmId) return undefined;
+    let cancelled = false;
+    api(`/api/scm/linked-docs-status/${encodeURIComponent(scmId)}`)
+      .then((d) => { if (!cancelled) setDocExistsRaw({ scmId, items: d?.items || {} }); })
+      // 확인 자체가 실패하면 **모른다**로 둔다 — false 로 접으면 멀쩡한 문서를 없다고 표시한다.
+      .catch(() => { if (!cancelled) setDocExistsRaw({ scmId, items: null }); });
+    return () => { cancelled = true; };
+  }, [scmId, linkedDocs]);
+  const docExists = docExistsRaw?.scmId === scmId ? docExistsRaw.items : null;
+
+  // 가려진 키를 설정에서 **비운다** — SCM 값을 복사해 넣으면 그 순간 또 굳어서 다음 SCM
+  // 변경이 다시 안 보인다. 비워 두면 이후로는 레지스트리 값이 그대로 흐른다.
+  const adoptScmPaths = useCallback(() => {
+    const next = { ...loadDocPaths() };
+    for (const k of overriddenKeys) delete next[k];
+    if (saveDocPaths(next, (e) => toast('error', `설정 저장 실패: ${e.message}`))) {
+      toast('success', `${overriddenKeys.length}개 경로를 SCM 값으로 되돌렸습니다.`);
+    }
+  }, [overriddenKeys, toast]);
 
   // VectorCAST 결과 로그 경로(복수) — Jenkins 빌드에 RAG 없을 때 cloudium fallback.
   // 부트로더/FBL/APP 등 별도 결과 대응. 설정의 SCM '연결 문서 경로'(linked_docs.vectorcast)
@@ -45,27 +159,32 @@ export default function SrsSdsSection({ job, analysisResult }) {
     [linkedDocs],
   );
 
-  useEffect(() => {
-    // analysisResult.matchedScm.linked_docs는 분석 실행 시점의 스냅샷이라, 이후 Settings에서
-    // 등록한 vectorcast(복수 경로)가 누락되거나 빈 배열([])로 굳어 있을 수 있다(vectorcast
-    // 필드 추가 직후~경로 입력 전 시점에 캡처된 경우). core 문서가 있고 vectorcast가
-    // '비어있지 않을' 때만 스냅샷을 그대로 쓰고, 그 외엔 레지스트리(단일 진실원) 최신본을
-    // 가져온다 — 안 그러면 VectorCAST/P&F가 끝까지 비어 나온다.
-    if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)
-        && Array.isArray(scmLinkedDocs.vectorcast) && scmLinkedDocs.vectorcast.length > 0) {
-      setLinkedDocs(scmLinkedDocs);
-      return;
-    }
-    api('/api/scm/list').then(d => {
-      const items = d?.items || (Array.isArray(d) ? d : []);
-      // Match the SAME registry entry the Dashboard selected for this job.
-      // Falling back to items[0] would silently pull another project's docs
-      // in multi-SCM environments.
-      const matched = scmId ? items.find(it => it.id === scmId) : items[0];
-      if (matched?.linked_docs) setLinkedDocs(matched.linked_docs);
-      else if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs);
-    }).catch(() => { if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs); });
-  }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // (레지스트리 재조회는 위 `useRegistryLinkedDocs` 안에 있다 — 예전엔 여기 인라인
+  //  effect 였는데, ProjectSummarySection 에는 그 effect 가 아예 없어서 같은 화면의
+  //  자동 매트릭스가 옛 경로로 만들어졌다. 복제 대신 훅으로 뽑아 둘이 함께 움직인다.)
+
+  // cacheKey SHAPE 단일 출처 — loadMatrix(생성·캐시히트)와 마운트 복원 effect가 같은 키를
+  // 쓰도록. docs = 시험/vcast 문서 소스(loadMatrix는 재fetch한 activeDocs, 마운트는 state
+  // linkedDocs; 레지스트리 불변 시 둘은 수렴). 정확 키 일치만 복원하므로 입력이 하나라도
+  // 바뀌면 miss→재생성(사용자 규칙 "재실행 필요할 때만 재생성"과 정합).
+  // ⚠ 모든 필드에 `|| ''` sentinel — undefined 값은 JSON.stringify가 키를 통째로 누락시켜
+  // 서로 다른 입력이 같은 문자열로 충돌할 수 있다(reviewer W1). 빈 문자열로 고정하면 필드 위치가
+  // 항상 보존돼 키가 결정적이고, 다른 프로젝트/문서 조합이 절대 같은 키를 만들지 않는다.
+  const buildCacheKey = useCallback((docs) => JSON.stringify({
+    srs: docPaths.srs || '', sds: docPaths.sds || '', hsis: docPaths.hsis || docs.hsis || '',
+    jobUrl: job?.url || '', sourceRoot: activeScm?.source_root || '',
+    sts: docs.sts || '', suts: docs.suts || '', sits: docs.sits || '', syts: docs.syts || '', syits: docs.syits || '',
+    vcast: (Array.isArray(docs?.vectorcast) ? docs.vectorcast : []).filter(Boolean).join(','),
+  }), [docPaths, job?.url, activeScm?.source_root]);
+
+  // 프로젝트 식별 부분키(binding) — cacheKey의 안정 접두부(요구/설계문서 + jobUrl + sourceRoot).
+  // 시험문서(STS/SUTS/…)·VectorCAST 빌드는 **일부러 제외**한다: 그것들이 드리프트했을 때 정확
+  // 키는 miss여도 "같은 프로젝트의 마지막 매트릭스"를 stale로 되살려 보여주기 위한 결속이다.
+  // jobUrl+sourceRoot 를 포함하므로 다른 프로젝트/소스트리로는 절대 새지 않는다(sentinel 동일 이유).
+  const buildBinding = useCallback((docs) => JSON.stringify({
+    jobUrl: job?.url || '', sourceRoot: activeScm?.source_root || '',
+    srs: docPaths.srs || '', sds: docPaths.sds || '', hsis: docPaths.hsis || docs.hsis || '',
+  }), [docPaths, job?.url, activeScm?.source_root]);
 
   const loadMatrix = useCallback(async (forceRefresh = false) => {
     // Ensure linkedDocs is loaded from SCM before proceeding
@@ -91,22 +210,33 @@ export default function SrsSdsSection({ job, analysisResult }) {
           }
           setLinkedDocs(activeDocs);
         }
-      } catch (_) {}
+      } catch (_) { /* 갱신 실패 → 기존 linkedDocs 유지(화면을 비우지 않는다) */ }
     }
 
     // Debug: log activeDocs state
 
-    // Cache check: skip API calls if inputs haven't changed
-    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
-    if (!forceRefresh && matrixCacheRef.current?.key === cacheKey && matrixCacheRef.current?.data) {
-      setMatrix(matrixCacheRef.current.data);
-      toast('info', '캐시된 매트릭스를 사용합니다. 새로고침하려면 버튼을 다시 클릭하세요.');
+    // Cache check: skip API calls if inputs haven't changed.
+    // ⚠ sourceRoot 를 반드시 포함한다 — 요청 body 에 싣는데 이게 빠지면 scmId·docPaths 가
+    // 같고 source_root 만 바뀐 재분석 후 비-force '생성'이 옛 소스트리로 만든 매트릭스를 캐시
+    // hit 로 되쓴다(deep-review W1). 캐시는 traceMatrixStore(모듈캐시 + localStorage)로 hoist
+    // 돼 컴포넌트 언마운트(프로젝트 왕복·새로고침)를 넘겨 살아남는다 — 키에 source_root 필수.
+    const cacheKey = buildCacheKey(activeDocs);
+    // 캐시 히트: 입력 전체(cacheKey) 동일하면 재생성 없이 저장분 사용(모듈캐시/localStorage 경유).
+    const cached = forceRefresh ? null : loadTraceMatrixByKey(cacheKey);
+    if (cached) {
+      setMatrix(cached.data);
+      setWarnings(cached.data?._warnings || []);   // 저장 시점 경고 재노출(silent 은폐 방지)
+      setNotices(cached.data?._notices || []);     // 정보성 요약도 함께 복원
+      setRestoredMeta({ savedAt: cached.savedAt, stale: false });  // 정확 키 일치 = current(clean)
+      toast('info', '캐시된 매트릭스를 사용합니다. 새로 생성하려면 새로고침을 누르세요.');
       return;
     }
 
     setLoading(true);
     setWarnings([]);
+    setNotices([]);
     const stepWarnings = [];
+    const stepNotices = [];   // 정보성 요약(경고 아님) — 배너를 warnings와 분리해 amber 경고와 안 섞이게
     const dataSources = [];  // track which sources contributed
 
     try {
@@ -119,17 +249,35 @@ export default function SrsSdsSection({ job, analysisResult }) {
       let reqItems = [];
       let mappingPairs = [];
       let udsFunctionIds = [];  // 전체 UDS 함수 인벤토리(SDS→UDS bridge 시드용)
+      let udsFunctionAsil = {};  // SwUDS 함수별 ASIL — 매트릭스 요구사항 ASIL max-merge 소스(under-report 해소)
+      // 백엔드가 알려준 "이 요구문서를 왜 못 읽었는가" — 아래 0건 분기에서 사유로 쓴다.
+      let reqDocErrors = [];
       try {
-        const user = getUsername();
+        // ⚠ multipart 라 api()/post() 헬퍼(JSON 전용)를 못 쓴다. 그래도 auth 헤더는 반드시
+        //   authHeaders()(Bearer + X-User) 로 붙일 것 — X-User 만 보내면 커밋 1b6bb99
+        //   (2026-08-04, X-User 한 줄 신원 위조 차단) 이후 미들웨어가 **401** 로 막는다.
+        //   그러면 reqItems=0 이 되고, 아래 "요구사항 0건" 분기가 Step 4(traceability-matrix)를
+        //   통째로 건너뛴다 = 매트릭스가 아예 생성되지 않는다(사용자 보고 2026-08-06).
+        //   Content-Type 은 설정하지 말 것 — 브라우저가 multipart boundary 를 붙여야 한다.
         const previewRes = await fetch('/api/jenkins/uds/requirements-preview', {
           method: 'POST', body: form,
-          headers: user ? { 'X-User': user } : {},
+          headers: authHeaders(),
         });
         if (previewRes.ok) {
           const previewData = await previewRes.json();
           reqItems = previewData?.preview?.items || [];
           mappingPairs = previewData?.traceability?.mapping_pairs
             || previewData?.mapping || [];
+          reqDocErrors = previewData?.req_doc_errors || [];
+        } else {
+          // ⚠ 예전엔 이 else 가 **비어 있었다**. res.ok 를 검사는 하는데 false 일 때
+          //   아무것도 안 해서, 401/403/500 이 경고 한 줄 없이 사라지고 끝에서
+          //   "SRS 경로를 확인하세요"(= 엉뚱한 원인)로 둔갑했다.
+          const body = await previewRes.text().catch(() => '');
+          const msg = `요구사항 미리보기 실패: HTTP ${previewRes.status}`
+            + (body ? ` — ${body.slice(0, 200)}` : '');
+          stepWarnings.push(msg);
+          toast('warning', msg);
         }
       } catch (e) {
         stepWarnings.push(`요구사항 미리보기 실패: ${e.message}`);
@@ -147,6 +295,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
           // 전체 UDS 함수 인벤토리 — 설계 req 참조 없는 함수까지 포함. 매트릭스 SDS→UDS
           // bridge가 전체 함수를 매칭하도록 별도 전달(mapping_pairs만으론 ~5%만 커버).
           udsFunctionIds = udsMapping?.all_function_ids || [];
+          udsFunctionAsil = udsMapping?.uds_function_asil || {};
           if (mappingPairs.length > 0) {
             toast('info', `UDS에서 ${mappingPairs.length}개 매핑 / ${udsFunctionIds.length}개 함수 추출`);
           }
@@ -157,6 +306,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       // Step 2b: Extract SDS component→requirement mapping
       let sdsPairs = [];
+      let componentAsil = {};  // ASIL 결합(P5) — {컴포넌트/함수명: ASIL}, 매트릭스가 요구사항 ASIL 도출
       if (docPaths.sds || activeDocs.sds) {
         setLoadProgress('SDS 컴포넌트 매핑 추출 중...');
         try {
@@ -164,11 +314,46 @@ export default function SrsSdsSection({ job, analysisResult }) {
             sds_path: docPaths.sds || activeDocs.sds,
           });
           sdsPairs = sdsData?.sds_pairs || [];
+          componentAsil = sdsData?.component_asil || {};
           if (sdsPairs.length > 0) {
             dataSources.push(`SDS: ${sdsPairs.length}개 매핑`);
           }
         } catch (e) {
           stepWarnings.push(`SDS 매핑 추출 실패: ${e.message}`);
+        }
+      }
+
+      // Step 2c: Extract HSIS interface→requirement mapping (시스템 레벨 인터페이스 밴드)
+      let hsisPairs = [];
+      if (docPaths.hsis || activeDocs.hsis) {
+        setLoadProgress('HSIS 인터페이스 매핑 추출 중...');
+        try {
+          const hsisData = await post('/api/jenkins/hsis/extract-mapping', {
+            hsis_path: docPaths.hsis || activeDocs.hsis,
+            syrs_path: docPaths.syrs || activeDocs.syrs || '',  // 시스템 기준(SyRS) 커버리지 계산용
+          });
+          hsisPairs = hsisData?.hsis_pairs || [];
+          if (hsisPairs.length > 0) {
+            dataSources.push(`HSIS: ${hsisPairs.length}개 인터페이스 매핑`);
+          }
+          // 시스템 기준(SyRS) 정직 커버리지 — HSIS는 시스템레벨 문서라 SW 매트릭스(68)엔 시스템-only
+          // 요구가 탈락해 밴드가 낮게(6/68) 보인다. SyRS 기준 참 커버리지를 표면화(오분모 교정).
+          const sb = hsisData?.system_basis;
+          if (sb) {
+            // 밴드칩(SW분모 6/68·매트릭스 캐시)과 별개 — 이 값은 시스템기준(SyRS분모·live·raw ID 스캔)
+            dataSources.push(`HSIS(시스템기준 SyRS·raw): 참조 ${sb.joined}/${sb.refs_total} 조인 · 인터페이스 ${sb.interface_covered}/${sb.interface_total} [밴드칩은 SW분모]`);
+            if (Array.isArray(sb.interface_missing) && sb.interface_missing.length > 0) {
+              stepWarnings.push(`HSIS: 시스템 인터페이스요구 ${sb.interface_missing.length}개 미커버(${sb.interface_missing.join(', ')}) — HSIS 문서 갱신 확인`);
+            }
+            if (Array.isArray(sb.unmatched) && sb.unmatched.length > 0) {
+              stepWarnings.push(`HSIS: SyRS에도 없는 참조 ${sb.unmatched.length}개(${sb.unmatched.slice(0, 5).join(', ')}) — 문서 버전 확인`);
+            }
+          } else if (hsisData?.system_basis_error) {
+            // fail-loud: SyRS 처리 실패(포맷/접근)를 침묵하지 않음
+            stepWarnings.push(`HSIS 시스템기준 커버리지 계산 실패: ${hsisData.system_basis_error} (SyRS 경로/포맷 확인)`);
+          }
+        } catch (e) {
+          stepWarnings.push(`HSIS 매핑 추출 실패: ${e.message}`);
         }
       }
 
@@ -185,13 +370,16 @@ export default function SrsSdsSection({ job, analysisResult }) {
         setLoadProgress('STS 추적성 추출 중...');
         try {
           const stsData = await post('/api/jenkins/sts/extract-traceability', { path: activeDocs.sts, doc_type: 'sts' });
+          if (stsData?.warning) stepWarnings.push(`STS: ${stsData.warning}`);  // 오태깅 검증(H3) — 조용한 밴드 오태깅을 fail-loud로
           if (stsData?.vcast_rows?.length) {
             for (const row of stsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'STS', confidence: 'exact' });
             }
             dataSources.push(`STS: ${stsData.vcast_rows.length}건`);
           } else if (Array.isArray(stsData?.available_sheets)) {
-            stepWarnings.push(`STS: ${stsData.error || '시트 미인식'}. 사용 가능한 시트: ${stsData.available_sheets.join(', ')}`);
+            // ⚠ warning 우선 — SITS 분기(:412)와 같은 순서다. warning 을 안 보면 '시트는
+            //   찾았는데 0행'인 응답에도 "시트 미인식"이라고 **거짓 사유**를 붙인다.
+            stepWarnings.push(`STS: ${stsData.warning || stsData.error || '시트 미인식'}. 사용 가능한 시트: ${stsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`STS 추출 실패: ${e.message}`);
@@ -202,14 +390,16 @@ export default function SrsSdsSection({ job, analysisResult }) {
       if (activeDocs.suts) {
         setLoadProgress('SUTS 추적성 추출 중...');
         try {
-          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: activeDocs.suts, doc_type: 'suts' });
+          const sutsData = await post('/api/jenkins/suts/extract-traceability', { path: activeDocs.suts });  // SUTS 전용 파서(요구=SwUFn 함수ID, unit-bridge)
+          if (sutsData?.warning) stepWarnings.push(`SUTS: ${sutsData.warning}`);  // 오태깅 검증(H3)
           if (sutsData?.vcast_rows?.length) {
             for (const row of sutsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'SUTS', confidence: 'exact' });
             }
             dataSources.push(`SUTS: ${sutsData.vcast_rows.length}건`);
           } else if (Array.isArray(sutsData?.available_sheets)) {
-            stepWarnings.push(`SUTS: ${sutsData.error || '시트 미인식'}. 사용 가능한 시트: ${sutsData.available_sheets.join(', ')}`);
+            // warning 우선 — 위 STS 와 동일 이유(거짓 '시트 미인식' 방지).
+            stepWarnings.push(`SUTS: ${sutsData.warning || sutsData.error || '시트 미인식'}. 사용 가능한 시트: ${sutsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`SUTS 추출 실패: ${e.message}`);
@@ -223,12 +413,55 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: activeDocs.sits });
           if (sitsData?.vcast_rows?.length) {
             sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: r.source || 'SITS', confidence: 'exact' }));
-            dataSources.push(`SITS: ${sitsData.vcast_rows.length}건`);
+            // 직접 요구 매핑(requirement_id 보유) vs testcase-only(2-hop 대기) 구분: 전부 후자면
+            // 요구열 없는 Test-Log 포맷이라 매트릭스 2-hop이 SUTS/SDS로 구제하지 못하면 SITS 밴드가
+            // 조용히 빈다. backend가 실은 warning을 성공 표시와 함께 노출한다(deep-review W6).
+            const directN = sitsData.vcast_rows.filter(r => r.requirement_id).length;
+            if (directN > 0) {
+              dataSources.push(`SITS: ${sitsData.vcast_rows.length}건`);
+            } else {
+              dataSources.push(`SITS: ${sitsData.vcast_rows.length}건(요구열 없음·2-hop 의존)`);
+              if (sitsData.warning) stepWarnings.push(`SITS: ${sitsData.warning}`);
+            }
           } else if (Array.isArray(sitsData?.available_sheets)) {
             stepWarnings.push(`SITS: ${sitsData.warning || sitsData.error || '시트 미인식'}. 사용 가능한 시트: ${sitsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`SITS 추출 실패: ${e.message}`);
+        }
+      }
+
+      // 3c-2. 시스템 시험(SyTS/SyITS) — SITS와 동일 구조, source 라벨만 다름.
+      // 비기능/안전 요구의 시스템 레벨 검증으로 covered 승격(결정1). vcast_rows에 합류(source로 분류).
+      for (const [docKey, ep, label] of [
+        ['syts', '/api/jenkins/syts/extract-traceability', 'SyTS'],
+        ['syits', '/api/jenkins/syits/extract-traceability', 'SyITS'],
+      ]) {
+        if (!activeDocs[docKey]) continue;
+        setLoadProgress(`${label} 추적성 추출 중...`);
+        try {
+          // SyTS는 시스템 기준(SyRS) 커버리지 병행 계산용 syrs_path 전달(SyITS는 carve-out — 백엔드가 미산출).
+          const sysData = await post(ep, { path: activeDocs[docKey], syrs_path: docPaths.syrs || activeDocs.syrs || '' });
+          if (sysData?.vcast_rows?.length) {
+            for (const row of sysData.vcast_rows) vcastRows.push({ ...row, source: row.source || label, confidence: 'exact' });
+            dataSources.push(`${label}: ${sysData.vcast_rows.length}건`);
+          } else if (Array.isArray(sysData?.available_sheets)) {
+            // 0건이 silent하지 않게 — 시트 미인식 원인 노출(SITS와 동일).
+            stepWarnings.push(`${label}: ${sysData.warning || sysData.error || '시트 미인식'}. 사용 가능한 시트: ${sysData.available_sheets.join(', ')}`);
+          }
+          // 시스템 기준(SyRS) 정직 커버리지 — 밴드칩(SW분모)과 별개. SyTS는 SW 평탄화로 시스템-only
+          // 요구가 탈락해 밴드가 낮게 보인다(band 28 vs SyRS기준 112). HSIS와 동일 근본.
+          const sb = sysData?.system_basis;
+          if (sb) {
+            dataSources.push(`${label}(시스템기준 SyRS·raw): 참조 ${sb.joined}/${sb.refs_total} 조인 [밴드칩은 SW분모]`);
+            if (Array.isArray(sb.unmatched) && sb.unmatched.length > 0) {
+              stepWarnings.push(`${label}: SyRS에도 없는 참조 ${sb.unmatched.length}개(${sb.unmatched.slice(0, 5).join(', ')}) — 문서 버전 확인`);
+            }
+          } else if (sysData?.system_basis_error) {
+            stepWarnings.push(`${label} 시스템기준 커버리지 계산 실패: ${sysData.system_basis_error} (SyRS 경로/포맷 확인)`);
+          }
+        } catch (e) {
+          stepWarnings.push(`${label} 추출 실패: ${e.message}`);
         }
       }
 
@@ -241,13 +474,33 @@ export default function SrsSdsSection({ job, analysisResult }) {
         const vcastLogPaths = Array.isArray(activeDocs?.vectorcast)
           ? activeDocs.vectorcast.filter(Boolean)
           : [];
-        const ragData = await post('/api/jenkins/report/vectorcast-rag', {
+        // ⚠ sync 호출이었다. 원격 IPC 직렬 파싱이라 수 분 블로킹이고, 프록시/브라우저
+        //   타임아웃에 끊기면 아래 catch 가 경고만 남긴 채 **VectorCAST 없는 매트릭스**가
+        //   만들어진다. 캐시 저장은 무조건이라(:614 의도된 결정) 그 반쪽이 그대로 굳는다.
+        //   백엔드가 이미 만들어 둔 백그라운드 잡 + 폴링으로 받는다(응답 shape 동일).
+        //   폴링은 요청 하나하나가 짧아 프록시 타임아웃에 안 걸리는 게 핵심 이득이다.
+        const ragData = await runVectorcastRagJob({
           job_url: job.url,
           cache_root: cacheRoot,
           build_selector: cfg.buildSelector || 'lastSuccessfulBuild',
           vcast_log_paths: vcastLogPaths,
+        }, {
+          onProgress: setLoadProgress,
+          shouldContinue: () => _aliveRef.current,
         });
         const rawRows = ragData?.data?.test_rows || [];
+        // silent-drop 방지(P1): VectorCAST 폴더 파싱 실패/빈결과 사유(worker timeout·폴더 부재
+        // 등)를 표면화한다. 부분 실패는 data.parse_warnings, 완전 실패(missing 응답)는 top-level.
+        const vcWarnings = ragData?.data?.parse_warnings || ragData?.parse_warnings || [];
+        // VectorCAST 데이터가 하나도 없을 때만(완전 실패) 사유를 표면화한다. 성공/부분성공
+        // (rawRows 존재)에는 성공 경로의 정보성 note([metric-report] 함수콜 보강 등)가 섞여 있어
+        // 표시하면 노이즈이고, 이 stepWarnings가 matrix 캐시 게이트(hadStepFailure)를 꺼
+        // 매 조회 재파싱을 유발한다(deep-review W1/W2). 데이터 0건일 때만 silent-drop을 막는다.
+        if (!rawRows.length && Array.isArray(vcWarnings) && vcWarnings.length) {
+          const _head = vcWarnings.slice(0, 3).join(' / ');
+          const _more = vcWarnings.length > 3 ? ` 외 ${vcWarnings.length - 3}건` : '';
+          stepWarnings.push(`VectorCAST: ${_head}${_more}`);
+        }
 
         // VectorCAST는 함수(subprogram) 단위로 롤업해 SUTS와 동일 granularity로 맞춘다.
         // per-실행(수천 행)을 그대로 보내면 한 요구사항에 수백~수천 셀이 붙어 렌더가
@@ -290,15 +543,27 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       // Warn if no data sources contributed
       if (reqItems.length === 0) {
-        stepWarnings.push('SRS에서 요구사항을 추출하지 못했습니다. SRS 경로를 확인하세요.');
-        toast('warning', 'SRS 요구사항이 없어 매트릭스를 생성할 수 없습니다.');
+        // ⚠ 예전엔 세 상태를 "SRS 경로를 확인하세요" 한 문장으로 뭉갰다 —
+        //   ①경로 미지정 ②문서를 못 읽음(사유 있음) ③읽었으나 요구 ID 0건.
+        //   ②·③에서 경로를 의심하게 만들어, 문서가 멀쩡히 등록된 사용자에게
+        //   "있는데 없다고 나온다"로 보였다(실제 보고). 셋을 갈라 말한다.
+        let why;
+        if (!docPaths.srs) {
+          why = 'SRS 경로가 지정되지 않았습니다 — 설정 탭 또는 SCM 연결 문서에서 등록하세요.';
+        } else if (reqDocErrors.length > 0) {
+          why = `SRS 문서를 읽지 못했습니다 — ${reqDocErrors.join(' / ')}`;
+        } else {
+          why = `SRS 문서는 읽었으나 요구사항 ID를 0건 인식했습니다(양식 확인 필요) — ${docPaths.srs}`;
+        }
+        stepWarnings.push(why);
+        toast('warning', `매트릭스 생성 불가 — ${why.slice(0, 120)}`);
         setWarnings(stepWarnings);
         setLoading(false);
         setLoadProgress('');
         return;
       }
       if (vcastRows.length === 0 && sitsRows.length === 0 && mappingPairs.length === 0 && sdsPairs.length === 0) {
-        stepWarnings.push('설계/테스트 매핑 데이터가 없습니다. SDS/UDS/STS/SUTS/SITS/VectorCAST 연결을 확인하세요.');
+        stepWarnings.push('설계/테스트 매핑 데이터가 없습니다. SW(SDS·UDS·STS·SUTS·SITS)·시스템(HSIS·SyTS·SyITS)·VectorCAST 연결을 확인하세요.');
       }
 
       // Step 4: Generate full traceability matrix (V-model 6-level)
@@ -309,34 +574,69 @@ export default function SrsSdsSection({ job, analysisResult }) {
         uds_function_ids: udsFunctionIds,
         vcast_rows: vcastRows,
         sds_pairs: sdsPairs,
+        hsis_pairs: hsisPairs,  // 시스템 레벨 인터페이스 밴드(design-arm)
         sits_rows: sitsRows,
+        component_asil: componentAsil,  // ASIL 결합(P5) — 요구사항별 ASIL 도출용
+        uds_function_asil: udsFunctionAsil,  // SwUDS 함수 ASIL — 매트릭스 max-merge(under-report 해소)
         // Required for server-side summary cache (dashboard TraceSummaryCard)
         job_url: job?.url || '',
         cache_root: cacheRoot || '.devops_pro_cache',
         build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
       });
       // 이 시점까지의 경고 = 실제 step 실패(SUTS/SITS/VectorCAST 추출 실패·매핑 없음).
-      // 아래 untraced 경고는 정보성이므로 캐시 가드 판단에서 제외하기 위해 먼저 스냅샷.
-      const hadStepFailure = stepWarnings.length > 0;
-      // VectorCAST bridge 가시성: SRS에 연결된 함수 수 / 미연결(이 SRS 범위 밖 함수).
-      // 미연결엔 단위시험된 함수(SDS 명세 공백 후보)도 포함 — 트리 'SRS 미추적 시험'에서 확인.
+      // VectorCAST bridge 가시성(§10): 미추적을 '설계 공백'으로 단정하지 않는다. 진짜 갭은 layer(app_leaf)이
+      // 아니라 design축(미설계, in_uds=False) — app_leaf 대다수는 단위설계(UDS)+단위시험(SUTS)까지 된 leaf
+      // 함수로 부모 SwUFn 아래 roll-up되는 '정당한 입도차'다(실측 KJPDS02_PV: 626 중 진짜 미설계 갭 ~3).
       const vcSum = (data?.matrix?.summary) || data?.summary || {};
       if (typeof vcSum.vcast_input_rows === 'number' && vcSum.vcast_input_rows > 0) {
         const untraced = vcSum.vcast_untraced_rows ?? 0;
         if (untraced > 0) {
-          const sutsTested = vcSum.unmapped_suts_tested ?? 0;
-          const tail = sutsTested > 0 ? ` 이 중 ${sutsTested}개는 단위시험까지 됨(SDS 명세 공백 가능) — 트리 'SRS 미추적 시험'에서 확인하세요.` : ' 부트로더·ISR 등 — 정상이나, 이 수가 급증하면 SUTS/SDS 매핑을 확인하세요.';
-          stepWarnings.push(`VectorCAST ${vcSum.vcast_traced_rows}/${vcSum.vcast_input_rows} 함수가 SRS에 연결됨. ${untraced}개는 이 SRS 범위 밖.${tail}`);
+          const appDesignGap = vcSum.unmapped_app_design_gap ?? 0;  // 진짜 미설계 앱 갭(APP_LEAF∩¬uds) — 실 검토 대상
+          const udsLinked = vcSum.unmapped_uds_linked ?? 0;         // 단위설계+시험 완료 leaf(in_uds, 정당한 입도차 roll-up)
+          const unresolved = vcSum.unmapped_layer_unresolved ?? 0;  // §H: SwUFn↔함수명 미해결(분류불가)
+          // ¬uds로 필터된 unmapped_test_artifact_gap 사용 — 전체 layer_test_artifact는 TEST_ARTIFACT∩in_uds
+          // 이론적 반례 시 design_gap에서 이중차감→음수클램프로 범위경계를 은닉한다(deep-review W1). 구 백엔드
+          // (필드 부재, 미재시작)는 layer_test_artifact로 폴백해 이전 동작 유지.
+          const testArtifact = vcSum.unmapped_test_artifact_gap ?? vcSum.unmapped_layer_test_artifact ?? 0;  // Range 등 시험 산출물(¬uds)
+          // design축(¬uds) 단일 분해: design_gap = 앱갭 + 분류불가 + 시험산출물 + 범위경계. 파트합 == design_gap 유지.
+          // (기존엔 testArtifact를 빼지 않아 Range 같은 시험 산출물이 '범위경계 미설계'로 오라벨됐다 — 정정.)
+          const boundaryGap = Math.max(0, (vcSum.unmapped_design_gap ?? 0) - appDesignGap - unresolved - testArtifact);
+          const parts = [];
+          if (udsLinked) parts.push(`단위설계+시험 완료 입도차 ${udsLinked}`);
+          if (appDesignGap) parts.push(`진짜 미설계 갭 ${appDesignGap}(검토 대상)`);
+          if (boundaryGap) parts.push(`범위경계(BSW·부트·라이브러리) ${boundaryGap}`);
+          if (testArtifact) parts.push(`시험 산출물 ${testArtifact}(Range 등, 추적 대상 아님)`);
+          if (unresolved) parts.push(`분류불가(SwUFn 미해결) ${unresolved}`);
+          const tail = parts.length ? ` 내역: ${parts.join(' · ')} — 트리 'SRS 미추적 시험'에서 확인.` : '';
+          // 정보성 요약(경고 아님) — 별도 notices 채널로 분리해 amber 경고 박스와 섞이지 않게 한다.
+          stepNotices.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 SRS까지 역추적됨. 나머지 ${untraced}개는 대부분 단위설계+시험까지 된 leaf(입도차) 또는 범위경계이며, 진짜 미설계 갭은 소수다(단위시험·PASS와 설계 추적성은 별개).${tail}`);
+          // 라운드113: SDS 이름은 있는데 요구ID 브리지만 끊긴 건 '설계 공백'이 아니라 '추적
+          // 브리지·명명 규약' 문제라, 위 design축 분해(parts)와 섞지 않고 별도 문장으로 낸다.
+          // 채널도 stepNotices(정보) 고정 — stepWarnings는 실제 step 실패만 담는다.
+          const sdsNameVariant = vcSum.unmapped_sds_name_variant ?? 0;
+          if (sdsNameVariant > 0) {
+            // ⚠ 분모 명시 — 앞 문장의 untraced 는 '행' 수, 이건 중복 제거한 '함수' 수라 "이 중"으로
+            // 쓰면 부분집합을 잘못 주장한다. 드릴다운 경로(2단 뒤)도 함께 안내한다.
+            stepNotices.push(`미추적 함수(중복 제거) 중 ${sdsNameVariant}개는 SDS 이름 집합에 같은 함수 이름이 있으나 요구ID 연결만 끊겼습니다(반환형/저장클래스 접두사 표기 차이). 설계 공백이 아니라 추적 브리지·명명 규약 정합 문제입니다. 트리 뷰에서 '역추적 안 된 시험 함수 표시'를 켜면 'SDS 설계' 열에 ≈ 로 표기됩니다. ⚠ SDS 이름 집합은 Related ID가 있는 엔트리만 담아 이 수치는 하한선입니다.`);
+          }
         }
       }
       // Attach metadata
       data._dataSources = dataSources;
+      // ⚠ 경고(stepWarnings)를 매트릭스와 함께 저장한다 — 복원 시 setWarnings로 재노출하기 위함.
+      // 과거엔 stepWarnings가 하나라도 있으면(hadStepFailure) 캐시를 통째로 막았는데, 실제 프로젝트는
+      // 데이터품질 advisory(SyRS 미매칭 참조·SITS 2-hop 등)가 상시 1건 이상이라 저장이 영구 차단돼
+      // 재진입·F5마다 매트릭스가 사라졌다(사용자 실사용 콘솔 진단으로 확인: save 함수가 한 번도
+      // 호출 안 됨 — 화면엔 매트릭스가 있는데 store는 비어 있었다). 원 취지(불완전 매트릭스가 silent
+      // 은폐)는 '경고 동반 저장 + 복원 시 재노출'로 해소된다 — 복원돼도 경고가 그대로 보이므로 은폐가
+      // 아니다. 따라서 zero-warning 게이트를 제거하고 항상 저장한다(saveTraceMatrix가 렌더 불가면 no-op).
+      data._warnings = stepWarnings;
+      data._notices = stepNotices;
       setMatrix(data);
-      // 부분 실패(step 실패) 시 캐시 저장 안 함 — 불완전 매트릭스가 '캐시 사용'으로 굳어
-      // 시험 evidence 누락을 silent 은폐하는 것 방지(deep-analyze WARNING). 정상 시에만 캐시.
-      if (!hadStepFailure) {
-        matrixCacheRef.current = { key: cacheKey, data };
-      }
+      setRestoredMeta(null);  // 방금 생성한 fresh — 복원 배지 숨김(stale 위장 방지)
+      // binding(활성 문서 기준)도 함께 저장 — 정확 키 miss 시에도 같은 프로젝트면 마지막 결과를
+      // stale로 되살리기 위한 결속. cacheKey(정확)와 같은 activeDocs 기반이라 일관.
+      saveTraceMatrix(cacheKey, buildBinding(activeDocs), data);  // 모듈캐시 + localStorage(재진입/새로고침 생존)
       if (dataSources.length > 0) {
         toast('success', `매트릭스 생성 완료: ${dataSources.join(', ')}`);
       }
@@ -346,46 +646,207 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoading(false);
       setLoadProgress('');
       if (stepWarnings.length > 0) setWarnings(stepWarnings);
+      if (stepNotices.length > 0) setNotices(stepNotices);
     }
-  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast]);
+    // ⚠ activeScm(위 :150에서 source_root 가 요청 body 에 실린다)이 **어느 dep 에도 안
+    // 들어 있었다**. scmId 는 activeScm?.id 문자열이고, docPaths·linkedDocs 는 linked_docs
+    // 만 본다 — 즉 SCM id 를 유지한 채 source_root 만 바뀌면 이 콜백이 갱신되지 않아
+    // **옛 소스 트리로 매트릭스를 만들면서 "생성 완료" 성공 토스트**(:441)를 띄운다.
+    // 이 파일 :37-40 이 스스로 "이 섹션에서 오귀속 피해가 가장 큰 건 activeScm" 이라고
+    // 적은 그 실패 양상이다.
+    //   객체 전체(activeScm)를 넣는다 — 속성(activeScm?.source_root)만 넣으면 React
+    // Compiler(preserve-manual-memoization)가 "본문에서 추론한 의존은 activeScm 인데 소스는
+    // 더 구체적이다"라며 이 컴포넌트 최적화를 통째로 건너뛴다(조건부로 정의된 :50-52 객체라
+    // 속성 수준 추적 불가). activeScm 은 analysisResult.matchedScm 파생이라 분석 실행 때만
+    // 바뀌어 참조가 충분히 안정적이고, :453 effect 는 _autoLoadedRef 가드로 1회만 돈다.
+  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, activeScm, toast, buildCacheKey, buildBinding]);
 
-  const impactData = analysisResult?.impactData;
+  // focus(영향도 → 추적성)를 갖고 진입하면 매트릭스를 자동 생성한다(1회).
+  useEffect(() => {
+    if (traceFocus && !_autoLoadedRef.current) {
+      _autoLoadedRef.current = true;
+      loadMatrix(false);
+    }
+  }, [traceFocus, loadMatrix]);
+
+  // 마운트 복원 — 프로젝트/Job 전환 왕복·새로고침 후 재진입 시 마지막 매트릭스를 즉시 복원한다
+  // (재생성 없음). keep-alive로 마운트가 유지되면 matrix가 이미 있어 건너뛰고, traceFocus 진입은
+  // 위 auto-load가 소유한다. **2단 복원**:
+  //  1) 정확 키 일치(입력 전체 동일) → current 로 복원(💾 배지, stale=false).
+  //  2) 정확 키 miss + binding 일치(같은 프로젝트) → 마지막 매트릭스를 **stale로 명시** 복원
+  //     (⚠ 배지 + '새로고침으로 재생성' 안내, stale=true). 시험문서/빌드가 드리프트해도 마지막
+  //     결과가 보이되(사용자 요구), 최신이 아님을 숨기지 않는다.
+  //  3) 이미 clean(💾)으로 표시 중인데 정확 키가 miss로 바뀌면(레지스트리 수렴 후 입력 드리프트)
+  //     → clean→stale **강등**. 업그레이드(2→1)만 하고 강등을 안 하면 옛 clean 배지가 잔류해
+  //     stale-as-fresh가 된다(아래 exact-miss+matrix 분기).
+  // ⚠ 과거 초판은 binding 일치를 clean 으로 복원해 stale 통과-실패를 current로 위장했다(deep-review
+  // Critical). 지금은 정확 키만 clean 이고 binding 복원·드리프트는 반드시 stale 로 표시하므로 위장 불가.
+  const _mountCacheKey = useMemo(() => buildCacheKey(linkedDocs), [buildCacheKey, linkedDocs]);
+  const _mountBinding = useMemo(() => buildBinding(linkedDocs), [buildBinding, linkedDocs]);
+  useEffect(() => {
+    if (traceFocus || loading) return;   // focus 진입(auto-load 소유)·생성 진행 중이면 skip.
+    // ⚠ loading 가드: 생성(loadMatrix) 진행 중에 이 effect가 exact-업그레이드로 matrix를 재설정하면
+    // '생성 중' 표 아래로 옛 데이터가 순간 끼어드는 깜빡임이 난다(reviewer W2). loading 끝나면
+    // 다시 실행돼(deps에 loading) 필요 시 복원하므로 기능 손실 없음.
+    // 외부 저장소(모듈캐시/localStorage) 하이드레이트 — 1회성 추가 렌더는 의도된 복원 동작이다
+    // (기존 ImpactGuideSection.jsx 하이드레이트와 동일 패턴, 그쪽은 rule 도입 전 grandfathered).
+    /* eslint-disable react-hooks/set-state-in-effect */
+    const exact = loadTraceMatrixByKey(_mountCacheKey);  // 1) 정확 키 = current(clean)
+    if (exact) {
+      // 최초 clean 복원(matrix 없음), 또는 stale로 복원돼 있던 것을 정확 키 확보 후 clean으로
+      // **업그레이드**(마운트 초기엔 linkedDocs가 prop 스냅샷이라 정확 키가 miss→stale이었다가,
+      // effect 81-104이 레지스트리 최신본으로 수렴하면 정확 키가 맞아떨어진다). 방금 생성한
+      // fresh(restoredMeta===null)는 건드리지 않는다 — clean 배지로 뒤집히면 오히려 stale 위장.
+      if (!matrix || restoredMeta?.stale) {
+        setMatrix(exact.data);
+        setWarnings(exact.data?._warnings || []);   // 저장 시점 경고 재노출(silent 은폐 방지)
+        setNotices(exact.data?._notices || []);     // 정보성 요약도 함께 복원
+        setRestoredMeta({ savedAt: exact.savedAt, stale: false });
+      }
+      return;
+    }
+    if (matrix) {
+      // 정확 키 miss인데 매트릭스가 표시 중 = 입력이 저장 시점에서 드리프트했다(예: 관리에서
+      // 설계문서 경로가 갱신돼[L84 주석] 마운트 초기 스냅샷 키로 clean 복원됐다가, 레지스트리
+      // 수렴 후 정확 키가 어긋난 경우). clean(💾)으로 복원돼 있던 것이면 더는 current가 아니므로
+      // stale(⚠)로 **강등**해 stale-as-fresh 오배지를 막는다(effect가 stale→clean 업그레이드만
+      // 하고 clean→stale 강등을 안 하던 비대칭이 근본 — 과거 2× Critical과 같은 실패류). 표시 중인
+      // 매트릭스는 같은 프로젝트 것이고(프로젝트 전환은 remount라 matrix=null) 여전히 유효한
+      // '마지막 결과'이므로 교체 없이 배지만 강등한다. fresh(restoredMeta===null)·이미 stale은 유지.
+      if (restoredMeta && !restoredMeta.stale) {
+        setRestoredMeta({ savedAt: restoredMeta.savedAt, stale: true });
+      }
+      return;   // 표시 중이면 재설정 없이 유지(불필요 재설정·fresh 훼손 방지)
+    }
+    const last = loadTraceMatrixByBinding(_mountBinding);  // 2) 같은 프로젝트 마지막 = stale
+    if (last) {
+      setMatrix(last.data);
+      setWarnings(last.data?._warnings || []);   // 저장 시점 경고 재노출(stale이어도 은폐 안 함)
+      setNotices(last.data?._notices || []);     // 정보성 요약도 함께 복원
+      setRestoredMeta({ savedAt: last.savedAt, stale: true });
+    }
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [_mountCacheKey, _mountBinding, matrix, restoredMeta, traceFocus, loading]);
+
+  // Context의 impactData가 정말 지금 보고 있는 Job/SCM의 것인지 대조한다(impactGuard).
+  // Dashboard.runAnalysis는 여러 개가 겹쳐 돌 수 있고 서버측 취소가 없어 구 실행이 완주하므로,
+  // 대조 없이 읽으면 다른 프로젝트의 변경파일·영향문서를 이 화면 것으로 표시하게 된다
+  // (ISO 26262 오보고 — 이 섹션은 요구사항 커버리지를 다루므로 특히 위험).
+  // 표시용이므로 '모순이 증명될 때만' 감춘다(impactGuard.impactConflict 주석 참조).
+  const _impactConflict = impactConflict(analysisResult, job?.url, activeScm?.id);
+  const impactData = _impactConflict.conflict ? null : analysisResult?.impactData;
+  // W1(Mechanism A) 완화: 복원된 매트릭스가 VectorCAST 실행 결과(vcast_input_rows>0)를 담고
+  // 있으면, 그 합부/커버리지는 저장 시점 빌드(build_selector='lastSuccessfulBuild' — 이동 포인터)
+  // 기준이다. cacheKey는 문서 '경로'만 담고 빌드번호를 못 담아, 같은 경로에 새 빌드가 올라와도
+  // exact 히트(💾 clean)가 난다 → 옛 빌드의 통과 결과가 최신처럼 보이는 stale-as-fresh(build 축).
+  // 근본 해결은 백엔드가 해석된 build_number를 응답에 실어 cacheKey에 포함하는 것(deep-review W1,
+  // 백엔드 결합·별도). 프론트 단독으로는 이 사실을 배지에 **가시적으로** 폭로한다(hover title만으론
+  // 부족 — 사용자가 💾/⚠ 배지를 안전 신호로 읽으므로). 불필요 경고 방지: vcast 없는 순수 문서
+  // 추적 매트릭스는 빌드 의존 데이터가 없어 폭로하지 않는다.
+  const _restoredBuildBasis = (() => {
+    if (!restoredMeta || !matrix) return false;
+    const s = matrix?.matrix?.summary || matrix?.summary || {};
+    return typeof s.vcast_input_rows === 'number' && s.vcast_input_rows > 0;
+  })();
+  // 사유가 미지여도 반드시 문구가 나온다(mismatchText가 일반 문구로 폴백) — 감췄는데
+  // 배너가 안 뜨는 침묵 은닉을 구조적으로 차단.
+  const impactMismatchReason = mismatchText(_impactConflict.reason);
   const impacts = impactData?.impacts ?? impactData?.impact_items ?? [];
   const changedFiles = impactData?.changed_files ?? [];
   const impactedDocs = impactData?.impacted_docs ?? impactData?.impacted_documents ?? [];
 
   return (
     <div>
+      {/* 결과 뭉치 전체가 옛 Job의 것이면 이 섹션 전부가 오귀속이다 — 추적성 매트릭스의
+          입력(activeScm.linked_docs)까지 옛 프로젝트 것이 되므로 최상단에 알린다. */}
+      {_staleContext && (
+        <div className="panel">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 이 화면의 분석 결과가 현재 Job의 것이 아닙니다 — {mismatchText(_ctxConflict.reason)}
+            <div style={{ marginTop: 4 }}>
+              추적성 매트릭스와 입력 문서를 옛 프로젝트 기준으로 그리지 않도록 비워 두었습니다.
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 다중 레지스트리에서 자동매칭이 실패한 상태. scmList[0]을 추측하지 않는다. */}
+      {scmAmbiguous && (
+        <div className="panel">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 이 Job에 해당하는 SCM을 확정하지 못했습니다(등록 {_scmList.length}개).
+            대시보드의 SCM 선택 드롭다운에서 직접 지정한 뒤 다시 분석하세요.
+          </div>
+        </div>
+      )}
+
       {/* Input doc status */}
       <div className="panel">
         <div className="panel-header">
           <span className="panel-title">입력 문서 현황</span>
         </div>
+        {/* 설정값이 SCM 최신본을 가리고 있으면 **먼저** 알린다 — 이걸 숨기면 사용자에게는
+            "설정에서 저장했는데 화면이 안 바뀐다"로만 보인다(실제 재보고 사유). */}
+        {overriddenKeys.length > 0 && (
+          <div className="panel-body text-sm" style={{ paddingTop: 0 }}>
+            <span style={{ color: 'var(--warning, #b45309)' }}>
+              ⚠ 설정 탭에 직접 저장된 경로가 SCM 최신본을 가리고 있습니다
+              ({overriddenKeys.map(k => k.toUpperCase()).join(', ')}).
+            </span>
+            {' '}
+            <button
+              type="button"
+              className="btn-sm"
+              title="설정 탭의 해당 경로를 비워 SCM 레지스트리 값을 그대로 따르게 합니다(이후 SCM 변경이 바로 반영됨)."
+              onClick={adoptScmPaths}
+            >
+              SCM 값 따르기 ({overriddenKeys.length})
+            </button>
+          </div>
+        )}
         <div className="field-group">
-          {[
-            { label: 'SRS', path: docPaths.srs, fromScm: !localDocPaths.srs && !!scmLinked.srs },
-            { label: 'SDS', path: docPaths.sds, fromScm: !localDocPaths.sds && !!scmLinked.sds },
-            { label: 'HSIS', path: docPaths.hsis, fromScm: !localDocPaths.hsis && !!scmLinked.hsis },
-            { label: 'STP', path: docPaths.stp, fromScm: !localDocPaths.stp && !!scmLinked.stp },
-          ].map(({ label, path, fromScm }) => (
+          {/* 경로는 localStorage(설정 탭) 우선, 없으면 SCM linked_docs — 목록은 DOC_STATUS_ROWS 단일 출처. */}
+          {DOC_STATUS_ROWS.map(({ label, key, grp }) => {
+            const path = localDocPaths[key] || scmLinked[key] || '';
+            const fromScm = !localDocPaths[key] && !!scmLinked[key];
+            const overridden = overriddenKeys.includes(key);
+            const dot = { design: '#0d9488', interface: '#0e7490', test: '#2563eb', system: '#9333ea', plan: '#6b7280' }[grp];
+            return (
             <div key={label} className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
-              <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center', flexShrink: 0 }}>{label}</span>
+              <span className="pill" style={{ minWidth: 46, textAlign: 'center', flexShrink: 0, background: dot, color: '#fff', fontWeight: 600 }}>{label}</span>
               {path ? (
                 <>
                   <span className="artifact-name" title={path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {path.split(/[\\/]/).pop()}
                   </span>
                   {fromScm && <span className="pill pill-info" style={{ fontSize: 9 }}>SCM</span>}
-                  <StatusBadge tone="success">등록됨</StatusBadge>
+                  {overridden && (
+                    <span
+                      className="pill"
+                      style={{ fontSize: 9, background: 'var(--warning, #b45309)', color: '#fff' }}
+                      title={`설정 탭 값이 SCM 최신본을 가리고 있습니다.\nSCM: ${scmLinked[key]}`}
+                    >
+                      설정 우선
+                    </span>
+                  )}
+                  {/* SCM 경로일 때만 존재를 단언한다. 설정 직접 입력값은 서버가 모르므로
+                      확인하지 않은 것을 '확인됨'이라 부르지 않는다. */}
+                  {fromScm && docExists?.[key]?.exists === false ? (
+                    <StatusBadge tone="danger" title="등록된 경로에 파일이 없습니다 — 문서가 개정되며 파일명이 바뀌었을 수 있습니다.">파일 없음</StatusBadge>
+                  ) : fromScm && docExists?.[key]?.exists === true ? (
+                    <StatusBadge tone="success">확인됨</StatusBadge>
+                  ) : (
+                    <StatusBadge tone="success">등록됨</StatusBadge>
+                  )}
                 </>
               ) : (
                 <>
-                  <span className="text-muted text-sm">설정 탭 또는 SCM에서 경로를 등록하세요</span>
+                  <span className="text-muted text-sm">{grp === 'system' ? '시스템 문서(선택) — 설정/SCM에서 등록' : '설정 탭 또는 SCM에서 경로를 등록하세요'}</span>
                   <StatusBadge tone="neutral">미등록</StatusBadge>
                 </>
               )}
             </div>
-          ))}
+            );
+          })}
           {/* VectorCAST 결과 로그 (Cloudium) — Jenkins 빌드에 RAG 없을 때 폴백.
               부트로더/FBL/APP 등 결과가 별도로 나올 때 설정 → SCM '연결 문서 경로'에서
               복수 경로 등록. 여기서는 read-only 표시만. */}
@@ -426,6 +887,16 @@ export default function SrsSdsSection({ job, analysisResult }) {
           </div>
         </div>
       </div>
+
+      {/* 대조 실패로 감췄다면 그 사실을 알린다 — 조용히 비우면 사용자는 '영향 없음'/'문서
+          미설정'으로 오독한다(침묵이 곧 오보고). 사유별 해소 방법은 mismatchText가 붙인다. */}
+      {impactMismatchReason && (
+        <div className="panel mt-3">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 영향 분석 결과를 표시하지 않았습니다 — {impactMismatchReason}
+          </div>
+        </div>
+      )}
 
       {/* Impact data: changed files and impacted documents */}
       {impactData && (changedFiles.length > 0 || impactedDocs.length > 0) && (
@@ -538,10 +1009,35 @@ export default function SrsSdsSection({ job, analysisResult }) {
       {/* Traceability matrix */}
       <div className="panel mt-3">
         <div className="panel-header">
-          <span className="panel-title">추적성 매트릭스</span>
+          <span className="panel-title">ISO 26262 Part 6 SW 추적성 매트릭스</span>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             {loading && loadProgress && (
               <span className="text-muted text-sm">{loadProgress}</span>
+            )}
+            {/* 복원 표식 — 저장분에서 되살린 매트릭스임을 명시(방금 생성한 fresh와 구분). stale을
+                fresh로 위장하지 않기 위한 정직성 배지. 새로고침 버튼이 명시 재생성 경로.
+                stale=true(정확 키 miss, binding만 일치=입력 드리프트)면 ⚠ 경고색으로 최신 아님을
+                크게 폭로한다. stale=false(정확 키 일치)면 current 로 간주(💾). */}
+            {!loading && matrix && restoredMeta && (
+              restoredMeta.stale ? (
+                <span
+                  className="text-sm"
+                  style={{ color: '#92400e', fontWeight: 600 }}
+                  title="같은 프로젝트의 마지막 매트릭스를 복원했습니다. 다만 문서 경로/시험문서/VectorCAST 빌드 등 입력이 저장 시점과 달라 최신이 아닐 수 있습니다. 새로고침을 눌러 현재 입력으로 재생성하세요."
+                >
+                  ⚠ 저장된 결과(입력 변경됨) · {new Date(restoredMeta.savedAt).toLocaleString()} — 새로고침으로 재생성
+                </span>
+              ) : (
+                <span className="text-muted text-sm" title="같은 입력(문서 경로)으로 저장된 결과를 복원했습니다. VectorCAST 실행 결과는 저장 시점 빌드 기준이므로, 최신 빌드로 갱신하려면 새로고침을 누르세요.">
+                  💾 저장된 결과 · {new Date(restoredMeta.savedAt).toLocaleString()}
+                  {/* W1(Mechanism A): 입력 경로는 일치(💾)하나 VectorCAST 합부/커버리지는 저장 시점
+                      빌드 기준 — 빌드번호가 cacheKey에 없어 새 빌드 회귀를 exact-hit가 못 거른다.
+                      hover title이 아닌 화면에 명시(가시 폭로)해 false-clean 을 정직화. */}
+                  {_restoredBuildBasis && (
+                    <span style={{ color: '#92400e', marginLeft: 4 }}>· 빌드 결과는 저장 시점 기준(새로고침으로 최신 확인)</span>
+                  )}
+                </span>
+              )
             )}
             <button className="btn-sm" onClick={() => loadMatrix(false)} disabled={loading}>
               {loading ? <span className="spinner" /> : '매트릭스 생성'}
@@ -555,6 +1051,13 @@ export default function SrsSdsSection({ job, analysisResult }) {
           </div>
         </div>
 
+        {/* 범위 배너(§2 ISO 26262 Part 6) — 이 화면이 SW 레벨 추적성임을 명시. 시스템/HW 시험 완료는
+            SW 완료율에 미포함(SyRS·HSIS는 입력 경계·상위 추적으로만 유지) — 시스템 쌍은 아래 V-model
+            요약에서 '참고'로 분리 표시. 추적 링크 존재 ≠ 시험 실행/PASS(서로 다른 상태). */}
+        <div style={{ margin: '6px 0 0', padding: '6px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          SW 요구·설계·구현·검증의 <strong style={{ color: 'var(--fg)' }}>양방향 추적성</strong>을 평가합니다. 시스템/HW 시험 완료는 SW 완료율에 <strong style={{ color: 'var(--fg)' }}>미포함</strong>(SyRS·HSIS는 입력 경계·상위 추적으로만 유지). 추적 링크 존재 ≠ 시험 실행/PASS — 서로 다른 상태입니다.
+        </div>
+
         {/* Partial failure warnings */}
         {warnings.length > 0 && (
           <div style={{ margin: '8px 0', padding: '8px 12px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 6, fontSize: 12 }}>
@@ -563,8 +1066,18 @@ export default function SrsSdsSection({ job, analysisResult }) {
           </div>
         )}
 
+        {/* 추적성 요약(참고) — 경고 아님. 정상 데이터의 정보성 안내라 중립 톤으로 warnings와 분리 렌더 */}
+        {notices.length > 0 && (
+          <div style={{ margin: '8px 0', padding: '8px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--fg)' }}>ℹ 추적성 요약 (참고)</div>
+            {notices.map((n, i) => <div key={i} style={{ color: 'var(--text-muted)' }}>• {n}</div>)}
+          </div>
+        )}
+
         {matrix ? (
-          <TraceMatrix matrix={matrix} />
+          <TraceMatrix matrix={matrix} focusFunctions={traceFocus?.functions || null} onClearFocus={() => setTraceFocus(null)}
+            job={job} cacheRoot={cacheRoot} buildSelector={cfg?.buildSelector || 'lastSuccessfulBuild'}
+            sourceRoot={activeScm?.source_root || ''} toast={toast} />
         ) : (
           <div className="text-muted text-sm">
             SRS/SDS 경로를 설정 탭에서 등록한 후 매트릭스 생성 버튼을 클릭하세요.
@@ -623,30 +1136,66 @@ function _hasData(v) {
   return Boolean(v);
 }
 
-// Field lists aligned with backend _cache_trace_summary (jenkins.py L2385~2400).
+// Field lists aligned with backend _cache_trace_summary (jenkins.py, has_design/has_tests).
 // Any divergence here will cause the Dashboard trace summary card to disagree
 // with the Matrix / UncoveredTopList counts — keep the two in lockstep.
 const DESIGN_FIELDS = [
-  'source_ids', 'sds_components', 'functions', 'mapping', 'sds', 'source_mapping',
+  // sds_functions: 추적 정화 후 인터페이스 함수가 sds_components에서 분리됐다. 함수로만 추적되는
+  // 요구사항이 '설계 없음(uncovered)'으로 회귀하지 않도록 hasDesign 판정에 포함(백엔드 lockstep).
+  // hsis_signals: 시스템 인터페이스(HSIS) realization — SwEI 등 인터페이스 요구 커버(결정1, 백엔드 has_design lockstep).
+  // sds_design_elements: 설계ID(SwFn_/SwST_)·상태명·표행 등. sds_functions 를 '함수만'으로
+  // 정화하면서 분리됐다 — 빼면 이것만 가진 요구(HDPDM01 실측 14행)가 uncovered 로 회귀한다.
+  'source_ids', 'sds_components', 'sds_functions', 'sds_design_elements', 'hsis_signals',
+  'functions', 'mapping', 'sds', 'source_mapping',
 ];
-const TEST_FIELDS = [
-  'tests', 'sts_tests', 'suts_tests', 'sits_tests', 'vcast_tests', 'test_ids',
-];
+// SW-레벨 시험 밴드(band-split — Jenkins 매트릭스에서 채워짐). SyTS/SyITS(시스템 레벨)는 제외 —
+// 결정1 재정의: 시스템 시험 완료는 SW covered에 포함하지 않는다(백엔드 _cache_trace_summary lockstep).
+// 시스템 레벨 검증은 삭제가 아니라 '시스템 레벨(참고)' 표시로 분리(밴드 카운트·V-model 참고 쌍에 유지).
+const SW_TEST_FIELDS = ['sts_tests', 'suts_tests', 'sits_tests', 'vcast_tests'];
+// flat tests[]는 SyTS/SyITS 멤버를 포함하는 상위집합이므로 source로 걸러야 한다(band-split 없는 로컬 모드 포함).
+const _SYS_TEST_SOURCES = new Set(['SyTS', 'SyITS']);
 
 function hasDesignData(r) {
   return DESIGN_FIELDS.some(f => _hasData(r[f]));
 }
 
+// SW-레벨 시험 존재 여부(결정1: 시스템시험 SyTS/SyITS 제외 — SW covered에 미포함).
+//  - band-split 키(sts/suts/sits/vcast): Jenkins 매트릭스의 SW 시험 밴드.
+//  - flat tests[]: 양 모드 공통. source가 SyTS/SyITS가 아닌 항목이 하나라도 있으면 SW 시험.
+//  - test_ids: source 미상 폴백 — flat tests[]가 리스트로 존재하면 위에서 판정되므로 flat 부재 시에만.
+// 3-site lockstep: 백엔드 jenkins.py _cache_trace_summary. (local.py는 STS/SUTS만 실어 SyTS/SyITS 부재 → no-op.)
 function hasTestData(r) {
-  return TEST_FIELDS.some(f => _hasData(r[f]));
+  if (SW_TEST_FIELDS.some(f => _hasData(r[f]))) return true;
+  const flat = r.tests;
+  // 객체(비-배열) 항목만 시험으로 인정 — 백엔드 isinstance(t, dict)와 정확 lockstep.
+  // (JS는 typeof [] === 'object'·typeof null === 'object'라 !Array.isArray + 앞의 truthy(t)로 좁힌다.)
+  // 실데이터는 항상 dict 시험 항목이라 이 가드는 malformed 방어용.
+  if (Array.isArray(flat)) return flat.some(t => t && typeof t === 'object' && !Array.isArray(t) && !_SYS_TEST_SOURCES.has(t.source));
+  return _hasData(r.test_ids);
+}
+
+// 요구사항 유형 분류 — pair-gap 정직화(진짜갭 vs 대체검증) + deriveStatus 비기능 판정 공용 SSOT.
+//  - nonfunctional(SwNTR/SwNTSR): 설계 분해 없이 시험으로 직접 검증(결정1) → UDS/SITS 구조적 불요.
+//  - interface(SwEI/SwEIF): SDS→HSIS 실현·시스템 통합시험(SyITS)으로 검증 → SITS 구조적 불요.
+// RAW 철자(정규화 전)라 Sy* 접두도 인정(백엔드 jenkins/local lockstep).
+// 이 파일 안에서만 쓰인다(외부 import 0) — export 를 달아 두면 react-refresh 가 깨진다.
+function _reqClass(rid) {
+  const s = String(rid || '').toUpperCase();
+  if (['SWNTR', 'SWNTSR', 'SYNTR', 'SYNTSR'].some(p => s.startsWith(p))) return 'nonfunctional';
+  if (['SWEI', 'SWEIF', 'SYEI', 'SYEIF'].some(p => s.startsWith(p))) return 'interface';
+  return 'functional';
 }
 
 // Derive coverage status from row data (pure function, shared across useMemo/filters)
 export function deriveStatus(r) {
   const hasDesign = hasDesignData(r);
   const hasTest = hasTestData(r);
-  // Full: design (any of 6 field kinds) + test (any of 6 field kinds)
-  if (hasDesign && hasTest) return 'covered';
+  // 비기능/안전 요구(SwNTR/SwNTSR)는 설계 분해 없이 시험으로 직접 검증(결정1, 백엔드 lockstep).
+  const rid = String(r.requirement_id || '').toUpperCase();
+  // RAW 철자(정규화 전)라 SyNTR_/SyNTSR_도 인정 — 분류는 _reqClass SSOT 재사용(백엔드 lockstep).
+  const isNonFunctional = _reqClass(rid) === 'nonfunctional';
+  // Full: 시험 + (설계 OR 비기능 요구)
+  if (hasTest && (hasDesign || isNonFunctional)) return 'covered';
   // Partial: any one layer present
   if (hasDesign || hasTest) return 'partial';
   if (r.status && r.status !== 'uncovered') return r.status;
@@ -654,8 +1203,15 @@ export function deriveStatus(r) {
 }
 
 const PAGE_SIZES = [30, 50, 100];
-const SOURCE_ICONS = { STS: 'S', SUTS: 'U', SITS: 'I', VectorCAST: 'V' };
-const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', VectorCAST: '#ea580c' };
+// 추적성 요약을 SW 커버리지 중심으로 화면 간소화 — 아래 요소를 숨긴다(되돌리려면 해당 플래그 true).
+// 상태·필터·데이터 로직은 모두 그대로 유지(필터값은 'all' 고정 → no-op)라 플래그만 켜면 즉시 복원된다.
+const SHOW_TRACE_EXTRA_SUMMARY = false; // '추적성 요약 상세'(상태 총계·ASIL 분포·밴드별 추적) 패널
+const SHOW_DATA_SOURCE_DETAIL = false;  // '데이터 소스 상세' details 블록
+const SHOW_TRACE_SEARCH_FILTER = false; // 검색 입력 + 전체 상태/소스/타입 드롭다운
+const SHOW_TEST_RESULT_FILTER = false;  // 테스트 결과(pass/fail) 드롭다운
+const SHOW_TRACE_GAP = false;           // '추적성 공백 (양방향)' 패널 — 설계단절·orphan·역추적 후보·V-model 수평쌍
+const SOURCE_ICONS = { STS: 'S', SUTS: 'U', SITS: 'I', SyTS: 'T', SyITS: 'Y', VectorCAST: 'V' };
+const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
 const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
 const CONFIDENCE_COLORS = { exact: '#16a34a', direct: '#16a34a', indirect: '#d97706', fuzzy: '#9ca3af', mixed: '#2563eb' };
 
@@ -677,7 +1233,556 @@ function GapBadge({ label, value, tone, title, sub }) {
   );
 }
 
-function TraceMatrix({ matrix }) {
+// ── V-model 수평쌍 완성도 요약 (상단 상시 노출) ──
+// 각 쌍: 좌(설계) 밴드 present 요구 중 우(검증) 밴드가 채워진 비율을 막대+판정으로.
+// covered(any-design AND any-test) 녹색이 통합/시스템 시험 미완을 가리는 것을 상단에서 한눈에 표면화.
+function _pairTone(gapGenuine) {
+  // 진짜 결핍 0 = 완결(green), 있으면 약함(amber). 대체검증분은 결핍으로 세지 않음(정직화 lockstep).
+  return gapGenuine === 0 ? 'ok' : 'warn';
+}
+
+function VModelPairSummary({ pg }) {
+  // 좌 분모 0(해당 설계 밴드를 쓰는 요구 없음)이면 그 쌍은 'N/A'로 회색 표시(거짓 100% 방지).
+  // SW 전용 뷰 — 쌍을 2그룹으로 시각 분리:
+  //  - swPairs: SW 설계↔검증 수평쌍(UDS↔SUTS, SDS↔SITS) — SW 완료율의 핵심 신호.
+  //  - execPairs: 실행 증거(Source→VectorCAST) — 설계↔검증 수평쌍이 아니라 시험명세→실행 체인.
+  // 시스템 레벨 쌍(HSIS→SyITS, SyRS→SyTS)은 SW 전용 뷰라 표시하지 않는다(계산 pg.*는 유지).
+  const swPairs = [
+    { key: 'uds', label: 'UDS → SUTS', side: 'SW 단위시험', left: pg.udsLeft, gap: pg.udsNoSuts, genuine: pg.udsNoSuts },
+    { key: 'sds', label: 'SDS → SITS', side: 'SW 통합시험', left: pg.sdsLeft, gap: pg.sdsNoSits, genuine: pg.sdsNoSitsGenuine, alt: pg.sdsNoSitsAlt },
+  ];
+  const execPairs = [
+    { key: 'src', label: 'Source → VectorCAST', side: '실행 결과', left: pg.srcLeft, gap: pg.srcNoVc, genuine: pg.srcNoVc },
+  ];
+  const renderPair = (p) => {
+    const na = !p.left;
+    const done = na ? 0 : p.left - p.genuine;
+    const pct = na ? 0 : Math.round((done / p.left) * 100);
+    const tone = _pairTone(p.genuine);
+    const barC = na ? '#cbd5e1' : (tone === 'ok' ? COVERAGE_COLORS.covered.border : COVERAGE_COLORS.partial.border);
+    const fg = na ? 'var(--text-muted)' : (tone === 'ok' ? COVERAGE_COLORS.covered.fg : COVERAGE_COLORS.partial.fg);
+    return (
+      <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}
+        title={na ? '이 설계 밴드를 쓰는 요구사항이 없어 해당 없음' :
+          `${p.label}: 설계 ${p.left}건 중 ${done}건 검증 완료` +
+          (p.alt ? ` · 대체검증 ${p.alt}건 제외` : '') +
+          (p.genuine ? ` · 진짜 결핍 ${p.genuine}건` : ' · 진짜 결핍 없음')}>
+        <span style={{ width: 168, fontWeight: 600, color: 'var(--fg)', whiteSpace: 'nowrap' }}>
+          {na ? '⊘' : (tone === 'ok' ? '✅' : '⚠')} {p.label}
+        </span>
+        <span style={{ width: 92, fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{p.side}</span>
+        <div style={{ flex: 1, minWidth: 80, height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: barC }} />
+        </div>
+        <span style={{ width: 116, textAlign: 'right', color: fg, fontWeight: 700, whiteSpace: 'nowrap' }}>
+          {na ? '해당 없음' : `${done}/${p.left} (${pct}%)`}
+          {!na && p.genuine ? <span style={{ fontWeight: 600, fontSize: 10 }}> · 결핍 {p.genuine}</span> : null}
+        </span>
+      </div>
+    );
+  };
+  const groupLabel = (txt, note) => (
+    <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginTop: 2 }}>
+      {txt}{note ? <span style={{ fontWeight: 400 }}> — {note}</span> : null}
+    </div>
+  );
+  return (
+    <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', background: 'var(--bg)' }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: 'var(--fg)' }}>
+        V-model 수평쌍 완성도 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 설계(좌) 대비 대응 검증(우) 채움 · 진짜 결핍만 '약함'</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {groupLabel('SW 설계 ↔ 검증 수평쌍')}
+        {swPairs.map(renderPair)}
+        {groupLabel('실행 증거', '설계↔검증 수평쌍이 아니라 시험명세→실행 체인')}
+        {execPairs.map(renderPair)}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+        비율 = (설계 요구 − 진짜 결핍) / 설계 요구. 비기능(STS)·인터페이스(HSIS 실현)로 검증되는 요구는 '대체검증'으로 결핍에서 제외(은폐 아님 — 상세는 아래 공백 패널·finding 시트). 시스템시험(SyTS/SyITS)은 SW 검증에서 제외되며 SW 전용 뷰라 표시하지 않는다.
+      </div>
+    </div>
+  );
+}
+
+// ── 추적성 요약 상세 (상태 총계 카드 · ASIL 등급별 분포/커버리지 · 밴드별 추적 현황) ──
+// 전부 rows(전체·필터 무관)에서 파생 — CoverageBar와 동일 소스라 수치 lockstep. 백엔드 무변경.
+// _STAGE_COLORS/_ASIL_COLORS/COVERAGE_COLORS/_TRACE_BANDS(모듈 상수)는 렌더 시점 접근이라 TDZ 무관.
+function TraceExtraSummary({ coverage, extra, onFilter }) {
+  if (!coverage || !extra) return null;
+  const total = coverage.total || 0;
+  const cards = [
+    { key: 'all', label: '전체 요구사항', val: total, fg: 'var(--fg)', bg: 'var(--bg-elevated)', border: 'var(--border)' },
+    { key: 'covered', label: '충족 (covered)', val: coverage.covered, fg: COVERAGE_COLORS.covered.fg, bg: COVERAGE_COLORS.covered.bg, border: COVERAGE_COLORS.covered.border },
+    { key: 'partial', label: '부분 (partial)', val: coverage.partial, fg: COVERAGE_COLORS.partial.fg, bg: COVERAGE_COLORS.partial.bg, border: COVERAGE_COLORS.partial.border },
+    { key: 'uncovered', label: '미충족 (uncovered)', val: coverage.uncovered, fg: COVERAGE_COLORS.uncovered.fg, bg: COVERAGE_COLORS.uncovered.bg, border: COVERAGE_COLORS.uncovered.border },
+  ];
+  const asilLabel = (g) => (g === '미상' ? '미상' : g === 'QM' ? 'QM' : `ASIL ${g}`);
+  return (
+    <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', background: 'var(--bg)' }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: 'var(--fg)' }}>
+        추적성 요약 상세 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 상태 총계 · ASIL 분포 · 밴드별 추적 (전체 {total}건 기준)</span>
+      </div>
+
+      {/* 1) 상태 총계 카드 — 클릭 시 매트릭스 상태 필터 (CoverageBar와 동일 onFilter) */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        {cards.map(c => {
+          const pct = total ? Math.round((c.val / total) * 100) : 0;
+          return (
+            <button key={c.key} type="button" onClick={() => onFilter?.(c.key)}
+              title={`${c.label} — 클릭하면 매트릭스를 이 상태로 필터`}
+              style={{ flex: '1 1 130px', minWidth: 118, textAlign: 'left', padding: '9px 12px', borderRadius: 8,
+                border: `1px solid ${c.border}`, background: c.bg, cursor: 'pointer' }}>
+              <div style={{ fontSize: 11, color: c.fg, fontWeight: 600, marginBottom: 2 }}>{c.label}</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: c.fg, lineHeight: 1.1 }}>{c.val}</div>
+              {c.key !== 'all' && <div style={{ fontSize: 11, color: c.fg, opacity: 0.85 }}>{pct}%</div>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 2) ASIL 등급별 분포·커버리지 */}
+      {extra.asilRows.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 6, color: 'var(--fg)' }}>
+            ASIL 등급별 분포·커버리지 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 등급별 요구사항 수와 검증(충족) 비율</span>
+          </div>
+          {/* 안전 요구 커버리지 — 대시보드 카드(ResultPanel)와 **같은 함수**로 판정한다.
+              각자 세면 같은 문서가 표면에 따라 다른 값을 낸다(저장소가 반복해 겪은 형태). */}
+          {(() => {
+            const sc = deriveSafetyCoverage(extra.asilRows);
+            const t = safetyCoverageText(sc);
+            if (!t) return null;
+            const col = t.unmeasured ? 'var(--text-muted)'
+              : sc.pct >= 70 ? COVERAGE_COLORS.covered.fg
+                : sc.pct >= 30 ? COVERAGE_COLORS.partial.fg : COVERAGE_COLORS.uncovered.fg;
+            return (
+              <div style={{ marginBottom: 8, padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--fg)' }}>안전 요구(ASIL A~D) 커버리지</span>{' '}
+                <span style={{ fontSize: 15, fontWeight: 800, color: col }}>{t.value}</span>{' '}
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {t.detail}</span>
+                {t.note && (
+                  <div style={{ fontSize: 11, color: 'var(--color-warning, #b45309)', marginTop: 3 }}>⚠ {t.note}</div>
+                )}
+              </div>
+            );
+          })()}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {extra.asilRows.map(a => {
+              const pct = a.total ? Math.round((a.covered / a.total) * 100) : 0;
+              const col = _ASIL_COLORS[a.grade] || '#6b7280';
+              const pctFg = pct >= 70 ? COVERAGE_COLORS.covered.fg : pct >= 30 ? COVERAGE_COLORS.partial.fg : COVERAGE_COLORS.uncovered.fg;
+              return (
+                <div key={a.grade} style={{ flex: '1 1 150px', minWidth: 138, border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', background: 'var(--bg-elevated)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: '#fff', background: col, padding: '1px 7px', borderRadius: 8, whiteSpace: 'nowrap' }}>{asilLabel(a.grade)}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--fg)' }}>{a.total}</span>
+                    <span style={{ flex: 1 }} />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: pctFg }}>{pct}%</span>
+                  </div>
+                  <div style={{ height: 6, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: col }} />
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>검증 {a.covered}/{a.total}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* '밴드별 추적 현황' 패널 제거 — SW 전용 뷰(시스템 밴드 숨김). extra.bandMap 계산은 유지(무해). */}
+    </div>
+  );
+}
+
+// ── hiMA식 교차 추적성 매트릭스 (additive '매트릭스' 뷰) ──
+// 행=요구사항(target), 열=SDS 컴포넌트(related), 셀=O/공백. 추적 0건 행은 핑크 강조
+// (hiMA 0카운트 밴드 대응). 데이터는 filtered rows에서 클라이언트 파생(필터 반영),
+// '링크 테이블 ↓'는 서버 파생 link_table(감사 baseline)을 그대로 내보낸다.
+const _TRACE_BANDS = ['SyRS', 'SDS', 'HSIS', 'UDS', 'STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
+// 시스템/HW 레벨 밴드 — 상세 뷰(표/트리/매트릭스/모자이크)·밴드 패널·소스 필터에서 표시 숨김(SW 전용 뷰).
+// ⚠ 표시 전용: covered/gap/ASIL 계산(deriveStatus·gapStats·_rowBands·r.total)은 이 밴드들을 계속 참조한다.
+// 숨김은 각 뷰의 렌더 iteration에서만 이 집합으로 필터한다(원본 배열/헬퍼 불변).
+const _HIDDEN_BANDS = new Set(['SyRS', 'HSIS', 'SyTS', 'SyITS']);
+const _SW_BANDS = _TRACE_BANDS.filter(b => !_HIDDEN_BANDS.has(b));
+
+function _testId(t) {
+  if (!t || typeof t !== 'object') return '';
+  return String(t.testcase || t.subprogram || t.unit || t.id || '').trim();
+}
+// 백엔드 build_link_table 의 밴드 추출과 동일 규칙 — 화면/내보내기 일관성.
+function _rowBands(row) {
+  const tids = (arr) => (Array.isArray(arr) ? arr : []).map(_testId).filter(Boolean);
+  return {
+    SyRS: (Array.isArray(row.syrs_parents) ? row.syrs_parents : []).map(String).filter(Boolean),
+    SDS: (Array.isArray(row.sds_components) ? row.sds_components : []).map(String).filter(Boolean),
+    HSIS: (Array.isArray(row.hsis_signals) ? row.hsis_signals : []).map(String).filter(Boolean),
+    UDS: (Array.isArray(row.source_ids) ? row.source_ids : []).map(String).filter(Boolean),
+    STS: tids(row.sts_tests),
+    SUTS: tids(row.suts_tests),
+    SITS: tids(row.sits_tests),
+    SyTS: tids(row.syts_tests),
+    SyITS: tids(row.syits_tests),
+    VectorCAST: (Array.isArray(row.tests) ? row.tests : [])
+      .filter(t => t && t.source === 'VectorCAST').map(_testId).filter(Boolean),
+  };
+}
+
+// ASIL 등급별 색(ISO 26262) — 셀 강조용. 미상/QM은 muted.
+const _ASIL_COLORS = { D: '#991b1b', C: '#dc2626', B: '#b45309', A: '#2563eb', QM: '#6b7280' };
+
+function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
+  const { built, cols, hasAsil, byBand, asilSummary, gapCount, unknownCount } = useMemo(() => {
+    const list = Array.isArray(rows) ? rows : [];
+    // ASIL 결합(P5) — link_table.asil_coverage의 갭/등급 요약을 행에 join.
+    const ac = linkTable?.asil_coverage || null;
+    const gapMap = {};
+    (ac?.gaps || []).forEach(g => { if (g?.target_id) gapMap[g.target_id] = Array.isArray(g.missing) ? g.missing : []; });
+    const sdsCols = new Set();
+    const b = list.map(row => {
+      const rid = String(row?.requirement_id || '').trim();
+      const bands = _rowBands(row || {});
+      bands.SDS.forEach(c => sdsCols.add(c));
+      // SyRS는 상위(부모) provenance라 하위 커버리지 total/핑크(0추적) 판정에서 제외(상위만 있는 요구를
+      // covered로 오인 방지). 밴드 칩(byBand)엔 SyRS도 집계됨.
+      const total = _TRACE_BANDS.reduce((n, bd) => n + (bd === 'SyRS' ? 0 : bands[bd].length), 0);
+      const asil = String(row?.asil || row?.requirement_asil || row?.ASIL || '').trim().toUpperCase();
+      return { rid, name: String(row?.requirement_name || '').trim(), bands, total, asil, gap: gapMap[rid] || null };
+    }).filter(r => r.rid);
+    const bb = {};
+    _TRACE_BANDS.forEach(bd => {
+      const linked = b.filter(r => r.bands[bd].length > 0).length;
+      // 부동소수 % (소수 1자리) — hiMA 정수나눗셈 절삭 회피
+      bb[bd] = { linked, total: b.length, pct: b.length ? Math.round(linked * 1000 / b.length) / 10 : 0 };
+    });
+    return {
+      built: b, cols: Array.from(sdsCols).sort(), hasAsil: b.some(r => r.asil), byBand: bb,
+      asilSummary: ac?.by_level || null,
+      // 갭 수 — link_table 우선, 없으면(구 백엔드) 클라 파생 폴백(폴백 시 gapMap 비어 0).
+      gapCount: ac?.gaps?.length ?? b.filter(r => r.gap?.length).length,
+      // ASIL 미상(안전등급 미할당) 요구사항 수 — 갭과 별개 표면화(서버 파생).
+      unknownCount: ac?.unknown_count ?? 0,
+    };
+  }, [rows, linkTable]);
+
+  const downloadLinkTable = useCallback(() => {
+    const payload = linkTable || { note: 'link_table 미제공(구버전 백엔드) — 화면은 filtered rows에서 파생됨' };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'trace_link_table.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [linkTable]);
+
+  // xlsx 내보내기(hiMA TrMatrixReport 대응) — 전체 매트릭스를 서버에서 xlsx로 렌더.
+  // 바이너리 응답이라 api() 헬퍼 대신 raw fetch지만 authHeaders(Bearer+X-User) + res.ok 검사 명시(X9).
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const exportXlsx = useCallback(async () => {
+    setXlsxBusy(true);
+    try {
+      const payload = { matrix: fullMatrix || { rows, link_table: linkTable }, meta: exportMeta || {} };
+      const res = await fetch(buildUrl('/api/jenkins/uds/traceability-matrix/export-xlsx'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${t.slice(0, 140)}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'traceability_matrix.xlsx';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`Excel 내보내기 실패: ${e.message}`);
+    } finally {
+      setXlsxBusy(false);
+    }
+  }, [fullMatrix, rows, linkTable, exportMeta]);
+
+  // ID 정합성 감사(trace_integrity) — fullMatrix.integrity에서 직접 읽음(link_table 아님).
+  // hiMA exact-match가 silent하게 오인하는 클래스(정규화 충돌·dangling·placeholder)를 칩으로 표면화.
+  const integ = fullMatrix?.integrity || null;
+  const integStats = integ?.stats || {};
+  // '정합성 ✓'는 진짜 결함(충돌·오참조 의심·placeholder)이 0일 때 표시. foreign(계층참조)은
+  // 구조적이라 결함 아님 → 그것만 있으면 ✓ 유지(stats.clean과 별개의 '결함 없음' 판정).
+  const integNoDefect = integ
+    ? !(integStats.collision_count || integStats.dangling_suspect_count || integStats.placeholder_count)
+    : true;
+  const collisionTitle = (integ?.id_collisions || []).slice(0, 8)
+    .map(c => `${c.canonical} ← raw ${c.variant_count}종`).join('  ·  ');
+  const danglingTitle = Object.entries(integ?.dangling_by_namespace || {})
+    .map(([band, ns]) => `${band}: ${Object.entries(ns || {}).map(([k, v]) => `${k}×${v}`).join(', ')}`).join('   ');
+  // foreign(계층참조)의 V-model 계층 분포 — "어느 계층 ID인가" 명시(예: SwDS(설계)).
+  const layerSummary = integ?.dangling_layer_summary || {};
+  const layerEntries = Object.entries(layerSummary).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const layerTitle = layerEntries.map(([k, v]) => `${k} ${v}건`).join(' · ');
+  // 단일 계층이 foreign 전부를 차지하면 칩 라벨에 그 계층명을 직접 노출(예: 'SwDS(설계) 참조').
+  const foreignLayerLabel = layerEntries.length === 1 ? layerEntries[0][0] : null;
+  // 거친 입도 — 백엔드 summary 에서 직접 읽는다(integ 와 같은 fullMatrix 경로). 구 캐시엔
+  // 없을 수 있어 0 폴백. 임계는 백엔드와 같은 식(0.4 × 실 컴포넌트 총수)을 툴팁 표시용으로만 재계산.
+  const coarseCount = fullMatrix?.summary?.sds_coarse_count || 0;
+  const coarseTotal = fullMatrix?.summary?.total_sds_components || 0;
+  const coarseThreshold = Math.floor(0.4 * coarseTotal);
+
+  if (built.length === 0) {
+    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>표시할 요구사항이 없습니다.</div>;
+  }
+
+  const pink = COVERAGE_COLORS.uncovered;
+  const Cell = ({ on }) => on
+    ? <td style={{ textAlign: 'center', color: COVERAGE_COLORS.covered.fg, fontWeight: 700 }}>O</td>
+    : <td style={{ textAlign: 'center', color: 'var(--border)' }}>·</td>;
+
+  return (
+    <div>
+      {/* 밴드 커버리지 칩 + 링크테이블 내보내기 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '8px 0' }}>
+        {_SW_BANDS.map(bd => (
+          <span key={bd} title={`${bd}: ${byBand[bd].linked}/${byBand[bd].total} 요구사항 추적`}
+            style={{ fontSize: 11, padding: '3px 8px', borderRadius: 12, border: '1px solid var(--border)', background: 'var(--bg)' }}>
+            {bd} <strong>{byBand[bd].pct}%</strong>
+          </span>
+        ))}
+        {hasAsil && (
+          <span
+            title={asilSummary
+              ? Object.entries(asilSummary).map(([k, v]) => `${k}: ${v.targets}건(시험추적 ${v.test_covered}, 갭 ${v.gap})`).join('  ·  ')
+              : 'ASIL 등급별 추적성 충족/갭'}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${gapCount > 0 ? COVERAGE_COLORS.uncovered.border : COVERAGE_COLORS.covered.border}`,
+              background: gapCount > 0 ? COVERAGE_COLORS.uncovered.bg : '#f0fdf4',
+              color: gapCount > 0 ? COVERAGE_COLORS.uncovered.fg : COVERAGE_COLORS.covered.fg,
+            }}>
+            ASIL 갭 {gapCount}{gapCount > 0 ? ' ⚠' : ' ✓'}
+          </span>
+        )}
+        {hasAsil && unknownCount > 0 && (
+          <span title="연결 설계요소에 ASIL 등급이 없는 요구사항 — 안전등급 미할당(확인 요망). 갭과는 별개."
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.partial.border}`,
+              background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
+            }}>
+            ASIL 미상 {unknownCount}
+          </span>
+        )}
+        {/* ID 정합성 감사 칩 — hiMA WrongRelatedID/WrongName 대응(현재 빌더가 log로 삼키던 것 표면화) */}
+        {integ && integStats.collision_count > 0 && (
+          <span title={`정규화 충돌 — 서로 다른 raw 철자가 같은 ID로 silent 병합(표시 1개만 유지). ${collisionTitle}`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+              background: COVERAGE_COLORS.uncovered.bg, color: COVERAGE_COLORS.uncovered.fg,
+            }}>
+            ID 충돌 {integStats.collision_count} ⚠
+          </span>
+        )}
+        {/* 오참조 의심(suspect) — SRS에 쓰이는 namespace인데 이 ID만 부재(오타/오참조, hiMA WrongRelatedID 본류) */}
+        {integ && integStats.dangling_suspect_count > 0 && (
+          <span title={`오참조 의심 — SRS에 쓰이는 namespace인데 해당 ID만 부재(오타/잘못된 RelatedID 가능성). namespace 분포 → ${danglingTitle}`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+              background: COVERAGE_COLORS.uncovered.bg, color: COVERAGE_COLORS.uncovered.fg,
+            }}>
+            오참조 의심 {integStats.dangling_suspect_count} ⚠
+          </span>
+        )}
+        {/* 계층참조(foreign) — SRS에 없는 namespace = 다른 V-model 계층 ID(예 SwDS 설계). 구조적 정상, 정보성 */}
+        {integ && integStats.dangling_foreign_count > 0 && (
+          <span title={`계층참조 — SRS에 없는 namespace의 ID 참조. V-model상 다른 계층(예: SwSTR/SwST/SwTK는 SDS가 정의하는 설계 ID로 SRS 요구사항이 아님 → 정상). 결함 아니라 정보성.${layerTitle ? `\n계층 분포 → ${layerTitle}` : ''}\nnamespace → ${danglingTitle}`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text-muted)',
+            }}>
+            {foreignLayerLabel ? `${foreignLayerLabel} 참조` : '계층참조'} {integStats.dangling_foreign_count}
+          </span>
+        )}
+        {integ && integStats.placeholder_count > 0 && (
+          <span title="placeholder 참조 ID — 미완성 템플릿 토큰(SwCom_XX/TBD/?? 등). 설계/시험 미완 신호."
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.partial.border}`,
+              background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
+            }}>
+            placeholder {integStats.placeholder_count}
+          </span>
+        )}
+        {/* 거친 입도(sds_coarse) — 한 요구가 실 SDS 컴포넌트의 40% 초과에 연결되면 추적 변별력이 없다.
+            분모가 상태명·설계ID·목차줄까지 세던 동안(HDPDM01 201 vs 실 33) 임계가 80.4로 떠서 이
+            지표는 한 번도 발화하지 않았다. 밴드 정화 후 8건이 드러났다 — 계산만 되고 표시가 없었으므로 칩 신설. */}
+        {coarseCount > 0 && (
+          <span title={`거친 입도 — 한 요구사항이 실 SDS 컴포넌트 ${coarseTotal}개 중 40%(${coarseThreshold}개) 초과에 연결됨. SDS Related ID 작성 입도가 거칠어 "이 요구가 어느 설계에 대응하는가"를 좁히지 못한다. 결함이 아니라 문서 입도 신호.`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.partial.border}`,
+              background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
+            }}>
+            거친 입도 {coarseCount}
+          </span>
+        )}
+        {integ && integNoDefect && (
+          <span title="ID 정합성 감사 통과 — 정규화 충돌·오참조 의심·placeholder 없음(계층참조는 구조적이라 결함 아님)"
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.covered.border}`,
+              background: '#f0fdf4', color: COVERAGE_COLORS.covered.fg,
+            }}>
+            정합성 ✓
+          </span>
+        )}
+        <button className="btn-sm" onClick={downloadLinkTable}
+          title="명시 RelatedID 링크 테이블(JSON) 내보내기 — 감사 baseline">링크 테이블 ↓</button>
+        <button className="btn-sm" onClick={exportXlsx} disabled={xlsxBusy}
+          title="추적성 매트릭스 전체를 xlsx로 내보내기 (교차표 + 링크테이블 + 커버리지 + ASIL 갭 + 정합성 감사)">
+          {xlsxBusy ? '생성 중…' : 'Excel 내보내기 ↓'}</button>
+      </div>
+      <div style={{ overflow: 'auto', maxHeight: 600, border: '1px solid var(--border)', borderRadius: 6 }}>
+        <table className="impact-table" style={{ minWidth: 700, fontSize: 11, borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ position: 'sticky', left: 0, background: 'var(--bg)', zIndex: 2 }}>요구사항</th>
+              {hasAsil && <th>ASIL</th>}
+              {/* 시스템 밴드(SyRS↑·HSIS·SyTS·SyITS) 컬럼 숨김 — SW 전용 뷰 */}
+              {cols.map(c => (
+                <th key={c} title={c}
+                  style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', whiteSpace: 'nowrap', maxHeight: 140 }}>{c}</th>
+              ))}
+              <th title="SDS→UDS 단위함수 수">UDS</th>
+              <th title="SW 시험">STS</th><th title="단위 시험">SUTS</th><th title="통합 시험">SITS</th>
+              <th title="VectorCAST 실행추적">VC</th><th title="가시 SW 밴드 연결 합계">합계</th>
+            </tr>
+          </thead>
+          <tbody>
+            {built.map(r => {
+              // SW 전용 뷰: 핑크(추적 0건)·합계 모두 가시 SW 밴드 기준 — 시스템-only 추적 행은 SW-미추적(핑크)으로 표시(합계와 일치).
+              const swTotal = r.bands.SDS.length + r.bands.UDS.length + r.bands.STS.length + r.bands.SUTS.length + r.bands.SITS.length + r.bands.VectorCAST.length;
+              const uncovered = swTotal === 0;
+              const gapRow = Array.isArray(r.gap) && r.gap.length > 0;
+              const sdsSet = new Set(r.bands.SDS);
+              // 우선순위: 추적0건(핑크) > ASIL 갭(앰버). 둘 다면 핑크가 더 심각.
+              const rowBg = uncovered ? pink.bg : (gapRow ? COVERAGE_COLORS.partial.bg : undefined);
+              return (
+                <tr key={r.rid} style={rowBg ? { background: rowBg } : undefined}>
+                  <td title={r.name} style={{ position: 'sticky', left: 0, background: rowBg || 'var(--bg)', whiteSpace: 'nowrap', fontWeight: 600 }}>{r.rid}</td>
+                  {hasAsil && (
+                    <td style={{ textAlign: 'center', color: _ASIL_COLORS[r.asil] || 'var(--text-muted)', fontWeight: 700 }}
+                      title={gapRow ? `ASIL ${r.asil}: 시험 추적 부족 — ${r.gap.join(', ')}` : (r.asil ? `ASIL ${r.asil}` : 'ASIL 미상')}>
+                      {r.asil || '–'}{gapRow ? ' ⚠' : ''}
+                    </td>
+                  )}
+                  {/* 시스템 밴드(SyRS↑·HSIS·SyTS·SyITS) 셀 숨김 — SW 전용 뷰 */}
+                  {cols.map(c => <Cell key={c} on={sdsSet.has(c)} />)}
+                  <td style={{ textAlign: 'center' }}>{r.bands.UDS.length || ''}</td>
+                  <Cell on={r.bands.STS.length > 0} />
+                  <Cell on={r.bands.SUTS.length > 0} />
+                  <Cell on={r.bands.SITS.length > 0} />
+                  <Cell on={r.bands.VectorCAST.length > 0} />
+                  <td style={{ textAlign: 'center', fontWeight: 700, color: uncovered ? pink.fg : 'var(--fg)' }}>{swTotal}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 0' }}>
+        O = 추적됨 · 핑크 행 = 추적 0건(공백){hasAsil ? ' · 앰버 행 = ASIL 갭(안전등급 대비 시험 추적 부족) ⚠' : ''}{cols.length > 80 ? ` · SDS 열 ${cols.length}개(가로 스크롤)` : ''}
+      </div>
+    </div>
+  );
+}
+
+// ── 모자이크 뷰 (additive '모자이크' 뷰) — hiMA TrMosaicReport 대응 ──────────────
+// 교차표(매트릭스)가 req×SDS 상세 O/공백이라면, 모자이크는 req×밴드를 색상 셀(히트맵)로
+// 압축 조망 — 추적 패턴/공백/FAIL을 한눈에. 셀 진하기=연결 수, 빨강=VectorCAST FAIL.
+// 밴드 추출은 _rowBands(매트릭스/내보내기/백엔드 link_table과 lockstep) 재사용.
+const _MOSAIC_BANDS = [
+  { key: 'SDS', label: 'SDS' }, { key: 'HSIS', label: 'HSIS' }, { key: 'UDS', label: 'UDS' },
+  { key: 'STS', label: 'STS' }, { key: 'SUTS', label: 'SUTS' }, { key: 'SITS', label: 'SITS' },
+  { key: 'SyTS', label: 'SyTS' }, { key: 'SyITS', label: 'SyITS' }, { key: 'VectorCAST', label: 'VC' },
+];
+// SW 전용 뷰 — 시스템 밴드(HSIS/SyTS/SyITS) 숨김(SyRS는 원래 모자이크에 없음). 헤더·셀 iteration에 사용.
+const _MOSAIC_BANDS_VISIBLE = _MOSAIC_BANDS.filter(b => !_HIDDEN_BANDS.has(b.key));
+const _MOSAIC_FAIL_RE = /^(fail|failed|false|0|ng)$/i;
+const TraceMosaicView = React.memo(function TraceMosaicView({ rows }) {
+  // 행별 셀 데이터 사전 파생(메모이즈) — CrossMatrixView 패턴과 통일, rows 불변 시(비필터 리렌더) 재계산 회피.
+  const cells = useMemo(() => {
+    const list = Array.isArray(rows) ? rows : [];
+    return list.map((r, idx) => {
+      const bands = _rowBands(r || {});
+      // FAIL은 cnt와 독립으로 도출 — 빈 testId FAIL이 cnt=0으로 은폐(회색)되지 않게 셀에서 우선 적용(I2).
+      const vcFail = (Array.isArray(r.tests) ? r.tests : []).some(t => t && t.source === 'VectorCAST' && _MOSAIC_FAIL_RE.test(String(t.result || '')));
+      return {
+        rid: _rowReqId(r) || `row-${idx}`,
+        name: String(r.requirement_name || ''),
+        status: deriveStatus(r),
+        bandCells: _MOSAIC_BANDS_VISIBLE.map(b => ({ key: b.key, cnt: (bands[b.key] || []).length, isFail: b.key === 'VectorCAST' && vcFail })),
+      };
+    });
+  }, [rows]);
+  if (!cells.length) {
+    return <div className="text-muted text-sm" style={{ padding: '16px 4px' }}>표시할 요구사항이 없습니다.</div>;
+  }
+  const headBg = 'var(--bg)';
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto', maxHeight: '72vh' }}>
+      {/* 범례 — 셀 색=밴드별(상단 헤더 색), 진할수록 다건. 공백=테두리만(다크 적응), FAIL=빨강 고정. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '8px 12px', background: headBg, borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
+        <span style={{ fontWeight: 600 }}>모자이크 — 요구사항×밴드 추적 히트맵 (hiMA TrMosaicReport 대응)</span>
+        <span>연결 = <b>밴드색</b>(상단 헤더), 진할수록 다건</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: 'transparent', border: '1px solid var(--border)', marginRight: 4, verticalAlign: 'middle' }} />공백</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#dc2626', marginRight: 4, verticalAlign: 'middle' }} />VectorCAST FAIL</span>
+      </div>
+      <table style={{ borderCollapse: 'collapse', fontSize: 10 }}>
+        <thead>
+          <tr style={{ background: headBg }}>
+            <th style={{ position: 'sticky', left: 0, top: 0, background: headBg, padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--border)', zIndex: 3 }}>요구사항 ({cells.length})</th>
+            <th style={{ position: 'sticky', top: 0, background: headBg, padding: '4px 6px', borderBottom: '1px solid var(--border)', zIndex: 2 }} title="추적 상태(deriveStatus)">상태</th>
+            {_MOSAIC_BANDS_VISIBLE.map(b => (
+              <th key={b.key} title={b.key} style={{ position: 'sticky', top: 0, background: headBg, padding: '4px 3px', borderBottom: '1px solid var(--border)', color: _STAGE_COLORS[b.key] || 'var(--fg)', fontWeight: 700, fontSize: 9, minWidth: 26, zIndex: 2 }}>{b.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {cells.map((c) => {
+            const sc = COVERAGE_COLORS[c.status] || {};
+            return (
+              <tr key={c.rid}>
+                <td title={c.name ? `${c.rid} — ${c.name}` : c.rid}
+                  style={{ position: 'sticky', left: 0, background: headBg, padding: '2px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', zIndex: 1 }}>{c.rid}</td>
+                <td style={{ padding: '2px 4px', textAlign: 'center', borderBottom: '1px solid var(--border)' }}>
+                  <span title={c.status} style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: sc.border || '#9ca3af' }} />
+                </td>
+                {c.bandCells.map(bc => {
+                  const base = _STAGE_COLORS[bc.key] || '#16a34a';
+                  // FAIL=빨강 고정(불투명, cnt 독립) · 공백=토큰 테두리만(다크 적응) · 그 외 밴드색+연결수 진하기.
+                  const op = (bc.isFail || bc.cnt === 0) ? 1 : Math.min(1, 0.4 + Math.log2(bc.cnt + 1) * 0.2);
+                  return (
+                    <td key={bc.key} title={`${c.rid} · ${bc.key}: ${bc.cnt}건${bc.isFail ? ' (FAIL 포함)' : ''}`}
+                      style={{ padding: '1px 2px', borderBottom: '1px solid var(--border)' }}>
+                      <div style={{ width: 22, height: 14, margin: '0 auto', borderRadius: 2,
+                        background: bc.isFail ? '#dc2626' : bc.cnt === 0 ? 'transparent' : base, opacity: op,
+                        border: bc.isFail ? '1px solid #991b1b' : bc.cnt === 0 ? '1px solid var(--border)' : 'none' }} />
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
+function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
+  job = null, cacheRoot = '', buildSelector = 'lastSuccessfulBuild', sourceRoot = '', toast = () => {} }) {
   const inner = matrix?.matrix ?? matrix;
   const rows = Array.isArray(inner?.rows) ? inner.rows : (Array.isArray(inner?.items) ? inner.items : []);
   const summary = inner?.summary ?? matrix?.summary;
@@ -699,11 +1804,53 @@ function TraceMatrix({ matrix }) {
   const [sortAsc, setSortAsc] = useState(true);
   const [expandedReqId, setExpandedReqId] = useState(null); // expanded row by requirement_id
   const [viewMode, setViewMode] = useState('table');        // 'table' | 'tree' — additive tree view (기존 표는 무변경)
+  // 표의 UDS 함수 클릭 → 함수그래프/콜트리로 이동(검색 입력 없이 바로). 탭 직접 클릭 시엔 시드 비워 첫 함수로.
+  const [funcGraphSeed, setFuncGraphSeed] = useState('');
+  const [callTreeSeed, setCallTreeSeed] = useState('');
+  const [reqGraphSeed, setReqGraphSeed] = useState('');     // '그래프' 탭 전체뷰 진입 시드(요구사항 ID). ''=첫 항목
+  // 표 행 인라인 뷰 — 펼친 행 안에서 한 번에 하나(콜트리/함수그래프/추적그래프)를 탭 전환 없이 표시. null=닫힘.
+  const [inlineView, setInlineView] = useState(null);       // { type:'calltree'|'funcgraph'|'reqgraph', key:string } | null
   const [expandedTreeNodes, setExpandedTreeNodes] = useState(() => new Set()); // 트리 노드 id 집합 (다중 펼침)
   const [includeUnmapped, setIncludeUnmapped] = useState(false); // 트리: SRS 미추적 시험 별도 루트 표시 토글
 
+  // 콜트리 진입 함수(entry) 자동 시드 후보 — 매트릭스 row의 source_ids(UDS 함수)에서 함수명
+  // 토큰만 추출해 datalist로 제안한다(콜트리 entry는 빌드의 known 함수명과 일치해야 적중).
+  const callTreeSeeds = useMemo(() => {
+    const set = new Set();
+    for (const r of (rows || [])) {
+      for (const s of (Array.isArray(r.source_ids) ? r.source_ids : [])) {
+        const fn = String(s || '').split(/[\s(]/)[0].trim();
+        if (fn) set.add(fn);
+      }
+    }
+    return Array.from(set).slice(0, 500);
+  }, [rows]);
+
+  // 표 UDS 함수 클릭 → 해당 함수 뷰로 이동. funcgraph는 원문(display) 매칭(_normFn), 콜트리는 빌드 함수명(괄호 앞 토큰).
+  const gotoFuncView = useCallback((fn, mode) => {
+    const raw = String(fn || '').trim();
+    if (!raw) return;
+    if (mode === 'calltree') {
+      const bare = raw.split(/[\s(]/)[0].trim();
+      if (bare) { setCallTreeSeed(bare); setViewMode('calltree'); }
+    } else {
+      setFuncGraphSeed(raw); setViewMode('funcgraph');
+    }
+  }, []);
+
+  // 표 행 인라인 뷰 토글 — 같은 (type,key,reqId)를 다시 누르면 닫고, 다르면 그것으로 교체(한 번에 하나).
+  // reqId(소유 행)를 함께 담아, 인접 행 펼침 시 렌더 가드가 '이 행 소속'을 선언적으로 판정 →
+  // 행 전환 리셋 effect가 paint 후 실행되더라도 이전 행 패널이 새 행에 마운트(헛 fetch·깜빡임)되지 않음.
+  const toggleInline = useCallback((type, key, reqId) => {
+    setInlineView(prev => (prev && prev.type === type && prev.key === key && prev.reqId === reqId) ? null : { type, key, reqId });
+  }, []);
+
   // Reset page when rows change (e.g., new matrix data)
   useEffect(() => { setCurrentPage(0); setExpandedReqId(null); setExpandedTreeNodes(new Set()); }, [rows]);
+
+  // 펼친 행이 바뀌면(다른 행 열기·현재 행 접기) 인라인 뷰도 닫는다 — 이전 행 함수/요구사항의 뷰가 남는 것 방지.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 행 집합(rows)이 바뀌면 페이지·펼침 상태를 리셋 — 파생 상태 동기화(React 공식 패턴)
+  useEffect(() => { setInlineView(null); }, [expandedReqId]);
 
   // 트리 펼침은 page-absolute nodeId를 쓰므로 페이지 이동엔 유지되지만, 행 집합/정렬/
   // 페이지크기가 바뀌면 절대 인덱스가 다른 행을 가리킬 수 있어(특히 anonymous 행) 초기화한다.
@@ -747,10 +1894,17 @@ function TraceMatrix({ matrix }) {
     const srcs = new Set();
     for (const r of rows) {
       for (const t of (r.tests || [])) {
-        if (t.source) srcs.add(t.source);
+        // 시스템 시험 소스(SyTS/SyITS)는 SW 전용 뷰라 소스 필터에서 제외.
+        if (t.source && !_HIDDEN_BANDS.has(t.source)) srcs.add(t.source);
       }
     }
-    return [...srcs].sort();
+    // V-model 정준 순서(알파벳 대신) — SW시험(STS→SUTS→SITS) 다음 시스템시험(SyTS→SyITS),
+    // 마지막 VectorCAST. 알파벳 정렬은 SyITS/SyTS를 SUTS 뒤에 흩어 놓아 발견성이 떨어짐.
+    const ORDER = ['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
+    return [...srcs].sort((a, b) => {
+      const ia = ORDER.indexOf(a), ib = ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || String(a).localeCompare(String(b));
+    });
   }, [rows]);
 
   // Coverage statistics
@@ -773,18 +1927,62 @@ function TraceMatrix({ matrix }) {
     return { covered, partial, uncovered, total, partialWithDesign, designTotal, pct: total > 0 ? Math.round((covered / total) * 100) : 0 };
   }, [rows]);
 
+  // ASIL 등급별 분포 + 밴드별 추적 현황 (TraceExtraSummary용) — 전체 rows 파생, coverage와 동일 소스.
+  const extraSummary = useMemo(() => {
+    if (!rows.length) return null;
+    const asilMap = {};   // grade -> { total, covered }
+    const bandMap = {};   // band -> 연결 요구사항 수
+    for (const bk of _TRACE_BANDS) bandMap[bk] = 0;
+    for (const r of rows) {
+      const raw = String(r.asil || r.requirement_asil || r.ASIL || '').toUpperCase().trim();
+      const g = (raw === 'D' || raw === 'C' || raw === 'B' || raw === 'A' || raw === 'QM') ? raw : '미상';
+      const cell = asilMap[g] || (asilMap[g] = { total: 0, covered: 0 });
+      cell.total++;
+      if (deriveStatus(r) === 'covered') cell.covered++;
+      const bands = _rowBands(r);
+      for (const bk of _TRACE_BANDS) if (bands[bk] && bands[bk].length) bandMap[bk]++;
+    }
+    const order = ['D', 'C', 'B', 'A', 'QM', '미상'];
+    const asilRows = order.filter(g => asilMap[g]).map(g => ({ grade: g, total: asilMap[g].total, covered: asilMap[g].covered }));
+    return { asilRows, bandMap };
+  }, [rows]);
+
   // V-Model 단계별 추적성 공백 — 정방향(설계 단절)·역방향(미추적 시험)을 viewMode와
   // 무관하게 항상 노출(deep-analyze WARNING: 공백이 covered 녹색/토글 뒤에 묻힘).
-  //  - sdsNoUds: SRS→SDS는 됐으나 SDS→UDS 끊김(설계 단절)
+  //  - sdsNoUds: SRS→SDS는 됐으나 SDS→UDS 끊김(설계 단절). 단 HSIS 실현(인터페이스 요구)은 제외.
   //  - udsUntestedFns: UDS 함수 중 SUTS 단위시험 미연결(정방향 검증 공백)
   //  - orphanSuts: 어느 UDS 함수에도 안 붙는 SUTS(역방향: 시험有 설계無)
   //  - unmappedTotal/Suts: VectorCAST 미추적(역방향) — 백엔드 summary 우선
   const gapStats = useMemo(() => {
-    let sdsNoUds = 0, udsUntestedFns = 0, udsFnTotal = 0, orphanSuts = 0;
+    let sdsNoUds = 0, sdsNoUdsGenuine = 0, sdsNoUdsAlt = 0, udsUntestedFns = 0, udsFnTotal = 0, orphanSuts = 0;
+    // V-model 수평쌍 공백: 설계(좌) 밴드는 있으나 대응 시험(우) 밴드가 없는 요구사항 수.
+    // covered=any-design AND any-test라 쌍 불일치(예: SDS 설계는 있는데 SITS 통합시험 없음)가
+    // covered 녹색에 가려진다 → 밴드 SSOT(_rowBands)로 쌍별 결핍을 표면화(감사 신호).
+    // ★모드 게이트: local 파일모드(local_traceability)는 band별 *_tests/VectorCAST를 안 채우고
+    //   flat tests[]만 쓴다 → _rowBands 시험밴드가 전부 빈 배열이라 쌍 공백이 '문서 미로드'를
+    //   '진짜 공백'으로 오인해 전 설계 요구를 거짓 집계한다. band 필드가 실제로 채워지는 전체
+    //   Jenkins 매트릭스(unmappedSupported)에서만 산출한다. rightPresent로는 '미로드'와 '100%
+    //   실공백'을 구분 못 하므로(둘 다 빈 밴드) 모드 신호를 쓴다.
+    const supportsPairs = unmappedSupported;
+    // 각 수평쌍: 결핍 카운트 + 좌(설계) 밴드 present 분모(*Left) — 상단 V-model 요약 카드의 완성비율용.
+    const pg = {
+      sdsNoSits: 0, sdsNoSitsGenuine: 0, sdsNoSitsAlt: 0, sdsLeft: 0,
+      udsNoSuts: 0, udsLeft: 0, hsisNoSyits: 0, hsisLeft: 0,
+      syrsNoSyts: 0, syrsLeft: 0, srcNoVc: 0, srcLeft: 0,
+    };
     for (const r of rows) {
       const sds = Array.isArray(r.sds_components) ? r.sds_components : [];
       const uds = Array.isArray(r.source_ids) ? r.source_ids : [];
-      if (sds.length > 0 && uds.length === 0) sdsNoUds++;
+      // HSIS 크레딧: 인터페이스 요구(SwEI 등)는 SDS→HSIS로 실현되어 UDS 함수가 없는 게 정상.
+      // HSIS 신호가 있으면 SDS→UDS 단절이 아니라 인터페이스 실현이므로 설계 단절에서 제외.
+      const hsis = Array.isArray(r.hsis_signals) ? r.hsis_signals : [];
+      if (sds.length > 0 && uds.length === 0 && hsis.length === 0) {
+        sdsNoUds++;
+        // 정직화: 비기능 요구는 UDS 분해 없이 시험으로 직접 검증(결정1)되므로 '설계 단절'이 아님 —
+        // 실제 시험이 있을 때만 대체검증으로 크레딧(증거 기반, 은폐 방지). 나머지는 진짜 갭.
+        if (_reqClass(r.requirement_id) === 'nonfunctional' && hasTestData(r)) sdsNoUdsAlt++;
+        else sdsNoUdsGenuine++;
+      }
       const m = _unitTestMap(r);
       udsFnTotal += uds.length;
       for (const fn of uds) if (!((m.get(_normFn(fn)) || []).length)) udsUntestedFns++;
@@ -793,16 +1991,50 @@ function TraceMatrix({ matrix }) {
         const u = _normFn(t && t.unit);
         if (u && !udsSet.has(u)) orphanSuts++;
       }
+      // 수평쌍 공백 (밴드 추출은 매트릭스/링크테이블과 동일 SSOT _rowBands 재사용) — 전체 매트릭스 모드만.
+      if (supportsPairs) {
+        const b = _rowBands(r);
+        if (b.SDS.length && !b.SITS.length) {
+          pg.sdsNoSits++;
+          // 정직화: 비기능(SyTS/STS로 검증)·인터페이스(HSIS/SyITS로 실현·통합)는 SITS 구조적 불요 —
+          // 대체 밴드가 실제 존재할 때만 크레딧. 나머지(기능요구·상위검증 없음)는 진짜 통합시험 갭.
+          // 결정1(wide): 시스템시험(SyTS/SyITS)은 SW 검증으로 인정 안 함 → 대체검증에서 제외.
+          //  - 비기능: SW 요구시험(STS)만 대체 인정(sdsNoUdsAlt의 SW전용 hasTestData와 정렬).
+          //  - 인터페이스: HSIS 실현(설계 구조적 근거)만 인정. SyITS(시스템 통합시험)는 SW 검증 아님.
+          const _cls = _reqClass(r.requirement_id);
+          const _alt = (_cls === 'nonfunctional' && b.STS.length)
+            || (_cls === 'interface' && b.HSIS.length);
+          if (_alt) pg.sdsNoSitsAlt++; else pg.sdsNoSitsGenuine++;
+        }
+        if (b.UDS.length && !b.SUTS.length) pg.udsNoSuts++;
+        if (b.HSIS.length && !b.SyITS.length) pg.hsisNoSyits++;
+        if (b.SyRS.length && !b.SyTS.length) pg.syrsNoSyts++;
+        if (b.UDS.length && !b.VectorCAST.length) pg.srcNoVc++;
+        // 좌(설계) 밴드 present 분모 — 완성비율(=(좌−결핍)/좌) 계산용.
+        if (b.SDS.length) pg.sdsLeft++;
+        if (b.UDS.length) { pg.udsLeft++; pg.srcLeft++; }
+        if (b.HSIS.length) pg.hsisLeft++;
+        if (b.SyRS.length) pg.syrsLeft++;
+      }
     }
     const unmappedTotal = summary?.unmapped_vcast_count ?? unmappedVcast.length;
     const unmappedSuts = summary?.unmapped_suts_tested ?? unmappedVcast.filter(u => u && u.category === 'suts_tested').length;
-    const hasAny = sdsNoUds || udsUntestedFns || orphanSuts || unmappedTotal;
-    return { sdsNoUds, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, hasAny };
-  }, [rows, summary, unmappedVcast]);
+    const pairHasAny = supportsPairs && !!(pg.sdsNoSits || pg.udsNoSuts || pg.hsisNoSyits || pg.syrsNoSyts || pg.srcNoVc);
+    const hasAny = sdsNoUds || udsUntestedFns || orphanSuts || unmappedTotal || pairHasAny;
+    return { sdsNoUds, sdsNoUdsGenuine, sdsNoUdsAlt, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, pairGaps: pg, pairSupported: supportsPairs, pairHasAny, hasAny };
+  }, [rows, summary, unmappedVcast, unmappedSupported]);
 
   // Filter + sort
   const filtered = useMemo(() => {
     let result = rows;
+
+    // 영향도 연동 focus — 변경 영향 함수(source_ids 교집합)가 닿는 요구사항 행만.
+    if (focusFunctions && focusFunctions.length) {
+      const fset = new Set(focusFunctions.map(f => String(f).trim().toLowerCase()));
+      result = result.filter(r =>
+        (r.source_ids ?? []).some(s => fset.has(String(s).trim().toLowerCase()))
+      );
+    }
 
     // Status filter
     if (statusFilter !== 'all') {
@@ -867,7 +2099,7 @@ function TraceMatrix({ matrix }) {
     }
 
     return result;
-  }, [rows, searchTerm, statusFilter, sourceFilter, reqTypeFilter, testResultFilter, sortKey, sortAsc]);
+  }, [rows, searchTerm, statusFilter, sourceFilter, reqTypeFilter, testResultFilter, sortKey, sortAsc, focusFunctions]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -926,16 +2158,28 @@ function TraceMatrix({ matrix }) {
     // 역방향 추적성 공백 — 'SRS 미추적 시험'(시험됐으나 이 SRS에 안 닿음) 별도 섹션.
     if (unmappedVcast.length > 0) {
       csvRows.push('');
-      csvRows.push(csvEscape(`# SRS 미추적 시험 (역방향 공백 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항 미명세)`));
-      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'UDS 설계', 'ISO계층', '분류', 'VectorCAST 결과'].join(','));
+      csvRows.push(csvEscape(`# SRS 미추적 시험 (역추적 미연결 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항에 연결 안 됨, 대부분 정당한 입도차)`));
+      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'SDS 이름일치', 'UDS 설계', 'ISO계층', '분류', 'VectorCAST 결과'].join(','));
       for (const u of unmappedVcast) {
         const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
         const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
         csvRows.push([
           csvEscape(u.subprogram ?? ''),
           csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
-          csvEscape(sr.length ? sr.join('; ') : '미명세'),
-          csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.in_uds === false ? '미설계' : '')),
+          // 라운드113: '미명세' 단정 대신 이름 대조 결과로 4분기(표 셀과 동일 의미론).
+          // 필드 부재(구 응답)는 '이름 미발견'이 아니라 공란 — 미계산을 단정으로 굳히지 않는다.
+          csvEscape(sr.length ? sr.join('; ')
+            : !Array.isArray(u.sds_name_hits) ? ''
+              : (u.sds_name_hits.length ? '이름일치(요구ID 미연결)' : '이름 미발견')),
+          // 표와 대칭: sds_reqs 가 있으면 그쪽이 이미 요구ID를 싣고, exact 티어는 SDS component 에
+          // 섞인 SwUFn 시험 ID 자기-메아리를 '이름일치'로 오승격할 수 있다 → variant 조건에서만 채운다.
+          csvEscape((!sr.length && Array.isArray(u.sds_name_hits) && u.sds_name_hits.length)
+            ? `${u.sds_name_match || '?'}: ${u.sds_name_hits.join('; ')}`
+              + ((u.sds_name_hits_total ?? 0) > u.sds_name_hits.length
+                ? ` +${u.sds_name_hits_total - u.sds_name_hits.length}` : '')
+              + (u.sds_name_ambiguous ? ' (모호)' : '')
+            : ''),
+          csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.layer === 'UNRESOLVED' ? '분류불가' : (u.in_uds === false ? '미설계' : ''))),
           csvEscape(LAYER_LABELS[u.layer] ?? ''),
           csvEscape(u.category ?? ''),
           csvEscape(u.result ?? ''),
@@ -959,14 +2203,30 @@ function TraceMatrix({ matrix }) {
 
   return (
     <div>
+      {/* 영향도 분석 연동 — 변경 영향 함수로 필터 중임을 명시 + 해제 */}
+      {focusFunctions && focusFunctions.length > 0 && (
+        <div style={{ margin: '0 0 12px', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--accent)',
+          background: 'var(--color-info-soft, rgba(59,130,246,0.08))', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12 }}>
+            🔗 <b>영향도 분석 연동</b> — 변경 영향 함수 <b>{focusFunctions.length}개</b>가 닿는 요구사항만 표시 중
+            <span className="text-muted" style={{ marginLeft: 6, fontSize: 11 }}>
+              ({filtered.length}/{rows.length}행) — 이 함수들의 추적성·커버리지·공백을 확인하세요
+            </span>
+          </span>
+          <span style={{ flex: 1 }} />
+          {onClearFocus && (
+            <button className="btn-sm" onClick={onClearFocus} title="필터 해제하고 전체 매트릭스 보기">필터 해제</button>
+          )}
+        </div>
+      )}
       {/* Coverage summary table */}
       {coverage && (
         <div style={{ marginBottom: 16, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
           <div style={{ padding: '10px 14px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span>추적성 요약</span>
             {summary?.total_tests > 0 && (
-              <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }} title="P/F는 VectorCAST 실행 결과만. STS/SUTS/SITS는 '매핑 존재'(중립)이며 시험 통과 아님 — 매핑 엔트리는 Total에 포함되나 P/F 대상이 아님.">
-                실행검증(VectorCAST) {summary.total_pass ?? 0}P / {summary.total_fail ?? 0}F · 매핑 {summary.total_tests}건(STS/SUTS/SITS=매핑·통과 아님)
+              <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }} title="P/F는 VectorCAST 실행 결과만. SW시험(STS/SUTS/SITS)·시스템시험(SyTS/SyITS)은 '매핑 존재'(중립)이며 시험 통과 아님 — 매핑 엔트리는 Total에 포함되나 P/F 대상이 아님.">
+                실행검증(VectorCAST) {summary.total_pass ?? 0}P / {summary.total_fail ?? 0}F · 매핑 {summary.total_tests}건(SW시험 STS/SUTS/SITS·시스템시험 SyTS/SyITS=매핑·통과 아님)
               </span>
             )}
           </div>
@@ -989,20 +2249,20 @@ function TraceMatrix({ matrix }) {
               </tr>
               <tr style={{ background: COVERAGE_COLORS.covered.bg }}>
                 <td style={{ padding: '6px 12px', fontWeight: 600, color: COVERAGE_COLORS.covered.fg }}>
-                  Covered (설계+시험 <em>매핑</em> 존재)
+                  Covered (설계·비기능 + 시험 <em>매핑</em>)
                 </td>
                 <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.covered.fg }}>{coverage.covered}</td>
                 <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.covered.fg }}>{coverage.pct}%</td>
-                <td style={{ padding: '6px 12px', fontSize: 11 }}>UDS 소스 매핑 + STS/SUTS/SITS/VectorCAST 시험 <strong>매핑</strong> 존재 — 매핑일 뿐 시험 통과 아님(P/F는 VectorCAST만)</td>
+                <td style={{ padding: '6px 12px', fontSize: 11 }}>설계[SW: SDS·UDS / 인터페이스: HSIS] 또는 비기능요구 + 시험[SW: STS·SUTS·SITS / 시스템: SyTS·SyITS / 실행: VectorCAST] <strong>매핑</strong> 존재 — 매핑일 뿐 시험 통과 아님(P/F는 VectorCAST만)</td>
               </tr>
               {coverage.partial > 0 && (
                 <tr style={{ background: COVERAGE_COLORS.partial.bg }}>
                   <td style={{ padding: '6px 12px', fontWeight: 600, color: COVERAGE_COLORS.partial.fg }}>
-                    Partial (테스트만 존재)
+                    Partial (설계·시험 중 한쪽만)
                   </td>
                   <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.partial.fg }}>{coverage.partial}</td>
                   <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.partial.fg }}>{coverage.total > 0 ? Math.round(coverage.partial / coverage.total * 100) : 0}%</td>
-                  <td style={{ padding: '6px 12px', fontSize: 11 }}>STS 테스트 매핑 있으나 UDS 소스 매핑 없음 (비기능/HW/시스템 레벨 요구사항)</td>
+                  <td style={{ padding: '6px 12px', fontSize: 11 }}>설계·시험 중 한쪽만 매핑 — 예: 시험(STS·SUTS·SITS·SyTS·SyITS) 있으나 설계(SDS·UDS) 없음. 기능요구는 partial 유지(비기능요구 SwNTR/SyNTR은 covered 승격)</td>
                 </tr>
               )}
               {coverage.uncovered > 0 && (
@@ -1026,7 +2286,7 @@ function TraceMatrix({ matrix }) {
                   {coverage.designTotal > 0 ? Math.round(coverage.covered / coverage.designTotal * 100) : 0}%
                 </td>
                 <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  설계(SDS/UDS) 매핑이 존재하는 요구사항 중 검증 완료 비율
+                  검증 완료 또는 설계(SDS·UDS·HSIS) 매핑이 존재하는 요구사항 중 검증 완료 비율
                 </td>
               </tr>
               <tr style={{ background: 'var(--bg)' }}>
@@ -1038,41 +2298,67 @@ function TraceMatrix({ matrix }) {
                   {Math.round(((summary?.mapped_test_count ?? (coverage.covered + coverage.partial)) / coverage.total) * 100)}%
                 </td>
                 <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  STS/SUTS/SITS/VectorCAST 테스트 매핑 기준
+                  SW시험(STS·SUTS·SITS)·시스템시험(SyTS·SyITS)·실행(VectorCAST) 테스트 매핑 기준 — 시스템시험 매핑 포함(SW covered 지표와는 별개)
                 </td>
               </tr>
             </tfoot>
           </table>
+          {/* '시스템 레벨 연결(HSIS/SyTS/SyITS/SyRS 카운트)' bar 제거 — SW 전용 뷰(시스템 밴드 숨김, 밴드 패널과 동일 정책) */}
         </div>
       )}
 
-      {/* 추적성 공백 (양방향) — viewMode 무관 상시 노출. 정방향 설계 단절 + 역방향 미명세 시험.
-          deep-analyze: 공백이 covered 녹색·토글 뒤에 묻혀 감사에서 누락되는 문제 해소. */}
-      {gapStats.hasAny ? (
+      {/* V-model 수평쌍 완성도 요약 — 상단 상시 노출(전체 매트릭스 모드만; local은 밴드 미채움).
+          통합/시스템 시험 미완이 covered 녹색에 가려지지 않게 한눈 판정으로 표면화. */}
+      {gapStats.pairSupported && rows.length > 0 ? (
+        <VModelPairSummary pg={gapStats.pairGaps} />
+      ) : null}
+
+      {/* 추적성 공백 (양방향) — 정방향 설계 단절 + 역방향 미명세 시험 (SHOW_TRACE_GAP로 화면 숨김).
+          gapStats 계산은 유지(트리 뷰 'SRS 미추적 시험'에도 노출) — 되돌리려면 플래그만 true. */}
+      {SHOW_TRACE_GAP && gapStats.hasAny ? (
         <div style={{ marginBottom: 12, border: `1px solid ${COVERAGE_COLORS.partial.border}`, borderLeft: `4px solid ${COVERAGE_COLORS.partial.border}`, borderRadius: 8, padding: '10px 14px', background: COVERAGE_COLORS.partial.bg + '40' }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: COVERAGE_COLORS.partial.fg }}>
             ⚠ 추적성 공백 (양방향 — 매핑 존재만으로 가려지지 않게 상시 표시)
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12 }}>
-            <GapBadge label="SDS有·UDS無 (설계 단절)" value={gapStats.sdsNoUds} tone={gapStats.sdsNoUds ? 'warn' : 'ok'}
-              title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊긴 행" />
+            <GapBadge label="SDS有·UDS無 (설계 단절, HSIS 실현 제외)" value={gapStats.sdsNoUds} tone={gapStats.sdsNoUdsGenuine ? 'warn' : 'ok'}
+              sub={gapStats.sdsNoUds ? `진짜 ${gapStats.sdsNoUdsGenuine}${gapStats.sdsNoUdsAlt ? ` · 비기능 ${gapStats.sdsNoUdsAlt}` : ''}` : ''}
+              title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊긴 행. 인터페이스 요구(HSIS 신호로 실현, SwEI 등)는 UDS 없음이 정상이므로 제외. '진짜'=기능요구 설계단절(보강 대상), '비기능'=SwNTR 등 시험으로 직접 검증돼 UDS 불요(정상)." />
             <GapBadge label="UDS함수 단위시험 미연결" value={gapStats.udsUntestedFns} tone={gapStats.udsUntestedFns ? 'warn' : 'ok'}
               title={`SUTS 단위시험이 안 붙은 (요구사항×UDS함수) 쌍 — 여러 요구사항이 공유하는 함수는 요구사항마다 합산(중복 포함). 분모 ${gapStats.udsFnTotal}도 동일 기준`} />
             <GapBadge label="orphan SUTS (시험有 설계無)" value={gapStats.orphanSuts} tone={gapStats.orphanSuts ? 'warn' : 'ok'}
               title="어느 UDS 함수에도 매핑되지 않는 SUTS 단위시험(역방향 공백) — (요구사항×시험) 쌍 기준, 공유 시험은 중복 합산" />
             {unmappedSupported ? (
-              <GapBadge label="SRS 미추적 시험 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
-                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거)"
+              <GapBadge label="SRS까지 역추적 안 된 구현 요소 후보 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
+                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거). 대부분 단위설계+시험까지 된 leaf(정당한 입도차 roll-up)·범위경계(BSW/부트/라이브러리)이며 진짜 미설계 갭은 소수다 — 상단 경고·트리 'SRS 미추적 시험' 참조."
                 sub={gapStats.unmappedSuts ? `단위시험됨 ${gapStats.unmappedSuts}` : ''} />
             ) : (
               <span title="로컬 파일모드는 VectorCAST 역방향 추적(미추적 시험)을 계산하지 않습니다 — Jenkins 경로에서 확인하세요"
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 16, background: '#f3f4f6', border: '1px solid #e5e7eb', whiteSpace: 'nowrap', color: '#9ca3af' }}>
-                SRS 미추적 시험 (역방향) <span style={{ fontWeight: 700 }}>미지원</span>
+                SRS까지 역추적 안 된 구현 요소 후보 (역방향) <span style={{ fontWeight: 700 }}>미지원</span>
               </span>
             )}
           </div>
+          {gapStats.pairHasAny ? (
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px dashed ${COVERAGE_COLORS.partial.border}` }}>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6, color: COVERAGE_COLORS.partial.fg }}>
+                V-model 수평쌍 공백 — 설계(좌) 있으나 대응 시험(우) 없음 (covered 녹색에 가려지는 쌍 불일치)
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12 }}>
+                <GapBadge label="SDS→SITS (SW통합시험)" value={gapStats.pairGaps.sdsNoSits} tone={gapStats.pairGaps.sdsNoSitsGenuine ? 'warn' : 'ok'}
+                  sub={gapStats.pairGaps.sdsNoSits ? `진짜 ${gapStats.pairGaps.sdsNoSitsGenuine}${gapStats.pairGaps.sdsNoSitsAlt ? ` · 대체검증 ${gapStats.pairGaps.sdsNoSitsAlt}` : ''}` : ''}
+                  title="SW 아키텍처(SDS) 설계는 있으나 대응 SW 통합시험(SITS)이 없는 요구사항. '진짜'=기능요구·상위검증도 없음(통합시험 보강 또는 정당화 필요), '대체검증'=비기능(STS)·인터페이스(HSIS 실현)로 SITS 구조적 불요. 시스템시험(SyTS/SyITS)은 결정1로 SW 검증서 제외." />
+                <GapBadge label="UDS→SUTS (SW단위시험)" value={gapStats.pairGaps.udsNoSuts} tone={gapStats.pairGaps.udsNoSuts ? 'warn' : 'ok'}
+                  title="단위 상세설계(UDS) 함수는 있으나 대응하는 SW 단위시험(SUTS)이 없는 요구사항 수" />
+                <GapBadge label="Source→VectorCAST" value={gapStats.pairGaps.srcNoVc} tone={gapStats.pairGaps.srcNoVc ? 'warn' : 'ok'}
+                  title="소스(UDS 함수)는 있으나 VectorCAST 실행 결과가 없는 요구사항 수(실행 증거 — 설계↔검증 수평쌍 아님)" />
+              </div>
+              {/* 시스템 레벨(참고) 쌍 배지(HSIS→SyITS·SyRS→SyTS) 제거 — SW 전용 뷰(계산 pairGaps.*는 유지) */}
+            </div>
+          ) : null}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
             정방향(요구사항→설계→시험)·역방향(시험→요구사항) 공백. ISO 26262 양방향 추적성 신호 — 0이 아니면 보강 검토. 역방향 상세는 트리 뷰 'SRS 미추적 시험'.
+            <br />상단 행은 SW 레벨(SDS→UDS 설계 단절·VectorCAST 함수 역추적) 공백, 'V-model 수평쌍 공백' 행은 각 SW 설계 밴드↔대응 SW 시험 밴드가 같은 요구사항에서 짝을 이루는지의 공백입니다(SW 전용 뷰 — 시스템 쌍 미표시).
           </div>
         </div>
       ) : null}
@@ -1085,8 +2371,14 @@ function TraceMatrix({ matrix }) {
         </div>
       )}
 
-      {/* Data sources */}
-      {summary && coverage && (
+      {/* 추적성 요약 상세 — 상태 총계 카드 · ASIL 분포/커버리지 · 밴드별 추적 현황 (SHOW_TRACE_EXTRA_SUMMARY로 화면 숨김) */}
+      {SHOW_TRACE_EXTRA_SUMMARY && coverage && extraSummary && (
+        <TraceExtraSummary coverage={coverage} extra={extraSummary}
+          onFilter={(k) => { setStatusFilter(k === 'all' ? 'all' : k); setCurrentPage(0); }} />
+      )}
+
+      {/* Data sources — '데이터 소스 상세' (SHOW_DATA_SOURCE_DETAIL로 화면 숨김) */}
+      {SHOW_DATA_SOURCE_DETAIL && summary && coverage && (
         <details style={{ marginBottom: 12 }}>
           <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600 }}>데이터 소스 상세</summary>
           {(() => {
@@ -1097,7 +2389,7 @@ function TraceMatrix({ matrix }) {
               { label: 'T3: SRS \u2192 STS', type: '\uC9C1\uC811', count: summary.mapped_sts_count, direct: summary.mapped_sts_direct, desc: 'SW \uD14C\uC2A4\uD2B8' },
               { label: 'T4: UDS \u2192 SUTS', type: '\uC9C1\uC811+\uACBD\uC720', count: summary.mapped_suts_count, direct: summary.mapped_suts_direct, indirect: summary.mapped_suts_indirect, desc: '\uB2E8\uC704 \uD14C\uC2A4\uD2B8' },
               { label: 'T5: SDS \u2192 SITS', type: '\uC9C1\uC811+\uACBD\uC720', count: summary.mapped_sits_count, direct: summary.mapped_sits_direct, indirect: summary.mapped_sits_indirect, desc: '\uD1B5\uD569 \uD14C\uC2A4\uD2B8' },
-              { label: '\uC804\uCCB4 \uAC80\uC99D', type: '\uD1B5\uD569', count: summary.mapped_test_count ?? (coverage.covered + coverage.partial), desc: 'STS+SUTS+SITS+VectorCAST' },
+              { label: '\uC804\uCCB4 \uAC80\uC99D', type: '\uD1B5\uD569', count: summary.mapped_test_count ?? (coverage.covered + coverage.partial), desc: 'STS+SUTS+SITS+SyTS+SyITS+VectorCAST' },
             ];
             const statusDot = (pct) => {
               const color = pct > 70 ? '#16a34a' : pct >= 30 ? '#d97706' : '#dc2626';
@@ -1138,7 +2430,7 @@ function TraceMatrix({ matrix }) {
           {/* Source breakdown */}
           {summary?.source_stats && typeof summary.source_stats === 'object' && Object.keys(summary.source_stats).length > 0 && (
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-              {Object.entries(summary.source_stats).map(([src, cnt]) => (
+              {Object.entries(summary.source_stats).filter(([src]) => !_HIDDEN_BANDS.has(src)).map(([src, cnt]) => (
                 <div key={src} style={{ padding: '4px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
                   background: (SOURCE_COLORS[src] || '#6b7280') + '18', color: SOURCE_COLORS[src] || '#6b7280',
                   border: `1px solid ${SOURCE_COLORS[src] || '#6b7280'}40` }}>
@@ -1160,8 +2452,9 @@ function TraceMatrix({ matrix }) {
          the user lands on it without manual scrolling. */}
       <UncoveredTopList rows={rows} onPick={handlePickUncovered} />
 
-      {/* Search and filter bar */}
+      {/* Search and filter bar — 검색 입력 + 전체 상태/소스/타입은 SHOW_TRACE_SEARCH_FILTER로 화면 숨김 (보기 토글은 유지) */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        {SHOW_TRACE_SEARCH_FILTER && (<>
         <input
           type="text"
           placeholder="요구사항 ID, 함수, 파일 검색..."
@@ -1194,13 +2487,16 @@ function TraceMatrix({ matrix }) {
             {reqTypes.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         )}
-        <select value={testResultFilter} onChange={e => { setTestResultFilter(e.target.value); setCurrentPage(0); }}
-          style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }}>
-          <option value="all">테스트 결과</option>
-          <option value="pass">Pass 있음</option>
-          <option value="fail">Fail 있음</option>
-          <option value="no_test">테스트 없음</option>
-        </select>
+        </>)}
+        {SHOW_TEST_RESULT_FILTER && (
+          <select value={testResultFilter} onChange={e => { setTestResultFilter(e.target.value); setCurrentPage(0); }}
+            style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }}>
+            <option value="all">테스트 결과</option>
+            <option value="pass">Pass 있음</option>
+            <option value="fail">Fail 있음</option>
+            <option value="no_test">테스트 없음</option>
+          </select>
+        )}
         {/* 보기 방식 토글: 표(기존) | 트리(신규 ID 기준 추적성 트리) */}
         <div role="group" aria-label="보기 방식" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
           <button type="button" onClick={() => setViewMode('table')} aria-pressed={viewMode === 'table'} title="표 보기"
@@ -1215,13 +2511,43 @@ function TraceMatrix({ matrix }) {
               color: viewMode === 'tree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'tree' ? 700 : 400 }}>
             트리
           </button>
+          <button type="button" onClick={() => setViewMode('matrix')} aria-pressed={viewMode === 'matrix'} title="hiMA식 교차 매트릭스 (요구사항×SDS, O/공백, 0추적 강조)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'matrix' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'matrix' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'matrix' ? 700 : 400 }}>
+            매트릭스
+          </button>
+          <button type="button" onClick={() => setViewMode('mosaic')} aria-pressed={viewMode === 'mosaic'} title="모자이크 — 요구사항×밴드 추적 히트맵 (hiMA TrMosaicReport 대응 · 색=밴드, 진하기=연결 수, 빨강=VectorCAST FAIL)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'mosaic' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'mosaic' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'mosaic' ? 700 : 400 }}>
+            모자이크
+          </button>
+          <button type="button" onClick={() => { setCallTreeSeed(''); setViewMode('calltree'); }} aria-pressed={viewMode === 'calltree'} title="함수 호출 트리 (tree-sitter 정밀 분석 · ASIL 강조) — 또는 표 행 펼쳐 함수의 '콜트리' 클릭"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'calltree' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'calltree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'calltree' ? 700 : 400 }}>
+            콜트리
+          </button>
+          <button type="button" onClick={() => { setReqGraphSeed(''); setViewMode('graph'); }} aria-pressed={viewMode === 'graph'} title="요구사항 1개의 하위 추적 그래프 — SW: SDS→UDS→STS/SUTS/SITS · 시스템: HSIS·SyTS·SyITS · 실행: VectorCAST (ASIL 강조 · UDS↔SUTS 매핑)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'graph' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'graph' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'graph' ? 700 : 400 }}>
+            그래프
+          </button>
+          <button type="button" onClick={() => { setFuncGraphSeed(''); setViewMode('funcgraph'); }} aria-pressed={viewMode === 'funcgraph'} title="함수 1개의 V-model 추적 그래프 — 함수→구현 요구사항/설계 + 그 함수의 단위시험(SUTS)·VectorCAST 실행결과 — 또는 표 행 펼쳐 함수명 클릭"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'funcgraph' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'funcgraph' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'funcgraph' ? 700 : 400 }}>
+            함수그래프
+          </button>
         </div>
         {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
         {viewMode === 'tree' && unmappedVcast.length > 0 && (
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, cursor: 'pointer', color: 'var(--fg)', userSelect: 'none' }}
-            title="시험은 됐지만 이 SRS 요구사항에 추적되지 않는 VectorCAST 함수를 트리 하단에 별도 루트로 표시 (역방향 추적성 공백)">
+            title="시험은 됐으나 이 SRS 요구사항에 연결 안 된 VectorCAST 함수를 트리 하단에 별도 루트로 표시 — 대부분 정당한 입도차">
             <input type="checkbox" checked={includeUnmapped} onChange={e => setIncludeUnmapped(e.target.checked)} style={{ cursor: 'pointer' }} />
-            SRS 미추적 시험 포함 ({unmappedVcast.length})
+            역추적 안 된 시험 함수 표시 ({unmappedVcast.length})
           </label>
         )}
         <button className="btn-sm" onClick={exportCSV} title="CSV 내보내기" style={{ fontSize: 11 }}>
@@ -1265,6 +2591,7 @@ function TraceMatrix({ matrix }) {
         <tbody>
           {displayedRows.map((r, idx) => {
             const reqId = _rowReqId(r) || `row-${idx}`;
+            const rgId = _reqGraphId(r);   // 추적 그래프 시드용 순수 요구사항 ID(익명 행이면 '' → 그래프 버튼 숨김)
             const status = deriveStatus(r);
             const colors = COVERAGE_COLORS[status] || {};
             const sdsComps = r.sds_components ?? [];
@@ -1275,7 +2602,8 @@ function TraceMatrix({ matrix }) {
             const sutsOnlyTests = Array.isArray(r.suts_tests) ? r.suts_tests : rawTests.filter(t => t.source === 'SUTS');
             const sitsTests = Array.isArray(r.sits_tests) ? r.sits_tests : rawTests.filter(t => t.source === 'SITS');
             const vcastTests = rawTests.filter(t => t.source === 'VectorCAST');
-            const otherTests = rawTests.filter(t => !['STS','SUTS','SITS','VectorCAST'].includes(t.source));
+            // 시스템 시험(SyTS/SyITS)은 표에서 숨김(SW 전용 뷰) — 변수/셀 제거. otherTests 분류엔 유지.
+            const otherTests = rawTests.filter(t => !['STS','SUTS','SITS','SyTS','SyITS','VectorCAST'].includes(t.source));
             const stsCount = stsOnlyTests.length;
             const sutsCount = sutsOnlyTests.length;
             const sitsCount = sitsTests.length;
@@ -1301,6 +2629,7 @@ function TraceMatrix({ matrix }) {
                       : <span className="text-muted">-</span>
                     }
                   </td>
+                  {/* HSIS 신호 셀 숨김 — SW 전용 뷰 */}
                   <td style={{ fontSize: 10, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                       title={srcFuncs.join(', ')}>
                     {srcFuncs.length > 0
@@ -1332,6 +2661,7 @@ function TraceMatrix({ matrix }) {
                       : <span className="text-muted">-</span>
                     }
                   </td>
+                  {/* 시스템 시험(SyTS·SyITS) 셀 숨김 — SW 전용 뷰 */}
                   <td style={{ fontSize: 10, textAlign: 'center' }}>
                     {vcastCount > 0
                       ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.VectorCAST + '20', color: SOURCE_COLORS.VectorCAST, fontWeight: 600 }}>{vcastCount}</span>
@@ -1364,7 +2694,31 @@ function TraceMatrix({ matrix }) {
                 {/* Expanded detail row — drilldown */}
                 {isExpanded && (
                   <tr style={{ background: '#f8fafc' }}>
+                    {/* 10컬럼: ID + 설계(SDS/UDS)2 + 검증(STS/SUTS/SITS/VC)4 + P/F + 신뢰도 + 상태. 시스템 밴드(HSIS/SyTS/SyITS) 숨김 반영 */}
                     <td colSpan={10} style={{ padding: '10px 16px' }}>
+                      {/* 요구사항 단위 추적 시각화 툴바 — 확장 즉시 보이도록 최상단 배치(함수 단위 함수그래프/콜트리는 UDS 함수 목록에 별도) */}
+                      {rgId && (() => {
+                        const rgOpen = inlineView?.type === 'reqgraph' && inlineView.reqId === reqId && inlineView.key === rgId;
+                        return (
+                          <div style={{ marginBottom: 10, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: '#475569' }}>이 요구사항 추적 시각화</span>
+                            <button type="button" onClick={(e) => { e.stopPropagation(); toggleInline('reqgraph', rgId, reqId); }}
+                              aria-pressed={rgOpen}
+                              title="이 요구사항의 하위 추적 그래프(SDS→UDS→시험→VectorCAST)를 이 자리에서 바로 펼침 (다시 누르면 닫힘)"
+                              style={{ fontSize: 10, padding: '2px 9px', border: `1px solid ${rgOpen ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 4, background: rgOpen ? 'var(--accent)' : 'var(--bg)', cursor: 'pointer', color: rgOpen ? '#fff' : 'var(--fg)', fontWeight: 600 }}>추적 그래프 {rgOpen ? '▴' : '▾'}</button>
+                          </div>
+                        );
+                      })()}
+                      {/* 상위(SyRS) provenance — 표 컬럼엔 없는 상위 시스템요구 추적(SR→SyRS→SwRS). 매트릭스 뷰엔 SyRS↑ 컬럼 별도 존재. */}
+                      {Array.isArray(r.syrs_parents) && r.syrs_parents.length > 0 && (
+                        <div style={{ marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid #e5e7eb', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, fontSize: 11 }}>
+                          <span style={{ fontWeight: 600, color: '#475569' }}>상위 시스템요구 (SyRS↑) {r.syrs_parents.length}</span>
+                          {r.syrs_parents.map((p, pi) => (
+                            <span key={pi} title="이 요구가 유도된 상위 시스템 요구 — SR→SyRS→SwRS 체인 (상위 추적, 커버리지 분모 제외)"
+                              style={{ fontFamily: 'monospace', fontSize: 10, padding: '1px 6px', borderRadius: 8, background: '#47556918', color: '#475569', border: '1px solid #47556940' }}>{String(p)}</span>
+                          ))}
+                        </div>
+                      )}
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 12 }}>
                         {/* SDS components */}
                         <div>
@@ -1382,9 +2736,24 @@ function TraceMatrix({ matrix }) {
                           <div style={{ fontWeight: 600, fontSize: 11, marginBottom: 6 }}>UDS 함수 ({srcFuncs.length})</div>
                           {srcFuncs.length > 0 ? (
                             <div style={{ maxHeight: 150, overflowY: 'auto', fontSize: 11 }}>
-                              {srcFuncs.map((fn, fi) => (
-                                <div key={fi} style={{ padding: '2px 0', fontFamily: 'monospace', borderBottom: '1px solid #e5e7eb' }}>{fn}</div>
-                              ))}
+                              {srcFuncs.map((fn, fi) => {
+                                const bareFn = String(fn).split(/[\s(]/)[0].trim();
+                                const ctOpen = inlineView?.type === 'calltree' && inlineView.reqId === reqId && inlineView.key === bareFn;
+                                const fgOpen = inlineView?.type === 'funcgraph' && inlineView.reqId === reqId && inlineView.key === fn;
+                                return (
+                                <div key={fi} style={{ padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6, borderBottom: '1px solid #e5e7eb' }}>
+                                  <code title={fn} style={{ flex: 1, minWidth: 0, fontFamily: 'monospace', fontSize: 11, color: _STAGE_COLORS.UDS, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fn}</code>
+                                  <button type="button" onClick={(e) => { e.stopPropagation(); toggleInline('funcgraph', fn, reqId); }}
+                                    aria-pressed={fgOpen}
+                                    title="이 함수의 V-model 추적 그래프(함수그래프)를 이 자리에서 바로 펼침 — 함수→요구사항/설계/단위시험/VectorCAST (다시 누르면 닫힘)"
+                                    style={{ flexShrink: 0, fontSize: 9, padding: '1px 5px', border: `1px solid ${fgOpen ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 4, background: fgOpen ? 'var(--accent)' : 'var(--bg)', cursor: 'pointer', color: fgOpen ? '#fff' : 'var(--fg)', fontWeight: 600 }}>함수그래프 {fgOpen ? '▴' : '▾'}</button>
+                                  <button type="button" onClick={(e) => { e.stopPropagation(); toggleInline('calltree', bareFn, reqId); }}
+                                    aria-pressed={ctOpen}
+                                    title="이 함수의 호출 트리(콜트리)를 이 자리에서 바로 펼침 — 호출/역호출 방향 전환 가능 (다시 누르면 닫힘)"
+                                    style={{ flexShrink: 0, fontSize: 9, padding: '1px 5px', border: `1px solid ${ctOpen ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 4, background: ctOpen ? 'var(--accent)' : 'var(--bg)', cursor: 'pointer', color: ctOpen ? '#fff' : 'var(--fg)', fontWeight: 600 }}>콜트리 {ctOpen ? '▴' : '▾'}</button>
+                                </div>
+                                );
+                              })}
                             </div>
                           ) : <div className="text-muted text-sm">매핑된 함수 없음</div>}
                         </div>
@@ -1445,6 +2814,27 @@ function TraceMatrix({ matrix }) {
                           T1: SDS → {sdsComps.length}{'\uAC1C \uCEF4\uD3EC\uB10C\uD2B8'} | T2: UDS → {srcFuncs.length}{'\uAC1C \uD568\uC218'} | T3: STS → {stsCount} TC ({'\uC9C1\uC811'}) | T4: SUTS → {r.suts_direct || 0} {'\uC9C1\uC811'} + {r.suts_indirect || 0} {'\uACBD\uC720'} | T5: SITS → {r.sits_direct || 0} {'\uC9C1\uC811'} + {r.sits_indirect || 0} {'\uACBD\uC720'}
                         </div>
                       </div>
+                      {/* 인라인 뷰 — 표 행에서 함수그래프/콜트리/추적그래프 클릭 시 탭 전환 없이 이 자리에서 표시 */}
+                      {inlineView?.type === 'calltree' && inlineView.reqId === reqId && srcFuncs.some(f => String(f).split(/[\s(]/)[0].trim() === inlineView.key) ? (
+                        <InlineCallTree key={`ct:${inlineView.key}`} fn={inlineView.key} job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
+                          sourceRoot={sourceRoot}
+                          onOpenFull={() => gotoFuncView(inlineView.key, 'calltree')}
+                          onClose={() => setInlineView(null)} />
+                      ) : null}
+                      {inlineView?.type === 'funcgraph' && inlineView.reqId === reqId && srcFuncs.some(f => f === inlineView.key) ? (
+                        <InlineGraphFrame title="함수그래프" badge={inlineView.key}
+                          onOpenFull={() => gotoFuncView(inlineView.key, 'funcgraph')}
+                          onClose={() => setInlineView(null)}>
+                          <TraceFuncGraphView key={`fg:${inlineView.key}`} rows={rows} focusFunctions={focusFunctions} initialFn={inlineView.key} embedded />
+                        </InlineGraphFrame>
+                      ) : null}
+                      {inlineView?.type === 'reqgraph' && inlineView.reqId === reqId && rgId && inlineView.key === rgId ? (
+                        <InlineGraphFrame title="추적 그래프" badge={rgId}
+                          onOpenFull={() => { setReqGraphSeed(rgId); setViewMode('graph'); }}
+                          onClose={() => setInlineView(null)}>
+                          <TraceReqGraphView key={`rg:${rgId}`} rows={rows} focusFunctions={focusFunctions} linkTable={inner?.link_table} initialReqId={rgId} embedded />
+                        </InlineGraphFrame>
+                      ) : null}
                     </td>
                   </tr>
                 )}
@@ -1462,6 +2852,35 @@ function TraceMatrix({ matrix }) {
       {viewMode === 'tree' && (
         <TraceTree rows={filtered} baseIndex={0} expanded={expandedTreeNodes} onToggle={toggleTreeNode}
           unmapped={includeUnmapped ? unmappedVcast : null} />
+      )}
+
+      {/* 매트릭스 보기 (신규 — hiMA식 교차표. filtered 반영, link_table 내보내기) */}
+      {viewMode === 'matrix' && (
+        <CrossMatrixView rows={filtered} linkTable={inner?.link_table} fullMatrix={inner}
+          exportMeta={{ job_url: matrix?.job_url || inner?.job_url || '' }} />
+      )}
+
+      {/* 모자이크 보기 (신규 — hiMA TrMosaicReport 대응. 요구사항×밴드 색상 히트맵, filtered 반영) */}
+      {viewMode === 'mosaic' && (
+        <TraceMosaicView rows={filtered} />
+      )}
+
+      {/* 콜트리 보기 (신규 — tree-sitter 정밀 함수 호출 트리. entry 기반 깊이탐색 + ASIL 강조) */}
+      {viewMode === 'calltree' && (
+        <CallTreeView job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
+          sourceRoot={sourceRoot} seedFns={callTreeSeeds} toast={toast} initialEntry={callTreeSeed} />
+      )}
+
+      {/* 그래프 보기 (신규 — 요구사항 1개의 하위 추적 그래프. SVG 노드-엣지, filtered row로 완결.
+          focusFunctions=영향도 연동 변경함수 → 그래프 안 해당 UDS/시험 노드 강조) */}
+      {viewMode === 'graph' && (
+        <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} linkTable={inner?.link_table} initialReqId={reqGraphSeed} />
+      )}
+
+      {/* 함수중심 그래프 (신규 — 함수 1개의 V-model 추적. root=함수, 요구사항/설계는 함수가 구현한
+          요구사항 경유, 단위시험(SUTS)·VectorCAST 실행결과는 함수 직접 연결. hiMA UCOneIDTrace 함수판) */}
+      {viewMode === 'funcgraph' && (
+        <TraceFuncGraphView rows={rows} focusFunctions={focusFunctions} initialFn={funcGraphSeed} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
@@ -1647,25 +3066,30 @@ export function UncoveredTopList({ rows, onPick }) {
 
 /* ── TraceTree — ID 기준 추적성 트리 뷰 ───────────────────────────────────
  * 기존 flat 매트릭스 표(TraceMatrix)는 그대로 두고, 같은 row 데이터를
- * SRS-ID 루트 → 문서 단계(SDS/UDS/STS/SUTS/SITS/VectorCAST) 트리로 재구성한다.
+ * SRS-ID 루트 → 문서 단계(SW: SDS/UDS/STS/SUTS/SITS · 시스템: HSIS/SyTS/SyITS · VectorCAST) 트리로 재구성한다.
  * 한 요구사항이 어느 단계까지 추적됐고 어디서 끊겼는지(빈 단계 = 회색 칩)를
  * 펼치지 않아도 한눈에 본다.
  *  - 상태 분류: deriveStatus 재사용 → 표/대시보드/백엔드 _cache_trace_summary와 lockstep.
- *  - P/F: 표(L1246-1252)와 동일 규칙. STS/SUTS/SITS의 result='mapped'는 '시험 통과'가
+ *  - P/F: 표(L1246-1252)와 동일 규칙. STS/SUTS/SITS·SyTS/SyITS의 result='mapped'는 '시험 통과'가
  *    아니라 '매핑 존재'이므로 중립색 유지(ISO 26262: 매핑 존재 ≠ 시험 통과).
  *  - SDS↔UDS 정확 부모-자식 엣지는 row 데이터에 없으므로(평탄 배열) 거짓 중첩 대신
  *    SRS 직속 단계 노드로 평면 배치한다. VectorCAST만 실행 P/F 보유. */
 
 const TREE_STAGES = [
   { key: 'SDS',  label: 'SDS',  kind: 'design' },
+  { key: 'HSIS', label: 'HSIS', kind: 'design' },
   { key: 'UDS',  label: 'UDS',  kind: 'design' },
   { key: 'STS',  label: 'STS',  kind: 'test' },
   { key: 'SUTS', label: 'SUTS', kind: 'test' },
   { key: 'SITS', label: 'SITS', kind: 'test' },
+  { key: 'SyTS', label: 'SyTS', kind: 'test' },
+  { key: 'SyITS', label: 'SyITS', kind: 'test' },
   { key: 'VectorCAST', label: 'VectorCAST', kind: 'test' },
 ];
+// SW 전용 트리 뷰 — 시스템 밴드(HSIS/SyTS/SyITS) 숨김. 그래프(_buildReqGraph)는 TREE_STAGES 원본 사용(미지정 뷰).
+const TREE_STAGES_VISIBLE = TREE_STAGES.filter(s => !_HIDDEN_BANDS.has(s.key));
 
-// STS/SUTS/SITS는 'mapped' 리터럴(실 P/F 아님) → 중립. VectorCAST만 실제 결과.
+// STS/SUTS/SITS·SyTS/SyITS는 'mapped' 리터럴(실 P/F 아님) → 중립. VectorCAST만 실제 결과.
 function _testResultColor(result) {
   const r = (result || '').toLowerCase();
   if (/^(pass|passed|true|1)$/.test(r)) return '#16a34a';
@@ -1677,12 +3101,15 @@ function _testResultColor(result) {
 // VectorCAST 단계는 표의 vcastCount 의미(VectorCAST + 분류 안 된 other source)와 일치시킨다.
 function _stageMembers(r, stageKey) {
   if (stageKey === 'SDS') return { type: 'ids', items: Array.isArray(r.sds_components) ? r.sds_components : [] };
+  if (stageKey === 'HSIS') return { type: 'ids', items: Array.isArray(r.hsis_signals) ? r.hsis_signals : [] };
   if (stageKey === 'UDS') return { type: 'ids', items: Array.isArray(r.source_ids) ? r.source_ids : [] };
   const raw = Array.isArray(r.tests) ? r.tests : [];
   if (stageKey === 'STS')  return { type: 'tests', items: Array.isArray(r.sts_tests)  ? r.sts_tests  : raw.filter(t => t.source === 'STS') };
   if (stageKey === 'SUTS') return { type: 'tests', items: Array.isArray(r.suts_tests) ? r.suts_tests : raw.filter(t => t.source === 'SUTS') };
   if (stageKey === 'SITS') return { type: 'tests', items: Array.isArray(r.sits_tests) ? r.sits_tests : raw.filter(t => t.source === 'SITS') };
-  if (stageKey === 'VectorCAST') return { type: 'tests', items: raw.filter(t => t.source === 'VectorCAST' || !['STS', 'SUTS', 'SITS'].includes(t.source)) };
+  if (stageKey === 'SyTS') return { type: 'tests', items: Array.isArray(r.syts_tests) ? r.syts_tests : raw.filter(t => t.source === 'SyTS') };
+  if (stageKey === 'SyITS') return { type: 'tests', items: Array.isArray(r.syits_tests) ? r.syits_tests : raw.filter(t => t.source === 'SyITS') };
+  if (stageKey === 'VectorCAST') return { type: 'tests', items: raw.filter(t => t.source === 'VectorCAST' || !['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS'].includes(t.source)) };
   return { type: 'ids', items: [] };
 }
 
@@ -1711,7 +3138,7 @@ function _unitTestMap(r) {
 // 시험 TC 표 — TraceTreeStage(시험 단계)와 TraceTreeFunc(함수별 중첩)가 공유.
 // 'mapped'는 _testResultColor가 중립 회색 처리(ISO 26262: 매핑 존재 ≠ 시험 통과).
 // 소스 열 없음(의도): 트리의 모든 시험 표는 단일 소스로 그룹화돼 들어온다 — 단계 노드는
-// 헤더(STS/SUTS/SITS/VectorCAST)가 곧 소스이고, 함수 중첩은 _unitTestMap이 SUTS 전용이라
+// 헤더(STS/SUTS/SITS/SyTS/SyITS/VectorCAST)가 곧 소스이고, 함수 중첩은 _unitTestMap이 SUTS 전용이라
 // 전부 SUTS다. 표 모드 drilldown은 소스 혼합이라 소스 열을 갖지만 트리는 불필요(중복 방지).
 function TestTable({ tests }) {
   const list = Array.isArray(tests) ? tests : [];
@@ -1755,10 +3182,10 @@ function TraceTree({ rows, baseIndex = 0, expanded, onToggle, unmapped = null })
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
       {/* 범례 */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, padding: '8px 12px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
-        <span style={{ fontWeight: 600 }}>단계 SRS → SDS → UDS → STS → SUTS → SITS → VectorCAST</span>
+        <span style={{ fontWeight: 600 }}>단계 — SW: SRS→SDS→UDS→STS→SUTS→SITS · 시스템: HSIS·SyTS·SyITS (상위 SyRS) · 실행: VectorCAST</span>
         <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: COVERAGE_COLORS.covered.border, marginRight: 4, verticalAlign: 'middle' }} />연결됨</span>
         <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#d1d5db', marginRight: 4, verticalAlign: 'middle' }} />끊김(연결 없음)</span>
-        <span>P/F는 VectorCAST 실행 결과만 (STS/SUTS/SITS는 매핑 존재 표시)</span>
+        <span>P/F는 VectorCAST 실행 결과만 (STS/SUTS/SITS·SyTS/SyITS는 매핑 존재 표시)</span>
         <span>UDS 펼침 → 함수별 단위시험(SUTS) 중첩(같은 SUTS를 함수축으로 재배치 — 합산 아님) · <span style={{ color: COVERAGE_COLORS.partial.fg }}>⚠ = 단위시험 없는 함수 / 함수 미매핑 SUTS</span></span>
       </div>
       <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
@@ -1792,6 +3219,15 @@ const LAYER_LABELS = {
   BOOT_REPROG: '부트/재프로그래밍',
   LIB_UTIL: '라이브러리',
   TEST_ARTIFACT: '시험산출물',
+  UNRESOLVED: '분류불가',   // §H: SwUFn↔함수명 미해결(설계 갭 판정 보류)
+};
+
+// 라운드113 SDS 이름 대조 티어 라벨 — 확신도 내림차순(exact > ret_prefix > core).
+// 백엔드가 "티어를 항상 함께 노출해 힌트로만 쓰게 한다"를 계약으로 두므로 표시 표면에 반드시 싣는다.
+const _SDS_TIER_LABEL = {
+  exact: '정확 일치',
+  ret_prefix: '반환형 접두사 차이',
+  core: '저장클래스 차이',
 };
 
 // SRS 미추적 시험 루트 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수를 의미 버킷으로 묶는다.
@@ -1812,18 +3248,28 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   // SDS 설계엔 명세됐으나 SRS만 끊긴 함수(역방향 부분추적). 정규화 fix 후 KJPDS02=0이나
   // 타 데이터/향후 대비 표기(라운드 109). >0일 때만 노출(safetyTotal 패턴과 동일).
   const sdsLinkedTotal = list.filter(u => u && Array.isArray(u.sds_reqs) && u.sds_reqs.length > 0).length;
+  // 라운드113: 이름은 SDS 원문에 있는데 요구ID 브리지만 끊긴 수. sdsLinkedTotal이 구조적으로
+  // 거의 항상 0인 사각(같은 키공간을 두 맵이 공유해 동시 미스)을 덮는 별도 신호다.
+  // ⚠ 설계 공백이 아니라 표기 규약 드리프트이므로 중립색으로만 노출(amber/red 금지).
+  const sdsNameVariantTotal = list.filter(u => u
+    && Array.isArray(u.sds_name_hits) && u.sds_name_hits.length > 0
+    && !(Array.isArray(u.sds_reqs) && u.sds_reqs.length > 0)).length;
   // UDS(단위설계) 연동 — SRS 역추적이 끊겨도 함수가 단위설계엔 존재(시험+단위설계 완료).
   // 사용자 질문("SDS 미추적이어도 UDS엔 연동돼 있나")의 직접 답: 대다수가 UDS엔 존재한다.
   // 미설계(in_uds=false)는 시험만 존재하는 진짜 설계 공백이라 빨강으로 별도 노출.
   // in_uds === false 만 갭으로 카운트(undefined=구 응답은 제외) — 버전 스큐 거짓 갭 방지(X6).
   const udsLinkedTotal = list.filter(u => u && u.in_uds === true).length;
-  const designGapTotal = list.filter(u => u && u.in_uds === false).length;
+  // 진짜 미설계 갭 = APP_LEAF ∩ ¬in_uds (Phase 1 6d16f2b: '실 finding'은 layer축이 아니라
+  // design축). 백엔드 unmapped_app_design_gap과 **정확히** lockstep — 경계(BSW/BOOT/LIB)·분류불가
+  // (UNRESOLVED)는 '진짜 설계 공백'이 아니므로 제외(트리 title '진짜 설계 공백'·경고배너와 동일 수).
+  // 경계 미설계는 아래 layer 배지가 별도 표기하므로 정보 손실 없음.
+  const designGapTotal = list.filter(u => u && u.in_uds === false && u.layer === 'APP_LEAF').length;
   // ISO 26262 SwDS 계층(라운드112) — '애플리케이션 설계 공백(app_leaf=실 finding)'과
   // '정당한 범위 경계(bsw/boot/lib)'를 분리 표기. 구 응답엔 layer 없어 카운트 0 → 자동 숨김.
   // 기존 버킷/색은 그대로 두고 보조 hint 라인만 추가(보수적 단계 노출).
-  const layerCounts = { APP_LEAF: 0, BSW_DRIVER: 0, BOOT_REPROG: 0, LIB_UTIL: 0, TEST_ARTIFACT: 0 };
+  const layerCounts = { APP_LEAF: 0, BSW_DRIVER: 0, BOOT_REPROG: 0, LIB_UTIL: 0, TEST_ARTIFACT: 0, UNRESOLVED: 0 };
   for (const u of list) { if (u && u.layer && layerCounts[u.layer] !== undefined) layerCounts[u.layer] += 1; }
-  const hasLayers = (layerCounts.APP_LEAF + layerCounts.BSW_DRIVER + layerCounts.BOOT_REPROG + layerCounts.LIB_UTIL + layerCounts.TEST_ARTIFACT) > 0;
+  const hasLayers = (layerCounts.APP_LEAF + layerCounts.BSW_DRIVER + layerCounts.BOOT_REPROG + layerCounts.LIB_UTIL + layerCounts.TEST_ARTIFACT + layerCounts.UNRESOLVED) > 0;
   return (
     <li style={{ borderTop: '2px solid var(--accent)' }}>
       <div
@@ -1833,30 +3279,33 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
         aria-label={`SRS 미추적 시험 ${list.length}건 ${isOpen ? '접기' : '펼치기'}`}
         onClick={() => onToggle(nodeId)}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } }}
-        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', flexWrap: 'wrap', background: COVERAGE_COLORS.partial.bg + '40' }}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', flexWrap: 'wrap', background: 'var(--bg-elevated)' }}
       >
         <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{isOpen ? '▼' : '▶'}</span>
         <span style={{ fontWeight: 700, fontSize: 12 }}>🔎 SRS 미추적 시험</span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           시험은 했으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수 {list.length}종(중복 제거)
           {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
-          {safetyTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }}> · ⚠ {safetyTotal} 안전</span>}
+          {safetyTotal > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 600 }} title="안전/진단 토큰 함수 — ISO 26262 역추적 검토 우선순위(참고 신호, 결함 아님)"> · 🛡 {safetyTotal} 안전</span>}
           {sdsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }} title="SDS 설계엔 명세됐으나 그 요구사항이 SRS 추적 매트릭스 밖(부분추적)"> · {sdsLinkedTotal} SDS부분</span>}
+          {/* 라운드113: 중립색 고정 — 설계 공백이 아니라 표기 규약 드리프트다(amber/red 금지). */}
+          {sdsNameVariantTotal > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 600 }} title="SDS 이름 집합(정규화 키)에 같은 함수 이름이 있으나 요구ID 브리지가 끊김(반환형/저장클래스 접두사 표기 차이) — 설계 공백이 아니라 추적 도구·명명 규약 문제. 이름 집합은 Related ID 있는 엔트리만 담아 이 수치는 하한선."> · {sdsNameVariantTotal} SDS이름일치</span>}
           {udsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.covered.fg, fontWeight: 600 }} title="UDS 단위설계엔 함수가 존재 — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)"> · {udsLinkedTotal} UDS설계</span>}
           {designGapTotal > 0 && <span style={{ color: COVERAGE_COLORS.uncovered.fg, fontWeight: 700 }} title="UDS 단위설계에도 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)"> · {designGapTotal} 미설계</span>}
         </span>
         {hasLayers && (
           <span style={{ flexBasis: '100%', fontSize: 11, color: 'var(--text-muted)', paddingLeft: 22 }}>
             ISO 26262 계층:
-            {layerCounts.APP_LEAF > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }} title="애플리케이션 구현 leaf 함수가 SDS에 함수단위로 미명세 — 아키텍처→유닛 roll-up 공백(실제 추적성 finding, 검토 권장)"> APP {layerCounts.APP_LEAF}</span>}
+            {layerCounts.APP_LEAF > 0 && <span title="애플리케이션 leaf 함수 — 대부분 단위설계(UDS)+시험 완료된 정당한 입도차(부모 SwUFn roll-up). 진짜 갭은 UDS에도 없는 것만(별도 '미설계' 뱃지)."> APP {layerCounts.APP_LEAF}</span>}
             {layerCounts.BOOT_REPROG > 0 && <span title="부트로더/재프로그래밍/EEPROM — SDS에 컴포넌트로 존재(컴포넌트 추적 성립), 별도 부트 설계 범위"> · 부트 {layerCounts.BOOT_REPROG}</span>}
             {layerCounts.BSW_DRIVER > 0 && <span title="기반 SW/드라이버(HAL·LIN/CAN) — BSW 설계명세/플랫폼 범위에서 추적(애플리케이션 SDS 범위 밖)"> · BSW {layerCounts.BSW_DRIVER}</span>}
             {layerCounts.LIB_UTIL > 0 && <span title="범용 라이브러리/연산 유틸 — 호출처 컴포넌트 설계에 라이브러리로 귀속 추적"> · LIB {layerCounts.LIB_UTIL}</span>}
             {layerCounts.TEST_ARTIFACT > 0 && <span title="시험 산출물/스텁 — 추적 대상 아님"> · 시험 {layerCounts.TEST_ARTIFACT}</span>}
-            <span style={{ color: COVERAGE_COLORS.partial.fg }} title="APP=애플리케이션 설계 공백(실 finding) / 부트·BSW·LIB=정당한 범위 경계"> ⓘ</span>
+            {layerCounts.UNRESOLVED > 0 && <span title="SwUFn ID↔함수명 미해결 — 분류 보류(진짜 설계 갭으로 단정 안 함, app 갭 오집계 방지)"> · 분류불가 {layerCounts.UNRESOLVED}</span>}
+            <span title="APP·부트·BSW·LIB은 코드 계층 분류(대부분 정당한 입도차·범위경계). 진짜 설계 갭은 별도 '미설계' 뱃지로만 표시."> ⓘ</span>
           </span>
         )}
-        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
+        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역추적(시험→요구) 미연결</span>
       </div>
       {isOpen && (
         <ul style={{ listStyle: 'none', margin: 0, padding: '0 12px 8px 30px', background: 'var(--bg)' }}>
@@ -1878,7 +3327,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
   const failN = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
   const safetyN = list.filter(u => u && u.safety).length;  // 안전/진단 토큰 보유(W4)
   // 안전 항목이 있으면 비-warn 버킷(vcast_only/isr)이라도 amber로 승격 — 검토 신호 보존.
-  const warn = (bucket.warn || safetyN > 0) && list.length > 0;
+  const warn = bucket.warn && list.length > 0;   // safety는 중립 신호(🛡)라 버킷 amber 승격 안 함(intrinsic warn만)
   // 안전 항목을 버킷 상단으로 정렬(잘림/스크롤 시 우선 노출). 안전 없으면 원순서 유지.
   const sorted = safetyN > 0 ? [...list].sort((a, b) => (b && b.safety ? 1 : 0) - (a && a.safety ? 1 : 0)) : list;
   return (
@@ -1901,7 +3350,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
           {warn ? '⚠ ' : ''}{bucket.label}
         </span>
         <span style={{ color: empty ? '#9ca3af' : 'var(--text-muted)' }}>
-          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}{safetyN > 0 ? ` · ⚠ ${safetyN} 안전` : ''}
+          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}{safetyN > 0 ? ` · 🛡 ${safetyN} 안전` : ''}
         </span>
       </div>
       {isOpen && (
@@ -1911,7 +3360,9 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
               <tr style={{ background: '#e5e7eb' }}>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>Subprogram</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>해석된 함수</th>
-                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. SRS 미추적이라도 설계엔 닿으면 표기, 없으면 'SRS·SDS 모두 미명세'">SDS 설계</th>
+                {/* 라운드113: 구 툴팁의 "없으면 'SRS·SDS 모두 미명세'" 단정을 철회했다 — 브리지 두 맵이
+                    같은 키공간을 공유해 동시 미스하므로 빈 값은 'SDS에 없음'을 뜻하지 않는다. */}
+                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. △=요구ID까지 연결됨(단 매트릭스 밖 요구), ≈=이름은 SDS에 있으나 요구ID 브리지가 끊김(표기 규약 차이), '이름 미발견'=이름 집합에서 못 찾음(집합이 불완전하므로 '설계에 없다'는 단정 아님), —=구 응답으로 미계산">SDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="UDS(단위설계) 인벤토리에 함수가 존재하는지. SRS 역추적이 끊겨도 단위설계엔 명세돼 있으면 '시험+단위설계 완료, SDS 아키텍처 roll-up만 누락'(정당한 입도차)이고, 없으면 시험만 존재하는 진짜 설계 공백">UDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="ISO 26262 SwDS 계층. 애플리케이션=구현 leaf가 SDS에 함수단위 미명세(실 finding) / 부트·BSW·라이브러리=정당한 범위 경계(컴포넌트·플랫폼·라이브러리 추적)">ISO계층</th>
                 <th style={{ padding: '3px 6px', textAlign: 'center', width: 50 }}>결과</th>
@@ -1928,10 +3379,10 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                 // 시험만 존재하는 진짜 설계 공백을 빨강으로 강조(사용자 질문: "uds랑은 연동돼 있나").
                 const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
                 return (
-                  <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? COVERAGE_COLORS.partial.bg + '60' : undefined }}>
+                  <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? 'var(--bg-elevated)' : undefined }}>
                     <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: u && u.safety ? 700 : undefined }}
-                      title={u && u.safety ? '안전/진단 토큰 보유 — SRS 미추적이나 백워드 추적성 검토 권장' : undefined}>
-                      {u && u.safety ? '⚠ ' : ''}{u.subprogram || '-'}
+                      title={u && u.safety ? '안전/진단 토큰 보유 — 역추적 검토 참고(결함 아님)' : undefined}>
+                      {u && u.safety ? '🛡 ' : ''}{u.subprogram || '-'}
                     </td>
                     <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
                       {(Array.isArray(u.resolved_funcs) && u.resolved_funcs.length) ? u.resolved_funcs.join(', ') : '—'}
@@ -1939,8 +3390,26 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                     {sr.length > 0
                       ? <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }}
                           title={`SDS 설계엔 명세됨(요구사항 ${sr.join(', ')}) — 단 이 요구사항은 SRS 추적 매트릭스 밖이라 SRS까지 안 닿음(부분추적)`}>△ {sr.join(', ')}</td>
-                      : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
-                          title="SDS 설계에도 함수명으로 명세되지 않음 — SRS·SDS 모두 미명세">미명세</td>}
+                      : (Array.isArray(u.sds_name_hits) && u.sds_name_hits.length > 0)
+                        /* 라운드113: 요구ID 브리지는 끊겼지만 SDS 이름 집합에 같은 이름이 있는 경우.
+                           설계 공백이 아니라 표기 규약 드리프트라 중립색으로만 표기한다.
+                           ⚠ core 티어(저장클래스 s_↔g_)는 별개 함수일 개연이 높아 ambiguous 여부와
+                           무관하게 헤지를 상시 노출한다 — 백엔드의 '티어 항상 노출' 계약. */
+                        ? <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}
+                            title={`SDS 이름 집합에 같은 함수 이름이 있으나 요구ID 브리지가 끊김 — ${_SDS_TIER_LABEL[u.sds_name_match] || u.sds_name_match}. 설계 공백이 아니라 추적 브리지·명명 규약 문제다.${u.sds_name_match === 'core' ? ' ⚠ 저장클래스가 달라 별개 함수일 수 있음(가장 약한 신호).' : ''}${u.sds_name_ambiguous ? ` ⚠ 후보 ${u.sds_name_hits_total ?? u.sds_name_hits.length}건이라 모호.` : ''} ⚠ 표시값은 정규화 키라 문서 원문 표기와 다를 수 있다(대소문자·반환형 토큰 제거됨).`}>
+                            ≈ {u.sds_name_hits.join(', ')}
+                            {(u.sds_name_hits_total ?? 0) > u.sds_name_hits.length
+                              ? ` +${u.sds_name_hits_total - u.sds_name_hits.length}` : ''}
+                            {u.sds_name_match
+                              ? <span style={{ fontSize: 10, opacity: 0.75 }}> [{_SDS_TIER_LABEL[u.sds_name_match] || u.sds_name_match}]</span>
+                              : null}</td>
+                        : !Array.isArray(u.sds_name_hits)
+                          /* 구 백엔드 응답·구 localStorage 복원 — 계산이 돌지 않은 상태를 '못 찾았다'는
+                             단정으로 렌더하면 전 행이 거짓 음성이 된다(바로 아래 in_uds 와 동일 규약). */
+                          ? <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
+                              title="SDS 이름 대조 정보 없음(구 응답 형식·구 저장분) — 매트릭스 재생성 후 표기됨">—</td>
+                          : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
+                              title="SDS 이름 집합에서 이 함수명을 찾지 못함. ⚠ 이름 집합은 Related ID가 있는 SDS 엔트리만 담으므로(불완전) '설계에 없다'고 단정할 수 없다">이름 미발견</td>}
                     {/* in_uds 미존재(구 백엔드 응답·버전 스큐)는 중립('—')으로 — 미설계(빨강)로
                         오인하면 backend 재시작 전 전이 상태에서 전 항목이 거짓 갭으로 보인다(X6). */}
                     {typeof (u && u.in_uds) !== 'boolean'
@@ -1977,7 +3446,7 @@ function TraceTreeRoot({ r, idx, expanded, onToggle }) {
   const colors = COVERAGE_COLORS[status] || {};
   const passCount = r.pass_count ?? 0;
   const failCount = r.fail_count ?? 0;
-  const stageCounts = TREE_STAGES.map(s => ({ ...s, count: _stageMembers(r, s.key).items.length }));
+  const stageCounts = TREE_STAGES_VISIBLE.map(s => ({ ...s, count: _stageMembers(r, s.key).items.length }));
   // 설계 단절: SRS→SDS는 됐으나 SDS→UDS(단위설계) 끊김. deriveStatus는 covered로 보지만
   // V-Model 중간 단계 공백이라 시각 마커로 별도 경고(판정 자체는 불변 — ASIL 안전로직 보존).
   const sdsN = (stageCounts.find(s => s.key === 'SDS') || {}).count || 0;
@@ -2033,7 +3502,7 @@ function TraceTreeRoot({ r, idx, expanded, onToggle }) {
       </div>
       {isOpen && (
         <ul style={{ listStyle: 'none', margin: 0, padding: '0 12px 8px 30px', background: 'var(--bg)' }}>
-          {TREE_STAGES.map(s => (
+          {TREE_STAGES_VISIBLE.map(s => (
             <TraceTreeStage key={s.key} r={r} stage={s} parentId={nodeId} expanded={expanded} onToggle={onToggle} />
           ))}
         </ul>
@@ -2161,5 +3630,1855 @@ function TraceTreeFunc({ fn, tests, parentId, expanded, onToggle }) {
         </div>
       )}
     </li>
+  );
+}
+
+/* ── CallTree — tree-sitter 정밀 함수 호출 트리 (viewMode='calltree') ──────────
+ * 추적성 매트릭스와 같은 섹션('요구사항 커버리지') 안에서 함수 호출 관계를 보여준다.
+ * 백엔드 POST /api/jenkins/call-tree (engine='precise', build_call_tree_precise)가
+ * parse_c_project(tree-sitter)로 호출엣지를 추출하고, 노드에 ASIL/파일/시그니처를 실어준다.
+ * - entry(진입 함수)는 빌드 소스의 known 함수명과 일치해야 적중. 매트릭스 source_ids에서 자동완성.
+ * - 표준 라이브러리는 백엔드에서 제외. include_external 시 미정의(외부) 호출만 별도 표시.
+ * - 루트는 기본 펼침(접기 가능), 하위는 클릭 펼침(깊은 트리 DOM 비용 절감). cycle/truncated 플래그 표시. */
+function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal, switMap }) {
+  const children = Array.isArray(node?.calls) ? node.calls : [];
+  const externals = includeExternal && Array.isArray(node?.externals) ? node.externals : [];
+  const hasChildren = children.length > 0 || externals.length > 0;
+  // isOpen 규칙 — expanded Set은 "기본값에서 토글된 노드"를 담는다. 루트(depth 0)는 기본 열림이라
+  // Set 포함=접힘, 하위(depth>0)는 기본 닫힘이라 Set 포함=펼침. toggle은 단순 멤버십 flip이라 양 depth 통일.
+  // (과거 `depth===0 || has`는 루트를 항상 열림 고정 → ▾ 셰브론 클릭이 무반응인 dead affordance였음)
+  const isOpen = expanded.has(path) !== (depth === 0);
+  const asil = node?.asil ? String(node.asil).toUpperCase() : '';
+  const isRoot = depth === 0;
+  // 루트(진입 함수)만 참조 SwITS의 SwIT_SwUFn_ID로 라벨 전환(labelMode='swit' 시 switMap 주입).
+  // 매핑 없으면 함수명 유지. 하위 노드는 SwIT 개념이 없어 항상 함수명.
+  const switId = (isRoot && switMap && node?.name) ? switMap[String(node.name).trim()] : null;
+  // hover 하이라이트는 CSS(.ct-node-row:hover)로 처리 — 노드별 useState 제거(비메모 컴포넌트라
+  // 상위 hover가 하위 서브트리 전체 재렌더하던 W2 완화). 루트 배경은 인라인 유지(hover 무관 상시).
+  return (
+    <li style={{ listStyle: 'none' }}>
+      <div
+        className="ct-node-row"
+        role={hasChildren ? 'button' : undefined}
+        tabIndex={hasChildren ? 0 : undefined}
+        aria-expanded={hasChildren ? isOpen : undefined}
+        onClick={hasChildren ? () => onToggle(path) : undefined}
+        onKeyDown={hasChildren ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(path); } }) : undefined}
+        title={node?.file || ''}
+        style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '4px 8px', fontSize: 13, lineHeight: 1.5,
+          cursor: hasChildren ? 'pointer' : 'default', borderRadius: 5,
+          background: isRoot ? 'var(--bg-elevated)' : undefined,
+          boxShadow: isRoot ? 'inset 3px 0 0 var(--accent)' : 'none', transition: 'background 0.08s' }}
+      >
+        <span style={{ fontFamily: 'monospace', width: 14, flex: '0 0 auto', textAlign: 'center', fontSize: 12,
+          color: hasChildren ? 'var(--accent)' : 'var(--text-muted)' }}>
+          {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
+        </span>
+        <strong style={{ fontFamily: 'monospace', fontSize: isRoot ? 14 : 13, fontWeight: isRoot ? 700 : 600,
+          color: isRoot ? _STAGE_COLORS.UDS : 'var(--fg)' }}>{switId || node?.name}</strong>
+        {switId && (
+          <code style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--text-muted)', fontWeight: 500 }}
+            title="소스 함수명">{node?.name}</code>
+        )}
+        {node?.via_ref && (
+          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
+            title="직접 호출이 아니라 함수포인터 참조(&함수 / 대입 / 인자 전달)로 추론된 엣지 — 실제 호출은 런타임에 포인터로 이뤄짐">↪ 참조</span>
+        )}
+        {asil && (
+          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 700, color: '#fff',
+            background: _ASIL_COLORS[asil] || '#6b7280' }}>ASIL {asil}</span>
+        )}
+        {Array.isArray(node?.indirect) && node.indirect.length > 0 && (
+          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
+            title={`함수포인터/디스패치 등 대상을 정적으로 못 잇는 간접 호출이 이 함수 본문에 있습니다(트리에 자식으로 안 나타남):\n· ${node.indirect.join('\n· ')}`}>
+            ⚡ 간접호출 {node.indirect.length}
+          </span>
+        )}
+        {node?.cycle && <span style={{ fontSize: 10, color: '#d97706', fontWeight: 600 }} title="재귀/순환 호출 — 더 펼치지 않음">↻ 순환</span>}
+        {node?.truncated && <span style={{ fontSize: 10, color: '#d97706', fontWeight: 600 }} title="설정한 최대 깊이에 도달해 이 아래 호출은 생략됨 — 헤더의 '깊이'를 높이면 더 깊이까지 표시됩니다.">… 깊이제한</span>}
+        {node?.signature && (
+          <code style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 340 }}>
+            {node.signature}
+          </code>
+        )}
+      </div>
+      {isOpen && hasChildren && (
+        <ul style={{ margin: 0, paddingLeft: 20, marginLeft: 8, borderLeft: '1px solid var(--border)' }}>
+          {children.map((c, i) => (
+            <CallTreeNode key={`${path}.${i}`} node={c} path={`${path}.${i}`}
+              expanded={expanded} onToggle={onToggle} depth={depth + 1} includeExternal={includeExternal} switMap={switMap} />
+          ))}
+          {externals.map((e, i) => (
+            <li key={`ext-${path}-${i}`} style={{ listStyle: 'none', padding: '3px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+              <span style={{ fontFamily: 'monospace' }}>{e?.name}</span>{' '}
+              <em>[{e?.header || '?'} | {e?.library || '?'}]</em>
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+// ── 전체 콜트리 루트 정렬/자동펼침 (표시 전용 — 커버리지/집계 무관) ──
+// 루트를 진입점(boot) → ISR/인터럽트 → 일반(라이브러리 고아) 순으로 정렬해 main·_Startup을 최상단에
+// 노출하고, boot 루트는 첫 레벨을 자동 펼쳐(_Startup→main) 애플리케이션 트리를 바로 보여준다.
+// 백엔드는 이름 기반 우선순위만 부여하나(시그니처 부재), 프론트는 노드 signature('ISR (...)')까지
+// 활용해 Cpu_* 등 시그니처 기반 ISR도 정확히 그룹핑한다.
+const _CT_BOOT_NAMES = new Set(['main', '_start', '__start', '_startup', '_entrypoint', 'reset_handler', 'startup']);
+function _ctRootKind(node) {
+  const name = String(node?.name || '');
+  const sig = String(node?.signature || '');
+  if (_CT_BOOT_NAMES.has(name.toLowerCase())) return 0;               // 0 = boot/진입점
+  if (/^\s*ISR\b/.test(sig) || /\bISR\s*\(/.test(sig)) return 1;      // 1 = ISR (tree-sitter 시그니처)
+  if (/(_Interrupt|_isr|_ISR|_IRQHandler|_IrqHandler|_IRQ)$/.test(name) || /^ISR_/.test(name)) return 1;
+  return 2;                                                            // 2 = 일반(라이브러리 고아 등)
+}
+function _ctSortRoots(trees, reverse = false) {
+  // 안정 정렬: (kind, name, 원본 index) — 동일 입력에 동일 순서(결정적). load 시 자동펼침 path 계산과
+  // 렌더가 반드시 같은 순서를 써야 하므로(index 정합) 양쪽 다 이 함수를 통과시킨다.
+  // 역방향(reverse) 루트는 forward-leaf라 boot/ISR 개념이 대응 안 됨 → kind 비교 생략, 이름순만.
+  return (Array.isArray(trees) ? trees : [])
+    .map((t, i) => ({ t, i, k: reverse ? 0 : _ctRootKind(t), n: String(t?.name || '') }))
+    .sort((a, b) => a.k - b.k || a.n.localeCompare(b.n) || a.i - b.i)
+    .map(x => x.t);
+}
+function _ctBootExpansion(trees, reverse = false) {
+  // boot 루트의 직계 자식 path를 펼침 집합에 넣어 _Startup→main 같은 첫 레벨을 자동 노출.
+  // 반드시 정렬 후 index로 계산(렌더 path와 일치). boot 없으면 빈 Set(기존 동작 = 루트만 펼침).
+  // 역방향은 boot 개념 무의미 → 자동펼침 없음(루트만 펼침).
+  if (reverse) return new Set();
+  const sorted = _ctSortRoots(trees, false);
+  const set = new Set();
+  sorted.forEach((t, ri) => {
+    if (_ctRootKind(t) !== 0) return;
+    const kids = Array.isArray(t?.calls) ? t.calls : [];
+    kids.forEach((_, ci) => set.add(`${ri}.${ci}`));
+  });
+  return set;
+}
+
+// 모두 펼치기 — 로드된 트리의 모든 자식(비루트, 자식 보유) path를 펼침 집합에 담는다.
+// isOpen 규칙(루트=기본열림, 비루트=기본닫힘)상 비루트 자식 path만 넣으면 전 노드가 열린다.
+// 반드시 렌더와 동일한 sortedTrees를 넘겨야 path index가 정합(자식은 node.calls 원순서라 CallTreeNode와 동일).
+function _ctAllExpandedPaths(trees) {
+  const set = new Set();
+  const walk = (node, path, depth) => {
+    const kids = Array.isArray(node?.calls) ? node.calls : [];
+    if (depth > 0 && kids.length) set.add(path);
+    kids.forEach((c, i) => walk(c, `${path}.${i}`, depth + 1));
+  };
+  (Array.isArray(trees) ? trees : []).forEach((t, i) => walk(t, `${i}`, 0));
+  return set;
+}
+
+function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toast, initialEntry = '' }) {
+  const [entry, setEntry] = useState(initialEntry || '');
+  const [depth, setDepth] = useState(5);
+  const [includeExternal, setIncludeExternal] = useState(false);
+  // 방향: callee(호출 →) / caller(← 역호출) / both(↕ 양방향 — 한 함수 중심 caller+callee 동시)
+  const [direction, setDirection] = useState('callee');
+  const reverse = direction === 'caller';
+  const bidir = direction === 'both';
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [allOpen, setAllOpen] = useState(false);
+  // 라벨 표시 모드: 'func'(함수명) / 'swit'(참조 SwITS의 SwIT_SwUFn_ID). switMap은 {진입함수:ID}.
+  const [labelMode, setLabelMode] = useState('func');
+  const [switMap, setSwitMap] = useState(null);
+  // SwIT ID 뷰: SITS 진입함수를 최상위로 재구성한 별도 트리(원본 data는 보존). null이면 재구성 안 됨(라벨-only 폴백).
+  const [switViewData, setSwitViewData] = useState(null);
+  const [switBusy, setSwitBusy] = useState(false);
+  const mountedRef = useRef(true);
+  // 요청 시퀀스 토큰 — 로딩 중 재진입(입력창 Enter/버튼 재클릭) 시 늦게 도착한 이전 응답이 최신 결과를
+  // 덮어쓰지 않도록(stale setData 방지). load 진입마다 ++, resolve 시 자기 토큰이 최신일 때만 반영.
+  const loadSeq = useRef(0);
+  // 라벨 토글(swit 매핑 조회)의 재진입/data변경/언마운트 stale 방지 토큰 — load의 loadSeq와 분리.
+  // data 변경 시 reset useEffect가 이 값을 증가시켜 in-flight toggleLabelMode를 무효화한다.
+  const switSeq = useRef(0);
+  // StrictMode(dev) 더블인보크 대비 — setup에서 true 복원(다른 섹션 동일 패턴). cleanup-only면 마운트 후 false 고착→자동로드 무음 실패.
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  const toggle = useCallback((id) => {
+    setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }, []);
+
+  // allRoots=true면 진입 함수 없이 백엔드가 in-degree 0 함수(+순환 대표)를 자동 루트로 전체 forest 구성.
+  const load = useCallback(async (allRoots = false) => {
+    const entries = String(entry || '').split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    // 양방향(피벗): 진입 함수 1개 중심으로 callee(정방향)·caller(역방향)를 동시 요청. all_roots 무의미.
+    if (bidir) {
+      if (!entries.length) { toast('warning', '양방향 뷰는 진입 함수가 필요합니다 (예: main).'); return; }
+      setLoading(true);
+      const myseq = ++loadSeq.current;
+      try {
+        const body = (rev) => ({
+          job_url: job?.url || '', cache_root: cacheRoot || '.devops_pro_cache',
+          build_selector: buildSelector || 'lastSuccessfulBuild', source_root: sourceRoot || '',
+          all_roots: false, reverse: rev, entry: entries.join(','),
+          max_depth: Math.max(1, Math.min(20, Number(depth) || 5)), include_external: includeExternal, engine: 'precise',
+        });
+        const [callees, callers] = await Promise.all([
+          post('/api/jenkins/call-tree', body(false)),
+          post('/api/jenkins/call-tree', body(true)),
+        ]);
+        if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입 stale 응답 무시
+        setData({ bidir: true, callers, callees, stats: callees?.stats || {} });
+        setExpanded(new Set());
+        const st = callees?.stats || {};
+        const miss = [...(callees?.missing || []), ...(callers?.missing || [])];
+        if (miss.length) toast('warning', `미발견 함수: ${[...new Set(miss)].slice(0, 5).join(', ')} — 함수명을 확인하세요.`);
+        else toast('success', `양방향 콜트리 (${st.engine || '?'} · 함수 ${st.functions ?? 0})`);
+      } catch (e) {
+        if (mountedRef.current && myseq === loadSeq.current) toast('error', e?.status === 404
+          ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하세요.'
+          : `양방향 콜트리 실패: ${e.message}`);
+      } finally { if (mountedRef.current && myseq === loadSeq.current) setLoading(false); }
+      return;
+    }
+    if (!allRoots && !entries.length) { toast('warning', '진입 함수명을 입력하세요 (예: main). 또는 [전체 트리]로 모든 루트를 자동 구성하세요.'); return; }
+    setLoading(true);
+    const myseq = ++loadSeq.current;
+    try {
+      const res = await post('/api/jenkins/call-tree', {
+        job_url: job?.url || '',
+        cache_root: cacheRoot || '.devops_pro_cache',
+        build_selector: buildSelector || 'lastSuccessfulBuild',
+        source_root: sourceRoot || '',
+        all_roots: allRoots,
+        reverse,
+        entry: allRoots ? '' : entries.join(','),
+        max_depth: Math.max(1, Math.min(20, Number(depth) || 5)),
+        include_external: includeExternal,
+        engine: 'precise',
+      });
+      if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입 stale 응답 무시
+      setData(res);
+      // boot 루트(main·_Startup)의 첫 레벨을 자동 펼쳐 애플리케이션 트리를 바로 노출. boot가 없거나
+      // 역방향이면 빈 Set(루트만 펼침). 정렬/index는 렌더 sortedTrees와 동일 함수·동일 reverse라 정합.
+      setExpanded(_ctBootExpansion(res?.trees, res?.stats?.reverse));
+      setAllOpen(false);   // 새 트리 로드 시 '모두 펼치기' 상태 초기화(라벨↔실제 펼침 정합)
+      const miss = Array.isArray(res?.missing) ? res.missing : [];
+      const st = res?.stats || {};
+      // 백엔드가 실제 스캔한 소스(build_root/source 체크아웃 사본)의 완전성 신호. 명시적 false일 때만 경고
+      // (구버전 백엔드는 undefined → 기존 동작 유지). 부분 체크아웃을 완료로 오인해 undercounted 트리를 신뢰하는 것 방지.
+      const incomplete = res?.meta?.source_complete === false;
+      if (miss.length) {
+        toast('warning', `미발견 함수 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? '…' : ''} — 빌드 소스의 함수명과 정확히 일치해야 합니다.${incomplete ? ' (체크아웃 소스가 미완 상태 — 빌드 동기화 완료 후 재시도 권장)' : ''}`);
+      } else if (incomplete) {
+        toast('warning', `콜트리 생성됨 (함수 ${st.functions ?? 0}) — 단, 체크아웃 소스가 미완(부분) 상태라 실제보다 적게 집계됐을 수 있습니다. 빌드 동기화 완료 후 재시도를 권장합니다.`);
+      } else if (allRoots) {
+        // 전체 트리는 백엔드가 루트 수(200)·포레스트 노드(60K)를 상한한다 — 절단 시 정직하게 경고.
+        const trunc = st.roots_truncated || st.nodes_truncated;
+        const dir = st.reverse ? '전체 역콜트리(called-by)' : '전체 콜트리';
+        toast(trunc ? 'warning' : 'success',
+          `${dir} 생성 (루트 ${st.roots ?? 0}${st.roots_truncated ? `/${st.roots_total}` : ''} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})${trunc ? ' — 규모 상한 도달로 일부 절단(트리 깊이를 낮추거나 진입 함수를 지정하세요)' : ''}`);
+      } else {
+        toast('success', `${st.reverse ? '역콜트리(누가 호출하나)' : '콜트리'} 생성 (${st.engine || '?'} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})`);
+      }
+    } catch (e) {
+      // 404(캐시 빌드 부재)는 raw 영문 대신 안내 메시지 — [콜트리 생성]·[전체 트리] 공통.
+      if (mountedRef.current && myseq === loadSeq.current) {
+        const msg = e?.status === 404
+          ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하거나, 소스가 있는 환경에서 진입 함수로 분석하세요.'
+          : `콜트리 생성 실패: ${e.message}`;
+        toast('error', msg);
+      }
+    } finally {
+      if (mountedRef.current && myseq === loadSeq.current) setLoading(false);
+    }
+  }, [entry, depth, includeExternal, reverse, bidir, job, cacheRoot, buildSelector, sourceRoot, toast]);
+
+  // 표에서 함수 클릭 진입(initialEntry) 시 자동 1회 로드 — 검색 입력 없이 바로 콜트리 표시.
+  const didAutoLoad = useRef(false);
+  useEffect(() => {
+    // 소스(Jenkins job 또는 sourceRoot) 있을 때만 자동로드 — 무소스(로컬) 환경의 의도치 않은 404/에러 토스트 방지.
+    if (initialEntry && !didAutoLoad.current && (job?.url || sourceRoot)) { didAutoLoad.current = true; load(); }
+  }, [initialEntry, load, job, sourceRoot]);
+
+  // xlsx 내보내기 — 현재 콜트리(data: 단방향 trees 또는 양방향 bidir)를 회사 SwITS
+  // "2.SW Integration Strategy" 형식(depth 컬럼)으로 서버에서 렌더. 바이너리 응답이라
+  // SwIT 매핑 해결 파라미터(설정>입력자료의 SITS 경로 → 기준 SCM → auto) — exportXlsx·fetchSwitMap 공유.
+  const resolveSwitParams = useCallback(() => {
+    let sitsPath = '';
+    try { sitsPath = String((JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}').sits) || '').trim(); }
+    catch { sitsPath = ''; }
+    let scmId = '';
+    let autoSwit = false;
+    if (!sitsPath) {
+      scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim();
+      if (!scmId) autoSwit = true;
+    }
+    return { sitsPath, scmId, autoSwit };
+  }, []);
+
+  // api() 헬퍼 대신 raw fetch지만 authHeaders(Bearer+X-User) + res.ok 검사 명시(X9).
+  // useSwitId=true면 진입 함수 블록 라벨을 참조 SwITS의 SwIT_SwUFn_ID로 치환(설정>입력자료의
+  // SITS 경로를 sits_path로 전달, 백엔드가 매핑 추출). false면 함수명 모드(현재 방식). 두 방식 병존.
+  const exportXlsx = useCallback(async (useSwitId = false) => {
+    if (!data) { toast('warning', '먼저 콜트리를 생성한 뒤 내보내세요.'); return; }
+    let sitsPath = '';
+    let scmId = '';
+    let autoSwit = false;
+    if (useSwitId) {
+      // sits_path → scm_id(linked_docs.sits) → auto_swit(매칭 최대 SCM). 화면 라벨 토글과 동일 로직.
+      // 사전 경고로 차단하지 않고 항상 진행 — 매칭 결과는 X-Swit-Matched 헤더로 사후 표면화한다.
+      ({ sitsPath, scmId, autoSwit } = resolveSwitParams());
+    }
+    setXlsxBusy(true);
+    try {
+      const meta = {
+        job_url: job?.url || '',
+        build_selector: buildSelector || '',
+        source_root: sourceRoot || '',
+        // 감사 provenance — 체크아웃 소스 미완(부분 집계) 신호를 xlsx 헤더에도 전달(W3).
+        source_complete: data?.bidir ? data?.callees?.meta?.source_complete : data?.meta?.source_complete,
+      };
+      const bodyObj = { payload: data, meta };
+      if (useSwitId) {
+        if (sitsPath) bodyObj.sits_path = sitsPath;
+        else if (scmId) bodyObj.scm_id = scmId;
+        else if (autoSwit) bodyObj.auto_swit = true;
+        // SITS 진입함수 기준으로 콜트리를 재생성해 참조 시트처럼 모든 SwIT 블록이 나오게 함
+        // (화면이 전체 트리여도 SwIT ID xlsx는 SITS 진입함수 트리로 구성). 캐시 빌드 없으면 백엔드가 화면 트리 폴백.
+        bodyObj.regen_from_sits = true;
+        bodyObj.job_url = job?.url || '';
+        bodyObj.cache_root = cacheRoot || '.devops_pro_cache';
+        bodyObj.build_selector = buildSelector || 'lastSuccessfulBuild';
+        bodyObj.source_root = sourceRoot || '';
+        bodyObj.max_depth = Math.max(1, Math.min(20, Number(depth) || 5));
+      }
+      const res = await fetch(buildUrl('/api/jenkins/call-tree/export-xlsx'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(bodyObj),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${t.slice(0, 140)}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = useSwitId ? 'call_tree_swit_id.xlsx' : 'call_tree_integration_strategy.xlsx';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      if (useSwitId) {
+        // W1: 백엔드가 'SwIT_ID 적용 루트 / 전체 SITS 매핑'을 x-swit-matched(예 "35/43")로, 소스에
+        // 진입함수 정의가 없어 못 만든 수를 x-swit-missing으로 알림. 0매칭=함수명 폴백(경고), 부분
+        // 생성(missing>0)=일부 진입함수 소스 부재(info·시트 하단 목록), 전량=성공. '35/35 다 됨'
+        // 위장(실제 43개 중 35개)을 방지 — 감사자가 무엇이 왜 빠졌는지 알 수 있게 정직 표면화.
+        const matched = res.headers.get('x-swit-matched') || '';
+        const made = parseInt(matched.split('/')[0] || '0', 10) || 0;
+        const total = parseInt(matched.split('/')[1] || '0', 10) || 0;
+        // W2: X-Swit-Missing은 regen 성공(소스에 진입함수 정의 없어 확정 누락) 시에만 온다. 헤더에만
+        // 근거하고 부재 시 미생성 수를 날조하지 않는다 — 폴백(캐시 없어 regen 미수행) 경로에서 없는
+        // '시트 하단 목록'을 안내하고 틀린 사유를 대던 오도(감사 정직성 훼손)를 제거.
+        const missing = parseInt(res.headers.get('x-swit-missing') || '0', 10) || 0;
+        let level = 'success';
+        let tail = ' (전량 적용)';
+        if (!matched) {
+          // I5: swit_map 자체를 못 찾음(SITS 경로/SCM 미해결, 헤더 부재) → 함수명 폴백임을 명시.
+          level = 'warning';
+          tail = ' — SITS 매핑을 찾지 못해 함수명으로 표시됨(설정>입력자료 SITS 경로/기준 SCM 확인)';
+        } else if (made === 0) {
+          level = 'warning';
+          tail = ' (매칭 0 · 함수명으로 표시됨. 진입 함수 또는 설정>입력자료 SITS 경로 확인)';
+        } else if (missing > 0) {
+          // regen 성공 + 소스 미정의 누락: 시트 하단에 실제 미생성 목록이 있음.
+          level = 'info';
+          tail = ` · ${missing}개 미생성(스캔 소스에 진입함수 정의 없음 · 시트 하단 목록 확인)`;
+        } else if (total > made) {
+          // W2: regen 미수행(캐시 빌드 부재) 폴백 — 화면 트리 기준이라 나머지는 '소스 미정의'가 아님.
+          level = 'info';
+          tail = ` · 나머지 ${total - made}개는 이 화면 트리에 루트로 없음(진입 함수 기준 재생성 필요 — 캐시 빌드 확인)`;
+        }
+        toast(level,
+          matched
+            ? `SwIT ID 엑셀 내보냄 — SITS ${total || '?'}개 중 ${made}개 생성${tail}`
+            : `SwIT ID 엑셀 내보냄${tail}`);
+      } else {
+        toast('success', '엑셀 파일을 내보냈습니다.');
+      }
+    } catch (e) {
+      toast('error', `엑셀 내보내기 실패: ${e.message}`);
+    } finally {
+      setXlsxBusy(false);
+    }
+  }, [data, job, buildSelector, sourceRoot, toast, depth, cacheRoot, resolveSwitParams]);
+
+  // 화면 라벨 토글용 매핑 조회(파일 생성 없이 {진입함수:SwIT_ID}만). 빈/실패는 {}.
+  const fetchSwitMap = useCallback(async () => {
+    if (!data) return {};
+    const { sitsPath, scmId, autoSwit } = resolveSwitParams();
+    const body = { payload: data };
+    if (sitsPath) body.sits_path = sitsPath;
+    else if (scmId) body.scm_id = scmId;
+    else if (autoSwit) body.auto_swit = true;
+    const r = await post('/api/jenkins/call-tree/swit-map', body);
+    return (r && r.map && typeof r.map === 'object') ? r.map : {};
+  }, [data, resolveSwitParams]);
+
+  // 라벨 함수명 ⇄ SwIT ID 전환. swit로 갈 때 매핑이 없으면 백엔드에서 1회 조회 후 캐시.
+  const toggleLabelMode = useCallback(async () => {
+    if (labelMode === 'swit') { setLabelMode('func'); return; }   // 원본 트리로 복귀(switViewData 캐시 유지)
+    if (switViewData && switMap && Object.keys(switMap).length) { setLabelMode('swit'); return; }  // 캐시 재사용
+    const myseq = ++switSeq.current;   // W1: 이 조회 인스턴스 토큰
+    setSwitBusy(true);
+    try {
+      const m = await fetchSwitMap();
+      // W1: await 중 언마운트/재진입/data변경(reset useEffect가 switSeq 증가) 시 stale 반영 차단.
+      if (!mountedRef.current || myseq !== switSeq.current) return;
+      const cnt = m ? Object.keys(m).length : 0;
+      if (!cnt) {
+        setSwitMap({});
+        toast('warning', 'SwIT 매핑을 찾지 못했습니다 — 설정>입력자료의 SITS 경로 또는 기준 SCM을 확인하세요. (함수명 유지)');
+        return;
+      }
+      // SITS 진입함수를 최상위로 재구성(Excel(SwIT ID)와 동일 뷰). 진입함수들로 콜트리 재생성.
+      const entries = Object.keys(m);
+      let regen = null;
+      try {
+        regen = await post('/api/jenkins/call-tree', {
+          job_url: job?.url || '', cache_root: cacheRoot || '.devops_pro_cache',
+          build_selector: buildSelector || 'lastSuccessfulBuild', source_root: sourceRoot || '',
+          all_roots: false, reverse: false, entry: entries.join(','),
+          max_depth: Math.max(1, Math.min(20, Number(depth) || 5)), include_external: includeExternal, engine: 'precise',
+        });
+      } catch { regen = null; }
+      if (!mountedRef.current || myseq !== switSeq.current) return;   // W1: 재생성 대기 중 stale 차단
+      setSwitMap(m);
+      if (regen && Array.isArray(regen.trees) && regen.trees.length) {
+        setSwitViewData(regen);
+        setExpanded(new Set());
+        setLabelMode('swit');
+        const roots = regen.trees.map(t => String(t?.name || ''));
+        const matched = roots.filter(n => m[n]).length;
+        toast('success', `SwIT ID 뷰 — 진입 함수 ${roots.length}개를 최상위로 재구성 (${matched}개 SwIT_ID · 참조 SITS ${cnt}개)`);
+      } else {
+        // 캐시 빌드 부재 등으로 재구성 불가 → 현재 트리에 라벨만(폴백). switViewData 없이 labelMode만 전환.
+        setSwitViewData(null);
+        setLabelMode('swit');
+        const roots = Array.isArray(data?.trees) ? data.trees.map(t => String(t?.name || '')) : [];
+        const matched = roots.filter(n => m[n]).length;
+        toast('info', `SwIT ID 라벨 — 캐시 빌드가 없어 현재 트리에 라벨만 적용(${matched}/${roots.length}). 진입 함수 재구성은 Jenkins 빌드 캐시가 필요합니다.`);
+      }
+    } catch (e) {
+      if (mountedRef.current && myseq === switSeq.current) toast('error', `SwIT ID 뷰 실패: ${e.message}`);
+    } finally {
+      if (mountedRef.current && myseq === switSeq.current) setSwitBusy(false);
+    }
+  }, [labelMode, switViewData, switMap, fetchSwitMap, data, job, cacheRoot, buildSelector, sourceRoot, depth, includeExternal, toast]);
+
+  // 새 콜트리 로드 시 라벨 모드/매핑 초기화(이전 트리 매핑을 새 트리에 잘못 적용 방지).
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 새 콜트리 로드 시 라벨 모드/매핑 리셋 — 이전 트리 매핑의 오적용 방지
+  useEffect(() => { switSeq.current += 1; setLabelMode('func'); setSwitMap(null); setSwitViewData(null); }, [data]);
+
+  // SwIT ID 뷰 활성 시 재구성 트리(switViewData)를, 아니면 원본 data를 렌더 소스로. 원본은 불변 보존.
+  const activeData = (labelMode === 'swit' && switViewData) ? switViewData : data;
+  // ⚠ useMemo — `: []` 폴백이 매 렌더 새 배열이라 아래 정렬 useMemo 가 매번 재계산됐다.
+  const trees = useMemo(() => (Array.isArray(activeData?.trees) ? activeData.trees : []), [activeData]);
+  const st = activeData?.stats || {};
+  // 진입점(boot)→ISR→일반 순 정렬(역방향은 이름순). load의 _ctBootExpansion과 동일 정렬 함수·동일
+  // reverse(로드된 데이터 기준 st.reverse)라 자동펼침 path가 정합.
+  const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
+  // 모두 펼치기/접기 — 클라 측(재조회 없음). 펼침=로드된 전 노드 path, 접기=기본(boot) 펼침.
+  // sortedTrees를 넘겨 렌더와 동일 index로 path 생성(정합). 단방향(trees) 전용 — 양방향은 caller/callee 블록이라 별도.
+  const toggleAllOpen = () => {
+    const next = !allOpen;
+    if (next) {
+      const paths = _ctAllExpandedPaths(sortedTrees);
+      // W1: 대형 트리(전체 트리 등)를 한 번에 펼치면 비메모 CallTreeNode 수천 개가 단일 렌더
+      // 패스로 동시 마운트 → 브라우저 프리즈 위험. 임계 초과 시 확인 게이트로 사용자 동의 후 진행.
+      if (paths.size > 2000 && typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(`${paths.size.toLocaleString()}개 노드를 한 번에 펼칩니다. 트리가 크면 브라우저가 잠시 느려질 수 있습니다. 계속할까요?`)) {
+        return;
+      }
+      setAllOpen(true);
+      setExpanded(paths);
+    } else {
+      setAllOpen(false);
+      setExpanded(_ctBootExpansion(trees, st.reverse));
+    }
+  };
+  // 방향 토글을 바꾸고 재조회 전이면 표시 데이터(로드 시점 방향)와 컨트롤(direction)이 불일치 — 시각 단서.
+  const loadedBidir = !!data?.bidir;
+  const dirStale = !!data && (loadedBidir !== bidir || (!loadedBidir && (!!st.reverse !== reverse)));
+
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 10,
+        padding: 10, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6 }}>
+        <input list="calltree-seed-fns" value={entry} onChange={e => setEntry(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); load(); } }}
+          placeholder="진입 함수명 (콤마 구분, 예: main, App_Init)"
+          style={{ flex: '1 1 280px', minWidth: 200, padding: '6px 8px', fontSize: 12, fontFamily: 'monospace',
+            border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
+        <datalist id="calltree-seed-fns">
+          {(seedFns || []).map(f => <option key={f} value={f} />)}
+        </datalist>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          깊이
+          <input type="number" min={1} max={20} value={depth} onChange={e => setDepth(Number(e.target.value))}
+            style={{ width: 56, padding: '5px 6px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
+        </label>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+          title="표준 라이브러리를 제외한 외부(미정의) 함수 호출도 트리에 표시">
+          <input type="checkbox" checked={includeExternal} onChange={e => setIncludeExternal(e.target.checked)} style={{ cursor: 'pointer' }} />
+          외부 함수
+        </label>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          title="방향 — 호출: 이 함수가 부르는 함수(callee, 하향) / 역호출: 이 함수를 부르는 함수(caller, 상향 — 영향분석) / 양방향: 한 함수 중심으로 위 caller·아래 callee 동시(진입 함수 필요)">
+          방향
+          <select value={direction} onChange={e => setDirection(e.target.value)}
+            style={{ padding: '5px 6px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>
+            <option value="callee">호출 → (callee)</option>
+            <option value="caller">← 역호출 (caller)</option>
+            <option value="both">↕ 양방향 (caller+callee)</option>
+          </select>
+        </label>
+        <button type="button" onClick={() => load(false)} disabled={loading}
+          style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 4, cursor: loading ? 'default' : 'pointer',
+            background: loading ? 'var(--border)' : 'var(--accent)', color: '#fff' }}>
+          {loading ? '분석 중…' : (bidir ? '양방향 생성' : reverse ? '역콜트리 생성' : '콜트리 생성')}
+        </button>
+        {!bidir && (
+          <button type="button" onClick={() => load(true)} disabled={loading}
+            title="진입 함수 입력 없이, 아무 함수도 호출하지 않는 함수(루트: main·ISR·콜백·미사용)를 자동 탐지해 프로젝트 전체 호출 트리를 구성합니다."
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: loading ? 'default' : 'pointer',
+              background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
+            {reverse ? '전체 역트리' : '전체 트리'}
+          </button>
+        )}
+        {trees.length > 0 && (
+          <button type="button" onClick={toggleAllOpen}
+            title={allOpen ? '모든 하위 노드 접기(기본 펼침으로 복귀)' : '로드된 모든 하위 노드를 한 번에 펼치기'}
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+              background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)' }}>
+            {allOpen ? '모두 접기 ⊟' : '모두 펼치기 ⊞'}
+          </button>
+        )}
+        {data && !data.bidir && (
+          <button type="button" onClick={toggleLabelMode} disabled={loading || switBusy}
+            title="진입 함수(루트) 라벨을 함수명 ⇄ 참조 SwITS의 SwIT_SwUFn_ID로 전환합니다(화면 표시 전용). SwIT ID 매핑은 설정>입력자료의 SITS 경로 또는 기준 SCM에서 읽습니다."
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || switBusy) ? 'default' : 'pointer',
+              background: labelMode === 'swit' ? 'var(--accent)' : 'var(--bg)', color: labelMode === 'swit' ? '#fff' : 'var(--accent)', border: '1px solid var(--accent)' }}>
+            {switBusy ? '매핑 로드…' : (labelMode === 'swit' ? '라벨: SwIT ID ⇄' : '라벨: 함수명 ⇄')}
+          </button>
+        )}
+        {data && (
+          <>
+            <button type="button" onClick={() => exportXlsx(false)} disabled={loading || xlsxBusy}
+              title="현재 호출 트리를 SwITS 통합전략(2.SW Integration Strategy) 형식 xlsx로 내보냅니다 — 진입 함수 블록을 함수명으로 표시. depth 컬럼·정의 파일·ASIL·마커 포함."
+              style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || xlsxBusy) ? 'default' : 'pointer',
+                background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
+              {xlsxBusy ? '생성 중…' : 'Excel(함수명) ↓'}
+            </button>
+            <button type="button" onClick={() => exportXlsx(true)} disabled={loading || xlsxBusy}
+              title="진입 함수 블록을 참조 SwITS의 SwIT_SwUFn_ID로 표시해 내보냅니다(설정>입력자료의 SITS 경로 필요). 매칭 안 되는 함수는 함수명 유지."
+              style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || xlsxBusy) ? 'default' : 'pointer',
+                background: 'var(--bg)', color: '#fff', border: '1px solid var(--accent)',
+                backgroundColor: 'var(--accent)' }}>
+              {xlsxBusy ? '생성 중…' : 'Excel(SwIT ID) ↓'}
+            </button>
+          </>
+        )}
+      </div>
+
+      {dirStale && (
+        <div style={{ fontSize: 11, color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a',
+          borderRadius: 4, padding: '5px 8px', marginBottom: 8 }}>
+          ⚠ 방향을 바꿨습니다 — 현재 표시된 것은 여전히 <strong>{loadedBidir ? '양방향' : st.reverse ? '역호출(caller)' : '호출(callee)'}</strong> 기준입니다.
+          [{bidir ? '양방향 생성' : reverse ? '역콜트리 생성' : '콜트리 생성'}]을 다시 눌러 반영하세요.
+        </div>
+      )}
+
+      {!data && !loading && (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 4px' }}>
+          진입 함수명을 입력하고 <strong>콜트리 생성</strong>을 누르면 tree-sitter로 분석한 함수 호출 트리를 보여줍니다.
+          진입점을 모르면 <strong>전체 트리</strong>로 프로젝트의 모든 루트 함수(main·ISR·콜백·미사용)를 자동 탐지해 전체 호출 구조를 구성합니다.
+          <strong>방향</strong>을 <em>역호출</em>로 바꾸면 “누가 이 함수를 호출하나(caller)”를 상향 추적하고, <em>양방향</em>은 한 함수를 중심에 두고 위 caller·아래 callee를 동시에 보여줍니다(영향분석).
+          함수포인터 참조로 추론된 엣지는 <span style={{ color: '#7c3aed' }}>↪ 참조</span>, 대상을 못 잇는 간접호출(디스패치·콜백)은 <span style={{ color: '#ea580c' }}>⚡ 간접호출</span> 배지로 표시합니다.
+          매트릭스가 로드돼 있으면 입력란에서 설계 함수명 자동완성을 제안합니다.
+        </div>
+      )}
+
+      {data && data.bidir && (() => {
+        // 양방향(피벗): 각 진입 함수를 중심으로 위=caller·아래=callee를 스택. 콤마로 여러 진입 함수를 주면
+        // 함수마다 독립 피벗 블록으로 렌더(과거엔 trees[0]만 그려 나머지를 성공 토스트로 위장한 채 silent drop).
+        // caller/callee 트리는 index가 아니라 함수명으로 짝지어 매칭(백엔드가 direction 무관 동일 known을
+        // 순회하므로 정렬은 같으나, misalignment 방어). 경로 접두사 c{블록}_{i} / e{블록}_{i}로 충돌 방지.
+        const calleeTrees = Array.isArray(data.callees?.trees) ? data.callees.trees : [];
+        const callerTrees = Array.isArray(data.callers?.trees) ? data.callers.trees : [];
+        const callerByName = new Map(callerTrees.map(t => [String(t?.name || ''), t]));
+        const calleeByName = new Map(calleeTrees.map(t => [String(t?.name || ''), t]));
+        // 중심 함수 목록(callee 트리 순서 우선, caller-only 보충) — 중복 제거.
+        const names = [];
+        const seenNames = new Set();
+        [...calleeTrees, ...callerTrees].forEach(t => {
+          const n = String(t?.name || '');
+          if (n && !seenNames.has(n)) { seenNames.add(n); names.push(n); }
+        });
+        const bst = data.callees?.stats || {};
+        const notFound = names.length === 0;
+        return (
+          <div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+              <span style={{ fontWeight: 700, color: '#0369a1' }}>↕ 양방향 (caller+callee)</span>
+              <span>엔진 <strong style={{ color: bst.engine === 'tree-sitter' ? '#16a34a' : '#d97706' }}>{bst.engine || '?'}</strong></span>
+              <span>함수 {bst.functions ?? 0}</span>
+              {names.length > 1 && <span>중심 <strong>{names.length}</strong>개</span>}
+            </div>
+            {notFound ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 6 }}>
+                입력한 함수를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.
+              </div>
+            ) : (
+              names.map((nm, bi) => {
+                const centerNode = calleeByName.get(nm) || callerByName.get(nm) || null;
+                const cAsil = centerNode?.asil ? String(centerNode.asil).toUpperCase() : '';
+                const callers = callerByName.get(nm)?.calls || [];
+                const callees = calleeByName.get(nm)?.calls || [];
+                const multi = names.length > 1;
+                return (
+                  <div key={`pivot-${bi}`}
+                    style={multi ? { marginBottom: 14, paddingBottom: 10, borderBottom: '1px dashed var(--border)' } : undefined}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#c026d3', marginBottom: 4 }}>⬆ 이 함수를 호출하는 함수 (caller)</div>
+                    {callers.length ? (
+                      <ul style={{ margin: '0 0 6px', padding: 0 }}>
+                        {callers.map((n, i) => (
+                          <CallTreeNode key={`c${bi}_${i}`} node={n} path={`c${bi}_${i}`} expanded={expanded} onToggle={toggle} depth={1} includeExternal={includeExternal} />
+                        ))}
+                      </ul>
+                    ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px 6px' }}>호출하는 함수 없음 (진입점·미사용)</div>}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', margin: '4px 0',
+                      background: 'var(--bg)', border: '2px solid var(--accent)', borderRadius: 6 }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>◆ 중심</span>
+                      <strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{nm}</strong>
+                      {cAsil && <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: _ASIL_COLORS[cAsil] || '#6b7280' }}>ASIL {cAsil}</span>}
+                      {Array.isArray(centerNode?.indirect) && centerNode.indirect.length > 0 && (
+                        <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
+                          title={`미해결 간접호출:\n· ${centerNode.indirect.join('\n· ')}`}>⚡ 간접호출 {centerNode.indirect.length}</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#0891b2', margin: '4px 0' }}>⬇ 이 함수가 호출하는 함수 (callee)</div>
+                    {callees.length ? (
+                      <ul style={{ margin: 0, padding: 0 }}>
+                        {callees.map((n, i) => (
+                          <CallTreeNode key={`e${bi}_${i}`} node={n} path={`e${bi}_${i}`} expanded={expanded} onToggle={toggle} depth={1} includeExternal={includeExternal} />
+                        ))}
+                      </ul>
+                    ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px' }}>호출하는 하위 함수 없음 (leaf)</div>}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        );
+      })()}
+
+      {activeData && !activeData.bidir && (
+        <div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+            {st.reverse && <span style={{ fontWeight: 700, color: '#c026d3' }} title="역방향 — 자식은 이 함수를 호출하는 함수(caller)">← 역콜트리(누가 호출하나)</span>}
+            <span>엔진 <strong style={{ color: st.engine === 'tree-sitter' ? '#16a34a' : '#d97706' }}>{st.engine || '?'}</strong></span>
+            <span>스캔 파일 {st.files_scanned ?? 0}</span>
+            <span>함수 {st.functions ?? 0}</span>
+            <span>호출 엣지 {st.edges ?? 0}</span>
+            {st.roots > 0 && <span>루트 <strong>{st.roots}</strong>{!st.reverse && <span style={{ opacity: 0.65 }}> · 진입점·ISR 우선</span>}</span>}
+            {Array.isArray(activeData.missing) && activeData.missing.length > 0 && (
+              <span style={{ color: '#d97706' }}>미발견 {activeData.missing.length}</span>
+            )}
+          </div>
+          {trees.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 6 }}>
+              표시할 호출 트리가 없습니다.
+              {Array.isArray(activeData.missing) && activeData.missing.length > 0 && (
+                <> 입력한 함수({activeData.missing.join(', ')})를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.</>
+              )}
+            </div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0 }}>
+              {sortedTrees.map((t, i) => (
+                <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} switMap={labelMode === 'swit' ? switMap : null} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── 인라인 콜트리 (표 행 펼침 내부 — 탭 전환 없이 UDS 함수의 호출 트리를 그 자리에서 표시) ──
+ * CallTreeView(탭 전용)의 축약판: 진입 함수 1개 고정, 방향(호출/역호출) 토글, 깊이 조절(기본 8·최대 20)·모두 펼치기, 외부함수 제외.
+ * 소스(job.url 또는 sourceRoot) 없으면 요청하지 않고 안내(로컬 파일모드의 doomed 404 방지).
+ * CallTreeNode·_ctSortRoots·_ctBootExpansion(모듈 SSOT) 재사용 — 렌더/정렬 규칙이 탭과 동일.
+ * loadSeq/mountedRef로 방향 연타·언마운트 시 stale setData 방지(CallTreeView와 동일 패턴).
+ * job 객체 대신 jobUrl 문자열을 deps로 써서 부모 리렌더로 인한 무한 재조회를 차단. */
+function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenFull, onClose }) {
+  const bare = String(fn || '').split(/[\s(]/)[0].trim();
+  const jobUrl = job?.url || '';
+  const hasSource = !!(jobUrl || sourceRoot);
+  const [direction, setDirection] = useState('callee');   // 'callee'(호출→) | 'caller'(←역호출)
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [depth, setDepth] = useState(8);                  // 확정 깊이(load 구동) — depthInput에서 디바운스 반영
+  const [depthInput, setDepthInput] = useState(8);        // 입력창 값(즉시) — 타이핑 중 재조회 폭주(W1) 방지용 분리
+  const [allOpen, setAllOpen] = useState(false);          // 모두 펼치기 상태(로드된 노드 전체 펼침/접기)
+  const mountedRef = useRef(true);
+  const loadSeq = useRef(0);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  const toggle = useCallback((id) => {
+    setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }, []);
+
+  const load = useCallback(async (dir) => {
+    if (!bare || !hasSource) return;
+    const rev = dir === 'caller';
+    setLoading(true); setError('');
+    const myseq = ++loadSeq.current;
+    try {
+      const res = await post('/api/jenkins/call-tree', {
+        job_url: jobUrl,
+        cache_root: cacheRoot || '.devops_pro_cache',
+        build_selector: buildSelector || 'lastSuccessfulBuild',
+        source_root: sourceRoot || '',
+        all_roots: false, reverse: rev, entry: bare,
+        max_depth: Math.min(20, Math.max(1, depth || 1)), include_external: false, engine: 'precise',
+      });
+      if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입/언마운트 stale 무시
+      setData(res);
+      setExpanded(_ctBootExpansion(res?.trees, res?.stats?.reverse));
+      setAllOpen(false);   // 새 데이터 로드 시 펼침 상태 초기화(깊이/방향 변경 후 일관)
+      const miss = Array.isArray(res?.missing) ? res.missing : [];
+      if (miss.length) setError(`빌드 소스에서 '${bare}'를 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.`);
+    } catch (e) {
+      if (mountedRef.current && myseq === loadSeq.current) {
+        setError(e?.status === 404
+          ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하세요.'
+          : `콜트리 실패: ${e.message}`);
+      }
+    } finally {
+      if (mountedRef.current && myseq === loadSeq.current) setLoading(false);
+    }
+  }, [bare, hasSource, jobUrl, cacheRoot, buildSelector, sourceRoot, depth]);
+
+  // 마운트 + 방향/깊이 변경 시 자동 로드 (load가 depth를 deps로 물어 깊이 변경 시 재조회)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 마운트·방향/깊이 변경 시 자동 로드 — load 내부의 로딩 플래그 setState
+  useEffect(() => { load(direction); }, [direction, load]);
+
+  // depthInput → depth 디바운스(350ms) — number input 타이핑 중 키마다 재조회하던 낭비(W1) 차단.
+  // 확정 depth만 load deps를 바꿔 재조회를 1회로 합침(loadSeq가 stale 응답은 폐기하나 파싱 낭비 방지).
+  useEffect(() => {
+    const t = setTimeout(() => setDepth(depthInput), 350);
+    return () => clearTimeout(t);
+  }, [depthInput]);
+
+  // ⚠ useMemo — 위 블록과 같은 이유(폴백 배열의 매 렌더 새 참조).
+  const trees = useMemo(() => (Array.isArray(data?.trees) ? data.trees : []), [data]);
+  const st = data?.stats || {};
+  const reverse = direction === 'caller';
+  const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
+
+  // 모두 펼치기/접기 — 클라이언트 측(재조회 없음). 펼침=로드된 전 노드 path, 접기=기본(boot) 펼침.
+  const toggleAllOpen = () => {
+    const next = !allOpen;
+    setAllOpen(next);
+    setExpanded(next ? _ctAllExpandedPaths(sortedTrees) : _ctBootExpansion(trees, st.reverse));
+  };
+
+  return (
+    <div style={{ marginTop: 12, border: '1px solid var(--accent)', borderRadius: 8, background: 'var(--panel)',
+      overflow: 'hidden', boxShadow: '0 2px 10px rgba(0,0,0,0.07)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 12px',
+        borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>콜트리</span>
+        <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
+          background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)' }}>{bare}</code>
+        <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+          {[['callee', '호출 →'], ['caller', '← 역호출']].map(([v, label]) => (
+            <button key={v} type="button" onClick={() => setDirection(v)}
+              title={v === 'callee' ? '이 함수가 호출하는 하위 함수(callee, 하향)' : '이 함수를 호출하는 함수(caller, 상향 — 영향분석)'}
+              style={{ fontSize: 11, padding: '4px 12px', border: 'none', cursor: 'pointer', fontWeight: direction === v ? 700 : 500,
+                background: direction === v ? 'var(--accent)' : 'transparent', color: direction === v ? '#fff' : 'var(--fg)' }}>{label}</button>
+          ))}
+        </div>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)' }}
+          title="호출 트리 최대 깊이 (1~20) — 높일수록 더 깊은 호출까지 표시. '… 깊이제한' 배지는 이 깊이에서 잘렸다는 표시입니다.">
+          깊이
+          <input type="number" min={1} max={20} value={depthInput}
+            onChange={e => setDepthInput(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
+            style={{ width: 46, padding: '3px 5px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
+        </label>
+        {trees.length > 0 && (
+          <button type="button" onClick={toggleAllOpen}
+            title={allOpen ? '모든 하위 노드 접기' : '로드된 모든 하위 노드를 한 번에 펼치기'}
+            style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>
+            {allOpen ? '모두 접기' : '모두 펼치기'}
+          </button>
+        )}
+        {loading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>분석 중…</span>}
+        {!loading && data && (
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            엔진 {st.engine || '?'} · 함수 {st.functions ?? 0} · 엣지 {st.edges ?? 0}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {onOpenFull && (
+          <button type="button" onClick={onOpenFull} title="전체 콜트리 뷰(깊이 조절·전체 트리·양방향)로 열기"
+            style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
+        )}
+        <button type="button" onClick={onClose} title="콜트리 닫기"
+          style={{ fontSize: 14, lineHeight: 1, padding: '3px 9px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
+      </div>
+      <div style={{ padding: '10px 12px', maxHeight: 400, overflowY: 'auto', background: 'var(--bg)' }}>
+        {!hasSource ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 2px', lineHeight: 1.5 }}>
+            소스가 연결되지 않아(로컬 파일 모드) 콜트리를 만들 수 없습니다 — Jenkins 빌드가 있는 환경에서 시도하세요.
+          </div>
+        ) : error ? (
+          <div style={{ fontSize: 12, color: '#b91c1c', padding: '8px 2px', lineHeight: 1.5 }}>{error}</div>
+        ) : (loading && !data) ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 2px' }}>tree-sitter로 호출 트리 분석 중…</div>
+        ) : trees.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 2px' }}>
+            {reverse ? '이 함수를 호출하는 함수가 없습니다 (진입점·미사용).' : '이 함수가 호출하는 하위 함수가 없습니다 (leaf).'}
+          </div>
+        ) : (
+          <ul style={{ margin: 0, padding: 0 }}>
+            {sortedTrees.map((t, i) => (
+              <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={false} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── 인라인 그래프 프레임 (함수그래프/추적그래프 공용 — 표 행 안에서 기존 그래프 컴포넌트를 감싸 표시) ──
+ * 헤더(제목·badge·⤢전체뷰·✕) + maxHeight 스크롤 본문. 자식 그래프 컴포넌트는 seed가 바뀌면
+ * 호출부에서 key로 remount하여 재시드한다(그래프 컴포넌트는 initial* 를 useState 1회 시드만 하므로). */
+function InlineGraphFrame({ title, badge, onOpenFull, onClose, children }) {
+  return (
+    <div style={{ marginTop: 12, border: '1px solid var(--accent)', borderRadius: 8, background: 'var(--panel)',
+      overflow: 'hidden', boxShadow: '0 2px 10px rgba(0,0,0,0.07)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 12px',
+        borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>{title}</span>
+        {badge && (
+          <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
+            background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>{badge}</code>
+        )}
+        <span style={{ flex: 1 }} />
+        {onOpenFull && (
+          <button type="button" onClick={onOpenFull} title="전용 탭(더 큰 캔버스)에서 열기"
+            style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
+        )}
+        <button type="button" onClick={onClose} title="닫기"
+          style={{ fontSize: 14, lineHeight: 1, padding: '3px 9px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
+      </div>
+      <div style={{ padding: '10px 12px', maxHeight: 460, overflow: 'auto', background: 'var(--bg)' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ── 요구사항 상하위 추적 그래프 (additive '그래프' 뷰) ──
+   요구사항 1개를 선택하면 그 하위 추적(SW: SDS→UDS→STS/SUTS/SITS · 시스템: HSIS·SyTS·SyITS → VectorCAST)을 레벨별 SVG
+   노드-엣지 그래프로 보여준다. hiMA UCOneIDTrace(요구사항 ID 의존성 그래프)의 child 방향에
+   대응 — hiMA의 MSAGL Sugiyama 대신 레벨이 7컬럼으로 고정이라 컬럼 배치로 단순화(레이아웃 엔진 불필요).
+   데이터는 matrix row만으로 완결(백엔드 무변경): _stageMembers(단계 멤버) + _unitTestMap(UDS함수↔
+   SUTS단위시험 정확 매핑 엣지). 상위(부모 요구사항)는 row에 구조화 데이터가 없어(설계서 prose에 묻힘)
+   이번 범위에서 제외 — 하위 추적에 집중. 모든 시각화는 SVG(innerHTML 없음 → XSS 무관). */
+const _STAGE_COLORS = { SyRS: '#475569', SDS: '#0d9488', HSIS: '#0e7490', UDS: '#7c3aed', STS: '#2563eb', SUTS: '#0891b2', SITS: '#db2777', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
+const _GRAPH = { COL_W: 172, NODE_W: 150, NODE_H: 30, GAP: 9, HEADER_H: 26, PAD: 14, MAX_PER_COL: 40 };
+
+function _reqGraphId(r) {
+  return String(r?.requirement_id ?? r?.req_id ?? r?.id ?? '').trim();
+}
+
+// 한 요구사항 row → 레벨별 노드 + 엣지(좌표 포함). 순수 함수(렌더 외부 계산).
+// FAIL 우선 정렬 키 — 안전관련(FAIL) 시험이 MAX_PER_COL 캡에 silent하게 잘려나가지 않도록
+// 캡 적용 전 FAIL을 앞으로 보낸다. 0=FAIL, 1=mapped/unknown, 2=PASS.
+function _resultRank(result) {
+  const v = (result || '').toLowerCase();
+  if (/^(fail|failed|false|0)$/.test(v)) return 0;
+  if (/^(pass|passed|true|1)$/.test(v)) return 2;
+  return 1;
+}
+
+// focusSet(영향도 변경함수 정규화 집합)이 주어지면 UDS 함수/시험 유닛이 변경 영향인지 표시.
+// visibleKeys(레벨 필터)가 주어지면 해당 단계만 컬럼으로 그린다(null/빈 배열=전체).
+function _buildReqGraph(row, focusSet, visibleKeys, linkTable) {
+  const G = _GRAPH;
+  const reqId = _reqGraphId(row) || '(이름없음)';
+  const reqName = String(row?.requirement_name ?? '').trim();
+  // ASIL 추출 연산자는 매트릭스 뷰(CrossMatrixView)와 통일(`||`) — present-but-empty asil에서 분기 방지.
+  const asil = String(row?.asil || row?.requirement_asil || row?.ASIL || '').trim().toUpperCase();
+  const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
+  const isSafety = asil === 'C' || asil === 'D'; // ISO 26262 최고 등급(시험 경로 강조용)
+  // 안전 검증 공백 — 백엔드 _asil_missing_bands(report_gen/trace_link_table.py)와 동일 규칙.
+  //   C/D = SUTS·SITS 둘 다 필수(하나라도 0이면 누락), A/B = 시험 밴드 중 1개 이상, QM/미상 = 기대 없음.
+  //   레벨 필터와 무관하게 전체 row 기준으로 판정(필터로 시험 단계를 숨겨도 정확).
+  // 안전 검증 공백 — 백엔드 link_table.asil_coverage.gaps를 SSOT로 직독(매트릭스 뷰 CrossMatrixView와
+  // 동일 출처 → 같은 요구사항에 byte-identical 갭, drift 제거). 백엔드 link_table 부재(구버전/빌드 실패)
+  // 시에만 _rowBands(백엔드 build_link_table과 byte-exact 추출) + _asil_missing_bands 규칙으로 폴백 재계산.
+  let safetyMissing;
+  const _backendGaps = linkTable?.asil_coverage?.gaps;
+  if (Array.isArray(_backendGaps)) {
+    const g = _backendGaps.find(x => String(x?.target_id ?? '') === reqId);
+    safetyMissing = (g && Array.isArray(g.missing)) ? g.missing.slice() : [];
+  } else {
+    const _safetyBands = _rowBands(row);
+    const _bandCount = (key) => (_safetyBands[key] || []).length;
+    const _asilRank = { QM: 0, A: 1, B: 2, C: 3, D: 4 }[asil] ?? -1;
+    safetyMissing = [];
+    if (_asilRank >= 3) { // ASIL C/D — SUTS·SITS 둘 다 필수
+      if (_bandCount('SUTS') === 0) safetyMissing.push('SUTS');
+      if (_bandCount('SITS') === 0) safetyMissing.push('SITS');
+    } else if (_asilRank >= 1) { // ASIL A/B — 시험 밴드 중 1개 이상
+      if (!['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'].some(b => _bandCount(b) > 0)) safetyMissing.push('ANY_TEST');
+    }
+  }
+  const safetyGap = safetyMissing.length > 0;
+  // 레벨 필터: visibleKeys에 든 단계만 컬럼화. SW 전용 뷰라 시스템 밴드 제외(TREE_STAGES_VISIBLE).
+  const stages = (Array.isArray(visibleKeys) && visibleKeys.length)
+    ? TREE_STAGES_VISIBLE.filter(s => visibleKeys.includes(s.key)) : TREE_STAGES_VISIBLE;
+
+  // 단계별 멤버(캡 적용 — 시험 수십 개 컬럼이 무한정 길어지는 것 방지)
+  const columns = stages.map((s, ci) => {
+    const { type, items } = _stageMembers(row, s.key);
+    let all = (Array.isArray(items) ? items : []).map((it, i) => {
+      const label = type === 'tests' ? _testId(it) : String(it ?? '').trim();
+      if (!label) return null;
+      const unit = type === 'tests' ? String(it?.unit ?? '') : '';
+      // 영향도 연동: UDS 함수명 또는 시험 유닛명이 변경함수 집합에 들면 강조
+      const impacted = !!(fset && (
+        (s.key === 'UDS' && fset.has(_normFn(label))) ||
+        (type === 'tests' && unit && fset.has(_normFn(unit)))
+      ));
+      return {
+        // id에 reqId prefix — 요구사항 간 위치기반 id 충돌(selNode 오매칭) 원천 차단
+        id: `${reqId}::${s.key}:${i}`, label, stage: s.key, kind: s.kind, type,
+        result: type === 'tests' ? String(it?.result ?? '') : '',
+        unit, source: type === 'tests' ? String(it?.source ?? '') : '',
+        confidence: type === 'tests' ? String(it?.confidence ?? '') : '',
+        impacted,
+      };
+    }).filter(Boolean);
+    // 시험 컬럼이 캡을 넘치면 FAIL 우선 정렬 후 자른다(안전 시험 우선 노출). 캡 이내면 원본 순서 유지.
+    if (type === 'tests' && all.length > G.MAX_PER_COL) {
+      all = all.map((m, idx) => ({ m, idx }))
+        .sort((a, b) => (_resultRank(a.m.result) - _resultRank(b.m.result)) || (a.idx - b.idx))
+        .map(o => o.m);
+    }
+    const shown = all.slice(0, G.MAX_PER_COL);
+    const hiddenFail = all.slice(G.MAX_PER_COL).filter(m => _resultRank(m.result) === 0).length;
+    return { stage: s.key, label: s.label, kind: s.kind, colIndex: ci + 1, members: shown, hidden: all.length - shown.length, hiddenFail };
+  });
+
+  // 좌표 계산
+  const maxRows = Math.max(1, ...columns.map(c => c.members.length || 1));
+  const bodyH = maxRows * (G.NODE_H + G.GAP);
+  const height = G.HEADER_H + bodyH + G.PAD * 2;
+  const width = (stages.length + 1) * G.COL_W;
+
+  const nodeXY = {};
+  const rootY = G.HEADER_H + G.PAD + Math.max(0, (bodyH - (G.NODE_H + G.GAP)) / 2);
+  nodeXY['__root__'] = { x: G.PAD, y: rootY };
+  for (const col of columns) {
+    const x = col.colIndex * G.COL_W + G.PAD;
+    col.members.forEach((m, mi) => {
+      const y = G.HEADER_H + G.PAD + mi * (G.NODE_H + G.GAP);
+      m.x = x; m.y = y;
+      nodeXY[m.id] = { x, y };
+    });
+  }
+
+  // 엣지: 요구사항(root) → 각 단계 멤버 (row 데이터는 모두 요구사항 기준이므로 SRS 직속).
+  // root 출발점이 한 점에 완전 중첩돼 hairball이 되던 것을 fromFrac으로 root 노드 우변 높이에
+  // 펼쳐(각 엣지 출발 y 분산) 초기 밀집을 완화한다.
+  const edges = [];
+  const reqEdges = [];
+  for (const col of columns) {
+    for (const m of col.members) {
+      // 안전 체인: ASIL C/D 요구사항이 시험 단계로 추적되는 경로를 ASIL 색으로 강조(hiMA FS-FS Navy 대응).
+      reqEdges.push({ from: '__root__', to: m.id, color: _STAGE_COLORS[col.stage] || '#9ca3af', kind: 'req', safety: isSafety && col.kind === 'test' });
+    }
+  }
+  reqEdges.forEach((e, i) => { e.fromFrac = (i + 0.5) / reqEdges.length; });
+  edges.push(...reqEdges);
+  // UDS 함수 ↔ SUTS 단위시험 정확 매핑(row에서 추출 가능한 유일한 단계간 엣지)
+  const udsCol = columns.find(c => c.stage === 'UDS');
+  const sutsCol = columns.find(c => c.stage === 'SUTS');
+  if (udsCol && sutsCol && sutsCol.members.length) {
+    const utMap = _unitTestMap(row);
+    for (const u of udsCol.members) {
+      const key = _normFn(u.label);
+      if (!key || !utMap.has(key)) continue;
+      for (const s of sutsCol.members) {
+        if (_normFn(s.unit) === key) edges.push({ from: u.id, to: s.id, color: '#2563eb', kind: 'unit' });
+      }
+    }
+  }
+
+  // 분리된 인터페이스 함수(추적 정화) — 그래프 노드로는 안 그려 정화를 유지하되, 데이터 존재는
+  // 범례/패널로 정직하게 노출(함수가 UI에서 완전 소실되지 않도록).
+  const sdsFunctions = (Array.isArray(row?.sds_functions) ? row.sds_functions : []).map(s => String(s).trim()).filter(Boolean);
+  // 설계 요소(설계ID·상태명·표행) — 함수와 **분리**해 표시한다. 구 응답·구 캐시엔 이 필드가
+  // 없고 그때는 전부 sds_functions 에 들어 있으므로 빈 배열이면 분리 이전 표시 그대로다.
+  const sdsElements = (Array.isArray(row?.sds_design_elements) ? row.sds_design_elements : []).map(s => String(s).trim()).filter(Boolean);
+  // SyRS 상위 추적(배지) — 그래프 좌표 무변경, root 위 배지로 노출(SR→SyRS→SwRS 체인). 풀 부모 컬럼은 후속.
+  const syrsParents = (Array.isArray(row?.syrs_parents) ? row.syrs_parents : []).map(s => String(s).trim()).filter(Boolean);
+  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, sdsFunctions, sdsElements, syrsParents, columns, edges, width, height, nodeXY, rootY };
+}
+
+function _bez(x1, y1, x2, y2) {
+  const mx = (x1 + x2) / 2;
+  return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+}
+
+// 단계 → 노드 모양(hiMA UCOneIDTrace getNodeShape 대응): SwDS=House, SwUDS=InvHouse,
+// SwTS/TR=Ellipse, SwUTS/UTR=Diamond, SwITS/ITR=Octagon, 요구사항=Box. VectorCAST는 hiMA에
+// 없으나 시험 실행결과라 Ellipse로 둔다(SUTS Diamond와 구분).
+const _NODE_SHAPE = { SDS: 'house', HSIS: 'house', UDS: 'invhouse', STS: 'ellipse', SUTS: 'diamond', SITS: 'octagon', SyTS: 'ellipse', SyITS: 'octagon', VectorCAST: 'ellipse' };
+
+function _shapePath(shape, W, H) {
+  if (shape === 'house') return `M0,9 L${W / 2},0 L${W},9 L${W},${H} L0,${H} Z`;        // 집(△지붕)
+  if (shape === 'invhouse') return `M0,0 L${W},0 L${W},${H - 9} L${W / 2},${H} L0,${H - 9} Z`; // 역집
+  if (shape === 'diamond') return `M12,0 L${W - 12},0 L${W},${H / 2} L${W - 12},${H} L12,${H} L0,${H / 2} Z`; // 늘인 ◇
+  if (shape === 'octagon') return `M9,0 L${W - 9},0 L${W},9 L${W},${H - 9} L${W - 9},${H} L9,${H} L0,${H - 9} L0,9 Z`; // 8각
+  return `M0,0 L${W},0 L${W},${H} L0,${H} Z`; // box fallback
+}
+
+// 내보내기용 SVG 직렬화 — CSS 변수 fill을 현재 테마 computed 값으로 인라인(다운로드 SVG/PNG는
+// CSS 컨텍스트 밖이라 var() 미해석). 우리 SVG의 var fill 3종만 치환.
+function _graphSvgString(svgEl) {
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  const cs = getComputedStyle(svgEl);
+  const fg = (cs.getPropertyValue('--fg') || '#111827').trim() || '#111827';
+  const bgEl = (cs.getPropertyValue('--bg-elevated') || '#ffffff').trim() || '#ffffff';
+  const muted = (cs.getPropertyValue('--text-muted') || '#6b7280').trim() || '#6b7280';
+  const bg = (cs.getPropertyValue('--bg') || '#ffffff').trim() || '#ffffff';
+  // 노드 강조 dim(노드/placeholder <g>의 opacity)이 다운로드본에 박히지 않게 복원 — 선택 상태에서
+  // 내보내도 워시아웃 없이 전체가 또렷. 엣지는 <path opacity>라 g[opacity] 선택에서 제외(시각계층 보존).
+  clone.querySelectorAll('g[opacity]').forEach(g => g.setAttribute('opacity', '1'));
+  // 다운로드 SVG는 컨테이너 var(--bg) 밖이라 투명 → 다크테마 헤더/placeholder가 뷰어 흰배경에 묻힘.
+  // PNG(canvas fillRect)와 정합하도록 불투명 배경 rect를 최하단에 삽입.
+  const bgRect = clone.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  bgRect.setAttribute('width', '100%');
+  bgRect.setAttribute('height', '100%');
+  bgRect.setAttribute('fill', bg);
+  clone.insertBefore(bgRect, clone.firstChild);
+  let s = new XMLSerializer().serializeToString(clone);
+  s = s.split('var(--bg-elevated, #ffffff)').join(bgEl)
+    .split('var(--fg)').join(fg)
+    .split('var(--text-muted)').join(muted);
+  return s;
+}
+
+function _downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+// 그래프 노드 1개 (root/단계 공용). label은 truncate, 전체는 <title> 툴팁.
+// active=hover/선택 강조(dim), kbFocused=키보드 포커스 링(dim과 분리), node.impacted=영향도 변경함수.
+function ReqGraphNode({ node, color, active, kbFocused, onClick, onHover, onFocus, onBlur }) {
+  const G = _GRAPH;
+  const W = G.NODE_W, H = G.NODE_H;
+  const label = String(node.label || '');
+  const shown = label.length > 20 ? label.slice(0, 19) + '…' : label;
+  const impacted = !!node.impacted;
+  // 단계별 모양(hiMA 대응). root/요구사항은 box.
+  const shape = node.isRoot ? 'box' : (_NODE_SHAPE[node.stage] || 'box');
+  const stroke = impacted ? '#b45309' : color;
+  const sw = impacted ? 3 : (node.isRoot ? 2.5 : 1.5);
+  const fillStyle = { fill: 'var(--bg-elevated, #ffffff)' };
+  // 텍스트 y — house는 지붕만큼 아래, invhouse는 위쪽 본체에.
+  const textY = shape === 'house' ? H / 2 + 8 : shape === 'invhouse' ? H / 2 - 1 : H / 2 + 4;
+  const body = shape === 'box'
+    ? <rect width={W} height={H} rx={6} style={fillStyle} stroke={stroke} strokeWidth={sw} />
+    : shape === 'ellipse'
+      ? <rect width={W} height={H} rx={H / 2} style={fillStyle} stroke={stroke} strokeWidth={sw} />
+      : <path d={_shapePath(shape, W, H)} style={fillStyle} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />;
+  return (
+    <g transform={`translate(${node.x},${node.y})`} style={{ cursor: 'pointer' }} opacity={active ? 1 : 0.28}
+      role="button" tabIndex={0} aria-label={impacted ? `${label} (변경 영향 함수)` : label}
+      onClick={onClick}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(); } }}
+      onMouseEnter={() => onHover?.(node.id)} onMouseLeave={() => onHover?.(null)}
+      onFocus={() => onFocus?.(node.id)} onBlur={() => onBlur?.()}>
+      <title>{impacted ? `${label} — 변경 영향 함수(영향도 연동)` : label}</title>
+      {kbFocused && <rect x={-3} y={-3} width={W + 6} height={H + 6} rx={8} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="3 2" />}
+      {body}
+      {impacted && <circle cx={W - 9} cy={9} r={4} fill="#b45309" />}
+      <text x={12} y={textY} fontSize={11} fontWeight={node.isRoot || impacted ? 700 : 500} clipPath="url(#rg-node-clip)" style={{ fill: 'var(--fg)' }}>{shown}</text>
+    </g>
+  );
+}
+
+function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null, initialReqId = '', embedded = false }) {
+  const list = useMemo(() => (Array.isArray(rows) ? rows.filter(r => _reqGraphId(r)) : []), [rows]);
+  // 표 행에서 진입 시 그 요구사항으로 시작(인라인은 key로 remount되므로 초기값 시드로 충분). 검색창으로 변경 가능.
+  const [selId, setSelId] = useState(initialReqId || '');
+  const [selNode, setSelNode] = useState(null);
+  const [hoverId, setHoverId] = useState(null);
+  const [focusId, setFocusId] = useState(null); // 키보드 포커스(강조 dim과 분리)
+  const [levelFilter, setLevelFilter] = useState('all'); // 'all' | 'design' | 'test' (hiMA DisplayLevel 대응)
+  const svgRef = useRef(null); // 내보내기(SVG/PNG)용 SVG 참조
+  const [showSdsFns, setShowSdsFns] = useState(false); // SDS 인터페이스 함수 펼침(추적 정화 분리분)
+
+  const visibleKeys = useMemo(() => {
+    if (levelFilter === 'design') return ['SDS', 'HSIS', 'UDS'];
+    if (levelFilter === 'test') return ['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
+    return null; // 전체
+  }, [levelFilter]);
+
+  // 영향도 연동 변경함수 집합(정규화) — 그래프 안에서 변경 영향 UDS/시험 노드를 강조.
+  const focusSet = useMemo(() => {
+    const arr = Array.isArray(focusFunctions) ? focusFunctions : [];
+    return new Set(arr.map(f => _normFn(f)).filter(Boolean));
+  }, [focusFunctions]);
+
+  // 선택 row (입력 없으면 첫 항목 자동)
+  const selectedRow = useMemo(() => {
+    if (!list.length) return null;
+    if (!selId) return list[0];
+    return list.find(r => _reqGraphId(r) === selId) || null;
+  }, [list, selId]);
+
+  const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet, visibleKeys, linkTable) : null), [selectedRow, focusSet, visibleKeys, linkTable]);
+
+  // 표시 그래프 교체 시: 선택 노드가 새 graph에 여전히 존재하면 유지(레벨필터 좁히기에도 상세 보존),
+  // 없으면 리셋(selId 변경·필터로 단계 제거 시 stale selNode/유령 dimming 차단). hover/focus는 transient라 항상 리셋.
+  useEffect(() => {
+    // 노드 생존 시 보존하되, root('__root__')는 nodeXY에 항상 있으므로 요구사항 동일(label===reqId)일 때만
+    // 보존 — 안 그러면 요구사항 전환 후에도 root 상세패널이 옛 reqId를 영구 표시(stale).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 그래프 교체 시 선택 노드 보존/무효화 — stale 상세패널 방지
+    setSelNode(prev => (prev && graph && graph.nodeXY[prev.id] && (!prev.isRoot || prev.label === graph.reqId)) ? prev : null);
+    setHoverId(null); setFocusId(null);
+  }, [graph]);
+
+  // hover/선택 강조는 키보드 focus와 분리(focusId는 dim 트리거 안 함 — Tab 순회 깜빡임 방지).
+  // selValid: graph 교체 직후 useEffect 리셋 전 1프레임에 selNode가 stale일 수 있어, 렌더 중 즉시
+  // '현재 graph에 그 노드가 있을 때만' 강조를 채택 → 전환 프레임 전체-dim 깜빡임 방지(derive-during-render).
+  const selValid = selNode && graph && graph.nodeXY[selNode.id];
+  const activeNodeId = hoverId || (selValid ? selNode.id : null);
+  // 활성 노드와 엣지로 직접 연결된 이웃 노드 집합 — UDS↔SUTS 매핑 등 인접 노드도 함께 강조.
+  const neighborSet = useMemo(() => {
+    const s = new Set();
+    if (activeNodeId && graph) {
+      for (const e of graph.edges) {
+        if (e.from === activeNodeId) s.add(e.to);
+        else if (e.to === activeNodeId) s.add(e.from);
+      }
+    }
+    return s;
+  }, [graph, activeNodeId]);
+
+  if (!list.length) {
+    return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12 }}>표시할 요구사항이 없습니다.</div>;
+  }
+
+  const G = _GRAPH;
+  // graph는 selId 비매칭 시 null일 수 있다(아래 JSX는 {graph && …}로 가드) — 파생 const도 null-safe.
+  const headerLabels = ['요구사항', ...(graph ? graph.columns.map(c => c.label) : [])];
+  const isNodeActive = (id) => !activeNodeId || id === activeNodeId || neighborSet.has(id);
+  const isEdgeActive = (e) => !activeNodeId || e.from === activeNodeId || e.to === activeNodeId;
+  const totalHiddenFail = graph ? graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0) : 0;
+  const impactedCount = graph ? graph.columns.reduce((n, c) => n + c.members.filter(m => m.impacted).length, 0) : 0;
+
+  // 내보내기(hiMA SaveInVectorFormat/SaveAsImage 대응) — 클라이언트에서 SVG 직렬화/PNG 래스터화.
+  const exportSvg = () => {
+    if (!svgRef.current || !graph) return;
+    const s = _graphSvgString(svgRef.current);
+    _downloadBlob(new Blob([s], { type: 'image/svg+xml;charset=utf-8' }), `${graph.reqId}_trace_graph.svg`);
+  };
+  const exportPng = () => {
+    if (!svgRef.current || !graph) return;
+    const s = _graphSvgString(svgRef.current);
+    const bg = (getComputedStyle(svgRef.current).getPropertyValue('--bg') || '#ffffff').trim() || '#ffffff';
+    const w = graph.width, h = graph.height, scale = 2;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml;charset=utf-8' }));
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w * scale; canvas.height = h * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(b => { if (b) _downloadBlob(b, `${graph.reqId}_trace_graph.png`); }, 'image/png');
+    };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
+  };
+
+  return (
+    <div>
+      {/* 요구사항 선택 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        {/* 인라인(embedded)에선 행 버튼이 선택자이므로 내부 요구사항 선택창 숨김 — 하이라이트 어긋남·DOM id 중복 제거 */}
+        {!embedded && (<>
+          <label htmlFor="req-graph-input" style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>요구사항</label>
+          <input id="req-graph-input" list="req-graph-ids" value={selId} onChange={e => setSelId(e.target.value)}
+            placeholder={`요구사항 ID 선택/검색 (${list.length}건, 미입력 시 첫 항목)`}
+            style={{ flex: '1 1 280px', maxWidth: 440, padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }} />
+          <datalist id="req-graph-ids">
+            {list.slice(0, 1000).map((r, i) => {
+              const id = _reqGraphId(r);
+              return <option key={i} value={id}>{r.requirement_name ? `${id} — ${r.requirement_name}` : id}</option>;
+            })}
+          </datalist>
+          {selId && !selectedRow && <span style={{ fontSize: 11, color: '#d97706' }}>일치하는 요구사항 없음</span>}
+        </>)}
+        <div role="group" aria-label="단계 필터" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginLeft: 'auto' }}>
+          {[['all', '전체'], ['design', '설계'], ['test', '시험']].map(([k, lbl], i) => (
+            <button key={k} type="button" onClick={() => setLevelFilter(k)} aria-pressed={levelFilter === k}
+              title={k === 'design' ? 'SDS·HSIS·UDS만' : k === 'test' ? 'STS·SUTS·SITS·SyTS·SyITS·VectorCAST만' : '전체 단계'}
+              style={{ padding: '5px 10px', fontSize: 11, border: 'none', borderLeft: i ? '1px solid var(--border)' : 'none', cursor: 'pointer',
+                background: levelFilter === k ? 'var(--accent)' : 'var(--bg)', color: levelFilter === k ? '#fff' : 'var(--fg)', fontWeight: levelFilter === k ? 700 : 400 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {graph && (
+        <>
+          {/* 요약 + 범례 */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, alignItems: 'center' }}>
+            <span><strong style={{ color: 'var(--fg)' }}>{graph.reqId}</strong>{graph.reqName ? ` — ${graph.reqName}` : ''}</span>
+            {graph.asil && <span style={{ padding: '1px 7px', borderRadius: 10, background: (_ASIL_COLORS[graph.asil] || '#6b7280'), color: '#fff', fontWeight: 700 }}>ASIL {graph.asil}</span>}
+            {graph.syrsParents && graph.syrsParents.length > 0 && (
+              <span title={`상위 시스템 요구(SyRS) — SR→SyRS→SwRS 체인: ${graph.syrsParents.join(', ')}`}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 12, border: `1px solid ${_STAGE_COLORS.UDS}`, color: _STAGE_COLORS.UDS, fontWeight: 600 }}>
+                ↑ 상위요구 {graph.syrsParents.length}: {graph.syrsParents.slice(0, 4).join(', ')}{graph.syrsParents.length > 4 ? '…' : ''}
+              </span>
+            )}
+            {graph.columns.map(c => (
+              <span key={c.stage} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: _STAGE_COLORS[c.stage], display: 'inline-block' }} />
+                {c.label} {c.members.length}{c.hidden > 0 ? `(+${c.hidden})` : ''}
+              </span>
+            ))}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 14, height: 0, borderTop: '2px dashed #2563eb', display: 'inline-block' }} />UDS↔SUTS 단위시험 매핑
+            </span>
+            <span style={{ opacity: 0.65 }} title="그래프/트리는 VectorCAST 컬럼에 미분류 소스 시험도 포함하나, 매트릭스 뷰는 엄격히 source='VectorCAST'만 셉니다(백엔드 link_table과 동일).">
+              ⓘ VectorCAST=실행시험+미분류 소스
+            </span>
+            {impactedCount > 0 && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#b45309', fontWeight: 600 }}
+                title="영향도 분석에서 변경된 함수에 해당하는 UDS/시험 노드 (주황 테두리·● 표시)">
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#b45309', display: 'inline-block' }} />변경 영향 {impactedCount}
+              </span>
+            )}
+            {totalHiddenFail > 0 && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`시험 컬럼 캡(${G.MAX_PER_COL})을 초과해 표시되지 않은 FAIL 시험이 있습니다. FAIL 우선 정렬로 대부분 노출되나, FAIL이 캡보다 많은 예외입니다.`}>
+                ⚠ 미표시 FAIL {totalHiddenFail}
+              </span>
+            )}
+            {graph.isSafety && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                title="ASIL C/D 요구사항이 시험 단계로 추적되는 경로(안전 검증 체인)를 ASIL 색·굵게로 강조합니다.">
+                <span style={{ width: 14, height: 0, borderTop: `2px solid ${_ASIL_COLORS[graph.asil] || '#dc2626'}`, display: 'inline-block' }} />안전 검증 경로
+              </span>
+            )}
+            {graph.safetyGap && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`ISO 26262: ASIL ${graph.asil} 요구사항의 기대 시험이 누락됐습니다(백엔드 asil_coverage와 동일 규칙 — C/D=SUTS·SITS 필수, A/B=시험 1개 이상).`}>
+                ⚠ 안전 검증 공백: {graph.safetyMissing.includes('ANY_TEST') ? '시험 없음' : `${graph.safetyMissing.join('·')} 누락`}
+              </span>
+            )}
+            <span style={{ opacity: 0.6 }} title="hiMA UCOneIDTrace 표기 대응 — 설계=집(△지붕)/단위설계=역집/시험스펙=타원/단위시험=◇/통합시험=8각/요구사항=□">
+              모양: 설계▭집·단위설계▽·시험◯◇⯃
+            </span>
+            {(graph.sdsFunctions.length > 0 || graph.sdsElements.length > 0) && (
+              <button type="button" onClick={() => setShowSdsFns(v => !v)} aria-expanded={showSdsFns}
+                title="SDS 밴드(설계 컴포넌트)에 안 세는 나머지 추적 근거 — 인터페이스 함수와 설계 요소(설계ID·상태명 등). 단위시험(SUTS)·VectorCAST 추적의 근거. 클릭해 목록 보기."
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 12,
+                  background: showSdsFns ? 'var(--accent)' : 'var(--bg)', color: showSdsFns ? '#fff' : 'var(--fg)', cursor: 'pointer' }}>
+                {/* 함수와 설계요소를 한 숫자로 합치면 상태명·목차줄이 '함수'로 표시된다(실측 21.3%) */}
+                함수 {graph.sdsFunctions.length}
+                {graph.sdsElements.length > 0 && ` · 설계요소 ${graph.sdsElements.length}`}
+                {' '}{showSdsFns ? '▲' : '▼'}
+              </button>
+            )}
+            <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
+              <button type="button" onClick={exportSvg} title="그래프를 SVG(벡터)로 내보내기 (hiMA SaveInVectorFormat 대응)"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>SVG ↓</button>
+              <button type="button" onClick={exportPng} title="그래프를 PNG(이미지)로 내보내기 (hiMA SaveAsImage 대응)"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>PNG ↓</button>
+            </div>
+          </div>
+
+          {/* 펼침 패널 — 함수와 설계요소를 **분리해** 보여준다. 한 목록으로 합쳐 '멤버 함수'라
+              라벨하던 동안 상태명(`standby`)·설계ID(`SwST_01`)·목차 줄이 함수로 표시됐다
+              (HDPDM01 실측 634 중 135 = 21.3%, 63행 중 52행). 기본 접힘은 유지. */}
+          {showSdsFns && (graph.sdsFunctions.length > 0 || graph.sdsElements.length > 0) && (
+            <div style={{ marginBottom: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', maxHeight: 220, overflow: 'auto' }}>
+              {graph.sdsFunctions.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                    SDS 인터페이스 함수 {graph.sdsFunctions.length}개 — 설계 컴포넌트의 멤버 함수(SDS 밴드 집계엔 미포함, SUTS/VectorCAST 단위시험 추적 근거)
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {graph.sdsFunctions.slice(0, 500).map((fn, i) => (
+                      <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)' }}>{fn}</span>
+                    ))}
+                    {graph.sdsFunctions.length > 500 && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>… +{graph.sdsFunctions.length - 500}</span>}
+                  </div>
+                </>
+              )}
+              {graph.sdsElements.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', margin: `${graph.sdsFunctions.length > 0 ? 10 : 0}px 0 6px` }}>
+                    SDS 설계 요소 {graph.sdsElements.length}개 — 설계ID(SwFn_/SwST_)·상태명·표 항목. <b>함수가 아니다</b>(SDS 밴드 집계엔 미포함, 설계 추적 근거로는 유효)
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {graph.sdsElements.slice(0, 500).map((el, i) => (
+                      <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--bg)', border: '1px dashed var(--border)', color: 'var(--text-muted)' }}>{el}</span>
+                    ))}
+                    {graph.sdsElements.length > 500 && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>… +{graph.sdsElements.length - 500}</span>}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* SVG 그래프 */}
+          <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
+            <svg ref={svgRef} width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.reqId} 하위 추적 그래프`}>
+              <defs>
+                {/* 엣지 방향 화살표(타겟 노드 끝). userSpaceOnUse로 strokeWidth와 무관하게 일정 크기. */}
+                <marker id="rg-arrow" markerWidth={7} markerHeight={7} refX={6} refY={2.5} orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L6,2.5 L0,5 Z" fill="#94a3b8" />
+                </marker>
+                {/* 노드 라벨 클립 — 문자수 truncate가 CJK(한글 컴포넌트명 등)에서 박스를 넘어
+                    이웃 컬럼을 침범하던 것을 박스 내로 가둠. userSpaceOnUse라 g translate 로컬 좌표로 재사용. */}
+                <clipPath id="rg-node-clip">
+                  <rect x={0} y={0} width={G.NODE_W} height={G.NODE_H} rx={6} />
+                </clipPath>
+              </defs>
+              {/* 컬럼 헤더 */}
+              {headerLabels.map((h, ci) => (
+                <text key={ci} x={ci * G.COL_W + G.PAD} y={16} fontSize={11} fontWeight={700} style={{ fill: 'var(--text-muted)' }}>{h}</text>
+              ))}
+              {/* 엣지 (노드보다 먼저 그려 뒤에 깔림) */}
+              {graph.edges.map((e, i) => {
+                const a = graph.nodeXY[e.from], b = graph.nodeXY[e.to];
+                if (!a || !b) return null;
+                const x1 = a.x + G.NODE_W;
+                const y1 = a.y + (e.fromFrac != null ? e.fromFrac * G.NODE_H : G.NODE_H / 2);
+                const x2 = b.x, y2 = b.y + G.NODE_H / 2;
+                const active = isEdgeActive(e);
+                // 안전 체인(ASIL C/D 요구사항→시험 단계)은 ASIL 색·굵게로 부각(hiMA FS-FS Navy 대응).
+                const stroke = e.kind === 'unit' ? '#2563eb' : (e.safety ? (_ASIL_COLORS[graph.asil] || e.color) : e.color);
+                const sw = e.kind === 'unit' ? 2 : (e.safety ? 2 : 1.2);
+                // 초기(미선택) 상태에선 req 엣지를 옅게 깔아 hairball 밀도를 낮추되, 안전/unit 엣지는 진하게.
+                const idleOp = e.kind === 'unit' ? 0.5 : (e.safety ? 0.45 : 0.16);
+                const op = active
+                  ? (e.kind === 'unit' ? 0.9 : (e.safety ? 0.85 : 0.55))
+                  : (activeNodeId ? 0.06 : idleOp);
+                return <path key={i} d={_bez(x1, y1, x2, y2)} fill="none"
+                  stroke={stroke} strokeWidth={sw}
+                  strokeDasharray={e.kind === 'unit' ? '4 2' : undefined}
+                  markerEnd="url(#rg-arrow)" opacity={op} />;
+              })}
+              {/* root(요구사항) 노드 */}
+              <ReqGraphNode node={{ id: '__root__', label: graph.reqId, x: G.PAD, y: graph.rootY, isRoot: true }}
+                color={_ASIL_COLORS[graph.asil] || '#374151'}
+                active={isNodeActive('__root__')} kbFocused={focusId === '__root__'}
+                onClick={() => setSelNode({ id: '__root__', label: graph.reqId, stage: '요구사항', asil: graph.asil, isRoot: true })}
+                onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              {/* 단계 노드 */}
+              {graph.columns.map(col => col.members.map(m => (
+                <ReqGraphNode key={m.id} node={m} color={_STAGE_COLORS[m.stage] || '#9ca3af'}
+                  active={isNodeActive(m.id)} kbFocused={focusId === m.id}
+                  onClick={() => setSelNode(m)} onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              )))}
+              {/* 끊긴 단계 placeholder('없음') */}
+              {graph.columns.filter(c => c.members.length === 0).map(c => (
+                <g key={`empty-${c.stage}`} opacity={activeNodeId ? 0.28 : 1} transform={`translate(${c.colIndex * G.COL_W + G.PAD},${G.HEADER_H + G.PAD})`}>
+                  <rect width={G.NODE_W} height={G.NODE_H} rx={5} fill="none" stroke="#d1d5db" strokeDasharray="4 3" />
+                  <text x={G.NODE_W / 2} y={G.NODE_H / 2 + 4} fontSize={10} textAnchor="middle" style={{ fill: '#9ca3af' }}>없음</text>
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          {/* 노드 상세 */}
+          {selNode && (
+            <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', fontSize: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <strong style={{ color: 'var(--fg)', wordBreak: 'break-all' }}>{selNode.label}</strong>
+                <button type="button" onClick={() => setSelNode(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 16, lineHeight: 1 }} aria-label="닫기">×</button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, color: 'var(--text-muted)' }}>
+                <span>단계 <strong style={{ color: selNode.isRoot ? 'var(--fg)' : (_STAGE_COLORS[selNode.stage] || 'var(--fg)') }}>{selNode.isRoot ? '요구사항' : selNode.stage}</strong></span>
+                {selNode.isRoot && selNode.asil && <span>ASIL <strong>{selNode.asil}</strong></span>}
+                {selNode.source && <span>소스 <strong>{selNode.source}</strong></span>}
+                {selNode.unit && <span>유닛 <strong>{selNode.unit}</strong></span>}
+                {selNode.result && <span>결과 <strong style={{ color: _testResultColor(selNode.result) }}>{selNode.result}</strong></span>}
+                {selNode.confidence && <span>신뢰 <strong>{CONFIDENCE_LABELS[selNode.confidence] || selNode.confidence}</strong></span>}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── 함수중심 V-model 트레이스 그래프 (viewMode='funcgraph') ──────────────────────
+   요구사항 그래프(TraceReqGraphView)의 역(逆). root=함수(UDS). 그 함수가 source_ids로
+   구현한 요구사항/설계(SDS, 요구사항 경유)와, 그 함수 직접 단위시험(SUTS unit==함수)·
+   VectorCAST 실행결과(subprogram==함수, PASS/FAIL)를 방사형으로. hiMA UCOneIDTrace의
+   '함수 ID' 추적에 대응하나, 우리만의 단위시험 코드연결·VectorCAST PASS/FAIL을 노드로 노출.
+   ── function-specific(SUTS·VectorCAST: 이 함수 직접) vs requirement-level(요구·설계·STS·SITS:
+   함수가 구현한 요구사항 경유)을 색·범례로 구분. MC/DC 등 커버리지%는 클라 데이터에 없어 표기 안 함. */
+const _FUNC_STAGES = [
+  { key: 'REQ',  label: '요구사항',        kind: 'req' },
+  { key: 'SDS',  label: '설계(SDS)',       kind: 'design' },
+  { key: 'STS',  label: 'STS',            kind: 'test' },
+  { key: 'SUTS', label: '단위시험(SUTS)',  kind: 'test' },
+  { key: 'SITS', label: 'SITS',           kind: 'test' },
+  // 시스템 레벨 시험(SW V-model 상단) — SITS와 동일 성격(요구사항 경유), 색만 시스템 보라/마젠타로 구분.
+  { key: 'SyTS', label: 'SyTS',           kind: 'test' },
+  { key: 'SyITS', label: 'SyITS',          kind: 'test' },
+  { key: 'VectorCAST', label: 'VectorCAST', kind: 'test' },
+];
+// SW 전용 함수그래프 — 시스템 시험(SyTS/SyITS) 컬럼 숨김(safetyMissing 계산은 SUTS/VectorCAST 기준이라 무관).
+const _FUNC_STAGES_VISIBLE = _FUNC_STAGES.filter(s => !_HIDDEN_BANDS.has(s.key));
+// REQ 컬럼 색(요구사항=중립 슬레이트). 나머지 단계는 _STAGE_COLORS 재사용.
+const _FUNC_STAGE_COLORS = { REQ: '#475569', SDS: _STAGE_COLORS.SDS, STS: _STAGE_COLORS.STS, SUTS: _STAGE_COLORS.SUTS, SITS: _STAGE_COLORS.SITS, SyTS: _STAGE_COLORS.SyTS, SyITS: _STAGE_COLORS.SyITS, VectorCAST: _STAGE_COLORS.VectorCAST };
+const _FN_ASIL_RANK = { QM: 0, A: 1, B: 2, C: 3, D: 4 };
+// 선행 언더스코어 bridge — '_entrypoint'(UDS) vs 'entrypoint'(SUTS unit) 거짓 공백 방지(백엔드 _sds_comp_key 대응).
+function _looseFn(x) { return _normFn(x).replace(/^_+/, ''); }
+// ASIL 결합 토큰('A, B' · 'C/D')에서 최고 등급(백엔드 _asil_max_of 대칭). 단일 토큰만 키였던 과소평가 방어.
+function _asilMaxRank(raw) {
+  let rank = -1, asil = '';
+  for (const t of String(raw || '').toUpperCase().split(/[,/\s]+/).filter(Boolean)) {
+    const rk = _FN_ASIL_RANK[t];
+    if (rk != null && rk > rank) { rank = rk; asil = t; }
+  }
+  return { rank, asil };
+}
+
+// 전체 행의 UDS 함수 인벤토리(고유) — 피커용. {norm, display}.
+function _funcInventory(rows) {
+  const seen = new Map();
+  for (const r of (Array.isArray(rows) ? rows : [])) {
+    for (const s of (Array.isArray(r?.source_ids) ? r.source_ids : [])) {
+      const disp = String(s ?? '').trim();
+      const norm = _normFn(disp);
+      if (!norm || seen.has(norm)) continue;
+      seen.set(norm, disp);
+    }
+  }
+  return [...seen.entries()].map(([norm, display]) => ({ norm, display })).sort((a, b) => a.display.localeCompare(b.display));
+}
+
+function _buildFuncGraph(funcDisplay, rows, focusSet, visibleKeys) {
+  const G = _GRAPH;
+  const nf = _normFn(funcDisplay);      // 노드 id prefix·자기강조용(엄격)
+  const lf = _looseFn(funcDisplay);     // 크로스밴드 매칭용(선행 _ bridge)
+  const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
+  const impactedSelf = !!(fset && (fset.has(nf) || [...fset].some(f => _looseFn(f) === lf)));
+  // 이 함수를 source_ids(UDS)에 가진 요구사항 = 함수가 구현한 요구사항.
+  const implRows = (Array.isArray(rows) ? rows : []).filter(r =>
+    (Array.isArray(r?.source_ids) ? r.source_ids : []).some(s => _looseFn(s) === lf));
+  // 함수 ASIL = 구현 요구사항들의 최고 등급(결합 토큰 'A, B'도 split-max).
+  let asilRank = -1, asil = '';
+  for (const r of implRows) {
+    const { rank, asil: a } = _asilMaxRank(r?.asil || r?.requirement_asil || r?.ASIL);
+    if (rank > asilRank) { asilRank = rank; asil = a; }
+  }
+  const isSafety = asilRank >= 3; // ASIL C/D
+
+  // SwUFn-키 프로젝트 bridge: VectorCAST subprogram이 함수명이 아니라 SwUFn ID인 산출물(KJPDS02 등)에서
+  // 함수↔VectorCAST를 잇기 위해, 이 함수의 SUTS 시험케이스(SwUTC_SwUFn_####)에서 SwUFn ID를 유도한다.
+  const swufnSet = new Set();
+  const SWUFN_RE = /sw_?[ui]_?fn_?\d+/ig; // 백엔드 _SWUFN_RE(Sw[UI]Fn) 대칭 — 단위(U)·통합(I) 모두
+  for (const r of implRows) {
+    for (const t of _stageMembers(r, 'SUTS').items) {
+      if (_looseFn(t?.unit) !== lf && _looseFn(t?.subprogram) !== lf) continue;
+      const mm = String(t?.testcase ?? t?.id ?? '').match(SWUFN_RE);
+      if (mm) mm.forEach(x => swufnSet.add(_normFn(x)));
+    }
+  }
+  // 함수 직접 시험 매칭: 함수명(loose) 일치 OR SwUFn ID bridge 일치(SwUFn-키 vcast).
+  const matchesFn = (t) => {
+    if (_looseFn(t?.subprogram) === lf || _looseFn(t?.unit) === lf) return true;
+    if (swufnSet.size) {
+      const cand = _normFn(t?.subprogram) || _normFn(t?.testcase);
+      if (cand && swufnSet.has(cand)) return true;
+    }
+    return false;
+  };
+
+  // 요구사항·설계 멤버(고유) — REQ는 개별 ASIL/명 보유(mixed-criticality 추적 손실 방지).
+  const reqMembers = [];
+  const seenReq = new Set();
+  for (const r of implRows) {
+    const rid = _reqGraphId(r);
+    if (!rid || seenReq.has(rid)) continue;
+    seenReq.add(rid);
+    reqMembers.push({ label: rid, stage: 'REQ', kind: 'req', type: 'ids',
+      name: String(r?.requirement_name ?? '').trim(),
+      asil: _asilMaxRank(r?.asil || r?.requirement_asil || r?.ASIL).asil });
+  }
+  const sdsMembers = [];
+  const seenSds = new Set();
+  for (const r of implRows) {
+    for (const c of (Array.isArray(r?.sds_components) ? r.sds_components : [])) {
+      const lab = String(c ?? '').trim();
+      if (!lab || seenSds.has(lab)) continue;
+      seenSds.add(lab);
+      sdsMembers.push({ label: lab, stage: 'SDS', kind: 'design', type: 'ids' });
+    }
+  }
+  // 시험 멤버 — dedup(단계+라벨+유닛). fnSpecific=이 함수 직접(SUTS·VectorCAST, 함수명/SwUFn 매칭).
+  const collectTests = (stageKey, fnSpecific) => {
+    const out = [];
+    const seen = new Set();
+    for (const r of implRows) {
+      for (const t of _stageMembers(r, stageKey).items) {
+        if (fnSpecific && !matchesFn(t)) continue;
+        const lab = _testId(t);
+        if (!lab) continue;
+        const key = `${stageKey}|${lab}|${_normFn(t?.unit)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ label: lab, stage: stageKey, kind: 'test', type: 'tests',
+          result: String(t?.result ?? ''), unit: String(t?.unit ?? ''),
+          source: String(t?.source ?? ''), confidence: String(t?.confidence ?? '') });
+      }
+    }
+    return out;
+  };
+  const membersByStage = {
+    REQ: reqMembers,
+    SDS: sdsMembers,
+    STS: collectTests('STS', false),
+    SUTS: collectTests('SUTS', true),
+    SITS: collectTests('SITS', false),
+    // 시스템 시험은 요구사항 경유(함수 직접 매칭 아님) → fnSpecific=false (SITS와 동일).
+    SyTS: collectTests('SyTS', false),
+    SyITS: collectTests('SyITS', false),
+    VectorCAST: collectTests('VectorCAST', true),
+  };
+
+  // 안전 검증 공백 — ASIL C/D 함수인데 단위시험·VectorCAST 실행이 없거나 FAIL이면 공백.
+  const safetyMissing = [];
+  if (asilRank >= 3) {
+    if (membersByStage.SUTS.length === 0) safetyMissing.push('단위시험');
+    if (membersByStage.VectorCAST.length === 0) safetyMissing.push('VectorCAST');
+    // FAIL은 ASIL 무관 결함이나 '안전 검증 공백' 배너는 C/D 한정(요구사항 그래프 규칙과 통일).
+    // 모든 ASIL의 FAIL은 노드 결과 색(빨강)으로 이미 노출됨.
+    if (membersByStage.VectorCAST.some(m => _resultRank(m.result) === 0)) safetyMissing.push('VectorCAST FAIL');
+  }
+  const safetyGap = safetyMissing.length > 0;
+
+  const stages = (Array.isArray(visibleKeys) && visibleKeys.length)
+    ? _FUNC_STAGES_VISIBLE.filter(s => visibleKeys.includes(s.key)) : _FUNC_STAGES_VISIBLE;
+
+  const columns = stages.map((s, ci) => {
+    // 멤버 노드엔 impacted 부여 안 함 — 변경 영향은 root(함수) impactedSelf로만 표시. 시험/요구 노드에
+    // impacted를 달면 ReqGraphNode가 '변경 영향 함수'로 오표기(시험 TC는 변경함수가 아님).
+    let all = membersByStage[s.key].map((m, i) => ({ ...m, id: `${nf}::${s.key}:${i}` }));
+    if (s.kind === 'test' && all.length > G.MAX_PER_COL) {
+      all = all.map((m, idx) => ({ m, idx }))
+        .sort((a, b) => (_resultRank(a.m.result) - _resultRank(b.m.result)) || (a.idx - b.idx))
+        .map(o => o.m);
+    }
+    const shown = all.slice(0, G.MAX_PER_COL);
+    const hiddenFail = all.slice(G.MAX_PER_COL).filter(m => _resultRank(m.result) === 0).length;
+    return { stage: s.key, label: s.label, kind: s.kind, colIndex: ci + 1, members: shown, hidden: all.length - shown.length, hiddenFail };
+  });
+
+  // 좌표
+  const maxRows = Math.max(1, ...columns.map(c => c.members.length || 1));
+  const bodyH = maxRows * (G.NODE_H + G.GAP);
+  const height = G.HEADER_H + bodyH + G.PAD * 2;
+  const width = (stages.length + 1) * G.COL_W;
+  const nodeXY = {};
+  const rootY = G.HEADER_H + G.PAD + Math.max(0, (bodyH - (G.NODE_H + G.GAP)) / 2);
+  nodeXY['__root__'] = { x: G.PAD, y: rootY };
+  for (const col of columns) {
+    const x = col.colIndex * G.COL_W + G.PAD;
+    col.members.forEach((m, mi) => {
+      const y = G.HEADER_H + G.PAD + mi * (G.NODE_H + G.GAP);
+      m.x = x; m.y = y; nodeXY[m.id] = { x, y };
+    });
+  }
+  // 엣지: 함수(root) → 각 멤버. 안전 체인(C/D 함수→시험)은 ASIL 색 강조.
+  const edges = [];
+  for (const col of columns) {
+    // STS/SITS·SyTS/SyITS는 함수가 구현한 '요구사항'의 시험(함수 직접 대응 아님) → 점선으로 구분(범례 일치).
+    // SyTS/SyITS도 collectTests fnSpecific=false(요구사항 경유)라 SITS와 동일하게 점선 처리.
+    const viaReq = col.stage === 'STS' || col.stage === 'SITS' || col.stage === 'SyTS' || col.stage === 'SyITS';
+    for (const m of col.members) {
+      edges.push({ from: '__root__', to: m.id, color: _FUNC_STAGE_COLORS[col.stage] || '#9ca3af', kind: 'req', viaReq, safety: isSafety && col.kind === 'test' });
+    }
+  }
+  edges.forEach((e, i) => { e.fromFrac = (i + 0.5) / Math.max(1, edges.length); });
+
+  return { funcId: funcDisplay, asil, asilRank, isSafety, safetyGap, safetyMissing, impactedSelf, reqCount: reqMembers.length, columns, edges, width, height, nodeXY, rootY };
+}
+
+function TraceFuncGraphView({ rows, focusFunctions = null, initialFn = '', embedded = false }) {
+  const inventory = useMemo(() => _funcInventory(rows), [rows]);
+  // 표에서 함수 클릭 진입 시 그 함수로 시작(뷰 전환마다 새로 마운트되므로 초기값으로 시드). 검색창으로 변경 가능.
+  const [selFn, setSelFn] = useState(initialFn || '');
+  const [selNode, setSelNode] = useState(null);
+  const [hoverId, setHoverId] = useState(null);
+  const [focusId, setFocusId] = useState(null);
+  const [levelFilter, setLevelFilter] = useState('all'); // 'all' | 'design' | 'test'
+  const svgRef = useRef(null);
+
+  const visibleKeys = useMemo(() => {
+    if (levelFilter === 'design') return ['REQ', 'SDS'];
+    if (levelFilter === 'test') return ['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
+    return null;
+  }, [levelFilter]);
+
+  const focusSet = useMemo(() => {
+    const arr = Array.isArray(focusFunctions) ? focusFunctions : [];
+    return new Set(arr.map(f => _normFn(f)).filter(Boolean));
+  }, [focusFunctions]);
+
+  const selectedFn = useMemo(() => {
+    if (!inventory.length) return null;
+    if (!selFn) return inventory[0].display;
+    const nf = _normFn(selFn);
+    const hit = inventory.find(f => f.norm === nf);
+    return hit ? hit.display : null;
+  }, [inventory, selFn]);
+
+  const graph = useMemo(() => (selectedFn ? _buildFuncGraph(selectedFn, rows, focusSet, visibleKeys) : null), [selectedFn, rows, focusSet, visibleKeys]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 위와 동일(함수 그래프 축)
+    setSelNode(prev => (prev && graph && graph.nodeXY[prev.id] && (!prev.isRoot || prev.label === graph.funcId)) ? prev : null);
+    setHoverId(null); setFocusId(null);
+  }, [graph]);
+
+  const selValid = selNode && graph && graph.nodeXY[selNode.id];
+  const activeNodeId = hoverId || (selValid ? selNode.id : null);
+  const neighborSet = useMemo(() => {
+    const s = new Set();
+    if (activeNodeId && graph) {
+      for (const e of graph.edges) {
+        if (e.from === activeNodeId) s.add(e.to);
+        else if (e.to === activeNodeId) s.add(e.from);
+      }
+    }
+    return s;
+  }, [graph, activeNodeId]);
+
+  if (!inventory.length) {
+    return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12 }}>표시할 UDS 함수가 없습니다(추적성 매트릭스에 source_ids 미존재 — UDS 추출/매핑을 먼저 실행하세요).</div>;
+  }
+
+  const G = _GRAPH;
+  const headerLabels = ['함수', ...(graph ? graph.columns.map(c => c.label) : [])];
+  const isNodeActive = (id) => !activeNodeId || id === activeNodeId || neighborSet.has(id);
+  const isEdgeActive = (e) => !activeNodeId || e.from === activeNodeId || e.to === activeNodeId;
+  const totalHiddenFail = graph ? graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0) : 0;
+
+  const exportSvg = () => {
+    if (!svgRef.current || !graph) return;
+    _downloadBlob(new Blob([_graphSvgString(svgRef.current)], { type: 'image/svg+xml;charset=utf-8' }), `${graph.funcId}_func_trace.svg`);
+  };
+  const exportPng = () => {
+    if (!svgRef.current || !graph) return;
+    const s = _graphSvgString(svgRef.current);
+    const bg = (getComputedStyle(svgRef.current).getPropertyValue('--bg') || '#ffffff').trim() || '#ffffff';
+    const w = graph.width, h = graph.height, scale = 2;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml;charset=utf-8' }));
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w * scale; canvas.height = h * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(b => { if (b) _downloadBlob(b, `${graph.funcId}_func_trace.png`); }, 'image/png');
+    };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
+  };
+
+  return (
+    <div>
+      {/* 함수 선택 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        {/* 인라인(embedded)에선 행의 함수명 버튼이 선택자이므로 내부 함수 선택창 숨김 — 하이라이트 어긋남·DOM id 중복 제거 */}
+        {!embedded && (<>
+          <label htmlFor="func-graph-input" style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>함수</label>
+          <input id="func-graph-input" list="func-graph-ids" value={selFn} onChange={e => setSelFn(e.target.value)}
+            placeholder={`UDS 함수 선택/검색 (${inventory.length}개, 미입력 시 첫 항목)`}
+            style={{ flex: '1 1 280px', maxWidth: 440, padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }} />
+          <datalist id="func-graph-ids">
+            {inventory.slice(0, 2000).map((f, i) => <option key={i} value={f.display} />)}
+          </datalist>
+          {selFn && !selectedFn && <span style={{ fontSize: 11, color: '#d97706' }}>일치하는 함수 없음</span>}
+        </>)}
+        <div role="group" aria-label="단계 필터" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginLeft: 'auto' }}>
+          {[['all', '전체'], ['design', '설계'], ['test', '시험']].map(([k, lbl], i) => (
+            <button key={k} type="button" onClick={() => setLevelFilter(k)} aria-pressed={levelFilter === k}
+              title={k === 'design' ? '요구사항·SDS만' : k === 'test' ? 'STS·SUTS·SITS·SyTS·SyITS·VectorCAST만' : '전체 단계'}
+              style={{ padding: '5px 10px', fontSize: 11, border: 'none', borderLeft: i ? '1px solid var(--border)' : 'none', cursor: 'pointer',
+                background: levelFilter === k ? 'var(--accent)' : 'var(--bg)', color: levelFilter === k ? '#fff' : 'var(--fg)', fontWeight: levelFilter === k ? 700 : 400 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {graph && (
+        <>
+          {/* 요약 + 범례 */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, alignItems: 'center' }}>
+            <span><strong style={{ color: 'var(--fg)', wordBreak: 'break-all' }}>{graph.funcId}</strong></span>
+            {graph.asil && <span style={{ padding: '1px 7px', borderRadius: 10, background: (_ASIL_COLORS[graph.asil] || '#6b7280'), color: '#fff', fontWeight: 700 }}>ASIL {graph.asil}</span>}
+            {graph.reqCount > 0 && <span title="이 함수가 구현(source_ids 포함)하는 요구사항 수">구현 요구사항 <strong style={{ color: 'var(--fg)' }}>{graph.reqCount}</strong></span>}
+            {graph.columns.map(c => (
+              <span key={c.stage} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: _FUNC_STAGE_COLORS[c.stage], display: 'inline-block' }} />
+                {c.label} {c.members.length}{c.hidden > 0 ? `(+${c.hidden})` : ''}
+              </span>
+            ))}
+            <span style={{ opacity: 0.7 }} title="단위시험(SUTS)·VectorCAST는 이 함수에 직접 연결(unit/subprogram==함수). 요구사항·설계·STS·SITS는 이 함수가 구현한 요구사항을 경유한 연결입니다.">
+              ⓘ SUTS·VectorCAST=함수 직접 / 나머지=요구사항 경유
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} title="STS·SITS는 함수가 구현한 요구사항의 시험(함수 직접 대응 아님)이라 점선으로 구분합니다.">
+              <span style={{ width: 14, height: 0, borderTop: '2px dashed #94a3b8', display: 'inline-block' }} />요구사항 경유 시험(STS·SITS)
+            </span>
+            {totalHiddenFail > 0 && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`시험 컬럼 캡(${G.MAX_PER_COL})을 초과해 표시되지 않은 FAIL 시험이 있습니다(FAIL 우선 정렬).`}>
+                ⚠ 미표시 FAIL {totalHiddenFail}
+              </span>
+            )}
+            {graph.isSafety && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                title="ASIL C/D 함수가 단위시험·VectorCAST로 검증되는 경로를 ASIL 색·굵게로 강조합니다.">
+                <span style={{ width: 14, height: 0, borderTop: `2px solid ${_ASIL_COLORS[graph.asil] || '#dc2626'}`, display: 'inline-block' }} />안전 검증 경로
+              </span>
+            )}
+            {graph.safetyGap && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`ISO 26262: ASIL ${graph.asil} 함수의 시험 검증이 부족합니다(C/D=단위시험·VectorCAST 기대, FAIL 시 결함).`}>
+                ⚠ 검증 공백: {graph.safetyMissing.join('·')}
+              </span>
+            )}
+            {graph.impactedSelf && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#b45309', fontWeight: 600 }}
+                title="영향도 분석에서 변경된 함수입니다.">
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#b45309', display: 'inline-block' }} />변경 영향 함수
+              </span>
+            )}
+            <span style={{ opacity: 0.6 }} title="hiMA UCOneIDTrace 표기 대응 — 요구사항=□·설계=집(△지붕)·시험스펙=타원·단위시험=◇·통합시험=8각">
+              모양: 요구□·설계집·시험◯◇⯃
+            </span>
+            <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
+              <button type="button" onClick={exportSvg} title="그래프를 SVG(벡터)로 내보내기"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>SVG ↓</button>
+              <button type="button" onClick={exportPng} title="그래프를 PNG(이미지)로 내보내기"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>PNG ↓</button>
+            </div>
+          </div>
+
+          {/* SVG 그래프 */}
+          <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
+            <svg ref={svgRef} width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.funcId} 함수중심 추적 그래프`}>
+              <defs>
+                <marker id="rg-arrow" markerWidth={7} markerHeight={7} refX={6} refY={2.5} orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L6,2.5 L0,5 Z" fill="#94a3b8" />
+                </marker>
+                <clipPath id="rg-node-clip">
+                  <rect x={0} y={0} width={G.NODE_W} height={G.NODE_H} rx={6} />
+                </clipPath>
+              </defs>
+              {headerLabels.map((h, ci) => (
+                <text key={ci} x={ci * G.COL_W + G.PAD} y={16} fontSize={11} fontWeight={700} style={{ fill: 'var(--text-muted)' }}>{h}</text>
+              ))}
+              {graph.edges.map((e, i) => {
+                const a = graph.nodeXY[e.from], b = graph.nodeXY[e.to];
+                if (!a || !b) return null;
+                const x1 = a.x + G.NODE_W;
+                const y1 = a.y + (e.fromFrac != null ? e.fromFrac * G.NODE_H : G.NODE_H / 2);
+                const x2 = b.x, y2 = b.y + G.NODE_H / 2;
+                const active = isEdgeActive(e);
+                const stroke = e.safety ? (_ASIL_COLORS[graph.asil] || e.color) : e.color;
+                const sw = e.safety ? 2 : 1.2;
+                const idleOp = e.safety ? 0.45 : 0.16;
+                const op = active ? (e.safety ? 0.85 : 0.55) : (activeNodeId ? 0.06 : idleOp);
+                return <path key={i} d={_bez(x1, y1, x2, y2)} fill="none" stroke={stroke} strokeWidth={sw} strokeDasharray={e.viaReq ? '4 2' : undefined} markerEnd="url(#rg-arrow)" opacity={op} />;
+              })}
+              {/* root(함수) 노드 */}
+              <ReqGraphNode node={{ id: '__root__', label: graph.funcId, x: G.PAD, y: graph.rootY, isRoot: true, impacted: graph.impactedSelf }}
+                color={_STAGE_COLORS.UDS}
+                active={isNodeActive('__root__')} kbFocused={focusId === '__root__'}
+                onClick={() => setSelNode({ id: '__root__', label: graph.funcId, stage: '함수', asil: graph.asil, isRoot: true })}
+                onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              {/* 단계 노드 */}
+              {graph.columns.map(col => col.members.map(m => (
+                <ReqGraphNode key={m.id} node={m} color={_FUNC_STAGE_COLORS[m.stage] || '#9ca3af'}
+                  active={isNodeActive(m.id)} kbFocused={focusId === m.id}
+                  onClick={() => setSelNode(m)} onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              )))}
+              {/* 끊긴 단계 placeholder */}
+              {graph.columns.filter(c => c.members.length === 0).map(c => (
+                <g key={`empty-${c.stage}`} opacity={activeNodeId ? 0.28 : 1} transform={`translate(${c.colIndex * G.COL_W + G.PAD},${G.HEADER_H + G.PAD})`}>
+                  <rect width={G.NODE_W} height={G.NODE_H} rx={5} fill="none" stroke="#d1d5db" strokeDasharray="4 3" />
+                  <text x={G.NODE_W / 2} y={G.NODE_H / 2 + 4} fontSize={10} textAnchor="middle" style={{ fill: '#9ca3af' }}>없음</text>
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          {/* 노드 상세 */}
+          {selNode && (
+            <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', fontSize: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <strong style={{ color: 'var(--fg)', wordBreak: 'break-all' }}>{selNode.label}</strong>
+                <button type="button" onClick={() => setSelNode(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 16, lineHeight: 1 }} aria-label="닫기">×</button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, color: 'var(--text-muted)' }}>
+                <span>단계 <strong style={{ color: selNode.isRoot ? 'var(--fg)' : (_FUNC_STAGE_COLORS[selNode.stage] || 'var(--fg)') }}>{selNode.isRoot ? '함수(UDS)' : (_FUNC_STAGES.find(s => s.key === selNode.stage)?.label || selNode.stage)}</strong></span>
+                {selNode.isRoot && selNode.asil && <span>ASIL <strong>{selNode.asil}</strong></span>}
+                {!selNode.isRoot && selNode.stage === 'REQ' && selNode.asil && <span>ASIL <strong style={{ color: _ASIL_COLORS[selNode.asil] || 'var(--fg)' }}>{selNode.asil}</strong></span>}
+                {!selNode.isRoot && selNode.name && <span style={{ flexBasis: '100%' }}>요구사항명 <strong style={{ color: 'var(--fg)' }}>{selNode.name}</strong></span>}
+                {selNode.source && <span>소스 <strong>{selNode.source}</strong></span>}
+                {selNode.unit && <span>유닛 <strong>{selNode.unit}</strong></span>}
+                {selNode.result && <span>결과 <strong style={{ color: _testResultColor(selNode.result) }}>{selNode.result}</strong></span>}
+                {selNode.confidence && <span>신뢰 <strong>{CONFIDENCE_LABELS[selNode.confidence] || selNode.confidence}</strong></span>}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }

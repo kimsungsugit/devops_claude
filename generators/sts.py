@@ -6,14 +6,24 @@ SDS component mapping, and source code analysis.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
 import time
-from copy import copy
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from report_gen.requirements import _extract_sds_partition_map
+from generators._artifact_check import apply_write_back_check
+from generators.safety_marks import is_safety_asil
+from generators.safety_marks import resolve_safety_related as _safety_mark_impl
+from report_gen.doc_kind import is_sds_filename
+from report_gen.requirements import (
+    _extract_sds_partition_map,
+    is_sds_placeholder_key,
+    normalize_sds_key,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -25,27 +35,128 @@ _REQ_ID_PAT = re.compile(
     r"\b(Sw(?:TR|TSR|NTR|NTSR|EI|CNF|ST|STR)_\d+)\b"
 )
 
-_TEST_METHODS = {"FIT", "FNCT", "RBT", "RVW", "ELCT"}
-_GEN_METHODS = {"AOR", "AOI", "AEC", "ABV", "ERG", "AFD", "ADF", "AUC", "STA", "ASV"}
+# 정본(KJPDS02_SwTS v1.02) 시트명. SwITS 의 `3.SW Integration Test Spec` 과 다르다.
+_SPEC_SHEET_NAME = "3.SW Test Spec"
+
+# ── 값 어휘 — **STS 정본의 Introduction 1.5/1.6** 이 출처다 ──────────────────
+#
+# ⚠ 같은 개념이라도 **문서마다 약어가 다르다**. 실측(2026-08-11):
+#     SwTS  1.5 Test Method  : Requirement-based test=RBT · Fault injection test=FIT
+#     SwTS  1.6 Generation   : Analysis of requirements=AOR · Equivalent class=ECA
+#                              · Boundary value analysis=BAA
+#     SwUTS 1.5 Test Method  : REQ · IFT · FI          ← 다른 약어
+#     SwUTS 1.6 Generation   : AOR · AEC · ABV · ERG   ← 다른 약어
+#   통일하지 말 것. 예전 판은 `FNCT`/`RVW`/`ELCT`/`ERG` 를 썼는데 **SwTS Introduction
+#   표에 없는 값**이라 문서를 읽는 사람이 대조할 표가 없었다.
+_TEST_METHODS = {"RBT", "FIT"}
+_GEN_METHODS = {"AOR", "ECA", "BAA"}
+_DEFAULT_TEST_METHOD = "RBT"   # 정본 실측: 102건 전부 RBT
+_DEFAULT_GEN_METHOD_STS = "AOR"  # 정본 실측: 102건 전부 AOR
+
+# 실행 산출물이 없는 검증방법. RVW 는 "소스 코드에서 구현부 확인" 같은 **사람이 읽는**
+# 활동이라(`_generate_review_steps`) 실행 시험과 증거 성격이 다르다.
+# 커버리지를 방법 구분 없이 한 숫자로 내면 "100%"가 실행시험 100%인지 리뷰 포함인지
+# 구분되지 않는다 — 실측(HDPDM01 SRS 63건): 보고 100.0% vs 실행시험 87.3%.
+_REVIEW_ONLY_METHODS = {"RVW"}
 
 _DEFAULT_TEST_ENV = "SwTE_01"
 _MAX_TC_PER_REQ = 5
 _MAX_STEPS_PER_TC = 15
 
 _HEADER_ROW = 6
-_COL_HEADERS = [
-    "", "Test Case ID", "Title", "Safety\nRelated",
-    "Test\nEnvironment", "Test\nMethod", "Test Case\nGen. Method",
-    "FS_REQ", "Description", "Pre-condition",
-    "Test Action\n(Sequence)", "Expected Result", "SRS",
+
+# ── STS 시트 열 스키마 (SSOT) ────────────────────────────────────────────────
+# (열 번호 1-indexed, 필드 키, row 6 헤더 라벨).
+# writer(generate_sts_xlsm)와 validator(validate_sts_xlsm)가 **같은 출처**를 봐야 한다.
+# 과거엔 validator가 SUTS 레이아웃 상수를 그대로 재사용해 5/6/4열(TestEnv·TestMethod·
+# SafetyRelated)을 Action·Expected·요구ID로 읽었다 → 실제 Action/Expected가 전부 비어도
+# "정상"으로 통과하고, 요구 링크율은 Safety Related 채움률을 보고했다.
+_STS_SCHEMA: List[Tuple[int, str, str]] = [
+    (1,  "seq",              ""),
+    (2,  "tc_id",            "Test Case ID"),
+    (3,  "title",            "Title"),
+    (4,  "safety_related",   "Safety\nRelated"),
+    (5,  "test_environment", "Test\nEnvironment"),
+    (6,  "test_method",      "Test\nMethod"),
+    (7,  "gen_method",       "Test Case\nGen. Method"),
+    (8,  "fs_req",           "FS_REQ"),
+    (9,  "description",      "Description"),
+    (10, "precondition",     "Pre-condition"),
+    (11, "action",           "Test Action\n(Sequence)"),
+    (12, "expected",         "Expected Result"),
+    (13, "srs",              "SRS"),
 ]
+STS_COL: Dict[str, int] = {key: col for col, key, _ in _STS_SCHEMA}
+_COL_HEADERS = [label for _, _, label in _STS_SCHEMA]
+_LAST_COL = _STS_SCHEMA[-1][0]
+# 산출물이 이 필드들을 비운 채 나오면 시험 명세로서 의미가 없다 — validator 필수 축.
+_STS_REQUIRED_FIELDS = ("tc_id", "action", "expected", "srs")
+
 _COL_WIDTHS = [4.0, 20.5, 52.0, 10.0, 12.0, 10.6, 10.4, 13.0, 61.5, 36.0, 61.0, 77.0, 14.0]
 _MERGE_COLS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12]  # 0-indexed → cols A,B,C,D,E,F,G,H,I,J,M (K,L per-step)
 # Columns that get center alignment (not wrap)
 _CENTER_COLS = {1, 4, 5, 6, 7, 13}  # #, Safety, TestEnv, TestMethod, GenMethod, SRS
 
 _SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
-_HSIS_SIGNALS_CACHE: Optional[Dict[str, Any]] = None  # {sw_var_names, signals, pat}
+
+# ── HSIS 파서 캐시 ───────────────────────────────────────────────────────────
+# 키는 **파일 정체성**(정규화 경로, mtime_ns, size)이다. 과거엔 경로를 무시하는 단일
+# 전역이라, 장기 기동 서버(`backend/routers/local.py`)가 프로젝트 A의 HSIS를 한 번 읽으면
+# 이후 프로젝트 B의 STS/SUTS/SITS 생성이 A의 HW 신호를 그대로 받았다 — 경고 한 줄 없이.
+# 실측: 전혀 다른 빈 문서 경로로 재호출해도 첫 파일의 signal 20건이 **동일 객체로** 반환됐다.
+# mtime_ns/size 를 키에 넣으므로 파일이 바뀌면 자동 무효화된다.
+_HSIS_CACHE_MAX = 8
+_HSIS_SIGNALS_CACHE: "OrderedDict[Tuple[str, int, int], Dict[str, Any]]" = OrderedDict()
+_HSIS_CACHE_LOCK = threading.Lock()
+
+# HSIS 데이터 행 판정에 쓰는 ID 패턴. 두 파서가 공유한다(아래 `_is_hsis_data_row`).
+_HSI_ID_PAT = re.compile(r"HSI_?\d+", re.I)
+_HSIS_REQ_ID_PAT = re.compile(r"S[wy][A-Za-z]{1,}_?\d+")
+
+
+def _is_hsis_data_row(sig_id: Any, related_id: Any) -> bool:
+    """HSIS 데이터 행인가 — `_load_hsis_signals`/`parse_hsis_signals` 공용 판정.
+
+    HSI ID가 있거나 Related 열에 Sw/Sy 요구 ID가 있으면 데이터 행이다.
+    과거 `_load_hsis_signals`는 HSI ID만 봐서 ID 열이 빈 행을 통째로 버렸다
+    (실측 HDPDM01 v5.00: 21건 중 1건 — `Battery Power / u16g_ApiIn_Vsup / SyEI_01`).
+    판정을 파서마다 따로 두면 한쪽만 고쳐지고 다른 쪽이 잠복하므로 여기로 묶는다.
+    """
+    return bool(
+        _HSI_ID_PAT.match(str(sig_id or "").strip())
+        or _HSIS_REQ_ID_PAT.search(str(related_id or ""))
+    )
+
+
+def _hsis_cache_key(p: Path) -> Optional[Tuple[str, int, int]]:
+    """(정규화 경로, mtime_ns, size). stat 실패 시 None → 캐시를 아예 쓰지 않는다."""
+    try:
+        st = p.stat()
+        resolved = str(p.resolve())
+    except OSError as exc:
+        _logger.debug("HSIS 캐시 키 산출 실패(%s) — 캐시 없이 진행: %s", exc, p)
+        return None
+    return (os.path.normcase(resolved), st.st_mtime_ns, st.st_size)
+
+
+def _hsis_cache_get(key: Optional[Tuple[str, int, int]]) -> Optional[Dict[str, Any]]:
+    if key is None:
+        return None
+    with _HSIS_CACHE_LOCK:
+        hit = _HSIS_SIGNALS_CACHE.get(key)
+        if hit is not None:
+            _HSIS_SIGNALS_CACHE.move_to_end(key)
+        return hit
+
+
+def _hsis_cache_put(key: Optional[Tuple[str, int, int]], value: Dict[str, Any]) -> None:
+    if key is None:
+        return
+    with _HSIS_CACHE_LOCK:
+        _HSIS_SIGNALS_CACHE[key] = value
+        _HSIS_SIGNALS_CACHE.move_to_end(key)
+        while len(_HSIS_SIGNALS_CACHE) > _HSIS_CACHE_MAX:
+            _HSIS_SIGNALS_CACHE.popitem(last=False)
 
 
 def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
@@ -54,10 +165,13 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
         return _SDS_MAP_CACHE
     docs_dir = Path(__file__).resolve().parents[1] / "docs"
     merged: Dict[str, Dict[str, str]] = {}
+    picked: List[str] = []
     if docs_dir.exists():
         for path in docs_dir.glob("*.docx"):
-            if "sds" not in path.name.lower():
+            # `"sds" in name` 은 `SwDS` 표기를 놓친다("swds" 에 "sds" 없음) — 단일 출처 사용.
+            if not is_sds_filename(path.name):
                 continue
+            picked.append(path.name)
             data = _extract_sds_partition_map(str(path))
             for key, value in data.items():
                 if key not in merged:
@@ -66,13 +180,31 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
                 for field in ("asil", "related", "description"):
                     if value.get(field) and not merged[key].get(field):
                         merged[key][field] = value[field]
+    if merged:
+        # ⚠ 침묵 금지 — 이 맵은 **프로젝트 무관**인데 실측상 요구-함수 링크 전량을
+        #   좌우한다(HDPDM01 기준 5,992건 100%). 어느 문서가 쓰였는지 남긴다.
+        _logger.warning(
+            "SDS 미지정 — 저장소 docs/ 글롭 폴백 사용(**프로젝트 무관**): %s (%d 엔트리). "
+            "대상 프로젝트의 SDS 를 넘기면 이 폴백은 쓰이지 않는다",
+            ", ".join(picked) or "(없음)", len(merged))
     _SDS_MAP_CACHE = merged
     return merged
 
 
 def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
+    """SDS 파티션을 찾을 후보 이름들 — **함수 이름이 첫 후보**다.
+
+    ⚠ 예전 판은 `module_name` 파생만 냈다. 그런데 이 프로젝트 SDS 의 871 파티션 중
+    **588개가 `kind='function'`**(전부 `related` 보유)이고 키가 곧 함수 이름이다.
+    후보에 함수명이 없으면 그 588개는 **모듈명이 우연히 닮았을 때만** 걸린다.
+    실측(KJPDS02_PV): 함수명을 넣자 356개가 **정확 키**로 붙고, 요구 매핑이
+    43/68 → 48/68 로, 어느 요구에도 못 붙는 함수가 202 → 151 로 줄었다.
+    """
     module_name = str(info.get("module_name") or "").strip()
     candidates: List[str] = []
+    fn_name = str(info.get("name") or "").strip()
+    if fn_name:
+        candidates.append(fn_name)
     if module_name:
         candidates.append(module_name)
         base = re.sub(r"_pds$", "", module_name, flags=re.I)
@@ -87,23 +219,29 @@ def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
 
 
 def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]]) -> List[str]:
-    def _norm(value: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
-
-    for candidate in _function_sds_candidates(info):
+    candidates = _function_sds_candidates(info)
+    for candidate in candidates:
         direct = sds_map.get(candidate.lower())
         if direct and direct.get("related"):
             return [m.group(1) for m in _REQ_ID_PAT.finditer(str(direct.get("related") or ""))]
-    for candidate in _function_sds_candidates(info):
-        nc = _norm(candidate)
+    for candidate in candidates:
+        nc = normalize_sds_key(candidate)
         if not nc:
             continue
         for key, value in sds_map.items():
-            nk = _norm(key)
-            if not nk:
+            nk = normalize_sds_key(key)
+            if not nk or is_sds_placeholder_key(nk):
                 continue
             if nc == nk or nc in nk or nk in nc:
-                return [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
+                ids = [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
+                if ids:
+                    return ids
+                # `related` 가 빈 칸이면 **여기서 끝내지 않는다**. 실측 41건이 전부
+                # `(swdsg) software architecture design guideline….docx`(SDS 안의
+                # 문서 목록 행)에 걸려 탐색이 멈췄다 — `Lin` 이 `guide**lin**e` 에
+                # 걸린 것이다. 빈 칸은 "요구가 없다"가 아니라 **그 행이 파티션이
+                # 아니라는** 뜻이므로 다음 후보를 계속 본다.
+                continue
     return []
 
 
@@ -328,11 +466,9 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
           'signals': List[Dict],              # full signal info
           'pat': re.Pattern,                  # extended hw signal pattern
         }
-    """
-    global _HSIS_SIGNALS_CACHE
-    if _HSIS_SIGNALS_CACHE is not None:
-        return _HSIS_SIGNALS_CACHE
 
+    결과는 파일 정체성(경로+mtime_ns+size)으로 캐시된다 — `_hsis_cache_key` 주석 참조.
+    """
     empty: Dict[str, Any] = {"sw_var_names": [], "signals": [], "pat": _HW_SIGNAL_PAT}
 
     if not hsis_path:
@@ -341,6 +477,11 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     if not p.exists():
         _logger.warning("HSIS file not found: %s", hsis_path)
         return empty
+
+    cache_key = _hsis_cache_key(p)
+    cached = _hsis_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         import openpyxl  # type: ignore
@@ -387,9 +528,10 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
                 header_found = True
             continue
 
-        # Data rows: must have ID like HSI_XX
+        # Data rows: HSI ID가 있거나 Related에 Sw/Sy 요구 ID가 있으면 데이터 행
         sig_id = cells[_COL_ID] if len(cells) > _COL_ID else ""
-        if not sig_id or not re.match(r"HSI_\d+", sig_id, re.I):
+        related = cells[_COL_RELATED] if len(cells) > _COL_RELATED else ""
+        if not _is_hsis_data_row(sig_id, related):
             continue
 
         sig_name = cells[_COL_SIG_NAME] if len(cells) > _COL_SIG_NAME else ""
@@ -397,7 +539,6 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         direction = cells[_COL_DIRECTION] if len(cells) > _COL_DIRECTION else ""
         characteristics = cells[_COL_CHARACTERISTICS] if len(cells) > _COL_CHARACTERISTICS else ""
         sw_var = cells[_COL_SW_VAR] if len(cells) > _COL_SW_VAR else ""
-        related = cells[_COL_RELATED] if len(cells) > _COL_RELATED else ""
 
         if not sig_name and not sw_var:
             continue
@@ -419,7 +560,7 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
 
     if not signals:
         _logger.info("HSIS: no signals parsed from %s (sheet=%s)", hsis_path, sheet_name)
-        _HSIS_SIGNALS_CACHE = empty
+        _hsis_cache_put(cache_key, empty)
         return empty
 
     # Collect SW variable names for pattern building
@@ -456,9 +597,141 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         "signals": signals,
         "pat": extended_pat,
     }
-    _HSIS_SIGNALS_CACHE = result
-    _logger.info("HSIS loaded: %d signals, %d SW var names", len(signals), len(sw_var_names))
+    _hsis_cache_put(cache_key, result)
+    _logger.info("HSIS loaded: %d signals, %d SW var names from %s",
+                 len(signals), len(sw_var_names), hsis_path)
     return result
+
+
+def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
+    """Cache-free HSIS xlsx parser with header auto-detection (layout-variant safe).
+
+    `_load_hsis_signals`(위)는 모듈 캐시 + 고정 0-based 컬럼이라 (1) 멀티파일 요청 시
+    첫 결과 오염, (2) HSIS 버전별 컬럼 오프셋(실측: 260105 v5.00 SwVar=20/Related=21 vs
+    hiMA계약 23/26)에 깨진다. 추적성 매트릭스 추출 엔드포인트는 이 함수를 쓴다 — 캐시 없이
+    헤더 라벨로 컬럼을 동적 탐지한다.
+
+    Returns: {signals:[{id, signal_name, sw_var_name, related_id, direction}], sw_var_names:[...]}.
+    헤더 탐지 실패 시 signals=[] + available_columns 힌트(STS available_sheets 패턴).
+    """
+    empty: Dict[str, Any] = {"sw_var_names": [], "signals": []}
+    if not hsis_path:
+        return empty
+    p = Path(hsis_path)
+    if not p.exists():
+        _logger.warning("HSIS file not found: %s", hsis_path)
+        return empty
+    try:
+        import openpyxl  # type: ignore
+        wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+    except Exception as e:
+        _logger.warning("Cannot open HSIS xlsx: %s", e)
+        return empty
+
+    sheet_name = None
+    for name in wb.sheetnames:
+        if "hsis" in name.lower() or "2." in name:
+            sheet_name = name
+            break
+    if sheet_name is None and wb.sheetnames:
+        sheet_name = wb.sheetnames[0]
+    if not sheet_name:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return empty
+    ws = wb[sheet_name]
+
+    rows: List[List[str]] = []
+    for ri, row in enumerate(ws.iter_rows(values_only=True)):
+        if ri > 5000:  # zip-bomb / runaway guard
+            break
+        rows.append([str(c or "").strip() for c in row])
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    def _norm(s: Any) -> str:
+        return re.sub(r"[\s_]+", "", str(s or "").strip().lower())
+
+    # 헤더 행 탐지: 'related id' + ('sw variable'|'variable name'|'signal name') 동시 포함.
+    hdr_idx = -1
+    cols: Dict[str, int] = {}
+    for ri in range(min(20, len(rows))):
+        normed = [_norm(c) for c in rows[ri]]
+        joined = " ".join(normed)
+        if "relatedid" in joined and ("swvariable" in joined or "variablename" in joined or "signalname" in joined):
+            for ci, n in enumerate(normed):
+                if n == "id" and "id" not in cols:
+                    cols["id"] = ci
+                if "relatedid" in n and "related" not in cols:
+                    cols["related"] = ci
+                if ("swvariable" in n or "variablename" in n) and "swvar" not in cols:
+                    cols["swvar"] = ci
+                if "signalname" in n and "signame" not in cols:
+                    cols["signame"] = ci
+                if n == "direction" and "dir" not in cols:
+                    cols["dir"] = ci
+            hdr_idx = ri
+            break
+    if hdr_idx < 0 or "related" not in cols:
+        _logger.info("HSIS: header not detected in %s (sheet=%s)", hsis_path, sheet_name)
+        return {"sw_var_names": [], "signals": [],
+                "available_columns": rows[2][:30] if len(rows) > 2 else []}
+
+    data_rows = rows[hdr_idx + 1:]
+    # ID 컬럼 disambiguation — 헤더 'id'가 여러 개(Arch Element ID·Connector ID)라
+    # 데이터에서 HSI_\d+ 빈도 최대 컬럼을 ID로 확정.
+    id_col = cols.get("id", -1)
+    _hsi = _HSI_ID_PAT
+    if id_col < 0 or not any(_hsi.match(dr[id_col]) for dr in data_rows[:30] if id_col < len(dr)):
+        best, best_cnt = -1, 0
+        max_c = max((len(dr) for dr in data_rows[:50]), default=0)
+        for ci in range(max_c):
+            cnt = sum(1 for dr in data_rows[:50] if ci < len(dr) and _hsi.match(dr[ci]))
+            if cnt > best_cnt:
+                best, best_cnt = ci, cnt
+        if best_cnt:
+            id_col = best
+
+    related_col = cols["related"]
+    swvar_col = cols.get("swvar", -1)
+    signame_col = cols.get("signame", -1)
+    dir_col = cols.get("dir", -1)
+
+    def _get(dr: List[str], ci: int) -> str:
+        return dr[ci] if 0 <= ci < len(dr) else ""
+
+    signals: List[Dict[str, Any]] = []
+    for dr in data_rows:
+        sid = _get(dr, id_col)
+        related = _get(dr, related_col)
+        swv = _get(dr, swvar_col)
+        # 데이터 행: HSI ID가 있거나 Related에 Sw/Sy ID가 있어야(설명/공백 행 스킵)
+        if not _is_hsis_data_row(sid, related):
+            continue
+        if not related and not swv:
+            continue
+        signals.append({
+            "id": sid,
+            "signal_name": _get(dr, signame_col),
+            "sw_var_name": swv,
+            "related_id": related,
+            "direction": _get(dr, dir_col),
+        })
+
+    sw_var_names: List[str] = []
+    for s in signals:
+        for tok in re.split(r"[\n,\s]+", s["sw_var_name"] or ""):
+            tok = tok.strip().strip(",")
+            if tok and re.match(r"^[A-Za-z_]\w+$", tok):
+                sw_var_names.append(tok)
+    sw_var_names = list(dict.fromkeys(sw_var_names))
+
+    _logger.info("HSIS parsed(headerless): %d signals from %s", len(signals), hsis_path)
+    return {"sw_var_names": sw_var_names, "signals": signals}
 
 
 def _merge_uds_into_function_details(
@@ -623,17 +896,101 @@ def _classify_req_type(req_id: str) -> str:
 # Phase 1: Requirement -> Function mapping
 # ---------------------------------------------------------------------------
 
+def load_uds_design_ids(uds_path: str) -> Dict[str, List[str]]:
+    """SwUDS 함수표 → ``함수 이름(lower) → [설계 ID]``. 설계-ID 브리지의 좌측 끝.
+
+    ## 왜 필요한가 (실측 2026-08-18, KJPDS02_PV)
+
+    함수 이름·모듈 이름으로 SwDS 파티션을 찾는 기존 사슬은 `kind='function'` 파티션
+    588개만 닿는다. 그런데 **어떤 요구는 그 kind 에 아예 없다** — 68 요구 중 20 이
+    미매핑이었고, 그중 16 이 걸린 SwDS 파티션의 kind 는::
+
+        design_id 19 · table_row 12 · design_element 4   ← `function` 0
+
+    즉 `swfn_35`(설계 ID) 나 `차속에 따른 도어 open 방지`(한글 기능명)가 키다.
+    함수 이름이 그런 키를 닮을 리 없으므로 **구조적으로 못 닿는다**. 이름을 더 세게
+    비벼도 안 되고, 비비면 오히려 유령 매칭이 는다.
+
+    SwUDS 문서는 함수마다 "이 함수가 구현하는 설계 요소"를 `Related ID` 로 적어 둔다.
+    그 설계 ID 로 SwDS 설계 파티션을 찾으면 요구에 닿는다 — 추적성 매트릭스가 이미
+    쓰는 브리지와 **같은 구조**다(`report_gen/requirements.py::design_to_reqs`).
+
+    ## ⚠ SwCom 을 뺀다
+
+    `_DESIGN_ID_BRIDGE_RE`(SwFn/SwSTR/SwST/SwTK)만 통과시킨다. SwCom 은 컴포넌트
+    레벨이라 fan-out 만 폭증시킨다 — 실측: 요구당 링크 중앙 138 → **4**, 최대
+    1068 → 110, 합 16,461 → 766. 그러면서 위 16 건은 **16/16 그대로** 닿는다.
+
+    ## ⚠ 이름으로만 잇는다
+
+    반환 키가 `SwUFn` ID 가 아니라 **함수 이름**인 이유는 `report_gen/uds_related.py`
+    모듈 docstring 에 있다(문서와 소스의 SwUFn 번호 체계가 다르다 — 43쌍 중 35쌍 불일치).
+    """
+    raw = str(uds_path or "").strip()
+    if not raw:
+        return {}
+    p = Path(raw)
+    try:
+        data = p.read_bytes()
+    except OSError as exc:
+        _logger.warning("SwUDS 를 읽지 못해 설계-ID 브리지가 꺼진다 — %s (%s)", raw, exc)
+        return {}
+    from report_gen.requirements import _DESIGN_ID_BRIDGE_RE
+    from report_gen.uds_related import docx_tables_text, extract_function_related_rows
+
+    tables = docx_tables_text(data)
+    if tables is None:
+        # ⚠ 못 읽은 것을 "설계 ID 가 없다" 로 접지 않는다.
+        _logger.warning("SwUDS 표를 파싱하지 못해 설계-ID 브리지가 꺼진다(문서 손상 가능): %s", raw)
+        return {}
+    out: Dict[str, List[str]] = {}
+    total = kept = 0
+    for row in extract_function_related_rows(tables):
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        ids = [d for d in (row.get("design_ids") or [])]
+        total += len(ids)
+        tight = [d for d in ids if _DESIGN_ID_BRIDGE_RE.match(str(d).upper())]
+        kept += len(tight)
+        if tight:
+            bucket = out.setdefault(name.lower(), [])
+            for d in tight:
+                if d not in bucket:
+                    bucket.append(d)
+    _logger.info(
+        "SwUDS 설계-ID 브리지: 함수 %d개 · 설계 ID %d개 채택(SwCom 등 %d개 제외) — 출처=%s",
+        len(out), kept, total - kept, raw,
+    )
+    return out
+
+
 def map_requirements_to_functions(
     requirements: List[Dict[str, Any]],
     function_details: Dict[str, Dict[str, Any]],
+    sds_map: Optional[Dict[str, Dict[str, str]]] = None,
+    uds_design_ids: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, List[str]]:
     """Map requirement IDs to lists of function IDs (fid).
 
     Uses the `related` field in function_details to find reverse mapping.
+
+    Args:
+        sds_map: `related` 필드로 못 잇는 함수를 요구에 잇는 **폴백 매핑 출처**.
+            None이면 저장소 `docs/` 글롭(`_load_default_sds_map`)을 쓰는데 이는
+            **프로젝트 무관**이다 — 실측(HDPDM01): 요구-함수 링크 5,992건이 100%
+            이 폴백에서 나왔다(폴백을 끄면 0/63). 요구 ID(`SwTR_0101` 등)는
+            프로젝트 간 네임스페이스가 겹쳐 오매핑이 걸러지지도 않으므로,
+            호출자가 대상 프로젝트의 SDS를 알고 있으면 반드시 넘길 것.
+        uds_design_ids: `함수 이름(lower) → [설계 ID]` (`load_uds_design_ids`).
+            이름으로 SwDS 를 못 찾는 요구를 **설계 ID 경유**로 잇는 3티어.
+            None/빈 dict 면 그 티어는 **꺼진다** — 없는 것을 있는 척하지 않는다.
     """
     req_to_fids: Dict[str, List[str]] = {r["id"]: [] for r in requirements}
-    sds_map = _load_default_sds_map()
+    if sds_map is None:
+        sds_map = _load_default_sds_map()
 
+    by_comment = by_sds = linkless = 0
     for fid, info in function_details.items():
         if not isinstance(info, dict):
             continue
@@ -645,10 +1002,68 @@ def map_requirements_to_functions(
                 req_to_fids[rid].append(fid)
                 matched = True
         if matched:
+            by_comment += 1
             continue
+        hit = False
         for rid in _lookup_sds_related_ids(info, sds_map):
             if rid in req_to_fids and fid not in req_to_fids[rid]:
                 req_to_fids[rid].append(fid)
+            if rid in req_to_fids:
+                hit = True
+        by_sds += 1 if hit else 0
+        linkless += 0 if hit else 1
+
+    # ── 3티어: 설계-ID 브리지 (SwUDS Related ID → 설계 ID → SwDS → 요구) ──────
+    # ⚠ 위 두 티어를 **건드리지 않고 별도 패스**로 돈다. 위 루프는 주석 매칭 시
+    #   `continue` 로 SDS 티어를 건너뛰므로, 그 안에 끼워 넣으면 기존 링크 구성이
+    #   조용히 달라진다. 여기서는 기존 결과에 **더하기만** 한다.
+    #   실측(KJPDS02_PV): 요구 48/68 → **64/68** · 링크 8,397 → 8,667(+3.2%) ·
+    #   요구당 링크 중앙 76 → 58(내려간다 — 작은 링크 집합을 가진 요구가 늘어서).
+    by_design = 0
+    if uds_design_ids:
+        for fid, info in function_details.items():
+            if not isinstance(info, dict):
+                continue
+            # ⚠ **이름**으로만 조인한다. `fid`(SwUFn 번호)로 조인하면 문서와 소스의
+            #   번호 체계가 달라 오귀속이 된다(실측 43쌍 중 35쌍 불일치, 오귀속 링크
+            #   276건) — `report_gen/uds_related.py` 모듈 docstring 참조.
+            name = str(info.get("name") or "").strip().lower()
+            if not name:
+                continue
+            gained = False
+            for did in uds_design_ids.get(name) or ():
+                entry = sds_map.get(str(did).lower())
+                if not entry:
+                    continue
+                for m in _REQ_ID_PAT.finditer(str(entry.get("related") or "")):
+                    rid = m.group(1)
+                    if rid in req_to_fids and fid not in req_to_fids[rid]:
+                        req_to_fids[rid].append(fid)
+                        gained = True
+            if gained:
+                by_design += 1
+
+    # ⚠ 침묵 금지 — 어느 요구가 **함수 근거 없이** TC 를 받는지 남긴다.
+    #   `generate_test_cases` 는 매핑이 빈 요구에도 TC 를 낸다(`_generate_review_steps`).
+    #   그래서 요구 커버리지는 100% 로 보이는데 그중 일부는 소스 근거가 0 이다.
+    #   실측(KJPDS02_PV): 브리지 전엔 68 요구 중 20 이 여기 해당했고, 그 20 중 16 은
+    #   SDS 의 `related` **에는 있었다**(우리가 그 파티션에 못 닿은 것). 설계-ID 브리지
+    #   도입 후 **4** 로 줄었고, 남은 4 는 SwDS 어디에도 없다 = 문서 간 추적 부재라
+    #   코드로 고칠 것이 아니다.
+    unmapped = [r["id"] for r in requirements if not req_to_fids.get(r["id"])]
+    if unmapped:
+        _logger.warning(
+            "STS 요구-함수 매핑: %d/%d 요구가 함수에 안 붙었다 — 이 요구들의 TC 는 "
+            "소스 근거 없이 리뷰 절차로만 만들어진다: %s%s",
+            len(unmapped), len(requirements), ", ".join(unmapped[:12]),
+            " …" if len(unmapped) > 12 else "",
+        )
+    _logger.info(
+        "STS 요구-함수 매핑 경로: 주석 related %d · SDS 파티션 %d · 설계-ID 브리지 %d "
+        "(브리지 %s) · 이름/주석으로는 어느 요구에도 못 붙은 함수 %d",
+        by_comment, by_sds, by_design,
+        "켜짐" if uds_design_ids else "꺼짐(SwUDS 미지정)", linkless,
+    )
 
     return req_to_fids
 
@@ -668,7 +1083,50 @@ _ERROR_GUARD_PAT = re.compile(
 )
 
 
+# 내부 휴리스틱이 내는 라벨 → **정본 Introduction 표의 약어**.
+# ⚠ 휴리스틱 자체는 유용하다(어떤 성격의 시험인지 구분한다). 문제는 그 결과 라벨이
+#   SwTS Introduction 1.5/1.6 표에 없는 값이라는 것이었다 — 문서를 읽는 사람이
+#   대조할 표가 없으면 그 칸은 근거가 아니라 장식이다.
+_METHOD_TO_STS_VOCAB = {
+    "RBT": "RBT", "FIT": "FIT",
+    "FNCT": "RBT",   # 기능 시험 = 요구 기반 시험
+    "RVW": "RBT",    # 리뷰도 요구 기반 확인으로 기록한다(정본에 RVW 칸이 없다)
+    "ELCT": "RBT",   # 전기/HW 신호 확인도 요구 기반
+}
+_GEN_TO_STS_VOCAB = {
+    "AOR": "AOR",
+    "AEC": "ECA", "ECA": "ECA",   # 등가 분할 — SwTS 는 ECA, SwUTS 는 AEC 로 쓴다
+    "ABV": "BAA", "BAA": "BAA",   # 경계값 분석 — SwTS 는 BAA, SwUTS 는 ABV
+    "ERG": "AOR", "AFD": "AOR", "ADF": "AOR", "STA": "AOR",
+    "AOI": "AOR", "AUC": "AOR", "ASV": "AOR",
+}
+
+
+# `Safety Related` 칸 — 구현은 `generators/safety_marks.py` 가 단일 출처다.
+# ⚠ 이 파일에 다시 쓰지 말 것. 안전 판정을 고친 커밋 3건(fe9481e·e69b9dd·fb385d8)이
+#   **여기에는 한 번도 안 닿았다** — 복제가 있으면 그 다음 수정도 같은 길을 간다.
+_safety_mark = _safety_mark_impl
+
+
+def _to_sts_vocab(method: str, gen: str) -> Tuple[str, str]:
+    """휴리스틱 라벨을 정본 어휘로 좁힌다. 모르는 값은 정본 최빈값으로 떨어뜨린다."""
+    return (
+        _METHOD_TO_STS_VOCAB.get(str(method or "").strip().upper(), _DEFAULT_TEST_METHOD),
+        _GEN_TO_STS_VOCAB.get(str(gen or "").strip().upper(), _DEFAULT_GEN_METHOD_STS),
+    )
+
+
 def _determine_test_method(
+    req: Dict[str, Any],
+    func_info: Optional[Dict[str, Any]] = None,
+    logic_flow: Optional[List[Dict[str, Any]]] = None,
+    hsis_signals: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """(test_method, gen_method) — **정본 어휘로 정규화해서** 돌려준다."""
+    return _to_sts_vocab(*_determine_test_method_raw(req, func_info, logic_flow, hsis_signals))
+
+
+def _determine_test_method_raw(
     req: Dict[str, Any],
     func_info: Optional[Dict[str, Any]] = None,
     logic_flow: Optional[List[Dict[str, Any]]] = None,
@@ -766,6 +1224,8 @@ def _format_gen_method(gen: str) -> str:
 def _generate_steps_from_flow(
     logic_flow: List[Dict[str, Any]],
     func_info: Dict[str, Any],
+    max_steps: int = _MAX_STEPS_PER_TC,
+    max_tc: int = _MAX_TC_PER_REQ,
 ) -> List[List[Dict[str, str]]]:
     """Generate multiple test-case step-lists from a function's logic flow.
 
@@ -779,7 +1239,7 @@ def _generate_steps_from_flow(
     normal_steps: List[Dict[str, str]] = []
     branch_tcs: List[List[Dict[str, str]]] = []
 
-    _walk_flow_nodes(logic_flow, normal_steps, branch_tcs, depth=0)
+    _walk_flow_nodes(logic_flow, normal_steps, branch_tcs, depth=0, max_tc=max_tc)
 
     # Generate an error-path TC if any guard-like condition exists
     error_tc = _generate_error_path_tc(logic_flow, normal_steps)
@@ -794,9 +1254,13 @@ def _generate_steps_from_flow(
         test_cases = _generate_simple_steps(func_info)
 
     for tc in test_cases:
-        tc[:] = tc[:_MAX_STEPS_PER_TC]
+        tc[:] = tc[:max_steps]
 
-    return test_cases[:_MAX_TC_PER_REQ]
+    # ⚠ 오래 이 줄이 모듈 상수(5)를 직참조했다. 바깥 루프(`generate_test_cases`)는
+    #   사용자 상한을 지키는데 여기서 **함수당** 5 로 다시 잘라서, 함수 하나에 매핑된
+    #   요구는 상한을 20 으로 올려도 산출이 5 에서 멈췄다 — 이름은 `요구당` 인데
+    #   실제로는 `함수당` 이 더 세게 걸리던 것.
+    return test_cases[:max_tc]
 
 
 def _walk_flow_nodes(
@@ -804,6 +1268,7 @@ def _walk_flow_nodes(
     prefix_steps: List[Dict[str, str]],
     branch_tcs: List[List[Dict[str, str]]],
     depth: int,
+    max_tc: int = _MAX_TC_PER_REQ,
 ) -> None:
     """Recursively walk logic flow nodes, expanding nested branches into TCs."""
     max_depth = 4
@@ -834,10 +1299,13 @@ def _walk_flow_nodes(
                 "action": f"조건 충족 설정: {cond}",
                 "expected": "조건 분기 → True 경로 진입",
             })
-            _expand_branch_body(true_body, true_steps, branch_tcs, depth, max_depth)
+            _expand_branch_body(true_body, true_steps, branch_tcs, depth, max_depth,
+                                max_tc=max_tc)
             branch_tcs.append(true_steps)
 
-            for ei, elif_node in enumerate(elif_chains[:_MAX_TC_PER_REQ - 2]):
+            # 참/거짓 두 갈래 몫으로 2 를 뺀다. 상한이 2 이하면 else-if 확장은 없다 —
+            # `max()` 없이 두면 `[:-1]` 이 되어 "마지막 하나를 버린다" 는 **다른 뜻**이 된다.
+            for ei, elif_node in enumerate(elif_chains[:max(0, max_tc - 2)]):
                 econd = elif_node.get("condition", f"else-if #{ei+1}")
                 ebody = elif_node.get("body", elif_node.get("true_body", []))
                 elif_steps = list(prefix_steps)
@@ -846,7 +1314,8 @@ def _walk_flow_nodes(
                     "expected": f"else-if 분기 #{ei+1} 진입",
                 })
                 if isinstance(ebody, list):
-                    _expand_branch_body(ebody, elif_steps, branch_tcs, depth, max_depth)
+                    _expand_branch_body(ebody, elif_steps, branch_tcs, depth, max_depth,
+                                        max_tc=max_tc)
                 branch_tcs.append(elif_steps)
 
             false_steps = list(prefix_steps)
@@ -855,7 +1324,8 @@ def _walk_flow_nodes(
                 "expected": "조건 분기 → False/else 경로 진입",
             })
             if false_body:
-                _expand_branch_body(false_body, false_steps, branch_tcs, depth, max_depth)
+                _expand_branch_body(false_body, false_steps, branch_tcs, depth, max_depth,
+                                    max_tc=max_tc)
                 branch_tcs.append(false_steps)
 
         elif ntype == "switch":
@@ -863,7 +1333,7 @@ def _walk_flow_nodes(
             cases = node.get("cases", [])
             default_calls = node.get("default_calls", [])
 
-            for case in cases[:_MAX_TC_PER_REQ]:
+            for case in cases[:max_tc]:
                 case_steps = list(prefix_steps)
                 label = case.get("label", "?")
                 case_steps.append({
@@ -879,7 +1349,8 @@ def _walk_flow_nodes(
                                 "expected": f"{cn} 정상 실행",
                             })
                     elif isinstance(case_body[0], dict) and depth < max_depth:
-                        _walk_flow_nodes(case_body, case_steps, branch_tcs, depth + 1)
+                        _walk_flow_nodes(case_body, case_steps, branch_tcs, depth + 1,
+                                         max_tc=max_tc)
                 branch_tcs.append(case_steps)
 
             if default_calls:
@@ -930,6 +1401,7 @@ def _expand_branch_body(
     branch_tcs: List[List[Dict[str, str]]],
     depth: int,
     max_depth: int,
+    max_tc: int = _MAX_TC_PER_REQ,
 ) -> None:
     """Expand sub-nodes inside a branch body, recursing into nested branches."""
     for sub in body:
@@ -946,11 +1418,11 @@ def _expand_branch_body(
                 "expected": f"반환값: {v}" if v else "정상 반환",
             })
         elif st == "if" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1, max_tc=max_tc)
         elif st == "switch" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1, max_tc=max_tc)
         elif st == "loop" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1, max_tc=max_tc)
         elif st == "assign":
             var = sub.get("var", "")
             val = sub.get("value", "")
@@ -959,12 +1431,9 @@ def _expand_branch_body(
                     "action": f"{var} = {val} 설정 확인",
                     "expected": f"{var} 값 변경 정상",
                 })
-        elif st == "if" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
-        elif st == "switch" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
-        elif st == "loop" and depth < max_depth:
-            _walk_flow_nodes([sub], steps, branch_tcs, depth + 1)
+        # ⚠ 여기 있던 `if`/`switch`/`loop` 3분기는 **같은 사슬 위쪽과 조건이 글자까지
+        #   동일**해서 한 번도 실행되지 않았다(앞선 `elif` 가 항상 먼저 잡는다).
+        #   `max_tc` 를 거기까지 넘기면 의미 있는 코드처럼 보이므로 지운다.
 
 
 def _generate_error_path_tc(
@@ -1197,7 +1666,8 @@ def _generate_simple_steps(
     return [tc1, tc2, tc3]
 
 
-def _generate_review_steps(req: Dict[str, Any]) -> List[List[Dict[str, str]]]:
+def _generate_review_steps(req: Dict[str, Any],
+                           max_steps: int = _MAX_STEPS_PER_TC) -> List[List[Dict[str, str]]]:
     """Generate review-based TC steps when no function is mapped."""
     desc = req.get("description") or req.get("name") or req.get("id", "")
     verification = req.get("verification", "")
@@ -1224,7 +1694,7 @@ def _generate_review_steps(req: Dict[str, Any]) -> List[List[Dict[str, str]]]:
             "expected": f"시스템 {precond} 상태 진입 확인",
         })
 
-    return [steps[:_MAX_STEPS_PER_TC]]
+    return [steps[:max_steps]]
 
 
 # ---------------------------------------------------------------------------
@@ -1237,16 +1707,35 @@ def generate_test_cases(
     req_to_fids: Dict[str, List[str]],
     project_config: Optional[Dict[str, Any]] = None,
     hsis_signals: Optional[Dict[str, Any]] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Generate all test cases from requirements and function details."""
+    """Generate all test cases from requirements and function details.
+
+    Args:
+        stats_out: 주면 생성 통계를 채워 넣는다(절단 표면화용). 요구당 TC 상한
+            `max_tc_per_req`(기본 5)은 **함수 루프 자체를 끊으므로**, 요구에 매핑된
+            함수가 많으면 대부분이 시험 없이 남는다. 그 사실이 어디에도 안 남으면
+            요구 단위 커버리지 100%가 "다 시험됨"으로 읽힌다.
+            실측(HDPDM01): 매핑 함수 747개 중 TC 를 얻은 것 48개(93.6% 무시험),
+            요구 35/37 이 상한에 도달, 그런데 보고 커버리지는 100.0%였다.
+    """
     config = project_config or {}
     max_tc = config.get("max_tc_per_req", _MAX_TC_PER_REQ)
+    # ⚠ 오래 `_MAX_STEPS_PER_TC` 를 세 곳(`_generate_steps_from_flow`·
+    #   `_generate_review_steps`·`_parse_sts_ai_response`)이 **직참조**해서 요청으로는
+    #   바꿀 수 없었다. 준비 게이트는 그 사실을 "조정 불가(코드 상수)" 로 정직하게
+    #   표시했지만, 그건 못 고치는 이유였지 못 고쳐야 할 이유는 아니었다.
+    #   `max_tc_per_req` 와 **같은 경로**를 쓴다 — 기본값은 여전히 모듈 상수다.
+    max_steps = config.get("max_steps_per_tc") or _MAX_STEPS_PER_TC
     test_env = config.get("default_test_env", _DEFAULT_TEST_ENV)
 
+    # 캡 **전** 총량을 먼저 센다 — 소비처에서 결과 길이로 되짚으면 절단을 못 본다.
+    mapped_fids: set = set()
+    used_fids: set = set()
+    truncated_reqs: List[str] = []
+
     project_asil = str(config.get("asil_level") or config.get("asil") or "").strip()
-    _proj_is_safety = bool(
-        project_asil and "QM" not in project_asil.upper() and project_asil.upper() != "TBD"
-    )
+    _proj_is_safety = is_safety_asil(project_asil)
 
     all_tcs: List[Dict[str, Any]] = []
 
@@ -1259,11 +1748,11 @@ def generate_test_cases(
         if not req_asil and _proj_is_safety:
             req_asil = project_asil
             req["asil"] = project_asil
-        is_safety = bool(req_asil and "QM" not in req_asil.upper() and req_asil.upper() != "TBD")
+        is_safety = is_safety_asil(req_asil)
 
         if not fids:
             method, gen = _determine_test_method(req, hsis_signals=hsis_signals)
-            step_sets = _generate_review_steps(req)
+            step_sets = _generate_review_steps(req, max_steps=max_steps)
             for idx, steps in enumerate(step_sets[:max_tc]):
                 tc_id = _make_tc_id(rid, idx + 1)
                 all_tcs.append(_build_tc_dict(
@@ -1273,21 +1762,26 @@ def generate_test_cases(
                 ))
             continue
 
+        mapped_fids.update(fids)
         tc_counter = 0
         for fid in fids:
             if tc_counter >= max_tc:
+                # 남은 함수는 시험 없이 버려진다 — 이 사실을 반드시 남긴다
+                truncated_reqs.append(rid)
                 break
             info = function_details.get(fid, {})
             if not isinstance(info, dict):
                 continue
             logic_flow = info.get("logic_flow") or []
             method, gen = _determine_test_method(req, info, logic_flow, hsis_signals=hsis_signals)
-            step_sets = _generate_steps_from_flow(logic_flow, info)
+            step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps,
+                                                  max_tc=max_tc)
 
             for steps in step_sets:
                 if tc_counter >= max_tc:
                     break
                 tc_counter += 1
+                used_fids.add(fid)
                 tc_id = _make_tc_id(rid, tc_counter)
                 all_tcs.append(_build_tc_dict(
                     tc_id=tc_id, req=req, steps=_ensure_min_steps(steps, info),
@@ -1295,6 +1789,18 @@ def generate_test_cases(
                     test_env=test_env, is_safety=is_safety,
                     func_name=info.get("name"),
                 ))
+
+    if stats_out is not None:
+        stats_out.update({
+            "max_tc_per_req": max_tc,
+            "mapped_functions": len(mapped_fids),
+            "functions_with_tc": len(used_fids),
+            "functions_without_tc": len(mapped_fids - used_fids),
+            "function_tc_coverage_pct": round(
+                len(used_fids) / max(len(mapped_fids), 1) * 100, 1),
+            "requirements_truncated": sorted(set(truncated_reqs)),
+            "requirements_truncated_count": len(set(truncated_reqs)),
+        })
 
     return all_tcs
 
@@ -1336,10 +1842,10 @@ def _build_tc_dict(
     if sw_state:
         precond_parts.append(f"S/W State: {sw_state}")
     if func_name:
-        precond_parts.append(f"시스템 초기화 완료")
+        precond_parts.append("시스템 초기화 완료")
         precond_parts.append(f"{func_name}() 호출 가능 상태")
     asil_val = str(req.get("asil") or "").strip()
-    if asil_val and "QM" not in asil_val.upper() and asil_val.upper() not in ("TBD", ""):
+    if is_safety_asil(asil_val):
         precond_parts.append(f"ASIL {asil_val} 안전 조건 충족")
 
     # Extract variable names from step actions
@@ -1373,7 +1879,7 @@ def _build_tc_dict(
 
     fs_req = ""
     asil = str(req.get("asil") or "").strip()
-    if asil and "QM" not in asil.upper() and asil.upper() != "TBD":
+    if is_safety_asil(asil):
         related_id = req.get("related_id", "")
         sys_ids = re.findall(r"Sy\w+_\d+", related_id)
         if sys_ids:
@@ -1386,7 +1892,9 @@ def _build_tc_dict(
     return {
         "id": tc_id,
         "title": title[:120],
-        "safety_related": "X" if is_safety else "",
+        # ⚠ 정본은 `O`=안전 관련 / `X`=비안전 이다(실측 X 86 · O 15). 예전엔
+        #   `"X" if is_safety else ""` 라 **의미가 정반대**였다. SUTS 도 같은 결함이었다.
+        "safety_related": _safety_mark(req.get("asil")),
         "test_environment": test_env,
         "test_method": test_method,
         "gen_method": _format_gen_method(gen_method),  # numbered list if multiple
@@ -1410,27 +1918,37 @@ def generate_traceability_matrix(
 
     Returns:
         {"req_ids": [...], "tc_ids": [...], "matrix": {tc_id: {req_id: 1/0}},
-         "coverage": {"total_reqs": N, "covered_reqs": N, "pct": float}}
+         "coverage": {"total_reqs": N, "covered_reqs": N, "pct": float,
+                      "executable_covered_reqs": N, "executable_pct": float,
+                      "review_only_reqs": [...], "review_only_count": N}}
+
+    `covered_reqs`/`pct`는 **검증방법을 가리지 않은** 값이다(기존 계약 유지).
+    거기에 검증방법 축을 더한다 — 아래 `_REVIEW_ONLY_METHODS` 주석 참조.
     """
     req_ids = sorted(set(r["id"] for r in requirements))
     tc_ids = [tc["id"] for tc in test_cases]
     matrix: Dict[str, Dict[str, int]] = {}
     covered_reqs: set = set()
+    exec_covered: set = set()
 
     for tc in test_cases:
         tid = tc["id"]
         srs = tc.get("srs_id", "")
+        is_executable = str(tc.get("test_method") or "").upper() not in _REVIEW_ONLY_METHODS
         row: Dict[str, int] = {}
         for rid in req_ids:
             if rid == srs:
                 row[rid] = 1
                 covered_reqs.add(rid)
+                if is_executable:
+                    exec_covered.add(rid)
             else:
                 row[rid] = 0
         matrix[tid] = row
 
     total = len(req_ids)
     covered = len(covered_reqs)
+    review_only = sorted(covered_reqs - exec_covered)
     return {
         "req_ids": req_ids,
         "tc_ids": tc_ids,
@@ -1439,6 +1957,11 @@ def generate_traceability_matrix(
             "total_reqs": total,
             "covered_reqs": covered,
             "pct": round(covered / max(total, 1) * 100, 1),
+            # ── 검증방법 축 (additive) ──
+            "executable_covered_reqs": len(exec_covered),
+            "executable_pct": round(len(exec_covered) / max(total, 1) * 100, 1),
+            "review_only_reqs": review_only,
+            "review_only_count": len(review_only),
         },
     }
 
@@ -1450,6 +1973,7 @@ def generate_traceability_matrix(
 def generate_quality_report(
     test_cases: List[Dict[str, Any]],
     trace: Dict[str, Any],
+    generation_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     total_tc = len(test_cases)
     complete = sum(1 for tc in test_cases if tc.get("steps") and len(tc["steps"]) >= 2)
@@ -1463,6 +1987,37 @@ def generate_quality_report(
         gen_methods[g] = gen_methods.get(g, 0) + 1
 
     cov = trace.get("coverage", {})
+
+    # 리뷰로만 덮인 요구는 숫자 옆에 반드시 말로 남긴다 — `requirement_coverage.pct`만
+    # 읽는 소비자에게는 실행시험 100%와 구분되지 않기 때문이다.
+    coverage_warnings: List[str] = []
+    review_only = list(cov.get("review_only_reqs") or [])
+    if review_only:
+        shown = ", ".join(review_only[:10])
+        suffix = f" 외 {len(review_only) - 10}건" if len(review_only) > 10 else ""
+        coverage_warnings.append(
+            f"[coverage] 요구 {len(review_only)}건은 실행 시험 없이 코드 리뷰(RVW)로만 덮였다 — "
+            f"보고 커버리지 {cov.get('pct')}%는 리뷰를 포함한 값이고 "
+            f"실행 시험 기준은 {cov.get('executable_pct')}%다 ({shown}{suffix})"
+        )
+
+    # TC 상한에 걸려 시험 없이 남은 함수 — 요구 단위 커버리지는 이 절단을 반영하지 않는다.
+    gen_stats = generation_stats or {}
+    without_tc = int(gen_stats.get("functions_without_tc") or 0)
+    if without_tc:
+        trunc = list(gen_stats.get("requirements_truncated") or [])
+        shown = ", ".join(trunc[:8])
+        suffix = f" 외 {len(trunc) - 8}건" if len(trunc) > 8 else ""
+        coverage_warnings.append(
+            f"[coverage] 요구당 TC 상한(max_tc_per_req="
+            f"{gen_stats.get('max_tc_per_req')})에 걸려 매핑된 함수 "
+            f"{gen_stats.get('mapped_functions')}개 중 {gen_stats.get('functions_with_tc')}개만 "
+            f"TC 를 가진다(함수 기준 {gen_stats.get('function_tc_coverage_pct')}%, "
+            f"무시험 {without_tc}개). 요구 커버리지 {cov.get('pct')}%는 요구 단위 값이라 "
+            f"이 절단을 반영하지 않는다"
+            + (f" — 상한 도달 요구: {shown}{suffix}" if trunc else "")
+        )
+
     return {
         "total_test_cases": total_tc,
         "complete_test_cases": complete,
@@ -1471,6 +2026,8 @@ def generate_quality_report(
         "requirement_coverage": cov,
         "test_method_distribution": methods,
         "gen_method_distribution": gen_methods,
+        "coverage_warnings": coverage_warnings,
+        "generation_stats": gen_stats,
     }
 
 
@@ -1523,7 +2080,10 @@ def generate_sts_xlsm(
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     # --- Main test spec sheet ---
-    sheet_name = "3.SW Integration Test Spec"
+    # ⚠ 정본(KJPDS02_SwTS v1.02)의 시트명은 `3.SW Test Spec` 이다. 예전엔
+    #   `3.SW Integration Test Spec`(= SwITS 의 시트명)에 SW 시험 명세를 쓰고 있었다.
+    #   시트명이 다르면 정본을 읽는 쪽이 이 시트를 못 찾거나 통합시험으로 오독한다.
+    sheet_name = _SPEC_SHEET_NAME
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -1602,22 +2162,24 @@ def generate_sts_xlsm(
             ws.cell(row=r, column=1, value=tc_counter).font = data_font
             ws.cell(row=r, column=1).alignment = center_align
 
-            ws.cell(row=r, column=2, value=tc["id"] if si == 0 else None).font = data_font
-            ws.cell(row=r, column=3, value=tc["title"] if si == 0 else None).font = data_font
-            ws.cell(row=r, column=4, value=tc.get("safety_related", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=5, value=tc.get("test_environment", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=6, value=tc.get("test_method", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=7, value=tc.get("gen_method", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=8, value=tc.get("fs_req", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=9, value=tc.get("description", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=10, value=tc.get("precondition", "") if si == 0 else None).font = data_font
+            # 열 번호는 전부 STS_COL(SSOT) 경유 — validator가 같은 상수를 본다.
+            ws.cell(row=r, column=STS_COL["tc_id"], value=tc["id"] if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["title"], value=tc["title"] if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["safety_related"], value=tc.get("safety_related", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["test_environment"], value=tc.get("test_environment", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["test_method"], value=tc.get("test_method", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["gen_method"], value=tc.get("gen_method", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["fs_req"], value=tc.get("fs_req", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["description"], value=tc.get("description", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["precondition"], value=tc.get("precondition", "") if si == 0 else None).font = data_font
 
-            ws.cell(row=r, column=11, value=step.get("action", "")).font = data_font
-            ws.cell(row=r, column=12, value=step.get("expected", "")).font = data_font
+            # step 단위 열(병합하지 않는다 — TC당 여러 행)
+            ws.cell(row=r, column=STS_COL["action"], value=step.get("action", "")).font = data_font
+            ws.cell(row=r, column=STS_COL["expected"], value=step.get("expected", "")).font = data_font
 
-            ws.cell(row=r, column=13, value=tc.get("srs_id", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["srs"], value=tc.get("srs_id", "") if si == 0 else None).font = data_font
 
-            for ci in range(1, 14):
+            for ci in range(1, _LAST_COL + 1):
                 ws.cell(row=r, column=ci).border = thin_border
                 ws.cell(row=r, column=ci).alignment = (
                     center_align if ci in _CENTER_COLS else wrap_align
@@ -1711,7 +2273,6 @@ def _create_cover_sheet(wb, project_id, doc_id, version, asil_level):
     ws = wb.active
     ws.title = "Cover"
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    from openpyxl.utils import get_column_letter
 
     title_font = Font(name="맑은 고딕", size=24, bold=True)
     label_font = Font(name="맑은 고딕", size=9, bold=True)
@@ -1952,7 +2513,8 @@ def _sts_ai_call_with_retry(agent_call_fn, ai_config, messages, *,
     return ""
 
 
-def _parse_sts_ai_response(reply: str) -> Optional[Dict[str, Any]]:
+def _parse_sts_ai_response(reply: str,
+                           max_steps: int = _MAX_STEPS_PER_TC) -> Optional[Dict[str, Any]]:
     """Parse and validate STS AI JSON response."""
     import json as _json
     if not reply:
@@ -1980,7 +2542,7 @@ def _parse_sts_ai_response(reply: str) -> Optional[Dict[str, Any]]:
     ai_steps = payload.get("steps")
     if isinstance(ai_steps, list) and ai_steps:
         cleaned = []
-        for s in ai_steps[:_MAX_STEPS_PER_TC]:
+        for s in ai_steps[:max_steps]:
             if isinstance(s, dict) and isinstance(s.get("action"), str) and isinstance(s.get("expected"), str):
                 cleaned.append({"action": s["action"], "expected": s["expected"]})
         if cleaned:
@@ -1996,8 +2558,14 @@ def enhance_test_cases_with_ai(
     sds_summary: str = "",
     stp_context: str = "",
     hsis_signals: Optional[Dict[str, Any]] = None,
+    max_steps: int = _MAX_STEPS_PER_TC,
 ) -> List[Dict[str, Any]]:
-    """Enhance test case descriptions using Gemini AI with timeout/retry."""
+    """Enhance test case descriptions using Gemini AI with timeout/retry.
+
+    ⚠ `max_steps` 를 안 받으면 AI 보강 스텝만 **다른 상한**을 갖는다. 사용자가 상한을
+      올려 놓고 AI 를 켜면 규칙 생성분은 늘고 AI 교체분만 15개에서 잘려, 같은 문서
+      안에서 TC 마다 스텝 상한이 달라진다.
+    """
     if not ai_config:
         _logger.info("AI enhancement skipped (no config)")
         return test_cases
@@ -2043,8 +2611,11 @@ def enhance_test_cases_with_ai(
         if hsis_signals and hsis_signals.get("signals"):
             hsis_lines = []
             for sig in hsis_signals["signals"][:15]:
+                # ID 열이 빈 HSIS 행도 이제 채택되므로(`_is_hsis_data_row`) 라벨을 비워두지
+                # 않는다 — 빈 라벨은 LLM이 ID를 지어내게 만든다.
+                _label = sig["id"] or sig["related_id"] or "(HSI ID 미기재)"
                 hsis_lines.append(
-                    f"  {sig['id']}: {sig['signal_name']} "
+                    f"  {_label}: {sig['signal_name']} "
                     f"(SW: {sig['sw_var_name']}, Dir: {sig['direction']}, "
                     f"Char: {sig['characteristics'][:40]})"
                 )
@@ -2070,7 +2641,7 @@ def enhance_test_cases_with_ai(
             ],
         )
 
-        validated = _parse_sts_ai_response(reply)
+        validated = _parse_sts_ai_response(reply, max_steps=max_steps)
         if validated:
             if "description" in validated:
                 tc["description"] = validated["description"]
@@ -2101,6 +2672,7 @@ def generate_sts(
     hsis_path: Optional[str] = None,
     ai_config: Optional[Dict[str, Any]] = None,
     on_progress: Optional[Any] = None,
+    source_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -2117,6 +2689,11 @@ def generate_sts(
         hsis_path: Optional path to HSIS xlsx for hardware signal enrichment
         ai_config: Optional AI config dict for Gemini enhancement
         on_progress: Optional callback(pct: int, message: str) for progress updates
+        source_root: Optional C source root(s) — 콤마 구분 복수 경로 허용.
+            품질 DB(record_run)의 project_root 로만 쓰인다. generate_suts/generate_sits
+            와 동일한 역할이며, 과거 이 파라미터가 없는 채로 record_run 이
+            source_root 를 참조해 NameError → except 로 삼켜져 **STS 품질 기록이
+            통째로 유실**되고 있었다.
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage
@@ -2136,29 +2713,45 @@ def generate_sts(
     sds_summary = ""
     stp_ctx = ""
 
+    # 이 맵은 function_details 보강뿐 아니라 **요구-함수 매핑의 폴백 출처**로도 쓰인다
+    # (`map_requirements_to_functions`). None으로 두면 저장소 `docs/` 글롭(프로젝트 무관)이
+    # 대신하는데, 실측상 요구-함수 링크 전량이 그 폴백에서 나온다.
+    sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None
+
     if sds_docx_path:
         _progress(7, "SDS 설계 컨텍스트 로드 중")
         sds_summary = _load_sds_summary(sds_docx_path)
         if sds_summary:
             _logger.info("SDS summary loaded (%d chars)", len(sds_summary))
-            # Also enrich function_details with SDS partition map
-            try:
-                from report_gen.requirements import _extract_sds_partition_map
-                sds_map = _extract_sds_partition_map(sds_docx_path)
-                if sds_map:
-                    for fid, info in function_details.items():
-                        if not isinstance(info, dict):
-                            continue
-                        for cand in _function_sds_candidates(info):
-                            entry = sds_map.get(cand.lower())
-                            if entry:
-                                if entry.get("asil") and not info.get("asil"):
-                                    info["asil"] = entry["asil"]
-                                if entry.get("description") and not info.get("sds_description"):
-                                    info["sds_description"] = entry["description"]
-                                break
-            except Exception as _e:
-                _logger.debug("SDS partition map enrichment skipped: %s", _e)
+        # ⚠ 파티션 맵 추출을 summary 유무에 종속시키지 않는다 — 과거엔 `if sds_summary:`
+        # 안에 있어서, 요약 절이 안 잡히는 SDS면 파티션 표가 멀쩡해도 맵을 아예 안 만들고
+        # 조용히 저장소 폴백으로 넘어갔다.
+        try:
+            from report_gen.requirements import _extract_sds_partition_map
+            sds_partition_map = _extract_sds_partition_map(sds_docx_path) or None
+        except Exception as _e:
+            _logger.warning("SDS 파티션 맵 추출 실패 — 요구-함수 매핑이 저장소 docs/ "
+                            "폴백(프로젝트 무관)으로 넘어간다: %s (%s)", sds_docx_path, _e)
+        if sds_partition_map:
+            _logger.info("SDS 파티션 %d건 로드 — 출처=%s", len(sds_partition_map), sds_docx_path)
+            for fid, info in function_details.items():
+                if not isinstance(info, dict):
+                    continue
+                for cand in _function_sds_candidates(info):
+                    entry = sds_partition_map.get(cand.lower())
+                    if entry:
+                        if entry.get("asil") and not info.get("asil"):
+                            info["asil"] = entry["asil"]
+                        if entry.get("description") and not info.get("sds_description"):
+                            info["sds_description"] = entry["description"]
+                        break
+        else:
+            _logger.warning("SDS를 지정했으나 파티션 0건 — 요구-함수 매핑이 저장소 docs/ "
+                            "폴백(프로젝트 무관)으로 넘어간다: %s", sds_docx_path)
+
+    # 설계-ID 브리지의 좌측 끝. SwUDS 를 안 주면 **꺼진다** — 실측상 그 상태에서
+    # 요구 매핑은 48/68 이고, 브리지가 켜지면 64/68 이다(`load_uds_design_ids` 참조).
+    uds_design_ids: Dict[str, List[str]] = {}
 
     if uds_path:
         _progress(8, "UDS 함수 설명 로드 중")
@@ -2166,6 +2759,12 @@ def generate_sts(
         if uds_descs:
             _logger.info("UDS descriptions loaded (%d entries)", len(uds_descs))
             _merge_uds_into_function_details(function_details, uds_descs)
+        uds_design_ids = load_uds_design_ids(uds_path)
+    else:
+        _logger.warning(
+            "SwUDS 미지정 — 설계-ID 브리지가 꺼진다. SwDS 의 설계 파티션"
+            "(`design_id`/`design_element`)에만 걸린 요구는 함수 근거 없이 리뷰 TC 로만 "
+            "만들어진다(실측 KJPDS02_PV: 16 요구)")
 
     if stp_path:
         _progress(9, "STP 시험 전략 로드 중")
@@ -2197,16 +2796,28 @@ def generate_sts(
     _progress(25, f"요구사항 {len(reqs)}개 파싱 완료")
 
     _progress(30, "요구사항-함수 매핑 중")
-    req_to_fids = map_requirements_to_functions(reqs, function_details)
+    req_to_fids = map_requirements_to_functions(reqs, function_details,
+                                                sds_map=sds_partition_map,
+                                                uds_design_ids=uds_design_ids)
     mapped = sum(1 for v in req_to_fids.values() if v)
     _progress(40, f"{mapped}/{len(reqs)}개 요구사항 매핑 완료")
 
     _progress(45, "테스트 케이스 생성 중")
+    gen_stats: Dict[str, Any] = {}
     test_cases = generate_test_cases(
         reqs, function_details, req_to_fids, project_config,
         hsis_signals=hsis_signals or None,
+        stats_out=gen_stats,
     )
     _progress(60, f"테스트 케이스 {len(test_cases)}개 생성 완료")
+    if gen_stats.get("functions_without_tc"):
+        _logger.warning(
+            "STS: TC 상한(%s)에 걸려 매핑 함수 %s개 중 %s개만 시험한다 (무시험 %s개, "
+            "상한 도달 요구 %s건) — 요구 커버리지는 이 절단을 반영하지 않는다",
+            gen_stats.get("max_tc_per_req"), gen_stats.get("mapped_functions"),
+            gen_stats.get("functions_with_tc"), gen_stats.get("functions_without_tc"),
+            gen_stats.get("requirements_truncated_count"),
+        )
 
     if ai_config:
         _progress(65, "AI 향상 적용 중")
@@ -2215,6 +2826,7 @@ def generate_sts(
             sds_summary=sds_summary,
             stp_context=stp_ctx,
             hsis_signals=hsis_signals or None,
+            max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
         )
         _progress(75, "AI 향상 완료")
 
@@ -2222,24 +2834,34 @@ def generate_sts(
     trace = generate_traceability_matrix(test_cases, reqs)
 
     _progress(82, "품질 리포트 생성 중")
-    quality = generate_quality_report(test_cases, trace)
+    quality = generate_quality_report(test_cases, trace, generation_stats=gen_stats)
 
     _progress(85, "XLSM 파일 생성 중")
     out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config)
 
     _progress(92, "생성 문서 자동 검증 중")
     try:
-        from generators.suts import validate_sts_xlsm
         validation = validate_sts_xlsm(out)
+        # 생성 수 ↔ 파일 기록 수 대조(세 생성기 공용 단일 출처). 이게 없으면 아래
+        # 반환값의 test_case_count 는 **파일이 아니라 생성기가 세어준 값**이라,
+        # 라이터가 흘려도 호출자는 끝까지 모른다.
+        validation = apply_write_back_check(validation, {"tc_count": len(test_cases)})
         if validation.get("issues"):
             _logger.warning("STS validation issues: %s", validation["issues"])
     except Exception as _ve:
         _logger.warning("STS validation skipped: %s", _ve)
-        validation = {"valid": True, "issues": [], "warnings": [], "stats": {}}
+        # B7 — 검증이 크래시했으면 valid:True(통과)로 위장하지 않는다. 검증을 **못 한** 것을
+        # 통과로 쓰는 fail-open 이다(미검증 ≠ 유효). valid:False + 사유를 warnings 로 표면화.
+        validation = {
+            "valid": False, "issues": [], "stats": {},
+            "warnings": [f"검증 실행 실패(미검증): {_ve}"],
+        }
 
     validation_report_path = ""
     try:
-        validation_report_path = generate_sts_validation_report(out, quality)
+        # ⚠ 위에서 만든 `validation` 을 **넘긴다**. 안 넘기면 리포트가 재검증하면서
+        #   write-back 대조 결과와 "검증 실행 실패(미검증)" 상태를 통째로 잃는다.
+        validation_report_path = generate_sts_validation_report(out, quality, validation=validation)
         _logger.info("STS validation report: %s", validation_report_path)
     except Exception as _vr:
         _logger.warning("STS validation report generation skipped: %s", _vr)
@@ -2258,7 +2880,11 @@ def generate_sts(
             ai_model=str((ai_config or {}).get("model", "")),
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 **침묵은 금지**. 이 `except: pass` 가 source_root
+        # NameError 를 몇 년간 삼켜 STS 품질 기록이 통째로 유실된 걸 아무도 몰랐다.
+        # recorder 내부엔 _logger.exception 이 있지만, 인자 평가에서 터지면
+        # record_run 진입 자체가 없어 거기까지 못 간다 → 호출부에서 남긴다.
+        _logger.exception("STS quality record skipped (non-fatal)")
 
     return {
         "output_path": out,
@@ -2275,13 +2901,187 @@ def generate_sts(
 # Document validation
 # ---------------------------------------------------------------------------
 
+# 읽는 쪽도 **writer 와 같은 상수**를 본다. 예전엔 시트명이 문자열로 박혀 있어
+# writer 만 고치면 validator 가 "Missing sheet" 를 내며 조용히 갈라졌다.
+_STS_SHEET_CANDIDATES = (_SPEC_SHEET_NAME, "3.SW Integration Test Spec", "2.SW Test Spec")
+
+
+def _normalize_header(value: Any) -> str:
+    """헤더 라벨 비교용 정규화 — 개행·공백·구두점 제거 후 소문자."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _detect_sts_columns(ws: Any, header_row: int = _HEADER_ROW) -> Tuple[Dict[str, int], List[str]]:
+    """header_row의 라벨로 필드→열 번호를 찾는다. 못 찾은 필드는 스키마 상수로 폴백.
+
+    열 번호 하드코딩만 쓰면 템플릿이 한 칸만 밀려도 **엉뚱한 열을 조용히 읽는다**(이 파일
+    상단 _STS_SCHEMA 주석의 실제 사고). 반대로 헤더 탐지만 쓰면 헤더가 없는 구 산출물에서
+    아무것도 못 읽는다. 둘을 합치고, 폴백을 썼다는 사실은 호출자에게 알린다.
+
+    Returns: (필드→열, 폴백을 쓴 필드 목록)
+    """
+    label_to_key = {_normalize_header(label): key for _, key, label in _STS_SCHEMA if label}
+    found: Dict[str, int] = {}
+    try:
+        # read_only 워크북은 .cell() 호출마다 시트를 재파싱한다 — 헤더 한 줄도 iter_rows로.
+        max_col = min(int(ws.max_column or 0), 64)   # 폭주 방지 — STS는 13열
+        header_vals = next(
+            ws.iter_rows(min_row=header_row, max_row=header_row,
+                         max_col=max_col, values_only=True),
+            (),
+        )
+        for col, raw in enumerate(header_vals, 1):
+            key = label_to_key.get(_normalize_header(raw))
+            if key and key not in found:             # 중복 헤더는 첫 번째만 채택
+                found[key] = col
+    except Exception as exc:
+        _logger.warning("STS header 탐지 실패(상수 폴백): %s", exc)
+
+    fallback_fields = [k for k in STS_COL if k not in found]
+    cols = {**STS_COL, **found}
+    return cols, fallback_fields
+
+
+def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
+    """생성된 STS XLSM의 구조·데이터 품질 검증.
+
+    ⚠ 이 함수는 **STS 전용**이다. 과거엔 generators.suts에 있으면서 SUTS 레이아웃 상수를
+    그대로 썼다 — writer가 11/12/13열(Action/Expected/SRS)에 쓰는데 validator는 5/6/4열
+    (TestEnvironment/TestMethod/SafetyRelated)을 읽어, Action·Expected가 전부 비어도
+    "이상 없음"이 되고 요구 링크율은 Safety Related 채움률을 보고했다.
+    """
+    issues: List[str] = []
+    warnings: List[str] = []
+    stats: Dict[str, Any] = {}
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return {"valid": False, "issues": ["openpyxl not installed"], "warnings": [], "stats": {}}
+
+    p = Path(xlsm_path)
+    if not p.exists():
+        return {"valid": False, "issues": [f"File not found: {xlsm_path}"], "warnings": [], "stats": {}}
+
+    try:
+        wb = load_workbook(str(p), read_only=True, data_only=True)
+    except Exception as e:
+        return {"valid": False, "issues": [f"Cannot open: {e}"], "warnings": [], "stats": {}}
+
+    try:
+        stats["sheets"] = wb.sheetnames
+        stats["sheet_count"] = len(wb.sheetnames)
+
+        for s in ("Cover", "History", "1.Introduction"):
+            if s not in wb.sheetnames:
+                warnings.append(f"Optional sheet missing: {s}")
+
+        sts_sheet = next((c for c in _STS_SHEET_CANDIDATES if c in wb.sheetnames), None)
+        if not sts_sheet:
+            issues.append("No STS main sheet found")
+            return {"valid": False, "issues": issues, "warnings": warnings, "stats": stats}
+
+        ws = wb[sts_sheet]
+        max_row = ws.max_row or 0
+        stats["max_row"] = max_row
+        stats["max_col"] = ws.max_column or 0
+        stats["sheet"] = sts_sheet
+
+        cols, fallback_fields = _detect_sts_columns(ws)
+        stats["columns"] = dict(cols)
+        if fallback_fields:
+            # 필수 축이 헤더에서 안 잡히면 잘못된 열을 읽고 있을 수 있다 — 침묵 금지.
+            missing_required = [f for f in _STS_REQUIRED_FIELDS if f in fallback_fields]
+            if missing_required:
+                warnings.append(
+                    "헤더에서 못 찾아 상수 위치로 판독한 필수 열: "
+                    + ", ".join(missing_required)
+                )
+
+        tc_count = 0
+        empty_title_tcs = 0
+        no_step_tcs = 0
+        no_expected_tcs = 0
+        reqs_linked = 0
+
+        # ⚠ read_only 워크북에서 ws.cell(row=N, ...) 랜덤 접근은 매 호출마다 시트를 다시
+        # 훑어 O(행²)가 된다(이 저장소 실측 전례: 75분 → iter_rows 0.9초). 한 번만 순회한다.
+        needed = ("tc_id", "title", "action", "expected", "srs")
+        max_needed_col = max(cols[f] for f in needed)
+
+        def _val(row_vals: Tuple[Any, ...], field: str) -> str:
+            idx = cols[field] - 1
+            return str(row_vals[idx] or "").strip() if idx < len(row_vals) else ""
+
+        # TC ID는 첫 스텝 행에만 있고 Action/Expected는 스텝마다 있다 — TC 블록 단위로 본다.
+        cur_has_action = cur_has_expected = False
+        has_open_tc = False
+
+        def _close_tc() -> None:
+            nonlocal no_step_tcs, no_expected_tcs
+            if not cur_has_action:
+                no_step_tcs += 1
+            if not cur_has_expected:
+                no_expected_tcs += 1
+
+        for row_vals in ws.iter_rows(
+            min_row=_HEADER_ROW + 1, max_row=max_row,
+            max_col=max_needed_col, values_only=True,
+        ):
+            tc_id = _val(row_vals, "tc_id")
+            if tc_id:
+                if has_open_tc:
+                    _close_tc()
+                tc_count += 1
+                has_open_tc = True
+                cur_has_action = cur_has_expected = False
+                if not _val(row_vals, "title"):
+                    empty_title_tcs += 1
+                if _val(row_vals, "srs"):
+                    reqs_linked += 1
+            if not has_open_tc:
+                continue   # TC 시작 전 잔여 행 — 어느 TC에도 귀속되지 않는다
+            if _val(row_vals, "action"):
+                cur_has_action = True
+            if _val(row_vals, "expected"):
+                cur_has_expected = True
+        if has_open_tc:
+            _close_tc()
+
+        stats["tc_count"] = tc_count
+        stats["empty_title_tcs"] = empty_title_tcs
+        stats["no_step_tcs"] = no_step_tcs
+        stats["no_expected_tcs"] = no_expected_tcs
+        stats["reqs_linked"] = reqs_linked
+        stats["req_linkage_pct"] = round(reqs_linked / tc_count * 100, 1) if tc_count else 0
+
+        if tc_count == 0:
+            issues.append("No test cases found")
+        if empty_title_tcs > tc_count * 0.3:
+            issues.append(f"Over 30% TCs lack titles ({empty_title_tcs}/{tc_count})")
+        # Action/Expected 부재는 "시험을 수행할 수 없다"는 뜻이라 경고가 아니라 결함이다.
+        if tc_count and no_step_tcs == tc_count:
+            issues.append(f"All TCs lack action steps ({no_step_tcs}/{tc_count})")
+        elif no_step_tcs > tc_count * 0.5:
+            warnings.append(f"Over 50% TCs lack action steps ({no_step_tcs}/{tc_count})")
+        if tc_count and no_expected_tcs == tc_count:
+            issues.append(f"All TCs lack expected results ({no_expected_tcs}/{tc_count})")
+        elif no_expected_tcs > tc_count * 0.5:
+            warnings.append(f"Over 50% TCs lack expected results ({no_expected_tcs}/{tc_count})")
+        if tc_count > 0 and reqs_linked == 0:
+            warnings.append("No TCs linked to requirements")
+    finally:
+        wb.close()
+
+    return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings, "stats": stats}
+
+
 def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
     """Validate a generated STS XLSM for structural completeness.
 
     Returns dict with 'valid' bool, 'issues' list, 'warnings' list, and 'stats' dict.
     """
     try:
-        from generators.suts import validate_sts_xlsm
         return validate_sts_xlsm(xlsm_path)
     except ImportError:
         pass
@@ -2291,10 +3091,11 @@ def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
     issues: List[str] = []
     stats: Dict[str, Any] = {"sheets": wb.sheetnames, "sheet_count": len(wb.sheetnames)}
 
-    if "3.SW Integration Test Spec" in wb.sheetnames:
-        ws = wb["3.SW Integration Test Spec"]
+    _sheet = next((n for n in _STS_SHEET_CANDIDATES if n in wb.sheetnames), None)
+    if _sheet:
+        ws = wb[_sheet]
         tc_count = 0
-        for r in range(7, (ws.max_row or 7) + 1):
+        for r in range(_HEADER_ROW + 1, (ws.max_row or _HEADER_ROW) + 1):
             tc_id = ws.cell(row=r, column=2).value
             if tc_id and str(tc_id).strip():
                 tc_count += 1
@@ -2302,7 +3103,7 @@ def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
         if tc_count == 0:
             issues.append("No test cases found in main sheet")
     else:
-        issues.append("Missing sheet: 3.SW Integration Test Spec")
+        issues.append(f"Missing sheet: {_SPEC_SHEET_NAME}")
 
     wb.close()
     stats["issues"] = issues
@@ -2313,13 +3114,24 @@ def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
 def generate_sts_validation_report(
     xlsm_path: str,
     quality_report: Optional[Dict[str, Any]] = None,
+    validation: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate a validation report markdown for STS XLSM.
 
     Writes a .validation.md file next to the XLSM and returns its path.
+
+    ⚠ `validation` 을 **받아야 한다**. 예전엔 인자가 없어 호출부가 만들어 둔 판정을
+      버리고 `validate_sts_xlsm` 을 **처음부터 다시** 돌렸다. 그래서 리포트에서 사라지던 것:
+
+      1. `apply_write_back_check` 결과 — 생성 수 ↔ 파일 기록 수 대조. 불일치면
+         `valid=False` + `issues` 인데, 재검증은 그걸 모르므로 리포트는 **PASS 로 적었다**.
+      2. 검증이 크래시했을 때 호출부가 세운 fail-closed 상태
+         (`valid:False` + "검증 실행 실패(미검증)") — 재검증이 성공하면 통째로 지워졌다.
+
+      형제 두 리포트(`generate_suts_validation_report`·`generate_sits_validation_report`)는
+      이미 이 인자를 받는다. 셋 중 하나만 빠져 있었다.
     """
-    from generators.suts import validate_sts_xlsm
-    validation = validate_sts_xlsm(xlsm_path)
+    validation = validation if isinstance(validation, dict) else validate_sts_xlsm(xlsm_path)
     stats = validation.get("stats", {})
     issues = validation.get("issues", [])
     warnings = validation.get("warnings", [])
@@ -2336,8 +3148,8 @@ def generate_sts_validation_report(
         "",
         "## 1. 구조 검증",
         "",
-        f"| 항목 | 값 |",
-        f"|------|-----|",
+        "| 항목 | 값 |",
+        "|------|-----|",
         f"| 시트 수 | {stats.get('sheet_count', 0)} |",
         f"| 시트 목록 | {', '.join(stats.get('sheets', []))} |",
         f"| TC 수 | {stats.get('tc_count', 0)} |",
@@ -2353,8 +3165,8 @@ def generate_sts_validation_report(
         lines.extend([
             "## 2. 품질 지표",
             "",
-            f"| 항목 | 값 |",
-            f"|------|-----|",
+            "| 항목 | 값 |",
+            "|------|-----|",
             f"| 총 TC 수 | {qr.get('total_test_cases', 0)} |",
             f"| 완전한 TC 수 | {qr.get('complete_test_cases', 0)} ({qr.get('completeness_pct', 0)}%) |",
             f"| 안전 관련 TC | {qr.get('safety_test_cases', 0)} |",
@@ -2371,23 +3183,28 @@ def generate_sts_validation_report(
                 lines.append(f"| {k} | {v} |")
             lines.append("")
 
+    # (R32 Q-10, 리뷰 W4) TC 0건이면 비율 항목은 정의되지 않는다 — 예전엔 `if tc_count else True` 로 통과로
+    #   접어 **빈 STS 가 5개 중 4개를 통과**했다(형제 SUTS 와 같은 결함, 같은 라운드에 같은 형태로 고친다).
+    #   해당 없음(`None`)은 분모에서 빼고 `N/A` 로 적는다 — 통과도 실패도 아니다.
+    _tc = stats.get("tc_count", 0)
     gate_items = [
-        ("TC 존재", stats.get("tc_count", 0) > 0),
-        ("빈 제목 < 30%", stats.get("empty_title_tcs", 0) <= stats.get("tc_count", 1) * 0.3 if stats.get("tc_count") else True),
-        ("스텝 존재 > 50%", stats.get("no_step_tcs", 0) < stats.get("tc_count", 1) * 0.5 if stats.get("tc_count") else True),
-        ("기대값 존재 > 50%", stats.get("no_expected_tcs", 0) < stats.get("tc_count", 1) * 0.5 if stats.get("tc_count") else True),
-        ("요구사항 연결 존재", stats.get("reqs_linked", 0) > 0 if stats.get("tc_count") else True),
+        ("TC 존재", _tc > 0),
+        ("빈 제목 < 30%", (stats.get("empty_title_tcs", 0) <= _tc * 0.3) if _tc else None),
+        ("스텝 존재 > 50%", (stats.get("no_step_tcs", 0) < _tc * 0.5) if _tc else None),
+        ("기대값 존재 > 50%", (stats.get("no_expected_tcs", 0) < _tc * 0.5) if _tc else None),
+        ("요구사항 연결 존재", (stats.get("reqs_linked", 0) > 0) if _tc else None),
     ]
-    passed = sum(1 for _, ok in gate_items if ok)
+    applicable = [(name, ok) for name, ok in gate_items if ok is not None]
+    passed = sum(1 for _, ok in applicable if ok)
 
     lines.extend([
-        f"## 3. Quality Gate ({passed}/{len(gate_items)})",
+        f"## 3. Quality Gate ({passed}/{len(applicable)})",
         "",
         "| 항목 | 결과 |",
         "|------|------|",
     ])
     for name, ok in gate_items:
-        lines.append(f"| {name} | {'PASS' if ok else 'FAIL'} |")
+        lines.append(f"| {name} | {'N/A (TC 없음)' if ok is None else ('PASS' if ok else 'FAIL')} |")
     lines.append("")
 
     if issues:

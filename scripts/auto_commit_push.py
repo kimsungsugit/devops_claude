@@ -3,11 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = SCRIPT_DIR.parent

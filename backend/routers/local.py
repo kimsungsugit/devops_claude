@@ -1,21 +1,68 @@
 """Auto-generated router: local"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from typing import Any, Dict, List, Optional, Tuple
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
-import traceback
-import logging
 import time
-import asyncio
+import traceback
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from backend.user_context import wrap_with_user
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
+import config
+from backend.dependencies.admin import require_admin
+from backend.helpers import (
+    _apply_uds_view_filters,
+    _augment_path,
+    _build_excel_artifact_payload,
+    _build_excel_artifact_summary,
+    _build_preflight,
+    _build_quality_evaluation,
+    _collect_tool_paths,
+    _compute_quick_quality_gate,
+    _compute_uds_mapping_summary,
+    _enrich_function_quality_fields,
+    _generate_docx_with_retry,
+    _get_progress,
+    _get_source_sections_cached,
+    _get_uds_view_payload_cached,
+    _is_allowed_req_doc,
+    _local_reports_dir,
+    _local_sits_dir,
+    _local_sts_dir,
+    _local_suts_dir,
+    _local_uds_dir,
+    _open_local_path,
+    _parse_component_map_file,
+    _parse_path_list,
+    _read_excel_artifact_sidecar,
+    _record_uds_run,
+    _resolve_local_report_path,
+    _resolve_local_sits_path,
+    _resolve_local_sts_path,
+    _resolve_local_suts_path,
+    _resolve_local_uds_path,
+    _resolve_report_dir,
+    _resolve_source_root_from_cfg,
+    _run_impact_analysis_for_uds,
+    _run_report_with_timeout,
+    _set_progress,
+    _validate_docx_template_bytes,
+    _write_excel_artifact_sidecar,
+    _write_residual_tbd_report,
+    _write_upload_to_temp,
+    build_vectorcast_metadata,
+    evaluate_vectorcast_readiness,
+    load_vectorcast_project_config,
+    resolve_registered_uds_template_local,
+)
+from backend.helpers.sds import build_sds_view_model, is_sds_filename, is_srs_filename
 from backend.schemas import (
     EditorReadAbsRequest,
     EditorReadRequest,
@@ -37,27 +84,12 @@ from backend.schemas import (
     RagStorageRequest,
     ReplaceTextRequest,
     ScmRequest,
-    SearchRequest,
     SdsViewRequest,
+    SearchRequest,
     TextPreviewRequest,
 )
-from datetime import datetime
-from backend.helpers import _apply_uds_view_filters, _augment_path, _build_excel_artifact_payload, _build_excel_artifact_summary, _build_preflight, _build_quality_evaluation, _collect_tool_paths, _compute_quick_quality_gate, _compute_uds_mapping_summary, _enrich_function_quality_fields, _generate_docx_with_retry, _get_progress, _get_source_sections_cached, _get_uds_view_payload_cached, _is_allowed_req_doc, _local_reports_dir, _local_sits_dir, _local_sts_dir, _local_suts_dir, _local_uds_dir, _open_local_path, _parse_component_map_file, _parse_path_list, _read_excel_artifact_sidecar, _resolve_local_report_path, _resolve_local_sits_path, _resolve_local_sts_path, _resolve_local_suts_path, _resolve_local_uds_path, _resolve_report_dir, _resolve_source_root_from_cfg, _run_impact_analysis_for_uds, _run_report_with_timeout, _set_progress, _validate_docx_template_bytes, _write_excel_artifact_sidecar, _write_residual_tbd_report, _write_upload_to_temp, build_vectorcast_metadata, evaluate_vectorcast_readiness, load_vectorcast_project_config
-from report_generator import (
-    _build_req_map_from_doc_paths,
-    enrich_function_details_with_docs,
-    generate_uds_source_sections,
-    generate_uds_requirements_from_docs,
-    generate_uds_validation_report,
-    generate_uds_field_quality_gate_report,
-    generate_uds_constraints_report,
-    generate_uds_preview_html,
-    generate_called_calling_accuracy_report,
-    generate_swcom_context_report,
-    generate_swcom_context_diff_report,
-    generate_asil_related_confidence_report,
-)
-import config
+from backend.services.files import read_text_limited
+from backend.services.local_report_generator import generate_local_docx, generate_local_xlsx
 from backend.services.local_service import (
     delete_kb_entry,
     format_c_code,
@@ -70,8 +102,8 @@ from backend.services.local_service import (
     git_stage,
     git_status,
     git_unstage,
-    list_kb_entries,
     list_directory,
+    list_kb_entries,
     pick_directory,
     pick_file,
     read_file_text,
@@ -79,19 +111,33 @@ from backend.services.local_service import (
     replace_lines,
     run_git,
     run_svn,
-    svn_info_url,
     search_in_files,
     write_file_text,
 )
-from backend.helpers.sds import build_sds_view_model
+from backend.services.paths import confine, is_under_any, safe_resolve_under, trusted_roots
+from backend.user_context import wrap_with_user
+from report_gen.atomic_io import atomic_write_text
+from report_gen.provenance import has_evidence_value, is_weak_source
+from report_gen.utils import build_function_details_by_name
+from report_generator import (
+    _build_req_map_from_doc_paths,
+    enrich_function_details_with_docs,
+    generate_asil_related_confidence_report,
+    generate_called_calling_accuracy_report,
+    generate_swcom_context_report,
+    generate_uds_constraints_report,
+    generate_uds_field_quality_gate_report,
+    generate_uds_preview_html,
+    generate_uds_requirements_from_docs,
+    generate_uds_source_sections,
+    generate_uds_validation_report,
+)
 from workflow.change_trigger import build_registry_trigger
-from workflow.impact_orchestrator import run_impact_update
 from workflow.impact_jobs import start_impact_job
-from backend.services.local_report_generator import generate_local_docx, generate_local_xlsx
-from backend.services.files import read_text_limited
-from backend.services.paths import is_under_any
+from workflow.impact_orchestrator import run_impact_update
+
 try:
-    from workflow.rag import _read_text_from_file, _read_and_chunk_file, get_kb, ingest_external_sources
+    from workflow.rag import _read_and_chunk_file, _read_text_from_file, get_kb, ingest_external_sources
 except ImportError:
     _read_text_from_file = None
     _read_and_chunk_file = None
@@ -109,10 +155,102 @@ router = APIRouter()
 _logger = logging.getLogger("devops_api")
 
 
-async def _run_blocking(func, *args, **kwargs):
-    """blocking 함수를 별도 스레드에서 실행 — async 엔드포인트의 이벤트 루프 hang 방지."""
-    import functools
-    return await asyncio.to_thread(functools.partial(func, *args, **kwargs))
+# ---------------------------------------------------------------------------
+# 요청자가 지정한 base(`project_root`) 확정 — **단일 출처**
+# ---------------------------------------------------------------------------
+#
+# ## 왜 생겼나 (2026-08-04, 보안 표면 감사)
+#
+# 이 파일의 endpoint 20곳이 `req.project_root` 를 **그대로 base 로** 써서, 인증만 통과하면
+# (당시엔 `X-User` 헤더 한 줄이면 됐다) 디스크 임의 위치를 읽고 쓸 수 있었다. 실측 재현:
+#
+#   POST /api/local/editor/write  project_root="C:/Users/<me>"                  -> 200, 홈에 파일 생성
+#   POST /api/local/editor/write  project_root=…\Start Menu\Programs\Startup    -> 200, **로그인 시 자동실행 지속성**
+#   POST /api/local/editor/write  rel_path="backend/routers/__probe.py"         -> 200, **코드 주입 표면**
+#   POST /api/local/editor/read   rel_path=".env"                               -> 200, 2,165B (JWT_SECRET 포함)
+#   POST /api/local/editor/read   rel_path="reports/quality.sqlite"             -> 200, 'SQLite format 3\x00'
+#
+# ⚠ **traversal 가드는 이미 있었고 정상 동작했다**(`../` 3종 전부 차단). 결함은 traversal 이
+#    아니라 **base 지정**이다 — `rel_path` 만 검사하고 root 는 body 를 그대로 믿었다.
+#    같은 파일 `:4155`/`:4177`/`:4236`(open-file/read-abs/open-folder)은 이미 이 확정을
+#    하고 있었다 — 읽기전용 3곳은 잠겼고 **쓰기 3곳은 열려 있던** 비대칭이었다.
+#
+# ⚠ 확정만으로는 부족하다. `.env`·`reports/quality.sqlite` 는 `repo_root` **밑**이라
+#    화이트리스트를 통과한다. 그래서 민감 경로 거부를 함께 둔다(`_deny_sensitive_target`).
+#
+# ⚠ 이 헬퍼는 **라우터 계층 전용**이다. MCP(`write_file`/`replace_in_file`)는 HTTP 를 타지
+#    않고 `local_service` 함수를 in-process 로 부르며 자체 가드가 있다 — 건드리지 않는다.
+
+def _allowed_request_roots() -> List[Path]:
+    """요청자가 base 로 지정할 수 있는 최상위 경로. `:4157` 과 같은 목록이다.
+
+    ⚠ 정의는 `backend/services/paths.trusted_roots()` **단일 출처**로 옮겼다(2026-08-19).
+      같은 판정이 세 벌로 흩어져 있었고, 그 사이로 봉인이 아예 없는 엔드포인트가 남아
+      있었다. 집합은 그대로다 — 여기서 넓히면 이 20곳이 조용히 함께 넓어진다.
+    """
+    return list(trusted_roots())
+
+
+# base 확정을 통과해도 **내용을 내주면 안 되는** 것들. 전부 `repo_root` 밑이라
+# 화이트리스트로는 안 걸린다.
+_SENSITIVE_NAME_PREFIXES = (".env",)
+_SENSITIVE_SUFFIXES = (".sqlite", ".sqlite3", ".db")
+_SENSITIVE_RELATIVE = (
+    Path("config/admin_users.json"),
+    Path("config/users.json"),
+    Path("config/allowed_users.json"),
+)
+
+
+def _deny_sensitive_target(target: Path) -> None:
+    """자격·신원·감사 저장소는 이 API 로 읽지도 쓰지도 못한다."""
+    name = target.name.lower()
+    if name.startswith(_SENSITIVE_NAME_PREFIXES):
+        raise HTTPException(status_code=403, detail="sensitive file not allowed")
+    # `quality.sqlite.bak` 처럼 접미가 더 붙어도 막는다 — 확장자 일치만 보면 새 나간다.
+    if any(s in name for s in _SENSITIVE_SUFFIXES):
+        raise HTTPException(status_code=403, detail="sensitive file not allowed")
+    try:
+        rel = target.resolve().relative_to(repo_root.resolve())
+    except (ValueError, OSError):
+        return
+    if any(rel == p or rel.as_posix() == p.as_posix() for p in _SENSITIVE_RELATIVE):
+        raise HTTPException(status_code=403, detail="sensitive file not allowed")
+
+
+def confine_request_root(project_root: Any, *, rel_path: Any = None) -> str:
+    """요청 body 의 base 를 허용 루트 안으로 **확정**한다. 밖이면 403.
+
+    Args:
+        project_root: 요청자가 준 base. 빈 값이면 `repo_root`.
+        rel_path: 있으면 최종 대상까지 민감 경로 검사를 건다.
+
+    Returns:
+        확정된 base 문자열(하위 서비스 함수가 그대로 쓸 수 있게).
+    """
+    raw = str(project_root or "").strip() or str(repo_root)
+    try:
+        target = Path(raw).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid project_root") from exc
+    if not is_under_any(target, _allowed_request_roots()):
+        # ⚠ 어떤 경로가 허용되는지 응답에 적지 않는다 — 실패 자체가 정보다.
+        _logger.warning("허용 밖 project_root 요청을 차단했다: %s", target)
+        raise HTTPException(status_code=403, detail="project_root not allowed")
+    _deny_sensitive_target(target)
+    if rel_path is not None and str(rel_path).strip():
+        try:
+            combined = (target / str(rel_path)).resolve()
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid rel_path") from exc
+        _deny_sensitive_target(combined)
+    return str(target)
+
+
+# blocking 오프로딩의 **단일 정의**는 backend/routers/_safety.py 에 있다.
+# 여기 사본을 두면 jenkins.py 와 갈라져 한쪽만 고쳐진다(이 저장소 1순위 재발 패턴).
+from backend.routers._safety import run_blocking as _run_blocking  # noqa: E402
+from backend.services.resolver_helpers import read_requirement_doc  # noqa: E402
 
 _MAX_PREVIEW_COLS = 20
 
@@ -161,6 +299,8 @@ def _build_local_excel_output(base_dir: Path, category: str, stem: str, template
     ts = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:4]}"
     suffix = _pick_excel_suffix(template_path)
     filename = f"{stem}_{ts}{suffix}"
+    # path-collision-ok: `ts` 에 이미 `uuid4().hex[:4]` 가 붙어 있다(위 줄). 선점으로
+    #   바꾸면 정상 경로의 파일명까지 달라지므로 여기선 난수 유일성을 유지한다.
     return filename, target_dir / filename
 
 
@@ -186,7 +326,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
             "summary": summary,
             "function_details": details,
         }
-        sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
         return sidecar
     except Exception as exc:
         _logger.warning("uds payload sidecar write skipped: %s", exc)
@@ -200,9 +341,9 @@ def _discover_default_req_docs() -> Dict[str, List[str]]:
         return result
     for path in docs_dir.glob("*.docx"):
         lower = path.name.lower()
-        if "srs" in lower or "sds" in lower:
+        if is_srs_filename(lower) or is_sds_filename(lower):
             result["req"].append(str(path))
-        if "sds" in lower:
+        if is_sds_filename(lower):
             result["sds"].append(str(path))
     return result
 
@@ -260,9 +401,42 @@ def _resolve_req_doc_sets(
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[str]]:
+    """요구/SDS 문서 경로 확정 — 저장소 `docs/` 글롭은 **아무것도 안 준 경우에만**.
+
+    예전엔 사용자가 준 경로에 저장소 글롭을 **무조건 이어붙였다**(`user + defaults`).
+    그러면 어느 프로젝트를 돌리든 저장소 동봉 HDPDM01 SDS 가 항상 섞인다.
+    `enrich_function_details_with_docs` 의 병합은 first-wins 라, 사용자 문서가 **빈칸인
+    항목을 HDPDM01 의 ASIL·요구ID 가 채우고**, 사용자 문서에 아예 없는 함수는 HDPDM01
+    엔트리가 통째로 추가된다.
+
+    실측(KJPDS02 SwDS ↔ 저장소 HDPDM01 SwDS): 함수 엔트리 **473개(KJPDS02 의 80.9%)가
+    이름 충돌**하고 그 **전부**가 HDPDM01 쪽에 asil·related 를 갖고 있었다 —
+    예: `adc0_stop_current_workaround` ← HDPDM01 의 `SwTR_0107, SwNTR_0103`.
+
+    같은 규율이 이 파일의 `_doc_or_discovered`(SRS)와 `generators/suts.py`
+    `load_sds_map_from`(커밋 `1bfdee9` "프로젝트 간 오염 3건")에 이미 있다 —
+    여기만 빠져 있었다. 그쪽은 "해석 실패 시 대체 금지"였는데 여기는 조건조차 없었다.
+    """
+    user_req = _dedupe_paths([p for p in (req_doc_paths or []) if str(p or "").strip()])
+    user_sds = _dedupe_paths([p for p in (sds_doc_paths or []) if str(p or "").strip()])
+    # 사용자가 준 요구 문서 중 이름에 'sds' 가 든 것도 SDS 로 인정 — Jenkins 경로
+    # (`jenkins.py` `sds_doc_paths` 구성)와 동일 규칙이라 모드 간 결과가 갈리지 않는다.
+    if not user_sds and user_req:
+        user_sds = _dedupe_paths([p for p in user_req if is_sds_filename(p)])
+    if user_req or user_sds:
+        if not user_sds:
+            # 침묵 금지 — SDS 없이 진행하면 ASIL/요구 보강이 비는데, 그게 저장소 문서로
+            # 채워지는 것보다는 낫다. 다만 왜 비었는지는 남긴다.
+            _logger.warning(
+                "SDS 미지정 — 저장소 docs/ 문서로 대체하지 않는다(다른 프로젝트 오염 방지). "
+                "함수별 ASIL/요구 보강은 생략된다")
+        return user_req, user_sds
     defaults = _discover_default_req_docs()
-    req_paths = _dedupe_paths(list(req_doc_paths or []) + list(defaults.get("req") or []))
-    sds_paths = _dedupe_paths(list(sds_doc_paths or []) + list(defaults.get("sds") or []))
+    req_paths = _dedupe_paths(list(defaults.get("req") or []))
+    sds_paths = _dedupe_paths(list(defaults.get("sds") or []))
+    if req_paths or sds_paths:
+        _logger.info("요구/SDS 문서 미지정 — 저장소 docs/ 에서 자동 탐색(프로젝트 무관): "
+                     "req %d · sds %d", len(req_paths), len(sds_paths))
     return req_paths, sds_paths
 
 
@@ -292,25 +466,110 @@ def _discover_hsis_path() -> Optional[str]:
     return None
 
 
+def _discover_srs_docx() -> Optional[str]:
+    """저장소 `docs/` 에서 SRS docx 하나를 고른다(프로젝트 무관)."""
+    for p in _discover_default_req_docs().get("req", []):
+        if is_srs_filename(p) and p.endswith(".docx"):
+            return p
+    return None
+
+
+def _discover_sds_docx() -> Optional[str]:
+    """저장소 `docs/` 에서 SDS docx 하나를 고른다(프로젝트 무관)."""
+    for p in _discover_default_req_docs().get("sds", []):
+        return p
+    return None
+
+
+def _doc_or_discovered(
+    resolved: Optional[str],
+    user_supplied: Any,
+    discover: Callable[[], Optional[str]],
+    *,
+    label: str,
+    tag: str = "",
+) -> Optional[str]:
+    """해석된 경로가 없을 때 자동 탐색을 쓸지 결정한다.
+
+    자동 탐색(저장소 `docs/` 글롭)은 사용자가 **아무것도 안 준 경우에만** 쓴다.
+    사용자가 경로를 줬는데 해석에 실패했다면(대표 사례: cloudium worker-only `U:\\…` —
+    로컬 `Path.exists()` 가 항상 False) **대체하지 않고 경고만 남긴다**.
+
+    과거엔 두 경우를 `if not resolved:` 하나로 묶어, 지정한 문서를 못 읽으면 저장소
+    `docs/` 에 들어있는 **다른 프로젝트 문서**(현재 HDPDM01)로 조용히 바꿔치기했다.
+    로그가 "auto-discovered" 라 기능처럼 읽혔고, SDS 는 요구-함수 매핑 전체를 좌우하므로
+    산출물이 통째로 남의 프로젝트 설계 기준이 됐다.
+    """
+    if resolved:
+        return resolved
+    if user_supplied:
+        _logger.warning(
+            "%s%s: 지정한 입력을 해석하지 못해 건너뛴다 — 저장소 docs/ 문서로 대체하지 "
+            "않는다(다른 프로젝트 오염 방지)", tag, label)
+        return None
+    picked = discover()
+    if picked:
+        _logger.info("%s%s 미지정 — 저장소 docs/ 에서 자동 탐색(프로젝트 무관): %s",
+                     tag, label, picked)
+    return picked
+
+
+def _localize_uds_for_enrich(uds_path: Optional[str]) -> Optional[str]:
+    """SwUDS 문서를 로컬 tmp .docx로 복사해 enrich 파서가 직접 open 가능하게 한다.
+
+    enrich/하위 파서는 path.exists()/open() 로컬 fs 직접 접근이라 cloudium U: 경로를
+    직접 읽지 못한다. resolver.read_bytes(worker 8765)로 bytes를 받아 tmp .docx에 기록
+    후 그 경로를 반환한다. 호출부는 사용 후 반드시 os.unlink로 삭제해야 한다(누수 방지).
+
+    Args:
+        uds_path: SwUDS 문서 경로(로컬 또는 cloudium). 빈 값이면 None.
+
+    Returns:
+        로컬 tmp .docx 경로. 미입력 또는 접근 실패 시 None(기존 동작 불변).
+    """
+    if not uds_path or not str(uds_path).strip():
+        return None
+    try:
+        from backend.services.file_resolver import get_resolver
+        from backend.services.resolver_helpers import enforce_resolver_access
+        enforce_resolver_access(uds_path)
+        data = get_resolver().read_bytes(uds_path)
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+            tmp.write(data)
+            return tmp.name
+    except Exception as exc:
+        _logger.warning("UDS localize for enrich skipped: %s", exc)
+        return None
+
+
 def _enrich_function_details_map(
     function_details: Optional[Dict[str, Any]],
     *,
     function_table_rows: Optional[List[List[Any]]] = None,
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
+    uds_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     details = function_details if isinstance(function_details, dict) else {}
     req_paths, sds_paths = _resolve_req_doc_sets(req_doc_paths, sds_doc_paths)
     if details:
+        _uds_tmp = _localize_uds_for_enrich(uds_path)
         try:
             enrich_function_details_with_docs(
                 details,
                 function_table_rows,
                 req_doc_paths=req_paths,
                 sds_doc_paths=sds_paths,
+                uds_doc_paths=[_uds_tmp] if _uds_tmp else None,
             )
         except Exception as exc:
             _logger.warning("function detail enrichment skipped: %s", exc)
+        finally:
+            if _uds_tmp:
+                try:
+                    os.unlink(_uds_tmp)
+                except OSError:
+                    pass
     # HSIS enrichment: functions using HSIS signal variables get
     # description_source/related_source upgraded from "inference" to "hsis"
     _hsis_p = _discover_hsis_path()
@@ -331,17 +590,27 @@ def _enrich_function_details_map(
                     if not isinstance(_fn_info, dict):
                         continue
                     _fvars: set = set()
+                    # inputs/outputs 원소는 소스 파서에 따라 dict({name:...}) 또는 str(예 "[OUT]
+                    # return U8 …")로 온다. dict 가정으로 .get 호출 시 str에서 AttributeError가
+                    # 나 try/except가 전체 함수 루프를 중단 → 이후 함수 HSIS 보강 전멸(실측 877/900).
+                    # dict는 name, str은 그대로 수용(HSIS 신호는 주로 globals로 매칭되므로 무해).
                     for _x in (_fn_info.get("inputs") or []):
-                        _fvars.add(str(_x.get("name") or ""))
+                        _fvars.add(str(_x.get("name") or "") if isinstance(_x, dict) else str(_x))
                     for _x in (_fn_info.get("outputs") or []):
-                        _fvars.add(str(_x.get("name") or ""))
+                        _fvars.add(str(_x.get("name") or "") if isinstance(_x, dict) else str(_x))
                     _fvars.update((_fn_info.get("globals_write") or {}).keys())
                     _fvars.update((_fn_info.get("globals_read") or {}).keys())
                     _matched_sigs = [_hvar[v] for v in _fvars if v in _hvar]
                     if not _matched_sigs:
                         continue
                     # Upgrade description_source from inference → hsis
-                    if _fn_info.get("description_source", "inference") in {"inference", ""}:
+                    # ⚠ **값이 있을 때만** 올린다. `hsis` 는 별칭이 `sds`(0.95)라, 설명이
+                    #    빈 칸인데 라벨만 올리면 "근거는 SDS 급인데 내용이 없다" 는 상태가
+                    #    0.95 를 받는다(`_score_for` 는 값 유무를 안 본다).
+                    if (
+                        has_evidence_value(_fn_info.get("description"))
+                        and is_weak_source(_fn_info.get("description_source") or "inference")
+                    ):
                         _fn_info["description_source"] = "hsis"
                     # Set related if currently TBD/empty
                     _cur_rel = str(_fn_info.get("related") or "").strip()
@@ -364,6 +633,7 @@ def _enrich_source_sections_with_docs(
     *,
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
+    uds_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     sections = source_sections if isinstance(source_sections, dict) else {}
     details = sections.get("function_details", {})
@@ -373,28 +643,17 @@ def _enrich_source_sections_with_docs(
         function_table_rows=table_rows if isinstance(table_rows, list) else None,
         req_doc_paths=req_doc_paths,
         sds_doc_paths=sds_doc_paths,
+        uds_path=uds_path,
     )
     sections["function_details"] = details
 
-    rebuilt_by_name: Dict[str, Any] = {}
-    for _, info in details.items():
-        if not isinstance(info, dict):
-            continue
-        name = str(info.get("name") or "").strip()
-        if name:
-            rebuilt_by_name[name] = info
-    sections["function_details_by_name"] = rebuilt_by_name
+    # ⚠ 키 규칙은 `report_gen.utils.function_name_key` **단일 출처**를 따른다.
+    #    여기 있던 인라인 루프는 `.strip()` 만 해서 **원형 대소문자**를 키로 썼는데,
+    #    조회는 전부 소문자다(`docx_builder` 13곳 · `code.py:126` · `test_gen.py:32` ·
+    #    `uds_generator` 4곳). 실측 표본 350개 중 267개(76.3%)가 대문자를 포함해
+    #    그만큼 **조용히 miss** 했다. jenkins 경로는 처음부터 소문자였다(비대칭).
+    sections["function_details_by_name"] = build_function_details_by_name(details)
     return sections, req_paths, sds_paths
-
-
-def _find_latest_excel_file(directory: Path) -> Optional[Path]:
-    files = [
-        p for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() in (".xlsm", ".xlsx")
-    ]
-    if not files:
-        return None
-    return max(files, key=lambda p: p.stat().st_mtime)
 
 
 def _parse_xlsm_preview(file_path: Path, max_rows: int = 30) -> Dict[str, Any]:
@@ -566,16 +825,21 @@ def local_reports_generate(req: LocalReportGenerateRequest) -> Dict[str, Any]:
     out_dir = _local_reports_dir(report_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ⚠ 키가 **하나도 없는** 이름이다(ts 뿐). `output_paths` 모듈이 최악의 사례로 지목한
+    #   바로 그 자리 — 다른 사용자·다른 프로젝트여도 같은 초면 그냥 부딪힌다.
+    #   두 형식은 **각각** 선점한다. 응답이 파일명을 명시로 실어 보내므로(`outputs`)
+    #   docx/xlsx 의 비켜간 번호가 서로 달라도 클라이언트가 이름을 조립하지 않는다.
+    from backend.services.output_paths import reserve_unique_path
     base = f"local_report_{ts}"
     formats = [str(f).lower() for f in (req.formats or [])]
 
     outputs: List[Dict[str, Any]] = []
     if "docx" in formats:
-        out_path = out_dir / f"{base}.docx"
+        out_path = reserve_unique_path(out_dir / f"{base}.docx")
         generate_local_docx(summary, out_path)
         outputs.append({"file": out_path.name, "path": str(out_path)})
     if "xlsx" in formats:
-        out_path = out_dir / f"{base}.xlsx"
+        out_path = reserve_unique_path(out_dir / f"{base}.xlsx")
         generate_local_xlsx(summary, out_path)
         outputs.append({"file": out_path.name, "path": str(out_path)})
 
@@ -650,6 +914,8 @@ async def local_uds_generate(
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
     req_id = (request.headers.get("x-req-id") or "").strip() or f"uds-gen-{int(time.time() * 1000)}"
+    # 소요 시간은 sts/suts/sits 와 같은 축(함수 진입 기준)으로 잰다.
+    _t0 = time.time()
     _logger.info("[UDS_GENERATE][%s] start source_root=%s test_mode=%s", req_id, source_root, bool(test_mode))
     template_bytes: Optional[bytes] = None
     template_warning = ""
@@ -702,24 +968,22 @@ async def local_uds_generate(
             elif ftype == "sds":
                 sds_texts.append(text.strip())
     sds_doc_paths: List[str] = []
+    # 탈락 사유를 버리지 않는다 — 예전엔 `except Exception: text = ""` 라
+    # 경로 오타·권한 없음·본문 0자가 전부 같은 침묵이었다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            if not _is_allowed_req_doc(p):
-                continue
-            text = _read_text_from_file(p)
-        except Exception:
-            text = ""
-        if text:
-            req_texts.append(text.strip())
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if p and text:
+            req_texts.append(text)
             if p.suffix.lower() == ".docx":
                 req_doc_paths.append(str(p))
             fname_lower = p.name.lower()
-            if "srs" in fname_lower:
+            if is_srs_filename(fname_lower):
                 srs_texts.append(text.strip())
-            elif "sds" in fname_lower:
+            elif is_sds_filename(fname_lower):
                 sds_texts.append(text.strip())
                 if p.suffix.lower() in {".docx", ".doc"}:
                     sds_doc_paths.append(str(p))
@@ -750,7 +1014,10 @@ async def local_uds_generate(
 
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
-        source_sections = generate_uds_source_sections(
+        # 전체 소스트리 파싱 — 수 초~수십 초. 이벤트 루프에서 돌리면 그동안
+        # 백엔드 전체가 멈춘다(tests/unit/test_router_event_loop_blocking.py).
+        source_sections = await _run_blocking(
+            generate_uds_source_sections,
             source_root,  # 콤마 구분 복수 경로 그대로 전달
             component_map=component_map if component_map else None,
             sds_partition_map=_sds_pmap if _sds_pmap else None,
@@ -836,8 +1103,15 @@ async def local_uds_generate(
             if rag_query:
                 fn_count = len(source_sections.get("function_details_by_name") or {}) if isinstance(source_sections, dict) else 0
                 default_top_k = 12 if fn_count >= 300 else 10 if fn_count >= 120 else 8 if expand else 4
-                use_top_k = rag_top_k if rag_top_k and rag_top_k > 0 else int(
-                    getattr(config, "AGENT_RAG_TOP_K_DEFAULT", default_top_k)
+                # ⚠ `rag_top_k` 는 사용자 Form 입력이 그대로 검색 폭 → 프롬프트 크기가 되는
+                #    유일한 축이라 상한을 건다(§6 후보 17). clamp 는
+                #    `workflow.ai.clamp_rag_top_k` 단일 출처 — 소비처 3곳이 각자 조이면 갈라진다.
+                from workflow.ai import clamp_rag_top_k
+                use_top_k = clamp_rag_top_k(
+                    rag_top_k if rag_top_k and rag_top_k > 0 else int(
+                        getattr(config, "AGENT_RAG_TOP_K_DEFAULT", default_top_k)
+                    ),
+                    default=default_top_k,
                 )
                 use_categories = [str(c).strip() for c in re.split(r"[,\n;]+", rag_categories or "") if str(c).strip()]
                 if not use_categories:
@@ -896,7 +1170,9 @@ async def local_uds_generate(
                 ]
             )
             notes_text = "\n\n".join([doc_block, src_block]).strip()
-        ai_sections = generate_uds_ai_sections(
+        # Gemini 호출 — 수 분. 이 저장소에서 이벤트 루프를 가장 오래 잡는 축이다.
+        ai_sections = await _run_blocking(
+            generate_uds_ai_sections,
             requirements_text=req_combined,
             source_sections=source_sections,
             notes_text=notes_text,
@@ -913,7 +1189,10 @@ async def local_uds_generate(
     out_dir = _local_uds_dir(report_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"uds_local_{ts}.docx"
+    # ⚠ 키 없음(ts 뿐) — 동기 생성과 비동기 잡(`local_uds_generate_async`)이 **같은
+    #   이름 규칙**을 쓴다. 둘이 같은 초에 겹치면 한쪽이 다른 쪽 UDS 를 덮는다.
+    from backend.services.output_paths import reserve_unique_path
+    out_path = reserve_unique_path(out_dir / f"uds_local_{ts}.docx")
     tpl_path = None
     template_applied = False
     if template_file and template_file.filename and template_bytes:
@@ -928,14 +1207,19 @@ async def local_uds_generate(
         except Exception:
             template_applied = False
     if not tpl_path:
-        # Use SUDS reference as default template for 4-level SUDS structure
-        try:
-            from config import UDS_REF_SUDS_PATH
-            _ref_path = Path(UDS_REF_SUDS_PATH)
-        except Exception:
-            _ref_path = Path(__file__).resolve().parents[2] / "docs" / "(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx"
-        if _ref_path.exists():
-            tpl_path = str(_ref_path)
+        # 서버 등록본(admin `/api/config/uds-template`) → 정본 SUDS 순.
+        # 판정은 `resolve_registered_uds_template()` 단일 출처다 — 예전엔 이게
+        # 인라인이었고 등록본을 아예 조회하지 않아 **관리자 지정이 무효**였다.
+        #
+        # ⚠ 원 경로를 그대로 넘기면 안 된다. 생성은 서브프로세스에서
+        #   `docx.Document(path)` 로 **직접** 여니 cloudium worker 가 닿지 않는다 —
+        #   `U:` 등록본이면 재시도 3단계가 전부 `PackageNotFoundError` 로 죽는다.
+        #   가정이 아니라 실측이다: 캐시의 08-10·08-11 실패 기록 마지막 줄이 정확히
+        #   그 모양이고 경로가 `U:/…/01.SwUDS/(XXXX_SwUDS)…docx` 다. jenkins 쪽 UDS
+        #   2곳은 `resolve_template_for` 로 이미 로컬화했고 **이 경로만 남아 있었다**.
+        #   해석 실패는 `None`(= 템플릿 없이 생성)이고, 사유는 resolver 가 로그에 남긴다
+        #   — 원 경로를 흘려보내면 같은 실패가 하류에서 나고 사유가 사라진다.
+        tpl_path = resolve_registered_uds_template_local()
     try:
         # Inject ai_config into payload for subprocess to use in function desc enhancement
         _uds_ai_cfg = _load_sts_ai_config()
@@ -967,6 +1251,23 @@ async def local_uds_generate(
             template_warning=template_warning,
             doc_only_mode=True,
         )
+        # Quality DB recording (non-fatal)
+        try:
+            # project_root 는 sts/suts/sits 와 **같은 어휘**(source_root)로 넘긴다 —
+            # recorder 가 이 값으로 scm_id 를 해결한다. 예전엔 UDS 만 아무것도 안
+            # 넘겨서 DB 의 uds 행이 3/3 전부 NULL 이었고, 그래서 "이 프로젝트의 UDS
+            # 품질" 을 물을 수단이 없었다.
+            # 기록은 `_record_uds_run` 단일 관문(helpers/uds.py) — 다섯 호출부가 각자
+            # 채우면 경로마다 다른 열이 비어 "어느 경로로 만들었나" 가 섞인다.
+            _record_uds_run(
+                quality_evaluation,
+                source_root=source_root, out_path=out_path, t0=_t0,
+                ai_used=bool(ai_enable),
+                extra_meta={"entry": "local_generate", "mode": "doc_only"},
+            )
+        except Exception:
+            # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
+            _logger.exception("[UDS_GENERATE][%s] quality record skipped (non-fatal)", req_id)
         _logger.info("[UDS_GENERATE][%s] done file=%s (doc_only)", req_id, out_path.name)
         return {
             "ok": True,
@@ -990,7 +1291,8 @@ async def local_uds_generate(
         }
     # 부가 보고서 (각각 _run_report_with_timeout 내부에서 timeout 관리됨)
     validation_path = out_path.with_suffix(".validation.md")
-    ok_validation, _ = _run_report_with_timeout(
+    ok_validation, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_validation_report(str(out_path), str(validation_path)),
         timeout_seconds=report_timeout_short,
         report_name="validation report",
@@ -999,7 +1301,8 @@ async def local_uds_generate(
         validation_path = None
     accuracy_path = out_path.with_suffix(".accuracy.md")
     src_root = str(source_root_path) if source_root_path else ""
-    ok_accuracy, _ = _run_report_with_timeout(
+    ok_accuracy, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_called_calling_accuracy_report(
             str(out_path),
             src_root,
@@ -1012,7 +1315,8 @@ async def local_uds_generate(
     if not ok_accuracy:
         accuracy_path = None
     swcom_context_path = out_path.with_suffix(".swcom_context.md")
-    ok_swcom, _ = _run_report_with_timeout(
+    ok_swcom, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_swcom_context_report(str(out_path), str(swcom_context_path)),
         timeout_seconds=report_timeout_short,
         report_name="swcom context report",
@@ -1021,7 +1325,8 @@ async def local_uds_generate(
         swcom_context_path = None
     swcom_diff_path = None
     confidence_path = out_path.with_suffix(".field_confidence.md")
-    ok_confidence, _ = _run_report_with_timeout(
+    ok_confidence, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_asil_related_confidence_report(
             uds_payload,
             str(confidence_path),
@@ -1033,7 +1338,8 @@ async def local_uds_generate(
     if not ok_confidence:
         confidence_path = None
     constraints_path = out_path.with_suffix(".constraints.md")
-    ok_constraints, _ = _run_report_with_timeout(
+    ok_constraints, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_constraints_report(uds_payload, str(constraints_path)),
         timeout_seconds=report_timeout_short,
         report_name="constraints report",
@@ -1041,14 +1347,15 @@ async def local_uds_generate(
     if not ok_constraints:
         constraints_path = None
     quality_gate_path = out_path.with_suffix(".quality_gate.md")
-    ok_quality_gate, _ = _run_report_with_timeout(
+    ok_quality_gate, quality_gate_error = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_field_quality_gate_report(str(out_path), str(quality_gate_path)),
         timeout_seconds=report_timeout_short,
         report_name="field quality gate report",
     )
     if not ok_quality_gate:
         quality_gate_path = None
-    preview_html = generate_uds_preview_html(uds_payload)
+    preview_html = await _run_blocking(generate_uds_preview_html, uds_payload)
     preview_path = out_path.with_suffix(".html")
     preview_path.write_text(preview_html, encoding="utf-8")
     quality_evaluation = _build_quality_evaluation(
@@ -1057,7 +1364,21 @@ async def local_uds_generate(
         accuracy_path=accuracy_path,
         template_warning=template_warning,
         doc_only_mode=False,
+        # (R32 I12) 생성 실패는 '리포트 없음' 이 아니다 — quick_only 강등 대신 fail-closed.
+        quality_gate_error=("" if ok_quality_gate else (quality_gate_error or "field quality gate report failed")),
     )
+    # Quality DB recording (non-fatal)
+    try:
+        # doc_only 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
+        _record_uds_run(
+            quality_evaluation,
+            source_root=source_root, out_path=out_path, t0=_t0,
+            ai_used=bool(ai_enable),
+            extra_meta={"entry": "local_generate", "mode": "full"},
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
+        _logger.exception("[UDS_GENERATE][%s] quality record skipped (non-fatal)", req_id)
     _logger.info("[UDS_GENERATE][%s] done file=%s", req_id, out_path.name)
 
     return {
@@ -1114,6 +1435,8 @@ async def local_uds_generate_async(
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    # 소요 시간은 sts/suts/sits 와 같은 축(함수 진입 기준)으로 잰다.
+    _t0 = time.time()
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
@@ -1172,7 +1495,7 @@ async def local_uds_generate_async(
             # SDS 파티션 맵 로드 (Related ID + ASIL 전파)
             _async_sds_pmap: Dict[str, Dict[str, str]] = {}
             for rp in req_paths_list:
-                if rp.lower().endswith(".docx") and "sds" in rp.lower():
+                if rp.lower().endswith(".docx") and is_sds_filename(rp):
                     try:
                         from report_gen.requirements import _extract_sds_partition_map
                         _async_sds_pmap.update(_extract_sds_partition_map(rp))
@@ -1209,27 +1532,26 @@ async def local_uds_generate_async(
                     elif ftype == "sds":
                         sds_texts.append(text.strip())
 
+            _async_doc_skips: List[str] = []
             for path_str in req_paths_list:
-                try:
-                    p = Path(path_str).expanduser().resolve()
-                    if not p.exists() or not p.is_file():
-                        continue
-                    if not _is_allowed_req_doc(p):
-                        continue
-                    text = _read_text_from_file(p)
-                except Exception:
-                    text = ""
-                if text:
-                    req_texts.append(text.strip())
+                p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+                if reason:
+                    _async_doc_skips.append(reason)
+                    continue
+                if p and text:
+                    req_texts.append(text)
                     if p.suffix.lower() == ".docx":
                         req_doc_paths.append(str(p))
                     fname_lower = p.name.lower()
-                    if "srs" in fname_lower:
-                        srs_texts.append(text.strip())
-                    elif "sds" in fname_lower:
-                        sds_texts.append(text.strip())
+                    if is_srs_filename(fname_lower):
+                        srs_texts.append(text)
+                    elif is_sds_filename(fname_lower):
+                        sds_texts.append(text)
                         if p.suffix.lower() in {".docx", ".doc"}:
                             sds_doc_paths.append(str(p))
+            if _async_doc_skips:
+                _logger.warning("[UDS-async] 요구사항 문서 %d건 탈락: %s",
+                                len(_async_doc_skips), "; ".join(_async_doc_skips[:5]))
 
             source_sections, req_doc_paths, sds_doc_paths = _enrich_source_sections_with_docs(
                 source_sections,
@@ -1305,7 +1627,9 @@ async def local_uds_generate_async(
             out_dir = _local_uds_dir(report_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = out_dir / f"uds_local_{ts}.docx"
+            # ⚠ 동기 경로(`local_uds_generate`)와 **이름 규칙이 같다** — 위 주석 참조.
+            from backend.services.output_paths import reserve_unique_path
+            out_path = reserve_unique_path(out_dir / f"uds_local_{ts}.docx")
 
             tpl_path = None
             if template_bytes:
@@ -1336,6 +1660,19 @@ async def local_uds_generate_async(
                     lambda: generate_uds_field_quality_gate_report(str(out_path), str(out_path.with_suffix(".quality_gate.md"))),
                     timeout_seconds=report_timeout, report_name="quality gate",
                 )
+
+            # Quality DB recording (non-fatal)
+            try:
+                # 동기 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
+                _record_uds_run(
+                    quick_qg,
+                    source_root=source_root, out_path=out_path, t0=_t0,
+                    ai_used=bool(ai_enable),
+                    extra_meta={"entry": "local_generate_async"},
+                )
+            except Exception:
+                # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
+                _logger.exception("UDS quality record skipped (non-fatal)")
 
             _set_progress(
                 "local_uds", "local", "local",
@@ -1505,336 +1842,11 @@ def local_uds_view_by_path(
     return payload
 
 
-@router.post("/api/local/traceability")
-def local_traceability(
-    request: Request,
-    source_root: str = Form(""),
-    srs_path: str = Form(""),
-    sds_path: str = Form(""),
-    report_dir: str = Form(""),
-) -> Dict[str, Any]:
-    """Build full traceability matrix: SRS -> Functions -> Test Cases."""
-    from sts_generator import (
-        parse_srs_docx_tables,
-        parse_requirements_structured,
-        map_requirements_to_functions,
-        generate_traceability_matrix,
-    )
-    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
-    import re as _re
-
-    srs_docx: Optional[str] = None
-    if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx = str(p)
-
-    # Parse SDS component mapping (V-Model 설계 계층)
-    sds_req_to_comps: Dict[str, List[str]] = {}
-    if sds_path:
-        sds_p = Path(sds_path).expanduser().resolve()
-        if not is_under_any(sds_p, [repo_root, sds_p.parent.resolve()]):
-            raise HTTPException(status_code=403, detail="SDS 경로 접근이 허용되지 않습니다")
-        if sds_p.exists() and sds_p.is_file():
-            partition_map = _extract_sds_partition_map(str(sds_p))
-            for comp_key, info in partition_map.items():
-                related = info.get("related", "")
-                if not related:
-                    continue
-                raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
-                for rid in raw_ids:
-                    norm = _normalize_req_id(rid)
-                    sds_req_to_comps.setdefault(norm, [])
-                    if comp_key not in sds_req_to_comps[norm]:
-                        sds_req_to_comps[norm].append(comp_key)
-
-    # Parse requirements
-    reqs: List[Dict[str, Any]] = []
-    if srs_docx:
-        reqs = parse_srs_docx_tables(srs_docx)
-
-    if not reqs:
-        raise HTTPException(status_code=400, detail="SRS 문서에서 요구사항을 추출할 수 없습니다.")
-
-    # Parse source for function details
-    function_details: Dict[str, Any] = {}
-    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
-    source_root_path = Path(_first_root).resolve() if _first_root else None
-    if source_root_path and source_root_path.exists() and source_root_path.is_dir():
-        try:
-            sections = _get_source_sections_cached(str(source_root_path))
-            function_details = sections.get("function_details", {})
-        except Exception:
-            pass
-
-    # Map requirements to functions
-    req_to_fids = map_requirements_to_functions(reqs, function_details)
-
-    # Keyword-based fallback mapping if related fields are TBD
-    _kw_map = {
-        "battery": ["apiin", "apiout", "monitor_adc", "drvin", "vsup"],
-        "voltage": ["apiin", "apiout", "monitor_adc", "drvin", "vsup"],
-        "buzzer": ["buzzer"],
-        "door": ["door", "motor"],
-        "motor": ["door", "motor"],
-        "latch": ["door"],
-        "lin": ["lin", "apiin", "apiout"],
-        "signal": ["lin", "apiin", "apiout"],
-        "eeprom": ["eeprom"],
-        "memory": ["eeprom"],
-        "sleep": ["sleep", "wake"],
-        "wakeup": ["sleep", "wake"],
-        "diag": ["diag", "uds"],
-        "diagnostic": ["diag", "uds"],
-        "option": ["option"],
-        "init": ["init", "main", "sysctrl"],
-        "position": ["motor", "speed", "direction"],
-        "sensor": ["motor", "speed", "direction"],
-        "pwm": ["pwm"],
-        "error": ["diag", "error"],
-        "close": ["door", "motor"],
-        "open": ["door", "motor"],
-    }
-    mapped_count_before = sum(1 for v in req_to_fids.values() if v)
-    if function_details and mapped_count_before < len(reqs) * 0.3:
-        for r in reqs:
-            rid = r["id"]
-            if req_to_fids.get(rid):
-                continue
-            desc = (r.get("description", "") + " " + r.get("name", "")).lower()
-            keywords = set()
-            for kw, fns in _kw_map.items():
-                if kw in desc:
-                    keywords.update(fns)
-            if keywords:
-                for fid, info in function_details.items():
-                    if not isinstance(info, dict):
-                        continue
-                    fname = str(info.get("name", "")).lower()
-                    if any(k in fname for k in keywords):
-                        fid_list = req_to_fids.setdefault(rid, [])
-                        if fid not in fid_list:
-                            fid_list.append(fid)
-
-    # Load STS test cases if available
-    sts_test_cases: List[Dict[str, Any]] = []
-    base = _resolve_report_dir(report_dir)
-    sts_dir = base / "sts"
-    sts_file_name = None
-    if sts_dir.exists():
-        latest_sts = _find_latest_excel_file(sts_dir)
-        if latest_sts:
-            sts_file_name = latest_sts.name
-            try:
-                import openpyxl
-                wb = openpyxl.load_workbook(str(latest_sts), read_only=True, data_only=True)
-                if "3.SW Integration Test Spec" in wb.sheetnames:
-                    ws = wb["3.SW Integration Test Spec"]
-                    for r in range(7, (ws.max_row or 7) + 1):
-                        tc_id = ws.cell(row=r, column=2).value
-                        if tc_id:
-                            sts_test_cases.append({
-                                "tc_id": str(tc_id),
-                                "title": str(ws.cell(row=r, column=3).value or ""),
-                                "method": str(ws.cell(row=r, column=6).value or ""),
-                                "srs_id": str(ws.cell(row=r, column=13).value or ""),
-                            })
-                wb.close()
-            except Exception:
-                pass
-
-    # Load SUTS test cases if available
-    suts_test_cases: List[Dict[str, Any]] = []
-    suts_dir = base / "suts"
-    suts_file_name = None
-    if suts_dir.exists():
-        latest_suts = _find_latest_excel_file(suts_dir)
-        if latest_suts:
-            suts_file_name = latest_suts.name
-            try:
-                import openpyxl as _xl
-                swb = _xl.load_workbook(str(latest_suts), read_only=True, data_only=True)
-                if "2.SW Unit Test Spec" in swb.sheetnames:
-                    sws = swb["2.SW Unit Test Spec"]
-                    for sr in range(7, (sws.max_row or 7) + 1):
-                        tc_id = sws.cell(row=sr, column=3).value
-                        if tc_id and str(tc_id).startswith("SwUTC"):
-                            related = sws.cell(row=sr, column=149).value or ""
-                            n_inp = sum(1 for c in range(14, 63) if sws.cell(row=sr, column=c).value is not None)
-                            n_out = sum(1 for c in range(63, 149) if sws.cell(row=sr, column=c).value is not None)
-                            suts_test_cases.append({
-                                "tc_id": str(tc_id),
-                                "name": str(sws.cell(row=sr, column=4).value or ""),
-                                "related_fid": str(related),
-                                "gen_method": str(sws.cell(row=sr, column=12).value or ""),
-                                "input_count": n_inp,
-                                "output_count": n_out,
-                            })
-                swb.close()
-            except Exception:
-                pass
-
-    # Build fid→suts_tc lookup
-    fid_to_suts: Dict[str, List[Dict[str, Any]]] = {}
-    for stc in suts_test_cases:
-        fid = stc.get("related_fid", "")
-        if fid:
-            fid_to_suts.setdefault(fid, []).append(stc)
-
-    # Build traceability rows
-    rows: List[Dict[str, Any]] = []
-    for r in reqs:
-        rid = r["id"]
-        fids = req_to_fids.get(rid, [])
-        func_names = []
-        # 전체 fid 순회 — 과거 fids[:10] 절단은 UDS 함수를 최대 ~188개 silent 누락시켜
-        # source_ids 기반 트리의 단위시험 미연결/orphan SUTS 계산을 거짓으로 만들었다
-        # (라운드 재검증 W1: 외곽 슬라이스만 제거됐고 이 내부 루프 절단이 잔존했음).
-        # 아래 suts_tcs_for_req는 이미 전체 fids를 쓰므로 비대칭도 해소된다.
-        for fid in fids:
-            info = function_details.get(fid)
-            if isinstance(info, dict):
-                func_names.append(info.get("name", fid))
-
-        # STS TC 매칭: 콤마 분리 + ID 정규화 (BUG-1, BUG-6 수정)
-        norm_rid = _normalize_req_id(rid)
-        sts_tcs = [
-            tc for tc in sts_test_cases
-            if norm_rid in [_normalize_req_id(s.strip()) for s in (tc.get("srs_id") or "").split(",")]
-        ]
-        suts_tcs_for_req: List[Dict[str, Any]] = []
-        for fid in fids:
-            suts_tcs_for_req.extend(fid_to_suts.get(fid, []))
-
-        has_uds = len(fids) > 0
-        has_sts = len(sts_tcs) > 0
-        has_suts = len(suts_tcs_for_req) > 0
-
-        # SDS 컴포넌트 매핑 (V-Model 아키텍처 설계 계층)
-        sds_comps = sds_req_to_comps.get(norm_rid, [])
-        has_sds = len(sds_comps) > 0
-
-        # tests 배열 통합 (Jenkins generate_uds_traceability_matrix 형식)
-        tests: List[Dict[str, Any]] = []
-        for tc in sts_tcs:
-            tests.append({
-                "requirement_id": rid,
-                "testcase": tc["tc_id"],
-                "result": "mapped",
-                "source": "STS",
-                "confidence": "exact",
-                "unit": "",
-                "report": "",
-            })
-        for tc in suts_tcs_for_req:
-            tests.append({
-                "requirement_id": rid,
-                "testcase": tc["tc_id"],
-                "result": "mapped",
-                "source": "SUTS",
-                "confidence": "exact",
-                "unit": tc.get("related_fid", ""),
-                "report": "",
-            })
-        test_ids = [t["testcase"] for t in tests]
-
-        # Jenkins 경로(generate_uds_traceability_matrix)와 동일한 행 구조
-        # status는 행에 포함하지 않음 — 프론트엔드 deriveStatus()가 단일 판정
-        rows.append({
-            "requirement_id": rid,
-            "sds_components": sds_comps,
-            # 전체 함수 유지 — 과거 [:10] 절단은 UDS 함수를 최대 ~188개 silent 누락시켜
-            # 트리의 단위시험 미연결/orphan SUTS 계산을 거짓으로 만들었다(deep-analyze).
-            # Jenkins 경로(generate_uds_traceability_matrix)는 전량 싣는다 — 표시는 프론트가 스크롤로 제한.
-            "source_ids": func_names,
-            "tests": tests,
-            "test_ids": test_ids,
-            "test_count": len(tests),
-            "pass_count": 0,
-            "fail_count": 0,
-            "confidence": "exact" if tests else None,
-            # Local 전용 추가 필드 (하위 호환)
-            "req_name": r.get("name", ""),
-            "req_type": r.get("req_type", ""),
-            "asil": r.get("asil", ""),
-        })
-
-    # Summary — Jenkins 경로(generate_uds_traceability_matrix)와 동일 키 사용
-    # deriveStatus 동일 로직: 설계(SDS or UDS) + 검증(any test) = covered
-    def _derive(r):
-        has_d = bool(r.get("sds_components")) or bool(r.get("source_ids"))
-        has_t = bool(r.get("test_count"))
-        if has_d and has_t:
-            return "covered"
-        if has_d or has_t:
-            return "partial"
-        return "uncovered"
-
-    total = len(rows)
-    covered = sum(1 for r in rows if _derive(r) == "covered")
-    partial = sum(1 for r in rows if _derive(r) == "partial")
-    uncovered = sum(1 for r in rows if _derive(r) == "uncovered")
-    safety_total = sum(1 for r in rows if r.get("asil") and r["asil"].upper() not in ("QM", "TBD", ""))
-    safety_covered = sum(1 for r in rows if _derive(r) == "covered" and r.get("asil") and r["asil"].upper() not in ("QM", "TBD", ""))
-    mapped_sds_count = sum(1 for r in rows if r.get("sds_components"))
-    mapped_source_count = sum(1 for r in rows if r.get("source_ids"))
-    mapped_test_count = sum(1 for r in rows if r.get("test_count"))
-    total_tests = sum(r.get("test_count", 0) for r in rows)
-
-    # source별 테스트 건수 (Jenkins source_stats와 동일)
-    source_stats: Dict[str, int] = {}
-    for r in rows:
-        for t in r.get("tests", []):
-            src = t.get("source", "unknown")
-            source_stats[src] = source_stats.get(src, 0) + 1
-
-    type_dist: Dict[str, int] = {}
-    for r in rows:
-        t = r.get("req_type") or "OTHER"
-        type_dist[t] = type_dist.get(t, 0) + 1
-
-    # SUTS-specific coverage
-    total_suts_fns = len(suts_test_cases)
-    fns_with_suts = sum(1 for fid in function_details if fid in fid_to_suts)
-
-    return {
-        "ok": True,
-        "total_requirements": total,
-        "summary": {
-            # Jenkins 호환 키
-            "requirement_count": total,
-            "mapped_sds_count": mapped_sds_count,
-            "mapped_source_count": mapped_source_count,
-            "mapped_test_count": mapped_test_count,
-            "total_tests": total_tests,
-            "total_pass": 0,
-            "total_fail": 0,
-            "source_stats": source_stats,
-            # Local 추가 키
-            "covered": covered,
-            "partial": partial,
-            "uncovered": uncovered,
-            "coverage_pct": round(covered / max(total, 1) * 100, 1),
-            "full_coverage_pct": round((covered + partial) / max(total, 1) * 100, 1),
-            "safety_total": safety_total,
-            "safety_covered": safety_covered,
-            "safety_pct": round(safety_covered / max(safety_total, 1) * 100, 1),
-            "total_sds_components": len(sds_req_to_comps),
-            "total_functions": len(function_details),
-            "total_sts_test_cases": len(sts_test_cases),
-            "total_suts_test_cases": total_suts_fns,
-            "suts_function_coverage": fns_with_suts,
-            "suts_function_coverage_pct": round(fns_with_suts / max(len(function_details), 1) * 100, 1),
-            "type_distribution": type_dist,
-        },
-        "has_sds_mapping": any(r.get("sds_components") for r in rows),
-        "has_source_mapping": any(r.get("source_ids") for r in rows),
-        "has_tests": any(r.get("test_count") for r in rows),
-        "rows": rows,
-        "sts_file": sts_file_name,
-        "suts_file": suts_file_name,
-    }
+# `/api/local/traceability` 는 2026-09-03(R27 B-2, 계획서 §8 #4 승인)에 **제거**했다.
+# 저장소 안 호출자 0(frontend·tests·동적 조립 전부 — 2026-09-02 전수 실측)이었고, 추적성
+# 화면은 파일 모드와 무관하게 `/api/jenkins/uds/*` 를 쓴다. 안에 있던 `safety_*` 는
+# `jenkins.py::_cache_trace_summary` 로 옮겨 분모 0 을 `None` 으로 고쳤다(R24). 죽은
+# 사본을 남기면 다음 사람이 옛 공식을 정본으로 읽는다 — 그렇게 시작한 사고였다.
 
 
 @router.post("/api/local/sts/generate")
@@ -1853,11 +1865,14 @@ async def local_sts_generate(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
-    from sts_generator import generate_sts, parse_srs_docx_tables
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     req_id = (request.headers.get("x-req-id") or "").strip() or f"sts-gen-{int(time.time() * 1000)}"
@@ -1865,10 +1880,10 @@ async def local_sts_generate(
 
     # Resolve SRS path
     srs_docx_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
 
     # Collect requirement text from paths/uploads
     req_paths_list = _parse_path_list(req_paths)
@@ -1876,21 +1891,24 @@ async def local_sts_generate(
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
 
+    # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file():
-                text = _read_text_from_file(p)
-                if text:
-                    req_texts.append(text.strip())
-                    if p.suffix.lower() == ".docx":
-                        req_doc_paths.append(str(p))
-                        if "sds" in p.name.lower():
-                            sds_doc_paths.append(str(p))
-                    if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
-                        srs_docx_path = str(p)
-        except Exception:
-            pass
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+            if is_sds_filename(p.name):
+                sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
+    if doc_skips:
+        _logger.warning("[STS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     for f in (req_files or []):
         if not f or not f.filename:
@@ -1905,21 +1923,17 @@ async def local_sts_generate(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                    if "sds" in f.filename.lower():
+                    if is_sds_filename(f.filename):
                         sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             pass
 
     # Fallback: auto-discover SRS from docs/ if not yet resolved
-    if not srs_docx_path:
-        _auto_docs = _discover_default_req_docs()
-        for _auto_p in _auto_docs.get("req", []):
-            if "srs" in _auto_p.lower() and _auto_p.endswith(".docx"):
-                srs_docx_path = _auto_p
-                _logger.info("[STS_GENERATE][%s] auto-discovered SRS: %s", req_id, srs_docx_path)
-                break
+    srs_docx_path = _doc_or_discovered(
+        srs_docx_path, bool(req_paths_list or req_files), _discover_srs_docx,
+        label="SRS", tag=f"[STS_GENERATE][{req_id}] ")
 
     if not req_texts and not srs_docx_path:
         raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
@@ -1938,36 +1952,40 @@ async def local_sts_generate(
                 function_table_rows=sections.get("function_table_rows", []),
                 req_doc_paths=req_doc_paths,
                 sds_doc_paths=sds_doc_paths,
+                uds_path=uds_path,
             )
-            _api_logger.info("[STS_GENERATE][%s] parsed %d functions from source", req_id, len(function_details))
+            _logger.info("[STS_GENERATE][%s] parsed %d functions from source", req_id, len(function_details))
         except Exception as e:
             print(f"[STS_GENERATE][{req_id}] source parsing warning: {e}", flush=True)
 
     # Resolve optional supplementary document paths
+    # 선택 입력은 **worker 경유**로 로컬화한다 — 직독은 cloudium `U:` 를 못 읽어
+    # 전량 `None` 이 되고, 생성기가 그 문서 **없이** 만든 뒤 "생성 완료" 가 떴다.
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips: List[str] = []
+
     def _resolve_opt(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=opt_skips)
 
     sds_docx_path = _resolve_opt(sds_path)
     # Fallback: auto-discover SDS from docs/ if not provided
-    if not sds_docx_path:
-        _auto_docs = _discover_default_req_docs()
-        for _auto_p in _auto_docs.get("sds", []):
-            sds_docx_path = _auto_p
-            _logger.info("[STS_GENERATE][%s] auto-discovered SDS: %s", req_id, sds_docx_path)
-            break
+    sds_docx_path = _doc_or_discovered(sds_docx_path, sds_path, _discover_sds_docx,
+                                       label="SDS", tag=f"[STS_GENERATE][{req_id}] ")
     uds_file_path = _resolve_opt(uds_path)
     stp_docx_path = _resolve_opt(stp_path)
-    hsis_file_path = _resolve_opt(hsis_path) or _discover_hsis_path()
+    hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
+    if opt_skips:
+        _logger.warning("STS(sync): 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips), "; ".join(opt_skips)[:400])
 
     # Resolve template
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     # Output path
     base_dir = _resolve_report_dir(report_dir)
@@ -1979,13 +1997,16 @@ async def local_sts_generate(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
 
     _sts_ai_cfg = _load_sts_ai_config()
 
     try:
-        result = generate_sts(
+        # STS 생성 전 구간(문서 파싱 + AI + xlsx 빌드) — 이벤트 루프 밖에서 돈다.
+        result = await _run_blocking(
+            generate_sts,
             requirements_text=req_texts,
             function_details=function_details,
             output_path=str(out_path),
@@ -1997,6 +2018,7 @@ async def local_sts_generate(
             stp_path=stp_docx_path,
             hsis_path=hsis_file_path,
             ai_config=_sts_ai_cfg,
+            source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
         )
     except Exception as e:
         traceback.print_exc()
@@ -2044,6 +2066,9 @@ async def local_sts_generate_stream(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
 ):
     """Generate STS with SSE progress streaming."""
@@ -2051,35 +2076,38 @@ async def local_sts_generate_stream(
     import queue
     import threading
 
-    from sts_generator import generate_sts
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
 
     req_paths_list = _parse_path_list(req_paths)
     req_texts: List[str] = []
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
+    # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file():
-                text = _read_text_from_file(p)
-                if text:
-                    req_texts.append(text.strip())
-                    if p.suffix.lower() == ".docx":
-                        req_doc_paths.append(str(p))
-                        if "sds" in p.name.lower():
-                            sds_doc_paths.append(str(p))
-                    if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
-                        srs_docx_path = str(p)
-        except Exception:
-            pass
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+            if is_sds_filename(p.name):
+                sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
+    if doc_skips:
+        _logger.warning("[STS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     for f in (req_files or []):
         if not f or not f.filename:
@@ -2094,9 +2122,9 @@ async def local_sts_generate_stream(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                    if "sds" in f.filename.lower():
+                    if is_sds_filename(f.filename):
                         sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             pass
@@ -2117,26 +2145,33 @@ async def local_sts_generate_stream(
                 function_table_rows=sections.get("function_table_rows", []),
                 req_doc_paths=req_doc_paths,
                 sds_doc_paths=sds_doc_paths,
+                uds_path=uds_path,
             )
         except Exception:
             pass
 
+    # 선택 입력 worker 경유 (위 sync 핸들러와 같은 이유).
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips2: List[str] = []
+
     def _resolve_opt2(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=opt_skips2)
 
     sds_docx_path = _resolve_opt2(sds_path)
     uds_file_path = _resolve_opt2(uds_path)
     stp_docx_path = _resolve_opt2(stp_path)
-    hsis_file_path2 = _resolve_opt2(hsis_path) or _discover_hsis_path()
+    hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
+    if opt_skips2:
+        _logger.warning("STS(stream): 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips2), "; ".join(opt_skips2)[:400])
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sts", "sts_local", tpl_path)
@@ -2147,6 +2182,7 @@ async def local_sts_generate_stream(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
 
@@ -2171,6 +2207,7 @@ async def local_sts_generate_stream(
                 hsis_path=hsis_file_path2,
                 ai_config=_sts_ai_cfg2,
                 on_progress=_on_progress,
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
             )
             download_url = f"/api/local/sts/download/{out_filename}"
             payload = _build_excel_artifact_payload(
@@ -2229,38 +2266,44 @@ async def local_sts_generate_async(
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
-    from sts_generator import generate_sts
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
 
     req_paths_list = _parse_path_list(req_paths)
     req_texts: List[str] = []
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
+    # 탈락 사유를 버리지 않는다 — 권한 없음/본문 0자가 '문서 미지정'과 구분된다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file():
-                text = _read_text_from_file(p)
-                if text:
-                    req_texts.append(text.strip())
-                    if p.suffix.lower() == ".docx":
-                        req_doc_paths.append(str(p))
-                        if "sds" in p.name.lower():
-                            sds_doc_paths.append(str(p))
-                    if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
-                        srs_docx_path = str(p)
-        except Exception:
-            pass
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+            if is_sds_filename(p.name):
+                sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
+    if doc_skips:
+        _logger.warning("[STS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     for f in (req_files or []):
         if not f or not f.filename:
@@ -2275,21 +2318,17 @@ async def local_sts_generate_async(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                    if "sds" in f.filename.lower():
+                    if is_sds_filename(f.filename):
                         sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             pass
 
     # Fallback: auto-discover SRS from docs/ if not yet resolved
-    if not srs_docx_path:
-        _auto_docs2 = _discover_default_req_docs()
-        for _auto_p2 in _auto_docs2.get("req", []):
-            if "srs" in _auto_p2.lower() and _auto_p2.endswith(".docx"):
-                srs_docx_path = _auto_p2
-                _logger.info("[STS_GENERATE_ASYNC] auto-discovered SRS: %s", srs_docx_path)
-                break
+    srs_docx_path = _doc_or_discovered(
+        srs_docx_path, bool(req_paths_list or req_files), _discover_srs_docx,
+        label="SRS", tag="[STS_GENERATE_ASYNC] ")
 
     if not req_texts and not srs_docx_path:
         raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
@@ -2301,32 +2340,34 @@ async def local_sts_generate_async(
         job_id=job_id,
     )
 
+    # 선택 입력 worker 경유 (위 sync/stream 핸들러와 같은 이유).
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips3: List[str] = []
+
     def _resolve_opt3(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=opt_skips3)
 
     sds_docx_path = _resolve_opt3(sds_path)
     # Fallback: auto-discover SDS from docs/ if not provided
-    if not sds_docx_path:
-        _auto_docs3 = _discover_default_req_docs()
-        for _auto_p3 in _auto_docs3.get("sds", []):
-            sds_docx_path = _auto_p3
-            _logger.info("[STS_GENERATE_ASYNC] auto-discovered SDS: %s", sds_docx_path)
-            break
+    sds_docx_path = _doc_or_discovered(sds_docx_path, sds_path, _discover_sds_docx,
+                                       label="SDS", tag="[STS_GENERATE_ASYNC] ")
     uds_file_path = _resolve_opt3(uds_path)
     stp_docx_path = _resolve_opt3(stp_path)
-    hsis_file_path3 = _resolve_opt3(hsis_path) or _discover_hsis_path()
+    hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
+    if opt_skips3:
+        _logger.warning("STS(async): 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips3), "; ".join(opt_skips3)[:400])
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sts", "sts_local", tpl_path)
@@ -2337,6 +2378,7 @@ async def local_sts_generate_async(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
 
@@ -2359,11 +2401,21 @@ async def local_sts_generate_async(
                 try:
                     sections = _get_source_sections_cached(str(source_root_path))
                     function_details = sections.get("function_details", {})
-                    function_details, req_doc_paths, sds_doc_paths = _enrich_function_details_map(
+                    # req_doc_paths / sds_doc_paths 는 **바깥 스코프**(이 함수를 감싸는
+                    # 엔드포인트)의 변수다. 여기서 대입 타깃에 넣으면 _worker 지역변수로
+                    # 승격돼, 바로 아래 kwarg 읽기가 UnboundLocalError를 냈다.
+                    # 정확히는 **인자 평가 단계**에서 터지므로 _enrich_function_details_map
+                    # 은 호출조차 되지 않았고, 예외는 except가 "source parsing warning"
+                    # 으로만 찍었다. 이때 function_details 는 바로 위에서 이미 바인딩된
+                    # **원본(비보강) 파싱 결과**를 그대로 들고 generate_sts 로 넘어갔다
+                    # (빈 dict 아님). 즉 유실된 건 문서/HSIS 기반 **보강분**이다.
+                    # 반환된 경로 집합은 generate_sts가 쓰지 않으므로 버린다(동기판도 동일).
+                    function_details, _, _ = _enrich_function_details_map(
                         function_details,
                         function_table_rows=sections.get("function_table_rows", []),
                         req_doc_paths=req_doc_paths,
                         sds_doc_paths=sds_doc_paths,
+                        uds_path=uds_path,
                     )
                 except Exception as e:
                     _logger.warning("[STS_ASYNC][%s] source parsing warning: %s", job_id, e)
@@ -2386,6 +2438,7 @@ async def local_sts_generate_async(
                 hsis_path=hsis_file_path3,
                 ai_config=_load_sts_ai_config(),
                 on_progress=_sts_on_progress,
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
             )
 
             download_url = f"/api/local/sts/download/{out_filename}"
@@ -2498,14 +2551,21 @@ def local_sts_view(filename: str, report_dir: Optional[str] = None) -> Dict[str,
 
 
 @router.post("/api/local/suts/generate")
-async def local_suts_generate(
+def local_suts_generate(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    #   중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    #   숫자 복제이므로 `test_docgen_test_materials.py` 가 생성기 상수와 대조한다.
+    max_sequences: int = Form(24),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -2525,33 +2585,28 @@ async def local_suts_generate(
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
+
+    from backend.services.resolver_helpers import resolve_builder_input
 
     def _resolve_doc_path(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        # worker 경유 — 직독은 cloudium `U:` 를 못 읽어 선택 문서가 조용히 빠졌다.
+        return resolve_builder_input(val)
 
     srs_docx = _resolve_doc_path(srs_path)
     sds_docx = _resolve_doc_path(sds_path)
     uds_file = _resolve_doc_path(uds_path)
     # Fallback: auto-discover SRS/SDS/HSIS from docs/ if not provided
-    if not srs_docx:
-        _suts_defaults = _discover_default_req_docs()
-        for _sp in _suts_defaults.get("req", []):
-            if "srs" in _sp.lower() and _sp.endswith(".docx"):
-                srs_docx = _sp
-                break
-    if not sds_docx:
-        _suts_defaults = _discover_default_req_docs()
-        for _sp in _suts_defaults.get("sds", []):
-            sds_docx = _sp
-            break
-    hsis_suts = _resolve_doc_path(hsis_path) or _discover_hsis_path()
+    srs_docx = _doc_or_discovered(srs_docx, srs_path, _discover_srs_docx,
+                                  label="SRS", tag="[SUTS_GENERATE] ")
+    sds_docx = _doc_or_discovered(sds_docx, sds_path, _discover_sds_docx,
+                                  label="SDS", tag="[SUTS_GENERATE] ")
+    hsis_suts = _doc_or_discovered(_resolve_doc_path(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2565,6 +2620,7 @@ async def local_suts_generate(
 
     try:
         result = generate_suts(
+            scope=scope,
             source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
             output_path=str(out_path),
             template_path=tpl_path,
@@ -2607,14 +2663,21 @@ async def local_suts_generate(
 
 
 @router.post("/api/local/suts/generate-stream")
-async def local_suts_generate_stream(
+def local_suts_generate_stream(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    #   중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    #   숫자 복제이므로 `test_docgen_test_materials.py` 가 생성기 상수와 대조한다.
+    max_sequences: int = Form(24),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -2635,33 +2698,27 @@ async def local_suts_generate_stream(
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
+
+    from backend.services.resolver_helpers import resolve_builder_input
 
     def _res_doc(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx_stream = _res_doc(srs_path)
     sds_docx_stream = _res_doc(sds_path)
     uds_file_stream = _res_doc(uds_path)
     # Fallback: auto-discover SRS/SDS/HSIS from docs/ if not provided
-    if not srs_docx_stream:
-        _suts_defs2 = _discover_default_req_docs()
-        for _sp2 in _suts_defs2.get("req", []):
-            if "srs" in _sp2.lower() and _sp2.endswith(".docx"):
-                srs_docx_stream = _sp2
-                break
-    if not sds_docx_stream:
-        _suts_defs2 = _discover_default_req_docs()
-        for _sp2 in _suts_defs2.get("sds", []):
-            sds_docx_stream = _sp2
-            break
-    hsis_suts_stream = _res_doc(hsis_path) or _discover_hsis_path()
+    srs_docx_stream = _doc_or_discovered(srs_docx_stream, srs_path, _discover_srs_docx,
+                                         label="SRS", tag="[SUTS_STREAM] ")
+    sds_docx_stream = _doc_or_discovered(sds_docx_stream, sds_path, _discover_sds_docx,
+                                         label="SDS", tag="[SUTS_STREAM] ")
+    hsis_suts_stream = _doc_or_discovered(_res_doc(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2681,6 +2738,7 @@ async def local_suts_generate_stream(
     def _run():
         try:
             result = generate_suts(
+                scope=scope,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
@@ -2735,14 +2793,21 @@ async def local_suts_generate_stream(
 
 
 @router.post("/api/local/suts/generate-async")
-async def local_suts_generate_async(
+def local_suts_generate_async(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종(BV 6/COND 4/SWITCH 6/LOOP 3/GLOBAL 3/VOID 1/MC-DC 6)
+    #   중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    #   숫자 복제이므로 `test_docgen_test_materials.py` 가 생성기 상수와 대조한다.
+    max_sequences: int = Form(24),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -2766,21 +2831,22 @@ async def local_suts_generate_async(
     )
 
     tpl_path: Optional[str] = None
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
+    #   worker 경유로 로컬화해야 생성기가 열 수 있다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_t
     if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+        tpl_path = _rbi_t(template_path, label="템플릿")
+
+    from backend.services.resolver_helpers import resolve_builder_input
 
     def _res_async(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx_async = _res_async(srs_path)
     sds_docx_async = _res_async(sds_path)
     uds_file_async = _res_async(uds_path)
-    hsis_suts_async = _res_async(hsis_path) or _discover_hsis_path()
+    hsis_suts_async = _doc_or_discovered(_res_async(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2809,6 +2875,7 @@ async def local_suts_generate_async(
             )
             _logger.info("[SUTS_ASYNC][%s] calling generate_suts ...", job_id)
             result = generate_suts(
+                scope=scope,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
@@ -2932,21 +2999,47 @@ def local_suts_view(filename: str, report_dir: Optional[str] = None) -> Dict[str
     )
 
 
+def _split_fi_design_ids(raw: str) -> List[str]:
+    """콤마/공백 구분 문자열 → 설계 ID 목록.
+
+    ⚠ 빈 토큰을 버리되 **알 수 없는 ID 는 여기서 거르지 않는다**. 존재 여부 판정은
+      생성기가 SwUDS Related 맵으로 하고, 못 찾은 ID 는 `fi_unresolved` 로 보고된다.
+      여기서 미리 걸러내면 "요청했는데 못 냈다" 가 "요청이 없었다" 로 둔갑한다.
+    """
+    return [t for t in (s.strip() for s in str(raw or "").replace(";", ",").split(",")) if t]
+
+
 @router.post("/api/local/sits/generate")
-async def local_sits_generate(
+def local_sits_generate(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다.
+    reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_subcases: int = Form(7),
+    # 통합 흐름 상한. **미지정(None)이면 생성기 기본값**(120)을 쓴다 — 여기서 숫자를
+    # 복제하면 생성기 상수와 갈라진다. 실측(kjpds02_pv): 흐름 145 로 상한을 넘어
+    # 25개가 시험 규격에서 빠지고 있는데, 지금까지 화면에서 올릴 방법이 없었다.
+    max_flows: Optional[int] = Form(None),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
     stp_path: str = Form(""),
+    # 오류 주입(FI) 시험을 낼 설계 ID — 콤마 구분. **입력이지 추론이 아니다.**
+    # 어느 통합 지점을 오류 주입으로 시험할지는 8가지 독립 근거(전략 라벨·오류 경로·
+    # 반환 경로·ASIL·시나리오 텍스트 등) 어느 것으로도 정본과 맞지 않았다(R8 실측).
+    # 지어내는 대신 받는다. 비우면 FI TC 는 0건이고, 그 사실은 품질 리포트의
+    # `fi_requested`/`fi_emitted`/`fi_unresolved` 로 남는다.
+    fi_design_ids: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate SITS (Software Integration Test Specification) Excel from source code."""
     from sits_generator import generate_sits
@@ -2960,22 +3053,28 @@ async def local_sits_generate(
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
-    tpl_path: Optional[str] = None
-    if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
+    # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    tpl_path, _tpl_why = resolve_template_for(
+        "sits", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("SITS 템플릿: %s", _tpl_why)
+
+    from backend.services.resolver_helpers import resolve_builder_input
 
     def _resolve_doc_path_sits(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx = _resolve_doc_path_sits(srs_path)
     sds_docx = _resolve_doc_path_sits(sds_path)
     uds_file = _resolve_doc_path_sits(uds_path)
-    hsis_file = _resolve_doc_path_sits(hsis_path) or _discover_hsis_path()
+    hsis_file = _doc_or_discovered(_resolve_doc_path_sits(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
     stp_file = _resolve_doc_path_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)
@@ -2995,11 +3094,14 @@ async def local_sits_generate(
             template_path=tpl_path,
             project_config=project_config,
             max_subcases=max_subcases,
+            # 미지정이면 인자 자체를 넘기지 않는다 — 생성기 기본값이 단일 출처다.
+            **({"max_flows": max_flows} if max_flows is not None else {}),
             srs_docx_path=srs_docx,
             sds_docx_path=sds_docx,
             uds_path=uds_file,
             hsis_path=hsis_file,
             stp_path=stp_file,
+            fi_design_ids=_split_fi_design_ids(fi_design_ids),
             ai_config=_load_sts_ai_config(),
         )
     except Exception as e:
@@ -3032,14 +3134,24 @@ async def local_sits_generate(
 
 
 @router.post("/api/local/sits/generate-stream")
-async def local_sits_generate_stream(
+def local_sits_generate_stream(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다.
+    reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_subcases: int = Form(7),
+    # 통합 흐름 상한. **미지정(None)이면 생성기 기본값**(120)을 쓴다 — 여기서 숫자를
+    # 복제하면 생성기 상수와 갈라진다. 실측(kjpds02_pv): 흐름 145 로 상한을 넘어
+    # 25개가 시험 규격에서 빠지고 있는데, 지금까지 화면에서 올릴 방법이 없었다.
+    max_flows: Optional[int] = Form(None),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -3060,22 +3172,28 @@ async def local_sits_generate_stream(
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
-    tpl_path: Optional[str] = None
-    if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
+    # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    tpl_path, _tpl_why = resolve_template_for(
+        "sits", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("SITS 템플릿: %s", _tpl_why)
+
+    from backend.services.resolver_helpers import resolve_builder_input
 
     def _res_doc_sits(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val)
 
     srs_docx_stream = _res_doc_sits(srs_path)
     sds_docx_stream = _res_doc_sits(sds_path)
     uds_file_stream = _res_doc_sits(uds_path)
-    hsis_stream = _res_doc_sits(hsis_path) or _discover_hsis_path()
+    hsis_stream = _doc_or_discovered(_res_doc_sits(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
     stp_stream = _res_doc_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)
@@ -3101,6 +3219,7 @@ async def local_sits_generate_stream(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_subcases=max_subcases,
+                **({"max_flows": max_flows} if max_flows is not None else {}),
                 on_progress=_on_progress,
                 srs_docx_path=srs_docx_stream,
                 sds_docx_path=sds_docx_stream,
@@ -3150,14 +3269,24 @@ async def local_sits_generate_stream(
 
 
 @router.post("/api/local/sits/generate-async")
-async def local_sits_generate_async(
+def local_sits_generate_async(
     request: Request,
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿 선택은 백엔드 단일 규칙이다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다.
+    reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_subcases: int = Form(7),
+    # 통합 흐름 상한. **미지정(None)이면 생성기 기본값**(120)을 쓴다 — 여기서 숫자를
+    # 복제하면 생성기 상수와 갈라진다. 실측(kjpds02_pv): 흐름 145 로 상한을 넘어
+    # 25개가 시험 규격에서 빠지고 있는데, 지금까지 화면에서 올릴 방법이 없었다.
+    max_flows: Optional[int] = Form(None),
     report_dir: str = Form(""),
     srs_path: str = Form(""),
     sds_path: str = Form(""),
@@ -3181,23 +3310,35 @@ async def local_sits_generate_async(
         job_id=job_id,
     )
 
-    tpl_path: Optional[str] = None
-    if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 정본이 있으면
+    # 정본을 쓴다(표지·이력·Introduction 이 납품본과 같아진다). 명세 시트는 새로 쓴다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    tpl_path, _tpl_why = resolve_template_for(
+        "sits", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("SITS 템플릿: %s", _tpl_why)
+
+    # 선택 입력 worker 경유. SITS 는 선택 문서가 5종(SRS·SDS·UDS·HSIS·STP)이라
+    # 직독 시절엔 cloudium 에서 **다섯 개가 통째로** 빠진 채 만들어졌다.
+    from backend.services.resolver_helpers import resolve_builder_input
+    sits_opt_skips: List[str] = []
 
     def _res_async_sits(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        return resolve_builder_input(val, reasons=sits_opt_skips)
 
     srs_docx_async = _res_async_sits(srs_path)
     sds_docx_async = _res_async_sits(sds_path)
     uds_file_async = _res_async_sits(uds_path)
-    hsis_async = _res_async_sits(hsis_path) or _discover_hsis_path()
+    hsis_async = _doc_or_discovered(_res_async_sits(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
     stp_async = _res_async_sits(stp_path)
+    if sits_opt_skips:
+        _logger.warning("SITS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(sits_opt_skips), "; ".join(sits_opt_skips)[:400])
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sits", "sits_local", tpl_path)
@@ -3231,6 +3372,7 @@ async def local_sits_generate_async(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_subcases=max_subcases,
+                **({"max_flows": max_flows} if max_flows is not None else {}),
                 on_progress=_sits_on_progress,
                 srs_docx_path=srs_docx_async,
                 sds_docx_path=sds_docx_async,
@@ -3383,9 +3525,12 @@ def local_suts_export_vectorcast(
     effective_source_root = resolved_source_root or str(cfg.get("source_root") or "").strip()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    package_name = f"suts_vectorcast_{ts}"
-    out_dir = base_dir / "vectorcast" / package_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠ 키가 **없는** 이름이다(ts 뿐) — 다른 프로젝트·다른 사용자여도 같은 초면 부딪힌다.
+    #   `mkdir(exist_ok=True)` 는 폴더를 **공유**시켜 안의 산출물이 서로 덮어써진다.
+    #   원자 선점으로 폴더 자체를 비켜간다.
+    from backend.services.output_paths import reserve_unique_dir
+    out_dir = reserve_unique_dir(base_dir / "vectorcast" / f"suts_vectorcast_{ts}")
+    package_name = out_dir.name
     intermediate_json = out_dir / "suts_vectorcast_model.json"
     warnings_md = out_dir / "suts_vectorcast_warnings.md"
 
@@ -3451,8 +3596,12 @@ def local_sits_export_vectorcast(
         )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    package_name = f"sits_vectorcast_{ts}"
-    out_dir = base_dir / "vectorcast" / package_name
+    # ⚠ 형제인 SUTS(`local_suts_export_vectorcast`)는 같은 부모(`base_dir/vectorcast`)에
+    #   같은 형태의 **키 없는** 이름을 만들면서 `reserve_unique_dir` 로 선점한다. 여기만
+    #   맨 경로였다 — 같은 패턴의 다른 입구가 남은 전형적인 자리다.
+    from backend.services.output_paths import reserve_unique_dir
+    out_dir = reserve_unique_dir(base_dir / "vectorcast" / f"sits_vectorcast_{ts}")
+    package_name = out_dir.name
 
     # source_root / compiler 설정
     _first_root = source_root.split(",")[0].strip() if source_root else ""
@@ -3490,53 +3639,174 @@ def local_sits_export_vectorcast(
 
 # ── VectorCAST 패키지 목록 / 다운로드 ──
 
-@router.get("/api/local/vectorcast/list")
-def local_vectorcast_list(report_dir: str = "") -> Dict[str, Any]:
-    """등록된 VectorCAST 패키지 목록 조회."""
-    base_dir = _resolve_report_dir(report_dir)
-    vcast_dir = base_dir / "vectorcast"
-    if not vcast_dir.exists():
-        return {"ok": True, "packages": []}
-    packages = []
-    for d in sorted(vcast_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not d.is_dir():
+# ── VectorCAST 패키지 루트 ────────────────────────────────────────────────────
+# ⚠ 등록(쓰기)이 **두 갈래**다. 읽기가 한쪽만 보면 반대쪽 산출물이 통째로 사라진다:
+#     `/api/local/{suts,sits}/export-vectorcast` → `_resolve_report_dir(report_dir)/vectorcast`
+#     `/api/jenkins/suts/export-vectorcast`      → `_jenkins_exports_dir(cache_root)/vectorcast`
+#   실측(2026-08-07): `reports/vectorcast` 3개 · `.devops_pro_cache/exports/vectorcast` 2개.
+#   목록은 전자만 봤고, 심지어 프론트가 cache_root 를 report_dir 로 보내 403 이었다 →
+#   화면엔 "등록된 패키지가 없습니다". **403 이 '없음'으로 위장**한 것이다.
+#
+#   그래서 한쪽 루트만 고르는 수정(어느 쪽이든)은 답이 아니다 — 반대쪽이 그대로 사라진다.
+#   목록·다운로드·삭제가 **이 함수 하나**를 공유하게 한다. 따로 세면 곧 어긋나서
+#   "목록에 보이는데 못 지운다"(또는 그 반대)가 된다.
+
+def _vcast_roots(report_dir: str, cache_root: str) -> Tuple[List[Tuple[str, Path]], List[str]]:
+    """(source, 루트) 목록과 **제외 사유**를 함께 준다. 사유를 버리면 침묵이 된다."""
+    from backend.helpers.jenkins import _jenkins_exports_dir
+
+    roots: List[Tuple[str, Path]] = []
+    notes: List[str] = []
+
+    try:
+        base = _resolve_report_dir(report_dir)
+    except HTTPException as exc:
+        # 허용 밖 report_dir 이라고 전체를 실패시키지 않는다 — 기본 리포트 루트는 살리고
+        # 무시했다는 사실만 올린다(구 프론트가 cache_root 를 여기로 보내던 전례).
+        base = _resolve_report_dir("")
+        notes.append(f"report_dir 무시됨({exc.detail}) — 기본 리포트 루트로 대체")
+    roots.append(("reports", (base / "vectorcast").resolve()))
+
+    raw_cache = str(cache_root or "").strip()
+    if raw_cache:
+        try:
+            # ⚠ create=False — 조회가 디렉터리를 만들면 오타 난 경로도 실재하게 된다.
+            roots.append(("jenkins_cache",
+                          (_jenkins_exports_dir(raw_cache, create=False) / "vectorcast").resolve()))
+            # 캐시는 **사용자별 격리 + legacy 공유 이중구조**다(`.devops_pro_cache/{user}/`
+            # 와 `.devops_pro_cache/`). 사용자 세그먼트가 붙기 전에 등록된 패키지는 상위
+            # 공유 루트에 남아 있어, 여기를 안 보면 그 등록물이 영영 안 보인다
+            # (실측 2026-08-07: 현재 jenkins 경유 등록물 2건이 **전부** 이쪽에 있다).
+            # ⚠ **실재할 때만** 추가한다 — 없는 루트를 지어내면 진단이 흐려진다.
+            parent = Path(raw_cache).expanduser().resolve().parent
+            legacy = (_jenkins_exports_dir(str(parent), create=False) / "vectorcast").resolve()
+            if legacy.is_dir():
+                roots.append(("jenkins_cache_legacy", legacy))
+        except (OSError, ValueError) as exc:
+            notes.append(f"cache_root 제외됨 — {type(exc).__name__}: {exc}")
+
+    # 두 루트가 같은 디렉터리를 가리키면 패키지가 두 번 나온다(첫 등장만 남긴다).
+    seen: set = set()
+    deduped: List[Tuple[str, Path]] = []
+    for source, root in roots:
+        if root in seen:
             continue
-        manifest_file = d / "manifest.json"
+        seen.add(root)
+        deduped.append((source, root))
+    return deduped, notes
+
+
+def _scan_vcast_root(source: str, root: Path) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """루트 하나를 훑는다. (패키지, 실패사유). 미존재는 실패가 아니다(아직 등록 전)."""
+    if not root.exists():
+        return [], None
+    packages: List[Dict[str, Any]] = []
+    try:
+        entries = [d for d in root.iterdir() if d.is_dir()]
+    except OSError as exc:
+        return [], f"{source} 루트를 읽지 못했다 — {type(exc).__name__}: {exc}"
+
+    for d in entries:
+        try:
+            mtime = d.stat().st_mtime
+            files = sorted(p.name for p in d.iterdir() if p.is_file())
+        except OSError as exc:
+            # 개별 패키지 실패가 나머지를 가리지 않게 — 행은 남기되 사유를 싣는다.
+            packages.append({
+                "name": d.name, "doc_type": "suts", "path": str(d), "source": source,
+                "files": [], "file_count": 0, "created": None, "summary": {},
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            continue
         meta: Dict[str, Any] = {}
+        manifest_file = d / "manifest.json"
         if manifest_file.exists():
             try:
-                import json
                 meta = json.loads(manifest_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        files = sorted(p.name for p in d.iterdir() if p.is_file())
-        doc_type = "sits" if "sits" in d.name else "suts"
+            except (OSError, ValueError):
+                meta = {}          # manifest 파손은 목록 자체를 막지 않는다(summary 만 빈다)
         packages.append({
             "name": d.name,
-            "doc_type": doc_type,
+            "doc_type": "sits" if "sits" in d.name else "suts",
             "path": str(d),
+            "source": source,
             "files": files,
             "file_count": len(files),
-            "created": datetime.fromtimestamp(d.stat().st_mtime).isoformat(),
-            "summary": meta.get("summary", {}),
+            "created": datetime.fromtimestamp(mtime).isoformat(),
+            "summary": meta.get("summary", {}) if isinstance(meta, dict) else {},
         })
-    return {"ok": True, "packages": packages}
+    return packages, None
+
+
+def _confine_vcast_package(package_path: str, report_dir: str, cache_root: str) -> Path:
+    """`package_path` 를 목록이 훑는 루트의 **직계 하위**로 확정한다. 밖이면 403.
+
+    ⚠ 이전엔 검사가 **아예 없었다** — `delete` 는 임의 경로를 `shutil.rmtree` 했고
+      `download` 는 임의 파일을 반환했다. 목록이 준 경로를 되받는 설계라 클라이언트를
+      믿은 것인데, 클라이언트가 준 값은 클라이언트가 지어낼 수도 있는 값이다.
+    ⚠ '직계 하위'인 이유: 단순 하위 검사는 루트 **자기 자신**도 통과시켜
+      `vectorcast` 디렉터리째 삭제된다.
+    """
+    raw = str(package_path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="package_path required")
+    try:
+        target = Path(raw).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid package_path") from exc
+    roots, _ = _vcast_roots(report_dir, cache_root)
+    if not any(target.parent == root for _, root in roots):
+        # ⚠ 어떤 경로가 허용되는지 응답에 적지 않는다 — 실패 자체가 정보다.
+        _logger.warning("허용 밖 VectorCAST package_path 를 차단했다: %s", target)
+        raise HTTPException(status_code=403, detail="package_path not allowed")
+    return target
+
+
+@router.get("/api/local/vectorcast/list")
+def local_vectorcast_list(report_dir: str = "", cache_root: str = "") -> Dict[str, Any]:
+    """등록된 VectorCAST 패키지 목록 조회 — **등록 경로 두 갈래를 모두** 훑는다."""
+    roots, warnings = _vcast_roots(report_dir, cache_root)
+    packages: List[Dict[str, Any]] = []
+    scanned: List[Dict[str, Any]] = []
+    for source, root in roots:
+        found, failure = _scan_vcast_root(source, root)
+        if failure:
+            warnings.append(failure)
+        packages.extend(found)
+        scanned.append({
+            "source": source, "path": str(root),
+            "exists": root.exists(), "count": len(found),
+            "error": failure,
+        })
+    # 루트를 가로질러 최신순. created 가 없는 행(stat 실패)은 뒤로.
+    packages.sort(key=lambda p: p.get("created") or "", reverse=True)
+    # `scanned_roots` 는 "0건"이 어느 루트에서 온 0건인지 화면이 말할 수 있게 하는 근거다.
+    return {"ok": True, "packages": packages, "warnings": warnings, "scanned_roots": scanned}
 
 
 @router.get("/api/local/vectorcast/download")
-def local_vectorcast_download(package_path: str = "", filename: str = ""):
-    """VectorCAST 패키지 파일 다운로드."""
+def local_vectorcast_download(
+    package_path: str = "",
+    filename: str = "",
+    report_dir: str = "",
+    cache_root: str = "",
+):
+    """VectorCAST 패키지 파일 다운로드 — 허용 루트 하위만."""
     from fastapi.responses import FileResponse
-    pkg_dir = Path(package_path)
-    if not pkg_dir.exists() or not pkg_dir.is_dir():
+    pkg_dir = _confine_vcast_package(package_path, report_dir, cache_root)
+    if not pkg_dir.is_dir():
         raise HTTPException(status_code=404, detail="Package not found")
     if filename:
-        target = pkg_dir / filename
-        if not target.exists():
+        # ⚠ `pkg_dir / filename` 만으론 `../` 로 패키지 밖을 짚는다 — 상대경로를 살균한다.
+        try:
+            target = safe_resolve_under(pkg_dir, filename)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid filename") from exc
+        if not target.is_file():
             raise HTTPException(status_code=404, detail="File not found")
-        return FileResponse(str(target), filename=filename)
+        return FileResponse(str(target), filename=target.name)
     # filename 없으면 ZIP으로 전체 패키지 다운로드
-    import zipfile, tempfile
+    import zipfile
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in pkg_dir.rglob("*"):
@@ -3546,21 +3816,29 @@ def local_vectorcast_download(package_path: str = "", filename: str = ""):
 
 
 @router.delete("/api/local/vectorcast/delete")
-def local_vectorcast_delete(package_path: str = "") -> Dict[str, Any]:
-    """VectorCAST 패키지 삭제."""
+def local_vectorcast_delete(
+    package_path: str = "",
+    report_dir: str = "",
+    cache_root: str = "",
+) -> Dict[str, Any]:
+    """VectorCAST 패키지 삭제 — 허용 루트의 **직계 하위**만.
+
+    ⚠ 이 함수는 `shutil.rmtree` 다. 이전엔 경로 검사가 없어 인증된 사용자면
+      **서버의 아무 디렉터리나** 지울 수 있었다.
+    """
     import shutil
-    pkg_dir = Path(package_path)
-    if not pkg_dir.exists() or not pkg_dir.is_dir():
+    pkg_dir = _confine_vcast_package(package_path, report_dir, cache_root)
+    if not pkg_dir.is_dir():
         raise HTTPException(status_code=404, detail="Package not found")
     shutil.rmtree(pkg_dir)
     return {"ok": True, "deleted": str(pkg_dir)}
 
 
-@router.post("/api/local/scm")
+@router.post("/api/local/scm", dependencies=[Depends(require_admin)])
 def local_scm(req: ScmRequest) -> Dict[str, Any]:
     if req.mode.lower() == "git":
         return run_git(
-            project_root=req.project_root,
+            project_root=confine_request_root(req.project_root, rel_path=req.workdir_rel),
             workdir_rel=req.workdir_rel,
             action=req.action,
             repo_url=req.repo_url,
@@ -3570,7 +3848,7 @@ def local_scm(req: ScmRequest) -> Dict[str, Any]:
         )
     if req.mode.lower() == "svn":
         return run_svn(
-            project_root=req.project_root,
+            project_root=confine_request_root(req.project_root, rel_path=req.workdir_rel),
             workdir_rel=req.workdir_rel,
             action=req.action,
             repo_url=req.repo_url,
@@ -3616,32 +3894,37 @@ def local_impact_trigger_async(req: LocalImpactTriggerRequest) -> Dict[str, Any]
     return start_impact_job(trigger)
 
 
-@router.post("/api/local/kb/list")
+@router.post("/api/local/kb/list", dependencies=[Depends(require_admin)])
 def local_kb_list(req: KBRequest) -> Dict[str, Any]:
-    return {"entries": list_kb_entries(req.project_root, req.report_dir)}
+    root = confine_request_root(req.project_root)
+    return {"entries": list_kb_entries(root, req.report_dir)}
 
 
-@router.post("/api/local/kb/delete")
+@router.post("/api/local/kb/delete", dependencies=[Depends(require_admin)])
 def local_kb_delete(req: KBRequest) -> Dict[str, Any]:
     if not req.entry_key:
         raise HTTPException(status_code=400, detail="entry_key required")
-    ok, msg = delete_kb_entry(req.entry_key, req.project_root, req.report_dir)
+    root = confine_request_root(req.project_root)
+    ok, msg = delete_kb_entry(req.entry_key, root, req.report_dir)
     return {"ok": ok, "message": msg}
 
 
-@router.post("/api/local/editor/read")
+@router.post("/api/local/editor/read", dependencies=[Depends(require_admin)])
 def local_editor_read(req: EditorReadRequest) -> Dict[str, Any]:
-    return read_file_text(req.project_root, req.rel_path, req.max_bytes)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return read_file_text(root, req.rel_path, req.max_bytes)
 
 
-@router.post("/api/local/editor/write")
+@router.post("/api/local/editor/write", dependencies=[Depends(require_admin)])
 def local_editor_write(req: EditorWriteRequest) -> Dict[str, Any]:
-    return write_file_text(req.project_root, req.rel_path, req.content, req.make_backup)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return write_file_text(root, req.rel_path, req.content, req.make_backup)
 
 
-@router.post("/api/local/editor/replace")
+@router.post("/api/local/editor/replace", dependencies=[Depends(require_admin)])
 def local_editor_replace(req: EditorReplaceRequest) -> Dict[str, Any]:
-    return replace_lines(req.project_root, req.rel_path, req.start_line, req.end_line, req.content)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return replace_lines(root, req.rel_path, req.start_line, req.end_line, req.content)
 
 
 @router.post("/api/local/format-c")
@@ -3663,7 +3946,11 @@ def local_generate_component_map(
     if not source_root:
         raise HTTPException(status_code=400, detail="source_root 필요")
     from report_gen.project_setup import generate_component_map_from_sds
-    out_path = str(Path(output_dir or "docs") / "component_map.json") if output_dir else "docs/component_map.json"
+    # ⚠ `sds_path`/`source_root` 는 봉인하지 않는다 — 요구문서·소스는 저장소 밖에 사는 것이
+    #   이 앱의 설계다. 하지만 **쓰기 위치**는 다르다: `output_dir` 은 클라이언트 문자열이고
+    #   프론트는 아예 보내지 않는다(기본 `docs/`). 임의 위치에 쓸 근거가 없다.
+    out_path = (str(confine(output_dir, what="output_dir") / "component_map.json")
+                if output_dir else "docs/component_map.json")
     result = generate_component_map_from_sds(sds_path, source_root, output_path=out_path)
     return {"ok": True, **result}
 
@@ -3677,7 +3964,9 @@ def local_generate_override(
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path (레퍼런스 UDS) 필요")
     from report_gen.project_setup import generate_override_from_reference_uds
-    out_path = str(Path(output_dir or "docs") / "uds_function_swcom_override.json") if output_dir else "docs/uds_function_swcom_override.json"
+    # ⚠ 위 generate-component-map 과 같은 판정 — 읽기(`uds_path`)는 열고 쓰기만 봉인한다.
+    out_path = (str(confine(output_dir, what="output_dir") / "uds_function_swcom_override.json")
+                if output_dir else "docs/uds_function_swcom_override.json")
     result = generate_override_from_reference_uds(uds_path, output_path=out_path)
     return {"ok": True, **result}
 
@@ -3849,6 +4138,11 @@ def local_rag_use_pgvector(req: RagStorageRequest) -> Dict[str, Any]:
     config.PGVECTOR_URL = url
     config.FORCE_PGVECTOR = True
     config.FORCE_PGVECTOR_STRICT = True
+    # get_kb 캐시는 base_dir 만 key 로 쓰고 storage(KB_STORAGE/FORCE_PGVECTOR) 는
+    # key 에 없다 → 캐시를 비우지 않으면 이전에 빌드된 sqlite 인스턴스가 반환되어
+    # pgvector 전환이 silent no-op 된다. config 변이 후 무효화.
+    from workflow.rag import _clear_kb_cache
+    _clear_kb_cache()
     report_dir = str(req.report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
     report_path = (repo_root / report_dir).resolve()
     report_path.mkdir(parents=True, exist_ok=True)
@@ -3929,7 +4223,7 @@ def api_open_file(req: OpenFileRequest) -> Dict[str, Any]:
     return {"ok": True, "path": str(target)}
 
 
-@router.post("/api/local/editor/read-abs")
+@router.post("/api/local/editor/read-abs", dependencies=[Depends(require_admin)])
 def local_editor_read_abs(req: EditorReadAbsRequest) -> Dict[str, Any]:
     if not req.path:
         raise HTTPException(status_code=400, detail="path required")
@@ -3999,6 +4293,10 @@ def api_open_folder(req: OpenFolderRequest) -> Dict[str, Any]:
     ]
     if not is_under_any(target, allowed_roots):
         raise HTTPException(status_code=403, detail="path not allowed")
+    # 산출물 경로는 **파일**로 온다(생성 응답의 `output_path`). 파일을 404 로 튕기면
+    # "폴더 열기" 가 항상 실패하므로, 파일이면 담고 있는 폴더를 연다.
+    if target.is_file():
+        target = target.parent
     if not target.exists() or not target.is_dir():
         raise HTTPException(status_code=404, detail="folder not found")
     try:
@@ -4008,10 +4306,10 @@ def api_open_folder(req: OpenFolderRequest) -> Dict[str, Any]:
     return {"ok": True, "path": str(target)}
 
 
-@router.post("/api/local/preflight")
+@router.post("/api/local/preflight", dependencies=[Depends(require_admin)])
 def local_preflight(req: PreflightRequest) -> Dict[str, Any]:
     cfg = dict(req.config or {})
-    resolved, root = _resolve_source_root_from_cfg(cfg, req.project_root)
+    resolved, root = _resolve_source_root_from_cfg(cfg, confine_request_root(req.project_root))
     extra_paths = _collect_tool_paths()
     original_path = os.environ.get("PATH", "")
     os.environ["PATH"] = _augment_path(original_path, extra_paths)
@@ -4032,61 +4330,73 @@ def local_preflight(req: PreflightRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/api/local/list-dir")
+@router.post("/api/local/list-dir", dependencies=[Depends(require_admin)])
 def api_list_dir(req: ListDirRequest) -> Dict[str, Any]:
-    return list_directory(req.project_root, req.rel_path)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return list_directory(root, req.rel_path)
 
 
-@router.post("/api/local/search")
+@router.post("/api/local/search", dependencies=[Depends(require_admin)])
 def api_search(req: SearchRequest) -> Dict[str, Any]:
-    return search_in_files(req.project_root, req.rel_path, req.query, req.max_results)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return search_in_files(root, req.rel_path, req.query, req.max_results)
 
 
-@router.post("/api/local/replace-text")
+@router.post("/api/local/replace-text", dependencies=[Depends(require_admin)])
 def api_replace_text(req: ReplaceTextRequest) -> Dict[str, Any]:
-    return replace_in_file(req.project_root, req.rel_path, req.search, req.replace)
+    root = confine_request_root(req.project_root, rel_path=req.rel_path)
+    return replace_in_file(root, req.rel_path, req.search, req.replace)
 
 
-@router.post("/api/local/git/status")
+@router.post("/api/local/git/status", dependencies=[Depends(require_admin)])
 def api_git_status(req: GitRequest) -> Dict[str, Any]:
-    return git_status(req.project_root, req.workdir_rel)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_status(root, req.workdir_rel)
 
 
-@router.post("/api/local/git/diff")
+@router.post("/api/local/git/diff", dependencies=[Depends(require_admin)])
 def api_git_diff(req: GitRequest) -> Dict[str, Any]:
-    return git_diff(req.project_root, req.workdir_rel, req.staged, req.path)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_diff(root, req.workdir_rel, req.staged, req.path)
 
 
-@router.post("/api/local/git/log")
+@router.post("/api/local/git/log", dependencies=[Depends(require_admin)])
 def api_git_log(req: GitRequest) -> Dict[str, Any]:
-    return git_log(req.project_root, req.workdir_rel, req.max_count)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_log(root, req.workdir_rel, req.max_count)
 
 
-@router.post("/api/local/git/branches")
+@router.post("/api/local/git/branches", dependencies=[Depends(require_admin)])
 def api_git_branches(req: GitRequest) -> Dict[str, Any]:
-    return git_branches(req.project_root, req.workdir_rel)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_branches(root, req.workdir_rel)
 
 
-@router.post("/api/local/git/checkout")
+@router.post("/api/local/git/checkout", dependencies=[Depends(require_admin)])
 def api_git_checkout(req: GitRequest) -> Dict[str, Any]:
-    return git_checkout(req.project_root, req.workdir_rel, req.branch)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_checkout(root, req.workdir_rel, req.branch)
 
 
-@router.post("/api/local/git/create-branch")
+@router.post("/api/local/git/create-branch", dependencies=[Depends(require_admin)])
 def api_git_create_branch(req: GitRequest) -> Dict[str, Any]:
-    return git_create_branch(req.project_root, req.workdir_rel, req.branch)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_create_branch(root, req.workdir_rel, req.branch)
 
 
-@router.post("/api/local/git/stage")
+@router.post("/api/local/git/stage", dependencies=[Depends(require_admin)])
 def api_git_stage(req: GitRequest) -> Dict[str, Any]:
-    return git_stage(req.project_root, req.workdir_rel, req.paths)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_stage(root, req.workdir_rel, req.paths)
 
 
-@router.post("/api/local/git/unstage")
+@router.post("/api/local/git/unstage", dependencies=[Depends(require_admin)])
 def api_git_unstage(req: GitRequest) -> Dict[str, Any]:
-    return git_unstage(req.project_root, req.workdir_rel, req.paths)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_unstage(root, req.workdir_rel, req.paths)
 
 
-@router.post("/api/local/git/commit")
+@router.post("/api/local/git/commit", dependencies=[Depends(require_admin)])
 def api_git_commit(req: GitRequest) -> Dict[str, Any]:
-    return git_commit(req.project_root, req.workdir_rel, req.message)
+    root = confine_request_root(req.project_root, rel_path=req.workdir_rel)
+    return git_commit(root, req.workdir_rel, req.message)

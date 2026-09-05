@@ -1,9 +1,35 @@
 # SwUT Builder (Software Unit Test, 8~20차 라운드)
 
-> CLAUDE.md on-demand 레퍼런스 — SwUT Coverage/SUTR/Consistency 빌더 작업 시 참조.
+> CLAUDE.md on-demand 레퍼런스 — SwUT Coverage(SwUTCV)/SUTR/**SwUTCR**/Consistency 빌더 작업 시 참조.
 > 관련: [`swit_builder.md`](swit_builder.md), [`visual-marking-and-design-tokens.md`](visual-marking-and-design-tokens.md)
 
 ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플랫폼.
+
+## 산출물 3종 (생성 현황 보드 게이트 대상)
+
+`/api/swut/*` 는 서로 다른 산출물 **셋**을 낸다. 세 endpoint 모두 동기 blob 응답(job_id·
+진행률 없음)이고 `require_admin` + Semaphore(capacity 3)를 공유한다.
+
+| 산출물 | endpoint | 확장자 | 양식 config 키 | Quality doc_type | 총 TC 키 |
+|--------|----------|--------|----------------|------------------|----------|
+| **SwUTCV** (커버리지) | `POST /api/swut/coverage/build` | xlsx | `coverage_report_template` | `swut` | `total_tcs` |
+| **SUTR** (시험 결과) | `POST /api/swut/sutr/build` | xlsm | `sutr_template` | `sutr` | `total` |
+| **SwUTCR** (종합 결과) | `POST /api/swut/swutcr/build` | xlsm | `swutcr_template` | `swutcr` | `total_tcs` |
+
+⚠ **총 TC 키가 산출물마다 다르다.** SUTR 만 `total` 이고 커버리지·종합결과는 `total_tcs` 다
+(`swut_sutr_aggregator.py` vs `swut_comprehensive_aggregator.py`). 평가기를 재사용하면 분모가
+`_safe_float` 로 0 에 접혀 **실행률이 tested 값 그대로 폭주**한다(tested 200건 → 20000%).
+그래서 평가기가 셋으로 갈라져 있다 — `evaluate_coverage` / `evaluate_test_result` /
+`evaluate_comprehensive_result`(`workflow/quality/evaluator.py`).
+
+⚠ **커버리지의 doc_type 이 `swutcv` 가 아니라 `swut` 인 것은 의도다.** Quality DB 가 이미
+`swut` 으로 이력을 쌓아 왔고 생성 현황 보드가 그 doc_type 으로 조회한다 — 새 어휘를 만들면
+그동안의 이력이 전부 "미생성" 으로 보인다.
+
+**SwUTCR 시트** — `Summary` / `1.UT101` / `2.UT201` / `3.UT301` / `21.IT801` / `BTB` /
+`AuditLog`. `2.UT201`(Fault Injection)은 config `swutcr_metadata.fault_injection_total/passed`
+가 **둘 다 없을 때만** 규격서에서 자동 산출하고, 실패하면 지어내지 않고 **노란 강조로 입력
+요청**을 남긴다(`_resolve_spec_fi_for_swutcr`).
 
 ## audit 자동화 현황 (Coverage Report v3.01 6시트, SUTR v3.01 5시트)
 | 시트 | Coverage | SUTR |
@@ -83,6 +109,44 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - SUTR Test Log에 함수 ID/ASIL 컬럼
 - SwUDS docx에서 ASIL 추출 (현재 C 소스 단일 출처)
 - ASIL B/C 함수 시각 강조 (본 라운드는 D만)
+
+## 문서 표기 ↔ 게이트 값이 다르다 (2026-08-26)
+
+SwUTCV(PV 정본 양식)는 미달 행의 Exception 을 `'O'` 로 **일괄** 처리한다. 그래서 상단
+요약 Coverage 가 `(분모 - Fail + Exception)/분모` = **100%** 로 찍힌다
+(`swut_coverage_aggregator.py:994` — 회사 감사본 정합, 사용자 결정 "PV 기준 유지").
+
+품질 게이트는 raw `covered/total` 로 채점한다. 두 숫자가 갈린다 — KJPDS02 PV 실측:
+
+| | 값 |
+|---|---|
+| 게이트 `statement_coverage_pct` | **99.45%** → FAIL |
+| 문서 요약 `H5` | **100%** (Fail 23 · Exception 23 상쇄) |
+| 게이트 `branch_coverage_pct` | 98.64% |
+| 문서 요약 `H6` | 100% (Fail 33 · Exception 33) |
+
+⚠ **어느 쪽도 지우지 않는다.** 면제는 개별 사유(Note) 없이 일괄 부여되므로 그걸 통과로
+접으면 미달이 사라진다. 그렇다고 문서 값을 안 남기면 **감사자가 문서만 볼 때 "달성",
+화면만 볼 때 "미달"이고 왜 다른지 어디에도 없다.** 그래서 둘 다 싣는다:
+
+    statement_coverage_pct            99.45   ← 게이트(raw)
+    doc_reported_statement_pct       100.0    ← 문서에 찍히는 값 (비게이트)
+    coverage_fail_statement_functions  23     ← 조치 대상 건수
+    coverage_exception_statement_functions 23 ← 전부 자동 면제됐다는 신호
+
+미달 수 == 면제 수면 **전부 자동 면제**다. ISO 26262 감사에서 사유를 요구받는 지점이다.
+
+### 숫자를 두 번 세지 않는다
+
+값은 `_write_spec_totals` 가 **시트를 스캔하며 이미 계산한 것**을 `out_stats` 로
+돌려받는다. 게이트 쪽에서 다시 세면 판정이 두 벌이 되어 드리프트한다 —
+`swit_comprehensive._load_workbook_summary` 가 그렇게 라운드 102 수정에서 빠진 채
+DV 에 고정돼 253배 과소보고했다(커밋 `daf0dff`).
+
+⚠ **배선은 링크마다 따로 잰다.** 2026-08-26 에 말단 함수 가드는 전부 초록인데 라이브
+quality DB 에는 값이 하나도 안 남는 일이 있었다(빌더가 `out_stats` 를 넘기지 않던 옛
+코드가 떠 있었다). `TestStatsWiringSurvivesTheChain` 이 빌더→라이터→TOTALS 세 구간을
+각각 잰다 — 뮤테이션 E1/E7/E8.
 
 ## 시각 강조 / Design Token
 → [`visual-marking-and-design-tokens.md`](visual-marking-and-design-tokens.md) 참조 (SwUT/SwIT 공통).

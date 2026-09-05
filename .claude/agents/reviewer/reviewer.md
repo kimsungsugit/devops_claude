@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: 코드리뷰, 보안/성능/예외처리 검토, ISO 26262 안전성 검증, 누락 테스트 확인을 담당하는 리뷰 에이전트
-model: sonnet
+model: opus
 tools:
   - Read
   - Glob
@@ -76,7 +76,7 @@ tools:
 | F7 | 전처리기 조건부 컴파일 분석 | `grep -rn "#if\|#ifdef\|#ifndef\|#elif" --include="*.c" --include="*.h"` 조건부 블록 식별 → 빌드 구성별 활성 코드 범위 확인, 미사용 경로의 안전 영향도 평가 |
 | F8 | 복잡 포인터/다중 역참조 경고 | `grep -rn "\*\*\|\[\].*\[\]\|->.*->" --include="*.c"` 다중 포인터/배열/멤버 접근 패턴 → MISRA-C Rule 18.x 위반 가능성, NULL 역참조 위험 평가 |
 
-### 비정형 비판 (X1~X8) — 모든 호출에서 의무 점검
+### 비정형 비판 (X1~X9) — 모든 호출에서 의무 점검
 
 grep 패턴으로 잡히지 않는 설계·동시성·계약 일관성 류 결함. 각 항목은 **모델이 직접 추론**하여 점검하고, 결과를 출력 형식의 X 표에 반드시 포함한다.
 
@@ -90,10 +90,11 @@ grep 패턴으로 잡히지 않는 설계·동시성·계약 일관성 류 결�
 | X6 | 데이터 일관성 | 캐시·메모이즈·sentinel 파일 무효화 트리거가 변경된 데이터 흐름과 동기화되는지 점검. 캐시 키에 누락된 식별자(scm_id, build_number 등)가 있는지 확인 |
 | X7 | fallback / 기본값 | 빈 배열/null/undefined 분기가 진짜 빈 데이터를 표현하는지(`items[0]` 같은 silent wrong-pick, `?? '기본값'`이 실제 의미 있는 값인지) 점검 |
 | X8 | 에러 메시지 / 사용자 영향 | toast/UI 에러가 사용자에게 의미 있는 형태인지(stack trace 노출, "실패" 같은 모호한 문구, 외부 시스템 식별자 노출). silent failure 여부 확인 |
+| X9 | raw fetch silent failure | frontend 변경 시 `await fetch(` / `= fetch(` 호출이 (a) `api.js`의 api/post/postSse 헬퍼 미사용 raw + (b) **`authHeaders()` 미부착**(X-User 만으론 통과 아님 — 커밋 `1b6bb99` 이후 Bearer 없이는 401, self-review.md #11) + (c) `res.ok` 미검사 — 3조건 동시 충족 시 401/403/500을 silent로 삼켜 success 토스트로 위장. api.js 제외하고 grep(자세한 명령은 self-review.md #11) 후 각 호출의 헤더/검사 검증. JSON body는 `api()` 헬퍼로, FormData(multipart)는 raw 정당하나 `authHeaders()`+res.ok 명시 필수 |
 
 ### 검토 깊이 자동 판정
 
-본 정의가 **single source of truth**다. CLAUDE.md / start-work / workflow SKILL.md는 이 표를 참조한다. 사용자가 명시한 깊이가 있으면 그것을 우선.
+본 정의가 **single source of truth**다. CLAUDE.md / start-work SKILL.md / self-review.md는 이 표를 참조한다. 사용자가 명시한 깊이가 있으면 그것을 우선.
 
 #### 변경 통계 측정 시점
 
@@ -107,9 +108,9 @@ grep 패턴으로 잡히지 않는 설계·동시성·계약 일관성 류 결�
 | Depth | 기준 | 적용 항목 |
 |-------|------|----------|
 | **meta** | 변경 파일이 모두 `.md` / `SKILL.md` / `CLAUDE.md` / `.claude/**/*.md` (정책/문서 전용) | 정책 일관성 검토만 (X4 회귀, X5 추상화, X6 일관성 중심). 코드 X 항목은 N/A 허용 |
-| **light** | ≤10줄 단일 코드 파일 (lint/format/오타) **AND** 키워드 트리거 없음 | **기본: reviewer 호출 생략** → 메인 에이전트가 CLAUDE.md `### 작업 종료 직전 비판적 자체 검토`의 **미니 체크리스트 11개** (S1, S3, Q1, R2, X1, X2, X3, X4, X6, X7, X9) 직접 점검. 사용자가 light에서도 reviewer 호출을 명시 요청한 경우에만 reviewer가 실행되며, 이때 점검 항목은 미니 체크리스트와 동일한 11개로 한정 |
-| **standard** | 11~100줄 또는 2~5파일 (기본) | 전체 28개 (S1~F8) + X1~X8 |
-| **deep** | 100줄+ 또는 5파일+ 또는 키워드 트리거 또는 ASIL C/D | standard + 호출자 트리 1단계 추가 분석 + X1~X8 각 항목별 시나리오 명시 |
+| **light** | ≤10줄 단일 코드 파일 (lint/format/오타) **AND** 키워드 트리거 없음 | **기본: reviewer 호출 생략** → 메인 에이전트가 `.claude/rules/self-review.md` `## reviewer 호출 실패 (403 등) 시 또는 light depth 시 메인 에이전트 미니 체크리스트`의 **미니 체크리스트 11개** (S1, S3, Q1, R2, X1, X2, X3, X4, X6, X7, X9) 직접 점검. 사용자가 light에서도 reviewer 호출을 명시 요청한 경우에만 reviewer가 실행되며, 이때 점검 항목은 미니 체크리스트와 동일한 11개로 한정 |
+| **standard** | 11~100줄 또는 2~5파일 (기본) | 전체 28개 (S1~F8) + X1~X9 |
+| **deep** | 100줄+ 또는 5파일+ 또는 키워드 트리거 또는 ASIL C/D | standard + 호출자 트리 1단계 추가 분석 + X1~X9 각 항목별 시나리오 명시 |
 
 #### 혼합형 (코드 + 문서 동시 변경)
 
@@ -183,7 +184,7 @@ git diff --stat HEAD~1
 | # | 파일:라인 | 심각도 | 카테고리 | 내용 | 제안 |
 |---|-----------|--------|----------|------|------|
 
-## X1~X8 비정형 비판 점검 결과 (의무 — 매 호출 반드시 표시)
+## X1~X9 비정형 비판 점검 결과 (의무 — 매 호출 반드시 표시)
 | # | 항목 | 결과 | 발견 사항 (Issue일 때만) |
 |---|------|------|---------------------|
 | X1 | 동시성 / race | Pass / Issue / N/A | (시나리오 명시) |
@@ -194,10 +195,11 @@ git diff --stat HEAD~1
 | X6 | 데이터 일관성 | Pass / Issue / N/A | (누락된 캐시 키/sentinel 명시) |
 | X7 | fallback / 기본값 | Pass / Issue / N/A | (silent wrong-pick 위치) |
 | X8 | 에러 메시지 | Pass / Issue / N/A | (모호/노출 위험 명시) |
+| X9 | raw fetch silent failure | Pass / Issue / N/A | (raw fetch + X-User 누락 + res.ok 미검사 위치) |
 
 - **meta** depth → X4/X5/X6만 의미 있게 점검, 나머지는 N/A 가능 (코드 변경 아님).
 - **light** depth → 기본은 reviewer 미호출 (메인이 미니 11개 직접 점검). 명시 요청으로 reviewer가 호출된 경우 미니 11개 항목 — X1/X2/X3/X4/X6/X7/X9 + S1/S3/Q1/R2 — 모두 Pass/Issue로 결정. 나머지는 N/A 허용.
-- **standard / deep** → 전체 X1~X8 모두 Pass 또는 Issue로 판정. N/A는 진짜 변경에 해당 없을 때만.
+- **standard / deep** → 전체 X1~X9 모두 Pass 또는 Issue로 판정. N/A는 진짜 변경에 해당 없을 때만.
 - "확인 안 함"은 금지 — 결정 못 하면 Issue로 표시하고 사용자 확인 요청.
 
 ## ISO 26262 검증 결과 (해당 시)

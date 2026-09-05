@@ -1,9 +1,382 @@
-import { useState, useCallback, useMemo } from 'react';
-import { post, api, defaultCacheRoot } from '../../api.js';
-import { useJenkinsCfg, useToast } from '../../App.jsx';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { post, api } from '../../api.js';
+import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
+import { pollImpactJob, isAbortError } from '../../impactPoll.js';
+import { proposeBoundaryTCs, formatSutsLoc } from '../../impactBoundary.js';
+import { reconcileSuts, reconcileSits, reconcileSitsDocTcs, reconcileUds } from '../../impactDocDraft.js';
+// 순수 함수는 컴포넌트 파일 밖 — 컴포넌트 아닌 export 가 섞이면 Fast Refresh 가 깨진다.
+import {
+  EMPTY_DIFF_ELEMS, buildDocumentActions, extractDiffElementsCached, matchFileDiff,
+} from '../../impactDiffElements.js';
+import DocProposalTable from './impact/DocProposalTable.jsx';
+import {
+  impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
+  saveImpactCurrent, loadImpactCurrent,
+} from '../../impactStore.js';
+import { targetConsistent } from '../../impactGuard.js';
+
+// 아직 어떤 대상에도 속하지 않은 가이드 슬롯(초기값).
+const UNOWNED = { value: null, owner: { key: '', ref: undefined } };
+
+// AI 서술문 실패 사유(백엔드 `workflow/impact_doc_prose.py`의 reason) → 사용자 문구.
+// 원시 enum을 그대로 노출하면 사용자가 다음에 무엇을 해야 할지 알 수 없다.
+const PROSE_REASON_KO = {
+  llm_unavailable: 'LLM 미설정 — 결정론 표만 표시합니다',
+  no_deterministic_payload: '결정론 초안이 없어 서술문을 요청하지 않았습니다',
+  llm_empty_or_invalid: 'AI 응답이 비었거나 형식이 올바르지 않습니다 — 다시 시도해 보세요',
+  all_fields_filtered: 'AI 초안이 전부 환각 검사에 걸려 폐기됐습니다 — 표의 값이 정본입니다',
+  llm_error: 'AI 호출이 실패했습니다 — 잠시 후 다시 시도해 보세요',
+  'doc-prose failed': '서술문 생성 중 서버 오류가 발생했습니다',
+};
+
+// 변경 파일 집합의 출처 — '0 영향'이나 과소보고를 해석하려면 무엇으로 뽑았는지가 필요하다.
+const CHANGED_SOURCE_KO = {
+  svn_revision_range: 'SVN 리비전 범위',
+  jenkins_changeset: 'Jenkins changeSet',
+  local_diff_fallback: '로컬 working-copy diff',
+};
 
 const CHANGE_TYPE_KO = { BODY: '본문', HEADER: '헤더', SIGNATURE: '시그니처', NEW: '신규', DELETE: '삭제', VARIABLE: '변수' };
+const CHANGE_TYPE_TONE = { NEW: 'success', DELETE: 'danger', SIGNATURE: 'warning', BODY: 'info', HEADER: 'neutral', VARIABLE: 'neutral' };
+// 변경 유형 툴팁 설명 — 리스트에서 hover 시 무엇인지 즉시 파악(모달 안 열어도).
+const CHANGE_TYPE_DESC = {
+  BODY: '함수 내부 로직(본문) 변경', HEADER: '헤더(매크로/타입 정의) 변경',
+  SIGNATURE: '함수 시그니처(파라미터/리턴타입) 변경', NEW: '신규 함수 추가',
+  DELETE: '함수 삭제', VARIABLE: '전역/정적 변수 변경',
+};
+// 정렬 우선순위 — 구조적 변경(시그니처/신규/삭제)을 위로.
+const CHANGE_ORDER = { SIGNATURE: 5, NEW: 4, DELETE: 4, VARIABLE: 3, HEADER: 2, BODY: 1 };
+const COVERAGE_METRIC_KO = { mcdc: 'MC/DC', branch: '분기', statement: '구문' };
+
+// 데모 시나리오용 매핑 — 데모 모드에서 실제 추출 API 대신 주입한다. 함수명은 demoFunctions/
+// demoImpact와 일치시켜, 조인 결과 요구사항/STS/SUTS TC가 채워진 완전한 데모를 보여준다.
+const DEMO_UDS_MAPPING = [
+  { requirement_id: 'SwRS_1001', source_ids: ['g_DrvIn_Main', 'g_DrvIn_MotorSpeed'] },
+  { requirement_id: 'SwRS_1002', source_ids: ['s_MotorSpdCtrl_AutoClose', 's_MotorSpdCtrl_AutoOpen'] },
+  { requirement_id: 'SwRS_1003', source_ids: ['s_AntipinchDetect_Close'] },
+  { requirement_id: 'SwRS_1010', source_ids: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl'] },
+];
+const DEMO_STS_TCS = [
+  { requirement_id: 'SwRS_1001', testcase: 'STS_DrvIn_001' },
+  { requirement_id: 'SwRS_1001', testcase: 'STS_DrvIn_002' },
+  { requirement_id: 'SwRS_1002', testcase: 'STS_MotorSpd_010' },
+  { requirement_id: 'SwRS_1003', testcase: 'STS_Antipinch_021' },
+  { requirement_id: 'SwRS_1010', testcase: 'STS_Buzzer_030' },
+];
+// SITS req→TC(SwRS 허브 키). 데모는 sdsPairs가 비어 UDS-경로 union(funcToReqs→SwRS_*)으로 조인된다.
+const DEMO_SITS_TCS = [
+  { requirement_id: 'SwRS_1001', testcase: 'SITS_DrvIn_Integ_001' },
+  { requirement_id: 'SwRS_1002', testcase: 'SITS_MotorSpd_Integ_005' },
+  { requirement_id: 'SwRS_1010', testcase: 'SITS_DoorState_Integ_012' },
+];
+const DEMO_SUTS_TCS = [
+  { unit: 'g_DrvIn_Main', testcase: 'SUTS_DrvIn_Main_01' },
+  { unit: 's_MotorSpdCtrl_AutoClose', testcase: 'SUTS_AutoClose_01' },
+  { unit: 's_MotorSpdCtrl_AutoOpen', testcase: 'SUTS_AutoOpen_01' },
+  { unit: 's_AntipinchDetect_Close', testcase: 'SUTS_Antipinch_01' },
+  // 간접 전용 함수도 기존 단위 TC가 있어 회귀 재실행 대상이 됨을 데모로 예시.
+  { unit: 's_NotifyObserver', testcase: 'SUTS_NotifyObserver_01' },
+];
+
+// 브라우저에서 텍스트 파일 다운로드(내보내기). Blob+anchor, CSP 안전(외부 요청 없음).
+function downloadTextFile(filename, content, mime = 'text/markdown;charset=utf-8') {
+  try {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (_) { /* 다운로드 실패는 무해하게 무시 */ }
+}
+
+// ── 함수 시그니처 매개변수 파싱/diff (change_details before/after 원문 기반, 결정론·정확) ──
+// C 함수 선언에서 반환 타입 추출(첫 '(' 앞, 함수명 토큰 제외).
+function parseReturnType(sig) {
+  if (!sig) return '';
+  const head = String(sig).split('(')[0].trim();
+  // 저장/링키지 지정자는 반환타입이 아니므로 제거(`static U8 f` → `U8`). 안 그러면
+  // 지정자만 추가돼도 반환타입이 바뀐 것처럼 오표시된다(reviewer W3).
+  const toks = head.split(/\s+/).filter(Boolean)
+    .filter(t => !/^(static|extern|inline|register|auto|__inline|__forceinline)$/.test(t));
+  return toks.length > 1 ? toks.slice(0, -1).join(' ') : (toks[0] || head);
+}
+// 최상위 콤마로만 분리 — 괄호/대괄호/꺾쇠 안의 콤마(함수포인터 `void(*cb)(int,int)`·배열·템플릿)는
+// 분리자로 보지 않는다. `.split(',')`은 함수포인터 파라미터 내부 콤마에서 오분할했다(정확성 버그).
+function splitTopLevelCommas(s) {
+  const out = [];
+  let depth = 0, cur = '';
+  for (const ch of s) {
+    if (ch === '(' || ch === '[' || ch === '{' || ch === '<') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}' || ch === '>') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { out.push(cur); cur = ''; } else cur += ch;
+  }
+  out.push(cur);
+  return out.map(x => x.trim()).filter(Boolean);
+}
+// 매개변수 목록 추출 — [{raw, type, name}]. 선언 없음/void/빈 → [](0개), 내용 있으나 괄호 없음 → null(파싱불가).
+function parseSignatureParams(sig) {
+  if (!sig) return [];  // 빈 측(NEW의 before / DELETE의 after) = 매개변수 0개(파싱실패 아님)
+  const m = String(sig).match(/\(([\s\S]*)\)/);
+  if (!m) return null;  // 내용은 있으나 괄호 없음 = 파싱 불가(원문 참조 유도)
+  const inner = m[1].trim();
+  if (!inner || inner.toLowerCase() === 'void') return [];
+  return splitTopLevelCommas(inner).map(raw => {
+    // 배열 접미사 분리: `U8 src[8]`/`char argv[]` → 이름이 대괄호에 가려지지 않게 base와 분리.
+    // 안 하면 last='src[8]'이 식별자 정규식에 안 맞아 name 추출 실패 → named diff가 위치기반으로
+    // 강등되고 삽입/삭제 시 매개변수를 서로 오귀속한다(reviewer Critical #1).
+    const arrM = raw.match(/^([\s\S]*?)\s*((?:\[[^\]]*\])+)\s*$/);
+    const base = arrM ? arrM[1] : raw;
+    const arraySuffix = arrM ? arrM[2] : '';
+    const toks = base.replace(/\*/g, ' * ').split(/\s+/).filter(Boolean);
+    const last = toks[toks.length - 1] || '';
+    const hasName = toks.length > 1 && /^[A-Za-z_]\w*$/.test(last);
+    const name = hasName ? last : '';
+    const type = hasName ? (toks.slice(0, -1).join(' ').replace(/\s+\*/g, '*') + arraySuffix) : raw;
+    return { raw, type, name };
+  });
+}
+// before/after 시그니처 매개변수 diff — 이름이 모두 있으면 이름 기준, 아니면 위치 기준.
+// 한쪽이라도 파싱 불가(null)면 failed=true로 "구조 파싱 불가"를 알린다(빈 값 0개로 오치환 금지).
+function diffSignatureParams(before, after) {
+  const bp = parseSignatureParams(before);
+  const ap = parseSignatureParams(after);
+  const meta = {
+    returnBefore: parseReturnType(before),
+    returnAfter: parseReturnType(after),
+    returnChanged: !!(before && after) && parseReturnType(before) !== parseReturnType(after),
+  };
+  if (bp === null || ap === null) return { ...meta, failed: true, rows: [], beforeCount: 0, afterCount: 0, positional: false };
+  const bb = bp, aa = ap;
+  const rows = [];
+  const named = (bb.length + aa.length) > 0 && bb.every(p => p.name) && aa.every(p => p.name);
+  if (named) {
+    const aMap = new Map(aa.map(p => [p.name, p]));
+    const bMap = new Map(bb.map(p => [p.name, p]));
+    for (const p of bb) {
+      const a = aMap.get(p.name);
+      if (!a) rows.push({ status: 'removed', before: p.raw, after: '' });
+      else if (a.raw !== p.raw) rows.push({ status: 'changed', before: p.raw, after: a.raw });
+    }
+    for (const p of aa) if (!bMap.has(p.name)) rows.push({ status: 'added', before: '', after: p.raw });
+  } else {
+    const n = Math.max(bb.length, aa.length);
+    for (let i = 0; i < n; i++) {
+      const b = bb[i], a = aa[i];
+      if (b && a) { if (b.raw !== a.raw) rows.push({ status: 'changed', before: b.raw, after: a.raw }); }
+      else if (a) rows.push({ status: 'added', before: '', after: a.raw });
+      else if (b) rows.push({ status: 'removed', before: b.raw, after: '' });
+    }
+  }
+  // 위치기반 폴백(이름 매칭 불가한 매개변수 존재)이면서 실제 매개변수가 있으면, 삽입/삭제 시
+  // 인덱스 밀림으로 오귀속될 수 있으므로 positional 경고 플래그를 세운다(reviewer Critical #1).
+  const positional = !named && (bb.length > 0 || aa.length > 0);
+  return { ...meta, failed: false, rows, beforeCount: bb.length, afterCount: aa.length, positional };
+}
+const PARAM_STATUS = {
+  added: { tone: 'success', label: '추가', mark: '＋' },
+  removed: { tone: 'danger', label: '삭제', mark: '－' },
+  changed: { tone: 'warning', label: '변경', mark: '~' },
+};
+
+// 백틱(`...`)으로 감싼 구간을 <code>로 렌더 — 문서 액션 텍스트의 파라미터명을 코드 스타일로.
+function renderInlineCode(text) {
+  return String(text).split(/(`[^`]+`)/g).map((p, i) =>
+    (p.length > 1 && p.startsWith('`') && p.endsWith('`'))
+      ? <code key={i} style={{ fontFamily: 'var(--font-mono, monospace)', background: 'var(--bg)', padding: '0 3px', borderRadius: 3, overflowWrap: 'anywhere' }}>{p.slice(1, -1)}</code>
+      : <span key={i}>{p}</span>
+  );
+}
+
+// 매개변수 diff(diffSignatureParams 결과)를 한눈 요약 뱃지로 — 원문 raw(+/-) 대신
+// "＋int flag / 반환 U8→U16"처럼 '무엇이' 바뀌었는지 직접 보여준다. 반환 { badges, hasChange }.
+function summarizeSignatureChange(pdiff) {
+  if (!pdiff || pdiff.failed) return { badges: [], hasChange: false, positional: false };
+  const badges = [];
+  if (pdiff.returnChanged) badges.push({ tone: 'warning', label: `반환 ${pdiff.returnBefore || '(void)'}→${pdiff.returnAfter || '(void)'}` });
+  for (const r of pdiff.rows) {
+    if (r.status === 'added') badges.push({ tone: 'success', label: `＋${r.after}` });
+    else if (r.status === 'removed') badges.push({ tone: 'danger', label: `－${r.before}` });
+    else if (r.status === 'changed') badges.push({ tone: 'warning', label: `${r.before} → ${r.after}` });
+  }
+  return { badges, hasChange: badges.length > 0, positional: !!pdiff.positional };
+}
+
+// diffSignatureParams 결과를 (before,after) 키로 캐시 — "변경 상세" 표가 SIGNATURE 행마다
+// 재계산하는데, 하단 검색창 타이핑 등으로 컴포넌트가 리렌더되면 매번 전량 재계산된다(reviewer W5).
+// 모듈 레벨 Map은 리렌더와 무관하게 유지되어 같은 선언쌍은 1회만 파싱한다(순수함수라 안전).
+const _sigDiffCache = new Map();
+function diffSignatureParamsCached(before, after) {
+  const key = JSON.stringify([before || '', after || '']);
+  let v = _sigDiffCache.get(key);
+  if (v === undefined) {
+    v = diffSignatureParams(before, after);
+    if (_sigDiffCache.size < 4000) _sigDiffCache.set(key, v);  // 무한 성장 방지(실전 함수 수 << 4000)
+  }
+  return v;
+}
+
+// ── 함수 본문 diff에서 실제 변경 요소 추출(BODY/VARIABLE 문서 카드 구체화용, 결정론) ──
+// 전역/정적 변수 write(LHS)·전처리 매크로를 부호별(added/removed)로 수집한다. AI 무관·즉시.
+// 함수별 '변경 상세' 셀 — 시그니처는 매개변수 단위 요약 뱃지, 신규/삭제는 원문, 본문 등은 설명.
+function renderChangeDetailCell(kind, detail) {
+  const mono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all' };
+  if (kind === 'SIGNATURE') {
+    if (detail && (detail.before || detail.after)) {
+      const pdiff = diffSignatureParamsCached(detail.before, detail.after);
+      const summary = summarizeSignatureChange(pdiff);
+      const posNote = summary.positional ? '\n⚠ 위치 추정 — 이름 매칭 불가 매개변수 존재(삽입/삭제 위치가 다를 수 있음)' : '';
+      const rawTitle = `이전: ${detail.before || '(없음)'}\n이후: ${detail.after || '(없음)'}${posNote}`;
+      if (summary.hasChange) {
+        // 매개변수 단위 요약 뱃지 — '무엇이' 바뀌었는지 직접 표시. 원문은 title 툴팁으로.
+        return (
+          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', alignItems: 'center' }} title={rawTitle}>
+            {summary.positional && <span title="위치 기반 추정 — 삽입/삭제 위치가 다를 수 있음" style={{ fontSize: 10 }}>⚠</span>}
+            {summary.badges.map((b, i) => (
+              <span key={i} className={`pill pill-${b.tone}`} style={{ fontSize: 9, fontFamily: 'var(--font-mono, monospace)' }}>{b.label}</span>
+            ))}
+          </div>
+        );
+      }
+      // hasChange=false → 파싱 실패(구조 분해 불가)와 파싱 성공+실질 무변화(공백/본문)를 구분(reviewer W4).
+      const fbTitle = pdiff?.failed ? '매개변수 구조 파싱 불가 — 원문 대조' : '매개변수 변화 없음(공백/본문 등) — 원문 대조';
+      return (
+        <div style={mono} title={fbTitle}>
+          {detail.before && <div style={{ color: 'var(--color-danger)' }}>− {detail.before}</div>}
+          {detail.after && <div style={{ color: 'var(--color-success)' }}>＋ {detail.after}</div>}
+        </div>
+      );
+    }
+    return <span className="text-muted" style={{ fontSize: 11 }}>파라미터/리턴타입 변경 (원문 미확보)</span>;
+  }
+  if (kind === 'NEW') {
+    return detail?.after
+      ? <span style={{ ...mono, color: 'var(--color-success)' }}>＋ {detail.after}</span>
+      : <span className="text-muted" style={{ fontSize: 11 }}>신규 함수 추가</span>;
+  }
+  if (kind === 'DELETE') {
+    return detail?.before
+      ? <span style={{ ...mono, color: 'var(--color-danger)' }}>− {detail.before}</span>
+      : <span className="text-muted" style={{ fontSize: 11 }}>함수 제거됨</span>;
+  }
+  if (kind === 'HEADER') return <span className="text-muted" style={{ fontSize: 11 }}>헤더(매크로/타입) 변경</span>;
+  if (kind === 'VARIABLE') return <span className="text-muted" style={{ fontSize: 11 }}>전역 변수 변경</span>;
+  return <span className="text-muted" style={{ fontSize: 11 }}>본문(로직) 변경</span>;
+}
+
+// 무정보(파일영향) 판정 — 단일 출처. BODY/VARIABLE인데 function_diff(본문 hunk)·change_details(선언
+// 원문) 둘 다 없음 = 직접 변경 증거 없이 파일 단위 보수 분류(fatten)로 딸려온 함수. 전처리(#ifdef)만
+// 바뀐 파일의 안 바뀐 getter류가 여기 해당. "변경 함수" 집계를 부풀리므로 옵션(showFileImpact)으로만 노출.
+function functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) {
+  const k = String(kind || '').toUpperCase();
+  if (k !== 'BODY' && k !== 'VARIABLE') return false;
+  const lf = String(fn).toLowerCase();
+  // 1차: 백엔드 function_meta.evidence(단일 출처, "line" | "file_fatten").
+  // function_diffs 부재로 '증거 없음'을 추론하면, diff 400KB 상한 절단이나 diff 미제공 경로에서
+  // **실제 변경된 함수**(ASIL D 포함 가능)가 '파일영향'으로 오분류돼 기본 집계에서 숨는다
+  // (ISO 26262 under-report). 그래서 백엔드가 판정한 사실을 우선한다.
+  const meta = functionMeta && (functionMeta[fn] ?? functionMeta[lf]);
+  const ev = meta && meta.evidence;
+  if (ev === 'file_fatten') return true;
+  if (ev === 'line') return false;
+  // 2차(구 페이로드 호환): evidence 필드가 없는 이전 job → 기존 추론으로 폴백.
+  const cd = changeDetails && changeDetails[lf];
+  return !(functionDiffs && functionDiffs[lf]) && !(cd && (cd.before || cd.after));
+}
+
+// 함수별 영향 가이드 리스트의 '변경' 셀 — 유형 뱃지(유형별 색상+툴팁 설명)와, SIGNATURE면
+// 파라미터 변화 요약(＋int b 등)까지 표시해 모달을 열지 않고도 무슨 변경인지 파악하게 한다.
+function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}, functionMeta = {}) {
+  if (!d.changed) {
+    return <span className="pill pill-neutral" style={{ fontSize: 9 }} title="직접 변경 아님 — 변경 함수의 호출 관계로 영향받는 간접 함수">영향</span>;
+  }
+  const kind = (d.changeType || '').toUpperCase();
+  const cd = changeDetails[String(d.function).toLowerCase()];
+  // 무정보(파일영향): 직접 변경 증거 없이 파일 단위 보수 포함(fatten) — 단일 출처 functionHasNoEvidence.
+  const cellNoEvidence = functionHasNoEvidence(d.function, kind, changeDetails, functionDiffs, functionMeta);
+  // 포맷/이동만(의미 변경 없음) — 본문 diff가 코드 이동/공백/포맷만(순서 보존 -/+ 동일). 파일영향과 배타.
+  const _cellDe = extractDiffElementsCached(functionDiffs[String(d.function).toLowerCase()] || '');
+  const cellFormatOnly = !cellNoEvidence && _cellDe.noSemanticChange;
+  const cellCommentOnly = !cellNoEvidence && _cellDe.commentOnly;
+  const pdiff = (kind === 'SIGNATURE' && cd && (cd.before || cd.after)) ? diffSignatureParamsCached(cd.before, cd.after) : null;
+  const sig = summarizeSignatureChange(pdiff);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
+      <span className={`pill pill-${CHANGE_TYPE_TONE[kind] || 'neutral'}`} style={{ fontSize: 9 }} title={CHANGE_TYPE_DESC[kind] || kind}>
+        {CHANGE_TYPE_KO[kind] || kind}
+      </span>
+      {cellNoEvidence && (
+        <span className="pill pill-neutral" style={{ fontSize: 8 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 같은 파일의 다른 변경으로 보수적 포함(파일 단위 영향)">파일영향</span>
+      )}
+      {cellFormatOnly && (
+        <span className="pill pill-neutral" style={{ fontSize: 8 }} title="본문 diff가 코드 이동·공백·포맷만 — 의미(로직) 변경 없음(재정렬 아님)">포맷/이동</span>
+      )}
+      {cellCommentOnly && (
+        <span className="pill pill-neutral" style={{ fontSize: 8 }} title="본문 diff가 C 주석(//·/* */)만 변경 — 코드·로직 변경 없음">주석만</span>
+      )}
+      {sig.hasChange && (
+        <span style={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }} title="매개변수/반환 변화">
+          {sig.positional && <span title="위치 추정 — 삽입/삭제 위치가 다를 수 있음" style={{ fontSize: 8 }}>⚠</span>}
+          {sig.badges.slice(0, 3).map((b, j) => (
+            <span key={j} className={`pill pill-${b.tone}`} style={{ fontSize: 8, fontFamily: 'var(--font-mono, monospace)' }}>{b.label}</span>
+          ))}
+          {sig.badges.length > 3 && <span className="text-muted" style={{ fontSize: 8 }}>+{sig.badges.length - 3}</span>}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// 함수별 VectorCAST 커버리지 셀 — ASIL 타깃 메트릭 % + 충족 여부 + 직전 대비 Δ.
+function renderCoverageCell(cov) {
+  if (!cov) return <span className="text-muted">-</span>;
+  const cur = cov.current_rate;
+  const metricKo = COVERAGE_METRIC_KO[cov.target_metric] || cov.target_metric;
+  // 매칭됐으나 타깃 메트릭 미측정(예: 리포트에 MC/DC 컬럼 없음) — 빨강 '미달(실패)'이 아니라
+  // 노랑 '미측정(증거 부재)'으로 표시해 false 미달 경보를 막는다.
+  if (cov.unmeasured_target) {
+    return (
+      <span title={`${metricKo} 미측정 — 이 리포트에 ${metricKo} 데이터가 없습니다(증거 부재, 시험 실패 아님). 별도 ${metricKo} 리포트가 필요합니다.`}>
+        <span className="pill pill-warning" style={{ fontSize: 9 }}>{metricKo} 미측정</span>
+      </span>
+    );
+  }
+  const pct = (typeof cur === 'number') ? `${Math.round(cur * 100)}%` : '—';
+  const d = cov.delta;
+  let deltaEl = null;
+  if (typeof d === 'number' && Math.abs(d) > 1e-9) {
+    const down = d < 0;
+    deltaEl = (
+      <span style={{ color: down ? 'var(--color-danger)' : 'var(--color-success)', marginLeft: 4, fontSize: 9 }}>
+        {down ? '▼' : '▲'}{Math.abs(Math.round(d * 100))}
+      </span>
+    );
+  }
+  return (
+    <span title={`${metricKo} 커버리지 ${pct} (목표 100%)${typeof d === 'number' ? `, 직전 대비 ${(d * 100).toFixed(0)}%p` : ''}${cov.collision_worst_copy ? ' — 이름충돌 함수의 여러 copy 중 최악(worst-copy) 값' : ''}`}>
+      <span className={`pill ${cov.meets_target ? 'pill-success' : 'pill-danger'}`} style={{ fontSize: 9 }}>
+        {metricKo} {pct}
+      </span>
+      {cov.collision_worst_copy && (
+        <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }}
+          title="이름충돌(동명 다른 함수)의 여러 copy 중 최악 copy 커버리지 — 변경 copy를 이름만으로 특정 못 해 gap을 안전측으로 노출(어느 copy에 gap이 있어도 재검증 대상 유지)">충돌 최악</span>
+      )}
+      {deltaEl}
+    </span>
+  );
+}
+
+// ── UI 게이트(사용자 요청, 2026-07) ──────────────────────────────────────────
+// 🛡️ASIL 차등 검증·🎯커버리지(ASIL 타깃) 상시 패널과 'AI 요약' 탭을 숨긴다. 백엔드 계산
+// (impact.asil/coverage_gap)·엔드포인트(/api/impact/ai-guide)는 유지 — 여기서만 렌더 게이팅해
+// 되살리기 쉽고 회귀 위험 최소. 함수별 '🤖 AI 변경 설명' 모달 카드는 유지(원문→제안 자리).
+const SHOW_ASIL_COVERAGE = false;
+const SHOW_AI_GUIDE_TAB = false;
+
 const DOC_STATUS = {
   review_required: { tone: 'warning', label: '검토 필요' },
   completed: { tone: 'success', label: '완료' },
@@ -12,31 +385,454 @@ const DOC_STATUS = {
   failed: { tone: 'danger', label: '실패' },
 };
 
-export default function ImpactGuideSection({ job, analysisResult }) {
-  const { cfg } = useJenkinsCfg();
+// 문서별 상세 탭 — 문서 5종 메타(마스터 목록 아이콘/라벨). buildDocumentActions 반환 키와 lockstep.
+const DOC_KEYS = ['uds', 'sts', 'suts', 'sits', 'sds'];
+const DOC_META = {
+  uds: { label: 'UDS', icon: '📘', desc: '단위 상세 설계' },
+  sts: { label: 'STS', icon: '📗', desc: 'SW 요구 기반 시험' },
+  suts: { label: 'SUTS', icon: '📙', desc: 'SW 단위시험' },
+  sits: { label: 'SITS', icon: '📕', desc: 'SW 통합시험' },
+  sds: { label: 'SDS', icon: '📋', desc: 'SW 아키텍처 설계' },
+};
+
+export default function ImpactGuideSection({ analysisResult, job }) {
   const toast = useToast();
-  const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
+  // 결과를 Context에 되싣기 위해 필요 — 복원/이력 로드가 다른 탭(ScmSection·추적성)에도 반영된다.
+  // JobCtx/JenkinsCfgCtx의 기본값이 null이라 Provider 밖 렌더에서 구조분해가 터진다 → 옵셔널로 읽는다.
+  const setAnalysisResult = useJob()?.setAnalysisResult;
+  const _jcfg = useJenkinsCfg();
+  // ⚠ useMemo — `?? {}`/`|| {}` 폴백이 **매 렌더 새 객체**라, 이걸 deps 로 쓰는 아래
+  //   useMemo/useCallback 이 렌더마다 전부 재계산됐다(react-hooks/exhaustive-deps).
+  const cfg = useMemo(() => _jcfg?.cfg || {}, [_jcfg]);
 
   const impact = analysisResult?.impactData;
-  const [guide, setGuide] = useState(null);
-  const [aiGuide, setAiGuide] = useState(null);
+
+  // ── 상세 가이드는 '생성된 대상'에 결속된다 ────────────────────────────────
+  // Detail은 keep-alive라 대시보드가 같은 Job의 새 빌드를 분석해도 이 컴포넌트는 언마운트되지
+  // 않는다. 그때 guide만 이전 빌드 것으로 남으면, 영속 계층이 그 옛 가이드를 '새 빌드의 신원'
+  // 으로 저장해 안전 게이트(sameImpactTarget)를 그대로 통과시킨다(가이드 세탁).
+  // → 상태에 소유자 키를 함께 두고, 대상이 바뀌면 렌더·영속 양쪽에서 자동 무효화한다.
+  // 소유자는 (식별자 키, 결과 객체 참조) 쌍이다. 키만 쓰면 식별자가 비어 있는 결과들끼리(로컬
+  // 트리거·메타 부재) 키가 같아져 가이드가 넘어가고, 참조만 쓰면 데모 모드(impact=null)를
+  // 구분할 수 없다. 둘을 함께 봐야 두 경우 모두 정확해진다.
+  const impactKey = useMemo(() => impactKeyOf(impact), [impact]);
+  // 값과 소유자를 **한 덩어리로** 묶는다. 소유자를 공유하면 aiGuide만 쓰는 호출
+  // (buildGuide 진입부의 setAiGuide(null))이 guide의 소유권까지 새 대상으로 옮겨
+  // 직전 대상의 guide를 되살린다(세탁).
+  const [guideState, setGuideState] = useState(UNOWNED);
+  const [aiGuideState, setAiGuideState] = useState(UNOWNED);
+  const valueIfCurrent = (owned) => (
+    owned?.owner?.key === impactKey && owned?.owner?.ref === impact ? owned.value : null
+  );
+  const guide = valueIfCurrent(guideState);
+  const aiGuide = valueIfCurrent(aiGuideState);
+  // owner 미지정 시 쓰이는 '현재 대상'. 비동기 작업은 이 값에 기대지 말고 **시작 시점의 owner를
+  // 캡처해 명시 전달**해야 한다 — 쓰는 순간의 대상으로 찍히면 늦은 결과가 오귀속된다.
+  const ownerRef = useRef({ key: impactKey, ref: impact });
+  ownerRef.current = { key: impactKey, ref: impact };
+  const setGuide = useCallback((value, owner) => {
+    setGuideState({ value, owner: owner || ownerRef.current });
+  }, []);
+  const setAiGuide = useCallback((value, owner) => {
+    setAiGuideState({ value, owner: owner || ownerRef.current });
+  }, []);
   const [loading, setLoading] = useState(false);
   const [selectedFn, setSelectedFn] = useState(null);
+  // 선택 함수의 Gemini 변경 설명(함수별). fn이 바뀌면 폐기.
+  const [explain, setExplain] = useState({ fn: null, text: '', loading: false, error: '' });
+  // 현재 선택 함수 ref — fetchExplanation의 늦은 응답이 다른 함수로 전환 후 덮어쓰는 race 방지.
+  const selectedFnRef = useRef(null);
+  useEffect(() => { selectedFnRef.current = selectedFn; }, [selectedFn]);
+  // 상세 모달 열렸을 때 Escape로 닫기(a11y).
+  useEffect(() => {
+    if (!selectedFn) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setSelectedFn(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedFn]);
   const [searchTerm, setSearchTerm] = useState('');
   const [hopFilter, setHopFilter] = useState('all');
   const [docFilter, setDocFilter] = useState('all');
   const [demoMode, setDemoMode] = useState(false);
+  // 파일영향(무정보 fatten 함수) 표시 토글 — 기본 숨김(집계·리스트에서 제외해 실변경 규모를 정직 표시).
+  const [showFileImpact, setShowFileImpact] = useState(false);
+  const [hideFormatOnly, setHideFormatOnly] = useState(false);
+  // Track 2: AI 요약 ↔ 함수별 상세 탭. aiGuide 있으면 기본 'ai'(서머리 우선), 없으면 렌더 시 'fn' 강등.
+  const [activeTab, setActiveTab] = useState('ai');
+  // 문서별 상세 탭: 좌측에서 선택한 문서(uds/sts/suts/sits/sds). null이면 렌더 시 첫 '영향 있는' 문서로 확정.
+  const [selectedDoc, setSelectedDoc] = useState(null);
+  // 회귀시험 패널 '전체 보기' 토글 — 기본은 상위 N개만(잘림), true면 절단 없이 전체 노출(스크롤).
+  const [regShowAll, setRegShowAll] = useState(false);
+
+  // ── 빌드/리비전 소스 선택 (분석 이력 조회 + 재실행) ────────────────────────
+  const [history, setHistory] = useState([]);            // /api/scm/impact-jobs?summary=1
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [builds, setBuilds] = useState([]);              // /api/jenkins/builds (lazy)
+  const [buildsError, setBuildsError] = useState('');
+  const [pickedBuild, setPickedBuild] = useState('');
+  const [sourceBusy, setSourceBusy] = useState('');      // '' 이면 유휴, 아니면 진행 메시지
+  // 마운트 1회 하이드레이트 가드. 영속 저장 effect는 이게 true가 된 뒤에만 돈다 —
+  // 같은 커밋에서 저장이 먼저 돌면 복원 전 guide(null)로 저장분을 덮어쓴다.
+  const [hydrated, setHydrated] = useState(false);
+  // 용량(quota)으로 본문이 빠진 저장분 — 자동 재요청 대신 명시적 '복원' 버튼으로 노출.
+  const [restorable, setRestorable] = useState(null);
+  // 영속 저장이 quota로 끝내 실패했는지 — 새로고침 후 결과가 사라질 것을 미리 알린다(침묵 금지).
+  const [persistFailed, setPersistFailed] = useState(false);
+  const buildsReqRef = useRef(false);
+  const historyReqRef = useRef(0);
+  // 폴링은 unmount로 끊는다. 살려두면 프로젝트를 전환한 뒤에 옛 결과가 adoptImpact로 들어와
+  // '새 Job + 옛 분석결과' 상태를 만든다(교차 트리거의 배달 경로).
+  const pollAbortRef = useRef(null);
+  useEffect(() => () => pollAbortRef.current?.abort(), []);
 
   // Impact data from analysis
   const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
   const changedFunctions = impact?.changed_function_types ?? {};
   const changedFnEntries = Object.entries(changedFunctions);
   const actions = impact?.actions ?? impact?.documents ?? {};
+  // F2(wrong-pick 방지): scmList 폴백 시 [0](= registry 첫 entry, 타 프로젝트 규격일 수 있음)을
+  // 무조건 집지 말고 job의 scm_id(trigger.scm_id)로 매칭한다. 매칭 실패 시에만 [0] 최후 폴백.
+  const _jobScmId = impact?.trigger?.scm_id || '';
+  const _scmListMatch = (_jobScmId && Array.isArray(analysisResult?.scmList))
+    ? analysisResult.scmList.find(s => s?.id === _jobScmId)
+    : null;
+  // ⚠ scmList[0] 최후 폴백은 제거했다. 이 폴백은 _jobScmId가 **어느 entry와도 안 맞을 때만**
+  // 발화하는데, 그건 곧 '다른 프로젝트의 규격서'라는 뜻이다. 그 문서로 buildGuide가 함수↔요구·
+  // TC 브리지를 만들면 화면상 정상으로 보이면서 추적성이 오귀속된다(ISO 26262 F3).
+  // 단일 SCM 저장소는 _scmListMatch가 그대로 잡으므로 정상 동작에는 영향이 없다.
   const linkedDocs = impact?._linked_docs
     ?? analysisResult?.matchedScm?.linked_docs
-    ?? analysisResult?.scmList?.[0]?.linked_docs
+    ?? _scmListMatch?.linked_docs
     ?? {};
+
+  // ── 분석 대상 단일 확정 ──────────────────────────────────────────────────
+  // scmId / jobUrl / baseRef를 각자 다른 폴백 사슬로 뽑으면 'SCM A × Job B × base_ref B' 같은
+  // 교차 조합이 만들어진다. 그 조합으로 분석을 트리거하면 백엔드가 Job B의 changeSet으로
+  // SCM A를 분석해 A의 커버리지 baseline(update_baseline=True)과 감사기록을 오염시킨다.
+  // → 대상은 하나의 객체에서만 파생하고, 확정할 수 없으면 '모름'으로 둔다.
+  //   scmList[0] 추측은 하지 않는다 — Dashboard도 자동매칭 실패 시 추측 대신 건너뛴다.
+  // 한 걸음 더: scmId/baseRef는 analysisResult에서, jobUrl은 job prop에서 온다. 두 prop이 같은
+  // 프로젝트라는 보장이 없으므로 '이 결과가 이 Job의 것인가'를 별도로 대조해야 한다.
+  // 그 판정(3축 — 형제 필드 / impact 자신의 provenance / SCM 축)은 impactGuard.js 로 추출했다:
+  // 같은 Context를 읽는 SrsSdsSection·ScmSection도 재사용해야 하는데, 컴포넌트 렌더 본문의
+  // 파생 불린값이면 재사용할 방법이 없기 때문이다. 근거·실패 시나리오는 그 모듈 상단 참조.
+  const projectConsistent = targetConsistent(analysisResult, job?.url);
+
+  const targetScm = useMemo(() => {
+    if (!projectConsistent) return null;  // 대상 미확정 → 이력 조회·트리거 모두 fail-closed
+    const list = Array.isArray(analysisResult?.scmList) ? analysisResult.scmList : [];
+    if (_jobScmId) return list.find(s => s?.id === _jobScmId) || { id: _jobScmId };
+    const matched = analysisResult?.matchedScm;
+    if (matched?.id) return list.find(s => s?.id === matched.id) || matched;
+    return null;
+  }, [projectConsistent, _jobScmId, analysisResult]);
+
+  const scmId = targetScm?.id || '';
+  // 현재 열려 있는 프로젝트의 Job만 쓴다 — 결과에 실린 job_url을 폴백으로 쓰면 타 프로젝트
+  // 결과가 로드된 순간 그 Job으로 분석을 걸어버린다.
+  const jobUrl = job?.url || analysisResult?.jobUrl || '';
+  const baseRef = targetScm?.base_ref || impact?.trigger?.base_ref || '';
+
+  const loadHistory = useCallback(async () => {
+    // 대상을 확정 못 했으면 이전 SCM의 이력을 그대로 두지 않는다(엉뚱한 이력 노출 방지).
+    if (!scmId) { setHistory([]); return; }
+    const seq = historyReqRef.current + 1;
+    historyReqRef.current = seq;
+    setHistoryLoading(true);
+    try {
+      const data = await api(`/api/scm/impact-jobs/${encodeURIComponent(scmId)}?summary=1&limit=20`);
+      // 대상 전환으로 요청이 겹치면 늦게 도착한 이전 SCM 응답이 최신을 덮을 수 있다 → 최신만 반영.
+      if (seq !== historyReqRef.current) return;
+      setHistory(Array.isArray(data?.items) ? data.items : []);
+    } catch (e) {
+      if (seq === historyReqRef.current) toast('error', `분석 이력 조회 실패: ${e.message}`);
+    } finally {
+      if (seq === historyReqRef.current) setHistoryLoading(false);
+    }
+  }, [scmId, toast]);
+
+  const loadBuildsOnce = useCallback(async () => {
+    if (buildsReqRef.current || !jobUrl) return;
+    buildsReqRef.current = true;
+    try {
+      const data = await post('/api/jenkins/builds', {
+        // scm_id를 주면 백엔드가 빌드별 SVN revision(빌드 시각→svn 날짜-revision)을 붙여준다.
+        // git 파이프라인 잡은 Jenkins에 소스 revision이 없어 이 우회가 유일한 정확 경로.
+        job_url: jobUrl, username: cfg.username, api_token: cfg.token,
+        scm_id: scmId, limit: 100, verify_tls: cfg.verifyTls,
+      });
+      setBuilds(Array.isArray(data) ? data : (Array.isArray(data?.builds) ? data.builds : []));
+      setBuildsError('');
+    } catch (e) {
+      // Jenkins 미연결이어도 '이력에서 열기'는 되어야 하므로 화면을 막지 않고 사유만 표면화한다.
+      setBuilds([]);
+      setBuildsError(e.message || '빌드 목록을 불러오지 못했습니다.');
+      // 일시 장애 1회로 이 마운트 내내 빌드 선택이 영구 불능이 되면 안 된다 → 재시도 허용.
+      buildsReqRef.current = false;
+    }
+  }, [jobUrl, cfg, scmId]);
+
+  /** 결과를 화면(Context)에 싣는다. 영속 저장은 아래 effect가 단일 지점에서 담당.
+   *  guide/aiGuide를 명시로 받는 이유: 대상이 바뀌면 반드시 null로 리셋해야 하기 때문이다
+   *  (빌드 A의 가이드를 빌드 B 데이터 위에 얹으면 ASIL/커버리지 오보고). */
+  const adoptImpact = useCallback((nextImpact, jobId, nextGuide = null, nextAiGuide = null) => {
+    if (!nextImpact) return false;
+    // 어느 문(이력 드롭다운·빌드 실행·복원)으로 들어오든 '지금 열린 Job의 결과'만 싣는다.
+    // localStorage 문만 막으면(savedMatchesProject) 새로 만든 이력 문으로 같은 오염이 들어온다.
+    // 증거가 없으면 통과시키지 않는다(fail-closed) — 로컬 트리거 잡은 metadata에 job_url이 없어
+    // job_url만 보면 무검증 통과가 된다. 그 경우 SCM id로 대조한다.
+    const resultJobUrl = nextImpact?.trigger?.metadata?.job_url || '';
+    const resultScm = String(nextImpact?.trigger?.scm_id || '');
+    const belongsHere = (resultJobUrl && jobUrl) ? sameJobUrl(resultJobUrl, jobUrl)
+      : (resultScm && scmId) ? resultScm === scmId
+        : false;
+    if (!belongsHere) {
+      toast('error', '현재 열린 프로젝트의 분석 결과가 아니라 표시하지 않았습니다.');
+      return false;
+    }
+    const decorated = jobId ? { ...nextImpact, _job_id: jobId } : nextImpact;
+    // 가이드 소유자는 '새 대상'의 키로 명시 각인한다. 기본값(현재 화면 키)에 맡기면 Context가
+    // 아직 갱신되기 전이라 직전 대상의 키가 찍혀 가이드가 즉시 무효화된다.
+    const nextOwner = { key: impactKeyOf(decorated, jobId), ref: decorated };
+    setAnalysisResult?.(prev => ({ ...(prev || {}), impactData: decorated }));
+    setGuide(nextGuide, nextOwner);
+    setAiGuide(nextAiGuide, nextOwner);
+    setRestorable(null);
+    return true;
+  }, [setAnalysisResult, setGuide, setAiGuide, jobUrl, scmId, toast]);
+
+  const openHistoryItem = useCallback(async (jobId, { keepGuide = null, keepAiGuide = null } = {}) => {
+    if (!jobId) return;
+    setSourceBusy('저장된 결과를 불러오는 중...');
+    try {
+      const data = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}/result`);
+      const result = data?.result;
+      if (!result || !Object.keys(result).length) throw new Error('저장된 결과가 비어 있습니다.');
+      // adoptImpact가 프로젝트 불일치로 거절하면 성공 토스트로 위장하지 않는다(거절 사유는 거기서 알림).
+      if (adoptImpact(result, jobId, keepGuide, keepAiGuide)) {
+        toast('success', '영향분석 결과를 불러왔습니다.');
+      }
+    } catch (e) {
+      toast('error', `결과 로드 실패: ${e.message}`);
+    } finally {
+      setSourceBusy('');
+    }
+  }, [adoptImpact, toast]);
+
+  /** 선택한 빌드로 영향분석. 이미 완료된 이력이 있으면 재실행하지 않고 그 결과를 연다. */
+  const runForBuild = useCallback(async (buildNumber, { force = false } = {}) => {
+    const n = Number(buildNumber) || 0;
+    if (!n) { toast('info', '빌드 번호를 선택하세요.'); return; }
+    if (!scmId) { toast('info', '대상 SCM을 확인할 수 없습니다.'); return; }
+    if (!jobUrl) { toast('info', 'Jenkins Job URL을 확인할 수 없습니다.'); return; }
+    if (!force) {
+      // job_url까지 대조한다 — 한 SCM을 두 Jenkins Job이 공유하면 빌드번호가 충돌해
+      // 다른 Job의 결과를 이 빌드의 것으로 열어버린다(결과 오귀속).
+      // job_url이 없는 잡(로컬 트리거)은 '어느 빌드인지' 증명할 수 없으므로 재사용하지 않고
+      // 새로 분석한다 — 증거 부재를 일치로 취급하지 않는다(fail-closed).
+      const hit = history.find(h => h?.status === 'completed'
+        && Number(h?.metadata?.build_number) === n
+        && sameJobUrl(h?.metadata?.job_url, jobUrl));
+      if (hit?.job_id) { await openHistoryItem(hit.job_id); return; }
+    }
+    setSourceBusy('영향도 분석 시작 중...');
+    try {
+      const triggerRes = await post('/api/jenkins/impact/trigger-async', {
+        scm_id: scmId, build_number: n, job_url: jobUrl, base_ref: baseRef,
+        targets: ['uds', 'suts', 'sits', 'sts', 'sds'],
+      });
+      if (!triggerRes?.job_id) throw new Error('impact job_id를 받지 못했습니다.');
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
+      const result = await pollImpactJob(triggerRes.job_id, {
+        onMsg: m => setSourceBusy(m), signal: controller.signal,
+      });
+      adoptImpact(result, triggerRes.job_id);
+      // 부분 실패(분석 성공 + 일부 문서 생성 실패)를 '완료'로 위장하지 않는다.
+      const failedDocs = Object.entries(result?.actions || {})
+        .filter(([, a]) => a && a.status === 'failed').map(([t]) => t.toUpperCase());
+      if (result?.partial_failure || failedDocs.length) {
+        toast('warning', `분석은 완료했으나 ${failedDocs.join(', ') || '일부 대상'} 문서 생성에 실패했습니다. 분석 결과는 유효합니다.`);
+      } else {
+        toast('success', `빌드 #${n} 영향분석 완료`);
+      }
+      loadHistory();
+    } catch (e) {
+      // unmount로 끊은 폴링은 사용자 오류가 아니다 — 실패로 보고하지 않는다.
+      if (!isAbortError(e)) toast('error', `영향도 분석 실패: ${e.message}`);
+    } finally {
+      setSourceBusy('');
+    }
+  }, [scmId, jobUrl, baseRef, history, openHistoryItem, adoptImpact, toast, loadHistory]);
+
+  // Job 또는 SCM이 바뀌면 빌드 목록 캐시를 버린다(다른 프로젝트 빌드를 그대로 보여주면 오선택).
+  // ⚠ scmId 포함 필수: 초기 로드가 analysisResult(→scmId)보다 먼저면 scmId '' 로 빌드를 받아
+  // revision이 안 붙는데, 가드(buildsReqRef)가 true로 남아 ''→실값 전이 후에도 재조회가 안 돼
+  // '리비전' 컬럼이 영구 미표시로 고착된다(BuildInfoSection W5와 동일 계열).
+  useEffect(() => { buildsReqRef.current = false; setBuilds([]); setBuildsError(''); setPickedBuild(''); }, [jobUrl, scmId]);
+  // 이력은 경량 투영이라 탭 진입 시 자동 조회(빌드 목록은 Jenkins 왕복이라 lazy).
+  // deps를 [loadHistory]로 두면 toast 등 상위 훅이 매 렌더 새 참조를 주는 순간 무한 조회가 된다
+  // → 트리거는 scmId 변화로 한정하고 최신 콜백은 ref로 읽는다.
+  const loadHistoryRef = useRef(loadHistory);
+  useEffect(() => { loadHistoryRef.current = loadHistory; });
+  useEffect(() => { loadHistoryRef.current?.(); }, [scmId]);
+
+  // 프로젝트 요약 탭 '빌드 행 클릭' 핸드오프(devops_v2_impact_focus_build, TTL 120s): 해당 빌드를
+  // 선택하고 완료 이력이 있으면 연다(무거운 새 분석은 자동 트리거 안 함 — 타임라인은 분석된 빌드만
+  // 보여줘 대개 완료 이력이 있다). keep-alive로 이미 마운트된 경우까지 커버하려 mount + 커스텀
+  // 이벤트 둘 다에서 확인한다(이벤트는 focusTick으로 apply effect 재실행을 유도).
+  const [focusTick, setFocusTick] = useState(0);
+  useEffect(() => {
+    // 이벤트 핸들러의 setState는 effect setup이 아니라 허용(set-state-in-effect 회피).
+    const onFocusEvent = () => setFocusTick(t => t + 1);
+    window.addEventListener('devops:impact-focus-build', onFocusEvent);
+    return () => window.removeEventListener('devops:impact-focus-build', onFocusEvent);
+  }, []);
+  useEffect(() => {
+    if (!scmId) return undefined;  // scmId 확정 전 — 소비하지 않고 다음 렌더에 재시도
+    let cancelled = false;
+    (async () => {
+      // ⚠ 소비(removeItem)는 적용 확정 시에만 — read→removeItem이 동기라 중복 적용 없음. setState는 await 이후.
+      let focus = null;
+      try {
+        const raw = localStorage.getItem('devops_v2_impact_focus_build');
+        if (raw) {
+          const o = JSON.parse(raw);
+          if (o && o.build_number != null && Date.now() - (o.ts || 0) < 120000
+              && (!o.scm_id || o.scm_id === scmId)) focus = o;
+        }
+      } catch (_) { focus = null; }
+      if (!focus) return;
+      localStorage.removeItem('devops_v2_impact_focus_build');
+      const n = Number(focus.build_number) || 0;
+      if (!n) return;
+      await loadBuildsOnce();
+      if (cancelled) return;
+      setPickedBuild(String(n));  // await 이후 setState (set-state-in-effect 회피)
+      // 완료 이력을 직접 재조회(closure의 history state는 stale일 수 있음)해, 있으면 그 결과를 연다.
+      try {
+        const data = await api(`/api/scm/impact-jobs/${encodeURIComponent(scmId)}?summary=1&limit=20`);
+        if (cancelled) return;
+        const hit = (Array.isArray(data?.items) ? data.items : []).find(h => h?.status === 'completed'
+          && Number(h?.metadata?.build_number) === n
+          && sameJobUrl(h?.metadata?.job_url, jobUrl));
+        if (hit?.job_id) openHistoryItem(hit.job_id);
+      } catch (_) { /* 이력 조회 실패 — 빌드만 선택 상태로 둔다 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [scmId, jobUrl, loadBuildsOnce, openHistoryItem, focusTick]);
+
+  /** 저장분이 '지금 열려 있는 프로젝트'의 것인가.
+   *
+   * 이 대조 없이 주입하면 프로젝트 A의 결과가 B의 Detail 전체(영향 평가·추적성·SCM 탭이 모두
+   * 같은 Context를 소비)로 퍼지고, 화면 라벨만 A를 가리키게 된다 — ASIL/커버리지 판정의 오귀속.
+   * Detail은 selectedJob.url이 바뀌면 remount하고 캐시 로드는 impactData=null이라, 프로젝트
+   * 전환 직후 hydrate가 항상 이 경로를 탄다.
+   */
+  const savedMatchesProject = useCallback((saved) => {
+    const savedJobUrl = saved?.id?.job_url || saved?.impactData?.trigger?.metadata?.job_url || '';
+    if (savedJobUrl && jobUrl) return sameJobUrl(savedJobUrl, jobUrl);
+    const savedScm = String(saved?.id?.scm_id || '');
+    if (savedScm && scmId) return savedScm === scmId;
+    return false;  // 확인 근거가 없으면 주입하지 않는다(이력에서 명시적으로 열면 된다)
+  }, [jobUrl, scmId]);
+
+  // 마운트 하이드레이트 — 새로고침 후에도 마지막으로 보던 결과와 상세 가이드를 복원한다.
+  useEffect(() => {
+    if (hydrated) return;
+    const saved = loadImpactCurrent();
+    if (!saved) { setHydrated(true); return; }
+    // 판정 근거가 아직 없거나(프로젝트 전환 중) 두 prop이 서로 다른 프로젝트를 가리키는 동안에는
+    // latch하지 말고 다음 렌더에서 재시도한다. 여기서 latch하면 전환이 끝난 뒤에도 effect가
+    // `if (hydrated) return`으로 빠져 복원도 복원 버튼도 영영 나오지 않는다.
+    if (!projectConsistent || (!jobUrl && !scmId)) return;
+    setHydrated(true);
+    if (!savedMatchesProject(saved)) return;  // 타 프로젝트 저장분 — 손대지 않는다
+    if (impact) {
+      // Context에 이미 결과가 있다 → '같은 대상'일 때만 가이드를 얹는다(다르면 폐기).
+      if (sameImpactTarget(saved.id, impactIdentity(impact))) {
+        const owner = { key: impactKey, ref: impact };
+        setGuide(saved.guide || null, owner);
+        setAiGuide(saved.aiGuide || null, owner);
+      }
+      return;
+    }
+    if (saved.impactData) {
+      // Context에 넣는 객체와 소유자 ref가 동일해야 다음 렌더에서 가이드가 유효로 판정된다.
+      const owner = { key: impactKeyOf(saved.impactData), ref: saved.impactData };
+      setAnalysisResult?.(prev => ({ ...(prev || {}), impactData: saved.impactData }));
+      setGuide(saved.guide || null, owner);
+      setAiGuide(saved.aiGuide || null, owner);
+    } else if (saved.jobId) {
+      setRestorable(saved);  // 본문은 quota로 빠졌다 — 버튼으로 명시 복원(자동 왕복 안 함)
+    }
+  }, [hydrated, impact, impactKey, jobUrl, scmId, projectConsistent, savedMatchesProject,
+    setAnalysisResult, setGuide, setAiGuide]);
+
+  // 영속 저장 단일 지점 — 결과/가이드가 바뀔 때마다 현재 대상 키로 미러링한다.
+  // 대형 결과의 JSON 직렬화가 렌더를 막지 않도록 지연시키고, 연속 변경은 마지막 1회로 합류시킨다.
+  useEffect(() => {
+    if (!hydrated || !impact) return undefined;
+    const timer = setTimeout(() => {
+      const id = impactIdentity(impact);
+      const ok = saveImpactCurrent({ id, jobId: id.job_id, impactData: impact, guide, aiGuide });
+      // 저장 실패를 삼키면 새로고침 후 결과가 사라진 이유를 사용자가 알 수 없다(침묵 금지 정책).
+      setPersistFailed(!ok);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [hydrated, impact, guide, aiGuide]);
   const impactGroups = impact?.impact ?? {};
+  // 분류 정밀도(백엔드 classification). "file"=파일단위 보수 분류 → "변경 함수" 수가
+  // "변경 파일 내 전체 함수"의 과대추정(실제 수정 함수는 더 적음). "line"=라인 diff 정밀.
+  const classification = impact?.classification ?? null;
+  // 'file' = 전부 파일단위 보수(증거 혼재 없음) → 토글 대신 '(보수 추정)' 캡션.
+  // 'mixed' = 일부만 라인증거 → isConservativeCount는 false로 두고 파일영향 토글(evidence split)로
+  //           정직하게 분리한다(빈 표 방지 + 실변경/보수 전환). 'line' = 전부 라인증거(정밀).
+  const isConservativeCount = classification?.granularity === 'file';
+  // "line"=전 함수 라인 diff 정밀 분류(SIGNATURE/NEW/DELETE 함수단위 판별) — 'mixed'는 미포함(정직).
+  const isLineClassified = classification?.granularity === 'line';
+  // 백엔드 ISO 증거: 함수별 메타(ASIL 등) + 경고(과소보고/cloudium/ASIL escalation 등) + ASIL 요약.
+  // ⚠ useMemo — `?? {}`/`|| {}` 폴백이 **매 렌더 새 객체**라, 이걸 deps 로 쓰는 아래
+  //   useMemo/useCallback 이 렌더마다 전부 재계산됐다(react-hooks/exhaustive-deps).
+  const functionMeta = useMemo(() => impact?.function_meta ?? {}, [impact]);
+  const impactWarnings = Array.isArray(impact?.warnings) ? impact.warnings : [];
+  const asilInfo = impact?.asil ?? null;
+  // MC/DC delta: 영향 함수별 VectorCAST 커버리지(ASIL 타깃 대비 gap + 이력 delta).
+  const coverageGap = impact?.coverage_gap ?? null;
+  const coverageByFn = useMemo(() => {
+    const m = {};
+    for (const r of (coverageGap?.functions || [])) { if (r.function) m[r.function] = r; }
+    return m;
+  }, [coverageGap]);
+  // reviewer Finding#6: AI 요약 함수명 클릭 해석을 O(1)로. 매 렌더 guide.details를 함수 참조마다
+  // 선형 2회 스캔하던 것을(안전함수/문서별/테스트제안 ~33개 × 2 × N) 소문자→canonical Map으로 대체.
+  const guideFnByLc = useMemo(() => {
+    const m = new Map();
+    for (const d of (guide?.details || [])) m.set(String(d.function).toLowerCase(), d.function);
+    return m;
+  }, [guide]);
+  // 소문자 함수명 → guide.details 항목(전체). renderDocContent(sts/sits)이 함수의 TC ID 목록
+  // (stsTestCases/sitsTestCases)을 O(1)로 찾아 doc_content(sts_by_tc/sits_by_tc)와 조인하는 데 쓴다.
+  const guideDetailByLc = useMemo(() => {
+    const m = new Map();
+    for (const d of (guide?.details || [])) m.set(String(d.function).toLowerCase(), d);
+    return m;
+  }, [guide]);
+  // 회귀시험 선정: 영향 함수 → 재실행 대상 SUTS TC / SITS call-chain(ISO 26262 증거).
+  const regressionSet = impact?.regression_test_set ?? null;
+  // 프론트 SwUFn 브리지로 산출된 함수별 SITS TC({fn: [SwITC_SwUFn_N]}). 백엔드 regression_test_set.sits는
+  // SITS VectorCAST 중간파일(빌더 산출물) 부재 시 0이지만(cloudium 읽기전용), 함수별 상세(buildGuide)는
+  // testcase의 SwUFn을 SUTS unit으로 풀어 SITS를 직접 조인한다 → 회귀 패널에도 이 파생값을 표면화한다.
+  const guideSitsMap = useMemo(() => {
+    const m = {};
+    for (const d of (guide?.details || [])) {
+      if (d.sitsTestCases && d.sitsTestCases.length) m[d.function] = d.sitsTestCases;
+    }
+    return m;
+  }, [guide]);
+  // 콜그래프 탐색 절단 — 변경 함수가 상한을 넘으면 2-hop이 '미계산'인데 빈 배열로 나와
+  // "2-hop 영향 없음"으로 오독될 수 있다(백엔드 impact_traversal이 사실을 알려줌).
+  const traversal = impact?.impact_traversal ?? null;
 
   // Demo data for testing — simulates real .c file changes
   const demoFunctions = {
@@ -51,31 +847,955 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   };
   const demoImpact = {
     direct: ['g_DrvIn_Main', 'g_DrvIn_MotorSpeed', 's_MotorSpdCtrl_AutoClose', 's_MotorSpdCtrl_AutoOpen', 's_AntipinchDetect_Close'],
-    indirect_1hop: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl'],
+    // s_NotifyObserver는 demoFunctions(변경 목록)에 없음 → 간접 전용(changed=false) 행으로 표시되어
+    // 데모만으로 '영향' 배지·1-hop 필터 실동작을 확인할 수 있다(간접 함수 노출 회귀 방지).
+    indirect_1hop: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl', 's_NotifyObserver'],
     indirect_2hop: ['g_SystemStatusCheck'],
   };
   const activeFnEntries = demoMode ? Object.entries(demoFunctions) : changedFnEntries;
   const activeImpactGroups = demoMode ? demoImpact : impactGroups;
   const activeChangedFiles = demoMode ? ['DrvIn_Main_PDS.c', 'Ap_MotorCtrl_PDS.c'] : changedFiles;
+  // 함수별 변경 상세(시그니처 이전→이후 원문). 키는 소문자 함수명(백엔드 changed_types와 동일).
+  const changeDetails = useMemo(() => impact?.change_details ?? {}, [impact]);
+  // 간접영향 근거 — {fn: {hop, via, seed}}. 간접 함수가 "왜 영향받는지"(경유 노드·최초 변경함수)를
+  // 표시/AI 근거로. 구 job(필드 없음)은 {} 폴백 → via/seed 빈 문자열(무해).
+  const impactPaths = useMemo(() => impact?.impact_paths ?? {}, [impact]);
+  // 함수별 본문 diff 원문(AI 설명용) — BODY 등 선언 미변경 함수도 실제 코드 근거를 Gemini에 전달.
+  const functionDiffs = useMemo(() => impact?.function_diffs ?? {}, [impact]);
+  // 파일레벨 원문 폴백(#3) — 함수 자체 diff 없는 함수(파일영향)의 '파일 전체 변경 보기'용. 정규화 상대경로 키.
+  const fileDiffs = impact?.file_diffs ?? {};
+  // 실제 문서 내용(예측 대신 실 파싱본) — 백엔드 doc_content{uds,suts,sds}(함수명 lower 키). 파일영향
+  // 함수도 문서 내용은 실 파싱이라 유효. 구 job(필드 없음)은 {}로 폴백 → 내용 블록만 미표시(무해).
+  const docContent = useMemo(() => impact?.doc_content ?? {}, [impact]);
+  const docContentFor = (fn, key) => (docContent?.[key] ?? {})[String(fn || '').toLowerCase()];
+  // 문서 생성 초안(백엔드 _build_doc_proposal — 문서 생성기 재사용 결정론 합성). 전부 함수키(소문자):
+  //   suts = [{strategy, inputs:{v:val}, expected:{v:val}, description}]
+  //   sits = {call_chain: "a -> b -> c", sub_cases:[{inputs, expected, precondition}]}
+  //   sts  = [[{action, expected}], ...]   (TC별 step 리스트)
+  // 구 job/미재기동이면 {}·미매칭이면 undefined → 각 분기가 기존 골격으로 graceful 폴백.
+  const docProposal = impact?.doc_proposal ?? {};
+  const docProposalFor = (fn, key) => (docProposal?.[key] ?? {})[String(fn || '').toLowerCase()];
+  // 문서 작성급 초안의 부가 노드(신규):
+  //   var_types  = {fn: {base_var: {type, source}}}  — 경계값 산출의 타입 근거. **키 부재 = 미상**이라
+  //                프론트는 숫자를 만들지 않는다(uint8_t 기본값 환각 차단 — workflow/impact_doc_draft.py).
+  //   suts_meta  = {fn: {component, test_method, gen_method, asil, srs_req_ids, precondition, total}}
+  //                생성기 산출(doc_proposal) 우선, 없으면 문서 원문(doc_content.suts_meta) 폴백.
+  //   doc_content.suts_meta[fn].columns = 시트 헤더 원문(열 순서 보존) — 재계산 대상 변수집합이자
+  //                Excel 붙여넣기 열 순서의 권위 소스. 시그니처로 유추하면 원문과 다른 변수를 가리킨다.
+  const varTypesFor = (fn) => (docProposal?.var_types ?? {})[String(fn || '').toLowerCase()] ?? {};
+  const docSutsMeta = docContent?.suts_meta ?? {};
+  // 생성기 산출과 문서 원문을 **필드 단위로** 합친다. 노드 통째로 고르면(all-or-nothing) 한쪽의
+  // Component/Test Method/Gen.Method/Related ID가 통째로 가려진다.
+  // ⚠ 각 값의 출처(`_src`)는 **백엔드가 필드별로 명시한 것**을 쓴다. "어느 노드에 있었나"로
+  //   추측하면 문서 폴백(같은 노드에 문서 원문을 싣는다)에서 판정이 역전돼, 문서에 실제로 적힌
+  //   값에 "(추론)" 배지가 붙어 사용자가 멀쩡한 원문을 의심하게 된다.
+  const _META_FIELDS = ['component', 'test_method', 'gen_method', 'asil', 'precondition', 'prototype'];
+  const _mergeSutsMeta = (gen, doc) => {
+    if (!gen && !doc) return null;
+    const out = { _src: {} };
+    for (const f of _META_FIELDS) {
+      const gv = gen && gen[f];
+      const dv = doc && doc[f];
+      if (gv) { out[f] = gv; out._src[f] = gen?._src?.[f] || 'generator'; } else if (dv) { out[f] = dv; out._src[f] = 'document'; }
+    }
+    // 요구 ID 필드명은 출처마다 다르다 — 생성기는 srs_req_ids(UDS/SDS 매핑), 문서는 related_ids
+    // (시트 Related ID 컬럼). ⚠ `[] || x`는 JS에서 `[]`(truthy)이라 length로 판정해야 폴백이 는다.
+    const genReq = (gen && (gen.srs_req_ids || gen.related_ids)) || [];
+    const docReq = (doc && (doc.related_ids || doc.srs_req_ids)) || [];
+    out.related_ids = genReq.length ? genReq : docReq;
+    out._src.related_ids = genReq.length ? (gen?._src?.srs_req_ids || 'generator') : 'document';
+    // 총량은 **두 축을 절대 섞지 않는다**(C1): 문서 TC 수 vs 생성기 시퀀스 수는 서로 다른 양이다.
+    out.doc_total = (gen && gen.doc_total) ?? (doc ? (doc.seq_total ?? null) : null);
+    out.doc_shown = (gen && gen.doc_shown) ?? (doc ? (doc.seq_shown ?? null) : null);
+    out.gen_total = gen ? (gen.gen_total ?? null) : null;
+    out.gen_truncated = !!(gen && gen.gen_truncated);
+    return out;
+  };
+  const sutsColumnsFor = (fn) => (docSutsMeta[String(fn || '').toLowerCase()] ?? {}).columns ?? null;
+  // 페이로드 상한으로 job에서 **생략된** 함수인지. '문서에 TC 없음(미파싱)'과 반드시 구분해야
+  // 한다 — 구분하지 않으면 실제로는 문서에 있는 TC를 "없다"고 표시하게 된다.
+  const _sutsOmitted = docContent?.suts_omitted ?? null;
+  const sutsIsOmitted = (fn) => !!(_sutsOmitted
+    && (_sutsOmitted.functions || []).includes(String(fn || '').toLowerCase()));
+  // 초안 근거 라벨 — 'generator'(소스 파싱 후 생성기 재사용) vs 'document'(소스 미해결, 문서 원문 기준).
+  const proposalSource = String(docProposal?.source || '');
+  // STS/SITS 실 내용은 TC-ID 키(함수 키 아님) — 프론트가 함수별 stsTestCases/sitsTestCases(ID)로 조인한다.
+  // 백엔드 sts_by_tc/sits_by_tc는 _normalize_req_id(공백제거+대문자)로 키를 정규화하므로 조회 전 동일 정규화.
+  const stsByTc = useMemo(() => docContent?.sts_by_tc ?? {}, [docContent]);
+  const sitsByTc = useMemo(() => docContent?.sits_by_tc ?? {}, [docContent]);
+  const _normTcId = (r) => String(r || '').replace(/\s+/g, '').toUpperCase();
+  // 문서 카드의 "실제 문서 내용" 블록 — 예측 텍스트와 별개로, 백엔드가 파싱한 실 문서 내용을 표시.
+  // uds/suts/sds만(범위). 내용 없으면 '미파싱' 정직 표기(과대 추정 금지). key='sts'/'sits'는 null(범위 외).
+  const _dcBox = { fontSize: 10, marginTop: 4, padding: '4px 6px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-info)' };
+  const _dcHdr = { fontWeight: 600, fontSize: 9, color: 'var(--color-info)', marginBottom: 2 };
+  const _dcMiss = (t) => <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· {t}</div>;
+  const renderDocContent = (fn, key) => {
+    const c = docContentFor(fn, key);
+    if (key === 'uds') {
+      if (!c) return _dcMiss('UDS 문서 내용 미파싱(사이드카/문서 미연동)');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 UDS 내용</div>
+          {c.heading && <div className="text-muted" style={{ fontSize: 9 }}>{c.heading}</div>}
+          {c.description && <div style={{ overflowWrap: 'anywhere' }}>{c.description}</div>}
+          {c.prototype && <div style={{ fontFamily: 'monospace', fontSize: 9, overflowWrap: 'anywhere' }}>{c.prototype}</div>}
+          {(c.globals || []).length > 0 && <div style={{ fontSize: 9 }}><span className="text-muted">Used Globals: </span>{c.globals.join(', ')}</div>}
+          {(c.calls || []).length > 0 && <div style={{ fontSize: 9 }}><span className="text-muted">Called: </span>{c.calls.join(', ')}</div>}
+        </div>
+      );
+    }
+    if (key === 'suts') {
+      if (!c || !c.length) return _dcMiss('SUTS TC 내용 미파싱(문서 미연동/유닛 불일치)');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 SUTS 시험 내용</div>
+          {c.map((tc, i) => {
+            // action/precondition은 문서 포맷에 따라 값(0x0)·변수명으로 나올 수 있어 prose(공백 포함)만
+            // 노출(노이즈 억제). 실 입력/기대값(header=value)은 항상 노출(핵심 실 내용).
+            const _prose = (s) => (typeof s === 'string' && /\s/.test(s.trim()) && s.trim().length > 3 ? s.trim() : '');
+            const _act = _prose(tc.action); const _pre = _prose(tc.precondition);
+            return (
+              <div key={i} style={{ marginBottom: 3 }}>
+                <div style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 600 }}>{tc.tc_id}</div>
+                {formatSutsLoc(tc.loc) && <div className="text-muted" style={{ fontSize: 9 }}>{formatSutsLoc(tc.loc)}</div>}
+                {_act && <div style={{ overflowWrap: 'anywhere' }}><span className="text-muted">Action: </span>{_act}</div>}
+                {_pre && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_pre}</div>}
+                {Object.keys(tc.inputs || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{Object.entries(tc.inputs).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+                {Object.keys(tc.expected || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">Exp: </span>{Object.entries(tc.expected).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    if (key === 'sds') {
+      if (!c) return _dcMiss('SDS 컴포넌트 설명 미파싱(문서 미연동/매칭 없음)');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 SDS 내용</div>
+          <div style={{ overflowWrap: 'anywhere' }}>{c}</div>
+        </div>
+      );
+    }
+    if (key === 'sts' || key === 'sits') {
+      // 함수의 TC ID 목록(브리지 산출)을 백엔드 TC-ID 키 내용 맵과 조인. ID만 있고 내용 0이면 정직 미파싱.
+      const dd = guideDetailByLc.get(String(fn || '').toLowerCase());
+      const tcIds = ((key === 'sts' ? dd?.stsTestCases : dd?.sitsTestCases) || []);
+      if (!tcIds.length) return _dcMiss(key === 'sts' ? 'STS 매칭 TC 없음(요구/SDS 브리지 0)' : 'SITS 매칭 TC 없음(요구/SwUFn 브리지 0)');
+      const byTc = key === 'sts' ? stsByTc : sitsByTc;
+      const rows = tcIds.map((t) => [t, byTc[_normTcId(t)]]);
+      if (!rows.some(([, cc]) => cc)) {
+        return _dcMiss(key === 'sts'
+          ? 'STS TC 내용 미파싱(문서 미연동/전용 파서 부재)'
+          : 'SITS TC 내용 미파싱(중간파일 부재·cloudium)');
+      }
+      const _prose = (s) => (typeof s === 'string' && /\s/.test(s.trim()) && s.trim().length > 3 ? s.trim() : '');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 {key.toUpperCase()} 시험 내용</div>
+          {rows.slice(0, 6).map(([t, cc], i) => (
+            <div key={i} style={{ marginBottom: 3 }}>
+              <div style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 600 }}>{t}</div>
+              {!cc && <span className="text-muted" style={{ fontSize: 9 }}>· 내용 미파싱</span>}
+              {cc && _prose(cc.description) && <div style={{ overflowWrap: 'anywhere' }}>{_prose(cc.description)}</div>}
+              {cc && cc.unit_name && <div style={{ fontSize: 9 }}><span className="text-muted">Unit: </span>{cc.unit_name}</div>}
+              {cc && _prose(cc.precondition) && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_prose(cc.precondition)}</div>}
+              {cc && cc.test_method && <div style={{ fontSize: 9 }}><span className="text-muted">Method: </span>{cc.test_method}</div>}
+              {/* STS 'Test Action(Sequence)'/'Expected Result' — cc.expected는 STS에선 string(SITS/SUTS의 kv dict 아님) → 직접 렌더(Object.entries 금지). 짧은 값(0x1)도 노출 위해 _prose 미적용. */}
+              {cc && _prose(cc.test_action) && <div style={{ overflowWrap: 'anywhere' }}><span className="text-muted">Action: </span>{_prose(cc.test_action)}</div>}
+              {cc && cc.expected && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">Exp: </span>{cc.expected}</div>}
+              {cc && cc.call_chain && <div style={{ fontSize: 9, fontFamily: 'monospace', overflowWrap: 'anywhere' }}><span className="text-muted">Chain: </span>{cc.call_chain}</div>}
+              {cc && (cc.sub_cases || []).slice(0, 3).map((sc, j) => (
+                <div key={j} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
+                  {_prose(sc.precondition) && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_prose(sc.precondition)}</div>}
+                  {Object.keys(sc.inputs || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{Object.entries(sc.inputs).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+                  {Object.keys(sc.expected || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">Exp: </span>{Object.entries(sc.expected).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+                </div>
+              ))}
+            </div>
+          ))}
+          {rows.length > 6 && <div className="text-muted" style={{ fontSize: 9 }}>+{rows.length - 6}개 TC 더</div>}
+        </div>
+      );
+    }
+    return null;
+  };
+  // per-card 문서 반영 제안(결정론) — 내용 있으면 '원문 → 변경안', 없으면 '작성 제안(신규 골격)'.
+  // 값이 결정론으로 확정되는 구조 필드(Prototype/Globals)·파라미터 타입 경계값만 짝짓는다(추정·환각 금지).
+  // 산문 재작성은 🤖 AI 카드가 담당(LLM 필요). 5개 문서 전부 — 막다른 '미파싱'을 건설적 작성 골격으로 대체.
+  const _propBox = { fontSize: 10, marginTop: 4, padding: '4px 6px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-warning)' };
+  const _propMono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 9, overflowWrap: 'anywhere' };
+  // STS/SITS는 doc_content가 TC-ID 키(sts_by_tc/sits_by_tc)라 함수키 조회 불가 → 함수의 TC 목록으로 실내용 존재 확인.
+  const _testSpecHasContent = (fn, key) => {
+    const dd = guideDetailByLc.get(String(fn || '').toLowerCase());
+    const tcIds = ((key === 'sts' ? dd?.stsTestCases : dd?.sitsTestCases) || []);
+    if (!tcIds.length) return false;
+    const byTc = key === 'sts' ? stsByTc : sitsByTc;
+    return tcIds.some((t) => byTc[_normTcId(t)]);
+  };
+  // 함수에 조인된 STS/SITS TC들의 **실 원문 행**(초안 대조용). 조인 규약은 _testSpecHasContent와 동일:
+  // 함수→TC-ID 브리지는 프론트에만 있고(요구 ∪ SwUFn 경로), 백엔드 doc_content는 TC-ID 키다.
+  const _testSpecRows = (fn, key) => {
+    const dd = guideDetailByLc.get(String(fn || '').toLowerCase());
+    const tcIds = ((key === 'sts' ? dd?.stsTestCases : dd?.sitsTestCases) || []);
+    const byTc = key === 'sts' ? stsByTc : sitsByTc;
+    return tcIds
+      .map((t) => { const v = byTc[_normTcId(t)]; return v ? { ...v, tc_id: v.tc_id || t } : null; })
+      .filter(Boolean);
+  };
+  // `meta`(선택 out-param): 반환값이 **제안이 아니라 진단 노트**면 `meta.isNote = true`.
+  // 프레임("현재 원문 → 수정안")은 진짜 제안일 때만 걸어야 한다 — 노트에 걸면 "요구 매핑 없음"이나
+  // "변경안 없음" 같은 진단이 "원문을 이렇게 고쳐라"로 읽힌다.
+  const renderAuthoringProposal = (d, key, cd, diffElems, ct, meta) => {
+    const _note = (node) => { if (meta) meta.isNote = true; return node; };
+    // 간접 영향(직접 변경 아님)·삭제 함수는 '작성' 대상이 아니다 — 계약 유지 확인/항목 제거 안내는
+    // 편집 액션 패널(buildDocumentActions)이 담당한다. 경계값·신규 골격을 비변경/삭제 함수에 제안하면
+    // '직접 변경 아님·문서 수정 없음'·'항목 제거'와 모순된다(같은 카드에 상반된 지시).
+    // commentOnly(주석-only)만 확정 억제 — C-렉서 충실 스트리퍼라 실 코드를 주석으로 오인하지 않음(적대 25+12 검증).
+    // noSemanticChange(포맷/이동)는 **억제하지 않는다**: 순서보존 이동이 use를 넘는 경우(move-past-use)를 못 잡는
+    // 맹점이 있어(-U3 context 라인이 -/+ 사이에 끼면 발동), 확정 억제 시 실 동작변경을 '수정 불필요'로 오판(under-report).
+    if (!d.changed || ct === 'DELETE' || diffElems?.commentOnly) return null;
+    const fn = d.function;
+    // AI 서술문(선택 보강) — 값이 아니라 문장만. 없으면 각 분기가 그대로 결정론만 표시한다.
+    const _prose = docProse[String(fn).toLowerCase()] || null;
+    const _proseText = (f) => (_prose && _prose.ok && (_prose.fields || {})[f]) || '';
+    // 프롬프트 예산으로 근거가 줄었으면 밝힌다 — "전부 보고 쓴 문장"과 "일부만 보고 쓴 문장"은
+    // 검토 강도가 달라야 한다(다른 절단 표기와 같은 규약).
+    const _proseTrim = () => {
+      const t = (_prose && _prose.trimmed_nodes) || [];
+      return t.length
+        ? <div className="text-muted" style={{ fontSize: 8 }}>· 근거 일부만 사용({t.join(', ')}) — 프롬프트 상한으로 축소됨</div>
+        : null;
+    };
+    // 폐기 사유는 **그 필드를 표시하는 카드에서** 말해야 한다. 예전엔 SUTS 카드에만 있어서,
+    // UDS/SDS는 버튼을 눌러도 화면이 요청 전과 똑같았고 사용자는 이유를 알 수 없었다(무한 재시도).
+    const _proseWhy = (f) => {
+      if (!_prose || _prose.loading || _proseText(f)) return '';
+      const d = (_prose.dropped_fields || []).find((x) => x && x.field === f);
+      if (d) {
+        return d.reason === 'unknown_number'
+          ? `AI 초안이 결정론에 없는 수치(${d.token})를 포함해 폐기됨 — 표의 값이 정본입니다`
+          : `AI 초안이 근거 없는 식별자(${d.token})를 포함해 폐기됨`;
+      }
+      if (_prose.error) return _prose.error;
+      if (_prose.ok === false && _prose.reason) return PROSE_REASON_KO[_prose.reason] || _prose.reason;
+      return '';
+    };
+    // static/private 판별(헝가리안 접두어 s_=static·prv_=private) — 이들은 아키텍처 SDS·요구기반 STS에
+    // 설계상 없을 수 있다(정직 노트 대상). 공개 함수(g_·무접두어)의 SDS/요구 부재는 '정상'이 아니라 실
+    // 갭일 수 있으므로 '정상' 안심을 붙이지 않는다(은폐 방지 — 미상은 안전측으로 '확인 필요').
+    const looksPrivate = /^(?:prv_|s_)/i.test(fn);
+    const c = docContentFor(fn, 'uds');
+    // 파라미터 원천: 변경 후 시그니처(cd.after) 우선 → UDS prototype(현 선언) → cd.before. 경계값·골격 근거.
+    const proto = (cd && cd.after) || (c && c.prototype) || (cd && cd.before) || '';
+    const params = proto ? (parseSignatureParams(proto) || []) : [];
+    const _lbl = (t) => <div className="text-muted" style={{ fontSize: 9 }}>{t}</div>;
+    const _val = (t) => <div style={{ overflowWrap: 'anywhere' }}>{t}</div>;
+    // inputs/expected 객체 → "k=v, k=v" (SUTS 시퀀스·SITS 서브케이스 공용 — reviewer I8 중복 제거)
+    const _kv = (o) => Object.entries(o || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+    const _box = (title, tone, children) => (
+      <div style={{ ..._propBox, borderLeft: `2px solid var(--color-${tone})` }}>
+        <div style={{ fontWeight: 600, fontSize: 9, color: `var(--color-${tone})`, marginBottom: 2 }}>{title}</div>
+        {children}
+      </div>
+    );
+    // 경계값 TC 골격 렌더(SUTS/SITS 공용). 파라미터 없으면 null.
+    const _boundaryRows = () => {
+      const bt = proposeBoundaryTCs(params, diffElems);
+      if (!bt.params.length && !bt.branchNote) return null;
+      return (
+        <>
+          {bt.params.map((p, i) => (
+            <div key={i} style={{ marginTop: 2 }}>
+              <div style={_propMono}><span className="text-muted">{p.param} </span>({p.type})</div>
+              <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}>
+                {p.cases.map((cc, j) => (
+                  <span key={j} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{cc.label}={cc.value}</span>
+                ))}
+              </div>
+            </div>
+          ))}
+          {bt.branchNote && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· {bt.branchNote}</div>}
+        </>
+      );
+    };
+
+    // ── UDS ── 내용 있음: 원문 → 변경안(Prototype/Globals). 없음: 신규 작성 골격.
+    if (key === 'uds') {
+      if (c) {
+        const rows = [];
+        // 항목 판정은 `impactDocDraft.reconcileUds` 단일 출처다. 예전엔 Prototype·Used Globals
+        // 판정 로직이 이 파일에도 한 벌 있어서 **모듈은 테스트에서만 돌고 화면은 사본을 썼다**
+        // (드리프트). 그 사이 백엔드가 만들던 Logic Flow·Called Functions·Precondition 은
+        // 화면에 한 줄도 나오지 않았다.
+        const _uds = reconcileUds({
+          udsContent: c,
+          proposal: docProposalFor(fn, 'uds'),
+          diffElems,
+          // SIGNATURE 게이트는 **모듈이** 갖는다 — 여기서 `changeAfter` 를 비우는 것만으론
+          // `proposal.prototype_after`(백엔드가 변경유형과 무관하게 echo) 폴백이 되살려서
+          // BODY 변경에도 선언 diff 가 그려진다.
+          changeType: ct,
+          changeAfter: (cd && cd.after) || '',
+        });
+        // ⚠ echo 항목(호출 함수·Precondition)만으로 '변경안' 프레임을 세우면 안 된다.
+        //   그건 소스 내용을 되비추는 참고값이지 "이렇게 고쳐라"가 아니다 — 변경이 없는데도
+        //   `✏ 원문 → 변경안` 헤더 아래 내용이 차서, 아래의 "결정론 변경안 없음" 안내가
+        //   구조적으로 뜨지 않게 된다(배선하면서 새로 생긴 구멍).
+        const _udsHasProposal = _uds.items.some((it) => it.verdict);
+        _uds.items.forEach((it, i) => {
+          if (!_udsHasProposal) return;   // 제안이 하나도 없으면 참고값도 이 프레임에 넣지 않는다
+          if (it.field === 'Prototype') {
+            rows.push(
+              <div key="proto">
+                {_lbl('Prototype')}
+                {it.before && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {it.before}</div>}
+                <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {it.after}</div>
+              </div>,
+            );
+          } else if (it.field === 'Used Globals') {
+            rows.push(
+              <div key="glob" style={{ marginTop: 2 }}>
+                {_lbl('Used Globals')}
+                {it.before && <div style={_propMono}>원문: {it.before}</div>}
+                {it.removed.length > 0 && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {it.removed.join(', ')}</div>}
+                {it.added.length > 0 && <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {it.added.join(', ')}</div>}
+              </div>,
+            );
+          } else {
+            // 참고값(echo)은 '유지' 같은 판정을 붙이지 않는다 — 문서와 대조한 적이 없다.
+            rows.push(
+              <div key={`uds-${i}`} style={{ marginTop: 2 }}>
+                {_lbl(it.echo ? `${it.field} (소스 기준 참고 — 문서 대조 아님)` : it.field)}
+                <div style={{ ..._propMono, whiteSpace: 'pre-wrap' }}>{it.after || it.before}</div>
+              </div>,
+            );
+          }
+        });
+        // Description은 결정론 근거가 없어 백엔드가 'ai_required'로 비워둔 자리 — AI 보강이
+        // 들어왔을 때만 채우고, 없으면 무엇이 비었는지 정직하게 밝힌다(동어반복 금지).
+        const _udsProse = _proseText('uds_description');
+        if (_udsProse) {
+          rows.push(
+            <div key="desc" style={{ marginTop: 2 }}>
+              {_lbl('Description')}
+              <div>{_udsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+              {_proseTrim()}
+            </div>,
+          );
+        } else if ((docProposalFor(fn, 'uds') || {}).description_source === 'ai_required') {
+          const _why = _proseWhy('uds_description');
+          rows.push(
+            <div key="desc" className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>
+              {/* 요청 후 폐기됐으면 그 사유를 말한다 — 아니면 화면이 요청 전과 똑같아 이유를 알 수 없다. */}
+              · {_why || 'Description 문장은 결정론 근거가 없음 — SUTS 카드의 [🤖 서술문 보강]으로 생성'}
+            </div>,
+          );
+        }
+        if (!rows.length) {
+          // ⚠ null을 돌려주면 원문만 뜨고 **왜 수정안이 없는지 화면에 한 줄도 없다**(구 job의
+          //   BODY 변경에서 흔하다 — 시그니처·전역 변화가 없고 doc_proposal 노드도 없는 조합).
+          return _note(
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>
+              · 결정론 변경안 없음 — 시그니처·전역 변화가 감지되지 않았고 생성기 초안도 없습니다
+              (구 분석 결과이면 재실행 시 초안이 생성됩니다)
+            </div>,
+          );
+        }
+        return _box('✏ 원문 → 변경안 (결정론)', 'warning', rows);
+      }
+      // 내용 없음 → 신규 UDS 작성 골격
+      return _box('🖊 UDS 작성 제안 (문서에 현재 없음 — 아래 골격대로)', 'info', (
+        <>
+          <div>{_lbl('Name')}{_val(fn)}</div>
+          <div style={{ marginTop: 2 }}>{_lbl('ASIL')}{_val(d.asil && /^[A-D]$/.test(d.asil) ? `ASIL ${d.asil}` : '(안전요구 매핑 확인)')}</div>
+          {proto && <div style={{ marginTop: 2 }}>{_lbl('Prototype')}<div style={_propMono}>{proto}</div></div>}
+          {params.length > 0 && (
+            <div style={{ marginTop: 2 }}>{_lbl('Input/Output Parameters')}
+              {params.map((p, i) => <div key={i} style={_propMono}>{p.type}{p.name ? ` ${p.name}` : ''}</div>)}
+            </div>
+          )}
+          <div style={{ marginTop: 2 }}>{_lbl('Description')}{_val(`${CHANGE_TYPE_KO[ct] || ct || '변경'} — 동작/입출력/의사코드 작성`)}</div>
+        </>
+      ));
+    }
+
+    // ── SUTS (단위시험 = 경계값 분석 핵심) ──
+    if (key === 'suts') {
+      const content = docContentFor(fn, 'suts');
+      const has = Array.isArray(content) && content.length > 0;
+      // 백엔드 생성기(generate_sequences) 실산출 — 전략별 경계값 입력→기대출력(구체값).
+      const gen = docProposalFor(fn, 'suts');
+      const genSeqs = Array.isArray(gen) && gen.length ? gen : null;
+      // 대조 대상 원문의 TC·행 앵커(중복 제거). "무엇과 비교했는가"는 사실이라 표시 가능하고,
+      // "이 TC 기준으로 재계산하라"는 단정은 매칭 행이 정해진 뒤에만 가능하다(행별 evidence 담당).
+      const _sutsAnchors = (() => {
+        if (!has) return '';
+        const seen = new Set();
+        const parts = [];
+        for (const r of content) {
+          const a = [r.tc_id ? `TC ${r.tc_id}` : '', formatSutsLoc(r.loc)].filter(Boolean).join(' · ');
+          if (a && !seen.has(a)) { seen.add(a); parts.push(a); }
+          if (parts.length >= 2) break;
+        }
+        if (!parts.length) return '';
+        const more = seen.size < content.length ? ` 외 ${content.length - parts.length}건` : '';
+        return `대조 원문: ${parts.join(' / ')}${more}`;
+      })();
+
+      // ⚠ 전체 초안(온디맨드) 상태는 **모든 분기보다 먼저** 계산한다. 아래 조기 반환들이 job
+      //   데이터(has/genSeqs)만 보고 갈리는데, 응답이 도착해도 그 값들은 그대로라 같은 분기를
+      //   다시 타 화면이 안 변하고 사용자는 무한 재클릭하게 된다.
+      const _fullKey = `${String(fn).toLowerCase()}:suts`;
+      const _full = fullDraft[_fullKey];
+      const _fullOk = !!(_full && _full.ok);
+      const _fullHasData = !!(_fullOk && ((Array.isArray(_full.proposal) && _full.proposal.length)
+        || (Array.isArray(_full.doc_rows) && _full.doc_rows.length)));
+
+      // 원문도 생성기 초안도 없으면 근거가 시그니처뿐이다 — 그땐 문서 컬럼을 지어낼 수 없으므로
+      // 기존 파라미터 경계값 골격을 그대로 쓴다(문서에 없는 함수의 '신규 작성' 안내로 정당).
+      // ⚠ 단, 페이로드 상한으로 **생략된** 함수는 예외다 — "문서에 없다"가 아니라 "job에 안 실렸다"이고,
+      //   그걸 신규 작성 골격으로 표시하면 실제로는 있는 TC를 없다고 말하게 된다. 이때는 조회 버튼이
+      //   있는 표(빈 draft + 안내)를 그려 사용자가 실제로 회복할 수 있게 한다.
+      // ⚠ `!genSeqs` 조건을 함께 걸면 안 된다. 생략은 `doc_content`(원문)에서만 일어나고
+      //   `doc_proposal.suts`(생성기 산출)는 그대로 남으므로, 생략된 함수인데 genSeqs가 있으면
+      //   이 가드를 지나쳐 "🖊 SUTS **작성 제안**" + 전 행 '신규추가'가 된다 — 문서에 있는 TC를
+      //   "없다"고 단정하는 것이다. 원문이 없고(has=false) 생략된 함수면 무조건 여기서 잡는다.
+      if (!has && !_fullHasData && sutsIsOmitted(fn)) {
+        const _o = _full;
+        return (
+          <DocProposalTable
+            title="⤓ SUTS 원문이 분석 결과에서 생략됨"
+            tone="info"
+            draft={{ mode: 'boundary', columns: [], rows: [], unknownTypes: [], newColumns: [], totals: {} }}
+            meta={[{ label: '상태', value: '페이로드 상한으로 생략(문서에 없다는 뜻이 아님)' }]}
+            notes={[
+              _o && _o.error ? `전체 초안: ${_o.error}` : '',
+              // 소스가 미해결(cloudium)이면 서버도 시퀀스를 만들 수 없다 — 성공했는데 빈 응답이
+              // 온 경우를 "다시 눌러라"로 방치하지 않는다.
+              (_fullOk && !_fullHasData)
+                ? '서버도 이 함수의 원문을 복구하지 못했습니다(소스 미해결) — 문서에서 직접 확인하세요'
+                : '아래 버튼으로 서버에서 이 함수만 다시 합성합니다',
+            ].filter(Boolean)}
+            onLoadFull={_fullOk ? null : () => loadFullDraft(fn, 'suts')}
+            loadingFull={!!fullDraftBusy[_fullKey]}
+          />
+        );
+      }
+      if (!has && !genSeqs && !_fullHasData) {
+        const rows = _boundaryRows();
+        if (!rows) {
+          return _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
+        }
+        return _box('🖊 SUTS 작성 제안 (경계값 TC 골격)', 'info', (
+          <>
+            {rows}
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>
+          </>
+        ));
+      }
+
+      // 문서 작성급 초안 — 컬럼 집합을 **원문에서** 가져와 경계값이 이미 있는지(유지) 없는지(신규추가)
+      // 판정한다. 예전엔 시그니처 파라미터만 봐서 원문(g_sys_error_his[0..4])과 다른 변수를 제안했다.
+      // ⚠ 얕은 병합(`{...a, ...b}`)은 **금지**다. `_src`가 통째로 덮이거나 남아, 값은 전체 초안
+      //   것으로 바뀌었는데 출처 배지는 job 시점 것이 남는다(추론값이 "문서 원문"으로 읽힘).
+      //   같은 필드별 병합기를 태워 `_src`도 값과 함께 따라오게 한다.
+      const sMeta = _mergeSutsMeta(
+        (_fullOk && _full.meta) || (docProposal?.suts_meta ?? {})[String(fn).toLowerCase()] || null,
+        docSutsMeta[String(fn).toLowerCase()] || null,
+      ) || {};
+      // 전체 초안이 실제로 **새 시퀀스를 가져왔는지**. 문서 폴백은 meta만 주고 시퀀스는 안 만들므로
+      // ok=true여도 표가 그대로일 수 있다 — 그때 "생성기 전량을 불러왔습니다"는 거짓말이다.
+      const _fullSeqs = (_fullOk && Array.isArray(_full.proposal) && _full.proposal.length) ? _full.proposal : null;
+      const draft = reconcileSuts({
+        docRows: has ? content : ((_fullOk && _full.doc_rows) || []),
+        docColumns: (_fullOk && _full.columns) || sutsColumnsFor(fn),
+        genSeqs: _fullSeqs || genSeqs,
+        // ⚠ 백엔드가 `var_types`를 `or {}`로 **항상 dict**로 준다. `{}`는 JS에서 truthy라
+        //   `||` 로 고르면 job이 해상해둔 타입맵이 빈 dict에 말소되고 전 행이 '검증필요'로 뒤집힌다.
+        varTypes: (_fullOk && Object.keys(_full.var_types || {}).length) ? _full.var_types : varTypesFor(fn),
+        diffElems,
+        sigParams: params,
+        // ⚠ '원문 N건 중 M건' 은 **문서 TC 수**만 쓴다. 생성기 시퀀스 수(gen_total)를 여기 넣으면
+        //   존재하지 않는 원문 절단을 경고하거나(문서 2건에 "10건 중 2건") 실제 절단을 과소보고한다.
+        // sMeta는 이미 `_full.meta`까지 병합된 결과다 — 여기서 다시 고르면 병합 규칙이 두 벌이 된다.
+        docTotal: sMeta.doc_total ?? undefined,
+      });
+      if (!draft.rows.length) {
+        const rows = _boundaryRows();
+        if (!rows) return has ? null : _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
+        return _box(has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)', has ? 'warning' : 'info', rows);
+      }
+      const _srcLabel = proposalSource === 'document' ? '문서 원문 기준' : '결정론';
+      const _sutsHdr = genSeqs
+        ? (has ? '✏ 경계값 케이스 재계산 (생성기 산출)' : '🖊 SUTS 작성 제안 (생성기 경계값 TC)')
+        : (has ? `✏ 경계값 케이스 재계산/추가 (${_srcLabel})` : `🖊 SUTS 작성 제안 (${_srcLabel})`);
+      return (
+        <DocProposalTable
+          title={_sutsHdr}
+          tone={has ? 'warning' : 'info'}
+          draft={draft}
+          // ⚠ 각 값이 **문서 원문**인지 **생성기 추론값**인지 밝힌다. 라벨이 없으면 사용자가
+          //   determine_test_method 같은 추론값을 원문으로 오인해 그대로 문서에 옮겨 적는다.
+          meta={[
+            { label: 'Component', value: sMeta.component, src: sMeta._src?.component },
+            { label: 'Test Method', value: sMeta.test_method, src: sMeta._src?.test_method },
+            { label: 'Gen.Method', value: sMeta.gen_method, src: sMeta._src?.gen_method },
+            { label: 'Safety Related', value: sMeta.asil ? `ASIL ${sMeta.asil}` : '', src: sMeta._src?.asil },
+            { label: 'Precondition', value: sMeta.precondition, src: sMeta._src?.precondition },
+            { label: 'Related ID', value: (sMeta.related_ids || []).join(', '), src: sMeta._src?.related_ids },
+          ]}
+          notes={[
+            // ⚠ 예전엔 content[0](임의 첫 행)을 "이 TC **기준** 재계산"이라 단정해, 실제 매칭 행이
+            //   아닌 곳을 근거로 제시했다. 이제 행마다 자체 근거(evidence)가 붙으므로 여기서는
+            //   "무엇과 대조했는지"만 사실대로 나열한다(단정 아님).
+            _sutsAnchors,
+            genSeqs ? '기대출력은 소스 로직(가드/클램프) 추론값 — 실행(VectorCAST) 검증 필요'
+              : '각 경계값별 기대출력(Expected) 판정기준 작성',
+            sMeta.gen_truncated ? `생성기 시퀀스 ${sMeta.gen_total}건 중 일부만 표시 — [전체 초안 불러오기]로 전량 조회` : '',
+            // TSV 열이 조용히 줄면 Excel 붙여넣기가 통째로 밀린다 — 반드시 표면화.
+            (sutsColumnsFor(fn) || {}).truncated ? '⚠ 문서 컬럼이 페이로드 상한으로 축소됨 — TSV 열이 원본 시트보다 적습니다' : '',
+            _full && _full.error ? `전체 초안: ${_full.error}` : '',
+            // ⚠ ok=true여도 시퀀스가 안 왔을 수 있다(문서 폴백은 meta만 준다). 그때 "전량을
+            //   불러왔습니다"는 거짓이므로 실제로 받은 것을 말한다.
+            _fullSeqs ? `전체 초안 ${_fullSeqs.length}건을 불러왔습니다(생성기 전량)` : '',
+            (_fullOk && !_fullSeqs) ? '전체 초안: 새 시퀀스 없음 — 소스 미해결로 문서 원문 기준 메타만 갱신했습니다' : '',
+            // 실패 경로의 사유는 이미 `_full.error`에 합쳐져 있다 — 성공했을 때만 별도로 편다(중복 방지).
+            ...((_fullOk && _full.warnings) || []),
+          ].filter(Boolean)}
+          // 새 시퀀스를 실제로 받았을 때만 버튼을 거둔다 — meta만 갱신된 경우엔 재시도 여지를 남긴다.
+          onLoadFull={_fullSeqs ? null : () => loadFullDraft(fn, 'suts')}
+          loadingFull={!!fullDraftBusy[_fullKey]}
+          // 서술문만 AI로 보강 — 표의 값 셀은 이 호출로 절대 바뀌지 않는다(값=결정론 소유).
+          prose={_prose}
+          // ⚠ 요청 1회가 5개 문서 필드를 만든다(버튼은 여기 하나뿐 — UDS/SDS/STS/SITS 카드가
+          //   그 결과를 각자 소비한다). 그러니 페이로드도 **5개 문서 근거를 모두** 실어야 한다.
+          //   SUTS 노드만 보내던 동안 sts_purpose·sits_description은 근거 없이 작성됐고,
+          //   환각 게이트의 허용 집합에도 그 문서의 어휘가 없어 대조가 헛돌았다.
+          onEnrichProse={() => loadDocProse(
+            fn,
+            {
+              suts: draft.rows, suts_meta: sMeta, columns: draft.columns,
+              uds: docProposalFor(fn, 'uds') || {},
+              sds: docProposalFor(fn, 'sds') || {},
+              sts: docProposalFor(fn, 'sts') || [],
+              sits: docProposalFor(fn, 'sits') || {},
+            },
+            proto,
+            functionDiffs[String(fn).toLowerCase()] || '',
+          )}
+          proseField="suts_description"
+        />
+      );
+    }
+
+    // ── SITS (통합 콜체인 시나리오) ──
+    if (key === 'sits') {
+      const has = _testSpecHasContent(fn, 'sits');
+      // 백엔드 생성기(collect_integration_flows) 실 통합 콜체인("a -> b -> c") + 서브케이스 입력/기대값 우선.
+      // 없으면(leaf 함수·cross-module 콜 없음) UDS callee 목록(c.calls)으로 폴백(콜체인 확인 골격).
+      const gen = docProposalFor(fn, 'sits');
+      const genChain = gen && gen.call_chain ? String(gen.call_chain).replace(/\s*->\s*/g, ' → ') : '';
+      const subs = (gen && Array.isArray(gen.sub_cases)) ? gen.sub_cases : [];
+      const chain = (c && c.calls) || [];
+      const chainText = genChain || (chain.length ? chain.join(' → ') : `${fn} 통합 콜체인 확인`);
+      const de = diffElems || {};
+      const gAll = [...new Set([...((de.changedGlobals && de.changedGlobals.added) || []), ...((de.changedGlobals && de.changedGlobals.removed) || [])])];
+      const _sitsHdr = has
+        ? (genChain ? '✏ 통합 시나리오 반영 (생성기 콜체인)' : '✏ 통합 시나리오 반영 (결정론)')
+        : (genChain ? '🖊 SITS 작성 제안 (생성기 통합 콜체인)' : '🖊 SITS 작성 제안 (통합 콜체인 골격)');
+      // 서브케이스가 있으면 문서 작성급 표(케이스 라벨 + Input/Expected 열 + 판정). 없으면 기존 골격.
+      if (subs.length) {
+        const draft = reconcileSits({
+          docTcs: _testSpecRows(fn, 'sits'),
+          gen,
+          varTypes: varTypesFor(fn),
+          diffElems,
+        });
+        draft.callChain = chainText;   // 폴백 콜체인(UDS callee)도 표에 그대로 보이게
+        return (
+          <DocProposalTable
+            title={_sitsHdr}
+            tone={has ? 'warning' : 'info'}
+            draft={draft}
+            // ⚠ 이 값들은 **전부 생성기 산출**이다(문서 원문이 아니다). SUTS는 필드마다 출처를
+            //   넘기는데 SITS만 안 넘겨서, 생성기가 합성한 TC ID(`SwITC_…`)가 원문 TC ID처럼
+            //   보였다 — "근거 없는 TC ID를 만들지 않는다" 규약 정면 위배.
+            meta={[
+              { label: 'TC ID', value: gen.tc_id ? `${gen.tc_id} (제안 ID — 실제 채번 필요)` : '', src: 'generator' },
+              { label: 'Gen.Method', value: gen.gen_method, src: 'generator' },
+              { label: 'Safety Related', value: gen.asil ? `ASIL ${gen.asil}` : '', src: 'generator' },
+              { label: 'Component', value: gen.module_name, src: 'generator' },
+              { label: 'Related ID', value: (gen.related_ids || []).join(', '), src: 'generator' },
+              {
+                label: 'Precondition',
+                value: gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정',
+                src: 'generator',
+              },
+            ]}
+            notes={[
+              '통합 기대값은 콜체인 하위 함수 산출 추론 — 실행 검증 필요',
+              // 생성기 서브케이스 절단(백엔드 total/truncated)을 침묵시키지 않는다.
+              draft.genTruncated ? `생성기 통합 케이스 ${draft.genTotal}건 중 ${draft.rows.length}건 표시` : '',
+              draft.docPartial ? '원문 일부만 파싱됨 — 아래 판정은 "문서에 없음"을 단정하지 않는다' : '',
+            ].filter(Boolean)}
+            // SUTS 카드 버튼이 만든 5개 필드 중 sits_description 은 **표시 표면이 없어**
+            // 생성·환각검사까지 하고 버려졌다. 여기서 소비한다(값 셀은 그대로 결정론 소유).
+            prose={_prose}
+            proseField="sits_description"
+          />
+        );
+      }
+      // 생성기 서브케이스가 없어도 **원문 통합 TC가 있으면** 그걸 근거로 재검증 표를 만든다.
+      // 실사용에서 흔한 조합이다(SITS 빌더 미실행 → 중간 JSON 없음 → 서브케이스 없음).
+      // 예전엔 이때 원문 TC 5건을 통째로 무시하고 "`<fn>` 통합 콜체인 확인" 두 줄만 냈다.
+      const _sitsDocTcs = _testSpecRows(fn, 'sits');
+      if (_sitsDocTcs.length) {
+        const draft = reconcileSitsDocTcs({
+          docTcs: _sitsDocTcs, fn, changeType: ct, diffElems,
+          // 조인 근거를 그대로 넘긴다 — 표시 텍스트로 재추론하지 않는다(절단 무관).
+          join: guideDetailByLc.get(String(fn).toLowerCase())?.sitsJoin,
+          normTc: _normTcId,
+        });
+        return (
+          <DocProposalTable
+            title="✏ 통합 시나리오 재검증 (문서 원문 기준)"
+            tone="warning"
+            draft={draft}
+            meta={[
+              { label: '관련 통합 TC', value: `${draft.rows.length}건`, src: 'document' },
+              {
+                label: 'Precondition',
+                value: gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정',
+                src: gAll.length ? 'document' : 'generator',
+              },
+            ]}
+            notes={[
+              // 판정은 "이 TC를 다시 봐야 하는가"이지 값 제안이 아니다 — 오독 방지.
+              '값 제안이 아니라 **재검증 대상 판정**이다(통합 입력/기대값은 SITS 빌더 실행 후 생성)',
+              draft.rows.some((r) => r.note) ? '일부 콜체인이 표시 상한으로 잘렸다 — 포함 여부를 단정하지 않는다' : '',
+              // 구 저장분(조인 근거를 Set으로 직렬화하던 시절) 복원 — 판정이 약해진 이유를 말한다.
+              draft.joinLost ? '추적성 조인 근거가 저장분에서 유실됐다 — 재분석하면 콜체인 기준 판정이 복구된다' : '',
+            ].filter(Boolean)}
+            prose={_prose}
+            proseField="sits_description"
+          />
+        );
+      }
+      return _box(_sitsHdr, has ? 'warning' : 'info', (
+        <>
+          <div>{_lbl('Call Chain')}<div style={_propMono}>{chainText}</div></div>
+          <div style={{ marginTop: 2 }}>{_lbl('Precondition')}{_val(gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정')}</div>
+          {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 Input/Expected Param — SUTS 경계값을 통합 시나리오로 승격</div>}
+        </>
+      ));
+    }
+
+    // ── STS (요구 기반 시험) — 요구 매핑 있을 때만(가짜 TC 금지) ──
+    if (key === 'sts') {
+      const reqs = d.requirements || [];
+      if (!reqs.length) {
+        // ⚠ 이건 **제안이 아니라 진단 노트**다 — 프레임에 넣으면 "이렇게 고쳐라"로 읽힌다.
+        return _note(<div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — {looksPrivate ? 'STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼)' : 'STS 요구 매핑 확인 필요(공개 함수는 SwRS 요구 연결 기대)'}</div>);
+      }
+      const has = _testSpecHasContent(fn, 'sts');
+      // 백엔드 생성기(_generate_steps_from_flow) 실 시험 절차 — logic_flow 기반 TC별 Action→Expected 스텝.
+      // 없으면 기존 'Test Action' 골격 폴백. 요구 매핑은 위에서 이미 게이트(가짜 TC 금지)했다.
+      const gen = docProposalFor(fn, 'sts');
+      const genTcs = Array.isArray(gen) && gen.length ? gen : null;
+      const _stsHdr = has
+        ? (genTcs ? '✏ 요구 기반 TC 반영 (생성기 절차)' : '✏ 요구 기반 TC 반영')
+        : (genTcs ? '🖊 STS 작성 제안 (생성기 시험 절차)' : '🖊 STS 작성 제안 (요구 기반 TC 골격)');
+      const _stsProse = _proseText('sts_purpose');
+      return _box(_stsHdr, has ? 'warning' : 'info', (
+        <>
+          <div>{_lbl('요구 기반 TC')}{_val(`요구 ${reqs.slice(0, 5).join(', ')}${reqs.length > 5 ? ` +${reqs.length - 5}개` : ''} 검증`)}</div>
+          {/* 시험 목적(산문)은 결정론 근거가 없어 AI 보강 자리다. SDS Behavior와 같은 규약:
+              보강이 오면 채우고, 폐기됐으면 사유를 말한다. 예전엔 백엔드가 sts_purpose를
+              만들고 환각 검사까지 해놓고 **표시 표면이 없어** 그대로 버렸다. */}
+          <div style={{ marginTop: 2 }}>
+            {_lbl('시험 목적')}
+            {_stsProse
+              ? <div>{_stsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span>{_proseTrim()}</div>
+              : <div className="text-muted" style={{ fontSize: 9 }}>
+                {_proseWhy('sts_purpose') || '요구 검증 목적 문장은 결정론 근거 없음(SUTS 카드의 [🤖 서술문 보강]으로 생성)'}
+              </div>}
+          </div>
+          {genTcs
+            ? genTcs.slice(0, 4).map((tc, i) => (
+              <div key={i} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
+                <div className="text-muted" style={{ fontSize: 8 }}>TC {i + 1}</div>
+                {(tc || []).slice(0, 6).map((st, j) => (
+                  <div key={j} style={{ fontSize: 9, overflowWrap: 'anywhere' }}>
+                    <span className="text-muted">Action: </span>{st.action}
+                    {st.expected && <><span className="text-muted"> → Exp: </span>{st.expected}</>}
+                  </div>
+                ))}
+              </div>
+            ))
+            : <div style={{ marginTop: 2 }}>{_lbl('Test Action')}{_val(`${fn} 호출 시퀀스 — 입력/기대 결과 작성`)}</div>}
+          {/* 생성기 Action/Expected도 로직 흐름 기반 추론값(실측 아님) — SUTS/SITS와 정직성 대칭(reviewer W2). */}
+          {genTcs && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Action/Expected는 로직 흐름 기반 추론 절차 — 실행 검증 필요</div>}
+          {/* 절단을 침묵시키지 않는다 — SUTS/SITS엔 있는 표기가 STS에만 없었다.
+              ⚠ 총량은 백엔드 `sts_meta.gen_total`(절단 전)을 쓴다. `genTcs.length`는 이미 잘린
+              수라 "6건 중 4건"처럼 실제(20건)보다 작게 말한다. 스텝 절단도 백엔드가 기록한다 —
+              프론트에서 `tc.length > 6`으로 재면 이미 잘려 온 배열이라 영구 false(dead code). */}
+          {(() => {
+            const m = (docProposal?.sts_meta ?? {})[String(fn).toLowerCase()] || {};
+            const shown = Math.min(genTcs ? genTcs.length : 0, 4);
+            return (
+              <>
+                {m.gen_truncated && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {m.gen_total}건 중 {shown}건 표시 — 전체는 문서 생성 시 산출</div>
+                )}
+                {!m.gen_truncated && genTcs && genTcs.length > 4 && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {genTcs.length}건 중 {shown}건 표시</div>
+                )}
+                {m.step_truncated && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 TC의 절차는 {m.step_cap}스텝까지만 표시</div>
+                )}
+              </>
+            );
+          })()}
+          {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Pre-condition: 위 파라미터 경계값 입력</div>}
+        </>
+      ));
+    }
+
+    // ── SDS (아키텍처 설계) ──
+    if (key === 'sds') {
+      const has = !!docContentFor(fn, 'sds');
+      const maybePrivate = !has && looksPrivate;  // static/private(s_·prv_)만 SDS 설계상 부재가 정상 — 공개 함수 누락은 실 갭(은폐 방지)
+      // Behavior 문단은 결정론 근거가 없다. 예전엔 `"본문 동작 변경 반영"` 같은 **동어반복
+      // 플레이스홀더**를 채워 정보가 있는 척했다 — 그건 지금 상태를 알려주는 게 아니라 가린다.
+      // 값이 있으면(AI 보강) 채우고, 없으면 비어 있음을 밝힌다.
+      const _sdsProse = _proseText('sds_behavior');
+      const _sdsGen = docProposalFor(fn, 'sds') || {};
+      const box = _box(has ? '✏ SDS 반영 (결정론)' : '🖊 SDS 작성 제안 (골격)', has ? 'warning' : 'info', (
+        <>
+          <div>{_lbl('Component Interface')}{_val(`${fn}${proto ? ` — ${proto}` : ''} 인터페이스 반영`)}</div>
+          {_sdsGen.interface_after && _sdsGen.interface_after !== _sdsGen.interface_before && (
+            <div style={{ marginTop: 2 }}>
+              {_lbl('Interface 변경')}
+              <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {_sdsGen.interface_before}</div>
+              <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {_sdsGen.interface_after}</div>
+            </div>
+          )}
+          <div style={{ marginTop: 2 }}>
+            {_lbl('Behavior')}
+            {_sdsProse
+              ? <div>{_sdsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span>{_proseTrim()}</div>
+              : <div className="text-muted" style={{ fontSize: 9 }}>
+                {_proseWhy('sds_behavior')
+                  || `${CHANGE_TYPE_KO[ct] || ct || '변경'} — 서술문은 결정론 근거 없음(SUTS 카드의 [🤖 서술문 보강]으로 생성)`}
+              </div>}
+          </div>
+        </>
+      ));
+      if (maybePrivate) {
+        return (
+          <>
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 아키텍처 SDS·요구기반 STS는 static private/내부 헬퍼엔 설계상 없을 수 있음(정상)</div>
+            {box}
+          </>
+        );
+      }
+      return box;
+    }
+
+    return null;
+  };
+  // 실제 현재 문서 내용 존재 여부 — renderDocContent의 miss 조건(_dcMiss 반환 지점)과 정확히 미러.
+  // ⚠ renderDocContent는 내용이 없어도 '미파싱' 노트(truthy)를 반환하므로, JSX truthy로 판정하면
+  //   "현재 원문"이 없는데도 있는 것으로 오판한다 → 존재 판정은 데이터로만(honesty).
+  const _dcHasContent = (fn, key) => {
+    if (key === 'sts' || key === 'sits') return _testSpecHasContent(fn, key);
+    const c = docContentFor(fn, key);
+    if (key === 'suts') return Array.isArray(c) && c.length > 0;
+    return !!c;  // uds, sds
+  };
+  // 통합 "현재 원문 → 수정안" — 실제 문서 내용(renderDocContent)과 작성 제안(renderAuthoringProposal)을
+  // 합성한다. 두 함수를 그대로 재사용해 각자의 미파싱 정직성·문구 로직을 보존하고, 프레임 헤더만 여기서
+  // 정직하게 판정한다(모달·문서별 상세 양 표면 동등화).
+  // ⚠ '현재 원문 → 수정안' 헤더/화살표는 **실제 현재 원문이 있을 때만**(_dcHasContent) 건다. 없는데
+  //   걸면 미파싱·신규 골격·'요구없음' 노트를 "현재 원문의 변경"으로 오표기한다(ISO 정직성 위배, reviewer
+  //   Critical). renderAuthoringProposal은 간접(!d.changed)·DELETE에서만 null이고 그 외엔 박스 또는
+  //   정직 노트(요구없음 STS 등)를 반환 — proposal truthy만으론 '변경안 존재'를 뜻하지 않는다.
+  const _c2pWrap = { marginTop: 6, padding: '4px 6px', border: '1px solid var(--border)', borderRadius: 4 };
+  const _c2pHdr = { fontWeight: 700, fontSize: 9, color: 'var(--color-warning)', marginBottom: 3, letterSpacing: 0.2 };
+  const _c2pArrow = { fontSize: 9, color: 'var(--color-warning)', margin: '3px 0', textAlign: 'center' };
+  const renderCurrentToProposal = (d, key, cd, diffElems, ct) => {
+    const fn = d && d.function;
+    if (!fn) return null;
+    const current = renderDocContent(fn, key);      // 실 내용 or '미파싱' 정직 노트(항상 truthy)
+    // ⚠ 위 주석이 "proposal truthy만으론 '변경안 존재'를 뜻하지 않는다(요구없음 STS 등)"라고 이미
+    //   적어놨는데 코드는 반대 방향만 막고 있었다 — 진단 노트가 "▼ 수정안" 프레임에 들어갔다.
+    //   이제 렌더러가 `_meta.isNote`로 직접 알려준다(호출부가 조건을 재구현하지 않는다).
+    const _meta = {};
+    const proposal = renderAuthoringProposal(d, key, cd, diffElems, ct, _meta); // 간접·DELETE만 null
+    // 실제 현재 원문이 있고 **진짜 제안**이 있을 때만 before→after 프레임.
+    if (proposal && !_meta.isNote && _dcHasContent(fn, key)) {
+      return (
+        <div style={_c2pWrap}>
+          <div style={_c2pHdr}>현재 원문 → 수정안</div>
+          {current}
+          <div style={_c2pArrow}>▼ 수정안</div>
+          {proposal}
+        </div>
+      );
+    }
+    return (current || proposal) ? <>{current}{proposal}</> : null;
+  };
+  // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
+  // ⚠ useMemo — 매 렌더 새 객체라 이걸 deps 로 쓰는 아래 useCallback 이 렌더마다 재생성됐다.
+  const changeSummary = useMemo(() => {
+    const acc = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
+    for (const [, k] of activeFnEntries) { if (k in acc) acc[k] += 1; }
+    return acc;
+  }, [activeFnEntries]);
+
+  // ── 파일영향(무정보) 분리 — 직접 변경 증거 없이 fatten으로 딸려온 함수를 집계/리스트에서 옵션 처리 ──
+  // "변경 함수" 수를 부풀리므로 기본 숨김. 라인 diff 분류(isLineClassified)이면서 증거 有/無가 혼재할
+  // 때만 토글 제공(hasEvidenceSplit). 전부 보수 분류거나 전부 증거면 분리가 무의미 → 토글 없이 전체 표시.
+  const evidencedFnEntries = activeFnEntries.filter(([fn, k]) => !functionHasNoEvidence(fn, k, changeDetails, functionDiffs, functionMeta));
+  const noEvidenceCount = activeFnEntries.length - evidencedFnEntries.length;
+  // 데모(합성 데이터, change_details/function_diffs 없음)는 전부 무정보로 잡히므로 분리 제외 — 데모가 텅 비지 않게.
+  const hasEvidenceSplit = !demoMode && !isConservativeCount && noEvidenceCount > 0 && evidencedFnEntries.length > 0;
+  const hideFileImpact = hasEvidenceSplit && !showFileImpact;
+  // 포맷/이동만(의미 변경 없음) 함수 — 본문 diff가 코드 이동/공백/포맷만이라 실 변경으로 오인되기 쉬움. 필터 제공.
+  const formatOnlyCount = useMemo(
+    () => (guide?.details || []).filter(
+      (d) => { const de = extractDiffElementsCached(functionDiffs[String(d.function).toLowerCase()] || ''); return d.changed && (de.noSemanticChange || de.commentOnly); },
+    ).length,
+    [guide, functionDiffs],
+  );
+  const visibleFnEntries = hideFileImpact ? evidencedFnEntries : activeFnEntries;
+  const visibleChangeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
+  for (const [, k] of visibleFnEntries) { if (k in visibleChangeSummary) visibleChangeSummary[k] += 1; }
+
+  // ── 파일영향 분리를 요약 전 패널로 전파 — impact.direct·actions[doc].functions·coverage_gap.functions는
+  // 모두 함수명(소문자) 리스트. changed_function_types 키는 대소문자 혼용이라 소문자 kind 맵으로 조회한다. ──
+  const changedKindLower = {};
+  for (const [fn, k] of activeFnEntries) changedKindLower[String(fn).toLowerCase()] = k;
+  const nameIsNoEvidence = (name) => {
+    const lf = String(name).toLowerCase();
+    const kind = changedKindLower[lf];
+    if (!kind) return false;  // 변경 함수 목록에 없음(간접/기타) → 파일영향 아님(유지)
+    return functionHasNoEvidence(name, kind, changeDetails, functionDiffs, functionMeta);
+  };
+  // hideFileImpact면 무정보(파일영향) 함수명을 제외한 리스트. 아니면 원본.
+  const visibleNameList = (list) => (hideFileImpact ? (list || []).filter((n) => !nameIsNoEvidence(n)) : (list || []));
+  // 직접 영향 = 변경 함수와 동일 집합(소문자) — 실변경만 세고 파일영향은 분리.
+  const directAll = activeImpactGroups.direct || [];
+  const directVisibleCount = visibleNameList(directAll).length;
+  const directHiddenCount = directAll.length - directVisibleCount;
+  // 커버리지 — 파일영향(무변경) 함수는 이 변경이 유발한 갭이 아니므로 기본 제외(오귀속 방지).
+  // 전체 표시(토글 ON·분리 없음·제외분 0)면 백엔드 summary를 그대로 사용(재계산 divergence 방지),
+  // 파일영향을 제외할 때만 함수 리스트에서 재집계한다.
+  const covView = (() => {
+    if (!coverageGap?.available || !coverageGap.summary) return null;
+    const s = coverageGap.summary;
+    // 미매칭/미검증 지표(백엔드 coverage_gap.py가 "증거 부재를 '충족'으로 위장 금지"로 산출).
+    // unmatched 함수는 functions[] rows에 없으므로(매칭 실패 → continue) 파일영향 필터로 재집계
+    // 불가 → summary 값을 그대로 노출하고 "전체 영향 함수 기준"임을 명시한다(무표시 = 위장).
+    const evid = {
+      unmatched: s.unmatched ?? 0,
+      unmatchedSafety: s.unmatched_safety ?? 0,
+      unmeasuredSafety: s.unmeasured_safety ?? 0,
+      unknownAsil: s.unknown_asil ?? 0,
+      // Δ 신뢰도: (a) baseline이 같은 빌드 → delta≡0, (b) revision 미상(로컬 diff 등) → 같은 빌드인지
+      // 알 수 없음, (c) baseline이 더 최신(과거 빌드 분석) → 개선분이 음수 Δ로 뒤집혀 유령 회귀.
+      // 셋 중 하나라도 참이면 "회귀 N"을 수치로 단정하지 않는다(위장 방지).
+      sameRevBaseline: !!s.baseline_same_revision,
+      deltaUntrusted: !!(s.baseline_same_revision || s.baseline_revision_unknown || s.baseline_newer_than_build),
+      deltaUntrustReason: s.baseline_same_revision ? '같은 빌드 — Δ 비교 불가'
+        : s.baseline_newer_than_build ? '직전 스냅샷이 더 최신 빌드 — Δ 신뢰 불가(유령 회귀)'
+          : s.baseline_revision_unknown ? '스냅샷 빌드 미상 — Δ 신뢰 불가' : '',
+      baselineRevision: s.baseline_revision || '',
+      // 이름충돌로 worst-copy(최악 copy) rate를 노출한 함수 수(백엔드 collision_worst_copy) — 전역
+      // max 병합의 gap 은폐를 안전측으로 대체했음을 표면화(0이면 충돌 영향 없음/단일 copy).
+      collisionWorstCopy: s.collision_worst_copy ?? 0,
+    };
+    const base = { evaluated: s.evaluated ?? 0, below: s.below_target ?? 0, unmeasured: s.unmeasured ?? 0, regressed: s.regressed ?? 0, hidden: 0, hadBaseline: s.had_baseline, ...evid };
+    const fns = coverageGap.functions || [];
+    if (!hideFileImpact || !fns.length) return base;
+    const vis = fns.filter((f) => !nameIsNoEvidence(f.function));
+    const hidden = fns.length - vis.length;
+    if (!hidden) return base;
+    return {
+      evaluated: vis.length,
+      below: vis.filter((f) => f.meets_target === false && !f.unmeasured_target).length,
+      unmeasured: vis.filter((f) => f.unmeasured_target).length,
+      regressed: vis.filter((f) => typeof f.delta === 'number' && f.delta < 0).length,
+      hidden,
+      hadBaseline: s.had_baseline,
+      ...evid,
+    };
+  })();
+
+  // ── 문서별 상세 탭 (함수-우선 → 문서-우선 전치) ──────────────────────────────────────────
+  // 멤버십은 권위 백엔드 actions[doc].functions(파일영향 제외), 편집 액션은 함수 상세 모달과 동일한
+  // 결정론 헬퍼 buildDocumentActions(d)[doc]. 신규 fetch·백엔드 변경 없음(순수 재피벗).
+  const docCounts = {};
+  for (const k of DOC_KEYS) docCounts[k] = visibleNameList(actions[k]?.functions || []).length;
+  // 최초 미선택(null)일 때만 첫 '영향 있는' 문서로 폴백. 사용자가 명시적으로 고른 문서는 0-count여도
+  // 존중해 '이 문서에 영향 없음' 빈 상태를 보여준다(reviewer W7: 0-count면 조용히 튕기던 wrong-pick 제거).
+  const effSelectedDoc = selectedDoc || (DOC_KEYS.find(k => docCounts[k] > 0) || 'uds');
+  // 우측 함수행 하단 칩 — 문서 성격에 맞는 매핑만(UDS=요구, STS/SUTS=해당 TC).
+  const docChips = (doc, d) => (doc === 'uds' ? (d.requirements || []) : doc === 'sts' ? (d.stsTestCases || []) : doc === 'suts' ? (d.sutsTestCases || []) : doc === 'sits' ? (d.sitsTestCases || []) : []);
+  // 선택 문서의 함수 행(direct 우선 정렬). activeTab==='doc'일 때만 계산 — buildDocumentActions ×N 회피.
+  const docRows = useMemo(() => {
+    if (!guide || activeTab !== 'doc') return [];
+    const byLc = new Map();
+    for (const dd of guide.details) byLc.set(String(dd.function).toLowerCase(), dd);
+    let rows = (actions[effSelectedDoc]?.functions || []).map((name) => {
+      const d = byLc.get(String(name).toLowerCase()) || null;
+      if (!d) return { name, d: null, acts: [], cd: {}, diffElems: EMPTY_DIFF_ELEMS, ct: '' };
+      const cd = changeDetails[String(d.function).toLowerCase()] || {};
+      const fd = functionDiffs[String(d.function).toLowerCase()] || '';
+      const pdiff = (cd.before || cd.after) ? diffSignatureParamsCached(cd.before, cd.after) : null;
+      const diffElems = extractDiffElementsCached(fd);
+      const acts = buildDocumentActions(d, pdiff, diffElems)[effSelectedDoc] || [];
+      return { name: d.function, d, acts, cd, diffElems, ct: (d.changeType || '').toUpperCase() };
+    });
+    // 파일영향(직접 변경·증거 없음) 제외 — filteredGuide(L778)와 동일 규칙(간접은 유지).
+    if (hideFileImpact) rows = rows.filter(r => !(r.d?.changed && functionHasNoEvidence(r.d.function, r.d.changeType, changeDetails, functionDiffs, functionMeta)));
+    if (hideFormatOnly) rows = rows.filter(r => { if (!r.d?.changed) return true; const de = extractDiffElementsCached(functionDiffs[String(r.d.function).toLowerCase()] || ''); return !(de.noSemanticChange || de.commentOnly); });
+    rows.sort((a, b) => {
+      const ac = a.d?.changed ? 0 : 1; const bc = b.d?.changed ? 0 : 1;
+      if (ac !== bc) return ac - bc;                                   // 직접 변경 우선
+      const ao = CHANGE_ORDER[a.d?.changeType] || 0; const bo = CHANGE_ORDER[b.d?.changeType] || 0;
+      if (ao !== bo) return bo - ao;                                    // 구조적 변경(시그니처/신규/삭제) 우선
+      return String(a.name).localeCompare(String(b.name));
+    });
+    return rows;
+  }, [guide, activeTab, effSelectedDoc, actions, changeDetails, functionDiffs, functionMeta, hideFileImpact, hideFormatOnly]);
 
   const filteredGuide = useMemo(() => {
     if (!guide) return [];
     let items = guide.details;
+    // 파일영향(무정보) 숨김 — 직접 변경이나 증거 없는(fatten) 함수 제외. 간접(changed=false)은 유지.
+    if (hideFileImpact) items = items.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs, functionMeta)));
+    if (hideFormatOnly) items = items.filter(d => { if (!d.changed) return true; const de = extractDiffElementsCached(functionDiffs[String(d.function).toLowerCase()] || ''); return !(de.noSemanticChange || de.commentOnly); });
     if (hopFilter !== 'all') items = items.filter(d => d.hop === hopFilter);
     if (docFilter === 'has_reqs') items = items.filter(d => d.requirements.length > 0);
     else if (docFilter === 'has_sts') items = items.filter(d => d.stsTestCases.length > 0);
     else if (docFilter === 'has_suts') items = items.filter(d => d.sutsTestCases.length > 0);
-    else if (docFilter === 'no_mapping') items = items.filter(d => d.requirements.length === 0 && d.stsTestCases.length === 0);
+    // '매핑 없음'은 요구사항·STS·SUTS TC가 모두 없을 때만 — SUTS TC만 있는 함수를 '매핑 없음'으로
+    // 오분류하던 버그 수정(SUTS TC도 실제 매핑 증거).
+    else if (docFilter === 'no_mapping') items = items.filter(d => d.requirements.length === 0 && d.stsTestCases.length === 0 && d.sutsTestCases.length === 0 && (d.sitsTestCases || []).length === 0);
     if (searchTerm.trim()) {
       const q = searchTerm.trim().toLowerCase();
       items = items.filter(d =>
         d.function.toLowerCase().includes(q) ||
         d.requirements.some(r => r.toLowerCase().includes(q)) ||
-        d.stsTestCases.some(tc => tc.toLowerCase().includes(q))
+        d.stsTestCases.some(tc => tc.toLowerCase().includes(q)) ||
+        d.sutsTestCases.some(tc => tc.toLowerCase().includes(q)) ||
+        (d.sitsTestCases || []).some(tc => tc.toLowerCase().includes(q))
       );
     }
     return items;
-  }, [guide, hopFilter, docFilter, searchTerm]);
+  }, [guide, hopFilter, docFilter, searchTerm, hideFileImpact, hideFormatOnly, changeDetails, functionDiffs, functionMeta]);
 
   // Build detailed guide
   const buildGuide = useCallback(async () => {
@@ -83,143 +1803,1032 @@ export default function ImpactGuideSection({ job, analysisResult }) {
       toast('info', '변경된 함수가 없습니다.');
       return;
     }
+    // 이 작업이 '어느 대상'을 위해 시작됐는지 여기서 고정한다. 아래 쓰기들이 owner를 생략하면
+    // 쓰는 순간 화면에 떠 있는 대상으로 각인돼, 문서 추출 5회가 도는 동안 다른 빌드로 전환하면
+    // 이 대상의 데이터로 만든 가이드가 그 빌드 소유가 된다(오귀속).
+    const owner = { key: impactKey, ref: impact };
     setLoading(true);
+    // reviewer Finding#4: 이전 분석의 AI 요약 오염 방지. AI fetch 실패는 catch로 삼켜(L930) 성공 시에만
+    // setAiGuide되므로, 새 분석 시작 시 초기화하지 않으면 직전 분석의 위험도/안전함수/테스트제안이
+    // 함수별 상세(새 데이터)와 뒤섞여 표시된다(ISO 위험 요약 cross-analysis 오염).
+    setAiGuide(null, owner);
     try {
-      // 1. UDS func→req mapping
+      // 추출 API 실패를 삼키지 않고 수집 — '매핑 없음'(실제 부재)과 '조회 실패'(403/500/네트워크)를
+      // 구분해 사용자에게 표면화한다. 과거 catch(_){}로 실패해도 성공 토스트가 뜨던 silent 버그 방지.
+      const fetchFailures = [];
       let udsMapping = [];
-      if (linkedDocs.uds) {
-        try {
-          const d = await post('/api/jenkins/uds/extract-mapping', { uds_path: linkedDocs.uds });
-          udsMapping = d?.mapping_pairs ?? [];
-        } catch (_) {}
-      }
-
-      // 2. STS req→TC mapping
       let stsTCs = [];
-      if (linkedDocs.sts) {
-        try {
-          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
-          stsTCs = d?.vcast_rows ?? [];
-          // N21: 외부 형식 SUTS/STS — 시트 미인식 시 사용자에게 명확 안내
-          if (!stsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
-            toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
-          }
-        } catch (_) {}
-      }
-
-      // 3. SUTS func→TC mapping
       let sutsTCs = [];
-      if (linkedDocs.suts) {
-        try {
-          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
-          sutsTCs = d?.vcast_rows ?? [];
-          if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
-            toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
-          }
-        } catch (_) {}
+      let sdsPairs = [];   // SDS 함수↔SwRS요구 브리지(SwRS 허브 경유 — STS/SITS TC 조인의 핵심)
+      let sitsTCs = [];    // SITS req→TC (SwRS 허브 키)
+      // Track 1a: 검토 TC(STS 조인) = 0일 때 사유를 정직 표시하기 위한 진단 플래그.
+      let stsSheetUnrecognized = false;
+
+      if (demoMode) {
+        // 데모: 실제 추출 API를 데모 함수명으로 호출하면 매핑이 항상 비므로 데모 매핑을 직접 주입해
+        // 요구사항/STS/SUTS TC가 채워진 완전한 시나리오를 보여준다(과거엔 빈 가이드만 나왔다).
+        udsMapping = DEMO_UDS_MAPPING;
+        stsTCs = DEMO_STS_TCS;
+        sutsTCs = DEMO_SUTS_TCS;
+        sitsTCs = DEMO_SITS_TCS;
+        // sdsPairs는 데모에서 비움 — STS/SITS 조인은 UDS-경로(funcToReqs→SwRS_*) union으로 성립.
+      } else {
+        // 1. UDS func→req mapping
+        if (linkedDocs.uds) {
+          try {
+            const d = await post('/api/jenkins/uds/extract-mapping', { uds_path: linkedDocs.uds });
+            udsMapping = d?.mapping_pairs ?? [];
+          } catch (e) { fetchFailures.push({ doc: 'UDS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 2. STS req→TC mapping
+        if (linkedDocs.sts) {
+          try {
+            const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
+            stsTCs = d?.vcast_rows ?? [];
+            // N21: 외부 형식 SUTS/STS — 시트 미인식 시 사용자에게 명확 안내
+            if (!stsTCs.length && Array.isArray(d?.available_sheets)) {
+              stsSheetUnrecognized = true;
+              if (typeof toast === 'function') toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+            }
+          } catch (e) { fetchFailures.push({ doc: 'STS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 3. SUTS func→TC mapping
+        if (linkedDocs.suts) {
+          try {
+            const d = await post('/api/jenkins/suts/extract-traceability', { path: linkedDocs.suts });  // SUTS 전용 파서(요구=SwUFn 함수ID)
+            sutsTCs = d?.vcast_rows ?? [];
+            if (d?.warning && typeof toast === 'function') toast('warning', `SUTS: ${d.warning}`);  // 오태깅 검증(H3)
+            if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
+              toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+            }
+          } catch (e) { fetchFailures.push({ doc: 'SUTS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 4. SDS 함수↔SwRS요구 브리지(SwRS 허브) — STS TC 매칭 0의 근본 해결. UDS 설계요구(SwSTR)와
+        //    STS TC 요구(SwEI)가 계열이 달라 직접 조인 0이므로, SDS의 함수명↔SW요구 매핑으로 우회한다.
+        if (linkedDocs.sds) {
+          try {
+            const d = await post('/api/jenkins/sds/extract-mapping', { sds_path: linkedDocs.sds });
+            sdsPairs = d?.sds_pairs ?? [];
+          } catch (e) { fetchFailures.push({ doc: 'SDS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 5. SITS req→TC — 같은 SwRS 허브 경유로 per-function SITS TC 조인.
+        if (linkedDocs.sits) {
+          try {
+            const d = await post('/api/jenkins/sits/extract-traceability', { path: linkedDocs.sits });
+            sitsTCs = d?.vcast_rows ?? [];
+          } catch (e) { fetchFailures.push({ doc: 'SITS', msg: e?.message || '조회 실패' }); }
+        }
       }
 
       // Build per-function guide
+      // F1(검토 TC=0 근본): STS extract-traceability는 requirement_id를 _normalize_req_id로
+      // 대문자화(+Sy→Sw)해 방출하지만, UDS extract-mapping은 raw regex 매치(원본 케이스)를 방출한다.
+      // 정규화 없이 조인하면 STS 키 'SWTR_1' vs UDS rid 'SwTR_1'이 영구 미스 → 검토 TC=0.
+      // 조인 키만 정규화하고, 표시용(details.requirements)은 UDS 원본 케이스를 보존한다.
+      const _normReq = (r) => String(r || '').replace(/\s+/g, '').toUpperCase();
+      // SDS 컴포넌트/함수명 → bridge 키 정규화. 백엔드 _sds_comp_key(report_gen/requirements.py:86)를
+      // 완전 포팅: 소문자화 → 선행 '행번호+탭' 표 아티팩트 제거 → '(' 이전만 → 배열첨자 제거 후 재trim
+      // → 선행 '_' 제거 → 순수 C 식별자만 반환(아니면 '' 폐기 — 한글 설명문 등 거짓 bridge 차단).
+      const _sdsKey = (c) => {
+        let s = String(c || '').trim().toLowerCase();
+        if (!s) return '';
+        s = s.replace(/^\d+\s*\t/, '');          // 표 파싱 아티팩트(행번호+탭)
+        s = s.split('(')[0];                      // 시그니처 조각 제거
+        s = s.replace(/\[[^\]]*\]/g, '').trim();  // 배열첨자 제거 후 재trim(공백 잔류 방지)
+        s = s.replace(/^_+/, '');                 // 선행 '_'(_entrypoint↔entrypoint)
+        return /^[a-z_][a-z0-9_]*$/.test(s) ? s : '';
+      };
+      // 반환형 헝가리안 접두사 제거(백엔드 _strip_ret_type_prefix:115). SDS 'u16s_X' ↔ 테스트 's_X'
+      // 불일치 보정용 — 완전키는 보존하고, 충돌 안전한 base만 alias로 추가(아래 sdsFuncToReqs 참조).
+      const _stripRet = (s) => s.replace(/^(?:u8|u16|u32|s8|s16|s32)(?=[sgl]_)/, '');
+      // F3(reviewer sweep): funcToReqs 키는 UDS source_ids(문서 "Name" 셀 원본 케이스 — backend가
+      // 소문자화하지 않는다, jenkins.py:4025 func_name 원본 보존). 반면 guide fn은 backend by_name
+      // 정규화로 소문자다. 정규화 없이 조회하면 mixed-case 함수명(예 'EEPROM_SetByte')은
+      // funcToReqs[소문자] 미스 → 요구사항·STS TC가 통째로 0 → ISO 26262 검토범위 under-report
+      // (kjpds02는 all-lowercase라 미발현, hdpdm01/NE_GN7 CamelCase에서 발현). fnToSutsTCs와 동일하게
+      // 조인 키만 양측 소문자화하고, 표시용 requirement_id는 원본을 보존한다.
       const funcToReqs = {};
       for (const mp of udsMapping) {
         for (const fn of (mp.source_ids || [])) {
-          if (!funcToReqs[fn]) funcToReqs[fn] = new Set();
-          funcToReqs[fn].add(mp.requirement_id);
+          const fk = String(fn || '').trim().toLowerCase();
+          if (!fk) continue;
+          if (!funcToReqs[fk]) funcToReqs[fk] = new Set();
+          funcToReqs[fk].add(mp.requirement_id);
         }
       }
 
       const reqToStsTCs = {};
       for (const row of stsTCs) {
-        if (!reqToStsTCs[row.requirement_id]) reqToStsTCs[row.requirement_id] = new Set();
-        reqToStsTCs[row.requirement_id].add(row.testcase);
+        const rid = _normReq(row.requirement_id);
+        if (!reqToStsTCs[rid]) reqToStsTCs[rid] = new Set();
+        reqToStsTCs[rid].add(row.testcase);
       }
 
+      // F1-parallel(reviewer Finding#1): SUTS unit 컬럼도 원본 케이스 → 소문자 guide fn과 조인하려면
+      // 양측 정규화 필요. 안 하면 per-function SUTS TC가 조용히 0이 되어 ISO 회귀 증거가 과소보고된다.
+      // ⚠ 스코프 주의: 이 함수-테이블 SUTS는 추적성 '3.SW Test Spec' 시트(unit 컬럼) 기준 = 전체 영향
+      //   함수의 '보유 시험'이다. 회귀 패널 SUTS(regression_test_set.suts)는 백엔드 '2.SW Unit Test Spec'
+      //   시트의 TC 블록(base_tc_id) 보유 기준 = '재실행 대상'이라, 다른 시트·다른 기준이므로 두 수치는
+      //   구조적으로 다를 수 있다(과거 "회귀 패널과 일치해야" 단언은 오류 — 시트가 달라 일치 보장 불가).
       const fnToSutsTCs = {};
       for (const row of sutsTCs) {
-        const fn = row.unit || '';
-        if (!fnToSutsTCs[fn]) fnToSutsTCs[fn] = new Set();
-        fnToSutsTCs[fn].add(row.testcase);
+        const uk = String(row.unit || '').trim().toLowerCase();
+        if (!uk) continue;
+        if (!fnToSutsTCs[uk]) fnToSutsTCs[uk] = new Set();
+        fnToSutsTCs[uk].add(row.testcase);
+      }
+
+      // SwRS 허브 브리지: 함수(정규화) → SW요구(SwRS) 집합. SDS sds_pairs.component_ids는 컴포넌트+
+      // 인터페이스 함수명을 모두 담고(백엔드가 _sds_comp_key로 정규화), requirement_id는 SwRS 계열.
+      // _normFn으로 반환형 접두사를 수렴시켜 impact 함수명과 매칭한다.
+      // 전체 SDS 키 선스캔 후, 반환형 접두사 base가 ①단 하나의 접두사형에서만 파생되고 ②그 base가
+      // 별도 SDS 키가 아닐 때만 alias 등록(백엔드 _alias_safe, requirements.py:2078-2103). 충돌형
+      // (u8g_X·s8g_X — 반환형 다른 별개 함수)이 같은 base로 모이면 alias를 안 만들어 오귀속을 막는다.
+      const _allSdsKeys = new Set();
+      for (const p of sdsPairs) for (const c of (p.component_ids || [])) { const k = _sdsKey(c); if (k) _allSdsKeys.add(k); }
+      const _prefBaseCount = {};
+      for (const k of _allSdsKeys) { const b = _stripRet(k); if (b !== k) _prefBaseCount[b] = (_prefBaseCount[b] || 0) + 1; }
+      const _aliasSafe = new Set();
+      for (const [b, cnt] of Object.entries(_prefBaseCount)) if (cnt === 1 && !_allSdsKeys.has(b)) _aliasSafe.add(b);
+      const sdsFuncToReqs = {};
+      for (const p of sdsPairs) {
+        const rid = _normReq(p.requirement_id);
+        for (const c of (p.component_ids || [])) {
+          const key = _sdsKey(c);
+          if (!key) continue;
+          const keys = [key];                                  // 완전키는 항상 등록
+          const alias = _stripRet(key);
+          if (alias !== key && _aliasSafe.has(alias)) keys.push(alias);  // 안전 base만 alias 추가
+          for (const kk of keys) {
+            if (!sdsFuncToReqs[kk]) sdsFuncToReqs[kk] = new Set();
+            sdsFuncToReqs[kk].add(rid);
+          }
+        }
+      }
+      // SITS req→TC — reqToStsTCs와 동일 패턴(SwRS 허브 키).
+      const reqToSitsTCs = {};
+      for (const row of sitsTCs) {
+        const rid = _normReq(row.requirement_id);
+        if (!reqToSitsTCs[rid]) reqToSitsTCs[rid] = new Set();
+        reqToSitsTCs[rid].add(row.testcase);
+      }
+      // SITS는 요구가 아니라 단위(SwUFn) 기반이다 — 실 kjpds02 SITS TC는 SYSTEMTM 네임스페이스 요구만
+      // 참조해 SwRS 허브로는 0이지만, testcase ID(SwITC_SwUFn_0112)에 SwUFn(단위함수) ID를 품는다.
+      // SUTS TC(SwUTC_SwUFn_N, unit=함수명)로 SwUFn→함수명 맵을 만들어 SITS TC를 함수에 직접 연결한다
+      // (백엔드 트레이스 매트릭스의 SITS 2-hop과 동일 원리, report_gen/requirements.py:2203).
+      // 백엔드 _SWUFN_RE(requirements.py:29)·jenkins.py:1082와 동일 — SwUFn_(단위)·SwIFn_(통합) +
+      // SwFn_(Fault Injection, SwITC_FI_SwFn_*)까지. 과거 /Sw[UI]Fn_/는 FI TC를 통째로 탈락시켰다.
+      const _SWUFN_RE = /Sw[UI]?Fn_\d+/ig;
+      const swufnToFn = {};
+      for (const row of sutsTCs) {
+        const unit = String(row.unit || '').trim().toLowerCase();
+        if (!unit) continue;
+        for (const m of String(row.testcase || '').match(_SWUFN_RE) || []) {
+          const k = m.toUpperCase();
+          if (!swufnToFn[k]) swufnToFn[k] = new Set();
+          swufnToFn[k].add(unit);
+        }
+      }
+      const fnToSitsTCs = {};  // 함수명(lower) → Set<SITS TC>  (SwUFn 단위 경로 + 콜체인 경로)
+      // ⚠ 조인 **경로**를 따로 보존한다. union만 남기면 "이 TC가 왜 이 함수에 붙었는지"를 잃어버려,
+      //   소비처가 화면용 **절단된** 콜체인 텍스트로 그걸 다시 추론하게 된다 — 그러면 300자 뒤에
+      //   있는 함수를 못 찾아 전부 '검증필요'가 된다(실측: 실데이터 3건 전부). 여기 `chain_fns`는
+      //   백엔드가 파싱한 **전체 체인**이라 절단이 없다.
+      const fnToSitsByChain = {};   // 콜체인에 실재 → 재검증 확정
+      const fnToSitsByUnit = {};    // SwUFn 단위(entry) 경로 → 재검증 확정
+      const _addTo = (map, fn, tc) => { if (!map[fn]) map[fn] = new Set(); map[fn].add(tc); };
+      for (const row of sitsTCs) {
+        const tc = String(row.testcase || '');
+        // (1) SwUFn 단위 경로 — testcase의 SwUFn/SwIFn/SwFn을 SUTS unit 맵으로 함수에 연결(entry).
+        for (const m of tc.match(_SWUFN_RE) || []) {
+          for (const fn of (swufnToFn[m.toUpperCase()] || [])) {
+            if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
+            fnToSitsTCs[fn].add(tc);
+            _addTo(fnToSitsByUnit, fn, tc);
+          }
+        }
+        // (2) 콜체인 경로 — 백엔드가 파싱한 "Interface : A -> B -> ..." 체인 함수(깊은 callee 포함)에 TC 귀속.
+        //     entry SwUFn뿐 아니라 체인 상 모든 함수가 그 통합시험 커버리지를 인정받는다(g_drvin 0 해소).
+        for (const cf of (row.chain_fns || [])) {
+          const fn = String(cf || '').trim().toLowerCase();
+          if (!fn) continue;
+          if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
+          fnToSitsTCs[fn].add(tc);
+          _addTo(fnToSitsByChain, fn, tc);
+        }
       }
 
       const details = [];
       const allReqs = new Set();
       const allStsTcs = new Set();
+      const allSitsTcs = new Set();
 
-      for (const [fn, changeType] of activeFnEntries) {
-        const reqs = funcToReqs[fn] ? [...funcToReqs[fn]] : [];
+      // 가이드 행 = 변경(직접) 함수 ∪ 간접 영향 함수(1/2hop). 과거엔 changed 함수만 순회해서
+      // 모든 행의 hop이 'direct'로 고정 → 1-hop/2-hop 필터가 영구히 죽고, 간접 영향 ASIL 함수가
+      // 가이드에서 통째로 누락(ISO 26262 under-report)됐다. 간접 함수는 변경종류 없음(changed=false)으로
+      // 구분 표기하되, backend function_meta의 ASIL·커버리지·요구/시험 매핑은 동일하게 조인한다.
+      const changedMap = new Map(activeFnEntries.map(([fn, k]) => [fn, k]));
+      // NOTE(F3 검토 반영): 대소문자 무관 dedup은 정상 경로에선 no-op(백엔드가 changed_types를
+      // by_name 기준 소문자로 정규화 → impact-group과 케이스 동일)이고, source_root 미해결 edge
+      // 경로에선 오히려 ASIL이 해석되는 소문자 사본을 버리고 ASIL 공백인 원본 케이스만 남겨
+      // ASIL 가시성을 떨어뜨릴 수 있어(reviewer Finding #1) 도입하지 않는다. 정확한 처리는
+      // function_meta/coverage 소문자 폴백 lookup으로 한다(아래 details.asil/coverage의 _fnLc 폴백, 해소됨).
+      const guideFns = [...new Set([
+        ...changedMap.keys(),
+        ...(activeImpactGroups.direct || []),
+        ...(activeImpactGroups.indirect_1hop || []),
+        ...(activeImpactGroups.indirect_2hop || []),
+      ].filter(Boolean))];
+
+      for (const fn of guideFns) {
+        const changeType = changedMap.get(fn) || '';
+        const isChanged = changedMap.has(fn);
+        // 조인은 소문자 정규화 키로(funcToReqs·fnToSutsTCs 양측 소문자화 — mixed-case 함수명
+        // under-report 방지). 표시용 이름(details.function)은 원본 fn을 그대로 보존한다.
+        const _fnLc = String(fn).toLowerCase();
+        const reqs = funcToReqs[_fnLc] ? [...funcToReqs[_fnLc]] : [];
         reqs.forEach(r => allReqs.add(r));
 
+        // STS/SITS TC 조인 요구집합 = UDS 설계요구(정규화) ∪ SDS 브리지 SwRS요구(함수→SwRS).
+        // 순수 가산(최대 recall) — UDS 경로는 데모/타 프로젝트에서 SwRS 직접 참조 시 유효, 실 kjpds02는
+        // SDS 브리지가 실효. 두 계열이 disjoint라 겹침 없음.
+        const _fk = _sdsKey(fn);
+        const joinReqs = new Set([...reqs.map(_normReq), ...(sdsFuncToReqs[_fk] || [])]);
         const stsTcSet = new Set();
-        for (const rid of reqs) {
+        const sitsTcSet = new Set();
+        for (const rid of joinReqs) {
           (reqToStsTCs[rid] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
+          (reqToSitsTCs[rid] || new Set()).forEach(tc => { sitsTcSet.add(tc); allSitsTcs.add(tc); });
         }
+        // SITS 단위(SwUFn) 경로 — 요구 경로와 union. SITS는 통합-단위 기반이라 실데이터에선 이 경로가 실효.
+        (fnToSitsTCs[_fnLc] || new Set()).forEach(tc => { sitsTcSet.add(tc); allSitsTcs.add(tc); });
 
-        const sutsTcList = fnToSutsTCs[fn] ? [...fnToSutsTCs[fn]] : [];
+        const sutsTcList = fnToSutsTCs[_fnLc] ? [...fnToSutsTCs[_fnLc]] : [];
         const hop = (activeImpactGroups.direct || []).includes(fn) ? 'direct'
           : (activeImpactGroups.indirect_1hop || []).includes(fn) ? '1-hop'
-          : (activeImpactGroups.indirect_2hop || []).includes(fn) ? '2-hop' : 'direct';
+          : (activeImpactGroups.indirect_2hop || []).includes(fn) ? '2-hop'
+          : (isChanged ? 'direct' : '1-hop');
+        // 간접영향 근거(백엔드 impact_paths) — via=경유 노드, seed=최초 변경함수. 대소문자 폴백 조회.
+        const _pathInfo = impactPaths[fn] || impactPaths[_fnLc] || null;
 
         details.push({
           function: fn,
           changeType,
+          changed: isChanged,
+          // 간접(비변경) 함수가 "왜 영향받는지" — via(경유 함수)/seed(변경 함수). direct는 null.
+          via: _pathInfo?.via || '',
+          seed: _pathInfo?.seed || '',
+          // function_meta/coverage는 backend by_name(소문자) 키 — CamelCase 프로젝트(hdpdm01 계열)에서
+          // 원본 fn 직접조회가 미스해 알려진 ASIL이 공백=under-report 됐다(위 주석의 '별도 라운드' 해소).
+          // 조인부(_fnLc)와 동일 폴백. by_name은 소문자 max-merge라 폴백이 낮은등급 오선택 안 함(안전측).
+          asil: (functionMeta[fn] || functionMeta[_fnLc])?.asil || '',
+          coverage: coverageByFn[fn] || coverageByFn[_fnLc] || null,
           hop,
           requirements: reqs,
           stsTestCases: [...stsTcSet],
           sutsTestCases: sutsTcList,
-          udsAction: actions.uds,
-          stsAction: actions.sts,
-          sutsAction: actions.suts,
-          sdsAction: actions.sds,
+          sitsTestCases: [...sitsTcSet],
+          // 조인 근거(정규화 TC ID) — 소비처가 절단된 표시 텍스트로 재추론하지 않게.
+          // ⚠ **배열로 담는다.** guide는 localStorage에 JSON으로 영속되는데
+          // `JSON.stringify(new Set(['A']))`는 `"{}"` 다 — 경고 없이 근거가 통째로 사라진다.
+          // 게다가 복원된 `{}`는 truthy라 소비처의 `|| new Set()` 폴백도 통과해 `.has()`에서
+          // TypeError로 터졌다(새로고침 후 탭 전체가 ErrorBoundary로 떨어짐). 위
+          // stsTestCases/sitsTestCases/requirements가 전부 `[...set]`인 것과 같은 이유다.
+          sitsJoin: {
+            chain: [...(fnToSitsByChain[_fnLc] || [])].map(_normTcId),
+            unit: [...(fnToSitsByUnit[_fnLc] || [])].map(_normTcId),
+          },
         });
       }
+      // 직접(변경) → 1-hop → 2-hop 순으로 정렬(변경 함수 우선 노출), 동일 hop은 함수명순.
+      const HOP_RANK = { direct: 0, '1-hop': 1, '2-hop': 2 };
+      details.sort((a, b) => (HOP_RANK[a.hop] - HOP_RANK[b.hop]) || a.function.localeCompare(b.function));
 
+      // Track 1a: 검토 TC=0을 bare 0 대신 사유로 정직 표시(silent 0 금지). 연동/시트/브리지 단계 구분.
+      // STS/SITS TC는 이제 SwRS 허브(SDS 함수↔SW요구 브리지) 경유로 조인되므로, 0의 사유도 STS 시트
+      // 단계 → SDS 브리지 단계 순으로 좁혀 표기한다. (과거 '요구 유형 상이 … 허브 경유 필요' 힌트는
+      // 실제로 허브를 경유하게 됐으므로 제거.)
+      const _sdsBridgeReason = () => {
+        if (!linkedDocs.sds) return 'SDS 미연동 (SwRS 허브 브리지 불가)';
+        if (fetchFailures.some(f => f.doc === 'SDS')) return 'SDS 조회 실패 (SwRS 허브 브리지 불가)';
+        if (sdsPairs.length === 0) return 'SDS 매핑 0 (함수↔SW요구 브리지 없음)';
+        return null;
+      };
+      let stsTcReason = null;
+      if (!demoMode && allStsTcs.size === 0) {
+        if (!linkedDocs.sts) stsTcReason = 'STS 미연동';
+        else if (fetchFailures.some(f => f.doc === 'STS')) stsTcReason = 'STS 조회 실패';
+        else if (stsSheetUnrecognized) stsTcReason = 'STS 시트 미인식';
+        // reviewer Finding#7: 시트를 못 찾은 경우(available_sheets 반환)만 '미인식'. 시트는 인식됐으나
+        // 매핑 행이 0인 경우는 별도 사유로 구분(정직성).
+        else if (stsTCs.length === 0) stsTcReason = 'STS 매핑 0 (시트 인식·행 없음)';
+        else stsTcReason = _sdsBridgeReason() || 'SDS 브리지 매핑 0 (영향 함수가 SDS 컴포넌트 미포함)';
+      }
+      // SITS TC 사유 — STS와 대칭(같은 SwRS 브리지). 0이어도 통합 콜체인(회귀 패널)이 보완.
+      let sitsTcReason = null;
+      if (!demoMode && allSitsTcs.size === 0) {
+        if (!linkedDocs.sits) sitsTcReason = 'SITS 미연동';
+        else if (fetchFailures.some(f => f.doc === 'SITS')) sitsTcReason = 'SITS 조회 실패';
+        else if (sitsTCs.length === 0) sitsTcReason = 'SITS 매핑 0 (시트 인식·행 없음)';
+        // SITS는 SwRS 허브(요구) ∪ SwUFn(단위) 이중 브리지로 조인. 둘 다 0이면 통합케이스가 영향 함수와
+        // 무관(요구가 시스템 네임스페이스거나 단위 불일치) — 통합 콜체인이 보완 신호.
+        else sitsTcReason = '영향 함수에 매칭되는 SITS 통합케이스 없음 — 통합 콜체인 참조';
+      }
+      // owner는 buildGuide 진입 시점에 고정한 값 — 도중에 대상이 바뀌었다면 이 가이드는
+      // 자동으로 무효(valueIfCurrent가 null 반환)가 되어 화면·영속 어디에도 실리지 않는다.
       setGuide({
         details,
+        fetchFailures,
         summary: {
-          changedFiles: changedFiles.length,
-          changedFunctions: changedFnEntries.length,
           impactedReqs: allReqs.size,
           impactedStsTCs: allStsTcs.size,
-          directFns: (impactGroups.direct || []).length,
-          hop1Fns: (impactGroups.indirect_1hop || []).length,
-          hop2Fns: (impactGroups.indirect_2hop || []).length,
+          impactedSitsTCs: allSitsTcs.size,
+          stsTcReason,
+          sitsTcReason,
         },
-      });
+      }, owner);
 
-      // Fetch AI risk/cross-doc guide (best-effort)
-      try {
-        const aiData = await post('/api/impact/ai-guide', {
-          changed_types: Object.fromEntries(activeFnEntries),
-          impact_groups: activeImpactGroups,
-        });
-        if (aiData?.ok) setAiGuide(aiData.guide);
-      } catch (_) { /* AI guide is optional */ }
+      // Fetch AI risk/cross-doc guide (best-effort). 'AI 요약' 탭이 숨겨졌으면(SHOW_AI_GUIDE_TAB)
+      // 결과가 렌더되지 않으므로 LLM 호출 자체를 건너뛴다(불필요 비용·지연 제거).
+      if (SHOW_AI_GUIDE_TAB) {
+        try {
+          const aiData = await post('/api/impact/ai-guide', {
+            changed_types: Object.fromEntries(activeFnEntries),
+            impact_groups: activeImpactGroups,
+            // 함수별 ASIL을 함께 보내 위험평가가 실제 ASIL을 반영(없으면 'ASIL 미상'으로 정직 표시).
+            by_name: Object.fromEntries(
+              Object.entries(functionMeta).map(([fn, m]) => [fn, { asil: m?.asil || '' }]),
+            ),
+          });
+          if (aiData?.ok) setAiGuide(aiData.guide, owner);
+        } catch (_) { /* AI guide is optional */ }
+      }
 
-      toast('success', '영향도 가이드 생성 완료');
+      // 도중에 대상이 바뀌었으면 이 가이드는 valueIfCurrent에서 걸러져 화면에 뜨지 않는다.
+      // 그걸 '생성 완료'로 알리면 사용자는 어딘가에 결과가 있다고 오해한다(성공 위장).
+      if (ownerRef.current.key !== owner.key || ownerRef.current.ref !== owner.ref) {
+        toast('info', '가이드 생성 중 분석 대상이 바뀌어 결과를 적용하지 않았습니다. 다시 생성하세요.');
+      } else if (!demoMode && !Object.keys(linkedDocs).length) {
+        // 연결 문서가 하나도 없으면 추출 5회를 전부 건너뛴다 → 요구사항·TC 0건이 나온다.
+        // 이걸 '완료'로 알리면 사용자는 "STS 미연동"으로 오진단하고 엉뚱한 곳을 고친다.
+        toast('warning', '이 결과에 연결된 규격서 정보가 없어 요구사항·TC 매핑을 만들지 못했습니다. 설정에서 SCM의 연결 문서를 확인하세요.');
+      } else if (fetchFailures.length) {
+        toast('warning', `${fetchFailures.map(f => f.doc).join('/')} 매핑 조회 실패 — 해당 문서의 요구사항/TC 매핑이 누락됐을 수 있습니다('매핑 없음'이 실제 부재가 아닐 수 있음)`);
+      } else {
+        toast('success', '영향도 가이드 생성 완료');
+      }
     } catch (e) {
       toast('error', `가이드 생성 실패: ${e.message}`);
     } finally {
       setLoading(false);
     }
-  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, toast]);
+    // impact/impactKey: 진입 시점 owner 캡처에 쓰인다 — deps에서 빠지면 stale 대상에 결속된다.
+  }, [activeFnEntries, linkedDocs, activeImpactGroups, demoMode, functionMeta, coverageByFn,
+    impactPaths, toast, impact, impactKey, setGuide, setAiGuide]);
 
 
-  // Auto-enable demo if real data has no rich mappings (only header changes)
-  const hasRichData = activeFnEntries.length > 1 || (guide?.summary?.impactedReqs > 0);
+  // 영향받은 함수 집합(직접+간접+변경)을 추적성 매트릭스 focus로 넘기고 SRS/SDS 탭으로 이동.
+  // 기존 추적성 UI(SrsSdsSection의 V-model 매트릭스 + 정/역방향 공백 분석)를 재사용해
+  // "이 변경이 어떤 요구사항/시험/커버리지 공백에 닿는지"를 그 화면에서 본다.
+  const openInTraceability = useCallback(() => {
+    const fns = [...new Set([
+      ...activeFnEntries.map(([fn]) => fn),
+      ...(activeImpactGroups.direct || []),
+      ...(activeImpactGroups.indirect_1hop || []),
+      ...(activeImpactGroups.indirect_2hop || []),
+    ].filter(Boolean))];
+    if (!fns.length) {
+      toast('info', '영향받은 함수가 없습니다.');
+      return;
+    }
+    try {
+      localStorage.setItem('devops_v2_trace_focus', JSON.stringify({
+        functions: fns, label: `변경 영향 함수 ${fns.length}개`, ts: Date.now(),
+      }));
+    } catch (_) { /* ignore */ }
+    if (typeof window.__detailSection === 'function') {
+      window.__detailSection('srssds');
+    } else {
+      toast('info', '추적성 매트릭스 탭으로 이동할 수 없습니다. SRS/SDS 탭을 직접 열어주세요.');
+    }
+  }, [activeFnEntries, activeImpactGroups, toast]);
+
+  // 현재 영향도 분석 결과를 Markdown 리포트로 내보낸다(브라우저 다운로드, 외부 요청 없음).
+  // guide 생성 전에도 요약/변경상세/ASIL/커버리지/회귀는 내보낼 수 있고, guide가 있으면 함수별 표까지 포함.
+  const exportGuideMarkdown = useCallback(() => {
+    if (!activeFnEntries.length) {
+      toast('info', '내보낼 변경 함수가 없습니다.');
+      return;
+    }
+    const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const L = [];
+    L.push('# 변경 영향도 분석 결과');
+    L.push('');
+    L.push(`- 생성 시각: ${stamp}`);
+    if (demoMode) L.push('- ⚠ 데모 시나리오 (시뮬레이션 데이터)');
+    L.push(`- 변경 파일: ${activeChangedFiles.length}`);
+    L.push(`- 변경 함수: ${activeFnEntries.length} (신규 ${changeSummary.NEW} / 삭제 ${changeSummary.DELETE} / 시그니처 ${changeSummary.SIGNATURE} / 본문 ${changeSummary.BODY} / 헤더 ${changeSummary.HEADER} / 변수 ${changeSummary.VARIABLE})`);
+    const noEvExport = activeFnEntries.filter(([fn, kind]) => functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta)).length;
+    if (noEvExport > 0) L.push(`  - 이 중 파일영향(직접 변경 증거 없음, 파일 단위 보수 포함): ${noEvExport}개 → 실 수정 함수 약 ${activeFnEntries.length - noEvExport}개`);
+    L.push(`- 직접 영향: ${(activeImpactGroups.direct || []).length} / 간접: ${(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}`);
+    // ASIL·커버리지 섹션은 UI 패널과 동일하게 SHOW_ASIL_COVERAGE로 게이팅 — 화면에서 숨긴 걸
+    // export엔 남기면 '숨겼다고 생각했는데 문서엔 있다'는 불일치(deep-review Warning). 계산은 유지.
+    if (SHOW_ASIL_COVERAGE && asilInfo && (asilInfo.max_changed || asilInfo.escalation || asilInfo.unknown_changed_count)) {
+      L.push('', '## ASIL 차등 검증');
+      L.push(`- 변경 최대 ASIL: ${asilInfo.max_changed || '미상'}`);
+      if (asilInfo.escalation) L.push('- ⚠ Escalation (ASIL B+ 직접 변경 — AUTO→검토)');
+      if (asilInfo.mcdc_required) L.push('- MC/DC 필수');
+      if (asilInfo.coverage_target) L.push(`- 커버리지 타깃: ${asilInfo.coverage_target}`);
+      if (asilInfo.unknown_changed_count) L.push(`- ASIL 미상 직접변경: ${asilInfo.unknown_changed_count}개 (수동 확인 필요)`);
+    }
+    if (SHOW_ASIL_COVERAGE && coverageGap?.available && coverageGap.summary) {
+      const s = coverageGap.summary;
+      L.push('', '## 커버리지 (ASIL 타깃 대비)');
+      L.push(`- 평가 ${s.evaluated ?? 0} / 목표 미달 ${s.below_target ?? 0} / 미측정 ${s.unmeasured ?? 0} / 직전 대비 회귀 ${s.regressed ?? 0}`);
+      // 미매칭(측정 자체 없음)은 '충족'이 아니라 증거 부재 — 리포트에서도 감추지 않는다.
+      if (s.unmatched) L.push(`- ⚠ 미매칭(커버리지 데이터 없음): ${s.unmatched}개${s.unmatched_safety ? ` (ASIL C/D ${s.unmatched_safety}개 미검증)` : ''}`);
+      if (s.unmeasured_safety) L.push(`- ⚠ ASIL C/D 미측정: ${s.unmeasured_safety}개 (타깃 메트릭 데이터 없음)`);
+      if (s.unknown_asil) L.push(`- ⚠ ASIL 미상: ${s.unknown_asil}개 (최저 기준 위장 평가 금지 — 수동 확인)`);
+    }
+    if (regressionSet?.summary) {
+      L.push('', '## 회귀시험 선정 (재실행 대상)');
+      L.push(`- SUTS 재실행 TC: ${regressionSet.summary.suts_tc_count ?? 0} / SITS 영향 체인: ${regressionSet.summary.sits_chain_count ?? 0}`);
+    }
+    L.push('', '## 변경 함수');
+    for (const [fn, kind] of activeFnEntries) {
+      const noEvMark = functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) ? ' (파일영향 — 직접 변경 증거 없음)' : '';
+      L.push(`- \`${fn}\` : ${CHANGE_TYPE_KO[kind] || kind}${noEvMark}`);
+    }
+    if (guide?.details?.length) {
+      L.push('', '## 함수별 영향 가이드 (직접 변경 + 간접 영향)');
+      L.push('| 함수 | 변경 | ASIL | 영향 | 요구사항 | STS TC | SUTS TC | SITS TC |');
+      L.push('|------|------|------|------|----------|--------|---------|---------|');
+      for (const d of guide.details) {
+        const chLabel = d.changed ? (CHANGE_TYPE_KO[d.changeType] || d.changeType) : '영향(간접)';
+        L.push(`| \`${d.function}\` | ${chLabel} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} | ${(d.sitsTestCases || []).length} |`);
+      }
+    }
+    if (SHOW_AI_GUIDE_TAB && aiGuide?.risk) {
+      L.push('', '## AI 위험 평가');
+      L.push(`- 등급: ${aiGuide.risk.grade} (${aiGuide.risk.score}/100), 최대 ASIL: ${aiGuide.risk.max_asil}`);
+      if (aiGuide.risk.justification) L.push(`- 근거: ${aiGuide.risk.justification}`);
+    }
+    L.push('');
+    downloadTextFile(`impact_analysis_${stamp.replace(/[: -]/g, '').slice(0, 14)}.md`, L.join('\n'));
+    toast('success', '영향도 분석 결과를 내보냈습니다.');
+  }, [activeFnEntries, activeChangedFiles, changeSummary, activeImpactGroups, asilInfo, coverageGap,
+    regressionSet, guide, aiGuide, demoMode, changeDetails, functionDiffs, functionMeta, toast]);
+
+  // 선택 함수의 변경을 Gemini로 설명(선언 원문 before/after 포함). LLM 미설정이면 ok=false로 폴백.
+  // 함수의 현재 문서 내용(원문) 조립 — LLM이 '원문→제안'을 실제 문장 근거로 생성하게 백엔드에 전달.
+  // uds/sds/suts는 함수키 직접 조회, sts/sits는 함수의 TC-ID를 sts_by_tc/sits_by_tc와 조인(캡).
+  const buildDocContentForFn = useCallback((fn) => {
+    const lf = String(fn || '').toLowerCase();
+    const _for = (key) => (docContent?.[key] ?? {})[lf];  // docContentFor 인라인(stale closure 회피)
+    const out = {};
+    const uds = _for('uds');
+    if (uds && (uds.description || uds.prototype || (uds.globals || []).length)) out.uds = uds;
+    const sds = _for('sds');
+    if (sds) out.sds = sds;
+    const suts = _for('suts');
+    if (Array.isArray(suts) && suts.length) out.suts = suts.slice(0, 4);
+    const dd = guideDetailByLc.get(lf);
+    for (const [k, ids, byTc] of [['sts', dd?.stsTestCases, stsByTc], ['sits', dd?.sitsTestCases, sitsByTc]]) {
+      const rows = (ids || []).map((t) => byTc[_normTcId(t)]).filter(Boolean).slice(0, 4);
+      if (rows.length) out[k] = rows;
+    }
+    return out;
+  }, [docContent, guideDetailByLc, stsByTc, sitsByTc]);
+
+  // 온디맨드 전체 초안 — job JSON엔 요약(SUTS 10 시퀀스)만 실리므로, 사용자가 '전체 초안 불러오기'를
+  // 누를 때만 서버가 생성기 기본값(24) 전량을 만든다. 전부 job에 실으면 페이로드가 폭증한다.
+  // ⚠ race 가드(seq 카운터)를 쓰지 않는다. 결과가 `${fn}:${doc}` **키별로 격리**돼 있어 늦게 온
+  //   응답이 다른 함수의 칸을 덮을 수 없다 — 전역 카운터를 두면 막을 오염은 없이 사용자의 클릭만
+  //   삼키고(A 요청 중 B를 누르면 A 응답 폐기), 더 나쁘게는 A가 '불러오는 중…'에 영구 고정된다.
+  // ⚠ 키가 `fn:doc`뿐이라 **함수는 격리되지만 분석 대상은 격리되지 않는다**. 같은 탭에서 빌드
+  //   #100 → #120으로 재분석하면 `impact`만 바뀌고 이 상태는 남아, 동명 함수 카드가 구 리비전
+  //   소스로 만든 시퀀스를 "생성기 전량"으로 표시한다(파일 상단이 '가이드 세탁'이라 부르는 계열).
+  //   `guide`/`aiGuide`가 owner 키로 막는 것을 신규 두 상태만 안 하고 있었다 — 대상이 바뀌면 비운다.
+  const [fullDraft, setFullDraft] = useState({});   // {`${fnLc}:${doc}`: {ok, proposal, meta, ...} | {error}}
+  const [fullDraftBusy, setFullDraftBusy] = useState({});   // {key: true}
+  const draftOwnerRef = useRef(impactKey);
+  if (draftOwnerRef.current !== impactKey) {
+    // 렌더 중 동기 리셋 — useEffect로 미루면 교체 직후 한 프레임 동안 구 대상 초안이 그려진다.
+    draftOwnerRef.current = impactKey;
+    if (Object.keys(fullDraft).length) setFullDraft({});
+    if (Object.keys(fullDraftBusy).length) setFullDraftBusy({});
+  }
+  const loadFullDraft = useCallback(async (fn, doc) => {
+    const key = `${String(fn || '').toLowerCase()}:${doc}`;
+    const jobId = impact?._job_id;
+    if (!jobId) {
+      setFullDraft((p) => ({ ...p, [key]: { error: '잡 ID 없음 — 분석을 다시 실행하면 전체 초안을 불러올 수 있습니다.' } }));
+      return;
+    }
+    setFullDraftBusy((p) => ({ ...p, [key]: true }));
+    try {
+      const res = await post('/api/impact/doc-draft', { job_id: jobId, function: fn, doc });
+      // 실패해도 서버가 준 한국어 사유(warnings)를 버리지 않는다 — `reason`은 원시 enum이라
+      // 그대로 노출하면 사용자가 무엇을 해야 할지 알 수 없다.
+      const _why = ((res?.warnings || []).join(' / ')) || res?.error || res?.reason;
+      setFullDraft((p) => ({
+        ...p,
+        [key]: res?.ok ? res : { error: _why || '전체 초안을 불러오지 못했습니다.', warnings: res?.warnings || [] },
+      }));
+    } catch (e) {
+      setFullDraft((p) => ({ ...p, [key]: { error: e?.message || '전체 초안 요청 실패' } }));
+    } finally {
+      // 어떤 경로로 끝나도 반드시 해제 — 남겨두면 버튼이 disabled로 굳어 재시도가 불가능하다.
+      setFullDraftBusy((p) => ({ ...p, [key]: false }));
+    }
+  }, [impact]);
+
+  // AI 서술문 보강(선택) — **값은 결정론이 소유하고 AI는 산문만 쓴다**. 서버가 응답의 숫자·식별자를
+  // 결정론 페이로드와 대조해 환각 필드를 폐기하므로, 여기서는 표의 값 셀을 절대 갱신하지 않는다.
+  // race 가드 없음 — 이유는 loadFullDraft 주석과 동일(결과가 함수 키별로 격리돼 있다).
+  // 대상 교체 시 리셋도 같은 이유로 필요하다(위 draftOwnerRef 주석 참조).
+  const [docProse, setDocProse] = useState({});   // {fnLc: {loading, ok, fields, dropped_fields, reason, error}}
+  const proseOwnerRef = useRef(impactKey);
+  if (proseOwnerRef.current !== impactKey) {
+    proseOwnerRef.current = impactKey;
+    if (Object.keys(docProse).length) setDocProse({});
+  }
+  const loadDocProse = useCallback(async (fn, deterministic, signature, functionDiff) => {
+    const key = String(fn || '').toLowerCase();
+    setDocProse((p) => ({ ...p, [key]: { loading: true } }));
+    try {
+      const res = await post('/api/impact/doc-prose', {
+        function: fn, signature: signature || '', function_diff: functionDiff || '',
+        deterministic: deterministic || {},
+      });
+      // 원시 enum(reason)은 그대로 노출하지 않는다 — 표시용 한국어를 함께 싣는다.
+      setDocProse((p) => ({
+        ...p,
+        [key]: { ...(res || {}), loading: false, reasonText: PROSE_REASON_KO[res?.reason] || '' },
+      }));
+    } catch (e) {
+      setDocProse((p) => ({ ...p, [key]: { loading: false, ok: false, error: e?.message || '서술문 요청 실패' } }));
+    }
+  }, []);
+
+  const fetchExplanation = useCallback(async (d) => {
+    if (!d) return;
+    const cd = changeDetails[String(d.function).toLowerCase()] || {};
+    const fd = functionDiffs[String(d.function).toLowerCase()] || '';
+    const _de = extractDiffElementsCached(fd);  // 비의미(주석/포맷/이동) 변경이면 AI에 '문서 수정 불필요' 지시
+    setExplain({ fn: d.function, text: '', loading: true, error: '' });
+    try {
+      const res = await post('/api/impact/explain-change', {
+        function: d.function,
+        change_type: d.changeType || '',
+        before: cd.before || '',
+        after: cd.after || '',
+        function_diff: fd,  // 본문 diff 원문 — BODY 함수도 실제 코드 근거로 AI 설명
+        asil: d.asil || '',
+        doc_content: buildDocContentForFn(d.function),  // 현재 문서 원문 → '원문→제안' 근거
+        // 간접영향 근거 — 간접(비변경) 함수면 AI가 콜체인 경로(변경함수 seed → via 경유)를 근거로
+        // '계약 유지 확인' 관점 설명하게 한다. 직접 변경 함수는 미전송(빈 dict).
+        impact_path: (!d.changed && (d.seed || d.via)) ? { hop: d.hop || '', via: d.via || '', seed: d.seed || '' } : {},
+        // function_meta 키는 guideFns의 fn과 항상 같은 케이스(정상 경로=소문자, source_root 미해결
+        // edge=원본 케이스로 상호 일관 — impact_orchestrator.py:1404 sorted(_changed_set|_impacted_all)).
+        // 그래서 d.function 그대로 조회하고 소문자화하지 않는다(edge 경로에선 소문자화가 조회 실패
+        // 유발). 원본 케이스 표시명이 필요하면 functionMeta[fn].display_name 사용.
+        module: functionMeta[d.function]?.module || '',
+        requirements: (d.requirements || []).slice(0, 12),
+        no_semantic_change: !!(d.changed && _de.commentOnly),  // 주석-only만 AI 함구(확정 무변경). 포맷/이동은 move-past-use 맹점 → AI 교차확인 유지
+      });
+      // race 가드: 응답 도착 시 사용자가 이미 다른 함수로 전환했으면 결과 폐기(오표시/슬롯 오염 방지).
+      if (selectedFnRef.current !== d.function) return;
+      if (res?.ok && res.explanation) {
+        setExplain({ fn: d.function, text: res.explanation, loading: false, error: '' });
+      } else {
+        setExplain({ fn: d.function, text: '', loading: false, error: res?.error || 'AI 설명을 가져오지 못했습니다(LLM 미설정일 수 있음).' });
+      }
+    } catch (e) {
+      setExplain({ fn: d.function, text: '', loading: false, error: e?.message || 'AI 설명 요청 실패' });
+    }
+    // buildDocContentForFn 필수: guide→guideDetailByLc는 impact 안정화 이후 채워지므로, 이걸
+    // deps에서 빼면 fetchExplanation이 빈 guideDetailByLc 시점 버전에 영구 결속돼 STS/SITS TC가
+    // doc_content 페이로드에서 영구 누락된다(stale closure, deep-review Critical). changeDetails/
+    // functionDiffs/functionMeta는 impact 불변이라 이것만으론 재메모이즈 안 됨.
+  }, [changeDetails, functionDiffs, functionMeta, buildDocContentForFn]);
+
+  // ── 소스 바: 어느 빌드/리비전의 결과인지 + 이력 열람 + 빌드별 재실행 ────────────
+  // 결과가 없을 때도 반드시 보여야 한다(이력/빌드로 여기서 바로 불러올 수 있어야 하므로)
+  // → 아래 빈 상태 early-return과 메인 렌더 양쪽에 삽입한다.
+  const curMeta = impact?.trigger?.metadata || {};
+  const curBuild = Number(curMeta.build_number) || 0;
+  const curRev = String(curMeta.build_revision || '');
+  const curBase = String(curMeta.baseline_revision || '');
+  const curSource = CHANGED_SOURCE_KO[curMeta.changed_files_source] || curMeta.changed_files_source || '';
+  // 지금 보고 있는 결과가 '어느 대상의 것인지'를 항상 노출한다 — 복원/이력 열람으로 결과가 바뀌는
+  // 화면이라 라벨이 없으면 다른 빌드 결과를 현재 빌드 것으로 오독할 수 있다(안전 오보고).
+  // 빌드 시각 기준 실제 revision을 못 뽑아 svn HEAD로 대체된 경우, r값 옆에 그 사실을 명시한다
+  // (침묵 fail-open 대체 — 이 값은 '이 빌드가 실제 빌드한 revision'이 아니라 현재 HEAD다).
+  const curIsHead = !!curMeta.build_revision_is_head;
+  const targetLabel = [
+    scmId,
+    curBuild ? `빌드 #${curBuild}` : '빌드 미지정',
+    curRev ? `r${curRev}${curIsHead ? ' ⚠HEAD(빌드 리비전 미확인)' : ''}` : '',
+    (curBase && curRev) ? `(기준 r${curBase})` : '',
+  ].filter(Boolean).join(' · ');
+  const selectStyle = { padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' };
+  const busy = Boolean(sourceBusy);
+  const historyLabel = (h) => {
+    const m = h?.metadata || {};
+    const b = Number(m.build_number) || 0;
+    const parts = [b ? `빌드 #${b}` : '로컬'];
+    if (m.build_revision) parts.push(`r${m.build_revision}`);
+    const when = String(h?.created_at || '').slice(0, 16).replace('T', ' ');
+    if (when) parts.push(when);
+    if (h?.status && h.status !== 'completed') parts.push(h.status === 'failed' ? '실패' : h.status);
+    const cf = h?.summary?.changed_files;
+    if (typeof cf === 'number' && cf > 0) parts.push(`${cf}파일`);
+    return parts.filter(Boolean).join(' · ');
+  };
+
+  const sourceBar = (
+    <div className="panel" style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="text-sm" style={{ fontWeight: 700 }}>분석 대상</span>
+        {impact ? (
+          <span className="text-sm" data-testid="impact-target-label" style={{ fontWeight: 600 }}>{targetLabel}</span>
+        ) : (
+          <span className="text-muted text-sm">불러온 결과 없음</span>
+        )}
+        {curSource ? (
+          <span className="text-sm"
+            title="변경 파일 집합을 무엇으로 뽑았는지 — '0 영향'/과소보고를 해석하려면 필요합니다"
+            style={{ padding: '1px 8px', borderRadius: 10, background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}>
+            {curSource}
+          </span>
+        ) : null}
+        <span style={{ flex: 1 }} />
+        {busy ? <span className="text-muted text-sm">{sourceBusy}</span> : null}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        <label className="text-muted text-sm" htmlFor="impact-history-select">분석 이력</label>
+        <select id="impact-history-select" style={{ ...selectStyle, minWidth: 250 }} value=""
+          disabled={busy || historyLoading || !history.length}
+          onChange={e => { const v = e.target.value; if (v) openHistoryItem(v); }}>
+          <option value="">
+            {historyLoading ? '조회 중...' : (history.length ? `저장된 분석 ${history.length}건 — 선택해 열기` : '저장된 분석 없음')}
+          </option>
+          {history.map(h => (
+            <option key={h.job_id} value={h.job_id} disabled={h.status !== 'completed'}>{historyLabel(h)}</option>
+          ))}
+        </select>
+        <button type="button" className="btn-secondary btn-sm" onClick={loadHistory} disabled={busy || historyLoading}>이력 새로고침</button>
+
+        <span style={{ width: 8 }} />
+
+        <label className="text-muted text-sm" htmlFor="impact-build-select">빌드</label>
+        <select id="impact-build-select" style={{ ...selectStyle, minWidth: 150 }} value={pickedBuild}
+          disabled={busy} onFocus={loadBuildsOnce} onChange={e => setPickedBuild(e.target.value)}>
+          <option value="">{builds.length ? '빌드 선택' : '클릭해 목록 불러오기'}</option>
+          {builds.map(b => (
+            <option key={b.number} value={b.number}>#{b.number}{b.revision ? ` · r${b.revision}` : ''}{b.result ? ` · ${b.result}` : ''}</option>
+          ))}
+        </select>
+        <button type="button" className="btn-primary btn-sm" disabled={busy || !pickedBuild}
+          onClick={() => runForBuild(pickedBuild)}
+          title="이미 분석된 빌드면 저장된 결과를 열고, 없으면 새로 분석합니다">분석</button>
+        <button type="button" className="btn-secondary btn-sm" disabled={busy || !pickedBuild}
+          onClick={() => runForBuild(pickedBuild, { force: true })}
+          title="저장된 결과가 있어도 다시 분석합니다">다시 분석</button>
+
+        {restorable ? (
+          <button type="button" className="btn-secondary btn-sm" disabled={busy}
+            onClick={() => openHistoryItem(restorable.jobId, { keepGuide: restorable.guide, keepAiGuide: restorable.aiGuide })}
+            title="브라우저 저장 용량 때문에 본문이 빠졌습니다 — 서버에서 다시 받아옵니다">
+            마지막 결과 복원{restorable.id?.build_number ? ` (빌드 #${restorable.id.build_number})` : ''}
+          </button>
+        ) : null}
+      </div>
+
+      {!projectConsistent ? (
+        <div className="text-sm" style={{ marginTop: 6, color: 'var(--color-warning)' }}>
+          현재 열린 Job과 불러온 분석 정보가 서로 다른 프로젝트를 가리켜, 잘못된 대상에 분석이 걸리지
+          않도록 이력 조회·실행을 잠갔습니다. 대시보드에서 이 프로젝트를 다시 불러오세요.
+        </div>
+      ) : null}
+      {buildsError ? (
+        <div className="text-sm" style={{ marginTop: 6, color: 'var(--color-warning)' }}>
+          빌드 목록 조회 실패: {buildsError} — '분석 이력'에서 열기는 계속 사용할 수 있습니다.
+        </div>
+      ) : null}
+      {persistFailed ? (
+        <div className="text-sm" style={{ marginTop: 6, color: 'var(--color-warning)' }}>
+          브라우저 저장 용량이 부족해 이 결과를 로컬에 보관하지 못했습니다 — 새로고침하면 사라집니다.
+          '분석 이력'에서 다시 열 수 있습니다.
+        </div>
+      ) : null}
+    </div>
+  );
 
   if (!impact && !demoMode) {
     return (
-      <div className="empty-state">
-        <div className="empty-icon">🔍</div>
-        <div className="empty-title">변경 영향도 분석 결과가 없습니다</div>
-        <div className="empty-desc">대시보드에서 동기화 & 분석을 실행하세요.<br />SCM에 base_ref가 설정되어야 변경 파일을 감지합니다.</div>
-        <button className="btn-primary btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 시나리오로 보기</button>
+      <div>
+        {sourceBar}
+        <div className="empty-state">
+          <div className="empty-icon">🔍</div>
+          <div className="empty-title">변경 영향도 분석 결과가 없습니다</div>
+          <div className="empty-desc">위 '분석 이력'에서 과거 결과를 열거나, 빌드를 골라 분석하세요.<br />대시보드의 동기화 &amp; 분석 실행으로도 생성됩니다. SCM에 base_ref가 설정되어야 변경 파일을 감지합니다.</div>
+          <button className="btn-primary btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 시나리오로 보기</button>
+        </div>
       </div>
     );
   }
 
+  // Track 2/문서별 상세: AI 요약 ↔ 함수별 상세 ↔ 문서별 상세 탭. aiGuide 없으면 함수 탭으로 강등,
+  // doc 탭은 guide 필요(없으면 기존 체인으로 강등 — 기존 동작/테스트 회귀 최소화).
+  const effTab = (SHOW_AI_GUIDE_TAB && activeTab === 'ai' && aiGuide) ? 'ai'
+    : (activeTab === 'doc' && guide) ? 'doc'
+      : (guide ? 'fn' : 'ai');
+  // AI 요약의 함수명 → 기존 상세 모달. guide.details의 정규(canonical) 이름으로 해석해야
+  // 모달 IIFE의 exact-match find가 성립한다(미해석 이름이면 무시 = no-op, 크래시 방지).
+  const resolveFnName = (name) => {
+    if (!name) return null;
+    return guideFnByLc.get(String(name).toLowerCase()) || null;
+  };
+  const openFnDetail = (name) => {
+    const canonical = resolveFnName(name);
+    if (canonical) setSelectedFn(canonical);
+  };
+  // AI 요약 함수명 렌더 — guide.details에 있으면 클릭 가능한 버튼, 없으면 일반 텍스트.
+  const renderFnRef = (name, extraStyle) => {
+    const canonical = resolveFnName(name);
+    if (!canonical) return <span style={extraStyle}>{name}</span>;
+    return (
+      <button
+        type="button"
+        onClick={() => openFnDetail(name)}
+        title="함수별 상세(시그니처·본문 diff·문서 영향·AI 설명) 열기"
+        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit', ...extraStyle }}
+      >{name}</button>
+    );
+  };
+  // 탭 바 — 렌더되는 패널(한 번에 하나)의 헤더에 삽입 → 통합 패널처럼 보인다.
+  const tabBar = (
+    <div className="panel-header" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {SHOW_AI_GUIDE_TAB && aiGuide && (
+        <button type="button" onClick={() => setActiveTab('ai')}
+          style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
+            fontWeight: effTab === 'ai' ? 700 : 400, color: effTab === 'ai' ? 'var(--accent)' : 'var(--text-muted)',
+            borderBottom: effTab === 'ai' ? '2px solid var(--accent)' : '2px solid transparent' }}>AI 요약</button>
+      )}
+      {guide && (
+        <button type="button" onClick={() => setActiveTab('fn')}
+          style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
+            fontWeight: effTab === 'fn' ? 700 : 400, color: effTab === 'fn' ? 'var(--accent)' : 'var(--text-muted)',
+            borderBottom: effTab === 'fn' ? '2px solid var(--accent)' : '2px solid transparent' }}>함수별 상세 ({guide.details.length})</button>
+      )}
+      {guide && (
+        <button type="button" onClick={() => setActiveTab('doc')}
+          title="문서별(UDS/STS/SUTS/SITS/SDS)로 어떤 함수가 어떤 편집을 요구하는지 — 함수별 상세를 문서 관점으로 전치"
+          style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
+            fontWeight: effTab === 'doc' ? 700 : 400, color: effTab === 'doc' ? 'var(--accent)' : 'var(--text-muted)',
+            borderBottom: effTab === 'doc' ? '2px solid var(--accent)' : '2px solid transparent' }}>문서별 상세 ({DOC_KEYS.filter(k => docCounts[k] > 0).length})</button>
+      )}
+      <span style={{ flex: 1 }} />
+      {SHOW_AI_GUIDE_TAB && effTab === 'ai' && aiGuide && (
+        <span className="text-muted text-sm">{aiGuide.ai_enriched ? 'AI-enriched' : 'deterministic'}</span>
+      )}
+      {effTab === 'fn' && guide && (
+        <span className="text-muted text-sm" title="변경(직접) 함수와 그 호출 관계로 영향받는 간접(1/2-hop) 함수를 함께 표시합니다. '영향' 필터로 hop을 좁힐 수 있습니다.">직접 변경 + 간접 영향(1/2-hop) 포함</span>
+      )}
+    </div>
+  );
+
   return (
     <div>
+      {sourceBar}
+      {/* 백엔드 경고 표면화 — 과소보고/cloudium degrade/revision 불일치/ASIL escalation 등.
+          0 영향을 '영향 없음'으로 오인하지 않도록 안전 신호를 의사결정 화면에 노출. */}
+      {impactWarnings.length > 0 && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>⚠️ 분석 경고 ({impactWarnings.length})</div>
+          {impactWarnings.map((w, i) => {
+            const danger = /under-reported|empty|escalation|미상|과소|MC\/DC|unavailable|회귀|재실행/i.test(String(w));
+            return (
+              <div key={i} className="text-sm" style={{ color: danger ? 'var(--color-danger)' : 'var(--text-muted)', padding: '1px 0' }}>
+                • {w}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {/* ASIL 차등 검증 — 직접 변경 함수의 최대 ASIL → 검증강도(escalation·MC/DC 필수·커버리지 타깃)
+          를 결정론적으로 표면화(ai-guide 선택 호출과 독립, 항상 노출). 미상은 QM 단정 금지로 경고. */}
+      {SHOW_ASIL_COVERAGE && asilInfo && (asilInfo.max_changed || asilInfo.escalation || (asilInfo.unknown_changed_count || 0) > 0) && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: `3px solid ${asilInfo.escalation ? 'var(--color-danger)' : 'var(--border)'}` }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>🛡️ ASIL 차등 검증</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11 }}>
+            <span>변경 최대 ASIL:&nbsp;
+              {asilInfo.max_changed && /^[A-D]$/.test(asilInfo.max_changed)
+                ? <span className={`pill ${/[CD]/.test(asilInfo.max_changed) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{asilInfo.max_changed}</span>
+                : <span className="text-muted">미상</span>}
+            </span>
+            {asilInfo.escalation && <StatusBadge tone="danger">Escalation (ASIL B+ 직접변경 — AUTO→검토)</StatusBadge>}
+            {asilInfo.mcdc_required && <span className="pill pill-danger" style={{ fontSize: 9 }}>MC/DC 필수</span>}
+            {asilInfo.coverage_target && <span className="pill pill-info" style={{ fontSize: 9 }}>커버리지 타깃: {asilInfo.coverage_target}</span>}
+            {(asilInfo.unknown_changed_count || 0) > 0 && (
+              <span className="pill pill-warning" style={{ fontSize: 9 }} title="ASIL 미상 직접변경 — 안전 등급 수동 확인 필요(QM 단정 금지)">
+                ASIL 미상 {asilInfo.unknown_changed_count}개
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+      {/* MC/DC delta — VectorCAST 커버리지 ASIL 타깃 대비 gap + 이력 회귀 요약. */}
+      {SHOW_ASIL_COVERAGE && covView && (
+        <div className="panel" style={{ marginBottom: 12,
+          borderLeft: `3px solid ${(covView.below || covView.regressed) ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>
+            🎯 커버리지 (ASIL 타깃 대비)
+          </div>
+          <div className="stats-row">
+            <div className="stat-card">
+              <div className="text-muted text-sm">평가된 영향 함수</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{covView.evaluated}</div>
+            </div>
+            <div className="stat-card">
+              <div className="text-muted text-sm">목표 미달</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.below ? 'var(--color-danger)' : undefined }}>
+                {covView.below}
+              </div>
+            </div>
+            <div className="stat-card" title="매칭됐으나 해당 ASIL 타깃 메트릭(예: MC/DC) 데이터가 리포트에 없는 함수 — 증거 부재(시험 실패 아님)">
+              <div className="text-muted text-sm">미측정</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.unmeasured ? 'var(--color-warning)' : undefined }}>
+                {covView.unmeasured}
+              </div>
+            </div>
+            <div className="stat-card"
+              title={covView.deltaUntrusted
+                ? `Δ(회귀) 신뢰 불가: ${covView.deltaUntrustReason}. 수치를 '회귀 없음/있음'으로 읽지 마십시오.`
+                : '직전 분석 스냅샷 대비 커버리지가 하락한 함수 수.'}>
+              <div className="text-muted text-sm">직전 대비 회귀</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: (!covView.deltaUntrusted && covView.regressed) ? 'var(--color-danger)' : undefined }}>
+                {covView.deltaUntrusted ? '—' : covView.regressed}
+              </div>
+              {covView.deltaUntrusted && (
+                <div style={{ fontSize: 9, color: 'var(--color-warning)', marginTop: 2, lineHeight: 1.3, overflowWrap: 'anywhere' }}>⚠ {covView.deltaUntrustReason}</div>
+              )}
+            </div>
+            {/* 미매칭 = VectorCAST 커버리지 데이터에 함수가 아예 없음(증거 부재). 백엔드는 이를
+                'unmatched'로 산출하며 "미검증을 안전 통과로 위장 금지"를 명시 — UI가 감추면 그 위장이
+                발생하므로 반드시 노출한다. ASIL C/D 미검증은 danger. */}
+            <div className="stat-card" title="영향 함수인데 VectorCAST 커버리지 데이터에 매칭되지 않음(측정 자체 없음) — '충족'이 아니라 증거 부재입니다. 전체 영향 함수 기준(파일영향 필터 미적용).">
+              <div className="text-muted text-sm">미매칭(측정 없음)</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.unmatchedSafety ? 'var(--color-danger)' : (covView.unmatched ? 'var(--color-warning)' : undefined) }}>
+                {covView.unmatched}
+              </div>
+              {covView.unmatchedSafety > 0 && (
+                <div style={{ fontSize: 9, color: 'var(--color-danger)', marginTop: 2 }}>⚠ ASIL C/D {covView.unmatchedSafety}개 미검증</div>
+              )}
+            </div>
+          </div>
+          {(covView.unmeasuredSafety > 0 || covView.unknownAsil > 0) && (
+            <div className="text-sm" style={{ marginTop: 4, color: 'var(--color-warning)' }}>
+              {covView.unmeasuredSafety > 0 && <span>⚠ ASIL C/D 미측정 {covView.unmeasuredSafety}개(타깃 메트릭 데이터 없음) </span>}
+              {covView.unknownAsil > 0 && <span>⚠ ASIL 미상 {covView.unknownAsil}개 — 최저 기준(구문)으로 위장 평가하지 않음(수동 확인 필요)</span>}
+            </div>
+          )}
+          {covView.hidden > 0 && (
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}
+              title="파일영향(무변경) 함수는 이 변경이 유발한 커버리지 갭이 아니므로 기본 제외 — 위 토글로 포함하면 전체가 반영됩니다.">
+              ⓘ 실변경 함수 기준 — 파일영향(무변경) {covView.hidden}개 제외(이 변경이 유발한 갭이 아님)
+            </div>
+          )}
+          {!covView.hadBaseline && (
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}>직전 스냅샷 없음 — 이번 실행을 기준으로 저장(다음 분석부터 Δ 표시).</div>
+          )}
+          {covView.collisionWorstCopy > 0 && (
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}
+              title="이름충돌(동명 다른 함수)은 여러 copy 중 최악 copy 커버리지로 표시합니다 — 변경 copy를 이름만으로 특정할 수 없어, 어느 copy에 gap이 있어도 재검증 대상으로 남깁니다(전역 max 병합의 gap 은폐 방지, 안전측).">
+              ⓘ 이름충돌 {covView.collisionWorstCopy}개 함수는 여러 copy 중 <b>최악(worst-copy)</b> 커버리지로 표시(gap 은폐 방지)
+            </div>
+          )}
+        </div>
+      )}
+      {/* 회귀시험 선정 — 영향 함수에 매핑된 기존 SUTS TC / SITS call-chain(재실행 대상 증거, ISO 26262).
+          백엔드 SITS 콜체인이 0이어도(빌더 미실행) 프론트 SwUFn 파생 SITS(guideSitsMap)가 있으면 표시. */}
+      {regressionSet?.summary && ((regressionSet.summary.suts_tc_count || 0) > 0 || (regressionSet.summary.sits_chain_count || 0) > 0 || Object.keys(guideSitsMap).length > 0) && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-info)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span className="text-sm" style={{ fontWeight: 700 }}>🔁 회귀시험 선정 (재실행 대상)</span>
+            <span style={{ flex: 1 }} />
+            {(Object.keys(regressionSet.suts || {}).length > 12 || Object.keys(regressionSet.sits || {}).length > 10 || Object.keys(guideSitsMap).length > 12
+              // reviewer W1: 함수-개수뿐 아니라 함수당 TC/체인-개수 절단(6/4/6 초과)도 버튼 노출 조건에 포함
+              // — 소수 함수에 TC가 몰려 "+N" 힌트만 뜨고 해제 버튼이 없는 dead-end 방지.
+              || Object.values(regressionSet.suts || {}).some(v => (v || []).length > 6)
+              || Object.values(regressionSet.sits || {}).some(v => (v || []).length > 4)
+              || Object.values(guideSitsMap).some(v => (v || []).length > 6)) && (
+              <button className="btn-sm" style={{ fontSize: 10, padding: '1px 6px' }}
+                onClick={() => setRegShowAll(v => !v)}
+                title="함수별 재실행 TC/체인 목록의 절단을 해제해 전체를 봅니다(스크롤).">
+                {regShowAll ? '접기 ⌃' : '전체 보기 ⌄'}
+              </button>
+            )}
+          </div>
+          <div className="stats-row">
+            <div className="stat-card">
+              <div className="text-muted text-sm">영향 함수</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.impacted_function_count ?? 0}</div>
+            </div>
+            <div className="stat-card" title="재실행 대상 = 영향 함수 중 기존 SUTS 단위 TC('2.SW Unit Test Spec' 시트의 TC 블록)를 보유한 함수. 함수별 상세의 'SUTS TC' 컬럼은 추적성('3.SW Test Spec') 시트 기준이라 더 넓을 수 있습니다(다른 시트·기준).">
+              <div className="text-muted text-sm">SUTS 재실행 TC</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.suts_tc_count ?? 0}</div>
+            </div>
+            <div className="stat-card" title="백엔드 통합 콜체인(SITS VectorCAST 중간파일 기반) 수. cloudium 읽기전용 등으로 SITS 빌더 산출물이 없으면 0 — 이 경우 함수별 SwUFn 브리지(아래) 참조.">
+              <div className="text-muted text-sm">SITS 영향 체인</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.sits_chain_count ?? 0}</div>
+              {Object.keys(guideSitsMap).length > 0 && (
+                <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-info)' }}>+ SwUFn TC {Object.keys(guideSitsMap).length}함수</div>
+              )}
+            </div>
+          </div>
+          {Object.keys(regressionSet.suts || {}).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SUTS 재실행 TC (함수별)</div>
+              <div style={{ maxHeight: regShowAll ? 360 : 120, overflow: 'auto' }}>
+                {Object.entries(regressionSet.suts).slice(0, regShowAll ? undefined : 12).map(([fn, tcs]) => (
+                  <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
+                    <span className="text-muted"> — {(tcs || []).length} TC </span>
+                    {(tcs || []).slice(0, regShowAll ? undefined : 6).map((tc, i) => (
+                      <span key={i} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>
+                    ))}
+                    {!regShowAll && (tcs || []).length > 6 && <span className="text-muted" style={{ fontSize: 8 }}> +{(tcs || []).length - 6}</span>}
+                  </div>
+                ))}
+                {!regShowAll && Object.keys(regressionSet.suts).length > 12 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(regressionSet.suts).length - 12}개 함수 더 · 상단 &lsquo;전체 보기&rsquo;</div>
+                )}
+              </div>
+            </div>
+          )}
+          {Object.keys(regressionSet.sits || {}).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SITS 영향 call-chain (함수별)</div>
+              <div style={{ maxHeight: regShowAll ? 360 : 140, overflow: 'auto' }}>
+                {Object.entries(regressionSet.sits).slice(0, regShowAll ? undefined : 10).map(([fn, chains]) => (
+                  <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
+                    <span className="text-muted"> — {(chains || []).length} 체인</span>
+                    <div style={{ marginLeft: 10 }}>
+                      {(chains || []).slice(0, regShowAll ? undefined : 4).map((c, i) => (
+                        <div key={i} title={c} style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>↳ {c}</div>
+                      ))}
+                      {!regShowAll && (chains || []).length > 4 && <div className="text-muted" style={{ fontSize: 9 }}>+{(chains || []).length - 4}개 더</div>}
+                    </div>
+                  </div>
+                ))}
+                {!regShowAll && Object.keys(regressionSet.sits).length > 10 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(regressionSet.sits).length - 10}개 함수 더 · 상단 &lsquo;전체 보기&rsquo;</div>
+                )}
+              </div>
+            </div>
+          )}
+          {/* 프론트 SwUFn 브리지 파생 SITS TC — 백엔드 통합 콜체인이 0(빌더 미실행)이어도 함수별 상세가
+              testcase의 SwUFn을 SUTS unit으로 풀어 SITS를 직접 조인한다. 함수 테이블 'SITS TC'와 동일 소스. */}
+          {Object.keys(guideSitsMap).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SITS 재실행 TC (함수별 · SwUFn 브리지)</div>
+              <div style={{ maxHeight: regShowAll ? 360 : 120, overflow: 'auto' }}>
+                {Object.entries(guideSitsMap).slice(0, regShowAll ? undefined : 12).map(([fn, tcs]) => (
+                  <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
+                    <span className="text-muted"> — {(tcs || []).length} TC </span>
+                    {(tcs || []).slice(0, regShowAll ? undefined : 6).map((tc, i) => (
+                      <span key={i} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>
+                    ))}
+                    {!regShowAll && (tcs || []).length > 6 && <span className="text-muted" style={{ fontSize: 8 }}> +{(tcs || []).length - 6}</span>}
+                  </div>
+                ))}
+                {!regShowAll && Object.keys(guideSitsMap).length > 12 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(guideSitsMap).length - 12}개 함수 더 · 상단 &lsquo;전체 보기&rsquo;</div>
+                )}
+              </div>
+            </div>
+          )}
+          {/* silent-0 금지: 백엔드 통합 콜체인 0의 사유(SITS 빌더 미실행 등)를 표면화. */}
+          {(regressionSet.summary.sits_chain_count || 0) === 0 && (() => {
+            const r = impactWarnings.find(w => /SITS/i.test(w) && /(미생성|미실행|미집계|중간파일|체인)/.test(w));
+            return (
+              <div className="text-muted" style={{ fontSize: 9, marginTop: 6, color: 'var(--color-warning)' }}>
+                ⓘ SITS 통합 콜체인 0: {r || '백엔드 SITS VectorCAST 중간파일 미생성(빌더 미실행)'}{Object.keys(guideSitsMap).length > 0 ? ' — 함수별 SwUFn 브리지 TC로 보완(위)' : ''}
+              </div>
+            );
+          })()}
+        </div>
+      )}
       {/* Summary */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header">
@@ -227,6 +2836,20 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           <div style={{ display: 'flex', gap: 4 }}>
             <button className="btn-primary btn-sm" onClick={buildGuide} disabled={loading}>
               {loading ? '분석 중...' : '상세 가이드 생성'}
+            </button>
+            {hasEvidenceSplit && (
+              <button className="btn-sm" onClick={() => setShowFileImpact(v => !v)}
+                title="파일영향 = 직접 변경 증거(본문 diff·선언 변경) 없이 파일 단위 보수 분류로 포함된 함수(실제 수정 아님). 모든 집계(변경 함수·직접 영향·문서별·커버리지)에서 제외/포함을 함께 전환합니다.">
+                {showFileImpact ? `파일영향 ${noEvidenceCount}개 숨기기` : `파일영향 ${noEvidenceCount}개 보기`}
+              </button>
+            )}
+            <button className="btn-sm" onClick={openInTraceability}
+              title="영향받은 함수 집합으로 추적성 매트릭스(SRS↔SDS↔UDS↔STS↔SUTS↔SITS)를 필터해서 봅니다">
+              추적성 매트릭스에서 보기
+            </button>
+            <button className="btn-sm" onClick={exportGuideMarkdown}
+              title="현재 영향도 분석 결과를 Markdown 리포트로 다운로드합니다">
+              내보내기
             </button>
             <button className="btn-sm" onClick={() => setDemoMode(!demoMode)}>
               {demoMode ? '실제 데이터' : '데모 시나리오'}
@@ -241,27 +2864,87 @@ export default function ImpactGuideSection({ job, analysisResult }) {
             <div className="stat-value">{activeChangedFiles.length}</div>
             <div className="stat-label">변경 파일</div>
           </div>
-          <div className="stat-card">
-            <div className="stat-value">{activeFnEntries.length}</div>
-            <div className="stat-label">변경 함수</div>
+          <div className="stat-card" title={
+            isConservativeCount ? '파일단위 보수 분류 — 변경된 파일에 속한 전체 함수를 집계합니다. 라인 diff가 없어 실제 수정된 함수는 이보다 적을 수 있습니다.'
+              : isLineClassified ? `라인 diff 정밀 분류 — 시그니처/신규/삭제를 함수단위로 판별. ${classification?.line_classified_file_count || 0}개 파일을 함수단위로 축소(라인변경 없는 ${classification?.narrow_removed_count || 0}개 함수 제외).`
+              : undefined}>
+            <div className="stat-value">{visibleFnEntries.length}</div>
+            <div className="stat-label">
+              변경 함수
+              {isConservativeCount && <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}>(보수 추정)</span>}
+              {isLineClassified && <span className="pill pill-success" style={{ fontSize: 8, marginLeft: 3 }}>정밀</span>}
+              {hasEvidenceSplit && (
+                <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}
+                  title="파일영향 = 직접 변경 증거 없이 파일 단위 보수 분류로 포함된 함수(실제 수정 아님). 아래 '변경 상세'에서 표시/숨김 전환.">
+                  {showFileImpact ? `(파일영향 ${noEvidenceCount} 포함)` : `+${noEvidenceCount} 파일영향`}
+                </span>
+              )}
+            </div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{(activeImpactGroups.direct || []).length}</div>
-            <div className="stat-label">직접 영향</div>
+            <div className="stat-value">{directVisibleCount}</div>
+            <div className="stat-label">
+              직접 영향
+              {hideFileImpact && directHiddenCount > 0 && (
+                <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}
+                  title="직접 영향 = 실제 변경된 함수. 파일영향(무변경, 파일 단위 보수 포함)은 제외 — 토글로 포함.">
+                  +{directHiddenCount} 파일영향
+                </span>
+              )}
+            </div>
           </div>
-          <div className="stat-card">
+          <div className="stat-card"
+            title={traversal?.truncated
+              ? `콜그래프 탐색이 상한(${traversal.max_impacted_functions})에서 중단돼 ${traversal.truncated_at_hop}-hop까지만 계산했습니다. 그 이상 hop은 '영향 없음'이 아니라 '미계산'입니다.`
+              : undefined}>
             <div className="stat-value">{(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}</div>
-            <div className="stat-label">간접 영향</div>
+            <div className="stat-label">
+              간접 영향
+              {!demoMode && traversal?.truncated && (
+                <span style={{ fontSize: 9, marginLeft: 3, color: 'var(--color-warning)' }}>
+                  ⚠ {traversal.truncated_at_hop}-hop까지만 계산
+                </span>
+              )}
+            </div>
           </div>
+          {/* reviewer Finding#2: 함수명 기준으로 실제 조인되는 회귀 지표를 헤드라인으로 표면화.
+              STS 요구기반 조인(아래 'STS 요구 TC')은 문서 요구 유형이 다르면 구조적으로 0이 될 수
+              있어(주 신호로 오해 소지) 함수 단위 회귀 SUTS/SITS를 함께 앞세운다. */}
+          {regressionSet?.summary && (
+            <>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}
+                title="변경/영향 함수에 직접 매핑된 기존 SUTS 단위시험 TC(함수명 기준 = 재실행 대상). STS 요구기반 조인과 달리 함수 단위로 정확 매칭.">
+                <div className="stat-value">{regressionSet.summary.suts_tc_count ?? 0}</div>
+                <div className="stat-label">회귀 SUTS TC</div>
+              </div>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}
+                title="변경/영향 함수가 진입점인 SITS 통합시험 콜체인(재확인 대상). 0이면 SITS VectorCAST 중간파일 미생성일 수 있음.">
+                <div className="stat-value">{regressionSet.summary.sits_chain_count ?? 0}</div>
+                <div className="stat-label">회귀 SITS 체인</div>
+              </div>
+            </>
+          )}
           {guide && (
             <>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-warning)' }}>
                 <div className="stat-value">{guide.summary.impactedReqs}</div>
                 <div className="stat-label">영향 요구사항</div>
               </div>
-              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
+                title={guide.summary.stsTcReason ? `STS 요구 TC 0 사유: ${guide.summary.stsTcReason} (함수 단위 회귀는 회귀 SUTS/SITS 참조)` : 'STS 요구 기반 시험 TC — SDS(SwRS 허브) 브리지로 함수→SW요구→STS TC를 조인. 0이면 사유 표기.'}>
                 <div className="stat-value">{guide.summary.impactedStsTCs}</div>
-                <div className="stat-label">검토 TC</div>
+                <div className="stat-label">STS 요구 TC</div>
+                {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcReason && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.stsTcReason}</div>
+                )}
+              </div>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
+                title={guide.summary.sitsTcReason ? `SITS 영향 TC 0 사유: ${guide.summary.sitsTcReason} (통합 콜체인은 위 회귀 SITS 체인 참조)` : 'SITS 통합시험 TC — SwRS 허브(함수→SW요구) 브리지 ∪ SwUFn 단위 브리지(testcase의 SwUFn→SUTS unit)로 조인. 통합 콜체인은 회귀 SITS 체인 참조.'}>
+                <div className="stat-value">{guide.summary.impactedSitsTCs ?? 0}</div>
+                <div className="stat-label">SITS 영향 TC</div>
+                {(guide.summary.impactedSitsTCs ?? 0) === 0 && guide.summary.sitsTcReason && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.sitsTcReason}</div>
+                )}
               </div>
             </>
           )}
@@ -269,37 +2952,36 @@ export default function ImpactGuideSection({ job, analysisResult }) {
 
         {/* Document impact status */}
         {(() => {
-          // Build doc stats from guide details or actions
-          const docStats = {};
-          if (guide) {
-            for (const d of guide.details) {
-              if (d.requirements.length > 0) { docStats.uds = (docStats.uds || 0) + 1; }
-              if (d.stsTestCases.length > 0) { docStats.sts = (docStats.sts || 0) + 1; }
-              if (d.sutsTestCases.length > 0) { docStats.suts = (docStats.suts || 0) + 1; }
-            }
-            // SDS/SITS always affected if any function changed
-            if (guide.details.length > 0) {
-              docStats.sds = guide.details.length;
-              docStats.sits = guide.details.filter(d => d.stsTestCases.length > 0).length || 0;
-            }
-          }
+          // 카운트는 문서별 상세 탭과 동일한 단일 출처(docCounts = 권위 actions[doc].functions, 파일영향
+          // 제외)로 계산 — 요약 카드 클릭→탭 이동 시 숫자 불일치 방지(reviewer W6). 과거 docStats(요구/TC
+          // 조인 성사 여부 기반)는 join-underreport라 탭 멤버십과 어긋났다. 카드 count = 탭 함수행 수.
           const docEntries = [
-            { key: 'uds', label: 'UDS', count: docStats.uds || actions.uds?.function_count || 0, status: actions.uds?.status },
-            { key: 'sts', label: 'STS', count: docStats.sts || actions.sts?.function_count || 0, status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
-            { key: 'suts', label: 'SUTS', count: docStats.suts || actions.suts?.function_count || 0, status: actions.suts?.status },
-            { key: 'sits', label: 'SITS', count: docStats.sits || actions.sits?.function_count || 0, status: actions.sits?.status },
-            { key: 'sds', label: 'SDS', count: docStats.sds || actions.sds?.function_count || 0, status: actions.sds?.status },
+            { key: 'uds', label: 'UDS', count: docCounts.uds, status: actions.uds?.status },
+            { key: 'sts', label: 'STS', count: docCounts.sts, status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
+            { key: 'suts', label: 'SUTS', count: docCounts.suts, status: actions.suts?.status },
+            { key: 'sits', label: 'SITS', count: docCounts.sits, status: actions.sits?.status, extra: guide ? `${guide.summary.impactedSitsTCs ?? 0} TC` : '' },
+            { key: 'sds', label: 'SDS', count: docCounts.sds, status: actions.sds?.status },
           ];
           return (
             <div style={{ marginTop: 10 }}>
-              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>문서별 영향</div>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>
+                문서별 영향
+                {hideFileImpact && noEvidenceCount > 0 && <span className="text-muted" style={{ fontSize: 10, fontWeight: 400, marginLeft: 4 }}>· 실변경 함수 기준(파일영향 제외)</span>}
+              </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {docEntries.map(d => {
                   const hasImpact = d.count > 0;
                   const st = d.status ? (DOC_STATUS[d.status] || { tone: 'neutral', label: d.status })
                     : (hasImpact ? { tone: 'warning', label: '검토 필요' } : { tone: 'neutral', label: '영향 없음' });
                   return (
-                    <div key={d.key} style={{ padding: '6px 10px', borderRadius: 6, border: `1px solid ${hasImpact ? 'var(--color-warning)' : 'var(--border)'}`, background: 'var(--bg)', minWidth: 100 }}>
+                    <div key={d.key}
+                      role={guide ? 'button' : undefined}
+                      tabIndex={guide ? 0 : undefined}
+                      aria-label={guide ? `${d.label} 문서별 상세 보기` : undefined}
+                      onClick={guide ? () => { setActiveTab('doc'); setSelectedDoc(d.key); } : undefined}
+                      onKeyDown={guide ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('doc'); setSelectedDoc(d.key); } } : undefined}
+                      title={guide ? '문서별 상세 탭에서 이 문서의 함수·편집 액션 보기' : undefined}
+                      style={{ padding: '6px 10px', borderRadius: 6, border: `1px solid ${hasImpact ? 'var(--color-warning)' : 'var(--border)'}`, background: 'var(--bg)', minWidth: 100, cursor: guide ? 'pointer' : 'default' }}>
                       <div style={{ fontWeight: 700, fontSize: 12, textTransform: 'uppercase' }}>{d.label}</div>
                       <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
                       {d.count > 0 && <span className="text-muted" style={{ fontSize: 10, marginLeft: 4 }}>{d.count} 함수</span>}
@@ -313,13 +2995,70 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         })()}
       </div>
 
-      {/* AI Risk & Cross-Document Impact Guide */}
-      {aiGuide && (
+      {/* 변경 상세 — 함수별 변경종류 + 시그니처 이전→이후 원문 (impactData 기반, 항상 렌더) */}
+      {activeFnEntries.length > 0 && (
         <div className="panel" style={{ marginBottom: 12 }}>
           <div className="panel-header">
-            <span className="panel-title">AI 영향도 분석 가이드</span>
-            <span className="text-muted text-sm">{aiGuide.ai_enriched ? 'AI-enriched' : 'deterministic'}</span>
+            <span className="panel-title">
+              변경 상세 ({visibleFnEntries.length}개 함수)
+              {hideFileImpact && <span className="text-muted" style={{ fontSize: 10, fontWeight: 400, marginLeft: 4 }}>{`· 파일영향 ${noEvidenceCount}개 숨김`}</span>}
+            </span>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {visibleChangeSummary.NEW > 0 && <span className="pill pill-success" style={{ fontSize: 10 }}>🟢 신규 {visibleChangeSummary.NEW}</span>}
+              {visibleChangeSummary.DELETE > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>🔴 삭제 {visibleChangeSummary.DELETE}</span>}
+              {visibleChangeSummary.SIGNATURE > 0 && <span className="pill pill-warning" style={{ fontSize: 10 }}>🟠 시그니처 {visibleChangeSummary.SIGNATURE}</span>}
+              {visibleChangeSummary.BODY > 0 && <span className="pill pill-info" style={{ fontSize: 10 }}>🔵 본문 {visibleChangeSummary.BODY}</span>}
+              {visibleChangeSummary.HEADER > 0 && <span className="pill" style={{ fontSize: 10 }}>헤더 {visibleChangeSummary.HEADER}</span>}
+              {visibleChangeSummary.VARIABLE > 0 && <span className="pill" style={{ fontSize: 10 }}>변수 {visibleChangeSummary.VARIABLE}</span>}
+              {hasEvidenceSplit && (
+                <button className="btn-sm" onClick={() => setShowFileImpact(v => !v)}
+                  title="파일영향 = 직접 변경 증거(본문 diff·선언 변경)가 없이 파일 단위 보수 분류로 포함된 함수. 실제 수정이 아닐 수 있어 기본 숨김입니다.">
+                  {showFileImpact ? `파일영향 ${noEvidenceCount}개 숨기기` : `파일영향 ${noEvidenceCount}개 보기`}
+                </button>
+              )}
+            </div>
           </div>
+          {isConservativeCount && (
+            <div className="text-muted" style={{ fontSize: 10, marginTop: 4, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4 }}>
+              ⚠ 파일단위 보수 분류 — 변경 파일에 속한 전체 함수를 '본문'으로 집계합니다. 라인 diff가 없어 시그니처/신규/삭제가 본문으로 접히며, 실제 수정 함수는 이보다 적을 수 있습니다.
+            </div>
+          )}
+          <div style={{ maxHeight: 420, overflow: 'auto', marginTop: 8 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  <th style={{ textAlign: 'left', padding: '6px 8px' }}>함수</th>
+                  <th style={{ textAlign: 'left', padding: '6px 8px', width: 90 }}>변경</th>
+                  <th style={{ textAlign: 'left', padding: '6px 8px' }}>상세 (이전 − → 이후 ＋)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...visibleFnEntries]
+                  .sort((a, b) => (CHANGE_ORDER[b[1]] || 0) - (CHANGE_ORDER[a[1]] || 0))
+                  .map(([fn, kind]) => (
+                    <tr key={fn} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono, monospace)', wordBreak: 'break-all' }}>{functionMeta[fn]?.display_name || fn}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <StatusBadge tone={CHANGE_TYPE_TONE[kind] || 'neutral'}>{CHANGE_TYPE_KO[kind] || kind}</StatusBadge>
+                        {!demoMode && functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) && (
+                          <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 파일 단위 영향(fatten, 보수적 포함). 클릭 시 본문 원문 없음이 정상.">파일영향</span>
+                        )}
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        {renderChangeDetailCell(kind, changeDetails[String(fn).toLowerCase()])}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* AI 요약 + 함수별 상세 — 탭 통합 (Track 2). 한 번에 한 탭만 렌더돼 통합 패널처럼 보인다. */}
+      {SHOW_AI_GUIDE_TAB && effTab === 'ai' && aiGuide && (
+        <div className="panel" style={{ marginBottom: 12 }}>
+          {tabBar}
 
           {/* Risk Assessment */}
           <div style={{ display: 'flex', gap: 10, marginBottom: 10, alignItems: 'center' }}>
@@ -333,13 +3072,13 @@ export default function ImpactGuideSection({ job, analysisResult }) {
             }}>
               {aiGuide.risk?.grade} ({aiGuide.risk?.score}/100)
             </div>
-            <div style={{ fontSize: 11 }}>
+            <div style={{ fontSize: 13 }}>
               <div>ASIL: <strong>{aiGuide.risk?.max_asil}</strong></div>
               {aiGuide.risk?.asil_escalation && (
                 <StatusBadge tone="danger">ASIL Escalation</StatusBadge>
               )}
             </div>
-            <div style={{ flex: 1, fontSize: 10, color: 'var(--text-muted)' }}>
+            <div style={{ flex: 1, fontSize: 13, lineHeight: 1.6, color: 'var(--text-muted)' }}>
               {aiGuide.risk?.justification}
             </div>
           </div>
@@ -347,11 +3086,18 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           {/* Safety Functions */}
           {aiGuide.risk?.affected_safety_functions?.length > 0 && (
             <div style={{ marginBottom: 10, padding: 8, background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-danger)' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>안전 관련 함수</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>안전 관련 함수</div>
               <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                {aiGuide.risk.affected_safety_functions.map((sf, i) => (
-                  <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{sf}</span>
-                ))}
+                {aiGuide.risk.affected_safety_functions.map((sf, i) => {
+                  const canonical = resolveFnName(sf);
+                  return canonical ? (
+                    <button key={i} type="button" onClick={() => setSelectedFn(canonical)}
+                      className="pill pill-danger" title="함수별 상세 열기"
+                      style={{ fontSize: 11, cursor: 'pointer', border: 'none' }}>{sf}</button>
+                  ) : (
+                    <span key={i} className="pill pill-danger" style={{ fontSize: 11 }}>{sf}</span>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -359,16 +3105,26 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           {/* Cross-Document Impact */}
           {aiGuide.cross_doc_impacts && Object.keys(aiGuide.cross_doc_impacts).length > 0 && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 6 }}>문서별 변경 영향</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>문서별 변경 영향</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 6 }}>
                 {Object.entries(aiGuide.cross_doc_impacts).map(([doc, impacts]) => {
                   const items = Array.isArray(impacts) ? impacts : [];
                   return (
                     <div key={doc} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
-                      <div style={{ fontWeight: 700, fontSize: 11, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
-                      {items.slice(0, 3).map((imp, i) => (
-                        <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>{imp}</div>
-                      ))}
+                      <div style={{ fontWeight: 700, fontSize: 12, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
+                      {items.slice(0, 3).map((imp, i) => {
+                        const m = String(imp).match(/^\[([^\]]+)\]/);
+                        const canonical = m ? resolveFnName(m[1]) : null;
+                        return (
+                          <div key={i} style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-muted)', marginBottom: 2 }}>
+                            {canonical ? (<>
+                              <button type="button" onClick={() => setSelectedFn(canonical)} title="함수별 상세 열기"
+                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>[{m[1]}]</button>
+                              {String(imp).slice(m[0].length)}
+                            </>) : imp}
+                          </div>
+                        );
+                      })}
                       {items.length > 3 && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>+{items.length - 3}건 더</div>}
                     </div>
                   );
@@ -380,11 +3136,11 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           {/* Review Checklist */}
           {aiGuide.review_checklist?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>리뷰 체크리스트</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>리뷰 체크리스트</div>
               {aiGuide.review_checklist.map((item, i) => (
-                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', fontSize: 11 }}>
+                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '4px 0', fontSize: 13, lineHeight: 1.5 }}>
                   <span className={`pill ${item.priority === 'CRITICAL' ? 'pill-danger' : item.priority === 'HIGH' ? 'pill-warning' : 'pill-info'}`}
-                    style={{ fontSize: 9, minWidth: 60, textAlign: 'center' }}>{item.priority}</span>
+                    style={{ fontSize: 10, minWidth: 60, textAlign: 'center' }}>{item.priority}</span>
                   <span>{item.item}</span>
                 </div>
               ))}
@@ -394,8 +3150,8 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           {/* Test Recommendations */}
           {aiGuide.test_recommendations?.length > 0 && (
             <div>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>테스트 추가 제안</div>
-              <table style={{ width: '100%', fontSize: 10, borderCollapse: 'collapse' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>테스트 추가 제안</div>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--border)' }}>
                     <th style={{ textAlign: 'left', padding: '3px 6px' }}>함수</th>
@@ -406,8 +3162,8 @@ export default function ImpactGuideSection({ job, analysisResult }) {
                 <tbody>
                   {aiGuide.test_recommendations.slice(0, 8).map((rec, i) => (
                     <tr key={i} style={{ borderBottom: '1px solid var(--border-light, var(--border))' }}>
-                      <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{rec.function}</td>
-                      <td style={{ padding: '3px 6px' }}><span className="pill pill-info" style={{ fontSize: 9 }}>{rec.test_type}</span></td>
+                      <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{renderFnRef(rec.function)}</td>
+                      <td style={{ padding: '3px 6px' }}><span className="pill pill-info" style={{ fontSize: 11 }}>{rec.test_type}</span></td>
                       <td style={{ padding: '3px 6px' }}>{rec.description}</td>
                     </tr>
                   ))}
@@ -418,12 +3174,20 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         </div>
       )}
 
-      {/* Detailed guide */}
+      {/* 함수별 상세 탭 (Track 2) — AI 요약과 탭 통합. 패널은 effTab==='fn'일 때만,
+          상세 모달은 guide만 있으면(탭 무관) 렌더돼 AI 요약에서 함수 클릭 시에도 뜬다. */}
       {guide && (
+        <>
+        {effTab === 'fn' && (
         <div className="panel">
-          <div className="panel-header">
-            <span className="panel-title">함수별 변경 가이드 ({guide.details.length}개)</span>
-          </div>
+          {tabBar}
+
+          {/* 추출 실패 표면화 — 매핑이 실제보다 적게 보일 수 있음을 지속 노출(토스트는 사라짐) */}
+          {guide.fetchFailures?.length > 0 && (
+            <div className="text-sm" style={{ margin: '4px 0 8px', padding: '6px 10px', borderLeft: '3px solid var(--color-warning)', background: 'var(--bg)', borderRadius: 4 }}>
+              ⚠️ {guide.fetchFailures.map(f => f.doc).join(', ')} 매핑 조회 실패 — 아래 요구사항/STS/SUTS/SITS TC 매핑(및 SDS SwRS 허브 브리지)이 실제보다 적게 보일 수 있습니다('매핑 없음' ≠ 확정 부재). 문서 경로/권한을 확인 후 다시 생성하세요.
+            </div>
+          )}
 
           {/* Search + Filter */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -445,6 +3209,20 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               <option value="has_suts">SUTS TC 있음</option>
               <option value="no_mapping">매핑 없음</option>
             </select>
+            {hasEvidenceSplit && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}
+                title="직접 변경 증거 없이 파일 단위 보수 분류로 포함된 함수(파일영향)를 목록에 포함합니다.">
+                <input type="checkbox" checked={showFileImpact} onChange={e => setShowFileImpact(e.target.checked)} />
+                {`파일영향 포함 (${noEvidenceCount})`}
+              </label>
+            )}
+            {formatOnlyCount > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}
+                title="본문 diff가 C 주석·코드 이동·공백·포맷만이고 코드(로직) 변경이 없는 함수를 목록에서 숨깁니다.">
+                <input type="checkbox" checked={hideFormatOnly} onChange={e => setHideFormatOnly(e.target.checked)} />
+                {`의미 변경 없음 숨기기 (${formatOnlyCount})`}
+              </label>
+            )}
             <span className="text-muted text-sm">{filteredGuide.length}/{guide.details.length}건</span>
           </div>
 
@@ -452,11 +3230,14 @@ export default function ImpactGuideSection({ job, analysisResult }) {
             <thead>
               <tr>
                 <th style={{ width: 150 }}>함수</th>
-                <th style={{ width: 60 }}>변경</th>
+                <th style={{ width: 120 }}>변경</th>
+                <th style={{ width: 50 }}>ASIL</th>
                 <th style={{ width: 50 }}>영향</th>
+                <th style={{ width: 96 }} title="ASIL 타깃 구조 커버리지(D=MC/DC, C/B=분기, A/QM=구문) 대비. Δ=직전 대비 변화">커버리지</th>
                 <th>요구사항</th>
                 <th>STS TC</th>
-                <th>SUTS TC</th>
+                <th title="전체 영향 함수 기준 보유 SUTS 시험(추적성 '3.SW Test Spec' 시트, unit 컬럼). 변경 함수 '재실행 대상'(기존 TC 블록 보유)은 위 회귀 패널 참조 — 다른 시트·기준이라 수치가 더 넓을 수 있음.">SUTS TC</th>
+                <th title="전체 영향 함수 기준 보유 SITS 시험(SwUFn 브리지: testcase의 SwUFn→SUTS unit). SITS는 통합시험이라 데이터가 희소할 수 있음(요구 참조가 시스템 네임스페이스면 함수 매칭 없음).">SITS TC</th>
                 <th style={{ width: 50 }}></th>
               </tr>
             </thead>
@@ -464,8 +3245,14 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               {filteredGuide.map((d, i) => (
                 <tr key={i} style={{ background: d.hop === 'direct' ? 'var(--bg)' : undefined }}>
                   <td style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 600 }}>{d.function}</td>
-                  <td><span className="pill pill-warning" style={{ fontSize: 9 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span></td>
+                  <td>{renderChangeSummaryCell(d, changeDetails, functionDiffs, functionMeta)}</td>
+                  <td>
+                    {d.asil && /^[A-D]$/.test(d.asil)
+                      ? <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{d.asil}</span>
+                      : <span className="text-muted" style={{ fontSize: 9 }} title="ASIL 미상 — 수동 확인 필요">미상</span>}
+                  </td>
                   <td><span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 9 }}>{d.hop}</span></td>
+                  <td style={{ fontSize: 10, whiteSpace: 'nowrap' }}>{renderCoverageCell(d.coverage)}</td>
                   <td style={{ fontSize: 10 }}>
                     {d.requirements.length > 0
                       ? <span title={d.requirements.join(', ')} style={{ cursor: 'pointer', color: 'var(--accent)', textDecoration: 'underline' }}
@@ -484,6 +3271,11 @@ export default function ImpactGuideSection({ job, analysisResult }) {
                       ? <span className="pill pill-info" style={{ fontSize: 9 }}>{d.sutsTestCases.length} TC</span>
                       : <span className="text-muted">-</span>}
                   </td>
+                  <td style={{ fontSize: 10 }}>
+                    {(d.sitsTestCases || []).length > 0
+                      ? <span className="pill pill-info" style={{ fontSize: 9 }}>{d.sitsTestCases.length} TC</span>
+                      : <span className="text-muted">-</span>}
+                  </td>
                   <td>
                     <button className="btn-sm" style={{ fontSize: 9, padding: '1px 4px' }}
                       onClick={() => setSelectedFn(selectedFn === d.function ? null : d.function)}>
@@ -494,26 +3286,341 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               ))}
             </tbody>
           </table>
+        </div>
+        )}
 
-          {/* Detail panel for selected function */}
+        {/* 문서별 상세 탭 — 좌우 마스터-디테일. actions[doc] 멤버십 × buildDocumentActions 편집 액션(전치).
+            함수명 클릭은 공유 상세 모달(아래)을 연다. */}
+        {effTab === 'doc' && (
+        <div className="panel">
+          {tabBar}
+          <div className="text-muted text-sm" style={{ margin: '2px 0 8px' }}>
+            문서별로 어떤 함수가 어떤 편집을 요구하는지 — 좌측 문서 선택, 우측 상세(함수명 클릭 시 함수별 상세 모달).
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 190px) 1fr', gap: 12, alignItems: 'start' }}>
+            {/* 좌: 문서 마스터 목록 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {DOC_KEYS.map((k) => {
+                const meta = DOC_META[k];
+                const cnt = docCounts[k];
+                const st = DOC_STATUS[actions[k]?.status] || { tone: cnt ? 'warning' : 'neutral', label: cnt ? '검토 필요' : '영향 없음' };
+                const sel = effSelectedDoc === k;
+                return (
+                  <button key={k} type="button" onClick={() => setSelectedDoc(k)}
+                    aria-label={`${meta.label} 문서 선택`} aria-pressed={sel}
+                    style={{ textAlign: 'left', padding: '7px 9px', borderRadius: 6, cursor: 'pointer', font: 'inherit',
+                      border: sel ? '2px solid var(--accent)' : '1px solid var(--border)',
+                      background: sel ? 'var(--panel)' : 'var(--bg)', opacity: cnt ? 1 : 0.55 }}>
+                    <div style={{ fontWeight: 700, fontSize: 12 }}>{meta.icon} {meta.label}</div>
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{meta.desc}</div>
+                    <div style={{ marginTop: 3, display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
+                      <span className="text-muted" style={{ fontSize: 10 }}>{cnt} 함수</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            {/* 우: 선택 문서 상세 */}
+            <div style={{ minWidth: 0 }}>
+              {(() => {
+                const meta = DOC_META[effSelectedDoc];
+                const a = actions[effSelectedDoc] || {};
+                const st = DOC_STATUS[a.status] || null;
+                const sitsReason = impactWarnings.find(w => /SITS/i.test(w) && /(미집계|미생성|미실행|체인|통합)/.test(w)) || '';
+                return (
+                  <div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8, paddingBottom: 6, borderBottom: '1px solid var(--border)' }}>
+                      <span style={{ fontWeight: 700, fontSize: 14 }}>{meta.icon} {meta.label}</span>
+                      <span className="text-muted text-sm">{meta.desc}</span>
+                      {st && <StatusBadge tone={st.tone}>{st.label}</StatusBadge>}
+                      {a.mode && a.mode !== '-' && (
+                        <span className={`pill ${a.mode === 'AUTO' ? 'pill-success' : 'pill-warning'}`} style={{ fontSize: 9 }}
+                          title={a.mode === 'AUTO' ? '자동 반영 대상' : '검토 후 수동 반영(FLAG)'}>{a.mode}</span>
+                      )}
+                      <span style={{ flex: 1 }} />
+                      <span className="text-muted text-sm">{docRows.length} 함수</span>
+                    </div>
+                    {effSelectedDoc === 'sits' && docRows.length > 0 && (
+                      <div className="text-muted" style={{ fontSize: 10, marginBottom: 6, color: 'var(--color-warning)' }}>
+                        ⓘ 통합 영향(cross-module) 함수 기준 — &lsquo;문서 갱신 검토 대상&rsquo;이며, 실제 SITS 시험 보유는 희소합니다(함수별 &lsquo;SITS TC&rsquo; 컬럼·회귀 패널 SwUFn 참조).
+                      </div>
+                    )}
+                    {docRows.length === 0 ? (
+                      <div className="text-muted text-sm" style={{ padding: 12 }}>
+                        이 문서에 영향 없음.
+                        {effSelectedDoc === 'sits' && sitsReason && <div style={{ marginTop: 4, color: 'var(--color-warning)' }}>ⓘ {sitsReason}</div>}
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '62vh', overflow: 'auto' }}>
+                        {docRows.map((row) => {
+                          const chips = row.d ? docChips(effSelectedDoc, row.d) : [];
+                          return (
+                            <div key={row.name} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: row.d?.changed ? 'var(--bg)' : 'transparent' }}>
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: row.acts.length ? 5 : 0 }}>
+                                <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 600 }}>{renderFnRef(row.name)}</span>
+                                {row.d?.changed
+                                  ? <span className={`pill pill-${CHANGE_TYPE_TONE[row.d.changeType] || 'neutral'}`} style={{ fontSize: 8 }} title={CHANGE_TYPE_DESC[row.d.changeType] || ''}>{CHANGE_TYPE_KO[row.d.changeType] || row.d.changeType}</span>
+                                  : <span className="pill pill-neutral" style={{ fontSize: 8 }} title="직접 변경 아님 — 간접 영향(계약 유지 확인)">{row.d?.hop || '간접'}</span>}
+                                {row.d?.asil && /^[A-D]$/.test(row.d.asil) && (
+                                  <span className={`pill ${/[CD]/.test(row.d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 8 }}>ASIL {row.d.asil}</span>
+                                )}
+                                {row.d?.changed && row.diffElems?.commentOnly && (
+                                  <span className="pill pill-neutral" style={{ fontSize: 8 }} title="본문 diff가 C 주석(//·/* */)만 변경 — 코드·로직 변경 없음">주석만</span>
+                                )}
+                                {row.d?.changed && row.diffElems?.noSemanticChange && (
+                                  <span className="pill pill-neutral" style={{ fontSize: 8 }} title="본문 diff가 코드 이동/공백/포맷만 — 의미(로직) 변경 없음">포맷/이동</span>
+                                )}
+                              </div>
+                              {row.acts.length > 0 ? (
+                                <ul style={{ fontSize: 11, margin: 0, padding: 0, listStyle: 'none' }}>
+                                  {row.acts.map((act, j) => (
+                                    <li key={j} style={{ marginBottom: 4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+                                      <span className={`pill pill-${act.tone}`} style={{ fontSize: 8, flexShrink: 0, whiteSpace: 'nowrap' }}>{act.section}</span>
+                                      <span style={{ lineHeight: 1.4, minWidth: 0, overflowWrap: 'anywhere' }} title={act.title || undefined}>{renderInlineCode(act.text)}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : row.d ? (
+                                <div className="text-sm text-muted">특이 액션 없음</div>
+                              ) : (
+                                <div className="text-sm text-muted">요구/TC 매핑 미조회(함수 상세 없음)</div>
+                              )}
+                              {chips.length > 0 && (
+                                <div style={{ marginTop: 4 }}>
+                                  {chips.slice(0, 10).map(tc => <span key={tc} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>)}
+                                  {chips.length > 10 && <span className="text-muted" style={{ fontSize: 8 }}> +{chips.length - 10}개</span>}
+                                </div>
+                              )}
+                              {renderCurrentToProposal(row.d || { function: row.name }, effSelectedDoc, row.cd, row.diffElems, row.ct)}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+        )}
+
+          {/* Detail modal — 공유(탭 무관 오버레이). AI 요약/함수별 상세 어느 탭에서 클릭해도 표시. */}
           {selectedFn && (() => {
             const d = guide.details.find(x => x.function === selectedFn);
             if (!d) return null;
             const ct = (d.changeType || '').toUpperCase();
+            const cd = changeDetails[String(d.function).toLowerCase()] || {};
+            const fd = functionDiffs[String(d.function).toLowerCase()] || '';
+            const hasRaw = !!(cd.before || cd.after);
+            const pdiff = hasRaw ? diffSignatureParamsCached(cd.before, cd.after) : null;
+            const sigSummary = summarizeSignatureChange(pdiff);
+            const diffElems = extractDiffElementsCached(fd);  // 본문 diff에서 변경 전역·전처리 추출(BODY/VARIABLE 구체화)
+            const hasDirectEvidence = hasRaw || !!fd;  // 선언 원문(cd) 또는 본문 hunk(fd) 존재
+            // 권위 evidence(백엔드 function_meta) 소비 — 리스트(functionHasNoEvidence)와 판정 일치.
+            // 'file_fatten'=파일 단위 영향(직접 변경 아님) · 'line'=실 라인 변경(원문은 400KB 절단·로컬/cloudium
+            // diff 경로에서 생략될 수 있음) · ''=간접/레거시 job. 옛 추론(fd/cd 유무)은 절단된 실변경을 fatten으로
+            // 오표기했다 → evidence로 구분. evidence 없는 구 job은 아래 식이 기존 동작(‖!hasDirectEvidence)로 폴백.
+            const _fnMeta = functionMeta[String(d.function).toLowerCase()] ?? functionMeta[d.function] ?? {};
+            const evKind = _fnMeta.evidence || '';
+            const isFatten = evKind === 'file_fatten';
+            const isTruncated = evKind === 'line' && !hasDirectEvidence;  // 실 변경이나 원문 절단/미수집(파일영향 아님)
+            const noEvidence = d.changed && (isFatten || (!evKind && !hasDirectEvidence));  // 파일영향(권위) — 절단 실변경 제외
+            const isFormatOnly = d.changed && diffElems.noSemanticChange;  // 본문 diff가 이동/공백/포맷만 — 의미 변경 없음
+            const isCommentOnly = d.changed && diffElems.commentOnly;      // 본문 diff가 C 주석만 — 코드 변경 없음
+            // 파일레벨 원문 폴백(#3) — 함수 자체 diff가 없으면(파일영향/원문절단) 그 파일의 전체 변경을 폴백 표시.
+            const fileDiffFallback = (!fd && _fnMeta.file) ? matchFileDiff(_fnMeta.file, fileDiffs) : '';
+            // 문서별 구체 편집 액션(결정론) — 파라미터 diff·본문 변경 요소·요구사항·TC 반영. LLM 무관·즉시.
+            const docActions = buildDocumentActions(d, pdiff, diffElems);
+            const DOC_CARDS = [
+              { key: 'uds', icon: '📘', title: 'UDS 업데이트', note: d.requirements.length ? `관련 요구사항: ${d.requirements.slice(0, 5).join(', ')}${d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}` : '' },
+              { key: 'sts', icon: '📗', title: 'STS 검토', chips: d.stsTestCases },
+              { key: 'suts', icon: '📙', title: 'SUTS 업데이트', chips: d.sutsTestCases },
+              { key: 'sits', icon: '📕', title: 'SITS 검토', chips: d.sitsTestCases || [], note: '통합 콜체인·Input/Expected Param' },
+              { key: 'sds', icon: '📋', title: 'SDS 확인', note: 'SW 아키텍처 설계' },
+            ];
+            const exp = explain.fn === d.function ? explain : { text: '', loading: false, error: '' };
+            const close = () => setSelectedFn(null);
             return (
-              <div style={{ marginTop: 12, padding: 14, border: '2px solid var(--accent)', borderRadius: 8, background: 'var(--bg)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div onClick={close}
+                style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', overflow: 'auto' }}>
+                <div onClick={e => e.stopPropagation()}
+                  role="dialog" aria-modal="true" aria-label={`${d.function} 변경 상세`}
+                  style={{ background: 'var(--panel)', border: '2px solid var(--accent)', borderRadius: 10, maxWidth: 1280, width: '100%', maxHeight: '92vh', overflow: 'auto', padding: 22, boxShadow: '0 10px 40px rgba(0,0,0,0.45)', fontSize: 13 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
                   <div>
-                    <span style={{ fontWeight: 700, fontSize: 15, fontFamily: 'monospace' }}>{d.function}</span>
-                    <span className="pill pill-warning" style={{ fontSize: 10, marginLeft: 8 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
-                    <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10, marginLeft: 4 }}>{d.hop}</span>
+                    <span style={{ fontWeight: 700, fontSize: 16, fontFamily: 'monospace', wordBreak: 'break-all' }}>{d.function}</span>
+                    <div style={{ marginTop: 4, display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {d.changed
+                        ? <span className="pill pill-warning" style={{ fontSize: 10 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+                        : <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
+                      {noEvidence && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 증거 없음 — 파일 단위 영향(hunk/선언 미감지, 보수적 포함)">파일영향</span>}
+                      {isFormatOnly && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="본문 diff가 코드 이동/공백/포맷만 — 의미(로직) 변경 없음(재정렬 아님)">포맷/이동</span>}
+                      {isCommentOnly && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="본문 diff가 C 주석(//·/* */)만 변경 — 코드·로직 변경 없음">주석만</span>}
+                      {isTruncated && <span className="pill pill-warning" style={{ fontSize: 10 }} title="실 라인 변경이나 본문 원문이 크기 상한(60줄/400KB)을 넘어 생략됨 — 파일영향 아님(변경 판정은 유효)">원문 절단</span>}
+                      <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10 }}>{d.hop}</span>
+                      {/* 간접영향 근거 뱃지 — 왜 이 함수가 잡혔는지(변경함수 seed → via 경유). 콜그래프 무향이라 '경유'로만 표기. */}
+                      {!d.changed && d.seed && (
+                        <span className="pill pill-neutral" style={{ fontSize: 9, fontFamily: 'monospace' }}
+                          title={`간접영향 근거: 변경 함수 '${d.seed}'${d.via && d.via !== d.seed ? ` → '${d.via}' 경유` : ''}와의 호출 관계로 이 함수가 영향받습니다(무향 콜그래프 — 호출/피호출 방향은 단정하지 않음).`}>
+                          ← {d.seed}{d.via && d.via !== d.seed ? ` · ${d.via}경유` : ''}
+                        </span>
+                      )}
+                      {d.asil && /^[A-D]$/.test(d.asil) && <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 10 }}>ASIL {d.asil}</span>}
+                      {d.requirements.length > 0 && <span className="text-muted" style={{ fontSize: 10 }}>요구사항 {d.requirements.length}개</span>}
+                    </div>
                   </div>
-                  {d.requirements.length > 0 && <span className="text-sm text-muted">영향 요구사항 {d.requirements.length}개</span>}
+                  <button className="btn-sm" onClick={close} style={{ flexShrink: 0 }}>✕ 닫기</button>
+                </div>
+
+                {/* 🔧 시그니처·매개변수 변화 — svn diff 원문(change_details) 기반 결정론 diff */}
+                {hasRaw && (
+                  <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--border)' }}>
+                      🔧 시그니처·매개변수 변화 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(변경 원문 기반)</span>
+                    </div>
+                    <div style={{ padding: 10 }}>
+                      {/* 한눈 요약 — 무엇이 추가/삭제/타입변경됐는지 뱃지로(원문 raw 대신 직접 표시) */}
+                      {sigSummary.hasChange && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                          {sigSummary.badges.map((b, i) => (
+                            <span key={i} className={`pill pill-${b.tone}`} style={{ fontSize: 10, fontFamily: 'var(--font-mono, monospace)' }}>{b.label}</span>
+                          ))}
+                        </div>
+                      )}
+                      {/* 위치 추정 경고 — 이름 매칭 불가 매개변수(함수포인터 등)로 귀속이 부정확할 수 있음 */}
+                      {sigSummary.positional && (
+                        <div style={{ fontSize: 10, color: 'var(--color-warning)', marginBottom: 8, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-warning)' }}>
+                          ⚠ 매개변수 이름을 매칭할 수 없어 <strong>위치 기반</strong>으로 추정했습니다. 삽입/삭제 위치가 실제와 다를 수 있으니 아래 원문을 대조하세요.
+                        </div>
+                      )}
+                      {pdiff?.returnChanged && (
+                        <div style={{ fontSize: 11, marginBottom: 8 }}>
+                          <strong>반환 타입:</strong>{' '}
+                          <span style={{ color: 'var(--color-danger)', fontFamily: 'monospace' }}>{pdiff.returnBefore || '(없음)'}</span>{' → '}
+                          <span style={{ color: 'var(--color-success)', fontFamily: 'monospace' }}>{pdiff.returnAfter || '(없음)'}</span>
+                        </div>
+                      )}
+                      {pdiff && pdiff.rows.length > 0 ? (
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, marginBottom: 8 }}>
+                          <thead><tr style={{ borderBottom: '1px solid var(--border)' }}>
+                            <th style={{ textAlign: 'left', padding: '3px 6px', width: 64 }}>구분</th>
+                            <th style={{ textAlign: 'left', padding: '3px 6px' }}>이전</th>
+                            <th style={{ textAlign: 'left', padding: '3px 6px' }}>이후</th>
+                          </tr></thead>
+                          <tbody>
+                            {pdiff.rows.map((r, i) => {
+                              const st = PARAM_STATUS[r.status] || { tone: 'neutral', label: r.status, mark: '' };
+                              return (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
+                                  <td style={{ padding: '3px 6px' }}><span className={`pill pill-${st.tone}`} style={{ fontSize: 8 }}>{st.mark} {st.label}</span></td>
+                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.before ? 'var(--color-danger)' : 'var(--text-muted)', wordBreak: 'break-word' }}>{r.before || '—'}</td>
+                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.after ? 'var(--color-success)' : 'var(--text-muted)', wordBreak: 'break-word' }}>{r.after || '—'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="text-muted" style={{ fontSize: 11, marginBottom: 8 }}>
+                          {pdiff?.failed ? '⚠ 매개변수 구조 파싱 불가 — 아래 원문을 직접 대조하세요.' : '매개변수 목록 변화 없음 (본문/기타 변경).'}
+                        </div>
+                      )}
+                      {/* 변경 원문(선언) — 기본 접힘. 요약/테이블로 이해되므로 필요 시만 펼쳐 대조 */}
+                      <details>
+                        <summary style={{ fontSize: 10, color: 'var(--text-muted)', cursor: 'pointer' }}>변경 원문(선언) 보기</summary>
+                        <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--bg)', borderRadius: 4, padding: '6px 8px', marginTop: 4 }}>
+                          {cd.before && <div style={{ color: 'var(--color-danger)' }}>− {cd.before}</div>}
+                          {cd.after && <div style={{ color: 'var(--color-success)' }}>＋ {cd.after}</div>}
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                )}
+                {!hasRaw && d.changed && ['SIGNATURE', 'NEW', 'DELETE'].includes(ct) && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6 }}>
+                    선언 원문 미확보(svn diff 접근 불가 등) — 매개변수 단위 변화는 표시할 수 없습니다. AI 설명으로 보완하세요.
+                  </div>
+                )}
+
+                {/* 🔧 본문 변경 원문(function diff) — BODY 등 선언 미변경 함수의 실제 코드 변경(AI 근거) */}
+                {fd && (
+                  <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                    <details>
+                      <summary style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                        🔧 본문 변경 원문 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(svn diff — AI 설명 근거)</span>
+                      </summary>
+                      <pre style={{ margin: 0, padding: 12, fontSize: 13, fontFamily: 'var(--font-mono, monospace)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 420, overflow: 'auto' }}>
+                        {fd.split('\n').map((ln, i) => {
+                          const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
+                            : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
+                            : ln.startsWith('@@') ? 'var(--accent)' : 'var(--text-muted)';
+                          return <div key={i} style={{ color }}>{ln || ' '}</div>;
+                        })}
+                      </pre>
+                    </details>
+                  </div>
+                )}
+                {fileDiffFallback && (
+                  <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                    <details>
+                      <summary style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                        📄 파일 전체 변경 보기 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(이 함수는 자체 diff 없음 — 같은 파일의 구조 변경으로 보수 포함)</span>
+                      </summary>
+                      <pre style={{ margin: 0, padding: 12, fontSize: 13, fontFamily: 'var(--font-mono, monospace)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 420, overflow: 'auto' }}>
+                        {fileDiffFallback.split('\n').map((ln, i) => {
+                          const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
+                            : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
+                            : (ln.startsWith('@@') || ln.startsWith('Index:') || ln.startsWith('===')) ? 'var(--accent)' : 'var(--text-muted)';
+                          return <div key={i} style={{ color }}>{ln || ' '}</div>;
+                        })}
+                      </pre>
+                    </details>
+                  </div>
+                )}
+                {noEvidence && (ct === 'BODY' || ct === 'VARIABLE') && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--border)' }}>
+                    직접 변경 아님 — 파일 단위 영향입니다. 같은 파일의 다른 변경(전처리·선언 등)으로 검토 대상에 보수적으로 포함됐으며, 본문 변경 원문이 없는 것이 정상입니다. AI 설명도 추정입니다.
+                  </div>
+                )}
+                {isTruncated && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-warning)' }}>
+                    실제 라인 변경이 있으나 본문 원문이 크기 상한(함수당 60줄·전체 400KB)을 넘어 생략됐습니다. <strong>파일영향이 아니며</strong> 실 변경이므로 Description·Test Action·Expected Result를 재검토하세요.
+                  </div>
+                )}
+                {(isFormatOnly || isCommentOnly) && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--border)' }}>
+                    {isCommentOnly ? (
+                      <>본문 diff가 <strong>C 주석(//·/* */)만</strong> 변경이고 코드(로직) 변경은 없습니다. <strong>문서 수정 불필요</strong> — 관련 문서(Description·Test Action·Expected) 재검토·작성 제안이 필요하지 않습니다.</>
+                    ) : (
+                      <>본문 diff가 <strong>코드 이동·공백·포맷만</strong>이고 의미(로직) 변경은 없습니다(재정렬 아님). 관련 문서(Description·Test Action·Expected) 재검토가 불필요할 수 있으나, 순서보존 이동은 동작이 바뀔 수 있으니 <strong>AI 설명으로 확인</strong>하세요.</>
+                    )}
+                  </div>
+                )}
+
+                {/* 🤖 AI 원문→제안 (Gemini) — 현재 문서 내용(원문)을 근거로 문서별 변경안 문장 생성 */}
+                <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                  <div style={{ padding: '6px 10px', background: 'var(--bg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, borderBottom: (exp.text || exp.error) ? '1px solid var(--border)' : 'none' }}>
+                    <span style={{ fontWeight: 700, fontSize: 14 }}>🤖 AI 원문→제안 <span className="text-muted" style={{ fontWeight: 400, fontSize: 11 }}>(Gemini · 각 문서 현재 문장 → 변경 후 문장)</span></span>
+                    <button className="btn-sm" onClick={() => fetchExplanation(d)} disabled={exp.loading} style={{ flexShrink: 0 }}>
+                      {exp.loading ? '분석 중...' : (exp.text ? '다시 생성' : 'AI 문장 재작성')}
+                    </button>
+                  </div>
+                  {exp.text && <div style={{ padding: 12, fontSize: 14, whiteSpace: 'pre-wrap', lineHeight: 1.7, overflowWrap: 'anywhere' }}>{exp.text}</div>}
+                  {exp.error && <div style={{ padding: 12, fontSize: 13, color: 'var(--text-muted)' }}>⚠ {exp.error}</div>}
                 </div>
 
                 {/* Change description */}
-                <div style={{ padding: '8px 10px', background: 'var(--panel)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: '3px solid var(--color-warning)' }}>
-                  {ct === 'BODY' && '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'}
+                <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: `3px solid ${noEvidence ? 'var(--border)' : 'var(--color-warning)'}` }}>
+                  {!d.changed && `이 함수는 직접 변경되지 않았으나, ${d.seed ? `변경 함수 '${d.seed}'${d.via && d.via !== d.seed ? ` → '${d.via}' 경유` : ''}와의` : '변경 함수와의'} 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
+                  {ct === 'BODY' && (noEvidence
+                    ? '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).'
+                    : isCommentOnly
+                      ? '본문 diff가 C 주석만 변경이고 코드(로직) 변경은 없습니다 — 문서 수정 불필요(재검토·작성 제안 불필요).'
+                      : isFormatOnly
+                        ? '본문 diff가 코드 이동·공백·포맷만이고 의미(로직) 변경은 없습니다(재정렬 아님). 관련 문서 재검토가 불필요할 수 있으나, 순서보존 이동은 동작이 바뀔 수 있으니 AI 설명으로 확인하세요.'
+                        : '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.')}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
                   {ct === 'HEADER' && '헤더 파일이 변경되었습니다. 매크로/타입 정의 변경으로 이 헤더를 include하는 모든 소스 파일의 함수에 영향이 있을 수 있습니다.'}
                   {ct === 'VARIABLE' && '글로벌 변수가 변경되었습니다. 이 변수를 읽고 쓰는 모든 함수의 동작을 확인해야 합니다.'}
@@ -521,83 +3628,52 @@ export default function ImpactGuideSection({ job, analysisResult }) {
                   {ct === 'DELETE' && '함수가 삭제되었습니다. UDS에서 해당 함수를 제거하고, 관련 TC를 비활성화해야 합니다.'}
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                  {/* UDS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📘 UDS 업데이트</div>
-                    {d.requirements.length > 0 ? (
-                      <>
-                        <div className="text-sm" style={{ marginBottom: 6 }}>다음 항목을 확인하고 업데이트하세요:</div>
-                        <ul style={{ fontSize: 11, margin: '0 0 6px 16px', padding: 0 }}>
-                          {ct === 'BODY' && <><li>Description — 변경된 로직 반영</li><li>Called Function — 호출 함수 변경 여부</li><li>Used Globals — 사용 변수 변경 여부</li></>}
-                          {ct === 'SIGNATURE' && <><li>Prototype — 새 시그니처 반영</li><li>Input/Output Parameters — 파라미터 변경</li><li>Calling Function — 호출부 영향 확인</li></>}
-                          {ct === 'VARIABLE' && <><li>Used Globals (Global/Static) — 변수 정의 업데이트</li><li>Description — 변수 변경에 따른 동작 변경</li></>}
-                        </ul>
-                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                          관련 요구사항: {d.requirements.slice(0, 5).join(', ')}{d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="text-sm text-muted">직접 매핑 없음 — 간접 영향 확인 필요</div>
-                    )}
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                  각 문서에 <strong>무엇을 어느 섹션에</strong> 반영해야 하는지 — 실제 매개변수 변화 기반(결정론).
+                </div>
+                {noEvidence && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4 }}>
+                    ※ 직접 변경 증거는 없으나(파일 단위 보수 포함) 아래 <strong>📄 실제 문서 내용</strong>은 파싱본입니다 — 편집 <em>액션</em>만 파일 변경 맥락 기준 일반 가이드.
                   </div>
-
-                  {/* STS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📗 STS 검토</div>
-                    {d.stsTestCases.length > 0 ? (
-                      <>
-                        <div className="text-sm" style={{ marginBottom: 6 }}><strong>{d.stsTestCases.length}개 TC</strong> 검토 필요:</div>
-                        <ul style={{ fontSize: 11, margin: '0 0 6px 16px', padding: 0 }}>
-                          {ct === 'BODY' && <><li>Test Action (Sequence) — 변경된 로직에 맞게 수정</li><li>Expected Result — 기대 결과 재확인</li><li>Pre-condition — 전제조건 변경 여부</li></>}
-                          {ct === 'SIGNATURE' && <><li>Pre-condition — 파라미터 변경 반영</li><li>Test Action — 호출 방식 변경</li><li>Expected Result — 리턴값 변경 확인</li></>}
-                          {ct === 'VARIABLE' && <><li>Test Action — 변수 초기값/설정 변경</li><li>Expected Result — 변수 기반 결과 변경</li></>}
-                        </ul>
-                        <div style={{ fontSize: 10, maxHeight: 60, overflow: 'auto' }}>
-                          {d.stsTestCases.slice(0, 10).map(tc => (
-                            <span key={tc} className="pill pill-neutral" style={{ fontSize: 9, margin: 1 }}>{tc}</span>
-                          ))}
-                          {d.stsTestCases.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{d.stsTestCases.length - 10}개</span>}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="text-sm text-muted">직접 매핑된 TC 없음 — 관련 요구사항의 TC를 수동 확인</div>
-                    )}
-                  </div>
-
-                  {/* SUTS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📙 SUTS 업데이트</div>
-                    {d.sutsTestCases.length > 0 ? (
-                      <>
-                        <div className="text-sm" style={{ marginBottom: 4 }}><strong>{d.sutsTestCases.length}개</strong> 단위 테스트 시퀀스 수정:</div>
-                        <ul style={{ fontSize: 11, margin: '0 0 0 16px', padding: 0 }}>
-                          <li>Input Variables — 입력값 업데이트</li>
-                          <li>Output Variables — 기대 출력값 재검증</li>
-                          <li>Sequences — 테스트 시퀀스 순서 확인</li>
-                        </ul>
-                      </>
-                    ) : (
-                      <div className="text-sm text-muted">해당 단위 TC 없음{d.hop !== 'direct' ? ' (간접 영향)' : ''}</div>
-                    )}
-                  </div>
-
-                  {/* SDS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📋 SDS 확인</div>
-                    <div className="text-sm" style={{ marginBottom: 4 }}>SW Component 설계 문서 확인:</div>
-                    <ul style={{ fontSize: 11, margin: '0 0 0 16px', padding: 0 }}>
-                      {ct === 'SIGNATURE' && <li>Component Interface — 인터페이스 변경 반영</li>}
-                      <li>Component Description — 동작 설명 확인</li>
-                      <li>State Transition — 상태 전이 영향 확인</li>
-                      {d.hop !== 'direct' && <li>Component Interaction — 간접 호출 관계 확인</li>}
-                    </ul>
-                  </div>
+                )}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 10 }}>
+                  {DOC_CARDS.map(card => {
+                    const acts = docActions[card.key] || [];
+                    const chips = card.chips || [];
+                    return (
+                      <div key={card.key} style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>{card.icon} {card.title}</div>
+                        {acts.length > 0 ? (
+                          <ul style={{ fontSize: 11, margin: '0 0 4px 0', padding: 0, listStyle: 'none' }}>
+                            {acts.map((a, i) => (
+                              <li key={i} style={{ marginBottom: 5, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+                                <span className={`pill pill-${a.tone}`} style={{ fontSize: 8, flexShrink: 0, whiteSpace: 'nowrap' }}>{a.section}</span>
+                                <span style={{ lineHeight: 1.4, minWidth: 0, overflowWrap: 'anywhere' }} title={a.title || undefined}>{renderInlineCode(a.text)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-sm text-muted">특이 액션 없음</div>
+                        )}
+                        {chips.length > 0 && (
+                          <div style={{ fontSize: 10, maxHeight: 56, overflow: 'auto', marginTop: 2 }}>
+                            {chips.slice(0, 10).map(tc => (
+                              <span key={tc} className="pill pill-neutral" style={{ fontSize: 9, margin: 1 }}>{tc}</span>
+                            ))}
+                            {chips.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{chips.length - 10}개</span>}
+                          </div>
+                        )}
+                        {renderCurrentToProposal(d, card.key, cd, diffElems, ct)}
+                        {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
                 </div>
               </div>
             );
           })()}
-        </div>
+        </>
       )}
     </div>
   );

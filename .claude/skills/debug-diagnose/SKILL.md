@@ -1,7 +1,7 @@
 ---
 name: debug-diagnose
-description: 버그, 오류, 성능 이슈를 체계적으로 진단합니다. 실제 에러 패턴, 로그 경로, 장애 분류 코드 내장.
-trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트러블슈팅 요청 시
+description: "버그·오류·성능 이슈의 **원인 규명** — 로그 경로, 에러 분류표, 알려진 이슈 패턴(hang/lock 충돌/타임아웃)을 담은 진단 레퍼런스. 원인을 찾은 뒤 설계·리뷰·커밋 Gate를 밟아 **고치는** 것은 `/start-work`(일반), 긴급이면 `/hotfix` 대상입니다."
+when_to_use: 원인 파악, 왜 실패하지, 왜 안되지, 진단, 트러블슈팅, 로그 어디, 재현, hanging, 멈춤, 크래시, 느림 — 무엇을 고칠지 아직 모를 때
 ---
 
 # /debug-diagnose 스킬
@@ -35,23 +35,30 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 
 ### 1. test_impact_jobs hanging
 - **파일**: `tests/unit/test_impact_jobs.py`
-- **CI 처리**: GitHub Actions에서 `--ignore` 제외, GitLab은 15분 timeout
+- **CI 처리**: ⚠ 2026-08-03 정정 — GitHub 의 `--ignore` 는 `b107c4b`(2026-07-29)에서
+  **제거됐다**. 지금은 **양쪽 CI 다 이 파일을 돌린다**(GitLab 은 15분 timeout)
 - **원인**: 백그라운드 스레드 동기화, _wait_for_job() 10초 하드 timeout
-- **진단**: `pytest tests/unit/test_impact_jobs.py -v --timeout=30`
+- **진단**: `.venv/Scripts/python.exe -m pytest tests/unit/test_impact_jobs.py -v --timeout=30`
 
 ### 2. Impact orchestrator RuntimeError
-- **파일**: `workflow/impact_orchestrator.py`
-- `line 452`: "UDS regeneration failed: {stderr}"
-- `line 464`: "SUTS regeneration requires source_root"
-- `line 508`: "SITS regeneration requires source_root"
-- `line 550`: "unsupported AUTO target: {target}"
+- **파일**: `workflow/impact_orchestrator.py` — 아래 메시지로 `grep -n` 해서 찾을 것
+  (절대 라인번호는 적지 말 것: 과거 "line 452" 표기가 실제 1281로 830줄 밀린 채 방치됐다)
+- `"UDS regeneration failed: {err}"`
+- `"SUTS regeneration requires source_root"`
+- `"SITS regeneration requires source_root"`
+- `"unsupported AUTO target: {target}"`
 - 모두 subprocess.run() 3600초 timeout
 
 ### 3. Lock 충돌
 - **파일**: `workflow/impact_audit.py`
-- **Lock 경로**: `reports/impact_audit/.run_lock`
+- **Lock 경로**: **scm_id 별** `reports/impact_audit/.run_lock_{scm_id}.json`
+  + `.run_lock_{scm_id}.flock` (`impact_audit.py:76-77`)
+  - ⚠ `reports/impact_audit/.run_lock`(확장자 없음)은 코드가 스스로
+    **`# legacy(하위호환 참조용)`** 이라 표시한 것이다(`:18`). **그걸 지워도 락은 안 풀린다**
+    — 엉뚱한 파일만 지우고 진짜 락(`.run_lock_{scm_id}.*`)은 그대로 남는다
 - **증상**: `{"ok": false, "reason": "active_lock"}`
-- **해결**: stale lock 확인 후 수동 삭제 또는 기존 잡 완료 대기
+- **해결**: `ls reports/impact_audit/.run_lock_*` 로 **어느 scm 의 락인지** 확인 →
+  기존 잡 완료 대기, stale 이면 `release_run_lock(scm_id)` 또는 해당 scm 의 두 파일 삭제
 
 ### 4. 파이프라인 공통 경고
 ```
@@ -62,9 +69,11 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 ```
 
 ### 5. FastAPI 글로벌 예외 핸들러
-- **파일**: `backend/main.py` (line 74-92)
-- 모든 미처리 예외를 500으로 반환, detail 300자 truncate
-- 로거: `_api_logger.error()`
+- **파일**: `backend/error_handler.py` — `global_exception_handler` / `http_exception_handler`
+  (`backend/main.py`의 `app.add_exception_handler(...)` 로 등록. 과거 이 문서는 핸들러가
+  main.py 본문 74~92행에 있다고 적어뒀지만 이미 별도 모듈로 분리됐다)
+- 모든 미처리 예외를 500으로 반환, detail truncate
+- 로거: `logger.error()` (`error_handler.py:14` = `logging.getLogger("devops_api")`)
 
 ### 6. Impact Router HTTP 에러
 - **파일**: `backend/routers/impact.py`
@@ -76,4 +85,4 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 2. **분류**: 위 에러 코드/패턴과 매칭
 3. **범위 축소**: `git log --oneline -10 --name-only` + grep
 4. **재현**: 최소 재현 케이스 → pytest 단일 테스트
-5. **수정 → 검증**: `python -m pytest tests/unit/ -q --tb=short`
+5. **수정 → 검증**: `.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short`

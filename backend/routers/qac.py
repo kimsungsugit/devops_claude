@@ -10,9 +10,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
-from backend.helpers.jenkins import _resolve_cached_build_root
-from backend.helpers.jenkins import _jenkins_sts_dir, _jenkins_suts_dir
+from backend.helpers.jenkins import _jenkins_sts_dir, _jenkins_suts_dir, _resolve_cached_build_root
 from backend.services.jenkins_helpers import _job_slug
+from backend.services.output_paths import drop_empty_reservation, reserve_unique_path
+from backend.services.paths import safe_resolve_under
 from backend.services.qac_excel_generator import generate_qac_excel
 from backend.services.qac_parser import QACDataManager, parse_qac_report
 from backend.services.report_parsers import _normalize_prqa_path
@@ -252,7 +253,10 @@ def _write_qac_impact_report(
         stem = _job_slug(job_url)
         safe_fn = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in function_name).strip("_") or "function"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"qac_impact_{stem}_{safe_fn}_{ts}.md"
+        # ⚠ `reports/qac_impact` 는 전 사용자 공유다. 키가 job+함수뿐이라 같은 함수를
+        #   두 사람이 같은 초에 분석하면 한쪽 리포트가 사라진다.
+        from backend.services.output_paths import reserve_unique_path
+        out_path = reserve_unique_path(out_dir / f"qac_impact_{stem}_{safe_fn}_{ts}.md")
         summary = payload.get("summary") or {}
         compare = payload.get("compare") or {}
         lines = [
@@ -260,6 +264,8 @@ def _write_qac_impact_report(
             "",
             f"- Job: `{job_url}`",
             f"- Generated: `{datetime.now().isoformat(timespec='seconds')}`",
+            *([f"- ⚠ {summary.get('message', 'STS/SUTS 캐시 없음 — 영향도 판정 불가')}"]
+              if summary.get("status") in ("insufficient_data", "partial_data") else []),
             f"- STS impacted: `{summary.get('sts_impacted', 0)}`",
             f"- SUTS impacted: `{summary.get('suts_impacted', 0)}`",
             f"- STS delta: `{summary.get('sts_delta', 0)}`",
@@ -351,6 +357,24 @@ def qac_jenkins_impact(
     sts_previous = _scan_excel_for_function(sts_files[1], fn_name) if len(sts_files) >= 2 else {"filename": "", "match_count": 0, "matches": []}
     suts_current = _scan_excel_for_function(suts_files[0], fn_name) if len(suts_files) >= 1 else {"filename": "", "match_count": 0, "matches": []}
     suts_previous = _scan_excel_for_function(suts_files[1], fn_name) if len(suts_files) >= 2 else {"filename": "", "match_count": 0, "matches": []}
+    # B4/W4 — 캐시(STS/SUTS QAC excel) 부재는 "영향 없음"이 아니라 **판정 불가**다. 캐시
+    # 미비(cache_root 오설정·미생성)만으로 no-impact 로 흘리면 안전변경이 의존 STS/SUTS
+    # 재검증을 조용히 우회한다. 소스별로 판정한다(W4 — 예전엔 OR 라 한 소스만 있어도
+    # data_available=True 라, 나머지 소스 캐시 누락이 has_any_impact 확정에서 묻혔다):
+    #   · 어느 소스든 영향 확인 → True
+    #   · 두 소스 다 스캔했고 영향 0 → False (확정 무영향)
+    #   · 일부 소스 캐시 부재 + 나머지 영향 0 → None (그 소스는 미판정이라 무영향 단정 불가)
+    sts_ok, suts_ok = bool(sts_files), bool(suts_files)
+    sts_impacted = sts_ok and (sts_current.get("match_count") or 0) > 0
+    suts_impacted = suts_ok and (suts_current.get("match_count") or 0) > 0
+    missing_sources = [s for s, ok in (("STS", sts_ok), ("SUTS", suts_ok)) if not ok]
+    if sts_impacted or suts_impacted:
+        has_any_impact: bool | None = True
+    elif not missing_sources:
+        has_any_impact = False
+    else:
+        has_any_impact = None
+    data_available = sts_ok or suts_ok
     payload = {
         "ok": True,
         "function_name": fn_name,
@@ -374,9 +398,24 @@ def qac_jenkins_impact(
             "suts_impacted": int(suts_current.get("match_count") or 0),
             "sts_delta": int(sts_current.get("match_count") or 0) - int(sts_previous.get("match_count") or 0),
             "suts_delta": int(suts_current.get("match_count") or 0) - int(suts_previous.get("match_count") or 0),
-            "has_any_impact": bool((sts_current.get("match_count") or 0) or (suts_current.get("match_count") or 0)),
+            # 소스별 판정(W4): None=판정 불가(일부 캐시 부재), True/False=확정.
+            "has_any_impact": has_any_impact,
+            "data_available": data_available,
+            "missing_sources": missing_sources,
+            "sts_files_scanned": len(sts_files),
+            "suts_files_scanned": len(suts_files),
         },
     }
+    if missing_sources:
+        # 둘 다 부재=데이터 없음, 하나만 부재=부분 데이터(그 소스 미판정).
+        payload["summary"]["status"] = (
+            "insufficient_data" if len(missing_sources) == 2 else "partial_data"
+        )
+        payload["summary"]["message"] = (
+            f"{'/'.join(missing_sources)} QAC 캐시가 없어 해당 소스 영향도를 판정할 수 없습니다"
+            + (" (cache_root 설정 또는 STS/SUTS 생성 후 재시도)."
+               if len(missing_sources) == 2 else " — 나머지 소스만으로는 무영향을 단정할 수 없음.")
+        )
     report_path = _write_qac_impact_report(job_url=job_url, function_name=fn_name, payload=payload)
     payload["impact_report_path"] = str(report_path) if report_path and report_path.exists() else ""
     return payload
@@ -398,10 +437,15 @@ def qac_jenkins_generate_excel(
     use_old = old_version if old_version is not None else (True if inferred_old is None else inferred_old)
     output_dir = repo_root / "reports" / "qac_excel"
     output_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"qac_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    output_path = output_dir / filename
+    # ⚠ `reports/qac_excel` 은 전 사용자 공유다 — 키가 job+초뿐이라 같은 job 을 두 사람이
+    #   같은 초에 뽑으면 한쪽이 남의 리포트를 받는다.
+    output_path = reserve_unique_path(
+        output_dir / f"qac_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+    filename = output_path.name
     qac_manager = parse_qac_report(target, bool(use_old))
     if not generate_qac_excel(qac_manager, output_path):
+        # 선점만 남은 0바이트 파일이 `/api/qac/reports` 목록에 뜨지 않게.
+        drop_empty_reservation(output_path)
         raise HTTPException(status_code=500, detail="Excel generation failed")
     return FileResponse(
         str(output_path),
@@ -446,12 +490,24 @@ async def qac_generate_excel(
             qac_manager = parse_qac_report(tmp_path, old_version)
             output_dir = repo_root / "reports" / "qac_excel"
             output_dir.mkdir(parents=True, exist_ok=True)
+            # ⚠ `output_filename` 은 **클라이언트가 준 쿼리 파라미터**다. `output_dir / …`
+            #   는 봉인이 아니다 — `../` 도, 기준 디렉터리를 통째로 대체하는 절대경로도
+            #   통과한다. 같은 파일의 다운로드(`qac_download_report`)는 이미
+            #   `safe_resolve_under` 를 쓴다 — **읽기만 봉인된 비대칭**이었다.
+            #   (`/api/vcast/generate-excel` 에 같은 결함이 있었다 — 같은 패턴의 다른 입구.)
             if output_filename:
                 filename = output_filename if output_filename.endswith(".xlsx") else f"{output_filename}.xlsx"
+                try:
+                    want = safe_resolve_under(output_dir, filename)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=f"invalid output_filename: {exc}")
             else:
-                filename = f"qac_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            output_path = output_dir / filename
+                want = output_dir / f"qac_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            want.parent.mkdir(parents=True, exist_ok=True)
+            output_path = reserve_unique_path(want)
+            filename = output_path.name
             if not generate_qac_excel(qac_manager, output_path):
+                drop_empty_reservation(output_path)
                 raise HTTPException(status_code=500, detail="Excel generation failed")
             return FileResponse(
                 str(output_path),
@@ -511,9 +567,12 @@ def qac_generate_excel_from_path(body: Dict[str, Any]) -> FileResponse:
         qac_manager = parse_qac_report(p, old_version)
         output_dir = repo_root / "reports" / "qac_excel"
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"qac_{p.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        output_path = output_dir / filename
+        # ⚠ 키가 입력 파일 stem 뿐이다 — 같은 HTML 을 두 사람이 같은 초에 변환하면 겹친다.
+        output_path = reserve_unique_path(
+            output_dir / f"qac_{p.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        filename = output_path.name
         if not generate_qac_excel(qac_manager, output_path):
+            drop_empty_reservation(output_path)
             raise HTTPException(status_code=500, detail="Excel generation failed")
         return FileResponse(str(output_path), filename=filename,
                             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

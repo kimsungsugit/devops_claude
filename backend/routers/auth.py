@@ -28,6 +28,8 @@ from backend.services.auth_service import (
 )
 from backend.services.users import (
     change_password as _change_password,
+)
+from backend.services.users import (
     get_user,
     increment_token_version,
     verify_credentials,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import pathlib
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -446,6 +447,7 @@ class TestSwudsAsilFallback32:
     def test_swuds_only_fallback_when_no_c_source(self, monkeypatch):
         """c_source 없고 swuds만 → SwUDS 결과 사용."""
         from backend.routers import swut as swut_router
+
         # 54차 T281 — swut_meta_resolver로 redirect
         from backend.services import swut_meta_resolver as meta_resolver_mod
         # 라운드 89: 단일 parse seam resolve_swuds_maps.
@@ -487,6 +489,7 @@ class TestSummaryHeaderTruncation21:
     def test_large_asil_d_list_truncated_to_valid_json(self):
         """ASIL D 함수 100개 → 헤더 1024B 초과 → list 길이로 축약된 valid JSON."""
         import json
+
         from backend.routers.swut import _build_result_to_response
 
         # 큰 asil_d_function_ids list (100 개 × 13B ≈ 1500B)
@@ -516,6 +519,7 @@ class TestSummaryHeaderTruncation21:
         """1024B 이하 summary는 그대로 전달."""
         import json
         from io import BytesIO
+
         from backend.routers.swut import _build_result_to_response
 
         summary = {
@@ -545,7 +549,9 @@ class TestWarningsSentinelBreakdownRound3NC1:
 
     def test_warnings_truncated_with_category_breakdown(self):
         import json
+        import re
         from io import BytesIO
+
         from backend.routers.swut import _build_result_to_response
 
         # production-realistic — stamp summary 메시지에 "ambiguous skipped:" 포함
@@ -570,8 +576,8 @@ class TestWarningsSentinelBreakdownRound3NC1:
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         parsed = json.loads(res.headers.get("X-SwUT-Warnings"))
-        assert isinstance(parsed, list) and len(parsed) == 1
-        msg = parsed[0]
+        assert isinstance(parsed, list) and parsed
+        msg = parsed[0]                      # sentinel 은 **맨 앞** — 스크롤 없이 보여야 한다
         # NW7 검증: ambiguous는 정확히 20 (stamp summary +1 오분류 안 됨)
         assert "ambiguous=20" in msg, f"NW7 회귀 — ambiguous miscount: {msg}"
         # hmr는 ambiguous 20 + stamp summary 1 = 21
@@ -580,7 +586,15 @@ class TestWarningsSentinelBreakdownRound3NC1:
         assert "layout=5" in msg
         # NW8 검증: 비-category warning (기타 일반 warning 14건) → other 카테고리
         assert "other=14" in msg, f"NW8 회귀 — uncategorized 누락: {msg}"
-        assert f"{len(warnings)} warnings" in msg
+
+        # 2026-08-25: 본문을 **통째로 버리지 않는다.** 예전엔 개수만 남겨서, 바로 그
+        # 빌드에서 새로 낸 경고가 사용자에게 닿지 않았다(SwITCR 17건 실측).
+        assert len(parsed) > 1, "경고 본문이 하나도 안 실렸다 — 개수만 남았다"
+        dropped = int(re.search(r"\+(\d+) warnings", msg).group(1))
+        assert dropped + len(parsed) - 1 == len(warnings), (
+            f"실린 {len(parsed) - 1} + 생략 {dropped} != 전체 {len(warnings)} — "
+            "캡끼리 숫자가 안 맞는다")
+        assert len(res.headers["X-SwUT-Warnings"]) <= 1024, "예산을 넘겼다"
 
 
 class TestXUserHeader:
@@ -739,6 +753,7 @@ class TestConfigCache:
     def test_lru_cache_invalidates_on_mtime_change(self, tmp_path, monkeypatch):
         """mtime이 변하면 cache miss → reload."""
         import time
+
         from backend.routers import swut as swut_mod
         from backend.services import swut_meta_resolver as resolver_mod
 
@@ -824,9 +839,9 @@ class TestSwutConfigFallback50:
         self, monkeypatch,
     ):
         """SwUTCR reason/action C scan must reuse the system-dir guard."""
+        import backend.services.swut_asil_resolver as asil_resolver
         from backend.routers import swut as swut_mod
         from backend.schemas import SwUTBuildRequest
-        import backend.services.swut_asil_resolver as asil_resolver
 
         monkeypatch.setattr(asil_resolver, "is_blocked_source_root", lambda _p: True)
 
@@ -1061,10 +1076,10 @@ class TestAsyncMigration:
 
     def test_endpoint_uses_to_thread(self):
         """source code에 asyncio.to_thread 사용 + get_event_loop 미사용 검증."""
-        import inspect
         from backend.routers import swut as swut_mod
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(swut_mod)
+        src = source_of(swut_mod)
         assert "asyncio.to_thread" in src
         assert "asyncio.get_event_loop()" not in src
         assert "loop.run_in_executor" not in src
@@ -1100,10 +1115,10 @@ class TestStreamingResponse14:
 
     def test_streaming_response_used_not_plain_response(self):
         """W1a: source code에 StreamingResponse 사용 확인."""
-        import inspect
         from backend.routers import swut as swut_mod
+        from tests.unit._source_probe import source_of
 
-        src = inspect.getsource(swut_mod)
+        src = source_of(swut_mod)
         assert "StreamingResponse" in src
         assert "_iter_bytesio" in src
         # plain Response(content=bytes) 사용 회피 확인 — bytes 그대로 전송하지 않음
@@ -1134,8 +1149,9 @@ class TestStreamingResponse14:
 
     def test_iter_bytesio_yields_chunks(self):
         """W1: _iter_bytesio가 chunk별 yield + 빈 data 시 종료."""
-        from backend.routers.swut import _iter_bytesio
         import io as _io
+
+        from backend.routers.swut import _iter_bytesio
 
         data = b"x" * (200 * 1024)  # 200KB → 64KB chunk 4개
         buf = _io.BytesIO(data)
@@ -1164,6 +1180,7 @@ class TestSutrSwudsIntegration17:
         ) as build_mock:
             # build_sutr mock — io.BytesIO 결과 반환
             import io as _io
+
             from backend.services.swut_sutr_aggregator import SutrBuildResult
             build_mock.return_value = SutrBuildResult(
                 ok=True, xlsm_io=_io.BytesIO(b"PK\x03\x04test"),
@@ -1233,6 +1250,7 @@ class TestConsistencyCheckEndpoint18:
     def test_endpoint_returns_consistency_report_json(self):
         """200: 정상 호출 시 ConsistencyReport.to_dict() 형식."""
         from unittest.mock import MagicMock
+
         from backend.services.swut_consistency_checker import ConsistencyReport
 
         mock_report = ConsistencyReport(ok=True, issues=[], parse_warnings=[])
@@ -1295,7 +1313,7 @@ class TestMemoryMonitor20:
 
     def test_returns_float_when_psutil_available(self):
         """psutil 설치된 환경에서는 양수 float 반환."""
-        from backend.routers._safety import get_process_memory_mb, _HAS_PSUTIL
+        from backend.routers._safety import _HAS_PSUTIL, get_process_memory_mb
         result = get_process_memory_mb()
         if _HAS_PSUTIL:
             assert isinstance(result, float)
@@ -1316,6 +1334,7 @@ class TestMemoryMonitor20:
     def test_returns_none_on_psutil_error(self):
         """psutil.Process가 예외 던지면 silent None."""
         from unittest.mock import patch as _patch
+
         from backend.routers import _safety as safety_mod
         if not safety_mod._HAS_PSUTIL:
             return  # psutil 미설치 환경 skip
@@ -1707,6 +1726,7 @@ class TestSwutcrSpecFiResolve107:
     def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
         """resolve_swuts_path의 config fallback을 hermetic하게 격리."""
         import json as _json
+
         from backend.services import swut_meta_resolver as resolver_mod
         cfg_path = tmp_path / "swut_meta.json"
         cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")
@@ -1847,3 +1867,160 @@ class TestSwutcrSpecFiResolve107:
             "spec 확장자가 xlsm/xlsx 아님" in w and "spec.docx" in w
             for w in warns
         )
+
+
+# ── 시험 결과 3종의 Quality 기록 배선 (2026-08-21) ────────────────────────────
+#
+# 여기서 깨지는 방식은 **조용하다**. 빌드는 성공하고 파일도 받아지는데 Quality DB 에
+# 행이 안 남아, 생성 현황 보드가 방금 만든 문서를 영영 "미생성" 으로 표시한다. 실제로
+# SwUT Coverage 에만 기록이 있어 SUTR 가 그 상태였고(커밋 이력), 고친 뒤에도
+# **SWUTCR 은 여전히 그 상태였다** — 같은 결함이 한 칸 옆에서 반복됐다.
+#
+# 그래서 헬퍼 단독 테스트로는 부족하다(호출부가 빠진 게 결함이므로). 아래는 **호출부를
+# AST 로** 확인한다: 각 빌드 함수가 `_record_test_quality` 를 부르는가, 그리고 doc_type
+# 을 무엇으로 넘기는가. doc_type 이 틀리면 종합결과서가 SUTR 행을 덮어쓴다.
+
+
+class TestQualityRecordingWiring:
+    EXPECTED = {
+        "_do_sutr_build": "sutr",
+        "_do_sutr_build_spec_based": "sutr",
+        "_do_swutcr_build": "swutcr",
+    }
+
+    @staticmethod
+    def _record_calls(func_name: str):
+        import ast
+        src = pathlib.Path("backend/routers/swut.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func_name),
+            None,
+        )
+        assert fn is not None, f"{func_name} 가 사라졌다 — 테스트가 겨눌 대상이 없다"
+        out = []
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_record_test_quality"):
+                kw = {k.arg: k.value for k in node.keywords}
+                doc = kw.get("doc_type")
+                out.append(doc.value if isinstance(doc, ast.Constant) else None)
+        return out
+
+    @pytest.mark.parametrize("func_name", sorted(EXPECTED))
+    def test_build_path_records_quality_with_its_own_doc_type(self, func_name):
+        calls = self._record_calls(func_name)
+        assert calls == [self.EXPECTED[func_name]], (
+            f"{func_name} 의 quality 기록 호출: {calls} "
+            f"(기대: [{self.EXPECTED[func_name]!r}])"
+        )
+
+    def test_doc_type_has_no_default(self):
+        """기본값을 두면 **빠뜨린 호출이 조용히 SUTR 로 기록**된다 — 종합결과서가
+        SUTR 행을 덮어쓰고, 보드는 둘을 구분하지 못한다."""
+        import inspect
+
+        from backend.routers import swut as mod
+        sig = inspect.signature(mod._record_test_quality)
+        param = sig.parameters["doc_type"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+    def test_helper_passes_doc_type_through(self, monkeypatch):
+        """헬퍼가 받은 doc_type 을 그대로 recorder 에 넘기는가."""
+        import workflow.quality.recorder as rec
+        from backend.routers import swut as mod
+        seen = {}
+
+        def _fake(doc_type, summary, **kw):
+            seen["doc_type"] = doc_type
+            seen["summary"] = summary
+            seen.update(kw)
+            return 1
+
+        monkeypatch.setattr(rec, "record_test_result_run", _fake)
+
+        class _Req:
+            project_id = "HDPDM01"
+            release_sw_version = "1.02"
+
+        class _Meta:
+            asil_level = "ASIL B"
+
+        mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="swutcr")
+        assert seen["doc_type"] == "swutcr"
+        assert seen["release_sw_version"] == "1.02"
+        assert seen["project_id"] == "HDPDM01"
+
+    def test_recording_failure_is_logged_not_silent(self, monkeypatch, caplog):
+        """non-fatal 은 유지하되 **침묵은 금지** — 같은 블록이 NameError 를 삼킨 전례가 있다."""
+        import logging
+
+        import workflow.quality.recorder as rec
+        from backend.routers import swut as mod
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(rec, "record_test_result_run", _boom)
+
+        class _X:
+            project_id = ""
+            release_sw_version = ""
+            asil_level = ""
+
+        with caplog.at_level(logging.ERROR):
+            mod._record_test_quality(_X(), _X(), {}, doc_type="swutcr")   # 예외가 새면 안 된다
+        assert any("SWUTCR" in r.getMessage() for r in caplog.records), (
+            "기록 실패가 로그에 남지 않았다 — 조용한 실패는 이 파일이 겨누는 결함 그 자체다"
+        )
+
+    def test_scm_id_is_passed_through_not_guessed(self, monkeypatch):
+        """프로젝트 축을 **추측에 맡기지 않는다**(2026-08-24 라이브 실측).
+
+        비우면 recorder 가 `project_id` 에서 `resolve_scm_id` 로 추측하는데, 문자열
+        "KJPDS02" 가 SCM entry `kjpds02` 의 id 이면서 `kjpds02_pv` 의 builder_project_id
+        라 추측이 빗나갔다 → 생성 현황 보드(`kjpds02_pv` 로 조회)가 방금 만든 문서를
+        영영 "미생성" 으로 표시했다. 빌드도 기록도 정상인데 화면만 침묵하는 형태다.
+        """
+        import workflow.quality.recorder as rec
+        from backend.routers import swut as mod
+        seen = {}
+        monkeypatch.setattr(
+            rec, "record_test_result_run",
+            lambda doc_type, summary, **kw: (seen.update(kw), 1)[1],
+        )
+
+        class _Req:
+            project_id = "KJPDS02"
+            release_sw_version = "1.02"
+            scm_id = "kjpds02_pv"
+
+        class _Meta:
+            asil_level = "ASIL A"
+
+        mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="swutcr")
+        assert seen["scm_id"] == "kjpds02_pv"
+
+    def test_absent_scm_id_stays_none_not_empty_string(self, monkeypatch):
+        """빈 문자열을 넘기면 recorder 의 `if not scm_id` 추측 분기가 **살아 있어야** 한다
+        — `""` 를 그대로 저장하면 '축을 아는데 빈 값' 처럼 보여 더 나쁘다."""
+        import workflow.quality.recorder as rec
+        from backend.routers import swut as mod
+        seen = {}
+        monkeypatch.setattr(
+            rec, "record_test_result_run",
+            lambda doc_type, summary, **kw: (seen.update(kw), 1)[1],
+        )
+
+        class _Req:
+            project_id = "KJPDS02"
+            release_sw_version = "1.02"
+            scm_id = ""
+
+        class _Meta:
+            asil_level = "ASIL A"
+
+        mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="swutcr")
+        assert seen["scm_id"] is None

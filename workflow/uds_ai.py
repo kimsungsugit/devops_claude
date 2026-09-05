@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import json
-import re
 import concurrent.futures
+import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import config
+from report_gen.function_analyzer import is_llm_refusal
+from utils.log import get_logger
 from workflow.ai import agent_call, call_judge, load_oai_config, load_oai_configs
 from workflow.llm_semantic_validator import SemanticReport, validate_evidence
-import config
-from utils.log import get_logger
 
 
 def _dynamic_max_retries(confidence: float) -> int:
@@ -618,6 +619,24 @@ def generate_uds_ai_sections(
             ]
             sections["document"] = "\n".join([ln for ln in doc_lines if ln is not None]).strip()
         sections["quality_warnings"] = _quality_warnings(sections)
+        # ─── 미검토 경로임을 반환 계약에 명시 ───
+        # 이 분기는 아래 순차 경로의 reviewer/auditor/semantic/judge 루프를 **전혀 타지 않는다**
+        # (여기서 바로 return 한다). 과거엔 그 사실이 반환값 어디에도 없어서, 소비자는 검증을
+        # 통과한 초안과 구분할 수 없었다 — 키 자체가 없으니 `.get()`은 None(=falsy)을 주고
+        # 그게 "문제 없음"으로 읽혔다. 순차 경로와 **같은 키**를 채우되 값으로 미검토를 말한다.
+        sections["confidence"] = 0.0
+        sections["semantic_validated"] = False
+        sections["semantic_report"] = SemanticReport().to_dict()
+        sections["ai_review_decision"] = "not_reviewed"
+        sections["ai_review_retry_count"] = 0
+        sections["quality_warnings"].append(
+            "[ai-review] UDS_PARALLEL_SECTIONS=True 경로로 생성됨 — reviewer/auditor/"
+            "semantic 검증/judge를 수행하지 않은 미검토 초안이다. 승인 결과가 아니므로 검토 필요"
+        )
+        logger.warning(
+            "UDS 섹션을 병렬 경로로 생성했다 — 검증 루프(reviewer/auditor/semantic/judge) 미수행. "
+            "config.UDS_PARALLEL_SECTIONS=False 로 두면 검증을 탄다."
+        )
         return sections
 
     system_prompt = (
@@ -893,6 +912,17 @@ def generate_uds_ai_sections(
     sections["semantic_report"] = semantic_report.to_dict()
     # quality_warnings에 [semantic] prefix 추가 — warning_categories breakdown 통합
     sections["quality_warnings"].extend(semantic_report.warning_messages)
+    # ─── reviewer/auditor/judge 최종 판정 표면화 ───
+    # 위 retry 루프는 max_retries를 소진하면 decision이 여전히 "reject"/"retry"인 결과를
+    # 그대로 최종본으로 돌려준다. 그 사실이 반환값 어디에도 없으면 소비자는 승인된 초안과
+    # 구분할 수 없다(초안 자체는 진단 가치가 있으니 버리지 않되, 상태는 반드시 밝힌다).
+    sections["ai_review_decision"] = decision
+    sections["ai_review_retry_count"] = retry_count
+    if decision != "accept":
+        sections["quality_warnings"].append(
+            f"[ai-review] 판정 '{decision}'이 재시도 {retry_count}회 후에도 해소되지 않은 초안 — "
+            f"승인 결과가 아니므로 검토 필요 (사유: {str(reason or '미기재')[:200]})"
+        )
     return sections
 
 
@@ -973,8 +1003,15 @@ def _build_func_desc_prompt(batch: List[Dict[str, Any]], *, pass_num: int = 1) -
 def generate_ai_function_descriptions(
     function_details: Dict[str, Dict[str, Any]],
     module_map: Optional[Dict[str, str]] = None,
+    body_snippets: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Generate AI descriptions for functions that currently have inference-only descriptions.
+
+    Args:
+        function_details: {fid: detail}. 여기엔 함수 body가 없다 — 2차 refinement용 본문은
+            `body_snippets`로 별도 전달한다(uds_generator의 `function_body_snippets`).
+        module_map: {함수명_소문자: 모듈명}.
+        body_snippets: {fid: body 앞부분}. 없으면 2차 패스는 건너뛴다.
 
     Returns a dict mapping fid to AI-generated description.
     Also includes name-based keys for backward compatibility.
@@ -1079,6 +1116,18 @@ def generate_ai_function_descriptions(
                         desc = parsed.get(name) or parsed.get(name.lower()) or ""
                         desc = str(desc).strip()
                         min_len = 5 if pass_num == 1 else 10
+                        # ⚠ **거절문 거부.** 이 `len > min_len` 이 AI 설명의 유일한
+                        #    내용 관문이었다. 거절문("I'm sorry, I cannot generate…")은
+                        #    61자라 무조건 통과했고, 그 뒤로는 `description_source="ai"`
+                        #    가 신뢰 출처라 `_is_generic_description` 검사까지 면제받아
+                        #    납품 UDS 의 설명 칸에 그대로 실릴 수 있었다.
+                        #    판정은 `function_analyzer.is_llm_refusal` 단일 출처.
+                        if desc and is_llm_refusal(desc):
+                            logger.warning(
+                                "[AI] batch %d: %s — 모델이 작업을 거절한 문장이라 채택하지 "
+                                "않는다: %.60s", batch_idx + 1, name, desc,
+                            )
+                            continue
                         if desc and len(desc) > min_len:
                             results[name.lower()] = desc
                             if fid:
@@ -1120,16 +1169,27 @@ def generate_ai_function_descriptions(
     logger.info("AI function description pass 1: %d unique names, %d fid-mapped / %d candidates",
                 len(results) - fid_count, fid_count, len(candidates))
 
-    # Pass 2: refine with body snippets for functions that got pass-1 results
+    # Pass 2: refine with body snippets for functions that got pass-1 results.
+    # body는 function_details가 아니라 별도 맵에서 온다 — detail dict엔 body 계열 키가 아예
+    # 없어서, 인자가 없으면 이 패스는 통째로 no-op다(과거엔 그 사실이 로그에도 안 남았다).
     pass2_candidates = []
+    _snips = body_snippets if isinstance(body_snippets, dict) else {}
+    _skip_no_body = 0
     for item in candidates:
         name = item["name"]
         if name.lower() not in results:
             continue
         fid = item.get("fid", "")
         finfo = function_details.get(fid, {})
-        body = str(finfo.get("body_text") or "")[:400]
+        # 우선순위: 전용 맵 → detail의 legacy body 키(외부 호출자가 채워 넣은 경우).
+        body = str(
+            _snips.get(fid)
+            or finfo.get("body_text")
+            or finfo.get("body")
+            or ""
+        )[:400]
         if not body or len(body) < 20:
+            _skip_no_body += 1
             continue
         pass2_candidates.append({
             **item,
@@ -1137,6 +1197,12 @@ def generate_ai_function_descriptions(
             "body_snippet": body,
         })
 
+    if not pass2_candidates:
+        logger.info(
+            "AI function description pass 2 skipped: 0 candidates "
+            "(body 없음 %d건 / body_snippets 인자 %s)",
+            _skip_no_body, "제공됨" if _snips else "없음",
+        )
     if pass2_candidates:
         pass2_batches = [pass2_candidates[i:i + _FUNC_DESC_BATCH_SIZE]
                          for i in range(0, len(pass2_candidates), _FUNC_DESC_BATCH_SIZE)]

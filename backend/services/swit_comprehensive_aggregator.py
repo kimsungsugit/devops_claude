@@ -18,11 +18,17 @@ try:
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
+from backend.services.excel_layout_resolver import (
+    coverage_column_base,
+    coverage_summary_col,
+    find_coverage_sheet,
+)
 from backend.services.excel_template_utils import (
     build_release_history_row,
     dot_date,
     has_vba_macros,
     inspect_vba_refs,
+    mark_user_input_required,
     safe_write,
     short_date,
     stamp_cover_document_id,
@@ -112,6 +118,170 @@ class SwitcrBuildResult:
         }
 
 
+#: 세션 실측 ↔ SwITR 문서 대조 축 (표시 라벨, agg 키, 문서 키).
+_SWITR_CROSSCHECK_AXES = (
+    ("총 TC", "total_tcs", "sitr_test_log_tcs"),
+    ("통과 TC", "passed", "sitr_pass_count"),
+    ("실패 TC", "failed", "sitr_fail_count"),
+)
+
+
+def _switr_divergence_warnings(
+    agg: dict[str, Any], switr_summary: dict[str, Any],
+) -> list[str]:
+    """VectorCAST 세션과 승인된 SwITR 문서가 다르면 경고 문자열을 낸다.
+
+    ⚠ 이 대조는 2026-08-26 까지 **한 번도 일어나지 않았다** — SwITR 을 1.1MB 나 읽어
+      놓고 시트명(`3.Test Log` vs 코드의 `2.Test Log`)과 TC 열(B vs 코드의 F)이 어긋나
+      `sitr_*` 세 키가 늘 부재였기 때문이다. 읽기만 고치면 값은 `or` 폴백 자리에 조용히
+      앉을 뿐이라, **어긋남을 말해야** 읽은 값이 쓸모가 있다.
+
+    ⚠ 한쪽이 없으면 건너뛴다 — **부재는 불일치가 아니다.** 없는 증거를 0 으로 접어
+      "문서가 0 건이라고 한다" 는 없는 사실을 만들지 않는다.
+    ⚠ 일치를 경고로 남기지 않는다 — 정상은 조용해야 한다.
+    """
+    out: list[str] = []
+    for label, agg_key, doc_key in _SWITR_CROSSCHECK_AXES:
+        live = agg.get(agg_key)
+        doc = switr_summary.get(doc_key)
+        if not isinstance(live, (int, float)) or not isinstance(doc, (int, float)):
+            continue
+        if int(live) != int(doc):
+            out.append(
+                f"[evidence] {label}: VectorCAST 세션 {int(live)} 와 SwITR 문서 "
+                f"{int(doc)} 가 다릅니다 — 산출물에는 세션 값을 실었습니다"
+            )
+    return out
+
+
+#: SwITR `1.Test Summary` 집계 블록의 헤더 라벨 → 우리 키.
+_SITR_TC_HEADERS = (
+    ("sitr_test_log_tcs", "number of tcs tested"),
+    ("sitr_pass_count", "number of tcs passed"),
+    ("sitr_fail_count", "number of tcs failed"),
+)
+
+
+def _sitr_summary_from_test_summary(wb: Any) -> dict[str, Any]:
+    """SwITR `1.Test Summary` 의 **Total 행**(문서가 스스로 말하는 집계)을 읽는다.
+
+    ⚠ Test Log 행 세기보다 이걸 **먼저** 쓴다. 정본 실측(2026-08-26)에서 `3.Test Log` 는
+      TC ID 가 세로 병합이라 병합 그룹이 54개, 결과 셀이 630개인데 문서의 Total 은 611 이다
+      — 행을 세는 접근 자체가 이 양식에서 틀린 답을 낸다.
+
+    라벨로만 찾는다(행·열 상수 없음). 못 찾으면 **빈 dict** 를 낸다 — 없는 집계를 0 으로
+    지어내지 않는다. SwITCV 에도 같은 이름의 시트가 있지만 이 블록이 없어 여기서 걸러진다.
+    """
+    ws = None
+    for name in getattr(wb, "sheetnames", []) or []:
+        if "testsummary" in "".join(str(name).split()).lower():
+            ws = wb[name]
+            break
+    if ws is None:
+        return {}
+    max_r = min(int(getattr(ws, "max_row", 0) or 0), 80)
+    max_c = min(int(getattr(ws, "max_column", 0) or 0), 20)
+
+    header_row = None
+    cols: dict[str, int] = {}
+    for r in range(1, max_r + 1):
+        found: dict[str, int] = {}
+        for c in range(1, max_c + 1):
+            label = str(ws.cell(r, c).value or "").strip().lower()
+            for key, want in _SITR_TC_HEADERS:
+                if label == want:
+                    found[key] = c
+        if len(found) == len(_SITR_TC_HEADERS):
+            header_row, cols = r, found
+            break
+    if header_row is None:
+        return {}
+
+    # 헤더 아래에서 `Total` 행을 찾는다. 부분합(Requirements Based / Fault Injection …)을
+    # 우리가 더하지 않는다 — 문서가 합쳐 둔 값을 그대로 쓴다(합산 규칙이 양식마다 다르다).
+    #
+    # ⚠ **블록 경계를 넘지 않는다.** 회사 SwITR 양식은 같은 시트에 섹션을 여러 개 쌓고
+    #   각각 자기 `Total` 행을 갖는다. HDPDM01 v0.10 양식(2026-08-26 실측)은 TC 블록에
+    #   Total 행이 **없고** 바로 아래 `■ Requirements/Design Coverage` 블록에 `Total`
+    #   (108/108/0)이 있다 — 경계를 안 지키면 **요구 커버리지 108 을 TC 108건으로**
+    #   읽는다. KJPDS02 에서 안 터진 건 그 칸이 비어 있어 아래 전량거부에 걸린 우연이다.
+    #   섹션 머리글은 이 양식군에서 `■` 로 시작한다.
+    for r in range(header_row + 1, min(header_row + 20, max_r) + 1):
+        if any(
+            str(ws.cell(r, c).value or "").strip().startswith("■")
+            for c in range(1, min(max_c, 4) + 1)
+        ):
+            break                          # 다음 섹션 시작 — 여기서 끊는다
+        is_total = any(
+            str(ws.cell(r, c).value or "").strip().lower() == "total"
+            for c in range(1, min(max_c, 4) + 1)
+        )
+        if not is_total:
+            continue
+        out: dict[str, Any] = {}
+        for key, _ in _SITR_TC_HEADERS:
+            value = ws.cell(r, cols[key]).value
+            if not isinstance(value, (int, float)):
+                return {}          # 한 칸이라도 수가 아니면 통째로 포기(부분 신뢰 금지)
+            out[key] = int(value)
+        return out
+    return {}
+
+
+def _sitr_summary_from_test_log(wb: Any) -> dict[str, Any]:
+    """`N.Test Log` 시트에서 TC 행을 센다 — `1.Test Summary` 가 없는 판(v1.01)용 폴백.
+
+    ⚠ 시트명을 정확 매칭하지 않는다. 회사 정본은 `3.Test Log` 인데 예전 코드가
+      `"2.Test Log"` 만 봐서 **한 번도 읽힌 적이 없었다**(2026-08-26 실측).
+    ⚠ TC ID 열도 상수가 아니다. 예전 코드는 `row[5]`(F열) 고정이었는데 정본은 **B열**이다.
+    """
+    ws = None
+    for name in getattr(wb, "sheetnames", []) or []:
+        if "testlog" in "".join(str(name).split()).lower():
+            ws = wb[name]
+            break
+    if ws is None:
+        return {}
+    max_r = min(int(getattr(ws, "max_row", 0) or 0), 400)
+    max_c = min(int(getattr(ws, "max_column", 0) or 0), 60)
+
+    tc_col = verdict_col = None
+    tc_hits: dict[int, int] = {}
+    verdict_hits: dict[int, int] = {}
+    for r in range(1, max_r + 1):
+        for c in range(1, max_c + 1):
+            value = str(ws.cell(r, c).value or "").strip()
+            if value.startswith("SwITC"):
+                tc_hits[c] = tc_hits.get(c, 0) + 1
+            elif value in ("Pass", "Fail", "PASS", "FAIL", "OK", "NG"):
+                verdict_hits[c] = verdict_hits.get(c, 0) + 1
+    if tc_hits:
+        tc_col = max(tc_hits, key=lambda c: tc_hits[c])
+    if verdict_hits:
+        verdict_col = max(verdict_hits, key=lambda c: verdict_hits[c])
+    if tc_col is None:
+        return {}
+
+    full_r = int(getattr(ws, "max_row", 0) or 0)
+    tc_count = pass_count = fail_count = 0
+    for r in range(1, full_r + 1):
+        if not str(ws.cell(r, tc_col).value or "").strip().startswith("SwITC"):
+            continue
+        tc_count += 1
+        if verdict_col is None:
+            continue
+        verdict = str(ws.cell(r, verdict_col).value or "").strip().lower()
+        if verdict in ("fail", "ng"):
+            fail_count += 1
+        elif verdict in ("pass", "ok"):
+            pass_count += 1
+    return {
+        "sitr_test_log_tcs": tc_count,
+        "sitr_pass_count": pass_count,
+        "sitr_fail_count": fail_count,
+    }
+
+
 def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False) -> dict[str, Any]:
     """Extract compact evidence from an existing SwITCV/SwITR workbook."""
     if not bytes_value or openpyxl is None:
@@ -130,27 +300,54 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
             "sheet_names": list(wb.sheetnames),
             "sheet_count": len(wb.sheetnames),
         }
-        cov = wb["4.Coverage"] if "4.Coverage" in wb.sheetnames else None
+        cov = find_coverage_sheet(wb)
         if cov is not None:
-            out["functions_total"] = cov["E5"].value
-            out["functions_fail_count"] = cov["F5"].value
-            out["functions_exception_count"] = cov["G5"].value
-            out["function_calls_total"] = cov["E6"].value
-            out["function_calls_fail_count"] = cov["F6"].value
-            out["function_calls_exception_count"] = cov["G6"].value
+            # 요약셀(r5/r6)은 회사 템플릿 수식이라 openpyxl이 cached=None으로 저장 →
+            # data_only 읽기 시 항상 None (roll-up이 함수 fail/exception을 0으로
+            # 오인식해 거짓 100% 커버리지 표기, ISO 26262 무결성 결함). 데이터행(SwITCV
+            # function/call 경로는 O/X·count·exception 모두 리터럴, swut_coverage 라102)
+            # 에서 집계해 채운다. 셀에 리터럴 캐시값이 있으면(외부 재계산본) 그 값 우선.
+            #
+            # ⚠ 2026-08-26 실측 — 여기 열 번호가 **DV(11열) 판에 고정**돼 있었다.
+            #   라운드 102 가 같은 파일의 `_extract_template_coverage_rows` 만 DV/PV
+            #   적응시키고 이 함수를 빠뜨려, KJPDS02 PV(10열) SwITCV 에서 **전 열이 한 칸씩
+            #   밀렸다**: `functions_total` 이 Total(1014) 대신 Fail Count(4) 를 읽어
+            #   253배 과소 보고했고, `function_result` 는 O/X 열이 아니라 Exception 열을
+            #   읽어 `coverage_fail_details` 가 통째로 비었다 — 실재하는 커버리지 미달성
+            #   4건(SwUFn_1005/1167/3519/3554)이 SwITCR 에 "해당사항 없음"으로 나갔다.
+            #   판정은 `excel_layout_resolver` 단일 출처를 쓴다(복제하지 말 것).
+            base = coverage_column_base(cov)
+            total_col = coverage_summary_col(cov, base=base)
+            fn_total = fn_fail = fn_exc = 0
+            call_rows = call_fail = call_exc = 0
             fail_details: list[dict[str, Any]] = []
             for row_idx in range(11, cov.max_row + 1):
-                unit_id = str(cov.cell(row_idx, 4).value or "").strip()
-                name = str(cov.cell(row_idx, 5).value or "").strip()
+                unit_id = str(cov.cell(row_idx, base).value or "").strip()
+                name = str(cov.cell(row_idx, base + 1).value or "").strip()
                 if not (unit_id or name):
                     continue
-                function_result = cov.cell(row_idx, 6).value
-                function_exception = cov.cell(row_idx, 7).value
-                call_count = cov.cell(row_idx, 8).value
-                call_total = cov.cell(row_idx, 9).value
-                call_result = cov.cell(row_idx, 10).value
-                call_exception = cov.cell(row_idx, 11).value
-                note = str(cov.cell(row_idx, 12).value or "").strip()
+                # 마감 TOTAL 행은 함수가 아니다 — 세면 합계가 1 늘어난다
+                # (`_extract_template_coverage_rows` 와 같은 방어).
+                if unit_id.lower() == "total" or name.lower() == "total":
+                    continue
+                function_result = cov.cell(row_idx, base + 2).value
+                function_exception = cov.cell(row_idx, base + 3).value
+                call_count = cov.cell(row_idx, base + 4).value
+                call_total = cov.cell(row_idx, base + 5).value
+                call_result = cov.cell(row_idx, base + 6).value
+                call_exception = cov.cell(row_idx, base + 7).value
+                note = str(cov.cell(row_idx, base + 8).value or "").strip()
+                fn_total += 1
+                if function_result == "X":
+                    fn_fail += 1
+                if str(function_exception or "").strip().upper() == "O":
+                    fn_exc += 1
+                if str(call_result or "").strip().upper() in ("O", "X"):
+                    call_rows += 1
+                if call_result == "X":
+                    call_fail += 1
+                if str(call_exception or "").strip().upper() == "O":
+                    call_exc += 1
                 if function_result == "X":
                     fail_details.append({
                         "kind": "함수커버리지",
@@ -170,24 +367,29 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
                         "note": note,
                     })
             out["coverage_fail_details"] = fail_details
-        test_log = wb["2.Test Log"] if "2.Test Log" in wb.sheetnames else None
-        if test_log is not None:
-            tc_count = 0
-            pass_count = 0
-            fail_count = 0
-            for row in test_log.iter_rows(min_row=4, values_only=True):
-                tc_id = str(row[5] or "").strip() if len(row) > 5 else ""
-                if not tc_id.startswith("SwITC"):
-                    continue
-                tc_count += 1
-                row_text = " ".join(str(v or "") for v in row[-12:])
-                if "Fail" in row_text:
-                    fail_count += 1
-                elif "Pass" in row_text or "OK" in row_text:
-                    pass_count += 1
-            out["sitr_test_log_tcs"] = tc_count
-            out["sitr_pass_count"] = pass_count
-            out["sitr_fail_count"] = fail_count
+            # 요약: 셀 리터럴 캐시값 우선, 없으면(수식→None) 데이터행 집계값.
+            # 열은 `Total | Fail Count | Exception` 연속 3칸 (헤더 라벨로 찾은 total_col 기준).
+            def _cell(row: int, col: int) -> Any:
+                return cov.cell(row, col).value
+
+            def _pick(row: int, offset: int, fallback: int) -> Any:
+                value = _cell(row, total_col + offset)
+                return value if isinstance(value, (int, float)) else fallback
+
+            out["functions_total"] = _pick(5, 0, fn_total)
+            out["functions_fail_count"] = _pick(5, 1, fn_fail)
+            out["functions_exception_count"] = _pick(5, 2, fn_exc)
+            out["function_calls_total"] = _pick(6, 0, call_rows)
+            out["function_calls_fail_count"] = _pick(6, 1, call_fail)
+            out["function_calls_exception_count"] = _pick(6, 2, call_exc)
+        # ⚠ 2026-08-26 실측 — SwITR 증거 읽기가 **통째로 죽어 있었다.** 두 이유가 겹쳤다:
+        #   ① 시트명을 `"2.Test Log"` 로 정확 매칭했는데 정본은 `3.Test Log` 다
+        #   ② TC ID 열을 `row[5]`(F) 로 박았는데 정본은 **B열**이다
+        #   그래서 `sitr_*` 세 키가 늘 부재였고, 이걸 폴백으로 쓰던 자리는 전부 세션 값만
+        #   봤다 — 승인된 결과 문서와의 **대조가 한 번도 일어나지 않았다.**
+        # 문서가 스스로 말하는 집계를 먼저 쓰고, 없을 때만 행을 센다.
+        sitr = _sitr_summary_from_test_summary(wb) or _sitr_summary_from_test_log(wb)
+        out.update(sitr)
         return out
     finally:
         wb.close()
@@ -752,7 +954,14 @@ def _write_it101(
     cfg: dict[str, Any],
     switcv_summary: dict[str, Any],
     warnings: list[str],
+    switr_summary: dict[str, Any] | None = None,
 ) -> int:
+    """IT101(4.1 커버리지 집계 + 4.2/4.3 미달성 표)를 쓴다.
+
+    ⚠ 2026-08-26 — `sitr_*` 키를 **`switcv_summary` 에서 찾고 있었다.** 그 키는 SwITR
+      워크북에서만 나오므로 늘 부재였고(게다가 이 함수는 `switr_summary` 를 받지도 않았다),
+      TC 수·통과 수는 세션 값만 보고 승인 문서와 대조되지 않았다.
+    """
     _write_common_header(ws, meta, cfg)
     safe_write(ws, 60, 4, "VectorCast")
     safe_write(ws, 61, 4, "2025.sp4")
@@ -763,17 +972,18 @@ def _write_it101(
     safe_write(ws, 68, 3, "HKY-KJPDS02-SwTP-2881")
     safe_write(ws, 5, 9, "=H79")
     function_count = _function_count(agg, switcv_summary)
-    failed_tcs = agg.get("failed", 0) or switcv_summary.get("sitr_fail_count", 0) or 0
+    _switr = switr_summary or {}
+    failed_tcs = agg.get("failed", 0) or _switr.get("sitr_fail_count", 0) or 0
     details = list(switcv_summary.get("coverage_fail_details") or [])
     function_fail = _int_value(switcv_summary.get("functions_fail_count"))
     function_exception = _int_value(switcv_summary.get("functions_exception_count"))
     call_fail = _int_value(switcv_summary.get("function_calls_fail_count"))
     call_exception = _int_value(switcv_summary.get("function_calls_exception_count"))
-    total_tcs = agg.get("total_tcs") or switcv_summary.get("sitr_test_log_tcs") or 0
-    passed_tcs = agg.get("passed") or switcv_summary.get("sitr_pass_count") or 0
+    total_tcs = agg.get("total_tcs") or _switr.get("sitr_test_log_tcs") or 0
+    passed_tcs = agg.get("passed") or _switr.get("sitr_pass_count") or 0
     it101_tc_total = _int_value(
         (cfg.get("switcr_metadata", {}) or {}).get("it101_tc_total"),
-        _int_value(switcv_summary.get("sitr_test_log_tcs"), _int_value(total_tcs)),
+        _int_value(_switr.get("sitr_test_log_tcs"), _int_value(total_tcs)),
     )
     call_total = switcv_summary.get("function_calls_total") or function_count
 
@@ -972,6 +1182,7 @@ def _write_it201(
     agg: dict[str, Any],
     cfg: dict[str, Any],
     failures: list[dict[str, Any]],
+    warnings: list[str] | None = None,
 ) -> int:
     _write_common_header(ws, meta, cfg)
     _write_switcr_test_environment(
@@ -980,13 +1191,29 @@ def _write_it201(
     )
     md = cfg.get("switcr_metadata", {}) or {}
     total_tcs = _int_value(md.get("interface_total"), _int_value(agg.get("total_tcs")))
-    passed = _int_value(md.get("interface_passed"), total_tcs)
-    passed = min(passed, total_tcs)
     safe_write(ws, 70, 2, "IT")
     safe_write(ws, 70, 3, "인터페이스 커버리지\n(검증된 인터페이스 / 전체 인터페이스) *100")
     safe_write(ws, 70, 6, total_tcs)
-    safe_write(ws, 70, 7, passed)
-    safe_write(ws, 70, 8, "=F70-G70")
+    # A2 — passed 실측(interface_passed) 부재 시 passed=total(=100% 커버리지) 조작 금지.
+    # 형제 SwUTCR UT201 과 동일 원칙: 명시 증거 없으면 노란 사용자입력 마킹 + 경고로
+    # 표면화한다. ISO 26262 인터페이스 검증 증거를 무측정 100% 로 위장하면 audit 무결성이
+    # 깨진다. total_tcs 는 agg 실측이라 그대로 기입(분모).
+    _if_passed = md.get("interface_passed")
+    if _if_passed is not None and str(_if_passed).strip() != "":
+        passed = min(_int_value(_if_passed), total_tcs)
+        safe_write(ws, 70, 7, passed)
+        # H70(=F70-G70)은 G70 이 숫자일 때만 유효한 수식이다. 무증거 경로에선 G70 이
+        # placeholder 텍스트라 H70 이 Excel 에서 #VALUE! 가 되므로(deep-review W1),
+        # 파생 수식 셀도 evidence 분기 안에서만 기입 — else 에선 함께 마킹(UT201식).
+        safe_write(ws, 70, 8, "=F70-G70")
+    else:
+        mark_user_input_required(ws, 70, 7, hint="인터페이스 검증 통과 수 실측 미제공")
+        mark_user_input_required(ws, 70, 8, hint="인터페이스 검증 통과 수 실측 미제공")
+        if warnings is not None:
+            warnings.append(
+                "[switcr] 2.IT201 interface_passed 실측 미제공 — G70/H70 사용자입력 마킹"
+                " (passed=total 100% 위장 제거)"
+            )
     safe_write(ws, 70, 9, '=IFERROR(G70/F70, "")')
     safe_write(ws, 70, 10, 0)
     safe_write(ws, 70, 11, 0)
@@ -1030,20 +1257,51 @@ def _write_it301(
     cfg: dict[str, Any],
     switr_summary: dict[str, Any],
     fault_injection_summary: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> None:
     _write_common_header(ws, meta, cfg)
     _write_switcr_test_environment(ws, cfg, tool_row=70, ref_doc_row=77)
     md = cfg.get("switcr_metadata", {}) or {}
     fi = fault_injection_summary or {}
-    total = _int_value(fi.get("tc_count"), _int_value(md.get("fault_injection_count"), 5))
-    passed = _int_value(fi.get("passed_tc_count"), _int_value(md.get("fault_injection_passed"), total))
-    failed = _int_value(fi.get("failed_tc_count"), max(total - passed, 0))
-    passed = min(passed, total)
-    safe_write(ws, 85, 3, total)
-    safe_write(ws, 85, 5, total)
-    safe_write(ws, 85, 6, passed)
-    safe_write(ws, 85, 7, "=E85-F85")
-    safe_write(ws, 85, 8, 1 if total and failed == 0 else 0)
+    # A2 — 결함주입(FI)은 ASIL 안전기구 검증 증거다. total(count)/passed 를 **독립 게이트**
+    # 한다(deep-review W2): 형제 SwUTCR UT201 처럼 count 만 있고 passed 가 없으면
+    # passed=total(=100% PASS)로 조작하지 않고 F85/H85 를 노란 마킹한다. 단일 bool 이던
+    # 예전 게이트는 count-only 부분증거를 통과시켜 무측정 100% PASS 를 부활시켰다.
+    # fi(실측) 우선, 없으면 config(switcr_metadata). 값 없으면 None(마킹).
+    def _fi_present(key_fi: str, key_md: str) -> int | None:
+        for src, k in ((fi, key_fi), (md, key_md)):
+            v = src.get(k)
+            if v is not None and str(v).strip() != "":
+                return _int_value(v)
+        return None
+    _total = _fi_present("tc_count", "fault_injection_count")
+    _passed = _fi_present("passed_tc_count", "fault_injection_passed")
+    _fi_measured = _total is not None and _passed is not None
+    if _total is not None:
+        safe_write(ws, 85, 3, _total)
+        safe_write(ws, 85, 5, _total)
+    else:
+        mark_user_input_required(ws, 85, 3, hint="결함주입 TC 수 실측 미제공")
+        mark_user_input_required(ws, 85, 5, hint="결함주입 TC 수 실측 미제공")
+    if _passed is not None:
+        safe_write(ws, 85, 6, min(_passed, _total) if _total is not None else _passed)
+    else:
+        mark_user_input_required(ws, 85, 6, hint="결함주입 통과 수 실측 미제공")
+    if _total is not None and _passed is not None:
+        failed = _int_value(fi.get("failed_tc_count"), max(_total - min(_passed, _total), 0))
+        safe_write(ws, 85, 7, "=E85-F85")
+        safe_write(ws, 85, 8, 1 if _total and failed == 0 else 0)
+    else:
+        # count 또는 passed 실측이 없으면 판정/실패수를 계산하지 않는다(위장 PASS 금지).
+        failed = 0  # 미측정 — 아래 Fail Report 도 '해당사항 없음'(=통과) 대신 마킹(W3).
+        mark_user_input_required(ws, 85, 7, hint="결함주입 판정 실측 미제공")
+        mark_user_input_required(ws, 85, 8, hint="결함주입 판정 실측 미제공")
+        if warnings is not None:
+            _missing = [n for n, ok in (("count", _total is not None), ("passed", _passed is not None)) if not ok]
+            warnings.append(
+                f"[switcr] 3.IT301 결함주입 실측 부족({', '.join(_missing) or '전무'}) — "
+                "E85/F85/G85/H85 사용자입력 마킹 (count-only 100% PASS·위장 제거)"
+            )
     _prepare_it301_reference_layout(ws)
     safe_write(ws, 88, 2, "  4.2 Fail Report")
     safe_write(ws, 89, 2, "NO")
@@ -1057,11 +1315,18 @@ def _write_it301(
             safe_write(ws, row, 3, case.get("tc_id") or f"FI-{idx}")
             safe_write(ws, row, 5, "Expected/Actual mismatch in Fault Injection evidence.")
             safe_write(ws, row, 11, "Review FI_Test Case actual results and linked SwITS fault-injection TC.")
-    else:
+    elif _fi_measured:
         safe_write(ws, 90, 2, 1)
         safe_write(ws, 90, 3, "해당사항 없음")
         safe_write(ws, 90, 5, "해당사항 없음")
         safe_write(ws, 90, 11, "해당사항 없음")
+    else:
+        # W3 — FI 미측정이면 Fail Report 를 "해당사항 없음"(=Fail 0=통과)으로 위장하지
+        # 않는다. 상단 E85/F85 노란 마킹과 모순되던 것을 제거(감사자 섹션별 상충 판독 방지).
+        safe_write(ws, 90, 2, 1)
+        mark_user_input_required(ws, 90, 3, hint="결함주입 미측정 — Fail 항목 미확정")
+        mark_user_input_required(ws, 90, 5, hint="결함주입 미측정")
+        mark_user_input_required(ws, 90, 11, hint="결함주입 미측정")
     safe_write(ws, 92, 2, "  4.3 Coverage Not Completed")
     safe_write(ws, 93, 2, "NO")
     safe_write(ws, 93, 3, "Test Case")
@@ -1093,11 +1358,16 @@ def _write_it301(
     ])
 
 
-def _write_it401(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
+def _write_it401(
+    ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], warnings: list[str] | None = None,
+) -> None:
     _write_common_header(ws, meta, cfg)
     md = cfg.get("switcr_metadata", {}) or {}
     safe_write(ws, 6, 3, md.get("debugger", ""))
     _write_switcr_test_environment(ws, cfg, tool_row=65, ref_doc_row=72)
+    # W5 — 자원사용(RAM/ROM/stack) 실측(resource_usage 설정)이 없을 때 하드코딩 "Pass"+
+    # 가짜 사용량(예: =1312/4096)을 stamp 하던 것을 금지 — 노란 사용자입력 마킹. 단
+    # 템플릿상 의도적 N/A 행(동적메모리 제외 등, result 가 Pass 가 아님)은 그대로 둔다.
     defaults = {
         78: ("=1312/4096", "Pass", ""),
         79: (0.211, "Pass", ""),
@@ -1109,14 +1379,35 @@ def _write_it401(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
     safe_write(ws, 80, 5, "동적 메모리 사용량")
     safe_write(ws, 80, 7, "PDSM은 동적메모리를 사용하고 있지 않으므로 \n해당 시험은 제외함")
     resource_usage = md.get("resource_usage", {}) or {}
+    _missing = []
     for row, fallback in defaults.items():
-        value, result, attachment = resource_usage.get(str(row), fallback)
-        safe_write(ws, row, 11, value)
-        safe_write(ws, row, 12, result)
-        safe_write(ws, row, 13, attachment)
+        if str(row) in resource_usage:
+            value, result, attachment = resource_usage[str(row)]
+            safe_write(ws, row, 11, value)
+            safe_write(ws, row, 12, result)
+            safe_write(ws, row, 13, attachment)
+        elif str(fallback[1]).strip().lower() == "pass":
+            # 실측 없이 "Pass" 로 판정하던 자원 행 — 값·판정을 마킹(가짜 사용량 제거).
+            mark_user_input_required(ws, row, 11, hint="자원 사용량 실측 미제공")
+            mark_user_input_required(ws, row, 12, hint="자원 사용량 판정 실측 미제공")
+            safe_write(ws, row, 13, fallback[2])
+            _missing.append(row)
+        else:
+            # 의도적 N/A·템플릿 행 (동적메모리 제외 등) — 그대로.
+            value, result, attachment = fallback
+            safe_write(ws, row, 11, value)
+            safe_write(ws, row, 12, result)
+            safe_write(ws, row, 13, attachment)
+    if _missing and warnings is not None:
+        warnings.append(
+            f"[switcr] 4.IT401 자원사용 실측 미제공(row {_missing}) — K/L열 사용자입력 마킹 "
+            "(하드코딩 Pass·가짜 사용량 제거)"
+        )
 
 
-def _write_it701(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
+def _write_it701(
+    ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], warnings: list[str] | None = None,
+) -> None:
     _write_common_header(ws, meta, cfg)
     md = cfg.get("switcr_metadata", {}) or {}
     safe_write(ws, 6, 3, md.get("debugger", ""))
@@ -1138,13 +1429,26 @@ def _write_it701(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
         safe_write(ws, row, 7, method)
         safe_write(ws, row, 9, action)
         safe_write(ws, row, 12, note)
+    # W5 — 안전기구(watchdog/RAM/ROM/stack/ECC/clock) 검증 결과를 실측(system_error_protection
+    # 설정) 없이 "Pass"로 조작하지 않는다. IT701 은 ASIL C/D 안전기구 증거라 무측정 Pass 는
+    # audit 무결성 위반(IT201/IT301=A2 과 같은 조작 패턴). 실측 없으면 노란 사용자입력 마킹.
     results = md.get("system_error_protection", {}) or {}
+    _missing = []
     for row in range(70, min(ws.max_row, 76) + 1):
-        result = results.get(str(row), "Pass")
         safe_write(ws, row, 6, "○")
-        safe_write(ws, row, 7, result)
+        _r = results.get(str(row))
+        if _r is not None and str(_r).strip() != "":
+            safe_write(ws, row, 7, _r)
+        else:
+            mark_user_input_required(ws, row, 7, hint="안전기구 검증 결과 실측 미제공")
+            _missing.append(row)
         safe_write(ws, row, 10, "X")
         safe_write(ws, row, 11, "N/A")
+    if _missing and warnings is not None:
+        warnings.append(
+            f"[switcr] 7.IT701 시스템오류보호(ASIL 안전기구) 결과 실측 미제공 "
+            f"(row {_missing}) — G열 사용자입력 마킹 (무측정 'Pass' 위장 제거)"
+        )
 
 
 def _write_not_applicable(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], reason: str) -> None:
@@ -1349,6 +1653,8 @@ def build_switcr_report(
         function_name_to_swufn_from_suds=agg.get("function_name_to_swufn_from_suds"),
     )
 
+    warnings.extend(_switr_divergence_warnings(agg, switr_summary))
+
     summary: dict[str, Any] = {
         "environments": len(session.environments),
         "total_tcs": agg.get("total_tcs", 0) or switr_summary.get("sitr_test_log_tcs", 0),
@@ -1376,6 +1682,7 @@ def build_switcr_report(
     if it101 is not None:
         summary["it101_failure_rows"] = _write_it101(
             it101, meta, agg, cfg, switcv_summary, warnings,
+            switr_summary=switr_summary,
         )
     else:
         incomplete_sheets.append("1.IT101")
@@ -1384,25 +1691,25 @@ def build_switcr_report(
     it201 = _find_sheet(wb, "it201")
     if it201 is not None:
         failures = _coverage_failures(agg.get("function_rows") or [], agg.get("c_function_map") or None)
-        summary["it201_coverage_rows"] = _write_it201(it201, meta, agg, cfg, failures)
+        summary["it201_coverage_rows"] = _write_it201(it201, meta, agg, cfg, failures, warnings)
     else:
         incomplete_sheets.append("2.IT201")
 
     it301 = _find_sheet(wb, "it301")
     if it301 is not None:
-        _write_it301(it301, meta, agg, cfg, switr_summary, fault_injection_summary)
+        _write_it301(it301, meta, agg, cfg, switr_summary, fault_injection_summary, warnings)
     else:
         incomplete_sheets.append("3.IT301")
 
     it401 = _find_sheet(wb, "it401")
     if it401 is not None:
-        _write_it401(it401, meta, cfg)
+        _write_it401(it401, meta, cfg, warnings)
     else:
         incomplete_sheets.append("4.IT401")
 
     it701 = _find_sheet(wb, "it701")
     if it701 is not None:
-        _write_it701(it701, meta, cfg)
+        _write_it701(it701, meta, cfg, warnings)
     else:
         incomplete_sheets.append("7.IT701")
 
@@ -1447,6 +1754,14 @@ def build_switcr_report(
 
     _apply_switcr_reference_styles(wb, switcr_reference_bytes, warnings)
     _order_switcr_sheets(wb)
+
+    # 라운드 107 — 템플릿/기입 수식을 openpyxl이 캐시 미저장(cached=None) → 재계산
+    # 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때 자동 재계산(SwITCV 라운드 102 정합).
+    # 캐시 미저장은 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     out = io.BytesIO()
     wb.save(out)

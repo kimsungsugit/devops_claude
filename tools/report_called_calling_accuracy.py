@@ -3,13 +3,15 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Set, Tuple
+
+import docx  # type: ignore
 
 repo_root = Path(r"D:\Project\devops\260105")
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-import report_generator as rg
+import report_generator as rg  # noqa: E402
 
 
 def _extract_doc_fn_info(path: Path) -> Dict[str, Dict[str, str]]:
@@ -40,7 +42,6 @@ def _names_from_field(text: str) -> Set[str]:
 
 def _build_expected_maps(source_sections: Dict[str, object]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, str]]:
     details_by_name = source_sections.get("function_details_by_name", {}) or {}
-    module_map = source_sections.get("module_map", {}) or {}
     exp_called: Dict[str, Set[str]] = {}
     exp_calling: Dict[str, Set[str]] = {}
     fn_to_swcom: Dict[str, str] = {}

@@ -2,8 +2,6 @@
 """Unit tests for workflow.doc_compare comparison logic."""
 from __future__ import annotations
 
-import pytest
-
 from workflow.doc_compare import diff_text_lines
 
 
@@ -76,8 +74,8 @@ class TestDiffTextLines:
 class TestDiffDocx:
     def test_missing_docx_lib(self):
         """diff_docx returns error when python-docx is missing."""
-        from workflow.doc_compare import diff_docx
         from unittest.mock import patch
+
         with patch.dict("sys.modules", {"docx": None}):
             # The function catches ImportError internally
             # Just verify it handles the case gracefully
@@ -87,8 +85,9 @@ class TestDiffDocx:
 class TestDiffXlsm:
     def test_missing_openpyxl(self):
         """diff_xlsm returns error dict when openpyxl is missing."""
-        from workflow.doc_compare import diff_xlsm
         from unittest.mock import patch
+
+        from workflow.doc_compare import diff_xlsm
         with patch.dict("sys.modules", {"openpyxl": None}):
             result = diff_xlsm("a.xlsx", "b.xlsx")
             assert "error" in result

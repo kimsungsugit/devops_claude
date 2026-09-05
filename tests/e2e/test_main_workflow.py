@@ -12,6 +12,7 @@ Requires both frontend (port 5173) and backend (port 7000) to be running.
 from __future__ import annotations
 
 import os
+
 import pytest
 
 try:

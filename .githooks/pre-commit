@@ -19,10 +19,33 @@ if [ ! -x "$PROJECT_PY" ]; then
     echo "⚠️  .venv python not found, falling back to PATH 'python'"
 fi
 
+# 0. 스테이징 목록을 **한 번만** 뽑는다 — 그리고 git 실패를 통과로 바꾸지 않는다.
+#
+# 예전엔 세 곳(STAGED_PY / STAGED_SKILL / STAGED_JS)이 전부 각자
+#   $(git diff --cached --name-only … | grep …)
+# 였다. 이 스크립트엔 `pipefail` 이 없어(전 파일 0건) 파이프의 종료코드는 **grep 만**
+# 결정한다. 그래서 `git diff --cached` 자체가 실패해도(index.lock 경합 등 — 이 저장소가
+# 실제로 겪은 사고다) 세 목록이 전부 빈 문자열이 되고
+#   [1/3] syntax → "No Python files staged, skipping"
+#   [2/3] ruff / eslint / frontmatter → if 조건이 거짓이라 **블록에 진입조차 안 함**
+# 이 되어 게이트 4개가 **경고 한 줄 없이** 사라진 채 "=== Pre-commit checks passed ===" 가
+# 찍힌다. `scripts/_ratchet_core.py` 는 같은 실패 모드를 이미 fail-closed(Disabled)로
+# 막는데, 정작 그 ratchet 을 **부를지 말지 정하는** 이 바깥 레이어만 무방비였다.
+if ! STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM); then
+    echo "❌ git diff --cached 실패 — 스테이징 목록을 못 읽었다."
+    echo "   목록이 비면 syntax/ruff/eslint/frontmatter 4개 게이트가 조용히 스킵된다."
+    echo "   미검증을 통과로 바꾸지 않는다. Commit aborted."
+    exit 1
+fi
+
+# 0b. 게이트가 도는 동안 index 가 바뀌면 **검사한 것과 커밋되는 것이 달라진다.**
+#     시작 시점을 기록해 두고 맨 끝에서 대조한다(아래 [4/4]).
+STAGED_STATUS_BEFORE=$(git diff --cached --name-status)
+
 # 1. Python syntax check on staged .py files
-STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+STAGED_PY=$(printf '%s\n' "$STAGED_ALL" | grep '\.py$' || true)
 if [ -n "$STAGED_PY" ]; then
-    echo "[1/2] Checking Python syntax..."
+    echo "[1/3] Checking Python syntax..."
     for f in $STAGED_PY; do
         if [ -f "$f" ]; then
             "$PROJECT_PY" -m py_compile "$f" || {
@@ -33,32 +56,222 @@ if [ -n "$STAGED_PY" ]; then
     done
     echo "✅ Python syntax OK"
 else
-    echo "[1/2] No Python files staged, skipping syntax check"
+    echo "[1/3] No Python files staged, skipping syntax check"
 fi
 
-# 2. Run pytest with 180s timeout (30차 prep T215 — 60s에서 상향)
-#    이전 60s는 ~1700개 회귀 일부만 실행하고 timeout 후 "commit allowed".
-#    180s = full 회귀 ~70s + 안전 margin. 그래도 도달 시 명시적 경고로
-#    수동 full 회귀 권장 메시지 출력 — silent skip 회피.
+# 2. Ruff lint + SKILL.md frontmatter — Claude Code 훅(PostToolUse)에서만 돌던
+#    게이트를 commit 시점으로 승격한다. `--no-verify`·외부 에디터 편집·17시
+#    auto_commit_push 가 우회하던 구멍을 닫는다. **스테이징 파일만** 검사해
+#    레거시 backlog(ruff 위반·frontmatter)를 안 건드린다(변경 파일 ratchet).
+#    도구 부재는 DISABLED 로 명시(빈 출력을 clean 으로 읽지 않음 = anti-fake-green).
 set +e
-if [ -d "tests/unit" ]; then
-    echo "[2/2] Running unit tests (timeout: 180s)..."
-    TEST_OUTPUT=$(timeout 180 "$PROJECT_PY" -m pytest tests/unit/ -x -q --tb=short 2>&1)
-    TEST_EXIT=$?
-    echo "$TEST_OUTPUT" | tail -20
-    if [ $TEST_EXIT -eq 124 ]; then
-        echo "⚠️ Tests timed out (180s). Skipping — commit allowed."
-        echo "   ⚠️  주의: 일부 회귀 미실행 상태로 commit. 수동 full 회귀 권장:"
-        echo "        $PROJECT_PY -m pytest tests/unit/ -q --tb=short"
-    elif [ $TEST_EXIT -ne 0 ]; then
-        echo "❌ Unit tests failed. Commit aborted."
+STAGED_SKILL=$(printf '%s\n' "$STAGED_ALL" | grep 'SKILL\.md$' || true)
+if [ -n "$STAGED_PY" ]; then
+    # ratchet: 변경 라인의 **신규** 위반만 차단. 저장소 ruff backlog(1072건/247파일,
+    # 2026-07-18 실측) 탓에 파일 전체 ruff 는 거의 모든 파일에서 레거시를 터뜨려
+    # 커밋을 막는다 → --no-verify 도피. scripts/ruff_ratchet.py 가 net-new 만 본다.
+    echo "[2/3] Ruff (변경 라인 한정, 레거시 제외) on staged Python..."
+    RUFF_OUT=$("$PROJECT_PY" scripts/ruff_ratchet.py --cached $STAGED_PY 2>&1)
+    RUFF_RC=$?
+    # DISABLED(rc=2) 비대칭(의도적): 로컬은 venv 드리프트가 흔해 **경고 후 허용**,
+    # CI(ci.yml/.gitlab-ci.yml)는 통제된 환경이라 DISABLED=인프라 이상 → **빌드 실패**.
+    if [ $RUFF_RC -eq 2 ]; then
+        echo "⚠️  $RUFF_OUT"
+    elif [ $RUFF_RC -ne 0 ]; then
+        echo "$RUFF_OUT"
+        echo "❌ 신규 ruff 위반. 고친 뒤 다시 커밋 (레거시 backlog 는 이 게이트가 안 막음)."
         exit 1
     else
-        echo "✅ Unit tests passed"
+        echo "✅ $RUFF_OUT"
+    fi
+fi
+# ⚠ 확장자는 eslint.config.js 의 files 범위(js,jsx)와 일치시킨다. ts/tsx 를 받으면
+# config 없는 파일이 넘어가 '설정 없음' warning 으로 조용히 통과한다.
+# node_modules 배제는 유지한다 — tracked 였던 2,186개는 이제 추적 해제됐지만(Initial commit
+# 에 휩쓸려 들어온 것), 누군가 다시 `git add -f` 하면 커맨드라인 길이 한계를 넘겨 eslint
+# 기동 자체가 실패한다. 방어는 남겨 두는 게 싸다.
+STAGED_JS=$(printf '%s\n' "$STAGED_ALL" | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/' || true)
+if [ -n "$STAGED_JS" ]; then
+    # ruff 와 같은 ratchet 원리. frontend-v2 는 오래 lint 게이트가 없어(config·의존성 부재)
+    # 레거시 error 101건(2026-07-20 실측)이 쌓였다 — 파일 전체 eslint 는 건드리는 파일마다
+    # 레거시를 터뜨려 --no-verify 도피를 부른다. scripts/eslint_ratchet.py 가 net-new 만 본다.
+    echo "[2/3] ESLint (변경 라인 한정, 레거시 제외) on staged JS/JSX..."
+    ES_OUT=$("$PROJECT_PY" scripts/eslint_ratchet.py --cached $STAGED_JS 2>&1)
+    ES_RC=$?
+    # rc=2(DISABLED) 비대칭은 ruff 와 동일: 로컬은 node_modules 미설치가 흔해 경고 후 허용,
+    # CI 는 통제된 환경이라 DISABLED=인프라 이상 → 빌드 실패.
+    if [ $ES_RC -eq 2 ]; then
+        echo "⚠️  $ES_OUT"
+    elif [ $ES_RC -ne 0 ]; then
+        echo "$ES_OUT"
+        echo "❌ 신규 ESLint 위반. 고친 뒤 다시 커밋 (레거시 backlog 는 이 게이트가 안 막음)."
+        exit 1
+    else
+        echo "✅ $ES_OUT"
+    fi
+fi
+if [ -n "$STAGED_SKILL" ]; then
+    echo "[2/3] SKILL.md frontmatter 검사..."
+    FM_OUT=$("$PROJECT_PY" scripts/check_skill_frontmatter.py $STAGED_SKILL 2>&1)
+    FM_RC=$?
+    if [ $FM_RC -eq 1 ]; then
+        echo "$FM_OUT"
+        echo "❌ SKILL.md frontmatter 문제(조용한 트리거 실종 등). Commit aborted."
+        exit 1
+    elif [ $FM_RC -eq 2 ]; then
+        echo "⚠️  frontmatter 검사 DISABLED (PyYAML 미설치?). 커밋 허용."
+    elif [ -n "$FM_OUT" ]; then
+        echo "$FM_OUT"
+    fi
+fi
+# 하네스 문서 **본문**의 코드 참조 실재 검사(변경 라인 ratchet). frontmatter 검사기는
+# 구조만 보므로 "없는 함수 사용법"·"무관한 줄번호"·"통째로 허구인 에이전트 문서" 가
+# 전부 사각이었다(2026-08-03 감사에서 9건 — backlog 는 그때 0으로 정리했다).
+STAGED_DOC=$(printf '%s\n' "$STAGED_ALL" | grep -E '^(\.claude/.*\.md|CLAUDE\.md)$' || true)
+if [ -n "$STAGED_DOC" ]; then
+    echo "[2/3] 문서 코드참조 검사(변경 라인 한정)..."
+    DR_OUT=$("$PROJECT_PY" scripts/check_doc_references.py --cached $STAGED_DOC 2>&1)
+    DR_RC=$?
+    if [ $DR_RC -eq 2 ]; then
+        echo "⚠️  $DR_OUT"
+    elif [ $DR_RC -ne 0 ]; then
+        echo "$DR_OUT"
+        echo "❌ 문서가 없는 경로/줄/심볼을 가리킨다. 고치거나, 부재를 서술하는 문단이면"
+        echo "   그 문단에 <!-- doc-refs-ok --> 를 달 것."
+        exit 1
+    else
+        echo "✅ $DR_OUT"
+    fi
+fi
+set -e
+
+# 3. Run pytest with 900s timeout
+#
+# ## 스위트가 예산을 향해 자라고 있었다 (실측)
+#
+#   2026-07-17  3,486개 / 281s      ← 아래 "900s = 281s + margin" 의 근거였던 값
+#   2026-07-29  4,603개 / 451s
+#   2026-07-29  4,638개 / 590s      ← 예산까지 여유 310초. 두 주 만에 2.1배
+#
+# 900s 에 닿으면 `timeout` 은 124 를 주는데, 예전 코드는 그걸 받아
+# `"Skipping — commit allowed"` 를 찍고 **커밋을 통과시켰다**. 즉 스위트가 조금만 더
+# 자라면 이 게이트는 스스로 무게이트로 강등된다 — 그러고도 "검사했다"는 인상만 남는다.
+# 같은 결함이 실제로 있었다: 예전 주석의 "full 회귀 ~70s" 드리프트 때문에 180s cap 이
+# **매번** 124 로 빠져 게이트가 사실상 없던 시기가 있었다.
+#
+# ## 두 갈래로 고친다
+#
+# (a) 예산에 닿을 일을 없앤다 — pytest-xdist 가 있으면 `-n auto`.
+#     실측(18코어): 590s → **179s**, 결과는 직렬과 완전 일치(4,638 passed / 1 skipped).
+#     xdist 는 워커가 별도 **프로세스**라 전역 싱글톤 오염이 오히려 줄어든다.
+# (b) 그래도 닿으면 **통과시키지 않는다**(fail-closed).
+#     이 저장소에서 "오래 걸린다"의 실체는 느림이 아니라 **hang** 이었다
+#     (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달 — 고친 뒤 4분 40초).
+#     179s 짜리가 900s 를 먹었다면 그건 hang 이고, hang 은 통과시킬 대상이 아니다.
+#     정말 장비가 느린 것뿐이라면 `--no-verify` 로 넘기되 그건 **의식적 결정**이어야 한다.
+set +e
+if [ -d "tests/unit" ]; then
+    # xdist 유무를 실제 import 로 확인한다. 없으면 조용히 직렬로 도는 게 아니라 **명시**한다
+    # (도구 부재를 clean 으로 읽지 않는다 = 이 저장소의 anti-fake-green 계약).
+    if "$PROJECT_PY" -c "import xdist" >/dev/null 2>&1; then
+        PYTEST_PAR="-n auto"
+        echo "[3/3] Running tests: tests/ 전체 (병렬 -n auto, 실측 310~433초 / timeout 900s)..."
+    else
+        PYTEST_PAR=""
+        echo "[3/3] Running tests: tests/ 전체 (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
+        echo "   ⚠️  직렬은 실측 590s+ 라 예산 900s 를 넘길 가능성이 높다(integration 추가분 포함)."
+        echo "       설치 권장: $PROJECT_PY -m pip install pytest-xdist"
+    fi
+    # `-k 30`: TERM 30초 뒤에도 살아 있으면 KILL. 병렬 실행은 워커가 손자 프로세스라
+    # TERM 만으로는 남을 수 있다(hang 이면 특히). 남은 워커가 다음 실행의 CPU 를 먹으면
+    # "왜 갑자기 느리지" 로 오진하게 된다.
+    # ⚠ `tests/integration/`·`tests/e2e/` 를 **추가**했다(2026-08-21). 예전엔 이 게이트가
+    #   `tests/unit/` 만 돌았고, 그래서 integration 56건이 커밋 1b6bb99(2026-08-04) 이후
+    #   **17일 동안 전부 401 로 죽어 있었는데 스위트는 초록이었다.** 거기엔 ISO 26262
+    #   추적성 ID 가 달려 "시험이 있다" 는 문서 근거로 쓰인다.
+    #   ⚠ 죽은 스위트의 피해는 "회귀를 못 잡는다" 로 끝나지 않는다 — **낡은 계약을 보존한다.**
+    #     되살려 보니 `/api/run/stop` 이 임의 PID 에 200 을 주던(=백엔드를 통째로 죽일 수
+    #     있던) 시절의 기대가 그대로 남아 있었다.
+    #   예산: **실측 310~433초**(7,288 passed / 16 skipped, -n auto 18코어, 2026-08-21).
+#   ⚠ 같은 규모가 310·372·433초로 갈렸다 — 동시 실행 부하 차이다. **단일 수치로 믿지 말 것.**
+    #   최악 관측(433초) 기준 900s 까지 여유 **467초**. ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
+    #   로 적었는데 **틀렸다** — 그 550s·96s 는 다른 작업과 동시 실행 중에 잰 값이라
+    #   부하가 섞여 있었다. 따로 잰 수를 더하지 말고 **합쳐서 한 번 잴 것**.
+    #   루트 직속 3파일도 편입돼 **제외 0** — `tests/unit/test_gate_reach.py` 의 `_EXEMPT = {}`
+    #   가 비어 있는 것이 정상이고, 그 가드가 새 사각지대를 막는다(2026-09-03 정정: 이 줄이
+    #   4곳에서 게이트를 실제보다 약하게 서술하고 있었다).
+    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
+    TEST_EXIT=$?
+    echo "$TEST_OUTPUT" | tail -20
+    # ⚠ **전문을 파일로 남긴다.** 위 `tail -20` 은 화면용이고, 실패 시엔 그걸로 부족하다:
+    #   `-x --tb=short` 의 마지막 20줄은 보통 요약줄과 로그 몇 줄뿐이라 FAILURES 블록·
+    #   captured log·단언 전문이 통째로 잘린다.
+    #   2026-08-21 실사고: `test_list_dir` 이 403 으로 **한 번** 깨졌는데 20줄만 남아
+    #   ①어느 403 인지(admin gate vs 경로 봉인 — 둘 다 WARNING 을 남긴다) ②단언 전문
+    #   (`assert 40...` 로 잘렸다) 을 못 봤다. 재실행 3회는 전부 통과해 **재현된 그 한 번의
+    #   증거를 버린 셈**이 됐다. 간헐 실패에선 이게 치명적이다.
+    if [ $TEST_EXIT -ne 0 ]; then
+        mkdir -p .codex_tmp 2>/dev/null
+        FAIL_LOG=".codex_tmp/precommit_test_failure.log"
+        printf '%s\n' "$TEST_OUTPUT" > "$FAIL_LOG" 2>/dev/null \
+            && echo "   📄 전체 출력: $FAIL_LOG ($(wc -l < "$FAIL_LOG" 2>/dev/null || echo '?') 줄)" \
+            || echo "   ⚠️  전체 출력을 파일로 못 남겼다 — 위 20줄이 전부다."
+    fi
+    if [ $TEST_EXIT -eq 124 ]; then
+        echo "❌ 테스트가 900s 예산을 넘겼다. Commit aborted."
+        echo "   이 저장소에서 예산 초과의 실체는 대부분 **hang** 이었다(데드락·모달 대화상자)."
+        echo "   미검증을 통과로 바꾸지 않는다 — 원인을 먼저 확인할 것:"
+        echo "        $PROJECT_PY -m pytest tests/ -x -q --tb=short --durations=20"
+        echo "   장비가 느린 것뿐이라고 판단되면 --no-verify 로 넘길 수 있다(의식적 결정)."
+        exit 1
+    elif [ $TEST_EXIT -ne 0 ]; then
+        echo "❌ Tests failed. Commit aborted."
+        exit 1
+    else
+        echo "✅ Tests passed (tests/ 전체 — 제외 0)"
     fi
 else
-    echo "[2/2] No unit test directory found, skipping tests"
+    echo "[3/3] No unit test directory found, skipping tests"
 fi
+set -e
+
+# 4. index 무결성 — 게이트가 도는 동안 스테이징 내용이 바뀌지 않았는지 (fail-closed)
+#
+# 2026-08-25 실사고: 이 훅이 **통과시킨** 커밋 2건(`04cf6a9`·`c19290a`)의 트리가 **3파일뿐**
+# 이었다. 나머지 1,208개가 전부 삭제로 기록됐는데 워킹트리는 멀쩡했고, `--no-verify` 로 같은
+# 명령을 돌리면 정상 커밋됐다. 즉 **훅이 도는 동안 무언가가 index 를 다른 내용으로 덮어썼다.**
+#
+# 원인은 아직 특정 못 했다. 저장소를 복제해 훅과 **동일한 환경**(GIT_INDEX_FILE=.git/index,
+# cwd=저장소 루트)에서 `pytest tests/` 7,309건을 돌렸을 때 index 는 **한 번도 안 변했다**
+# — 테스트 스위트는 범인이 아니다(대조군 확보). 상대경로 GIT_INDEX_FILE 상속도 실측상
+# 임시 저장소를 오염시키지 않았다(50→50). 절대경로였다면 1,212→3 으로 무너진다(실증).
+#
+# 원인을 모르는 채로도 **결과는 막을 수 있다**: 검사 시작 시점과 끝 시점의 스테이징 내용이
+# 다르면 커밋을 중단한다. 미검증 내용을 커밋으로 내보내지 않는다.
+set +e
+STAGED_STATUS_AFTER=$(git diff --cached --name-status)
+if [ $? -ne 0 ]; then
+    echo "❌ [4/4] 검사 후 git diff --cached 실패 — index 상태를 확인할 수 없다."
+    echo "   확인 실패를 '이상 없음' 으로 접지 않는다. Commit aborted."
+    exit 1
+fi
+if [ "$STAGED_STATUS_BEFORE" != "$STAGED_STATUS_AFTER" ]; then
+    N_BEFORE=$(printf '%s
+' "$STAGED_STATUS_BEFORE" | grep -c .)
+    N_AFTER=$(printf '%s
+' "$STAGED_STATUS_AFTER"  | grep -c .)
+    N_DEL=$(printf '%s
+' "$STAGED_STATUS_AFTER" | grep -c '^D')
+    echo "❌ [4/4] 게이트가 도는 동안 스테이징 내용이 바뀌었다 — 검사한 것과 커밋될 것이 다르다."
+    echo "   검사 시작: ${N_BEFORE} 항목 / 검사 종료: ${N_AFTER} 항목"
+    if [ "${N_DEL:-0}" -gt 0 ]; then
+        echo "   ⚠️  삭제 ${N_DEL} 건이 스테이징돼 있다 — 2026-08-25 에 저장소를 통째로 지울 뻔한"
+        echo "       그 형태다. index 를 먼저 되돌릴 것:  git reset --mixed"
+    fi
+    echo "   Commit aborted."
+    exit 1
+fi
+echo "✅ [4/4] index 무결성 OK (스테이징 ${#STAGED_STATUS_AFTER}B 불변)"
 set -e
 
 echo "=== Pre-commit checks passed ==="

@@ -6,10 +6,15 @@ import pytest
 from workflow.quality.evaluator import (
     _metric,
     _safe_float,
-    evaluate_uds,
+    compute_overall_score,
+    evaluate_coverage,
+    evaluate_sits,
     evaluate_sts,
     evaluate_suts,
-    compute_overall_score,
+    evaluate_swit_coverage,
+    evaluate_swreport,
+    evaluate_swsa,
+    evaluate_uds,
 )
 
 
@@ -82,6 +87,24 @@ class TestEvaluateUDS:
         metrics = evaluate_uds({})
         assert len(metrics) > 0  # still produces all field metrics (with 0 values)
 
+    def test_fields_from_rates_shape(self):
+        """실제 생산자 _compute_quick_quality_gate 의 quick_gate.rates.*_fill(0~100) 소비."""
+        data = {
+            "quick_gate": {
+                "rates": {
+                    "called_fill": 90.0,
+                    "calling_fill": 80.0,
+                    "description_fill": 70.0,
+                },
+                "counts": {"total_functions": 5},
+            },
+            "gate_pass": True,
+        }
+        by_name = {m["metric_name"]: m for m in evaluate_uds(data)}
+        assert by_name["called_pct"]["value"] == 90.0
+        assert by_name["calling_pct"]["value"] == 80.0
+        assert by_name["description_pct"]["value"] == 70.0
+
 
 class TestEvaluateSTS:
     def test_basic(self):
@@ -130,6 +153,304 @@ class TestEvaluateSUTS:
         assert logic["value"] == 60.0  # 30/50 * 100
 
 
+class TestEvaluateSITS:
+    def test_basic(self):
+        data = {
+            "total_test_cases": 10,
+            "related_coverage_pct": 100.0,          # 합성 SwCom 포함 — 서식 채움 지표
+            "requirement_traceability_pct": 80.0,   # 합성 제외 — 게이트 대상
+            "io_coverage_pct": 65.0,
+            "avg_sub_cases_per_tc": 3.5,
+            "gen_method_distribution": {"normal": 5, "boundary": 3, "stress": 2},
+        }
+        by_name = {m["metric_name"]: m for m in evaluate_sits(data)}
+        assert by_name["requirement_traceability_pct"]["value"] == 80.0
+        assert by_name["requirement_traceability_pct"]["threshold"] == 70.0
+        assert by_name["io_coverage_pct"]["value"] == 65.0
+        # method_diversity: 3 종류 / 3 = 100%
+        assert by_name["method_diversity_pct"]["value"] == 100.0
+        # integration_density: 3.5 / 7 = 50%
+        assert by_name["integration_density_pct"]["value"] == 50.0
+
+    def test_related_field_fill_is_not_traceability(self):
+        """합성 SwCom으로 Related ID가 다 차 있어도 요구 추적성 게이트는 통과하지 않는다.
+
+        회귀 대상: evaluate_sits가 related_coverage_pct(항상 ~100%)를
+        requirement_traceability_pct로 그대로 썼다 → 요구 링크 0건도 threshold 70 통과.
+        """
+        data = {
+            "total_test_cases": 10,
+            "related_coverage_pct": 100.0,
+            "requirement_traceability_pct": 0.0,
+            "synthetic_only_related_count": 10,
+        }
+        by_name = {m["metric_name"]: m for m in evaluate_sits(data)}
+        assert by_name["requirement_traceability_pct"]["value"] == 0.0
+        assert by_name["requirement_traceability_pct"]["gate_pass"] is False
+        # 서식 채움 지표는 보존하되 점수/게이트에 반영하지 않는다
+        assert by_name["related_field_filled_pct"]["value"] == 100.0
+        assert by_name["related_field_filled_pct"]["threshold"] is None
+        assert by_name["synthetic_only_related_count"]["value"] == 10.0
+
+    def test_missing_new_key_is_fail_closed(self):
+        """새 키가 없는 구 리포트는 0.0(미측정)으로 떨어져 게이트가 실패해야 한다."""
+        by_name = {m["metric_name"]: m for m in evaluate_sits({
+            "total_test_cases": 5, "related_coverage_pct": 100.0,
+        })}
+        assert by_name["requirement_traceability_pct"]["value"] == 0.0
+        assert by_name["requirement_traceability_pct"]["gate_pass"] is False
+
+    def test_empty(self):
+        assert len(evaluate_sits({})) > 0
+
+
+class TestEvaluateSwReport:
+    def test_pass_rate(self):
+        data = {"performed_count": 10, "fail_count": 2, "overall_result": "Fail"}
+        by_name = {m["metric_name"]: m for m in evaluate_swreport(data)}
+        assert by_name["pass_rate_pct"]["value"] == 80.0  # (10-2)/10
+        assert by_name["pass_rate_pct"]["threshold"] == 100.0
+        assert by_name["overall_pass"]["value"] == 0.0
+
+    def test_all_pass(self):
+        data = {"performed_count": 5, "fail_count": 0, "overall_result": "Pass"}
+        by_name = {m["metric_name"]: m for m in evaluate_swreport(data)}
+        assert by_name["pass_rate_pct"]["value"] == 100.0
+        assert by_name["overall_pass"]["value"] == 100.0
+
+
+class TestEvaluateCoverage:
+    def test_asil_d_gates_mcdc(self):
+        summary = {
+            "overall_statement_pct": 90.0, "overall_branch_pct": 80.0,
+            "overall_mcdc_pct": 50.0, "passed": 11, "failed": 1, "total_tcs": 12,
+        }
+        by_name = {m["metric_name"]: m for m in evaluate_coverage(summary, asil="D")}
+        assert by_name["statement_coverage_pct"]["value"] == 90.0
+        assert by_name["mcdc_coverage_pct"]["value"] == 50.0
+        assert by_name["mcdc_coverage_pct"]["threshold"] == 100.0  # ASIL D: gated
+        assert by_name["branch_coverage_pct"]["threshold"] == 100.0
+        # pass_rate = 11/12 (여기선 passed+failed == total_tcs, 미실행 0)
+        assert by_name["pass_rate_pct"]["value"] == round(11 / 12 * 100, 2)
+
+    def test_pass_rate_penalizes_not_executed_tcs(self):
+        """미실행 TC(시험 공백)는 pass_rate 분모(tested+not_executed)에 포함돼야 한다.
+
+        안 그러면 스위트의 일부만 돌려도 100% 통과로 품질게이트를 지난다 — ISO 26262
+        시험 완전성이 은폐된다. name 단위 일치: passed/failed/not_executed 모두 이름 단위
+        (total_tcs 는 compound TC 서브아이템 granular라 분모로 안 씀 — deep-review W1).
+        """
+        # 실행 10개 전부 통과 + 미실행 90개 → 분모 100
+        summary = {"passed": 10, "failed": 0, "not_executed": 90}
+        by_name = {m["metric_name"]: m for m in evaluate_coverage(summary, asil="D")}
+        assert by_name["pass_rate_pct"]["value"] == 10.0  # 10/100, NOT 10/10=100
+        assert by_name["pass_rate_pct"]["threshold"] == 100.0  # → 게이트 미충족
+
+    def test_pass_rate_falls_back_when_not_executed_absent(self):
+        """not_executed 부재면 실행분(passed+failed)으로 폴백 — 데이터부재 과도 penalty 방지.
+
+        not_executed 는 항상 ≥0 이라 분모 ≥ tested → pass_rate 는 결코 100% 를 넘지 않는다.
+        """
+        # not_executed 키 없음 → 실행분 분모
+        by_name = {m["metric_name"]: m for m in evaluate_coverage({"passed": 5, "failed": 0})}
+        assert by_name["pass_rate_pct"]["value"] == 100.0
+        # not_executed=0 명시 + 일부 실패 → 실행분 기준
+        by_name = {m["metric_name"]: m for m in evaluate_coverage({"passed": 4, "failed": 1, "not_executed": 0})}
+        assert by_name["pass_rate_pct"]["value"] == 80.0  # 4/5
+
+    def test_asil_a_mcdc_info_only(self):
+        summary = {"overall_statement_pct": 100.0, "overall_mcdc_pct": 0.0, "passed": 5, "failed": 0}
+        by_name = {m["metric_name"]: m for m in evaluate_coverage(summary, asil="A")}
+        # ASIL A: branch/mcdc 는 참고지표(threshold None) → 0% 라도 점수 미반영
+        assert by_name["mcdc_coverage_pct"]["threshold"] is None
+        assert by_name["branch_coverage_pct"]["threshold"] is None
+        assert by_name["statement_coverage_pct"]["threshold"] == 100.0
+
+
+class TestCoverageDocumentGap:
+    """문서가 적는 값과 게이트 값이 다르면 **그 격차가 보여야** 한다.
+
+    SwUTCV(PV 정본 양식)는 미달 행의 Exception 을 'O' 로 일괄 처리해 요약 Coverage 를
+    `(분모 - Fail + Exception)/분모` = **100%** 로 만든다(회사 감사본 정합 — 사용자
+    결정). 게이트는 raw `covered/total` 로 채점한다. 실측(KJPDS02 PV 2026-08-26):
+    게이트 99.45% ↔ 문서 100%.
+
+    ⚠ 격차를 안 남기면 감사자가 문서만 볼 때 "달성", 화면만 볼 때 "미달"이고
+      **왜 다른지 어디에도 없다**. 어느 쪽도 지우지 않고 둘 다 남긴다.
+    """
+
+    CANON = {
+        "overall_statement_pct": 99.45, "overall_branch_pct": 98.64,
+        "measured_functions": {"statement": 1014, "branch": 1014, "mcdc": 0},
+        "synthesized_rows": 0,
+        "passed": 6882, "failed": 0, "total_tcs": 6882,
+        "coverage_fail_statement_functions": 23,
+        "coverage_fail_branch_functions": 33,
+        "coverage_exception_statement_functions": 23,
+        "coverage_exception_branch_functions": 33,
+        "doc_reported_statement_pct": 100.0,
+        "doc_reported_branch_pct": 100.0,
+    }
+
+    def _by(self, summary=None):
+        return {m["metric_name"]: m
+                for m in evaluate_coverage(summary if summary is not None else self.CANON,
+                                           asil="A")}
+
+    def test_both_numbers_are_recorded(self):
+        by = self._by()
+        assert by["statement_coverage_pct"]["value"] == 99.45      # 게이트(raw)
+        assert by["doc_reported_statement_pct"]["value"] == 100.0  # 문서 표기
+        assert by["statement_coverage_pct"]["gate_pass"] is False
+        # 문서 표기는 **채점하지 않는다** — 면제에 개별 사유가 없다.
+        assert by["doc_reported_statement_pct"]["threshold"] is None
+
+    def test_shortfall_counts_are_actionable(self):
+        by = self._by()
+        assert by["coverage_fail_statement_functions"]["value"] == 23.0
+        assert by["coverage_fail_branch_functions"]["value"] == 33.0
+
+    def test_all_shortfalls_auto_excused_is_visible(self):
+        """미달 수 == 면제 수 면 '전부 자동 면제' 다 — 그 사실이 화면에 남아야 한다."""
+        by = self._by()
+        assert (by["coverage_exception_statement_functions"]["value"]
+                == by["coverage_fail_statement_functions"]["value"] == 23.0)
+
+    def test_absent_document_values_are_not_fabricated(self):
+        """면제 축이 없는 산출물(구 양식)에 0 을 지어내지 않는다."""
+        lean = {k: v for k, v in self.CANON.items()
+                if not k.startswith(("doc_reported_", "coverage_fail_", "coverage_exception_"))}
+        by = self._by(lean)
+        for k in ("doc_reported_statement_pct", "coverage_fail_statement_functions",
+                  "coverage_exception_branch_functions"):
+            assert k not in by, k
+
+    def test_unmeasured_document_value_is_omitted_not_zero(self):
+        """문서가 '미측정' 이라고 쓴 경우 — 0% 로 바꾸면 '측정했고 0%' 가 된다."""
+        by = self._by({**self.CANON, "doc_reported_statement_pct": None})
+        assert "doc_reported_statement_pct" not in by
+        assert by["doc_reported_branch_pct"]["value"] == 100.0   # 다른 축은 그대로
+
+
+class TestEvaluateSwitCoverage:
+    """SwITCV 는 구문/분기 문서가 아니다 — 그 축으로 채점하면 영구 FAIL 이 된다.
+
+    2026-08-26 KJPDS02 PV 실측이 근거다. 빌더의 `_align_function_rows_to_template`
+    이 statement/branch 를 `measured=False` 인 O/X 표식으로 덮어쓰므로
+    `compute_coverage_rollup` 은 SwIT 에서 **항상** None 을 낸다. 그 상태로
+    `evaluate_coverage` 에 넣으면 `_safe_float` 가 0.0 으로 접어 FAIL 인데,
+    시험을 아무리 더해도 사라지지 않는다. 그리고 정작 정본이 지목한 미달
+    (Functions 4건 · Function Calls 21건)은 어느 지표에도 안 뜬다.
+    """
+
+    #: 2026-08-26 KJPDS02 PV 실측값 그대로 — 정본 4.Coverage 요약과 일치.
+    CANON = {
+        "swit_functions_total": 1014,
+        "swit_functions_achieved": 1010,
+        "swit_functions_fail": 4,
+        "swit_function_calls_functions": 590,
+        "swit_function_calls_na_functions": 424,
+        "swit_function_calls_covered": 1643,
+        "swit_function_calls_total": 1678,
+        "swit_function_calls_fail_functions": 21,
+        # 정렬이 죽인 축 — SwIT summary 에는 늘 None 으로 실린다.
+        "overall_statement_pct": None,
+        "overall_branch_pct": None,
+        "overall_mcdc_pct": None,
+        "vcast_raw_statement_pct": 31.59,
+        "vcast_raw_branch_pct": 26.54,
+        "vcast_raw_measured_functions": 712,
+        "passed": 611, "failed": 0, "total_tcs": 611,
+    }
+
+    def _by_name(self, summary=None):
+        return {m["metric_name"]: m
+                for m in evaluate_swit_coverage(summary if summary is not None else self.CANON)}
+
+    def test_gates_are_the_documents_own_axes(self):
+        by = self._by_name()
+        assert by["function_achievement_pct"]["value"] == 99.61      # 1010/1014
+        assert by["function_achievement_pct"]["threshold"] == 100.0
+        assert by["function_call_coverage_pct"]["value"] == 97.91    # 1643/1678
+        assert by["function_call_coverage_pct"]["threshold"] == 100.0
+
+    def test_unmeasured_statement_axis_is_not_gated(self):
+        """회귀 핵심 — 재지도 않은 축으로 FAIL 을 지어내지 않는다."""
+        by = self._by_name()
+        for dead in ("statement_coverage_pct", "branch_coverage_pct", "mcdc_coverage_pct"):
+            assert dead not in by, f"{dead} 이 SwIT 게이트에 남아 있다"
+
+    def test_the_old_evaluator_really_did_fail_on_it(self):
+        """가드가 헛돌지 않음을 보인다 — 같은 summary 를 옛 평가기에 넣으면 FAIL 이다."""
+        old = {m["metric_name"]: m for m in evaluate_coverage(self.CANON)}
+        assert old["statement_coverage_pct"]["value"] == 0.0
+        assert old["statement_coverage_pct"]["gate_pass"] is False
+        # 그리고 정본이 지목한 미달은 옛 평가기 어디에도 없다.
+        assert "swit_functions_fail" not in old
+        assert "function_call_coverage_pct" not in old
+
+    def test_real_shortfalls_are_reported(self):
+        by = self._by_name()
+        assert by["swit_functions_fail"]["value"] == 4.0
+        assert by["swit_function_calls_fail_functions"]["value"] == 21.0
+        # 절대수는 점수에 반영하지 않는다(참고지표).
+        assert by["swit_functions_fail"]["threshold"] is None
+        assert by["swit_function_calls_fail_functions"]["threshold"] is None
+
+    def test_na_denominator_shrink_is_visible(self):
+        """호출 0 함수 424개를 분모에서 뺐다는 사실이 화면에 남아야 한다."""
+        assert self._by_name()["swit_function_calls_na_functions"]["value"] == 424.0
+
+    def test_missing_metric_report_leaves_call_axis_unjudged(self):
+        """Metric report 부재(분모 0)면 0% FAIL 이 아니라 **미평가**다.
+
+        이 함수가 고치려는 바로 그 함정을 함수 안에서 되풀이하지 않는지 본다.
+        """
+        by = self._by_name({**self.CANON, "swit_function_calls_total": 0,
+                            "swit_function_calls_covered": 0})
+        assert by["function_call_coverage_pct"]["threshold"] is None
+        assert by["function_call_coverage_pct"]["gate_pass"] is None
+
+    def test_raw_vcast_coverage_is_kept_as_reference(self):
+        """정렬이 버린 원시 실측을 남긴다 — 미측정과 구분되어야 한다."""
+        by = self._by_name()
+        assert by["vcast_raw_statement_pct"]["value"] == 31.59
+        assert by["vcast_raw_statement_pct"]["threshold"] is None   # 비게이트
+        assert by["vcast_raw_measured_functions"]["value"] == 712.0
+
+    def test_raw_keys_absent_do_not_fabricate_zero(self):
+        """원시 값이 없으면 0.0 을 지어내 싣지 않는다(부재 != 0%)."""
+        lean = {k: v for k, v in self.CANON.items() if not k.startswith("vcast_raw_")}
+        by = self._by_name(lean)
+        assert "vcast_raw_statement_pct" not in by
+        assert "vcast_raw_branch_pct" not in by
+
+    def test_perfect_document_passes(self):
+        by = self._by_name({**self.CANON,
+                            "swit_functions_achieved": 1014, "swit_functions_fail": 0,
+                            "swit_function_calls_covered": 1678,
+                            "swit_function_calls_fail_functions": 0})
+        gated = [m for m in by.values() if m["threshold"] is not None]
+        assert gated and all(m["gate_pass"] for m in gated)
+
+
+class TestEvaluateSwSA:
+    def test_his_pass_excludes_unbinned(self):
+        data = {
+            "his_metrics": [
+                {"total": 10, "fail": 1, "unbinned": 1},  # (10-1-1)/10 = 80%
+                {"total": 10, "fail": 0, "unbinned": 0},  # 100%
+            ],
+            "misra_active": 7, "secure_active": 3, "pmd_fail": 2,
+        }
+        by_name = {m["metric_name"]: m for m in evaluate_swsa(data)}
+        assert by_name["his_pass_pct"]["value"] == 90.0  # (80+100)/2
+        assert by_name["his_pass_pct"]["threshold"] == 80.0
+        # 위반 수는 참고지표 (threshold 없음 → 점수 미반영)
+        assert by_name["misra_active_violations"]["threshold"] is None
+        assert by_name["misra_active_violations"]["value"] == 7.0
+
+
 class TestComputeOverallScore:
     def test_with_thresholds(self):
         metrics = [
@@ -159,3 +480,100 @@ class TestComputeOverallScore:
 
     def test_empty_metrics(self):
         assert compute_overall_score([]) == 0.0
+
+
+class TestEvaluateStsExecutableCoverage:
+    """실행 시험 기준 커버리지가 게이트 지표 옆에 함께 나와야 한다.
+
+    회귀 대상: `requirement_coverage_pct`(threshold 70)는 검증방법을 가리지 않아,
+    코드 리뷰(RVW)로만 덮인 요구도 covered로 센다. 실측 — 소스 함수를 하나도 못 잡은
+    경우 이 값이 100.0%인데 실행 시험 기준은 57.1%(27건이 리뷰만)였다.
+    """
+
+    @staticmethod
+    def _report(**cov):
+        base = {"total_reqs": 10, "covered_reqs": 10, "pct": 100.0}
+        base.update(cov)
+        return {
+            "total_test_cases": 20, "completeness_pct": 90.0, "safety_test_cases": 5,
+            "requirement_coverage": base,
+            "test_method_distribution": {"FIT": 10, "RVW": 10},
+        }
+
+    @staticmethod
+    def _by_key(metrics):
+        return {m["metric_name"]: m for m in metrics}
+
+    def test_executable_axis_is_reported_separately(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            executable_pct=57.1, executable_covered_reqs=6, review_only_count=4)))
+        assert "requirement_coverage_pct" in got and "executable_coverage_pct" in got
+        assert got["requirement_coverage_pct"]["value"] == 100.0
+        assert got["executable_coverage_pct"]["value"] == 57.1, \
+            "두 축이 같은 값을 보고하면 구분이 안 된다"
+        assert got["review_only_reqs_count"]["value"] == 4
+
+    def test_executable_metric_is_not_gated(self):
+        """게이트 전환은 기존 pass/fail을 뒤집으므로 이 지표는 threshold가 없어야 한다."""
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            executable_pct=10.0, review_only_count=9)))
+        assert got["executable_coverage_pct"]["threshold"] is None
+        assert got["executable_coverage_pct"]["gate_pass"] is None
+        # 대조군: 기존 게이트는 그대로 살아 있어야 한다
+        assert got["requirement_coverage_pct"]["threshold"] == 70.0
+
+    def test_absent_executable_key_adds_nothing(self):
+        """구 버전 quality_report(검증방법 축 없음)도 그대로 동작해야 한다."""
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report()))
+        assert "executable_coverage_pct" not in got
+        assert "requirement_coverage_pct" in got
+
+
+class TestEvaluateStsFunctionAxis:
+    """함수 기준 TC 보유율이 요구 단위 지표 옆에 함께 나와야 한다.
+
+    회귀 대상: requirement_coverage_pct / executable_coverage_pct 는 **둘 다 요구 단위**라
+    요구당 TC 상한이 끊어낸 함수를 못 본다. 실측(HDPDM01): 요구 100.0% / 실행시험 87.3%
+    인데 함수 기준은 6.4%(747개 중 48개)였다.
+    """
+
+    @staticmethod
+    def _report(gen_stats):
+        return {
+            "total_test_cases": 20, "completeness_pct": 90.0, "safety_test_cases": 5,
+            "requirement_coverage": {"total_reqs": 10, "covered_reqs": 10, "pct": 100.0,
+                                     "executable_pct": 87.3, "review_only_count": 1},
+            "test_method_distribution": {"FNCT": 20},
+            "generation_stats": gen_stats,
+        }
+
+    @staticmethod
+    def _by_key(metrics):
+        return {m["metric_name"]: m for m in metrics}
+
+    def test_function_axis_is_reported(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            {"function_tc_coverage_pct": 6.4, "functions_without_tc": 699,
+             "mapped_functions": 747, "max_tc_per_req": 5})))
+        assert got["function_tc_coverage_pct"]["value"] == 6.4
+        assert got["functions_without_tc"]["value"] == 699.0
+        # 세 축이 서로 다른 값을 보고해야 구분이 된다
+        assert got["requirement_coverage_pct"]["value"] == 100.0
+        assert got["executable_coverage_pct"]["value"] == 87.3
+
+    def test_function_axis_is_not_gated(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            {"function_tc_coverage_pct": 1.0, "functions_without_tc": 900})))
+        assert got["function_tc_coverage_pct"]["threshold"] is None
+        assert got["function_tc_coverage_pct"]["gate_pass"] is None
+
+    def test_absent_generation_stats_adds_nothing(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report({})))
+        assert "function_tc_coverage_pct" not in got
+        assert "requirement_coverage_pct" in got

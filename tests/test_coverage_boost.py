@@ -3,16 +3,77 @@ Coverage boost tests for report_generator.py.
 Targets uncovered utility, parsing, generation, and report functions.
 """
 import sys
-import os
-import re
-import json
 import tempfile
-import pytest
 from pathlib import Path
-from typing import Dict, Any
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+
+# ⚠ 저장소 고정 입력(참조 SUDS 40.7MB · 기본 템플릿 430 heading)을 읽지 않는다.
+#   안 막으면 `generate_uds_docx(None, {}, out)` 하나가 **429초**다(빈 payload인데도) —
+#   이 파일이 어떤 게이트에도 안 들어가 있던 이유가 그거였다. 사유·프로파일은
+#   `tests/conftest.py::no_reference_suds` 참조.
+pytestmark = pytest.mark.usefixtures("no_reference_suds")
+
+
+# ---------------------------------------------------------------------------
+# 이 파일이 쓰는데 **어디에도 정의가 없던** fixture 2개 (2026-08-21 복원).
+#
+# ⚠ 20건이 `fixture '...' not found` 로 ERROR 였다. 파일 헤더의 `# /app/tests/...` 가
+#   말해주듯 옛 Docker 구성에서 온 파일이고, 그때 conftest 에 있었을 fixture 가 유실됐다.
+# ⚠ shape 를 **지어내지 않았다** — 이미 동작 중인 `tests/unit/test_uds_docx_gen_stats.py`
+#   의 `_payload()` 헬퍼를 그대로 따랐다(그게 `generate_uds_docx` 가 실제로 받는 형태다).
+# ---------------------------------------------------------------------------
+def _function_detail(idx: int, name: str, related: str, prototype: str) -> dict:
+    fid = f"SwUFn_{idx:04d}"
+    return {
+        "id": fid,
+        "name": name,
+        "prototype": prototype,
+        "description": f"{name} 수행",
+        "description_source": "comment",
+        "asil": "QM",          # ⚠ 테스트 **입력**이다. 생성기가 채우는 값이 아니다
+        "related": related,
+        "inputs": [],
+        "outputs": [],
+        "precondition": "",
+        "globals_global": [],
+        "globals_static": [],
+        "called": "",
+        "logic": "",
+    }
+
+
+# ⚠ 함수명을 **지어내지 않았다.** 이 파일이 스스로 기대하는 이름이다 —
+#   `:544` 는 산출물에 `S_Motor_Init` 이 있어야 한다고 단언하고, `:720` 의 매핑은
+#   `S_Motor_Init`·`S_Diag_Check`, `:726` 의 items 는 `SwCom_01`·`SwCom_02` 다.
+#   (처음엔 `Func_1`/`Func_2` 로 만들었다가 `:544` 가 정확히 이걸 잡아냈다.)
+_FUNCS = [
+    (1, "S_Motor_Init", "SwCom_01", "void S_Motor_Init(U8 mode);"),
+    (2, "S_Diag_Check", "SwCom_02", "U8 S_Diag_Check(void);"),
+]
+
+
+@pytest.fixture()
+def mock_function_details() -> dict:
+    """`generate_uds_traceability_mapping(function_details=...)` 이 받는 형태."""
+    return {f"SwUFn_{i:04d}": _function_detail(i, n, r, p) for i, n, r, p in _FUNCS}
+
+
+@pytest.fixture()
+def mock_uds_payload(mock_function_details) -> dict:
+    """`generate_uds_docx(template, uds_payload, out)` 의 두 번째 인자."""
+    return {
+        "project_name": "TestProject",
+        "overview": "overview",
+        "requirements": "requirements",
+        "interfaces": "interfaces",
+        "uds_frames": "frames",
+        "notes": "notes",
+        "function_details": dict(mock_function_details),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +293,7 @@ class TestAiSectionHelpers:
 class TestDocxTextHelpers:
     def test_add_docx_text_block(self):
         import docx
+
         from report_generator import _add_docx_text_block
         doc = docx.Document()
         _add_docx_text_block(doc, "Line 1\n2.1 Section Title\nLine 3")
@@ -240,6 +302,7 @@ class TestDocxTextHelpers:
 
     def test_add_docx_text_block_empty(self):
         import docx
+
         from report_generator import _add_docx_text_block
         doc = docx.Document()
         _add_docx_text_block(doc, "")
@@ -373,9 +436,14 @@ U16 g_Speed = 100;
 
     def test_empty_inputs(self):
         from report_generator import (
-            _strip_c_comments, _extract_c_prototypes, _extract_c_definitions,
-            _extract_c_function_bodies, _extract_simple_call_names,
-            _extract_c_macros, _extract_c_macro_defs, _extract_c_global_candidates,
+            _extract_c_definitions,
+            _extract_c_function_bodies,
+            _extract_c_global_candidates,
+            _extract_c_macro_defs,
+            _extract_c_macros,
+            _extract_c_prototypes,
+            _extract_simple_call_names,
+            _strip_c_comments,
         )
         assert _strip_c_comments("") == ""
         assert _extract_c_prototypes("") == []
@@ -477,6 +545,7 @@ class TestDocxGeneration:
 
     def test_generate_docx_has_function_tables(self, mock_uds_payload, tmp_path):
         import docx
+
         from report_generator import generate_uds_docx
         out = tmp_path / "test_fn.docx"
         generate_uds_docx(None, mock_uds_payload, str(out))
@@ -514,7 +583,8 @@ class TestDocxGeneration:
 
     def test_roundtrip_parse(self, mock_uds_payload, tmp_path):
         import docx
-        from report_generator import generate_uds_docx, _extract_function_info_from_docx
+
+        from report_generator import _extract_function_info_from_docx, generate_uds_docx
         out = tmp_path / "roundtrip.docx"
         generate_uds_docx(None, mock_uds_payload, str(out))
         doc = docx.Document(str(out))
@@ -572,8 +642,8 @@ class TestQualityGateReport:
 
 class TestBuildViewPayload:
     def test_build_view_payload(self, mock_uds_payload, tmp_path):
-        import docx
-        from report_generator import generate_uds_docx, build_uds_view_payload
+
+        from report_generator import build_uds_view_payload, generate_uds_docx
         docx_path = tmp_path / "view_test.docx"
         generate_uds_docx(None, mock_uds_payload, str(docx_path))
         result = build_uds_view_payload(str(docx_path))
@@ -587,7 +657,7 @@ class TestBuildViewPayload:
 
 class TestSwcomContextReport:
     def test_swcom_context_report(self, mock_uds_payload, tmp_path):
-        from report_generator import generate_uds_docx, generate_swcom_context_report
+        from report_generator import generate_swcom_context_report, generate_uds_docx
         docx_path = tmp_path / "swcom_src.docx"
         generate_uds_docx(None, mock_uds_payload, str(docx_path))
         out = tmp_path / "swcom_ctx.md"
@@ -826,6 +896,7 @@ class TestDocxGenerationExtended:
 
     def test_docx_with_template(self, mock_uds_payload, tmp_path):
         import docx
+
         from report_generator import generate_uds_docx
         tpl = tmp_path / "template.docx"
         doc = docx.Document()

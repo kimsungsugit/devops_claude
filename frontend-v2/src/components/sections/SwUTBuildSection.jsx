@@ -3,7 +3,11 @@ import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
-import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
+import { isAbortError } from '../../impactPoll.js';
+import { useSharedInputSync, markTouched } from '../../sharedInputs.js';
+// 폼 기본값·payload 조립은 생성 현황 보드와 **공유**한다 — 복제하면 두 경로가
+// 서로 다른 문서를 내고, 그 차이는 xlsx 를 열기 전엔 보이지 않는다.
+import { BUILDER_SPECS, loadBuilderForm, parseListField, toBuildPayload } from '../../swBuilderForms.js';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
   || import.meta.env?.VITE_API_BASE_URL || '';
@@ -13,60 +17,14 @@ function buildUrl(path) {
   return API_BASE.replace(/\/$/, '') + path;
 }
 
-const STORAGE_KEY = 'devops_v2_swut_form';
-
-const DEFAULT_FORM = {
-  project_id: 'HDPDM01',
-  release_sw_version: '',
-  test_date: '',
-  test_engineer: '',
-  doc_id_sequence: '',
-  hw_version: '1.00',
-  asil_level: 'ASIL A',
-  log_folder: '',
-  // 라운드 96-보강: 다중 log_folders 입력 (한 줄당 폴더 1개, 최대 8 — B2).
-  // UI 전용 필드 — 빌드 payload에서는 제거 후 log_folders 배열로 변환
-  // (backend extra='forbid' 422 회피). 입력 시 단일 log_folder보다 우선.
-  log_folders_text: '',
-  // 51차 — Coverage / SUTR 양식 분리 (이전 단일 template_path)
-  coverage_template_path: '',
-  sutr_template_path: '',
-  swutcr_template_path: '',
-  swuds_docx_path: '',
-  // 60차 F6-A: SwUTS spec 파일 (xlsm/docx 허용). 제공 시 SUTR Test Log의
-  // TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
-  swuts_docx_path: '',
-  // 60차 F6-C: HMR (VectorCAST aggregate metrics report) HTML 경로 (옵션).
-  // 제공 시 Coverage Report 3.Coverage 함수별 Function Calls metric stamp.
-  hmr_html_path: '',
-  // 30차 W21: C 소스 디렉토리 (옵션) — Doxygen @asil 태그에서 함수별 ASIL 추출.
-  c_source_root: '',
-  // 26차 W16: backend schema에 이미 있던 3 옵션 필드를 frontend에서도 입력
-  reviewer_override: '',
-  approver_override: '',
-  validation_date: '',
-};
+// 폼 기본값·localStorage 키·legacy template_path 마이그레이션·payload strip 은 전부
+// swBuilderForms.js 로 이전했다(보드와 공유). 여기서는 키만 다시 꺼내 쓴다.
+const STORAGE_KEY = BUILDER_SPECS.swut.storageKey;
 
 // 40차: 로컬 isAdminMode helper 제거 — AdminContext.useAdminMode() 사용.
 
 function loadSavedForm() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    // 52차 C1 — legacy template_path key 마이그레이션: 51차 schema 분리 시 이전 key
-    // 그대로 보내면 backend 무시. 신규 양식 field가 비어있고 legacy template_path만
-    // 있으면 coverage_template_path로 일단 채워서 사용자가 다시 입력하지 않도록 함.
-    if (saved.template_path && !saved.coverage_template_path && !saved.sutr_template_path) {
-      saved.coverage_template_path = saved.template_path;
-    }
-    delete saved.template_path;  // 신규 schema에 없는 key 제거
-    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10), ...saved };
-    // 입력 일원화: touched가 아닌(prefill) 매핑 필드만 공유 기본값으로 채움(사용자 입력·빈값 보존).
-    const touched = resolveTouched('swut', STORAGE_KEY, saved);
-    return applySharedDefaults(base, touched, sharedDefaultsFor('swut', loadSharedInputs()));
-  } catch (e) {
-    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
-    return applySharedDefaults(base, new Set(), sharedDefaultsFor('swut', loadSharedInputs()));
-  }
+  return loadBuilderForm('swut');
 }
 
 function formatDetailMessage(detail) {
@@ -84,8 +42,12 @@ function formatDetailMessage(detail) {
   return '';
 }
 
-export default function SwUTBuildSection() {
+export default function SwUTBuildSection({ analysisResult }) {
   const toast = useToast();
+  // 보드(생성 현황)와 **같은 SCM 귀속**을 싣는다. 안 실으면 백엔드가 요청에서
+  // `scm_id` 를 못 찾아 quality run 이 프로젝트에 안 붙고, 방금 만든 문서가
+  // 생성 현황 보드에서 계속 '미생성' 으로 남는다(2026-08-24 라이브 실측).
+  const scmId = analysisResult?.matchedScm?.id || '';
   const [building, setBuilding] = useState(null);
   const [lastSummary, setLastSummary] = useState(null);
   const [lastWarnings, setLastWarnings] = useState([]);
@@ -135,7 +97,7 @@ export default function SwUTBuildSection() {
       // F5: 보류 중인 revoke timer를 정리하고, blob URL을 즉시 revoke
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
         clearTimeout(timerId);
-        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       });
       downloadCleanupRef.current = [];
     };
@@ -162,7 +124,7 @@ export default function SwUTBuildSection() {
     document.body.removeChild(a);
     // F5: timer + url을 ref에 저장 — unmount 시 cleanup
     const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       downloadCleanupRef.current = downloadCleanupRef.current.filter(
         item => item.timerId !== timerId,
       );
@@ -181,8 +143,7 @@ export default function SwUTBuildSection() {
         ? form.swutcr_template_path
         : form.sutr_template_path;
     // 라운드 96-보강: 다중 log_folders (한 줄당 1개, 최대 8 — backend max_length=8).
-    const logFolders = (form.log_folders_text || '')
-      .split('\n').map(s => s.trim()).filter(Boolean);
+    const logFolders = parseListField('swut', form);
     if (logFolders.length > 8) {
       toast('warning', `다중 로그 폴더는 최대 8개 (현재 ${logFolders.length}개)`); return;
     }
@@ -207,12 +168,9 @@ export default function SwUTBuildSection() {
     abortRef.current = controller;
 
     try {
-      // 라운드 96-보강: log_folders_text(UI 전용)는 payload에서 제거하고
-      // (주의: 향후 UI 전용 키 추가 시 동일하게 strip — backend extra='forbid' 422)
-      // 비어있지 않으면 log_folders 배열로 변환 (backend 우선순위:
-      // log_folders > log_folder > config swut_log_folders > 단수).
-      const { log_folders_text: _lfText, ...payload } = form;
-      if (logFolders.length > 0) payload.log_folders = logFolders;
+      // UI 전용 키 strip + log_folders 배열 변환은 공유 모듈 단일 출처
+      // (backend 우선순위: log_folders > log_folder > config swut_log_folders > 단수).
+      const payload = { ...toBuildPayload('swut', form), scm_id: scmId };
       const res = await fetch(buildUrl(`/api/swut/${kind}/build`), {
         method: 'POST',
         headers: {
@@ -234,7 +192,7 @@ export default function SwUTBuildSection() {
           } else if (j?.message) {
             msg = j.message;
           }
-        } catch (e) {
+        } catch (_e) {
           // body가 JSON이 아닌 경우 (예: 502 HTML) — HTTP status만 표시
         }
         if (mountedRef.current) {
@@ -262,7 +220,7 @@ export default function SwUTBuildSection() {
       triggerDownload(blob, filename);
       toast('success', `${kind.toUpperCase()} ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) {
         toast('error', `${kind.toUpperCase()} 빌드 실패: ${e?.message || e}`);
       }
@@ -270,7 +228,7 @@ export default function SwUTBuildSection() {
       if (mountedRef.current) setBuilding(null);
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [form, toast]);
+  }, [form, toast, scmId]);
 
   // 19차: Coverage ↔ SUTR cross-validation 호출.
   const runConsistencyCheck = useCallback(async () => {
@@ -304,7 +262,7 @@ export default function SwUTBuildSection() {
           else if (typeof j?.detail === 'string') msg = j.detail;
           else if (j?.error?.message) msg = j.error.message;
           else if (j?.message) msg = j.message;
-        } catch (e) { /* non-JSON body */ }
+        } catch (_e) { /* non-JSON body */ }
         if (mountedRef.current) toast('error', `일관성 검증 실패: ${msg}`);
         return;
       }
@@ -319,7 +277,7 @@ export default function SwUTBuildSection() {
         toast('warning', `일관성 검증: issue ${issues.length}건 — 카드 확인`);
       }
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) toast('error', `일관성 검증 실패: ${e?.message || e}`);
     } finally {
       if (mountedRef.current) setConsistencyChecking(false);

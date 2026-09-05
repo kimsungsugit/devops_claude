@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from report_gen.function_analyzer import _normalize_symbol_name
+from report_gen.provenance import has_evidence_value
 from report_gen.source_parser import (
     _extract_comment_lines,
     _scan_source_function_names,
     _scan_source_requirement_ids,
 )
+from report_gen.trace_integrity import build_integrity_audit
 from report_gen.utils import (
     _dedupe_multiline_text,
     _normalize_asil_value,
@@ -26,6 +28,22 @@ _logger = logging.getLogger("report_generator")
 # SwUFn/SwIFn 단위·통합 함수 ID 패턴 — SITS/VectorCAST 2-hop bridge에서 행마다
 # 재사용(7천+ 행 루프 재컴파일 방지, reviewer INFO 권고).
 _SWUFN_RE = re.compile(r"Sw[UI]Fn_\d+", re.IGNORECASE)
+
+# 설계-ID bridge(SRS→SDS→UDS) 대상 namespace — SwFn/SwSTR/SwST/SwTK만.
+# _normalize_req_id(대문자화) 출력에 매칭. SwCom(loose·컴포넌트 fan-out 중앙 101)과
+# SwUFn(함수 자기 ID)은 구조적 제외. SRS 요구(SwTR/SwEI/SwTSR 등)도 접두가 달라 불매치.
+# 앵커 ^…$로 부분매칭 차단. 실측(KJPDS02_PV): 이 집합으로 UDS 밴드 43→64(+21), fan-out
+# 중앙 22(현행 44보다 낮음). SwCom 포함 시 reach 불변(64)·fan-out 중앙 56으로 악화.
+_DESIGN_ID_BRIDGE_RE = re.compile(r"^SW(?:FN|STR|ST|TK)_\d+$")
+
+# 설계-ID bridge 방어 필터(deep-review C1): UDS Function Information 표의 값 셀이 라벨을
+# echo하는 junk 표에서 func_name='Name'/func_id='ID' 등이 harvest돼 source_ids에 섞이면
+# bridge가 이를 '함수'로 요구에 부착(over-trace). 파서 echo 가드가 1차 차단하나, 문서군
+# 편차에 대비해 조립부에서도 필드 라벨을 요구 추적 함수에서 제외한다(방어심층).
+_UDS_FUNC_JUNK = frozenset({
+    "id", "name", "type", "asil", "reuse", "prototype", "description",
+    "no", "related id", "cyber security",
+})
 
 # 미추적 VectorCAST subprogram 의미 분류용 — ISR/인터럽트/부트 핸들러 등
 # 'SRS 추적 대상이 아닌 게 당연한' 인프라 함수를 식별(트리 미추적 루트의 isr 버킷).
@@ -81,6 +99,35 @@ _SDS_TABLE_ARTIFACT_RE = re.compile(r"^\d+\s*\t")   # 선행 '행번호+탭'
 _SDS_ARRAY_SUBSCRIPT_RE = re.compile(r"\[[^\]]*\]")  # 배열 첨자 [10]/[]
 _C_IDENT_RE = re.compile(r"[a-z_][a-z0-9_]*\Z")      # C 식별자(소문자화 후)
 
+# §C(공백분리 반환형): SDS가 component_id에 함수 프로토타입을 통째로 실어보내면
+# ('void f( void )', 'static u16 s_calc( void )') 반환형/저장한정자가 함수명 앞에 공백으로
+# 분리돼 붙는다. 마지막 토큰(함수명)만 채택하되 **선행이 전부 타입/한정자이고 그중 실제
+# 타입이 최소 1개**일 때만 한다(_sds_comp_key 본문). 'reset counter'/'do something(x)'의 끝
+# 단어를 함수명으로 오채택하면 곧바로 over-trace(설명문→SRS 거짓추적)이므로, 열린 last-token
+# 채택을 금지하고 이 닫힌 화이트리스트로 게이트한다. 붙은 반환형('u16s_foo')은 §A 담당(별개).
+#
+# ⚠ 화이트리스트는 **자연어 영어 단어와 겹치지 않는 것만** 담는다(deep-review W1, 재현·실증):
+# 기본 C 타입 int/long/short/char/double/float/signed/unsigned/bool 과 벤더 typedef
+# word/byte/dword/boolean 은 'long delay( ms )'·'double click( x )'·'byte order( swap )' 같은
+# 설계 라벨의 첫 단어와 겹쳐, 괄호가 뒤따르면 함수 delay/click/order 에 거짓 추적된다(auto·
+# register 를 같은 이유로 뺐던 가드 논리를 이 부류 전체로 확장). 이들을 뺀 결과 순수 시그니처
+# 'int foo()'는 못 벗기나(under-trace, 안전측), §C 이득은 이 저장소 실데이터 0건이라 손실 없고
+# over-trace 위험만 제거된다. 자연어와 안 겹치는 것(void·헝가리안 u8~f64·stdint)만 타입으로
+# 남긴다. struct/union/enum도 제외: 진짜 반환형이면 태그(struct Foo)를 동반해 lead에 비화이트
+# 토큰이 생겨 어차피 차단(복구 이득 0)이고, 단독이면 자연어('union select')로 over-trace만
+# 노출한다(deep-review 후속). '타입 토큰 최소 1개' 규칙이 한정자 단독('static delay( ms )')도 차단.
+_C_TYPE_TOKEN = frozenset({           # 실제 반환 '타입'(자연어 비충돌만) — 벗기려면 최소 1개 필수.
+    "void",
+    "u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64", "f32", "f64",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+    "size_t", "ssize_t", "uintptr_t", "intptr_t",
+})
+_C_QUALIFIER_TOKEN = frozenset({      # 저장/타입 한정자 — 타입에 선행하나 단독으론 불충분.
+    "static", "const", "volatile", "inline", "extern",
+})
+_C_RETURN_QUALIFIER = _C_TYPE_TOKEN | _C_QUALIFIER_TOKEN   # 벗기기 허용 선행 토큰(합집합)
+
 
 def _sds_comp_key(comp: Any) -> str:
     """SDS component_id를 함수명 bridge용 정규화 키(lower)로 변환.
@@ -89,14 +136,33 @@ def _sds_comp_key(comp: Any) -> str:
     정확매칭되게 한다. 정규화 후 **순수 C 식별자가 아니면 빈 문자열을 반환**해 키를
     버린다(reviewer W1): 공백/콜론/한글/선행숫자가 남은 설명문 컴포넌트('power operation
     disable', 'mcu 이상 감지', 'swcom_35: bootloader\\t115')는 함수명과 절대 매칭되면
-    안 되므로 dict 오염·거짓 bridge 표면을 원천 차단한다. None/숫자 입력도 여기서 걸러짐.
+    안 되므로 dict 오염·거짓 bridge 표면을 원천 차단한다. None은 초입에서, 숫자('123')는
+    식별자 검증에서 걸러진다. 반환형이 공백분리된 프로토타입('void f( void )')은 선행이
+    전부 C 반환형/한정자일 때만 함수명을 채택한다(§C, _C_RETURN_QUALIFIER).
     """
+    if comp is None:                 # str(None)='None'→'none'이 유효 식별자라 아래 검증을
+        return ""                    # 통과하는 것을 초입 차단('none' 키 오염 방지)
     s = str(comp).strip().lower()
     if not s:
         return ""
     s = _SDS_TABLE_ARTIFACT_RE.sub("", s)
+    _had_paren = "(" in s            # 함수 시그니처 문맥 표지(§C 벗기기 전제)
     s = s.split("(", 1)[0]            # 'name( void' / 'name(void)' → 'name'
     s = _SDS_ARRAY_SUBSCRIPT_RE.sub("", s).strip()
+    # §C: 공백으로 분리된 반환형/저장한정자 접두 제거 ('void f( x )' → 'f'). 3중 게이트로
+    # over-trace를 차단한다(deep-review W1): ① 원본에 '('가 있던 시그니처 문맥(_had_paren)
+    # ② 말단(함수명 후보) 제외 선행 토큰이 전부 타입/한정자이고 그중 실제 타입이 최소 1개
+    # ③ 말단 토큰 자신은 타입 키워드가 아님('unsigned int( x )'→'int' 방지). 이로써 자연어
+    # 라벨('auto close'·'long delay( ms )'·'static delay( ms )')이 함수명으로 새지 않는다.
+    # 포인터 '*'는 토큰서 제거.
+    if _had_paren and " " in s:
+        _toks = [t for t in (p.strip("*") for p in s.split()) if t]
+        _lead = _toks[:-1]
+        if (len(_toks) >= 2
+                and _toks[-1] not in _C_RETURN_QUALIFIER
+                and all(t in _C_RETURN_QUALIFIER for t in _lead)
+                and any(t in _C_TYPE_TOKEN for t in _lead)):
+            s = _toks[-1]
     # 선행 언더스코어 정규화(라운드112): 링커/컴파일러 내부 표기('_entrypoint')와 설계 표기
     # ('entrypoint')의 차이로 bridge가 끊기는 것을 막는다. 실데이터 검증: SDS 키 중 선행 '_'는
     # 0개라 strip은 기존 매칭을 절대 깨지 않고(순수 가산) '_entrypoint'->'entrypoint' 1건만 새로
@@ -128,23 +194,47 @@ def _strip_ret_type_prefix(key: str) -> str:
 # 분류 원칙(보수): 인프라 토큰은 함수명 core(선행 _·반환형·저장클래스 제거) 선두 앵커 위주로 잡아
 # 애플리케이션 함수(중간에 eeprom 등 포함)를 인프라로 잘못 삼켜 공백을 숨기는 것을 막는다.
 # 불확실하면 APP_LEAF(=검토 대상)로 떨어뜨려 안전측(공백 미은닉)으로 편향한다.
+# 단, 구별성이 높은(앱과 충돌 없는) 인프라 토큰은 비앵커로도 추가한다 — 선두 앵커만으론
+# 중간 위치 토큰(diageeprom·write2eeprom·pp1_..._pwm 등)을 놓쳐 인프라를 APP로 과대집계했다.
+# 추가 토큰은 KJPDS02_PV 실데이터로 검증됨(이동 103건 전부 APP→인프라 단방향, 인프라→APP 역행 0,
+# app_design_gap delta 0 — 이동분 전부 in_uds=True라 진짜갭 은닉 없음. 구조적으로 NEW_APP⊆OLD_APP
+# (제거 브랜치 0)라 app_design_gap=|APP∩¬uds|은 단조 비증가, deep-review 3중 확증).
+# s_buzzerstateflashing·s_antipinch·doorstatectrl 등 앱 도메인은 APP 유지. ⚠단, 비앵커 eeprom은
+# 'Ap_*Eeprom*' 앱 함수 2건(ResetEepromParamState 등)도 BOOT로 재라벨한다(EEPROM 조작이라 방어가능,
+# in_uds=True 무영향). bare eeprom/reprog의 잔여 latent 위험 = 미래 in_uds=False 앱 함수. _isr은
+# 저장소 _ISR_RE 규율대로 '_isr$|_isr_' 앵커(앱 술어 _IsReady/_IsReset 오매치 배제). bare flash/pin/lin 금지.
 _LAYER_CORE_PREFIX_RE = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)?[sgl]_")
+# 앱 도메인 네이밍 앵커 — 인프라 키워드를 **이름 중간에** 품은 앱 함수를 지켜낸다.
+# 실측 근거(KJPDS02_PV build_125, 함수 정의 955개): `Ap_` 접두는 APP 계층 전용 규약이다 —
+# APP 디렉터리 밖에 `Ap_*` **정의는 0건**이고 SYSTEM/IF에 보이는 것은 전부 호출이었다.
+# 이 앵커가 없으면 `s_Ap_PreviousCtrl_ResetEepromParams`(Sources/APP/Ap_DoorPreCtrl_PDS.c)가
+# 중간 'eeprom' 때문에 BOOT_REPROG로 삼켜진다. 앵커 도입 시 이동은 그 1건뿐이고
+# BSW 216·LIB 44는 불변이라, 인프라 복구(4e449dc)를 되돌리지 않는다.
+_LAYER_APP_ANCHOR_RE = re.compile(r"^ap_")
 _LAYER_BOOT_RE = re.compile(
     # entrypoint는 선두 앵커(^) — 'validate_entrypoint'/'check_entrypoint_valid' 같은 APP
     # 함수를 BOOT로 오삼켜 공백을 숨기지 않도록(라운드112 W2). 실 부트 엔트리는 core가 정확히
     # 'entrypoint'라 ^로 충분(실데이터 '_entrypoint'는 lstrip 후 core='entrypoint').
-    r"(^sf_|secureflash|bootload|^boot|^reprog|^clearreprog|^chkprog|^checkprog|^setreprog"
-    r"|^getreprog|^eep|^syseepromctrl|^entrypoint|jump_main|chkappisvalid|copy_shadow"
-    r"|backupsector|fccob|^linuds|linudsreprog|^writeblock$|^writeword$)",
+    r"(^sf_|secureflash|bootload|^boot|^reprog|reprog|^clearreprog|^chkprog|^checkprog|^setreprog"
+    r"|^getreprog|^eep|eeprom|^syseepromctrl|^entrypoint|jump_main|chkappisvalid|copy_shadow"
+    r"|backupsector|fccob|^linuds|linudsreprog|^writeblock$|^writeword$"
+    # 비앵커 eeprom/reprog + 플래시 프로그래밍(pflash/ftmrz/erase*sector) — diageeprom·
+    # write2eeprom·maininitreprog·플래시섹터소거를 BOOT로 복구(실데이터 검증, +32).
+    r"|pflash|ftmrz|eraseflashsector|erasesectorinternal)",
     re.I,
 )
 _LAYER_BSW_RE = re.compile(
-    r"(^adc|^pwm|^spi|^gpio|^port|^timer|^pt[0-9]|^dma|^clock|^osc|^pll|^lin|^can|^uart|^sci"
-    r"|drv8706|iim20670|^drvin|^drvout|spictrl|lintp|lin_lld|sbcm|^sbc|^hw_|^mcu_|^reg_)",
+    r"(^adc|^pwm|^spi|^gpio|^port|^timer|^tim[0-9]|systick|^rti|^cpu|_isr$|_isr_|^pt[0-9]|^dma|^clock|^osc|^pll"
+    r"|^lin|^can|^uart|^sci|^pp[0-9]|^pj[0-9]|^pad[0-9]|^pl[0-9]|^pe_"
+    # ^tim[0-9]/systick/^rti(타이머) · ^cpu(예외·인터럽트·PLL/OSC 핸들러) · _isr(ISR) ·
+    # ^pp/pj/pad/pl[0-9](포트핀 I/O) · ^pe_(Processor Expert init) · driveic(모터 드라이브 IC)
+    # 추가 — 저수준 드라이버/핸들러를 BSW로 복구(실데이터 검증, +69). 앱 도메인 오삼킴 0.
+    r"|drv8706|iim20670|driveic|^drvin|^drvout|spictrl|lintp|lin_lld|sbcm|^sbc|^hw_|^mcu_|^reg_)",
     re.I,
 )
 _LAYER_LIB_RE = re.compile(
-    r"(sha256|^aes|crc32|^lib_|_lib_|movingaverage|_conv$|_conv_|slope_conv|^math|^util)",
+    # stdutil(copydata/dataset = memcpy/memset류 표준 유틸) 추가(실데이터 검증, +2).
+    r"(sha256|^aes|crc32|^lib_|_lib_|movingaverage|_conv$|_conv_|slope_conv|^math|^util|stdutil)",
     re.I,
 )
 
@@ -164,7 +254,13 @@ def _classify_unmapped_layer(names: List[str]) -> str:
     # 순수 C 식별자가 아니거나 VectorCAST range-test 산출물은 추적 대상 함수가 아님.
     if not _C_IDENT_RE.match(first.lstrip("_")) or re.match(r"^(range$|<<)", first, re.I):
         return "TEST_ARTIFACT"
-    cores = " ".join(_LAYER_CORE_PREFIX_RE.sub("", n.lstrip("_")) for n in cand)
+    core_list = [_LAYER_CORE_PREFIX_RE.sub("", n.lstrip("_")) for n in cand]
+    cores = " ".join(core_list)
+    # 앱 도메인 앵커가 인프라 키워드보다 우선한다(위 _LAYER_APP_ANCHOR_RE 주석의 실측 근거).
+    # 후보 **전부**가 앱 앵커일 때만 — 하나라도 인프라 이름이 섞이면 인프라 판정 기회를 남긴다
+    # (같은 요구에 앱·드라이버 함수가 함께 걸린 경우 인프라 쪽이 더 강한 신호다).
+    if all(_LAYER_APP_ANCHOR_RE.match(c) for c in core_list):
+        return "APP_LEAF"
     if _LAYER_BOOT_RE.search(cores):
         return "BOOT_REPROG"
     if _LAYER_BSW_RE.search(cores):
@@ -327,7 +423,6 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
         ptype = cells[2].strip() if len(cells) > 2 else ""
         vrange = cells[3].strip() if len(cells) > 3 else ""
         reset = cells[4].strip() if len(cells) > 4 else ""
-        desc = cells[5].strip() if len(cells) > 5 else ""
         if not name or name.upper() in {"N/A", "-", "NONE"}:
             return ""
         parts = [name]
@@ -552,6 +647,69 @@ def _safe_docx_open(source: Any) -> Any:
     return docx.Document(buf)
 
 
+# ── SDS 파티션 엔트리의 kind 체계 ──────────────────────────────────────────────
+# 예전엔 'component'/'function' 2종뿐이었고 `_add_entry` 의 기본값이 'component' 라,
+# 11개 호출지점 중 인터페이스 함수 행(1곳)만 명시하고 나머지 10곳이 전부 컴포넌트로
+# 등록됐다. 그 결과 SDS 밴드에 상태명('initial'/'standby'/'auto close')과 설계ID
+# ('SwFn_'/'SwSTR_'/'SwST_')가 섞여 실 컴포넌트 33개가 201개로 부풀었다(HDPDM01 실측).
+#
+# 랭크는 "같은 키가 여러 표에서 다른 성격으로 등장할 때 무엇이 이기는가"를 정한다.
+# component 가 모두를 이기는 것은 종전과 동일하고, function 이 약한 kind 를 이기는 것이
+# 신규다(예전엔 약한 kind 가 먼저 걸리면 함수 승격이 막혔다).
+_SDS_KIND_RANK = {
+    "component": 4,       # SwCom ID·이름 표 — 밴드에 세는 유일한 kind
+    "function": 3,        # SwCom 인터페이스 함수 — 브리지·영향분석 ASIL 전용
+    "design_element": 1,  # 설계 블록의 name(상태명: initial/standby/auto close)
+    "design_id": 1,       # SwFn_/SwSTR_/SwST_ — 설계 ID 이지 컴포넌트 아님
+    "table_row": 1,       # 범용 표 폴백 — 헤더만 맞은 미확인 행
+    "heading": 1,         # 문단 heading 잔재
+}
+# ⚠ **긍정형** 화이트리스트여야 한다. 예전의 부정형(`kind != 'function'`)이면 새 kind 가
+# 전부 그대로 밴드를 통과해 이 분류가 무효가 된다.
+_SDS_BAND_KINDS = frozenset({"component"})
+# kind 없는 레거시 엔트리(구 캐시·외부 주입)는 분류 이전 동작을 그대로 보존한다.
+_SDS_DEFAULT_KIND = "component"
+
+# SwCom ID 추출 — 표기 혼재(`SwCom_7` / `Sw Com 07` / `SwCom-7`)를 제로패딩 canonical 로.
+# `report_gen/utils.py::_normalize_swcom_label` 과 같은 관용 규칙이되, 그쪽은 주변 텍스트를
+# 보존하는 **라벨** 정규화라 목적이 다르다(`Door Control(SwCom_14)` → 같은 문자열).
+_SWCOM_ID_RE = re.compile(r"\bSw\s*Com\s*[_\s-]?\s*(\d{1,3})\b", re.I)
+
+
+def _canonical_swcom_id(text: str) -> str:
+    """`SwCom_7` / `Sw Com 07` → `SwCom_07`. SwCom ID 가 없으면 빈 문자열."""
+    m = _SWCOM_ID_RE.search(str(text or ""))
+    return f"SwCom_{int(m.group(1)):02d}" if m else ""
+
+
+# SDS 파티션 키를 **부분일치**로 찾을 때 쓰는 정규화 — 이 맵을 읽는 생성기
+# (`generators/sts.py` 요구 매핑, `generators/suts.py` ASIL 폴백)의 **단일 출처**다.
+# 예전엔 두 곳이 각자 `[^a-z0-9]` 로 복제하고 있었고, 그래서 한쪽만 고쳐질 수 있었다.
+_SDS_KEY_STRIP = re.compile(r"[\W_]", re.UNICODE)
+
+# 이름이 아니라 "값이 없다"는 표시. `n/a` 는 정규화하면 `na` 두 글자라
+# `s_SignalHandler`(`sig**na**lhandler`) 같은 아무 이름에나 걸리는데, 실측(KJPDS02_PV)
+# 에서 그 한 칸에 요구가 12개 달려 있었다.
+_SDS_PLACEHOLDER_KEYS = frozenset({"na", "tbd", "none", "null", "n", "x", "etc"})
+
+
+def normalize_sds_key(value: str) -> str:
+    """부분일치용 정규화 — 구두점·공백만 버리고 **한글은 남긴다**.
+
+    ⚠ `[^a-z0-9]` 로 지우면 한글이 통째로 사라진다. 그러면 파티션 이름
+    `차속에 따른 도어 open 방지` 가 `open` **한 단어**로 쪼그라들어
+    `u16s_MotorOpenCircuitRun`(모터 **단선** 검출)에 붙는다 — 커버리지 숫자는 오르고
+    내용은 틀린 링크다. 같은 식으로 `mcu 레지스터 이상감지`→`mcu`,
+    `고장진단 및 sbcm 송신`→`sbcm` 이 됐다.
+    """
+    return _SDS_KEY_STRIP.sub("", str(value or "").lower())
+
+
+def is_sds_placeholder_key(normalized: str) -> bool:
+    """정규화된 키가 `n/a`·`TBD` 류의 **근거 부재 표시**인가."""
+    return normalized in _SDS_PLACEHOLDER_KEYS
+
+
 def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     try:
         pass  # type: ignore
@@ -567,6 +725,12 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     except Exception:
         return {}
     mapping: Dict[str, Dict[str, str]] = {}
+    # component_description 폴백 출처 추적 — 같은 함수가 여러 SwCom 표에 서로 다른 설명으로
+    # 등장하면(이 프로젝트가 실측한 SwCom echo/교차참조 과다추출 패턴) 표 순서로 임의 상속하는
+    # 오귀속을 막는다: 두 번째 '다른' 설명을 만나면 모호로 표시하고 component_description을 제거
+    # (honest miss — 잘못된 컴포넌트 맥락보다 없는 편이 안전, deep-review Warning).
+    _comp_desc_src: Dict[str, str] = {}
+    _comp_desc_ambiguous: set = set()
 
     def _collapse_adjacent_duplicates(values: List[str]) -> List[str]:
         result: List[str] = []
@@ -579,17 +743,32 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             result.append(value)
         return result
 
-    def _add_entry(name: str, asil: str, related: str, desc: str) -> None:
+    def _add_entry(name: str, asil: str, related: str, desc: str, kind: str = "component",
+                   canonical: str = "") -> None:
         key = str(name or "").strip().lower()
         if not key:
             return
         entry = mapping.get(key, {})
+        # canonical: 같은 SwCom 을 가리키는 ID 키(`swcom_14`)와 이름 키(`door control`)를
+        # 한 컴포넌트로 접기 위한 표시/집계용 앵커. 조회 키(원 키)는 그대로 살려 둔다 —
+        # Related ID 가 컴포넌트를 이름으로만 참조한 요구의 링크가 끊기면 안 된다.
+        if canonical and not entry.get("canonical"):
+            entry["canonical"] = canonical
         if asil and not entry.get("asil"):
             entry["asil"] = asil
         if related and not entry.get("related"):
             entry["related"] = related
         if desc and not entry.get("description"):
             entry["description"] = desc
+        # kind 승격은 `_SDS_KIND_RANK` 비교로 한다 — 같은 키가 여러 표에서 다른 성격으로
+        # 등장할 때 강한 쪽이 이긴다. SDS 밴드/링크 집계는 'component' 만 세어 함수
+        # fan-out 과대표기(요구사항당 16→413)를 막고, 함수는 SUTS/VCAST 브리지에 그대로 쓰인다.
+        # ⚠ 예전 코드는 인자 `kind` 를 무시하고 "function" 을 하드코딩했다 — kind 가 2종일
+        #    때만 우연히 맞았고, 약한 kind 가 먼저 걸리면 함수 승격이 막혔다.
+        _new = kind if kind in _SDS_KIND_RANK else _SDS_DEFAULT_KIND
+        _cur = entry.get("kind")
+        if _cur is None or _SDS_KIND_RANK[_new] > _SDS_KIND_RANK.get(_cur, 0):
+            entry["kind"] = _new
         mapping[key] = entry
 
     def _find_col(norm_headers: List[str], keywords: List[str]) -> int:
@@ -685,13 +864,30 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             sc_asil = sc_data.get("asil", "") or swcom_asil_map.get(sc_id.lower(), "")
             sc_related = sc_data.get("related", "")
             sc_desc = sc_data.get("description", "")
+            # ID 키와 이름 키는 **같은 표의 같은 행**에서 나온 같은 컴포넌트다 → 같은 canonical.
+            sc_canon = _canonical_swcom_id(sc_id)
             if sc_id:
-                _add_entry(sc_id, sc_asil, sc_related, sc_desc)
+                _add_entry(sc_id, sc_asil, sc_related, sc_desc, kind="component", canonical=sc_canon)
             if sc_name:
-                _add_entry(sc_name, sc_asil, sc_related, sc_desc)
+                _add_entry(sc_name, sc_asil, sc_related, sc_desc, kind="component", canonical=sc_canon)
             for fr in func_rows:
                 fn = fr["name"].rstrip("()").strip()
-                _add_entry(fn, sc_asil, sc_related, fr.get("desc", ""))
+                _add_entry(fn, sc_asil, sc_related, fr.get("desc", ""), kind="function")
+                # 인터페이스 행 description이 비어도 소속 SwCom 설명을 폴백 필드로 부착 —
+                # 영향분석 SDS 카드가 함수 소속 컴포넌트 맥락을 표시할 수 있게(description 불변,
+                # 신규 필드라 밴드 집계·SUTS/VCAST 브리지 등 기존 소비처엔 무영향).
+                fk = fn.strip().lower()
+                if sc_desc and fk and fk in mapping:
+                    _capped = sc_desc[:500]
+                    if fk in _comp_desc_ambiguous:
+                        pass  # 이미 다중 SwCom 충돌 확정 — 붙이지 않음
+                    elif fk not in _comp_desc_src:
+                        _comp_desc_src[fk] = _capped
+                        mapping[fk]["component_description"] = _capped
+                    elif _comp_desc_src[fk] != _capped:
+                        # 다른 SwCom이 다른 설명 부여 → 모호. 오귀속 방지로 제거 후 확정.
+                        _comp_desc_ambiguous.add(fk)
+                        mapping[fk].pop("component_description", None)
             continue
 
         idx_comp_id = _find_col(header_norm, ["comp id", "component id", "swcom"])
@@ -707,9 +903,10 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
                 casil = cells[idx_comp_asil] if idx_comp_asil < len(cells) else ""
                 if cid and casil:
                     swcom_asil_map[cid.lower()] = casil
-                    _add_entry(cid, casil, "", "")
+                    cid_canon = _canonical_swcom_id(cid)
+                    _add_entry(cid, casil, "", "", kind="component", canonical=cid_canon)
                     if cname:
-                        _add_entry(cname, casil, "", "")
+                        _add_entry(cname, casil, "", "", kind="component", canonical=cid_canon)
             continue
 
         idx_name = _find_col(header_norm, [
@@ -737,28 +934,35 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
                         block[cells[attr_idx].lower()] = cells[cont_idx]
                 bid = block.get("id", "")
                 if bid and re.match(r"Sw\w+_\d+", bid):
+                    # Attribute/Contents 세로 블록 — `name` 은 상태명('initial'/'standby'/
+                    # 'auto close'), `id` 는 설계ID(SwFn_/SwSTR_/SwST_). 둘 다 컴포넌트가
+                    # 아니므로 밴드에서 제외한다(HDPDM01 실측 201개 중 131개가 여기서 왔다).
                     _add_entry(
                         block.get("name", bid),
                         block.get("asil", ""),
                         block.get("related id", block.get("related", "")),
                         block.get("description", "")[:500],
+                        kind="design_element",
                     )
                     _add_entry(
                         bid,
                         block.get("asil", ""),
                         block.get("related id", block.get("related", "")),
                         block.get("description", "")[:500],
+                        kind="design_id",
                     )
             continue
         for row in table.rows[1:]:
             cells = [c.text.strip() for c in row.cells]
             if idx_name >= len(cells):
                 continue
+            # 범용 표 폴백 — 헤더 이름만 맞은 미확인 행이라 컴포넌트로 단정할 수 없다.
             _add_entry(
                 cells[idx_name],
                 cells[idx_asil] if idx_asil >= 0 and idx_asil < len(cells) else "",
                 cells[idx_rel] if idx_rel >= 0 and idx_rel < len(cells) else "",
                 cells[idx_desc] if idx_desc >= 0 and idx_desc < len(cells) else "",
+                kind="table_row",
             )
 
     _asil_pat = re.compile(r"\bASIL[\s\-_]*([A-D](?:\s*\([A-D]\))?)\b|\bQM\b", re.I)
@@ -779,7 +983,7 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
         is_heading = hasattr(para, "style") and para.style and "heading" in str(para.style.name or "").lower()
         if heading_m or is_heading or swcom_m:
             if current_module and desc_buffer:
-                _add_entry(current_module, "", "", " ".join(desc_buffer).strip())
+                _add_entry(current_module, "", "", " ".join(desc_buffer).strip(), kind="heading")
                 desc_buffer = []
             candidate = heading_m.group(1).strip() if heading_m else txt
             candidate = re.sub(r"^\d+\.?\d*\.?\s*", "", candidate).strip()
@@ -791,17 +995,204 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             asil_m = _asil_pat.search(txt)
             if asil_m:
                 asil_val = "QM" if asil_m.group(0).strip().upper().startswith("QM") else asil_m.group(1)[0].upper()
-                _add_entry(current_module, asil_val, "", "")
+                _add_entry(current_module, asil_val, "", "", kind="heading")
                 current_asil = asil_val
             req_ids = re.findall(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", txt)
             if req_ids:
-                _add_entry(current_module, "", ", ".join(req_ids), "")
+                _add_entry(current_module, "", ", ".join(req_ids), "", kind="heading")
             if not asil_m and not req_ids and len(txt) > 10 and not txt.startswith(("Table", "Figure")):
                 desc_buffer.append(txt)
     if current_module and desc_buffer:
-        _add_entry(current_module, "", "", " ".join(desc_buffer).strip()[:500])
+        _add_entry(current_module, "", "", " ".join(desc_buffer).strip()[:500], kind="heading")
 
     return mapping
+
+
+# SDS Related ID 안의 요구/설계 ID 토큰. 내부 공백 허용("SwRS_ 001") — 두 라우터가
+# 각자 복제해 쓰던 정규식을 여기로 단일화했다.
+_SDS_RELATED_ID_RE = re.compile(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+")
+
+
+def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """SDS 파티션 맵 → 요구사항별 컴포넌트 맵. **SDS 밴드 판정의 단일 출처.**
+
+    `backend/routers/jenkins.py`(Jenkins 모드)와 `backend/routers/local.py`(로컬 모드)가
+    같은 판정을 복제하고 있던 것을 합쳤다. 복제 시절엔 한쪽만 고쳐져 모드 간 SDS 컴포넌트
+    수가 갈릴 수 있었다 — `scripts/_ratchet_core.py` 가 ruff/eslint ratchet 에서 같은
+    문제를 해결한 선례를 따른다.
+
+    반환 키:
+      ``req_to_comps``        요구ID → [컴포넌트+함수 **전체**]. 브리지 3종
+                              (``sds_func_to_reqs``/``design_to_reqs``/``comp_to_reqs``)이
+                              여기 의존하므로 **절대 줄이지 말 것**.
+      ``req_to_design_comps`` 요구ID → [실 SwCom/모듈만]. SDS 밴드 집계·표시용.
+                              같은 컴포넌트의 ID 키·이름 키는 canonical 로 접힌다.
+      ``req_to_folded_comps`` 요구ID → [접기로 사라진 **원 키**]. 소비처가 차집합
+                              (``sds_functions``)을 낼 때 여기 실린 키를 함께 빼야 한다.
+      ``component_asil``      컴포넌트/함수명(lower) → ASIL.
+      ``comp_set``            ``req_to_comps`` 에 실린 distinct 키.
+      ``design_comp_set``     ``req_to_design_comps`` 에 실린 distinct 표시 라벨.
+
+    ⚠ ``related`` 없는 엔트리는 두 맵 모두에서 탈락한다. 이 게이트 때문에 SDS 이름 집합은
+    **불완전**하며(하한선), Jenkins 경로의 ``_all_sds_keys``·``unmapped_sds_name_hit`` 은
+    그 하한선 위에서 계산된다. 로컬 경로는 ``generate_uds_traceability_matrix`` 를 호출하지
+    않아 이 인과가 성립하지 않는다. SDS 이름 완전 집합이 필요해지면 여기를 고친다.
+
+    ⚠ ``component_asil`` 만 게이트 **밖**에서 전 엔트리를 순회한다 — 요구의 component_id 가
+    related 없는 SwCom 정의 행을 가리킬 수 있기 때문(P5 ASIL 결합).
+
+    통합 전 두 라우터의 실측 차이는 ``if req_ids:`` 가드 유무 하나뿐이었고, 가드가 없는 쪽도
+    빈 리스트면 루프가 무동작이라 **맵 결과는 동치**다. 여기서는 가드 있는 쪽(jenkins)을 채택해
+    ``comp_set`` 의 의미("요구ID를 실제로 하나 이상 낳은 엔트리")를 보존한다.
+    """
+    req_to_comps: Dict[str, List[str]] = {}
+    req_to_design_comps: Dict[str, List[str]] = {}
+    req_to_folded_comps: Dict[str, List[str]] = {}
+    req_to_element_comps: Dict[str, List[str]] = {}
+    comp_set: Set[str] = set()
+    design_comp_set: Set[str] = set()
+    component_asil: Dict[str, str] = {}
+
+    for comp_key, info in (partition_map or {}).items():
+        if not isinstance(info, dict):
+            continue
+        casil = str(info.get("asil") or "").strip()
+        if casil:
+            component_asil[str(comp_key).strip().lower()] = casil
+
+    for comp_key, info in (partition_map or {}).items():
+        if not isinstance(info, dict):
+            continue
+        related = info.get("related", "")
+        if not related:
+            continue
+        req_ids = [_normalize_req_id(rid) for rid in _SDS_RELATED_ID_RE.findall(str(related))]
+        if not req_ids:
+            continue
+        # ⚠ **긍정형** 화이트리스트. 예전의 부정형(`kind != "function"`)이면 상태명·설계ID·
+        # 표 폴백 잔재가 전부 그대로 밴드를 통과한다.
+        # kind 부재(구 캐시·외부 주입) **와** 미등록 kind 문자열은 둘 다 `_SDS_DEFAULT_KIND`
+        # 로 흡수한다 — `_add_entry` 의 fail-safe 와 같은 규칙이어야 한다. 여기만 미지 kind 를
+        # 탈락시키면, 나중에 `_add_entry` 에 kind 를 추가하고 `_SDS_KIND_RANK` 등록을 잊었을 때
+        # 그 엔트리가 **경고 없이 밴드에서 사라진다**(밴드 제외는 등록이라는 명시 행위여야 한다).
+        _kind = str(info.get("kind") or "").strip().lower()
+        if _kind not in _SDS_KIND_RANK:
+            _kind = _SDS_DEFAULT_KIND
+        is_band = _kind in _SDS_BAND_KINDS
+        # 표시 라벨 = canonical(`SwCom_14`) 우선. 없으면 원 키 그대로 — SwCom 표에 없는
+        # 고아 이름이 조용히 사라지지 않게.
+        canon = str(info.get("canonical") or "").strip()
+        display = canon or comp_key
+        # 밴드도 함수도 아닌 것 = 설계 요소(설계ID·상태명·미확인 표행·heading 잔재).
+        # 소비처의 차집합은 "컴포넌트가 아닌 것 = 함수"라 가정하므로, 이걸 따로 실어 주지
+        # 않으면 상태명 `standby` 와 목차 줄이 **인터페이스 함수로 표시**된다(실측 21.3%).
+        is_element = (not is_band) and _kind != "function"
+        comp_set.add(comp_key)
+        if is_band:
+            design_comp_set.add(display)
+        for rid in req_ids:
+            bucket = req_to_comps.setdefault(rid, [])
+            if comp_key not in bucket:
+                bucket.append(comp_key)
+            if is_element:
+                ebucket = req_to_element_comps.setdefault(rid, [])
+                if comp_key not in ebucket:
+                    ebucket.append(comp_key)
+            if is_band:
+                dbucket = req_to_design_comps.setdefault(rid, [])
+                if display not in dbucket:
+                    dbucket.append(display)
+                # ⚠ 접기로 사라진 **원 키**를 반드시 남긴다. 이게 없으면 소비처의 차집합
+                #   (sds_components 를 뺀 나머지 = sds_functions)이 `swcom_14` 와
+                #   `door control` 을 **둘 다 함수로** 밀어 넣어 이중 계상된다.
+                #   canonical 이 원 키와 다르면 원 키 자신도 folded 대상이다(대소문자 불일치).
+                if canon and canon != comp_key:
+                    fbucket = req_to_folded_comps.setdefault(rid, [])
+                    if comp_key not in fbucket:
+                        fbucket.append(comp_key)
+
+    return {
+        "req_to_comps": req_to_comps,
+        "req_to_design_comps": req_to_design_comps,
+        "req_to_folded_comps": req_to_folded_comps,
+        # 밴드도 함수도 아닌 설계 요소 — 소비처가 "컴포넌트 아닌 것 = 함수" 로 접지 않도록.
+        "req_to_element_comps": req_to_element_comps,
+        "component_asil": component_asil,
+        "comp_set": comp_set,
+        "design_comp_set": design_comp_set,
+    }
+
+
+# 거친 입도 임계 — 실 컴포넌트의 이 비율을 **초과**해 연결되면 변별력 없음으로 본다.
+_SDS_COARSE_RATIO = 0.4
+# 총 컴포넌트가 이보다 적으면 미적용 — 3개 중 2개 같은 소규모에서 비율이 무의미해진다.
+_SDS_COARSE_MIN_COMPONENTS = 5
+
+
+def annotate_sds_coarse(rows: Optional[List[Dict[str, Any]]]) -> Tuple[int, int]:
+    """행별 ``sds_coarse`` 플래그를 채우고 ``(실 컴포넌트 총수, coarse 행 수)`` 반환.
+
+    한 요구사항이 실 설계 컴포넌트의 40%를 넘게 참조하면 "이 요구가 어느 설계에
+    대응하는가"를 좁히지 못한다(예: SwCom Related-ID 에 SwTR 을 통째로 나열). 결함이
+    아니라 **문서 입도 신호**다.
+
+    분모는 반드시 **정화 후 실 컴포넌트**여야 한다. 상태명·설계ID·목차줄까지 세던 동안
+    분모가 6배로 부풀어(HDPDM01 201 vs 실 33) 임계가 80.4 로 떠 있었고, 최대 행이
+    34개라 이 지표는 **한 번도 발화하지 않았다**(0/63 → 정화 후 8/63).
+
+    Jenkins 경로(`generate_uds_traceability_matrix`)와 local 경로(`local.py`)가 각자
+    세면 같은 문서가 모드에 따라 다른 값을 내므로 단일 출처로 둔다 —
+    `build_sds_component_maps` 와 같은 이유.
+    """
+    _rows = [r for r in (rows or []) if isinstance(r, dict)]
+    total = len({
+        str(c).strip().lower()
+        for r in _rows for c in (r.get("sds_components") or []) if str(c).strip()
+    })
+    coarse_count = 0
+    if total >= _SDS_COARSE_MIN_COMPONENTS:
+        threshold = _SDS_COARSE_RATIO * total
+        for r in _rows:
+            is_coarse = len(r.get("sds_components") or []) > threshold
+            r["sds_coarse"] = is_coarse
+            if is_coarse:
+                coarse_count += 1
+    return total, coarse_count
+
+
+def resolve_component_entry(
+    file_path: Any, component_map: Optional[Dict[str, Dict[str, str]]]
+) -> Dict[str, str]:
+    """소스 파일 경로 → component_map 엔트리. 못 찾으면 빈 dict.
+
+    **경로 키 우선, 파일명 폴백**이다. 순서가 뒤바뀌면 같은 파일명이 여러 트리에
+    있을 때 엉뚱한 컴포넌트로 붙는다(맵이 그 충돌을 풀려고 경로 키를 둔다).
+
+    ⚠ 이 판정은 두 곳이 쓴다 — `uds_generator` 의 파일 수집(verify=X 건너뛰기)과
+      `generators/suts` 의 시험 범위 보고. 예전엔 전자에 인라인으로만 있어서
+      **AST 파서 경로(`parse_c_project`)가 필터를 통째로 우회**했고, 그 사실이
+      어디에도 안 남았다(실측: 우리만 내는 unit 152개 중 45개가 verify=X 유래.
+      정본은 1,005개 중 24개뿐). 판정을 복제하지 말고 여기를 부를 것.
+    """
+    if not component_map:
+        return {}
+    fp = str(file_path or "").replace("\\", "/").strip()
+    if not fp:
+        return {}
+    for key, val in component_map.items():
+        if "/" in key and fp.endswith(key) and isinstance(val, dict):
+            return val
+    name = fp.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    got = component_map.get(name) or component_map.get(stem)
+    return got if isinstance(got, dict) else {}
+
+
+def component_verify_of(
+    file_path: Any, component_map: Optional[Dict[str, Dict[str, str]]]
+) -> str:
+    """`'O'`(시험 대상) · `'X'`(면제) · `''`(맵에 없음/미기재)."""
+    return str((resolve_component_entry(file_path, component_map) or {}).get("verify") or "").strip().upper()
 
 
 def _load_component_map() -> Dict[str, Dict[str, str]]:
@@ -1025,19 +1416,53 @@ def _build_req_map_from_doc_paths(doc_paths: List[str], texts: Optional[List[str
     return mapping
 
 
+def _build_uds_asil_map(uds_doc_paths: Optional[List[str]]) -> Dict[str, str]:
+    """SwUDS(v3.02 세로 key-value 표) 문서에서 {함수명(lower): ASIL 등급} 직독.
+
+    impact 파이프라인의 검증된 extract_function_asil_from_kv_tables를 재사용한다(권위 문서
+    직독 — SDS 이름 휴리스틱 매칭보다 정확). 이 파서·상위 파서가 path.exists()/open()으로
+    로컬 fs 직접 접근하므로, 호출부가 cloudium U: 경로를 로컬 tmp로 변환해 넘긴 뒤에만 유효.
+    다중 UDS·동명 함수는 max-merge(안전측 — 낮은 등급 채택은 under-report). 파싱 실패는
+    graceful skip(추적성 본류 비차단). lazy import로 계층 위생 + iso26262 모듈 로드 실패 격리.
+    """
+    out: Dict[str, str] = {}
+    for p in (uds_doc_paths or []):
+        try:
+            path = Path(str(p))
+            if not path.exists() or path.suffix.lower() != ".docx":
+                continue
+            from backend.services.iso26262_doc_asil_extractor import (
+                extract_function_asil_from_kv_tables,
+            )
+            parsed = extract_function_asil_from_kv_tables(path.read_bytes())
+            for k, v in (parsed or {}).items():
+                nk = str(k).strip().lower()
+                if not nk or not v:
+                    continue
+                if nk not in out or _ASIL_RANK.get(str(v).upper(), -1) > _ASIL_RANK.get(str(out[nk]).upper(), -1):
+                    out[nk] = v
+        except Exception:
+            continue
+    return out
+
+
 def enrich_function_details_with_docs(
     function_details: Dict[str, Dict[str, Any]],
     function_table_rows: Optional[List[List[Any]]] = None,
     *,
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
+    uds_doc_paths: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     if not isinstance(function_details, dict) or not function_details:
         return function_details
 
     req_paths = [str(p).strip() for p in (req_doc_paths or []) if str(p).strip()]
     sds_paths = [str(p).strip() for p in (sds_doc_paths or []) if str(p).strip()]
+    uds_paths = [str(p).strip() for p in (uds_doc_paths or []) if str(p).strip()]
     req_map = _build_req_map_from_doc_paths(req_paths) if req_paths else {}
+    # SwUDS 문서 직독 ASIL(권위) — 함수별 blank를 SDS 이름매칭보다 먼저 채운다(under-report 방지).
+    uds_name_asil = _build_uds_asil_map(uds_paths)
 
     sds_map: Dict[str, Dict[str, str]] = {}
     for path in sds_paths:
@@ -1225,7 +1650,13 @@ def enrich_function_details_with_docs(
             if (not desc or desc.lower().startswith("function")) and sds_info.get("description"):
                 info["description"] = sds_info["description"]
                 info["description_source"] = "sds"
-            elif str(info.get("description_source") or "").strip() in {"", "inference"}:
+            # ⚠ `has_evidence_value(desc)` 가 **필수**다. 위 `if` 는 `sds_info` 에 설명이
+            #    있을 때만 타므로, 설명이 비어 있고 SDS 에도 설명이 없으면 이 `elif` 로
+            #    떨어져 **빈 칸에 출처만** 붙던 경로가 열려 있었다.
+            elif (
+                has_evidence_value(desc)
+                and str(info.get("description_source") or "").strip() in {"", "inference"}
+            ):
                 info["description_source"] = "sds_match"
 
         related = str(info.get("related") or "").strip()
@@ -1247,6 +1678,19 @@ def enrich_function_details_with_docs(
                     info["asil"] = asil
                     info["asil_source"] = "srs"
                     break
+        # ⚠ 예전엔 여기서 `asil="QM"; asil_source="srs_default_qm"` 을 썼다. 지웠다.
+        #   "SRS 요구에 매칭됐는데 **그 요구에 ASIL 이 안 적혀 있다**" 는 근거의 **부재**인데,
+        #   그걸 `QM`(= 안전 관련 아님)이라는 **실질 주장**으로 바꿔 적은 것이었다.
+        #   ISO 26262 에서 QM 은 안전 요구가 면제된다는 뜻이라, 침묵을 등급으로 굳히면
+        #   under-classification 이 된다. 게다가 실측(2026-07-31)에서 이 라벨은
+        #   점수표(`validation.py::_src_aliases`)가 `default`(0.30, 최약체)로 접는데
+        #   `provenance.WEAK_SOURCES` 엔 없어서 `is_weak_source()` 는 **강한 출처**로
+        #   답했다 — 그래서 더 나은 근거(주석 `@asil`=1.00, SDS=0.95)가 와도 이 칸을
+        #   덮지 못했다. 최약체가 최강자를 막고 있었다.
+        #   값을 지어내지 않는다. 없으면 없는 대로, `TBD` 면 `TBD` 로 둔다.
+        #   다만 **왜** 미상인지는 잃지 않는다 — SRS 문서 자체에 등급이 없다는 건
+        #   상류 문서의 결함이라 보고 가치가 있다. 점수·병합 판정에 참여하지 않는
+        #   진단 키로만 남긴다(`*_source` 가 아니므로 어휘표와 무관).
         cur_asil = str(info.get("asil") or "").strip().upper()
         if (
             related
@@ -1254,8 +1698,28 @@ def enrich_function_details_with_docs(
             and not matched_req_with_asil
             and ((not cur_asil) or cur_asil in {"TBD", "N/A", "-"})
         ):
-            info["asil"] = "QM"
-            info["asil_source"] = "srs_default_qm"
+            info["asil_unresolved"] = "srs_req_without_asil"
+
+        # SwUDS 문서 직독 ASIL — 등급 낮추기 절대 없음(상향만). 단 소스 유래(asil_source="comment",
+        # C @asil Doxygen)와 문서 유래(sds 이름휴리스틱·srs·inference·blank)를 구분한다:
+        #  · 문서 유래가 UDS보다 낮으면 → UDS로 상향(under-report 해소). SDS 오매칭·SRS 미스보다
+        #    UDS 문서 직독이 권위. UDS 문서에만 명시된 안전함수(보안접근 등)를 회복.
+        #  · 소스 코드 @asil(c_source 권위, backend/services/CLAUDE.md "c_source > swuds")이 UDS보다
+        #    낮으면 → 등급 유지 + asil_doc_conflict 표면화(자동 상향 안 함). 문서>코드 불일치는 수동
+        #    검토 신호이지 코드 등급을 문서에 맞춰 올릴 사안 아님 — impact _enrich_asil_from_uds와 lockstep.
+        #    이로써 같은 함수가 impact 탭·추적성 탭에서 모순 표시되지 않는다(deep-review W1).
+        # SDS direct/exact가 UDS보다 높은 경우(예 sf_* secure flash)는 max라 SDS 우위 보존([B]).
+        if uds_name_asil:
+            _nm = str(info.get("name") or "").strip().lower()
+            _uds_a = uds_name_asil.get(_nm) if _nm else None
+            if _uds_a:
+                _cur = str(info.get("asil") or "").strip().upper()
+                if _ASIL_RANK.get(str(_uds_a).upper(), -1) > _ASIL_RANK.get(_cur, -1):
+                    if str(info.get("asil_source") or "").strip() == "comment":
+                        info["asil_doc_conflict"] = f"source={_cur or '(빈)'}<uds={_uds_a}"
+                    else:
+                        info["asil"] = _uds_a
+                        info["asil_source"] = "uds"
 
     return function_details
 
@@ -1828,11 +2292,36 @@ def _normalize_vcast_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
                 "unit": row.get("unit") or "",
                 "report": row.get("report") or "",
                 "source": source,
+                # subprogram(=시험 대상 함수, vcast 산출물에서만 채워짐) 보존 — 함수중심 그래프가
+                # 함수↔VectorCAST를 잇는 키. STS/SUTS/SITS는 비어 무영향(프론트 매칭은 unit 사용).
+                "subprogram": row.get("subprogram") or "",
                 "trace_type": row.get("trace_type") or "direct",
                 "confidence": row.get("confidence") if row.get("confidence") not in (None, "") else ("exact" if source in ("STS", "SUTS", "SITS") else "fuzzy"),
             }
         )
     return out
+
+
+# ASIL 등급 순위(ISO 26262: QM<A<B<C<D) — 요구사항 ASIL은 연결 설계요소 중 최고로 도출.
+_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def _asil_max_of(raw_values: List[str]) -> str:
+    """주어진 ASIL 문자열들('A','QM','A, B' 등) 중 최고 등급을 canonical 토큰으로 반환.
+
+    _normalize_asil_value로 정규화 후 토큰별 순위 비교. 인식 불가/빈 값은 무시.
+    하나도 인식 못 하면 빈 문자열(graceful — ASIL 미상).
+    """
+    best = ""
+    best_rank = -1
+    for v in raw_values:
+        for tok in _normalize_asil_value(v).split(","):
+            tok = tok.strip().upper()
+            r = _ASIL_RANK.get(tok)
+            if r is not None and r > best_rank:
+                best_rank = r
+                best = tok
+    return best
 
 
 def generate_uds_traceability_matrix(
@@ -1842,17 +2331,44 @@ def generate_uds_traceability_matrix(
     sds_pairs: Optional[List[Dict[str, Any]]] = None,
     sits_rows: Optional[List[Dict[str, Any]]] = None,
     uds_function_ids: Optional[List[str]] = None,
+    component_asil: Optional[Dict[str, str]] = None,
+    hsis_pairs: Optional[List[Dict[str, Any]]] = None,
+    uds_function_asil: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    # ASIL 결합(P5) — {컴포넌트/함수명(lower): ASIL}. SDS 추출(component_asil)에서 전달.
+    # 요구사항별 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 ASIL 중 최고(QM<A<B<C<D).
+    # hiMA는 ASIL을 셀에 비노출 → 우리 차별점. 데이터 없으면 빈 문자열(graceful).
+    comp_asil_map: Dict[str, str] = {}
+    for _k, _v in (component_asil or {}).items():
+        _kk = str(_k or "").strip().lower()
+        _vv = str(_v or "").strip()
+        if _kk and _vv:
+            comp_asil_map[_kk] = _vv
+    # SwUDS 문서 직독 함수 ASIL을 요구사항 ASIL 도출 소스에 max-merge. SDS 컴포넌트 ASIL만으론
+    # UDS 함수 단위 안전등급(보안접근·슬립감지 등)이 누락돼 요구사항 ASIL이 under-report될 수 있다
+    # (extract-mapping이 uds_function_asil로 전달). 같은 함수명에 SDS/UDS 등급이 다르면 max —
+    # 낮은 등급 채택은 under-report(위험), over-report는 안전측. (라이브: kjpds02_pv 함수 ASIL 갭)
+    for _k, _v in (uds_function_asil or {}).items():
+        _kk = str(_k or "").strip().lower()
+        _vv = str(_v or "").strip()
+        if _kk and _vv and (_kk not in comp_asil_map or _ASIL_RANK.get(_vv.upper(), -1) > _ASIL_RANK.get(str(comp_asil_map[_kk]).upper(), -1)):
+            comp_asil_map[_kk] = _vv
+
     # Build original→normalized ID mapping to preserve display IDs
     raw_ids = sorted({str(x.get("id") or "").strip() for x in items if str(x.get("id") or "").strip()})
     logger = logging.getLogger(__name__)
     norm_to_raw: Dict[str, str] = {}
+    # 정합성 감사(trace_integrity): 한 canonical로 붕괴하는 raw 철자 전체를 보존한다.
+    # 기존 first-wins(norm_to_raw)는 표시용 1개만 남기고 나머지를 log로만 흘려 삼키므로,
+    # 여기서 전 변형을 모아 build_integrity_audit가 '정규화 충돌'을 표면화하게 한다(additive).
+    norm_to_raws: Dict[str, List[str]] = {}
     for rid in raw_ids:
         norm = _normalize_req_id(rid)
         if norm in norm_to_raw and norm_to_raw[norm] != rid:
             logger.warning("Duplicate requirement ID after normalization: '%s' and '%s' both normalize to '%s'", norm_to_raw[norm], rid, norm)
         if norm not in norm_to_raw:
             norm_to_raw[norm] = rid  # keep first occurrence for display
+        norm_to_raws.setdefault(norm, []).append(rid)
 
     req_ids = sorted(norm_to_raw.keys())
 
@@ -1860,6 +2376,11 @@ def generate_uds_traceability_matrix(
     # 많은(파이프 정제 후 비지 않고 긴) name을 채택. SRS 표 추출이 ID당 다중 행을 만들어
     # 첫 행(빈 name)이 표시되던 문제 해소(라운드110). 방어적으로 '| ' 잔여 잡음도 정제.
     name_map: Dict[str, str] = {}
+    # SyRS 상위 추적(요구→상위 시스템요구) — items의 raw related_ids에서 Sy* 토큰을 보존 소비.
+    # builder 내부 _normalize_req_id(requirements.py:1804)는 Sy 보존(공백제거+대문자)이라 collapse 안 됨.
+    # → SR→SyRS→SwRS 체인의 상위 링크를 surface(배지/밴드). 신규 추출 아님(이미 들어온 raw 소비).
+    syrs_map: Dict[str, List[str]] = {}
+    _SY_RE = re.compile(r"Sy[A-Za-z]{2,}_\d+")
     for x in items:
         rid_n = _normalize_req_id(str(x.get("id") or "").strip())
         if not rid_n:
@@ -1867,6 +2388,13 @@ def generate_uds_traceability_matrix(
         nm = re.sub(r"\s*\|\s*", " ", str(x.get("name") or "")).strip()
         if len(nm) > len(name_map.get(rid_n, "")):
             name_map[rid_n] = nm
+        raw_rel = str(x.get("related_ids") or x.get("related") or "")
+        if raw_rel:
+            existing = syrs_map.setdefault(rid_n, [])
+            for tok in _SY_RE.findall(raw_rel):
+                tok = tok.upper()
+                if tok not in existing:
+                    existing.append(tok)
 
     # ── UDS function mapping (requirement → source functions) ──
     mapping_pairs = mapping_pairs or []
@@ -1910,6 +2438,102 @@ def generate_uds_traceability_matrix(
             if c not in existing:
                 existing.append(c)
         sds_lookup[rid] = existing
+
+    # ── HSIS interface mapping (requirement → interface signals) ──
+    # 시스템 레벨 인터페이스 밴드(design-arm). HSIS extract 엔드포인트가 Related ID(Sy*)를
+    # SW namespace로 평탄화해 hsis_pairs[{requirement_id, hsis_signals:[HSI_xx/SW변수]}]로 전달.
+    hsis_lookup: Dict[str, List[str]] = {}
+    for row in (hsis_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        sigs = row.get("hsis_signals") or []
+        if isinstance(sigs, str):
+            sigs = [s.strip() for s in sigs.split(",") if s.strip()]
+        elif isinstance(sigs, list):
+            sigs = [str(s).strip() for s in sigs if str(s).strip()]
+        else:
+            sigs = []
+        existing = hsis_lookup.get(rid, [])
+        for s in sigs:
+            if s not in existing:
+                existing.append(s)
+        hsis_lookup[rid] = existing
+
+    # 실 설계 컴포넌트만(인터페이스 함수 제외) — 행 sds_components 표시/집계용. sds_lookup(전체)은
+    # 브리지(sds_func_to_reqs)·ASIL 롤업에 그대로 쓰여 동작 불변. design_component_ids 부재(구버전
+    # sds_pairs/클라이언트) 시 component_ids로 폴백 → 회귀 없음(분리 전과 동일 동작).
+    sds_comp_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        dcomps = row.get("design_component_ids")
+        if dcomps is None:
+            dcomps = row.get("component_ids") or []
+        if isinstance(dcomps, str):
+            dcomps = [c.strip() for c in dcomps.split(",") if c.strip()]
+        elif isinstance(dcomps, list):
+            dcomps = [str(c).strip() for c in dcomps if str(c).strip()]
+        else:
+            dcomps = []
+        dexisting = sds_comp_lookup.get(rid, [])
+        for c in dcomps:
+            if c not in dexisting:
+                dexisting.append(c)
+        sds_comp_lookup[rid] = dexisting
+
+    # canonical 접기로 sds_components 에서 사라진 **원 키**. 차집합(sds_functions)에서 함께
+    # 빼지 않으면 `swcom_14`·`door control` 이 둘 다 인터페이스 함수로 이중 계상된다.
+    # 구 응답·구 캐시엔 이 필드가 없다 → 빈 set → 접기 이전 동작 그대로(회귀 없음).
+    sds_folded_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        fcomps = row.get("folded_component_ids") or []
+        if isinstance(fcomps, str):
+            fcomps = [c.strip() for c in fcomps.split(",") if c.strip()]
+        elif isinstance(fcomps, list):
+            fcomps = [str(c).strip() for c in fcomps if str(c).strip()]
+        else:
+            fcomps = []
+        fexisting = sds_folded_lookup.get(rid, [])
+        for c in fcomps:
+            if c not in fexisting:
+                fexisting.append(c)
+        sds_folded_lookup[rid] = fexisting
+
+    # 밴드도 함수도 아닌 설계 요소(설계ID `SwFn_`/`SwST_`·상태명 `standby`·미확인 표행·
+    # heading 잔재). 차집합은 "컴포넌트가 아닌 것 = 함수" 라 접으므로 이걸 따로 빼지 않으면
+    # 목차 줄까지 **인터페이스 함수**로 표시된다(HDPDM01 실측 634 중 135 = 21.3%,
+    # 63행 중 52행 오염, SWNTR_0408 은 10/10 전부 비-함수).
+    # 구 응답·구 캐시엔 이 필드가 없다 → 빈 set → 전부 sds_functions 로(=이 분리 이전 동작).
+    sds_element_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        ecomps = row.get("design_element_ids") or []
+        if isinstance(ecomps, str):
+            ecomps = [c.strip() for c in ecomps.split(",") if c.strip()]
+        elif isinstance(ecomps, list):
+            ecomps = [str(c).strip() for c in ecomps if str(c).strip()]
+        else:
+            ecomps = []
+        eexisting = sds_element_lookup.get(rid, [])
+        for c in ecomps:
+            if c not in eexisting:
+                eexisting.append(c)
+        sds_element_lookup[rid] = eexisting
 
     # ── Test rows: merge STS/SUTS/VectorCAST + SITS ──
     all_test_rows = list(vcast_rows or [])
@@ -1979,6 +2603,24 @@ def generate_uds_traceability_matrix(
         if _b != _k:
             _prefixed_base_count[_b] = _prefixed_base_count.get(_b, 0) + 1
     _alias_safe = {b for b, c in _prefixed_base_count.items() if c == 1 and b not in _all_sds_keys}
+    # ── 원시 SDS 이름 인덱스(대칭 정규화) — 라운드113 ──────────────────────────────
+    # ⚠ 이건 '추적'이 아니라 '이름 존재' 인덱스다. 바로 위 alias 보정은 SDS 키 쪽에만
+    # _strip_ret_type_prefix 를 걸고, 접두사형이 2개 이상 충돌하면 alias 를 아예 포기한다
+    # (_alias_safe — over-trace 보수 처리). 그래서 표기 규약이 어긋난 함수는 브리지 두 맵
+    # (sds_func_to_reqs / sds_all_func_to_reqs)이 **동시에** 미스해 'SDS 미명세'로 거짓 보고된다.
+    # 두 맵은 같은 루프·같은 키·같은 소스에서 in_matrix 게이트 하나만 다르므로 한쪽이 놓치면
+    # 다른 쪽도 놓친다(unmapped_sds_linked 가 구조적으로 0 인 이유 — 집계부 주석 참조).
+    # 여기서 **양변에 동일 정규화**를 걸어 그 실패 모드만 별도 채널로 노출한다.
+    # 절대 sds_reqs/traced/covered/in_uds 에 먹이지 않는다(순수 보고용).
+    _sds_name_index: Dict[str, List[str]] = {}   # strip(key) → [원 SDS 키...]
+    _sds_core_index: Dict[str, List[str]] = {}   # core(key)  → [원 SDS 키...] (저장클래스까지 제거)
+    # ⚠ sorted() 필수 — _all_sds_keys 는 set 이고 CPython 문자열 해시는 프로세스마다
+    # randomize 되므로, 정렬 없이 순회하면 아래 리스트 순서가 재기동마다 바뀐다. 그러면
+    # sds_name_hits 의 표시 캡이 '임의의 N개'를 조용히 고르게 되어 CSV 감사 증빙과
+    # localStorage 영속 매트릭스가 같은 입력에도 달라진다(베이스라인 diff에 유령 변경).
+    for _k in sorted(_all_sds_keys):
+        _sds_name_index.setdefault(_strip_ret_type_prefix(_k), []).append(_k)
+        _sds_core_index.setdefault(_LAYER_CORE_PREFIX_RE.sub("", _k), []).append(_k)
     for rid_srs, comps in sds_lookup.items():
         in_matrix = rid_srs in req_id_set
         for comp in comps:
@@ -2020,6 +2662,47 @@ def generate_uds_traceability_matrix(
         if f:
             uds_all_funcs.setdefault(f.lower(), f)
 
+    # 설계-ID bridge(SRS→SDS→UDS): UDS 함수의 Related ID 설계ID(SwFn/SwSTR/SwST/SwTK)를
+    # SDS의 '설계ID→SRS요구' 매핑으로 이어 UDS 밴드에 부착한다. comp_to_reqs(SwCom·SITS
+    # 전용)의 형제 — 여기선 SwCom 제외(loose, reach 불변·fan-out만 악화). map_lookup은
+    # 설계ID(정규화)→[함수명+자기 SwUFn ID], sds_lookup은 SRS요구→[component_ids(설계ID·함수명)].
+    design_to_reqs: Dict[str, List[str]] = {}          # 설계ID(정규화) → [SRS 요구], SwCom 제외
+    for rid_srs, comps in sds_lookup.items():
+        if rid_srs not in req_id_set:                  # 매트릭스 SRS 요구에만 시드(설계→설계 노이즈 차단)
+            continue
+        for comp in comps:
+            dkey = _normalize_req_id(comp)
+            if not _DESIGN_ID_BRIDGE_RE.match(dkey):    # SwFn/SwSTR/SwST/SwTK만; SwCom/SwUFn/함수명 배제
+                continue
+            _dlst = design_to_reqs.setdefault(dkey, [])
+            if rid_srs not in _dlst:
+                _dlst.append(rid_srs)
+    design_bridge_funcs: Dict[str, List[str]] = {}     # SRS 요구 → [UDS 함수 display]
+    # 역방향 맵: _sds_comp_key(함수명) → [SRS 요구] via 설계ID. SUTS/VectorCAST test-row가
+    # 시험 함수의 UDS 설계ID로 SRS에 닿게 한다(UDS 밴드와 동일 체인의 test-arm 확장 —
+    # 시험이 함수 F를 검증, F가 SwFn_05를 구현, SwFn_05가 요구 R을 실현 → 시험이 R 검증).
+    func_design_reqs: Dict[str, List[str]] = {}
+    for _did, _fns in map_lookup.items():
+        _reqs = design_to_reqs.get(_did)
+        if not _reqs:
+            continue
+        for _fn in _fns:
+            _fs = str(_fn).strip()
+            if _SWUFN_RE.match(_fs):                     # 함수 자기 SwUFn ID 값 제외 — 밴드엔 함수명만
+                continue
+            if _fs.lower() in _UDS_FUNC_JUNK:            # junk 필드 라벨 제외(C1 방어심층)
+                continue
+            _fdisp = uds_all_funcs.get(_fs.lower(), _fs)
+            _fkey = _sds_comp_key(_fs)                   # SUTS unit/VCAST resolved 함수명 조회 키공간
+            for _rid in _reqs:
+                _blst = design_bridge_funcs.setdefault(_rid, [])
+                if _fdisp not in _blst:
+                    _blst.append(_fdisp)
+                if _fkey:
+                    _flst = func_design_reqs.setdefault(_fkey, [])
+                    if _rid not in _flst:
+                        _flst.append(_rid)
+
     # SITS/VectorCAST 2-hop bridge용: SUTS가 제공하는 SwUFn(단위함수 ID) → 함수명 맵.
     # SITS/vcast는 testcase·subprogram에 SwUFn ID를 박아두지만 함수명/SRS ID가 없다.
     # SUTS의 SwUFn↔함수명(unit)으로 함수명을 얻은 뒤 SDS 함수명 bridge로 SRS에 연결.
@@ -2042,6 +2725,9 @@ def generate_uds_traceability_matrix(
     # 구분할 신호를 summary로 노출한다. 미추적 행은 매트릭스에서 빠지므로 카운트만.
     vcast_input_rows = 0
     vcast_traced_rows = 0
+    # §G: bridge(seen_vc)로 traced된 subprogram 집합 — 같은 subprogram이 다른 행에서 bridge
+    # 실패해 미추적 목록에 잔류한 것을 loop 후 일괄 revoke(행 순서 무관). never-revoke 이중집계 해소.
+    _traced_subs: Set[str] = set()
     # 미추적(SRS 미연결) VectorCAST subprogram 목록 — 역방향 추적성 공백 가시화.
     # 시험은 했으나 이 SRS 요구사항에 안 닿는 함수(일부 보안/안전 관련이라 의미 있음).
     # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 이 목록을 의미 3버킷으로 묶어 보여준다.
@@ -2083,6 +2769,11 @@ def generate_uds_traceability_matrix(
             for r in sds_func_to_reqs.get(_sds_comp_key(unit), []):
                 if r not in mapped_rids:
                     mapped_rids.append(r)
+            # 설계-ID bridge: 시험 함수(unit)의 UDS Related ID 설계ID로도 SRS에 연결.
+            # 함수명 bridge가 SDS에 이름 없는 함수를 놓치던 것을 보완(SUTS 43→64).
+            for r in func_design_reqs.get(_sds_comp_key(unit), []):
+                if r not in mapped_rids:
+                    mapped_rids.append(r)
             for mrid in mapped_rids:
                 # 유효한 SRS 요구사항(req_id_set)으로만 간접 추적 추가 — SwSTR 등 노이즈 배제
                 if mrid != orig_rid and mrid in req_id_set:
@@ -2110,19 +2801,28 @@ def generate_uds_traceability_matrix(
             vcast_input_rows += 1
             seen_vc: set = set()
             sub_lower = subprogram.lower()
-            for mrid in sds_func_to_reqs.get(_sds_comp_key(sub_lower), []):
-                if mrid in req_id_set and mrid not in seen_vc:
-                    seen_vc.add(mrid)
-                    enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+            # 함수명 bridge(sds_func_to_reqs) + 설계-ID bridge(func_design_reqs) 병행 —
+            # 시험 함수의 UDS 설계ID로도 SRS에 연결(VectorCAST 43→64). seen_vc가 중복 차단.
+            for _map in (sds_func_to_reqs, func_design_reqs):
+                for mrid in _map.get(_sds_comp_key(sub_lower), []):
+                    if mrid in req_id_set and mrid not in seen_vc:
+                        seen_vc.add(mrid)
+                        enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
             hay = subprogram + " " + str(row.get("testcase") or "")
             for swufn in _SWUFN_RE.findall(hay):
                 for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
-                    for mrid in sds_func_to_reqs.get(_sds_comp_key(fn), []):
-                        if mrid in req_id_set and mrid not in seen_vc:
-                            seen_vc.add(mrid)
-                            enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
-            if seen_vc:
+                    for _map in (sds_func_to_reqs, func_design_reqs):
+                        for mrid in _map.get(_sds_comp_key(fn), []):
+                            if mrid in req_id_set and mrid not in seen_vc:
+                                seen_vc.add(mrid)
+                                enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+            # bridge(seen_vc) 또는 direct requirement_id(orig_rid, 2367서 이미 trace_type:"direct"
+            # 로 traced)로 SRS에 연결된 행은 traced로 집계한다. direct rid 행이 subprogram bridge에
+            # 실패해도 여기서 흡수돼 untraced(unmapped_vcast) 이중집계를 막는다(§F).
+            if seen_vc or orig_rid in req_id_set:
                 vcast_traced_rows += 1
+                if seen_vc:
+                    _traced_subs.add(sub_lower)   # §G: bridge traced subprogram 수집(revoke용)
             else:
                 # SRS 미연결 — 역방향 추적 공백 목록에 distinct subprogram만 수집.
                 # SUTS bridge(swufn_to_func)로 함수명을 해석해 의미 분류한다:
@@ -2150,8 +2850,12 @@ def generate_uds_traceability_matrix(
                     # SRS엔 미추적이라도 '설계엔 닿는'(SDS 연동) 함수면 매트릭스 밖 req를 노출.
                     # 정확매칭(정규화 키)이므로 거짓양성 없음. 비면 프론트는 'SDS 미명세'로 표기
                     # → 'SRS·SDS 모두 미명세' 추적성 공백을 정직히 가시화(라운드 109).
+                    # 후보를 아래 이름 대조와 **공유**한다 — hit ⊇ linked 단조성(항등식
+                    # variant == hit − linked)을 코드 수준에서 보장하기 위함. _uds_cands 는
+                    # SwUFn ID 를 제외해 후보가 좁으므로 여기 쓰면 항등식이 음수가 될 수 있다.
+                    _sds_cands = [sub_lower, *resolved]
                     sds_reqs: List[str] = []
-                    for cand in [sub_lower, *resolved]:
+                    for cand in _sds_cands:
                         for r in sds_all_func_to_reqs.get(_sds_comp_key(cand), []):
                             if r not in sds_reqs:
                                 sds_reqs.append(r)
@@ -2169,6 +2873,31 @@ def generate_uds_traceability_matrix(
                         disp = uds_all_funcs.get(cand) or uds_all_funcs.get(_sds_comp_key(cand))
                         if disp and disp not in uds_funcs:
                             uds_funcs.append(disp)
+                    # 원시 SDS 이름 대조(라운드113) — 요구ID 브리지가 아니라 '이름이 SDS에
+                    # 있는가'만 본다. 강한 신호부터 티어를 소진하고 첫 히트에서 멈춘다:
+                    #   exact      : 정확 키 일치(기존 sds_reqs 와 동치 — 신규 정보 없음)
+                    #   ret_prefix : 반환형 접두사만 다름(u16s_X ↔ s_X). SDS 실측 충돌률 0.5%
+                    #   core       : 저장클래스까지 다름(s_X ↔ g_X). 가장 약한 신호 — 별개 함수일
+                    #                수 있으므로 티어를 항상 함께 노출해 '힌트'로만 쓰게 한다
+                    _sds_hits: List[str] = []
+                    _sds_match = ""
+                    for _tier in ("exact", "ret_prefix", "core"):
+                        for cand in _sds_cands:
+                            _k = _sds_comp_key(cand)
+                            if not _k:
+                                continue
+                            if _tier == "exact":
+                                _raws = [_k] if _k in _all_sds_keys else []
+                            elif _tier == "ret_prefix":
+                                _raws = _sds_name_index.get(_strip_ret_type_prefix(_k), [])
+                            else:
+                                _raws = _sds_core_index.get(_LAYER_CORE_PREFIX_RE.sub("", _k), [])
+                            for _raw in _raws:
+                                if _raw not in _sds_hits:
+                                    _sds_hits.append(_raw)
+                        if _sds_hits:
+                            _sds_match = _tier
+                            break
                     _unmapped_idx[sub_lower] = len(unmapped_vcast)
                     unmapped_vcast.append({
                         "subprogram": subprogram,
@@ -2179,6 +2908,18 @@ def generate_uds_traceability_matrix(
                         "category": category,
                         # SDS 설계에 명세된 SRS 요구사항(매트릭스 밖 포함) — 비면 'SDS 미명세'.
                         "sds_reqs": sds_reqs,
+                        # ── 라운드113: 원시 SDS **이름** 대조(요구ID 브리지와 독립) ──
+                        # sds_reqs 가 비었는데 여기 값이 있으면 = 'SDS는 이 함수를 명세하는데 요구ID
+                        # 연결만 끊김'(표기 규약 드리프트) → 설계 공백이 아니라 브리지·명명 결함이다.
+                        # ⚠ 한계: 이름 출처가 sds_lookup(=component_ids)이라 파서가 Related ID 없는
+                        #   SDS 엔트리를 버린다(backend/routers/jenkins.py:4596-4598). 따라서
+                        #   '히트=SDS에 있다'는 참이지만 '미히트=SDS에 없다'는 결론지을 수 없다(불완전 집합).
+                        # ⚠ 표시 캡(8). 총량을 함께 실어 절단을 표면화한다 — 캡만 두고 총량을
+                        #   숨기면 UI·CSV가 '전부'라고 오독한다(열 상한 침묵 손실과 같은 결함 클래스).
+                        "sds_name_hits": _sds_hits[:8],
+                        "sds_name_hits_total": len(_sds_hits),
+                        "sds_name_match": _sds_match,          # "" | "exact" | "ret_prefix" | "core"
+                        "sds_name_ambiguous": len(_sds_hits) > 1,
                         # UDS 단위설계 인벤토리에 존재하는 정규 함수명(비면 '단위설계 미명세' = 진짜 갭).
                         "uds_funcs": uds_funcs,
                         "in_uds": bool(uds_funcs),
@@ -2196,7 +2937,15 @@ def generate_uds_traceability_matrix(
                         # BSW_DRIVER/BOOT_REPROG/LIB_UTIL/TEST_ARTIFACT. 보고 hint이며 안전성은
                         # 직교(safety 플래그). 입력은 해석된 실제 함수명(_uds_cands) — SwUFn ID
                         # 자기-메아리를 피하고 도메인 토큰이 실린 진짜 이름으로 분류한다.
-                        "layer": _classify_unmapped_layer(_uds_cands),
+                        # §H: subprogram이 SwUFn ID인데 함수명 해석(resolved)이 없으면 UDS 대조
+                        # 입력(_uds_cands)이 비어 _classify가 APP_LEAF로 기본화되고, 진짜 설계갭
+                        # (unmapped_app_design_gap = APP_LEAF ∩ not in_uds)을 부풀린다. 실제로는
+                        # '분류 불가'(SwUFn↔함수명 미해결)이므로 UNRESOLVED 버킷으로 빼 오염을 막는다.
+                        "layer": (
+                            "UNRESOLVED"
+                            if (_SWUFN_RE.search(subprogram) and not resolved)
+                            else _classify_unmapped_layer(_uds_cands)
+                        ),
                     })
                 else:
                     # worst-case 집계: 동일 subprogram의 후속 행이 FAIL이면 기존 항목 result를
@@ -2205,6 +2954,13 @@ def generate_uds_traceability_matrix(
                     _existing = unmapped_vcast[_unmapped_idx[sub_lower]]
                     if _RESULT_FAIL_RE.match(res_str) and not _RESULT_FAIL_RE.match(str(_existing["result"])):
                         _existing["result"] = res_str
+
+    # §G: 같은 subprogram이 다른 행에서 bridge로 traced됐으면 미추적 목록에서 제거한다(never-
+    # revoke 이중집계 해소). 행 순서 무관하게 loop 후 일괄 필터 — traced 행이 unmapped 행보다
+    # 먼저 와도 정확. _unmapped_idx는 이후 미사용이라 인덱스 무효화 무해.
+    if _traced_subs:
+        unmapped_vcast = [u for u in unmapped_vcast
+                          if str(u["subprogram"]).lower() not in _traced_subs]
 
     # 의미 버킷 우선순위로 정렬 — 잘림/상단 노출 시 신호(suts_tested)가 먼저 보이도록.
     _UNMAPPED_ORDER = {"suts_tested": 0, "isr": 1, "vcast_only": 2}
@@ -2215,6 +2971,7 @@ def generate_uds_traceability_matrix(
     matrix: List[Dict[str, Any]] = []
     mapped_source_count = 0
     mapped_sds_count = 0
+    mapped_hsis_count = 0
     mapped_test_count = 0
     total_pass = 0
     total_fail = 0
@@ -2224,19 +2981,48 @@ def generate_uds_traceability_matrix(
     for rid in req_ids:
         tests = vcast_map.get(rid, [])
         test_ids = [t.get("testcase") for t in tests if t.get("testcase")]
-        src_list = list(map_lookup.get(rid, []))
+        src_direct = list(map_lookup.get(rid, []))  # 진짜 UDS RelatedID(직접 추적, confidence=direct)
+        src_list = list(src_direct)
         # SDS 함수명 bridge: 이 SRS 요구사항에 SDS가 귀속한 함수 중 UDS에 존재하는 것을
         # UDS 추적(source_ids)으로 채운다 (UDS가 SwSTR로 추적해 직접 안 붙던 문제 해소).
         # 조회 키는 _sds_comp_key로 정규화 — SDS 키 공간과 일치(라운드112 W1: 다른 4개 bridge
         # 조회 사이트와 동일하게, 선행 '_'('_entrypoint') 등 정규화 차이로 끊기는 것 방지).
+        # 여기서 append되는 항목은 SDS 경유 '추정'이라 link_table에서 indirect로 라벨(정직화).
         for flower, fdisp in uds_all_funcs.items():
             if rid in sds_func_to_reqs.get(_sds_comp_key(flower), []) and fdisp not in src_list:
                 src_list.append(fdisp)
-        sds_list = sds_lookup.get(rid, [])
+        # 설계-ID bridge(2b) 주입: name-bridge가 놓친 요구사항의 UDS 함수를 SwFn/SwSTR/
+        # SwST/SwTK 경유로 부착. SDS 경유 '추정'이라 src_direct(직접)엔 안 넣는다 →
+        # source_ids_direct 비어 유지 → link_table에서 indirect 라벨(over-trace 안전판).
+        for _bf in design_bridge_funcs.get(rid, []):
+            if _bf not in src_list:
+                src_list.append(_bf)
+        sds_list = sds_lookup.get(rid, [])              # 전체(함수 포함) — ASIL 롤업·내부용
+        sds_comp_list = sds_comp_lookup.get(rid, [])    # 실 설계 컴포넌트만 — 표시/집계(추적 정화)
+        _scomp_set = set(sds_comp_list)
+        _folded_set = set(sds_folded_lookup.get(rid, []))   # canonical 로 접힌 원 키
+        # 설계 요소(설계ID·상태명·미확인 표행·heading)는 함수가 아니다 — 함께 빼지 않으면
+        # 차집합이 "컴포넌트 아닌 것 = 함수" 로 접어 UI 가 목차 줄을 '멤버 함수'로 표시한다.
+        _elem_set = set(sds_element_lookup.get(rid, []))
+        sds_elem_list = [c for c in sds_list if c in _elem_set and c not in _scomp_set]
+        sds_func_list = [c for c in sds_list
+                         if c not in _scomp_set and c not in _folded_set
+                         and c not in _elem_set]            # 인터페이스 함수만
+        hsis_list = hsis_lookup.get(rid, [])            # HSIS 인터페이스 신호(시스템 레벨 design-arm)
+        # ASIL 결합(P5) — 요구사항 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 최고 ASIL.
+        # 컴포넌트/함수명(lower)으로 comp_asil_map 조회. 맵 없거나 매칭 0이면 ''(graceful).
+        # ASIL 키는 전체(sds_list) 사용 — 함수가 부모 ASIL 상속이라 max 불변(분리 전과 동일).
+        row_asil = ""
+        if comp_asil_map:
+            _asil_keys = [str(c).strip().lower() for c in sds_list]
+            _asil_keys += [str(s).strip().lower() for s in src_list]
+            row_asil = _asil_max_of([comp_asil_map[k] for k in _asil_keys if k in comp_asil_map])
         if src_list:
             mapped_source_count += 1
-        if sds_list:
+        if sds_comp_list:
             mapped_sds_count += 1
+        if hsis_list:
+            mapped_hsis_count += 1
         if test_ids:
             mapped_test_count += 1
 
@@ -2256,6 +3042,10 @@ def generate_uds_traceability_matrix(
         sts_tests = [t for t in tests if t.get("source") == "STS"]
         suts_tests = [t for t in tests if t.get("source") == "SUTS"]
         sits_tests = [t for t in tests if t.get("source") == "SITS"]
+        # 시스템 레벨 시험(SyTS/SyITS) — 시스템 레벨 검증 증거. 결정1 재정의로 SW covered에는 미포함
+        # (참고·V-model 시스템 쌍·밴드 카운트로만 노출). 아래 syts_tests/syits_tests 필드로 분리 보존.
+        syts_tests = [t for t in tests if t.get("source") == "SyTS"]
+        syits_tests = [t for t in tests if t.get("source") == "SyITS"]
         # VectorCAST 실행추적(fuzzy, indirect) — V-model 통계에 별도 노출(reviewer INFO:
         # vcast 기여가 *_indirect 카운트에 안 잡혀 audit 불가하던 문제 해소).
         vcast_tests_row = [t for t in tests if t.get("source") == "VectorCAST"]
@@ -2287,10 +3077,25 @@ def generate_uds_traceability_matrix(
                 "requirement_id": norm_to_raw.get(rid, rid),
                 # 요구사항 표시명(제목) — 프론트 표/트리에서 ID 옆에 노출(라운드110).
                 "requirement_name": name_map.get(rid, ""),
-                # T1: SRS→SDS (아키텍처 추적)
-                "sds_components": sds_list,
+                # ASIL(P5) — 연결 설계요소 최고 등급(QM<A<B<C<D). 데이터 없으면 ''(graceful).
+                "asil": row_asil,
+                # T1: SRS→SDS (아키텍처 추적) — 실 설계 컴포넌트만(인터페이스 함수 fan-out 제외, 추적 정화)
+                "sds_components": sds_comp_list,
+                # 인터페이스 함수(투명성·드릴다운). SDS 밴드 집계엔 미포함, SUTS/VCAST 브리지엔 사용됨.
+                # **함수만** — 설계ID·상태명·표행·heading 은 아래 sds_design_elements 로 분리한다.
+                "sds_functions": sds_func_list,
+                # 설계 요소 — SwFn_/SwST_ 설계ID, 상태명(`standby`), 미확인 표행, heading 잔재.
+                # 밴드(컴포넌트)도 함수도 아니지만 **설계 근거로는 유효**하므로 has_design 에 포함한다
+                # (3-site lockstep: jenkins `has_design`, local `_derive`, 프론트 DESIGN_FIELDS).
+                "sds_design_elements": sds_elem_list,
+                # 인터페이스 밴드(시스템 레벨 design-arm) — HSIS 신호(HSI_xx/SW변수). SwEI 등 인터페이스 요구의 realization.
+                "hsis_signals": hsis_list,
+                # 상위 추적 — 이 요구가 유도된 상위 시스템 요구(SyRS: SyTR/SyTSR/SyEI…). SR→SyRS→SwRS 체인.
+                "syrs_parents": syrs_map.get(rid, []),
                 # T2: SDS→UDS (상세 설계 추적)
                 "source_ids": src_list,
+                # 직접 UDS RelatedID만(나머지 source_ids는 SDS 브리지 추정) — link_table confidence 정직화용
+                "source_ids_direct": src_direct,
                 # T3: SRS→STS (SW 테스트 추적)
                 "sts_tests": sts_tests,
                 "sts_count": len(sts_tests),
@@ -2305,6 +3110,11 @@ def generate_uds_traceability_matrix(
                 "sits_count": len(sits_tests),
                 "sits_direct": len(sits_direct),
                 "sits_indirect": len(sits_indirect),
+                # 시스템 레벨 시험(SyTS/SyITS) — 시스템 레벨 검증 증거(결정1: SW covered 미포함, 참고 보존)
+                "syts_tests": syts_tests,
+                "syts_count": len(syts_tests),
+                "syits_tests": syits_tests,
+                "syits_count": len(syits_tests),
                 # VectorCAST 실행추적 (전부 indirect/fuzzy)
                 "vcast_count": len(vcast_tests_row),
                 # 기존 호환
@@ -2316,13 +3126,65 @@ def generate_uds_traceability_matrix(
                 "confidence": row_confidence,
             }
         )
+    # ── ID 정합성 감사(trace_integrity, additive) ──
+    # hiMA exact-match가 silent하게 오인하는 클래스(정규화 충돌·SRS에 없는 대상 참조·
+    # placeholder)를 명시 finding으로 표면화. 본 매트릭스 로직/기존 키 불변, 새 'integrity'만 가산.
+    _ref: Dict[str, Dict[str, str]] = {"UDS": {}, "SDS": {}}
+    _rel: Dict[str, List[str]] = {"UDS": [], "SDS": []}
+    for _mp in mapping_pairs:
+        if not isinstance(_mp, dict):
+            continue
+        _raw = str(_mp.get("requirement_id") or "").strip()
+        if _raw:
+            _ref["UDS"].setdefault(_normalize_req_id(_raw), _raw)
+        _srcs = _mp.get("source_ids") or []
+        if isinstance(_srcs, str):
+            _srcs = [s.strip() for s in _srcs.split(",") if s.strip()]
+        for _s in (_srcs or []):
+            _ss = str(_s).strip()
+            if _ss:
+                _rel["UDS"].append(_ss)
+    for _sp in (sds_pairs or []):
+        if not isinstance(_sp, dict):
+            continue
+        _raw = str(_sp.get("requirement_id") or "").strip()
+        if _raw:
+            _ref["SDS"].setdefault(_normalize_req_id(_raw), _raw)
+        _comps = _sp.get("component_ids") or []
+        if isinstance(_comps, str):
+            _comps = [c.strip() for c in _comps.split(",") if c.strip()]
+        for _c in (_comps or []):
+            _cc = str(_c).strip()
+            if _cc:
+                _rel["SDS"].append(_cc)
+    _total_sds_comps, _coarse_count = annotate_sds_coarse(matrix)
+
+    try:
+        integrity = build_integrity_audit(req_ids, norm_to_raws, _ref, _rel)
+    except Exception as _intg_exc:  # best-effort: 감사 실패가 매트릭스 생성을 막지 않도록
+        logger.debug("Integrity audit skipped: %s", _intg_exc)
+        # 폴백 stats shape를 build_integrity_audit 정상경로와 정확히 일치시킨다
+        # (suspect/foreign 키 포함) — 소비자의 '?? default'/destructure 함정 방지.
+        integrity = {
+            "id_collisions": [], "dangling_refs": {}, "dangling_by_namespace": {},
+            "dangling_layer_summary": {},
+            "placeholder_ids": {},
+            "stats": {"collision_count": 0, "collision_affected_raw": 0,
+                      "dangling_count": 0, "dangling_suspect_count": 0,
+                      "dangling_foreign_count": 0, "placeholder_count": 0, "clean": True},
+        }
     return {
         "total_requirements": len(req_ids),
         "rows": matrix,
         "summary": {
             "requirement_count": len(req_ids),
             "mapped_sds_count": mapped_sds_count,
+            # 추적 정화: 실 설계 컴포넌트 총수(함수 fan-out 제외) + 거친입도(>40% 연결) 요구사항 수
+            "total_sds_components": _total_sds_comps,
+            "sds_coarse_count": _coarse_count,
             "mapped_source_count": mapped_source_count,
+            # 시스템 레벨 인터페이스(HSIS) 연결된 요구사항 수
+            "mapped_hsis_count": mapped_hsis_count,
             "mapped_test_count": mapped_test_count,
             "total_tests": total_tests,
             "total_pass": total_pass,
@@ -2332,6 +3194,11 @@ def generate_uds_traceability_matrix(
             "mapped_sts_count": sum(1 for r in matrix if r.get("sts_count")),
             "mapped_suts_count": sum(1 for r in matrix if r.get("suts_count")),
             "mapped_sits_count": sum(1 for r in matrix if r.get("sits_count")),
+            # 시스템 레벨 상위(SyRS) 연결 요구사항 수 — 상위 추적 provenance(다운스트림 커버리지 분모 제외, _UPSTREAM_BANDS)
+            "mapped_syrs_count": sum(1 for r in matrix if r.get("syrs_parents")),
+            # 시스템 레벨 시험(SyTS/SyITS) 연결 요구사항 수
+            "mapped_syts_count": sum(1 for r in matrix if r.get("syts_count")),
+            "mapped_syits_count": sum(1 for r in matrix if r.get("syits_count")),
             "mapped_sts_direct": sum(1 for r in matrix if r.get("sts_direct")),
             "mapped_suts_direct": sum(1 for r in matrix if r.get("suts_direct")),
             "mapped_suts_indirect": sum(1 for r in matrix if r.get("suts_indirect")),
@@ -2350,27 +3217,93 @@ def generate_uds_traceability_matrix(
             # 버킷과 무관하게 안전/진단 토큰을 가진 미추적 함수 수 — 프론트 amber 강조·뱃지용(W4).
             "unmapped_safety": sum(1 for u in unmapped_vcast if u.get("safety")),
             # SRS 미추적이지만 SDS 설계엔 명세된(역방향 부분추적) 함수 수 — 프론트 'SDS:<req>' 뱃지용.
-            # 정규화 fix 후 KJPDS02 실데이터에선 0(설계가 이 함수들을 명세 안 함). 라운드 109.
+            # ⚠ 이 지표는 구조적으로 거의 항상 0 이다(라운드113 정정). sds_reqs 는
+            #   sds_all_func_to_reqs 를, traced 판정은 sds_func_to_reqs 를 조회하는데 두 맵은 같은
+            #   루프·같은 키·같은 소스에서 in_matrix 게이트 하나만 다르게 만들어진다. 따라서 값이
+            #   채워지려면 '그 함수의 SDS 요구가 전부 매트릭스 밖'이라는 극단 조건이 필요하고,
+            #   키 정규화가 어긋나면 두 맵이 **동시에** 미스한다. 0 은 "설계가 이 함수들을 명세
+            #   안 함"을 **의미하지 않는다** — 코드가 보장하는 건 '매트릭스 밖 요구에만 귀속된
+            #   미추적 함수가 0' 뿐이다. 실제 SDS 명세 여부는 아래 unmapped_sds_name_hit 을 볼 것.
+            #   (구 주석 "설계가 이 함수들을 명세 안 함"은 과한 결론이라 정정. 라운드 109→113)
             "unmapped_sds_linked": sum(1 for u in unmapped_vcast if u.get("sds_reqs")),
+            # 미추적 함수 중 **SDS 이름 집합(정규화 키)에 이름이 존재**하는 수(요구ID 연결 무관, 라운드113).
+            # 이름 집합이 Related ID 있는 엔트리만 담으므로 하한선(lower bound)이다 — 미히트를
+            # '미명세'로 읽지 말 것.
+            # ⚠ SDS component_ids 에 SwUFn 같은 **시험 ID**가 섞여 있으면 exact 티어가 그 ID 자기-메아리를
+            #   히트로 센다(함수명 일치가 아님). 단 그 경우 sds_reqs 도 함께 채워지므로 아래 신규 신호
+            #   (variant = 이름은 있고 요구ID는 없음)에는 들어가지 않는다 — 오염은 hit 총계에만 국한.
+            "unmapped_sds_name_hit": sum(1 for u in unmapped_vcast if u.get("sds_name_hits")),
+            # ★신규 신호: 이름은 SDS에 있는데 요구ID 브리지는 끊긴 수 = '설계 공백'이 아니라 '브리지 결함'.
+            #  항등식: unmapped_sds_name_variant == unmapped_sds_name_hit − unmapped_sds_linked
+            #  (sds_reqs 비공백 ⟹ 반드시 name_hit — exact 티어가 같은 키공간을 보므로 단조. 테스트 고정)
+            "unmapped_sds_name_variant": sum(
+                1 for u in unmapped_vcast if u.get("sds_name_hits") and not u.get("sds_reqs")
+            ),
+            # ⚠⚠ 이 수치를 "콜그래프 roll-up 으로 없앨 수 있다"고 읽지 말 것 — **재 셌고, 안 된다.**
+            #
+            # 백로그에 "SRS 미추적 Phase 3 — 콜그래프 roll-up"(leaf 를 지배 조상의 요구로
+            # 승계)이 세 번 올라왔다. 2026-08-19 에 실측으로 종결한다.
+            #
+            #   KJPDS02_PV 콜그래프(함수 1157·엣지 1476) leaf 514건의 도달 루트 분포
+            #     297(57.8%) 호출자 없음 · **163(31.7%) 단일 지배 조상** · 36 2~3 · 18 4+
+            #   → 구조적 전제(단일 조상)는 3분의 1쯤 성립한다. 문제는 그 다음이다:
+            #
+            #   추적된 조상이 **정확히 1개**인 미추적 함수 4건 → **4건 전부 조상이 다중 요구**
+            #   추적 함수 349개의 요구 수 분포: 단일 요구는 33개뿐 · 나머지는 2~17개
+            #
+            # 즉 조상이 하나여도 그 조상이 요구 2~17개를 달고 있어, 승계하면 leaf 하나가
+            # 요구 여러 개에 붙는다. 이건 커밋 `52e4b08`(SDS 컴포넌트 24배 과대표기 정화)이
+            # **정확히 막은 fan-out** 의 반대 방향이다 — 그때는 부모 related 를 인터페이스
+            # 함수에 상속시켜 16 SwCom 이 382 로 부풀었다. 방향만 뒤집힌 같은 결함이다.
+            #
+            # 게다가 고칠 대상이 없다: 실측(build_125) `unmapped_app_design_gap` = **0**,
+            # `covered` = **68/68**. 바뀌는 건 화면의 미추적 숫자(627→~3)뿐이고, 대가는
+            # 감사 문서에 근거 없는 링크가 늘어나는 것이다.
+            #
+            # 가드: `tests/unit/test_srs_untraced_no_ancestor_rollup.py`
+            #
             # SRS 미추적이지만 UDS 단위설계엔 존재하는 함수 수 — '시험+단위설계 완료, SDS
             # 아키텍처 roll-up만 누락'(정당한 입도차). KJPDS02 실데이터 661/662.
+            # ⚠ 여기서 'roll-up' 은 **설계 문서 계층**(leaf 가 부모 SwUFn 아래 설계됨) 이야기지
+            #   콜그래프 승계가 아니다. 근거는 `in_uds`(UDS 등재)이지 호출 관계가 아니다.
             # (unmapped_sds_linked와 동일 패턴: 캐시 trace_summary.json·감사·문서화용 집계이며,
             #  프론트 루트 뱃지는 unmapped_vcast list의 in_uds로 직접 재계산해 표시·카운트 동기 보장.)
             "unmapped_uds_linked": sum(1 for u in unmapped_vcast if u.get("in_uds")),
             # UDS에도 없는(단위설계 미명세) 미추적 함수 수 — 진짜 설계 공백(검토 우선순위 ↑).
             "unmapped_design_gap": sum(1 for u in unmapped_vcast if not u.get("in_uds")),
-            # ISO 26262 SwDS 계층별 미추적 함수 수(라운드112) — '애플리케이션 설계 공백
-            # (app_leaf=실 finding)'과 '정당한 범위 경계(bsw_driver/boot_reprog/lib_util)'를
-            # 분리 집계. 프론트 루트는 unmapped_vcast list의 layer로 직접 재계산(카운트 동기).
+            # ★진짜 '실 finding' = layer축(app_leaf)이 아니라 design축(미설계)이다. app_leaf 중 대다수는
+            #  단위설계(UDS)+단위시험(SUTS)까지 된 leaf helper로 부모 SwUFn 아래 roll-up되는 '정당한
+            #  입도차'(unmapped_uds_linked)일 뿐. 진짜 검토 대상 = APP_LEAF ∩ 미설계(UDS에도 없음).
+            #  (실측 KJPDS02_PV: app_leaf 413 중 미설계 ~3 — layer만 보면 ~100배 과대 집계.)
+            "unmapped_app_design_gap": sum(
+                1 for u in unmapped_vcast if u.get("layer") == "APP_LEAF" and not u.get("in_uds")
+            ),
+            # TEST_ARTIFACT 중 ¬uds (design_gap 하위집합) — 프론트 배너 design축 분해 전용(app_design_gap과 동형).
+            # ⚠ 아래 unmapped_layer_test_artifact(전체)와 구분: 그건 6버킷 합==count 불변식용이고, 이건 design_gap
+            #  정확 분해용이다. _classify는 cand[0]만 보고 TEST_ARTIFACT를 판정하나 in_uds는 _uds_cands 전체를
+            #  보므로 TEST_ARTIFACT∩in_uds가 이론상 가능(예: 첫 해석명이 시그니처형이라 non-ident인데 다른 후보가
+            #  UDS 매칭). 그때 전체 카운트를 design_gap에서 빼면 이중차감→음수 클램프로 범위경계 갭을 은닉하므로,
+            #  ¬uds로 필터한 이 필드를 배너 차감(boundaryGap = design_gap − app_gap − unresolved − 이 값)에 쓴다.
+            "unmapped_test_artifact_gap": sum(
+                1 for u in unmapped_vcast if u.get("layer") == "TEST_ARTIFACT" and not u.get("in_uds")
+            ),
+            # ISO 26262 SwDS 계층(라운드112) — '코드 종류' 축(app/BSW/boot/lib/test). ⚠ layer는 갭 판정이
+            # 아니라 분류 힌트다: app_leaf ∩ in_uds = 설계+시험된 leaf roll-up(정당한 입도차),
+            # app_leaf ∩ 미설계 = 진짜 finding(위 unmapped_app_design_gap). BSW/BOOT/LIB = 정당한 범위경계.
             "unmapped_layer_app_leaf": sum(1 for u in unmapped_vcast if u.get("layer") == "APP_LEAF"),
             "unmapped_layer_bsw_driver": sum(1 for u in unmapped_vcast if u.get("layer") == "BSW_DRIVER"),
             "unmapped_layer_boot_reprog": sum(1 for u in unmapped_vcast if u.get("layer") == "BOOT_REPROG"),
             "unmapped_layer_lib_util": sum(1 for u in unmapped_vcast if u.get("layer") == "LIB_UTIL"),
             "unmapped_layer_test_artifact": sum(1 for u in unmapped_vcast if u.get("layer") == "TEST_ARTIFACT"),
+            # §H: 분류 불가(SwUFn↔함수명 미해결) — layer 정합식(6버킷 합 == unmapped_vcast_count)의
+            # 6번째 정식 버킷. app_design_gap(APP_LEAF ∩ 미설계)엔 미포함이라 진짜 갭 과대집계를 막는다.
+            "unmapped_layer_unresolved": sum(1 for u in unmapped_vcast if u.get("layer") == "UNRESOLVED"),
         },
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.
         "unmapped_vcast": unmapped_vcast,
+        # ID 정합성 감사(trace_integrity, additive) — 정규화 충돌·dangling·placeholder finding.
+        "integrity": integrity,
         "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),
         "has_tests": any(r.get("test_count") for r in matrix),

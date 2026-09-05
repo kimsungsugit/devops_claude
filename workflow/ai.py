@@ -13,44 +13,95 @@ AI helpers
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
+import threading
 import time
 import traceback
-import difflib
-import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# [Google Gemini SDK Import]
-try:
-    # New SDK (recommended): pip install google-genai
-    from google import genai as genai_new  # type: ignore
-except Exception:  # pragma: no cover
-    genai_new = None  # type: ignore
+# ── [Google Gemini SDK — **지연 로딩**] ────────────────────────────────────────
+# ⚠ 실측(2026-07-31): 이 두 SDK 를 모듈 레벨에서 즉시 import 하면
+#     google.genai ≈ 36초 + google.generativeai ≈ 10초
+#   이 든다(3회 재현, warm cache). 그 결과 `backend.helpers.uds` import 가 **52초**였고
+#   그 비용을 **백엔드 기동**·**모든 pytest 워커**·`workflow.ai` 를 스치는 모든 스크립트가
+#   LLM 을 한 번도 호출하지 않아도 지불했다.
+#
+#   게다가 `google.generativeai` 는 **수명이 끝난 패키지**다("All support ... has ended").
+#   실제 사용처는 아래 legacy fallback 한 곳뿐인데 항상 로드되고 FutureWarning 을 뿌렸다.
+#
+#   같은 저장소의 `workflow/llm_adapters.py:111` 은 이미 함수 안에서 지연 import 한다 —
+#   여기만 즉시 로드였다.
+#
+# 계약 유지: 외부(`workflow/pipeline.py:2246`)는 `getattr(ai, "genai_new", None)` 로
+# **가용성**을 묻는다. PEP 562 모듈 `__getattr__` 로 그 이름들을 그대로 유지하되,
+# 접근 시점에 로드한다(가용성 판단은 LLM 을 쓰기 직전이므로 그때 내는 비용이 맞다).
+_SDK_NAMES = ("genai_new", "genai_legacy", "HarmCategory", "HarmBlockThreshold")
+_sdk_cache: Dict[str, Any] = {}
+_sdk_errors: Dict[str, str] = {}
+_sdk_lock = threading.Lock()
 
-try:
-    # Legacy SDK (deprecated): pip install google-generativeai
-    import google.generativeai as genai_legacy  # type: ignore
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
-except Exception:  # pragma: no cover
-    genai_legacy = None  # type: ignore
-    HarmCategory = None  # type: ignore
-    HarmBlockThreshold = None  # type: ignore
+
+def _load_gemini_sdks() -> None:
+    """두 SDK 를 한 번만 로드한다. 실패는 **사유를 남긴다**(조용한 None 금지)."""
+    if _sdk_cache:
+        return
+    with _sdk_lock:
+        if _sdk_cache:
+            return
+        loaded: Dict[str, Any] = dict.fromkeys(_SDK_NAMES)
+        try:
+            from google import genai as _genai_new  # type: ignore
+            loaded["genai_new"] = _genai_new
+        except Exception as e:  # pragma: no cover - 환경 의존
+            _sdk_errors["genai_new"] = f"{type(e).__name__}: {e}"
+        try:
+            import google.generativeai as _genai_legacy  # type: ignore
+            from google.generativeai.types import HarmBlockThreshold as _HBT  # type: ignore
+            from google.generativeai.types import HarmCategory as _HC  # type: ignore
+            loaded["genai_legacy"] = _genai_legacy
+            loaded["HarmCategory"] = _HC
+            loaded["HarmBlockThreshold"] = _HBT
+        except Exception as e:  # pragma: no cover - 환경 의존
+            _sdk_errors["genai_legacy"] = f"{type(e).__name__}: {e}"
+        _sdk_cache.update(loaded)
+    if _sdk_errors:
+        import logging
+        logging.getLogger("workflow.ai").info(
+            "Gemini SDK 일부 미가용(폴백 체인에 반영됨): %s", _sdk_errors)
+
+
+def _sdk(name: str) -> Any:
+    """SDK 심볼을 지연 해석한다. 모듈 내부 참조는 **전부 이걸 쓴다**.
+
+    (모듈 `__getattr__` 은 모듈 **밖** 접근에만 불린다 — 내부 전역 조회에는 안 걸린다.)
+    """
+    _load_gemini_sdks()
+    return _sdk_cache.get(name)
+
+
+def __getattr__(name: str) -> Any:   # PEP 562 — 외부의 `ai.genai_new` 접근 호환
+    if name in _SDK_NAMES:
+        return _sdk(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 try:
     import requests  # type: ignore
 except Exception:  # pragma: no cover
     requests = None  # type: ignore
 
-import analysis_tools as tools
-import config
-from utils.log import get_logger
-from . import common, static
-from .common import read_excerpt, create_backup, standardize_result
+import analysis_tools as tools  # noqa: E402
+import config  # noqa: E402
+from utils.log import get_logger  # noqa: E402
+
+from . import static  # noqa: E402
+from .common import create_backup, read_excerpt  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -60,6 +111,8 @@ logger = get_logger(__name__)
 _gemini_cached_content: Dict[str, Any] = {}
 _oai_config_cache_lock = threading.Lock()
 _oai_config_cache: Dict[str, Tuple[int, Optional[Dict[str, Any]]]] = {}
+_oai_configs_cache_lock = threading.Lock()
+_oai_configs_cache: Dict[str, Tuple[int, List[Dict[str, Any]]]] = {}
 
 def create_gemini_cached_context(
     cfg: Dict[str, Any],
@@ -85,9 +138,10 @@ def create_gemini_cached_context(
     if not api_key:
         return None
 
-    if genai_new is not None:
+    _gn = _sdk("genai_new")
+    if _gn is not None:
         try:
-            client = genai_new.Client(api_key=api_key)
+            client = _gn.Client(api_key=api_key)
             from google.genai import types as genai_types
             cached = client.caches.create(
                 model=model,
@@ -209,6 +263,17 @@ def load_oai_configs(path: Optional[str]) -> List[Dict[str, Any]]:
         logger.error("Config file not found: %s", p)
         return _merge_env_provider_candidates([])
 
+    # D13: mtime 캐시 (단수 load_oai_config 와 동일 패턴, 별도 lock)
+    try:
+        mtime_ns = int(p.stat().st_mtime_ns)
+    except OSError:
+        mtime_ns = -1
+    cache_key = str(p.resolve())
+    with _oai_configs_cache_lock:
+        cached = _oai_configs_cache.get(cache_key)
+        if cached and cached[0] == mtime_ns:
+            return [dict(it) for it in cached[1]]  # 호출자 mutation 격리
+
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
 
@@ -222,10 +287,14 @@ def load_oai_configs(path: Optional[str]) -> List[Dict[str, Any]]:
         resolve = getattr(config, "resolve_oai_api_keys", None)
         if resolve:
             items = resolve(items)
-        return _merge_env_provider_candidates(items)
+        result = _merge_env_provider_candidates(items)
     except (json.JSONDecodeError, OSError) as e:
         logger.error("Failed to load OAI configs: %s", e)
         return []
+
+    with _oai_configs_cache_lock:
+        _oai_configs_cache[cache_key] = (mtime_ns, [dict(it) for it in result])
+    return [dict(it) for it in result]
 
 
 def load_oai_config(path: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -339,6 +408,8 @@ def _agent_log(log_dir: Path, role: str, content: str) -> None:
     tools.ensure_dir(log_dir)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     ts_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # path-collision-ok: 에이전트 대화 **로그**다 — 사용자에게 내려가는 산출물이 아니고,
+    #   같은 초의 두 항목은 append 로 이어 붙는 게 오히려 맞다.
     fname = log_dir / f"agent_{ts}.md"
 
     if role in ("error", "retry", "warning"):
@@ -355,6 +426,243 @@ def _agent_log(log_dir: Path, role: str, content: str) -> None:
 # ---------------------------------------------------------------------------
 # LLM 호출 (Gemini 통합 + 예외 처리 강화)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 응답 완결성 — 잘린 응답을 완결된 응답과 구분한다
+# ---------------------------------------------------------------------------
+#
+# 회귀 대상(2026-07-29): `finish_reason` 이 저장소 전체에 **0건**이었다. 즉 토큰 상한
+# 절단(MAX_TOKENS)·안전필터 차단(SAFETY)·인용 차단(RECITATION)이 정상 완료(STOP)와
+# 구분되지 않았다. 실측 재현:
+#
+#     시나리오          finish_reason   추출 결과                      절단 신호
+#     완전한 응답        STOP           함수는 ... CRC 를 계산한다.      없음
+#     토큰 상한에 잘림    MAX_TOKENS     함수는 ... CRC 를              없음
+#     안전필터 차단      SAFETY         함수는                        없음
+#
+# 호출자는 넷을 전혀 구분할 수 없었고, **잘린 초안이 완결된 산출물로 문서에 들어갔다.**
+#
+# 정상 종료로 인정하는 값. provider/SDK 마다 enum·문자열·정수가 섞여 오므로
+# 마지막 dotted segment 만 취해 대문자로 정규화한다.
+_OK_FINISH_REASONS = frozenset({"STOP", "FINISH_REASON_STOP", "END_TURN", "COMPLETE", "1"})
+
+
+def _norm_finish_reason(v: Any) -> str:
+    """`FinishReason.MAX_TOKENS` / `"MAX_TOKENS"` / `2` 를 하나로 정규화."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s.upper()
+
+
+def _extract_finish_reason(resp: Any) -> str:
+    """Gemini 응답에서 finish_reason 을 뽑는다. 못 뽑으면 빈 문자열(=판정 보류)."""
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        for c in candidates:
+            fr = getattr(c, "finish_reason", None)
+            if fr is None and isinstance(c, dict):
+                fr = c.get("finish_reason") or c.get("finishReason")
+            norm = _norm_finish_reason(fr)
+            if norm:
+                return norm
+    except Exception as exc:  # noqa: BLE001 - SDK shape 는 버전마다 다르다
+        _logger_finish_debug(exc)
+    return ""
+
+
+def _logger_finish_debug(exc: Exception) -> None:
+    logger.debug("finish_reason 추출 실패(응답 shape 불일치) — 절단 판정 보류: %s", exc)
+
+
+def note_finish_reason_value(
+    meta_out: Optional[Dict[str, Any]],
+    raw: Any,
+    log_dir: Optional[Path] = None,
+) -> None:
+    """이미 뽑아낸 finish_reason 값으로 완결성을 기록한다 — **판정 단일 출처**.
+
+    공급자마다 필드 위치가 다르다(Gemini `candidates[].finish_reason`, OpenAI
+    `choices[0].finish_reason`, Anthropic `stop_reason`). shape 추출은 호출자가 하고
+    "이게 절단인가" 판정만 여기서 한다 — 세 어댑터와 `llm_call` 이 같은 함수를 쓴다.
+    (판정 복제는 이 저장소가 반복해 겪은 실패 모드다.)
+    """
+    fr = _norm_finish_reason(raw)
+    truncated = bool(fr) and fr not in _OK_FINISH_REASONS
+    if meta_out is not None:
+        meta_out["finish_reason"] = fr
+        meta_out["finish_reason_available"] = bool(fr)
+        meta_out["truncated"] = truncated
+    if truncated:
+        logger.warning("LLM 응답이 비정상 종료됐다(finish_reason=%s) — 잘린 초안일 수 있다", fr)
+        if log_dir:
+            _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
+
+
+def _note_finish_reason(meta_out: Optional[Dict[str, Any]], resp: Any,
+                        log_dir: Optional[Path]) -> None:
+    """finish_reason 을 meta 에 싣고, 비정상이면 경고를 남긴다.
+
+    ⚠ 빈 문자열(못 뽑음)은 **절단으로 치지 않는다** — SDK shape 를 모른다고 정상 응답을
+    버리면 그게 더 나쁘다. 대신 `finish_reason_available=False` 로 남겨 "확인 못 함" 과
+    "확인했고 정상" 을 구분한다.
+    """
+    # 판정은 `note_finish_reason_value` 단일 출처 — 여기선 Gemini shape 추출만 한다.
+    note_finish_reason_value(meta_out, _extract_finish_reason(resp), log_dir)
+
+
+def _extract_response_model(resp: Any) -> str:
+    """응답 객체가 **실제로 답한 모델**을 밝히면 그 값을 뽑는다. 없으면 빈 문자열."""
+    for attr in ("model_version", "model"):
+        try:
+            v = getattr(resp, attr, None)
+        except Exception:  # silent-ok: SDK 프로퍼티가 던지면 다음 후보로 넘어가면 된다.
+            # 결과가 "" 여도 `_models_compatible` 가 **불일치로 단정하지 않으므로**
+            # 삼켜도 거짓 판정이 안 난다(모르는 것은 모른다고 남는다).
+            v = None
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    if isinstance(resp, dict):
+        for key in ("model_version", "model"):
+            v = resp.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _models_compatible(requested: str, reported: str) -> bool:
+    """provider 가 버전 접미사를 붙여 돌려주는 경우까지 같은 모델로 본다.
+
+    예: 요청 `gemini-2.5-flash` → 응답 `gemini-2.5-flash-001`. 정확일치를 요구하면
+    정상 응답이 전부 불일치로 잡혀 경고가 무의미해진다.
+    """
+    a = str(requested or "").strip().lower()
+    b = str(reported or "").strip().lower()
+    if not a or not b:
+        return True          # 한쪽을 모르면 불일치라고 단정하지 않는다
+    return a.startswith(b) or b.startswith(a)
+
+
+def _note_effective_model(
+    meta_out: Optional[Dict[str, Any]],
+    answered_by: str,
+    resp: Any,
+    log_dir: Optional[Path],
+) -> None:
+    """**실제로 답한 모델**을 meta 에 확정하고, provider echo 와 어긋나면 경고한다.
+
+    회귀 대상(2026-07-29): `meta_out["model"]` 은 호출 **전** cfg 값으로 한 번만 찍혔다.
+    400 폴백이 성공하면 `model_fallback` 이라는 **다른 키**에만 기록돼, `meta.get("model")`
+    을 읽는 소비처(`gui_utils` 의 `ai_model` 2곳)는 **실패한 모델**을 답한 모델로 기록했다.
+    그리고 `model_fallback` 은 저장소 어디서도 읽히지 않았다.
+
+    `.env` 가 특정 모델을 하드락하는 운영 방식이라 "어느 모델이 이 문장을 썼는가" 는
+    산출물 근거의 일부다 — 틀린 값을 남기면 안 된다.
+    """
+    if meta_out is None:
+        return
+    meta_out["model"] = str(answered_by)          # 기존 키 = **답한** 모델(하위호환 유지)
+    reported = _extract_response_model(resp)
+    meta_out["model_reported"] = reported
+    if reported and not _models_compatible(answered_by, reported):
+        meta_out["model_mismatch"] = True
+        logger.warning(
+            "요청 모델(%s)과 응답이 밝힌 모델(%s)이 다르다 — 산출물의 모델 근거가 어긋난다",
+            answered_by, reported,
+        )
+        if log_dir:
+            _agent_log(log_dir, "warning",
+                       f"모델 불일치: 요청={answered_by} / 응답={reported}")
+    else:
+        meta_out["model_mismatch"] = False
+
+
+# ---------------------------------------------------------------------------
+# 나가는 프롬프트에서 **실제 설정된 시크릿**만 가린다
+# ---------------------------------------------------------------------------
+#
+# 예전엔 `workflow/ai_validator.py` 에 시크릿 탐지(`_check_safety`)가 있었지만 그 모듈은
+# **프로덕션 호출자 0건**이라 한 번도 발화한 적이 없었고, 2026-08-04 에 삭제했다(§6 후보 10).
+# 어차피 그 검사는 대체재가 못 됐다:
+#   ① 프롬프트가 아니라 **응답**을 보고
+#   ② 경고만 낼 뿐 가리지 않는다
+#   (③ 예전 주석은 "정규식 오탐이 심해 거의 매 호출 경고" 라고도 적었는데 **실측으로
+#      반증됐다** — 실제 C 소스 48파일 중 2건(4.2%), AI 작성 한국어 산문 192단락 중 0건.
+#      기각 사유는 오탐이 아니라 ①②였다. 틀린 근거를 남기면 다음 판단이 오염된다.)
+#
+# 여기서는 **정규식 추측을 안 쓴다.** env 에 실제로 설정된 값과 문자열 대조만 한다 —
+# 진짜 API 키가 프롬프트에 들어간 경우에만 걸리므로 오탐이 원리적으로 없다.
+_SECRET_ENV_NAMES: Tuple[str, ...] = (
+    "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "OAI_API_KEY", "DEVOPS_SCM_PASSWORD", "DEVOPS_JENKINS_API_TOKEN",
+    "JENKINS_TOKEN", "JENKINS_API_TOKEN",
+)
+# 짧은 값은 본문에 우연히 등장할 수 있다(예: 6자리 토큰). 우연 일치로 멀쩡한 프롬프트를
+# 훼손하지 않도록 하한을 둔다.
+_MIN_SECRET_LEN = 12
+
+
+def _known_secret_values() -> List[Tuple[str, str]]:
+    """(env 이름, 값) — 설정돼 있고 충분히 긴 것만."""
+    out: List[Tuple[str, str]] = []
+    for name in _SECRET_ENV_NAMES:
+        v = (os.environ.get(name) or "").strip()
+        if len(v) >= _MIN_SECRET_LEN:
+            out.append((name, v))
+    return out
+
+
+def redact_known_secrets(text: str) -> Tuple[str, List[str]]:
+    """프롬프트에 실제 시크릿 값이 그대로 있으면 가린다. (가린 텍스트, 걸린 env 이름들)"""
+    if not text:
+        return text, []
+    hit: List[str] = []
+    out = text
+    for name, value in _known_secret_values():
+        if value in out:
+            out = out.replace(value, f"[REDACTED:{name}]")
+            hit.append(name)
+    return out, hit
+
+
+def sanitize_messages(messages: Any) -> Any:
+    """메시지 목록의 content 에서 실제 시크릿을 가린다(원본 불변, 사본 반환).
+
+    걸리면 **경고**한다 — 시크릿이 프롬프트에 들어갔다는 건 그 자체로 사고 신호다
+    (어느 코드 경로가 넣었는지 추적해야 한다). 값은 절대 로그에 남기지 않는다.
+    """
+    if not isinstance(messages, list):
+        return messages
+    if not _known_secret_values():
+        return messages          # 설정된 시크릿이 없으면 완전 no-op
+    out = []
+    hits: List[str] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            red, names = redact_known_secrets(c)
+            if names:
+                hits.extend(names)
+                m = {**m, "content": red}
+        out.append(m)
+    if hits:
+        logger.warning(
+            "나가는 프롬프트에서 시크릿을 발견해 가렸다: %s — 어느 경로가 넣었는지 확인 필요",
+            ", ".join(sorted(set(hits))),
+        )
+    return out
+
+
+# `workflow/llm_adapters.py`(별도 provider 스택)가 같은 판정을 쓰도록 공개한다.
+# ⚠ 어댑터는 `ai.llm_call` 을 안 거치는 **독립 egress** 라, 여기 검사가 어댑터에 없으면
+#   같은 결함(잘린 응답을 완결본으로 취급, 모델 근거 부재)이 그 경로에만 남는다.
+note_effective_model = _note_effective_model
 
 
 def _extract_gemini_text(resp: Any) -> Optional[str]:
@@ -447,6 +755,149 @@ def _extract_gemini_text(resp: Any) -> Optional[str]:
 
     return None
 
+
+# ── 입력 예산·절단 (egress 공용 단일 출처) ──────────────────────────────────
+#
+# ⚠ 아래 4개는 예전엔 `llm_call` **안쪽 중첩 함수**였다. 그래서 `workflow/llm_adapters.py`
+#   스택(`assistant_service._call_anthropic`, `scripts/generate_periodic_reports.py`)은
+#   같은 절단을 **구조적으로 쓸 수 없었다** — 설정에 입력 예산이 있어도 그쪽 egress 는
+#   통째로 무시하고 원문을 그대로 보낸다. 결과는 "같은 챗 질문이 공급자에 따라 한쪽은
+#   잘려서 답이 나오고 한쪽은 상한 초과로 실패" 다.
+#
+#   판정·구현 복제는 이 저장소가 반복해 겪은 실패 모드라(`_ratchet_core`·`provenance`·
+#   `gate_report` 와 같은 처방) 구현을 모듈 레벨로 올려 단일 출처로 만든다.
+#   **상한 값을 정하는 건 정책이지만, egress 마다 구현이 갈리는 건 결함이다.**
+
+def resolve_token_margin(model: Any, policy: Optional[Dict[str, Any]] = None) -> float:
+    """토큰 추정 여유율. gemini 는 tiktoken 추정이 더 어긋나 별도 기본값을 쓴다."""
+    margin = float((policy or {}).get("token_estimate_margin") or 0.0)
+    if margin > 0:
+        return margin
+    if "gemini" in str(model).lower():
+        return float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_GEMINI", 1.25))
+    return float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_DEFAULT", 1.1))
+
+
+def estimate_tokens(text: str, *, margin: float = 1.0) -> int:
+    if not text:
+        return 0
+    try:
+        import tiktoken  # type: ignore
+        enc = tiktoken.get_encoding("cl100k_base")
+        base = int(len(enc.encode(text)))
+    except Exception:  # silent-ok: tiktoken 부재/인코딩 실패는 문자수 근사로 대체한다.
+        # 추정치일 뿐이고, 근사로 떨어져도 절단 사실은 그대로 보고된다(판정을 바꾸지 않음).
+        base = max(1, int(len(text) / 4))
+    return max(1, int(base * margin))
+
+
+def _truncate_middle(text: str, keep_head: int, keep_tail: int) -> str:
+    if len(text) <= (keep_head + keep_tail + 20):
+        return text
+    return text[:keep_head] + "\n...[truncated]...\n" + text[-keep_tail:]
+
+
+def _summarize_text(text: str, *, keep_head: int = 1200, keep_tail: int = 800) -> str:
+    if not text:
+        return text
+    lines = text.splitlines()
+    if len(text) <= (keep_head + keep_tail + 200):
+        return text
+    keywords = ("error", "fail", "failed", "exception", "traceback", "warning", "assert", "timeout")
+    key_lines = [ln for ln in lines if any(k in ln.lower() for k in keywords)]
+    key_block = "\n".join(key_lines[:80])
+    head = text[:keep_head]
+    tail = text[-keep_tail:]
+    summary = "\n".join(
+        [
+            head,
+            "\n...[summary]...\n",
+            key_block,
+            "\n...[tail]...\n",
+            tail,
+        ]
+    )
+    return summary
+
+
+def trim_messages_to_token_budget(
+    msgs: List[Dict[str, str]],
+    max_tokens: int,
+    *,
+    margin: float = 1.0,
+    warn_input_tokens: Optional[int] = None,
+    on_warn: Optional[Any] = None,
+) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    """예산 초과분을 요약·중간절단으로 줄이고 **(메시지, 절단정보)** 를 함께 돌려준다.
+
+    절단정보를 반환값에 넣는 건 의도적이다 — 예전엔 절단이 호출자에게 전혀 안 보였고,
+    `input_tokens_est` 는 **절단 뒤** 값이라 "원래 그 크기였다" 와 구분되지 않았다.
+    잘랐다는 사실·원래 크기·예산 아래로 못 내린 경우를 모두 남긴다.
+    """
+    info: Dict[str, Any] = {"applied": False}
+    if max_tokens <= 0:
+        return msgs, info
+    msgs = list(msgs or [])
+
+    def _total_tokens() -> int:
+        return sum(estimate_tokens(m.get("content", ""), margin=margin) for m in msgs)
+
+    total = _total_tokens()
+    if total <= max_tokens:
+        return msgs, info
+
+    info.update({
+        "applied": True,
+        "limit_tokens": int(max_tokens),
+        "before_tokens_est": int(total),
+        "summarized": False,
+        "truncated_messages": 0,
+        "gave_up_over_limit": False,
+    })
+
+    threshold = int(
+        warn_input_tokens
+        if warn_input_tokens is not None
+        else getattr(config, "LLM_WARN_INPUT_TOKENS", 200000)
+    )
+    if total >= threshold and callable(on_warn):
+        on_warn(total, threshold)
+
+    if total >= threshold:
+        info["summarized"] = True
+        for i, m in enumerate(msgs):
+            if m.get("role") == "system":
+                continue
+            content = m.get("content", "")
+            if len(content) > 4000:
+                msgs[i]["content"] = _summarize_text(content)
+        total = _total_tokens()
+
+    for _ in range(20):
+        if total <= max_tokens:
+            break
+        idx = None
+        longest = 0
+        for i, m in enumerate(msgs):
+            if m.get("role") == "system":
+                continue
+            ln = len(m.get("content", ""))
+            if ln > longest:
+                longest = ln
+                idx = i
+        if idx is None:
+            break
+        content = msgs[idx].get("content", "")
+        msgs[idx]["content"] = _truncate_middle(content, keep_head=2000, keep_tail=1200)
+        info["truncated_messages"] = int(info.get("truncated_messages") or 0) + 1
+        total = _total_tokens()
+    # ⚠ 위 루프는 20회로 제한된다. 그 안에 예산 아래로 못 내려오면 **초과분을 그대로
+    #    보낸다** — 그 사실도 남겨야 호출자가 구분할 수 있다.
+    info["after_tokens_est"] = int(total)
+    info["gave_up_over_limit"] = bool(total > max_tokens)
+    return msgs, info
+
+
 def llm_call(
     cfg: Dict[str, Any],
     messages: List[Dict[str, str]],
@@ -510,104 +961,54 @@ def llm_call(
         elif "gemini" in str(model).lower():
             temperature = float(getattr(config, "DEFAULT_LLM_TEMPERATURE_GEMINI", 1.0))
     if meta_out is not None:
+        # 요청 모델. 실제로 답한 모델은 호출 뒤 `_note_effective_model` 이 `model` 키를
+        # 덮어쓴다(400 폴백이 뜨면 답한 모델이 달라진다).
+        meta_out["model_requested"] = model
         meta_out["model"] = model
         if model_override:
             meta_out["model_override"] = model_override
         meta_out["temperature"] = temperature
         meta_out["max_tokens"] = num_predict
 
-    token_margin = float(policy.get("token_estimate_margin") or 0.0)
-    if token_margin <= 0:
-        if "gemini" in str(model).lower():
-            token_margin = float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_GEMINI", 1.25))
-        else:
-            token_margin = float(getattr(config, "LLM_TOKEN_ESTIMATE_MARGIN_DEFAULT", 1.1))
+    token_margin = resolve_token_margin(model, policy)
 
     def _estimate_tokens(text: str) -> int:
-        if not text:
-            return 0
-        try:
-            import tiktoken  # type: ignore
-            enc = tiktoken.get_encoding("cl100k_base")
-            base = int(len(enc.encode(text)))
-        except Exception:
-            base = max(1, int(len(text) / 4))
-        return max(1, int(base * token_margin))
+        return estimate_tokens(text, margin=token_margin)
 
-    def _truncate_middle(text: str, keep_head: int, keep_tail: int) -> str:
-        if len(text) <= (keep_head + keep_tail + 20):
-            return text
-        return text[:keep_head] + "\n...[truncated]...\n" + text[-keep_tail:]
-
-    def _summarize_text(text: str, *, keep_head: int = 1200, keep_tail: int = 800) -> str:
-        if not text:
-            return text
-        lines = text.splitlines()
-        if len(text) <= (keep_head + keep_tail + 200):
-            return text
-        keywords = ("error", "fail", "failed", "exception", "traceback", "warning", "assert", "timeout")
-        key_lines = [ln for ln in lines if any(k in ln.lower() for k in keywords)]
-        key_block = "\n".join(key_lines[:80])
-        head = text[:keep_head]
-        tail = text[-keep_tail:]
-        summary = "\n".join(
-            [
-                head,
-                "\n...[summary]...\n",
-                key_block,
-                "\n...[tail]...\n",
-                tail,
-            ]
-        )
-        return summary
+    # 절단 사실을 담아 둔다 — 아래에서 `meta_out` 으로 내보낸다.
+    #
+    # ⚠ 예전엔 절단이 **완전히 침묵**할 수 있었다. 경고가
+    #   `if total >= warn_threshold and log_dir:` 라 **`log_dir` 이 없으면 안 찍히는데**,
+    #   `workflow/uds_ai.py:341` 이 바로 `log_dir=None` 으로 부른다 — 이 저장소에서
+    #   가장 큰 프롬프트를 내는 경로가 하필 그쪽이다. 게다가 `meta_out["input_tokens_est"]`
+    #   는 **절단 뒤** 값이라 호출자는 원래 크기를 알 방법이 없었다("원래 그 크기였다"로 보인다).
+    #   값(상한)을 정하는 건 정책이지만, **잘랐다는 사실을 감추는 건 정책이 아니다.**
+    _trim_info: Dict[str, Any] = {"applied": False}
 
     def _trim_messages_to_token_budget(msgs: List[Dict[str, str]], max_tokens: int) -> List[Dict[str, str]]:
-        if max_tokens <= 0:
-            return msgs
-        msgs = list(msgs or [])
+        """모듈 레벨 단일 출처에 위임한다(구현 복제 금지 — 어댑터 egress 와 같은 코드)."""
 
-        def _total_tokens() -> int:
-            return sum(_estimate_tokens(m.get("content", "")) for m in msgs)
+        def _warn(total: int, threshold: int) -> None:
+            # 경고가 `log_dir` 유무에 걸린 건 의도적이지만, 그것만으론 침묵할 수 있어
+            # 절단 사실은 아래 `_trim_info` → `meta_out["input_trim"]` 로 따로 나간다.
+            if log_dir:
+                _agent_log(
+                    log_dir,
+                    "warning",
+                    f"Input tokens estimate {total} exceeds {threshold}. Applying auto-summarization.",
+                )
 
-        total = _total_tokens()
-        if total <= max_tokens:
-            return msgs
-
-        warn_threshold = int(policy.get("warn_input_tokens") or getattr(config, "LLM_WARN_INPUT_TOKENS", 200000))
-        if total >= warn_threshold and log_dir:
-            _agent_log(
-                log_dir,
-                "warning",
-                f"Input tokens estimate {total} exceeds {warn_threshold}. Applying auto-summarization.",
-            )
-
-        if total >= warn_threshold:
-            for i, m in enumerate(msgs):
-                if m.get("role") == "system":
-                    continue
-                content = m.get("content", "")
-                if len(content) > 4000:
-                    msgs[i]["content"] = _summarize_text(content)
-            total = _total_tokens()
-
-        for _ in range(20):
-            if total <= max_tokens:
-                break
-            idx = None
-            longest = 0
-            for i, m in enumerate(msgs):
-                if m.get("role") == "system":
-                    continue
-                ln = len(m.get("content", ""))
-                if ln > longest:
-                    longest = ln
-                    idx = i
-            if idx is None:
-                break
-            content = msgs[idx].get("content", "")
-            msgs[idx]["content"] = _truncate_middle(content, keep_head=2000, keep_tail=1200)
-            total = _total_tokens()
-        return msgs
+        out, info = trim_messages_to_token_budget(
+            msgs,
+            max_tokens,
+            margin=token_margin,
+            warn_input_tokens=int(
+                policy.get("warn_input_tokens") or getattr(config, "LLM_WARN_INPUT_TOKENS", 200000)
+            ),
+            on_warn=_warn,
+        )
+        _trim_info.update(info)
+        return out
 
     env_max = os.environ.get("LLM_MAX_INPUT_TOKENS", "").strip()
     explicit_input = ("max_input_tokens" in cfg) or bool(env_max)
@@ -645,6 +1046,25 @@ def llm_call(
         messages = _trim_messages_to_token_budget(messages, max_input_tokens)
         if meta_out is not None:
             meta_out["input_tokens_est"] = sum(_estimate_tokens(m.get("content", "")) for m in messages)
+            # ⚠ 위 `input_tokens_est` 는 **절단 뒤** 값이라 그것만으론 "원래 그 크기였다" 와
+            #    구분되지 않는다. 잘랐다는 사실·원래 크기·포기 여부를 함께 내보낸다.
+            #    `applied=False` 일 때도 키를 남긴다 — 키 부재를 "안 잘렸다" 로 읽으면
+            #    구 소비자와 신 소비자가 갈린다.
+            meta_out["input_trim"] = dict(_trim_info)
+            if _trim_info.get("applied"):
+                meta_out.setdefault("warnings", []).append(
+                    "input_truncated: {before}→{after} tokens (limit {limit}, stage={stage})".format(
+                        before=_trim_info.get("before_tokens_est"),
+                        after=_trim_info.get("after_tokens_est"),
+                        limit=_trim_info.get("limit_tokens"),
+                        stage=stage or "-",
+                    )
+                    + (" — 예산 아래로 못 내림(초과분 그대로 전송)"
+                       if _trim_info.get("gave_up_over_limit") else "")
+                )
+    # ⚠ 절단 **뒤**에 가린다. 앞에서 가리면 `[REDACTED:...]` 자체가 절단에 잘려 나가
+    # 시크릿 일부가 남을 수 있다. 여기가 프롬프트가 네트워크로 나가기 직전 지점이다.
+    messages = sanitize_messages(messages)
 
     # -----------------------------------------------------------------------
     # 1) Google Gemini
@@ -717,17 +1137,21 @@ def llm_call(
             prompt = f"[SYSTEM]\n{system_instruction}\n\n{prompt}"
 
         # 1-a) New SDK (google-genai)
-        if genai_new is not None:
+        _gn = _sdk("genai_new")
+        if _gn is not None:
             last_err = ""
             allow_legacy_after_network_denied = str(
                 cfg.get("legacy_fallback_on_network_denied")
                 or os.environ.get("GEMINI_LEGACY_FALLBACK_ON_NETWORK_DENIED")
                 or "0"
             ).strip().lower() in ("1", "true", "yes")
+            # gemini-3.5-flash-lite 단일 사용 정책(2026-07-25): 타 모델 교차 폴백 제거.
+            # bad_request(400) 시엔 동일 모델로 출력 토큰만 줄여 재시도해 복구는 유지한다.
+            # 운영자가 cfg.fallback_model / LLM_FALLBACK_MODEL을 명시하면 그 값이 우선.
             fallback_model = (
                 cfg.get("fallback_model")
                 or os.environ.get("LLM_FALLBACK_MODEL")
-                or ("gemini-2.5-flash" if ("gemini-3" in str(model).lower() or "gemini-3.1" in str(model).lower()) else "")
+                or str(model)
             )
 
             def _try_gemini(model_name: str, max_tokens: int) -> Tuple[Optional[str], Optional[Any]]:
@@ -738,7 +1162,7 @@ def llm_call(
                     client_kwargs["http_options"] = genai_types.HttpOptions(
                         timeout=int(gemini_read_timeout * 1000)
                     )
-                    client = genai_new.Client(**client_kwargs)  # type: ignore[attr-defined]
+                    client = _gn.Client(**client_kwargs)  # type: ignore[attr-defined]
                     gen_cfg = genai_types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=int(max_tokens),
@@ -749,7 +1173,7 @@ def llm_call(
                     if system_instruction:
                         gen_cfg.system_instruction = system_instruction  # type: ignore[attr-defined]
                 except Exception:  # pragma: no cover
-                    client = genai_new.Client(**client_kwargs)  # type: ignore[attr-defined]
+                    client = _gn.Client(**client_kwargs)  # type: ignore[attr-defined]
                     gen_cfg = {
                         "temperature": temperature,
                         "max_output_tokens": int(max_tokens),
@@ -771,6 +1195,8 @@ def llm_call(
                     text, resp = _try_gemini(str(model), int(num_predict))
                     if log_dir:
                         _agent_log(log_dir, "assistant", text or "")
+                    _note_finish_reason(meta_out, resp, log_dir)
+                    _note_effective_model(meta_out, str(model), resp, log_dir)
                     if meta_out is not None:
                         meta_out["sdk"] = "google-genai"
                         meta_out["ok"] = True
@@ -802,10 +1228,17 @@ def llm_call(
                             text, resp = _try_gemini(str(fallback_model), int(reduced_tokens))
                             if log_dir:
                                 _agent_log(log_dir, "assistant", text or "")
+                            # ⚠ 이 분기는 정상 경로의 복사본인데 아래 둘이 빠져 있었다:
+                            #  · 절단 검사 — 폴백 응답이 잘려도 완결본으로 통과했다
+                            #  · 실제 답한 모델 확정 — `model` 은 **실패한 모델**로 남고
+                            #    답한 모델은 아무도 안 읽는 `model_fallback` 에만 갔다
+                            _note_finish_reason(meta_out, resp, log_dir)
+                            _note_effective_model(meta_out, str(fallback_model), resp, log_dir)
                             if meta_out is not None:
                                 meta_out["sdk"] = "google-genai"
                                 meta_out["ok"] = True
-                                meta_out["model_fallback"] = str(fallback_model)
+                                meta_out["model_fallback"] = str(fallback_model)  # 기존 키 유지
+                                meta_out["model_fallback_from"] = str(model)
                                 try:
                                     cand = getattr(resp, "candidates", None)
                                     if cand and hasattr(cand[0], "content"):
@@ -825,33 +1258,61 @@ def llm_call(
                 meta_out["error"] = meta_out.get("error") or last_err
 
         # 1-b) Legacy SDK (google-generativeai, deprecated fallback)
-        if genai_legacy is not None:
+        #
+        # ⚠ **제거 보류 확정 (2026-08-04, §6 후보 16).** 수명 종료 패키지지만 지운다는
+        #    결정을 내리지 않았다. 근거와 반증을 남긴다:
+        #
+        #    제거를 지지한 것
+        #      - 발동 흔적 0건. 단, 그 grep 은 **양성 대조군이 0** 이었다(성공 경로가 남기는
+        #        `"sdk": "google-genai"` 조차 산출물에서 0건) — 즉 legacy 가 매 호출마다
+        #        발동했어도 0 을 냈을 측정이다. 올바른 haystack(`reports/agent_logs/
+        #        agent_runs/`)으로 다시 재면 12레코드 전부 신 SDK 이지만, 표본은 하루치 5파일이다.
+        #      - 비용이 0 이 아니다. 지연 로딩 후에도 첫 LLM 호출 때 legacy 한계비용
+        #        **1.4~2.8초**(3회 실측)를 문다. 계획서의 "비용은 이미 0" 은 틀렸다.
+        #        단 RAG 임베딩 경로는 `rag/embedder.py` 가 신 SDK 를 직접 import 하므로
+        #        이 비용을 물지 않는다 — "LLM 을 쓰는 모든 프로세스" 는 과대 표현이다.
+        #
+        #    제거를 막은 것 (결정적)
+        #      - **`safety_settings` 비대칭.** 이 블록만 4종 BLOCK_NONE 을 건다(아래).
+        #        신 SDK 경로(`GenerateContentConfig`)에는 safety 인자가 **아예 없다**.
+        #        그러면 legacy 는 "신 SDK 가 SAFETY 로 막을 때 유일하게 뚫는 경로" 일 수
+        #        있고, 지우면 복구 경로 하나가 사라진다. 어느 쪽인지는 **실제 API 호출
+        #        없이는 판정 불가**다 — 이 라운드에서 재지 못했다(측정 실패).
+        #      - 측정 실패를 "안 쓰이니 안전" 으로 읽는 것은 이 저장소가 금지한 fake-green
+        #        이다. 같은 논리라면 "쓸모없다" 도 미검증이다.
+        #
+        #    되살릴 때 할 것: `google.generativeai` 로 `list_models()` 1회 호출해
+        #    하드락 모델(`gemini-3.5-flash-lite`)을 legacy 스택이 서빙하는지 확인하고,
+        #    신 SDK 경로에 safety 설정을 **먼저** 넣어 비대칭을 없앤 뒤 제거할 것.
+        _gl = _sdk("genai_legacy")
+        if _gl is not None:
             last_err = ""
             # configure를 1회만 실행 (글로벌 상태 변경 최소화)
-            if not getattr(genai_legacy, "_configured", False):
-                genai_legacy.configure(api_key=api_key)  # type: ignore[union-attr]
-                genai_legacy._configured = True  # type: ignore[attr-defined]
+            if not getattr(_gl, "_configured", False):
+                _gl.configure(api_key=api_key)  # type: ignore[union-attr]
+                _gl._configured = True  # type: ignore[attr-defined]
             for attempt in range(max(1, retries)):
                 try:
 
                     # legacy는 구조화된 role보다 prompt 문자열 전달이 안전
                     if system_instruction:
-                        gemini_model = genai_legacy.GenerativeModel(  # type: ignore[union-attr]
+                        gemini_model = _gl.GenerativeModel(  # type: ignore[union-attr]
                             model_name=str(model),
                             system_instruction=system_instruction,
                         )
                     else:
-                        gemini_model = genai_legacy.GenerativeModel(  # type: ignore[union-attr]
+                        gemini_model = _gl.GenerativeModel(  # type: ignore[union-attr]
                             model_name=str(model),
                         )
 
                     safety_settings = None
-                    if HarmCategory is not None and HarmBlockThreshold is not None:
+                    _hc, _hbt = _sdk("HarmCategory"), _sdk("HarmBlockThreshold")
+                    if _hc is not None and _hbt is not None:
                         safety_settings = {
-                            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_HARASSMENT: _hbt.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_HATE_SPEECH: _hbt.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_SEXUALLY_EXPLICIT: _hbt.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_DANGEROUS_CONTENT: _hbt.BLOCK_NONE,
                         }
 
                     generation_config: Dict[str, Any] = {
@@ -871,6 +1332,8 @@ def llm_call(
                     text = _extract_gemini_text(response)
                     if log_dir:
                         _agent_log(log_dir, "assistant", text or "")
+                    _note_finish_reason(meta_out, response, log_dir)
+                    _note_effective_model(meta_out, str(model), response, log_dir)
                     if meta_out is not None:
                         meta_out["sdk"] = "google-generativeai"
                         meta_out["ok"] = True
@@ -892,13 +1355,21 @@ def llm_call(
                 _agent_log(log_dir, "error", f"Gemini(Legacy SDK) failed after retries: {last_err}")
             if meta_out is not None:
                 meta_out["sdk"] = "google-generativeai"
-                meta_out["error"] = last_err
+                # 위 신 SDK 블록(`meta_out.get("error") or last_err`)과 같은 규약 —
+                # **먼저 난 실제 실패 사유가 이긴다**. 예전엔 무조건 덮어써서, 신 SDK 의
+                # 429/timeout 이 legacy 의 사유로 바뀌어 진단이 한 단계 멀어졌다.
+                meta_out["error"] = meta_out.get("error") or last_err
             return None
 
         if log_dir:
             _agent_log(log_dir, "error", "Gemini SDK not available. Install google-genai.")
         if meta_out is not None:
-            meta_out["error"] = "gemini_sdk_missing"
+            # ⚠ `or` 가드가 **필수**다. 이 줄은 "SDK 가 없다" 는 **상태 서술**이지 시도의
+            #    실패 사유가 아니다. 무조건 덮어쓰면, 신 SDK 가 재시도를 소진하고
+            #    legacy 가 설치돼 있지 않은 환경에서 실제 사유(429/timeout/500)가 사라지고
+            #    **"SDK 가 설치돼 있는데 설치 안 됨"** 이라는 거짓 진단이 남는다.
+            #    소비처: `ai.py::_agent_once` → `reason = f"llm_error:{llm_meta.get('error')}"`.
+            meta_out["error"] = meta_out.get("error") or "gemini_sdk_missing"
         return None
 
     # -----------------------------------------------------------------------
@@ -974,8 +1445,21 @@ def llm_call(
             content = data["choices"][0]["message"]["content"]
             if log_dir:
                 _agent_log(log_dir, "assistant", content)
+            # OpenAI 호환 응답은 finish_reason 이 choices[0] 에 있다(Gemini 와 shape 가 다르다).
+            # "length" = 토큰 상한 절단, "content_filter" = 차단 — 둘 다 완결된 응답이 아니다.
+            _oa_fr = _norm_finish_reason((data["choices"][0] or {}).get("finish_reason"))
+            # OpenAI 호환 응답은 top-level `model` 에 **실제로 응답한 모델**을 담는다 —
+            # 요청과 다르면(게이트웨이 라우팅·모델 폐기 등) 산출물의 모델 근거가 어긋난다.
+            _note_effective_model(meta_out, str(model), data, log_dir)
             if meta_out is not None:
                 meta_out["ok"] = True
+                meta_out["finish_reason"] = _oa_fr
+                meta_out["finish_reason_available"] = bool(_oa_fr)
+                meta_out["truncated"] = bool(_oa_fr) and _oa_fr not in _OK_FINISH_REASONS
+            if _oa_fr and _oa_fr not in _OK_FINISH_REASONS:
+                logger.warning("LLM 응답이 비정상 종료됐다(finish_reason=%s) — 잘린 초안일 수 있다", _oa_fr)
+                if log_dir:
+                    _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={_oa_fr}")
             return content
         except Exception as e:
             last_err = str(e)
@@ -993,6 +1477,38 @@ def llm_call(
 # ---------------------------------------------------------------------------
 # Agent loop wrapper (roles + review + RAG)
 # ---------------------------------------------------------------------------
+
+def clamp_rag_top_k(value: Any, *, default: int = 1) -> int:
+    """RAG `top_k` 를 `[1, config.AGENT_RAG_TOP_K_MAX]` 로 조인다 — **판정 단일 출처**.
+
+    ## 왜 여기만 막나 (§6 후보 17 실측, 2026-08-04)
+
+    `uds_analysis`·`uds_audit`·`uds_logic`·`uds_review`·`uds_sections` 5종에 stage cap
+    이 없어 전역 상한(1,048,576)만 적용된다는 것이 후보 17 의 잔여였다. 값을 정하기 전에
+    재 봤더니 **넣을 이유가 없었다**: 실데이터 프롬프트가 전역 상한의 **2.05%**, 최악
+    포화 시나리오도 **16.32%** 다(`user_payload` 가 이미 `_trim_text` 로 78,000자에
+    묶여 있다). 없는 문제에 stage 키 13개를 더하는 건 과잉이다.
+
+    실제로 열려 있는 축은 **`rag_top_k` 하나**였다 — 사용자 Form 입력이 그대로 검색
+    결과 개수가 되고 그게 프롬프트 크기가 되는데 상한이 없었다(`rag_top_k=1000` → 전역
+    상한의 45.9%). 소비처가 셋이라 각자 조이면 갈라진다:
+
+        workflow/ai.py            `max(1, ...)`  하한만 있고 상한 없음
+        backend/routers/local.py  Form 값 그대로
+        backend/helpers/uds.py    Form 값 그대로
+
+    그래서 clamp 를 여기 하나 두고 셋이 부른다.
+
+    비정상 입력(문자열·None·음수)은 예외가 아니라 `default` 로 접는다 — 이 값은 검색
+    폭이라 실패시킬 이유가 없다.
+    """
+    max_k = max(1, int(getattr(config, "AGENT_RAG_TOP_K_MAX", 50)))
+    try:
+        k = int(value)
+    except (TypeError, ValueError):
+        k = int(default)
+    return max(1, min(k, max_k))
+
 
 def _default_agent_settings(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     settings = {
@@ -1012,10 +1528,7 @@ def _default_agent_settings(overrides: Optional[Dict[str, Any]] = None) -> Dict[
         settings["max_steps"] = max(1, int(settings.get("max_steps", 1)))
     except Exception:
         settings["max_steps"] = 1
-    try:
-        settings["rag_top_k"] = max(1, int(settings.get("rag_top_k", 1)))
-    except Exception:
-        settings["rag_top_k"] = 1
+    settings["rag_top_k"] = clamp_rag_top_k(settings.get("rag_top_k"), default=1)
     if not isinstance(settings.get("roles"), list):
         settings["roles"] = [str(settings.get("roles"))]
     settings["roles"] = [str(r) for r in settings["roles"] if str(r).strip()]
@@ -1239,6 +1752,13 @@ def agent_call(
         reason = "" if valid else "no_reply"
         if not valid and isinstance(llm_meta, dict) and llm_meta.get("error"):
             reason = f"llm_error:{llm_meta.get('error')}"
+        # ⚠ 잘린 응답(MAX_TOKENS / SAFETY / RECITATION / length …)을 정상 출력으로 받으면
+        # **잘린 초안이 완결된 산출물로 문서에 들어간다**. 기존 재시도 기계를 그대로 쓴다 —
+        # validator 실패와 같은 등급의 재시도 사유다. 재시도를 다 써도 계속 잘리면
+        # ok=False 로 끝나므로 호출자가 "생성 실패" 를 본다(잘린 초안을 받는 것보다 낫다).
+        if valid and isinstance(llm_meta, dict) and llm_meta.get("truncated"):
+            valid = False
+            reason = f"truncated:{llm_meta.get('finish_reason') or 'unknown'}"
         if valid and validator:
             try:
                 vres = validator(reply)
@@ -1760,6 +2280,7 @@ def apply_search_replace(
             patch_path: Optional[Path] = None
             if diff_text:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # path-collision-ok: 내부 진단용 패치 덤프. 산출물 아님.
                 patch_path = patch_dir / f"{tf.name}.{ts}.patch"
                 tmp = patch_path.with_suffix(patch_path.suffix + ".tmp")
                 tmp.write_text(diff_text, encoding="utf-8")
@@ -1908,7 +2429,9 @@ def _param_placeholder(param: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_param_name(raw: str) -> str:
-    ids = re.findall(r"[A-Za-z_]\w*", raw or "")
+    # ⚠ `\b` 필수 — 없으면 `U8 buf[10U]` 의 이름이 `U` 가 된다.
+    #   근거는 `workflow/code_parser/c_parser.py::c_identifiers` (정규식 정본).
+    ids = re.findall(r"\b[A-Za-z_]\w*", raw or "")
     if not ids:
         return ""
     return ids[-1]
@@ -2783,6 +3306,13 @@ def run_test_gen(
                 return True
         return False
 
+    # exclude 경고 로깅에서도 쓰이므로 exclude 블록보다 먼저 확정한다.
+    # (예전엔 아래 `total = len(targets)` 뒤에 대입돼 있어서, exclude 로그가
+    #  log_dir 을 미바인딩 상태로 읽어 UnboundLocalError 를 냈다. 그 호출은
+    #  try 밖이라 삼켜지지도 않고 run_test_gen 전체가 죽었다 — exclude_list 가
+    #  있고 실제로 걸러지는 대상이 하나라도 있으면 항상.)
+    log_dir = reports / "agent_logs"
+
     if exclude_list:
         filtered: List[Path] = []
         for t in targets:
@@ -2805,7 +3335,6 @@ def run_test_gen(
         targets = filtered
 
     total = len(targets)
-    log_dir = reports / "agent_logs"
     timeout_sec = int(cfg.get("test_gen_timeout_sec") or os.environ.get("TEST_GEN_TIMEOUT_SEC", "300"))
 
     def _call_agent_with_timeout(

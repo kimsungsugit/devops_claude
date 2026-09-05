@@ -1,26 +1,17 @@
 """Common utility functions for the helpers package."""
-import re
-import os
-import sys
 import csv
 import json
-import time
-import shutil
-import hashlib
 import logging
+import re
+import shutil
 import tempfile
-import zipfile
 import traceback
-import subprocess
-import threading
-from copy import deepcopy
-from io import BytesIO
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set
-from functools import lru_cache
-from time import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from fastapi import HTTPException, UploadFile
@@ -33,12 +24,19 @@ try:
 except ImportError:
     JenkinsPublishRequest = None  # type: ignore[assignment,misc]
 
-import config
 from backend.state import (
-    jenkins_progress_lock as _jenkins_progress_lock,
     jenkins_progress as _jenkins_progress,
+)
+from backend.state import (
     jenkins_progress_latest as _jenkins_progress_latest,
 )
+from backend.state import (
+    jenkins_progress_lock as _jenkins_progress_lock,
+)
+from report_gen.atomic_io import atomic_write_text
+from report_gen.c_return import returns_value
+from report_gen.gate_report import has_meaningful_value
+from report_gen.provenance import canonical_source
 
 _logger = logging.getLogger("devops_api")
 _api_logger = _logger
@@ -102,19 +100,61 @@ def _mtime_or_zero(path: Optional[Path]) -> float:
     return 0.0
 
 
-def _has_meaningful_value(value: Any) -> bool:
-    if isinstance(value, list):
-        items = [str(x).strip() for x in value if str(x).strip()]
-        return len(items) > 0
-    text = str(value or "").strip()
-    if not text:
-        return False
-    return text.upper() not in {"N/A", "TBD", "-"}
+# "이 칸에 정보를 적었나" — 정의는 `report_gen.gate_report.has_meaningful_value` **하나**다.
+# (R29) 사이드카 채점이 같은 축을 다른 규칙(`TBD` 만 제외)으로 세어 빈 ASIL/Related 를
+# 통과로 계상했다. 여기 본문을 다시 쓰면 그 갈림이 되살아난다 — alias 로만 둔다.
+_has_meaningful_value = has_meaningful_value
+
+
+# 인터페이스 칸이 "없음" 을 뜻하는 표기들. `[IN] (none)` 처럼 방향 태그가 앞에 붙어
+# 오므로 벗겨내고 본다.
+_INTERFACE_EMPTY_TOKENS = {"", "(none)", "none", "n/a", "na", "tbd", "-", "()"}
+_DIRECTION_TAG_RE = re.compile(r"^(?:Name\s*=\s*)?\[(?:IN|OUT|INOUT)\]\s*", re.I)
+
+
+def _has_real_interface_value(value: Any) -> bool:
+    """인터페이스 칸(inputs/outputs 등)에 **실제 항목**이 있는가.
+
+    ``_has_meaningful_value`` 와 **다른 질문**이라 따로 둔다 — 합치지 말 것:
+
+      · ``_has_meaningful_value``  = "이 칸에 정보를 적었나"
+        → ``['[IN] (none)']`` 은 **참**이다. 파라미터가 없는 ``void f(void)`` 에
+          "없음" 이라고 적은 것은 정확한 기술이고, 이걸 미채움으로 세면 정상 함수를
+          벌하게 된다(실측: payload 350함수 중 278이 `(none)` 인데 **전부 진짜 void**,
+          prototype 에 파라미터가 있는데 `(none)` 인 경우는 0건이었다).
+
+      · ``_has_real_interface_value`` = "실제로 주고받는 항목이 있나"
+        → ``['[IN] (none)']`` 은 **거짓**이다.
+
+    두 축을 섞으면 ``input_fill 98.3%`` 같은 수치가 "입력이 잘 채워졌다" 로 읽힌다.
+    실제로는 그 중 79.4%가 "없음" 표기였다. 게이트 판정은 앞 축이 계속 맡고, 이 축은
+    **참고지표**로 나란히 남겨 오독을 막는다.
+    """
+    items = value if isinstance(value, list) else ([value] if value is not None else [])
+    for x in items:
+        body = _DIRECTION_TAG_RE.sub("", str(x or "").strip()).strip()
+        if body.lower() not in _INTERFACE_EMPTY_TOKENS:
+            return True
+    return False
+
+
+# 신뢰 판정이 아는 6개 라벨. ⚠ 이건 **판정용** 축약이지 표시용 어휘가 아니다 — 사람에게 보여줄 땐
+#   `provenance.canonical_source()` + `validation.src_labels` 를 쓴다(`docgen_field_sources.py` 머리글).
+_TRUST_VOCAB = frozenset({"comment", "sds", "srs", "reference", "rule", "inference"})
 
 
 def _normalize_field_source(value: Any) -> str:
-    src = str(value or "").strip().lower()
-    if src in {"comment", "sds", "srs", "reference", "rule", "inference"}:
+    """출처 라벨 → 신뢰 판정용 6개 라벨. 어휘 밖은 `inference`(= 신뢰하지 않음).
+
+    (R32 Q-10) 별칭은 `provenance.SOURCE_ALIASES` **단일 출처**로 먼저 접는다. 예전엔 여기가 별칭을
+    몰라 `hsis`(정본 인터페이스 문서, 신뢰도 리포트에선 `sds`=0.95)를 `inference` 로 접었다 — 같은
+    필드를 신뢰도 리포트는 "강함", 채움률 게이트는 "불신" 으로 다르게 판정한 것이다.
+    라이브 payload 126개 실측: `hsis` 0건 · `sds_match` 3,104 · `srs_default_qm` 51 — 뒤 둘은 별칭
+    표에서도 강한 출처가 **아니므로**(`sds_match` 는 일부러 별칭 없음, `srs_default_qm`→`default`)
+    이 함수의 결과가 바뀌지 않는다. 즉 판정 이동 0, 두 판정기의 어휘만 하나로 합쳤다.
+    """
+    src = canonical_source(value)
+    if src in _TRUST_VOCAB:
         return src
     return "inference"
 
@@ -203,10 +243,14 @@ def _build_excel_artifact_summary(artifact_type: str, result: Optional[Dict[str,
             or (payload.get("validation") or {}).get("stats", {}).get("flow_count")
             or tc_count  # fallback: 1 flow per ITC
         )
-        # covered_reqs: from trace_coverage, or quality_report.with_related_count
+        # covered_reqs: from trace_coverage, or quality_report의 **실제 요구 ID** 카운트.
+        # with_related_count(Related ID 필드 보유 수)를 폴백으로 쓰면 안 된다 — SITS는 모든
+        # flow에 순번 기반 합성 SwCom_XX를 삽입하므로 그 값은 사실상 TC 총수와 같아
+        # "Covered Reqs"가 항상 만점처럼 보인다. 구 산출물엔 새 키가 없어 0으로 떨어지는데,
+        # 미측정을 만점으로 보이게 하는 것보다 0이 정직하다.
         covered_reqs = int(
             trace.get("covered_reqs")
-            or quality.get("with_related_count")
+            or quality.get("with_requirement_trace_count")
             or 0
         )
         primary = [
@@ -283,7 +327,8 @@ def _write_excel_artifact_sidecar(out_path: Path, artifact_type: str, payload: D
         data = _json_safe(payload if isinstance(payload, dict) else {})
         if not isinstance(data.get("summary"), dict):
             data["summary"] = _build_excel_artifact_summary(artifact_type, data.get("raw_result") or data)
-        sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — `_read_excel_artifact_sidecar` 가 같은 파일을 읽는다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(data, ensure_ascii=False, indent=2))
         return sidecar
     except Exception as exc:
         _logger.warning("excel payload sidecar write skipped: %s", exc)
@@ -304,29 +349,41 @@ def _read_excel_artifact_sidecar(file_path: Path) -> Dict[str, Any]:
 def _infer_related_id_simple(info: Dict[str, Any]) -> str:
     if not isinstance(info, dict):
         return ""
+    # ⚠ `info.get("id")` 를 후보에서 뺐다(2026-08-03). 그게 **유일한 실사용 입구**였다 —
+    #   실 payload 86개 실측: 빈 `related` 5,780건이 전부 값을 받았고, **전부** 이
+    #   `id` 후보에서 나왔으며 **전부** `SwFn_N` 형태였다. 즉 함수 자신의 설계 ID
+    #   `SwUFn_0307` 을 `SwFn_0307` 로 **개명**해 Related ID 칸에 넣고 있었다.
+    #   함수 자신의 ID 는 "이 함수가 어느 요구/설계요소를 구현하는가" 의 답이 아니다.
+    #   실제 `SwUDS v3.02` 의 Related ID 는 SwDS **설계요소 ID**(`SwCom_NN`/`SwFn_NN`)로
+    #   1,035/1,035 채워져 있다(`docs/plans/UDS_RelatedID_SwFn_보강요청.md` §1).
+    #   그러니 개명은 **실재하는 네임스페이스 안에 근거 없는 ID 를 만들어 넣는 것**이라
+    #   리뷰어가 문서 유래와 구분할 수 없다 — 빈칸보다 나쁘다.
     candidates = [
         info.get("related"),
         info.get("related_id"),
         info.get("related_ids"),
         info.get("swcom"),
-        info.get("id"),
         info.get("partition"),
     ]
     for cand in candidates:
         text = str(cand or "").strip()
         if not text or text.upper() in {"N/A", "TBD", "-"}:
             continue
-        m = re.search(r"\b(SwCom_\d+|SwFn_\d+|SwUFn_\d+|SwSTR_\d+|SwST_\d+)\b", text, flags=re.I)
+        # ⚠ `SwUFn_\d+` 를 패턴에서 뺐다 — 위와 같은 이유다. Related ID 칸에 단위함수
+        #   설계 ID 가 적혀 있어도 그건 요구 추적이 아니라 자기 자신이다.
+        m = re.search(r"\b(SwCom_\d+|SwFn_\d+|SwSTR_\d+|SwST_\d+)\b", text, flags=re.I)
         if m:
             token = str(m.group(1) or "").strip()
-            if token.lower().startswith("swufn_"):
-                token = "SwFn_" + token.split("_", 1)[-1]
             token = token.replace("swcom", "SwCom")
             token = token.replace("swfn", "SwFn")
             token = token.replace("swstr", "SwSTR")
             token = token.replace("swst", "SwST")
             return token
-        return text
+        # ⚠ 예전엔 여기가 `return text` 였다 — ID 패턴이 **하나도 안 맞아도** 그 후보의
+        #   원문을 Related ID 로 반환했다(예: `partition="APP_Layer"` → Related ID 가
+        #   "APP_Layer"). 게다가 첫 후보에서 반환하므로 **뒤 후보를 아예 안 봤다**.
+        #   ID 가 아니면 넘어간다. 끝까지 못 찾으면 빈 값 — 지어내지 않는다.
+        continue
     return ""
 
 
@@ -363,7 +420,7 @@ def _parse_signature_outputs_simple(signature: str) -> List[str]:
     ret = " ".join(pieces[:-1]) if len(pieces) >= 2 else pieces[0]
     ret = ret.strip()
     outputs: List[str] = []
-    if ret and ret.lower() != "void":
+    if returns_value(ret):
         outputs.append(f"[OUT] return {ret}")
     m = re.search(r"\((.*)\)", sig)
     inner = str(m.group(1) if m else "").strip()

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import re
 
 from backend.services.local_service import list_directory, read_file_text, search_in_files
 
@@ -70,6 +70,13 @@ class CodeSearchMCPServer:
                 timeout=30,
             )
         except (OSError, subprocess.TimeoutExpired):
+            return None
+
+        # ripgrep exit: 0=매치 / 1=매치없음 / 2=오류(잘못된 정규식·IO·권한 등). 2를
+        # 검사 안 하면 오류의 빈 stdout 이 '매치 없음'(results:[])과 구분 안 돼, 안전패턴
+        # 검색이 "부재"로 오독된다 — 검색이 안 돈 것을 '구성 없음'으로 위장(B3). 오류는
+        # None(에러 신호, OSError/timeout 과 동일 처리)로 올린다.
+        if proc.returncode not in (0, 1):
             return None
 
         root_path = Path(root)

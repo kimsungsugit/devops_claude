@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ def _read_meta_config_raw(mtime: float) -> dict[str, Any]:  # noqa: ARG001
     try:
         with open(_META_CONFIG_PATH, encoding="utf-8") as f:
             return json.load(f) or {}
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:   # ValueError ⊃ JSONDecodeError·UnicodeDecodeError
         _logger.warning("swut_meta.json load failed: %s", e)
         return {}
 
@@ -70,6 +71,103 @@ def load_meta_from_config(project_id: str) -> dict[str, Any]:
         return {}
     cfg = _read_meta_config_raw(mtime)
     return cfg.get("projects", {}).get(project_id, {}) or {}
+
+
+class MetaConfigUnreadable(RuntimeError):
+    """`config/swut_meta.json` 이 **있는데 읽을 수 없다** — 부재·미등록과 다른 사실."""
+
+
+def load_meta_from_config_strict(project_id: str) -> dict[str, Any]:
+    """`load_meta_from_config` 와 같되, 파일이 있는데 못 읽으면 **예외**다.
+
+    빌드 경로는 못 읽은 config 를 `{}` 로 접어 폴백을 타는 게 맞다(생성은 계속돼야 한다).
+    그러나 **준비 게이트**가 같은 `{}` 를 받으면 "이 프로젝트가 양식 설정에 없다"(missing)
+    로 그려 required 행을 **진행 불가**로 굳힌다 — 실제로는 파일이 깨졌거나 잠긴 것인데
+    사람은 등록을 다시 하러 간다(2026-09-03 감사 P-3①). 게이트는 이 변형을 쓴다.
+
+    - 파일 없음 → `{}`(등록 없음이 정직하다).
+    - 파일 있음 + 읽기/파싱 실패 → `MetaConfigUnreadable`(모름 — `unmeasured`).
+    - 프로젝트 미등록 → `{}`.
+
+    값은 `load_meta_from_config` 에서 온다(같은 캐시·같은 테스트 seam) — 여기서는 **읽을 수
+    있는가** 만 먼저 확인한다. 값까지 따로 읽으면 라우터 회귀가 config 를 갈아 끼우는
+    seam(`monkeypatch.setattr(swut_meta_resolver, "load_meta_from_config", …)`)을 우회해
+    실 머신 파일을 읽는다 — 2026-08-24 에 라우터 회귀 12건이 그렇게 깨졌던 형태다.
+    """
+    if os.path.isfile(_META_CONFIG_PATH):
+        try:
+            with open(_META_CONFIG_PATH, encoding="utf-8") as f:
+                json.load(f)
+        # ⚠ `ValueError` 가 `JSONDecodeError` 와 `UnicodeDecodeError` 둘 다 덮는다 — 후자만
+        #   빠뜨리면 "config 가 깨졌다" 의 대표 형태(잘못된 바이트)가 500 으로 새어 나간다.
+        except (OSError, ValueError) as e:
+            name = os.path.basename(_META_CONFIG_PATH)   # 서버 절대경로는 화면에 내지 않는다
+            raise MetaConfigUnreadable(f"{name}: {type(e).__name__}: {str(e)[:120]}") from e
+    return load_meta_from_config(project_id)
+
+
+# VectorCAST 로그 폴더의 **config fallback 키** — 시리즈별 단일 출처.
+#
+# ⚠ 이 표가 왜 여기 있나 (2026-08-24). 같은 판정이 세 곳에 필요하다: SwUT 라우터,
+# SwIT 라우터, 그리고 생성 준비 점검(preflight). 앞의 둘은 각자 복제돼 있었고 세 번째를
+# 또 복제하려던 참이었다. 그러면 **게이트가 라우터와 다른 곳을 보게 된다** — 실측으로
+# preflight 가 "VectorCAST 결과 경로가 지정되지 않았습니다 → 진행 불가" 를 냈는데 같은
+# 요청의 빌드는 config 폴백으로 정상 성공했다. 거짓 차단은 게이트를 무시하게 만든다.
+_LOG_FOLDER_CONFIG_KEYS: dict[str, dict[str, Any]] = {
+    "swut": {"list": "swut_log_folders", "single": "swut_log_folder", "dict_keys": ()},
+    # SwIT 만 `log_folders` dict 폴백이 하나 더 있다(과거 키). 없애면 구 config 가 죽는다.
+    "swit": {
+        "list": "swit_log_folders",
+        "single": "swit_log_folder",
+        "dict_keys": ("swit", "integration"),
+    },
+}
+
+
+def config_log_folders(cfg: dict[str, Any], series: str) -> list[str]:
+    """project config **dict 에서** VectorCAST 로그 폴더를 뽑는다 — 요청값은 보지 않는다.
+
+    ⚠ config 를 **여기서 읽지 않고 인자로 받는** 것은 의도다. 라우터는 자기 모듈의
+    `_load_meta_from_config`(캐시·테스트 seam)를 이미 갖고 있는데, 이 함수가 config 를
+    직접 읽으면 그 seam 을 우회해 **회귀가 실제 머신 config 를 읽는다**(2026-08-24 실측:
+    라우터 회귀 12건이 tmp config 대신 실 파일을 읽어 깨졌다). 판정만 단일 출처로 두고
+    읽기는 호출부에 남긴다. config 를 안 가진 호출부는 `config_log_folders_for` 를 쓴다.
+
+    우선순위: list 키 → 단일 키 → (SwIT 전용) `log_folders` dict.
+
+    Args:
+        cfg: `load_meta_from_config(project_id)` 결과(프로젝트 단위 dict).
+        series: ``"swut"`` 또는 ``"swit"``.
+
+    Returns:
+        폴더 경로 목록. 등록이 없으면 빈 목록(= 지어내지 않는다).
+    """
+    keys = _LOG_FOLDER_CONFIG_KEYS.get(str(series or "").strip().lower())
+    if not keys:
+        return []
+    cfg = cfg or {}
+    raw_list = cfg.get(keys["list"])
+    if isinstance(raw_list, (list, tuple)):
+        folders = [str(f) for f in raw_list if f]
+        if folders:
+            return folders
+    single = cfg.get(keys["single"])
+    if not single:
+        nested = cfg.get("log_folders", {}) or {}
+        for k in keys["dict_keys"]:
+            if nested.get(k):
+                single = nested[k]
+                break
+    return [str(single)] if single else []
+
+
+def config_log_folders_for(project_id: str, series: str) -> list[str]:
+    """config 를 직접 읽어 `config_log_folders` 를 부르는 편의 래퍼.
+
+    라우터는 자기 캐시 wrapper 를 쓰므로 이걸 쓰지 않는다 — 소비처는 요청 객체가 없는
+    쪽(생성 준비 점검)이다.
+    """
+    return config_log_folders(load_meta_from_config(project_id), series)
 
 
 def resolve_swuds_path(req: Any, project_id: str) -> str:
@@ -114,6 +212,55 @@ def resolve_c_source_root(req: Any, project_id: str) -> str:
     return (cfg.get("c_source_root") or "").strip()
 
 
+def config_spec_path(cfg: dict[str, Any], series: str) -> str:
+    """project config **dict 에서** 대응 시험 규격서(SwUTS/SwITS) 경로를 뽑는다.
+
+    ⚠ `config_log_folders` 와 같은 이유로 config 를 인자로 받는다 — 읽기는 호출부에,
+    판정만 여기에. 소비처가 셋이다: `resolve_swuts_path`(라우터 경유)와 생성 준비
+    점검(preflight), 그리고 아래 `config_spec_path_for`.
+
+    SwIT 은 SwITS 를 먼저 보고 없으면 SwUTS 로 떨어진다(기존 동작 보존).
+    """
+    cfg = cfg or {}
+    iso_docs = cfg.get("iso26262_docs", {}) or {}
+    if str(series or "").strip().lower() == "swit":
+        return (
+            cfg.get("swits_docx_path")
+            or iso_docs.get("swits_xlsm_path")
+            or cfg.get("swuts_docx_path")
+            or iso_docs.get("swuts_xlsm_path")
+            or ""
+        ).strip()
+    return (
+        cfg.get("swuts_docx_path")
+        or iso_docs.get("swuts_xlsm_path")
+        or ""
+    ).strip()
+
+
+def config_spec_path_for(project_id: str, series: str) -> str:
+    """config 를 직접 읽어 `config_spec_path` 를 부르는 편의 래퍼(요청 객체 없는 쪽 용)."""
+    return config_spec_path(load_meta_from_config(project_id), series)
+
+
+def config_spec_is_required(cfg: dict[str, Any], series: str) -> bool:
+    """규격서가 **필수**인가 — `sutr_spec_based`/`sitr_spec_based` 가 정한다.
+
+    spec-based 빌드는 결과 문서의 `3.Test Log` 시트를 **규격서 시트 통째 복사**로 만든다
+    (`_do_sutr_build_spec_based`). 그래서 규격서가 없으면 선택 입력이 빠지는 게 아니라
+    라우터가 **HTTP 400** 을 낸다 — 게이트가 "없어도 됩니다" 라고 말하면 거짓이다.
+
+    ⚠ **프로젝트마다 다르다.** 표에 고정으로 박으면 안 되고 config 를 읽어 판정해야 한다
+    (HDPDM01 은 `false` 라 그쪽에선 여전히 선택 입력이다).
+    """
+    key = "sitr_spec_based" if str(series or "").strip().lower() == "swit" else "sutr_spec_based"
+    return bool((cfg or {}).get(key, False))
+
+
+def config_spec_is_required_for(project_id: str, series: str) -> bool:
+    return config_spec_is_required(load_meta_from_config(project_id), series)
+
+
 def resolve_swuts_path(req: Any, project_id: str) -> str:
     """60차 F6-A — req.swuts_docx_path 우선, 비면 config의 project별 값 fallback.
 
@@ -134,22 +281,9 @@ def resolve_swuts_path(req: Any, project_id: str) -> str:
     req_value = getattr(req, "swuts_docx_path", "") or ""
     if req_value:
         return req_value
-    cfg = load_meta_from_config(project_id)
-    iso_docs = cfg.get("iso26262_docs", {}) or {}
-    req_type = type(req).__name__.lower()
-    if req_type.startswith("swit"):
-        return (
-            cfg.get("swits_docx_path")
-            or iso_docs.get("swits_xlsm_path")
-            or cfg.get("swuts_docx_path")
-            or iso_docs.get("swuts_xlsm_path")
-            or ""
-        ).strip()
-    return (
-        cfg.get("swuts_docx_path")
-        or iso_docs.get("swuts_xlsm_path")
-        or ""
-    ).strip()
+    series = "swit" if type(req).__name__.lower().startswith("swit") else "swut"
+    # 판정은 `config_spec_path` 단일 출처. config 읽기는 여기(기존 테스트 seam) 유지.
+    return config_spec_path(load_meta_from_config(project_id), series)
 
 
 def resolve_swuts_test_specs(
@@ -299,27 +433,58 @@ def _cached_parse_swuds(path: str) -> Any:
         return result
 
 
-def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
+def resolve_swuds_function_ids(
+    req: Any, project_id: str,
+    out_warnings: list[str] | None = None,
+) -> set[str] | None:
     """16차 + 49차 — swuds_docx_path가 있으면 docx → function ID set 반환.
 
     plan vs 구현 divergence (54-fix I2 / 55차):
         plan의 `kind` 인자는 req 객체 속성으로 흡수 (덕 타이핑). 자세히는
         `resolve_swuds_path` docstring 참조.
 
-    실패 시 None — caller는 SwUDS 비교 skip + warnings에 사유 누적.
+    Args:
+        out_warnings: 실패 사유 누적 list.
+
+            ⚠ **2026-08-04 — 이 인자가 없어서 이 함수만 침묵했다.** 형제 3개
+            (``resolve_hmr_html_bytes`` · ``resolve_swuts_test_specs`` ·
+            ``resolve_swuds_maps``)는 F6 Round 1 W1 에서 전부 `out_warnings` 를
+            받게 고쳤는데 이 함수만 빠졌고, 옛 docstring 은 *"caller 가 warnings 에
+            사유 누적"* 이라고 **적어 두기까지 했다** — 4개 호출처(SwUT coverage/SUTR,
+            SwIT coverage/SITR) 어디도 누적하지 않았으므로 구현되지 않은 계약이었다.
+
+            실측(KJPDS02·HDPDM01, cloudium 모드): `swuds_docx_path` 2건이 모두
+            allowed_prefixes 밖이라 PermissionError → None → SwUDS↔시험 ID 매핑
+            검증이 통째로 건너뛰어졌고, 산출물에는 그 사실이 **어디에도 없었다**.
+
+    Returns:
+        function ID set. 실패 시 None — caller 는 SwUDS 비교를 skip 하되,
+        `out_warnings` 를 넘겼다면 **사유가 산출물까지 도달한다**.
     """
     swuds_path = resolve_swuds_path(req, project_id)
     if not swuds_path:
+        # 경로 미지정은 결함이 아니라 선택 — 경고를 만들지 않는다(소음 방지).
         return None
     try:
         result = _cached_parse_swuds(swuds_path)  # 라운드 89 — path 키 캐시
         if not result.ok:
             _logger.warning("SwUDS parse failed (function_ids)")
+            if out_warnings is not None:
+                out_warnings.append(
+                    "[swuds] function ID parse 실패 (ok=False) — docx 양식 확인. "
+                    "SwUDS↔시험 함수 ID 매핑 검증을 건너뛴다"
+                )
             return None
         return result.function_ids
     except (FileNotFoundError, PermissionError, OSError) as e:
         # F6 Round 3 NC2: OSError 확대 정책 일관성 — swuts/hmr 함수와 대칭.
         _logger.warning("SwUDS docx read failed: %s", e)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[swuds] function ID read 실패 — {type(e).__name__}: {str(e)[:160]} "
+                "(cloudium 모드면 allowed_prefixes에 SwUDS 경로 포함 여부 확인). "
+                "SwUDS↔시험 함수 ID 매핑 검증을 건너뛴다"
+            )
         return None
 
 
@@ -497,3 +662,80 @@ __all__ = [
     "resolve_hmr_html_path",
     "resolve_hmr_html_bytes",
 ]
+
+
+def folder_contents_hint(resolver: Any, path: str, cap: int = 8) -> str:
+    """등록 파일이 없을 때 **그 폴더에 실제로 뭐가 있는지** 문장으로 낸다.
+
+    "찾지 못했습니다" 만으로는 ①이름이 바뀐 건지 ②폴더가 통째로 옮겨진 건지 ③애초에
+    배포된 적이 없는 건지 화면에서 구분할 수 없다(커밋 `62c7243`).
+
+    2026-08-26 에 **준비 게이트에만** 이 안내가 있고 빌드 경로엔 없다는 걸 실측했다 —
+    `[준비]` 를 누르면 폴더 내용을 보여 주는데 `[생성]` 을 누르면 raw
+    `FileNotFoundError` 가 500 으로 나간다. 같은 부재에 화면이 두 말을 하지 않도록
+    여기로 올려 두 경로가 함께 쓴다.
+
+    ⚠ 이건 판정이 아니라 **증거**다. 후보를 고르지 않는다.
+    ⚠ IPC 왕복이 한 번 더 든다. 호출부가 **부재일 때만** 부를 것.
+    """
+    parent = str(Path(path).parent)
+    if not parent or parent == ".":
+        return ""
+    try:
+        entries = resolver.list_dir(parent, pattern="*") or []
+    except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
+        # 침묵하지 않는다 — "폴더도 못 봤다" 와 "폴더가 비었다" 는 다른 사실이다.
+        return f" — 그 폴더도 확인하지 못했습니다 ({type(exc).__name__})."
+    names = sorted({
+        Path(str(n.get("name") if isinstance(n, dict) else n)).name for n in entries
+    } - {""})
+    if not names:
+        # ⚠ resolver 계약상 **빈 폴더와 없는 폴더가 구분되지 않는다**(`file_resolver.py`
+        #   의 `list_dir` 주석). 단정하지 않는다.
+        return f" — 그 폴더는 비어 있거나 폴더 자체가 없습니다: {parent}"
+    more = f" 외 {len(names) - cap}건" if len(names) > cap else ""
+    return " — 같은 폴더의 실제 파일: " + ", ".join(names[:cap]) + more + "."
+
+
+class TemplateNotResolved(RuntimeError):
+    """양식 후보를 하나도 읽지 못했다 — 라우터가 400 으로 변환한다."""
+
+
+def read_template_from_keys(
+    resolver: Any,
+    template_paths: dict,
+    keys: "tuple[str, ...]",
+    *,
+    project_id: str,
+    label: str,
+) -> bytes:
+    """config `template_paths` 의 후보 키를 **읽힐 때까지** 순회해 bytes 를 낸다.
+
+    ⚠ 예전엔 "값이 있는 첫 키" 에서 곧장 `read_bytes` 를 불렀다. 그 경로가 낡았으면
+      **뒤 후보를 시도조차 못 하고** raw `FileNotFoundError` 가 500 으로 나갔다
+      (2026-08-26 실측: KJPDS02 `es95411_template` 이 v1.02 파일을 가리키는데 그
+      세대가 v2.01_260629_R 로 교체돼 사라졌다). 값이 있다 != 읽힌다.
+
+    실패해도 **어느 키를 어떤 이유로 건너뛰었는지** 전부 문장에 남긴다 — 조용히
+    다음 후보로 넘어가면 "왜 다른 양식이 쓰였는지" 를 나중에 설명할 수 없다.
+    """
+    tried: list[str] = []
+    for key in keys:
+        # ⚠ 키 이름을 **작은따옴표로 감싼다.** `test_docgen_preflight` 의
+        #   `TestReportTemplateKeyParity` 가 준비 게이트 키 ↔ 라우터 키 일치를
+        #   이 문장에서 `'<key>'` 로 읽는다 — 따옴표를 빼면 그 가드가 조용히 죽는다.
+        tpath = str((template_paths or {}).get(key) or "").strip()
+        if not tpath:
+            tried.append(f"'{key}'=미등록")
+            continue
+        try:
+            return resolver.read_bytes(tpath)
+        except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
+            tried.append(
+                f"'{key}'={type(exc).__name__}"
+                + folder_contents_hint(resolver, tpath)
+            )
+    raise TemplateNotResolved(
+        f"{label} 양식을 읽지 못했습니다 ({project_id}). 시도한 후보: "
+        + " | ".join(tried)
+    )

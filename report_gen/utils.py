@@ -1,18 +1,56 @@
 """report_gen.utils - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
-import csv
 import logging
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+import re
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 from report_gen.source_parser import _read_text_limited  # noqa: F401  (leaf module, no circular dep)
 
 _logger = logging.getLogger("report_generator")
+
+def function_name_key(name: Any) -> str:
+    """`function_details_by_name` 의 **키 규칙 단일 출처**.
+
+    ⚠ 이 규칙이 갈리면 조용히 깨진다. 2026-08-03 실측:
+
+        report_gen/uds_generator.py::_put_by_name   `.strip().lower()`   ← 정본
+        backend/routers/jenkins.py                  `.strip().lower()`   ✓
+        backend/routers/local.py                    `.strip()`           ✗ 원형 유지
+        tools/generate_uds_local.py                 `.strip()`           ✗ 원형 유지
+
+    그런데 **조회는 전부 소문자**다 — `docx_builder` 13곳, `backend/routers/code.py:126`,
+    `backend/routers/test_gen.py:32`, `uds_generator` 4곳. 즉 local 경로에서 만든 맵은
+    이름에 대문자가 있는 함수를 **전부 못 찾는다**. 실측 표본에서 350개 중 **267개(76.3%)**
+    가 대문자를 포함한다.
+
+    맞으면 아무 일도 안 일어나고 틀리면 조용히 miss 다 — 그래서 규칙을 한 곳에 둔다.
+    """
+    return str(name or "").strip().lower()
+
+
+def build_function_details_by_name(details: Any) -> Dict[str, Any]:
+    """`function_details` → `function_details_by_name`(이름 키) 재구성.
+
+    라우터 3곳(local·jenkins·tools)이 같은 루프를 복제하고 있었고 그중 둘이 키 규칙을
+    틀렸다. 값은 **원본 객체 그대로** 담는다 — 사본을 넣으면 문서 생성의 in-place 갱신이
+    반영되지 않는다(`uds_generator._put_by_name` docstring 참조).
+
+    동명 함수는 last-wins 다(기존 동작 유지). 충돌 기록이 필요한 경로는
+    `_put_by_name(collisions=...)` 를 쓴다.
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(details, dict):
+        return out
+    for info in details.values():
+        if not isinstance(info, dict):
+            continue
+        key = function_name_key(info.get("name"))
+        if key:
+            out[key] = info
+    return out
+
 
 def _safe_dict(x) -> Dict[str, Any]:
     return x if isinstance(x, dict) else {}
@@ -142,10 +180,10 @@ def generate_pdf_report(summary: Dict[str, Any], output_path: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib import colors
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     except Exception as e:
         raise ImportError(
             "reportlab 미설치로 PDF 생성 불가. requirements에 reportlab 추가 필요"
@@ -430,8 +468,16 @@ def _dedupe_multiline_text(value: str, na_to_empty: bool = False) -> str:
 
 
 def _normalize_asil_value(value: str) -> str:
+    raw_str = str(value or "").strip()
+    # N/A·미적용·TBD류는 'ASIL 미부여'(빈 문자열)로 정규화한다. split이 'N/A'를 ['N','A']로
+    # 쪼개 'A'로 거짓 격상하던 안전 결함 차단(ISO 26262 ASIL 도출 정확성 — 추적성 갭 판정에
+    # 직접 영향). 'NA'(슬래시 없음)도 동일 처리.
+    if re.fullmatch(r"\s*(?:n\s*/?\s*a|tbd|none|미적용|해당\s*없음)\s*", raw_str, re.IGNORECASE):
+        return ""
     tokens: List[str] = []
-    for raw in re.split(r"[\s,;/]+", str(value or "").strip()):
+    # 괄호도 구분자로 포함 — 'B(C)'(공백 없는 보조등급 표기)를 ['B','C']로 분해해 등급
+    # 탈락(미상 처리)을 방지. 'D (B)' 등 기존 케이스는 영향 없음.
+    for raw in re.split(r"[\s,;/()]+", raw_str):
         t = str(raw or "").strip().upper()
         if not t:
             continue
@@ -440,7 +486,7 @@ def _normalize_asil_value(value: str) -> str:
             if canon not in tokens:
                 tokens.append(canon)
     if not tokens:
-        text = _dedupe_multiline_text(str(value or ""), na_to_empty=True)
+        text = _dedupe_multiline_text(raw_str, na_to_empty=True)
         return text
     return ", ".join(tokens)
 
@@ -533,29 +579,67 @@ def _normalize_swcom_label(label: str) -> str:
     return text
 
 
+# 저장소가 오래 지고 있던 **죽은 폴백** 두 개(2026-08-12 발견).
+#
+# 아래 두 함수의 정규식이 raw 문자열 안에서 `\\b` · `\\s` 였다. raw 에서 `\\` 는
+# **리터럴 백슬래시**이므로 `\\b` 는 "역슬래시 다음에 b" 를 요구한다 — C 소스엔 그런
+# 문자열이 없으니 **한 번도 매치된 적이 없다**:
+#
+#     _infer_type_from_decl("extern volatile ADC0STSSTR _ADC0STS;", "_ADC0STS")  ->  ""
+#
+# 파일 자동 분할(`Auto-split from report_generator.py`) 때 한 단계 더 이스케이프된
+# 것으로 보이며, 둘 다 조용히 `""` 를 돌려주므로 "타입을 못 구했다" 와 구분되지 않았다.
+#
+# ⚠ 이 fix 는 KJPDS02 에서 **산출물을 바꾸지 않는다** — tree-sitter 가 이미 모든 전역에
+#   타입을 주고 있어 `typeless_dropped` 가 0 이다(실측). 즉 회수가 아니라 **폴백의
+#   복구**다. tree-sitter 가 실패하는 프로젝트에서만 효과가 있다. 없는 회수를
+#   있다고 적지 않기 위해 여기 명시한다.
+# 타입 자리로 인정할 모양: (struct|union|enum) 태그? + 식별자 1개 이상 + 포인터
+_RE_TYPE_HEAD = re.compile(r"^(?:(?:struct|union|enum)\s+)?[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)*\s*\**$")
+
+
+def _is_type_head(text: str) -> bool:
+    """'선언의 타입 자리' 로 인정할 수 있는 모양인가.
+
+    ⚠ 아래 두 폴백은 정규식으로 이름 앞부분을 잘라 타입이라 부르는데, **'선언' 이라는
+    개념이 없다.** 그래서 선언이 아닌 줄에서도 타입을 만들어 낸다:
+
+        `}   s_BuzzerState;`          ->  '}'                (익명 enum 의 닫는 줄)
+        `s_BuzzerState = en_s_Stop;`  ->  's_BuzzerState ='   (그냥 대입문)
+
+    이렇게 만든 값이 그대로 ISO 26262 설계서 Type 칸에 실렸다 — 실측 산출물 2,406칸 중
+    24칸이 `enum }` 또는 열거자 본문이었고, 정본 2,751칸 중 중괄호 포함은 **0개**다.
+    모양이 아니면 `""` 를 돌려 "타입을 못 구했다" 로 남긴다(지어내지 않는다).
+    """
+    return bool(_RE_TYPE_HEAD.match((text or "").strip()))
+
+
 def _infer_type_from_decl(decl: str, name: str) -> str:
     if not decl or not name:
         return ""
     text = " ".join(decl.replace("\n", " ").split())
-    m = re.search(rf"(.+?)\\b{name}\\b", text)
+    m = re.search(rf"(.+?)\b{re.escape(name)}\b", text)
     if not m:
         return ""
     head = m.group(1)
-    head = re.sub(r"\\s*=", " ", head).strip()
-    head = re.sub(r"\\b(static|extern|const|volatile)\\b", "", head).strip()
-    return " ".join(head.split()).strip()
+    head = re.sub(r"\s*=", " ", head).strip()
+    head = re.sub(r"\b(static|extern|const|volatile)\b", "", head).strip()
+    head = " ".join(head.split()).strip()
+    return head if _is_type_head(head) else ""
 
 
 def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
     if not file_path or not name:
         return "", ""
     try:
-        text = _read_text_limited(Path(file_path), 200_000)
+        # ⚠ 상한을 여기 박아두면(옛 판 `200_000`) 선언이 파일 뒤쪽에 있는 전역은
+        #   폴백조차 못 탄다. 상한은 `_SRC_READ_MAX_BYTES` 단일 출처를 따른다.
+        text = _read_text_limited(Path(file_path))
     except Exception:
         return "", ""
     name_re = re.escape(name)
     try:
-        pattern = re.compile(rf"^\\s*(.+?)\\b{name_re}\\b\\s*(=|\\[|;)", re.M)
+        pattern = re.compile(rf"^\s*(.+?)\b{name_re}\b\s*(=|\[|;)", re.M)
     except re.error:
         return "", ""
     for match in pattern.finditer(text):
@@ -563,13 +647,15 @@ def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
         if "(" in decl:
             continue
         head = match.group(1)
-        head = re.sub(r"\\b(static|extern|const|volatile)\\b", "", head).strip()
+        head = re.sub(r"\b(static|extern|const|volatile)\b", "", head).strip()
         gtype = " ".join(head.split()).strip()
         init = ""
-        init_match = re.search(rf"\\b{name}\\b\\s*=\\s*([^;]+)", decl)
+        init_match = re.search(rf"\b{name_re}\b\s*=\s*([^;]+)", decl)
         if init_match:
             init = init_match.group(1).strip()
-        if gtype:
+        # ⚠ 모양이 아니면 **다음 후보로 넘어간다**. 파일 뒤쪽에 진짜 선언이 있을 수 있고,
+        #   여기서 `}` 를 돌려주면 그게 그대로 설계서 Type 칸이 된다(`_is_type_head`).
+        if gtype and _is_type_head(gtype):
             return gtype, init
     return "", ""
 

@@ -110,6 +110,38 @@ def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
     return Response(content=data, media_type=_MEDIA_XLSM, headers=headers)
 
 
+def _swsa_quality_data(inputs):
+    """SwSA 빌드 입력 → Quality 기록용 dict. HIS 데이터 없으면 None(미기록).
+
+    HIS(ST201~204) pass% 가 게이트 지표 — 없으면 점수화하지 않는다. QAC 위반 수는
+    ``extraction_failed`` 면 '0건'이 아니라 '추출 실패'라 **미포함**(가짜 0점 방지).
+    """
+    if inputs is None:
+        return None
+    st201 = getattr(inputs, "st201", None)
+    his = []
+    if st201 is not None and getattr(st201, "metrics", None):
+        for m in st201.metrics.values():
+            his.append({
+                "total": getattr(m, "total_functions", 0),
+                "fail": getattr(m, "fail_count", 0),
+                "unbinned": getattr(m, "unbinned_count", 0),
+            })
+    if not his:
+        return None
+    data = {"his_metrics": his, "his_metric_count": len(his)}
+    qac = getattr(inputs, "qac_xml", None)
+    if qac is not None and not getattr(qac, "extraction_failed", False):
+        misra = getattr(qac, "misra", None)
+        secure = getattr(qac, "secure", None)
+        data["misra_active"] = getattr(misra, "active", 0) if misra else 0
+        data["secure_active"] = getattr(secure, "active", 0) if secure else 0
+    pmd = getattr(inputs, "pmd", None)
+    if pmd is not None:
+        data["pmd_fail"] = getattr(pmd, "fail_count", 0)
+    return data
+
+
 def _do_build(req: SwSABuildRequest) -> Response:
     resolver = get_resolver()
     log_folder = req.log_folder.strip()
@@ -125,6 +157,19 @@ def _do_build(req: SwSABuildRequest) -> Response:
         st201=getattr(inputs, "st201", None),
         pmd=getattr(inputs, "pmd", None),
     )
+    # Quality DB recording (non-fatal). HIS 없음/extraction_failed 는 helper 가 선차단.
+    try:
+        _qd = _swsa_quality_data(inputs)
+        if _qd:
+            from workflow.quality.recorder import record_run
+            record_run(
+                "swsa", _qd,
+                project_root=str(getattr(meta, "project_id", "") or ""),
+                meta={"asil_level": str(getattr(meta, "asil_level", "") or "")},
+            )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwSA quality record skipped (non-fatal)")
     return _to_response(res, meta, inputs)
 
 

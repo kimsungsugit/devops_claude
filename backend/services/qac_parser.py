@@ -10,12 +10,13 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    import subprocess, sys
+    import subprocess
+    import sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "-q"])
     from bs4 import BeautifulSoup
 

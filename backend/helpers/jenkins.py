@@ -1,13 +1,10 @@
 """Jenkins-specific domain helpers."""
-import re
-import os
-import json
-import shutil
 import logging
+import shutil
 import zipfile
-from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 try:
     from fastapi import HTTPException
@@ -19,22 +16,18 @@ try:
 except ImportError:
     JenkinsPublishRequest = None  # type: ignore[assignment,misc]
 
+from backend.helpers.common import (
+    _read_json,
+    _set_progress,
+    _write_json,
+)
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
+from backend.services.paths import is_under_any
 from backend.services.report_parsers import (
     build_report_summary,
     classify_report_group,
     find_local_jenkins_report_dir,
     write_report_index,
-)
-from backend.services.paths import is_under_any
-
-import config
-
-from backend.helpers.common import (
-    _read_json,
-    _write_json,
-    _set_progress,
-    _is_relative_to,
 )
 
 _logger = logging.getLogger("devops_api")
@@ -43,8 +36,8 @@ repo_root = Path(__file__).resolve().parents[2]
 
 
 
-def _jenkins_exports_dir(cache_root: str) -> Path:
-    return _normalize_jenkins_cache_root(cache_root) / "exports"
+def _jenkins_exports_dir(cache_root: str, *, create: bool = True) -> Path:
+    return _normalize_jenkins_cache_root(cache_root, create=create) / "exports"
 
 
 def _jenkins_templates_dir(cache_root: str) -> Path:
@@ -82,13 +75,16 @@ def _save_uds_meta(out_dir: Path, job_slug: str, meta: Dict[str, Any]) -> None:
     _write_json(_uds_meta_path(out_dir, job_slug), meta)
 
 
-def _normalize_jenkins_cache_root(cache_root: str, username: str = "") -> Path:
+def _normalize_jenkins_cache_root(cache_root: str, username: str = "", *, create: bool = True) -> Path:
     """Normalize cache root path and ensure the directory exists.
 
     Args:
         cache_root: Explicit cache root path (from frontend).
         username: Reserved for future per-user override. Currently unused
                   because the frontend already embeds the username in the path.
+        create: 없으면 만들지 여부. **읽기 전용 조회는 반드시 False** — 목록 조회가
+                디렉터리를 만들면 "없는 캐시"가 조회만으로 생겨나고, 오타 난 경로도
+                빈 폴더로 실재하게 돼 진단이 뒤집힌다. 기본 True 는 기존 쓰기 경로 유지.
     """
     if cache_root:
         base = Path(cache_root).expanduser().resolve()
@@ -96,10 +92,11 @@ def _normalize_jenkins_cache_root(cache_root: str, username: str = "") -> Path:
         base = (Path.home() / ".devops_pro_cache").resolve()
     # Ensure the cache directory tree exists — first-time sync for a new project
     # was failing because parents didn't exist yet.
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    if create:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:  # silent-ok — 기존 동작 유지. 생성 실패는 곧이어 쓰기 시점에
+            pass           #   더 구체적인 오류로 드러난다(여기서 삼켜도 정보가 사라지지 않음)
     return base
 
 
@@ -206,8 +203,11 @@ def _jenkins_report_publish_impl(req: JenkinsPublishRequest, job_id: str = "") -
     try:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         job_slug = _job_slug(req.job_url)
-        dest_dir = (report_dir / "local_upload" / job_slug / ts).resolve()
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        # ⚠ `mkdir(exist_ok=True)` 는 폴더를 **공유**시킨다 — 같은 job 을 같은 초에 두 번
+        #   올리면 두 업로드가 한 폴더에 섞이고 같은 이름의 파일은 서로 덮는다.
+        #   폴더 자체를 원자 선점해 비켜간다.
+        from backend.services.output_paths import reserve_unique_dir
+        dest_dir = reserve_unique_dir(report_dir / "local_upload" / job_slug / ts).resolve()
         files = [p for p in source_dir.rglob("*") if p.is_file()]
         total = max(1, len(files))
         copied = 0

@@ -38,6 +38,62 @@ syntax-check:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
+# Ruff + ESLint (둘 다 변경 라인 한정 ratchet) + SKILL.md frontmatter
+# — Claude Code 훅 밖에서도 강제
+ruff-eslint-frontmatter:
+  stage: lint
+  tags:
+    - shared
+  variables:
+    GIT_DEPTH: "0"   # before-SHA 가 여러 커밋 뒤일 수 있어 전체 이력 필요
+  before_script:
+    # ⚠ `2>$null; $true` 를 뗐다(2026-09-03) — 아래 unit-tests 잡과 같은 규약: 설치 실패를
+    #   **보이게** 하되 러너 동작을 로컬에서 검증할 수 없어 죽이지는 않는다.
+    - |
+      python -m pip install --no-build-isolation ruff pyyaml
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: ruff/pyyaml 설치 실패(exit $LASTEXITCODE) — 아래 ratchet 이 DISABLED 로 실패할 수 있다" }
+      $global:LASTEXITCODE = 0
+  script:
+    - echo "=== Ruff ratchet + frontmatter (changed only) ==="
+    - |
+      # MR 은 diff base, push 는 before-SHA 기준(멀티커밋 push 의 이전 커밋도 포함).
+      # 빈/zero/도달불가 SHA 면 HEAD~1 로 폴백 → 빈 range 로 인한 fail-open 차단.
+      $base = if ($env:CI_MERGE_REQUEST_DIFF_BASE_SHA) { $env:CI_MERGE_REQUEST_DIFF_BASE_SHA } else { $env:CI_COMMIT_BEFORE_SHA }
+      $zero = "0000000000000000000000000000000000000000"
+      if (-not $base -or $base -eq $zero) { $base = "HEAD~1" }
+      git cat-file -e "$base^{commit}" 2>$null
+      if ($LASTEXITCODE -ne 0) { $base = "HEAD~1" }
+      Write-Host "diff base = $base"
+      $changed = git diff --name-only $base HEAD 2>$null
+      $rc = 0
+      $py = @($changed | Where-Object { $_ -match '\.py$' })
+      $skill = @($changed | Where-Object { $_ -match 'SKILL\.md$' })
+      # 확장자는 eslint.config.js 범위(js,jsx)와 일치. node_modules 배제 필수 —
+      # PowerShell 커맨드라인 32,767자 한계를 tracked node_modules 가 넘긴다.
+      $js = @($changed | Where-Object { $_ -match 'frontend-v2/.*\.(js|jsx)$' -and $_ -notmatch '/node_modules/' })
+      if ($py.Count -gt 0) {
+        # ratchet: backlog(1072건) 익사 방지 위해 변경 라인의 신규 위반만
+        python scripts/ruff_ratchet.py --base $base @py
+        if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+      } else { Write-Host "No changed .py" }
+      if ($js.Count -gt 0) {
+        # 동일 ratchet(레거시 error 101건 제외). eslint 는 로컬 바이너리를 직접 부르므로
+        # node_modules 가 필요하다 — 변경된 JS 가 있을 때만 설치해 lint stage 를 가볍게 유지.
+        Push-Location frontend-v2; npm ci; Pop-Location
+        python scripts/eslint_ratchet.py --base $base @js
+        if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+      } else { Write-Host "No changed frontend-v2 JS/JSX" }
+      if ($skill.Count -gt 0) {
+        python scripts/check_skill_frontmatter.py @skill
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+      }
+      if ($rc -ne 0) { exit $rc }
+      Write-Host "Lint OK"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: false
+
 # Unit tests
 unit-tests:
   stage: test
@@ -45,13 +101,36 @@ unit-tests:
     - shared
   before_script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
-    - python -m pip install --no-build-isolation -r requirements-dev.txt 2>$null; $true
-    - python -m pip install --no-build-isolation -r requirements-core.txt 2>$null; $true
+    # ⚠ `2>$null; $true` 를 뗐다 — stderr 를 버리고 종료코드를 무력화하면 설치 실패가
+    #   **흔적 없이** 사라지고, 뒤이어 테스트가 ModuleNotFoundError 로 죽었을 때 원인이
+    #   설치 실패라는 신호가 이미 없다. 여기서는 **보이게만** 하고 죽이지는 않는다:
+    #   이 러너는 의도적으로 core+dev 만 설치해 테스트 폐포가 축소된 환경이고(아래 주석),
+    #   러너 동작을 로컬에서 검증할 수 없어 fail-fast 로 바꾸는 건 별건으로 남긴다.
+    - |
+      python -m pip install --no-build-isolation -r requirements-dev.txt
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: requirements-dev.txt 설치 실패(exit $LASTEXITCODE) — 이후 실패는 의존성 부재일 수 있다" }
+      $global:LASTEXITCODE = 0
+    - |
+      python -m pip install --no-build-isolation -r requirements-core.txt
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: requirements-core.txt 설치 실패(exit $LASTEXITCODE) — 이후 실패는 의존성 부재일 수 있다" }
+      $global:LASTEXITCODE = 0
   script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
-    - python -m pip install --no-build-isolation pytest-cov 2>$null; $true
-    - python -m pytest tests/unit/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov-report=term --cov-fail-under=25
+    - |
+      python -m pip install --no-build-isolation pytest-cov
+      if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: pytest-cov 설치 실패(exit $LASTEXITCODE) — 커버리지 옵션이 거부돼 테스트가 안 돌 수 있다" }
+      $global:LASTEXITCODE = 0
+    # scripts 포함 — 훅(quality_check/posttool_dispatch/ruff_ratchet 등)이 커버리지
+    # 게이트에 보이게(pyproject source 와 정합). fail-under 는 25 유지(GitLab 러너는
+    # core+dev 만 설치해 테스트 폐포가 축소 — 축소 환경 커버리지 미측정이라 상향 보류).
+    # ⚠ `tests/integration/`·`tests/e2e/` 추가(2026-08-21). 이 게이트가 `tests/unit/` 만
+    #   돌아서 integration 56건이 17일간 401 로 죽어 있었는데 아무도 몰랐다.
+    #   루트 직속 3파일도 편입돼 **제외 0** — `tests/unit/test_gate_reach.py` 의 `_EXEMPT = {}`
+    #   가 비어 있는 것이 정상이고, 그 가드가 새 사각지대를 막는다(2026-09-03 정정).
+    # `-n auto`: 로컬 pre-commit 과 같은 병렬 실행(xdist 는 requirements-dev.txt). 직렬은
+    #   같은 스위트가 3배 이상 걸렸다(2026-09-03 B-1).
+    - python -m pytest tests/ -q -n auto --dist loadfile --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

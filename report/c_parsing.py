@@ -1,15 +1,31 @@
 """C code parsing utilities for extracting prototypes, definitions, macros, and globals.
 
-Canonical low-level C parsing lives here.  ``report_gen.source_parser``
-re-uses these functions via its own copies (kept in sync); higher-level
-modules (e.g. report_gen.uds_generator) should import from
-``report_gen.source_parser`` to avoid circular dependencies.
+⚠ **이 판은 canonical 이 아니고, `report_gen.source_parser` 와 동기화돼 있지도 않다.**
+
+정본은 ``report_gen.source_parser`` 다. 프로덕션(`uds_generator` 등)은 전부 그쪽을
+쓰고, 여기는 ``report_generator`` 하위호환 shim 의 재수출 대상으로만 남아 있다
+(프로덕션 호출부 0건 — 2026-08-26 실측).
+
+실측 차이(PDS64_RD 헤더 51개):
+
+* 함수 **이름** 집합은 같다 — 189 vs 189, 차집합 0.
+* ``_extract_c_prototypes`` / ``_extract_c_definitions`` 의 **튜플 폭이 다르다**:
+  여기는 3-tuple ``(name, params, is_extern)``, 정본은 4-tuple 로 **반환 타입**을
+  하나 더 낸다. 그래서 여기 판으로는 ``__interrupt void`` 든 ``U8`` 이든 **반환
+  타입을 알 수 없다**.
+
+⚠ 이 어긋남은 이미 사고를 냈다 — 커밋 43a2f99 가 정본을 3→4 tuple 로 넓혔을 때
+  ``_scan_source_function_names`` 소비처만 3-tuple 로 남아 **C 파일이 하나라도
+  있으면 100% ValueError** 였고, 침묵 표면이 그것을 4개월간 감췄다
+  (``tests/unit/test_static_analysis_round_fixes.py`` §2 참조).
+
+→ 새 코드는 여기서 import 하지 말고 ``report_gen.source_parser`` 를 쓸 것.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 
 def _strip_c_comments(text: str) -> str:

@@ -1,7 +1,8 @@
 """Pydantic request/response models for the backend API."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -47,6 +48,9 @@ class JenkinsBuildsRequest(BaseModel):
     api_token: str
     limit: int = 30
     verify_tls: bool = True
+    # 선택: 주면 빌드 목록에 per-build SVN revision을 부착한다(git 파이프라인 잡은 Jenkins에
+    # 소스 revision이 없어 빌드 시각→svn 날짜-revision으로 되찾는다). 없으면 기존과 동일.
+    scm_id: str = ""
 
 
 class JenkinsBuildInfoRequest(BaseModel):
@@ -112,10 +116,34 @@ class ScmLinkedDocs(BaseModel):
     sds: str = ""
     hsis: str = ""
     stp: str = ""
+    # 시스템 레벨 문서 — SyRS(상위 시스템요구 docx), SyTS/SyITS(시스템 시험/통합시험 결과 xlsx).
+    # ScmLinkedDocs에 정의돼야 model_dump 직렬화에서 살아남아 프론트가 경로를 받고,
+    # scm.py allowed_prefixes 자동병합으로 cloudium 워커 접근 prefix가 등록된다.
+    syrs: str = ""
+    syts: str = ""
+    syits: str = ""
     # VectorCAST 결과 로그 경로(들). 부트로더/FBL/APP 등 결과가 별도 파일로 나올 수
     # 있어 단일 문자열이 아닌 복수 경로 list. 각 경로는 vectorcast_rag.json 파일 또는
     # 그 상위 폴더. SwUT/SwIT 로그처럼 SCM별로 설정의 '연결 문서 경로'에서 등록.
     vectorcast: List[str] = Field(default_factory=list)
+    # 문서별 **생성 템플릿**. 형식이 서로 다르다 — UDS 는 .docx, 시험 규격서는 .xlsm 이다.
+    # 예전엔 이 필드가 아예 없어서 프론트가 설정의 `docPaths.template` **하나**를
+    # UDS(`uds_template_path`)와 시험문서(`template_path`) 양쪽에 같이 보냈다. 형식이
+    # 다른 두 자리에 같은 경로가 가므로 한쪽은 반드시 틀린다(라이브에서 준비 게이트의
+    # '템플릿' 항목이 어느 프로젝트에서도 채워지지 않은 이유이기도 하다).
+    # ⚠ SwUT/SwIT 빌더 템플릿은 여기가 아니라 `config/swut_meta.json`
+    #   `template_paths` 가 프로젝트별로 관리한다 — 두 곳에 두면 갈라진다.
+    uds_template: str = ""
+    sts_template: str = ""
+    suts_template: str = ""
+    sits_template: str = ""
+    # 정적분석 산출물 폴더 경로(들) — 보통 회사 SCM의 '09.정적분석/01.Static Analysis' 폴더
+    # 하나를 등록하면 그 안의 4종 리포트(CodeSonar PDF / QAC HIS PDF / CPD XML / CodeEye PDF)를
+    # 모두 파싱한다. AnalysisSection '정적분석 불러오기'가 linked_docs.codesonar를 읽으므로,
+    # 이 필드가 ScmLinkedDocs에 정의돼 있어야 model_dump 직렬화에서 살아남아 프론트가 경로를
+    # 받는다(미정의 시 누락 → '등록된 정적분석 경로 없음'). scm.py의 allowed_prefixes 자동
+    # 병합(linked.model_dump().values())에도 포함돼 cloudium 접근 prefix가 자동 등록된다.
+    codesonar: List[str] = Field(default_factory=list)
 
 
 class ScmRegistryEntry(BaseModel):
@@ -131,6 +159,18 @@ class ScmRegistryEntry(BaseModel):
     watch_patterns: List[str] = Field(default_factory=lambda: ["*.c", "*.h"])
     ignore_patterns: List[str] = Field(default_factory=list)
     webhook_secret_env: str = ""
+    # 시험 결과 빌더(SwUT/SwIT/통합)가 쓸 **양식 설정 키**.
+    #
+    # SCM id 와 `config/swut_meta.json` 의 project_id 는 **다른 어휘**다 — 실측:
+    #   SCM        hdpdm01 · kjpds02 · kjpds02_pv
+    #   swut_meta  HDPDM01 · KJPDS02            ← `kjpds02_pv` 가 없다
+    # 매핑이 없어서 빌더 폼의 하드코딩 기본값(`HDPDM01`)이 그대로 쓰였고, KJPDS02_PV 를
+    # 보면서 [생성]을 누르면 **남의 프로젝트 문서**가 나왔다(사용자 보고).
+    #
+    # ⚠ 자동 유추(`kjpds02_pv` → `KJPDS02`)를 하지 않는다 — 프로젝트 명명이 바뀌면
+    #   조용히 틀리고, 그 조용한 실패가 이 저장소의 반복 결함이다. 비우면 비운 대로
+    #   두고 화면이 "지정 필요" 라고 말한다.
+    builder_project_id: str = ""
     linked_docs: ScmLinkedDocs = Field(default_factory=ScmLinkedDocs)
     created_at: str = ""
     updated_at: str = ""
@@ -155,6 +195,8 @@ class ScmRegisterRequest(BaseModel):
     watch_patterns: List[str] = Field(default_factory=lambda: ["*.c", "*.h"])
     ignore_patterns: List[str] = Field(default_factory=list)
     webhook_secret_env: str = ""
+    # 시험 결과 빌더가 쓸 양식 설정 키(`ScmRegistryEntry.builder_project_id` 주석 참조).
+    builder_project_id: str = ""
     linked_docs: ScmLinkedDocs = Field(default_factory=ScmLinkedDocs)
 
 
@@ -170,6 +212,7 @@ class ScmUpdateRequest(BaseModel):
     watch_patterns: Optional[List[str]] = None
     ignore_patterns: Optional[List[str]] = None
     webhook_secret_env: Optional[str] = None
+    builder_project_id: Optional[str] = None
     linked_docs: Optional[ScmLinkedDocs] = None
 
 
@@ -224,23 +267,52 @@ class JenkinsReportRequest(BaseModel):
         return v
 
 
+class CodeSonarRequest(BaseModel):
+    """CodeSonar(정적분석) PDF 로드 요청 — SCM 등록 폴더(또는 PDF) 경로 목록.
+
+    paths 각 항목은 CodeSonar PDF 파일이거나 그 상위 폴더(재귀 탐색)이다. cloudium 모드면
+    worker IPC로 read. 미지정/local 모드면 빈 결과.
+    """
+
+    paths: List[str] = []
+
+    @field_validator("paths")
+    @classmethod
+    def _check_paths(cls, v: List[str]) -> List[str]:
+        # vcast_log_paths와 동일한 입력 표면 제한(DoS/주입 방어).
+        if v is None:
+            return []
+        if len(v) > 16:
+            raise ValueError("paths는 최대 16개까지 허용됩니다")
+        for item in v:
+            s = str(item or "")
+            if len(s) > 500:
+                raise ValueError("paths 항목 길이는 500자 이하여야 합니다")
+            if "\n" in s or "\r" in s:
+                raise ValueError("paths 항목에 줄바꿈 금지")
+        return v
+
+
 class JenkinsCallTreeRequest(JenkinsReportRequest):
     source_root: Optional[str] = None
-    entry: str = ""
-    max_depth: int = 5
+    entry: str = Field("", max_length=4096)
+    all_roots: bool = False  # True면 entry 무시하고 in-degree 0 함수(+순환 대표)를 자동 루트로 전체 forest 구성
+    reverse: bool = False     # True면 호출 그래프 반전 → '누가 이 함수를 호출하나(called-by)' 역방향 트리
+    max_depth: int = Field(5, ge=1, le=20)
     include_paths: List[str] = []
     exclude_paths: List[str] = []
-    max_files: int = 2000
+    max_files: int = Field(2000, ge=1, le=10000)
     include_external: bool = False
     compile_commands_path: Optional[str] = None
     output_format: str = "json"
+    engine: str = "precise"  # "precise"(tree-sitter) | "regex". precise 미가용 시 자동 regex 폴백.
     external_map: List[Dict[str, Any]] = []
-    html_template: Optional[str] = None
+    html_template: Optional[str] = Field(None, max_length=200000)
 
 
 class CallTreePreviewRequest(BaseModel):
     call_tree: Dict[str, Any]
-    html_template: Optional[str] = None
+    html_template: Optional[str] = Field(None, max_length=200000)
 
 
 class JenkinsPublishRequest(JenkinsReportRequest):
@@ -300,13 +372,25 @@ class UdsPublishRequest(BaseModel):
 
 class ChatHistoryItem(BaseModel):
     role: str
-    text: str
+    text: str = Field("", max_length=8000)
 
 
 class ChatJenkinsConfig(BaseModel):
     job_url: str = ""
     cache_root: str = ""
     build_selector: str = "lastSuccessfulBuild"
+
+    @field_validator("job_url")
+    @classmethod
+    def _validate_job_url(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            return v
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("job_url must start with http:// or https://")
+        if len(v) > 2000:
+            raise ValueError("job_url too long")
+        return v
 
 
 class ApprovalRequestPayload(BaseModel):
@@ -375,13 +459,13 @@ class ChatResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     mode: str = "local"
-    question: str
+    question: str = Field(..., max_length=8000)
     session_id: Optional[str] = None
     report_dir: Optional[str] = None
     llm_model: Optional[str] = None
     oai_config_path: Optional[str] = None
     ui_context: Optional[Dict[str, Any]] = None
-    history: List[ChatHistoryItem] = Field(default_factory=list)
+    history: List[ChatHistoryItem] = Field(default_factory=list, max_length=200)
     jenkins: Optional[ChatJenkinsConfig] = None
     thread_id: Optional[str] = None  # 기존 대화 이어하기 (서버 이력 로드)
     save_history: bool = True  # 서버측 이력 저장 여부
@@ -423,7 +507,7 @@ class ChatConversationListResponse(BaseModel):
 
 
 class ChatTitleUpdateRequest(BaseModel):
-    title: str
+    title: str = Field(..., max_length=500)
 
 
 # ── Local ─────────────────────────────────────────────────────────────
@@ -586,6 +670,81 @@ class ImpactAnalyzeRequest(BaseModel):
     include_ai_guide: bool = False
 
 
+class ImpactAiGuideRequest(BaseModel):
+    """POST /api/impact/ai-guide 입력 — 과거 raw Request.json()으로 무검증 수신하던 것을
+    타입 계약으로 승격(analyze와 대칭). generate_impact_guide가 shape 세부는 처리하므로
+    값 타입은 느슨하게 두되 최상위 필드/타입만 강제한다."""
+    changed_types: Dict[str, Any] = Field(default_factory=dict)
+    impact_groups: Dict[str, Any] = Field(default_factory=dict)
+    by_name: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ImpactExplainChangeRequest(BaseModel):
+    """POST /api/impact/explain-change 입력 — 단일 함수 변경의 자연어 설명(Gemini).
+
+    선언 원문(before/after)은 UI가 change_details에서 넘긴 svn diff 원문. 값 길이는 상한을
+    둬 과대 페이로드/프롬프트 남용을 막는다(선언 라인 수준이라 4000자면 충분).
+    function_diff는 함수 본문 변경 hunk(BODY 함수도 실제 코드 근거 제공) — 서버에서 60줄 cap된
+    값이라 8000자면 충분하다."""
+    function: str = Field(default="", max_length=200)
+    change_type: str = Field(default="", max_length=40)
+    before: str = Field(default="", max_length=4000)
+    after: str = Field(default="", max_length=4000)
+    function_diff: str = Field(default="", max_length=8000)
+    asil: str = Field(default="", max_length=20)
+    module: str = Field(default="", max_length=200)
+    requirements: List[str] = Field(default_factory=list, max_length=20)
+    # 영향 함수의 현재 문서 내용(원문) — LLM이 '원문→제안'을 실제 문장 근거로 생성.
+    # 프론트가 docContentFor()로 조립(uds/sds/suts + sts/sits TC). 값은 서버 파싱 단계에서
+    # 이미 캡된 내용이고, 소비처(explain_function_change)가 재차 캡하므로 여기선 dict로 수용.
+    doc_content: Dict[str, Any] = Field(default_factory=dict)
+    # 간접영향 근거 — {hop, via, seed}. 간접(비변경) 함수가 "왜 영향받는지"(경유 노드·최초 변경함수)를
+    # LLM이 콜체인 계약 유지 관점으로 설명하게 한다. 직접 함수는 빈 dict. 값은 함수명 문자열이라 소규모.
+    impact_path: Dict[str, Any] = Field(default_factory=dict)
+    # 비의미 변경(주석/포맷/이동 only) — True면 LLM에 '문서 수정 불필요'를 지시하고 신규 TC·문서 편집을
+    # 제안하지 않게 한다(프론트 extractDiffElements.commentOnly/noSemanticChange 파생). 결정론 억제와 짝.
+    no_semantic_change: bool = Field(default=False)
+
+
+class ImpactDocDraftRequest(BaseModel):
+    """POST /api/impact/doc-draft 입력 — 한 함수의 **전체** 문서 초안(온디맨드).
+
+    job JSON에는 요약(SUTS 10 시퀀스 / SITS 6 서브케이스)만 싣고, 사용자가 '전체 보기'를
+    누를 때만 생성기 기본값(24 / 14) 전량을 만든다 — 전부 job에 실으면 페이로드가 폭증한다.
+    소스가 미해결(cloudium)이면 문서 원문 기준으로 자동 폴백하고 `source`로 근거를 밝힌다.
+    """
+    job_id: str = Field(default="", max_length=200)
+    function: str = Field(default="", max_length=200)
+    doc: str = Field(default="suts", max_length=10)
+
+
+class ImpactDocProseRequest(BaseModel):
+    """POST /api/impact/doc-prose 입력 — 결정론 초안에 붙일 **서술문만** 생성(선택 기능).
+
+    값(경계값·Input/Expected·TC ID·판정)은 결정론이 소유하고 AI가 바꾸지 않는다. 여기 오는
+    `deterministic`은 프론트가 이미 화면에 그린 초안 데이터 그대로이며, 서버는 그 안에 등장한
+    숫자·식별자만 허용 집합으로 삼아 응답을 사후 검사한다(환각 필드 폐기).
+    """
+    function: str = Field(default="", max_length=200)
+    signature: str = Field(default="", max_length=4000)
+    function_diff: str = Field(default="", max_length=8000)
+    # 결정론 초안(문서별 노드 + 표 행). 프롬프트 주입 전 12000자로 자르지만, 그 절단은 **직렬화
+    # 이후**에 일어나므로 대용량 body가 그대로 파싱·직렬화된다 — 입구에서 크기를 막는다.
+    deterministic: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("deterministic")
+    @classmethod
+    def _cap_deterministic(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        """직렬화 크기 상한(256KB). 프론트가 보내는 실측은 수 KB 수준이라 정상 사용엔 무영향."""
+        try:
+            size = len(json.dumps(v, ensure_ascii=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("deterministic must be JSON-serializable") from exc
+        if size > 256_000:
+            raise ValueError(f"deterministic payload too large: {size} bytes (max 256000)")
+        return v
+
+
 class TestGenerateRequest(BaseModel):
     source_root: str
     target_function: str
@@ -658,6 +817,17 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     # 모아 전달. SDS→UDS bridge가 전체 함수를 매칭하도록 매트릭스 uds_all_funcs를 시드.
     # UDS 함수 ~1k(이름+ID 2배=~2k) 상한의 넉넉한 배수.
     uds_function_ids: List[str] = Field(default_factory=list, max_length=20000)
+    # ASIL 결합(P5) — {컴포넌트/함수명(lower): ASIL}. SDS 추출(component_asil)에서 echo.
+    # 매트릭스가 요구사항별 ASIL(연결 컴포넌트 max)을 도출해 행/링크테이블에 부착.
+    # 컴포넌트 ~1k(SwCom+함수)의 넉넉한 배수 상한.
+    component_asil: Dict[str, str] = Field(default_factory=dict, max_length=20000)
+    # SwUDS 문서 직독 함수 ASIL — {함수명(lower): ASIL}. uds extract-mapping이 v3.02 kv-표에서
+    # 추출해 echo. 매트릭스가 comp_asil_map에 max-merge(SDS 컴포넌트만으론 UDS 함수 안전등급이
+    # 누락돼 요구사항 ASIL under-report). 함수 ~1k의 넉넉한 배수 상한(component_asil과 동형).
+    uds_function_asil: Dict[str, str] = Field(default_factory=dict, max_length=20000)
+    # 시스템 레벨 인터페이스 밴드 — hsis extract가 요구사항↔인터페이스 신호(HSI_xx/SW변수)로 전달.
+    # 신호 ~수백 행 상한의 넉넉한 배수.
+    hsis_pairs: List[Dict[str, Any]] = Field(default_factory=list, max_length=20000)
     # Optional cache-persist hints (for dashboard summary quick-load)
     job_url: Optional[str] = None
     cache_root: Optional[str] = None
@@ -686,6 +856,15 @@ class SwUTBuildRequest(BaseModel):
 
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
+    # 품질 이력의 **프로젝트 축**. 화면이 아는 SCM entry id 를 그대로 실어 보낸다.
+    #
+    # ⚠ 없으면 recorder 가 `project_root`(= 빌더 project_id)에서 **추측**하는데, 그 추측이
+    #   틀리는 실환경이 있다(2026-08-24 실측): 문자열 "KJPDS02" 가 SCM entry `kjpds02` 의
+    #   **id** 이면서 동시에 `kjpds02_pv` 의 **builder_project_id** 다. `resolve_scm_id` 는
+    #   id 정확일치를 먼저 잡아 PV 산출물을 ToolDev 프로젝트로 귀속시켰고, 생성 현황 보드는
+    #   `kjpds02_pv` 로 조회하므로 **방금 만든 문서가 영영 "미생성"** 이었다. 문자열만으로는
+    #   갈리지 않는 모호함이라 추측으로 풀 수 없다 — 아는 쪽(화면)이 실어 보내야 한다.
+    scm_id: str = Field("", max_length=100)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
     # 13차 W7: $ anchor 추가 — garbage suffix 차단
     test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
@@ -811,6 +990,15 @@ class SwITBuildRequest(BaseModel):
 
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
+    # 품질 이력의 **프로젝트 축**. 화면이 아는 SCM entry id 를 그대로 실어 보낸다.
+    #
+    # ⚠ 없으면 recorder 가 `project_root`(= 빌더 project_id)에서 **추측**하는데, 그 추측이
+    #   틀리는 실환경이 있다(2026-08-24 실측): 문자열 "KJPDS02" 가 SCM entry `kjpds02` 의
+    #   **id** 이면서 동시에 `kjpds02_pv` 의 **builder_project_id** 다. `resolve_scm_id` 는
+    #   id 정확일치를 먼저 잡아 PV 산출물을 ToolDev 프로젝트로 귀속시켰고, 생성 현황 보드는
+    #   `kjpds02_pv` 로 조회하므로 **방금 만든 문서가 영영 "미생성"** 이었다. 문자열만으로는
+    #   갈리지 않는 모호함이라 추측으로 풀 수 없다 — 아는 쪽(화면)이 실어 보내야 한다.
+    scm_id: str = Field("", max_length=100)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
     test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 
@@ -1032,6 +1220,27 @@ class SwUTConsistencyCheckRequest(BaseModel):
         return v
 
 
+class SwUTDocSummaryRequest(BaseModel):
+    """단일 산출물(SwUTCV Coverage .xlsx 또는 SUTR .xlsm) 직접 파싱 요청 (정합성 비교 없이).
+
+    SwUTConsistencyCheckRequest와 달리 path 1개만 받아 해당 문서의 결과 요약만 반환.
+    kind='coverage' → coverage_summary, kind='report' → sutr_summary.
+
+    입력 표면 매트릭스:
+      - path: maxlen 500, 줄바꿈 금지 (헤더 인젝션 안전), 필수
+      - kind: 'coverage' | 'report' (Literal 강제)
+    """
+    path: str = Field(..., min_length=1, max_length=500)
+    kind: Literal["coverage", "report"]
+
+    @field_validator("path")
+    @classmethod
+    def _no_newline_doc_path(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
 # ── SwIT Consistency Check (35차 라운드) ──────────────────────────────
 
 class AddAllowedPrefixRequest(BaseModel):
@@ -1098,6 +1307,27 @@ class SwITConsistencyCheckRequest(BaseModel):
         return v
 
 
+class SwITDocSummaryRequest(BaseModel):
+    """단일 산출물(SwITCV Coverage .xlsx 또는 SITR .xlsm) 직접 파싱 요청 (정합성 비교 없이).
+
+    SwUTDocSummaryRequest와 동일 패턴 — SwIT용. kind='coverage' → coverage_summary,
+    kind='report' → sutr_summary(SITR 결과).
+
+    입력 표면 매트릭스:
+      - path: maxlen 500, 줄바꿈 금지 (헤더 인젝션 안전), 필수
+      - kind: 'coverage' | 'report' (Literal 강제)
+    """
+    path: str = Field(..., min_length=1, max_length=500)
+    kind: Literal["coverage", "report"]
+
+    @field_validator("path")
+    @classmethod
+    def _no_newline_swit_doc_path(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
 # ── SW Test Result Report — 전 레벨 통합 Summary (ES95411) ──────────────────
 # 완성된 레벨별 산출물(SwUTCR/SwITCR/SwSA 등 — ES95411-style detail 시트 보유)을
 # 파싱하여 마스터 리포트의 Summary 시트(ST/UT/IT/ET)를 채운 .xlsm을 생성. build와
@@ -1119,6 +1349,15 @@ class SwReportBuildRequest(BaseModel):
 
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
+    # 품질 이력의 **프로젝트 축**. 화면이 아는 SCM entry id 를 그대로 실어 보낸다.
+    #
+    # ⚠ 없으면 recorder 가 `project_root`(= 빌더 project_id)에서 **추측**하는데, 그 추측이
+    #   틀리는 실환경이 있다(2026-08-24 실측): 문자열 "KJPDS02" 가 SCM entry `kjpds02` 의
+    #   **id** 이면서 동시에 `kjpds02_pv` 의 **builder_project_id** 다. `resolve_scm_id` 는
+    #   id 정확일치를 먼저 잡아 PV 산출물을 ToolDev 프로젝트로 귀속시켰고, 생성 현황 보드는
+    #   `kjpds02_pv` 로 조회하므로 **방금 만든 문서가 영영 "미생성"** 이었다. 문자열만으로는
+    #   갈리지 않는 모호함이라 추측으로 풀 수 없다 — 아는 쪽(화면)이 실어 보내야 한다.
+    scm_id: str = Field("", max_length=100)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
     test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 

@@ -1,28 +1,27 @@
 """Auto-generated router: vcast"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
-import json
-import traceback
 import logging
-from pathlib import Path
+import traceback
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
 
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
+
+from backend.helpers import _resolve_cached_build_root
 from backend.schemas import (
     VCastGenerateExcelRequest,
-    VCastParseRequest,
     VCastProcessJenkinsRequest,
 )
-from backend.helpers import _resolve_cached_build_root
-from backend.services.vcast_parser import (
-    VectorCASTParser,
-    VCASTVersion,
-    ReportType,
-    parse_vcast_report,
-    MetricsBank,
-)
-from backend.services.vcast_excel_generator import generate_testcase_excel, generate_metrics_excel
+from backend.services.output_paths import drop_empty_reservation, reserve_unique_path
 from backend.services.paths import safe_resolve_under
+from backend.services.vcast_excel_generator import generate_metrics_excel, generate_testcase_excel
+from backend.services.vcast_parser import (
+    MetricsBank,
+    ReportType,
+    VCASTVersion,
+    parse_vcast_report,
+)
 
 repo_root = Path(__file__).resolve().parents[2]
 
@@ -241,6 +240,7 @@ async def vcast_parse(
 @router.post("/api/vcast/generate-excel")
 def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
     """파싱된 데이터로 Excel 리포트 생성"""
+    reserved: Optional[Path] = None
     try:
         if not isinstance(req.parsed_data, dict):
             raise HTTPException(status_code=400, detail="parsed_data must be an object")
@@ -252,25 +252,44 @@ def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # 파일명 생성
+        # ⚠ `output_filename` 은 **클라이언트가 준 문자열**이다. `output_dir / filename` 은
+        #   봉인이 아니다 — `../` 는 물론이고 **절대경로는 기준 디렉터리를 통째로 대체한다**
+        #   (실측: `Path("D:/…/vcast_excel") / "C:/Windows/Temp/x.xlsx"` == `C:/Windows/Temp/x.xlsx`).
+        #   확장자 강제(`.xlsx`)가 유일한 제약이었으므로 백엔드 프로세스가 쓸 수 있는 곳의
+        #   **임의 .xlsx 를 덮어쓸 수 있었다** — 입력 요구문서(`260105/docs/*.xlsx`) 포함.
+        #   같은 파일의 다운로드 엔드포인트(`vcast_download_report`)는 이미
+        #   `safe_resolve_under` 를 쓴다. **읽기만 봉인하고 쓰기를 열어 둔 비대칭**이었다.
         if req.output_filename:
             filename = req.output_filename
             if not filename.endswith(".xlsx"):
                 filename += ".xlsx"
+            try:
+                want = safe_resolve_under(output_dir, filename)
+            except ValueError as exc:
+                # 클라이언트 입력 문제다 — `except Exception` 이 500 으로 뭉개지 않게 먼저 낸다.
+                raise HTTPException(status_code=400, detail=f"invalid output_filename: {exc}")
         else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"vcast_report_{ts}.xlsx"
-        
-        output_path = output_dir / filename
-        
+            want = output_dir / f"vcast_report_{ts}.xlsx"
+
+        # ⚠ 프론트가 보내는 이름은 **날짜(일) 단위**다
+        #   (`ReportGenSection.jsx`: `vcast_${type}_${YYYYMMDD}.xlsx`). "같은 초 경합"이
+        #   아니라 **같은 날이면 확정 충돌**이고, 키에 사용자·프로젝트가 없다. 선점하지
+        #   않으면 나중 요청이 앞 사용자의 산출물을 덮고, FileResponse 는 그걸 내려준다.
+        want.parent.mkdir(parents=True, exist_ok=True)
+        output_path = reserve_unique_path(want)
+        reserved = output_path
+        filename = output_path.name
+
         # Metrics 리포트인 경우
         if mode == "Metrics" or "statement_data" in req.parsed_data or "functions_data" in req.parsed_data:
             from backend.services.vcast_parser import (
-                MetricsBank,
-                MatixDataBank,
-                MatricStatementItem,
-                MatricFunCallItem,
                 CoverageItem,
+                MatixDataBank,
+                MatricFunCallItem,
+                MatricStatementItem,
                 MatricsType,
+                MetricsBank,
             )
             
             metrics_bank = MetricsBank()
@@ -414,8 +433,10 @@ def vcast_generate_excel(req: VCastGenerateExcelRequest) -> FileResponse:
                 raise HTTPException(status_code=500, detail="Excel generation failed")
     
     except HTTPException:
+        drop_empty_reservation(reserved)
         raise
     except Exception as e:
+        drop_empty_reservation(reserved)
         tb = traceback.format_exc()
         print(tb)
         raise HTTPException(status_code=500, detail=f"Excel generation error: {str(e)}")
@@ -502,9 +523,13 @@ def vcast_process_jenkins(req: VCastProcessJenkinsRequest) -> Dict[str, Any]:
                 "functions_units": len(parsed.functions_data or {}),
             })
         return result
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Process error: {str(e)}")
+
+    # ⚠ 이 try 안에서 404("cached build not found" 등)를 내는데 아래가 먹고 있었다.
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.error("vcast Jenkins 처리 실패:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Jenkins 리포트 처리 중 오류 발생")
 
 
 @router.get("/api/vcast/reports")
@@ -534,19 +559,30 @@ def vcast_download_report(filename: str) -> FileResponse:
     """생성된 Excel 리포트 다운로드"""
     try:
         reports_dir = repo_root / "reports" / "vcast_excel"
-        file_path = safe_resolve_under(reports_dir, filename)
-        
+        try:
+            file_path = safe_resolve_under(reports_dir, filename)
+        except ValueError as exc:
+            # 경로 이탈은 **클라이언트 오류**다. 500 으로 보내면 공격 시도가 서버 장애로
+            # 집계되고, 정상 오타와도 구분이 안 된다.
+            raise HTTPException(status_code=400, detail=f"invalid filename: {exc}")
+
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail="Report file not found")
-        
+
         return FileResponse(
             str(file_path),
-            filename=filename,
+            filename=file_path.name,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
+
+    # ⚠ 실측: 이게 없으면 위 404 가 **500 "Download error: 404: Report file not found"** 로
+    #   나간다. 의도한 상태코드가 통째로 사라지고, 내부 예외 문자열(절대경로 포함 가능)이
+    #   응답에 실려 나간다.
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.error("vcast 리포트 다운로드 실패:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="리포트 다운로드 중 오류 발생")
 
 
 @router.post("/api/vcast/scan-folder")
@@ -599,10 +635,10 @@ async def vcast_test_summary(req: Request) -> Dict[str, Any]:
         previous = body.get("previous_data")
 
         from backend.services.test_summary_service import (
-            classify_failures_bulk,
-            build_unit_breakdown,
-            evaluate_quality_gates,
             build_trend_analysis,
+            build_unit_breakdown,
+            classify_failures_bulk,
+            evaluate_quality_gates,
             generate_executive_summary,
         )
 

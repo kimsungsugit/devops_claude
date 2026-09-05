@@ -11,8 +11,8 @@ import pytest
 
 from backend.services import file_resolver
 from backend.services.file_resolver import (
-    CloudiumFileResolver,
     DEFAULT_GATE_PROCESS,
+    CloudiumFileResolver,
     LocalFileResolver,
     is_gate_running,
 )
@@ -29,13 +29,30 @@ def _reset_resolver_and_gate_cache(monkeypatch, tmp_path):
     생성되어 자동 통과되는 케이스 회피. 테스트용으로 _PROJECT_ROOT를 isolate된
     fake로 가짜 변경. workspace bypass 자체 검증은 개별 테스트에서 monkeypatch
     원복.
+
+    ⚠ teardown 은 **원래 값으로 복원**해야 한다. 예전엔 여기서도
+    `set_resolver(LocalFileResolver())` 를 불렀는데, 그건 복원이 아니라 **전역을
+    Local 로 고정**하는 것이라(모듈 전역 직접 변경 = monkeypatch 미개입) 이 파일이
+    돌고 나면 **이후 모든 테스트가 Local resolver 를 물려받았다**. 누설을 막으려던
+    fixture 가 곧 누설원이었다 — 실제로 test_routers.py 14건이 이 누설에 얹혀
+    통과하다가 단독 실행 시에만 실패했다(dev 머신 file_mode=cloudium).
+
+    ⚠ ping 예산: 게이트 검사는 `_MockWorker` 의 accept 스레드가 **0.5초 안에 스케줄
+    되기**를 요구한다. `-n auto`(18워커)로 CPU 가 포화되면 그 스레드가 제때 못 깨어
+    `PermissionError: Cloudium worker 미응답` 이 난다 — 코드 결함이 아니라 **테스트가
+    실시간 응답에 건 가정**이다. 실측: 부하 O 60회 중 13회 실패 / 부하 X 0회.
+    프로덕션 값(0.5초)은 실사용 live-ness 지연이라 정책이므로 건드리지 않고, 테스트에서만
+    넉넉히 준다. (`_ping_worker` 가 이 값을 **호출 시점에** 읽도록 고친 뒤에야 유효해졌다
+    — 기본 인자로 얼어붙어 있던 동안엔 이 monkeypatch 가 no-op 이었다.)
     """
+    monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 15.0)
+    _orig_resolver = file_resolver._resolver  # None 일 수 있음(lazy init 전)
     file_resolver.invalidate_gate_cache()
     file_resolver.set_resolver(file_resolver.LocalFileResolver())
     monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", tmp_path / "_isolated_fake_root")
     yield
     file_resolver.invalidate_gate_cache()
-    file_resolver.set_resolver(file_resolver.LocalFileResolver())
+    file_resolver._resolver = _orig_resolver
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +287,6 @@ def test_cloudium_user_home_bypass_does_not_leak_outside(monkeypatch, tmp_path):
 def test_cloudium_workspace_bypass_resolves_relative_paths(monkeypatch, tmp_path):
     """N16 fix: relative path(.devops_pro_cache 등)는 cwd 기준 abs 변환 후
     workspace bypass 적용. frontend가 cache_root="." 같은 relative 보내는 시나리오 회귀."""
-    import os
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     # cwd를 fake_workspace로 변경 — relative path가 그 안의 abs path가 됨
     fake_workspace = tmp_path / "fake_workspace"
@@ -472,6 +488,7 @@ def test_cloudium_prefix_exact_match_succeeds(mock_worker, tmp_path):
 # ---------------------------------------------------------------------------
 def test_file_mode_request_rejects_invalid_gate_process():
     from pydantic import ValidationError
+
     from backend.routers.health import FileModeRequest
     bad_values = [
         "../../evil.exe",
@@ -526,13 +543,14 @@ def test_cloudium_explicit_write_methods_all_raise(monkeypatch, tmp_path):
 # C1: preview-excel / preview-image이 Cloudium 게이트 미실행 시 403
 # ---------------------------------------------------------------------------
 def test_preview_excel_blocked_when_cloudium_gate_not_running(monkeypatch, tmp_path):
-    from backend.services.file_resolver import set_resolver, CloudiumFileResolver, LocalFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
 
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -546,7 +564,7 @@ def test_preview_excel_blocked_when_cloudium_gate_not_running(monkeypatch, tmp_p
 
 
 def test_preview_image_blocked_when_cloudium_path_not_allowed(monkeypatch, tmp_path):
-    from backend.services.file_resolver import set_resolver, CloudiumFileResolver, LocalFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
 
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     allowed = tmp_path / "ok"
@@ -558,6 +576,7 @@ def test_preview_image_blocked_when_cloudium_path_not_allowed(monkeypatch, tmp_p
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -575,13 +594,14 @@ def test_preview_excel_allows_through_gate_and_whitelist(monkeypatch, tmp_path):
     mock worker 없는 환경에서는 endpoint 단계에서 OSError → 403 반환.
     핵심 검증은 미들웨어가 CLOUDIUM_BLOCKED로 차단하지 않는 것.
     """
-    from backend.services.file_resolver import set_resolver, CloudiumFileResolver, LocalFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
 
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -631,8 +651,19 @@ def test_gate_cache_ttl_is_one_second():
     assert file_resolver._GATE_CACHE_TTL == 1.0
 
 
-def test_invalidate_gate_cache_resets_snapshot(mock_worker):
-    """invalidate_gate_cache 호출 시 다음 is_gate_running이 캐시 무시하고 재검사 (IPC ping)."""
+def test_invalidate_gate_cache_resets_snapshot(mock_worker, monkeypatch):
+    """invalidate_gate_cache 호출 시 다음 is_gate_running이 캐시 무시하고 재검사 (IPC ping).
+
+    ⚠ TTL 을 크게 고정한다. 프로덕션 `_GATE_CACHE_TTL = 1.0`(초)인데 첫 호출은 **실제 TCP
+    왕복**이라, 전체 스위트를 xdist 로 돌릴 때 그 왕복이 1초를 넘기면 두 번째 호출 시점에
+    캐시가 이미 만료돼 ping 이 한 번 더 가고 아래 단정이 깨진다. 실측: 이 파일은 격리 시
+    4/4 통과인데 전체 스위트에서 두 개 테스트가 서로 다른 라운드에 실패해 **커밋 게이트를
+    반복 차단**했다(게이트가 불안정하면 `--no-verify` 로 유도된다).
+
+    이 테스트가 검증할 대상은 **무효화 로직**이지 벽시계가 아니다. TTL 만료 자체는 아래
+    `test_gate_cache_expires_after_ttl` 이 시계를 통제해 따로 검증한다.
+    """
+    monkeypatch.setattr(file_resolver, "_GATE_CACHE_TTL", 3600.0)
     calls = {"n": 0}
     real_handler = mock_worker.handlers["ping"]
     def _counted_ping(args):
@@ -649,6 +680,34 @@ def test_invalidate_gate_cache_resets_snapshot(mock_worker):
     file_resolver.invalidate_gate_cache()
     file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
     assert calls["n"] == n_after_first + 1
+
+
+def test_gate_cache_expires_after_ttl(mock_worker, monkeypatch):
+    """TTL 만료 후에는 캐시를 안 쓰고 다시 ping 한다.
+
+    기존엔 `_GATE_CACHE_TTL == 1.0` 이라는 **값만** 단정하고 만료 **동작**은 어디서도
+    검증하지 않았다. 시계는 `time.monotonic` 을 대체해 통제한다 — 실제로 기다리면 그게
+    다시 벽시계 의존이 된다.
+
+    뮤테이션: `now - cached_ts < _GATE_CACHE_TTL` 을 무조건 True 로 바꾸면 ping 이 늘지 않아 실패.
+    """
+    monkeypatch.setattr(file_resolver, "_GATE_CACHE_TTL", 1.0)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(file_resolver.time, "monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+    real_handler = mock_worker.handlers["ping"]
+    mock_worker.handlers["ping"] = lambda args: (calls.__setitem__("n", calls["n"] + 1),
+                                                 real_handler(args))[1]
+
+    file_resolver.invalidate_gate_cache()
+    file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
+    first = calls["n"]
+    clock["t"] += 0.5                      # TTL 안 — 캐시 hit
+    file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
+    assert calls["n"] == first, "TTL 이내인데 재조회했다"
+    clock["t"] += 1.0                      # TTL 초과 — 재조회
+    file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
+    assert calls["n"] == first + 1, "TTL 을 넘겼는데 stale 캐시를 썼다"
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +732,7 @@ def test_public_api_in_all():
 
 def test_set_resolver_invalidates_gate_cache():
     """set_resolver는 게이트 캐시도 무효화해야 — 모드 전환 후 stale 캐시로 잘못된 read 허용 방지."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver
+    from backend.services.file_resolver import LocalFileResolver, set_resolver
 
     # 캐시에 stale True 넣기
     file_resolver._gate_cache = ("excel_rename_gui_v2.exe", True, 99999999.0)
@@ -713,7 +772,8 @@ def test_write_methods_have_explicit_signatures(monkeypatch, tmp_path):
 def test_set_resolver_skips_inspect_when_info_disabled(monkeypatch):
     """logger INFO 미활성 시 inspect.stack() 호출 비용을 회피해야 한다."""
     import inspect as _inspect
-    from backend.services.file_resolver import set_resolver, LocalFileResolver
+
+    from backend.services.file_resolver import LocalFileResolver, set_resolver
 
     calls = {"stack": 0}
     real_stack = _inspect.stack
@@ -735,7 +795,8 @@ def test_set_resolver_skips_inspect_when_info_disabled(monkeypatch):
 def test_set_resolver_uses_inspect_when_info_enabled(monkeypatch):
     """logger INFO 활성 시 caller 정보 수집 — 운영 추적성."""
     import inspect as _inspect
-    from backend.services.file_resolver import set_resolver, LocalFileResolver
+
+    from backend.services.file_resolver import LocalFileResolver, set_resolver
 
     calls = {"stack": 0}
     real_stack = _inspect.stack
@@ -755,12 +816,13 @@ def test_set_resolver_uses_inspect_when_info_enabled(monkeypatch):
 # ---------------------------------------------------------------------------
 def test_middleware_blocks_body_path_key_when_gate_off(monkeypatch, tmp_path):
     """미들웨어가 body의 'srs_path' 같은 PATH_KEYS를 검사 — 196곳 우회 차단."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -778,7 +840,7 @@ def test_middleware_blocks_body_path_key_when_gate_off(monkeypatch, tmp_path):
 
 def test_middleware_blocks_query_path_key_when_path_not_allowed(monkeypatch, tmp_path):
     """미들웨어가 query string의 PATH_KEYS도 검사."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     allowed = tmp_path / "ok"
     blocked = tmp_path / "block"
@@ -788,6 +850,7 @@ def test_middleware_blocks_query_path_key_when_path_not_allowed(monkeypatch, tmp
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -802,11 +865,12 @@ def test_middleware_blocks_query_path_key_when_path_not_allowed(monkeypatch, tmp
 
 def test_middleware_allows_local_mode(monkeypatch, tmp_path):
     """LOCAL 모드면 미들웨어 통과 — Cloudium 비활성 시 어떤 path든 허용."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver
+    from backend.services.file_resolver import LocalFileResolver, set_resolver
     set_resolver(LocalFileResolver())
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -820,12 +884,13 @@ def test_middleware_allows_local_mode(monkeypatch, tmp_path):
 
 def test_middleware_exempt_path_passes_in_cloudium(monkeypatch, tmp_path):
     """/api/file-mode 등 exempt path는 cloudium 모드여도 미들웨어 통과해야 — chicken-and-egg 방지."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)  # 게이트 OFF
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -846,12 +911,13 @@ def test_middleware_body_can_be_reread_by_endpoint(monkeypatch, tmp_path):
     검증은 (1) body 재구성 실패에 의한 422가 아님, (2) 미들웨어 차단(CLOUDIUM_BLOCKED)
     아님 — 즉 endpoint가 path를 정상 수신했다는 사실.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -871,12 +937,13 @@ def test_middleware_body_can_be_reread_by_endpoint(monkeypatch, tmp_path):
 
 def test_middleware_recursive_dict_scan(monkeypatch, tmp_path):
     """중첩된 dict의 PATH_KEYS도 검사 (예: { "config": { "path": ".." } })."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -895,11 +962,12 @@ def test_middleware_response_uses_detail_key_for_frontend_compat(monkeypatch, tm
 
     api.js: if (j.detail) msg = j.detail;  → detail 우선 추출.
     """
-    from backend.services.file_resolver import set_resolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     from starlette.testclient import TestClient
+
     from backend.main import app
     c = TestClient(app, raise_server_exceptions=False)
     c.headers["X-User"] = "test"
@@ -918,11 +986,12 @@ def test_middleware_response_uses_detail_key_for_frontend_compat(monkeypatch, tm
 # ---------------------------------------------------------------------------
 def test_middleware_blocks_multipart_form_path_field(monkeypatch, tmp_path):
     """multipart/form-data로 cache_root, template_path 등 보내도 게이트 검사 작동."""
-    from backend.services.file_resolver import set_resolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     from starlette.testclient import TestClient
+
     from backend.main import app
     c = TestClient(app, raise_server_exceptions=False)
     c.headers["X-User"] = "test"
@@ -937,11 +1006,12 @@ def test_middleware_blocks_multipart_form_path_field(monkeypatch, tmp_path):
 
 def test_middleware_blocks_urlencoded_form_path_field(monkeypatch, tmp_path):
     """application/x-www-form-urlencoded도 검사."""
-    from backend.services.file_resolver import set_resolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     from starlette.testclient import TestClient
+
     from backend.main import app
     c = TestClient(app, raise_server_exceptions=False)
     c.headers["X-User"] = "test"
@@ -992,19 +1062,57 @@ def test_autouse_fixture_resets_resolver_to_local():
 # ---------------------------------------------------------------------------
 # W2: 라우터 path 키 회귀 테스트 — PATH_KEYS 누락 자동 탐지
 # ---------------------------------------------------------------------------
+#
+# ⚠ **Pydantic body 축 backlog** (2026-08-04 신설).
+#
+# 아래 검출기가 `.get("키")`/`Form(` 만 보던 사각을 Pydantic 요청 모델 필드까지 넓혔더니
+# **31개 키**가 한꺼번에 드러났다. 전부 사용자 입력이 경로가 되는 자리인데 cloudium
+# 게이트가 구조적으로 한 번도 본 적이 없다.
+#
+# 전부를 즉시 `_CLOUDIUM_PATH_KEYS` 에 넣지 **않는다**: 그 순간 미들웨어가 이 키들을
+# 검사하기 시작해 cloudium 모드의 문서 생성 흐름이 막힐 수 있는데, cloudium worker 없이는
+# 그 회귀를 검증할 수 없다. **검증 못 하는 게이트 확장은 이 저장소가 금지한 부류**다.
+#
+# 그래서 `ruff_ratchet`/침묵-except ratchet 과 같은 방식을 쓴다: **기존은 명시 부채로
+# 열거하고 신규는 차단**한다. 보이지 않던 사각이 **세어지는 목록**이 된 것이 이 라운드의
+# 소득이고, 각 키를 게이트에 올리는 건 cloudium 실환경 검증과 함께 갈 별건이다.
+#
+# ✅ `project_root`·`rel_path` 는 backlog 에 있지만 **다른 층에서 이미 막힌다** —
+#    `backend/routers/local.py::confine_request_root` 가 허용 루트 밖을 403 으로 끊는다
+#    (`tests/unit/test_local_request_root_confinement.py`). 나머지 29개는 admin 게이트는
+#    있으나 cloudium path 검사는 없는 상태다.
+_PYDANTIC_KEY_BACKLOG = frozenset({
+    "c_source_root", "compile_commands_path", "coverage_path", "coverage_template_path",
+    "exclude_paths", "fault_injection_result_path", "hmr_html_path", "impact_path",
+    "include_paths", "local_reports_dir", "log_folder", "oai_config_path",
+    "path_target", "project_root", "rel_path", "sheet_target",
+    "sitr_path", "sitr_template_path", "sutr_path", "sutr_template_path",
+    "switcr_template_path", "switcv_path", "switr_path", "swuds_docx_path",
+    "swutcr_template_path", "swuts_docx_path", "target_dir", "test_target",
+    "vcast_log_path", "vcast_log_paths", "verification_target",
+})
 def test_all_router_user_input_path_keys_are_in_path_keys_whitelist():
     """라우터의 사용자 입력 path 키가 모두 _CLOUDIUM_PATH_KEYS에 등록되어 있는지 검증.
 
     검사 패턴:
       - (payload|body|req).get("XXX_path") / .get("XXX_root") 등 — JSON body
       - XXX_path: str = Form("") — multipart form field
+      - **Pydantic 요청 모델의 필드 선언** (`backend/schemas.py`) — 아래 ⚠ 참조
 
     누락되면 미들웨어가 검사 못 해 Cloudium 모드에서도 통과 → 정책 우회 결손.
     이 테스트는 새 endpoint가 새 키 이름을 도입할 때 즉시 실패해야 한다.
+
+    ⚠ **2026-08-04 — 이 검출기에 구조적 사각이 있었다.** `.get("키")` 와 `Form(` 만 보므로
+       **Pydantic 모델을 body 로 받는 endpoint**(`req: EditorWriteRequest` → `req.project_root`)
+       는 통째로 안 보였다. 실측: `project_root detected? False`, `rel_path detected? False`.
+       그래서 `/api/local/editor/*` 20곳이 cloudium 모드에서도 게이트 없이 통과했고
+       (라이브 재현: `mode=cloudium` 인데 `editor/write` 200), 이 회귀 테스트는 **초록**이었다.
+       검사가 못 보는 축은 "없다" 가 아니라 "안 봤다" 다 — 축을 넓힌다.
     """
     import re
     from pathlib import Path as _P
-    from backend.middleware import _CLOUDIUM_PATH_KEYS, _CLOUDIUM_MULTI_PATH_KEYS
+
+    from backend.middleware import _CLOUDIUM_MULTI_PATH_KEYS, _CLOUDIUM_PATH_KEYS
 
     routers_dir = _P(__file__).resolve().parents[2] / "backend" / "routers"
     assert routers_dir.is_dir(), f"라우터 디렉토리 못 찾음: {routers_dir}"
@@ -1026,26 +1134,69 @@ def test_all_router_user_input_path_keys_are_in_path_keys_whitelist():
     path_suffixes = ("_path", "_paths", "_root", "_dir", "_folder", "_target")
     path_exact_names = {"path", "target", "folder", "root"}
 
+    def _is_path_key(key: str) -> bool:
+        return key in path_exact_names or any(key.endswith(s) for s in path_suffixes)
+
     found_keys: set[str] = set()
     for py_file in routers_dir.glob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         for m in get_pattern.finditer(text):
-            key = m.group(1)
-            if key in path_exact_names or any(key.endswith(s) for s in path_suffixes):
-                found_keys.add(key)
+            if _is_path_key(m.group(1)):
+                found_keys.add(m.group(1))
         for m in form_pattern.finditer(text):
-            key = m.group(1)
-            if key in path_exact_names or any(key.endswith(s) for s in path_suffixes):
-                found_keys.add(key)
+            if _is_path_key(m.group(1)):
+                found_keys.add(m.group(1))
+
+    # ── Pydantic 요청 모델 필드 (위 ⚠ 의 사각) ──────────────────────────────
+    # 라우터가 `req: XxxRequest` 로 받는 body 는 위 두 정규식에 전혀 안 걸린다.
+    # 모델 정의를 AST 로 읽어 **path 성 필드**를 같은 화이트리스트로 검사한다.
+    import ast as _ast
+
+    schemas_py = _P(__file__).resolve().parents[2] / "backend" / "schemas.py"
+    assert schemas_py.is_file(), f"스키마 파일을 못 찾음: {schemas_py}"
+    _tree = _ast.parse(schemas_py.read_text(encoding="utf-8"))
+    _model_fields: dict[str, set[str]] = {}
+    for _node in _tree.body:
+        if not isinstance(_node, _ast.ClassDef):
+            continue
+        _model_fields[_node.name] = {
+            stmt.target.id
+            for stmt in _node.body
+            if isinstance(stmt, _ast.AnnAssign) and isinstance(stmt.target, _ast.Name)
+        }
+
+    # 라우터 함수 시그니처에서 **실제로 body 로 쓰이는** 모델만 본다 — 모든 모델을 훑으면
+    # 응답 모델·내부 DTO 까지 걸려 오탐이 난다.
+    _sig_pattern = re.compile(r":\s*(\w+Request)\b")
+    _used_models: set[str] = set()
+    for py_file in routers_dir.glob("*.py"):
+        _used_models.update(_sig_pattern.findall(py_file.read_text(encoding="utf-8")))
+
+    for _model in sorted(_used_models):
+        for _field in _model_fields.get(_model, set()):
+            if _is_path_key(_field):
+                found_keys.add(_field)
 
     # PATH_KEYS (single-string) 또는 MULTI_PATH_KEYS (콤마/세미콜론 split) 둘 중 하나에 들어 있으면 통과
     whitelist = _CLOUDIUM_PATH_KEYS | _CLOUDIUM_MULTI_PATH_KEYS
-    missing = found_keys - whitelist
+    missing = found_keys - whitelist - _PYDANTIC_KEY_BACKLOG
     assert not missing, (
         f"라우터에서 사용되는 사용자 입력 path 키가 PATH_KEYS / MULTI_PATH_KEYS 어디에도 누락됨: "
         f"{sorted(missing)}. backend/middleware.py의 _CLOUDIUM_PATH_KEYS 또는 "
         f"_CLOUDIUM_MULTI_PATH_KEYS에 추가하거나, path가 아니라면 path_exact_names/path_suffixes "
         f"화이트리스트 조정 필요."
+    )
+    # ⚠ backlog 는 **줄어들기만** 해야 한다. 이미 게이트에 등록됐거나 코드에서 사라진
+    #    키가 backlog 에 남아 있으면, 다음 사람이 "아직 부채" 로 오독한다.
+    stale = _PYDANTIC_KEY_BACKLOG - found_keys
+    assert not stale, (
+        f"backlog 에 있는데 라우터에서 더 이상 안 쓰이는 키: {sorted(stale)} — "
+        f"_PYDANTIC_KEY_BACKLOG 에서 지울 것(부채 목록이 실제보다 커 보인다)."
+    )
+    overlap = _PYDANTIC_KEY_BACKLOG & whitelist
+    assert not overlap, (
+        f"backlog 와 게이트 화이트리스트에 **둘 다** 있는 키: {sorted(overlap)} — "
+        f"게이트에 등록됐으면 backlog 에서 지울 것."
     )
 
 
@@ -1055,12 +1206,13 @@ def test_validation_and_residual_report_path_keys_blocked_by_middleware(monkeypa
     payload에 두 키가 들어오면 미들웨어가 게이트 검사로 403을 내야 한다.
     PATH_KEYS에 빠지면 통과되어 다운스트림에서 파일 접근 시점에서야 차단됨.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1089,12 +1241,13 @@ def test_middleware_exempt_does_not_match_unknown_file_mode_subpath(monkeypatch,
     과거 startswith 매칭은 신규 endpoint를 자동 우회시켰음. frozenset + 정확 매치로
     명시 endpoint(`browse-file`/`check-access`)만 통과. 미지의 sub-path는 path 화이트리스트 검사.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1111,12 +1264,13 @@ def test_middleware_exempt_does_not_match_unknown_file_mode_subpath(monkeypatch,
 
 def test_middleware_exempt_still_passes_browse_file_and_check_access(monkeypatch, tmp_path):
     """D1 — 명시 화이트리스트 endpoint는 cloudium 모드에서도 통과해야 함."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1132,7 +1286,7 @@ def test_middleware_exempt_still_passes_browse_file_and_check_access(monkeypatch
 # ---------------------------------------------------------------------------
 def test_multi_path_form_field_blocked_by_middleware(monkeypatch, tmp_path):
     """D2 회귀 — `req_paths` 콤마/세미콜론 multi-path가 미들웨어에서 split 후 각각 검사."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     allowed = tmp_path / "ok"
     blocked = tmp_path / "block"
@@ -1142,6 +1296,7 @@ def test_multi_path_form_field_blocked_by_middleware(monkeypatch, tmp_path):
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1158,12 +1313,13 @@ def test_multi_path_form_field_blocked_by_middleware(monkeypatch, tmp_path):
 
 def test_multi_path_form_field_passes_when_all_allowed(monkeypatch, tmp_path):
     """D2 — 모든 element가 allowed_prefix 안이면 미들웨어 통과."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1183,7 +1339,7 @@ def test_multi_path_form_field_passes_when_all_allowed(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 def test_reject_upload_in_cloudium_blocks_with_filename(monkeypatch, tmp_path):
     """D3 회귀 — cloudium 모드 + UploadFile (filename 있음) → 403."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
@@ -1204,7 +1360,7 @@ def test_reject_upload_in_cloudium_blocks_with_filename(monkeypatch, tmp_path):
 
 def test_reject_upload_in_cloudium_passes_in_local_mode(tmp_path):
     """D3 — local 모드면 no-op (어떤 업로드도 통과)."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver
+    from backend.services.file_resolver import LocalFileResolver, set_resolver
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     set_resolver(LocalFileResolver())
 
@@ -1221,7 +1377,7 @@ def test_reject_upload_in_cloudium_passes_in_local_mode(tmp_path):
 
 def test_reject_upload_in_cloudium_passes_empty_filename(monkeypatch, tmp_path):
     """D3 — UploadFile 인자가 None이거나 filename 없으면 통과 (default=None 케이스)."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
@@ -1265,7 +1421,9 @@ def test_check_allowed_case_insensitive_on_windows(monkeypatch, tmp_path):
 def test_mark_path_validated_supports_multiple_paths():
     """W4 회귀 — mark_path_validated가 list/tuple/frozenset 받아 모두 마킹."""
     from backend.services.file_resolver import (
-        mark_path_validated, reset_path_validated, _path_already_validated,
+        _path_already_validated,
+        mark_path_validated,
+        reset_path_validated,
     )
     paths = ["/p1", "/p2", "/p3"]
     token = mark_path_validated(paths)
@@ -1282,7 +1440,9 @@ def test_mark_path_validated_supports_multiple_paths():
 def test_gate_then_allow_skips_when_path_in_marked_set(monkeypatch, tmp_path):
     """W4 — _gate_then_allow가 마킹된 frozenset 멤버십 검사로 ping 생략."""
     from backend.services.file_resolver import (
-        CloudiumFileResolver, mark_path_validated, reset_path_validated,
+        CloudiumFileResolver,
+        mark_path_validated,
+        reset_path_validated,
     )
     # is_gate_running를 raise하도록 설정 — 호출되면 fail
     def _raise(*_a, **_k):
@@ -1379,7 +1539,7 @@ def test_middleware_blocks_list_of_strings_value_under_path_key(monkeypatch, tmp
     부모 key가 PATH_KEYS / MULTI_PATH_KEYS면 list element string도 화이트리스트 검사.
     이 hole이 열려 있으면 D2 정책 단일 출처가 깨짐.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     allowed = tmp_path / "ok"
     blocked = tmp_path / "block"
@@ -1389,6 +1549,7 @@ def test_middleware_blocks_list_of_strings_value_under_path_key(monkeypatch, tmp
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1405,12 +1566,13 @@ def test_middleware_blocks_list_of_strings_value_under_path_key(monkeypatch, tmp
 
 def test_middleware_passes_list_of_strings_when_all_allowed(monkeypatch, tmp_path):
     """C-N1 — 모든 element가 allowed_prefix면 미들웨어 통과."""
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1434,12 +1596,13 @@ def test_reject_upload_in_cloudium_response_shape_matches_middleware(monkeypatch
     미들웨어 차단 응답과 동일 shape이어야 frontend가 단일 분기로 cloudium 정책
     위반 식별 가능. CloudiumBlockedException + handler 등록의 효과 검증.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
 
     try:
         from starlette.testclient import TestClient
+
         from backend.main import app
         c = TestClient(app, raise_server_exceptions=False)
         c.headers["X-User"] = "test"
@@ -1467,9 +1630,10 @@ def test_asgi_middleware_replay_allows_endpoint_to_read_body(monkeypatch, tmp_pa
     56차 T307 회귀: BaseHTTPMiddleware → 순수 ASGI middleware 리팩토링 후 다운스트림
     endpoint가 await request.body() / json() / form() 호출 시 동일 body 받음.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
     from starlette.testclient import TestClient
+
     from backend.main import app
+    from backend.services.file_resolver import CloudiumFileResolver, LocalFileResolver, set_resolver
 
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
     set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
@@ -1500,9 +1664,10 @@ def test_asgi_middleware_no_unexpected_message_error_on_streaming_response(
     `RuntimeError: Unexpected message received: http.request` 발생.
     ASGI 리팩토링 후 동일 시나리오에서 로그에 "Unexpected message" 미발생.
     """
-    from backend.services.file_resolver import set_resolver, LocalFileResolver
     from starlette.testclient import TestClient
+
     from backend.main import app
+    from backend.services.file_resolver import LocalFileResolver, set_resolver
 
     set_resolver(LocalFileResolver())
     c = TestClient(app, raise_server_exceptions=False)
@@ -1520,3 +1685,65 @@ def test_asgi_middleware_no_unexpected_message_error_on_streaming_response(
     assert "Unexpected message received" not in log_text, (
         f"starlette known issue #1438 재발 — 로그에 Unexpected message: {log_text[:300]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 후보 25 — ping 예산이 **호출 시점에** 읽히는가
+# ---------------------------------------------------------------------------
+class TestPingTimeoutIsLive:
+    """`_PING_TIMEOUT` 을 바꾸면 실제로 바뀌어야 한다.
+
+    예전 시그니처는 `timeout: float = _PING_TIMEOUT` 이었다. 기본 인자는 `def` 시점에
+    한 번 평가돼 상수에 얼어붙으므로, 이후 값을 바꿔도(설정 튜닝·테스트 monkeypatch)
+    **아무 효과가 없다** — 바꾼 쪽은 바꿨다고 믿는데 값은 그대로다.
+
+    이 함정이 조사를 한 번 헛돌렸다: 병렬 실행 flake 를 "ping timeout 가설" 로 보고
+    `_PING_TIMEOUT` 을 0.0001 로 낮춰 **반증했다고 기록**했는데, 그 실험이 no-op 이라
+    아무것도 검증하지 않았다. 부하를 준 채 제대로 재현하니 **60회 중 13회 실패**
+    (무부하 0회), 예산을 키우니 0회 — 가설은 맞았고 반증이 틀렸다.
+
+    되돌리면 다시 **조용히** no-op 이 되므로(실패가 아니라 무반응) 값으로 잠근다.
+    """
+
+    def _capture_timeout(self, monkeypatch):
+        seen = {}
+
+        def _fake_create_connection(addr, timeout=None, **_kw):
+            seen["timeout"] = timeout
+            raise OSError("stop here — 연결 자체는 이 테스트의 관심사가 아니다")
+
+        monkeypatch.setattr(file_resolver.socket, "create_connection",
+                            _fake_create_connection)
+        return seen
+
+    def test_module_constant_is_read_at_call_time(self, monkeypatch):
+        seen = self._capture_timeout(monkeypatch)
+        monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 7.25)
+
+        assert file_resolver._ping_worker("127.0.0.1", 1) is False
+        assert seen["timeout"] == 7.25, (
+            "기본 인자가 상수에 얼어붙었다 — _PING_TIMEOUT 을 바꿔도 무시된다")
+
+    def test_explicit_timeout_still_wins(self, monkeypatch):
+        seen = self._capture_timeout(monkeypatch)
+        monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 7.25)
+
+        file_resolver._ping_worker("127.0.0.1", 1, timeout=0.125)
+        assert seen["timeout"] == 0.125
+
+    def test_signature_does_not_freeze_the_constant(self):
+        """시그니처를 되돌리면 위 두 테스트보다 먼저 여기서 걸린다."""
+        import inspect
+
+        default = inspect.signature(file_resolver._ping_worker).parameters["timeout"].default
+        assert default is None, (
+            f"timeout 기본값이 {default!r} 로 고정됐다 — 모듈 상수 변경이 무시된다")
+
+    def test_gate_check_uses_the_live_budget(self, monkeypatch):
+        """`is_gate_running` 경유로도 살아 있어야 한다(직접 호출만 고치면 반쪽)."""
+        seen = self._capture_timeout(monkeypatch)
+        monkeypatch.setattr(file_resolver, "_PING_TIMEOUT", 3.5)
+        file_resolver.invalidate_gate_cache()
+
+        assert file_resolver.is_gate_running(host="127.0.0.1", port=1) is False
+        assert seen["timeout"] == 3.5

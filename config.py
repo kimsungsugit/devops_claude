@@ -181,6 +181,26 @@ UDS_QUALITY_WARNING_THRESHOLDS = {
     "related_trusted_warn": 35.0,
 }
 
+# ---------------- UDS 사이드카(.quality_gate.md) 게이트 임계값 ----------------
+# ⚠ 위 `UDS_QUALITY_GATE_THRESHOLDS` 와 **다른 벌**이다. 키(`*_fill_rate`)·스케일(0~1 비율)·값이
+#   전부 다르다(예: description 0.70 vs `description_min` 90). 두 판정은
+#   `backend/helpers/uds.py` 에서 AND 된다(quick gate ∧ 신뢰도 ∧ 사이드카).
+# (R29, 2026-09-04) 값 불변으로 `report_gen/validation.py` 함수 안 리터럴에서 승격했다 — 그때까지
+#   이 벌은 어디에도 공시되지 않았고, 호출부가 위 표를 넘겨도 키가 달라 **조용히 무시**됐다.
+#   두 벌을 하나로 합칠지는 정책 결정(계획서 §8 #2) — 합치면 판정이 대량 이동한다.
+UDS_SIDECAR_GATE_THRESHOLDS = {
+    "description_fill_rate": _safe_float("UDS_SIDECAR_DESCRIPTION_FILL_RATE", 0.70),
+    "input_fill_rate": _safe_float("UDS_SIDECAR_INPUT_FILL_RATE", 0.20),
+    "output_fill_rate": _safe_float("UDS_SIDECAR_OUTPUT_FILL_RATE", 0.10),
+    "globals_global_fill_rate": _safe_float("UDS_SIDECAR_GLOBALS_GLOBAL_FILL_RATE", 0.35),
+    "globals_static_fill_rate": _safe_float("UDS_SIDECAR_GLOBALS_STATIC_FILL_RATE", 0.15),
+    "called_fill_rate": _safe_float("UDS_SIDECAR_CALLED_FILL_RATE", 0.50),
+    "calling_fill_rate": _safe_float("UDS_SIDECAR_CALLING_FILL_RATE", 0.25),
+    "asil_non_tbd_rate": _safe_float("UDS_SIDECAR_ASIL_NON_TBD_RATE", 0.30),
+    "related_non_tbd_rate": _safe_float("UDS_SIDECAR_RELATED_NON_TBD_RATE", 0.30),
+    "traceability_rate": _safe_float("UDS_SIDECAR_TRACEABILITY_RATE", 0.20),
+}
+
 # ---------------- UDS Hallucination 검출 (라운드 C T509) ----------------
 # llm_semantic_validator + LLM-as-a-Judge + confidence-based dynamic retry.
 # 환경 변수로 운영 시 opt-out 가능 (예: UDS_JUDGE_ENABLED=0).
@@ -194,7 +214,7 @@ UDS_JUDGE_ENABLED = (
 )
 UDS_JUDGE_THRESHOLD = _safe_float("UDS_JUDGE_THRESHOLD", 0.7)
 UDS_JUDGE_MODEL_SUBSTRING = os.environ.get(
-    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-2.5-flash"
+    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-3.1-flash-lite"
 )
 
 # ---------------- UDS DOCX retry 타임아웃 (초) ----------------
@@ -247,7 +267,7 @@ TEST_CODE_MAX_TOKENS = 16384
 # ---------------- LLM / 에이전트 설정 ----------------
 # [TIP] 70b 모델이 너무 느리면 "llama3:8b" 또는 "phi3" 등으로 변경 고려
 # 기본 모델을 제미나이로 변경하고 싶으면 아래를 수정하세요.
-DEFAULT_LLM_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_LLM_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_LLM_BASE_URL_ENV = "OLLAMA_BASE_URL"
 _DEFAULT_OAI_CONFIG = _REPO_ROOT / "OAI_CONFIG_LIST"
 if _DEFAULT_OAI_CONFIG.exists():
@@ -255,10 +275,13 @@ if _DEFAULT_OAI_CONFIG.exists():
 else:
     DEFAULT_OAI_CONFIG_PATH = os.environ.get("DEVOPS_OAI_CONFIG_PATH", "/app/OAI_CONFIG_LIST")
 
+# 챗 어시스턴트 전용 OAI config 경로(서버 고정 — 클라이언트 요청 본문의 oai_config_path
+# 제어를 차단하는 SSRF-lite 방어. 미설정 시 DEFAULT_OAI_CONFIG_PATH 폴백). env-only.
+CHAT_OAI_CONFIG_PATH = os.environ.get("CHAT_OAI_CONFIG_PATH", "").strip() or None
+
 
 def resolve_oai_api_keys(config_list: list) -> list:
     """Resolve 'ENV:VAR_NAME' placeholders in api_key fields to actual env values."""
-    import json as _json
     resolved = []
     for entry in config_list:
         entry = dict(entry)
@@ -290,6 +313,24 @@ LLM_WARN_INPUT_TOKENS = 200000
 # Model-specific policies (auto caps, temperature, margins)
 # Keys are matched by substring (case-insensitive) against model name.
 LLM_MODEL_POLICIES = {
+    # 표준 모델(무조건 이 모델 — 2026-07-25 사용자 결정). 스펙 정확값: 입력 1,048,576 / 출력 65,536.
+    # lookup은 exact-key 우선(ai.py _pick_model_policy) + substring first-match이라 "gemini-3" 앞에 둔다.
+    "gemini-3.5-flash-lite": {
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "max_input_tokens_by_stage": {
+            "build_fix": 200000,
+            "syntax_fix": 200000,
+            "static": 200000,
+            "domain_tests": 200000,
+            "plan_repair": 200000,
+            "test_plan": 200000,
+            "test_code": 200000,
+        },
+        "token_estimate_margin": 1.25,
+        "warn_input_tokens": 200000,
+        "temperature_default": 1.0,
+    },
     "gemini-3.1-flash-lite": {
         "max_input_tokens": 1000000,
         "max_output_tokens": 65536,
@@ -370,7 +411,7 @@ def apply_runtime_env() -> None:
 # Gemini-only 강제 사용(요청: gemini3만 사용)
 # - OAI_CONFIG_LIST가 여러 모델을 포함해도, workflow는 Gemini만 선택
 LLM_GEMINI_ONLY = os.environ.get("LLM_GEMINI_ONLY", "1").strip().lower() in ("1", "true", "yes")
-LLM_GEMINI_PREFERRED_SUBSTRING = os.environ.get("LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.1-flash-lite").strip().lower()
+LLM_GEMINI_PREFERRED_SUBSTRING = os.environ.get("LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.5-flash-lite").strip().lower()
 
 # [MODIFIED] 기본 출력 토큰 수 최대치로 상향 (65536)
 # Gemini 3 Pro Preview 스펙에 맞춤
@@ -422,6 +463,12 @@ AGENT_MAX_STEPS_DEFAULT = 3
 AGENT_REVIEW_ENABLED_DEFAULT = True
 AGENT_RAG_ENABLED_DEFAULT = True
 AGENT_RAG_TOP_K_DEFAULT = 3
+# RAG 검색 결과 개수의 **상한**. 사용자 Form 입력이 그대로 프롬프트 크기가 되는
+# 유일한 축이라(§6 후보 17 실측: stage cap 은 필요 없었다 — 실데이터가 전역 상한의
+# 2.05%, 최악 포화도 16.32% 였다) 여기만 막는다. `rag_top_k=1000` 이면 프롬프트가
+# 전역 상한의 45.9% 까지 간다. 판정 복제를 막으려고 clamp 는
+# `workflow.ai.clamp_rag_top_k()` 한 곳에서만 한다.
+AGENT_RAG_TOP_K_MAX = _safe_int("AGENT_RAG_TOP_K_MAX", 50)
 AGENT_RUN_MODES = ["auto", "review", "off"]
 AGENT_RUN_MODE_DEFAULT = "auto"
 
@@ -448,6 +495,29 @@ AUTO_INSTALL_GCOVR = str(os.environ.get("AUTO_INSTALL_GCOVR", "1")).strip().lowe
 # 전역 KB를 사용하려면 경로 지정 (예: C:/Users/.../.devops_kb)
 KB_GLOBAL_DIR = os.environ.get("KB_GLOBAL_DIR", "").strip()
 KB_SOURCES_DIR = os.environ.get("KB_SOURCES_DIR", "").strip()
+
+# get_kb 프로세스 캐시 (D8): 매 호출 KnowledgeBase 재구성(_init_db+_load_all+_ingest)
+# 비용 제거. 인스턴스는 스레드 간 공유되며 KnowledgeBase 내부 RLock 이 동시성 보호.
+#   - TTL: 멀티프로세스(pipeline 별도 프로세스) staleness 상한(초). 0 = 무만료.
+#   - MAX_ENTRIES: session/build 별 고cardinality 경로 누수 차단용 LRU 상한.
+KB_CACHE_ENABLED = str(os.environ.get("KB_CACHE_ENABLED", "1")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# 모듈 import 시점 raw int() 는 잘못된 env(예: "two minutes") 에 ValueError 로
+# backend 기동 자체를 죽인다 — _kb_cache_ttl()/_kb_cache_max() 의 런타임 폴백과
+# 일관되게 _safe_int 로 파싱(불량 값 → 기본값).
+KB_CACHE_TTL_SECONDS = _safe_int("KB_CACHE_TTL_SECONDS", 120)
+KB_CACHE_MAX_ENTRIES = _safe_int("KB_CACHE_MAX_ENTRIES", 32)
+
+# UDS 문서 함수 설명 RAG 보강 (R3): inference 설명을 RAG 유사 함수로 보강.
+# ASIL 문서(UDS) 출력을 바꾸므로 기본 off — opt-in 시에만 동작.
+UDS_RAG_DESC_ENRICH = str(os.environ.get("UDS_RAG_DESC_ENRICH", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 PGVECTOR_DSN = os.environ.get("PGVECTOR_DSN", "").strip()
 PGVECTOR_URL = os.environ.get("PGVECTOR_URL", "").strip()
 KB_CATEGORIES = [
@@ -478,15 +548,19 @@ RAG_CATEGORY_BY_STAGE = {
 }
 
 # ---------------- Chat tuning ----------------
+# 활성: CHAT_MAX_TURNS, CHAT_APPROVAL_TTL_SECONDS.
+# 예약(현재 미소비 — 향후 요약/보존 기능에서 사용): CHAT_LOG_LINES, CHAT_SUMMARY_*,
+# CHAT_LONG_QUERY_CHARS, CHAT_MODEL_FAST.
 CHAT_MAX_TURNS = 16
 CHAT_LOG_LINES = 40
 CHAT_SUMMARY_MAX_CHARS = 1600
 CHAT_ENABLE_SUMMARY = True
 CHAT_LONG_QUERY_CHARS = 800
-CHAT_MODEL_FAST = "gemini-3.1-flash-lite-preview"
+CHAT_MODEL_FAST = "gemini-3.5-flash-lite"
 CHAT_SUMMARY_KEEP_DAYS = 7
 CHAT_SUMMARY_LOAD_FROM_FILE = True
 CHAT_SUMMARY_FILE_MAX_CHARS = 1200
+CHAT_APPROVAL_TTL_SECONDS = 1800  # 승인 대기 항목 만료(초) — in-memory store 메모리 누수 방지
 
 # ---------------- RAG ingestion (VectorCAST/UDS/Requirements/Code) ----------------
 RAG_INGEST_ENABLE = True
@@ -509,9 +583,31 @@ RAG_CHUNK_STRATEGIES = {
     "default": {"size": RAG_CHUNK_SIZE, "overlap": RAG_CHUNK_OVERLAP},
 }
 
+# ---------------- RAG embedding backend ----------------
+# ⚠ 이 두 값이 여기 있는 이유: 예전엔 `workflow/rag/embedder.py` 안의 하드코딩
+# 기본값뿐이었고, 그 모델(`text-embedding-004`)이 v1beta 에서 **삭제돼 404** 를 내는
+# 동안에도 아무 설정 표면에 안 나타났다. 404 는 폴백 체인이 흡수해 KB 전체가 무작위
+# 벡터가 됐다 — 모델이 죽었다는 사실 자체가 어디에도 안 보였다.
+#
+# 두 값은 **짝**이다. RAG_EMBED_MODEL 을 바꾸면 native 차원이 달라질 수 있고,
+# 차원이 어긋나면 embedder 가 그 벡터를 저장하지 않고 오류로 보고한다(fail-closed).
+# gemini-embedding-001 은 native 3072 이며 MRL 절단(768/1536/3072)을 지원한다.
+# 모델 변경 후에는 **반드시 재인덱싱**할 것: `scripts/reindex_kb.py <report_dir>`
+# (차원·모델이 다른 기존 벡터는 cosine 비교가 성립하지 않아 검색에서 제외된다).
+RAG_EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "gemini-embedding-001").strip()
+RAG_EMBED_DIM = int(os.environ.get("RAG_EMBED_DIM", "768") or 768)
+
 # ---------------- UDS Generation Constants ----------------
-UDS_MAX_SOURCE_FILES = 1200
-UDS_MAX_ITEMS_PER_CATEGORY = 120
+# ⚠ `UDS_MAX_SOURCE_FILES` / `UDS_MAX_FUNCTION_ITEMS` 는 **위(§UDS/Source Parsing 성능
+#   설정)에서 env 로 읽는다**. 예전엔 여기서 `UDS_MAX_SOURCE_FILES = 1200` 을 다시
+#   할당했는데, 파이썬은 나중 할당이 이기므로 `DEVOPS_UDS_MAX_FILES` 가 **영구 무효**
+#   였다 — 환경변수를 넣어도 언제나 1200 이었고 아무 경고도 없었다.
+#   여기 상수를 늘릴 때는 위에 같은 이름이 없는지 먼저 볼 것.
+#
+#   함께 있던 `UDS_MAX_ITEMS_PER_CATEGORY = 120` 도 지웠다. 소비처가 저장소 전체에
+#   **0곳**이었고(실제 절단은 `UDS_MAX_FUNCTION_ITEMS` 가 한다 —
+#   `report_gen/uds_generator.py` 의 `max_items`), 이름이 비슷해 어느 쪽이 진짜인지
+#   헷갈리게 만들 뿐이었다.
 UDS_TRIM_MAX_CHARS = 24000
 UDS_STYLE_EXCERPT_MAX_CHARS = 12000
 UDS_FRONT_MATTER_LINES = 120

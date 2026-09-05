@@ -2,9 +2,40 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 _logger = logging.getLogger("workflow.quality.advisor")
+
+
+def _uds_gate_threshold(key: str, fallback: float) -> float:
+    """UDS 축의 rule 폴백 임계 — `config.UDS_QUALITY_GATE_THRESHOLDS` **단일 출처**에서 읽는다.
+
+    (R32 Q-10) 예전엔 아래 표에 95/95/90/50/70/90/90 이 리터럴로 복제돼 있었다. `suggest_improvements`
+    는 DB 에 기록된 `score.threshold` 를 먼저 쓰므로 평소엔 안 보이지만, DB 임계가 None 인 행(구판·
+    threshold 미기록)에서는 이 리터럴이 판정 기준이 된다 — 운영자가 env 로 임계를 바꾸면 게이트와
+    제안이 **다른 숫자**로 갈린다. config 를 못 읽으면(독립 스크립트 등) 옛 리터럴을 그대로 쓴다.
+
+    ⚠ **호출 시점**에 읽는다(리뷰 W5). import 시점에 굳히면 `reexec_config()`·env 변경 뒤 config 는 바뀌는데
+    이 표만 옛 값이라, 없애려던 "게이트와 제안이 다른 숫자" 가 리터럴 축에서 스냅샷 축으로 옮겨갈 뿐이다.
+    """
+    try:
+        import config
+        table = getattr(config, "UDS_QUALITY_GATE_THRESHOLDS", None) or {}
+        v = table.get(key)
+        return float(v) if v is not None else float(fallback)
+    except Exception as exc:   # noqa: BLE001 - config 부재/오류는 리터럴 폴백(제안 표는 판정이 아니다)
+        # 임계가 리터럴로 되돌아간 사실은 남아야 한다 — 그 숫자가 조용히 사실 행세를 한다(§7d).
+        _logger.warning("advisor: config 임계 %s 를 못 읽어 리터럴 %s 로 폴백: %s", key, fallback, exc)
+        return float(fallback)
+
+
+def _rule_threshold(rule: Dict[str, Any]) -> Any:
+    """규칙의 폴백 임계 — `threshold_key` 가 있으면 **지금** config 에서 읽고, 없으면 리터럴."""
+    key = rule.get("threshold_key")
+    if key:
+        return _uds_gate_threshold(str(key), float(rule.get("threshold") or 0.0))
+    return rule.get("threshold")
+
 
 # 메트릭별 개선 제안 규칙
 _UDS_ADVICE = {
@@ -12,36 +43,55 @@ _UDS_ADVICE = {
         "label": "Called Functions 커버리지",
         "low_advice": "콜 트리 분석 결과가 누락되었을 수 있습니다. include 경로를 확인하고, 외부 함수 매핑(CALL_TREE_EXTERNAL_MAP)을 추가하세요.",
         "threshold": 95.0,
+        "threshold_key": "called_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "calling_pct": {
         "label": "Calling Functions 커버리지",
         "low_advice": "호출 관계가 불완전합니다. 소스 파일 glob 패턴(DEFAULT_TARGETS_GLOB)을 확장하거나, 헤더 파일 경로를 추가하세요.",
         "threshold": 95.0,
+        "threshold_key": "calling_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "description_pct": {
         "label": "함수 설명 완성도",
         "low_advice": "함수 설명이 부족합니다. 소스 코드에 Doxygen 주석을 추가하거나, SDS 문서 경로를 지정하여 AI가 참조하도록 하세요. ref_suds_path 설정을 확인하세요.",
         "threshold": 90.0,
+        "threshold_key": "description_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "asil_pct": {
         "label": "ASIL 레벨 지정율",
         "low_advice": "ASIL 레벨이 TBD인 함수가 많습니다. SDS/SRS 문서에서 안전 요구사항을 매핑하거나, project_config에 기본 ASIL 레벨을 설정하세요.",
         "threshold": 50.0,
+        "threshold_key": "asil_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "related_pct": {
         "label": "요구사항 추적성",
         "low_advice": "SRS/SDS 요구사항 ID 연결이 부족합니다. req_docs_paths에 요구사항 문서를 추가하고, RAG KB에 요구사항을 ingest하세요.",
         "threshold": 70.0,
+        "threshold_key": "related_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "input_pct": {
         "label": "입력 파라미터 완성도",
         "low_advice": "함수 입력 파라미터 정보가 누락되었습니다. 소스 코드의 함수 프로토타입이 정확한지 확인하세요.",
         "threshold": 90.0,
+        "threshold_key": "input_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
     },
     "output_pct": {
         "label": "출력 파라미터 완성도",
         "low_advice": "함수 출력/반환값 정보가 누락되었습니다. void 함수의 포인터 출력 파라미터를 확인하세요.",
         "threshold": 90.0,
+        "threshold_key": "output_min",   # 호출 시점에 config 로 해석(`_rule_threshold`)
+    },
+    # ── 산출물 충실도(비게이트) ── 위 축들은 전부 **payload** 를 재는데, 이건 문서에
+    #    실제로 들어간 수다. 라이터가 템플릿 주도라 대응 heading 이 없는 함수는 조용히
+    #    빠지므로, payload 가 완벽하면 문서가 비어 있어도 만점이 나온다
+    #    (실측 run 660·661 = 반영 0/5 인데 점수 100.0).
+    #    `threshold: None` 은 의도다 — 템플릿이 **의도된 부분집합**일 수 있어 지금
+    #    판정에 넣으면 대량 오탐이다. `flow_emit_pct` 와 같은 취급으로 **라벨 정본**만
+    #    둔다(제안은 발화하지 않는다). 임계는 베이스라인을 쌓은 뒤 정할 일이다.
+    "artifact_match_pct": {
+        "label": "문서 반영률(payload 대비)",
+        "low_advice": "생성된 함수 중 일부만 DOCX 에 들어갔습니다. 템플릿에 대응 heading 이 없으면 그 함수는 문서에 존재하지 않습니다 — 템플릿과 소스의 함수 집합이 같은 프로젝트인지, heading 이름 규칙이 맞는지 확인하세요. 0% 면 템플릿이 통째로 다른 프로젝트의 것일 수 있습니다.",
+        "threshold": None,
     },
 }
 
@@ -52,9 +102,29 @@ _STS_ADVICE = {
         "threshold": 80.0,
     },
     "requirement_coverage_pct": {
-        "label": "요구사항 커버리지",
+        "label": "요구사항 커버리지(검증방법 무관)",
         "low_advice": "요구사항 ID와 연결되지 않은 TC가 많습니다. SRS 문서 경로(srs_docx_path)를 지정하고, 요구사항 매핑 규칙을 확인하세요.",
         "threshold": 70.0,
+    },
+    "executable_coverage_pct": {
+        "label": "실행 시험 기준 커버리지",
+        "low_advice": "요구사항이 실행 시험 없이 코드 리뷰(RVW)로만 덮여 있습니다. 소스 경로(source_root)와 SDS 경로를 지정해 요구-함수 매핑을 확보하면 실행 가능한 TC가 생성됩니다.",
+        "threshold": None,
+    },
+    "review_only_reqs_count": {
+        "label": "리뷰로만 덮인 요구 수",
+        "low_advice": "",
+        "threshold": None,
+    },
+    "function_tc_coverage_pct": {
+        "label": "함수 기준 TC 보유율",
+        "low_advice": "요구당 TC 상한(max_tc_per_req)에 걸려 매핑된 함수 대부분이 시험 없이 남습니다. 상한을 올리거나, 요구-함수 매핑을 좁혀(모듈 단위 → 함수 단위 SDS Related ID) 요구당 함수 수를 줄이세요.",
+        "threshold": None,
+    },
+    "functions_without_tc": {
+        "label": "시험 없는 매핑 함수 수",
+        "low_advice": "",
+        "threshold": None,
     },
     "method_diversity_pct": {
         "label": "테스트 방법 다양성",
@@ -91,6 +161,252 @@ _SUTS_ADVICE = {
     },
 }
 
+# SwUT/SwIT 커버리지 게이트(evaluate_coverage 메트릭명과 1:1).
+# branch/mcdc 는 ASIL 별 threshold(B+/D)라 rule 기본값을 두지 않는다 —
+# DB에 기록된 threshold(score_obj.threshold)가 있을 때(=ASIL 게이트 대상)만 제안.
+# QM/ASIL A 모듈은 evaluate_coverage 가 threshold=None 으로 저장 → 제안 skip.
+_SWUT_ADVICE = {
+    # ── 커버리지 FAIL 의 **사유** 구분 (비게이트) ──────────────────────────
+    # "커버리지 0%" 와 "측정 자체를 안 함" 은 다른 조치를 요구한다. 예전엔 둘 다 0.0 이라
+    # 구분이 불가능했다(HMR 미제공 프로젝트는 오히려 합성값 때문에 100.0 이 나왔다).
+    "coverage_unmeasured_axes": {
+        "label": "미측정 커버리지 축 수",
+        "low_advice": "0 이 아니면 그 축은 실측이 없습니다 — TC 를 늘려도 값이 안 변합니다. VectorCAST 산출물(.cov/HMR)이 수집됐는지, 대상 함수가 하니스에 포함됐는지 먼저 확인하세요.",
+        "threshold": None,
+    },
+    "coverage_measured_functions": {
+        "label": "실측 커버리지 함수 수(구문 축 분모)",
+        "low_advice": "백분율만 보면 '1개 함수 100%'와 '200개 함수 100%'가 같아 보입니다. 이 값이 작으면 커버리지 수치의 근거가 얇습니다.",
+        "threshold": None,
+    },
+    "coverage_synthesized_rows": {
+        "label": "합성(존재표식) 행 수",
+        "low_advice": "실측이 아니라 '로그에 있음'을 1/1 로 표현한 행입니다. 집계에서는 제외되지만, 이 값이 크면 문서의 O/X 표기 대부분이 실측 근거가 없다는 뜻입니다.",
+        "threshold": None,
+    },
+    # ── 문서가 적는 값과의 격차 (2026-08-26) ─────────────────────────────
+    # PV 정본 양식은 미달을 Exception 'O' 로 일괄 면제해 요약을 100% 로 만든다.
+    # 게이트는 raw 로 채점하므로 두 숫자가 갈린다 — 격차를 화면에 남긴다.
+    "doc_reported_statement_pct": {
+        "label": "(문서 표기) 구문 커버리지",
+        "low_advice": "산출물 요약에 실제로 찍히는 값입니다. 위 실측치보다 높다면 그 차이는 Exception(면제) 처리분입니다 — 면제 사유가 문서에 적혀 있는지 확인하세요.",
+        "threshold": None,
+    },
+    "doc_reported_branch_pct": {
+        "label": "(문서 표기) 분기 커버리지",
+        "low_advice": "위 구문 항목과 같은 성격입니다(면제 상쇄 후 값).",
+        "threshold": None,
+    },
+    "coverage_fail_statement_functions": {
+        "label": "구문 미달 함수 수",
+        "low_advice": "백분율보다 이 수를 보고 대상 함수를 특정하세요. 산출물 4.Coverage 의 Statement Pass 열이 'X' 인 행입니다.",
+        "threshold": None,
+    },
+    "coverage_fail_branch_functions": {
+        "label": "분기 미달 함수 수",
+        "low_advice": "Branch Pass 열이 'X' 인 행의 수입니다.",
+        "threshold": None,
+    },
+    "coverage_exception_statement_functions": {
+        "label": "구문 면제(Exception) 함수 수",
+        "low_advice": "문서가 Exception 으로 상쇄한 건수입니다. 미달 수와 같다면 **전부 자동 면제**됐다는 뜻이고, 그 면제에는 개별 사유가 붙어 있지 않습니다 — ISO 26262 감사에서 사유를 요구받는 지점입니다.",
+        "threshold": None,
+    },
+    "coverage_exception_branch_functions": {
+        "label": "분기 면제(Exception) 함수 수",
+        "low_advice": "위 구문 항목과 같습니다.",
+        "threshold": None,
+    },
+    "statement_coverage_pct": {
+        "label": "구문 커버리지(Statement)",
+        "low_advice": "구문 커버리지가 100% 미만입니다(전 ASIL 필수). 실행되지 않은 코드 라인을 위한 TC를 추가하고, VectorCAST 빌드 산출물(.cov)이 최신인지·대상 함수가 테스트 하니스에 포함됐는지 확인하세요.",
+        "threshold": 100.0,
+    },
+    "branch_coverage_pct": {
+        "label": "분기 커버리지(Branch)",
+        "low_advice": "분기 커버리지가 미달입니다(ASIL B 이상 필수). if/switch 의 미실행 분기(참·거짓 경계)에 대한 TC를 추가하세요.",
+        # threshold 생략 — DB threshold(ASIL B+ 에서 100)가 있을 때만 제안.
+    },
+    "mcdc_coverage_pct": {
+        "label": "MC/DC 커버리지",
+        "low_advice": "MC/DC 커버리지가 미달입니다(ASIL D 필수). 복합 조건의 각 피연산자가 독립적으로 결과에 영향을 주는 테스트 조합을 보강하세요.",
+        # threshold 생략 — DB threshold(ASIL D 에서 100)가 있을 때만 제안.
+    },
+    "pass_rate_pct": {
+        "label": "테스트 통과율",
+        "low_advice": "실패한 TC가 있습니다. SwUTR/SwITR 의 FAIL 항목을 확인해 기대값 또는 구현을 수정하세요. 안전 관련(ASIL C/D) 함수는 자동 수정 금지 — 검토 필수입니다.",
+        "threshold": 100.0,
+    },
+}
+
+# SwReport 통합 Summary roll-up — P/F verdict 집계(커버리지 아님).
+_SWIT_COVERAGE_ADVICE = {
+    # SwITCV 는 구문/분기 문서가 아니다 — 정본 4.Coverage 가 싣는 두 줄이 곧 축이다.
+    # (`evaluator.evaluate_swit_coverage` docstring 참조)
+    "function_achievement_pct": {
+        "label": "함수 달성률(Functions)",
+        "low_advice": "통합시험에서 커버리지를 달성하지 못한 함수가 있습니다. 아래 '미달성 함수 수'가 가리키는 함수의 호출 경로가 통합 하니스에 포함됐는지, 상위 호출자 TC 가 있는지 확인하세요.",
+        "threshold": 100.0,
+    },
+    "function_call_coverage_pct": {
+        "label": "함수 호출 커버리지(Function Calls)",
+        "low_advice": "실행되지 않은 함수 호출문(call site)이 남아 있습니다. 조건 분기 안쪽의 호출은 그 분기를 타는 입력을 줘야 실행됩니다 — 미달 함수의 호출 조건을 먼저 보세요.",
+        "threshold": 100.0,
+    },
+    "swit_functions_total": {
+        "label": "대상 함수 수(양식 universe)",
+        "low_advice": "SwITCV 양식이 정의한 승인 함수 목록의 크기입니다. VectorCAST 원시 행 수와 다른 것이 정상입니다(양식 순서·범위를 따릅니다).",
+        "threshold": None,
+    },
+    "swit_functions_fail": {
+        "label": "미달성 함수 수",
+        "low_advice": "달성률 100% 를 막는 실제 건수입니다. 백분율보다 이 수를 보고 대상 함수를 특정하세요.",
+        "threshold": None,
+    },
+    "swit_function_calls_fail_functions": {
+        "label": "호출 미달 함수 수",
+        "low_advice": "호출문 일부가 미실행인 함수의 수입니다(함수 자체는 달성했을 수 있습니다).",
+        "threshold": None,
+    },
+    "swit_function_calls_na_functions": {
+        "label": "호출 없음(N/A) 함수 수",
+        "low_advice": "호출문이 0 이라 호출 커버리지 분모에서 빠진 함수입니다(정본도 Pass='O'). 이 값이 크면 호출 커버리지 백분율의 근거 범위가 좁다는 뜻입니다.",
+        "threshold": None,
+    },
+    "vcast_raw_statement_pct": {
+        "label": "(참고) VectorCAST 원시 구문 커버리지",
+        "low_advice": "문서에는 싣지 않는 값입니다 — SwITCV 는 구문 커버리지 산출물이 아닙니다. 통합 로그 자체의 실측치이며 판정에 반영되지 않습니다.",
+        "threshold": None,
+    },
+    "vcast_raw_branch_pct": {
+        "label": "(참고) VectorCAST 원시 분기 커버리지",
+        "low_advice": "위 구문 커버리지와 같은 성격의 참고값입니다(비게이트).",
+        "threshold": None,
+    },
+    "vcast_raw_measured_functions": {
+        "label": "(참고) 원시 실측 함수 수",
+        "low_advice": "0 이면 통합 로그에서 커버리지를 하나도 읽지 못했다는 뜻입니다 — 로그 폴더/산출물 수집을 확인하세요.",
+        "threshold": None,
+    },
+    "pass_rate_pct": {
+        "label": "시험 통과율",
+        "low_advice": "실패했거나 실행되지 않은 TC 가 있습니다. 미실행 TC 도 분모에 포함됩니다.",
+        "threshold": 100.0,
+    },
+    "total_tcs": {
+        "label": "총 TC 수",
+        "low_advice": "통합시험 세션이 담은 TC 총수입니다.",
+        "threshold": None,
+    },
+}
+
+
+_SWREPORT_ADVICE = {
+    "pass_rate_pct": {
+        "label": "통합 통과율(Pass Rate)",
+        "low_advice": "통합 Summary 에 FAIL 항목이 있습니다. 레벨별(SwUT/SwIT/SITS) 산출물의 fail_count 를 추적해 원인 레벨의 테스트를 수정하세요.",
+        "threshold": 100.0,
+    },
+    "overall_pass": {
+        "label": "전체 판정(Overall Result)",
+        "low_advice": "전체 판정이 Pass 가 아닙니다. 미수행(performed 누락) 또는 실패 항목을 점검하세요.",
+        "threshold": 100.0,
+    },
+}
+
+# SUTR/SITR(시험 **결과** 보고서) — 커버리지 문서와 조치가 다르다. "커버리지를 올려라"
+# 가 아니라 "안 돌린 TC 를 돌려라 / 실패를 고쳐라" 다.
+_TEST_RESULT_ADVICE = {
+    "test_execution_pct": {
+        "label": "시험 실행률",
+        "low_advice": "등록된 TC 중 실행되지 않은 것이 있습니다. 미실행 TC 는 통과도 실패도 아닌 **시험 공백**이라 결과 보고서의 판정 근거가 되지 못합니다 — VectorCAST 실행 로그가 해당 환경까지 수집됐는지 먼저 확인하세요.",
+        "threshold": 100.0,
+    },
+    "pass_rate_pct": {
+        "label": "통과율(미실행 포함)",
+        "low_advice": "실패했거나 실행되지 않은 TC 가 있습니다. 실행률이 함께 낮다면 원인은 실패가 아니라 미실행입니다 — 두 지표를 같이 보세요.",
+        "threshold": 100.0,
+    },
+    "executed_pass_rate_pct": {
+        "label": "실행분 통과율(문서 표기값)",
+        "low_advice": "문서 Test Summary 시트에 찍히는 값입니다. 이 값이 100%인데 위 통과율이 낮다면 **돌린 것은 다 통과했지만 안 돌린 것이 있다**는 뜻입니다.",
+        "threshold": None,
+    },
+    "deviation_cases": {
+        "label": "편차(Deviation) 건수",
+        "low_advice": "편차는 자동 판정 대상이 아닙니다(ISO 26262 상 audit reviewer 판단). 건수만 참고하고 내용은 직접 검토하세요.",
+        "threshold": None,
+    },
+}
+
+# SwUTCR/SwITCR(종합결과서) — 축은 SUTR/SITR 과 같지만 **분모 키가 다르다**
+# (`total` 이 아니라 `total_tcs` — `evaluate_comprehensive_result` docstring 참조).
+# 표를 재사용하지 않고 따로 두는 이유는 조치문이 다르기 때문이다: 종합결과서의 미실행은
+# "로그를 더 모아라" 가 아니라 **"어느 레벨 산출물이 비었는가"** 로 되짚어야 한다.
+_COMPREHENSIVE_ADVICE = {
+    "test_execution_pct": {
+        "label": "시험 실행률(종합)",
+        "low_advice": "종합결과서가 집계한 TC 중 실행되지 않은 것이 있습니다. 종합결과서는 커버리지·결과·Fault Injection 을 한 장으로 합치므로, 실행률이 낮으면 **어느 레벨 산출물이 비었는지** 먼저 보세요 — 증적 시트가 빈 채로 나가도 빌드는 성공합니다.",
+        "threshold": 100.0,
+    },
+    "pass_rate_pct": {
+        "label": "통과율(미실행 포함, 종합)",
+        "low_advice": "실패했거나 실행되지 않은 TC 가 있습니다. 실행률이 함께 낮다면 원인은 실패가 아니라 미실행입니다 — 두 지표를 같이 보세요.",
+        "threshold": 100.0,
+    },
+    "executed_pass_rate_pct": {
+        "label": "실행분 통과율(문서 표기값)",
+        "low_advice": "문서 Summary 시트에 찍히는 값입니다. 이 값이 100%인데 위 통과율이 낮다면 **돌린 것은 다 통과했지만 안 돌린 것이 있다**는 뜻입니다.",
+        "threshold": None,
+    },
+    "qualified_function_count": {
+        "label": "자격 함수 수",
+        # threshold 가 없으므로 제안은 발화하지 않는다 — 라벨 정본으로만 둔다
+        # (`deviation_cases` 와 같은 취급). 절대수는 프로젝트 규모에 비례해 hard-fail 부적합.
+        "low_advice": "자동 판정 대상이 아닙니다(프로젝트 규모에 비례하는 절대수). VectorCAST 원시 함수 수와 다르면 종합결과서가 override 를 적용한 것이며, 그 사유는 빌드 warnings 에 남습니다.",
+        "threshold": None,
+    },
+}
+
+# SwSA(MISRA/HIS 정적·안전분석) — HIS pass% 만 게이트(위반 절대수는 제안 부적합).
+_SWSA_ADVICE = {
+    "his_pass_pct": {
+        "label": "HIS 메트릭 통과율",
+        "low_advice": "HIS 메트릭(복잡도/중첩/경로 등) 통과율이 낮습니다. 임계 초과 함수를 리팩터링하거나, 미평가(unbinned) 함수를 QAC 분석 대상에 포함하세요.",
+        "threshold": 80.0,
+    },
+}
+
+# SITS(SW 통합시험 — 시스템 통합시험은 SyITS) — 추적성/IO proxy(실행 커버리지 아님).
+_SITS_ADVICE = {
+    "requirement_traceability_pct": {
+        "label": "요구사항 추적성",
+        "low_advice": "시스템 요구사항 ID 와 연결되지 않은 TC 가 많습니다. SRS 문서 경로를 지정하고 related ID 매핑을 보강하세요.",
+        "threshold": 70.0,
+    },
+    "io_coverage_pct": {
+        "label": "I/O 커버리지",
+        "low_advice": "입출력 변수가 없는 통합 TC 가 많습니다. 시스템 인터페이스(신호/메시지) 정의가 소스에 반영됐는지 확인하세요.",
+        "threshold": 60.0,
+    },
+    # ── 캡 절단 축(비게이트) ── TC 수만 보면 "전부 시험함" 으로 읽히므로 별도 노출.
+    "flow_emit_pct": {
+        "label": "통합 흐름 생성률(소스에서 찾은 흐름 대비)",
+        "low_advice": "소스에서 찾은 통합 흐름 중 일부만 규격에 들어갔습니다(max_flows 캡). 잘린 흐름은 시험 규격에 존재하지 않으므로, 캡을 올리거나 대상 범위를 좁혀 의도적으로 결정하세요.",
+        "threshold": None,
+    },
+    "flows_dropped": {
+        "label": "캡으로 제외된 통합 흐름 수",
+        "low_advice": "0 이 아니면 그만큼의 흐름이 규격에 없습니다.",
+        "threshold": None,
+    },
+    "dropped_safety_related_flows": {
+        "label": "제외된 흐름 중 안전관련(ASIL A~D)",
+        "low_advice": "안전관련 흐름이 캡에 잘렸습니다. 선별은 등급 우선이므로 이 값이 0 이 아니면 캡이 안전관련 흐름 수보다 작다는 뜻입니다 — 캡을 올려야 합니다.",
+        "threshold": None,
+    },
+}
+
 
 def suggest_improvements(
     run_id: int,
@@ -111,8 +427,8 @@ def suggest_improvements(
             "summary": str,
         }
     """
-    from workflow.quality.db import init_db, get_session
-    from workflow.quality.models import GenerationRun, QualityScore, QualitySummary
+    from workflow.quality.db import get_session, init_db
+    from workflow.quality.models import GenerationRun
 
     init_db(db_path)
 
@@ -132,17 +448,56 @@ def suggest_improvements(
             advice_rules = _STS_ADVICE
         elif doc_type == "suts":
             advice_rules = _SUTS_ADVICE
+        elif doc_type == "swut":
+            advice_rules = _SWUT_ADVICE
+        elif doc_type == "swit":
+            # SwUT 와 **다른 표** — SwITCV 는 구문/분기가 아니라 Functions 달성 +
+            # Function Calls 를 싣는 문서라 지표 이름도 조치문도 다르다.
+            advice_rules = _SWIT_COVERAGE_ADVICE
+        elif doc_type in ("sutr", "sitr"):
+            advice_rules = _TEST_RESULT_ADVICE
+        elif doc_type in ("swutcr", "switcr"):
+            # ⚠ 위 분기에 합치지 말 것 — 같은 지표 이름을 쓰지만 분모 출처가 다르고
+            #   조치문도 다르다(`_COMPREHENSIVE_ADVICE` 주석).
+            advice_rules = _COMPREHENSIVE_ADVICE
+        elif doc_type == "swreport":
+            advice_rules = _SWREPORT_ADVICE
+        elif doc_type == "swsa":
+            advice_rules = _SWSA_ADVICE
+        elif doc_type == "sits":
+            advice_rules = _SITS_ADVICE
         else:
             advice_rules = {}
 
+        # (R32, 리뷰 W2) 게이트 항목이 0개인 run 은 **판정 불가**다 — 그런데 rule 폴백 임계는 평가기가 "지어내지
+        # 않겠다" 고 뺀 축(B-9: 분모 0 → threshold None)의 0.0 을 다시 임계와 비교해 "긴급 미달" 을 만든다
+        # (swsa `his_metrics` 전부 total 0 실측: 요약은 판정 불가, 제안은 his_pass 0.0 < 80 high). 판정 불가에
+        # 미달 사유를 붙이는 건 R31 Q-7 이 지운 모순이라, 검사 규모 0 이면 제안을 만들지 않는다.
+        _gated_obj = scores.get("gated_metric_count")
+        _gated_zero = bool(_gated_obj is not None and _gated_obj.value is not None and int(_gated_obj.value) == 0)
+
         suggestions: List[Dict[str, Any]] = []
         for metric_name, rule in advice_rules.items():
+            if _gated_zero:
+                break
             score_obj = scores.get(metric_name)
             if not score_obj:
                 continue
 
             value = score_obj.value
-            threshold = rule["threshold"]
+            if value is None:
+                continue  # 외부 INSERT 등으로 value NULL이면 비교 TypeError 방지
+            # 진실원 단일화: DB에 기록된 실제 threshold 우선, 없으면 rule 기본값 폴백.
+            # (overall_pass 처럼 evaluator가 threshold 미저장이나 rule엔 threshold 가 있는
+            #  메트릭은 rule 폴백으로 제안 생성 — 정상.) DB·rule 둘 다 None 이면
+            #  (ASIL 미해당 branch/mcdc 같은 참고지표) 게이트 비대상 → 과잉 제안 방지로 skip.
+            rule_threshold = _rule_threshold(rule)
+            if score_obj.threshold is not None:
+                threshold = score_obj.threshold
+            elif rule_threshold is not None:
+                threshold = rule_threshold
+            else:
+                continue
 
             if value < threshold:
                 gap = threshold - value
@@ -168,16 +523,47 @@ def suggest_improvements(
         suggestions.sort(key=lambda x: (priority_order.get(x["priority"], 9), -x["gap"]))
 
         # 요약 메시지
-        overall = summary.overall_score if summary else 0.0
-        gate = summary.gate_pass if summary else False
+        # (R31 Q-6) 요약 행이 없으면 **판정 없음**(None)이다. 예전엔 `0.0`·`False` 로 접어
+        # "품질 점수 0.0 -- 게이트 미통과" 라는 문장을 지어냈다 — 기록이 없는 것과 미통과는 다르다.
+        overall = summary.overall_score if summary else None
+        gate = summary.gate_pass if summary else None
         high_count = sum(1 for s in suggestions if s["priority"] == "high")
+        score_txt = f"{overall:.1f}" if overall is not None else "—"
 
-        if not suggestions:
-            summary_text = f"품질 점수 {overall:.1f}/100 -- 모든 항목이 임계값을 통과했습니다."
+        # 게이트 대상이 0개였던 실행은 "통과/미통과" 로 말할 수 없다 — 검사 자체를 안 했다.
+        # recorder 가 `gated_metric_count` 를 남기므로 그 값으로 판별한다(부재=구 실행 → None).
+        gated_obj = scores.get("gated_metric_count")
+        gated_count = int(gated_obj.value) if (gated_obj and gated_obj.value is not None) else None
+
+        unsupported = not advice_rules
+        if gated_count == 0:
+            summary_text = (
+                f"품질 점수 {score_txt}/100 -- **게이트 항목이 0개**라 판정이 성립하지 "
+                f"않습니다(통과 아님). threshold 설정 또는 doc_type '{doc_type}' 을 확인하세요."
+            )
+        elif summary is None:
+            # `quality_summaries.gate_pass` 는 NOT NULL 이라 "요약은 있는데 판정 None" 은 없다 — 판정 없음은
+            # 요약 행 부재뿐이다(recorder 는 항상 만들지만 외부 삭제·부분 복구는 가능).
+            summary_text = (
+                "품질 요약이 기록되지 않아 **판정 없음**입니다(통과도 실패도 아님). "
+                f"run {run_id} 의 quality_summaries 행이 없습니다."
+            )
+        elif unsupported:
+            # 미정의 doc_type(예: sits 등)을 '모든 항목 통과'(품질 양호)로 위장하지 않는다.
+            summary_text = f"doc_type '{doc_type}' 은 개선 제안 규칙이 정의되지 않았습니다."
+        elif not suggestions and not gate:
+            # 게이트는 미통과인데 제안이 0건 = 실패한 지표에 advice 규칙이 없는 경우다.
+            # '모든 항목 통과' 로 말하면 게이트 결과와 정면으로 모순된다.
+            summary_text = (
+                f"품질 점수 {score_txt}/100 -- 게이트 미통과이지만 해당 지표에 개선 제안 "
+                f"규칙이 없습니다. 실패 지표는 quality_scores 의 gate_pass=false 행을 확인하세요."
+            )
+        elif not suggestions:
+            summary_text = f"품질 점수 {score_txt}/100 -- 모든 항목이 임계값을 통과했습니다."
         elif gate:
-            summary_text = f"품질 점수 {overall:.1f}/100 -- 게이트 통과. {len(suggestions)}개 항목 개선 가능."
+            summary_text = f"품질 점수 {score_txt}/100 -- 게이트 통과. {len(suggestions)}개 항목 개선 가능."
         else:
-            summary_text = f"품질 점수 {overall:.1f}/100 -- 게이트 미통과. {high_count}개 긴급 개선 필요."
+            summary_text = f"품질 점수 {score_txt}/100 -- 게이트 미통과. {high_count}개 긴급 개선 필요."
 
         return {
             "run_id": run_id,
@@ -186,5 +572,9 @@ def suggest_improvements(
             "gate_pass": gate,
             "suggestions": suggestions,
             "suggestion_count": len(suggestions),
+            "unsupported": unsupported,
+            # 게이트 대상 수 — 0 이면 gate_pass 를 "통과/미통과" 로 읽으면 안 된다.
+            # None = 이 지표가 없던 구 실행(판별 불가).
+            "gated_metric_count": gated_count,
             "summary": summary_text,
         }

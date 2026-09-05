@@ -8,15 +8,18 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 
 import config
+from backend.cache import KeyedBuildLocks
+from backend.dependencies.admin import require_admin
 from backend.helpers import (
     _apply_uds_view_filters,
     _build_excel_artifact_payload,
@@ -55,8 +58,11 @@ from backend.helpers import (
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
 )
+from backend.helpers.sds import is_sds_filename, is_srs_filename
+from backend.routers._safety import run_blocking as _run_blocking
 from backend.schemas import (
     CallTreePreviewRequest,
+    CodeSonarRequest,
     JenkinsBuildInfoRequest,
     JenkinsBuildsRequest,
     JenkinsCacheRequest,
@@ -80,10 +86,17 @@ from backend.schemas import (
     UdsTraceabilityMatrixRequest,
 )
 from backend.services.assistant_service import read_report_bundle
-from backend.services.files import list_log_candidates, read_csv_rows, tail_text
+from backend.services.call_tree import (
+    build_call_tree,
+    build_call_tree_precise,
+    call_tree_to_csv,
+    call_tree_to_html,
+)
+from backend.services.files import list_log_candidates, list_report_files, read_csv_rows, tail_text
 from backend.services.jenkins_client import JenkinsClient
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _safe_artifact_path
 from backend.services.jenkins_service import (
+    _source_is_complete,  # 체크아웃 완전성 판정 단일 출처(.source_complete 센티널) — 콜트리 폴백에서 재사용
     ensure_source_checkout,
     get_build_info,
     list_builds,
@@ -93,12 +106,24 @@ from backend.services.jenkins_service import (
     sync_local_reports,
 )
 from backend.services.local_service import run_svn, svn_info_url
+from backend.services.output_paths import reserve_unique_dir, reserve_unique_path
 from backend.services.paths import is_under_any, safe_resolve_under
 from backend.services.report_parsers import (
     build_report_summary,
     find_jenkins_source_root,
+    resolve_code_metrics,
+    resolve_scm_vcast_metrics,
 )
+from backend.services.resolver_helpers import read_requirement_doc
 from backend.user_context import wrap_with_user
+
+# 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.
+from report_gen import uds_related as _uds_related
+from report_gen.atomic_io import atomic_write_text
+from report_gen.trace_link_table import build_link_table
+from report_gen.utils import build_function_details_by_name
+
+# 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기를 수정하지 않고 그 출력만 소비.
 from report_generator import (
     _build_req_map_from_doc_paths,
     enrich_function_details_with_docs,
@@ -116,6 +141,7 @@ from report_generator import (
     generate_uds_source_sections,
     generate_uds_traceability_matrix,
     generate_uds_validation_report,
+    parse_uds_preview_html,
 )
 
 try:
@@ -156,7 +182,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
             "summary": summary,
             "function_details": details,
         }
-        sidecar.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
+        atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
         return sidecar
     except Exception as exc:
         _logger.warning("jenkins uds payload sidecar write skipped: %s", exc)
@@ -164,12 +191,15 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
 
 
 def _build_jenkins_excel_output(cache_root: str, category: str, stem: str, template_path: Optional[str]) -> Tuple[str, Path]:
+    """STS/SUTS Excel 산출물 경로. ⚠ ts 가 **초 단위**라 같은 job·같은 초 요청이 같은
+    경로를 낸다 — 그대로 두면 마지막 쓰기만 남고 앞 사용자는 남의 산출물을 받는다.
+    `reserve_unique_path` 로 원자 선점한다(충돌 없으면 이름은 오늘과 동일)."""
     target_dir = _jenkins_sts_dir(cache_root) if category == "sts" else _jenkins_suts_dir(cache_root)
     target_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = Path(template_path).suffix.lower() if template_path and Path(template_path).suffix.lower() in {".xlsx", ".xlsm"} else ".xlsx"
-    filename = f"{stem}_{ts}{suffix}"
-    return filename, target_dir / filename
+    out_path = reserve_unique_path(target_dir / f"{stem}_{ts}{suffix}")
+    return out_path.name, out_path
 
 
 def _excel_media_type(file_path: Path) -> str:
@@ -394,6 +424,22 @@ def jenkins_builds(req: JenkinsBuildsRequest) -> Dict[str, Any]:
             limit=req.limit,
             verify_tls=req.verify_tls,
         )
+        # per-build SVN revision 부착 — git 파이프라인 잡은 Jenkins에 소스 revision이 없어
+        # 빌드 시각→svn 날짜-revision으로 되찾는다(콤보박스/이력에 실제 revision 표시). scm_id가
+        # svn-type일 때만, fail-soft(부착 실패는 목록에 무해).
+        _scm_id = str(getattr(req, "scm_id", "") or "").strip()
+        if _scm_id:
+            try:
+                from backend.services.jenkins_service import map_builds_to_svn_revisions
+                from backend.services.scm_registry import get_registry_entry, resolve_scm_credentials
+                _entry = get_registry_entry(_scm_id)
+                if (_entry is not None and str(_entry.scm_type or "").lower() == "svn"
+                        and str(_entry.scm_url or "").strip()):
+                    _u, _p, _ = resolve_scm_credentials(scm_id=_scm_id)
+                    map_builds_to_svn_revisions(
+                        repo_url=str(_entry.scm_url), builds=builds, username=_u, password=_p or "")
+            except Exception as _rex:  # noqa: BLE001 — revision 부착 실패는 목록에 무해(fail-soft)
+                _logger.warning("[jenkins/builds] revision enrich failed (scm=%s): %s", _scm_id, _rex)
         _api_logger.info("[jenkins/builds] success: builds=%d", len(builds))
         return {"builds": builds}
     except Exception as e:
@@ -781,10 +827,29 @@ def jenkins_rag_query(req: JenkinsRagQueryRequest) -> Dict[str, Any]:
 @router.post("/api/jenkins/report/complexity")
 def jenkins_complexity(req: JenkinsReportRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
+    rows: List[Dict[str, Any]] = []
+    if build_root:
+        report_dir = _detect_reports_dir(build_root)
+        rows = read_csv_rows(report_dir / "complexity.csv")
+    if rows:
+        return {"rows": rows, "source": "jenkins"}
+    # 빌드 산출물에 complexity.csv가 없으면(VectorCAST 결과가 cloudium SCM 경로에만 있는 흔한
+    # 케이스) SCM 등록 VectorCAST 폴더의 AggregateCoverage per-function 복잡도로 폴백한다.
+    # cloudium 폴더 파싱은 30분 TTL 캐시 — 동일 폴더를 vectorcast-rag(-async)로 한 번 로드했으면
+    # 즉시 응답한다. (still-present sync /report/vectorcast-rag와 동일한 동기 계약)
+    # 주의: 프론트 loadComplexity는 vcast_log_paths를 보내지 않아 UI에서는 이 폴백이 트리거되지
+    # 않는다(UI는 비동기 vectorcast-rag-async가 실어 보낸 complexity_rows를 복잡도 표에 표시).
+    # 이 동기 경로는 vcast_log_paths를 명시적으로 넘기는 프로그래매틱 호출 전용 — cold 캐시 시
+    # ~100s 블로킹 가능하나 호출자 의도이며 이후 TTL 캐시로 즉시.
+    cloud_paths = _collect_vcast_paths(req)
+    if cloud_paths:
+        cloud = _load_vectorcast_rag_from_cloudium_multi(cloud_paths)
+        cr = (cloud.get("complexity_rows") if isinstance(cloud, dict) else None) or []
+        if cr:
+            return {"rows": cr, "source": "cloudium"}
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
-    report_dir = _detect_reports_dir(build_root)
-    return {"rows": read_csv_rows(report_dir / "complexity.csv")}
+    return {"rows": rows, "source": "jenkins"}
 
 
 @router.post("/api/jenkins/report/docs")
@@ -874,6 +939,66 @@ def _load_vectorcast_rag_from_cloudium(path: str) -> Dict[str, Any]:
     return {}
 
 
+# 2026-06-24 — SCM(cloudium) IT 함수콜 보강. AggregateCoverage(구문/분기/MC-DC) 리포트에는
+# 함수콜(Function Called) 커버리지가 없고 VectorCAST Metric report HTML에만 있다. 그동안
+# 함수콜은 Jenkins 빌드 산출물에서만 나왔는데, SwITCV 빌더가 쓰는 parse_hmr_html을 재사용해
+# SCM cloudium 경로에서도 동일하게 it_metrics.grand_totals(function_calls/functions)를 제공한다.
+_MAX_METRIC_HTML_SCAN = 40   # 폴더당 Metric report 후보 HTML read 상한(runaway IPC 방지).
+
+
+def _aggregate_it_function_calls(
+    html_bytes_list: List[bytes],
+) -> "tuple[Dict[str, Any], Dict[str, Dict[str, int]]]":
+    """IT VectorCAST Metric report HTML들 → it_metrics.grand_totals + 함수명→함수콜 셀 map.
+
+    각 HTML을 parse_hmr_html로 파싱(metric 양식 아니면 ok=False → skip), Function Called
+    (covered_calls/total_calls)와 Functions(functions_covered/functions_total)를 전 함수 합산해
+    grand_totals를 만든다. function_calls/functions 둘 다 total>0일 때만 키를 채운다(0% 위장 금지).
+
+    Returns:
+        (grand_totals, fc_by_name) — grand_totals는 {"function_calls": {covered,total,rate},
+        "functions": {covered,total,rate}} 일부/전체. fc_by_name은 entries 병합용
+        {함수명: {covered,total}}.
+    """
+    from backend.services.vcast_hmr_parser import parse_hmr_html
+    fc_cov = fc_tot = fn_cov = fn_tot = 0
+    fc_by_name: Dict[str, Dict[str, int]] = {}
+    _seen_units: set = set()  # (함수명, unit_file) — multi-HTML 동일 함수 이중집계 방지
+    for hb in html_bytes_list or []:
+        try:
+            hr = parse_hmr_html(hb)
+        except Exception:  # noqa: BLE001 — 개별 HTML 파싱 실패는 skip
+            continue
+        if not getattr(hr, "ok", False):
+            continue
+        # metrics_by_name(유닛파일별 버킷)를 순회 — hr.metrics(이름 dedup, first-wins)는
+        # 동명 다른-파일 static 함수(osif.c::Init vs canif.c::Init)를 첫 개만 남기고
+        # 나머지를 합산에서 누락시켜 과소집계한다. by-name 버킷을 (함수,파일) 단위로 합산.
+        for name, mlist in (getattr(hr, "metrics_by_name", None) or {}).items():
+            nm = (name or "").strip()
+            for m in (mlist or []):
+                _uk = (nm, str(getattr(m, "unit_file", "") or ""))
+                if _uk in _seen_units:  # 다른 HTML의 동일 (함수,파일) 중복은 skip
+                    continue
+                _seen_units.add(_uk)
+                _cc = int(getattr(m, "covered_calls", 0) or 0)
+                _tc = int(getattr(m, "total_calls", 0) or 0)
+                fc_cov += _cc
+                fc_tot += _tc
+                fn_cov += int(getattr(m, "functions_covered", 0) or 0)
+                fn_tot += int(getattr(m, "functions_total", 0) or 0)
+                if nm:
+                    _agg = fc_by_name.setdefault(nm, {"covered": 0, "total": 0})
+                    _agg["covered"] += _cc
+                    _agg["total"] += _tc
+    grand: Dict[str, Any] = {}
+    if fc_tot:
+        grand["function_calls"] = {"covered": fc_cov, "total": fc_tot, "rate": round(fc_cov / fc_tot, 4)}
+    if fn_tot:
+        grand["functions"] = {"covered": fn_cov, "total": fn_tot, "rate": round(fn_cov / fn_tot, 4)}
+    return grand, fc_by_name
+
+
 # cloudium 원본 리포트 폴더 파싱은 무겁다(폴더당 수십 env × ExecutionResult HTML
 # worker IPC read + BS4 — 실측 ~100s). cloudium은 read-only라 리포트가 릴리스 단위로
 # 정적이므로 폴더 경로 기준 TTL 캐시로 반복 매트릭스 로드를 즉시화한다. 비어있는 결과
@@ -881,9 +1006,47 @@ def _load_vectorcast_rag_from_cloudium(path: str) -> Dict[str, Any]:
 _VCAST_CLOUDIUM_PARSE_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
 _VCAST_CLOUDIUM_PARSE_LOCK = threading.Lock()
 _VCAST_CLOUDIUM_PARSE_TTL = 1800.0  # 30분
+# 폴더별 single-flight — 아래 래퍼 주석 참조. 등록 경로는 통상 한 자릿수라 32면 충분.
+_VCAST_PARSE_BUILD_LOCKS = KeyedBuildLocks(max_keys=32)
+
+
+def _vcast_cloudium_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    """신선한 캐시 값의 **사본**(캐시 객체 변형 방지), 없으면 None."""
+    with _VCAST_CLOUDIUM_PARSE_LOCK:
+        entry = _VCAST_CLOUDIUM_PARSE_CACHE.get(key)
+    if entry and (time.time() - entry[0]) < _VCAST_CLOUDIUM_PARSE_TTL:
+        return dict(entry[1])
+    return None
 
 
 def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
+    """cloudium 원본 리포트 폴더 파싱 — TTL 캐시 + **폴더별 single-flight**.
+
+    실제 파싱은 `_parse_vcast_logs_from_cloudium_folder_impl`.
+
+    ⚠ 예전엔 락을 캐시 *조회*에만 걸고 파싱은 락 밖에서 했다("동시 miss는 redundant
+    parse 허용, 락 점유 최소화"). 그 전제는 파싱이 싸다는 것인데, 실측은 폴더당 ~100초·
+    4폴더 병렬로도 233초다. **cloudium worker 는 하나**라 같은 폴더를 두 요청이 동시에
+    요구하면 서로 경합해 둘 다 느려진다 — 2026-08-06 실측 **460초**(≈ 단독 233초의 2배.
+    매트릭스의 sync `/report/vectorcast-rag` 와 분석탭의 async 잡이 겹쳤을 때).
+    즉 TTL 캐시는 "누가 먼저 끝낸 다음"부터만 듣고, 정작 막으려던 pile-up 은 못 막았다.
+
+    ⚠ trade-off: 예외 경로(worker 미응답 등)는 결과를 **캐시하지 않는다**(의도된 재시도
+    허용, :1309). 그래서 대기하던 요청이 재파싱한다 = 실패가 직렬화된다. worker 장애는
+    통상 IPC timeout 으로 빨리 끝나 수용 가능하다고 판단했다 — 실패가 느려지면 여길 볼 것.
+    """
+    p = str(path or "").strip()
+    if not p:
+        return {}
+    key = p.replace("\\", "/").rstrip("/").lower()
+    return _VCAST_PARSE_BUILD_LOCKS.run(
+        key,
+        lambda: _vcast_cloudium_cache_get(key),
+        lambda: _parse_vcast_logs_from_cloudium_folder_impl(p, key),
+    )
+
+
+def _parse_vcast_logs_from_cloudium_folder_impl(p: str, _key: str) -> Dict[str, Any]:
     """vectorcast_rag.json이 없는 cloudium 원본 리포트 폴더에서 실행결과를 직접 파싱.
 
     사용자가 설정 SCM '연결 문서 경로'에 등록하는 폴더는 우리 산출물(vectorcast_rag.json)
@@ -895,21 +1058,16 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
     HTML만 읽어 매트릭스 join용 test_rows(subprogram/testcase/unit/result)를 조립한다.
     subprogram은 tc_name(`SwUFn_3401.001`)에서 함수 id(`SwUFn_3401`)를 도출 — ISO 26262
     추적성 체인이 SwUFn id로 매핑되므로 UDS mapping_pairs.source_ids와 join된다.
+
+    ⚠ 캐시 조회·single-flight 는 래퍼(`_parse_vcast_logs_from_cloudium_folder`)가 한다.
+    여기 직접 들어오지 말 것 — 중복 파싱 방지가 통째로 사라진다.
+    `_key` 는 래퍼가 만든 캐시 키를 그대로 받는다(양쪽이 키를 따로 만들면 조회는 miss,
+    쓰기는 다른 칸에 들어가 캐시가 영원히 안 맞는다).
     """
     import re as _re
     from pathlib import Path as _P
 
-    p = str(path or "").strip()
-    if not p:
-        return {}
-    # TTL 캐시 조회 — parse는 락 밖에서 수행(동시 miss는 redundant parse 허용,
-    # 락 점유 최소화). 캐시 객체 변형 방지 위해 사본 반환.
-    _key = p.replace("\\", "/").rstrip("/").lower()
     _now = time.time()
-    with _VCAST_CLOUDIUM_PARSE_LOCK:
-        _cached = _VCAST_CLOUDIUM_PARSE_CACHE.get(_key)
-    if _cached and (_now - _cached[0]) < _VCAST_CLOUDIUM_PARSE_TTL:
-        return dict(_cached[1])
     try:
         from backend.services import swut_input_adapter as SA
         from backend.services.file_resolver import get_resolver
@@ -942,7 +1100,10 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
         layout = SA._detect_log_layout(resolver, folder, warnings)
         sub_tc = os.path.join(folder, layout.tc_dir)
         if not resolver.exists(sub_tc):
-            return {}
+            # silent-drop 방지(P1): tc 폴더 부재/worker 접근 실패를 warnings로 표면화한다.
+            # 과거엔 bare {} 반환으로 사용자에게 사유 없이 VectorCAST 열이 비었다.
+            return {"test_rows": [], "vcast_kind": kind,
+                    "parse_warnings": warnings + [f"{kind}: 시험 TC 폴더 부재/접근 불가 ({sub_tc})"]}
         # ExecutionResult 폴더 — exec_dir 미존재 시 exec_dir_alts("Execution") 시도.
         sub_exec = os.path.join(folder, layout.exec_dir)
         if layout.exec_dir_alts and not SA._exists_quiet(resolver, sub_exec):
@@ -999,7 +1160,9 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
                     "report": env,
                 })
         if not test_rows:
-            return {}
+            # silent-drop 방지(P1): env 스캔은 됐으나 결과 0건 — 누적 warnings 표면화.
+            return {"test_rows": [], "vcast_kind": kind,
+                    "parse_warnings": warnings + [f"{kind}: 시험 결과 0건 (폴더 스캔됨, env 파싱 실패 누적 가능)"]}
         summary = _summarize_vcast_tests(test_rows)
         failures: List[Dict[str, Any]] = [
             {
@@ -1016,6 +1179,159 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
         top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
         if top_n > 0:
             failures = failures[:top_n]
+
+        # 커버리지(구문/분기/MC-DC) — env별 AggregateCoverage 리포트 단일 HTML에서 추출해
+        # 합산한다. ExecutionResult와 동급 비용(env당 HTML 1개 + BS4 표 1개, 무거운
+        # TestCaseData 전체 파싱은 여전히 skip). SwUT 빌더의 검증된 extract_aggregate_coverage
+        # 재사용. 리포트 미존재/파싱 실패는 best-effort skip(테스트 결과는 그대로 반환).
+        cov_acc: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+        # per-function 상세(집계 폐기 방지). vcast_summary.{ut,it}_metrics.entries는 영향도
+        # ASIL 차등 MC/DC delta(coverage_gap.load_function_coverage)의 입력이고, complexity_rows는
+        # 복잡도 탭의 SCM 소스다. 추출기(extract_aggregate_coverage)가 이미 함수별로 다 주는데
+        # 집계로만 접던 결함(audit D2/D3) 수정 — 함수별은 grand가 아니라 항상 funcs에서 모은다.
+        fn_entries: List[Dict[str, Any]] = []
+        complexity_rows: List[Dict[str, Any]] = []
+        _comp_seen: set = set()
+
+        def _cov_cell(cs: Any) -> Dict[str, Any]:
+            """CoverageStats → {covered,total,rate}. total=0이면 rate=None(0% 위장 금지 — coverage_gap이 None을 '데이터 없음'으로 처리)."""
+            c = int(getattr(cs, "covered", 0) or 0)
+            t = int(getattr(cs, "total", 0) or 0)
+            return {"covered": c, "total": t, "rate": (round(c / t, 4) if t else None)}
+
+        sub_cov = os.path.join(folder, layout.cov_dir)
+        cov_alt = ("_AggregateReport.html",) if layout.name == "vc2025" else ()
+        if SA._exists_quiet(resolver, sub_cov):
+            for env in env_names:
+                try:
+                    cov_path = SA._resolve_report_path(
+                        resolver, sub_cov, env, layout.cov_suffix,
+                        alt_suffixes=cov_alt, idx_cache=idx_cache, out_warnings=warnings,
+                    )
+                    cdata = SA._read_via_resolver(resolver, cov_path)
+                    funcs, grand = SA.extract_aggregate_coverage(cdata, out_warnings=warnings)
+                except (PermissionError, OSError) as e:
+                    warnings.append(f"{env}: AggregateCoverage 접근 실패 ({type(e).__name__})")
+                    continue
+                except Exception as e:  # noqa: BLE001 — 개별 env 커버리지 실패는 skip + 누적
+                    warnings.append(f"{env}: AggregateCoverage 파싱 실패 ({type(e).__name__})")
+                    continue
+                # env당 grand_total이 곧 그 env 함수들의 합 — 있으면 그것만(이중집계 방지),
+                # 없으면 함수별 합산. 두 출처를 섞지 않는다.
+                _has_grand = bool(grand and (grand.statement.total or grand.branch.total))
+                for fc in ([grand] if _has_grand else funcs):
+                    for _k in ("statement", "branch", "mcdc"):
+                        cs = getattr(fc, _k, None)
+                        if cs is not None and cs.total:
+                            cov_acc[_k][0] += cs.covered
+                            cov_acc[_k][1] += cs.total
+                # 함수별 entries/complexity는 grand 합산이 아니라 항상 per-function(funcs)에서.
+                for fc in funcs:
+                    sub = (getattr(fc, "name", "") or getattr(fc, "unit_id", "") or "").strip()
+                    if not sub:
+                        continue
+                    unit = (getattr(fc, "component_name", "") or env or "").strip()
+                    fn_entries.append({
+                        "unit": unit,
+                        "subprogram": sub,
+                        "ccn": int(getattr(fc, "complexity", 0) or 0),
+                        "statements": _cov_cell(getattr(fc, "statement", None)),
+                        "branches": _cov_cell(getattr(fc, "branch", None)),
+                        "pairs": _cov_cell(getattr(fc, "mcdc", None)),
+                    })
+                    cplx = int(getattr(fc, "complexity", 0) or 0)
+                    if cplx:
+                        _ckey = (sub, unit)
+                        if _ckey not in _comp_seen:
+                            _comp_seen.add(_ckey)
+                            complexity_rows.append({
+                                "function": sub, "file": unit, "unit": unit, "complexity": cplx,
+                            })
+        coverage: Dict[str, Any] = {}
+        for _k in ("statement", "branch", "mcdc"):
+            _c, _t = cov_acc[_k]
+            coverage[_k] = {"covered": _c, "total": _t, "rate": (round(_c / _t, 4) if _t else None)}
+
+        # deep-review C1 — 라벨 무관 데이터 가드: mcdc(pairs) 컬럼이 함수-진입 커버리지로 퇴화
+        # (전 함수 pairs.total=1·분기 변동)했으면 거짓 MC/DC(예 380/712)를 중화한다. 헤더가
+        # 'MC/DC'/'Pairs' 여도 데이터가 함수-진입이면 coverage_it.mcdc·entries[].pairs·coverage_gap
+        # (ASIL D)·Quality DB 전부 오염되므로, 폴더 집계(전 env 병합 fn_entries) 분포로 판정 후 중화.
+        if fn_entries and SA._is_degenerate_pairs(
+            [(e.get("pairs") or {}).get("total") for e in fn_entries],
+            [(e.get("branches") or {}).get("total") for e in fn_entries],
+        ):
+            coverage["mcdc"] = {"covered": 0, "total": 0, "rate": None}
+            for _e in fn_entries:
+                if _e.get("pairs"):
+                    _e["pairs"] = {"covered": 0, "total": 0, "rate": None}
+            warnings.append(
+                "[mcdc-guard] IT 'MC/DC' 컬럼이 함수-진입 커버리지로 판정(전 함수 pairs.total=1·분기 변동) — 거짓 MC/DC 중화(라벨 무관 데이터 가드)"
+            )
+
+        # vcast_summary는 빌드 RAG와 동일 스키마({ut,it}_metrics.entries) — coverage_gap이
+        # ut_metrics/it_metrics를 모두 읽으므로 폴더 종류(UT/IT)에 맞는 키 하나만 채운다.
+        vcast_summary: Dict[str, Any] = {}
+        if fn_entries:
+            vcast_summary["it_metrics" if is_it else "ut_metrics"] = {"entries": fn_entries}
+
+        # IT 폴더 — Metric report HTML에서 함수콜(Function Called)/함수 진입(Functions) 커버리지를
+        # 추출해 it_metrics.grand_totals를 채운다. 함수콜은 AggregateCoverage(구문/분기/MC-DC)에
+        # 없고 Metric report에만 있어, 그동안 Jenkins 빌드 산출물에서만 나오던 함수콜을 SCM
+        # cloudium 경로에서도 동일하게 제공한다 (SwITCV 빌더 _discover_metric_report_bytes 대칭).
+        # 후보 폴더: 등록 경로(p) + 해석된 릴리스 폴더(folder) — 양식별 Metric report 위치 차이 대비.
+        # 파일명이 일정치 않아(APP `*_Metric_report_*`, BOOT `*_IT_*`) content-detect(parse_hmr_html.ok).
+        if is_it and fn_entries:
+            try:
+                _html_list: List[bytes] = []
+                _seen_html: set = set()
+                _cand_dirs: List[str] = []
+                for _d in (folder, p):
+                    _dk = str(_d or "").replace("\\", "/").rstrip("/").lower()
+                    if _d and _dk and _dk not in {str(x).replace(chr(92), '/').rstrip('/').lower() for x in _cand_dirs}:
+                        _cand_dirs.append(_d)
+                for _d in _cand_dirs:
+                    if len(_html_list) >= _MAX_METRIC_HTML_SCAN:
+                        break
+                    try:
+                        _htmls = SA._list_dir_via_resolver(resolver, _d, pattern="*.html")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    for _e in sorted(_htmls, key=lambda x: str(x).lower()):
+                        if len(_html_list) >= _MAX_METRIC_HTML_SCAN:
+                            break
+                        _base = os.path.basename(str(_e).rstrip("\\/").replace("\\", "/"))
+                        _full = _e if (str(_e).startswith("U:") or str(_e).startswith("/")) \
+                            else os.path.join(_d, _base)
+                        _fk = _full.replace("\\", "/").lower()
+                        if _fk in _seen_html:
+                            continue
+                        _seen_html.add(_fk)
+                        try:
+                            _html_list.append(SA._read_via_resolver(resolver, _full))
+                        except Exception:  # noqa: BLE001
+                            continue
+                _it_grand, _fc_by_name = _aggregate_it_function_calls(_html_list)
+                if _it_grand:
+                    vcast_summary.setdefault("it_metrics", {})["grand_totals"] = _it_grand
+                    # per-function 함수콜을 entries에 병합(모듈 드릴다운 표시용) — 함수명/점앞 base 매칭.
+                    for _ent in fn_entries:
+                        _sp = (_ent.get("subprogram") or "").strip()
+                        _hit = _fc_by_name.get(_sp) or _fc_by_name.get(_sp.split(".")[0])
+                        if _hit and _hit.get("total"):
+                            _ent["function_calls"] = {
+                                "covered": _hit["covered"], "total": _hit["total"],
+                                "rate": round(_hit["covered"] / _hit["total"], 4),
+                            }
+                    if _it_grand.get("function_calls"):
+                        warnings.append(
+                            "[metric-report] IT 함수콜 커버리지 보강 "
+                            f"({_it_grand['function_calls']['covered']}/{_it_grand['function_calls']['total']})"
+                        )
+            except Exception:  # noqa: BLE001 — Metric report 부재/파싱 실패는 best-effort skip
+                logging.getLogger(__name__).debug(
+                    "IT Metric report 함수콜 집계 skip path=%s", p, exc_info=True
+                )
+
         payload_out: Dict[str, Any] = {
             "build_root": folder,
             "source_folder": p,
@@ -1024,6 +1340,9 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
             "test_rows_count": len(test_rows),
             "summary": summary,
             "failures": failures,
+            "coverage": coverage,
+            "vcast_summary": vcast_summary,      # P0: ASIL 차등 MC/DC delta(coverage_gap) 입력
+            "complexity_rows": complexity_rows,  # P1: 복잡도 탭 SCM 소스
             "ut_reports": [] if is_it else [folder],
             "it_reports": [folder] if is_it else [],
             "parse_warnings": warnings,
@@ -1044,12 +1363,37 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
             "vcast cloudium 파싱 접근 실패 path=%s err=%s: %s warnings=%s",
             p, type(e).__name__, e, warnings[:5],
         )
-        return {}
+        # silent-drop 방지(P1): worker 미응답/timeout(PermissionError)·IO 오류를 warnings로
+        # 표면화. cloudium U: 유휴 후 첫 접근 timeout이 가장 흔한 실사용 통증(KJPDS02 PV).
+        return {"test_rows": [], "vcast_kind": kind,
+                "parse_warnings": warnings + [f"{kind}: cloudium 접근 실패 {type(e).__name__} (worker 미응답/timeout 가능): {str(e)[:80]}"]}
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).debug(
             "vcast cloudium 파싱 예외 path=%s", p, exc_info=True
         )
-        return {}
+        # silent-drop 방지(P1): 예상 못한 파싱 예외도 warnings로 표면화(상세는 debug 로그).
+        return {"test_rows": [], "vcast_kind": kind,
+                "parse_warnings": warnings + [f"{kind}: 파싱 예외 (backend 로그 참조)"]}
+
+
+def _split_vcast_summary_by_source(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """test_rows를 source(UT/IT)별로 나눠 합부 summary/카운트를 분리한다.
+
+    각 row의 ``source``는 폴더 종류(``kind = "IT" if is_it else "UT"``, jenkins.py:1029)이며,
+    coverage 분리 로직(``cov_it if _it else cov_ut``)과 동일하게 **IT가 아니면 UT로 귀속**해
+    ut+it 합이 전체와 일치하도록 한다(미상 source는 UT로 흡수). 결합 summary와 별개로
+    UT 패널은 UT만, IT 패널은 IT만 표시하기 위한 필드.
+    """
+    from backend.services.jenkins_adapter import _summarize_vcast_tests
+
+    it_rows = [r for r in rows if str(r.get("source") or "").upper() == "IT"]
+    ut_rows = [r for r in rows if str(r.get("source") or "").upper() != "IT"]
+    return {
+        "summary_ut": _summarize_vcast_tests(ut_rows) if ut_rows else None,
+        "summary_it": _summarize_vcast_tests(it_rows) if it_rows else None,
+        "test_rows_count_ut": len(ut_rows),
+        "test_rows_count_it": len(it_rows),
+    }
 
 
 def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1068,9 +1412,27 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     seen: set = set()
     ut_reports: List[Any] = []
     it_reports: List[Any] = []
+    # 커버리지 합산 — 전체 + UT/IT 분리. 각 payload의 coverage는 폴더 단위 집계라 폴더별
+    # 합산(row dedup과 무관). [covered, total].
+    cov_all: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+    cov_ut: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+    cov_it: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+    # per-function entries(vcast_summary)·complexity_rows 병합 — 폴더별 함수 집합은 보통
+    # 서로소(부트로더/APP 등). entries는 coverage_gap이 메트릭별 max로 흡수하므로 단순 concat,
+    # complexity는 (function,unit)로 dedup.
+    merged_metrics: Dict[str, List[Dict[str, Any]]] = {}
+    # {mk: {metric_key: {covered,total}}} — 폴더별 grand_totals 합산 누산기(버그2 fix)
+    merged_grand: Dict[str, Dict[str, Dict[str, int]]] = {}
+    merged_complexity: List[Dict[str, Any]] = []
+    comp_seen: set = set()
+    merged_warnings: List[str] = []
     for pl in payloads:
         if not isinstance(pl, dict):
             continue
+        # silent-drop 방지(P1): 폴더별 파싱 실패/빈결과 사유(parse_warnings)를 병합 수집.
+        _pw = pl.get("parse_warnings")
+        if isinstance(_pw, list):
+            merged_warnings.extend(str(w) for w in _pw)
         for r in (pl.get("test_rows") or []):
             if not isinstance(r, dict):
                 continue
@@ -1095,6 +1457,45 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         it = pl.get("it_reports")
         if isinstance(it, list):
             it_reports.extend(it)
+        cov = pl.get("coverage")
+        if isinstance(cov, dict):
+            _it = str(pl.get("vcast_kind") or "").upper() == "IT"
+            for _m in ("statement", "branch", "mcdc"):
+                _cell = cov.get(_m) or {}
+                _c = int(_cell.get("covered") or 0)
+                _t = int(_cell.get("total") or 0)
+                cov_all[_m][0] += _c
+                cov_all[_m][1] += _t
+                _tgt = cov_it if _it else cov_ut
+                _tgt[_m][0] += _c
+                _tgt[_m][1] += _t
+        vs = pl.get("vcast_summary")
+        if isinstance(vs, dict):
+            for _mk in ("ut_metrics", "it_metrics"):
+                _blk = vs.get(_mk)
+                if not isinstance(_blk, dict):
+                    continue
+                if isinstance(_blk.get("entries"), list):
+                    merged_metrics.setdefault(_mk, []).extend(_blk["entries"])
+                # grand_totals(함수콜/함수진입)는 폴더별 함수 집합이 disjoint(APP/BOOT 등)라
+                # covered/total을 합산해 보존 — 드롭하면 2폴더+ 로드 시 카드가 사라진다.
+                _gt = _blk.get("grand_totals")
+                if isinstance(_gt, dict):
+                    _acc = merged_grand.setdefault(_mk, {})
+                    for _metric_key in ("function_calls", "functions"):
+                        _mv = _gt.get(_metric_key)
+                        if isinstance(_mv, dict) and int(_mv.get("total") or 0) > 0:
+                            _sub = _acc.setdefault(_metric_key, {"covered": 0, "total": 0})
+                            _sub["covered"] += int(_mv.get("covered") or 0)
+                            _sub["total"] += int(_mv.get("total") or 0)
+        for _cr in (pl.get("complexity_rows") or []):
+            if not isinstance(_cr, dict):
+                continue
+            _ck = (str(_cr.get("function") or ""), str(_cr.get("unit") or _cr.get("file") or ""))
+            if _ck in comp_seen:
+                continue
+            comp_seen.add(_ck)
+            merged_complexity.append(_cr)
 
     summary = _summarize_vcast_tests(merged_rows)
     top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
@@ -1114,14 +1515,50 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     if top_n > 0:
         failures = failures[:top_n]
 
+    def _cov_dict(acc: Dict[str, List[int]]) -> Optional[Dict[str, Any]]:
+        out: Dict[str, Any] = {}
+        any_total = False
+        for _m in ("statement", "branch", "mcdc"):
+            _c, _t = acc[_m]
+            out[_m] = {"covered": _c, "total": _t, "rate": (round(_c / _t, 4) if _t else None)}
+            any_total = any_total or _t > 0
+        return out if any_total else None
+
+    def _vcast_summary_out() -> Dict[str, Any]:
+        # entries + 합산된 grand_totals(함수콜/함수진입)를 모두 실어 카드 유실 방지(버그2).
+        out: Dict[str, Any] = {}
+        for _mk in set(merged_metrics) | set(merged_grand):
+            _blk: Dict[str, Any] = {}
+            if _mk in merged_metrics:
+                _blk["entries"] = merged_metrics[_mk]
+            _gt_acc = merged_grand.get(_mk) or {}
+            _gt: Dict[str, Any] = {}
+            for _metric_key, _sub in _gt_acc.items():
+                _t = int(_sub.get("total") or 0)
+                if _t > 0:
+                    _cvd = int(_sub.get("covered") or 0)
+                    _gt[_metric_key] = {"covered": _cvd, "total": _t, "rate": round(_cvd / _t, 4)}
+            if _gt:
+                _blk["grand_totals"] = _gt
+            out[_mk] = _blk
+        return out
+
     return {
         "test_rows": merged_rows,
         "test_rows_count": len(merged_rows),
         "summary": summary,
+        **_split_vcast_summary_by_source(merged_rows),
         "failures": failures,
         "ut_reports": ut_reports,
         "it_reports": it_reports,
+        "coverage": _cov_dict(cov_all),
+        "coverage_ut": _cov_dict(cov_ut),
+        "coverage_it": _cov_dict(cov_it),
+        "vcast_summary": _vcast_summary_out(),
+        "complexity_rows": merged_complexity,
         "merged_sources": len([p for p in payloads if isinstance(p, dict) and p]),
+        # silent-drop 방지(P1): 폴더별 파싱 실패 사유를 병합해 상위로 전달(프론트 표면화).
+        "parse_warnings": merged_warnings,
     }
 
 
@@ -1151,7 +1588,11 @@ def _load_vectorcast_rag_from_cloudium_multi(paths: List[str]) -> Dict[str, Any]
     if not payloads:
         return {}
     if len(payloads) == 1:
-        return payloads[0]
+        # 단일 폴더(UT 또는 IT 하나)도 UT/IT 분리 필드를 채워 프론트 패널이 결합값을
+        # 오표시하지 않게 한다. 원본 캐시 dict를 변형하지 않도록 얕은 복사 후 갱신.
+        pl = dict(payloads[0])
+        pl.update(_split_vcast_summary_by_source(pl.get("test_rows") or []))
+        return pl
     return _merge_vectorcast_payloads(payloads)
 
 
@@ -1180,8 +1621,12 @@ def _collect_vcast_paths(req: JenkinsReportRequest) -> List[str]:
     return out
 
 
-@router.post("/api/jenkins/report/vectorcast-rag")
-def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
+def _compute_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
+    """VectorCAST RAG 계산(빌드 산출물 → cloudium 등록 경로 폴백). 동기/비동기 라우트 공용.
+
+    cloudium 원본 폴더 파싱은 무거우므로(수 분) 비동기 잡 경로(vectorcast-rag-async)에서도
+    동일 로직을 재사용한다. 결과는 폴더 단위 TTL 캐시(_VCAST_CLOUDIUM_PARSE_CACHE)로 2회차+ 즉시.
+    """
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
     payload = _load_vectorcast_rag(build_root) if build_root else {}
     source = "jenkins"
@@ -1195,6 +1640,7 @@ def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
     # rowless payload(예: build_20 vectorcast_rag.json은 키는 많지만 test_rows=[])를
     # 'present'로 오인해 `if not payload`가 폴백을 건너뛰어 → 등록 경로 결과가 끝까지
     # 안 쓰이고 VectorCAST/P&F 컬럼이 빈 채로 나왔다. test_rows 유무로 판정해 폴백한다.
+    cloud_warnings: List[str] = []
     if not _has_vcast_rows(payload):
         cloud_paths = _collect_vcast_paths(req)
         if cloud_paths:
@@ -1202,8 +1648,16 @@ def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
             if _has_vcast_rows(cloud_payload):
                 payload = cloud_payload
                 source = "cloudium"
+            elif isinstance(cloud_payload, dict):
+                # silent-drop 방지(P1): 폴백이 test_rows를 못 얻어도 실패 사유(worker
+                # timeout/폴더 부재 등)는 살려 프론트가 표시하게 한다.
+                _pw = cloud_payload.get("parse_warnings")
+                if isinstance(_pw, list):
+                    cloud_warnings.extend(str(w) for w in _pw)
     if not _has_vcast_rows(payload):
-        return {"ok": False, "error": "missing"}
+        _pw = payload.get("parse_warnings") if isinstance(payload, dict) else None
+        all_pw = ([str(w) for w in _pw] if isinstance(_pw, list) else []) + cloud_warnings
+        return {"ok": False, "error": "missing", "parse_warnings": all_pw}
 
     comparison: Dict[str, Any] = {}
     # 이전 빌드 delta 비교는 Jenkins 캐시 기반 — cloudium 폴백 소스에는 비적용.
@@ -1239,6 +1693,212 @@ def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
             comparison = {}
 
     return {"ok": True, "data": payload, "comparison": comparison, "source": source}
+
+
+@router.post("/api/jenkins/report/vectorcast-rag")
+def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
+    return _compute_vectorcast_rag(req)
+
+
+@router.post("/api/jenkins/report/vectorcast-rag-async")
+def jenkins_vectorcast_rag_async(req: JenkinsReportRequest) -> Dict[str, Any]:
+    """무거운 cloudium VectorCAST 폴더 파싱(수 분)을 백그라운드 잡으로 실행한다.
+
+    동기 호출은 원격 IPC 직렬 파싱으로 4~5분 블로킹 → 브라우저/프록시 타임아웃·탭 전환 abort로
+    '에러처럼' 보였다. 잡으로 돌리고 기존 폴링(/api/scm/impact-job/{id}, /result)을 재사용한다.
+    user context는 start_job의 wrap_with_user가 상속(cloudium worker 접근 필수).
+    """
+    from workflow.impact_jobs import start_job
+
+    def _runner(_job_id: str) -> Dict[str, Any]:
+        return _compute_vectorcast_rag(req)
+
+    return start_job(
+        scm_id=_job_slug(req.job_url) or "vcast",
+        trigger_type="vectorcast",
+        runner=_runner,
+        # 내부 cloudium 경로를 잡 메타(폴링 응답에 노출)에 싣지 않는다 — 개수만 진단용 기록(W3).
+        metadata={"job_url": req.job_url, "vcast_path_count": len(_collect_vcast_paths(req))},
+    )
+
+
+def _sa_module_of(path: str) -> str:
+    """.../<TOOL>/<MODULE_날짜_버전>/file → 'MODULE_날짜_버전' (파일의 부모 폴더명)."""
+    parts = re.split(r"[\\/]", (path or "").rstrip("\\/"))
+    return parts[-2] if len(parts) >= 2 else ""
+
+
+def _sa_module_label(path: str) -> str:
+    """모듈 폴더명 → 표시 라벨. 'APP_260527_v0.05.37' → 'APP'. prefix 없으면 폴더명."""
+    folder = _sa_module_of(path)
+    prefix = folder.split("_")[0] if folder else ""
+    return prefix or folder or "?"
+
+
+def _sa_pmd_to_cpd(pmd: Any) -> Dict[str, Any]:
+    """swsa PmdResult → 프론트 CPD 카드 shape(duplication_blocks/…/top_blocks)."""
+    files: set = set()
+    for b in pmd.blocks:
+        files.update(b.basenames)
+    top = pmd.blocks_sorted()[:20]
+    return {
+        "ok": pmd.total_blocks > 0,
+        "duplication_blocks": pmd.total_blocks,
+        "total_dup_lines": pmd.total_duplicated_lines,
+        "total_tokens": sum(b.tokens for b in pmd.blocks),
+        "files_involved": len(files),
+        "top_blocks": [
+            {"lines": b.lines, "tokens": b.tokens,
+             "fragments": len(b.files), "files": b.basenames}
+            for b in top
+        ],
+    }
+
+
+def _sa_st201_to_qac(st: Any) -> Dict[str, Any]:
+    """swsa St201Result(HMR) → 프론트 QAC HIS 카드 shape(함수 v(G) 분포)."""
+    from backend.services.qac_parser import MatrixItem
+
+    vgs = st.values_for(MatrixItem.V_G)
+    summary: Dict[str, Any] = {"function_count": st.total_functions}
+    if vgs:
+        vs = sorted(vgs)
+        summary["vg_max"] = max(vgs)
+        summary["vg_mean"] = round(sum(vgs) / len(vgs), 2)
+        summary["vg_p95"] = vs[min(len(vs) - 1, int(len(vs) * 0.95))]
+        summary["vg_over_10"] = sum(1 for v in vgs if v > 10)
+    mr = st.metric("ST201")
+    top = [{"function": nm, "vg": v} for nm, v in (mr.worst_functions if mr else [])]
+    return {"ok": bool(vgs), "summary": summary, "top_functions": top}
+
+
+def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
+    """SCM 등록 정적분석 폴더에서 4종 도구 산출물을 **모듈(APP/BOOT)별로** 찾아 파싱한다.
+
+    회사 정적분석 4종 = CodeSonar(PDF)·CodeEye(OSS 종합 PDF)·QAC HIS(HMR HTML)·CPD(PMD TXT).
+    각 도구는 ``<TOOL>/<MODULE_날짜_버전>/`` 하위에 모듈별로 존재 — 모듈 prefix(APP/BOOT)별
+    **최신 분석 1개씩** 파싱해 ``modules`` 리스트로 반환한다. (과거 단일-파일 방식은
+    사전순 마지막 1개만 남겨 APP 모듈을 누락시켰음.) 포맷 혼재 흡수: QAC는 html(HMR)+pdf(HIS),
+    CPD는 txt(PMD)+xml(CPD)을 **합집합**으로 모아 파서를 확장자로 분기(존재-기반 폴백 아님).
+    cloudium 모드는 worker IPC로 read(backend python은 권한 없음). 일부 도구/모듈만 있어도 graceful.
+
+    응답 shape::
+        {"ok", "codesonar"|"codeeye"|"qac"|"cpd": {"ok", "modules":[{label, module_folder, source, …}]},
+         "warnings"?, "detail"?}
+    """
+    from backend.services.codesonar_pdf_parser import parse_codesonar_pdf
+    from backend.services.file_resolver import get_resolver
+    from backend.services.static_analysis_parsers import (
+        parse_codeeye_pdf,
+        parse_cpd_xml,
+        parse_qac_his_pdf,
+    )
+    from backend.services.swsa_input_adapter import _select_latest_per_module
+    from backend.services.swsa_pmd_parser import parse_pmd_cpd
+    from backend.services.swsa_st201_binner import parse_st201_from_hmr
+
+    resolver = get_resolver()
+    all_files: List[str] = []
+    for raw in paths or []:
+        p = (raw or "").strip()
+        if not p:
+            continue
+        if p.lower().endswith((".pdf", ".xml", ".txt", ".html", ".htm")):
+            all_files.append(p)
+            continue
+        try:
+            all_files.extend(str(f) for f in resolver.list_dir(p, "*", recursive=True))
+        except Exception as e:  # cloudium 권한/미연결/경로부재 — graceful
+            _logger.warning("[static-analysis] list_dir 실패 %s: %s", p[:80], e)
+
+    def _read(path: Optional[str]) -> Optional[bytes]:
+        if not path:
+            return None
+        try:
+            return resolver.read_bytes(path)
+        except Exception as e:
+            _logger.warning("[static-analysis] read 실패 %s: %s", path[:80], e)
+            return None
+
+    warnings: List[str] = []
+
+    def _modules(files: List[str], kind: str, parse_bytes: Any) -> Dict[str, Any]:
+        """모듈 prefix별 최신 파일 1개씩 파싱 → {ok, modules:[…]}. 파서 예외는 모듈 단위 격리.
+
+        parse_bytes(data, path): path 확장자로 포맷 분기(QAC html/pdf·CPD txt/xml 혼재 대응).
+        """
+        sel = _select_latest_per_module(files, kind, warnings) if files else []
+        modules: List[Dict[str, Any]] = []
+        for path in sorted(sel):
+            data = _read(path)
+            if not data:
+                continue
+            try:
+                res = parse_bytes(data, path)
+            except Exception as e:  # 한 모듈 파싱 실패가 전체를 무너뜨리지 않도록 격리
+                _logger.warning("[static-analysis] %s 파싱 실패 %s: %s", kind, path[:80], e)
+                continue
+            if not (isinstance(res, dict) and res.get("ok")):
+                continue
+            res["label"] = _sa_module_label(path)
+            res["module_folder"] = _sa_module_of(path)
+            res["source"] = path
+            modules.append(res)
+        return {"ok": any(m.get("ok") for m in modules), "modules": modules}
+
+    def _parse_qac(data: bytes, path: str) -> Dict[str, Any]:
+        # 실 산출물이 html(HMR) 또는 pdf(HIS Metric) — 확장자로 분기(모듈별 혼재 허용).
+        if path.lower().endswith((".html", ".htm")):
+            return _sa_st201_to_qac(parse_st201_from_hmr(data))
+        return parse_qac_his_pdf(data)
+
+    def _parse_cpd(data: bytes, path: str) -> Dict[str, Any]:
+        # PMD txt(회사 표준) 또는 PMD CPD xml — 확장자로 분기.
+        if path.lower().endswith(".txt"):
+            return _sa_pmd_to_cpd(parse_pmd_cpd(data))
+        return parse_cpd_xml(data)
+
+    lo = [(f, f.lower()) for f in all_files]
+
+    cs_files = [f for f, fl in lo if fl.endswith(".pdf") and "codesonar" in fl]
+    ce_files = [f for f, fl in lo if fl.endswith(".pdf") and "codeeye" in fl and "종합" in f]
+    # QAC/CPD는 두 포맷을 **합집합**으로 모아 모듈별 최신 1개를 뽑고 파서를 확장자로 분기한다.
+    # (과거 'html 있으면 pdf 무시' 식 존재-기반 폴백은 손상된 primary가 유효한 fallback을
+    #  막거나 APP=html·BOOT=pdf 혼재 시 한쪽을 통째 누락시켰음.)
+    qac_files = [
+        f for f, fl in lo
+        if (fl.endswith((".html", ".htm")) and "hmr" in fl)
+        or (fl.endswith(".pdf") and "his" in fl and "metric" in fl
+            and "codesonar" not in fl and "codeeye" not in fl)
+    ]
+    cpd_files = [
+        f for f, fl in lo
+        if (fl.endswith(".txt") and "pmd" in fl)
+        or (fl.endswith(".xml") and ("cpd" in fl or "result_xml" in fl))
+    ]
+
+    out: Dict[str, Any] = {
+        "codesonar": _modules(cs_files, "CodeSonar", lambda data, _p: parse_codesonar_pdf(data)),
+        "codeeye": _modules(ce_files, "CodeEye", lambda data, _p: parse_codeeye_pdf(data)),
+        "qac": _modules(qac_files, "QAC", _parse_qac),
+        "cpd": _modules(cpd_files, "CPD", _parse_cpd),
+    }
+    out["ok"] = any(out[k].get("ok") for k in ("codesonar", "codeeye", "qac", "cpd"))
+    if warnings:
+        out["warnings"] = warnings
+    if not out["ok"]:
+        out["detail"] = "정적분석 산출물(CodeSonar/CodeEye/QAC HMR/PMD)을 찾지 못했습니다 (경로/권한 확인)"
+    return out
+
+
+@router.post("/api/jenkins/report/static-analysis")
+def jenkins_static_analysis(req: CodeSonarRequest) -> Dict[str, Any]:
+    """SCM 정적분석 폴더에서 CodeSonar/CPD/QAC HIS/CodeEye 4종 요약 지표를 추출한다.
+
+    SCM 연결 문서 경로(linked_docs.codesonar) 또는 사용자 지정 폴더/파일 경로 목록을 받아
+    각 도구별 최신 리포트를 파싱. 산출물은 정적분석 섹션의 도구별 카드/표에 표시된다.
+    """
+    return _load_static_analysis(req.paths)
 
 
 @router.post("/api/jenkins/source-root")
@@ -1409,21 +2069,275 @@ def jenkins_scm_info(req: JenkinsScmInfoRequest) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail="unsupported scm_type")
 
 
+def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, build_ts: Optional[int] = None, skip_info: Optional[Dict[str, Any]] = None):
+    """현재 로컬 default 버전(A) ↔ 선택 빌드 버전(B) 사이의 svn 정밀 델타를 시도한다.
+
+    A = `svn info <source_root>`의 로컬 작업본 revision(오프라인, 자격증명 불필요).
+    B = build_rev(Jenkins lastBuiltRevision). 둘 다 정수 SVN revision일 때만
+    `svn diff --summarize -r A:B <repo_url>`로 변경 파일 집합을 구한다.
+
+    반환:
+      - (files, True, meta{changed_files_source:'svn_revision_range', ...}) — 성공.
+        A==B면 files=[]로 '변경 없음'을 명시(빈 changeSet 오등치와 구분).
+      - None — svn 대상 아님/작업본 아님/revision 비정수/조회 실패 → 호출자가 단일
+        빌드 changeSet 결과로 폴백(git·비-svn·회귀 0). repo_url은 registry(신뢰)에서만
+        오고 revision은 정수검증하므로 SSRF/인자 주입 표면 없음.
+      - skip_info(dict)가 주어지면 None 반환 시 'svn_skip_reason'을 채워 호출자가 fallback
+        meta로 노출한다(왜 changeSet로 떨어졌는지 silent 방지 — self-review 정책).
+    """
+    def _skip(reason: str):
+        if isinstance(skip_info, dict):
+            skip_info["svn_skip_reason"] = reason
+        return None
+    try:
+        from backend.services.scm_registry import get_registry_entry, resolve_scm_credentials
+        entry = get_registry_entry(req.scm_id)
+        if entry is None or str(entry.scm_type or "").lower() != "svn":
+            return _skip("not an svn-type SCM entry (scm_type != 'svn')")
+        repo_url = str(entry.scm_url or "").strip()
+        source_root = str(entry.source_root or "").strip()
+        if not (repo_url and source_root):
+            return _skip("svn entry missing scm_url or source_root")
+        from backend.services.local_service import (
+            svn_diff_summarize,
+            svn_info_url,
+            svn_revision_at_date,
+        )
+        # B(build revision) 결정. KJPDS02_PV 등은 git 파이프라인 잡이라 Jenkins changeSet/
+        # lastBuiltRevision이 소스 SVN revision이 아니라 파이프라인 repo의 git SHA1이다(∴
+        # build_rev이 비정수). 소스는 '빌드 시각 기준'으로 svn checkout 되므로, 빌드 timestamp를
+        # SVN 날짜-revision으로 되찾는 게 정확하다(콘솔 로그의 'At revision N'과 일치 검증됨).
+        # build_rev이 svn 정수면 그대로, timestamp도 없거나 조회 실패면 최후로 svn HEAD(라벨 명시).
+        _cred_user, _cred_pw, _ = resolve_scm_credentials(scm_id=req.scm_id)
+        build_rev_is_head = False
+        if not str(build_rev or "").strip().isdigit():
+            _by_ts = ""
+            if build_ts is not None:
+                try:
+                    from datetime import timezone as _tz
+                    # 밀리초까지 유지(초 절삭 금지) — 콤보박스(map_builds_to_svn_revisions)도 full-ms를
+                    # 쓰므로, 같은 정밀도라야 '선택 빌드 라벨 revision == 분석 diff revision'이 초 미만
+                    # 경계 커밋에서도 일치한다(W2). svn은 소수초 -r {…Z}를 수용(실측). Jenkins checkout도
+                    # 밀리초 타임스탬프로 svn co 하므로 이게 실제 빌드 revision과도 정확.
+                    _bd = datetime.fromtimestamp(int(build_ts) / 1000, _tz.utc)
+                    _iso = _bd.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(build_ts) % 1000:03d}Z"
+                    _at = svn_revision_at_date(
+                        repo_url=repo_url, when_iso=_iso, username=_cred_user, password=_cred_pw)
+                    _by_ts = str(_at.get("revision") or "").strip()
+                except (ValueError, TypeError, OSError):
+                    _by_ts = ""
+            if _by_ts.isdigit():
+                build_rev = _by_ts  # 빌드 시각 기준 실제 checkout revision(정확)
+            else:
+                _head = svn_info_url(repo_url=repo_url, username=_cred_user, password=_cred_pw)
+                _head_rev = str(_head.get("revision") or "").strip()
+                if not _head_rev.isdigit():
+                    _logger.warning(
+                        "svn revision-range skipped: no per-build svn revision (git-pipeline job?) "
+                        "and svn HEAD unavailable (%s) — changeSet fallback",
+                        repo_url,
+                    )
+                    return _skip("no per-build svn revision and svn HEAD unavailable")
+                build_rev = _head_rev
+                build_rev_is_head = True  # 빌드 시각 revision 미확인 → HEAD 대체(프론트 라벨로 명시)
+        scm_norm = repo_url.rstrip("/")
+        # A(baseline revision) 결정. 우선순위:
+        #  1) base_ref에 정수 svn revision이 명시되면 그걸 사용 — source_root가 export(.svn 없음)라
+        #     `svn info`가 불가한 프로젝트(예: KJPDS02_PV, 배포 소스가 export) 대응. baseline을
+        #     revision 번호로 고정한다(예: base_ref="1018"; 커밋 메시지의 ver 0.05.17에 해당).
+        #  2) 없으면 로컬 작업본에서 추출 — source_root는 콤마/세미콜론 멀티패스일 수 있으므로 분리해
+        #     scm_url과 '같은 리포지토리'(작업본 Repository Root가 scm_url 포함)인 작업본의 revision을
+        #     고른다(리포 정합, silent-wrong 방지). svn info는 작업본 대상이라 오프라인 조회.
+        base_rev = ""
+        _base_ref_hint = str(getattr(req, "base_ref", "") or getattr(entry, "base_ref", "") or "").strip()
+        # 'r1018' 같은 svn 관례 표기도 허용(선행 r/R 제거 후 정수면 revision). '0.05.17'처럼
+        # 정수가 아닌 버전 라벨은 revision 매핑 불가 → 작업본 경로로 폴백(대개 실패→changeSet).
+        if _base_ref_hint[:1] in ("r", "R") and _base_ref_hint[1:].isdigit():
+            _base_ref_hint = _base_ref_hint[1:]
+        if _base_ref_hint.isdigit():
+            base_rev = _base_ref_hint
+        else:
+            for _raw in source_root.replace(";", ",").split(","):
+                _p = _raw.strip()
+                if not _p:
+                    continue
+                _info = svn_info_url(repo_url=_p)
+                _rev = str(_info.get("revision") or "").strip()
+                if not _rev.isdigit():
+                    continue
+                _root = str(_info.get("repo_root") or "").strip().rstrip("/")
+                if _root and not (scm_norm == _root or scm_norm.startswith(_root + "/")):
+                    continue  # 다른 리포지토리 작업본 — A로 쓰면 무의미
+                base_rev = _rev
+                break
+        if not base_rev.isdigit():
+            _logger.warning(
+                "svn revision-range skipped: no numeric base_ref and no svn working copy in source_root "
+                "matches scm_url (%s) — changeSet fallback",
+                repo_url,
+            )
+            return _skip("no numeric base_ref set (SCM registry) and no svn working copy in source_root")
+        if base_rev == build_rev:
+            # 로컬 default가 이미 빌드 revision과 동일 → 실제 변경 0건(확인됨).
+            return [], True, {
+                "changed_files_source": "svn_revision_range",
+                "baseline_revision": base_rev,
+                "build_revision": build_rev,
+                "build_revision_is_head": build_rev_is_head,
+                "jenkins_changed_file_count": 0,
+                "linkage_reason": f"local working copy already at build revision r{build_rev} (no changes)",
+            }
+        # A>B: 로컬 작업본(A)이 선택 빌드(B)보다 최신 → svn diff -r A:B가 역방향 델타(NEW/DELETE·
+        # before/after 뒤집힘, '삭제 TC 제거' 가이드 오발동)를 낸다 → 명시적 changeSet 폴백.
+        if int(base_rev) > int(build_rev):
+            _logger.warning(
+                "svn revision-range skipped: local rev %s newer than build rev %s — changeSet fallback",
+                base_rev, build_rev,
+            )
+            return _skip(f"local baseline r{base_rev} newer than build r{build_rev} (reverse delta)")
+        diff = svn_diff_summarize(
+            repo_url=repo_url,
+            rev_a=base_rev,
+            rev_b=build_rev,
+            username=_cred_user,
+            password=_cred_pw,
+        )
+        if int(diff.get("rc", 1)) != 0:
+            _logger.warning(
+                "svn diff -r %s:%s failed (scm=%s): %s",
+                base_rev, build_rev, req.scm_id, str(diff.get("output"))[:200],
+            )
+            return _skip(f"svn diff -r {base_rev}:{build_rev} failed (rc!=0)")  # 조회 실패 → changeSet 폴백
+        files = [str(x) for x in (diff.get("files") or [])]
+        meta: Dict[str, Any] = {
+            "changed_files_source": "svn_revision_range",
+            "baseline_revision": base_rev,
+            "build_revision": build_rev,
+            "build_revision_is_head": build_rev_is_head,
+            "jenkins_changed_file_count": len(files),
+            "linkage_reason": (
+                f"svn diff --summarize -r {base_rev}:{build_rev}"
+                + (" (build rev = svn HEAD; per-build revision unavailable)" if build_rev_is_head else "")
+            ),
+        }
+        edit_types = diff.get("edit_types") or {}
+        if edit_types:
+            meta["changed_file_edit_types"] = edit_types
+        return files, True, meta
+    except Exception as exc:  # noqa: BLE001 — 어떤 실패든 changeSet로 graceful 폴백
+        _logger.warning("svn revision-range diff failed (scm=%s): %s", req.scm_id, exc, exc_info=True)
+        return _skip(f"svn error: {str(exc)[:120]}")
+
+
+def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
+    """선택한 빌드의 changeSet에서 변경 .c/.h 파일을 가져온다.
+
+    반환: (manual_changed_files, use_manual_only, meta_extra)
+      - 성공: (files, True, {...jenkins_changeset...}) — files가 []여도 '빌드 변경 0건'으로
+        간주(use_manual_only=True라 로컬 working-copy diff로 잘못 되돌아가지 않음).
+      - 자격증명 없음/조회 실패: (None, False, {...local_diff_fallback...}) — 기존 로컬 SCM diff.
+    서버 측 Jenkins 자격증명(config.get_jenkins_config)만 사용 — HTTP body로 토큰 받지 않음.
+    """
+    _svn_skip: Dict[str, Any] = {}
+    if not (req.build_number and str(req.job_url or "").strip()):
+        # build/job 없어도 svn A:B(base_ref↔HEAD)는 독립적으로 가능 — 먼저 시도.
+        _svn = _try_svn_revision_range(req, "", skip_info=_svn_skip)
+        if _svn is not None:
+            return _svn
+        return None, False, {
+            "changed_files_source": "local_diff_fallback",
+            "linkage_reason": "no build_number/job_url",
+            "svn_skip_reason": _svn_skip.get("svn_skip_reason"),
+        }
+
+    # Jenkins changeSet 조회(build_rev 확보용) — svn 프로젝트에선 build_rev이 git SHA일 수
+    # 있고, 조회 자체가 실패(Jenkins 다운)할 수도 있다. 둘 다 svn A:B(base_ref↔HEAD)는
+    # 독립적으로 성립하므로, Jenkins 결과 유무와 무관하게 svn 경로를 항상 먼저 시도한다.
+    build_rev = ""
+    _build_ts: Optional[int] = None
+    _jenkins_res = None
+    _jenkins_err = ""
+    try:
+        from backend.routers.config import get_jenkins_config
+        cfg = get_jenkins_config()
+        user = str(cfg.get("username") or "").strip()
+        token = str(cfg.get("token") or "").strip()
+        base_url = str(cfg.get("baseUrl") or "").strip().rstrip("/")
+        job = str(req.job_url or "").strip()
+        job_l = job.lower()
+        under_base = bool(base_url) and (job_l == base_url.lower() or job_l.startswith(base_url.lower() + "/"))
+        if not (user and token):
+            _jenkins_err = "jenkins credentials not configured"
+        elif (not under_base) or (".." in job):
+            # SSRF fail-closed: baseUrl 하위가 아니면 서버 토큰을 싣지 않는다.
+            _jenkins_err = "job_url not under configured Jenkins baseUrl"
+        else:
+            from backend.services.jenkins_service import get_build_changed_files
+            _jenkins_res = get_build_changed_files(
+                job_url=req.job_url,
+                build_number=int(req.build_number),
+                username=user,
+                api_token=token,
+                verify_tls=bool(cfg.get("verifyTls", True)),
+            )
+            build_rev = str(_jenkins_res.get("revision") or "").strip()
+            _build_ts = _jenkins_res.get("timestamp")  # 빌드 시각 — svn 날짜-revision 해석용
+    except Exception as exc:  # noqa: BLE001 — Jenkins 조회 실패는 svn/로컬로 graceful fallback
+        _logger.warning("jenkins changeset fetch failed (scm=%s build=%s): %s", req.scm_id, req.build_number, exc, exc_info=True)
+        _jenkins_err = f"changeset fetch failed: {exc}"[:200]
+
+    # ── svn revision-range: baseline(base_ref A) ↔ build_rev(B, 비정수면 svn HEAD) 정밀 델타 ──
+    # svn diff --summarize -r A:B로 빌드가 몇 번 끼어 있든 A→B 전체 변경을 잡는다. Jenkins
+    # 조회 실패/build_rev이 git SHA여도 독립적으로 성립(svn HEAD를 B로 대체).
+    svn_range = _try_svn_revision_range(req, build_rev, build_ts=_build_ts, skip_info=_svn_skip)
+    if svn_range is not None:
+        return svn_range
+
+    # svn 경로 미성립 → Jenkins changeSet 결과가 있으면 그걸로, 없으면 로컬 diff 폴백.
+    if _jenkins_res is not None:
+        files = [str(x) for x in (_jenkins_res.get("files") or [])]
+        meta: Dict[str, Any] = {
+            "changed_files_source": "jenkins_changeset",
+            "build_revision": build_rev,
+            "jenkins_changed_file_count": len(files),
+            # svn 우선인데 changeSet로 떨어졌으면 왜인지 표면화(silent 방지) — 예: base_ref 미설정.
+            "svn_skip_reason": _svn_skip.get("svn_skip_reason"),
+        }
+        edit_types = _jenkins_res.get("edit_types") or {}
+        if edit_types:
+            meta["changed_file_edit_types"] = edit_types
+        return files, True, meta
+    return None, False, {
+        "changed_files_source": "local_diff_fallback",
+        "linkage_reason": _jenkins_err or "svn/changeset unavailable",
+        "svn_skip_reason": _svn_skip.get("svn_skip_reason"),
+    }
+
+
+def _make_jenkins_impact_trigger(req: JenkinsImpactTriggerRequest, *, source: str):
+    """영향도를 '선택한 빌드의 실제 changeSet'에 묶어 ChangeTrigger를 만든다."""
+    manual, use_manual_only, meta_extra = _resolve_jenkins_changed_files(req)
+    return build_registry_trigger(
+        trigger_type="jenkins",
+        scm_id=req.scm_id,
+        base_ref=req.base_ref,
+        dry_run=req.dry_run,
+        targets=req.targets or None,
+        manual_changed_files=manual,
+        use_manual_only=use_manual_only,
+        metadata={
+            "source": source,
+            "build_number": req.build_number,
+            "job_url": req.job_url,
+            **meta_extra,
+        },
+    )
+
+
 @router.post("/api/jenkins/impact/trigger")
 def jenkins_impact_trigger(req: JenkinsImpactTriggerRequest) -> Dict[str, Any]:
     try:
-        trigger = build_registry_trigger(
-            trigger_type="jenkins",
-            scm_id=req.scm_id,
-            base_ref=req.base_ref,
-            dry_run=req.dry_run,
-            targets=req.targets or None,
-            metadata={
-                "source": "api/jenkins/impact/trigger",
-                "build_number": req.build_number,
-                "job_url": req.job_url,
-            },
-        )
+        trigger = _make_jenkins_impact_trigger(req, source="api/jenkins/impact/trigger")
     except KeyError:
         raise HTTPException(status_code=404, detail="registry entry not found")
     return run_impact_update(trigger)
@@ -1432,18 +2346,7 @@ def jenkins_impact_trigger(req: JenkinsImpactTriggerRequest) -> Dict[str, Any]:
 @router.post("/api/jenkins/impact/trigger-async")
 def jenkins_impact_trigger_async(req: JenkinsImpactTriggerRequest) -> Dict[str, Any]:
     try:
-        trigger = build_registry_trigger(
-            trigger_type="jenkins",
-            scm_id=req.scm_id,
-            base_ref=req.base_ref,
-            dry_run=req.dry_run,
-            targets=req.targets or None,
-            metadata={
-                "source": "api/jenkins/impact/trigger-async",
-                "build_number": req.build_number,
-                "job_url": req.job_url,
-            },
-        )
+        trigger = _make_jenkins_impact_trigger(req, source="api/jenkins/impact/trigger-async")
     except KeyError:
         raise HTTPException(status_code=404, detail="registry entry not found")
     return start_impact_job(trigger)
@@ -1465,7 +2368,8 @@ async def jenkins_uds_template_upload(
     ext = Path(file.filename).suffix.lower() or ".docx"
     out_dir = _jenkins_templates_dir(cache_root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"uds_template_{job_slug}_{ts}{ext}"
+    # 초 단위 ts — 같은 job 에 같은 초로 두 번 올리면 앞 업로드가 사라진다. 원자 선점.
+    out_path = reserve_unique_path(out_dir / f"uds_template_{job_slug}_{ts}{ext}")
     content = await file.read()
     out_path.write_bytes(content)
     return {
@@ -1482,6 +2386,18 @@ async def jenkins_uds_generate(
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),
     template_path: str = Form(""),
+    # 동기 판도 같은 계약을 받는다 — 한쪽만 받으면 두 입구가 같은 요청에 다른 문서를
+    # 만든다(이 저장소가 반복해 밟은 '쌍둥이 한쪽만 고침' 패턴).
+    reference_doc_path: str = Form(""),
+    template_source: str = Form(""),
+    # 생성 상한 — 준비 게이트 `4. 결정할 것` 에서 고른 값. 오래 요청 파라미터가 아예
+    # 없어 환경변수로만 바꿀 수 있었고, 게이트는 그 사실을 "조정 불가" 로만 말했다.
+    # `None` = 미설정 = 생성기(=config) 기본값. 숫자를 여기 복제하지 않는다.
+    max_source_files: Optional[int] = Form(None),
+    max_items_per_category: Optional[int] = Form(None),
+    # 정본에만 있는 남의 함수 절을 남길지(`""`/`keep`) 지울지(`drop`).
+    # ⚠ 기본값은 빈 문자열이라 **고르기 전까지 산출물이 바뀌지 않는다**.
+    unmatched_headings: str = Form(""),
     source_root: str = Form(""),
     source_only: bool = Form(False),
     req_files: List[UploadFile] = File(default_factory=list),
@@ -1493,6 +2409,8 @@ async def jenkins_uds_generate(
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
+    # 소요 시간은 sts/suts/sits 와 같은 축(핸들러 진입 기준)으로 잰다.
+    _t0 = time.time()
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), *(logic_files or []), *(files or []), component_list)
     _first_root = source_root.split(",")[0].strip() if source_root else ""
@@ -1564,20 +2482,20 @@ async def jenkins_uds_generate(
                 srs_texts.append(text.strip())
             elif ftype == "sds":
                 sds_texts.append(text.strip())
+    # 탈락 사유를 버리지 않는다 — 아래 uds_warnings 로 산출물까지 올린다.
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            if not _is_allowed_req_doc(p):
-                continue
-            text = _read_text_from_file(p)
-        except Exception:
-            text = ""
-        if text:
-            req_texts.append(text.strip())
-            if p.suffix.lower() == ".docx":
-                req_doc_paths.append(str(p))
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+    if doc_skips:
+        _logger.warning("[UDS] 요구사항 문서 %d건 탈락: %s", len(doc_skips), "; ".join(doc_skips[:5]))
 
     jenkins_meta = summary.get("jenkins") if isinstance(summary, dict) else {}
     if not isinstance(jenkins_meta, dict):
@@ -1585,13 +2503,16 @@ async def jenkins_uds_generate(
     summary_text = summary.get("summary_text", "") if isinstance(summary, dict) else ""
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
-        source_sections = generate_uds_source_sections(
+        source_sections = await _run_blocking(
+            generate_uds_source_sections,
             str(source_root_path),
             component_map=component_map if component_map else None,
+            max_files=max_source_files,
+            max_items=max_items_per_category,
         )
     sds_doc_paths: List[str] = []
     for p in req_doc_paths:
-        if "sds" in Path(p).name.lower():
+        if is_sds_filename(p):
             sds_doc_paths.append(str(p))
     if source_sections:
         details = source_sections.get("function_details", {})
@@ -1603,14 +2524,9 @@ async def jenkins_uds_generate(
                 sds_doc_paths=sds_doc_paths,
             )
             source_sections["function_details"] = details
-            rebuilt_by_name: Dict[str, Any] = {}
-            for _, info in details.items():
-                if not isinstance(info, dict):
-                    continue
-                name = str(info.get("name") or "").strip().lower()
-                if name:
-                    rebuilt_by_name[name] = info
-            source_sections["function_details_by_name"] = rebuilt_by_name
+            # 키 규칙은 `report_gen.utils.function_name_key` 단일 출처.
+            # (이 경로는 원래도 소문자였지만 local·tools 판은 아니었다 — 복제가 원인이다.)
+            source_sections["function_details_by_name"] = build_function_details_by_name(details)
     req_from_docs = generate_uds_requirements_from_docs(req_texts) if req_texts else ""
     req_map = _build_req_map_from_doc_paths(req_doc_paths, req_texts) if req_texts or req_doc_paths else {}
     logic_items: List[Dict[str, Any]] = []
@@ -1623,8 +2539,12 @@ async def jenkins_uds_generate(
                 continue
             suffix = Path(f.filename).suffix.lower() or ".png"
             safe_name = "".join(c for c in Path(f.filename).stem if c.isalnum() or c in ("-", "_"))
-            out_name = f"logic_{safe_name}_{ts_logic}{suffix}"
-            out_path = logic_dir / out_name
+            # ⚠ 이름의 유일성이 **업로드 파일명**에만 걸려 있다. 두 사용자가 같은 초에
+            #   `diagram.png` 를 올리면 같은 경로다 — 게다가 한글 등으로 stem 이 전부
+            #   걸러지면 `logic__{ts}` 로 수렴해 충돌 확률이 더 올라간다. 아래 `url` 은
+            #   **선점된 이름**으로 만들어야 남의 그림을 가리키지 않는다.
+            out_path = reserve_unique_path(logic_dir / f"logic_{safe_name}_{ts_logic}{suffix}")
+            out_name = out_path.name
             out_path.write_bytes(await f.read())
             logic_items.append(
                 {
@@ -1686,6 +2606,7 @@ async def jenkins_uds_generate(
         "show_mapping_evidence": bool(show_mapping_evidence),
         "srs_texts": srs_texts,
         "sds_texts": sds_texts,
+        "unmatched_headings": unmatched_headings,
     }
     impact_path = _run_impact_analysis_for_uds(
         source_root_path,
@@ -1703,15 +2624,28 @@ async def jenkins_uds_generate(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = _jenkins_exports_dir(cache_root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"uds_spec_{job_slug}_{ts}.docx"
-    tpl = str(template_path).strip() or None
-    _generate_docx_with_retry(tpl, uds_payload, out_path)
+    # 초 단위 ts — 동시 생성 시 UDS 산출물이 서로를 덮어쓴다(ISO 26262 산출물이라
+    # '남의 문서를 받는' 결과가 된다). 원자 선점으로 비켜간다.
+    out_path = reserve_unique_path(out_dir / f"uds_spec_{job_slug}_{ts}.docx")
+    # 템플릿 선택은 **백엔드 단일 규칙**(`docgen_template_source`) — 비동기 판과 같은 함수.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    _uds_tpl, _uds_tpl_why = resolve_template_for(
+        "uds", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("UDS 템플릿: %s", _uds_tpl_why)
+    tpl = str(_uds_tpl or "").strip() or None
+    await _run_blocking(_generate_docx_with_retry, tpl, uds_payload, out_path)
     _write_uds_payload_sidecar(out_path, uds_payload)
     residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})
     validation_path = out_path.with_suffix(".validation.md")
     _jenkins_report_short = 300
     _jenkins_report_long = 600
-    ok_validation, _ = _run_report_with_timeout(
+    ok_validation, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_validation_report(str(out_path), str(validation_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="validation report",
@@ -1720,7 +2654,8 @@ async def jenkins_uds_generate(
         validation_path = None
     accuracy_path = out_path.with_suffix(".accuracy.md")
     src_root = str(source_root_path) if source_root_path else ""
-    ok_accuracy, _ = _run_report_with_timeout(
+    ok_accuracy, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_called_calling_accuracy_report(
             str(out_path),
             src_root,
@@ -1733,7 +2668,8 @@ async def jenkins_uds_generate(
     if not ok_accuracy:
         accuracy_path = None
     swcom_context_path = out_path.with_suffix(".swcom_context.md")
-    ok_swcom, _ = _run_report_with_timeout(
+    ok_swcom, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_swcom_context_report(str(out_path), str(swcom_context_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="swcom context report",
@@ -1742,7 +2678,8 @@ async def jenkins_uds_generate(
         swcom_context_path = None
     swcom_diff_path = None
     confidence_path = out_path.with_suffix(".field_confidence.md")
-    ok_confidence, _ = _run_report_with_timeout(
+    ok_confidence, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_asil_related_confidence_report(
             uds_payload,
             str(confidence_path),
@@ -1754,7 +2691,8 @@ async def jenkins_uds_generate(
     if not ok_confidence:
         confidence_path = None
     constraints_path = out_path.with_suffix(".constraints.md")
-    ok_constraints, _ = _run_report_with_timeout(
+    ok_constraints, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_constraints_report(uds_payload, str(constraints_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="constraints report",
@@ -1762,14 +2700,46 @@ async def jenkins_uds_generate(
     if not ok_constraints:
         constraints_path = None
     quality_gate_path = out_path.with_suffix(".quality_gate.md")
-    ok_quality_gate, _ = _run_report_with_timeout(
+    ok_quality_gate, _ = await _run_blocking(
+        _run_report_with_timeout,
         lambda: generate_uds_field_quality_gate_report(str(out_path), str(quality_gate_path)),
         timeout_seconds=_jenkins_report_short,
         report_name="field quality gate report",
     )
     if not ok_quality_gate:
         quality_gate_path = None
-    preview_html = generate_uds_preview_html(uds_payload)
+
+    # Quality DB recording (non-fatal)
+    try:
+        from backend.helpers import (
+            _compute_quick_quality_gate,
+            _enrich_function_quality_fields,
+            _record_uds_run,
+        )
+        # local 경로와 동일하게 enrich 후 quick_gate 계산 → 경로 간 점수 일관성.
+        _enrich_function_quality_fields(uds_payload)
+        # 기록은 `_record_uds_run` 단일 관문(helpers/uds.py) — 인자 구성도 산출물
+        # 충실도도 거기 한 곳에만 둔다.
+        _record_uds_run(
+            _compute_quick_quality_gate(uds_payload),
+            # ⚠ `ai_used=False` 는 의도다 — **이 경로에는 AI 섹션 생성 단계가 없다**
+            #   (generate-async 와 달리 `generate_uds_ai_sections` 호출부가 없음).
+            #   설정 파일에 적힌 모델명을 여기서 기록하면 "그 모델이 이 문서를 만들었다"
+            #   는 거짓이 DB 에 남는다. 근거 없는 값은 채우지 않는다.
+            source_root=source_root, out_path=out_path, t0=_t0,
+            ai_used=False,
+            extra_meta={
+                "entry": "jenkins_generate_sync",
+                "ai_stage": "absent",
+                "build_selector": str(build_selector or ""),
+            },
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (sts/suts/sits 의 동일 블록이 NameError 를
+        # 몇 년간 삼켜 품질 기록이 통째로 유실된 전례 — 608f849).
+        _logger.exception("UDS quality record skipped (non-fatal)")
+
+    preview_html = await _run_blocking(generate_uds_preview_html, uds_payload)
     preview_path = out_path.with_suffix(".html")
     preview_path.write_text(preview_html, encoding="utf-8")
     return {
@@ -1795,6 +2765,21 @@ async def jenkins_uds_generate_async(
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),
     template_path: str = Form(""),
+    # ⚠ 오래 이 두 개가 **없었다**. 프론트는 `reference_doc_path` 를 보내고 있었고
+    #   FastAPI 는 미선언 Form 필드를 조용히 버리므로, 준비 게이트가 "UDS 정본을
+    #   템플릿으로 사용합니다 / 설정한 표준 템플릿은 쓰이지 않습니다" 라고 공시하는
+    #   동안 실제로는 정확히 그 반대가 일어났다(정본 폐기·표준 템플릿 사용).
+    #   같은 함정을 `asil_level` 이 이미 밟았다(`DocGenSection.jsx` 주석 참조).
+    reference_doc_path: str = Form(""),
+    template_source: str = Form(""),
+    # 생성 상한 — 준비 게이트 `4. 결정할 것` 에서 고른 값. 오래 요청 파라미터가 아예
+    # 없어 환경변수로만 바꿀 수 있었고, 게이트는 그 사실을 "조정 불가" 로만 말했다.
+    # `None` = 미설정 = 생성기(=config) 기본값. 숫자를 여기 복제하지 않는다.
+    max_source_files: Optional[int] = Form(None),
+    max_items_per_category: Optional[int] = Form(None),
+    # 정본에만 있는 남의 함수 절을 남길지(`""`/`keep`) 지울지(`drop`).
+    # ⚠ 기본값은 빈 문자열이라 **고르기 전까지 산출물이 바뀌지 않는다**.
+    unmatched_headings: str = Form(""),
     source_root: str = Form(""),
     source_only: bool = Form(False),
     req_files: List[UploadFile] = File(default_factory=list),
@@ -1938,13 +2923,31 @@ async def jenkins_uds_generate_async(
             job_id=job_id,
         )
 
+    # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`) — sts/suts/sits
+    # 와 같은 함수를 쓴다. 어느 쪽을 쓸지는 사용자가 준비 게이트에서 고른다
+    # (`template_source`); 미설정이면 서버 기본(정본 우선)이다.
+    # ⚠ 여기서 해석(worker 경유 로컬화)까지 해야 cloudium `U:` 템플릿이 열린다 —
+    #   UDS 는 오래 원문 경로를 그대로 넘겨 그쪽에서 조용히 서식 없이 만들어졌다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    _uds_tpl, _uds_tpl_why = resolve_template_for(
+        "uds", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("UDS 템플릿: %s", _uds_tpl_why)
+
     def _worker() -> None:
         try:
             result = _uds_generate_from_paths(
                 job_url=job_url,
                 cache_root=cache_root,
                 build_selector=build_selector,
-                template_path=template_path,
+                template_path=_uds_tpl or "",
+                max_source_files=max_source_files,
+                max_items_per_category=max_items_per_category,
+                unmatched_headings=unmatched_headings,
                 source_root=source_root,
                 source_only=source_only,
                 req_file_paths=req_file_paths,
@@ -2185,16 +3188,40 @@ def _parse_excel_preview(file_path: Path, max_rows: int = 30) -> Dict[str, Any]:
     return {"filename": file_path.name, "sheets": sheets, "sheet_names": names}
 
 
-def _build_sts_function_details(source_root_path: Path, req_doc_paths: List[str], sds_doc_paths: List[str]) -> Dict[str, Any]:
+def _build_sts_function_details(source_root_path: Path, req_doc_paths: List[str], sds_doc_paths: List[str], uds_path: Optional[str] = None) -> Dict[str, Any]:
     sections = generate_uds_source_sections(str(source_root_path))
     details = sections.get("function_details", {}) if isinstance(sections, dict) else {}
     if isinstance(details, dict):
-        enrich_function_details_with_docs(
-            details,
-            sections.get("function_table_rows", []) if isinstance(sections, dict) else [],
-            req_doc_paths=req_doc_paths,
-            sds_doc_paths=sds_doc_paths,
-        )
+        # SwUDS 문서 직독 ASIL 보강 — cloudium U: 경로는 worker(resolver.read_bytes)로 받아
+        # 로컬 tmp .docx로 실체화 후 enrich에 전달(enrich 파서는 로컬 fs 직접 접근). sds/extract-mapping
+        # (canonical)과 동일 패턴. 사용 후 반드시 unlink. uds_path 없으면 기존 동작 불변.
+        _uds_tmp: Optional[str] = None
+        if uds_path and str(uds_path).strip():
+            try:
+                from backend.services.file_resolver import get_resolver
+                from backend.services.resolver_helpers import enforce_resolver_access
+                enforce_resolver_access(uds_path)
+                _data = get_resolver().read_bytes(uds_path)
+                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as _tmp:
+                    _tmp.write(_data)
+                    _uds_tmp = _tmp.name
+            except Exception as _uds_exc:
+                _api_logger.warning("STS UDS ASIL localize skipped: %s", _uds_exc)
+                _uds_tmp = None
+        try:
+            enrich_function_details_with_docs(
+                details,
+                sections.get("function_table_rows", []) if isinstance(sections, dict) else [],
+                req_doc_paths=req_doc_paths,
+                sds_doc_paths=sds_doc_paths,
+                uds_doc_paths=[_uds_tmp] if _uds_tmp else None,
+            )
+        finally:
+            if _uds_tmp:
+                try:
+                    Path(_uds_tmp).unlink()
+                except OSError:
+                    pass
     return details if isinstance(details, dict) else {}
 
 
@@ -2211,10 +3238,19 @@ async def jenkins_sts_generate_async(
     req_paths: str = Form(""),
     req_files: List[UploadFile] = File(default_factory=list),
     template_path: str = Form(""),
+    # 같은 종류의 **납품 정본**. 템플릿을 무엇으로 삼을지는 백엔드가 정한다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다(판정 복제 금지).
+    reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
+    # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
+    # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
+    max_steps_per_tc: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     from sts_generator import generate_sts
@@ -2230,26 +3266,32 @@ async def jenkins_sts_generate_async(
     req_doc_paths: List[str] = []
     sds_doc_paths: List[str] = []
     srs_docx_path: Optional[str] = ""
+    # ⚠ 예전엔 `Path(srs_path).exists()` 직독이었다. cloudium `U:` 경로에서
+    #   **`PermissionError` 가 그대로 전파**돼 `[WinError 5] 액세스가 거부되었습니다` 로
+    #   500 이 났다(사용자 보고). 다른 선택 문서는 이미 worker 경유인데 SRS 만 별도
+    #   블록이라 빠져 있었다 — 같은 판정이 두 벌이면 한쪽만 고쳐진다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi
     if srs_path:
-        p = Path(srs_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            srs_docx_path = str(p)
+        srs_docx_path = _rbi(srs_path, label="SRS") or ""
+    # 탈락한 요구사항 문서의 **사유**를 모은다 — 예전엔 `except Exception: continue`
+    # 라 경로 오타·권한 없음·본문 0자가 전부 같은 침묵이었고, 마지막에 나오는
+    # "SRS document is required" 가 원인과 무관한 안내가 됐다(실측: cloudium 모드에서
+    # registry 의 U: 문서는 백엔드 권한으로 열리지 않아 전량 탈락한다).
+    doc_skips: List[str] = []
     for path_str in req_paths_list:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            text = _read_text_from_file(p)
-            if text:
-                req_texts.append(text.strip())
-                if p.suffix.lower() == ".docx":
-                    req_doc_paths.append(str(p))
-                if "sds" in p.name.lower():
-                    sds_doc_paths.append(str(p))
-                if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
-                    srs_docx_path = str(p)
-        except Exception:
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            doc_skips.append(reason)
             continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+        if is_sds_filename(p.name):
+            sds_doc_paths.append(str(p))
+        if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
+            srs_docx_path = str(p)
     for f in (req_files or []):
         if not f or not f.filename:
             continue
@@ -2263,29 +3305,46 @@ async def jenkins_sts_generate_async(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                if "sds" in f.filename.lower():
+                if is_sds_filename(f.filename):
                     sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             continue
     if not req_texts and not srs_docx_path:
-        raise HTTPException(status_code=400, detail="SRS document is required")
-    def _resolve_opt_j(val: str) -> Optional[str]:
-        if not val:
-            return None
-        p2 = Path(val).expanduser().resolve()
-        return str(p2) if p2.exists() and p2.is_file() else None
+        # 왜 하나도 못 읽었는지 함께 말한다. "문서를 달라" 는 안내는 문서를 준
+        # 사용자에게 아무 정보도 주지 않는다.
+        detail = "SRS document is required"
+        if doc_skips:
+            detail += " — 지정한 문서가 전부 읽히지 않았다: " + " / ".join(doc_skips[:5])
+            if len(doc_skips) > 5:
+                detail += f" (외 {len(doc_skips) - 5}건)"
+        raise HTTPException(status_code=400, detail=detail)
+    # 선택 입력은 **worker 경유**로 로컬화한다. 예전엔 `Path(val).exists()` 직독이라
+    # cloudium `U:` 문서가 전량 PermissionError → `None` → 생성기가 **그 문서 없이**
+    # 만들고 화면엔 "생성 완료" 가 떴다(근거가 빠진 ISO 26262 산출물). 사유도 수집한다.
+    from backend.services.resolver_helpers import resolve_builder_input
+    opt_skips: List[str] = []
+    sds_docx_path = resolve_builder_input(sds_path, label="SDS", reasons=opt_skips)
+    uds_file_path = resolve_builder_input(uds_path, label="UDS", reasons=opt_skips)
+    stp_docx_path = resolve_builder_input(stp_path, label="STP", reasons=opt_skips)
+    if opt_skips:
+        _logger.warning("STS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
+                        len(opt_skips), "; ".join(opt_skips)[:400])
 
-    sds_docx_path = _resolve_opt_j(sds_path)
-    uds_file_path = _resolve_opt_j(uds_path)
-    stp_docx_path = _resolve_opt_j(stp_path)
-
-    tpl_path: Optional[str] = None
-    if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+    # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
+    # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
+    # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유 로컬화가 필요하다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    tpl_path, _tpl_why = resolve_template_for(
+        "sts", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("%s 템플릿: %s", "sts".upper(), _tpl_why)
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "sts", f"sts_{_job_slug(job_url)}", tpl_path)
     project_config = {
         "project_id": project_id or "PROJECT",
@@ -2293,6 +3352,7 @@ async def jenkins_sts_generate_async(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
     _set_progress("jenkins_sts", job_url, build_selector, {"stage": "start", "percent": 1, "message": "STS start", "done": False, "error": ""}, job_id=job_id)
@@ -2303,7 +3363,7 @@ async def jenkins_sts_generate_async(
     def _worker() -> None:
         try:
             _set_progress("jenkins_sts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
-            function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths)
+            function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths, uds_path=uds_path)
             result = generate_sts(
                 requirements_text=req_texts,
                 function_details=function_details,
@@ -2315,6 +3375,7 @@ async def jenkins_sts_generate_async(
                 uds_path=uds_file_path,
                 stp_path=stp_docx_path,
                 on_progress=_on_progress,
+                source_root=str(source_root_path) if source_root_path else None,  # 품질 DB project_root
             )
             download_url = f"/api/jenkins/sts/download?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
             preview_url = f"/api/jenkins/sts/preview?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
@@ -2411,16 +3472,27 @@ def jenkins_sts_view(job_url: str, cache_root: str, filename: str) -> Dict[str, 
 
 
 @router.post("/api/jenkins/suts/generate-async")
-async def jenkins_suts_generate_async(
+def jenkins_suts_generate_async(
     job_url: str = Form(...),
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),
     source_root: str = Form(""),
     template_path: str = Form(""),
+    # 시험 범위. 기본 `suds` = SwUDS 설계 ID 가 있는 함수만(**정본과 같은 범위**).
+    # `source` = 소스에서 찾은 함수 전부. 판정은 생성기 단일 규칙이다.
+    scope: str = Form("suds"),
+    # 같은 종류의 **납품 정본**. 템플릿을 무엇으로 삼을지는 백엔드가 정한다
+    # (`docgen_template_source`) — 프론트는 데이터만 준다(판정 복제 금지).
+    reference_doc_path: str = Form(""),
+    # 템플릿 출처는 사용자가 준비 게이트에서 고른다 — 미설정이면 서버 기본
+    # (정본 우선). 철자는 `docgen_template_source.TEMPLATE_SOURCE_*` 단일 출처다.
+    template_source: str = Form(""),
     project_id: str = Form(""),
     version: str = Form("v1.00"),
     asil_level: str = Form(""),
-    max_sequences: int = Form(6),
+    # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
+    # ⚠ 예전엔 6 이었다 — 전략 24종 중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
+    max_sequences: int = Form(24),
 ) -> Dict[str, Any]:
     from suts_generator import generate_suts
 
@@ -2428,11 +3500,19 @@ async def jenkins_suts_generate_async(
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
-    tpl_path: Optional[str] = None
-    if template_path:
-        p = Path(template_path).expanduser().resolve()
-        if p.exists() and p.is_file():
-            tpl_path = str(p)
+    # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
+    # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
+    # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
+    # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유 로컬화가 필요하다.
+    from backend.services.docgen_template_source import (
+        prefer_reference_from,
+        resolve_template_for,
+    )
+    tpl_path, _tpl_why = resolve_template_for(
+        "suts", registered_template=template_path, reference_doc=reference_doc_path,
+        prefer_reference=prefer_reference_from(template_source),
+    )
+    _logger.info("%s 템플릿: %s", "suts".upper(), _tpl_why)
     out_filename, out_path = _build_jenkins_excel_output(cache_root, "suts", f"suts_{_job_slug(job_url)}", tpl_path)
     project_config = {
         "project_id": project_id or "PROJECT",
@@ -2450,6 +3530,7 @@ async def jenkins_suts_generate_async(
         try:
             _set_progress("jenkins_suts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
             result = generate_suts(
+                scope=scope,
                 source_root=str(source_root_path),
                 output_path=str(out_path),
                 template_path=tpl_path,
@@ -2581,9 +3662,13 @@ def jenkins_suts_export_vectorcast(
     effective_project_id = str(project_id or cfg.get("project_id") or "VECTORCAST").strip()
     effective_source_root = resolved_source_root or str(cfg.get("source_root") or "").strip()
 
-    package_name = f"suts_vectorcast_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    package_dir = _jenkins_exports_dir(cache_root) / "vectorcast" / package_name
-    package_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠ `mkdir(exist_ok=True)` 는 폴더를 **공유**시켜 안의 산출물이 서로 덮어써진다.
+    #   local 쪽 쌍둥이 두 개(`local_suts_export_vectorcast`·`local_sits_export_vectorcast`)는
+    #   `reserve_unique_dir` 로 비켜간다. 여기만 남아 있었다.
+    package_dir = reserve_unique_dir(
+        _jenkins_exports_dir(cache_root) / "vectorcast"
+        / f"suts_vectorcast_{_job_slug(job_url)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    package_name = package_dir.name
     intermediate_json = package_dir / "suts_vectorcast_model.json"
     warnings_md = package_dir / "suts_vectorcast_warnings.md"
 
@@ -2628,73 +3713,78 @@ async def jenkins_uds_requirements_preview(
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []))
     req_texts: List[str] = []
+    req_doc_errors: List[str] = []
+    # ⚠ 업로드 분기도 파싱 실패를 조용히 삼켜 "요구 0건"으로만 보였다(경로 분기와 같은
+    #   결함). 사유를 남긴다. 임시 파일 write/파싱/unlink 는 헬퍼 한 덩어리로 묶어
+    #   워커 스레드로 보낸다 — docx 파싱이 이벤트 루프를 잡지 않도록.
+    from backend.services.resolver_helpers import read_uploaded_requirement_doc
     for f in req_files:
         if not f or not f.filename:
             continue
-        suffix = Path(f.filename).suffix.lower() or ".txt"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await f.read())
-            tmp_path = Path(tmp.name)
-        try:
-            text = _read_text_from_file(tmp_path)
-        except Exception:
-            text = ""
+        text, reason = await _run_blocking(
+            read_uploaded_requirement_doc, f.filename, await f.read(),
+        )
+        if reason:
+            req_doc_errors.append(reason)
         if text:
-            req_texts.append(text.strip())
+            req_texts.append(text)
     # N20 fix: cloudium 모드에서 backend python.exe는 클라우디움 폴더 권한 없음
     # → Path.exists() / _read_text_from_file의 직접 read 모두 실패. resolver를
     # 통해 worker IPC로 read 후 임시 파일에 저장 → _read_text_from_file 호출.
     # local 모드에서는 resolver.read_bytes도 직접 read이라 동일 동작.
-    from backend.services.file_resolver import get_resolver
-    from backend.services.resolver_helpers import enforce_resolver_access
-    _resolver = get_resolver()
+    #
+    # ⚠ 이 루프는 예전에 다섯 갈래 실패(접근 거부/파일 없음/형식 불허/read 실패/본문
+    #   추출 실패)를 전부 `text = ""` 로 삼켰다. 응답은 언제나 ok:True 라 호출자는
+    #   구분할 수 없고, 프론트는 끝에서 "SRS 경로를 확인하세요" 한 문장으로 뭉갠다 —
+    #   사용자에겐 "문서는 있는데 없다고 나온다"로 보인다(실제 보고). 바로 아래
+    #   compare/function_mapping 블록은 같은 결함을 이미 고쳐 errors 에 사유를 싣는데
+    #   정작 그 위인 여기가 안 고쳐져 있었다. 사유를 req_doc_errors 로 올린다.
+    from backend.services.resolver_helpers import read_requirement_doc_via_resolver
     for path_str in _parse_path_list(req_paths):
-        text = ""
-        try:
-            enforce_resolver_access(path_str)  # cloudium 게이트 + 화이트리스트
-            if not _resolver.exists(path_str):
-                continue
-            suffix = Path(path_str).suffix or ".txt"
-            if not _is_allowed_req_doc(Path(path_str)):
-                continue
-            data = _resolver.read_bytes(path_str)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(data)
-                tmp_p = Path(tmp.name)
-            try:
-                text = _read_text_from_file(tmp_p)
-            except Exception:
-                text = ""
-            finally:
-                try:
-                    tmp_p.unlink()
-                except Exception:
-                    pass
-        except (PermissionError, OSError):
-            text = ""
-        except Exception:
-            text = ""
+        text, reason = read_requirement_doc_via_resolver(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            req_doc_errors.append(reason)
         if text:
-            req_texts.append(text.strip())
+            req_texts.append(text)
+    # 경로도 업로드도 안 온 상태는 "읽었는데 0건"과 전혀 다른 사유다 — 구분해 알린다.
+    if not req_texts and not req_doc_errors and not _parse_path_list(req_paths):
+        req_doc_errors.append("요구사항 문서 경로가 지정되지 않았습니다")
     preview = generate_uds_requirements_preview(req_texts)
     mapping = generate_uds_requirements_mapping(preview.get("items") or [])
     compare = None
     function_mapping = None
+    # ⚠ 이 두 블록은 예전에 `except Exception: <var> = None` 이었다. 그래서
+    #   ① source_root 미지정 ② 소스에 함수 없음 ③ 파서 크래시 세 상태가 응답에서
+    #   전부 같은 `null` 이 됐고, 실제로 `_scan_source_function_names` 가 튜플 폭
+    #   불일치로 **모든 정상 호출에서 ValueError** 를 내던 것이 약 4개월간 묻혔다.
+    #   ISO 26262 맥락에서 이 필드는 문서↔소스 함수명 추적 대조 결과라, null 을
+    #   '불일치 0건' 으로 읽으면 추적성 갭이 은폐된다. 사유를 응답에 싣는다
+    #   ('미계산은 0 이 아니라 —' 규약과 같은 취지).
+    errors: Dict[str, str] = {}
     if source_root:
         try:
             compare = generate_uds_requirements_compare(preview.get("items") or [], source_root)
-        except Exception:
-            compare = None
+        except Exception as exc:
+            _logger.warning("requirements-preview: compare 실패 — %s", exc, exc_info=True)
+            errors["compare"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         try:
             function_mapping = generate_uds_function_mapping(req_texts, source_root)
-        except Exception:
-            function_mapping = None
+        except Exception as exc:
+            _logger.warning("requirements-preview: function_mapping 실패 — %s", exc, exc_info=True)
+            errors["function_mapping"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    if req_doc_errors:
+        _logger.warning("requirements-preview: 요구문서 %d건 탈락 — %s",
+                        len(req_doc_errors), "; ".join(req_doc_errors)[:400])
     return {
         "ok": True,
         "preview": preview,
         "mapping": mapping,
         "compare": compare,
         "function_mapping": function_mapping,
+        # 읽지 못한 요구문서의 **사유**. 호출자가 "요구 0건"을 경로 탓으로 뭉개지 않도록
+        # 무엇이 왜 탈락했는지 그대로 전달한다(빈 배열이면 키 자체를 안 싣는다).
+        **({"req_doc_errors": req_doc_errors} if req_doc_errors else {}),
+        **({"errors": errors} if errors else {}),
     }
 
 
@@ -2782,6 +3872,28 @@ def _resolve_job_build_root(job_url: str, cache_root: str) -> Optional[Path]:
     return build_dirs[0] if build_dirs else None
 
 
+# 시스템 레벨 시험 source(SyTS/SyITS) — 결정1 재정의로 SW covered 판정에서 제외한다.
+_SYS_TEST_SOURCES = frozenset({"SyTS", "SyITS"})
+
+
+def _row_has_sw_tests(row: Dict[str, Any]) -> bool:
+    """SW-레벨 시험 존재 여부(결정1: 시스템시험 SyTS/SyITS 제외 — SW covered에 미포함).
+
+    - band-split 키(sts/suts/sits/vcast): Jenkins 매트릭스의 SW 시험 밴드.
+    - flat tests[]: 양 모드 공통. flat은 SyTS/SyITS 멤버를 포함하는 상위집합이라 source로 걸러야 한다
+      (단순히 syts/syits 키만 빼면 flat/test_ids가 시스템-only 검증 행을 여전히 covered로 잡는다).
+    - test_ids(source 미상): flat이 리스트로 존재하면 위에서 판정되므로 flat 부재 시에만 폴백.
+
+    프론트 hasTestData(SrsSdsSection.jsx)와 lockstep. (local.py는 STS/SUTS만 실어 SyTS/SyITS 부재 → no-op.)
+    """
+    if row.get("sts_tests") or row.get("suts_tests") or row.get("sits_tests") or row.get("vcast_tests"):
+        return True
+    flat = row.get("tests")
+    if isinstance(flat, list):
+        return any(isinstance(t, dict) and t.get("source") not in _SYS_TEST_SOURCES for t in flat)
+    return bool(row.get("test_ids"))
+
+
 def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixRequest) -> None:
     """Persist a compact traceability summary for dashboard quick-load.
 
@@ -2820,6 +3932,27 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
     #   covered   : design (SDS or UDS source) AND tests both present
     #   partial   : exactly one of {design, tests} present
     #   uncovered : neither present
+    # ASIL 등급분포·밴드별 현황(대시보드 카드용) — link_table asil_coverage(req→grade) + 행 밴드 필드에서
+    # 단일 패스로 파생. asil_cov는 아래 cache_payload(has_asil/gap/unknown)에서도 재사용한다.
+    link_table = inner.get("link_table") if isinstance(inner, dict) else None
+    asil_cov = link_table.get("asil_coverage") if isinstance(link_table, dict) else None
+    asil_cov = asil_cov if isinstance(asil_cov, dict) else {}
+    _asil_by_target = asil_cov.get("by_target") if isinstance(asil_cov.get("by_target"), dict) else {}
+    _BAND_FIELDS = {
+        "SyRS": "syrs_parents", "SDS": "sds_components", "HSIS": "hsis_signals",
+        "UDS": "source_ids", "STS": "sts_tests", "SUTS": "suts_tests",
+        "SITS": "sits_tests", "SyTS": "syts_tests", "SyITS": "syits_tests",
+    }
+    _TEST_BANDS = {"STS", "SUTS", "SITS", "SyTS", "SyITS"}  # dict-list(내용 _tid 필터), 나머지는 string-list 설계밴드
+    asil_distribution: Dict[str, Dict[str, int]] = {}   # grade → {total, covered}
+    band_counts: Dict[str, int] = {b: 0 for b in (list(_BAND_FIELDS.keys()) + ["VectorCAST"])}
+
+    def _tid(t: Any) -> Any:
+        # 프론트 _testId / link_table _test_related_id 와 동일 4필드 우선순위(testcase→subprogram→unit→id).
+        if not isinstance(t, dict):
+            return ""
+        return t.get("testcase") or t.get("subprogram") or t.get("unit") or t.get("id") or ""
+
     covered = 0
     partial = 0
     uncovered = 0
@@ -2827,35 +3960,96 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         if not isinstance(row, dict):
             uncovered += 1
             continue
-        has_tests = bool(
-            row.get("tests")
-            or row.get("sts_tests")
-            or row.get("suts_tests")
-            or row.get("sits_tests")
-            or row.get("vcast_tests")
-            or row.get("test_ids")
-        )
+        # SW-레벨 시험만(결정1 재정의: 시스템시험 SyTS/SyITS 제외 — SW covered에 미포함).
+        # 상세 predicate는 _row_has_sw_tests(모듈 헬퍼, 프론트 hasTestData와 lockstep·단위테스트 대상).
+        has_tests = _row_has_sw_tests(row)
         has_design = bool(
             row.get("source_ids")
             or row.get("sds_components")
+            or row.get("sds_functions")  # 추적 정화: 함수로만 추적된 요구사항 커버리지 회귀 방지(프론트 DESIGN_FIELDS lockstep)
+            or row.get("sds_design_elements")  # 설계ID·상태명 등 — 함수 분리 시 이게 없으면 14행이 uncovered 로 회귀
+            or row.get("hsis_signals")   # 시스템 인터페이스(HSIS) realization — SwEI 등 인터페이스 요구 커버(결정1)
             or row.get("functions")
             or row.get("mapping")
             or row.get("sds")
             or row.get("source_mapping")
         )
-        if has_design and has_tests:
+        # 비기능/안전 요구(SwNTR/SwNTSR)는 설계 분해 없이 시험으로 직접 검증된다(ISO 26262 요구사항기반
+        # 시험). 따라서 설계 링크가 없어도 시험만 있으면 covered로 인정(결정1, 3-site lockstep).
+        # 행 requirement_id는 RAW 철자(정규화 전)라 SyNTR_/SyNTSR_도 매칭(_normalize_req_id가 키에만
+        # Sy→Sw collapse). 비기능/안전 요구 prefix 4종 모두 인정.
+        _rid = str(row.get("requirement_id") or "").upper()
+        is_nonfunctional = _rid.startswith(("SWNTR", "SWNTSR", "SYNTR", "SYNTSR"))
+        if has_tests and (has_design or is_nonfunctional):
             covered += 1
+            _row_covered = True
         elif has_design or has_tests:
             partial += 1
+            _row_covered = False
         else:
             uncovered += 1
+            _row_covered = False
+        # ASIL 등급분포 — 행 asil 우선, 없으면 link_table by_target(req→grade) 조인. 미상은 UNKNOWN.
+        # (I1) by_target은 현재 row.asil의 순수 파생(trace_link_table target_asil)이라 이 폴백은 사실상
+        # 휴면이다. 상세탭 extraSummary엔 대칭 폴백이 없으므로, target_asil 파생이 row.asil과 분리되면
+        # 두 화면 ASIL 분포가 갈린다 — 그때 프론트 extraSummary에도 동일 폴백을 추가해 대칭 유지할 것.
+        _raw_grade = str(row.get("asil") or _asil_by_target.get(str(row.get("requirement_id") or "")) or "").upper().strip()
+        _grade = _raw_grade if _raw_grade in ("D", "C", "B", "A", "QM") else "UNKNOWN"
+        _cell = asil_distribution.setdefault(_grade, {"total": 0, "covered": 0})
+        _cell["total"] += 1
+        if _row_covered:
+            _cell["covered"] += 1
+        # 밴드별 현황 — 해당 밴드에 '내용 있는' 항목이 하나라도 있는 요구 수. 공백규칙을 프론트
+        # _rowBands(_testId)·link_table by_band(_test_related_id)와 일치시켜(단순 non-empty list가
+        # 아니라) 내용없는 시험dict·빈문자열 설계원소가 대시보드만 과대집계되던 비대칭 제거(W1).
+        # 정상 데이터에선 count 불변(by_band==band_counts 실증) — malformed 항목에서만 갈리던 것 봉합.
+        for _band, _fld in _BAND_FIELDS.items():
+            _v = row.get(_fld)
+            if not isinstance(_v, list) or not _v:
+                continue
+            if _band in _TEST_BANDS:
+                if any(_tid(_t) for _t in _v):        # 식별자 있는 시험만
+                    band_counts[_band] += 1
+            elif any(str(_x) for _x in _v):           # 빈문자열 아닌 설계원소만(.map(String).filter(Boolean))
+                band_counts[_band] += 1
+        _tests = row.get("tests")
+        if isinstance(_tests, list) and any(
+            isinstance(_t, dict) and _t.get("source") == "VectorCAST" and _tid(_t) for _t in _tests
+        ):
+            band_counts["VectorCAST"] += 1
 
     # Prefer matrix-declared total; fall back to row count
     total = int(declared_total) if isinstance(declared_total, int) and declared_total > 0 else len(rows)
-    # Normalize: if declared_total > len(rows), unclassified extras are "uncovered"
+    # Normalize: if declared_total > len(rows), unclassified extras are "uncovered".
+    # (I2) asil_distribution/band_counts는 위에서 rows만 순회했다. 현재 declared_total==len(rows)
+    # (req_id당 1행·skip 없음)라 phantom이 없지만, 향후 declared_total>len(rows)인 매트릭스가 오면
+    # 그 phantom(미검증·미등급) 요구는 total엔 잡혀도 ASIL/밴드 카드엔 빠진다 — 그때 rows 대사 필요.
     if total > covered + partial + uncovered:
         uncovered += total - (covered + partial + uncovered)
     coverage_pct = round(covered / total * 100, 1) if total > 0 else 0.0
+
+    # 안전 요구(ASIL A~D) 커버리지 — 위 단일 패스가 만든 asil_distribution 에서 파생한다.
+    # 따로 세지 않는 이유: 판정이 둘이 되면 같은 문서가 표면에 따라 다른 값을 낸다.
+    # QM 은 비안전이라, 미상(UNKNOWN)은 **판단 불가**라 분모에서 뺀다 — 근거 부재를 QM 으로
+    # 바꾸면 under-classification 이다. 뺀 사실은 **이 분포의 UNKNOWN 건수**로 화면에 함께 나간다.
+    # ⚠ `asil_unknown_count`(바로 아래 payload)가 아니다 — 그건 link_table 축이고 등급 데이터가
+    #   전무하면 0 으로 강제된다(report_gen/trace_link_table.py `unknown_count`). 즉 "등급이 하나도
+    #   없다" 는 최악의 경우에 0 을 내므로 '분모에서 뺀 건수'로 쓰면 안 된다. 실측(2026-09-02):
+    #   등급 전무 3행 → asil_unknown_count=0 · 분포 UNKNOWN=3. 오늘 KJPDS02_PV 는 둘 다 4 라
+    #   우연히 같아 보인다.
+    # 프론트 단일 출처: frontend-v2/src/asilCoverage.js `deriveSafetyCoverage` (같은 규칙).
+    # AI 입력 단일 출처: workflow/summary_ai_insight.py `derive_safety_coverage` (같은 규칙).
+    _SAFETY_GRADES = ("D", "C", "B", "A")
+    safety_total = sum(int((asil_distribution.get(_g) or {}).get("total", 0)) for _g in _SAFETY_GRADES)
+    safety_covered = sum(int((asil_distribution.get(_g) or {}).get("covered", 0)) for _g in _SAFETY_GRADES)
+
+    # (link_table / asil_cov는 위 단일 패스에서 이미 추출 — has_asil/gap/unknown은 아래 payload에서 재사용)
+
+    # ID 정합성 감사(trace_integrity) — 대시보드 quick-load가 충돌/dangling/placeholder를
+    # 매트릭스 재생성 없이 알 수 있게 카운트만 전파(ASIL 패턴과 동일). 데이터 없으면 0/clean.
+    integ = inner.get("integrity") if isinstance(inner, dict) else None
+    integ_stats = integ.get("stats") if isinstance(integ, dict) else None
+    integ_stats = integ_stats if isinstance(integ_stats, dict) else {}
 
     cache_payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -2865,10 +4059,67 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "uncovered": uncovered,
         "coverage_pct": coverage_pct,
         "summary_raw": summary_data,
+        # ASIL 추적성 결합(P5) — 대시보드 표시용. 데이터 없으면 has=False/0.
+        "asil_has": bool(asil_cov.get("has_asil")),
+        "asil_gap_count": len(asil_cov.get("gaps") or []),
+        "asil_unknown_count": int(asil_cov.get("unknown_count") or 0),
+        # ASIL 등급분포(등급→{total,covered}) + 밴드별 연결 요구 수 — 대시보드 카드 상세 요약용.
+        "asil_distribution": asil_distribution,
+        # 안전 요구(ASIL A~D) 커버리지. ⚠ 분모가 0 이면 `None` 이다 — **0.0 이 아니다**.
+        # 등급 붙은 요구가 하나도 없는 프로젝트에서 0.0 을 내면 "안전 커버리지 0%" 라는
+        # 없는 경보가 된다(잴 대상이 없다는 뜻인데). 미측정 ≠ 0 ≠ 통과.
+        "safety_total": safety_total,
+        "safety_covered": safety_covered,
+        "safety_pct": round(safety_covered / safety_total * 100, 1) if safety_total > 0 else None,
+        "band_counts": band_counts,
+        # ID 정합성 감사(trace_integrity) — 충돌/dangling/placeholder 카운트 + clean 플래그.
+        "integrity_clean": bool(integ_stats.get("clean", True)),
+        "integrity_collision_count": int(integ_stats.get("collision_count") or 0),
+        "integrity_dangling_count": int(integ_stats.get("dangling_count") or 0),
+        # dangling 중 **결함인 것만**. foreign(계층참조 — SwFn_/SwST_ 같은 설계ID가 SDS
+        # Related ID 에 적힌 것)은 V-model 상 정상이라 결함이 아니다. 상세 패널은 이미
+        # suspect 만으로 '정합성 ✓'를 판정하는데(SrsSdsSection.jsx `integNoDefect`), 요약
+        # 배너·KPI 는 dangling_count 전량을 세어 같은 문서를 6건 vs 3건으로 달리 보고했다.
+        # 두 표면 lockstep 용 필드 — 기존 integrity_dangling_count 는 호환 위해 유지한다.
+        "integrity_dangling_suspect_count": int(integ_stats.get("dangling_suspect_count") or 0),
+        "integrity_placeholder_count": int(integ_stats.get("placeholder_count") or 0),
     }
 
     (report_dir / "trace_matrix_summary.json").write_text(
         json.dumps(cache_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _cache_link_table(
+    link_table: Optional[Dict[str, Any]], req: UdsTraceabilityMatrixRequest
+) -> None:
+    """명시 RelatedID 링크 테이블(P1)을 ``report/trace_link_table.json``에 영속화.
+
+    ``build_link_table()`` 결과는 결정적(같은 입력 → 동일)이라, 이 파일은 빌드마다
+    재계산되는 휴리스틱 bridge와 달리 **감사 가능한 추적성 baseline**이 된다.
+    ``_cache_trace_summary``와 동일한 빌드 디렉토리 해석/쓰기 패턴을 따른다(best-effort).
+    """
+    if not isinstance(link_table, dict):
+        return
+    job_url = (req.job_url or "").strip()
+    if not job_url:
+        return
+
+    cache_root = req.cache_root or ".devops_pro_cache"
+    build_root = _resolve_job_build_root(job_url, cache_root)
+    if build_root is None:
+        return
+
+    report_dir = build_root / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        **link_table,
+    }
+    (report_dir / "trace_link_table.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -2883,15 +4134,61 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             sds_pairs=req.sds_pairs or [],
             sits_rows=req.sits_rows or [],
             uds_function_ids=req.uds_function_ids or [],
+            component_asil=req.component_asil or {},
+            hsis_pairs=req.hsis_pairs or [],
+            uds_function_asil=req.uds_function_asil or {},
         )
+        # 명시 RelatedID 링크 테이블 파생(P1) — hiMA식 매트릭스/감사 baseline.
+        # additive: 기존 matrix dict를 변형하지 않고 새 키(link_table)만 더한다.
+        try:
+            matrix["link_table"] = build_link_table(matrix)
+        except Exception as lt_exc:
+            _api_logger.debug("Link table derivation skipped: %s", lt_exc)
         # Cache compact summary for dashboard quick-load (best-effort)
         try:
             _cache_trace_summary(matrix, req)
         except Exception as cache_exc:
             _api_logger.debug("Trace summary cache skipped: %s", cache_exc)
+        # 링크 테이블 영속화(P1) — 빌드마다 재계산 대신 감사 가능 baseline으로 고정(best-effort)
+        try:
+            _cache_link_table(matrix.get("link_table"), req)
+        except Exception as lt_cache_exc:
+            _api_logger.debug("Link table cache skipped: %s", lt_cache_exc)
         return {"ok": True, "matrix": matrix}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/api/jenkins/uds/traceability-matrix/export-xlsx")
+def jenkins_uds_traceability_matrix_xlsx(body: Dict[str, Any]) -> Response:
+    """추적성 매트릭스(클라이언트 보유 matrix)를 감사용 xlsx로 렌더해 반환.
+
+    hiMA TrMatrixReport(화면 그대로 xlsx) 대응 — 감사자가 가장 자주 요구하는 형식.
+    프론트가 이미 생성한 matrix(rows+link_table)를 body로 보내면 재추출 없이 포맷만 한다.
+    body: {"matrix": {...}, "meta": {project_name, job_url, build_selector, ...}}.
+    """
+    from report_gen.trace_matrix_xlsx import build_trace_xlsx
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    matrix = body.get("matrix") if isinstance(body.get("matrix"), dict) else body
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = dict(meta)
+    # 생성시각은 서버에서 주입(클라 신뢰 불요) — 헤더 블록 표시용.
+    meta.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
+    try:
+        data = build_trace_xlsx(matrix, meta)
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"openpyxl 미설치: {exc}")
+    except Exception as exc:
+        _api_logger.debug("Trace xlsx export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"xlsx 생성 실패: {exc}")
+    fname = f"traceability_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.post("/api/jenkins/uds/trace-summary")
@@ -2938,68 +4235,65 @@ def jenkins_trace_summary(req: dict) -> Dict[str, Any]:
 # uds_path 기준 TTL 캐시로 재추출을 막는다. 파일은 세션 중 거의 안 바뀌므로 30분 TTL.
 _UDS_MAPPING_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
 _UDS_MAPPING_LOCK = threading.Lock()
+# 경로별 single-flight — 라우트 docstring 참조. 동시 진행 문서는 한 자릿수라 16이면 충분.
+_UDS_MAPPING_BUILD_LOCKS = KeyedBuildLocks(max_keys=16)
 _UDS_MAPPING_TTL = 1800.0
+# 파서 산출 스키마 버전 — 캐시 키에 prefix해 파서 변경 시 자동 무효화(재기동 불필요).
+# helpers/uds.py:_SOURCE_SECTIONS_SCHEMA_VERSION 선례. 파서 로직 변경 시 반드시 bump.
+# v2: Related ID 행 한정 + [A-Za-z] 확대(SwFn 포착) — 설계ID→SDS→SRS bridge 지원.
+_UDS_MAPPING_SCHEMA_VERSION = "v2"
 
 
-def _docx_tables_text(data: bytes) -> Optional[List[List[List[str]]]]:
-    """docx bytes → tables[행[셀텍스트]]. 손상 docx 복구 fallback 포함.
+# ⚠ 파싱 규약은 `report_gen/uds_related.py` **단일 출처**다. 예전엔 이 함수와 아래
+#   Function Information 순회가 여기에만 있었는데, STS 요구-함수 매핑도 같은 표를
+#   읽어야 해서 복제 위험이 생겼다 — 복제하면 한쪽만 고쳐진다(이 저장소의 반복 결함).
+#   이름은 유지한다(테스트·호출부가 `J._docx_tables_text` 로 참조).
+_docx_tables_text = _uds_related.docx_tables_text
 
-    정상 파일은 python-docx로 읽는다. 임베디드 이미지 CRC 오류 등으로 python-docx가
-    실패해도 추적성 매핑은 이미지와 무관한 '표'에서만 추출하므로, word/document.xml만
-    직접 스트리밍 파싱해 표를 복구한다(손상 미디어 파트 우회). document.xml까지 손상돼
-    파싱 불가하면 None.
-    """
-    import io as _io
-    # 1) 정상 경로 — python-docx
-    try:
-        import docx as _docx
-        doc = _docx.Document(_io.BytesIO(data))
-        return [[[c.text for c in r.cells] for r in t.rows] for t in doc.tables]
-    except Exception:
-        pass
-    # 2) 손상 fallback — document.xml만 직접 파싱 (이미지 등 손상 파트 우회).
-    #    document.xml은 수십 MB일 수 있어 iterparse + elem.clear()로 메모리 방어.
-    try:
-        import xml.etree.ElementTree as _ET
-        import zipfile as _zip
-        W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-        tables: List[List[List[str]]] = []
-        with _zip.ZipFile(_io.BytesIO(data)) as zf:
-            with zf.open("word/document.xml") as f:
-                for _event, elem in _ET.iterparse(f, events=("end",)):
-                    if elem.tag != W + "tbl":
-                        continue
-                    rows: List[List[str]] = []
-                    for tr in elem.findall(W + "tr"):
-                        rows.append([
-                            "".join(t.text or "" for t in tc.iter(W + "t"))
-                            for tc in tr.findall(W + "tc")
-                        ])
-                    tables.append(rows)
-                    elem.clear()
-        return tables
-    except Exception:
-        return None
+
+def _uds_mapping_cache_get(ck: str) -> Optional[Dict[str, Any]]:
+    """신선한 캐시 값의 **사본**(캐시 객체 변형 방지), 없으면 None."""
+    with _UDS_MAPPING_LOCK:
+        entry = _UDS_MAPPING_CACHE.get(ck)
+    if entry and (time.time() - entry[0]) < _UDS_MAPPING_TTL:
+        return dict(entry[1])
+    return None
 
 
 @router.post("/api/jenkins/uds/extract-mapping")
 def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
-    """UDS 문서에서 함수↔요구사항 매핑을 추출"""
-    import re as _re
+    """UDS 문서에서 함수↔요구사항 매핑을 추출 — TTL 캐시 + **경로별 single-flight**.
 
-    from backend.services.file_resolver import get_resolver
-    from backend.services.resolver_helpers import enforce_resolver_access
+    ⚠ 캐시 주석은 원래 "재로드/연타 시 같은 파싱이 쌓여 worker/CPU 경합 → 타임아웃을
+    유발하므로 TTL 캐시로 막는다" 였는데, 락을 캐시 *조회*에만 걸어서 **정작 그 pile-up
+    을 못 막았다**. cold key 에 동시 도착한 N개 요청은 전부 파싱한다 — 캐시는 누가 먼저
+    끝낸 다음부터만 듣기 때문이다. 실측 101초짜리 파싱이고 호출처가 둘(SrsSdsSection·
+    traceMatrix)이라 실제로 겹친다. single-flight 로 한 번만 파싱하고 나머지는 그 결과를 쓴다.
+    """
     uds_path = str(body.get("uds_path", "")).strip()
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path required")
+    from backend.services.resolver_helpers import enforce_resolver_access
     enforce_resolver_access(uds_path)  # C3: health.py와 일관된 방어심층
-    # TTL 캐시 — 손상 docx fallback(73MB 파싱) 재로드 pile-up 방지.
-    _ck = uds_path.replace("\\", "/").rstrip("/").lower()
+    # 스키마 버전 prefix로 파서 변경 시 stale 캐시가 옛 산출을 반환하는 것을 차단
+    # (30분 TTL 내에도 즉시 무효화).
+    _ck = _UDS_MAPPING_SCHEMA_VERSION + ":" + uds_path.replace("\\", "/").rstrip("/").lower()
+    return _UDS_MAPPING_BUILD_LOCKS.run(
+        _ck,
+        lambda: _uds_mapping_cache_get(_ck),
+        lambda: _jenkins_uds_extract_mapping_impl(uds_path, _ck),
+    )
+
+
+def _jenkins_uds_extract_mapping_impl(uds_path: str, _ck: str) -> Dict[str, Any]:
+    """UDS 매핑 추출 본체(36MB read + 최대 73MB document.xml 파싱).
+
+    ⚠ 캐시 조회·single-flight 는 위 라우트가 한다. 여기 직접 들어오지 말 것.
+    `_ck` 는 라우트가 만든 캐시 키를 그대로 받는다(양쪽이 키를 따로 만들면 조회는 miss,
+    쓰기는 다른 칸에 들어가 캐시가 영원히 안 맞는다).
+    """
+    from backend.services.file_resolver import get_resolver
     _now = time.time()
-    with _UDS_MAPPING_LOCK:
-        _hit = _UDS_MAPPING_CACHE.get(_ck)
-    if _hit and (_now - _hit[0]) < _UDS_MAPPING_TTL:
-        return dict(_hit[1])
     resolver = get_resolver()
     try:
         if not resolver.exists(uds_path):
@@ -3022,56 +4316,33 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
 
     # Extract func_id → func_name → requirement_ids from Function Information tables
     req_to_sources: Dict[str, set] = {}
-    # 전체 UDS 함수 인벤토리(함수명 + SwUFn ID) — 설계 req(SwSTR 등) 참조 유무와 무관하게
-    # 모은다. UDS 함수표의 대부분(~95%)은 자기 SwUFn ID·Name만 있고 설계 req 참조가 없어
-    # req_to_sources(=mapping_pairs)에서 누락되는데, 매트릭스의 SDS→UDS bridge는 함수명만
-    # 매칭하면 되므로 전체 목록을 별도로 전달해 "UDS 함수" 컬럼이 채워지게 한다.
+    # 전체 UDS 함수 인벤토리(함수명 + SwUFn ID) — 설계 req(SwFn/SwSTR 등) 참조 유무와
+    # 무관하게 모은다. 실측(KJPDS02_PV): 함수표의 94.8%가 Related ID에 설계 req 참조를
+    # 갖는다(과거 주석의 "~95%가 참조 없음"은 오류였다). 다만 그 설계ID(SwCom/SwFn 등)는
+    # SRS 요구 namespace(SwTR/SwEI 등)와 달라 mapping_pairs로는 매트릭스에 직접 안 붙는다.
+    # 매트릭스는 (1) 함수명 bridge + (2) 설계ID→SDS→SRS bridge로 연결하되, 둘 다 못 잡는
+    # 함수도 있으므로 전체 목록을 별도 전달해 "UDS 함수" 컬럼이 채워지게 한다.
     all_funcs: set = set()
-    for rows in tables_text:
-        if len(rows) < 4:
-            continue
-        first_cell = (rows[0][0] if rows[0] else "").strip()
-        if "Function Information" not in first_cell:
-            continue
-
-        func_id = ""
-        func_name = ""
-        req_refs = []
-        for cells in rows:
-            cells = [str(c).strip() for c in cells]
-            label = cells[0] if cells else ""
-            # python-docx는 병합셀을 grid로 펼쳐 값이 cells[2]에 오지만, document.xml
-            # 직접 파싱(손상 docx fallback)은 실제 w:tc만 추출해 값이 cells[1]에 온다.
-            # 두 경우 모두 커버: 3+셀이면 [2], 2셀이면 마지막 셀.
-            if len(cells) > 2:
-                value = cells[2]
-            elif len(cells) > 1:
-                value = cells[1]
-            else:
-                value = ""
-            if label == "ID":
-                func_id = value
-            elif label == "Name":
-                func_name = value
-            # Find requirement IDs in all cells
-            for c in cells:
-                req_refs.extend(_re.findall(r"Sw[A-Z]{2,}_\d+", c))
-
-        if func_name:
-            all_funcs.add(func_name)
+    # 표 순회·echo 가드·Related ID 행 한정은 `report_gen/uds_related.py` 단일 출처.
+    for _row in _uds_related.extract_function_related_rows(tables_text):
+        func_name = _row["name"]
+        func_id = _row["id"]
+        all_funcs.add(func_name)
+        if func_id:
+            all_funcs.add(func_id)
+        for rid in _row["design_ids"]:
+            if rid not in req_to_sources:
+                req_to_sources[rid] = set()
+            req_to_sources[rid].add(func_name)
+            # rank1 fix: func_id(SwUFn_NNNN)도 source로 등록한다. VectorCAST 원본
+            # 리포트는 testcase를 SwUFn ID로 식별하므로(예 SwUFn_0133.001),
+            # func_name(예 'main')만으로는 join이 0건이 된다. SwUFn ID를 함께
+            # 노출해 vcast subprogram(SwUFn_NNNN 정규화)과 매칭되게 한다.
+            # ⚠ 이것은 **vcast 조인용 표시**다. 소스 파서의 SwUFn 번호와는 체계가
+            #   달라(실측 43쌍 중 35쌍 불일치) 소스 함수 조인에 쓰면 안 된다
+            #   — `report_gen/uds_related.py` 모듈 docstring 참조.
             if func_id:
-                all_funcs.add(func_id)
-            req_refs = sorted(set(req_refs) - {func_id})
-            for rid in req_refs:
-                if rid not in req_to_sources:
-                    req_to_sources[rid] = set()
-                req_to_sources[rid].add(func_name)
-                # rank1 fix: func_id(SwUFn_NNNN)도 source로 등록한다. VectorCAST 원본
-                # 리포트는 testcase를 SwUFn ID로 식별하므로(예 SwUFn_0133.001),
-                # func_name(예 'main')만으로는 join이 0건이 된다. SwUFn ID를 함께
-                # 노출해 vcast subprogram(SwUFn_NNNN 정규화)과 매칭되게 한다.
-                if func_id:
-                    req_to_sources[rid].add(func_id)
+                req_to_sources[rid].add(func_id)
 
     # Convert to mapping_pairs format expected by traceability-matrix API
     mapping_pairs = []
@@ -3080,6 +4351,16 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
             "requirement_id": rid,
             "source_ids": sorted(sources),
         })
+
+    # SwUDS 함수별 ASIL 직독(추적성 매트릭스 요구사항 ASIL 도출용) — 검증된 v3.02 kv-표 추출기
+    # 재사용. SDS 컴포넌트 ASIL만으론 UDS 함수 단위 안전등급이 누락돼 요구사항이 under-report되던
+    # 갭을 매트릭스에 공급(매트릭스가 comp_asil_map에 max-merge). 실패는 graceful(빈 맵).
+    uds_function_asil: Dict[str, str] = {}
+    try:
+        from backend.services.iso26262_doc_asil_extractor import extract_function_asil_from_kv_tables
+        uds_function_asil = extract_function_asil_from_kv_tables(data) or {}
+    except Exception as _asil_exc:
+        _api_logger.debug("UDS function ASIL extraction skipped: %s", _asil_exc)
 
     result = {
         "ok": True,
@@ -3090,6 +4371,8 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         # 함수까지 포함. 매트릭스 SDS→UDS bridge가 이 목록으로 전체 함수를 매칭한다.
         "all_function_ids": sorted(all_funcs),
         "all_functions_count": len(all_funcs),
+        # 함수명(lower)→ASIL — 매트릭스 요구사항 ASIL max-merge 소스(under-report 해소).
+        "uds_function_asil": uds_function_asil,
     }
     with _UDS_MAPPING_LOCK:
         if len(_UDS_MAPPING_CACHE) >= 16:
@@ -3116,15 +4399,53 @@ def _normalize_req_id(rid: str) -> str:
     return rid.upper() if rid else rid
 
 
-@router.post("/api/jenkins/sts/extract-traceability")
-def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
-    """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
+# ── STS/SUTS 추적성 파서 공유 코어 ───────────────────────────────────────────
+# STS(SW 요구 기반 시험)와 SUTS(SW 단위시험)는 레이아웃·의미가 달라(STS 요구=실 SRS
+# 직접, SUTS 요구=SwUDS 함수ID SwUFn→unit-bridge 간접) 엔드포인트를 분리하되, 시트/컬럼
+# 탐지 로직은 여기서 공유한다(복제 금지 — ruff/eslint ratchet 미러 fail-open 전례).
+_TRACE_ID_RE = re.compile(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+")
+_UNIT_TC_RE = re.compile(r"^S\w?UTC_", re.I)       # SwUTC_/SUTC_ = SW 단위시험 TC
+_SPEC_TC_RE = re.compile(r"^S\w?I?TC_", re.I)      # SwTC_/SwITC_ = 요구/통합시험 TC(단위 제외)
+_FUNC_ID_RE = re.compile(r"^SW(?:UFN|UDFN)_\d+$")  # 정규화된 SwUFn/SwUdFn 함수ID(요구 아님)
+
+
+def _detect_trace_doc_type(vcast_rows: list) -> str:
+    """추출된 TC 형태·요구 네임스페이스로 실제 doc-type을 추정(STS/SUTS 오태깅 감지, H3).
+
+    positive signal만 집계한다: 단위 TC(SwUTC) 또는 함수ID(SwUFn) → suts, 요구/통합
+    TC(SwTC/SwITC) → sts. 판별 불가·혼재는 '' 반환해 오경보(false-loud)를 억제 —
+    fallback 고정컬럼(TC 'TC_001' 등)엔 신호가 없어 경고가 안 뜬다.
+    """
+    n = suts = sts = 0
+    for r in vcast_rows:
+        tc = str(r.get("testcase") or "")
+        rid = str(r.get("requirement_id") or "")
+        if not tc and not rid:
+            continue
+        n += 1
+        if _UNIT_TC_RE.match(tc) or _FUNC_ID_RE.match(rid):
+            suts += 1
+        elif _SPEC_TC_RE.match(tc):
+            sts += 1
+    if n == 0:
+        return ""
+    if suts / n >= 0.6:
+        return "suts"
+    if sts / n >= 0.6:
+        return "sts"
+    return ""
+
+
+def _load_trace_workbook(body: Dict[str, Any]):
+    """STS/SUTS 추적성 파서 공유: path 검증 + resolver read + openpyxl 로드.
+
+    (wb, file_path) 반환. 오류는 HTTPException으로 raise(호출측이 그대로 전파).
+    """
     import io
 
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
     file_path = str(body.get("path", "")).strip()
-    doc_type = str(body.get("doc_type", "")).strip().lower()  # "sts" or "suts"
     if not file_path:
         raise HTTPException(status_code=400, detail="path required")
     enforce_resolver_access(file_path)  # C3: 명시 endpoint-local 검증
@@ -3134,144 +4455,233 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
-    p = Path(file_path).expanduser()
-
     try:
         import openpyxl
         data = resolver.read_bytes(file_path)
-        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        # ⚠ read_only 는 **필수**다. 정상 모드는 시트의 셀 전부를 Cell 객체로 물화하는데,
+        #   실측(2026-08-06, KJPDS02_PV) SUTS 4.75MB 로드가 **28.5초**(read_only 0.50초,
+        #   56배)다. 엔드포인트 왕복은 36초까지 갔다 — 사용자에게는 "SITS 는 바뀌었는데
+        #   SUTS 만 안 바뀐다"로 보인다(SITS 는 이미 read_only 라 5.6초).
+        #   같은 파일의 SITS(4815)·SyTS(5094) 로더는 처음부터 read_only 였고, 이 로더만
+        #   빠져 있었다 — 판정 복제.
+        #
+        #   ⚠⚠ read_only 워크시트에 `ws.cell(r, c)` 랜덤 접근을 하면 호출마다 재스캔이라
+        #   O(행²)로 폭주한다(이 저장소 실측 전례: SITS 75분 → 0.9초). 이 파서는 그 접근을
+        #   13곳에서 하므로 `_GridSheet` 로 **한 번만 순회해 값 격자를 뜬 뒤** 넘긴다.
+        #   플래그만 뒤집으면 되레 느려진다 — 둘은 한 세트다.
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
+    return wb, file_path
 
-    # Find traceability sheet — 우선순위:
-    # 1) body의 sheet_name이 명시되면 그 시트 사용 (외부 도구 생성 파일 대응)
-    # 2) "traceability" / "trace" / "tc" / "test case" / "test spec" / "사양" / "트레이스" 등 자동 탐색
-    # 3) 미발견 시 available_sheets와 함께 안내 — frontend가 사용자에게 시트 선택 노출 가능
+
+# 열 스캔 상한 — 폭주 방지 가드이자 `max_column`이 None일 때(openpyxl read_only 엣지)의
+# 폴백값. 과거엔 199 하나가 폴백값과 **하드 상한**을 겸해 `min(max_column, 199)` 형태로
+# 199가 상한으로도 작동했다. 실측 KJPDS02_PV SwITS(v1.02)는 Input 82열 + Expected
+# Result 113열이 붙어 max_column=205이고 `Related ID`가 204열이라 통째로 스캔 밖이었다
+# (고유 요구ID 3→111, 매핑행 49→356. 시트는 찾아 warning도 없던 침묵 손실).
+# 이 상한은 두 곳이 공유한다: (1) _detect_trace_header_cols — STS/SUTS 헤더 탐지(정상
+# 모드 로드라 ws.cell() O(1)). (2) SITS/SyTS 파서 — read_only iter_rows 단일 패스.
+# SUTS(v0.10)는 189열이라 200 캡을 아슬히 통과했으나 더 넓은 릴리스에서 같은 침묵 손실
+# 위험이 있어 헤더 탐지도 이 상한으로 통일한다(하드 200 캡 제거). 성능 영향 없음(둘 다 선형).
+_MAX_SCAN_COLS = 1024
+
+
+class _GridSheet:
+    """read_only 워크시트를 **한 번만** 순회해 만든 in-memory 값 격자.
+
+    `ws.cell(r, c).value` / `.max_row` / `.max_column` 만 흉내내므로, 기존 파서 로직을
+    한 줄도 안 바꾸고 그대로 얹을 수 있다(랜덤 접근 13곳).
+
+    ## 왜 필요한가 (둘 다 실측)
+
+    - **정상 모드**: 셀 전부를 Cell 객체로 물화 → SUTS 4.75MB 로드가 28.5초.
+    - **read_only + 랜덤 `.cell()`**: 호출마다 재스캔 → O(행²) 폭주. 이 저장소는
+      같은 형태로 SITS 파서가 **75분** 걸린 전례가 있다.
+
+    한 번의 `iter_rows(values_only=True)` 로 값만 뜨면 둘 다 피한다(로드 0.5초 + 순회).
+    Cell 객체가 아니라 **값 튜플**이라 메모리도 정상 모드보다 가볍다.
+
+    열은 `_MAX_SCAN_COLS` 로 자른다 — 파서가 그 너머를 안 보므로 결과는 동일하고,
+    비정상적으로 넓은 시트에서 메모리가 터지는 것만 막는다.
+    """
+
+    __slots__ = ("_rows", "max_row", "max_column")
+
+    def __init__(self, ws, max_cols: int = _MAX_SCAN_COLS):
+        rows: list[tuple] = []
+        width = 0
+        for row in ws.iter_rows(values_only=True):
+            if row is None:
+                rows.append(())
+                continue
+            trimmed = row[:max_cols]
+            width = max(width, len(trimmed))
+            rows.append(trimmed)
+        self._rows = rows
+        self.max_row = len(rows)
+        self.max_column = width
+
+    class _Cell:
+        __slots__ = ("value",)
+
+        def __init__(self, value):
+            self.value = value
+
+    def cell(self, row: int, column: int):
+        """1-based 접근. 범위 밖은 openpyxl 과 같이 `value=None` 을 돌려준다."""
+        if row < 1 or column < 1 or row > len(self._rows):
+            return self._Cell(None)
+        data = self._rows[row - 1]
+        if column > len(data):
+            return self._Cell(None)
+        return self._Cell(data[column - 1])
+
+
+def _detect_trace_header_cols(ws, unit_header_extra=()):
+    """헤더 텍스트로 (header_row, tc_col, req_id_cols, unit_col) 동적 탐지(list 형식).
+
+    KJPDS02 SwTS/SwUTS처럼 TC ID/요구 컬럼이 고정 위치가 아니라 'Test Case ID'/'SRS'
+    헤더로만 식별되는 파일 대응(상위 30행 스캔). 미탐지 시 None → 호출측 고정컬럼 fallback.
+    unit_header_extra: SUTS 전용 폴백 헤더('name' 등) — 구체 unit 헤더 미발견 시에만 사용.
+    """
+    max_c = min((ws.max_column or 1), _MAX_SCAN_COLS)
+    max_r = min((ws.max_row or 1), 30)
+    for hr in range(1, max_r + 1):
+        tc_col = None
+        for c in range(1, max_c + 1):
+            h = str(ws.cell(hr, c).value or "").strip().lower()
+            if not h:
+                continue
+            # TC ID 컬럼: 'Test Case ID'(SwTS) / 'TC_ID'(SwUTS) 등 표기 변형 흡수.
+            # 'Test Case Generation Method'는 'testcaseid' 미포함 → 오탐 방지.
+            _hn = h.replace(" ", "").replace("_", "")
+            if "testcaseid" in _hn or _hn == "tcid":
+                tc_col = c
+                break
+        if tc_col is None:
+            continue
+        # 멀티행 헤더 대응: 'Related ID'가 TC 상세헤더보다 위 행(병합 타이틀)에 있을 수
+        # 있어 TC 행 포함 위로 3행 band를 스캔한다.
+        req_id_cols = []
+        for rr in range(max(1, hr - 3), hr + 1):
+            for c in range(1, max_c + 1):
+                if c in req_id_cols:
+                    continue
+                h = str(ws.cell(rr, c).value or "").strip().lower()
+                if not h:
+                    continue
+                # 'srs'/'swrs'는 specific해서 substring 허용, 'related'/'requirement'는
+                # 'related functionality' 등 오탐 방지 위해 완전일치(공백 제거)로 한정.
+                hn = h.replace(" ", "")
+                if ("srs" in hn or "swrs" in hn
+                        or hn in ("related", "relatedid", "relatedids",
+                                  "relatedrequirement", "relatedreq", "requirement",
+                                  "requirementid", "reqid", "trace", "traceid")):
+                    req_id_cols.append(c)
+        if req_id_cols:
+            # unit(함수명) 컬럼 — SUTS/SITS를 SDS 함수명 bridge로 SRS에 연결하기 위해
+            # 캡처(SwUTS col4 'Unit'). TC 헤더 행에서 완전일치 탐색.
+            unit_col = None
+            for c in range(1, max_c + 1):
+                h = str(ws.cell(hr, c).value or "").strip().lower()
+                if h in ("unit", "function", "function name",
+                         "unit name", "function_name", "unit_name"):
+                    unit_col = c
+                    break
+            # SUTS 전용 폴백(H2): 구체 unit 헤더 미발견 시에만 'name' 등 일반 헤더 허용.
+            # STS엔 미전달 → 오탐 방지. 내부 생성 SUTS의 col4 'Name'(함수명) 대응.
+            if unit_col is None and unit_header_extra:
+                extra = {str(x).strip().lower() for x in unit_header_extra}
+                for c in range(1, max_c + 1):
+                    h = str(ws.cell(hr, c).value or "").strip().lower()
+                    if h in extra:
+                        unit_col = c
+                        break
+            return hr, tc_col, req_id_cols, unit_col
+    return None
+
+
+def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
+                                    unit_header_extra=()):
+    """STS/SUTS 'Test Spec/Traceability' 시트에서 (요구|함수)↔TC 매핑 추출 — 공유 코어.
+
+    반환: (vcast_rows, available_sheets|None). available_sheets가 비None이면 추적성
+    시트 미탐지(호출측이 error+available_sheets 응답 구성).
+    """
     trace_ws = None
     trace_type = None
-    sheet_name_arg = str(body.get("sheet_name", "")).strip()
+    sheet_name = ""
     if sheet_name_arg and sheet_name_arg in wb.sheetnames:
         trace_ws = wb[sheet_name_arg]
+        sheet_name = sheet_name_arg
         trace_type = "matrix" if "swrs" in sheet_name_arg.lower() else "list"
     else:
         # N23: keyword 좁힘 — "사양" 단독은 "기능 사양" 등 false positive 위험.
-        # "테스트 사양" / "test 사양" 처럼 test 컨텍스트 결합한 패턴만 매칭.
         _trace_keywords = ("traceability", "trace", "test case", "testcase", "test spec",
                             "테스트 사양", "테스트사양", "트레이스")
         for name in wb.sheetnames:
             nl = name.lower()
             if any(kw in nl for kw in _trace_keywords) or nl.strip() == "tc":
                 trace_ws = wb[name]
+                sheet_name = name
                 trace_type = "matrix" if "swrs" in nl else "list"
                 break
 
+    # 0행일 때 **왜 0행인지**를 말하기 위한 진단. 추출 로직·행 수는 불변이고 카운터만 는다.
+    # (과거엔 시트를 찾고도 0행이면 ok:true 로 조용히 끝나 밴드가 이유 없이 비었다.)
+    diag: Dict[str, Any] = {
+        "sheet": sheet_name, "sheets": list(wb.sheetnames), "layout": trace_type,
+        "req_cols": 0, "tc_seen": 0, "req_cells_seen": 0, "id_hits": 0,
+        "header_row": None, "truncated_at": None,
+    }
     if not trace_ws:
-        all_sheets = list(wb.sheetnames)
-        wb.close()
-        return {
-            "ok": False,
-            "error": "Traceability 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
-            "available_sheets": all_sheets,
-            "vcast_rows": [],
-        }
+        return [], list(wb.sheetnames), diag
 
-    vcast_rows = []
-    import re as _re
+    # 아래 로직은 `ws.cell(r, c)` 랜덤 접근이 13곳이다. 워크북이 read_only 로 열리므로
+    # (성능 — `_load_trace_workbook` 주석 참조) 여기서 **한 번만** 순회해 값 격자로 바꾼다.
+    # 이 줄이 없으면 read_only 랜덤 접근이 O(행²)로 폭주한다(SITS 75분 전례).
+    trace_ws = _GridSheet(trace_ws)
 
-    # 헤더 기반 컬럼 탐지 (list 형식 전용) — KJPDS02 SwTS/SwUTS "3.SW Test Spec"처럼
-    # TC ID/요구사항 컬럼이 고정 위치가 아니라 'Test Case ID' / 'SRS' 헤더로만 식별되는
-    # 파일 대응. 헤더 행을 스캔해 TC 컬럼 + 요구사항(SRS/Related/SwRS) 컬럼을 찾는다.
-    # 못 찾으면 기존 고정 컬럼(TC=5/req=6) 로직으로 fallback (하위호환).
-    def _detect_header_cols(ws):
-        # 상위 30행까지 스캔 (SwUTS는 preamble이 길어 헤더가 12행 이후). 먼저 그 행에
-        # TC ID 컬럼이 있는지 보고, 있으면 같은 행에서 요구사항/Related 컬럼을 찾는다
-        # (요구사항 컬럼을 TC 헤더 행으로 한정 → preamble/데이터 오탐 방지).
-        max_c = min((ws.max_column or 1), 200)
-        max_r = min((ws.max_row or 1), 30)
-        for hr in range(1, max_r + 1):
-            tc_col = None
-            for c in range(1, max_c + 1):
-                h = str(ws.cell(hr, c).value or "").strip().lower()
-                if not h:
-                    continue
-                # TC ID 컬럼: 'Test Case ID'(SwTS) / 'TC_ID'(SwUTS) 등 표기 변형 흡수.
-                # 'Test Case Generation Method'는 'testcaseid' 미포함 → 오탐 방지.
-                _hn = h.replace(" ", "").replace("_", "")
-                if "testcaseid" in _hn or _hn == "tcid":
-                    tc_col = c
-                    break
-            if tc_col is None:
-                continue
-            # 멀티행 헤더 대응: 'Related ID'가 TC 상세헤더(예: SwUTS row4)보다 위 행
-            # (병합 타이틀, row3)에 있을 수 있어 TC 행 포함 위로 3행 band를 스캔한다.
-            req_id_cols = []
-            for rr in range(max(1, hr - 3), hr + 1):
-                for c in range(1, max_c + 1):
-                    if c in req_id_cols:
-                        continue
-                    h = str(ws.cell(rr, c).value or "").strip().lower()
-                    if not h:
-                        continue
-                    # 요구사항/추적 링크 컬럼만 매칭. 'srs'/'swrs'는 specific해서 substring
-                    # 허용, 'related'/'requirement'는 'related functionality'/'requirement
-                    # category' 같은 오탐 방지 위해 완전일치(공백 제거)로 한정. FS_REQ 제외.
-                    hn = h.replace(" ", "")
-                    if ("srs" in hn or "swrs" in hn
-                            or hn in ("related", "relatedid", "relatedids",
-                                      "relatedrequirement", "relatedreq", "requirement",
-                                      "requirementid", "reqid", "trace", "traceid")):
-                        req_id_cols.append(c)
-            if req_id_cols:
-                # unit(함수명) 컬럼 — SUTS/SITS를 SDS 함수명 bridge로 SRS에 연결하기
-                # 위해 캡처 (SwUTS의 col4 'Unit' = 함수명). TC 헤더 행에서 완전일치 탐색.
-                unit_col = None
-                for c in range(1, max_c + 1):
-                    h = str(ws.cell(hr, c).value or "").strip().lower()
-                    if h in ("unit", "function", "function name",
-                             "unit name", "function_name", "unit_name"):
-                        unit_col = c
-                        break
-                return hr, tc_col, req_id_cols, unit_col
-        return None
-
-    # Determine source label from doc_type or auto-detect from sheet structure
+    vcast_rows: List[Dict[str, Any]] = []
     if trace_type == "matrix":
-        source_label = doc_type.upper() if doc_type in ("sts", "suts") else "STS"
-        # STS format: row 4 has req IDs as column headers, rows 5+ have TC IDs with markers
+        # matrix: row4에 요구 ID가 컬럼 헤더, rows 5+ TC ID + 교차 마커.
         req_cols = []
         for c in range(3, (trace_ws.max_column or 0) + 1):
             v = trace_ws.cell(4, c).value
             if v and ("Sw" in str(v) or "SW" in str(v).upper() or "Sy" in str(v)):
                 req_cols.append((c, _normalize_req_id(str(v).strip())))
-
+        diag["req_cols"] = len(req_cols)
         for r in range(5, (trace_ws.max_row or 0) + 1):
             tc_id = str(trace_ws.cell(r, 3).value or "").strip()
             if not tc_id:
                 continue
+            diag["tc_seen"] += 1
             for col, rid in req_cols:
                 val = trace_ws.cell(r, col).value
                 if val is not None and str(val).strip():
                     vcast_rows.append({
-                        "requirement_id": rid,
-                        "testcase": tc_id,
-                        "source": source_label,
-                        "result": "mapped",
+                        "requirement_id": rid, "testcase": tc_id,
+                        "source": source_label, "result": "mapped",
                     })
     else:
-        source_label = doc_type.upper() if doc_type in ("sts", "suts") else "SUTS"
-        detected = _detect_header_cols(trace_ws)
+        detected = _detect_trace_header_cols(trace_ws, unit_header_extra)
         if detected:
-            # 헤더 기반: TC ID 컬럼 ↔ 요구사항 컬럼. 병합셀/연속행은 직전 TC 유지,
-            # 빈 행 50연속 시 조기 종료. 요구사항은 req 컬럼에서만 regex 추출.
+            # 헤더 기반: TC ID ↔ 요구 컬럼. 병합셀/연속행은 직전 TC carry-forward,
+            # 빈 행 50연속 시 조기 종료. 요구는 req 컬럼에서만 regex 추출.
             header_row, tc_col, req_id_cols, unit_col = detected
+            diag["layout"] = "header"
+            diag["header_row"] = header_row
+            diag["req_cols"] = len(req_id_cols)
             empty_streak = 0
             current_tc = ""
             current_unit = ""
             for r in range(header_row + 1, (trace_ws.max_row or header_row) + 1):
                 tc_v = str(trace_ws.cell(r, tc_col).value or "").strip()
                 if tc_v:
+                    diag["tc_seen"] += 1
                     current_tc = tc_v
                     current_unit = ""  # 새 TC 블록 시작 → unit 초기화
                 if unit_col:
@@ -3282,10 +4692,13 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 for rc in req_id_cols:
                     cv = str(trace_ws.cell(r, rc).value or "").strip()
                     if cv:
-                        found += _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", cv)
+                        diag["req_cells_seen"] += 1
+                        found += _TRACE_ID_RE.findall(cv)
+                diag["id_hits"] += len(found)
                 if not tc_v and not found:
                     empty_streak += 1
                     if empty_streak >= 50:
+                        diag["truncated_at"] = r
                         break
                     continue
                 empty_streak = 0
@@ -3293,50 +4706,178 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     for rid in found:
                         vcast_rows.append({
                             "requirement_id": _normalize_req_id(rid),
-                            "testcase": current_tc,
-                            "unit": current_unit,
-                            "source": source_label,
-                            "result": "mapped",
+                            "testcase": current_tc, "unit": current_unit,
+                            "source": source_label, "result": "mapped",
                         })
         else:
             # Fallback: 기존 고정 컬럼 (TC=5, SRS req=6, func=4)
+            diag["layout"] = "fixed_fallback"
             for r in range(4, trace_ws.max_row + 1):
                 tc_id = str(trace_ws.cell(r, 5).value or "").strip()
                 req_raw = str(trace_ws.cell(r, 6).value or "").strip()
                 func_name = str(trace_ws.cell(r, 4).value or "").strip()
+                if req_raw:
+                    diag["req_cells_seen"] += 1
                 if not tc_id:
                     continue
-                req_ids = _re.findall(r"Sw[A-Z]{2,}_\d+|Sy[A-Z]{2,}_\d+", req_raw)
-                for rid in req_ids:
+                diag["tc_seen"] += 1
+                for rid in _TRACE_ID_RE.findall(req_raw):
+                    diag["id_hits"] += 1
                     vcast_rows.append({
                         "requirement_id": _normalize_req_id(rid),
-                        "testcase": tc_id,
-                        "unit": func_name,
-                        "source": source_label,
-                        "result": "mapped",
+                        "testcase": tc_id, "unit": func_name,
+                        "source": source_label, "result": "mapped",
                     })
+    return vcast_rows, None, diag
 
-    wb.close()
 
-    # Summarize
+def _trace_empty_reason(diag: Dict[str, Any], label: str) -> str:
+    """'시트는 찾았는데 0행' 의 **사유**를 갈래별로 만든다.
+
+    커밋 b2d2968("SRS 경로를 확인하세요가 실은 다섯 갈래였다")와 같은 교정이다 — 판정은
+    맞는데 **왜인지를 말하지 않는 것**이 결함이다. 0행이 되는 경로는 아래처럼 서로 다르고,
+    각각 사용자가 취할 조치가 다르다. 뭉뚱그리면 엉뚱한 곳(문서 경로 등)을 의심하게 된다.
+    """
+    sheet = diag.get("sheet") or "?"
+    layout = diag.get("layout")
+    req_cols = int(diag.get("req_cols") or 0)
+    tc_seen = int(diag.get("tc_seen") or 0)
+    cells = int(diag.get("req_cells_seen") or 0)
+    hits = int(diag.get("id_hits") or 0)
+    head = f"{label} 시트('{sheet}')를 인식했으나 TC↔요구 매핑을 0건 추출했습니다"
+
+    if layout == "matrix":
+        if req_cols == 0:
+            why = "matrix 레이아웃으로 판정했으나 4행에서 요구 ID 헤더(Sw*/Sy*)를 찾지 못했습니다"
+        elif tc_seen == 0:
+            why = f"요구 헤더 {req_cols}개는 인식했으나 3열에 TC ID가 없습니다"
+        else:
+            why = f"TC {tc_seen}개 × 요구 {req_cols}열을 인식했으나 교차 표시가 한 칸도 없습니다"
+    elif layout == "fixed_fallback":
+        # 가장 흔한 실사용 원인 — 템플릿이 둘 이상인데 컬럼을 고정으로 가정한 경우.
+        # (SUTS 2템플릿 사건: 컬럼 하드코딩으로 704/1013행이 침묵 드롭됐다.)
+        why = ("헤더를 인식하지 못해 고정 컬럼(TC=5열·요구=6열)으로 폴백했고 그 위치에 값이 "
+               f"없습니다(TC {tc_seen}개·요구셀 {cells}개). 문서 템플릿이 다를 수 있으니 "
+               "sheet_name 을 지정하거나 헤더 표기('Test Case ID'/'Related ID')를 확인하세요")
+    elif layout == "header":
+        hr = diag.get("header_row")
+        if tc_seen == 0:
+            why = f"헤더(행 {hr})는 인식했으나 TC 열에 값이 없습니다"
+        elif cells == 0:
+            why = f"TC {tc_seen}개는 읽었으나 요구 열({req_cols}개)이 전부 비어 있습니다"
+        else:
+            why = (f"요구 열에 값 {cells}개가 있으나 ID 패턴에 맞는 것이 {hits}개입니다 — "
+                   "요구 ID 표기 규약(SwTR_/SwUFn_ 등)을 확인하세요")
+    else:
+        why = "레이아웃을 판정하지 못했습니다"
+
+    tail = ""
+    if diag.get("truncated_at"):
+        # 절단을 침묵시키지 않는다 — 아래쪽에 데이터가 더 있었을 수 있다.
+        tail += f" ⚠ 빈 행 50연속으로 {diag['truncated_at']}행에서 조기 종료했습니다."
+    sheets = diag.get("sheets") or []
+    if sheets:
+        tail += f" 사용 가능한 시트: {', '.join(str(s) for s in sheets)}"
+    return f"{head} — {why}.{tail}"
+
+
+def _finalize_trace_result(vcast_rows, avail, *, expected: str, other: str,
+                           diag: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """공유: 추출 결과를 응답 dict으로 마감 + 내용검증 경고(H3) 부착.
+
+    expected/other는 'sts'|'suts' — 실제 구조가 other로 감지되면 오태깅 경고를 실어
+    조용한 밴드 오태깅(fail-open)을 fail-loud로 전환한다(추출 로직·행은 불변).
+
+    ⚠ **'시트는 찾았는데 0행'이 여기서 `ok:true` + 무사유로 나갔다.** 프론트는
+    `warning` 도 `available_sheets` 도 없어 두 분기가 **모두 미발화** → 밴드가 이유 없이
+    빈다(완전 침묵). SITS 는 같은 결함을 이미 고쳐 두고 주석에 "비대칭 해소"라고 적어
+    놨는데(:5157) STS/SUTS 만 남아 있었다 — 이 저장소 단골인 "복제 → 한쪽만 수정".
+    이제 `diag` 로 갈래별 사유를 만들어 `warning` 에 싣는다(프론트는 이미 warning 을
+    무조건 표시하므로 배선 변경 불필요).
+    """
+    if avail is not None:
+        return {
+            "ok": False,
+            "error": "Traceability 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
+            "available_sheets": avail,
+            "vcast_rows": [],
+        }
     req_set = set(r["requirement_id"] for r in vcast_rows)
-    return {
+    result: Dict[str, Any] = {
         "ok": True,
         "vcast_rows": vcast_rows,
         "total_mappings": len(vcast_rows),
         "requirements_covered": len(req_set),
     }
+    if not vcast_rows:
+        _lbl_up = expected.upper()
+        result["warning"] = (
+            _trace_empty_reason(diag, _lbl_up) if diag
+            # diag 없이 불린 경우(구 호출자)도 침묵시키지 않는다 — 사유는 덜 구체적이어도 남긴다.
+            else f"{_lbl_up} 시트를 인식했으나 TC↔요구 매핑을 0건 추출했습니다(레이아웃 확인 필요)."
+        )
+        # 진단 원자료도 함께 — 프론트는 안 쓰지만 운영/재현에 필요하다.
+        if diag:
+            result["empty_diagnostics"] = diag
+        return result
+    if _detect_trace_doc_type(vcast_rows) == other:
+        _lbl = {"sts": "SW 요구/통합시험(STS)", "suts": "SW 단위시험(SUTS)"}
+        result["warning"] = (
+            f"doc_type={expected.upper()}로 선언됐으나 추출된 TC/요구가 {_lbl[other]} "
+            "구조로 보입니다 — sts/suts 문서 링크가 뒤바뀌지 않았는지 확인하세요."
+        )
+    return result
+
+
+@router.post("/api/jenkins/sts/extract-traceability")
+def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """STS(SW 요구 기반 시험) Excel에서 요구사항↔TC 매핑 추출 (추적성 매트릭스용).
+
+    SUTS는 레이아웃·의미가 달라(요구 컬럼=SwUDS 함수ID, unit-bridge 필요) 전용 파서
+    jenkins_suts_extract_traceability로 분리됨. 하위호환: doc_type='suts'로 들어오면
+    SUTS 전용 파서에 위임한다(구 호출자 무breakage).
+    """
+    doc_type = str(body.get("doc_type", "")).strip().lower()
+    if doc_type == "suts":
+        return jenkins_suts_extract_traceability(body)
+    wb, _fp = _load_trace_workbook(body)
+    try:
+        vcast_rows, avail, diag = _extract_test_spec_traceability(
+            wb, source_label="STS",
+            sheet_name_arg=str(body.get("sheet_name", "")).strip())
+    finally:
+        wb.close()
+    return _finalize_trace_result(vcast_rows, avail, expected="sts", other="suts", diag=diag)
+
+
+@router.post("/api/jenkins/suts/extract-traceability")
+def jenkins_suts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """SUTS(SW 단위시험) Excel에서 함수ID↔TC 매핑 추출 (추적성 매트릭스용) — STS 전용 분리.
+
+    SUTS 요구 컬럼은 실 SRS가 아니라 SwUDS 함수ID(SwUFn)라, 매트릭스가 unit→요구 bridge로
+    간접 연결한다(direct=0, indirect가 정상). 내부 생성 SUTS의 함수명 컬럼 헤더가 'Name'
+    이라 unit 탐지에 'name' 폴백을 추가(H2). 시트/컬럼 탐지는 STS와 공유 코어
+    (_extract_test_spec_traceability) — 중복 없음.
+    """
+    wb, _fp = _load_trace_workbook(body)
+    try:
+        vcast_rows, avail, diag = _extract_test_spec_traceability(
+            wb, source_label="SUTS",
+            sheet_name_arg=str(body.get("sheet_name", "")).strip(),
+            unit_header_extra=("name",))
+    finally:
+        wb.close()
+    return _finalize_trace_result(vcast_rows, avail, expected="suts", other="sts", diag=diag)
 
 
 @router.post("/api/jenkins/sds/extract-mapping")
 def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """SDS 문서에서 SwCom↔요구사항 매핑 추출 (추적성 매트릭스용)"""
-    import re as _re
     import tempfile
 
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
-    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+    from report_gen.requirements import _extract_sds_partition_map, build_sds_component_maps
 
     sds_path = str(body.get("sds_path", "")).strip()
     if not sds_path:
@@ -3369,35 +4910,185 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "sds_pairs": [], "total_components": 0, "total_requirements": 0}
 
     # Build requirement_id → [component_names] mapping
-    # W3: Apply _normalize_req_id to handle whitespace/case in related IDs
-    req_to_comps: Dict[str, list] = {}
-    comp_set = set()
-    for comp_key, info in partition_map.items():
-        related = info.get("related", "")
-        if not related:
-            continue
-        # Match IDs allowing optional internal whitespace (e.g., "SwRS_ 001")
-        raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
-        req_ids = [_normalize_req_id(rid) for rid in raw_ids]
-        if req_ids:
-            comp_name = comp_key
-            comp_set.add(comp_name)
-            for rid in req_ids:
-                req_to_comps.setdefault(rid, [])
-                if comp_name not in req_to_comps[rid]:
-                    req_to_comps[rid].append(comp_name)
+    # 판정은 report_gen.requirements.build_sds_component_maps 단일 출처. 여기(Jenkins 모드)와
+    # local.py(로컬 모드)가 같은 로직을 복제하던 것을 합쳤다 — 정규화·게이트·함수/컴포넌트
+    # 분리 근거는 전부 그 docstring 참조. 이 파일에는 I/O 와 응답 조립만 남긴다.
+    _maps = build_sds_component_maps(partition_map)
+    req_to_comps = _maps["req_to_comps"]
+    req_to_design_comps = _maps["req_to_design_comps"]
+    req_to_folded_comps = _maps["req_to_folded_comps"]
+    req_to_element_comps = _maps["req_to_element_comps"]
+    component_asil = _maps["component_asil"]
+    comp_set = _maps["comp_set"]
+    design_comp_set = _maps["design_comp_set"]
 
     sds_pairs = [
-        {"requirement_id": rid, "component_ids": comps}
+        {
+            "requirement_id": rid,
+            "component_ids": comps,  # 컴포넌트+함수 전체(브리지 호환)
+            "design_component_ids": req_to_design_comps.get(rid, []),  # 실 SwCom/모듈만(SDS 밴드용)
+            # ID 키·이름 키를 canonical 로 접으며 사라진 원 키. 소비처가 차집합으로
+            # sds_functions 를 낼 때 함께 빼지 않으면 접힌 키가 함수로 이중 계상된다.
+            "folded_component_ids": req_to_folded_comps.get(rid, []),
+            # 밴드도 함수도 아닌 설계 요소(설계ID·상태명·미확인 표행·heading). 이걸 안 실으면
+            # 소비처 차집합이 "컴포넌트 아닌 것 = 함수" 로 접어 상태명 `standby` 와 목차 줄이
+            # **인터페이스 함수로 표시**된다(HDPDM01 실측 634 중 135 = 21.3%).
+            "design_element_ids": req_to_element_comps.get(rid, []),
+        }
         for rid, comps in sorted(req_to_comps.items())
     ]
 
     return {
         "ok": True,
         "sds_pairs": sds_pairs,
-        "total_components": len(comp_set),
+        "total_components": len(design_comp_set),  # 실 설계 컴포넌트 수(함수 fan-out 제외)
+        "total_components_with_functions": len(comp_set),  # 참고: 함수 포함 전체
         "total_requirements": len(sds_pairs),
+        # ASIL 결합(P5) — 컴포넌트/함수별 ASIL 맵. 매트릭스가 요구사항별 ASIL 도출에 사용.
+        "component_asil": component_asil,
     }
+
+
+def _load_syrs_req_set(syrs_path: str, resolver) -> set:
+    """SyRS docx에서 시스템 요구 ID 집합(Sy*, 대문자)을 로드 — 시스템 기준 조인용.
+
+    HSIS/SyTS 같은 시스템레벨 밴드는 SW 요구(SwRS 68)가 아니라 시스템 요구(SyRS 116)를
+    참조하므로 이 집합에 조인해야 커버리지가 정직하다. SW 매트릭스에 Sy→Sw 평탄화 조인하면
+    시스템-only 요구(SyTR_0802 등)가 침묵 탈락해 밴드가 과소 표시된다(HSIS 6/68 근본원인,
+    실측 SyRS 기준 21/21).
+    """
+    import tempfile as _tf
+
+    from docx import Document
+    data = resolver.read_bytes(syrs_path)
+    with _tf.NamedTemporaryFile(suffix=".docx", delete=False) as _tmp:
+        _tmp.write(data)
+        _tp = _tmp.name
+    try:
+        doc = Document(_tp)
+        parts = [p.text for p in doc.paragraphs]
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                for cell in row.cells:
+                    parts.append(cell.text)
+    finally:
+        try:
+            Path(_tp).unlink()
+        except OSError:
+            pass
+    # 공백 대칭(HSIS 추출 정규식과 동일 `\s*_\s*`) — 'SyTR _ 0507' 포맷도 매치 후 정규화.
+    return {re.sub(r"\s+", "", m).upper()
+            for m in re.findall(r"Sy[A-Za-z]{2,}\s*_\s*\d+", "\n".join(parts))}
+
+
+@router.post("/api/jenkins/hsis/extract-mapping")
+def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
+    """HSIS(HW-SW 인터페이스) xlsx에서 요구사항↔인터페이스 신호 매핑 추출.
+
+    추적성 매트릭스의 인터페이스 밴드(design-arm)용. HSIS Related ID 컬럼의 시스템 요구
+    ID(SyTR/SyTSR/SyEI…)를 `_normalize_req_id`로 SW namespace에 평탄화 → 요구사항별
+    인터페이스 신호(HSI_xx / SW변수) 그룹. 인터페이스 요구(SwEI) 커버를 위해 SyEI→SwEI도
+    로컬 보강(이 사내 템플릿은 시스템/SW 인터페이스 번호가 1:1 병행).
+    """
+    import re as _re
+    import tempfile
+
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+    from generators.sts import parse_hsis_signals
+
+    hsis_path = str(body.get("hsis_path", "")).strip()
+    if not hsis_path:
+        raise HTTPException(status_code=400, detail="hsis_path required")
+    enforce_resolver_access(hsis_path)  # C3
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(hsis_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {hsis_path}")
+        data = resolver.read_bytes(hsis_path)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+
+    # parse_hsis_signals은 file path를 받음 — cloudium IPC bytes를 임시파일로 떨군 뒤 파싱(SDS 패턴).
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        parsed = parse_hsis_signals(tmp_path)
+    finally:
+        try:
+            Path(tmp_path).unlink()
+        except OSError:
+            pass
+
+    signals = parsed.get("signals") or []
+
+    def _norm_hsis_req(rid: str) -> str:
+        n = _normalize_req_id(rid)  # SyTR→SwTR, SyTSR→SwTSR, SyEIF→SwEI 등 + 대문자
+        n = _re.sub(r"^SYEI_", "SWEI_", n)  # HSIS는 SyEI(F 없음) 사용 → 인터페이스 요구(SwEI)에 연결
+        return n
+
+    req_to_sigs: Dict[str, list] = {}
+    sys_refs: set = set()  # 시스템 기준(SyRS) 커버리지용 — 평탄화 전 원본 Sy* 참조
+    for s in signals:
+        related = str(s.get("related_id") or "")
+        raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
+        if not raw_ids:
+            continue
+        for _rid in raw_ids:
+            if _rid.strip().upper().startswith("SY"):
+                sys_refs.add(_re.sub(r"\s+", "", _rid).upper())
+        sig_label = (str(s.get("id") or "").strip()
+                     or str(s.get("sw_var_name") or "").strip()
+                     or str(s.get("signal_name") or "").strip())
+        if not sig_label:
+            continue
+        for rid in raw_ids:
+            nrid = _norm_hsis_req(rid)
+            if not nrid:
+                continue
+            req_to_sigs.setdefault(nrid, [])
+            if sig_label not in req_to_sigs[nrid]:
+                req_to_sigs[nrid].append(sig_label)
+
+    hsis_pairs = [
+        {"requirement_id": rid, "hsis_signals": sigs}
+        for rid, sigs in sorted(req_to_sigs.items())
+    ]
+    result: Dict[str, Any] = {
+        "ok": True,
+        "hsis_pairs": hsis_pairs,
+        "total_signals": len(signals),
+        "total_requirements": len(hsis_pairs),
+    }
+    # 시스템 기준(SyRS) 커버리지 — HSIS는 시스템레벨 문서라 SW 매트릭스(68)가 아니라 시스템
+    # 요구(SyRS)에 조인해야 정직하다. SW 평탄화 조인은 시스템-only 요구를 침묵 탈락시켜 밴드가
+    # 6/68로 과소 표시됐다(실측 근본원인). syrs_path 제공 시 원본 Sy* 참조를 SyRS 집합에 조인해
+    # 참 커버리지를 병행 표면화(기존 SW 필드 불변 = 하위호환).
+    syrs_path = str(body.get("syrs_path", "")).strip()
+    if syrs_path:
+        enforce_resolver_access(syrs_path)  # C3: 2차 대칭 (미들웨어 1차 뒤 방어심층)
+        try:
+            if resolver.exists(syrs_path):
+                syrs = _load_syrs_req_set(syrs_path, resolver)
+                joined = sorted(sys_refs & syrs)
+                _ifc_pfx = ("SYEIF_", "SYEI_")  # 시스템 인터페이스 요구
+                ifc_total = sorted(x for x in syrs if x.startswith(_ifc_pfx))
+                ifc_cov = [x for x in joined if x.startswith(_ifc_pfx)]
+                result["system_basis"] = {
+                    "syrs_total": len(syrs),
+                    "refs_total": len(sys_refs),
+                    "joined": len(joined),
+                    "joined_ids": joined,
+                    "interface_total": len(ifc_total),
+                    "interface_covered": len(ifc_cov),
+                    "interface_ids": ifc_cov,
+                    "interface_missing": [x for x in ifc_total if x not in ifc_cov],
+                    "unmatched": sorted(sys_refs - syrs),
+                }
+        except Exception as exc:  # noqa: BLE001 — 진단 optional: docx 손상 등 실패해도 hsis_pairs(주 산출물) 보존. type만 노출(경로 누설 차단)
+            result["system_basis_error"] = f"SyRS 처리 실패({type(exc).__name__})"
+    return result
 
 
 @router.post("/api/jenkins/sits/extract-traceability")
@@ -3431,6 +5122,10 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 
     vcast_rows = []
     _MAX_EMPTY_ROWS = 50  # C3: break after N consecutive empty rows
+    # source 라벨 — 시스템 시험(SyTS/SyITS)이 동일 구조라 라벨만 갈아끼워 재사용(syts/syits 위임 엔드포인트).
+    src_label = (str(body.get("source_label") or "SITS").strip() or "SITS")
+    # 매핑 0건일 때 진단용 — 실제로 스캔한 시트명(silent-empty 표면화, W-SITS-fix#4).
+    scanned_sheet = ""
 
     # Strategy 1: Look for Traceability sheet — sheet_name 명시 + 자동 탐색 keyword 확장
     # (외부 도구 생성 SITS 파일 대응 — N20 follow-up)
@@ -3449,13 +5144,14 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     if trace_ws:
+        scanned_sheet = trace_ws.title
         empty_streak = 0
         # PERF: read_only 모드에서 ws.cell(r,c) 랜덤 접근은 호출마다 시트 상단부터
         # 재파싱돼 O(행²·열)로 폭주한다(1874행×146열 실측 ~75분). 순차 iter_rows
-        # 단일 패스는 O(행)이며 동일 파일에서 0.4초로 동작한다. 열은 4~199만 본다.
-        # max_column은 read_only 모드에서 None일 수 있음 → 그 경우 199(상한)까지
-        # 스캔해 cols 5+ req ID 누락 방지. 좁은 시트는 아래 len(row) 가드가 처리.
-        max_col = min(trace_ws.max_column or 199, 199)
+        # 단일 패스는 O(행)이며 동일 파일에서 0.4초로 동작한다. 열은 4열부터 본다.
+        # max_column은 read_only 모드에서 None일 수 있음 → 그 경우 _MAX_SCAN_COLS
+        # 까지 스캔해 cols 5+ req ID 누락 방지. 좁은 시트는 아래 len(row) 가드가 처리.
+        max_col = min(trace_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
         for row in trace_ws.iter_rows(min_row=4, max_col=max_col, values_only=True):
             # 1-based 열 2/3 == 0-based 인덱스 1/2
             tc_id = str(row[1] or "").strip() if len(row) > 1 else ""
@@ -3475,7 +5171,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     vcast_rows.append({
                         "requirement_id": _normalize_req_id(rid),
                         "testcase": tc_id,
-                        "source": "SITS",
+                        "source": src_label,
                         "result": "mapped",
                     })
     else:
@@ -3503,12 +5199,13 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 "warning": "SITS Traceability 또는 Integration Test 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
                 "available_sheets": list(wb.sheetnames),
             }
+        scanned_sheet = spec_ws.title
 
         # Find the Related ID column by scanning header rows 5/6.
         # PERF: 본문 random .cell() 스캔도 Strategy 1과 동일한 O(행²) 폭주를
         # 유발하므로 header(2행)·본문 모두 iter_rows 순차 패스로 처리한다.
         related_col = -1
-        hdr_scan_max = min(spec_ws.max_column or 199, 199)
+        hdr_scan_max = min(spec_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
         hdr_rows = list(spec_ws.iter_rows(
             min_row=5, max_row=6, max_col=hdr_scan_max, values_only=True))
         hdr5 = hdr_rows[0] if len(hdr_rows) > 0 else ()
@@ -3523,8 +5220,9 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             related_col = 145  # default SITS layout
 
         empty_streak = 0
-        # related_col(기본 145)까지 포함하도록 max_col 보장 (단 199 상한)
-        body_max_col = min(max(spec_ws.max_column or 199, related_col), 199)
+        # related_col(기본 145)까지 포함하도록 max_col 보장 (단 _MAX_SCAN_COLS 상한)
+        body_max_col = min(
+            max(spec_ws.max_column or _MAX_SCAN_COLS, related_col), _MAX_SCAN_COLS)
         for row in spec_ws.iter_rows(
                 min_row=7, max_col=body_max_col, values_only=True):
             tc_id = str(row[1] or "").strip() if len(row) > 1 else ""
@@ -3552,7 +5250,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     "requirement_id": _normalize_req_id(rid),
                     "testcase": tc_id,
                     "unit": entry_fn,
-                    "source": "SITS",
+                    "source": src_label,
                     "result": "mapped",
                 })
             # If no Sw* req IDs found but we have entry_fn, still add row
@@ -3562,9 +5260,52 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     "requirement_id": "",
                     "testcase": tc_id,
                     "unit": entry_fn,
-                    "source": "SITS",
+                    "source": src_label,
                     "result": "mapped",
                 })
+
+    # ── SITS 콜체인 채굴 ── spec 시트 서브행 C4의 "Interface : A -> B -> ..." 를 파싱해 TC별 체인 함수
+    # 집합을 만든다. 통합시험 콜체인에 등장하는 **깊은 callee**(entry가 아닌 함수)도 그 TC에 귀속시켜,
+    # 함수→SITS TC 브리지가 entry SwUFn뿐 아니라 체인 전체를 커버하게 한다(예: g_drvin_drv8706sq_init이
+    # SwITC_SwUFn_0112 체인에 등장 → SITS TC 획득). Strategy 1/2와 독립적으로 항상 best-effort로 시도.
+    try:
+        _spec = None
+        for _name in wb.sheetnames:
+            if "Integration Test Spec" in _name:
+                _spec = wb[_name]
+                break
+        if _spec is not None:
+            _tc_chain: Dict[str, set] = {}
+            _cur = ""
+            _CHAIN_CAP = 60  # TC당 체인 함수 상한(과대 방지)
+            _spec_max = min(_spec.max_column or 6, 6)
+            for _row in _spec.iter_rows(min_row=4, max_col=_spec_max, values_only=True):
+                _c2 = str(_row[1] or "").strip() if len(_row) > 1 else ""
+                if _c2 and _c2.upper().startswith("SWITC"):
+                    _cur = _c2
+                _c4 = str(_row[3] or "").strip() if len(_row) > 3 else ""
+                if _cur and "interface" in _c4.lower() and ("->" in _c4 or "→" in _c4):
+                    _cs = _tc_chain.setdefault(_cur, set())
+                    for _tok in _re.split(r"->|→", _c4.split(":", 1)[-1]):
+                        # C 식별자만(3자+) — 프로즈/기호 토큰 오탐 방지. 체인 귀속은 over-report(안전측).
+                        _m = _re.match(r"^\s*([A-Za-z_]\w{2,})", _tok)
+                        if _m and len(_cs) < _CHAIN_CAP:
+                            _cs.add(_m.group(1))
+            if _tc_chain:
+                _existing = {str(r.get("testcase") or "").strip().upper() for r in vcast_rows}
+                for r in vcast_rows:
+                    _ch = _tc_chain.get(str(r.get("testcase") or "").strip())
+                    if _ch:
+                        r["chain_fns"] = sorted(_ch)
+                # 체인만 있고 매핑 행이 없는 spec TC도 방출(체인 브리지 전용, req 없이 chain_fns만).
+                for _tc, _ch in _tc_chain.items():
+                    if _ch and _tc.strip().upper() not in _existing:
+                        vcast_rows.append({
+                            "requirement_id": "", "testcase": _tc, "unit": "",
+                            "source": src_label, "result": "chain", "chain_fns": sorted(_ch),
+                        })
+    except Exception:  # noqa: BLE001 — 콜체인 채굴은 best-effort(실패해도 기존 매핑은 유효)
+        pass
 
     wb.close()
 
@@ -3577,17 +5318,229 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             seen.add(key)
             deduped.append(row)
 
-    req_set = set(r["requirement_id"] for r in deduped)
-    return {
+    # rid=""(testcase-only 행, W-SITS-fix#1)는 커버된 요구사항이 아니므로 covered에서 제외
+    # (허위 커버리지 방지 — deep-review I1). total_mappings는 전체(2-hop 대기 행 포함).
+    req_set = set(r["requirement_id"] for r in deduped if r["requirement_id"])
+    direct_mapped = len(req_set)
+    result: Dict[str, Any] = {
         "ok": True,
         "vcast_rows": deduped,
         "total_mappings": len(deduped),
+        "requirements_covered": direct_mapped,
+        "direct_mapped": direct_mapped,
+    }
+    # silent-empty 표면화(W-SITS-fix#4): 시트는 인식했으나 직접 요구 매핑 0건이면 warning+
+    # available_sheets를 실어 프론트(SrsSdsSection)가 '요구열 없는 Test-Log 포맷' 등 원인을
+    # 표기하게 한다. 과거엔 Strategy1이 시트를 찾고도 0행이면 아무 신호 없이 빈 배열만 반환해
+    # SITS 밴드가 조용히 비었다(Strategy2의 '시트 없음' 경로만 warning을 실었음 — 비대칭 해소).
+    if not deduped:
+        result["warning"] = (
+            f"{src_label} 시트('{scanned_sheet}')를 인식했으나 TC↔요구사항 매핑을 0건 추출했습니다. "
+            "요구(Related) 열이 없는 Test-Log 포맷이거나 시트 레이아웃이 예상과 다를 수 있습니다."
+        )
+        result["available_sheets"] = list(wb.sheetnames)
+    elif direct_mapped == 0:
+        # 전부 testcase-only(직접 요구열 없는 Test-Log) — 직접 매핑 0, 매트릭스 2-hop 브리지
+        # (TC의 SwUFn→SUTS→SDS→요구사항)에만 의존한다. fix#1(testcase-only emit)이 vcast_rows를
+        # 채워 위 'not deduped' 경로를 우회하므로, 이 경우를 별도 표면화해 2-hop 미해소 시의
+        # silent를 막는다(deep-review W6 — fix#1↔fix#4 상충 해소). 프론트는 이 warning을
+        # 성공 표시와 함께 노출한다.
+        result["warning"] = (
+            f"{src_label} 시트('{scanned_sheet}')에서 직접 요구사항 매핑 없이 testcase만 "
+            f"{len(deduped)}건 추출했습니다(요구 열 없는 Test-Log 포맷). 매트릭스의 2-hop 추적에 "
+            "의존하므로, SITS 밴드가 비면 SUTS/SDS 연결을 확인하세요."
+        )
+        result["available_sheets"] = list(wb.sheetnames)
+    return result
+
+
+def _syts_norm_header(s: Any) -> str:
+    """헤더 정규화 — 공백/개행/언더스코어/점 제거 + 소문자."""
+    return (str(s or "").strip().lower()
+            .replace(" ", "").replace("\n", "").replace("_", "").replace(".", ""))
+
+
+@router.post("/api/jenkins/syts/extract-traceability")
+def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """시스템 시험(SyTS) 전용 파서 — 'System Test Spec' 시트.
+
+    ⚠ SyTS 레이아웃은 SITS와 다르다(실측 KJPDS02_PV v1.02). 과거엔 SITS 파서에 위임했는데,
+    SITS 가정(TC/요구 구조)이 SyTS와 안 맞아 **Title(col C)을 testcase로, Test
+    Environment(col G, SyTE)를 requirement로 오독** → 밴드의 92.9%가 문서 Title/헤딩을
+    시험 근거로 삼는 허위 추적(over-trace)이었다. 문서별 전용 파서로 교체(사용자 결정).
+
+    SyTS 실 레이아웃: 시트 'N.System Test Spec', 상세헤더 행(예 row4)에 'Test Case ID'(col B),
+    요구 링크는 상단 병합 그룹헤더 'Related ID'(예 row3) 아래 열(col T). TC ID는 SyTC_ 형태.
+    SITS/SUTS 파서(jenkins_sits/sts_extract_traceability)는 무변경 — 회귀 위험 0.
+    """
+    import io
+    import re as _re
+
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+
+    file_path = str(body.get("path", "")).strip()
+    source_label = str(body.get("source_label", "SyTS")).strip() or "SyTS"
+    if not file_path:
+        raise HTTPException(status_code=400, detail="path required")
+    enforce_resolver_access(file_path)  # C3
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(file_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    try:
+        import openpyxl
+        data = resolver.read_bytes(file_path)
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
+
+    # 시트 선택: 'system test spec' / 'test spec' 우선(traceability 시트 아님 — 그건 TG 매트릭스)
+    spec_ws = None
+    for sn in wb.sheetnames:
+        n = _syts_norm_header(sn)
+        if "systemtestspec" in n or "testspecification" in n or "testspec" in n:
+            spec_ws = wb[sn]
+            break
+    if spec_ws is None:  # 폴백: 최대 행 시트
+        spec_ws = max((wb[sn] for sn in wb.sheetnames),
+                      key=lambda w: (w.max_row or 0), default=None)
+    if spec_ws is None:
+        wb.close()
+        return {"ok": True, "vcast_rows": [], "warning": "SyTS: 시트 없음",
+                "available_sheets": list(wb.sheetnames)}
+
+    max_col = min(spec_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
+    # W2: max_row 부재(read_only dimension 메타 없음) 시 30으로 — max_col 폴백(→1024)과 대칭.
+    #     1로 붕괴하면 헤더행(예 row4)을 못 읽어 정상 시트가 침묵 empty가 된다.
+    max_hdr_row = min(spec_ws.max_row or 30, 30)
+    # 헤더 캐시 — 상위 30행을 iter_rows 단일 패스로 읽는다. read_only에서 랜덤 .cell()은
+    # 30×max_col회 = O(행²) 폭주(실측 205열 9.5s / max_col None ~60s)라 SITS 주석이 금한다.
+    hdr: Dict[tuple, str] = {}
+    for r, hrow in enumerate(
+            spec_ws.iter_rows(min_row=1, max_row=max_hdr_row, max_col=max_col, values_only=True),
+            start=1):
+        for c, v in enumerate(hrow, start=1):
+            if v is not None:
+                hdr[(r, c)] = _syts_norm_header(v)
+    tc_col = None
+    hdr_row = 0
+    for r in range(1, max_hdr_row + 1):
+        for c in range(1, max_col + 1):
+            h = hdr.get((r, c), "")
+            if "testcaseid" in h or h == "tcid":
+                tc_col, hdr_row = c, r
+                break
+        if tc_col:
+            break
+    rel_cols: list = []
+    if tc_col:
+        # 'Related ID'는 TC 헤더 행 또는 그 위 3행(병합 그룹헤더)에 있을 수 있다 — SyTS 핵심
+        for rr in range(max(1, hdr_row - 3), hdr_row + 1):
+            for c in range(1, max_col + 1):
+                # W3: 완전일치 — substring은 'Unrelated ID'/'Correlated ID' 오매치(over-trace
+                # 민감 파서에서 과대포용은 역방향). SITS _detect_header_cols와 동일 정렬.
+                if hdr.get((rr, c), "") in ("relatedid", "relatedids") and c not in rel_cols:
+                    rel_cols.append(c)
+    if not tc_col or not rel_cols:
+        wb.close()
+        return {"ok": True, "vcast_rows": [],
+                "warning": f"SyTS 열 탐지 실패 (Test Case ID 열={tc_col}, Related ID 열={rel_cols}). "
+                           "시트 레이아웃을 확인하세요.",
+                "available_sheets": list(wb.sheetnames)}
+
+    _ID_RE = _re.compile(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+")
+    _TC_RE = _re.compile(r"^(?:Sy|Sw)I?TC_", _re.I)  # SyTC_/SwTC_/SyITC_/SwITC_
+    vcast_rows: List[Dict[str, Any]] = []
+    sys_refs: set = set()  # 시스템 기준(SyRS) 커버리지용 — 평탄화 전 원본 Sy* 참조(HSIS와 동일)
+    current_tc = ""
+    max_data_col = min(max(tc_col, max(rel_cols)), _MAX_SCAN_COLS)
+    for row in spec_ws.iter_rows(min_row=hdr_row + 1, max_col=max_data_col, values_only=True):
+        tcv = str(row[tc_col - 1] or "").strip() if tc_col - 1 < len(row) else ""
+        if tcv:
+            current_tc = tcv
+        # TC ID 형태 아니면 스킵 — Title/설명 유입 2차 방어(열 오탐 시 빈 결과+warning으로 안전 실패)
+        if not current_tc or not _TC_RE.match(current_tc):
+            continue
+        for rc in rel_cols:
+            rv = str(row[rc - 1] or "").strip() if rc - 1 < len(row) else ""
+            if not rv:
+                continue
+            for rid in _ID_RE.findall(rv):
+                if rid.strip().upper().startswith("SY"):
+                    sys_refs.add(_re.sub(r"\s+", "", rid).upper())
+                vcast_rows.append({
+                    "requirement_id": _normalize_req_id(rid),  # Sy*→Sw* 평탄화(4123)
+                    "testcase": current_tc,
+                    "source": source_label,
+                    "result": "mapped",
+                })
+    wb.close()
+    req_set = set(r["requirement_id"] for r in vcast_rows)
+    result: Dict[str, Any] = {
+        "ok": True,
+        "vcast_rows": vcast_rows,
+        "total_mappings": len(vcast_rows),
         "requirements_covered": len(req_set),
     }
+    # 시스템 기준(SyRS) 커버리지 — SyTS(시스템 시험)는 SyRS 요구를 검증하는데 매트릭스가 Sy→Sw
+    # 평탄화로 작은 SW SRS(68)에 조인해 시스템-only 요구가 침묵 탈락(band 28). HSIS와 동일 근본.
+    # syrs_path 제공 시 원본 Sy* 참조를 SyRS에 조인해 참 커버리지 병행 표면화(기존 필드 불변).
+    # ⚠ SyITS(source_label='SyITS')는 carve-out — SyII/SyDB 등 시스템 설계요소 참조라 SyRS(요구)
+    #   미조인이 정상(2뿐)이므로 system_basis 산출 안 함(오분모·오경보 방지, 위임처가 미전달).
+    syrs_path = str(body.get("syrs_path", "")).strip()
+    if syrs_path and source_label == "SyTS":
+        enforce_resolver_access(syrs_path)  # C3: 2차 대칭
+        try:
+            if resolver.exists(syrs_path):
+                syrs = _load_syrs_req_set(syrs_path, resolver)
+                joined = sorted(sys_refs & syrs)
+                result["system_basis"] = {
+                    "syrs_total": len(syrs),
+                    "refs_total": len(sys_refs),
+                    "joined": len(joined),
+                    "joined_ids": joined,
+                    "unmatched": sorted(sys_refs - syrs),
+                }
+        except Exception as exc:  # noqa: BLE001 — 진단 optional: 실패해도 vcast_rows(주 산출물) 보존
+            result["system_basis_error"] = f"SyRS 처리 실패({type(exc).__name__})"
+    return result
 
 
-@router.post("/api/jenkins/uds/publish")
+@router.post("/api/jenkins/syits/extract-traceability")
+def jenkins_syits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """시스템 통합시험(SyITS) — SyTS와 동일 'System Test Spec' 계열 레이아웃이라 SyTS 전용
+    파서를 공유한다(SITS 위임 아님 — deep-review W4). 실측(KJPDS02_PV SyITS v1.02): 시트
+    '3.System Integration Test Spec', TC ID='TC ID' 헤더(col C, SyITC_), 요구=Related ID
+    (col T). 과거 SITS 위임은 Test Environment(SyTE)를 요구로, Sequence/Description **산문**의
+    'SwTC_SwTR_..' 교차참조를 SwTR 요구로 오추출해 허위 밴드(7)를 냈다. SyITS 요구는 시스템
+    레벨 Sy*(SyFN/SyII)라 SW 매트릭스엔 정당히 미조인(밴드 0 = 정직, SyTS 33→28과 동류 정정).
+    SyTS 파서는 헤더명 동적 탐지라 SyITS의 col C TC ID도 정확히 잡는다(실측 123/123)."""
+    return jenkins_syts_extract_traceability({**body, "source_label": "SyITS"})
+
+
+@router.post("/api/jenkins/uds/publish", dependencies=[Depends(require_admin)])
 def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
+    """산출물을 저장소 `docs/` 로 게시한다 — **admin 전용**.
+
+    2026-09-03 까지 이 라우터엔 권한 의존성이 0 이라 로그인만으로 저장소 안에 파일을 쓸 수
+    있었다(계획서 §8 #7 승인: 빌더(evidence 생성)와 같은 급 `require_admin`). 미검토
+    산출물의 게시 차단은 검토 기록 기능이 자리 잡은 뒤 재론한다.
+
+    ⚠ `target_dir` 은 **저장소 `docs/` 아래**로 봉인한다(R27 리뷰 C1). 예전엔
+    `repo_root / target_dir` 를 그대로 `resolve()` 해 `../../X` 도, `D:/X`(pathlib 은 우측
+    절대경로가 좌측을 대체한다)도 통과해 저장소 밖 임의 디렉터리를 **만들고 썼다** — 실증됨.
+    docstring 이 "docs/ 로 게시" 라 단정하는데 코드가 그걸 강제하지 않던 자리다.
+    저장소 안 호출자는 0(frontend·tests)이지만 외부 도구가 부를 수 있어 제거 대신 봉인한다.
+    """
+    docs_root = (repo_root / "docs").resolve()
+    docs_dir = (repo_root / req.target_dir).resolve()
+    if not is_under_any(docs_dir, [docs_root]):
+        raise HTTPException(status_code=403, detail="target_dir 는 저장소 docs/ 아래여야 합니다")
     out_dir = _jenkins_exports_dir(req.cache_root)
     try:
         target = safe_resolve_under(out_dir, req.filename)
@@ -3595,10 +5548,23 @@ def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
-    docs_dir = (repo_root / req.target_dir).resolve()
     docs_dir.mkdir(parents=True, exist_ok=True)
     out_path = docs_dir / target.name
-    out_path.write_bytes(target.read_bytes())
+    # 임시 파일 + `os.replace` — 두 admin 이 같은 이름을 동시에 게시하면 `write_bytes` 가
+    # 인터리브돼 문서가 찢긴다(리뷰 X1). 교체는 원자적이다.
+    # ⚠ 임시 이름은 **요청마다 유일**해야 한다(`mkstemp`). 파일명에서 결정적으로 만들면 경합이
+    #   tmp 로 옮겨갈 뿐이고, 먼저 끝난 쪽이 tmp 를 옮긴 뒤 두 번째 `os.replace` 가
+    #   `FileNotFoundError` 로 500 을 낸다(확인 패스 N1).
+    fd, tmp_name = tempfile.mkstemp(dir=str(docs_dir), prefix=out_path.name + ".", suffix=".publishing")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(target.read_bytes())
+        os.replace(tmp_path, out_path)
+    finally:
+        # 쓰기 도중 실패하면 잔여물을 남기지 않는다(N4).
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
     return {"ok": True, "path": str(out_path)}
 
 
@@ -3662,28 +5628,79 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
-    source_root = Path(req.source_root).resolve() if req.source_root else build_root
-    entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()]
-    if not entries:
+    # 신뢰 소스 경계 = 캐시 빌드 루트뿐 (path-traversal 리뷰 finding [3] 엄격 유지).
+    # Jenkins sync가 SCM 소스를 build_root/source(.source_complete 센티널)에 체크아웃하므로
+    # 외부 SCM 작업본(C:/Project/Ados/...)을 신뢰 목록에 넣을 필요가 없다. 프론트가 관성적으로
+    # 보내는 외부 절대경로는 신뢰하지 않고(레지스트리는 비-admin 쓰기 가능 → 신뢰 원천 부적격),
+    # build_root 하위의 체크아웃 사본을 스캔한다 — 두 소스는 동일(byte-identical checkout).
+    checked_out = build_root / "source"
+    # 완전성은 정본 센티널(.source_complete)로 판정 — bare exists()는 중단/진행중 체크아웃의
+    # 부분 트리를 완료본처럼 스캔해 과소집계를 완료로 오인시킨다. 신호는 meta로 정직하게 노출.
+    source_complete = _source_is_complete(checked_out)
+    source_root = checked_out if checked_out.exists() else build_root
+    raw_src = str(req.source_root or "").strip()
+    if raw_src:
+        # 클라가 build_root 하위 경로를 명시하면 그 부분만 스캔(신뢰 경계 안에서만 존중).
+        # build_root 밖(외부 SCM 경로 포함)이거나 미존재면 무시하고 체크아웃 사본으로 폴백 —
+        # 임의 외부 경로를 파일 read 대상으로 삼지 않으므로 traversal 우회 없음.
+        cands = [Path(p.strip()).resolve() for p in raw_src.replace(";", ",").split(",") if p.strip()]
+        picked = next((c for c in cands if is_under_any(c, [build_root]) and c.exists()), None)
+        if picked is not None:
+            source_root = picked
+    # all_roots=True면 진입 함수를 백엔드가 자동 산출(in-degree 0 + 순환 대표) → entry 불필요.
+    all_roots = bool(getattr(req, "all_roots", False))
+    reverse = bool(getattr(req, "reverse", False))  # 역방향(called-by) 트리 — 누가 이 함수를 호출하나
+    entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()][:200]
+    if not entries and not all_roots:
         raise HTTPException(status_code=400, detail="entry required")
     if not source_root.exists():
         raise HTTPException(status_code=404, detail="source_root not found")
     compile_db = Path(req.compile_commands_path).resolve() if req.compile_commands_path else None
-    payload = build_call_tree(
-        source_root,
-        entries,
-        include_paths=req.include_paths or [],
-        exclude_paths=req.exclude_paths or [],
-        max_depth=max(1, int(req.max_depth or 5)),
-        max_files=max(1, int(req.max_files or 2000)),
-        include_external=bool(req.include_external),
-        compile_commands_path=compile_db,
-        external_map=req.external_map or [],
-    )
+    def _regex_engine() -> Dict[str, Any]:
+        return build_call_tree(
+            source_root,
+            entries,
+            include_paths=req.include_paths or [],
+            exclude_paths=req.exclude_paths or [],
+            max_depth=max(1, int(req.max_depth or 5)),
+            max_files=max(1, int(req.max_files or 2000)),
+            include_external=bool(req.include_external),
+            compile_commands_path=compile_db,
+            external_map=req.external_map or [],
+            auto_roots=all_roots,
+            reverse=reverse,
+        )
+
+    engine = str(getattr(req, "engine", "precise") or "precise").strip().lower()
+    if engine == "precise":
+        payload = build_call_tree_precise(
+            source_root,
+            entries,
+            include_paths=req.include_paths or [],
+            exclude_paths=req.exclude_paths or [],
+            max_depth=max(1, int(req.max_depth or 5)),
+            max_files=max(1, int(req.max_files or 2000)),
+            include_external=bool(req.include_external),
+            external_map=req.external_map or [],
+            auto_roots=all_roots,
+            reverse=reverse,
+        )
+        # tree-sitter 미가용(engine='unavailable') → regex 엔진 자동 폴백 (R1 완화)
+        if (payload.get("stats") or {}).get("engine") == "unavailable":
+            payload = _regex_engine()
+            payload.setdefault("stats", {})["engine"] = "regex-fallback"
+    else:
+        payload = _regex_engine()
+        payload.setdefault("stats", {}).setdefault("engine", "regex")
     payload["meta"] = {
         "job_url": req.job_url,
         "build_selector": req.build_selector,
         "build_root": str(build_root),
+        # 실제 스캔된 경로와 체크아웃 완전성을 정직하게 노출 — 프론트가 외부 경로를 보냈어도
+        # build_root/source(체크아웃 사본)를 스캔했음을, 그리고 그 체크아웃이 부분/미완이면
+        # source_complete=false로 알려 undercounted 트리를 완료로 오인하지 않게 한다.
+        "source_root": str(source_root),
+        "source_complete": bool(source_complete),
     }
     return payload
 
@@ -3699,14 +5716,18 @@ def jenkins_call_tree_save(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     fmt = str(req.output_format or "json").strip().lower()
     if fmt not in ("json", "html", "csv"):
         raise HTTPException(status_code=400, detail="invalid output_format")
+    # ⚠ 키가 job+build 뿐이라 **사용자가 안 들어간다** — 같은 job 의 콜트리를 두 사람이
+    #   같은 초에 저장하면 같은 경로다. 같은 파일의 리포트 zip(`:5881`)·Excel(`:198`)은
+    #   이미 선점한다. 여기만 맨 경로였다.
+    stem = f"jenkins_call_tree_{job_slug}_{sel}_{ts}"
     if fmt == "html":
-        out_path = out_dir / f"jenkins_call_tree_{job_slug}_{sel}_{ts}.html"
+        out_path = reserve_unique_path(out_dir / f"{stem}.html")
         out_path.write_text(call_tree_to_html(payload, req.html_template), encoding="utf-8")
     elif fmt == "csv":
-        out_path = out_dir / f"jenkins_call_tree_{job_slug}_{sel}_{ts}.csv"
+        out_path = reserve_unique_path(out_dir / f"{stem}.csv")
         out_path.write_text(call_tree_to_csv(payload), encoding="utf-8")
     else:
-        out_path = out_dir / f"jenkins_call_tree_{job_slug}_{sel}_{ts}.json"
+        out_path = reserve_unique_path(out_dir / f"{stem}.json")
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"filename": out_path.name, "path": str(out_path), "format": fmt}
 
@@ -3733,6 +5754,171 @@ def jenkins_call_tree_download(job_url: str, cache_root: str, filename: str) -> 
     elif target.suffix.lower() == ".csv":
         media = "text/csv"
     return FileResponse(str(target), filename=target.name, media_type=media)
+
+
+def _resolve_swit_map_for_calltree(body: Dict[str, Any], payload: Any) -> Optional[Dict[str, str]]:
+    """콜트리 export/화면라벨 공용 — {진입함수: SwIT_SwUFn_ID} 매핑 해결.
+
+    우선순위: body.sits_path → body.scm_id(linked_docs.sits) → body.auto_swit(등록 SCM 중 이
+    콜트리와 매칭 최대인 SITS 자동 선택). 미지정/파싱 실패는 None(함수명 폴백). cloudium 접근
+    게이트(enforce_resolver_access)의 HTTPException(403)은 그대로 전파해 경로 불가를 알린다.
+    """
+    from backend.services.call_tree_xlsx import count_swit_matched_roots, parse_swit_strategy_map
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+
+    swit_map: Optional[Dict[str, str]] = None
+    sits_path = str(body.get("sits_path") or "").strip()
+    scm_id = str(body.get("scm_id") or "").strip()
+    if not sits_path and scm_id:
+        # doc_paths.sits 미설정 시 SCM 연결문서(linked_docs.sits)에서 SITS 경로 해결.
+        try:
+            from backend.services.scm_registry import get_registry_entry
+            entry = get_registry_entry(scm_id)
+            ld = getattr(entry, "linked_docs", None) if entry else None
+            sits_path = str(getattr(ld, "sits", "") or "").strip() if ld else ""
+        except Exception as exc:
+            _api_logger.debug("SCM linked_docs.sits resolve failed (%s): %s", scm_id, exc)
+    if sits_path:
+        try:
+            enforce_resolver_access(sits_path)
+            resolver = get_resolver()
+            if resolver.exists(sits_path):
+                swit_map = parse_swit_strategy_map(resolver.read_bytes(sits_path))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _api_logger.debug("SwIT strategy map parse failed: %s", exc)
+            swit_map = None
+    elif body.get("auto_swit"):
+        # 기준 SCM 미지정: 등록 SCM 각각의 SITS를 워커로 읽어 파싱 → 이 콜트리 루트와 매칭이
+        # 최대인 것을 선택(다른 프로젝트 SITS로 0매칭 나는 것을 데이터 기반으로 방지).
+        try:
+            from backend.services.scm_registry import list_registry_entries
+            resolver = get_resolver()
+            best_map, best_n = None, 0
+            for e in (list_registry_entries() or []):
+                ld = getattr(e, "linked_docs", None)
+                sp = str(getattr(ld, "sits", "") or "").strip() if ld else ""
+                if not sp:
+                    continue
+                try:
+                    enforce_resolver_access(sp)
+                    if not resolver.exists(sp):
+                        continue
+                    cand = parse_swit_strategy_map(resolver.read_bytes(sp))
+                    matched, _ = count_swit_matched_roots(payload, cand)
+                    if matched > best_n:
+                        best_n, best_map = matched, cand
+                except Exception:
+                    continue
+            swit_map = best_map
+        except Exception as exc:
+            _api_logger.debug("auto SwIT map resolve failed: %s", exc)
+            swit_map = None
+    return swit_map
+
+
+@router.post("/api/jenkins/call-tree/export-xlsx")
+def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
+    """콜트리(클라이언트 보유 payload)를 회사 SwITS 통합전략 형식 xlsx로 렌더해 반환.
+
+    프론트가 이미 생성한 콜트리 payload(trees/stats 또는 bidir callers/callees)를 body로
+    보내면 재분석 없이 depth-컬럼 형식으로 포맷만 한다(추적성 매트릭스 export-xlsx와 동일
+    패턴 — 디스크/소스 read 없음, cloudium 워커 무관).
+    body: {"payload": {...}, "meta": {job_url, build_selector, ...}}.
+    """
+    from backend.services.call_tree_xlsx import build_call_tree_xlsx, count_swit_matched_roots
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = dict(meta)
+    # 생성시각은 서버 권위값으로 강제(클라가 보낸 값 무시) — audit '생성시각' 위조 방지(I-3).
+    meta["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    # SwIT ID 모드: 참조 SwITS 파일에서 {진입함수:SwIT_SwUFn_ID} 매핑을 읽어 루트 블록 라벨을
+    # ID로 치환. sits_path 미제공이면 swit_map=None → 함수명 모드(현재 방식). 파싱/접근 실패도
+    # 함수명 폴백(단 cloudium 게이트 403은 그대로 전파해 경로 접근 불가를 알림).
+    swit_map = _resolve_swit_map_for_calltree(body, payload)
+    # SITS 진입함수 기준 콜트리 재생성(참조 SwITS '2.SW Integration Strategy' 재현): swit_map의
+    # 진입함수들을 루트로 콜트리를 새로 만들어, 전체 트리에서 in-degree0 라이브러리/ISR만 루트라
+    # 매칭이 낮던 문제를 해소하고 모든 SwIT 블록이 나오게 한다. 캐시 빌드 부재 등은 화면 payload 폴백.
+    regen_ok = False
+    if swit_map and body.get("regen_from_sits"):
+        try:
+            entries = [str(k) for k in swit_map.keys() if k][:200]
+            if entries:
+                regen_req = JenkinsCallTreeRequest(
+                    job_url=str(body.get("job_url") or ""),
+                    cache_root=str(body.get("cache_root") or ""),
+                    build_selector=str(body.get("build_selector") or "lastSuccessfulBuild"),
+                    source_root=(str(body.get("source_root") or "") or None),
+                    entry=",".join(entries),
+                    max_depth=max(1, min(20, int(body.get("max_depth") or 5))),
+                    engine="precise",
+                )
+                regen = jenkins_call_tree(regen_req)
+                if isinstance(regen, dict) and regen.get("trees"):
+                    payload = regen
+                    regen_ok = True
+        except HTTPException:
+            pass
+        except Exception as exc:
+            _api_logger.debug("SwIT regen from SITS failed: %s", exc)
+    # regen 성공 시: 참조 SITS 전체 매핑 대비 실제 트리 루트가 된 진입함수를 비교해, 소스에
+    # 정의가 없어(이름 불일치 포함) 누락된 SwIT를 계산한다 — 43개 중 35개만 생성되고 8개가
+    # 무표기로 사라지는 것을 시트 하단·응답 헤더로 정직하게 표면화(silent 누락 방지). fallback
+    # (regen 미수행)에선 루트가 진입함수가 아니라 '미생성' 개념이 부적합하므로 계산하지 않는다.
+    missing_swit = None
+    if regen_ok and swit_map:
+        root_names = {str(t.get("name") or "").strip()
+                      for t in (payload.get("trees") or []) if isinstance(t, dict)}
+        missing_swit = sorted(
+            [(fn, sid) for fn, sid in swit_map.items() if fn and fn not in root_names],
+            key=lambda x: x[1],
+        )
+    try:
+        data = build_call_tree_xlsx(payload, meta, swit_map=swit_map, missing_swit=missing_swit)
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"openpyxl 미설치: {exc}")
+    except Exception as exc:
+        _api_logger.debug("Call tree xlsx export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"xlsx 생성 실패: {exc}")
+    fname = f"call_tree_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+    if swit_map is not None:
+        # W1: 헤더로 'SwIT_ID가 적용된 루트 수 / 참조 SITS 전체 매핑 수'를 노출 → 프론트 토스트가
+        # (a) 매칭 0인데 성공으로 위장, (b) 43개 중 35개만 생성됐는데 '35/35 다 됨'으로 위장하는
+        # 것을 둘 다 방지. 분모는 전체 SITS 매핑(len(swit_map)). 누락 수는 X-Swit-Missing으로 보강.
+        matched, _ = count_swit_matched_roots(payload, swit_map)
+        headers["X-Swit-Matched"] = f"{matched}/{len(swit_map)}"
+        if missing_swit:
+            headers["X-Swit-Missing"] = str(len(missing_swit))
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
+
+
+@router.post("/api/jenkins/call-tree/swit-map")
+def jenkins_call_tree_swit_map(body: Dict[str, Any]) -> Dict[str, Any]:
+    """콜트리 화면 라벨 토글용 — {진입함수: SwIT_SwUFn_ID} 매핑과 매칭 통계를 반환.
+
+    export-xlsx와 동일한 해결(sits_path→scm_id→auto_swit)을 쓰되 파일 생성 없이 매핑만 낸다.
+    payload(화면 콜트리)는 auto_swit이 '이 트리와 매칭 최대'인 SCM을 고르는 데만 사용한다.
+    프론트가 루트 진입 함수 라벨을 함수명 ⇄ SwIT_ID로 전환(토글)하는 데 쓴다.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    swit_map = _resolve_swit_map_for_calltree(body, payload)
+    if not swit_map:
+        return {"ok": True, "map": {}, "count": 0, "matched": 0, "roots": 0}
+    from backend.services.call_tree_xlsx import count_swit_matched_roots
+    matched, roots = count_swit_matched_roots(payload, swit_map)
+    return {"ok": True, "map": swit_map, "count": len(swit_map), "matched": matched, "roots": roots}
 
 
 @router.post("/api/jenkins/report/files")
@@ -3848,7 +6034,7 @@ def jenkins_report_files_download_zip(req: JenkinsReportZipRequest) -> FileRespo
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_slug = _job_slug(req.job_url)
     sel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(req.build_selector))
-    out_path = out_dir / f"jenkins_reports_{job_slug}_{sel}_{ts}.zip"
+    out_path = reserve_unique_path(out_dir / f"jenkins_reports_{job_slug}_{sel}_{ts}.zip")
     _create_jenkins_zip_file(
         report_dir,
         out_path,
@@ -3870,7 +6056,7 @@ def jenkins_report_files_download_zip_select(req: JenkinsReportRequest, sel: Rep
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_slug = _job_slug(req.job_url)
     sel_key = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(req.build_selector))
-    out_path = out_dir / f"jenkins_reports_{job_slug}_{sel_key}_{ts}.zip"
+    out_path = reserve_unique_path(out_dir / f"jenkins_reports_{job_slug}_{sel_key}_{ts}.zip")
     paths = sel.paths or []
     if not paths:
         raise HTTPException(status_code=400, detail="paths required")
@@ -3948,6 +6134,168 @@ def jenkins_report_publish_async(req: JenkinsPublishRequest) -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────
 # Aggregate stats across multiple projects
 # ──────────────────────────────────────────────────────────────────
+
+# SCM(cloudium) VectorCAST 로드 이력 → 대시보드 경량 지표 캐시.
+# key=(잡파일경로, mtime_ns) — 완료된 잡 파일은 불변이라 무-stale(새 로드는 새 파일=새 키).
+# 값은 resolve_scm_vcast_metrics의 작은 dict(또는 None)만 보존 — 수 MB 잡 본문은 캐시하지 않는다.
+# 자매 캐시 _VCAST_CLOUDIUM_PARSE_CACHE(:994)와 동일하게 lock으로 check-clear-set을 감싼다.
+_SCM_VCAST_METRICS_CACHE: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
+_SCM_VCAST_METRICS_LOCK = threading.Lock()
+
+
+def _scm_vcast_metrics_for_slug(scm_slug: str) -> Optional[Dict[str, Any]]:
+    """job slug의 최신 완료 VectorCAST 잡에서 대시보드용 커버리지/TC 지표를 회수.
+
+    "SCM 로드 이력이 있으면"을 구현 — cloudium 재접근 없이 reports/impact_jobs의 기존 잡 파일만
+    읽는다. find_job_files_by_scm(파일명 기반)로 최신 후보 몇 개를 받아 **최신순**으로 완료
+    +vectorcast+ok인 첫 잡을 쓴다(최신 잡이 cloudium timeout 등으로 실패해도 직전 성공 로드로
+    폴백 — 가용성 우선). 각 파일은 (path,mtime) 캐시 miss일 때만 본문을 1회 파싱한다.
+    """
+    # import 자체 실패(ImportError)는 진짜 결함이므로 삼키지 않고 표면화한다.
+    from workflow.impact_jobs import find_job_files_by_scm
+    try:
+        candidates = find_job_files_by_scm(scm_slug, limit=5)
+    except OSError:  # glob/mkdir I/O 장애 → '이력 없음'으로 graceful.
+        return None
+    for path in candidates:
+        try:
+            key = (str(path), path.stat().st_mtime_ns)
+        except OSError:
+            continue  # 파일이 사라짐 → 다음 후보.
+        with _SCM_VCAST_METRICS_LOCK:
+            has = key in _SCM_VCAST_METRICS_CACHE
+            cached = _SCM_VCAST_METRICS_CACHE.get(key)
+        if has:
+            if cached is None:
+                continue  # 캐시된 None = 이 파일은 이력 아님 → 더 오래된 후보로.
+            return cached
+        metrics: Optional[Dict[str, Any]] = None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                isinstance(raw, dict)
+                and raw.get("status") == "completed"
+                and raw.get("trigger_type") == "vectorcast"
+            ):
+                result = raw.get("result")
+                if isinstance(result, dict) and result.get("ok"):
+                    metrics = resolve_scm_vcast_metrics(result.get("data"))
+        except (OSError, ValueError):  # 파일 소멸(OSError)·손상/부분쓰기 JSON(JSONDecodeError⊂ValueError).
+            metrics = None
+        with _SCM_VCAST_METRICS_LOCK:
+            if len(_SCM_VCAST_METRICS_CACHE) > 128:
+                _SCM_VCAST_METRICS_CACHE.clear()
+            _SCM_VCAST_METRICS_CACHE[key] = metrics
+        if metrics is not None:
+            return metrics
+    return None
+
+
+@router.post("/api/jenkins/scm-vcast-summary")
+def scm_vcast_summary(req: dict) -> Dict[str, Any]:
+    """단일 프로젝트 '빌드 & 아티팩트 요약' 카드용 — SCM 로드 이력의 VectorCAST 결과값(경량).
+
+    cloudium 재접근 없이 reports/impact_jobs의 최신 완료 잡만 읽는다(_scm_vcast_metrics_for_slug —
+    aggregate-stats와 동일 캐시/가용성 우선). 빌드 산출물 경로에 VectorCAST가 없거나(KJPDS02_PV:
+    test_rows 0) 전부 미분류(HDPDM01: 판정 컬럼 부재)일 때, 진짜 합부/커버리지/UT·IT를 카드에
+    폴백 공급한다. available=False면 프론트가 빌드 산출물 tester.vectorcast.summary로 폴백한다.
+
+    ⚠ 본문에서 password/경로를 받지 않는다 — job_url만으로 slug를 유도(SCM credential 규약 준수).
+    """
+    job_url = str((req or {}).get("job_url") or "").strip()
+    if not job_url:
+        return {"available": False, "reason": "job_url_required"}
+    slug = _job_slug(job_url)
+    if not slug:
+        return {"available": False, "reason": "invalid_job_url"}
+    metrics = _scm_vcast_metrics_for_slug(slug)
+    if not metrics:
+        return {"available": False}
+    return {"available": True, **metrics}
+
+
+@router.post("/api/jenkins/prqa-trend")
+def jenkins_prqa_trend(req: dict) -> Dict[str, Any]:
+    """프로젝트 요약 탭 '빌드별 변화' — PRQA 정적분석 지표의 빌드별 트렌드.
+
+    각 캐시 빌드의 report/analysis_summary.json을 **직독**해(build_report_summary의 빌드당 RCR
+    재파싱은 N배로 수 초~수십 초 → 타임아웃) prqa.rcr.summary + resolve_code_metrics로 빌드별
+    위반/진단/준수율 + 코드규모를 낸다. 값은 상세탭 kpis.prqa와 동일 소스(prqa.rcr). ⚠ VectorCAST
+    동적은 SCM 스냅샷이라 빌드마다 동일값 → 트렌드에 넣지 않는다(수평선 오해 방지, 현황 게이지로).
+    """
+    job_url = str((req or {}).get("job_url") or "").strip()
+    if not job_url:
+        return {"available": False, "reason": "job_url_required", "builds": []}
+    cache_root = _normalize_jenkins_cache_root((req or {}).get("cache_root"))
+    try:
+        limit = int((req or {}).get("limit") or 15)
+    except (TypeError, ValueError):
+        limit = 15
+    # 상한 100 — 캐시 백필(sync-backfill)로 빌드가 늘어난 프로젝트의 트렌드 축 확장(Phase E).
+    limit = max(1, min(limit, 100))
+    builds_meta = list_cached_builds(job_url=job_url, cache_root=cache_root)  # 최신순
+    out: List[Dict[str, Any]] = []
+
+    def _num(v: Any) -> int | None:
+        # RCR summary는 "64,805" 콤마 문자열일 수 있다(jenkins_adapter _to_int 콤마버그와 동일 함정).
+        if v is None:
+            return None
+        try:
+            return int(str(v).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    for b in builds_meta[:limit]:
+        reports_dir_str = str(b.get("reports_dir") or "")
+        if not reports_dir_str:
+            continue
+        summary_path = Path(reports_dir_str) / "analysis_summary.json"
+        try:
+            if not summary_path.exists():
+                continue
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # 한 빌드 파싱 실패가 트렌드 전체를 죽이지 않는다(fail-soft).
+            _api_logger.debug("prqa-trend build %s skipped: %s", b.get("build_number"), exc)
+            continue
+        if not isinstance(data, dict):
+            continue
+        prqa = data.get("prqa") if isinstance(data.get("prqa"), dict) else {}
+        rcr = prqa.get("rcr") if isinstance(prqa.get("rcr"), dict) else {}
+        rcr_summary = rcr.get("summary") if isinstance(rcr.get("summary"), dict) else {}
+        cm = resolve_code_metrics(data) if isinstance(data, dict) else {}
+        _diag = rcr_summary.get("Diagnostic Count")
+        out.append(
+            {
+                "build_number": b.get("build_number"),
+                "violations": _num(rcr_summary.get("Rule Violation Count")),
+                "diagnostics": _num(_diag) if _diag is not None else _num(rcr.get("diagnostic_count")),
+                "compliance": _num(rcr_summary.get("Project Compliance Index")),
+                "loc": cm.get("nloc") if cm.get("nloc") is not None else _num(rcr_summary.get("Lines of Code (including headers)")),
+                "functions": cm.get("functions"),
+                "code_files": cm.get("code_files") if cm.get("code_files") is not None else _num(rcr_summary.get("Number of Files (including CMA)")),
+                "code_metrics_source": cm.get("source"),
+                "rcr_ok": rcr.get("ok"),
+            }
+        )
+    out.reverse()  # 오래된→최신(트렌드 X축 방향)
+    # 인접 빌드 delta — 요약탭 타임라인 Δ컬럼/드릴다운 헤더 소비. 어느 한쪽 결측이면
+    # null(0 위장 금지 — ISO 정직성). 규칙×파일 단위 delta는 RCR 재파싱이 필요해
+    # /api/jenkins/prqa-delta(summary_insight 라우터)가 쌍 단위 on-demand로 제공한다.
+    prev: Dict[str, Any] | None = None
+    for r in out:
+        for k in ("violations", "diagnostics"):
+            r[f"{k}_delta"] = (
+                r[k] - prev[k]
+                if prev is not None and r.get(k) is not None and prev.get(k) is not None
+                else None
+            )
+        prev = r
+    available = any(
+        (r.get("violations") is not None) or (r.get("diagnostics") is not None) or (r.get("compliance") is not None)
+        for r in out
+    )
+    return {"available": available, "builds": out, "count": len(out)}
+
 
 @router.post("/api/jenkins/aggregate-stats")
 def aggregate_stats(req: dict) -> Dict[str, Any]:
@@ -4056,33 +6404,74 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 return None
 
-        # Coverage
+        # Coverage — 빌드 산출물 우선(분모: analysis_summary.coverage)
         cov = data.get("coverage") or {}
         lr = _safe_float(cov.get("line_rate"))
         br = _safe_float(cov.get("branch_rate"))
-        if lr is not None:
-            cov_line_rates.append(lr)
-        if br is not None:
-            cov_branch_rates.append(br)
-        total_covered += _safe_int(cov.get("covered"))
-        total_lines += _safe_int(cov.get("total"))
+        cov_covered = _safe_int(cov.get("covered"))
+        cov_total_lines = _safe_int(cov.get("total"))
+        # 빌드 라인커버가 0.0이면 VectorCAST가 SCM 소스라 빌드에 안 담긴 '자리표시 0'일 때가 많다
+        # (KJPDS02_PV 실측). 테스트 카운트 0(ut_total>0 검사)과 동일하게 SCM 이력으로 폴백한다.
+        coverage_source = "build" if (lr is not None and lr > 0) else None
+        # 커버리지 기준(basis) — 대시보드 '구문 커버리지(UT)' 라벨/각주용. 빌드 coverage.basis를 승격:
+        # vcast_ut_statements=UT 구문(기준값)·그 외(IT 구문/IT 함수/비-vcast 라인커버)는 프론트가
+        # '기준 상이' 각주로 폭로. SCM 폴백 시 아래에서 scm["coverage_basis"]로 덮어쓴다.
+        coverage_basis = None
+        line_rate_combined = None
+        if coverage_source == "build":
+            coverage_basis = {
+                "vcast_ut_statements": "ut_statement",
+                "vcast_it_statements": "it_statement",
+                "vcast_it_functions": "it_functions",
+            }.get(cov.get("basis"), "build_line")
 
-        # Tests
+        # Tests — 빌드 산출물 우선
         tests = data.get("tests") or {}
         details = tests.get("details") or {}
         ut = details.get("ut") or {}
         it = details.get("it") or {}
         ut_tc = ut.get("testcases") or {}
         it_tc = it.get("testcases") or {}
-        total_ut_cases += _safe_int(ut_tc.get("total"))
-        passed_ut_cases += _safe_int(ut_tc.get("ok"))
-        total_it_cases += _safe_int(it_tc.get("total"))
-        passed_it_cases += _safe_int(it_tc.get("ok"))
+        ut_total = _safe_int(ut_tc.get("total"))
+        ut_ok = _safe_int(ut_tc.get("ok"))
+        it_total = _safe_int(it_tc.get("total"))
+        it_ok = _safe_int(it_tc.get("ok"))
+        tests_source = "build" if (ut_total > 0 or it_total > 0) else None
+
+        # SCM(cloudium) 로드 이력 폴백 — 빌드에 커버리지/테스트가 **없을 때만**.
+        # KJPDS02_PV류는 VectorCAST가 빌드가 아니라 SCM 경로에 있어 analysis_summary엔 0이다.
+        # 과거 로드가 남긴 reports/impact_jobs 잡 파일에서 회수(cloudium 재접근 없음).
+        # 빌드소스(HDPDM01)는 이 분기 자체를 안 타 무회귀·SCM 미조회.
+        if coverage_source is None or tests_source is None:
+            scm = _scm_vcast_metrics_for_slug(slug)
+            if scm:
+                if coverage_source is None and scm["line_rate"] is not None:
+                    lr, br, coverage_source = scm["line_rate"], scm["branch_rate"], "scm_vcast"
+                    coverage_basis = scm.get("coverage_basis")
+                    line_rate_combined = scm.get("line_rate_combined")
+                if tests_source is None and (scm["ut_total"] or scm["it_total"]):
+                    ut_total, it_total = scm["ut_total"], scm["it_total"]
+                    ut_ok = int(scm["ut_passed"]) if scm["ut_passed"] is not None else 0
+                    it_ok = int(scm["it_passed"]) if scm["it_passed"] is not None else 0
+                    tests_source = "scm_vcast"
+
+        # 해석값으로 누적(빌드-or-SCM) — 상단 avg_line_rate·total_ut_cases도 SCM 반영(X6 일관성).
+        if lr is not None:
+            cov_line_rates.append(lr)
+        if br is not None:
+            cov_branch_rates.append(br)
+        total_covered += cov_covered
+        total_lines += cov_total_lines
+        total_ut_cases += ut_total
+        passed_ut_cases += ut_ok
+        total_it_cases += it_total
+        passed_it_cases += it_ok
         if not tests.get("ok", True):
             all_pass = False
 
-        # Code metrics
-        cm = data.get("code_metrics") or {}
+        # Code metrics — 상세탭(build_report_summary)과 동일 해석(QAC 폴백 포함) 단일 출처.
+        # 직독 cm.get() 대신 resolve_code_metrics로 KJPDS02_PV 등 lizard 부재 프로젝트도 QAC 값 반영.
+        cm = resolve_code_metrics(data)
         total_files += _safe_int(cm.get("code_files"))
         total_functions += _safe_int(cm.get("functions"))
         total_nloc += _safe_int(cm.get("nloc"))
@@ -4090,17 +6479,20 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
         # PRQA
         prqa = data.get("prqa") or {}
         crr = prqa.get("crr") or {}
-        total_diagnostics += _safe_int(crr.get("diagnostic_count"))
+        # PRQA RCR summary for compliance metrics (진단건수 RCR 우선 회수에도 재사용)
+        rcr = prqa.get("rcr") or {}
+        rcr_summary = rcr.get("summary") or {}
+        # 진단건수는 상세탭 kpis.prqa.diagnostic_count(RCR "Diagnostic Count")와 일치시킨다.
+        # Helix QAC는 CRR이 없어(RCR만) crr.diagnostic_count 직독은 KJPDS02_PV에서 0이 됐다 → RCR 우선.
+        # RCR 값이 '없을 때만'(None) CRR 폴백 — 진짜 0건을 부재로 오인해 CRR로 넘어가지 않도록.
+        _rcr_diag = rcr_summary.get("Diagnostic Count")
+        diag = _safe_int(_rcr_diag) if _rcr_diag is not None else _safe_int(crr.get("diagnostic_count"))
+        total_diagnostics += diag
         total_loc += _safe_int(crr.get("loc_source"))
         total_files_analyzed += _safe_int(crr.get("number_of_files"))
 
         # Jenkins info
         jenkins = data.get("jenkins") or {}
-        ut_total = _safe_int(ut_tc.get("total"))
-
-        # PRQA RCR summary for compliance metrics
-        rcr = prqa.get("rcr") or {}
-        rcr_summary = rcr.get("summary") or {}
 
         def _parse_fraction_first(val: Any) -> int:
             """Extract first number from 'N/M' string or return int."""
@@ -4119,17 +6511,23 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             "name": job_url.rstrip("/").split("/")[-1],
             "build_number": jenkins.get("build_number"),
             "result": jenkins.get("result"),
-            "line_rate": lr,
+            "line_rate": lr,          # 빌드 라인커버 or SCM VectorCAST 구문커버(coverage_source로 구분)
             "branch_rate": br,
             "ut_pass_rate": (
-                round(_safe_int(ut_tc.get("ok")) / ut_total, 4)
+                round(ut_ok / ut_total, 4)
                 if ut_total > 0 else None
             ),
-            "ut_total": _safe_int(ut_tc.get("total")),
-            "it_total": _safe_int(it_tc.get("total")),
-            "diagnostics": _safe_int(crr.get("diagnostic_count")),
+            "ut_total": ut_total,     # 빌드 or SCM VectorCAST UT TC 개수
+            "it_total": it_total,     # 빌드 or SCM VectorCAST IT TC 개수
+            "diagnostics": diag,
             "loc": _safe_int(cm.get("nloc")),
             "functions": _safe_int(cm.get("functions")),
+            "code_metrics_source": cm.get("source"),   # 'lizard' | 'qac' | None — 프론트 LOC 출처 라벨/각주용
+            "code_metrics_reason": cm.get("reason"),   # 완전 부재(lizard·QAC 둘 다 없음) 사유 — 침묵 0 방지
+            "coverage_source": coverage_source,  # 'build' | 'scm_vcast' | None — 커버리지 출처 각주/미집계 구분
+            "coverage_basis": coverage_basis,    # 'ut_statement'|'it_statement'|'it_functions'|'combined_statement'|'build_line'|None — 구문(UT) 기준 여부 폭로
+            "line_rate_combined": line_rate_combined,  # SCM: 원 UT+IT 합산 구문 커버리지(투명성 각주/툴팁)
+            "tests_source": tests_source,        # 'build' | 'scm_vcast' | None — TC 개수 출처 각주용
             "rcr_violated_rules": _parse_fraction_first(rcr_summary.get("Violated Rules", 0)),
             "rcr_compliance_index": _parse_fraction_first(rcr_summary.get("Project Compliance Index", 0)),
         })
@@ -4137,6 +6535,9 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
     return {
         "project_count": len(projects),
         "coverage": {
+            # ⚠ avg_line_rate는 프로젝트별 lr을 basis 구분 없이 평균한다 — 대부분 UT 구문이나 UT 미산출
+            # 프로젝트(coverage_basis!='ut_statement')가 섞이면 기준이 혼재할 수 있다. 막대별 권위 기준은
+            # per-project 'coverage_basis'이며, 이 평균값은 현재 프론트 미표시(집계 카드는 buildStats 사용).
             "avg_line_rate": (
                 round(sum(cov_line_rates) / len(cov_line_rates), 4)
                 if cov_line_rates else None

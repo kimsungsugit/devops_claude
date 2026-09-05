@@ -4,7 +4,10 @@ import {
   post, api, saveServerJenkinsConfig,
   fetchServerUdsTemplate, saveServerUdsTemplate, uploadServerUdsTemplate,
 } from '../api.js';
-import { loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS } from '../sharedInputs.js';
+import {
+  loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS, saveDocPaths,
+} from '../sharedInputs.js';
+import { notifyScmRegistryChanged } from '../scmLinkedDocs.js';
 
 export default function Settings() {
   return (
@@ -158,7 +161,15 @@ function ScmSection() {
       branch: '',
       base_ref: 'HEAD~1',
       source_root: '',
-      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '', vectorcast: [] },
+      // 시험 결과 빌더가 쓸 양식 설정 키. SCM id 와 다른 어휘라 따로 지정한다
+      // (예: SCM `kjpds02_pv` → 양식 `KJPDS02`). 비우면 빌더 폼 기본값이 그대로 쓰인다.
+      builder_project_id: '',
+      linked_docs: {
+        srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '',
+        // 문서별 생성 템플릿(UDS .docx / 시험 규격서 .xlsm) — 형식이 달라 키를 나눈다.
+        uds_template: '', sts_template: '', suts_template: '', sits_template: '',
+        vectorcast: [], codesonar: [],
+      },
     };
   }
 
@@ -182,22 +193,45 @@ function ScmSection() {
       return;
     }
     try {
+      let saved = null;
       if (editMode) {
         // api() 헬퍼 사용 — X-User 헤더 자동 추가 + res.ok 검사 + 에러 throw.
         // 이전 raw fetch는 X-User 누락으로 401 silent failure 발생.
-        await api(`/api/scm/update/${editMode}`, {
+        saved = await api(`/api/scm/update/${editMode}`, {
           method: 'PUT',
           body: JSON.stringify(form),
         });
         toast('success', 'SCM 수정 완료');
       } else {
-        await post('/api/scm/register', form);
+        saved = await post('/api/scm/register', form);
         toast('success', 'SCM 등록 완료');
+      }
+      // ⚠ **서버가 모르는 필드는 조용히 버려진다**(`ScmLinkedDocs` 는 pydantic 기본
+      //   `extra='ignore'`). 저장은 200 으로 성공하고 값만 사라지므로, 사용자는
+      //   저장됐다고 믿는다 — 실제 사용자 보고: "어제 템플릿 다 등록하고 저장했는데
+      //   저장이 안 되어 있다". 응답과 대조해 **버려진 키를 이름으로** 알린다.
+      // ⚠ 응답을 못 받았으면 **대조하지 않는다** — 빈 객체와 비교하면 모든 항목이
+      //   "버려짐" 으로 오탐해 매번 경고가 뜬다.
+      const savedLinked = saved?.item?.linked_docs;
+      const dropped = !savedLinked ? [] : Object.entries(form.linked_docs || {})
+        .filter(([k, v]) => {
+          const has = Array.isArray(v) ? v.length > 0 : String(v || '').trim() !== '';
+          return has && !(k in savedLinked);
+        })
+        .map(([k]) => k);
+      if (dropped.length) {
+        toast('warning',
+          `저장되지 않은 항목: ${dropped.join(', ')} — 서버가 모르는 필드입니다. `
+          + '백엔드가 최신 버전인지 확인하세요.');
       }
       setShowForm(false);
       setEditMode(null);
       setForm(defaultScmForm());
       loadList();
+      // ⚠ 마운트된 프로젝트 섹션들에 통지. 없으면 Detail 이 keep-alive(display:none)라
+      //   재마운트되지 않아 '입력 문서 현황'/추적성 매트릭스가 전체 새로고침 전까지
+      //   옛 경로를 계속 쓴다(사용자 재보고 결함). doc_paths 쪽 saveDocPaths 와 대칭.
+      notifyScmRegistryChanged();
     } catch (e) {
       toast('error', `${editMode ? '수정' : '등록'} 실패: ${e.message}`);
     }
@@ -211,6 +245,7 @@ function ScmSection() {
       await api(`/api/scm/delete/${id}`, { method: 'DELETE' });
       toast('success', '삭제 완료');
       loadList();
+      notifyScmRegistryChanged();
     } catch (e) {
       toast('error', `삭제 실패: ${e.message}`);
     }
@@ -295,6 +330,32 @@ function ScmSection() {
     }
   };
 
+  // 정적분석 폴더(codesonar)도 복수 경로 — CodeSonar/QAC HIS/CPD/CodeEye 리포트 폴더.
+  // 테스트 결과 '정적분석' 패널이 linked_docs.codesonar를 읽으므로 vectorcast와 별도 필드로 관리.
+  const setCodesonarPaths = (arr) =>
+    setForm(p => ({ ...p, linked_docs: { ...p.linked_docs, codesonar: Array.isArray(arr) ? arr : [] } }));
+
+  const pickCodesonarPath = async () => {
+    try {
+      const picked = await post('/api/file-mode/browse-file', {
+        title: '정적분석 폴더 선택 (CodeSonar/QAC/CPD/CodeEye 리포트 상위 폴더)',
+        kind: 'directory',
+      });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return;
+      }
+      const cur = Array.isArray(form.linked_docs.codesonar) ? form.linked_docs.codesonar : [];
+      if (cur.includes(picked.path)) { toast('info', '이미 추가된 경로입니다.'); return; }
+      setCodesonarPaths([...cur, picked.path]);
+      await ensureCloudiumPrefix(picked.path);
+      toast('success', '정적분석 폴더 추가됨');
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+    }
+  };
+
   return (
     <div className="settings-section">
       <div className="settings-section-title">
@@ -353,10 +414,26 @@ function ScmSection() {
                 onChange={v => setForm(p => ({ ...p, source_root: v }))}
               />
             </div>
+            <div className="field span-2">
+              <label>
+                시험 결과 양식 키 (builder_project_id)
+                <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
+                  {' '}— SCM id 와 다를 수 있습니다(예: {form.id || 'kjpds02_pv'} → KJPDS02)
+                </span>
+              </label>
+              <input
+                value={form.builder_project_id}
+                onChange={e => setForm(p => ({ ...p, builder_project_id: e.target.value }))}
+                placeholder="config/swut_meta.json 의 project_id — 비우면 빌더 폼 기본값"
+              />
+            </div>
           </div>
           <div className="settings-section-title" style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8 }}>연결 문서 경로</div>
           <div className="field-group cols-3">
-            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp'].map(k => (
+            {/* 템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
+                예전엔 필드가 없어 설정의 공용 `template` 하나가 양쪽에 갔다. */}
+            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syts', 'syits',
+              'uds_template', 'sts_template', 'suts_template', 'sits_template'].map(k => (
               <div className="field" key={k}>
                 <label>{k.toUpperCase()} 경로</label>
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -364,7 +441,7 @@ function ScmSection() {
                     style={{ flex: 1 }}
                     value={form.linked_docs[k] || ''}
                     onChange={e => setLinked(k, e.target.value)}
-                    placeholder={`/docs/${k}.docx`}
+                    placeholder={['syts', 'syits', 'hsis'].includes(k) ? `/docs/${k}.xlsx` : `/docs/${k}.docx`}
                   />
                   <button
                     type="button"
@@ -382,6 +459,16 @@ function ScmSection() {
               paths={form.linked_docs.vectorcast}
               onChange={setVcastPaths}
               onBrowse={pickVcastPath}
+            />
+          </div>
+          <div className="field span-2" style={{ marginTop: 8 }}>
+            <label>정적분석 폴더 (CodeSonar·QAC HIS·CPD·CodeEye 리포트 — 복수 경로)</label>
+            <VcastDocsEditor
+              paths={form.linked_docs.codesonar}
+              onChange={setCodesonarPaths}
+              onBrowse={pickCodesonarPath}
+              placeholder="U:\...\09.정적분석\01.Static Analysis (폴더 경로)"
+              hint="테스트 결과 '정적분석' 패널이 이 폴더에서 CodeSonar(PDF)·CPD(XML)·QAC HIS(PDF)·CodeEye(PDF)를 찾아 표시합니다. VectorCAST 결과 로그와는 다른 필드입니다."
             />
           </div>
           <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>{editMode ? '수정 저장' : '등록'}</button>
@@ -453,22 +540,67 @@ function PathField({ label, value, ph, onChange, onBrowse, span2 = false, multil
   );
 }
 
+// linked_docs(SCM 연결문서)에서 상속 가능한 doc_paths 키.
+//
+// ⚠ 템플릿은 이제 linked_docs 에 **있다**(`uds_template` 등, 문서별로 형식이 다르다).
+//   다만 여기 넣지 않는 이유는 `doc_paths`(설정>입력 자료)에 대응 필드가 없기 때문이다 —
+//   생성 시 `DocGenSection` 이 레지스트리를 직접 읽는다. `doc_paths` 에 템플릿 입력을
+//   추가하려면 이 목록도 함께 늘릴 것.
+// vectorcast/codesonar 는 복수 경로 list 라 단일 문서 필드와 매핑되지 않는다.
+const SCM_INHERIT_KEYS = ['srs', 'sds', 'hsis', 'stp', 'uds', 'sts', 'suts', 'sits'];
+const DOC_SCM_KEY = 'devops_v2_doc_scm';
+
 function DocInputSection() {
   const toast = useToast();
   const [paths, setPaths] = useState(() => {
     try { return JSON.parse(localStorage.getItem(DOC_KEY) || '{}'); } catch (_) { return {}; }
   });
   const [shared, setShared] = useState(loadSharedInputs);
+  // 입력 자료 = SCM 레지스트리 연결문서와 겹침 → 기준 SCM을 고르면 그 linked_docs를 상속(중복
+  // 입력 제거). 빈 칸은 SCM 경로를 placeholder로 보여주고 '빈 칸 채우기'로 doc_paths에 복사
+  // (생성 탭 prefill이 doc_paths를 읽으므로 그때 실제 사용됨). 직접 입력값은 항상 우선.
+  const [scms, setScms] = useState([]);
+  const [scmId, setScmId] = useState(() => localStorage.getItem(DOC_SCM_KEY) || '');
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await api('/api/scm/list');
+        setScms(Array.isArray(data) ? data : (data.items ?? data.registries ?? []));
+      } catch (_) { /* SCM 목록 없으면 상속 UI만 숨김 */ }
+    })();
+  }, []);
+  const selectedScm = scms.find(s => s.id === scmId) || null;
+  const scmLinks = selectedScm?.linked_docs || {};
+  const pickScm = (id) => { setScmId(id); localStorage.setItem(DOC_SCM_KEY, id); };
 
   const setDoc = (k, v) => {
     const next = { ...paths, [k]: v };
     setPaths(next);
-    localStorage.setItem(DOC_KEY, JSON.stringify(next));
+    // ⚠ 직접 setItem 하지 않는다 — saveDocPaths 가 같은 탭 구독자에게 통지한다.
+    //   통지가 없으면 프로젝트 탭 섹션들이 keep-alive 라 재마운트되지 않아
+    //   전체 새로고침 전까지 옛 경로를 계속 쓴다(사용자 보고 결함).
+    saveDocPaths(next);
   };
   const setShr = (k, v) => {
     const next = { ...shared, [k]: v };
     setShared(next);
     saveSharedInputs(next);
+  };
+
+  // 선택 SCM의 linked_docs로 '빈 칸만' 채운다(직접 입력값은 보존). 생성 탭 prefill이
+  // doc_paths를 읽으므로 한 번 채우면 같은 경로를 다시 입력할 필요가 없다.
+  const fillFromScm = () => {
+    if (!selectedScm) { toast('info', '기준 SCM을 먼저 선택하세요.'); return; }
+    const next = { ...paths };
+    let filled = 0;
+    for (const k of SCM_INHERIT_KEYS) {
+      const inh = (scmLinks[k] || '').trim();
+      if (inh && !(next[k] || '').trim()) { next[k] = inh; filled += 1; }
+    }
+    if (!filled) { toast('info', '채울 빈 칸이 없습니다 (이미 입력됨 또는 SCM에 경로 없음).'); return; }
+    setPaths(next);
+    saveDocPaths(next);
+    toast('success', `선택 SCM 연결문서로 빈 칸 ${filled}개를 채웠습니다.`);
   };
 
   // /api/file-mode/browse-file 재사용 (post 헬퍼 — X-User 포함). 선택 경로 반환 or null.
@@ -497,18 +629,45 @@ function DocInputSection() {
         여기 등록한 문서·템플릿·로그 폴더는 <b>문서 생성</b> 탭의 각 생성기에서 칸이 비었을 때 자동으로 채워집니다(생성 탭에서 직접 입력하면 그 값이 우선).
       </div>
 
+      {/* 기준 SCM 상속 — SCM 레지스트리 '연결 문서 경로'와 겹치는 입력을 한 번에 가져온다. */}
+      {scms.length > 0 && (
+        <div className="field-group" style={{ marginBottom: 10, padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
+          <div className="field span-2">
+            <label htmlFor="doc-scm-select">기준 SCM (연결 문서 상속)</label>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select id="doc-scm-select" style={{ flex: 1, minWidth: 160 }} value={scmId} onChange={e => pickScm(e.target.value)}>
+                <option value="">(선택 안 함)</option>
+                {scms.map(s => <option key={s.id} value={s.id}>{s.name || s.id}</option>)}
+              </select>
+              <button type="button" className="btn-sm" disabled={!selectedScm} onClick={fillFromScm}
+                title="선택한 SCM의 연결 문서 경로(SRS/SDS/UDS/STS/SUTS/SITS/HSIS/STP)로 아래 빈 칸을 채웁니다. 직접 입력한 값은 보존됩니다.">
+                빈 칸 채우기
+              </button>
+            </div>
+            <div className="text-sm text-muted" style={{ marginTop: 4 }}>
+              SCM 레지스트리의 연결 문서 경로와 중복 입력을 피합니다. 빈 칸은 선택 SCM 경로가 흐리게 표시되며, '빈 칸 채우기'로 복사합니다(직접 입력값 우선).
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 입력/참조 문서 (devops_v2_doc_paths) */}
       <div className="field-group cols-3">
-        {DOC_FIELDS.map(f => (
-          <PathField
-            key={f.key}
-            label={f.label}
-            ph={f.ph}
-            value={paths[f.key] || ''}
-            onChange={v => setDoc(f.key, v)}
-            onBrowse={async () => { const p = await browse(f.browse); if (p) setDoc(f.key, p); }}
-          />
-        ))}
+        {DOC_FIELDS.map(f => {
+          const explicit = paths[f.key] || '';
+          const inherited = SCM_INHERIT_KEYS.includes(f.key) ? (scmLinks[f.key] || '').trim() : '';
+          const inheritedActive = !explicit && !!inherited;
+          return (
+            <PathField
+              key={f.key}
+              label={f.label + (inheritedActive ? ' · SCM 상속' : '')}
+              ph={inheritedActive ? `(상속: ${inherited})` : f.ph}
+              value={explicit}
+              onChange={v => setDoc(f.key, v)}
+              onBrowse={async () => { const p = await browse(f.browse); if (p) setDoc(f.key, p); }}
+            />
+          );
+        })}
       </div>
 
       {/* 공유 입력 그룹 — 템플릿 / 로그 폴더 / 공통 메타 (devops_v2_shared_inputs) */}
@@ -1156,7 +1315,7 @@ function SourceRootEditor({ value, onChange }) {
 // VectorCAST 결과 로그 복수 경로 편집기. 부트로더/FBL/APP 등 결과가 별도
 // vectorcast_rag.json으로 나올 수 있어 SCM별로 여러 경로를 등록한다. paths는
 // string[] (SourceRootEditor의 콤마 string과 달리 array 그대로 다룸).
-function VcastDocsEditor({ paths, onChange, onBrowse }) {
+function VcastDocsEditor({ paths, onChange, onBrowse, placeholder, hint }) {
   const list = Array.isArray(paths) ? paths : [];
   const [draft, setDraft] = useState('');
 
@@ -1199,7 +1358,7 @@ function VcastDocsEditor({ paths, onChange, onBrowse }) {
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addPath())}
-          placeholder="U:\...\report\vectorcast_rag (폴더 경로)"
+          placeholder={placeholder || "U:\\...\\report\\vectorcast_rag (폴더 경로)"}
           spellCheck="false"
           autoComplete="off"
           style={{ flex: 1, fontSize: 12 }}
@@ -1216,8 +1375,7 @@ function VcastDocsEditor({ paths, onChange, onBrowse }) {
       </div>
       {list.length === 0 && (
         <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
-          미등록 시 Jenkins 빌드의 VectorCAST RAG를 사용합니다. 부트로더 등 결과가 별도로
-          나오면 결과가 담긴 폴더 경로를 추가하세요(폴더 안의 vectorcast_rag.json을 자동 탐색).
+          {hint || '미등록 시 Jenkins 빌드의 VectorCAST RAG를 사용합니다. 부트로더 등 결과가 별도로 나오면 결과가 담긴 폴더 경로를 추가하세요(폴더 안의 vectorcast_rag.json을 자동 탐색).'}
         </div>
       )}
     </div>
