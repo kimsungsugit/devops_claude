@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -105,3 +106,58 @@ class QualitySummary(QualityBase):
     fn_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     run: Mapped["GenerationRun"] = relationship(back_populates="summary")
+
+
+# ── 검토 기록 (R34, 계획 C-2) ──────────────────────────────────────────────
+# 사람이 run 하나에 남기는 판정(approved / rejected / needs_work)과 그 감사 이력.
+# 게이트화하지 않는다 — 검토 결과로 FAIL 을 만들지 않고, 사이드카 `.md` 에도 한 글자도 쓰지 않는다(S1).
+# 판정 대상은 **run 이 아니라 그 run 의 산출물 바이트**다: `output_sha256` 스냅샷(NOT NULL)이 없으면 기록할
+# 수 없다(S5·S6 — 해시 없는 run 은 `hash_unavailable` 로 검토 잠금).
+class ReviewRecord(QualityBase):
+    __tablename__ = "review_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("generation_runs.id"), nullable=False)
+    # 검토 시점의 산출물 해시 스냅샷. run 의 값이 나중에 바뀌어도(재기록) 이 값은 남는다 → 조회 시 `stale`.
+    output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(120), nullable=False)
+    # 어떤 인증으로 남겼나 — 쓰기는 JWT 만 받으므로 지금은 항상 'jwt'(S4). 기록해 두는 이유: 뒷날 다른
+    # 경로가 열리면 그 행이 구분되어야 한다.
+    auth_method: Mapped[str] = mapped_column(String(16), nullable=False, default="jwt")
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)  # approved|rejected|needs_work
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 낙관적 잠금(S9) — 갱신은 현재 version 을 같이 보내야 하고, 다르면 409 VERSION_CONFLICT.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+
+    __table_args__ = (
+        # 한 검토자는 run 당 기록 하나 — 갱신은 version 으로(S9). 두 번째 INSERT 는 IntegrityError.
+        UniqueConstraint("run_id", "reviewer", name="uq_review_run_reviewer"),
+        Index("ix_review_run", "run_id"),
+        Index("ix_review_reviewer", "reviewer"),
+    )
+
+
+class ReviewAudit(QualityBase):
+    __tablename__ = "review_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    review_id: Mapped[int] = mapped_column(Integer, ForeignKey("review_records.id"), nullable=False)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("generation_runs.id"), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(120), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)  # create|update
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_review_audit_run", "run_id"),
+        Index("ix_review_audit_created", "created_at"),
+    )

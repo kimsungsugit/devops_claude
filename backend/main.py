@@ -402,6 +402,10 @@ app.include_router(_summary_insight_router)
 from backend.routers.quality import router as _quality_router  # noqa: E402
 
 app.include_router(_quality_router)
+# (R34, 계획 C-2) 검토 기록 — 게이트 조회(quality) 와 별개의 쓰기 라우터(JWT+admin).
+from backend.routers.review import router as _review_router  # noqa: E402
+
+app.include_router(_review_router)
 from backend.routers.swut import router as _swut_router  # noqa: E402
 
 app.include_router(_swut_router)

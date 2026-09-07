@@ -59,6 +59,10 @@ def _apply_sqlite_pragmas(dbapi_conn) -> None:
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    # (R34 리뷰 W9) sqlite 는 FK 를 기본으로 **집행하지 않는다**(실측 `PRAGMA foreign_keys=0`) — 모델의 `ForeignKey`
+    # 가 문서일 뿐이라 존재하지 않는 run_id 로 검토 기록이 들어갔다. 검토 기록(review_records/review_audit)은
+    # 감사 증거라 고아행을 허용하지 않는다. 기존 세 테이블의 FK 도 같은 방향(ORM cascade 와 일치).
+    cursor.execute("PRAGMA foreign_keys=ON")
     # (R33 C-1, 계획 S10) 같은 DB 에 쓰는 호출처가 8곳(swut/swit/swsa/swreport 라우터 + sts/suts/sits
     # 생성기 + record_uds_run)이다. ⚠ 계획서의 "busy_timeout 없음" 은 **오진**이었다 — 실측(2026-09-07):
     # Python `sqlite3.connect()` 기본 `timeout=5.0` 이 이미 5초 busy handler 를 걸어 실효값은 원래

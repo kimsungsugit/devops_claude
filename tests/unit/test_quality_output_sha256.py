@@ -73,6 +73,35 @@ CREATE TABLE quality_summaries (
     PRIMARY KEY (run_id),
     FOREIGN KEY(run_id) REFERENCES generation_runs (id)
 );
+-- (R34 형상, 2026-09-07) 검토 기록 두 테이블 — 여기 얼려 두어야 뒷날 컬럼 추가가 드리프트로 드러난다.
+CREATE TABLE review_records (
+    id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    output_sha256 VARCHAR(64) NOT NULL,
+    reviewer VARCHAR(120) NOT NULL,
+    auth_method VARCHAR(16) NOT NULL,
+    decision VARCHAR(16) NOT NULL,
+    comment TEXT,
+    version INTEGER NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_review_run_reviewer UNIQUE (run_id, reviewer),
+    FOREIGN KEY(run_id) REFERENCES generation_runs (id)
+);
+CREATE TABLE review_audit (
+    id INTEGER NOT NULL,
+    review_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    reviewer VARCHAR(120) NOT NULL,
+    action VARCHAR(16) NOT NULL,
+    decision VARCHAR(16) NOT NULL,
+    output_sha256 VARCHAR(64) NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    FOREIGN KEY(review_id) REFERENCES review_records (id),
+    FOREIGN KEY(run_id) REFERENCES generation_runs (id)
+);
 """
 
 
@@ -191,15 +220,20 @@ class TestModelDbDrift:
     """앞으로 어떤 컬럼을 더하든 `_COLUMN_ADDITIONS` 누락을 여기서 잡는다."""
 
     def test_every_model_column_exists_after_migrating_legacy_db(self, legacy_db):
+        """(R34 리뷰 W5) `GenerationRun` 만이 아니라 **메타데이터의 모든 테이블**을 대조한다 —
+        `review_records`/`review_audit` 에 컬럼을 더하고 `_COLUMN_ADDITIONS` 를 빠뜨려도 여기서 잡힌다."""
         from workflow.quality.db import init_db
-        from workflow.quality.models import GenerationRun
+        from workflow.quality.models import QualityBase
 
         init_db(legacy_db)
-        model_cols = {c.name for c in GenerationRun.__table__.columns}
-        db_cols = _columns(legacy_db)
-        assert model_cols - db_cols == set(), (
-            f"모델에만 있는 컬럼 {sorted(model_cols - db_cols)} — "
-            "db.py `_COLUMN_ADDITIONS` 에 한 줄이 빠졌다(기존 DB 조회 전부 500)"
+        missing = {}
+        for table in QualityBase.metadata.sorted_tables:
+            model_cols = {c.name for c in table.columns}
+            gap = model_cols - _columns(legacy_db, table.name)
+            if gap:
+                missing[table.name] = sorted(gap)
+        assert missing == {}, (
+            f"모델에만 있는 컬럼 {missing} — db.py `_COLUMN_ADDITIONS` 에 한 줄이 빠졌다(기존 DB 조회 전부 500)"
         )
 
     def test_column_additions_declare_the_new_column(self):
