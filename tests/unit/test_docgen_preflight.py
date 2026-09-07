@@ -837,6 +837,65 @@ def test_template_suggestion_only_when_the_file_exists(tmp_path: Path) -> None:
     assert "설정" in s2.get("reason", "")
 
 
+@pytest.mark.parametrize("bad", ["\\", "/", "C:\\"])
+def test_template_registered_as_drive_root_is_a_verdict_not_a_500(tmp_path: Path, bad: str) -> None:
+    """드라이브 루트가 등록된 템플릿은 **판정**이지 500 이 아니다.
+
+    실측(2026-09-07): `kjpds02_pv.linked_docs.suts_template = "\\\\"`. `exists("\\\\")` 는 True 라
+    ✓ 로 통과했고, 확장자 제안이 `Path("\\\\").with_suffix(".xlsm")` 에서
+    `ValueError: WindowsPath('/') has an empty name` 으로 죽어 **SUTS 준비 게이트 전체가 500**
+    이었다 — 보드는 그 문장을 오류 칸에 그대로 그렸다. 다른 문서는 멀쩡해 "SUTS 만 이상" 으로 보였다.
+    """
+    data = _post({"doc_type": "suts", "source_root": str(tmp_path),
+                  "doc_paths": {"suts_template": bad}})
+    step = _step(data, "template")
+    assert step is not None
+    assert step["state"] == "missing", step
+    assert "파일이 아닙니다" in str(step.get("reason") or ""), step.get("reason")
+    assert "suggestion" not in step, step
+    assert {a["kind"] for a in (step.get("actions") or [])} == {"pick_path"}, step.get("actions")
+
+
+def test_document_registered_as_folder_is_not_ok(tmp_path: Path) -> None:
+    """폴더가 문서 키에 등록되면 `exists` 는 True 지만 문서는 아니다 — ✓ 가 아니라 missing."""
+    data = _post({"doc_type": "sts", "source_root": str(tmp_path),
+                  "doc_paths": {"srs": str(tmp_path)}})
+    step = _step(data, "swrs")
+    assert step is not None
+    assert step["state"] == "missing", step
+    assert "파일이 아닙니다" in str(step.get("reason") or ""), step.get("reason")
+
+
+def test_folder_inputs_still_probe_as_folders(tmp_path: Path, monkeypatch) -> None:
+    """파일 판정은 **문서 입력에만** 붙는다 — 폴더 입력(로그 폴더)까지 파일을 요구하면 안 된다."""
+    from backend.routers import docgen_preflight as pf
+
+    class _R:
+        mode = "local"
+
+        def exists(self, p):
+            return True
+
+        def is_dir(self, p):
+            return True
+
+    assert pf._probe_path(_R(), str(tmp_path))["state"] == "ok"
+    assert pf._probe_file(_R(), str(tmp_path))["state"] == "missing"
+
+    # 이름 없는 경로는 resolver 가 "파일" 이라 우겨도 파일이 아니다 — IPC 전에 판정한다.
+    class _Liar(_R):
+        def is_dir(self, p):
+            return False
+
+    for root in ("\\", "/", "C:\\"):
+        assert pf._probe_file(_Liar(), root)["state"] == "missing", root
+    assert pf._probe_file(_Liar(), str(tmp_path / "x.xlsm"))["state"] == "ok"
+    # 키가 프로브를 고른다 — 로그 폴더는 폴더로, 문서는 파일로.
+    assert pf._probe_input(_R(), "vectorcast", str(tmp_path))["state"] == "ok"
+    assert pf._probe_input(_R(), "swrs", str(tmp_path))["state"] == "missing"
+    assert pf._probe_input(_R(), "template", str(tmp_path))["state"] == "missing"
+
+
 def test_uds_template_wants_docx(tmp_path: Path) -> None:
     """UDS 는 python-docx 라 `.docx` 가 맞다 — 시험문서와 반대다."""
     ok_tpl = tmp_path / "unit.docx"

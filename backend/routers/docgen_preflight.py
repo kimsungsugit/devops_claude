@@ -534,6 +534,44 @@ def _probe_path(resolver: Any, path: str) -> Dict[str, Any]:
                 "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
 
 
+def _probe_file(resolver: Any, path: str) -> Dict[str, Any]:
+    """문서 입력용 프로브 — 존재에 더해 **파일인지**까지 본다.
+
+    `_probe_path` 는 폴더 입력(로그 폴더·레벨별 산출물)도 쓰므로 존재만 본다. 그런데 문서
+    키에 드라이브 루트나 폴더가 등록되면 `exists` 가 True 라 ✓ 가 됐고, 뒤의 확장자 제안이
+    `Path("\\\\").with_suffix()` 에서 `ValueError: has an empty name` 으로 죽어 **게이트 전체가
+    500** 이었다(2026-09-07 실측: `kjpds02_pv.linked_docs.suts_template = "\\\\"` — SUTS 만
+    준비 상태가 오류였다). 파일이 아닌 것은 예외가 아니라 **판정**이다.
+    """
+    not_a_file = {"state": S_MISSING, "kind": "not_a_file",
+                  "reason": f"등록값 `{path}` 은 파일이 아닙니다(폴더 또는 드라이브 루트) — 파일을 고르세요"}
+    # 이름 없는 경로(`\`·`/`·`C:\`)는 resolver 가 뭐라 답하든 파일일 수 없다 — IPC 전에 끝낸다.
+    if not Path(path).name:
+        return not_a_file
+    res = _probe_path(resolver, path)
+    if res["state"] != S_OK:
+        return res
+    try:
+        is_dir = bool(resolver.is_dir(path))
+    except Exception as exc:  # noqa: BLE001 — resolver/IPC 계열이 광범위하다
+        return {"state": S_UNMEASURED, "kind": "",
+                "reason": f"확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+    return not_a_file if is_dir else res
+
+
+# 파일이어야 하는 입력 키. VectorCAST 로그(폴더)·레벨별 산출물·소스 루트는 여기 없다 —
+# 폴더 입력에 파일 판정을 붙이면 단일 폴더 VectorCAST 가 `missing` 이 된다(테스트가 잡았다).
+_FILE_INPUT_KEYS = frozenset({
+    _req.IN_SWRS, _req.IN_SWDS, _req.IN_UDS_DOC, _req.IN_HSIS, _req.IN_STP,
+    _req.IN_TEMPLATE, _req.IN_SPEC_DOC,
+})
+
+
+def _probe_input(resolver: Any, key: str, path: str) -> Dict[str, Any]:
+    """입력 키의 성격(파일/폴더)에 맞는 프로브."""
+    return _probe_file(resolver, path) if key in _FILE_INPUT_KEYS else _probe_path(resolver, path)
+
+
 def _mark_available(available: Dict[str, bool], key: str, state: str) -> None:
     """입력 가용성 — **3상태**로 적는다.
 
@@ -1183,7 +1221,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             available[key] = ok
             continue
 
-        res = _probe_path(resolver, path)
+        res = _probe_input(resolver, key, path)
         state = res["state"]
         extra: Dict[str, Any] = {"value": path, "reason": res["reason"]}
         if state == S_ERROR and res.get("kind") == "prefix":
@@ -1201,7 +1239,8 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 if note:
                     extra["reason"] += " — " + note
             else:
-                extra["reason"] = "파일이 없습니다 — 경로가 바뀌었을 수 있습니다"
+                # 프로브가 사유를 냈으면(파일 아님) 그것이 답이다 — 일반 문구로 덮지 않는다.
+                extra["reason"] = res["reason"] or "파일이 없습니다 — 경로가 바뀌었을 수 있습니다"
                 extra["actions"] = [{"kind": "pick_path",
                                      "target": _INPUT_TO_DOC_KEY.get(key, key)}]
         # 템플릿은 **형식까지** 맞아야 한다 — 존재만으로는 부족하다.
@@ -1217,7 +1256,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 # 같은 이름의 올바른 확장자 파일이 **실재할 때만** 제안한다.
                 for cand_ext in want:
                     cand = Path(path).with_suffix(cand_ext)
-                    if _probe_path(resolver, str(cand))["state"] == S_OK:
+                    if _probe_file(resolver, str(cand))["state"] == S_OK:
                         state = S_STALE
                         extra["suggestion"] = cand.name
                         acts, note = _revision_actions(key, origins.get(key), cand.name)
@@ -1267,7 +1306,8 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             _shadowed = bool(_tpl and _chosen and _chosen != _tpl)
             _tail = ""
             if _shadowed:
-                _tail += (f" ⚠ 설정한 표준 템플릿(`{Path(_tpl).name}`)은 이번 생성에 "
+                # 이름 없는 값(`\`)이면 파일명이 비어 `` 가 된다 — 원문을 보인다.
+                _tail += (f" ⚠ 설정한 표준 템플릿(`{Path(_tpl).name or _tpl}`)은 이번 생성에 "
                           f"**쓰이지 않습니다**.")
                 # 폴백은 **정본을 골랐을 때만** 뜻이 있다. 표준 템플릿을 고른 상태에서
                 # "실패하면 표준 템플릿으로" 라고 쓰면 자기 자신을 가리키는 헛말이다.
@@ -1276,7 +1316,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             # 못 여는 파일을 "이걸로 만듭니다" 라고 이름 대는 셈이다.
             _tpl_state = S_OK if _chosen else S_DEGRADED
             if _chosen:
-                _probe = (_probe_path(resolver, _chosen) if _chosen != _tpl
+                _probe = (_probe_file(resolver, _chosen) if _chosen != _tpl
                           else {"state": S_OK if available.get(_req.IN_TEMPLATE) else S_MISSING,
                                 "reason": ""})
                 if _probe["state"] != S_OK:
@@ -1345,7 +1385,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             # 로컬 리졸버가 False 를 내 "확인했고 없음" 으로 뒤집는다(리뷰 NW2).
             continue
         # ⚠ 3상태다 — `== S_OK` 로 접으면 확인 실패가 "확인했고 없음"(✗) 이 된다(P-3②).
-        _mark_available(available, key, _probe_path(resolver, path)["state"])
+        _mark_available(available, key, _probe_input(resolver, key, path)["state"])
 
     # AI 출처는 문서가 아니라 **설정**이다 — 키가 있으면 그 경로가 열려 있다.
     try:
@@ -1740,7 +1780,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             # config 키를 재면 "등록돼 있지 않습니다" 가 폼 사용자에게 거짓이 되고, 조치
             # (`open_scm`)를 따라가도 이미 정답인 폼은 그대로다(R28 리뷰 C1 실증).
             value = form_tpl
-            probe = _probe_path(resolver, form_tpl)
+            probe = _probe_file(resolver, form_tpl)
             state = probe["state"]
             reason = (f"폼 `{form_key}` 로 지정한 양식입니다 — config 양식 키는 쓰이지 않습니다"
                       if state == S_OK else
@@ -1786,7 +1826,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     chosen: Optional[Tuple[str, str]] = None
                     probes: List[Tuple[str, str, Dict[str, Any]]] = []
                     for k, v in registered:
-                        pr = _probe_path(resolver, v)
+                        pr = _probe_file(resolver, v)
                         probes.append((k, v, pr))
                         if pr["state"] == S_OK:
                             chosen = (k, v)
@@ -2307,7 +2347,7 @@ def docgen_attribution(req: AttributionRequest) -> Dict[str, Any]:
             available[key] = bool(first) and Path(first).expanduser().is_dir()
         else:
             # preflight 와 같은 3상태(`_mark_available`) — 확인 실패는 키를 만들지 않는다.
-            _mark_available(available, key, _probe_path(resolver, path)["state"])
+            _mark_available(available, key, _probe_input(resolver, key, path)["state"])
 
     dist_by_field = {
         "asil": _chain.parse_source_distribution(conf.get("asil_sources")),
@@ -2388,7 +2428,7 @@ def docgen_adopt_doc_path(req: AdoptDocPathRequest) -> Dict[str, Any]:
 
     # 교체 전에 **실물을 확인**한다. 없는 파일로 바꾸면 문제를 옮기기만 한다.
     resolver = get_resolver()
-    probe = _probe_path(resolver, new_path)
+    probe = _probe_file(resolver, new_path)
     if probe["state"] != S_OK:
         raise HTTPException(
             status_code=400,
