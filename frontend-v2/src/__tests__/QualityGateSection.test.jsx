@@ -422,11 +422,19 @@ describe('QualityGateSection — 검토 패널 (R35)', () => {
     expect(within(panel).queryByRole('radio')).toBeNull();
   });
 
-  it('해시 사유가 기록된 run 은 그 사유를 보인다', async () => {
+  it('해시 사유가 기록된 run 은 토큰과 함께 그 뜻을 보인다', async () => {
     const user = userEvent.setup();
     stubApi({ review: reviewState({ output_sha256: null, hash_unavailable: true, hash_reason: 'file_missing' }) });
     const panel = await openPanel(user);
     expect(within(panel).getByRole('status')).toHaveTextContent('file_missing');
+    expect(within(panel).getByRole('status')).toHaveTextContent(/기록된 경로에 파일이 없습니다/);
+  });
+
+  it('배선 실패 사유(no_bytes)는 \'정상\' 이 아니라 문제로 읽히게 적는다 (R36 리뷰 W2)', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ output_sha256: null, hash_unavailable: true, hash_reason: 'no_bytes' }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByRole('status')).toHaveTextContent(/기록 배선 문제/);
   });
 
   it('admin 이면 폼이 있고, 저장은 서버 해시를 그대로 보내며 성공 토스트는 2xx 뒤에만 뜬다', async () => {
@@ -517,6 +525,10 @@ describe('QualityGateSection — 검토 패널 (R35)', () => {
     expect(within(panel).getByText(/#900/)).toBeInTheDocument();
     expect(within(panel).getByText(/지금 파일이 이 run 의 기록과 다릅니다/)).toBeInTheDocument();
     expect(within(panel).getByText(/stale — 지금 파일이 검토 시점과 다릅니다/)).toBeInTheDocument();
+    // (R36) 재생성 결정론이 없다는 사실을 화면이 말하되 **단정하지 않는다**(리뷰 W4 — 같은 초 안 재생성은 해시가 같다).
+    expect(within(panel).getByText(/다시 생성하면 대개 해시가 달라집니다/)).toBeInTheDocument();
+    expect(within(panel).getByText(/같은 run 이라는 뜻은 아닙니다/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/생성마다 해시가 다릅니다/)).toBeNull();
   });
 
   it('레코드 stale=null 은 "일치" 가 아니라 판단 불가다', async () => {
@@ -526,6 +538,14 @@ describe('QualityGateSection — 검토 패널 (R35)', () => {
     const panel = await openPanel(user);
     expect(within(panel).getByText(/최신성 판단 불가/)).toBeInTheDocument();
     expect(within(panel).queryByText(/지금 파일과 일치/)).toBeNull();
+  });
+
+  it('경로 없는 산출물의 판단 불가는 고장이 아니라 구조라고 적고, 대조 방법을 준다 (리뷰 I6)', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ stale: null, current_basis: 'record', current_basis_reason: 'no_path' }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByText(/사본을 갖고 있지 않아/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Get-FileHash/)).toBeInTheDocument();
   });
 
   it('조회 실패는 role="alert" 다', async () => {

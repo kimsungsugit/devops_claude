@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, gateDefinitionOf, reasonTextOf,
   REASON_TEXT, TONE_COLOR, VERDICT_CODES,
-  reviewVerdictOf, reviewErrorText, reviewFreshnessOf, latestReviewOf,
+  reviewVerdictOf, reviewErrorText, reviewFreshnessOf, latestReviewOf, hashReasonText, basisReasonText, HASH_REASON_TEXT,
   REVIEW_DECISIONS, REVIEW_DECISION_LABEL, REVIEW_ERROR_TEXT, REVIEW_VERDICT_CODES,
 } from '../gateVerdict.js';
 
@@ -250,5 +250,40 @@ describe('reviewFreshnessOf / reviewErrorText', () => {
     expect(m).not.toBeNull();
     const server = [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
     expect([...REVIEW_DECISIONS]).toEqual(server);
+  });
+});
+
+
+describe('hashReasonText / basisReasonText — 사유를 문장으로, 경로 계열과 배선 실패를 구별해서 (R36 리뷰 W2)', () => {
+  it('배선 실패 4종은 경고 표시가 붙고 경로 계열 5종은 안 붙는다', () => {
+    for (const t of ['no_bytes', 'bytes_unreadable', 'bytes_not_bytes', 'empty_bytes']) {
+      expect(hashReasonText(t)).toMatch(/⚠/);
+    }
+    for (const t of ['no_path', 'file_missing', 'not_a_file', 'unreadable', 'invalid_arg']) {
+      expect(hashReasonText(t)).not.toMatch(/⚠/);
+      expect(hashReasonText(t)).toBeTruthy();
+    }
+  });
+
+  it('모르는 토큰은 지어내지 않고 그대로, null 은 null', () => {
+    expect(hashReasonText('quantum_flux')).toBe('quantum_flux');
+    expect(hashReasonText(null)).toBeNull();
+    expect(hashReasonText(undefined)).toBeNull();
+  });
+
+  it('basisReasonText 는 no_path 를 고장이 아니라 구조로 설명하고 대조 방법을 남긴다', () => {
+    expect(basisReasonText('no_path')).toMatch(/사본을 갖고 있지 않아/);
+    expect(basisReasonText('no_path')).toMatch(/해시로 직접 대조/);
+    expect(basisReasonText('batch_budget')).toMatch(/예산/);
+    expect(basisReasonText(null)).toBeNull();
+  });
+
+  it('사유 어휘는 서버 recorder 의 토큰을 모두 덮는다 (lockstep)', () => {
+    const py = fs.readFileSync(path.resolve(process.cwd(), '..', 'workflow', 'quality', 'recorder.py'), 'utf-8');
+    const tokens = new Set();
+    for (const m of py.matchAll(/return \{"output_hash_reason": "([a-z_]+)"\}/g)) tokens.add(m[1]);
+    for (const m of py.matchAll(/return None, None, "([a-z_]+)"/g)) tokens.add(m[1]);
+    expect(tokens.size).toBeGreaterThanOrEqual(7);
+    for (const t of tokens) expect(HASH_REASON_TEXT[t], `사유 ${t} 에 문장이 없다`).toBeTruthy();
   });
 });

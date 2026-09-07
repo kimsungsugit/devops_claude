@@ -231,3 +231,42 @@ export function reviewFreshnessOf(rec) {
   if (rec?.stale === false) return { code: 'FRESH', tone: 'success', label: '지금 파일과 일치' };
   return { code: 'UNVERIFIED', tone: 'neutral', label: '최신성 판단 불가(파일 기준 재해시 불가)' };
 }
+
+/**
+ * 해시 미기록 사유(`hash_reason`) → 문장. **경로 계열과 버퍼 계열을 섞지 않는다**(R36 리뷰 W2):
+ * 앞 다섯은 "이 문서엔 서버 사본이 없다/못 읽었다"(대개 정상), 뒤 넷은 **기록 배선이 끊긴 것**(버그)이다.
+ * 없는 토큰은 그대로 보여 준다 — 모르는 사유를 아는 척하지 않는다.
+ */
+export const HASH_REASON_TEXT = Object.freeze({
+  no_path: '산출물 경로가 기록되지 않은 run 입니다',
+  file_missing: '기록된 경로에 파일이 없습니다',
+  not_a_file: '기록된 경로가 파일이 아닙니다',
+  unreadable: '기록된 경로를 읽지 못했습니다',
+  invalid_arg: '전달된 해시 값이 올바르지 않았습니다',
+  no_bytes: '⚠ 산출물 바이트가 기록기에 전달되지 않았습니다 — 기록 배선 문제입니다(정상 상태가 아닙니다)',
+  bytes_unreadable: '⚠ 산출물 버퍼를 읽지 못했습니다 — 기록 배선 문제입니다',
+  bytes_not_bytes: '⚠ 산출물 버퍼가 바이트가 아니었습니다 — 기록 배선 문제입니다',
+  empty_bytes: '⚠ 산출물이 0바이트였습니다 — 빈 입력의 해시를 산출물 해시로 남기지 않습니다',
+});
+
+/** 사유 토큰 → 문장(모르는 토큰은 토큰 그대로). `null` 은 사유 자체가 미기록(구 run). */
+export function hashReasonText(reason) {
+  if (!reason) return null;
+  return HASH_REASON_TEXT[reason] || String(reason);
+}
+
+/**
+ * 지금 파일과 대조하지 못한 이유(`current_basis_reason`) → 문장 + **벗어나는 길**.
+ * `no_path` 는 고장이 아니라 구조다 — 서버가 산출물 사본을 갖지 않는 문서(BytesIO 응답)라
+ * 파일 대조가 성립하지 않는다. 그 사실과, 사용자가 손에 든 파일로 직접 대조하는 방법을 함께 낸다.
+ */
+export function basisReasonText(reason) {
+  if (!reason) return null;
+  if (reason === 'no_path') {
+    return '서버가 이 산출물의 사본을 갖고 있지 않아 파일 대조가 성립하지 않습니다(내려받은 파일과 아래 해시로 직접 대조하세요)';
+  }
+  if (reason === 'batch_budget') {
+    return '목록 배치 조회의 재해시 예산을 넘어 파일을 읽지 않았습니다 — 이 패널은 파일 기준으로 다시 잽니다';
+  }
+  return HASH_REASON_TEXT[reason] || String(reason);
+}

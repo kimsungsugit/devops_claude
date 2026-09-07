@@ -578,7 +578,7 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         raise HTTPException(status_code=500, detail="SwIT 빌드 실패 (ok=False)")
     # Quality DB recording (non-fatal). SwIT Coverage 빌더 = 통합 커버리지 출처.
     try:
-        from workflow.quality.recorder import record_run
+        from workflow.quality.recorder import output_hash_kwargs, record_run
         record_run(
             "swit", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
@@ -588,6 +588,8 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
                 "kind": "coverage",
                 "release_sw_version": str(getattr(req, "release_sw_version", "") or ""),
             },
+            # (R36 C-4) 응답 바이트의 해시 — 검토 기록(R34)이 이 run 에 붙을 수 있게. 파일 경로가 없는 빌더다.
+            **output_hash_kwargs(result.xlsx_io),
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
@@ -617,7 +619,7 @@ async def build_swit_coverage(
 
 
 def _record_test_quality(
-    req: SwITBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str,
+    req: SwITBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str, output_io: Any = None,
 ) -> None:
     """SITR / SwITCR 빌드 1회를 Quality DB 에 기록 (non-fatal) — swut.py `_record_test_quality` 대칭.
 
@@ -636,7 +638,7 @@ def _record_test_quality(
     종합결과서가 SITR 행을 덮어쓴다.
     """
     try:
-        from workflow.quality.recorder import record_test_result_run
+        from workflow.quality.recorder import output_hash_kwargs, record_test_result_run
         record_test_result_run(
             doc_type, summary,
             project_id=str(getattr(req, "project_id", "") or ""),
@@ -645,6 +647,8 @@ def _record_test_quality(
             # 화면이 아는 프로젝트 축을 그대로 넘긴다. 비면 recorder 가 project_id 에서
             # 추측하는데 그 추측이 틀리는 실환경이 있다(schemas.py `scm_id` 주석).
             scm_id=str(getattr(req, "scm_id", "") or "") or None,
+            # (R36 C-4) 응답 바이트 해시. 호출부가 `output_io` 를 안 주면 해시 없음(no_path)으로 정직하게 남는다.
+            **output_hash_kwargs(output_io),
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
@@ -722,7 +726,7 @@ def _do_swit_sitr_build_spec_based(
             status_code=500,
             detail=f"spec-based SwITR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
-    _record_test_quality(req, meta, result.summary, doc_type="sitr")
+    _record_test_quality(req, meta, result.summary, doc_type="sitr", output_io=result.xlsm_io)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -784,7 +788,7 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
-    _record_test_quality(req, meta, result.summary, doc_type="sitr")
+    _record_test_quality(req, meta, result.summary, doc_type="sitr", output_io=result.xlsm_io)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -869,7 +873,7 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
         result.warnings.extend(_optional_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwITCR build failed (ok=False)")
-    _record_test_quality(req, meta, result.summary, doc_type="switcr")
+    _record_test_quality(req, meta, result.summary, doc_type="switcr", output_io=result.xlsm_io)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

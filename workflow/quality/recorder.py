@@ -39,6 +39,7 @@ def record_run(
     output_path: Optional[str] = None,
     output_sha256: Optional[str] = None,
     output_size_bytes: Optional[int] = None,
+    output_hash_reason: Optional[str] = None,
     ai_model: Optional[str] = None,
     error_msg: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
@@ -46,13 +47,18 @@ def record_run(
 ) -> int:
     """생성 실행 1회를 Quality DB에 기록.
 
-    ``output_sha256`` (R33 C-1): 산출물 바이트의 SHA-256 hex. 명시하면 그 값을 쓰고(BytesIO 응답
-    빌더는 경로가 없으니 `sha256_hex(buf.getvalue())` 로 넘긴다 — C-4), 없으면 ``output_path``
-    파일을 읽어 계산한다. 둘 다 없으면 NULL(미기록). 이 값이 검토 기록(R34~)의 대상 고정에 쓰인다.
-    ``output_size_bytes``: 명시 해시와 **같은 바이트**의 길이(`len(buf.getvalue())`). 명시 해시가 있으면
-    크기는 파일에서 재지 않는다 — 한 행의 크기와 해시가 다른 바이트를 가리키면 안 된다(R33 리뷰 W2).
+    ``output_sha256`` (R33 C-1): 산출물 바이트의 SHA-256 hex. 명시하면 그 값을 쓰고, 없으면
+    ``output_path`` 파일을 읽어 계산한다. 둘 다 없으면 NULL(미기록). 이 값이 검토 기록(R34~)의 대상
+    고정에 쓰인다. **BytesIO 응답 빌더는 `output_hash_kwargs(buf)` 를 `**` 로 펼쳐 넘긴다**(R36 C-4) —
+    호출부마다 `sha256_hex(buf.getvalue())` 를 복제하면 한 곳이 빠진다.
+    ``output_size_bytes``: 명시 해시와 **같은 바이트**의 길이. 명시 해시가 있으면 크기는 파일에서 재지
+    않는다 — 한 행의 크기와 해시가 다른 바이트를 가리키면 안 된다(R33 리뷰 W2).
+    ``output_hash_reason`` (R36 리뷰 W2): 바이트를 못 얻은 **호출부 쪽 사유**. 경로도 해시도 없을 때
+    `no_path` 대신 이 값을 남긴다 — 안 그러면 "경로가 없는 문서다"(정상)와 "버퍼 배선이 깨졌다"(버그)가
+    한 토큰이 되어, R36 자신의 실패가 화면에서 정상으로 읽힌다.
     해시를 못 기록한 사유는 `meta.output_sha256_reason` 에 남는다(`no_path`·`file_missing`·`not_a_file`·
-    `unreadable`·`invalid_arg`) — NULL 네 갈래를 한 값으로 접지 않는다(W5).
+    `unreadable`·`invalid_arg` + 호출부 사유 `no_bytes`·`bytes_unreadable`·`bytes_not_bytes`·`empty_bytes`)
+    — NULL 갈래를 한 값으로 접지 않는다(R33 W5 · R36 리뷰 W2).
 
     Returns:
         run_id (성공 시), -1 (실패 시 -- 예외 전파하지 않음)
@@ -104,7 +110,7 @@ def record_run(
             target_function=target_function,
             status=status, elapsed_sec=elapsed_sec,
             output_path=output_path, output_sha256=output_sha256,
-            output_size_bytes=output_size_bytes,
+            output_size_bytes=output_size_bytes, output_hash_reason=output_hash_reason,
             ai_model=ai_model,
             error_msg=error_msg, meta=meta, db_path=db_path,
         )
@@ -189,6 +195,41 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def output_hash_kwargs(buf: Any) -> Dict[str, Any]:
+    """(R36 C-4) BytesIO 응답 빌더의 산출물 → `record_run(**kwargs)` 인자.
+
+    성공: `{output_sha256, output_size_bytes}` · 실패: `{output_hash_reason: …}`(기록은 남기고 해시만 없음).
+    라우터 4곳 + 시험결과 헬퍼 2곳이 각자 `sha256_hex(buf.getvalue())` 를 복제하면 한 곳이 빠진다(이 저장소의
+    반복 결함). 받는 것: `io.BytesIO`(`getvalue()` — 위치를 옮기지 않는다) · `bytes`/`bytearray`/`memoryview`.
+
+    ⚠ **실패를 `no_path` 로 접지 않는다**(R36 리뷰 W2). 경로 없는 문서는 정상이고 버퍼를 못 받은 것은 버그인데,
+      한 토큰이면 화면에서 구별되지 않아 **배선이 끊긴 사실이 영영 리포트되지 않는다**.
+    ⚠ **0바이트는 해시하지 않는다**(리뷰 W3). `e3b0c442…`(빈 입력의 sha256)는 유효한 해시처럼 보여서
+      빈 산출물이 검토 승인까지 받을 수 있다 — 무엇의 해시인가를 답할 수 없으면 기록하지 않는다.
+    ⚠ 같은 입력을 다시 빌드해도 해시는 대개 다르다 — openpyxl 이 `docProps/core.xml` 에 **초 단위** 저장 시각을
+      쓴다(2026-09-07 실측: 같은 초 안 6회는 동일, 1.1초 넘기면 그 파트만 다름). 검토는 run 의 바이트에 붙는다.
+    """
+    data: Optional[bytes]
+    if isinstance(buf, (bytes, bytearray, memoryview)):
+        data = bytes(buf)
+    elif hasattr(buf, "getvalue"):
+        try:
+            data = buf.getvalue()
+        except Exception as exc:  # noqa: BLE001 — 어떤 실패도 기록을 버릴 이유가 아니다
+            _logger.warning("산출물 버퍼를 읽지 못했다 — 해시 미기록: %s", exc)
+            return {"output_hash_reason": "bytes_unreadable"}
+        if not isinstance(data, (bytes, bytearray)):
+            _logger.warning("산출물 버퍼가 바이트가 아니다(%s) — 해시 미기록", type(data).__name__)
+            return {"output_hash_reason": "bytes_not_bytes"}
+    else:
+        _logger.warning("산출물 버퍼 없음(%s) — 해시 미기록", type(buf).__name__)
+        return {"output_hash_reason": "no_bytes"}
+    if not data:
+        _logger.warning("산출물 바이트가 0개다 — 해시 미기록(빈 입력의 해시를 산출물 해시로 남기지 않는다)")
+        return {"output_hash_reason": "empty_bytes"}
+    return {"output_sha256": sha256_hex(bytes(data)), "output_size_bytes": len(data)}
+
+
 def _hash_and_size_of_file(path: "str | Path") -> "tuple[str, int]":
     """파일 바이트의 (SHA-256 hex, 길이) — **한 번 읽으며** 둘 다 잰다. 1MiB 청크(UDS docx 46MB).
 
@@ -245,13 +286,14 @@ def _normalize_sha256(value: Any) -> Optional[str]:
 
 def _measure_output(
     output_path: Any, output_sha256: Any, output_size_bytes: Any = None,
+    output_hash_reason: Any = None,
 ) -> "tuple[Optional[int], Optional[str], Optional[str]]":
     """(크기, 해시, 해시 없음 사유). 실패는 NULL + 사유 + 경고 — 어떤 예외도 기록을 버리게 하지 않는다.
 
     - 명시 해시가 있으면 크기도 **명시 값**(같은 바이트)만 쓴다. 파일은 열지 않는다(W2).
     - 명시 해시가 없으면 경로 파일을 한 번 읽어 크기·해시를 같이 잰다.
-    - NULL 은 "해시 없음" 이지 "빈 산출물" 이 아니다. 사유 어휘: `no_path`(경로 없음 — BytesIO 라우터,
-      C-4 전) · `file_missing` · `not_a_file`(디렉터리 등) · `unreadable`(권한·인코딩·NUL 경로 등 그 외 전부)
+    - NULL 은 "해시 없음" 이지 "빈 산출물" 이 아니다. 사유 어휘: `no_path`(경로도 바이트도 안 넘어옴 — C-4 뒤엔
+      라우터가 버퍼를 못 넘긴 것) · `file_missing` · `not_a_file`(디렉터리 등) · `unreadable`(권한·인코딩·NUL 경로 등 그 외 전부)
       · `invalid_arg`(명시 해시가 hex 아님). 리더(R34)는 사유와 무관하게 NULL 을 `hash_unavailable` 로
       잠그되 화면엔 사유를 그대로 낸다.
 
@@ -266,7 +308,10 @@ def _measure_output(
         size = int(output_size_bytes) if isinstance(output_size_bytes, int) and output_size_bytes >= 0 else None
         return size, explicit, None
     if not output_path:
-        return None, None, "no_path"
+        # 호출부가 사유를 줬으면 그것이 더 정확하다 — `no_path`(경로 없는 문서 = 정상)와
+        # `no_bytes`/`bytes_unreadable`(버퍼 배선 실패 = 버그)를 한 토큰으로 접지 않는다(R36 리뷰 W2).
+        reason = str(output_hash_reason) if output_hash_reason else "no_path"
+        return None, None, reason
     try:
         p = resolve_output_path(output_path)
         if not p.exists():
@@ -391,6 +436,7 @@ def _record_run_impl(
         # output_size · output_sha256 계산 (R33 C-1: 해시는 명시 인자 우선, 사유는 meta 로)
         output_size, output_sha, sha_reason = _measure_output(
             kwargs.get("output_path"), kwargs.get("output_sha256"), kwargs.get("output_size_bytes"),
+            kwargs.get("output_hash_reason"),
         )
         run_meta: Dict[str, Any] = dict(kwargs.get("meta") or {})
         if sha_reason:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import pathlib
 import shutil
 import threading
 import uuid
@@ -19,6 +21,40 @@ def tmp_path() -> Path:
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_quality_db():
+    """테스트는 **사용자의 Quality DB**(`reports/quality.sqlite`)에 쓰지 않는다.
+
+    실측(2026-09-07): 라이브 2,058행 중 swut 1,338행의 **1,327행**이 `project_root='HDPDM01'` ·
+    `statement_coverage_pct=0.0` 인 픽스처 서명이었고, 2.5초 간격으로 두 건씩(= 스위트 한 번) 쌓여 있었다.
+    라우터 테스트가 `/api/swreport/summary/build` 같은 **실 경로**를 태우는데 `record_run` 이
+    `db_path` 없이 기본 경로(`config.DEFAULT_REPORT_DIR/quality.sqlite`)로 떨어지기 때문이다.
+
+    그 행들은 조회 화면의 추세·KPI 에 섞이고, R34 의 `superseded_by`("같은 scm·문서의 더 새로운 성공 run")
+    자리를 테스트 행이 차지하며, R36 이후로는 **해시까지 붙어 검토 대상**이 된다. 게이트가 사용자 데이터를
+    바꾸면 그 데이터로 잰 값은 더 이상 사실이 아니다 — 그래서 스위트 전체를 프로세스별 임시 DB 로 돌린다.
+
+    ⚠ 개별 테스트의 `monkeypatch.setattr(qdb, "_default_db_path", ...)`(21파일)은 그대로 동작한다 —
+      함수 스코프 monkeypatch 가 이 세션 값을 저장했다가 되돌린다. `db_path=` 명시 호출도 무관하다.
+    """
+    try:
+        from workflow.quality import db as _qdb
+    except ImportError:      # sqlalchemy 부재 환경 — 기록 경로 자체가 없으니 오염 위험도 없다
+        yield
+        return
+    db_file = _TMP_ROOT / f"quality-test-{os.getpid()}.sqlite"
+    mp = pytest.MonkeyPatch()
+    mp.setattr(_qdb, "_default_db_path", lambda: db_file)
+    _qdb.reset_engine()
+    try:
+        yield db_file
+    finally:
+        mp.undo()
+        _qdb.reset_engine()
+        for suffix in ("", "-wal", "-shm"):
+            pathlib.Path(str(db_file) + suffix).unlink(missing_ok=True)
 
 
 @pytest.fixture()

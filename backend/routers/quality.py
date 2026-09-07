@@ -115,8 +115,9 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
         "elapsed_sec": run.elapsed_sec,
         "output_path": run.output_path,
         "output_size_bytes": run.output_size_bytes,
-        # (R33 C-1) 산출물 바이트 해시. None = 미기록(구 run·파일 부재·경로 없는 BytesIO run) —
-        # 검토 기록(R34~)은 None 을 `hash_unavailable` 로 갈라 검토를 잠근다.
+        # (R33 C-1) 산출물 바이트 해시. None = 미기록(구 run·파일 부재·버퍼 미전달) — 사유는
+        # `meta.output_sha256_reason`. R36 부터 BytesIO 빌더도 바이트로 해시를 남기므로 "경로 없는 run"
+        # 은 더 이상 NULL 의 사유가 아니다. 검토 기록(R34~)은 None 을 `hash_unavailable` 로 갈라 잠근다.
         "output_sha256": run.output_sha256,
         "ai_model": run.ai_model,
     }

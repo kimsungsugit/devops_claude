@@ -147,9 +147,9 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
     result = build_summary_report(template_bytes, sources, _build_meta(req))
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwReport Summary build failed (ok=False)")
-    # Quality DB recording (non-fatal). output_path 없음(BytesIO 응답, Cloudium read-only).
+    # Quality DB recording (non-fatal). output_path 없음(BytesIO 응답, Cloudium read-only) — 해시는 바이트로(R36 C-4).
     try:
-        from workflow.quality.recorder import record_run
+        from workflow.quality.recorder import output_hash_kwargs, record_run
         record_run(
             "swreport", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
@@ -157,6 +157,7 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
             #   라 project_root 에서 프로젝트를 추측할 수가 없다. 화면이 아는 축을 싣는다.
             scm_id=str(getattr(req, "scm_id", "") or "") or None,
             meta={"release_sw_version": getattr(req, "release_sw_version", "")},
+            **output_hash_kwargs(result.xlsm_io),
         )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).

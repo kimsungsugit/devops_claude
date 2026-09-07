@@ -5,6 +5,7 @@ import StatusBadge from '../StatusBadge.jsx';
 import {
   verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR,
   reviewVerdictOf, reviewErrorText, reviewFreshnessOf, reviewDecisionTone, REVIEW_DECISIONS, REVIEW_DECISION_LABEL,
+  hashReasonText, basisReasonText,
 } from '../../gateVerdict.js';
 
 /**
@@ -229,7 +230,7 @@ function ReviewPanel({ runId, onSaved }) {
               <StatusBadge tone="neutral">검토 잠금</StatusBadge>{' '}
               산출물 해시가 없어 무엇을 검토했는지 고정할 수 없습니다 — 기록을 받지 않습니다.
               {' '}사유: {state.hash_reason
-                ? <code>{state.hash_reason}</code>
+                ? <><code>{state.hash_reason}</code> — {hashReasonText(state.hash_reason)}</>
                 : <span>미기록 (해시 기록 이전의 구 run)</span>}
               . 문서를 다시 생성하면 새 run 에 해시가 남습니다.
             </p>
@@ -239,7 +240,12 @@ function ReviewPanel({ runId, onSaved }) {
               {' · '}
               {state.stale === true && <strong style={{ color: 'var(--color-warning)' }}>⚠ 지금 파일이 이 run 의 기록과 다릅니다 — 검토는 기록된 산출물에 붙습니다.</strong>}
               {state.stale === false && '지금 파일과 일치'}
-              {state.stale == null && `파일 기준 판단 불가${state.current_basis_reason ? ` (${state.current_basis_reason})` : ''}`}
+              {state.stale == null && (basisReasonText(state.current_basis_reason) || '파일 기준으로 다시 잴 수 없습니다')}
+              {' · '}
+              {/* (R36 실측) openpyxl 이 `docProps/core.xml` 에 **초 단위** 저장 시각을 쓴다 — 같은 초 안 6회는 해시가 같고
+                  1.1초를 넘기면 달라졌다. "생성마다 다르다" 는 반례가 있어 단정하지 않는다(리뷰 W4). */}
+              다시 생성하면 대개 해시가 달라집니다(문서에 저장 시각이 들어갑니다) — 해시가 같아도 같은 run 이라는 뜻은 아닙니다.
+              {' '}내려받은 파일과 대조하려면 PowerShell <code>Get-FileHash &lt;파일&gt; -Algorithm SHA256</code>.
             </p>
           )}
           {state.superseded_by && (

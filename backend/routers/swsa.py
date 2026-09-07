@@ -161,11 +161,13 @@ def _do_build(req: SwSABuildRequest) -> Response:
     try:
         _qd = _swsa_quality_data(inputs)
         if _qd:
-            from workflow.quality.recorder import record_run
+            from workflow.quality.recorder import output_hash_kwargs, record_run
             record_run(
                 "swsa", _qd,
                 project_root=str(getattr(meta, "project_id", "") or ""),
                 meta={"asil_level": str(getattr(meta, "asil_level", "") or "")},
+                # (R36 C-4) 응답 바이트의 해시 — 검토 기록이 이 run 에 붙을 수 있게.
+                **output_hash_kwargs(getattr(res, "xlsm_io", None)),
             )
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
