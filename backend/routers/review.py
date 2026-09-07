@@ -7,6 +7,7 @@
 | `GET /runs/{run_id}` | `require_user`(로그인) | 기록 목록 + `stale`/`hash_unavailable`/`superseded_by`/`can_review`. run 없음 = **404** |
 | `POST /runs/{run_id}` | `require_jwt_user` **+ `require_admin`**(§8 #8) | body `extra='forbid'`. 409 `STALE`/`HASH_UNAVAILABLE`/`VERSION_CONFLICT`, 503 `DB_BUSY` |
 | `GET /history` | `require_user` | 감사 이력, `scm_id`/`doc_type`/`run_id`/`reviewer`/`limit`/`offset` |
+| `GET /states?run_ids=1,2` | `require_user` | (R35) 목록 '검토' 열용 배치 — id 마다 `GET /runs/{id}` 와 같은 본문. ≤50개, 없는 id 는 `missing` |
 
 - 200 + `{"error": …}` 를 **절대** 돌려주지 않는다 — `api.js` 는 `res.ok` 만 본다(quality.py `get_run` 과 같은 이유).
 - 경로·파일명·신원은 클라이언트가 보내지 않는다(run_id 만 — `evidence` 와 같은 구조).
@@ -33,6 +34,7 @@ from workflow.quality.review import (
     comment_violation,
     history,
     review_state,
+    review_states,
     upsert_review,
 )
 
@@ -41,6 +43,9 @@ _logger = logging.getLogger("devops_api.review")
 router = APIRouter(prefix="/api/review", tags=["review"])
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_RUN_ID_RE = re.compile(r"^[0-9]{1,12}$")
+# 배치 상한 — 목록 한 페이지(`/api/quality/runs` limit 50)와 같다. 넘으면 422(조용히 자르지 않는다).
+STATES_MAX_IDS = 50
 
 
 class ReviewBody(BaseModel):
@@ -122,6 +127,45 @@ def post_review(
         "create" if result["created"] else "update", run_id, body.decision, mask_user(jwt_user),
     )
     return result
+
+
+def _parse_run_ids(raw: str) -> list[int]:
+    """`1,2,3` → [1,2,3]. 비정수·0·상한 초과는 422 — 일부만 받아 '없음' 으로 접지 않는다."""
+    ids: list[int] = []
+    for tok in str(raw or "").split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        if not _RUN_ID_RE.match(t) or int(t) < 1:
+            raise HTTPException(status_code=422, detail={"code": "BAD_RUN_IDS", "message": f"run_ids 항목이 정수가 아닙니다: {t[:20]!r}"})
+        n = int(t)
+        if n not in ids:
+            ids.append(n)
+    if not ids:
+        raise HTTPException(status_code=422, detail={"code": "BAD_RUN_IDS", "message": "run_ids 가 비었습니다"})
+    if len(ids) > STATES_MAX_IDS:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "BAD_RUN_IDS", "message": f"run_ids 는 최대 {STATES_MAX_IDS}개입니다 ({len(ids)}개)"},
+        )
+    return ids
+
+
+@router.get("/states")
+def get_states(
+    run_ids: str = Query(..., min_length=1, max_length=800),
+    user: str = Depends(require_user),
+) -> Dict[str, Any]:
+    """(R35) 목록 '검토' 열 — 단건과 **같은 판정기**(복제 없음). 없는 id 는 404 가 아니라 `missing`.
+
+    세션 하나 + 누적 재해시 예산(`BATCH_REHASH_BUDGET_BYTES`) — 넘는 run 은 `current_basis_reason='batch_budget'`.
+    응답에 `output_path` 는 없다(리뷰 W4).
+    """
+    ids = _parse_run_ids(run_ids)
+    try:
+        return review_states(_open_session, ids, can_review=bool(is_admin(user)))
+    except ReviewError as exc:
+        raise _http(exc) from None
 
 
 @router.get("/history")

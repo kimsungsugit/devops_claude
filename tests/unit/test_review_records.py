@@ -788,3 +788,130 @@ def test_legacy_r33_db_gains_review_tables_and_fk_is_enforced(monkeypatch, tmp_p
                                    version=1, created_at=now, updated_at=now))
     finally:
         qdb_mod.reset_engine()
+
+
+# ==============================================================
+# 9. (R35) 배치 상태 `GET /states` — 목록 '검토' 열 + 프론트 어휘 lockstep
+# ==============================================================
+
+
+class TestStates:
+    def test_batch_returns_same_shape_as_single_and_lists_missing(self, qdb):
+        c = _app()
+        a = _make_run(qdb, doc_type="sits")
+        b = _make_run(qdb, doc_type="uds", sha=None)
+        r = c.get(f"/api/review/states?run_ids={a},{b},99999,{a}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["missing"] == [99999]
+        assert set(body["states"]) == {str(a), str(b)}
+        single = c.get(f"/api/review/runs/{a}").json()
+        # (리뷰 W4) 배치는 서버 절대경로를 싣지 않는다 — 그것만 빼면 단건과 같은 본문(같은 판정기).
+        assert "output_path" not in body["states"][str(a)]
+        single.pop("output_path")
+        assert body["states"][str(a)] == single, "배치와 단건이 다른 판정기를 쓴다"
+        assert body["states"][str(b)]["hash_unavailable"] is True
+        assert body["states"][str(a)]["can_review"] is True
+
+    def test_can_review_follows_admin(self, qdb):
+        a = _make_run(qdb)
+        c = _app(user="viewer", admin=None)
+        body = c.get(f"/api/review/states?run_ids={a}").json()
+        assert body["states"][str(a)]["can_review"] is False
+
+    @pytest.mark.parametrize("raw", ["x", "1,abc", "0", "-1", "1.5", ",,,", ",".join(str(i) for i in range(1, 52))])
+    def test_bad_ids_are_422_not_partial(self, qdb, raw):
+        c = _app()
+        r = c.get(f"/api/review/states?run_ids={raw}")
+        assert r.status_code == 422, r.text
+        assert r.json()["error"]["code"] == "BAD_RUN_IDS"
+
+    def test_never_200_plus_error(self, qdb):
+        c = _app()
+        r = c.get("/api/review/states?run_ids=99999")
+        assert r.status_code == 200 and "error" not in r.json()
+        assert r.json() == {"states": {}, "missing": [99999]}
+
+
+def test_review_decisions_lockstep_with_frontend():
+    """프론트 `gateVerdict.js::REVIEW_DECISIONS` 는 서버 `DECISIONS` 의 복제다 — 갈리면 라디오가 서버에 없는 값을 보낸다."""
+    import re
+    from pathlib import Path
+
+    from workflow.quality.review import DECISIONS
+
+    # CWD 가 아니라 이 파일 기준으로 루트를 잡는다(리뷰 I2 — 게이트 실행 위치가 바뀌면 한쪽만 죽는다).
+    js = (Path(__file__).resolve().parents[2] / "frontend-v2/src/gateVerdict.js").read_text(encoding="utf-8")
+    m = re.search(r"export const REVIEW_DECISIONS\s*=\s*Object\.freeze\(\[([^\]]*)\]\)", js)
+    assert m, "gateVerdict.js 에 REVIEW_DECISIONS 가 없다"
+    front = tuple(re.findall(r"'([a-z_]+)'", m.group(1)))
+    assert front == tuple(DECISIONS), (front, DECISIONS)
+
+
+class TestStatesBudgetAndSession:
+    """(리뷰 C2/W3) 배치는 누적 재해시 예산 + 세션 하나."""
+
+    def _two_files(self, tmp_path, qdb):
+        big = tmp_path / "big.bin"
+        big.write_bytes(b"B" * 4096)
+        small = tmp_path / "small.bin"
+        small.write_bytes(b"s" * 16)
+        # 기록 해시 = 실제 바이트 — 그래야 `stale=False` 가 "파일 기준으로 쟀고 같다" 를 뜻한다.
+        a = _make_run(qdb, output_path=str(big), sha=hashlib.sha256(big.read_bytes()).hexdigest())
+        b = _make_run(qdb, output_path=str(small), sha=hashlib.sha256(small.read_bytes()).hexdigest())
+        return a, b
+
+    def test_budget_exceeded_falls_back_to_record_with_reason(self, qdb, tmp_path, monkeypatch):
+        from workflow.quality import review as svc
+        svc._HASH_CACHE.clear()
+        a, b = self._two_files(tmp_path, qdb)
+        c = _app()
+        # 예산 100 바이트: 4096 짜리는 못 읽고(batch_budget), 16 짜리는 읽는다 — 순서와 무관하게 예산은 파일 크기로만 소모.
+        monkeypatch.setattr(svc, "BATCH_REHASH_BUDGET_BYTES", 100)
+        body = c.get(f"/api/review/states?run_ids={a},{b}").json()
+        sa, sb = body["states"][str(a)], body["states"][str(b)]
+        assert sa["current_basis"] == "record" and sa["current_basis_reason"] == "batch_budget"
+        assert sa["stale"] is None, "예산에 막힌 run 을 최신으로 접었다"
+        assert sb["current_basis"] == "file" and sb["stale"] is False
+        # 단건은 예산이 없다 — 같은 run 이 파일 기준으로 다시 잰다(열과 패널이 갈리는 건 사유가 설명한다).
+        single = c.get(f"/api/review/runs/{a}").json()
+        assert single["current_basis"] == "file"
+
+    def test_cache_hit_does_not_spend_budget(self, qdb, tmp_path, monkeypatch):
+        from workflow.quality import review as svc
+        svc._HASH_CACHE.clear()
+        a, b = self._two_files(tmp_path, qdb)
+        c = _app()
+        c.get(f"/api/review/runs/{a}")   # 캐시를 채운다(단건, 예산 없음)
+        monkeypatch.setattr(svc, "BATCH_REHASH_BUDGET_BYTES", 100)
+        body = c.get(f"/api/review/states?run_ids={a},{b}").json()
+        assert body["states"][str(a)]["current_basis"] == "file", "캐시 적중이 예산을 소모했다"
+        assert body["states"][str(b)]["current_basis"] == "file"
+
+    def test_hash_cache_is_lru_not_clear_all(self, tmp_path):
+        from workflow.quality import review as svc
+        svc._HASH_CACHE.clear()
+        files = []
+        for i in range(svc._HASH_CACHE_MAX + 1):
+            f = tmp_path / f"f{i}.bin"
+            f.write_bytes(bytes([i % 256]) * 8)
+            files.append(f)
+        for f in files:
+            svc._cached_file_hash(f)
+        assert len(svc._HASH_CACHE) == svc._HASH_CACHE_MAX
+        assert str(files[0]) not in svc._HASH_CACHE, "가장 오래된 것이 나가야 한다"
+        assert str(files[-1]) in svc._HASH_CACHE and str(files[1]) in svc._HASH_CACHE, "통째로 비웠다"
+
+    def test_batch_opens_one_session(self, qdb, monkeypatch):
+        from backend.routers import review as rt
+        ids = [_make_run(qdb) for _ in range(3)]
+        calls = {"n": 0}
+        real = rt._open_session
+        def counting():
+            calls["n"] += 1
+            return real()
+        monkeypatch.setattr(rt, "_open_session", counting)
+        c = _app()
+        r = c.get("/api/review/states?run_ids=" + ",".join(map(str, ids)))
+        assert r.status_code == 200 and len(r.json()["states"]) == 3
+        assert calls["n"] == 1, f"배치가 세션을 {calls['n']}번 열었다(run 마다 init_db)"

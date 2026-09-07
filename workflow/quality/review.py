@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import threading
 import unicodedata
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Callable, ContextManager, Dict, List, Optional
 
@@ -115,34 +116,63 @@ def comment_violation(text: Optional[str]) -> Optional[str]:
 
 # ── 산출물 현재 해시(세션 밖) ───────────────────────────────────────────────────
 
-_HASH_CACHE: Dict[str, "tuple[tuple[int, int], str]"] = {}
+_HASH_CACHE: "OrderedDict[str, tuple[tuple[int, int], str]]" = OrderedDict()
 _HASH_CACHE_MAX = 64
 _HASH_CACHE_LOCK = threading.Lock()
 
+# (R35 리뷰 C2) 배치 조회 한 번이 읽을 수 있는 **누적** 바이트. 파일 하나 상한(`REHASH_MAX_BYTES`)만으로는
+# 50개 × 512MB 가 한 요청이라 스레드풀이 멎는다. 넘는 run 은 `basis='record'`·`batch_budget` 으로 정직하게 낸다.
+BATCH_REHASH_BUDGET_BYTES = 64 * 1024 * 1024
 
-def _cached_file_hash(p) -> str:
-    """(mtime_ns, size) 가 같으면 재해시하지 않는다(선례 `reference_preview_cache`). 한도 넘으면 통째로 비운다."""
-    st = p.stat()
-    key = str(p)
-    sig = (int(st.st_mtime_ns), int(st.st_size))
+
+def _cache_lookup(key: str, sig: "tuple[int, int]") -> Optional[str]:
     with _HASH_CACHE_LOCK:
         hit = _HASH_CACHE.get(key)
         if hit and hit[0] == sig:
+            _HASH_CACHE.move_to_end(key)
             return hit[1]
-    digest = sha256_of_file(p)
+    return None
+
+
+def _cache_store(key: str, sig: "tuple[int, int]", digest: str) -> None:
+    # LRU — 예전엔 가득 차면 `clear()` 통째라 경로 65개를 오가면 매번 전량 재해시였다(리뷰 C2).
     with _HASH_CACHE_LOCK:
-        if len(_HASH_CACHE) >= _HASH_CACHE_MAX:
-            _HASH_CACHE.clear()
         _HASH_CACHE[key] = (sig, digest)
+        _HASH_CACHE.move_to_end(key)
+        while len(_HASH_CACHE) > _HASH_CACHE_MAX:
+            _HASH_CACHE.popitem(last=False)
+
+
+def _cached_file_hash(p, budget: Optional[Dict[str, int]] = None) -> Optional[str]:
+    """(mtime_ns, size) 가 같으면 재해시하지 않는다(선례 `reference_preview_cache`).
+
+    `budget` 이 있으면(배치) 캐시 미스일 때 남은 바이트에서 파일 크기를 뺀다 — 모자라면 **읽지 않고 None**.
+    캐시 적중은 예산을 쓰지 않는다.
+    """
+    st = p.stat()
+    key = str(p)
+    sig = (int(st.st_mtime_ns), int(st.st_size))
+    hit = _cache_lookup(key, sig)
+    if hit is not None:
+        return hit
+    if budget is not None:
+        if sig[1] > budget.get("remaining", 0):
+            return None
+        budget["remaining"] = budget.get("remaining", 0) - sig[1]
+    digest = sha256_of_file(p)
+    _cache_store(key, sig, digest)
     return digest
 
 
-def current_output_hash(output_path: Optional[str], recorded_sha256: Optional[str]) -> Dict[str, Any]:
+def current_output_hash(
+    output_path: Optional[str], recorded_sha256: Optional[str], *, budget: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
     """지금 산출물의 해시. `{"sha256", "basis": "file"|"record"|None, "basis_reason"}`.
 
     - `file`: `output_path` 가 살아 있어 **지금 파일**을 읽었다(캐시 적중이면 안 읽는다).
     - `record`: 파일 기준 판단을 못 해 run 의 기록 해시만 있다. `basis_reason` 이 왜인지 말한다 —
-      `no_path` / `file_missing` / `not_a_file` / `too_large` / `unreadable`.
+      `no_path` / `file_missing` / `not_a_file` / `too_large` / `unreadable` / `batch_budget`(배치 누적 예산 초과 —
+      단건 조회는 예산이 없어 파일 기준으로 다시 잰다).
     - `None`: 둘 다 없다 → `hash_unavailable`.
     읽기 실패는 기록 해시로 물러나되 사유를 남긴다 — 조용히 "같다" 로 접지 않는다(리뷰 W3 ③).
     ⚠ DB 세션 밖에서 부를 것.
@@ -158,7 +188,10 @@ def current_output_hash(output_path: Optional[str], recorded_sha256: Optional[st
             elif p.stat().st_size > REHASH_MAX_BYTES:
                 reason = "too_large"
             else:
-                return {"sha256": _cached_file_hash(p), "basis": "file", "basis_reason": None}
+                digest = _cached_file_hash(p, budget)
+                if digest is not None:
+                    return {"sha256": digest, "basis": "file", "basis_reason": None}
+                reason = "batch_budget"
         except Exception as exc:
             _logger.warning("검토 대상 파일을 다시 읽지 못했다(%r) — 기록 해시로 물러난다: %s", output_path, exc)
             reason = "unreadable"
@@ -266,7 +299,12 @@ def review_state(
     """
     with open_session() as session:
         st = _load_state(session, run_id)
-    cur = current_output_hash(st["output_path"], st["output_sha256"])
+    return _finish_state(st, can_review=can_review)
+
+
+def _finish_state(st: Dict[str, Any], *, can_review: Optional[bool], budget: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """세션 밖 마무리 — 파일 재해시 + stale. 단건·배치가 **같은 판정기**를 쓴다(복제 금지)."""
+    cur = current_output_hash(st["output_path"], st["output_sha256"], budget=budget)
     hash_unavailable = st["output_sha256"] is None
     for r in st["reviews"]:
         r["stale"] = _stale(r["output_sha256"], cur)
@@ -281,6 +319,34 @@ def review_state(
         "can_review": can_review,
     })
     return st
+
+
+def review_states(
+    open_session: Callable[[], ContextManager[Session]], run_ids: List[int], *,
+    can_review: Optional[bool] = None, budget_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    """(R35) `GET /api/review/states` 본문 — 목록 '검토' 열. `{"states": {str(id): state}, "missing": [id]}`.
+
+    - DB 읽기는 세션 **하나**(리뷰 W3: run 마다 세션+init_db 50회였다), 재해시는 세션 밖에서 **누적 예산**(리뷰 C2).
+    - 없는 id 는 404 가 아니라 `missing` — 배치의 일부만 없다고 전부를 거절하지 않는다.
+    - `output_path`(서버 절대경로)는 싣지 않는다 — 열이 쓰지 않는 값이고 배치는 열거 비용을 50배 낮춘다(리뷰 W4).
+    """
+    loaded: Dict[str, Dict[str, Any]] = {}
+    missing: List[int] = []
+    with open_session() as session:
+        for rid in run_ids:
+            try:
+                loaded[str(rid)] = _load_state(session, rid)
+            except RunNotFound:
+                missing.append(rid)
+    # 기본값은 호출 시점에 읽는다(정의 시점 바인딩이면 env/monkeypatch 로 바꾼 값이 안 먹는다).
+    budget = {"remaining": int(BATCH_REHASH_BUDGET_BYTES if budget_bytes is None else budget_bytes)}
+    states: Dict[str, Dict[str, Any]] = {}
+    for key, st in loaded.items():
+        out = _finish_state(st, can_review=can_review, budget=budget)
+        out.pop("output_path", None)
+        states[key] = out
+    return {"states": states, "missing": missing}
 
 
 # ── 쓰기 ────────────────────────────────────────────────────────────────────────

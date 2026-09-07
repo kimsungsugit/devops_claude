@@ -112,3 +112,122 @@ export const TONE_COLOR = {
   neutral: 'var(--text-muted)',
   info: 'var(--color-info)',
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (R35 C-3) 검토 기록 — 게이트 판정과 **다른 축**이다(검토는 게이트를 바꾸지 않는다, 계획 §4.1).
+// 라벨·오류 문구는 여기 한 곳. 컴포넌트는 `code` 로 분기한다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 서버 `workflow/quality/review.py::DECISIONS` 의 복제 — `tests/unit/test_review_records.py` 가 lockstep 을 잰다. */
+export const REVIEW_DECISIONS = Object.freeze(['approved', 'rejected', 'needs_work']);
+
+export const REVIEW_DECISION_LABEL = Object.freeze({
+  approved: '승인됨',
+  rejected: '반려',
+  needs_work: '보완 필요',
+});
+
+const REVIEW_DECISION_TONE = Object.freeze({
+  approved: 'success',
+  rejected: 'danger',
+  needs_work: 'warning',
+});
+
+/** 판정 하나의 배지 톤 — 패널 기록 표처럼 톤만 필요한 곳은 판정기에 가짜 state 를 먹이지 말고 이걸 쓴다(리뷰 W6). */
+export function reviewDecisionTone(decision) {
+  return REVIEW_DECISION_TONE[decision] || 'neutral';
+}
+
+/** 검토 쓰기 오류 코드 → 사람이 읽는 문장. 없는 코드는 서버 message 그대로(호출부). */
+export const REVIEW_ERROR_TEXT = Object.freeze({
+  JWT_REQUIRED: '로그인 토큰이 필요합니다 — X-User 만으로는 검토를 저장할 수 없습니다.',
+  AUTH_REQUIRED: '로그인이 필요합니다.',
+  ADMIN_REQUIRED: '검토 권한이 없습니다(admin 만 기록할 수 있습니다 — 오류가 아니라 권한 상태입니다).',
+  STALE: '산출물이 검토 시점과 다릅니다 — 새로고침 뒤 지금 산출물을 다시 검토하세요.',
+  HASH_UNAVAILABLE: '이 run 은 산출물 해시가 없어 검토를 기록할 수 없습니다.',
+  VERSION_CONFLICT: '다른 저장이 먼저 반영됐습니다 — 새로고침 뒤 다시 저장하세요.',
+  DB_BUSY: '기록 DB 가 잠겨 있습니다 — 잠시 후 다시 시도하세요.',
+});
+
+/** 오류 객체(`api.js` 가 던진 `{status, code, message}`) → 문장. 403 은 코드가 없어도 권한 상태다. */
+export function reviewErrorText(err) {
+  const code = err?.code;
+  if (code && REVIEW_ERROR_TEXT[code]) return REVIEW_ERROR_TEXT[code];
+  if (err?.status === 403) return REVIEW_ERROR_TEXT.ADMIN_REQUIRED;
+  if (err?.status === 401) return REVIEW_ERROR_TEXT.AUTH_REQUIRED;
+  return `검토 저장 실패: ${err?.message || err}`;
+}
+
+/** 가장 최근 갱신된 기록 — 표시 대표. 없으면 null. 시각은 `Date.parse`(문자열 비교는 표기가 바뀌면 조용히 뒤집힌다 — 리뷰 I1), 같으면 id. */
+export function latestReviewOf(state) {
+  const list = Array.isArray(state?.reviews) ? state.reviews : [];
+  if (!list.length) return null;
+  const t = (r) => { const v = Date.parse(String(r?.updated_at || '')); return Number.isFinite(v) ? v : -Infinity; };
+  return list.reduce((a, b) => (t(b) > t(a) || (t(b) === t(a) && Number(b?.id) > Number(a?.id)) ? b : a));
+}
+
+/** 서로 다른 판정이 섞였는가 — 반려 뒤 승인이 오면 대표 1건만 보여선 반려가 사라진다(리뷰 W2). */
+export function reviewDecisionsOf(state) {
+  const list = Array.isArray(state?.reviews) ? state.reviews : [];
+  return [...new Set(list.map((r) => r?.decision).filter(Boolean))];
+}
+
+/**
+ * run 하나의 검토 상태 라벨. **서버 값 그대로** — 프론트는 해시를 비교하지 않는다.
+ *
+ * 순서: 해시 없음(검토 잠금) → 조회 실패 → run 없음(서버 `missing`) → 상태 미조회 → 미검토 → 판정 갈림 → 최근 기록의 판정(+stale).
+ * `opts.missing` 은 서버가 "그 run 없다" 고 답한 것 — '조회 중' 으로 남기면 끝난 조회를 안 끝난 것처럼 말한다(리뷰 W1).
+ * title 에 검토자 실명을 싣지 않는다 — 목록은 스코프 없는 전체 표면이다(리뷰 W7). 이름은 패널에서.
+ * `run.output_sha256` 만으로 잠금을 알 수 있어(목록 응답에 실려 온다) 상태 조회 없이도 첫 분기는 선다.
+ * `stale === null` 은 "판단 불가" 이지 최신이 아니다 — false 로 접지 않는다(R34 C2 와 같은 규약).
+ */
+export function reviewVerdictOf(run, state, opts = {}) {
+  const hashless = run ? run.output_sha256 == null : false;
+  if (hashless || state?.hash_unavailable === true) {
+    const reason = state?.hash_reason || run?.meta?.output_sha256_reason || null;
+    return {
+      code: 'LOCKED', tone: 'neutral', label: '검토 잠금(해시 없음)',
+      title: reason ? `해시 미기록 사유: ${reason}` : '해시 미기록 — 구 run 은 사유가 기록되지 않았습니다',
+    };
+  }
+  if (opts.error) return { code: 'ERROR', tone: 'danger', label: '검토 상태 조회 실패', title: String(opts.error) };
+  if (opts.missing) return { code: 'MISSING', tone: 'danger', label: 'run 을 찾을 수 없음', title: '서버에 이 run 의 검토 상태가 없습니다(삭제됐거나 다른 DB)' };
+  if (!state) return { code: 'UNKNOWN', tone: 'neutral', label: '조회 중…', title: '검토 상태를 아직 받지 못했습니다' };
+  const rec = latestReviewOf(state);
+  if (!rec) return { code: 'NONE', tone: 'neutral', label: '미검토', title: '검토 기록이 없습니다' };
+  const n = state.reviews.length;
+  const who = `검토 ${n}명`;
+  const kinds = reviewDecisionsOf(state);
+  if (kinds.length > 1) {
+    return {
+      code: 'MIXED', tone: 'warning', label: `판정 갈림 ${kinds.length}종`,
+      title: `${who} — ${kinds.map((k) => REVIEW_DECISION_LABEL[k] || k).join(' / ')}. 근거 보기에서 각 기록을 확인하세요`,
+    };
+  }
+  const decision = REVIEW_DECISION_LABEL[rec.decision] || rec.decision;
+  if (rec.stale === true) {
+    return {
+      code: 'STALE', tone: 'warning', label: `${decision} · stale`,
+      title: `${who} — 검토 시점 산출물과 지금 파일이 다릅니다`,
+    };
+  }
+  if (rec.stale == null) {
+    const why = state.current_basis_reason === 'batch_budget'
+      ? '목록 배치 조회의 재해시 예산을 넘어 파일을 읽지 않았습니다 — 근거 보기를 열면 파일 기준으로 다시 잽니다'
+      : (state.current_basis_reason || '파일 기준으로 다시 잴 수 없습니다');
+    return {
+      code: 'UNVERIFIED', tone: REVIEW_DECISION_TONE[rec.decision] || 'neutral', label: `${decision} · 최신성 판단 불가`,
+      title: `${who} — ${why}`,
+    };
+  }
+  return { code: 'REVIEWED', tone: REVIEW_DECISION_TONE[rec.decision] || 'neutral', label: decision, title: who };
+}
+
+export const REVIEW_VERDICT_CODES = Object.freeze(['LOCKED', 'ERROR', 'MISSING', 'UNKNOWN', 'NONE', 'MIXED', 'STALE', 'UNVERIFIED', 'REVIEWED']);
+
+/** 기록 하나의 최신성 문장 — `stale` 3상태를 그대로. 컴포넌트가 `null` 을 '최신' 으로 접지 않게 한 곳에 둔다. */
+export function reviewFreshnessOf(rec) {
+  if (rec?.stale === true) return { code: 'STALE', tone: 'warning', label: 'stale — 지금 파일이 검토 시점과 다릅니다' };
+  if (rec?.stale === false) return { code: 'FRESH', tone: 'success', label: '지금 파일과 일치' };
+  return { code: 'UNVERIFIED', tone: 'neutral', label: '최신성 판단 불가(파일 기준 재해시 불가)' };
+}

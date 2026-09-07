@@ -25,6 +25,7 @@ const mockToast = vi.fn();
 vi.mock('../api.js', () => ({
   api: (...a) => mockApi(...a),
   post: (...a) => mockPost(...a),
+  getUsername: () => 'tester',
 }));
 vi.mock('../App.jsx', () => ({ useToast: () => mockToast }));
 
@@ -40,9 +41,13 @@ function runRow(over = {}) {
 }
 
 /** 목록 응답만 주는 기본 스텁. 상세/정책/추세는 각 테스트가 덮는다. */
-function stubApi({ runs = [runRow()], detail = null, policy = null, trend = null } = {}) {
+function stubApi({ runs = [runRow()], detail = null, policy = null, trend = null, review = null, states = null, history = null } = {}) {
   mockApi.mockImplementation((path) => {
     const p = String(path);
+    // (R35) 검토 API 는 quality API 보다 **먼저** 갈라야 한다 — `/runs/\d+$` 가 둘 다 맞는다.
+    if (p.includes('/api/review/states')) return Promise.resolve(states || { states: {}, missing: [] });
+    if (p.includes('/api/review/history')) return Promise.resolve(history || { items: [], total: 0 });
+    if (p.includes('/api/review/runs/')) return Promise.resolve(review || reviewState());
     if (p.includes('/policy')) return Promise.resolve(policy || { tables: [], notes: [] });
     if (p.includes('/trend')) return Promise.resolve({ trend: trend || [] });
     if (/\/runs\/\d+$/.test(p)) return Promise.resolve(detail || { id: 776, scores: [] });
@@ -323,5 +328,330 @@ describe('QualityGateSection — 접근성', () => {
     await user.keyboard('{ArrowRight}');
     await waitFor(() =>
       expect(screen.getByRole('tab', { name: '점수 추세' })).toHaveAttribute('aria-selected', 'true'));
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (R35 C-3) 검토 기록 — 열 · 패널 · 이력. 라벨은 gateVerdict.js 의 것을 그대로 기대한다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHA = 'a'.repeat(64);
+
+function reviewState(over = {}) {
+  return {
+    run_id: 776, doc_type: 'uds', scm_id: 'hdpdm01', output_path: 'x.docx', output_sha256: SHA,
+    hash_reason: null, superseded_by: null, gated_metric_count: 5, reviews: [],
+    hash_unavailable: false, current_sha256: SHA, current_basis: 'file', current_basis_reason: null,
+    stale: false, can_review: true,
+    ...over,
+  };
+}
+
+function reviewRec(over = {}) {
+  return {
+    id: 1, run_id: 776, reviewer: 'tester', auth_method: 'jwt', decision: 'approved', comment: 'ok',
+    output_sha256: SHA, version: 1, created_at: '2026-09-07T01:00:00+00:00', updated_at: '2026-09-07T01:00:00+00:00',
+    stale: false, ...over,
+  };
+}
+
+const cellOf = (id) => screen.getByTestId(`review-cell-${id}`);
+const statesCalls = () => mockApi.mock.calls.filter((c) => String(c[0]).includes('/api/review/states'));
+
+describe('QualityGateSection — 검토 열 (R35)', () => {
+  it('해시 없는 run 은 목록 값만으로 검토 잠금이고 배치 조회를 부르지 않는다', async () => {
+    stubApi({ runs: [runRow({ id: 1, output_sha256: null })] });
+    render(<QualityGateSection />);
+    await waitFor(() => expect(cellOf(1)).toHaveTextContent('검토 잠금(해시 없음)'));
+    expect(statesCalls()).toHaveLength(0);
+  });
+
+  it('해시 있는 run 만 모아 한 번에 조회하고 서버 판정을 그대로 그린다', async () => {
+    stubApi({
+      runs: [
+        runRow({ id: 1, output_sha256: SHA }), runRow({ id: 2, output_sha256: SHA }),
+        runRow({ id: 3, output_sha256: SHA }), runRow({ id: 4, output_sha256: SHA }), runRow({ id: 5, output_sha256: null }),
+      ],
+      states: { states: {
+        1: reviewState({ reviews: [reviewRec({ decision: 'approved', stale: false })] }),
+        2: reviewState({ reviews: [] }),
+        3: reviewState({ reviews: [reviewRec({ decision: 'rejected', stale: true })] }),
+        4: reviewState({ reviews: [reviewRec({ decision: 'needs_work', stale: null })], current_basis: 'record' }),
+      }, missing: [] },
+    });
+    render(<QualityGateSection />);
+    await waitFor(() => expect(cellOf(1)).toHaveTextContent('승인됨'));
+    expect(statesCalls()).toHaveLength(1);
+    expect(String(statesCalls()[0][0])).toMatch(/run_ids=1,2,3,4$/);
+    expect(cellOf(2)).toHaveTextContent('미검토');
+    expect(cellOf(3)).toHaveTextContent('반려 · stale');
+    // stale=null 은 최신이 아니다 — '보완 필요' 만 쓰면 판단 불가를 통과처럼 읽는다.
+    expect(cellOf(4)).toHaveTextContent('보완 필요 · 최신성 판단 불가');
+    expect(cellOf(5)).toHaveTextContent('검토 잠금(해시 없음)');
+  });
+
+  it('배치 조회가 실패하면 열은 빈칸이 아니라 "조회 실패" 다(해시 없는 run 은 여전히 잠금)', async () => {
+    stubApi({ runs: [runRow({ id: 1, output_sha256: SHA }), runRow({ id: 2, output_sha256: null })] });
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/api/review/states')) return Promise.reject(new Error('down'));
+      if (p.includes('/runs')) return Promise.resolve({ runs: [runRow({ id: 1, output_sha256: SHA }), runRow({ id: 2, output_sha256: null })], total: 2 });
+      return Promise.resolve({});
+    });
+    render(<QualityGateSection />);
+    await waitFor(() => expect(cellOf(1)).toHaveTextContent('검토 상태 조회 실패'));
+    expect(cellOf(2)).toHaveTextContent('검토 잠금(해시 없음)');
+  });
+});
+
+describe('QualityGateSection — 검토 패널 (R35)', () => {
+  async function openPanel(user) {
+    render(<QualityGateSection />);
+    await waitFor(() => screen.getByText('#776'));
+    await user.click(screen.getByRole('button', { name: '근거 보기' }));
+    return waitFor(() => screen.getByTestId('review-panel'));
+  }
+
+  it('해시 없는 run 은 검토 잠금 문구 + 사유 미기록을 적고 폼을 그리지 않는다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ output_sha256: null, hash_unavailable: true, hash_reason: null, current_basis: null }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByRole('status')).toHaveTextContent(/검토 잠금/);
+    expect(within(panel).getByRole('status')).toHaveTextContent(/미기록/);
+    expect(within(panel).queryByRole('radio')).toBeNull();
+  });
+
+  it('해시 사유가 기록된 run 은 그 사유를 보인다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ output_sha256: null, hash_unavailable: true, hash_reason: 'file_missing' }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByRole('status')).toHaveTextContent('file_missing');
+  });
+
+  it('admin 이면 폼이 있고, 저장은 서버 해시를 그대로 보내며 성공 토스트는 2xx 뒤에만 뜬다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState() });
+    let resolvePost;
+    mockPost.mockImplementation(() => new Promise((res) => { resolvePost = res; }));
+    const panel = await openPanel(user);
+    await user.click(within(panel).getByRole('radio', { name: '승인됨' }));
+    await user.type(within(panel).getByRole('textbox', { name: '검토 사유' }), 'looks fine');
+    await user.click(within(panel).getByRole('button', { name: '저장' }));
+    expect(mockPost).toHaveBeenCalledWith('/api/review/runs/776', {
+      decision: 'approved', comment: 'looks fine', expected_sha256: SHA,
+    });
+    expect(mockToast).not.toHaveBeenCalled();   // 아직 응답 전
+    const runsBefore = mockApi.mock.calls.filter((c) => /\/api\/quality\/runs\?/.test(String(c[0]))).length;
+    resolvePost({ created: true, record: reviewRec() });
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('success', expect.stringMatching(/저장/)));
+    // 목록의 검토 열도 다시 받는다.
+    await waitFor(() => expect(
+      mockApi.mock.calls.filter((c) => /\/api\/quality\/runs\?/.test(String(c[0]))).length,
+    ).toBeGreaterThan(runsBefore));
+  });
+
+  it('내 기록이 있으면 version 을 실어 갱신한다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ reviews: [reviewRec({ reviewer: 'tester', version: 3, decision: 'needs_work', comment: 'fix' })] }) });
+    mockPost.mockResolvedValue({ created: false, record: reviewRec({ version: 4 }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByRole('radio', { name: '보완 필요' })).toBeChecked();
+    await user.click(within(panel).getByRole('radio', { name: '승인됨' }));
+    await user.click(within(panel).getByRole('button', { name: '갱신' }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(mockPost.mock.calls[0][1]).toMatchObject({ decision: 'approved', expected_sha256: SHA, version: 3 });
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('success', expect.stringMatching(/갱신/)));
+  });
+
+  it.each([
+    ['STALE', 409, /검토 시점과 다릅니다/],
+    ['VERSION_CONFLICT', 409, /먼저 반영/],
+    ['JWT_REQUIRED', 401, /토큰이 필요/],
+    ['DB_BUSY', 503, /잠겨/],
+  ])('%s 는 성공 토스트 없이 그 뜻의 문장으로 알린다', async (code, status, re) => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState() });
+    const err = new Error('server says'); err.status = status; err.code = code;
+    mockPost.mockRejectedValue(err);
+    const panel = await openPanel(user);
+    const getCalls = () => mockApi.mock.calls.filter((c) => String(c[0]) === '/api/review/runs/776').length;
+    const before = getCalls();
+    await user.click(within(panel).getByRole('radio', { name: '반려' }));
+    await user.click(within(panel).getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('error', expect.stringMatching(re)));
+    expect(mockToast).not.toHaveBeenCalledWith('success', expect.anything());
+    if (code === 'STALE' || code === 'VERSION_CONFLICT') {
+      // 지금 값을 다시 받아야 다음 저장이 뜻을 갖는다.
+      await waitFor(() => expect(getCalls()).toBeGreaterThan(before));
+    }
+  });
+
+  it('403 은 코드가 없어도 권한 상태 문장이다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState() });
+    const err = new Error('Forbidden'); err.status = 403; err.code = 'HTTP_403';
+    mockPost.mockRejectedValue(err);
+    const panel = await openPanel(user);
+    await user.click(within(panel).getByRole('radio', { name: '반려' }));
+    await user.click(within(panel).getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('error', expect.stringMatching(/권한이 없습니다/)));
+  });
+
+  it('can_review=false 면 폼 대신 권한 문구다 (오류가 아니다)', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ can_review: false }) });
+    const panel = await openPanel(user);
+    expect(within(panel).queryByRole('radio')).toBeNull();
+    expect(within(panel).getByRole('status')).toHaveTextContent(/admin 만/);
+    expect(within(panel).queryByRole('alert')).toBeNull();
+  });
+
+  it('superseded_by 와 stale 을 서버 값 그대로 적는다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({
+      stale: true, superseded_by: { run_id: 900, created_at: '2026-09-07T02:00:00+00:00' },
+      reviews: [reviewRec({ stale: true })],
+    }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByText(/#900/)).toBeInTheDocument();
+    expect(within(panel).getByText(/지금 파일이 이 run 의 기록과 다릅니다/)).toBeInTheDocument();
+    expect(within(panel).getByText(/stale — 지금 파일이 검토 시점과 다릅니다/)).toBeInTheDocument();
+  });
+
+  it('레코드 stale=null 은 "일치" 가 아니라 판단 불가다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ stale: null, current_basis: 'record', current_basis_reason: 'file_missing',
+      reviews: [reviewRec({ stale: null })] }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByText(/최신성 판단 불가/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/지금 파일과 일치/)).toBeNull();
+  });
+
+  it('조회 실패는 role="alert" 다', async () => {
+    const user = userEvent.setup();
+    stubApi();
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/api/review/runs/')) return Promise.reject(new Error('boom'));
+      if (/\/runs\/\d+$/.test(p)) return Promise.resolve({ id: 776, scores: [] });
+      if (p.includes('/runs')) return Promise.resolve({ runs: [runRow()], total: 1 });
+      return Promise.resolve({});
+    });
+    const panel = await openPanel(user);
+    await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent(/boom/));
+  });
+});
+
+describe('QualityGateSection — 검토 이력 서브탭 (R35)', () => {
+  it('열기 전엔 /history 를 부르지 않고, 열면 스코프대로 부른다', async () => {
+    const user = userEvent.setup();
+    stubApi({ history: { items: [
+      { id: 9, review_id: 1, run_id: 776, doc_type: 'uds', scm_id: 'hdpdm01', reviewer: 'tester', action: 'create',
+        decision: 'approved', output_sha256: SHA, created_at: '2026-09-07T01:00:00+00:00' },
+    ], total: 1 } });
+    render(<QualityGateSection analysisResult={{ matchedScm: { id: 'hdpdm01', name: 'H' } }} />);
+    await waitFor(() => expect(mockApi).toHaveBeenCalled());
+    expect(mockApi.mock.calls.some((c) => String(c[0]).includes('/api/review/history'))).toBe(false);
+    await user.click(screen.getByRole('tab', { name: '검토 이력' }));
+    await waitFor(() => expect(mockApi.mock.calls.some((c) => String(c[0]).includes('/api/review/history'))).toBe(true));
+    const call = mockApi.mock.calls.find((c) => String(c[0]).includes('/api/review/history'));
+    expect(String(call[0])).toMatch(/scm_id=hdpdm01/);
+    const panel = screen.getByRole('tabpanel', { name: '검토 이력' });
+    await waitFor(() => expect(within(panel).getByText('승인됨')).toBeInTheDocument());
+    expect(within(panel).getByText('생성')).toBeInTheDocument();
+  });
+
+  it('이력 조회 실패는 role="alert" 다', async () => {
+    const user = userEvent.setup();
+    stubApi();
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/api/review/history')) return Promise.reject(new Error('hist down'));
+      if (p.includes('/runs')) return Promise.resolve({ runs: [], total: 0 });
+      return Promise.resolve({});
+    });
+    render(<QualityGateSection />);
+    await user.click(screen.getByRole('tab', { name: '검토 이력' }));
+    const panel = screen.getByRole('tabpanel', { name: '검토 이력' });
+    await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent(/hist down/));
+  });
+});
+
+
+describe('QualityGateSection — 리뷰 반영 (R35 C1/W1/W2/W5)', () => {
+  it('run 을 갈아타면 패널이 새로 조회하고 옛 run 의 해시·version 을 보내지 않는다 (C1)', async () => {
+    const user = userEvent.setup();
+    const SHA_A = 'a'.repeat(64), SHA_B = 'c'.repeat(64);
+    let resolveRun2;
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p === '/api/review/runs/1') return Promise.resolve(reviewState({ run_id: 1, output_sha256: SHA_A, reviews: [reviewRec({ run_id: 1, version: 7, output_sha256: SHA_A })] }));
+      // #2 는 보류 — 갈아타는 **사이**에 #1 의 state 가 남아 있으면 그게 C1 이다.
+      if (p === '/api/review/runs/2') return new Promise((res) => { resolveRun2 = res; });
+      if (p.includes('/api/review/states')) return Promise.resolve({ states: {}, missing: [] });
+      if (/\/runs\/\d+$/.test(p)) return Promise.resolve({ id: Number(p.split('/').pop()), scores: [] });
+      if (p.includes('/runs')) return Promise.resolve({ runs: [runRow({ id: 1, output_sha256: SHA_A }), runRow({ id: 2, output_sha256: SHA_B })], total: 2 });
+      return Promise.resolve({});
+    });
+    mockPost.mockResolvedValue({ created: true, record: reviewRec() });
+    render(<QualityGateSection />);
+    await waitFor(() => screen.getByText('#1'));
+    const buttons = () => screen.getAllByRole('button', { name: '근거 보기' });
+    await user.click(buttons()[0]);
+    await waitFor(() => expect(screen.getByTestId('review-panel')).toHaveTextContent('run #1 검토 기록'));
+    await waitFor(() => expect(within(screen.getByTestId('review-panel')).getByRole('button', { name: '갱신' })).toBeInTheDocument());
+    // run #2 로 갈아탄다 — 패널은 #2 를 새로 받아야 하고 #1 의 폼 값이 남으면 안 된다.
+    await user.click(screen.getAllByRole('button', { name: /근거 보기|접기/ })[1]);
+    await waitFor(() => expect(screen.getByTestId('review-panel')).toHaveTextContent('run #2 검토 기록'));
+    // 응답 전: #1 의 기록 표·'갱신' 버튼·(나) 표시가 #2 제목 아래 남아 있으면 안 된다.
+    expect(within(screen.getByTestId('review-panel')).queryByRole('button', { name: '갱신' })).toBeNull();
+    expect(within(screen.getByTestId('review-panel')).queryByText(/\(나\)/)).toBeNull();
+    resolveRun2(reviewState({ run_id: 2, output_sha256: SHA_B, reviews: [] }));
+    const panel = screen.getByTestId('review-panel');
+    await waitFor(() => expect(within(panel).getByRole('button', { name: '저장' })).toBeInTheDocument());
+    expect(within(panel).getByText(/검토 기록이 없습니다/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole('radio', { name: '승인됨' }));
+    await user.click(within(panel).getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(mockPost.mock.calls[0][0]).toBe('/api/review/runs/2');
+    expect(mockPost.mock.calls[0][1]).toMatchObject({ expected_sha256: SHA_B });
+    expect(mockPost.mock.calls[0][1]).not.toHaveProperty('version');
+  });
+
+  it('서버 missing 은 "조회 중" 이 아니라 "run 을 찾을 수 없음" 이고, 응답에서 빠진 id 는 실패다 (W1)', async () => {
+    stubApi({
+      runs: [runRow({ id: 1, output_sha256: SHA }), runRow({ id: 2, output_sha256: SHA }), runRow({ id: 3, output_sha256: SHA })],
+      states: { states: { 1: reviewState({ reviews: [] }) }, missing: [2] },
+    });
+    render(<QualityGateSection />);
+    await waitFor(() => expect(cellOf(1)).toHaveTextContent('미검토'));
+    expect(cellOf(2)).toHaveTextContent('run 을 찾을 수 없음');
+    expect(cellOf(3)).toHaveTextContent('검토 상태 조회 실패');
+    expect(screen.queryByText('조회 중…')).toBeNull();
+  });
+
+  it('검토자 판정이 갈리면 열은 대표 1건이 아니라 "판정 갈림" 이다 (W2)', async () => {
+    stubApi({
+      runs: [runRow({ id: 1, output_sha256: SHA })],
+      states: { states: { 1: reviewState({ reviews: [
+        reviewRec({ id: 1, reviewer: 'old', decision: 'rejected', updated_at: '2026-09-01T00:00:00+00:00' }),
+        reviewRec({ id: 2, reviewer: 'new', decision: 'approved', updated_at: '2026-09-07T00:00:00+00:00' }),
+      ] }) }, missing: [] },
+    });
+    render(<QualityGateSection />);
+    await waitFor(() => expect(cellOf(1)).toHaveTextContent('판정 갈림 2종'));
+    expect(cellOf(1)).not.toHaveTextContent('승인됨');
+  });
+
+  it('배치 조회 실패 사유는 hover 가 아니라 role="alert" 에도 있다 (W5)', async () => {
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/api/review/states')) { const e = new Error('states down'); e.status = 500; return Promise.reject(e); }
+      if (p.includes('/runs')) return Promise.resolve({ runs: [runRow({ id: 1, output_sha256: SHA })], total: 1 });
+      return Promise.resolve({});
+    });
+    render(<QualityGateSection />);
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/states down/));
   });
 });

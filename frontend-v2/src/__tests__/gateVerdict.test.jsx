@@ -11,6 +11,8 @@ import { describe, it, expect } from 'vitest';
 import {
   verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, gateDefinitionOf, reasonTextOf,
   REASON_TEXT, TONE_COLOR, VERDICT_CODES,
+  reviewVerdictOf, reviewErrorText, reviewFreshnessOf, latestReviewOf,
+  REVIEW_DECISIONS, REVIEW_DECISION_LABEL, REVIEW_ERROR_TEXT, REVIEW_VERDICT_CODES,
 } from '../gateVerdict.js';
 
 describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
@@ -122,8 +124,12 @@ describe('판정 로직은 gateVerdict.js 한 곳에만 있다', () => {
       const src = stripComments(fs.readFileSync(file, 'utf-8'));
       expect(src).toMatch(/from\s+'\.\.\/\.\.\/gateVerdict\.js'/);
       // 로컬 정의(함수 선언·화살표 대입) 어느 형태도 안 된다.
-      expect(src).not.toMatch(/function\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf)\s*\(/);
-      expect(src).not.toMatch(/(const|let|var)\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf)\s*=/);
+      expect(src).not.toMatch(/function\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf|reviewVerdictOf|reviewErrorText|reviewFreshnessOf|reviewDecisionTone)\s*\(/);
+      expect(src).not.toMatch(/(const|let|var)\s+(verdictOf|gateLabel|metricVerdictOf|trendVerdictOf|reviewVerdictOf|reviewErrorText|reviewFreshnessOf)\s*=/);
+      // (R35) 검토 라벨·어휘도 복제 금지 — 컴포넌트에 '승인됨' 리터럴 매핑이나 decision 문자열 비교가 생기면 걸린다.
+      expect(src).not.toMatch(/approved\s*:\s*['"]승인됨/);
+      expect(src).not.toMatch(/decision\s*===\s*['"]approved['"]\s*\?/);
+      expect(src).not.toMatch(/stale\s*\?\s*['"]/);
       // 소비처는 `code` 로 분기한다 — 라벨 문자열 비교가 남으면 라벨을 고칠 때 KPI 분모가 조용히 바뀐다(리뷰 W1).
       expect(src).not.toMatch(/\.label\s*===\s*['"](PASS|FAIL|판정 불가|판정 없음|미생성)['"]/);
       // 판정식 자체의 복제 — `gate_pass === true ? 'PASS'` 류가 컴포넌트에 다시 생기면 걸린다.
@@ -148,5 +154,101 @@ describe('판정 로직은 gateVerdict.js 한 곳에만 있다', () => {
     };
     walk(SRC);
     expect(offenders).toEqual([]);
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C. (R35) 검토 기록 — 게이트와 다른 축, 같은 규약(서버 값 그대로 · null 은 통과/최신이 아니다)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHA = 'b'.repeat(64);
+const rec = (over = {}) => ({ id: 1, reviewer: 'r1', decision: 'approved', stale: false, version: 1, updated_at: '2026-09-07T01:00:00+00:00', ...over });
+
+describe('reviewVerdictOf — 검토 열 판정', () => {
+  it('해시 없는 run 은 상태와 무관하게 검토 잠금이고 사유를 title 에 싣는다', () => {
+    expect(reviewVerdictOf({ output_sha256: null }, null).code).toBe('LOCKED');
+    expect(reviewVerdictOf({ output_sha256: null }, { reviews: [rec()] }).label).toBe('검토 잠금(해시 없음)');
+    expect(reviewVerdictOf({ output_sha256: null, meta: { output_sha256_reason: 'file_missing' } }, null).title).toMatch(/file_missing/);
+    expect(reviewVerdictOf({ output_sha256: null }, null).title).toMatch(/구 run/);
+    expect(reviewVerdictOf({ output_sha256: SHA }, { hash_unavailable: true, hash_reason: 'no_path' }).title).toMatch(/no_path/);
+  });
+
+  it('상태 미조회는 조회 중, 조회 실패는 실패 — 둘 다 미검토가 아니다', () => {
+    expect(reviewVerdictOf({ output_sha256: SHA }, undefined).code).toBe('UNKNOWN');
+    expect(reviewVerdictOf({ output_sha256: SHA }, undefined, { error: 'down' })).toMatchObject({ code: 'ERROR', tone: 'danger' });
+  });
+
+  it('기록 없음은 미검토, 기록은 판정 라벨 + stale 3상태', () => {
+    expect(reviewVerdictOf({ output_sha256: SHA }, { reviews: [] })).toMatchObject({ code: 'NONE', label: '미검토' });
+    expect(reviewVerdictOf({ output_sha256: SHA }, { reviews: [rec()] })).toMatchObject({ code: 'REVIEWED', tone: 'success', label: '승인됨' });
+    expect(reviewVerdictOf({ output_sha256: SHA }, { reviews: [rec({ decision: 'rejected' })] })).toMatchObject({ tone: 'danger', label: '반려' });
+    expect(reviewVerdictOf({ output_sha256: SHA }, { reviews: [rec({ decision: 'needs_work' })] })).toMatchObject({ tone: 'warning', label: '보완 필요' });
+    expect(reviewVerdictOf({ output_sha256: SHA }, { reviews: [rec({ stale: true })] })).toMatchObject({ code: 'STALE', tone: 'warning', label: '승인됨 · stale' });
+    expect(reviewVerdictOf({ output_sha256: SHA }, { reviews: [rec({ stale: null })], current_basis_reason: 'file_missing' }))
+      .toMatchObject({ code: 'UNVERIFIED', label: '승인됨 · 최신성 판단 불가' });
+  });
+
+  it('판정이 갈리면 대표 1건으로 접지 않고 "판정 갈림" 이며, title 에 검토자 실명은 없다 (리뷰 W2/W7)', () => {
+    const st = { reviews: [rec({ id: 1, reviewer: 'old', decision: 'rejected', updated_at: '2026-09-01T00:00:00+00:00' }), rec({ id: 2, reviewer: 'new', updated_at: '2026-09-07T00:00:00+00:00' })] };
+    expect(latestReviewOf(st).reviewer).toBe('new');
+    const v = reviewVerdictOf({ output_sha256: SHA }, st);
+    expect(v).toMatchObject({ code: 'MIXED', tone: 'warning', label: '판정 갈림 2종' });
+    expect(v.title).toMatch(/반려 \/ 승인됨|승인됨 \/ 반려/);
+    expect(v.title).not.toMatch(/new|old/);
+    // 같은 판정 둘이면 갈림이 아니다 — 인원만 title 에.
+    const same = { reviews: [rec({ id: 1, reviewer: 'a' }), rec({ id: 2, reviewer: 'b', updated_at: '2026-09-08T00:00:00+00:00' })] };
+    const v2 = reviewVerdictOf({ output_sha256: SHA }, same);
+    expect(v2.label).toBe('승인됨');
+    expect(v2.title).toMatch(/검토 2명/);
+    expect(v2.title).not.toMatch(/\ba\b|\bb\b/);
+  });
+
+  it('대표 선택은 시각 파싱 기준이다 — 표기가 달라도 뒤집히지 않는다 (리뷰 I1)', () => {
+    const st = { reviews: [
+      rec({ id: 1, reviewer: 'x', updated_at: '2026-09-07T01:00:00.500000+00:00' }),
+      rec({ id: 2, reviewer: 'y', updated_at: '2026-09-07T10:00:00+09:00' }),   // = 01:00:00Z, 더 이르다
+    ] };
+    expect(latestReviewOf(st).reviewer).toBe('x');
+    expect(latestReviewOf({ reviews: [rec({ id: 1, updated_at: null }), rec({ id: 2, updated_at: null })] }).id).toBe(2);
+  });
+
+  it('서버 missing 은 별도 코드이고 batch_budget 사유는 다시 재는 길을 말한다 (리뷰 W1/C2)', () => {
+    expect(reviewVerdictOf({ output_sha256: SHA }, undefined, { missing: true })).toMatchObject({ code: 'MISSING', tone: 'danger' });
+    const v = reviewVerdictOf({ output_sha256: SHA }, { reviews: [rec({ stale: null })], current_basis_reason: 'batch_budget' });
+    expect(v.code).toBe('UNVERIFIED');
+    expect(v.title).toMatch(/근거 보기/);
+  });
+
+  it('코드 집합이 고정돼 있다', () => {
+    expect(REVIEW_VERDICT_CODES).toEqual(['LOCKED', 'ERROR', 'MISSING', 'UNKNOWN', 'NONE', 'MIXED', 'STALE', 'UNVERIFIED', 'REVIEWED']);
+    expect(REVIEW_DECISIONS).toEqual(['approved', 'rejected', 'needs_work']);
+    for (const d of REVIEW_DECISIONS) expect(REVIEW_DECISION_LABEL[d]).toBeTruthy();
+  });
+});
+
+describe('reviewFreshnessOf / reviewErrorText', () => {
+  it('stale 3상태를 접지 않는다', () => {
+    expect(reviewFreshnessOf({ stale: true }).code).toBe('STALE');
+    expect(reviewFreshnessOf({ stale: false }).code).toBe('FRESH');
+    expect(reviewFreshnessOf({ stale: null }).code).toBe('UNVERIFIED');
+    expect(reviewFreshnessOf({}).code).toBe('UNVERIFIED');
+  });
+
+  it('코드가 있으면 그 문장, 403/401 은 코드 없이도 권한/로그인 문장, 나머지는 서버 message', () => {
+    for (const [code, text] of Object.entries(REVIEW_ERROR_TEXT)) {
+      expect(reviewErrorText({ code, status: 409 })).toBe(text);
+    }
+    expect(reviewErrorText({ status: 403, code: 'HTTP_403' })).toBe(REVIEW_ERROR_TEXT.ADMIN_REQUIRED);
+    expect(reviewErrorText({ status: 401, code: 'HTTP_401' })).toBe(REVIEW_ERROR_TEXT.AUTH_REQUIRED);
+    expect(reviewErrorText({ status: 500, code: 'INTERNAL_ERROR', message: 'kaboom' })).toMatch(/kaboom/);
+  });
+
+  it('검토 어휘는 서버 DECISIONS 와 lockstep 이다 (workflow/quality/review.py)', () => {
+    const py = fs.readFileSync(path.resolve(process.cwd(), '..', 'workflow', 'quality', 'review.py'), 'utf-8');
+    const m = py.match(/^DECISIONS\s*=\s*\(([^)]*)\)/m);
+    expect(m).not.toBeNull();
+    const server = [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+    expect([...REVIEW_DECISIONS]).toEqual(server);
   });
 });

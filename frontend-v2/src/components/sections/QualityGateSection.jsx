@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { api, post } from '../../api.js';
+import { api, post, getUsername } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
-import { verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR } from '../../gateVerdict.js';
+import {
+  verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR,
+  reviewVerdictOf, reviewErrorText, reviewFreshnessOf, reviewDecisionTone, REVIEW_DECISIONS, REVIEW_DECISION_LABEL,
+} from '../../gateVerdict.js';
 
 /**
  * QualityGateSection — 품질 게이트 **세부**. 이력 · 추세 · 정책.
@@ -43,6 +46,8 @@ const SUBS = [
   { id: 'runs', label: '실행 이력' },
   { id: 'trend', label: '점수 추세' },
   { id: 'policy', label: '정책값' },
+  // (R35 C-3) 검토 기록 감사 이력 — `/api/review/history`. 챗 승인 감사와 별개다.
+  { id: 'reviews', label: '검토 이력' },
 ];
 const VALID_SUB = new Set(SUBS.map((s) => s.id));
 
@@ -147,6 +152,171 @@ function TrendChart({ data }) {
   );
 }
 
+/**
+ * (R35 C-3) 검토 기록 패널 — run 하나. 어휘는 '검토 기록'('승인' 은 실행을 뜻하지 않는다, S14).
+ *
+ * - 판정·라벨·오류 문구는 `gateVerdict.js` 한 곳(복제 금지 가드가 잰다).
+ * - 해시 없는 run 은 **검토 잠금** — 폼을 그리지 않는다(S6). 빈칸이 아니라 잠금 사유를 적는다.
+ * - `expected_sha256` 은 서버가 준 run 해시를 **그대로** 되돌려 보낸다(프론트 계산 0). 갱신은 내 기록의 `version`.
+ * - 성공 토스트는 **2xx 뒤에만**. 409 `STALE`/`VERSION_CONFLICT` 는 상태를 다시 받는다.
+ * - `can_review` 는 서버 값 — admin 1명 = 단독 검토임을 문구로 밝힌다(§8 #8).
+ */
+function ReviewPanel({ runId, onSaved }) {
+  const toast = useToast();
+  const [state, setState] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [decision, setDecision] = useState('');
+  const [comment, setComment] = useState('');
+  const [saving, setSaving] = useState(false);
+  const seq = useRef(0);
+  const me = getUsername();
+
+  const load = useCallback(async () => {
+    const my = ++seq.current;
+    setBusy(true); setErr('');
+    try {
+      const d = await api(`/api/review/runs/${runId}`);
+      if (my !== seq.current) return;
+      if (d?.error) throw new Error(String(d.error));   // 200+error 방어(계약상 없다)
+      setState(d);
+      const mine = (d.reviews || []).find((r) => r.reviewer === me);
+      setDecision(mine?.decision || '');
+      setComment(mine?.comment || '');
+    } catch (e) {
+      if (my !== seq.current) return;
+      setState(null);
+      setErr(e?.status === 403 ? '권한이 없어 검토 기록을 볼 수 없습니다.' : `검토 기록을 불러오지 못했습니다: ${e?.message || e}`);
+    } finally {
+      if (my === seq.current) setBusy(false);
+    }
+  }, [runId, me]);
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- run 이 바뀔 때 조회 (콜백 첫 줄의 로딩 플래그 setState)
+  useEffect(() => { load(); }, [load]);
+
+  const mine = state ? (state.reviews || []).find((r) => r.reviewer === me) : null;
+
+  const save = async () => {
+    if (!state || !decision) return;
+    setSaving(true);
+    try {
+      const body = { decision, comment: comment.trim() ? comment : null, expected_sha256: state.output_sha256 };
+      if (mine) body.version = mine.version;
+      const d = await post(`/api/review/runs/${runId}`, body);
+      if (d?.error) throw new Error(String(d.error));
+      toast('success', d?.created ? '검토 기록을 저장했습니다.' : '검토 기록을 갱신했습니다.');
+      await load();
+      if (onSaved) onSaved();
+    } catch (e) {
+      toast('error', reviewErrorText(e));
+      // 산출물이 바뀌었거나 남이 먼저 저장했다 — 지금 값을 다시 받아야 다음 저장이 뜻을 갖는다.
+      if (e?.code === 'STALE' || e?.code === 'VERSION_CONFLICT') await load();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="panel" style={{ marginTop: 'var(--sp-3)' }} data-testid="review-panel">
+      <h3 style={{ marginTop: 0 }}>run #{runId} 검토 기록</h3>
+      {busy && <div>불러오는 중…</div>}
+      {err && <div role="alert" style={{ color: 'var(--color-danger)', fontSize: 'var(--text-sm)' }}>{err}</div>}
+      {state && (
+        <>
+          {state.hash_unavailable ? (
+            <p role="status" style={{ fontSize: 'var(--text-sm)' }}>
+              <StatusBadge tone="neutral">검토 잠금</StatusBadge>{' '}
+              산출물 해시가 없어 무엇을 검토했는지 고정할 수 없습니다 — 기록을 받지 않습니다.
+              {' '}사유: {state.hash_reason
+                ? <code>{state.hash_reason}</code>
+                : <span>미기록 (해시 기록 이전의 구 run)</span>}
+              . 문서를 다시 생성하면 새 run 에 해시가 남습니다.
+            </p>
+          ) : (
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              산출물 해시 <code>{String(state.output_sha256).slice(0, 12)}…</code>
+              {' · '}
+              {state.stale === true && <strong style={{ color: 'var(--color-warning)' }}>⚠ 지금 파일이 이 run 의 기록과 다릅니다 — 검토는 기록된 산출물에 붙습니다.</strong>}
+              {state.stale === false && '지금 파일과 일치'}
+              {state.stale == null && `파일 기준 판단 불가${state.current_basis_reason ? ` (${state.current_basis_reason})` : ''}`}
+            </p>
+          )}
+          {state.superseded_by && (
+            <p role="status" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              더 새로운 run <strong>#{state.superseded_by.run_id}</strong>
+              {state.superseded_by.created_at ? ` (${fmtWhen(state.superseded_by.created_at)})` : ''} 이 같은 프로젝트·문서에 있습니다 —
+              이 검토는 그 run 을 대상으로 하지 않습니다.
+            </p>
+          )}
+          {state.gated_metric_count == null && (
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              ⚠ 검사 규모 미기록 run 입니다 — 검토는 허용되지만 몇 개 항목을 검사했는지는 복원할 수 없습니다.
+            </p>
+          )}
+
+          {(state.reviews || []).length > 0 ? (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="board-table">
+                <thead><tr><th>검토자</th><th>판정</th><th>사유</th><th>최신성</th><th>갱신</th></tr></thead>
+                <tbody>
+                  {state.reviews.map((r) => {
+                    const f = reviewFreshnessOf(r);
+                    return (
+                      <tr key={r.id}>
+                        <td>{r.reviewer}{r.reviewer === me ? ' (나)' : ''}</td>
+                        <td><StatusBadge tone={reviewDecisionTone(r.decision)}>{REVIEW_DECISION_LABEL[r.decision] || r.decision}</StatusBadge></td>
+                        <td style={{ whiteSpace: 'pre-wrap', fontSize: 'var(--text-xs)' }}>{r.comment || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                        <td><StatusBadge tone={f.tone}>{f.label}</StatusBadge></td>
+                        <td style={{ fontSize: 'var(--text-xs)' }}>{fmtWhen(r.updated_at)} · v{r.version}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>검토 기록이 없습니다(미검토).</p>
+          )}
+
+          {!state.hash_unavailable && state.can_review === true && (
+            <form onSubmit={(e) => { e.preventDefault(); save(); }} style={{ marginTop: 'var(--sp-3)' }} aria-label="검토 기록 입력">
+              <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+                <legend style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>{mine ? '내 검토 갱신' : '검토 기록'}</legend>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', margin: '6px 0' }}>
+                  {REVIEW_DECISIONS.map((d) => (
+                    <label key={d} style={{ fontSize: 'var(--text-sm)' }}>
+                      <input type="radio" name={`review-decision-${runId}`} value={d}
+                        checked={decision === d} onChange={() => setDecision(d)} />{' '}
+                      {REVIEW_DECISION_LABEL[d]}
+                    </label>
+                  ))}
+                </div>
+                <textarea aria-label="검토 사유" value={comment} maxLength={2000} rows={3}
+                  onChange={(e) => setComment(e.target.value)}
+                  placeholder="사유(선택, 2000자 이내)" style={{ width: '100%', boxSizing: 'border-box' }} />
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                  <button type="submit" className="btn-primary btn-sm" disabled={saving || !decision}>
+                    {saving ? '저장 중…' : (mine ? '갱신' : '저장')}
+                  </button>
+                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                    JWT 로그인한 admin 만 기록합니다(현재 admin 은 단독 검토입니다). 검토는 게이트 판정을 바꾸지 않습니다.
+                  </span>
+                </div>
+              </fieldset>
+            </form>
+          )}
+          {!state.hash_unavailable && state.can_review !== true && (
+            <p role="status" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-2)' }}>
+              검토 기록은 admin 만 남길 수 있습니다 — 조회는 로그인 사용자 누구나 됩니다.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function QualityGateSection({ analysisResult, onSubChange, initialSub }) {
   const toast = useToast();
 
@@ -206,6 +376,14 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
   const [trendErr, setTrendErr] = useState('');
   const [policy, setPolicy] = useState(null);
   const [policyErr, setPolicyErr] = useState('');
+  // (R35) 목록 '검토' 열 — 해시 있는 run 만 배치 조회한다(해시 없는 run 은 목록 값만으로 '검토 잠금').
+  const [reviewStates, setReviewStates] = useState({});
+  // 서버가 "없다" 고 답한 id(리뷰 W1) — '조회 중' 으로 남기지 않는다. `done` 은 배치가 끝났다는 사실.
+  const [reviewMissing, setReviewMissing] = useState(() => new Set());
+  const [reviewDone, setReviewDone] = useState(false);
+  const [reviewStatesErr, setReviewStatesErr] = useState('');
+  const [reviewHistory, setReviewHistory] = useState(null);
+  const [historyErr, setHistoryErr] = useState('');
   const loadSeq = useRef(0);
 
   const scopeQuery = useCallback((extra = {}) => {
@@ -228,8 +406,25 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
       if (seq !== loadSeq.current) return;
       // quality 모듈 부재는 200 + {error} — 안 보면 "이력 0건" 과 "조회 실패" 가 같아 보인다.
       if (d?.error) throw new Error(String(d.error));
-      setRuns(Array.isArray(d?.runs) ? d.runs : []);
+      const list = Array.isArray(d?.runs) ? d.runs : [];
+      setRuns(list);
       setTotal(Number(d?.total) || 0);
+      // 검토 열 — 목록과 같은 세대(seq)로 묶는다. 실패는 열에 '조회 실패' 로 드러낸다(빈칸 금지).
+      const ids = list.filter((r) => r?.output_sha256 != null).map((r) => r.id);
+      setReviewStates({}); setReviewMissing(new Set()); setReviewDone(false); setReviewStatesErr('');
+      if (ids.length) {
+        try {
+          const st = await api(`/api/review/states?run_ids=${ids.join(',')}`);
+          if (seq !== loadSeq.current) return;
+          if (st?.error) throw new Error(String(st.error));
+          setReviewStates(st?.states || {});
+          setReviewMissing(new Set((Array.isArray(st?.missing) ? st.missing : []).map(String)));
+          setReviewDone(true);
+        } catch (e) {
+          if (seq !== loadSeq.current) return;
+          setReviewStatesErr(describeError(e, '검토 상태를 불러오지 못했습니다'));
+        }
+      }
     } catch (e) {
       if (seq !== loadSeq.current) return;
       setRuns([]); setTotal(0);
@@ -285,6 +480,22 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
   // eslint-disable-next-line react-hooks/set-state-in-effect -- 정책 서브탭 첫 방문 시 1회 조회
   useEffect(() => { if (mounted.has('policy') && !policy && !policyErr) loadPolicy(); },
     [mounted, policy, policyErr, loadPolicy]);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryErr('');
+    try {
+      const d = await api(`/api/review/history?${scopeQuery({ limit: '50' })}`);
+      if (d?.error) throw new Error(String(d.error));
+      setReviewHistory(d);
+    } catch (e) {
+      setReviewHistory(null);
+      setHistoryErr(describeError(e, '검토 이력을 불러오지 못했습니다'));
+    }
+  }, [scopeQuery]);
+
+  // 검토 이력 서브탭을 **연 뒤에만** 조회한다(lazy) — 스코프(프로젝트/문서)가 바뀌면 다시.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- lazy 조회 (콜백 첫 줄의 에러 초기화 setState)
+  useEffect(() => { if (mounted.has('reviews')) loadHistory(); }, [mounted, loadHistory]);
 
   const advise = useCallback(async (runId) => {
     try {
@@ -356,6 +567,12 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
             </div>
           )}
 
+          {!runsErr && reviewStatesErr && (
+            <div role="alert" style={{ color: 'var(--color-danger)', fontSize: 'var(--text-xs)', marginBottom: 'var(--sp-2)' }}>
+              검토 열: {reviewStatesErr}
+            </div>
+          )}
+
           {!runsErr && verdictNote && verdictNote.withVerdict < verdictNote.shown && (
             <div role="status" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 'var(--sp-2)' }}>
               표시된 {verdictNote.shown}건 중 {verdictNote.shown - verdictNote.withVerdict}건은
@@ -371,7 +588,7 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                   {!scmId && <th>프로젝트</th>}
                   <th>생성 시각</th>
                   <th style={{ textAlign: 'right' }}>점수</th>
-                  <th>게이트</th><th aria-label="작업" />
+                  <th>게이트</th><th>검토</th><th aria-label="작업" />
                 </tr>
               </thead>
               <tbody>
@@ -391,6 +608,19 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                         {r?.summary ? Number(r.summary.overall_score).toFixed(1) : '—'}
                       </td>
                       <td><StatusBadge tone={g.tone}>{g.label}</StatusBadge></td>
+                      <td data-testid={`review-cell-${r.id}`}>
+                        {(() => {
+                          const id = String(r.id);
+                          const hashed = r?.output_sha256 != null;
+                          // 배치가 끝났는데 states 에도 missing 에도 없으면 계약 위반이다 — '조회 중' 이 아니라 실패로.
+                          const absent = hashed && reviewDone && !reviewStates[id] && !reviewMissing.has(id);
+                          const rv = reviewVerdictOf(r, reviewStates[id], {
+                            error: hashed && reviewStatesErr ? reviewStatesErr : (absent ? '배치 응답에 이 run 이 없습니다' : null),
+                            missing: hashed && reviewMissing.has(id),
+                          });
+                          return <StatusBadge tone={rv.tone} title={rv.title}>{rv.label}</StatusBadge>;
+                        })()}
+                      </td>
                       <td>
                         <button type="button" className="btn-secondary btn-sm"
                           onClick={() => openRun(r.id)} aria-expanded={openId === r.id}>
@@ -402,7 +632,7 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                 })}
                 {!runs.length && !runsBusy && !runsErr && (
                   <tr>
-                    <td colSpan={scmId ? 6 : 7} style={{ color: 'var(--text-muted)' }}>
+                    <td colSpan={scmId ? 7 : 8} style={{ color: 'var(--text-muted)' }}>
                       이력이 없습니다.
                     </td>
                   </tr>
@@ -470,6 +700,8 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
               )}
             </div>
           )}
+          {/* key 로 remount — run 을 갈아탈 때 옛 state·해시·version 이 새 run 의 POST 에 실리지 않게(리뷰 C1). */}
+          {openId != null && <ReviewPanel key={openId} runId={openId} onSaved={loadRuns} />}
         </div>
 
         {/* ── 점수 추세 ── */}
@@ -531,6 +763,49 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── 검토 이력 (R35) ── */}
+        <div role="tabpanel" id="qgate-panel-reviews" aria-labelledby="qgate-tab-reviews"
+          tabIndex={sub === 'reviews' ? 0 : -1}
+          style={{ display: sub === 'reviews' ? 'block' : 'none' }}>
+          {mounted.has('reviews') && (
+            <div style={{ marginTop: 'var(--sp-3)' }}>
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                검토 기록의 <strong>감사 이력</strong>입니다(생성·갱신 한 줄씩, 최신순). 검토는 게이트 판정을 바꾸지 않습니다.
+                {reviewHistory ? ` 총 ${reviewHistory.total}건 중 ${(reviewHistory.items || []).length}건 표시.` : ''}
+              </p>
+              {historyErr && (
+                <div role="alert" style={{ color: 'var(--color-danger)', fontSize: 'var(--text-sm)' }}>{historyErr}</div>
+              )}
+              {reviewHistory && (
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="board-table">
+                    <thead>
+                      <tr><th>시각</th><th>run</th><th>문서</th>{!scmId && <th>프로젝트</th>}<th>검토자</th><th>동작</th><th>판정</th><th>해시</th></tr>
+                    </thead>
+                    <tbody>
+                      {(reviewHistory.items || []).map((h) => (
+                        <tr key={h.id}>
+                          <td style={{ fontSize: 'var(--text-xs)' }}>{fmtWhen(h.created_at)}</td>
+                          <td>#{h.run_id}</td>
+                          <td>{h.doc_type}</td>
+                          {!scmId && <td style={{ fontSize: 'var(--text-xs)' }}>{h.scm_id || <span style={{ color: 'var(--text-muted)' }}>미상</span>}</td>}
+                          <td>{h.reviewer}</td>
+                          <td>{h.action === 'create' ? '생성' : h.action === 'update' ? '갱신' : h.action}</td>
+                          <td>{REVIEW_DECISION_LABEL[h.decision] || h.decision}</td>
+                          <td><code style={{ fontSize: 'var(--text-xs)' }}>{String(h.output_sha256 || '').slice(0, 12)}</code></td>
+                        </tr>
+                      ))}
+                      {!(reviewHistory.items || []).length && (
+                        <tr><td colSpan={scmId ? 7 : 8} style={{ color: 'var(--text-muted)' }}>검토 이력이 없습니다.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </div>
