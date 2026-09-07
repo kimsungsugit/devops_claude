@@ -85,6 +85,9 @@ HEAVY_CALLS = frozenset({
     #   (backend/helpers/common.py:401). 즉 워커 스레드에서 돌아도 이벤트 루프는
     #   timeout_seconds 만큼 그대로 막힌다. "스레드에서 돈다 ≠ 호출자가 안 막힌다".
     "_run_report_with_timeout",
+    # (R33 C-1) 품질 기록이 산출물 **전체를 읽어 해시**한다(UDS docx 46MB, UNC 면 hang) — 단일 관문
+    #   `_record_uds_run` 을 async 핸들러 본문에서 직접 부르면 그동안 루프가 선다.
+    "_record_uds_run",
 })
 
 # 블로킹을 스레드로 넘기는 정당한 수단. 이 안에 들어 있으면 통과다.

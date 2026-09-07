@@ -46,6 +46,13 @@ class GenerationRun(QualityBase):
     elapsed_sec: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     output_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     output_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # (R33 C-1) 산출물 **바이트**의 SHA-256(hex 64). 검토 기록(R34~)이 "어느 바이트에 대한
+    # 판정인가" 를 여기에 고정한다. 실측(2026-09-07): `output_path` 가 있는 43 run 중 18 run 은
+    # 기록된 `output_size_bytes` 와 지금 그 경로의 파일 크기가 **다르다**(`SITS_gate.xlsm` 한
+    # 경로를 21 run 이 돌려썼다) — 경로는 run 을 식별하지 못한다. NULL = 해시 미기록(구 run,
+    # 파일 부재, BytesIO 응답이라 경로가 없는 run) 이지 "빈 산출물" 이 아니다.
+    # ⚠ 컬럼 추가는 `db.py::_COLUMN_ADDITIONS` 한 줄과 한 세트다.
+    output_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     ai_model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     error_msg: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     meta_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON

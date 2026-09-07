@@ -49,6 +49,27 @@ def _default_db_path() -> Path:
         return Path("reports") / _QUALITY_DB_FILENAME
 
 
+# 커넥션마다 거는 PRAGMA. 엔진 리스너 안의 클로저가 아니라 모듈 함수인 이유: 테스트가
+# **드라이버 기본값을 끈 커넥션**(`sqlite3.connect(timeout=0)`)에 직접 적용해 효과를 잴 수 있어야
+# 한다(R33 리뷰 W1 — 리스너 클로저는 재지 못해 뮤턴트가 살아남았다).
+BUSY_TIMEOUT_MS = 5000
+
+
+def _apply_sqlite_pragmas(dbapi_conn) -> None:
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    # (R33 C-1, 계획 S10) 같은 DB 에 쓰는 호출처가 8곳(swut/swit/swsa/swreport 라우터 + sts/suts/sits
+    # 생성기 + record_uds_run)이다. ⚠ 계획서의 "busy_timeout 없음" 은 **오진**이었다 — 실측(2026-09-07):
+    # Python `sqlite3.connect()` 기본 `timeout=5.0` 이 이미 5초 busy handler 를 걸어 실효값은 원래
+    # 5000 이었고, 이 줄을 지운 뮤턴트가 살아남았다. 그래도 선언한다: 드라이버 기본값에 기대면
+    # `connect_args={"timeout": 0}` 같은 뒷날의 변경이 잠금 대기를 조용히 0 으로 되돌린다 — `connect`
+    # 리스너는 그 뒤에 발화하므로 여기서 다시 5초로 올린다(실측: timeout=0 커넥션 → 0 → 이 줄 → 5000).
+    # 선례 `backend/services/chat_history_db.py`(R2).
+    cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    cursor.close()
+
+
 def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
     """SQLAlchemy 엔진 반환 (db_path 별 캐시, thread-safe)."""
     key = _resolve_key(db_path)
@@ -64,10 +85,7 @@ def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
 
         @event.listens_for(engine, "connect")
         def _set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
+            _apply_sqlite_pragmas(dbapi_conn)
 
         _engines[key] = engine
         # force_new 로 엔진을 갈면 기존 세션팩토리도 무효화.
@@ -98,6 +116,8 @@ def get_session_factory(db_path: Optional[Path] = None):
 # (table, column, DDL 타입, 인덱스명|None)
 _COLUMN_ADDITIONS = (
     ("generation_runs", "scm_id", "VARCHAR(64)", "ix_gen_run_scm"),
+    # (R33 C-1) 산출물 바이트 해시 — models.py `GenerationRun.output_sha256` 과 한 세트.
+    ("generation_runs", "output_sha256", "VARCHAR(64)", None),
 )
 
 

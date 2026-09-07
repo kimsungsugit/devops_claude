@@ -1259,7 +1259,9 @@ async def local_uds_generate(
             # 품질" 을 물을 수단이 없었다.
             # 기록은 `_record_uds_run` 단일 관문(helpers/uds.py) — 다섯 호출부가 각자
             # 채우면 경로마다 다른 열이 비어 "어느 경로로 만들었나" 가 섞인다.
-            _record_uds_run(
+            # (R33) 기록이 산출물 전체를 읽어 해시한다(46MB docx) — 루프 밖으로.
+            await _run_blocking(
+                _record_uds_run,
                 quality_evaluation,
                 source_root=source_root, out_path=out_path, t0=_t0,
                 ai_used=bool(ai_enable),
@@ -1370,7 +1372,9 @@ async def local_uds_generate(
     # Quality DB recording (non-fatal)
     try:
         # doc_only 경로와 같은 어휘(source_root) — recorder 가 scm_id 를 해결한다.
-        _record_uds_run(
+        # (R33) 기록이 산출물 전체를 읽어 해시한다(46MB docx) — 루프 밖으로.
+        await _run_blocking(
+            _record_uds_run,
             quality_evaluation,
             source_root=source_root, out_path=out_path, t0=_t0,
             ai_used=bool(ai_enable),

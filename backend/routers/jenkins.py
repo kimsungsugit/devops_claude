@@ -2720,7 +2720,9 @@ async def jenkins_uds_generate(
         _enrich_function_quality_fields(uds_payload)
         # 기록은 `_record_uds_run` 단일 관문(helpers/uds.py) — 인자 구성도 산출물
         # 충실도도 거기 한 곳에만 둔다.
-        _record_uds_run(
+        # (R33) 기록이 산출물 전체를 읽어 해시한다(46MB docx) — 루프 밖으로.
+        await _run_blocking(
+            _record_uds_run,
             _compute_quick_quality_gate(uds_payload),
             # ⚠ `ai_used=False` 는 의도다 — **이 경로에는 AI 섹션 생성 단계가 없다**
             #   (generate-async 와 달리 `generate_uds_ai_sections` 호출부가 없음).

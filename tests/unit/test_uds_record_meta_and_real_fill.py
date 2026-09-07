@@ -107,14 +107,29 @@ _RECORD_SITES = {
 }
 
 
+# 블로킹 함수를 스레드로 넘기는 수단 — `test_router_event_loop_blocking.OFFLOADERS` 와 같은 집합.
+# (R33) 관문이 산출물 전체를 읽어 해시하므로 async 핸들러는 `await _run_blocking(_record_uds_run, ...)`
+# 로 부른다. 그 형태도 "관문을 지난 것" 이다 — 첫 인자로 넘긴 함수 이름을 관문 호출로 센다.
+_OFFLOADERS = frozenset({"_run_blocking", "run_blocking", "to_thread", "run_in_threadpool", "run_in_executor"})
+
+
 def _calls_named(rel, name):
-    """`rel` 안의 `name(...)` 호출 노드들. 이름은 **정확히** 일치해야 한다 —
-    `endswith` 로 보면 `_record_uds_run` 이 `record_uds_run` 에도 걸려 두 계층이 섞인다."""
+    """`rel` 안의 `name(...)` 호출 노드들 + `offloader(name, ...)` 로 넘긴 노드들.
+
+    이름은 **정확히** 일치해야 한다 — `endswith` 로 보면 `_record_uds_run` 이 `record_uds_run`
+    에도 걸려 두 계층이 섞인다. 오프로딩 형태의 키워드는 그대로 관문의 이름 인자이므로 같은 검사를 받는다.
+    """
     tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
-    return [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
-    ]
+    out = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        fname = n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+        if fname == name:
+            out.append(n)
+        elif fname in _OFFLOADERS and n.args and isinstance(n.args[0], ast.Name) and n.args[0].id == name:
+            out.append(n)
+    return out
 
 
 @pytest.mark.parametrize("rel,expected", sorted(_RECORD_SITES.items()))

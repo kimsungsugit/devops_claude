@@ -1,6 +1,7 @@
 """Record generation runs and quality scores to the Quality DB."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -12,10 +13,10 @@ from workflow.quality.evaluator import (
     compute_overall_score,
     evaluate_comprehensive_result,
     evaluate_coverage,
-    evaluate_swit_coverage,
     evaluate_sits,
     evaluate_sts,
     evaluate_suts,
+    evaluate_swit_coverage,
     evaluate_swreport,
     evaluate_swsa,
     evaluate_test_result,
@@ -36,12 +37,22 @@ def record_run(
     status: str = "success",
     elapsed_sec: Optional[float] = None,
     output_path: Optional[str] = None,
+    output_sha256: Optional[str] = None,
+    output_size_bytes: Optional[int] = None,
     ai_model: Optional[str] = None,
     error_msg: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """생성 실행 1회를 Quality DB에 기록.
+
+    ``output_sha256`` (R33 C-1): 산출물 바이트의 SHA-256 hex. 명시하면 그 값을 쓰고(BytesIO 응답
+    빌더는 경로가 없으니 `sha256_hex(buf.getvalue())` 로 넘긴다 — C-4), 없으면 ``output_path``
+    파일을 읽어 계산한다. 둘 다 없으면 NULL(미기록). 이 값이 검토 기록(R34~)의 대상 고정에 쓰인다.
+    ``output_size_bytes``: 명시 해시와 **같은 바이트**의 길이(`len(buf.getvalue())`). 명시 해시가 있으면
+    크기는 파일에서 재지 않는다 — 한 행의 크기와 해시가 다른 바이트를 가리키면 안 된다(R33 리뷰 W2).
+    해시를 못 기록한 사유는 `meta.output_sha256_reason` 에 남는다(`no_path`·`file_missing`·`not_a_file`·
+    `unreadable`·`invalid_arg`) — NULL 네 갈래를 한 값으로 접지 않는다(W5).
 
     Returns:
         run_id (성공 시), -1 (실패 시 -- 예외 전파하지 않음)
@@ -92,7 +103,9 @@ def record_run(
             project_root=project_root, scm_id=scm_id,
             target_function=target_function,
             status=status, elapsed_sec=elapsed_sec,
-            output_path=output_path, ai_model=ai_model,
+            output_path=output_path, output_sha256=output_sha256,
+            output_size_bytes=output_size_bytes,
+            ai_model=ai_model,
             error_msg=error_msg, meta=meta, db_path=db_path,
         )
     except Exception:
@@ -166,6 +179,107 @@ def record_test_result_run(
         },
         **kwargs,
     )
+
+
+_SHA256_HEX_LEN = 64
+
+
+def sha256_hex(data: bytes) -> str:
+    """바이트열의 SHA-256 hex(64자) — BytesIO 응답 빌더가 `record_run(output_sha256=)` 에 넘길 값."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hash_and_size_of_file(path: "str | Path") -> "tuple[str, int]":
+    """파일 바이트의 (SHA-256 hex, 길이) — **한 번 읽으며** 둘 다 잰다. 1MiB 청크(UDS docx 46MB).
+
+    크기를 `stat` 으로 따로 재면 그 사이 파일이 갈릴 때 한 행의 크기와 해시가 다른 세대를 가리킨다
+    (R33 리뷰 X1-B TOCTOU). 파일이 없거나 못 읽으면 예외를 **그대로** 올린다 — 호출부가 사유를 정한다.
+    """
+    h = hashlib.sha256()
+    n = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+            n += len(chunk)
+    return h.hexdigest(), n
+
+
+def sha256_of_file(path: "str | Path") -> str:
+    """파일 바이트의 SHA-256 hex(검토 기록의 stale 재검증이 쓸 공개 함수)."""
+    return _hash_and_size_of_file(path)[0]
+
+
+def resolve_output_path(output_path: Any) -> Path:
+    """`output_path` 를 **저장소 루트 기준**으로 앵커링한다(상대 경로 → 절대).
+
+    라이브 DB 실측(2026-09-07): 상대 경로 행이 실재한다(`reports\\_gen_check\\SUTS_check.xlsm` 등). 앵커 없이
+    `Path(p)` 를 열면 백엔드 기동(CWD)과 스크립트 실행이 **다른 파일**을 해시한다 — `db._default_db_path`
+    가 같은 함정으로 read/write DB 가 갈렸던 자리다. 기록·재검증(R34)이 이 한 함수를 같이 쓴다.
+    저장되는 `output_path` 문자열은 손대지 않는다(원본 증거).
+    """
+    p = Path(str(output_path))
+    if p.is_absolute():
+        return p
+    try:
+        import config
+        root = Path(config.__file__).resolve().parent
+    except Exception:  # config 를 못 찾는 실행(도구 단독) — CWD 폴백을 **명시**
+        _logger.warning("저장소 루트를 못 찾아 상대 output_path 를 CWD 기준으로 앵커링한다: %s", p)
+        root = Path.cwd()
+    return root / p
+
+
+def _normalize_sha256(value: Any) -> Optional[str]:
+    """명시 해시 인자 검증: 64자 hex 만 받고 나머지는 None(+경고).
+
+    잘못된 값을 그대로 저장하면 검토 기록의 `expected_sha256` 비교가 영원히 STALE 이 된다.
+    """
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if len(s) == _SHA256_HEX_LEN and all(c in "0123456789abcdef" for c in s):
+        return s
+    _logger.warning("output_sha256 인자가 SHA-256 hex 가 아니다 — 미기록(NULL)으로 둔다: %r", value)
+    return None
+
+
+def _measure_output(
+    output_path: Any, output_sha256: Any, output_size_bytes: Any = None,
+) -> "tuple[Optional[int], Optional[str], Optional[str]]":
+    """(크기, 해시, 해시 없음 사유). 실패는 NULL + 사유 + 경고 — 어떤 예외도 기록을 버리게 하지 않는다.
+
+    - 명시 해시가 있으면 크기도 **명시 값**(같은 바이트)만 쓴다. 파일은 열지 않는다(W2).
+    - 명시 해시가 없으면 경로 파일을 한 번 읽어 크기·해시를 같이 잰다.
+    - NULL 은 "해시 없음" 이지 "빈 산출물" 이 아니다. 사유 어휘: `no_path`(경로 없음 — BytesIO 라우터,
+      C-4 전) · `file_missing` · `not_a_file`(디렉터리 등) · `unreadable`(권한·인코딩·NUL 경로 등 그 외 전부)
+      · `invalid_arg`(명시 해시가 hex 아님). 리더(R34)는 사유와 무관하게 NULL 을 `hash_unavailable` 로
+      잠그되 화면엔 사유를 그대로 낸다.
+
+    ⚠ (R33 리뷰 C1) 좁힌 `except OSError` 는 NUL 바이트 경로의 `ValueError` 를 밖으로 흘려 `record_run` 의
+    `return -1`(기록 통째 유실)로 갔다. 여기서는 **어떤 예외든** 사유로 접는다 — 이 함수의 실패는 품질
+    기록을 버릴 이유가 아니다.
+    """
+    explicit = _normalize_sha256(output_sha256)
+    if output_sha256 is not None and explicit is None:
+        return None, None, "invalid_arg"
+    if explicit is not None:
+        size = int(output_size_bytes) if isinstance(output_size_bytes, int) and output_size_bytes >= 0 else None
+        return size, explicit, None
+    if not output_path:
+        return None, None, "no_path"
+    try:
+        p = resolve_output_path(output_path)
+        if not p.exists():
+            _logger.warning("output_path 가 없다(%s) — 해시 미기록(NULL)", p)
+            return None, None, "file_missing"
+        if not p.is_file():
+            _logger.warning("output_path 가 파일이 아니다(%s) — 크기·해시 미기록(NULL)", p)
+            return None, None, "not_a_file"
+        sha, size = _hash_and_size_of_file(p)
+        return size, sha, None
+    except Exception as exc:
+        _logger.warning("output_path 를 못 읽었다(%r) — 해시 미기록(NULL): %s", output_path, exc)
+        return None, None, "unreadable"
 
 
 def _record_run_impl(
@@ -274,13 +388,13 @@ def _record_run_impl(
 
     # 2. DB 기록
     with get_session(db_path) as session:
-        # output_size 계산
-        output_size = None
-        if kwargs.get("output_path"):
-            try:
-                output_size = Path(kwargs["output_path"]).stat().st_size
-            except Exception:
-                pass
+        # output_size · output_sha256 계산 (R33 C-1: 해시는 명시 인자 우선, 사유는 meta 로)
+        output_size, output_sha, sha_reason = _measure_output(
+            kwargs.get("output_path"), kwargs.get("output_sha256"), kwargs.get("output_size_bytes"),
+        )
+        run_meta: Dict[str, Any] = dict(kwargs.get("meta") or {})
+        if sha_reason:
+            run_meta["output_sha256_reason"] = sha_reason
 
         run = GenerationRun(
             run_uuid=str(uuid.uuid4()),
@@ -292,12 +406,10 @@ def _record_run_impl(
             elapsed_sec=kwargs.get("elapsed_sec"),
             output_path=kwargs.get("output_path"),
             output_size_bytes=output_size,
+            output_sha256=output_sha,
             ai_model=kwargs.get("ai_model"),
             error_msg=kwargs.get("error_msg"),
-            meta_json=(
-                json.dumps(kwargs.get("meta") or {}, ensure_ascii=False)
-                if kwargs.get("meta") else None
-            ),
+            meta_json=(json.dumps(run_meta, ensure_ascii=False) if run_meta else None),
         )
         session.add(run)
         session.flush()  # run.id 확보
