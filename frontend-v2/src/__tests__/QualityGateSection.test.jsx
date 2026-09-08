@@ -508,11 +508,22 @@ describe('QualityGateSection — 검토 패널 (R35)', () => {
 
   it('can_review=false 면 폼 대신 권한 문구다 (오류가 아니다)', async () => {
     const user = userEvent.setup();
-    stubApi({ review: reviewState({ can_review: false }) });
+    stubApi({ review: reviewState({ can_review: false, review_block_reason: 'not_admin' }) });
     const panel = await openPanel(user);
     expect(within(panel).queryByRole('radio')).toBeNull();
     expect(within(panel).getByRole('status')).toHaveTextContent(/admin 만/);
     expect(within(panel).queryByRole('alert')).toBeNull();
+  });
+
+  it('토큰이 없어서 막힌 것을 권한 문제로 적지 않는다 (R37 D-1)', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ can_review: false, review_block_reason: 'jwt_required' }) });
+    const panel = await openPanel(user);
+    const note = within(panel).getByRole('status');
+    // 벗어나는 길이 다르다 — 재로그인하면 되는 사람에게 '권한 없음' 을 보이면 관리자를 찾아간다.
+    expect(note).toHaveTextContent(/다시 로그인/);
+    expect(note).toHaveTextContent(/권한 문제가 아닙니다/);
+    expect(note.textContent).not.toMatch(/admin 만 남길/);
   });
 
   it('superseded_by 와 stale 을 서버 값 그대로 적는다', async () => {
@@ -560,6 +571,37 @@ describe('QualityGateSection — 검토 패널 (R35)', () => {
     });
     const panel = await openPanel(user);
     await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent(/boom/));
+  });
+
+  // ── (R37 리뷰 C1) 빈 산출물 run 의 검토 ──────────────────────────────────
+  it('빈 산출물이면 무엇을 승인하는지 말하고, "검사 규모 미기록" 과 갈라 놓는다', async () => {
+    const user = userEvent.setup();
+    stubApi({
+      review: reviewState({
+        status: 'empty_output',
+        empty_output_reason: 'empty:total_tcs',
+        gated_metric_count: null,
+        can_review: true,
+      }),
+    });
+    const panel = await openPanel(user);
+    // `<strong>` 과 그 부모 둘 다 매치되므로 개수로 본다 — 정확히 어디에 있는지가 아니라 보이는가가 요점.
+    expect(within(panel).getAllByText(/담을 내용이 0건/).length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText(/빈 문서에 대한 승인/).length).toBeGreaterThan(0);
+    // 어느 축이 비었는지·어디를 되짚는지도 같은 자리에서 말한다.
+    expect(within(panel).getByText(/시험 케이스가 0건/)).toBeInTheDocument();
+    // 원인 오귀속 금지 — 이 문구는 *구 run(기록 이전)* 을 뜻한다.
+    expect(within(panel).queryByText(/검사 규모 미기록/)).toBeNull();
+    // 잠그는 게 아니라 말하는 것이다 — 해시가 있으면 폼은 열려 있어야 한다.
+    expect(within(panel).queryAllByRole('radio').length).toBeGreaterThan(0);
+  });
+
+  it('빈 산출물이 아닌 run 의 "검사 규모 미기록" 문구는 그대로다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ gated_metric_count: null, can_review: true }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByText(/검사 규모 미기록/)).toBeInTheDocument();
+    expect(within(panel).queryAllByText(/담을 내용이 0건/)).toHaveLength(0);
   });
 });
 

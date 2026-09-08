@@ -13,6 +13,33 @@
  * 재계산을 하지 않는다(옛 `QualityDashboard` 가 그렇게 통과를 지어냈다).
  */
 
+/**
+ * (R37 D-3) 빈 산출물 사유(`meta.empty_output_reason`) → 문장. 서버 `_EMPTY_KEYS` 의 키가 그대로 온다.
+ * "왜 점수가 없나" 에 답하지 못하면 사용자는 같은 빈 문서를 다시 만든다.
+ */
+export const EMPTY_OUTPUT_TEXT = Object.freeze({
+  'empty:total_tcs': '시험 케이스가 0건이라 채점할 것이 없습니다 — VectorCAST 로그 폴더와 대상 환경을 확인하세요.',
+  'empty:total': '시험 결과가 0건이라 채점할 것이 없습니다 — VectorCAST 로그 폴더와 대상 환경을 확인하세요.',
+  'empty:total_test_cases': '시험 케이스가 0건이라 채점할 것이 없습니다 — 입력 명세 문서의 TC 표를 확인하세요.',
+  'empty:performed_count': '수행 결과가 0건이라 채점할 것이 없습니다 — 하위 레벨 산출물이 먼저 있어야 합니다.',
+  'empty:his_metrics': '정적분석 메트릭이 0건이라 채점할 것이 없습니다 — QAC/PRQA 산출물 경로를 확인하세요.',
+  'empty:total_functions': '분석된 함수가 0개라 채점할 것이 없습니다 — 소스 경로와 파싱 결과를 확인하세요.',
+});
+
+/**
+ * run → 빈 산출물 사유 문장. 빈 산출물이 아니면 null. 모르는 토큰은 그대로.
+ *
+ * ⚠ 같은 사실이 **두 모양**으로 온다: `/api/quality/runs` 는 `meta.empty_output_reason`(meta 통째 전달),
+ * `/api/review/runs/{id}` 는 top-level(검토 응답은 meta 를 싣지 않는다). 소비처마다 갈라 읽으면
+ * 한쪽이 조용히 빈 문장을 내므로 여기서 흡수한다(`gatedCountOf` 가 top-level ↔ scores 를 흡수하는 것과 같은 이유).
+ */
+export function emptyOutputText(run) {
+  if (!run || String(run.status || '') !== 'empty_output') return null;
+  const code = run.empty_output_reason || run.meta?.empty_output_reason;
+  if (!code) return '산출물에 담을 내용이 0건이었습니다.';
+  return EMPTY_OUTPUT_TEXT[code] || String(code);
+}
+
 /** 게이트 사유 코드 → 사람이 읽는 문장. 없는 코드는 코드 그대로. */
 export const REASON_TEXT = {
   no_gated_metric: '검사 항목이 0개 — 판정이 성립하지 않는다',
@@ -68,6 +95,12 @@ export function gatedCountOf(run) {
  */
 export function verdictOf(run) {
   if (!run) return { code: 'ABSENT', tone: 'neutral', label: '미생성' };
+  // (R37 D-3) 내용이 빈 산출물 — **가장 먼저**다. 만들어지긴 했으므로 '미생성' 이 아니고,
+  // 점수가 없는 이유가 분명하므로 '판정 없음'(원인 불명) 으로 접어서도 안 된다.
+  // 서버는 이 run 에 요약·점수를 남기지 않는다(`recorder.EMPTY_OUTPUT_STATUS`).
+  if (String(run.status || '') === 'empty_output') {
+    return { code: 'EMPTY_OUTPUT', tone: 'warning', label: '산출물 비어 있음' };
+  }
   const gated = gatedCountOf(run);
   if (run.gate_reason === 'no_gated_metric' || gated === 0) {
     return { code: 'INDETERMINATE', tone: 'warning', label: '판정 불가' };
@@ -84,7 +117,7 @@ export function verdictOf(run) {
 }
 
 /** 소비처는 `label`(표시용 한국어)이 아니라 `code` 로 분기한다 — 라벨을 고치면 KPI 분모가 조용히 바뀐다(리뷰 W1). */
-export const VERDICT_CODES = Object.freeze(['ABSENT', 'INDETERMINATE', 'PASS', 'FAIL', 'NONE']);
+export const VERDICT_CODES = Object.freeze(['ABSENT', 'EMPTY_OUTPUT', 'INDETERMINATE', 'PASS', 'FAIL', 'NONE']);
 
 /** 추세 항목(`/api/quality/trend`)은 `gate_pass` 가 top-level 이다 — 같은 판정기로 보낸다. */
 export function trendVerdictOf(item) {
@@ -148,6 +181,26 @@ export const REVIEW_ERROR_TEXT = Object.freeze({
   VERSION_CONFLICT: '다른 저장이 먼저 반영됐습니다 — 새로고침 뒤 다시 저장하세요.',
   DB_BUSY: '기록 DB 가 잠겨 있습니다 — 잠시 후 다시 시도하세요.',
 });
+
+/**
+ * (R37 D-1) 검토를 못 남기는 사유(`review_block_reason`) → 문장 + **벗어나는 길**.
+ * 서버 `workflow/quality/review.py` 의 `BLOCK_*` 와 lockstep — 둘이 갈리면 화면이 사유를 삼킨다.
+ * 두 사유를 "권한이 없습니다" 하나로 접으면, 다시 로그인하면 될 사람이 관리자를 찾는다.
+ */
+export const REVIEW_BLOCK_TEXT = Object.freeze({
+  not_admin: '검토 기록은 admin 만 남길 수 있습니다 — 조회는 로그인 사용자 누구나 됩니다.',
+  jwt_required: '로그인 토큰이 없거나 만료됐습니다 — 다시 로그인하면 검토를 남길 수 있습니다(권한 문제가 아닙니다).',
+});
+
+/**
+ * 사유 토큰 → 문장. 모르는 토큰은 지어내지 않고 그대로.
+ * `null` 은 **사유 미기록**(구 서버)이지 "admin 이 아님" 이 아니다 — 서버 계약이 그 자리를 "판정 없음" 으로
+ * 두는데 화면이 특정 사유로 접으면, admin 인 사람에게 "당신은 admin 이 아닙니다" 를 보이게 된다(리뷰 I2).
+ */
+export function reviewBlockText(reason) {
+  if (!reason) return '검토 기록은 JWT 로그인한 admin 만 남길 수 있습니다.';
+  return REVIEW_BLOCK_TEXT[reason] || String(reason);
+}
 
 /** 오류 객체(`api.js` 가 던진 `{status, code, message}`) → 문장. 403 은 코드가 없어도 권한 상태다. */
 export function reviewErrorText(err) {

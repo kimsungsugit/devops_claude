@@ -27,6 +27,101 @@ from workflow.quality.models import GenerationRun, QualityScore, QualitySummary
 _logger = logging.getLogger("workflow.quality.recorder")
 
 
+# (R37 D-3) 빈 산출물 run 의 `status`. `success` 와 갈라 두면 KPI·추세·delta 가 자동으로 비켜간다.
+EMPTY_OUTPUT_STATUS = "empty_output"
+
+# doc_type → summary 에서 "내용물 개수" 를 담는 키. 어휘가 문서마다 다르다(같은 뜻인데 이름이 셋).
+_EMPTY_KEYS = {
+    "sts": "total_test_cases", "suts": "total_test_cases", "sits": "total_test_cases",
+    "swreport": "performed_count",
+    # 종합결과서(swutcr/switcr)도 커버리지와 **같은 `total_tcs` 키**를 쓴다
+    # (`swut_comprehensive_aggregator.py:1078`). 바로 아래 SUTR/SITR 과 헷갈리지 말 것.
+    "swut": "total_tcs", "swit": "total_tcs", "swutcr": "total_tcs", "switcr": "total_tcs",
+    # 시험 결과 보고서 summary 는 `total_tcs` 가 아니라 `total` 이다 — 커버리지 키를 그대로 쓰면
+    # **모든 SUTR/SITR 이 빈 산출물로** 판정된다.
+    "sutr": "total", "sitr": "total",
+    "swsa": "his_metrics",
+    # UDS 는 summary 가 아니라 `quick_gate.counts.total_functions` 에 규모가 있다 — 아래 특수 분기.
+    "uds": "total_functions",
+}
+
+
+def empty_output_reason(doc_type: Any, quality_data: Any) -> Optional[str]:
+    """내용이 빈 산출물인가 — 그렇다면 **어느 축이 0이었는지**. 아니면 None.
+
+    판정을 여기 하나만 둔다: 기록기와 화면 문구가 각자 세면 "왜 점수가 없는지" 가 갈린다.
+    반환값은 사유 토큰(`empty:<키>`)이고 그대로 `meta.empty_output_reason` 에 남는다.
+    """
+    dt = str(doc_type or "").lower().strip()
+    key = _EMPTY_KEYS.get(dt)
+    if not key:
+        return None
+    data = quality_data or {}
+    if dt == "uds":
+        # 규모가 중첩(`quick_gate.counts.total_functions`)이고 bare quick_gate 형태도 온다.
+        qg = data.get("quick_gate") if isinstance(data.get("quick_gate"), dict) else data
+        counts = qg.get("counts") if isinstance(qg.get("counts"), dict) else {}
+        try:
+            n = int(counts.get("total_functions") or qg.get("total_functions") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        return f"empty:{key}" if n <= 0 else None
+    if key == "his_metrics":
+        return None if data.get(key) else f"empty:{key}"
+    try:
+        n = int(data.get(key) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return f"empty:{key}" if n <= 0 else None
+
+
+def _record_empty_output_run(doc_type: str, *, reason: str, status: Any = None, **kwargs: Any) -> int:
+    """생성은 됐고 내용이 비었다 — **run 행만** 남긴다(점수·요약 없음).
+
+    ⚠ 예전엔 이 경우를 통째로 skip 했다. 그러면 사용자는 문서를 내려받았는데 생성 현황은
+      계속 "미생성" 이라, 같은 빈 문서를 다시 만든다. 0점 FAIL 로 기록하는 것도 답이 아니다
+      (재지도 않은 축을 미달로 세어 KPI 를 오염시킨다 — skip 이 원래 막으려던 것).
+      그래서 **사실만** 남긴다: 언제·무엇을·어느 바이트로 만들었는지, 그리고 왜 점수가 없는지.
+    ⚠ 요약(`QualitySummary`)을 만들지 않는 것이 곧 판정 제외다 — `/api/quality/trend` 는
+      `join(QualitySummary)` 라 이 run 을 보지 않고, 점수 집계도 마찬가지다.
+    """
+    from workflow.quality.db import get_session, init_db
+
+    db_path = kwargs.get("db_path")
+    init_db(db_path)
+    with get_session(db_path) as session:
+        output_size, output_sha, sha_reason = _measure_output(
+            kwargs.get("output_path"), kwargs.get("output_sha256"), kwargs.get("output_size_bytes"),
+            kwargs.get("output_hash_reason"),
+        )
+        run_meta: Dict[str, Any] = dict(kwargs.get("meta") or {})
+        run_meta["empty_output_reason"] = reason
+        if sha_reason:
+            run_meta["output_sha256_reason"] = sha_reason
+        # ⚠ 호출부가 준 status 를 **덮지 않는다**(R37 리뷰 W4). `record_run(status="failed", …)` 에
+        #   빈 데이터가 실리면 "실패했다" 는 사실이 "내용이 비었다" 로 갈아끼워진다 — 둘 다 참일 때
+        #   더 중요한 쪽은 실패다. 사유는 어느 쪽이든 meta 에 남는다.
+        given = str(kwargs.get("status") or status or "success").strip() or "success"
+        run = GenerationRun(
+            run_uuid=str(uuid.uuid4()),
+            doc_type=doc_type,
+            project_root=kwargs.get("project_root"),
+            scm_id=kwargs.get("scm_id"),
+            target_function=kwargs.get("target_function"),
+            status=EMPTY_OUTPUT_STATUS if given == "success" else given,
+            elapsed_sec=kwargs.get("elapsed_sec"),
+            output_path=kwargs.get("output_path"),
+            output_size_bytes=output_size,
+            output_sha256=output_sha,
+            ai_model=kwargs.get("ai_model"),
+            error_msg=kwargs.get("error_msg"),
+            meta_json=json.dumps(run_meta, ensure_ascii=False),
+        )
+        session.add(run)
+        session.flush()
+        return int(run.id)
+
+
 def record_run(
     doc_type: str,
     quality_data: Dict[str, Any],
@@ -64,36 +159,14 @@ def record_run(
         run_id (성공 시), -1 (실패 시 -- 예외 전파하지 않음)
     """
     try:
-        # 빈 산출물 skip — 0점·FAIL 레코드가 KPI/trend 를 오염하지 않도록.
-        # (UDS 0함수는 record_uds_run 에서 선 차단 → doc_type 간 정책 통일)
-        _dt = (doc_type or "").lower().strip()
-        _qd = quality_data or {}
-        _empty = False
-        if _dt in ("sts", "suts", "sits"):
-            _empty = int(_qd.get("total_test_cases") or 0) <= 0
-        elif _dt == "swreport":
-            _empty = int(_qd.get("performed_count") or 0) <= 0
-        elif _dt in ("swut", "swit", "swutcr", "switcr"):
-            # 종합결과서(swutcr/switcr)도 커버리지와 **같은 `total_tcs` 키**를 쓴다
-            # (`swut_comprehensive_aggregator.py:1078`). 바로 아래 SUTR/SITR 분기와
-            # 헷갈리지 말 것 — 시험 결과 보고서만 `total` 이다.
-            _empty = int(_qd.get("total_tcs") or 0) <= 0
-        elif _dt in ("sutr", "sitr"):
-            # 시험 결과 보고서 summary 는 `total_tcs` 가 아니라 `total` 이다 —
-            # 커버리지 키를 그대로 쓰면 **모든 SUTR/SITR 이 빈 산출물로 skip** 된다
-            # (기록이 없으니 화면은 "미생성" 을 계속 보여주고, 원인은 보이지 않는다).
-            _empty = int(_qd.get("total") or 0) <= 0
-        elif _dt == "swsa":
-            _empty = not (_qd.get("his_metrics"))
-        if _empty:
-            _logger.info("%s quality run skipped (empty output)", _dt)
-            return -1
-
         # scm_id 를 명시로 받지 못했으면 `project_root` 에서 해결한다.
         # 호출부 7곳(swut/swit/swreport/swsa/sts/suts/sits)은 이미 프로젝트를 아는
         # 값을 project_root 로 넘기고 있으므로, 판정을 **여기 한 곳**에 두면 그
         # 7곳을 건드리지 않고도 축이 채워지고 앞으로 늘 호출도 자동으로 덮인다.
         # (UDS 5곳은 project_root 자체가 없어 명시 전달이 필요하다 — 라우터 참조.)
+        # ⚠ 이 해결은 빈 산출물 판정 **앞**에 있어야 한다(R37 D-3). 뒤에 두면 빈 run 만
+        #   `scm_id` 가 NULL 이 되고, 화면은 프로젝트 축으로 조회하므로 그 run 을 못 찾아
+        #   **여전히 "미생성"** 이다 — 기록을 남기는 의미가 절반 사라진다.
         if not scm_id and project_root:
             try:
                 from backend.services.scm_registry import resolve_scm_id
@@ -103,6 +176,22 @@ def record_run(
                 # 두고 기록은 계속한다 — 다만 침묵은 금지(사후에 왜 NULL 인지 알아야 한다).
                 _logger.exception("scm_id 자동 해결 실패 — 미상(NULL)으로 기록한다")
                 scm_id = None
+
+        # 내용이 빈 산출물: **점수는 남기지 않고 생성 사실만** 남긴다 (R37 D-3).
+        # 예전엔 통째로 skip 했는데, 그러면 사용자는 파일을 받았는데 화면은 "미생성" 이라
+        # 같은 빈 문서를 다시 만든다. 판정 축은 여전히 비켜간다(요약을 안 만든다).
+        # doc_type 11종 전부 같은 규약이다 — UDS(중첩 키)도 `empty_output_reason` 이 판정한다.
+        _dt = (doc_type or "").lower().strip()
+        _empty_reason = empty_output_reason(_dt, quality_data)
+        if _empty_reason:
+            _logger.info("%s quality run recorded without scores (%s)", _dt, _empty_reason)
+            return _record_empty_output_run(
+                _dt, reason=_empty_reason, status=status,
+                project_root=project_root, scm_id=scm_id, target_function=target_function,
+                elapsed_sec=elapsed_sec, output_path=output_path, output_sha256=output_sha256,
+                output_size_bytes=output_size_bytes, output_hash_reason=output_hash_reason,
+                ai_model=ai_model, error_msg=error_msg, meta=meta, db_path=db_path,
+            )
 
         return _record_run_impl(
             doc_type, quality_data,
@@ -147,9 +236,9 @@ def record_uds_run(quality_eval: Dict[str, Any], **kwargs: Any) -> int:
             or qg.get("total_functions")
             or 0
         )
-        if total_fn <= 0:
-            _logger.info("UDS quality run skipped (0 functions)")
-            return -1
+        # (R37 리뷰 W1) 여기서 선차단하면 **UDS 만** 옛 동작으로 남는다 — 생성은 됐는데 이력이 없어
+        # 보드가 영영 "미생성" 이다. 판정은 `record_run` 의 `empty_output_reason` 하나로 통일한다.
+        del total_fn
         return record_run("uds", data, **kwargs)
     except Exception:
         _logger.exception("Failed to record UDS quality run (non-fatal)")
@@ -195,12 +284,35 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _digest_kwargs(view: Any) -> Dict[str, Any]:
+    """바이트를 담은 무엇이든 → `{output_sha256, output_size_bytes}`. **복사하지 않는다.**
+
+    `hashlib` 은 buffer protocol 을 그대로 받으므로 `bytes()` 로 감쌀 이유가 없다. 크기는
+    `nbytes`(memoryview 는 `len()` 이 **항목 수**라 itemsize 가 1 이 아니면 바이트 수와 다르다).
+    """
+    n = getattr(view, "nbytes", None)
+    if n is None:
+        n = len(view)
+    if not n:
+        _logger.warning("산출물 바이트가 0개다 — 해시 미기록(빈 입력의 해시를 산출물 해시로 남기지 않는다)")
+        return {"output_hash_reason": "empty_bytes"}
+    return {"output_sha256": hashlib.sha256(view).hexdigest(), "output_size_bytes": int(n)}
+
+
 def output_hash_kwargs(buf: Any) -> Dict[str, Any]:
     """(R36 C-4) BytesIO 응답 빌더의 산출물 → `record_run(**kwargs)` 인자.
 
     성공: `{output_sha256, output_size_bytes}` · 실패: `{output_hash_reason: …}`(기록은 남기고 해시만 없음).
     라우터 4곳 + 시험결과 헬퍼 2곳이 각자 `sha256_hex(buf.getvalue())` 를 복제하면 한 곳이 빠진다(이 저장소의
-    반복 결함). 받는 것: `io.BytesIO`(`getvalue()` — 위치를 옮기지 않는다) · `bytes`/`bytearray`/`memoryview`.
+    반복 결함). 받는 것: `io.BytesIO` · `bytes`/`bytearray`/`memoryview`.
+
+    (R37 D-2) **`getbuffer()` 로 무복사 해시**한다. 실측(write 로 채운 11MB BytesIO, 5회 중앙값):
+    `getvalue()` 는 추가 peak **11.00 MB**, `getbuffer()` 는 **0.00 MB**(시간은 6.0ms vs 5.9ms 로 동등).
+    앞판은 `getvalue()` 로 한 벌, `bytes(data)` 로 또 한 벌을 떠서 응답 조립의 `read()` 까지 **세 벌**이었다.
+    ⚠ export 를 안 풀면 그 BytesIO 는 `write`/`truncate`/`close` 가 전부 `BufferError` 다(실측) — 그래서
+      반드시 `with` 로 감싼다. `seek`/`read` 는 export 중에도 되므로 응답 조립은 영향을 받지 않는다.
+    ⚠ 하네스 주의: `io.BytesIO(초기값)` 은 그 값을 **공유**해 `getvalue()` 가 복사를 안 한다 — 그 형태로 재면
+      두 방식의 우열이 반대로 나온다(실제 빌더는 `wb.save(buf)` 즉 write 로 채운다).
 
     ⚠ **실패를 `no_path` 로 접지 않는다**(R36 리뷰 W2). 경로 없는 문서는 정상이고 버퍼를 못 받은 것은 버그인데,
       한 토큰이면 화면에서 구별되지 않아 **배선이 끊긴 사실이 영영 리포트되지 않는다**.
@@ -209,25 +321,33 @@ def output_hash_kwargs(buf: Any) -> Dict[str, Any]:
     ⚠ 같은 입력을 다시 빌드해도 해시는 대개 다르다 — openpyxl 이 `docProps/core.xml` 에 **초 단위** 저장 시각을
       쓴다(2026-09-07 실측: 같은 초 안 6회는 동일, 1.1초 넘기면 그 파트만 다름). 검토는 run 의 바이트에 붙는다.
     """
-    data: Optional[bytes]
     if isinstance(buf, (bytes, bytearray, memoryview)):
-        data = bytes(buf)
-    elif hasattr(buf, "getvalue"):
         try:
-            data = buf.getvalue()
+            return _digest_kwargs(buf)
+        except (BufferError, TypeError, ValueError) as exc:
+            # 비연속 memoryview 등 — hashlib 이 거부한다. 침묵하지 않고 사유를 남긴다.
+            _logger.warning("산출물 바이트를 해시하지 못했다 — 해시 미기록: %s", exc)
+            return {"output_hash_reason": "bytes_unreadable"}
+    if hasattr(buf, "getbuffer"):
+        try:
+            with buf.getbuffer() as view:      # ← 무복사. with 를 벗어나며 export 해제(BufferError 방지)
+                return _digest_kwargs(view)
         except Exception as exc:  # noqa: BLE001 — 어떤 실패도 기록을 버릴 이유가 아니다
             _logger.warning("산출물 버퍼를 읽지 못했다 — 해시 미기록: %s", exc)
             return {"output_hash_reason": "bytes_unreadable"}
-        if not isinstance(data, (bytes, bytearray)):
+    if hasattr(buf, "getvalue"):
+        # `getbuffer` 가 없는 파일류(구현체·스텁) 폴백 — 여기서만 복사가 생긴다.
+        try:
+            data = buf.getvalue()
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("산출물 버퍼를 읽지 못했다 — 해시 미기록: %s", exc)
+            return {"output_hash_reason": "bytes_unreadable"}
+        if not isinstance(data, (bytes, bytearray, memoryview)):
             _logger.warning("산출물 버퍼가 바이트가 아니다(%s) — 해시 미기록", type(data).__name__)
             return {"output_hash_reason": "bytes_not_bytes"}
-    else:
-        _logger.warning("산출물 버퍼 없음(%s) — 해시 미기록", type(buf).__name__)
-        return {"output_hash_reason": "no_bytes"}
-    if not data:
-        _logger.warning("산출물 바이트가 0개다 — 해시 미기록(빈 입력의 해시를 산출물 해시로 남기지 않는다)")
-        return {"output_hash_reason": "empty_bytes"}
-    return {"output_sha256": sha256_hex(bytes(data)), "output_size_bytes": len(data)}
+        return _digest_kwargs(data)
+    _logger.warning("산출물 버퍼 없음(%s) — 해시 미기록", type(buf).__name__)
+    return {"output_hash_reason": "no_bytes"}
 
 
 def _hash_and_size_of_file(path: "str | Path") -> "tuple[str, int]":
@@ -481,9 +601,13 @@ def _record_run_impl(
         # scm_id 가 없는(백필 미상·구 경로) run 은 현행대로 doc_type 만 본다 —
         # 과거 행과의 연속성을 끊지 않기 위함이고, 이 경우 delta 는 여전히 프로젝트를
         # 넘나들 수 있다(그 한계는 scm_id 가 채워지는 만큼 자연히 사라진다).
+        # ⚠ **성공 run 만** 비교 대상이다(R37 D-3). 빈 산출물 run 은 요약이 없어서 `prev_run.summary`
+        #   가 None 이 되고, 그러면 delta 가 조용히 사라진다 — 점수는 그대로인데 화면의 `↑ +x.x` 만
+        #   없어져 "비교할 게 없다" 로 읽힌다. 판정에 못 드는 run 은 비교 기준도 아니다.
         _scm = kwargs.get("scm_id")
         _prev_q = session.query(GenerationRun).filter(
             GenerationRun.doc_type == doc_type,
+            GenerationRun.status == "success",
             GenerationRun.id < run.id,
         )
         if _scm:

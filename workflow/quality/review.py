@@ -25,6 +25,7 @@ import logging
 import threading
 import unicodedata
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, ContextManager, Dict, List, Optional
 
@@ -42,6 +43,72 @@ AUTH_METHOD_JWT = "jwt"
 REHASH_MAX_BYTES = 512 * 1024 * 1024
 COMMENT_MAX_LEN = 2000
 
+# 검토 쓰기가 막힌 사유 — 화면이 "누구에게 무엇이 모자란가" 를 말할 수 있게 갈라 둔다.
+# 하나로 접으면 "권한이 없습니다" 가 토큰 만료까지 삼켜, 재로그인하면 되는 사람이 관리자를 찾는다.
+BLOCK_NOT_ADMIN = "not_admin"
+BLOCK_JWT_REQUIRED = "jwt_required"
+
+
+@dataclass(frozen=True)
+class Viewer:
+    """이 응답을 받는 사람 — **쓰기 통과 여부와 이름 노출 범위를 여기서만** 판정한다 (R37 D-1).
+
+    ⚠ 두 결함이 같은 뿌리였다:
+
+    1. `can_review` 가 admin 여부만 봤다. 쓰기는 `require_jwt_user` **+** `require_admin` 인데
+       조회는 `require_user`(Bearer 불요)라, `DEV_MODE_X_USER_FALLBACK=1` 에서 X-User 로 들어온 admin 이
+       입력 폼을 받고 저장에서 401 을 맞았다 — **화면이 약속한 것을 서버가 거부**한다.
+    2. 검토자 실명이 로그인한 누구에게나 나갔다. 같은 이름을 서버 로그는 `mask_user` 로 가리면서
+       API 응답은 원문으로 냈다 — 한 값에 두 기준이면 느슨한 쪽이 사실상의 정책이 된다.
+
+    그래서 "쓸 수 있는 사람" 과 "이름을 볼 수 있는 사람" 을 같은 객체가 답한다. 라우터는 요청에서
+    세 사실(이름·admin 여부·Bearer 여부)만 읽어 넘기고, 판정은 하지 않는다.
+    """
+
+    name: str = ""
+    is_admin: bool = False
+    has_bearer: bool = False
+
+    @property
+    def can_review(self) -> bool:
+        """`POST /api/review/runs/{id}` 가 통과하는가 — 그 endpoint 의 의존성과 **같은 조건**."""
+        return bool(self.is_admin and self.has_bearer)
+
+    @property
+    def block_reason(self) -> Optional[str]:
+        """`can_review` 가 False 인 이유. 통과하면 None."""
+        if self.can_review:
+            return None
+        return BLOCK_NOT_ADMIN if not self.is_admin else BLOCK_JWT_REQUIRED
+
+    def _is_self(self, reviewer: str) -> bool:
+        return bool(self.name) and reviewer.strip().lower() == self.name.strip().lower()
+
+    def may_see_names(self, reviewer: str) -> bool:
+        """이 사람에게 `reviewer` 의 실명을 보여도 되는가 — 마스킹과 이력 필터가 **같은 조건**을 쓴다.
+
+        ⚠ **Bearer 를 함께 요구한다**(R37 리뷰 W3). `DEV_MODE_X_USER_FALLBACK=1`(D-1 이 근거로 든 바로 그
+          환경)에서는 `X-User: <admin>` 헤더 한 줄로 `is_admin` 이 True 가 된다. 쓰기는 `require_jwt_user`
+          가 막지만 **읽기 통제는 그대로 뚫려** 전 검토자 실명이 나가고, `X-User: <피해자>` 로는 자기일치를
+          만들어 이력 필터의 403 까지 우회된다. 신원을 위조할 수 있는 채널로는 이름을 풀지 않는다.
+        """
+        return bool(self.has_bearer) and (self.is_admin or self._is_self(reviewer))
+
+    def visible(self, reviewer: Optional[str]) -> Optional[str]:
+        """검토자 이름 — admin 과 **본인**에게는 원문(둘 다 Bearer 필요), 나머지에게는 마스킹.
+
+        본인을 가리지 않는 이유: 자기가 남긴 판정을 못 알아보면 갱신 대상을 고를 수 없다.
+        마스킹 방식은 기존 단일 출처(`admin_users.mask_user`)를 그대로 쓴다 — 여기서 다시 만들면
+        로그와 API 가 또 갈린다. import 는 지연(계층: workflow → backend 는 recorder 의 선례).
+        """
+        if reviewer is None:
+            return None
+        if self.may_see_names(reviewer):
+            return reviewer
+        from backend.services.admin_users import mask_user
+
+        return mask_user(reviewer)
+
 
 class ReviewError(Exception):
     """라우터가 HTTP 로 번역하는 규칙 위반. `code` 는 응답 `error.code` 로 그대로 나간다."""
@@ -58,6 +125,13 @@ class ReviewError(Exception):
 class RunNotFound(ReviewError):
     status = 404
     code = "RUN_NOT_FOUND"
+
+
+class ReviewerFilterForbidden(ReviewError):
+    """(R37 D-1) 남의 이름으로 감사 이력을 거르려는 조회 — 마스킹을 질의로 우회하는 경로."""
+
+    status = 403
+    code = "REVIEWER_FILTER_FORBIDDEN"
 
 
 class IdentityRequired(ReviewError):
@@ -230,8 +304,8 @@ def superseded_by(session: Session, run: GenerationRun) -> Optional[Dict[str, An
     return {"run_id": int(newer[0]), "created_at": _iso(newer[1])} if newer else None
 
 
-def _hash_reason_from_meta(raw: Optional[str]) -> Optional[str]:
-    """R33 이 `meta_json.output_sha256_reason` 에 남긴 NULL 사유. 없으면 None(구 run — 사유 미기록)."""
+def _meta_field(raw: Optional[str], key: str) -> Optional[str]:
+    """`meta_json` 의 문자열 필드 하나. 없거나 못 읽으면 None(구 run — 미기록)."""
     if not raw:
         return None
     try:
@@ -240,8 +314,13 @@ def _hash_reason_from_meta(raw: Optional[str]) -> Optional[str]:
         meta = json.loads(raw)
     except (ValueError, TypeError):
         return None
-    v = meta.get("output_sha256_reason") if isinstance(meta, dict) else None
+    v = meta.get(key) if isinstance(meta, dict) else None
     return str(v) if v else None
+
+
+def _hash_reason_from_meta(raw: Optional[str]) -> Optional[str]:
+    """R33 이 `meta_json.output_sha256_reason` 에 남긴 NULL 사유. 없으면 None(구 run — 사유 미기록)."""
+    return _meta_field(raw, "output_sha256_reason")
 
 
 def _gated_metric_count(run: GenerationRun) -> Optional[int]:
@@ -254,11 +333,13 @@ def _gated_metric_count(run: GenerationRun) -> Optional[int]:
     return None
 
 
-def _record_plain(rec: ReviewRecord) -> Dict[str, Any]:
+def _record_plain(rec: ReviewRecord, *, viewer: Optional[Viewer] = None) -> Dict[str, Any]:
+    """`viewer` 가 없으면 원문 — 내부 호출(테스트·스크립트)용이다. HTTP 응답 경로는 **반드시** 넘긴다
+    (가드: `test_review_records.py::TestReviewerNameExposure`)."""
     return {
         "id": rec.id,
         "run_id": rec.run_id,
-        "reviewer": rec.reviewer,
+        "reviewer": viewer.visible(rec.reviewer) if viewer else rec.reviewer,
         "auth_method": rec.auth_method,
         "decision": rec.decision,
         "comment": rec.comment,
@@ -269,7 +350,7 @@ def _record_plain(rec: ReviewRecord) -> Dict[str, Any]:
     }
 
 
-def _load_state(session: Session, run_id: int) -> Dict[str, Any]:
+def _load_state(session: Session, run_id: int, *, viewer: Optional[Viewer] = None) -> Dict[str, Any]:
     """세션 안에서 DB 만 읽는다(파일 I/O 없음)."""
     run = session.query(GenerationRun).filter_by(id=run_id).first()
     if not run:
@@ -281,28 +362,35 @@ def _load_state(session: Session, run_id: int) -> Dict[str, Any]:
         "run_id": run.id,
         "doc_type": run.doc_type,
         "scm_id": run.scm_id,
+        # (R37 리뷰 C1) 빈 산출물 run 은 해시가 있어 검토가 **열린다** — 그러면 화면이 "무엇을 승인하는가" 를
+        # 말할 수 있어야 한다. 이걸 안 실으면 패널이 아는 유일한 단서가 `gated_metric_count == null` 인데,
+        # 그 문구는 *구 run(기록 이전)* 을 뜻해서 "잴 대상이 0건"(해당 없음)을 "기록이 안 됐다"(미측정)로
+        # **틀리게 귀속**한다. 두 사실은 다르고, 감사 증거에서 그 차이는 결정적이다.
+        "status": run.status,
+        "empty_output_reason": _meta_field(run.meta_json, "empty_output_reason"),
         "output_path": run.output_path,
         "output_sha256": run.output_sha256,
         "hash_reason": _hash_reason_from_meta(run.meta_json) if run.output_sha256 is None else None,
         "superseded_by": superseded_by(session, run),
         "gated_metric_count": _gated_metric_count(run),
-        "reviews": [_record_plain(r) for r in records],
+        "reviews": [_record_plain(r, viewer=viewer) for r in records],
     }
 
 
 def review_state(
-    open_session: Callable[[], ContextManager[Session]], run_id: int, *, can_review: Optional[bool] = None,
+    open_session: Callable[[], ContextManager[Session]], run_id: int, *, viewer: Optional[Viewer] = None,
 ) -> Dict[str, Any]:
     """`GET /api/review/runs/{id}` 본문. DB 읽기는 세션 안, 파일 재해시는 세션 **밖**(리뷰 W3).
 
-    run 이 없으면 `RunNotFound`(200+error 금지). `can_review` 는 라우터가 현재 사용자의 admin 여부를 넣는다(I7).
+    run 이 없으면 `RunNotFound`(200+error 금지). `viewer` 가 쓰기 가능 여부와 이름 노출을 정한다(R37 D-1)
+    — 라우터는 요청에서 사실만 읽어 넘기고 판정하지 않는다. `None` 이면 판정 없음(`can_review: null`).
     """
     with open_session() as session:
-        st = _load_state(session, run_id)
-    return _finish_state(st, can_review=can_review)
+        st = _load_state(session, run_id, viewer=viewer)
+    return _finish_state(st, viewer=viewer)
 
 
-def _finish_state(st: Dict[str, Any], *, can_review: Optional[bool], budget: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+def _finish_state(st: Dict[str, Any], *, viewer: Optional[Viewer], budget: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """세션 밖 마무리 — 파일 재해시 + stale. 단건·배치가 **같은 판정기**를 쓴다(복제 금지)."""
     cur = current_output_hash(st["output_path"], st["output_sha256"], budget=budget)
     hash_unavailable = st["output_sha256"] is None
@@ -316,14 +404,16 @@ def _finish_state(st: Dict[str, Any], *, can_review: Optional[bool], budget: Opt
         "current_basis_reason": cur["basis_reason"],
         # run 의 기록 해시 ↔ 지금 파일. 파일 기준이 아니면 None(판단 불가) — False 로 접지 않는다.
         "stale": _stale(st["output_sha256"], cur),
-        "can_review": can_review,
+        "can_review": viewer.can_review if viewer else None,
+        # 왜 못 쓰는가 — 없으면 화면이 "admin 만" 한 문장으로 접어 토큰 만료를 권한 문제로 오독한다.
+        "review_block_reason": viewer.block_reason if viewer else None,
     })
     return st
 
 
 def review_states(
     open_session: Callable[[], ContextManager[Session]], run_ids: List[int], *,
-    can_review: Optional[bool] = None, budget_bytes: Optional[int] = None,
+    viewer: Optional[Viewer] = None, budget_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """(R35) `GET /api/review/states` 본문 — 목록 '검토' 열. `{"states": {str(id): state}, "missing": [id]}`.
 
@@ -336,14 +426,14 @@ def review_states(
     with open_session() as session:
         for rid in run_ids:
             try:
-                loaded[str(rid)] = _load_state(session, rid)
+                loaded[str(rid)] = _load_state(session, rid, viewer=viewer)
             except RunNotFound:
                 missing.append(rid)
     # 기본값은 호출 시점에 읽는다(정의 시점 바인딩이면 env/monkeypatch 로 바꾼 값이 안 먹는다).
     budget = {"remaining": int(BATCH_REHASH_BUDGET_BYTES if budget_bytes is None else budget_bytes)}
     states: Dict[str, Dict[str, Any]] = {}
     for key, st in loaded.items():
-        out = _finish_state(st, can_review=can_review, budget=budget)
+        out = _finish_state(st, viewer=viewer, budget=budget)
         out.pop("output_path", None)
         states[key] = out
     return {"states": states, "missing": missing}
@@ -493,11 +583,16 @@ def history(
     reviewer: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    viewer: Optional[Viewer] = None,
 ) -> Dict[str, Any]:
     """감사 이력(G7) — 최신순. run 의 doc_type/scm_id 를 조인해 필터한다. 챗 승인 감사와 **분리**.
 
     정규화는 형제 `backend/routers/quality.py::list_runs` 와 **같게** — `doc_type` 은 `lower().strip()`, `scm_id` 는
     `strip()`(리뷰 I2/후속: 두 엔드포인트가 같은 질의에 다른 수를 내면 빈 목록이 '이력 없음' 으로 읽힌다).
+
+    (R37 D-1) 이름은 `viewer` 가 정한다. **필터도 같이 막는다** — 응답만 마스킹하면 `?reviewer=<이름>` 의
+    결과 수가 그 이름의 존재를 그대로 알려줘, 가린 값을 되맞힐 수 있다(마스킹이 표시 계층에만 있으면
+    질의 계층이 그 옆으로 샌다).
     """
     q = session.query(ReviewAudit, GenerationRun).join(GenerationRun, ReviewAudit.run_id == GenerationRun.id)
     if scm_id:
@@ -507,7 +602,14 @@ def history(
     if run_id is not None:
         q = q.filter(ReviewAudit.run_id == int(run_id))
     if reviewer:
-        q = q.filter(ReviewAudit.reviewer == reviewer.strip())
+        want = reviewer.strip()
+        # 마스킹과 **같은 조건**(`may_see_names`)을 쓴다 — 표시 계층만 가리면 결과 수가 가린 이름을 되맞힌다.
+        if viewer is not None and not viewer.may_see_names(want):
+            raise ReviewerFilterForbidden(
+                "다른 검토자로 이력을 거르려면 JWT 로그인한 admin 이어야 합니다 — 본인 이력은 자기 이름으로 조회됩니다",
+                reviewer=want[:64],
+            )
+        q = q.filter(ReviewAudit.reviewer == want)
     total = q.count()
     rows = q.order_by(ReviewAudit.id.desc()).offset(offset).limit(limit).all()
     items = [
@@ -517,7 +619,7 @@ def history(
             "run_id": audit.run_id,
             "doc_type": run.doc_type,
             "scm_id": run.scm_id,
-            "reviewer": audit.reviewer,
+            "reviewer": viewer.visible(audit.reviewer) if viewer else audit.reviewer,
             "action": audit.action,
             "decision": audit.decision,
             "output_sha256": audit.output_sha256,

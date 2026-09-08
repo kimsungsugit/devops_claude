@@ -5,7 +5,7 @@ import StatusBadge from '../StatusBadge.jsx';
 import {
   verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR,
   reviewVerdictOf, reviewErrorText, reviewFreshnessOf, reviewDecisionTone, REVIEW_DECISIONS, REVIEW_DECISION_LABEL,
-  hashReasonText, basisReasonText,
+  hashReasonText, basisReasonText, reviewBlockText, emptyOutputText,
 } from '../../gateVerdict.js';
 
 /**
@@ -160,7 +160,8 @@ function TrendChart({ data }) {
  * - 해시 없는 run 은 **검토 잠금** — 폼을 그리지 않는다(S6). 빈칸이 아니라 잠금 사유를 적는다.
  * - `expected_sha256` 은 서버가 준 run 해시를 **그대로** 되돌려 보낸다(프론트 계산 0). 갱신은 내 기록의 `version`.
  * - 성공 토스트는 **2xx 뒤에만**. 409 `STALE`/`VERSION_CONFLICT` 는 상태를 다시 받는다.
- * - `can_review` 는 서버 값 — admin 1명 = 단독 검토임을 문구로 밝힌다(§8 #8).
+ * - `can_review` 는 서버 값 — admin 1명 = 단독 검토임을 문구로 밝힌다(§8 #8). **쓰기 endpoint 와 같은 조건**
+ *   (admin **그리고** Bearer)이라 이 폼이 보이면 저장이 통과한다. 못 쓰는 사유는 `review_block_reason`.
  */
 function ReviewPanel({ runId, onSaved }) {
   const toast = useToast();
@@ -255,7 +256,17 @@ function ReviewPanel({ runId, onSaved }) {
               이 검토는 그 run 을 대상으로 하지 않습니다.
             </p>
           )}
-          {state.gated_metric_count == null && (
+          {/* (R37 리뷰 C1) 빈 산출물은 **잴 대상이 0건**(해당 없음)이지 "기록이 안 됐다"(미측정)가 아니다.
+              아래 '검사 규모 미기록' 문구는 *구 run* 을 뜻하므로, 여기서 갈라 두지 않으면 원인을 틀리게 댄다.
+              승인 자체는 막지 않는다 — 대상은 바이트이고 해시가 있다. 다만 무엇을 승인하는지는 말한다. */}
+          {state.status === 'empty_output' && (
+            <p role="status" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
+              ⚠ 이 run 은 <strong>산출물에 담을 내용이 0건</strong>이라 점수가 없습니다 —
+              승인하면 <strong>빈 문서에 대한 승인</strong>이 됩니다.
+              {emptyOutputText(state) ? ` ${emptyOutputText(state)}` : ''}
+            </p>
+          )}
+          {state.status !== 'empty_output' && state.gated_metric_count == null && (
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
               ⚠ 검사 규모 미기록 run 입니다 — 검토는 허용되지만 몇 개 항목을 검사했는지는 복원할 수 없습니다.
             </p>
@@ -307,6 +318,7 @@ function ReviewPanel({ runId, onSaved }) {
                   </button>
                   <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
                     JWT 로그인한 admin 만 기록합니다(현재 admin 은 단독 검토입니다). 검토는 게이트 판정을 바꾸지 않습니다.
+                    {' '}검토자 이름은 admin 과 본인에게만 그대로 보입니다.
                   </span>
                 </div>
               </fieldset>
@@ -314,7 +326,8 @@ function ReviewPanel({ runId, onSaved }) {
           )}
           {!state.hash_unavailable && state.can_review !== true && (
             <p role="status" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-2)' }}>
-              검토 기록은 admin 만 남길 수 있습니다 — 조회는 로그인 사용자 누구나 됩니다.
+              {/* (R37 D-1) 사유를 서버가 갈라 준다 — '권한 없음' 과 '토큰 만료' 는 벗어나는 길이 다르다. */}
+              {reviewBlockText(state.review_block_reason)}
             </p>
           )}
         </>
@@ -516,12 +529,16 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
   }, [toast]);
 
   // 판정이 없는 run 비율 — 사실만 표시한다(가짜라는 뜻이 아니라 판별 불가).
+  // (R37 리뷰 W2) 빈 산출물은 따로 센다. 같은 표의 배지는 '산출물 비어 있음' 인데 이 줄만 "요약이 없어
+  // 판정 없음" 이라고 하면 한 화면이 같은 질문에 두 답을 내고, 원인도 틀리게 귀속된다.
   const verdictNote = useMemo(() => {
     if (!runs.length) return null;
+    const empty = runs.filter((r) => verdictOf(r).code === 'EMPTY_OUTPUT').length;
     const withVerdict = runs.filter(
-      (r) => r?.summary && r.summary.gate_pass !== null && r.summary.gate_pass !== undefined
+      (r) => verdictOf(r).code !== 'EMPTY_OUTPUT'
+        && r?.summary && r.summary.gate_pass !== null && r.summary.gate_pass !== undefined
     ).length;
-    return { shown: runs.length, withVerdict };
+    return { shown: runs.length, withVerdict, empty };
   }, [runs]);
 
   return (
@@ -581,8 +598,14 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
 
           {!runsErr && verdictNote && verdictNote.withVerdict < verdictNote.shown && (
             <div role="status" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 'var(--sp-2)' }}>
-              표시된 {verdictNote.shown}건 중 {verdictNote.shown - verdictNote.withVerdict}건은
-              요약이 없어 <strong>판정 없음</strong>입니다 — 통과도 실패도 아닙니다.
+              표시된 {verdictNote.shown}건 중{' '}
+              {verdictNote.shown - verdictNote.withVerdict - verdictNote.empty > 0 && (
+                <>{verdictNote.shown - verdictNote.withVerdict - verdictNote.empty}건은 요약이 없어{' '}
+                  <strong>판정 없음</strong>{verdictNote.empty > 0 ? ', ' : '입니다 — 통과도 실패도 아닙니다.'}</>
+              )}
+              {verdictNote.empty > 0 && (
+                <>{verdictNote.empty}건은 <strong>산출물에 담을 내용이 0건</strong>이라 점수가 없습니다.</>
+              )}
             </div>
           )}
 

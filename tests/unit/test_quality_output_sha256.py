@@ -1101,3 +1101,96 @@ class TestEveryRecordSiteFixesTheArtifact:
                     if not args or (isinstance(args[0], ast.Constant) and args[0].value is None):
                         dead.append(f"{rel}:{lineno}")
         assert dead == [], f"항상 빈 dict 를 만드는 죽은 배선: {dead}"
+
+
+# ==============================================================
+# (R37 D-2) 해시는 무복사로 — 그리고 버퍼를 잠가 두지 않는다
+# ==============================================================
+
+
+class TestHashingDoesNotCopyOrLockTheBuffer:
+    """11MB 산출물 하나에 사본이 세 벌 뜨던 것을 한 벌로 줄인다.
+
+    ⚠ 무복사의 대가는 **export** 다: `getbuffer()` 를 release 하지 않으면 그 BytesIO 는
+    `write`/`truncate`/`close` 가 전부 `BufferError` 가 된다. 응답 조립(`seek`+`read`)은 살아남아서
+    **테스트가 해시만 보면 이 실수를 못 잡는다** — 그래서 해시 뒤 쓰기를 직접 단언한다.
+    """
+
+    @staticmethod
+    def _written(mb: int):
+        """`wb.save(buf)` 처럼 **write 로** 채운 `BytesIO`. `BytesIO(초기값)` 은 그 값을 공유해
+        `getvalue()` 조차 복사를 안 하므로, 그 형태로 재면 두 방식의 우열이 뒤집힌다."""
+        import io
+        import os
+
+        buf = io.BytesIO()
+        chunk = os.urandom(1024 * 1024)
+        for _ in range(mb):
+            buf.write(chunk)
+        return buf
+
+    def test_buffer_is_usable_after_hashing(self):
+        """해시 뒤에도 쓰고 자를 수 있어야 한다 — export 를 안 풀면 여기서 BufferError 다."""
+        from workflow.quality.recorder import output_hash_kwargs
+
+        buf = self._written(1)
+        assert "output_sha256" in output_hash_kwargs(buf)
+        buf.write(b"more")          # BufferError 면 export 가 살아 있다는 뜻
+        buf.truncate(10)
+        buf.close()
+
+    def test_response_assembly_still_sees_every_byte(self):
+        """해시가 위치를 옮기거나 버퍼를 소모하면 응답 본문이 잘린다."""
+        from workflow.quality.recorder import output_hash_kwargs
+
+        buf = self._written(1)
+        buf.seek(12345)             # 라우터가 어디에 있든 상관없어야 한다
+        kw = output_hash_kwargs(buf)
+        buf.seek(0)
+        body = buf.read()
+        assert len(body) == kw["output_size_bytes"] == 1024 * 1024
+        assert hashlib.sha256(body).hexdigest() == kw["output_sha256"]
+
+    def test_hashing_11mb_does_not_allocate_a_copy(self):
+        """무복사 여부를 실제로 잰다 — 임계는 넉넉히(1MB) 두되 11MB 사본은 반드시 걸린다."""
+        import tracemalloc
+
+        from workflow.quality.recorder import output_hash_kwargs
+
+        buf = self._written(11)
+        tracemalloc.start()
+        base, _ = tracemalloc.get_traced_memory()
+        kw = output_hash_kwargs(buf)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        grew_mb = (peak - base) / 1024 / 1024
+        assert kw["output_size_bytes"] == 11 * 1024 * 1024
+        assert grew_mb < 1.0, f"산출물 사본이 떴다: +{grew_mb:.2f} MB (무복사면 0 에 가깝다)"
+
+    def test_same_digest_as_the_copying_path(self):
+        """무복사로 바꿨다고 값이 달라지면 기존 검토 기록이 전부 stale 이 된다."""
+        from workflow.quality.recorder import output_hash_kwargs
+
+        buf = self._written(2)
+        assert output_hash_kwargs(buf)["output_sha256"] == hashlib.sha256(buf.getvalue()).hexdigest()
+
+    def test_getvalue_only_object_still_works(self):
+        """`getbuffer` 가 없는 파일류(스텁·구현체)도 폴백으로 받는다 — duck typing 소비처를 깨지 않는다."""
+        from workflow.quality.recorder import output_hash_kwargs
+
+        class _OnlyGetValue:
+            def getvalue(self):
+                return b"payload"
+
+        kw = output_hash_kwargs(_OnlyGetValue())
+        assert kw == {"output_sha256": hashlib.sha256(b"payload").hexdigest(), "output_size_bytes": 7}
+
+    def test_memoryview_size_is_bytes_not_items(self):
+        """`len(memoryview)` 는 **항목 수**다 — itemsize 가 1 이 아니면 크기가 틀린다."""
+        import array
+
+        from workflow.quality.recorder import output_hash_kwargs
+
+        arr = array.array("I", [1, 2, 3, 4])          # itemsize 4 → 16 bytes / len 4
+        kw = output_hash_kwargs(memoryview(arr))
+        assert kw["output_size_bytes"] == 16, "항목 수를 바이트 수로 기록했다"

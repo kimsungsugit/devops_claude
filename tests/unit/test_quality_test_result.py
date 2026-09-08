@@ -143,6 +143,14 @@ def test_zero_total_does_not_become_full_marks():
 
 # ── 2. recorder 배선 ──────────────────────────────────────────────────────
 
+def _is_empty_run(qdb, run_id):
+    """(R37 D-3) 빈 산출물 run 인가 — 생성 사실은 남고 **점수·요약은 없다**."""
+    init_db(qdb)
+    with get_session(qdb) as s:
+        run = s.query(GenerationRun).filter_by(id=run_id).one()
+        return (run.status, run.summary is None, list(run.scores) == [])
+
+
 def test_recorded_run_uses_test_result_metrics(qdb):
     run_id = record_run("sutr", SUTR_SUMMARY, project_root="HDPDM01", db_path=qdb)
     assert run_id > 0
@@ -157,11 +165,19 @@ def test_recorded_run_uses_test_result_metrics(qdb):
         assert run.summary.fn_count == 100
 
 
-def test_empty_output_is_skipped_by_total_key(qdb):
-    """`total_tcs`(커버리지 키)로 판정하면 **모든** SUTR 이 빈 산출물로 skip 된다."""
-    assert record_run("sutr", {"total": 0, "tested": 0}, db_path=qdb) == -1
-    # 비지 않았으면 기록돼야 한다 — skip 조건이 과하게 넓지 않은지 확인.
-    assert record_run("sutr", {"total": 5, "tested": 5, "passed": 5}, db_path=qdb) > 0
+def test_empty_output_is_judged_by_total_key(qdb):
+    """`total_tcs`(커버리지 키)로 판정하면 **모든** SUTR 이 빈 산출물로 접힌다.
+
+    (R37 D-3) 빈 산출물도 run 은 남는다 — 판정에서 빠지는 것은 요약·점수가 없기 때문이지
+    기록이 없기 때문이 아니다. 여기서 재는 것은 여전히 **어느 키로 세는가** 다.
+    """
+    empty = record_run("sutr", {"total": 0, "tested": 0}, db_path=qdb)
+    assert empty > 0, "빈 산출물이라고 기록 자체를 버리면 화면은 '미생성' 을 계속 보여준다"
+    assert _is_empty_run(qdb, empty) == ("empty_output", True, True)
+    # 비지 않았으면 정상 채점돼야 한다 — 판정 조건이 과하게 넓지 않은지 확인.
+    ok = record_run("sutr", {"total": 5, "tested": 5, "passed": 5}, db_path=qdb)
+    assert ok > 0
+    assert _is_empty_run(qdb, ok)[0] == "success"
 
 
 def test_helper_stamps_kind_and_project(qdb):
@@ -275,12 +291,16 @@ def test_recorder_dispatches_comprehensive_doc_types(qdb):
             assert run.summary.fn_count == 100, doc_type
 
 
-def test_comprehensive_empty_output_is_skipped_by_total_tcs(qdb):
-    """빈 산출물 skip 도 같은 키를 봐야 한다 — `total` 을 보면 **전부** skip 된다."""
-    assert record_run("swutcr", {"total_tcs": 0, "tested": 0}, db_path=qdb) == -1
-    assert record_run("switcr", {"total_tcs": 0, "tested": 0}, db_path=qdb) == -1
-    # 과하게 넓지 않은지 — 비지 않은 것은 기록돼야 한다.
-    assert record_run("swutcr", {"total_tcs": 5, "tested": 5, "passed": 5}, db_path=qdb) > 0
+def test_comprehensive_empty_output_is_judged_by_total_tcs(qdb):
+    """빈 산출물 판정도 같은 키를 봐야 한다 — `total` 을 보면 **전부** 빈 것으로 접힌다."""
+    for dt in ("swutcr", "switcr"):
+        rid = record_run(dt, {"total_tcs": 0, "tested": 0}, db_path=qdb)
+        assert rid > 0, dt
+        assert _is_empty_run(qdb, rid) == ("empty_output", True, True), dt
+    # 과하게 넓지 않은지 — 비지 않은 것은 채점돼야 한다.
+    ok = record_run("swutcr", {"total_tcs": 5, "tested": 5, "passed": 5}, db_path=qdb)
+    assert ok > 0
+    assert _is_empty_run(qdb, ok)[0] == "success"
 
 
 def test_comprehensive_advice_table_is_its_own():

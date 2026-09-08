@@ -88,8 +88,12 @@ def _rows(db, table):
         conn.close()
 
 
-def _app(*, user="tester", admin: Optional[str] = "tester"):
-    """라우터 단독 앱. `require_user`/`require_jwt_user`/`require_admin` 을 각각 덮는다."""
+def _app(*, user="tester", admin: Optional[str] = "tester", bearer: bool = True):
+    """라우터 단독 앱. `require_user`/`require_jwt_user`/`require_admin` 을 각각 덮는다.
+
+    ⚠ `bearer` 는 의존성 override 로 못 흉내 낸다 — 조회 handler 가 **요청 헤더를 직접** 보고
+    `can_review` 를 정하기 때문이다(R37 D-1). 기본 True = "admin 은 JWT 로 로그인해 있다" 는 실환경.
+    """
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
@@ -105,7 +109,7 @@ def _app(*, user="tester", admin: Optional[str] = "tester"):
     app.dependency_overrides[require_jwt_user] = lambda: user
     if admin is not None:
         app.dependency_overrides[require_admin] = lambda: admin
-    return TestClient(app)
+    return TestClient(app, headers={"Authorization": "Bearer test-token"} if bearer else {})
 
 
 @pytest.fixture
@@ -225,9 +229,10 @@ class TestGet:
         rid = _make_run(qdb, output_path=None)
         d = _app().get(f"/api/review/runs/{rid}").json()
         assert d["current_basis_reason"] == "no_path"
-        assert d["can_review"] is True  # conftest: tester 는 admin
+        assert d["can_review"] is True  # conftest: tester 는 admin + Bearer
         d2 = _app(user="reader", admin=None).get(f"/api/review/runs/{rid}").json()
         assert d2["can_review"] is False
+        assert d2["review_block_reason"] == "not_admin"
 
     def test_rehash_cache_hits_on_same_signature(self, client, qdb, tmp_path, monkeypatch):
         """같은 (mtime, size) 면 파일을 다시 읽지 않고, 바뀌면 다시 읽는다."""
@@ -915,3 +920,189 @@ class TestStatesBudgetAndSession:
         r = c.get("/api/review/states?run_ids=" + ",".join(map(str, ids)))
         assert r.status_code == 200 and len(r.json()["states"]) == 3
         assert calls["n"] == 1, f"배치가 세션을 {calls['n']}번 열었다(run 마다 init_db)"
+
+
+# ==============================================================
+# (R37 D-1) 화면이 약속한 것을 서버가 지키는가 / 이름은 누구에게 보이는가
+# ==============================================================
+
+
+class TestCanReviewMatchesTheWriteEndpoint:
+    """`can_review` 는 "지금 저장을 누르면 통과하는가" 다 — admin 여부만 보면 거짓말이 된다.
+
+    쓰기는 `require_jwt_user` **와** `require_admin` 을 둘 다 통과해야 하는데 조회는 Bearer 를
+    요구하지 않는다. 그래서 X-User 로 들어온 admin 은 입력 폼을 받고 저장에서 401 을 맞았다.
+    """
+
+    def test_admin_with_bearer_can_review(self, qdb):
+        rid = _make_run(qdb)
+        d = _app().get(f"/api/review/runs/{rid}").json()
+        assert d["can_review"] is True
+        assert d["review_block_reason"] is None
+
+    def test_admin_without_bearer_is_blocked_by_token_not_by_role(self, qdb):
+        """막힌 이유가 '권한' 이 아니라 '토큰' 이라고 말해야 재로그인으로 벗어난다."""
+        rid = _make_run(qdb)
+        d = _app(bearer=False).get(f"/api/review/runs/{rid}").json()
+        assert d["can_review"] is False
+        assert d["review_block_reason"] == "jwt_required"
+
+    def test_non_admin_with_bearer_is_blocked_by_role(self, qdb):
+        rid = _make_run(qdb)
+        d = _app(user="reader", admin=None).get(f"/api/review/runs/{rid}").json()
+        assert d["can_review"] is False
+        assert d["review_block_reason"] == "not_admin"
+
+    def test_states_column_agrees_with_the_panel(self, qdb):
+        """목록 열과 패널이 갈리면 열은 '가능' 인데 열어 보면 잠겨 있다."""
+        rid = _make_run(qdb)
+        for bearer, want in ((True, True), (False, False)):
+            c = _app(bearer=bearer)
+            single = c.get(f"/api/review/runs/{rid}").json()
+            batch = c.get(f"/api/review/states?run_ids={rid}").json()["states"][str(rid)]
+            assert single["can_review"] is want
+            assert batch["can_review"] is single["can_review"]
+            assert batch["review_block_reason"] == single["review_block_reason"]
+
+    def test_promise_is_kept_round_trip(self, qdb, monkeypatch):
+        """**핵심**: `can_review` 가 참이라고 답한 그 요청 헤더로 실제 POST 가 통과하는가.
+
+        진짜 `require_jwt_user` 를 쓴다(덮으면 Bearer 검사가 사라져 이 단언이 vacuous 해진다).
+        신원만 미들웨어 대신 주입한다 — 그래야 남는 변수가 **Bearer 유무 하나**다.
+        """
+        from fastapi import FastAPI, HTTPException
+        from fastapi.testclient import TestClient
+
+        from backend.dependencies import auth as auth_mod
+        from backend.dependencies.admin import require_admin
+        from backend.dependencies.auth import require_user
+        from backend.error_handler import http_exception_handler
+        from backend.routers import review
+
+        monkeypatch.setattr(auth_mod, "get_current_user", lambda: "tester")
+
+        app = FastAPI()
+        app.add_exception_handler(HTTPException, http_exception_handler)
+        app.include_router(review.router)
+        app.dependency_overrides[require_user] = lambda: "tester"
+        app.dependency_overrides[require_admin] = lambda: "tester"
+        rid = _make_run(qdb)
+
+        # (1) Bearer 없는 요청: 조회가 '못 쓴다' 고 답하고, 실제 POST 도 401 이다.
+        plain = TestClient(app)
+        assert plain.get(f"/api/review/runs/{rid}").json()["can_review"] is False
+        assert plain.post(f"/api/review/runs/{rid}", json=_body(_run_sha(qdb, rid))).status_code == 401
+
+        # (2) Bearer 를 든 요청: 조회가 '쓸 수 있다' 고 답했으면 POST 가 정말로 통과한다.
+        with_bearer = TestClient(app, headers={"Authorization": "Bearer t"})
+        assert with_bearer.get(f"/api/review/runs/{rid}").json()["can_review"] is True
+        res = with_bearer.post(f"/api/review/runs/{rid}", json=_body(_run_sha(qdb, rid)))
+        assert res.status_code == 200, res.text
+
+
+class TestReviewerNameExposure:
+    """검토자 이름은 admin 과 본인에게만 원문 — 로그는 가리면서 API 는 내주던 비대칭을 없앤다."""
+
+    def _seed(self, qdb, rid, reviewer="tester"):
+        c = _app(user=reviewer, admin=reviewer)
+        res = c.post(f"/api/review/runs/{rid}", json=_body(_run_sha(qdb, rid)))
+        assert res.status_code == 200, res.text
+
+    def test_admin_sees_the_real_name(self, qdb):
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        d = _app().get(f"/api/review/runs/{rid}").json()
+        assert d["reviews"][0]["reviewer"] == "tester"
+
+    def test_other_login_user_gets_a_masked_name(self, qdb):
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        d = _app(user="reader", admin=None).get(f"/api/review/runs/{rid}").json()
+        got = d["reviews"][0]["reviewer"]
+        assert got != "tester"
+        assert got == "te***r"          # mask_user 단일 출처 — 여기서 다시 만들지 않는다
+        assert "tester" not in json.dumps(d, ensure_ascii=False), "다른 필드로 실명이 샌다"
+
+    def test_own_record_is_never_masked(self, qdb):
+        """자기가 남긴 판정을 못 알아보면 갱신 대상을 고를 수 없다."""
+        rid = _make_run(qdb)
+        self._seed(qdb, rid, reviewer="someone")
+        d = _app(user="someone", admin=None).get(f"/api/review/runs/{rid}").json()
+        assert d["reviews"][0]["reviewer"] == "someone"
+
+    def test_batch_states_mask_too(self, qdb):
+        """목록 배치가 마스킹을 안 하면 패널만 가려 둔 셈이다."""
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        body = _app(user="reader", admin=None).get(f"/api/review/states?run_ids={rid}").json()
+        assert body["states"][str(rid)]["reviews"][0]["reviewer"] == "te***r"
+
+    def test_history_masks_and_admin_does_not(self, qdb):
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        assert _app().get("/api/review/history").json()["items"][0]["reviewer"] == "tester"
+        masked = _app(user="reader", admin=None).get("/api/review/history").json()
+        assert masked["items"][0]["reviewer"] == "te***r"
+
+    def test_history_filter_by_someone_elses_name_is_403(self, qdb):
+        """마스킹이 표시 계층에만 있으면 `?reviewer=` 의 결과 수가 가린 이름을 되맞힌다."""
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        res = _app(user="reader", admin=None).get("/api/review/history?reviewer=tester")
+        assert res.status_code == 403
+        assert res.json()["error"]["code"] == "REVIEWER_FILTER_FORBIDDEN"
+
+    def test_history_filter_by_own_name_is_allowed(self, qdb):
+        rid = _make_run(qdb)
+        self._seed(qdb, rid, reviewer="someone")
+        res = _app(user="someone", admin=None).get("/api/review/history?reviewer=someone")
+        assert res.status_code == 200
+        assert [i["reviewer"] for i in res.json()["items"]] == ["someone"]
+
+    def test_admin_may_filter_by_any_name(self, qdb):
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        res = _app().get("/api/review/history?reviewer=tester")
+        assert res.status_code == 200
+        assert res.json()["total"] == 1
+
+
+class TestForgedIdentityCannotUnmask:
+    """(R37 리뷰 W3) 마스킹은 **위조할 수 있는 신원** 앞에서 성립하면 안 된다.
+
+    `DEV_MODE_X_USER_FALLBACK=1`(D-1 이 근거로 든 바로 그 환경)에서는 `X-User: <admin>` 헤더 한 줄로
+    `is_admin` 이 True 가 된다. 쓰기는 `require_jwt_user` 가 막지만 **읽기 통제는 그대로 뚫려**
+    전 검토자 실명이 나가고, `X-User: <피해자>` 로는 자기일치를 만들어 403 까지 우회된다.
+    """
+
+    def _seed(self, qdb, rid, reviewer="tester"):
+        res = _app(user=reviewer, admin=reviewer).post(f"/api/review/runs/{rid}", json=_body(_run_sha(qdb, rid)))
+        assert res.status_code == 200, res.text
+
+    def test_admin_without_bearer_sees_masked_names(self, qdb):
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        d = _app(bearer=False).get(f"/api/review/runs/{rid}").json()
+        assert d["reviews"][0]["reviewer"] == "te***r", "X-User 신원만으로 실명이 풀렸다"
+
+    def test_self_match_without_bearer_is_still_masked(self, qdb):
+        """가장 교묘한 우회 — 피해자 이름을 X-User 로 대면 '본인' 이 되어 마스킹이 풀린다."""
+        rid = _make_run(qdb)
+        self._seed(qdb, rid, reviewer="victim")
+        d = _app(user="victim", admin=None, bearer=False).get(f"/api/review/runs/{rid}").json()
+        assert d["reviews"][0]["reviewer"] != "victim"
+
+    def test_history_filter_needs_bearer_too(self, qdb):
+        """필터를 열어 두면 결과 수가 가린 이름을 되맞힌다 — 마스킹과 **같은 조건**이어야 한다."""
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        res = _app(bearer=False).get("/api/review/history?reviewer=tester")
+        assert res.status_code == 403
+        assert res.json()["error"]["code"] == "REVIEWER_FILTER_FORBIDDEN"
+
+    def test_bearer_admin_still_works(self, qdb):
+        """조이고 나서 정상 경로가 막히면 그건 고친 게 아니다."""
+        rid = _make_run(qdb)
+        self._seed(qdb, rid)
+        assert _app().get(f"/api/review/runs/{rid}").json()["reviews"][0]["reviewer"] == "tester"
+        assert _app().get("/api/review/history?reviewer=tester").status_code == 200

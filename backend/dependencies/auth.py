@@ -23,6 +23,19 @@ from backend.user_context import get_current_user
 _logger = logging.getLogger(__name__)
 
 
+def has_bearer(request: Request) -> bool:
+    """이 요청이 Bearer 토큰을 들고 왔는가 — **`require_jwt_user` 와 같은 판정**.
+
+    조회 endpoint 가 "이 사용자가 지금 쓰기를 하면 통과하는가" 를 미리 답하려면 같은 기준이
+    필요하다. 판정을 두 곳에 적으면 언젠가 한쪽만 바뀌어 **화면이 허용을 약속하고 서버가 거부**한다
+    (R37 D-1: `can_review` 가 admin 여부만 보던 탓에, `DEV_MODE_X_USER_FALLBACK=1` 에서 X-User 로
+    들어온 admin 이 '검토 가능' 폼을 받고 저장 버튼에서 401 `JWT_REQUIRED` 를 맞았다).
+
+    ⚠ 신원 검증이 아니다 — 토큰의 유효성은 미들웨어가 이미 판정했고 여기는 **인증 수단**만 본다.
+    """
+    return (request.headers.get("Authorization") or "").strip().lower().startswith("bearer ")
+
+
 def require_jwt_user(request: Request) -> str:
     """JWT-only 인증 — Authorization Bearer 헤더 필수. X-User fallback 거부.
 
@@ -33,8 +46,7 @@ def require_jwt_user(request: Request) -> str:
         HTTPException 401 JWT_REQUIRED — Authorization 헤더 없거나 Bearer 형식 아님.
         HTTPException 401 AUTH_REQUIRED — middleware가 user 식별 안 함 (default).
     """
-    auth_header = (request.headers.get("Authorization") or "").strip()
-    if not auth_header.lower().startswith("bearer "):
+    if not has_bearer(request):
         _logger.warning("require_jwt_user: Authorization Bearer 누락 (X-User fallback 차단)")
         raise HTTPException(
             status_code=401,
@@ -82,4 +94,4 @@ def require_user() -> str:
     return user
 
 
-__all__ = ["require_jwt_user", "require_user"]
+__all__ = ["has_bearer", "require_jwt_user", "require_user"]

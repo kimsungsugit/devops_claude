@@ -116,6 +116,26 @@ describe('DocGenStatusBoard — 판정을 지어내지 않는다', () => {
     expect(within(tr).getByText('판정 불가')).toBeInTheDocument();
   });
 
+  it('빈 산출물은 미생성도 판정 없음도 아니다 — 왜 비었는지까지 적는다 (R37 D-3)', async () => {
+    // 예전엔 이 run 이 기록조차 안 돼서 행이 '미생성' 이었다 — 사용자는 파일을 받았는데.
+    mockApi.mockResolvedValue({
+      runs: [run({
+        status: 'empty_output',
+        meta: { empty_output_reason: 'empty:total_tcs' },
+        summary: null,
+        scores: [],
+      })],
+      total: 1,
+    });
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    expect(within(tr).getByText('산출물 비어 있음')).toBeInTheDocument();
+    expect(within(tr).queryByText('미생성')).toBeNull();
+    expect(within(tr).queryByText('판정 없음')).toBeNull();
+    // 되짚을 곳까지 — 사유가 없으면 같은 빈 문서를 다시 만든다.
+    expect(within(tr).getByText(/시험 케이스가 0건/)).toBeInTheDocument();
+  });
+
   it('생성한 적 없는 문서는 미생성이고 점수가 0 이 아니다', async () => {
     mockApi.mockResolvedValue({ runs: [], total: 0 });
     mountBoard();

@@ -12,6 +12,7 @@ import {
   verdictOf, trendVerdictOf, metricVerdictOf, gatedCountOf, gateDefinitionOf, reasonTextOf,
   REASON_TEXT, TONE_COLOR, VERDICT_CODES,
   reviewVerdictOf, reviewErrorText, reviewFreshnessOf, latestReviewOf, hashReasonText, basisReasonText, HASH_REASON_TEXT,
+  reviewBlockText, REVIEW_BLOCK_TEXT, emptyOutputText, EMPTY_OUTPUT_TEXT,
   REVIEW_DECISIONS, REVIEW_DECISION_LABEL, REVIEW_ERROR_TEXT, REVIEW_VERDICT_CODES,
 } from '../gateVerdict.js';
 
@@ -285,5 +286,112 @@ describe('hashReasonText / basisReasonText — 사유를 문장으로, 경로 �
     for (const m of py.matchAll(/return None, None, "([a-z_]+)"/g)) tokens.add(m[1]);
     expect(tokens.size).toBeGreaterThanOrEqual(7);
     for (const t of tokens) expect(HASH_REASON_TEXT[t], `사유 ${t} 에 문장이 없다`).toBeTruthy();
+  });
+});
+
+
+describe('reviewBlockText — 왜 못 쓰는지를 갈라 말한다 (R37 D-1)', () => {
+  it('토큰 사유와 권한 사유가 다른 문장이고, 각각 벗어나는 길을 담는다', () => {
+    expect(reviewBlockText('jwt_required')).toMatch(/다시 로그인/);
+    expect(reviewBlockText('not_admin')).toMatch(/admin/);
+    expect(reviewBlockText('jwt_required')).not.toBe(reviewBlockText('not_admin'));
+  });
+
+  it('사유가 없으면(구 서버) 특정 사유로 단정하지 않는다 (리뷰 I2)', () => {
+    // 서버 계약은 `viewer` 부재 = "판정 없음" 이다. 그걸 'admin 아님' 으로 접으면
+    // admin 인 사람에게 "당신은 admin 이 아닙니다" 를 보이게 된다.
+    for (const v of [null, undefined]) {
+      const t = reviewBlockText(v);
+      expect(t).toBeTruthy();
+      expect(t).not.toBe(REVIEW_BLOCK_TEXT.not_admin);
+      expect(t).toMatch(/admin/);       // 조건은 말하되 단정하지 않는다
+    }
+  });
+
+  it('모르는 토큰은 지어내지 않고 그대로 보인다', () => {
+    expect(reviewBlockText('quantum_flux')).toBe('quantum_flux');
+  });
+
+  it('사유 어휘가 서버 BLOCK_* 와 lockstep 이다 (workflow/quality/review.py)', () => {
+    const py = fs.readFileSync(path.resolve(process.cwd(), '..', 'workflow', 'quality', 'review.py'), 'utf-8');
+    const tokens = [...py.matchAll(/^BLOCK_[A-Z_]+ = "([a-z_]+)"$/gm)].map((m) => m[1]);
+    expect(tokens.length).toBeGreaterThanOrEqual(2);
+    for (const t of tokens) expect(REVIEW_BLOCK_TEXT[t], `사유 ${t} 에 문장이 없다`).toBeTruthy();
+    expect(Object.keys(REVIEW_BLOCK_TEXT).sort()).toEqual([...tokens].sort());
+  });
+});
+
+
+describe('빈 산출물 — 만들어졌지만 담을 내용이 0건이었다 (R37 D-3)', () => {
+  const emptyRun = (reason = 'empty:total_tcs') => ({
+    status: 'empty_output', meta: { empty_output_reason: reason }, summary: null,
+  });
+
+  it("'미생성' 이 아니다 — 사용자는 파일을 받았다", () => {
+    const v = verdictOf(emptyRun());
+    expect(v.code).toBe('EMPTY_OUTPUT');
+    expect(v.code).not.toBe('ABSENT');
+    expect(v.label).not.toBe('미생성');
+  });
+
+  it("'판정 없음' 으로도 접지 않는다 — 점수가 없는 이유가 분명하다", () => {
+    expect(verdictOf(emptyRun()).code).not.toBe('NONE');
+    // 요약이 없다는 점만 보면 옛 판정은 '판정 없음' 이었다 — status 를 봐야 갈린다.
+    expect(verdictOf({ summary: null }).code).toBe('NONE');
+  });
+
+  it('통과로 그리지 않는다 — 어쩌다 요약이 붙어 있어도', () => {
+    const v = verdictOf({ ...emptyRun(), summary: { gate_pass: true }, gated_metric_count: 7 });
+    expect(v.code).toBe('EMPTY_OUTPUT');
+    expect(v.tone).toBe('warning');
+  });
+
+  it('정상 run 은 건드리지 않는다', () => {
+    expect(verdictOf({ status: 'success', summary: { gate_pass: true } }).code).toBe('PASS');
+    expect(verdictOf({ summary: { gate_pass: false } }).code).toBe('FAIL');
+  });
+
+  it('사유가 어느 축이 비었는지 말하고, 되짚을 곳을 준다', () => {
+    expect(emptyOutputText(emptyRun('empty:total_tcs'))).toMatch(/시험 케이스가 0건/);
+    expect(emptyOutputText(emptyRun('empty:total_tcs'))).toMatch(/VectorCAST/);
+    expect(emptyOutputText(emptyRun('empty:his_metrics'))).toMatch(/정적분석/);
+  });
+
+  it('사유가 top-level 로 오든 meta 안으로 오든 같은 문장을 낸다 (엔드포인트 두 모양)', () => {
+    // `/api/quality/runs` 는 meta 통째로, `/api/review/runs/{id}` 는 top-level 로 준다.
+    // 한쪽만 읽으면 다른 화면이 조용히 빈 문장을 낸다 — 실제로 그렇게 한 번 새어 나갔다.
+    const viaMeta = { status: 'empty_output', meta: { empty_output_reason: 'empty:total_tcs' } };
+    const viaTop = { status: 'empty_output', empty_output_reason: 'empty:total_tcs' };
+    expect(emptyOutputText(viaTop)).toBe(emptyOutputText(viaMeta));
+    expect(emptyOutputText(viaTop)).toMatch(/시험 케이스가 0건/);
+  });
+
+  it('빈 산출물이 아니면 사유가 없다(null) — 정상 run 에 경고를 붙이지 않는다', () => {
+    expect(emptyOutputText({ status: 'success' })).toBeNull();
+    expect(emptyOutputText(null)).toBeNull();
+  });
+
+  it('사유가 없거나 모르는 토큰이어도 빈 칸을 남기지 않는다', () => {
+    expect(emptyOutputText({ status: 'empty_output', meta: {} })).toMatch(/0건/);
+    expect(emptyOutputText(emptyRun('empty:quantum'))).toBe('empty:quantum');
+  });
+
+  it('사유 어휘가 서버 _EMPTY_KEYS 와 lockstep 이다 (workflow/quality/recorder.py)', () => {
+    const py = fs.readFileSync(path.resolve(process.cwd(), '..', 'workflow', 'quality', 'recorder.py'), 'utf-8');
+    const block = py.match(/_EMPTY_KEYS = \{([\s\S]*?)\n\}/);
+    expect(block).not.toBeNull();
+    // `his_metrics` 도 dict 값이라 정규식이 잡는다 — 손으로 더하면 서버에서 지워도 가드가 통과한다.
+    const keys = new Set([...block[1].matchAll(/:\s*"([a-z_]+)"/g)].map((m) => `empty:${m[1]}`));
+    expect(keys.size).toBeGreaterThanOrEqual(6);
+    expect(keys.has('empty:his_metrics')).toBe(true);
+    expect(keys.has('empty:total_functions')).toBe(true);   // UDS 도 같은 규약(리뷰 W1)
+    for (const k of keys) expect(EMPTY_OUTPUT_TEXT[k], `사유 ${k} 에 문장이 없다`).toBeTruthy();
+    // 양방향 — 프론트에만 남은 잉여 키는 서버가 지운 축을 설명하는 죽은 문장이다(리뷰 I5).
+    expect(Object.keys(EMPTY_OUTPUT_TEXT).sort()).toEqual([...keys].sort());
+  });
+
+  it('새 코드가 VERDICT_CODES 에 등록돼 있다 — 소비처는 code 로 분기한다', () => {
+    expect(VERDICT_CODES).toContain('EMPTY_OUTPUT');
+    expect(VERDICT_CODES).toContain('ABSENT');
   });
 });

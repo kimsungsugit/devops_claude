@@ -1,6 +1,7 @@
 """Quality advisor -- analyzes low scores and suggests improvements."""
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List
 
@@ -429,6 +430,7 @@ def suggest_improvements(
     """
     from workflow.quality.db import get_session, init_db
     from workflow.quality.models import GenerationRun
+    from workflow.quality.recorder import EMPTY_OUTPUT_STATUS
 
     init_db(db_path)
 
@@ -439,6 +441,14 @@ def suggest_improvements(
 
         scores = {s.metric_name: s for s in (run.scores or [])}
         summary = run.summary
+        # (R37 리뷰 C2) "왜 점수가 없나" 의 사유는 recorder 가 이미 남겼다 — 여기서 다시 추정하지 않는다.
+        _empty_reason = None
+        if str(getattr(run, "status", "") or "") == EMPTY_OUTPUT_STATUS:
+            try:
+                _empty_reason = (json.loads(run.meta_json or "{}") or {}).get("empty_output_reason")
+            except (ValueError, TypeError):
+                _empty_reason = "empty:unknown"
+            _empty_reason = str(_empty_reason or "empty:unknown")
         doc_type = run.doc_type
 
         # 메트릭별 advice 규칙 선택
@@ -541,9 +551,17 @@ def suggest_improvements(
                 f"품질 점수 {score_txt}/100 -- **게이트 항목이 0개**라 판정이 성립하지 "
                 f"않습니다(통과 아님). threshold 설정 또는 doc_type '{doc_type}' 을 확인하세요."
             )
+        elif _empty_reason:
+            # (R37 리뷰 C2) 빈 산출물은 요약이 **일부러** 없다. 이걸 아래 "행이 없습니다" 로 말하면
+            # 없는 사실(외부 삭제)을 암시하고, 같은 카드의 보드 문구("시험 케이스가 0건…")와 정면으로
+            # 어긋난다 — 한 화면이 같은 질문에 두 답을 낸다. 사유는 recorder 가 남긴 것을 그대로 쓴다.
+            summary_text = (
+                "산출물에 담을 내용이 0건이라 **점수가 없습니다**(통과도 실패도 아님). "
+                f"사유: `{_empty_reason}` — 입력(로그 폴더·명세 문서)을 먼저 확인하세요."
+            )
         elif summary is None:
             # `quality_summaries.gate_pass` 는 NOT NULL 이라 "요약은 있는데 판정 None" 은 없다 — 판정 없음은
-            # 요약 행 부재뿐이다(recorder 는 항상 만들지만 외부 삭제·부분 복구는 가능).
+            # 요약 행 부재뿐이다. 빈 산출물(위 분기)을 제외하면 외부 삭제·부분 복구가 남는다.
             summary_text = (
                 "품질 요약이 기록되지 않아 **판정 없음**입니다(통과도 실패도 아님). "
                 f"run {run_id} 의 quality_summaries 행이 없습니다."

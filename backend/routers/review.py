@@ -4,13 +4,15 @@
 
 | 엔드포인트 | 권한 | 계약 |
 |---|---|---|
-| `GET /runs/{run_id}` | `require_user`(로그인) | 기록 목록 + `stale`/`hash_unavailable`/`superseded_by`/`can_review`. run 없음 = **404** |
+| `GET /runs/{run_id}` | `require_user`(로그인) | 기록 목록 + `stale`/`hash_unavailable`/`superseded_by`/`can_review`+`review_block_reason`. run 없음 = **404** |
 | `POST /runs/{run_id}` | `require_jwt_user` **+ `require_admin`**(§8 #8) | body `extra='forbid'`. 409 `STALE`/`HASH_UNAVAILABLE`/`VERSION_CONFLICT`, 503 `DB_BUSY` |
-| `GET /history` | `require_user` | 감사 이력, `scm_id`/`doc_type`/`run_id`/`reviewer`/`limit`/`offset` |
+| `GET /history` | `require_user` | 감사 이력, `scm_id`/`doc_type`/`run_id`/`reviewer`/`limit`/`offset`. 남의 이름 필터는 **403** |
 | `GET /states?run_ids=1,2` | `require_user` | (R35) 목록 '검토' 열용 배치 — id 마다 `GET /runs/{id}` 와 같은 본문. ≤50개, 없는 id 는 `missing` |
 
 - 200 + `{"error": …}` 를 **절대** 돌려주지 않는다 — `api.js` 는 `res.ok` 만 본다(quality.py `get_run` 과 같은 이유).
 - 경로·파일명·신원은 클라이언트가 보내지 않는다(run_id 만 — `evidence` 와 같은 구조).
+- (R37 D-1) 조회 3종은 `Viewer` 를 만들어 넘길 뿐 **권한을 판정하지 않는다** — `can_review` 는 POST 의 의존성과
+  같은 조건(admin **그리고** Bearer)이라야 하고, 검토자 이름은 admin·본인 밖에서 마스킹된다.
 - 쓰기 실패는 fail-loud(`record_run` 의 `return -1` 관용을 따르지 않는다).
 - 핸들러는 전부 `def`(스레드풀) — GET 이 산출물 파일을 다시 읽어 해시할 수 있다(세션 밖, 크기 상한·캐시는 서비스).
 """
@@ -20,17 +22,18 @@ import logging
 import re
 from typing import Any, Dict, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.dependencies.admin import require_admin
-from backend.dependencies.auth import require_jwt_user, require_user
+from backend.dependencies.auth import has_bearer, require_jwt_user, require_user
 from backend.services.admin_users import is_admin, mask_user
 from workflow.quality.review import (
     AUTH_METHOD_JWT,
     COMMENT_MAX_LEN,
     DECISIONS,
     ReviewError,
+    Viewer,
     comment_violation,
     history,
     review_state,
@@ -87,6 +90,11 @@ def _http(exc: ReviewError) -> HTTPException:
     )
 
 
+def _viewer(request: Request, user: str) -> Viewer:
+    """요청에서 **사실 셋**만 읽는다 — 판정은 `Viewer` 가 한다(권한 규칙을 라우터에 복제하지 않는다)."""
+    return Viewer(name=user, is_admin=bool(is_admin(user)), has_bearer=has_bearer(request))
+
+
 def _open_session():
     from workflow.quality.db import get_session, init_db
 
@@ -95,9 +103,9 @@ def _open_session():
 
 
 @router.get("/runs/{run_id}")
-def get_review(run_id: int, user: str = Depends(require_user)) -> Dict[str, Any]:
+def get_review(run_id: int, request: Request, user: str = Depends(require_user)) -> Dict[str, Any]:
     try:
-        return review_state(_open_session, run_id, can_review=bool(is_admin(user)))
+        return review_state(_open_session, run_id, viewer=_viewer(request, user))
     except ReviewError as exc:
         raise _http(exc) from None
 
@@ -153,6 +161,7 @@ def _parse_run_ids(raw: str) -> list[int]:
 
 @router.get("/states")
 def get_states(
+    request: Request,
     run_ids: str = Query(..., min_length=1, max_length=800),
     user: str = Depends(require_user),
 ) -> Dict[str, Any]:
@@ -163,23 +172,27 @@ def get_states(
     """
     ids = _parse_run_ids(run_ids)
     try:
-        return review_states(_open_session, ids, can_review=bool(is_admin(user)))
+        return review_states(_open_session, ids, viewer=_viewer(request, user))
     except ReviewError as exc:
         raise _http(exc) from None
 
 
 @router.get("/history")
 def get_history(
+    request: Request,
     scm_id: Optional[str] = Query(None, max_length=64),
     doc_type: Optional[str] = Query(None, max_length=16),
     run_id: Optional[int] = Query(None, ge=1),
     reviewer: Optional[str] = Query(None, max_length=120),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    _user: str = Depends(require_user),
+    user: str = Depends(require_user),
 ) -> Dict[str, Any]:
-    with _open_session() as session:
-        return history(
-            session, scm_id=scm_id, doc_type=doc_type, run_id=run_id, reviewer=reviewer,
-            limit=limit, offset=offset,
-        )
+    try:
+        with _open_session() as session:
+            return history(
+                session, scm_id=scm_id, doc_type=doc_type, run_id=run_id, reviewer=reviewer,
+                limit=limit, offset=offset, viewer=_viewer(request, user),
+            )
+    except ReviewError as exc:
+        raise _http(exc) from None

@@ -7,7 +7,7 @@ import { loadDocPaths, loadDocGenCaps, loadSharedInputs, useDocGenCapsSync } fro
 import { docGenCapsScope } from '../../docGenHelpers.js';
 import { notifyScmRegistryChanged } from '../../scmLinkedDocs.js';
 import { contextConflict, mismatchText } from '../../impactGuard.js';
-import { verdictOf, reasonTextOf } from '../../gateVerdict.js';
+import { verdictOf, reasonTextOf, emptyOutputText } from '../../gateVerdict.js';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -207,6 +207,11 @@ function whyOf(run, verdict) {
   // 분기는 `code` 로 — 라벨(표시용 한국어)로 분기하면 라벨을 고칠 때 조용히 갈린다(리뷰 W1).
   if (verdict.code === 'INDETERMINATE') {
     return reasonTextOf(run);
+  }
+  // (R37 D-3) 만들어졌는데 담을 내용이 0건이었다 — 점수가 없는 이유가 분명하므로
+  // 아래 '요약이 기록되지 않은 실행'(원인 불명) 으로 흘려보내지 않는다.
+  if (verdict.code === 'EMPTY_OUTPUT') {
+    return emptyOutputText(run);
   }
   const scores = run.scores || [];
   if (verdict.code === 'FAIL') {
