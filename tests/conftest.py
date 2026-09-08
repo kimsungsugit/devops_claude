@@ -74,6 +74,10 @@ _REPORT_DIR_TARGETS = (
     # 리터럴이라 **부르는 순간** 사용자 트리에 쓴다. 가드가 못 보던 자리라 리뷰가 짚었다.
     ("workflow.impact_orchestrator", "SUTS_REPORT_DIR", "suts"),
     ("workflow.impact_orchestrator", "SITS_REPORT_DIR", "sits"),
+    # (R39) **두 번째 산출 트리** `backend/reports/` — R38 리뷰 I-5 가 짚은 자리다.
+    # D-1 의 "전량 1회당 24개" 는 top-level `reports/` 만 잰 값이라 이쪽 유출은 세지도 않았다.
+    ("workflow.impact_orchestrator", "UDS_LOCAL_REPORT_DIR", "uds_local"),
+    ("workflow.uds_ai", "UDS_AI_DIAG_DIR", "uds_ai_diagnostics"),
 )
 
 

@@ -288,14 +288,42 @@ _CORS_ORIGINS = _CORS_DEFAULT_ORIGINS + _CORS_EXTRA
 if _CORS_EXTRA:
     _api_logger.info("CORS 추가 origin: %s", _CORS_EXTRA)
 
+#: 브라우저가 **읽을 수 있게** 노출하는 응답 헤더. cross-origin 이면 이 목록 밖 헤더는
+#: `res.headers.get(...)` 이 조용히 `null` 이 된다 — 라우터가 보낸 것과 무관하게.
+#:
+#: ⚠ (R39 N2) 앞판은 **4개뿐**이었다: `Content-Disposition` · `X-Swit-Matched` · `X-Swit-Missing` ·
+#:   `X-SwUT-Summary`. 그런데 라우터가 실제로 발행하는 X- 헤더는 **13종**이었다(AST 실측) —
+#:   `X-SwIT-*` 3 · `X-SwReport-*` 3 · `X-SwSA-*` 2 · `X-SwUT-Warnings`/`-Incomplete-Sheets` 2 가
+#:   전부 빠져 있었다. 즉 빌드 **경고와 미완성 시트 목록이 통째로 사라지는** 구성이 있었고,
+#:   주석은 "커스텀 상태 헤더를 프론트가 읽게 노출" 이라 **사실 행세**를 했다.
+#:
+#: ⚠ 지금 개발 구성에서 안 보였던 이유는 vite proxy(`/api` → 9000)라 **same-origin** 이기 때문이다.
+#:   `frontend-v2/public/config.js` 는 재빌드 없이 `window.__ARIA_API_BASE__` 를 바꾸도록
+#:   **설계된 파일**이고 주석이 split deployment 예시까지 준다 — 그 한 줄을 바꾸는 순간 발화한다.
+#:
+#: 새 헤더를 발행하면 여기 추가할 것. `tests/unit/test_response_headers_exposed.py` 가
+#: "라우터 발행 == 이 목록" 을 AST 로 강제한다(손으로 든 목록은 빠진다 — R38 D-1 교훈).
+EXPOSED_RESPONSE_HEADERS = [
+    "Content-Disposition",
+    # 빌드 산출물의 요약·경고·미완성 시트 (라우터 4곳)
+    "X-SwUT-Summary", "X-SwUT-Warnings", "X-SwUT-Incomplete-Sheets",
+    "X-SwIT-Summary", "X-SwIT-Warnings", "X-SwIT-Incomplete-Sheets",
+    "X-SwReport-Summary", "X-SwReport-Warnings", "X-SwReport-Incomplete",
+    "X-SwSA-Summary", "X-SwSA-Warnings",
+    # 추적성 매트릭스 내보내기 (jenkins.py)
+    "X-Swit-Matched", "X-Swit-Missing",
+    # (R39 N1) 이 파일이 어느 품질 run 인가 — 검토 기록과 잇는 유일한 단서
+    "X-Quality-Run-Id",
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    # 다운로드 파일명 + 커스텀 상태 헤더를 cross-origin(dev 5174)에서도 프론트가 읽게 노출.
-    expose_headers=["Content-Disposition", "X-Swit-Matched", "X-Swit-Missing", "X-SwUT-Summary"],
+    # 다운로드 파일명 + 커스텀 상태 헤더를 cross-origin 에서도 프론트가 읽게 노출.
+    expose_headers=EXPOSED_RESPONSE_HEADERS,
 )
 
 from backend.middleware import (  # noqa: E402

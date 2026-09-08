@@ -391,7 +391,7 @@ def _iter_bytesio(buf: "io.BytesIO", chunk_size: int = _CHUNK_SIZE):
 def _build_result_to_response(
     *, content_io: "io.BytesIO", filename: str, summary: dict[str, Any],
     warnings: list[str], incomplete_sheets: list[str],
-    media_type: str,
+    media_type: str, quality_run_id: Any = None,
 ) -> Response:
     """SwUT `_build_result_to_response` 패턴 그대로 — X-SwIT-* 헤더만 명명 분리.
 
@@ -446,6 +446,9 @@ def _build_result_to_response(
             "ascii", errors="replace",
         ).decode("ascii")[:512],
     }
+    # (R39 N1) "이 파일이 어느 run 인가" — 기록 실패도 `unrecorded` 로 말한다(단일 출처 헬퍼).
+    from workflow.quality.recorder import quality_run_headers
+    headers.update(quality_run_headers(quality_run_id))
     return Response(
         content=body_bytes,
         media_type=media_type,
@@ -577,9 +580,11 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT 빌드 실패 (ok=False)")
     # Quality DB recording (non-fatal). SwIT Coverage 빌더 = 통합 커버리지 출처.
+    # (R39 N1) 반환값을 받는다 — 기록 실패면 None 이고 헤더는 `unrecorded`.
+    _quality_run_id = None
     try:
         from workflow.quality.recorder import output_hash_kwargs, record_run
-        record_run(
+        _quality_run_id = record_run(
             "swit", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
             scm_id=str(getattr(req, "scm_id", "") or "") or None,
@@ -603,6 +608,7 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ),
+        quality_run_id=_quality_run_id,
     )
 
 
@@ -620,7 +626,7 @@ async def build_swit_coverage(
 
 def _record_test_quality(
     req: SwITBuildRequest, meta: Any, summary: dict[str, Any], *, doc_type: str, output_io: Any = None,
-) -> None:
+) -> int | None:
     """SITR / SwITCR 빌드 1회를 Quality DB 에 기록 (non-fatal) — swut.py `_record_test_quality` 대칭.
 
     Coverage 빌드에만 기록이 있어 SITR 은 만들어도 이력이 남지 않았다. doc_type 을
@@ -637,9 +643,10 @@ def _record_test_quality(
     **doc_type 에 기본값을 두지 않는 것도 의도다**: 빠뜨린 호출이 조용히 `sitr` 로 기록되면
     종합결과서가 SITR 행을 덮어쓴다.
     """
+    _quality_run_id = None
     try:
         from workflow.quality.recorder import output_hash_kwargs, record_test_result_run
-        record_test_result_run(
+        _quality_run_id = record_test_result_run(
             doc_type, summary,
             project_id=str(getattr(req, "project_id", "") or ""),
             asil_level=str(getattr(meta, "asil_level", "") or ""),
@@ -653,6 +660,9 @@ def _record_test_quality(
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
         _logger.exception("%s quality record skipped (non-fatal)", doc_type.upper())
+    # (R39 N1) run_id 를 **반환한다** — 호출부가 응답 헤더에 실어야 사용자가 받은 파일과
+    # 검토 대상 run 을 이을 수 있다. 기록 실패(위 except)면 None 이고 헤더는 `unrecorded`.
+    return _quality_run_id
 
 
 def _is_sitr_spec_based(req: SwITSitrBuildRequest, cfg: dict[str, Any]) -> bool:
@@ -726,7 +736,7 @@ def _do_swit_sitr_build_spec_based(
             status_code=500,
             detail=f"spec-based SwITR 빌드 실패: {'; '.join(result.warnings[:3])}",
         )
-    _record_test_quality(req, meta, result.summary, doc_type="sitr", output_io=result.xlsm_io)
+    _quality_run_id = _record_test_quality(req, meta, result.summary, doc_type="sitr", output_io=result.xlsm_io)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -734,6 +744,7 @@ def _do_swit_sitr_build_spec_based(
         warnings=result.warnings,
         incomplete_sheets=result.incomplete_sheets,
         media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+        quality_run_id=_quality_run_id,
     )
 
 
@@ -788,7 +799,7 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
-    _record_test_quality(req, meta, result.summary, doc_type="sitr", output_io=result.xlsm_io)
+    _quality_run_id = _record_test_quality(req, meta, result.summary, doc_type="sitr", output_io=result.xlsm_io)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -796,6 +807,7 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         warnings=result.warnings,
         incomplete_sheets=result.incomplete_sheets,
         media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+        quality_run_id=_quality_run_id,
     )
 
 
@@ -873,7 +885,7 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
         result.warnings.extend(_optional_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwITCR build failed (ok=False)")
-    _record_test_quality(req, meta, result.summary, doc_type="switcr", output_io=result.xlsm_io)
+    _quality_run_id = _record_test_quality(req, meta, result.summary, doc_type="switcr", output_io=result.xlsm_io)
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,
@@ -881,6 +893,7 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
         warnings=result.warnings,
         incomplete_sheets=result.incomplete_sheets,
         media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+        quality_run_id=_quality_run_id,
     )
 
 

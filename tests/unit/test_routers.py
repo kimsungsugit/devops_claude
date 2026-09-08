@@ -895,12 +895,21 @@ class TestQualityRouter:
         assert isinstance(data["trend"], list)
 
     def test_advice_nonexistent_run(self):
-        """POST /api/quality/runs/<id>/advice with nonexistent returns error."""
+        """POST /api/quality/runs/<id>/advice — 없는 run 은 **404**.
+
+        ⚠ (R39 N9) 이 테스트는 `200 + {"error"}` 라는 **낡은 계약을 고정**하고 있었다.
+        형제 `GET /runs/{id}` 는 *바로 그 이유로* 이미 404 로 고쳐졌는데(같은 파일 `get_run`
+        docstring 에 실측까지 남아 있다) 이웃인 advice 만 200 으로 남았고, 이 테스트가 그
+        상태를 계약으로 못박고 있었다.
+
+        왜 200 이 위험한가: `frontend-v2/src/api.js` 헬퍼는 `res.ok` 만 본다 — 200 이면
+        **에러를 성공으로 삼킨다**. 실제 피해는 `DocGenStatusBoard` 에서 났다.
+        `detail.advice?.summary || '제안 없음'` 이라 **조회 실패가 "개선할 게 없다"** 로 나온다.
+        """
         r = client.post("/api/quality/runs/999999/advice")
-        assert r.status_code == 200
-        data = r.json()
-        # Returns error field when advisor module or run not available
-        assert isinstance(data, dict)
+        assert r.status_code == 404, (
+            f"없는 run 에 {r.status_code} — 200 이면 프론트가 성공으로 읽고 '제안 없음' 을 그린다"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════

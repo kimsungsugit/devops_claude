@@ -28,6 +28,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `tests/unit/test_report_dirs_are_isolated.py` 가 이 상수들이 격리 표에 있는지 강제한다.
 SUTS_REPORT_DIR = REPO_ROOT / "reports" / "suts"
 SITS_REPORT_DIR = REPO_ROOT / "reports" / "sits"
+# (R39) **두 번째 산출 트리** — `backend/reports/` 도 같은 이유로 상수여야 한다.
+# 리뷰어가 R38 에서 짚었다: D-1 의 "1회당 24개" 는 top-level `reports/` 만 잰 값이라
+# 이 트리의 유출은 세지도 않고 있었다.
+UDS_LOCAL_REPORT_DIR = REPO_ROOT / "backend" / "reports" / "uds_local"
 AUTO_DOCS = {"uds", "suts", "sits"}
 FLAG_DOCS = {"sts", "sds"}
 
@@ -2157,7 +2161,7 @@ def _write_review_artifact(
 
 
 def _run_uds_generation(trigger: ChangeTrigger) -> Dict[str, Any]:
-    out_dir = REPO_ROOT / "backend" / "reports" / "uds_local"
+    out_dir = UDS_LOCAL_REPORT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     before = {p.resolve() for p in out_dir.glob("uds_spec_generated_expanded_*.docx")}
     env = os.environ.copy()

@@ -395,8 +395,14 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           runId: run.id,
           evidence: ev.status === 'fulfilled' ? ev.value : null,
           evidenceError: ev.status === 'rejected' ? (ev.reason?.message || '근거 조회 실패') : '',
-          advice: ad.status === 'fulfilled' ? ad.value : null,
-          adviceError: ad.status === 'rejected' ? (ad.reason?.message || '제안 조회 실패') : '',
+          // (R39 N9) 서버가 200 에 `{error}` 를 실어 보내던 시절이 있었다 — 그러면 `res.ok` 만 보는
+          // 헬퍼가 성공으로 넘기고, 아래 렌더가 `detail.advice?.summary || '제안 없음'` 이라
+          // **조회 실패가 "제안 없음"**(= 개선할 게 없다)으로 둔갑했다. 서버는 이제 404/503 을
+          // 내지만, 옛 응답이나 다른 경로가 `error` 를 실어도 **성공으로 읽지 않는다**.
+          advice: ad.status === 'fulfilled' && !ad.value?.error ? ad.value : null,
+          adviceError: ad.status === 'rejected'
+            ? (ad.reason?.message || '제안 조회 실패')
+            : (ad.status === 'fulfilled' && ad.value?.error ? String(ad.value.error) : ''),
           attribution: at.status === 'fulfilled' ? at.value : null,
           attributionError: at.status === 'rejected'
             ? (at.reason?.message || '원인 분석 실패') : '',

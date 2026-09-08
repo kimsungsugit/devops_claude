@@ -148,9 +148,11 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwReport Summary build failed (ok=False)")
     # Quality DB recording (non-fatal). output_path 없음(BytesIO 응답, Cloudium read-only) — 해시는 바이트로(R36 C-4).
+    # (R39 N1) 반환값을 받아 응답 헤더로 — 기록 실패면 None 이고 헤더는 `unrecorded`.
+    _quality_run_id = None
     try:
         from workflow.quality.recorder import output_hash_kwargs, record_run
-        record_run(
+        _quality_run_id = record_run(
             "swreport", result.summary,
             project_root=str(getattr(req, "project_id", "") or ""),
             # ⚠ 통합 Summary 의 `project_id` 는 프로젝트가 아니라 **마스터 양식 ID**(ES95411)
@@ -168,12 +170,13 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
         summary=result.summary,
         warnings=result.warnings,
         incomplete=result.incomplete_rows,
+        quality_run_id=_quality_run_id,
     )
 
 
 def _build_result_to_response(
     *, content_io, filename: str, summary: dict[str, Any],
-    warnings: list[str], incomplete: list[str],
+    warnings: list[str], incomplete: list[str], quality_run_id: Any = None,
 ) -> Response:
     """xlsm BytesIO → attachment Response. summary/warnings를 X-SwReport-* 헤더로.
 
@@ -214,6 +217,9 @@ def _build_result_to_response(
             "ascii", errors="replace",
         ).decode("ascii")[:512],
     }
+    # (R39 N1) "이 파일이 어느 run 인가" — 기록 실패도 `unrecorded` 로 말한다(단일 출처 헬퍼).
+    from workflow.quality.recorder import quality_run_headers
+    headers.update(quality_run_headers(quality_run_id))
     return Response(content=body_bytes, media_type=_XLSM_MEDIA, headers=headers)
 
 

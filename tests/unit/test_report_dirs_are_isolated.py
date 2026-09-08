@@ -49,6 +49,13 @@ _INLINE_EXCEPTIONS = {
     "tools.generate_uds_local": "CLI 진입점 — 출력 경로가 인자 기본값",
     "tools.impact_analysis": "CLI 진입점 — `--out` 기본값",
     "tools.validate_uds_constraints": "CLI 진입점 — 검증 대상 경로 기본값",
+    # (R39) `backend/reports/uds_local` 을 읽는 일회성 분석 도구들 — 사람이 직접 돌린다.
+    # 테스트가 import 하지 않으며(전량 실행 기준), 읽기 위주라 유출 위험이 낮다.
+    "tools.compare_suds_template": "CLI 분석 도구 — 산출물 비교(읽기)",
+    "tools.report_called_calling_accuracy": "CLI 분석 도구 — 정확도 리포트(읽기)",
+    "tools.report_swcom_context": "CLI 분석 도구 — SwCom 문맥 리포트(읽기)",
+    "tools.report_swcom_context_regression": "CLI 분석 도구 — 회귀 비교(읽기)",
+    "tools.run_manual_uds_generation": "CLI 진입점 — 수동 UDS 생성 출력 경로",
 }
 
 

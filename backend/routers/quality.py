@@ -513,9 +513,25 @@ def get_policy() -> Dict[str, Any]:
 
 @router.post("/runs/{run_id}/advice")
 def get_advice(run_id: int) -> Dict[str, Any]:
-    """품질 개선 제안 생성."""
+    """품질 개선 제안 생성.
+
+    ⚠ (R39 N9) 형제 `get_run` 이 **바로 위에서** 같은 이유로 404 로 고쳐졌는데 이 endpoint 만
+    `200 + {"error": …}` 로 남아 있었다 — 한 라우터 안에서 계약이 갈렸다는 뜻이다.
+    `api.js` 헬퍼는 `res.ok` 만 보므로 200 이면 **에러를 성공으로 삼킨다**. 실제 피해:
+    `DocGenStatusBoard.jsx` 가 `ad.status === 'fulfilled' ? ad.value : null` 로 받고
+    `detail.advice?.summary || '제안 없음'` 을 그리기 때문에, **조회 실패가 "제안 없음"**
+    (= 개선할 게 없다는 뜻)으로 화면에 나온다. 두 사실이 한 문장으로 접힌다.
+
+    - 모듈 부재 → **503**(일시적 불가, 클라이언트 잘못이 아니다 — `get_run` 과 같은 구분)
+    - 없는 run → **404**
+    """
     try:
         from workflow.quality.advisor import suggest_improvements
-        return suggest_improvements(run_id)
     except ImportError:
-        return {"error": "advisor module not available"}
+        raise HTTPException(status_code=503, detail="advisor module not available") from None
+    out = suggest_improvements(run_id)
+    # advisor 는 라이브러리라 HTTP 를 모른다 — 그쪽이 `{"error": …}` 로 사실을 말하면
+    # **라우터가** 상태코드로 옮긴다(판정은 한 곳, 표현은 각 층에서).
+    if isinstance(out, dict) and out.get("error") and "not found" in str(out["error"]):
+        raise HTTPException(status_code=404, detail=str(out["error"]))
+    return out

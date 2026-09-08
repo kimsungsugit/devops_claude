@@ -717,3 +717,21 @@ describe('QualityGateSection — 리뷰 반영 (R35 C1/W1/W2/W5)', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/states down/));
   });
 });
+
+describe('검토 대상 해시는 전체가 보여야 한다 (R39 N3)', () => {
+  it('64자 전부를 화면에서 꺼낼 수 있다 — 수동 대조가 유일한 검증 경로인 run 이 있다', async () => {
+    const user = userEvent.setup();
+    // 서버가 파일 사본을 못 가진 run(`basis='record'`)은 아래 `Get-FileHash` 수동 대조가
+    // **유일한** 검증 경로다. 앞판은 앞 12자만 보여 그 경로가 끊겨 있었다(48비트 접두는 증거가 아니다).
+    stubApi({ review: reviewState({ current_basis: 'record', current_basis_reason: 'no_path', stale: null }) });
+    render(<QualityGateSection />);
+    await waitFor(() => screen.getByText('#776'));
+    await user.click(screen.getByRole('button', { name: '근거 보기' }));
+    const panel = await waitFor(() => screen.getByTestId('review-panel'));
+    const code = within(panel).getByTitle(SHA);
+    expect(code.textContent).toBe(SHA);
+    expect(code.textContent.length).toBe(64);
+    // 안내 문구가 가리키는 대조 수단도 함께 있어야 한다 — 값만 있고 방법이 없으면 반쪽이다.
+    expect(within(panel).getByText(/Get-FileHash/)).toBeInTheDocument();
+  });
+});

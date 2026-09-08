@@ -472,6 +472,11 @@ def test_run_uds_generation_passes_source_root_to_script(tmp_path, monkeypatch):
     out_dir.mkdir(parents=True, exist_ok=True)
     generated = out_dir / "uds_spec_generated_expanded_20260324_120000.docx"
     generated.write_text("ok", encoding="utf-8")
+    # (R39) 산출 경로는 `UDS_LOCAL_REPORT_DIR` **단일 출처**다 — 예전엔 이 함수가
+    # `REPO_ROOT / "backend" / "reports" / "uds_local"` 을 인라인으로 조립해서 `REPO_ROOT`
+    # patch 만으로 따라왔지만, 그건 경로가 복제돼 있을 때만 성립하던 결합이었다.
+    # (그 인라인 때문에 세션 격리가 이 경로를 비켜가 사용자 트리에 쌓였다 — 실측 454개.)
+    monkeypatch.setattr(impact_orchestrator, "UDS_LOCAL_REPORT_DIR", out_dir)
 
     class DummyRun:
         returncode = 0

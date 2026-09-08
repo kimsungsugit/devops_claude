@@ -237,7 +237,17 @@ function ReviewPanel({ runId, onSaved }) {
             </p>
           ) : (
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              산출물 해시 <code>{String(state.output_sha256).slice(0, 12)}…</code>
+              {/* (R39 N3) **전체 64자를 꺼낼 수 있어야 한다.** 검토 가능한 run 은 대개
+                  `basis='record'`(서버에 파일 사본이 없다)라 아래 `Get-FileHash` 수동 대조가
+                  **유일한 검증 경로**인데, 앞판은 12자만 보이고 전체를 볼 수단이 없었다 —
+                  48비트 접두는 증거가 아니고, 12자라는 사실조차 화면에 안 적혀 있었다. */}
+              산출물 해시{' '}
+              <code
+                title={String(state.output_sha256)}
+                style={{ wordBreak: 'break-all', userSelect: 'all' }}
+              >
+                {String(state.output_sha256)}
+              </code>
               {' · '}
               {state.stale === true && <strong style={{ color: 'var(--color-warning)' }}>⚠ 지금 파일이 이 run 의 기록과 다릅니다 — 검토는 기록된 산출물에 붙습니다.</strong>}
               {state.stale === false && '지금 파일과 일치'}

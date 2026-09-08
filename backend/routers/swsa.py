@@ -83,7 +83,7 @@ def _json_header(obj: Any) -> str:
     return json.dumps({"truncated": True, "len": len(value)}, ensure_ascii=True)
 
 
-def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
+def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any, quality_run_id: Any = None) -> Response:
     data = res.xlsm_io.getvalue()
     filename = f"({meta.project_id}_SwSA) Software Static Analysis Report_{meta.doc_version}_{meta.test_date}.xlsm"
     # CR/LF 는 valid ASCII 라 encode(replace)로 안 걸러짐 → 헤더 인젝션/500(h11) 방지 위해 제거
@@ -107,6 +107,9 @@ def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
         "X-SwSA-Summary": _json_header(summary),
         "X-SwSA-Warnings": _json_header(warnings[:20]),
     }
+    # (R39 N1) "이 파일이 어느 run 인가" — 기록 실패도 `unrecorded` 로 말한다(단일 출처 헬퍼).
+    from workflow.quality.recorder import quality_run_headers
+    headers.update(quality_run_headers(quality_run_id))
     return Response(content=data, media_type=_MEDIA_XLSM, headers=headers)
 
 
@@ -161,10 +164,12 @@ def _do_build(req: SwSABuildRequest) -> Response:
         pmd=getattr(inputs, "pmd", None),
     )
     # Quality DB recording (non-fatal). HIS 0건이면 recorder 가 `empty_output` 으로 남긴다(R37 D-3).
+    # (R39 N1) 반환값을 받아 응답 헤더로 — 기록 실패면 None 이고 헤더는 `unrecorded`.
+    _quality_run_id = None
     try:
         _qd = _swsa_quality_data(inputs)
         from workflow.quality.recorder import output_hash_kwargs, record_run
-        record_run(
+        _quality_run_id = record_run(
             "swsa", _qd,
             project_root=str(getattr(meta, "project_id", "") or ""),
             meta={"asil_level": str(getattr(meta, "asil_level", "") or "")},
@@ -174,7 +179,7 @@ def _do_build(req: SwSABuildRequest) -> Response:
     except Exception:
         # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
         _logger.exception("SwSA quality record skipped (non-fatal)")
-    return _to_response(res, meta, inputs)
+    return _to_response(res, meta, inputs, quality_run_id=_quality_run_id)
 
 
 @router.post("/report/build")

@@ -37,6 +37,9 @@ def _dynamic_max_retries(confidence: float) -> int:
 logger = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+# (R39) 진단 산출 디렉터리 — 모듈 상수여야 테스트가 갈아끼울 지점이 생긴다.
+# 함수 안에서 조립하면 그 경로만 격리를 비켜가 사용자 트리에 쌓인다(실측 67개).
+UDS_AI_DIAG_DIR = Path(__file__).resolve().parents[1] / "backend" / "reports" / "uds_ai_diagnostics"
 
 
 def _load_prompt(name: str) -> str:
@@ -250,8 +253,7 @@ def _now_ts() -> str:
 
 def _write_diag(payload: Dict[str, Any]) -> None:
     try:
-        repo_root = Path(__file__).resolve().parents[1]
-        out_dir = repo_root / "backend" / "reports" / "uds_ai_diagnostics"
+        out_dir = UDS_AI_DIAG_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = payload.get("timestamp") or "unknown"
         name = f"uds_ai_diag_{ts}.json"

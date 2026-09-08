@@ -158,3 +158,50 @@ def test_suts_pass_no_suggestions(tmp_db):
 def test_missing_run_returns_error(tmp_db):
     res = suggest_improvements(99999, db_path=tmp_db)
     assert "error" in res
+
+
+class TestAdviceEndpointDoesNotHideErrorsBehind200:
+    """(R39 N9) `/advice` 만 `200 + {"error"}` 로 남아 있었다 — 형제는 이미 404 다.
+
+    `frontend-v2/src/api.js` 헬퍼는 `res.ok` 만 보므로 200 이면 **에러를 성공으로 삼킨다**.
+    실제 피해는 `DocGenStatusBoard` 에서 났다: `detail.advice?.summary || '제안 없음'` 이라
+    **조회 실패가 "제안 없음"**(= 개선할 게 없다)으로 화면에 나온다 — 두 사실이 한 문장으로 접힌다.
+    같은 라우터 안에서 `get_run` 은 *바로 이 이유로* 404 로 고쳐져 있었으므로, 계약이 갈려 있었다.
+    """
+
+    def _client(self, tmp_db, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from backend.dependencies.auth import require_user
+        from backend.routers import quality as quality_router
+        from workflow.quality import db as qdb
+
+        monkeypatch.setattr(qdb, "_default_db_path", lambda: tmp_db)
+        app = FastAPI()
+        app.include_router(quality_router.router)
+        # 라우터 전체가 `require_user` 를 건다. 여기서 재는 것은 **상태코드 계약**이지 인증이
+        # 아니므로 신원만 통과시킨다(인증 자체는 `test_admin_gate` 계열이 따로 잰다).
+        app.dependency_overrides[require_user] = lambda: "tester"
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_missing_run_is_404_not_200(self, tmp_db, monkeypatch):
+        res = self._client(tmp_db, monkeypatch).post("/api/quality/runs/999999/advice")
+        assert res.status_code == 404, (
+            f"없는 run 에 {res.status_code} — 200 이면 프론트가 성공으로 읽고 '제안 없음' 을 그린다"
+        )
+
+    def test_existing_run_still_returns_advice(self, tmp_db, monkeypatch):
+        """조이고 나서 정상 경로가 막히면 그건 고친 게 아니다."""
+        init_db(tmp_db)
+        with get_session(tmp_db) as s:
+            run = GenerationRun(run_uuid=str(uuid.uuid4()), doc_type="swut", status="success")
+            s.add(run)
+            s.flush()
+            s.add(QualitySummary(run_id=run.id, overall_score=50.0, gate_pass=False))
+            s.add(QualityScore(run_id=run.id, metric_name="pass_rate_pct", value=50.0,
+                               gate_pass=False, threshold=100.0))
+            rid = run.id
+        res = self._client(tmp_db, monkeypatch).post(f"/api/quality/runs/{rid}/advice")
+        assert res.status_code == 200, res.text
+        assert "summary" in res.json()

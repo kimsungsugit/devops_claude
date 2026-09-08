@@ -30,6 +30,32 @@ _logger = logging.getLogger("workflow.quality.recorder")
 # (R37 D-3) 빈 산출물 run 의 `status`. `success` 와 갈라 두면 KPI·추세·delta 가 자동으로 비켜간다.
 EMPTY_OUTPUT_STATUS = "empty_output"
 
+#: (R39 N1) 빌드 응답이 "이 파일이 어느 run 인가" 를 말하는 헤더. 값은 run id 또는 `unrecorded`.
+QUALITY_RUN_HEADER = "X-Quality-Run-Id"
+#: 기록이 안 됐을 때의 값 — 빈 헤더나 헤더 부재로 두면 "옛 서버" 와 구별되지 않는다.
+QUALITY_RUN_UNRECORDED = "unrecorded"
+
+
+def quality_run_headers(run_id: Any) -> Dict[str, str]:
+    """기록 결과 → 응답 헤더 한 줄. **실패도 말한다.**
+
+    빌더 6곳은 `record_run(...)` 을 `try/except` 로 감싸 non-fatal 로 두는데(기록이 깨져도 산출물은
+    줘야 한다), 그 반환값을 **아무도 안 봤다**. 그래서 사용자는 파일을 받고도
+    ① 이게 어느 run 인지 · ② 애초에 기록이 됐는지를 알 방법이 없었다 — 검토 기록(R34~)이
+    run 단위인데 방금 받은 파일과 그 run 을 **잇는 수단이 없다**는 뜻이다.
+
+    ⚠ 헤더를 **빼지 않는다**. 부재는 "옛 서버" 와 구별되지 않아 화면이 두 상태를 한 칸에 그린다 —
+      기록 실패는 `unrecorded` 로 **명시**한다(이 저장소의 anti-fake-green 계약).
+    ⚠ 이 헤더는 `backend/main.py::EXPOSED_RESPONSE_HEADERS` 에 **반드시** 들어가야 한다.
+      cross-origin 구성(`config.js` 의 `__ARIA_API_BASE__`)에서는 노출 목록에 없는 헤더가
+      브라우저에서 조용히 `null` 이 된다 — `tests/unit/test_response_headers_exposed.py` 가 강제한다.
+    """
+    try:
+        n = int(run_id)
+    except (TypeError, ValueError):
+        return {QUALITY_RUN_HEADER: QUALITY_RUN_UNRECORDED}
+    return {QUALITY_RUN_HEADER: str(n)} if n > 0 else {QUALITY_RUN_HEADER: QUALITY_RUN_UNRECORDED}
+
 # doc_type → summary 에서 "내용물 개수" 를 담는 키. 어휘가 문서마다 다르다(같은 뜻인데 이름이 셋).
 _EMPTY_KEYS = {
     "sts": "total_test_cases", "suts": "total_test_cases", "sits": "total_test_cases",
