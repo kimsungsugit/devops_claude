@@ -17,6 +17,7 @@ import re
 from typing import Any, Dict, List
 
 import openpyxl
+import pytest
 
 from generators.sits import (
     _INTRO_GEN_METHODS,
@@ -122,6 +123,8 @@ class TestCoverIsFilled:
         wb = _gen(tmp_path, author="김진경", date="2026.08.18")
         cover = next((wb[s] for s in wb.sheetnames if s.lower() == "cover"), None)
         if cover is None:
-            return  # 무템플릿 경로에 Cover 가 없으면 이 축은 대상 밖
+            # (R38 D-3) `return` 은 skip 집계에 안 잡혀 **초록으로 계상**된다 — 대상 밖이면
+            # 그 사실이 보여야 한다(안 그러면 Cover 시트가 통째로 사라져도 이 가드는 계속 초록).
+            pytest.skip("무템플릿 경로라 Cover 시트가 없다 — 이 축은 대상 밖")
         blob = " | ".join(_cells(cover))
         assert "[P_Name]" not in blob and "202X.XX.XX" not in blob, blob[:300]

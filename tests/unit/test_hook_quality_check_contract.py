@@ -103,10 +103,34 @@ class TestNotRunStates:
             assert v in allowed, f"not_run[{k}]={v!r} 이 NOT_RUN 상태가 아님"
 
     def test_ran_states_never_in_not_run(self, payload):
-        """`clean`/`PASS …` 같은 RAN 상태가 not_run 에 들어가면 안 된다."""
+        """`clean`/`PASS …` 같은 RAN 상태가 not_run 에 들어가면 안 된다.
+
+        ⚠ (R38 D-4) 이 루프는 **트리가 깨끗하면 0회 돈다** — `not_run` 이 비기 때문이다.
+        실측에서 이 테스트는 단언을 한 번도 평가하지 않은 채 통과하고 있었다(완전 공허).
+        그래서 아래 `test_not_run_states_declare_no_ran_state` 가 **소스 선언 자체**를 재도록
+        같은 계약을 트리 상태와 무관한 축에서 한 번 더 못박는다.
+        """
         for k, v in payload["not_run"].items():
             assert not str(v).startswith("PASS"), f"not_run[{k}]={v!r} 은 RAN 상태"
             assert v != "clean", f"not_run[{k}]={v!r} 은 RAN 상태"
+
+    def test_not_run_states_declare_no_ran_state(self):
+        """(R38 D-4) 계약을 **선언부**에서 잰다 — 트리가 깨끗해도 반드시 돈다.
+
+        위 테스트는 실제 payload 를 보므로 `not_run` 이 비면 아무것도 검사하지 않는다.
+        여기서는 `scripts/quality_check.py` 의 `_NOT_RUN_STATES` 집합을 직접 읽어,
+        RAN 을 뜻하는 어휘가 **'안 돌림' 목록에 들어가 있지 않은지**를 본다.
+        이 집합이 오염되면 훅이 *돌린 것*을 *안 돌린 것*으로 보고하고, 그 반대도 된다
+        (= 이 저장소가 반복해서 밟은 fake-green).
+        """
+        import re
+        src = _SCRIPT.read_text(encoding="utf-8")
+        m = re.search(r"_NOT_RUN_STATES = \{([^}]+)\}", src)
+        assert m, "_NOT_RUN_STATES 를 못 찾음"
+        states = set(re.findall(r'"([^"]+)"', m.group(1)))
+        assert states, "_NOT_RUN_STATES 가 비었다 — 그러면 어떤 값도 '안 돌림' 으로 안 잡힌다"
+        ran_like = {s for s in states if s == "clean" or s.startswith("PASS")}
+        assert not ran_like, f"RAN 어휘가 NOT_RUN 목록에 있다: {ran_like}"
 
 
 class TestRunnerDecodeSafety:

@@ -488,8 +488,15 @@ def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int],
         return None
     d = int(by_grade.get("D") or 0)
     c = int(by_grade.get("C") or 0)
+    # ⚠ (R38 D-5 ②) **등급을 못 읽은 함수 수를 같이 낸다.** 빈 dict 만 막던 앞판은
+    #   `by_grade={"A":785,"QM":177}` + `ungraded=195` 같은 실제 분포에서 `d=0` 을 내고,
+    #   소비처가 그걸 "이 소스에 ASIL D 함수는 없습니다" 라는 **사실 주장**으로 바꿨다.
+    #   195개가 미상인데 없다고 단언할 수는 없다 — 게다가 같은 응답의 옆 행은 이미
+    #   "425개 unit 의 등급이 부분문자열 첫 일치로 정해졌다" 고 적고 있어 자기모순이었다.
+    #   `mcdc_at_risk` 는 그대로 둔다(없는 경고를 만들지 않는다) — 바뀌는 건 **문구의 확신도**다.
+    ungraded = int(a.get("ungraded") or 0)
     cut = isinstance(eff, int) and isinstance(full, int) and eff < full
-    return {"asil_d": d, "asil_c": c, "mcdc_at_risk": bool(cut and d)}
+    return {"asil_d": d, "asil_c": c, "asil_ungraded": ungraded, "mcdc_at_risk": bool(cut and d)}
 
 
 def _permission_error_kind(message: str) -> str:
@@ -2062,7 +2069,15 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                                        f"가장 먼저 잘립니다(ISO 26262-6: ASIL D 는 MC/DC 필수)")
                         elif not _risk["asil_d"]:
                             # 없는 위험을 경고로 남겨 두면 진짜 경고가 묻힌다.
-                            reason += " (측정 기준 이 소스에 ASIL D 함수는 없습니다)"
+                            # ⚠ 다만 **등급을 못 읽은 함수가 있으면 "없습니다" 는 사실이 아니다**
+                            #   (R38 D-5 ②). 미상이 곧 QM 은 아니므로 그 수를 그대로 말한다.
+                            _ung = _risk.get("asil_ungraded") or 0
+                            if _ung:
+                                reason += (f" (확인된 ASIL D 함수는 없지만 **{_ung}개 함수의 "
+                                           f"안전 등급을 읽지 못했습니다** — 그 안에 ASIL D 가 "
+                                           f"있으면 MC/DC 가 이 상한에 먼저 잘립니다)")
+                            else:
+                                reason += " (측정 기준 이 소스에 ASIL D 함수는 없습니다)"
                         else:
                             # ASIL D 는 있는데 상한이 후보 전량을 담는 경우. 앞의 정적
                             # 문구("MC/DC 가 맨 끝이라 잘립니다")가 그대로 남으면 `ok`

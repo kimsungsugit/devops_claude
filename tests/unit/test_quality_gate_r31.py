@@ -229,17 +229,33 @@ class TestReasonsComeOnlyFromGateAxes:
     def test_info_is_empty_when_there_are_no_functions(self):
         assert _info(_qg({k: 0.0 for k in _RATE_KEYS}, {k: 50.0 for k in _THR_KEYS}, total=0)) == []
 
-    @pytest.mark.parametrize("seed", range(40))
-    def test_pass_verdict_never_carries_a_threshold_reason(self, seed):
-        """불변식: quick+confidence 판정이 True 면 임계 사유는 0개. 판정식과 같은 튜플에서 사유를 뽑기 때문."""
+    @pytest.mark.parametrize("want_pass", [True, False])
+    @pytest.mark.parametrize("seed", range(20))
+    def test_pass_verdict_never_carries_a_threshold_reason(self, seed, want_pass):
+        """불변식: quick+confidence 판정이 True 면 임계 사유는 0개. 판정식과 같은 튜플에서 사유를 뽑기 때문.
+
+        ⚠ (R38 D-4) 예전엔 `seed` 40개를 순수 랜덤으로만 뽑았는데, 축이 많아 **40개 전부
+        `verdict=False`** 였다 — 즉 docstring 이 선언한 불변식(*통과면 사유 0개*)을 검사하는
+        `if verdict:` 가지가 **한 번도 실행된 적이 없다**. 랜덤이 한쪽 방향만 치면 그 테스트는
+        반대 방향에 대해 아무것도 말하지 않는다. 이제 통과 케이스를 **의도적으로** 만든다.
+        """
         import random
 
         from backend.helpers.uds import CONFIDENCE_GATE_AXES, QUICK_GATE_AXES
 
         rng = random.Random(seed)
-        rates = {k: rng.choice([0.0, 10.0, 50.0, 90.0, 100.0]) for k in _RATE_KEYS}
         thr = {k: rng.choice([0.0, 50.0, 95.0]) for k in _THR_KEYS}
+        if want_pass:
+            # 임계는 최대 95.0 이므로 전 축 100.0 이면 반드시 통과한다.
+            rates = {k: 100.0 for k in _RATE_KEYS}
+        else:
+            rates = {k: rng.choice([0.0, 10.0, 50.0, 90.0, 100.0]) for k in _RATE_KEYS}
         verdict = all(rates[r] >= thr[t] for r, t in (*QUICK_GATE_AXES, *CONFIDENCE_GATE_AXES))
+        if want_pass:
+            assert verdict, (
+                "통과를 의도한 입력이 미통과다 — 임계 후보가 100 을 넘게 바뀌었으면 "
+                f"이 생성기를 함께 고칠 것 (thr={thr})"
+            )
         reasons = set(_codes(_qg(rates, thr))) & _THRESHOLD_CODES
         if verdict:
             assert not reasons, f"통과인데 사유 {reasons} (rates={rates}, thr={thr})"

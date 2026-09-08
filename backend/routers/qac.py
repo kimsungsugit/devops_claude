@@ -19,6 +19,11 @@ from backend.services.qac_parser import QACDataManager, parse_qac_report
 from backend.services.report_parsers import _normalize_prqa_path
 
 repo_root = Path(__file__).resolve().parents[2]
+
+# 산출 디렉터리는 **모듈 상수**로 둔다 — 함수 안에서 조립하면 테스트가 갈아끼울 지점이 없어
+# 사용자 `reports/` 에 쓴다(R38 D-1 실측: `reports/qac_impact` 1,586개 중 **1,585개**가 테스트
+# 산물이고 실물은 단 1건이었다). 상수 하나면 `conftest` 가 세션 단위로 돌린다.
+QAC_IMPACT_DIR = repo_root / "reports" / "qac_impact"
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
 
@@ -248,7 +253,7 @@ def _write_qac_impact_report(
     payload: Dict[str, Any],
 ) -> Optional[Path]:
     try:
-        out_dir = repo_root / "reports" / "qac_impact"
+        out_dir = QAC_IMPACT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = _job_slug(job_url)
         safe_fn = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in function_name).strip("_") or "function"

@@ -411,6 +411,27 @@ class TestEvaluateSwitCoverage:
         assert by["function_call_coverage_pct"]["threshold"] is None
         assert by["function_call_coverage_pct"]["gate_pass"] is None
 
+    def test_missing_function_report_leaves_function_axis_unjudged(self):
+        """(R38 D-5 ①) **형제 축도 같은 규약이다.**
+
+        위 테스트가 호출 축만 봤기 때문에, 바로 위에 있는 `function_achievement_pct` 는
+        분모가 0 이어도 `threshold=100.0` 을 달고 **0% FAIL 을 지어내고** 있었다 —
+        이 함수의 docstring 이 "그 함정을 되풀이하지 않는다" 고 적어 둔 바로 그 함정을
+        같은 함수 안에서 되풀이한 것이다. 가드가 한쪽만 보면 형제는 반드시 새어나간다.
+        """
+        by = self._by_name({**self.CANON, "swit_functions_total": 0,
+                            "swit_functions_achieved": 0})
+        assert by["function_achievement_pct"]["threshold"] is None, (
+            "함수 축을 못 읽었는데 100% 임계를 걸어 0% FAIL 을 지어낸다"
+        )
+        assert by["function_achievement_pct"]["gate_pass"] is None
+
+    def test_both_axes_stay_gated_when_measured(self):
+        """조인 것이 아니라 **재지 못한 것만** 미평가다 — 정상 입력에선 두 축 다 게이트다."""
+        by = self._by_name()
+        assert by["function_achievement_pct"]["threshold"] == 100.0
+        assert by["function_call_coverage_pct"]["threshold"] == 100.0
+
     def test_raw_vcast_coverage_is_kept_as_reference(self):
         """정렬이 버린 원시 실측을 남긴다 — 미측정과 구분되어야 한다."""
         by = self._by_name()

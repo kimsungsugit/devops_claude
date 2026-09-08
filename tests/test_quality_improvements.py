@@ -16,7 +16,11 @@ REF_SUDS = REPO_ROOT / "docs" / "(HDPDM01_SUDS) Software Unit Design Specificati
 SRS_TXT = REPO_ROOT / "docs" / "HDPDM01_SRS.txt"
 SRS_DOCX = REPO_ROOT / "docs" / "(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx"
 SDS_DOCX = REPO_ROOT / "docs" / "(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx"
-SOURCE_ROOT = Path(r"D:\Project\Ados\PDS_64_RD")
+# ⚠ (R38 D-3) `PDS_64_RD` 오타였다 — 실제 경로는 `PDS64_RD`(CLAUDE.md §Important Paths).
+# Initial commit 부터 틀려 있어서 아래 6건이 **한 번도 실행된 적이 없다**. skip 메시지가
+# "Source code directory not available" 라 환경 제약처럼 읽혔지만 어느 머신에서도 통과하지
+# 않는 값이었다 — 그 6건은 실소스 파싱과 **DOCX 생성→재파싱 왕복** 검증의 유일한 경로다.
+SOURCE_ROOT = Path(r"D:\Project\Ados\PDS64_RD")
 
 
 class TestPhase2InputOutputParsing:
@@ -691,17 +695,32 @@ class TestPhase4QGateReport:
         assert "Low" in content
 
 
+@pytest.fixture(scope="module")
+def uds_source_payload():
+    """실소스 1회 파싱 — **모듈 전체가 공유한다**(R38 리뷰 C-2).
+
+    실측(`D:\\Project\\Ados\\PDS64_RD`, 447함수): 단독 **141초**. 예전엔 이 파싱이 두 번 돌았다 —
+    `TestPhase5E2EGeneration` 의 class-scope 픽스처 하나와, 다른 클래스의
+    `test_e2e_globals_static_rate` 가 **본문에서 직접** 부른 것. 게다가 pre-commit 은
+    `-n auto` 만 주므로 기본 분산이 `load` 이고, 그러면 class-scope 픽스처가 **워커마다**
+    재생성돼 최악 6회까지 동시 파싱한다(두 CI 는 `--dist loadfile` 이라 한 워커 고정).
+    module scope 로 올려 파일 안에서는 한 번만 돌게 한다.
+    """
+    if not SOURCE_ROOT.exists():
+        pytest.skip(f"실소스 트리가 없다: {SOURCE_ROOT} — 이 축은 이 머신에서 잴 수 없다")
+    from report_generator import generate_uds_source_sections
+    payload = generate_uds_source_sections(str(SOURCE_ROOT))
+    assert payload, "generate_uds_source_sections returned empty"
+    return payload
+
+
 class TestPhase5E2EGeneration:
     """Phase 5-3: End-to-end UDS generation and quality verification."""
 
     @pytest.fixture(scope="class")
-    def generated_payload(self):
-        if not SOURCE_ROOT.exists():
-            pytest.skip("Source code directory not available")
-        from report_generator import generate_uds_source_sections
-        payload = generate_uds_source_sections(str(SOURCE_ROOT))
-        assert payload, "generate_uds_source_sections returned empty"
-        return payload
+    def generated_payload(self, uds_source_payload):
+        """모듈 픽스처에 위임 — 이 클래스만의 파싱을 따로 돌리지 않는다(R38 리뷰 C-2)."""
+        return uds_source_payload
 
     def test_source_sections_has_function_details(self, generated_payload):
         fd = generated_payload.get("function_details", {})
@@ -864,11 +883,10 @@ class TestPhase5GlobalsStatic:
         assert "counter" in found
         assert "timer_val" in found
 
-    def test_e2e_globals_static_rate(self):
-        if not SOURCE_ROOT.exists():
-            pytest.skip("Source code directory not available")
-        from report_generator import generate_uds_source_sections
-        payload = generate_uds_source_sections(str(SOURCE_ROOT))
+    def test_e2e_globals_static_rate(self, uds_source_payload):
+        # (R38 리뷰 C-2) 예전엔 여기서 실소스를 **한 번 더** 파싱했다(141초 × 2). 모듈 픽스처를
+        # 받으면 같은 결과를 공유한다 — 검증 내용은 그대로다.
+        payload = uds_source_payload
         fd = payload.get("function_details", {})
         fbn = payload.get("function_details_by_name", {})
         all_fns = list(fd.values()) + list(fbn.values())

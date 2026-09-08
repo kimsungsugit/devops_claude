@@ -21,6 +21,13 @@ from workflow.impact_changes import build_change_log, write_change_log
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# 재생성 산출 디렉터리 — **모듈 상수**로 둔다(R38 리뷰 W-1). 함수 안에서 조립하면 테스트가
+# 갈아끼울 지점이 없어 사용자 `reports/` 에 그대로 쓴다. 지금은 이 두 함수를 부르는 테스트가
+# 없어 유출이 0이지만(누적 suts 90 · sits 32 는 실 사용분), 부르는 순간 샌다 —
+# `tests/unit/test_report_dirs_are_isolated.py` 가 이 상수들이 격리 표에 있는지 강제한다.
+SUTS_REPORT_DIR = REPO_ROOT / "reports" / "suts"
+SITS_REPORT_DIR = REPO_ROOT / "reports" / "sits"
 AUTO_DOCS = {"uds", "suts", "sits"}
 FLAG_DOCS = {"sts", "sds"}
 
@@ -1844,8 +1851,13 @@ def _write_review_artifact(
     pre_suts_tcs: Dict[str, Any] | None = None,
     pre_sits_chains: Dict[str, Any] | None = None,
 ) -> str:
-    review_dir = REPO_ROOT / "reports" / "impact_audit"
-    review_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠ 경로를 여기서 다시 조립하지 않는다 — `impact_audit.AUDIT_DIR` 단일 출처를 **호출 시점에**
+    # 읽는다(R38 D-1). 예전엔 `REPO_ROOT / "reports" / "impact_audit"` 리터럴이라, 테스트가 그 상수를
+    # 갈아끼워도 이 함수만 **사용자 트리에 계속 썼다**. 그렇게 쌓인 `*_review_required_*.md` 가
+    # `build_timeline` 의 `cumulative_flag_docs`(= ISO 26262 검토 대기 배너)를 463건까지 부풀렸고,
+    # 그 463건은 전부 픽스처였다.
+    from workflow.impact_audit import ensure_audit_dir
+    review_dir = ensure_audit_dir()
     # 파일명에 scm_id 포함 — 실행 락이 scm별이라 서로 다른 프로젝트가 같은 초에 끝날 수 있고,
     # 그때 검토 산출물(ISO 26262 FLAG 증거)이 조용히 덮어써진다.
     _scm = "".join(
@@ -2177,7 +2189,7 @@ def _run_suts_generation(entry: Any, target_functions: List[str] | None = None) 
     source_root = str(entry.source_root or "").strip()
     if not source_root:
         raise RuntimeError("SUTS regeneration requires source_root")
-    out_dir = REPO_ROOT / "reports" / "suts"
+    out_dir = SUTS_REPORT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"suts_impact_{_ts()}.xlsm"
     template_path = _resolve_existing(entry.linked_docs.suts) or _discover_doc("suts", {".xlsm", ".xlsx"})
@@ -2226,7 +2238,7 @@ def _run_sits_generation(entry: Any) -> Dict[str, Any]:
     source_root = str(entry.source_root or "").strip()
     if not source_root:
         raise RuntimeError("SITS regeneration requires source_root")
-    out_dir = REPO_ROOT / "reports" / "sits"
+    out_dir = SITS_REPORT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"sits_impact_{_ts()}.xlsm"
     template_path = _resolve_existing(entry.linked_docs.sits) or _discover_doc("sits", {".xlsm", ".xlsx"})

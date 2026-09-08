@@ -66,6 +66,22 @@ def empty_output_reason(doc_type: Any, quality_data: Any) -> Optional[str]:
         except (TypeError, ValueError):
             n = 0
         return f"empty:{key}" if n <= 0 else None
+    if dt in ("swut", "swit"):
+        # ⚠ (R38 D-5 ③) 커버리지 문서의 내용물은 **TC 수가 아니라 함수 행**이다.
+        #   `total_tcs` 하나로 판정하면, 로그 폴더가 비었거나 **헤더 탐지가 실패했을 때**
+        #   (`swut_consistency_checker.py` 가 "헤더 탐지 실패로 total_tcs=0" 이라 적어 둔 바로 그
+        #   상황) 구문·분기·MC/DC 지표가 **통째로 기록되지 않는다** — ISO 26262 커버리지 증거가
+        #   무경고로 사라진다. 게다가 `evaluator.evaluate_coverage` 는 같은 `total_tcs` 를
+        #   "분모로 쓰면 완전실행 스위트를 오탐 FAIL 시킨다" 며 **비게이트 참고지표**로만 쓴다 —
+        #   판정에 못 쓰는 값을 기록 여부 판정에 쓰고 있었던 셈이다.
+        #   분모 축은 `_record_run_impl` 의 `fn_count`(swut/swit)와 **같은 키**를 본다.
+        n = 0
+        for k in ("total_tcs", "functions_with_coverage", "function_rows"):
+            try:
+                n = max(n, int(data.get(k) or 0))
+            except (TypeError, ValueError):
+                continue
+        return "empty:coverage_rows" if n <= 0 else None
     if key == "his_metrics":
         return None if data.get(key) else f"empty:{key}"
     try:

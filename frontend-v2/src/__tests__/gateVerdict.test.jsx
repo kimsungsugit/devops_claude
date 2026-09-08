@@ -382,7 +382,11 @@ describe('빈 산출물 — 만들어졌지만 담을 내용이 0건이었다 (R
     expect(block).not.toBeNull();
     // `his_metrics` 도 dict 값이라 정규식이 잡는다 — 손으로 더하면 서버에서 지워도 가드가 통과한다.
     const keys = new Set([...block[1].matchAll(/:\s*"([a-z_]+)"/g)].map((m) => `empty:${m[1]}`));
-    expect(keys.size).toBeGreaterThanOrEqual(6);
+    // (R38 D-5 ③) **dict 값만 보면 특수 분기를 놓친다.** 커버리지 문서는 세 키를 함께 보고
+    // `"empty:coverage_rows"` 를 직접 낸다 — 함수 본문이 내는 리터럴 사유도 어휘에 포함한다.
+    for (const m of py.matchAll(/"(empty:[a-z_]+)"/g)) keys.add(m[1]);
+    expect(keys.has('empty:coverage_rows')).toBe(true);
+    expect(keys.size).toBeGreaterThanOrEqual(7);
     expect(keys.has('empty:his_metrics')).toBe(true);
     expect(keys.has('empty:total_functions')).toBe(true);   // UDS 도 같은 규약(리뷰 W1)
     for (const k of keys) expect(EMPTY_OUTPUT_TEXT[k], `사유 ${k} 에 문장이 없다`).toBeTruthy();

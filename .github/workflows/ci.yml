@@ -47,8 +47,13 @@ jobs:
     #   (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달). 로컬 훅은
     #   900s+30s KILL 로 fail-closed 인데 여긴 상한이 없어 GitHub 기본값(최대 360분)에
     #   의존했다 — GitLab 은 `timeout: 15m` 을 명시하는데 여기만 비대칭이었다.
-    #   xdist 미적용(직렬)이라 로컬 179초보다 넉넉히 잡되, 종일 도는 일은 없게 한다.
-    timeout-minutes: 30
+    #   ⚠ "xdist 미적용(직렬)" 은 **낡은 서술이었다** — 아래 실행은 `-n auto --dist loadfile` 이다
+    #     (2026-09-03 B-1 에서 병렬로 바뀌었는데 이 주석만 남았다).
+    #   30 → **45분**(2026-09-08 R38, 사용자 승인). 로컬 단독 실측이 **1,270초**(18코어)이고
+    #   이 러너는 2~4코어 + `--cov` 트레이싱이라 더 든다. 증가분의 주된 원인은 R38 D-3 이
+    #   되살린 실소스 파싱 6건 — `PDS_64_RD` 오타 때문에 Initial commit 이래 한 번도 돌지
+    #   않던 것이고, 실소스 파싱과 DOCX 왕복 검증의 유일한 경로다.
+    timeout-minutes: 45
     needs: syntax-check
     # ⚠ windows 러너의 로캘은 영문(cp1252)이라 **한글 출력이 UnicodeEncodeError 로 죽는다.**
     #   개발 PC 는 한국어 로캘(cp949)이라 이 차이가 로컬에서는 안 보인다. 실측: 훅 계약

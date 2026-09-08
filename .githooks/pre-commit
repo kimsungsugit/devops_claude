@@ -145,7 +145,7 @@ if [ -n "$STAGED_DOC" ]; then
 fi
 set -e
 
-# 3. Run pytest with 900s timeout
+# 3. Run pytest with 1800s timeout (2026-09-08 R38 — 실측 1,270초, 아래 근거)
 #
 # ## 스위트가 예산을 향해 자라고 있었다 (실측)
 #
@@ -167,7 +167,7 @@ set -e
 # (b) 그래도 닿으면 **통과시키지 않는다**(fail-closed).
 #     이 저장소에서 "오래 걸린다"의 실체는 느림이 아니라 **hang** 이었다
 #     (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달 — 고친 뒤 4분 40초).
-#     179s 짜리가 900s 를 먹었다면 그건 hang 이고, hang 은 통과시킬 대상이 아니다.
+#     1,270초짜리가 1,800초를 먹었다면 그건 hang 이고, hang 은 통과시킬 대상이 아니다.
 #     정말 장비가 느린 것뿐이라면 `--no-verify` 로 넘기되 그건 **의식적 결정**이어야 한다.
 set +e
 if [ -d "tests/unit" ]; then
@@ -175,11 +175,11 @@ if [ -d "tests/unit" ]; then
     # (도구 부재를 clean 으로 읽지 않는다 = 이 저장소의 anti-fake-green 계약).
     if "$PROJECT_PY" -c "import xdist" >/dev/null 2>&1; then
         PYTEST_PAR="-n auto"
-        echo "[3/3] Running tests: tests/ 전체 (병렬 -n auto, 실측 310~433초 / timeout 900s)..."
+        echo "[3/3] Running tests: tests/ 전체 (병렬 -n auto, 실측 1,270초 단독 / timeout 1800s)..."
     else
         PYTEST_PAR=""
-        echo "[3/3] Running tests: tests/ 전체 (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
-        echo "   ⚠️  직렬은 실측 590s+ 라 예산 900s 를 넘길 가능성이 높다(integration 추가분 포함)."
+        echo "[3/3] Running tests: tests/ 전체 (**직렬** — pytest-xdist 미설치 / timeout 1800s)..."
+        echo "   ⚠️  직렬은 병렬(1,270초)의 3배 이상이라 예산 1800s 도 넘길 가능성이 높다."
         echo "       설치 권장: $PROJECT_PY -m pip install pytest-xdist"
     fi
     # `-k 30`: TERM 30초 뒤에도 살아 있으면 KILL. 병렬 실행은 워커가 손자 프로세스라
@@ -194,13 +194,23 @@ if [ -d "tests/unit" ]; then
     #     있던) 시절의 기대가 그대로 남아 있었다.
     #   예산: **실측 310~433초**(7,288 passed / 16 skipped, -n auto 18코어, 2026-08-21).
 #   ⚠ 같은 규모가 310·372·433초로 갈렸다 — 동시 실행 부하 차이다. **단일 수치로 믿지 말 것.**
-    #   최악 관측(433초) 기준 900s 까지 여유 **467초**. ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
+    #   ⚠ 이 아래 수치는 **R38 이전(815초 시절)** 것이다. 현행은 단독 1,270초 / 예산 1800s.
+    #   최악 관측(433초) 기준 900s 까지 여유 **467초**(당시). ⚠ 처음엔 "unit 550s + integration 96s = 645s, 여유 245s"
     #   로 적었는데 **틀렸다** — 그 550s·96s 는 다른 작업과 동시 실행 중에 잰 값이라
     #   부하가 섞여 있었다. 따로 잰 수를 더하지 말고 **합쳐서 한 번 잴 것**.
     #   루트 직속 3파일도 편입돼 **제외 0** — `tests/unit/test_gate_reach.py` 의 `_EXEMPT = {}`
     #   가 비어 있는 것이 정상이고, 그 가드가 새 사각지대를 막는다(2026-09-03 정정: 이 줄이
     #   4곳에서 게이트를 실제보다 약하게 서술하고 있었다).
-    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
+    # ⚠ 예산 900 → **1800초**(2026-09-08 R38, 사용자 승인). 실측이 예산을 넘었기 때문이다:
+    #   단독 `-n auto`(18코어) **1,270초 / 9,079 passed + 10 skipped**.
+    #   늘어난 주된 이유는 R38 D-3 이 되살린 6건이다 — `tests/test_quality_improvements.py` 의
+    #   실소스 파싱(447함수, 단독 141초)이 `PDS_64_RD` 오타 때문에 Initial commit 이래
+    #   **한 번도 돌지 않다가** 이제 돈다. 그 6건은 실소스 파싱과 DOCX 생성→재파싱 왕복을
+    #   검증하는 유일한 경로라 되살린 값이 크고, 그래서 예산을 줄이는 대신 늘렸다.
+    #   (R38 리뷰 C-2 로 파싱 횟수는 2→1 로 줄였다 — 모듈 스코프 `uds_source_payload`.)
+    # ⚠ **fail-closed 는 그대로다.** 이 상한의 목적은 "느림" 이 아니라 **hang** 을 잡는 것이고,
+    #   1,270초짜리가 1,800초를 먹었다면 그건 여전히 hang 이다(여유 530초 = 42%).
+    TEST_OUTPUT=$(timeout -k 30 1800 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
     # ⚠ **전문을 파일로 남긴다.** 위 `tail -20` 은 화면용이고, 실패 시엔 그걸로 부족하다:

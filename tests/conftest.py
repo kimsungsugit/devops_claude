@@ -57,6 +57,73 @@ def _isolate_quality_db():
             pathlib.Path(str(db_file) + suffix).unlink(missing_ok=True)
 
 
+#: 세션 격리 대상 — `(모듈 경로, 상수 이름, 하위 디렉터리 이름)`. **여기 없는 경로는 격리되지 않는다.**
+#: 새 산출 디렉터리를 만들면 이 표에 한 줄을 더하고, 아래 `test_report_dirs_are_isolated.py` 의
+#: 전수 가드가 "코드가 쓰는 `reports/` 하위 == 이 표" 를 강제한다(손으로 든 목록은 반드시 빠진다).
+_REPORT_DIR_TARGETS = (
+    ("workflow.impact_changes", "CHANGE_DIR", "impact_changes"),
+    ("workflow.impact_audit", "AUDIT_DIR", "impact_audit"),
+    ("backend.routers.qac", "QAC_IMPACT_DIR", "qac_impact"),
+    ("backend.routers.impact", "UDS_REPORT_DIR", "uds"),
+    # ⚠ 이 줄은 **가드가 찾아냈다**. 감사가 짚은 4개만 넣고 끝냈다가, 전수 스캔에서
+    #   `impact_jobs`(249개 누적)가 빠져 있는 걸 발견했다 — 손으로 든 목록은 빠진다는 것을
+    #   같은 라운드 안에서 그대로 재현한 셈이다. 그래서 `test_report_dirs_are_isolated.py` 가
+    #   "`reports/` 하위를 가리키는 모듈 상수 전수 == 이 표" 를 강제한다.
+    ("workflow.impact_jobs", "JOB_DIR", "impact_jobs"),
+    # (R38 리뷰 W-1) 재생성 산출 2곳 — 부르는 테스트가 아직 없어 유출은 0이었지만, 인라인
+    # 리터럴이라 **부르는 순간** 사용자 트리에 쓴다. 가드가 못 보던 자리라 리뷰가 짚었다.
+    ("workflow.impact_orchestrator", "SUTS_REPORT_DIR", "suts"),
+    ("workflow.impact_orchestrator", "SITS_REPORT_DIR", "sits"),
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_report_dirs():
+    """테스트는 **사용자의 `reports/` 트리**에 쓰지 않는다.
+
+    R36 이 `reports/quality.sqlite` 한 곳에 격리를 넣었는데, 같은 결함이 `reports/` 하위 4개
+    디렉터리에 그대로 남아 있었다 — 그리고 **분모가 8배 크고 사용자 화면에 직결**된다.
+    실측(2026-09-08, R38 D-1): 전량 실행 1회당 24개 파일이 새로 생기고, 누적은
+    `impact_changes` 11,128 · `impact_audit` 4,906 · `uds` 3,638 · `qac_impact` 1,586 이며
+    그중 `qac_impact` 는 **1,586개 중 1,585개**가 테스트 산물(실물 1건)이었다.
+
+    왜 화면이 틀어지나: `build_timeline(scm_id, limit=200)` 이 이 파일들을 시각 역순으로 읽는다.
+    픽스처가 매 실행마다 새 타임스탬프로 쌓이므로 **최신 200건을 100% 점유**했고, HDPDM01 의
+    실제 영향분석 이력 735건은 화면에서 완전히 사라졌다(`distinct_changed_functions` 9 vs 대조군
+    kjpds02_pv 821). 그 값은 `ProjectSummarySection.jsx` 가 *"배너의 유일한 출처"* 라고 적은
+    경로이고 `summary_insight.py` 가 **AI 인사이트 입력**으로도 읽는다.
+
+    ⚠ 왜 세션 autouse 인가 — 개별 `monkeypatch.setattr(…CHANGE_DIR…)` 이 이미 **47곳**에 있었는데
+      **3파일이 빠져서** 유출이 계속됐다. 파일 목록을 손으로 드는 격리는 반드시 빠진다.
+      함수 스코프 monkeypatch 는 이 세션 값을 저장했다 되돌리므로 기존 47곳은 그대로 동작한다.
+    """
+    root = _TMP_ROOT / f"reports-test-{os.getpid()}"
+    mp = pytest.MonkeyPatch()
+    patched: list[str] = []
+    skipped: list[str] = []
+    for mod_path, attr, sub in _REPORT_DIR_TARGETS:
+        try:
+            mod = __import__(mod_path, fromlist=["_"])
+        except ImportError as exc:
+            # 의존성 부재 환경(sqlalchemy·fastapi 등) — 그 모듈의 쓰기 경로 자체가 없으니 위험도 없다.
+            # ⚠ 그래도 **침묵하지 않는다**(R38 리뷰 I-1). 빈 출력을 "격리됨" 으로 읽는 것이
+            #   이 저장소가 반복해 고친 fake-green 패턴이다.
+            skipped.append(f"{mod_path}.{attr}({type(exc).__name__})")
+            continue
+        target = root / sub
+        target.mkdir(parents=True, exist_ok=True)
+        mp.setattr(mod, attr, target, raising=True)
+        patched.append(f"{mod_path}.{attr}")
+    if skipped:
+        print(f"\n[reports 격리] DISABLED {len(skipped)}건 — {', '.join(skipped)} "
+              f"(적용 {len(patched)}건)")
+    try:
+        yield root
+    finally:
+        mp.undo()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 @pytest.fixture()
 def sample_report_dir(tmp_path: Path) -> Path:
     """Create a sample report directory with minimal JSON files for MCP tests."""

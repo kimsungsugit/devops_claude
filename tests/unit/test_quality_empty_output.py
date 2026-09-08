@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 import sqlite3
 
 import pytest
@@ -58,6 +59,23 @@ def _run(qdb_path, run_id):
             "sha": run.output_sha256,
             "size": run.output_size_bytes,
         }
+
+
+def _scores(qdb_path, run_id):
+    """`{metric_name: {value, gate_pass, threshold}}` — 요약이 **정직한지**까지 보려면 값이 필요하다."""
+    init_db(qdb_path)
+    with get_session(qdb_path) as s:
+        run = s.query(GenerationRun).filter_by(id=run_id).one()
+        return {sc.metric_name: {"value": sc.value, "gate_pass": sc.gate_pass,
+                                 "threshold": sc.threshold} for sc in run.scores}
+
+
+def _summary(qdb_path, run_id):
+    init_db(qdb_path)
+    with get_session(qdb_path) as s:
+        run = s.query(GenerationRun).filter_by(id=run_id).one()
+        return {"gate_pass": run.summary.gate_pass, "overall_score": run.summary.overall_score} \
+            if run.summary else {}
 
 
 class TestTheFactIsKeptTheScoreIsNot:
@@ -104,7 +122,7 @@ class TestTheFactIsKeptTheScoreIsNot:
         meta = _run(qdb, rid)["meta"]
         assert meta["asil_level"] == "ASIL D"
         assert meta["kind"] == "coverage"
-        assert meta["empty_output_reason"] == "empty:total_tcs"
+        assert meta["empty_output_reason"] == "empty:coverage_rows"
 
     def test_scm_id_is_resolved_like_a_normal_run(self, qdb, monkeypatch):
         """프로젝트 축이 없으면 화면(프로젝트별 조회)이 이 run 을 못 찾아 여전히 '미생성' 이다."""
@@ -218,7 +236,7 @@ class TestFailureIsNotOverwrittenByEmptiness:
         rid = record_run("swut", {"total_tcs": 0}, status="failed", error_msg="빌더 예외", db_path=qdb)
         got = _run(qdb, rid)
         assert got["status"] == "failed", "실패가 empty_output 으로 갈아끼워졌다"
-        assert got["meta"]["empty_output_reason"] == "empty:total_tcs", "사유는 그대로 남아야 한다"
+        assert got["meta"]["empty_output_reason"] == "empty:coverage_rows", "사유는 그대로 남아야 한다"
 
     def test_default_status_becomes_empty_output(self, qdb):
         rid = record_run("swut", {"total_tcs": 0}, db_path=qdb)
@@ -246,7 +264,7 @@ class TestConsumersOfTheNewStatus:
 
         st = review_state(_open, rid, viewer=Viewer(name="t", is_admin=True, has_bearer=True))
         assert st["status"] == EMPTY_OUTPUT_STATUS
-        assert st["empty_output_reason"] == "empty:total_tcs"
+        assert st["empty_output_reason"] == "empty:coverage_rows"
         # 해시가 있으니 검토는 열린다 — 잠그는 게 아니라 **말하는** 것이 이 fix 다.
         assert st["hash_unavailable"] is False
         assert st["can_review"] is True
@@ -258,7 +276,7 @@ class TestConsumersOfTheNewStatus:
         rid = record_run("swut", {"total_tcs": 0}, db_path=qdb)
         out = suggest_improvements(rid, db_path=qdb)
         assert "0건" in out["summary"], out["summary"]
-        assert "empty:total_tcs" in out["summary"]
+        assert "empty:coverage_rows" in out["summary"]
         assert "행이 없습니다" not in out["summary"], "없는 사실(삭제)을 암시한다"
 
     def test_advisor_keeps_the_old_message_for_a_truly_missing_summary(self, qdb):
@@ -276,3 +294,78 @@ class TestConsumersOfTheNewStatus:
             conn.close()
         out = suggest_improvements(rid, db_path=qdb)
         assert "행이 없습니다" in out["summary"], out["summary"]
+
+
+class TestCoverageDocsJudgeCoverageRows:
+    """(R38 D-5 ③) 커버리지 문서의 "비었다" 는 **TC 수가 아니라 함수 행**으로 판정한다.
+
+    앞판은 swut/swit 를 `total_tcs` 하나로 판정했다. 그런데 그 값은
+    ① 이 문서가 재는 축(함수 커버리지)이 아니고,
+    ② `evaluator.evaluate_coverage` 가 "분모로 쓰면 완전실행 스위트를 오탐 FAIL 시킨다" 며
+       **비게이트 참고지표**로만 쓰는 값이며,
+    ③ `swut_consistency_checker` 가 "헤더 탐지 실패로 `total_tcs=0`" 이라 적어 둔 **파서 실패의 증상**이다.
+    그래서 0 이 되는 순간 구문·분기·MC/DC 지표가 통째로 기록되지 않았다 — ISO 26262 커버리지
+    증거가 무경고로 사라지는 자리다.
+    """
+
+    @pytest.mark.parametrize("doc_type", ["swut", "swit"])
+    @pytest.mark.parametrize("key", ["functions_with_coverage", "function_rows"])
+    def test_function_rows_alone_keep_the_run_scored(self, qdb, doc_type, key):
+        """TC 가 0 이어도 **커버리지 행이 있으면** 채점한다(요약이 생긴다)."""
+        rid = record_run(doc_type, {"total_tcs": 0, key: 314, "statement_pct": 88.0},
+                         db_path=qdb)
+        row = _run(qdb, rid)
+        assert row["status"] == "success", "커버리지 행이 있는데 빈 산출물로 접혔다"
+        assert row["meta"].get("empty_output_reason") is None
+        assert row["has_summary"], "요약이 없으면 판정에서 빠진다 — 커버리지 증거가 사라진다"
+
+    @pytest.mark.parametrize("doc_type", ["swut", "swit"])
+    def test_the_summary_that_appears_is_honest(self, qdb, doc_type):
+        """(R38 리뷰 C-1) **요약이 생기는 것만으로는 부족하다 — 그 요약이 사실이어야 한다.**
+
+        D-5 ③ 이 공허 축을 넓히면서, 예전엔 `empty_output` 으로 판정을 비켜가던 run 이 이제
+        채점 경로로 들어온다. 그 경로의 `pass_rate_pct` 는 분모 0(=실행 결과를 못 읽음)을
+        `max(denom, 1.0)` 으로 접어 **"통과율 0%" 라는 사실 주장**을 만들고 있었다 —
+        전 축 100% 인 문서가 미달로 기록됐다(리뷰어 실증 `overall 66.67 / gate_pass False`).
+        축을 넓힌 쪽이 그 하류를 같이 보지 않으면, 정직화가 새 거짓을 연다.
+        """
+        # 평가기가 doc_type 마다 다르다 — swut 은 `evaluate_coverage`(구문/분기/MC-DC 축),
+        # swit 은 `evaluate_swit_coverage`(함수 달성/호출 축). 두 축 모두 **100% 로 채우고**
+        # 실행 결과만 0건으로 둔다: 그래야 미달이 나오면 그건 지어낸 것이다.
+        data = {"total_tcs": 0, "function_rows": 712, "functions_with_coverage": 712}
+        if doc_type == "swut":
+            data.update({"overall_statement_pct": 100.0, "overall_branch_pct": 100.0,
+                         "overall_mcdc_pct": 100.0})
+        else:
+            data.update({"swit_functions_total": 712, "swit_functions_achieved": 712,
+                         "swit_function_calls_total": 900, "swit_function_calls_covered": 900})
+        rid = record_run(doc_type, data, db_path=qdb)
+        scores = _scores(qdb, rid)
+        pr = scores.get("pass_rate_pct")
+        assert pr is not None, "통과율 지표 자체가 사라졌다"
+        assert pr["threshold"] is None, (
+            f"실행 결과가 0건인데 통과율에 임계를 걸어 미달을 지어낸다 (value={pr['value']})"
+        )
+        assert pr["gate_pass"] is None
+        assert _summary(qdb, rid)["gate_pass"] is not False, (
+            "재지 못한 축 때문에 문서 전체가 미달로 기록된다"
+        )
+
+    @pytest.mark.parametrize("doc_type", ["swut", "swit"])
+    def test_both_axes_zero_is_still_empty(self, qdb, doc_type):
+        """둘 다 0 일 때만 빈 산출물 — 사유는 어느 축인지 말하지 않고 **둘 다 봤다**고 말한다."""
+        rid = record_run(doc_type, {"total_tcs": 0, "function_rows": 0}, db_path=qdb)
+        row = _run(qdb, rid)
+        assert row["status"] == "empty_output"
+        assert row["meta"]["empty_output_reason"] == "empty:coverage_rows"
+
+    def test_comprehensive_docs_still_use_total_tcs(self, qdb):
+        """종합결과서(swutcr/switcr)는 **커버리지 문서가 아니다** — 축을 함께 옮기지 않았다."""
+        rid = record_run("swutcr", {"total_tcs": 0}, db_path=qdb)
+        assert _run(qdb, rid)["meta"]["empty_output_reason"] == "empty:total_tcs"
+
+    def test_reason_token_has_a_screen_sentence(self):
+        """새 사유 토큰이 화면 문구 표에 있어야 한다 — 없으면 사용자는 코드를 본다."""
+        gv = (pathlib.Path(__file__).resolve().parents[2]
+              / "frontend-v2" / "src" / "gateVerdict.js").read_text(encoding="utf-8")
+        assert "'empty:coverage_rows'" in gv, "gateVerdict.EMPTY_OUTPUT_TEXT 에 문장이 없다"

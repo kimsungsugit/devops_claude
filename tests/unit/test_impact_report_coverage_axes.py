@@ -112,17 +112,22 @@ class TestRenderedArtifactShowsTheAxes:
 
     @staticmethod
     def _render(tmp_path, monkeypatch, quality):
+        import pathlib
+
         import workflow.impact_orchestrator as mod
+        from workflow import impact_audit
         from workflow.change_trigger import ChangeTrigger
 
-        monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+        # (R38 D-1) 감사 디렉터리는 `impact_audit.AUDIT_DIR` **단일 출처**다 — 예전엔 이 테스트가
+        # `mod.REPO_ROOT` 를 갈아끼우고 `REPO_ROOT/reports/impact_audit` 를 손으로 재조립했는데,
+        # 그건 라이터가 경로를 **인라인으로 복제**하고 있을 때만 성립하던 결합이었다.
+        monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "reports" / "impact_audit")
         linked = _payload(tmp_path, quality)
         trig = ChangeTrigger(trigger_type="manual", scm_id="T", source_root=str(tmp_path),
                              scm_type="git", base_ref="HEAD", changed_files=["a.c"])
         out = mod._write_review_artifact("sts", trig, {}, {}, None, linked)
-        return (tmp_path / "reports" / "impact_audit" /
-                out.split("impact_audit")[-1].lstrip("\\/")).read_text(encoding="utf-8") \
-            if "impact_audit" in out else ""
+        # 라이터가 **실제로 쓴 경로**를 그대로 읽는다 — 경로를 재조립하면 그 조립식이 또 하나의 복제다.
+        return pathlib.Path(out).read_text(encoding="utf-8") if out else ""
 
     def test_all_axes_and_warnings_appear_in_markdown(self, tmp_path, monkeypatch):
         txt = self._render(tmp_path, monkeypatch, _STS_QUALITY)

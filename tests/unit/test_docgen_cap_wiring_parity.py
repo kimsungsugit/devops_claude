@@ -105,11 +105,15 @@ def test_unadjustable_caps_have_no_handler_param_and_say_why() -> None:
     이 단언이 없으면 "전부 False 로 바꿔라" 뮤턴트가 살아남아, 이번에 고친 STS/SUTS 가
     조용히 죽은 입력칸으로 되돌아간다.
     """
+    seen_caps = 0
+    checked = 0
     for doc_type in req.doc_types():
         spec = req.requirements_for(doc_type)
         for name, cap in (spec.get("caps") or {}).items():
+            seen_caps += 1
             if cap.get("adjustable"):
                 continue
+            checked += 1
             with pytest.raises((KeyError, AssertionError)):
                 _form_default(spec["handler"], name)
             # env(환경변수로는 가능)와 fixed(코드 상수라 수단 없음)는 **사용자에게 다른
@@ -117,6 +121,16 @@ def test_unadjustable_caps_have_no_handler_param_and_say_why() -> None:
             assert cap.get("env") or cap.get("fixed"), (
                 f"{doc_type}/{name}: 왜 못 바꾸는지가 없다"
             )
+    # (R38 D-4) **관측량을 단언한다.** 실측에서 `adjustable` 아닌 cap 이 0개라 위 루프 본문이
+    # 통째로 실행되지 않은 채 통과하고 있었다(`pytest.raises` 포함 전량 미실행).
+    # caps 자체가 비면 그건 스펙이 사라진 것이므로 즉시 실패시킨다.
+    assert seen_caps > 0, "cap 스펙이 하나도 없다 — 이 가드가 지킬 대상이 사라졌다"
+    # ⚠ `checked` 는 **단언하지 않는다**(리뷰 W-3). 앞판은 `assert checked == 0` 으로 "지금 대상이
+    #   0" 을 못박았는데, 그러면 **정당한 신규 non-adjustable cap 이 생기는 순간 이 테스트가 실패**한다 —
+    #   가드가 지키려던 계약(조정 불가면 핸들러에 없고 사유가 있다)은 그때 비로소 돌아야 하는데,
+    #   그 변경 자체를 막아 버리는 셈이다. 대상이 0 이라는 사실은 숨기지 않되(아래 이름 그대로),
+    #   0 을 계약으로 고정하지는 않는다.
+    assert checked >= 0  # 관측만 — 0 이면 위 계약 검사는 "지킬 대상 없음" 이다
 
 
 def test_adjustable_flag_and_api_default_cannot_disagree() -> None:

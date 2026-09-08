@@ -1337,7 +1337,12 @@ class TestMemoryMonitor20:
 
         from backend.routers import _safety as safety_mod
         if not safety_mod._HAS_PSUTIL:
-            return  # psutil 미설치 환경 skip
+            # (R38 D-3) 예전엔 `return` 이라 **skip 집계에도 안 잡히고 초록으로 계상**됐다.
+            # 실측: 프로덕션 인터프리터(`backend/.venv`)엔 psutil 이 있는데 테스트 venv 엔 없어서,
+            # 라이브에선 도는 메모리 가드가 게이트에선 영구 미검증이었다(호스트/타깃 divergence).
+            # 이제 `requirements-dev.txt` 가 psutil 을 요구하므로 이 분기는 실제로는 안 탄다 —
+            # 타는 환경이 생기면 **보이게** 한다.
+            pytest.skip("psutil 미설치 — 메모리 가드 경로를 검증할 수 없다")
         with _patch("backend.routers._safety.psutil.Process",
                     side_effect=Exception("mock error")):
             assert safety_mod.get_process_memory_mb() is None

@@ -19,6 +19,12 @@ from backend.schemas import (
 
 repo_root = Path(__file__).resolve().parents[2]
 
+# 산출 디렉터리는 **모듈 상수**로 둔다 — 함수 안에서 `repo_root / "reports" / …` 를 조립하면
+# 테스트가 그 경로를 갈아끼울 지점이 없어 **사용자 `reports/` 에 그대로 쓴다**(R38 D-1 실측:
+# `reports/uds` 3,638개 중 3,618개가 테스트 산물이었고, 그 파일들이 `build_timeline` 의 최신
+# 200건을 100% 점유해 실물 이력을 화면에서 가렸다). 상수 하나면 `conftest` 가 세션 단위로 돌린다.
+UDS_REPORT_DIR = repo_root / "reports" / "uds"
+
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
 
@@ -56,7 +62,7 @@ def impact_analyze(req: ImpactAnalyzeRequest) -> Dict[str, Any]:
         # — 형제 엔드포인트(/ai-guide, /explain-change)와 동일 정책. 상세는 서버 로그에만.
         _logger.exception("impact analyze failed")
         raise HTTPException(status_code=500, detail="영향도 분석에 실패했습니다. 서버 로그를 확인하세요.")
-    out_dir = repo_root / "reports" / "uds"
+    out_dir = UDS_REPORT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out_md = out_dir / f"impact_analysis_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.md"
     out_json = out_md.with_suffix(".json")

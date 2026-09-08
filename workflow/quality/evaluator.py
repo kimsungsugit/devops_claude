@@ -454,7 +454,15 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     # 완전실행 스위트를 오탐 FAIL 시킬 수 있다(deep-review W1). not_executed 부재면
     # 실행분(tested)으로 폴백 — 데이터부재 과도 penalty·0除 방지.
     denom = tested + _safe_float(summary, "not_executed")
-    metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2), threshold=100.0))
+    # (R38 리뷰 C-1) 분모 0 = 실행 결과를 못 읽은 것 — `max(denom,1.0)` 이 그걸 **0% FAIL 로**
+    # 만든다. 예전엔 `empty_output_reason` 이 `total_tcs==0` 을 먼저 걸러 여기 못 닿았는데,
+    # D-5 ③ 이 커버리지 문서의 공허 축을 함수 행까지 넓히면서 **그 보호막이 걷혔다**:
+    # 로그 폴더가 비어도 커버리지 행이 있으면 이제 채점된다. 그 run 은 함수 달성·호출 커버리지가
+    # 100% 여도 "통과율 0%" 로 미달 기록된다(리뷰어 실증: overall 66.67 / gate_pass False).
+    # 규약은 R32 가 세운 `_gate_if_applicable` 단일 출처다 — 형제 축만 고치고 이 축을 두면
+    # 같은 결함이 옆줄에 남는다(D-5 ① 이 고친 것과 정확히 같은 형태).
+    metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2),
+                           threshold=_gate_if_applicable(100.0, denom)))
 
     metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
 
@@ -520,9 +528,15 @@ def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = Non
 
     fn_total = _safe_float(summary, "swit_functions_total")
     fn_achieved = _safe_float(summary, "swit_functions_achieved")
+    # 분모 0 = 함수 축을 못 읽은 것(양식 파싱 실패·레거시 경로) — 아래 호출 축과 **같은 규약**으로
+    # 미평가(threshold None)로 둔다. ⚠ 예전엔 이 줄만 무조건 `threshold=100.0` 이라, 바로 아래
+    # 형제가 "위 docstring 이 지적한 그 함정을 이 함수 안에서 되풀이하지 않기 위한 분기" 라고
+    # 적어 둔 그 함정을 **같은 함수 안에서 되풀이했다**(R38 D-5 ①): 재지도 않은 축이 0% FAIL 로
+    # 기록되고, 그 FAIL 은 "달성률 0%" 라는 사실 주장이 된다.
     metrics.append(
         _metric("function_achievement_pct",
-                round(fn_achieved / max(fn_total, 1.0) * 100, 2), threshold=100.0),
+                round(fn_achieved / max(fn_total, 1.0) * 100, 2),
+                threshold=100.0 if fn_total > 0 else None),
     )
 
     calls_total = _safe_float(summary, "swit_function_calls_total")
@@ -567,7 +581,9 @@ def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = Non
     passed = _safe_float(summary, "passed")
     tested = passed + _safe_float(summary, "failed")
     denom = tested + _safe_float(summary, "not_executed")
-    metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2), threshold=100.0))
+    # (R38 리뷰 C-1) 형제(`evaluate_coverage`)와 같은 규약 — 분모 0 은 미측정이지 0% 가 아니다.
+    metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2),
+                           threshold=_gate_if_applicable(100.0, denom)))
     metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
     return metrics
 

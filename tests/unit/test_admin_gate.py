@@ -158,6 +158,12 @@ class TestAdminGate:
     def test_admin_passes_gate(self, method, path, body):
         """admin user는 가드 통과 — 이후 builder 단계는 400/422/500 가능 (path 무효)."""
         r = _call(method, path, body, user_header="admin_user")
+        # (R38 D-4) **성공 쪽을 단언하는 줄이 없었다.** 아래 `if 403:` 안에만 assert 가 있어
+        # 15 endpoint 전부 403 이 아니면 단언이 한 번도 평가되지 않았고, 그래서 이 가드는
+        # 전 endpoint 가 401/500 을 뱉어도 초록이었다. admin 은 **인증 자체는 통과해야** 한다.
+        assert r.status_code != 401, (
+            f"admin user 가 401 을 받았다(path={path}) — 가드 이전 단계인 인증이 깨졌다"
+        )
         # admin 통과 후 builder 단계 검증. 403 ADMIN_REQUIRED가 안 떠야 함.
         if r.status_code == 403:
             err = r.json().get("error", {}).get("message", "")

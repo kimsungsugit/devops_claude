@@ -1948,7 +1948,11 @@ def _run_impact_analysis_for_uds(source_root_path: Optional[Path], changed_files
     changed_files = str(changed_files_raw or "").strip()
     if not source_root_path or not source_root_path.exists() or not changed_files:
         return None
-    out_dir = repo_root / "reports" / "uds"
+    # (R38 D-1) 경로를 여기서 다시 조립하지 않는다 — `impact.UDS_REPORT_DIR` 단일 출처를
+    # **호출 시점에** 읽는다. 인라인 리터럴이면 테스트가 그 상수를 갈아끼워도 이 함수만
+    # 사용자 `reports/uds` 에 계속 쓴다(실측: 3,638개 중 3,618개가 테스트 산물이었다).
+    from backend.routers import impact as _impact_router
+    out_dir = _impact_router.UDS_REPORT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "impact_analysis.md"
     cmd = [

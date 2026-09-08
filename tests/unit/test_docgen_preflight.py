@@ -1523,10 +1523,10 @@ def test_router_uses_the_shared_spec_path_judgment() -> None:
 # 오래 **일반론**으로만 적었다 — QM 전용 프로젝트엔 소음이고 ASIL D 프로젝트에선
 # 몇 개가 걸리는지 말하지 못했다.
 
-def _suts_with_grades(tmp_path: Path, monkeypatch, by_grade, caps=None) -> dict | None:
+def _suts_with_grades(tmp_path: Path, monkeypatch, by_grade, caps=None, ungraded=0) -> dict | None:
     _fake_cat_cache(monkeypatch, {
         "suts_asil": {"measured": True, "units": 100, "graded": sum(by_grade.values()),
-                      "fuzzy": 0, "fuzzy_conflict": 0, "by_grade": by_grade, "ungraded": 0},
+                      "fuzzy": 0, "fuzzy_conflict": 0, "by_grade": by_grade, "ungraded": ungraded},
     })
     return _step(_post({"doc_type": "suts", "source_root": str(tmp_path),
                         "caps": caps or {}}), "cap_max_sequences")
@@ -1546,6 +1546,32 @@ def test_sequence_cap_does_not_cry_wolf_without_asil_d(tmp_path: Path, monkeypat
     assert s["measured"]["asil_d"] == 0
     assert s["measured"]["mcdc_at_risk"] is False
     assert "ASIL D 함수는 없습니다" in s["reason"], s["reason"]
+
+
+def test_sequence_cap_does_not_claim_absence_over_ungraded_units(tmp_path: Path, monkeypatch) -> None:
+    """(R38 D-5 ②) **등급을 못 읽은 함수가 있으면 "ASIL D 없음" 은 사실이 아니다.**
+
+    앞판은 `by_grade` 가 **빈 dict** 인 경우만 막았다. 그런데 실측(kjpds02_pv)은
+    `by_grade={"A":785,"QM":177}` + `ungraded=195` 였고, 그 상태에서 `d=0` 이 그대로
+    "(측정 기준 이 소스에 ASIL D 함수는 없습니다)" 라는 **사실 주장**으로 나갔다.
+    195개가 미상인데 없다고 단언할 수 없다 — 게다가 같은 응답의 옆 행은 이미 "등급이
+    부분문자열 첫 일치로 정해졌다" 고 적어, 한 화면이 두 말을 하고 있었다.
+    미상은 QM 이 아니다(이 저장소의 `[[project_asil_no_fabrication]]` 규약).
+    """
+    s = _suts_with_grades(tmp_path, monkeypatch, {"A": 785, "QM": 177}, ungraded=195)
+    assert s["measured"]["asil_d"] == 0
+    assert s["measured"]["asil_ungraded"] == 195
+    assert "ASIL D 함수는 없습니다" not in s["reason"], (
+        f"미상 195개 위에서 부재를 단언한다: {s['reason']}"
+    )
+    assert "195개" in s["reason"] and "읽지 못" in s["reason"], s["reason"]
+
+
+def test_sequence_cap_still_says_absent_when_everything_is_graded(tmp_path: Path, monkeypatch) -> None:
+    """등급을 전부 읽었으면 "없습니다" 는 정직한 문장이다 — 정직화가 침묵이 되면 안 된다."""
+    s = _suts_with_grades(tmp_path, monkeypatch, {"QM": 80, "A": 20}, ungraded=0)
+    assert "ASIL D 함수는 없습니다" in s["reason"], s["reason"]
+    assert "읽지 못" not in s["reason"]
 
 
 def test_sequence_cap_at_full_has_no_mcdc_risk(tmp_path: Path, monkeypatch) -> None:

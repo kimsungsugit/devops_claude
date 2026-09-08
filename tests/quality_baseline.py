@@ -22,7 +22,7 @@ SDS_DOCX = REPO_ROOT / "docs" / "(HDPDM01_SDS) Software Architecture Design Spec
 REF_SUDS = REPO_ROOT / "docs" / "(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx"
 SRS_TXT = REPO_ROOT / "docs" / "HDPDM01_SRS.txt"
 SDS_TXT = REPO_ROOT / "docs" / "HDPDM01_SDS.txt"
-SOURCE_ROOT = Path(r"D:\Project\Ados\PDS_64_RD")
+SOURCE_ROOT = Path(r"D:\Project\Ados\PDS64_RD")  # (R38) `PDS_64_RD` 오타였다 — 실제는 밑줄 없음
 
 MALFORMED_JSON_SAMPLES = [
     '{"overview": {"text": "hello"}, "requirements": {"text": "world"}}',

@@ -131,7 +131,11 @@ unit-tests:
     # `-n auto`: 로컬 pre-commit 과 같은 병렬 실행(xdist 는 requirements-dev.txt). 직렬은
     #   같은 스위트가 3배 이상 걸렸다(2026-09-03 B-1).
     - python -m pytest tests/ -q -n auto --dist loadfile --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
-  timeout: 15m
+  # ⚠ 15m → **35m**(2026-09-08 R38, 사용자 승인). 로컬 단독 실측이 **1,270초**(18코어,
+  #   `-n auto`)이고 이 러너는 2~4코어 + `--cov` 트레이싱이라 더 든다. R38 D-3 이 되살린
+  #   실소스 파싱 6건(`PDS_64_RD` 오타로 Initial commit 이래 한 번도 안 돌던 것)이 주된 증가분.
+  #   hang 상한이라는 목적은 유지한다 — 이 예산을 먹으면 그건 느림이 아니라 hang 이다.
+  timeout: 35m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
