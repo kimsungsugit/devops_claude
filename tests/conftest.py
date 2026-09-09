@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import stat
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -12,6 +14,141 @@ import pytest
 _TMP_ROOT = Path(__file__).resolve().parents[1] / ".codex_tmp"
 _TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
+#: 정리에 실패한 경로 — 프로세스 안에서만 쓰는 사본(테스트가 단언에 쓴다).
+_CLEANUP_FAILURES: list[str] = []
+
+#: **파일**로도 남긴다. 이유는 `pytest_unconfigure` 참조 — 리스트만으로는 아무에게도 안 닿는다.
+_CLEANUP_FAILURE_LOG = _TMP_ROOT / "_cleanup_failures.txt"
+
+
+def _record_cleanup_failure(line: str) -> None:
+    """실패 한 줄을 프로세스 사본과 **파일**에 함께 남긴다.
+
+    ⚠ (R43 리뷰 C2) 첫 판은 모듈 전역 리스트에만 쌓고 세션 fixture 가 `print` 했다.
+    그런데 이 저장소의 게이트 4곳은 전부 `-n auto` 이고 `-s` 가 없다:
+      · `-s` 없는 직렬 실행에서는 세션 fixture teardown 의 stdout 이 **캡처돼 사라진다**.
+      · xdist 에서는 워커가 **별도 프로세스**라 리스트가 N조각으로 갈리고 컨트롤러에
+        전달되지 않는다.
+    즉 "조용히 쌓이는 것을 막는 유일한 신호" 라고 적어 둔 그 신호가 **실사용 조건에서
+    0% 도달**이었다. `ignore_errors=True` 를 걷어낸 자리에 같은 모양의 fake-green 을
+    다시 넣은 셈이다. 파일이면 프로세스 경계를 넘고 캡처와도 무관하다.
+    """
+    _CLEANUP_FAILURES.append(line)
+    try:
+        with open(_CLEANUP_FAILURE_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass          # 기록조차 못 하는 상황이라도 리스트 사본은 남는다
+
+
+def pytest_configure(config):
+    """세션 시작 시 실패 로그를 비운다 — 지난 실행의 잔재를 이번 것으로 읽지 않는다."""
+    if hasattr(config, "workerinput"):
+        return        # xdist 워커는 지우지 않는다(컨트롤러가 이미 비웠다)
+    try:
+        _CLEANUP_FAILURE_LOG.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def pytest_unconfigure(config):
+    """정리 실패를 **컨트롤러에서** 보고한다 — 워커 stdout 은 여기까지 오지 않는다."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        lines = [ln for ln in _CLEANUP_FAILURE_LOG.read_text(encoding="utf-8").splitlines() if ln]
+    except OSError:
+        return
+    if not lines:
+        return
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    say = reporter.write_line if reporter is not None else print
+    say(f"[임시 트리 정리] 실패 {len(lines)}건 — `.codex_tmp` 에 남았습니다:")
+    for line in lines[:5]:
+        say(f"  {line}")
+    if len(lines) > 5:
+        say(f"  … 외 {len(lines) - 5}건 (전체: {_CLEANUP_FAILURE_LOG})")
+
+
+def _force_rmtree(path: Path) -> bool:
+    """임시 트리를 **정말로** 지운다. 실패는 침묵하지 않는다.
+
+    ⚠ (R43 N16) 예전엔 세 곳 모두 `shutil.rmtree(..., ignore_errors=True)` 였고,
+    그래서 `.codex_tmp` 에 `pytest-*` 디렉터리가 **13,723개**(가장 오래된 것 2026-03-13,
+    6개월치)나 쌓여 있었다. `ls .codex_tmp` 한 번이 120초를 넘겼다.
+
+    원인은 디스크가 아니라 **Windows + git** 이다: 테스트가 임시 저장소를 만들면
+    `.git/objects/**` 가 **읽기 전용(0444)** 으로 생성되고, Windows 의 `unlink` 는 그
+    파일을 지우지 못해 `PermissionError [WinError 5]` 를 낸다. `ignore_errors=True` 가
+    그 예외를 통째로 삼켰으므로, 정리는 **한 번도 성공한 적이 없는데** 스위트는 조용했다
+    (실측: 잔존물 3개를 손으로 지워 보니 1개는 성공, git 이 든 2개는 전부 WinError 5).
+
+    이 저장소가 반복해 고친 fake-green 이 **정리 경로**에 남아 있던 자리다 — 빈 출력을
+    성공으로 읽는 것과 같다. 이제 쓰기 비트를 세우고 재시도하며, 그래도 안 되면 사실을
+    모아 세션 끝에 보고한다(테스트를 실패시키지는 않는다 — 정리는 판정이 아니다).
+
+    ⚠ **테스트가 패치한 전역을 밟지 않는다.** 첫 판은 `if not path.exists()` 로 시작했는데,
+    `Path.exists` 를 monkeypatch 로 PermissionError 를 던지게 만드는 테스트가 있어
+    (`test_impact_changes.py:159` — cloudium SMB 권한거부 재현) **teardown 이 그 패치를 밟고
+    죽었다**. 정리는 teardown 에서 도는 코드라, 그 시점에 무엇이 패치돼 있는지 알 수 없다 —
+    그래서 판정도 `Path` 가 아니라 `os.path.lexists` 로 한다(끊어진 심링크도 '남았다').
+
+    ⚠ **콜백은 예외를 위로 던지지 않는다**(리뷰 W1). 던지면 `shutil.rmtree` 가 그 자리에서
+    언와인드해 **나머지 형제 항목을 아예 못 지운다** — 실패 케이스에서 옛 `ignore_errors`
+    보다도 적게 지우게 된다. 모아 두고 계속 진행한 뒤, 끝에서 실제로 남았는지로 판정한다.
+    """
+    failures: list[str] = []
+
+    def _on_exc(func, target, exc):
+        # 읽기 전용이면 쓰기 비트를 세우고 한 번 더.
+        try:
+            if os.path.islink(target):
+                # 심링크에 chmod 하면 **타깃**의 권한이 바뀐다 — 트리 밖 파일을 건드릴 수
+                # 있으므로 손대지 않는다(리뷰 W3). rmtree 는 링크를 따라 들어가지 않는다.
+                failures.append(f"{target}: symlink — {type(exc).__name__}")
+                return
+            mode = os.stat(target, follow_symlinks=False).st_mode
+            # ⚠ `S_IWRITE`(=0o200)를 **대입**하면 r/x 가 사라진다(리뷰 W2). 디렉터리는 x 를
+            #   잃는 순간 하위 순회가 불가능해지고, 남는 파일은 열어 볼 수도 없게 된다.
+            os.chmod(target, mode | stat.S_IWUSR | (stat.S_IXUSR if os.path.isdir(target) else 0))
+            func(target)
+        except OSError as retry_exc:
+            failures.append(f"{target}: {type(retry_exc).__name__}: {retry_exc}")
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=_on_exc)
+        else:
+            # 3.11 이하에는 `onexc` 가 없다 — 없는 인자를 주면 TypeError 가 나고 그것은
+            # `except OSError` 에 안 잡혀 teardown 전체가 죽는다(리뷰 W5).
+            shutil.rmtree(path, onerror=lambda f, t, ei: _on_exc(f, t, ei[1]))
+    except FileNotFoundError:
+        return True          # 이미 없다 = 정리 완료(실패가 아니다)
+    except OSError as exc:
+        failures.append(f"{path}: {type(exc).__name__}: {exc}")
+
+    if not os.path.lexists(path):
+        return True          # 도중에 무엇이 실패했든 **결과적으로 지워졌다**
+    detail = failures[0] if failures else "원인 미상"
+    if len(failures) > 1:
+        detail += f" (외 {len(failures) - 1}건)"
+    # ⚠ 메시지를 짧게 자르지 않는다 — Windows 는 **파일명이 문장 끝**에 붙어서, 120자 캡이
+    #   유일한 진단 정보를 통째로 버렸다(리뷰 W4).
+    # 실패 상세가 이미 루트 경로로 시작하면 앞에 또 붙이지 않는다(같은 경로 두 번).
+    line = detail if detail.startswith(str(path)) else f"{path}: {detail}"
+    _record_cleanup_failure(line[:600])
+    return False
+
+
+# ⚠ (R43 리뷰 C1) 보고를 세션 fixture 로 두면 **정작 가장 큰 두 트리의 실패를 못 본다**.
+# fixture teardown 은 setup 역순이고 setup 은 이름 알파벳 순이라, `_report_cleanup_failures`
+# 는 `_isolate_config_files`·`_isolate_report_dirs` 보다 **먼저** 끝났다 — 그 둘이 teardown 에서
+# 하는 정리의 실패는 이미 보고가 끝난 뒤에 기록됐다. 게다가 그 순서는 설계가 아니라 **이름
+# 철자에 딸린 우연**이었다. 그래서 보고는 모든 finalizer 뒤에 도는 `pytest_unconfigure` 로
+# 옮겼다(위). 여기에 fixture 를 다시 두지 말 것.
+
 
 @pytest.fixture()
 def tmp_path() -> Path:
@@ -20,7 +157,7 @@ def tmp_path() -> Path:
     try:
         yield path
     finally:
-        shutil.rmtree(path, ignore_errors=True)
+        _force_rmtree(path)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -132,7 +269,7 @@ def _isolate_config_files():
         yield root
     finally:
         mp.undo()
-        shutil.rmtree(root, ignore_errors=True)
+        _force_rmtree(root)
 
 
 #: 세션 격리 대상 — `(모듈 경로, 상수 이름, 하위 디렉터리 이름)`. **여기 없는 경로는 격리되지 않는다.**
@@ -203,7 +340,7 @@ def _isolate_report_dirs():
         yield root
     finally:
         mp.undo()
-        shutil.rmtree(root, ignore_errors=True)
+        _force_rmtree(root)
 
 
 @pytest.fixture()

@@ -53,9 +53,10 @@ when_to_use: 원인 파악, 왜 실패하지, 왜 안되지, 진단, 트러블�
 - **파일**: `workflow/impact_audit.py`
 - **Lock 경로**: **scm_id 별** `reports/impact_audit/.run_lock_{scm_id}.json`
   + `.run_lock_{scm_id}.flock` (`impact_audit.py:76-77`)
-  - ⚠ `reports/impact_audit/.run_lock`(확장자 없음)은 코드가 스스로
-    **`# legacy(하위호환 참조용)`** 이라 표시한 것이다(`:18`). **그걸 지워도 락은 안 풀린다**
-    — 엉뚱한 파일만 지우고 진짜 락(`.run_lock_{scm_id}.*`)은 그대로 남는다
+  - ⚠ 옛 트리에 `reports/impact_audit/.run_lock`(확장자 없음)이 남아 있을 수 있다.
+    그것을 가리키던 `LOCK_PATH` 상수는 **소비처가 0이라 2026-09-09(R43)에 제거**됐다.
+    **그 파일을 지워도 락은 안 풀린다** — 엉뚱한 파일만 지우고 진짜 락
+    (`.run_lock_{scm_id}.*`)은 그대로 남는다
 - **증상**: `{"ok": false, "reason": "active_lock"}`
 - **해결**: `ls reports/impact_audit/.run_lock_*` 로 **어느 scm 의 락인지** 확인 →
   기존 잡 완료 대기, stale 이면 `release_run_lock(scm_id)` 또는 해당 scm 의 두 파일 삭제

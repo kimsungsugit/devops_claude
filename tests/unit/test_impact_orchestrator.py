@@ -14,7 +14,6 @@ def test_run_impact_update_dry_run_builds_auto_and_flag_actions(tmp_path, monkey
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(
             id="hdpdm01",
@@ -87,7 +86,6 @@ def test_run_impact_update_upgrades_body_to_signature_from_change_details(tmp_pa
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(
             id="hdpdm01", name="HDPDM01", scm_type="svn",
@@ -143,7 +141,6 @@ def _setup_classification_env(tmp_path, monkeypatch, *, scm_type, classify_resul
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     # 분기를 결정적으로 — file_mode 전역 싱글톤(라이브 cloudium)에 의존하지 않게 non-cloudium 고정.
     monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
     # 실 svn/git subprocess 회피(코드베이스 관례) — 시그니처 원문 수집은 빈 dict.
@@ -193,7 +190,6 @@ def _setup_precise_env(tmp_path, monkeypatch, *, blob, by_name=None):
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
     scm_registry.register_entry(ScmRegisterRequest(
         id="kj", name="KJ", scm_type="svn",
@@ -336,7 +332,6 @@ def test_run_impact_update_promotes_auto_to_flag_when_limit_exceeded(tmp_path, m
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(
             id="hdpdm01",
@@ -399,7 +394,6 @@ def test_run_impact_update_executes_auto_and_flag_actions(tmp_path, monkeypatch)
     change_dir = tmp_path / "changes"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     monkeypatch.setattr(impact_changes, "CHANGE_DIR", change_dir)
     scm_registry.register_entry(
         ScmRegisterRequest(
@@ -517,7 +511,6 @@ def test_run_impact_update_falls_back_to_file_based_change_types(tmp_path, monke
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(
             id="hdpdm01",
@@ -649,7 +642,6 @@ def test_run_impact_update_sits_uses_cross_module_impact(tmp_path, monkeypatch):
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"))
     )
@@ -714,7 +706,6 @@ def test_run_impact_update_no_sits_has_no_cross_field(tmp_path, monkeypatch):
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"))
     )
@@ -781,7 +772,6 @@ def test_run_impact_update_asil_differentiation_and_evidence(tmp_path, monkeypat
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"))
     )
@@ -827,7 +817,6 @@ def _reg_demo(tmp_path, monkeypatch, classify, by_name):
     from workflow import impact_audit, impact_orchestrator
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src")))
     monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: dict(classify))
     monkeypatch.setattr(impact_orchestrator, "_load_source_sections",
@@ -870,7 +859,6 @@ def test_run_impact_update_includes_coverage_gap(tmp_path, monkeypatch):
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(ScmRegisterRequest(
         id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"),
         linked_docs={"vectorcast": ["rag.json"]},
@@ -908,7 +896,6 @@ def test_run_impact_update_no_coverage_data_with_safety_promotes(tmp_path, monke
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(ScmRegisterRequest(
         id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"),
         linked_docs={"vectorcast": ["rag.json"]},
@@ -977,7 +964,6 @@ def test_run_impact_update_uses_edit_types_and_skips_local_diff(tmp_path, monkey
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(ScmRegisterRequest(
         id="x", name="X", scm_type="svn", source_root=str(tmp_path / "src")))
     monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)  # local 모드 + changeset

@@ -17,7 +17,6 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_DIR = REPO_ROOT / "reports" / "impact_audit"
-LOCK_PATH = AUDIT_DIR / ".run_lock"  # legacy(하위호환 참조용) — 실제 락은 아래 scm별 경로
 # 다중 uvicorn 워커 배포: 실행 수명 동안 FileLock을 '보유'해 진짜 cross-process 뮤텍스로 쓴다
 # (holder crash 시 OS가 fd를 닫으며 자동 해제 → 좀비 락 없음). intra 락은 같은 프로세스 내 다중
 # daemon 잡을 직렬화(filelock은 같은 인스턴스에 re-entrant라 자체로 intra 배제 불가).
@@ -69,7 +68,7 @@ def _get_locks(scm_id: str):
 
     과거엔 모듈 import 시점에 고정 경로로 만든 **전역 단일** FileLock이었다:
       (1) 프로젝트 A 분석이 프로젝트 B를 최대 1시간(문서 자동생성 timeout) 동안 차단하고,
-      (2) 테스트가 AUDIT_DIR/LOCK_PATH를 monkeypatch해도 FileLock 경로는 import 시점 repo 경로에
+      (2) 테스트가 AUDIT_DIR를 monkeypatch해도 FileLock 경로는 import 시점 repo 경로에
           바인딩돼 그대로여서, **동시 실행 pytest들이 서로의 락에 걸려 'active_lock' 유령 실패**를
           냈다(원인 파악이 매우 어려움 — 코드 결함처럼 보임).
     → 호출 시점의 AUDIT_DIR로 scm별 경로를 만들고, 경로가 바뀌면 락 객체를 재생성한다.

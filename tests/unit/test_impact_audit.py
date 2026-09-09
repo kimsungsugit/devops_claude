@@ -11,7 +11,6 @@ def _isolate_locks(impact_audit, tmp_path, monkeypatch):
     audit = tmp_path / "audit"
     audit.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit / ".run_lock")  # legacy 참조 호환
     monkeypatch.setattr(impact_audit, "_RUN_FILE_LOCKS", {})
     monkeypatch.setattr(impact_audit, "_RUN_INTRA_LOCKS", {})
     monkeypatch.setattr(impact_audit, "_RUN_LOCKS_GUARD", threading.Lock())

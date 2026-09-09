@@ -57,7 +57,6 @@ def test_run_impact_update_cloudium_downgrades_auto_and_skips_diff(tmp_path, mon
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(id="x", name="X", scm_type="svn", source_root="//remote/src")
     )
@@ -172,7 +171,6 @@ def test_run_impact_update_cloudium_empty_index_warns_underreport(tmp_path, monk
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
     scm_registry.register_entry(
         ScmRegisterRequest(id="x", name="X", scm_type="svn", source_root="//remote/src")
     )
