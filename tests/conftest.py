@@ -57,6 +57,84 @@ def _isolate_quality_db():
             pathlib.Path(str(db_file) + suffix).unlink(missing_ok=True)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_chat_history_db():
+    """테스트는 **사용자의 채팅 이력 DB**(`reports/chat_history.sqlite`)에 쓰지 않는다. (R41 N11)
+
+    ⚠ 앞판의 격리는 **전역 싱글톤 고정**에 기대고 있었다: 각 테스트가 `reset_engine()` 후
+      `init_db(tmp)` 를 불러 모듈 전역 `_engine` 을 임시 경로로 박아 두면, 그 뒤 `db_path` 를
+      **안 주는** 호출(`get_session()` 등)도 따라왔다. 그건 "첫 호출이 tmp 였다" 에 의존하는
+      **순서 취약** 방어다 — 다른 테스트가 먼저 라이브 경로로 열면 그때부터 전부 라이브로 간다.
+      게다가 경로별 캐시가 없어 회복 지점도 없었다.
+
+    R41 이 `chat_history_db` 를 `workflow/quality/db.py` 와 같은 **경로별 캐시**로 바꾸면서
+    그 우연한 방어가 사라졌으므로(= `db_path` 없는 호출은 기본 경로로 간다), 격리를
+    `_default_db_path` 를 갈아끼우는 **명시적인 방식**으로 옮긴다 — `_isolate_quality_db` 와 같은 형태.
+    """
+    try:
+        from backend.services import chat_history_db as _chat
+    except ImportError:      # sqlalchemy 부재 환경 — 쓰기 경로 자체가 없다
+        yield
+        return
+    db_file = _TMP_ROOT / f"chat-history-test-{os.getpid()}.sqlite"
+    mp = pytest.MonkeyPatch()
+    # ⚠ **원본을 여기서 보존한다.** 함수 스코프 fixture 들도 같은 이름을 갈아끼우는데, 그들이
+    #   보존하면 이미 격리된 값을 "원본" 으로 잡는다 — 기본 경로 계약을 재는 테스트가
+    #   자기 격리를 검사하게 된다(실측으로 그렇게 실패했다). 세션이 가장 먼저이므로 여기가 맞다.
+    mp.setattr(_chat, "_default_db_path_original", _chat._default_db_path, raising=False)
+    mp.setattr(_chat, "_default_db_path", lambda: db_file)
+    _chat.reset_engine()
+    try:
+        yield db_file
+    finally:
+        mp.undo()
+        _chat.reset_engine()
+        for suffix in ("", "-wal", "-shm"):
+            pathlib.Path(str(db_file) + suffix).unlink(missing_ok=True)
+
+
+#: 사용자 **설정 파일** 세션 격리 — `(모듈 경로, 상수 이름, 임시 파일명)`.
+#: 위 `_REPORT_DIR_TARGETS`(디렉터리)와 달리 파일 하나씩이라 표를 따로 둔다.
+_CONFIG_FILE_TARGETS = (
+    ("backend.services.file_mode_store", "MODE_PATH", "file_mode.json"),
+    ("backend.services.cloudium_extra_prefixes", "PREFIXES_PATH", "cloudium_extra_prefixes.json"),
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_config_files():
+    """테스트는 **사용자의 `config/` 설정 파일**을 고쳐 쓰지 않는다. (R41 N12)
+
+    ⚠ R38 감사가 짚은 자리다: `test_admin_gate.py` 가 admin 자격으로
+      `POST /api/file-mode/add-allowed-prefix {"prefix":"U:/test"}` 를 **실제로 호출**한다.
+      지금 안전한 이유는 경로 격리가 아니라 **resolver 가 local 로 고정돼 핸들러가 400 에서
+      반환**하기 때문이다 — 누가 그 테스트에 cloudium resolver fixture 를 붙이는 순간
+      사용자 `config/cloudium_extra_prefixes.json`(3,677B)에 쓴다.
+      "지금 안 터진다" 가 격리가 아니다.
+
+    `file_mode.json` 도 같은 축이다 — 파일 모드는 **영속**이라(`영속 > env > local`)
+    테스트가 한 번 바꾸면 다음 기동까지 남는다.
+    """
+    root = _TMP_ROOT / f"config-test-{os.getpid()}"
+    root.mkdir(parents=True, exist_ok=True)
+    mp = pytest.MonkeyPatch()
+    skipped: list[str] = []
+    for mod_path, attr, fname in _CONFIG_FILE_TARGETS:
+        try:
+            mod = __import__(mod_path, fromlist=["_"])
+        except ImportError as exc:
+            skipped.append(f"{mod_path}.{attr}({type(exc).__name__})")
+            continue
+        mp.setattr(mod, attr, root / fname, raising=True)
+    if skipped:
+        print(f"\n[config 격리] DISABLED {len(skipped)}건 — {', '.join(skipped)}")
+    try:
+        yield root
+    finally:
+        mp.undo()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 #: 세션 격리 대상 — `(모듈 경로, 상수 이름, 하위 디렉터리 이름)`. **여기 없는 경로는 격리되지 않는다.**
 #: 새 산출 디렉터리를 만들면 이 표에 한 줄을 더하고, 아래 `test_report_dirs_are_isolated.py` 의
 #: 전수 가드가 "코드가 쓰는 `reports/` 하위 == 이 표" 를 강제한다(손으로 든 목록은 반드시 빠진다).

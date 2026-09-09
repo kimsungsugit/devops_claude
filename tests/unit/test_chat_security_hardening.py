@@ -28,9 +28,14 @@ from backend.services.chat_history_db import (  # noqa: E402  (sys.path 부트�
 
 
 @pytest.fixture(autouse=True)
-def _isolated_db(tmp_path: Path):
+def _isolated_db(tmp_path: Path, monkeypatch):
+    # (R41 N11) `db_path` 없는 호출도 같은 파일을 보게 한다 — 위 파일들과 같은 이유.
+    from backend.services import chat_history_db as _chat_db_mod
+
+    db_file = tmp_path / "test_chat_security_hardening.sqlite"
+    monkeypatch.setattr(_chat_db_mod, "_default_db_path", lambda: db_file)
     reset_engine()
-    init_db(tmp_path / "test_chat_security_hardening.sqlite")
+    init_db(db_file)
     yield
     reset_engine()
 

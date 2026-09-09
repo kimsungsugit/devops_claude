@@ -15,6 +15,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pytest  # noqa: E402
 
 from backend.services.chat_history_db import get_engine, get_session, init_db, reset_engine  # noqa: E402
+from backend.services import chat_history_db as _chat_db_mod  # noqa: E402
 from backend.services.chat_history_models import ChatMessage  # noqa: E402
 from backend.services.chat_history_service import (  # noqa: E402
     _auto_title,
@@ -30,9 +31,13 @@ from backend.services.chat_history_service import (  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _isolated_db(tmp_path: Path):
+def _isolated_db(tmp_path: Path, monkeypatch):
     """Each test gets a fresh SQLite DB in a temp directory."""
     db_file = tmp_path / "test_chat_history.sqlite"
+    # (R41 N11) `db_path` 를 **안 주는** 호출(`get_session()` 등)도 같은 파일을 보게 한다.
+    #   앞판은 전역 싱글톤이 tmp 로 박히는 데 기댔는데, 경로별 캐시가 되면서 그
+    #   우연한 결합이 사라졌다 — quality 테스트가 쓰는 방식으로 명시한다.
+    monkeypatch.setattr(_chat_db_mod, "_default_db_path", lambda: db_file)
     reset_engine()
     init_db(db_file)
     yield

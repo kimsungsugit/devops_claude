@@ -278,3 +278,61 @@ class TestThePathIsNotDuplicated:
             f"감사 디렉터리를 인라인으로 다시 조립한다(line {inline}) — "
             "`impact_audit.ensure_audit_dir()` 를 쓸 것"
         )
+
+
+class TestUserDataFilesAreIsolated:
+    """사용자 **파일**(설정·채팅 DB)도 격리된다 — 디렉터리만으로는 부족하다. (R41 N11·N12)
+
+    R38 은 `reports/` **디렉터리**를 막았다. 그런데 테스트가 건드릴 수 있는 사용자 데이터는
+    디렉터리만이 아니다:
+      - `config/file_mode.json` — 파일 모드는 **영속**이라(`영속 > env > local`) 한 번 바뀌면
+        다음 기동까지 남는다.
+      - `config/cloudium_extra_prefixes.json` — `test_admin_gate` 가 admin 자격으로
+        `add-allowed-prefix` 를 **실제로 호출**한다. 지금 안 터지는 이유는 격리가 아니라
+        resolver 가 local 이라 400 에서 반환하기 때문이었다("지금 안 터진다" 는 격리가 아니다).
+      - `reports/chat_history.sqlite` — 앞판은 전역 싱글톤이 tmp 로 박히는 데 기댔다(순서 취약).
+    """
+
+    def test_config_files_point_outside_the_repo_config_dir(self):
+        from tests.conftest import _CONFIG_FILE_TARGETS
+
+        user_config = (_REPO / "config").resolve()
+        leaking = []
+        for mod_path, attr, _fname in _CONFIG_FILE_TARGETS:
+            try:
+                mod = __import__(mod_path, fromlist=["_"])
+            except ImportError:
+                continue
+            cur = pathlib.Path(str(getattr(mod, attr))).resolve()
+            if cur.parent == user_config:
+                leaking.append(f"{mod_path}.{attr} → {cur}")
+        assert not leaking, (
+            "세션 격리가 걸렸는데도 사용자 `config/` 를 가리킨다:\n  " + "\n  ".join(leaking)
+        )
+
+    def test_config_table_is_not_empty(self):
+        """표가 비면 위 검사가 **전부 통과한다** — 그건 가드가 아니다."""
+        from tests.conftest import _CONFIG_FILE_TARGETS
+
+        assert len(_CONFIG_FILE_TARGETS) >= 2
+
+    def test_chat_history_db_is_isolated(self):
+        """채팅 DB 기본 경로가 사용자 `reports/` 밖을 가리킨다."""
+        from backend.services import chat_history_db as chat
+
+        cur = pathlib.Path(str(chat._default_db_path())).resolve()
+        assert (_REPO / "reports").resolve() not in cur.parents, (
+            f"채팅 DB 기본 경로가 사용자 트리를 가리킨다: {cur}"
+        )
+
+    def test_chat_engine_cache_is_per_path(self):
+        """경로별 캐시여야 `db_path` 인자가 유효하다 — 단일 싱글톤이면 첫 경로가 전부를 먹는다.
+
+        (R41 N11) `workflow/quality/db.py` 가 같은 결함을 먼저 고쳤고, 그 주석이 이유를 적어 뒀다:
+        *"단일 `_engine` 싱글톤이라 첫 init 후 db_path 인자가 무시돼 테스트 격리가 깨졌다"*.
+        """
+        from backend.services import chat_history_db as chat
+
+        assert hasattr(chat, "_engines"), "경로별 엔진 캐시가 없다(전역 싱글톤으로 되돌아갔다)"
+        assert isinstance(chat._engines, dict)
+        assert not hasattr(chat, "_engine"), "전역 단일 엔진이 되살아났다"

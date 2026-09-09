@@ -14,8 +14,15 @@ from backend.services.chat_history_models import ChatHistoryBase
 
 _logger = logging.getLogger("backend.chat_history.db")
 
-_engine = None
-_SessionLocal = None
+# 경로별 엔진/세션팩토리 캐시 (db_path 별 1개씩 — 동일 경로면 재사용).
+# ⚠ (R41 N11) 과거엔 `_engine` **전역 하나**였다. 첫 `get_engine()` 이 경로를 고정하면
+#   이후 `db_path` 인자가 **무시**돼, 테스트가 임시 DB 를 주어도 실제로는 그때 잡힌 경로에
+#   쓴다 — 한 번이라도 라이브 경로로 열리면 그 워커의 이후 전 테스트가 **사용자 채팅 DB**
+#   에 기록하고, 경로별 캐시가 없으니 회복 지점도 없다.
+#   `workflow/quality/db.py` 가 **같은 결함을 이미 고쳤다**(그 주석: "단일 _engine 싱글톤이라
+#   첫 init 후 db_path 인자가 무시돼 테스트 격리가 깨졌다") — 여기만 옛 형태로 남아 있었다.
+_engines: dict = {}
+_session_factories: dict = {}
 # RLock 필수: get_session_factory 가 _lock 을 쥔 채 get_engine 을 부르고(재귀 acquire),
 # get_engine 의 fast-path 는 _engine 이 아직 None 인 **첫 호출**에선 안 타므로
 # 일반 Lock 이면 같은 스레드가 자기 락에 막혀 **영구 데드락**이 된다.
@@ -42,24 +49,26 @@ def _default_db_path() -> Path:
         return (Path("reports").resolve()) / _CHAT_HISTORY_DB_FILENAME
 
 
+def _resolve_key(db_path: "Optional[Path]") -> str:
+    """db_path → 캐시 키 (None 이면 기본 경로). 정본 `workflow/quality/db.py::_resolve_key` 와 같은 형태."""
+    return str(Path(db_path) if db_path is not None else _default_db_path())
+
+
 def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
-    global _engine
-    if _engine is not None and not force_new:
-        return _engine
-
+    """SQLAlchemy 엔진 반환 (db_path 별 캐시, thread-safe)."""
+    key = _resolve_key(db_path)
     with _lock:
-        if _engine is not None and not force_new:
-            return _engine
+        if not force_new and key in _engines:
+            return _engines[key]
 
-        if db_path is None:
-            db_path = _default_db_path()
+        db_path = Path(key)
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         url = f"sqlite:///{db_path}"
         # D10: sync endpoint + 백그라운드 저장 스레드 동시 접근 허용
-        _engine = create_engine(url, echo=False, connect_args={"check_same_thread": False})
+        engine = create_engine(url, echo=False, connect_args={"check_same_thread": False})
 
-        @event.listens_for(_engine, "connect")
+        @event.listens_for(engine, "connect")
         def _set_sqlite_pragma(dbapi_conn, connection_record):
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
@@ -70,18 +79,23 @@ def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
             cursor.close()
 
         _logger.info("Chat History DB engine: %s", db_path)
-        return _engine
+        _engines[key] = engine
+        # force_new 로 엔진을 갈면 기존 세션팩토리도 무효화(정본과 같은 규약).
+        _session_factories.pop(key, None)
+        return engine
 
 
 def get_session_factory(db_path: Optional[Path] = None):
-    global _SessionLocal
-    if _SessionLocal is not None:
-        return _SessionLocal
-    with _lock:  # W3: double-checked locking (reset_engine 직후 동시호출 시 stale factory 방지)
-        if _SessionLocal is None:
+    """SessionLocal 팩토리 반환 (db_path 별 캐시).
+
+    RLock 재귀 안전 — `get_engine` 을 락 안에서 부른다(모듈 상단 `_lock` 주석 참조).
+    """
+    key = _resolve_key(db_path)
+    with _lock:
+        if key not in _session_factories:
             engine = get_engine(db_path)
-            _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
-    return _SessionLocal
+            _session_factories[key] = sessionmaker(bind=engine, expire_on_commit=False)
+        return _session_factories[key]
 
 
 def _migrate_schema(engine) -> None:
@@ -125,9 +139,16 @@ def get_session(db_path: Optional[Path] = None) -> Generator[Session, None, None
 
 
 def reset_engine() -> None:
-    global _engine, _SessionLocal
+    """캐시된 엔진을 **전부** 정리한다(테스트 teardown·경로 전환).
+
+    ⚠ 경로별 캐시가 되면서 지울 대상이 여러 개다 — 하나만 지우면 다른 경로의 엔진이
+      살아남아 다음 테스트가 그 경로를 계속 쓴다.
+    """
     with _lock:
-        if _engine is not None:
-            _engine.dispose()
-        _engine = None
-        _SessionLocal = None
+        for engine in list(_engines.values()):
+            try:
+                engine.dispose()
+            except Exception:  # noqa: BLE001 — dispose 실패가 정리를 막지 않는다
+                _logger.warning("Chat History DB engine dispose 실패", exc_info=True)
+        _engines.clear()
+        _session_factories.clear()

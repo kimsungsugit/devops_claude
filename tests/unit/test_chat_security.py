@@ -36,9 +36,18 @@ from backend.services.chat_history_service import (  # noqa: E402  (sys.path 부
 
 
 @pytest.fixture(autouse=True)
-def _isolated_db(tmp_path: Path):
+def _isolated_db(tmp_path: Path, monkeypatch):
+    # (R41 N11) `db_path` 를 **안 주는** 호출(`get_session()` 등)도 같은 파일을 보게 한다.
+    #   앞판은 전역 싱글톤이 tmp 로 박히는 데 기댔는데(순서 취약), 경로별 캐시가 되면서
+    #   그 우연한 결합이 사라졌다 — quality 테스트가 쓰는 방식으로 명시한다.
+    from backend.services import chat_history_db as _chat_db_mod
+
+    db_file = tmp_path / "test_chat_security.sqlite"
+    # ⚠ 원본 보존은 **세션 픽스처**(`conftest._isolate_chat_history_db`)가 한다 — 여기서 하면
+    #   이미 격리된 값을 "원본" 으로 잡아 `TestConfigAnchoring` 이 자기 격리를 검사하게 된다.
+    monkeypatch.setattr(_chat_db_mod, "_default_db_path", lambda: db_file)
     reset_engine()
-    init_db(tmp_path / "test_chat_security.sqlite")
+    init_db(db_file)
     yield
     reset_engine()
 
@@ -121,8 +130,13 @@ class TestApprovalStore:
 
 class TestConfigAnchoring:
     def test_default_db_path_absolute(self):
-        from backend.services.chat_history_db import _default_db_path
-        p = _default_db_path()
+        """기본 경로 계약(절대경로 + 파일명) — **격리 patch 를 우회해서** 원본을 잰다.
+
+        (R41 N11) `_isolated_db` 가 `_default_db_path` 를 tmp 로 갈아끼우므로, 그냥 부르면
+        테스트가 자기 격리를 재게 된다. fixture 가 보존해 둔 원본을 쓴다.
+        """
+        from backend.services import chat_history_db as mod
+        p = mod._default_db_path_original()
         assert p.is_absolute()
         assert p.name == "chat_history.sqlite"
 

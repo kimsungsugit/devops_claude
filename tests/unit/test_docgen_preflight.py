@@ -1954,3 +1954,64 @@ def test_gate_does_not_walk_the_source_tree_twice_for_the_same_answer(
     (src / "a.c").write_text("int f(void){return 0;}", encoding="utf-8")
     _compute_preflight(PreflightRequest(doc_type="sits", source_root=str(src)))
     assert len(calls) <= 2, f"한 요청에 서명을 {len(calls)}번 계산한다"
+
+
+class TestSuggestedRespectsPerCategoryMultiplier:
+    """(R41 N7) 제안값이 **분류별 배수**를 반영한다 — "최소 N" 이 거짓이면 안 된다.
+
+    생성기는 분류마다 같은 상한을 쓰지 않는다: `global_data`·`macro_defs` 는 `max_items * 2`
+    (`uds_generator.py`). 바로 위 형제 `_recount_category_truncation` 은 그 배수를
+    `cap // measured_at` 으로 읽는데, 제안 함수만 몰라서 `max(total)` 을 그대로 냈다.
+
+    실측(kjpds02_pv): `global_data` total 25005 → "전부 담으려면 **최소 25005**" 라고 안내했지만
+    그 분류의 상한은 ×2 라 **12503 이면 전부 담긴다**(라이브 반증). 즉 필요한 값의 **2배**를
+    요구했고, 그 값은 그대로 생성 부하가 된다. 패널은 이 수를 `전부 N` 버튼과 툴팁으로 낸다.
+    """
+
+    @staticmethod
+    def _suggest(tr, measured_at):
+        from backend.routers.docgen_preflight import _cap_suggested_from_truncation
+        return _cap_suggested_from_truncation(
+            "max_items_per_category",
+            {"uds_category_caps": {"cap": measured_at, "truncated": tr}},
+        )
+
+    def test_doubled_category_needs_half(self):
+        """상한이 ×2 인 분류는 total 의 **절반**이면 전부 담긴다."""
+        # measured_at=120 으로 쟀고 그 분류의 실제 cap 이 240 → 배수 2
+        got = self._suggest({"global_data": {"total": 25005, "cap": 240}}, 120)
+        assert got == 12503, f"×2 분류에 {got} 을 요구한다(필요한 값의 2배면 생성 부하도 2배)"
+
+    def test_plain_category_needs_full(self):
+        """배수 1인 분류는 종전대로 total 그대로 — 조이다가 과소 제안하면 안 된다."""
+        assert self._suggest({"functions": {"total": 300, "cap": 120}}, 120) == 300
+
+    def test_takes_the_hungriest_category(self):
+        """분류마다 상한이 걸리므로 **가장 많이 필요한** 쪽을 담아야 한다."""
+        got = self._suggest({
+            "global_data": {"total": 25005, "cap": 240},   # ×2 → 12503 필요
+            "functions": {"total": 300, "cap": 120},       # ×1 → 300 필요
+            "macro_defs": {"total": 40000, "cap": 240},    # ×2 → 20000 필요
+        }, 120)
+        assert got == 20000
+
+    def test_rounds_up_not_down(self):
+        """내림하면 **1개가 남는다** — "전부 담긴다" 가 거짓이 되는 가장 조용한 방식이다."""
+        assert self._suggest({"x": {"total": 25005, "cap": 200}}, 100) == 12503  # 25005/2 = 12502.5
+
+    @pytest.mark.parametrize("bad_at", [None, 0, -1, "x"])
+    def test_unknown_measurement_suggests_nothing(self, bad_at):
+        """어느 상한으로 잰 통계인지 모르면 배수도 모른다 — **지어내지 않는다**(함수 계약)."""
+        assert self._suggest({"global_data": {"total": 25005, "cap": 240}}, bad_at) is None
+
+    @pytest.mark.parametrize("bad", [
+        {"global_data": {"total": "x", "cap": 240}},
+        {"global_data": {"total": 25005, "cap": 0}},
+        {"global_data": "not-a-dict"},
+    ])
+    def test_one_unreadable_category_aborts_the_whole_suggestion(self, bad):
+        """한 분류라도 못 읽으면 전체 포기 — 형제(`_recount_category_truncation`)와 같은 규약."""
+        assert self._suggest(bad, 120) is None
+
+    def test_no_truncation_means_no_suggestion(self):
+        assert self._suggest({}, 120) is None

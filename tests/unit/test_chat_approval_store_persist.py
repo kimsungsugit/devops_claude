@@ -10,8 +10,12 @@ from backend.services import chat_approval_store as store
 
 
 @pytest.fixture
-def store_db(tmp_path):
+def store_db(tmp_path, monkeypatch):
+    # (R41 N11) `chat_approval_store` 는 `get_session()` 을 **db_path 없이** 부른다.
+    #   앞판은 전역 싱글톤이 tmp 로 박히는 데 기댔는데(순서 취약), 경로별 캐시가 되면서
+    #   그 우연한 결합이 사라졌다 — 기본 경로 자체를 갈아끼운다.
     path = tmp_path / "chat_history.sqlite"
+    monkeypatch.setattr(db, "_default_db_path", lambda: path)
     db.reset_engine()
     db.init_db(path)
     yield path

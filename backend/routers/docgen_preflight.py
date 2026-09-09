@@ -388,14 +388,36 @@ def _cap_suggested_from_truncation(cap_name: str, tm: Dict[str, Any]) -> Optiona
     if cap_name != "max_items_per_category":
         return None
     tr = (tm.get("uds_category_caps") or {}).get("truncated") or {}
-    totals = []
+    if not isinstance(tr, dict) or not tr:
+        return None
+    # ⚠ (R41 N7) **생성기는 분류마다 같은 상한을 쓰지 않는다** — `global_data`·`macro_defs` 는
+    #   `max_items * 2` 다(`uds_generator.py`). 바로 위 형제 `_recount_category_truncation` 은
+    #   그 배수를 `cap // measured_at` 으로 읽는데, 이 함수만 몰라서 `max(total)` 을 그대로 냈다.
+    #   실측: `global_data` total 25005 → "전부 담으려면 최소 25005" 라고 안내했지만 그 분류의
+    #   상한은 ×2 라 **12503 이면 전부 담긴다**(라이브 반증: 12503 으로 재호출하니 `전부 담깁니다`).
+    #   즉 사용자에게 **필요한 값의 2배**를 요구했고, 그 값은 그대로 생성 부하가 된다.
+    #   패널은 이 수를 `전부 25005` 버튼과 "최소 25005 이어야 합니다" 툴팁으로 낸다 —
+    #   "최소" 라는 말이 거짓이었다.
+    measured_at = _cap_measured_at(cap_name, tm)
+    if not isinstance(measured_at, int) or measured_at <= 0:
+        # 어느 상한으로 잰 통계인지 모르면 배수도 모른다 — 이 함수의 계약대로 **제안하지 않는다**
+        # ("측정에서 확실히 알 수 있을 때만"). 모르는 수를 내면 사용자가 그 값을 믿는다.
+        return None
+    needs = []
     for v in tr.values():
+        if not isinstance(v, dict):
+            return None
         try:
-            totals.append(int(v.get("total")))
+            total, cap = int(v.get("total")), int(v.get("cap"))
         except (TypeError, ValueError):
-            continue
-    # 상한은 **분류마다** 걸리므로, 하나도 안 빠지려면 가장 큰 분류를 담아야 한다.
-    return max(totals) if totals else None
+            return None      # 한 분류라도 못 읽으면 전체 포기(형제와 같은 규약 — 리뷰 W1)
+        if cap <= 0:
+            return None
+        mult = max(1, cap // measured_at)
+        # 그 분류를 전부 담는 데 필요한 `max_items` — 상한이 `max_items * mult` 이므로 올림.
+        needs.append(-(-total // mult))
+    # 상한은 **분류마다** 걸리므로, 하나도 안 빠지려면 가장 많이 필요한 분류를 담아야 한다.
+    return max(needs) if needs else None
 
 
 def _linked_docs(req: "PreflightRequest") -> Dict[str, Any]:
