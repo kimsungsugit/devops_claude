@@ -465,3 +465,97 @@ def test_engine_cache_modules_are_not_a_stale_hand_written_list() -> None:
     assert missing == [], (
         "경로별 엔진 캐시를 가진 모듈이 `_release_handles_under` 목록에 없다 — "
         f"그 트리는 정리되지 않는다: {missing}")
+
+
+def test_cwd_inside_the_tree_does_not_block_cleanup(failure_log: Path, tmp_path: Path) -> None:
+    """(R45 N19-b) Windows 는 **현재 디렉터리를 지우지 못한다**.
+
+    `monkeypatch.chdir(tmp_path / …)` 를 쓴 테스트는 teardown 이 인자 역순이라 `tmp_path`
+    정리가 chdir 복원보다 **먼저** 돈다 — 실측 `fake_workspace` 가 빈 디렉터리인데
+    "사용 중" 으로 남았다. R43 C3 와 같은 순서 함정이다.
+    """
+    from tests.conftest import _release_handles_under
+
+    inner = tmp_path / "fake_workspace"
+    inner.mkdir()
+    before = os.getcwd()
+    os.chdir(inner)
+    try:
+        # ⚠ 이 skip 프로브는 실패하면 **진짜 실패 줄을 기록**한다 — 세션 보고에 새지 않는
+        #   유일한 이유는 `failure_log` fixture 가 기록 대상을 갈아끼웠기 때문이다(인자 하나).
+        if _force_rmtree(inner) is True:
+            pytest.skip("이 플랫폼은 현재 디렉터리도 지운다 — 시나리오가 성립하지 않는다")
+        _release_handles_under(tmp_path)
+        assert not os.path.join(os.path.normcase(os.getcwd()), "").startswith(
+            os.path.join(os.path.normcase(str(tmp_path)), "")), "cwd 가 아직 트리 안이다"
+        assert _force_rmtree(inner) is True
+    finally:
+        os.chdir(before)
+
+
+def test_unreferenced_readonly_workbook_does_not_block_cleanup(failure_log: Path, tmp_path: Path) -> None:
+    """(R45 N19-b) 변수에서 빠진 `load_workbook(read_only=True)` 는 GC 시점에 닫힌다.
+
+    그 시점이 정리보다 늦으면 실패, 빠르면 성공 — "정리 실패 0" 이 재실행에서 8 로 돌아온
+    이유다(R44). 정리 직전 `gc.collect()` 로 우연을 순서로 바꾼다.
+    """
+    openpyxl = pytest.importorskip("openpyxl")
+    from tests.conftest import _release_handles_under
+
+    out = tmp_path / "wb.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "x"
+    wb.save(out)
+    wb.close()
+
+    import gc
+
+    from tests.conftest import _cleanup_tree
+
+    def _open_and_drop():
+        ws = openpyxl.load_workbook(str(out), read_only=True)["Sheet"]   # 워크북 참조를 버린다
+        assert ws["A1"].value == "x"
+
+    # ⚠ (리뷰 I-3) "핸들이 아직 열려 있다" 는 전제는 자동 GC 타이밍에 달린 **확률적** 전제다 —
+    #   고할당 부하에서 gen2 수집이 끼어들면 조용히 skip 돼 그 실행의 가드는 정보 0 이 된다.
+    #   자동 수집을 멈춰 결정화한다(`gc.collect()` 는 disable 상태에서도 동작한다).
+    gc.disable()
+    try:
+        _open_and_drop()
+        try:
+            os.unlink(out)
+            pytest.fail("자동 GC 를 껐는데 핸들이 이미 닫혔다 — 전제가 성립하지 않는다")
+        except PermissionError:
+            pass                               # 전제 성립: 핸들이 아직 열려 있다
+
+        # 대조군 — 핸들 해제(①~④)만으로는 안 닫힌다. GC 가 **필요한** 케이스임을 고정한다.
+        _release_handles_under(tmp_path)
+        with pytest.raises(PermissionError):
+            os.unlink(out)
+
+        # 정본 순서(`_cleanup_tree`: 1차 실패 → gc → 2차)로는 지워진다.
+        assert _cleanup_tree(out) is True, "1차 실패 뒤 GC 를 거쳐도 워크북 핸들이 남았다"
+        assert not out.exists()
+    finally:
+        gc.enable()
+
+
+def test_cwd_in_a_sibling_prefix_tree_is_left_alone(failure_log: Path, tmp_path: Path) -> None:
+    """cwd 판정도 **구분자**가 필요하다 — `inside` 가 `inside_extra` 를 먹으면 남의 cwd 를 옮긴다.
+
+    R44 W4(핸들러 범위)와 같은 형태다. 뮤턴트(구분자 제거)가 생존해서 드러났다.
+    """
+    from tests.conftest import _release_handles_under
+
+    inside = tmp_path / "inside"
+    sibling = tmp_path / "inside_extra"
+    inside.mkdir()
+    sibling.mkdir()
+    before = os.getcwd()
+    os.chdir(sibling)
+    try:
+        _release_handles_under(inside)
+        assert os.path.normcase(os.getcwd()) == os.path.normcase(str(sibling)), \
+            "접두사가 겹치는 형제 트리에 있던 cwd 를 옮겼다"
+    finally:
+        os.chdir(before)

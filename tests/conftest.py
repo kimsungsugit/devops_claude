@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import pathlib
@@ -14,6 +15,11 @@ import pytest
 
 _TMP_ROOT = Path(__file__).resolve().parents[1] / ".codex_tmp"
 _TMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+#: pytest 를 띄운 cwd. 정리가 cwd 를 트리 밖으로 옮겨야 할 때 **여기로** 돌아온다 —
+#: 레포 루트는 "복원값" 이 아니라 지어낸 값이다(R45 리뷰 I-1: 다른 cwd 에서 띄운 사용자에게
+#: 조용한 축 변경이고, teardown 중 살아 있는 daemon 스레드 12곳이 그 cwd 를 목격한다).
+_INITIAL_CWD = os.getcwd()
 
 #: 정리에 실패한 경로 — 프로세스 안에서만 쓰는 사본(테스트가 단언에 쓴다).
 _CLEANUP_FAILURES: list[str] = []
@@ -73,8 +79,17 @@ def pytest_unconfigure(config):
         say(f"  … 외 {len(lines) - 5}건 (전체: {_CLEANUP_FAILURE_LOG})")
 
 
-def _force_rmtree(path: Path) -> bool:
-    """임시 트리를 **정말로** 지운다. 실패는 침묵하지 않는다.
+def _force_rmtree(path: Path, *, record: bool = True) -> bool:
+    """임시 트리(또는 파일)를 **정말로** 지운다. 실패는 침묵하지 않는다.
+
+    `record=False` 면 실패를 기록하지 않는다 — "1차는 조용히, 실패하면 GC 후 2차만 기록"
+    하는 `_cleanup_tree` 용이다(같은 실패를 두 번 적지 않는다).
+
+    ⚠ (R45 리뷰 W-2) **파일** 경로도 받는다. 예전엔 디렉터리 전용이라 파일을 주면
+    `shutil.rmtree` 가 `os.scandir` 에서 `NotADirectoryError` 를 내고, `lexists` 가 True 라
+    **핸들 유무와 무관하게 항상 False** 였다. 가드 테스트가 그 False 를 "핸들이 열려 있다"
+    로 읽어 한 라운드를 "미규명" 으로 보냈다 — 실패 줄에 이미 `NotADirectoryError` 라고
+    적혀 있었는데 `WinError 32` 로 읽은 것이다.
 
     ⚠ (R43 N16) 예전엔 세 곳 모두 `shutil.rmtree(..., ignore_errors=True)` 였고,
     그래서 `.codex_tmp` 에 `pytest-*` 디렉터리가 **13,723개**(가장 오래된 것 2026-03-13,
@@ -119,7 +134,15 @@ def _force_rmtree(path: Path) -> bool:
             failures.append(f"{target}: {type(retry_exc).__name__}: {retry_exc}")
 
     try:
-        if sys.version_info >= (3, 12):
+        if os.path.islink(path) or not os.path.isdir(path):
+            # 파일(또는 링크)은 rmtree 대상이 아니다 — 같은 콜백으로 한 번 시도한다.
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                return True
+            except OSError as exc:
+                _on_exc(os.unlink, path, exc)
+        elif sys.version_info >= (3, 12):
             shutil.rmtree(path, onexc=_on_exc)
         else:
             # 3.11 이하에는 `onexc` 가 없다 — 없는 인자를 주면 TypeError 가 나고 그것은
@@ -132,6 +155,8 @@ def _force_rmtree(path: Path) -> bool:
 
     if not os.path.lexists(path):
         return True          # 도중에 무엇이 실패했든 **결과적으로 지워졌다**
+    if not record:
+        return False
     detail = failures[0] if failures else "원인 미상"
     if len(failures) > 1:
         detail += f" (외 {len(failures) - 1}건)"
@@ -143,6 +168,26 @@ def _force_rmtree(path: Path) -> bool:
     return False
 
 
+def _cleanup_tree(path: Path) -> bool:
+    """정리의 정본 순서: 핸들을 놓고 → 지우고 → **실패했을 때만** GC 후 한 번 더.
+
+    ⚠ (R45 리뷰 W-1) 처음엔 `_release_handles_under` 가 매번 `gc.collect()` 를 불렀다.
+    full collection 은 부하 인터프리터에서 중앙값 **198 ms** 이고 `tmp_path` 테스트가
+    **1,447개**라 전량 1회에 **+290~480 s CPU** — 모듈 하나(84건)의 A/B 실측 +22~33 s.
+    CI(2~4코어 `loadfile`)는 벽시계 +75~240 s, pre-commit 의 xdist 미설치 직렬 폴백은
+    1800 s 예산(여유 ≈530 s)을 넘길 수 있었다. 99.8% 는 GC 없이 지워지므로, GC 는 1차
+    삭제가 실패한 **0.2%** 에만 쓴다. 효과는 같다(실측: 실패 → collect → 삭제 성공).
+    """
+    _release_handles_under(path)
+    if _force_rmtree(path, record=False):
+        return True
+    # 참조 끊긴 파일 객체(예: `load_workbook(read_only=True)` 를 변수에서 버린 것)는
+    # GC 시점에 닫힌다. 그 시점이 정리보다 늦으면 실패, 빠르면 성공 — "정리 실패 0" 이
+    # 재실행에서 8 로 돌아온 이유가 이것이었다(R44). 우연을 순서로 바꾼다.
+    gc.collect()
+    return _force_rmtree(path)
+
+
 # ⚠ (R43 리뷰 C1) 보고를 세션 fixture 로 두면 **정작 가장 큰 두 트리의 실패를 못 본다**.
 # fixture teardown 은 setup 역순이고 setup 은 이름 알파벳 순이라, `_report_cleanup_failures`
 # 는 `_isolate_config_files`·`_isolate_report_dirs` 보다 **먼저** 끝났다 — 그 둘이 teardown 에서
@@ -152,7 +197,8 @@ def _force_rmtree(path: Path) -> bool:
 
 
 def _release_handles_under(path: Path) -> None:
-    """`path` 하위를 잡고 있는 **우리 프로세스의** 파일 핸들을 놓는다. (R44 N19)
+    """`path` 하위를 잡고 있는 **우리 프로세스의** 핸들을 놓는다 — 파일 핸들뿐 아니라
+    **프로세스 cwd 도 옮긴다**(전역 부작용, 갈래 ④). 진단 목적으로 부르지 말 것. (R44 N19)
 
     R43 이 정리 실패 보고를 살리자 두 번째 원인이 드러났다 — 실행당 23건이 전부
     `WinError 32`(사용 중)이고, 읽기 전용과 무관했다. 실측으로 두 갈래였다:
@@ -243,6 +289,21 @@ def _release_handles_under(path: Path) -> None:
                     _record_cleanup_failure(f"{path}: {mod_name}.reset_engine() 실패 — "
                                             f"{type(exc).__name__}: {exc}")
 
+    # ④ 프로세스 cwd — Windows 는 **현재 디렉터리를 지우지 못한다**("사용 중").
+    #    `monkeypatch.chdir(tmp_path / …)` 를 쓴 테스트는 teardown 이 인자 역순이라
+    #    `tmp_path` 정리가 chdir 복원보다 **먼저** 돈다(R45 실측: `fake_workspace` 잔존).
+    #    R43 C3 와 같은 순서 함정 — 정리 전에 트리 밖으로 나간다(복원은 monkeypatch 몫이며
+    #    `MonkeyPatch.undo` 는 저장해 둔 절대경로로 무조건 chdir 하므로 최종값은 같다).
+    try:
+        if os.path.join(os.path.normcase(os.getcwd()), "").startswith(root):
+            os.chdir(_INITIAL_CWD)
+    except OSError as exc:
+        # 사유를 남긴다 — 결과는 어차피 `WinError 32` 로 보고되지만 원인(cwd)이 사라진다.
+        _record_cleanup_failure(f"{path}: cwd 이탈 실패 — {type(exc).__name__}: {exc}")
+
+    # ⚠ GC 는 여기서 하지 않는다 — `_cleanup_tree` 가 **1차 삭제 실패 시에만** 부른다
+    #   (무조건 collect 는 전량 +290~480 s CPU, 리뷰 W-1).
+
 
 @pytest.fixture()
 def tmp_path() -> Path:
@@ -251,8 +312,7 @@ def tmp_path() -> Path:
     try:
         yield path
     finally:
-        _release_handles_under(path)
-        _force_rmtree(path)
+        _cleanup_tree(path)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -367,8 +427,7 @@ def _isolate_config_files():
         # (R44 리뷰 W6) 세션 루트도 같은 해제를 거친다 — `.run_lock_*.flock` 이 실제로
         # 만들어지는 자리가 여기다(`reports-test-<pid>/impact_audit`). 배선이 `tmp_path` 에만
         # 있으면 락 갈래가 정작 락이 사는 트리에서 발화하지 않는다.
-        _release_handles_under(root)
-        _force_rmtree(root)
+        _cleanup_tree(root)
 
 
 #: 세션 격리 대상 — `(모듈 경로, 상수 이름, 하위 디렉터리 이름)`. **여기 없는 경로는 격리되지 않는다.**
@@ -442,8 +501,7 @@ def _isolate_report_dirs():
         # (R44 리뷰 W6) 세션 루트도 같은 해제를 거친다 — `.run_lock_*.flock` 이 실제로
         # 만들어지는 자리가 여기다(`reports-test-<pid>/impact_audit`). 배선이 `tmp_path` 에만
         # 있으면 락 갈래가 정작 락이 사는 트리에서 발화하지 않는다.
-        _release_handles_under(root)
-        _force_rmtree(root)
+        _cleanup_tree(root)
 
 
 @pytest.fixture()
