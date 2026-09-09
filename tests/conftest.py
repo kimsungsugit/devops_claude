@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import shutil
@@ -150,6 +151,99 @@ def _force_rmtree(path: Path) -> bool:
 # 옮겼다(위). 여기에 fixture 를 다시 두지 말 것.
 
 
+def _release_handles_under(path: Path) -> None:
+    """`path` 하위를 잡고 있는 **우리 프로세스의** 파일 핸들을 놓는다. (R44 N19)
+
+    R43 이 정리 실패 보고를 살리자 두 번째 원인이 드러났다 — 실행당 23건이 전부
+    `WinError 32`(사용 중)이고, 읽기 전용과 무관했다. 실측으로 두 갈래였다:
+
+    · **로그 핸들러 10건** — `backend.main._attach_file_log()` 가 `RotatingFileHandler` 를
+      열어 로거에 붙이고 **닫지 않는다**(프로덕션에선 프로세스 수명과 같으니 정상).
+      `test_backend_file_logging.py` 가 `DEVOPS_LOG_DIR` 를 tmp 로 잡고 그 함수를 부르면,
+      핸들러가 tmp 파일을 쥔 채 남아 teardown 이 지우지 못한다(6 passed · 정리 실패 5건).
+    · **DB 엔진 18건** — `q.db` 를 `db_path=` 로 만든 sqlalchemy 엔진이 경로별 캐시
+      (`_engines`)에 살아 있어 sqlite 연결이 열린 채다. `reset_engine()` 뒤에는 지워진다.
+
+    로깅 갈래는 **전수 순회**다(등록된 모든 로거를 훑는다) — 새 테스트가 어디서 핸들러를
+    열든 걸린다. 반면 락·엔진 갈래는 **모듈 이름을 적은 목록**이다(아래 튜플). 지금 저장소에
+    경로별 엔진 캐시는 그 둘뿐이지만, 세 번째가 생기면 조용히 빠진다 — 이 저장소가
+    `_REPORT_DIR_TARGETS` 에서 이미 겪은 형태다(`impact_jobs` 누락 → AST 전수 가드).
+    `test_temp_tree_cleanup.py` 의 가드가 "저장소의 `_engines` 정의 == 이 목록" 을 강제한다.
+    """
+    try:
+        # ⚠ (R44 리뷰 W4) 구분자를 붙이지 않으면 `…/inside` 가 `…/inside_extra` 를 접두사로
+        #   먹는다(실증: 형제 디렉터리의 핸들러까지 닫혔다). pid 접두사도 같다(123 ⊂ 1234).
+        root = os.path.join(os.path.normcase(os.path.abspath(path)), "")
+    except (OSError, ValueError):
+        return
+
+    # ① 로깅 파일 핸들러 — 루트 로거 + 등록된 모든 로거.
+    loggers = [logging.getLogger()]
+    loggers += [logging.getLogger(name) for name in list(logging.root.manager.loggerDict)]
+    for logger in loggers:
+        for handler in list(getattr(logger, "handlers", []) or []):
+            fname = getattr(handler, "baseFilename", None)
+            if not fname:
+                continue
+            try:
+                if os.path.normcase(os.path.abspath(fname)).startswith(root):
+                    handler.close()
+                    logger.removeHandler(handler)
+            except (OSError, ValueError):
+                continue
+
+    # ② 실행 락(FileLock) — `impact_audit` 은 실행 수명 동안 락을 **보유**하는 설계라
+    #    (holder crash 시 OS 가 fd 를 닫아 좁비 락이 안 남는다) 테스트가 `release_run_lock`
+    #    을 안 부르면 `.flock` 이 열린 채 남는다. 그 경로가 이 트리 안이면 놓아 준다.
+    audit_mod = sys.modules.get("workflow.impact_audit")
+    locks = getattr(audit_mod, "_RUN_FILE_LOCKS", None) if audit_mod is not None else None
+    if isinstance(locks, dict):
+        for key, lock in list(locks.items()):
+            lock_file = getattr(lock, "lock_file", None)
+            if not lock_file:
+                continue
+            try:
+                if not os.path.normcase(os.path.abspath(lock_file)).startswith(root):
+                    continue
+                if getattr(lock, "is_locked", False):
+                    lock.release(force=True)
+            except (OSError, ValueError, AttributeError, TypeError):
+                continue
+            locks.pop(key, None)
+            # ⚠ (R44 리뷰 W5) **짝을 함께 놓는다.** cross-process 락만 풀고 intra 락과
+            #   소유자 기록을 남기면 같은 키의 다음 acquire 가 `intra.acquire(blocking=False)`
+            #   에서 실패해 **영구 `active_lock`** 이 된다(리뷰어 실증). `impact_audit` 자신의
+            #   docstring 이 "원인 파악이 매우 어려움" 이라 적어 둔 그 상태다.
+            intra_locks = getattr(audit_mod, "_RUN_INTRA_LOCKS", None)
+            if isinstance(intra_locks, dict):
+                intra = intra_locks.get(key)
+                try:
+                    if intra is not None and intra.locked():
+                        intra.release()      # threading.Lock 은 타 스레드 해제를 허용한다
+                except (RuntimeError, AttributeError):
+                    pass
+                intra_locks.pop(key, None)
+            owners = getattr(audit_mod, "_RUN_LOCK_OWNERS", None)
+            if isinstance(owners, dict):
+                owners.pop(key, None)
+
+    # ③ 경로별 엔진 캐시(quality·chat) — 이 경로의 DB 를 쓴 테스트가 있으면 dispose.
+    for mod_name in ("workflow.quality.db", "backend.services.chat_history_db"):
+        mod = sys.modules.get(mod_name)
+        engines = getattr(mod, "_engines", None) if mod is not None else None
+        if not isinstance(engines, dict):
+            continue
+        if any(os.path.normcase(os.path.abspath(str(k))).startswith(root) for k in engines):
+            reset = getattr(mod, "reset_engine", None)
+            if callable(reset):
+                try:
+                    reset()
+                except Exception as exc:  # noqa: BLE001 — 정리 실패가 teardown 을 막지 않는다
+                    # 침묵하지 않는다 — 못 놓은 핸들은 곧 잔존물이 되고, 그 사유가 유일한 단서다.
+                    _record_cleanup_failure(f"{path}: {mod_name}.reset_engine() 실패 — "
+                                            f"{type(exc).__name__}: {exc}")
+
+
 @pytest.fixture()
 def tmp_path() -> Path:
     path = _TMP_ROOT / f"pytest-{uuid.uuid4().hex[:12]}"
@@ -157,6 +251,7 @@ def tmp_path() -> Path:
     try:
         yield path
     finally:
+        _release_handles_under(path)
         _force_rmtree(path)
 
 
@@ -269,6 +364,10 @@ def _isolate_config_files():
         yield root
     finally:
         mp.undo()
+        # (R44 리뷰 W6) 세션 루트도 같은 해제를 거친다 — `.run_lock_*.flock` 이 실제로
+        # 만들어지는 자리가 여기다(`reports-test-<pid>/impact_audit`). 배선이 `tmp_path` 에만
+        # 있으면 락 갈래가 정작 락이 사는 트리에서 발화하지 않는다.
+        _release_handles_under(root)
         _force_rmtree(root)
 
 
@@ -340,6 +439,10 @@ def _isolate_report_dirs():
         yield root
     finally:
         mp.undo()
+        # (R44 리뷰 W6) 세션 루트도 같은 해제를 거친다 — `.run_lock_*.flock` 이 실제로
+        # 만들어지는 자리가 여기다(`reports-test-<pid>/impact_audit`). 배선이 `tmp_path` 에만
+        # 있으면 락 갈래가 정작 락이 사는 트리에서 발화하지 않는다.
+        _release_handles_under(root)
         _force_rmtree(root)
 
 

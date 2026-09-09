@@ -262,3 +262,206 @@ def test_symlink_target_permissions_are_not_touched(failure_log: Path, tmp_path:
     assert outsider.exists(), "링크를 따라가 트리 밖 파일을 지웠다"
     assert stat.S_IMODE(os.stat(outsider).st_mode) == before_mode, (
         "링크 타깃의 권한이 바뀌었다 — chmod 가 링크를 따라갔다")
+
+
+def test_open_log_handler_does_not_block_cleanup(failure_log: Path, tmp_path: Path) -> None:
+    """(R44 N19) 로그 핸들러가 임시 파일을 쥔 채여도 정리된다.
+
+    `_attach_file_log()` 는 `RotatingFileHandler` 를 열어 로거에 붙이고 닫지 않는다 —
+    프로덕션에선 프로세스 수명과 같으니 정상이지만, 테스트가 `DEVOPS_LOG_DIR` 를 tmp 로
+    잡으면 그 핸들러가 tmp 를 쥔 채 남아 teardown 이 지우지 못했다(실측 10건/실행).
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from tests.conftest import _release_handles_under
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    logger = logging.getLogger("r44_cleanup_probe")
+    handler = RotatingFileHandler(log_dir / "backend.log", encoding="utf-8")
+    logger.addHandler(handler)
+    logger.warning("x")
+
+    try:
+        # 대조군 — 핸들을 안 놓으면 이 플랫폼에서 지워지지 않는다.
+        if _force_rmtree(log_dir) is True:
+            pytest.skip("이 플랫폼은 열린 파일도 삭제한다 — 이 시나리오가 성립하지 않는다")
+
+        _release_handles_under(tmp_path)
+        assert handler not in logger.handlers, "핸들러가 로거에 남아 있다"
+        assert _force_rmtree(log_dir) is True
+        assert not log_dir.exists()
+    finally:
+        if handler in logger.handlers:
+            handler.close()
+            logger.removeHandler(handler)
+
+
+def test_open_db_engine_does_not_block_cleanup(failure_log: Path, tmp_path: Path) -> None:
+    """(R44 N19) 경로별 엔진 캐시에 남은 sqlite 연결이 정리를 막지 않는다(실측 18건/실행)."""
+    qdb = pytest.importorskip("workflow.quality.db")
+
+    from tests.conftest import _release_handles_under
+
+    db_file = tmp_path / "probe" / "q.db"
+    db_file.parent.mkdir(parents=True)
+    qdb.init_db(db_path=db_file)
+    assert any(str(db_file) in str(k) for k in getattr(qdb, "_engines", {})), \
+        "전제: 엔진이 경로별 캐시에 들어가야 한다"
+
+    if _force_rmtree(db_file.parent) is True:
+        pytest.skip("이 플랫폼은 열린 sqlite 파일도 삭제한다")
+
+    _release_handles_under(tmp_path)
+    assert _force_rmtree(db_file.parent) is True
+    assert not db_file.exists()
+
+
+def test_release_only_touches_the_given_subtree(failure_log: Path, tmp_path: Path) -> None:
+    """다른 경로의 핸들은 **건드리지 않는다** — 남의 테스트 로거를 닫으면 그쪽이 깨진다."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from tests.conftest import _release_handles_under
+
+    outside = tmp_path / "outside"
+    inside = tmp_path / "inside"
+    outside.mkdir()
+    inside.mkdir()
+    logger = logging.getLogger("r44_scope_probe")
+    keep = RotatingFileHandler(outside / "keep.log", encoding="utf-8")
+    drop = RotatingFileHandler(inside / "drop.log", encoding="utf-8")
+    logger.addHandler(keep)
+    logger.addHandler(drop)
+    # ⚠ (리뷰 W4) `inside` / `inside_extra` — **접두사가 겹치는 형제**가 진짜 함정이다.
+    #   구분자 없이 `startswith` 하면 남의 트리를 닫는다(실증됨). `outside` 만으로는 못 잡는다.
+    sibling_dir = tmp_path / "inside_extra"
+    sibling_dir.mkdir()
+    sibling = RotatingFileHandler(sibling_dir / "sib.log", encoding="utf-8")
+    logger.addHandler(sibling)
+    try:
+        _release_handles_under(inside)
+        assert keep in logger.handlers, "범위 밖 핸들러까지 닫았다"
+        assert sibling in logger.handlers, "접두사가 겹치는 형제 트리의 핸들러를 닫았다"
+        assert drop not in logger.handlers
+    finally:
+        for h in (keep, drop, sibling):
+            if h in logger.handlers:
+                h.close()
+                logger.removeHandler(h)
+            else:
+                h.close()
+
+
+def test_tmp_path_teardown_actually_releases_handles(failure_log: Path) -> None:
+    """(R44) 헬퍼가 있는 것과 **`tmp_path` 가 그것을 부르는 것**은 다르다.
+
+    앞의 테스트들은 `_release_handles_under` 를 직접 불러 검증한다. 그래서 fixture 에서
+    그 호출을 빼는 뮤턴트가 **생존했다** — 배선이 끊겨도 아무도 몰랐다(R39→R40 이 겪은
+    "헤더를 실었다고 배선이 끝난 게 아니다" 와 같은 형태).
+
+    fixture 를 수동으로 구동해 teardown 까지 돌린 뒤, 열어 둔 핸들이 정리를 막았는지 본다.
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from tests import conftest as _cf
+
+    gen = _cf.tmp_path.__wrapped__()      # fixture 데코레이터를 벗긴 원 제너레이터
+    path = next(gen)
+    logger = logging.getLogger("r44_wiring_probe")
+    handler = RotatingFileHandler(path / "held.log", encoding="utf-8")
+    logger.addHandler(handler)
+    logger.warning("x")
+    try:
+        try:
+            next(gen)                      # teardown 실행
+        except StopIteration:
+            pass
+        assert not path.exists(), (
+            "tmp_path teardown 이 열린 핸들을 놓지 않아 디렉터리가 남았다 — "
+            "`_release_handles_under` 배선을 확인할 것")
+    finally:
+        if handler in logger.handlers:
+            handler.close()
+            logger.removeHandler(handler)
+        else:
+            handler.close()
+        _force_rmtree(path)
+
+
+def test_held_run_lock_does_not_block_cleanup(failure_log: Path, tmp_path: Path) -> None:
+    """(R44) `impact_audit` 은 실행 수명 동안 `.flock` 을 **보유**한다 — 테스트가 release 를
+    안 부르면 그 파일이 열린 채 남아 정리를 막는다(전량 실행에서 실측)."""
+    audit = pytest.importorskip("workflow.impact_audit")
+    if getattr(audit, "FileLock", None) is None:
+        pytest.skip("filelock 미설치")
+
+    from tests.conftest import _release_handles_under
+
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(audit, "AUDIT_DIR", audit_dir)
+        res = audit.acquire_run_lock("r44probe")
+        assert res.get("ok") is not False or res.get("reason") != "active_lock", res
+
+        if _force_rmtree(audit_dir) is True:
+            audit.release_run_lock("r44probe")
+            pytest.skip("이 플랫폼은 잠긴 파일도 삭제한다")
+
+        # ⚠ (리뷰 W7) "참조를 떨궜다" 로는 부족하다 — pop 만 하면 정리가 CPython refcount 와
+        #   `FileLock.__del__` 이라는 **우연**에 기댄다. 그런데 dict 에서 pop 된 뒤에 검사하면
+        #   `locks.values()` 가 비어 있어 그대로 통과한다(첫 판이 그래서 생존했다).
+        #   **해제 전에 객체를 붙잡아** 두고 그 객체의 상태를 본다.
+        held = list(getattr(audit, "_RUN_FILE_LOCKS", {}).values())
+        assert any(getattr(lk, "is_locked", False) for lk in held), "전제: 락이 보유 상태여야 한다"
+
+        _release_handles_under(tmp_path)
+        assert not any(getattr(lk, "is_locked", False) for lk in held),             "락이 여전히 보유 상태다 — release 없이 참조만 떨궜다"
+        # 짝(intra·owners)도 함께 놓여야 다음 acquire 가 유령 `active_lock` 을 안 낸다.
+        again = audit.acquire_run_lock("r44probe")
+        assert again.get("reason") != "active_lock", f"유령 active_lock: {again}"
+        audit.release_run_lock("r44probe")
+
+        assert _force_rmtree(audit_dir) is True
+        assert not audit_dir.exists()
+
+
+def test_engine_cache_modules_are_not_a_stale_hand_written_list() -> None:
+    """(리뷰 W9) 경로별 엔진 캐시 목록이 저장소 실제와 일치하는가.
+
+    `_release_handles_under` 의 로깅 갈래는 전수 순회지만 엔진 갈래는 **모듈 이름을 적은
+    목록**이다. 세 번째 캐시가 생기면 조용히 빠지고, 증상은 "정리 실패가 늘었다" 뿐이다 —
+    이 저장소가 `_REPORT_DIR_TARGETS` 에서 이미 겪은 형태(`impact_jobs` 누락)다.
+    """
+    import ast
+
+    from tests import conftest as _cf
+
+    root = Path(_cf.__file__).resolve().parents[1]
+    skip = {"venv", ".venv", "node_modules", "site-packages", "__pycache__", "tests", ".git"}
+    found = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+        for fn in filenames:
+            if not fn.endswith(".py"):
+                continue
+            p = Path(dirpath) / fn
+            try:
+                tree = ast.parse(p.read_text("utf-8"))
+            except (SyntaxError, UnicodeDecodeError, OSError):
+                continue
+            names = {t.id for node in tree.body if isinstance(node, ast.Assign)
+                     for t in node.targets if isinstance(t, ast.Name)}
+            funcs = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+            if "_engines" in names and "reset_engine" in funcs:
+                found.add(str(p.relative_to(root)).replace("\\", "/")[:-3].replace("/", "."))
+
+    src = Path(_cf.__file__).read_text("utf-8")
+    declared = {m for m in found if f'"{m}"' in src}
+    missing = sorted(found - declared)
+    assert missing == [], (
+        "경로별 엔진 캐시를 가진 모듈이 `_release_handles_under` 목록에 없다 — "
+        f"그 트리는 정리되지 않는다: {missing}")
