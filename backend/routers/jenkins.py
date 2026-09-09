@@ -2502,10 +2502,13 @@ async def jenkins_uds_generate(
         jenkins_meta = {}
     summary_text = summary.get("summary_text", "") if isinstance(summary, dict) else ""
     source_sections: Dict[str, str] = {}
-    if source_root_path and source_root_path.exists():
+    # (R46) 다중 루트 전체 — 첫 루트만 넘기면 async 경로와 함수 집합이 갈린다(리뷰 C1).
+    from backend.helpers.uds import _source_roots_for_generation as _roots_for_gen
+    _uds_roots_str, _ = _roots_for_gen(source_root)
+    if _uds_roots_str:
         source_sections = await _run_blocking(
             generate_uds_source_sections,
-            str(source_root_path),
+            _uds_roots_str,
             component_map=component_map if component_map else None,
             max_files=max_source_files,
             max_items=max_items_per_category,
@@ -3190,8 +3193,12 @@ def _parse_excel_preview(file_path: Path, max_rows: int = 30) -> Dict[str, Any]:
     return {"filename": file_path.name, "sheets": sheets, "sheet_names": names}
 
 
-def _build_sts_function_details(source_root_path: Path, req_doc_paths: List[str], sds_doc_paths: List[str], uds_path: Optional[str] = None) -> Dict[str, Any]:
-    sections = generate_uds_source_sections(str(source_root_path))
+def _build_sts_function_details(source_root_path: Path, req_doc_paths: List[str], sds_doc_paths: List[str], uds_path: Optional[str] = None, source_root: str = "") -> Dict[str, Any]:
+    # (R46 리뷰 C1) `source_root`(콤마 결합 원문)가 오면 존재 루트 **전부**를 분석한다 —
+    # 첫 루트만 보면 UDS(전 루트)와 STS 의 함수 집합이 갈려 추적 짝이 깨진다.
+    from backend.helpers.uds import _source_roots_for_generation as _roots_for_gen
+    _roots_str, _ = _roots_for_gen(source_root) if source_root else ("", [])
+    sections = generate_uds_source_sections(_roots_str or str(source_root_path))
     details = sections.get("function_details", {}) if isinstance(sections, dict) else {}
     if isinstance(details, dict):
         # SwUDS 문서 직독 ASIL 보강 — cloudium U: 경로는 worker(resolver.read_bytes)로 받아
@@ -3365,7 +3372,7 @@ async def jenkins_sts_generate_async(
     def _worker() -> None:
         try:
             _set_progress("jenkins_sts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
-            function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths, uds_path=uds_path)
+            function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths, uds_path=uds_path, source_root=source_root)
             result = generate_sts(
                 requirements_text=req_texts,
                 function_details=function_details,

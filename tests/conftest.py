@@ -16,6 +16,19 @@ import pytest
 _TMP_ROOT = Path(__file__).resolve().parents[1] / ".codex_tmp"
 _TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
+# (R46 2026-09-09) pre-commit 훅 아래에서 pytest 가 돌면 `GIT_INDEX_FILE` 이 **절대경로**
+# (`.git/next-index-<pid>.lock` — pathspec 커밋의 임시 index)로 상속된다. 임시 저장소에서
+# `git add` 를 하는 테스트가 그 값을 그대로 쓰면 **커밋 중인 실 index 를 덮어쓴다**
+# (B-7: 2026-08-25 1,212→3 트리 · 2026-09-09 `unable to read` 두 번). git 이 "다른 저장소로
+# 갈 때 지우라" 고 지정한 변수들을 세션 시작에 지운다. 훅도 같은 변수를 빼고 띄우지만
+# (`.githooks/pre-commit`), 훅 없이 `GIT_INDEX_FILE` 을 둔 셸에서 돌려도 안전해야 한다.
+#: 지운 변수 이름 — 테스트가 "실제로 지웠는가" 를 단언하는 데 쓴다.
+_SCRUBBED_GIT_ENV: tuple[str, ...] = tuple(
+    v for v in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_PREFIX",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR")
+    if os.environ.pop(v, None) is not None
+)
+
 #: pytest 를 띄운 cwd. 정리가 cwd 를 트리 밖으로 옮겨야 할 때 **여기로** 돌아온다 —
 #: 레포 루트는 "복원값" 이 아니라 지어낸 값이다(R45 리뷰 I-1: 다른 cwd 에서 띄운 사용자에게
 #: 조용한 축 변경이고, teardown 중 살아 있는 daemon 스레드 12곳이 그 cwd 를 목격한다).

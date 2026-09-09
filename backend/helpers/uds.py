@@ -1995,6 +1995,32 @@ def _run_impact_analysis_for_uds(source_root_path: Optional[Path], changed_files
     return out_path
 
 
+def _existing_source_roots(source_root: str | None) -> tuple[list[str], list[str]]:
+    """콤마/세미콜론 결합 소스 루트를 **존재하는 것 / 없는 것**으로 가른다.
+
+    반환은 `(existing, missing)` — 둘 다 원문 순서. 결합 문자열 통째로 존재를 묻지 않는다
+    (그게 함수 0개 문서를 낳은 결함이다). 구분 규약은 `generate_uds_source_sections` 와 같다.
+    """
+    roots = [p.strip() for p in str(source_root or "").replace(";", ",").split(",") if p.strip()]
+    existing: list[str] = []
+    missing: list[str] = []
+    for r in roots:
+        (existing if Path(r).exists() else missing).append(r)
+    return existing, missing
+
+
+def _source_roots_for_generation(source_root: str | None) -> tuple[str, list[str]]:
+    """생성기에 넘길 **콤마 결합 루트 문자열**과 빠진 루트 목록.
+
+    `generate_uds_source_sections` 는 콤마 목록을 지원한다. 여기서 만든 문자열이 비면
+    (존재 루트 0) 소스 분석을 건너뛰고, 호출자는 `missing` 을 사용자에게 보인다.
+    ⚠ 단일 루트든 다중 루트든 **같은 경로**로 간다 — "루트가 하나면 옛 로직" 같은 분기를
+    두면 그 분기가 곧 침묵의 자리다(R46 리뷰 M1b 뮤턴트).
+    """
+    existing, missing = _existing_source_roots(source_root)
+    return ",".join(existing), missing
+
+
 def _uds_generate_from_paths(
     *,
     job_url: str,
@@ -2090,10 +2116,24 @@ def _uds_generate_from_paths(
         jenkins_meta = {}
     summary_text = summary.get("summary_text", "") if isinstance(summary, dict) else ""
     source_sections: Dict[str, str] = {}
-    source_root_path = Path(source_root).resolve() if source_root else None
-    if source_root_path and source_root_path.exists():
+    # ⚠ (R46 실사고 2026-09-09) `source_root` 는 레지스트리의 **콤마 결합 다중 루트**
+    #   (`C:\…\NE1AW_PORTING,C:\…\PDS128_FBL`)로 온다. 예전엔 결합 문자열 통째로
+    #   `Path(...).exists()` 를 물어 False → 소스 분석을 **조용히 건너뛰고** 함수 0개짜리
+    #   60MB 문서를 "success" 로 냈다(핸들러는 첫 루트만 존재 검사해 통과시켰고,
+    #   `generate_uds_source_sections` 는 콤마 목록을 지원한다 — 그 사이 이 한 줄이 갈랐다).
+    #   존재하는 루트만 넘기고, 빠진 루트는 notes 에 남긴다(침묵 금지).
+    _src_roots_str, _src_missing = _source_roots_for_generation(source_root)
+    # 아래 영향도 분석·RAG·src_root 표기는 **첫 루트** 하나를 쓴다(기존 계약 유지).
+    source_root_path: Optional[Path] = (
+        Path(_src_roots_str.split(",")[0]).resolve() if _src_roots_str else None
+    )
+    for _m in _src_missing:
+        # 문서 본문·AI 프롬프트에 실리는 notes 라 **경로 대신 이름만**(리뷰 W2).
+        notes.append(f"소스 루트 1개를 찾지 못해 건너뜀: {Path(_m).name or _m}")
+        _logger.warning("UDS source root missing (skipped): %s", _m)
+    if _src_roots_str:
         source_sections = generate_uds_source_sections(
-            str(source_root_path),
+            _src_roots_str,
             component_map=component_map if component_map else None,
             max_files=max_source_files,
             max_items=max_items_per_category,

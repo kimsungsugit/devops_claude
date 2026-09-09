@@ -48,6 +48,10 @@ default. 헤더 블록 값 열도 라벨 우측 첫 비어있지 않은 셀로 �
 
 ## ⚠ ES95411 양식이 어디에도 없다 (2026-08-26 실측)
 
+> **2026-09-09 결정(사용자)**: `config/swut_meta.json` KJPDS02 `template_paths.es95411_template` 을 **SwTCR 공용 양식**
+> (`★개발템플릿 Version3/…/11.SW 테스트/03.최종 보고서/(XXXX_SwTCR) Software Test Comprehesive Result_v0.10_XXXXXX.xlsm`, 워커 실측 실재)으로 교체했다.
+> 옛 값은 같은 파일의 `_comment_es95411_replaced_2026_09_09` 에 보존. 라이브 빌드로 시트 정합을 확인하고 안 맞으면 되돌린다(R46).
+
 KJPDS02 `template_paths.es95411_template` 이 가리키는
 `(KJPDS02_ES95411) ES95411 Test Result Report_v1.02_260324.xlsm` 은 **실재하지 않는다.**
 등록 경로 폴더는 물론 그 아래 `PV_2631` · `backup` · `backup/1.DV` 까지 전수 확인했고,

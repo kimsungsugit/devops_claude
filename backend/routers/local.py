@@ -181,6 +181,13 @@ _logger = logging.getLogger("devops_api")
 # ⚠ 이 헬퍼는 **라우터 계층 전용**이다. MCP(`write_file`/`replace_in_file`)는 HTTP 를 타지
 #    않고 `local_service` 함수를 in-process 로 부르며 자체 가드가 있다 — 건드리지 않는다.
 
+
+def _all_source_roots_str(source_root: str) -> str:
+    """(R46 리뷰 C1) 콤마 결합 소스 루트 중 **존재하는 것 전부**를 생성기 규약 문자열로.
+    첫 루트만 넘기던 자리 3곳(STS/SUTS/SITS 함수 상세)이 UDS 와 다른 함수 집합을 만들었다."""
+    from backend.helpers.uds import _source_roots_for_generation
+    return _source_roots_for_generation(source_root)[0]
+
 def _allowed_request_roots() -> List[Path]:
     """요청자가 base 로 지정할 수 있는 최상위 경로. `:4157` 과 같은 목록이다.
 
@@ -1505,11 +1512,14 @@ async def local_uds_generate_async(
                         _async_sds_pmap.update(_extract_sds_partition_map(rp))
                     except Exception:
                         pass
+            # (R46 리뷰 C1) 다중 루트 전체 — jenkins async 경로와 같은 함수 집합.
+            from backend.helpers.uds import _source_roots_for_generation as _roots_for_gen
+            _uds_roots_str, _ = _roots_for_gen(source_root)
             source_sections = generate_uds_source_sections(
-                str(source_root_path),
+                _uds_roots_str,
                 component_map=comp_map if comp_map else None,
                 sds_partition_map=_async_sds_pmap if _async_sds_pmap else None,
-            ) if source_root_path and source_root_path.exists() else {}
+            ) if _uds_roots_str else {}
 
             _set_progress(
                 "local_uds", "local", "local",
@@ -1949,7 +1959,7 @@ async def local_sts_generate(
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
-            sections = _get_source_sections_cached(str(source_root_path))
+            sections = _get_source_sections_cached(_all_source_roots_str(source_root) or str(source_root_path))
             function_details = sections.get("function_details", {})
             function_details, req_doc_paths, sds_doc_paths = _enrich_function_details_map(
                 function_details,
@@ -2142,7 +2152,7 @@ async def local_sts_generate_stream(
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
-            sections = _get_source_sections_cached(str(source_root_path))
+            sections = _get_source_sections_cached(_all_source_roots_str(source_root) or str(source_root_path))
             function_details = sections.get("function_details", {})
             function_details, req_doc_paths, sds_doc_paths = _enrich_function_details_map(
                 function_details,
@@ -2403,7 +2413,7 @@ async def local_sts_generate_async(
             function_details: Dict[str, Any] = {}
             if source_root_path and source_root_path.exists() and source_root_path.is_dir():
                 try:
-                    sections = _get_source_sections_cached(str(source_root_path))
+                    sections = _get_source_sections_cached(_all_source_roots_str(source_root) or str(source_root_path))
                     function_details = sections.get("function_details", {})
                     # req_doc_paths / sds_doc_paths 는 **바깥 스코프**(이 함수를 감싸는
                     # 엔드포인트)의 변수다. 여기서 대입 타깃에 넣으면 _worker 지역변수로

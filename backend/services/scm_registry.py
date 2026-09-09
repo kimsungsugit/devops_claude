@@ -140,6 +140,13 @@ def update_entry(entry_id: str, req: ScmUpdateRequest) -> ScmRegistryEntry:
                 continue
             merged = entry.model_dump(mode="json")
             patch = req.model_dump(exclude_none=True, mode="json")
+            # ⚠ (R46 실사고 2026-09-09) `linked_docs` 는 **보낸 키만** 병합한다. 전엔 여기서
+            #   `model_dump()` 가 안 보낸 필드를 기본값 `""`/`[]` 로 채워 아래 병합이 그 빈 값으로
+            #   기존 경로를 **전부 덮어썼다** — `{"linked_docs": {"uds": …}}` 한 번에 hdpdm01 의
+            #   나머지 8개 경로가 사라졌다(백업으로 복구). 프론트는 늘 전체 객체를 보내서 잠복해 있었다.
+            #   `link-docs`(교체 의미)는 `replace_linked_docs` 가 전 필드를 명시해 넘기므로 영향 없다.
+            if req.linked_docs is not None:
+                patch["linked_docs"] = req.linked_docs.model_dump(exclude_unset=True, mode="json")
             if "scm_password_env" in patch:
                 patch["scm_password_env"] = validate_scm_password_env(patch["scm_password_env"])
             if "linked_docs" in patch and isinstance(patch["linked_docs"], dict):
@@ -171,7 +178,10 @@ def delete_entry(entry_id: str) -> bool:
 
 
 def replace_linked_docs(entry_id: str, linked_docs: ScmLinkedDocs) -> ScmRegistryEntry:
-    return update_entry(entry_id, ScmUpdateRequest(linked_docs=linked_docs))
+    # 교체 의미를 지킨다 — 전 필드를 **명시 설정**으로 만들어 `update_entry` 의 부분 병합
+    # (exclude_unset)에서 빈 필드도 그대로 실리게 한다. 안 그러면 부분 body 가 병합으로 바뀐다.
+    full = ScmLinkedDocs.model_validate(linked_docs.model_dump(mode="json"))
+    return update_entry(entry_id, ScmUpdateRequest(linked_docs=full))
 
 
 def patch_linked_doc_field(entry_id: str, field: str, path_text: str) -> ScmRegistryEntry | None:

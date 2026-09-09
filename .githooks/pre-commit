@@ -210,7 +210,12 @@ if [ -d "tests/unit" ]; then
     #   (R38 리뷰 C-2 로 파싱 횟수는 2→1 로 줄였다 — 모듈 스코프 `uds_source_payload`.)
     # ⚠ **fail-closed 는 그대로다.** 이 상한의 목적은 "느림" 이 아니라 **hang** 을 잡는 것이고,
     #   1,270초짜리가 1,800초를 먹었다면 그건 여전히 hang 이다(여유 530초 = 42%).
-    TEST_OUTPUT=$(timeout -k 30 1800 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
+    # (R46 2026-09-09) 이 훅 안에서 GIT_INDEX_FILE 은 **절대경로**(.git/next-index-<pid>.lock)로
+    # 상속된다 — 아래 §4 주석의 "상대경로" 는 실측이 틀렸다. 그 채로 pytest 를 띄우면 임시
+    # 저장소에서 `git read-tree --empty; git add keep.txt` 를 하는 테스트가 **이 커밋의 임시
+    # index 를 통째로 덮어쓴다**(→ `unable to read <tmp blob>` 또는 1,212→3 트리). git 이
+    # "다른 저장소로 갈 때 지우라" 고 지정한 변수(`rev-parse --local-env-vars`)를 pytest 자식에서만 뺀다.
+    TEST_OUTPUT=$(for _v in $(git rev-parse --local-env-vars); do unset "$_v"; done; timeout -k 30 1800 "$PROJECT_PY" -m pytest tests/ $PYTEST_PAR -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
     # ⚠ **전문을 파일로 남긴다.** 위 `tail -20` 은 화면용이고, 실패 시엔 그걸로 부족하다:
@@ -251,10 +256,13 @@ set -e
 # 이었다. 나머지 1,208개가 전부 삭제로 기록됐는데 워킹트리는 멀쩡했고, `--no-verify` 로 같은
 # 명령을 돌리면 정상 커밋됐다. 즉 **훅이 도는 동안 무언가가 index 를 다른 내용으로 덮어썼다.**
 #
-# 원인은 아직 특정 못 했다. 저장소를 복제해 훅과 **동일한 환경**(GIT_INDEX_FILE=.git/index,
-# cwd=저장소 루트)에서 `pytest tests/` 7,309건을 돌렸을 때 index 는 **한 번도 안 변했다**
-# — 테스트 스위트는 범인이 아니다(대조군 확보). 상대경로 GIT_INDEX_FILE 상속도 실측상
-# 임시 저장소를 오염시키지 않았다(50→50). 절대경로였다면 1,212→3 으로 무너진다(실증).
+# (R46 2026-09-09 원인 특정) 대조군이 틀렸다 — 실제 훅의 GIT_INDEX_FILE 은 `.git/index` 가
+# 아니라 **절대경로 `.git/next-index-<pid>.lock`**(pathspec 커밋의 임시 index)이다. 그 값이
+# pytest 자식에 상속되면 임시 저장소에서 `git read-tree --empty; git add keep.txt` 를 하는
+# `test_postcommit_mass_deletion_guard.py` 가 **이 임시 index 를 덮어쓴다** → 아래 [4/4] 가
+# `unable to read <임시 저장소 blob>` 로 죽거나(2026-09-09 두 번 재현, 같은 해시), 훅이 통과하면
+# 1,212→3 트리가 커밋된다(2026-08-25 실사고). 위 pytest 호출이 그 변수를 빼고, `tests/conftest.py`
+# 도 세션 시작에 같은 변수를 지운다(이중 방어). 아래 [4/4] 는 그대로 둔다 — 결과 방어선.
 #
 # 원인을 모르는 채로도 **결과는 막을 수 있다**: 검사 시작 시점과 끝 시점의 스테이징 내용이
 # 다르면 커밋을 중단한다. 미검증 내용을 커밋으로 내보내지 않는다.

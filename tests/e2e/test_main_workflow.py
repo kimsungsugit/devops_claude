@@ -21,7 +21,17 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-pytestmark = pytest.mark.skipif(not HAS_PLAYWRIGHT, reason="playwright not installed")
+# (R46 2026-09-09) `browser_type_launch_args` 는 **pytest-playwright 플러그인**의 fixture 다.
+# `playwright` 패키지만 있으면(스크린샷용으로 venv 에 설치한 순간) skip 이 풀리고
+# fixture 미발견 ERROR 로 pre-commit 전량 게이트가 중단됐다(실사고). 두 조건을 다 본다.
+import importlib.util as _ilu  # noqa: E402
+
+HAS_PYTEST_PLAYWRIGHT = _ilu.find_spec("pytest_playwright") is not None
+
+pytestmark = pytest.mark.skipif(
+    not (HAS_PLAYWRIGHT and HAS_PYTEST_PLAYWRIGHT),
+    reason="playwright + pytest-playwright 둘 다 필요 (fixture browser_type_launch_args)",
+)
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:5173")
 

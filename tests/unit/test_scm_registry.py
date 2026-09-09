@@ -304,3 +304,53 @@ def test_resolve_credentials_prefers_longest_match(tmp_path, monkeypatch):
     )
     assert entry is not None and entry.id == "specific"
     assert user == "specific_user"
+
+
+def _fresh_registry(tmp_path, monkeypatch):
+    from backend.schemas import ScmLinkedDocs, ScmRegisterRequest
+    from backend.services import scm_registry
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    scm_registry.register_entry(
+        ScmRegisterRequest(
+            id="p1", name="P1", scm_type="git", scm_url="https://example/p1.git",
+            source_root="D:/src",
+            linked_docs=ScmLinkedDocs(
+                uds="U:/docs/uds.docx", srs="U:/docs/srs.docx", sds="U:/docs/sds.docx",
+                vectorcast=["U:/vc/app", "U:/vc/boot"], sts_template="U:/tpl/sts.xlsm",
+            ),
+        )
+    )
+    return scm_registry
+
+
+def test_partial_linked_docs_update_keeps_the_keys_it_did_not_send(tmp_path, monkeypatch):
+    """(R46 실사고 2026-09-09) `{"linked_docs": {"uds": …}}` 한 번에 나머지 경로가 전부 `""` 로
+    지워졌다 — Pydantic 이 안 보낸 필드를 기본값으로 채운 것을 병합이 '보낸 값' 으로 읽었다.
+    body 로 들어온 형태 그대로(`model_validate(dict)`) 재현한다 — 코드에서 `ScmLinkedDocs(uds=…)`
+    로 만들어도 fields_set 은 같지만, 라우터가 받는 건 JSON 이다."""
+    from backend.schemas import ScmUpdateRequest
+
+    reg = _fresh_registry(tmp_path, monkeypatch)
+    req = ScmUpdateRequest.model_validate({"linked_docs": {"uds": "U:/docs/uds_v2.docx"}})
+    updated = reg.update_entry("p1", req)
+    ld = updated.linked_docs
+    assert ld.uds == "U:/docs/uds_v2.docx"
+    assert ld.srs == "U:/docs/srs.docx" and ld.sds == "U:/docs/sds.docx"
+    assert ld.vectorcast == ["U:/vc/app", "U:/vc/boot"]
+    assert ld.sts_template == "U:/tpl/sts.xlsm"
+
+    # 빈 문자열을 **명시해서** 보내면 지운다 — "안 보냄" 과 "비움" 은 다르다.
+    cleared = reg.update_entry("p1", ScmUpdateRequest.model_validate({"linked_docs": {"sds": ""}}))
+    assert cleared.linked_docs.sds == "" and cleared.linked_docs.srs == "U:/docs/srs.docx"
+
+
+def test_replace_linked_docs_still_replaces_everything(tmp_path, monkeypatch):
+    """`link-docs` 는 교체 의미다 — 부분 병합으로 바뀌면 안 된다."""
+    from backend.schemas import ScmLinkedDocs
+
+    reg = _fresh_registry(tmp_path, monkeypatch)
+    replaced = reg.replace_linked_docs("p1", ScmLinkedDocs.model_validate({"uds": "U:/only.docx"}))
+    ld = replaced.linked_docs
+    assert ld.uds == "U:/only.docx"
+    assert ld.srs == "" and ld.sds == "" and ld.vectorcast == [] and ld.sts_template == ""
