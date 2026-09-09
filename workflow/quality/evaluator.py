@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from .thresholds import require_gate_threshold as _gt
+
 _logger = logging.getLogger("workflow.quality.evaluator")
 
 MetricResult = Dict[str, Any]  # {"metric_name": str, "value": float, "gate_pass": bool|None, "threshold": float|None}
@@ -203,7 +205,7 @@ def evaluate_sts(quality_report: Dict[str, Any]) -> MetricList:
 
     # 완성도
     metrics.append(
-        _metric("completeness_pct", _safe_float(quality_report, "completeness_pct"), threshold=80.0),
+        _metric("completeness_pct", _safe_float(quality_report, "completeness_pct"), threshold=_gt("sts", "completeness_pct")),
     )
 
     # 안전 TC 비율
@@ -222,7 +224,7 @@ def evaluate_sts(quality_report: Dict[str, Any]) -> MetricList:
     #   그 사유를 `requirement_coverage_unmeasured`(1.0) 와 분모 `total_requirements` 로 남긴다.
     _req_total = req_cov.get("total_reqs") if isinstance(req_cov, dict) else None
     _req_total_f = _safe_float(req_cov, "total_reqs")
-    metrics.append(_metric("requirement_coverage_pct", cov_pct, threshold=70.0))
+    metrics.append(_metric("requirement_coverage_pct", cov_pct, threshold=_gt("sts", "requirement_coverage_pct")))
     metrics.append(_metric("requirement_coverage_unmeasured",
                            1.0 if (not req_cov or _req_total is None or _req_total_f <= 0) else 0.0))
     metrics.append(_metric("total_requirements", _req_total_f))
@@ -274,14 +276,14 @@ def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
     if isinstance(quality_report, dict) and quality_report.get("function_coverage_pct") is not None:
         metrics.append(
             _metric("function_coverage_pct",
-                    _safe_float(quality_report, "function_coverage_pct"), threshold=80.0),
+                    _safe_float(quality_report, "function_coverage_pct"), threshold=_gt("suts", "function_coverage_pct")),
         )
 
     # I/O 커버리지 — (R32 B-9) TC 0건이면 비율이 정의되지 않으므로 비게이트. `total_test_cases` 가
     #   0 인 사실은 아래 참고지표로 남는다(라이브 실측: 12 run 전부 TC>0 — 0.0 두 건은 TC 253 의 실측 0%).
     metrics.append(
         _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"),
-                threshold=_gate_if_applicable(70.0, total)),
+                threshold=_gate_if_applicable(_gt("suts", "io_coverage_pct"), total)),
     )
 
     # 시퀀스 충실도 (avg/6 상한 100%)
@@ -320,7 +322,7 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     metrics.append(
         _metric("requirement_traceability_pct",
                 _safe_float(quality_report, "requirement_traceability_pct"),
-                threshold=_gate_if_applicable(70.0, total)),
+                threshold=_gate_if_applicable(_gt("sits", "requirement_traceability_pct"), total)),
     )
     # Related ID 필드 보유율은 서식 채움 지표로 별도 보존(게이트 미반영 — threshold 없음).
     metrics.append(
@@ -333,7 +335,7 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     # I/O 커버리지 (입출력 변수 보유 TC 비율)
     metrics.append(
         _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"),
-                threshold=_gate_if_applicable(60.0, total)),
+                threshold=_gate_if_applicable(_gt("sits", "io_coverage_pct"), total)),
     )
     # 테스트 방법 다양성 (생성 방법 종류 수 / 3, 상한 100%)
     methods = quality_report.get("gen_method_distribution") or {}
@@ -391,7 +393,7 @@ def evaluate_swreport(summary: Dict[str, Any]) -> MetricList:
     fail = _safe_float(summary, "fail_count")
 
     pass_rate = round((performed - fail) / max(performed, 1.0) * 100, 2)
-    metrics.append(_metric("pass_rate_pct", pass_rate, threshold=100.0))
+    metrics.append(_metric("pass_rate_pct", pass_rate, threshold=_gt("swreport", "pass_rate_pct")))
 
     overall_pass = 100.0 if str(summary.get("overall_result", "")).strip().lower() == "pass" else 0.0
     metrics.append(_metric("overall_pass", overall_pass))
@@ -433,15 +435,15 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
                            _safe_float(summary, "synthesized_rows")))
 
     metrics.append(
-        _metric("statement_coverage_pct", _safe_float(summary, "overall_statement_pct"), threshold=100.0),
+        _metric("statement_coverage_pct", _safe_float(summary, "overall_statement_pct"), threshold=_gt("coverage", "statement_coverage_pct")),
     )
     metrics.append(
         _metric("branch_coverage_pct", _safe_float(summary, "overall_branch_pct"),
-                threshold=100.0 if a in ("B", "C", "D") else None),
+                threshold=_gt("coverage", "branch_coverage_pct") if a in ("B", "C", "D") else None),
     )
     metrics.append(
         _metric("mcdc_coverage_pct", _safe_float(summary, "overall_mcdc_pct"),
-                threshold=100.0 if a == "D" else None),
+                threshold=_gt("coverage", "mcdc_coverage_pct") if a == "D" else None),
     )
 
     passed = _safe_float(summary, "passed")
@@ -462,7 +464,7 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     # 규약은 R32 가 세운 `_gate_if_applicable` 단일 출처다 — 형제 축만 고치고 이 축을 두면
     # 같은 결함이 옆줄에 남는다(D-5 ① 이 고친 것과 정확히 같은 형태).
     metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2),
-                           threshold=_gate_if_applicable(100.0, denom)))
+                           threshold=_gate_if_applicable(_gt("coverage", "pass_rate_pct"), denom)))
 
     metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
 
@@ -536,7 +538,7 @@ def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = Non
     metrics.append(
         _metric("function_achievement_pct",
                 round(fn_achieved / max(fn_total, 1.0) * 100, 2),
-                threshold=100.0 if fn_total > 0 else None),
+                threshold=_gt("swit_coverage", "function_achievement_pct") if fn_total > 0 else None),
     )
 
     calls_total = _safe_float(summary, "swit_function_calls_total")
@@ -547,7 +549,7 @@ def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = Non
     metrics.append(
         _metric("function_call_coverage_pct",
                 round(calls_covered / max(calls_total, 1.0) * 100, 2),
-                threshold=100.0 if calls_total > 0 else None),
+                threshold=_gt("swit_coverage", "function_call_coverage_pct") if calls_total > 0 else None),
     )
 
     # 참고지표 — 절대수는 threshold 부적합(`evaluate_swsa` 와 같은 판단).
@@ -583,7 +585,7 @@ def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = Non
     denom = tested + _safe_float(summary, "not_executed")
     # (R38 리뷰 C-1) 형제(`evaluate_coverage`)와 같은 규약 — 분모 0 은 미측정이지 0% 가 아니다.
     metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2),
-                           threshold=_gate_if_applicable(100.0, denom)))
+                           threshold=_gate_if_applicable(_gt("swit_coverage", "pass_rate_pct"), denom)))
     metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
     return metrics
 
@@ -619,10 +621,10 @@ def evaluate_test_result(summary: Dict[str, Any]) -> MetricList:
     # 있으므로 여기서도 0除 를 막는다(0/0 을 100% 로 접지 않는다 — 아래 max 는
     # 분자도 0 이라 결과가 0.0 이 된다).
     metrics.append(
-        _metric("test_execution_pct", round(tested / max(total, 1.0) * 100, 2), threshold=100.0),
+        _metric("test_execution_pct", round(tested / max(total, 1.0) * 100, 2), threshold=_gt("test_result", "test_execution_pct")),
     )
     metrics.append(
-        _metric("pass_rate_pct", round(passed / max(total, 1.0) * 100, 2), threshold=100.0),
+        _metric("pass_rate_pct", round(passed / max(total, 1.0) * 100, 2), threshold=_gt("test_result", "pass_rate_pct")),
     )
     metrics.append(
         _metric("executed_pass_rate_pct", round(passed / max(tested, 1.0) * 100, 2)),
@@ -668,10 +670,10 @@ def evaluate_comprehensive_result(summary: Dict[str, Any]) -> MetricList:
     # 분모 0 은 recorder 의 빈-산출물 skip 이 먼저 걸러내지만 외부 직접 호출도 있으므로
     # 여기서도 0除 를 막는다(분자도 0 이라 결과는 0.0 — 0/0 을 100% 로 접지 않는다).
     metrics.append(
-        _metric("test_execution_pct", round(tested / max(total, 1.0) * 100, 2), threshold=100.0),
+        _metric("test_execution_pct", round(tested / max(total, 1.0) * 100, 2), threshold=_gt("comprehensive", "test_execution_pct")),
     )
     metrics.append(
-        _metric("pass_rate_pct", round(passed / max(total, 1.0) * 100, 2), threshold=100.0),
+        _metric("pass_rate_pct", round(passed / max(total, 1.0) * 100, 2), threshold=_gt("comprehensive", "pass_rate_pct")),
     )
     metrics.append(
         _metric("executed_pass_rate_pct", round(passed / max(tested, 1.0) * 100, 2)),
@@ -715,7 +717,7 @@ def evaluate_swsa(quality_data: Dict[str, Any]) -> MetricList:
     #   않고 비게이트로 둔다. 잰 metric 수는 참고지표로 남긴다(라이브 실측: swsa run 0건 — 코드 결함만).
     his_pass = round(sum(rates) / len(rates), 2) if rates else 0.0
     metrics.append(_metric("his_pass_pct", his_pass,
-                           threshold=_gate_if_applicable(80.0, float(len(rates)))))
+                           threshold=_gate_if_applicable(_gt("swsa", "his_pass_pct"), float(len(rates)))))
     metrics.append(_metric("his_metrics_measured", float(len(rates))))
 
     # 위반 수 — 참고지표(threshold 없음). QAC extraction_failed 시 호출자가 미포함.

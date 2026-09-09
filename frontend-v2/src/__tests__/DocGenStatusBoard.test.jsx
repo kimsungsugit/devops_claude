@@ -1203,3 +1203,30 @@ describe('통합 Summary 준비 점검 — form.source_paths', () => {
     expect(again.form.source_paths_text).toBeUndefined();
   });
 });
+
+// (R42 N17) 제안의 `gated` 는 "평가기가 이 축으로 판정했는가" 다. 보드는 임계를 "목표" 로
+// 찍는데, 게이트가 재지도 않는 축에 그 문구를 쓰면 사용자는 미달로 읽는다.
+describe('DocGenStatusBoard — 제안의 게이트 축 구별', () => {
+  it('gated=false 는 목표가 아니라 참고 기준으로 적는다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) return Promise.resolve({ run_id: 1 });
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    mockPost.mockResolvedValue({
+      suggestions: [
+        { metric: 'logic_flow_pct', label: '로직 흐름', value: 0, threshold: 40, gated: false },
+        { metric: 'pass_rate_pct', label: '통과율', value: 50, threshold: 100, gated: true },
+      ],
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    const relaxed = await screen.findByText('로직 흐름');
+    expect(relaxed.closest('li').textContent).toContain('참고 기준');
+    expect(relaxed.closest('li').textContent).not.toContain('목표');
+    // 대조군 — 게이트 축은 여전히 "목표" 다.
+    expect(screen.getByText('통과율').closest('li').textContent).toContain('목표');
+  });
+});

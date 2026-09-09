@@ -367,9 +367,17 @@ def test_unconfirmed_input_is_unknown_in_the_chain_not_false(tmp_path: Path, mon
 
 
 class _CloudiumDenies:
-    """cloudium 모드에서 `exists` 가 PermissionError 를 낸다 — 문장만 다르다."""
+    """cloudium 모드에서 `exists` 가 PermissionError 를 낸다 — 문장만 다르다.
+
+    ⚠ (R42 N8) 워커 생존은 이제 **경로와 무관하게** `is_gate_running` 으로 잰다. 그래서
+    이 fake 도 워커 엔드포인트를 갖고, 테스트가 생존을 명시로 통제한다 — 통제하지 않으면
+    "워커 행이 떴다/안 떴다" 가 실행 환경(진짜 워커가 도는지)에 좌우된다.
+    """
 
     mode = "cloudium"
+    worker_host = "127.0.0.1"
+    worker_port = 8766
+    gate_process = "excel_rename_gui_v2.exe"
 
     def __init__(self, message: str) -> None:
         self.message = message
@@ -407,6 +415,7 @@ def test_permission_error_kind(message: str, kind: str) -> None:
 def test_prefix_block_is_not_reported_as_a_dead_worker(tmp_path: Path, monkeypatch, message: str) -> None:
     """허용 prefix 밖 경로는 워커가 죽은 게 아니다 — "워커를 실행하세요" 는 거짓 안내다."""
     monkeypatch.setattr(fr, "get_resolver", lambda: _CloudiumDenies(message))
+    monkeypatch.setattr(fr, "is_gate_running", lambda **_kw: True)   # 워커는 멀쩡하다
     data = _post({"doc_type": "uds", "source_root": str(tmp_path),
                   "doc_paths": {"srs": "U:/other/SwRS.docx"}})
     assert _step(data, "worker") is None, "prefix 차단에 워커 실행 행이 떴다"
@@ -420,6 +429,7 @@ def test_prefix_block_is_not_reported_as_a_dead_worker(tmp_path: Path, monkeypat
 def test_dead_worker_still_gets_the_worker_row(tmp_path: Path, monkeypatch) -> None:
     """대조군 — 진짜 연결 실패는 여전히 워커 행 + 실행 안내다."""
     monkeypatch.setattr(fr, "get_resolver", lambda: _CloudiumDenies(_WORKER_MSG))
+    monkeypatch.setattr(fr, "is_gate_running", lambda **_kw: False)
     data = _post({"doc_type": "uds", "source_root": str(tmp_path),
                   "doc_paths": {"srs": "U:/docs/SwRS.docx"}})
     worker = _step(data, "worker")

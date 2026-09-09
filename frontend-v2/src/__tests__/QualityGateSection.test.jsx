@@ -735,3 +735,26 @@ describe('검토 대상 해시는 전체가 보여야 한다 (R39 N3)', () => {
     expect(within(panel).getByText(/Get-FileHash/)).toBeInTheDocument();
   });
 });
+
+// (R42 N17) 서버는 제안마다 `gated` 를 실어 보낸다 — 평가기가 그 축으로 판정했는가.
+// 화면이 그걸 안 읽으면 게이트가 재지도 않은 축의 임계가 "미달" 로 읽힌다.
+describe('개선 제안 — 게이트 축과 참고 축을 구별한다', () => {
+  it('gated=false 제안은 참고임을 문구로 밝힌다', async () => {
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({
+      suggestions: [
+        { metric: 'logic_flow_pct', label: '로직 흐름', value: 0, threshold: 40, gated: false, advice: '단순 함수일 수 있습니다' },
+        { metric: 'pass_rate_pct', label: '통과율', value: 50, threshold: 100, gated: true, advice: '실패 TC 를 보세요' },
+      ],
+      summary: '',
+    });
+    render(<QualityGateSection />);
+    await user.click(await screen.findByRole('button', { name: '근거 보기' }));
+    await user.click(await screen.findByRole('button', { name: '개선 제안 생성' }));
+
+    const relaxed = await screen.findByText('로직 흐름');
+    expect(relaxed.closest('li').textContent).toContain('게이트 항목 아님');
+    // 대조군 — 게이트 축엔 그 꼬리표가 붙지 않는다(전부 참고로 보이면 구별이 사라진다).
+    expect(screen.getByText('통과율').closest('li').textContent).not.toContain('게이트 항목 아님');
+  });
+});

@@ -692,7 +692,14 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
       return;
     }
     if (kind === 'run_worker') {
-      toast('warning', 'Cloudium worker 가 응답하지 않습니다 — excel_rename_gui_v2.exe 를 실행한 뒤 다시 확인하세요.');
+      // (R42 리뷰 I1) 서버가 이미 사실을 문장으로 실어 보낸다 — 미응답(`error`)인지
+      // **확인을 못했는지**(`unmeasured`)인지, 그리고 실제 게이트 프로세스명까지. 예전엔
+      // 이 토스트가 "응답하지 않습니다" 를 **단언**하고 프로세스명을 하드코딩해,
+      // 서버는 "못 재다" 인데 버튼은 "죽었다" 라고 말하는 한 화면 두 답이 됐다.
+      const said = String(step?.reason || '').trim();
+      toast('warning', said
+        ? `${said} — 게이트 프로세스를 실행한 뒤 다시 확인하세요.`
+        : 'Cloudium worker 상태를 확인한 뒤 다시 시도하세요.');
       return;
     }
     if (kind === 'adopt_suggestion') {
@@ -1555,7 +1562,13 @@ function EvidenceDetail({ run, detail }) {
             {sugg.map((s, i) => (
               <li key={`${s.metric}-${i}`}>
                 <strong>{s.label || metricLabel(s.metric)}</strong>
-                {s.value != null && s.threshold != null && ` ${fmtPct(s.value)} → 목표 ${fmtPct(s.threshold)}`}
+                {/* (R42 N17) `gated:false` = **평가기가 이 축으로 판정하지 않았다**. 그런 축의 임계를
+                    "목표" 로 보이면 게이트 미달로 읽힌다 — 서버가 실어 보낸 사실을 화면이 그대로 쓴다. */}
+                {s.value != null && s.threshold != null && (
+                  s.gated === false
+                    ? ` ${fmtPct(s.value)} (참고 기준 ${fmtPct(s.threshold)} — 게이트 항목 아님)`
+                    : ` ${fmtPct(s.value)} → 목표 ${fmtPct(s.threshold)}`
+                )}
                 {s.advice && <> — {s.advice}</>}
               </li>
             ))}

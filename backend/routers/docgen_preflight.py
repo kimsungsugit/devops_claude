@@ -543,6 +543,42 @@ def _permission_error_kind(message: str) -> str:
     return "other"
 
 
+def _probe_worker(resolver: Any) -> Dict[str, Any]:
+    """worker 가 살아 있는가 — **경로와 무관한 사실**이라 경로로 추론하지 않는다.
+
+    ⚠ (R42 N8) 예전엔 입력 dict 의 **첫 항목 하나**를 `_probe_path` 로 찔러 보고, 그 결과가
+    `kind == "worker"` 일 때만 이 행을 냈다. 그래서 세 경우에 워커가 죽어도 안내가 없었다:
+      · 첫 입력이 허용 prefix **밖**이면 `kind == "prefix"` 로 갈려 워커 판정이 아예 없다
+        (그 경로는 워커가 살았든 죽었든 같은 예외를 낸다).
+      · 첫 입력이 **로컬 캐시 등** 워커를 타지 않는 경로면 존재 판정이 그냥 성립한다.
+      · 입력이 하나도 없으면(`probe_target` 이 빈 문자열) 접근 점검 자체를 건너뛴다.
+    세 경우 모두 화면엔 입력 행만 ✗ 로 남아, 사용자는 **파일이 없다**고 읽는다 — 실제로는
+    워커를 켜면 끝나는 일이다.
+
+    정본은 resolver 자신에게 있다: `CloudiumFileResolver._ensure_gate` 가 read 전마다
+    `is_gate_running` 으로 같은 판정을 한다. 게이트도 그것을 쓴다(TTL 캐시라 IPC 비용도 낮다).
+    """
+    host = str(getattr(resolver, "worker_host", "") or "").strip()
+    port = getattr(resolver, "worker_port", None)
+    if not host or not port:
+        # 워커 엔드포인트를 모르는 resolver — **살아 있다고 단정하지 않는다**(미측정).
+        return {"state": S_UNMEASURED, "kind": "worker",
+                "reason": "worker 엔드포인트를 알 수 없어 생존을 확인하지 못했습니다"}
+    # 지연 import — 이 모듈의 다른 resolver 사용처와 같은 규약(순환 회피).
+    from backend.services.file_resolver import is_gate_running
+    try:
+        alive = bool(is_gate_running(host=host, port=int(port)))
+    except Exception as exc:  # noqa: BLE001 — 소켓/설정 계열이 광범위하다
+        return {"state": S_UNMEASURED, "kind": "worker",
+                "reason": f"worker 확인 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
+    if alive:
+        return {"state": S_OK, "kind": "", "reason": ""}
+    gate_process = str(getattr(resolver, "gate_process", "") or "").strip()
+    tail = f" — '{gate_process}' 를 실행하세요." if gate_process else ""
+    return {"state": S_ERROR, "kind": "worker",
+            "reason": f"Cloudium worker 미응답 ({host}:{port}){tail}"}
+
+
 def _probe_path(resolver: Any, path: str) -> Dict[str, Any]:
     """존재 3상태. ⚠ 확인 실패를 `missing` 으로 접지 않는다(`scm.py:294` 와 같은 규약).
 
@@ -1115,23 +1151,13 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # ── 0. 접근 — cloudium 이면 worker 가 살아 있어야 한다 ────────────────────
     mode = getattr(resolver, "mode", "local")
     if mode != "local":
-        # 다중값 키(콤마/개행 결합)는 **첫 조각**으로 잰다 — 결합 문자열 자체는 존재하지
-        # 않는 합성 경로다(리뷰 I1).
-        probe_target = next(
-            ((_split_multi(k, p) or [""])[0] for k, p in inputs.items()
-             if k != _req.IN_SOURCE_ROOT), "",
-        )
-        if probe_target:
-            res = _probe_path(resolver, probe_target)
-            # ⚠ worker 연결 실패일 때만 "워커를 실행하세요" 다. 허용 prefix 밖 경로도
-            #   같은 `S_ERROR` 로 오는데, 그건 워커가 아니라 등록의 문제라 아래 입력 행이
-            #   `open_scm` 으로 안내한다(P-3③).
-            if res["state"] == S_ERROR and res.get("kind") == "worker":
-                steps.append(_step(
-                    "worker", "access", S_ERROR, "Cloudium worker",
-                    reason=res["reason"],
-                    actions=[{"kind": "run_worker"}],
-                ))
+        res = _probe_worker(resolver)
+        if res["state"] != S_OK:
+            steps.append(_step(
+                "worker", "access", res["state"], "Cloudium worker",
+                reason=res["reason"],
+                actions=[{"kind": "run_worker"}],
+            ))
 
     # ── 1. 입력 ──────────────────────────────────────────────────────────────
     required = list(spec.get("required") or [])
@@ -1257,6 +1283,12 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             # 워커는 살아 있는데 이 경로가 허용 prefix 밖이다 — 조치는 워커 실행이 아니라
             # SCM/파일 모드에 prefix 를 등록하는 것이다.
             extra["actions"] = [{"kind": "open_scm"}]
+        elif state == S_ERROR and res.get("kind") == "worker":
+            # (R42 리뷰 W3) ping 은 pong 인데 **이 read 가** 워커 연결 실패로 죽는 창이 있다
+            # (생존 캐시 TTL 1초, 또는 그 사이 워커 종료). 위 접근 행은 그때 뜨지 않으므로
+            # 이 행이 유일한 안내인데, 조치가 없으면 사용자는 "접근 거부" 문장만 보고 무엇을
+            # 눌러야 할지 모른다 — 새 상태마다 벗어나는 행동 경로를 준다.
+            extra["actions"] = [{"kind": "run_worker"}]
         if state == S_MISSING:
             suggestion = _suggest_revision(resolver, path)
             if suggestion:

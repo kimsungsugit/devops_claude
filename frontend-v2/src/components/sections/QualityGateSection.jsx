@@ -730,6 +730,10 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                       {detail.advice.suggestions.map((s, i) => (
                         <li key={`${s.metric}-${i}`}>
                           <strong>{s.label || s.metric}</strong>
+                          {/* (R42 N17) 게이트가 재지 않은 축은 미달이 아니라 참고다. */}
+                          {s.gated === false && (
+                            <span style={{ color: 'var(--color-text-muted)' }}> (참고 — 게이트 항목 아님)</span>
+                          )}
                           {s.advice && <> — {s.advice}</>}
                         </li>
                       ))}

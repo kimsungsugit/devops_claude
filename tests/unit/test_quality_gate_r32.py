@@ -435,14 +435,22 @@ class TestAdvisorThresholdsAreResolvedAtCallTime:
         import config
         from workflow.quality.advisor import _UDS_ADVICE, _rule_threshold
         monkeypatch.setattr(config, "UDS_QUALITY_GATE_THRESHOLDS", {**config.UDS_QUALITY_GATE_THRESHOLDS, "called_min": 12.5})
-        assert _rule_threshold(_UDS_ADVICE["called_pct"]) == 12.5
+        assert _rule_threshold(_UDS_ADVICE["called_pct"], "uds", "called_pct") == 12.5
         monkeypatch.setattr(config, "UDS_QUALITY_GATE_THRESHOLDS", {**config.UDS_QUALITY_GATE_THRESHOLDS, "called_min": 33.0})
-        assert _rule_threshold(_UDS_ADVICE["called_pct"]) == 33.0
+        assert _rule_threshold(_UDS_ADVICE["called_pct"], "uds", "called_pct") == 33.0
 
     def test_rules_without_a_key_keep_their_literal(self):
         from workflow.quality.advisor import _rule_threshold
-        assert _rule_threshold({"threshold": 80.0}) == 80.0
-        assert _rule_threshold({"threshold": None}) is None
+        assert _rule_threshold({"threshold": 80.0}, "", "x") == 80.0
+        assert _rule_threshold({"threshold": None}, "", "x") is None
+
+    def test_table_rules_read_the_single_source(self):
+        """(R42 N6) `from_table` 규칙은 평가기와 **같은 표**에서 임계를 읽는다."""
+        from workflow.quality.advisor import _rule_threshold
+        from workflow.quality.thresholds import require_gate_threshold
+        assert _rule_threshold({"from_table": True}, "swsa", "his_pass_pct") ==             require_gate_threshold("swsa", "his_pass_pct")
+        # 표에 없는 축이면 규칙은 임계를 얻지 못한다 — 숫자를 지어내지 않는다.
+        assert _rule_threshold({"from_table": True}, "swsa", "no_such") is None
 
     def test_uds_rules_all_carry_a_config_key(self):
         import config
