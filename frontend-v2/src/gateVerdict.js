@@ -327,3 +327,38 @@ export function basisReasonText(reason) {
   }
   return HASH_REASON_TEXT[reason] || String(reason);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (R40 N1) 빌드 응답이 알려 주는 "이 파일이 어느 품질 run 인가".
+// R39 가 서버에 `X-Quality-Run-Id` 를 실었는데 **읽는 화면이 없었다** — 헤더만 있고
+// 사용자에게 닿지 않으면 배선은 반쪽이다(R37 이 `X-Output-SHA256` 을 그 상태로 이월했던 전례).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 서버 `workflow/quality/recorder.QUALITY_RUN_HEADER` 와 lockstep. */
+export const QUALITY_RUN_HEADER = 'X-Quality-Run-Id';
+
+/**
+ * 헤더 값 → `{ runId, text, tone }` 또는 null(헤더 없음 = 옛 서버).
+ *
+ * 세 상태를 **구별**한다:
+ *   - 숫자      → 기록됨. 검토 기록(run 단위)과 이 파일을 잇는 유일한 단서다.
+ *   - unrecorded→ 기록 실패. 빌드는 성공했고 파일도 받았지만 이력에는 안 남는다 —
+ *                 침묵하면 사용자는 나중에 "왜 생성 현황에 없지" 를 겪는다.
+ *   - 헤더 없음 → 옛 서버. 실패가 아니므로 아무 말도 하지 않는다.
+ */
+export function qualityRunNote(raw) {
+  const v = String(raw ?? '').trim();
+  if (!v) return null;
+  if (v === 'unrecorded') {
+    return {
+      runId: null,
+      tone: 'warning',
+      text: '품질 기록이 남지 않았습니다 — 생성 현황에 이 실행이 안 보입니다(서버 로그 확인)',
+    };
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) {
+    return { runId: null, tone: 'warning', text: `품질 기록 상태를 알 수 없습니다(${v})` };
+  }
+  return { runId: n, tone: 'info', text: `품질 기록 #${n}` };
+}

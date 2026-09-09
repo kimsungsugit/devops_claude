@@ -511,7 +511,18 @@ def suggest_improvements(
 
             if value < threshold:
                 gap = threshold - value
-                if gap > 30:
+                # (R40 N5) **평가기가 판정한 축인가**를 먼저 본다. `score_obj.threshold` 가 있으면
+                # 평가기가 그 축을 게이트로 걸었다는 뜻이고, 없으면 rule 리터럴로 폴백한 것이다 —
+                # 즉 **평가기는 그 축으로 판정하지 않기로 했다**. 그런 축을 "긴급" 으로 올리면
+                # 게이트가 재지도 않은 것을 사용자에게 미달로 알리게 된다.
+                #
+                # 실측(라이브 suts 1157·1158): `logic_flow_pct 0.0 < 40.0` 이 priority=high 로 나갔는데,
+                # 정작 같은 규칙의 조치문은 "…단순 함수일 수 있으며, **이 경우 정상입니다**" 다 —
+                # 한 제안이 두 말을 했다. 값이 0.0 인 것도 미측정이 접힌 결과라 두 결함이 겹친 자리다.
+                gated = score_obj.threshold is not None
+                if not gated:
+                    priority = "low"
+                elif gap > 30:
                     priority = "high"
                 elif gap > 10:
                     priority = "medium"
@@ -526,6 +537,9 @@ def suggest_improvements(
                     "gap": round(gap, 1),
                     "advice": rule["low_advice"],
                     "priority": priority,
+                    # 화면이 "게이트 미달" 과 "참고 임계 미달" 을 구별할 수 있게 사실을 싣는다.
+                    # 임계의 출처가 평가기(DB)인지 rule 리터럴인지가 곧 그 구별이다.
+                    "gated": gated,
                 })
 
         # 우선순위 정렬 (high > medium > low, gap 큰 순)

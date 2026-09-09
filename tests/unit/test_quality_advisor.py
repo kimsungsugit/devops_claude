@@ -205,3 +205,52 @@ class TestAdviceEndpointDoesNotHideErrorsBehind200:
         res = self._client(tmp_db, monkeypatch).post(f"/api/quality/runs/{rid}/advice")
         assert res.status_code == 200, res.text
         assert "summary" in res.json()
+
+
+class TestAdvisorRespectsTheEvaluatorsJudgement:
+    """(R40 N5) 평가기가 **판정하지 않기로 한 축**을 advisor 가 "긴급" 으로 올리지 않는다.
+
+    임계의 출처가 둘이다: DB(`quality_scores.threshold` — 평가기가 게이트로 걸었다는 뜻)와
+    rule 리터럴(폴백). 앞판은 둘을 구분하지 않아, 평가기가 비게이트로 둔 축도 gap 만 크면
+    `priority='high'` 로 나갔다.
+
+    라이브 실측(suts 1157·1158): `logic_flow_pct 0.0 < 40.0` → high. 그런데 같은 규칙의
+    조치문은 *"…단순 함수일 수 있으며, 이 경우 정상입니다"* 다 — **한 제안이 두 말**을 했다.
+    """
+
+    def _run_with(self, tmp_db, metric, value, threshold):
+        init_db(tmp_db)
+        with get_session(tmp_db) as s:
+            run = GenerationRun(run_uuid=str(uuid.uuid4()), doc_type="suts", status="success")
+            s.add(run)
+            s.flush()
+            s.add(QualitySummary(run_id=run.id, overall_score=50.0, gate_pass=False))
+            s.add(QualityScore(run_id=run.id, metric_name=metric, value=value,
+                               gate_pass=None if threshold is None else value >= threshold,
+                               threshold=threshold))
+            return run.id
+
+    def _find(self, out, metric):
+        return next((s for s in out.get("suggestions", []) if s["metric"] == metric), None)
+
+    def test_ungated_axis_is_not_urgent(self, tmp_db):
+        """평가기가 임계를 안 건 축(=비게이트)은 gap 이 커도 low — 재지 않은 것을 긴급이라 하지 않는다."""
+        rid = self._run_with(tmp_db, "logic_flow_pct", 0.0, None)   # threshold=None → 비게이트
+        got = self._find(suggest_improvements(rid, db_path=tmp_db), "logic_flow_pct")
+        assert got is not None, "제안 자체가 사라지면 안 된다(정보는 남긴다)"
+        assert got["priority"] == "low", f"비게이트 축이 {got['priority']} 로 올라갔다"
+        assert got["gated"] is False, "화면이 '게이트 미달' 과 구별할 수 있어야 한다"
+
+    def test_gated_axis_keeps_its_urgency(self, tmp_db):
+        """평가기가 실제로 건 축은 종전대로 gap 에 따라 긴급해진다 — 조이다가 진짜 미달을 놓치면 안 된다."""
+        rid = self._run_with(tmp_db, "logic_flow_pct", 0.0, 40.0)   # DB 임계 있음 → 게이트 축
+        got = self._find(suggest_improvements(rid, db_path=tmp_db), "logic_flow_pct")
+        assert got is not None
+        assert got["priority"] == "high", "게이트 축의 큰 미달이 low 로 내려갔다"
+        assert got["gated"] is True
+
+    def test_summary_high_count_follows_the_same_rule(self, tmp_db):
+        """요약의 '긴급 N건' 도 같은 판정을 따른다 — 표와 문장이 갈리면 한 화면이 두 말을 한다."""
+        rid = self._run_with(tmp_db, "logic_flow_pct", 0.0, None)
+        out = suggest_improvements(rid, db_path=tmp_db)
+        assert "긴급" not in out["summary"] or "0개 긴급" in out["summary"], out["summary"]

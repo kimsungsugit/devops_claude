@@ -258,10 +258,14 @@ def record_uds_run(quality_eval: Dict[str, Any], **kwargs: Any) -> int:
             또는 _compute_quick_quality_gate() 반환 dict(bare quick_gate: rates/counts 보유).
         **kwargs: record_run 으로 전달 (project_root/output_path/elapsed_sec/ai_model 등).
 
-    함수가 0개(빈 생성)면 기록하지 않는다 — 대시보드 0점 오염 방지.
+    ⚠ (R40 N10) **함수가 0개여도 기록한다.** 예전 이 자리엔 빈 생성이면 건너뛴다는 문장이
+    있었는데, R37 이 그 선차단을 없앤 뒤로 **사실이 아니었다** — UDS 만 옛 동작으로 남으면
+    생성은 됐는데 이력이 없어 보드가 영영 "미생성" 이고, 사용자는 같은 빈 문서를 다시 만든다.
+    빈 산출물 판정은 `record_run` 의 `empty_output_reason` **한 곳**이 하고, 그 run 은
+    `status='empty_output'` 으로 남아 점수만 없다(= 판정 제외).
 
     Returns:
-        run_id (성공 시), -1 (skip/실패 시 -- 예외 전파하지 않음).
+        run_id (성공 시), -1 (**실패 시** -- 예외 전파하지 않음). skip 은 더 이상 없다.
     """
     try:
         data = dict(quality_eval or {})
@@ -272,15 +276,14 @@ def record_uds_run(quality_eval: Dict[str, Any], **kwargs: Any) -> int:
                 "gate_pass": data.get("gate_pass"),
                 "confidence_gate_pass": data.get("confidence_gate_pass"),
             }
-        qg = data.get("quick_gate") or {}
-        total_fn = int(
-            (qg.get("counts") or {}).get("total_functions")
-            or qg.get("total_functions")
-            or 0
-        )
-        # (R37 리뷰 W1) 여기서 선차단하면 **UDS 만** 옛 동작으로 남는다 — 생성은 됐는데 이력이 없어
-        # 보드가 영영 "미생성" 이다. 판정은 `record_run` 의 `empty_output_reason` 하나로 통일한다.
-        del total_fn
+        # (R37 리뷰 W1) 여기서 함수 수를 보고 선차단하지 않는다 — 그러면 **UDS 만** 옛 동작으로
+        # 남아, 생성은 됐는데 이력이 없어 보드가 영영 "미생성" 이다. 판정은 `record_run` 의
+        # `empty_output_reason` 하나로 통일한다.
+        # ⚠ (R40 N10) 그때 남겨 둔 `total_fn = int(...)` + `del total_fn` 을 **지웠다.**
+        #   아무도 안 쓰는 값인데 `int()` 가 던지면(예: `total_functions="N/A"`) 아래
+        #   `except Exception` 이 `return -1`(기록 통째 유실)로 접는다 — 정작 살아 있는 판정기는
+        #   같은 입력을 `(TypeError, ValueError)` 로 받아 0 으로 정상 처리한다.
+        #   **죽은 계산이 산 경로를 죽이는** 형태라, 계산 자체를 없애는 것이 옳다.
         return record_run("uds", data, **kwargs)
     except Exception:
         _logger.exception("Failed to record UDS quality run (non-fatal)")

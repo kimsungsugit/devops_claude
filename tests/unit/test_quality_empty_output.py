@@ -369,3 +369,54 @@ class TestCoverageDocsJudgeCoverageRows:
         gv = (pathlib.Path(__file__).resolve().parents[2]
               / "frontend-v2" / "src" / "gateVerdict.js").read_text(encoding="utf-8")
         assert "'empty:coverage_rows'" in gv, "gateVerdict.EMPTY_OUTPUT_TEXT 에 문장이 없다"
+
+
+class TestDeadCodeDoesNotKillTheLiveOne:
+    """(R40 N10) 아무도 안 쓰는 계산이 **기록 전체**를 버리게 두지 않는다.
+
+    `record_uds_run` 은 R37 에서 선차단을 없애면서 `total_fn = int(...)` + `del total_fn` 을
+    남겨 뒀다. 그 값은 아무도 안 쓰는데, `int()` 가 던지면(`total_functions="N/A"` 등)
+    바깥 `except Exception` 이 `return -1` — **기록이 통째로 사라진다**.
+    정작 살아 있는 판정기(`empty_output_reason`)는 같은 입력을 `(TypeError, ValueError)` 로
+    받아 0 으로 정상 처리한다. 죽은 코드가 산 경로를 죽이던 형태다.
+    """
+
+    @pytest.mark.parametrize("bad", ["N/A", None, "", "tbd", [], {}])
+    def test_unparsable_function_count_still_records(self, qdb, bad):
+        """함수 수가 숫자가 아니어도 **기록은 남는다**(빈 산출물로 판정될지언정)."""
+        from workflow.quality.recorder import record_uds_run
+
+        rid = record_uds_run({"quick_gate": {"counts": {"total_functions": bad}}}, db_path=qdb)
+        assert rid > 0, f"total_functions={bad!r} 에 기록이 통째로 사라졌다(run_id={rid})"
+        row = _run(qdb, rid)
+        assert row["status"] == "empty_output", "세지 못한 것은 빈 산출물로 남는다"
+        assert row["meta"]["empty_output_reason"] == "empty:total_functions"
+
+    def test_zero_functions_is_recorded_not_skipped(self, qdb):
+        """docstring 이 약속하는 것이 사실인가 — **0개여도 기록한다**(R37 이후 계약)."""
+        from workflow.quality.recorder import record_uds_run
+
+        rid = record_uds_run({"quick_gate": {"counts": {"total_functions": 0}}}, db_path=qdb)
+        assert rid > 0, "0개면 skip 하던 옛 동작이 되살아났다"
+        assert _run(qdb, rid)["status"] == "empty_output"
+
+    def test_real_functions_are_scored(self, qdb):
+        """조이고 나서 정상 경로가 막히면 그건 고친 게 아니다."""
+        from workflow.quality.recorder import record_uds_run
+
+        rid = record_uds_run(
+            {"quick_gate": {"counts": {"total_functions": 42}, "rates": {"desc_fill": 95.0}}},
+            db_path=qdb)
+        row = _run(qdb, rid)
+        assert row["status"] == "success"
+        assert row["has_summary"], "요약이 없으면 판정에서 빠진다"
+
+    def test_docstring_does_not_promise_a_skip(self):
+        """**문서가 사실이어야 한다.** 코드가 안 하는 일을 docstring 이 약속하면 다음 호출부가 어긋난다."""
+        import inspect
+
+        from workflow.quality.recorder import record_uds_run
+
+        doc = inspect.getdoc(record_uds_run) or ""
+        assert "기록하지 않는다" not in doc, "선차단은 R37 에 없앴는데 docstring 이 남아 있다"
+        assert "skip" not in doc.lower() or "skip 은 더 이상 없다" in doc

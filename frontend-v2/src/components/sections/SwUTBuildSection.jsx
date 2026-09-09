@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { QUALITY_RUN_HEADER, qualityRunNote } from '../../gateVerdict';
 import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
@@ -209,6 +210,10 @@ export default function SwUTBuildSection({ analysisResult }) {
       } catch (e) {
         console.warn('X-SwUT-* header parse failed:', e?.message || e);
       }
+      // (R40 N1) "이 파일이 어느 품질 run 인가" — 검토 기록은 run 단위인데, 방금 받은 파일과
+      // 그 run 을 이을 단서가 없었다. 기록 실패(`unrecorded`)도 **말한다** — 침묵하면
+      // 사용자는 나중에 "왜 생성 현황에 없지" 를 겪는다.
+      const _runNote = qualityRunNote(res.headers.get(QUALITY_RUN_HEADER));
 
       const blob = await res.blob();
       const cd = res.headers.get('Content-Disposition') || '';
@@ -218,7 +223,11 @@ export default function SwUTBuildSection({ analysisResult }) {
 
       if (!mountedRef.current) return;
       triggerDownload(blob, filename);
-      toast('success', `${kind.toUpperCase()} ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
+      toast('success', `${kind.toUpperCase()} ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료${_runNote ? ` · ${_runNote.text}` : ''}`);
+      if (_runNote && _runNote.runId == null) {
+        // 빌드는 됐고 파일도 줬지만 이력에는 안 남았다 — 다른 사실이므로 다른 토스트로.
+        toast('warning', _runNote.text);
+      }
     } catch (e) {
       if (isAbortError(e)) return;
       if (mountedRef.current) {

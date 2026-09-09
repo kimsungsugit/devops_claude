@@ -14,6 +14,7 @@ import {
   reviewVerdictOf, reviewErrorText, reviewFreshnessOf, latestReviewOf, hashReasonText, basisReasonText, HASH_REASON_TEXT,
   reviewBlockText, REVIEW_BLOCK_TEXT, emptyOutputText, EMPTY_OUTPUT_TEXT,
   REVIEW_DECISIONS, REVIEW_DECISION_LABEL, REVIEW_ERROR_TEXT, REVIEW_VERDICT_CODES,
+  QUALITY_RUN_HEADER, qualityRunNote,
 } from '../gateVerdict.js';
 
 describe('verdictOf — 서버 판정 그대로, 검사 0건이 먼저', () => {
@@ -397,5 +398,45 @@ describe('빈 산출물 — 만들어졌지만 담을 내용이 0건이었다 (R
   it('새 코드가 VERDICT_CODES 에 등록돼 있다 — 소비처는 code 로 분기한다', () => {
     expect(VERDICT_CODES).toContain('EMPTY_OUTPUT');
     expect(VERDICT_CODES).toContain('ABSENT');
+  });
+});
+
+describe('빌드 응답의 품질 run 안내 (R40 N1)', () => {
+  it('세 상태를 구별한다 — 기록됨 / 기록 실패 / 옛 서버', () => {
+    expect(qualityRunNote('2061')).toEqual({ runId: 2061, tone: 'info', text: '품질 기록 #2061' });
+    const un = qualityRunNote('unrecorded');
+    expect(un.runId).toBeNull();
+    expect(un.tone).toBe('warning');
+    expect(un.text).toMatch(/생성 현황/);          // 무엇이 안 보이는지 말한다
+    // 헤더 없음 = 옛 서버. **실패가 아니므로 아무 말도 하지 않는다**(없는 경고를 만들지 않는다).
+    expect(qualityRunNote(null)).toBeNull();
+    expect(qualityRunNote('')).toBeNull();
+    expect(qualityRunNote(undefined)).toBeNull();
+  });
+
+  it('숫자가 아닌 값을 성공으로 접지 않는다', () => {
+    for (const bad of ['abc', '0', '-3', 'NaN']) {
+      const n = qualityRunNote(bad);
+      expect(n.runId, `${bad} 를 run id 로 읽었다`).toBeNull();
+      expect(n.tone).toBe('warning');
+    }
+  });
+
+  it('헤더 이름이 서버 상수와 lockstep 이다', () => {
+    const py = fs.readFileSync(path.resolve(process.cwd(), '..', 'workflow', 'quality', 'recorder.py'), 'utf-8');
+    const m = py.match(/QUALITY_RUN_HEADER = "([^"]+)"/);
+    expect(m, 'recorder.py 에서 헤더 상수를 못 찾았다').not.toBeNull();
+    expect(QUALITY_RUN_HEADER).toBe(m[1]);
+  });
+
+  it('빌드 화면 4곳이 **전부** 이 헤더를 읽는다 — 한 곳이 빠지면 그 문서만 못 잇는다', () => {
+    const dir = path.resolve(process.cwd(), 'src', 'components', 'sections');
+    const files = ['SwUTBuildSection.jsx', 'SwITBuildSection.jsx',
+      'SwReportSummarySection.jsx', 'SwSABuildSection.jsx'];
+    for (const f of files) {
+      const src = fs.readFileSync(path.join(dir, f), 'utf-8');
+      expect(src, `${f} 가 품질 run 헤더를 읽지 않는다`).toContain('qualityRunNote(');
+      expect(src, `${f} 가 헤더 상수를 안 쓴다(문자열 복제 금지)`).toContain('QUALITY_RUN_HEADER');
+    }
   });
 });
