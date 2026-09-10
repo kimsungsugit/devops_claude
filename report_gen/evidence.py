@@ -12,6 +12,7 @@ Markdown 사이드카 세 개로만 남아 있었다 — writer 는 4곳인데 r
 | `.field_confidence.md` | 출처 신뢰도 점수/등급(A~D), 출처 분포 | `validation.py::generate_asil_related_confidence_report` |
 | `.validation.md` | DOCX 구조 검증(표/이미지/heading 수, issues) | `validation.py::generate_uds_validation_report` |
 | `.validation.md` (같은 접미사, **다른 형식**) | XLSM 구조 검증(`**결과**` PASS/FAIL, Quality Gate 표, 이슈·경고) | `generators/{sts,suts,sits}.py::*_validation_report` — 첫 줄로 판별(R47 N22) |
+| `.docx.gen_stats.json` `reference_suds` + `.payload.json` `enrichment` | **참조 SwUDS 보강** — 어느 문서를 열었나, 같은 프로젝트인가, ASIL·Related 를 몇 건 적용/차단했나, 게이트가 그 값을 되쓴 값으로 쟀나 | `docx_builder.py`(서브프로세스) + `backend.helpers.uds.merge_enriched_function_details`(부모) — R47 N26 |
 
 ## 계약 — 부재를 0 이나 통과로 접지 않는다
 
@@ -26,6 +27,7 @@ Markdown 사이드카 세 개로만 남아 있었다 — writer 는 4곳인데 r
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -40,8 +42,11 @@ __all__ = [
     "read_gate_report",
     "read_confidence_report",
     "read_docx_validation",
+    "read_reference_enrichment",
     "read_evidence",
     "SIDECAR_SUFFIXES",
+    "GEN_STATS_SUFFIX",
+    "PAYLOAD_SUFFIX",
     "VALIDATION_SIDECAR_WRITERS",
 ]
 
@@ -51,6 +56,12 @@ SIDECAR_SUFFIXES = {
     "confidence": ".field_confidence.md",
     "docx_validate": ".validation.md",
 }
+
+# (R47 N26) 참조 보강 근거는 Markdown 이 아니라 JSON 두 개에서 온다.
+#   `<out>.docx.gen_stats.json` — 접미사 **덧붙임**(`docx_builder.gen_stats_path` 와 같은 규칙, 가드가 대조한다).
+#   `<out>.payload.json`        — `with_suffix` 치환(`_write_uds_payload_sidecar` 와 같은 규칙).
+GEN_STATS_SUFFIX = ".gen_stats.json"
+PAYLOAD_SUFFIX = ".payload.json"
 
 # `- <라벨>: \`<값>\`` — 세 사이드카가 공유하는 유일한 줄 문법.
 _KV_RE = re.compile(r"^-\s*([^:]+):\s*`([^`]*)`")
@@ -529,8 +540,111 @@ def _uncomparable(text: Optional[str]) -> Optional[bool]:
     return False if _as_count(raw) is not None else None
 
 
+def _int_field(d: Dict[str, Any], key: str) -> Optional[int]:
+    v = d.get(key)
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _int_sum(d: Any) -> Optional[int]:
+    """`{"inputs": 3, "outputs": 0, ...}` 의 합 — dict 가 아니거나 **정수가 아닌 축이 하나라도 있으면** 미측정(None).
+
+    (리뷰 W5) 첫 판은 int 만 골라 더해 `{"inputs": "?", "outputs": 3}` 을 3 으로 냈다 — 누락 축이 침묵하고,
+    빈 dict 는 0(= "차단 없음") 이 됐다. 이 모듈의 계약은 부재를 0 으로 접지 않는 것이다.
+    """
+    if not isinstance(d, dict) or not d:
+        return None
+    if any(not isinstance(v, int) or isinstance(v, bool) for v in d.values()):
+        return None
+    return sum(d.values())
+
+
+def _read_json_dict(path: Path, label: str) -> "tuple[Optional[Dict[str, Any]], Optional[str]]":
+    """`(dict, None)` 또는 `(None, 사유)`. 부재와 읽기 실패를 다른 사유로 낸다."""
+    if not path.is_file():
+        return None, f"{label} 없음 ({path.name})"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:   # noqa: BLE001 - 사유를 화면까지 나른다
+        return None, f"{label} 읽기 실패 {type(exc).__name__}: {str(exc)[:120]}"
+    if not isinstance(data, dict):
+        return None, f"{label} 형식이 dict 가 아님"
+    return data, None
+
+
+def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[str, Any]:
+    """참조 SwUDS 보강 근거 — 빌더 통계(`reference_suds`) + 부모 병합 기록(`enrichment`). (R47 N26)
+
+    ## 왜 이 섹션이 생겼나
+
+    R47 실측: 게이트가 23.8% 라던 ASIL 은 문서도 파서도 아니라 **배선**이었다 — 지정한 정본은 템플릿에만
+    흐르고 참조는 config 기본값(다른 프로젝트 HDPDM01)이라 신원 게이트가 305건을 차단했다. 그 사실은
+    `gen_stats.reference_suds` 에 **처음부터 적혀 있었는데** 읽는 화면이 없었다. 이 섹션은 그 기록을
+    보드까지 나른다: 어느 문서를 열었나 · 같은 프로젝트인가 · ASIL·Related 를 몇 건 적용/차단했나 ·
+    게이트가 문서를 만든 값(보강본)을 쟀나(N27).
+
+    ## 계약
+
+    - `present:false` 는 반드시 `reason` — 통계 사이드카 부재·읽기 실패·`reference_suds` 키 없음(구판 빌더).
+    - `document`(연 파일명) / `configured`(부모가 경로를 넘겼나) 는 **구판 통계엔 없다** → `None`(모름).
+      `configured:False` 는 "미지정/접근 실패", `configured:True` + `document:None` 은 "경로는 왔는데 파일이
+      아니라 열지 못함"(리뷰 W2) — 화면은 `None` 을 어느 쪽으로도 접지 않는다.
+    - `same_project` 는 빌더 판정 그대로(`True/False/None`) — `None` 은 확인됨이 아니다.
+    - `enrichment` 는 별도 `present` 를 갖는다: payload 사이드카 부재 / `enrichment` 키 없음(병합 이전 라이터) /
+      `applied:false`+사유 / `applied:true`+`functions`.
+    """
+    stats, why = _read_json_dict(gen_stats_path, "생성 통계 사이드카")
+    if stats is None:
+        return _absent(why or "생성 통계 사이드카 없음")
+    ref = stats.get("reference_suds")
+    if not isinstance(ref, dict):
+        return _absent("생성 통계에 reference_suds 기록 없음(참조 통계를 남기기 전 빌더)")
+    identity = ref.get("identity") if isinstance(ref.get("identity"), dict) else {}
+    same = identity.get("same_project")
+    doc = ref.get("document")
+    configured = ref.get("configured")
+
+    payload, pwhy = _read_json_dict(payload_path, "payload 사이드카")
+    enrichment: Dict[str, Any]
+    if payload is None:
+        enrichment = {"present": False, "applied": None, "functions": None, "unknown_keys": None, "reason": pwhy}
+    else:
+        rec = payload.get("enrichment")
+        if not isinstance(rec, dict):
+            enrichment = {"present": False, "applied": None, "functions": None, "unknown_keys": None,
+                          "reason": "payload 에 enrichment 기록 없음(보강본을 병합하지 않는 라이터) — 게이트 ASIL·Related 는 파서 값"}
+        elif rec.get("applied") is True:
+            fn = _int_field(rec, "functions")
+            unknown = _int_field(rec, "unknown_keys")
+            if fn == 0 and (unknown or 0) > 0:
+                # (리뷰 W3) 라이터는 "병합 성공 0건 · 미지 키 n" 을 남긴다 — 되쓰기 **실패**다. applied:true 를
+                #   그대로 내면 화면이 "되쓴 값 0 함수 — 문서를 만든 값" 이라는 거짓을 그린다.
+                enrichment = {"present": True, "applied": False, "functions": 0, "unknown_keys": unknown,
+                              "reason": f"보강본 키 {unknown}건이 payload 함수 키와 하나도 맞지 않아 되쓴 값 없음"}
+            else:
+                enrichment = {"present": True, "applied": True, "functions": fn, "unknown_keys": unknown, "reason": None}
+        else:
+            enrichment = {"present": True, "applied": False, "functions": None, "unknown_keys": None,
+                          "reason": str(rec.get("reason") or "사유 미기록")}
+
+    return {
+        "present": True,
+        "document": str(doc) if isinstance(doc, str) and doc else None,
+        "configured": configured if isinstance(configured, bool) else None,
+        "same_project": same if isinstance(same, bool) else None,
+        "identity_reason": str(identity.get("reason") or "") or None,
+        "shared_tokens": [str(t) for t in (identity.get("shared_tokens") or []) if t],
+        "safety_fields_applied": _int_field(ref, "safety_fields_applied"),
+        "safety_fields_blocked": _int_field(ref, "safety_fields_blocked"),
+        "descriptive_fields_applied": _int_field(ref, "descriptive_fields_applied"),
+        "invalid_asil_rejected": _int_field(ref, "invalid_asil_rejected"),
+        "structural_fields_applied": _int_sum(ref.get("structural_fields_applied")),
+        "structural_fields_blocked": _int_sum(ref.get("structural_fields_blocked")),
+        "enrichment": enrichment,
+    }
+
+
 def read_evidence(docx_path: str) -> Dict[str, Any]:
-    """산출물 DOCX 경로 → 근거 3종 묶음.
+    """산출물 DOCX 경로 → 근거 4종 묶음(사이드카 3종 + 참조 보강).
 
     경로는 **호출자(서버)가 DB 에서 꺼낸 값**이어야 한다. 클라이언트가 보낸 경로를
     그대로 넣으면 임의 파일 읽기가 된다 — endpoint 는 run_id 만 받는다.
@@ -540,6 +654,7 @@ def read_evidence(docx_path: str) -> Dict[str, Any]:
         return {
             "output_path_present": False,
             **{k: _absent("산출물 경로가 기록되지 않은 run") for k in SIDECAR_SUFFIXES},
+            "reference": _absent("산출물 경로가 기록되지 않은 run"),
         }
 
     base = Path(raw)
@@ -552,4 +667,6 @@ def read_evidence(docx_path: str) -> Dict[str, Any]:
         "gate_report": read_gate_report(_side(SIDECAR_SUFFIXES["gate_report"])),
         "confidence": read_confidence_report(_side(SIDECAR_SUFFIXES["confidence"])),
         "docx_validate": read_docx_validation(_side(SIDECAR_SUFFIXES["docx_validate"])),
+        # (R47 N26) 통계는 접미사 덧붙임, payload 는 치환 — 라이터 둘의 규칙이 다르다.
+        "reference": read_reference_enrichment(Path(raw + GEN_STATS_SUFFIX), _side(PAYLOAD_SUFFIX)),
     }

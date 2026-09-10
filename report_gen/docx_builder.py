@@ -2663,8 +2663,14 @@ def generate_uds_docx(
     ref_doc_path = Path(UDS_REF_SUDS_PATH)
     _ref_identity = _reference_identity_verdict(uds_payload, ref_doc_path)
     _ref_safety_ok = _ref_identity["same_project"] is True
+    # (R47 N26) 어느 문서를 열었는지도 남긴다 — 신원 토큰만으론 검토자가 "어떤 파일이었나" 를 못 본다.
+    #   `configured` 는 부모가 경로를 넘겼는가(빈 값 = 미지정/접근 실패), `document` 는 실제로 연 파일명
+    #   (Cloudium 로컬화 사본도 원래 이름을 유지하므로 이름이 곧 정본 식별자다).
+    _ref_configured = bool(str(UDS_REF_SUDS_PATH or "").strip())
     _ref_stats: Dict[str, Any] = {
         "identity": _ref_identity,
+        "configured": _ref_configured,
+        "document": ref_doc_path.name if (_ref_configured and ref_doc_path.is_file()) else None,
         "safety_fields_applied": 0,
         "safety_fields_blocked": 0,
         "descriptive_fields_applied": 0,
@@ -3027,6 +3033,9 @@ def generate_uds_docx(
                 "matched_functions": None,
                 "match_pct": None,
                 "note": "토큰 치환 템플릿이라 SwUFn 함수 반영률이 적용되지 않는다(미측정).",
+                # (R47-c 리뷰 W4) 참조 보강 루프는 이 분기보다 **위**에서 이미 돌았다 — 세 종결 경로 중 여기만
+                #   기록을 버려 보드가 "참조 통계를 남기기 전 빌더" 라는 틀린 사유를 말했다.
+                "reference_suds": _ref_stats,
             })
             doc.save(str(out))
             return str(out)

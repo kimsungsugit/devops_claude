@@ -16,6 +16,7 @@ JS 로 흘리면 문자열 `'False'` 는 truthy 라 실패가 성공으로 그�
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import tempfile
 
@@ -239,7 +240,7 @@ class TestAbsenceIsExplicit:
 
         got = read_evidence(str(bare_docx))
         assert got["output_path_present"] is True  # docx 는 있다
-        for key in ("gate_report", "confidence", "docx_validate"):
+        for key in ("gate_report", "confidence", "docx_validate", "reference"):
             assert got[key]["present"] is False, key
             assert got[key].get("reason"), f"{key}: 부재 사유가 비었다"
 
@@ -625,7 +626,8 @@ class TestExpectedSidecarsPerSection:
         out = _write_validation(tmp_path, "sts_live", ".xlsm", _SUTS_XLSM_MD.replace("SUTS", "STS"))
         rid = make_run("sts", output_path=out)
         body = client.get(f"/api/quality/runs/{rid}/evidence").json()
-        assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": True}
+        assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": True,
+                                             "reference": False}
         assert body["sidecars_expected"] is False            # 구 소비처 호환
         assert body["docx_validate"]["format"] == "xlsm"
         assert body["docx_validate"]["ok"] is False
@@ -635,7 +637,8 @@ class TestExpectedSidecarsPerSection:
         client, make_run = api
         rid = make_run("uds", output_path=sidecars)
         body = client.get(f"/api/quality/runs/{rid}/evidence").json()
-        assert body["expected_sidecars"] == {"gate_report": True, "confidence": True, "docx_validate": True}
+        assert body["expected_sidecars"] == {"gate_report": True, "confidence": True, "docx_validate": True,
+                                             "reference": True}
 
     @pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
     def test_every_xlsm_writer_expects_a_validation_sidecar(self, api, doc_type):
@@ -661,4 +664,210 @@ class TestExpectedSidecarsPerSection:
         client, make_run = api
         rid = make_run(doc_type)
         body = client.get(f"/api/quality/runs/{rid}/evidence").json()
-        assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": False}
+        assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": False,
+                                             "reference": False}
+
+# ==============================================================
+# 6. 참조 SwUDS 보강 근거 (R47 N26)
+# ==============================================================
+# run 2058(2026-09-09) 의 gen_stats 엔 `same_project:false · safety_fields_blocked:305` 가 처음부터 적혀
+# 있었지만 읽는 화면이 없어 "게이트 23.8%" 의 원인이 두 라운드 동안 보이지 않았다. 이 섹션이 그 기록을
+# 근거 엔드포인트 → 보드까지 나른다.
+
+_REF_STATS_2064 = {   # 2026-09-10 run 2064 실측 형태(+ N26 이 추가한 configured/document)
+    "mode": "template",
+    "reference_suds": {
+        "identity": {"same_project": True, "reason": "token_match", "ref_tokens": ["KJPDS02"],
+                     "payload_tokens": ["KJPDS02", "NE1AW"], "shared_tokens": ["KJPDS02"]},
+        "configured": True,
+        "document": "(KJPDS02_SwUDS) Software Unit Design Specification_v3.03_260902.docx",
+        "safety_fields_applied": 710, "safety_fields_blocked": 0,
+        "descriptive_fields_applied": 877, "invalid_asil_rejected": 0,
+        "structural_fields_applied": {"inputs": 412, "outputs": 427, "globals_static": 14,
+                                      "globals_global": 306, "called": 375, "calling": 64},
+        "structural_fields_blocked": {"inputs": 0, "outputs": 0, "globals_static": 0,
+                                      "globals_global": 0, "called": 0, "calling": 0},
+    },
+}
+_REF_STATS_2058 = {   # 2026-09-09 run 2058 실측 형태 — 구판 빌더(configured/document 없음), 참조가 남의 문서
+    "mode": "template",
+    "reference_suds": {
+        "identity": {"same_project": False, "reason": "token_mismatch", "ref_tokens": ["HDPDM01"],
+                     "payload_tokens": ["KJPDS02"], "shared_tokens": []},
+        "safety_fields_applied": 0, "safety_fields_blocked": 305,
+        "descriptive_fields_applied": 385, "invalid_asil_rejected": 1,
+        "structural_fields_applied": {"inputs": 0, "outputs": 0, "globals_static": 0,
+                                      "globals_global": 0, "called": 0, "calling": 0},
+        "structural_fields_blocked": {"inputs": 200, "outputs": 200, "globals_static": 8,
+                                      "globals_global": 150, "called": 150, "calling": 50},
+    },
+}
+_PAYLOAD_ENRICHED = {"docx_path": "x", "summary": {}, "function_details": {},
+                     "enrichment": {"applied": True, "functions": 1157, "unknown_keys": 0}}
+
+
+def _ref_sidecars(tmp_path, stats=_REF_STATS_2064, payload=_PAYLOAD_ENRICHED, *, stem="spec", raw_stats=None):
+    """`<stem>.docx` + `<stem>.docx.gen_stats.json` + `<stem>.payload.json` — None 이면 그 파일을 만들지 않는다."""
+    docx = tmp_path / f"{stem}.docx"
+    docx.write_bytes(b"PK\x03\x04dummy")
+    if raw_stats is not None:
+        (tmp_path / f"{stem}.docx.gen_stats.json").write_text(raw_stats, encoding="utf-8")
+    elif stats is not None:
+        (tmp_path / f"{stem}.docx.gen_stats.json").write_text(json.dumps(stats), encoding="utf-8")
+    if payload is not None:
+        (tmp_path / f"{stem}.payload.json").write_text(json.dumps(payload), encoding="utf-8")
+    return docx
+
+
+class TestReferenceEnrichmentSection:
+
+    def test_live_shape_of_run_2064_is_read_whole(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        ref = read_evidence(str(_ref_sidecars(tmp_path)))["reference"]
+        assert ref["present"] is True
+        assert ref["document"].endswith("_v3.03_260902.docx") and ref["configured"] is True
+        assert ref["same_project"] is True and ref["identity_reason"] == "token_match"
+        assert ref["shared_tokens"] == ["KJPDS02"]
+        assert (ref["safety_fields_applied"], ref["safety_fields_blocked"]) == (710, 0)
+        assert ref["descriptive_fields_applied"] == 877 and ref["invalid_asil_rejected"] == 0
+        assert (ref["structural_fields_applied"], ref["structural_fields_blocked"]) == (1598, 0)
+        assert ref["enrichment"] == {"present": True, "applied": True, "functions": 1157, "unknown_keys": 0, "reason": None}
+
+    def test_foreign_reference_of_run_2058_is_visible_not_silent(self, tmp_path):
+        """게이트 23.8% 의 원인 그 자체 — 다른 프로젝트 문서라 305건 차단. 병합 이전 라이터라 enrichment 도 없다."""
+        from report_gen.evidence import read_evidence
+
+        payload_legacy = {"docx_path": "x", "summary": {}, "function_details": {}}
+        ref = read_evidence(str(_ref_sidecars(tmp_path, _REF_STATS_2058, payload_legacy)))["reference"]
+        assert ref["present"] is True
+        assert ref["same_project"] is False and ref["identity_reason"] == "token_mismatch"
+        assert ref["safety_fields_blocked"] == 305 and ref["safety_fields_applied"] == 0
+        assert ref["invalid_asil_rejected"] == 1
+        assert ref["structural_fields_blocked"] == 758
+        # 구판 통계엔 없는 키 — "모름" 이지 "미지정" 이 아니다.
+        assert ref["document"] is None and ref["configured"] is None
+        assert ref["enrichment"]["present"] is False and ref["enrichment"]["applied"] is None
+        assert "병합하지 않는 라이터" in ref["enrichment"]["reason"]
+
+    def test_undelivered_reference_is_false_not_none(self, tmp_path):
+        stats = json.loads(json.dumps(_REF_STATS_2064))
+        stats["reference_suds"].update({"configured": False, "document": None})
+        stats["reference_suds"]["identity"] = {"same_project": None, "reason": "ref_no_token",
+                                               "ref_tokens": [], "payload_tokens": ["KJPDS02"]}
+        from report_gen.evidence import read_evidence
+
+        ref = read_evidence(str(_ref_sidecars(tmp_path, stats)))["reference"]
+        assert ref["configured"] is False and ref["document"] is None
+        assert ref["same_project"] is None and ref["identity_reason"] == "ref_no_token"
+        assert ref["shared_tokens"] == []
+
+    def test_enrichment_not_applied_carries_the_builders_reason(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        payload = {"docx_path": "x", "summary": {}, "function_details": {},
+                   "enrichment": {"applied": False, "reason": "빌더가 보강본을 남기지 않음 (spec.docx.function_details.json)"}}
+        enr = read_evidence(str(_ref_sidecars(tmp_path, payload=payload)))["reference"]["enrichment"]
+        assert enr["present"] is True and enr["applied"] is False and enr["functions"] is None
+        assert "남기지 않음" in enr["reason"]
+
+    def test_payload_absent_is_reported_inside_the_section(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        ref = read_evidence(str(_ref_sidecars(tmp_path, payload=None)))["reference"]
+        assert ref["present"] is True                      # 통계는 있으니 섹션은 산다
+        assert ref["enrichment"]["present"] is False
+        assert "payload 사이드카 없음" in ref["enrichment"]["reason"]
+
+    def test_stats_absent_unreadable_or_without_reference_are_three_different_reasons(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        for sub in ("a", "b", "c", "d"):
+            (tmp_path / sub).mkdir()
+        absent = read_evidence(str(_ref_sidecars(tmp_path / "a", stats=None)))["reference"]
+        assert absent["present"] is False and "생성 통계 사이드카 없음" in absent["reason"]
+        broken = read_evidence(str(_ref_sidecars(tmp_path / "b", raw_stats="{ not json")))["reference"]
+        assert broken["present"] is False and "읽기 실패" in broken["reason"]
+        old = read_evidence(str(_ref_sidecars(tmp_path / "c", stats={"mode": "template"})))["reference"]
+        assert old["present"] is False and "reference_suds 기록 없음" in old["reason"]
+        lst = read_evidence(str(_ref_sidecars(tmp_path / "d", raw_stats="[1, 2]")))["reference"]
+        assert lst["present"] is False and "dict 가 아님" in lst["reason"]
+
+    def test_all_zero_merge_with_unknown_keys_is_a_failure_not_a_success_of_zero(self, tmp_path):
+        """(리뷰 W3) 라이터가 '병합 0건 · 미지 키 n' 을 남기면 되쓰기 실패다 — applied:true 로 내면 화면이 거짓을 그린다."""
+        from report_gen.evidence import read_evidence
+
+        payload = {"docx_path": "x", "summary": {}, "function_details": {},
+                   "enrichment": {"applied": True, "functions": 0, "unknown_keys": 1157}}
+        enr = read_evidence(str(_ref_sidecars(tmp_path, payload=payload)))["reference"]["enrichment"]
+        assert enr["applied"] is False and enr["functions"] == 0 and enr["unknown_keys"] == 1157
+        assert "하나도 맞지 않아" in enr["reason"]
+        # 대조군 — 함수가 0개인 payload 에서 0/0 은 실패가 아니다(미지 키 0).
+        payload["enrichment"] = {"applied": True, "functions": 0, "unknown_keys": 0}
+        (tmp_path / "spec.payload.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert read_evidence(str(tmp_path / "spec.docx"))["reference"]["enrichment"]["applied"] is True
+
+    def test_structural_sum_is_unmeasured_when_any_axis_is_not_an_int(self, tmp_path):
+        """(리뷰 W5) `{"inputs": "?", "outputs": 3}` 은 3 이 아니라 미측정이고, 빈 dict 는 0(차단 없음)이 아니다."""
+        from report_gen.evidence import _int_sum, read_evidence
+
+        assert _int_sum({}) is None and _int_sum({"a": "x"}) is None and _int_sum({"a": "?", "b": 3}) is None
+        assert _int_sum({"a": True, "b": 1}) is None and _int_sum("7") is None
+        assert _int_sum({"a": 2, "b": 3}) == 5
+        stats = json.loads(json.dumps(_REF_STATS_2064))
+        stats["reference_suds"]["structural_fields_blocked"] = {}
+        stats["reference_suds"]["structural_fields_applied"]["inputs"] = None
+        ref = read_evidence(str(_ref_sidecars(tmp_path, stats)))["reference"]
+        assert ref["structural_fields_blocked"] is None and ref["structural_fields_applied"] is None
+
+    def test_suffix_rules_match_the_writers(self):
+        """리더의 접미사 두 개는 라이터 규칙의 사본이다 — 갈리면 섹션이 영원히 '없음' 이 된다.
+
+        (리뷰 I4) payload 라이터는 셋(비동기 helpers · jenkins · local) — 셋 다 대조한다. docx 부재 환경은 skip 이 아니라
+        경로 규칙 문자열 자체를 소스에서 확인한다.
+        """
+        from report_gen.evidence import GEN_STATS_SUFFIX, PAYLOAD_SUFFIX
+
+        out = "X:/o/spec.docx"
+        try:
+            from report_gen.docx_builder import gen_stats_path
+        except ImportError:                       # pragma: no cover - docx 없는 환경
+            src = (pathlib.Path(__file__).resolve().parents[2] / "report_gen/docx_builder.py").read_text(encoding="utf-8")
+            assert f'return Path(str(output_path) + "{GEN_STATS_SUFFIX}")' in src
+        else:
+            assert pathlib.Path(out + GEN_STATS_SUFFIX) == gen_stats_path(out)
+        pytest.importorskip("fastapi")
+        from backend.helpers import uds as U
+        from backend.routers import jenkins, local
+        from tests.unit._source_probe import source_of
+        for fn in (jenkins._write_uds_payload_sidecar, local._write_uds_payload_sidecar, U._uds_generate_from_paths):
+            assert f'with_suffix("{PAYLOAD_SUFFIX}")' in source_of(fn), fn.__qualname__
+
+    def test_endpoint_exposes_reference_and_expects_it_only_for_uds(self, api, tmp_path):
+        client, make_run = api
+        rid = make_run("uds", output_path=_ref_sidecars(tmp_path))
+        body = client.get(f"/api/quality/runs/{rid}/evidence").json()
+        assert body["reference"]["present"] is True and body["reference"]["safety_fields_applied"] == 710
+        assert body["expected_sidecars"]["reference"] is True
+        rid2 = make_run("sts")
+        body2 = client.get(f"/api/quality/runs/{rid2}/evidence").json()
+        assert body2["reference"]["present"] is False and body2["reference"]["reason"]
+        assert body2["expected_sidecars"]["reference"] is False
+
+    def test_every_key_the_board_reads_from_ref_is_produced_by_the_reader(self, tmp_path):
+        """보드가 `ref.<키>` / `ref.enrichment.<키>` 로 읽는 이름이 리더 출력에 있어야 한다(형제 가드: `val.`)."""
+        import re
+
+        from report_gen.evidence import read_evidence
+
+        board = pathlib.Path(__file__).resolve().parents[2] / "frontend-v2/src/components/sections/DocGenStatusBoard.jsx"
+        if not board.exists():                        # pragma: no cover - 경로 이동 대비
+            pytest.skip(f"보드 파일 없음: {board}")
+        text = board.read_text(encoding="utf-8")
+        used = set(re.findall(r"\bref\??\.([a-z_]+)", text))
+        used_enr = set(re.findall(r"\bref\.enrichment\??\.([a-z_]+)", text))
+        assert "safety_fields_applied" in used and "applied" in used_enr, "가드가 보드의 ref 줄을 못 찾았다"
+        ref = read_evidence(str(_ref_sidecars(tmp_path)))["reference"]
+        produced = set(ref) | {"reason"}
+        assert not sorted(used - produced), f"보드가 읽는데 리더가 안 내는 키: {sorted(used - produced)}"
+        assert not sorted(used_enr - set(ref["enrichment"])), sorted(used_enr - set(ref["enrichment"]))

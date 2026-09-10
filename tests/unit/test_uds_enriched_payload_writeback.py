@@ -117,13 +117,25 @@ class TestParentMergesBeforeWritingThePayload:
         assert data["function_details"]["SwUFn_001"]["asil"] == "B"
         assert data["enrichment"]["applied"] is True and data["enrichment"]["functions"] == 1
 
-    def test_both_twins_call_the_merge(self):
+    def test_local_sidecar_writer_merges_and_records_too(self, tmp_path):
+        """(R47-c 리뷰 I5) 세 번째 트윈 — 빠뜨리면 보드가 local 산출물을 '병합하지 않는 라이터' 로 보인다."""
+        from backend.routers.local import _write_uds_payload_sidecar
+
+        out = tmp_path / "out.docx"
+        self._enriched(out, asil="C")
+        payload = {"function_details": {"SwUFn_001": {"name": "alpha", "asil": "TBD"}}}
+        data = json.loads(Path(_write_uds_payload_sidecar(out, payload)).read_text(encoding="utf-8"))
+        assert data["function_details"]["SwUFn_001"]["asil"] == "C"
+        assert data["enrichment"]["applied"] is True and data["enrichment"]["functions"] == 1
+
+    def test_all_three_twins_call_the_merge(self):
         from backend.helpers import uds as U
-        from backend.routers import jenkins
+        from backend.routers import jenkins, local
         from tests.unit._source_probe import source_of
 
         assert "merge_enriched_function_details(out_path" in source_of(U._uds_generate_from_paths)
         assert "merge_enriched_function_details(out_path" in source_of(jenkins._write_uds_payload_sidecar)
+        assert "merge_enriched_function_details(out_path" in source_of(local._write_uds_payload_sidecar)
         # 병합은 매핑 요약·사이드카보다 **앞**이어야 한다 — 뒤면 요약이 보강 전 값을 센다.
         src = source_of(U._uds_generate_from_paths)
         assert src.index("merge_enriched_function_details(") < src.index("_compute_uds_mapping_summary(")

@@ -1383,6 +1383,7 @@ function EvidenceDetail({ run, detail }) {
   const gate = ev?.gate_report;
   const conf = ev?.confidence;
   const val = ev?.docx_validate;
+  const ref = ev?.reference;
   const sugg = detail.advice?.suggestions || [];
 
   return (
@@ -1508,6 +1509,64 @@ function EvidenceDetail({ run, detail }) {
               </li>
             ) : (
               <li style={{ color: 'var(--text-muted)' }}>출처 신뢰도 근거 없음 — {conf?.reason || '사유 미상'}</li>
+            )}
+            {/* (R47 N26) 참조 SwUDS 보강 — 이 줄이 없어서 "게이트 23.8%" 의 원인(참조가 다른 프로젝트 문서라
+                ASIL·Related 305건 차단)이 gen_stats 에 적힌 채 두 라운드 동안 화면에 닿지 못했다.
+                `configured`/`document` 는 구판 통계엔 없다(null) — null 을 "미지정" 으로 접지 않는다. */}
+            {ref?.present ? (
+              <li>
+                참조 SwUDS{' '}
+                {/* (리뷰 W2) 3분기 — false=미전달 / true+파일명 없음=경로는 왔는데 열지 못함 / null=구판 통계(모름) */}
+                <strong>
+                  {ref.document
+                    || (ref.configured === false ? '미전달'
+                      : ref.configured === true ? '열지 못함(경로는 전달됨)' : '(파일명 미기록)')}
+                </strong>
+                {' · 신원 '}
+                <strong>
+                  {ref.same_project === true ? '같은 프로젝트'
+                    : ref.same_project === false ? '다른 프로젝트' : '판정 불가'}
+                </strong>
+                {ref.shared_tokens?.length > 0 && ` (${ref.shared_tokens.join(', ')})`}
+                {ref.safety_fields_applied != null && ` · ASIL·Related 적용 ${ref.safety_fields_applied}`}
+                {/* (리뷰 W6) 미측정(null)과 0 은 다르다 — 차단 수가 없으면 "차단 0" 으로 읽히므로 미기록을 말한다 */}
+                {ref.safety_fields_blocked == null ? ' · 차단 미기록'
+                  : ref.safety_fields_blocked > 0 && <> · <strong>차단 {ref.safety_fields_blocked}</strong></>}
+                {ref.invalid_asil_rejected > 0 && ` · ASIL 형식 오류 거부 ${ref.invalid_asil_rejected}`}
+                {ref.descriptive_fields_applied != null && ` · 서술 ${ref.descriptive_fields_applied}`}
+                {ref.structural_fields_applied != null && ` · 구조 ${ref.structural_fields_applied}`}
+                {ref.structural_fields_blocked > 0 && ` (구조 차단 ${ref.structural_fields_blocked})`}
+                {/* 판정 불가는 확인됨이 아니다 — 빌더는 둘 다 fail-closed 로 안전 필드를 막는다 */}
+                {/* (리뷰 W1) 참조를 아예 안 열었으면(미전달·열지 못함) 서술 보강도 0 — "서술만 보강" 은 거짓이다 */}
+                {/*     구판 통계(configured null)는 참조를 열었는지 모르지만 차단 수가 있으면 열었던 것 — 문구를 유지한다 */}
+                {ref.same_project !== true && ref.configured !== false && !(ref.configured === true && !ref.document)
+                  && ' — 이 프로젝트 문서로 확인되지 않아 ASIL·Related 는 적용하지 않았다(서술만 보강)'}
+                {ref.configured === false
+                  && ' — 정본 입력이 빌더에 전달되지 않았다(미지정 또는 접근 실패 · 생성 로그의 "참조 SwUDS" 줄) · 보강 없음'}
+                {ref.configured === true && !ref.document
+                  && ' — 경로는 전달됐으나 파일로 열지 못해 보강 없음'}
+                <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 'var(--text-xs)' }}
+                  aria-label="게이트 반영">
+                  {/* (N27) 게이트가 문서를 만든 값을 쟀는가 — 아니면 위 적용 수와 게이트 ASIL 이 갈린다(실측 82.8% vs 23.8%) */}
+                  {ref.enrichment?.applied === true ? (
+                    <li>게이트 반영: 빌더가 되쓴 값 <strong>{ref.enrichment.functions ?? '—'}</strong>
+                      {' 함수 — 게이트 ASIL·Related 는 문서를 만든 값'}</li>
+                  ) : ref.enrichment?.present ? (
+                    <li>⚠ 게이트 반영 안 됨 — {ref.enrichment.reason || '사유 미기록'}
+                      {' · 게이트 ASIL·Related 는 보강 전 파서 값이라 문서 셀과 다를 수 있다'}</li>
+                  ) : (
+                    <li style={{ color: 'var(--text-muted)' }}>
+                      게이트 반영 기록 없음 — {ref.enrichment?.reason || '사유 미상'}
+                    </li>
+                  )}
+                </ul>
+              </li>
+            ) : (
+              <li style={{ color: 'var(--text-muted)' }}>
+                {/* (리뷰 I3) 서버가 섹션 자체를 안 냈으면(구 백엔드) 사이드카 부재와 다른 일이다 */}
+                참조 SwUDS 보강 근거 없음 — {ref ? (ref.reason || '사유 미상') : '서버 응답에 reference 섹션이 없다(구 백엔드)'}
+                {ev.expected_sidecars?.reference === false && ' (이 문서 종류는 참조 보강을 하지 않는다)'}
+              </li>
             )}
             {/* (R47 N22) 같은 `.validation.md` 를 두 계열이 쓴다 — 서버가 첫 줄로 가른 `format` 을 따른다.
                 XLSM(STS/SUTS/SITS) 을 DOCX 라벨로 읽으면 실패(FAIL)가 '판정 불가' 로 접혔다(2026-09-09 실측). */}

@@ -283,6 +283,7 @@ def get_run_evidence(run_id: int) -> Dict[str, Any]:
         "gate_report": dt == "uds",
         "confidence": dt == "uds",
         "docx_validate": dt in VALIDATION_SIDECAR_WRITERS,
+        "reference": dt == "uds",        # (R47 N26) 참조 SwUDS 보강은 UDS 빌더만 한다
     }
     payload["sidecars_expected"] = (dt == "uds")   # 구 소비처 호환 — gate/confidence 기준
     return payload

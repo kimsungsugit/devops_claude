@@ -1312,3 +1312,125 @@ describe('DocGenStatusBoard — XLSM 구조 검증 근거 (R47 N22)', () => {
     expect(li.textContent).not.toMatch(/\bOK\b/);
   });
 });
+
+describe('DocGenStatusBoard — 참조 SwUDS 보강 근거 (R47 N26)', () => {
+  // run 2058(2026-09-09) 의 gen_stats 엔 `same_project:false · safety_fields_blocked:305` 가 처음부터 적혀
+  // 있었지만 읽는 화면이 없어 "게이트 23.8%" 의 원인이 두 라운드 동안 보이지 않았다.
+  const evidenceWith = (reference, docType = 'uds') => ({
+    run_id: 1, output_path_present: true, sidecars_expected: docType === 'uds',
+    expected_sidecars: { gate_report: docType === 'uds', confidence: docType === 'uds', docx_validate: true, reference: docType === 'uds' },
+    gate_report: { present: false, reason: 'x' }, confidence: { present: false, reason: 'x' },
+    docx_validate: { present: false, reason: 'x' },
+    reference,
+  });
+  const openEvidence = async (reference, docType = 'uds', label = '📘 UDS') => {
+    mockApi.mockImplementation((path) => (String(path).includes('/evidence')
+      ? Promise.resolve(evidenceWith(reference, docType))
+      : Promise.resolve({ runs: [run({ id: 1, doc_type: docType })], total: 1 })));
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf(label));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+  };
+
+  it('같은 프로젝트 정본이면 파일명·적용 수·게이트 되쓴 값을 그린다 (run 2064)', async () => {
+    await openEvidence({
+      present: true, document: '(KJPDS02_SwUDS) Software Unit Design Specification_v3.03_260902.docx',
+      configured: true, same_project: true, identity_reason: 'token_match', shared_tokens: ['KJPDS02'],
+      safety_fields_applied: 710, safety_fields_blocked: 0, descriptive_fields_applied: 877, invalid_asil_rejected: 0,
+      structural_fields_applied: 1598, structural_fields_blocked: 0,
+      enrichment: { present: true, applied: true, functions: 1157, reason: null },
+    });
+    const li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('_v3.03_260902.docx');
+    expect(li.textContent).toContain('같은 프로젝트 (KJPDS02)');
+    expect(li.textContent).toContain('ASIL·Related 적용 710');
+    expect(li.textContent).toContain('서술 877');
+    expect(li.textContent).toContain('구조 1598');
+    expect(li.textContent).not.toContain('차단');
+    expect(li.textContent).not.toContain('적용하지 않았다');
+    expect(li.textContent).toContain('되쓴 값 1157 함수');
+  });
+
+  it('다른 프로젝트 문서면 차단 수와 "적용하지 않았다" 를, 병합 이전 라이터면 게이트 반영 기록 없음을 말한다 (run 2058)', async () => {
+    await openEvidence({
+      present: true, document: null, configured: null, same_project: false, identity_reason: 'token_mismatch',
+      shared_tokens: [], safety_fields_applied: 0, safety_fields_blocked: 305, descriptive_fields_applied: 385,
+      invalid_asil_rejected: 1, structural_fields_applied: 0, structural_fields_blocked: 758,
+      enrichment: { present: false, applied: null, functions: null,
+        reason: 'payload 에 enrichment 기록 없음(보강본을 병합하지 않는 라이터) — 게이트 ASIL·Related 는 파서 값' },
+    });
+    const li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('다른 프로젝트');
+    expect(li.textContent).toContain('차단 305');
+    expect(li.textContent).toContain('ASIL 형식 오류 거부 1');
+    expect(li.textContent).toContain('구조 차단 758');
+    expect(li.textContent).toContain('적용하지 않았다');
+    expect(li.textContent).toContain('게이트 반영 기록 없음');
+    expect(li.textContent).toContain('병합하지 않는 라이터');
+    // 구판 통계의 null 은 "모름" — 미전달로 접지 않는다.
+    expect(li.textContent).toContain('(파일명 미기록)');
+    expect(li.textContent).not.toContain('미전달');
+    // 뮤테이션 M8 생존 자리 — 꼬리 문구(`configured === false` 조건)도 null 에선 없어야 한다.
+    expect(li.textContent).not.toContain('전달되지 않았다');
+    expect(li.textContent).not.toContain('되쓴 값');
+  });
+
+  it('정본이 빌더에 전달되지 않았으면 미전달과 판정 불가를 말하고, 보강 미반영은 사유를 붙인다', async () => {
+    await openEvidence({
+      present: true, document: null, configured: false, same_project: null, identity_reason: 'ref_no_token',
+      shared_tokens: [], safety_fields_applied: 0, safety_fields_blocked: 0, descriptive_fields_applied: 0,
+      invalid_asil_rejected: 0, structural_fields_applied: 0, structural_fields_blocked: 0,
+      enrichment: { present: true, applied: false, functions: null, reason: '빌더가 보강본을 남기지 않음 (x.function_details.json)' },
+    });
+    const li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('미전달');
+    expect(li.textContent).toContain('판정 불가');
+    expect(li.textContent).toContain('전달되지 않았다');
+    // (리뷰 W1) 참조를 아예 안 열었으면 "서술만 보강" 은 거짓이다.
+    expect(li.textContent).not.toContain('서술만 보강');
+    expect(li.textContent).toContain('보강 없음');
+    expect(li.textContent).toContain('게이트 반영 안 됨 — 빌더가 보강본을 남기지 않음');
+  });
+
+  it('경로는 왔는데 파일로 열지 못했으면 기록 누락이 아니라 "열지 못함" 이라 말한다 (리뷰 W2)', async () => {
+    await openEvidence({
+      present: true, document: null, configured: true, same_project: null, identity_reason: 'ref_no_token',
+      shared_tokens: [], safety_fields_applied: 0, safety_fields_blocked: 0, descriptive_fields_applied: 0,
+      invalid_asil_rejected: 0, structural_fields_applied: 0, structural_fields_blocked: 0,
+      enrichment: { present: true, applied: true, functions: 5, unknown_keys: 0, reason: null },
+    });
+    const li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('열지 못함(경로는 전달됨)');
+    expect(li.textContent).not.toContain('(파일명 미기록)');
+    expect(li.textContent).not.toContain('미전달');
+    expect(li.textContent).not.toContain('서술만 보강');
+  });
+
+  it('차단 수가 미기록(null)이면 0 처럼 침묵하지 않는다 (리뷰 W6)', async () => {
+    await openEvidence({
+      present: true, document: 'x.docx', configured: true, same_project: true, identity_reason: 'token_match',
+      shared_tokens: ['X'], safety_fields_applied: 3, safety_fields_blocked: null, descriptive_fields_applied: null,
+      invalid_asil_rejected: null, structural_fields_applied: null, structural_fields_blocked: null,
+      enrichment: { present: true, applied: true, functions: 3, unknown_keys: 0, reason: null },
+    });
+    const li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('차단 미기록');
+    expect(li.textContent).not.toContain('차단 0');
+  });
+
+  it('서버가 reference 섹션 자체를 안 내면(구 백엔드) 사이드카 부재와 다르게 말한다 (리뷰 I3)', async () => {
+    await openEvidence(undefined);
+    const li = (await screen.findByText(/참조 SwUDS 보강 근거 없음/)).closest('li');
+    expect(li.textContent).toContain('서버 응답에 reference 섹션이 없다');
+    expect(li.textContent).not.toContain('사유 미상');
+  });
+
+  it('UDS 가 아닌 문서는 근거 없음 사유와 함께 "참조 보강을 하지 않는다" 고 말한다', async () => {
+    await openEvidence({ present: false, reason: '생성 통계 사이드카 없음 (x.docx.gen_stats.json)' }, 'sts', '📗 STS');
+    const li = (await screen.findByText(/참조 SwUDS 보강 근거 없음/)).closest('li');
+    expect(li.textContent).toContain('생성 통계 사이드카 없음');
+    expect(li.textContent).toContain('이 문서 종류는 참조 보강을 하지 않는다');
+  });
+});
+

@@ -482,3 +482,66 @@ class TestStructuralFieldsAreCounted:
             "globals_global": 0, "called": 0, "calling": 0,
         }
         assert info["called"] == "own_callee", "이미 값이 있으면 참조가 덮지 않는다"
+
+class TestSidecarNamesTheDocument:
+    """(R47 N26) 신원 토큰만으론 검토자가 "어떤 파일이었나" 를 못 본다 — 연 파일명과 전달 여부를 남긴다."""
+
+    def test_document_name_and_configured_flag_land_in_the_sidecar(self, gen, tmp_path):
+        import json
+
+        from report_gen.docx_builder import gen_stats_path
+        gen(project_name="KJPDS02_PV", ref_block={"asil": "A"}, ref_stem="KJPDS02_SwUDS")
+        side = json.loads(gen_stats_path(str(tmp_path / "out.docx")).read_text(encoding="utf-8"))
+        assert side["reference_suds"]["configured"] is True
+        assert side["reference_suds"]["document"] == "(KJPDS02_SwUDS) x.docx"
+
+    def test_unconfigured_reference_is_recorded_as_not_delivered(self, gen, tmp_path, monkeypatch):
+        """부모가 빈 경로를 넘기면(미지정/접근 실패) `configured:false · document:null` — 화면이 '미전달' 이라 말한다.
+        `Path("")` 는 `.` 이라 exists() 가 True 인 함정(R47 리뷰 W1)이 여기서도 새지 않아야 한다."""
+        import json
+
+        import config
+        from report_gen import docx_builder
+        from report_gen.docx_builder import gen_stats_path
+        gen(project_name="KJPDS02_PV", ref_block={"asil": "A"})          # 템플릿(t.docx)을 만들어 둔다
+        monkeypatch.setattr(config, "UDS_REF_SUDS_PATH", "", raising=False)
+        info = {"id": "SwUFn_0001", "name": "alpha", "prototype": "void alpha(void);",
+                "description": "", "asil": "TBD", "related": "TBD", "precondition": "N/A",
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "called": "", "logic": ""}
+        payload = {"project_name": "KJPDS02_PV", "overview": "o", "requirements": "r",
+                   "interfaces": "i", "uds_frames": "u", "notes": "n",
+                   "function_details": {"SwUFn_0001": info}}
+        out = tmp_path / "out2.docx"
+        docx_builder.generate_uds_docx(str(tmp_path / "t.docx"), payload, str(out))
+        side = json.loads(gen_stats_path(str(out)).read_text(encoding="utf-8"))["reference_suds"]
+        assert side["configured"] is False and side["document"] is None
+        assert side["safety_fields_applied"] == 0 and side["descriptive_fields_applied"] == 0
+        assert info["asil"] == "TBD"
+
+    def test_placeholder_template_exit_also_records_reference_stats(self, gen, tmp_path, monkeypatch):
+        """(R47-c 리뷰 W4) 토큰 치환 템플릿 경로는 세 종결 경로 중 유일하게 `reference_suds` 를 버렸다 —
+        보드가 "참조 통계를 남기기 전 빌더" 라는 틀린 사유를 말하게 된다."""
+        import json
+
+        import docx
+
+        import config
+        from report_gen import docx_builder
+        from report_gen.docx_builder import gen_stats_path
+        gen(project_name="KJPDS02_PV", ref_block={"asil": "A"}, ref_stem="KJPDS02_SwUDS")
+        tpl = tmp_path / "ph.docx"
+        d = docx.Document()
+        # 치환되지 않는 토큰이 남아야 placeholder 분기로 간다(검사는 치환 뒤에 한다)
+        d.add_paragraph("{{project_name}} {{custom_token_not_in_payload}}")
+        d.save(str(tpl))
+        payload = {"project_name": "KJPDS02_PV", "overview": "o", "requirements": "r",
+                   "interfaces": "i", "uds_frames": "u", "notes": "n", "function_details": {}}
+        out = tmp_path / "ph_out.docx"
+        docx_builder.generate_uds_docx(str(tpl), payload, str(out))
+        side = json.loads(gen_stats_path(str(out)).read_text(encoding="utf-8"))
+        assert side["mode"] == "placeholder_substitution", side
+        assert side["reference_suds"]["configured"] is True
+        assert side["reference_suds"]["document"] == "(KJPDS02_SwUDS) x.docx"
+        assert config.UDS_REF_SUDS_PATH.endswith("x.docx")
+

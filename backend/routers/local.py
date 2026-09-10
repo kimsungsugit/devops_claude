@@ -29,6 +29,7 @@ from backend.helpers import (
     _compute_uds_mapping_summary,
     _enrich_function_quality_fields,
     _generate_docx_with_retry,
+    merge_enriched_function_details,
     _get_progress,
     _get_source_sections_cached,
     _get_uds_view_payload_cached,
@@ -323,6 +324,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
         details = uds_payload.get("function_details")
         if not isinstance(details, dict):
             return None
+        # (R47-c 리뷰 I5) 세 번째 트윈 — N27 이 두 트윈만 덮어, 이 라이터의 payload 는 보드에 "병합하지 않는 라이터" 로 보였다.
+        enrichment = merge_enriched_function_details(out_path, details)
         summary = uds_payload.get("summary")
         if not isinstance(summary, dict):
             summary = {}
@@ -333,6 +336,7 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
             "docx_path": str(out_path),
             "summary": summary,
             "function_details": details,
+            "enrichment": enrichment,
         }
         # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
         atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1233,8 +1237,10 @@ async def local_uds_generate(
         _uds_ai_cfg = _load_sts_ai_config()
         if _uds_ai_cfg:
             uds_payload["_gen_ai_config"] = _uds_ai_cfg
-        # (R47 N25) 이 핸들러엔 `reference_doc_path` 폼이 없어 ASIL·Related 보강 참조는 config 기본값을 읽는다.
-        _logger.info("UDS 참조 SwUDS: local 경로엔 정본 입력이 없어 config.UDS_REF_SUDS_PATH 기본값을 읽는다(신원 게이트가 남의 문서를 막는다)")
+        # (R47 N25 / R47-c 리뷰 I6) 이 핸들러엔 `reference_doc_path` 폼이 없고, 서브프로세스 env 는 항상 명시 주입이라
+        #   빈 값 = **참조 없이** 생성한다(config 기본값을 읽지 않는다 — 첫 판 로그가 그렇게 적어 화면의 '미전달' 과 어긋났다).
+        #   레지스트리 `uds` 정본을 이 경로에도 잇는 일은 N29.
+        _logger.warning("UDS 참조 SwUDS: local 경로엔 정본 입력이 없어 참조 없이 생성한다(보드 근거에 '미전달' 로 표시, 배선은 N29)")
         await _run_blocking(_generate_docx_with_retry, tpl_path, uds_payload, out_path)
     except Exception as docx_exc:
         tb = traceback.format_exc()
