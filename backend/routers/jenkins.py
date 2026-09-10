@@ -57,6 +57,7 @@ from backend.helpers import (
     build_vectorcast_metadata,
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
+    merge_enriched_function_details,
     resolve_reference_suds_for_generation,
 )
 from backend.helpers.sds import is_sds_filename, is_srs_filename
@@ -173,6 +174,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
         details = uds_payload.get("function_details")
         if not isinstance(details, dict):
             return None
+        # (R47 N27) 빌더가 보강한 값을 먼저 병합한다 — 비동기 트윈(`_uds_generate_from_paths`)과 같은 순서.
+        enrichment = merge_enriched_function_details(out_path, details)
         summary = uds_payload.get("summary")
         if not isinstance(summary, dict):
             summary = {}
@@ -183,6 +186,7 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
             "docx_path": str(out_path),
             "summary": summary,
             "function_details": details,
+            "enrichment": enrichment,
         }
         # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
         atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))

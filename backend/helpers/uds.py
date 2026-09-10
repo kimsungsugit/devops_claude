@@ -1802,6 +1802,46 @@ def resolve_reference_suds_for_generation(
     return "", (reasons[0] if reasons else f"참조 SwUDS 를 읽지 못함: {name} ({raw})")
 
 
+def merge_enriched_function_details(out_path: Path, function_details: Dict[str, Any]) -> Dict[str, Any]:
+    """빌더(서브프로세스)가 남긴 보강본을 부모의 `function_details` 에 **제자리 병합**한다. (R47 N27)
+
+    반환은 payload 사이드카에 그대로 싣는 기록: `{"applied": True, "functions": n, "reference_suds": {...}}`
+    또는 `{"applied": False, "reason": ...}`. 부재를 조용히 넘기지 않는다 — 게이트 머리글이 이 값을 읽어
+    "무엇을 쟀나" 를 말한다. 이 사이드카가 없던 시절엔 문서 ASIL 82.8% 를 게이트가 23.8% 로 쟀다.
+
+    같은 함수 키(`SwUFn_…`)만 덮는다 — 빌더가 새 키를 만들지는 않으므로 부모에 없는 키는 무시하고 센다.
+    """
+    from report_gen.docx_builder import enriched_function_details_path
+    path = enriched_function_details_path(str(out_path))
+    if not path.is_file():
+        return {"applied": False, "reason": f"빌더가 보강본을 남기지 않음 ({path.name})"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:   # noqa: BLE001 - 읽기 실패 사유를 기록으로 남긴다
+        return {"applied": False, "reason": f"보강본 읽기 실패 {type(exc).__name__}: {str(exc)[:120]}"}
+    enriched = data.get("function_details") if isinstance(data, dict) else None
+    if not isinstance(enriched, dict) or not isinstance(function_details, dict):
+        return {"applied": False, "reason": "보강본 형식이 dict 가 아님"}
+    merged = 0
+    unknown = 0
+    for fid, entry in enriched.items():
+        if not isinstance(entry, dict):
+            continue
+        cur = function_details.get(fid)
+        if isinstance(cur, dict):
+            cur.update(entry)
+            merged += 1
+        else:
+            unknown += 1
+    return {
+        "applied": True,
+        "functions": merged,
+        "unknown_keys": unknown,
+        "source": path.name,
+        "reference_suds": (data.get("reference_suds") if isinstance(data.get("reference_suds"), dict) else None),
+    }
+
+
 def _docx_subprocess_env(reference_suds_path: str) -> Dict[str, str]:
     """DOCX 생성 서브프로세스 환경 — `UDS_REF_SUDS_PATH` 를 **항상** 대입한다(빈 값 포함).
 
@@ -2430,6 +2470,8 @@ def _uds_generate_from_paths(
     if reference_suds_path:
         _api_logger.info("[UDS_DOCX] 참조 SwUDS: %s", Path(reference_suds_path).name)
     _generate_docx_with_retry(tpl, uds_payload, out_path, reference_suds_path=reference_suds_path)
+    # (R47 N27) 빌더가 보강한 값을 **먼저** 병합한다 — 게이트·매핑 요약·payload 사이드카가 전부 문서를 만든 값을 본다.
+    _enrichment = merge_enriched_function_details(out_path, uds_payload.get("function_details") or {})
     summary = uds_payload.get("summary")
     if not isinstance(summary, dict):
         summary = {}
@@ -2446,6 +2488,7 @@ def _uds_generate_from_paths(
                     "docx_path": str(out_path),
                     "summary": summary,
                     "function_details": uds_payload.get("function_details") or {},
+                    "enrichment": _enrichment,
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -1988,6 +1988,33 @@ def gen_stats_path(output_path: str) -> Path:
     return Path(str(output_path) + ".gen_stats.json")
 
 
+def enriched_function_details_path(output_path: str) -> Path:
+    """빌더가 **참조 보강까지 끝낸** `function_details` 를 남기는 사이드카 — `<out>.docx.function_details.json`. (R47 N27)
+
+    ⚠ 왜 필요한가: 참조 SwUDS 보강(ASIL·Related·서술·구조 축)은 **이 서브프로세스 안의** `function_details`
+      에 일어나는데, 게이트가 읽는 `<out>.payload.json` 은 **부모 프로세스가 보강 전 객체**로 쓴다. 그래서 R47
+      라이브에서 문서는 ASIL 82.8% 인데 게이트는 23.8% 였다 — 게이트가 문서가 아니라 파서 출력을 재고 있었다.
+      부모는 이 파일을 payload 에 병합한 뒤 사이드카를 쓴다(`backend.helpers.uds.merge_enriched_function_details`).
+    """
+    return Path(str(output_path) + ".function_details.json")
+
+
+def _write_enriched_function_details(output_path: str, function_details: Dict[str, Any],
+                                     ref_stats: Dict[str, Any]) -> None:
+    """실패해도 문서 생성을 깨지 않는다 — 대신 부모가 "보강본 없음" 을 payload 에 적는다."""
+    try:
+        enriched_function_details_path(output_path).write_text(
+            json.dumps({
+                "source": "docx_builder",
+                "reference_suds": ref_stats,
+                "function_details": function_details,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:   # noqa: BLE001 - 사이드카 실패가 산출물을 막아선 안 된다
+        _logger.warning("보강 function_details 사이드카 기록 실패 %s: %s", output_path, e)
+
+
 _STAT_SAMPLE_CAP = 50
 
 
@@ -4180,6 +4207,7 @@ def generate_uds_docx(
         if stats_out is not None:
             stats_out.update(_stats)
         _write_gen_stats(output_path, _stats)
+        _write_enriched_function_details(output_path, function_details, _ref_stats)
         doc.save(str(out))
         return str(out)
 
@@ -4707,6 +4735,7 @@ def generate_uds_docx(
     if stats_out is not None:
         stats_out.update(_nt_stats)
     _write_gen_stats(output_path, _nt_stats)
+    _write_enriched_function_details(output_path, function_details, _ref_stats)
     doc.save(str(out))
     return str(out)
 

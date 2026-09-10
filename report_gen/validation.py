@@ -1242,7 +1242,14 @@ def generate_uds_field_quality_gate_report(
         lines.append(f"- Payload: `{payload_file.name}` · functions `{len(payload_by_name)}`{_fn_note}")
         # 리뷰 F3: ASIL/Related/호출 값은 **payload(파서) 기준**이다 — 문서 셀과 다를 수 있다(실측 344행 중 11행의
         # Related ID 계열이 달랐다). 어느 쪽을 쟀는지 적는다.
-        lines.append("- Scored fields source: `payload` — ASIL·Related·호출 값은 파서 값이며 문서 셀과 다를 수 있다")
+        # (R47 N27) payload 가 빌더의 보강본을 병합한 것인지 — 아니면 문서(참조 보강 후)와 갈린다(실측 82.8% vs 23.8%).
+        _enr = payload.get("enrichment") if isinstance(payload.get("enrichment"), dict) else None
+        if _enr and _enr.get("applied"):
+            lines.append(f"- Scored fields source: `payload` — 빌더가 되쓴 값(참조 SwUDS 보강 반영 `{_enr.get('functions')}` 함수) · 문서를 만든 값과 같다")
+        elif _enr:
+            lines.append(f"- Scored fields source: `payload` — ⚠ 보강 미반영(사유: {_enr.get('reason')}) · ASIL·Related 는 파서 값이라 문서 셀과 다를 수 있다")
+        else:
+            lines.append("- Scored fields source: `payload` — ASIL·Related·호출 값은 파서 값이며 문서 셀과 다를 수 있다(보강본 병합 이전 라이터)")
         lines.append(f"- Document entries: `{document_entries}` · scored (document ∩ payload): `{total}`")
         # ⚠ 커버리지는 **필드 품질과 다른 축**이라 판정에 넣지 않는다(임계를 새로 만드는 건 정책 — 계획서 §8).
         #   그래도 수는 head 에 둔다: 재채점 실측에서 426항목 중 18개만 생성된 문서가 그 18개로 `Gate pass: True`
