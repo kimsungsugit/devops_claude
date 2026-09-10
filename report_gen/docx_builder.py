@@ -2671,6 +2671,10 @@ def generate_uds_docx(
         "identity": _ref_identity,
         "configured": _ref_configured,
         "document": ref_doc_path.name if (_ref_configured and ref_doc_path.is_file()) else None,
+        # (R47-d 리뷰 I3) 누가 이 문서를 골랐나 — 부모가 payload 에 남긴 출처("form" / "registry:<id>")를 그대로 베낀다.
+        #   없으면 None(구 호출부·jenkins 경로). 로그에만 있던 출처가 사이드카→근거 화면까지 간다.
+        "origin": (str(uds_payload.get("reference_suds_origin")).strip() or None)
+        if isinstance(uds_payload, dict) and uds_payload.get("reference_suds_origin") else None,
         "safety_fields_applied": 0,
         "safety_fields_blocked": 0,
         "descriptive_fields_applied": 0,

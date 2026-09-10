@@ -1528,6 +1528,10 @@ function EvidenceDetail({ run, detail }) {
                     : ref.same_project === false ? '다른 프로젝트' : '판정 불가'}
                 </strong>
                 {ref.shared_tokens?.length > 0 && ` (${ref.shared_tokens.join(', ')})`}
+                {/* (R47-d I3) 출처 — 사용자가 폼으로 준 문서인지, 레지스트리 정본인지. 기록 없으면 말하지 않는다 */}
+                {ref.origin === 'form' ? ' · 출처 지정 경로'
+                  : typeof ref.origin === 'string' && ref.origin.startsWith('registry:')
+                    ? ` · 출처 레지스트리 ${ref.origin.slice('registry:'.length)}` : ''}
                 {ref.safety_fields_applied != null && ` · ASIL·Related 적용 ${ref.safety_fields_applied}`}
                 {/* (리뷰 W6) 미측정(null)과 0 은 다르다 — 차단 수가 없으면 "차단 0" 으로 읽히므로 미기록을 말한다 */}
                 {ref.safety_fields_blocked == null ? ' · 차단 미기록'

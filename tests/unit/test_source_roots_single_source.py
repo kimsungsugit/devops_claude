@@ -139,7 +139,7 @@ class TestRepositorySweep:
             fn = getattr(mod, "split_source_roots", None) or getattr(mod, "first_source_root", None)
             assert fn is not None, mod.__name__
             assert fn.__module__ == "report_gen.source_roots", (mod.__name__, fn.__module__)
-        assert "from report_gen.source_roots import split_source_roots" in source_of(scm_registry.resolve_scm_id)
+        assert "from report_gen.source_roots import split_source_roots" in source_of(scm_registry.resolve_scm_entry)
 
 
 class TestObservable:

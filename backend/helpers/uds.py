@@ -1802,6 +1802,136 @@ def resolve_reference_suds_for_generation(
     return "", (reasons[0] if reasons else f"참조 SwUDS 를 읽지 못함: {name} ({raw})")
 
 
+def resolve_reference_suds_from_registry(source_root: Any) -> Tuple[str, str, str]:
+    """호출부가 참조 SwUDS 를 안 줬을 때 — **레지스트리 항목의 `linked_docs.uds`** 를 원 경로로 낸다. (R47-d N29)
+
+    반환 `(원 경로 | "", 사유, 항목 id | "")`. 로컬화는 하지 않는다 — 호출자가 `resolve_reference_suds_for_generation`
+    에 넘겨 템플릿과 같은 해석기를 태운다. 항목 id 는 uds 가 비어 있어도 돌려준다(신원 앵커에 쓴다 — 아래).
+
+    왜: `/api/local/uds/generate(-async)` 엔 `reference_doc_path` 폼이 없어 N25 이후 **참조 없이** 생성해
+    왔다(보드 근거 '미전달'). 그런데 같은 요청이 `source_root` 로 Quality DB 의 `scm_id` 를 채우고 있었다
+    — 프로젝트를 이미 알고 있으면서 그 프로젝트의 SwUDS 는 열지 않은 것이다.
+
+    프로젝트 판정은 `resolve_scm_entry`(정확일치만, 미상은 None, **한 스냅샷**) 단일 출처다. 후보가 여럿인데
+    안 맞으면 고르지 않는다 — 임의 선택은 남의 프로젝트 ASIL 을 조용히 싣고, 신원 게이트가 막더라도 "왜 보강이
+    0인가" 를 다시 두 라운드 찾게 만든다(R47 실측).
+    """
+    raw_root = str(source_root or "").strip()
+    if not raw_root:
+        return "", "참조 SwUDS 미지정 — source_root 도 없어 레지스트리에서 정본을 고를 수 없다", ""
+    try:
+        from backend.services.scm_registry import resolve_scm_entry
+        entry = resolve_scm_entry(raw_root)
+    except Exception as exc:   # noqa: BLE001 - 조회 실패는 "참조 없음" 으로 정직하게(생성은 계속)
+        return "", f"참조 SwUDS 미지정 — 레지스트리 조회 실패({type(exc).__name__}: {str(exc)[:80]})", ""
+    if entry is None:
+        return "", (f"참조 SwUDS 미지정 — source_root 가 레지스트리 항목과 정확히 맞지 않아 정본을 고르지 않는다"
+                    f" ({raw_root[:80]})"), ""
+    sid = str(entry.id)
+    uds = str(getattr(getattr(entry, "linked_docs", None), "uds", "") or "").strip()
+    if not uds:
+        return "", f"참조 SwUDS 미지정 — 레지스트리 {sid} 에 uds 정본이 등록돼 있지 않다", sid
+    return uds, f"레지스트리 {sid} 의 uds 정본", sid
+
+
+def pick_reference_suds_source(reference_doc_path: str, source_root: Any) -> Tuple[str, str, str]:
+    """local UDS 경로의 참조 SwUDS **원 경로** — 폼 `reference_doc_path` 가 먼저, 비면 레지스트리 `uds`. (R47-d N29)
+
+    반환 `(원 경로 | "", 사유, 출처)`. 출처는 `"form"` / `"registry:<id>"` / `""`(없음). 로컬화는 하지 않는다 —
+    호출자가 같은 원 경로를 ① 템플릿 단일 규칙(`resolve_template_for`, 정본 우선)과 ② 참조 로컬화
+    (`resolve_reference_suds_for_generation`)에 차례로 넘긴다. ②는 ①이 만든 로컬 사본(`<tmp>/sha1(원경로)/이름`)을
+    재사용하므로 정본(수십 MB)은 한 번만 내려온다. 출처 문자열은 `anchor_project_identity` 로 payload 에 남겨
+    빌더 통계(`reference_suds.origin`)→근거 화면까지 간다(리뷰 I3).
+    """
+    raw = str(reference_doc_path or "").strip()
+    if raw:
+        return raw, "폼 reference_doc_path", "form"
+    raw, why_reg, sid = resolve_reference_suds_from_registry(source_root)
+    if not raw:
+        return "", why_reg, ""
+    return raw, why_reg, f"registry:{sid}"
+
+
+def anchor_project_identity(uds_payload: Dict[str, Any], source_root: Any, origin: str) -> str:
+    """payload 의 프로젝트 신원 토큰에 **레지스트리 항목 id** 를 얹는다. (R47-d 리뷰 C1)
+
+    빌더 `_reference_identity_verdict` 는 payload 토큰(`project_name`·`module_name`·`source_docs`·`summary.project`)
+    과 참조 문서 파일명 토큰의 교집합으로 "같은 프로젝트" 를 판정한다. local 경로의 payload 토큰은 소스 루트
+    leaf 디렉터리명뿐이라(실측 `NE1AW_PORTING`→{NE1AW, PORTING} vs 정본 `(KJPDS02_SwUDS)…`→{KJPDS02}) 등록된
+    두 프로젝트 **모두** 교집합이 비어 참조를 열고도 ASIL·Related 가 전부 차단됐다 — R47 이 고치려던 증상이
+    이름만 바꿔 남는다.
+
+    레지스트리 항목 id(`kjpds02_pv`→{KJPDS02}, `hdpdm01`→{HDPDM01})는 "이 source_root 는 이 프로젝트다" 라는
+    관리자의 명시 등록이라 신원 토큰으로 정당하다. ⚠ 게이트를 **통과시키는 것이 아니라 토큰을 하나 더 주는
+    것**이다 — R46 이전처럼 hdpdm01 항목의 uds 가 KJPDS02 문서를 가리키면 {HDPDM01}∩{KJPDS02}=∅ 로 여전히
+    막힌다. 판정 결과는 그대로 `gen_stats.reference_suds.identity` 에 남는다.
+
+    `reference_suds_origin` 은 빌더가 통계에 그대로 베낀다(어느 출처의 문서였나 — 사후 복원용).
+    반환값은 얹은 id(없으면 ""). 항목을 못 고르면 아무것도 바꾸지 않는다(토큰을 지어내지 않는다).
+    """
+    if not isinstance(uds_payload, dict):
+        return ""
+    if origin:
+        uds_payload["reference_suds_origin"] = origin
+    sid = ""
+    try:
+        from backend.services.scm_registry import resolve_scm_entry
+        entry = resolve_scm_entry(str(source_root or ""))
+        sid = str(entry.id) if entry is not None else ""
+    except Exception as exc:   # noqa: BLE001 - 앵커는 부가 정보다; 실패해도 생성은 계속(판정은 fail-closed 로 남는다)
+        _logger.warning("UDS 신원 앵커: 레지스트리 조회 실패(%s) — 토큰을 얹지 않는다", type(exc).__name__)
+        sid = ""
+    if not sid:
+        return ""
+    summary = uds_payload.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+        uds_payload["summary"] = summary
+    if not str(summary.get("project") or "").strip():
+        summary["project"] = sid
+    return sid
+
+
+def log_reference_outcome(out_path: Path, logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+    """생성 **뒤** `gen_stats.reference_suds` 를 읽어 "참조를 열었다" 와 "보강이 적용됐다" 를 갈라 로그한다. (R47-d 리뷰 X8)
+
+    해석 성공 로그(`UDS 참조 SwUDS: …`)만 있으면 신원 게이트가 막아 적용 0 인 경우도 성공으로 읽힌다 —
+    직전 라운드가 고친 "로그가 화면과 어긋난다" 의 재발이다. 반환은 요약 dict(테스트·호출자용); 통계가 없으면
+    `{"present": False}`.
+    """
+    lg = logger or _logger
+    try:
+        from report_gen.docx_builder import gen_stats_path
+        path = gen_stats_path(str(out_path))
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    except Exception as exc:   # noqa: BLE001 - 통계를 못 읽어도 생성 결과는 유효; 사실만 적는다
+        lg.warning("UDS 참조 SwUDS 결과: gen_stats 읽기 실패(%s) — 적용 여부 미상", type(exc).__name__)
+        return {"present": False}
+    ref = data.get("reference_suds") if isinstance(data, dict) else None
+    if not isinstance(ref, dict):
+        lg.warning("UDS 참조 SwUDS 결과: gen_stats 에 reference_suds 없음 — 적용 여부 미상")
+        return {"present": False}
+    identity = ref.get("identity") if isinstance(ref.get("identity"), dict) else {}
+    same = identity.get("same_project")
+    out = {
+        "present": True, "configured": ref.get("configured"), "document": ref.get("document"),
+        "same_project": same, "reason": identity.get("reason"),
+        "applied": ref.get("safety_fields_applied"), "blocked": ref.get("safety_fields_blocked"),
+        "origin": ref.get("origin"),
+    }
+    if not ref.get("configured"):
+        lg.warning("UDS 참조 SwUDS 결과: 참조 없이 생성 — ASIL·Related 보강 없음")
+    elif same is True:
+        lg.info("UDS 참조 SwUDS 결과: %s · 같은 프로젝트(%s) · ASIL·Related 적용 %s · 출처 %s",
+                out["document"], ",".join(identity.get("shared_tokens") or []), out["applied"], out["origin"])
+    else:
+        lg.warning("UDS 참조 SwUDS 결과: %s 를 열었지만 신원 %s(%s, ref=%s payload=%s) — ASIL·Related 차단 %s · 적용 %s · 출처 %s",
+                   out["document"], "불일치" if same is False else "판정 불가", out["reason"],
+                   ",".join(identity.get("ref_tokens") or []), ",".join(identity.get("payload_tokens") or []),
+                   out["blocked"], out["applied"], out["origin"])
+    return out
+
+
 def merge_enriched_function_details(out_path: Path, function_details: Dict[str, Any]) -> Dict[str, Any]:
     """빌더(서브프로세스)가 남긴 보강본을 부모의 `function_details` 에 **제자리 병합**한다. (R47 N27)
 
@@ -1956,6 +2086,10 @@ def _generate_docx_with_retry(
                 # 성공/실패 판정은 **바꾸지 않는다**(템플릿이 의도된 부분집합일 수 있어
                 # 뒤집으면 대량 오탐) — 대신 수치를 checkpoint 에 실어 침묵을 없앤다.
                 gen_stats = _read_gen_stats(out_path)
+                # (R47-d 리뷰 X8) "참조를 열었다" 와 "보강이 적용됐다" 는 다른 사실이다 — 신원 게이트가 막으면
+                #   해석 성공 로그만 남고 적용은 0 이다. 네 호출부(jenkins 동기/비동기·local 동기/비동기)가
+                #   전부 여기를 지나므로 결과 로그는 이 한 곳에 둔다.
+                log_reference_outcome(out_path)
                 record: Dict[str, Any] = _finish({
                     "stage": stage,
                     "status": "success",

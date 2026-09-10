@@ -854,6 +854,21 @@ class TestReferenceEnrichmentSection:
         assert body2["reference"]["present"] is False and body2["reference"]["reason"]
         assert body2["expected_sidecars"]["reference"] is False
 
+    def test_origin_is_carried_when_recorded_and_null_otherwise(self, tmp_path):
+        """(R47-d 리뷰 I3) "form" / "registry:<id>" 를 그대로, 기록 없음·비문자열은 None(지어내지 않는다)."""
+        import copy
+
+        from report_gen.evidence import read_evidence
+
+        assert read_evidence(str(_ref_sidecars(tmp_path, stem="a")))["reference"]["origin"] is None
+        stats = copy.deepcopy(_REF_STATS_2064)
+        stats["reference_suds"]["origin"] = "registry:kjpds02_pv"
+        assert read_evidence(str(_ref_sidecars(tmp_path, stats, stem="b")))["reference"]["origin"] == "registry:kjpds02_pv"
+        stats["reference_suds"]["origin"] = "form"
+        assert read_evidence(str(_ref_sidecars(tmp_path, stats, stem="c")))["reference"]["origin"] == "form"
+        stats["reference_suds"]["origin"] = 7
+        assert read_evidence(str(_ref_sidecars(tmp_path, stats, stem="d")))["reference"]["origin"] is None
+
     def test_every_key_the_board_reads_from_ref_is_produced_by_the_reader(self, tmp_path):
         """보드가 `ref.<키>` / `ref.enrichment.<키>` 로 읽는 이름이 리더 출력에 있어야 한다(형제 가드: `val.`)."""
         import re

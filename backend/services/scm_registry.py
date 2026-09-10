@@ -301,7 +301,21 @@ def _normalize_path_key(text: str) -> str:
 
 
 def resolve_scm_id(value: str) -> str | None:
-    """`project_id` 나 `source_root` 를 SCM registry entry id 로 정규화한다.
+    """`project_id` 나 `source_root` 를 SCM registry entry id 로 정규화한다 — `resolve_scm_entry` 의 id 투영.
+
+    판정 본체는 `resolve_scm_entry` 다(docstring 도 거기). 여기는 id 만 필요한 호출자(품질 이력 recorder·백필)용.
+    """
+    entry = resolve_scm_entry(value)
+    return str(entry.id) if entry is not None else None
+
+
+def resolve_scm_entry(value: str) -> ScmRegistryEntry | None:
+    """`project_id` 나 `source_root` 를 SCM registry **항목**으로 정규화한다 — 한 스냅샷 안에서.
+
+    ⚠ (R47-d 리뷰 W2) id 를 고른 뒤 `get_registry_entry(id)` 로 **다시** 읽으면 두 스냅샷 사이에
+      `update_entry`/삭제가 끼어 ①항목이 사라져 "안 맞는다" 는 틀린 사유가 나거나 ②같은 id 로 재등록된
+      **다른 source_root 의 항목**이 잡힌다. 항목이 필요한 호출자(UDS 참조 정본 폴백)는 이 함수로
+      판정과 조회를 한 번에 끝낸다.
 
     품질 이력(`GenerationRun.scm_id`)의 프로젝트 축을 채우는 **단일 판정**이다.
     런타임 기록(`record_*`)과 과거 행 백필(`scripts/backfill_quality_scm_id.py`)이
@@ -320,7 +334,7 @@ def resolve_scm_id(value: str) -> str | None:
     FAIL 이 B 프로젝트 화면에 뜬다. 근거가 없으면 **None**(=미상)이 정답이다.
 
     Returns:
-        entry id, 또는 판정 불가 시 None.
+        entry(같은 스냅샷의 객체), 또는 판정 불가 시 None.
     """
     # (R47 리뷰 W5) 20줄짜리 무의존 헬퍼 때문에 `report_gen` 패키지 init(680모듈·1.1초)을 깨우지 않는다 —
     #   단발 스크립트(backfill·check_linked_docs)가 이 모듈을 직접 문다. 함수 안에서 든다.
@@ -334,6 +348,7 @@ def resolve_scm_id(value: str) -> str | None:
     if not entries:
         return None
 
+    by_entry_id = {str(e.id): e for e in entries if e.id}
     by_id = {str(e.id or "").strip().lower(): str(e.id) for e in entries if e.id}
     by_root: Dict[str, str] = {}
     for e in entries:
@@ -364,7 +379,7 @@ def resolve_scm_id(value: str) -> str | None:
 
     direct = _one(raw)
     if direct:
-        return direct
+        return by_entry_id.get(direct)
 
     # (R47 리뷰 C1) 조회값도 **등록값과 같은 분해**를 탄다 — 한쪽만 세미콜론을 가르면 전체문자열 조회가 끊긴다.
     # ⚠ `len(parts) > 1` 로 두면 `"D:/a,D:/a"`(중복 제거 후 1조각)가 조각 조회를 건너뛴다 — 게이트 실측(R47).
@@ -372,7 +387,7 @@ def resolve_scm_id(value: str) -> str | None:
     if parts:
         found = {r for r in (_one(part) for part in parts) if r}
         if len(found) == 1:
-            return found.pop()
+            return by_entry_id.get(found.pop())
 
     return None
 

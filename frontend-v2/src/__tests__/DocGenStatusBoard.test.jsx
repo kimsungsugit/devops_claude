@@ -9,7 +9,7 @@
  *   - `QualityDashboard` 가 `gate_pass ?? (score >= 70)` 로 **통과를 지어냈다**.
  *   - 백엔드가 `all([])`=True 라 **검사 0건을 PASS 로 기록**했다(fail-closed 로 수정).
  */
-import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DOCGEN_CAPS_KEY, saveDocGenCap } from '../sharedInputs.js';
@@ -1432,5 +1432,23 @@ describe('DocGenStatusBoard — 참조 SwUDS 보강 근거 (R47 N26)', () => {
     expect(li.textContent).toContain('생성 통계 사이드카 없음');
     expect(li.textContent).toContain('이 문서 종류는 참조 보강을 하지 않는다');
   });
+  it('출처가 기록돼 있으면 레지스트리 id 또는 지정 경로라고 말하고, 없으면 출처를 말하지 않는다 (R47-d I3)', async () => {
+    const base = {
+      present: true, document: '(KJPDS02_SwUDS) x.docx', configured: true, same_project: true,
+      identity_reason: 'token_match', shared_tokens: ['KJPDS02'], safety_fields_applied: 710, safety_fields_blocked: 0,
+      enrichment: { present: true, applied: true, functions: 1157, reason: null },
+    };
+    await openEvidence({ ...base, origin: 'registry:kjpds02_pv' });
+    let li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('출처 레지스트리 kjpds02_pv');
+    cleanup();
+    await openEvidence({ ...base, origin: 'form' });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('출처 지정 경로');
+    expect(li.textContent).not.toContain('레지스트리');
+    cleanup();
+    await openEvidence({ ...base, origin: null });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).not.toContain('출처');
+  });
 });
-

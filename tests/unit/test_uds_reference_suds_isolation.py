@@ -495,6 +495,28 @@ class TestSidecarNamesTheDocument:
         assert side["reference_suds"]["configured"] is True
         assert side["reference_suds"]["document"] == "(KJPDS02_SwUDS) x.docx"
 
+    def test_origin_from_the_parent_payload_is_copied_into_the_sidecar(self, gen, tmp_path):
+        """(R47-d 리뷰 I3) 누가 골랐나 — 부모가 payload 에 남긴 출처를 빌더가 통계에 베낀다. 없으면 None."""
+        import json
+
+        from report_gen import docx_builder
+        from report_gen.docx_builder import gen_stats_path
+        gen(project_name="KJPDS02_PV", ref_block={"asil": "A"}, ref_stem="KJPDS02_SwUDS")   # 템플릿·참조 준비
+        side0 = json.loads(gen_stats_path(str(tmp_path / "out.docx")).read_text(encoding="utf-8"))["reference_suds"]
+        assert side0["origin"] is None
+        info = {"id": "SwUFn_0001", "name": "alpha", "prototype": "void alpha(void);",
+                "description": "", "asil": "TBD", "related": "TBD", "precondition": "N/A",
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "called": "", "logic": ""}
+        payload = {"project_name": "KJPDS02_PV", "overview": "o", "requirements": "r",
+                   "interfaces": "i", "uds_frames": "u", "notes": "n",
+                   "reference_suds_origin": "registry:kjpds02_pv",
+                   "function_details": {"SwUFn_0001": info}}
+        out = tmp_path / "out3.docx"
+        docx_builder.generate_uds_docx(str(tmp_path / "t.docx"), payload, str(out))
+        side = json.loads(gen_stats_path(str(out)).read_text(encoding="utf-8"))["reference_suds"]
+        assert side["origin"] == "registry:kjpds02_pv"
+
     def test_unconfigured_reference_is_recorded_as_not_delivered(self, gen, tmp_path, monkeypatch):
         """부모가 빈 경로를 넘기면(미지정/접근 실패) `configured:false · document:null` — 화면이 '미전달' 이라 말한다.
         `Path("")` 는 `.` 이라 exists() 가 True 인 함정(R47 리뷰 W1)이 여기서도 새지 않아야 한다."""

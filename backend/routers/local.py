@@ -61,6 +61,9 @@ from backend.helpers import (
     build_vectorcast_metadata,
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
+    anchor_project_identity,
+    pick_reference_suds_source,
+    resolve_reference_suds_for_generation,
     resolve_registered_uds_template_local,
 )
 from backend.helpers.sds import build_sds_view_model, is_sds_filename, is_srs_filename
@@ -922,6 +925,8 @@ async def local_uds_generate(
     report_dir: str = Form(""),
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
+    # (R47-d N29) 이 프로젝트의 SwUDS — ASIL·Related 보강의 권위 문서. 비면 레지스트리 `uds` 정본(source_root 로 판정).
+    reference_doc_path: str = Form(""),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
@@ -1106,6 +1111,58 @@ async def local_uds_generate(
         notes_text = str(uds_payload.get("notes") or "").strip()
         uds_payload["notes"] = "\n".join([x for x in [notes_text, f"impact:{impact_path.name}"] if x])
 
+    # (R47 N25 → R47-d N29) ASIL·Related 보강의 참조는 config 기본값(HDPDM01)이 아니라 **이 프로젝트의 SwUDS** 다.
+    #   폼 `reference_doc_path` 가 먼저, 비면 `source_root` 로 판정한 레지스트리 항목의 `uds` 정본. 둘 다 없으면
+    #   서브프로세스 env 에 빈 값을 **명시 주입**해 참조 없이 생성한다(보드 근거 '미전달') — config 기본값을 읽지 않는다.
+    #   AI 예시문(아래)도 같은 문서를 쓰므로 AI 블록 **앞에서** 해석한다(리뷰 W3 — 예시문 경로로 남의 프로젝트 본문이
+    #   프롬프트에 실리던 두 번째 사이트). cloudium 이면 정본(수십 MB)을 워커로 받아오므로 루프 밖에서(리뷰 W1).
+    _ref_raw, _ref_pick_why, _ref_origin = pick_reference_suds_source(reference_doc_path, source_root)
+    # 템플릿 — 업로드가 먼저. 없으면 등록본(로컬화)을 잡고, 정본이 있으면 **백엔드 단일 규칙**(`resolve_template_for`,
+    #   정본 우선 — jenkins 두 곳과 같은 함수)이 둘 중 하나를 고른다. 같은 정본이 템플릿(heading 집합)이자 참조(ASIL·Related)다.
+    tpl_path = None
+    template_applied = False
+    if template_file and template_file.filename and template_bytes:
+        suffix = Path(template_file.filename).suffix.lower() or ".docx"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(template_bytes)
+            tpl_tmp_path = Path(tmp.name)
+            tpl_path = str(tpl_tmp_path)
+        try:
+            tpl_text = _read_text_from_file(Path(tpl_path))
+            template_applied = "{{" in tpl_text and "}}" in tpl_text
+        except Exception:
+            template_applied = False
+    if not tpl_path:
+        # 서버 등록본(admin `/api/config/uds-template`) → 정본 SUDS 순.
+        # 판정은 `resolve_registered_uds_template()` 단일 출처다 — 예전엔 이게
+        # 인라인이었고 등록본을 아예 조회하지 않아 **관리자 지정이 무효**였다.
+        #
+        # ⚠ 원 경로를 그대로 넘기면 안 된다. 생성은 서브프로세스에서
+        #   `docx.Document(path)` 로 **직접** 여니 cloudium worker 가 닿지 않는다 —
+        #   `U:` 등록본이면 재시도 3단계가 전부 `PackageNotFoundError` 로 죽는다.
+        #   가정이 아니라 실측이다: 캐시의 08-10·08-11 실패 기록 마지막 줄이 정확히
+        #   그 모양이고 경로가 `U:/…/01.SwUDS/(XXXX_SwUDS)…docx` 다. jenkins 쪽 UDS
+        #   2곳은 `resolve_template_for` 로 이미 로컬화했고 **이 경로만 남아 있었다**.
+        #   해석 실패는 `None`(= 템플릿 없이 생성)이고, 사유는 resolver 가 로그에 남긴다
+        #   — 원 경로를 흘려보내면 같은 실패가 하류에서 나고 사유가 사라진다.
+        tpl_path = resolve_registered_uds_template_local()
+        if _ref_raw:
+            from backend.services.docgen_template_source import resolve_template_for
+            # `reference_doc` 는 폼이 먼저, 비면 레지스트리 정본(`_ref_raw` 가 이미 그 규칙이다 — 가드가 이름으로 짝짓는다).
+            tpl_path, _tpl_why = await _run_blocking(
+                resolve_template_for, "uds", registered_template=tpl_path or "",
+                reference_doc=reference_doc_path or _ref_raw,
+            )
+            _logger.info("UDS 템플릿: %s", _tpl_why)
+    if _ref_raw:
+        _ref_suds, _ref_suds_why = await _run_blocking(resolve_reference_suds_for_generation, _ref_raw, tpl_path)
+        _ref_suds_why = f"{_ref_suds_why} [{_ref_pick_why}]"
+    else:
+        _ref_suds, _ref_suds_why = "", _ref_pick_why
+    (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
+    # (리뷰 C1) payload 신원 토큰이 소스 루트 leaf 뿐이라 정본을 열고도 "다른 프로젝트" 로 막힌다 — 레지스트리 id 를 얹는다.
+    anchor_project_identity(uds_payload, source_root, _ref_origin)
+
     if ai_enable:
         rag_snippets: List[Dict[str, Any]] = []
         try:
@@ -1164,13 +1221,15 @@ async def local_uds_generate(
             except Exception:
                 template_text = ""
             example_text = template_text or example_text
-        if not example_text:
+        if not example_text and _ref_suds:
+            # (리뷰 W3) 예시문도 **이 프로젝트의 SwUDS** 다. 예전엔 여기서 `config.UDS_REF_SUDS_PATH`(HDPDM01)를 읽어
+            #   남의 프로젝트 본문이 프롬프트에 실렸다 — 신원 게이트는 이 경로를 보지 않으므로 서술 절에 그대로 남았다.
+            #   참조가 없으면 예시문 없이 생성한다(기본값으로 대체하지 않는다).
             try:
-                ref_suds_path = Path(config.UDS_REF_SUDS_PATH)
-                if ref_suds_path.exists() and ref_suds_path.is_file():
-                    example_text = _read_text_from_file(ref_suds_path)
-            except Exception:
-                pass
+                example_text = _read_text_from_file(Path(_ref_suds))
+            except Exception as _ex_exc:   # noqa: BLE001 - 예시문은 부가 입력; 실패 사유만 남기고 계속
+                _logger.warning("UDS AI 예시문: 참조 SwUDS 읽기 실패(%s) — 예시문 없이 생성", type(_ex_exc).__name__)
+                example_text = ""
         notes_text = ""
         if expand:
             doc_block = "\n\n".join(req_texts)[:40000]
@@ -1205,43 +1264,16 @@ async def local_uds_generate(
     #   이름 규칙**을 쓴다. 둘이 같은 초에 겹치면 한쪽이 다른 쪽 UDS 를 덮는다.
     from backend.services.output_paths import reserve_unique_path
     out_path = reserve_unique_path(out_dir / f"uds_local_{ts}.docx")
-    tpl_path = None
-    template_applied = False
-    if template_file and template_file.filename and template_bytes:
-        suffix = Path(template_file.filename).suffix.lower() or ".docx"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(template_bytes)
-            tpl_tmp_path = Path(tmp.name)
-            tpl_path = str(tpl_tmp_path)
-        try:
-            tpl_text = _read_text_from_file(Path(tpl_path))
-            template_applied = "{{" in tpl_text and "}}" in tpl_text
-        except Exception:
-            template_applied = False
-    if not tpl_path:
-        # 서버 등록본(admin `/api/config/uds-template`) → 정본 SUDS 순.
-        # 판정은 `resolve_registered_uds_template()` 단일 출처다 — 예전엔 이게
-        # 인라인이었고 등록본을 아예 조회하지 않아 **관리자 지정이 무효**였다.
-        #
-        # ⚠ 원 경로를 그대로 넘기면 안 된다. 생성은 서브프로세스에서
-        #   `docx.Document(path)` 로 **직접** 여니 cloudium worker 가 닿지 않는다 —
-        #   `U:` 등록본이면 재시도 3단계가 전부 `PackageNotFoundError` 로 죽는다.
-        #   가정이 아니라 실측이다: 캐시의 08-10·08-11 실패 기록 마지막 줄이 정확히
-        #   그 모양이고 경로가 `U:/…/01.SwUDS/(XXXX_SwUDS)…docx` 다. jenkins 쪽 UDS
-        #   2곳은 `resolve_template_for` 로 이미 로컬화했고 **이 경로만 남아 있었다**.
-        #   해석 실패는 `None`(= 템플릿 없이 생성)이고, 사유는 resolver 가 로그에 남긴다
-        #   — 원 경로를 흘려보내면 같은 실패가 하류에서 나고 사유가 사라진다.
-        tpl_path = resolve_registered_uds_template_local()
+    # 템플릿(`tpl_path`)·참조(`_ref_suds`)는 AI 블록 앞에서 정했다(리뷰 W1·W3).
     try:
         # Inject ai_config into payload for subprocess to use in function desc enhancement
         _uds_ai_cfg = _load_sts_ai_config()
         if _uds_ai_cfg:
             uds_payload["_gen_ai_config"] = _uds_ai_cfg
-        # (R47 N25 / R47-c 리뷰 I6) 이 핸들러엔 `reference_doc_path` 폼이 없고, 서브프로세스 env 는 항상 명시 주입이라
-        #   빈 값 = **참조 없이** 생성한다(config 기본값을 읽지 않는다 — 첫 판 로그가 그렇게 적어 화면의 '미전달' 과 어긋났다).
-        #   레지스트리 `uds` 정본을 이 경로에도 잇는 일은 N29.
-        _logger.warning("UDS 참조 SwUDS: local 경로엔 정본 입력이 없어 참조 없이 생성한다(보드 근거에 '미전달' 로 표시, 배선은 N29)")
-        await _run_blocking(_generate_docx_with_retry, tpl_path, uds_payload, out_path)
+        # 참조 SwUDS(`_ref_suds`)는 AI 블록 앞에서 해석했다 — 빈 값이면 env 에 빈 값이 실려 참조 없이 생성한다.
+        await _run_blocking(
+            lambda: _generate_docx_with_retry(tpl_path, uds_payload, out_path, reference_suds_path=_ref_suds),
+        )
     except Exception as docx_exc:
         tb = traceback.format_exc()
         _logger.error("[UDS_GENERATE][%s] DOCX generation error:\n%s", req_id, tb)
@@ -1450,6 +1482,8 @@ async def local_uds_generate_async(
     report_dir: str = Form(""),
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
+    # (R47-d N29) 동기 핸들러와 같은 뜻 — 비면 레지스트리 `uds` 정본(source_root 로 판정).
+    reference_doc_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking local UDS generation. Returns job_id for progress polling."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -1663,8 +1697,28 @@ async def local_uds_generate_async(
             _uds_ai_cfg = _load_sts_ai_config()
             if _uds_ai_cfg:
                 uds_payload["_gen_ai_config"] = _uds_ai_cfg
-            _logger.info("UDS 참조 SwUDS: local 경로엔 정본 입력이 없어 config.UDS_REF_SUDS_PATH 기본값을 읽는다(신원 게이트가 남의 문서를 막는다)")
-            _generate_docx_with_retry(tpl_path, uds_payload, out_path)
+            # (R47-d N29) 동기 경로와 같은 판정 — 폼 → 레지스트리 `uds` → 없음(빈 값 명시 주입, config 기본값 아님).
+            #   ⚠ 이전 로그는 "config 기본값을 읽는다" 고 적었는데 거짓이었다 — `_docx_subprocess_env` 는 빈 값을 실어
+            #   보드 근거에 '미전달' 로 찍혔다. 로그가 화면과 어긋나면 사람이 둘 중 하나를 안 믿게 된다.
+            #   (이 블록은 워커 스레드 안이라 루프를 잡지 않는다 — 동기 판은 `_run_blocking` 으로 감싼다.)
+            _ref_raw, _ref_pick_why, _ref_origin = pick_reference_suds_source(reference_doc_path, source_root)
+            if not tpl_path and _ref_raw:
+                # 정본이 있으면 템플릿도 백엔드 단일 규칙이 고른다(동기 판·jenkins 와 같은 함수). 없으면 빌더가 등록본을 해석한다.
+                from backend.services.docgen_template_source import resolve_template_for
+                tpl_path, _tpl_why = resolve_template_for(
+                    "uds", registered_template=resolve_registered_uds_template_local() or "",
+                    reference_doc=reference_doc_path or _ref_raw,
+                )
+                _logger.info("UDS 템플릿: %s", _tpl_why)
+            if _ref_raw:
+                _ref_suds, _ref_suds_why = resolve_reference_suds_for_generation(_ref_raw, tpl_path)
+                _ref_suds_why = f"{_ref_suds_why} [{_ref_pick_why}]"
+            else:
+                _ref_suds, _ref_suds_why = "", _ref_pick_why
+            (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
+            # (리뷰 C1) 레지스트리 id 를 신원 토큰에 얹는다 — 업로드 요구문서(tmpXXXX.docx)면 `source_docs` 도 토큰이 없다.
+            anchor_project_identity(uds_payload, source_root, _ref_origin)
+            _generate_docx_with_retry(tpl_path, uds_payload, out_path, reference_suds_path=_ref_suds)
             _write_uds_payload_sidecar(out_path, uds_payload)
             residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})
 

@@ -633,6 +633,8 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
         "same_project": same if isinstance(same, bool) else None,
         "identity_reason": str(identity.get("reason") or "") or None,
         "shared_tokens": [str(t) for t in (identity.get("shared_tokens") or []) if t],
+        # (R47-d 리뷰 I3) 누가 골랐나 — "form" / "registry:<id>" / None(기록 없음: 구 빌더·jenkins 경로).
+        "origin": (str(ref.get("origin")).strip() or None) if isinstance(ref.get("origin"), str) else None,
         "safety_fields_applied": _int_field(ref, "safety_fields_applied"),
         "safety_fields_blocked": _int_field(ref, "safety_fields_blocked"),
         "descriptive_fields_applied": _int_field(ref, "descriptive_fields_applied"),
