@@ -266,7 +266,7 @@ def get_run_evidence(run_id: int) -> Dict[str, Any]:
         doc_type = run.doc_type
 
     try:
-        from report_gen.evidence import read_evidence
+        from report_gen.evidence import VALIDATION_SIDECAR_WRITERS, read_evidence
     except ImportError:
         raise HTTPException(status_code=503, detail="evidence module not available") from None
 
@@ -274,9 +274,17 @@ def get_run_evidence(run_id: int) -> Dict[str, Any]:
     payload["run_id"] = run_id
     payload["doc_type"] = doc_type
     payload["output_path"] = output_path
-    # 사이드카는 UDS 파이프라인 산출물이다. 다른 doc_type 에서 present=False 가
-    # 뜨는 건 결함이 아니라 정상이라는 걸 화면이 구분할 수 있게 표시한다.
-    payload["sidecars_expected"] = (str(doc_type or "").lower() == "uds")
+    dt = str(doc_type or "").strip().lower()
+    # 어느 사이드카를 **이 doc_type 의 라이터가 실제로 만드는가** — 섹션별로 말한다(R47 N22).
+    # gate_report/confidence 는 UDS 파이프라인만 쓰고, `.validation.md` 는 STS/SUTS/SITS 도 쓴다.
+    # 예전엔 UDS 여부 하나(`sidecars_expected`)로 접어 화면이 STS 에 "이 문서 종류는 사이드카를
+    # 만들지 않는다" 고 적었다 — 실제로는 만들고 있었고 리더가 못 읽은 것이었다.
+    payload["expected_sidecars"] = {
+        "gate_report": dt == "uds",
+        "confidence": dt == "uds",
+        "docx_validate": dt in VALIDATION_SIDECAR_WRITERS,
+    }
+    payload["sidecars_expected"] = (dt == "uds")   # 구 소비처 호환 — gate/confidence 기준
     return payload
 
 

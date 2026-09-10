@@ -28,6 +28,7 @@ from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
 from report_gen.doc_kind import is_sds_filename
+from report_gen.source_roots import first_source_root
 
 _logger = logging.getLogger(__name__)
 
@@ -3460,7 +3461,7 @@ def generate_sits(
     # ── Stage 5: source parsing ──────────────────────────────────────────────
     _progress(15, "소스 코드 파싱 시작")
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.is_dir():
         return {

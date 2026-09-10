@@ -1230,3 +1230,85 @@ describe('DocGenStatusBoard — 제안의 게이트 축 구별', () => {
     expect(screen.getByText('통과율').closest('li').textContent).toContain('목표');
   });
 });
+
+describe('DocGenStatusBoard — XLSM 구조 검증 근거 (R47 N22)', () => {
+  // 2026-09-09 실측: STS/SUTS/SITS 도 `.validation.md` 를 쓰는데 리더가 UDS 라벨로 읽어
+  // `present:true, ok:null` 이 됐고 화면은 "DOCX 구조 검증 판정 불가" 를 그렸다 — SUTS 는 FAIL 문서였다.
+  it('xlsm 형식이면 결과·Quality Gate·실패 게이트·지적을 그리고 "판정 불가" 로 접지 않는다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: false,
+          expected_sidecars: { gate_report: false, confidence: false, docx_validate: true },
+          gate_report: { present: false, reason: '사이드카 없음 (.quality_gate.md)' },
+          confidence: { present: false, reason: '사이드카 없음 (.field_confidence.md)' },
+          docx_validate: {
+            present: true, format: 'xlsm', doc_kind: 'SUTS', ok: false,
+            gates_passed: 4, gates_total: 5, failed_gates: ['I/O 없는 TC < 50%'],
+            issues: ['Optional sheet missing: 1.Introduction'], warnings: ['145/1025 TCs lack I/O variables'],
+          },
+        });
+      }
+      return Promise.resolve({ runs: [run({ id: 1, doc_type: 'sts' })], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📗 STS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+
+    const line = await screen.findByText(/SUTS 구조 검증/);
+    const li = line.closest('li');
+    expect(li.textContent).toContain('FAIL');
+    expect(li.textContent).toContain('Quality Gate 4 / 5');
+    expect(li.textContent).toContain('실패 게이트: I/O 없는 TC < 50%');
+    expect(li.textContent).toContain('지적 1건');
+    expect(li.textContent).not.toContain('판정 불가');
+    expect(li.textContent).not.toContain('DOCX 구조 검증');
+    expect(screen.getByText(/145\/1025 TCs lack I\/O variables/)).toBeInTheDocument();
+    // 게이트 사이드카 부재 문구는 "게이트 사이드카" 로 한정 — 구조 검증 사이드카는 이 문서 종류도 만든다.
+    expect(screen.getByText(/게이트 사이드카를 만들지 않는다/)).toBeInTheDocument();
+    expect(screen.queryByText(/이 문서 종류는 사이드카를 만들지 않는다/)).toBeNull();
+  });
+
+  it('게이트 전부 통과인데 FAIL 이면 지적이 판정을 만든 것이라고 말한다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: false,
+          expected_sidecars: { gate_report: false, confidence: false, docx_validate: true },
+          gate_report: { present: false, reason: 'x' }, confidence: { present: false, reason: 'x' },
+          docx_validate: { present: true, format: 'xlsm', doc_kind: 'SUTS', ok: false,
+            gates_passed: 5, gates_total: 5, failed_gates: [], issues: ['Optional sheet missing: 1.Introduction'], warnings: null },
+        });
+      }
+      return Promise.resolve({ runs: [run({ id: 1, doc_type: 'sts' })], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📗 STS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    const li = (await screen.findByText(/SUTS 구조 검증/)).closest('li');
+    expect(li.textContent).toContain('지적 사항이 판정을 FAIL 로 만들었다');
+  });
+
+  it('알 수 없는 형식이면 판정 불가와 사유를 보이고 OK 로 그리지 않는다', async () => {
+    mockApi.mockImplementation((path) => {
+      if (String(path).includes('/evidence')) {
+        return Promise.resolve({
+          run_id: 1, output_path_present: true, sidecars_expected: false,
+          expected_sidecars: { gate_report: false, confidence: false, docx_validate: true },
+          gate_report: { present: false, reason: 'x' }, confidence: { present: false, reason: 'x' },
+          docx_validate: { present: true, format: 'unknown', ok: null, reason: "검증 리포트 형식을 알 수 없다 (첫 줄: '# Something')", issues: [], warnings: null },
+        });
+      }
+      return Promise.resolve({ runs: [run({ id: 1, doc_type: 'sts' })], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📗 STS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    const li = (await screen.findByText(/구조 검증 판정 불가/)).closest('li');
+    expect(li.textContent).toContain('검증 리포트 형식을 알 수 없다');
+    expect(li.textContent).not.toMatch(/\bOK\b/);
+  });
+});

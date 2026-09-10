@@ -11,6 +11,7 @@ Markdown 사이드카 세 개로만 남아 있었다 — writer 는 4곳인데 r
 | `.quality_gate.md` | 지표 15종, TBD 잔여, Description 3등급, 실패 게이트 + 개선 가이드 | `validation.py::generate_uds_field_quality_gate_report` |
 | `.field_confidence.md` | 출처 신뢰도 점수/등급(A~D), 출처 분포 | `validation.py::generate_asil_related_confidence_report` |
 | `.validation.md` | DOCX 구조 검증(표/이미지/heading 수, issues) | `validation.py::generate_uds_validation_report` |
+| `.validation.md` (같은 접미사, **다른 형식**) | XLSM 구조 검증(`**결과**` PASS/FAIL, Quality Gate 표, 이슈·경고) | `generators/{sts,suts,sits}.py::*_validation_report` — 첫 줄로 판별(R47 N22) |
 
 ## 계약 — 부재를 0 이나 통과로 접지 않는다
 
@@ -41,6 +42,7 @@ __all__ = [
     "read_docx_validation",
     "read_evidence",
     "SIDECAR_SUFFIXES",
+    "VALIDATION_SIDECAR_WRITERS",
 ]
 
 # DOCX 경로 → 사이드카 경로 (`x.docx` → `x.quality_gate.md`)
@@ -330,19 +332,155 @@ def read_confidence_report(path: Path) -> Dict[str, Any]:
 
 
 def read_docx_validation(path: Path) -> Dict[str, Any]:
-    """`.validation.md` → DOCX 구조 검증 요약."""
+    """`.validation.md` → 구조 검증 요약. **형식은 첫 줄로 판별한다** (R47 N22).
+
+    같은 접미사를 두 계열이 쓴다:
+    - UDS(DOCX): `# UDS Validation Report` + `- 라벨: \\`값\\`` 줄 문법 → `format="docx"`
+    - STS/SUTS/SITS(XLSM): `# STS 생성 문서 자동 검증 리포트` + `**결과**: PASS|FAIL` + 표 →
+      `format="xlsm"` (라이터: `generators/{sts,suts,sits}.py`)
+
+    2026-09-09 라이브 실측: STS·SUTS·SITS 산출물 셋 다 이 사이드카를 **쓰고 있었는데** 리더가 UDS
+    라벨로만 읽어 `present:True, ok:None` + 필드 14개 null 로 답했고, 화면은 "DOCX 구조 검증 판정
+    불가" 를 그렸다 — SUTS 는 라이터가 **FAIL** 을 적어 둔 문서였다. 실패가 '판정 불가' 로 접힌 것.
+    doc_type 이 아니라 **내용**으로 가른다(DB 의 doc_type 이 틀려도 파일이 진실이다).
+    """
     if not path.exists():
         return _absent("사이드카 없음 (.validation.md)")
     text = _read_text(path)
     if text is None:
         return _absent("사이드카 읽기 실패 (.validation.md)")
 
+    if _XLSM_TITLE_RE.search(text):
+        return _parse_xlsm_validation(text)
+    if _DOCX_TITLE_RE.search(text):
+        return _parse_docx_validation(text)
+    # 제목이 없어도 `- 라벨: \`값\`` 줄 문법이 있으면 UDS 계열이다(제목 없는 구판·최소 산출물).
+    if any(_KV_RE.match(ln.strip()) for ln in text.splitlines()):
+        return _parse_docx_validation(text)
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    # 파일은 있는데 아는 형식이 아니다 — 판정 불가를 **사유와 함께** 낸다(null 더미 아님).
+    return {
+        "present": True,
+        "format": "unknown",
+        "ok": None,
+        "reason": f"검증 리포트 형식을 알 수 없다 (첫 줄: {first[:80]!r})",
+        "issues": [],
+        "warnings": None,
+    }
+
+
+# ── .validation.md 형식 판별 ────────────────────────────────────────────────
+_DOCX_TITLE_RE = re.compile(r"^#\s*UDS Validation Report\b", re.M)
+_XLSM_TITLE_RE = re.compile(r"^#\s*(STS|SUTS|SITS)\s+생성 문서 자동 검증 리포트\s*$", re.M)
+_XLSM_RESULT_RE = re.compile(r"^\*\*결과\*\*:\s*(PASS|FAIL)\b", re.M)
+_XLSM_FILE_RE = re.compile(r"^\*\*파일\*\*:\s*`([^`]*)`", re.M)
+_XLSM_CHECKED_RE = re.compile(r"^\*\*검증 시각\*\*:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.M)
+_XLSM_GATE_HDR_RE = re.compile(r"Quality Gate\s*\((\d+)\s*/\s*(\d+)\)")
+
+#: `.validation.md` 를 실제로 쓰는 doc_type — 엔드포인트가 "이 문서 종류는 만들지 않는다" 를
+#: 섹션별로 말할 때 쓴다. gate_report/confidence 는 UDS 만 쓴다.
+VALIDATION_SIDECAR_WRITERS = frozenset({"uds", "sts", "suts", "sits"})
+
+
+def _table_rows(lines: List[str]) -> List[List[str]]:
+    """`| a | b |` 표 → 셀 목록(머리글·구분선 제외)."""
+    rows: List[List[str]] = []
+    for line in lines:
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if set(cells[0]) <= set("-: "):          # `|------|-----|`
+            continue
+        if cells[0] == "항목":                     # 머리글
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _xlsm_bullets(lines: List[str]) -> List[str]:
+    """`- ❌ x` / `- ⚠ x` → `x`. 라이터의 빈 표식(`이슈 없음`)은 빈 목록."""
+    out: List[str] = []
+    for raw in _bullet_list(lines):
+        item = raw.strip()
+        for mark in ("❌", "⚠"):
+            if item.startswith(mark):
+                item = item[len(mark):].strip()
+        if not item or item in ("이슈 없음", "none"):
+            continue
+        out.append(item)
+    return out
+
+
+def _parse_xlsm_validation(text: str) -> Dict[str, Any]:
+    """STS/SUTS/SITS 검증 리포트 → 판정·게이트 표·이슈·경고·구조 표.
+
+    ⚠ `ok` 는 **`**결과**` 줄**(라이터의 `valid`)이고 `gates_passed/total` 은 **Quality Gate 표**다.
+      둘은 독립이다 — SUTS 는 게이트 5/5 인데 `issues` 때문에 FAIL 인 문서가 실재한다(2026-09-09).
+      게이트 표로 `ok` 를 되짚지 않는다(형제 검증기 계약이 셋 다 다르다).
+    """
+    tm = _XLSM_TITLE_RE.search(text)
+    kind = tm.group(1) if tm else "XLSM"
+    m = _XLSM_RESULT_RE.search(text)
+    ok: Optional[bool] = None if m is None else (m.group(1) == "PASS")
+    fm = _XLSM_FILE_RE.search(text)
+    cm = _XLSM_CHECKED_RE.search(text)
+
+    sec = _sections(text)
+    gates_passed = gates_total = None
+    gate_items: List[Dict[str, str]] = []
+    issues: List[str] = []
+    # 라이터 셋은 경고가 없으면 절을 **생략**한다 — 그래서 절 부재는 미상이 아니라 0건이다(docx 계열의
+    # `None`=구판/미상 과 뜻이 다르다, 리뷰 I3).
+    warnings: List[str] = []
+    structure: Dict[str, str] = {}
+    for title, lines in sec.items():
+        if "Quality Gate" in title:
+            g = _XLSM_GATE_HDR_RE.search(title)
+            if g:
+                gates_passed, gates_total = int(g.group(1)), int(g.group(2))
+            for cells in _table_rows(lines):
+                res = cells[1].upper()
+                verdict = ("PASS" if res.startswith("PASS")
+                           else "FAIL" if res.startswith("FAIL") else "N/A")
+                gate_items.append({"name": cells[0], "result": verdict})
+        elif title.endswith("Issues") or title.endswith("이슈"):
+            issues = _xlsm_bullets(lines)
+        elif title.endswith("Warnings") or title.endswith("경고"):
+            warnings = _xlsm_bullets(lines)
+        elif title.endswith("구조 검증"):
+            for cells in _table_rows(lines):
+                structure[cells[0]] = cells[1]
+
+    return {
+        "present": True,
+        "format": "xlsm",
+        "doc_kind": kind,
+        "file": fm.group(1) if fm else None,
+        "checked_at": cm.group(1) if cm else None,
+        # `**결과**` 줄이 없으면 None(판정 불가) — PASS 로 접지 않는다.
+        "ok": ok,
+        "gates_passed": gates_passed,
+        "gates_total": gates_total,
+        "gate_items": gate_items,
+        "failed_gates": [g["name"] for g in gate_items if g["result"] == "FAIL"],
+        "issues": issues,
+        "warnings": warnings,          # [] = 경고 0건(절 생략). docx 계열의 None(미상)과 다르다
+        "structure": structure,
+    }
+
+
+def _parse_docx_validation(text: str) -> Dict[str, Any]:
+    """UDS DOCX 검증 리포트(`- 라벨: \\`값\\`` 문법)."""
     sec = _sections(text)
     head = _kv(sec.get("", []))
     ok_raw = str(head.get("OK", "")).strip().lower()
 
     return {
         "present": True,
+        "format": "docx",
         # "OK: True|False" 가 아니면 판정 불가 — 문자열을 truthy 로 읽지 않는다
         # (JS 에서 문자열 'False' 는 truthy 라 FAIL 이 PASS 로 그려진다).
         "ok": True if ok_raw == "true" else (False if ok_raw == "false" else None),

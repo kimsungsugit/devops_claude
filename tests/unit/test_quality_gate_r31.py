@@ -392,12 +392,14 @@ class TestWarningsReachTheReader:
 
     def test_section_title_is_the_shared_constant_on_both_sides(self):
         """제목 문자열이 한쪽에 리터럴로 남으면 라벨 결함이 재발한다 — 소스로 확인."""
+        # (R47 N22) 리더는 `read_docx_validation`(형식 판별) → `_parse_docx_validation`(UDS 절 읽기)
+        # 로 갈라졌다 — 절 제목을 실제로 읽는 쪽을 본다.
         import report_gen.validation_labels as VL
-        from report_gen.evidence import read_docx_validation
+        from report_gen.evidence import _parse_docx_validation
         from report_gen.validation import generate_uds_validation_report
         from tests.unit._source_probe import source_of
 
-        for fn in (generate_uds_validation_report, read_docx_validation):
+        for fn in (generate_uds_validation_report, _parse_docx_validation):
             src = source_of(fn)
             assert VL.SECTION_WARNINGS not in src, f"{fn.__name__} 가 절 제목을 리터럴로 들고 있다"
             assert "SECTION_WARNINGS" in src

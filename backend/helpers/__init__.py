@@ -121,6 +121,7 @@ from backend.helpers.uds import (  # noqa: F401
     _uds_record_kwargs,
     _validate_docx_template_bytes,
     _write_residual_tbd_report,
+    resolve_reference_suds_for_generation,
     resolve_registered_uds_template,
     resolve_registered_uds_template_local,
 )

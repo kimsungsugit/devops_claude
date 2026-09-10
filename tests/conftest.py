@@ -29,6 +29,20 @@ _SCRUBBED_GIT_ENV: tuple[str, ...] = tuple(
     if os.environ.pop(v, None) is not None
 )
 
+# (R47 N21 2026-09-10) 테스트는 **사용자의 `logs/backend.log` 에 쓰지 않는다.**
+# `backend.main` 은 import 시점에 `_attach_file_log()` 로 `RotatingFileHandler` 를 붙이는데,
+# 그 경로가 `DEVOPS_LOG_DIR` 미설정이면 저장소 `logs/` 다. 테스트 모듈 수십 개가 모듈 상단에서
+# `backend.main` 을 import 하므로 `-n auto` 워커 18개가 **전부 실 로그 파일을 연 채** 돌았다.
+# 실측(2026-09-10): `logs/backend.log` 116,400줄 중 pytest 임시경로가 찍힌 줄만 2,838줄이고,
+# 회전 파일이 `.1`·`.5` 만 남고 `.2~.4` 가 없다(여러 프로세스가 같은 파일을 동시에 회전한 흔적).
+# 사후 진단용 로그가 테스트 소음과 섞이면 "그 시각에 무슨 일이 있었나" 를 읽을 수 없다.
+#
+# ⚠ 왜 fixture 가 아니라 **import 시점**인가 — 핸들러는 collection 중 모듈 import 에서 붙는다.
+#   세션 fixture 는 그보다 늦다. `.env` 는 `override=False` 로 읽히므로 여기서 넣은 값이 이긴다.
+#   pid 별 디렉터리라 xdist 워커끼리도 파일을 공유하지 않는다. 정리는 `pytest_unconfigure`.
+_ISOLATED_LOG_DIR = Path(__file__).resolve().parents[1] / ".codex_tmp" / f"logs-test-{os.getpid()}"
+os.environ["DEVOPS_LOG_DIR"] = str(_ISOLATED_LOG_DIR)
+
 #: pytest 를 띄운 cwd. 정리가 cwd 를 트리 밖으로 옮겨야 할 때 **여기로** 돌아온다 —
 #: 레포 루트는 "복원값" 이 아니라 지어낸 값이다(R45 리뷰 I-1: 다른 cwd 에서 띄운 사용자에게
 #: 조용한 축 변경이고, teardown 중 살아 있는 daemon 스레드 12곳이 그 cwd 를 목격한다).
@@ -75,6 +89,12 @@ def pytest_configure(config):
 
 def pytest_unconfigure(config):
     """정리 실패를 **컨트롤러에서** 보고한다 — 워커 stdout 은 여기까지 오지 않는다."""
+    # (R47 N21) 이 프로세스의 격리 로그 디렉터리를 지운다 — 워커·컨트롤러 각자 자기 pid 것만.
+    # 핸들러가 파일을 쥐고 있으므로(R44 실측 WinError 32) 먼저 놓고 지운다. `backend.main` 을
+    # import 한 적 없는 프로세스(컨트롤러)는 디렉터리 자체가 없다.
+    if _ISOLATED_LOG_DIR.exists():
+        _release_handles_under(_ISOLATED_LOG_DIR)
+        _cleanup_tree(_ISOLATED_LOG_DIR)
     if hasattr(config, "workerinput"):
         return
     try:

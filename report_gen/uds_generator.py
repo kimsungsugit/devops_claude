@@ -98,6 +98,7 @@ from report_gen.source_parser import (  # noqa: E402
     extract_struct_member_types,
     is_const_type,
 )
+from report_gen.source_roots import split_source_roots  # noqa: E402
 from report_gen.uds_text import (  # noqa: E402
     _ai_document_text,
     _ai_evidence_lines,
@@ -290,7 +291,7 @@ def generate_uds_source_sections(
       (`docgen_requirements._uds_cap`). `generators/sts.py` 의 `max_tc_per_req` 와 같은 규약.
     """
     # 콤마/세미콜론 구분 복수 소스 루트 지원
-    _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
+    _raw_roots = split_source_roots(source_root)
 
     # cloudium 모드면 worker IPC resolver로 소스 접근(read-only). local/standalone이면 None →
     # 기존 os.walk/Path 경로 그대로 사용(회귀 0). backend 미가용이면 조용히 None.

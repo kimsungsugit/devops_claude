@@ -45,6 +45,7 @@ from backend.services import docgen_test_materials as _tm
 from backend.services.swut_meta_resolver import (
     folder_contents_hint as _resolver_folder_contents_hint,
 )
+from report_gen.source_roots import first_source_root
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api.docgen_preflight")
@@ -1266,7 +1267,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
 
         if key == _req.IN_SOURCE_ROOT:
             # 소스 루트는 디렉터리이고 로컬이다(레지스트리 실측: 전부 C:/D:).
-            first = path.split(",")[0].strip()
+            first = first_source_root(path)
             ok = bool(first) and Path(first).expanduser().is_dir()
             steps.append(_step(
                 key, "input", S_OK if ok else S_MISSING, label,
@@ -2412,7 +2413,7 @@ def docgen_attribution(req: AttributionRequest) -> Dict[str, Any]:
     available: Dict[str, bool] = {}
     for key, path in inputs.items():
         if key == _req.IN_SOURCE_ROOT:
-            first = path.split(",")[0].strip()
+            first = first_source_root(path)
             available[key] = bool(first) and Path(first).expanduser().is_dir()
         else:
             # preflight 와 같은 3상태(`_mark_available`) — 확인 실패는 키를 만들지 않는다.

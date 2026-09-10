@@ -31,8 +31,12 @@ import json
 import os
 import pathlib
 import random
+import sys
 import time
 from typing import Dict, List, Tuple
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from report_gen.source_roots import split_source_roots  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports"
@@ -79,8 +83,8 @@ def _real_signatures() -> Tuple[List[str], List[str]]:
     for entry in reg.get("registries", []) or []:
         if entry.get("id"):
             ids.append(str(entry["id"]).lower())
-        for part in str(entry.get("source_root") or "").replace("/", "\\").split(","):
-            part = part.strip().lower()
+        for part in split_source_roots(entry.get("source_root")):
+            part = part.replace("/", "\\").strip().lower()
             if not part:
                 continue
             roots.append(part)

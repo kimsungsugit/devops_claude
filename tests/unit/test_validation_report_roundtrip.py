@@ -306,7 +306,7 @@ class TestLegacyUnitSuffix:
 
 class TestTheBoardReadsKeysThatExist:
 
-    def test_every_key_the_board_reads_is_produced_by_the_reader(self, runs):
+    def test_every_key_the_board_reads_is_produced_by_the_reader(self, runs, tmp_path):
         """보드가 `val.<키>` 로 읽는 이름이 리더 출력에 있어야 한다.
 
         `missing_from_docx` 는 **영원히 null** 이었는데도 보드가 그걸 조건으로
@@ -319,6 +319,14 @@ class TestTheBoardReadsKeysThatExist:
             pytest.skip(f"보드 파일 없음: {board}")
         text = board.read_text(encoding="utf-8")
         used = set(re.findall(r"\bval\.([a-z_]+)", text))
-        produced = set(runs["drop"][1].keys()) | {"reason"}
+        # (R47 N22) 같은 `val` 이 세 형식(docx / xlsm / unknown)을 받는다 — 셋의 키 합집합과 대조한다.
+        #   docx 는 실제 라운드트립 산출(`runs`), xlsm 은 최소 리포트를 리더에 넣은 출력, unknown 은 리더의 고정 형태.
+        from report_gen.evidence import read_docx_validation
+        xlsm_min = ("# STS 생성 문서 자동 검증 리포트\n\n**결과**: PASS\n\n## 3. Quality Gate (1/1)\n\n"
+                    "| 항목 | 결과 |\n|------|------|\n| TC 존재 | PASS |\n")
+        (tmp := tmp_path / "x.validation.md").write_text(xlsm_min, encoding="utf-8")
+        xlsm_keys = set(read_docx_validation(tmp).keys())
+        assert "gate_items" in xlsm_keys, "xlsm 분기가 타지 않았다 — 이 가드의 절반이 죽는다"
+        produced = set(runs["drop"][1].keys()) | xlsm_keys | {"reason"}
         missing = sorted(used - produced)
         assert not missing, f"보드가 읽는데 리더가 안 내는 키: {missing}"

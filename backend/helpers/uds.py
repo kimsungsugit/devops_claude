@@ -42,6 +42,7 @@ from report_gen.gate_report import (
     parse_scoring_scope,
     to_rate_map,
 )
+from report_gen.source_roots import first_source_root, split_source_roots
 from report_generator import (
     _build_req_map_from_doc_paths,
     build_uds_view_payload,
@@ -1166,7 +1167,7 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
     파서 스키마 버전도 포함해, 소스 불변이어도 파서가 바뀌면 캐시를 무효화한다.
     """
     import hashlib
-    roots = [p.strip() for p in str(source_root or "").replace(";", ",").split(",") if p.strip()]
+    roots = split_source_roots(source_root)
     if not roots:
         return None
     h = hashlib.sha1()
@@ -1218,7 +1219,7 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
     max_files = int(max_files) if isinstance(max_files, int) and max_files > 0 else _def_files
     max_items = int(max_items) if isinstance(max_items, int) and max_items > 0 else _def_items
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 전달
-    _first = (source_root or "").split(",")[0].strip()
+    _first = first_source_root(source_root)
     # cloudium 모드면 worker IPC resolver로 검증(원격 경로는 로컬 resolve/exists로 못 잡음).
     # local/standalone이면 기존 로컬 검증 그대로.
     try:
@@ -1743,11 +1744,87 @@ def _apply_uds_view_filters(
     return out
 
 
+def resolve_reference_suds_for_generation(
+    reference_doc_path: str, template_local: Optional[str],
+) -> Tuple[str, str]:
+    """이 프로젝트의 SwUDS(ASIL·Related 의 권위 문서) 를 생성기가 열 수 있는 로컬 경로로. (R47 N25)
+
+    반환 `(로컬 경로 | "", 사유)`. **비면 비운 채로 둔다** — `config.UDS_REF_SUDS_PATH` 기본값
+    (저장소 `docs/` 의 HDPDM01 SUDS)으로 대체하지 않는다. 그 기본값은 다른 프로젝트 문서라
+    신원 게이트가 전부 막고, 막힌 뒤엔 정작 이 프로젝트 문서는 읽힌 적이 없다.
+
+    실측(2026-09-09 kjpds02_pv 라이브 UDS): 사용자가 `reference_doc_path` 로 v3.03 정본을 줬는데
+    그 파일은 **템플릿으로만** 쓰였고 ASIL·Related 보강은 config 기본값(HDPDM01)을 읽어
+    `same_project:false · safety_fields_blocked:305 · applied:0` — 게이트 ASIL 기재율 23.8%.
+    정본을 같은 추출기로 열어 보니 988/988 (100%) 기재였다. 문서도 파서도 아닌 **배선**이었다.
+
+    순서: ① 지정이 없으면 없음 ② 템플릿이 **같은 원본 경로**의 로컬 사본이면 재사용(50MB 재로컬화 회피)
+    ③ 그 외는 템플릿과 같은 해석기 `resolve_builder_input`(모드 분기·접근 검사·로컬화·사유) — 실패 사유를 돌려준다.
+
+    ⚠ (리뷰 W3) ②는 **파일명이 아니라 원본 경로**로 판정한다. cloudium 에 같은 SwUDS 폴더가 두 트리
+      (`0002 A Cappella` / `1220 진행/0002 A Cappella`)에 실재하고, 프로젝트 토큰이 같아 신원 게이트도
+      통과하므로 이름만 보면 **다른 리비전의 ASIL 값**이 조용히 실린다. 로컬 사본은
+      `materialize_via_resolver` 가 `<tmp>/sha1(원경로)[:12]/<원본이름>` 에 두므로 그 해시로 정확히 맞춘다.
+    ⚠ (리뷰 W2) 로컬 경로도 `Path.exists()` 직판정이 아니라 `resolve_builder_input` 을 탄다 — 같은 폼 필드가
+      템플릿으로 쓰일 땐 접근 검사를 받는데 참조로 쓰일 땐 안 받는 비대칭을 만들지 않는다.
+    """
+    import hashlib
+
+    raw = str(reference_doc_path or "").strip()
+    if not raw:
+        return "", "참조 SwUDS 미지정 — ASIL·Related 를 참조 문서로 보강하지 않는다"
+    name = Path(raw).name
+    tpl = str(template_local or "").strip()
+    if tpl:
+        tp = Path(tpl)
+        try:
+            is_file = tp.is_file()
+        except OSError:
+            is_file = False
+        if is_file:
+            key = hashlib.sha1(raw.replace("\\", "/").lower().encode("utf-8")).hexdigest()[:12]
+            same = (tp.name == name and tp.parent.name == key)
+            if not same:
+                try:
+                    same = Path(raw).is_file() and os.path.samefile(raw, tpl)
+                except (OSError, ValueError):
+                    same = False
+            if same:
+                return tpl, f"템플릿과 같은 정본 재사용: {name} (원본 {raw} → 사본 {tpl})"
+    try:
+        from backend.services.resolver_helpers import resolve_builder_input
+        reasons: List[str] = []
+        local = resolve_builder_input(raw, label="UDS 참조 SwUDS", reasons=reasons)
+    except Exception as exc:   # noqa: BLE001 - 해석 실패는 "참조 없음" 으로 정직하게
+        return "", f"참조 SwUDS 해석 실패({type(exc).__name__}): {name}"
+    if local:
+        return str(local), f"참조 SwUDS: {name} (원본 {raw} → {local})"
+    return "", (reasons[0] if reasons else f"참조 SwUDS 를 읽지 못함: {name} ({raw})")
+
+
+def _docx_subprocess_env(reference_suds_path: str) -> Dict[str, str]:
+    """DOCX 생성 서브프로세스 환경 — `UDS_REF_SUDS_PATH` 를 **항상** 대입한다(빈 값 포함).
+
+    배선이 성립하는 이유: `config` 모듈이 **자기 import 시점**에 `os.environ` 을 읽어 상수로 캐시하고,
+    `docx_builder` 는 그 상수를 함수 안에서 든다. 서브프로세스는 config 를 새로 import 하므로 env 한 줄이
+    곧 배선이다(시그니처를 늘리지 않는다). 부모 프로세스의 `config` 를 reload 하는 것과는 무관하다.
+
+    ⚠ (리뷰 W1) 참조가 없을 때 키를 **빼면** 서브프로세스 config 가 HDPDM01 기본값을 읽고, `.env`/셸에
+      같은 이름이 있으면 그 값이 조용히 상속된다 — "미지정=보강 없음" 이라는 계약이 문서에만 있게 된다.
+      그래서 빈 문자열을 명시적으로 넘기고, 빌더 쪽은 빈 값·비파일을 "참조 없음" 으로 읽는다.
+    """
+    env = dict(os.environ)
+    env["UDS_REF_SUDS_PATH"] = str(reference_suds_path or "").strip()
+    return env
+
+
 def _generate_docx_with_retry(
     tpl: Optional[str],
     uds_payload: Dict[str, Any],
     out_path: Path,
     retries: int = 3,
+    *,
+    reference_suds_path: str = "",
 ) -> None:
     def _build_docx_retry_payload(base_payload: Dict[str, Any], level: int) -> Dict[str, Any]:
         payload = deepcopy(base_payload or {})
@@ -1825,6 +1902,7 @@ def _generate_docx_with_retry(
             run = subprocess.run(
                 [sys.executable, "-c", inline, str(tpl or ""), str(payload_file), str(out_path)],
                 cwd=str(repo_root),
+                env=_docx_subprocess_env(reference_suds_path),
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
@@ -2001,7 +2079,7 @@ def _existing_source_roots(source_root: str | None) -> tuple[list[str], list[str
     반환은 `(existing, missing)` — 둘 다 원문 순서. 결합 문자열 통째로 존재를 묻지 않는다
     (그게 함수 0개 문서를 낳은 결함이다). 구분 규약은 `generate_uds_source_sections` 와 같다.
     """
-    roots = [p.strip() for p in str(source_root or "").replace(";", ",").split(",") if p.strip()]
+    roots = split_source_roots(source_root)
     existing: list[str] = []
     missing: list[str] = []
     for r in roots:
@@ -2051,6 +2129,8 @@ def _uds_generate_from_paths(
     # 이 두 값으로 내려온다. `None` 이면 `config` 기본값(환경변수로 덮임)이 쓰인다.
     max_source_files: Optional[int] = None,
     max_items_per_category: Optional[int] = None,
+    # (R47 N25) 이 프로젝트의 SwUDS 로컬 경로 — ASIL·Related 보강의 참조. 비면 보강 없음(기본값 대체 금지).
+    reference_suds_path: str = "",
     # 정본에만 있는 남의 함수 절을 남길지 지울지 — 기본은 `""`(= keep, 종전 동작).
     # 정규화는 `docx_builder.normalize_unmatched_headings` 단일 출처가 한다.
     unmatched_headings: str = "",
@@ -2125,7 +2205,7 @@ def _uds_generate_from_paths(
     _src_roots_str, _src_missing = _source_roots_for_generation(source_root)
     # 아래 영향도 분석·RAG·src_root 표기는 **첫 루트** 하나를 쓴다(기존 계약 유지).
     source_root_path: Optional[Path] = (
-        Path(_src_roots_str.split(",")[0]).resolve() if _src_roots_str else None
+        Path(first_source_root(_src_roots_str)).resolve() if _src_roots_str else None
     )
     for _m in _src_missing:
         # 문서 본문·AI 프롬프트에 실리는 notes 라 **경로 대신 이름만**(리뷰 W2).
@@ -2272,7 +2352,7 @@ def _uds_generate_from_paths(
     #   2) project_name as fallback
     _module_name_val = ""
     try:
-        _first_src = (source_root or "").split(",")[0].strip()
+        _first_src = first_source_root(source_root)
         if _first_src:
             _module_name_val = Path(_first_src).name
     except Exception:
@@ -2347,7 +2427,9 @@ def _uds_generate_from_paths(
     from backend.services.output_paths import reserve_unique_path
     out_path = reserve_unique_path(out_dir / f"uds_spec_{job_slug}_{ts}.docx")
     tpl = str(template_path).strip() or None
-    _generate_docx_with_retry(tpl, uds_payload, out_path)
+    if reference_suds_path:
+        _api_logger.info("[UDS_DOCX] 참조 SwUDS: %s", Path(reference_suds_path).name)
+    _generate_docx_with_retry(tpl, uds_payload, out_path, reference_suds_path=reference_suds_path)
     summary = uds_payload.get("summary")
     if not isinstance(summary, dict):
         summary = {}

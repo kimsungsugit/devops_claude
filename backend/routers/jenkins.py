@@ -57,6 +57,7 @@ from backend.helpers import (
     build_vectorcast_metadata,
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
+    resolve_reference_suds_for_generation,
 )
 from backend.helpers.sds import is_sds_filename, is_srs_filename
 from backend.routers._safety import run_blocking as _run_blocking
@@ -120,6 +121,7 @@ from backend.user_context import wrap_with_user
 # 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.
 from report_gen import uds_related as _uds_related
 from report_gen.atomic_io import atomic_write_text
+from report_gen.source_roots import first_source_root, split_source_roots
 from report_gen.trace_link_table import build_link_table
 from report_gen.utils import build_function_details_by_name
 
@@ -2157,10 +2159,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, bu
         if _base_ref_hint.isdigit():
             base_rev = _base_ref_hint
         else:
-            for _raw in source_root.replace(";", ",").split(","):
-                _p = _raw.strip()
-                if not _p:
-                    continue
+            for _p in split_source_roots(source_root):
                 _info = svn_info_url(repo_url=_p)
                 _rev = str(_info.get("revision") or "").strip()
                 if not _rev.isdigit():
@@ -2413,7 +2412,7 @@ async def jenkins_uds_generate(
     _t0 = time.time()
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     reject_upload_in_cloudium(*(req_files or []), *(logic_files or []), *(files or []), component_list)
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
@@ -2641,7 +2640,12 @@ async def jenkins_uds_generate(
     )
     _logger.info("UDS 템플릿: %s", _uds_tpl_why)
     tpl = str(_uds_tpl or "").strip() or None
-    await _run_blocking(_generate_docx_with_retry, tpl, uds_payload, out_path)
+    # (R47 N25) ASIL·Related 보강의 참조는 config 기본값(HDPDM01)이 아니라 **이 프로젝트의 SwUDS** 다.
+    _ref_suds, _ref_suds_why = resolve_reference_suds_for_generation(reference_doc_path, tpl)
+    (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
+    await _run_blocking(
+        lambda: _generate_docx_with_retry(tpl, uds_payload, out_path, reference_suds_path=_ref_suds),
+    )
     _write_uds_payload_sidecar(out_path, uds_payload)
     residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})
     validation_path = out_path.with_suffix(".validation.md")
@@ -2812,7 +2816,7 @@ async def jenkins_uds_generate_async(
         component_list, ai_example_file,
     )
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
@@ -2942,6 +2946,9 @@ async def jenkins_uds_generate_async(
         prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("UDS 템플릿: %s", _uds_tpl_why)
+    # (R47 N25) ASIL·Related 보강의 참조는 config 기본값(HDPDM01)이 아니라 **이 프로젝트의 SwUDS** 다.
+    _ref_suds, _ref_suds_why = resolve_reference_suds_for_generation(reference_doc_path, _uds_tpl)
+    (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
 
     def _worker() -> None:
         try:
@@ -2950,6 +2957,7 @@ async def jenkins_uds_generate_async(
                 cache_root=cache_root,
                 build_selector=build_selector,
                 template_path=_uds_tpl or "",
+                reference_suds_path=_ref_suds,
                 max_source_files=max_source_files,
                 max_items_per_category=max_items_per_category,
                 unmatched_headings=unmatched_headings,
@@ -3265,7 +3273,7 @@ async def jenkins_sts_generate_async(
     from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
@@ -3505,7 +3513,7 @@ def jenkins_suts_generate_async(
 ) -> Dict[str, Any]:
     from suts_generator import generate_suts
 
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
@@ -5652,7 +5660,7 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
         # 클라가 build_root 하위 경로를 명시하면 그 부분만 스캔(신뢰 경계 안에서만 존중).
         # build_root 밖(외부 SCM 경로 포함)이거나 미존재면 무시하고 체크아웃 사본으로 폴백 —
         # 임의 외부 경로를 파일 read 대상으로 삼지 않으므로 traversal 우회 없음.
-        cands = [Path(p.strip()).resolve() for p in raw_src.replace(";", ",").split(",") if p.strip()]
+        cands = [Path(p).resolve() for p in split_source_roots(raw_src)]
         picked = next((c for c in cands if is_under_any(c, [build_root]) and c.exists()), None)
         if picked is not None:
             source_root = picked

@@ -2659,7 +2659,8 @@ def generate_uds_docx(
             "globals_global": 0, "called": 0, "calling": 0,
         },
     }
-    if ref_doc_path.exists():
+    # (R47 리뷰 W1) `Path("")` 는 `.` 이라 `.exists()` 가 True 다 — 빈 값·비파일은 "참조 없음".
+    if str(UDS_REF_SUDS_PATH or "").strip() and ref_doc_path.is_file():
         if not _ref_safety_ok:
             # 침묵 금지 — 이 문서는 **다른 프로젝트의 설계서**일 수 있다.
             _logger.warning(

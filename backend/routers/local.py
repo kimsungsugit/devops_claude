@@ -118,6 +118,7 @@ from backend.services.paths import confine, is_under_any, safe_resolve_under, tr
 from backend.user_context import wrap_with_user
 from report_gen.atomic_io import atomic_write_text
 from report_gen.provenance import has_evidence_value, is_weak_source
+from report_gen.source_roots import first_source_root
 from report_gen.utils import build_function_details_by_name
 from report_generator import (
     _build_req_map_from_doc_paths,
@@ -939,7 +940,7 @@ async def local_uds_generate(
             template_warning = msg
             template_bytes = None
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
@@ -1232,6 +1233,8 @@ async def local_uds_generate(
         _uds_ai_cfg = _load_sts_ai_config()
         if _uds_ai_cfg:
             uds_payload["_gen_ai_config"] = _uds_ai_cfg
+        # (R47 N25) 이 핸들러엔 `reference_doc_path` 폼이 없어 ASIL·Related 보강 참조는 config 기본값을 읽는다.
+        _logger.info("UDS 참조 SwUDS: local 경로엔 정본 입력이 없어 config.UDS_REF_SUDS_PATH 기본값을 읽는다(신원 게이트가 남의 문서를 막는다)")
         await _run_blocking(_generate_docx_with_retry, tpl_path, uds_payload, out_path)
     except Exception as docx_exc:
         tb = traceback.format_exc()
@@ -1448,7 +1451,7 @@ async def local_uds_generate_async(
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     # 소요 시간은 sts/suts/sits 와 같은 축(함수 진입 기준)으로 잰다.
     _t0 = time.time()
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
@@ -1654,6 +1657,7 @@ async def local_uds_generate_async(
             _uds_ai_cfg = _load_sts_ai_config()
             if _uds_ai_cfg:
                 uds_payload["_gen_ai_config"] = _uds_ai_cfg
+            _logger.info("UDS 참조 SwUDS: local 경로엔 정본 입력이 없어 config.UDS_REF_SUDS_PATH 기본값을 읽는다(신원 게이트가 남의 문서를 막는다)")
             _generate_docx_with_retry(tpl_path, uds_payload, out_path)
             _write_uds_payload_sidecar(out_path, uds_payload)
             residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})
@@ -1955,7 +1959,7 @@ async def local_sts_generate(
     # Get function_details from source root
     function_details: Dict[str, Any] = {}
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
@@ -2148,7 +2152,7 @@ async def local_sts_generate_stream(
 
     function_details: Dict[str, Any] = {}
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
@@ -2374,7 +2378,7 @@ async def local_sts_generate_async(
                         len(opt_skips3), "; ".join(opt_skips3)[:400])
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     tpl_path: Optional[str] = None
     # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. 템플릿도 U: 에 등록되므로
@@ -2593,7 +2597,7 @@ def local_suts_generate(
     print(f"[SUTS_GENERATE][{req_id}] start source_root={source_root}", flush=True)
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
@@ -2706,7 +2710,7 @@ def local_suts_generate_stream(
     from suts_generator import generate_suts
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
@@ -2832,7 +2836,7 @@ def local_suts_generate_async(
     from suts_generator import generate_suts
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
@@ -3062,7 +3066,7 @@ def local_sits_generate(
     print(f"[SITS_GENERATE][{req_id}] start source_root={source_root}", flush=True)
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
@@ -3181,7 +3185,7 @@ def local_sits_generate_stream(
     from sits_generator import generate_sits
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
@@ -3312,7 +3316,7 @@ def local_sits_generate_async(
     from sits_generator import generate_sits
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
@@ -3618,7 +3622,7 @@ def local_sits_export_vectorcast(
     package_name = out_dir.name
 
     # source_root / compiler 설정
-    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    _first_root = first_source_root(source_root)
     resolved_source_root = str(Path(_first_root).resolve()) if _first_root else ""
 
     try:

@@ -12,6 +12,7 @@ except ImportError:
     FileLock = None
 from pydantic import ValidationError
 
+
 from backend.schemas import (
     ScmLinkedDocs,
     ScmRegisterRequest,
@@ -321,6 +322,10 @@ def resolve_scm_id(value: str) -> str | None:
     Returns:
         entry id, 또는 판정 불가 시 None.
     """
+    # (R47 리뷰 W5) 20줄짜리 무의존 헬퍼 때문에 `report_gen` 패키지 init(680모듈·1.1초)을 깨우지 않는다 —
+    #   단발 스크립트(backfill·check_linked_docs)가 이 모듈을 직접 문다. 함수 안에서 든다.
+    from report_gen.source_roots import split_source_roots
+
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -336,7 +341,7 @@ def resolve_scm_id(value: str) -> str | None:
         #   "D:/…/PDS64_RD,D:\…\PDS64_FBL" 꼴). 조회값만 조각내고 등록값을 통짜로
         #   두면 단일 경로 조회가 영원히 안 맞는다 — 정규화는 **양쪽 대칭**이어야 한다.
         #   (이 저장소가 추적성 정규화에서 한쪽만 strip 해 겪은 것과 같은 결함이다.)
-        for piece in str(getattr(e, "source_root", "") or "").split(","):
+        for piece in split_source_roots(getattr(e, "source_root", "")):
             key = _normalize_path_key(piece)
             if not key:
                 continue
@@ -361,8 +366,11 @@ def resolve_scm_id(value: str) -> str | None:
     if direct:
         return direct
 
-    if "," in raw:
-        found = {r for r in (_one(part) for part in raw.split(",")) if r}
+    # (R47 리뷰 C1) 조회값도 **등록값과 같은 분해**를 탄다 — 한쪽만 세미콜론을 가르면 전체문자열 조회가 끊긴다.
+    # ⚠ `len(parts) > 1` 로 두면 `"D:/a,D:/a"`(중복 제거 후 1조각)가 조각 조회를 건너뛴다 — 게이트 실측(R47).
+    parts = split_source_roots(raw)
+    if parts:
+        found = {r for r in (_one(part) for part in parts) if r}
         if len(found) == 1:
             return found.pop()
 

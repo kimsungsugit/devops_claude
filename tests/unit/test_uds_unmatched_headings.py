@@ -286,7 +286,7 @@ class TestTheValueReachesTheGenerator:
 
         seen: Dict[str, Any] = {}
 
-        def _fake_docx(tpl, payload, out_path, retries=3):  # noqa: ANN001
+        def _fake_docx(tpl, payload, out_path, retries=3, **_kw):  # noqa: ANN001 - (R47) reference_suds_path 등 kw-only 인자
             seen["payload"] = payload
             # 뒤따르는 리포트들이 이 파일을 되읽으므로 **진짜 docx** 를 남긴다
             # (깨진 바이트를 두면 로그가 traceback 3개로 뒤덮인다).

@@ -428,3 +428,237 @@ class TestListExposesNewFields:
         res = client.get("/api/quality/runs", params={"scm_id": "nonexistent_project"})
         assert res.status_code == 200
         assert res.json()["runs"] == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# (R47 N22) 같은 `.validation.md` 를 두 계열이 쓴다 — 첫 줄로 형식을 가른다
+# ═══════════════════════════════════════════════════════════════════════════
+
+_STS_XLSM_MD = """# STS 생성 문서 자동 검증 리포트
+
+**파일**: `sts_x.xlsm`  
+**검증 시각**: 2026-09-09 20:00:41  
+**결과**: PASS
+
+---
+
+## 1. 구조 검증
+
+| 항목 | 값 |
+|------|-----|
+| 시트 수 | 6 |
+| TC 수 | 270 |
+
+## 3. Quality Gate (5/5)
+
+| 항목 | 결과 |
+|------|------|
+| TC 존재 | PASS |
+| 빈 제목 < 30% | PASS |
+| 스텝 존재 > 50% | PASS |
+| 기대값 존재 > 50% | PASS |
+| 요구사항 연결 존재 | PASS |
+
+## 5. Warnings
+
+- Optional sheet missing: 1.Introduction
+"""
+
+# 라이브 실물(2026-09-09 SUTS): 게이트 5/5 인데 `issues` 때문에 FAIL — 판정과 표는 독립이다.
+_SUTS_XLSM_MD = """# SUTS 생성 문서 자동 검증 리포트
+
+**파일**: `suts_x.xlsm`  
+**검증 시각**: 2026-09-09 20:07:47  
+**결과**: FAIL
+
+---
+
+## 1. 구조 검증
+
+| 항목 | 값 |
+|------|-----|
+| TC 수 | 1025 |
+
+## 3. Quality Gate (4/5)
+
+| 항목 | 결과 |
+|------|------|
+| TC 존재 | PASS |
+| 시퀀스 존재 | PASS |
+| I/O 없는 TC < 50% | FAIL |
+| TC당 평균 시퀀스 >= 2 | PASS |
+| 함수 커버리지 측정됨 | N/A (TC 없음) |
+
+## 4. Issues
+
+- Optional sheet missing: 1.Introduction
+
+## 5. Warnings
+
+- ⚠ 145/1025 TCs lack I/O variables
+"""
+
+# SITS 라이터는 Quality Gate 절이 없고 이슈 절 제목이 한국어다.
+_SITS_XLSM_MD = """# SITS 생성 문서 자동 검증 리포트
+
+**파일**: `sits_x.xlsm`  
+**검증 시각**: 2026-09-09 20:08:28  
+**결과**: PASS
+
+---
+
+## 1. 구조 검증
+
+| 항목 | 값 |
+|------|-----|
+| TC 수 (SwITC_*) | 120 |
+
+## 3. 이슈
+
+- 이슈 없음
+
+## 4. 경고
+
+- ⚠ 합성 ID 3건
+"""
+
+
+def _write_validation(tmp_path, stem: str, suffix: str, text: str):
+    out = tmp_path / f"{stem}{suffix}"
+    out.write_bytes(b"x")
+    out.with_suffix(".validation.md").write_text(text, encoding="utf-8")
+    return out
+
+
+class TestXlsmValidationFormat:
+    """리더가 UDS 라벨로만 읽어 `present:True, ok:None` + null 14개를 내던 것(2026-09-09 실측)."""
+
+    def test_sts_pass_is_read_as_xlsm_with_gate_table(self, tmp_path):
+        from report_gen.evidence import read_docx_validation
+        out = _write_validation(tmp_path, "sts_x", ".xlsm", _STS_XLSM_MD)
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["present"] is True
+        assert got["format"] == "xlsm"
+        assert got["doc_kind"] == "STS"
+        assert got["ok"] is True
+        assert (got["gates_passed"], got["gates_total"]) == (5, 5)
+        assert [g["name"] for g in got["gate_items"]][:2] == ["TC 존재", "빈 제목 < 30%"]
+        assert got["failed_gates"] == []
+        assert got["issues"] == []
+        assert got["warnings"] == ["Optional sheet missing: 1.Introduction"]
+        assert got["structure"]["TC 수"] == "270"
+        assert got["checked_at"] == "2026-09-09 20:00:41"
+        # UDS 전용 필드를 null 더미로 싣지 않는다 — 그게 화면이 '판정 불가' 를 그리던 원인이다.
+        assert "swufn_headings" not in got and "missing_from_docx" not in got
+
+    def test_suts_fail_is_fail_not_undecidable(self, tmp_path):
+        """실패가 '판정 불가' 로 접히던 그 문서 — ok=False 가 그대로 나와야 한다."""
+        from report_gen.evidence import read_docx_validation
+        out = _write_validation(tmp_path, "suts_x", ".xlsm", _SUTS_XLSM_MD)
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["ok"] is False
+        assert (got["gates_passed"], got["gates_total"]) == (4, 5)
+        assert got["failed_gates"] == ["I/O 없는 TC < 50%"]
+        assert [g["result"] for g in got["gate_items"]] == ["PASS", "PASS", "FAIL", "PASS", "N/A"]
+        assert got["issues"] == ["Optional sheet missing: 1.Introduction"]
+        assert got["warnings"] == ["145/1025 TCs lack I/O variables"]   # ⚠ 표식 제거
+
+    def test_sits_without_gate_section_keeps_gates_none_not_zero(self, tmp_path):
+        from report_gen.evidence import read_docx_validation
+        out = _write_validation(tmp_path, "sits_x", ".xlsm", _SITS_XLSM_MD)
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["doc_kind"] == "SITS"
+        assert got["ok"] is True
+        assert got["gates_passed"] is None and got["gates_total"] is None
+        assert got["gate_items"] == []
+        assert got["issues"] == []                       # `- 이슈 없음` 은 항목이 아니다
+        assert got["warnings"] == ["합성 ID 3건"]
+
+    def test_xlsm_without_warnings_section_means_zero_not_unknown(self, tmp_path):
+        """(리뷰 I3) 라이터 셋은 경고가 없으면 절을 생략한다 — 절 부재는 0건이지 미상(None)이 아니다."""
+        from report_gen.evidence import read_docx_validation
+        text = _SITS_XLSM_MD.split("## 4. 경고")[0]
+        out = _write_validation(tmp_path, "sits_nowarn", ".xlsm", text)
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["warnings"] == []
+
+    def test_result_line_missing_is_none_not_pass(self, tmp_path):
+        from report_gen.evidence import read_docx_validation
+        text = _STS_XLSM_MD.replace("**결과**: PASS\n", "")
+        out = _write_validation(tmp_path, "sts_y", ".xlsm", text)
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["format"] == "xlsm" and got["ok"] is None
+
+    def test_uds_docx_format_is_tagged_and_unchanged(self, sidecars):
+        from report_gen.evidence import read_docx_validation
+        got = read_docx_validation(pathlib.Path(str(sidecars)).with_suffix(".validation.md"))
+        assert got["format"] == "docx"
+        assert got["ok"] is False and "gate_items" not in got
+
+    def test_unknown_format_is_undecidable_with_reason(self, tmp_path):
+        from report_gen.evidence import read_docx_validation
+        out = _write_validation(tmp_path, "z", ".xlsm", "# Something else\n\nResult: PASS\n")
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["present"] is True and got["format"] == "unknown"
+        assert got["ok"] is None                          # `PASS` 단어가 있어도 통과로 읽지 않는다
+        assert "Something else" in got["reason"]
+
+    def test_titleless_kv_text_still_reads_as_docx(self, tmp_path):
+        """제목 없는 구판/최소 산출물 — `- 라벨: \\`값\\`` 줄이 있으면 UDS 계열이다."""
+        from report_gen.evidence import read_docx_validation
+        out = _write_validation(tmp_path, "legacy", ".docx", "# R\n- OK: `False`\n")
+        got = read_docx_validation(out.with_suffix(".validation.md"))
+        assert got["format"] == "docx" and got["ok"] is False
+
+    def test_dispatch_is_by_content_not_by_extension(self, tmp_path):
+        """DB 의 doc_type/확장자가 틀려도 파일 첫 줄이 진실이다."""
+        from report_gen.evidence import read_docx_validation
+        out = _write_validation(tmp_path, "mislabeled", ".docx", _SUTS_XLSM_MD)
+        assert read_docx_validation(out.with_suffix(".validation.md"))["format"] == "xlsm"
+
+
+class TestExpectedSidecarsPerSection:
+    """`sidecars_expected`(UDS 여부 하나)로 접으면 STS 에 "사이드카를 만들지 않는다" 고 적게 된다."""
+
+    def test_sts_expects_validation_but_not_gate_or_confidence(self, api, tmp_path):
+        client, make_run = api
+        out = _write_validation(tmp_path, "sts_live", ".xlsm", _SUTS_XLSM_MD.replace("SUTS", "STS"))
+        rid = make_run("sts", output_path=out)
+        body = client.get(f"/api/quality/runs/{rid}/evidence").json()
+        assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": True}
+        assert body["sidecars_expected"] is False            # 구 소비처 호환
+        assert body["docx_validate"]["format"] == "xlsm"
+        assert body["docx_validate"]["ok"] is False
+        assert body["gate_report"]["present"] is False
+
+    def test_uds_expects_all_three(self, api, sidecars):
+        client, make_run = api
+        rid = make_run("uds", output_path=sidecars)
+        body = client.get(f"/api/quality/runs/{rid}/evidence").json()
+        assert body["expected_sidecars"] == {"gate_report": True, "confidence": True, "docx_validate": True}
+
+    @pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
+    def test_every_xlsm_writer_expects_a_validation_sidecar(self, api, doc_type):
+        """(리뷰 W4) 손으로 든 목록 — 항목 하나를 빼면 화면이 "이 문서 종류는 만들지 않는다" 는 거짓을 적는다."""
+        client, make_run = api
+        rid = make_run(doc_type)
+        assert client.get(f"/api/quality/runs/{rid}/evidence").json()["expected_sidecars"]["docx_validate"] is True
+
+    def test_writers_list_matches_the_generators_that_actually_write_the_sidecar(self):
+        """목록의 근거는 라이터다 — `generators/*.py` 에서 `.validation.md` 를 쓰는 모듈 + UDS."""
+        import re
+
+        from report_gen.evidence import VALIDATION_SIDECAR_WRITERS
+
+        root = pathlib.Path(__file__).resolve().parents[2]
+        writers = {p.stem for p in (root / "generators").glob("*.py")
+                   if re.search(r'with_suffix\(["\']\.validation\.md["\']\)', p.read_text(encoding="utf-8", errors="replace"))}
+        assert writers, "generators 에서 라이터를 하나도 못 찾았다 — 정규식이 죽었다"
+        assert set(VALIDATION_SIDECAR_WRITERS) == writers | {"uds"}
+
+    @pytest.mark.parametrize("doc_type", ["swreport", "swut", "swit"])
+    def test_builders_without_sidecars_expect_none(self, api, doc_type):
+        client, make_run = api
+        rid = make_run(doc_type)
+        body = client.get(f"/api/quality/runs/{rid}/evidence").json()
+        assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": False}

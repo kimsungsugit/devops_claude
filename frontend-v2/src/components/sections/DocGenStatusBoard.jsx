@@ -1494,7 +1494,10 @@ function EvidenceDetail({ run, detail }) {
             ) : (
               <li style={{ color: 'var(--text-muted)' }}>
                 게이트 근거 파일 없음 — {gate?.reason || '사유 미상'}
-                {ev.sidecars_expected === false && ' (이 문서 종류는 사이드카를 만들지 않는다)'}
+                {/* (R47 N22) 섹션별 기대 — STS/SUTS/SITS 는 게이트 사이드카는 안 만들지만
+                    구조 검증 사이드카는 만든다. 통째로 "안 만든다" 고 적으면 거짓이다. */}
+                {(ev.expected_sidecars?.gate_report ?? ev.sidecars_expected) === false
+                  && ' (이 문서 종류는 게이트 사이드카를 만들지 않는다)'}
               </li>
             )}
             {conf?.present ? (
@@ -1506,7 +1509,31 @@ function EvidenceDetail({ run, detail }) {
             ) : (
               <li style={{ color: 'var(--text-muted)' }}>출처 신뢰도 근거 없음 — {conf?.reason || '사유 미상'}</li>
             )}
-            {val?.present ? (
+            {/* (R47 N22) 같은 `.validation.md` 를 두 계열이 쓴다 — 서버가 첫 줄로 가른 `format` 을 따른다.
+                XLSM(STS/SUTS/SITS) 을 DOCX 라벨로 읽으면 실패(FAIL)가 '판정 불가' 로 접혔다(2026-09-09 실측). */}
+            {val?.present && val.format === 'xlsm' ? (
+              <li>
+                {val.doc_kind || 'XLSM'} 구조 검증{' '}
+                <strong>{val.ok === true ? 'PASS' : val.ok === false ? 'FAIL' : '판정 불가'}</strong>
+                {val.gates_total != null && ` · Quality Gate ${val.gates_passed ?? '—'} / ${val.gates_total}`}
+                {val.failed_gates?.length > 0 && ` · 실패 게이트: ${val.failed_gates.join(', ')}`}
+                {val.issues?.length > 0 && ` · 지적 ${val.issues.length}건`}
+                {/* 판정(결과 줄)과 게이트 표는 독립이다 — 게이트 전부 통과인데 FAIL 이면 지적 때문이다. */}
+                {val.ok === false && val.gates_total > 0 && val.gates_passed === val.gates_total
+                  && ' — 게이트는 전부 통과했고 지적 사항이 판정을 FAIL 로 만들었다'}
+                {(val.issues?.length > 0 || val.warnings?.length > 0) && (
+                  <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 'var(--text-xs)' }}
+                    aria-label="구조 검증 지적·경고">
+                    {(val.issues || []).map((w, i) => <li key={`i${i}`}>❌ {String(w)}</li>)}
+                    {(val.warnings || []).map((w, i) => <li key={`w${i}`}>⚠ {String(w)}</li>)}
+                  </ul>
+                )}
+              </li>
+            ) : val?.present && val.format === 'unknown' ? (
+              <li style={{ color: 'var(--text-muted)' }}>
+                구조 검증 판정 불가 — {val.reason || '검증 리포트 형식을 알 수 없다'}
+              </li>
+            ) : val?.present ? (
               <li>
                 DOCX 구조 검증 {val.ok === true ? 'OK' : val.ok === false ? '문제 있음' : '판정 불가'}
                 {val.issues?.length > 0 && ` · 지적 ${val.issues.length}건`}
@@ -1538,7 +1565,10 @@ function EvidenceDetail({ run, detail }) {
                 )}
               </li>
             ) : (
-              <li style={{ color: 'var(--text-muted)' }}>구조 검증 근거 없음 — {val?.reason || '사유 미상'}</li>
+              <li style={{ color: 'var(--text-muted)' }}>
+                구조 검증 근거 없음 — {val?.reason || '사유 미상'}
+                {ev.expected_sidecars?.docx_validate === false && ' (이 문서 종류는 구조 검증 사이드카를 만들지 않는다)'}
+              </li>
             )}
           </ul>
         )}

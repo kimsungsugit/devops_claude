@@ -42,6 +42,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from report_gen.source_roots import split_source_roots
+
 # 파싱 결과 캐시 — `parse_c_project` 는 실측 41초(350함수) ~ 368초(750함수)다.
 # 행을 펼칠 때마다 돌릴 수 없다. 키는 (정규화 경로, max_files), 무효화는 TTL + 시그니처.
 _CACHE: Dict[Tuple[str, int], Tuple[float, Any, Dict[str, Any]]] = {}
@@ -82,7 +84,7 @@ def _signature(source_root: str, max_files: int) -> Optional[Tuple[int, int]]:
     try:
         # ⚠ 복수 루트를 **전부** 본다. 첫 루트만 보면 둘째 트리가 바뀌어도 캐시가 살아
         #   남아 낡은 수치를 계속 보여준다.
-        roots = [Path(r.strip()) for r in str(source_root or "").split(",") if r.strip()]
+        roots = [Path(r) for r in split_source_roots(source_root)]
         roots = [r for r in roots if r.exists()]
         if not roots:
             return None
@@ -124,7 +126,7 @@ def _parse_cached(source_root: str, max_files: int) -> Tuple[Any, Dict[str, Any]
     #   `C:\…\NE1AW_PORTING,C:\…\PDS128_FBL`). `parse_c_project` 는 단일 루트만 받으므로
     #   콤마 문자열을 그대로 넘기면 존재하지 않는 경로가 되어 **함수 0개**가 나온다.
     #   라이브 검증에서 정확히 그렇게 나왔다(scanned_files=0). 루트마다 돌려 합친다.
-    roots = [r.strip() for r in str(source_root or "").split(",") if r.strip()]
+    roots = split_source_roots(source_root)
     res: Dict[str, Any] = {"functions": [], "globals": [], "scanned": []}
     for root in roots:
         part = parse_c_project(root, max_files=max_files)
@@ -220,7 +222,7 @@ def measure(source_root: str, *, max_files: int = 300) -> Dict[str, Any]:
         }
 
     # 복수 루트(콤마 구분) 중 **하나라도** 있으면 진행한다.
-    roots = [r.strip() for r in str(source_root or "").split(",") if r.strip()]
+    roots = split_source_roots(source_root)
     if not roots or not any(Path(r).exists() for r in roots):
         return _absent("소스 루트를 찾을 수 없습니다")
 
