@@ -31,7 +31,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import report_gen.validation_labels as VL
 from report_gen.gate_report import parse_gate_report, parse_scoring_scope
@@ -44,6 +44,7 @@ __all__ = [
     "read_docx_validation",
     "read_reference_enrichment",
     "read_evidence",
+    "EVIDENCE_SECTIONS",
     "SIDECAR_SUFFIXES",
     "GEN_STATS_SUFFIX",
     "PAYLOAD_SUFFIX",
@@ -62,6 +63,12 @@ SIDECAR_SUFFIXES = {
 #   `<out>.payload.json`        — `with_suffix` 치환(`_write_uds_payload_sidecar` 와 같은 규칙).
 GEN_STATS_SUFFIX = ".gen_stats.json"
 PAYLOAD_SUFFIX = ".payload.json"
+
+# `read_evidence` 가 내는 섹션 — 이 순서로 응답에 실린다. `sections=` 는 이 이름들만 받는다.
+EVIDENCE_SECTIONS = ("gate_report", "confidence", "docx_validate", "reference")
+# (리뷰 W3) 섹션 이름의 출처가 둘(사이드카 접미사 표 + 이 튜플)이라 — 새 사이드카를 표에만 적으면 어느 분기에서도
+#   읽히지 않고 `sections=("새키",)` 는 ValueError 가 된다. import 시점에 포함을 강제한다.
+assert set(SIDECAR_SUFFIXES) <= set(EVIDENCE_SECTIONS), "SIDECAR_SUFFIXES 의 키는 전부 EVIDENCE_SECTIONS 에 있어야 한다"
 
 # `- <라벨>: \`<값>\`` — 세 사이드카가 공유하는 유일한 줄 문법.
 _KV_RE = re.compile(r"^-\s*([^:]+):\s*`([^`]*)`")
@@ -658,18 +665,32 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
     }
 
 
-def read_evidence(docx_path: str) -> Dict[str, Any]:
+def read_evidence(docx_path: str, sections: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """산출물 DOCX 경로 → 근거 4종 묶음(사이드카 3종 + 참조 보강).
 
     경로는 **호출자(서버)가 DB 에서 꺼낸 값**이어야 한다. 클라이언트가 보낸 경로를
     그대로 넣으면 임의 파일 읽기가 된다 — endpoint 는 run_id 만 받는다.
+
+    `sections` — 읽을 섹션만 고른다(기본 = `EVIDENCE_SECTIONS` 전부). (R47-f N28) 보드의 근거 1회
+    열람은 두 요청(evidence + attribution)이고 attribution 은 `confidence` 만 쓰는데 이 함수가
+    전량이라 2.7MB payload 사이드카를 요청마다 파싱했다(실측 run 2070: 전량 78ms·13.7MB peak,
+    confidence 만 2ms·0.2MB). 모르는 이름은 ValueError — 오타가 "섹션 없음" 으로 조용히 접히지 않게.
+    응답엔 고른 섹션 키만 실린다(없는 키 ≠ `present:false`).
     """
+    want = tuple(EVIDENCE_SECTIONS) if sections is None else tuple(sections)
+    unknown = [s for s in want if s not in EVIDENCE_SECTIONS]
+    if unknown:
+        raise ValueError(f"read_evidence: 모르는 섹션 {unknown} — 가능한 값 {list(EVIDENCE_SECTIONS)}")
+    if not want:
+        # (리뷰 W1) 0개 선택은 의미 있는 요청이 아니다 — 통과시키면 소비자의 `ev.get(k) or {}` 가 "요청 안 함" 을
+        #   "사이드카 없음" 으로 번역해 화면이 파일 부재를 단언한다.
+        raise ValueError("read_evidence: sections 가 비었다 — 전부 읽으려면 None")
+
     raw = str(docx_path or "").strip()
     if not raw:
         return {
             "output_path_present": False,
-            **{k: _absent("산출물 경로가 기록되지 않은 run") for k in SIDECAR_SUFFIXES},
-            "reference": _absent("산출물 경로가 기록되지 않은 run"),
+            **{k: _absent("산출물 경로가 기록되지 않은 run") for k in EVIDENCE_SECTIONS if k in want},
         }
 
     base = Path(raw)
@@ -677,11 +698,15 @@ def read_evidence(docx_path: str) -> Dict[str, Any]:
     def _side(suffix: str) -> Path:
         return base.with_suffix(suffix) if base.suffix else Path(raw + suffix)
 
-    return {
-        "output_path_present": base.exists(),
-        "gate_report": read_gate_report(_side(SIDECAR_SUFFIXES["gate_report"])),
-        "confidence": read_confidence_report(_side(SIDECAR_SUFFIXES["confidence"])),
-        "docx_validate": read_docx_validation(_side(SIDECAR_SUFFIXES["docx_validate"])),
+    readers = {
+        "gate_report": lambda: read_gate_report(_side(SIDECAR_SUFFIXES["gate_report"])),
+        "confidence": lambda: read_confidence_report(_side(SIDECAR_SUFFIXES["confidence"])),
+        "docx_validate": lambda: read_docx_validation(_side(SIDECAR_SUFFIXES["docx_validate"])),
         # (R47 N26) 통계는 접미사 덧붙임, payload 는 치환 — 라이터 둘의 규칙이 다르다.
-        "reference": read_reference_enrichment(Path(raw + GEN_STATS_SUFFIX), _side(PAYLOAD_SUFFIX)),
+        "reference": lambda: read_reference_enrichment(Path(raw + GEN_STATS_SUFFIX), _side(PAYLOAD_SUFFIX)),
     }
+    out: Dict[str, Any] = {"output_path_present": base.exists()}
+    for k in EVIDENCE_SECTIONS:
+        if k in want:
+            out[k] = readers[k]()
+    return out

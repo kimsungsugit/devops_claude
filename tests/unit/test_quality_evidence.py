@@ -907,3 +907,139 @@ class TestReferenceEnrichmentSection:
         produced = set(ref) | {"reason"}
         assert not sorted(used - produced), f"보드가 읽는데 리더가 안 내는 키: {sorted(used - produced)}"
         assert not sorted(used_enr - set(ref["enrichment"])), sorted(used_enr - set(ref["enrichment"]))
+
+
+# ==============================================================
+# 8. (R47-f N28) 섹션 선택 — attribution 은 payload 를 열지 않는다
+# ==============================================================
+
+class TestSectionSelection:
+    """근거 1회 열람 = evidence + attribution 두 요청. attribution 이 `confidence` 만 쓰면서 전량을
+    부르는 바람에 2.7MB payload 가 요청마다 두 번 파싱됐다(리뷰 W7). 고른 섹션만 읽고, 모르는
+    이름은 조용히 빠지지 않는다."""
+
+    def test_default_reads_every_section(self, sidecars):
+        from report_gen.evidence import EVIDENCE_SECTIONS, read_evidence
+
+        got = read_evidence(str(sidecars))
+        assert set(got) == {"output_path_present", *EVIDENCE_SECTIONS}
+
+    def test_subset_carries_only_the_requested_keys(self, sidecars):
+        from report_gen.evidence import read_evidence
+
+        got = read_evidence(str(sidecars), sections=("confidence",))
+        assert set(got) == {"output_path_present", "confidence"}
+        assert got["confidence"]["present"] is True
+        assert got["confidence"]["total_functions"] == 169
+
+    def test_subset_does_not_open_the_reference_sidecars(self, sidecars, monkeypatch):
+        """관측량: 참조 리더가 **호출되지 않는다**. 대조군: 전량 호출은 같은 조건에서 터진다."""
+        import report_gen.evidence as ev
+
+        def _boom(*_a, **_k):
+            raise AssertionError("reference 섹션을 읽었다 — payload 가 파싱됐다")
+
+        monkeypatch.setattr(ev, "read_reference_enrichment", _boom)
+        got = ev.read_evidence(str(sidecars), sections=("confidence", "gate_report"))
+        assert set(got) == {"output_path_present", "confidence", "gate_report"}
+        with pytest.raises(AssertionError, match="payload"):
+            ev.read_evidence(str(sidecars))
+
+    def test_unknown_section_is_an_error_not_a_silent_omission(self, sidecars):
+        from report_gen.evidence import read_evidence
+
+        with pytest.raises(ValueError, match="confidnce"):
+            read_evidence(str(sidecars), sections=("confidnce",))
+
+    def test_empty_selection_is_an_error_not_a_silent_nothing(self, sidecars):
+        """(리뷰 W1) `sections=()` 가 통과하면 소비자의 `or {}` 가 "요청 안 함" 을 "사이드카 없음" 으로 번역한다."""
+        from report_gen.evidence import read_evidence
+
+        with pytest.raises(ValueError, match="비었다"):
+            read_evidence(str(sidecars), sections=())
+        with pytest.raises(ValueError, match="비었다"):
+            read_evidence("", sections=[])
+
+    def test_section_order_is_this_literal(self, sidecars):
+        """(리뷰 뮤턴트 2) 상수 자신과 비교하면 동어반복 — 응답 키 순서를 리터럴로 고정한다."""
+        from report_gen.evidence import EVIDENCE_SECTIONS, read_evidence
+
+        assert EVIDENCE_SECTIONS == ("gate_report", "confidence", "docx_validate", "reference")
+        assert list(read_evidence(str(sidecars))) == ["output_path_present", *EVIDENCE_SECTIONS]
+
+    def test_every_sidecar_suffix_is_a_readable_section(self):
+        """(리뷰 W3) 이름 출처가 둘 — 접미사 표에만 적힌 사이드카는 영구 미판독이 된다. evidence endpoint 의
+        `expected_sidecars` 4키도 같은 집합이어야 한다."""
+        import re
+
+        from report_gen.evidence import EVIDENCE_SECTIONS, SIDECAR_SUFFIXES
+
+        assert set(SIDECAR_SUFFIXES) <= set(EVIDENCE_SECTIONS)
+        src = (pathlib.Path(__file__).resolve().parents[2] / "backend/routers/quality.py").read_text(encoding="utf-8")
+        m = re.search(r'payload\["expected_sidecars"\] = \{(.*?)\n    \}', src, re.S)
+        assert m, "expected_sidecars 리터럴을 찾지 못했다"
+        assert set(re.findall(r'"([a-z_]+)":', m.group(1))) == set(EVIDENCE_SECTIONS)
+
+    def test_missing_output_path_still_shapes_only_the_requested_keys(self):
+        from report_gen.evidence import read_evidence
+
+        got = read_evidence("", sections=("reference",))
+        assert set(got) == {"output_path_present", "reference"}
+        assert got["output_path_present"] is False
+        assert got["reference"]["present"] is False
+        # (리뷰 W2) 경로 없는 분기도 상수 순 — 호출자 순이 아니다.
+        assert list(read_evidence("", sections=("reference", "gate_report"))) == [
+            "output_path_present", "gate_report", "reference"]
+
+    def test_order_follows_the_contract_not_the_caller(self, sidecars):
+        from report_gen.evidence import EVIDENCE_SECTIONS, read_evidence
+
+        got = read_evidence(str(sidecars), sections=("reference", "gate_report"))
+        assert [k for k in got if k != "output_path_present"] == [
+            s for s in EVIDENCE_SECTIONS if s in ("reference", "gate_report")]
+
+
+class TestAttributionReadsOnlyConfidence:
+    """`POST /api/docgen/attribution` 이 근거를 **신뢰도 섹션만** 읽는다 — 행동 + 소스 두 층."""
+
+    @pytest.fixture
+    def attribution_api(self, tmp_path, monkeypatch, sidecars):
+        pytest.importorskip("fastapi")
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from backend.routers import docgen_preflight
+        from workflow.quality import db as qdb
+        from workflow.quality.recorder import record_run
+
+        db_file = tmp_path / "q.db"
+        monkeypatch.setattr(qdb, "_default_db_path", lambda: db_file)
+        run_id = record_run("uds", {"quick_gate": {"counts": {"total_functions": 169}}},
+                            output_path=str(sidecars), db_path=db_file)
+        app = FastAPI()
+        app.include_router(docgen_preflight.router)
+        yield TestClient(app), run_id
+        # (리뷰 I4) 형제 `api` fixture 와 같은 관습 — 엔진을 놓아야 tmp 트리 정리가 된다(R44 N19 의 갈래).
+        qdb.reset_engine()
+
+    def test_endpoint_answers_without_touching_the_payload(self, attribution_api, monkeypatch):
+        import report_gen.evidence as ev
+
+        def _boom(*_a, **_k):
+            raise AssertionError("attribution 이 reference 섹션(payload)을 읽었다")
+
+        monkeypatch.setattr(ev, "read_reference_enrichment", _boom)
+        client, run_id = attribution_api
+        res = client.post("/api/docgen/attribution", json={"run_id": run_id})
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["available"] is True
+        assert body["total_functions"] == 169
+        assert {f["field"] for f in body["fields"]} == {"asil", "related", "description"}
+
+    def test_router_source_narrows_the_sections(self):
+        src = (pathlib.Path(__file__).resolve().parents[2] / "backend/routers/docgen_preflight.py").read_text(encoding="utf-8")
+        assert 'read_evidence(output_path or "", sections=("confidence",))' in src,             "attribution 이 섹션을 좁히지 않거나 호출 포맷이 바뀌었다(재포맷이면 이 리터럴을 갱신)"
+        assert 'read_evidence(output_path or "")' not in src
+        # (리뷰 W1) 고른 섹션을 `or {}` 로 받으면 "요청 안 함" 이 "사이드카 없음" 으로 번역된다.
+        assert 'conf = ev["confidence"]' in src

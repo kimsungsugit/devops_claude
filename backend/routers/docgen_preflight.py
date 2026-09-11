@@ -2391,8 +2391,10 @@ def docgen_attribution(req: AttributionRequest) -> Dict[str, Any]:
     except ImportError:
         raise HTTPException(status_code=503, detail="evidence module not available") from None
 
-    ev = read_evidence(output_path or "")
-    conf = ev.get("confidence") or {}
+    # (R47-f N28) 여기서 쓰는 건 신뢰도 사이드카뿐 — 전량으로 부르면 evidence 요청이 방금 파싱한 2.7MB
+    #   payload 를 같은 열람에서 한 번 더 파싱한다(78ms·13.7MB → 2ms·0.2MB).
+    ev = read_evidence(output_path or "", sections=("confidence",))
+    conf = ev["confidence"]   # 고른 섹션은 반드시 실린다 — 없으면 500 이 맞다(`or {}` 는 "요청 안 함" 을 "부재" 로 접는다)
     if not conf.get("present"):
         # 부재를 빈 결과로 접지 않는다 — 사유 없이 `[]` 를 주면 "원인이 없다" 로 읽힌다.
         return {
