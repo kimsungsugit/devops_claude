@@ -30,6 +30,7 @@ from backend.helpers import (
     _enrich_function_quality_fields,
     _generate_docx_with_retry,
     merge_enriched_function_details,
+    record_enrichment_in_gen_stats,
     _get_progress,
     _get_source_sections_cached,
     _get_uds_view_payload_cached,
@@ -343,6 +344,8 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
         }
         # (R32 W2) 원자 기록 — 생성 직후 품질 게이트가 읽는 파일이다(`report_gen/atomic_io.py`).
         atomic_write_text(sidecar, json.dumps(payload, ensure_ascii=False, indent=2))
+        # (R47-g N28-b) payload 가 **실제로 쓰인 뒤** 통계에 병기 — 근거 리더가 2.7MB payload 를 열지 않게.
+        record_enrichment_in_gen_stats(out_path, enrichment)
         return sidecar
     except Exception as exc:
         _logger.warning("uds payload sidecar write skipped: %s", exc)

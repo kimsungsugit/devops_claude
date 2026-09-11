@@ -2040,6 +2040,47 @@ def merge_enriched_function_details(out_path: Path, function_details: Dict[str, 
     }
 
 
+def record_enrichment_in_gen_stats(out_path: Path, enrichment: Dict[str, Any]) -> bool:
+    """payload 에 실은 `enrichment` 요약을 `<out>.docx.gen_stats.json` 에도 병기한다. (R47-g N28-b)
+
+    ## 왜
+
+    근거 보드의 `reference` 섹션은 `enrichment` 의 **네 값**(applied·functions·unknown_keys·reason)을 보여 주려고
+    2.7MB `<out>.payload.json` 을 통째로 파싱했다(run 2070 in-process 74ms·13.7MB — 근거 4섹션 전체 소요의
+    95%). 그 네 값은 이 부모 프로세스가 payload 를 쓰는 순간 이미 손에 있고, 같은 산출물의 5KB 통계 사이드카가
+    옆에 있다. 여기 병기하면 리더는 payload 를 열지 않는다(`report_gen.evidence.read_reference_enrichment`).
+
+    ## 계약
+
+    - **payload 원자 기록이 성공한 뒤**에만 부른다 — 먼저 적으면 payload 쓰기가 실패한 run 에서 통계는
+      "되쓴 값 n 함수" 라 하고 게이트는 payload 없이 문서 자기 대조로 잰 것이 되어 두 표면이 어긋난다.
+    - 통계 사이드카가 없거나(구 빌더·기록 실패) 읽히지 않으면 **건드리지 않고** `False` — 리더가 payload 로
+      폴백하므로 느릴 뿐 틀리지 않는다. 깨진 통계를 새 dict 로 덮어쓰지 않는다(빌더의 다른 값을 잃는다).
+    - 중첩 `reference_suds` 는 빼고 적는다 — 통계 사이드카엔 이미 top-level 로 같은 값이 있다(세 번째 복제 금지).
+    - 실패는 사유를 로그에 남기고 `False`. 문서 생성 결과엔 영향 없다.
+    """
+    try:
+        from report_gen.docx_builder import gen_stats_path
+        path = gen_stats_path(str(out_path))
+        if not path.is_file():
+            _logger.info("gen_stats 없음 — enrichment 병기 생략(근거는 payload 폴백): %s", path.name)
+            return False
+        stats = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(stats, dict):
+            _logger.warning("gen_stats 형식이 dict 가 아님 — enrichment 병기 생략: %s", path.name)
+            return False
+        rec = {k: v for k, v in (enrichment or {}).items() if k != "reference_suds"}
+        if not rec:
+            _logger.info("enrichment 기록이 비어 병기 생략(근거는 payload 폴백): %s", path.name)
+            return False
+        stats["enrichment"] = rec
+        atomic_write_text(path, json.dumps(stats, ensure_ascii=False, indent=2))
+        return True
+    except Exception as exc:   # noqa: BLE001 - 병기 실패는 생성 실패가 아니다; 사유만 남긴다
+        _logger.warning("gen_stats enrichment 병기 실패(%s) — 근거는 payload 폴백: %s", type(exc).__name__, exc)
+        return False
+
+
 def _docx_subprocess_env(reference_suds_path: str) -> Dict[str, str]:
     """DOCX 생성 서브프로세스 환경 — `UDS_REF_SUDS_PATH` 를 **항상** 대입한다(빈 값 포함).
 
@@ -2701,6 +2742,8 @@ def _uds_generate_from_paths(
                 indent=2,
             ),
         )
+        # (R47-g N28-b) payload 가 **실제로 쓰인 뒤** 통계에 병기 — 근거 리더가 2.7MB payload 를 열지 않게.
+        record_enrichment_in_gen_stats(out_path, _enrichment)
     except Exception:
         # payload 사이드카가 없으면 채점기는 문서 자기 대조로 떨어진다 — 그 사실은 로그에 남아야 한다.
         _logger.warning("UDS payload sidecar write skipped: %s", sidecar_path, exc_info=True)

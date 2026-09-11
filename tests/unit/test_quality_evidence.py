@@ -732,7 +732,8 @@ class TestReferenceEnrichmentSection:
         assert (ref["safety_fields_applied"], ref["safety_fields_blocked"]) == (710, 0)
         assert ref["descriptive_fields_applied"] == 877 and ref["invalid_asil_rejected"] == 0
         assert (ref["structural_fields_applied"], ref["structural_fields_blocked"]) == (1598, 0)
-        assert ref["enrichment"] == {"present": True, "applied": True, "functions": 1157, "unknown_keys": 0, "reason": None}
+        assert ref["enrichment"] == {"present": True, "applied": True, "functions": 1157, "unknown_keys": 0, "reason": None,
+                                     "record_source": "payload"}
 
     def test_foreign_reference_of_run_2058_is_visible_not_silent(self, tmp_path):
         """게이트 23.8% 의 원인 그 자체 — 다른 프로젝트 문서라 305건 차단. 병합 이전 라이터라 enrichment 도 없다."""
@@ -1043,3 +1044,90 @@ class TestAttributionReadsOnlyConfidence:
         assert 'read_evidence(output_path or "")' not in src
         # (리뷰 W1) 고른 섹션을 `or {}` 로 받으면 "요청 안 함" 이 "사이드카 없음" 으로 번역된다.
         assert 'conf = ev["confidence"]' in src
+
+
+class TestEnrichmentFromGenStats:
+    """(R47-g N28-b) `reference.enrichment` 는 통계 사이드카의 병기값을 먼저 쓰고, 그때 2.7MB payload 는 열지 않는다.
+
+    run 2070 in-process: `reference` 섹션 74ms·13.7MB 중 거의 전부가 payload 파싱이었다 — 네 값 때문에.
+    """
+
+    _GS_WITH = dict(_REF_STATS_2064, enrichment={"applied": True, "functions": 1157, "unknown_keys": 0,
+                                                  "source": "spec.docx.function_details.json"})
+
+    def test_gen_stats_copy_is_used_and_payload_is_not_opened(self, tmp_path):
+        from report_gen import evidence as ev
+
+        docx = _ref_sidecars(tmp_path, stats=self._GS_WITH, payload=None)   # payload 자체가 없다
+        ref = ev.read_evidence(str(docx), sections=("reference",))["reference"]
+        assert ref["enrichment"] == {"present": True, "applied": True, "functions": 1157, "unknown_keys": 0, "reason": None,
+                                     "record_source": "gen_stats"}
+        # 열지 않았다는 직접 증거 — payload 를 "{ not json" 으로 두어도 결과가 같다(열었다면 '읽기 실패' 사유).
+        (tmp_path / "spec.payload.json").write_text("{ not json", encoding="utf-8")
+        again = ev.read_evidence(str(docx), sections=("reference",))["reference"]["enrichment"]
+        assert again["present"] is True and again["applied"] is True and again["functions"] == 1157
+
+    def test_gen_stats_wins_over_payload_when_both_exist(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        other = {"docx_path": "x", "summary": {}, "function_details": {},
+                 "enrichment": {"applied": False, "reason": "payload 쪽 기록"}}
+        enr = read_evidence(str(_ref_sidecars(tmp_path, stats=self._GS_WITH, payload=other)))["reference"]["enrichment"]
+        assert enr["applied"] is True and enr["functions"] == 1157 and enr["record_source"] == "gen_stats"
+
+    def test_legacy_stats_without_the_key_still_fall_back_to_payload(self, tmp_path):
+        """구 run(병기 이전 라이터) — 값은 같고 느릴 뿐이다. 병기가 없는데 payload 도 안 열면 화면이 '기록 없음' 으로 접힌다."""
+        from report_gen.evidence import read_evidence
+
+        enr = read_evidence(str(_ref_sidecars(tmp_path)))["reference"]["enrichment"]     # _REF_STATS_2064 엔 enrichment 없음
+        assert enr == {"present": True, "applied": True, "functions": 1157, "unknown_keys": 0, "reason": None,
+                       "record_source": "payload"}
+
+    def test_non_dict_copy_in_stats_falls_back_to_payload(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        stats = dict(_REF_STATS_2064, enrichment="applied")
+        enr = read_evidence(str(_ref_sidecars(tmp_path, stats=stats)))["reference"]["enrichment"]
+        assert enr["applied"] is True and enr["functions"] == 1157 and enr["record_source"] == "payload"
+
+    def test_zero_merge_rule_applies_to_the_stats_copy_too(self, tmp_path):
+        """(리뷰 W3 의 규칙은 출처를 가리지 않는다) 통계 쪽 '0건 병합·미지 키 1157' 도 되쓰기 실패다."""
+        from report_gen.evidence import read_evidence
+
+        stats = dict(_REF_STATS_2064, enrichment={"applied": True, "functions": 0, "unknown_keys": 1157})
+        enr = read_evidence(str(_ref_sidecars(tmp_path, stats=stats, payload=None)))["reference"]["enrichment"]
+        assert enr["applied"] is False and enr["functions"] == 0 and enr["unknown_keys"] == 1157
+        assert "하나도 맞지 않아" in enr["reason"]
+        stats["enrichment"] = {"applied": False, "reason": "빌더가 보강본을 남기지 않음 (spec.docx.function_details.json)"}
+        enr = read_evidence(str(_ref_sidecars(tmp_path, stats=stats, payload=None)))["reference"]["enrichment"]
+        assert enr["applied"] is False and enr["functions"] is None and "남기지 않음" in enr["reason"]
+
+    def test_record_source_is_none_when_there_is_no_record_at_all(self, tmp_path):
+        """(리뷰 W1) 출처 키는 기록이 있을 때만 파일을 가리킨다 — 부재 두 갈래는 None 이지 'payload' 가 아니다."""
+        from report_gen.evidence import read_evidence
+
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        gone = read_evidence(str(_ref_sidecars(tmp_path / "a", payload=None)))["reference"]["enrichment"]
+        assert gone["present"] is False and gone["record_source"] is None
+        no_key = read_evidence(str(_ref_sidecars(tmp_path / "b", payload={"docx_path": "x", "summary": {}, "function_details": {}})))["reference"]["enrichment"]
+        assert no_key["present"] is False and no_key["record_source"] is None
+
+    def test_both_sources_produce_the_same_shape_for_the_same_record(self, tmp_path):
+        """같은 라이터 기록이면 어느 사이드카에서 읽어도 판정이 같다 — 다른 건 `record_source` 뿐이어야 한다."""
+        from report_gen.evidence import read_evidence
+
+        for i, rec in enumerate(({"applied": True, "functions": 3, "unknown_keys": 2},
+                                 {"applied": True, "functions": 0, "unknown_keys": 5},
+                                 {"applied": False, "reason": "보강본 형식이 dict 가 아님"},
+                                 {"applied": True, "functions": "?", "unknown_keys": None})):
+            a = tmp_path / f"a{i}"
+            b = tmp_path / f"b{i}"
+            a.mkdir()
+            b.mkdir()
+            via_stats = read_evidence(str(_ref_sidecars(a, stats=dict(_REF_STATS_2064, enrichment=rec), payload=None)))
+            via_payload = read_evidence(str(_ref_sidecars(b, payload={"docx_path": "x", "summary": {}, "function_details": {}, "enrichment": rec})))
+            s_enr = dict(via_stats["reference"]["enrichment"])
+            p_enr = dict(via_payload["reference"]["enrichment"])
+            assert (s_enr.pop("record_source"), p_enr.pop("record_source")) == ("gen_stats", "payload"), rec
+            assert s_enr == p_enr, rec

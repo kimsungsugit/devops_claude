@@ -12,7 +12,7 @@ Markdown 사이드카 세 개로만 남아 있었다 — writer 는 4곳인데 r
 | `.field_confidence.md` | 출처 신뢰도 점수/등급(A~D), 출처 분포 | `validation.py::generate_asil_related_confidence_report` |
 | `.validation.md` | DOCX 구조 검증(표/이미지/heading 수, issues) | `validation.py::generate_uds_validation_report` |
 | `.validation.md` (같은 접미사, **다른 형식**) | XLSM 구조 검증(`**결과**` PASS/FAIL, Quality Gate 표, 이슈·경고) | `generators/{sts,suts,sits}.py::*_validation_report` — 첫 줄로 판별(R47 N22) |
-| `.docx.gen_stats.json` `reference_suds` + `.payload.json` `enrichment` | **참조 SwUDS 보강** — 어느 문서를 열었나, 같은 프로젝트인가, ASIL·Related 를 몇 건 적용/차단했나, 게이트가 그 값을 되쓴 값으로 쟀나 | `docx_builder.py`(서브프로세스) + `backend.helpers.uds.merge_enriched_function_details`(부모) — R47 N26 |
+| `.docx.gen_stats.json` `reference_suds`·`enrichment`(+ 구 run 은 `.payload.json` `enrichment` 폴백) | **참조 SwUDS 보강** — 어느 문서를 열었나, 같은 프로젝트인가, ASIL·Related 를 몇 건 적용/차단했나, 게이트가 그 값을 되쓴 값으로 쟀나 | `docx_builder.py`(서브프로세스) + `backend.helpers.uds.merge_enriched_function_details`/`record_enrichment_in_gen_stats`(부모) — R47 N26 · R47-g N28-b |
 
 ## 계약 — 부재를 0 이나 통과로 접지 않는다
 
@@ -588,6 +588,27 @@ def _read_json_dict(path: Path, label: str) -> "tuple[Optional[Dict[str, Any]], 
     return data, None
 
 
+def _normalize_enrichment(rec: Dict[str, Any], record_source: str) -> Dict[str, Any]:
+    """라이터의 `enrichment` 기록 → 화면 계약 `{present, applied, functions, unknown_keys, reason, record_source}`.
+
+    판정 규칙은 출처(통계·payload)와 무관하고, `record_source` 는 어느 파일에서 읽었는지만 말한다(리뷰 W1 —
+    없으면 병기 경로가 끊겨도 값은 같고 소요만 2.3배로 돌아가며 아무 신호가 없다).
+    """
+    if rec.get("applied") is True:
+        fn = _int_field(rec, "functions")
+        unknown = _int_field(rec, "unknown_keys")
+        if fn == 0 and (unknown or 0) > 0:
+            # (리뷰 W3) 라이터는 "병합 성공 0건 · 미지 키 n" 을 남긴다 — 되쓰기 **실패**다. applied:true 를
+            #   그대로 내면 화면이 "되쓴 값 0 함수 — 문서를 만든 값" 이라는 거짓을 그린다.
+            return {"present": True, "applied": False, "functions": 0, "unknown_keys": unknown,
+                    "reason": f"보강본 키 {unknown}건이 payload 함수 키와 하나도 맞지 않아 되쓴 값 없음",
+                    "record_source": record_source}
+        return {"present": True, "applied": True, "functions": fn, "unknown_keys": unknown, "reason": None,
+                "record_source": record_source}
+    return {"present": True, "applied": False, "functions": None, "unknown_keys": None,
+            "reason": str(rec.get("reason") or "사유 미기록"), "record_source": record_source}
+
+
 def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[str, Any]:
     """참조 SwUDS 보강 근거 — 빌더 통계(`reference_suds`) + 부모 병합 기록(`enrichment`). (R47 N26)
 
@@ -608,6 +629,12 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
     - `same_project` 는 빌더 판정 그대로(`True/False/None`) — `None` 은 확인됨이 아니다.
     - `enrichment` 는 별도 `present` 를 갖는다: payload 사이드카 부재 / `enrichment` 키 없음(병합 이전 라이터) /
       `applied:false`+사유 / `applied:true`+`functions`.
+    - (R47-g N28-b) `enrichment` 의 **출처는 둘**이고 순서가 계약이다: 통계 사이드카에 `enrichment` 가 있으면
+      그것을 쓰고 **payload 는 열지 않는다**(부모가 payload 기록 직후 병기 — `record_enrichment_in_gen_stats`).
+      없을 때만 `<out>.payload.json` 을 연다(구 run — 2.7MB 전량 파싱, 느릴 뿐 값은 같다). 두 출처는 같은
+      dict 를 같은 규칙으로 읽는다(`_normalize_enrichment`) — "0건 병합·미지 키 n" 은 어느 쪽에서 와도 실패다.
+      `record_source` 가 어느 파일이었는지 말한다(`"gen_stats"` / `"payload"` / 기록 없음 `None`) — 병기 경로가
+      끊기는 회귀는 값이 아니라 이 키와 소요로만 보인다.
     """
     stats, why = _read_json_dict(gen_stats_path, "생성 통계 사이드카")
     if stats is None:
@@ -620,28 +647,21 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
     doc = ref.get("document")
     configured = ref.get("configured")
 
-    payload, pwhy = _read_json_dict(payload_path, "payload 사이드카")
     enrichment: Dict[str, Any]
-    if payload is None:
-        enrichment = {"present": False, "applied": None, "functions": None, "unknown_keys": None, "reason": pwhy}
+    if isinstance(stats.get("enrichment"), dict):
+        # 병기된 요약 — payload 를 열지 않는다(리더 소요의 95% 가 그 파일이었다).
+        enrichment = _normalize_enrichment(stats["enrichment"], "gen_stats")
     else:
-        rec = payload.get("enrichment")
-        if not isinstance(rec, dict):
+        payload, pwhy = _read_json_dict(payload_path, "payload 사이드카")
+        if payload is None:
+            enrichment = {"present": False, "applied": None, "functions": None, "unknown_keys": None, "reason": pwhy,
+                          "record_source": None}
+        elif not isinstance(payload.get("enrichment"), dict):
             enrichment = {"present": False, "applied": None, "functions": None, "unknown_keys": None,
-                          "reason": "payload 에 enrichment 기록 없음(보강본을 병합하지 않는 라이터) — 게이트 ASIL·Related 는 파서 값"}
-        elif rec.get("applied") is True:
-            fn = _int_field(rec, "functions")
-            unknown = _int_field(rec, "unknown_keys")
-            if fn == 0 and (unknown or 0) > 0:
-                # (리뷰 W3) 라이터는 "병합 성공 0건 · 미지 키 n" 을 남긴다 — 되쓰기 **실패**다. applied:true 를
-                #   그대로 내면 화면이 "되쓴 값 0 함수 — 문서를 만든 값" 이라는 거짓을 그린다.
-                enrichment = {"present": True, "applied": False, "functions": 0, "unknown_keys": unknown,
-                              "reason": f"보강본 키 {unknown}건이 payload 함수 키와 하나도 맞지 않아 되쓴 값 없음"}
-            else:
-                enrichment = {"present": True, "applied": True, "functions": fn, "unknown_keys": unknown, "reason": None}
+                          "reason": "payload 에 enrichment 기록 없음(보강본을 병합하지 않는 라이터) — 게이트 ASIL·Related 는 파서 값",
+                          "record_source": None}
         else:
-            enrichment = {"present": True, "applied": False, "functions": None, "unknown_keys": None,
-                          "reason": str(rec.get("reason") or "사유 미기록")}
+            enrichment = _normalize_enrichment(payload["enrichment"], "payload")
 
     return {
         "present": True,

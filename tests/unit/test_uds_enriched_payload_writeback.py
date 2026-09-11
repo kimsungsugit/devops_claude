@@ -181,3 +181,109 @@ class TestTheGateCountsWhatTheDocumentGot:
         generate_uds_field_quality_gate_report(str(out), str(gate))
         text = gate.read_text(encoding="utf-8")
         assert "보강 미반영(사유: 빌더가 보강본을 남기지 않음" in text
+
+
+class TestParentRecordsEnrichmentInGenStats:
+    """(R47-g N28-b) 부모는 payload 를 쓴 **뒤** 같은 `enrichment` 요약을 `<out>.docx.gen_stats.json` 에 병기한다.
+
+    근거 리더가 네 값 때문에 2.7MB payload 를 열던 것을 5KB 통계로 옮긴다. 통계가 없거나 깨졌으면 건드리지
+    않는다(리더가 payload 로 폴백 — 느릴 뿐 틀리지 않는다). 순서가 계약이다: payload 기록이 실패하면 병기도 없다.
+    """
+
+    def _stats(self, out: Path, **extra) -> Path:
+        from report_gen.docx_builder import gen_stats_path
+
+        p = gen_stats_path(str(out))
+        p.write_text(json.dumps({"mode": "template", "match_pct": 81.5,
+                                 "reference_suds": {"identity": {"same_project": True}, "safety_fields_applied": 1},
+                                 **extra}, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def _enriched(self, out: Path, **fields) -> Path:
+        from report_gen.docx_builder import enriched_function_details_path
+
+        p = enriched_function_details_path(str(out))
+        p.write_text(json.dumps({"source": "docx_builder",
+                                 "reference_suds": {"identity": {"same_project": True}, "safety_fields_applied": 1},
+                                 "function_details": {"SwUFn_001": {"name": "alpha", **fields}}}), encoding="utf-8")
+        return p
+
+    def test_records_the_summary_without_the_nested_reference_and_keeps_builder_keys(self, tmp_path):
+        from backend.helpers.uds import record_enrichment_in_gen_stats
+
+        out = tmp_path / "out.docx"
+        gs = self._stats(out)
+        rec = {"applied": True, "functions": 7, "unknown_keys": 1, "source": "out.docx.function_details.json",
+               "reference_suds": {"identity": {"same_project": True}}}
+        assert record_enrichment_in_gen_stats(out, rec) is True
+        data = json.loads(gs.read_text(encoding="utf-8"))
+        assert data["enrichment"] == {"applied": True, "functions": 7, "unknown_keys": 1, "source": "out.docx.function_details.json"}
+        assert data["match_pct"] == 81.5 and data["reference_suds"]["safety_fields_applied"] == 1   # 빌더 값 보존
+        assert "reference_suds" not in data["enrichment"]                                          # 세 번째 복제 없음
+
+    def test_missing_or_broken_stats_are_left_alone(self, tmp_path):
+        from backend.helpers.uds import record_enrichment_in_gen_stats
+        from report_gen.docx_builder import gen_stats_path
+
+        out = tmp_path / "out.docx"
+        assert record_enrichment_in_gen_stats(out, {"applied": False, "reason": "x"}) is False
+        assert not gen_stats_path(str(out)).exists()                     # 없는 통계를 만들어내지 않는다
+        gs = gen_stats_path(str(out))
+        gs.write_text("{ not json", encoding="utf-8")
+        assert record_enrichment_in_gen_stats(out, {"applied": False, "reason": "x"}) is False
+        assert gs.read_text(encoding="utf-8") == "{ not json"            # 깨진 통계를 덮어쓰지 않는다
+        gs.write_text("[1, 2]", encoding="utf-8")
+        assert record_enrichment_in_gen_stats(out, {"applied": False, "reason": "x"}) is False
+        assert gs.read_text(encoding="utf-8") == "[1, 2]"
+        assert record_enrichment_in_gen_stats(out, {}) is False
+
+    @pytest.mark.parametrize("module_name", ["backend.routers.jenkins", "backend.routers.local"])
+    def test_twin_writes_payload_then_the_stats_copy_and_the_reader_no_longer_needs_the_payload(self, tmp_path, module_name):
+        import importlib
+
+        from report_gen.evidence import read_evidence
+
+        mod = importlib.import_module(module_name)
+        out = tmp_path / "out.docx"
+        out.write_bytes(b"PK\x03\x04dummy")
+        self._stats(out)
+        self._enriched(out, asil="B")
+        payload = {"function_details": {"SwUFn_001": {"name": "alpha", "asil": "TBD"}}}
+        sidecar = Path(mod._write_uds_payload_sidecar(out, payload))
+        pay = json.loads(sidecar.read_text(encoding="utf-8"))
+        gs = json.loads((tmp_path / "out.docx.gen_stats.json").read_text(encoding="utf-8"))
+        expect = {k: v for k, v in pay["enrichment"].items() if k != "reference_suds"}
+        assert gs["enrichment"] == expect and expect["functions"] == 1
+        # 관측량: payload 를 지워도 근거의 enrichment 는 그대로 — 리더가 payload 를 열지 않는다는 뜻.
+        sidecar.unlink()
+        enr = read_evidence(str(out), sections=("reference",))["reference"]["enrichment"]
+        assert enr == {"present": True, "applied": True, "functions": 1, "unknown_keys": 0, "reason": None,
+                       "record_source": "gen_stats"}
+
+    def test_stats_are_not_touched_when_the_payload_write_fails(self, tmp_path, monkeypatch):
+        """순서가 계약 — payload 없이 통계만 '되쓴 값 1 함수' 라 하면 게이트(문서 자기 대조)와 근거가 어긋난다."""
+        from backend.routers import jenkins
+
+        out = tmp_path / "out.docx"
+        gs = self._stats(out)
+        before = gs.read_bytes()
+        self._enriched(out, asil="B")
+
+        def _boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(jenkins, "atomic_write_text", _boom)
+        assert jenkins._write_uds_payload_sidecar(out, {"function_details": {"SwUFn_001": {"asil": "TBD"}}}) is None
+        assert gs.read_bytes() == before
+
+    def test_all_three_twins_record_after_the_atomic_write(self):
+        from backend.helpers import uds as U
+        from backend.routers import jenkins, local
+        from tests.unit._source_probe import source_of
+
+        for fn in (U._uds_generate_from_paths, jenkins._write_uds_payload_sidecar, local._write_uds_payload_sidecar):
+            src = source_of(fn)
+            assert "record_enrichment_in_gen_stats(out_path" in src, fn.__qualname__
+            # (리뷰 I3) 첫 출현 기준이 자명해지지 않게 — 이 함수 안의 원자 기록은 payload 하나뿐이어야 한다.
+            assert src.count("atomic_write_text(") == 1, fn.__qualname__
+            assert src.index("atomic_write_text(") < src.index("record_enrichment_in_gen_stats("), fn.__qualname__

@@ -122,6 +122,7 @@ from backend.helpers.uds import (  # noqa: F401
     _validate_docx_template_bytes,
     _write_residual_tbd_report,
     merge_enriched_function_details,
+    record_enrichment_in_gen_stats,
     anchor_project_identity,
     annotate_reference_source,
     describe_reference_suds_source,
