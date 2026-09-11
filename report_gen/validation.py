@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import report_gen.validation_labels as VL
 from report_gen.atomic_io import atomic_write_text
 from report_gen.docx_builder import _iter_template_blocks
+from report_gen.enrichment_record import normalize_enrichment
 from report_gen.function_analyzer import (
     _classify_description_quality,
     _is_generic_description,
@@ -1243,11 +1244,16 @@ def generate_uds_field_quality_gate_report(
         # 리뷰 F3: ASIL/Related/호출 값은 **payload(파서) 기준**이다 — 문서 셀과 다를 수 있다(실측 344행 중 11행의
         # Related ID 계열이 달랐다). 어느 쪽을 쟀는지 적는다.
         # (R47 N27) payload 가 빌더의 보강본을 병합한 것인지 — 아니면 문서(참조 보강 후)와 갈린다(실측 82.8% vs 23.8%).
+        # (R47-h N33) 판정은 근거 리더와 **같은 함수**다 — `applied` 를 날것으로 읽으면 "0건 병합·미지 키 n"(키 전량
+        #   불일치 = 되쓰기 실패)을 여기선 "되쓴 값 0 함수 · 문서를 만든 값과 같다" 로 적고 보드는 ⚠ 로 그려 한 run 에
+        #   두 판정이 난다.
         _enr = payload.get("enrichment") if isinstance(payload.get("enrichment"), dict) else None
-        if _enr and _enr.get("applied"):
-            lines.append(f"- Scored fields source: `payload` — 빌더가 되쓴 값(참조 SwUDS 보강 반영 `{_enr.get('functions')}` 함수) · 문서를 만든 값과 같다")
-        elif _enr:
-            lines.append(f"- Scored fields source: `payload` — ⚠ 보강 미반영(사유: {_enr.get('reason')}) · ASIL·Related 는 파서 값이라 문서 셀과 다를 수 있다")
+        # 빈 dict 도 "기록 있음" 이다(리뷰 I1 — 근거 리더와 같은 isinstance 기준. 진리값으로 거르면 `{}` 에서 두 표면이 갈린다).
+        _enr_n = normalize_enrichment(_enr, "payload") if _enr is not None else None
+        if _enr_n and _enr_n["applied"]:
+            lines.append(f"- Scored fields source: `payload` — 빌더가 되쓴 값(참조 SwUDS 보강 반영 `{_enr_n['functions']}` 함수) · 문서를 만든 값과 같다")
+        elif _enr_n:
+            lines.append(f"- Scored fields source: `payload` — ⚠ 보강 미반영(사유: {_enr_n['reason']}) · ASIL·Related 는 파서 값이라 문서 셀과 다를 수 있다")
         else:
             lines.append("- Scored fields source: `payload` — ASIL·Related·호출 값은 파서 값이며 문서 셀과 다를 수 있다(보강본 병합 이전 라이터)")
         lines.append(f"- Document entries: `{document_entries}` · scored (document ∩ payload): `{total}`")

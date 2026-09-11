@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import report_gen.validation_labels as VL
+from report_gen.enrichment_record import int_field as _int_field
+from report_gen.enrichment_record import normalize_enrichment as _normalize_enrichment
 from report_gen.gate_report import parse_gate_report, parse_scoring_scope
 
 _logger = logging.getLogger("report_gen.evidence")
@@ -547,11 +549,6 @@ def _uncomparable(text: Optional[str]) -> Optional[bool]:
     return False if _as_count(raw) is not None else None
 
 
-def _int_field(d: Dict[str, Any], key: str) -> Optional[int]:
-    v = d.get(key)
-    return v if isinstance(v, int) and not isinstance(v, bool) else None
-
-
 def _int_sum(d: Any) -> Optional[int]:
     """`{"inputs": 3, "outputs": 0, ...}` 의 합 — dict 가 아니거나 **정수가 아닌 축이 하나라도 있으면** 미측정(None).
 
@@ -586,27 +583,6 @@ def _read_json_dict(path: Path, label: str) -> "tuple[Optional[Dict[str, Any]], 
     if not isinstance(data, dict):
         return None, f"{label} 형식이 dict 가 아님"
     return data, None
-
-
-def _normalize_enrichment(rec: Dict[str, Any], record_source: str) -> Dict[str, Any]:
-    """라이터의 `enrichment` 기록 → 화면 계약 `{present, applied, functions, unknown_keys, reason, record_source}`.
-
-    판정 규칙은 출처(통계·payload)와 무관하고, `record_source` 는 어느 파일에서 읽었는지만 말한다(리뷰 W1 —
-    없으면 병기 경로가 끊겨도 값은 같고 소요만 2.3배로 돌아가며 아무 신호가 없다).
-    """
-    if rec.get("applied") is True:
-        fn = _int_field(rec, "functions")
-        unknown = _int_field(rec, "unknown_keys")
-        if fn == 0 and (unknown or 0) > 0:
-            # (리뷰 W3) 라이터는 "병합 성공 0건 · 미지 키 n" 을 남긴다 — 되쓰기 **실패**다. applied:true 를
-            #   그대로 내면 화면이 "되쓴 값 0 함수 — 문서를 만든 값" 이라는 거짓을 그린다.
-            return {"present": True, "applied": False, "functions": 0, "unknown_keys": unknown,
-                    "reason": f"보강본 키 {unknown}건이 payload 함수 키와 하나도 맞지 않아 되쓴 값 없음",
-                    "record_source": record_source}
-        return {"present": True, "applied": True, "functions": fn, "unknown_keys": unknown, "reason": None,
-                "record_source": record_source}
-    return {"present": True, "applied": False, "functions": None, "unknown_keys": None,
-            "reason": str(rec.get("reason") or "사유 미기록"), "record_source": record_source}
 
 
 def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[str, Any]:

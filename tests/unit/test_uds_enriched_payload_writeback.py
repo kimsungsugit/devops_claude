@@ -287,3 +287,77 @@ class TestParentRecordsEnrichmentInGenStats:
             # (리뷰 I3) 첫 출현 기준이 자명해지지 않게 — 이 함수 안의 원자 기록은 payload 하나뿐이어야 한다.
             assert src.count("atomic_write_text(") == 1, fn.__qualname__
             assert src.index("atomic_write_text(") < src.index("record_enrichment_in_gen_stats("), fn.__qualname__
+
+
+class TestGateHeaderAppliesTheZeroMergeRule:
+    """(R47-h N33) 게이트 md 머리글은 근거 리더와 **같은 판정 함수**로 `enrichment` 를 읽는다.
+
+    R47 리뷰 W3 의 규칙("applied:true · functions:0 · unknown_keys:n>0 = 되쓰기 실패")을 근거 리더만 알았다.
+    md 는 `applied` 를 날것으로 읽어 같은 run 을 "되쓴 값 0 함수 · 문서를 만든 값과 같다" 라 적었고 보드는 ⚠ 를
+    그렸다 — 한 기록에 두 판정. 관측량은 md 본문이고, 대조군은 근거 API 의 `applied`/`reason` 이다.
+    """
+
+    def test_header_calls_zero_merge_a_failure_like_the_evidence_reader(self, tmp_path):
+        from backend.routers.jenkins import _write_uds_payload_sidecar
+        from report_gen.docx_builder import enriched_function_details_path
+        from report_gen.evidence import read_evidence
+        from report_gen.validation import generate_uds_field_quality_gate_report
+
+        out, pay = _generate(tmp_path)
+        p = enriched_function_details_path(str(out))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data["function_details"] = {"SwUFn_999": {"asil": "A"}}          # payload 키와 하나도 안 맞는 보강본
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        sidecar = Path(_write_uds_payload_sidecar(out, pay))
+        rec = json.loads(sidecar.read_text(encoding="utf-8"))["enrichment"]
+        assert (rec["applied"], rec["functions"], rec["unknown_keys"]) == (True, 0, 1)   # 라이터 기록은 그대로다
+
+        gate = out.with_suffix(".quality_gate.md")
+        generate_uds_field_quality_gate_report(str(out), str(gate))
+        text = gate.read_text(encoding="utf-8")
+        assert "⚠ 보강 미반영(사유: 보강본 키 1건이 payload 함수 키와 하나도 맞지 않아 되쓴 값 없음)" in text, text[:1500]
+        assert "빌더가 되쓴 값(참조" not in text
+        enr = read_evidence(str(out), sections=("reference",))["reference"]["enrichment"]
+        assert enr["applied"] is False and enr["reason"] in text
+
+    @pytest.mark.parametrize("rec, expect_applied", [
+        ({"applied": True, "functions": 3, "unknown_keys": 2}, True),
+        ({"applied": True, "functions": 0, "unknown_keys": 5}, False),
+        ({"applied": True, "functions": 0, "unknown_keys": 0}, True),      # 0/0 은 실패가 아니다 — 대조군
+        ({"applied": False, "reason": "보강본 형식이 dict 가 아님"}, False),
+        ({"applied": True, "functions": "?", "unknown_keys": 7}, False),   # (리뷰 W1) 정수 아님 = 판정 불가, 성공 아님
+        ({"applied": True, "functions": 0, "unknown_keys": None}, False),  # (리뷰 W1) 미기록을 0 으로 접지 않는다
+        ({}, False),                                                        # (리뷰 I1) 빈 기록도 기록 — 두 표면 같은 문장
+    ])
+    def test_header_and_evidence_reader_agree_for_every_record_shape(self, tmp_path, rec, expect_applied):
+        """같은 payload 기록을 두 표면이 읽으면 `applied` 판정과 사유가 같고, 그 판정은 기대값과도 같다.
+
+        패리티만 단언하면 공용 규칙이 통째로 틀려도 통과한다(뮤테이션 M3 "0/0 도 실패" 가 살아남았다) — 절대값을 함께 박는다.
+        """
+        from backend.routers.jenkins import _write_uds_payload_sidecar
+        from report_gen.docx_builder import gen_stats_path
+        from report_gen.evidence import read_evidence
+        from report_gen.validation import generate_uds_field_quality_gate_report
+
+        out, pay = _generate(tmp_path)
+        sidecar = Path(_write_uds_payload_sidecar(out, pay))
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        data["enrichment"] = rec
+        sidecar.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        gs = gen_stats_path(str(out))
+        if gs.is_file():                                                  # 리더가 같은 파일(payload)을 읽게 병기를 지운다
+            stats = json.loads(gs.read_text(encoding="utf-8"))
+            stats.pop("enrichment", None)
+            gs.write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+
+        gate = out.with_suffix(".quality_gate.md")
+        generate_uds_field_quality_gate_report(str(out), str(gate))
+        text = gate.read_text(encoding="utf-8")
+        enr = read_evidence(str(out), sections=("reference",))["reference"]["enrichment"]
+        assert enr["record_source"] == "payload", enr
+        says_applied = "빌더가 되쓴 값(참조 SwUDS 보강 반영" in text
+        assert says_applied is enr["applied"] is expect_applied, (rec, text[:1500])
+        if enr["applied"]:
+            assert f"보강 반영 `{enr['functions']}` 함수" in text
+        else:
+            assert f"⚠ 보강 미반영(사유: {enr['reason']})" in text
