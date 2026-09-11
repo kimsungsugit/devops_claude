@@ -61,8 +61,8 @@ from backend.helpers import (
     build_vectorcast_metadata,
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
-    anchor_project_identity,
-    pick_reference_suds_source,
+    annotate_reference_source,
+    describe_reference_suds_source,
     resolve_reference_suds_for_generation,
     resolve_registered_uds_template_local,
 )
@@ -1116,7 +1116,8 @@ async def local_uds_generate(
     #   서브프로세스 env 에 빈 값을 **명시 주입**해 참조 없이 생성한다(보드 근거 '미전달') — config 기본값을 읽지 않는다.
     #   AI 예시문(아래)도 같은 문서를 쓰므로 AI 블록 **앞에서** 해석한다(리뷰 W3 — 예시문 경로로 남의 프로젝트 본문이
     #   프롬프트에 실리던 두 번째 사이트). cloudium 이면 정본(수십 MB)을 워커로 받아오므로 루프 밖에서(리뷰 W1).
-    _ref_raw, _ref_pick_why, _ref_origin = pick_reference_suds_source(reference_doc_path, source_root)
+    _ref_src = describe_reference_suds_source(reference_doc_path, source_root)
+    _ref_raw, _ref_pick_why = _ref_src["raw"], _ref_src["why"]
     # 템플릿 — 업로드가 먼저. 없으면 등록본(로컬화)을 잡고, 정본이 있으면 **백엔드 단일 규칙**(`resolve_template_for`,
     #   정본 우선 — jenkins 두 곳과 같은 함수)이 둘 중 하나를 고른다. 같은 정본이 템플릿(heading 집합)이자 참조(ASIL·Related)다.
     tpl_path = None
@@ -1161,7 +1162,8 @@ async def local_uds_generate(
         _ref_suds, _ref_suds_why = "", _ref_pick_why
     (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
     # (리뷰 C1) payload 신원 토큰이 소스 루트 leaf 뿐이라 정본을 열고도 "다른 프로젝트" 로 막힌다 — 레지스트리 id 를 얹는다.
-    anchor_project_identity(uds_payload, source_root, _ref_origin)
+    #   (N30) 폼 경로가 레지스트리 정본과 다른 파일이면 그 사실도 payload → gen_stats → 근거에 남긴다.
+    annotate_reference_source(uds_payload, source_root, _ref_src)
 
     if ai_enable:
         rag_snippets: List[Dict[str, Any]] = []
@@ -1701,7 +1703,8 @@ async def local_uds_generate_async(
             #   ⚠ 이전 로그는 "config 기본값을 읽는다" 고 적었는데 거짓이었다 — `_docx_subprocess_env` 는 빈 값을 실어
             #   보드 근거에 '미전달' 로 찍혔다. 로그가 화면과 어긋나면 사람이 둘 중 하나를 안 믿게 된다.
             #   (이 블록은 워커 스레드 안이라 루프를 잡지 않는다 — 동기 판은 `_run_blocking` 으로 감싼다.)
-            _ref_raw, _ref_pick_why, _ref_origin = pick_reference_suds_source(reference_doc_path, source_root)
+            _ref_src = describe_reference_suds_source(reference_doc_path, source_root)
+            _ref_raw, _ref_pick_why = _ref_src["raw"], _ref_src["why"]
             if not tpl_path and _ref_raw:
                 # 정본이 있으면 템플릿도 백엔드 단일 규칙이 고른다(동기 판·jenkins 와 같은 함수). 없으면 빌더가 등록본을 해석한다.
                 from backend.services.docgen_template_source import resolve_template_for
@@ -1717,7 +1720,7 @@ async def local_uds_generate_async(
                 _ref_suds, _ref_suds_why = "", _ref_pick_why
             (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
             # (리뷰 C1) 레지스트리 id 를 신원 토큰에 얹는다 — 업로드 요구문서(tmpXXXX.docx)면 `source_docs` 도 토큰이 없다.
-            anchor_project_identity(uds_payload, source_root, _ref_origin)
+            annotate_reference_source(uds_payload, source_root, _ref_src)
             _generate_docx_with_retry(tpl_path, uds_payload, out_path, reference_suds_path=_ref_suds)
             _write_uds_payload_sidecar(out_path, uds_payload)
             residual_tbd_path = _write_residual_tbd_report(out_path, (uds_payload.get("summary") or {}).get("mapping") or {})

@@ -1451,4 +1451,32 @@ describe('DocGenStatusBoard — 참조 SwUDS 보강 근거 (R47 N26)', () => {
     li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
     expect(li.textContent).not.toContain('출처');
   });
+  it('지정 경로가 레지스트리 정본과 다른 파일이면 경고하고, 같거나 기록이 없으면 말하지 않는다 (R47-e N30)', async () => {
+    const base = {
+      present: true, document: '(OTHER_SwUDS) y.docx', configured: true, same_project: true,
+      identity_reason: 'token_match', shared_tokens: ['KJPDS02'], safety_fields_applied: 1, safety_fields_blocked: 0,
+      origin: 'form', enrichment: { present: true, applied: true, functions: 1, reason: null },
+    };
+    await openEvidence({ ...base, registry_compare: 'differs', registry_mismatch: { scm_id: 'kjpds02_pv', form: '(OTHER_SwUDS) y.docx', registry: '(KJPDS02_SwUDS) v3.03.docx' } });
+    let li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('⚠ 지정 (OTHER_SwUDS) y.docx ≠ 레지스트리 정본 (KJPDS02_SwUDS) v3.03.docx (kjpds02_pv)');
+    expect(li.textContent).not.toContain('열지도 못했다');
+    cleanup();
+    // (리뷰 I6) 참조를 열지 못한 생성이면 "잘못된 파일을 썼다" 로 읽히지 않게 갈라 말한다.
+    await openEvidence({ ...base, document: null, safety_fields_applied: 0, registry_compare: 'differs',
+      registry_mismatch: { scm_id: 'kjpds02_pv', form: '(OTHER_SwUDS) y.docx', registry: '(KJPDS02_SwUDS) v3.03.docx' } });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('열지도 못했다');
+    cleanup();
+    // (리뷰 W2) 대조 불가는 "같음" 이 아니다.
+    await openEvidence({ ...base, registry_compare: 'unavailable:레지스트리 조회 실패(RuntimeError)', registry_mismatch: null });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('레지스트리 대조 불가(레지스트리 조회 실패(RuntimeError))');
+    expect(li.textContent).not.toContain('≠');
+    cleanup();
+    await openEvidence({ ...base, registry_compare: 'same', registry_mismatch: null });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).not.toContain('≠');
+    expect(li.textContent).not.toContain('대조 불가');
+  });
 });

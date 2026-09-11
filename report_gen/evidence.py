@@ -558,6 +558,16 @@ def _int_sum(d: Any) -> Optional[int]:
     return sum(d.values())
 
 
+def _mismatch_field(v: Any) -> Optional[Dict[str, str]]:
+    """`registry_mismatch` — dict 이고 `form`·`registry` 가 비지 않은 문자열일 때만 그대로(문자열화), 아니면 None."""
+    if not isinstance(v, dict):
+        return None
+    form, reg = str(v.get("form") or "").strip(), str(v.get("registry") or "").strip()
+    if not form or not reg:
+        return None
+    return {"scm_id": str(v.get("scm_id") or ""), "form": form, "registry": reg}
+
+
 def _read_json_dict(path: Path, label: str) -> "tuple[Optional[Dict[str, Any]], Optional[str]]":
     """`(dict, None)` 또는 `(None, 사유)`. 부재와 읽기 실패를 다른 사유로 낸다."""
     if not path.is_file():
@@ -635,6 +645,9 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
         "shared_tokens": [str(t) for t in (identity.get("shared_tokens") or []) if t],
         # (R47-d 리뷰 I3) 누가 골랐나 — "form" / "registry:<id>" / None(기록 없음: 구 빌더·jenkins 경로).
         "origin": (str(ref.get("origin")).strip() or None) if isinstance(ref.get("origin"), str) else None,
+        # (R47-e N30) 폼 지정 경로 ≠ 레지스트리 정본 — 있으면 `{"scm_id","form","registry"}`, 없으면 None(불일치 없음 또는 미기록).
+        "registry_compare": (str(ref.get("registry_compare")).strip() or None) if isinstance(ref.get("registry_compare"), str) else None,
+        "registry_mismatch": _mismatch_field(ref.get("registry_mismatch")),
         "safety_fields_applied": _int_field(ref, "safety_fields_applied"),
         "safety_fields_blocked": _int_field(ref, "safety_fields_blocked"),
         "descriptive_fields_applied": _int_field(ref, "descriptive_fields_applied"),

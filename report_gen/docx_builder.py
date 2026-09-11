@@ -1960,6 +1960,8 @@ def _reference_identity_verdict(uds_payload: Any, ref_path: Path) -> Dict[str, A
         summary = uds_payload.get("summary")
         if isinstance(summary, dict):
             payload_tokens |= _project_tokens(summary.get("project"))
+        # (R47-e 리뷰 W1) 부모가 레지스트리 항목 id 를 **전용 키**로 준다 — 표지 문자열과 분리된 신원 입력.
+        payload_tokens |= _project_tokens(uds_payload.get("reference_identity_hint"))
 
     if not ref_tokens:
         return {"same_project": None, "reason": "ref_no_token",
@@ -2675,6 +2677,12 @@ def generate_uds_docx(
         #   없으면 None(구 호출부·jenkins 경로). 로그에만 있던 출처가 사이드카→근거 화면까지 간다.
         "origin": (str(uds_payload.get("reference_suds_origin")).strip() or None)
         if isinstance(uds_payload, dict) and uds_payload.get("reference_suds_origin") else None,
+        # (R47-e N30) 폼↔레지스트리 대조 상태 "same"/"differs"/"unavailable:<사유>"(폼 없으면 None) — null 하나로 접지 않는다(리뷰 W2).
+        "registry_compare": (str(uds_payload.get("reference_suds_registry_compare")).strip() or None)
+        if isinstance(uds_payload, dict) and uds_payload.get("reference_suds_registry_compare") else None,
+        # (R47-e N30) 지정 경로가 레지스트리 정본과 다른 파일이었나 — `{"scm_id","form","registry"}`(파일명) 또는 None.
+        "registry_mismatch": dict(uds_payload["reference_suds_registry_mismatch"])
+        if isinstance(uds_payload, dict) and isinstance(uds_payload.get("reference_suds_registry_mismatch"), dict) else None,
         "safety_fields_applied": 0,
         "safety_fields_blocked": 0,
         "descriptive_fields_applied": 0,

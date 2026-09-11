@@ -187,10 +187,25 @@ class TestCallSitesAreWired:
         from tests.unit._source_probe import source_of
 
         src = source_of(jenkins)
-        assert src.count("resolve_reference_suds_for_generation(reference_doc_path") >= 2, \
-            "jenkins 동기·비동기 UDS 핸들러 둘 다 참조를 해석해야 한다"
+        # (R47-e N30) 서버가 최종 판정한다 — 폼이 먼저, 비면 레지스트리 정본. local 두 곳과 같은 함수.
+        assert src.count("describe_reference_suds_source, reference_doc_path, source_root)") >= 2, \
+            "jenkins 동기·비동기 UDS 핸들러 둘 다 참조 출처를 서버에서 판정해야 한다"
+        assert src.count('resolve_reference_suds_for_generation, _ref_src["raw"]') >= 2, \
+            "jenkins 동기·비동기 UDS 핸들러 둘 다 참조를 로컬화해야 한다"
         # 동기(lambda 인자)·비동기(kwarg) 두 곳 — 한 곳만 남으면 뮤턴트(M3)가 산다.
         assert src.count("reference_suds_path=_ref_suds") >= 2, "호출부 한 곳이 참조를 넘기지 않는다"
+        # 신원 앵커·불일치 기록: 동기는 핸들러에서, 비동기는 payload 를 만드는 헬퍼로 출처를 넘긴다.
+        assert "annotate_reference_source(uds_payload, source_root, _ref_src)" in src
+        assert "reference_source=_ref_src" in src
+        # 같은 정본이 템플릿 단일 규칙에도 들어간다(폼 → 레지스트리 순).
+        assert src.count("reference_doc=reference_doc_path or _ref_src[\"raw\"]") >= 2
+        # (R47-e 리뷰 W6) 레지스트리 락·정본 로컬화는 루프 밖 — local 과 같은 규약.
+        assert src.count("await _run_blocking(describe_reference_suds_source, reference_doc_path, source_root)") >= 2
+        assert src.count("await _run_blocking(resolve_reference_suds_for_generation, _ref_src[\"raw\"]") >= 2
+        # (R47-e 리뷰 W5) AI 예시문 폴백이 HDPDM01 기본값(config·docs/*.txt)을 읽지 않는다 — 참조 SwUDS 를 쓴다.
+        assert "Path(config.UDS_REF_SUDS_PATH)" not in src
+        assert '"HDPDM01_UDS.txt"' not in src
+        assert "ai_example_text = _read_text_from_file(Path(_ref_suds))" in src
 
     def test_generate_from_paths_forwards_to_the_retry_runner(self):
         from tests.unit._source_probe import source_of
@@ -198,6 +213,9 @@ class TestCallSitesAreWired:
         src = source_of(U._uds_generate_from_paths)
         assert "reference_suds_path=reference_suds_path" in src
         assert "reference_suds_path" in U._uds_generate_from_paths.__code__.co_varnames
+        # (N30) 출처가 오면 payload 를 만든 직후 앵커·불일치를 새긴다.
+        assert "annotate_reference_source(uds_payload, source_root, reference_source)" in src
+        assert "reference_source" in U._uds_generate_from_paths.__code__.co_varnames
 
     def test_retry_runner_uses_the_env_helper(self):
         from tests.unit._source_probe import source_of

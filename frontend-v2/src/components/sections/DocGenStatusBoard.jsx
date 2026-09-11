@@ -1532,6 +1532,15 @@ function EvidenceDetail({ run, detail }) {
                 {ref.origin === 'form' ? ' · 출처 지정 경로'
                   : typeof ref.origin === 'string' && ref.origin.startsWith('registry:')
                     ? ` · 출처 레지스트리 ${ref.origin.slice('registry:'.length)}` : ''}
+                {/* (R47-e N30) 사용자가 지정한 파일이 레지스트리 정본과 다르다 — 폼이 이기지만 그 사실은 말한다.
+                    참조를 열지 못한 생성이면 "잘못된 파일을 썼다" 로 읽히지 않게 갈라 말한다(리뷰 I6). 대조 불가는 같음이 아니다(W2) */}
+                {ref.registry_mismatch?.registry && (
+                  <> · <strong>⚠ 지정 {ref.registry_mismatch.form} ≠ 레지스트리 정본 {ref.registry_mismatch.registry}
+                    {ref.registry_mismatch.scm_id ? ` (${ref.registry_mismatch.scm_id})` : ''}
+                    {ref.document ? '' : ' — 지정 경로가 정본과 달랐고 열지도 못했다'}</strong></>
+                )}
+                {typeof ref.registry_compare === 'string' && ref.registry_compare.startsWith('unavailable:')
+                  && ` · 레지스트리 대조 불가(${ref.registry_compare.slice('unavailable:'.length)})`}
                 {ref.safety_fields_applied != null && ` · ASIL·Related 적용 ${ref.safety_fields_applied}`}
                 {/* (리뷰 W6) 미측정(null)과 0 은 다르다 — 차단 수가 없으면 "차단 0" 으로 읽히므로 미기록을 말한다 */}
                 {ref.safety_fields_blocked == null ? ' · 차단 미기록'

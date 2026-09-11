@@ -123,10 +123,10 @@ from backend.helpers.uds import (  # noqa: F401
     _write_residual_tbd_report,
     merge_enriched_function_details,
     anchor_project_identity,
+    annotate_reference_source,
+    describe_reference_suds_source,
     log_reference_outcome,
-    pick_reference_suds_source,
     resolve_reference_suds_for_generation,
-    resolve_reference_suds_from_registry,
     resolve_registered_uds_template,
     resolve_registered_uds_template_local,
 )

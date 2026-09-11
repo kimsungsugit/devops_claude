@@ -1802,93 +1802,161 @@ def resolve_reference_suds_for_generation(
     return "", (reasons[0] if reasons else f"참조 SwUDS 를 읽지 못함: {name} ({raw})")
 
 
-def resolve_reference_suds_from_registry(source_root: Any) -> Tuple[str, str, str]:
-    """호출부가 참조 SwUDS 를 안 줬을 때 — **레지스트리 항목의 `linked_docs.uds`** 를 원 경로로 낸다. (R47-d N29)
+def describe_reference_suds_source(reference_doc_path: str, source_root: Any) -> Dict[str, Any]:
+    """UDS 참조 SwUDS 의 **원 경로와 출처** — 폼 `reference_doc_path` 가 먼저, 비면 레지스트리 `uds`. (R47-d N29 → R47-e N30)
 
-    반환 `(원 경로 | "", 사유, 항목 id | "")`. 로컬화는 하지 않는다 — 호출자가 `resolve_reference_suds_for_generation`
-    에 넘겨 템플릿과 같은 해석기를 태운다. 항목 id 는 uds 가 비어 있어도 돌려준다(신원 앵커에 쓴다 — 아래).
+    반환 dict:
+      `raw`(원 경로|"") · `why`(사유) · `origin`(`"form"` / `"registry:<id>"` / `""`) · `scm_id`(source_root 로 판정한 항목,
+      없으면 "") · `basis`(항목을 고른 근거 — `"path"`: 요청 루트가 항목 루트와 일치 / `"id"`: 요청값이 항목 id / `""`) ·
+      `registry_uds`(그 항목의 uds 원 경로|"") · `compare`(폼값 ↔ 레지스트리 정본 대조 — `"same"` / `"differs"` /
+      `"unavailable:<사유>"` / `""`(폼 없음)) · `mismatch`(`compare=="differs"` 일 때 `{"scm_id","form","registry"}`, 아니면 None).
 
-    왜: `/api/local/uds/generate(-async)` 엔 `reference_doc_path` 폼이 없어 N25 이후 **참조 없이** 생성해
-    왔다(보드 근거 '미전달'). 그런데 같은 요청이 `source_root` 로 Quality DB 의 `scm_id` 를 채우고 있었다
-    — 프로젝트를 이미 알고 있으면서 그 프로젝트의 SwUDS 는 열지 않은 것이다.
+    로컬화는 하지 않는다 — 호출자가 같은 원 경로를 ① 템플릿 단일 규칙(`resolve_template_for`, 정본 우선)과 ② 참조
+    로컬화(`resolve_reference_suds_for_generation`)에 차례로 넘긴다. ②는 ①이 만든 로컬 사본(`<tmp>/sha1(원경로)/이름`)을
+    재사용하므로 정본(수십 MB)은 한 번만 내려온다. 레지스트리는 **한 스냅샷**(`resolve_scm_entry`)만 읽는다 — 폼이 있어도
+    읽는데, 불일치 대조와 신원 앵커 id 두 목적을 그 한 번으로 끝낸다.
 
-    프로젝트 판정은 `resolve_scm_entry`(정확일치만, 미상은 None, **한 스냅샷**) 단일 출처다. 후보가 여럿인데
-    안 맞으면 고르지 않는다 — 임의 선택은 남의 프로젝트 ASIL 을 조용히 싣고, 신원 게이트가 막더라도 "왜 보강이
-    0인가" 를 다시 두 라운드 찾게 만든다(R47 실측).
+    ⚠ (리뷰 W4) `resolve_scm_entry` 는 요청 조각이 항목 **id** 와 같아도 항목을 고른다(recorder 용 규칙). 참조 정본 선택에는
+      그 규칙이 위험하다 — `"C:/unregistered,hdpdm01"` 처럼 미등록 경로에 남의 id 가 섞이면 남의 정본이 자동 선택되고 앵커까지
+      그 id 로 맞춰져 신원 게이트를 지난다(probe 실증). 그래서 여기서는 **경로 조각이 하나라도 있으면 그중 하나는 항목 루트와
+      맞아야** 항목을 인정한다. 요청값 전체가 id 하나면(`"kjpds02_pv"`) `basis="id"` 로 인정한다.
+
+    왜 `compare`/`mismatch` 인가(리뷰 W4·W2): jenkins 는 프론트가 `docPaths.uds || linkedDocs.uds` 를 보내고 준비 게이트는
+    `scm_id` 로 정본을 고른다 — 사용자가 설정 화면에 다른 파일을 넣으면 보드가 이름 댄 정본과 실제로 쓴 파일이 갈린다. 폼이
+    이기는 것은 맞지만 그 사실은 남아야 하고, "대조 못 함"(조회 실패·미등록)은 "같음" 과 다른 상태라 따로 말한다.
+    ⚠ (리뷰 W3) 같은 이름의 다른 리비전이 두 트리에 실재한다 — 이름이 같으면 부모 폴더까지 붙여 구분한다.
     """
+    raw_form = str(reference_doc_path or "").strip()
+    sid = ""
+    basis = ""
+    reg_uds = ""
+    reg_why = ""
     raw_root = str(source_root or "").strip()
-    if not raw_root:
-        return "", "참조 SwUDS 미지정 — source_root 도 없어 레지스트리에서 정본을 고를 수 없다", ""
-    try:
-        from backend.services.scm_registry import resolve_scm_entry
-        entry = resolve_scm_entry(raw_root)
-    except Exception as exc:   # noqa: BLE001 - 조회 실패는 "참조 없음" 으로 정직하게(생성은 계속)
-        return "", f"참조 SwUDS 미지정 — 레지스트리 조회 실패({type(exc).__name__}: {str(exc)[:80]})", ""
-    if entry is None:
-        return "", (f"참조 SwUDS 미지정 — source_root 가 레지스트리 항목과 정확히 맞지 않아 정본을 고르지 않는다"
-                    f" ({raw_root[:80]})"), ""
-    sid = str(entry.id)
-    uds = str(getattr(getattr(entry, "linked_docs", None), "uds", "") or "").strip()
-    if not uds:
-        return "", f"참조 SwUDS 미지정 — 레지스트리 {sid} 에 uds 정본이 등록돼 있지 않다", sid
-    return uds, f"레지스트리 {sid} 의 uds 정본", sid
+    if raw_root:
+        try:
+            from backend.services.scm_registry import entry_root_keys, resolve_scm_entry, same_path
+            from report_gen.source_roots import split_source_roots
+            entry = resolve_scm_entry(raw_root)
+            if entry is not None:
+                pieces = split_source_roots(raw_root) or [raw_root]
+                root_keys = entry_root_keys(entry)
+                id_l = str(entry.id or "").strip().lower()
+                path_pieces = [pc for pc in pieces if pc.strip().lower() != id_l]
+                path_hit = any(same_path(pc, rk) for pc in path_pieces for rk in root_keys)
+                if path_hit:
+                    basis = "path"
+                elif not path_pieces:
+                    basis = "id"
+                else:
+                    # 경로 조각이 있는데 어느 것도 항목 루트와 안 맞는다 — id 토큰만으로 고른 항목은 참조 선택에 쓰지 않는다.
+                    reg_why = (f"참조 SwUDS 미지정 — source_root 의 경로 조각이 레지스트리 {entry.id} 의 루트와 맞지 않아"
+                               f"(id 토큰만 일치) 정본을 고르지 않는다 ({raw_root[:80]})")
+                    entry = None
+        except Exception as exc:   # noqa: BLE001 - 조회 실패는 "참조 없음" 으로 정직하게(생성은 계속)
+            entry = None
+            reg_why = f"참조 SwUDS 미지정 — 레지스트리 조회 실패({type(exc).__name__}: {str(exc)[:80]})"
+        if entry is not None:
+            sid = str(entry.id)
+            reg_uds = str(getattr(getattr(entry, "linked_docs", None), "uds", "") or "").strip()
+            if not reg_uds:
+                reg_why = f"참조 SwUDS 미지정 — 레지스트리 {sid} 에 uds 정본이 등록돼 있지 않다"
+        elif not reg_why:
+            reg_why = (f"참조 SwUDS 미지정 — source_root 가 레지스트리 항목과 정확히 맞지 않아 정본을 고르지 않는다"
+                       f" ({raw_root[:80]})")
+    else:
+        reg_why = "참조 SwUDS 미지정 — source_root 도 없어 레지스트리에서 정본을 고를 수 없다"
+
+    out: Dict[str, Any] = {"raw": "", "why": reg_why, "origin": "", "scm_id": sid, "basis": basis,
+                           "registry_uds": reg_uds, "compare": "", "mismatch": None}
+    if raw_form:
+        out.update(raw=raw_form, why="폼 reference_doc_path", origin="form")
+        if not reg_uds:
+            out["compare"] = f"unavailable:{reg_why}"
+            _logger.warning("UDS 참조 SwUDS: 지정 경로를 레지스트리 정본과 대조하지 못했다 — %s", reg_why)
+            return out
+        try:
+            from backend.services.scm_registry import same_path as _same
+            same = _same(raw_form, reg_uds)
+        except Exception as exc:   # noqa: BLE001 - 대조 실패도 상태로 남긴다(같음으로 접지 않는다)
+            out["compare"] = f"unavailable:대조 실패({type(exc).__name__})"
+            return out
+        if same:
+            out["compare"] = "same"
+            return out
+        f_name, r_name = Path(raw_form).name, Path(reg_uds).name
+        if f_name == r_name:
+            # 같은 이름·다른 위치(두 트리의 다른 리비전 — 실측 `0002 A Cappella/…` 와 `1220 진행/0002 A Cappella/…`, 부모 폴더까지
+            # 같다) — 뒤에서부터 처음 **달라지는 세그먼트**를 앞에 붙여야 어느 쪽인지 보인다.
+            fp, rp = Path(raw_form.replace("\\", "/")).parts, Path(reg_uds.replace("\\", "/")).parts
+            k = 0
+            while k < min(len(fp), len(rp)) and fp[-1 - k].lower() == rp[-1 - k].lower():
+                k += 1
+            f_name = f"{fp[-1 - k] if k < len(fp) else '?'}/…/{f_name}"
+            r_name = f"{rp[-1 - k] if k < len(rp) else '?'}/…/{r_name}"
+        out["compare"] = "differs"
+        out["mismatch"] = {"scm_id": sid, "form": f_name, "registry": r_name}
+        return out
+    if reg_uds:
+        out.update(raw=reg_uds, why=f"레지스트리 {sid} 의 uds 정본", origin=f"registry:{sid}")
+    return out
 
 
-def pick_reference_suds_source(reference_doc_path: str, source_root: Any) -> Tuple[str, str, str]:
-    """local UDS 경로의 참조 SwUDS **원 경로** — 폼 `reference_doc_path` 가 먼저, 비면 레지스트리 `uds`. (R47-d N29)
+def annotate_reference_source(uds_payload: Dict[str, Any], source_root: Any, src: Dict[str, Any]) -> str:
+    """payload 에 참조 출처를 새긴다 — 신원 앵커(`anchor_project_identity`) + 폼↔레지스트리 대조 결과. (R47-e N30)
 
-    반환 `(원 경로 | "", 사유, 출처)`. 출처는 `"form"` / `"registry:<id>"` / `""`(없음). 로컬화는 하지 않는다 —
-    호출자가 같은 원 경로를 ① 템플릿 단일 규칙(`resolve_template_for`, 정본 우선)과 ② 참조 로컬화
-    (`resolve_reference_suds_for_generation`)에 차례로 넘긴다. ②는 ①이 만든 로컬 사본(`<tmp>/sha1(원경로)/이름`)을
-    재사용하므로 정본(수십 MB)은 한 번만 내려온다. 출처 문자열은 `anchor_project_identity` 로 payload 에 남겨
-    빌더 통계(`reference_suds.origin`)→근거 화면까지 간다(리뷰 I3).
+    `reference_suds_registry_compare`(문자열)·`reference_suds_registry_mismatch`(dict, differs 일 때만) 는 빌더가
+    `gen_stats.reference_suds.registry_compare/registry_mismatch` 로 베끼고 근거·보드가 읽는다. 불일치는 WARNING 으로도
+    남긴다(전체 경로 — 사이드카엔 파일명만). 반환은 신원 토큰으로 얹은 항목 id("" = 못 골라서 안 얹음).
     """
-    raw = str(reference_doc_path or "").strip()
-    if raw:
-        return raw, "폼 reference_doc_path", "form"
-    raw, why_reg, sid = resolve_reference_suds_from_registry(source_root)
-    if not raw:
-        return "", why_reg, ""
-    return raw, why_reg, f"registry:{sid}"
+    if not isinstance(uds_payload, dict) or not isinstance(src, dict):
+        return ""
+    cmp = str(src.get("compare") or "")
+    if cmp:
+        uds_payload["reference_suds_registry_compare"] = cmp
+    mm = src.get("mismatch")
+    if isinstance(mm, dict):
+        uds_payload["reference_suds_registry_mismatch"] = dict(mm)
+        _logger.warning("UDS 참조 SwUDS: 지정 경로가 레지스트리 %s 의 uds 정본과 다른 파일이다 — 지정 경로를 쓴다 (지정 %s / 레지스트리 %s)",
+                        mm.get("scm_id"), src.get("raw"), src.get("registry_uds"))
+    return anchor_project_identity(uds_payload, source_root, str(src.get("origin") or ""), scm_id=str(src.get("scm_id") or ""))
 
 
-def anchor_project_identity(uds_payload: Dict[str, Any], source_root: Any, origin: str) -> str:
+def anchor_project_identity(uds_payload: Dict[str, Any], source_root: Any, origin: str, *, scm_id: str = "") -> str:
     """payload 의 프로젝트 신원 토큰에 **레지스트리 항목 id** 를 얹는다. (R47-d 리뷰 C1)
 
-    빌더 `_reference_identity_verdict` 는 payload 토큰(`project_name`·`module_name`·`source_docs`·`summary.project`)
-    과 참조 문서 파일명 토큰의 교집합으로 "같은 프로젝트" 를 판정한다. local 경로의 payload 토큰은 소스 루트
-    leaf 디렉터리명뿐이라(실측 `NE1AW_PORTING`→{NE1AW, PORTING} vs 정본 `(KJPDS02_SwUDS)…`→{KJPDS02}) 등록된
-    두 프로젝트 **모두** 교집합이 비어 참조를 열고도 ASIL·Related 가 전부 차단됐다 — R47 이 고치려던 증상이
-    이름만 바꿔 남는다.
+    빌더 `_reference_identity_verdict` 는 payload 토큰(`project_name`·`module_name`·`source_docs`·`summary.project`·
+    **`reference_identity_hint`**)과 참조 문서 파일명 토큰의 교집합으로 "같은 프로젝트" 를 판정한다. local 경로의 payload
+    토큰은 소스 루트 leaf 디렉터리명뿐이라(실측 `NE1AW_PORTING`→{NE1AW, PORTING} vs 정본 `(KJPDS02_SwUDS)…`→{KJPDS02}) 등록된
+    두 프로젝트 **모두** 교집합이 비어 참조를 열고도 ASIL·Related 가 전부 차단됐다 — R47 이 고치려던 증상이 이름만 바꿔 남는다.
 
-    레지스트리 항목 id(`kjpds02_pv`→{KJPDS02}, `hdpdm01`→{HDPDM01})는 "이 source_root 는 이 프로젝트다" 라는
-    관리자의 명시 등록이라 신원 토큰으로 정당하다. ⚠ 게이트를 **통과시키는 것이 아니라 토큰을 하나 더 주는
-    것**이다 — R46 이전처럼 hdpdm01 항목의 uds 가 KJPDS02 문서를 가리키면 {HDPDM01}∩{KJPDS02}=∅ 로 여전히
-    막힌다. 판정 결과는 그대로 `gen_stats.reference_suds.identity` 에 남는다.
+    레지스트리 항목 id(`kjpds02_pv`→{KJPDS02}, `hdpdm01`→{HDPDM01})는 "이 source_root 는 이 프로젝트다" 라는 관리자의 명시
+    등록이라 신원 토큰으로 정당하다. ⚠ 게이트를 **통과시키는 것이 아니라 토큰을 하나 더 주는 것**이다 — R46 이전처럼
+    hdpdm01 항목의 uds 가 KJPDS02 문서를 가리키면 {HDPDM01}∩{KJPDS02}=∅ 로 여전히 막힌다. 판정 결과는 그대로
+    `gen_stats.reference_suds.identity` 에 남는다.
+
+    ⚠ (R47-e 리뷰 W1) 토큰은 **전용 키 `reference_identity_hint`** 에 둔다. 처음엔 `summary.project` 에 얹었는데 빌더가 그 값을
+      표지 `{{PROJECT_NAME}}`/`{{MODULE_NAME}}` 폴백으로도 읽어(`project_name` 이 비는 jenkins 동기 payload) 납품 문서 표지가
+      내부 슬러그 `kjpds02_pv` 로 바뀌었다. 신원 판정 입력과 표시 문자열은 다른 것이다.
 
     `reference_suds_origin` 은 빌더가 통계에 그대로 베낀다(어느 출처의 문서였나 — 사후 복원용).
-    반환값은 얹은 id(없으면 ""). 항목을 못 고르면 아무것도 바꾸지 않는다(토큰을 지어내지 않는다).
+    반환값은 얹은 id(항목을 못 고르면 "" 이고 아무것도 바꾸지 않는다 — 토큰을 지어내지 않는다).
     """
     if not isinstance(uds_payload, dict):
         return ""
     if origin:
         uds_payload["reference_suds_origin"] = origin
-    sid = ""
-    try:
-        from backend.services.scm_registry import resolve_scm_entry
-        entry = resolve_scm_entry(str(source_root or ""))
-        sid = str(entry.id) if entry is not None else ""
-    except Exception as exc:   # noqa: BLE001 - 앵커는 부가 정보다; 실패해도 생성은 계속(판정은 fail-closed 로 남는다)
-        _logger.warning("UDS 신원 앵커: 레지스트리 조회 실패(%s) — 토큰을 얹지 않는다", type(exc).__name__)
-        sid = ""
+    sid = str(scm_id or "").strip()   # 호출자가 같은 스냅샷에서 이미 골랐으면 다시 읽지 않는다(리뷰 W2)
+    if not sid:
+        try:
+            from backend.services.scm_registry import resolve_scm_entry
+            entry = resolve_scm_entry(str(source_root or ""))
+            sid = str(entry.id) if entry is not None else ""
+        except Exception as exc:   # noqa: BLE001 - 앵커는 부가 정보다; 실패해도 생성은 계속(판정은 fail-closed 로 남는다)
+            _logger.warning("UDS 신원 앵커: 레지스트리 조회 실패(%s) — 토큰을 얹지 않는다", type(exc).__name__)
+            sid = ""
     if not sid:
         return ""
-    summary = uds_payload.get("summary")
-    if not isinstance(summary, dict):
-        summary = {}
-        uds_payload["summary"] = summary
-    if not str(summary.get("project") or "").strip():
-        summary["project"] = sid
+    uds_payload["reference_identity_hint"] = sid
     return sid
 
 
@@ -2305,6 +2373,8 @@ def _uds_generate_from_paths(
     max_items_per_category: Optional[int] = None,
     # (R47 N25) 이 프로젝트의 SwUDS 로컬 경로 — ASIL·Related 보강의 참조. 비면 보강 없음(기본값 대체 금지).
     reference_suds_path: str = "",
+    # (R47-e N30) 그 참조의 출처(`describe_reference_suds_source` 결과) — payload 신원 앵커·불일치 기록에 쓴다.
+    reference_source: Optional[Dict[str, Any]] = None,
     # 정본에만 있는 남의 함수 절을 남길지 지울지 — 기본은 `""`(= keep, 종전 동작).
     # 정규화는 `docx_builder.normalize_unmatched_headings` 단일 출처가 한다.
     unmatched_headings: str = "",
@@ -2601,6 +2671,9 @@ def _uds_generate_from_paths(
     from backend.services.output_paths import reserve_unique_path
     out_path = reserve_unique_path(out_dir / f"uds_spec_{job_slug}_{ts}.docx")
     tpl = str(template_path).strip() or None
+    if reference_source:
+        # (R47-e N30) 레지스트리 id 를 신원 토큰으로, 폼≠레지스트리면 기록 — 네 호출부 중 이 경로만 payload 를 여기서 만든다.
+        annotate_reference_source(uds_payload, source_root, reference_source)
     if reference_suds_path:
         _api_logger.info("[UDS_DOCX] 참조 SwUDS: %s", Path(reference_suds_path).name)
     _generate_docx_with_retry(tpl, uds_payload, out_path, reference_suds_path=reference_suds_path)

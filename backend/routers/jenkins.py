@@ -58,6 +58,8 @@ from backend.helpers import (
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
     merge_enriched_function_details,
+    annotate_reference_source,
+    describe_reference_suds_source,
     resolve_reference_suds_for_generation,
 )
 from backend.helpers.sds import is_sds_filename, is_srs_filename
@@ -2638,15 +2640,26 @@ async def jenkins_uds_generate(
         prefer_reference_from,
         resolve_template_for,
     )
-    _uds_tpl, _uds_tpl_why = resolve_template_for(
-        "uds", registered_template=template_path, reference_doc=reference_doc_path,
+    # (R47 N25 → R47-e N30) 참조 SwUDS 는 **서버가 최종 판정**한다 — 폼 `reference_doc_path` 가 먼저, 비면 `source_root` 로
+    #   판정한 레지스트리 항목의 `uds`(local 두 곳과 같은 함수). 프론트가 `linkedDocs.uds` 를 보내던 것에 기대면 판정이 두 집이 된다.
+    #   레지스트리 락+파일 읽기와 cloudium 정본(수십 MB) 로컬화라 루프 밖에서(리뷰 W6 — local 과 같은 규약).
+    _ref_src = await _run_blocking(describe_reference_suds_source, reference_doc_path, source_root)
+    _uds_tpl, _uds_tpl_why = await _run_blocking(
+        resolve_template_for, "uds", registered_template=template_path,
+        reference_doc=reference_doc_path or _ref_src["raw"],
         prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("UDS 템플릿: %s", _uds_tpl_why)
     tpl = str(_uds_tpl or "").strip() or None
     # (R47 N25) ASIL·Related 보강의 참조는 config 기본값(HDPDM01)이 아니라 **이 프로젝트의 SwUDS** 다.
-    _ref_suds, _ref_suds_why = resolve_reference_suds_for_generation(reference_doc_path, tpl)
+    if _ref_src["raw"]:
+        _ref_suds, _ref_suds_why = await _run_blocking(resolve_reference_suds_for_generation, _ref_src["raw"], tpl)
+        _ref_suds_why = f"{_ref_suds_why} [{_ref_src['why']}]"
+    else:
+        _ref_suds, _ref_suds_why = "", _ref_src["why"]
     (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
+    # 신원 앵커(레지스트리 id 토큰) + 폼≠레지스트리 불일치 기록 — payload → gen_stats → 근거.
+    annotate_reference_source(uds_payload, source_root, _ref_src)
     await _run_blocking(
         lambda: _generate_docx_with_retry(tpl, uds_payload, out_path, reference_suds_path=_ref_suds),
     )
@@ -2906,24 +2919,8 @@ async def jenkins_uds_generate_async(
                 ai_example_text = _read_text_from_file(Path(tmp.name))
         except Exception:
             ai_example_text = ai_example_text or ""
-    if ai_enable and not ai_example_text:
-        for cand in [
-            repo_root / "docs" / "UDSPDM01_UDS.txt",
-            repo_root / "docs" / "HDPDM01_UDS.txt",
-        ]:
-            try:
-                if cand.exists() and cand.is_file():
-                    ai_example_text = _read_text_from_file(cand)
-                    break
-            except Exception:
-                continue
-    if ai_enable and not ai_example_text:
-        try:
-            ref_suds_path = Path(config.UDS_REF_SUDS_PATH)
-            if ref_suds_path.exists() and ref_suds_path.is_file():
-                ai_example_text = _read_text_from_file(ref_suds_path)
-        except Exception:
-            pass
+    # (R47-e 리뷰 W5) AI 예시문 폴백은 아래에서 **이 프로젝트의 참조 SwUDS**(`_ref_suds`)로 채운다 — 예전엔 저장소 `docs/` 의
+    #   HDPDM01 예시 텍스트와 `config.UDS_REF_SUDS_PATH`(HDPDM01) 를 읽어 남의 프로젝트 본문이 프롬프트에 실렸다(local 과 같은 사이트).
 
     def _progress_cb(stage: str, data: Dict[str, Any]) -> None:
         if not isinstance(data, dict):
@@ -2945,14 +2942,28 @@ async def jenkins_uds_generate_async(
         prefer_reference_from,
         resolve_template_for,
     )
-    _uds_tpl, _uds_tpl_why = resolve_template_for(
-        "uds", registered_template=template_path, reference_doc=reference_doc_path,
+    # (R47 N25 → R47-e N30) 참조 SwUDS 는 서버가 최종 판정한다 — 동기 판·local 두 곳과 같은 함수.
+    #   레지스트리 락+파일 읽기와 cloudium 정본(수십 MB) 로컬화라 루프 밖에서(리뷰 W6 — local 과 같은 규약).
+    _ref_src = await _run_blocking(describe_reference_suds_source, reference_doc_path, source_root)
+    _uds_tpl, _uds_tpl_why = await _run_blocking(
+        resolve_template_for, "uds", registered_template=template_path,
+        reference_doc=reference_doc_path or _ref_src["raw"],
         prefer_reference=prefer_reference_from(template_source),
     )
     _logger.info("UDS 템플릿: %s", _uds_tpl_why)
     # (R47 N25) ASIL·Related 보강의 참조는 config 기본값(HDPDM01)이 아니라 **이 프로젝트의 SwUDS** 다.
-    _ref_suds, _ref_suds_why = resolve_reference_suds_for_generation(reference_doc_path, _uds_tpl)
+    if _ref_src["raw"]:
+        _ref_suds, _ref_suds_why = await _run_blocking(resolve_reference_suds_for_generation, _ref_src["raw"], _uds_tpl)
+        _ref_suds_why = f"{_ref_suds_why} [{_ref_src['why']}]"
+    else:
+        _ref_suds, _ref_suds_why = "", _ref_src["why"]
     (_logger.info if _ref_suds else _logger.warning)("UDS 참조 SwUDS: %s", _ref_suds_why)
+    if ai_enable and not ai_example_text and _ref_suds:
+        try:
+            ai_example_text = _read_text_from_file(Path(_ref_suds))
+        except Exception as _ex_exc:   # noqa: BLE001 - 예시문은 부가 입력; 실패 사유만 남기고 계속
+            _logger.warning("UDS AI 예시문: 참조 SwUDS 읽기 실패(%s) — 예시문 없이 생성", type(_ex_exc).__name__)
+            ai_example_text = ""
 
     def _worker() -> None:
         try:
@@ -2962,6 +2973,7 @@ async def jenkins_uds_generate_async(
                 build_selector=build_selector,
                 template_path=_uds_tpl or "",
                 reference_suds_path=_ref_suds,
+                reference_source=_ref_src,
                 max_source_files=max_source_files,
                 max_items_per_category=max_items_per_category,
                 unmatched_headings=unmatched_headings,

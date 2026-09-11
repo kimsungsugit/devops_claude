@@ -516,6 +516,54 @@ class TestSidecarNamesTheDocument:
         docx_builder.generate_uds_docx(str(tmp_path / "t.docx"), payload, str(out))
         side = json.loads(gen_stats_path(str(out)).read_text(encoding="utf-8"))["reference_suds"]
         assert side["origin"] == "registry:kjpds02_pv"
+        assert side["registry_mismatch"] is None and side0["registry_mismatch"] is None
+
+    def test_registry_mismatch_from_the_parent_payload_is_copied_into_the_sidecar(self, gen, tmp_path):
+        """(R47-e N30) 폼 지정 경로 ≠ 레지스트리 정본 — 부모가 남긴 dict 를 그대로 베낀다(파일명만)."""
+        import json
+
+        from report_gen import docx_builder
+        from report_gen.docx_builder import gen_stats_path
+        gen(project_name="KJPDS02_PV", ref_block={"asil": "A"}, ref_stem="KJPDS02_SwUDS")
+        info = {"id": "SwUFn_0001", "name": "alpha", "prototype": "void alpha(void);",
+                "description": "", "asil": "TBD", "related": "TBD", "precondition": "N/A",
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "called": "", "logic": ""}
+        mm = {"scm_id": "kjpds02_pv", "form": "(KJPDS02_SwUDS) x.docx", "registry": "(KJPDS02_SwUDS) v3.03.docx"}
+        payload = {"project_name": "KJPDS02_PV", "overview": "o", "requirements": "r",
+                   "interfaces": "i", "uds_frames": "u", "notes": "n",
+                   "reference_suds_origin": "form", "reference_suds_registry_mismatch": mm,
+                   "function_details": {"SwUFn_0001": info}}
+        out = tmp_path / "out4.docx"
+        docx_builder.generate_uds_docx(str(tmp_path / "t.docx"), payload, str(out))
+        side = json.loads(gen_stats_path(str(out)).read_text(encoding="utf-8"))["reference_suds"]
+        assert side["origin"] == "form" and side["registry_mismatch"] == mm
+        assert side["registry_compare"] is None   # 이 payload 엔 compare 를 안 실었다 — 지어내지 않는다
+
+    def test_identity_hint_alone_makes_the_reference_same_project(self, gen, tmp_path):
+        """(R47-e 리뷰 W1) 신원 토큰은 전용 키 `reference_identity_hint` 로 들어온다 — payload 이름 토큰이 leaf 뿐이어도 판정된다."""
+        import json
+
+        from report_gen import docx_builder
+        from report_gen.docx_builder import gen_stats_path
+        gen(project_name="KJPDS02_PV", ref_block={"asil": "A"}, ref_stem="KJPDS02_SwUDS")
+        info = {"id": "SwUFn_0001", "name": "alpha", "prototype": "void alpha(void);",
+                "description": "", "asil": "TBD", "related": "TBD", "precondition": "N/A",
+                "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+                "called": "", "logic": ""}
+        base = {"project_name": "NE1AW_PORTING", "module_name": "NE1AW_PORTING", "overview": "o", "requirements": "r",
+                "interfaces": "i", "uds_frames": "u", "notes": "n", "reference_suds_registry_compare": "same"}
+        out_a = tmp_path / "out5a.docx"
+        docx_builder.generate_uds_docx(str(tmp_path / "t.docx"), {**base, "function_details": {"SwUFn_0001": dict(info)}}, str(out_a))
+        side_a = json.loads(gen_stats_path(str(out_a)).read_text(encoding="utf-8"))["reference_suds"]
+        assert side_a["identity"]["same_project"] is False, "대조군: leaf 토큰만으로는 다른 프로젝트"
+        out_b = tmp_path / "out5b.docx"
+        docx_builder.generate_uds_docx(str(tmp_path / "t.docx"),
+                                       {**base, "reference_identity_hint": "kjpds02_pv", "function_details": {"SwUFn_0001": dict(info)}},
+                                       str(out_b))
+        side_b = json.loads(gen_stats_path(str(out_b)).read_text(encoding="utf-8"))["reference_suds"]
+        assert side_b["identity"]["same_project"] is True and side_b["identity"]["shared_tokens"] == ["KJPDS02"]
+        assert side_b["registry_compare"] == "same"
 
     def test_unconfigured_reference_is_recorded_as_not_delivered(self, gen, tmp_path, monkeypatch):
         """부모가 빈 경로를 넘기면(미지정/접근 실패) `configured:false · document:null` — 화면이 '미전달' 이라 말한다.

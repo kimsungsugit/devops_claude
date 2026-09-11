@@ -300,6 +300,19 @@ def _normalize_path_key(text: str) -> str:
         return s.replace("\\", "/").rstrip("/").lower()
 
 
+def same_path(a: str, b: str) -> bool:
+    """두 경로 문자열이 **같은 파일**인가 — 대소문자·구분자·후행 슬래시 차이를 흡수(레지스트리 조회와 같은 정규화)."""
+    ka, kb = _normalize_path_key(a), _normalize_path_key(b)
+    return bool(ka) and ka == kb
+
+
+def entry_root_keys(entry: Any) -> set[str]:
+    """항목 `source_root`(콤마/세미콜론 복수)를 정규화 키 집합으로 — 조회값과 **같은 분해·같은 정규화**."""
+    from report_gen.source_roots import split_source_roots
+
+    return {k for k in (_normalize_path_key(piece) for piece in split_source_roots(getattr(entry, "source_root", ""))) if k}
+
+
 def resolve_scm_id(value: str) -> str | None:
     """`project_id` 나 `source_root` 를 SCM registry entry id 로 정규화한다 — `resolve_scm_entry` 의 id 투영.
 
