@@ -653,6 +653,45 @@ def _mark_available(available: Dict[str, bool], key: str, state: str) -> None:
         available[key] = False
 
 
+def _cached_comment_coverage(inputs: Dict[str, str], available: Dict[str, bool]) -> Optional[Dict[str, Any]]:
+    """소스 주석 측정값 — **캐시가 있을 때만**. 게이트는 측정을 시작하지 않는다(`measure_source` 액션이 한다).
+
+    소스 루트가 없거나 디렉터리로 확인되지 않았으면 `None`(모름). preflight 의 "소스 주석" 행과 귀속의
+    `comment` 축이 같은 값을 본다.
+    """
+    src = inputs.get(_req.IN_SOURCE_ROOT, "")
+    if not (src and available.get(_req.IN_SOURCE_ROOT)):
+        return None
+    # ⚠ `has_cached()` 뒤 `measure()` 가 아니다 — 둘 다 소스 트리를 걷고, 그 사이 서명이 바뀌면 `measure()`
+    #   가 요청 안에서 전량 파싱을 시작한다(리뷰 W1/W2). 조회 한 번이 히트 판정이자 값이다(`_tm.cached` 와 같다).
+    return _cov.cached(src)
+
+
+def _fill_derived_availability(available: Dict[str, bool], cov: Optional[Dict[str, Any]]) -> None:
+    """문서 경로가 아닌 세 입력 축 — 콜그래프·AI·소스 주석 — 의 가용성. **preflight 와 귀속이 같은 함수**를 부른다.
+
+    (R47-i N32) 이 세 판정이 preflight 안 세 자리에 흩어져 있었고 귀속은 하나도 채우지 않았다. 같은 run 을
+    두고 준비 게이트는 "소스 주석 ✓ · AI ✓" 인데 귀속 화면은 세 출처 전부 "현재 상태 확인 안 함" — 한 입력에
+    두 판정(R47-h 의 `enrichment` 와 같은 갈래). 규칙은 여기 하나다:
+
+    - **콜그래프**: 소스 루트가 있으면 만든다(파싱 산출이라 별도 입력이 없다). 루트 판정이 없거나 없음이면
+      `False` — 소스 없이 콜그래프는 없다.
+    - **AI**: 문서가 아니라 **설정**이다 — 키가 있으면 그 경로가 열려 있다. 설정을 못 읽으면 '모름'(키 없음).
+      `False` 로 접으면 없는 결핍을 만든다.
+    - **소스 주석**: 캐시된 측정이 있고 사유 없이 쟀을 때만 — 실질 설명이 하나라도 있으면 `True`. 재지 못한
+      측정(`reason`)은 키를 만들지 않는다(설정하면 사슬이 "확인했고 없음" 으로 그리는데 실제로는 모른다).
+      ⚠ 유무 판정이다 — 준비 게이트 행의 50% 비율(degraded)과 다른 축이고, 그 행은 호출자가 그린다.
+    """
+    available[_chain.INPUT_CALL_GRAPH] = bool(available.get(_req.IN_SOURCE_ROOT))
+    try:
+        from workflow.ai import load_oai_config
+        available[_chain.INPUT_AI] = bool(load_oai_config(None))
+    except Exception:  # noqa: BLE001  # silent-ok
+        pass
+    if cov is not None and not cov.get("reason"):
+        available[_chain.INPUT_SOURCE_COMMENT] = bool(cov["description"]["substantive"])
+
+
 def _revision_actions(
     key: str, origin: Optional[Dict[str, str]], suggestion: str,
 ) -> Tuple[List[Dict[str, Any]], str]:
@@ -1449,14 +1488,6 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         # ⚠ 3상태다 — `== S_OK` 로 접으면 확인 실패가 "확인했고 없음"(✗) 이 된다(P-3②).
         _mark_available(available, key, _probe_input(resolver, key, path)["state"])
 
-    # AI 출처는 문서가 아니라 **설정**이다 — 키가 있으면 그 경로가 열려 있다.
-    try:
-        from workflow.ai import load_oai_config
-        available[_chain.INPUT_AI] = bool(load_oai_config(None))
-    except Exception:  # noqa: BLE001  # silent-ok
-        # 설정을 못 읽으면 '모름' 이 정답이다. `False`(없음)로 접으면 없는 결핍을 만든다.
-        pass
-
     # ── 2. 재료 — 요구 인식 ──────────────────────────────────────────────────
     swrs_path = inputs.get(_req.IN_SWRS, "")
     if swrs_path and available.get(_req.IN_SWRS):
@@ -1478,8 +1509,8 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
 
     # ── 3. 재료 — 소스 주석 (캐시가 있을 때만) ───────────────────────────────
     src = inputs.get(_req.IN_SOURCE_ROOT, "")
+    cov = _cached_comment_coverage(inputs, available)   # 귀속과 같은 함수 — 아래 4. 사슬의 주석 축도 이 값
     if src and available.get(_req.IN_SOURCE_ROOT):
-        cov = _cov.measure(src) if _cov.has_cached(src) else None
         if cov is not None and cov.get("reason"):
             # 측정을 시도했지만 못 쟀다 — `0` 으로 그리면 "주석이 하나도 없다" 가 된다.
             # ⚠ `available[comment]` 를 **설정하지 않는다**. 설정하면 사슬이 그 출처를
@@ -1506,7 +1537,6 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 actions=([{"kind": "export_comment_targets"}]
                          if (cov["substantive_gap"] or filled < fn) else []),
             ))
-            available[_chain.INPUT_SOURCE_COMMENT] = bool(subst)
             # ⚠ 유무가 아니라 **비율**로 판정한다(형제 `comment_coverage` 와 같은 50%). 435
             #   함수 중 1개에만 태그가 있어도 ✓ 였다(감사 P-6③). 없는 것은 근거 부재일 뿐
             #   결함이 아니므로 degraded(차단 아님)이고, 사유에 수를 적는다.
@@ -1793,7 +1823,8 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     ))
 
     # ── 4. 사슬 — 각 필드를 채울 경로의 단계별 가용성 ─────────────────────────
-    available[_chain.INPUT_CALL_GRAPH] = bool(available.get(_req.IN_SOURCE_ROOT))
+    # 콜그래프·AI·소스 주석은 문서 경로가 아니다 — 귀속(`docgen_attribution`)과 **같은 함수**로 채운다.
+    _fill_derived_availability(available, cov)
     for field in (spec.get("fields") or []):
         rows = _chain.chain_state(field, available)
         grounded = [r for r in rows if r["grounded"]]
@@ -2342,6 +2373,10 @@ def docgen_questions(req: PreflightRequest) -> Dict[str, Any]:
     }
 
 
+# 귀속이 되짚는 필드 — 신뢰도 사이드카의 `<field>_sources` 분포 세 줄과 1:1.
+_ATTRIBUTION_FIELDS = ("asil", "related", "description")
+
+
 class AttributionRequest(BaseModel):
     run_id: int
     scm_id: str = ""
@@ -2412,20 +2447,26 @@ def docgen_attribution(req: AttributionRequest) -> Dict[str, Any]:
         doc_type=doc_type or "uds", scm_id=req.scm_id,
         doc_paths=req.doc_paths, source_root=req.source_root,
     ))
+    # (R47-i N32) **사슬이 읽는 입력만** 확인한다 — 여기서 만든 `available` 의 독자는 `attribute_field`
+    #   뿐이고 그것이 읽는 키는 `required_inputs(...)` 집합이다. UDS 는 해석된 7키 중 `stp`·`template` 이
+    #   응답 어디에도 실리지 않는 워커 IPC 였다(키당 exists+is_dir 2회 = 전체 12회 중 4회). 소스 루트는
+    #   콜그래프·소스 주석 축의 근거라 남긴다(로컬 디렉터리 판정이라 IPC 가 아니다).
+    needed = _chain.required_inputs(_ATTRIBUTION_FIELDS) | {_req.IN_SOURCE_ROOT}
     available: Dict[str, bool] = {}
     for key, path in inputs.items():
+        if key not in needed:
+            continue
         if key == _req.IN_SOURCE_ROOT:
             first = first_source_root(path)
             available[key] = bool(first) and Path(first).expanduser().is_dir()
         else:
             # preflight 와 같은 3상태(`_mark_available`) — 확인 실패는 키를 만들지 않는다.
             _mark_available(available, key, _probe_input(resolver, key, path)["state"])
+    # 콜그래프·AI·소스 주석 — preflight 와 **같은 함수**. 예전엔 여기서 안 채워 세 출처가 늘 "현재 상태 확인
+    #   안 함" 이었다(R47-f 리뷰 I2). `kb`·`reference` 는 두 표면 다 확인하지 않는다(확인 경로가 없다 — 모름이 정직).
+    _fill_derived_availability(available, _cached_comment_coverage(inputs, available))
 
-    dist_by_field = {
-        "asil": _chain.parse_source_distribution(conf.get("asil_sources")),
-        "related": _chain.parse_source_distribution(conf.get("related_sources")),
-        "description": _chain.parse_source_distribution(conf.get("description_sources")),
-    }
+    dist_by_field = {f: _chain.parse_source_distribution(conf.get(f"{f}_sources")) for f in _ATTRIBUTION_FIELDS}
     fields = [_chain.attribute_field(f, d, available) for f, d in dist_by_field.items()]
 
     return {

@@ -503,8 +503,7 @@ def _fake_cov(monkeypatch, functions: int, asil_filled: int) -> None:
         "asil": {"filled": asil_filled}, "related": {"filled": 0},
         "substantive_gap": 0, "samples": [],
     }
-    monkeypatch.setattr(pf._cov, "has_cached", lambda *_a, **_k: True)
-    monkeypatch.setattr(pf._cov, "measure", lambda *_a, **_k: res)
+    monkeypatch.setattr(pf._cov, "cached", lambda *_a, **_k: res)
 
 
 @pytest.mark.parametrize("functions,filled,state", [

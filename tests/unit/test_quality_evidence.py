@@ -1000,28 +1000,30 @@ class TestSectionSelection:
             s for s in EVIDENCE_SECTIONS if s in ("reference", "gate_report")]
 
 
+@pytest.fixture
+def attribution_api(tmp_path, monkeypatch, sidecars):
+    """`POST /api/docgen/attribution` 용 TestClient + 사이드카를 가리키는 UDS run 하나(임시 quality DB)."""
+    pytest.importorskip("fastapi")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.routers import docgen_preflight
+    from workflow.quality import db as qdb
+    from workflow.quality.recorder import record_run
+
+    db_file = tmp_path / "q.db"
+    monkeypatch.setattr(qdb, "_default_db_path", lambda: db_file)
+    run_id = record_run("uds", {"quick_gate": {"counts": {"total_functions": 169}}},
+                        output_path=str(sidecars), db_path=db_file)
+    app = FastAPI()
+    app.include_router(docgen_preflight.router)
+    yield TestClient(app), run_id
+    # (리뷰 I4) 형제 `api` fixture 와 같은 관습 — 엔진을 놓아야 tmp 트리 정리가 된다(R44 N19 의 갈래).
+    qdb.reset_engine()
+
+
 class TestAttributionReadsOnlyConfidence:
     """`POST /api/docgen/attribution` 이 근거를 **신뢰도 섹션만** 읽는다 — 행동 + 소스 두 층."""
-
-    @pytest.fixture
-    def attribution_api(self, tmp_path, monkeypatch, sidecars):
-        pytest.importorskip("fastapi")
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
-
-        from backend.routers import docgen_preflight
-        from workflow.quality import db as qdb
-        from workflow.quality.recorder import record_run
-
-        db_file = tmp_path / "q.db"
-        monkeypatch.setattr(qdb, "_default_db_path", lambda: db_file)
-        run_id = record_run("uds", {"quick_gate": {"counts": {"total_functions": 169}}},
-                            output_path=str(sidecars), db_path=db_file)
-        app = FastAPI()
-        app.include_router(docgen_preflight.router)
-        yield TestClient(app), run_id
-        # (리뷰 I4) 형제 `api` fixture 와 같은 관습 — 엔진을 놓아야 tmp 트리 정리가 된다(R44 N19 의 갈래).
-        qdb.reset_engine()
 
     def test_endpoint_answers_without_touching_the_payload(self, attribution_api, monkeypatch):
         import report_gen.evidence as ev
@@ -1044,6 +1046,128 @@ class TestAttributionReadsOnlyConfidence:
         assert 'read_evidence(output_path or "")' not in src
         # (리뷰 W1) 고른 섹션을 `or {}` 로 받으면 "요청 안 함" 이 "사이드카 없음" 으로 번역된다.
         assert 'conf = ev["confidence"]' in src
+
+
+class TestAttributionChecksWhatTheChainReads:
+    """(R47-i N32) 귀속의 "지금 상태" 는 **사슬이 읽는 입력만** 확인하고, 문서 경로가 아닌 3축은 preflight 와 같은 함수로 채운다.
+
+    두 결함이 한 자리에 있었다: ① 해석된 입력 7키 전부를 워커로 찔러 봤는데 `attribute_field` 는 그중 4키만 읽는다
+    (`stp`·`template` 은 응답에 없는 IPC). ② preflight 가 채우는 `ai`·`call_graph`·`source_comment` 를 귀속은 안 채워
+    같은 run 이 준비 게이트에선 ✓ 인데 귀속 화면은 "현재 상태 확인 안 함" 이었다(R47-f 리뷰 I2).
+    """
+
+    class _SpyResolver:
+        mode = "local"
+
+        def __init__(self, present):
+            self.present = set(present)
+            self.asked = []
+
+        def exists(self, p):
+            self.asked.append(p)
+            return p in self.present
+
+        def is_dir(self, p):
+            self.asked.append(p)
+            return False
+
+        def list_dir(self, *_a, **_k):
+            return []
+
+    _LINKED = {"srs": "U:/reg/srs.docx", "sds": "U:/reg/sds.docx", "uds": "U:/reg/uds.docx",
+               "hsis": "U:/reg/hsis.docx", "stp": "U:/reg/stp.docx", "uds_template": "U:/reg/tpl.docx"}
+
+    @staticmethod
+    def _entry(linked, source_root):
+        import types
+        return types.SimpleNamespace(
+            source_root=source_root, builder_project_id="",
+            linked_docs=types.SimpleNamespace(model_dump=lambda mode="json": dict(linked)))
+
+    @pytest.fixture
+    def surfaces(self, attribution_api, monkeypatch, tmp_path):
+        """가짜 레지스트리(6키, hsis 만 부재) + 스파이 리졸버 + AI 설정 있음 — 귀속과 preflight 를 같은 요청으로 부른다."""
+        import workflow.ai as wai
+        from backend.routers import docgen_preflight as dp
+        from backend.services import file_resolver as fr
+        from backend.services import scm_registry as reg
+
+        spy = self._SpyResolver(present={v for k, v in self._LINKED.items() if k != "hsis"})
+        entry = self._entry(self._LINKED, str(tmp_path))
+        monkeypatch.setattr(reg, "get_registry_entry", lambda sid: entry if sid == "spy" else None)
+        monkeypatch.setattr(fr, "get_resolver", lambda: spy)
+        monkeypatch.setattr(wai, "load_oai_config", lambda _p: {"api_key": "k"})
+        monkeypatch.setattr(dp, "_read_doc_material",
+                            lambda _p: {"ok": False, "reason": "skip", "chars": 0, "items": None})
+        dp._cov.clear_cache()
+        client, run_id = attribution_api
+        return client, run_id, spy, dp
+
+    @staticmethod
+    def _rows(body):
+        return {r["source"]: r for f in body["fields"] for r in f["rows"]}
+
+    def _attr(self, client, run_id):
+        res = client.post("/api/docgen/attribution", json={"run_id": run_id, "scm_id": "spy"})
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["available"] is True
+        return self._rows(body)
+
+    def test_probes_only_inputs_the_chain_reads(self, surfaces):
+        client, run_id, spy, _dp = surfaces
+        rows = self._attr(client, run_id)
+        # 리졸버에 물어본 경로 = 사슬이 읽는 4키뿐 — `stp`·`template` 은 한 번도 안 찌른다(절대 집합).
+        assert set(spy.asked) == {"U:/reg/srs.docx", "U:/reg/sds.docx", "U:/reg/uds.docx", "U:/reg/hsis.docx"}, spy.asked
+        assert {s: rows[s]["have_now"] for s in ("srs", "sds", "uds", "hsis")} == \
+            {"srs": True, "sds": True, "uds": True, "hsis": False}
+
+    def test_derived_axes_are_filled_like_preflight(self, surfaces):
+        client, run_id, spy, dp = surfaces
+        rows = self._attr(client, run_id)
+        # 절대값: 소스 루트(tmp_path)가 있으니 콜그래프 True · AI 설정 있음 True · 주석은 캐시가 없어 모름 ·
+        # kb/reference 는 두 표면 다 확인 경로가 없다(모름이 정직).
+        expect = {"call_graph": True, "ai": True, "comment": None, "rag": None, "reference": None}
+        assert {s: rows[s]["have_now"] for s in expect} == expect
+        # 같은 요청의 preflight 사슬과 갈리지 않는다 — 패리티는 위 절대값에 **더하는** 단언이다(한 함수로 합친 뒤엔
+        # 패리티만으로는 규칙이 통째로 틀려도 통과한다: R47-h 뮤테이션 M3 의 교훈).
+        spy.asked.clear()
+        pf = dp._compute_preflight(dp.PreflightRequest(doc_type="uds", scm_id="spy"))
+        have = {r["source"]: r["have"] for s in pf["steps"] if s["id"].startswith("chain_") for r in s["chain"]}
+        for src in ("call_graph", "ai", "comment", "sds", "srs", "uds", "hsis", "reference", "rag"):
+            assert have[src] is rows[src]["have_now"], (src, have[src], rows[src]["have_now"])
+
+    @pytest.mark.parametrize("cov, expect", [
+        ({"functions": 4, "description": {"filled": 3, "substantive": 3}}, True),     # 실질 설명 있음
+        ({"functions": 4, "description": {"filled": 3, "substantive": 0}}, False),    # 쟀는데 실질 0
+        ({"functions": 0, "description": {"filled": 0, "substantive": 0},
+          "reason": "소스 루트를 찾을 수 없습니다"}, None),                              # 못 잼 — 없음이 아니다
+    ])
+    def test_comment_axis_follows_the_cached_measurement(self, surfaces, monkeypatch, cov, expect):
+        client, run_id, _spy, dp = surfaces
+        monkeypatch.setattr(dp._cov, "cached", lambda *_a, **_k: dict(cov))
+        assert self._attr(client, run_id)["comment"]["have_now"] is expect
+
+    @pytest.mark.parametrize("cfg, expect", [
+        (lambda _p: {"api_key": "k"}, True),     # 설정 있음 — 그 경로가 열려 있다
+        (lambda _p: None, False),                # 설정 파일은 읽었는데 항목 없음 — 확인했고 없음
+        (lambda _p: (_ for _ in ()).throw(OSError("unreadable")), None),  # 못 읽음 — 모름(없는 결핍을 만들지 않는다)
+    ])
+    def test_ai_axis_is_a_setting_not_a_document(self, surfaces, monkeypatch, cfg, expect):
+        client, run_id, _spy, _dp = surfaces
+        import workflow.ai as wai
+        monkeypatch.setattr(wai, "load_oai_config", cfg)
+        assert self._attr(client, run_id)["ai"]["have_now"] is expect
+
+    def test_no_source_root_means_no_call_graph(self, surfaces, monkeypatch):
+        """소스 루트가 없으면 콜그래프는 '모름' 이 아니라 **없음** — 파싱 산출이라 소스 없이 생길 수 없다(preflight 와 같은 규칙)."""
+        client, run_id, _spy, _dp = surfaces
+        from backend.services import scm_registry as reg
+        entry = self._entry(self._LINKED, "")
+        monkeypatch.setattr(reg, "get_registry_entry", lambda sid: entry)
+        rows = self._attr(client, run_id)
+        assert rows["call_graph"]["have_now"] is False
+        assert rows["comment"]["have_now"] is None
 
 
 class TestEnrichmentFromGenStats:

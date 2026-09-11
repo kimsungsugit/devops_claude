@@ -37,7 +37,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional
 
 from report_gen.provenance import canonical_source
 
@@ -110,6 +110,19 @@ def source_input(src: Any) -> Optional[str]:
     if raw in PRE_ALIAS_SOURCE_INPUT:
         return PRE_ALIAS_SOURCE_INPUT[raw]
     return SOURCE_REQUIRED_INPUT.get(canonical_source(raw))
+
+
+def required_inputs(fields: Iterable[str]) -> FrozenSet[str]:
+    """이 필드들의 사슬이 **읽는 입력 키 집합** — 귀속이 "지금 상태" 를 확인할 범위.
+
+    (R47-i N32) 귀속(`docgen_attribution`)은 해석된 입력 **전부**를 워커로 찔러 봤는데,
+    그 결과를 읽는 `attribute_field` 는 여기 집합만 본다 — UDS 는 등록 7키 중 `stp`·`template`
+    이 응답 어디에도 실리지 않는 IPC 였다. 입력이 필요 없는 출처(`None`)는 빠진다.
+    """
+    return frozenset(
+        need for f in fields for src in FIELD_SOURCES.get(f, [])
+        if (need := source_input(src)) is not None
+    )
 
 
 # ── 필드별 출처 후보 ────────────────────────────────────────────────────────

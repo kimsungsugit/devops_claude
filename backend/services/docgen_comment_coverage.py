@@ -197,8 +197,45 @@ def list_comment_targets(source_root: str, *, max_files: int = 300) -> Dict[str,
     }
 
 
+def _absent(reason: str) -> Dict[str, Any]:
+    # ⚠ 부재는 **사유와 함께** 낸다. 숫자만 0 으로 내면 화면이 "주석이 하나도 없다"
+    #   로 그린다 — 실제로는 재지 못한 것이다.
+    return {
+        "scanned_files": 0, "functions": 0, "partial": False, "reason": reason,
+        "description": {"filled": 0, "substantive": 0},
+        "asil": {"filled": 0}, "related": {"filled": 0},
+        "substantive_gap": 0, "samples": [],
+    }
+
+
+def cached(source_root: str, *, max_files: int = 300) -> Optional[Dict[str, Any]]:
+    """캐시된 측정이 있으면 `measure()` 와 **같은 dict**, 없으면 `None` — 서명 계산 **1회**.
+
+    (R47-i 리뷰 W1/W2) `has_cached()` 뒤에 `measure()` 를 부르면 둘 다 `_signature()` 로 소스 트리를
+    걷고(실측 99파일 cold 60ms·warm 16ms), 그 사이 TTL 만료나 소스 저장으로 서명이 바뀌면 `measure()`
+    가 요청 스레드에서 **전량 재파싱**(41~368초)을 시작한다 — `has_cached` 를 둔 목적이 그 창에서
+    무너진다. 조회 한 번이 히트 판정이자 값이다(형제 `docgen_test_materials.cached()` 와 같은 규약).
+    ⚠ HTTP 핸들러는 이걸 쓴다. `measure()` 는 측정 액션(`measure-source`)의 몫이다.
+    """
+    key = (str(source_root or "").strip().lower(), int(max_files))
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+    if not (hit and (time.time() - hit[0]) < _CACHE_TTL_S):
+        # 항목이 없거나 TTL 이 지났으면 서명을 잴 이유가 없다 — 서명은 **있는 항목의 신선도**를 묻는 값이다.
+        #   라이브 실측: 서명 1회가 소스 루트 2개에서 20ms 라, 측정을 한 번도 안 한 프로세스(가장 흔한 상태)의
+        #   귀속 요청마다 트리 워크가 붙어 IPC 절감분을 되먹었다.
+        return None
+    sig = _signature(source_root, max_files)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)   # 서명 계산 중 바뀌었을 수 있다 — 다시 읽는다
+        if not (hit and (time.time() - hit[0]) < _CACHE_TTL_S and hit[2].get("signature") == sig):
+            return None
+        res, meta = hit[1], {**hit[2], "cached": True}
+    return _summarize(res, meta, max_files)
+
+
 def measure(source_root: str, *, max_files: int = 300) -> Dict[str, Any]:
-    """소스 주석 커버리지를 잰다.
+    """소스 주석 커버리지를 잰다(캐시가 없으면 **여기서 파싱한다** — 요청 안에서 부르지 말 것, `cached()` 참조).
 
     Returns:
         ``{"scanned_files", "functions", "partial", "elapsed_s", "cached",
@@ -211,22 +248,17 @@ def measure(source_root: str, *, max_files: int = 300) -> Dict[str, Any]:
         - `partial` 은 `max_files` 상한에 걸려 **일부만 봤다**는 뜻이다. 침묵 절단 금지
           (이 저장소가 여러 번 겪은 결함 — 상한이 총량을 조용히 줄인다).
     """
-    def _absent(reason: str) -> Dict[str, Any]:
-        # ⚠ 부재는 **사유와 함께** 낸다. 숫자만 0 으로 내면 화면이 "주석이 하나도 없다"
-        #   로 그린다 — 실제로는 재지 못한 것이다.
-        return {
-            "scanned_files": 0, "functions": 0, "partial": False, "reason": reason,
-            "description": {"filled": 0, "substantive": 0},
-            "asil": {"filled": 0}, "related": {"filled": 0},
-            "substantive_gap": 0, "samples": [],
-        }
-
     # 복수 루트(콤마 구분) 중 **하나라도** 있으면 진행한다.
     roots = split_source_roots(source_root)
     if not roots or not any(Path(r).exists() for r in roots):
         return _absent("소스 루트를 찾을 수 없습니다")
 
     res, meta = _parse_cached(source_root, max_files)
+    return _summarize(res, meta, max_files)
+
+
+def _summarize(res: Dict[str, Any], meta: Dict[str, Any], max_files: int) -> Dict[str, Any]:
+    """파싱 결과 → 커버리지 dict. `measure()`(파싱 후)와 `cached()`(캐시 히트)가 같은 함수로 요약한다."""
     funcs = list(res.get("functions") or [])
     scanned = list(res.get("scanned") or [])
     if not scanned:

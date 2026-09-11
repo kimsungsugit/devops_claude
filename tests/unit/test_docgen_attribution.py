@@ -115,6 +115,21 @@ def test_attribution_covers_uds_source() -> None:
     assert rows["uds"]["input"] == fs.INPUT_UDS_DOC
 
 
+def test_required_inputs_is_exactly_what_the_chain_reads() -> None:
+    """(R47-i N32) 귀속이 "지금 상태" 를 확인할 입력 — **절대 집합**으로 박는다(표가 바뀌면 여기가 먼저 깨져야 한다)."""
+    all3 = fs.required_inputs(("asil", "related", "description"))
+    assert all3 == frozenset({
+        fs.INPUT_SOURCE_COMMENT, fs.INPUT_SWDS, fs.INPUT_SWRS, fs.INPUT_HSIS, fs.INPUT_UDS_DOC,
+        fs.INPUT_KB, fs.INPUT_REFERENCE, fs.INPUT_AI, fs.INPUT_CALL_GRAPH,
+    })
+    assert fs.required_inputs(("asil",)) == frozenset({
+        fs.INPUT_SOURCE_COMMENT, fs.INPUT_SWDS, fs.INPUT_SWRS, fs.INPUT_UDS_DOC})
+    # 입력이 필요 없는 출처(module_inherit·default…)는 키를 만들지 않고, 게이트 전용 입력은 여기 없다.
+    assert not {"stp", "template", "vectorcast", "spec_doc", None} & set(all3)
+    assert fs.required_inputs(()) == frozenset()
+    assert fs.required_inputs(("nope",)) == frozenset()
+
+
 @pytest.mark.parametrize("field", ["asil", "related", "description"])
 def test_attribution_shape_for_every_field(field: str) -> None:
     res = fs.attribute_field(field, {}, {})

@@ -2015,3 +2015,74 @@ class TestSuggestedRespectsPerCategoryMultiplier:
 
     def test_no_truncation_means_no_suggestion(self):
         assert self._suggest({}, 120) is None
+
+
+# ── (R47-i 리뷰 W1/W2) 캐시 조회는 한 번 ──────────────────────────────────
+
+class TestCommentCoverageSingleLookup:
+    """`_cov.cached()` 는 서명을 **한 번** 재고, 히트면 `measure()` 와 같은 값·미스면 `None` 이다.
+
+    `has_cached()` → `measure()` 두 번 물으면 소스 트리를 두 번 걷고(실측 16~60ms), 그 사이 서명이 바뀌면
+    `measure()` 가 요청 스레드에서 전량 파싱을 시작한다 — 게이트와 귀속 둘 다 이 함수 하나만 부른다.
+    """
+
+    @staticmethod
+    def _prime(tmp_path: Path) -> str:
+        (tmp_path / "a.c").write_text("/** @brief add two ints — returns the sum of a and b. */\nint add(int a, int b){return a+b;}\n",
+                                       encoding="utf-8")
+        cov.clear_cache()
+        cov.measure(str(tmp_path))            # 캐시를 채운다(측정 액션의 몫)
+        return str(tmp_path)
+
+    def test_hit_equals_measure_and_walks_the_tree_once(self, tmp_path: Path, monkeypatch) -> None:
+        src = self._prime(tmp_path)
+        want = cov.measure(src)
+        calls = []
+        real = cov._signature
+        monkeypatch.setattr(cov, "_signature", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+        got = cov.cached(src)
+        assert got == want and got["cached"] is True and got["functions"] == 1
+        assert len(calls) == 1, f"서명을 {len(calls)}번 쟀다 — 한 번이어야 한다"
+
+    def test_miss_is_none_not_a_parse(self, tmp_path: Path, monkeypatch) -> None:
+        cov.clear_cache()
+        (tmp_path / "b.c").write_text("int f(void){return 0;}\n", encoding="utf-8")
+        monkeypatch.setattr(cov, "_parse_cached",
+                            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cached() 가 파싱을 시작했다")))
+        assert cov.cached(str(tmp_path)) is None
+
+    def test_stale_entry_is_none_not_a_reparse(self, tmp_path: Path, monkeypatch) -> None:
+        """항목은 살아 있는데 소스가 바뀌었다(서명 불일치) — 이때 요청 안에서 재파싱하면 W2 의 41~368초가 그대로 돌아온다."""
+        src = self._prime(tmp_path)
+        entry = cov._CACHE[(src.lower(), 300)]
+        cov._CACHE[(src.lower(), 300)] = (entry[0], entry[1], {**entry[2], "signature": (999, 1)})   # 낡은 서명
+        monkeypatch.setattr(cov, "_parse_cached",
+                            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cached() 가 재파싱을 시작했다")))
+        assert cov.cached(src) is None
+        cov.clear_cache()
+
+    def test_empty_cache_does_not_walk_the_tree(self, tmp_path: Path, monkeypatch) -> None:
+        """항목이 없으면 서명(트리 워크)을 재지 않는다 — 측정을 한 번도 안 한 프로세스가 가장 흔한 상태다(라이브 20ms/요청)."""
+        cov.clear_cache()
+        (tmp_path / "c.c").write_text("int g(void){return 0;}", encoding="utf-8")
+        monkeypatch.setattr(cov, "_signature",
+                            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("빈 캐시에서 서명을 쟀다")))
+        assert cov.cached(str(tmp_path)) is None
+        # TTL 이 지난 항목도 같다 — 서명은 살아 있는 항목의 신선도를 묻는 값이다.
+        cov._CACHE[(str(tmp_path).lower(), 300)] = (0.0, {"functions": [], "scanned": ["x"]}, {"signature": (1, 1)})
+        assert cov.cached(str(tmp_path)) is None
+        cov.clear_cache()
+
+    def test_router_helper_asks_once(self, tmp_path: Path, monkeypatch) -> None:
+        """게이트·귀속이 쓰는 `_cached_comment_coverage` 는 `cached()` 한 번 — `has_cached`/`measure` 를 부르지 않는다."""
+        from backend.routers import docgen_preflight as dp
+        src = self._prime(tmp_path)
+        calls = []
+        real = cov._signature
+        monkeypatch.setattr(cov, "_signature", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+        monkeypatch.setattr(cov, "has_cached", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("has_cached 를 불렀다")))
+        got = dp._cached_comment_coverage({req.IN_SOURCE_ROOT: src}, {req.IN_SOURCE_ROOT: True})
+        assert got is not None and got["functions"] == 1
+        assert len(calls) == 1
+        # 루트가 확인되지 않았으면 캐시가 있어도 묻지 않는다(모름).
+        assert dp._cached_comment_coverage({req.IN_SOURCE_ROOT: src}, {}) is None
