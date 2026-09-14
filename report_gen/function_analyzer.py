@@ -840,6 +840,43 @@ def _format_param_entry(
     return display
 
 
+_NATURAL_SPLIT_RE = re.compile(r"(\d+)")
+
+
+def _natural_key(text: str) -> Tuple[Any, ...]:
+    """`u8t_Idx2` < `u8t_Idx10` — 숫자 구간은 값으로 비교. `re.split` 의 캡처 결과는 항상
+    str/int 가 번갈아 놓이므로 같은 자리끼리는 형이 같다(형 혼합 비교 예외 없음)."""
+    # `isdecimal()` — `\d+` 가 잡는 Nd 문자와 `int()` 가 받는 집합이 정확히 같다(`isdigit()` 은 `²` 에 True 인데 `int('²')` 는 죽는다).
+    return tuple(int(t) if t.isdecimal() else t for t in _NATURAL_SPLIT_RE.split(str(text)))
+
+
+def _observed_index_values(indexes: Any, macro_map: Dict[str, str]) -> List[str]:
+    """`(idx: …)` 꼬리에 실을 첨자 목록 — **정규화 → 중복 제거 → 정렬**의 단일 출처.
+
+    ⚠ (R47-k N27-e) `_scan_name_usage` 는 첨자를 `set` 에 모은다. 문자열 해시 시드는 프로세스마다
+      달라 `set` 순회 순서가 **백엔드 재기동마다** 바뀐다 — 같은 소스로 만든 두 UDS 가 435셀에서
+      `(idx: 7, 2, 1, …)` ↔ `(idx: 0, 1, 4, …)` 로 갈렸다(2026-09-14 run 2072/2073 실측). 소비처는
+      바로 윗줄의 `members` 를 `sorted()` 로 정렬하면서 첨자만 set 그대로 순회한 쌍둥이 한쪽이었다.
+    순서: 숫자로 접힌 첨자를 **값** 오름차순으로 먼저(`0, 1, 2, 10`), 그다음 기호 첨자를 자연 정렬로.
+    정규화 뒤에 중복을 지운다(`2U` 와 `( 2U )` 는 같은 첨자다).
+    """
+    seen: Dict[str, Optional[int]] = {}
+    for raw in indexes or ():
+        norm, val = _normalize_bracket_expr(str(raw), macro_map)
+        if norm and norm not in seen:
+            seen[norm] = val
+
+    def _key(item: Tuple[str, Optional[int]]) -> Tuple[Any, ...]:
+        norm, val = item
+        if val is not None:
+            return (0, val, (), "")
+        # (리뷰 C1) 자연 키는 전순서가 아니다 — `u8t_Ch1` 과 `u8t_Ch01` 이 같은 키라 안정 정렬이 **삽입(=set 순회) 순서**로
+        #   떨어져 고치려던 비결정이 그 자리에 살아남는다. 원문 문자열을 마지막 타이브레이커로 둬 전순서로 만든다.
+        return (1, 0, _natural_key(norm), norm)
+
+    return [norm for norm, _ in sorted(seen.items(), key=_key)]
+
+
 def _extract_return_type(signature: str, func_name: str) -> str:
     if not signature:
         return ""

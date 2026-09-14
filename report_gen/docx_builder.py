@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time as _time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -23,6 +24,7 @@ from report.constants import (
     LOGIC_MAX_DEPTH_DEFAULT,
     LOGIC_MAX_GRANDCHILDREN_DEFAULT,
 )
+from report_gen.atomic_io import normalize_zip_member_times
 from report_gen.function_analyzer import (
     FN_ROW_FULL,
     FN_ROW_GRID,
@@ -63,6 +65,29 @@ from report_gen.utils import (
 )
 
 _logger = logging.getLogger("report_generator")
+
+
+def _save_docx(doc: Any, out: Path, output_path: str, stats: Dict[str, Any]) -> bool:
+    """UDS DOCX 의 **유일한** 저장 경로 — `generate_uds_docx` 의 세 종결 분기(토큰 템플릿·구조 복제·무템플릿)가 다 여길 지난다.
+
+    (R47-k N27-e) 저장 뒤 zip 멤버 시각을 고정한다. python-docx 는 멤버마다 저장 시각을 박아 같은 문서도
+    저장할 때마다 바이트가 달랐다 — 검토 기록의 `output_sha256` 은 산출물 바이트이므로 "같은 입력 → 같은 문서"
+    를 해시로 말하려면 여기서 지워야 한다. 정규화 실패는 warning 뿐, 산출물은 그대로 남는다.
+    결과는 `stats["zip_time_normalized"]` 에 실어 gen_stats 사이드카로 남긴다(리뷰 W3) — 빌더는 로깅 설정이 없는
+    서브프로세스에서 돌아 INFO 는 영영 안 찍히고 WARNING 도 성공 경로에선 버려진다. 문서 **안**에는 적을 수 없다
+    (자기 해시를 바꾼다). 사이드카는 저장 뒤에 (다시) 쓴다.
+    ⚠ 바이트 동일은 **구조 복제 분기**에서만 성립한다(리뷰 W2): 토큰 템플릿 분기(`{{generated_at}}`)와 무템플릿 분기
+      (`Generated at:` 문단)는 payload 에 `generated_at` 이 없으면 벽시계를 본문에 박는다.
+    """
+    doc.save(str(out))
+    t0 = _time.perf_counter()
+    ok = normalize_zip_member_times(out)
+    stats["zip_time_normalized"] = bool(ok)
+    stats["zip_time_normalize_sec"] = round(_time.perf_counter() - t0, 2)
+    _write_gen_stats(output_path, stats)
+    return bool(ok)
+
+
 
 def _add_docx_text_block(doc, text: str, max_lines: int = 8000) -> None:
     if not text:
@@ -3094,7 +3119,7 @@ def generate_uds_docx(
             # 토큰 치환 전용 템플릿 — SwUFn 표를 순회하지 않으므로 함수 반영률 개념이 없다.
             # 통계를 **안 남기면** 소비처가 "통계 부재 = 문제 없음" 으로 읽으므로 mode 를
             # 명시해서 남긴다(미측정과 정상을 구분).
-            _write_gen_stats(output_path, {
+            _ph_stats = {
                 "mode": "placeholder_substitution",
                 "template_path": str(template_path or ""),
                 "template_source": template_source,
@@ -3105,8 +3130,8 @@ def generate_uds_docx(
                 # (R47-c 리뷰 W4) 참조 보강 루프는 이 분기보다 **위**에서 이미 돌았다 — 세 종결 경로 중 여기만
                 #   기록을 버려 보드가 "참조 통계를 남기기 전 빌더" 라는 틀린 사유를 말했다.
                 "reference_suds": _ref_stats,
-            })
-            doc.save(str(out))
+            }
+            _save_docx(doc, out, output_path, _ph_stats)
             return str(out)
         # 템플릿에 치환 키가 없으면, 구조만 복제하고 콘텐츠는 새로 작성
         blocks = _extract_template_blocks(doc)
@@ -4284,9 +4309,8 @@ def generate_uds_docx(
             )
         if stats_out is not None:
             stats_out.update(_stats)
-        _write_gen_stats(output_path, _stats)
         _write_enriched_function_details(output_path, function_details, _ref_stats)
-        doc.save(str(out))
+        _save_docx(doc, out, output_path, _stats)
         return str(out)
 
     # ── No-template fallback: SUDS-compatible 4-level structure ──
@@ -4812,9 +4836,8 @@ def generate_uds_docx(
     }
     if stats_out is not None:
         stats_out.update(_nt_stats)
-    _write_gen_stats(output_path, _nt_stats)
     _write_enriched_function_details(output_path, function_details, _ref_stats)
-    doc.save(str(out))
+    _save_docx(doc, out, output_path, _nt_stats)
     return str(out)
 
 

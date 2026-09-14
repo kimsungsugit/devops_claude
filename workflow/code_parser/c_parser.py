@@ -1005,7 +1005,10 @@ def parse_c_project(
                 )
             if root_node is not None:
                 # 776에서 이미 파싱한 root_node 재사용(재파싱 제거). file_globals도 778 결과 재사용.
-                for g in file_globals:
+                # (R47-k 리뷰 C2) `file_globals` 는 set — 그대로 돌면 `globals_detailed` 순서가 프로세스마다 달라
+                #   `global_data` 와 그 상한 절단(25,005 중 240)이 재기동마다 다른 전역을 남긴다. 아래 `"globals": sorted(...)`
+                #   형제와 같은 규약으로 정렬한다.
+                for g in sorted(file_globals):
                     if not g:
                         continue
                     globals_list.add(g)

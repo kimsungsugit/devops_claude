@@ -57,9 +57,9 @@ from report_gen.function_analyzer import (  # noqa: E402
     _infer_precondition_from_body,
     _is_generic_description,
     _is_static_var,
-    _normalize_bracket_expr,
     _normalize_dims,
     _normalize_symbol_name,
+    _observed_index_values,
     _parse_signature_outputs,
     _parse_signature_params,
     _split_param,
@@ -1284,12 +1284,8 @@ def generate_uds_source_sections(
                     for member_name in sorted(list(u.get("members") or [])):
                         if member_name not in names:
                             names.append(member_name)
-                    index_vals: List[str] = []
-                    for idx_expr in u.get("indexes") or []:
-                        norm, _ = _normalize_bracket_expr(str(idx_expr), macro_value_map)
-                        if norm:
-                            index_vals.append(norm)
-                    index_vals = list(dict.fromkeys(index_vals))
+                    # (R47-k N27-e) 첨자는 set 이라 순회 순서가 프로세스마다 다르다 — 정렬은 헬퍼가 한다.
+                    index_vals = _observed_index_values(u.get("indexes"), macro_value_map)
                     pointer_range = "*" in ptype or "*" in p
                     for disp_name in names:
                         display = _format_param_entry(
@@ -1313,12 +1309,7 @@ def generate_uds_source_sections(
                     for member_name in sorted(list(u.get("members") or [])):
                         if member_name not in names:
                             names.append(member_name)
-                    index_vals: List[str] = []
-                    for idx_expr in u.get("indexes") or []:
-                        norm, _ = _normalize_bracket_expr(str(idx_expr), macro_value_map)
-                        if norm:
-                            index_vals.append(norm)
-                    index_vals = list(dict.fromkeys(index_vals))
+                    index_vals = _observed_index_values(u.get("indexes"), macro_value_map)   # (R47-k) 위 파라미터 경로와 같은 헬퍼
                     # 선언 배열 차원. 정본은 배열을 원소 단위로 펼쳐 적으므로
                     # (입력 엔트리의 50.3%) 소비처가 개수를 알아야 한다.
                     # ⚠ **base 이름에만** 붙인다 — 멤버 경로(`s.f`)나 확장형

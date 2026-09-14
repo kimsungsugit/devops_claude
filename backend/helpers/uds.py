@@ -1156,7 +1156,10 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True,
 #      선언·리셋 함수 대입·정적 저장기간 중 어느 근거인지까지 싣는다. v14 캐시엔 그
 #      키가 없어 `_param_reset_text` 가 옛 폴백(`init`)으로 떨어지므로, 무효화하지
 #      않으면 소스가 안 바뀐 프로젝트에서 이 판정이 **한 번도 안 돈다**(v12 와 같은 실패).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v15"
+#  v16: (R47-k N27-e) `(idx: …)` 첨자 나열이 set 순회(프로세스마다 다른 순서)에서 정렬로 바뀌었다.
+#      캐시엔 **옛 순서의 문자열**이 그대로 박혀 있어, 무효화하지 않으면 소스가 안 바뀐 로컬 프로젝트에서
+#      "같은 입력 → 같은 문서" 가 캐시 수명 동안 캐시 덕에만 성립하고 fix 는 한 번도 안 돈다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v16"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
