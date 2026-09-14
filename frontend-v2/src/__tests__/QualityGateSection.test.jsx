@@ -41,10 +41,12 @@ function runRow(over = {}) {
 }
 
 /** 목록 응답만 주는 기본 스텁. 상세/정책/추세는 각 테스트가 덮는다. */
-function stubApi({ runs = [runRow()], detail = null, policy = null, trend = null, review = null, states = null, history = null } = {}) {
+function stubApi({ runs = [runRow()], detail = null, policy = null, trend = null, review = null, states = null, history = null, issues = null } = {}) {
   mockApi.mockImplementation((path) => {
     const p = String(path);
     // (R35) 검토 API 는 quality API 보다 **먼저** 갈라야 한다 — `/runs/\d+$` 가 둘 다 맞는다.
+    // (R48-b) 문제 목록은 검토 상태보다 먼저 — `/api/review/runs/` 가 둘 다 맞는다.
+    if (p.includes('/issues')) return Promise.resolve(issues || { issues: [], counts: { total: 0, actual: 0, potential: 0 }, sources: {} });
     if (p.includes('/api/review/states')) return Promise.resolve(states || { states: {}, missing: [] });
     if (p.includes('/api/review/history')) return Promise.resolve(history || { items: [], total: 0 });
     if (p.includes('/api/review/runs/')) return Promise.resolve(review || reviewState());
@@ -508,11 +510,37 @@ describe('QualityGateSection — 검토 패널 (R35)', () => {
 
   it('can_review=false 면 폼 대신 권한 문구다 (오류가 아니다)', async () => {
     const user = userEvent.setup();
-    stubApi({ review: reviewState({ can_review: false, review_block_reason: 'not_admin' }) });
+    stubApi({ review: reviewState({ can_review: false, review_block_reason: 'not_reviewer' }) });
     const panel = await openPanel(user);
     expect(within(panel).queryByRole('radio')).toBeNull();
-    expect(within(panel).getByRole('status')).toHaveTextContent(/admin 만/);
+    // (R48-a) 승인 상태 줄도 role=status 라 사유 문구를 텍스트로 고른다.
+    expect(within(panel).getByText(/admin 또는 승인자만 남길/)).toBeInTheDocument();
     expect(within(panel).queryByRole('alert')).toBeNull();
+  });
+
+  it('(R48-a) 자기가 만든 run 이면 폼 대신 4-eyes 문구 — 승인자여도 이 run 은 못 쓴다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({
+      can_review: false, review_block_reason: 'self_review', created_by: 'tester', created_by_known: true, approved: false,
+    }) });
+    const panel = await openPanel(user);
+    expect(within(panel).queryByRole('radio')).toBeNull();
+    expect(within(panel).getByText(/내가 만든 것이라 검토할 수 없습니다/)).toBeInTheDocument();
+    const line = within(panel).getByTestId('review-approval-line');
+    expect(line).toHaveTextContent(/생성자/);
+    expect(line).toHaveTextContent(/tester \(나\)/);
+    expect(line).toHaveTextContent(/미승인/);
+  });
+
+  it('(R48-a) 생성자 미기록(구 run)은 "아무도 아님" 이 아니라 판정 불가로 적고, 승인된 바이트는 승인됨 배지다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState({ created_by: null, created_by_known: false, approved: true, reviews: [reviewRec()] }) });
+    const panel = await openPanel(user);
+    const line = within(panel).getByTestId('review-approval-line');
+    expect(line).toHaveTextContent(/미기록/);
+    expect(line).toHaveTextContent(/판정할 수 없습니다/);
+    expect(line).toHaveTextContent(/승인됨/);
+    expect(line.textContent).not.toMatch(/게시\(publish\)할 수 있습니다/);
   });
 
   it('토큰이 없어서 막힌 것을 권한 문제로 적지 않는다 (R37 D-1)', async () => {
@@ -756,5 +784,50 @@ describe('개선 제안 — 게이트 축과 참고 축을 구별한다', () => 
     expect(relaxed.closest('li').textContent).toContain('게이트 항목 아님');
     // 대조군 — 게이트 축엔 그 꼬리표가 붙지 않는다(전부 참고로 보이면 구별이 사라진다).
     expect(screen.getByText('통과율').closest('li').textContent).not.toContain('게이트 항목 아님');
+  });
+});
+
+describe('ReviewPanel — 문제 목록 (R48-b)', () => {
+  async function openPanel(user) {
+    render(<QualityGateSection />);
+    await waitFor(() => screen.getByText('#776'));
+    await user.click(screen.getByRole('button', { name: '근거 보기' }));
+    return waitFor(() => screen.getByTestId('review-panel'));
+  }
+
+  it('승인 전에 문제 목록을 보인다 — 서버 값 그대로, 설명은 버튼으로만', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState(), issues: {
+      issues: [
+        { code: 'gate_fail:traceability_rate', severity: 'error', kind: 'actual', source: 'gate_report', message: '게이트 미달: traceability_rate', facts: {} },
+        { code: 'tbd_residual:asil_tbd', severity: 'warning', kind: 'potential', source: 'gate_report', message: 'ASIL TBD 29 / 169', facts: { count: 29, total: 169 } },
+      ],
+      counts: { total: 2, actual: 1, potential: 1, by_severity: { error: 1, warning: 1, risk: 0 } },
+      sources: { generation: false, gate_report: true },
+    } });
+    const panel = await openPanel(user);
+    const box = within(panel).getByTestId('review-issues');
+    expect(within(box).getByTestId('issue-counts')).toHaveTextContent('문제가 된 것 1 · 문제가 될 수 있는 것 1');
+    expect(within(box).getByText('gate_fail:traceability_rate')).toBeInTheDocument();
+    expect(within(box).getByRole('button', { name: 'Gemini 로 풀어 설명' })).toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockApi).toHaveBeenCalledWith('/api/review/runs/776/issues');
+  });
+
+  it('문제 목록 조회 실패는 alert 로 남고 검토 폼은 그대로다', async () => {
+    const user = userEvent.setup();
+    stubApi({ review: reviewState() });
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/issues')) return Promise.reject(new Error('503'));
+      if (p.includes('/api/review/states')) return Promise.resolve({ states: {}, missing: [] });
+      if (p.includes('/api/review/runs/')) return Promise.resolve(reviewState());
+      if (/\/runs\/\d+$/.test(p)) return Promise.resolve({ id: 776, scores: [] });
+      if (p.includes('/runs')) return Promise.resolve({ runs: [runRow()], total: 1 });
+      return Promise.resolve({});
+    });
+    const panel = await openPanel(user);
+    await waitFor(() => expect(within(within(panel).getByTestId('review-issues')).getByRole('alert')).toHaveTextContent(/문제 목록을 불러오지 못했습니다: 503/));
+    expect(within(panel).getAllByRole('radio').length).toBeGreaterThan(0);
   });
 });

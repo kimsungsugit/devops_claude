@@ -8,6 +8,7 @@ import { docGenCapsScope } from '../../docGenHelpers.js';
 import { notifyScmRegistryChanged } from '../../scmLinkedDocs.js';
 import { contextConflict, mismatchText } from '../../impactGuard.js';
 import { verdictOf, reasonTextOf, emptyOutputText } from '../../gateVerdict.js';
+import IssueList from '../IssueList.jsx';
 
 /**
  * 생성 현황 보드 — "이 프로젝트의 문서가 지금 어디까지 갔고, 게이트가 어떻게 나왔고,
@@ -375,8 +376,8 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
   const fetchDetail = useCallback(async (docType, run) => {
     setDetail(prev => ({ ...prev, [docType]: { loading: true, runId: run.id } }));
     try {
-      // 근거(사이드카)·조치 제안·원인 귀속을 함께. 하나가 실패해도 나머지는 보여준다.
-      const [ev, ad, at] = await Promise.allSettled([
+      // 근거(사이드카)·조치 제안·원인 귀속·문제 목록(R48-b)을 함께. 하나가 실패해도 나머지는 보여준다.
+      const [ev, ad, at, is] = await Promise.allSettled([
         api(`/api/quality/runs/${run.id}/evidence`),
         post(`/api/quality/runs/${run.id}/advice`, {}),
         post('/api/docgen/attribution', {
@@ -385,6 +386,7 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           source_root: analysisResult?.matchedScm?.source_root || '',
           doc_paths: loadDocPaths() || {},
         }),
+        api(`/api/review/runs/${run.id}/issues`),
       ]);
       // (R32 W6) 응답 역전: run1 조회가 in-flight 인 채로 run2 로 바뀌었으면 run1 응답은 버린다 — 안 버리면
       // 새 run 판정 옆에 옛 run 사이드카가 한 번 그려지고 effect 가 run2 를 다시 받는다(왕복 3회).
@@ -406,6 +408,10 @@ export default function DocGenStatusBoard({ job, analysisResult, genState, onGen
           attribution: at.status === 'fulfilled' ? at.value : null,
           attributionError: at.status === 'rejected'
             ? (at.reason?.message || '원인 분석 실패') : '',
+          // (R48-b) 문제 목록 — 실패는 실패로 적는다(빈 목록으로 접으면 "문제 없음" 이 된다).
+          issues: is.status === 'fulfilled' && Array.isArray(is.value?.issues) ? is.value : null,
+          issuesError: is.status === 'rejected' ? (is.reason?.message || '문제 목록 조회 실패')
+            : (is.status === 'fulfilled' && !Array.isArray(is.value?.issues) ? '문제 목록 응답 형식이 다릅니다' : ''),
         },
       }));
     } catch (e) {
@@ -1680,6 +1686,22 @@ function EvidenceDetail({ run, detail }) {
 
       {/* 3. 원인 귀속 — "이 칸이 왜 비었나" */}
       <AttributionDetail data={detail.attribution} error={detail.attributionError} />
+
+      {/* (R48-b) 문제 목록 — 생성 중 기록 + 사이드카 파생 + 점수 미달을 한 어휘로. Gemini 설명은 버튼으로만. */}
+      <div data-testid="run-issues">
+        {detail.issuesError && (
+          <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>{detail.issuesError}</div>
+        )}
+        {detail.issues && (
+          <IssueList
+            compact
+            issues={detail.issues.issues}
+            counts={detail.issues.counts}
+            sources={detail.issues.sources}
+            onExplain={() => post(`/api/review/runs/${run.id}/issues/explain`, {})}
+          />
+        )}
+      </div>
 
       {/* 4. 실행 메타 */}
       <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>

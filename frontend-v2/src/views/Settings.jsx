@@ -8,6 +8,7 @@ import {
   loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS, saveDocPaths,
 } from '../sharedInputs.js';
 import { notifyScmRegistryChanged } from '../scmLinkedDocs.js';
+import UserRoleAdminBlock from '../components/UserRoleAdminBlock.jsx';
 
 export default function Settings() {
   return (
@@ -1101,6 +1102,8 @@ function AdminSection() {
             </button>
           </div>
           <UdsTemplateAdminBlock />
+          {/* (R48-a) 계정·승인자 — 실권한은 백엔드(JWT + admin). 블록 안에서 `useAdminMode().isAdmin` 으로 다시 가른다. */}
+          <UserRoleAdminBlock />
         </div>
       ) : (
         <div className="field-group">

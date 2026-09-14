@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api, post, getUsername } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
+import IssueList from '../IssueList.jsx';
 import {
   verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR,
   reviewVerdictOf, reviewErrorText, reviewFreshnessOf, reviewDecisionTone, REVIEW_DECISIONS, REVIEW_DECISION_LABEL,
@@ -160,8 +161,9 @@ function TrendChart({ data }) {
  * - 해시 없는 run 은 **검토 잠금** — 폼을 그리지 않는다(S6). 빈칸이 아니라 잠금 사유를 적는다.
  * - `expected_sha256` 은 서버가 준 run 해시를 **그대로** 되돌려 보낸다(프론트 계산 0). 갱신은 내 기록의 `version`.
  * - 성공 토스트는 **2xx 뒤에만**. 409 `STALE`/`VERSION_CONFLICT` 는 상태를 다시 받는다.
- * - `can_review` 는 서버 값 — admin 1명 = 단독 검토임을 문구로 밝힌다(§8 #8). **쓰기 endpoint 와 같은 조건**
- *   (admin **그리고** Bearer)이라 이 폼이 보이면 저장이 통과한다. 못 쓰는 사유는 `review_block_reason`.
+ * - `can_review` 는 서버 값 — (R48-a) **run 단위**다: admin 또는 승인자 **그리고** Bearer **그리고** 자기가 만든 run 이 아님.
+ *   쓰기 endpoint 와 같은 판정기라 이 폼이 보이면 저장이 통과한다. 못 쓰는 사유는 `review_block_reason`
+ *   (`not_reviewer`/`jwt_required`/`self_review`). 승인 상태 `approved` 는 바이트 범위(게시 게이트와 같은 질문).
  */
 function ReviewPanel({ runId, onSaved }) {
   const toast = useToast();
@@ -196,6 +198,17 @@ function ReviewPanel({ runId, onSaved }) {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- run 이 바뀔 때 조회 (콜백 첫 줄의 로딩 플래그 setState)
   useEffect(() => { load(); }, [load]);
+
+  // (R48-b) 승인 전에 봐야 하는 **문제 목록** — 검토 상태와 별도 요청(하나가 실패해도 다른 쪽은 보인다).
+  const [issues, setIssues] = useState(null);      // {issues, counts, sources} | null
+  const [issuesErr, setIssuesErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    api(`/api/review/runs/${runId}/issues`)
+      .then((d) => { if (alive) { if (Array.isArray(d?.issues)) setIssues(d); else setIssuesErr('문제 목록 응답 형식이 다릅니다'); } })
+      .catch((e) => { if (alive) setIssuesErr(`문제 목록을 불러오지 못했습니다: ${e?.message || e}`); });
+    return () => { alive = false; };
+  }, [runId]);
 
   const mine = state ? (state.reviews || []).find((r) => r.reviewer === me) : null;
 
@@ -281,6 +294,37 @@ function ReviewPanel({ runId, onSaved }) {
               ⚠ 검사 규모 미기록 run 입니다 — 검토는 허용되지만 몇 개 항목을 검사했는지는 복원할 수 없습니다.
             </p>
           )}
+          {/* (R48-a) 승인 절차의 두 사실 — 누가 만들었나(4-eyes 의 근거)와 이 바이트가 승인됐나(게시 게이트와 같은 질문).
+              생성자 미기록(구 run)은 "아무도 아님" 이 아니라 판정 불가라 그렇게 적는다. */}
+          {!state.hash_unavailable && (
+            <p data-testid="review-approval-line" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              생성자{' '}
+              {state.created_by_known
+                ? <strong>{state.created_by}{String(state.created_by || '').trim().toLowerCase() === String(me || '').trim().toLowerCase() ? ' (나)' : ''}</strong>
+                : <span>미기록 — 자기 승인 여부를 판정할 수 없습니다(R48 이전 run)</span>}
+              {' · '}
+              승인 상태{' '}
+              {state.approved
+                ? <StatusBadge tone="success">승인됨</StatusBadge>
+                : <StatusBadge tone="neutral">미승인</StatusBadge>}
+              {!state.approved && ' — 승인 기록이 있어야 게시(publish)할 수 있습니다'}
+            </p>
+          )}
+
+          {/* (R48-b) 판정하기 전에 무엇이 문제인지 — 생성 중 기록·근거·점수에서 모은 목록. Gemini 설명은 버튼으로만. */}
+          <div data-testid="review-issues" style={{ margin: 'var(--sp-2) 0' }}>
+            {issuesErr && <div role="alert" style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)' }}>{issuesErr}</div>}
+            {issues && (
+              <IssueList
+                compact
+                issues={issues.issues}
+                counts={issues.counts}
+                sources={issues.sources}
+                title="이 run 의 문제 목록(승인 전 확인)"
+                onExplain={() => post(`/api/review/runs/${runId}/issues/explain`, {})}
+              />
+            )}
+          </div>
 
           {(state.reviews || []).length > 0 ? (
             <div style={{ overflowX: 'auto' }}>
@@ -327,7 +371,7 @@ function ReviewPanel({ runId, onSaved }) {
                     {saving ? '저장 중…' : (mine ? '갱신' : '저장')}
                   </button>
                   <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                    JWT 로그인한 admin 만 기록합니다(현재 admin 은 단독 검토입니다). 검토는 게이트 판정을 바꾸지 않습니다.
+                    JWT 로그인한 admin 또는 승인자만 기록하고, 자기가 만든 run 은 판정할 수 없습니다(4-eyes). 검토는 게이트 판정을 바꾸지 않습니다.
                     {' '}검토자 이름은 admin 과 본인에게만 그대로 보입니다.
                   </span>
                 </div>

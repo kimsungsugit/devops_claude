@@ -54,6 +54,12 @@ class GenerationRun(QualityBase):
     # 파일 부재, BytesIO 응답이라 경로가 없는 run) 이지 "빈 산출물" 이 아니다.
     # ⚠ 컬럼 추가는 `db.py::_COLUMN_ADDITIONS` 한 줄과 한 세트다.
     output_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # (R48-a) 이 run 을 **만든 사람** — 검토 기록의 자기 승인 차단(4-eyes)이 이 값과 검토자를 대조한다.
+    # `record_run` 이 요청 contextvar(`get_current_user`)에서 채운다(백그라운드 스레드는 `wrap_with_user`
+    # 로 상속). NULL = 미기록(구 run·신원 없는 스크립트) 이지 "아무도 아님" 이 아니다 — NULL 이면 자기
+    # 승인 판정은 **불가**로 공시하고 막지 않는다(막으면 구 run 전부가 영구 미승인).
+    # ⚠ 컬럼 추가는 `db.py::_COLUMN_ADDITIONS` 한 줄과 한 세트다.
+    created_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     ai_model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     error_msg: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     meta_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
@@ -70,6 +76,7 @@ class GenerationRun(QualityBase):
         Index("ix_gen_run_created", "created_at"),
         Index("ix_gen_run_project", "project_root"),
         Index("ix_gen_run_scm", "scm_id"),
+        Index("ix_gen_run_created_by", "created_by"),
     )
 
 

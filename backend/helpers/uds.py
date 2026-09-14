@@ -42,6 +42,7 @@ from report_gen.gate_report import (
     parse_scoring_scope,
     to_rate_map,
 )
+from report_gen.gen_issues import IssueCollector, current_collector, issue_payload
 from report_gen.source_roots import first_source_root, split_source_roots
 from report_generator import (
     _build_req_map_from_doc_paths,
@@ -406,6 +407,106 @@ def _record_uds_run(
 #   7키(gate) + 3키(신뢰도) 였고 `global_min`/`static_min` 은 사유 코드에만 쓰였다
 #   (`workflow/quality/evaluator.py` 가 의도적으로 제외 — 정상 모듈의 구조적 저평가).
 #   판정식과 공시가 같은 튜플을 읽게 해 둘이 갈리지 않게 한다.
+# ── (R48-b) 생성 중 문제 수집 — 판정은 바꾸지 않고 **보이게만** 한다 ──────────────────────
+# 아래 `_note_*` 는 파이프라인의 관측값(사이드카 통계·리포트 결과·quick gate)을 수집기 어휘로 옮긴다.
+# 수집기(`IssueCollector`)는 `_uds_generate_from_paths` 가 열고, 진행 폴링·완료 결과·품질 run meta 에 실린다.
+
+
+def _note_source_caps(issues: IssueCollector, source_sections: Dict[str, Any]) -> None:
+    """소스 분석이 **잘라낸 것**을 항목으로 — 캡은 조용히 자르므로 여기서 말하지 않으면 "원래 없는 것" 으로 읽힌다."""
+    if not isinstance(source_sections, dict):
+        return
+    caps = source_sections.get("category_caps") or {}
+    if isinstance(caps, dict) and caps.get("any_truncated"):
+        tr = caps.get("truncated") or {}
+        names = sorted(tr.keys()) if isinstance(tr, dict) else [str(tr)]
+        issues.add("source_cap_reached", "warning", "actual",
+                   f"카테고리 상한({caps.get('cap')})에 닿아 잘린 축: {', '.join(names)} — 준비 게이트의 max_items_per_category 로 조정",
+                   stage="source", facts={"cap": caps.get("cap"), "truncated": tr if isinstance(tr, dict) else {}})
+    fs = source_sections.get("file_scan") or {}
+    if isinstance(fs, dict) and fs.get("truncated"):
+        issues.add("source_cap_reached", "warning", "actual",
+                   f"파일 상한({fs.get('cap')})에 닿아 나머지 소스 파일은 읽지 않았다 — max_source_files 로 조정",
+                   stage="source", facts={"cap": fs.get("cap"), "axis": "files"})
+    gs = source_sections.get("globals_scan") or {}
+    if isinstance(gs, dict) and gs.get("measured"):
+        if (gs.get("c_total") or 0) > (gs.get("c_cap") or 0) or (gs.get("h_total") or 0) > (gs.get("h_cap") or 0):
+            issues.add("source_cap_reached", "warning", "actual",
+                       f"전역 스캔 캡 도달(.c {gs.get('c_scanned')}/{gs.get('c_total')} · .h {gs.get('h_scanned')}/{gs.get('h_total')}) — 나머지 파일의 전역은 인식되지 않는다",
+                       stage="source", facts={k: gs.get(k) for k in ("c_scanned", "c_total", "h_scanned", "h_total")})
+        rt = gs.get("read_truncated_files") or 0
+        if rt:
+            issues.add("source_read_truncated", "warning", "actual",
+                       f"파일 내부 읽기 상한에 닿은 파일 {rt}개 — 큰 헤더의 매크로/선언이 잘렸을 수 있다",
+                       stage="source", facts={"files": rt, "detail": (gs.get("read_truncated_detail") or [])[:3]})
+
+
+def _note_docx_outcome(issues: IssueCollector, gen_stats: Dict[str, Any]) -> None:
+    """DOCX 라이터 통계(`.gen_stats.json`)에서 — 미반영 함수·빈 heading·참조 신원 차단."""
+    if not isinstance(gen_stats, dict) or not gen_stats:
+        issues.add("gen_stats_missing", "risk", "potential",
+                   "DOCX 생성 통계가 없다 — 반영률·참조 적용 여부를 잴 수 없다(미측정이지 문제 없음이 아니다)", stage="docx")
+        return
+    unmatched = gen_stats.get("unmatched_payload_count")
+    empty = gen_stats.get("empty_heading_count")
+    if (isinstance(unmatched, int) and unmatched > 0) or (isinstance(empty, int) and empty > 0):
+        issues.add("docx_unmatched_functions", "warning", "actual",
+                   f"payload 함수 {gen_stats.get('payload_functions')}개 중 {gen_stats.get('matched_functions')}개 반영(반영률 {gen_stats.get('match_pct')}%) — "
+                   f"템플릿에 heading 이 없어 빠진 함수 {unmatched}개, 내용 없이 남은 heading {empty}개",
+                   stage="docx", facts={"payload_functions": gen_stats.get("payload_functions"), "matched": gen_stats.get("matched_functions"),
+                                        "match_pct": gen_stats.get("match_pct"), "unmatched": unmatched, "empty_headings": empty})
+    ref = gen_stats.get("reference_suds")
+    if isinstance(ref, dict) and ref.get("configured"):
+        identity = ref.get("identity") if isinstance(ref.get("identity"), dict) else {}
+        same = identity.get("same_project")
+        if same is False:
+            issues.add("reference_identity_blocked", "error", "actual",
+                       f"참조 SwUDS({ref.get('document')})가 다른 프로젝트로 판정돼 ASIL·Related 보강 {ref.get('safety_fields_blocked')}건이 차단됐다({identity.get('reason')})",
+                       stage="docx", facts={"document": ref.get("document"), "blocked": ref.get("safety_fields_blocked"),
+                                            "applied": ref.get("safety_fields_applied"), "reason": identity.get("reason")})
+        elif same is None:
+            issues.add("reference_identity_unknown", "warning", "potential",
+                       f"참조 SwUDS({ref.get('document')})의 프로젝트 신원을 판정하지 못했다 — 보강 적용 {ref.get('safety_fields_applied')}·차단 {ref.get('safety_fields_blocked')}",
+                       stage="docx", facts={"applied": ref.get("safety_fields_applied"), "blocked": ref.get("safety_fields_blocked")})
+
+
+def _note_report(issues: IssueCollector, ok: bool, err: Any, name: str, seconds: Any) -> None:
+    """후처리 리포트 결과 — 타임아웃이면 `report_timeout:<slug>`, 그 밖의 실패는 `report_failed:<slug>`. 성공은 기록하지 않는다."""
+    if ok:
+        return
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_") or "report"
+    text = str(err or "")
+    timed_out = "timeout" in text.lower() or "timed out" in text.lower()
+    issues.add(
+        f"report_timeout:{slug}" if timed_out else f"report_failed:{slug}", "warning", "actual",
+        (f"{name} 가 {seconds}초 안에 끝나지 못해 그 리포트 없이 산출물이 나갔다" if timed_out
+         else f"{name} 실패 — {text[:120] or '사유 미기록'}"),
+        stage="reports", facts={"report": name, "seconds": seconds, "timed_out": timed_out},
+    )
+
+
+def _note_quick_gate(issues: IssueCollector, qg: Dict[str, Any]) -> None:
+    """빠른 게이트 — 미달 축마다 한 건(값·임계를 facts 에). 임계 없는 축은 fail-closed 사실을 남긴다."""
+    if not isinstance(qg, dict):
+        return
+    rates = qg.get("rates") or {}
+    thresholds = qg.get("thresholds")
+    for rate_key, thr_key in (*QUICK_GATE_AXES, *CONFIDENCE_GATE_AXES):
+        thr = _quality_threshold(thresholds, thr_key)
+        rate = rates.get(rate_key)
+        if thr is None or rate is None:
+            continue
+        if float(rate) < float(thr):
+            # 값은 **재지 않은 그대로**(quick gate 의 rate 와 임계는 같은 눈금 — 0~100). 라이브 run 2077 에서 ×100 으로
+            # 적었다가 "460% < 5000%" 가 나왔다 — 눈금을 지어내지 않는다.
+            issues.add(f"gate_fail:{rate_key}", "error", "actual",
+                       f"빠른 게이트 미달: {rate_key} {round(float(rate), 2)} < 임계 {round(float(thr), 2)}",
+                       stage="quality", facts={"axis": rate_key, "rate": rate, "threshold": thr})
+    for key in qg.get("thresholds_missing") or []:
+        issues.add(f"threshold_missing:{key}", "error", "actual",
+                   f"임계 없는 축 {key} — 판정할 수 없어 fail-closed 됐다", stage="quality", facts={"key": key})
+
+
 QUICK_GATE_AXES: Tuple[Tuple[str, str], ...] = (
     ("called_fill", "called_min"),
     ("calling_fill", "calling_min"),
@@ -2423,10 +2524,15 @@ def _uds_generate_from_paths(
     # 정규화는 `docx_builder.normalize_unmatched_headings` 단일 출처가 한다.
     unmatched_headings: str = "",
 ) -> Dict[str, Any]:
+    # (R48-b) 생성 중 문제 수집기 — 바깥 컨텍스트(`use_collector`)가 있으면 그것, 없으면 이 실행의 지역 수집기.
+    #   `_note_*` 헬퍼에 명시로 넘긴다(래퍼로 감싸지 않는 이유: 기존 가드 2종이 이 함수의 `__code__`·AST 를 직접 본다).
+    _issues = current_collector() or IssueCollector()
+
     def _progress(stage: str, percent: int, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
         if not progress_cb:
             return
-        payload = {"stage": stage, "percent": percent, "message": message}
+        # 진행 응답마다 목록을 **통째로** 싣는다 — 누적은 서버 몫이고, 폴러는 마지막 값을 그대로 보인다.
+        payload = {"stage": stage, "percent": percent, "message": message, **issue_payload(_issues)}
         if extra:
             payload.update(extra)
         progress_cb(stage, payload)
@@ -2477,6 +2583,10 @@ def _uds_generate_from_paths(
             req_texts.append(text.strip())
             if p.suffix.lower() == ".docx":
                 req_doc_paths.append(str(p))
+    if not req_texts:
+        _issues.add("requirements_missing", "warning", "potential",
+                    "요구사항 문서(SwRS/SwDS)를 하나도 읽지 못했다 — 요구 절과 Related ID 는 소스에서만 온다",
+                    stage="requirements", facts={"req_paths": len(req_paths), "req_files": len(req_file_paths)})
 
     _progress("source", 45, "소스/섹션 분석")
     jenkins_meta = summary.get("jenkins") if isinstance(summary, dict) else {}
@@ -2499,6 +2609,9 @@ def _uds_generate_from_paths(
         # 문서 본문·AI 프롬프트에 실리는 notes 라 **경로 대신 이름만**(리뷰 W2).
         notes.append(f"소스 루트 1개를 찾지 못해 건너뜀: {Path(_m).name or _m}")
         _logger.warning("UDS source root missing (skipped): %s", _m)
+        _issues.add("source_root_missing", "warning", "actual",
+                    f"소스 루트 1개를 찾지 못해 건너뜀: {Path(_m).name or _m}", stage="source",
+                    facts={"root": Path(_m).name or str(_m)})
     if _src_roots_str:
         source_sections = generate_uds_source_sections(
             _src_roots_str,
@@ -2506,6 +2619,11 @@ def _uds_generate_from_paths(
             max_files=max_source_files,
             max_items=max_items_per_category,
         )
+        _note_source_caps(_issues, source_sections)
+    else:
+        _issues.add("source_root_none", "error", "actual",
+                    "존재하는 소스 루트가 없어 소스 분석을 건너뛴다 — 함수 0개 문서가 된다", stage="source",
+                    facts={"missing": len(_src_missing)})
 
     _progress("requirements_build", 60, "요구사항 정리")
     req_from_docs = generate_uds_requirements_from_docs(req_texts) if req_texts else ""
@@ -2600,8 +2718,14 @@ def _uds_generate_from_paths(
                 detailed=bool(ai_detailed),
                 rag_snippets=rag_snippets,
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — AI 실패는 생성을 멈추지 않지만 **침묵하지 않는다**(수집기에 남긴다)
             ai_sections = None
+            _issues.add("ai_failed", "warning", "actual",
+                        f"AI 섹션 생성 실패({type(exc).__name__}) — description 은 소스 주석/참조 SwUDS 에서만 온다",
+                        stage="ai", facts={"error": type(exc).__name__})
+    else:
+        _issues.add("ai_disabled", "risk", "potential",
+                    "AI 설명이 꺼져 있다 — description 은 소스 주석/참조 SwUDS 에서만 채워진다", stage="ai")
 
     _progress("payload", 82, "UDS 페이로드 생성")
     req_map = _build_req_map_from_doc_paths(req_doc_paths, req_texts) if req_texts or req_doc_paths else {}
@@ -2720,7 +2844,18 @@ def _uds_generate_from_paths(
         annotate_reference_source(uds_payload, source_root, reference_source)
     if reference_suds_path:
         _api_logger.info("[UDS_DOCX] 참조 SwUDS: %s", Path(reference_suds_path).name)
+        if isinstance(reference_source, dict) and reference_source.get("compare") == "differs":
+            _mm = reference_source.get("mismatch") or {}
+            _issues.add("reference_registry_mismatch", "warning", "actual",
+                        f"폼이 지정한 참조 SwUDS({_mm.get('form')})가 레지스트리 {_mm.get('scm_id')} 의 정본({_mm.get('registry')})과 다르다 — 지정 경로를 쓴다",
+                        stage="docx", facts=dict(_mm))
+    else:
+        _issues.add("reference_suds_unconfigured", "warning", "potential",
+                    (str((reference_source or {}).get("why") or "") if isinstance(reference_source, dict) else "")
+                    or "참조 SwUDS 미지정 — ASIL·Related 보강 없이 생성한다", stage="docx")
     _generate_docx_with_retry(tpl, uds_payload, out_path, reference_suds_path=reference_suds_path)
+    # 라이터 통계에서 미반영 함수·빈 heading·참조 신원 차단을 항목으로(로그 한 줄이던 것).
+    _note_docx_outcome(_issues, _read_gen_stats(out_path))
     # (R47 N27) 빌더가 보강한 값을 **먼저** 병합한다 — 게이트·매핑 요약·payload 사이드카가 전부 문서를 만든 값을 본다.
     _enrichment = merge_enriched_function_details(out_path, uds_payload.get("function_details") or {})
     summary = uds_payload.get("summary")
@@ -2747,38 +2882,51 @@ def _uds_generate_from_paths(
         )
         # (R47-g N28-b) payload 가 **실제로 쓰인 뒤** 통계에 병기 — 근거 리더가 2.7MB payload 를 열지 않게.
         record_enrichment_in_gen_stats(out_path, _enrichment)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — 사이드카 실패는 생성을 멈추지 않지만 채점 강등 사실은 남긴다
         # payload 사이드카가 없으면 채점기는 문서 자기 대조로 떨어진다 — 그 사실은 로그에 남아야 한다.
         _logger.warning("UDS payload sidecar write skipped: %s", sidecar_path, exc_info=True)
+        _issues.add("payload_sidecar_failed", "error", "actual",
+                    f"payload 사이드카 기록 실패({type(exc).__name__}) — 채점기가 문서 자기 대조로 강등된다",
+                    stage="payload", facts={"error": type(exc).__name__})
+    _tbd_n = int((summary.get("mapping") or {}).get("residual_tbd_count") or 0)
+    if _tbd_n:
+        _issues.add("tbd_residual:mapping", "warning", "potential",
+                    f"SDS 매핑 미확정(TBD) 함수 {_tbd_n}개 — 검토자가 채우거나 참조 SwUDS 를 지정할 것",
+                    stage="payload", facts={"count": _tbd_n, "total": (summary.get("mapping") or {}).get("total")})
     residual_tbd_path = _write_residual_tbd_report(out_path, summary.get("mapping") or {})
     validation_path = out_path.with_suffix(".validation.md")
-    ok_validation, _ = _run_report_with_timeout(
+    _rt = getattr(config, "UDS_REPORT_TIMEOUT", 120)
+    ok_validation, _err_validation = _run_report_with_timeout(
         lambda: generate_uds_validation_report(str(out_path), str(validation_path)),
-        timeout_seconds=getattr(config, "UDS_REPORT_TIMEOUT", 120),
+        timeout_seconds=_rt,
         report_name="validation report",
     )
+    _note_report(_issues, ok_validation, _err_validation, "validation report", _rt)
     if not ok_validation:
         validation_path = None
     accuracy_path = out_path.with_suffix(".accuracy.md")
     src_root = str(source_root_path) if source_root_path else ""
-    ok_accuracy, _ = _run_report_with_timeout(
+    _rt_acc = getattr(config, "UDS_ACCURACY_REPORT_TIMEOUT", 300)
+    ok_accuracy, _err_accuracy = _run_report_with_timeout(
         lambda: generate_called_calling_accuracy_report(
             str(out_path),
             src_root,
             str(accuracy_path),
             relation_mode="code",
         ),
-        timeout_seconds=getattr(config, "UDS_ACCURACY_REPORT_TIMEOUT", 300),
+        timeout_seconds=_rt_acc,
         report_name="accuracy report",
     )
+    _note_report(_issues, ok_accuracy, _err_accuracy, "accuracy report", _rt_acc)
     if not ok_accuracy:
         accuracy_path = None
     swcom_context_path = out_path.with_suffix(".swcom_context.md")
-    ok_swcom, _ = _run_report_with_timeout(
+    ok_swcom, _err_swcom = _run_report_with_timeout(
         lambda: generate_swcom_context_report(str(out_path), str(swcom_context_path)),
-        timeout_seconds=getattr(config, "UDS_REPORT_TIMEOUT", 120),
+        timeout_seconds=_rt,
         report_name="swcom context report",
     )
+    _note_report(_issues, ok_swcom, _err_swcom, "swcom context report", _rt)
     if not ok_swcom:
         swcom_context_path = None
     swcom_diff_path = out_path.with_suffix(".swcom_diff.md")
@@ -2794,41 +2942,48 @@ def _uds_generate_from_paths(
             "다른 프로젝트 문서로 대체하지 않는다", ref_docx,
         )
     if ref_docx.exists():
-        ok_swcom_diff, _ = _run_report_with_timeout(
+        ok_swcom_diff, _err_swcom_diff = _run_report_with_timeout(
             lambda: generate_swcom_context_diff_report(str(ref_docx), str(out_path), str(swcom_diff_path)),
-            timeout_seconds=getattr(config, "UDS_REPORT_TIMEOUT", 120),
+            timeout_seconds=_rt,
             report_name="swcom context diff report",
         )
+        _note_report(_issues, ok_swcom_diff, _err_swcom_diff, "swcom context diff report", _rt)
         if not ok_swcom_diff:
             swcom_diff_path = None
     else:
         swcom_diff_path = None
+        _issues.add("report_skipped:swcom_diff", "risk", "potential",
+                    "참조 SUDS(config UDS_REF_SUDS_PATH)가 없어 SwCom diff 리포트를 건너뛰었다(다른 프로젝트 문서로 대체하지 않는다)",
+                    stage="reports")
     confidence_path = out_path.with_suffix(".field_confidence.md")
-    ok_confidence, _ = _run_report_with_timeout(
+    ok_confidence, _err_confidence = _run_report_with_timeout(
         lambda: generate_asil_related_confidence_report(
             uds_payload,
             str(confidence_path),
             str(out_path),
         ),
-        timeout_seconds=getattr(config, "UDS_REPORT_TIMEOUT", 120),
+        timeout_seconds=_rt,
         report_name="ASIL/Related confidence report",
     )
+    _note_report(_issues, ok_confidence, _err_confidence, "ASIL/Related confidence report", _rt)
     if not ok_confidence:
         confidence_path = None
     constraints_path = out_path.with_suffix(".constraints.md")
-    ok_constraints, _ = _run_report_with_timeout(
+    ok_constraints, _err_constraints = _run_report_with_timeout(
         lambda: generate_uds_constraints_report(uds_payload, str(constraints_path)),
-        timeout_seconds=getattr(config, "UDS_REPORT_TIMEOUT", 120),
+        timeout_seconds=_rt,
         report_name="constraints report",
     )
+    _note_report(_issues, ok_constraints, _err_constraints, "constraints report", _rt)
     if not ok_constraints:
         constraints_path = None
     quality_gate_path = out_path.with_suffix(".quality_gate.md")
-    ok_quality_gate, _ = _run_report_with_timeout(
+    ok_quality_gate, _err_quality_gate = _run_report_with_timeout(
         lambda: generate_uds_field_quality_gate_report(str(out_path), str(quality_gate_path)),
-        timeout_seconds=getattr(config, "UDS_REPORT_TIMEOUT", 120),
+        timeout_seconds=_rt,
         report_name="field quality gate report",
     )
+    _note_report(_issues, ok_quality_gate, _err_quality_gate, "field quality gate report", _rt)
     if not ok_quality_gate:
         quality_gate_path = None
 
@@ -2841,8 +2996,12 @@ def _uds_generate_from_paths(
         # 여기서만 붙는다(복제하면 한쪽만 고쳐진다).
         # scm_id 는 넘기지 않는다: 이 경로가 아는 건 job_url/cache_root 뿐이라
         # 여기서 지어내느니 recorder 가 project_root 로 해결하게 둔다.
+        _qg = _compute_quick_quality_gate(uds_payload)
+        # (R48-b) 미달 축·임계 없는 축을 항목으로 — 그리고 지금까지 모인 목록을 run meta 에 남긴다
+        #   (`/api/review/runs/{id}/issues` 의 `generation` 출처). 미리보기 단계는 뒤라 여기 안 실린다.
+        _note_quick_gate(_issues, _qg)
         _record_uds_run(
-            _compute_quick_quality_gate(uds_payload),
+            _qg,
             source_root=source_root,
             out_path=out_path,
             t0=_t0,
@@ -2850,6 +3009,7 @@ def _uds_generate_from_paths(
             extra_meta={
                 "entry": "jenkins_generate_async",
                 "build_selector": str(build_selector or ""),
+                **issue_payload(_issues),
             },
         )
     except Exception:
@@ -2884,4 +3044,7 @@ def _uds_generate_from_paths(
         #   그래서 "침묵을 없앴다" 고 적었지만 실제로는 로그와 파일에만 남았다.
         #   보고를 추가하는 것과 보고가 **도달하는** 것은 다른 문제다.
         **_gen_stats_result_fields(out_path),
+        # (R48-b) 생성 중 관측된 문제 — 완료 응답(`result`)에도 실어 마지막 폴링이 놓친 항목이 없게.
+        **issue_payload(_issues),
     }
+

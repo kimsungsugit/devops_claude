@@ -4,10 +4,12 @@
 
 | 엔드포인트 | 권한 | 계약 |
 |---|---|---|
-| `GET /runs/{run_id}` | `require_user`(로그인) | 기록 목록 + `stale`/`hash_unavailable`/`superseded_by`/`can_review`+`review_block_reason`. run 없음 = **404** |
-| `POST /runs/{run_id}` | `require_jwt_user` **+ `require_admin`**(§8 #8) | body `extra='forbid'`. 409 `STALE`/`HASH_UNAVAILABLE`/`VERSION_CONFLICT`, 503 `DB_BUSY` |
+| `GET /runs/{run_id}` | `require_user`(로그인) | 기록 목록 + `stale`/`hash_unavailable`/`superseded_by`/`can_review`+`review_block_reason`/`created_by`/`approved`. run 없음 = **404** |
+| `POST /runs/{run_id}` | `require_reviewer` = JWT **+ admin 또는 승인자**(R48-a, §8 #8 (b)) | body `extra='forbid'`. 403 `REVIEWER_REQUIRED`/`SELF_REVIEW`(자기 run), 409 `STALE`/`HASH_UNAVAILABLE`/`VERSION_CONFLICT`, 503 `DB_BUSY` |
 | `GET /history` | `require_user` | 감사 이력, `scm_id`/`doc_type`/`run_id`/`reviewer`/`limit`/`offset`. 남의 이름 필터는 **403** |
 | `GET /states?run_ids=1,2` | `require_user` | (R35) 목록 '검토' 열용 배치 — id 마다 `GET /runs/{id}` 와 같은 본문. ≤50개, 없는 id 는 `missing` |
+| `GET /runs/{run_id}/issues` | `require_user` | (R48-b) 문제 목록(생성 중 기록 + 사이드카 파생 + 점수 미달). run 없음 = **404** |
+| `POST /runs/{run_id}/issues/explain` | `require_user` | (R48-b) Gemini 설명 — body `{use_llm?}` `extra='forbid'`. 실패는 룰 문장 + `generated_by:"rule"` |
 
 - 200 + `{"error": …}` 를 **절대** 돌려주지 않는다 — `api.js` 는 `res.ok` 만 본다(quality.py `get_run` 과 같은 이유).
 - 경로·파일명·신원은 클라이언트가 보내지 않는다(run_id 만 — `evidence` 와 같은 구조).
@@ -25,9 +27,9 @@ from typing import Any, Dict, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.dependencies.admin import require_admin
 from backend.dependencies.auth import has_bearer, require_jwt_user, require_user
 from backend.services.admin_users import is_admin, mask_user
+from backend.services.approvers import is_approver
 from workflow.quality.review import (
     AUTH_METHOD_JWT,
     COMMENT_MAX_LEN,
@@ -91,8 +93,29 @@ def _http(exc: ReviewError) -> HTTPException:
 
 
 def _viewer(request: Request, user: str) -> Viewer:
-    """요청에서 **사실 셋**만 읽는다 — 판정은 `Viewer` 가 한다(권한 규칙을 라우터에 복제하지 않는다)."""
-    return Viewer(name=user, is_admin=bool(is_admin(user)), has_bearer=has_bearer(request))
+    """요청에서 **사실 넷**만 읽는다 — 판정은 `Viewer` 가 한다(권한 규칙을 라우터에 복제하지 않는다)."""
+    return Viewer(
+        name=user, is_admin=bool(is_admin(user)), has_bearer=has_bearer(request),
+        is_approver=bool(is_approver(user)),
+    )
+
+
+def require_reviewer(jwt_user: str = Depends(require_jwt_user)) -> str:
+    """(R48-a) 검토 쓰기 주체 — JWT 로 로그인한 **admin 또는 승인자**(`config/approvers.json`).
+
+    `Viewer.is_reviewer` 와 같은 두 목록을 본다(조회의 `can_review` 약속 = 쓰기의 통과 조건, R37 D-1).
+    아니면 403 `REVIEWER_REQUIRED` — 401 이 아니다(신원은 있고 역할이 없다).
+    """
+    if is_admin(jwt_user) or is_approver(jwt_user):
+        return jwt_user
+    _logger.warning("review gate: user=%s is neither admin nor approver", mask_user(jwt_user))
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "REVIEWER_REQUIRED",
+            "message": "검토 기록은 admin 또는 승인자만 남길 수 있습니다 — 관리자에게 승인자 등록을 요청하세요",
+        },
+    )
 
 
 def _open_session():
@@ -114,13 +137,12 @@ def get_review(run_id: int, request: Request, user: str = Depends(require_user))
 def post_review(
     run_id: int,
     body: ReviewBody,
-    jwt_user: str = Depends(require_jwt_user),
-    _admin: str = Depends(require_admin),
+    jwt_user: str = Depends(require_reviewer),
 ) -> Dict[str, Any]:
     """검토 기록 생성/갱신. 본문 `created` 로 구분한다(프론트 헬퍼가 상태코드를 안 본다).
 
-    두 의존성은 같은 요청 contextvar 를 읽으므로 신원은 하나다 — `require_jwt_user` 가 Bearer 를, `require_admin`
-    이 admin 등록을 각각 강제한다.
+    (R48-a) `require_reviewer` = Bearer(`require_jwt_user`) + admin **또는** 승인자. 자기 승인(`created_by ==
+    reviewer`)은 서비스가 403 `SELF_REVIEW` 로 막는다 — 역할 검사는 사람 단위, 4-eyes 는 run 단위라 층이 다르다.
     """
     try:
         result = upsert_review(
@@ -175,6 +197,46 @@ def get_states(
         return review_states(_open_session, ids, viewer=_viewer(request, user))
     except ReviewError as exc:
         raise _http(exc) from None
+
+
+class ExplainBody(BaseModel):
+    """`extra='forbid'`. `use_llm=false` 는 룰 문장만(테스트·LLM 없는 환경)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    use_llm: bool = True
+
+
+def _issues_payload(run_id: int) -> Dict[str, Any]:
+    from workflow.quality.issues import RunNotFound, collect_run_issues
+
+    try:
+        with _open_session() as session:
+            return collect_run_issues(session, run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND", "message": f"run_id {run_id} not found"}) from None
+
+
+@router.get("/runs/{run_id}/issues")
+def get_run_issues(run_id: int, _user: str = Depends(require_user)) -> Dict[str, Any]:
+    """(R48-b) run 의 **문제 목록** — 생성 중 기록(meta) + 사이드카 근거 + DB 점수를 한 어휘로(`workflow/quality/issues.py`).
+
+    로그인 사용자 누구나(승인자는 admin 이 아니다 — 승인 전에 봐야 한다). 서버 절대경로는 싣지 않는다.
+    """
+    return _issues_payload(run_id)
+
+
+@router.post("/runs/{run_id}/issues/explain")
+def explain_run_issues(run_id: int, body: Optional[ExplainBody] = None, _user: str = Depends(require_user)) -> Dict[str, Any]:
+    """(R48-b) 문제 목록을 Gemini 로 풀어 설명한다 — **버튼으로만** 부를 것(페이지 로드마다 부르지 않는다).
+
+    숫자는 만들지 않는다(프롬프트 밖 숫자 → 폐기), 없는 문제도 만들지 않는다(코드 부분집합). 실패·비활성은 룰 문장으로
+    내려가고 `generated_by`/`model`/`llm_reason` 이 출처를 말한다(`backend/services/issue_explainer.py`).
+    """
+    from backend.services.issue_explainer import explain_issues
+
+    payload = _issues_payload(run_id)
+    return explain_issues(payload, use_llm=(body.use_llm if body is not None else True))
 
 
 @router.get("/history")

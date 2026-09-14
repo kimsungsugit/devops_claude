@@ -117,6 +117,22 @@ def empty_output_reason(doc_type: Any, quality_data: Any) -> Optional[str]:
     return f"empty:{key}" if n <= 0 else None
 
 
+def current_identity() -> Optional[str]:
+    """(R48-a) 지금 요청의 사용자 이름 — 없으면 None.
+
+    `backend.user_context` 는 지연 import(계층: workflow → backend 는 이 모듈의 scm_registry 선례와 같다).
+    `default` 는 미들웨어의 "신원 없음" 토큰이라 이름이 아니다 — NULL 로 둔다. 백엔드 없이 도는 스크립트
+    (`generate_uds_local.py` 등)는 import 자체가 실패할 수 있고, 그때도 None 이다(기록을 버리지 않는다).
+    """
+    try:
+        from backend.user_context import get_current_user
+        user = str(get_current_user() or "").strip()
+    except Exception as exc:  # noqa: BLE001 — 백엔드 컨텍스트 밖(독립 스크립트)에서는 신원이 없는 것이 정상
+        _logger.debug("created_by 미기록 — 요청 컨텍스트 없음(%s)", type(exc).__name__)
+        return None
+    return user if user and user != "default" else None
+
+
 def _record_empty_output_run(doc_type: str, *, reason: str, status: Any = None, **kwargs: Any) -> int:
     """생성은 됐고 내용이 비었다 — **run 행만** 남긴다(점수·요약 없음).
 
@@ -155,6 +171,7 @@ def _record_empty_output_run(doc_type: str, *, reason: str, status: Any = None, 
             output_path=kwargs.get("output_path"),
             output_size_bytes=output_size,
             output_sha256=output_sha,
+            created_by=kwargs.get("created_by"),
             ai_model=kwargs.get("ai_model"),
             error_msg=kwargs.get("error_msg"),
             meta_json=json.dumps(run_meta, ensure_ascii=False),
@@ -181,8 +198,14 @@ def record_run(
     error_msg: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
     db_path: Optional[Path] = None,
+    created_by: Optional[str] = None,
 ) -> int:
     """생성 실행 1회를 Quality DB에 기록.
+
+    ``created_by`` (R48-a): 이 run 을 만든 사람. 명시하지 않으면 **요청 contextvar**(`get_current_user`)에서
+    읽는다 — 호출부 11곳을 건드리지 않고도 채워지도록 판정을 여기 한 곳에 둔다(`scm_id` 자동 해결과 같은
+    자리). 백그라운드 스레드는 `wrap_with_user` 로 신원을 상속하므로 async 생성도 채워진다. 신원이 없으면
+    (`default`·스크립트) NULL — 검토 기록의 자기 승인 판정은 NULL 을 "판단 불가" 로 공시한다.
 
     ``output_sha256`` (R33 C-1): 산출물 바이트의 SHA-256 hex. 명시하면 그 값을 쓰고, 없으면
     ``output_path`` 파일을 읽어 계산한다. 둘 다 없으면 NULL(미기록). 이 값이 검토 기록(R34~)의 대상
@@ -218,6 +241,14 @@ def record_run(
                 # 두고 기록은 계속한다 — 다만 침묵은 금지(사후에 왜 NULL 인지 알아야 한다).
                 _logger.exception("scm_id 자동 해결 실패 — 미상(NULL)으로 기록한다")
                 scm_id = None
+        # (R48-a) 생성자 — 명시 인자 > 요청 contextvar. 빈 산출물 분기 **앞**에서 해결한다(scm_id 와 같은 이유).
+        created_by = current_identity() if created_by is None else (str(created_by).strip() or None)
+        if created_by is None:
+            # (리뷰 W4) NULL 은 곧 4-eyes 판정 불가(면제)다 — 조용히 남기지 않는다. 사유를 meta 에 적고 WARNING 으로.
+            meta = dict(meta or {})
+            meta.setdefault("created_by_reason", "no_identity")
+            _logger.warning("%s run 을 생성자 미상(created_by NULL)으로 기록한다 — 요청 컨텍스트 밖(스크립트/GUI)이거나 "
+                            "신원 없는 요청. 이 run 은 자기 승인 차단 대상에서 벗어난다", (doc_type or "").lower())
 
         # 내용이 빈 산출물: **점수는 남기지 않고 생성 사실만** 남긴다 (R37 D-3).
         # 예전엔 통째로 skip 했는데, 그러면 사용자는 파일을 받았는데 화면은 "미생성" 이라
@@ -233,6 +264,7 @@ def record_run(
                 elapsed_sec=elapsed_sec, output_path=output_path, output_sha256=output_sha256,
                 output_size_bytes=output_size_bytes, output_hash_reason=output_hash_reason,
                 ai_model=ai_model, error_msg=error_msg, meta=meta, db_path=db_path,
+                created_by=created_by,
             )
 
         return _record_run_impl(
@@ -244,6 +276,7 @@ def record_run(
             output_size_bytes=output_size_bytes, output_hash_reason=output_hash_reason,
             ai_model=ai_model,
             error_msg=error_msg, meta=meta, db_path=db_path,
+            created_by=created_by,
         )
     except Exception:
         _logger.exception("Failed to record quality run (non-fatal)")
@@ -618,6 +651,7 @@ def _record_run_impl(
             output_path=kwargs.get("output_path"),
             output_size_bytes=output_size,
             output_sha256=output_sha,
+            created_by=kwargs.get("created_by"),
             ai_model=kwargs.get("ai_model"),
             error_msg=kwargs.get("error_msg"),
             meta_json=(json.dumps(run_meta, ensure_ascii=False) if run_meta else None),

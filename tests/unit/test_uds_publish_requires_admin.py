@@ -29,8 +29,39 @@ def test_publish_route_declares_require_admin_and_confines_target_dir() -> None:
     assert '@router.post("/api/jenkins/uds/publish", dependencies=[Depends(require_admin)])' in src, (
         "publish 가 다시 로그인만으로 열렸다")
     assert "is_under_any(docs_dir, [docs_root])" in src, "target_dir 봉인이 사라졌다"
+    # (R48-a) 승인 게이트 — 파일 존재 확인 **뒤**, 디렉터리 생성 **앞**에 있어야 한다.
+    assert src.index("_require_publish_approval(data)") < src.index("docs_dir.mkdir("), (
+        "승인 게이트가 사라졌거나 디렉터리를 만든 뒤에 있다")
+    # (R48-a 리뷰 C1) 바이트는 **한 번만** 읽고, 게이트가 해시한 그 바이트를 쓴다 — 두 번 읽으면 그 사이 재생성된
+    # 승인 안 된 바이트가 승인 응답을 달고 나간다(TOCTOU).
+    assert src.count("target.read_bytes()") == 1, "게시 대상 바이트를 두 번 읽는다 — 게이트와 쓰기가 다른 바이트를 볼 수 있다"
+    assert src.index("target.read_bytes()") < src.index("_require_publish_approval(data)")
+    assert "fh.write(data)" in src
     assert "os.replace(" in src, "원자적 교체가 사라졌다 — 동시 게시가 문서를 찢는다"
     assert "tempfile.mkstemp(" in src, "임시 이름이 결정적이면 경합이 tmp 로 옮겨가고 2회차 replace 가 500 이다"
+
+
+def _approve_bytes(payload: bytes, reviewer: str = "reviewer01") -> None:
+    """(R48-a) 게시 게이트가 그 바이트의 `approved` 기록을 요구한다 — 이 테스트의 관심은 원자 쓰기라 승인은 미리 심는다.
+
+    conftest 가 Quality DB 를 프로세스 임시 파일로 격리하므로 사용자 DB 에는 닿지 않는다.
+    """
+    import hashlib
+    import uuid
+    from datetime import datetime, timezone
+
+    from workflow.quality.db import get_session, init_db
+    from workflow.quality.models import GenerationRun, ReviewRecord
+
+    sha = hashlib.sha256(payload).hexdigest()
+    init_db()
+    now = datetime.now(timezone.utc)
+    with get_session() as s:
+        run = GenerationRun(run_uuid=str(uuid.uuid4()), doc_type="uds", status="success", output_sha256=sha)
+        s.add(run)
+        s.flush()
+        s.add(ReviewRecord(run_id=run.id, output_sha256=sha, reviewer=reviewer, auth_method="jwt",
+                           decision="approved", version=1, created_at=now, updated_at=now))
 
 
 def test_publish_writes_atomically_and_leaves_no_temp_residue(tmp_path, monkeypatch) -> None:
@@ -48,6 +79,7 @@ def test_publish_writes_atomically_and_leaves_no_temp_residue(tmp_path, monkeypa
     src = exports / "UDS_r27.docx"
     for payload in (b"first", b"second"):
         src.write_bytes(payload)
+        _approve_bytes(payload)
         r = client.post("/api/jenkins/uds/publish", headers={"X-User": "tester"},
                         json={"job_url": "http://j/job/x/", "cache_root": str(cache_root),
                               "filename": "UDS_r27.docx", "target_dir": "docs/r27"})

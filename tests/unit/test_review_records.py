@@ -89,7 +89,12 @@ def _rows(db, table):
 
 
 def _app(*, user="tester", admin: Optional[str] = "tester", bearer: bool = True):
-    """라우터 단독 앱. `require_user`/`require_jwt_user`/`require_admin` 을 각각 덮는다.
+    """라우터 단독 앱. `require_user`/`require_jwt_user` 를 덮는다.
+
+    `admin` 이 주어지면 그 이름을 **승인자 목록**(conftest 가 격리한 `approvers.json`)에 넣는다 — (R48-a) 쓰기
+    권한은 admin **또는 승인자**이고 `tester`/`hbrnd2` 는 conftest 기본 admin 이라 어느 쪽이든 실제 판정기
+    (`is_admin`/`is_approver`)를 통과한다. `require_admin` override 는 더 이상 쓰이지 않는다(POST 의존성이
+    `require_reviewer` 로 바뀌었다) — 덮어도 효과가 없으므로 넣지 않는다.
 
     ⚠ `bearer` 는 의존성 override 로 못 흉내 낸다 — 조회 handler 가 **요청 헤더를 직접** 보고
     `can_review` 를 정하기 때문이다(R37 D-1). 기본 True = "admin 은 JWT 로 로그인해 있다" 는 실환경.
@@ -97,10 +102,10 @@ def _app(*, user="tester", admin: Optional[str] = "tester", bearer: bool = True)
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
-    from backend.dependencies.admin import require_admin
     from backend.dependencies.auth import require_jwt_user, require_user
     from backend.error_handler import http_exception_handler
     from backend.routers import review
+    from backend.services.approvers import add_approver
 
     app = FastAPI()
     app.add_exception_handler(HTTPException, http_exception_handler)
@@ -108,7 +113,7 @@ def _app(*, user="tester", admin: Optional[str] = "tester", bearer: bool = True)
     app.dependency_overrides[require_user] = lambda: user
     app.dependency_overrides[require_jwt_user] = lambda: user
     if admin is not None:
-        app.dependency_overrides[require_admin] = lambda: admin
+        add_approver(admin)
     return TestClient(app, headers={"Authorization": "Bearer test-token"} if bearer else {})
 
 
@@ -232,7 +237,7 @@ class TestGet:
         assert d["can_review"] is True  # conftest: tester 는 admin + Bearer
         d2 = _app(user="reader", admin=None).get(f"/api/review/runs/{rid}").json()
         assert d2["can_review"] is False
-        assert d2["review_block_reason"] == "not_admin"
+        assert d2["review_block_reason"] == "not_reviewer"
 
     def test_rehash_cache_hits_on_same_signature(self, client, qdb, tmp_path, monkeypatch):
         """같은 (mtime, size) 면 파일을 다시 읽지 않고, 바뀌면 다시 읽는다."""
@@ -541,16 +546,13 @@ class TestAuth:
         assert res.status_code == 401
         assert res.json()["error"]["code"] == "AUTH_REQUIRED"
 
-    def test_non_admin_jwt_user_is_403(self, qdb, monkeypatch):
-        """JWT 는 통과했지만 admin 목록에 없다 — 403 ADMIN_REQUIRED (진짜 `require_admin`)."""
-        from backend.dependencies import admin as admin_mod
-
-        monkeypatch.setattr(admin_mod, "get_current_user", lambda: "nobody")
+    def test_non_reviewer_jwt_user_is_403(self, qdb):
+        """JWT 는 통과했지만 admin 도 승인자도 아니다 — 403 REVIEWER_REQUIRED (진짜 `require_reviewer`, R48-a)."""
         c = _app(user="nobody", admin=None)
         rid = _make_run(qdb)
         res = c.post(f"/api/review/runs/{rid}", json=_body(_run_sha(qdb, rid)))
         assert res.status_code == 403
-        assert res.json()["error"]["code"] == "ADMIN_REQUIRED"
+        assert res.json()["error"]["code"] == "REVIEWER_REQUIRED"
         assert _rows(qdb, "review_records") == []
 
     def test_default_user_is_rejected_by_service(self, qdb):
@@ -951,7 +953,7 @@ class TestCanReviewMatchesTheWriteEndpoint:
         rid = _make_run(qdb)
         d = _app(user="reader", admin=None).get(f"/api/review/runs/{rid}").json()
         assert d["can_review"] is False
-        assert d["review_block_reason"] == "not_admin"
+        assert d["review_block_reason"] == "not_reviewer"
 
     def test_states_column_agrees_with_the_panel(self, qdb):
         """목록 열과 패널이 갈리면 열은 '가능' 인데 열어 보면 잠겨 있다."""

@@ -294,8 +294,15 @@ describe('hashReasonText / basisReasonText — 사유를 문장으로, 경로 �
 describe('reviewBlockText — 왜 못 쓰는지를 갈라 말한다 (R37 D-1)', () => {
   it('토큰 사유와 권한 사유가 다른 문장이고, 각각 벗어나는 길을 담는다', () => {
     expect(reviewBlockText('jwt_required')).toMatch(/다시 로그인/);
-    expect(reviewBlockText('not_admin')).toMatch(/admin/);
-    expect(reviewBlockText('jwt_required')).not.toBe(reviewBlockText('not_admin'));
+    expect(reviewBlockText('not_reviewer')).toMatch(/admin 또는 승인자/);
+    expect(reviewBlockText('not_reviewer')).toMatch(/승인자 등록/);   // 벗어나는 길
+    expect(reviewBlockText('jwt_required')).not.toBe(reviewBlockText('not_reviewer'));
+  });
+
+  it('(R48-a) 자기 승인 사유는 권한 사유와 다른 문장이다 — 승인자인데 이 run 만 못 쓰는 상태', () => {
+    expect(reviewBlockText('self_review')).toMatch(/내가 만든/);
+    expect(reviewBlockText('self_review')).toMatch(/다른 승인자/);
+    expect(reviewBlockText('self_review')).not.toBe(reviewBlockText('not_reviewer'));
   });
 
   it('사유가 없으면(구 서버) 특정 사유로 단정하지 않는다 (리뷰 I2)', () => {
@@ -304,7 +311,7 @@ describe('reviewBlockText — 왜 못 쓰는지를 갈라 말한다 (R37 D-1)', 
     for (const v of [null, undefined]) {
       const t = reviewBlockText(v);
       expect(t).toBeTruthy();
-      expect(t).not.toBe(REVIEW_BLOCK_TEXT.not_admin);
+      expect(t).not.toBe(REVIEW_BLOCK_TEXT.not_reviewer);
       expect(t).toMatch(/admin/);       // 조건은 말하되 단정하지 않는다
     }
   });

@@ -678,6 +678,46 @@ def _default_admin_users(tmp_path_factory, monkeypatch, request):
     au._cache["admins"] = set()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_account_audit(tmp_path_factory, monkeypatch):
+    """(R48-a) 계정 감사 로그(`reports/account_audit.jsonl`)를 프로덕션 밖으로 — 테스트가 실 감사 기록에 159행을 썼다(실측).
+
+    `_isolate_report_dirs` 표는 서비스가 **모듈 로드 시점**에 굳힌 경로만 다루고, 이 모듈은 호출 시점에 `config` 를 읽으므로
+    함수 자체를 tmp 경로로 덮는다(N14 계열 — 프로덕션 데이터 디렉터리에 테스트가 쓰지 않는다).
+    """
+    try:
+        from backend.services import account_audit as aa
+    except ImportError:
+        return
+    p = tmp_path_factory.mktemp("account_audit") / "account_audit.jsonl"
+    monkeypatch.setattr(aa, "audit_path", lambda: p)
+
+
+@pytest.fixture(autouse=True)
+def _default_approvers(tmp_path_factory, monkeypatch):
+    """(R48-a) 승인자 목록도 머신 상태(`config/approvers.json`)에서 격리한다 — 기본은 **빈 목록**.
+
+    `_default_admin_users` 와 같은 규약: 파일별 fixture 가 `APPROVERS_PATH` 를 다시 덮으면 그쪽이 이긴다.
+    빈 목록이 기본인 이유: 검토 쓰기 권한이 "admin 또는 승인자" 로 넓어졌으므로, 실 머신에 등록된 승인자가
+    테스트의 403 기대를 조용히 200 으로 바꿀 수 있다.
+    """
+    tmp = tmp_path_factory.mktemp("approvers_default")
+    p = tmp / "approvers.json"
+    p.write_text('{"approvers": [], "schema_version": 1}', encoding="utf-8")
+    try:
+        from backend.services import approvers as ap
+    except ImportError:
+        return
+    monkeypatch.setattr(ap, "APPROVERS_PATH", p)
+    try:
+        from filelock import FileLock
+        monkeypatch.setattr(ap, "_LOCK", FileLock(str(p) + ".lock", timeout=5))
+    except ImportError:
+        monkeypatch.setattr(ap, "_LOCK", threading.Lock())
+    ap._cache["mtime"] = 0.0
+    ap._cache["approvers"] = set()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _session_local_resolver():
     """⚠ 함수 스코프 격리는 **module/session 스코프 fixture 를 못 덮는다.**

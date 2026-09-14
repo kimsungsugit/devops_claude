@@ -45,8 +45,22 @@ COMMENT_MAX_LEN = 2000
 
 # 검토 쓰기가 막힌 사유 — 화면이 "누구에게 무엇이 모자란가" 를 말할 수 있게 갈라 둔다.
 # 하나로 접으면 "권한이 없습니다" 가 토큰 만료까지 삼켜, 재로그인하면 되는 사람이 관리자를 찾는다.
-BLOCK_NOT_ADMIN = "not_admin"
+# (R48-a) `not_admin` → `not_reviewer`: 쓰기 주체가 admin **또는 승인자**(`config/approvers.json`)로 넓어졌다.
+# `self_review` 는 run 단위 사유다 — 사람은 검토자인데 **이 run 은** 자기가 만든 것이라 못 쓴다(4-eyes).
+BLOCK_NOT_REVIEWER = "not_reviewer"
 BLOCK_JWT_REQUIRED = "jwt_required"
+BLOCK_SELF_REVIEW = "self_review"
+
+
+def is_same_identity(a: Optional[str], b: Optional[str]) -> bool:
+    """사용자 이름 동일성 — `admin_users.is_admin`/`approvers.is_approver` 와 같은 규약(trim + lowercase).
+
+    자기 승인 판정과 이름 노출 판정이 **같은 함수**를 쓴다. 한쪽만 대소문자를 접으면 `HBRND2` 가 만든 run 을
+    `hbrnd2` 가 승인하는 길이 생긴다.
+    """
+    x = str(a or "").strip().lower()
+    y = str(b or "").strip().lower()
+    return bool(x) and bool(y) and x == y
 
 
 @dataclass(frozen=True)
@@ -62,27 +76,54 @@ class Viewer:
        API 응답은 원문으로 냈다 — 한 값에 두 기준이면 느슨한 쪽이 사실상의 정책이 된다.
 
     그래서 "쓸 수 있는 사람" 과 "이름을 볼 수 있는 사람" 을 같은 객체가 답한다. 라우터는 요청에서
-    세 사실(이름·admin 여부·Bearer 여부)만 읽어 넘기고, 판정은 하지 않는다.
+    네 사실(이름·admin 여부·승인자 여부·Bearer 여부)만 읽어 넘기고, 판정은 하지 않는다.
+
+    (R48-a) 쓰기 주체는 **admin 또는 승인자**(`is_reviewer`). 사람 단위 판정(`can_review`)과 run 단위 판정
+    (`can_review_run` — 자기가 만든 run 은 불가)을 나눈다. 목록 열·패널·POST 가 전부 후자를 써야 한다.
     """
 
     name: str = ""
     is_admin: bool = False
     has_bearer: bool = False
+    is_approver: bool = False
+
+    @property
+    def is_reviewer(self) -> bool:
+        """검토 기록을 남길 수 있는 **역할**인가 — admin 또는 승인자."""
+        return bool(self.is_admin or self.is_approver)
 
     @property
     def can_review(self) -> bool:
-        """`POST /api/review/runs/{id}` 가 통과하는가 — 그 endpoint 의 의존성과 **같은 조건**."""
-        return bool(self.is_admin and self.has_bearer)
+        """`POST /api/review/runs/{id}` 의 **사람 단위** 조건 — 그 endpoint 의 의존성(역할 + Bearer)과 같다.
+
+        run 단위(자기 승인)는 `can_review_run` 이 더한다 — 이 값만 보고 폼을 그리면 자기 run 에서 403 을 맞는다.
+        """
+        return bool(self.is_reviewer and self.has_bearer)
 
     @property
     def block_reason(self) -> Optional[str]:
         """`can_review` 가 False 인 이유. 통과하면 None."""
         if self.can_review:
             return None
-        return BLOCK_NOT_ADMIN if not self.is_admin else BLOCK_JWT_REQUIRED
+        return BLOCK_NOT_REVIEWER if not self.is_reviewer else BLOCK_JWT_REQUIRED
+
+    def can_review_run(self, created_by: Optional[str]) -> bool:
+        """이 run 에 기록을 남길 수 있는가 — 사람 조건 **그리고** 자기가 만든 run 이 아님(4-eyes).
+
+        `created_by` 가 None(구 run·신원 없이 만든 run)이면 자기 승인을 **판정할 수 없고**, 막지 않는다 —
+        막으면 R48 이전 run 750건이 영구 미승인이다. 대신 응답 `created_by:null` 이 그 사실을 공시한다.
+        """
+        return self.can_review and not is_same_identity(self.name, created_by)
+
+    def block_reason_for_run(self, created_by: Optional[str]) -> Optional[str]:
+        if self.can_review_run(created_by):
+            return None
+        if self.can_review:
+            return BLOCK_SELF_REVIEW
+        return self.block_reason
 
     def _is_self(self, reviewer: str) -> bool:
-        return bool(self.name) and reviewer.strip().lower() == self.name.strip().lower()
+        return is_same_identity(self.name, reviewer)
 
     def may_see_names(self, reviewer: str) -> bool:
         """이 사람에게 `reviewer` 의 실명을 보여도 되는가 — 마스킹과 이력 필터가 **같은 조건**을 쓴다.
@@ -137,6 +178,20 @@ class ReviewerFilterForbidden(ReviewError):
 class IdentityRequired(ReviewError):
     status = 401
     code = "AUTH_REQUIRED"
+
+
+class SelfReview(ReviewError):
+    """(R48-a) 자기가 만든 run 에 판정을 남기려 했다 — 검토는 만든 사람과 다른 사람이 한다(4-eyes)."""
+
+    status = 403
+    code = "SELF_REVIEW"
+
+
+class NotApproved(ReviewError):
+    """(R48-a) 승인 기록 없는 바이트를 게시하려 했다 — `approved` 판정이 **그 해시**에 있어야 한다."""
+
+    status = 409
+    code = "NOT_APPROVED"
 
 
 class HashUnavailable(ReviewError):
@@ -368,12 +423,21 @@ def _load_state(session: Session, run_id: int, *, viewer: Optional[Viewer] = Non
         # **틀리게 귀속**한다. 두 사실은 다르고, 감사 증거에서 그 차이는 결정적이다.
         "status": run.status,
         "empty_output_reason": _meta_field(run.meta_json, "empty_output_reason"),
+        # (R48-a) 생성자 — 자기 승인 판정의 근거. 이름 노출은 검토자 이름과 **같은 규칙**(admin·본인만 원문).
+        #   `created_by_known` 을 따로 두는 이유: 마스킹된 이름과 "기록 없음" 이 화면에서 같아 보이면 안 된다.
+        "created_by": (viewer.visible(run.created_by) if viewer else run.created_by),
+        "created_by_known": run.created_by is not None,
+        "_created_by_raw": run.created_by,
         "output_path": run.output_path,
         "output_sha256": run.output_sha256,
         "hash_reason": _hash_reason_from_meta(run.meta_json) if run.output_sha256 is None else None,
         "superseded_by": superseded_by(session, run),
         "gated_metric_count": _gated_metric_count(run),
         "reviews": [_record_plain(r, viewer=viewer) for r in records],
+        # (R48-a 리뷰 W1/W2) 승인 상태는 **바이트 범위** — 게시 게이트(`require_approved_bytes`)와 같은 질문·같은 함수.
+        #   같은 바이트를 낸 다른 run(R47-k 이후 결정적 생성)의 승인도 이 run 의 승인이다. run 범위로 세면 화면은 "미승인",
+        #   게시는 통과(또는 그 반대)로 갈린다.
+        "_approval": approval_for_sha256(session, run.output_sha256 or ""),
     }
 
 
@@ -396,6 +460,8 @@ def _finish_state(st: Dict[str, Any], *, viewer: Optional[Viewer], budget: Optio
     hash_unavailable = st["output_sha256"] is None
     for r in st["reviews"]:
         r["stale"] = _stale(r["output_sha256"], cur)
+    created_by_raw = st.pop("_created_by_raw", None)
+    approval = st.pop("_approval", None) or {"approved": False, "runs": []}
     st.update({
         # 검토 잠금(S6). 사유는 R33 의 meta — 구 run 은 사유 미기록(None).
         "hash_unavailable": hash_unavailable,
@@ -404,9 +470,14 @@ def _finish_state(st: Dict[str, Any], *, viewer: Optional[Viewer], budget: Optio
         "current_basis_reason": cur["basis_reason"],
         # run 의 기록 해시 ↔ 지금 파일. 파일 기준이 아니면 None(판단 불가) — False 로 접지 않는다.
         "stale": _stale(st["output_sha256"], cur),
-        "can_review": viewer.can_review if viewer else None,
+        # (R48-a) **run 단위** 판정 — 역할·Bearer 에 자기 승인 차단까지. POST 의 검사와 같은 함수다.
+        "can_review": viewer.can_review_run(created_by_raw) if viewer else None,
         # 왜 못 쓰는가 — 없으면 화면이 "admin 만" 한 문장으로 접어 토큰 만료를 권한 문제로 오독한다.
-        "review_block_reason": viewer.block_reason if viewer else None,
+        "review_block_reason": viewer.block_reason_for_run(created_by_raw) if viewer else None,
+        # 승인 상태 — "이 run 의 기록 바이트에 approved 가 있는가"(게시 게이트와 **같은 함수**). 지금 파일이 그 바이트와
+        # 다르면 `stale` 이 따로 말한다 — 두 사실을 한 값으로 접지 않는다.
+        "approved": bool(approval.get("approved")),
+        "approved_runs": list(approval.get("runs") or []),
     })
     return st
 
@@ -473,6 +544,12 @@ def _upsert_in_session(
             "산출물이 검토 시점과 다르다 — 화면을 새로고침해 지금 산출물을 다시 확인할 것",
             run_id=run_id, expected_sha256=expected, output_sha256=run.output_sha256,
         )
+    # (R48-a) 4-eyes — 만든 사람은 판정하지 못한다. `created_by` 가 NULL 이면 판정 불가라 통과(위 docstring).
+    if is_same_identity(run.created_by, reviewer):
+        raise SelfReview(
+            "자기가 만든 run 은 검토할 수 없다 — 다른 승인자가 판정해야 한다(4-eyes)",
+            run_id=run_id, created_by=run.created_by,
+        )
 
     now = _utcnow()
     existing = session.query(ReviewRecord).filter_by(run_id=run_id, reviewer=reviewer).first()
@@ -529,6 +606,48 @@ def _upsert_in_session(
     ))
     session.flush()
     return {"created": action == "create", "record": _record_plain(rec), "_output_path": run.output_path}
+
+
+def approval_for_sha256(session: Session, sha256: str) -> Dict[str, Any]:
+    """(R48-a) 이 **바이트**(sha256)에 승인 기록이 있는가 — 게시 게이트의 단일 판정기.
+
+    반환 `{"approved": bool, "sha256", "records": [...], "runs": [id…]}`. `records` 는 그 해시를 스냅샷으로 가진
+    기록 전부(판정별) — 승인이 없을 때 "반려 1건" 과 "기록 0건" 을 화면이 가를 수 있어야 한다.
+    해시로 찾는 이유: 경로는 run 을 식별하지 못한다(R33 실측 — 한 경로를 21 run 이 돌려썼다). 게시하려는 파일의
+    지금 바이트와 승인 시점 바이트가 같아야 승인이 그 파일에 대한 것이다.
+    """
+    sha = str(sha256 or "").strip().lower()
+    if not sha:
+        return {"approved": False, "sha256": None, "records": [], "runs": []}
+    rows: List[ReviewRecord] = (
+        session.query(ReviewRecord).filter(ReviewRecord.output_sha256 == sha).order_by(ReviewRecord.id.asc()).all()
+    )
+    return {
+        "approved": any(r.decision == "approved" for r in rows),
+        "sha256": sha,
+        "records": [
+            {"run_id": r.run_id, "decision": r.decision, "reviewer_masked": _mask(r.reviewer), "updated_at": _iso(r.updated_at)}
+            for r in rows
+        ],
+        "runs": sorted({r.run_id for r in rows}),
+    }
+
+
+def _mask(name: str) -> str:
+    from backend.services.admin_users import mask_user
+
+    return mask_user(name)
+
+
+def require_approved_bytes(session: Session, sha256: str) -> Dict[str, Any]:
+    """승인 없는 바이트면 `NotApproved`(409). 통과하면 `approval_for_sha256` 결과."""
+    st = approval_for_sha256(session, sha256)
+    if not st["approved"]:
+        raise NotApproved(
+            "이 산출물 바이트에 승인(approved) 기록이 없다 — 검토 기록에서 승인을 받은 뒤 게시할 것",
+            sha256=st["sha256"], records=st["records"], runs=st["runs"],
+        )
+    return st
 
 
 def _current_version(session: Session, rec_id: int) -> Optional[int]:

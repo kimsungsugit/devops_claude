@@ -545,7 +545,8 @@ describe('DocGenStatusBoard — 근거(evidence)', () => {
     mountBoard();
     const tr = await waitFor(() => rowOf('📘 UDS'));
     await user.click(within(tr).getByRole('button', { name: '근거' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/503 unavailable/));
+    // (R48-b) 같은 패널에 문제 목록 alert 가 하나 더 있을 수 있다(여기 스텁은 /issues 에 형식 밖 응답을 준다) — 근거 alert 를 골라 본다.
+    await waitFor(() => expect(screen.getAllByRole('alert').some((a) => /503 unavailable/.test(a.textContent))).toBe(true));
   });
 });
 
@@ -1478,5 +1479,44 @@ describe('DocGenStatusBoard — 참조 SwUDS 보강 근거 (R47 N26)', () => {
     li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
     expect(li.textContent).not.toContain('≠');
     expect(li.textContent).not.toContain('대조 불가');
+  });
+});
+
+describe('DocGenStatusBoard — 문제 목록 (R48-b)', () => {
+  it('근거 패널에 /issues 목록을 함께 보이고, 조회 실패는 실패로 적는다', async () => {
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/issues')) {
+        return Promise.resolve({ run_id: 1, issues: [
+          { code: 'report_timeout:accuracy_report', severity: 'warning', kind: 'actual', source: 'generation', stage: 'reports', message: 'accuracy report 가 300초 안에 끝나지 못했다', facts: { seconds: 300 } },
+        ], counts: { total: 1, actual: 1, potential: 0, by_severity: { error: 0, warning: 1, risk: 0 } }, sources: { generation: true } });
+      }
+      if (p.includes('/evidence')) return Promise.resolve({ run_id: 1, output_path_present: true, gate_report: { present: false, reason: 'x' }, confidence: { present: false, reason: 'x' }, docx_validate: { present: false, reason: 'x' } });
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    const box = await waitFor(() => screen.getByTestId('run-issues'));
+    await waitFor(() => expect(within(box).getByText('report_timeout:accuracy_report')).toBeInTheDocument());
+    expect(within(box).getByTestId('issue-counts')).toHaveTextContent('문제가 된 것 1 · 문제가 될 수 있는 것 0');
+    expect(mockApi).toHaveBeenCalledWith('/api/review/runs/1/issues');
+  });
+
+  it('/issues 가 실패하면 "문제 0건" 이 아니라 조회 실패를 적는다', async () => {
+    mockApi.mockImplementation((path) => {
+      const p = String(path);
+      if (p.includes('/issues')) return Promise.reject(new Error('500'));
+      if (p.includes('/evidence')) return Promise.resolve({ run_id: 1, output_path_present: true, gate_report: { present: false, reason: 'x' }, confidence: { present: false, reason: 'x' }, docx_validate: { present: false, reason: 'x' } });
+      return Promise.resolve({ runs: [run()], total: 1 });
+    });
+    const user = userEvent.setup();
+    mountBoard();
+    const tr = await waitFor(() => rowOf('📘 UDS'));
+    await user.click(within(tr).getByRole('button', { name: '근거' }));
+    const box = await waitFor(() => screen.getByTestId('run-issues'));
+    await waitFor(() => expect(within(box).getByRole('alert')).toHaveTextContent('500'));
+    expect(within(box).queryByTestId('issue-list')).toBeNull();
   });
 });

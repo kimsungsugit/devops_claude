@@ -122,6 +122,8 @@ _COLUMN_ADDITIONS = (
     ("generation_runs", "scm_id", "VARCHAR(64)", "ix_gen_run_scm"),
     # (R33 C-1) 산출물 바이트 해시 — models.py `GenerationRun.output_sha256` 과 한 세트.
     ("generation_runs", "output_sha256", "VARCHAR(64)", None),
+    # (R48-a) run 생성자 — 자기 승인 차단. models.py `GenerationRun.created_by` 와 한 세트.
+    ("generation_runs", "created_by", "VARCHAR(120)", "ix_gen_run_created_by"),
 )
 
 

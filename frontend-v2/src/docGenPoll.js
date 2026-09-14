@@ -16,7 +16,17 @@ import { throwIfAborted } from './impactPoll.js';
 // ⚠ throw 로 바꾸는 것만으로는 부족하다: 루프 선두와 sleep 뒤에만 검사하면 `await api()`
 // 왕복 중에 도착한 중단을 놓쳐 `done:true` 응답이 그대로 성공 처리된다. 창을 좁힐 뿐
 // 닫지 못한다 — 그래서 api() 직후에도 검사한다.
-export async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg, signal }) {
+/**
+ * (R48-b) 진행 응답에 실린 **생성 중 문제 목록**을 호출자에게 넘긴다.
+ * 서버(`report_gen/gen_issues.py`)가 `issues`(배열)·`issue_counts` 를 매 진행마다 통째로 싣는다 — 누적은 서버 몫이라
+ * 여기서는 마지막 값을 그대로 전달한다. 배열이 아니면(구 서버·다른 경로) 부르지 않는다: 빈 배열로 접으면
+ * "문제 0건" 으로 읽힌다.
+ */
+function emitIssues(p, onIssues) {
+  if (typeof onIssues === 'function' && Array.isArray(p?.issues)) onIssues(p.issues, p.issue_counts || null);
+}
+
+export async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg, onIssues, signal }) {
   while (true) {
     throwIfAborted(signal);
     await new Promise(r => setTimeout(r, 2000));
@@ -29,6 +39,7 @@ export async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg
     );
     throwIfAborted(signal);  // 요청 왕복 중 도착한 '중단' — 없으면 done:true 가 그대로 성공 처리된다
     const p = data?.progress || {};
+    emitIssues(p, onIssues);
     if (p.message || p.stage) onMsg(p.message || p.stage);
     // ⚠ 서버가 넣는 필드는 `percent` 다(`helpers/uds.py::_set_progress`, `jenkins.py`).
     // 여기서 `p.progress` 만 읽던 탓에 이 줄은 **한 번도 발화한 적이 없고**, 화면의 %는
@@ -40,7 +51,7 @@ export async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg
   }
 }
 
-export async function pollStsProgress(jobId, action, jobUrl, { onMsg, signal, prefix = '/api/jenkins' } = {}) {
+export async function pollStsProgress(jobId, action, jobUrl, { onMsg, onIssues, signal, prefix = '/api/jenkins' } = {}) {
   while (true) {
     throwIfAborted(signal);
     await new Promise(r => setTimeout(r, 3000));
@@ -49,6 +60,7 @@ export async function pollStsProgress(jobId, action, jobUrl, { onMsg, signal, pr
     const data = await api(`${prefix}/${action}/progress?${qs}`);
     throwIfAborted(signal);  // 요청 왕복 중 도착한 '중단' (return 지점이 3개라 창이 더 넓다)
     const p = data?.progress || data || {};
+    emitIssues(p, onIssues);
     if (p.message || p.stage) onMsg(p.message || p.stage);
     // UDS 폴러와 동일 — 서버 필드는 `percent`(위 주석 참조).
     const pct = p.percent != null ? p.percent : p.progress;

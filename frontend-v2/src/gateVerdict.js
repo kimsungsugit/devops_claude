@@ -179,7 +179,11 @@ export function reviewDecisionTone(decision) {
 export const REVIEW_ERROR_TEXT = Object.freeze({
   JWT_REQUIRED: '로그인 토큰이 필요합니다 — X-User 만으로는 검토를 저장할 수 없습니다.',
   AUTH_REQUIRED: '로그인이 필요합니다.',
-  ADMIN_REQUIRED: '검토 권한이 없습니다(admin 만 기록할 수 있습니다 — 오류가 아니라 권한 상태입니다).',
+  ADMIN_REQUIRED: '검토 권한이 없습니다(admin 또는 승인자만 기록할 수 있습니다 — 오류가 아니라 권한 상태입니다).',
+  // (R48-a) 쓰기 주체가 admin 또는 승인자로 넓어졌고, 자기가 만든 run 은 누구도 판정하지 못한다(4-eyes).
+  REVIEWER_REQUIRED: '검토 권한이 없습니다 — admin 또는 승인자(config/approvers.json)만 기록할 수 있습니다. 관리자에게 승인자 등록을 요청하세요.',
+  SELF_REVIEW: '자기가 만든 run 은 검토할 수 없습니다 — 다른 승인자가 판정해야 합니다(4-eyes).',
+  NOT_APPROVED: '이 산출물 바이트에 승인 기록이 없습니다 — 승인을 받은 뒤 게시할 수 있습니다.',
   STALE: '산출물이 검토 시점과 다릅니다 — 새로고침 뒤 지금 산출물을 다시 검토하세요.',
   HASH_UNAVAILABLE: '이 run 은 산출물 해시가 없어 검토를 기록할 수 없습니다.',
   VERSION_CONFLICT: '다른 저장이 먼저 반영됐습니다 — 새로고침 뒤 다시 저장하세요.',
@@ -192,8 +196,10 @@ export const REVIEW_ERROR_TEXT = Object.freeze({
  * 두 사유를 "권한이 없습니다" 하나로 접으면, 다시 로그인하면 될 사람이 관리자를 찾는다.
  */
 export const REVIEW_BLOCK_TEXT = Object.freeze({
-  not_admin: '검토 기록은 admin 만 남길 수 있습니다 — 조회는 로그인 사용자 누구나 됩니다.',
+  // (R48-a) `not_admin` → `not_reviewer`: 쓰기 주체가 admin 또는 승인자. `self_review` 는 run 단위 사유.
+  not_reviewer: '검토 기록은 admin 또는 승인자만 남길 수 있습니다 — 조회는 로그인 사용자 누구나 됩니다. 관리자에게 승인자 등록을 요청하세요.',
   jwt_required: '로그인 토큰이 없거나 만료됐습니다 — 다시 로그인하면 검토를 남길 수 있습니다(권한 문제가 아닙니다).',
+  self_review: '이 run 은 내가 만든 것이라 검토할 수 없습니다 — 다른 승인자가 판정해야 합니다(4-eyes).',
 });
 
 /**
@@ -202,7 +208,7 @@ export const REVIEW_BLOCK_TEXT = Object.freeze({
  * 두는데 화면이 특정 사유로 접으면, admin 인 사람에게 "당신은 admin 이 아닙니다" 를 보이게 된다(리뷰 I2).
  */
 export function reviewBlockText(reason) {
-  if (!reason) return '검토 기록은 JWT 로그인한 admin 만 남길 수 있습니다.';
+  if (!reason) return '검토 기록은 JWT 로그인한 admin 또는 승인자만 남길 수 있습니다.';
   return REVIEW_BLOCK_TEXT[reason] || String(reason);
 }
 

@@ -5564,8 +5564,8 @@ def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
     """산출물을 저장소 `docs/` 로 게시한다 — **admin 전용**.
 
     2026-09-03 까지 이 라우터엔 권한 의존성이 0 이라 로그인만으로 저장소 안에 파일을 쓸 수
-    있었다(계획서 §8 #7 승인: 빌더(evidence 생성)와 같은 급 `require_admin`). 미검토
-    산출물의 게시 차단은 검토 기록 기능이 자리 잡은 뒤 재론한다.
+    있었다(계획서 §8 #7 승인: 빌더(evidence 생성)와 같은 급 `require_admin`). (R48-a) 미검토
+    산출물의 게시는 **차단한다** — 게시할 바이트의 해시에 `approved` 검토 기록이 있어야 한다(409 `NOT_APPROVED`).
 
     ⚠ `target_dir` 은 **저장소 `docs/` 아래**로 봉인한다(R27 리뷰 C1). 예전엔
     `repo_root / target_dir` 를 그대로 `resolve()` 해 `../../X` 도, `D:/X`(pathlib 은 우측
@@ -5584,6 +5584,16 @@ def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
+    # (R48-a) 승인 게이트 — 게시하려는 **지금 바이트**의 해시에 `approved` 검토 기록이 있어야 한다.
+    #   §8 #7 이 "미검토 차단은 검토 기록이 자리 잡은 뒤 재론" 으로 미뤄 둔 자리. 판정은 서비스
+    #   (`require_approved_bytes`) 하나고 라우터는 409 로 옮긴다. 경로가 아니라 해시로 찾는 이유는 그 함수 docstring.
+    # ⚠ (리뷰 C1) 바이트를 **한 번만** 읽는다 — 해시할 때 읽고 쓸 때 다시 읽으면 그 사이 exports 가 재생성될 때
+    #   승인 안 된 바이트가 승인 응답을 달고 docs/ 로 나간다(TOCTOU). 같은 `data` 를 해시하고 그대로 쓴다.
+    try:
+        data = target.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail=f"file unreadable: {type(exc).__name__}") from None
+    _approval = _require_publish_approval(data)
     docs_dir.mkdir(parents=True, exist_ok=True)
     out_path = docs_dir / target.name
     # 임시 파일 + `os.replace` — 두 admin 이 같은 이름을 동시에 게시하면 `write_bytes` 가
@@ -5595,13 +5605,32 @@ def jenkins_uds_publish(req: UdsPublishRequest) -> Dict[str, Any]:
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:
-            fh.write(target.read_bytes())
+            fh.write(data)   # 게이트가 해시한 **그 바이트**(리뷰 C1)
         os.replace(tmp_path, out_path)
     finally:
         # 쓰기 도중 실패하면 잔여물을 남기지 않는다(N4).
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
-    return {"ok": True, "path": str(out_path)}
+    return {"ok": True, "path": str(out_path), "approval": _approval}
+
+
+def _require_publish_approval(data: bytes) -> Dict[str, Any]:
+    """게시할 **바이트** 의 해시 → 승인 기록 확인. 없으면 409 `NOT_APPROVED`(기록 요약 동봉).
+
+    인자가 경로가 아니라 바이트인 이유(리뷰 C1): 호출자가 같은 바이트를 그대로 써야 게이트와 게시가 한 대상을 본다.
+    별도 함수인 이유: 테스트가 라우터 전체(캐시 루트·docs 봉인)를 세우지 않고 게이트만 잴 수 있어야 한다.
+    """
+    from workflow.quality.db import get_session, init_db
+    from workflow.quality.recorder import sha256_hex
+    from workflow.quality.review import ReviewError, require_approved_bytes
+
+    sha = sha256_hex(data)
+    init_db()
+    try:
+        with get_session() as session:
+            return require_approved_bytes(session, sha)
+    except ReviewError as exc:
+        raise HTTPException(status_code=exc.status, detail={**exc.extra, "code": exc.code, "message": exc.message}) from None
 
 
 @router.post("/api/jenkins/uds/label")

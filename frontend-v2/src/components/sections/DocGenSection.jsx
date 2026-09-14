@@ -7,6 +7,7 @@ import { persistDocPaths, useScmFallback, soleScmEntry, docGenCapsScope } from '
 import { loadDocPaths, loadDocGenCaps, loadSharedInputs, useDocPathsSync } from '../../sharedInputs.js';
 import { extractOutputPath } from '../../docgenOutputPath.js';
 import { contextConflict, mismatchText } from '../../impactGuard.js';
+import IssueList from '../IssueList.jsx';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -76,6 +77,9 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
   const [genStage, setGenStage] = useState('');     // current stage text
   const [genProgress, setGenProgress] = useState(0); // 0-100
   const [genResult, setGenResult] = useState(null);  // {success, error, path}
+  // (R48-b) 생성 **도중** 서버가 관측한 문제 — 진행 응답의 `issues`/`issue_counts` 를 그대로(누적은 서버 몫).
+  //   `null` = 이번 생성에서 서버가 목록을 실은 적 없음(구 서버·다른 경로) — 빈 배열(0건)과 다르다.
+  const [genIssues, setGenIssues] = useState(null);
 
   const docPaths = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
@@ -104,6 +108,7 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
     setGenerating(docType);
     setGenStage(`${label} 생성 준비 중...`);
     setGenProgress(5);
+    setGenIssues(null);
     setGenResult(null);
 
     try {
@@ -268,17 +273,19 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
         const pct = resolveProgress(msg);
         if (pct != null) setGenProgress(prev => Math.max(prev, pct));
       };
+      // (R48-b) 문제 목록은 진행마다 통째로 온다 — 마지막 값으로 덮는다(누적은 서버).
+      const onIssues = (list, counts) => setGenIssues({ list, counts });
 
       // signal 은 넘기지 않는다 — 이 화면엔 취소 UI 가 없어 배선할 컨트롤러가 없다.
       // (죽은 `signal: null` 하드코딩을 남겨두면 "취소가 지원되는 것처럼" 읽힌다.)
       if (docType === 'uds') {
         progress = await pollProgress(job.url, cfg.buildSelector || 'lastSuccessfulBuild', data.job_id, 'uds', {
-          onMsg: onProgress,
+          onMsg: onProgress, onIssues,
         });
       } else {
         const pollPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
         progress = await pollStsProgress(data.job_id, docType, job.url, {
-          onMsg: onProgress, prefix: pollPrefix,
+          onMsg: onProgress, onIssues, prefix: pollPrefix,
         });
       }
 
@@ -291,10 +298,17 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
 
       setGenProgress(100);
       setGenStage(`${label} 생성 완료`);
+      // (R48-b) 완료 응답(`result`)에도 목록이 실린다 — 마지막 폴링이 놓친 항목이 있으면 여기서 덮는다.
+      const finalIssues = Array.isArray(progress?.result?.issues) ? progress.result.issues
+        : (Array.isArray(progress?.issues) ? progress.issues : null);
+      if (finalIssues) setGenIssues({ list: finalIssues, counts: progress?.result?.issue_counts || progress?.issue_counts || null });
       // ⚠ `docType` 을 함께 싣는다 — 보드가 **어느 행에** 저장 경로를 붙일지 알아야 한다.
       //   완료 시 `generating` 이 null 이 되므로 결과만으로는 문서를 특정할 수 없다.
-      setGenResult({ success: true, path: extractOutputPath(progress), docType });
-      toast('success', `${label} 생성 완료`);
+      setGenResult({ success: true, path: extractOutputPath(progress), docType, issues: finalIssues });
+      const nActual = (finalIssues || []).filter((i) => i.kind === 'actual').length;
+      toast(nActual > 0 ? 'warning' : 'success', nActual > 0
+        ? `${label} 생성 완료 — 문제 ${nActual}건이 관측됐습니다(아래 목록 확인)`
+        : `${label} 생성 완료`);
     } catch (e) {
       // 취소는 사용자 오류가 아니다 — 실패로 보고하지 않는다. 다만 조용히 return 만 하면
       // 진행바가 중간값(예: 55% "DOCX 생성")에 고착돼 "아직 도는 중"처럼 보인다.
@@ -316,8 +330,8 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
   // 보드가 그 identity 변화를 이력 재조회 트리거로 쓴다.
   useEffect(() => {
     if (!onGenState) return;
-    onGenState({ docType: generating, stage: genStage, progress: genProgress, result: genResult });
-  }, [generating, genStage, genProgress, genResult, onGenState]);
+    onGenState({ docType: generating, stage: genStage, progress: genProgress, result: genResult, issues: genIssues });
+  }, [generating, genStage, genProgress, genResult, genIssues, onGenState]);
 
   // 보드의 '생성' 버튼이 호출할 실제 함수를 등록한다. `generateDoc` 은 이 컴포넌트의
   // 폼 상태(docPaths·cacheRoot·linked_docs)에 묶여 있어 끌어올리면 그게 전부 따라온다 —
@@ -574,6 +588,14 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
             {genResult?.success && genResult.path && (
               <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace', wordBreak: 'break-all' }}>
                 {genResult.path}
+              </div>
+            )}
+
+            {/* (R48-b) 생성 중 관측된 문제 — 진행 중에도, 끝난 뒤에도 같은 자리. 서버가 목록을 실은 적이 있을 때만 그린다
+                (안 실었으면 "0건" 이 아니라 "모름" 이라 아무것도 안 그린다). */}
+            {genIssues && (genIssues.list.length > 0 || genResult) && (
+              <div style={{ marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 6 }}>
+                <IssueList compact issues={genIssues.list} counts={genIssues.counts} title="생성 중 관측된 문제" />
               </div>
             )}
           </div>

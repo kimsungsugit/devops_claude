@@ -831,3 +831,32 @@ describe('DocGenSection — 남의 프로젝트 자료로 만들지 않는다', 
     expect(genCall()[1].body.get('cache_root')).toBe('.devops_pro_cache/testuser');
   }, 20000);
 });
+
+describe('docGenPoll — 생성 중 문제 목록 (R48-b)', () => {
+  it('pollProgress: 진행 응답의 issues 배열을 onIssues 로 넘기고, 배열이 아니면 부르지 않는다', async () => {
+    const calls = [];
+    api.mockResolvedValueOnce({ progress: { stage: 'source', percent: 45, message: '소스 분석' } })
+       .mockResolvedValueOnce({ progress: { stage: 'docx', percent: 85, issues: [{ code: 'x', kind: 'actual' }], issue_counts: { total: 1 } } })
+       .mockResolvedValueOnce({ progress: { done: true, issues: [{ code: 'x', kind: 'actual' }, { code: 'y', kind: 'potential' }], issue_counts: { total: 2 } } });
+    vi.useFakeTimers();
+    const p = pollProgress('http://j/job/x/', 'sel', 'j1', 'uds', { onMsg: () => {}, onIssues: (list, counts) => calls.push([list.length, counts?.total]) });
+    for (let i = 0; i < 3; i++) { await vi.advanceTimersByTimeAsync(2000); }
+    const res = await p;
+    vi.useRealTimers();
+    expect(res.done).toBe(true);
+    expect(calls).toEqual([[1, 1], [2, 2]]);   // 첫 응답엔 issues 가 없어 안 불렀다
+  });
+
+  it('pollStsProgress: 같은 계약', async () => {
+    const calls = [];
+    api.mockResolvedValueOnce({ progress: { status: 'running', issues: [] , issue_counts: { total: 0 } } })
+       .mockResolvedValueOnce({ progress: { status: 'completed' } });
+    vi.useFakeTimers();
+    const p = pollStsProgress('j1', 'sts', 'http://j/job/x/', { onMsg: () => {}, onIssues: (list) => calls.push(list.length) });
+    for (let i = 0; i < 2; i++) { await vi.advanceTimersByTimeAsync(3000); }
+    const res = await p;
+    vi.useRealTimers();
+    expect(res.done).toBe(true);
+    expect(calls).toEqual([0]);
+  });
+});

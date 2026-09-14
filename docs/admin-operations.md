@@ -6,8 +6,10 @@
 | 시나리오 | 방법 |
 |---------|------|
 | 첫 admin 등록 | `.env`에 `BOOTSTRAP_ADMIN_USERS=user1,user2` 추가 → backend 가동 시 자동 |
-| admin 추가 | admin이 `config/admin_users.json` 직접 편집 (mtime invalidate로 자동 반영) |
-| admin 제거 | 동일 — json 편집 |
+| admin 추가 | (R48-a) 설정 > 관리자 모드 > 👥 계정·승인자 블록, 또는 `PUT /api/auth/users/{u}/roles {"admin":true}` (JWT+admin). `config/admin_users.json` 직접 편집도 여전히 동작(mtime invalidate) |
+| admin 제거 | 동일 — 자기 자신은 409 `SELF_DEMOTE`/`SELF_DELETE`(lockout 방어. 행위자가 admin 이라 남을 내려도 자기가 남으므로 '마지막 admin' 검사는 따로 없다) |
+| **계정 생성** | (R48-a) 같은 블록 / `POST /api/auth/users {username, temp_password, approver?, admin?}` (JWT+admin). 임시 비밀번호는 admin 이 정해 직접 전달, 첫 로그인에서 변경 강제 |
+| **승인자 등록** | (R48-a) 같은 블록 / `PUT /api/auth/users/{u}/roles {"approver":true}` → `config/approvers.json`. 검토 기록은 admin 또는 승인자만, **자기가 만든 run 은 불가**(4-eyes) — 상세 [`docs/rounds/auth_operations.md`](rounds/auth_operations.md) |
 | Lockout 회복 | `config/admin_users.json` 수동 편집 + `.env` `BOOTSTRAP_ADMIN_USERS` 설정 + backend 재기동 |
 | Frontend admin 모드 표시 | **탭마다 출처가 다르다** — 아래 §탭 표시 권한 참조 |
 | 권한 동기화 | AdminContext가 `/api/auth/me` 호출 — 탭 visible 시 자동 refresh (41차) |
