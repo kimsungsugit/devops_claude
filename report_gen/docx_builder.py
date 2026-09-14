@@ -1262,6 +1262,39 @@ def normalize_unmatched_headings(value: Any) -> "Tuple[str, str]":
     return UNMATCHED_HEADINGS_KEEP, raw
 
 
+def _grid_cells(table) -> List[Any]:
+    """표의 그리드 셀 목록을 **한 번만** 만든다 — 그 시점의 `table.cell(r, c)` 와 같은 `_Cell` 객체다.
+
+    (R47-j N27-b) python-docx 의 `Table.cell(r, c)` 는 `self._cells[c + r * col_count]` 인데 `_cells` 가 **프로퍼티**라
+    부를 때마다 표 전체 `<w:tc>` 를 훑어 셀 객체를 새로 만든다(1.2.0 실측). 셀마다 한 번씩 부르면 셀 수의 제곱이다 —
+    라이브 프로파일(kjpds02_pv · 1,157함수 · DOCX 단계 1,486초 단독): 이 API 아래가 DOCX 시간의 **55%**
+    (`_add_blank_table` 38.6% · `_merge_function_info_table` 12.7% · 로직 이미지 삽입 경로 일부).
+    `_fill_function_info_table` 은 같은 함정을 이미 고쳐 두었는데(docstring 의 81,510회 프로파일) 형제 셋은 그대로였다 —
+    이 저장소 단골인 "쌍둥이 한쪽만 수정".
+
+    스냅샷 `[c + r * col_count]` 는 gridSpan 반복·vMerge 위 셀 참조까지 `_cells` 와 같은 규칙으로 만들어진 **같은 목록**이다.
+    ⚠ 병합은 표 모양을 바꾸므로 스냅샷은 **병합 전에 집은 같은 행의 셀**에만 유효하다 — 가로 병합은 그 행의 `<w:tc>` 만
+    지우고 다른 행의 요소는 살아 있으니 행 단위로 쓰면 된다(`_merge_function_info_table` 의 사용 방식).
+    ⚠ (R47-j 리뷰 W1) 위 단언은 **직사각 표**(모든 행의 gridSpan 합 == `tblGrid` 열 수, gridBefore/After 없음) 전제다.
+      행 폭이 다른(ragged) 표에선 평면 인덱스가 다른 행의 셀을 집어 가로 병합이 **세로 병합을 만들고**, vMerge 는 `_cells`
+      의 개수가 아니라 엔트리를 바꿔 스냅샷이 그 순간 낡는다. 병합하는 호출자는 `_is_uniform_grid` 로 먼저 가른다.
+    """
+    return list(table._cells)
+
+
+def _is_uniform_grid(table, stride: int) -> bool:
+    """모든 행이 `tblGrid` 폭을 정확히 채우는가(gridBefore/After 없음) — 스냅샷 병합이 옛 `table.cell()` 경로와 같아지는 조건."""
+    try:
+        for tr in table._tbl.tr_lst:
+            if int(getattr(tr, "grid_before", 0) or 0) or int(getattr(tr, "grid_after", 0) or 0):
+                return False
+            if sum(int(tc.grid_span) for tc in tr.tc_lst) != stride:
+                return False
+        return True
+    except Exception:  # noqa: BLE001 — 판단 불가면 느린(안전한) 경로
+        return False
+
+
 def _merge_function_info_table(table, cols: int, layout=None) -> None:
     """함수 정보 표의 셀을 행 종류에 맞게 병합한다.
 
@@ -1279,6 +1312,20 @@ def _merge_function_info_table(table, cols: int, layout=None) -> None:
     try:
         kinds = [str(k) for k, _ in (layout or [])]
         n_rows = len(table.rows)
+        # 표당 그리드 1회 — 행 안의 두 병합은 서로 다른 `<w:tc>` 를 건드리고, 다른 행의 요소는 살아 있다(`_grid_cells`).
+        #   단 **직사각 표**에서만이다(리뷰 W1) — 행 폭이 다른 표는 옛 경로대로 호출마다 재계산한다(느리지만 같은 결과).
+        stride = table._column_count
+        if _is_uniform_grid(table, stride):
+            grid = _grid_cells(table)
+
+            def _c(r: int, c: int):
+                return grid[c + r * stride]
+        else:
+            _logger.warning("함수 정보 표의 행 폭이 tblGrid(%d열)와 달라 셀 접근을 호출마다 재계산한다(느린 경로)", stride)
+
+            def _c(r: int, c: int):
+                return table.cell(r, c)
+
         for r_idx in range(n_rows):
             if r_idx < len(kinds):
                 kind = kinds[r_idx]
@@ -1286,17 +1333,18 @@ def _merge_function_info_table(table, cols: int, layout=None) -> None:
                 kind = FN_ROW_FULL if r_idx == 0 else FN_ROW_PAIR
             if kind == FN_ROW_GRID:
                 if cols > PARAM_GRID_COLS:
-                    table.cell(r_idx, PARAM_GRID_COLS - 1).merge(table.cell(r_idx, cols - 1))
+                    _c(r_idx, PARAM_GRID_COLS - 1).merge(_c(r_idx, cols - 1))
                 continue
             if kind == FN_ROW_FULL:
-                table.cell(r_idx, 0).merge(table.cell(r_idx, cols - 1))
+                _c(r_idx, 0).merge(_c(r_idx, cols - 1))
                 continue
             if cols >= 2:
-                table.cell(r_idx, 0).merge(table.cell(r_idx, 1))
+                _c(r_idx, 0).merge(_c(r_idx, 1))
             if cols >= 4:
-                table.cell(r_idx, 2).merge(table.cell(r_idx, cols - 1))
-    except Exception:
-        pass
+                _c(r_idx, 2).merge(_c(r_idx, cols - 1))
+    except Exception as exc:  # noqa: BLE001 — 병합 실패가 문서 생성을 막아선 안 된다
+        # (R47-j 리뷰 I5/X8) 예전엔 여기가 완전 침묵이라 "일부 행만 병합된 표" 와 정상을 산출물에서 구분할 수 없었다.
+        _logger.warning("함수 정보 표 병합 중단(%s: %s) — 남은 행은 병합되지 않은 채 남는다", type(exc).__name__, str(exc)[:120])
 
 
 def _infer_function_info_layout(table):
@@ -1442,10 +1490,12 @@ def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
             except Exception:
                 pass
     try:
+        stride = table._column_count
+        grid = _grid_cells(table)             # 표당 1회 — `Table.cell` 은 호출마다 그리드를 다시 만든다
         for r_idx, row in enumerate(table.rows):
             cells = [c.text.strip() for c in row.cells]
             if any(c.replace(" ", "") == "LogicDiagram" for c in cells):
-                target_cell = table.cell(r_idx, min(2, cols - 1))
+                target_cell = grid[min(2, cols - 1) + r_idx * stride]
                 _clear_cell(target_cell)
                 p = target_cell.paragraphs[0] if target_cell.paragraphs else target_cell.add_paragraph()
                 run = p.add_run()
@@ -1882,13 +1932,16 @@ def _add_blank_table(
             table.style = style
     except Exception:
         pass
+    # 새 표는 병합 없는 균일 격자라 `[c + r * cols]` 가 곧 `table.cell(r, c)` 다 — 단, 그리드는 **한 번만** 만든다.
+    #   예전엔 셀마다 `table.cell()` 을 불러 1,000행 표에서 셀 수의 제곱으로 돌았다(라이브 프로파일 DOCX 시간의 38.6%).
+    grid = _grid_cells(table)
     row_offset = 0
     if header_rows:
         for r_idx, row in enumerate(header_rows):
             if r_idx >= rows:
                 break
             for c_idx, val in enumerate(row[:cols]):
-                table.cell(r_idx, c_idx).text = val or ""
+                grid[c_idx + r_idx * cols].text = val or ""
         row_offset = min(len(header_rows), rows)
     if data_rows:
         max_rows = rows - row_offset
@@ -1905,11 +1958,9 @@ def _add_blank_table(
             )
         for r_idx, row in enumerate(data_rows[:max_rows]):
             for c_idx, val in enumerate(row[:cols]):
-                table.cell(row_offset + r_idx, c_idx).text = str(val) if val is not None else ""
-    for r_idx in range(row_offset, rows):
-        for c in table.rows[r_idx].cells:
-            if c.text is None:
-                c.text = ""
+                grid[c_idx + (row_offset + r_idx) * cols].text = str(val) if val is not None else ""
+    # (R47-j) 예전의 뒷정리 루프(`if c.text is None: c.text = ""`)는 지웠다 — `_Cell.text` 는 None 을 내지 않아 한 번도
+    #   쓰지 않는 루프였고, `table.rows[r]` 인덱싱이 행마다 전 행을 다시 만들어 비용만 냈다(XML 동일 — 가드가 대조한다).
     return table
 
 
@@ -2714,11 +2765,17 @@ def generate_uds_docx(
                 "이 프로젝트의 SUDS 를 쓰려면 UDS_REF_SUDS_PATH 를 지정할 것.",
                 _ref_identity["reason"], _ref_identity["ref_tokens"], _ref_identity["payload_tokens"],
             )
+        ref_doc = None
         try:
             ref_doc = docx.Document(str(ref_doc_path))
             ref_map = _extract_function_info_from_docx(ref_doc)
         except Exception:
             ref_map = {}
+        finally:
+            # (R47-j N27-b) 여기서 쓰는 건 `ref_map` 뿐이다. 이 지역변수는 함수 끝까지 살아 정본(실측 50MB docx)의
+            #   DOM 을 빌드 내내 붙들었다 — 아래에서 같은 파일을 템플릿으로 한 번 더 여니 두 벌이 상주한다.
+            #   (리뷰 I3) 추출이 던져도 놓아야 하므로 finally 다.
+            del ref_doc
         if ref_map:
             patched_called = 0
             patched_calling = 0
