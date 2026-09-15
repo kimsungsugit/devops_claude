@@ -76,6 +76,45 @@ class TestNoteDocxOutcome:
         U._note_docx_outcome(c, {"reference_suds": {"configured": True, "document": "d", "identity": {}, "safety_fields_applied": 1, "safety_fields_blocked": 0}})
         assert _codes(c) == ["reference_identity_unknown"]
 
+    def test_unplaced_text_sections_are_reported_with_sizes(self):
+        """(R50 N38) run 2078: SwRS 요구 절 79,572자가 정본 레이아웃에 자리가 없어 침묵으로 빠졌다."""
+        c = IssueCollector()
+        U._note_docx_outcome(c, {"payload_functions": 1, "matched_functions": 1, "unmatched_payload_count": 0, "empty_heading_count": 0,
+                                 "text_sections_unplaced": {"requirements": 79572}})
+        items = {i["code"]: i for i in c.as_list()}
+        assert list(items) == ["text_section_unplaced"]
+        it = items["text_section_unplaced"]
+        assert (it["severity"], it["kind"]) == ("warning", "actual")
+        assert "requirements(79,572자)" in it["message"]
+        assert it["facts"] == {"sections": ["requirements"], "chars": {"requirements": 79572}}
+
+    def test_empty_unplaced_dict_is_quiet(self):
+        c = IssueCollector()
+        U._note_docx_outcome(c, {"payload_functions": 1, "matched_functions": 1, "unmatched_payload_count": 0, "empty_heading_count": 0,
+                                 "text_sections_unplaced": {}})
+        assert _codes(c) == []
+
+    def test_reference_overrides_are_reported_by_previous_source(self):
+        """(R50 N38) 정본이 SwDS·모듈상속 값을 덮었다 — run 2079 였다면 여기 327 이 찍혔다. 정본이 권위라 error 가 아니라 warning."""
+        c = IssueCollector()
+        U._note_docx_outcome(c, {"reference_suds": {"configured": True, "document": "X_v3.03.docx", "identity": {"same_project": True},
+                                                    "safety_fields_applied": 660, "safety_fields_blocked": 0, "safety_fields_agreed": 12,
+                                                    "safety_fields_overridden": {"sds": 300, "module_inherit": 27}}})
+        items = {i["code"]: i for i in c.as_list()}
+        assert list(items) == ["reference_overrode_doc_asil"]
+        it = items["reference_overrode_doc_asil"]
+        assert (it["severity"], it["kind"]) == ("warning", "actual")
+        assert "327건" in it["message"] and "sds 300" in it["message"]
+        assert it["facts"] == {"document": "X_v3.03.docx", "overridden": 327, "by_source": {"sds": 300, "module_inherit": 27}, "agreed": 12}
+
+    def test_zero_overrides_and_legacy_stats_without_the_key_are_quiet(self):
+        """구판 gen_stats(키 없음)와 덮은 게 0건인 run 은 항목을 만들지 않는다."""
+        c = IssueCollector()
+        U._note_docx_outcome(c, {"reference_suds": {"configured": True, "identity": {"same_project": True}, "safety_fields_overridden": {}}})
+        U._note_docx_outcome(c, {"reference_suds": {"configured": True, "identity": {"same_project": True}}})
+        U._note_docx_outcome(c, {"reference_suds": {"configured": True, "identity": {"same_project": True}, "safety_fields_overridden": {"sds": 0}}})
+        assert _codes(c) == []
+
 
 class TestNoteReport:
     def test_ok_is_quiet(self):
@@ -196,20 +235,66 @@ class TestReadRequirementDocs:
         assert "s not in _req_skipped" in src
 
 
-class TestSdsPartitionMapNotWiredHere:
-    """(R49 N38) SwDS 파티션 맵은 이 경로의 소스 분석에 넘기지 **않는다** — 라이브 run 2079 에서 정본 SwUDS 의 ASIL 657건이
-    35건으로 밀리고 A→QM 327건이 났다(그 자리는 comment > override > sds 라 정본보다 위). 빈칸 채움 자리로 넣기 전까지 봉인."""
+class TestSdsPartitionMapWiredBelowReference:
+    """(R49 N38 → R50) SwDS 파티션 맵을 이 경로의 소스 분석에 **넘긴다** — 단, 정본이 그 값을 덮는 빌더 규칙과 한 세트다.
 
-    def test_source_sections_call_has_no_partition_map(self):
+    R49 라이브 run 2079 에서 같은 배선이 정본 SwUDS 의 ASIL 657건을 35건으로 밀어(ASIL 변경 327 중 A→QM 45) 봉인했었다. R50 이 빌더의 정본
+    채움을 "빈칸만" 에서 "`comment`·`uds`·자기 자신 빼고 덮기" 로 바꿔(`provenance.reference_suds_may_override`,
+    `tests/unit/test_uds_reference_precedence.py`) 봉인을 풀었다. 배선만 있고 빌더 규칙이 없으면 run 2079 가 재현된다 —
+    그래서 이 테스트는 배선과 함께 빌더 술어의 존재도 본다.
+    """
+
+    @staticmethod
+    def _calls(tree, name):
+        import ast
+        return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+
+    def test_source_sections_call_passes_the_partition_map(self):
         import ast
         import textwrap
         tree = ast.parse(textwrap.dedent(source_of(U._uds_generate_from_paths)))
-        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                 and getattr(n.func, "id", getattr(n.func, "attr", "")) == "generate_uds_source_sections"]
+        calls = self._calls(tree, "generate_uds_source_sections")
         assert calls, "소스 분석 호출을 못 찾았다 — 선택자가 낡았다"
         for call in calls:
             kws = {k.arg for k in call.keywords}
-            assert "sds_partition_map" not in kws, "정본(참조 SwUDS) ASIL 을 SDS 이름매칭이 덮는다 — N38 설계 판단 전엔 넣지 말 것"
+            assert "sds_partition_map" in kws, "SwDS 파티션 맵이 이 경로에 배선돼 있지 않다 — 요구 문서를 읽어도 문서가 같다(run 2078)"
+
+    def test_partition_map_is_built_from_materialized_docx_paths_only(self):
+        """`_extract_sds_partition_map` 은 `req_doc_paths`(실체화 사본) 루프 변수로만 부른다 — 원경로(`req_paths`)면 N37 재발."""
+        import ast
+        import textwrap
+        tree = ast.parse(textwrap.dedent(source_of(U._uds_generate_from_paths)))
+        calls = self._calls(tree, "_extract_sds_partition_map")
+        assert calls, "파티션 맵 추출 호출이 없다"
+        loops = {id(n): n for n in ast.walk(tree) if isinstance(n, ast.For)}
+        for call in calls:
+            arg = call.args[0]
+            assert isinstance(arg, ast.Name), "루프 변수를 그대로 넘겨야 한다(가공하면 어느 목록에서 왔는지 가드가 못 본다)"
+            owners = [lp for lp in loops.values() if isinstance(lp.target, ast.Name) and lp.target.id == arg.id]
+            assert owners, f"{arg.id} 를 도는 for 루프가 없다"
+            for lp in owners:
+                assert isinstance(lp.iter, ast.Name) and lp.iter.id == "req_doc_paths", (
+                    f"파티션 맵은 실체화 사본 목록(req_doc_paths)만 돌아야 한다 — 지금은 {ast.dump(lp.iter)[:60]}")
+
+    def test_partition_map_failure_facts_carry_the_filename_only(self):
+        """실패 항목의 facts 는 파일명만 — 절대 경로는 Gemini 프롬프트·화면에 실린다(R49 리뷰 W1 과 같은 규칙)."""
+        src = source_of(U._uds_generate_from_paths)
+        assert '"sds_partition_map_failed"' in src
+        assert 'facts={"path": Path(_sds_doc).name, "error": type(exc).__name__}' in src
+
+    def test_empty_partition_map_with_docs_present_becomes_an_item(self):
+        """(리뷰 W2) 배선했는데 맵이 비면 R49 의 "읽었는데 문서가 같다" 와 같은 모습 — 건수 로그 + 문서가 있을 때만 항목."""
+        src = source_of(U._uds_generate_from_paths)
+        assert "if req_doc_paths and not _sds_pmap:" in src
+        assert '_issues.add("sds_partition_map_empty", "warning", "potential",' in src
+        assert '"[UDS] SwDS 파티션 맵 %d건 (SwDS 후보 %d / 요구 문서 %d)"' in src
+
+    def test_builder_precedence_predicate_is_in_place(self):
+        """배선의 안전 전제 — 빌더가 `reference_suds_may_override` 로 정본 우선을 강제한다(둘 중 하나만 있으면 안 된다)."""
+        from report_gen import docx_builder, provenance
+        assert provenance.reference_suds_may_override("sds") is True
+        assert "reference_suds_may_override(_prev_src)" in source_of(docx_builder.generate_uds_docx)
 
 
 class TestWrapperAndSurfaces:

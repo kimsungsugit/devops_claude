@@ -166,3 +166,26 @@ def has_evidence_value(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() not in PLACEHOLDER_VALUES
+
+
+# ── (R50 N38, 2026-09-15) 정본 SwUDS 가 **덮지 못하는** 출처 ─────────────────────────────
+# UDS 빌더의 ASIL·Related 우선순위(사용자 결정): 소스 주석 `comment`(c_source 권위) > **정본 SwUDS**
+# (`reference`, 직독 `uds`) > 설계·요구 문서(`sds`/`srs`) > 모듈 상속·추론·기본값.
+#
+# 왜 `is_weak_source` 와 별개인가: `sds`/`srs`(0.95) 는 실제 근거를 본 강한 출처라 "약함" 이 아니다.
+# 그런데 정본 SwUDS 는 **단위 설계의 정본 문서**라 설계 문서(SwDS)의 함수 파티션 맵보다 위다 —
+# 라이브 실측(run 2079): 빌더의 정본 채움이 빈칸만 채우던 동안 SwDS 맵이 먼저 채워 정본 ASIL 657건이
+# 35건으로 밀리고 함수 ASIL 327건이 바뀌었다(그중 A→QM 45·근거 없는 TBD→QM 27 = under-classification). 그래서 판정을 "약한가" 가 아니라
+# "정본이 덮어도 되는가" 로 따로 둔다. 예외 3개만 명시한다 — 나머지(미지 라벨 포함)는 전부 덮인다.
+REFERENCE_SUDS_KEEPS = frozenset({"comment", "reference", "uds"})
+
+
+def reference_suds_may_override(src: Any) -> bool:
+    """정본 SwUDS 의 ASIL·Related 가 이 출처의 값을 **덮어도 되는가**.
+
+    `comment`(소스 주석 `@asil`)·`reference`(정본 자신)·`uds`(정본 직독) 만 지킨다. 별칭은 먼저 접는다
+    (`hsis`→`sds` 는 덮인다, `srs_default_qm`→`default` 도).
+    ⚠ 여기 `sds` 를 넣으면 R49 run 2079 의 역전이 되살아난다 — 그건 SwDS 를 정본 위에 두는 설계 변경이지
+    코드 정리가 아니다. 가드: `tests/unit/test_uds_reference_precedence.py`.
+    """
+    return canonical_source(src) not in REFERENCE_SUDS_KEEPS

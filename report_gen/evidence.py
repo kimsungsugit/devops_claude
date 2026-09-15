@@ -653,6 +653,13 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
         "registry_mismatch": _mismatch_field(ref.get("registry_mismatch")),
         "safety_fields_applied": _int_field(ref, "safety_fields_applied"),
         "safety_fields_blocked": _int_field(ref, "safety_fields_blocked"),
+        # (R50 N38) 정본이 **이미 있던** 값을 덮은 건수(이전 출처별 dict 의 합) — 구판 gen_stats 엔 키가 없어 None(미기록),
+        #   빈 dict 는 "덮은 것 없음" 이라 0 이다(`_int_sum` 은 빈 dict 를 미측정으로 접으므로 따로 가른다).
+        "safety_fields_agreed": _int_field(ref, "safety_fields_agreed"),
+        "safety_fields_overridden": (
+            0 if isinstance(ref.get("safety_fields_overridden"), dict) and not ref.get("safety_fields_overridden")
+            else _int_sum(ref.get("safety_fields_overridden"))
+        ),
         "descriptive_fields_applied": _int_field(ref, "descriptive_fields_applied"),
         "invalid_asil_rejected": _int_field(ref, "invalid_asil_rejected"),
         "structural_fields_applied": _int_sum(ref.get("structural_fields_applied")),

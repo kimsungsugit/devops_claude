@@ -37,6 +37,7 @@ from backend.state import (
     uds_view_cache_lock as _uds_view_cache_lock,
 )
 from report_gen.atomic_io import atomic_write_text
+from report_gen.doc_kind import is_sds_filename
 from report_gen.gate_report import (
     parse_gate_report,
     parse_scoring_scope,
@@ -455,8 +456,26 @@ def _note_docx_outcome(issues: IssueCollector, gen_stats: Dict[str, Any]) -> Non
                    f"템플릿에 heading 이 없어 빠진 함수 {unmatched}개, 내용 없이 남은 heading {empty}개",
                    stage="docx", facts={"payload_functions": gen_stats.get("payload_functions"), "matched": gen_stats.get("matched_functions"),
                                         "match_pct": gen_stats.get("match_pct"), "unmatched": unmatched, "empty_headings": empty})
+    # (R50 N38) 본문 절이 템플릿(정본) 레이아웃에 자리가 없어 빠졌다 — run 2078 의 SwRS 요구 절 79,572자가 이랬다.
+    unplaced = gen_stats.get("text_sections_unplaced")
+    if isinstance(unplaced, dict) and unplaced:
+        names = ", ".join(f"{k}({v:,}자)" if isinstance(v, int) else str(k) for k, v in unplaced.items())
+        issues.add("text_section_unplaced", "warning", "actual",
+                   f"본문 절 {len(unplaced)}개가 템플릿(정본) 레이아웃에 자리가 없어 문서에 실리지 않았다: {names}",
+                   stage="docx", facts={"sections": sorted(str(k) for k in unplaced), "chars": dict(unplaced)})
     ref = gen_stats.get("reference_suds")
     if isinstance(ref, dict) and ref.get("configured"):
+        # (R50 N38) 정본이 다른 출처(SwDS·모듈상속·추론)의 ASIL·Related 를 덮었다 — 설계 문서와 정본이 어긋난 함수다.
+        #   정본이 권위라 판정은 바뀌지 않지만, 어긋남 자체는 검토자가 알아야 한다(run 2079 라면 여기 327 이 찍혔다).
+        overridden = ref.get("safety_fields_overridden")
+        if isinstance(overridden, dict) and overridden:
+            total = sum(int(v) for v in overridden.values() if isinstance(v, int) and not isinstance(v, bool))
+            if total > 0:
+                by_src = ", ".join(f"{k} {v}" for k, v in sorted(overridden.items(), key=lambda kv: -int(kv[1] or 0)))
+                issues.add("reference_overrode_doc_asil", "warning", "actual",
+                           f"정본 SwUDS({ref.get('document')})가 다른 출처의 ASIL·Related {total}건을 덮었다(이전 출처: {by_src}) — 설계 문서와 정본이 어긋난 함수",
+                           stage="docx", facts={"document": ref.get("document"), "overridden": total, "by_source": dict(overridden),
+                                                "agreed": ref.get("safety_fields_agreed")})
         identity = ref.get("identity") if isinstance(ref.get("identity"), dict) else {}
         same = identity.get("same_project")
         if same is False:
@@ -2628,12 +2647,11 @@ def _uds_generate_from_paths(
     req_map: Dict[str, Any] = {}
     # (N37) 경로 지정 문서는 공용 판독기(cloudium 이면 워커 실체화) — 여기만 `Path.exists()` 직독이 남아 U: 문서가 매 run 탈락했다.
     req_texts, req_doc_paths, _req_skipped = _read_requirement_docs(_issues, req_file_paths, req_paths)
-    # ⚠ (R49 라이브 실측, N38) 여기서 읽은 SwRS/SwDS 는 이 경로의 **문서 바이트를 바꾸지 않는다** — run 2077(못 읽음)과
-    #   2078(읽음)의 sha256 이 같았다. `requirements` 절은 정본 레이아웃에 자리가 없고, SwRS req_map 키(요구 ID)는 함수와
-    #   만나지 않는다. SwDS 파티션 맵을 local 비동기처럼 `generate_uds_source_sections(sds_partition_map=)` 로 넘겨 봤더니
-    #   (run 2079) 참조 SwUDS 의 ASIL 657건이 35건으로 밀리고 A→QM 327건·`asil_trusted_fill` 게이트 미달이 생겨 **되돌렸다**
-    #   — 그 자리는 comment > override > **sds** 순이라 정본(권위)보다 위다. SDS 는 빈칸 채움(`enrich_function_details_with_docs`,
-    #   "SwUDS 직독 ASIL 먼저") 자리로 넣어야 하고 이 경로엔 그 호출이 없다(설계 판단 — 계획서 N38).
+    # ⚠ (R49 라이브 실측, N38) R49 시점엔 여기서 읽은 SwRS/SwDS 가 이 경로의 **문서 바이트를 바꾸지 않았다** — run 2077(못 읽음)과
+    #   2078(읽음)의 sha256 이 같았다. ① `requirements` 절은 정본 레이아웃에 자리가 없다 → R50 부터 `text_sections_unplaced` 로
+    #   공시(안 싣는다 — 사용자 결정). ② SwRS req_map 키(요구 ID)는 함수와 만나지 않는다(그대로). ③ SwDS 파티션 맵은 아래
+    #   소스 분석에 배선했고(R50), 그게 정본을 덮던 문제(run 2079: 정본 ASIL 657→35, ASIL 변경 327 중 A→QM 45)는 빌더가 정본 우선으로 덮게
+    #   바뀌어 닫혔다(`provenance.reference_suds_may_override`).
 
     _progress("source", 45, "소스/섹션 분석")
     jenkins_meta = summary.get("jenkins") if isinstance(summary, dict) else {}
@@ -2659,10 +2677,37 @@ def _uds_generate_from_paths(
         _issues.add("source_root_missing", "warning", "actual",
                     f"소스 루트 1개를 찾지 못해 건너뜀: {Path(_m).name or _m}", stage="source",
                     facts={"root": Path(_m).name or str(_m)})
+    # (R50 N38) SwDS 파티션 맵 — **실체화 사본**(`req_doc_paths`, 원경로 아님)에서 뽑아 소스 분석에 넘긴다(local 두 경로와
+    #   같은 자리). R49 에서 같은 배선이 정본 ASIL 을 덮어(run 2079) 되돌렸던 것은 빌더의 정본 채움이 빈칸만 채웠기
+    #   때문이고, 이제 정본이 `sds`·모듈상속을 덮는다(`docx_builder` 정본 채움 + `provenance.reference_suds_may_override`).
+    #   그래서 SwDS 는 정본이 못 채운 함수(run 2078 TBD 134)에만 남는다 — 사용자 결정(2026-09-15).
+    # 지연 import — `report_gen.requirements` 는 무겁고 이 함수만 쓴다(리뷰 I3; `is_sds_filename` 은 가벼워 모듈 상단).
+    from report_gen.requirements import _extract_sds_partition_map
+    _sds_pmap: Dict[str, Dict[str, str]] = {}
+    _sds_candidates = 0
+    for _sds_doc in req_doc_paths:
+        if not is_sds_filename(_sds_doc):
+            continue
+        _sds_candidates += 1
+        try:
+            _sds_pmap.update(_extract_sds_partition_map(_sds_doc))
+        except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그·항목으로 남긴다
+            _logger.warning("[UDS] SwDS 파티션 맵 추출 실패 %s: %s", Path(_sds_doc).name, type(exc).__name__)
+            _issues.add("sds_partition_map_failed", "warning", "actual",
+                        f"SwDS 파티션 맵 추출 실패: {Path(_sds_doc).name} ({type(exc).__name__}) — 설계 문서 없이 소스·정본만으로 채운다",
+                        stage="requirements", facts={"path": Path(_sds_doc).name, "error": type(exc).__name__})
+    # (리뷰 W2) 배선했는데 맵이 비면 R49 의 "읽었는데 문서가 같다" 와 같은 모습이라 구별할 수 없다 — 건수를 남기고, 문서가
+    #   있는데 0건이면 항목으로(SwDS 로 인식된 파일이 없거나 표 구조가 다르다).
+    _logger.info("[UDS] SwDS 파티션 맵 %d건 (SwDS 후보 %d / 요구 문서 %d)", len(_sds_pmap), _sds_candidates, len(req_doc_paths))
+    if req_doc_paths and not _sds_pmap:
+        _issues.add("sds_partition_map_empty", "warning", "potential",
+                    f"요구 문서 {len(req_doc_paths)}건 중 SwDS 로 인식된 것 {_sds_candidates}건, 파티션 맵 0건 — 설계 문서 없이 소스·정본만으로 채운다",
+                    stage="requirements", facts={"docs": len(req_doc_paths), "sds_candidates": _sds_candidates})
     if _src_roots_str:
         source_sections = generate_uds_source_sections(
             _src_roots_str,
             component_map=component_map if component_map else None,
+            sds_partition_map=_sds_pmap if _sds_pmap else None,
             max_files=max_source_files,
             max_items=max_items_per_category,
         )

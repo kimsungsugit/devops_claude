@@ -1548,6 +1548,8 @@ function EvidenceDetail({ run, detail }) {
                 {typeof ref.registry_compare === 'string' && ref.registry_compare.startsWith('unavailable:')
                   && ` · 레지스트리 대조 불가(${ref.registry_compare.slice('unavailable:'.length)})`}
                 {ref.safety_fields_applied != null && ` · ASIL·Related 적용 ${ref.safety_fields_applied}`}
+                {/* (R50 N38) 정본이 SwDS·모듈상속 값을 덮은 건수 — 설계 문서와 정본이 어긋난 함수. 0 이면 말하지 않고 미기록(null)도 말하지 않는다 */}
+                {ref.safety_fields_overridden > 0 && <> · <strong>정본이 덮음 {ref.safety_fields_overridden}</strong></>}
                 {/* (리뷰 W6) 미측정(null)과 0 은 다르다 — 차단 수가 없으면 "차단 0" 으로 읽히므로 미기록을 말한다 */}
                 {ref.safety_fields_blocked == null ? ' · 차단 미기록'
                   : ref.safety_fields_blocked > 0 && <> · <strong>차단 {ref.safety_fields_blocked}</strong></>}

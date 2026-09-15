@@ -41,7 +41,12 @@ from report_gen.function_analyzer import (
     _parse_signature_params,
     resolve_param_grid_entries,
 )
-from report_gen.provenance import is_weak_source, unrecorded_source
+from report_gen.provenance import (
+    canonical_source,
+    is_weak_source,
+    reference_suds_may_override,
+    unrecorded_source,
+)
 from report_gen.requirements import (
     _extract_doc_section,
     _extract_function_info_from_docx,
@@ -2096,6 +2101,21 @@ def _write_enriched_function_details(output_path: str, function_details: Dict[st
 _STAT_SAMPLE_CAP = 50
 
 
+def _safety_value_key(value: Any, field: str = "related") -> str:
+    """(R50 N38) ASIL·Related 값의 **비교 키** — 표기가 달라도 같은 값이면 같다.
+
+    정본이 이미 있던 값을 덮을 때 "같은 값(출처만 승격)" 과 "다른 값(충돌)" 을 가르는 데만 쓴다 — 결과값이 아니라
+    **충돌 계수**가 걸린 판정이라, 표기 변형을 충돌로 세면 "설계 문서와 정본이 어긋난 함수 N건" 이 거짓 주장이 된다.
+    - `asil`: `ASIL B`·`asil-b`·`B` 는 같다(리뷰 W5 — `cur` 는 SwDS 파싱 원문이라 접두어가 흔하다).
+    - `related`: 구분자·나열 순서·중복을 무시한 토큰 **집합**(`SwFn_25, SwCom_03` ≡ `SwCom_03 / SwFn_25`).
+    """
+    raw = str(value or "").strip().upper()
+    if field == "asil":
+        return re.sub(r"[^A-Z0-9]", "", re.sub(r"^\s*ASIL[\s_-]*", "", raw))
+    toks = {t for t in re.split(r"[\s,;/]+", raw) if t}
+    return ",".join(sorted(toks))
+
+
 def _write_gen_stats(output_path: str, stats: Dict[str, Any]) -> None:
     """생성 통계를 sidecar 로 남긴다. 실패해도 문서 생성을 깨지 않는다."""
     try:
@@ -2450,19 +2470,31 @@ def generate_uds_docx(
                 if not info.get("related"):
                     info["related"] = req.get("related") or ""
 
+    # (R50 리뷰 C1) 모듈 상속의 **씨앗 우선순위** — 예전엔 dict 순서상 첫 non-TBD 값이 씨앗이라, SwDS 가 먼저 채운 QM 이
+    #   정본 A 를 가진 형제보다 앞에 오면 모듈 전체가 QM 을 물려받았다(run 2079: module_inherit 1→672). 정본 채움 규칙과
+    #   같은 순서로 씨앗을 고른다: 소스 주석 > 정본 > 설계·요구 문서 > 나머지. 같은 등급 안에서는 첫 함수.
+    _SEED_RANK = {"comment": 0, "reference": 1, "uds": 1, "sds": 2, "srs": 2}
+
     def _inherit_module_asil(
         func_details: Dict[str, Any],
         module_map: Dict[str, str],
-    ) -> None:
-        module_asil: Dict[str, str] = {}
+    ) -> Dict[str, int]:
+        """빈칸(""/TBD) 함수에 같은 모듈의 씨앗 ASIL 을 물려준다. 반환 = 씨앗 출처별 상속 건수(gen_stats 공시용)."""
+        module_seed: Dict[str, tuple] = {}     # mod -> (rank, asil, seed_source)
         for fid, finfo in func_details.items():
             if not isinstance(finfo, dict):
                 continue
             asil = str(finfo.get("asil") or "").strip()
             if asil and asil not in {"TBD", ""}:
                 mod = module_map.get(fid, "")
-                if mod and mod not in module_asil:
-                    module_asil[mod] = asil
+                if not mod:
+                    continue
+                src = canonical_source(finfo.get("asil_source"))
+                rank = _SEED_RANK.get(src, 3)
+                cur = module_seed.get(mod)
+                if cur is None or rank < cur[0]:
+                    module_seed[mod] = (rank, asil, src)
+        by_seed: Dict[str, int] = {}
         for fid, finfo in func_details.items():
             if not isinstance(finfo, dict):
                 continue
@@ -2470,10 +2502,11 @@ def generate_uds_docx(
             if asil and asil not in {"TBD", ""}:
                 continue
             mod = module_map.get(fid, "")
-            inherited = module_asil.get(mod, "")
-            if inherited:
-                finfo["asil"] = inherited
+            seed = module_seed.get(mod)
+            if seed:
+                finfo["asil"] = seed[1]
                 finfo["asil_source"] = "module_inherit"
+                by_seed[seed[2]] = by_seed.get(seed[2], 0) + 1
             # ⚠ 예전엔 여기 `else: asil="QM"; asil_source="default"` 가 있었다. 지웠다.
             #   모듈 상속조차 못 찾았다는 건 **아무 근거도 없다**는 뜻이다. 그 상태를
             #   `QM`(안전 관련 아님)으로 적으면 근거의 부재가 등급 주장으로 둔갑한다.
@@ -2482,6 +2515,7 @@ def generate_uds_docx(
             #   지어내기가 **여기서 다시 채워져** 상류 수정이 통째로 no-op 이 된다.
             #   네 사이트(`requirements.py`·여기·`function_analyzer.py`·`helpers/uds.py`)는
             #   한 세트다.
+        return by_seed
 
     def _resolve_related_asil_desc(
         info: Dict[str, Any],
@@ -2588,7 +2622,8 @@ def generate_uds_docx(
             info["related"] = ""
             info["related_source"] = "default"
 
-    _inherit_module_asil(function_details, fn_module_map)
+    # (R50 리뷰 C1) 모듈 상속 호출은 정본 채움 **뒤**로 옮겼다(아래 참조 블록 끝) — 여기 두면 SwDS 값이 씨앗이 되어 정본이
+    #   못 닿는 형제 함수에 굳는다.
 
     for info in list(function_details.values()):
         if not isinstance(info, dict):
@@ -2761,6 +2796,16 @@ def generate_uds_docx(
         if isinstance(uds_payload, dict) and isinstance(uds_payload.get("reference_suds_registry_mismatch"), dict) else None,
         "safety_fields_applied": 0,
         "safety_fields_blocked": 0,
+        # (R50 N38) 정본이 **이미 있던 값을 덮은** 안전축 — 빈칸 채움과 다른 사실이다. `overridden` 은 이전 출처별
+        #   건수(`{"sds": 327, "module_inherit": …}`), `agreed` 는 값이 같아 출처만 정본으로 올린 건수, `sample` 은
+        #   충돌 표본(캡). 라이브 run 2079 의 ASIL 변경 327건(A→QM 45·QM→A 40·TBD→A 215·TBD→QM 27)이 이 칸에 보였어야 했다.
+        "safety_fields_agreed": 0,
+        "safety_fields_overridden": {},
+        "safety_conflicts_sample": [],
+        # (리뷰 I1) `safety_fields_applied` 는 빈칸 채움 + 동의 승격 + 덮어쓰기의 합이 됐다 — 빈칸 채움만 따로 센다(구판 비교용).
+        "safety_fields_blank_filled": 0,
+        # (리뷰 W1) 정본과 값이 다른데 지켜진 출처(comment/uds)별 건수 — 정본을 막은 쪽의 충돌.
+        "safety_fields_kept_conflict": {},
         "descriptive_fields_applied": 0,
         "invalid_asil_rejected": 0,
         # ⚠ 아래 6축은 예전엔 **계수에서 통째로 빠져** 있었다. `descriptive_fields_applied`
@@ -2839,7 +2884,21 @@ def generate_uds_docx(
                         #   부풀린다. 실측: `asil` 은 이 지점 이전에 이미 `QM`(source=default)
                         #   으로 채워져 있어 애초에 적용 대상이 아니었는데도 차단 1건으로
                         #   집계됐다. 적용 자격 → 값 유효성 → 신원 순으로 본다.
-                        if not ((not cur) or cur in {"TBD", "N/A", "-"}):
+                        #
+                        # (R50 N38) 여기는 **빈칸만** 채우던 자리였다. 그런데 이 앞에서 SwDS 파티션 맵(`sds`)과
+                        #   모듈 상속이 먼저 채우면 정본이 채울 빈칸이 없다 — 라이브 run 2079 실측: 정본 ASIL
+                        #   657→35, 함수 ASIL 변경 327건(A→QM 45). 사용자 결정(2026-09-15) "정본 SwUDS 먼저, SwDS 는 빈칸만" 에 따라
+                        #   소스 주석(`comment`, c_source 권위)·정본 직독(`uds`)·자기 자신만 남기고 **덮는다**.
+                        #   판정은 `provenance.reference_suds_may_override` 단일 출처. 값이 달랐으면 충돌로 센다
+                        #   (설계 문서와 정본이 어긋난 함수 — 침묵하면 "정본이 곧 SwDS" 로 읽힌다).
+                        _blank = (not cur) or cur in {"TBD", "N/A", "-"}
+                        _prev_src = canonical_source(target.get(f"{key}_source"))
+                        if not _blank and not reference_suds_may_override(_prev_src):
+                            # (R50 리뷰 W1) 지켜진 출처(소스 주석 등)와 정본이 **다른 값**이면 그 사실도 센다 — "정본을 막은 건" 도
+                            #   "정본이 덮은 건" 만큼 검토 가치가 있다(주석 @asil D ↔ 정본 A). 신원 확인된 정본만.
+                            if _ref_safety_ok and _safety_value_key(cur, key) != _safety_value_key(incoming, key):
+                                _kept = _ref_stats["safety_fields_kept_conflict"]
+                                _kept[_prev_src] = int(_kept.get(_prev_src, 0)) + 1
                             continue
                         if key == "asil" and incoming.upper() not in _VALID_ASIL:
                             # 참조 파싱이 어긋나 프로토타입 문자열 등이 ASIL 로 들어오는 경우.
@@ -2848,6 +2907,19 @@ def generate_uds_docx(
                         if not _ref_safety_ok:
                             _ref_stats["safety_fields_blocked"] += 1
                             continue
+                        if _blank:
+                            _ref_stats["safety_fields_blank_filled"] += 1
+                        elif _safety_value_key(cur, key) == _safety_value_key(incoming, key):
+                            _ref_stats["safety_fields_agreed"] += 1
+                        else:
+                            _ovr = _ref_stats["safety_fields_overridden"]
+                            _ovr[_prev_src] = int(_ovr.get(_prev_src, 0)) + 1
+                            if len(_ref_stats["safety_conflicts_sample"]) < _STAT_SAMPLE_CAP:
+                                _ref_stats["safety_conflicts_sample"].append({
+                                    # (리뷰 I4) 이름 폴백 매칭이면 `fid` 는 정본 쪽 키라 payload 함수 id 가 아니다 — 이름을 같이 싣는다.
+                                    "id": str(target.get("id") or fid), "name": str(target.get("name") or ""), "field": key,
+                                    "prev": cur[:80], "prev_source": _prev_src, "reference": incoming[:80],
+                                })
                         target[key] = incoming
                         target[f"{key}_source"] = "reference"
                         _ref_stats["safety_fields_applied"] += 1
@@ -2910,6 +2982,10 @@ def generate_uds_docx(
                     value=block.get("calling"),
                 ):
                     patched_calling += 1
+
+    # (R50 리뷰 C1) 모듈 상속은 정본 채움 **뒤** — 정본이 고친 값이 씨앗이 되고, 씨앗 출처별 건수를 남긴다(정본이 못 닿는
+    #   형제 함수가 어떤 근거의 등급을 물려받았는지 검토자가 볼 수 있게).
+    _ref_stats["module_inherit_by_seed_source"] = _inherit_module_asil(function_details, fn_module_map)
 
     if isinstance(function_details, dict) and isinstance(function_details_by_name, dict):
         for fid, info in function_details.items():
@@ -3127,6 +3203,13 @@ def generate_uds_docx(
                 "matched_functions": None,
                 "match_pct": None,
                 "note": "토큰 치환 템플릿이라 SwUFn 함수 반영률이 적용되지 않는다(미측정).",
+                # (R50 리뷰 W3) 이 모드는 본문 절을 싣는 자리 자체가 없다 — 있는 절은 전부 미배치다(템플릿 분기와 같은 키).
+                "text_sections_unplaced": {
+                    k: len(str(v)) for k, v in (
+                        ("overview", overview), ("requirements", requirements), ("interfaces", interfaces),
+                        ("uds_frames", uds_frames), ("notes", notes),
+                    ) if str(v or "").strip()
+                },
                 # (R47-c 리뷰 W4) 참조 보강 루프는 이 분기보다 **위**에서 이미 돌았다 — 세 종결 경로 중 여기만
                 #   기록을 버려 보드가 "참조 통계를 남기기 전 빌더" 라는 틀린 사유를 말했다.
                 "reference_suds": _ref_stats,
@@ -3453,6 +3536,9 @@ def generate_uds_docx(
                         _payload_fn_names.add(
                             _normalize_symbol_name(str(_v.get("name"))).lower())
         _matched_fn_names: Set[str] = set()
+        # (R50 N38) 본문 절(overview/requirements/interfaces/uds_frames/notes)이 템플릿 heading 에 **실린** 키.
+        #   정본 레이아웃엔 `Requirements` 가 없어 SwRS 79,572자가 조용히 빠졌다(run 2078) — 어디에도 계수가 없었다.
+        _text_sections_placed: Set[str] = set()
         _empty_headings: List[str] = []
         _deleted_headings: List[str] = []
         _boilerplate_headings: List[str] = []
@@ -3908,6 +3994,7 @@ def generate_uds_docx(
                 next_kind = _next_block_kind(blocks, idx)
                 has_table = _section_has_table(blocks, idx, level)
                 if key == "overview":
+                    _text_sections_placed.add("overview")
                     _add_docx_bullets(doc, overview)
                 elif key in {
                     "introduction",
@@ -3927,16 +4014,20 @@ def generate_uds_docx(
                         if template_text:
                             _add_docx_lines(doc, template_text)
                 elif key == "requirements":
+                    _text_sections_placed.add("requirements")
                     _add_docx_bullets(doc, requirements)
                 elif key == "interfaces":
+                    _text_sections_placed.add("interfaces")
                     _add_docx_bullets(doc, interfaces)
                 elif key == "uds frames":
+                    _text_sections_placed.add("uds_frames")
                     _add_docx_bullets(doc, uds_frames)
                 elif key == "contents":
                     if not toc_inserted:
                         _add_docx_toc(doc)
                         toc_inserted = True
                 elif key == "notes":
+                    _text_sections_placed.add("notes")
                     _add_docx_bullets(doc, notes)
                 elif key == "software unit design":
                     if next_kind != "table" and not has_table:
@@ -4255,6 +4346,15 @@ def generate_uds_docx(
             "table_rows_recovered": _rows_recovered,
             "table_rows_blank_trimmed": _rows_trimmed,
             "swcom_globals_unattributed": len(_unattributed_swcoms),
+            # (R50 N38) 본문이 있는데 템플릿(정본) 레이아웃에 자리가 없어 **실리지 않은 절** — 글자수. 정본 SwUDS 의
+            #   1레벨 heading 엔 `Requirements` 가 없어 SwRS 요구 절이 매 run 침묵으로 빠졌다. 판정은 바꾸지 않는다
+            #   (정본 레이아웃이 곧 회사 양식) — 사실만 낸다.
+            "text_sections_unplaced": {
+                k: len(str(v)) for k, v in (
+                    ("overview", overview), ("requirements", requirements), ("interfaces", interfaces),
+                    ("uds_frames", uds_frames), ("notes", notes),
+                ) if str(v or "").strip() and k not in _text_sections_placed
+            },
             # 참조 SUDS 를 얼마나·왜 적용했는지. 로그에만 남기면 산출물 검토자가 못 본다.
             "reference_suds": _ref_stats,
         }

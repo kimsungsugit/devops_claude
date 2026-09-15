@@ -268,10 +268,13 @@ class TestFieldClassSplit:
         로 이걸 관측했는데, 그 지어내기를 제거해 이제 빈 `asil` 은 정당한 적용
         대상이다. 그래서 관측 방법을 바꿨다: 대상이 **이미 실제 등급을 가진** 경우로
         본다. 그 칸은 자격 단계에서 걸러지므로 차단으로 세면 안 된다(related 만 1건).
+        ⚠ 2026-09-15(R50 N38) — 정본이 문서 출처(`sds`)·미상 출처의 값을 **덮게** 됐으므로
+        "이미 값이 있음" 만으론 자격 단계에서 안 걸러진다. 자격 밖인 건 소스 주석
+        (`asil_source="comment"`, c_source 권위)뿐이라 그걸로 관측한다.
         """
         _info, rs = gen(project_name="KJPDS02_PV",
                         ref_block={"asil": "A", "related": "SwFn_99"},
-                        target_overrides={"asil": "D"})
+                        target_overrides={"asil": "D", "asil_source": "comment"})
         assert rs["safety_fields_blocked"] == 1, "적용 불가한 시도까지 차단으로 셌다"
 
     def test_descriptive_fields_pass_even_for_foreign_reference(self, gen):
@@ -304,13 +307,32 @@ class TestFieldClassSplit:
         assert info["description"] != "센서 값을 읽는다"
         assert rs["descriptive_fields_applied"] == 0
 
-    def test_existing_value_is_never_overwritten(self, gen):
-        """참조는 **빈 칸만** 채운다 — 이미 판정된 값을 덮으면 안 된다."""
-        info, _rs = gen(project_name="HDPDM01_PDS64_RD",
-                        ref_block={"asil": "A", "related": "SwFn_99"},
-                        target_overrides={"asil": "D", "related": "SwFn_01"})
+    def test_source_comment_value_is_never_overwritten(self, gen):
+        """소스 주석(`@asil`) 은 c_source 권위다 — 정본이 덮지 않는다(`backend/services/CLAUDE.md` 우선순위).
+
+        ⚠ 2026-09-15(R50 N38) 까지 이 테스트는 "참조는 빈 칸만 채운다" 였다. 그 규칙 아래서 SwDS 파티션 맵·모듈
+        상속이 정본보다 먼저 채워 라이브 run 2079 에서 정본 ASIL 657건이 35건으로 밀렸다(ASIL 변경 327 중 A→QM 45). 사용자
+        결정으로 정본이 문서 출처를 덮게 됐고, 지켜지는 출처는 `comment`·`uds`·`reference` 뿐이다
+        (`tests/unit/test_uds_reference_precedence.py`).
+        """
+        info, rs = gen(project_name="HDPDM01_PDS64_RD",
+                       ref_block={"asil": "A", "related": "SwFn_99"},
+                       target_overrides={"asil": "D", "asil_source": "comment",
+                                         "related": "SwFn_01", "related_source": "comment"})
         assert info["asil"] == "D"
         assert info["related"] == "SwFn_01"
+        assert rs["safety_fields_overridden"] == {} and rs["safety_fields_applied"] == 0
+
+    def test_document_or_unlabelled_value_is_overwritten_and_counted(self, gen):
+        """정본은 SwDS(`sds`)·출처 미상 값을 덮고, 덮은 사실을 이전 출처별로 센다 — 침묵으로 덮지 않는다."""
+        info, rs = gen(project_name="HDPDM01_PDS64_RD",
+                       ref_block={"asil": "A", "related": "SwFn_99"},
+                       target_overrides={"asil": "D", "asil_source": "sds", "related": "SwFn_01"})
+        assert (info["asil"], info["asil_source"]) == ("A", "reference")
+        assert (info["related"], info["related_source"]) == ("SwFn_99", "reference")
+        assert rs["safety_fields_overridden"] == {"sds": 1, "unknown": 1}
+        assert rs["safety_fields_applied"] == 2
+        assert {s["field"] for s in rs["safety_conflicts_sample"]} == {"asil", "related"}
 
     def test_stats_land_in_the_sidecar(self, gen, tmp_path):
         """차단 사실은 파일로 남아야 한다 — 프로덕션은 서브프로세스라 in-process 는 못 넘는다."""

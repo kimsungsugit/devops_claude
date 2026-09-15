@@ -1452,6 +1452,24 @@ describe('DocGenStatusBoard — 참조 SwUDS 보강 근거 (R47 N26)', () => {
     li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
     expect(li.textContent).not.toContain('출처');
   });
+  it('정본이 다른 출처 값을 덮은 건수는 0 보다 클 때만 말한다 (R50 N38)', async () => {
+    const base = {
+      present: true, document: '(KJPDS02_SwUDS) x.docx', configured: true, same_project: true,
+      identity_reason: 'token_match', shared_tokens: ['KJPDS02'], safety_fields_applied: 710, safety_fields_blocked: 0,
+      enrichment: { present: true, applied: true, functions: 1157, reason: null },
+    };
+    await openEvidence({ ...base, safety_fields_overridden: 45 });
+    let li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('정본이 덮음 45');
+    cleanup();
+    await openEvidence({ ...base, safety_fields_overridden: 0 });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).not.toContain('정본이 덮음');
+    cleanup();
+    await openEvidence({ ...base, safety_fields_overridden: null });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).not.toContain('정본이 덮음');
+  });
   it('지정 경로가 레지스트리 정본과 다른 파일이면 경고하고, 같거나 기록이 없으면 말하지 않는다 (R47-e N30)', async () => {
     const base = {
       present: true, document: '(OTHER_SwUDS) y.docx', configured: true, same_project: true,

@@ -730,10 +730,30 @@ class TestReferenceEnrichmentSection:
         assert ref["same_project"] is True and ref["identity_reason"] == "token_match"
         assert ref["shared_tokens"] == ["KJPDS02"]
         assert (ref["safety_fields_applied"], ref["safety_fields_blocked"]) == (710, 0)
+        # (R50 N38) 구판 gen_stats(키 없음)는 미기록 — 0 으로 접지 않는다
+        assert ref["safety_fields_overridden"] is None and ref["safety_fields_agreed"] is None
         assert ref["descriptive_fields_applied"] == 877 and ref["invalid_asil_rejected"] == 0
         assert (ref["structural_fields_applied"], ref["structural_fields_blocked"]) == (1598, 0)
         assert ref["enrichment"] == {"present": True, "applied": True, "functions": 1157, "unknown_keys": 0, "reason": None,
                                      "record_source": "payload"}
+
+    @pytest.mark.parametrize("overridden,expected", [
+        ({}, 0),                                   # 기록됐고 덮은 게 없다 — 미기록(None)과 다르다
+        ({"sds": 3, "module_inherit": 2}, 5),      # 이전 출처별 합
+        ({"sds": "?"}, None),                      # 정수가 아닌 축이 있으면 미측정
+    ])
+    def test_overridden_sum_distinguishes_zero_from_unrecorded(self, tmp_path, overridden, expected):
+        """(R50 N38) 뮤테이션 M15: 빈 dict 를 `_int_sum` 에 그대로 넣으면 "덮은 것 없음" 이 "미기록" 으로 접힌다."""
+        import copy
+
+        from report_gen.evidence import read_evidence
+
+        stats = copy.deepcopy(_REF_STATS_2064)
+        stats["reference_suds"]["safety_fields_overridden"] = overridden
+        stats["reference_suds"]["safety_fields_agreed"] = 7
+        ref = read_evidence(str(_ref_sidecars(tmp_path, stats=stats)))["reference"]
+        assert ref["safety_fields_overridden"] == expected
+        assert ref["safety_fields_agreed"] == 7
 
     def test_foreign_reference_of_run_2058_is_visible_not_silent(self, tmp_path):
         """게이트 23.8% 의 원인 그 자체 — 다른 프로젝트 문서라 305건 차단. 병합 이전 라이터라 enrichment 도 없다."""

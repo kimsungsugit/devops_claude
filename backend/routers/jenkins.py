@@ -2874,7 +2874,10 @@ async def jenkins_uds_generate_async(
         if not f or not f.filename:
             continue
         suffix = Path(f.filename).suffix.lower() or ".txt"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        # (R50 리뷰 W2) 원 파일명을 임시 파일 이름에 남긴다 — 하류의 문서 종류 판정(`is_sds_filename`)·탈락 항목의 파일명이
+        #   `tmpab12.docx` 로는 아무것도 말하지 못했다(업로드 SwDS 는 파티션 맵에 **구조적으로** 못 들어갔다).
+        _stem = re.sub(r"[^A-Za-z0-9._()\-]+", "_", Path(f.filename).stem)[:80] or "upload"
+        with tempfile.NamedTemporaryFile(delete=False, prefix=f"{_stem}__", suffix=suffix) as tmp:
             tmp.write(await f.read())
             req_file_paths.append(Path(tmp.name))
 
