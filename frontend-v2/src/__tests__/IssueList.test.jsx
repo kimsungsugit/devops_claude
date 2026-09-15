@@ -56,6 +56,30 @@ describe('IssueList', () => {
     expect(onExplain).toHaveBeenCalledTimes(1);
   });
 
+  it('같은 code 가 여러 건이면 설명은 순번(i)으로 되붙는다 — 마지막 설명이 전부를 덮지 않는다', async () => {
+    const user = userEvent.setup();
+    const dup = [
+      { code: 'requirement_doc_skipped', severity: 'warning', kind: 'actual', source: 'generation', message: '요구 문서 탈락: SwRS.docx: 접근 거부', facts: {} },
+      { code: 'requirement_doc_skipped', severity: 'warning', kind: 'actual', source: 'generation', message: '요구 문서 탈락: SwDS.docx: 파일 없음', facts: {} },
+    ];
+    const onExplain = vi.fn().mockResolvedValue({
+      generated_by: 'llm', model: 'm', summary: '요약',
+      items: [
+        { i: 0, code: 'requirement_doc_skipped', explanation: 'SwRS 설명', action: 'SwRS 조치' },
+        { i: 1, code: 'requirement_doc_skipped', explanation: 'SwDS 설명', action: 'SwDS 조치' },
+      ],
+      items_shown: 2, items_total: 2,
+    });
+    render(<IssueList issues={dup} onExplain={onExplain} />);
+    await user.click(screen.getByRole('button', { name: 'Gemini 로 풀어 설명' }));
+    await screen.findByTestId('issue-explain');
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent(/↳ SwRS 설명/);
+    expect(rows[1]).toHaveTextContent(/↳ SwDS 설명/);
+    expect(rows[0]).not.toHaveTextContent(/SwDS 설명/);
+  });
+
   it('룰 폴백이면 LLM 이 아니라고 적고 사유를 보인다', async () => {
     const user = userEvent.setup();
     const onExplain = vi.fn().mockResolvedValue({ generated_by: 'rule', model: null, llm_reason: 'LLM 이 설정되지 않았다', summary: '룰 요약', items: [], items_shown: 3, items_total: 3 });

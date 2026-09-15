@@ -1552,14 +1552,20 @@ async def local_uds_generate_async(
                 job_id=job_id,
             )
             # SDS 파티션 맵 로드 (Related ID + ASIL 전파)
+            # ⚠ (R49 리뷰 W4) 원경로 `rp` 를 그대로 열었다 — cloudium `U:` 면 docx 를 못 열어 파티션 맵이 **조용히**
+            #   비었다(36줄 아래 본문 읽기는 공용 판독기를 쓰는데 여기만 직독이었다). 판독기가 실체화한 로컬 경로로 연다.
             _async_sds_pmap: Dict[str, Dict[str, str]] = {}
             for rp in req_paths_list:
                 if rp.lower().endswith(".docx") and is_sds_filename(rp):
+                    p, text, reason = read_requirement_doc(rp, allow=_is_allowed_req_doc)
+                    if reason or p is None:
+                        _logger.warning("[local UDS] SDS 파티션 맵 건너뜀: %s", reason or rp)
+                        continue
                     try:
                         from report_gen.requirements import _extract_sds_partition_map
-                        _async_sds_pmap.update(_extract_sds_partition_map(rp))
-                    except Exception:
-                        pass
+                        _async_sds_pmap.update(_extract_sds_partition_map(str(p)))
+                    except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그로
+                        _logger.warning("[local UDS] SDS 파티션 맵 추출 실패 %s: %s", p.name, type(exc).__name__)
             # (R46 리뷰 C1) 다중 루트 전체 — jenkins async 경로와 같은 함수 집합.
             from backend.helpers.uds import _source_roots_for_generation as _roots_for_gen
             _uds_roots_str, _ = _roots_for_gen(source_root)

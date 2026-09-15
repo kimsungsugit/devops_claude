@@ -117,6 +117,101 @@ class TestNoteQuickGate:
         assert _codes(c) == []
 
 
+class TestReadRequirementDocs:
+    """(N37) 경로 지정 요구 문서는 공용 판독기 `read_requirement_doc` 으로 — cloudium U: 문서가 여기서만 직독이라 매 run 탈락했다."""
+
+    def _patch(self, monkeypatch, table):
+        from backend.services import resolver_helpers as RH
+        calls = []
+
+        def fake(path_str, *, allow=None):
+            calls.append((path_str, allow))
+            return table[path_str]
+        monkeypatch.setattr(RH, "read_requirement_doc", fake)
+        return calls
+
+    def test_paths_go_through_shared_reader_with_allow(self, monkeypatch, tmp_path):
+        local = tmp_path / "KJPDS02_SwRS.docx"
+        calls = self._patch(monkeypatch, {r"U:\proj\KJPDS02_SwRS.docx": (local, "SwTR_0101 요구", "")})
+        c = IssueCollector()
+        texts, doc_paths, skipped = U._read_requirement_docs(c, [], [r"U:\proj\KJPDS02_SwRS.docx"])
+        assert texts == ["SwTR_0101 요구"] and skipped == []
+        assert doc_paths == [str(local)], "하류(Path 직독)에는 실체화된 로컬 경로가 가야 한다"
+        assert calls == [(r"U:\proj\KJPDS02_SwRS.docx", U._is_allowed_req_doc)]
+        assert _codes(c) == []
+
+    def test_skip_reason_becomes_an_item_and_missing_is_actual(self, monkeypatch):
+        self._patch(monkeypatch, {
+            "U:/a/b/SwRS.docx": (None, "", "SwRS.docx: 접근 거부 — 워커 미응답"),
+            "U:/a/b/SwDS.docx": (None, "", "SwDS.docx: 파일 없음 — 경로가 바뀌었거나 문서가 이동/개정됐을 수 있다"),
+        })
+        c = IssueCollector()
+        texts, doc_paths, skipped = U._read_requirement_docs(c, [], ["U:/a/b/SwRS.docx", "", "U:/a/b/SwDS.docx"])
+        assert texts == [] and doc_paths == []
+        assert skipped == ["U:/a/b/SwRS.docx", "U:/a/b/SwDS.docx"], "탈락 경로는 호출부가 Reference 절에서 뺀다"
+        items = c.as_list()
+        assert [i["code"] for i in items] == ["requirement_doc_skipped", "requirement_doc_skipped", "requirements_missing"]
+        assert "워커 미응답" in items[0]["message"]
+        # facts 에는 파일명만 — 절대 경로는 Gemini 프롬프트·화면에 실린다(리뷰 W1)
+        assert items[0]["facts"] == {"path": "SwRS.docx", "source": "path"}
+        assert "U:/" not in str(items[0]["facts"]) and "U:/" not in items[0]["message"]
+        assert items[2]["kind"] == "actual", "준 문서가 있는데 전부 탈락 = 된 문제"
+        assert items[2]["facts"] == {"req_paths": 2, "req_files": 0, "skipped": 2}, "빈 항목은 시도가 아니다(리뷰 I3)"
+
+    def test_no_docs_at_all_is_potential(self, monkeypatch):
+        self._patch(monkeypatch, {})
+        c = IssueCollector()
+        U._read_requirement_docs(c, [], [])
+        items = c.as_list()
+        assert [i["code"] for i in items] == ["requirements_missing"] and items[0]["kind"] == "potential"
+
+    def test_upload_temp_files_still_read_directly(self, monkeypatch, tmp_path):
+        calls = self._patch(monkeypatch, {})
+        f = tmp_path / "SwRS.txt"
+        f.write_text("SwTR_0001 업로드 요구", encoding="utf-8")
+        c = IssueCollector()
+        texts, doc_paths, skipped = U._read_requirement_docs(c, [f], [])
+        assert texts == ["SwTR_0001 업로드 요구"] and doc_paths == [] and calls == [] and skipped == []
+        assert _codes(c) == []
+
+    def test_upload_parser_missing_is_named_not_typeerror(self, monkeypatch, tmp_path):
+        """`workflow.rag` 미설치면 `_read_text_from_file` 이 None — TypeError 로 위장하지 않는다(리뷰 I5)."""
+        self._patch(monkeypatch, {})
+        monkeypatch.setattr(U, "_read_text_from_file", None)
+        f = tmp_path / "SwRS.docx"
+        f.write_bytes(b"x")
+        c = IssueCollector()
+        texts, doc_paths, _ = U._read_requirement_docs(c, [f], [])
+        assert texts == [] and doc_paths == [str(f)], ".docx 는 표 파서가 따로 연다(종전 동작)"
+        items = c.as_list()
+        assert items[0]["code"] == "requirement_doc_skipped" and "미설치" in items[0]["message"] and "TypeError" not in items[0]["message"]
+
+    def test_body_delegates_and_has_no_direct_exists_loop(self):
+        src = source_of(U._uds_generate_from_paths)
+        assert "req_texts, req_doc_paths, _req_skipped = _read_requirement_docs(_issues, req_file_paths, req_paths)" in src
+        assert "for path_str in req_paths:" not in src, "옛 `Path(path_str)…exists()` 직독 루프가 되살아났다"
+        # req_map 은 한 번만(60%) — 82% 에서 같은 문서를 다시 열던 자리를 지웠다(리뷰 W3)
+        assert src.count("_build_req_map_from_doc_paths(") == 1
+        # 읽지 못한 문서는 1.4 Reference 에 올리지 않는다(리뷰 I2)
+        assert "s not in _req_skipped" in src
+
+
+class TestSdsPartitionMapNotWiredHere:
+    """(R49 N38) SwDS 파티션 맵은 이 경로의 소스 분석에 넘기지 **않는다** — 라이브 run 2079 에서 정본 SwUDS 의 ASIL 657건이
+    35건으로 밀리고 A→QM 327건이 났다(그 자리는 comment > override > sds 라 정본보다 위). 빈칸 채움 자리로 넣기 전까지 봉인."""
+
+    def test_source_sections_call_has_no_partition_map(self):
+        import ast
+        import textwrap
+        tree = ast.parse(textwrap.dedent(source_of(U._uds_generate_from_paths)))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", getattr(n.func, "attr", "")) == "generate_uds_source_sections"]
+        assert calls, "소스 분석 호출을 못 찾았다 — 선택자가 낡았다"
+        for call in calls:
+            kws = {k.arg for k in call.keywords}
+            assert "sds_partition_map" not in kws, "정본(참조 SwUDS) ASIL 을 SDS 이름매칭이 덮는다 — N38 설계 판단 전엔 넣지 말 것"
+
+
 class TestWrapperAndSurfaces:
     def test_body_uses_outer_collector_when_present(self):
         """바깥 `use_collector()` 가 있으면 그 수집기에 쌓인다(테스트·상위 호출자가 목록을 받아볼 수 있게)."""

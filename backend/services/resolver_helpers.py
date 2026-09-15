@@ -9,8 +9,10 @@ from __future__ import annotations
 import atexit
 import hashlib
 import logging
+import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -96,7 +98,12 @@ def materialize_via_resolver(
         out_dir = _materialize_root() / key
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / name
-        out.write_bytes(data)
+        # ⚠ 사본 경로는 문서당 결정적(= 모든 run 이 공유)이다. `write_bytes` 는 truncate→write 라 그 사이에 다른
+        #   run 이 같은 사본을 열면 잘린 zip 을 받아 `except: continue` 로 **조용히** 빈 req_map 이 된다(R49 리뷰 W3).
+        #   같은 폴더의 임시 이름에 쓰고 `os.replace` 로 원자 교체한다 — 읽는 쪽은 언제나 완전한 파일을 본다.
+        tmp = out_dir / f".{name}.{os.getpid()}.{threading.get_ident()}.part"
+        tmp.write_bytes(data)
+        os.replace(tmp, out)
     except OSError as exc:
         return None, f"{name}: 로컬 임시 파일 생성 실패 ({type(exc).__name__}: {str(exc)[:100]})"
     return out, ""

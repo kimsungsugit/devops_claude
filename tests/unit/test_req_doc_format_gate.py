@@ -217,7 +217,8 @@ def test_모든_읽기지점이_allow를_넘긴다():
     root = Path(RH.__file__).resolve().parents[2]
     offenders: list[str] = []
     seen = 0
-    for rel in ("backend/routers/jenkins.py", "backend/routers/local.py"):
+    # (N37) `backend/helpers/uds.py` 추가 — 비동기 UDS 본체의 읽기 지점(8번째)이 이 목록 밖에 있었다.
+    for rel in ("backend/routers/jenkins.py", "backend/routers/local.py", "backend/helpers/uds.py"):
         for i, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1):
             s = line.strip()
             if not s.startswith("p, text, reason = read_requirement_doc("):
@@ -225,5 +226,5 @@ def test_모든_읽기지점이_allow를_넘긴다():
             seen += 1
             if "allow=" not in s:
                 offenders.append(f"{rel}:{i}")
-    assert seen >= 7, f"읽기 지점을 {seen}개만 찾았다 — 선택자가 낡았을 수 있다"
+    assert seen >= 8, f"읽기 지점을 {seen}개만 찾았다 — 선택자가 낡았을 수 있다"
     assert offenders == [], f"allow 없이 요구문서를 읽는 지점: {offenders}"

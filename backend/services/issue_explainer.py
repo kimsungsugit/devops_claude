@@ -43,7 +43,7 @@ _SYSTEM = (
     "**입력에 없는 숫자를 절대 쓰지 마라. 숫자를 새로 만들거나 추정하지 마라.** 입력에 없는 문제를 만들지 마라. "
     "한국어로, 검토자가 승인/반려를 판단할 수 있게 써라. 반드시 아래 JSON 만 출력하라(코드 펜스 없이):\n"
     '{"summary": "<전체 요약 2~4문장 — 실제 문제와 잠재 문제를 갈라 말할 것>", '
-    '"items": [{"code": "<입력의 code 그대로>", "explanation": "<왜 문제인가 1~2문장>", "action": "<무엇을 하면 되는가 1문장>"}]}'
+    '"items": [{"i": <입력 항목의 i 그대로>, "code": "<입력의 code 그대로>", "explanation": "<왜 문제인가 1~2문장>", "action": "<무엇을 하면 되는가 1문장>"}]}'
 )
 
 # 코드 접두 → 룰 조치문. LLM 이 없을 때의 문장이고, LLM 응답이 있어도 code 마다 여기 문장이 기본값이다.
@@ -77,6 +77,7 @@ _RULE_ACTION: Dict[str, str] = {
     "source_cap_reached": "파일/항목 상한에 닿아 나머지는 인식되지 않았다 — 준비 게이트의 상한(cap_*)을 늘린다.",
     "source_read_truncated": "파일 내부 읽기 상한에 닿았다 — 큰 헤더(매크로)가 잘렸다. 상한 정책을 확인한다.",
     "requirements_missing": "요구사항 문서를 읽지 못했다 — SwRS/SwDS 경로·형식을 확인한다.",
+    "requirement_doc_skipped": "그 문서만 읽지 못했다 — 경로·권한(cloudium 워커)·양식을 확인한다. 나머지 문서로만 만든 문서다.",
     "ai_disabled": "AI 설명이 꺼져 있다 — description 은 소스 주석/참조에서만 온다. 필요하면 AI 를 켜고 재생성한다.",
     "ai_failed": "AI 섹션 생성이 실패했다 — API 키·모델·네트워크를 확인한다.",
     "docx_unmatched_functions": "템플릿 heading 이 없어 문서에 못 실은 함수다 — 정본 템플릿 갱신 또는 매칭 규칙 확인.",
@@ -105,10 +106,12 @@ def _facts_of(payload: Dict[str, Any]) -> Dict[str, Any]:
         "counts": payload.get("counts") or {},
         "items_shown": len(shown),
         "items_total": len(items),
+        # `i` = 목록 안 순번. 같은 code 가 여러 건(`requirement_doc_skipped` 는 문서마다 한 건)이라 code 만으로는
+        # 설명을 항목에 되붙일 수 없다 — LLM 이 `i` 를 그대로 돌려주고, 병합·화면은 `i` 우선, code 는 폴백(리뷰 I6).
         "issues": [
-            {"code": it.get("code"), "severity": it.get("severity"), "kind": it.get("kind"),
+            {"i": idx, "code": it.get("code"), "severity": it.get("severity"), "kind": it.get("kind"),
              "source": it.get("source"), "message": str(it.get("message") or "")[:200], "facts": it.get("facts") or {}}
-            for it in shown
+            for idx, it in enumerate(shown)
         ],
     }
 
@@ -130,8 +133,8 @@ def rule_explanation(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "summary": summary,
         "items": [
-            {"code": it.get("code"), "explanation": str(it.get("message") or ""), "action": rule_action(str(it.get("code") or ""))}
-            for it in items
+            {"i": idx, "code": it.get("code"), "explanation": str(it.get("message") or ""), "action": rule_action(str(it.get("code") or ""))}
+            for idx, it in enumerate(items)
         ],
     }
 
@@ -160,7 +163,8 @@ def _parse_llm(text: str, facts: Dict[str, Any]) -> "tuple[Optional[Dict[str, An
             return None, "JSON 이 아니다"
     if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not isinstance(data.get("items"), list):
         return None, "형식 위반(summary/items)"
-    allowed_codes = {str(i.get("code")) for i in facts.get("issues") or []}
+    shown = list(facts.get("issues") or [])
+    allowed_codes = {str(i.get("code")) for i in shown}
     items: List[Dict[str, Any]] = []
     for it in data["items"]:
         if not isinstance(it, dict):
@@ -168,7 +172,12 @@ def _parse_llm(text: str, facts: Dict[str, Any]) -> "tuple[Optional[Dict[str, An
         code = str(it.get("code") or "")
         if code not in allowed_codes:
             return None, f"입력에 없는 문제 코드 {code[:40]!r}"
-        items.append({"code": code, "explanation": str(it.get("explanation") or "").strip(),
+        # `i` 는 입력 순번과 code 가 **둘 다** 맞을 때만 믿는다 — 틀리면 버리고 code 폴백(없는 항목을 만들지 않는다).
+        idx = it.get("i")
+        if not (isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(shown)
+                and str(shown[idx].get("code")) == code):
+            idx = None
+        items.append({"i": idx, "code": code, "explanation": str(it.get("explanation") or "").strip(),
                       "action": str(it.get("action") or "").strip() or rule_action(code)})
     text_all = data["summary"] + " " + " ".join(i["explanation"] + " " + i["action"] for i in items)
     bad = invented_numbers(text_all, facts)
@@ -239,8 +248,10 @@ def explain_issues(payload: Dict[str, Any], *, use_llm: bool = True,
     rule = rule_explanation(payload)
     if llm_out is not None:
         # LLM 이 설명하지 않은 코드는 룰 문장으로 채운다 — 목록이 줄어들면 안 된다(빠진 항목 = 없는 문제로 읽힌다).
+        # 순번(`i`)이 맞는 설명을 먼저, 없으면 같은 code 의 설명(옛 응답 형식 호환), 그것도 없으면 룰 문장.
+        by_i = {i["i"]: i for i in llm_out["items"] if i.get("i") is not None}
         by_code = {i["code"]: i for i in llm_out["items"]}
-        merged = [dict(by_code.get(str(r["code"]), r), code=r["code"]) for r in rule["items"]]
+        merged = [dict(by_i.get(r["i"]) or by_code.get(str(r["code"])) or r, code=r["code"], i=r["i"]) for r in rule["items"]]
         out.update(generated_by="llm", summary=llm_out["summary"], items=merged)
     else:
         out.update(summary=rule["summary"], items=rule["items"])

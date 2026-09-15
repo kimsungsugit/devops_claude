@@ -507,6 +507,74 @@ def _note_quick_gate(issues: IssueCollector, qg: Dict[str, Any]) -> None:
                    f"임계 없는 축 {key} — 판정할 수 없어 fail-closed 됐다", stage="quality", facts={"key": key})
 
 
+def _read_requirement_docs(
+    issues: IssueCollector, req_file_paths: List[Path], req_paths: List[str],
+) -> Tuple[List[str], List[str], List[str]]:
+    """(N37) 요구 문서(업로드 임시파일 + 경로 지정) → ``(본문 목록, docx 경로 목록, 탈락한 지정 경로 목록)``.
+
+    경로 지정 문서는 **공용 판독기** `read_requirement_doc` 으로 읽는다 — cloudium 이면 워커로 실체화해
+    로컬 경로를 돌려주므로, 그 경로를 받는 하류 Path 직독(`_build_req_map_from_doc_paths`)도 같은 파일을 연다.
+
+    ⚠ 2026-08-05 의 "8곳 전부"(`be271734`)는 라우터 두 파일만 봐서 **이 함수의 `Path.exists()` 직독이 남았다**.
+    U: 로 등록된 SwRS/SwDS 가 매 run 조용히 탈락했고(R48-c run 2077 의 `requirements_missing` 이 처음 드러냄),
+    준비 게이트는 워커 경유(`read_requirement_doc_via_resolver`)로 읽어 '준비 완료' 였다 — 게이트와 생성이
+    **다른 판독기**를 썼다. 탈락은 항목(`requirement_doc_skipped`)으로 남긴다 — 사유가 사라지면 다음번에도 같은 침묵이다.
+    항목의 facts 에는 **파일명만**(절대 경로는 Gemini 프롬프트·화면에 실린다 — `source_root_missing` 과 같은 규약, 리뷰 W1);
+    전체 경로는 로그에만. 탈락한 지정 경로는 셋째 값으로 돌려줘 호출부가 문서 1.4 Reference 에서 뺀다(못 읽은 문서를
+    "참조했다" 고 적지 않는다 — 리뷰 I2).
+    """
+    from backend.services.resolver_helpers import read_requirement_doc
+
+    req_texts: List[str] = []
+    req_doc_paths: List[str] = []
+    skipped_paths: List[str] = []
+    skipped = 0
+    for p in req_file_paths:
+        text = ""
+        why = ""
+        if _read_text_from_file is None:   # workflow.rag 미설치 — TypeError 로 위장시키지 않는다(리뷰 I5)
+            why = "본문 파서(workflow.rag) 미설치"
+        else:
+            try:
+                text = _read_text_from_file(p)
+            except Exception as exc:  # noqa: BLE001 — 파서 계열 예외가 광범위. 사유는 항목으로 남긴다
+                why = f"본문 추출 실패 ({type(exc).__name__})"
+        if why:
+            skipped += 1
+            issues.add("requirement_doc_skipped", "warning", "actual", f"요구 문서 탈락: {p.name}: {why}",
+                       stage="requirements", facts={"path": p.name, "source": "upload"})
+        # 본문 추출이 실패해도 .docx 는 표 파서(`_build_req_map_from_doc_paths`)가 따로 연다 — 종전 동작 유지(리뷰 I4).
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+        if text:
+            req_texts.append(text.strip())
+    attempted = 0
+    for path_str in req_paths:
+        if not str(path_str or "").strip():
+            continue   # 빈 항목은 시도가 아니다 — 건수에 안 센다(리뷰 I3)
+        attempted += 1
+        p, text, reason = read_requirement_doc(path_str, allow=_is_allowed_req_doc)
+        if reason:
+            skipped += 1
+            skipped_paths.append(str(path_str))
+            _logger.warning("[UDS] 요구 문서 탈락: %s (%s)", reason, path_str)
+            issues.add("requirement_doc_skipped", "warning", "actual", f"요구 문서 탈락: {reason}",
+                       stage="requirements", facts={"path": Path(str(path_str)).name or str(path_str), "source": "path"})
+            continue
+        if not p or not text:
+            continue
+        req_texts.append(text)
+        if p.suffix.lower() == ".docx":
+            req_doc_paths.append(str(p))
+    if not req_texts:
+        # 준 문서가 있는데 전부 탈락했으면 '된 문제'(actual), 애초에 없었으면 '될 수 있는 문제'(potential).
+        issues.add("requirements_missing", "warning", "actual" if skipped else "potential",
+                   "요구사항 문서(SwRS/SwDS)를 하나도 읽지 못했다 — 요구 절과 Related ID 는 소스에서만 온다",
+                   stage="requirements",
+                   facts={"req_paths": attempted, "req_files": len(req_file_paths), "skipped": skipped})
+    return req_texts, req_doc_paths, skipped_paths
+
+
 QUICK_GATE_AXES: Tuple[Tuple[str, str], ...] = (
     ("called_fill", "called_min"),
     ("calling_fill", "calling_min"),
@@ -2557,36 +2625,15 @@ def _uds_generate_from_paths(
             notes.append(text.strip())
 
     _progress("requirements", 25, "요구사항 문서 파싱")
-    req_texts: List[str] = []
     req_map: Dict[str, Any] = {}
-    req_doc_paths: List[str] = []
-    for p in req_file_paths:
-        try:
-            text = _read_text_from_file(p)
-        except Exception:
-            text = ""
-        if p.suffix.lower() == ".docx":
-            req_doc_paths.append(str(p))
-        if text:
-            req_texts.append(text.strip())
-    for path_str in req_paths:
-        try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
-                continue
-            if not _is_allowed_req_doc(p):
-                continue
-            text = _read_text_from_file(p)
-        except Exception:
-            text = ""
-        if text:
-            req_texts.append(text.strip())
-            if p.suffix.lower() == ".docx":
-                req_doc_paths.append(str(p))
-    if not req_texts:
-        _issues.add("requirements_missing", "warning", "potential",
-                    "요구사항 문서(SwRS/SwDS)를 하나도 읽지 못했다 — 요구 절과 Related ID 는 소스에서만 온다",
-                    stage="requirements", facts={"req_paths": len(req_paths), "req_files": len(req_file_paths)})
+    # (N37) 경로 지정 문서는 공용 판독기(cloudium 이면 워커 실체화) — 여기만 `Path.exists()` 직독이 남아 U: 문서가 매 run 탈락했다.
+    req_texts, req_doc_paths, _req_skipped = _read_requirement_docs(_issues, req_file_paths, req_paths)
+    # ⚠ (R49 라이브 실측, N38) 여기서 읽은 SwRS/SwDS 는 이 경로의 **문서 바이트를 바꾸지 않는다** — run 2077(못 읽음)과
+    #   2078(읽음)의 sha256 이 같았다. `requirements` 절은 정본 레이아웃에 자리가 없고, SwRS req_map 키(요구 ID)는 함수와
+    #   만나지 않는다. SwDS 파티션 맵을 local 비동기처럼 `generate_uds_source_sections(sds_partition_map=)` 로 넘겨 봤더니
+    #   (run 2079) 참조 SwUDS 의 ASIL 657건이 35건으로 밀리고 A→QM 327건·`asil_trusted_fill` 게이트 미달이 생겨 **되돌렸다**
+    #   — 그 자리는 comment > override > **sds** 순이라 정본(권위)보다 위다. SDS 는 빈칸 채움(`enrich_function_details_with_docs`,
+    #   "SwUDS 직독 ASIL 먼저") 자리로 넣어야 하고 이 경로엔 그 호출이 없다(설계 판단 — 계획서 N38).
 
     _progress("source", 45, "소스/섹션 분석")
     jenkins_meta = summary.get("jenkins") if isinstance(summary, dict) else {}
@@ -2728,7 +2775,8 @@ def _uds_generate_from_paths(
                     "AI 설명이 꺼져 있다 — description 은 소스 주석/참조 SwUDS 에서만 채워진다", stage="ai")
 
     _progress("payload", 82, "UDS 페이로드 생성")
-    req_map = _build_req_map_from_doc_paths(req_doc_paths, req_texts) if req_texts or req_doc_paths else {}
+    # req_map 은 60% 단계에서 같은 입력으로 이미 계산했다 — 여기서 다시 열지 않는다(같은 문서를 두 번 파싱했고,
+    # 실체화 사본을 늦게 다시 여는 창이 다른 run 의 재실체화와 겹칠 수 있었다 — 리뷰 W3).
     req_source = source_sections.get("requirements", "")
     if source_only:
         req_combined = req_source
@@ -2755,7 +2803,8 @@ def _uds_generate_from_paths(
             continue
     for _p in (req_paths or []):
         s = str(_p or "").strip()
-        if s and s not in _source_docs:
+        # 읽지 못한 문서는 참조 문헌에 올리지 않는다 — 탈락 사실은 `requirement_doc_skipped` 항목이 말한다(리뷰 I2).
+        if s and s not in _source_docs and s not in _req_skipped:
             _source_docs.append(s)
 
     _project_name_val = summary.get("project") if isinstance(summary, dict) else ""

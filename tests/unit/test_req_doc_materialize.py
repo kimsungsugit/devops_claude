@@ -84,6 +84,32 @@ U_SRS = "U:/proj/01.SwRS/(KJPDS02_SwRS) Software Requirements Specification_v3.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# G — (R49 리뷰 W3) 사본 쓰기는 원자적이어야 한다
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_실체화_사본은_임시이름에_쓰고_원자_교체한다(cloud, monkeypatch):
+    """사본 경로는 문서당 결정적(= run 간 공유). truncate→write 사이에 다른 run 이 열면 잘린 zip 을 받아
+    `except: continue` 로 조용히 빈 req_map 이 된다. 임시 이름에 쓰고 `os.replace` 로 바꿔 넣어야 한다."""
+    import os as _os
+
+    cloud({U_SRS: _docx_bytes("SwTR_0101")})
+    calls: list[tuple[str, str]] = []
+    real_replace = _os.replace
+
+    def spy(src, dst, *a, **k):
+        calls.append((str(src), str(dst)))
+        return real_replace(src, dst, *a, **k)
+    monkeypatch.setattr(RH.os, "replace", spy)
+
+    p, text, reason = RH.read_requirement_doc(U_SRS)
+    assert reason == "" and "SwTR_0101" in text and p is not None and p.exists()
+    assert len(calls) == 1, "원자 교체(os.replace) 없이 사본을 썼다 — 비원자 쓰기로 회귀"
+    src, dst = calls[0]
+    assert dst == str(p) and src != dst and Path(src).parent == p.parent, "임시 이름은 같은 폴더여야 rename 이 원자적이다"
+    assert not Path(src).exists() and not list(p.parent.glob("*.part")), "임시 파일이 남았다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # A — local 모드 불변 (회귀 방지)
 # ─────────────────────────────────────────────────────────────────────────────
 

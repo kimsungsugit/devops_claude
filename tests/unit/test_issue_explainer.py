@@ -70,6 +70,61 @@ class TestRuleFallback:
         assert ex.rule_action("never_heard_of") == ex._DEFAULT_ACTION
 
 
+class TestDuplicateCodes:
+    """(R49 리뷰 I6) 같은 code 가 여러 건이면 설명은 **순번 `i`** 로 되붙는다 — code 만으로는 마지막 설명이 전부를 덮는다."""
+
+    def _dup_payload(self):
+        issues = [
+            {"code": "requirement_doc_skipped", "severity": "warning", "kind": "actual", "source": "generation",
+             "message": "요구 문서 탈락: SwRS.docx: 접근 거부 — 워커 미응답", "facts": {"path": "SwRS.docx"}},
+            {"code": "requirement_doc_skipped", "severity": "warning", "kind": "actual", "source": "generation",
+             "message": "요구 문서 탈락: SwDS.docx: 파일 없음", "facts": {"path": "SwDS.docx"}},
+        ]
+        return {"run_id": 1, "doc_type": "uds", "counts": {"total": 2, "actual": 2, "potential": 0,
+                "by_severity": {"error": 0, "warning": 2, "risk": 0}}, "issues": issues}
+
+    def test_facts_and_rule_items_carry_index(self):
+        facts = ex._facts_of(self._dup_payload())
+        assert [i["i"] for i in facts["issues"]] == [0, 1]
+        rule = ex.rule_explanation(self._dup_payload())
+        assert [(i["i"], i["code"]) for i in rule["items"]] == [(0, "requirement_doc_skipped"), (1, "requirement_doc_skipped")]
+        assert rule["items"][0]["action"] == ex._RULE_ACTION["requirement_doc_skipped"], "전용 조치문(리뷰 W2)"
+
+    def test_llm_items_matched_by_index_not_code(self):
+        resp = json.dumps({"summary": "문서 두 건을 읽지 못했다.", "items": [
+            {"i": 0, "code": "requirement_doc_skipped", "explanation": "SwRS 는 워커가 응답하지 않았다", "action": "워커를 띄운다"},
+            {"i": 1, "code": "requirement_doc_skipped", "explanation": "SwDS 는 경로에 없다", "action": "경로를 고친다"},
+        ]})
+        out = ex.explain_issues(self._dup_payload(), llm_call_fn=_ok_llm(resp))
+        assert out["generated_by"] == "llm"
+        assert [(i["i"], i["explanation"]) for i in out["items"]] == [(0, "SwRS 는 워커가 응답하지 않았다"), (1, "SwDS 는 경로에 없다")]
+
+    def test_bad_index_falls_back_to_code_and_never_invents_items(self):
+        # i 가 범위 밖/불리언/코드 불일치면 무시하고 code 로 맞춘다 — 항목 수는 입력과 같다
+        resp = json.dumps({"summary": "요약.", "items": [
+            {"i": 7, "code": "requirement_doc_skipped", "explanation": "설명 A", "action": "조치 A"},
+            {"i": True, "code": "requirement_doc_skipped", "explanation": "설명 B", "action": "조치 B"},
+        ]})
+        out = ex.explain_issues(self._dup_payload(), llm_call_fn=_ok_llm(resp))
+        assert out["generated_by"] == "llm" and len(out["items"]) == 2
+        assert [i["i"] for i in out["items"]] == [0, 1]
+        assert {i["explanation"] for i in out["items"]} <= {"설명 A", "설명 B"}
+
+    def test_index_that_points_at_another_code_is_ignored(self):
+        """순번과 code 가 어긋나면 순번을 버린다 — 다른 문제의 설명이 이 문제에 붙으면 검토자가 오독한다."""
+        out = ex.explain_issues(_payload(), llm_call_fn=_ok_llm(json.dumps({"summary": "요약.", "items": [
+            # i=1 은 tbd_residual 자리인데 code 는 gate_fail — code 가 맞는 0번에 붙어야 한다
+            {"i": 1, "code": "gate_fail:traceability_rate", "explanation": "게이트 설명", "action": "게이트 조치"},
+            # i=False(=0 으로 읽힘) 는 불리언 — 무시하고 code 로 1번에 붙는다
+            {"i": False, "code": "tbd_residual:ASIL TBD", "explanation": "TBD 설명", "action": "TBD 조치"},
+        ]})))
+        assert out["generated_by"] == "llm"
+        assert [(i["i"], i["code"], i["explanation"]) for i in out["items"]] == [
+            (0, "gate_fail:traceability_rate", "게이트 설명"),
+            (1, "tbd_residual:ASIL TBD", "TBD 설명"),
+        ]
+
+
 class TestLlmValidation:
     def test_good_response_is_used_and_missing_codes_are_filled_by_rule(self):
         resp = json.dumps({"summary": "traceability 가 30.8% 로 임계 20.0% 를 밑돈다. ASIL TBD 29건은 잠재 문제다.",

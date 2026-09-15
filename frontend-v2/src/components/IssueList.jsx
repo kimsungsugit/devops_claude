@@ -48,9 +48,15 @@ export default function IssueList({ issues, counts, sources, onExplain, compact 
   const [explaining, setExplaining] = useState(false);
   const [explainErr, setExplainErr] = useState('');
   const list = Array.isArray(issues) ? issues : [];
-  const actual = list.filter((i) => i.kind === 'actual');
-  const potential = list.filter((i) => i.kind !== 'actual');
-  const byCode = new Map((explain?.items || []).map((i) => [i.code, i]));
+  // 순번을 붙여 가른다 — 설명은 서버 `items[].i`(목록 순번)로 되붙이고, i 가 없는 옛 응답만 code 로 맞춘다.
+  // 같은 code 가 여러 건(`requirement_doc_skipped` 는 문서마다 한 건)이면 code 만으로는 마지막 설명이 전부를 덮는다.
+  const indexed = list.map((it, idx) => ({ it, idx }));
+  const actual = indexed.filter(({ it }) => it.kind === 'actual');
+  const potential = indexed.filter(({ it }) => it.kind !== 'actual');
+  const explainItems = explain?.items || [];
+  const byIndex = new Map(explainItems.filter((i) => Number.isInteger(i.i)).map((i) => [i.i, i]));
+  const byCode = new Map(explainItems.map((i) => [i.code, i]));
+  const explainedFor = (it, idx) => byIndex.get(idx) || (byIndex.size === 0 ? byCode.get(it.code) : undefined);
   const missingSources = sources
     ? Object.entries(sources).filter(([k, v]) => v === false && k !== 'generation').map(([k]) => SOURCE_LABEL[k] || k)
     : [];
@@ -115,7 +121,7 @@ export default function IssueList({ issues, counts, sources, onExplain, compact 
         <div style={{ marginTop: 4 }}>
           <div style={{ fontWeight: 600 }}>{KIND_LABEL.actual} ({actual.length})</div>
           <ul style={{ margin: 0, paddingLeft: '1.1em' }}>
-            {actual.map((it, i) => <IssueRow key={`${it.code}-${i}`} it={it} explained={byCode.get(it.code)} />)}
+            {actual.map(({ it, idx }) => <IssueRow key={`${it.code}-${idx}`} it={it} explained={explainedFor(it, idx)} />)}
           </ul>
         </div>
       )}
@@ -123,7 +129,7 @@ export default function IssueList({ issues, counts, sources, onExplain, compact 
         <div style={{ marginTop: 4 }}>
           <div style={{ fontWeight: 600 }}>{KIND_LABEL.potential} ({potential.length})</div>
           <ul style={{ margin: 0, paddingLeft: '1.1em' }}>
-            {potential.map((it, i) => <IssueRow key={`${it.code}-${i}`} it={it} explained={byCode.get(it.code)} />)}
+            {potential.map(({ it, idx }) => <IssueRow key={`${it.code}-${idx}`} it={it} explained={explainedFor(it, idx)} />)}
           </ul>
         </div>
       )}

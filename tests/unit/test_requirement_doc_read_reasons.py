@@ -145,8 +145,10 @@ def test_empty_input_is_not_an_error():
 # ---------------------------------------------------------------------------
 # 세 호출처가 **모두** 이 헬퍼를 쓰는지 (판정 복제 방지)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("rel", ["backend/routers/jenkins.py", "backend/routers/local.py"])
+@pytest.mark.parametrize("rel", ["backend/routers/jenkins.py", "backend/routers/local.py", "backend/helpers/uds.py"])
 def test_routers_use_the_shared_reader(rel):
+    # (N37) `backend/helpers/uds.py` 가 목록에 없었다 — 비동기 UDS 본체 `_uds_generate_from_paths` 의
+    #   `Path.exists()` 직독이 이 가드 밖에 있어 U: 요구 문서가 매 run 조용히 탈락했다(R48-c run 2077).
     src = (REPO / rel).read_text(encoding="utf-8")
     assert "read_requirement_doc(" in src, f"{rel}: 공용 판독기를 쓰지 않는다"
 
@@ -158,20 +160,30 @@ def test_no_silent_requirement_loop_remains():
     반복해 겪은 형태라 구조로 막는다.
     """
     offenders: list[str] = []
-    for rel in ("backend/routers/jenkins.py", "backend/routers/local.py"):
+    for rel in ("backend/routers/jenkins.py", "backend/routers/local.py", "backend/helpers/uds.py"):
         tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.For):
                 continue
-            if "req_paths_list" not in ast.unparse(node.iter):
+            # `req_paths_list`(라우터) 와 `req_paths`(헬퍼 인자) 둘 다 — 이름이 달라 헬퍼 쪽 루프가 빠져 있었다(N37).
+            if "req_paths" not in ast.unparse(node.iter):
                 continue
             body = ast.unparse(node)
             # ⚠ req_paths_list 를 도는 루프가 전부 '문서 본문 읽기'는 아니다 —
             #   SDS 파티션 맵 추출처럼 경로만 쓰는 루프도 있다. 본문을 읽는
             #   루프(_read_text_from_file 호출)만 대상으로 좁힌다. 안 그러면
             #   무관한 루프까지 잡는 소음이 되어 곧 무시된다.
-            if "_read_text_from_file" not in body:
+            #   (R49 리뷰 W4) SDS 파티션 맵(`_extract_sds_partition_map`)도 docx 를 여는 루프다 — 원경로를
+            #   그대로 넘기면 cloudium 에서 조용히 빈 맵이 된다. 같은 가드 안에 둔다.
+            if "_read_text_from_file" not in body and "_extract_sds_partition_map" not in body:
                 continue
+            # 파티션 맵을 **루프 변수(원경로) 그대로** 열면 판독기를 불렀어도 실체화 경로를 안 쓴 것이다(뮤테이션 M11).
+            loop_var = node.target.id if isinstance(node.target, ast.Name) else ""
+            for call in ast.walk(node):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                        and call.func.id == "_extract_sds_partition_map"
+                        and any(isinstance(a, ast.Name) and a.id == loop_var for a in call.args)):
+                    offenders.append(f"{rel}:{call.lineno} — SDS 파티션 맵을 원경로로 연다(실체화 경로를 넘길 것)")
             if "read_requirement_doc" not in body:
                 offenders.append(f"{rel}:{node.lineno} — 문서 읽기 루프가 공용 판독기를 안 쓴다")
     assert not offenders, "\n  ".join(offenders)
