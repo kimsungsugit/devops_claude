@@ -73,6 +73,15 @@ from report_gen.utils import (
 _logger = logging.getLogger("report_generator")
 
 
+def _count_duplicate_drawing_ids(doc: Any) -> Optional[int]:
+    """문서 안 `wp:docPr/@id` 중복 건수(전체 − 서로 다른 값). 셀 수 없으면 None(미측정 — 0 과 구분)."""
+    try:
+        ids = [str(v) for v in doc.element.xpath(".//wp:docPr/@id")]
+    except Exception:  # noqa: BLE001 — 공시 실패가 저장을 막아선 안 된다(None = 미측정)
+        return None
+    return len(ids) - len(set(ids))
+
+
 def _save_docx(doc: Any, out: Path, output_path: str, stats: Dict[str, Any]) -> bool:
     """UDS DOCX 의 **유일한** 저장 경로 — `generate_uds_docx` 의 세 종결 분기(토큰 템플릿·구조 복제·무템플릿)가 다 여길 지난다.
 
@@ -85,6 +94,12 @@ def _save_docx(doc: Any, out: Path, output_path: str, stats: Dict[str, Any]) -> 
     ⚠ 바이트 동일은 **구조 복제 분기**에서만 성립한다(리뷰 W2): 토큰 템플릿 분기(`{{generated_at}}`)와 무템플릿 분기
       (`Generated at:` 문단)는 payload 에 `generated_at` 이 없으면 벽시계를 본문에 박는다.
     """
+    # (R53 리뷰 W3) 그림 id 유일성 공시 — `wp:docPr/@id` 는 문서 안에서 유일해야 한다(ECMA-376; 겹치면 Word 가 복구를 묻는다).
+    #   `_PictureSink` 는 id 를 추적하므로 싱크를 거치지 않은 그림 삽입이 생기면 여기서 드러난다(문서 전체 xpath 1회 ≈ 2ms).
+    #   막지 않고 적는다 — 저장을 막으면 문서 대신 아무것도 안 남고, 중복 자체는 Word 가 고칠 수 있다.
+    stats["drawing_id_duplicates"] = _count_duplicate_drawing_ids(doc)
+    if stats["drawing_id_duplicates"]:
+        _logger.warning("그림 id(wp:docPr/@id) 중복 %d건 — 싱크를 거치지 않은 그림 삽입이 있다", stats["drawing_id_duplicates"])
     doc.save(str(out))
     t0 = _time.perf_counter()
     ok = normalize_zip_member_times(out)
@@ -211,7 +226,20 @@ def _replace_reference_table_paragraph(doc, lines: List[str]) -> bool:
 
 
 def _replace_docx_text(doc, replacements: Dict[str, str]) -> None:
+    from docx.oxml.ns import qn  # type: ignore
+
+    # (R53 N27-c) 원문 노드 선검사 — `paragraph.text` 는 run 마다 xpath 를 돌려 정본(셀 17만 개)에서 이 함수 하나가 21초였다.
+    #   키의 첫 글자가 문단의 어느 `w:t` 에도 없으면 치환할 게 없다: python-docx 의 문단 텍스트는 `w:t` 의 부분집합에
+    #   탭/개행/하이픈 문자(`w:tab`·`w:ptab`·`w:br`·`w:cr`·`w:noBreakHyphen` 요소)를 더한 것뿐이라(1.2.0 `CT_R.text` 원문 —
+    #   리뷰 I3 대조: `w:sym`·`w:softHyphen`·`w:delText`·필드는 안 들어온다), 그 셋으로 시작하는 키가 있으면 선검사를 끈다.
+    #   결과는 같고(선검사는 "확실히 없음" 만 거른다) 읽는 문단만 준다.
+    _first = {k[:1] for k in replacements if k}
+    _prescan = bool(_first) and all(not ch.isspace() and ch != "-" for ch in _first)
+    _w_t = qn("w:t")
+
     def _replace_in_paragraph(paragraph):
+        if _prescan and not any(ch in (t.text or "") for t in paragraph._p.iter(_w_t) for ch in _first):
+            return
         full = paragraph.text
         if not full:
             return
@@ -1293,6 +1321,25 @@ def normalize_unmatched_headings(value: Any) -> "Tuple[str, str]":
     return UNMATCHED_HEADINGS_KEEP, raw
 
 
+def _distinct_cells(row) -> List[Any]:
+    """`row.cells` 에서 같은 `<w:tc>` 를 **한 번만** 낸다(첫 등장 순).
+
+    (R53 N27-c) python-docx 는 병합 칸을 gridSpan 만큼 같은 `_Cell` 로 반복해 낸다 — 6열 라벨|값 행이면 6개 중 다른 칸은 2개뿐인데
+    `c.text` 는 부를 때마다 run 마다 xpath 를 돌린다(라이브: 이 읽기가 로직 이미지 행 찾기·행 종류 되짚기·머리글 판정에서 표당
+    수십 회). 판정이 `any(...)`/집합/첫 칸이거나 쓰기가 같은 값의 멱등 대입인 자리에서만 쓴다 — 그런 자리는 중복 칸이 결과를
+    바꾸지 않는다. 세로 병합 이어짐 칸도 위 칸의 `_tc` 를 내므로 같은 규칙으로 접힌다.
+    """
+    out: List[Any] = []
+    seen: Set[int] = set()
+    for c in row.cells:
+        key = id(c._tc)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
 def _grid_cells(table) -> List[Any]:
     """표의 그리드 셀 목록을 **한 번만** 만든다 — 그 시점의 `table.cell(r, c)` 와 같은 `_Cell` 객체다.
 
@@ -1326,6 +1373,173 @@ def _is_uniform_grid(table, stride: int) -> bool:
         return False
 
 
+# ── (R53 N27-c) 그림 삽입 싱크 · 같은 행 가로 병합 빠른 경로 ─────────────────────────────────────
+
+class _PictureSink:
+    """한 문서 생성 동안의 그림 삽입 — python-docx `Run.add_picture` 와 **같은 XML·같은 파트·같은 rId·같은 id** 를 내되
+    그림마다 문서 크기에 비례해 돌던 두 비용을 걷어낸다.
+
+    (R53 N27-c) python-docx 1.2.0 `Run.add_picture` 는 그림 한 장마다:
+      ① `ImageParts._get_by_sha1` — 기존 이미지 파트 **전부**의 blob 을 다시 sha1 한다(`ImagePart.sha1` 은 캐시가 없다).
+         정본 템플릿 + 함수 1,157장이면 파트 해시가 수백만 번이다.
+      ② `StoryPart.next_id` — 문서 전체에 `//@id` xpath 를 돌려 "숫자 id 최대값 + 1" 을 잡는다(14MB document.xml).
+    라이브 프로파일(R47-j 수정 후 572초)에서 `add_picture` 아래가 26.3%(`next_id` 14.8% · `sha1` 7%) 였다.
+
+    등가 근거(1.2.0 소스 — 같은 API 를 같은 순서로 부른다):
+      `Run.add_picture(path, w, h)` = `part.new_pic_inline` → `get_or_add_image`(`package.image_parts.get_or_add_image_part`
+      뒤 `relate_to(part, RT.IMAGE)`) → `image_part.image.scaled_dimensions(w, h)` → `next_id` → `CT_Inline.new_pic_inline`
+      → `run._r.add_drawing(inline)`.
+      · sha1 색인: `_get_by_sha1` 는 `_image_parts` **목록 순서**로 첫 일치를 돌려준다 → 목록 순서대로 `setdefault` 하면 같은
+        파트다. 다른 경로(`Document.add_picture` 등)가 목록에 파트를 붙였을 수 있으니 조회 전마다 **꼬리만** 마저 색인한다.
+      · 파일명·크기는 원판처럼 **매칭된 파트의** `image` 에서 읽는다(중복이면 기존 파트의 이름이 docPr/cNvPr 에 실린다).
+      · id: `next_id` = "문서 안 숫자 `@id` 최대값 + 1". 본문은 `_clear_docx_body` 뒤로 **자라기만** 하므로 최대값은 우리가 넣는
+        그림(docPr id = 배정값 · cNvPr id = 0)과 원본 블록 되붙임(`note_appended`)으로만 오른다. 첫 배정 때 원판과 같은 xpath 로
+        한 번 재고 그 뒤로는 추적한다. 다른 경로가 그림을 넣을 수 있는 자리에선 `invalidate()` — 추적이 틀릴 수 있는 순간엔
+        항상 원판의 계산으로 돌아간다.
+    ⚠ `image_parts._image_parts`·`PackURI.idx`·`ImagePart.from_image` 는 비공개/내부 API(1.2.0 고정 — R47-j I4 와 같은 축).
+    """
+
+    def __init__(self, doc) -> None:
+        self._doc = doc
+        self._part = doc.part
+        self._package = self._part.package
+        self._by_sha1: Dict[str, Any] = {}
+        self._indexed = 0
+        self._used_idx: Set[Any] = set()     # 파트 이름 번호(`partname.idx`) — 원판 `_next_image_partname` 의 used_numbers
+        self._next_free = 1                   # 최소 빈 번호 커서 — 번호는 늘기만 하므로 단조
+        self._max_id: Optional[int] = None
+        self.pictures = 0            # 계측용 — 이 싱크로 넣은 그림 수
+        self.full_id_scans = 0       # 계측용 — `//@id` 전체 스캔 횟수(첫 배정 + invalidate 뒤)
+
+    def _parts(self) -> List[Any]:
+        return self._package.image_parts._image_parts      # `_get_by_sha1` 가 도는 바로 그 목록·그 순서
+
+    def _index_tail(self) -> None:
+        parts = self._parts()
+        for part in parts[self._indexed:]:
+            self._by_sha1.setdefault(part.sha1, part)     # 같은 해시가 둘이면 원판처럼 **앞의 것**
+            self._used_idx.add(part.partname.idx)
+        self._indexed = len(parts)
+
+    def _new_part(self, image):
+        """`ImageParts._add_image_part` 와 같은 파트(같은 이름) — 원판은 그림마다 파트 전부를 훑어 "빈 번호 중 최소" 를 찾는다
+        (`_next_image_partname`, 파트 수 제곱). 번호는 늘기만 하므로 최소 빈 번호는 단조 — 커서 하나로 같은 번호를 낸다."""
+        from docx.opc.packuri import PackURI  # type: ignore
+        from docx.parts.image import ImagePart  # type: ignore
+
+        n = self._next_free
+        while n in self._used_idx:
+            n += 1
+        self._next_free = n
+        part = ImagePart.from_image(image, PackURI("/word/media/image%d.%s" % (n, image.ext)))
+        self._package.image_parts.append(part)
+        self._used_idx.add(n)
+        return part
+
+    def invalidate(self) -> None:
+        """다른 경로가 숫자 `@id` 를 가진 요소를 넣었을 수 있다 — 다음 배정은 원판처럼 문서 전체를 다시 잰다."""
+        self._max_id = None
+
+    def note_appended(self, el) -> None:
+        """원본 블록(표지 sdt·보존 표)을 되붙인 뒤 부른다 — 그 안의 숫자 `@id` 가 최대값을 올릴 수 있다."""
+        if self._max_id is None:
+            return
+        for raw in el.xpath(".//@id"):
+            text = str(raw)
+            if text.isdigit():
+                self._max_id = max(self._max_id, int(text))
+
+    def _alloc_id(self) -> int:
+        if self._max_id is None:
+            used = [int(str(s)) for s in self._part._element.xpath("//@id") if str(s).isdigit()]   # 원판 `next_id` 그대로
+            self._max_id = max(used) if used else 0
+            self.full_id_scans += 1
+        return self._max_id + 1
+
+    def add_picture(self, run, image_path: str, width=None, height=None):
+        """`run.add_picture(image_path, width, height)` 와 같은 결과."""
+        from docx.image.image import Image  # type: ignore
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT  # type: ignore
+        from docx.oxml.shape import CT_Inline  # type: ignore
+        from docx.shape import InlineShape  # type: ignore
+
+        image = Image.from_file(image_path)               # 원판과 같은 순서 — 파일 오류는 여기서 나고 문서는 그대로다
+        self._index_tail()
+        sha1 = image.sha1
+        part = self._by_sha1.get(sha1)
+        if part is None:
+            part = self._new_part(image)
+            self._by_sha1[sha1] = part
+            self._indexed = len(self._parts())
+        rId = self._part.relate_to(part, RT.IMAGE)
+        part_image = part.image                           # 중복이면 **기존 파트**의 이름·크기(원판과 같다)
+        cx, cy = part_image.scaled_dimensions(width, height)
+        shape_id = self._alloc_id()
+        inline = CT_Inline.new_pic_inline(shape_id, rId, part_image.filename, cx, cy)
+        run._r.add_drawing(inline)
+        self._max_id = shape_id                           # 방금 넣은 docPr id 가 새 최대값(cNvPr id 는 0)
+        self.pictures += 1
+        return InlineShape(inline)
+
+    def add_picture_paragraph(self, image_path: str, width=None, height=None):
+        """`Document.add_picture(image_path, width, height)` 와 같다 — 새 문단의 새 run 에 넣는다."""
+        run = self._doc.add_paragraph().add_run()
+        return self.add_picture(run, image_path, width, height)
+
+
+def _hmerge_fast(tc_a, tc_b) -> bool:
+    """같은 행 안의 가로 병합을 python-docx `CT_Tc.merge` 와 **같은 XML** 로, 항법 xpath 없이 수행한다.
+
+    전제가 하나라도 어긋나면 아무것도 바꾸지 않고 False — 호출자는 원판 `merge` 로 간다(원판이 던질 예외도 그쪽에서 그대로).
+
+    (R53 N27-c) 원판은 병합 한 번에 `_tbl`·`_tr`·`preceding-sibling`·`following-sibling` xpath 를 셀마다 다시 돌린다 —
+    함수 정보 표 1,157개 × 행마다 1~2회 병합이면 xpath 수백만 번이고, 라이브 프로파일에서 `merge` 아래가 24.7% 였다.
+
+    등가 근거(1.2.0 `CT_Tc.merge`): 두 tc 가 같은 `w:tr` 의 직속 자식이고 둘 다 vMerge 가 없으면 `_span_dimensions` 는
+    (top=행, left=a.grid_offset, height=1, width=b.right−a.left) 이고 `top_tc` 는 a 자신이다. `_grow_to(width, 1)` 는
+    `_span_to_width(width, a, None)`: `a._move_content_to(a)` 는 no-op, `grid_span < width` 인 동안 `_swallow_next_tc` —
+    다음 tc 가 **비어 있으면** `_move_content_to` 도 no-op 이라 `_add_width_of` · `grid_span +=` · `_remove()` 만 남는다.
+    셀은 행을 빈틈없이 덮으므로 삼키는 tc 는 정확히 a 다음부터 b 까지다. 끝으로 `vMerge = None`. 여기서는 항법만 걷어내고
+    **변이는 원판과 같은 setter 를 같은 순서로** 부른다. 삼킬 셀에 내용이 있으면(원판은 옮긴다) 원판에 맡긴다.
+    예외까지 등가인 범위는 행이 `w:tbl` **직속**일 때다 — `w:sdt` 로 감싼 행은 원판이 ValueError 를 던지므로 그쪽으로 보낸다(리뷰 W2).
+    """
+    from docx.oxml.ns import qn  # type: ignore
+
+    tr = tc_a.getparent()
+    if tr is None or tr is not tc_b.getparent() or tr.tag != qn("w:tr"):
+        return False
+    tbl = tr.getparent()
+    if tbl is None or tbl.tag != qn("w:tbl"):                  # (리뷰 W2) `w:sdt` 로 감싼 행 — 원판은 `tr_lst.index` 에서 ValueError 를 던진다 → 원판에
+        return False
+    if tc_a.vMerge is not None or tc_b.vMerge is not None:      # top/bottom 이 행 밖으로 나간다 → 원판에
+        return False
+    tcs = tr.tc_lst
+    a_i = b_i = -1
+    for i, tc in enumerate(tcs):
+        if tc is tc_a:
+            a_i = i
+        if tc is tc_b:
+            b_i = i
+    if a_i < 0 or b_i < 0 or a_i > b_i:                          # b 가 왼쪽이면 원판이 b 를 키운다 → 원판에
+        return False
+    swallow = tcs[a_i + 1:b_i + 1]
+    for tc in swallow:
+        if not tc._is_empty:
+            return False
+    for tc in swallow:                                           # `_swallow_next_tc` 와 같은 순서·같은 setter
+        tc_a._add_width_of(tc)
+        tc_a.grid_span += tc.grid_span
+        tr.remove(tc)
+    tc_a.vMerge = None                                           # `_span_to_width` 마지막 줄(높이 1 → None)
+    return True
+
+
+def _merge_cells(cell_a, cell_b) -> None:
+    """`cell_a.merge(cell_b)` — 같은 행의 빈 셀 가로 병합이면 빠른 경로, 아니면 python-docx 원판(예외도 원판 것)."""
+    if not _hmerge_fast(cell_a._tc, cell_b._tc):
+        cell_a.merge(cell_b)
+
+
 def _merge_function_info_table(table, cols: int, layout=None) -> None:
     """함수 정보 표의 셀을 행 종류에 맞게 병합한다.
 
@@ -1344,6 +1558,7 @@ def _merge_function_info_table(table, cols: int, layout=None) -> None:
         kinds = [str(k) for k, _ in (layout or [])]
         n_rows = len(table.rows)
         # 표당 그리드 1회 — 행 안의 두 병합은 서로 다른 `<w:tc>` 를 건드리고, 다른 행의 요소는 살아 있다(`_grid_cells`).
+        #   (R53 N27-c) 병합 자체는 `_merge_cells` — 같은 행의 빈 셀이면 xpath 없는 빠른 경로, 아니면 python-docx 원판.
         #   단 **직사각 표**에서만이다(리뷰 W1) — 행 폭이 다른 표는 옛 경로대로 호출마다 재계산한다(느리지만 같은 결과).
         stride = table._column_count
         if _is_uniform_grid(table, stride):
@@ -1364,15 +1579,15 @@ def _merge_function_info_table(table, cols: int, layout=None) -> None:
                 kind = FN_ROW_FULL if r_idx == 0 else FN_ROW_PAIR
             if kind == FN_ROW_GRID:
                 if cols > PARAM_GRID_COLS:
-                    _c(r_idx, PARAM_GRID_COLS - 1).merge(_c(r_idx, cols - 1))
+                    _merge_cells(_c(r_idx, PARAM_GRID_COLS - 1), _c(r_idx, cols - 1))
                 continue
             if kind == FN_ROW_FULL:
-                _c(r_idx, 0).merge(_c(r_idx, cols - 1))
+                _merge_cells(_c(r_idx, 0), _c(r_idx, cols - 1))
                 continue
             if cols >= 2:
-                _c(r_idx, 0).merge(_c(r_idx, 1))
+                _merge_cells(_c(r_idx, 0), _c(r_idx, 1))
             if cols >= 4:
-                _c(r_idx, 2).merge(_c(r_idx, cols - 1))
+                _merge_cells(_c(r_idx, 2), _c(r_idx, cols - 1))
     except Exception as exc:  # noqa: BLE001 — 병합 실패가 문서 생성을 막아선 안 된다
         # (R47-j 리뷰 I5/X8) 예전엔 여기가 완전 침묵이라 "일부 행만 병합된 표" 와 정상을 산출물에서 구분할 수 없었다.
         _logger.warning("함수 정보 표 병합 중단(%s: %s) — 남은 행은 병합되지 않은 채 남는다", type(exc).__name__, str(exc)[:120])
@@ -1395,7 +1610,7 @@ def _infer_function_info_layout(table):
     try:
         in_params = False
         for r_idx, row in enumerate(list(table.rows)):
-            cells = [str(c.text or "").strip() for c in row.cells]
+            cells = [str(c.text or "").strip() for c in _distinct_cells(row)]   # (R53) 판정은 첫 칸·집합·any 뿐 — 중복 칸 불필요
             first = cells[0] if cells else ""
             norm = re.sub(r"[\[\]\s]+", " ", first).strip().lower()
             if r_idx == 0:
@@ -1429,12 +1644,13 @@ def _normalize_function_info_tables(doc) -> None:
         for table in doc.tables:
             if not table.rows:
                 continue
-            header_cells = [c.text.strip() for c in table.rows[0].cells]
+            _row0 = table.rows[0]                                    # (R53) `rows[0]` 은 부를 때마다 전 행을 다시 만든다 — 한 번만
+            header_cells = [c.text.strip() for c in _distinct_cells(_row0)]
             if not any("Function Information" in c for c in header_cells):
                 continue
             cols = len(table.columns)
-            for cell in table.rows[0].cells:
-                cell.text = "[ Function Information ]"
+            for cell in _distinct_cells(_row0):
+                cell.text = "[ Function Information ]"             # 같은 칸에 같은 값 — 멱등이라 한 번이면 같다
             _merge_function_info_table(table, cols, _infer_function_info_layout(table))
     except Exception:
         pass
@@ -1464,17 +1680,28 @@ def _fill_function_info_table(table, layout) -> None:
             if r_idx >= len(trows):
                 break
             cells = trows[r_idx].cells    # 행당 한 번만 해석
-            # clear row first
+            # (R53 N27-c) 같은 `<w:tc>` 에 여러 번 쓰지 않는다 — python-docx 는 병합 칸을 gridSpan 만큼 반복해 내므로 "전부 비우고
+            #   다시 쓰기" 가 라벨|값 행에서 setter 8회, 머리글 행에서 12회였다(칸은 2개·1개). 대입은 마지막 값이 이기고 setter 는
+            #   멱등이라, 예전과 같은 순서로 **계획**만 세운 뒤 칸마다 한 번 쓴다(XML 동일 — `test_docx_function_info_fill` 이 옛 구현과 대조).
+            plan: Dict[int, Tuple[Any, str]] = {}
+
+            def _put(c, text: str) -> None:
+                plan[id(c._tc)] = (c, text)
+
             for c in cells:
-                c.text = ""
+                _put(c, "")
             if kind == FN_ROW_GRID:
                 for c_idx, val in enumerate(cells_text[:len(cells)]):
-                    cells[c_idx].text = str(val)
+                    _put(cells[c_idx], str(val))
+                for c, text in plan.values():
+                    c.text = text
                 continue
             if kind == FN_ROW_FULL:
                 head = str(cells_text[0]) if cells_text else ""
                 for c in cells:
-                    c.text = head
+                    _put(c, head)
+                for c, text in plan.values():
+                    c.text = text
                 continue
             # ⚠ 값 칸 선택은 P2-3 이전과 **글자 그대로 같게** 둔다. 좁은 표(6열 미만)는
             #   라벨/값 쌍을 한 행에 여러 개 접어 넣으므로(`_pack_pairs_into_rows`)
@@ -1487,16 +1714,23 @@ def _fill_function_info_table(table, layout) -> None:
             else:
                 value = ""
             if len(cells) > 0:
-                cells[0].text = label
+                _put(cells[0], label)
             if len(cells) > 2:
-                cells[2].text = value
+                _put(cells[2], value)
+            for c, text in plan.values():
+                c.text = text
     except Exception as exc:   # noqa: BLE001 - 표 채우기 실패가 문서 생성을 막아선 안 된다
         # 예전엔 `pass` 라 표가 통째로 비어도 흔적이 없었다.
         _logger.warning("함수 정보 표 채우기 실패(%s) — 그 표는 빈 채로 남는다: %s",
                         type(exc).__name__, exc)
 
 
-def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
+def _insert_logic_image_in_table(table, cols: int, logic_img: str, picture_sink=None) -> bool:
+    """함수 정보 표의 `Logic Diagram` 행 값 칸에 그림을 넣는다.
+
+    `picture_sink`(`_PictureSink`)가 있으면 그 싱크로 넣는다(R53 N27-c — 결과 XML 은 `run.add_picture` 와 같고 그림마다
+    문서 전체를 훑지 않는다). 없으면 python-docx 원판.
+    """
     if not table or not logic_img:
         return False
     try:
@@ -1504,16 +1738,17 @@ def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
     except Exception:
         Inches = None  # type: ignore
     def _clear_cell(cell) -> None:
-        try:
-            from docx.oxml import OxmlElement  # type: ignore
-        except Exception:
-            OxmlElement = None  # type: ignore
+        """값 칸의 **내용만** 비운다 — `w:tcPr`(gridSpan·tcW)는 남긴다.
+
+        (R53 N48) 예전엔 `tc` 의 자식을 **전부** 지워 셀 속성까지 사라졌다. 이 칸은 `_merge_function_info_table` 이 `cols-2` 열로
+        병합한 값 칸이라 gridSpan 이 사라지면 그 행만 좁은 칸이 되고(ragged), ① Word 에서 Logic Diagram 행이 다른 행과 폭이 다르며
+        ② 정규화가 그 표를 비직사각으로 판정해 표마다 느린 경로(셀마다 그리드 재구성 — 셀 수의 제곱) + IndexError 경고를 냈다 — 라이브 실측
+        989/989 표(Initial commit 이래). python-docx `_Cell.text` setter 와 같은 규약(`clear_content` = tcPr 만 남김)으로 비운다.
+        """
         try:
             tc = cell._tc
-            for child in list(tc):
-                tc.remove(child)
-            if OxmlElement:
-                tc.append(OxmlElement("w:p"))
+            tc.clear_content()            # `w:tcPr` 를 제외한 자식 제거(python-docx)
+            tc.add_p()
         except Exception as e:
             _logger.debug("Cell XML clear failed: %s", e)
             try:
@@ -1524,16 +1759,17 @@ def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
         stride = table._column_count
         grid = _grid_cells(table)             # 표당 1회 — `Table.cell` 은 호출마다 그리드를 다시 만든다
         for r_idx, row in enumerate(table.rows):
-            cells = [c.text.strip() for c in row.cells]
+            cells = [c.text.strip() for c in _distinct_cells(row)]     # (R53) 병합 칸은 한 번만 읽는다 — any() 판정은 같다
             if any(c.replace(" ", "") == "LogicDiagram" for c in cells):
                 target_cell = grid[min(2, cols - 1) + r_idx * stride]
                 _clear_cell(target_cell)
                 p = target_cell.paragraphs[0] if target_cell.paragraphs else target_cell.add_paragraph()
                 run = p.add_run()
-                if Inches:
-                    run.add_picture(str(logic_img), width=Inches(5.2))
+                _width = Inches(5.2) if Inches else None
+                if picture_sink is not None:
+                    picture_sink.add_picture(run, str(logic_img), width=_width)
                 else:
-                    run.add_picture(str(logic_img))
+                    run.add_picture(str(logic_img), width=_width)
                 return True
     except Exception as e:
         _logger.warning("Failed to insert logic image in table: %s", e)
@@ -1636,7 +1872,7 @@ def _para_text(p_el) -> str:
     return "".join(n.text or "" for n in nodes)
 
 
-def _append_body_block(doc, el) -> None:
+def _append_body_block(doc, el, picture_sink=None) -> None:
     """원본 요소를 본문 끝(단, `w:sectPr` **앞**)에 되붙인다.
 
     ⚠ `body.append(el)` 을 쓰면 `w:sectPr` **뒤**로 간다. python-docx 의
@@ -1651,6 +1887,8 @@ def _append_body_block(doc, el) -> None:
         sect.addprevious(el)
     else:
         body.append(el)
+    if picture_sink is not None:
+        picture_sink.note_appended(el)      # (R53 N27-c) 되붙인 요소 안의 숫자 `@id` 가 그림 id 최대값을 올릴 수 있다
 
 
 def _fill_bracket_project_name(doc, project: str) -> int:
@@ -3296,6 +3534,7 @@ def generate_uds_docx(
             "{{notes}}": notes,
         }
         doc = docx.Document(template_path)
+        _pics = _PictureSink(doc)     # (R53 N27-c) 이 문서의 모든 그림 삽입·원본 블록 되붙임은 이 싱크를 지난다
         # 1) First, expand the reference-table token into a paragraph with
         #    real soft line breaks (w:br) so Word renders each entry on its
         #    own line. Consumes the token in-place.
@@ -3350,7 +3589,7 @@ def generate_uds_docx(
         _lead_raw = 0
         while _lead_raw < len(blocks) and blocks[_lead_raw][0] == "raw":
             try:
-                _append_body_block(doc, blocks[_lead_raw][1])
+                _append_body_block(doc, blocks[_lead_raw][1], picture_sink=_pics)
                 _restored_blocks += 1
             except Exception:   # noqa: BLE001 - 표지 복원 실패가 생성을 막지는 않는다
                 _logger.warning("표지 블록 복원 실패 — 표지 없이 계속한다", exc_info=True)
@@ -4047,7 +4286,7 @@ def generate_uds_docx(
             _merge_function_info_table(func_table, cols, data_rows)
             _fill_function_info_table(func_table, data_rows)
             if logic_img:
-                inserted = _insert_logic_image_in_table(func_table, cols, str(logic_img))
+                inserted = _insert_logic_image_in_table(func_table, cols, str(logic_img), picture_sink=_pics)
                 if not inserted:
                     try:
                         from docx.shared import Inches  # type: ignore
@@ -4055,10 +4294,7 @@ def generate_uds_docx(
                         Inches = None  # type: ignore
                     try:
                         doc.add_paragraph("Logic Diagram")
-                        if Inches:
-                            doc.add_picture(str(logic_img), width=Inches(5))
-                        else:
-                            doc.add_picture(str(logic_img))
+                        _pics.add_picture_paragraph(str(logic_img), width=Inches(5) if Inches else None)
                     except Exception as e:
                         _logger.warning("Failed to insert logic diagram: %s", e)
                         doc.add_paragraph("[Logic Diagram not available]")
@@ -4188,10 +4424,7 @@ def generate_uds_docx(
                             Inches = None  # type: ignore
                         try:
                             doc.add_paragraph("Structure Diagram")
-                            if Inches:
-                                doc.add_picture(str(structure_img), width=Inches(5))
-                            else:
-                                doc.add_picture(str(structure_img))
+                            _pics.add_picture_paragraph(str(structure_img), width=Inches(5) if Inches else None)
                         except Exception as e:
                             _logger.warning("Failed to insert structure diagram: %s", e)
                             doc.add_paragraph("[Structure Diagram not available]")
@@ -4357,7 +4590,7 @@ def generate_uds_docx(
                     #   없다**는 뜻이라 빈 표가 정답이다. `None` 과 접지 말 것.
                     # ⚠ 새로 만들지 않으므로 오히려 빠르다(정본은 표 1,165개).
                     try:
-                        _append_body_block(doc, tbl_el)
+                        _append_body_block(doc, tbl_el, picture_sink=_pics)
                         _preserved_tables += 1
                     except Exception:   # noqa: BLE001 - 실패하면 종전대로 빈 표
                         _logger.warning("원본 표 복원 실패 — 빈 표로 대체", exc_info=True)
@@ -4380,7 +4613,7 @@ def generate_uds_docx(
                 # 선행 블록은 위에서 이미 붙였다(자동 목차보다 앞서야 해서).
                 if idx >= _lead_raw:
                     try:
-                        _append_body_block(doc, payload_block)
+                        _append_body_block(doc, payload_block, picture_sink=_pics)
                         _restored_blocks += 1
                     except Exception:   # noqa: BLE001
                         _logger.warning("구조 블록 복원 실패", exc_info=True)
@@ -4528,6 +4761,7 @@ def generate_uds_docx(
 
     # ── No-template fallback: SUDS-compatible 4-level structure ──
     doc = docx.Document()
+    _pics = _PictureSink(doc)         # (R53 N27-c) 템플릿 분기와 같은 싱크(쌍둥이 한쪽만 고치지 않는다)
     cols = 6  # Function info table column count
 
     # ── Helper functions needed in fallback (template path has these in its scope) ──
@@ -4787,11 +5021,11 @@ def generate_uds_docx(
         _merge_function_info_table(_ft, _cols, _data_rows)
         _fill_function_info_table(_ft, _data_rows)
         if _logic_img:
-            if not _insert_logic_image_in_table(_ft, _cols, str(_logic_img)):
+            if not _insert_logic_image_in_table(_ft, _cols, str(_logic_img), picture_sink=_pics):
                 try:
                     from docx.shared import Inches as _I  # type: ignore
                     doc.add_paragraph("Logic Diagram")
-                    doc.add_picture(str(_logic_img), width=_I(5))
+                    _pics.add_picture_paragraph(str(_logic_img), width=_I(5))
                 except Exception:
                     doc.add_paragraph("[Logic Diagram not available]")
 
@@ -4924,7 +5158,7 @@ def generate_uds_docx(
         if _struct_img:
             try:
                 from docx.shared import Inches as _Inches  # type: ignore
-                doc.add_picture(str(_struct_img), width=_Inches(5))
+                _pics.add_picture_paragraph(str(_struct_img), width=_Inches(5))
             except Exception:
                 doc.add_paragraph(f"[Unit Structure: {_swcom_id}]")
         else:
@@ -5010,10 +5244,7 @@ def generate_uds_docx(
                 doc.add_paragraph(str(title))
             if path:
                 try:
-                    if Inches:
-                        doc.add_picture(str(path), width=Inches(5))
-                    else:
-                        doc.add_picture(str(path))
+                    _pics.add_picture_paragraph(str(path), width=Inches(5) if Inches else None)
                 except Exception:
                     continue
             if desc:
