@@ -2116,6 +2116,111 @@ def _safety_value_key(value: Any, field: str = "related") -> str:
     return ",".join(sorted(toks))
 
 
+_REF_AXES = ("asil", "related", "description", "precondition", "logic",
+             "inputs", "outputs", "globals_static", "globals_global", "called", "calling")
+_REF_NO_OPINION = frozenset({"", "TBD", "NA", "N/A", "-", "NONE"})
+
+
+def _reference_opinion(value: Any, axis: str) -> str:
+    """정본 블록 한 축의 **의견** 정규화 키 — 자리표시자(빈칸·TBD·N/A·-)는 의견 없음(`""`). (R51 리뷰 W2)
+
+    같은 이름 블록끼리 "다른 값을 말하는가" 를 잴 때, 적용 경로가 버리는 값(`asil` 은 `_VALID_ASIL` 밖, 빈칸류)을
+    판정 경로만 "의견" 으로 세면 사본 절의 `TBD` 가 유효한 등급을 막고 검토자에게 "정본을 고쳐라" 까지 올린다.
+    """
+    whole = " ".join(str(value or "").split()).upper() if not isinstance(value, (list, tuple)) else None
+    if whole is not None and whole in _REF_NO_OPINION:
+        return ""      # `N/A` 는 토큰으로 쪼개면 `A`·`N` 이 된다 — 통째로 먼저 본다
+    if axis == "asil":
+        k = _safety_value_key(value, "asil")
+        return k if k in _VALID_ASIL else ""
+    if axis == "related":
+        toks = [t for t in _safety_value_key(value, "related").split(",") if t and t not in _REF_NO_OPINION]
+        return ",".join(toks)
+    if isinstance(value, (list, tuple)):
+        return "\n".join(" ".join(str(v).split()) for v in value if str(v).strip())
+    return " ".join(str(value or "").split())
+
+
+def _sibling_axis_conflicts(siblings: List[str], ref_map: Dict[str, Any]) -> Set[str]:
+    """같은 이름 정본 블록들이 서로 **다른 의견**을 내는 축. (R51 리뷰 W3 — 갈린 축만 막고 같은 축은 싣는다)"""
+    out: Set[str] = set()
+    for axis in _REF_AXES:
+        opinions = {_reference_opinion((ref_map.get(s) or {}).get(axis), axis) for s in siblings} - {""}
+        if len(opinions) > 1:
+            out.add(axis)
+    return out
+
+
+def _resolve_reference_target(
+    fid: str,
+    block: Any,
+    function_details: Dict[str, Any],
+    function_details_by_name: Any,
+    ref_blocks_by_name: Dict[str, List[str]],
+    ref_map: Dict[str, Any],
+    stats: Dict[str, Any],
+    seen_names: Set[str],
+) -> Tuple[Optional[Dict[str, Any]], Set[str]]:
+    """정본 SwUDS 블록 하나가 payload 의 어느 함수인가 — **이름**으로 찾는다. (R51 N40)
+
+    ⚠ 왜 ID 가 아닌가: 생성 ID(`SwUFn_{모듈}{일련}`)는 소스 스캔 순서로 붙고, 정본 ID 는 그 문서의 것이다. 두 번호는
+      서로 무관하다. 실측(kjpds02_pv 정본 v3.03 × run 2080, 2026-09-15): 옛 "ID 먼저, 없으면 이름" 규칙으로 ID 가
+      맞은 819 블록 중 **773 이 이름이 다른 함수**였다(정본 SwUFn_0101 = main, 생성본 SwUFn_0101 = ADC_MONITOR_Enable).
+      그 엉뚱한 블록의 ASIL 763 · Related 762 · precondition 729 · inputs 368 · outputs 372 · called 339 건이
+      다른 함수에 실려 있었다(Initial commit 이래). "정본 자기 충돌 77건" 은 뒤에 온 **올바른(이름) 블록**이 막힌 수였다.
+      ID 는 판정에 쓰지 않는다 — 우연히 같은 번호를 안전값 충돌의 결정 근거로 삼는 것은 같은 오류다(리뷰 W1). 이름과
+      ID 가 함께 맞은 건수(`by_name_and_id`)는 계수로만 남긴다.
+
+    같은 이름 블록이 여럿이면(정본이 한 함수를 두 절에 실은 경우) **축별**로 본다: 서로 같은 의견인 축은 싣고, 갈린 축만
+    막는다(`blocked_axes`). ASIL·Related 가 갈리면 `ambiguous_names` + 표본으로 공시 — 첫 블록을 고르면 침묵 판정이다
+    (ASIL 지어내기 금지와 같은 축). 자리표시자(TBD·N/A)는 의견이 아니다(`_reference_opinion`).
+
+    반환: `(대상 함수 dict 또는 None, 막힌 축 집합)`. None 이면 사유는 `stats` 계수에 남는다.
+    """
+    raw_name = str((block or {}).get("name") or "")
+    name = _normalize_symbol_name(raw_name).lower()
+    if not name:
+        stats["unnamed_blocks"] += 1
+        return None, set()
+    target = None
+    if isinstance(function_details_by_name, dict):
+        target = function_details_by_name.get(name)
+        if not isinstance(target, dict):
+            target = function_details_by_name.get(raw_name.strip().lower())
+    if not isinstance(target, dict):
+        stats["unmatched_blocks"] += 1
+        return None, set()
+    _by_id = function_details.get(fid) if isinstance(function_details, dict) else None
+    if isinstance(_by_id, dict) and _by_id is not target \
+            and _normalize_symbol_name(str(_by_id.get("name") or "")).lower() != name:
+        # 정본 ID 가 payload 의 **다른** 함수를 가리킨다 — 옛 ID 우선 매칭이 오염을 만들던 바로 그 경우.
+        stats["id_collision_blocks"] += 1
+    tid = str(target.get("id") or "")
+    blocked: Set[str] = set()
+    siblings = ref_blocks_by_name.get(name) or [fid]
+    if len(siblings) > 1:
+        blocked = _sibling_axis_conflicts(siblings, ref_map)
+        if blocked and name not in seen_names:
+            seen_names.add(name)
+            _bx = stats["blocked_axes"]
+            for _ax in blocked:
+                _bx[_ax] = int(_bx.get(_ax, 0)) + 1
+            if blocked & {"asil", "related"}:
+                stats["ambiguous_names"] += 1
+                if len(stats["ambiguous_sample"]) < _STAT_SAMPLE_CAP:
+                    stats["ambiguous_sample"].append({
+                        "name": str(target.get("name") or raw_name), "id": tid, "conflicting": sorted(blocked),
+                        "blocks": [{"id": s, "asil": str((ref_map.get(s) or {}).get("asil") or ""),
+                                    "related": str((ref_map.get(s) or {}).get("related") or "")[:80]} for s in siblings],
+                    })
+    if fid == tid:
+        stats["by_name_and_id"] += 1
+    else:
+        stats["by_name"] += 1
+    return target, blocked
+
+
+
 def _write_gen_stats(output_path: str, stats: Dict[str, Any]) -> None:
     """생성 통계를 sidecar 로 남긴다. 실패해도 문서 생성을 깨지 않는다."""
     try:
@@ -2806,6 +2911,13 @@ def generate_uds_docx(
         "safety_fields_blank_filled": 0,
         # (리뷰 W1) 정본과 값이 다른데 지켜진 출처(comment/uds)별 건수 — 정본을 막은 쪽의 충돌.
         "safety_fields_kept_conflict": {},
+        # (R51 N40) 정본 블록→함수 매칭 계수. 매칭 키는 **이름**이다(`_resolve_reference_target` docstring 의 실측 — ID 로 맞은
+        #   819 중 773 이 다른 함수). `id_collision_blocks` = 정본 ID 가 payload 의 다른 함수를 가리킨 블록(정본 번호 ≠ 생성 번호의
+        #   증거), `ambiguous_names` = 같은 이름 블록이 서로 다른 값을 말해 **적용하지 않은** 함수(정본 문서 품질).
+        "matching": {
+            "by_name": 0, "by_name_and_id": 0, "id_collision_blocks": 0, "unmatched_blocks": 0, "unnamed_blocks": 0,
+            "blocked_axes": {}, "ambiguous_names": 0, "ambiguous_sample": [],
+        },
         "descriptive_fields_applied": 0,
         "invalid_asil_rejected": 0,
         # ⚠ 아래 6축은 예전엔 **계수에서 통째로 빠져** 있었다. `descriptive_fields_applied`
@@ -2850,20 +2962,31 @@ def generate_uds_docx(
             patched_called = 0
             patched_calling = 0
             patched_limit = 9999
+            # (R51 N40) 매칭은 이름으로 — 옛 "ID 먼저" 는 정본 번호와 생성 번호가 무관해 773 블록을 엉뚱한 함수에 실었다
+            #   (`_resolve_reference_target` docstring). 같은 이름 블록 목록을 먼저 만들어 중복(정본이 한 함수를 두 절에)을 가른다.
+            _ref_blocks_by_name: Dict[str, List[str]] = {}
+            for _rfid, _rblk in ref_map.items():
+                _rn = _normalize_symbol_name(str(_rblk.get("name") or "")).lower() if isinstance(_rblk, dict) else ""
+                if _rn:
+                    _ref_blocks_by_name.setdefault(_rn, []).append(_rfid)
+            _seen_dup_names: Set[str] = set()
             for fid, block in ref_map.items():
-                target = function_details.get(fid)
-                if target is None:
-                    name = _normalize_symbol_name(str(block.get("name") or ""))
-                    if name:
-                        target = function_details_by_name.get(name.lower())
+                if not isinstance(block, dict):
+                    continue
+                target, _blocked_axes = _resolve_reference_target(
+                    fid, block, function_details, function_details_by_name, _ref_blocks_by_name, ref_map,
+                    _ref_stats["matching"], _seen_dup_names,
+                )
                 if not isinstance(target, dict):
                     continue
                 bname = _normalize_symbol_name(str(block.get("name") or "")).lower()
                 brel = str(block.get("related") or "").strip()
                 # ref_related_by_name 도 안전축(Related ID)이다 — 신원 미확인이면 채우지 않는다.
-                if bname and brel and _ref_safety_ok:
+                if bname and brel and _ref_safety_ok and "related" not in _blocked_axes:
                     ref_related_by_name[bname] = brel
                 for key in ["description", "asil", "related", "precondition", "logic"]:
+                    if key in _blocked_axes:
+                        continue      # (R51 리뷰 W3) 같은 이름 블록끼리 갈린 축 — 이 축만 싣지 않는다
                     cur = str(target.get(key) or "").strip()
                     incoming = str(block.get(key) or "").strip()
                     if not incoming:
@@ -2940,10 +3063,11 @@ def generate_uds_docx(
                 # ⚠ 판정 순서는 위 안전축과 같다: **적용 자격 → 신원**. 신원을 먼저 보면
                 #   어차피 적용되지 않았을 시도까지 "차단" 으로 세어 막은 양을 부풀린다.
                 #
-                # ⚠ 이름 조인으로 바꾸는 대안(초안 A2)은 측정으로 기각됐다: 이름 조인 시
-                #   구조축 적용이 770→787 로 **늘고**, 이름이 같아 매칭된 354건 중 244건이
-                #   참조와 대상의 prototype 이 다르다(두 코드베이스가 같은 PDS 계열이라
-                #   함수명이 대량으로 겹친다). 교차 프로젝트 오염을 닫는 레버는 신원 게이트뿐이다.
+                # ⚠ 2026-08-04 의 "이름 조인(초안 A2) 기각" 은 **다른 프로젝트 문서**(HDPDM01 SUDS)를 참조로 두던 때의 측정이다
+                #   (이름이 같은 354건 중 244건이 prototype 이 다름 = 교차 프로젝트 오염). 그 레버는 신원 게이트가 맞다.
+                #   그러나 그 결론이 "ID 조인이 옳다" 는 뜻은 아니었다 — 같은 프로젝트 정본에서도 ID 는 문서 번호라 생성 번호와
+                #   무관하고, 이름이 다른 함수 773 블록의 구조축이 여기로 실렸다(R51 N40, `_resolve_reference_target`).
+                #   지금 매칭 키는 이름 + 신원 게이트다.
                 _struct = _ref_stats["structural_fields_applied"]
                 _blocked = _ref_stats["structural_fields_blocked"]
 
@@ -2961,13 +3085,13 @@ def generate_uds_docx(
                 for _axis in ("inputs", "outputs", "globals_static", "globals_global"):
                     _apply_struct(
                         _axis,
-                        eligible=bool(block.get(_axis)) and not target.get(_axis),
+                        eligible=bool(block.get(_axis)) and not target.get(_axis) and _axis not in _blocked_axes,
                         value=block.get(_axis),
                     )
                 _cur_called = str(target.get("called") or "").strip()
                 if _apply_struct(
                     "called",
-                    eligible=bool(block.get("called"))
+                    eligible=bool(block.get("called")) and "called" not in _blocked_axes
                     and ((not _cur_called) or _cur_called.upper() in {"N/A", "TBD", "-"})
                     and patched_called < patched_limit,
                     value=block.get("called"),
@@ -2976,7 +3100,7 @@ def generate_uds_docx(
                 _cur_calling = str(target.get("calling") or "").strip()
                 if _apply_struct(
                     "calling",
-                    eligible=bool(block.get("calling"))
+                    eligible=bool(block.get("calling")) and "calling" not in _blocked_axes
                     and ((not _cur_calling) or _cur_calling.upper() in {"N/A", "TBD", "-"})
                     and patched_calling < patched_limit,
                     value=block.get("calling"),

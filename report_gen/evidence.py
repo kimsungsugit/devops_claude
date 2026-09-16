@@ -549,6 +549,21 @@ def _uncomparable(text: Optional[str]) -> Optional[bool]:
     return False if _as_count(raw) is not None else None
 
 
+_MATCHING_KEYS = ("by_name", "by_name_and_id", "id_collision_blocks", "unmatched_blocks", "unnamed_blocks",
+                  "ambiguous_names")
+
+
+def _matching_summary(m: Any) -> Optional[Dict[str, Optional[int]]]:
+    """(R51 N40) `reference_suds.matching` → 정수 축만. dict 가 아니면 None(구판 — 미기록)."""
+    if not isinstance(m, dict):
+        return None
+    out: Dict[str, Optional[int]] = {k: _int_field(m, k) for k in _MATCHING_KEYS}
+    # 갈린 축 계수(축별 dict)의 합 — 빈 dict 는 "막은 축 없음" 이라 0(`_int_sum` 은 빈 dict 를 미측정으로 접는다).
+    _bx = m.get("blocked_axes")
+    out["blocked_axes"] = 0 if isinstance(_bx, dict) and not _bx else _int_sum(_bx)
+    return out
+
+
 def _int_sum(d: Any) -> Optional[int]:
     """`{"inputs": 3, "outputs": 0, ...}` 의 합 — dict 가 아니거나 **정수가 아닌 축이 하나라도 있으면** 미측정(None).
 
@@ -662,6 +677,8 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
         ),
         "descriptive_fields_applied": _int_field(ref, "descriptive_fields_applied"),
         "invalid_asil_rejected": _int_field(ref, "invalid_asil_rejected"),
+        # (R51 N40) 정본 블록→함수 매칭 계수(이름 매칭). 구판 gen_stats(키 없음)는 None — "ID 충돌 0" 으로 읽히면 안 된다.
+        "matching": _matching_summary(ref.get("matching")),
         "structural_fields_applied": _int_sum(ref.get("structural_fields_applied")),
         "structural_fields_blocked": _int_sum(ref.get("structural_fields_blocked")),
         "enrichment": enrichment,

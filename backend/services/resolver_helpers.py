@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,12 +23,84 @@ _logger = logging.getLogger("devops_api.resolver_helpers")
 
 # cloudium 문서를 로컬로 떨구는 프로세스 수명 temp 루트. 첫 사용 시 만들고 종료 시 지운다.
 _MATERIALIZE_ROOT: Path | None = None
+_MATERIALIZE_PREFIX = "devops_reqdoc_"
+_OWNER_PID_FILE = ".owner_pid"
+_LEGACY_STALE_AGE_S = 24 * 3600
+
+
+def _sweep_stale_materialize_roots(tmp_dir: Path | None = None) -> dict[str, int]:
+    """(R51 N42) 죽은 프로세스가 남긴 형제 루트를 지운다.
+
+    `atexit` 정리는 **정상 종료에서만** 돈다 — 이 백엔드는 재기동 때 kill 로 죽는다(`restart_backend`·start.bat 재실행).
+    실측(2026-09-15): `%TEMP%/devops_reqdoc_*` **28개 · 1.2GB**(09-08~09-15, 루트마다 정본 SwUDS 50MB 사본 포함).
+
+    판정은 **주인 프로세스 생사**다(나이가 아니다 — 하루 넘게 도는 백엔드의 루트를 지우면 그 run 이 잘린 사본을 읽는다):
+    - 루트 안 `.owner_pid` 의 pid 가 죽었으면 지운다. 살아 있거나 나 자신이면 둔다.
+    - pid 기록이 없는 구판 루트는 주인을 모르니 **하루 넘게 손대지 않은 것만** 지운다.
+    - psutil 이 없으면 pid 판정을 할 수 없다 — 지우지 않고 `kept_unknown` 으로 센다(도구 부재를 clean 으로 읽지 않는다).
+    """
+    base = Path(tmp_dir) if tmp_dir else Path(tempfile.gettempdir())
+    out = {"removed": 0, "kept_alive": 0, "kept_unknown": 0, "failed": 0}
+    try:
+        import psutil  # type: ignore
+    except Exception:  # noqa: BLE001 — 부재는 "판정 불가" 로 계수한다
+        psutil = None
+    me = os.getpid()
+    now = time.time()
+    for d in base.glob(f"{_MATERIALIZE_PREFIX}*"):
+        try:
+            if not d.is_dir():
+                continue
+            pid_file = d / _OWNER_PID_FILE
+            pid = 0
+            if pid_file.is_file():
+                try:
+                    pid = int(pid_file.read_text(encoding="ascii").strip() or "0")
+                except (OSError, ValueError):
+                    pid = 0
+            if pid > 0:
+                # (리뷰 W4) pid 를 **읽어 낸** 루트만 생사로 판정한다. 파일이 없거나 비었거나 깨졌으면 주인을 모르는 것이지
+                #   죽은 것이 아니다 — 아래 구판 규칙(하루)으로 강등. 기록 자체도 원자 교체라 0바이트 창은 없다.
+                if pid == me:
+                    out["kept_alive"] += 1
+                    continue
+                if psutil is None:
+                    out["kept_unknown"] += 1
+                    continue
+                if psutil.pid_exists(pid):
+                    out["kept_alive"] += 1
+                    continue
+            elif now - d.stat().st_mtime < _LEGACY_STALE_AGE_S:
+                out["kept_unknown"] += 1
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            out["removed" if not d.exists() else "failed"] += 1
+        except OSError:
+            out["failed"] += 1
+    if psutil is None and out["kept_unknown"]:
+        # (리뷰 I1) 도구 부재는 반환값에만 적으면 fake-green 이다 — 청소가 영구 no-op 인 환경임을 로그로 말한다.
+        _logger.warning("[materialize] psutil 이 없어 임시 루트 %d개의 주인 생사를 판정하지 못했다 — 청소 비활성(DISABLED)", out["kept_unknown"])
+    if out["removed"] or out["failed"] or out["kept_unknown"]:
+        _logger.info("[materialize] 죽은 프로세스의 요구 문서 임시 루트 정리: 삭제 %d · 실패 %d · 유지(살아 있음 %d · 판정 불가 %d)",
+                     out["removed"], out["failed"], out["kept_alive"], out["kept_unknown"])
+    return out
 
 
 def _materialize_root() -> Path:
     global _MATERIALIZE_ROOT
     if _MATERIALIZE_ROOT is None or not _MATERIALIZE_ROOT.exists():
-        _MATERIALIZE_ROOT = Path(tempfile.mkdtemp(prefix="devops_reqdoc_"))
+        try:
+            _sweep_stale_materialize_roots()
+        except Exception as exc:  # noqa: BLE001 — 청소 실패가 생성을 막으면 안 된다. 사유는 남긴다
+            _logger.warning("[materialize] 임시 루트 청소 실패(%s: %s) — 계속 진행", type(exc).__name__, exc)
+        _MATERIALIZE_ROOT = Path(tempfile.mkdtemp(prefix=_MATERIALIZE_PREFIX))
+        try:
+            # (리뷰 W4) 임시 이름에 쓰고 원자 교체 — 다른 프로세스의 청소가 0바이트 파일을 읽는 창을 없앤다.
+            _pid_tmp = _MATERIALIZE_ROOT / f"{_OWNER_PID_FILE}.{os.getpid()}.part"
+            _pid_tmp.write_text(str(os.getpid()), encoding="ascii")
+            os.replace(_pid_tmp, _MATERIALIZE_ROOT / _OWNER_PID_FILE)
+        except OSError as exc:
+            _logger.warning("[materialize] 주인 pid 기록 실패(%s) — 이 루트는 다음 청소에서 구판 규칙(하루)으로 취급된다", exc)
         atexit.register(shutil.rmtree, _MATERIALIZE_ROOT, True)
     return _MATERIALIZE_ROOT
 

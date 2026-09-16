@@ -1470,6 +1470,26 @@ describe('DocGenStatusBoard — 참조 SwUDS 보강 근거 (R47 N26)', () => {
     li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
     expect(li.textContent).not.toContain('정본이 덮음');
   });
+  it('정본 중복 이름·ID 불일치는 0 보다 클 때만 말하고, 구판(matching 없음)은 침묵한다 (R51 N40)', async () => {
+    const base = {
+      present: true, document: '(KJPDS02_SwUDS) x.docx', configured: true, same_project: true,
+      identity_reason: 'token_match', shared_tokens: ['KJPDS02'], safety_fields_applied: 710, safety_fields_blocked: 0,
+      enrichment: { present: true, applied: true, functions: 1157, reason: null },
+    };
+    await openEvidence({ ...base, matching: { ambiguous_names: 9, id_collision_blocks: 773 } });
+    let li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).toContain('정본 중복 이름 9');
+    expect(li.textContent).toContain('정본 ID≠생성 ID 773');
+    cleanup();
+    await openEvidence({ ...base, matching: { ambiguous_names: 0, id_collision_blocks: 0 } });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).not.toContain('중복 이름');
+    expect(li.textContent).not.toContain('생성 ID');
+    cleanup();
+    await openEvidence({ ...base, matching: null });
+    li = (await screen.findByText(/^참조 SwUDS/)).closest('li');
+    expect(li.textContent).not.toContain('중복 이름');
+  });
   it('지정 경로가 레지스트리 정본과 다른 파일이면 경고하고, 같거나 기록이 없으면 말하지 않는다 (R47-e N30)', async () => {
     const base = {
       present: true, document: '(OTHER_SwUDS) y.docx', configured: true, same_project: true,

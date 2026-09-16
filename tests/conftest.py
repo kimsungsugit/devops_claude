@@ -383,6 +383,35 @@ def _isolate_quality_db():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _isolate_tempfile_dir():
+    """테스트는 **사용자의 %TEMP%** 를 건드리지 않는다 — `tempfile` 의 기본 디렉터리를 세션별 폴더로. (R51 N42)
+
+    실측(2026-09-15): 요구 문서 실체화 루트(`%TEMP%/devops_reqdoc_*`)에 "주인 프로세스가 죽은 루트 청소" 를 넣자,
+    `materialize_via_resolver` 를 태우는 테스트가 **실제 %TEMP%** 에서 청소를 돌렸다. 정상 코드는 죽은 루트만 지웠지만
+    뮤테이션 한 판(나이 조건 제거)이 **살아 있는 백엔드의 루트까지 28개 전부** 지웠다 — 테스트가 기계 상태를 바꾸면
+    그 뒤의 모든 측정이 오염된다(Quality DB·채팅 DB 격리와 같은 축). `_materialize_root()` 는 `tempfile.mkdtemp` /
+    `tempfile.gettempdir()` 만 보므로 여기 한 곳이면 실체화·청소가 전부 세션 폴더 안에서 논다.
+
+    ⚠ 함수 스코프 `monkeypatch.setattr(tempfile, "tempdir", …)` 은 그대로 동작한다(세션 값을 저장했다 되돌린다).
+    ⚠ 위치는 **저장소 밖**(시스템 temp 아래 세션 폴더)이어야 한다 — `.codex_tmp` 아래 두면 "저장소 밖 경로는 403" 을
+      재는 쓰기 봉인 테스트(`test_router_status_and_write_confinement`)의 탐침이 신뢰 루트 안이 돼 4건이 setup ERROR 다
+      (2026-09-16 게이트 실측). 청소는 이 폴더 안의 `devops_reqdoc_*` 만 보므로 실제 %TEMP% 의 루트는 건드리지 않는다.
+    """
+    import shutil
+    import tempfile
+
+    prev = tempfile.tempdir
+    root = Path(tempfile.gettempdir()) / f"devops-tests-{os.getpid()}"
+    root.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(root)
+    try:
+        yield root
+    finally:
+        tempfile.tempdir = prev
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _isolate_chat_history_db():
     """테스트는 **사용자의 채팅 이력 DB**(`reports/chat_history.sqlite`)에 쓰지 않는다. (R41 N11)
 

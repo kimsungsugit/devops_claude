@@ -1550,6 +1550,9 @@ function EvidenceDetail({ run, detail }) {
                 {ref.safety_fields_applied != null && ` · ASIL·Related 적용 ${ref.safety_fields_applied}`}
                 {/* (R50 N38) 정본이 SwDS·모듈상속 값을 덮은 건수 — 설계 문서와 정본이 어긋난 함수. 0 이면 말하지 않고 미기록(null)도 말하지 않는다 */}
                 {ref.safety_fields_overridden > 0 && <> · <strong>정본이 덮음 {ref.safety_fields_overridden}</strong></>}
+                {/* (R51 N40) 정본이 같은 함수를 두 절에 다른 값으로 — 적용하지 않은 함수 수. 정본을 고쳐야 풀린다. 0·미기록은 말하지 않는다 */}
+                {ref.matching?.ambiguous_names > 0 && <> · <strong>⚠ 정본 중복 이름 {ref.matching.ambiguous_names}(적용 안 함)</strong></>}
+                {ref.matching?.id_collision_blocks > 0 && ` · 정본 ID≠생성 ID ${ref.matching.id_collision_blocks}(이름으로 매칭)`}
                 {/* (리뷰 W6) 미측정(null)과 0 은 다르다 — 차단 수가 없으면 "차단 0" 으로 읽히므로 미기록을 말한다 */}
                 {ref.safety_fields_blocked == null ? ' · 차단 미기록'
                   : ref.safety_fields_blocked > 0 && <> · <strong>차단 {ref.safety_fields_blocked}</strong></>}

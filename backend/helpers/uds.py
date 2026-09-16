@@ -476,6 +476,26 @@ def _note_docx_outcome(issues: IssueCollector, gen_stats: Dict[str, Any]) -> Non
                            f"정본 SwUDS({ref.get('document')})가 다른 출처의 ASIL·Related {total}건을 덮었다(이전 출처: {by_src}) — 설계 문서와 정본이 어긋난 함수",
                            stage="docx", facts={"document": ref.get("document"), "overridden": total, "by_source": dict(overridden),
                                                 "agreed": ref.get("safety_fields_agreed")})
+        # (R51 N40) 정본 블록→함수 매칭 계수. 같은 이름 블록이 다른 값을 말해 **적용하지 않은** 함수는 정본 문서 품질 문제라
+        #   검토자가 정본을 고쳐야 풀린다(kjpds02_pv v3.03: main·LINPHY0_Init·SCI0_Init·EEPROM 6 이 SwCom_35 에 사본).
+        #   정본 ID 가 생성본의 다른 함수를 가리킨 블록 수는 "두 번호가 무관하다" 는 사실의 공시다 — 매칭은 이름이라 결과엔
+        #   영향이 없지만, 정본 ID 로 함수를 찾는 사람이 있다면 알아야 한다.
+        matching = ref.get("matching") if isinstance(ref.get("matching"), dict) else {}
+        _amb = matching.get("ambiguous_names")
+        if isinstance(_amb, int) and not isinstance(_amb, bool) and _amb > 0:
+            _sample = [s for s in (matching.get("ambiguous_sample") or []) if isinstance(s, dict)][:8]
+            _names = ", ".join(str(s.get("name") or "") for s in _sample if s.get("name"))
+            issues.add("reference_ambiguous_function_name", "warning", "actual",
+                       f"정본 SwUDS({ref.get('document')})가 같은 함수를 두 절에 서로 다른 ASIL·Related 로 실었다 — "
+                       f"{_amb}개 함수는 갈린 축의 정본 값을 적용하지 않았다" + (f": {_names}" if _names else ""),
+                       stage="docx", facts={"document": ref.get("document"), "ambiguous_names": _amb, "sample": _sample})
+        _coll = matching.get("id_collision_blocks")
+        if isinstance(_coll, int) and not isinstance(_coll, bool) and _coll > 0:
+            issues.add("reference_id_numbering_differs", "risk", "potential",
+                       f"정본 SwUDS 의 함수 ID {_coll}개가 생성본의 다른 함수를 가리킨다(정본 번호 ≠ 생성 번호) — 매칭은 이름으로 했다"
+                       f"(이름 {matching.get('by_name')} · 이름+ID {matching.get('by_name_and_id')} · 정본에만 있는 함수 {matching.get('unmatched_blocks')})",
+                       stage="docx", facts={"id_collision_blocks": _coll, "by_name": matching.get("by_name"),
+                                            "by_name_and_id": matching.get("by_name_and_id"), "unmatched_blocks": matching.get("unmatched_blocks")})
         identity = ref.get("identity") if isinstance(ref.get("identity"), dict) else {}
         same = identity.get("same_project")
         if same is False:

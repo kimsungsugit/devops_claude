@@ -103,6 +103,8 @@ def test_실체화_사본은_임시이름에_쓰고_원자_교체한다(cloud, m
 
     p, text, reason = RH.read_requirement_doc(U_SRS)
     assert reason == "" and "SwTR_0101" in text and p is not None and p.exists()
+    # (R51 N42) 루트 생성 시 주인 pid 기록도 원자 교체를 쓴다 — 여기서 재는 것은 **문서 사본**의 교체다
+    calls = [c for c in calls if not c[1].endswith(RH._OWNER_PID_FILE)]
     assert len(calls) == 1, "원자 교체(os.replace) 없이 사본을 썼다 — 비원자 쓰기로 회귀"
     src, dst = calls[0]
     assert dst == str(p) and src != dst and Path(src).parent == p.parent, "임시 이름은 같은 폴더여야 rename 이 원자적이다"
@@ -334,3 +336,93 @@ def test_빈_경로는_사유_없이_조용히_통과(cloud):
     cloud({})
     assert RH.read_requirement_doc("   ") == (None, "", "")
     assert RH.read_requirement_doc_via_resolver("") == ("", "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G — (R51 N42) 죽은 프로세스의 실체화 루트 청소. atexit 는 kill 로 죽는 백엔드에선 안 돈다(실측 28개·1.2GB).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dead_pid():
+    psutil = pytest.importorskip("psutil")   # (리뷰 I5) 프로덕션은 psutil 을 선택으로 둔다 — 테스트도 부재면 skip
+    return next(p for p in range(2_000_000_000, 2_000_004_000, 4) if not psutil.pid_exists(p))
+
+
+def _root(base: Path, name: str, *, pid=None, age_s: int = 0) -> Path:
+    import os
+    import time
+    d = base / f"{RH._MATERIALIZE_PREFIX}{name}"
+    (d / "abc").mkdir(parents=True)
+    (d / "abc" / "doc.docx").write_bytes(b"x" * 10)
+    if pid is not None:
+        (d / RH._OWNER_PID_FILE).write_text(str(pid), encoding="ascii")
+    if age_s:
+        old = time.time() - age_s
+        os.utime(d, (old, old))
+    return d
+
+
+def test_sweep_는_주인이_죽은_루트와_하루_지난_구판_루트만_지운다(tmp_path):
+    import os
+    dead = _root(tmp_path, "dead", pid=_dead_pid())
+    mine = _root(tmp_path, "mine", pid=os.getpid())
+    parent = _root(tmp_path, "parent", pid=os.getppid())          # 살아 있는 남의 프로세스
+    legacy_old = _root(tmp_path, "legacy_old", age_s=2 * 24 * 3600)
+    legacy_new = _root(tmp_path, "legacy_new")
+    garbage = _root(tmp_path, "garbage", pid="not-a-pid")       # (리뷰 W4) 깨진 pid = 주인 모름 → 구판 규칙(하루) → 새것이라 유지
+    empty = _root(tmp_path, "empty", pid="")                    # 0바이트 pid 파일(기록 중 창) — 같은 취급
+    stale_garbage = _root(tmp_path, "stale_garbage", pid="?", age_s=2 * 24 * 3600)
+    (tmp_path / f"{RH._MATERIALIZE_PREFIX}file").write_text("not a dir")
+    out = RH._sweep_stale_materialize_roots(tmp_path)
+    assert out == {"removed": 3, "kept_alive": 2, "kept_unknown": 3, "failed": 0}
+    assert not dead.exists() and not legacy_old.exists() and not stale_garbage.exists()
+    assert mine.exists() and parent.exists() and legacy_new.exists() and garbage.exists() and empty.exists()
+
+
+def test_psutil_이_없으면_pid_루트는_판정_불가로_두고_구판_규칙만_적용(tmp_path, monkeypatch):
+    import os
+    import sys
+    monkeypatch.setitem(sys.modules, "psutil", None)   # import psutil → ImportError
+    dead = _root(tmp_path, "dead", pid=_dead_pid_cached)
+    mine = _root(tmp_path, "mine", pid=os.getpid())     # 나 자신은 psutil 없이도 산 것으로 안다
+    legacy_old = _root(tmp_path, "legacy_old", age_s=2 * 24 * 3600)
+    out = RH._sweep_stale_materialize_roots(tmp_path)
+    assert out == {"removed": 1, "kept_alive": 1, "kept_unknown": 1, "failed": 0}
+    assert dead.exists() and mine.exists() and not legacy_old.exists()
+
+
+_dead_pid_cached = 2_000_000_000  # psutil 없는 테스트용 — 값은 판정에 쓰이지 않는다(판정 불가로 분류)
+
+
+def test_materialize_root_는_주인_pid_를_적고_먼저_청소한다(tmp_path, monkeypatch):
+    import os
+    import tempfile
+    dead = _root(tmp_path, "dead", pid=_dead_pid())
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(RH, "_MATERIALIZE_ROOT", None)
+    root = RH._materialize_root()
+    try:
+        assert root.parent == tmp_path and root.name.startswith(RH._MATERIALIZE_PREFIX)
+        assert (root / RH._OWNER_PID_FILE).read_text(encoding="ascii") == str(os.getpid())
+        assert not list(root.glob("*.part")), "pid 기록의 임시 파일이 남았다(원자 교체 아님)"
+        assert not dead.exists(), "새 루트를 만들기 전에 죽은 루트를 치운다"
+        assert RH._materialize_root() == root, "두 번째 호출은 같은 루트"
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_청소가_던져도_루트는_만들어진다(tmp_path, monkeypatch):
+    import tempfile
+
+    def _boom(*_a, **_k):
+        raise OSError("glob failed")
+
+    monkeypatch.setattr(RH, "_sweep_stale_materialize_roots", _boom)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(RH, "_MATERIALIZE_ROOT", None)
+    root = RH._materialize_root()
+    try:
+        assert root.exists()
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)

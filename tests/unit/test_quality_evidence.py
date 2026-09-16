@@ -1275,3 +1275,36 @@ class TestEnrichmentFromGenStats:
             p_enr = dict(via_payload["reference"]["enrichment"])
             assert (s_enr.pop("record_source"), p_enr.pop("record_source")) == ("gen_stats", "payload"), rec
             assert s_enr == p_enr, rec
+
+
+class TestReferenceMatchingSummary:
+    """(R51 N40) `reference_suds.matching` → 정수 축만. 구판(키 없음)은 None — "ID 충돌 0" 으로 읽히면 안 된다."""
+
+    def test_legacy_stats_without_matching_are_unrecorded(self, tmp_path):
+        from report_gen.evidence import read_evidence
+
+        assert read_evidence(str(_ref_sidecars(tmp_path)))["reference"]["matching"] is None
+
+    def test_matching_ints_pass_through_and_non_ints_are_none(self, tmp_path):
+        import copy
+
+        from report_gen.evidence import read_evidence
+
+        stats = copy.deepcopy(_REF_STATS_2064)
+        stats["reference_suds"]["matching"] = {"by_name": 896, "by_name_and_id": 46, "id_collision_blocks": 773,
+                                               "unmatched_blocks": 37, "unnamed_blocks": 0, "blocked_axes": {"related": 6, "inputs": 2},
+                                               "ambiguous_names": "9", "ambiguous_sample": [{"name": "main"}]}
+        m = read_evidence(str(_ref_sidecars(tmp_path, stats=stats)))["reference"]["matching"]
+        assert m == {"by_name": 896, "by_name_and_id": 46, "id_collision_blocks": 773, "unmatched_blocks": 37,
+                     "unnamed_blocks": 0, "blocked_axes": 8, "ambiguous_names": None}
+
+    @pytest.mark.parametrize("blocked,expected", [({}, 0), ({"asil": 1}, 1), (None, None), ({"asil": "x"}, None)])
+    def test_blocked_axes_sum_distinguishes_zero_from_unrecorded(self, tmp_path, blocked, expected):
+        import copy
+
+        from report_gen.evidence import read_evidence
+
+        stats = copy.deepcopy(_REF_STATS_2064)
+        stats["reference_suds"]["matching"] = {"by_name": 1, "blocked_axes": blocked}
+        m = read_evidence(str(_ref_sidecars(tmp_path, stats=stats)))["reference"]["matching"]
+        assert m["blocked_axes"] == expected and m["by_name"] == 1

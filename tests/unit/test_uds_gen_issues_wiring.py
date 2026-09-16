@@ -317,3 +317,58 @@ class TestWrapperAndSurfaces:
         assert "_note_quick_gate(_issues, _qg)" in src and "_record_uds_run(\n            _qg," in src
         assert "_note_docx_outcome(_issues, _read_gen_stats(out_path))" in src
         assert src.count("_note_report(_issues,") >= 7, "후처리 리포트 7종 전부 결과를 남겨야 한다(accuracy 300초 타임아웃이 매 run 조용했다)"
+
+
+class TestReferenceMatchingOutcome:
+    """(R51 N40) 정본 매칭 계수 → 항목. 중복 이름(정본 품질)은 warning/actual, ID 번호 불일치는 risk/potential."""
+
+    _REF = {"configured": True, "document": "X_v3.03.docx", "identity": {"same_project": True},
+            "safety_fields_overridden": {}}
+
+    def test_ambiguous_names_become_a_warning_with_the_sample(self):
+        c = IssueCollector()
+        sample = [{"name": "main", "id": "SwUFn_0130", "blocks": [{"id": "SwUFn_0101", "asil": "A", "related": "SwCom_01"},
+                                                                  {"id": "SwUFn_3563", "asil": "QM", "related": "SwCom_35"}]}]
+        U._note_docx_outcome(c, {"reference_suds": {**self._REF, "matching": {"ambiguous_names": 1, "ambiguous_sample": sample,
+                                                                               "id_collision_blocks": 0}}})
+        items = {i["code"]: i for i in c.as_list()}
+        assert list(items) == ["reference_ambiguous_function_name"]
+        it = items["reference_ambiguous_function_name"]
+        assert (it["severity"], it["kind"]) == ("warning", "actual")
+        assert "1개 함수" in it["message"] and "main" in it["message"]
+        assert it["facts"] == {"document": "X_v3.03.docx", "ambiguous_names": 1, "sample": sample}
+
+    def test_id_collisions_become_a_risk_with_the_matching_counts(self):
+        c = IssueCollector()
+        U._note_docx_outcome(c, {"reference_suds": {**self._REF, "matching": {
+            "ambiguous_names": 0, "id_collision_blocks": 773, "by_name": 896, "by_name_and_id": 46, "unmatched_blocks": 37}}})
+        items = {i["code"]: i for i in c.as_list()}
+        assert list(items) == ["reference_id_numbering_differs"]
+        it = items["reference_id_numbering_differs"]
+        assert (it["severity"], it["kind"]) == ("risk", "potential")
+        assert "773개" in it["message"] and "이름 896" in it["message"] and "이름+ID 46" in it["message"]
+        assert it["facts"] == {"id_collision_blocks": 773, "by_name": 896, "by_name_and_id": 46, "unmatched_blocks": 37}
+
+    @pytest.mark.parametrize("matching", [None, {}, {"ambiguous_names": 0, "id_collision_blocks": 0},
+                                          {"ambiguous_names": True, "id_collision_blocks": "3"}])
+    def test_legacy_or_zero_matching_is_quiet(self, matching):
+        """구판 gen_stats(키 없음)·0건·정수가 아닌 값은 항목을 만들지 않는다."""
+        c = IssueCollector()
+        ref = dict(self._REF)
+        if matching is not None:
+            ref["matching"] = matching
+        U._note_docx_outcome(c, {"reference_suds": ref})
+        assert c.as_list() == []
+
+    def test_explainer_knows_both_codes(self):
+        from backend.services import issue_explainer as IE
+        assert IE._RULE_ACTION["reference_ambiguous_function_name"] and IE._RULE_ACTION["reference_id_numbering_differs"]
+
+    def test_builder_matches_reference_blocks_by_name(self):
+        """계수의 원천 — 빌더 루프가 `_resolve_reference_target` 을 타고, 옛 `function_details.get(fid)` 우선 매칭이 없다."""
+        import re
+
+        from report_gen import docx_builder as DB
+        src = source_of(DB.generate_uds_docx)
+        assert "_resolve_reference_target(" in src
+        assert not re.search(r"target = function_details\.get\(fid\)", src), "정본 블록을 ID 로 먼저 찾는 옛 규칙이 되살아났다"
