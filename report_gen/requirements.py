@@ -710,6 +710,48 @@ def is_sds_placeholder_key(normalized: str) -> bool:
     return normalized in _SDS_PLACEHOLDER_KEYS
 
 
+def _merge_sds_partition_map(
+    merged: Dict[str, Dict[str, str]], data: Dict[str, Dict[str, str]]
+) -> int:
+    """SwDS 파티션 맵 병합 — 새 키는 **사본**으로 넣고, 이미 있는 키는 세 필드만 본다 → 갈린 ASIL 키 수를 돌려준다.
+
+    - `related`·`description`: first-wins(빈 필드만 채운다).
+    - `asil`: **max** — 두 문서가 같은 파티션을 다른 등급으로 말하면 높은 쪽(안전측). 이 저장소의 ASIL 병합 규칙이다
+      (`_build_uds_asil_map` "max-merge — 낮은 등급 채택은 under-report", 커밋 05cdd1f 는 first-wins 로 101건이 하향된 뒤
+      max 로 폐색). 인식 못 하는 값(TBD 등)은 의견이 아니다. 갈림은 WARNING 으로 남긴다(침묵 금지 — R52 리뷰 W2).
+    - 그 밖의 필드(`kind`·`canonical`)는 **먼저 온 문서 것**이다(리뷰 I7 — 소비자가 생기면 여기서 정할 것).
+
+    (R52 N39) 단일 출처. 예전엔 `generators/suts.py` 에만 있었고 UDS 세 경로(jenkins 비동기 · local 동기/비동기)는
+    `dict.update`(뒤 문서가 통째로 이김), `requirements`·`sts`·`docx_builder` 엔 같은 루프의 손복제가 있었다(리뷰 W3) —
+    같은 입력에 규칙이 갈렸다. 가드: `tests/unit/test_sds_partition_map_merge.py`.
+    """
+    conflicts = 0
+    for key, value in data.items():
+        if key not in merged:
+            merged[key] = dict(value)
+            continue
+        cur = merged[key]
+        incoming_asil = str(value.get("asil") or "").strip()
+        if incoming_asil:
+            cur_asil = str(cur.get("asil") or "").strip()
+            cur_rank = _ASIL_RANK.get(_asil_max_of([cur_asil]), -1) if cur_asil else -1
+            new_rank = _ASIL_RANK.get(_asil_max_of([incoming_asil]), -1)
+            if cur_rank < 0 and (new_rank >= 0 or not cur_asil):
+                cur["asil"] = incoming_asil          # 비어 있거나 의견이 아니던 값 → 채움(갈림 아님)
+            elif new_rank >= 0 and cur_rank >= 0 and new_rank != cur_rank:
+                conflicts += 1
+                if new_rank > cur_rank:
+                    cur["asil"] = incoming_asil      # 높은 등급으로(문서 표기 그대로 보존)
+        for field in ("related", "description"):
+            if value.get(field) and not cur.get(field):
+                cur[field] = value[field]
+    if conflicts:
+        _logger.warning(
+            "SwDS 파티션 맵 병합: 같은 키 %d건에서 ASIL 이 갈려 높은 등급을 택했다(안전측) — 어느 문서가 맞는지는 문서를 볼 것",
+            conflicts)
+    return conflicts
+
+
 def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     try:
         pass  # type: ignore
@@ -1466,13 +1508,7 @@ def enrich_function_details_with_docs(
 
     sds_map: Dict[str, Dict[str, str]] = {}
     for path in sds_paths:
-        for key, value in _extract_sds_partition_map(path).items():
-            if key not in sds_map:
-                sds_map[key] = dict(value)
-                continue
-            for field in ("asil", "related", "description"):
-                if value.get(field) and not sds_map[key].get(field):
-                    sds_map[key][field] = value[field]
+        _merge_sds_partition_map(sds_map, _extract_sds_partition_map(path))   # (R52 리뷰 W3) 손복제 루프 → 단일 출처
 
     fid_to_swcom: Dict[str, str] = {}
     if isinstance(function_table_rows, list):

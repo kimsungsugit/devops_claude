@@ -1025,12 +1025,12 @@ async def local_uds_generate(
     # SDS 파티션 맵 로드 (Related ID + ASIL 전파용)
     _sds_pmap: Dict[str, Dict[str, str]] = {}
     if sds_doc_paths:
-        from report_gen.requirements import _extract_sds_partition_map
+        from report_gen.requirements import _extract_sds_partition_map, _merge_sds_partition_map
         for sp in sds_doc_paths:
             try:
-                _sds_pmap.update(_extract_sds_partition_map(sp))
-            except Exception:
-                pass
+                _merge_sds_partition_map(_sds_pmap, _extract_sds_partition_map(sp))  # (R52 N39) 병합 규칙 단일 출처
+            except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그로(리뷰 I6 — 세 경로 중 여기만 침묵이었다)
+                _logger.warning("[local UDS] SwDS 파티션 맵 추출 실패 %s: %s", Path(sp).name, type(exc).__name__)
 
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
@@ -1562,8 +1562,8 @@ async def local_uds_generate_async(
                         _logger.warning("[local UDS] SDS 파티션 맵 건너뜀: %s", reason or rp)
                         continue
                     try:
-                        from report_gen.requirements import _extract_sds_partition_map
-                        _async_sds_pmap.update(_extract_sds_partition_map(str(p)))
+                        from report_gen.requirements import _extract_sds_partition_map, _merge_sds_partition_map
+                        _merge_sds_partition_map(_async_sds_pmap, _extract_sds_partition_map(str(p)))  # (R52 N39) 병합 규칙 단일 출처
                     except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그로
                         _logger.warning("[local UDS] SDS 파티션 맵 추출 실패 %s: %s", p.name, type(exc).__name__)
             # (R46 리뷰 C1) 다중 루트 전체 — jenkins async 경로와 같은 함수 집합.

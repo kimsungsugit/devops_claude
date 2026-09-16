@@ -400,6 +400,11 @@ def generate_uds_source_sections(
     globals_info_map: Dict[str, Dict[str, str]] = {}
     manual_globals_info_map: Dict[str, Dict[str, str]] = {}
     source_text_cache: Dict[str, str] = {}
+    # (R52 N41) 타입 폴백(`_infer_type_from_file`)의 실행 단위 원문 캐시 — 두 호출부가 **같은** 캐시를 넘긴다(한쪽만 넘기면
+    #   그쪽은 옛 동작대로 전역마다 파일을 다시 읽는다). 이 함수가 끝나면 버려진다.
+    #   ⚠ 위 `source_text_cache`(`_src_read` — 상한 없음, local 모드는 `errors="replace"`)와는 읽기 경로·상한·디코딩이 달라
+    #   합치지 않았다(리뷰 I2). 세 번째 원문 캐시를 만들지 말 것 — 합치려면 상한 통일이 먼저다.
+    _type_scan_cache: Dict[str, str] = {}
     _header_proto_map: Dict[str, str] = {}  # name → header prototype (우선)
     if component_map is None:
         component_map = _load_component_map()
@@ -828,7 +833,7 @@ def generate_uds_source_sections(
                 if gtype.lower() == "void" and re.match(r"^[gs]_", gname):
                     continue
                 if not gtype and gfile:
-                    gtype, init_from_file = _infer_type_from_file(gfile, gname)
+                    gtype, init_from_file = _infer_type_from_file(gfile, gname, cache=_type_scan_cache)
                     if not g.get("init") and init_from_file:
                         g = dict(g)
                         g["init"] = init_from_file
@@ -1623,7 +1628,7 @@ def generate_uds_source_sections(
                 if not gtype and gname in globals_info_map:
                     gtype = str(globals_info_map.get(gname, {}).get("type") or "").strip()
                 if not gtype and gfile:
-                    gtype2, init2 = _infer_type_from_file(gfile, gname)
+                    gtype2, init2 = _infer_type_from_file(gfile, gname, cache=_type_scan_cache)
                     if gtype2:
                         gtype = gtype2
                     if init2 and not ginit:

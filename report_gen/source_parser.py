@@ -323,6 +323,15 @@ def _read_source_text(
         data = _read_bytes_resolver_aware(path)
     except Exception:
         return "", 0, False
+    return _cap_and_decode(data, max_bytes)
+
+
+def _cap_and_decode(data: bytes, max_bytes: int = _SRC_READ_MAX_BYTES) -> Tuple[str, int, bool]:
+    """읽은 바이트에 상한·디코딩을 적용 → `(원문, 원본 바이트 수, 절단 여부)`.
+
+    `_read_source_text` 와, 읽기 **실패**를 구분해야 하는 호출자(`utils._infer_type_from_file` 의 실행 단위 캐시 —
+    R52 리뷰 W1: 실패를 빈 원문으로 굳히면 그 파일의 나머지 전역이 전부 조용히 타입 없음이 된다)가 같은 규칙을 쓴다.
+    """
     raw_len = len(data)
     truncated = bool(max_bytes) and raw_len > max_bytes
     if truncated:

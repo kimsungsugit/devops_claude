@@ -4,9 +4,9 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from report_gen.source_parser import _read_text_limited  # noqa: F401  (leaf module, no circular dep)
+from report_gen.source_parser import _cap_and_decode, _read_bytes_resolver_aware  # leaf module, no circular dep
 
 _logger = logging.getLogger("report_generator")
 
@@ -628,21 +628,80 @@ def _infer_type_from_decl(decl: str, name: str) -> str:
     return head if _is_type_head(head) else ""
 
 
-def _infer_type_from_file(file_path: str, name: str) -> Tuple[str, str]:
+def _iter_decl_matches(text: str, name: str, pattern: "re.Pattern[str]") -> Iterator["re.Match[str]"]:
+    """`pattern`(= `^\\s*(.+?)\\b{name}\\b\\s*(=|\\[|;)`, re.M) 의 `finditer(text)` 와 **같은 매치를 같은 순서로**
+    내되, 이름이 실제로 나오는 줄의 머리에서만 정규식을 돌린다.
+
+    왜: 원판은 줄마다 `^\\s*(.+?)` 를 게으르게 늘리며 이름을 찾아 파일 전체를 훑는다 — 이름이 파일에 **없을 때가 가장
+    느리다**. 실측(R52 N41, kjpds02_pv): 폴백 25,007회 중 22,627회(90%)가 그 파일에 이름이 아예 없는 호출이었다
+    (tree-sitter 가 '그 파일이 쓰는 전역' 을 파일에 귀속시키므로 선언은 다른 파일에 있다).
+
+    등가 근거: 매치는 `^` 때문에 줄 머리에서만 시작하고 `(.+?)` 는 개행을 못 넘으므로, 이름(리터럴)은 그 줄(또는 공백만 있는
+    줄들을 앞의 `\\s*` 가 건넌 뒤의 첫 내용 줄)에 **부분 문자열로** 있어야 한다. 그래서 이름이 나오는 줄의 머리에서
+    `pattern.match` 를 하면 finditer 가 거기(또는 그 앞 빈 줄 머리)에서 얻는 매치와 group(1)·끝 위치가 같다(빈 줄 접두는
+    group(0) 의 앞 공백만 다르고 호출자는 그것을 `(` 포함 여부·초기값 탐색에만 쓴다). finditer 처럼 앞 매치의 끝(`resume`)
+    앞에서는 시작하지 않는다. 통단어(`\\b`) 판정은 **원 정규식에 맡긴다** — 후보를 미리 거르는 사전 검사는 결과에 기여하지
+    않는 최적화였다(뮤테이션 생존으로 확인). `last_start` 도 같은 줄의 실패 매치를 반복하지 않는 최적화일 뿐이다.
+    가드: `tests/unit/test_infer_type_scan_cache.py`(참조 구현 대조 + 고정 시드 무작위 대조).
+    """
+    if not name:
+        yield from pattern.finditer(text)
+        return
+    resume = 0
+    last_start = -1
+    pos = 0
+    while True:
+        i = text.find(name, pos)
+        if i < 0:
+            return
+        # 한 글자씩 전진한다 — `i + len(name)` 은 이름에 개행이 들어 자기겹침할 때 다른 줄의 후보를 건너뛴다(리뷰 I1 반례
+        #   `text="a\nU8 a\nU8 a;"`, `name="a\nU8 a"`). 비용은 후보 줄 수에 비례하고 통단어 판정은 정규식 몫이다.
+        pos = i + 1
+        line_start = text.rfind("\n", 0, i) + 1
+        if line_start < resume or line_start == last_start:
+            continue
+        last_start = line_start
+        m = pattern.match(text, line_start)
+        if m is None:
+            continue
+        yield m
+        resume = m.end()
+
+
+def _infer_type_from_file(
+    file_path: str, name: str, *, cache: Optional[Dict[str, str]] = None
+) -> Tuple[str, str]:
+    """파일 원문에서 `name` 의 선언 타입(과 초기값)을 찾는 폴백 → `(타입, 초기값)`, 못 찾으면 `("", "")`.
+
+    `cache` 는 **한 생성 실행 안**에서 파일 원문(상한 적용)을 재사용하는 dict({경로: 원문}) — 호출자가 만들고 버린다.
+    ⚠ 실측(R52 N41, kjpds02_pv 2 루트 · 179 파일 · 3.4MB): 전역 25,007건이 전부 이 폴백을 탔고 **호출마다 파일을 다시
+      읽어**(cloudium 모드에선 워커 IPC 소켓 연결) 777MB 를 옮겼다 — 소스 분석 491초 중 IPC 251초(51%). 같은 파일은 113개뿐.
+      모듈 전역 캐시로 두지 않는다: 파일이 바뀐 뒤(SVN 갱신)에도 남는다. 기본값 None 은 옛 동작(매번 읽기) 그대로.
+    """
     if not file_path or not name:
         return "", ""
-    try:
-        # ⚠ 상한을 여기 박아두면(옛 판 `200_000`) 선언이 파일 뒤쪽에 있는 전역은
-        #   폴백조차 못 탄다. 상한은 `_SRC_READ_MAX_BYTES` 단일 출처를 따른다.
-        text = _read_text_limited(Path(file_path))
-    except Exception:
-        return "", ""
+    key = str(file_path)
+    text = cache.get(key) if cache is not None else None
+    if text is None:
+        try:
+            # ⚠ 상한을 여기 박아두면(옛 판 `200_000`) 선언이 파일 뒤쪽에 있는 전역은
+            #   폴백조차 못 탄다. 상한은 `_SRC_READ_MAX_BYTES` 단일 출처(`_cap_and_decode`)를 따른다.
+            text = _cap_and_decode(_read_bytes_resolver_aware(Path(file_path)))[0]
+        except FileNotFoundError:
+            text = ""        # 없는 파일 — 옛 동작(빈 원문)과 같고, 다시 읽어도 없으므로 캐시해도 된다
+        except Exception:
+            # (리뷰 W1) 일시 실패(워커 타임아웃·연결 거부 등)는 **캐시하지 않는다** — 빈 원문을 굳히면 그 파일의 나머지
+            #   전역 전부가 조용히 타입 없음이 된다(재현: 첫 읽기만 실패시키면 3전역 전부 `("", "")`). 옛 판처럼 다음
+            #   심볼에서 다시 읽는다. 반환값은 옛 판과 같다(`("", "")`).
+            return "", ""
+        if cache is not None:
+            cache[key] = text
     name_re = re.escape(name)
     try:
         pattern = re.compile(rf"^\s*(.+?)\b{name_re}\b\s*(=|\[|;)", re.M)
     except re.error:
         return "", ""
-    for match in pattern.finditer(text):
+    for match in _iter_decl_matches(text, name, pattern):
         decl = match.group(0)
         if "(" in decl:
             continue

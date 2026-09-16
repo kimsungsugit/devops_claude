@@ -1274,9 +1274,7 @@ def _finalize_function_fields(info: Dict[str, Any]) -> Dict[str, Any]:
     if not str(out.get("precondition") or "").strip():
         out["precondition"] = "N/A"
     out["precondition"] = _dedupe_multiline_text(str(out.get("precondition") or ""), na_to_empty=True) or "N/A"
-    if name_text.lower() == "main":
-        out["related"] = "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
-        out["related_source"] = out.get("related_source") or "rule"
+    # (R52 N39) `main` 의 Related 를 프로젝트 ID 리터럴로 덮던 특례를 지웠다 — `docx_builder.py` 의 같은 리터럴과 한 세트.
     for key in ("inputs", "outputs", "globals_global", "globals_static"):
         val = out.get(key)
         if not isinstance(val, list):
@@ -1337,8 +1335,6 @@ def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
     proto_text = str(info.get("prototype") or "").strip()
     if not proto_text and name_norm == "main":
         info["prototype"] = "void main( void )"
-    if name_norm == "main":
-        info["related"] = "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
     if not str(info.get("description") or "").strip():
         info["description"] = _fallback_function_description(
             str(info.get("name") or ""),

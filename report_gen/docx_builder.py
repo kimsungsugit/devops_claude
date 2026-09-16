@@ -51,6 +51,7 @@ from report_gen.requirements import (
     _extract_doc_section,
     _extract_function_info_from_docx,
     _extract_sds_partition_map,
+    _merge_sds_partition_map,
 )
 from report_gen.uds_text import (
     _ai_document_text,
@@ -2495,17 +2496,10 @@ def generate_uds_docx(
     sds_doc_paths = payload.get("sds_doc_paths") or []
     for sds_path in sds_doc_paths:
         try:
-            docx_map = _extract_sds_partition_map(sds_path)
-            if docx_map:
-                for k, v in docx_map.items():
-                    if k not in sds_partition_map:
-                        sds_partition_map[k] = v
-                    else:
-                        for field in ("asil", "related", "description"):
-                            if v.get(field) and not sds_partition_map[k].get(field):
-                                sds_partition_map[k][field] = v[field]
-        except Exception:
-            pass
+            # (R52 리뷰 W3) 손복제 루프 → 단일 출처. 옛 루프는 새 키를 **별칭**으로 넣었다(입력 맵을 건드리면 같이 바뀜) — 헬퍼는 사본.
+            _merge_sds_partition_map(sds_partition_map, _extract_sds_partition_map(sds_path))
+        except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그로(옛 판은 침묵)
+            _logger.warning("SwDS 파티션 맵 추출 실패 %s: %s", Path(str(sds_path)).name, type(exc).__name__)
     _sds_name_labels = {"partition name", "component name", "module name", "name"}
     _sds_asil_labels = {"asil"}
     _sds_desc_labels = {"description", "desc"}
@@ -3868,22 +3862,17 @@ def generate_uds_docx(
                         lines.append(sig or str(c))
                     info["calling"] = "\n".join([ln for ln in lines if ln])
                 ref_rel = ref_related_by_name.get(heading_fn_name)
-                if heading_fn_name == "main" and ref_rel:
+                # (R52 N39) `main` 특례를 지웠다 — 다른 함수와 같은 규칙. 예전엔 정본에 main 이 없으면 프로젝트 ID 리터럴
+                #   ("SwST_01, SwCom_01, SwSTR_…")을 `rule` 로 실었다: 그 값은 KJPDS02 정본 main 의 Related 이자
+                #   `docs/uds_function_swcom_override.json` 의 main 항목과 같은 값이라 코드에 둘 이유가 없고, 다른
+                #   프로젝트에선 지어내기다(같은 리터럴이 이 파일 3곳 + `function_analyzer.py` 2곳에 있었다).
+                cur_related = str(info.get("related") or "").strip()
+                if cur_related in {"", "TBD", "SwCom_01"} and ref_rel:
                     info["related"] = ref_rel
                     info["related_source"] = "reference"
-                elif heading_fn_name == "main":
-                    info["related"] = "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
-                    info["related_source"] = "rule"
-                else:
-                    cur_related = str(info.get("related") or "").strip()
-                    if cur_related in {"", "TBD", "SwCom_01"} and ref_rel:
-                        info["related"] = ref_rel
-                        info["related_source"] = "reference"
             return info
 
         def _build_function_info_table(info: Dict[str, Any], rows: int, cols: int, style: Any):
-            if str(info.get("name") or "").strip().lower() == "main":
-                info["related"] = "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
             fn_key = str(info.get("name") or "").strip().lower()
             callee_names = [str(c).strip() for c in (info.get("calls_list") or []) if str(c).strip()]
             if (not callee_names) and call_relation_mode == "code" and isinstance(call_map, dict):
@@ -4762,8 +4751,6 @@ def generate_uds_docx(
             _inf2["calling"] = "\n".join(_sig_lines(_caller_names)) if _caller_names else "N/A"
         if _fn_key == "main" and not str(_inf2.get("calling") or "").strip().replace("N/A", ""):
             _inf2["calling"] = "void _Startup(void)"
-        if _fn_key == "main":
-            _inf2["related"] = _inf2.get("related") or "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
 
         # AI-enhance description if it's short
         _existing_desc = str(_inf2.get("description") or _inf2.get("desc") or "").strip()

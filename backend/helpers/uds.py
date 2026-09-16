@@ -2702,7 +2702,7 @@ def _uds_generate_from_paths(
     #   때문이고, 이제 정본이 `sds`·모듈상속을 덮는다(`docx_builder` 정본 채움 + `provenance.reference_suds_may_override`).
     #   그래서 SwDS 는 정본이 못 채운 함수(run 2078 TBD 134)에만 남는다 — 사용자 결정(2026-09-15).
     # 지연 import — `report_gen.requirements` 는 무겁고 이 함수만 쓴다(리뷰 I3; `is_sds_filename` 은 가벼워 모듈 상단).
-    from report_gen.requirements import _extract_sds_partition_map
+    from report_gen.requirements import _extract_sds_partition_map, _merge_sds_partition_map
     _sds_pmap: Dict[str, Dict[str, str]] = {}
     _sds_candidates = 0
     for _sds_doc in req_doc_paths:
@@ -2710,7 +2710,8 @@ def _uds_generate_from_paths(
             continue
         _sds_candidates += 1
         try:
-            _sds_pmap.update(_extract_sds_partition_map(_sds_doc))
+            # (R52 N39) 병합 규칙 단일 출처(related/description first-wins · asil max) — `dict.update` 는 뒤 문서가 통째로 이겼다.
+            _merge_sds_partition_map(_sds_pmap, _extract_sds_partition_map(_sds_doc))
         except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그·항목으로 남긴다
             _logger.warning("[UDS] SwDS 파티션 맵 추출 실패 %s: %s", Path(_sds_doc).name, type(exc).__name__)
             _issues.add("sds_partition_map_failed", "warning", "actual",

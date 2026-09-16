@@ -27,6 +27,7 @@ from report_gen.requirements import (
     _asil_max_of,
     _extract_sds_partition_map,
     _load_component_map,
+    _merge_sds_partition_map,
     component_verify_of,
     is_sds_placeholder_key,
     normalize_sds_key,
@@ -198,18 +199,7 @@ _DEFAULT_TEST_ENV = "SwTE_01"
 
 _SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
 
-
-def _merge_sds_partition_map(
-    merged: Dict[str, Dict[str, str]], data: Dict[str, Dict[str, str]]
-) -> None:
-    """first-wins 병합 — 이미 값이 있는 필드는 덮어쓰지 않는다."""
-    for key, value in data.items():
-        if key not in merged:
-            merged[key] = dict(value)
-            continue
-        for field in ("asil", "related", "description"):
-            if value.get(field) and not merged[key].get(field):
-                merged[key][field] = value[field]
+# (R52 N39) `_merge_sds_partition_map` 은 `report_gen.requirements` 단일 출처 — UDS 세 경로와 같은 first-wins 규칙.
 
 
 def load_sds_map_from(sds_docx_path: str) -> Dict[str, Dict[str, str]]:

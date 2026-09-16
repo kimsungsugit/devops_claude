@@ -21,6 +21,7 @@ from generators.safety_marks import resolve_safety_related as _safety_mark_impl
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _extract_sds_partition_map,
+    _merge_sds_partition_map,
     is_sds_placeholder_key,
     normalize_sds_key,
 )
@@ -172,14 +173,7 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
             if not is_sds_filename(path.name):
                 continue
             picked.append(path.name)
-            data = _extract_sds_partition_map(str(path))
-            for key, value in data.items():
-                if key not in merged:
-                    merged[key] = dict(value)
-                    continue
-                for field in ("asil", "related", "description"):
-                    if value.get(field) and not merged[key].get(field):
-                        merged[key][field] = value[field]
+            _merge_sds_partition_map(merged, _extract_sds_partition_map(str(path)))   # (R52 리뷰 W3) 손복제 루프 → 단일 출처
     if merged:
         # ⚠ 침묵 금지 — 이 맵은 **프로젝트 무관**인데 실측상 요구-함수 링크 전량을
         #   좌우한다(HDPDM01 기준 5,992건 100%). 어느 문서가 쓰였는지 남긴다.
