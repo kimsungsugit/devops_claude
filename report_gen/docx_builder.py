@@ -39,6 +39,8 @@ from report_gen.function_analyzer import (
     _normalize_symbol_name,
     _parse_signature_outputs,
     _parse_signature_params,
+    is_logic_diagram_header,
+    is_logic_diagram_label,
     resolve_param_grid_entries,
 )
 from report_gen.provenance import (
@@ -1605,15 +1607,29 @@ def _infer_function_info_layout(table):
     (음성 대조군이 잡았다). 그래서 정본 배치의 **내용**으로 판정한다 —
     `report_gen.requirements._extract_function_info_from_docx` 가 같은 문서를 되읽을 때
     쓰는 것과 같은 상태기계다(섹션 머리 → 그리드 헤더 → 번호로 시작하는 데이터 행).
+    (R54 N49) `[ Logic Diagram ]` 머리행과 그 다음 그림행은 full — 그림행은 글이 없어 내용이 아니라 **머리행 뒤라는 위치**로 판정한다.
     """
     layout = []
     try:
         in_params = False
+        logic_body_next = False
         for r_idx, row in enumerate(list(table.rows)):
             cells = [str(c.text or "").strip() for c in _distinct_cells(row)]   # (R53) 판정은 첫 칸·집합·any 뿐 — 중복 칸 불필요
             first = cells[0] if cells else ""
             norm = re.sub(r"[\[\]\s]+", " ", first).strip().lower()
             if r_idx == 0:
+                layout.append((FN_ROW_FULL, []))
+                continue
+            if logic_body_next:
+                logic_body_next = False
+                if len(cells) == 1 or all(not c for c in cells):     # (R54 N49) 머리행 다음 = 전폭 그림행 — 전폭 한 칸이거나 전부 빈 칸일 때만(리뷰 W2)
+                    layout.append((FN_ROW_FULL, []))
+                    continue
+                # 모양이 다르면(라벨|값 행이 바로 온 표) 보통 행으로 — 아래 판정으로 흘린다
+            if is_logic_diagram_label(first) and (is_logic_diagram_header(first) or len(cells) == 1):
+                # (R54 N49) 정본 배치의 머리행(대괄호 표기, 또는 이미 전폭 한 칸). 옛 라벨|값 한 행(대괄호 없음·두 칸)은 아래 pair 로.
+                in_params = False
+                logic_body_next = True
                 layout.append((FN_ROW_FULL, []))
                 continue
             if norm in ("input parameters", "output parameters", "input paramters"):
@@ -1726,7 +1742,12 @@ def _fill_function_info_table(table, layout) -> None:
 
 
 def _insert_logic_image_in_table(table, cols: int, logic_img: str, picture_sink=None) -> bool:
-    """함수 정보 표의 `Logic Diagram` 행 값 칸에 그림을 넣는다.
+    """함수 정보 표의 Logic Diagram 그림 칸에 그림을 넣는다.
+
+    그림 칸은 배치에 따라 둘 중 하나다(R54 N49):
+    · 정본 배치 — `[ Logic Diagram ]` 전폭 머리행(대괄호 표기, 또는 이미 전폭 한 칸) 다음의 **전폭 그림행**(KJPDS02 정본 989/989).
+    · 옛 배치 — `Logic Diagram` 라벨|값 한 행의 값 칸(`min(2, cols-1)` 열). 좁은 표(6열 미만) 폴백은 아직 이 배치다.
+    머리행 뒤에 행이 없으면 False(호출부가 표 뒤 문단으로 폴백한다) — 조용히 머리행에 덮어쓰지 않는다.
 
     `picture_sink`(`_PictureSink`)가 있으면 그 싱크로 넣는다(R53 N27-c — 결과 XML 은 `run.add_picture` 와 같고 그림마다
     문서 전체를 훑지 않는다). 없으면 python-docx 원판.
@@ -1758,10 +1779,25 @@ def _insert_logic_image_in_table(table, cols: int, logic_img: str, picture_sink=
     try:
         stride = table._column_count
         grid = _grid_cells(table)             # 표당 1회 — `Table.cell` 은 호출마다 그리드를 다시 만든다
-        for r_idx, row in enumerate(table.rows):
+        rows_l = list(table.rows)
+        for r_idx, row in enumerate(rows_l):
             cells = [c.text.strip() for c in _distinct_cells(row)]     # (R53) 병합 칸은 한 번만 읽는다 — any() 판정은 같다
-            if any(c.replace(" ", "") == "LogicDiagram" for c in cells):
-                target_cell = grid[min(2, cols - 1) + r_idx * stride]
+            hit = next((c for c in cells if is_logic_diagram_label(c)), None)
+            if hit is not None:
+                if is_logic_diagram_header(hit) or len(cells) == 1:
+                    # (R54 N49) 정본 배치 — 그림은 다음 전폭 행. 머리행이 한 칸뿐이면 "값 칸" 이 곧 라벨 칸이라 거기 넣으면 라벨이 지워진다.
+                    #   다음 행은 **행 단위**로 잡고(그리드 평면 인덱스는 비직사각 표에서 어긋난다 — 리뷰 W3) 전폭 한 칸이거나 전부 빈 칸일
+                    #   때만 지운다 — 라벨|값 행이 바로 오면 그 라벨을 지우는 대신 False(표 뒤 문단 폴백 — 검증기는 그 표를 '그림 없음' 으로 센다).
+                    if r_idx + 1 >= len(rows_l):
+                        _logger.warning("Logic Diagram 머리행 뒤에 그림행이 없다 — 표 뒤 문단으로 폴백한다")
+                        return False
+                    nxt = _distinct_cells(rows_l[r_idx + 1])
+                    if not nxt or not (len(nxt) == 1 or all(not c.text.strip() for c in nxt)):
+                        _logger.warning("Logic Diagram 머리행 다음 행이 그림행 모양(전폭 한 칸·빈 칸)이 아니다 — 표 뒤 문단으로 폴백한다")
+                        return False
+                    target_cell = nxt[0]
+                else:
+                    target_cell = grid[min(2, cols - 1) + r_idx * stride]      # 옛 배치(라벨|값 한 행) — 좁은 표 폴백이 아직 쓴다
                 _clear_cell(target_cell)
                 p = target_cell.paragraphs[0] if target_cell.paragraphs else target_cell.add_paragraph()
                 run = p.add_run()
@@ -4111,7 +4147,7 @@ def generate_uds_docx(
                     info["related_source"] = "reference"
             return info
 
-        def _build_function_info_table(info: Dict[str, Any], rows: int, cols: int, style: Any):
+        def _build_function_info_table(info: Dict[str, Any], cols: int, style: Any):
             fn_key = str(info.get("name") or "").strip().lower()
             callee_names = [str(c).strip() for c in (info.get("calls_list") or []) if str(c).strip()]
             if (not callee_names) and call_relation_mode == "code" and isinstance(call_map, dict):
@@ -4279,10 +4315,10 @@ def generate_uds_docx(
             #   이미지는 아래 `_insert_logic_image_in_table` 이 그 칸에 직접 넣으므로
             #   파일명은 어차피 필요 없다 — 죽은 쓰기를 되살리는 대신 지운다.
             data_rows = [(FN_ROW_FULL, ["[ Function Information ]"])] + data_rows
-            # ⚠ 템플릿이 준 행 수는 **정본 함수의 파라미터 개수**에서 온 것이라 우리
-            #   함수와 다르다. 고정하면 늘어난 파라미터가 조용히 잘린다(무템플릿 경로는
-            #   예전부터 `max` 였다 — 같은 표를 두 경로가 다르게 자르고 있었다).
-            func_table = _add_blank_table(doc, max(len(data_rows), rows), cols, style, None, None)
+            # ⚠ 표의 행 수는 **데이터가 정한다**(R54 N50). 예전엔 템플릿 표의 행 수(= 정본 그 함수의 파라미터 개수)를 하한으로
+            #   두어(`max(len, 템플릿 행 수)`) 우리 행이 더 적은 함수마다 빈 라벨|값 행이 꼬리에 남았다 — 라이브 실측 516/989 표.
+            #   그 전엔 그 값으로 **고정**이라 늘어난 파라미터가 조용히 잘렸다(무템플릿 경로는 하한 18). 둘 다 아니다.
+            func_table = _add_blank_table(doc, len(data_rows), cols, style, None, None)
             _merge_function_info_table(func_table, cols, data_rows)
             _fill_function_info_table(func_table, data_rows)
             if logic_img:
@@ -4470,16 +4506,17 @@ def generate_uds_docx(
                                     break
                     # (`swufn_table_spec` 조회는 제거 — 위 2829 주석 참조. 이 전방탐색이
                     #  같은 표를 찾아내며 실측 429/429 동일했다.)
+                    # 템플릿 표에서는 열 수·스타일만 가져온다 — 행 수는 데이터가 정한다(R54 N50)
                     if target_idx is not None:
-                        (rows, cols, style, _header_rows,
+                        (_rows, cols, style, _header_rows,
                          _ctx_titles, _el_ti) = blocks[target_idx][1]
                     elif function_info_template:
-                        rows, cols, style, _header_rows = function_info_template
+                        _rows, cols, style, _header_rows = function_info_template
                     else:
-                        rows, cols, style = 18, 6, None
+                        cols, style = PARAM_GRID_COLS, None                  # 정본 그리드 폭(6)
                     info = _resolve_function_info(str(title), key)
                     _note_fn_match(str(title), info)
-                    _build_function_info_table(info, rows, cols, style)
+                    _build_function_info_table(info, cols, style)
                     if target_idx is not None:
                         skip_table_idx = target_idx
             elif kind == "table":
@@ -4953,7 +4990,7 @@ def generate_uds_docx(
         t.join(timeout=20)
         return result_holder.get("desc", "")
 
-    def _build_function_info_table(info: Dict[str, Any], rows: int, _cols: int, style: Any) -> None:
+    def _build_function_info_table(info: Dict[str, Any], _cols: int, style: Any) -> None:
         """Build and append a function info table to doc."""
         _fn_key = str(info.get("name") or "").strip().lower()
         # Resolve called/calling
@@ -5016,8 +5053,7 @@ def generate_uds_docx(
                 module_map=module_map if isinstance(module_map, dict) else None,
             )
         _data_rows = [(FN_ROW_FULL, ["[ Function Information ]"])] + _data_rows
-        _rows_per_fn = max(len(_data_rows), rows)
-        _ft = _add_blank_table(doc, _rows_per_fn, _cols, style, None, None)
+        _ft = _add_blank_table(doc, len(_data_rows), _cols, style, None, None)   # (R54 N50) 행 수는 데이터가 정한다 — 하한 18 은 빈 꼬리 행이었다
         _merge_function_info_table(_ft, _cols, _data_rows)
         _fill_function_info_table(_ft, _data_rows)
         if _logic_img:
@@ -5219,7 +5255,7 @@ def generate_uds_docx(
                 )
                 if not isinstance(_inf, dict):
                     _inf = {"id": _fid2, "name": _fname2}
-                _build_function_info_table(_inf, 18, cols, None)
+                _build_function_info_table(_inf, cols, None)
                 fn_added += 1
 
         _write_fn_section(_swcom_func_map[_swcom_id]["interfaces"], "Interface Functions", 3)

@@ -505,6 +505,8 @@ def _extract_docx_sheets(doc) -> List[Dict[str, Any]]:
     paginate=True 시트만 호출부에서 row_start:row_end로 슬라이싱한다(other_tables는
     추출 시 100행으로 이미 캡됨 → paginate=False). 결과는 페이지 무관 → 캐시 안전.
     """
+    from report_gen.function_analyzer import is_logic_diagram_header, is_logic_diagram_label
+
     ns_a = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
             'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
     func_tables: List[Dict[str, str]] = []
@@ -534,7 +536,8 @@ def _extract_docx_sheets(doc) -> List[Dict[str, Any]]:
                 attr_tables.append(attr_data)
         elif "Function Information" in first_text:
             func_data: Dict[str, str] = {}
-            for row in table.rows[1:]:
+            rows_l = list(table.rows[1:])
+            for r_i, row in enumerate(rows_l):
                 cells_raw = row.cells
                 cells = [c.text.strip() for c in cells_raw]
                 if len(cells) >= 3:
@@ -542,8 +545,16 @@ def _extract_docx_sheets(doc) -> List[Dict[str, Any]]:
                     value = cells[2]
                     if label and label != "[ Function Information ]":
                         func_data[label] = value
-                    if label == "Logic Diagram":
-                        for cell in cells_raw[2:]:
+                    if is_logic_diagram_label(label) and not func_data.get("_image_id"):
+                        # (R54 N49) 그림 칸은 빌더와 같은 규칙 — 정본 배치(`[ Logic Diagram ]` 머리행, 또는 전폭 한 칸)면 **다음 행**,
+                        #   옛 라벨|그림 한 행이면 같은 행 3열부터. 예전엔 라벨 문자열 정확 일치(대괄호 없는 표기만) + 같은 행만 봐서
+                        #   정본(대괄호 표기)의 그림은 미리보기에 한 번도 실린 적이 없었다.
+                        distinct = len({id(c._tc) for c in cells_raw})
+                        if is_logic_diagram_header(label) or distinct <= 1:
+                            candidates = list(rows_l[r_i + 1].cells) if r_i + 1 < len(rows_l) else []
+                        else:
+                            candidates = list(cells_raw[2:])
+                        for cell in candidates:
                             blips = cell._element.findall('.//a:blip', ns_a)
                             for b in blips:
                                 embed = b.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')

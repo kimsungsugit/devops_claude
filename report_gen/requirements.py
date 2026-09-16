@@ -553,6 +553,12 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
                         continue
                 if not label_norm:
                     continue
+                if last_label_norm == "logic diagram" and len(set(cells)) == 1 and not str(info.get("logic") or "").strip():
+                    # (R54 N49) 정본 배치 — `[ Logic Diagram ]` 머리행 **다음의 전폭 본문행**이 logic 본문이다(그림행이면 글이 없어 위
+                    #   `if not label_norm: continue` 에서 이미 빠진다). 옛 라벨|값 한 행은 아래 `logic diagram` 분기가 값을 읽는다.
+                    #   빌더 `_build_function_info_layout` 과 같은 배치 규칙(리뷰 W1 — 왕복 가드 `test_docx_logic_diagram_rows`).
+                    info["logic"] = label
+                    continue
                 last_label_norm = label_norm
                 if label_norm == "name":
                     info["name"] = _normalize_symbol_name(value)

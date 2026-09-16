@@ -25,6 +25,8 @@ from report_gen.function_analyzer import (
     _classify_description_quality,
     _is_generic_description,
     _normalize_symbol_name,
+    is_logic_diagram_header,
+    is_logic_diagram_label,
 )
 from report_gen.gate_report import has_meaningful_value, parse_gate_report, to_percent_text_map
 from report_gen.provenance import SOURCE_ALIASES, has_evidence_value, is_weak_source, unrecorded_source
@@ -251,6 +253,16 @@ def _docx_heading_function_names(doc: Any) -> set:
     return out
 
 
+def _cell_has_picture(cell: Any) -> bool:
+    """셀 XML 에 그림(`w:drawing` 또는 VML `v:imagedata`)이 있는가. 못 읽으면 '그림 없음'(게이트 입력 — 옛 성질 유지, 리뷰 I4)."""
+    try:
+        xml = cell._tc.xml
+    except Exception as exc:  # noqa: BLE001 — 게이트 입력 함수가 통째로 죽는 것보다 '그림 없음' 이 옛 성질이다
+        _logger.debug("logic 그림 칸을 읽지 못했다(%s: %s) — 그림 없음으로 센다", type(exc).__name__, exc)
+        return False
+    return "w:drawing" in xml or "v:imagedata" in xml
+
+
 def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "docx_path": docx_path,
@@ -294,16 +306,28 @@ def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
         first_row = [c.text.strip() for c in table.rows[0].cells]
         if any("Function Information" in cell for cell in first_row):
             result["function_info_table_count"] += 1
-            for r_idx, row in enumerate(table.rows):
-                row_cells = [c.text.strip() for c in row.cells]
-                if any("Logic Diagram" in c for c in row_cells):
+            rows_l = list(table.rows)
+            for r_idx, row in enumerate(rows_l):
+                cells = row.cells
+                row_cells = [c.text.strip() for c in cells]
+                hit = next((c for c in row_cells if is_logic_diagram_label(c)), None)
+                if hit is not None:
                     result["logic_row_count"] += 1
-                    target_col = min(2, max(0, len(row.cells) - 1))
+                    # 그림 칸은 빌더(`docx_builder._insert_logic_image_in_table`)와 같은 규칙으로 찾는다(R54 N49):
+                    #   정본 배치(`[ Logic Diagram ]` 머리행, 또는 전폭 한 칸)면 **다음 행** 첫 칸, 옛 라벨|그림 한 행이면 같은 행 3열.
+                    #   ⚠ 이 수치는 `issues` → `ok` → 품질 게이트 입력이다. 배치를 바꾸며 여기를 안 바꾸면 989/989 가 거짓 실패다.
+                    #   (라벨 판정도 부분문자열이 아니라 같은 정확 판정 — 설명 칸이 그 말을 언급한 행을 logic 행으로 세지 않는다.)
                     try:
-                        xml = table.cell(r_idx, target_col)._tc.xml
-                    except Exception:
-                        xml = ""
-                    if "w:drawing" in xml or "v:imagedata" in xml:
+                        distinct = len({id(c._tc) for c in cells})
+                        if is_logic_diagram_header(hit) or distinct <= 1:
+                            nxt = rows_l[r_idx + 1].cells if r_idx + 1 < len(rows_l) else ()
+                            target = nxt[0] if nxt else None
+                        else:
+                            target = cells[min(2, len(cells) - 1)]
+                    except Exception as exc:  # noqa: BLE001 — 옛 코드의 `except Exception: xml = ""` 와 같은 성질(리뷰 I4)
+                        _logger.debug("logic 그림 칸을 고르지 못했다(%s: %s) — 그림 없음으로 센다", type(exc).__name__, exc)
+                        target = None
+                    if target is not None and _cell_has_picture(target):
                         result["logic_with_image_count"] += 1
     result["top_headers"] = [
         {"header": h, "count": c}

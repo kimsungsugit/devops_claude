@@ -1398,7 +1398,7 @@ def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
     )
     pairs.append(("Called Function", _normalize_call_field(str(info.get("called") or "")) or "N/A"))
     pairs.append(("Calling Function", _normalize_call_field(str(info.get("calling") or "")) or "N/A"))
-    pairs.append(("Logic Diagram", str(info.get("logic") or "")))
+    pairs.append((LOGIC_DIAGRAM_LABEL, str(info.get("logic") or "")))
 
     return pairs
 
@@ -1413,12 +1413,32 @@ def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
 #   full : 전체 폭 한 칸        `[ Function Information ]` · `[ Input Parameters ]` …
 #   pair : 라벨[0-1] + 값[2..]  ID / Name / Prototype / …
 #   grid : 6칸 독립             `No|Name|Type|Value Range|Reset Value|Description` 와 그 데이터
+#   (R54 N49) `[ Logic Diagram ]` 머리행과 그 다음 그림행은 **둘 다 full** — KJPDS02 정본 v3.03 989/989. 그림은 빌더가 그림행에 넣는다.
 #
 # ⚠ 이 상수는 `docx_builder._merge_function_info_table` / `_fill_function_info_table`
 #   이 **함께** 본다. 종류를 늘리면 그 두 곳이 같이 움직여야 한다.
 FN_ROW_FULL = "full"
 FN_ROW_PAIR = "pair"
 FN_ROW_GRID = "grid"
+
+# (R54 N49) Logic Diagram 행 — 정본 배치는 `[ Logic Diagram ]` **전폭 머리행** + **전폭 그림행**이다.
+#   실측(2026-09-16, KJPDS02 정본 v3.03 함수 표 989개 전수 lxml 직독): 989/989 가 머리행(1칸·gridSpan 6) 다음 그림행(1칸·gridSpan 6,
+#   trHeight 2175)이고 라벨|그림 한 행은 0개. 우리 산출물(run 2084)은 989/989 가 `Logic Diagram` 라벨(2칸)|그림(4칸) 한 행이었다
+#   (R53 리뷰 I1 의 "값 칸 4.0in < 그림 5.2in" 도 그 배치의 결과). 라벨 문자열과 판정은 **여기 한 곳**이다 — 빌더(`docx_builder`)·
+#   검증기(`validation`)·미리보기 리더(`backend.routers.health`)가 같은 판정으로 그 행을 찾는다(복제본 셋 중 하나만 고치는 사고 방지).
+LOGIC_DIAGRAM_LABEL = "Logic Diagram"
+LOGIC_DIAGRAM_HEADER = "[ Logic Diagram ]"
+
+
+def is_logic_diagram_label(text: Any) -> bool:
+    """`Logic Diagram` / `[ Logic Diagram ]` / 공백·대소문자 흔들림을 같은 라벨로 본다(`Logic Diagrams`·문장 속 언급은 아님)."""
+    return re.sub(r"[\[\]\s]+", "", str(text or "")).lower() == "logicdiagram"
+
+
+def is_logic_diagram_header(text: Any) -> bool:
+    """정본 표기 `[ Logic Diagram ]`(대괄호) — 머리행이면 그림은 **다음 행**이다. 옛 라벨|그림 한 행의 라벨엔 대괄호가 없다."""
+    s = str(text or "").strip()
+    return s.startswith("[") and s.endswith("]") and is_logic_diagram_label(s)
 
 # 정본 파라미터 그리드의 열. 순서가 곧 계약이다 — `report_gen.requirements`
 # `_parse_param_row` 가 같은 순서로 되읽는다.
@@ -1869,20 +1889,13 @@ def _build_function_info_layout(info: Dict[str, Any], cols: int) -> List[Tuple[s
             layout.append((FN_ROW_FULL, [f"[ {key} ]"]))
             layout.append((FN_ROW_GRID, list(PARAM_GRID_HEADER)))
             layout.extend((FN_ROW_GRID, list(r)) for r in (rows or [_empty_param_grid_row()]))
+        elif key == LOGIC_DIAGRAM_LABEL:
+            # (R54 N49) 정본 배치 — 전폭 머리행 + 전폭 본문행. 본문행의 글은 `logic` 본문이고(되읽기 `requirements._extract_function_info_from_docx`
+            #   가 머리행 다음 전폭 행에서 읽는다 — 리뷰 W1 왕복 가드), 그림이 있으면 빌더(`docx_builder._insert_logic_image_in_table`)가 그 칸을
+            #   비우고 그림을 넣는다(옛 라벨|값 행의 값 칸과 같은 규칙 — 그림이 있으면 글은 문서에 남지 않는다).
+            layout.append((FN_ROW_FULL, [LOGIC_DIAGRAM_HEADER]))
+            layout.append((FN_ROW_FULL, [value]))
         else:
             layout.append((FN_ROW_PAIR, [key, value]))
     return layout
-    cells_per_row = max(2, cols // 2 * 2)
-    pairs_per_row = max(1, cells_per_row // 2)
-    row: List[str] = []
-    for idx, (k, v) in enumerate(pairs):
-        row.extend([k, v])
-        if (idx + 1) % pairs_per_row == 0:
-            rows.append(row[:cells_per_row])
-            row = []
-    if row:
-        while len(row) < cells_per_row:
-            row.append("")
-        rows.append(row[:cells_per_row])
-    return rows
 

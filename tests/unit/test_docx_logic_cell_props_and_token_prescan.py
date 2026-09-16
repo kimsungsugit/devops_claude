@@ -48,7 +48,7 @@ _LAYOUT = [
     (FN_ROW_PAIR, ["ID", "", "SwUFn_0101"]),
     (FN_ROW_PAIR, ["Logic Diagram", "", ""]),
     (FN_ROW_PAIR, ["Called Function", "", "N/A"]),
-    (FN_ROW_PAIR, ["", "", ""]),           # 템플릿 행수가 데이터보다 많을 때 남는 빈 꼬리 행(라이브 516/989 표)
+    (FN_ROW_PAIR, ["", "", ""]),           # R54 N50 이전 라이브 516/989 표에 남던 빈 꼬리 행 — 되읽기·삽입 경로는 여전히 견뎌야 한다
 ]
 
 

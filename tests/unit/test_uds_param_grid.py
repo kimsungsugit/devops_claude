@@ -292,7 +292,8 @@ class TestLayout:
         expected = ["ID", "Name", "Prototype", "Description", "ASIL", "Related ID",
                     "[ Input Parameters ]", "[ Output Parameters ]", "선행조건",
                     "Used Globals (Global)", "Used Globals (Static)",
-                    "Called Function", "Calling Function", "Logic Diagram"]
+                    "Called Function", "Calling Function",
+                    "[ Logic Diagram ]", ""]      # (R54 N49) 정본 배치: 전폭 머리행 + 전폭 그림행(글은 `logic` 본문 — 여긴 없음)
         assert labels == expected
 
 
@@ -323,14 +324,16 @@ class TestCallSitesStayInSync:
 
     def test_both_builders_size_the_table_to_the_layout(self):
         """⚠ 템플릿 경로는 예전에 템플릿이 준 행 수로 **고정**이라, 늘어난 파라미터가
-        조용히 잘렸다. 무템플릿 경로는 예전부터 `max` 였다 — 같은 표를 두 경로가
-        다르게 자르고 있었다."""
+        조용히 잘렸다. 그 다음엔 두 경로 모두 `max(len(rows), 템플릿 행 수)` 로 **하한**을
+        두어, 우리 행이 더 적은 함수마다 빈 라벨|값 행이 꼬리에 남았다(R54 N50 — 라이브
+        516/989 표). 행 수는 정확히 데이터 행 수다 — 잘리지도, 남지도 않는다."""
         from report_gen import docx_builder
         from tests.unit._source_probe import source_of
 
         src = source_of(docx_builder)
-        assert src.count("max(len(data_rows), rows)") == 1, "템플릿 경로의 행 수 확장이 사라졌다"
-        assert src.count("max(len(_data_rows), rows)") == 1, "무템플릿 경로의 행 수 확장이 사라졌다"
+        assert src.count("_add_blank_table(doc, len(data_rows), cols, style, None, None)") == 1, "템플릿 경로의 표 크기가 데이터 행 수가 아니다"
+        assert src.count("_add_blank_table(doc, len(_data_rows), _cols, style, None, None)") == 1, "무템플릿 경로의 표 크기가 데이터 행 수가 아니다"
+        assert "max(len(data_rows)" not in src and "max(len(_data_rows)" not in src, "행 수 하한(빈 꼬리 행)이 되살아났다"
 
 
 docx = pytest.importorskip("docx", reason="python-docx 없음")
