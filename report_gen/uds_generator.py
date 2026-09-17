@@ -309,15 +309,57 @@ def parse_uds_preview_html(html: str) -> Dict[str, List[str]]:
     return sections
 
 
+_C_COMMENT_SPAN_PAT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+_COMMENT_NAMES_A_DID_PAT = re.compile(r"\bDID\b", re.I)
+
+
+def _did_pattern_hits(fn_body: str, patterns: List["re.Pattern[str]"]) -> Tuple[List[str], int]:
+    """함수 본문의 DID 패턴 매치 `(값 목록, 버린 주석 매치 수)` — 코드 속 매치는 전부, **주석 속 매치는 그 주석이
+    `DID` 라고 말할 때만**.
+
+    (R60, 리뷰 W1) DID 패턴엔 `0x` + 16진 4자리가 있어 주석 속 아무 상수나 걸렸다. KJPDS02 실측 124건 중 13건이
+    주석에만 있었고 그중 9건이 DID 가 아니었다(`/* TIM0TC3: BIT=0x0186 */` · `// 0x7FFF` · 주석 처리된 코드의 마스크
+    `0xFF00` · 프레임 설명 속 `DID_H`). 그렇다고 주석을 통째로 지우면 **주석에만 적힌 진짜 DID 4건을 잃는다**
+    (`{   /* DID: 0x1002 */` · `/* Build response header for unified DID 0xF2F0 */`) — 코드는 그 값을 매크로·바이트
+    비교로만 쓴다. 전처리(`gcc -E`)가 주석을 지우던 시절엔 생성 코드의 오탐 2건이 우연히 가려져 있었다.
+    ⚠ 코드 속 16진 4자리(마스크 등)의 오탐은 여기서 다루지 않는다(N66).
+    """
+    spans = [(m.start(), m.end()) for m in _C_COMMENT_SPAN_PAT.finditer(fn_body)]
+    hits: List[Tuple[int, str]] = []
+    dropped = 0
+    for pat in patterns:
+        for dm in pat.finditer(fn_body):
+            val = dm.group(0).strip()
+            if not val:
+                continue
+            pos = dm.start()
+            span = next(((a, b) for a, b in spans if a <= pos < b), None)
+            if span is not None and not _COMMENT_NAMES_A_DID_PAT.search(fn_body, span[0], span[1]):
+                dropped += 1
+                continue
+            hits.append((pos, val))
+    return [v for _, v in hits], dropped
+
+
 def generate_uds_source_sections(
     source_root: str,
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
-    preprocess: bool = True,
+    *,
+    preprocess: bool = False,
     max_files: Optional[int] = None,
     max_items: Optional[int] = None,
 ) -> Dict[str, Any]:   # 값은 str·list·dict 혼합(function_details 등) — 과거 Dict[str, str]는 오기
     """`max_files`/`max_items` 는 **호출자 상한**. `None` 이면 `config` 기본값을 쓴다.
+
+    ⚠ `preprocess` 기본값은 **False** 다(R60 N64 — 2026-09-17 까지 True). "정밀" 이라던 전처리 경로는 실측하니
+      함수의 6%(KJPDS02)·0%(PDS64)에만 닿았고 닿은 곳에선 소스 주석 설명 52건을 추론 문장으로 바꾸고 전역 718개를
+      엉뚱한 파일에 귀속시켰다 — 입력·출력·호출 어느 칸에도 이득이 없었다(상세 `parse_c_project` docstring).
+      이 기본값과 `backend.helpers.uds._get_source_sections_cached` 의 기본값은 같아야 한다(캐시 키에 들어간다) —
+      `tests/unit/test_source_sections_preprocess_default_r60.py` 가 묶는다. `preprocess` 이후 인자는 **키워드 전용**
+      이다(리뷰 I2) — 위치 인자로 True 가 들어오면 그 가드가 못 본다.
+    ⚠ 이 전환으로 KJPDS02 의 전역 표 모수가 25,005 → 1,327 로 **19배 준다. 회귀가 아니다** — 같은 헤더의 extern 이
+      그 헤더를 include 한 `.c` 마다 복제돼 있던 것이 사라진 것이다(리뷰 I5).
 
     ⚠ 숫자를 여기 복제하지 않는다 — 기본값의 단일 출처는 `config.UDS_MAX_SOURCE_FILES`/
       `UDS_MAX_FUNCTION_ITEMS`(환경변수로 덮임)이고, 준비 게이트의 공시도 거기서 읽는다
@@ -1956,19 +1998,20 @@ def generate_uds_source_sections(
     did_function_map: Dict[str, List[str]] = {}
     _did_pats = [re.compile(p, re.I) for p in UDS_DID_PATTERNS]
     _sid_pats = [re.compile(p, re.I) for p in UDS_SERVICE_ID_PATTERNS]
+    _did_comment_dropped = 0
     for fn in (ast_result.get("functions", []) if parse_c_project is not None else fallback_functions):
         fn_name = str(fn.get("name") or "").strip()
         fn_body = str(fn.get("body") or "").strip()
         if not fn_name or not fn_body:
             continue
-        for pat in _did_pats:
-            for dm in pat.finditer(fn_body):
-                did_val = dm.group(0).strip()
-                if did_val and did_val not in did_entries:
-                    did_entries.append(did_val)
-                did_function_map.setdefault(did_val, [])
-                if fn_name not in did_function_map[did_val]:
-                    did_function_map[did_val].append(fn_name)
+        _did_vals, _did_dropped = _did_pattern_hits(fn_body, _did_pats)
+        _did_comment_dropped += _did_dropped
+        for did_val in _did_vals:
+            if did_val not in did_entries:
+                did_entries.append(did_val)
+            did_function_map.setdefault(did_val, [])
+            if fn_name not in did_function_map[did_val]:
+                did_function_map[did_val].append(fn_name)
         for pat in _sid_pats:
             for sm in pat.finditer(fn_body):
                 sid_raw = sm.group(0).strip()
@@ -1983,6 +2026,10 @@ def generate_uds_source_sections(
                     entry = f"{sid_raw} -> {fn_name}"
                 if entry not in service_entries:
                     service_entries.append(entry)
+
+    if _did_comment_dropped:
+        _logger.info("DID scan: %d entries · 주석 속 매치 %d건 제외(그 주석이 DID 를 말하지 않음)",
+                     len(did_entries), _did_comment_dropped)
 
     frames_lines: List[str] = []
     if did_entries:

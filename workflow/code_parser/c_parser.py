@@ -102,53 +102,51 @@ class CFunction:
     paren_calls: Optional[List[str]] = None    # (R58 N59) `(ident)(args)` 의 ident — 캐스트인지 함수인지 파일 단위로는 모른다
 
 
-def _run_preprocessor(
-    path: Path,
-    *,
-    cpp_path: str = "gcc",
-    include_dirs: Optional[List[str]] = None,
-    defines: Optional[List[str]] = None,
-) -> Optional[bytes]:
-    include_dirs = include_dirs or []
-    defines = defines or []
+# 전처리기 한 번의 상한(초). 실측 최장 0.35초 — 상한이 없으면 멈춘 도구 하나가 분석 전체를 멈춘다(리뷰 I4).
+_PREPROCESS_TIMEOUT_S = 60
 
-    def _uniq(seq: List[str]) -> List[str]:
-        out: List[str] = []
-        seen: Set[str] = set()
-        for x in seq:
-            k = str(x or "").strip()
-            if not k or k in seen:
-                continue
-            seen.add(k)
+
+def _preprocessor_candidates(cpp_path: str) -> List[str]:
+    """시도할 전처리기 — 지정 도구 먼저, 그 뒤 gcc·clang·cl.exe. 같은 도구는 한 번만."""
+    out: List[str] = []
+    for x in (cpp_path, "gcc", "clang", "cl.exe"):
+        k = str(x or "").strip()
+        if k and k not in out:
             out.append(k)
-        return out
+    return out
 
-    candidates = _uniq([cpp_path, "gcc", "clang", "cl.exe"])
-    for tool in candidates:
-        t = tool.lower()
-        if t.endswith("cl.exe") or t == "cl":
-            args = [tool, "/nologo", "/EP", str(path)]
-            for inc in include_dirs:
-                args.append(f"/I{inc}")
-            for d in defines:
-                args.append(f"/D{d}")
-        else:
-            args = [tool, "-E", str(path)]
-            for inc in include_dirs:
-                args.extend(["-I", inc])
-            for d in defines:
-                args.extend(["-D", d])
-        try:
-            proc = subprocess.run(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            if proc.returncode == 0 and proc.stdout:
-                return proc.stdout
-        except Exception:
-            continue
+
+def _run_one_preprocessor(
+    tool: str,
+    path: Path,
+    include_dirs: List[str],
+    defines: List[str],
+) -> Optional[bytes]:
+    t = tool.lower()
+    if t.endswith("cl.exe") or t == "cl":
+        args = [tool, "/nologo", "/EP", str(path)]
+        for inc in include_dirs:
+            args.append(f"/I{inc}")
+        for d in defines:
+            args.append(f"/D{d}")
+    else:
+        args = [tool, "-E", str(path)]
+        for inc in include_dirs:
+            args.extend(["-I", inc])
+        for d in defines:
+            args.extend(["-D", d])
+    try:
+        proc = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=_PREPROCESS_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):  # 도구 부재(FileNotFoundError)·시간 초과(TimeoutExpired)는 다음 후보로
+        return None
+    if proc.returncode == 0 and proc.stdout:
+        return proc.stdout
     return None
 
 
@@ -159,20 +157,16 @@ def _run_preprocessor_fallback(
     defines: Optional[List[str]] = None,
     cpp_path: str = "gcc",
 ) -> Tuple[Optional[bytes], str]:
+    """후보 도구를 **각각 한 번씩** 돌려 (전처리본, 실제로 성공한 도구) 를 낸다.
+
+    (R60 N64) 예전엔 바깥 루프 `[cpp_path, "clang"]` 가 후보 전체(`gcc→clang→cl.exe`)를 도는 안쪽 함수를 두 번
+    불러, 실패하는 파일 하나에 spawn 이 6번이었고(실측 77 파일·179회·33.8초) **성공한 도구가 clang 이어도
+    바깥 루프의 이름(`gcc`)으로 적혔다**.
+    """
     include_dirs = include_dirs or []
     defines = defines or []
-    tried: List[str] = []
-    for cand in [cpp_path, "clang"]:
-        tool = str(cand or "").strip()
-        if not tool or tool in tried:
-            continue
-        tried.append(tool)
-        data = _run_preprocessor(
-            path,
-            cpp_path=tool,
-            include_dirs=include_dirs,
-            defines=defines,
-        )
+    for tool in _preprocessor_candidates(cpp_path):
+        data = _run_one_preprocessor(tool, path, include_dirs, defines)
         if data is not None:
             return data, tool
     return None, "no-preprocess"
@@ -1128,6 +1122,18 @@ def parse_c_project(
     defines: Optional[List[str]] = None,
     cpp_path: str = "gcc",
 ) -> Dict[str, object]:
+    """소스 루트의 C 파일을 파싱한다.
+
+    ⚠ `preprocess=True` 는 **문서·영향 분석용이 아니다**(R60 실측, 기본 호출 경로는 전부 False).
+      전처리본(`gcc -E`)을 그 파일인 것처럼 파싱하므로 ① 주석이 사라져 `comment_*` 가 전부 빈다(KJPDS02: 설명이
+      있던 52개 함수 52개 모두 → 문서가 소스 주석 대신 추론 문장을 싣는다) ② include 한 헤더의 선언이 **포함한
+      파일의 전역**으로 잡힌다(전역 1,327 → 25,005, 718개가 그 이름이 없는 파일에 귀속·368개 설명 소실)
+      ③ 조건식의 매크로 이름이 리터럴로 바뀐다(`== (byte)FALSE` → `== (byte)0`). 게다가 include 경로를 안 주면
+      앱 코드는 전처리가 **조용히 실패해 원문으로 되돌아간다**(KJPDS02 함수의 94%, PDS64 는 100%) — 한 문서 안에
+      두 관례가 섞이고, 어느 쪽이 될지는 그 PC 에 gcc 가 있느냐로 갈린다. 몇 파일이 어느 길로 갔는지는
+      반환값 `preprocess_stats` 에 있다 — 단 **이 함수를 직접 부를 때만** 보인다(`generate_uds_source_sections` 는
+      functions/globals 만 꺼내 쓰고 이 필드는 버린다. 그래서 위 94% 가 한 번도 공시되지 않았다).
+    """
     root = Path(source_root).resolve()
     if not root.exists():
         return {"functions": [], "globals": [], "scanned": [], "call_filter": _EMPTY_CALL_FILTER.copy()}

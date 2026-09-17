@@ -55,19 +55,25 @@ ACTION_MATRIX: Dict[str, Dict[str, str]] = {
 
 
 def _load_source_sections(source_root: str) -> Dict[str, Any]:
-    # impact도 preprocess=True(정밀)로 파싱한다(안전 우선, ISO 26262). preprocess=False는 gcc
-    # 전처리를 생략해 빠르지만 (1) 함수형 매크로로 가려진 호출 엣지를 놓쳐 영향 함수를 '과소보고'
-    # (진짜 영향받은 안전 함수를 재검증 대상에서 누락 — unsafe 방향)하고, (2) #ifdef 가드 동일
-    # 함수명 변형을 둘 다 파싱해 first-wins ASIL 오판 위험이 있다. 속도는 regex hot-loop 제거 +
-    # 디스크 캐시(동일 소스 재실행 시 파싱 skip)로 확보하며, 문서생성과 동일 정밀·동일 캐시 tier를 쓴다.
+    # 문서생성과 **같은 인자**(기본값 = 전처리 없음)로 파싱한다 — 같은 캐시 tier, 같은 함수 집합.
+    # ⚠ (R60 N64) 여기엔 "preprocess=True(정밀) — 안전 우선" 이라고 적혀 있었고 근거는 둘이었다:
+    #   (1) 함수형 매크로에 가려진 호출 엣지를 놓치면 영향 함수를 과소보고한다 (2) #ifdef 변형의 ASIL 오판.
+    #   실측하니 그 "정밀" 은 **적용된 적이 없었다**: include 경로를 넘기지 않아 앱 코드는 전처리가 조용히 실패하고
+    #   원문으로 되돌아갔다(KJPDS02 함수의 94%, PDS64 는 100%). 닿은 6%(생성 코드)에서 늘어난 호출 엣지는 0,
+    #   함수 집합은 두 경로가 같았다(1,170 = 1,170). (1) 이 실제로 성립하는 자리는 include 경로를 전부 줘야 보이는
+    #   매크로 1개(`CALLBACK_HANDLER` → `lin_pid_response_callback_handler`, 엣지 2)뿐이고 그건 **두 경로 모두**
+    #   놓치고 있다 — 전처리가 아니라 매크로 본문의 호출을 엣지로 승격하는 쪽이 답이다(N65).
+    #   (2) 는 **ASIL 축만** `_dead_function_nodes`(리터럴 #if 0/1) + 생성기의 ASIL max 병합이 맡는다. 같은 파일 안
+    #   같은 이름 변형의 본문·호출 칸은 여전히 first-wins 다(리뷰 I6) — 전처리가 그 파일들에 닿은 적이 없으므로
+    #   이 전환으로 달라지는 것은 없고, 고치려면 전처리가 아니라 변형 선택 규칙을 고쳐야 한다.
     try:
         from backend.helpers import _get_source_sections_cached
 
-        return _get_source_sections_cached(source_root, preprocess=True)
+        return _get_source_sections_cached(source_root)
     except Exception:
         import report_generator as rg
 
-        return rg.generate_uds_source_sections(source_root, preprocess=True)
+        return rg.generate_uds_source_sections(source_root)
 
 
 @dataclass

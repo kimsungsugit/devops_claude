@@ -1302,12 +1302,12 @@ def _to_swcom_from_fn(info: Dict[str, Any]) -> str:
     return f"SwCom_{m.group(1)}" if m else "UNMAPPED"
 
 
-def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True,
+def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
                                      max_files: int = 0, max_items: int = 0) -> Path:
     """디스크 영속 캐시 파일 경로(정규화 source_root+preprocess+상한의 sha1). repo_root(모듈 전역, parents[2]).
 
-    preprocess를 키에 포함 — impact(preprocess=False)와 문서생성(True)의 섹션은 내용이 달라
-    같은 소스라도 별도 캐시 파일이어야 교차오염이 없다.
+    preprocess를 키에 포함 — 전처리본으로 만든 섹션은 내용이 달라(주석 소실·전역 귀속 변화) 같은 소스라도
+    별도 캐시 파일이어야 교차오염이 없다. 기본 경로는 전부 False(R60) — True 는 명시 호출만.
 
     ⚠ **상한도 키다.** 상한은 `generate_uds_source_sections` 의 산출을 실제로 자르므로
       (읽는 파일 수·분류별 항목 수), 키에서 빠지면 상한을 올려도 옛 상한으로 만든 payload
@@ -1438,7 +1438,8 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
 
 
 def _get_source_sections_cached(source_root: str, max_files: Optional[int] = None,
-                                preprocess: bool = True,
+                                *,
+                                preprocess: bool = False,
                                 max_items: Optional[int] = None) -> Dict[str, Any]:
     """소스 인덱스 — TTL + (경로,mtime,size) 시그니처 캐시.
 
