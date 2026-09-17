@@ -315,6 +315,89 @@ def _dead_function_nodes(root, src: bytes) -> Set[int]:
                     dead.add(d.id)
     return dead
 
+
+# (R62 N69) 위 판정의 **텍스트 판** — 정규식 경로는 트리가 없어 죽은 분기를 모른다.
+#   tree-sitter 가 `#if 0` 안이라 일부러 뺀 함수를 정규식 폴백이 되살리고 있었다(KJPDS02 24개 · PDS64 13개가
+#   `function_details` 에 실재 함수로 올라 있었다 — 정본 UDS 엔 하나도 없다). 길이 두 갈래:
+#     ① 파일의 함수가 전부 죽었으면 tree-sitter 가 0개를 내고, `parse_c_project` 의 `if not funcs:` 가 그걸
+#        "파싱 실패" 로 읽어 파일 전체를 정규식으로 다시 훑는다(`CRC32.c`)
+#     ② `uds_generator` 가 "AST 가 놓친 함수" 를 이름으로 병합한다 — 죽은 함수는 정의상 AST 에 없다
+#   규칙은 `_dead_function_nodes` 와 같다(리터럴 0/1 만, `#elif` 조건은 평가하지 않는다 — 과대포함이 안전 방향).
+_PP_COND_DIRECTIVE_PAT = re.compile(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|elif|else|endif)\b([^\n]*)", re.M)
+
+
+def dead_preproc_spans(scan_text: str) -> List[Tuple[int, int]]:
+    """`#if 0` 의 then-분기와 `#if 1` 의 alternative 구간 `(start, end)` 목록. **주석을 가린 텍스트**를 받는다.
+
+    - 주석을 안 가리면 주석 속 `#if 0` 이 구간을 열고, `#if 0 /* 임시 */` 의 조건이 `0` 으로 안 읽힌다.
+    - 닫히지 않은 `#if` 는 구간을 내지 않는다(파일 끝까지 지우는 쪽이 아니라 **안 지우는 쪽**으로 틀린다).
+    - 죽은 구간 안의 중첩 `#if … #else … #endif` 는 짝만 맞춘다 — 안쪽 `#else` 가 바깥 구간을 닫지 않는다.
+    """
+    spans: List[Tuple[int, int]] = []
+    stack: List[List[object]] = []   # [kind, dead_start] — kind: "falsy" | "truthy" | "other"(판정 끝난 프레임 포함)
+    for m in _PP_COND_DIRECTIVE_PAT.finditer(scan_text):
+        kw = m.group(1)
+        if kw == "if":
+            cond = m.group(2).strip()
+            if cond in _FALSY_COND:
+                stack.append(["falsy", m.end()])
+            elif cond in _TRUTHY_COND:
+                stack.append(["truthy", None])
+            else:
+                stack.append(["other", None])
+        elif kw in ("ifdef", "ifndef"):
+            stack.append(["other", None])
+        elif not stack:
+            continue   # 짝 없는 `#else`/`#endif` — 판정하지 않는다
+        elif kw in ("elif", "else"):
+            top = stack[-1]
+            if top[0] == "falsy":
+                spans.append((int(top[1]), m.start()))   # type: ignore[arg-type]
+                top[0], top[1] = "other", None
+            elif top[0] == "truthy":
+                top[0], top[1] = "other", m.end()        # alternative 전체가 죽는다(뒤따르는 `#elif`/`#else` 포함)
+        else:   # endif
+            top = stack.pop()
+            if top[1] is not None:
+                spans.append((int(top[1]), m.start()))   # type: ignore[arg-type]
+    return spans
+
+
+def blank_dead_preproc_regions(scan_text: str) -> str:
+    """죽은 전처리 분기를 **길이를 유지한 채** 공백으로 가린다(개행은 남긴다 — 오프셋·줄 번호 불변).
+
+    매칭용 텍스트에만 쓴다. 본문·주석은 호출부가 원문에서 같은 오프셋으로 꺼낸다(`blank_c_comments` 와 같은 계약).
+    """
+    return _blank_spans(scan_text, dead_preproc_spans(scan_text))
+
+
+def blank_dead_code(raw_text: str) -> str:
+    """**원문**에서 죽은 분기만 가린다 — 살아 있는 쪽의 주석은 그대로 남는다.
+
+    판정은 위와 같은 한 구현(길이 보존 `blank_c_comments` 위에서 구간을 잰다). 주석을 **지우는**(`_strip_c_comments` —
+    길이 비보존) 텍스트에 직접 판정을 걸면 줄 중간에서 시작한 블록 주석이 `#endif` 앞에서 끝날 때 `#endif` 가 줄 머리를
+    잃어 구간이 안 닫힌다(리뷰 I1 — 실 트리 차이 0 이지만 "한 규칙 두 구현" 을 만들지 않는다). 그래서 주석을 지우는
+    호출부는 `_strip_c_comments(blank_dead_code(raw))` 순서로 쓴다.
+    """
+    return _blank_spans(raw_text, dead_preproc_spans(blank_c_comments(raw_text)))
+
+
+def _blank_spans(text: str, spans: List[Tuple[int, int]]) -> str:
+    if not spans:
+        return text
+    out: List[str] = []
+    pos = 0
+    for start, end in sorted(spans):
+        if end <= pos:
+            continue   # 바깥 죽은 구간에 이미 덮인 안쪽 구간
+        start = max(start, pos)
+        out.append(text[pos:start])
+        out.append("\n".join(" " * len(part) for part in text[start:end].split("\n")))
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
 # (R59 N60) 정의 머리 `[접두] 이름(파라미터) {` 를 찾는 **선형** 스캐너.
 #   옛 정규식 `^[\t ]*((?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{` 는
 #   접두(lazy, 괄호·쉼표·개행 허용)와 파라미터(lazy `[^;]*?`)가 둘 다 무한정 늘어나, 세미콜론 없이 길게 이어지는
@@ -640,7 +723,10 @@ _RE_C_PRECOND_KO = re.compile(r"선행조건[:\s]+(.+)")
 _RE_C_RANGE = re.compile(r"\bRange\b[:\s]+(.+)", re.I)
 _RE_C_VALUE_RANGE = re.compile(r"\bValue Range\b[:\s]+(.+)", re.I)
 _RE_C_DESC = re.compile(r"\bDescription\b[:\s]+(.+)", re.I)
-_RE_C_PARAM = re.compile(r"@param\s+(?:\[(?:in|out|in,\s*out)\]\s*)?(\w+)\s*(.*)", re.I)
+# (R62 리뷰 I3) 방향 표기는 `@param` 에 **붙여** 쓴다(`@param[in] x`) — 옛 `@param\s+` 는 그 형태를 영영 못 읽었다
+#   (실 트리 `@param[` 49건의 파라미터 설명이 조용히 0건). `(?![A-Za-z])` 는 `@paramfoo` 같은 다른 명령을 막는다.
+_RE_C_PARAM = re.compile(r"@param(?![A-Za-z])\s*(?:\[(?:in|out|in,\s*out)\]\s*)?(\w+)\s*(.*)", re.I)
+_RE_C_BARE_IDENT = re.compile(r"[A-Za-z_]\w*")
 _RE_C_RETURN = re.compile(r"@(?:return|retval)\s+(.*)", re.I)
 _RE_C_TAG_SKIP = re.compile(r"@(?:note|see|warning|file|author|date|version|since|deprecated|todo|bug|throws|exception)\b", re.I)
 
@@ -670,6 +756,7 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
     brief_lines: List[str] = []
     details_lines: List[str] = []
     in_details = False
+    desc_is_free_line = False
     for raw in comment.splitlines():
         line = raw.strip().lstrip("*").strip()
         if not line:
@@ -737,11 +824,21 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         if not desc:
             if _is_noise_desc(line):
                 continue
-            if _RE_C_TAG_SKIP.match(line):
+            # (R62 N69) `@` 로 시작하는 줄은 Doxygen **명령**이지 문장이 아니다. 알려진 명령만 거르던 옛 목록은
+            #   `@addtogroup`·`@fn`·`@{` 와 이름 자리에 타입을 적은 `@param[in] (UINT8) *data …`(→ `_RE_C_PARAM` 불일치)를
+            #   설명으로 실었다 — 실측 KJPDS02 36개 · PDS64 35개 함수의 설명 칸이 그 줄 그대로였다.
+            #   백슬래시 표기(`\param x …`)도 같은 명령이다(리뷰 I2 — 실 트리 100개, 설명으로 새는 건 아직 0건).
+            if line.startswith(("@", "\\")) or _RE_C_TAG_SKIP.match(line):
                 continue
             desc = line
-    if not desc and brief_lines:
-        desc = " ".join(brief_lines).strip()
+            desc_is_free_line = True
+    # `@brief` 는 명시된 요약이다 — 태그 없이 먼저 걸린 줄(`@param` 의 이어진 줄 등)보다 앞선다. `Description:` 라벨로
+    # 적은 설명은 그대로 둔다(그것도 명시다). 단 `@brief` 가 **식별자 하나뿐**(함수 이름만 적는 양식)이면 요약이 아니라
+    # 이름표라 산문 줄을 밀어내지 않는다(리뷰 I4 — 실 트리 0건, 방어).
+    brief_text = " ".join(brief_lines).strip()
+    brief_is_name_tag = bool(desc_is_free_line and _RE_C_BARE_IDENT.fullmatch(brief_text))
+    if brief_text and (not desc or (desc_is_free_line and not brief_is_name_tag)):
+        desc = brief_text
     if details_lines:
         details_text = " ".join(details_lines).strip()
         if desc:
@@ -901,7 +998,8 @@ def _extract_function_defs_regex_fallback(
     #   시험 케이스를 만들고 있었다는 뜻이다.
     #   ⚠ 매칭용 텍스트만 가린다. 본문·주석 추출은 원문(`text`/`text_bytes`)에서 하며,
     #     `_blank_c_comments` 가 **길이를 유지**하므로 오프셋이 어긋나지 않는다.
-    scan_text = blank_c_comments(text)
+    # (R62 N69) 죽은 `#if 0` 분기도 가린다 — tree-sitter 가 "전부 죽어서 0개" 라고 **정확히** 읽은 파일을 여기서 되살리지 않는다.
+    scan_text = blank_dead_preproc_regions(blank_c_comments(text))
     for head_start, raw_prefix, name, raw_params, head_end in _iter_regex_def_heads(scan_text):
         prefix = raw_prefix.strip()
         params = " ".join(raw_params.replace("\n", " ").split())

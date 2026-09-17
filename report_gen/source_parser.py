@@ -357,7 +357,11 @@ def _strip_c_comments(text: str) -> str:
 # 주석 가리기는 **단일 출처**다 — 이 저장소가 반복해서 겪은 실패가 "판정 복제 후
 # 한쪽만 고침" 이라, 두 파서(c_parser 정규식 폴백 · 여기)가 같은 함수를 쓴다.
 # tree_sitter 유무와 무관하게 import 된다(c_parser 의 tree_sitter import 는 guarded).
-from workflow.code_parser.c_parser import _iter_regex_def_heads  # noqa: E402
+from workflow.code_parser.c_parser import (  # noqa: E402
+    _iter_regex_def_heads,
+    _parse_comment_fields,
+    blank_dead_code,
+)
 from workflow.code_parser.c_parser import blank_c_comments as _blank_c_comments  # noqa: E402
 
 
@@ -1276,6 +1280,90 @@ def _extract_doxygen_asil_tags(text: str) -> Dict[str, Dict[str, str]]:
         if info:
             result[func_name] = info
     return result
+
+
+# (R62 N69) 헤더 프로토타입의 문서 주석 — 정의 쪽에 주석이 없는 함수의 설명·ASIL·Related 원천.
+#   벤더 드라이버(Freescale LIN 스택)는 문서를 **헤더에만** 적는다. 실측: 설명이 추론 문장으로 나간 함수 중
+#   KJPDS02 71개 · PDS64 66개(추론 94개 중)가 헤더에 `@brief` 를 갖고 있었고, `.h` 의 문서 주석은 읽히기만 하고
+#   한 번도 쓰인 적이 없었다(R61 리뷰 I2). 필드 해석은 정의 쪽과 **같은 파서**(`_parse_comment_fields`)로 한다 —
+#   주석이 어느 파일에 적혔느냐로 설명의 모양이 달라지면 안 된다.
+_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+_NOT_A_FUNCTION_NAME = frozenset(
+    {"void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "struct", "union", "enum",
+     "const", "volatile", "static", "extern", "typedef", "if", "for", "while", "switch", "return", "sizeof"}
+)
+
+
+def extract_header_function_docs(raw: str) -> Dict[str, Dict[str, str]]:
+    """헤더 원문 → `{함수 이름: {"desc","asil","related","precondition"}}`. 필드가 하나도 없는 주석은 싣지 않는다."""
+    out: Dict[str, Dict[str, str]] = {}
+    if not raw:
+        return out
+    # 죽은 `#if 0` 분기의 프로토타입은 문서화 근거가 아니다(리뷰 I7 — 정의 쪽과 같은 규칙).
+    for func_name, body in _iter_doc_comment_heads(blank_dead_code(raw)):
+        if func_name in _NOT_A_FUNCTION_NAME:
+            continue   # `typedef void (*Cb)(void);` 를 머리 패턴이 `void(` 로 읽는다(리뷰 I8)
+        desc, asil, related, precondition, _rng, _params, _ret = _parse_comment_fields(body)
+        if not (desc or asil or related):
+            continue
+        # first-wins — 같은 헤더에 같은 이름이 두 번(`#if`/`#else` 양쪽 프로토타입)이면 먼저 적힌 쪽.
+        out.setdefault(
+            func_name,
+            {"desc": desc, "asil": asil, "related": related, "precondition": precondition},
+        )
+    return out
+
+
+def _shared_path_parts(a: str, b: str) -> int:
+    pa = [x.lower() for x in Path(a).parts]
+    pb = [x.lower() for x in Path(b).parts]
+    n = 0
+    for x, y in zip(pa, pb, strict=False):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _root_index_of(path: str, roots: List[str]) -> int:
+    parts = [x.lower() for x in Path(path).parts]
+    best, best_len = -1, -1
+    for i, root in enumerate(roots):
+        rp = [x.lower() for x in Path(root).parts]
+        if rp and parts[: len(rp)] == rp and len(rp) > best_len:
+            best, best_len = i, len(rp)
+    return best
+
+
+def pick_header_doc(
+    candidates: List[Dict[str, str]], file_path: str, roots: Optional[List[str]] = None
+) -> Dict[str, str]:
+    """같은 이름을 문서화한 헤더가 여럿일 때 하나를 고른다(APP/FBL 두 트리가 같은 이름의 헤더를 따로 갖는다).
+
+    - `roots` 를 주면 **정의 파일과 같은 소스 루트의 헤더만** 후보다. 실측: 부트로더 트리의 `Comms.h` 가 선언한
+      `LINPHY0_Init` 의 주석이 앱 트리의 `LINPHY0.c` 로 갔다 — 이름이 같아도 다른 바이너리의 함수다.
+    - 정의 파일과 경로를 가장 길게 공유하는 헤더를 고른다.
+    - 그래도 여럿이고 내용이 다르면 **설명·Related 는 고르지 않는다**(아무거나 고르면 남의 문장을 싣는다).
+      ASIL 만은 그중 가장 높은 등급을 돌려준다 — 모르겠다고 비우면 하류가 SDS/TBD 로 내려가 과소분류가 된다.
+    """
+    if roots:
+        own = _root_index_of(file_path, roots)
+        candidates = [c for c in candidates if _root_index_of(str(c.get("file") or ""), roots) == own]
+    if not candidates:
+        return {}
+    best = max(_shared_path_parts(str(c.get("file") or ""), file_path) for c in candidates)
+    top = [c for c in candidates if _shared_path_parts(str(c.get("file") or ""), file_path) == best]
+    first = top[0]
+    _key = ("desc", "asil", "related", "precondition")
+    same = all(tuple(c.get(k) or "" for k in _key) == tuple(first.get(k) or "" for k in _key) for c in top)
+    if same:
+        return first
+    ranked = [c for c in top if str(c.get("asil") or "").strip().upper() in _ASIL_RANK]
+    if not ranked:
+        return {}
+    highest = max(ranked, key=lambda c: _ASIL_RANK[str(c.get("asil") or "").strip().upper()])
+    # `file` 을 비운다 — 취한 것은 등급뿐인데 그 헤더가 "이 함수를 문서화했다" 로 읽히면 안 된다(리뷰 W4).
+    return {"file": "", "desc": "", "asil": str(highest.get("asil") or ""), "related": "", "precondition": ""}
 
 
 def _extract_file_header_asil(text: str) -> str:

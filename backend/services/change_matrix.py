@@ -29,7 +29,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-CHANGE_MATRIX_ALGO_VERSION = 1
+# 2: (R62) 파서가 죽은 `#if 0` 함수를 더는 되살리지 않는다 — 옛 셀은 그 함수들을 추가/삭제/변경으로 세고 있다.
+CHANGE_MATRIX_ALGO_VERSION = 2
 # ⚠ `summary_baseline_diff_*` 와 **반드시 달라야 한다** — summary_insight._changed_functions_from_cache
 #   가 그 글롭의 mtime 최신 3개를 test-design·ai-insight의 '변경 축'으로 쓴다. 같은 이름으로
 #   매트릭스 셀을 대량 생성하면 그 축이 조용히 바뀐다.

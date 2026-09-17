@@ -94,9 +94,11 @@ from report_gen.source_parser import (  # noqa: E402
     _read_text_limited,
     _scan_source_comment_patterns,
     _strip_c_comments,
+    extract_header_function_docs,
     extract_struct_member_arrays,
     extract_struct_member_types,
     is_const_type,
+    pick_header_doc,
 )
 from report_gen.source_roots import split_source_roots  # noqa: E402
 from report_gen.uds_text import (  # noqa: E402
@@ -122,7 +124,10 @@ from report_gen.validation_labels import (  # noqa: E402
     LABEL_CALLED_FUNCTION,
     LABEL_CALLING_FUNCTION,
 )
-from workflow.code_parser.c_parser import c_identifiers  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
+from workflow.code_parser.c_parser import (  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
+    blank_dead_code,
+    c_identifiers,
+)
 
 _logger = logging.getLogger("report_generator")
 
@@ -184,6 +189,12 @@ _BY_NAME_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 def _asil_rank(v: Any) -> int:
     a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
     return _BY_NAME_ASIL_RANK.get(a, -1)
+
+
+def _header_origin_label(hdr_doc: Dict[str, str]) -> str:
+    """`comment_origin` 값. 헤더 여럿이 다른 말을 해 등급만 취한 경우엔 특정 헤더를 지목하지 않는다(리뷰 W4)."""
+    file_name = Path(str(hdr_doc.get("file") or "")).name
+    return "header:" + file_name if file_name else "header:ambiguous"
 
 
 def _put_by_name(
@@ -584,6 +595,11 @@ def generate_uds_source_sections(
     doc_texts: List[str] = []
     _doxygen_tags_by_file: Dict[str, Dict[str, Dict[str, str]]] = {}
     _file_header_asil: Dict[str, str] = {}
+    # (R62 N69) 헤더 프로토타입의 문서 주석 — 이름 → 후보 목록(헤더가 APP/FBL 트리에 따로 있다).
+    _header_docs: Dict[str, List[Dict[str, str]]] = {}
+    _root_strs: List[str] = [str(_r) for _r in _roots]
+    # 죽은 `#if 0` 분기라 모으지 않은 정의 — {파일: [이름]}. 텍스트 루프가 읽는 `.c` 기준(면제 계층 파일은 애초에 안 읽는다).
+    _dead_code_excluded: Dict[str, List[str]] = {}
     # 원문 읽기 상한에 **닿은 파일**. 캡은 조용히 자르므로 닿았다는 사실을 남기지
     # 않으면 "이 프로젝트엔 그 선언이 원래 없다" 와 구분되지 않는다
     # (실측: 200KB 캡이 IO_Map.h 의 매크로 69% 를 지웠는데 로그가 한 줄도 없었다).
@@ -629,6 +645,8 @@ def generate_uds_source_sections(
                 "desc": str(prev.get("desc") or "").strip(),
             }
         if p.suffix.lower() in {".h", ".hpp"}:
+            for _hname, _hdoc in extract_header_function_docs(raw).items():
+                _header_docs.setdefault(_hname, []).append({"file": str(p), **_hdoc})
             for name, params, ret_type, is_extern in _extract_c_prototypes(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 # Header prototype을 맵에 저장 (source definition보다 우선)
@@ -646,12 +664,23 @@ def generate_uds_source_sections(
             for m_name, m_val in _extract_c_macro_defs(text):
                 macro_defs.append([m_name, "", m_val, ""])
         else:
-            body_map = _extract_c_function_bodies(text)
+            # (R62 N69) 죽은 `#if 0` 분기의 정의는 모으지 않는다 — tree-sitter 가 일부러 뺀 함수를 아래 "AST 누락분 병합" 이
+            #   이름으로 되살려 KJPDS02 24개 · PDS64 13개가 실재 함수처럼 올라 있었다. 매크로 수집은 옛 범위 그대로(`text`).
+            #   판정은 길이 보존 텍스트 위의 한 구현에서 한다(`blank_dead_code` docstring — 리뷰 I1).
+            _live_raw = blank_dead_code(raw)
+            live_text = text if _live_raw is raw else _strip_c_comments(_live_raw)
+            body_map = _extract_c_function_bodies(live_text)
             # 리셋/초기화 함수의 전역 대입을 모은다(같은 `body_map` 재사용 — 추가 파싱 0).
             # ⚠ 헤더(`.h`)는 여기 안 온다. 헤더에 `static` 초기화 함수가 있으면 못 본다.
             for _rvar, _rrows in collect_reset_assignments(body_map).items():
                 _reset_assigns.setdefault(_rvar, []).extend(_rrows)
-            for name, params, ret_type, is_static in _extract_c_definitions(text):
+            if live_text is not text:
+                # 버린 것을 남긴다(R58 의 call_filter 와 같은 규약) — 안 남기면 "함수 수가 왜 줄었나" 에 답할 수 없다.
+                _live_names = {d[0] for d in _extract_c_definitions(live_text)}
+                _dead_here = sorted({d[0] for d in _extract_c_definitions(text)} - _live_names)
+                if _dead_here:
+                    _dead_code_excluded[str(p)] = _dead_here
+            for name, params, ret_type, is_static in _extract_c_definitions(live_text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 if name.startswith("g_"):
                     interfaces.append(signature)
@@ -678,6 +707,9 @@ def generate_uds_source_sections(
                         "used_globals": [],
                         "comment_desc": c_desc,
                         "comment_asil": c_asil,
+                        # 함수 **자기** 주석의 등급만. `c_asil` 은 파일 머리말 ASIL 로 채워질 수 있고, 그걸 병합 분기가
+                        # `asil_source: "comment"` 로 실으면 출처가 세탁된다(리뷰 W1 — AST 경로도 머리말 ASIL 은 안 쓴다).
+                        "comment_asil_own": str(dox_info.get("asil", "") or ""),
                         "comment_related": c_related,
                         "comment_precondition": "",
                         "body": body_text,
@@ -1241,6 +1273,23 @@ def generate_uds_source_sections(
             comment_precond = str(fn.get("comment_precondition") or "").strip()
             if not name:
                 continue
+            # (R62 N69) 정의에 없는 필드만 헤더 프로토타입의 문서 주석에서 채운다 — 정의 쪽 주석이 항상 이긴다.
+            #   static 은 제외: 헤더가 선언하는 것은 외부 연결 함수이고, 같은 이름의 파일 내부 함수는 남이다.
+            comment_origin = ""
+            if not is_static and not (comment_desc and comment_asil and comment_related):
+                _hdr_doc = pick_header_doc(_header_docs.get(name) or [], file_path, _root_strs)
+                if _hdr_doc:
+                    _filled = False
+                    if not comment_desc and _hdr_doc.get("desc"):
+                        comment_desc, _filled = str(_hdr_doc["desc"]).strip(), True
+                    if not comment_asil and _hdr_doc.get("asil"):
+                        comment_asil, _filled = str(_hdr_doc["asil"]).strip(), True
+                    if not comment_related and _hdr_doc.get("related"):
+                        comment_related, _filled = str(_hdr_doc["related"]).strip(), True
+                    if not comment_precond and _hdr_doc.get("precondition"):
+                        comment_precond = str(_hdr_doc["precondition"]).strip()
+                    if _filled:
+                        comment_origin = _header_origin_label(_hdr_doc)
             if file_path and file_path not in source_text_cache:
                 try:
                     source_text_cache[file_path] = _src_read(file_path)
@@ -1503,6 +1552,7 @@ def generate_uds_source_sections(
                 "file": str(file_path) if file_path else "",
                 "module_name": Path(file_path).stem if file_path else "",
                 "comment_description": comment_desc,
+                "comment_origin": comment_origin,   # "" = 정의 앞 주석(또는 주석 없음) · "header:<파일>" = 헤더 프로토타입의 문서 주석
                 "comment_asil": comment_asil,
                 "comment_related": comment_related,
                 "globals_global": globals_global,
@@ -1609,9 +1659,26 @@ def generate_uds_source_sections(
                 called_list = [str(c).strip() for c in calls if str(c).strip()] if isinstance(calls, list) else []
                 inputs_list = [f"[IN] {p}" for p in _parse_signature_params(signature)]
                 outputs_list = _parse_signature_outputs(signature, name)
+                # (R62 N69) 수집 단계(위 `fallback_functions.append`)가 읽어 둔 주석 필드를 여기서 버리고 있었다 —
+                #   tree-sitter 가 놓친 함수는 `@asil` 이 있어도 SDS/TBD 로 내려갔다. AST 경로와 같은 우선순위로 쓴다.
+                m_desc = str(fn.get("comment_desc") or "").strip()
+                m_asil = str(fn.get("comment_asil_own") or "").strip()
+                m_precond = str(fn.get("comment_precondition") or "").strip()
+                m_related = str(fn.get("comment_related") or "").strip()
+                m_origin = ""
+                if not is_static and not (m_desc and m_asil and m_related):
+                    _hdr_doc = pick_header_doc(_header_docs.get(name) or [], file_path, _root_strs)
+                    if _hdr_doc:
+                        _before = (m_desc, m_asil, m_related)
+                        m_desc = m_desc or str(_hdr_doc.get("desc") or "").strip()
+                        m_asil = m_asil or str(_hdr_doc.get("asil") or "").strip()
+                        m_related = m_related or str(_hdr_doc.get("related") or "").strip()
+                        m_precond = m_precond or str(_hdr_doc.get("precondition") or "").strip()
+                        if (m_desc, m_asil, m_related) != _before:
+                            m_origin = _header_origin_label(_hdr_doc)
                 desc_text = _enhance_description_text(
                     name,
-                    _fallback_function_description(name, called_list),
+                    m_desc or _fallback_function_description(name, called_list),
                     called_list,
                 )
                 if _is_generic_description(desc_text):
@@ -1660,19 +1727,20 @@ def generate_uds_source_sections(
                     "name": name,
                     "prototype": signature,
                     "description": desc_text,
-                    "asil": (_func_override.get(name, {}).get("asil") if _func_override.get(name) else "") or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
-                    "related": _lookup_sds_related(name, module_name) or "TBD",
-                    "description_source": "inference",
-                    "asil_source": "sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference",
-                    "related_source": "sds" if _lookup_sds_related(name, module_name) else "inference",
+                    "asil": m_asil or (_func_override.get(name, {}).get("asil") if _func_override.get(name) else "") or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
+                    "related": m_related or _lookup_sds_related(name, module_name) or "TBD",
+                    "description_source": "comment" if m_desc else "inference",
+                    "asil_source": "comment" if m_asil else ("sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference"),
+                    "related_source": "comment" if m_related else ("sds" if _lookup_sds_related(name, module_name) else "inference"),
                     "inputs": inputs_list,
                     "outputs": outputs_list,
-                    "precondition": "N/A",
+                    "precondition": m_precond or "N/A",
                     "file": str(file_path) if file_path else "",
                     "module_name": Path(file_path).stem if file_path else "",
-                    "comment_description": "",
-                    "comment_asil": "",
-                    "comment_related": "",
+                    "comment_description": m_desc,
+                    "comment_origin": m_origin,
+                    "comment_asil": m_asil,
+                    "comment_related": m_related,
                     "globals_global": globals_global,
                     "globals_static": globals_static,
                     "called": "\n".join(called_list),
@@ -2363,6 +2431,13 @@ def generate_uds_source_sections(
         # 전역 인식에서 **잃은 것**. 스캔 캡·미사용 판정·접두사 필터·타입없음 네 지점이
         # 전부 조용히 자르므로, 이 값이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
         "globals_scan": _globals_loss,
+        # (R62) 죽은 `#if 0` 분기라 함수 목록에서 뺀 정의. tree-sitter 경로가 뺀 것은 여기 안 센다(그쪽은 애초에 목록에
+        # 오른 적이 없다) — 이 값은 "정규식 경로가 예전엔 되살리던 것" 이다.
+        "dead_code_excluded": {
+            "files": len(_dead_code_excluded),
+            "functions": sum(len(v) for v in _dead_code_excluded.values()),
+            "by_file": _dead_code_excluded,
+        },
         # 카테고리 절단(인터페이스/내부/매크로/타입…). `globals_scan` 과 같은 규약 —
         # **잘린 것을 남긴다**. 준비 게이트의 `max_items_per_category` 공시가 실제로
         # 무엇을 잘랐는지 이 값으로만 알 수 있다.

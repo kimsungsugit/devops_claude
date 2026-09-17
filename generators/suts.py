@@ -33,7 +33,7 @@ from report_gen.requirements import (
     normalize_sds_key,
 )
 from report_gen.source_parser import is_const_type
-from workflow.code_parser.c_parser import blank_c_comments
+from workflow.code_parser.c_parser import blank_c_comments, blank_dead_code
 
 _logger = logging.getLogger(__name__)
 
@@ -4107,7 +4107,8 @@ def _lightweight_parse(source_root: str) -> Dict[str, Dict[str, Any]]:
         except Exception:
             continue
 
-        stripped = _strip_c_comments(raw)
+        # (R62 N69) 죽은 `#if 0` 분기의 함수로 시험 케이스를 만들지 않는다 — 정식 경로(tree-sitter)와 같은 규칙.
+        stripped = _strip_c_comments(blank_dead_code(raw))
         defs = _extract_c_definitions(stripped)
         bodies = _extract_c_function_bodies(stripped)
 

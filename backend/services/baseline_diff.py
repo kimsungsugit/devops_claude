@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # v2: files.changed_detail(파일→함수 롤업 + 커버리지/ASIL 조인) 추가 — 캐시 무효화용 bump.
 # 3: 지문에 content_sha 추가(stat 2개 충돌로 stale 서빙 가능) — bump 시 전 캐시 1회 재계산.
-BASELINE_DIFF_ALGO_VERSION = 3
+# 4: (R62) 파서가 죽은 `#if 0` 함수를 더는 되살리지 않는다 — 함수 집합이 바뀌므로 전 캐시 1회 재계산.
+BASELINE_DIFF_ALGO_VERSION = 4
 
 # 표시 캡 — 대규모 리팩토링 스냅샷에서 응답이 폭증하지 않게. 절단은 항상 omitted로 표기한다.
 MAX_DETAIL_FILES = 200

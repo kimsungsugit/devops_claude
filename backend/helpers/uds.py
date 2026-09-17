@@ -1394,7 +1394,8 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #      캐시엔 **옛 순서의 문자열**이 그대로 박혀 있어, 무효화하지 않으면 소스가 안 바뀐 로컬 프로젝트에서
 #      "같은 입력 → 같은 문서" 가 캐시 수명 동안 캐시 덕에만 성립하고 fix 는 한 번도 안 돈다.
 # (R56 N52) v17: 함수 static 복원 · 프로토타입 한 줄 · called 텍스트 이름만 — 구 캐시가 히트하면 fix 가 프로덕션에서 발화하지 않는다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v17"
+# (R62 N69) v18: 죽은 `#if 0` 함수 제거(함수 수·SwUFn 번호·Calling 칸이 바뀐다) · `@명령` 줄이 설명이던 것 · 헤더 문서 주석 · `comment_origin` 필드.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v18"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -1794,6 +1795,7 @@ def _get_uds_view_payload_cached(
                     "asil_source",
                     "related_source",
                     "description_source",
+                    "comment_origin",   # (R62 W1) 주석이 정의 앞의 것인지 헤더 프로토타입의 것인지 — 출처를 하류가 구분할 수 있게
                 ):
                     value = src.get(field)
                     if value not in (None, ""):
