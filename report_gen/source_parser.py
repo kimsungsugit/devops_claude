@@ -357,6 +357,7 @@ def _strip_c_comments(text: str) -> str:
 # 주석 가리기는 **단일 출처**다 — 이 저장소가 반복해서 겪은 실패가 "판정 복제 후
 # 한쪽만 고침" 이라, 두 파서(c_parser 정규식 폴백 · 여기)가 같은 함수를 쓴다.
 # tree_sitter 유무와 무관하게 import 된다(c_parser 의 tree_sitter import 는 guarded).
+from workflow.code_parser.c_parser import _iter_regex_def_heads  # noqa: E402
 from workflow.code_parser.c_parser import blank_c_comments as _blank_c_comments  # noqa: E402
 
 
@@ -421,18 +422,20 @@ def _extract_c_definitions(text: str) -> List[Tuple[str, str, str, bool]]:
 
 
 def _extract_c_function_bodies(text: str) -> Dict[str, str]:
+    """`{함수 이름: 본문}` — 정의 머리 뒤 중괄호 균형으로 자른 본문(같은 이름은 뒤엣것이 남는다).
+
+    ⚠ R61(N63): 머리는 `c_parser._iter_regex_def_heads`(R59 선형 스캐너)로 찾는다. 여기 있던 정규식은 R59 가
+      `c_parser` 에서 걷어낸 것과 **같은 모양의 사본**이었다 — 접두 클래스에 괄호·쉼표가 들어 있어 세미콜론 없는
+      초기화 표(`Vectors.c` 17.9KB)에서 줄마다 백트래킹, 그 한 파일에 1.6초 동안 GIL 을 쥐었다. 사본은 고친 쪽의
+      가드에 걸리지 않는다: R59 는 `c_parser` 만 쟀고 이 함수는 호출 입력(주석 제거본)으로 재야만 드러났다.
+    """
     if not text:
         return {}
     out: Dict[str, str] = {}
-    pat = re.compile(
-        r"^[\t ]*(?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\([^;]*?\)\s*\{",
-        flags=re.M,
-    )
-    for m in pat.finditer(text):
-        name = str(m.group(1) or "").strip()
+    for _head_start, _prefix, name, _params, head_end in _iter_regex_def_heads(text):
         if not name:
             continue
-        start = m.end() - 1  # points to "{"
+        start = head_end - 1  # points to "{"
         depth = 0
         end = start
         for i in range(start, len(text)):
@@ -1150,45 +1153,126 @@ def _scan_source_function_names(source_root: str, max_files: int = 800) -> Dict[
     return {"names": sorted(names), "scanned": scanned}
 
 
+#: 문서 주석 **뒤에 오는** 함수 머리. 옛 정규식의 뒷부분과 같은 모양이고, 접두(반환형) 길이에만
+#: 상한을 뒀다 — 상한이 없으면 단어·공백이 길게 이어진 자리에서 lazy 확장이 제곱으로 돈다.
+#: ⚠ 공백 런에도 같은 상한을 둔다(리뷰 I3) — 접두만 묶으면 `타입` 뒤 긴 공백에서 lazy 위치마다 `\s+` 가 런 전체를
+#:   먹었다 되물린다(실측 1MB = 주석 200 × 공백 5,000 에 2.25초). 원문엔 없는 모양이지만 주석을 공백으로 바꾼
+#:   텍스트가 들어오면 바로 현실이 된다. 이 함수는 **원문(raw)** 으로 부를 것 — 주석이 지워지면 읽을 태그도 없다.
+#:   이름 **뒤** 공백엔 상한이 필요 없다 — 런마다 한 번만 되물리므로 합이 입력 길이를 넘지 않는다(뮤테이션으로 확인).
+_DOX_HEAD_PREFIX_MAX = 256
+_DOX_HEAD_PAT = re.compile(
+    r"(?:static\s+)?[A-Za-z_][\w\s\*]{0,%(n)d}?\s{1,%(n)d}([A-Za-z_]\w*)\s*\(" % {"n": _DOX_HEAD_PREFIX_MAX}
+)
+_C_SPACE = " \t\r\n\f\v"
+
+
+def _doxygen_tags_of(body: str) -> Dict[str, str]:
+    """문서 주석 본문 하나의 태그 — `asil`·`safety`·`requirement`·`brief` 중 있는 것만."""
+    info: Dict[str, str] = {}
+    asil_m = re.search(r"@(?:asil|ASIL)\s+([A-D]|QM)\b", body, re.I)
+    if asil_m:
+        info["asil"] = asil_m.group(1).upper()
+    safety_m = re.search(r"@(?:safety|SAFETY)\s+(.+?)(?:\n|$)", body)
+    if safety_m:
+        info["safety"] = safety_m.group(1).strip()
+        if not info.get("asil"):
+            asil_in_safety = re.search(r"\b(ASIL[\s\-_]*[A-D]|QM)\b", info["safety"], re.I)
+            if asil_in_safety:
+                raw = asil_in_safety.group(1).upper().replace(" ", "").replace("-", "").replace("_", "")
+                info["asil"] = raw.replace("ASIL", "") if raw.startswith("ASIL") else raw
+    req_ids: List[str] = []
+    for req_m in re.finditer(
+        r"@(?:requirement|req|related)\s+(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)",
+        body,
+        re.I,
+    ):
+        req_ids.append(req_m.group(1))
+    if req_ids:
+        info["requirement"] = ", ".join(req_ids)
+    brief_m = re.search(r"@brief\s+(.+?)(?:\n|$)", body)
+    if brief_m:
+        info["brief"] = brief_m.group(1).strip()
+    return info
+
+
+def _skip_space_and_non_owner_comments(text: str, pos: int) -> int:
+    """공백과 **함수의 주인이 아닌** 주석을 건너뛴 위치.
+
+    주인이 아닌 주석 = 일반 주석(`/* … */`·`// …`), 뒤따름 문서(`/**< …` — 앞 멤버의 것), **태그 없는** `/** … */`.
+    - Freescale LIN 양식은 `/** … *//*END*-----*/` 뒤에 함수가 온다 — 문서 주석과 함수 사이에 일반 주석이 낀다.
+    - 태그가 **있는** `/** … */` 에선 멈춘다: 그건 다음 함수의 자기 주석이고, 가까운 쪽이 이긴다.
+    - 태그 없는 `/**` (구분선 `/*** sep ***/`·그룹 마커 `/**@{*/`)가 짝을 끊게 두면 `@asil` 이 **조용히 사라진다**
+      (리뷰 W2). 끊는 쪽의 오류는 과소보고, 잇는 쪽의 오류는 과대보고라 잇는다.
+    """
+    n = len(text)
+    while pos < n:
+        if text[pos] in _C_SPACE:
+            pos += 1
+        elif text.startswith("//", pos):
+            eol = text.find("\n", pos)
+            pos = n if eol < 0 else eol + 1
+        elif text.startswith("/*", pos):
+            close = text.find("*/", pos + 2)
+            if close < 0:
+                return n
+            if (
+                text.startswith("/**", pos)
+                and not text.startswith("/**<", pos)
+                and _doxygen_tags_of(text[pos + 3 : close])      # `/**/` 면 빈 슬라이스 → 태그 없음
+            ):
+                break
+            pos = close + 2
+        else:
+            break
+    return pos
+
+
+def _iter_doc_comment_heads(text: str) -> Iterator[Tuple[str, str]]:
+    """`(함수 이름, 문서 주석 본문)` — 문서 주석 **하나**와 그 바로 뒤 함수 머리의 짝.
+
+    ⚠ R61(N63): 옛 구현은 `<문서 주석 lazy 본문><공백><머리>` 한 덩어리를 `re.S` 로 걸었다. 주석이 함수 앞이 아니면
+    `.*?` 가 **다음 주석들을 넘어** 머리가 나올 때까지 늘어난다. 결과가 둘이었다.
+      1. 비용 — 함수가 없는 레지스터 헤더(670KB)에서 `/**` 마다 파일 끝까지 훑어 3.6초·2.6초.
+         정규식은 GIL 을 놓지 않으므로 그 동안 백엔드 프로세스 전체가 멈췄다(라이브 4.2~4.5초 정지).
+      2. 오귀속 — 파일 머리말의 `@brief`/`@asil` 이 **첫 함수의 것**이 됐다(실측 KJPDS02 17건은
+         자기 주석이 있는데도 머리말 문장으로 덮였고, 14건은 남의 주석을 받았다).
+    여기선 주석을 첫 `*/` 에서 닫고, 그 뒤 공백·주인 아닌 주석만 건너뛴 자리에서 머리를 **한 번** 맞춘다.
+    ⚠ 전처리 줄(`#pragma`·`#if`)은 건너뛰지 않는다 — 재 보니 더해지는 7건 중 5건이 오귀속이었다.
+    ⚠ 머리가 안 맞으면 **건너뛴 끝**에서 이어 간다. 건너뛴 주석들은 어차피 같은 자리에 닿아 같은 이유로 떨어지므로,
+      하나씩 다시 시작하면 잇닿은 주석 N 개에서 N² 이 된다.
+    """
+    pos = 0
+    while True:
+        start = text.find("/**", pos)
+        if start < 0:
+            return
+        # `/**/` 는 빈 주석이다 — 닫는 `*/` 가 여는 `/**` 와 겹친다.
+        close = text.find("*/", start + 2)
+        if close < 0:
+            return
+        if text.startswith("/**<", start):
+            pos = close + 2          # 뒤따름 문서 — 앞 멤버의 것이지 다음 함수의 것이 아니다.
+            continue
+        gap_end = _skip_space_and_non_owner_comments(text, close + 2)
+        head = _DOX_HEAD_PAT.match(text, gap_end)
+        if head is None:
+            pos = gap_end
+            continue
+        yield head.group(1), text[start + 3 : close]
+        pos = head.end()
+
+
 def _extract_doxygen_asil_tags(text: str) -> Dict[str, Dict[str, str]]:
-    """Extract ASIL/safety/requirement tags from Doxygen comments preceding functions."""
+    """Extract ASIL/safety/requirement tags from Doxygen comments preceding functions.
+
+    ⚠ 소비처는 `uds_generator` 의 **정규식 폴백 분기**(tree-sitter 가 그 함수를 못 찾았을 때)뿐이다. tree-sitter 경로의
+      주석은 `c_parser._extract_leading_comment` 가 읽고, 거기엔 "사이에 낀 일반 주석" 규칙이 아직 없다(N69).
+    """
     if not text:
         return {}
     result: Dict[str, Dict[str, str]] = {}
-    comment_pat = re.compile(
-        r"/\*\*(.*?)\*/\s*"
-        r"(?:static\s+)?[A-Za-z_][\w\s\*]*?\s+([A-Za-z_]\w*)\s*\(",
-        flags=re.S,
-    )
-    for m in comment_pat.finditer(text):
-        body = m.group(1)
-        func_name = m.group(2).strip()
-        if not func_name:
-            continue
-        info: Dict[str, str] = {}
-        asil_m = re.search(r"@(?:asil|ASIL)\s+([A-D]|QM)\b", body, re.I)
-        if asil_m:
-            info["asil"] = asil_m.group(1).upper()
-        safety_m = re.search(r"@(?:safety|SAFETY)\s+(.+?)(?:\n|$)", body)
-        if safety_m:
-            info["safety"] = safety_m.group(1).strip()
-            if not info.get("asil"):
-                asil_in_safety = re.search(r"\b(ASIL[\s\-_]*[A-D]|QM)\b", info["safety"], re.I)
-                if asil_in_safety:
-                    raw = asil_in_safety.group(1).upper().replace(" ", "").replace("-", "").replace("_", "")
-                    info["asil"] = raw.replace("ASIL", "") if raw.startswith("ASIL") else raw
-        req_ids: List[str] = []
-        for req_m in re.finditer(
-            r"@(?:requirement|req|related)\s+(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)",
-            body,
-            re.I,
-        ):
-            req_ids.append(req_m.group(1))
-        if req_ids:
-            info["requirement"] = ", ".join(req_ids)
-        brief_m = re.search(r"@brief\s+(.+?)(?:\n|$)", body)
-        if brief_m:
-            info["brief"] = brief_m.group(1).strip()
+    for func_name, body in _iter_doc_comment_heads(text):
+        info = _doxygen_tags_of(body)
         if info:
             result[func_name] = info
     return result
