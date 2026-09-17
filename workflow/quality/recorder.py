@@ -317,6 +317,13 @@ def record_uds_run(quality_eval: Dict[str, Any], **kwargs: Any) -> int:
         #   `except Exception` 이 `return -1`(기록 통째 유실)로 접는다 — 정작 살아 있는 판정기는
         #   같은 입력을 `(TypeError, ValueError)` 로 받아 0 으로 정상 처리한다.
         #   **죽은 계산이 산 경로를 죽이는** 형태라, 계산 자체를 없애는 것이 옳다.
+        # (R55 리뷰 W2) accuracy 수치의 **기대측 정의**를 meta 에 같이 남긴다 — R55 에서 정의가 바뀌었다(source_root 재분석 →
+        #   문서를 만든 분석). 라벨 없이 한 열에 섞이면 88.7%→99.8% 가 "문서가 좋아졌다" 로 읽힌다. 정의가 없는 옛 리포트면 키를 지어내지 않는다.
+        _acc = data.get("accuracy")
+        if isinstance(_acc, dict) and _acc.get("expected_side"):
+            _meta = dict(kwargs.get("meta") or {})
+            _meta.setdefault("accuracy_expected_side", str(_acc["expected_side"]))
+            kwargs["meta"] = _meta
         return record_run("uds", data, **kwargs)
     except Exception:
         _logger.exception("Failed to record UDS quality run (non-fatal)")

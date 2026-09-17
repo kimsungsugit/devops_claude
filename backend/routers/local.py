@@ -1363,6 +1363,7 @@ async def local_uds_generate(
             src_root,
             str(accuracy_path),
             relation_mode=str(call_relation_mode or "code"),
+            source_sections=source_sections,   # (R55 N27-c) 문서를 만든 분석 — 소스를 다시 분석하지 않는다
         ),
         timeout_seconds=report_timeout_long,
         report_name="accuracy report",

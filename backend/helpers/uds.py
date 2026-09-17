@@ -1006,7 +1006,8 @@ def _parse_quality_gate_report(path: Optional[Path]) -> Dict[str, Any]:
 
 
 def _parse_accuracy_report(path: Optional[Path]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"called_exact_match": None, "calling_exact_match": None}
+    # (R55 리뷰 W2) `expected_side` — 수치의 기대측 정의("pipeline"/"re-analysis"/"" 미기록). 품질 기록 meta 로 간다(recorder).
+    out: Dict[str, Any] = {"called_exact_match": None, "calling_exact_match": None, "expected_side": ""}
     if not path or not path.exists():
         return out
     try:
@@ -1019,6 +1020,9 @@ def _parse_accuracy_report(path: Optional[Path]) -> Dict[str, Any]:
         out["called_exact_match"] = float(m_called.group(1))
     if m_calling:
         out["calling_exact_match"] = float(m_calling.group(1))
+    m_side = re.search(r"Expected side:\s*(pipeline|re-analysis)", text, flags=re.I)
+    if m_side:
+        out["expected_side"] = m_side.group(1).lower()
     return out
 
 
@@ -3028,6 +3032,7 @@ def _uds_generate_from_paths(
             src_root,
             str(accuracy_path),
             relation_mode="code",
+            source_sections=source_sections,   # (R55 N27-c) 문서를 만든 분석 — 소스를 다시 분석하지 않는다(라이브 ≈2분)
         ),
         timeout_seconds=_rt_acc,
         report_name="accuracy report",

@@ -867,6 +867,7 @@ def main() -> None:
                 str(source_root) if source_root.exists() else "",
                 str(accuracy_path),
                 relation_mode=str(uds_payload.get("call_relation_mode") or "code"),
+                source_sections=uds_payload,   # (R55 N27-c) 문서를 만든 분석(같은 두 키) — 소스를 다시 분석하지 않는다
             ),
             timeout_seconds=300,
             logger=logger,

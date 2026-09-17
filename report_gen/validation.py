@@ -2,6 +2,7 @@
 # Re-import common dependencies
 import json
 import logging
+import os
 
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
@@ -10,7 +11,8 @@ import logging
 # Legacy: older sidecar JSONs may use bare "globals" key → fall back to it when
 # reading (see _extract_payload_function_details / row.get("globals_global") or row.get("globals"))
 import re
-from collections import Counter
+import threading
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -20,6 +22,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import report_gen.validation_labels as VL
 from report_gen.atomic_io import atomic_write_text
 from report_gen.docx_builder import _iter_template_blocks
+from report_gen.docx_text import cell_text
 from report_gen.enrichment_record import normalize_enrichment
 from report_gen.function_analyzer import (
     _classify_description_quality,
@@ -263,6 +266,78 @@ def _cell_has_picture(cell: Any) -> bool:
     return "w:drawing" in xml or "v:imagedata" in xml
 
 
+# ── (R55 N27-c) 산출물 되읽기 메모 ────────────────────────────────────────────────────────────────
+# 후처리 리포트 셋(accuracy·confidence·quality gate)과 보기 payload(`build_uds_view_payload`)가 **같은 파일**을 각자 열어
+# 함수 표 989개를 각자 걸었다(60MB 실측: 열기 0.8초 + 걷기 11초, 리포트마다). 파일 신원 = (정규화 절대경로, mtime_ns, size)
+# — 셋 중 하나라도 다르면 다시 판다. 같은 경로의 새 산출물은 원자 기록(`atomic_io`)의 바꿔치기라 mtime_ns/size 가 바뀐다.
+# 반환은 **깊은 사본**이다 — 소비자가 행을 고쳐도 다음 소비자가 그 흔적을 보지 않는다(confidence 리포트가 입력을 바꾸던 전례).
+# Document 객체(60MB 문서 = 프로세스 RSS +90MB)는 들고 있지 않는다 — 걷기 결과(≈4MB)만.
+_READBACK_LOCK = threading.Lock()
+_READBACK_MAX = 2
+_READBACK_CACHE: "OrderedDict[str, Tuple[Tuple[int, int], Dict[str, Dict[str, Any]]]]" = OrderedDict()
+_READBACK_INFLIGHT: Dict[str, threading.Lock] = {}   # (리뷰 W3) 같은 파일을 동시에 파려는 스레드 중 하나만 판다 — 끝나면 비운다
+
+
+def _readback_key(docx_path: str) -> Tuple[str, Tuple[int, int]]:
+    # (리뷰 I3) 뷰 경로(`build_uds_view_payload`)의 `Path.resolve()` 와 같은 정규화 — 같은 파일이 두 키가 되지 않게 realpath.
+    p = os.path.realpath(str(docx_path))
+    st = os.stat(p)
+    return os.path.normcase(p), (int(st.st_mtime_ns), int(st.st_size))
+
+
+def _readback_lookup(key: str, sig: Tuple[int, int]) -> Optional[Dict[str, Dict[str, Any]]]:
+    import copy
+
+    with _READBACK_LOCK:
+        hit = _READBACK_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            _READBACK_CACHE.move_to_end(key)
+            return copy.deepcopy(hit[1])
+    return None
+
+
+def read_back_function_info(docx_path: str) -> Dict[str, Dict[str, Any]]:
+    """`docx.Document(path)` + `_extract_function_info_from_docx` — 같은 파일(경로·mtime_ns·size)이면 한 번만 판다.
+
+    없는 파일은 그대로 던진다(옛 `docx.Document` 도 던졌다). 반환은 매번 새 사본.
+    ⚠ 후처리 리포트 셋은 순차지만 `build_uds_view_payload` 는 엔드포인트라 후처리와 **동시에** 같은 파일에 들어올 수 있다 —
+      키별 진행 중 락으로 두 번째 진입은 첫 파싱을 기다렸다가 적중한다(60MB Document 두 개 동시 상주 방지, 리뷰 W3).
+    ⚠ 파싱하는 동안 파일이 바뀌면(서명이 달라지면) 결과는 돌려주되 **캐시에는 넣지 않는다**(리뷰 I1 — 옛 서명에 새 내용을 남기지 않는다).
+    """
+    import copy
+
+    import docx  # type: ignore
+
+    key, sig = _readback_key(docx_path)
+    hit = _readback_lookup(key, sig)
+    if hit is not None:
+        return hit
+    with _READBACK_LOCK:
+        gate = _READBACK_INFLIGHT.setdefault(key, threading.Lock())
+    with gate:
+        hit = _readback_lookup(key, sig)       # 기다리는 동안 앞 스레드가 채웠으면 그걸 쓴다
+        if hit is not None:
+            return hit
+        try:
+            doc_map = _extract_function_info_from_docx(docx.Document(str(docx_path)))
+            _, sig_after = _readback_key(docx_path)
+            with _READBACK_LOCK:
+                if sig_after == sig:
+                    _READBACK_CACHE[key] = (sig, copy.deepcopy(doc_map))
+                    _READBACK_CACHE.move_to_end(key)
+                    while len(_READBACK_CACHE) > _READBACK_MAX:
+                        _READBACK_CACHE.popitem(last=False)
+        finally:
+            with _READBACK_LOCK:
+                _READBACK_INFLIGHT.pop(key, None)
+    return doc_map
+
+
+def clear_readback_cache() -> None:
+    with _READBACK_LOCK:
+        _READBACK_CACHE.clear()
+
+
 def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "docx_path": docx_path,
@@ -286,6 +361,8 @@ def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
         result["issues"].append(f"docx not found: {docx_path}")
         return result
     try:
+        # (R55) 여기는 되읽기 메모를 안 쓴다 — 문단(heading)·그림·모든 표 머리를 봐야 해서 Document 자체가 필요하다.
+        #   "같은 파일은 한 번만 판다" 는 함수 표 되읽기 4곳(accuracy·confidence·quality gate·view)의 이야기다(리뷰 I5).
         doc = docx.Document(str(path))
     except Exception as exc:
         result["issues"].append(f"failed to open docx: {exc}")
@@ -301,15 +378,15 @@ def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
     for table in doc.tables:
         if not table.rows:
             continue
-        header_key = "|".join([(c.text or "").strip() for c in table.rows[0].cells])
+        first_row = [cell_text(c).strip() for c in table.rows[0].cells]   # (R55) `.text` 와 같은 값, xpath 없이
+        header_key = "|".join(first_row)
         header_counter[header_key] += 1
-        first_row = [c.text.strip() for c in table.rows[0].cells]
         if any("Function Information" in cell for cell in first_row):
             result["function_info_table_count"] += 1
             rows_l = list(table.rows)
             for r_idx, row in enumerate(rows_l):
                 cells = row.cells
-                row_cells = [c.text.strip() for c in cells]
+                row_cells = [cell_text(c).strip() for c in cells]
                 hit = next((c for c in row_cells if is_logic_diagram_label(c)), None)
                 if hit is not None:
                     result["logic_row_count"] += 1
@@ -496,12 +573,29 @@ def generate_called_calling_accuracy_report(
     source_root: str,
     out_path: str,
     relation_mode: str = "code",
+    *,
+    source_sections: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """문서의 Called/Calling 칸 ↔ 소스 분석의 호출 관계 대조.
+
+    `source_sections` = **문서를 만든 분석**(`generate_uds_source_sections` 의 반환. `uds_payload` 도 같은 두 키
+    `function_details_by_name`·`function_table_rows` 를 가진다). (R55 N27-c) 예전엔 여기서 `source_root` 를 **다시**
+    분석했다 — 생성 한 번당 소스 분석 두 번(라이브 실측 ≈2분 추가)이었고, 그 재분석은 첫 루트만·기본 상한·컴포넌트 맵 없이
+    돌아 문서를 만든 분석과 달랐다(서로 다른 두 분석의 차이를 "문서 정확도" 로 보고했다). 프로덕션 호출부 셋은 전부 넘긴다.
+    안 넘긴 호출은 옛 방식으로 재분석하되 경고하고 머리글에 그 사실을 적는다.
+    """
     relation_mode = str(relation_mode or "code").strip().lower()
     if relation_mode not in {"code", "document"}:
         relation_mode = "code"
-    from report_gen.uds_generator import generate_uds_source_sections  # lazy: heavy module
-    source_sections = generate_uds_source_sections(source_root)
+    if source_sections is None:
+        from report_gen.uds_generator import generate_uds_source_sections  # lazy: heavy module
+        _logger.warning("accuracy report: source_root 를 재분석한다(%s) — 문서를 만든 분석과 다를 수 있다(호출부가 source_sections 를 넘길 것)", source_root)
+        source_sections = generate_uds_source_sections(source_root)
+        expected_origin = f"re-analysis of source_root `{source_root}` (may differ from the analysis that built the document)"
+    else:
+        expected_origin = "pipeline source_sections (the analysis that built the document)"
+    if not isinstance(source_sections, dict):
+        source_sections = {}
     details_by_name = source_sections.get("function_details_by_name", {}) or {}
     fn_to_swcom: Dict[str, str] = {}
     for row in source_sections.get("function_table_rows", []) or []:
@@ -536,13 +630,13 @@ def generate_called_calling_accuracy_report(
             exp_calling.setdefault(str(callee).lower(), set()).add(caller)
 
     try:
-        import docx  # type: ignore
+        import docx  # type: ignore  # noqa: F401 — 설치 확인만(없으면 아래가 사유를 리포트에 쓴다); 되읽기는 read_back_function_info
     except Exception as exc:
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(f"# Called/Calling Accuracy Report\n\n- error: {exc}\n", encoding="utf-8")
         return str(out)
-    doc_map = _extract_function_info_from_docx(docx.Document(str(docx_path)))
+    doc_map = read_back_function_info(docx_path)   # (R55) 같은 파일이면 한 번만 판다
     doc_by_name: Dict[str, Dict[str, str]] = {}
     doc_swcom_by_name: Dict[str, str] = {}
     for _, row in doc_map.items():
@@ -610,6 +704,9 @@ def generate_called_calling_accuracy_report(
     lines.append("")
     lines.append(f"- Target DOCX: `{docx_path}`")
     lines.append(f"- Relation mode: `{relation_mode}`")
+    lines.append(f"- Expected side: {expected_origin}")
+    lines.append(f"- Expected functions (source analysis): `{len(details_by_name)}`")
+    lines.append("- Measures: writer fidelity — the document's Called/Calling cells against the analysis that built it (not source-vs-analysis agreement)")
     lines.append(f"- Total functions compared: `{total}`")
     lines.append(f"- Called exact match: `{called_match}` / `{total}` ({_ratio(called_match, total)})")
     lines.append(f"- Calling exact match: `{calling_match}` / `{total}` ({_ratio(calling_match, total)})")
@@ -943,7 +1040,7 @@ def generate_uds_field_quality_gate_report(
       함수에 넣으면 그 전제가 거짓이라 High 가 구조적으로 0 이다(리뷰 I5).
     """
     try:
-        import docx  # type: ignore
+        import docx  # type: ignore  # noqa: F401 — 설치 확인만(없으면 아래가 사유를 리포트에 쓴다); 되읽기는 read_back_function_info
     except Exception as exc:
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -984,8 +1081,7 @@ def generate_uds_field_quality_gate_report(
         "traceability_rate": "DID/서비스 매핑을 확인하고, 코드 내 UDS 서비스 핸들러에 요구사항 ID를 연결하세요.",
     }
 
-    doc = docx.Document(str(docx_path))
-    doc_map = _extract_function_info_from_docx(doc)
+    doc_map = read_back_function_info(docx_path)   # (R55) 같은 파일이면 한 번만 판다
     payload, payload_file, payload_read_error = _load_uds_payload_detailed(docx_path)
     payload_by_name = _payload_function_details_by_name(payload)
     doc_rows = [row for row in doc_map.values() if isinstance(row, dict)]
@@ -1580,6 +1676,9 @@ def _parse_accuracy_summary(text: str) -> Dict[str, Any]:
         "swcom_01_called_exact_match": "",
         "swcom_01_calling_exact_match": "",
         "total_functions": 0,
+        # (R55 리뷰 W2) 기대측 정의 — "pipeline"(문서를 만든 분석) / "re-analysis"(source_root 재분석) / ""(옛 리포트, 미기록).
+        #   R55 전 수치(88.7%)와 후 수치(99.8%)는 정의가 달라 같은 열에 섞이면 안 된다.
+        "expected_side": "",
     }
     in_swcom01 = False
     for raw in str(text or "").splitlines():
@@ -1592,6 +1691,10 @@ def _parse_accuracy_summary(text: str) -> Dict[str, Any]:
             continue
         if low.startswith("## ") and "swcom_01" not in low:
             in_swcom01 = False
+        m_side = re.match(r"-?\s*expected side:\s*(pipeline|re-analysis)", line, flags=re.I)
+        if m_side:
+            out["expected_side"] = m_side.group(1).lower()
+            continue
         m_total = re.search(r"total functions compared:\s*`?(\d+)`?", line, flags=re.I)
         if m_total:
             out["total_functions"] = int(m_total.group(1))
@@ -1646,14 +1749,13 @@ def build_uds_view_payload(
     quality_gate_report_path: str = "",
 ) -> Dict[str, Any]:
     try:
-        import docx  # type: ignore
+        import docx  # type: ignore  # noqa: F401 — 설치 확인만(없으면 아래가 사유를 리포트에 쓴다); 되읽기는 read_back_function_info
     except Exception as exc:
         raise RuntimeError(f"python-docx import failed: {exc}") from exc
     target = Path(docx_path).expanduser().resolve()
     if not target.exists():
         raise FileNotFoundError(f"UDS DOCX not found: {target}")
-    doc = docx.Document(str(target))
-    doc_map = _extract_function_info_from_docx(doc)
+    doc_map = read_back_function_info(str(target))   # (R55) 생성 직후의 첫 보기는 후처리가 판 결과를 그대로 쓴다
     functions: List[Dict[str, Any]] = []
     swcom_summary: Dict[str, int] = {}
     traceability: List[Dict[str, Any]] = []
@@ -1834,10 +1936,10 @@ def generate_asil_related_confidence_report(
         docx_path = str(generated_docx_path or "").strip()
         if docx_path and Path(docx_path).exists():
             try:
-                import docx  # type: ignore
-                doc = docx.Document(docx_path)
-                doc_map = _extract_function_info_from_docx(doc)
-            except Exception:
+                import docx  # type: ignore  # noqa: F401 — 설치 확인만(없으면 아래가 사유를 리포트에 쓴다); 되읽기는 read_back_function_info
+                doc_map = read_back_function_info(docx_path)   # (R55) 같은 파일이면 한 번만 판다
+            except Exception as exc:  # noqa: BLE001 — 되읽기 실패는 리포트를 멈추지 않지만 사유는 남긴다(리뷰 I8)
+                _logger.warning("confidence report: 생성 문서 되읽기 실패(%s: %s) — 문서 없이 채점한다", type(exc).__name__, exc)
                 doc_map = {}
             rebuilt_from_doc: Dict[str, Dict[str, Any]] = {}
             for _, row in (doc_map or {}).items():
@@ -1877,10 +1979,10 @@ def generate_asil_related_confidence_report(
         docx_path = str(generated_docx_path or "").strip()
         if docx_path and Path(docx_path).exists():
             try:
-                import docx  # type: ignore
-                doc = docx.Document(docx_path)
-                doc_map = _extract_function_info_from_docx(doc)
-            except Exception:
+                import docx  # type: ignore  # noqa: F401 — 설치 확인만(없으면 아래가 사유를 리포트에 쓴다); 되읽기는 read_back_function_info
+                doc_map = read_back_function_info(docx_path)   # (R55) 같은 파일이면 한 번만 판다
+            except Exception as exc:  # noqa: BLE001 — 되읽기 실패는 리포트를 멈추지 않지만 사유는 남긴다(리뷰 I8)
+                _logger.warning("confidence report: 생성 문서 되읽기 실패(%s: %s) — 문서 없이 채점한다", type(exc).__name__, exc)
                 doc_map = {}
             if isinstance(doc_map, dict) and doc_map:
                 by_name_from_doc: Dict[str, Dict[str, Any]] = {}
@@ -1919,6 +2021,9 @@ def generate_asil_related_confidence_report(
                     k: (dict(v) if isinstance(v, dict) else v)
                     for k, v in details_by_name.items()
                 }
+                # (R55 N27-c) 문서 쪽 정규화 이름은 **한 번만** 만든다 — 예전엔 아래 폴백이 못 찾은 함수마다 문서 989행을
+                #   다시 정규화했다(라이브 payload 1157 중 문서에 없는 214개 × 989 = 21만 회 re.sub, 리포트 20초 중 ≈7초). 순서·판정 동일.
+                _doc_norm = [(_norm_name(dk), dv) for dk, dv in by_name_from_doc.items()]
                 for name, info in list(details_by_name.items()):
                     if not isinstance(info, dict):
                         continue
@@ -1932,8 +2037,7 @@ def generate_asil_related_confidence_report(
                         nkey = _norm_name(name)
                         if nkey:
                             # fuzzy name fallback for rows with extra annotations.
-                            for dk, dv in by_name_from_doc.items():
-                                dkey = _norm_name(dk)
+                            for dkey, dv in _doc_norm:
                                 if not dkey:
                                     continue
                                 if nkey == dkey or nkey in dkey or dkey in nkey:

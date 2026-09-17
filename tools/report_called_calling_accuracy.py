@@ -80,11 +80,14 @@ def main() -> None:
         raise FileNotFoundError(f"No generated UDS docx found in {report_dir}")
     target_doc = docx_files[0]
     out = report_dir / "called_calling_accuracy_latest.md"
+    # (R55) 독립 CLI — 문서를 만든 분석이 손에 없다. `source_sections=None` 은 **의도한 재분석**이고, 리포트 머리글이
+    #   "Expected side: re-analysis of source_root … may differ" 로 그 사실을 적는다(생성 경로 넷은 전부 파이프라인 분석을 넘긴다).
     report_path = rg.generate_called_calling_accuracy_report(
         str(target_doc),
         str(Path(r"D:\Project\Ados\PDS_64_RD")),
         str(out),
         relation_mode="code",
+        source_sections=None,
     )
     print(report_path)
 

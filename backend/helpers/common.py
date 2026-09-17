@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 import traceback
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -446,10 +447,13 @@ def _run_report_with_timeout(
     report_name: str,
 ) -> Tuple[bool, str]:
     ex = ThreadPoolExecutor(max_workers=1)
+    _t0 = time.perf_counter()
     try:
         future = ex.submit(fn)
         future.result(timeout=timeout_seconds)
         ex.shutdown(wait=True, cancel_futures=False)
+        # (R55 N27-c) 리포트별 소요 — 후처리 4분이 어디서 가는지 로그만으로 알 수 있게(오프라인 하네스 없이).
+        _api_logger.info("[UDS_REPORT] %s done in %.1fs", report_name, time.perf_counter() - _t0)
         return True, ""
     except FuturesTimeoutError:
         ex.shutdown(wait=False, cancel_futures=True)

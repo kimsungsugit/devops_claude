@@ -402,6 +402,8 @@ def _docx_to_text(doc) -> str:
 
 
 def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
+    # (R55 N27-c) 셀 글은 python-docx `.text` 와 같은 값을 xpath 없이 — 989개 표 걷기 12초 → 2초(`report_gen/docx_text.py`).
+    from report_gen.docx_text import cell_text
     result: Dict[str, Dict[str, Any]] = {}
 
     def _norm_label(raw: str) -> str:
@@ -441,7 +443,7 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
         for table in doc.tables:
             if not table.rows:
                 continue
-            header = [c.text.strip() for c in table.rows[0].cells]
+            header = [cell_text(c).strip() for c in table.rows[0].cells]
             if not header:
                 continue
             header_joined = " ".join(header)
@@ -450,7 +452,7 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
             fn_id = ""
             if len(table.rows) > 1:
                 for cell in table.rows[1].cells:
-                    m = re.search(r"(SwUFn_\d+)", cell.text or "")
+                    m = re.search(r"(SwUFn_\d+)", cell_text(cell))
                     if m:
                         fn_id = m.group(1)
                         break
@@ -461,7 +463,7 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
             collecting_params = ""
             skip_next_header = False
             for row in table.rows[2:]:
-                cells = [c.text.strip() for c in row.cells]
+                cells = [cell_text(c).strip() for c in row.cells]
                 if not cells:
                     continue
                 label = cells[0].strip()
