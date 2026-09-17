@@ -4287,6 +4287,11 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             <span>스캔 파일 {st.files_scanned ?? 0}</span>
             <span>함수 {st.functions ?? 0}</span>
             <span>호출 엣지 {st.edges ?? 0}</span>
+            {st.paren_targets_dropped > 0 && (
+              <span title="(U8)(x) 캐스트·(*pfn)(x) 포인터 변수처럼 괄호 안 이름이 프로젝트 함수가 아닌 호출식 — 외부 호출(externals)로 세지 않는다. 프로젝트 전체 기준(include/exclude 무관)">
+                괄호 대상 제외 {st.paren_targets_dropped}
+              </span>
+            )}
             {st.roots > 0 && <span>루트 <strong>{st.roots}</strong>{!st.reverse && <span style={{ opacity: 0.65 }}> · 진입점·ISR 우선</span>}</span>}
             {Array.isArray(activeData.missing) && activeData.missing.length > 0 && (
               <span style={{ color: '#d97706' }}>미발견 {activeData.missing.length}</span>

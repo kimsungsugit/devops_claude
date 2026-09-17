@@ -99,6 +99,7 @@ class CFunction:
     comment_return: str = ""
     func_refs: Optional[List[str]] = None      # &foo/pfn=foo/f(foo) — 함수포인터 참조(엣지 승격 후보)
     pointer_calls: Optional[List[str]] = None  # (*p)()/obj->h()/pfn() — 간접 호출 사이트(배지)
+    paren_calls: Optional[List[str]] = None    # (R58 N59) `(ident)(args)` 의 ident — 캐스트인지 함수인지 파일 단위로는 모른다
 
 
 def _run_preprocessor(
@@ -326,7 +327,8 @@ _REGEX_DEF_PAT = re.compile(
 )
 
 
-def _extract_calls(func_node, src: bytes) -> List[str]:
+def _extract_calls(func_node, src: bytes, paren_targets: Optional[Set[str]] = None) -> List[str]:
+    """직접 호출 이름. `paren_targets` 를 주면 `(ident)(args)` 의 ident 를 같은 순회에서 거기 모은다(R58 N59 — 별도 순회 없이)."""
     calls: Set[str] = set()
     body = func_node.child_by_field_name("body")
     if not body:
@@ -339,9 +341,13 @@ def _extract_calls(func_node, src: bytes) -> List[str]:
             if target is None:
                 continue
             if target.type == "parenthesized_expression":
-                inner = _find_ident(target)
-                if inner:
-                    calls.add(inner)
+                # (R58 N59) `(U8)(x)` 캐스트도 `(*pfn)(x)` 역참조도 여기로 온다 — 한 파일만 보고는 함수인지 알 수 없다.
+                # `_extract_paren_call_targets` 가 따로 모으고 `parse_c_project` 가 프로젝트 함수 집합으로 걸러 승격한다
+                # (라이브 콜트리 externals 278쌍 중 97쌍이 `U8`·`U16`·`byte` 같은 타입 이름이었다).
+                if paren_targets is not None:
+                    inner = _find_ident(target)
+                    if inner:
+                        paren_targets.add(inner)
                 continue
             name = _find_ident(target)
             if name:
@@ -365,6 +371,17 @@ def _extract_calls(func_node, src: bytes) -> List[str]:
                         if rname and not rname.isupper():
                             calls.add(rname)
     return sorted(calls - _STD_LIB_FUNCS)
+
+
+def _extract_paren_call_targets(func_node, src: bytes = b"") -> List[str]:
+    """(R58 N59) `(ident)(args)` 꼴 호출식의 ident — tree-sitter 는 `(U8)(x + 1)` 캐스트를 call_expression 으로 읽는다.
+    파일 하나만으로는 typedef 인지 함수인지 판정할 수 없으므로 여기서는 모으기만 하고, `promote_paren_call_targets` 가
+    프로젝트 정의 함수 집합에 있는 이름만 `calls` 로 승격한다(`(free)(p)` 같은 매크로 회피 관용구는 그때 남는다).
+    `(*pfn)(x)` 의 pfn 도 여기 들어오지만 함수가 아니면 승격되지 않는다 — 간접 호출 사이트는 `pointer_calls` 가 따로 적는다.
+    `_extract_calls` 와 같은 순회를 쓴다(리뷰 I1 — 본문 전수 순회를 하나 더 늘리지 않는다)."""
+    out: Set[str] = set()
+    _extract_calls(func_node, src, out)
+    return sorted(out)
 
 
 def _extract_func_refs(func_node, src: bytes) -> List[str]:
@@ -726,7 +743,9 @@ def _extract_function_defs(
         # (R56 N52) static 은 형제 노드 · 시그니처는 한 줄로 — `_is_static_function_node` / `normalize_prototype_text` 참조.
         is_static = _is_static_function_node(node, src) or _has_static_token(prefix)
         signature = normalize_prototype_text(prefix + " " + decl_text)
-        calls = _extract_calls(node, src)
+        _paren: Set[str] = set()
+        calls = _extract_calls(node, src, _paren)
+        paren_calls = sorted(_paren)
         func_refs = _extract_func_refs(node, src)
         pointer_calls = _extract_pointer_calls(node, src)
         used_globals: Set[str] = set()
@@ -760,6 +779,7 @@ def _extract_function_defs(
                 comment_return=c_return,
                 func_refs=func_refs,
                 pointer_calls=pointer_calls,
+                paren_calls=paren_calls,
             )
         )
     return functions
@@ -975,6 +995,32 @@ def _make_parser():
     return None
 
 
+_EMPTY_CALL_FILTER: Dict[str, int] = {"paren_targets": 0, "paren_kept": 0, "paren_dropped": 0}
+
+
+def promote_paren_call_targets(functions: List[Dict[str, object]]) -> Dict[str, int]:
+    """(R58 N59) 파일 단위로 미뤄 둔 괄호 대상(`paren_calls`)을 함수 집합 `functions` 의 이름으로 걸러 `calls` 에 합친다.
+    `parse_c_project` 가 루트 하나에 대해 부르고, **루트 여럿을 합쳐 쓰는 소비자는 병합한 목록으로 다시 불러야 한다**
+    (리뷰 W1 — 루트 A 의 함수를 루트 B 가 `(Foo)(v)` 로 부르면 루트 단위 known 으론 버려진다). 멱등: `paren_calls` 는
+    남겨 두고 `calls` 는 합집합이므로 몇 번 불러도 같다. 반환값은 공시용 계수 — `paren_targets`(괄호 대상 총수) ·
+    `paren_kept`(함수라서 승격) · `paren_dropped`(캐스트·포인터 변수·**이 집합에 없는 이름** — 후자는 스코프가 좁을수록 늘어난다)."""
+    stats = _EMPTY_CALL_FILTER.copy()
+    known = {str(f.get("name") or "") for f in functions if isinstance(f, dict) and f.get("name")}
+    for f in functions:
+        if not isinstance(f, dict):
+            continue
+        paren = f.get("paren_calls") or []
+        if not paren:
+            continue
+        kept = [p for p in paren if p in known and p not in _STD_LIB_FUNCS]
+        stats["paren_targets"] += len(paren)
+        stats["paren_kept"] += len(kept)
+        stats["paren_dropped"] += len(paren) - len(kept)
+        if kept:
+            f["calls"] = sorted(set(f.get("calls") or []) | set(kept))
+    return stats
+
+
 def parse_c_project(
     source_root: str,
     *,
@@ -986,7 +1032,7 @@ def parse_c_project(
 ) -> Dict[str, object]:
     root = Path(source_root).resolve()
     if not root.exists():
-        return {"functions": [], "globals": [], "scanned": []}
+        return {"functions": [], "globals": [], "scanned": [], "call_filter": _EMPTY_CALL_FILTER.copy()}
     allowed = {".c", ".h", ".cpp", ".hpp"}
     functions: List[Dict[str, object]] = []
     globals_list: Set[str] = set()
@@ -1052,6 +1098,7 @@ def parse_c_project(
                         "body": f.body_text,
                         "func_refs": f.func_refs or [],
                         "pointer_calls": f.pointer_calls or [],
+                        "paren_calls": list(f.paren_calls or []),
                     }
                 )
             if root_node is not None:
@@ -1075,8 +1122,10 @@ def parse_c_project(
                     globals_detailed.append(g)
         if count > max_files:
             break
+    call_filter = promote_paren_call_targets(functions)
     return {
         "functions": functions,
+        "call_filter": call_filter,
         "globals": sorted(globals_list),
         "globals_detailed": globals_detailed,
         "scanned": scanned,

@@ -200,6 +200,9 @@ def _meta_line(stats: Dict[str, Any], meta: Dict[str, Any], reverse: bool) -> st
         bits.append(f"루트: {stats.get('roots')}")
     if stats.get("files_scanned"):
         bits.append(f"스캔 파일: {stats.get('files_scanned')}")
+    if stats.get("paren_targets_dropped"):
+        # (R58 N59, 리뷰 W2/I2) externals 에서 사라진 캐스트·포인터 괄호 대상 수 — 프로젝트 전체 기준(include/exclude 무관).
+        bits.append(f"괄호 대상 제외(캐스트·포인터, 전체 기준): {stats.get('paren_targets_dropped')}")
     if meta.get("generated_at"):
         bits.append(f"생성: {meta.get('generated_at')}")
     if meta.get("job_url"):

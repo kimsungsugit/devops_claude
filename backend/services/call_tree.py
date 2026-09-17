@@ -652,6 +652,9 @@ def build_call_tree_precise(
             "nodes_truncated": bool(budget is not None and budget[1]),
             "compile_commands": "",
             "reverse": bool(reverse),
+            # (R58 N59) 파서가 `(U8)(x)` 같은 괄호 대상을 호출로 치지 않고 버린 개수 — externals 에서 사라진 것이
+            # 무엇인지 화면·xlsx 가 물을 수 있게 공시한다(0 이면 버린 것이 없다).
+            "paren_targets_dropped": int((parsed.get("call_filter") or {}).get("paren_dropped") or 0),
             # parse_c_project가 검증된 tree-sitter 파서 성공 여부를 parser_engine으로 정직 노출
             # (import 유무가 아니라 실제 파싱 성공 — #if 중첩/capsule 소비로 regex 폴백되면 그대로 표기).
             "engine": parsed.get("parser_engine")

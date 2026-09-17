@@ -120,7 +120,7 @@ def _parse_cached(source_root: str, max_files: int) -> Tuple[Any, Dict[str, Any]
         if hit and (now - hit[0]) < _CACHE_TTL_S and hit[2].get("signature") == sig:
             return hit[1], {**hit[2], "cached": True}
 
-    from workflow.code_parser.c_parser import parse_c_project
+    from workflow.code_parser.c_parser import parse_c_project, promote_paren_call_targets
     t0 = time.time()
     # ⚠ `source_root` 는 **콤마 구분 복수 경로**일 수 있다(레지스트리 실측:
     #   `C:\…\NE1AW_PORTING,C:\…\PDS128_FBL`). `parse_c_project` 는 단일 루트만 받으므로
@@ -132,6 +132,9 @@ def _parse_cached(source_root: str, max_files: int) -> Tuple[Any, Dict[str, Any]
         part = parse_c_project(root, max_files=max_files)
         res["functions"].extend(part.get("functions") or [])
         res["scanned"].extend(part.get("scanned") or [])
+    # (R58 N59, 리뷰 W1) 루트를 합친 함수 집합으로 괄호 대상을 다시 승격 — 병합 결과에도 `call_filter` 가 있어야
+    # 단일 루트 결과와 shape 가 같다(리뷰 X6).
+    res["call_filter"] = promote_paren_call_targets(res["functions"])
     meta = {
         "cached": False,
         "elapsed_s": round(time.time() - t0, 1),

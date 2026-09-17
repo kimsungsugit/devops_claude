@@ -746,6 +746,13 @@ def generate_uds_source_sections(
                         ast_result["globals_detailed"].extend(_partial.get("globals_detailed") or [])
                 except Exception:
                     pass
+            # (R58 N59, 리뷰 W1) 괄호 대상 `(Foo)(v)` 승격은 루트 단위 known 으로 먼저 됐다 — 루트를 합친 함수 집합으로
+            # 다시 승격해야 교차 루트(APP↔FBL)의 진짜 호출이 남는다(멱등). 계수는 합친 기준으로 다시 센다.
+            try:
+                from workflow.code_parser.c_parser import promote_paren_call_targets as _promote_paren
+                ast_result["call_filter"] = _promote_paren(ast_result["functions"])
+            except Exception:
+                pass
         except Exception:
             ast_result = {"functions": [], "globals": []}
         # AST 중복 함수 제거 (복수 루트에서 동일 함수명 중복 가능)
