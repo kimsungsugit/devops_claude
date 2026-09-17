@@ -61,7 +61,7 @@ def _run(tmp_path, monkeypatch, ref_map, payload):
 
 
 _MATCH_KEYS = {"by_name", "by_name_and_id", "id_collision_blocks", "unmatched_blocks", "unnamed_blocks",
-               "blocked_axes", "ambiguous_names", "ambiguous_sample"}
+               "blocked_axes", "ambiguous_names", "ambiguous_sample", "twin_definition_blocks"}   # (R57 N54) 쌍둥이 계수
 
 
 class TestNameIsTheKey:

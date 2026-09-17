@@ -550,7 +550,7 @@ def _uncomparable(text: Optional[str]) -> Optional[bool]:
 
 
 _MATCHING_KEYS = ("by_name", "by_name_and_id", "id_collision_blocks", "unmatched_blocks", "unnamed_blocks",
-                  "ambiguous_names")
+                  "ambiguous_names", "twin_definition_blocks")
 
 
 def _matching_summary(m: Any) -> Optional[Dict[str, Optional[int]]]:

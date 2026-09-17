@@ -70,6 +70,7 @@ from report_gen.utils import (
     _safe_dict,
     _table_rows_from_texts,
     function_name_key,
+    normalize_prototype_text,
 )
 
 _logger = logging.getLogger("report_generator")
@@ -2435,8 +2436,17 @@ def _resolve_reference_target(
     ref_map: Dict[str, Any],
     stats: Dict[str, Any],
     seen_names: Set[str],
+    candidates_by_name: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    consumed: Optional[Set[int]] = None,
+    twin_pairing: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Set[str]]:
     """정본 SwUDS 블록 하나가 payload 의 어느 함수인가 — **이름**으로 찾는다. (R51 N40)
+
+    (R57 N54) 같은 이름의 정의가 둘 이상(`candidates_by_name`)이면 이 블록의 정의를 고른다(`stats["twin_definition_blocks"]`).
+    `twin_pairing`(이름 → {정본 ID: 정의})이 오면 같은 이름의 블록 전부를 `_pair_twin_blocks` 로 **한 번에** 짝지어 거기 두고
+    heading 채움도 같은 표를 본다. 짝이 실제로 서로 다른 정의에 1:1 로 붙었을 때만(`_twin_pairing_is_split`) 그 블록들은 한 함수에
+    대한 두 의견이 아니라 **다른 함수**이므로 축 충돌(`blocked_axes`)을 보지 않는다 — 짝 표 없이 `consumed` 만 오면 distinct 를
+    알 수 없으므로 종전대로(보수적으로) 충돌을 본다.
 
     ⚠ 왜 ID 가 아닌가: 생성 ID(`SwUFn_{모듈}{일련}`)는 소스 스캔 순서로 붙고, 정본 ID 는 그 문서의 것이다. 두 번호는
       서로 무관하다. 실측(kjpds02_pv 정본 v3.03 × run 2080, 2026-09-15): 옛 "ID 먼저, 없으면 이름" 규칙으로 ID 가
@@ -2465,6 +2475,21 @@ def _resolve_reference_target(
     if not isinstance(target, dict):
         stats["unmatched_blocks"] += 1
         return None, set()
+    _cands = (candidates_by_name or {}).get(name) or []
+    _twin_split = False
+    if len(_cands) > 1:
+        _pm: Optional[Dict[str, Dict[str, Any]]] = None
+        if twin_pairing is not None:
+            _pm = twin_pairing.get(name)
+            if _pm is None:
+                _pm = _pair_twin_blocks(ref_blocks_by_name.get(name) or [fid], ref_map, _cands)
+                twin_pairing[name] = _pm
+        if _pm is not None and fid in _pm:
+            target = _pm[fid]
+        else:
+            target = _pick_function_candidate(_cands, block, consumed)
+        stats["twin_definition_blocks"] = int(stats.get("twin_definition_blocks", 0)) + 1
+        _twin_split = _twin_pairing_is_split(_pm)
     _by_id = function_details.get(fid) if isinstance(function_details, dict) else None
     if isinstance(_by_id, dict) and _by_id is not target \
             and _normalize_symbol_name(str(_by_id.get("name") or "")).lower() != name:
@@ -2473,7 +2498,7 @@ def _resolve_reference_target(
     tid = str(target.get("id") or "")
     blocked: Set[str] = set()
     siblings = ref_blocks_by_name.get(name) or [fid]
-    if len(siblings) > 1:
+    if len(siblings) > 1 and not _twin_split:
         blocked = _sibling_axis_conflicts(siblings, ref_map)
         if blocked and name not in seen_names:
             seen_names.add(name)
@@ -2554,6 +2579,98 @@ def rejoin_function_maps(
         function_details_by_name[nm] = tgt
         rejoined += 1
     return rejoined
+
+
+# ── 같은 이름의 정의가 둘 이상일 때(APP/FBL 쌍둥이) 어느 정의인가 ──────────────────────
+#
+# (R57 N54) 정본 KJPDS02 는 main·WriteBlock·EEPROM_SetByte … 9개 함수를 APP 절(SwCom_21 EEPROM 등)과
+# Bootloader 절(SwCom_35)에 **따로** 싣고 내용도 다르다. 분석이 두 정의를 다 넘겨도 이름 키 하나로 고르면
+# 두 표가 같은 내용이 된다. 그래서 heading 하나가 어느 정의인지는 **정본 블록의 피호출자와 겹치는 정도**로
+# 고르고, 겹침이 같으면(피호출자가 둘 다 없는 BackupSector 같은 경우) **아직 안 쓴 정의**를 문서 순서대로 준다.
+# heading 채움(`_resolve_function_info`)과 정본 병합(`_resolve_reference_target`)이 같은 함수를 쓰므로 두 경로가
+# 같은 정의를 고른다 — 갈리면 정본 ASIL 이 APP 표에, 피호출자가 FBL 표에 실리는 식으로 엇갈린다.
+UNMATCHED_HEADING_NOTE = "분석 대상 소스에서 이 함수의 정의를 찾지 못했다 — 템플릿(정본) heading 만 있어 내용을 만들지 않았다."
+
+
+def _candidates_by_name(function_details: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """이름(정규화·소문자) → 그 이름의 정의 목록(payload 순서). 하나뿐인 이름도 담는다(호출자는 `len > 1` 로 가른다)."""
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    if not isinstance(function_details, dict):
+        return out
+    for info in function_details.values():
+        if not isinstance(info, dict):
+            continue
+        nm = _normalize_symbol_name(str(info.get("name") or "")).lower()
+        if nm:
+            out.setdefault(nm, []).append(info)
+    return out
+
+
+def _candidate_callees(info: Dict[str, Any]) -> Set[str]:
+    vals = info.get("calls_list")
+    if not isinstance(vals, list):
+        vals = _extract_call_names(str(info.get("called") or ""))
+    return {str(v).strip().lower() for v in vals if str(v).strip() and str(v).strip().upper() != "N/A"}
+
+
+def _prototype_key(text: Any) -> str:
+    """프로토타입 동일성 비교 키 — 주석 제거·공백 전부 제거·소문자(정본은 `( byte sector )` 처럼 괄호 안에 공백을 둔다)."""
+    return re.sub(r"\s+", "", normalize_prototype_text(str(text or ""))).lower()
+
+
+def _pick_function_candidate(
+    candidates: List[Dict[str, Any]],
+    ref_block: Optional[Dict[str, Any]],
+    consumed: Optional[Set[int]] = None,
+) -> Dict[str, Any]:
+    """같은 이름의 정의들 중 이 heading/블록의 것을 고른다. 판정 순서: 정본 블록 피호출자 겹침(많을수록) →
+    프로토타입 일치 → 아직 안 쓴 정의 → payload 순서. `consumed` 에 고른 정의의 `id()` 를 기록한다."""
+    if not candidates:
+        raise ValueError("no candidates")
+    ref_callees: Set[str] = set()
+    ref_proto = ""
+    if isinstance(ref_block, dict):
+        ref_callees = {n.lower() for n in _extract_call_names(str(ref_block.get("called") or "")) if n.upper() != "N/A"}
+        ref_proto = _prototype_key(ref_block.get("prototype"))
+    best = candidates[0]
+    best_key = None
+    for idx, cand in enumerate(candidates):
+        overlap = len(ref_callees & _candidate_callees(cand)) if ref_callees else 0
+        proto_hit = 1 if (ref_proto and _prototype_key(cand.get("prototype")) == ref_proto) else 0
+        fresh = 0 if (consumed is not None and id(cand) in consumed) else 1
+        key = (overlap, proto_hit, fresh, -idx)
+        if best_key is None or key > best_key:
+            best, best_key = cand, key
+    if consumed is not None:
+        consumed.add(id(best))
+    return best
+
+
+def _pair_twin_blocks(
+    siblings: List[str],
+    ref_map: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """같은 이름의 정본 블록들(`siblings`, 문서 순서) ↔ 같은 이름의 정의들 — **한 번** 짝지어 `{정본 ID: 정의}` 로 돌려준다.
+
+    (R57 리뷰 W2/W3) 정본 병합과 heading 채움이 각자 고르면 피호출자 겹침이 없는 tie(BackupSector)에서 두 경로의 문서 순서가
+    다를 때 서로 다른 정의를 고를 수 있다 — 정본 ASIL 은 APP 표에, 피호출자는 FBL 표에. 그래서 짝은 여기서 한 번만 만들고
+    두 경로가 같은 표를 본다. 블록은 `ref_blocks_by_name` 에서 온 것이라 이름이 같음이 보장된다(리뷰 W1 — 정본 ID 만 같은
+    남의 함수 블록은 여기 못 들어온다).
+    """
+    consumed: Set[int] = set()
+    out: Dict[str, Dict[str, Any]] = {}
+    for fid in siblings:
+        blk = ref_map.get(fid)
+        out[fid] = _pick_function_candidate(candidates, blk if isinstance(blk, dict) else None, consumed)
+    return out
+
+
+def _twin_pairing_is_split(pairing: Optional[Dict[str, Dict[str, Any]]]) -> bool:
+    """짝이 **실제로** 서로 다른 정의에 1:1 로 붙었는가(리뷰 W3 — 개수 비교가 아니라 고른 대상의 distinct 로 판정)."""
+    if not pairing or len(pairing) < 2:
+        return False
+    return len({id(t) for t in pairing.values()}) == len(pairing)
 
 
 def _analysis_display_name(nm: Any, function_details_by_name: Any) -> str:
@@ -3193,6 +3310,8 @@ def generate_uds_docx(
         "matching": {
             "by_name": 0, "by_name_and_id": 0, "id_collision_blocks": 0, "unmatched_blocks": 0, "unnamed_blocks": 0,
             "blocked_axes": {}, "ambiguous_names": 0, "ambiguous_sample": [],
+            # (R57 N54) 같은 이름의 정의가 둘 이상이라 정본 블록 피호출자로 정의를 고른 블록 수(APP/FBL 쌍둥이).
+            "twin_definition_blocks": 0,
         },
         "descriptive_fields_applied": 0,
         "invalid_asil_rejected": 0,
@@ -3213,6 +3332,13 @@ def generate_uds_docx(
             "globals_global": 0, "called": 0, "calling": 0,
         },
     }
+    # (R57 N54) 같은 이름의 정의 목록 — heading 채움과 정본 병합이 같은 표·같은 규칙으로 정의를 고른다.
+    #   소비 집합은 경로별로 따로(둘 다 문서 순서로 돌므로 같은 heading 에 같은 정의가 붙는다).
+    _fn_candidates_by_name = _candidates_by_name(function_details)
+    _twin_consumed_merge: Set[int] = set()
+    _twin_consumed_headings: Set[int] = set()
+    _twin_pairing: Dict[str, Dict[str, Dict[str, Any]]] = {}     # 이름 → {정본 ID: 정의} — 병합이 만들고 heading 채움이 같은 표를 본다
+    ref_map: Dict[str, Any] = {}      # 정본이 없어도 heading 채움이 참조한다(빈 dict = 정본 의견 없음)
     # (R47 리뷰 W1) `Path("")` 는 `.` 이라 `.exists()` 가 True 다 — 빈 값·비파일은 "참조 없음".
     if str(UDS_REF_SUDS_PATH or "").strip() and ref_doc_path.is_file():
         if not _ref_safety_ok:
@@ -3252,6 +3378,7 @@ def generate_uds_docx(
                 target, _blocked_axes = _resolve_reference_target(
                     fid, block, function_details, function_details_by_name, _ref_blocks_by_name, ref_map,
                     _ref_stats["matching"], _seen_dup_names,
+                    candidates_by_name=_fn_candidates_by_name, consumed=_twin_consumed_merge, twin_pairing=_twin_pairing,
                 )
                 if not isinstance(target, dict):
                     continue
@@ -4024,6 +4151,25 @@ def generate_uds_docx(
                 fn_name = heading_fn_name
                 if isinstance(function_details_by_name, dict):
                     info = function_details_by_name.get(fn_name)
+                _cands = _fn_candidates_by_name.get(fn_name) or []
+                if len(_cands) > 1:
+                    # (R57 N54) 같은 이름의 정의가 둘 이상 — 정본 병합이 만든 짝 표(`_twin_pairing`, 이름 → {정본 ID: 정의})에서
+                    #   이 heading 의 정본 ID 로 찾는다(두 경로가 같은 표를 본다 — 리뷰 W2). 짝 표는 **이름이 같은** 정본 블록만으로
+                    #   만들어지므로 정본 ID 만 같은 남의 함수 블록이 선택을 조종하지 못한다(리뷰 W1). 짝 표에 없으면(정본 없음·템플릿과
+                    #   정본이 다른 문서) 정본 의견 없이 고르되, 짝 표가 다른 heading 에 이미 준 정의는 뒤로 민다(같은 정의가 두 표에
+                    #   실리지 않게). 여기서 `ref_map` 을 직접 뒤지지 않는다 — 같은 이름 블록은 전부 짝 표에 있어 그 조회는 도달하지 않는다.
+                    _fid_m = re.search(r"(swufn_\d+)", str(key_text), re.I)
+                    _want = _fid_m.group(1).lower() if _fid_m else ""
+                    _hit = None
+                    if _want:
+                        _hit = next((t for k, t in (_twin_pairing.get(fn_name) or {}).items() if str(k).lower() == _want), None)
+                    if isinstance(_hit, dict):
+                        info = _hit
+                        _twin_consumed_headings.add(id(_hit))
+                    else:
+                        _taken = set(_twin_consumed_headings) | {id(t) for t in (_twin_pairing.get(fn_name) or {}).values()}
+                        info = _pick_function_candidate(_cands, None, _taken)
+                        _twin_consumed_headings.add(id(info))
             if not isinstance(info, dict) and ":" in str(title_text):
                 fn_name = heading_fn_name
                 if isinstance(function_details, dict) and fn_name:
@@ -4108,11 +4254,15 @@ def generate_uds_docx(
                             continue
                         called_text = ", ".join([str(v) for v in (vals or []) if v])
                         break
+                # (R57 N54) payload 에 없는 함수의 heading(정본에만 있는 함수 — run 2088 에 36개). 예전엔 이름의 낱말로
+                #   동작 문장을 지어 실었다("s_Ap_Diagnostic: … 상태를 점검하고 진단 결과를 갱신한다") — 분석하지 않은
+                #   함수를 분석한 것처럼 적는 것이라 ISO 26262 설계 문서에선 지어내기다. 사실만 적는다(개수는 `empty_heading_count`).
+                #   출처 라벨은 붙이지 않는다 — 껍데기는 payload 가 아니라 사이드카·게이트가 읽지 않는 죽은 값이 된다.
                 info = {
                     "id": _normalize_swufn_id(str(fn_id.group(1)) if fn_id else ""),
                     "name": heading_fn_name,
                     "prototype": "",
-                    "description": _fallback_function_description(heading_fn_name, called_text),
+                    "description": UNMATCHED_HEADING_NOTE,
                     "asil": "",
                     "related": "",
                     "inputs": [],
@@ -4126,8 +4276,8 @@ def generate_uds_docx(
             if isinstance(info, dict) and heading_fn_name:
                 if fn_id:
                     info["id"] = _normalize_swufn_id(str(fn_id.group(1)))
-                if not str(info.get("prototype") or "").strip() and heading_fn_name == "main":
-                    info["prototype"] = "void main( void )"
+                # (R57 N54) `main` 의 `void main( void )` 리터럴을 지웠다 — 분석에 없는 main 에 프로토타입을 지어 싣던 특례
+                #   (R52 N39 의 Related 리터럴과 같은 갈래). 쌍둥이 main 은 이제 각자의 정의를 받는다.
                 if not str(info.get("description") or "").strip():
                     info["description"] = _fallback_function_description(
                         heading_fn_name,
@@ -4152,7 +4302,9 @@ def generate_uds_docx(
         def _build_function_info_table(info: Dict[str, Any], cols: int, style: Any):
             fn_key = str(info.get("name") or "").strip().lower()
             callee_names = [str(c).strip() for c in (info.get("calls_list") or []) if str(c).strip()]
-            if (not callee_names) and call_relation_mode == "code" and isinstance(call_map, dict):
+            # (R57 리뷰 I1) `call_map` 은 이름 키(쌍둥이면 두 정의의 합집합) — 정의가 둘 이상인 이름은 복구하지 않는다.
+            _is_twin = len(_fn_candidates_by_name.get(_normalize_symbol_name(str(info.get("name") or "")).lower()) or []) > 1
+            if (not callee_names) and (not _is_twin) and call_relation_mode == "code" and isinstance(call_map, dict):
                 fn_norm = _normalize_symbol_name(str(info.get("name") or "")).lower()
                 if fn_norm:
                     recovered: List[str] = []

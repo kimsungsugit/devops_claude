@@ -510,6 +510,14 @@ def _note_docx_outcome(issues: IssueCollector, gen_stats: Dict[str, Any]) -> Non
                        f"(이름 {matching.get('by_name')} · 이름+ID {matching.get('by_name_and_id')} · 정본에만 있는 함수 {matching.get('unmatched_blocks')})",
                        stage="docx", facts={"id_collision_blocks": _coll, "by_name": matching.get("by_name"),
                                             "by_name_and_id": matching.get("by_name_and_id"), "unmatched_blocks": matching.get("unmatched_blocks")})
+        # (R57 리뷰 I2) 같은 이름의 정의가 둘 이상(APP/FBL)이라 정본 블록의 피호출자로 정의를 고른 블록 수 — 정본 자체 중복
+        #   (`ambiguous_names`)과 다른 사실이다. 예전엔 이 9개 함수가 ambiguous 에 잡혔으므로 대체 표시 없이 사라지면 안 된다.
+        _twin = matching.get("twin_definition_blocks")
+        if isinstance(_twin, int) and not isinstance(_twin, bool) and _twin > 0:
+            issues.add("reference_twin_definitions", "risk", "actual",
+                       f"같은 이름의 함수 정의가 여러 파일에 있어(APP/FBL 등) 정본 블록 {_twin}개는 그 블록의 피호출자로 정의를 골랐다 — "
+                       f"정본이 한 함수를 두 절에 실은 것과 다른 경우",
+                       stage="docx", facts={"twin_definition_blocks": _twin})
         identity = ref.get("identity") if isinstance(ref.get("identity"), dict) else {}
         same = identity.get("same_project")
         if same is False:

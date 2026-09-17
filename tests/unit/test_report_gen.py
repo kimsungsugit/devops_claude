@@ -206,15 +206,17 @@ def test_put_by_name_preserves_identity_and_records_collisions():
     _put_by_name(by_name, "eeprom_setbyte", boot, coll)
     _put_by_name(by_name, "eeprom_setbyte", app, coll)
 
-    # 동일성 보존 — 마지막 등록 객체 그대로(복사본 아님)
-    assert by_name["eeprom_setbyte"] is app
+    # (R57 N54) 동일성 보존 — **다른 파일**의 같은 이름은 첫 정의를 유지한다(복사본 아님). 예전엔 last-wins 였지만 그때는
+    #   dedup 이 두 번째 정의를 파일째 버려 여기 도달하지 못했다 — 두 정의가 다 오는 지금, 이름 하나만 보는 소비자의
+    #   기본값을 예전 산출(첫 정의)과 같게 둔다. 문서는 정의별로 고른다(`docx_builder._pick_function_candidate`).
+    assert by_name["eeprom_setbyte"] is boot
     # 충돌은 별도 맵에 — 두 파일 전부 + 최대 ASIL
     ent = coll["eeprom_setbyte"]
     assert sorted(ent["files"]) == ["Generated_Code/EEPROM.c", "Sources/Eeprom/EEPROM.c"]
     assert ent["asil"] == "B"  # QM보다 높은 등급 유지(안전측)
 
-    # 보강 루프가 다시 덮어써도 충돌 기록은 유지된다
-    enriched = dict(app)
+    # 같은 파일의 재등록(보강 루프가 같은 정의를 다시 넣는 경우)은 종전대로 마지막 객체 — 충돌 기록은 유지된다
+    enriched = dict(boot)
     enriched["calling"] = "x"
     _put_by_name(by_name, "eeprom_setbyte", enriched, coll)
     assert by_name["eeprom_setbyte"] is enriched

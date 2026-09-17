@@ -85,6 +85,7 @@ _RULE_ACTION: Dict[str, str] = {
     "reference_overrode_doc_asil": "정본 SwUDS 와 설계 문서(SwDS)의 ASIL·Related 가 어긋난 함수다 — 정본을 썼다. 두 문서 중 낡은 쪽을 갱신한다.",
     "reference_ambiguous_function_name": "정본 SwUDS 가 같은 함수를 두 절에 다른 ASIL·Related 로 실었다 — 어느 쪽도 적용하지 않았다. 정본에서 사본 절을 지우거나 값을 맞춘다.",
     "reference_id_numbering_differs": "정본 SwUDS 의 함수 ID 와 생성본 ID 가 다른 함수를 가리킨다 — 매칭은 이름으로 했으니 결과는 맞다. 정본 ID 로 함수를 찾지 말 것.",
+    "reference_twin_definitions": "같은 이름의 함수가 여러 파일(APP/FBL 등)에 정의돼 있다 — 정본 블록의 피호출자로 어느 정의인지 골랐다. 두 표의 내용이 각자의 소스와 맞는지 확인한다.",
     "sds_partition_map_failed": "SwDS 에서 파티션 맵을 못 뽑았다 — 문서 양식(표 구조)을 확인한다. 정본·소스만으로 채운 문서다.",
     "sds_partition_map_empty": "요구 문서는 있는데 SwDS 파티션이 0건이다 — 파일명에 SwDS 가 있는지, 표 구조가 맞는지 확인한다.",
     "payload_sidecar_failed": "payload 기록 실패 — 채점기가 자기 대조로 강등됐다. 디스크를 확인하고 재생성한다.",

@@ -1295,8 +1295,9 @@ class TestReferenceMatchingSummary:
                                                "unmatched_blocks": 37, "unnamed_blocks": 0, "blocked_axes": {"related": 6, "inputs": 2},
                                                "ambiguous_names": "9", "ambiguous_sample": [{"name": "main"}]}
         m = read_evidence(str(_ref_sidecars(tmp_path, stats=stats)))["reference"]["matching"]
+        # (R57 N54) `twin_definition_blocks` 는 새 계수 — 옛 sidecar(2064)엔 없으므로 None(미기록)이 맞다.
         assert m == {"by_name": 896, "by_name_and_id": 46, "id_collision_blocks": 773, "unmatched_blocks": 37,
-                     "unnamed_blocks": 0, "blocked_axes": 8, "ambiguous_names": None}
+                     "unnamed_blocks": 0, "blocked_axes": 8, "ambiguous_names": None, "twin_definition_blocks": None}
 
     @pytest.mark.parametrize("blocked,expected", [({}, 0), ({"asil": 1}, 1), (None, None), ({"asil": "x"}, None)])
     def test_blocked_axes_sum_distinguishes_zero_from_unrecorded(self, tmp_path, blocked, expected):

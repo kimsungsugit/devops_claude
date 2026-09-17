@@ -218,7 +218,33 @@ def _put_by_name(
                 ent["files"].append(_f)
             if _asil_rank(_d.get("asil")) > _asil_rank(ent.get("asil")):
                 ent["asil"] = str(_d.get("asil") or "")
+    if prev is not None and prev is not detail:
+        _pf = os.path.normcase(str(prev.get("file") or "").strip())
+        _df = os.path.normcase(str(detail.get("file") or "").strip())
+        if _pf and _df and _pf != _df:
+            # (R57 N54) 교차 파일 쌍둥이 — 이름 하나에 정의 둘. 문서는 정의별로 고르므로(`_pick_function_candidate`)
+            #   이 맵은 **첫 정의**를 유지한다(예전에 두 번째 정의를 버리던 때와 같은 기본값 — 영향분석 등 이름 하나만
+            #   보는 소비자가 갑자기 다른 파일을 보지 않게).
+            return
     by_name[key] = detail  # 동일성 보존(문서 생성의 in-place 갱신 경로 유지)
+
+
+def _merge_call_map(call_map: Dict[str, List[str]], name: str, calls: Any) -> None:
+    """`call_map[name]` 에 피호출자를 **합집합·순서 보존**으로 넣는다. (R57 N54)
+
+    이름 키 하나에 정의가 둘(APP/FBL)일 수 있다 — 덮어쓰면 먼저 온 정의의 피호출자가 사라지고, 그 함수들의
+    호출자 행(`callers_map`)에서 이 이름이 빠진다. 문서 표의 피호출자 칸은 정의별 `calls_list` 를 쓰므로 섞이지 않는다.
+    """
+    incoming = [str(c).strip() for c in (calls if isinstance(calls, list) else []) if str(c).strip()]
+    prev = call_map.get(name)
+    if not isinstance(prev, list) or not prev:
+        call_map[name] = incoming
+        return
+    seen = set(prev)
+    for c in incoming:
+        if c not in seen:
+            prev.append(c)
+            seen.add(c)
 
 
 def _group_function_blocks_by_swcom(blocks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -733,34 +759,41 @@ def generate_uds_source_sections(
             _s = re.sub(r"^ASIL[\s_-]*", "", str(_v or "").strip().upper()).strip()
             return _ASIL_R.get(_s, -1)
 
-        _seen_ast_idx: Dict[str, int] = {}
+        # (R57 N54) 같은 이름의 정의가 **다른 파일**에 있으면 둘 다 남긴다 — 예전엔 두 번째 정의를 파일째 버려
+        #   (first-wins) 정본이 APP 절과 Bootloader 절에 따로 실은 9개 함수(main·WriteBlock·EEPROM_SetByte …)의
+        #   Bootloader 표가 **APP 내용의 복사본**이었다(run 2088: 정본 main 표 둘은 피호출자가 다른데 생성본은 둘 다
+        #   `s_System_InitSequence`). 같은 파일 안의 같은 이름(#ifdef 변형)은 종전대로 첫 정의에 ASIL 만 보수적 상향.
+        #   교차 파일 충돌 기록(`function_collisions`)은 그대로 — 영향분석이 두 사본의 file/최대 ASIL 을 거기서 읽는다.
+        _seen_ast_idx: Dict[Tuple[str, str], int] = {}
+        _first_idx_by_name: Dict[str, int] = {}
         _deduped: List[Dict[str, Any]] = []
+
+        def _note_collision(_a: Dict[str, Any], _b: Dict[str, Any], _fn_name: str) -> None:
+            _ck = _fn_name.strip().lower()
+            _ce = function_collisions.setdefault(_ck, {"files": [], "asil": ""})
+            for _d in (_a, _b):
+                _df = str(_d.get("file") or "").strip()
+                if _df and _df not in _ce["files"]:
+                    _ce["files"].append(_df)
+                if _asil_rank_of(_d.get("comment_asil")) > _asil_rank_of(_ce.get("asil")):
+                    _ce["asil"] = str(_d.get("comment_asil") or "")
+
         for _fn in (ast_result.get("functions") or []):
             _fn_name = str(_fn.get("name") or "").strip() if isinstance(_fn, dict) else ""
             if not _fn_name:
                 continue
-            if _fn_name not in _seen_ast_idx:
-                _seen_ast_idx[_fn_name] = len(_deduped)
+            _fkey = (_fn_name, os.path.normcase(str(_fn.get("file") or "").strip()))
+            if _fkey not in _seen_ast_idx:
+                # 교차 파일 쌍둥이(이름은 같고 파일이 다름)는 자기 정의로 남긴다 — 충돌 기록은 두 정의가 다 지나가는
+                #   `_put_by_name` 이 한다(여기서도 적으면 같은 사실을 두 곳이 적는다).
+                _seen_ast_idx[_fkey] = len(_deduped)
+                _first_idx_by_name.setdefault(_fn_name, len(_deduped))
                 _deduped.append(_fn)
             else:
-                _prev = _deduped[_seen_ast_idx[_fn_name]]
+                _prev = _deduped[_seen_ast_idx[_fkey]]
                 if _asil_rank_of(_fn.get("comment_asil")) > _asil_rank_of(_prev.get("comment_asil")):
                     _prev["comment_asil"] = _fn.get("comment_asil")  # 하향 방지(보수적 상향)
-                # ⚠ 여기서 두 번째 정의를 **파일 경로째 통째로 버린다**. 그래서 하위 레이어
-                # (_put_by_name / function_details_by_name)는 충돌을 **볼 수조차 없다** — 충돌 정보를
-                # 거기서 기록하려던 과거 시도들이 전부 죽은 코드였던 이유다.
-                # 동일 이름이 여러 파일에 정의되면(예: Generated_Code/EEPROM.c와 Sources/Eeprom/EEPROM.c의
-                # eeprom_setbyte, main 등) 영향분석은 남은 한 사본의 file만 보고 **다른 파일의 변경을
-                # 통째로 놓친다**(ISO 26262 under-report — 실제로 ASIL D 구현이 누락될 수 있음).
-                # → 정의 파일 전체와 최대 ASIL을 이 시점에 기록한다(소비자: impact_orchestrator).
-                _ck = _fn_name.strip().lower()
-                _ce = function_collisions.setdefault(_ck, {"files": [], "asil": ""})
-                for _d in (_prev, _fn):
-                    _df = str(_d.get("file") or "").strip()
-                    if _df and _df not in _ce["files"]:
-                        _ce["files"].append(_df)
-                    if _asil_rank_of(_d.get("comment_asil")) > _asil_rank_of(_ce.get("asil")):
-                        _ce["asil"] = str(_d.get("comment_asil") or "")
+                _note_collision(_prev, _fn, _fn_name)
         ast_result["functions"] = _deduped
         module_ids: Dict[str, int] = {}
         module_order = [
@@ -1172,7 +1205,7 @@ def generate_uds_source_sections(
             if calls_source:
                 fn["calls_source"] = calls_source
             if isinstance(calls, list):
-                call_map[name] = [str(c).strip() for c in calls if str(c).strip()]
+                _merge_call_map(call_map, name, calls)
             call_suffix = ""
             if isinstance(calls, list) and calls:
                 call_suffix = f" calls: {', '.join([str(c) for c in calls[:6] if c])}"
@@ -1225,7 +1258,8 @@ def generate_uds_source_sections(
                         module_ids[module_name] = next_module_idx
                         next_module_idx += 1
                     mod_idx = module_ids.get(module_name, 0)
-            module_map[name] = module_name
+            # (R57 리뷰 W4) 이름 키 — 같은 이름의 정의가 둘이면 첫 정의의 모듈을 유지한다(`_put_by_name` 과 같은 first-wins).
+            module_map.setdefault(name, module_name)
             # ⚠ counter 는 `fn_id` 의 **유일성을 책임진다**. 예전엔 `module_name`(파일 stem)
             #   별로 셌는데 `fn_id` 는 `mod_idx`(SwCom 번호) + counter 로 만든다. 같은
             #   SwCom 에 속한 파일이 여럿이면 **서로 다른 함수가 같은 fn_id 를 받고**
@@ -1469,7 +1503,7 @@ def generate_uds_source_sections(
                 )
                 if calls_source:
                     fn["calls_source"] = calls_source
-                call_map[name] = [str(c).strip() for c in calls if str(c).strip()]
+                _merge_call_map(call_map, name, calls)
                 module_name = "Module"
                 if file_path:
                     try:
@@ -1502,7 +1536,7 @@ def generate_uds_source_sections(
                             module_ids[module_name] = next_module_idx
                             next_module_idx += 1
                         mod_idx = module_ids.get(module_name, 0)
-                module_map[name] = module_name
+                module_map.setdefault(name, module_name)   # (R57 리뷰 W4) 위와 같은 규칙 — 두 곳이 같이 움직여야 한다
                 # 위와 같은 이유로 SwCom(mod_idx) 단위로 센다 — **두 곳이 같이 움직여야
                 # 한다**(한쪽만 고치면 폴백 경로에서 같은 충돌이 그대로 남는다).
                 counter = _fn_counter_by_mod.get(mod_idx, 0) + 1

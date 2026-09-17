@@ -1335,11 +1335,7 @@ def _infer_precondition_from_body(body: str, func_name: str = "") -> str:
 def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
     """함수 정보 표의 라벨/값 쌍. **배치와 무관한 내용만** 여기서 정한다."""
     info = _finalize_function_fields(info)
-    name_text = str(info.get("name") or "").strip()
-    name_norm = re.sub(r"[^a-z0-9_]", "", name_text.lower())
-    proto_text = str(info.get("prototype") or "").strip()
-    if not proto_text and name_norm == "main":
-        info["prototype"] = "void main( void )"
+    # (R57 N54) `main` 프로토타입 리터럴 제거 — 분석이 준 것만 싣는다(docx_builder 쪽 같은 특례와 한 세트).
     if not str(info.get("description") or "").strip():
         info["description"] = _fallback_function_description(
             str(info.get("name") or ""),
