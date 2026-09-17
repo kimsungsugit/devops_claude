@@ -46,6 +46,7 @@ from report_gen.function_analyzer import (  # noqa: E402
     is_logic_diagram_label,
 )
 from report_gen.validation import validate_uds_docx_structure  # noqa: E402
+from report_gen.validation_labels import CALL_ROW_LABEL_TO_KEY  # noqa: E402
 
 _PNG_1x1 = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da6364f8cfc000000201"
@@ -300,7 +301,9 @@ class TestLogicTextRoundTrip:
     def test_a_label_row_after_the_header_is_not_read_as_logic(self):
         block = self._extract([(FN_ROW_FULL, ["[ Function Information ]"]), (FN_ROW_PAIR, ["ID", "", "SwUFn_0101"]),
                                (FN_ROW_FULL, [LOGIC_DIAGRAM_HEADER]), (FN_ROW_PAIR, ["Called Function", "", "Foo_Bar"])])
-        assert not str(block.get("logic") or "").strip() and "Foo_Bar" in str(block.get("called") or "")
+        # (R56 N52) "Called Function" 행은 정본 관례로 **호출자** → 내부 키 `calling`(대응표 `CALL_ROW_LABEL_TO_KEY`).
+        assert not str(block.get("logic") or "").strip()
+        assert "Foo_Bar" in str(block.get(CALL_ROW_LABEL_TO_KEY["Called Function"]) or "")
 
 
 # ── N50 빈 꼬리 행 ──────────────────────────────────────────────────────────

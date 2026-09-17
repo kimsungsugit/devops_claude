@@ -31,6 +31,7 @@ import report_gen.validation as V
 from backend.helpers.common import _run_report_with_timeout
 from report_gen.docx_text import cell_text, paragraph_text, run_text
 from report_gen.requirements import _extract_function_info_from_docx
+from report_gen.validation_labels import CALL_KEY_TO_ROW_LABEL
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -70,8 +71,10 @@ def _function_table(doc, fn_id: str, name: str, *, called: str, calling: str, lo
         ("Description", "does\tthings"),
         ("ASIL", "B"),
         ("Related ID", "SwFn_01"),
-        ("Called Function", called),
-        ("Calling Function", calling),
+        # (R56 N52) 정본 관례 — 피호출자(`called`)는 "Calling Function" 행, 호출자(`calling`)는 "Called Function" 행.
+        #   대응표 `validation_labels.CALL_ROW_LABEL_TO_KEY` 가 단일 출처(리터럴로 적으면 이 픽스처가 옛 관례를 되살린다).
+        (CALL_KEY_TO_ROW_LABEL["called"], called),
+        (CALL_KEY_TO_ROW_LABEL["calling"], calling),
     ]
     t = doc.add_table(rows=0, cols=2)
     for label, value in rows:

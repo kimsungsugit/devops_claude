@@ -115,6 +115,12 @@ from report_gen.utils import (  # noqa: E402
     _normalize_swcom_label,
     _safe_dict,
     function_name_key,
+    normalize_prototype_text,
+)
+from report_gen.validation_labels import (  # noqa: E402
+    CALL_ROW_LABEL_TO_KEY,
+    LABEL_CALLED_FUNCTION,
+    LABEL_CALLING_FUNCTION,
 )
 from workflow.code_parser.c_parser import c_identifiers  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
 
@@ -151,13 +157,14 @@ def generate_uds_logic_items(
             title = block.get("title") or block.get("id") or "Logic Diagram"
             desc = ""
             if mode == "call_tree":
-                called = _collect_section_lines(lines, "Called Function")
-                calling = _collect_section_lines(lines, "Calling Function")
+                # 문서 라벨을 그대로 되비춘다("Called: …" = 정본 관례로 호출자). 라벨 리터럴은 `validation_labels` 단일 출처.
+                called = _collect_section_lines(lines, LABEL_CALLED_FUNCTION)
+                calling = _collect_section_lines(lines, LABEL_CALLING_FUNCTION)
                 parts: List[str] = []
                 if called:
-                    parts.append("Called: " + ", ".join(called[:12]))
+                    parts.append("Called(호출자): " + ", ".join(called[:12]))     # (리뷰 I3) 방향을 한 단어로
                 if calling:
-                    parts.append("Calling: " + ", ".join(calling[:12]))
+                    parts.append("Calling(피호출자): " + ", ".join(calling[:12]))
                 desc = " / ".join(parts) if parts else "N/A"
             elif mode == "state_table":
                 states = _extract_state_tokens(lines)
@@ -243,10 +250,10 @@ def _format_function_block_lines(block: Dict[str, Any]) -> List[str]:
         lines.append(f"선행조건\t{block.get('precondition')}")
     if block.get("globals"):
         lines.append(f"사용 전역변수\t{block.get('globals')}")
-    if block.get("called"):
-        lines.append(f"Called Function\t{block.get('called')}")
-    if block.get("calling"):
-        lines.append(f"Calling Function\t{block.get('calling')}")
+    # (R56 N52) 행 라벨 ↔ 내부 키는 대응표대로(정본 관례: Called 행 = 호출자 = `calling`). 리더 `_extract_function_blocks` 와 왕복.
+    for _label in (LABEL_CALLED_FUNCTION, LABEL_CALLING_FUNCTION):
+        if block.get(CALL_ROW_LABEL_TO_KEY[_label]):
+            lines.append(f"{_label}\t{block.get(CALL_ROW_LABEL_TO_KEY[_label])}")
     inputs = block.get("inputs") or []
     if inputs:
         lines.append("[ Input Parameters ]")
@@ -431,7 +438,8 @@ def generate_uds_source_sections(
     }
 
     def _normalize_prototype(sig: str) -> str:
-        """typedef 정규화 적용."""
+        """typedef 정규화 적용. (R56 N52) 먼저 한 줄로 — 원문 줄바꿈·주석 제거(정본 Prototype 은 전부 한 줄, 실측 50건)."""
+        sig = normalize_prototype_text(sig)
         for pattern, replacement in _typedef_map.items():
             sig = re.sub(pattern, replacement, sig)
         return sig
@@ -1084,15 +1092,6 @@ def generate_uds_source_sections(
             if _accessor_globals_map:
                 _logger.info("Accessor function globals: %d accessor functions detected", len(_accessor_globals_map))
 
-        callee_signature_map: Dict[str, str] = {}
-        for f2 in ast_result.get("functions", []) or []:
-            if not isinstance(f2, dict):
-                continue
-            n2 = str(f2.get("name") or "").strip()
-            s2 = str(f2.get("signature") or "").strip()
-            if n2 and s2 and n2 not in callee_signature_map:
-                callee_signature_map[n2] = s2
-
         def _merge_call_candidates(
             fn_name: str,
             file_path: str,
@@ -1366,14 +1365,9 @@ def generate_uds_source_sections(
                 )
                 outputs_list = [return_entry] + outputs_list
             called_list = [str(c).strip() for c in calls if str(c).strip()] if isinstance(calls, list) else []
-            called_sig_lines: List[str] = []
-            for callee in called_list:
-                sig = callee_signature_map.get(callee, "")
-                if sig:
-                    called_sig_lines.append(sig)
-                else:
-                    called_sig_lines.append(callee)
-            called_text = "\n".join(called_sig_lines)
+            # (R56 N52) Called/Calling 칸은 **이름만** — 정본 951 함수 중 914 가 이름만이다. 프로토타입을 넣던 옛 방식은
+            #   여러 줄 원문·주석까지 칸에 실었고(LIN 드라이버 50건) 되읽기 파서가 이름을 잃었다. 프로토타입은 Prototype 행에만.
+            called_text = "\n".join(called_list)
             desc_text = _enhance_description_text(
                 name,
                 comment_desc or _fallback_function_description(name, called_list),

@@ -257,7 +257,10 @@ class TestQualityScore:
 
     def test_all_critical_fields_above_threshold(self, ref_fn_map):
         total = len(ref_fn_map)
-        thresholds = {"description": 0.9, "called": 0.9, "calling": 0.5, "inputs": 0.5, "outputs": 0.7}
+        # (R56 N52) 되읽기 키는 내부 의미다 — `calling` = 호출자(정본 "Called Function" 행, 정본에서 90%+ 채움),
+        #   `called` = 피호출자(정본 "Calling Function" 행, 50%+). 예전 임계(called 0.9 · calling 0.5)는 라벨과 키를 같은
+        #   이름끼리 짝짓던 옛 리더를 전제한 것이라 R56 뒤 `called` 가 52.2% 로 잡혔다 — 정본 수치는 그대로고 키 이름만 바뀌었다.
+        thresholds = {"description": 0.9, "called": 0.5, "calling": 0.9, "inputs": 0.5, "outputs": 0.7}
         for field, threshold in thresholds.items():
             filled = sum(
                 1 for v in ref_fn_map.values()

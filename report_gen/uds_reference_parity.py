@@ -39,6 +39,8 @@ import zipfile
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from report_gen.validation_labels import LABEL_CALLED_FUNCTION, LABEL_CALLING_FUNCTION
+
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 #: `[ Function Information ]` 표를 알아보는 표식.
@@ -51,7 +53,7 @@ VALUE_COLUMNS: Tuple[str, ...] = ("type", "range", "reset", "desc")
 _SECTION_END_LABELS = frozenset({
     "선행조건", "precondition", "사용 전역변수",
     "used globals (global)", "used globals (static)",
-    "called function", "calling function", "logic diagram",
+    LABEL_CALLED_FUNCTION.lower(), LABEL_CALLING_FUNCTION.lower(), "logic diagram",   # 라벨 단일 출처(R56)
 })
 
 #: 정본에 `Paramters` 오타가 19건 있다 — 표기 흔들림을 여기서 흡수한다.

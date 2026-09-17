@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from docx import Document  # type: ignore
 from docx.oxml.table import CT_Tbl  # type: ignore
 from docx.oxml.text.paragraph import CT_P  # type: ignore
 from docx.table import Table  # type: ignore
 from docx.text.paragraph import Paragraph  # type: ignore
+
+from report_gen.validation_labels import LABEL_CALLED_FUNCTION  # noqa: E402 — 라벨 단일 출처(R56)
 
 LABELS = [
     "[ Function Information ]",
@@ -21,7 +25,7 @@ LABELS = [
     "Precondition",
     "Used Globals (Global)",
     "Used Globals (Static)",
-    "Called Function",
+    LABEL_CALLED_FUNCTION,
     "Logic Diagram",
 ]
 

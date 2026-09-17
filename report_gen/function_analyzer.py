@@ -19,6 +19,11 @@ from report_gen.utils import (
     _normalize_related_ids,
     _normalize_swufn_id,
 )
+from report_gen.validation_labels import (
+    CALL_ROW_LABEL_TO_KEY,
+    LABEL_CALLED_FUNCTION,
+    LABEL_CALLING_FUNCTION,
+)
 from workflow.code_parser.c_parser import blank_c_comments, c_identifiers
 
 _logger = logging.getLogger("report_generator")
@@ -1396,8 +1401,10 @@ def _function_info_pairs(info: Dict[str, Any]) -> List[Tuple[str, str]]:
             "\n".join([str(x) for x in globals_static if x]) if globals_static else "N/A",
         )
     )
-    pairs.append(("Called Function", _normalize_call_field(str(info.get("called") or "")) or "N/A"))
-    pairs.append(("Calling Function", _normalize_call_field(str(info.get("calling") or "")) or "N/A"))
+    # (R56 N52) 행 라벨 ↔ 내부 키는 `validation_labels.CALL_ROW_LABEL_TO_KEY` 가 정한다 — 정본 관례로 Called 행은
+    #   **호출자**(`calling`), Calling 행은 **피호출자**(`called`). 예전엔 같은 이름끼리 짝지어 989개 표가 정본과 반대였다.
+    for _label in (LABEL_CALLED_FUNCTION, LABEL_CALLING_FUNCTION):
+        pairs.append((_label, _normalize_call_field(str(info.get(CALL_ROW_LABEL_TO_KEY[_label]) or "")) or "N/A"))
     pairs.append((LOGIC_DIAGRAM_LABEL, str(info.get("logic") or "")))
 
     return pairs

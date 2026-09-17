@@ -501,7 +501,11 @@ class TestExtractFunctionBlocksDetailed:
         b = blocks[0]
         assert b.get("prototype") == "void Bar(uint8 x)"
         assert b.get("description") == "Checks bar."
-        assert b.get("called") == "Function FuncA"  # "Called" prefix stripped by split
+        # (R56 N52) 정본 관례: "Called Function" 행 = 호출자 → 키 `calling`, "Calling Function" 행 = 피호출자 → 키 `called`.
+        #   예전 기대값 `"Function FuncA"` 는 두 단어 라벨을 `split(None, 1)` 로 잘라 라벨 절반이 값에 남던 **결함을 정답으로
+        #   고정**한 것이었다(주석까지 "prefix stripped by split" 이라 적혀 있었다).
+        assert b.get("calling") == "FuncA"
+        assert b.get("called") == "FuncB"
         assert b.get("globals") is not None
 
     def test_related_id(self):

@@ -22,8 +22,16 @@ from report_gen.utils import (
     _normalize_related_ids,
     _normalize_swcom_label,
 )
+from report_gen.validation_labels import (
+    CALL_ROW_LABEL_TO_KEY,
+    LABEL_CALLED_FUNCTION,
+    LABEL_CALLING_FUNCTION,
+)
 
 _logger = logging.getLogger("report_generator")
+
+# (R56 N52) 되읽기 라벨은 소문자 정규화해서 비교한다 — 대응표(정본 관례)의 소문자 판.
+_CALL_LABEL_NORM_TO_KEY = {k.lower(): v for k, v in CALL_ROW_LABEL_TO_KEY.items()}
 
 # SwUFn/SwIFn 단위·통합 함수 ID 패턴 — SITS/VectorCAST 2-hop bridge에서 행마다
 # 재사용(7천+ 행 루프 재컴파일 방지, reviewer INFO 권고).
@@ -363,10 +371,12 @@ def _extract_function_blocks(text: str) -> List[Dict[str, Any]]:
             current["asil"] = line.split(None, 1)[-1].strip()
         elif line.startswith("Related ID"):
             current["related"] = line.split(None, 1)[-1].strip()
-        elif line.startswith("Called Function"):
-            current["called"] = line.split(None, 1)[-1].strip()
-        elif line.startswith("Calling Function"):
-            current["calling"] = line.split(None, 1)[-1].strip()
+        elif line.startswith(LABEL_CALLED_FUNCTION):
+            # (R56 N52) 정본 관례: Called 행 = 호출자(`calling`) — 대응표 `CALL_ROW_LABEL_TO_KEY`. 두 단어 라벨이라
+            #   `split(None, 1)` 은 "Function FuncA" 를 남겼다(테스트가 그 값을 정답으로 고정하고 있었다) → 라벨 길이로 자른다.
+            current[CALL_ROW_LABEL_TO_KEY[LABEL_CALLED_FUNCTION]] = line[len(LABEL_CALLED_FUNCTION):].strip(" :\t")
+        elif line.startswith(LABEL_CALLING_FUNCTION):
+            current[CALL_ROW_LABEL_TO_KEY[LABEL_CALLING_FUNCTION]] = line[len(LABEL_CALLING_FUNCTION):].strip(" :\t")
         elif line.startswith("사용 전역변수"):
             current["globals"] = line.split(None, 1)[-1].strip()
         elif line.startswith("선행조건"):
@@ -522,22 +532,15 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
                     collecting_params = ""
 
                 if not label_norm and last_label_norm and value:
-                    if last_label_norm in {"description", "called function", "calling function"}:
-                        prev = str(info.get({
-                            "description": "description",
-                            "called function": "called",
-                            "calling function": "calling",
-                        }.get(last_label_norm, ""), "") or "").strip()
+                    if last_label_norm == "description" or last_label_norm in _CALL_LABEL_NORM_TO_KEY:
+                        # (R56 N52) 이어지는 값 없는 행 — Called/Calling 은 대응표(정본 관례: Called 행 = 호출자 = `calling`).
+                        _cont_key = "description" if last_label_norm == "description" else _CALL_LABEL_NORM_TO_KEY[last_label_norm]
+                        prev = str(info.get(_cont_key, "") or "").strip()
                         joined = "\n".join([x for x in [prev, value] if x]).strip()
                         joined = _dedupe_multiline_text(joined)
-                        if last_label_norm == "description":
-                            info["description"] = joined
-                            if joined.strip():
-                                info["description_source"] = "reference"
-                        elif last_label_norm == "called function":
-                            info["called"] = joined
-                        elif last_label_norm == "calling function":
-                            info["calling"] = joined
+                        info[_cont_key] = joined
+                        if _cont_key == "description" and joined.strip():
+                            info["description_source"] = "reference"
                         continue
                     if last_label_norm in {
                         "used globals global", "used globals (global)", "used global variable global", "used global variableglobal", "used global variables global", "used global variablesglobal",
@@ -576,10 +579,9 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
                     info["related"] = _normalize_related_ids(value)
                 elif label_norm in {"precondition", "선행조건"}:
                     info["precondition"] = _dedupe_multiline_text(value, na_to_empty=True) or "N/A"
-                elif label_norm == "called function":
-                    info["called"] = value
-                elif label_norm == "calling function":
-                    info["calling"] = value
+                elif label_norm in _CALL_LABEL_NORM_TO_KEY:
+                    # (R56 N52) 정본 관례 — Called 행은 호출자(`calling`), Calling 행은 피호출자(`called`). 대응표 단일 출처.
+                    info[_CALL_LABEL_NORM_TO_KEY[label_norm]] = value
                 elif label_norm in {"used globals global", "used globals (global)", "used global variable global", "used global variableglobal", "used global variables global", "used global variablesglobal"}:
                     info["globals_global"] = [ln.strip() for ln in value.splitlines() if ln.strip()]
                 elif label_norm in {"used globals static", "used globals (static)", "used global variable static", "used global variablestatic", "used global variables static", "used global variablesstatic"}:
@@ -1813,8 +1815,8 @@ def _collect_section_lines(lines: List[str], header: str) -> List[str]:
                 or line.startswith("Related ID")
                 or line.startswith("선행조건")
                 or line.startswith("사용 전역변수")
-                or line.startswith("Called Function")
-                or line.startswith("Calling Function")
+                or line.startswith(LABEL_CALLED_FUNCTION)
+                or line.startswith(LABEL_CALLING_FUNCTION)
             ):
                 collecting = False
                 continue

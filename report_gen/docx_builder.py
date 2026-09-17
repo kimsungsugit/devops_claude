@@ -2556,6 +2556,14 @@ def rejoin_function_maps(
     return rejoined
 
 
+def _analysis_display_name(nm: Any, function_details_by_name: Any) -> str:
+    """호출 관계 맵의 이름은 소문자 정규화돼 있다 — 분석(`function_details_by_name`)의 원래 표기로 되돌린다. (R56 N52)
+    예전엔 칸에 프로토타입을 실으며 표기가 돌아왔는데, 이름만 싣게 되면서 소문자가 그대로 나갈 뻔했다."""
+    key = str(nm or "").strip()
+    _ci = function_details_by_name.get(key.lower()) if isinstance(function_details_by_name, dict) else None
+    return str(_ci.get("name") or key).strip() if isinstance(_ci, dict) else key
+
+
 def generate_uds_docx(
     template_path: Optional[str],
     uds_payload: Dict[str, Any],
@@ -4126,16 +4134,10 @@ def generate_uds_docx(
                         info.get("called") or info.get("calls_list") or [],
                     )
                 if not str(info.get("calling") or "").strip():
-                    callers = callers_map.get(heading_fn_name, [])
-                    lines: List[str] = []
-                    for c in callers:
-                        sig = ""
-                        if isinstance(function_details_by_name, dict):
-                            cinfo = function_details_by_name.get(str(c).lower())
-                            if isinstance(cinfo, dict):
-                                sig = str(cinfo.get("prototype") or "").strip()
-                        lines.append(sig or str(c))
-                    info["calling"] = "\n".join([ln for ln in lines if ln])
+                    # (R56 N52) 이름만 — 정본 관례. 프로토타입은 Prototype 행에만.
+                    info["calling"] = "\n".join(
+                        _analysis_display_name(c, function_details_by_name) for c in callers_map.get(heading_fn_name, []) if str(c).strip()
+                    )
                 ref_rel = ref_related_by_name.get(heading_fn_name)
                 # (R52 N39) `main` 특례를 지웠다 — 다른 함수와 같은 규칙. 예전엔 정본에 main 이 없으면 프로젝트 ID 리터럴
                 #   ("SwST_01, SwCom_01, SwSTR_…")을 `rule` 로 실었다: 그 값은 KJPDS02 정본 main 의 Related 이자
@@ -4166,64 +4168,16 @@ def generate_uds_docx(
             # corrupt directionality for leaf functions.
             callee_names = list(dict.fromkeys(callee_names))
             caller_names = list(dict.fromkeys(callers_map.get(fn_key, [])))
-
-            def _sig_lines(names: List[str]) -> List[str]:
-                out: List[str] = []
-                for nm in names:
-                    sig = ""
-                    cinfo = function_details_by_name.get(str(nm).lower()) if isinstance(function_details_by_name, dict) else None
-                    if isinstance(cinfo, dict):
-                        sig = str(cinfo.get("prototype") or "").strip()
-                    out.append(sig or str(nm))
-                return [x for x in out if x]
-
-            callee_lines = _sig_lines(callee_names)
-            caller_lines = _sig_lines(caller_names)
-            if fn_key == "wake_up_setting":
-                callee_name_set = {
-                    str(x).strip().lower()
-                    for x in _extract_call_names("\n".join(callee_lines))
-                    if str(x).strip()
-                }
-                if (
-                    "l_ifc_init" not in callee_name_set
-                    and {"l_sys_init", "monitor_adc_enable", "monitor_adc_init"} & callee_name_set
-                ):
-                    l_ifc_sig = ""
-                    cinfo = function_details_by_name.get("l_ifc_init") if isinstance(function_details_by_name, dict) else None
-                    if isinstance(cinfo, dict):
-                        l_ifc_sig = str(cinfo.get("prototype") or "").strip()
-                    callee_lines = ([l_ifc_sig or "l_ifc_init"] + callee_lines)
-                    dedup_lines: List[str] = []
-                    for ln in callee_lines:
-                        if ln and ln not in dedup_lines:
-                            dedup_lines.append(ln)
-                    callee_lines = dedup_lines
-            if fn_key == "main" and not caller_lines:
-                caller_lines = ["void _Startup(void)"]
+            # (R56 N52) Called/Calling 칸은 **이름만**(정본 951 함수 중 914). 옛 `_sig_lines` 는 피호출자·호출자의 프로토타입을
+            #   그대로 실어 여러 줄 원문·주석이 칸에 들어갔고(LIN 드라이버 50건) 되읽기 파서가 이름을 잃었다.
+            #   `wake_up_setting` 에 `l_ifc_init` 을 끼워 넣고 `main` 의 호출자를 `_Startup` 으로 적던 **함수명 리터럴 특례**도
+            #   지웠다 — 정본 Wake_Up_Setting 의 피호출자에 l_ifc_init 은 없고 정본 main 의 호출자는 N/A 다(R52 N39 와 같은 부류).
+            callee_lines = [_analysis_display_name(x, function_details_by_name) for x in callee_names if str(x).strip()]
+            caller_lines = [_analysis_display_name(x, function_details_by_name) for x in caller_names if str(x).strip()]
             # Keep canonical relation direction in persisted fields:
-            # called = callees, calling = callers.
+            # called = callees, calling = callers (행 라벨 배치는 `_function_info_pairs` 가 대응표로 정한다).
             info["called"] = "\n".join(callee_lines) if callee_lines else "N/A"
             info["calling"] = "\n".join(caller_lines) if caller_lines else "N/A"
-            if fn_key == "wake_up_setting":
-                current_calling = str(info.get("calling") or "")
-                parsed_names = {
-                    str(x).strip().lower()
-                    for x in _extract_call_names(current_calling)
-                    if str(x).strip()
-                }
-                if (
-                    "l_ifc_init" not in parsed_names
-                    and {"l_sys_init", "monitor_adc_enable", "monitor_adc_init"} & parsed_names
-                ):
-                    lines_now = [ln for ln in current_calling.splitlines() if ln.strip()]
-                    lines_now.insert(0, "l_ifc_init")
-                    dedup_lines: List[str] = []
-                    for ln in lines_now:
-                        clean = str(ln).strip()
-                        if clean and clean not in dedup_lines:
-                            dedup_lines.append(clean)
-                    info["calling"] = "\n".join(dedup_lines) if dedup_lines else current_calling
 
             def _format_globals(items: List[str]) -> List[str]:
                 out: List[str] = []
@@ -5006,22 +4960,11 @@ def generate_uds_docx(
                     break
         _caller_names = list(dict.fromkeys(_fb_callers_map.get(_fn_key, [])))
 
-        def _sig_lines(names: List[str]) -> List[str]:
-            out: List[str] = []
-            for nm in names:
-                sig = ""
-                _ci = function_details_by_name.get(str(nm).lower()) if isinstance(function_details_by_name, dict) else None
-                if isinstance(_ci, dict):
-                    sig = str(_ci.get("prototype") or "").strip()
-                out.append(sig or str(nm))
-            return [x for x in out if x]
-
+        # (R56 N52) 이름만(원래 표기) · 함수명 리터럴 특례(main→_Startup) 제거 — 위 `_build_function_info_table` 과 같은 규칙.
         _inf2 = dict(info)
-        _inf2["called"] = "\n".join(_sig_lines(_callee_names)) if _callee_names else "N/A"
+        _inf2["called"] = "\n".join(_analysis_display_name(x, function_details_by_name) for x in _callee_names) if _callee_names else "N/A"
         if not str(_inf2.get("calling") or "").strip():
-            _inf2["calling"] = "\n".join(_sig_lines(_caller_names)) if _caller_names else "N/A"
-        if _fn_key == "main" and not str(_inf2.get("calling") or "").strip().replace("N/A", ""):
-            _inf2["calling"] = "void _Startup(void)"
+            _inf2["calling"] = "\n".join(_analysis_display_name(x, function_details_by_name) for x in _caller_names) if _caller_names else "N/A"
 
         # AI-enhance description if it's short
         _existing_desc = str(_inf2.get("description") or _inf2.get("desc") or "").strip()

@@ -382,18 +382,32 @@ def _record_uds_run(
     t0: Optional[float] = None,
     ai_used: bool = False,
     extra_meta: Optional[Dict[str, Any]] = None,
+    accuracy_report: Optional[Path] = None,
 ) -> int:
     """UDS 품질 기록의 **단일 관문** — 다섯 호출부가 전부 여기를 지난다.
 
     호출부가 `record_uds_run` 을 직접 부르면 산출물 충실도를 다섯 곳에 복제해야 하고,
     그러면 한쪽만 고쳐진다(이 저장소가 반복해 겪은 패턴). 인자 구성은
     `_uds_record_kwargs`, 충실도는 `_uds_artifact_fidelity` 가 맡고 여기서 합친다.
+
+    ``accuracy_report`` (R56): 그 run 의 `.accuracy.md`. 있으면 **기대측 정의**(`expected_side`)를 meta 에 싣는다.
+    R55 W2 는 recorder 가 `quality_eval["accuracy"]` 에서 인양하게 했는데, 라이브 경로 둘은 `_compute_quick_quality_gate`
+    결과(accuracy 키 없음)를 기록해 **한 번도 발화하지 않았다**(run 2086·2087 meta 에 키 없음 — 라이브 확인으로 드러남).
+    리포트가 없거나 정의 줄이 없으면 키를 지어내지 않는다.
     """
     from workflow.quality.recorder import record_uds_run
 
     fidelity = _uds_artifact_fidelity(out_path)
     meta = dict(extra_meta or {})
     meta.update(fidelity["meta"])
+    if accuracy_report is not None:
+        try:
+            _side = str(_parse_accuracy_report(Path(accuracy_report)).get("expected_side") or "").strip()
+        except Exception:
+            _logger.exception("accuracy expected_side 인양 실패(기록은 계속)")
+            _side = ""
+        if _side:
+            meta.setdefault("accuracy_expected_side", _side)
     return record_uds_run(
         _with_artifact_fidelity(quality_eval, fidelity),
         **_uds_record_kwargs(
@@ -1371,7 +1385,8 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True,
 #  v16: (R47-k N27-e) `(idx: …)` 첨자 나열이 set 순회(프로세스마다 다른 순서)에서 정렬로 바뀌었다.
 #      캐시엔 **옛 순서의 문자열**이 그대로 박혀 있어, 무효화하지 않으면 소스가 안 바뀐 로컬 프로젝트에서
 #      "같은 입력 → 같은 문서" 가 캐시 수명 동안 캐시 덕에만 성립하고 fix 는 한 번도 안 돈다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v16"
+# (R56 N52) v17: 함수 static 복원 · 프로토타입 한 줄 · called 텍스트 이름만 — 구 캐시가 히트하면 fix 가 프로덕션에서 발화하지 않는다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v17"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -1454,7 +1469,9 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
         raise HTTPException(status_code=400, detail="source_root not found or not directory")
     # 캐시 키: 전체 경로 + preprocess + **상한**(교차오염 방지). 상한이 빠지면
     # `/api/code/call-graph?max_files=200` 의 결과가 문서생성(1200)과 한 칸을 공유한다.
-    key = f"{source_root}\x00pp={int(bool(preprocess))}\x00mf={max_files}\x00mi={max_items}"
+    # (R56 리뷰 W2) 스키마 버전을 **키에** 넣는다 — cloudium/원격 루트는 `_source_root_signature` 가 None 이라 `_sig_ok` 가 무조건
+    #   True 였고, 그러면 버전 bump 가 인메모리 TTL 캐시(30분)를 못 깼다(v16 payload 가 계속 돌아온다).
+    key = f"{source_root}\x00pp={int(bool(preprocess))}\x00mf={max_files}\x00mi={max_items}\x00schema={_SOURCE_SECTIONS_SCHEMA_VERSION}"
     now = time()
     # 소스 시그니처(경로,mtime,size,스키마버전)를 먼저 계산 — 인메모리 TTL 캐시도 시그니처로 검증한다.
     # 과거엔 TTL 캐시가 mtime을 안 봐서, 소스를 편집하고 30분 내 재실행하면 **편집 전 함수 집합으로
@@ -3126,6 +3143,7 @@ def _uds_generate_from_paths(
             out_path=out_path,
             t0=_t0,
             ai_used=bool(ai_enable and ai_sections),
+            accuracy_report=accuracy_path,   # (R56) 기대측 정의를 meta 에 — 실패한 리포트면 None
             extra_meta={
                 "entry": "jenkins_generate_async",
                 "build_selector": str(build_selector or ""),

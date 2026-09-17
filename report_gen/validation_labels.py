@@ -47,8 +47,28 @@ VALUE_UNCOMPARABLE = "대조 불가(사이드카 없음/읽기 실패)"
 # "소스 함수 629개가 문서에 없다" 가 화면에 닿은 적이 없었다. 라벨과 같은 이유로 여기 둔다.
 SECTION_WARNINGS = "Warnings (입력 대비)"
 
+# ── 함수 정보 표 Called/Calling 행 (R56 N52) ─────────────────────────────────
+# 정본 SwUDS 의 관례(KJPDS02 v3.03, 분석과 대조되는 951 함수 실측 — 이 방향 921 · 반대 방향 **0**):
+#   "Called Function"  = 이 함수가 **호출되는** 곳 = 호출자(callers)    → 내부 키 `calling`
+#   "Calling Function" = 이 함수가 **호출하는** 함수 = 피호출자(callees) → 내부 키 `called`
+# 내부 키(`called`=callees · `calling`=callers — 사이드카·품질 DB·AI 프롬프트·게이트가 쓴다)는 그대로 두고,
+# **문서 행 라벨 ↔ 내부 키 대응은 여기서만** 정한다. 라이터(`function_analyzer._function_info_pairs` ·
+# `uds_generator._format_function_block_lines`)와 리더(`requirements` 의 docx 되읽기·텍스트 블록 파서)가 같은 표를 쓴다.
+# 예전엔 라이터가 라벨과 키를 같은 이름끼리 짝지어 생성 문서 989개 표 **전부** 정본과 반대였고, 정본을 읽는 리더도
+# 같은 짝이라 정본의 호출자 목록이 피호출자 칸에 병합됐다(`docx_builder` 의 "reference merge may inject
+# caller-oriented text and corrupt directionality" 주석이 그 증상이었다). accuracy 리포트는 문서를 **자기 관례**로
+# 재서 99.8% 였다 — 정본과의 방향 일치는 0% 였다.
+LABEL_CALLED_FUNCTION = "Called Function"
+LABEL_CALLING_FUNCTION = "Calling Function"
+CALL_ROW_LABEL_TO_KEY = {LABEL_CALLED_FUNCTION: "calling", LABEL_CALLING_FUNCTION: "called"}
+CALL_KEY_TO_ROW_LABEL = {v: k for k, v in CALL_ROW_LABEL_TO_KEY.items()}
+
 __all__ = [
     "SECTION_WARNINGS",
+    "LABEL_CALLED_FUNCTION",
+    "LABEL_CALLING_FUNCTION",
+    "CALL_ROW_LABEL_TO_KEY",
+    "CALL_KEY_TO_ROW_LABEL",
     "LABEL_EXPECTED_FUNCTIONS",
     "LABEL_MATCHED_FUNCTIONS",
     "LABEL_MISSING_FROM_DOCX",

@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
+from report_gen.validation_labels import CALL_KEY_TO_ROW_LABEL
 from tests.unit.test_quality_gate_unmeasured import FN_INFO_BANNER, _doc_with
 
 pytest.importorskip("docx")
@@ -315,9 +316,10 @@ class TestBlankIsNotFilled:
 
     def test_related_na_is_not_traceable_even_with_calls(self, tmp_path):
         """`has_related` 도 같은 헬퍼다 — N/A 는 추적성 분자에 들어가지 않는다."""
+        # (R56 N52) 피호출자(supported call)는 정본 관례로 "Calling Function" 행 — 대응표 `CALL_KEY_TO_ROW_LABEL["called"]`.
         d = _doc_per_fn(tmp_path, [
-            _fn("void a(void)", related="N/A") + [("Called Function", "g_helper")],
-            _fn("void b(void)", related="SwFn_002") + [("Called Function", "g_helper")],
+            _fn("void a(void)", related="N/A") + [(CALL_KEY_TO_ROW_LABEL["called"], "g_helper")],
+            _fn("void b(void)", related="SwFn_002") + [(CALL_KEY_TO_ROW_LABEL["called"], "g_helper")],
         ])
         text, _ = _run(d, tmp_path / "tr.quality_gate.md")
         assert "`1` / `2`" in _metric_line(text, "Traceability (Related + Supported Call)")

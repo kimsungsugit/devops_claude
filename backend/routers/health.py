@@ -21,6 +21,7 @@ from backend.error_handler import APIError
 
 # C3: 공유 헬퍼로 이동 — health.py / jenkins.py 등이 동일 검증 사용 (방어 비대칭 해소)
 from backend.services.resolver_helpers import enforce_resolver_access as _enforce_resolver_access
+from report_gen.validation_labels import LABEL_CALLED_FUNCTION, LABEL_CALLING_FUNCTION
 
 _GATE_PROCESS_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.]+\.exe$")
 
@@ -626,8 +627,9 @@ def _extract_docx_sheets(doc) -> List[Dict[str, Any]]:
         })
 
     if func_tables:
+        # 라벨 문자열은 `validation_labels` 단일 출처(R56) — 여기선 열 제목으로 되비출 뿐 방향 해석은 하지 않는다.
         func_keys = ["ID", "Name", "Prototype", "Description", "ASIL", "Related ID",
-                     "Input Parameters", "Output Parameters", "Called Function", "Calling Function"]
+                     "Input Parameters", "Output Parameters", LABEL_CALLED_FUNCTION, LABEL_CALLING_FUNCTION]
         func_headers = [k for k in func_keys if any(f.get(k) for f in func_tables)]
         has_images = any(f.get("_image_id") for f in func_tables)
         if has_images:

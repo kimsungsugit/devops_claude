@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from report_gen.source_parser import _cap_and_decode, _read_bytes_resolver_aware  # leaf module, no circular dep
+from workflow.code_parser.c_parser import normalize_prototype_text  # noqa: F401 — 재수출(단일 출처는 파서 쪽, R56)
 
 _logger = logging.getLogger("report_generator")
 
@@ -534,7 +535,15 @@ def _extract_call_names(value: str) -> List[str]:
         "sizeof",
     }
     names: List[str] = []
-    for raw in str(value or "").splitlines():
+    text = str(value or "")
+    # (R56 N52) 여러 줄 프로토타입 — 소스가 `(` 를 다음 줄에 두면(LIN 드라이버 스타일, KJPDS02 50건) 이름 줄에 `(` 가
+    #   없어 줄 단위 검사가 이름을 잃었다(run 2086 accuracy 잔여 3건 전부 이 경우). 주석을 지우고 `이름⏎(` 를 한 줄로
+    #   붙인 뒤 줄을 본다. 구판 산출물·정본의 프로토타입 칸을 읽을 때를 위한 방어 — 새 산출물은 이름만 싣는다.
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    #   (리뷰 I1) 개행은 **한 번만** 넘는다 — `\s*` 면 빈 줄 건너 다음 항목의 `(` 까지 붙여 뒤 이름을 지울 수 있다.
+    text = re.sub(r"([A-Za-z_]\w*)[ \t]*\r?\n[ \t]*\(", r"\1(", text)
+    for raw in text.splitlines():
         line = raw.strip().rstrip(";")
         if not line:
             continue

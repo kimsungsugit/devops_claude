@@ -654,6 +654,56 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
     return desc, asil, related, precondition, range_text, params, return_desc
 
 
+_PROTO_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+_PROTO_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def normalize_prototype_text(text: str) -> str:
+    """프로토타입/시그니처를 **한 줄**로 — 주석 제거 + 공백 접기. (R56 N52)
+
+    tree-sitter 선언자 원문은 소스 줄바꿈·주석째 온다: LIN 드라이버 스타일
+    ``l_bool l_ifc_init\n(\n/* [IN] interface name */\nl_ifc_handle iii\n)`` (KJPDS02 실측 50건). 정본 SwUDS 의
+    Prototype 은 전부 한 줄이고, 여러 줄 원문이 셀에 실리면 되읽기 이름 파서가 이름 줄에 `(` 가 없어 이름을 잃었다.
+    ⚠ 이 함수가 단일 출처다 — `report_gen.utils` 가 재수출한다(`report_gen.source_parser` 가 이 모듈을 import 하므로
+      여기서 report_gen 을 import 하면 순환).
+    """
+    s = _PROTO_BLOCK_COMMENT_RE.sub(" ", str(text or ""))
+    s = _PROTO_LINE_COMMENT_RE.sub(" ", s)
+    return " ".join(s.split())
+
+
+_FN_STATIC_WORDS: Optional[frozenset] = None
+
+
+def _function_static_words() -> frozenset:
+    """함수 static 별칭 집합 — 변수 static 별칭(`report_gen.source_parser._STATIC_STORAGE_WORDS`)과 같은 출처.
+    모듈 상단 import 는 순환(source_parser → c_parser)이라 첫 호출 때 한 번 가져온다. 못 가져오면 좁게 접지 않고 던진다."""
+    global _FN_STATIC_WORDS
+    if _FN_STATIC_WORDS is None:
+        from report_gen.source_parser import _STATIC_STORAGE_WORDS
+
+        _FN_STATIC_WORDS = frozenset(_STATIC_STORAGE_WORDS)
+    return _FN_STATIC_WORDS
+
+
+def _is_static_function_node(node, src: bytes) -> bool:
+    """function_definition 의 `static`. (R56 N52) `static` 은 `type` 필드가 아니라 **형제** `storage_class_specifier` 라
+    예전 ``"static" in prefix`` 는 tree-sitter 경로에서 항상 False 였다(정본 프로토타입 697개가 static, 생성본 0개).
+    매크로 별칭(`STATIC`·`FAST_STATIC` …)은 type_identifier 로 파싱되므로 자식 텍스트로 본다. 선언자·본문은 보지 않는다."""
+    for child in node.children:
+        if child.type in ("function_declarator", "pointer_declarator", "compound_statement", "declarator", "body"):
+            continue
+        if _has_static_token(_node_text(src, child)):
+            return True
+    return False
+
+
+def _has_static_token(text: str) -> bool:
+    """`static` 키워드 또는 별칭 매크로가 **토큰**으로 있는가 — 한 노드에 `STATIC U8` 처럼 둘이 묶여도 잡는다(리뷰 W5).
+    tree-sitter 경로와 regex 폴백이 같은 판정을 쓴다(예전엔 한쪽만 소문자화해 정책이 갈렸다)."""
+    return bool(set(str(text or "").split()) & _function_static_words())
+
+
 def _extract_function_defs(
     root, src: bytes, file_path: str, globals_set: Set[str]
 ) -> List[CFunction]:
@@ -673,8 +723,9 @@ def _extract_function_defs(
             # 매크로/K&R 등으로 `if(...)`가 function_definition으로 오파싱되는 아티팩트 방어(regex 폴백과 동일 정책).
             continue
         prefix = _node_text(src, node.child_by_field_name("type")) or ""
-        is_static = "static" in prefix
-        signature = (prefix + " " + decl_text).strip()
+        # (R56 N52) static 은 형제 노드 · 시그니처는 한 줄로 — `_is_static_function_node` / `normalize_prototype_text` 참조.
+        is_static = _is_static_function_node(node, src) or _has_static_token(prefix)
+        signature = normalize_prototype_text(prefix + " " + decl_text)
         calls = _extract_calls(node, src)
         func_refs = _extract_func_refs(node, src)
         pointer_calls = _extract_pointer_calls(node, src)
@@ -770,8 +821,8 @@ def _extract_function_defs_regex_fallback(
         functions.append(
             CFunction(
                 name=name,
-                signature=f"{prefix} {name}({params})".strip(),
-                is_static="static" in prefix.lower().split(),
+                signature=normalize_prototype_text(f"{prefix} {name}({params})"),
+                is_static=_has_static_token(prefix),   # (R56 W5) tree-sitter 경로와 같은 토큰 판정(별칭 포함)
                 file=file_path,
                 calls=_extract_calls_from_body_text(body_text),
                 used_globals=sorted(used_globals),

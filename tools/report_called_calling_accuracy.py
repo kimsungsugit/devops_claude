@@ -1,90 +1,38 @@
+"""가장 최근 로컬 UDS 산출물의 Called/Calling accuracy 리포트를 만드는 독립 CLI.
+
+(R56 리뷰 W1) 예전엔 `D:\\Project\\devops\\260105` 를 sys.path 에 넣고 **그 트리의 `report_generator`** 를 import 했다 —
+2026-03-12 스냅샷이라 대응표(`validation_labels`)도 없는 옛 리더/비교기였고, 이 도구로 R56 이후 문서를 재면 결론이 뒤집힌다.
+이 저장소의 `report_gen` 을 쓴다.
+"""
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
-from typing import Dict, Set, Tuple
 
-import docx  # type: ignore
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-repo_root = Path(r"D:\Project\devops\260105")
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
+from report_gen.validation import generate_called_calling_accuracy_report  # noqa: E402
 
-import report_generator as rg  # noqa: E402
-
-
-def _extract_doc_fn_info(path: Path) -> Dict[str, Dict[str, str]]:
-    data = rg._extract_function_info_from_docx(docx.Document(str(path)))
-    out: Dict[str, Dict[str, str]] = {}
-    for _fid, row in data.items():
-        name = str(row.get("name") or "").strip().lower()
-        if not name:
-            continue
-        out[name] = row
-    return out
-
-
-def _names_from_field(text: str) -> Set[str]:
-    items: Set[str] = set()
-    for line in str(text or "").splitlines():
-        raw = line.strip().rstrip(";")
-        if not raw:
-            continue
-        m = re.search(r"\b([A-Za-z_]\w*)\s*\(", raw)
-        if m:
-            items.add(m.group(1))
-        else:
-            if re.match(r"^[A-Za-z_]\w*$", raw):
-                items.add(raw)
-    return items
-
-
-def _build_expected_maps(source_sections: Dict[str, object]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, str]]:
-    details_by_name = source_sections.get("function_details_by_name", {}) or {}
-    exp_called: Dict[str, Set[str]] = {}
-    exp_calling: Dict[str, Set[str]] = {}
-    fn_to_swcom: Dict[str, str] = {}
-    # function -> swcom id from table rows
-    for row in source_sections.get("function_table_rows", []) or []:
-        if not isinstance(row, list) or len(row) < 4:
-            continue
-        swcom = str(row[0] or "").strip()
-        name = str(row[3] or "").strip().lower()
-        if swcom and name:
-            fn_to_swcom[name] = swcom
-    # called map
-    for name, info in details_by_name.items():
-        if not isinstance(info, dict):
-            continue
-        calls = [str(x).strip() for x in (info.get("calls_list") or []) if str(x).strip()]
-        exp_called[str(name).lower()] = set(calls)
-    # reverse
-    for caller, callees in exp_called.items():
-        for callee in callees:
-            exp_calling.setdefault(callee.lower(), set()).add(caller)
-    return exp_called, exp_calling, fn_to_swcom
-
-
-def _ratio(a: int, b: int) -> str:
-    if b <= 0:
-        return "0.0%"
-    return f"{(a / b) * 100:.1f}%"
+DEFAULT_SOURCE_ROOT = Path(r"D:\Project\Ados\PDS_64_RD")
 
 
 def main() -> None:
-    repo = repo_root
-    report_dir = repo / "backend" / "reports" / "uds_local"
+    # 산출 디렉터리 기본값은 여기(함수 안)에서 — 모듈 상수로 두면 `reports/` 격리 가드(`test_report_dirs_are_isolated`)가
+    #   테스트 쓰기 대상으로 세는데, 이 CLI 는 테스트가 import 만 할 뿐 실행하지 않는다.
+    report_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "backend" / "reports" / "uds_local"
+    source_root = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_SOURCE_ROOT
     docx_files = sorted(report_dir.glob("uds_spec_generated_expanded_*.docx"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not docx_files:
         raise FileNotFoundError(f"No generated UDS docx found in {report_dir}")
     target_doc = docx_files[0]
     out = report_dir / "called_calling_accuracy_latest.md"
-    # (R55) 독립 CLI — 문서를 만든 분석이 손에 없다. `source_sections=None` 은 **의도한 재분석**이고, 리포트 머리글이
+    # 독립 CLI — 문서를 만든 분석이 손에 없다. `source_sections=None` 은 **의도한 재분석**이고, 리포트 머리글이
     #   "Expected side: re-analysis of source_root … may differ" 로 그 사실을 적는다(생성 경로 넷은 전부 파이프라인 분석을 넘긴다).
-    report_path = rg.generate_called_calling_accuracy_report(
+    report_path = generate_called_calling_accuracy_report(
         str(target_doc),
-        str(Path(r"D:\Project\Ados\PDS_64_RD")),
+        str(source_root),
         str(out),
         relation_mode="code",
         source_sections=None,
