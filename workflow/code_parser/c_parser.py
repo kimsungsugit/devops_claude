@@ -321,10 +321,109 @@ def _dead_function_nodes(root, src: bytes) -> Set[int]:
                     dead.add(d.id)
     return dead
 
-_REGEX_DEF_PAT = re.compile(
-    r"^[\t ]*((?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
-    flags=re.M,
-)
+# (R59 N60) 정의 머리 `[접두] 이름(파라미터) {` 를 찾는 **선형** 스캐너.
+#   옛 정규식 `^[\t ]*((?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{` 는
+#   접두(lazy, 괄호·쉼표·개행 허용)와 파라미터(lazy `[^;]*?`)가 둘 다 무한정 늘어나, 세미콜론 없이 길게 이어지는
+#   초기화 표(인터럽트 벡터 테이블 `Generated_Code/Vectors.c` — 17.6KB, `_VECTOR(x),` 123줄)에서 줄 시작마다
+#   접두 길이 × 파라미터 길이로 백트래킹했다(O(n³)): **그 한 파일에 31초**. `re` 는 매칭 중 GIL 을 놓지 않으므로
+#   그동안 백엔드 프로세스의 다른 스레드(진행 조회·`/api/health`·이벤트 루프)가 전부 멈췄다(라이브 40초 정지,
+#   keep-alive 타이머가 늦게 발화해 대기 중이던 폴링을 응답 없이 끊음).
+#   판정은 옛 규칙 그대로, 후보 한 번씩만 검사한다(`_iter_regex_def_heads`):
+#     후보   = `\b이름\s*\(` 이고 이름 앞이 공백(옛 `\s+`)
+#     접두   = 이름 앞 클래스 `[\w\s*(),]` 밖 문자 뒤, `[\t ]*[A-Za-z_]` 로 시작하는 **가장 이른 줄 시작**부터 이름 앞까지
+#              (옛 최좌단 `^` 매치와 같은 자리 — 그래서 `#define …` 줄은 접두가 될 수 없다)
+#     파라미터 = `(` 뒤 첫 `;` 전에서 `\)\s*\{` 를 만족하는 **첫** `)` 까지(옛 `[^;]*?\)\s*\{` 와 같은 규칙)
+#   싼 검사부터 하므로 매크로만 있는 큰 헤더(`IO_Map.h` 665KB)에서도 접두 단계에서 끝난다.
+_DEF_CANDIDATE_PAT = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_DEF_BRACE_AFTER_PAT = re.compile(r"\s*\{")
+_DEF_PREFIX_OUT_PAT = re.compile(r"[^\w\s*(),]")
+_DEF_PREFIX_LINE_PAT = re.compile(r"[\t ]*(?=[A-Za-z_])")
+_DEF_PARAM_SCAN_PAT = re.compile(r"[();{}]")
+# 접두 탐색 창 — 옛 정규식은 무제한이었다. 반환형·한정자·매크로 반환형은 이보다 짧지만, `blank_c_comments` 가 주석을
+# 길이 보존 공백으로 바꾸므로 한정자와 반환형 사이의 큰 주석 블록도 창을 소모한다(리뷰 I3) — 그래서 8KB.
+# 창 안에서 가장 이른 줄 시작을 고르므로 창 절단은 접두를 짧게 만들 뿐, 정의를 잃는 건 창 안 모든 줄이 글자로 안 시작할 때뿐이다.
+_DEF_PREFIX_WINDOW = 8192
+# 파라미터 목록의 최대 길이 — `(` 에서 깊이가 맞는 `)` 까지. 닫히지 않는 `(` 가 이어지고 `;{}` 가 먼 입력에서 후보마다 그
+# 구간 끝까지 훑는 것(리뷰 W2: 63KB 에 3초)을 입력과 무관한 상수로 묶는다. 실측 최장 파라미터 목록은 364자(KJPDS02_PV).
+_DEF_PARAMS_MAX = 4096
+
+
+def _iter_regex_def_heads(text: str):
+    """옛 `_REGEX_DEF_PAT.finditer` 가 내던 것과 같은 `(match_start, prefix, name, params, match_end)` 를 선형으로 낸다.
+
+    `match_start` 는 접두 줄의 시작(선행 주석은 거기서 거슬러 읽는다), `match_end` 는 `{` 바로 뒤. 매치는 구조적으로
+    겹치지 않는다 — `{` 가 접두 클래스 밖이라 다음 머리의 접두는 앞 머리의 `{` 뒤에서만 시작한다.
+    """
+    for m in _DEF_CANDIDATE_PAT.finditer(text):
+        name_start = m.start(1)
+        if name_start == 0 or not text[name_start - 1].isspace():
+            continue
+        # 파라미터 — `(` 와 **깊이가 맞는** `)` 까지(그 앞에 `;`·`{`·`}` 가 오면 파라미터가 아니다), 그 뒤 `\s*\{`.
+        #   옛 규칙은 "첫 `;` 전에서 `\)\s*\{` 를 만족하는 첫 `)`" 라 `static FUNC(void, CODE) foo(void) {` 는
+        #   `static\s+` 의 탐욕 매치 덕에 우연히 foo 를 골랐지만 `const FUNC(void, CODE) foo(void) {` 는 FUNC 를
+        #   함수 이름으로 냈다. 깊이로 재면 두 경우 다 foo 다(가드: TestWhereTheOldRegexInvented).
+        #   접두보다 먼저 본다 — 표(`_VECTOR(x),`)·매크로(`X(a) …`)의 후보는 여기서 O(1) 에 떨어진다.
+        open_pos = m.end() - 1
+        depth = 0
+        close = -1
+        i = open_pos
+        while True:
+            pm2 = _DEF_PARAM_SCAN_PAT.search(text, i, open_pos + 1 + _DEF_PARAMS_MAX)
+            if not pm2:
+                break
+            ch = text[pm2.start()]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    close = pm2.start()
+                    break
+            else:
+                break
+            i = pm2.end()
+        if close < 0:
+            continue
+        bm = _DEF_BRACE_AFTER_PAT.match(text, close + 1)
+        if not bm:
+            continue
+        # 접두 — 이름 줄부터 거슬러 올라가며 클래스 밖 문자를 찾는다(대개 같은 줄에서 끝난다).
+        win_lo = text.rfind("\n", 0, max(0, name_start - _DEF_PREFIX_WINDOW)) + 1
+        seg_start = win_lo
+        line_end = name_start
+        while True:
+            # ⚠ 창 안에 `\n` 이 없으면 rfind 가 -1 → 0 이 되어 파일 맨 앞부터 훑는다(리뷰 W1: 2,048자 넘는 줄이 하나라도
+            #   있으면 머리마다 파일 전체 스캔 = O(머리 × 파일)). 창 시작으로 고정한다.
+            line_start = max(win_lo, text.rfind("\n", win_lo, line_end) + 1)
+            last_out = None
+            for om in _DEF_PREFIX_OUT_PAT.finditer(text, line_start, line_end):
+                last_out = om.end()
+            if last_out is not None:
+                seg_start = last_out
+                break
+            if line_start <= win_lo:
+                break
+            line_end = line_start - 1
+        if seg_start == 0 or text[seg_start - 1] == "\n":
+            ls = seg_start
+        else:
+            nl = text.find("\n", seg_start, name_start)
+            ls = nl + 1 if nl >= 0 else -1
+        head_start = -1
+        prefix_start = -1
+        while 0 <= ls < name_start:
+            pm = _DEF_PREFIX_LINE_PAT.match(text, ls, name_start)
+            if pm:
+                head_start, prefix_start = ls, pm.end()
+                break
+            nl = text.find("\n", ls, name_start)
+            ls = nl + 1 if nl >= 0 else -1
+        if head_start < 0:
+            continue
+        # 접두는 비지 않는다 — `_DEF_PREFIX_LINE_PAT` 의 lookahead 가 endpos=name_start 앞의 글자를 요구하므로.
+        prefix = text[prefix_start:name_start].rstrip()
+        pos = bm.end()
+        yield head_start, prefix, m.group(1), text[open_pos + 1 : close], pos
 
 
 def _extract_calls(func_node, src: bytes, paren_targets: Optional[Set[str]] = None) -> List[str]:
@@ -809,13 +908,12 @@ def _extract_function_defs_regex_fallback(
     #   ⚠ 매칭용 텍스트만 가린다. 본문·주석 추출은 원문(`text`/`text_bytes`)에서 하며,
     #     `_blank_c_comments` 가 **길이를 유지**하므로 오프셋이 어긋나지 않는다.
     scan_text = blank_c_comments(text)
-    for match in _REGEX_DEF_PAT.finditer(scan_text):
-        prefix = str(match.group(1) or "").strip()
-        name = str(match.group(2) or "").strip()
-        params = " ".join(str(match.group(3) or "").replace("\n", " ").split())
+    for head_start, raw_prefix, name, raw_params, head_end in _iter_regex_def_heads(scan_text):
+        prefix = raw_prefix.strip()
+        params = " ".join(raw_params.replace("\n", " ").split())
         if not name or name in keywords:
             continue
-        brace_start = match.end() - 1
+        brace_start = head_end - 1
         depth = 0
         brace_end = brace_start
         for idx in range(brace_start, len(text)):
@@ -833,7 +931,7 @@ def _extract_function_defs_regex_fallback(
             if ident in globals_set and ident != name:
                 used_globals.add(ident)
         try:
-            start_byte = len(text[: match.start()].encode("utf-8", errors="ignore"))
+            start_byte = len(text[:head_start].encode("utf-8", errors="ignore"))
         except Exception:
             start_byte = 0
         comment = _extract_leading_comment(text_bytes, start_byte)
