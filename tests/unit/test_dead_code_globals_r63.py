@@ -263,3 +263,43 @@ class TestReviewItems:
         )
         f = {v["name"]: v for v in sec["function_details"].values()}["f"]
         assert "ghost_callee" not in " ".join(str(x) for x in (f.get("calls") or [])) + " ".join(sec["call_map"].get("f") or [])
+
+
+class TestMergedBranchAndCommentTables:
+    def test_a_dead_copy_after_the_live_one_does_not_supply_the_merged_asil(self, tmp_path, monkeypatch):
+        # (뮤테이션 M15) doxygen 태그 맵은 이름 키 last-wins — `#if 0` 안의 옛 사본이 뒤에 오면 그 `@asil` 이 병합 분기의 등급이 됐다.
+        import workflow.code_parser as pkg
+
+        (tmp_path / "isr.c").write_text(
+            _src(
+                "/**", " * @brief live", " * @asil B", " */", "void missed(void)", "{", "    b = 1;", "}",
+                "#if 0", "/**", " * @brief old", " * @asil D", " */", "void missed(void)", "{", "    b = 2;", "}", "#endif",
+            ),
+            encoding="utf-8",
+        )
+        real = pkg.parse_c_project
+
+        def _without_missed(*args, **kwargs):
+            res = real(*args, **kwargs)
+            res["functions"] = [f for f in res["functions"] if f.get("name") != "missed"]
+            return res
+
+        monkeypatch.setattr(pkg, "parse_c_project", _without_missed)
+        sec = generate_uds_source_sections(str(tmp_path))
+        d = {v["name"]: v for v in sec["function_details"].values()}["missed"]
+        assert (d["comment_asil"], d["comment_description"]) == ("B", "live")
+
+    def test_comment_tables_inside_a_dead_block_are_not_read(self, tmp_path):
+        # (리뷰 I4) 주석 표 섹션도 한 규칙 — 죽은 분기 안의 `Common Macro Definition` 표는 읽지 않는다.
+        sec = _sections(
+            tmp_path,
+            {
+                "a.c": _src(
+                    "/* Common Macro Definition", "   LIVE_M    1    live macro", "*/",
+                    "#if 0", "/* Common Macro Definition", "   GHOST_M    2    ghost macro", "*/", "#endif",
+                    "void live(void)", "{", "}",
+                ),
+            },
+        )
+        rows = " ".join(sec["common_macros"])
+        assert "LIVE_M" in rows and "GHOST_M" not in rows
