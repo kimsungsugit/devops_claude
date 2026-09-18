@@ -11,6 +11,10 @@ _EP = "/api/swsa/report/build"
 _HDR = {"X-User": "tester"}  # conftest DEV_MODE_X_USER_FALLBACK 회귀 호환
 
 
+# 파일 resolver 는 conftest 의 `_default_local_resolver` 가 local 로 고정한다
+# (cloudium 이면 이 endpoint 가 worker 미응답으로 403 이 되어 스키마 422 검증이 깨진다).
+
+
 def _post(body):
     return client.post(_EP, json=body, headers=_HDR)
 

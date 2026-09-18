@@ -9,11 +9,10 @@ Measures current quality metrics using actual input data:
 """
 
 import json
-import sys
-import os
 import re
+import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -23,7 +22,7 @@ SDS_DOCX = REPO_ROOT / "docs" / "(HDPDM01_SDS) Software Architecture Design Spec
 REF_SUDS = REPO_ROOT / "docs" / "(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx"
 SRS_TXT = REPO_ROOT / "docs" / "HDPDM01_SRS.txt"
 SDS_TXT = REPO_ROOT / "docs" / "HDPDM01_SDS.txt"
-SOURCE_ROOT = Path(r"D:\Project\Ados\PDS_64_RD")
+SOURCE_ROOT = Path(r"D:\Project\Ados\PDS64_RD")  # (R38) `PDS_64_RD` 오타였다 — 실제는 밑줄 없음
 
 MALFORMED_JSON_SAMPLES = [
     '{"overview": {"text": "hello"}, "requirements": {"text": "world"}}',
@@ -39,8 +38,8 @@ MALFORMED_JSON_SAMPLES = [
 def _measure_srs_parsing() -> Dict[str, Any]:
     """Measure SRS document parsing success rate."""
     from report_generator import (
-        _extract_requirements_from_doc,
         _extract_requirements_fallback,
+        _extract_requirements_from_doc,
     )
 
     results = {"txt_available": SRS_TXT.exists(), "docx_available": SRS_DOCX.exists()}
@@ -111,6 +110,7 @@ def _measure_reference_suds_extraction() -> Dict[str, Any]:
 
     try:
         import docx as _docx
+
         from report_generator import _extract_function_info_from_docx
 
         doc = _docx.Document(str(REF_SUDS))

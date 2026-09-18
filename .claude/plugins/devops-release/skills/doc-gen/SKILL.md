@@ -1,5 +1,6 @@
 ---
-description: "설계/시험 규격서를 자동 생성합니다. UDS, STS, SUTS, SITS 중 선택하여 생성합니다."
+description: "규격서 **1종을 골라** 생성합니다(uds|sts|suts|sits|all) — 플러그인 `user_config.backend_url` 경유. 4종 순차 + 추적성 체인 검증 + documenter 연동 + delta 재생성까지 필요하면 프로젝트 스킬 `/doc-pipeline` 이 더 완전합니다(같은 백엔드 엔드포인트를 쓴다)."
+when_to_use: 특정 규격서 1종만 생성, uds만/sts만/suts만/sits만 생성, 플러그인 경유 문서 생성 요청 시
 ---
 
 # 문서 자동 생성 (doc-gen)

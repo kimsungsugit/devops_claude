@@ -9,7 +9,6 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = SCRIPT_DIR.parent
 REPORTS_ROOT = WORKSPACE_ROOT / "reports"

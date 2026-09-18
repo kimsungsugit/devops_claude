@@ -14,13 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.services.swut_input_adapter import (  # noqa: E402
-    CoverageStats,
-    EnvironmentData,
-    FunctionCoverage,
-    SwUTSession,
-    ExecutionRow,
     SWTE_LAYOUT,
     VC2025_LAYOUT,
+    CoverageStats,
+    EnvironmentData,
+    ExecutionRow,
+    FunctionCoverage,
+    SwUTSession,
     _detect_log_layout,
     _extract_env_from_filename,
     _norm_env_stem,
@@ -266,6 +266,7 @@ class TestResolveLatestReleaseFolder:
     def test_w6_large_candidate_count_performance(self, tmp_path):
         """38차 W6: 100개 후보 디렉토리 → 1초 미만 처리 (성능)."""
         import time
+
         from backend.services.file_resolver import LocalFileResolver
         from backend.services.swut_input_adapter import _resolve_latest_release_folder
         # 100 release 후보 + 01.TestCaseDataReport 각각
@@ -289,6 +290,7 @@ class TestResolveLatestReleaseFolder:
         Windows에서는 symlink 권한 제약으로 skip — 환경 검증.
         """
         import platform
+
         from backend.services.file_resolver import LocalFileResolver
         from backend.services.swut_input_adapter import _resolve_latest_release_folder
         # 실 release 생성 후 symlink 추가
@@ -403,6 +405,209 @@ class TestExtractAggregateCoverage:
         assert total.statement.total == 69
         assert total.branch.covered == 21
         assert total.branch.total == 21
+
+
+def _agg_html_col_metric(metric_headers, rows, *, with_thead=True):
+    """VC2025 양식(col_metric class) AggregateCoverage HTML 생성.
+
+    rows: list of (unit, subprogram, complexity, [metric_cell_texts]).
+    header 라벨을 실제 VectorCAST 양식대로 col_metric th 로 낸다(헤더기반 매핑 테스트용).
+    """
+    head_cells = "".join(f'<th class="col_metric">{h}</th>' for h in metric_headers)
+    header_tr = (
+        '<tr><th class="col_unit">Unit</th><th class="col_subprogram">Subprogram</th>'
+        f'<th class="col_complexity">Complexity</th>{head_cells}</tr>'
+    )
+    body = ""
+    for unit, sub, cplx, cells in rows:
+        tds = "".join(f'<td class="success col_metric">{c}</td>' for c in cells)
+        body += (
+            f'<tr><td class="col_unit">{unit}</td><td class="col_subprogram">{sub}</td>'
+            f'<td class="col_complexity">{cplx}</td>{tds}</tr>'
+        )
+    thead = f"<thead>{header_tr}</thead>" if with_thead else ""
+    inner_head = "" if with_thead else header_tr
+    return (
+        f'<html><body><h2>Metrics</h2><table>{thead}<tbody>{inner_head}{body}</tbody>'
+        "</table></body></html>"
+    ).encode("utf-8")
+
+
+class TestHeaderAwareMetricMapping:
+    """2026-07-23 안전 fix — AggregateCoverage 컬럼을 헤더 라벨로 매핑.
+
+    과거 위치배정(metrics[0/1/2]→statement/branch/mcdc)이 IT 리포트 3번째 컬럼
+    Functions(함수 진입)를 거짓 MC/DC 로 표기하던 것(ISO 26262 거짓 안전지표)을 차단한다.
+    핵심 불변식: mcdc 는 헤더가 실제 MC/DC 인 컬럼에서만 채운다.
+    """
+
+    def test_ut_two_columns_leaves_mcdc_empty(self):
+        html = _agg_html_col_metric(
+            ["Statements", "Branches"],
+            [("Cpu", "fn_a", "1", ["8 / 10 (80%)", "2 / 4 (50%)"])],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert len(funcs) == 1
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 10)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 4)
+        assert funcs[0].mcdc.total == 0  # MC/DC 컬럼 부재 → 비움
+
+    def test_real_mcdc_column_populates_mcdc(self):
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "MC/DC"],
+            [("Cpu", "fn_a", "1", ["8 / 8 (100%)", "2 / 2 (100%)", "3 / 5 (60%)"])],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert (funcs[0].mcdc.covered, funcs[0].mcdc.total) == (3, 5)
+        assert funcs[0].function_coverage.total == 0
+
+    def test_functions_column_not_mislabeled_as_mcdc(self):
+        # IT 양식: 3번째 = Functions(함수 진입). 전 함수 1-pair·covered≡실행 = MC/DC 아님.
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "Functions"],
+            [
+                ("Ap", "s_IsDoorClosed", "3", ["0 / 4 (0%)", "0 / 3 (0%)", "0 / 1 (0%)"]),
+                ("Ap", "g_Ap_Diag", "1", ["3 / 3 (100%)", "1 / 1 (100%)", "1 / 1 (100%)"]),
+            ],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert len(funcs) == 2
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (0, 4)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (0, 3)
+        # ★ 거짓 MC/DC 차단 — 두 함수 모두 mcdc 비어야 한다
+        assert funcs[0].mcdc.total == 0
+        assert funcs[1].mcdc.total == 0
+        # Functions 는 function_coverage 로 정확 배정
+        assert (funcs[1].function_coverage.covered, funcs[1].function_coverage.total) == (1, 1)
+
+    def test_unrecognized_column_warns_and_skips_mcdc(self):
+        warns: list[str] = []
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "Frobnicate"],
+            [("Cpu", "fn_a", "1", ["8 / 8 (100%)", "2 / 2 (100%)", "9 / 9 (100%)"])],
+        )
+        funcs, _ = extract_aggregate_coverage(html, out_warnings=warns)
+        assert funcs[0].mcdc.total == 0  # 미인식 → mcdc 추정 금지
+        assert any("Frobnicate" in w or "미인식" in w for w in warns)
+
+    def test_empty_metric_cell_keeps_column_alignment(self):
+        # 빈 Function Calls 셀(" ")이어도 위치 보존 → branch 오정렬 없음.
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "Function Calls"],
+            [("Cpu", "fn_a", "1", ["8 / 10 (80%)", "2 / 4 (50%)", " "])],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 10)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 4)
+        assert funcs[0].function_calls_coverage.total == 0  # 빈 셀 → 미배정
+
+    def test_no_col_metric_falls_back_positional_without_false_mcdc(self):
+        # 헤더 클래스 없는 레거시 표 → 위치 폴백(statement/branch만), mcdc 안전상 비움.
+        warns: list[str] = []
+        html = (
+            "<html><body><h2>Metrics</h2><table><tbody>"
+            "<tr><th>Unit</th><th>Subprogram</th><th>Complexity</th>"
+            "<th>Statements</th><th>Branches</th><th>MysteryCol</th></tr>"
+            "<tr><th>Cpu</th><th>fn_a</th><th>1</th>"
+            "<th>8 / 8 (100%)</th><th>2 / 2 (100%)</th><th>5 / 9 (55%)</th></tr>"
+            "</tbody></table></body></html>"
+        ).encode("utf-8")
+        funcs, _ = extract_aggregate_coverage(html, out_warnings=warns)
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 8)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 2)
+        assert funcs[0].mcdc.total == 0  # 폴백도 3번째→mcdc 오배정 안 함
+        assert any("폴백" in w or "col_metric" in w for w in warns)
+
+    def test_header_col_metric_but_data_bare_falls_back_per_row(self):
+        # deep-review W1 — 헤더엔 col_metric 있으나 데이터행 셀엔 없는 비대칭 양식:
+        # 침묵 0-커버리지 대신 statement/branch 위치폴백 + mcdc 안전 공백 + warn.
+        warns: list[str] = []
+        html = (
+            '<html><body><h2>Metrics</h2><table><thead>'
+            '<tr><th class="col_unit">Unit</th><th class="col_subprogram">Subprogram</th>'
+            '<th class="col_complexity">Complexity</th>'
+            '<th class="col_metric">Statements</th><th class="col_metric">Branches</th>'
+            '<th class="col_metric">Functions</th></tr></thead><tbody>'
+            '<tr><td>Cpu</td><td>fn_a</td><td>1</td>'
+            '<td>8 / 10 (80%)</td><td>2 / 4 (50%)</td><td>1 / 1 (100%)</td></tr>'
+            '</tbody></table></body></html>'
+        ).encode("utf-8")
+        funcs, _ = extract_aggregate_coverage(html, out_warnings=warns)
+        assert len(funcs) == 1
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 10)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 4)
+        # ★ 비대칭 폴백에서도 3번째(Functions) 셀이 mcdc 로 새지 않는다
+        assert funcs[0].mcdc.total == 0
+        assert any("비대칭" in w for w in warns)
+
+
+class TestDegenerateMcdcGuard:
+    """2026-07-23 deep-review C1 — 라벨 무관 데이터 가드로 '함수-진입 위장 MC/DC' 차단.
+
+    헤더 라벨('MC/DC'·'Pairs')은 양방향 불신(MC/DC→거짓유입·Pairs→진짜드롭)이라, mcdc 로
+    배정된 데이터가 함수-진입 형태로 퇴화했는지 분포로 재검증한다.
+    """
+
+    def test_classify_pairs_label_maps_to_mcdc(self):
+        # W1 — VectorCAST 실제 MC/DC 컬럼 용어 'Pairs' 인식(미인식 시 진짜 MC/DC 침묵 드롭)
+        from backend.services.swut_input_adapter import _classify_metric_label
+        assert _classify_metric_label("Pairs") == "mcdc"
+        assert _classify_metric_label("MC/DC Pairs") == "mcdc"
+        assert _classify_metric_label("Function Calls") == "function_calls_coverage"  # 'call' 우선
+        assert _classify_metric_label("Functions") == "function_coverage"
+
+    def test_degenerate_detects_function_entry_masquerade(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        # 전 함수 pairs.total==1(단일 스파이크) + 분기 변동(>2 존재) = 함수-진입 위장
+        assert _is_degenerate_pairs([1] * 20, [1, 3, 5, 9, 2] + [1] * 15) is True
+
+    def test_real_mcdc_not_flagged(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        # 무결정(0)·단일(1)·복합조건(≥2) 섞임 = 진짜 MC/DC → 미발화
+        assert _is_degenerate_pairs([0, 1, 2, 3, 0, 1, 2, 0, 1, 1], [0, 2, 4, 6, 0, 2, 4, 0, 2, 2]) is False
+
+    def test_all_single_if_not_flagged_fp_control(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        # 전부 단일 if(branch=2,pair=1) 자명 코드베이스 — 오탐 방지(max_branch<=2)
+        assert _is_degenerate_pairs([1] * 20, [2] * 20) is False
+
+    def test_small_sample_and_empty_not_flagged(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        assert _is_degenerate_pairs([1] * 5, [9] * 5) is False       # n<8
+        assert _is_degenerate_pairs([0] * 20, [3] * 20) is False     # mcdc 공백(UT)
+
+    def test_rollup_zeros_degenerate_mcdc(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats,
+            FunctionCoverage,
+            compute_coverage_rollup,
+        )
+        rows = []
+        for i in range(20):
+            fc = FunctionCoverage(name=f"fn{i}")
+            fc.statement = CoverageStats(covered=5, total=5, coverage_pct=1.0)
+            fc.branch = CoverageStats(covered=1, total=(3 if i % 2 else 9), coverage_pct=0.5)
+            fc.mcdc = CoverageStats(covered=(1 if i < 10 else 0), total=1, coverage_pct=(1.0 if i < 10 else 0.0))
+            rows.append(fc)
+        out = compute_coverage_rollup(rows)
+        assert out["overall_mcdc_pct"] == 0.0        # 퇴화 → 중화(거짓 50% 아님)
+        assert out["overall_statement_pct"] == 100.0  # 다른 지표 무영향
+
+    def test_rollup_keeps_real_mcdc(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats,
+            FunctionCoverage,
+            compute_coverage_rollup,
+        )
+        rows = []
+        for i, (pt, bt) in enumerate([(0, 0), (2, 4), (3, 6), (0, 0), (1, 2), (2, 4), (0, 0), (1, 2), (2, 4), (3, 6)]):
+            fc = FunctionCoverage(name=f"fn{i}")
+            fc.statement = CoverageStats(covered=5, total=5, coverage_pct=1.0)
+            fc.branch = CoverageStats(covered=bt, total=bt, coverage_pct=1.0) if bt else CoverageStats()
+            fc.mcdc = CoverageStats(covered=pt, total=pt, coverage_pct=1.0) if pt else CoverageStats()
+            rows.append(fc)
+        out = compute_coverage_rollup(rows)
+        assert out["overall_mcdc_pct"] > 0            # 진짜 MC/DC(분포 흩어짐) → 유지
 
 
 class TestRound77ComponentName:
@@ -1032,7 +1237,8 @@ class TestEnhanceFunctionCoverageWithFile:
 
     def test_normal_matching_injects_file(self):
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, FunctionCoverage,
+            FunctionCoverage,
+            enhance_function_coverage_with_file,
         )
         function_rows = [
             FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
@@ -1049,7 +1255,8 @@ class TestEnhanceFunctionCoverageWithFile:
 
     def test_no_matching_keeps_empty(self):
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, FunctionCoverage,
+            FunctionCoverage,
+            enhance_function_coverage_with_file,
         )
         function_rows = [
             FunctionCoverage(unit_id="SwUFn_0101", name="vcast_only", file=""),
@@ -1061,7 +1268,8 @@ class TestEnhanceFunctionCoverageWithFile:
 
     def test_partial_matching_only_inject_matched(self):
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, FunctionCoverage,
+            FunctionCoverage,
+            enhance_function_coverage_with_file,
         )
         function_rows = [
             FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
@@ -1303,7 +1511,9 @@ class TestAggregateSessionUnmatchedResults:
     @staticmethod
     def _env_with_unmatched():
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            SwUTSession,
         )
         env = EnvironmentData(
             env_name="SwIT_SwUFn_0104",
@@ -1352,7 +1562,10 @@ class TestAggregateSessionUnmatchedResults:
 
     def test_all_matched_no_warning_backward_compat(self):
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, SwUTSession, aggregate_session,
+            EnvironmentData,
+            ExecutionRow,
+            SwUTSession,
+            aggregate_session,
         )
         env = EnvironmentData(
             env_name="SWTE_01",
@@ -1368,3 +1581,120 @@ class TestAggregateSessionUnmatchedResults:
         agg = aggregate_session(session)
         assert agg["passed"] == 1 and agg["unmatched_result_tcs"] == []
         assert not [w for w in session.parse_warnings if "[aggregate]" in w]
+
+
+class TestMeasuredFlagSeparatesRealFromSynthesized:
+    """실측 커버리지와 "존재 표식"(1/1·0/1)을 구분한다.
+
+    회귀 대상(2026-07-29 실측): 같은 `CoverageStats` 타입이 둘을 구분 없이 날랐고
+    `compute_coverage_rollup` 이 함께 합산했다:
+
+        HMR 미제공(전부 합성) → overall_statement_pct = **100.0**   ← 측정 0건인데
+        실측 30/100 + 합성 19개 → 41.18                            ← 11.18%p 부풀림
+        측정 0건               → 0.0                              ← 실측 0% 와 구분 불가
+
+    100.0 은 evaluator 의 statement_coverage_pct(threshold=100) 게이트를 **통과**한다.
+    """
+
+    @staticmethod
+    def _fc(name, st, br=None):
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        return FunctionCoverage(unit_id=name, name=name,
+                                statement=st, branch=br or CoverageStats())
+
+    def test_measured_defaults_true(self):
+        """기존 생성부(위치·키워드 인자)는 손대지 않아도 실측으로 남는다."""
+        from backend.services.swut_input_adapter import CoverageStats
+        assert CoverageStats(69, 69, 1.0).measured is True
+        assert CoverageStats(covered=1, total=2).measured is True
+
+    def test_all_synthesized_reports_not_measured_not_100(self):
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        synth = CoverageStats(1, 1, 1.0, measured=False)
+        out = compute_coverage_rollup([self._fc(f"f{i}", synth) for i in range(20)])
+        assert out["overall_statement_pct"] is None, "합성값이 100% 로 집계됐다"
+        assert out["measured_functions"]["statement"] == 0
+        assert out["synthesized_rows"] == 20
+
+    def test_mixed_reports_only_the_real_measurement(self):
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        synth = CoverageStats(1, 1, 1.0, measured=False)
+        real = CoverageStats(30, 100, 0.30)
+        out = compute_coverage_rollup(
+            [self._fc("real", real)] + [self._fc(f"s{i}", synth) for i in range(19)])
+        assert out["overall_statement_pct"] == 30.0, "합성이 분자·분모를 채워 부풀렸다"
+        assert out["measured_functions"]["statement"] == 1
+
+    def test_nothing_measured_is_none_not_zero(self):
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        out = compute_coverage_rollup([self._fc(f"f{i}", CoverageStats()) for i in range(5)])
+        assert out["overall_statement_pct"] is None, "미측정이 실측 0% 와 같은 값이다"
+
+    def test_real_measurements_are_unchanged(self):
+        """대조군 — 실측만 있는 프로젝트의 수치는 오늘과 같아야 한다."""
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        out = compute_coverage_rollup([
+            self._fc("a", CoverageStats(69, 69, 1.0)),
+            self._fc("b", CoverageStats(30, 100, 0.30)),
+        ])
+        assert out["overall_statement_pct"] == 58.58
+        assert out["synthesized_rows"] == 0
+
+    def test_coverage_verdict_ignores_synthesized(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats,
+            compute_coverage_final_result,
+        )
+        synth = CoverageStats(1, 1, 1.0, measured=False)
+        r = compute_coverage_final_result([self._fc(f"f{i}", synth) for i in range(10)])
+        assert r["verdict"] == "na", "합성 100% 를 '달성' 으로 읽었다"
+
+
+class TestSynthesisSitesAreMarked:
+    """합성 지점 중 하나라도 표식을 빠뜨리면 그 경로만 다시 부풀린다.
+
+    합성의 시그니처는 **`total` 이 리터럴**이라는 것이다 — 실측은 분모가 데이터에서
+    오므로(`m.total_calls`, `ctot`) 리터럴일 수 없다. 그래서 `total=<상수>` 인 생성만
+    검사한다(실측 생성부에 표식을 요구하면 거짓 실패가 난다).
+    """
+
+    @staticmethod
+    def _unmarked_literal_synthesis(src: str) -> list[str]:
+        import ast
+
+        out = []
+        for node in ast.walk(ast.parse(src)):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "CoverageStats"):
+                continue
+            tot = next((k.value for k in node.keywords if k.arg == "total"), None)
+            if not (isinstance(tot, ast.Constant) and isinstance(tot.value, int)
+                    and tot.value > 0):
+                continue          # 분모가 리터럴이 아니면 실측 — 검사 대상 아님
+            if not any(k.arg == "measured" for k in node.keywords):
+                out.append(ast.unparse(node)[:90])
+        return out
+
+    def test_flatten_sub_functions_marks_synthesized(self):
+        from backend.services import swut_input_adapter as m
+        from tests.unit._source_probe import source_of
+
+        missing = self._unmarked_literal_synthesis(source_of(m.flatten_sub_functions))
+        assert missing == [], f"표식 없는 합성 CoverageStats: {missing}"
+
+    def test_swit_template_alignment_marks_synthesized(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        src = (root / "backend/services/swit_coverage_aggregator.py").read_text(encoding="utf-8")
+        missing = self._unmarked_literal_synthesis(src)
+        assert missing == [], f"표식 없는 합성 CoverageStats: {missing}"
+
+    def test_guard_is_not_vacuous(self):
+        """대조군 — 표식을 뺀 코드에서는 실제로 잡혀야 한다."""
+        bad = "CoverageStats(covered=1, total=1, coverage_pct=1.0)"
+        good = "CoverageStats(covered=1, total=1, coverage_pct=1.0, measured=False)"
+        real = "CoverageStats(covered=m.covered_calls, total=m.total_calls, coverage_pct=1.0)"
+        assert self._unmarked_literal_synthesis(bad) != []
+        assert self._unmarked_literal_synthesis(good) == []
+        assert self._unmarked_literal_synthesis(real) == []

@@ -90,6 +90,10 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     tmp.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+        # `.gitattributes` 는 `*.json text eol=lf` 다. `newline` 을 안 주면 Windows 에서
+        # `\n` -> `\r\n` 으로 바뀌어, 설정을 한 번 저장하는 것만으로 파일 전체 줄끝이
+        # 뒤집힌다. 같은 실수가 훅 스크립트에서 나면 bash 가 실행을 거부한다.
+        newline="\n",
     )
     os.replace(str(tmp), str(path))
 

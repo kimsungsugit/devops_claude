@@ -8,10 +8,9 @@ ISO 26262 심사 증거로 사용 가능한 수준의 구조화된 보고서를 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-
 
 # ---------------------------------------------------------------------------
 # Failure classification

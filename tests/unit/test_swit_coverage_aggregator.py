@@ -8,8 +8,8 @@ fallback 위주.
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import openpyxl
@@ -23,7 +23,11 @@ from backend.services.swit_coverage_aggregator import (  # noqa: E402
 )
 from backend.services.swit_meta import SwitCoverageBuildMeta  # noqa: E402
 from backend.services.swut_input_adapter import (  # noqa: E402
-    CoverageStats, EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+    CoverageStats,
+    EnvironmentData,
+    ExecutionRow,
+    FunctionCoverage,
+    SwUTSession,
 )
 
 
@@ -354,9 +358,12 @@ class TestSwitSwitsConsistency:
         out_wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
         out_cons = out_wb["3.Consistency"]
         assert out_cons.cell(11, 5).value == "O"
+        # row 11: 템플릿에 미리 기재된 Exception 'X' + note는 preserved (reviewer 수기).
         assert out_cons.cell(11, 6).value == "X"
         assert out_cons.cell(11, 7).value == "Legacy exception note"
-        assert out_cons.cell(12, 6).value == "X"
+        # 라운드 102 — row 12(미주석 default)는 Exception 공백 (회사 감사본 정합).
+        # 기존 'X' 강제 기재 제거: F121=COUNTIF(F,"O") 집계 무의미 + REF 공백.
+        assert out_cons.cell(12, 6).value in (None, "")
         assert out_cons.cell(12, 7).value in (None, "")
         assert any("exception annotations preserved" in w for w in result.warnings)
 
@@ -573,7 +580,8 @@ class TestSwutBuilderV202InspectFix54:
     def test_swut_coverage_with_v202_template_fills_sw_version(self):
         """SwUT 빌더에 v2.02 template 입력 → SW Version cell 자동 채움."""
         from backend.services.swut_coverage_aggregator import (
-            CoverageBuildMeta, build_coverage_report,
+            CoverageBuildMeta,
+            build_coverage_report,
         )
         meta = CoverageBuildMeta(
             project_id="HDPDM01",
@@ -595,7 +603,8 @@ class TestSwutBuilderV202InspectFix54:
     def test_swut_coverage_with_v301_template_backward_compat(self):
         """SwUT 기존 v3.01 양식도 정상 채움 — fallback_to_v301."""
         from backend.services.swut_coverage_aggregator import (
-            CoverageBuildMeta, build_coverage_report,
+            CoverageBuildMeta,
+            build_coverage_report,
         )
         meta = CoverageBuildMeta(
             project_id="HDPDM01",
@@ -886,10 +895,12 @@ class TestF7StageR3N7IsSwitCallerBranch:
         """build_coverage_report (SwUT) default is_swit_caller=False → SwUT 분기.
         회사 표준 v1.01 양식 (coverage_metric_kind=function_and_calls + has_component_col)
         에서도 SwUT은 Statement+Branch stamp."""
-        from backend.services.swut_coverage_aggregator import (
-            build_coverage_report, CoverageBuildMeta,
-        )
         from openpyxl import load_workbook
+
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta,
+            build_coverage_report,
+        )
         template = self._build_company_standard_swit_layout_template()
         meta = CoverageBuildMeta(
             project_id="HDPDM01", release_sw_version="2.02",
@@ -933,7 +944,8 @@ class TestAlignDroppedFunctionWarning:
 
     def test_designed_dropped_function_warned(self):
         from backend.services.swut_input_adapter import (
-            CoverageStats, FunctionCoverage,
+            CoverageStats,
+            FunctionCoverage,
         )
         matched = FunctionCoverage(
             unit_id="", name="main",
@@ -959,7 +971,8 @@ class TestAlignDroppedFunctionWarning:
 
     def test_no_dropped_no_warning(self):
         from backend.services.swut_input_adapter import (
-            CoverageStats, FunctionCoverage,
+            CoverageStats,
+            FunctionCoverage,
         )
         matched = FunctionCoverage(
             unit_id="", name="main",
@@ -1065,3 +1078,69 @@ class TestNoAutoException96Final:
                 break
         assert total_row is not None
         assert cov.cell(total_row, 7).value == 0
+
+
+class TestSwitCoverageAxes:
+    """SwITCV 4.Coverage 요약 블록과 같은 축을 센다 — 2026-08-26 정본 대조.
+
+    이 문서는 구문/분기 커버리지를 싣지 않는다. `_align_function_rows_to_template`
+    이 statement/branch 를 `measured=False` 인 O/X 표식으로 덮어쓰기 때문이다.
+    정본이 싣는 두 줄(Functions / Function Calls)을 그 표식에서 되센다.
+    """
+
+    @staticmethod
+    def _fc(unit_id, *, present, calls=None, calls_na=False):
+        fc = FunctionCoverage(
+            unit_id=unit_id, name=f"fn_{unit_id}",
+            statement=CoverageStats(covered=1 if present else 0, total=1, measured=False),
+            branch=CoverageStats(covered=1 if present else 0, total=1, measured=False),
+            function_calls_coverage=calls if calls is not None else CoverageStats(),
+        )
+        setattr(fc, "swit_function_present", present)
+        setattr(fc, "swit_calls_na", calls_na)
+        return fc
+
+    def _axes(self, rows):
+        from backend.services.swit_coverage_aggregator import _swit_coverage_axes
+        return _swit_coverage_axes(rows)
+
+    def test_counts_functions_and_calls_separately(self):
+        rows = [
+            self._fc("SwUFn_0101", present=True,
+                     calls=CoverageStats(covered=6, total=6, measured=True)),
+            self._fc("SwUFn_0102", present=True,                       # 호출 미달
+                     calls=CoverageStats(covered=1, total=2, measured=True)),
+            self._fc("SwUFn_1005", present=False,                      # 함수 미달성
+                     calls=CoverageStats(covered=3, total=3, measured=True)),
+            self._fc("SwUFn_0110", present=True, calls_na=True),       # 호출 없는 leaf
+        ]
+        a = self._axes(rows)
+        assert a["swit_functions_total"] == 4
+        assert a["swit_functions_achieved"] == 3
+        assert a["swit_functions_fail"] == 1
+        # leaf 는 분모에서 빠진다 — 대신 몇 개인지 남는다.
+        assert a["swit_function_calls_functions"] == 3
+        assert a["swit_function_calls_na_functions"] == 1
+        assert a["swit_function_calls_covered"] == 10          # 6+1+3
+        assert a["swit_function_calls_total"] == 11            # 6+2+3
+        assert a["swit_function_calls_fail_functions"] == 1
+
+    def test_existence_markers_are_not_counted_as_calls(self):
+        """`measured=False` 인 1/1 합성값을 호출 실측으로 합산하면 100% 가 된다.
+
+        HMR 미제공 프로젝트가 통째로 만점이 되던 결함과 같은 축이다.
+        """
+        rows = [self._fc(f"SwUFn_{i:04d}", present=True,
+                         calls=CoverageStats(covered=1, total=1, coverage_pct=1.0,
+                                             measured=False))
+                for i in range(5)]
+        a = self._axes(rows)
+        assert a["swit_function_calls_total"] == 0             # 분모 0 = 미평가
+        assert a["swit_function_calls_covered"] == 0
+        assert a["swit_function_calls_functions"] == 0
+
+    def test_empty_rows_do_not_divide_by_zero(self):
+        a = self._axes([])
+        assert a["swit_functions_total"] == 0
+        assert a["swit_functions_fail"] == 0
+        assert a["swit_function_calls_total"] == 0

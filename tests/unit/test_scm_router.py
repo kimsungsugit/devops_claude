@@ -39,6 +39,7 @@ def test_scm_router_crud_and_link_docs(tmp_path, monkeypatch):
 
 def test_scm_status_for_missing_registry(tmp_path, monkeypatch):
     from fastapi import HTTPException
+
     from backend.routers import scm as scm_router
     from backend.services import scm_registry
 

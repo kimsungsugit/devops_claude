@@ -1,9 +1,189 @@
 # SwIT Builder (Software Integration Test, 33~35차 라운드~)
 
-> CLAUDE.md on-demand 레퍼런스 — SwIT Coverage/SITR/Consistency 빌더 작업 시 참조.
+> CLAUDE.md on-demand 레퍼런스 — SwIT Coverage(SwITCV)/SITR/**SwITCR**/Consistency 빌더 작업 시 참조.
 > 관련: [`swut_builder.md`](swut_builder.md), [`visual-marking-and-design-tokens.md`](visual-marking-and-design-tokens.md)
 
 ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프라 **81% 재활용**.
+
+## 산출물 3종 (생성 현황 보드 게이트 대상)
+
+`/api/swit/*` 도 SwUT 과 대칭으로 산출물 **셋**을 낸다. 세 endpoint 모두 동기 blob 응답이고
+`require_admin` + Semaphore(capacity 2)를 공유한다.
+
+| 산출물 | endpoint | 확장자 | 양식 config 키 | Quality doc_type | 총 TC 키 |
+|--------|----------|--------|----------------|------------------|----------|
+| **SwITCV** (커버리지) | `POST /api/swit/coverage/build` | xlsx | `swit_coverage_template` | `swit` | `total_tcs` |
+| **SITR** (시험 결과) | `POST /api/swit/sitr/build` | xlsm | `swit_sitr_template` | `sitr` | `total` |
+| **SwITCR** (종합 결과) | `POST /api/swit/switcr/build` | xlsm | `switcr_template` | `switcr` | `total_tcs` |
+
+⚠ **SwUT 과 같은 분모 함정이 여기도 있다** — SITR 만 `total`, 나머지 둘은 `total_tcs` 다.
+자세한 근거는 [`swut_builder.md`](swut_builder.md) `## 산출물 3종` 참조. 커버리지의
+doc_type 이 `switcv` 가 아니라 **`swit`** 인 것도 같은 이유(기존 이력 보존)다.
+
+**SwITCR 시트** — `cover` / `summary` / `it101` / `it201` / `it301` / `it401` / `it701` /
+`2.Test Log` / `4.Coverage` / `FI_Test Case` / `history` / `AuditLog`.
+
+⚠ **SwITCR 만 다른 산출물을 되읽는다.** SwITCV·SITR·Fault Injection 규격서를 입력으로 받아
+증적 시트를 채우는데, 셋 다 config fallback 이 있어 **없어도 빌드가 죽지 않고 그 시트가 빈
+채로 나간다**. 즉 결핍이 조용하다 — 생성 현황 보드의 준비 점검이 이 셋을 선택 입력으로
+표시하는 이유다(`backend/services/docgen_requirements.py` `IN_LEVEL_ARTIFACTS`).
+
+## SwITCV `4.Coverage` 레이아웃 — DV(11열) / PV(10열) (2026-08-26 실측)
+
+**Component 열 하나 차이로 그 오른쪽 전부가 한 칸씩 밀린다.** 열을 상수로 박으면 조용히
+틀린 값을 읽는다. 판정은 `excel_layout_resolver.coverage_column_base()` **단일 출처**를 쓸 것.
+
+| | No | Component | Unit ID | Name | Functions | Exception | Called Count | Total | Pass | Exception | File |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **DV(11열)** | B | C | D | E | F | G | H | I | J | K | L |
+| **PV(10열)** | B | — | C | D | E | F | G | H | I | J | K |
+
+요약 블록(r4 헤더 / r5 Functions / r6 Function Calls)도 같은 한 칸만큼 밀린다 —
+`Total | Fail Count | Exception | Coverage` 연속 4칸. DV 는 E~H, PV 는 D~G.
+
+**두 판 모두 실물로 확인됐다** (2026-08-26):
+
+| 판 | 실물 | 근거 |
+|---|---|---|
+| PV(10열) | KJPDS02 `… SwITCV … v2.01_260629_R.xlsx` | Component 없음, `D5=1014` |
+| DV(11열) | HDPDM01 `(XXXX_SwITCV) … v0.10` (회사 표준 양식) | `C9='Component'`, `E5=5` |
+
+KJPDS02 PV 정본(`… SwITCV … v2.01_260629_R.xlsx`) 실측:
+
+    D5=1014(Total)  E5=4(Fail)   F5=4(Exc)   G5=1(Coverage)
+    D6=1014(Total)  E6=21(Fail)  F6=21(Exc)  G6=1(Coverage)
+    데이터 1014행(r11~r1024) + 마감 TOTAL 행 r1025 + `< End of Document >` r1027
+
+⚠ **`4.Coverage` 를 정확 매칭으로 찾지 말 것** — 회사 SwUTCV 정본의 시트명은
+`4. Coverage`(점 뒤 공백)다. `find_coverage_sheet()` 를 쓸 것.
+
+⚠ **헤더 라벨에 오타가 실재한다** (`Excpetion`). 그래서 `Fail Count`/`Exception` 은 라벨로
+찾지 않고 `Total` 만 라벨로 찾은 뒤 `+1 / +2` 로 잡는다.
+
+### 이 결함이 오래 산 이유 (2026-08-26 수정 전)
+
+`swit_comprehensive_aggregator._load_workbook_summary` 가 DV 에 고정돼 PV 정본을 한 칸씩
+밀려 읽었다. 라운드 102 가 같은 파일의 `_extract_template_coverage_rows` 만 DV/PV 적응을
+시키고 이 함수를 빠뜨린, **복제본이 갈라진** 형태다. 증상이 조용했던 건 밀린 자리의 값이
+우연히 같았기 때문이다 — `Fail Count`(4)와 `Exception`(4)이 같은 수라 "fail 은 맞네" 로
+보였고, 정작 `Total`(1014)이 `Fail Count`(4)로 읽혀 **253배 과소** 보고됐다.
+
+결과(KJPDS02 PV SwITCR 실측 대조):
+
+| | 수정 전 | 수정 후 | 정본 |
+|---|---|---|---|
+| IT101 `E75` Functions Total | 4 | **1014** | 1014 |
+| IT101 `E76` Function Calls Total | 21 | **1014** | 1014 |
+| IT101 `K75/K76` Exception | 1 / 1 | **4 / 21** | 4 / 21 |
+| IT101 4.1 판정 `=IF(E=F+I+K,…)` | **Fail / Fail** | Pass / Pass | Pass |
+| IT101 4.2 미달성 표 | "해당사항 없음" | **10건 + 외 15건** | 25건 |
+| quality `qualified_function_count` | 4.0 | **1014.0** | — |
+
+⚠ 판정이 **Fail 로 뒤집혀 있었고**, 실재하는 미달성 25건(함수 4 + 호출 21)이
+"해당사항 없음" 으로 나갔다 — ISO 26262 감사 산출물에서 거짓 부정이다.
+회귀 가드는 `tests/unit/test_swit_comprehensive_aggregator.py`
+`TestSwitcvPvLayoutIsNotReadOneColumnOff` (뮤테이션 8/8).
+
+⚠ 가드는 **Total / Fail Count / Exception 을 전부 다른 값**으로 둔다. 세 값이 같으면 한 칸
+밀려도 통과해서 결함을 못 잡는다 — 예전 픽스처가 헤더 없이 DV 열에만 기입해 **코드의
+거울**이던 것이 이 결함을 통과시킨 원인이다.
+
+## SwITR 증거 읽기 — 시트명·열 (2026-08-26 실측)
+
+SwITCR 은 SwITR 을 되읽어 TC 집계를 증거로 삼는다. 정본 배치는 **코드가 가정하던 것과 달랐고**,
+그 결과 `sitr_test_log_tcs` / `sitr_pass_count` / `sitr_fail_count` 세 키가 늘 부재였다.
+
+| | 코드가 보던 곳 | 정본 실측 |
+|---|---|---|
+| 시트 | `2.Test Log` (정확 매칭) | **`3.Test Log`** |
+| TC ID 열 | `row[5]` = F | **B** (세로 병합) |
+| Pass/Fail 열 | `row[-12:]` (뒤에서 12칸) | **AL** (max_col=319) |
+
+⚠ **행을 세면 틀린다.** TC ID 가 세로 병합이라 병합 그룹 54개 / 결과 셀 630개가 나오는데
+문서가 말하는 Total 은 **611** 이다. 그래서 이제 `1.Test Summary` 의 Total 행을 **먼저** 쓴다:
+
+    r17  Type | Number of TCs Tested | Number of TCs Passed | Number of TCs Failed | not executed
+    r18  Requirements Based TC   581  581  0  0
+    r19  Interface TC            (빈 칸 — 미수행)
+    r20  Fault Injection TC       30   30  0  0
+    r21  Total                   611  611  0  0        <- 이 행을 쓴다
+
+부분합을 우리가 더하지 않는다 — 합산 규칙이 양식마다 다르다. Total 한 칸이라도 수가 아니면
+**통째로 포기**한다(절반짜리 근거 금지). 라벨을 못 찾으면 `1.Test Summary` 가 없는 판(v1.01)
+으로 보고 `N.Test Log` 행 세기로 접는데, 그때도 시트명·열은 **탐지**한다.
+
+⚠ SwITCV 에도 `1.Test Summary` 가 있지만 `Number of TCs Tested` 블록이 없다 — 라벨 기반이라
+자동으로 걸러진다(같은 함수가 두 워크북에 쓰인다).
+
+⚠ **Total 행 탐색은 블록 경계를 넘지 않는다.** 이 양식군은 한 시트에 섹션을 쌓고 각각 자기
+`Total` 행을 갖는다. HDPDM01 v0.10 양식은 TC 블록에 Total 이 **없고** 바로 아래
+`■ Requirements/Design Coverage` 블록에 Total 이 있다 — 경계를 안 지키면 **요구 커버리지
+108 을 TC 108건으로** 읽는다(재현 실증). 섹션 머리글은 `■` 로 시작하므로 그걸 만나면 끊는다.
+KJPDS02 에서 안 터진 건 그 칸이 비어 있어 전량거부에 걸린 **우연**이다 — 숫자가 차 있으면
+조용히 틀린 값이 나온다.
+
+## SwITCV 품질 게이트 축 (2026-08-26)
+
+SwITCV 는 **구문/분기 커버리지 문서가 아니다.** `_align_function_rows_to_template` 이
+각 함수 행의 statement/branch 를 `measured=False` 인 O/X 표식(1/1·0/1)으로 덮어쓴다 —
+정본 `4.Coverage` 요약이 싣는 값이 그 두 줄이기 때문이다:
+
+    Functions       Total | Fail Count | Exception | Coverage
+    Function Calls  Total | Fail Count | Exception | Coverage
+
+그래서 `compute_coverage_rollup` 은 SwIT 에서 **항상** 전 축 None 을 낸다. 그게 정상이다.
+
+⚠ **그 상태를 `evaluate_coverage` 로 채점하면 안 된다.** `_safe_float` 가 None 을 0.0 으로
+접어 `statement_coverage_pct = 0 < 100` → FAIL 인데, **시험을 아무리 더해도 사라지지 않는
+구조적 FAIL** 이다. 게다가 정작 정본이 지목하는 미달은 어느 지표에도 안 뜬다. 실측
+(KJPDS02 PV, 2026-08-26):
+
+| | 옛 게이트(`evaluate_coverage`) | 지금(`evaluate_swit_coverage`) |
+|---|---|---|
+| 게이트 축 | `statement_coverage_pct` **0.0** (미측정) | 함수 달성률 **99.61%** · 호출 커버리지 **97.91%** |
+| 보이는 미달 | 없음 | Functions **4건** · Function Calls **21건** |
+| 게이트 지표 수 | 2 (실질 1 — pass_rate 는 늘 100%) | 3 |
+| 점수 / 판정 | 50.0 / FAIL | 66.25 / FAIL |
+
+즉 **완화가 아니라 강화**다. 미달 4건은 `SwUFn_1005 / 1167 / 3519 / 3554` 로, 정본 요약의
+`Fail Count=4` 와 일치한다(호출 미달 21건도 정본 21 과 일치).
+
+SwUTCV(`swut`)는 **진짜** 구문 커버리지를 낸다(실측 99.45% / 1014 함수). 그래서 recorder·
+advisor 분기는 `swut` ↔ `swit` 으로 갈라져 있고, 한쪽만 고치면 다시 붙는다.
+
+정렬이 버리는 원시 VectorCAST 커버리지(31.59% / 712 함수)는 `vcast_raw_*` **비게이트**
+참고지표로 보존한다 — 안 남기면 "측정했는데 문서가 안 싣는다" 와 "측정 자체를 못 했다" 가
+화면에서 같아 보인다.
+
+### 곁가지 — 읽어도 쓰지 않던 두 번째 배선
+
+`_write_it101` 이 `sitr_*` 를 **`switcv_summary`**(커버리지 쪽 dict)에서 찾고 있었다. 그 키는
+SwITR 워크북에서만 나오고, 게다가 이 함수는 `switr_summary` 를 인자로 받지도 않았다. 즉 읽기를
+고쳐도 IT101 에는 안 닿았다. 인자를 넘기고 조회 대상을 바꿨다.
+
+### 대조 — 이 읽기를 쓸모 있게 만드는 부분
+
+읽기만 고치면 값은 `or` 폴백 자리에 조용히 앉을 뿐이다(KJPDS02 는 세션이 이미 611 을 주므로
+산출물 숫자는 그대로다). 그래서 **세션 실측 ↔ 승인 문서가 다르면 경고**한다
+(`_switr_divergence_warnings`, prefix `[evidence]`).
+
+- 일치는 **조용하다** — 정상을 경고로 채우면 진짜 경고가 묻힌다
+- 한쪽이 없으면 건너뛴다 — **부재는 불일치가 아니다**
+- 산출물에는 세션 값을 싣고, 그 사실을 경고문에 적는다
+
+실측(KJPDS02 PV): 세션 611/611/0 · 문서 611/611/0 → 경고 없음. 대조군으로 세션을 600 으로
+바꾸면 `[evidence] 총 TC: VectorCAST 세션 600 와 SwITR 문서 611 가 다릅니다` 가 뜬다.
+
+⚠ **`sitr_*` 를 단언하는 테스트가 0건이었다** — 그래서 죽은 읽기가 안 잡혔다. 회귀 가드는
+`tests/unit/test_swit_comprehensive_aggregator.py` `TestSwitrEvidenceIsActuallyRead` /
+`TestSessionVsSwitrDivergenceIsReported` / `TestIt101ReadsSitrKeysFromTheSwitrDict`
+(뮤테이션 12/12).
+
+### 아직 못 잰 것
+
+`_load_fault_injection_summary` 도 시트명 정확 매칭(`FI_Test Case`, 실패 시 **첫 시트**로 폴백)
++ 열 하드코딩(3/2/15~19/4/5/6)이다. **FI 정본 파일이 실물로 없어 대조 불가**라 손대지 않았다
+(그 부재는 빌드 경고로 나간다). 파일이 확보되면 위와 같은 방식으로 잴 것.
 
 ## 33차 — Coverage Report v2.02 (xlsx)
 - 회사 v2.02 양식 (HDPDM01 NE_GN7). 시트 구조: Cover / Test Summary / 1.Traceability / 2.Consistency / 3.Coverage / History (SwUT v3.01과 동일)

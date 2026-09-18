@@ -754,8 +754,13 @@ def _apply_actual_result_style(ws, layout: SpecLayout | None = None) -> int:
 
 def _write_log_headers(
     ws, out_warnings: list[str] | None, layout: SpecLayout | None = None,
+    *, title: str = "Software Unit Test Log",
 ) -> None:
     """레퍼런스 SUTR 레이아웃의 Actual/Pass-Fail/Log 헤더를 추가.
+
+    ``title`` — A1 셀 제목. SUTR='Software Unit Test Log'(기본), SITR='Test Log'
+    (회사 감사본 실측: SwITR A1='Test Log'). 공유 함수가 Unit 제목을 하드코딩하면
+    SwITR이 Integration 문서인데 'Unit'으로 표기되는 결함(2026-06-24 검증).
 
     좌표는 ``layout`` 동적 값 (DV: Actual=FF162~JE265, JF/JG/JH=266/267/268.
     PV: Actual=189~272, 273/274/275 — 라운드 105). 고정 상수 사용 시 PV에서
@@ -781,7 +786,7 @@ def _write_log_headers(
             except (ValueError, KeyError):
                 pass
 
-    safe_write(ws, 1, 1, "Software Unit Test Log")
+    safe_write(ws, 1, 1, title)
 
     # r3 섹션 헤더.
     # 2026-06-18 fix — 레퍼런스 실측: r3 Pass/Fail(col273), Pass열(col274=pass_total)은
@@ -854,6 +859,8 @@ def _fill_actual_and_result(
     asil_map: dict[str, str],
     out_warnings: list[str] | None,
     layout: SpecLayout | None = None,
+    *,
+    actual_offset_align: bool = False,
 ) -> dict[str, Any]:
     """spec 함수 블록에 Actual/Pass-Fail/Log 채움.
 
@@ -890,11 +897,17 @@ def _fill_actual_and_result(
         # Expected 변수 열 (anchor) = Actual 변수 열 offset.
         exp_cols = _expected_var_cols(ws, anchor, lo)
         # Actual 변수명 = Expected 변수명 (감사본 패턴) — anchor에 stamp.
+        # 2026-06-24 fix (SwITR 검증) — actual_offset_align=True면 actual 열을
+        # expected 열과 **동일 offset**(ec - expected_start)에 정렬. enumerate
+        # 인덱스(off)는 _expected_var_cols가 빈 선두/중간 열을 skip할 때 좌측 패킹
+        # → 레퍼런스(열 정렬) 대비 시프트(SwITR: 선두 파라미터 누락). SUTR는 기존
+        # packed 유지(R105 양식·테스트 정합) — 기본 False.
         for off, ec in enumerate(exp_cols):
-            if off >= lo.actual_max:
-                break
+            col_off = (ec - lo.expected_start) if actual_offset_align else off
+            if not (0 <= col_off < lo.actual_max):
+                continue
             var_name = ws.cell(anchor, ec).value
-            safe_write(ws, anchor, lo.actual_start + off, var_name)
+            safe_write(ws, anchor, lo.actual_start + col_off, var_name)
 
         if iter_data is None:
             stats["unmatched_fn"] += 1
@@ -967,10 +980,12 @@ def _fill_actual_and_result(
                 continue
             any_exec = True
             # Actual 값 채우기 — Pass면 Expected 복제 (감사본 패턴), Fail이면 vcast.
+            # 2026-06-24 fix — 변수명 stamp와 동일 정렬 정책(actual_offset_align).
             for off, ec in enumerate(exp_cols):
-                if off >= lo.actual_max:
-                    break
-                ac = lo.actual_start + off
+                col_off = (ec - lo.expected_start) if actual_offset_align else off
+                if not (0 <= col_off < lo.actual_max):
+                    continue
+                ac = lo.actual_start + col_off
                 if passed:
                     exp_val = ws.cell(ir, ec).value
                     safe_write(ws, ir, ac, exp_val)
@@ -1929,6 +1944,14 @@ def build_sutr_from_spec(
         # 표준 순서: Cover, History, 1.Test Summary, 2.Deviation, 3.Test Log
         # copy_sheet가 끝에 넣었으므로 이미 마지막 (AuditLog 미존재 시) — 명시 정렬.
         summary["output_sheet_order"] = names
+
+    # 라운드 107 — 템플릿/기입 수식(1.Test Summary Coverage 6개 등)을 openpyxl이
+    # 캐시 미저장(cached=None) → 재계산 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때
+    # 자동 재계산(SwITCV 라운드 102 정합). 캐시 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     out = io.BytesIO()
     wb.save(out)

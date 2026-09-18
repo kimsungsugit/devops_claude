@@ -24,7 +24,6 @@ from typing import Any
 
 from fastapi import HTTPException
 
-
 # UNC 패턴: \\server\share 형식
 _UNC_PREFIX = re.compile(r"^\\\\")
 

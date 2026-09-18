@@ -26,7 +26,6 @@ from backend.services.swut_deviation_generator import (  # noqa: E402
     generate_deviation_rationales_dict,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

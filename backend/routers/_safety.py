@@ -22,6 +22,8 @@ builder/consistency 함수 호출 + 예외 분류:
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 import os
 from typing import Any, Callable
@@ -36,6 +38,26 @@ except ImportError:  # pragma: no cover
 from fastapi import HTTPException
 
 from backend.user_context import get_current_user
+
+
+async def run_blocking(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """블로킹 함수를 워커 스레드에서 실행 — ``async def`` 핸들러의 이벤트 루프 hang 방지.
+
+    ## 왜 공용인가
+
+    같은 헬퍼가 ``local.py`` 에만 있었고 ``jenkins.py`` 에는 없었다. 그래서 jenkins
+    쪽 UDS 생성은 소스 파싱·docx 빌드·리포트 6종을 **전부 이벤트 루프에서** 돌렸다.
+    복사해서 두 벌로 두면 이 저장소가 반복해 겪은 "판정 복제 → 한쪽만 고쳐짐" 이
+    되므로(``_ratchet_core.py`` 가 같은 이유로 생겼다) 정의는 여기 하나뿐이다.
+
+    ## 계약
+
+    - ``asyncio.to_thread`` 는 ``contextvars`` 를 복사하므로
+      ``backend.user_context.current_user`` 가 워커 스레드에서도 유지된다
+      (``tests/unit/test_router_event_loop_blocking.py`` 가 이 성질을 고정한다).
+    - 예외는 원본 그대로 전파된다 — 호출부의 ``try/except`` 분기가 그대로 산다.
+    """
+    return await asyncio.to_thread(functools.partial(func, *args, **kwargs))
 
 
 def get_process_memory_mb() -> float | None:
@@ -173,10 +195,17 @@ def run_consistency_safely(
             len(result.get("issues") or [])
             if isinstance(result, dict) else 0
         )
+        # /doc/summary 응답은 ok/issues 없이 {coverage_summary|sutr_summary,
+        # parse_warnings}만 반환 → parse_warnings도 로깅(ok=None은 비교가 아닌
+        # 단일 파싱 신호). 정합성 경로도 parse_warnings를 함께 노출해 관측성 향상.
+        n_warn = (
+            len(result.get("parse_warnings") or [])
+            if isinstance(result, dict) else 0
+        )
         mem_after = get_process_memory_mb()
         logger.info(
-            "%s.consistency.check done: ok=%s issues=%d mem_mb=%s",
-            series, ok, n_issues,
+            "%s.consistency.check done: ok=%s issues=%d warnings=%d mem_mb=%s",
+            series, ok, n_issues, n_warn,
             f"{mem_after:.1f}" if mem_after is not None else "n/a",
         )
         return result

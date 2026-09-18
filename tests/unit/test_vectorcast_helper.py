@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from backend.helpers.vectorcast import build_vectorcast_metadata, evaluate_vectorcast_readiness, load_vectorcast_project_config
+from backend.helpers.vectorcast import (
+    build_vectorcast_metadata,
+    evaluate_vectorcast_readiness,
+    load_vectorcast_project_config,
+)
 
 
 def test_load_vectorcast_project_config_uses_default_paths(tmp_path: Path) -> None:

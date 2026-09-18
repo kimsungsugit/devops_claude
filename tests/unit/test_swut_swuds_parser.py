@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -121,9 +121,13 @@ class TestSwUDSConsistencyIntegration:
     def test_swuds_function_ids_added_to_consistency_when_all_match(self, tmp_path):
         """SwUTS 모든 함수가 SwUDS에 있으면 PASS."""
         import openpyxl
-        from backend.services.swut_coverage_aggregator import build_coverage_report, CoverageBuildMeta
+
+        from backend.services.swut_coverage_aggregator import CoverageBuildMeta, build_coverage_report
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         # session: SwUFn_0001 만 보유
         env = EnvironmentData(
@@ -172,9 +176,13 @@ class TestSwUDSConsistencyIntegration:
     def test_swuds_missing_function_marked_fail(self, tmp_path):
         """SwUDS에는 있는데 SwUTS에 없는 함수가 있으면 FAIL."""
         import openpyxl
-        from backend.services.swut_coverage_aggregator import build_coverage_report, CoverageBuildMeta
+
+        from backend.services.swut_coverage_aggregator import CoverageBuildMeta, build_coverage_report
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         env = EnvironmentData(
             env_name="SWTE_01", component_name="X",
@@ -218,9 +226,13 @@ class TestSwUDSConsistencyIntegration:
     def test_swuds_not_provided_partial_label_kept(self, tmp_path):
         """swuds_function_ids=None이면 incomplete_sheets에 partial 라벨 유지."""
         import openpyxl
-        from backend.services.swut_coverage_aggregator import build_coverage_report, CoverageBuildMeta
+
+        from backend.services.swut_coverage_aggregator import CoverageBuildMeta, build_coverage_report
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         env = EnvironmentData(
             env_name="SWTE_01", component_name="X",
@@ -415,3 +427,141 @@ class TestRound87HeadingTableFallback:
         # 매핑 0건 → fallback warning 안 emit
         fallback_warnings = [w for w in result.parse_warnings if "regex fallback 적용" in w]
         assert fallback_warnings == []
+
+
+class TestDescriptionExtractionKJPDS02:
+    """Description 추출기 KJPDS02 병합라벨/rows≥5 대응 (ASIL/Name 추출기와 동일 패턴).
+
+    구식 `rows[:5]` + naive `cells[i+1]`는 병합 라벨(반복 셀)·index≥5 Description을
+    침묵 실패시켜 UDS Description이 빈 채로 표시됐다(heading만 노출). ASIL/Name 추출기가
+    받은 병합라벨 업그레이드를 Description만 못 받은 결함의 회귀 방지.
+    """
+
+    @staticmethod
+    def _docx(rows_spec, cols, fn_id="SwUFn_1150"):
+        from docx import Document  # type: ignore
+        doc = Document()
+        doc.add_paragraph(f"{fn_id} — s_TunningParamRead_16bitData")
+        tbl = doc.add_table(rows=len(rows_spec), cols=cols)
+        for r, cells in enumerate(rows_spec):
+            for c, txt in enumerate(cells):
+                tbl.cell(r, c).text = txt
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    def test_merged_label_repeated_cells(self):
+        """['Description','Description','튜닝...'] — 반복 라벨 셀 skip 후 값 채택."""
+        b = self._docx(
+            [["Description", "Description", "튜닝 파라미터를 16bit로 읽어 반환한다"]], cols=3,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "튜닝 파라미터를 16bit" in r.entries[0].description
+
+    def test_description_row_index_beyond_5(self):
+        """Description 행이 index 5 — 구식 rows[:5]는 놓침, rows[:8]로 추출."""
+        rows = [
+            ["ID", "SwUFn_1150"],
+            ["Name", "s_TunningParamRead_16bitData"],
+            ["Prototype", "void s_TunningParamRead_16bitData(void)"],
+            ["Reuse", "N"],
+            ["Cyber", "-"],
+            ["Description", "튜닝 파라미터를 16bit로 읽어 반환한다"],
+            ["ASIL", "A"],
+        ]
+        b = self._docx(rows, cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "튜닝 파라미터를 16bit" in r.entries[0].description
+
+    def test_korean_merged_label_variant(self):
+        """한글 '기능설명' 병합 라벨도 매칭."""
+        b = self._docx(
+            [["기능설명", "기능설명", "16비트 튜닝값을 읽는다"]], cols=3,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "16비트 튜닝값을 읽는다" in r.entries[0].description
+
+    def test_empty_adjacent_cell_skipped(self):
+        """['Description','', '실제 설명'] — 빈 인접 셀 skip(구식은 빈 값 반환)."""
+        b = self._docx(
+            [["Description", "", "실제 설명 문장"]], cols=3,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "실제 설명 문장" in r.entries[0].description
+
+    def test_simple_hdpdm01_layout_no_regression(self):
+        """HDPDM01 단순 ['Description','값'] — 무회귀(첫 후속 셀이 곧 값)."""
+        b = self._docx(
+            [["Description", "간단한 설명"]], cols=2,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "간단한 설명" in r.entries[0].description
+
+
+class TestPrototypeExtraction:
+    """Prototype 추출 — 링크(cloudium) UDS도 표에 있으면 실 선언 표시/원문→변경안 기준선.
+
+    이 추출이 없어 SwUDSEntry.prototype 필드조차 없던 시절, 링크 문서 UDS 카드의 prototype이
+    표에 값이 있는데도 조용히 비었다(사이드카 전용). Name/ASIL과 동일 라벨-스캔 패턴 회귀 방지.
+    """
+
+    @staticmethod
+    def _docx(rows_spec, cols, fn_id="SwUFn_1150"):
+        from docx import Document  # type: ignore
+        doc = Document()
+        doc.add_paragraph(f"{fn_id} — s_TunningParamRead_16bitData")
+        tbl = doc.add_table(rows=len(rows_spec), cols=cols)
+        for r, cells in enumerate(rows_spec):
+            for c, txt in enumerate(cells):
+                tbl.cell(r, c).text = txt
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    def test_prototype_extracted_english_label(self):
+        b = self._docx([["Prototype", "void s_TunningParamRead_16bitData(void)"]], cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == "void s_TunningParamRead_16bitData(void)"
+
+    def test_prototype_merged_label(self):
+        """병합 라벨 ['Prototype','Prototype','void f( void )'] — 반복 셀 skip."""
+        b = self._docx([["Prototype", "Prototype", "u8 s_ReadByte( u16 addr )"]], cols=3)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == "u8 s_ReadByte( u16 addr )"
+
+    def test_prototype_korean_label(self):
+        b = self._docx([["프로토타입", "void s_Init(void)"]], cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == "void s_Init(void)"
+
+    def test_prototype_absent_stays_empty(self):
+        """Prototype 행 없으면 빈 string (fail-safe) — 기존 필드 무영향."""
+        b = self._docx([["Description", "설명만"]], cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == ""
+        assert r.entries[0].description == "설명만"
+
+    def test_full_function_info_row_layout(self):
+        """KJPDS02 Function Info 다행 — Prototype/Description/ASIL 동시 추출(교차오염 없음)."""
+        rows = [
+            ["Name", "s_TunningParamRead_16bitData"],
+            ["Prototype", "void s_TunningParamRead_16bitData(void)"],
+            ["Description", "튜닝 파라미터를 16bit로 읽어 반환"],
+            ["ASIL", "A"],
+        ]
+        b = self._docx(rows, cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        e = r.entries[0]
+        assert e.prototype == "void s_TunningParamRead_16bitData(void)"
+        assert "튜닝 파라미터를 16bit" in e.description
+        assert e.asil == "A"

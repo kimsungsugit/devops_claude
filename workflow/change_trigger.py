@@ -34,8 +34,16 @@ def build_registry_trigger(
     auto_generate: bool = False,
     targets: Optional[List[str]] = None,
     manual_changed_files: Optional[List[str]] = None,
+    use_manual_only: bool = False,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> ChangeTrigger:
+    """변경 파일 집합을 결정해 ChangeTrigger를 만든다.
+
+    use_manual_only=True면 manual_changed_files를 '권위 있는 변경 집합'으로 간주하고
+    로컬 SCM diff 폴백을 건너뛴다(빈 리스트도 그대로 '변경 없음'으로 취급). Jenkins
+    빌드 changeSet을 주입할 때 사용 — 빌드가 변경 0건이면 로컬 working-copy diff로
+    잘못 되돌아가지 않도록 한다(영향도-빌드 정합 보장).
+    """
     entry = get_registry_entry(scm_id)
     if entry is None:
         raise KeyError(scm_id)
@@ -44,7 +52,7 @@ def build_registry_trigger(
     scm_type = str(entry.scm_type or "git").lower()
     default_base_ref = "" if scm_type == "svn" else "HEAD~1"
     resolved_base_ref = str(base_ref or entry.base_ref or default_base_ref).strip()
-    if not changed_files:
+    if not changed_files and not use_manual_only:
         if scm_type in {"git", "svn"} and str(entry.source_root or "").strip():
             changed_files = get_changed_files(
                 str(entry.source_root),

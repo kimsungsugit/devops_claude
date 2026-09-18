@@ -26,90 +26,123 @@ KEY_MOD_STATICS = "static_vars"     # module-level: static var definitions table
 # Legacy key kept for backward compat when reading old sidecar JSON files
 KEY_FN_GLOBALS_LEGACY = "globals"
 # ---------------------------------------------------------------------------
-import os
-import json
-import csv
-import logging
-import time
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
-from io import BytesIO, StringIO
-from html import escape
+import json  # noqa: E402
+import logging  # noqa: E402
+import os  # noqa: E402
+from datetime import datetime  # noqa: E402
+from html import escape  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: E402
 
-from report.constants import (
+from report.constants import (  # noqa: E402
     DEFAULT_TYPE_RANGES,
-    UDS_SERVICE_TABLE,
-    UDS_DID_PATTERNS,
-    UDS_SERVICE_ID_PATTERNS,
 )
-from report_gen.source_parser import (
-    _extract_doxygen_asil_tags,
-    _extract_file_header_asil,
+from report_gen.c_reset import (  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
+    collect_reset_assignments,
+    placed_global_names,
+    resolve_reset,
 )
-from report_gen.function_analyzer import (
-    _parse_signature_outputs,
-    _is_static_var,
-    _fallback_function_description,
-    _parse_signature_params,
-    _extract_logic_flow,
-    _extract_condition_branch_calls,
-    _normalize_symbol_name,
-    _enhance_function_description,
-    _normalize_bracket_expr,
-    _is_generic_description,
+from report_gen.c_return import returns_value  # noqa: E402 (import 블록 전체가 상수 뒤에 온다)
+from report_gen.function_analyzer import (  # noqa: E402
     _collect_var_usage,
-    _extract_logic_terminal_paths,
-    _format_param_entry,
     _enhance_description_text,
-    _extract_return_type,
-    _split_param,
+    _enhance_function_description,
+    _extract_condition_branch_calls,
+    _extract_logic_flow,
+    _extract_logic_terminal_paths,
     _extract_primary_condition,
+    _extract_return_type,
+    _fallback_function_description,
+    _format_param_entry,
     _infer_precondition_from_body,
+    _is_generic_description,
+    _is_static_var,
+    _normalize_dims,
+    _normalize_symbol_name,
+    _observed_index_values,
+    _parse_signature_outputs,
+    _parse_signature_params,
+    _split_param,
 )
-from report_gen.requirements import (
-    _load_component_map,
-    _extract_requirements_from_comments,
+from report_gen.requirements import (  # noqa: E402
     _collect_section_lines,
-    _normalize_table_row,
-    _split_doc_function_blocks,
     _extract_function_blocks,
+    _extract_requirements_from_comments,
     _extract_state_tokens,
     _extract_table_section,
+    _load_component_map,
+    _normalize_table_row,
+    _split_doc_function_blocks,
+    component_verify_of,
 )
-from report_gen.source_parser import (
-    _scan_source_comment_patterns,
-    _extract_c_macros,
-    _read_text_limited,
-    _strip_c_comments,
-    _extract_c_prototypes,
-    _extract_c_global_candidates,
-    _extract_c_function_bodies,
-    _extract_c_macro_defs,
+from report_gen.source_parser import (  # noqa: E402
+    _SRC_READ_MAX_BYTES,
+    _decl_array_dim,
     _extract_c_definitions,
-    _extract_local_static_candidates,
+    _extract_c_function_bodies,
+    _extract_c_global_candidates,
+    _extract_c_macro_defs,
+    _extract_c_macros,
+    _extract_c_prototypes,
+    _extract_doxygen_asil_tags,
     _extract_fallback_call_names,
-    _extract_macro_call_names,
+    _extract_file_header_asil,
     _extract_function_pointer_call_targets,
+    _extract_local_static_candidates,
+    _extract_macro_call_names,
+    _read_source_text,
+    _read_text_limited,
+    _scan_source_comment_patterns,
+    _strip_c_comments,
+    extract_header_function_docs,
+    extract_struct_member_arrays,
+    extract_struct_member_types,
+    is_const_type,
+    pick_header_doc,
 )
-from report_gen.uds_text import (
-    _merge_logic_ai_items,
-    _apply_uds_rules,
-    _merge_section_text,
+from report_gen.source_roots import split_source_roots  # noqa: E402
+from report_gen.uds_text import (  # noqa: E402
     _ai_document_text,
-    _uds_lines_to_html,
     _ai_evidence_lines,
+    _apply_uds_rules,
+    _merge_logic_ai_items,
+    _merge_section_text,
+    _uds_lines_to_html,
     _uds_logic_html,
 )
-from report_gen.utils import (
-    _normalize_swcom_label,
-    _infer_type_from_decl,
+from report_gen.utils import (  # noqa: E402
     _extract_simple_call_names,
-    _safe_dict,
+    _infer_type_from_decl,
     _infer_type_from_file,
+    _normalize_swcom_label,
+    _safe_dict,
+    function_name_key,
+    normalize_prototype_text,
+)
+from report_gen.validation_labels import (  # noqa: E402
+    CALL_ROW_LABEL_TO_KEY,
+    LABEL_CALLED_FUNCTION,
+    LABEL_CALLING_FUNCTION,
+)
+from workflow.code_parser.c_parser import (  # noqa: E402 (이 파일 import 블록 전체가 상수 뒤에 온다)
+    blank_dead_code,
+    c_identifiers,
 )
 
 _logger = logging.getLogger("report_generator")
+
+# function_body_snippets 항목 1건의 최대 길이. 소비자(workflow.uds_ai 2차 refinement)가
+# 프롬프트에 400자만 싣는다 — 그보다 크게 저장하면 캐시만 커지고 쓰이지 않는다.
+_BODY_SNIPPET_MAX = 400
+
+# object-like 매크로가 **전역 변수의 멤버/원소를 가리키는** 경우만 매칭한다.
+#   `#define PTT_PTT3  _PTT.Bits.PTT3`  ·  `#define RXBUF0  s_RxBuf[0]`
+# 상수 매크로(`#define MAX 255`)나 식(`#define HALF (x/2)`)은 걸리지 않아야 한다 —
+# 걸리면 전역이 아닌 이름이 globals_info_map 에 올라간다.
+_MACRO_MEMBER_PATH_RE = re.compile(
+    r"^([A-Za-z_]\w*)((?:\s*(?:\.|->)\s*[A-Za-z_]\w*|\s*\[[^\]]*\])+)$"
+)
+
 
 def generate_uds_logic_items(
     texts: List[str],
@@ -129,13 +162,14 @@ def generate_uds_logic_items(
             title = block.get("title") or block.get("id") or "Logic Diagram"
             desc = ""
             if mode == "call_tree":
-                called = _collect_section_lines(lines, "Called Function")
-                calling = _collect_section_lines(lines, "Calling Function")
+                # 문서 라벨을 그대로 되비춘다("Called: …" = 정본 관례로 호출자). 라벨 리터럴은 `validation_labels` 단일 출처.
+                called = _collect_section_lines(lines, LABEL_CALLED_FUNCTION)
+                calling = _collect_section_lines(lines, LABEL_CALLING_FUNCTION)
                 parts: List[str] = []
                 if called:
-                    parts.append("Called: " + ", ".join(called[:12]))
+                    parts.append("Called(호출자): " + ", ".join(called[:12]))     # (리뷰 I3) 방향을 한 단어로
                 if calling:
-                    parts.append("Calling: " + ", ".join(calling[:12]))
+                    parts.append("Calling(피호출자): " + ", ".join(calling[:12]))
                 desc = " / ".join(parts) if parts else "N/A"
             elif mode == "state_table":
                 states = _extract_state_tokens(lines)
@@ -147,6 +181,81 @@ def generate_uds_logic_items(
             if len(items) >= limit:
                 return items
     return items
+
+
+_BY_NAME_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def _asil_rank(v: Any) -> int:
+    a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
+    return _BY_NAME_ASIL_RANK.get(a, -1)
+
+
+def _header_origin_label(hdr_doc: Dict[str, str]) -> str:
+    """`comment_origin` 값. 헤더 여럿이 다른 말을 해 등급만 취한 경우엔 특정 헤더를 지목하지 않는다(리뷰 W4)."""
+    file_name = Path(str(hdr_doc.get("file") or "")).name
+    return "header:" + file_name if file_name else "header:ambiguous"
+
+
+def _put_by_name(
+    by_name: Dict[str, Dict[str, Any]],
+    name: str,
+    detail: Dict[str, Any],
+    collisions: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> None:
+    """function_details_by_name 등록 + **동일 이름 다중 정의(파일 간 충돌) 기록**.
+
+    C 프로젝트에는 같은 이름 함수가 여러 파일에 정의되는 경우가 있다(예: Generated_Code/EEPROM.c와
+    Sources/Eeprom/EEPROM.c의 eeprom_setbyte, main 등). by_name은 last-wins라 한쪽 메타만 남아
+      (a) `asil`이 더 낮은 사본으로 덮여 **안전 등급이 손실**되고(ISO 26262 — escalation·MC/DC 게이트),
+      (b) `file`이 한쪽만 가리켜 영향분석의 파일 매칭이 다른 사본을 **누락**(under-report)했다.
+
+    ⚠ 그렇다고 by_name에 **병합 사본(dict 복사)** 을 넣으면 안 된다 — by_name 값은 function_details의
+    **동일 객체**여야 하고(docx_builder가 참조문서 값을 `target[key] = ...`로 in-place 병합하므로,
+    복사본을 넣으면 그 갱신이 문서에 반영되지 않는다), 뒤이어 실행되는 콜그래프 보강 루프가
+    `function_details_by_name[fn] = info`로 다시 덮어써 병합이 무효화되기도 한다.
+    → by_name은 **동일성 유지(last-wins 그대로)**, 충돌 사실은 별도 맵(`collisions`)에 기록한다.
+      소비자(영향분석)는 자신의 deepcopy에 이 정보를 얹어 쓴다.
+    """
+    key = function_name_key(name)
+    if not key:
+        return
+    prev = by_name.get(key)
+    if collisions is not None and prev is not None and prev is not detail:
+        ent = collisions.setdefault(key, {"files": [], "asil": ""})
+        for _d in (prev, detail):
+            _f = str(_d.get("file") or "").strip()
+            if _f and _f not in ent["files"]:
+                ent["files"].append(_f)
+            if _asil_rank(_d.get("asil")) > _asil_rank(ent.get("asil")):
+                ent["asil"] = str(_d.get("asil") or "")
+    if prev is not None and prev is not detail:
+        _pf = os.path.normcase(str(prev.get("file") or "").strip())
+        _df = os.path.normcase(str(detail.get("file") or "").strip())
+        if _pf and _df and _pf != _df:
+            # (R57 N54) 교차 파일 쌍둥이 — 이름 하나에 정의 둘. 문서는 정의별로 고르므로(`_pick_function_candidate`)
+            #   이 맵은 **첫 정의**를 유지한다(예전에 두 번째 정의를 버리던 때와 같은 기본값 — 영향분석 등 이름 하나만
+            #   보는 소비자가 갑자기 다른 파일을 보지 않게).
+            return
+    by_name[key] = detail  # 동일성 보존(문서 생성의 in-place 갱신 경로 유지)
+
+
+def _merge_call_map(call_map: Dict[str, List[str]], name: str, calls: Any) -> None:
+    """`call_map[name]` 에 피호출자를 **합집합·순서 보존**으로 넣는다. (R57 N54)
+
+    이름 키 하나에 정의가 둘(APP/FBL)일 수 있다 — 덮어쓰면 먼저 온 정의의 피호출자가 사라지고, 그 함수들의
+    호출자 행(`callers_map`)에서 이 이름이 빠진다. 문서 표의 피호출자 칸은 정의별 `calls_list` 를 쓰므로 섞이지 않는다.
+    """
+    incoming = [str(c).strip() for c in (calls if isinstance(calls, list) else []) if str(c).strip()]
+    prev = call_map.get(name)
+    if not isinstance(prev, list) or not prev:
+        call_map[name] = incoming
+        return
+    seen = set(prev)
+    for c in incoming:
+        if c not in seen:
+            prev.append(c)
+            seen.add(c)
 
 
 def _group_function_blocks_by_swcom(blocks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -178,10 +287,10 @@ def _format_function_block_lines(block: Dict[str, Any]) -> List[str]:
         lines.append(f"선행조건\t{block.get('precondition')}")
     if block.get("globals"):
         lines.append(f"사용 전역변수\t{block.get('globals')}")
-    if block.get("called"):
-        lines.append(f"Called Function\t{block.get('called')}")
-    if block.get("calling"):
-        lines.append(f"Calling Function\t{block.get('calling')}")
+    # (R56 N52) 행 라벨 ↔ 내부 키는 대응표대로(정본 관례: Called 행 = 호출자 = `calling`). 리더 `_extract_function_blocks` 와 왕복.
+    for _label in (LABEL_CALLED_FUNCTION, LABEL_CALLING_FUNCTION):
+        if block.get(CALL_ROW_LABEL_TO_KEY[_label]):
+            lines.append(f"{_label}\t{block.get(CALL_ROW_LABEL_TO_KEY[_label])}")
     inputs = block.get("inputs") or []
     if inputs:
         lines.append("[ Input Parameters ]")
@@ -211,25 +320,120 @@ def parse_uds_preview_html(html: str) -> Dict[str, List[str]]:
     return sections
 
 
+_C_COMMENT_SPAN_PAT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+_COMMENT_NAMES_A_DID_PAT = re.compile(r"\bDID\b", re.I)
+
+
+def _did_pattern_hits(fn_body: str, patterns: List["re.Pattern[str]"]) -> Tuple[List[str], int]:
+    """함수 본문의 DID 패턴 매치 `(값 목록, 버린 주석 매치 수)` — 코드 속 매치는 전부, **주석 속 매치는 그 주석이
+    `DID` 라고 말할 때만**.
+
+    (R60, 리뷰 W1) DID 패턴엔 `0x` + 16진 4자리가 있어 주석 속 아무 상수나 걸렸다. KJPDS02 실측 124건 중 13건이
+    주석에만 있었고 그중 9건이 DID 가 아니었다(`/* TIM0TC3: BIT=0x0186 */` · `// 0x7FFF` · 주석 처리된 코드의 마스크
+    `0xFF00` · 프레임 설명 속 `DID_H`). 그렇다고 주석을 통째로 지우면 **주석에만 적힌 진짜 DID 4건을 잃는다**
+    (`{   /* DID: 0x1002 */` · `/* Build response header for unified DID 0xF2F0 */`) — 코드는 그 값을 매크로·바이트
+    비교로만 쓴다. 전처리(`gcc -E`)가 주석을 지우던 시절엔 생성 코드의 오탐 2건이 우연히 가려져 있었다.
+    ⚠ 코드 속 16진 4자리(마스크 등)의 오탐은 여기서 다루지 않는다(N66).
+    """
+    spans = [(m.start(), m.end()) for m in _C_COMMENT_SPAN_PAT.finditer(fn_body)]
+    hits: List[Tuple[int, str]] = []
+    dropped = 0
+    for pat in patterns:
+        for dm in pat.finditer(fn_body):
+            val = dm.group(0).strip()
+            if not val:
+                continue
+            pos = dm.start()
+            span = next(((a, b) for a, b in spans if a <= pos < b), None)
+            if span is not None and not _COMMENT_NAMES_A_DID_PAT.search(fn_body, span[0], span[1]):
+                dropped += 1
+                continue
+            hits.append((pos, val))
+    return [v for _, v in hits], dropped
+
+
 def generate_uds_source_sections(
     source_root: str,
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
-) -> Dict[str, str]:
+    *,
+    preprocess: bool = False,
+    max_files: Optional[int] = None,
+    max_items: Optional[int] = None,
+) -> Dict[str, Any]:   # 값은 str·list·dict 혼합(function_details 등) — 과거 Dict[str, str]는 오기
+    """`max_files`/`max_items` 는 **호출자 상한**. `None` 이면 `config` 기본값을 쓴다.
+
+    ⚠ `preprocess` 기본값은 **False** 다(R60 N64 — 2026-09-17 까지 True). "정밀" 이라던 전처리 경로는 실측하니
+      함수의 6%(KJPDS02)·0%(PDS64)에만 닿았고 닿은 곳에선 소스 주석 설명 52건을 추론 문장으로 바꾸고 전역 718개를
+      엉뚱한 파일에 귀속시켰다 — 입력·출력·호출 어느 칸에도 이득이 없었다(상세 `parse_c_project` docstring).
+      이 기본값과 `backend.helpers.uds._get_source_sections_cached` 의 기본값은 같아야 한다(캐시 키에 들어간다) —
+      `tests/unit/test_source_sections_preprocess_default_r60.py` 가 묶는다. `preprocess` 이후 인자는 **키워드 전용**
+      이다(리뷰 I2) — 위치 인자로 True 가 들어오면 그 가드가 못 본다.
+    ⚠ 이 전환으로 KJPDS02 의 전역 표 모수가 25,005 → 1,327 로 **19배 준다. 회귀가 아니다** — 같은 헤더의 extern 이
+      그 헤더를 include 한 `.c` 마다 복제돼 있던 것이 사라진 것이다(리뷰 I5).
+
+    ⚠ 숫자를 여기 복제하지 않는다 — 기본값의 단일 출처는 `config.UDS_MAX_SOURCE_FILES`/
+      `UDS_MAX_FUNCTION_ITEMS`(환경변수로 덮임)이고, 준비 게이트의 공시도 거기서 읽는다
+      (`docgen_requirements._uds_cap`). `generators/sts.py` 의 `max_tc_per_req` 와 같은 규약.
+    """
     # 콤마/세미콜론 구분 복수 소스 루트 지원
-    _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
-    _roots = [Path(p).resolve() for p in _raw_roots if Path(p).resolve().exists()]
+    _raw_roots = split_source_roots(source_root)
+
+    # cloudium 모드면 worker IPC resolver로 소스 접근(read-only). local/standalone이면 None →
+    # 기존 os.walk/Path 경로 그대로 사용(회귀 0). backend 미가용이면 조용히 None.
+    _src_resolver = None
+    try:
+        from backend.services.file_resolver import get_resolver as _get_resolver
+        _r0 = _get_resolver()
+        if getattr(_r0, "mode", "local") != "local":
+            _src_resolver = _r0
+    except Exception:
+        _src_resolver = None
+
+    def _src_walk(walk_root):
+        if _src_resolver is not None:
+            for _sp in _src_resolver.list_dir(str(walk_root), pattern="*", recursive=True):
+                yield Path(_sp)
+        else:
+            for _dp, _, _fns in os.walk(walk_root):
+                for _n in _fns:
+                    yield Path(_dp) / _n
+
+    def _src_read(p) -> str:
+        if _src_resolver is not None:
+            try:
+                return _src_resolver.read_bytes(str(p)).decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        try:
+            return Path(p).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _src_relbase(p):
+        # 모듈명 계산용. cloudium은 로컬 resolve 금지(원격경로 그대로), local은 기존 resolve.
+        return Path(p) if _src_resolver is not None else Path(p).resolve()
+
+    if _src_resolver is not None:
+        _roots = [Path(p) for p in _raw_roots if _src_resolver.is_dir(p)]
+    else:
+        _roots = [Path(p).resolve() for p in _raw_roots if Path(p).resolve().exists()]
     if not _roots:
         return {}
     root = _roots[0]  # 기본 루트 (상대경로 계산 기준)
     allowed = {".c", ".h", ".cpp", ".hpp"}
     try:
         import config as _cfg
-        max_files = getattr(_cfg, "UDS_MAX_SOURCE_FILES", 1200)
-        max_items = getattr(_cfg, "UDS_MAX_FUNCTION_ITEMS", 120)
+        _cfg_max_files = getattr(_cfg, "UDS_MAX_SOURCE_FILES", 1200)
+        _cfg_max_items = getattr(_cfg, "UDS_MAX_FUNCTION_ITEMS", 120)
     except Exception:
-        max_files = 1200
-        max_items = 120
+        _cfg_max_files = 1200
+        _cfg_max_items = 120
+    # 호출자가 준 값이 있으면 그것, 없으면 config. `0`·음수는 "전부 자르라" 가 아니라
+    # 미설정으로 본다 — 저장소가 이미 그 규약이고(`sharedInputs.js::saveDocGenCap`),
+    # 여기서 다르게 읽으면 같은 값에 화면과 생성기가 반대말을 한다.
+    max_files = int(max_files) if isinstance(max_files, int) and max_files > 0 else _cfg_max_files
+    max_items = int(max_items) if isinstance(max_items, int) and max_items > 0 else _cfg_max_items
     files: List[Path] = []
     ext_counts: Dict[str, int] = {}
     top_dirs: Dict[str, int] = {}
@@ -240,6 +444,21 @@ def generate_uds_source_sections(
     reqs: List[str] = []
     common_macros: List[str] = []
     type_defs: List[str] = []
+    # 구조체/공용체 멤버의 배열 차원(접기 전 원문). 정본 SUTS 는 멤버 배열도
+    # 원소 단위로 적는다 — `source_parser.extract_struct_member_arrays` 주석 참조.
+    # 리셋/초기화 이름 함수 안의 전역 대입 — `Reset Value` 열의 유일한 소스 근거다.
+    # ⚠ 실측: 이 대입을 안 보고 "정적 저장기간 → 0" 만 쓰면 정밀도가 96.5% → 93.7%
+    #   로 내려가고, 실패가 하필 `u8g_ApiIn_LinRx_*` 외부 인터페이스 신호 34칸에 몰린다.
+    _reset_assigns: Dict[str, List[Tuple[str, str]]] = {}
+    # 배치 주소(`@0x…`)로 선언된 변수 — 리셋 값이 MCU 데이터시트에 있어 소스엔 없다.
+    _placed_globals: Set[str] = set()
+    struct_member_arrays_raw: Dict[str, Dict[str, str]] = {}
+    # 타입 -> {멤버경로: {type, array, bits, desc}}. 배열 차원만 담는 위 맵과
+    # **키는 같고 값이 다르다** — 소비처 계약(SUTS/SITS)이 달라 따로 낸다.
+    struct_member_types: Dict[str, Dict[str, Dict[str, str]]] = {}
+    # ⚠ 함수 스코프에 둔다 — 접기는 `if parse_c_project is not None:` 안에서만
+    #   일어나는데 payload 는 밖에서 쓴다. 안에 선언하면 파서 부재 시 NameError.
+    struct_member_arrays: Dict[str, Dict[str, str]] = {}
     param_defs: List[str] = []
     version_defs: List[str] = []
     global_data: List[str] = []
@@ -248,14 +467,30 @@ def generate_uds_source_sections(
     macro_defs: List[List[str]] = []
     calibration_params: List[List[str]] = []
     function_table_rows: List[List[str]] = []
+    # SwCom(mod_idx) 단위 함수 일련번호. `fn_id = SwUFn_{mod_idx}{counter}` 의 유일성을
+    # 이 카운터가 책임진다 — 파일 stem 별로 세면 같은 SwCom 안에서 ID 가 충돌한다.
+    _fn_counter_by_mod: Dict[int, int] = {}
     function_details: Dict[str, Dict[str, Any]] = {}
     function_details_by_name: Dict[str, Dict[str, Any]] = {}
+    # {fid: body 앞부분}. AI 2차 description refinement(uds_ai)가 유일한 소비자다.
+    # **detail dict 안이 아니라 별도 맵**인 이유: detail은 by_name(별칭 포함 1,160건)이 같은
+    # 객체를 참조해 캐시 JSON에 두 번 직렬화되고, impact 문서초안 등 다른 소비자에게도 실려
+    # 나간다. 여기 두면 fid 기준 1회(실측 900건 ≈ +360KB)로 끝나고 detail 계약도 안 바뀐다.
+    function_body_snippets: Dict[str, str] = {}
+    # 동일 이름 함수의 다중 정의(파일 간 충돌) 기록 — {name_lower: {files:[...], asil: max}}.
+    # by_name은 last-wins(동일성 보존)이라 이 정보가 없으면 영향분석이 다른 사본을 누락한다.
+    function_collisions: Dict[str, Dict[str, Any]] = {}
     call_map: Dict[str, List[str]] = {}
     fallback_functions: List[Dict[str, Any]] = []
     module_map: Dict[str, str] = {}
     globals_info_map: Dict[str, Dict[str, str]] = {}
     manual_globals_info_map: Dict[str, Dict[str, str]] = {}
     source_text_cache: Dict[str, str] = {}
+    # (R52 N41) 타입 폴백(`_infer_type_from_file`)의 실행 단위 원문 캐시 — 두 호출부가 **같은** 캐시를 넘긴다(한쪽만 넘기면
+    #   그쪽은 옛 동작대로 전역마다 파일을 다시 읽는다). 이 함수가 끝나면 버려진다.
+    #   ⚠ 위 `source_text_cache`(`_src_read` — 상한 없음, local 모드는 `errors="replace"`)와는 읽기 경로·상한·디코딩이 달라
+    #   합치지 않았다(리뷰 I2). 세 번째 원문 캐시를 만들지 말 것 — 합치려면 상한 통일이 먼저다.
+    _type_scan_cache: Dict[str, str] = {}
     _header_proto_map: Dict[str, str] = {}  # name → header prototype (우선)
     if component_map is None:
         component_map = _load_component_map()
@@ -282,7 +517,8 @@ def generate_uds_source_sections(
     }
 
     def _normalize_prototype(sig: str) -> str:
-        """typedef 정규화 적용."""
+        """typedef 정규화 적용. (R56 N52) 먼저 한 줄로 — 원문 줄바꿈·주석 제거(정본 Prototype 은 전부 한 줄, 실측 50건)."""
+        sig = normalize_prototype_text(sig)
         for pattern, replacement in _typedef_map.items():
             sig = re.sub(pattern, replacement, sig)
         return sig
@@ -331,39 +567,27 @@ def generate_uds_source_sections(
 
     truncated = False
     for _walk_root in _roots:
-        for dirpath, _, filenames in os.walk(_walk_root):
-            for name in filenames:
-                p = Path(dirpath) / name
-                ext = p.suffix.lower()
-                if ext not in allowed:
+        for p in _src_walk(_walk_root):
+            ext = p.suffix.lower()
+            if ext not in allowed:
+                continue
+            if component_map:
+                # 판정은 `requirements.component_verify_of` **단일 출처**다.
+                # ⚠ 이 필터는 아래 `parse_c_project`(AST) 경로엔 안 걸린다 —
+                #   그쪽은 루트를 따로 훑는다. 그래서 verify=X 파일의 함수가
+                #   산출물에 남고, 그 사실은 `generators/suts` 가 보고한다.
+                if component_verify_of(p, component_map) == "X":
                     continue
-                if component_map:
-                    # 경로 기반 매칭 우선 (동일 파일명 충돌 해결)
-                    mapped = None
-                    fp_norm = str(p).replace("\\", "/")
-                    for cm_key in component_map:
-                        if "/" in cm_key and fp_norm.endswith(cm_key):
-                            mapped = component_map[cm_key]
-                            break
-                    # 파일명 fallback
-                    if not mapped or not isinstance(mapped, dict):
-                        mapped = component_map.get(p.name) or component_map.get(p.stem)
-                    if isinstance(mapped, dict):
-                        verify = str(mapped.get("verify") or "").strip().upper()
-                        if verify == "X":
-                            continue
-                files.append(p)
-                ext_counts[ext] = ext_counts.get(ext, 0) + 1
-                try:
-                    rel = p.relative_to(_walk_root)
-                except ValueError:
-                    rel = p
-                top = rel.parts[0] if rel.parts else "."
-                top_dirs[top] = top_dirs.get(top, 0) + 1
-                if len(files) >= max_files:
-                    truncated = True
-                    break
-            if truncated:
+            files.append(p)
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+            try:
+                rel = p.relative_to(_walk_root)
+            except ValueError:
+                rel = p
+            top = rel.parts[0] if rel.parts else "."
+            top_dirs[top] = top_dirs.get(top, 0) + 1
+            if len(files) >= max_files:
+                truncated = True
                 break
         if truncated:
             break
@@ -371,16 +595,54 @@ def generate_uds_source_sections(
     doc_texts: List[str] = []
     _doxygen_tags_by_file: Dict[str, Dict[str, Dict[str, str]]] = {}
     _file_header_asil: Dict[str, str] = {}
+    # (R62 N69) 헤더 프로토타입의 문서 주석 — 이름 → 후보 목록(헤더가 APP/FBL 트리에 따로 있다).
+    _header_docs: Dict[str, List[Dict[str, str]]] = {}
+    _root_strs: List[str] = [str(_r) for _r in _roots]
+    # 죽은 `#if 0` 분기라 모으지 않은 정의 — {파일: [이름]}. 텍스트 루프가 읽는 `.c` 기준(면제 계층 파일은 애초에 안 읽는다).
+    _dead_code_excluded: Dict[str, List[str]] = {}
+    # (R63 N70) 같은 이유로 모으지 않은 전역·매크로·프로토타입 — {종류: {파일: [이름]}}. 이름은 그 파일 기준(다른 파일에 산 정의가 있을 수 있다).
+    _dead_decls_excluded: Dict[str, Dict[str, List[str]]] = {}
+    # 원문 읽기 상한에 **닿은 파일**. 캡은 조용히 자르므로 닿았다는 사실을 남기지
+    # 않으면 "이 프로젝트엔 그 선언이 원래 없다" 와 구분되지 않는다
+    # (실측: 200KB 캡이 IO_Map.h 의 매크로 69% 를 지웠는데 로그가 한 줄도 없었다).
+    _read_truncated: List[Tuple[str, int]] = []
     for p in files:
-        raw = _read_text_limited(p)
-        text = _strip_c_comments(raw)
-        reqs.extend(_extract_requirements_from_comments(raw))
-        dox_tags = _extract_doxygen_asil_tags(raw)
+        raw, _raw_len, _cut = _read_source_text(p)
+        if _cut:
+            _read_truncated.append((str(p), _raw_len))
+        # (R63 N70) 죽은 `#if 0` 분기는 **이 루프의 모든 수집기**에서 가린다 — R62 는 함수 정의만 가려, 죽은 구간에만 있는
+        #   전역(KJPDS02 6개 · PDS64 4개 — `CRC32.c:crcTable` 등, 정본 UDS 엔 0개)이 전역 표에 실재 변수로 남아 있었다.
+        #   `raw` 는 원문 그대로 둔다(`source_text_cache` — 본문 조회용). 판정은 `blank_dead_code` 한 구현.
+        live_raw = blank_dead_code(raw)
+        _has_dead = live_raw is not raw
+        text = _strip_c_comments(live_raw)
+        if _has_dead:
+            # (리뷰 W3) 전역·매크로·프로토타입도 버린 것을 센다 — 함수만 공시하면 "전역 표 행이 왜 줄었나" 에 답할 수 없다.
+            _dead_text = _strip_c_comments(raw)
+            _dg = sorted({str(g.get("name") or "") for g in _extract_c_global_candidates(_dead_text)} - {str(g.get("name") or "") for g in _extract_c_global_candidates(text)})
+            _dm = sorted({m[0] for m in _extract_c_macro_defs(_dead_text)} - {m[0] for m in _extract_c_macro_defs(text)})
+            _dp = sorted({d[0] for d in _extract_c_prototypes(_dead_text)} - {d[0] for d in _extract_c_prototypes(text)})
+            for _kind, _names in (("globals", _dg), ("macros", _dm), ("prototypes", _dp)):
+                if _names:
+                    _dead_decls_excluded.setdefault(_kind, {})[str(p)] = [n for n in _names if n]
+        # ⚠ 주석이 지워진 `text` 로 본다 — 주석 안 선언을 세면 없는 레지스터가 생긴다.
+        _placed_globals.update(placed_global_names(text))
+        reqs.extend(_extract_requirements_from_comments(live_raw))
+        dox_tags = _extract_doxygen_asil_tags(live_raw)
         if dox_tags:
             _doxygen_tags_by_file[str(p)] = dox_tags
-        hdr_asil = _extract_file_header_asil(raw)
+        hdr_asil = _extract_file_header_asil(raw)   # 선두 고정 매치라 `#if 0` 이 앞서면 어차피 실패 — raw/live_raw 동치(리뷰 I3)
         if hdr_asil:
             _file_header_asil[str(p)] = hdr_asil
+        for _sty, _smm in extract_struct_member_arrays(text).items():
+            struct_member_arrays_raw.setdefault(_sty, {}).update(_smm)
+        # ⚠ **주석이 남은 원문**(`live_raw`)을 넘긴다. `text` 는 주석이 지워진 판이라 멤버의 자기 주석이
+        #    통째로 사라진다(그 함수가 내부에서 길이 보존 blank 를 다시 한다).
+        for _sty, _smt in extract_struct_member_types(live_raw).items():
+            _dst = struct_member_types.setdefault(_sty, {})
+            for _mname, _mrec in _smt.items():
+                # first-wins. dict 덮어쓰기로 행을 침묵 소실한 전례(SUTS R25 66행).
+                _dst.setdefault(_mname, _mrec)
         for g in _extract_c_global_candidates(text):
             gname = str(g.get("name") or "").strip()
             if not gname:
@@ -388,6 +650,9 @@ def generate_uds_source_sections(
             prev = manual_globals_info_map.get(gname, {})
             manual_globals_info_map[gname] = {
                 "type": str(g.get("type") or prev.get("type") or "").strip(),
+                # 배열 차원(`[60]`). 정본은 배열을 원소 단위로 펼쳐 적는다 —
+                # `source_parser._decl_array_dim` 주석 참조.
+                "array": str(g.get("array") or prev.get("array") or "").strip(),
                 "file": str(p),
                 "range": str(prev.get("range") or "").strip(),
                 "init": str(g.get("init") or prev.get("init") or "").strip(),
@@ -396,6 +661,8 @@ def generate_uds_source_sections(
                 "desc": str(prev.get("desc") or "").strip(),
             }
         if p.suffix.lower() in {".h", ".hpp"}:
+            for _hname, _hdoc in extract_header_function_docs(live_raw).items():
+                _header_docs.setdefault(_hname, []).append({"file": str(p), **_hdoc})
             for name, params, ret_type, is_extern in _extract_c_prototypes(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 # Header prototype을 맵에 저장 (source definition보다 우선)
@@ -413,7 +680,19 @@ def generate_uds_source_sections(
             for m_name, m_val in _extract_c_macro_defs(text):
                 macro_defs.append([m_name, "", m_val, ""])
         else:
+            # (R62 N69) 죽은 `#if 0` 분기의 정의는 모으지 않는다 — tree-sitter 가 일부러 뺀 함수를 아래 "AST 누락분 병합" 이
+            #   이름으로 되살려 KJPDS02 24개 · PDS64 13개가 실재 함수처럼 올라 있었다. (R63) `text` 가 이미 가린 판이다.
             body_map = _extract_c_function_bodies(text)
+            # 리셋/초기화 함수의 전역 대입을 모은다(같은 `body_map` 재사용 — 추가 파싱 0).
+            # ⚠ 헤더(`.h`)는 여기 안 온다. 헤더에 `static` 초기화 함수가 있으면 못 본다.
+            for _rvar, _rrows in collect_reset_assignments(body_map).items():
+                _reset_assigns.setdefault(_rvar, []).extend(_rrows)
+            if _has_dead:
+                # 버린 것을 남긴다(R58 의 call_filter 와 같은 규약) — 안 남기면 "함수 수가 왜 줄었나" 에 답할 수 없다.
+                _live_names = {d[0] for d in _extract_c_definitions(text)}
+                _dead_here = sorted({d[0] for d in _extract_c_definitions(_dead_text)} - _live_names)
+                if _dead_here:
+                    _dead_code_excluded[str(p)] = _dead_here
             for name, params, ret_type, is_static in _extract_c_definitions(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 if name.startswith("g_"):
@@ -441,6 +720,9 @@ def generate_uds_source_sections(
                         "used_globals": [],
                         "comment_desc": c_desc,
                         "comment_asil": c_asil,
+                        # 함수 **자기** 주석의 등급만. `c_asil` 은 파일 머리말 ASIL 로 채워질 수 있고, 그걸 병합 분기가
+                        # `asil_source: "comment"` 로 실으면 출처가 세탁된다(리뷰 W1 — AST 경로도 머리말 ASIL 은 안 쓴다).
+                        "comment_asil_own": str(dox_info.get("asil", "") or ""),
                         "comment_related": c_related,
                         "comment_precondition": "",
                         "body": body_text,
@@ -451,7 +733,7 @@ def generate_uds_source_sections(
             for m_name, m_val in _extract_c_macro_defs(text):
                 macro_defs.append([m_name, "", m_val, ""])
 
-        lines = raw.splitlines()
+        lines = live_raw.splitlines()   # (R63) 주석 표도 죽은 분기는 읽지 않는다 — 위 요구 ID 추출과 한 규칙(리뷰 I4)
         stop_headers = [
             "Type Definition",
             "Parameter Definition",
@@ -478,16 +760,12 @@ def generate_uds_source_sections(
     # additional documentation files (txt/md) for structured templates
     doc_files = 0
     for _walk_root2 in _roots:
-        for dirpath, _, filenames in os.walk(_walk_root2):
-            for name in filenames:
-                ext = Path(name).suffix.lower()
-                if ext not in {".txt", ".md"}:
-                    continue
-                p = Path(dirpath) / name
-                doc_texts.append(_read_text_limited(p))
-                doc_files += 1
-                if doc_files >= 20:
-                    break
+        for p in _src_walk(_walk_root2):
+            ext = p.suffix.lower()
+            if ext not in {".txt", ".md"}:
+                continue
+            doc_texts.append(_read_text_limited(p))
+            doc_files += 1
             if doc_files >= 20:
                 break
         if doc_files >= 20:
@@ -531,6 +809,12 @@ def generate_uds_source_sections(
         if str(fn.get("name") or "").strip()
     }
 
+    # 전역 인식 손실 계수. **AST 경로 밖에서도 반드시 바인딩돼 있어야 한다** — 아래
+    # 페이로드가 무조건 읽으므로, regex 폴백 경로에선 `NameError` 로 생성이 통째로 죽는다.
+    # ⚠ 기본값을 0 으로 두면 안 된다. "손실 0" 과 "재지 못함" 은 다른 말이고, 0 으로 두면
+    #   regex 폴백일 때 화면이 "전역을 하나도 안 잃었다" 고 말한다.
+    _globals_loss: Dict[str, Any] = {"measured": False, "reason": "AST 파서 미가용(regex 폴백)"}
+
     # AST 기반 보강 (가능 시)
     try:
         from workflow.code_parser import parse_c_project  # type: ignore
@@ -542,23 +826,68 @@ def generate_uds_source_sections(
             ast_result = {"functions": [], "globals": [], "globals_detailed": []}
             for _parse_root in _roots:
                 try:
-                    _partial = parse_c_project(str(_parse_root), max_files=max_files, preprocess=True)
+                    _partial = parse_c_project(str(_parse_root), max_files=max_files, preprocess=preprocess)
                     if isinstance(_partial, dict):
                         ast_result["functions"].extend(_partial.get("functions") or [])
                         ast_result["globals"].extend(_partial.get("globals") or [])
                         ast_result["globals_detailed"].extend(_partial.get("globals_detailed") or [])
                 except Exception:
                     pass
+            # (R58 N59, 리뷰 W1) 괄호 대상 `(Foo)(v)` 승격은 루트 단위 known 으로 먼저 됐다 — 루트를 합친 함수 집합으로
+            # 다시 승격해야 교차 루트(APP↔FBL)의 진짜 호출이 남는다(멱등). 계수는 합친 기준으로 다시 센다.
+            try:
+                from workflow.code_parser.c_parser import promote_paren_call_targets as _promote_paren
+                ast_result["call_filter"] = _promote_paren(ast_result["functions"])
+            except Exception:
+                pass
         except Exception:
             ast_result = {"functions": [], "globals": []}
         # AST 중복 함수 제거 (복수 루트에서 동일 함수명 중복 가능)
-        _seen_ast_names: Set[str] = set()
+        # ⚠ 안전: first-wins로 detail은 유지하되 ASIL은 중복 변형 중 '최대'로 보수적 상향한다.
+        # preprocess=False에선 #ifdef/#if MACRO로 가드된 동일 함수명 변형이 둘 다 파싱되는데,
+        # 소스 우선(source-first) 변형이 비활성(낮은 ASIL)일 수 있어 first-wins가 ASIL을 하향할 위험
+        # (ASIL D 변경을 A로 오판→에스컬레이션/MC-DC 게이트 미발동). ASIL만 max로 올려 하향을 차단.
+        _ASIL_R = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+        def _asil_rank_of(_v: Any) -> int:
+            _s = re.sub(r"^ASIL[\s_-]*", "", str(_v or "").strip().upper()).strip()
+            return _ASIL_R.get(_s, -1)
+
+        # (R57 N54) 같은 이름의 정의가 **다른 파일**에 있으면 둘 다 남긴다 — 예전엔 두 번째 정의를 파일째 버려
+        #   (first-wins) 정본이 APP 절과 Bootloader 절에 따로 실은 9개 함수(main·WriteBlock·EEPROM_SetByte …)의
+        #   Bootloader 표가 **APP 내용의 복사본**이었다(run 2088: 정본 main 표 둘은 피호출자가 다른데 생성본은 둘 다
+        #   `s_System_InitSequence`). 같은 파일 안의 같은 이름(#ifdef 변형)은 종전대로 첫 정의에 ASIL 만 보수적 상향.
+        #   교차 파일 충돌 기록(`function_collisions`)은 그대로 — 영향분석이 두 사본의 file/최대 ASIL 을 거기서 읽는다.
+        _seen_ast_idx: Dict[Tuple[str, str], int] = {}
+        _first_idx_by_name: Dict[str, int] = {}
         _deduped: List[Dict[str, Any]] = []
+
+        def _note_collision(_a: Dict[str, Any], _b: Dict[str, Any], _fn_name: str) -> None:
+            _ck = _fn_name.strip().lower()
+            _ce = function_collisions.setdefault(_ck, {"files": [], "asil": ""})
+            for _d in (_a, _b):
+                _df = str(_d.get("file") or "").strip()
+                if _df and _df not in _ce["files"]:
+                    _ce["files"].append(_df)
+                if _asil_rank_of(_d.get("comment_asil")) > _asil_rank_of(_ce.get("asil")):
+                    _ce["asil"] = str(_d.get("comment_asil") or "")
+
         for _fn in (ast_result.get("functions") or []):
             _fn_name = str(_fn.get("name") or "").strip() if isinstance(_fn, dict) else ""
-            if _fn_name and _fn_name not in _seen_ast_names:
-                _seen_ast_names.add(_fn_name)
+            if not _fn_name:
+                continue
+            _fkey = (_fn_name, os.path.normcase(str(_fn.get("file") or "").strip()))
+            if _fkey not in _seen_ast_idx:
+                # 교차 파일 쌍둥이(이름은 같고 파일이 다름)는 자기 정의로 남긴다 — 충돌 기록은 두 정의가 다 지나가는
+                #   `_put_by_name` 이 한다(여기서도 적으면 같은 사실을 두 곳이 적는다).
+                _seen_ast_idx[_fkey] = len(_deduped)
+                _first_idx_by_name.setdefault(_fn_name, len(_deduped))
                 _deduped.append(_fn)
+            else:
+                _prev = _deduped[_seen_ast_idx[_fkey]]
+                if _asil_rank_of(_fn.get("comment_asil")) > _asil_rank_of(_prev.get("comment_asil")):
+                    _prev["comment_asil"] = _fn.get("comment_asil")  # 하향 방지(보수적 상향)
+                _note_collision(_prev, _fn, _fn_name)
         ast_result["functions"] = _deduped
         module_ids: Dict[str, int] = {}
         module_order = [
@@ -605,6 +934,19 @@ def generate_uds_source_sections(
             cols = _normalize_table_row(row)
             if len(cols) >= 3:
                 macro_value_map[str(cols[0]).strip()] = str(cols[2]).strip()
+        # 멤버 차원 접기는 **매크로 맵이 완성된 뒤**에 한다 — `[LIN_MAX_DATA_BYTES]`
+        # 처럼 값이 다른 헤더에 있는 경우가 흔해서 파일 단위로는 못 접는다.
+        # ⚠ 접히지 않은 차원은 **버린다**. `[SIGNATURE_SIZE]` 에서 숫자만 긁으면
+        #   없는 크기를 지어내게 된다(`generators/suts._decl_dims_from_array_field`
+        #   와 같은 이유).
+        for _sty, _smm in struct_member_arrays_raw.items():
+            for _mname, _mdims in _smm.items():
+                _dims = _normalize_dims(_mdims, macro_value_map)
+                if _dims and all(str(x).strip().isdigit() for x in _dims):
+                    struct_member_arrays.setdefault(_sty, {})[_mname] = "".join(
+                        f"[{int(x)}]" for x in _dims
+                    )
+
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):
@@ -626,7 +968,7 @@ def generate_uds_source_sections(
                 if gtype.lower() == "void" and re.match(r"^[gs]_", gname):
                     continue
                 if not gtype and gfile:
-                    gtype, init_from_file = _infer_type_from_file(gfile, gname)
+                    gtype, init_from_file = _infer_type_from_file(gfile, gname, cache=_type_scan_cache)
                     if not g.get("init") and init_from_file:
                         g = dict(g)
                         g["init"] = init_from_file
@@ -641,8 +983,21 @@ def generate_uds_source_sections(
                     prev = globals_info_map.get(gname, {}) if isinstance(globals_info_map.get(gname), dict) else {}
                     incoming_desc = str(g.get("desc") or "").strip()
                     static_name_map[gname] = is_static
+                    # ⚠ tree-sitter 산출 타입(`gtype`)엔 **`const` 한정자가 없다**.
+                    #   텍스트 스캔(`prev`)은 갖고 있는데 여기서 통째로 덮여
+                    #   `static const UDSFuncEntry_t s_UdsFuncTbl[…]` 가 그냥
+                    #   `UDSFuncEntry_t` 로 남았다. const 는 "시험 입력으로 설정할 수
+                    #   없다"는 판정의 유일한 근거라 **한정자만** 되살린다.
+                    _gtype = gtype or str(prev.get("type") or "").strip()
+                    if is_const_type(prev.get("type")) and not is_const_type(_gtype):
+                        _gtype = f"const {_gtype}".strip()
                     globals_info_map[gname] = {
-                        "type": gtype or str(prev.get("type") or "").strip(),
+                        "type": _gtype,
+                        # ⚠ tree-sitter 쪽(`globals_detailed`)엔 배열 차원 필드가 없다.
+                        #   텍스트 스캔이 이미 채워둔 값을 **먼저** 쓰고, 없을 때만
+                        #   선언문에서 뽑는다(`decl` 은 문장 전체라 다중 선언자면
+                        #   마지막 것이 나온다 — 그래서 텍스트 스캔이 우선이다).
+                        "array": str(prev.get("array") or "").strip() or _decl_array_dim(gdecl),
                         "file": gfile or str(prev.get("file") or "").strip(),
                         "range": grange or str(prev.get("range") or "").strip(),
                         "init": str(g.get("init") or "").strip() or str(prev.get("init") or "").strip(),
@@ -650,13 +1005,46 @@ def generate_uds_source_sections(
                         "static": "true" if is_static else "false",
                         "desc": incoming_desc or str(prev.get("desc") or "").strip(),
                     }
-        for src_file in [f for f in files if f.suffix.lower() == ".c"][:200]:
+        # ── Reset Value 판정 (판정은 `report_gen.c_reset` **단일 출처**) ──────────
+        # 값과 **출처**를 함께 낸다. 정본은 같은 심볼에 두 값을 적는 곳이 16심볼·100칸
+        # (4.6%) 인데, 그게 "C 정적 저장기간(0)" 과 "리셋 함수가 넣는 값" 이 섞인
+        # 결과다. 표시 없이 값만 적으면 그 모호함을 그대로 물려받는다.
+        _reset_stats: Dict[str, int] = {}
+        for _gname, _ginfo in globals_info_map.items():
+            _cell, _src = resolve_reset(
+                _ginfo, _reset_assigns.get(_gname), macro_value_map,
+                placed=_gname in _placed_globals)
+            _ginfo["reset"] = _cell
+            _ginfo["reset_source"] = _src
+            _reset_stats[_src] = _reset_stats.get(_src, 0) + 1
+        if _dead_code_excluded or _dead_decls_excluded:
+            _logger.info(
+                "죽은 #if 0 구간 제외: 함수 %d · 전역 %d · 매크로 %d · 프로토타입 %d (파일 %d)",
+                sum(len(v) for v in _dead_code_excluded.values()),
+                sum(len(v) for v in _dead_decls_excluded.get("globals", {}).values()),
+                sum(len(v) for v in _dead_decls_excluded.get("macros", {}).values()),
+                sum(len(v) for v in _dead_decls_excluded.get("prototypes", {}).values()),
+                len(set(_dead_code_excluded) | {f for d in _dead_decls_excluded.values() for f in d}),
+            )
+        _logger.info(
+            "reset 판정: %s",
+            " · ".join(f"{k} {v}" for k, v in sorted(
+                _reset_stats.items(), key=lambda kv: -kv[1])) or "(전역 없음)")
+
+        # 스캔 캡에 실제로 닿는지 **센다**. 캡은 조용히 자르므로, 닿았는지를 기록하지 않으면
+        # "이 프로젝트엔 전역이 원래 없다" 와 "캡에서 잘렸다" 를 구분할 수 없다.
+        _c_files = [f for f in files if f.suffix.lower() == ".c"]
+        _h_files = [f for f in files if f.suffix.lower() == ".h"]
+        _scan_caps = {"c_total": len(_c_files), "c_cap": 200,
+                      "h_total": len(_h_files), "h_cap": 300}
+        for src_file in _c_files[:200]:
             try:
-                src_text = src_file.read_text(encoding="utf-8", errors="replace")
+                src_text = _src_read(src_file)
                 source_text_cache[str(src_file)] = src_text
             except Exception:
                 continue
-            for g in _extract_c_global_candidates(src_text):
+            # (R63 N70) 죽은 분기의 `static` 선언이 산 전역을 static 으로 만들지 않게 — 위 텍스트 루프와 같은 판정.
+            for g in _extract_c_global_candidates(blank_dead_code(src_text)):
                 vname = str(g.get("name") or "").strip()
                 if vname and str(g.get("static") or "").strip().lower() == "true":
                     static_name_map[vname] = True
@@ -669,13 +1057,37 @@ def generate_uds_source_sections(
             _global_prefixes = ("g_", "s_", "u8g_", "u16g_", "u32g_", "u8s_", "u16s_", "u32s_")
         _extern_added = 0
         c_source_texts = [text for path, text in source_text_cache.items() if str(path).lower().endswith(".c")]
-        for hdr_file in [f for f in files if f.suffix.lower() == ".h"][:300]:
+        # extern 사용여부 판정을 위해 전체 .c 원문의 식별자 토큰집합을 1회만 만든다.
+        # (기존: extern마다 모든 .c에 re.search full-text 스캔 → O(헤더×extern×전체.c). 대형
+        #  트리에서 파싱 지연의 주요인. 토큰집합 in 검사로 O(extern)로 단축.)
+        # ⚠ 토큰화는 `c_identifiers`(= `\b` 앵커)여야 한다. `[A-Za-z_]\w*` 는 `2U` 의
+        #   `U` 를 식별자로 내놔 **1글자 유령 전역**을 "소스에서 쓰임"으로 통과시킨다.
+        _c_token_set: Set[str] = set()
+        for _src_text in c_source_texts:
+            _c_token_set.update(c_identifiers(_src_text))
+        # ⚠ 매크로 뒤에 숨은 SFR(`#define PTT_PTT3 _PTT.Bits.PTT3`)을 살리려고 이 필터에
+        #    "매크로 경유 사용" 예외를 넣었다가 **뺐다**. 실측(KJPDS02 Sources/SYSTEM +
+        #    Generated_Code): 예외를 꺼도 `_PTT` 는 그대로 해결된다 — `globals_detailed`
+        #    (tree-sitter 전 파일 스캔)가 이미 잡고 있고, 진짜 원인은 선언 이름을
+        #    주소 리터럴로 읽던 `_parse_c_declaration_statement` 쪽이었다.
+        #    근거가 확인되지 않는 완화는 넣지 않는다.
+        # 이 필터들이 실제로 몇 건을 떨어뜨리는지 **센다**. 세지 않으면 "떨어뜨릴 게
+        # 없었다" 와 "떨어뜨렸다" 가 똑같이 조용하다.
+        #
+        # ⚠ 실측(2026-08-12, KJPDS02·HDPDM01): 이 루프가 추가하는 건수는 **0** 이다.
+        #   위 `globals_detailed`(tree-sitter 전 파일 스캔)가 헤더까지 이미 훑기 때문에
+        #   `ename in globals_info_map` 에서 전부 걸러진다(include 가드를 씌워도 같다).
+        #   즉 이 블록은 **tree-sitter 가 그 헤더를 파싱하지 못했을 때만** 동작하는
+        #   폴백이다. 아래 카운터는 그 폴백이 언젠가 실제로 도는지 보기 위한 계측이며,
+        #   지금은 도달하지 않으므로 테스트로 고정할 수 없다(가짜 테스트를 만들지 않는다).
+        _extern_dropped = {"unused_in_source": 0, "prefix_mismatch": 0}
+        for hdr_file in _h_files[:300]:
             try:
-                hdr_text = hdr_file.read_text(encoding="utf-8", errors="replace")
+                hdr_text = _src_read(hdr_file)
                 source_text_cache[str(hdr_file)] = hdr_text
             except Exception:
                 continue
-            for item in _extract_c_global_candidates(hdr_text):
+            for item in _extract_c_global_candidates(blank_dead_code(hdr_text)):
                 if str(item.get("extern") or "").strip().lower() != "true":
                     continue
                 etype = str(item.get("type") or "").strip()
@@ -685,12 +1097,13 @@ def generate_uds_source_sections(
                 if etype.lower() in {"void"}:
                     continue
                 used_in_body = ename in used_identifier_set
-                used_in_source = used_in_body or any(
-                    re.search(rf"\b{re.escape(ename)}\b", src_text) for src_text in c_source_texts
-                )
+                # 토큰집합 멤버십(O(1))으로 전체 .c full-text re.search를 대체.
+                used_in_source = used_in_body or (ename in _c_token_set)
                 if not used_in_source:
+                    _extern_dropped["unused_in_source"] += 1
                     continue
                 if (not any(ename.startswith(p) for p in _global_prefixes)) and not used_in_body:
+                    _extern_dropped["prefix_mismatch"] += 1
                     continue
                 globals_info_map[ename] = {
                     "type": etype,
@@ -704,21 +1117,77 @@ def generate_uds_source_sections(
                 _extern_added += 1
         if _extern_added > 0:
             _logger.info("extern variable scan: added %d variables from headers", _extern_added)
+        _typeless_dropped = 0
         if globals_info_map:
+            _before = len(globals_info_map)
             globals_info_map = {
                 k: v for k, v in globals_info_map.items() if str(v.get("type") or "").strip()
             }
+            _typeless_dropped = _before - len(globals_info_map)
+        # 전역 인식에서 **잃은 것**을 한 줄로 낸다. 셋 다 조용히 자르는 지점이라, 기록이
+        # 없으면 "이 프로젝트엔 원래 없다" 로 오독한다. 캡에 닿으면 WARNING 으로 올린다
+        # (SITS `headroom` 과 같은 규약 — 절단 0 이 아니라 여유를 본다).
+        _globals_loss = {
+            "measured": True,
+            **_scan_caps,
+            "c_scanned": min(_scan_caps["c_total"], _scan_caps["c_cap"]),
+            "h_scanned": min(_scan_caps["h_total"], _scan_caps["h_cap"]),
+            "extern_added": _extern_added,
+            "extern_dropped_unused": _extern_dropped["unused_in_source"],
+            "extern_dropped_prefix": _extern_dropped["prefix_mismatch"],
+            "typeless_dropped": _typeless_dropped,
+            "globals_kept": len(globals_info_map),
+            # 파일 **내부** 절단. 위 c_cap/h_cap 은 "파일 몇 개를 봤나" 이고 이건
+            # "본 파일을 끝까지 읽었나" 다 — 둘은 다른 축이라 따로 센다.
+            "read_truncated_files": len(_read_truncated),
+            "read_truncated_detail": [
+                {"file": f, "bytes": n, "cap": _SRC_READ_MAX_BYTES}
+                for f, n in _read_truncated[:10]
+            ],
+        }
+        _at_cap = (_scan_caps["c_total"] > _scan_caps["c_cap"]
+                   or _scan_caps["h_total"] > _scan_caps["h_cap"])
+        (_logger.warning if (_at_cap or _read_truncated) else _logger.info)(
+            "globals scan: kept=%d | .c %d/%d · .h %d/%d%s | extern +%d "
+            "(미사용 -%d · 접두사 -%d) | 타입없음 -%d | 파일내부절단 %d%s",
+            _globals_loss["globals_kept"],
+            _globals_loss["c_scanned"], _scan_caps["c_total"],
+            _globals_loss["h_scanned"], _scan_caps["h_total"],
+            "  ⚠캡 도달 — 나머지 파일의 전역은 인식되지 않는다" if _at_cap else "",
+            _extern_added, _extern_dropped["unused_in_source"],
+            _extern_dropped["prefix_mismatch"], _typeless_dropped,
+            len(_read_truncated),
+            ("  ⚠" + ", ".join(f"{Path(f).name}({n:,}B>{_SRC_READ_MAX_BYTES:,})"
+                               for f, n in _read_truncated[:3])
+             if _read_truncated else ""),
+        )
         macro_globals_map: Dict[str, List[str]] = {}
+        # 매크로 이름 -> 확장형. 확장형이 곧 **문서에 적힐 이름**이다(`_PTT.Bits.PTT3`).
+        # 이게 없으면 base(`_PTT`)만 남아 정본과 다른 이름이 된다.
+        # ⚠ 아래 `_MACRO_MEMBER_PATH_RE` 필터는 **정확성 가드가 아니라 맵 크기 제한**이다.
+        #    실제로 "확장형이 이 전역의 멤버 경로인가" 판정은 `_collect_var_usage` 가 다시
+        #    한다(`^{g}(\.|->|\[)`). 필터를 빼도 결과는 같고 맵만 커진다(이 프로젝트 7,337개).
+        macro_expansion_map: Dict[str, str] = {}
         macro_call_map: Dict[str, List[str]] = {}
         if globals_info_map:
-            global_names = list(globals_info_map.keys())
             for row in macro_defs:
                 if len(row) >= 3:
                     m_name = str(row[0]).strip()
                     m_val = str(row[2]).strip()
                     if not m_name or not m_val:
                         continue
-                    hits = [g for g in global_names if re.search(rf"\b{re.escape(g)}\b", m_val)]
+                    if _MACRO_MEMBER_PATH_RE.match(m_val):
+                        macro_expansion_map[m_name] = re.sub(r"\s+", "", m_val)
+                    # 전역명은 항상 식별자 토큰 → \bNAME\b ≡ 토큰 멤버십. m_val 1회 토큰화 후 O(1) in
+                    # 검사로 per-global re.search(rf...) 재컴파일(대형 트리에서 파싱 지연 주요인) 제거.
+                    #
+                    # ⚠ **토큰 쪽을 순회한다**(전역 목록이 아니라). 전역은 1,500개인데
+                    #   매크로 확장형의 토큰은 보통 1~3개다. 읽기 캡을 풀면서 매크로가
+                    #   3.2배(≈2,800 → 9,000)로 늘었는데, 전역을 순회하면 1,350만 번
+                    #   비교가 되고 토큰을 순회하면 2만 번이다. 결과 집합은 같다
+                    #   (아래 소비처는 전역별 플래그를 독립적으로 세우므로 **순서 무관**).
+                    #   순서는 캐시 산출물에 실리므로 `sorted` 로 고정한다.
+                    hits = sorted(t for t in set(c_identifiers(m_val)) if t in globals_info_map)
                     if hits:
                         macro_globals_map[m_name] = hits
                     call_hits: List[str] = []
@@ -750,22 +1219,15 @@ def generate_uds_source_sections(
                     used = []
                 accessed_globals = [g for g in used if g in globals_info_map]
                 if not accessed_globals and body:
+                    # body 1회 토큰화 후 멤버십 — per-global re.search(rf...) 재컴파일 제거(위 macro 루프와 동일 관용구).
+                    _body_toks = set(c_identifiers(body))
                     for gname in list(globals_info_map.keys())[:500]:
-                        if re.search(rf"\b{re.escape(gname)}\b", body):
+                        if gname in _body_toks:
                             accessed_globals.append(gname)
                 if accessed_globals:
                     _accessor_globals_map[fname.lower()] = accessed_globals[:10]
             if _accessor_globals_map:
                 _logger.info("Accessor function globals: %d accessor functions detected", len(_accessor_globals_map))
-
-        callee_signature_map: Dict[str, str] = {}
-        for f2 in ast_result.get("functions", []) or []:
-            if not isinstance(f2, dict):
-                continue
-            n2 = str(f2.get("name") or "").strip()
-            s2 = str(f2.get("signature") or "").strip()
-            if n2 and s2 and n2 not in callee_signature_map:
-                callee_signature_map[n2] = s2
 
         def _merge_call_candidates(
             fn_name: str,
@@ -798,8 +1260,10 @@ def generate_uds_source_sections(
             if fptr_calls:
                 source_parts.append("fptr")
             if not merged:
+                # (R63 N70 리뷰 W2) 원문 캐시는 그대로 두고 **판정에 쓰는 소비자**만 가린다 — `#if 0` 안의 옛 구현(`main.c` 141~316행)이
+                #   같은 이름의 첫 매치가 되어 죽은 본문의 호출이 산 함수의 Called 칸이 되던 경로.
                 fb = _extract_fallback_call_names(
-                    source_text_cache.get(file_path, ""),
+                    blank_dead_code(source_text_cache.get(file_path, "")),
                     fn_name,
                     function_name_set,
                     body_text,
@@ -834,9 +1298,26 @@ def generate_uds_source_sections(
             comment_precond = str(fn.get("comment_precondition") or "").strip()
             if not name:
                 continue
+            # (R62 N69) 정의에 없는 필드만 헤더 프로토타입의 문서 주석에서 채운다 — 정의 쪽 주석이 항상 이긴다.
+            #   static 은 제외: 헤더가 선언하는 것은 외부 연결 함수이고, 같은 이름의 파일 내부 함수는 남이다.
+            comment_origin = ""
+            if not is_static and not (comment_desc and comment_asil and comment_related):
+                _hdr_doc = pick_header_doc(_header_docs.get(name) or [], file_path, _root_strs)
+                if _hdr_doc:
+                    _filled = False
+                    if not comment_desc and _hdr_doc.get("desc"):
+                        comment_desc, _filled = str(_hdr_doc["desc"]).strip(), True
+                    if not comment_asil and _hdr_doc.get("asil"):
+                        comment_asil, _filled = str(_hdr_doc["asil"]).strip(), True
+                    if not comment_related and _hdr_doc.get("related"):
+                        comment_related, _filled = str(_hdr_doc["related"]).strip(), True
+                    if not comment_precond and _hdr_doc.get("precondition"):
+                        comment_precond = str(_hdr_doc["precondition"]).strip()
+                    if _filled:
+                        comment_origin = _header_origin_label(_hdr_doc)
             if file_path and file_path not in source_text_cache:
                 try:
-                    source_text_cache[file_path] = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    source_text_cache[file_path] = _src_read(file_path)
                 except Exception:
                     source_text_cache[file_path] = ""
             if not isinstance(calls, list):
@@ -847,7 +1328,7 @@ def generate_uds_source_sections(
             if calls_source:
                 fn["calls_source"] = calls_source
             if isinstance(calls, list):
-                call_map[name] = [str(c).strip() for c in calls if str(c).strip()]
+                _merge_call_map(call_map, name, calls)
             call_suffix = ""
             if isinstance(calls, list) and calls:
                 call_suffix = f" calls: {', '.join([str(c) for c in calls[:6] if c])}"
@@ -860,7 +1341,7 @@ def generate_uds_source_sections(
             module_name = "Module"
             if file_path:
                 try:
-                    fp_resolved = Path(file_path).resolve()
+                    fp_resolved = _src_relbase(file_path)
                     rel = None
                     for _r in _roots:
                         try:
@@ -900,8 +1381,18 @@ def generate_uds_source_sections(
                         module_ids[module_name] = next_module_idx
                         next_module_idx += 1
                     mod_idx = module_ids.get(module_name, 0)
-            module_map[name] = module_name
-            counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
+            # (R57 리뷰 W4) 이름 키 — 같은 이름의 정의가 둘이면 첫 정의의 모듈을 유지한다(`_put_by_name` 과 같은 first-wins).
+            module_map.setdefault(name, module_name)
+            # ⚠ counter 는 `fn_id` 의 **유일성을 책임진다**. 예전엔 `module_name`(파일 stem)
+            #   별로 셌는데 `fn_id` 는 `mod_idx`(SwCom 번호) + counter 로 만든다. 같은
+            #   SwCom 에 속한 파일이 여럿이면 **서로 다른 함수가 같은 fn_id 를 받고**
+            #   `function_details[fn_id] = detail` 이 조용히 덮어썼다.
+            #   실측(PDS128_FBL, 2026-08-12): c_parser 186함수 → 165개만 남고 `main.c` 는
+            #   24개 중 **5개만** 살아남았다(linuds 86 · lin 24 · main 5 가 전부
+            #   `SwUFn_3501` 부터 시작). 정본 대비 251개 누락의 주 원인이다.
+            #   SwCom 단위로 세는 것이 `SwUFn_{SwCom}{순번}` 체계의 원래 의도다.
+            counter = _fn_counter_by_mod.get(mod_idx, 0) + 1
+            _fn_counter_by_mod[mod_idx] = counter
             fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
             lname = name.lower()
             if lname.startswith("s_"):
@@ -935,7 +1426,9 @@ def generate_uds_source_sections(
                         param_names.append(pname)
                 param_usage = _collect_var_usage(body_text, param_names)
                 global_names = list(globals_info_map.keys())
-                global_usage = _collect_var_usage(body_text, global_names, macro_globals_map)
+                global_usage = _collect_var_usage(
+                    body_text, global_names, macro_globals_map, macro_expansion_map
+                )
                 for p in params:
                     ptype, pname, array_part = _split_param(p)
                     if not pname:
@@ -952,12 +1445,8 @@ def generate_uds_source_sections(
                     for member_name in sorted(list(u.get("members") or [])):
                         if member_name not in names:
                             names.append(member_name)
-                    index_vals: List[str] = []
-                    for idx_expr in u.get("indexes") or []:
-                        norm, _ = _normalize_bracket_expr(str(idx_expr), macro_value_map)
-                        if norm:
-                            index_vals.append(norm)
-                    index_vals = list(dict.fromkeys(index_vals))
+                    # (R47-k N27-e) 첨자는 set 이라 순회 순서가 프로세스마다 다르다 — 정렬은 헬퍼가 한다.
+                    index_vals = _observed_index_values(u.get("indexes"), macro_value_map)
                     pointer_range = "*" in ptype or "*" in p
                     for disp_name in names:
                         display = _format_param_entry(
@@ -981,12 +1470,12 @@ def generate_uds_source_sections(
                     for member_name in sorted(list(u.get("members") or [])):
                         if member_name not in names:
                             names.append(member_name)
-                    index_vals: List[str] = []
-                    for idx_expr in u.get("indexes") or []:
-                        norm, _ = _normalize_bracket_expr(str(idx_expr), macro_value_map)
-                        if norm:
-                            index_vals.append(norm)
-                    index_vals = list(dict.fromkeys(index_vals))
+                    index_vals = _observed_index_values(u.get("indexes"), macro_value_map)   # (R47-k) 위 파라미터 경로와 같은 헬퍼
+                    # 선언 배열 차원. 정본은 배열을 원소 단위로 펼쳐 적으므로
+                    # (입력 엔트리의 50.3%) 소비처가 개수를 알아야 한다.
+                    # ⚠ **base 이름에만** 붙인다 — 멤버 경로(`s.f`)나 확장형
+                    #   (`_PTT.Bits.PTT3`)은 배열이 아니라 그 배열의 한 칸/필드다.
+                    _g_array = str((globals_info_map.get(gname) or {}).get("array") or "").strip()
                     for disp_name in names:
                         display = _format_param_entry(
                             disp_name,
@@ -996,6 +1485,7 @@ def generate_uds_source_sections(
                             macro_value_map,
                             False,
                             bool(u.get("divisor")),
+                            size_hint=_g_array if disp_name == gname else "",
                         )
                         entry = f"[{direction}] {display}"
                         if _is_static_var(gname, static_name_map):
@@ -1021,7 +1511,7 @@ def generate_uds_source_sections(
                         globals_static.append(ls_name)
                         local_static_set.add(ls_name)
             return_type = _extract_return_type(signature, name)
-            if return_type and "void" not in return_type:
+            if returns_value(return_type):
                 m = re.search(r"\b(U8|U16|U32|S8|S16|S32)\b", return_type)
                 base = m.group(1) if m else return_type.split()[-1]
                 range_text = DEFAULT_TYPE_RANGES.get(base, "")
@@ -1032,14 +1522,9 @@ def generate_uds_source_sections(
                 )
                 outputs_list = [return_entry] + outputs_list
             called_list = [str(c).strip() for c in calls if str(c).strip()] if isinstance(calls, list) else []
-            called_sig_lines: List[str] = []
-            for callee in called_list:
-                sig = callee_signature_map.get(callee, "")
-                if sig:
-                    called_sig_lines.append(sig)
-                else:
-                    called_sig_lines.append(callee)
-            called_text = "\n".join(called_sig_lines)
+            # (R56 N52) Called/Calling 칸은 **이름만** — 정본 951 함수 중 914 가 이름만이다. 프로토타입을 넣던 옛 방식은
+            #   여러 줄 원문·주석까지 칸에 실었고(LIN 드라이버 50건) 되읽기 파서가 이름을 잃었다. 프로토타입은 Prototype 행에만.
+            called_text = "\n".join(called_list)
             desc_text = _enhance_description_text(
                 name,
                 comment_desc or _fallback_function_description(name, called_list),
@@ -1092,6 +1577,7 @@ def generate_uds_source_sections(
                 "file": str(file_path) if file_path else "",
                 "module_name": Path(file_path).stem if file_path else "",
                 "comment_description": comment_desc,
+                "comment_origin": comment_origin,   # "" = 정의 앞 주석(또는 주석 없음) · "header:<파일>" = 헤더 프로토타입의 문서 주석
                 "comment_asil": comment_asil,
                 "comment_related": comment_related,
                 "globals_global": globals_global,
@@ -1107,7 +1593,9 @@ def generate_uds_source_sections(
                 "logic": "Auto(call tree)" if called_list else "",
             }
             function_details[fn_id] = detail
-            function_details_by_name[name.lower()] = detail
+            if body_text:
+                function_body_snippets[fn_id] = body_text[:_BODY_SNIPPET_MAX]
+            _put_by_name(function_details_by_name, name, detail, function_collisions)
         # Fallback: AST에서 누락된 함수도 병합 (regex 기반 수집분)
         _ast_names = {r[3] for r in function_table_rows if len(r) >= 4}
         if fallback_functions:
@@ -1125,7 +1613,7 @@ def generate_uds_source_sections(
                     continue
                 if file_path and file_path not in source_text_cache:
                     try:
-                        source_text_cache[file_path] = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                        source_text_cache[file_path] = _src_read(file_path)
                     except Exception:
                         source_text_cache[file_path] = ""
                 if not isinstance(calls, list):
@@ -1139,11 +1627,11 @@ def generate_uds_source_sections(
                 )
                 if calls_source:
                     fn["calls_source"] = calls_source
-                call_map[name] = [str(c).strip() for c in calls if str(c).strip()]
+                _merge_call_map(call_map, name, calls)
                 module_name = "Module"
                 if file_path:
                     try:
-                        rel = Path(file_path).resolve().relative_to(root)
+                        rel = _src_relbase(file_path).relative_to(root)
                         module_name = rel.parts[0] if rel.parts else "Module"
                     except Exception:
                         module_name = "Module"
@@ -1172,8 +1660,11 @@ def generate_uds_source_sections(
                             module_ids[module_name] = next_module_idx
                             next_module_idx += 1
                         mod_idx = module_ids.get(module_name, 0)
-                module_map[name] = module_name
-                counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
+                module_map.setdefault(name, module_name)   # (R57 리뷰 W4) 위와 같은 규칙 — 두 곳이 같이 움직여야 한다
+                # 위와 같은 이유로 SwCom(mod_idx) 단위로 센다 — **두 곳이 같이 움직여야
+                # 한다**(한쪽만 고치면 폴백 경로에서 같은 충돌이 그대로 남는다).
+                counter = _fn_counter_by_mod.get(mod_idx, 0) + 1
+                _fn_counter_by_mod[mod_idx] = counter
                 fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
                 fn_type = "Internal" if is_static else "I/F"
                 if name.lower().startswith("s_"):
@@ -1193,9 +1684,26 @@ def generate_uds_source_sections(
                 called_list = [str(c).strip() for c in calls if str(c).strip()] if isinstance(calls, list) else []
                 inputs_list = [f"[IN] {p}" for p in _parse_signature_params(signature)]
                 outputs_list = _parse_signature_outputs(signature, name)
+                # (R62 N69) 수집 단계(위 `fallback_functions.append`)가 읽어 둔 주석 필드를 여기서 버리고 있었다 —
+                #   tree-sitter 가 놓친 함수는 `@asil` 이 있어도 SDS/TBD 로 내려갔다. AST 경로와 같은 우선순위로 쓴다.
+                m_desc = str(fn.get("comment_desc") or "").strip()
+                m_asil = str(fn.get("comment_asil_own") or "").strip()
+                m_precond = str(fn.get("comment_precondition") or "").strip()
+                m_related = str(fn.get("comment_related") or "").strip()
+                m_origin = ""
+                if not is_static and not (m_desc and m_asil and m_related):
+                    _hdr_doc = pick_header_doc(_header_docs.get(name) or [], file_path, _root_strs)
+                    if _hdr_doc:
+                        _before = (m_desc, m_asil, m_related)
+                        m_desc = m_desc or str(_hdr_doc.get("desc") or "").strip()
+                        m_asil = m_asil or str(_hdr_doc.get("asil") or "").strip()
+                        m_related = m_related or str(_hdr_doc.get("related") or "").strip()
+                        m_precond = m_precond or str(_hdr_doc.get("precondition") or "").strip()
+                        if (m_desc, m_asil, m_related) != _before:
+                            m_origin = _header_origin_label(_hdr_doc)
                 desc_text = _enhance_description_text(
                     name,
-                    _fallback_function_description(name, called_list),
+                    m_desc or _fallback_function_description(name, called_list),
                     called_list,
                 )
                 if _is_generic_description(desc_text):
@@ -1244,19 +1752,20 @@ def generate_uds_source_sections(
                     "name": name,
                     "prototype": signature,
                     "description": desc_text,
-                    "asil": (_func_override.get(name, {}).get("asil") if _func_override.get(name) else "") or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
-                    "related": _lookup_sds_related(name, module_name) or "TBD",
-                    "description_source": "inference",
-                    "asil_source": "sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference",
-                    "related_source": "sds" if _lookup_sds_related(name, module_name) else "inference",
+                    "asil": m_asil or (_func_override.get(name, {}).get("asil") if _func_override.get(name) else "") or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
+                    "related": m_related or _lookup_sds_related(name, module_name) or "TBD",
+                    "description_source": "comment" if m_desc else "inference",
+                    "asil_source": "comment" if m_asil else ("sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference"),
+                    "related_source": "comment" if m_related else ("sds" if _lookup_sds_related(name, module_name) else "inference"),
                     "inputs": inputs_list,
                     "outputs": outputs_list,
-                    "precondition": "N/A",
+                    "precondition": m_precond or "N/A",
                     "file": str(file_path) if file_path else "",
                     "module_name": Path(file_path).stem if file_path else "",
-                    "comment_description": "",
-                    "comment_asil": "",
-                    "comment_related": "",
+                    "comment_description": m_desc,
+                    "comment_origin": m_origin,
+                    "comment_asil": m_asil,
+                    "comment_related": m_related,
                     "globals_global": globals_global,
                     "globals_static": globals_static,
                     "called": "\n".join(called_list),
@@ -1270,7 +1779,9 @@ def generate_uds_source_sections(
                     "logic": "Auto(call tree)" if called_list else "",
                 }
                 function_details[fn_id] = detail
-                function_details_by_name[name.lower()] = detail
+                if body_text:
+                    function_body_snippets[fn_id] = body_text[:_BODY_SNIPPET_MAX]
+                _put_by_name(function_details_by_name, name, detail, function_collisions)
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):
@@ -1287,7 +1798,7 @@ def generate_uds_source_sections(
                 if not gtype and gname in globals_info_map:
                     gtype = str(globals_info_map.get(gname, {}).get("type") or "").strip()
                 if not gtype and gfile:
-                    gtype2, init2 = _infer_type_from_file(gfile, gname)
+                    gtype2, init2 = _infer_type_from_file(gfile, gname, cache=_type_scan_cache)
                     if gtype2:
                         gtype = gtype2
                     if init2 and not ginit:
@@ -1363,17 +1874,43 @@ def generate_uds_source_sections(
             out.append(item)
         return out
 
-    interfaces = _unique(interfaces)[:max_items]
-    internals = _unique(internals)[:max_items]
-    unknowns = _unique(unknowns)[:max_items]
-    macros = _unique(macros)[:max_items]
-    reqs = _unique(reqs)[:max_items]
-    common_macros = _unique(common_macros)[:max_items]
-    type_defs = _unique(type_defs)[:max_items]
-    param_defs = _unique(param_defs)[:max_items]
-    version_defs = _unique(version_defs)[:max_items]
-    global_data = _unique(global_data)[: max_items * 2]
-    macro_defs = macro_defs[: max_items * 2]
+    # 카테고리 절단 — **무엇을 잘랐는지 남긴다.**
+    #
+    # ⚠ 아래 11개 축은 오래 조용히 잘렸다. 같은 함수의 전역 축(`_globals_loss`)은
+    #   "기록이 없으면 '이 프로젝트엔 원래 없다' 로 오독한다" 는 이유로 손실을 남기는데
+    #   카테고리 축만 빠져 있던 **비대칭**이다. 실측(KJPDS02_RD + FBL): 소스의
+    #   `#define` 이 12,941개인데 분류 상한은 120 이다 — 준비 게이트가 이 상한을
+    #   공시하면서도 "실제로 자르고 있는가" 는 말할 수 없었던 이유가 여기에 있었다.
+    _cat_loss: Dict[str, Dict[str, int]] = {}
+
+    def _cap_items(name: str, items: List[Any], cap: int, *, dedupe: bool = True) -> List[Any]:
+        vals = _unique(items) if dedupe else list(items)
+        total = len(vals)
+        if total > cap:
+            _cat_loss[name] = {"total": total, "cap": cap, "dropped": total - cap}
+        return vals[:cap]
+
+    interfaces = _cap_items("interfaces", interfaces, max_items)
+    internals = _cap_items("internals", internals, max_items)
+    unknowns = _cap_items("unknowns", unknowns, max_items)
+    macros = _cap_items("macros", macros, max_items)
+    reqs = _cap_items("reqs", reqs, max_items)
+    common_macros = _cap_items("common_macros", common_macros, max_items)
+    type_defs = _cap_items("type_defs", type_defs, max_items)
+    param_defs = _cap_items("param_defs", param_defs, max_items)
+    version_defs = _cap_items("version_defs", version_defs, max_items)
+    global_data = _cap_items("global_data", global_data, max_items * 2)
+    # ⚠ 원본이 여기만 `_unique` 를 거치지 않았다 — 동작을 바꾸지 않고 셈만 붙인다.
+    macro_defs = _cap_items("macro_defs", macro_defs, max_items * 2, dedupe=False)
+    if _cat_loss:
+        # 전역 축과 같은 등급으로 올린다. 이게 없으면 규격서에서 빠진 항목이 어디에도
+        # 안 남아 "원래 그만큼뿐" 으로 읽힌다.
+        _logger.warning(
+            "UDS 카테고리 상한(max_items=%d)에 걸려 %s",
+            max_items,
+            " · ".join(f"{k} {v['total']}→{v['cap']}(-{v['dropped']})"
+                       for k, v in sorted(_cat_loss.items())),
+        )
     if param_defs:
         for row in param_defs:
             cols = _normalize_table_row(row)
@@ -1496,7 +2033,10 @@ def generate_uds_source_sections(
         f"Public interfaces: {len(interfaces)}, Internal functions: {len(internals)}, Global data: {len(global_data)}",
     ]
     if truncated:
-        overview_lines.append("Scan truncated to first 400 files.")
+        # ⚠ 오래 `400` 이 하드코딩돼 있었다. 실제 상한은 `UDS_MAX_SOURCE_FILES`(기본
+        #   1200, `DEVOPS_UDS_MAX_FILES` 로 덮임)라 어느 경우에도 맞지 않았고, 바로 위
+        #   `Files scanned: {file_count}` 와 **인접한 두 줄이 다른 수**를 말했다.
+        overview_lines.append(f"Scan truncated to first {max_files} files.")
 
     requirements_lines: List[str] = []
     for row in common_macros:
@@ -1545,25 +2085,26 @@ def generate_uds_source_sections(
 
     interfaces_lines = interfaces or ["N/A"]
 
-    from report.constants import UDS_SERVICE_TABLE, UDS_DID_PATTERNS, UDS_SERVICE_ID_PATTERNS
+    from report.constants import UDS_DID_PATTERNS, UDS_SERVICE_ID_PATTERNS, UDS_SERVICE_TABLE
     did_entries: List[str] = []
     service_entries: List[str] = []
     did_function_map: Dict[str, List[str]] = {}
     _did_pats = [re.compile(p, re.I) for p in UDS_DID_PATTERNS]
     _sid_pats = [re.compile(p, re.I) for p in UDS_SERVICE_ID_PATTERNS]
+    _did_comment_dropped = 0
     for fn in (ast_result.get("functions", []) if parse_c_project is not None else fallback_functions):
         fn_name = str(fn.get("name") or "").strip()
         fn_body = str(fn.get("body") or "").strip()
         if not fn_name or not fn_body:
             continue
-        for pat in _did_pats:
-            for dm in pat.finditer(fn_body):
-                did_val = dm.group(0).strip()
-                if did_val and did_val not in did_entries:
-                    did_entries.append(did_val)
-                did_function_map.setdefault(did_val, [])
-                if fn_name not in did_function_map[did_val]:
-                    did_function_map[did_val].append(fn_name)
+        _did_vals, _did_dropped = _did_pattern_hits(fn_body, _did_pats)
+        _did_comment_dropped += _did_dropped
+        for did_val in _did_vals:
+            if did_val not in did_entries:
+                did_entries.append(did_val)
+            did_function_map.setdefault(did_val, [])
+            if fn_name not in did_function_map[did_val]:
+                did_function_map[did_val].append(fn_name)
         for pat in _sid_pats:
             for sm in pat.finditer(fn_body):
                 sid_raw = sm.group(0).strip()
@@ -1578,6 +2119,10 @@ def generate_uds_source_sections(
                     entry = f"{sid_raw} -> {fn_name}"
                 if entry not in service_entries:
                     service_entries.append(entry)
+
+    if _did_comment_dropped:
+        _logger.info("DID scan: %d entries · 주석 속 매치 %d건 제외(그 주석이 DID 를 말하지 않음)",
+                     len(did_entries), _did_comment_dropped)
 
     frames_lines: List[str] = []
     if did_entries:
@@ -1785,7 +2330,9 @@ def generate_uds_source_sections(
         if hop2_callers:
             info["calling_indirect"] = hop2_callers[:20]
         if fn_name:
-            function_details_by_name[fn_name] = info
+            # ⚠ 직접 대입하면 위에서 기록한 충돌 정보가 아니라 **등록 순서**만 바뀌지만,
+            # 이 루프는 두 사본을 모두 순회하므로 충돌 기록을 계속 갱신해야 한다.
+            _put_by_name(function_details_by_name, fn_name, info, function_collisions)
 
     # ── 간접 Globals 추적: same-module direct/2-hop globals를 제한적으로 caller에 전파 ──
     if call_map and function_details_by_name:
@@ -1901,10 +2448,52 @@ def generate_uds_source_sections(
         "function_table_rows": function_table_rows,
         "function_details": function_details,
         "function_details_by_name": function_details_by_name,
+        # {fid: body 앞 400자}. detail 밖에 두어 by_name 중복 직렬화를 피한다(위 선언부 주석).
+        "function_body_snippets": function_body_snippets,
+        # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이
+        # 다른 사본의 파일 변경을 놓치고(under-report) 낮은 ASIL로 오판한다. {name: {files, asil}}.
+        "function_collisions": function_collisions,
+        # 전역 인식에서 **잃은 것**. 스캔 캡·미사용 판정·접두사 필터·타입없음 네 지점이
+        # 전부 조용히 자르므로, 이 값이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
+        "globals_scan": _globals_loss,
+        # (R62) 죽은 `#if 0` 분기라 함수 목록에서 뺀 정의. tree-sitter 경로가 뺀 것은 여기 안 센다(그쪽은 애초에 목록에
+        # 오른 적이 없다) — 이 값은 "정규식 경로가 예전엔 되살리던 것" 이다.
+        "dead_code_excluded": {
+            "files": len(_dead_code_excluded),
+            "functions": sum(len(v) for v in _dead_code_excluded.values()),
+            "by_file": _dead_code_excluded,
+            # (R63 N70) 같은 구간에서 뺀 전역·매크로·프로토타입 — 종류별 개수(파일 기준 발생 수)와 {파일: [이름]}.
+            "globals": sum(len(v) for v in _dead_decls_excluded.get("globals", {}).values()),
+            "macros": sum(len(v) for v in _dead_decls_excluded.get("macros", {}).values()),
+            "prototypes": sum(len(v) for v in _dead_decls_excluded.get("prototypes", {}).values()),
+            "decls_by_file": _dead_decls_excluded,
+        },
+        # 카테고리 절단(인터페이스/내부/매크로/타입…). `globals_scan` 과 같은 규약 —
+        # **잘린 것을 남긴다**. 준비 게이트의 `max_items_per_category` 공시가 실제로
+        # 무엇을 잘랐는지 이 값으로만 알 수 있다.
+        "category_caps": {
+            "measured": True,
+            "cap": max_items,
+            "truncated": _cat_loss,
+            "any_truncated": bool(_cat_loss),
+        },
+        # 파일 스캔 절단. ⚠ `truncated` 는 상한에 닿는 즉시 서고 곧바로 break 하므로
+        # **전체 파일 수는 모른다** — 지어내지 않고 "닿았다" 는 사실만 낸다.
+        "file_scan": {
+            "measured": True,
+            "cap": max_files,
+            "scanned": len(files),
+            "truncated": bool(truncated),
+        },
         "call_map": call_map,
         "calling_map": calling_map,
         "module_map": module_map,
         "globals_info_map": globals_info_map,
+        # 타입 → {멤버경로: "[8]"} — 접힌 선언 차원만 담는다.
+        "struct_member_arrays": struct_member_arrays,
+        # 타입 -> {멤버경로: {type, array, bits, desc}} — 멤버 행이 베이스의
+        # 레코드를 이지 않게 하는 유일한 출처(`_member_grid_info`).
+        "struct_member_types": struct_member_types,
         "common_macros": common_macros,
         "type_defs": type_defs,
         "param_defs": param_defs,
@@ -1981,83 +2570,6 @@ def generate_uds_preview_markdown(uds_payload: Dict[str, Any]) -> str:
     if detailed_doc:
         lines += ["## Detailed UDS", detailed_doc, ""]
     return "\n".join(lines).rstrip() + "\n"
-
-
-def generate_uds_preview_html(uds_payload: Dict[str, Any]) -> str:
-    payload = _safe_dict(uds_payload)
-    summary = _safe_dict(payload.get("summary", {}))
-    project = payload.get("project_name") or summary.get("project") or summary.get("project_name") or "UDS Spec"
-    generated_at = payload.get("generated_at") or datetime.now().isoformat(timespec="seconds")
-
-    ai_sections = payload.get("ai_sections")
-    overview = _apply_uds_rules(
-        _merge_section_text(payload.get("overview", "") or "", ai_sections, "overview"),
-        "overview",
-    )
-    requirements = _apply_uds_rules(
-        _merge_section_text(payload.get("requirements", "") or "", ai_sections, "requirements"),
-        "requirements",
-    )
-    interfaces = _apply_uds_rules(
-        _merge_section_text(payload.get("interfaces", "") or "", ai_sections, "interfaces"),
-        "interfaces",
-    )
-    uds_frames = _apply_uds_rules(
-        _merge_section_text(payload.get("uds_frames", "") or "", ai_sections, "uds_frames"),
-        "uds_frames",
-    )
-    notes_text = _merge_section_text(
-        payload.get("notes", "") or "",
-        ai_sections,
-        "notes",
-        append_base=True,
-    )
-    evidence_lines = _ai_evidence_lines(ai_sections)
-    if evidence_lines:
-        notes_text = "\n".join([notes_text, "Evidence:"] + evidence_lines).strip()
-    notes = _apply_uds_rules(notes_text, "notes")
-    software_unit_design = payload.get("software_unit_design", "") or ""
-
-    project_html = escape(str(project))
-    job_url_html = escape(str(payload.get("job_url") or ""))
-    build_html = escape(str(payload.get("build_number") or ""))
-    generated_html = escape(str(generated_at))
-
-    logic_items = payload.get("logic_diagrams")
-    logic_items = _merge_logic_ai_items(logic_items, ai_sections)
-    logic_html = (
-        _uds_logic_html(logic_items) if isinstance(logic_items, list) else "<p>N/A</p>"
-    )
-    detailed_doc = _ai_document_text(ai_sections)
-
-    return "\n".join(
-        [
-            "<div class=\"uds-doc\">",
-            f"<h2>{project_html}</h2>",
-            "<ul>",
-            f"<li><strong>Job URL:</strong> {job_url_html}</li>",
-            f"<li><strong>Build:</strong> {build_html}</li>",
-            f"<li><strong>Generated at:</strong> {generated_html}</li>",
-            "</ul>",
-            "<h3>Overview</h3>",
-            _uds_lines_to_html(overview),
-            "<h3>Requirements</h3>",
-            _uds_lines_to_html(requirements),
-            "<h3>Interfaces</h3>",
-            _uds_lines_to_html(interfaces),
-            "<h3>UDS Frames</h3>",
-            _uds_lines_to_html(uds_frames),
-            "<h3>Notes</h3>",
-            _uds_lines_to_html(notes),
-            "<h3>Detailed UDS</h3>",
-            f"<pre>{escape(detailed_doc) if detailed_doc else 'N/A'}</pre>",
-            "<h3>Logic Diagrams</h3>",
-            logic_html,
-            "<h3>Software Unit Design</h3>",
-            "<pre>" + escape(software_unit_design or "N/A") + "</pre>",
-            "</div>",
-        ]
-    )
 
 
 def generate_uds_preview_html(uds_payload: Dict[str, Any]) -> str:

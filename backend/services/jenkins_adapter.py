@@ -9,7 +9,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import config
 
@@ -594,7 +594,9 @@ def _to_int(v: Any, default: int = 0) -> int:
     try:
         if v is None:
             return default
-        s = str(v).strip()
+        # 천단위 콤마 제거 후 매칭 — 안 하면 re.search가 콤마에서 멈춰 "67,464"→67로 1000배
+        # 손상된다(PRQA LOC/파일수/진단수 등). report_parsers._parse_number와 동일 정책.
+        s = str(v).strip().replace(",", "")
         if not s:
             return default
         m = re.search(r"-?\d+", s)
@@ -760,12 +762,15 @@ def _map_vcast_header(name: str) -> str:
 
 def _normalize_vcast_result(value: Any) -> str:
     raw = str(value or "").strip().upper()
-    if any(tok in raw for tok in ("PASS", "OK", "SUCCESS")):
-        return "pass"
-    if any(tok in raw for tok in ("SKIP", "SKIPPED", "N/A", "NOT RUN", "NOTRUN")):
-        return "skip"
+    # fail-safe 우선순위: 실패/실행오류를 **가장 먼저** 판정한다. 과거엔 PASS 토큰("OK" 포함)을
+    # 먼저 봐서 "TOKEN ERROR"처럼 'OK' 부분문자열이 든 오류/실패가 PASS로 오분류될 수 있었다
+    # (실패를 통과로 위장 = 안전 위험). ISO 26262 시험 증거는 의심 시 non-pass로 두는 게 안전측.
     if any(tok in raw for tok in ("FAIL", "ERROR", "NG", "FATAL")):
         return "fail"
+    if any(tok in raw for tok in ("SKIP", "SKIPPED", "N/A", "NOT RUN", "NOTRUN")):
+        return "skip"
+    if any(tok in raw for tok in ("PASS", "OK", "SUCCESS")):
+        return "pass"
     return "unknown"
 
 
@@ -1484,6 +1489,9 @@ def parse_prqa_his_metrics_xlsx(path: Path, *, top_n: int = 30, max_rows: int = 
     data["function"] = data["function"].astype(str)
     data["file"] = data["file"].astype(str)
     data = data[~data["function"].str.match(r"^\s*Level\b", case=False, na=False)]
+    # F4: 함수명이 빈 셀(→ astype(str) 시 'nan')인 행 제외 — HIS 요약/구분 행이 실함수로 오계상되어
+    # functions_total이 881로 부풀던 off-by-1 차단(html qac_parser 실함수 880과 정합). file 필터와 대칭.
+    data = data[~data["function"].str.match(r"^\s*(nan|none)\s*$", case=False, na=False)]
     data = data[~data["file"].str.match(r"^\s*(nan|none)\s*$", case=False, na=False)]
 
     data_sorted = data.sort_values(["vg", "calls"], ascending=[False, False])

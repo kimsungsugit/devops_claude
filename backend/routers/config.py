@@ -1,14 +1,13 @@
 """Auto-generated router: config"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
 import json
-import traceback
 import logging
 from pathlib import Path
-from backend.helpers import _default_base_report_dir
-import config
+from typing import Any, Dict
 
+from fastapi import APIRouter, File, HTTPException, UploadFile
+
+import config
+from backend.helpers import _default_base_report_dir
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
@@ -162,6 +161,7 @@ def save_jenkins_config(req: Dict[str, Any]) -> Dict[str, Any]:
     each write for recovery from accidental overwrites.
     """
     import datetime
+
     from backend.user_context import get_current_user
     current_user = get_current_user()
     _require_admin(current_user)
@@ -245,6 +245,7 @@ def save_uds_template_config(req: Dict[str, Any]) -> Dict[str, Any]:
     An empty path clears the override (generation falls back to env default).
     """
     import datetime
+
     from backend.user_context import get_current_user
     current_user = get_current_user()
     _require_admin(current_user)
@@ -301,6 +302,7 @@ async def upload_uds_template(file: UploadFile = File(...)) -> Dict[str, Any]:
     Stored under ``docs/uds_templates/<original-filename>``; overwrites existing file.
     """
     import datetime
+
     from backend.user_context import get_current_user
     current_user = get_current_user()
     _require_admin(current_user)

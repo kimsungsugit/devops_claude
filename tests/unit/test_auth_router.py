@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 from backend.main import app  # noqa: E402
 from backend.services import admin_users as au  # noqa: E402
 
-
 client = TestClient(app)
 
 

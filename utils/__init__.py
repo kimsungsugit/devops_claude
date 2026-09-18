@@ -1,10 +1,10 @@
 # /app/utils/__init__.py
 """Shared utility modules for the DevOps analysis toolkit."""
 
-from .types import safe_dict, safe_list, fmt_bool
-from .file_io import read_text_limited, read_text_safe, write_text_safe, write_json_safe
-from .text import trim_text, strip_c_comments, normalize_whitespace
+from .file_io import read_text_limited, read_text_safe, write_json_safe, write_text_safe
 from .log import get_logger
+from .text import normalize_whitespace, strip_c_comments, trim_text
+from .types import fmt_bool, safe_dict, safe_list
 
 __all__ = [
     "safe_dict",

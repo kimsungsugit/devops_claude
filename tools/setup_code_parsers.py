@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-
 REQUIRED_PY_MODULES = {
     "tree_sitter": "tree-sitter",
     "tree_sitter_c": "tree-sitter-c",

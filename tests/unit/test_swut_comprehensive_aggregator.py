@@ -269,7 +269,14 @@ def test_build_swutcr_specific_template_uses_project_config_and_no_generic_warni
     assert wb["Summary"]["E6"].value == "PDS"
     assert wb["Summary"]["E9"].value == "\tCodeWarrior HC12Z "
     assert wb["1.UT101"]["C6"].value == "주희영"
-    assert wb["1.UT101"]["F76"].value == 570
+    # ⚠ 같은 '총 TC 수' 열이지만 **행마다 세는 대상이 다르다.** 두 축을 함께 고정한다 —
+    #   한쪽만 단언하면 둘이 뒤바뀌어도 통과한다(예전엔 F76 만 봤고, 거기 함수 수가
+    #   들어가 있었다).
+    #   73행 = CVG/Statement → 함수 수(qualified_function_total 오버라이드 = 570)
+    #   76행 = Test Case(P/F) → **TC 수** (이 세션의 실행 TC 1건)
+    assert wb["1.UT101"]["F73"].value == 570, "CVG 행 분모는 함수 수여야 한다"
+    assert wb["1.UT101"]["F76"].value == 1, "Test Case(P/F) 행 분모는 TC 수여야 한다"
+    assert wb["1.UT101"]["F77"].value == 570, "요구사항 추적성 행은 단위레벨=함수 수"
     assert wb["2.UT201"]["C85"].value == 570
     assert wb["2.UT201"]["E85"].value == 402
     assert wb["2.UT201"]["F85"].value == 402
@@ -950,3 +957,112 @@ class TestW6LabelRowFixes96Final:
         assert ws.cell(12, 8).value == 20
         assert ws.cell(12, 9).value == 30
         assert ws.cell(12, 10).value == "=SUM(G12:I12)"
+
+
+# ---------------------------------------------------------------------------
+# UT101 4.1 Test Results Summary — 행마다 세는 대상이 다르다
+# ---------------------------------------------------------------------------
+class TestUt101TestCaseRowCountsTcsNotFunctions:
+    """76행('Test Case(P/F)')의 '총 TC 수' 자리에 **함수 수**가 들어가고 있었다.
+
+    회사 양식(`(XXXX_SwUTCR) … v0.10`)의 `1.UT101` 시트 구조를 열어서 확인했다:
+
+        72행 헤더  F='총 TC 수'  G='Pass TC 수'  H='Fail TC 수'  I='테스트 성공율'
+        73행  UT / CVG / Statement                → 분모 = 함수 수(SwUFn)
+        74행       CVG / Branch                   → 분모 = 함수 수
+        75행       CVG / TC                       → '-' (VectorCAST 미산출)
+        76행  Test Case(P/F)                      → 분모 = **TC 수**
+        77·78행  요구사항 추적성/정합성 커버리지    → 단위레벨이라 분모 = 함수 수
+
+    즉 같은 열이어도 76행만 세는 대상이 다르다. 여기에 함수 수를 쓰면 KJPDS02 실측
+    기준 TC 6,882건이 1,014건으로 **5.8배 과소 보고**된다. 비율(=G/F)은 우연히 같아서
+    화면상 아무 이상이 없고, ISO 26262 근거로 인용되는 것은 그 절대 수치다.
+
+    ⚠ 이 결함을 기존 테스트가 **고정하고 있었다** — `F76 == 570`(함수 수)만 단언했다.
+      그래서 아래는 두 축을 함께 본다: 한쪽만 보면 둘이 뒤바뀌어도 통과한다.
+    """
+
+    @staticmethod
+    def _sess(n_cases: int, n_results: int) -> SwUTSession:
+        # tc_name 하나당 항목 1개 → total_tcs 는 키 수와 같다(집계 방식에 안 흔들린다).
+        cases = {f"SwUFn_0001.{i:03d}": [object()] for i in range(1, n_cases + 1)}
+        results = {
+            k: ExecutionRow(tc_name=k, passed=True, actual_result={})
+            for k in list(cases)[:n_results]
+        }
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="CompA",
+            test_cases=cases,
+            test_results=results,
+            function_coverage=[FunctionCoverage(unit_id="SwUFn_0001", name="FunctionA")],
+        )
+        return SwUTSession(environments=[env])
+
+    @staticmethod
+    def _build(session: SwUTSession):
+        return build_swutcr_report(
+            session,
+            SwutcrBuildMeta(
+                project_id="KJPDS02",
+                project_full_name="KJPDS02",
+                release_sw_version="1.01",
+                test_date="2025-12-05",
+                test_engineer="",
+                project_config={
+                    "swutcr_metadata": {
+                        "project": "KJPDS02",
+                        "phase": "DV",
+                        # 함수 축을 TC 축과 **다른 값**으로 고정해 둘이 섞이면 즉시 드러나게 한다.
+                        "qualified_function_total": 570,
+                    },
+                },
+            ),
+            _minimal_swutcr_specific_template(),
+        )
+
+    def test_tc_row_uses_tc_count_and_cvg_rows_use_function_count(self):
+        result = self._build(self._sess(n_cases=3, n_results=3))
+        assert result.ok is True
+        wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
+        ws = wb["1.UT101"]
+        assert ws["F76"].value == 3, "Test Case(P/F) 분모가 TC 수(3)가 아니다"
+        assert ws["F73"].value == 570, "CVG/Statement 분모는 함수 수(570)여야 한다"
+        assert ws["F74"].value == 570, "CVG/Branch 분모는 함수 수(570)여야 한다"
+        assert ws["F77"].value == 570, "요구사항 추적성은 단위레벨=함수 수"
+
+    def test_not_all_executed_warns_that_pass_formula_overstates(self):
+        """양식의 Pass 수식은 `=F76-H76` 이라 **미실행을 Pass 로 센다.**
+
+        분모를 TC 수로 고친 뒤에 남는 문제다. 값을 몰래 바꾸지 않고 경고로 드러낸다 —
+        수식은 회사 양식 소유물이라 우리가 갈아끼울 대상이 아니다.
+        """
+        result = self._build(self._sess(n_cases=5, n_results=2))
+        wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
+        assert wb["1.UT101"]["F76"].value == 5
+        hits = [w for w in result.warnings if "미실행 TC" in w and "Test Case(P/F)" in w]
+        assert hits, f"미실행 TC 경고가 없다: {result.warnings}"
+        assert "3건" in hits[0], f"미실행 건수(5-2=3)가 안 적혔다: {hits[0]}"
+
+    def test_missing_total_stays_zero_and_never_falls_back_to_function_count(self):
+        """TC 수를 못 구하면 0 으로 남기고 경고한다 — 함수 수로 메우지 않는다.
+
+        '빈 자리를 그럴듯한 다른 수로 채우는' 것이 바로 이 결함의 정체였다.
+        """
+        result = self._build(self._sess(n_cases=0, n_results=0))
+        wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
+        f76 = wb["1.UT101"]["F76"].value
+        assert f76 == 0, f"TC 수 부재인데 F76={f76!r} — 다른 수로 메웠다"
+        assert f76 != 570, "함수 수로 폴백하면 안 된다"
+        assert any("총 TC 수를 못 구했다" in w for w in result.warnings), \
+            f"부재를 침묵으로 넘겼다: {result.warnings}"
+
+    def test_ratio_cell_survives_zero_denominator(self):
+        """F76 이 0 이어도 #DIV/0! 이 아니라 빈 칸이어야 한다.
+
+        `#DIV/0!` 은 "못 구했다" 가 아니라 "엑셀이 깨졌다" 로 읽힌다 — 형제 행(73/74/
+        77/78)이 전부 IFERROR 인 것도 같은 이유다.
+        """
+        result = self._build(self._sess(n_cases=0, n_results=0))
+        wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
+        assert wb["1.UT101"]["I76"].value == '=IFERROR(G76/F76, "")'

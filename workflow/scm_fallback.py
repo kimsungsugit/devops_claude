@@ -7,9 +7,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-AUDIT_DIR = REPO_ROOT / "reports" / "impact_audit"
+
+
+def _audit_dir() -> Path:
+    """감사 디렉터리 — `impact_audit.AUDIT_DIR` 단일 출처를 **호출 시점에** 읽는다(R38 D-1).
+
+    예전엔 이 모듈이 같은 경로를 `AUDIT_DIR` 상수로 **복제**했다. 세 곳(여기 · `impact_audit` ·
+    `impact_orchestrator`)이 각자 조립하니 한 곳을 격리해도 나머지가 사용자 트리에 계속 썼다.
+    `from … import AUDIT_DIR` 로 값을 당겨오면 이름이 import 시점에 고정돼 같은 문제가 되므로,
+    반드시 **모듈 속성**으로 읽는다.
+    """
+    from workflow import impact_audit
+    return impact_audit.AUDIT_DIR
 
 
 def _now_iso() -> str:
@@ -19,7 +29,7 @@ def _now_iso() -> str:
 def _snapshot_path(scm_id: str) -> Path:
     safe_id = "".join(ch for ch in str(scm_id or "default") if ch.isalnum() or ch in {"_", "-"})
     safe_id = safe_id or "default"
-    return AUDIT_DIR / f".source_snapshot_{safe_id}.json"
+    return _audit_dir() / f".source_snapshot_{safe_id}.json"
 
 
 def _load_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:

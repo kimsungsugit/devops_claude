@@ -173,5 +173,8 @@ describe('api refresh queue (I5)', () => {
     ]);
     expect(results).toHaveLength(3);
     expect(refreshCalls).toBe(1);  // single-flight 검증
+    // ⚠ `dataCalls` 는 예전엔 세기만 하고 **아무도 안 봤다**(eslint no-unused-vars).
+    //   검사되지 않는 카운터는 죽은 코드다. 3호출 × (최초 401 + 재시도) = 6 을 단언한다.
+    expect(dataCalls).toBe(6);
   });
 });
