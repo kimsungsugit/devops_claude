@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from report_gen.source_parser import _cap_and_decode, _read_bytes_resolver_aware  # leaf module, no circular dep
-from workflow.code_parser.c_parser import normalize_prototype_text  # noqa: F401 — 재수출(단일 출처는 파서 쪽, R56)
+from workflow.code_parser.c_parser import (  # noqa: F401 — normalize_prototype_text 재수출(단일 출처는 파서 쪽, R56)
+    blank_dead_code,
+    normalize_prototype_text,
+)
 
 _logger = logging.getLogger("report_generator")
 
@@ -703,6 +706,9 @@ def _infer_type_from_file(
             #   전역 전부가 조용히 타입 없음이 된다(재현: 첫 읽기만 실패시키면 3전역 전부 `("", "")`). 옛 판처럼 다음
             #   심볼에서 다시 읽는다. 반환값은 옛 판과 같다(`("", "")`).
             return "", ""
+        # (R63 N70 리뷰 W1) 죽은 `#if 0` 분기의 선언이 **첫** 매치가 되어 산 전역의 Type/Reset 근거가 되지 않게 — 수집 루프가
+        #   죽은 init 을 버린 뒤엔 이 폴백이 죽은 init 의 유일한 잔여 공급원이다. 캐시에도 가린 판을 담는다(소비자 둘 다 선언 탐색용).
+        text = blank_dead_code(text)
         if cache is not None:
             cache[key] = text
     name_re = re.escape(name)

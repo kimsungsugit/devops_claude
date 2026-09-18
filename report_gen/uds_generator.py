@@ -600,6 +600,8 @@ def generate_uds_source_sections(
     _root_strs: List[str] = [str(_r) for _r in _roots]
     # 죽은 `#if 0` 분기라 모으지 않은 정의 — {파일: [이름]}. 텍스트 루프가 읽는 `.c` 기준(면제 계층 파일은 애초에 안 읽는다).
     _dead_code_excluded: Dict[str, List[str]] = {}
+    # (R63 N70) 같은 이유로 모으지 않은 전역·매크로·프로토타입 — {종류: {파일: [이름]}}. 이름은 그 파일 기준(다른 파일에 산 정의가 있을 수 있다).
+    _dead_decls_excluded: Dict[str, Dict[str, List[str]]] = {}
     # 원문 읽기 상한에 **닿은 파일**. 캡은 조용히 자르므로 닿았다는 사실을 남기지
     # 않으면 "이 프로젝트엔 그 선언이 원래 없다" 와 구분되지 않는다
     # (실측: 200KB 캡이 IO_Map.h 의 매크로 69% 를 지웠는데 로그가 한 줄도 없었다).
@@ -608,21 +610,35 @@ def generate_uds_source_sections(
         raw, _raw_len, _cut = _read_source_text(p)
         if _cut:
             _read_truncated.append((str(p), _raw_len))
-        text = _strip_c_comments(raw)
+        # (R63 N70) 죽은 `#if 0` 분기는 **이 루프의 모든 수집기**에서 가린다 — R62 는 함수 정의만 가려, 죽은 구간에만 있는
+        #   전역(KJPDS02 6개 · PDS64 4개 — `CRC32.c:crcTable` 등, 정본 UDS 엔 0개)이 전역 표에 실재 변수로 남아 있었다.
+        #   `raw` 는 원문 그대로 둔다(`source_text_cache` — 본문 조회용). 판정은 `blank_dead_code` 한 구현.
+        live_raw = blank_dead_code(raw)
+        _has_dead = live_raw is not raw
+        text = _strip_c_comments(live_raw)
+        if _has_dead:
+            # (리뷰 W3) 전역·매크로·프로토타입도 버린 것을 센다 — 함수만 공시하면 "전역 표 행이 왜 줄었나" 에 답할 수 없다.
+            _dead_text = _strip_c_comments(raw)
+            _dg = sorted({str(g.get("name") or "") for g in _extract_c_global_candidates(_dead_text)} - {str(g.get("name") or "") for g in _extract_c_global_candidates(text)})
+            _dm = sorted({m[0] for m in _extract_c_macro_defs(_dead_text)} - {m[0] for m in _extract_c_macro_defs(text)})
+            _dp = sorted({d[0] for d in _extract_c_prototypes(_dead_text)} - {d[0] for d in _extract_c_prototypes(text)})
+            for _kind, _names in (("globals", _dg), ("macros", _dm), ("prototypes", _dp)):
+                if _names:
+                    _dead_decls_excluded.setdefault(_kind, {})[str(p)] = [n for n in _names if n]
         # ⚠ 주석이 지워진 `text` 로 본다 — 주석 안 선언을 세면 없는 레지스터가 생긴다.
         _placed_globals.update(placed_global_names(text))
-        reqs.extend(_extract_requirements_from_comments(raw))
-        dox_tags = _extract_doxygen_asil_tags(raw)
+        reqs.extend(_extract_requirements_from_comments(live_raw))
+        dox_tags = _extract_doxygen_asil_tags(live_raw)
         if dox_tags:
             _doxygen_tags_by_file[str(p)] = dox_tags
-        hdr_asil = _extract_file_header_asil(raw)
+        hdr_asil = _extract_file_header_asil(raw)   # 선두 고정 매치라 `#if 0` 이 앞서면 어차피 실패 — raw/live_raw 동치(리뷰 I3)
         if hdr_asil:
             _file_header_asil[str(p)] = hdr_asil
         for _sty, _smm in extract_struct_member_arrays(text).items():
             struct_member_arrays_raw.setdefault(_sty, {}).update(_smm)
-        # ⚠ **`raw`** 를 넘긴다. `text` 는 주석이 지워진 판이라 멤버의 자기 주석이
+        # ⚠ **주석이 남은 원문**(`live_raw`)을 넘긴다. `text` 는 주석이 지워진 판이라 멤버의 자기 주석이
         #    통째로 사라진다(그 함수가 내부에서 길이 보존 blank 를 다시 한다).
-        for _sty, _smt in extract_struct_member_types(raw).items():
+        for _sty, _smt in extract_struct_member_types(live_raw).items():
             _dst = struct_member_types.setdefault(_sty, {})
             for _mname, _mrec in _smt.items():
                 # first-wins. dict 덮어쓰기로 행을 침묵 소실한 전례(SUTS R25 66행).
@@ -645,7 +661,7 @@ def generate_uds_source_sections(
                 "desc": str(prev.get("desc") or "").strip(),
             }
         if p.suffix.lower() in {".h", ".hpp"}:
-            for _hname, _hdoc in extract_header_function_docs(raw).items():
+            for _hname, _hdoc in extract_header_function_docs(live_raw).items():
                 _header_docs.setdefault(_hname, []).append({"file": str(p), **_hdoc})
             for name, params, ret_type, is_extern in _extract_c_prototypes(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
@@ -665,22 +681,19 @@ def generate_uds_source_sections(
                 macro_defs.append([m_name, "", m_val, ""])
         else:
             # (R62 N69) 죽은 `#if 0` 분기의 정의는 모으지 않는다 — tree-sitter 가 일부러 뺀 함수를 아래 "AST 누락분 병합" 이
-            #   이름으로 되살려 KJPDS02 24개 · PDS64 13개가 실재 함수처럼 올라 있었다. 매크로 수집은 옛 범위 그대로(`text`).
-            #   판정은 길이 보존 텍스트 위의 한 구현에서 한다(`blank_dead_code` docstring — 리뷰 I1).
-            _live_raw = blank_dead_code(raw)
-            live_text = text if _live_raw is raw else _strip_c_comments(_live_raw)
-            body_map = _extract_c_function_bodies(live_text)
+            #   이름으로 되살려 KJPDS02 24개 · PDS64 13개가 실재 함수처럼 올라 있었다. (R63) `text` 가 이미 가린 판이다.
+            body_map = _extract_c_function_bodies(text)
             # 리셋/초기화 함수의 전역 대입을 모은다(같은 `body_map` 재사용 — 추가 파싱 0).
             # ⚠ 헤더(`.h`)는 여기 안 온다. 헤더에 `static` 초기화 함수가 있으면 못 본다.
             for _rvar, _rrows in collect_reset_assignments(body_map).items():
                 _reset_assigns.setdefault(_rvar, []).extend(_rrows)
-            if live_text is not text:
+            if _has_dead:
                 # 버린 것을 남긴다(R58 의 call_filter 와 같은 규약) — 안 남기면 "함수 수가 왜 줄었나" 에 답할 수 없다.
-                _live_names = {d[0] for d in _extract_c_definitions(live_text)}
-                _dead_here = sorted({d[0] for d in _extract_c_definitions(text)} - _live_names)
+                _live_names = {d[0] for d in _extract_c_definitions(text)}
+                _dead_here = sorted({d[0] for d in _extract_c_definitions(_dead_text)} - _live_names)
                 if _dead_here:
                     _dead_code_excluded[str(p)] = _dead_here
-            for name, params, ret_type, is_static in _extract_c_definitions(live_text):
+            for name, params, ret_type, is_static in _extract_c_definitions(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 if name.startswith("g_"):
                     interfaces.append(signature)
@@ -720,7 +733,7 @@ def generate_uds_source_sections(
             for m_name, m_val in _extract_c_macro_defs(text):
                 macro_defs.append([m_name, "", m_val, ""])
 
-        lines = raw.splitlines()
+        lines = live_raw.splitlines()   # (R63) 주석 표도 죽은 분기는 읽지 않는다 — 위 요구 ID 추출과 한 규칙(리뷰 I4)
         stop_headers = [
             "Type Definition",
             "Parameter Definition",
@@ -1004,6 +1017,15 @@ def generate_uds_source_sections(
             _ginfo["reset"] = _cell
             _ginfo["reset_source"] = _src
             _reset_stats[_src] = _reset_stats.get(_src, 0) + 1
+        if _dead_code_excluded or _dead_decls_excluded:
+            _logger.info(
+                "죽은 #if 0 구간 제외: 함수 %d · 전역 %d · 매크로 %d · 프로토타입 %d (파일 %d)",
+                sum(len(v) for v in _dead_code_excluded.values()),
+                sum(len(v) for v in _dead_decls_excluded.get("globals", {}).values()),
+                sum(len(v) for v in _dead_decls_excluded.get("macros", {}).values()),
+                sum(len(v) for v in _dead_decls_excluded.get("prototypes", {}).values()),
+                len(set(_dead_code_excluded) | {f for d in _dead_decls_excluded.values() for f in d}),
+            )
         _logger.info(
             "reset 판정: %s",
             " · ".join(f"{k} {v}" for k, v in sorted(
@@ -1021,7 +1043,8 @@ def generate_uds_source_sections(
                 source_text_cache[str(src_file)] = src_text
             except Exception:
                 continue
-            for g in _extract_c_global_candidates(src_text):
+            # (R63 N70) 죽은 분기의 `static` 선언이 산 전역을 static 으로 만들지 않게 — 위 텍스트 루프와 같은 판정.
+            for g in _extract_c_global_candidates(blank_dead_code(src_text)):
                 vname = str(g.get("name") or "").strip()
                 if vname and str(g.get("static") or "").strip().lower() == "true":
                     static_name_map[vname] = True
@@ -1064,7 +1087,7 @@ def generate_uds_source_sections(
                 source_text_cache[str(hdr_file)] = hdr_text
             except Exception:
                 continue
-            for item in _extract_c_global_candidates(hdr_text):
+            for item in _extract_c_global_candidates(blank_dead_code(hdr_text)):
                 if str(item.get("extern") or "").strip().lower() != "true":
                     continue
                 etype = str(item.get("type") or "").strip()
@@ -1237,8 +1260,10 @@ def generate_uds_source_sections(
             if fptr_calls:
                 source_parts.append("fptr")
             if not merged:
+                # (R63 N70 리뷰 W2) 원문 캐시는 그대로 두고 **판정에 쓰는 소비자**만 가린다 — `#if 0` 안의 옛 구현(`main.c` 141~316행)이
+                #   같은 이름의 첫 매치가 되어 죽은 본문의 호출이 산 함수의 Called 칸이 되던 경로.
                 fb = _extract_fallback_call_names(
-                    source_text_cache.get(file_path, ""),
+                    blank_dead_code(source_text_cache.get(file_path, "")),
                     fn_name,
                     function_name_set,
                     body_text,
@@ -2437,6 +2462,11 @@ def generate_uds_source_sections(
             "files": len(_dead_code_excluded),
             "functions": sum(len(v) for v in _dead_code_excluded.values()),
             "by_file": _dead_code_excluded,
+            # (R63 N70) 같은 구간에서 뺀 전역·매크로·프로토타입 — 종류별 개수(파일 기준 발생 수)와 {파일: [이름]}.
+            "globals": sum(len(v) for v in _dead_decls_excluded.get("globals", {}).values()),
+            "macros": sum(len(v) for v in _dead_decls_excluded.get("macros", {}).values()),
+            "prototypes": sum(len(v) for v in _dead_decls_excluded.get("prototypes", {}).values()),
+            "decls_by_file": _dead_decls_excluded,
         },
         # 카테고리 절단(인터페이스/내부/매크로/타입…). `globals_scan` 과 같은 규약 —
         # **잘린 것을 남긴다**. 준비 게이트의 `max_items_per_category` 공시가 실제로
