@@ -99,6 +99,7 @@ from report_gen.source_parser import (  # noqa: E402
     extract_struct_member_types,
     is_const_type,
     pick_header_doc,
+    pick_header_prototype,
 )
 from report_gen.source_roots import split_source_roots  # noqa: E402
 from report_gen.uds_text import (  # noqa: E402
@@ -491,7 +492,11 @@ def generate_uds_source_sections(
     #   ⚠ 위 `source_text_cache`(`_src_read` — 상한 없음, local 모드는 `errors="replace"`)와는 읽기 경로·상한·디코딩이 달라
     #   합치지 않았다(리뷰 I2). 세 번째 원문 캐시를 만들지 말 것 — 합치려면 상한 통일이 먼저다.
     _type_scan_cache: Dict[str, str] = {}
-    _header_proto_map: Dict[str, str] = {}  # name → header prototype (우선)
+    # (R65 N74) name → 헤더 프로토타입 **후보 전부** [{file, sig}]. 고르는 것은 함수마다 `pick_header_prototype`(정의와 같은 트리 ·
+    #   같은 인자 수). 앞 판의 `name → 첫 프로토타입` first-wins 는 APP/FBL 쌍둥이가 한 프로토타입을 나눠 갖게 했다.
+    _header_proto_map: Dict[str, List[Dict[str, str]]] = {}
+    _proto_scan: Dict[str, int] = {}          # source → 함수 수 (`header` / `definition:<이유>`)
+    _proto_kept: Dict[str, List[Dict[str, str]]] = {}    # 정의를 지킨 이유 → [{name, file}](공시용, 이유당 50개)
     if component_map is None:
         component_map = _load_component_map()
     _sds_map = sds_partition_map or {}
@@ -665,9 +670,8 @@ def generate_uds_source_sections(
                 _header_docs.setdefault(_hname, []).append({"file": str(p), **_hdoc})
             for name, params, ret_type, is_extern in _extract_c_prototypes(text):
                 signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
-                # Header prototype을 맵에 저장 (source definition보다 우선)
-                if name not in _header_proto_map:
-                    _header_proto_map[name] = signature
+                # 후보로 쌓는다(first-wins 아님) — 어느 것을 쓸지는 정의 파일을 아는 자리에서 고른다.
+                _header_proto_map.setdefault(name, []).append({"file": str(p), "sig": signature})
                 if name.startswith("g_"):
                     interfaces.append(signature)
                 elif name.startswith("s_"):
@@ -1320,16 +1324,24 @@ def generate_uds_source_sections(
                 continue
             name = str(fn.get("name") or "").strip()
             signature = str(fn.get("signature") or name).strip()
-            # Header prototype 우선 사용 (파라미터명/타입이 더 정확)
-            if name in _header_proto_map:
-                signature = _header_proto_map[name]
             is_static = bool(fn.get("is_static"))
+            file_path = str(fn.get("file") or "").strip()
+            # 헤더 프로토타입 우선(파라미터명/타입이 더 정확) — 단 **이 정의의** 헤더만. (R65 N74) 규칙은 `pick_header_prototype` 한 곳.
+            if name:
+                signature, _proto_src = pick_header_prototype(
+                    _header_proto_map.get(name) or [], file_path, _root_strs, signature, is_static=is_static, name=name
+                )
+                _proto_scan[_proto_src] = _proto_scan.get(_proto_src, 0) + 1
+                # 정의를 지킨 이유별 목록 — 정상 상태(static·헤더 없음)는 빼고, 이름만으론 쌍둥이를 못 가르니 파일과 함께, 이유당 50개까지(리뷰 I1·I3).
+                if _proto_src.startswith("definition:") and _proto_src not in ("definition:static", "definition:no_header"):
+                    _kept = _proto_kept.setdefault(_proto_src, [])
+                    if len(_kept) < 50:
+                        _kept.append({"name": name, "file": "/".join(Path(file_path).parts[-2:]) if file_path else ""})
             # static 함수의 시그니처에 static 키워드 보존 (레퍼런스 UDS 형식)
             if is_static and not signature.lstrip().startswith("static "):
                 signature = "static " + signature
             # typedef 정규화 (byte→U8, word→U16 등)
             signature = _normalize_prototype(signature)
-            file_path = str(fn.get("file") or "").strip()
             calls = fn.get("calls") or []
             used_globals = fn.get("used_globals") or []
             comment_desc = str(fn.get("comment_desc") or "").strip()
@@ -1787,6 +1799,8 @@ def generate_uds_source_sections(
                             local_static_set.add(ls_name)
                 true_calls, false_calls = _extract_condition_branch_calls(body_text)
                 term_return, term_error = _extract_logic_terminal_paths(body_text)
+                # (R65 리뷰 I2) 이 루프(텍스트 폴백 함수)는 헤더 프로토타입을 쓴 적이 없다 — 분모를 맞추기 위해 세기만 한다.
+                _proto_scan["definition:fallback_loop"] = _proto_scan.get("definition:fallback_loop", 0) + 1
                 detail = {
                     "id": fn_id,
                     "name": name,
@@ -2506,6 +2520,9 @@ def generate_uds_source_sections(
         # 전역 인식에서 **잃은 것**. 스캔 캡·미사용 판정·접두사 필터·타입없음 네 지점이
         # 전부 조용히 자르므로, 이 값이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
         "globals_scan": _globals_loss,
+        # (R65 N74) Prototype 의 출처 — 헤더를 쓴 함수 수와 **정의를 지킨 이유별 함수 이름**. 같은 이름의 헤더가 다른 트리에만
+        #   있거나(other_root) 인자 수가 다르거나(arity) 같은 트리 후보끼리 다르면(conflict) 헤더를 고르지 않았다는 기록이다.
+        "prototype_scan": {"counts": _proto_scan, "definition_kept": _proto_kept},
         # (R62) 죽은 `#if 0` 분기라 함수 목록에서 뺀 정의. tree-sitter 경로가 뺀 것은 여기 안 센다(그쪽은 애초에 목록에
         # 오른 적이 없다) — 이 값은 "정규식 경로가 예전엔 되살리던 것" 이다.
         "dead_code_excluded": {

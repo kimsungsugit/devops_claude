@@ -594,8 +594,10 @@ _MEMBER_NEST_MAX = 6
 # 멤버 선언: `U8 Byte` · `U8 READY :1` · `UINT8 buf[8]` · `lin_tl_pdu_data *tl_pdu`
 # ⚠ 별표가 이름에 붙는 형태(`T   *p`)를 놓치면 그 타입의 멤버가 통째로 안 잡힌다
 #   (실측: `lin_transport_layer_queue::tl_pdu` 12칸).
+# (R65 N74) 두 단어 이상의 기본 타입(`unsigned long long bitcount` · `struct tag x`)도 한 멤버다 — 앞 판은 첫 단어를 타입,
+#   둘째 단어를 이름으로 읽다가 셋째 단어에서 실패해 그 멤버를 통째로 버렸다(실측: KJPDS02 `SHA256_CTX.bitcount` 1개).
 _MEMBER_DECL_RE = re.compile(
-    r"^\s*((?:(?:const|volatile|static)\s+)*[A-Za-z_]\w*)"
+    r"^\s*((?:(?:const|volatile|static|unsigned|signed|short|long|struct|union|enum)\s+)*[A-Za-z_]\w*)"
     r"(?:\s*(\*+)\s*|\s+)(\w+)\s*(?:((?:\[[^\]]*\])+)|:\s*(\d+))?\s*$"
 )
 
@@ -1314,9 +1316,19 @@ def extract_header_function_docs(raw: str) -> Dict[str, Dict[str, str]]:
     return out
 
 
+def _path_parts_norm(p: str) -> List[str]:
+    """비교용 경로 조각 — 소문자 + `..`/`.`/중복 구분자 정리. (R65 리뷰 W1) cloudium 모드의 `_roots` 는 resolve 를 안 하고
+    tree-sitter 경로(`parse_c_project`)는 항상 resolve 하므로, 루트 문자열에 `..` 가 섞이면 같은 파일이 다른 루트로 읽혀 헤더
+    프로토타입·헤더 주석이 **전량** `other_root` 로 떨어진다. 파일 시스템은 건드리지 않는다(원격 경로 그대로)."""
+    s = str(p or "")
+    if not s:
+        return []
+    return [x.lower() for x in Path(os.path.normpath(s)).parts]
+
+
 def _shared_path_parts(a: str, b: str) -> int:
-    pa = [x.lower() for x in Path(a).parts]
-    pb = [x.lower() for x in Path(b).parts]
+    pa = _path_parts_norm(a)
+    pb = _path_parts_norm(b)
     n = 0
     for x, y in zip(pa, pb, strict=False):
         if x != y:
@@ -1326,10 +1338,10 @@ def _shared_path_parts(a: str, b: str) -> int:
 
 
 def _root_index_of(path: str, roots: List[str]) -> int:
-    parts = [x.lower() for x in Path(path).parts]
+    parts = _path_parts_norm(path)
     best, best_len = -1, -1
     for i, root in enumerate(roots):
-        rp = [x.lower() for x in Path(root).parts]
+        rp = _path_parts_norm(root)
         if rp and parts[: len(rp)] == rp and len(rp) > best_len:
             best, best_len = i, len(rp)
     return best
@@ -1364,6 +1376,114 @@ def pick_header_doc(
     highest = max(ranked, key=lambda c: _ASIL_RANK[str(c.get("asil") or "").strip().upper()])
     # `file` 을 비운다 — 취한 것은 등급뿐인데 그 헤더가 "이 함수를 문서화했다" 로 읽히면 안 된다(리뷰 W4).
     return {"file": "", "desc": "", "asil": str(highest.get("asil") or ""), "related": "", "precondition": ""}
+
+
+def prototype_param_count(sig: str) -> int:
+    """시그니처의 인자 수. `(void)`·빈 괄호는 0, 괄호를 못 찾으면 -1(모름). 함수 포인터 인자의 안쪽 쉼표는 세지 않는다."""
+    s = str(sig or "").strip()
+    if not s.endswith(")"):
+        return -1
+    depth = 0
+    start = -1
+    for i in range(len(s) - 1, -1, -1):
+        ch = s[i]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            depth -= 1
+            if depth == 0:
+                start = i
+                break
+    if start < 0:
+        return -1
+    inner = " ".join(s[start + 1:-1].split())
+    if inner == "void":
+        return 0
+    if inner == "":
+        # (리뷰 W5) `f()` 는 C 에서 "인자 미지정" 이지 0개가 아니다 — `(void)` 와 접으면 인자 있는 정의와 불일치로 읽혀 헤더를 잃는다.
+        #   대상 코드베이스 4 트리엔 이 형태의 헤더 선언이 0건이라 실효는 없지만 값의 뜻은 맞게 둔다.
+        return -1
+    n, d = 1, 0
+    for ch in inner:
+        if ch in "([":
+            d += 1
+        elif ch in ")]":
+            d -= 1
+        elif ch == "," and d == 0:
+            n += 1
+    return n
+
+
+def _ident_before_params(sig: str) -> str:
+    """마지막 최상위 `(` 바로 앞의 식별자. `ISR (Cpu_Interrupt)` → `ISR`, `void f(U8 a)` → `f`. 없으면 빈 문자열."""
+    s = str(sig or "").strip()
+    if not s.endswith(")"):
+        return ""
+    depth = 0
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] == ")":
+            depth += 1
+        elif s[i] == "(":
+            depth -= 1
+            if depth == 0:
+                m = re.search(r"([A-Za-z_]\w*)\s*$", s[:i])
+                return m.group(1) if m else ""
+    return ""
+
+
+def pick_header_prototype(
+    candidates: List[Dict[str, str]],
+    file_path: str,
+    roots: Optional[List[str]],
+    definition_sig: str,
+    is_static: bool = False,
+    name: str = "",
+) -> Tuple[str, str]:
+    """함수 하나의 Prototype 을 고른다 → `(signature, source)`.
+
+    (R65 N74) 앞 판은 이름 → 헤더 프로토타입 **first-wins** 였다. 같은 이름의 함수가 APP/FBL 두 트리에 따로 있으면(실측 충돌 이름
+    KJPDS02 14 · PDS64 11) 두 정의가 **먼저 읽힌 헤더 하나**의 프로토타입을 나눠 가졌고, 그 순서는 파일 열거 순서(local `os.walk` 와
+    cloudium 워커 목록이 다르다)라 같은 소스가 모드에 따라 다른 문서를 냈다. 실측 결과 `lin_lld_sci.c:lin_lld_sci_init(l_ifc_handle)`
+    이 부트로더 `Comms.h` 의 `(void)` 를 달고 있었다 — LIN 헤더는 verify=X 계층이라 텍스트 루프가 읽지도 않는다.
+
+    규칙(`pick_header_doc` 와 같은 축):
+    - static 함수는 정의 그대로 — 헤더가 선언하는 것은 외부 연결 함수이고 같은 이름의 파일 내부 함수는 남이다(R62 규칙).
+    - `roots` 를 주면 **정의 파일과 같은 소스 루트의 헤더만** 후보다. 없으면 정의를 지킨다(`definition:other_root`).
+    - 정의 파일과 경로를 가장 길게 공유하는 헤더. 동률은 경로 문자열 순으로 — 열거 순서에 기대지 않는다.
+    - 인자 수가 정의와 다른 프로토타입은 남의 것이다(`definition:arity`). 남은 후보가 서로 다르면 고르지 않는다(`definition:conflict`).
+    - 정의가 매크로형(`ISR (Cpu_Interrupt)` — 괄호 앞 식별자가 `name` 이 아니다)이면 인자 수를 모르는 것으로 두고 헤더를 받는다
+      (`header:macro_def` — 인자 수 검사를 건너뛴 사실을 남긴다).
+    `source` 는 `header*` 아니면 `definition:<이유>` — 호출자가 세어 `prototype_scan` 으로 공시한다.
+    """
+    if is_static:
+        return definition_sig, "definition:static"
+    cands = [c for c in (candidates or []) if str(c.get("sig") or "").strip()]
+    if not cands:
+        return definition_sig, "definition:no_header"
+    if roots:
+        own = _root_index_of(file_path, roots)
+        # (리뷰 W2) 정의 파일이 어느 루트에도 안 걸리면(-1) 후보의 -1 과 "같은 루트" 가 되어 남의 시그니처를 싣는다 → 정의를 지킨다.
+        cands = [c for c in cands if own >= 0 and _root_index_of(str(c.get("file") or ""), roots) == own]
+        if not cands:
+            return definition_sig, "definition:other_root"
+    best = max(_shared_path_parts(str(c.get("file") or ""), file_path) for c in cands)
+    top = sorted(
+        (c for c in cands if _shared_path_parts(str(c.get("file") or ""), file_path) == best),
+        key=lambda c: str(c.get("file") or "").lower(),
+    )
+    want = prototype_param_count(definition_sig)
+    # ⚠ 정의가 매크로형(`ISR (Cpu_Interrupt)` — tree-sitter 가 `ISR` 을 선언자로 읽는다)이면 괄호 안은 인자가 아니라 이름이다.
+    #   그대로 세면 헤더 `(void)` 와 "인자 수가 다르다" 가 되어 ISR 15/14개가 정의로 떨어졌다(첫 구현, 페이로드 대조로 발견).
+    #   판별은 **함수 이름**으로(리뷰 W4 — 후보 하나의 모양에 기대지 않는다): 괄호 앞 식별자가 이름이 아니면 인자 수를 모르는 것.
+    macro_def = bool(name) and _ident_before_params(definition_sig) != name
+    if macro_def:
+        want = -1
+    fit = [c for c in top if want < 0 or prototype_param_count(str(c.get("sig") or "")) == want]
+    if not fit:
+        return definition_sig, "definition:arity"
+    if len({" ".join(str(c.get("sig") or "").split()) for c in fit}) > 1:
+        return definition_sig, "definition:conflict"
+    return str(fit[0].get("sig") or ""), ("header:macro_def" if macro_def else "header")
 
 
 def _extract_file_header_asil(text: str) -> str:

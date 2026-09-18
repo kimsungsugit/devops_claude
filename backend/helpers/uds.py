@@ -454,6 +454,23 @@ def _note_source_caps(issues: IssueCollector, source_sections: Dict[str, Any]) -
             issues.add("source_read_truncated", "warning", "actual",
                        f"파일 내부 읽기 상한에 닿은 파일 {rt}개 — 큰 헤더의 매크로/선언이 잘렸을 수 있다",
                        stage="source", facts={"files": rt, "detail": (gs.get("read_truncated_detail") or [])[:3]})
+    # (R65 N74 리뷰 I4) Prototype 출처 — 헤더가 정의와 어긋나 버린 함수(arity·conflict)는 알고도 버린 것이라 말한다. 헤더가 있는데
+    #   전부 다른 루트로 읽히면(루트 표기 불일치) 헤더 프로토타입이 통째로 사라지는데 페이로드 안에서만 보이면 아무도 안 본다.
+    ps = source_sections.get("prototype_scan") or {}
+    counts = ps.get("counts") if isinstance(ps, dict) else None
+    if isinstance(counts, dict):
+        kept = ps.get("definition_kept") or {}
+        mism = int(counts.get("definition:arity") or 0) + int(counts.get("definition:conflict") or 0)
+        if mism:
+            issues.add("prototype_header_mismatch", "warning", "actual",
+                       f"헤더 프로토타입이 정의와 어긋나 정의 시그니처를 쓴 함수 {mism}개(인자 수 {counts.get('definition:arity') or 0} · 같은 트리 후보 충돌 {counts.get('definition:conflict') or 0})",
+                       stage="source", facts={"arity": (kept.get("definition:arity") or [])[:5], "conflict": (kept.get("definition:conflict") or [])[:5]})
+        hdr = int(counts.get("header") or 0) + int(counts.get("header:macro_def") or 0)
+        other = int(counts.get("definition:other_root") or 0)
+        if other and other * 2 >= max(hdr + other, 1):
+            issues.add("prototype_roots_mismatch", "warning", "actual",
+                       f"같은 이름의 헤더가 있는 함수 {hdr + other}개 중 {other}개가 '다른 소스 루트' 로 읽혀 헤더 프로토타입을 못 썼다 — 소스 루트 표기(`..`·구분자)가 tree-sitter 경로와 어긋났을 가능성",
+                       stage="source", facts={"header": hdr, "other_root": other, "sample": (kept.get("definition:other_root") or [])[:5]})
 
 
 def _note_docx_outcome(issues: IssueCollector, gen_stats: Dict[str, Any]) -> None:
@@ -1397,7 +1414,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R62 N69) v18: 죽은 `#if 0` 함수 제거(함수 수·SwUFn 번호·Calling 칸이 바뀐다) · `@명령` 줄이 설명이던 것 · 헤더 문서 주석 · `comment_origin` 필드.
 # (R63 N70) v19: 죽은 `#if 0` 구간의 전역·매크로·프로토타입 제거(전역 표 행 · Reset 근거 · `lin_checksum` Prototype 이 바뀐다).
 # (R64 N73) v20: tree-sitter 전역 수집이 include guard 안(어느 깊이든)의 산 선언을 본다 — `used_globals`·전역 표 행·타입/설명 출처가 바뀐다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v20"
+# (R65 N74) v21: 헤더 프로토타입을 이름 first-wins 가 아니라 정의와 같은 트리·같은 인자 수로 고른다 — APP/FBL 쌍둥이의 Prototype · `prototype_scan` 키.
+#   같은 판에서 구조체 멤버 정규식이 두 단어 이상 타입(`unsigned long long`)을 읽어 `struct_member_types` 내용도 바뀐다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v21"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
