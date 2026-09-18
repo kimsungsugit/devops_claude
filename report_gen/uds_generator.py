@@ -831,6 +831,9 @@ def generate_uds_source_sections(
                         ast_result["functions"].extend(_partial.get("functions") or [])
                         ast_result["globals"].extend(_partial.get("globals") or [])
                         ast_result["globals_detailed"].extend(_partial.get("globals_detailed") or [])
+                        ast_result["decl_error_rejected"] = int(ast_result.get("decl_error_rejected") or 0) + int(
+                            _partial.get("decl_error_rejected") or 0
+                        )
                 except Exception:
                     pass
             # (R58 N59, 리뷰 W1) 괄호 대상 `(Foo)(v)` 승격은 루트 단위 known 으로 먼저 됐다 — 루트를 합친 함수 집합으로
@@ -947,6 +950,7 @@ def generate_uds_source_sections(
                         f"[{int(x)}]" for x in _dims
                     )
 
+        _global_def_collisions: Dict[str, List[str]] = {}
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):
@@ -967,6 +971,24 @@ def generate_uds_source_sections(
                     gtype = _infer_type_from_decl(gdecl, gname)
                 if gtype.lower() == "void" and re.match(r"^[gs]_", gname):
                     continue
+                # (리뷰 I2) `globals_info_map = dict(manual_globals_info_map)` 은 얕은 복사라 아래 `prev[...] = …` 제자리 수정이
+                #   manual 맵의 항목 dict 에도 비친다 — L914 이후 manual 맵을 읽는 곳이 없어 무해. 다시 읽게 되면 여기가 결함이 된다.
+                prev = globals_info_map.get(gname, {}) if isinstance(globals_info_map.get(gname), dict) else {}
+                if gname and prev and str(g.get("is_extern") or "").strip().lower() == "true":
+                    # (R64 N73) `extern` 은 선언이지 정의가 아니다 — 이미 있는 항목(텍스트 스캔의 정의·앞서 지나간 정의 행)의
+                    #   file·init·desc·static 을 헤더 것으로 갈아 끼우지 않는다. include guard 안 헤더 extern 이 수집되면서
+                    #   (KJPDS02 1,208행) 순회 순서에 따라 정의가 헤더에 귀속되던 경로. 비어 있는 칸(타입·설명)만 행이 가진
+                    #   값으로 채운다. 아래 파일 스캔(`_infer_type_from_file`) 앞에서 끝내는 이유: 이름-only 행은 타입이 없어
+                    #   665KB 레지스터 헤더를 이름마다 정규식으로 훑는데, 이미 아는 이름에 그 비용을 내지 않는다(A/B +7초).
+                    incoming_desc = str(g.get("desc") or "").strip()
+                    if not str(prev.get("type") or "").strip() and gtype:
+                        prev["type"] = gtype
+                    if not str(prev.get("desc") or "").strip() and incoming_desc:
+                        # (리뷰 W3) 값은 정의 항목에 붙지만 출처는 헤더 선언의 주석이다 — 함수의 `comment_origin` 과 같은 규약으로 표기.
+                        prev["desc"] = incoming_desc
+                        prev["desc_source"] = "header_decl"
+                    globals_info_map[gname] = prev
+                    continue
                 if not gtype and gfile:
                     gtype, init_from_file = _infer_type_from_file(gfile, gname, cache=_type_scan_cache)
                     if not g.get("init") and init_from_file:
@@ -980,8 +1002,19 @@ def generate_uds_source_sections(
                     if any(gname.startswith(p) for p in STATIC_VAR_PREFIXES):
                         is_static = True
                 if gname:
-                    prev = globals_info_map.get(gname, {}) if isinstance(globals_info_map.get(gname), dict) else {}
                     incoming_desc = str(g.get("desc") or "").strip()
+                    # (R64 리뷰 W2) 같은 이름의 정의가 **다른 `.c`** 에도 있으면 이 맵은 이름 키라 뒤에 온 쪽이 이긴다(last-wins).
+                    #   KJPDS02 `u8s_DataBuffer`(Sys_UDS_LinComp_PDS.c · Sys_UDS_ParamTuning.c) — 중첩 수집으로 두 번째 정의가
+                    #   보이면서 승자가 바뀌었다. 동작은 두지 않고 충돌을 센다·적는다(정답은 (이름, 파일) 키 — N76).
+                    _pf = str(prev.get("file") or "").strip()
+                    #   이름-only 행(`decl` 없음)도 센다 — 그 행이 먼저 file 을 바꿔 두면 뒤따르는 상세 행에선 충돌이 안 보인다.
+                    if (
+                        _pf and gfile and os.path.normcase(_pf) != os.path.normcase(gfile)
+                        and _pf.lower().endswith((".c", ".cpp")) and gfile.lower().endswith((".c", ".cpp"))
+                    ):
+                        _global_def_collisions.setdefault(gname, [_pf])
+                        if gfile not in _global_def_collisions[gname]:
+                            _global_def_collisions[gname].append(gfile)
                     static_name_map[gname] = is_static
                     # ⚠ tree-sitter 산출 타입(`gtype`)엔 **`const` 한정자가 없다**.
                     #   텍스트 스캔(`prev`)은 갖고 있는데 여기서 통째로 덮여
@@ -1137,6 +1170,13 @@ def generate_uds_source_sections(
             "extern_dropped_prefix": _extern_dropped["prefix_mismatch"],
             "typeless_dropped": _typeless_dropped,
             "globals_kept": len(globals_info_map),
+            # (R64 N73 리뷰 W1·W2) 조용히 지나가던 두 가지 — 이름이 ERROR 안에서만 나와 버린 선언 수(tree-sitter 오파싱),
+            #   같은 이름의 정의가 여러 `.c` 에 있어 이름 키 맵이 한쪽만 남긴 이름(→ 후보 파일 목록).
+            "decl_error_rejected": int(ast_result.get("decl_error_rejected") or 0),
+            #   경로는 `상위폴더/파일` — APP·FBL 두 루트에 같은 이름의 파일이 있어 파일명만으론 같은 파일로 읽힌다(`EEPROM.c:BackupArray`).
+            "definition_collisions": {
+                k: ["/".join(Path(f).parts[-2:]) for f in v] for k, v in sorted(_global_def_collisions.items())
+            },
             # 파일 **내부** 절단. 위 c_cap/h_cap 은 "파일 몇 개를 봤나" 이고 이건
             # "본 파일을 끝까지 읽었나" 다 — 둘은 다른 축이라 따로 센다.
             "read_truncated_files": len(_read_truncated),
@@ -1783,6 +1823,7 @@ def generate_uds_source_sections(
                     function_body_snippets[fn_id] = body_text[:_BODY_SNIPPET_MAX]
                 _put_by_name(function_details_by_name, name, detail, function_collisions)
         if globals_detailed:
+            _listed_extern: Set[str] = set()
             for g in globals_detailed:
                 if not isinstance(g, dict):
                     continue
@@ -1795,6 +1836,15 @@ def generate_uds_source_sections(
                 is_static = str(g.get("is_static") or "").strip().lower() == "true"
                 if not gname:
                     continue
+                if str(g.get("is_extern") or "").strip().lower() == "true":
+                    # (R64 N73 리뷰 C1) 선언 행은 목록에 정의와 동급으로 서지 않는다 — include guard 안 헤더 extern(KJPDS02 1,208행)이
+                    #   그대로 들어오면 `global_data` 총계가 1,014 → 1,915 로 부풀어 상한 240 안에서 진짜 전역(`_PIEL`·`_PIEP`)이
+                    #   밀려나고, 같은 이름이 두 번 서고, 상한 손실 공시가 중복 선언을 "잘린 전역" 으로 센다. 항목의 집(`file`)이
+                    #   이 파일이 아니면(정의가 다른 파일) 건너뛰고, 정의가 스캔 밖인 extern 은 한 번만 싣는다.
+                    _home = str((globals_info_map.get(gname) or {}).get("file") or "").strip()
+                    if (_home and os.path.normcase(_home) != os.path.normcase(gfile)) or gname in _listed_extern:
+                        continue
+                    _listed_extern.add(gname)
                 if not gtype and gname in globals_info_map:
                     gtype = str(globals_info_map.get(gname, {}).get("type") or "").strip()
                 if not gtype and gfile:

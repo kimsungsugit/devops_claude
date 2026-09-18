@@ -146,10 +146,12 @@ class TestGlobalsScanLoss:
         인식돼야 시험 입력이 선다.
 
         ⚠ 인식 주체는 헤더 extern 스캔이 **아니라** `globals_detailed`(tree-sitter 전
-          파일 스캔)다. 실측으로 확인했다 — 헤더 extern 스캔을 타는 건수는 실제
-          프로젝트에서 0 이다(`extern_added: 0`). include 가드를 씌워도 마찬가지다.
-          그래서 그 스캔의 필터(미사용·접두사)는 **현행 파서에선 도달하지 않는 경로**이며,
-          카운터는 tree-sitter 가 실패했을 때를 위한 계측으로만 남아 있다.
+          파일 스캔)다 — 단 이 문장은 **R64(N73) 부터 참**이다. 그 전의 tree-sitter 수집은
+          `root.children` 만 봐서 이 테스트의 include 가드 안 extern 을 못 봤고, 이 케이스는
+          헤더 extern 스캔(`extern_added: 1`)이 살리고 있었다(R63 리뷰 W4 실험으로 도달 확인).
+          실제 프로젝트에서 `extern_added` 가 0 이었던 것은 정의가 `.c` 최상위에 있어 이름이
+          이미 맵에 있었기 때문이지, tree-sitter 가 가드 안을 봐서가 아니었다. 아래 단언이
+          그 전제를 고정한다 — 되돌리면 1 이 된다.
         """
         (tmp_path / "ext.h").write_text(
             "#ifndef EXT_H\n#define EXT_H\nextern U8 u8g_SystemReset_F;\n#endif\n",
@@ -167,6 +169,8 @@ class TestGlobalsScanLoss:
         ]
         assert any(g.endswith("u8g_SystemReset_F") for g in globs), \
             "다른 파일에 정의된 전역을 못 잡으면 시험 입력이 서지 않는다"
+        assert res["globals_scan"]["extern_added"] == 0, \
+            "(R64 N73) include 가드 안 extern 은 tree-sitter 가 본다 — 폴백이 돌았다면 수집기가 다시 최상위만 보는 것"
 
     def test_unmeasured_is_not_reported_as_zero_loss(self, monkeypatch, tmp_path):
         """⚠ AST 파서가 없으면 이 값들은 **재지 못한 것**이다.

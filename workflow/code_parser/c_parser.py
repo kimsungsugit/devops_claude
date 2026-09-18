@@ -5,7 +5,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from tree_sitter import Language, Parser  # type: ignore
@@ -179,18 +179,56 @@ def _node_text(src: bytes, node) -> str:
         return ""
 
 
-def _find_ident(node) -> Optional[str]:
+def _find_ident_node(node):
     if node.type == "identifier":
-        return node.text.decode("utf-8", errors="ignore")
+        return node
     for child in node.children:
-        name = _find_ident(child)
-        if name:
-            return name
+        found = _find_ident_node(child)
+        if found is not None:
+            return found
     return None
+
+
+def _find_ident(node) -> Optional[str]:
+    found = _find_ident_node(node)
+    return found.text.decode("utf-8", errors="ignore") if found is not None else None
 
 
 # 선언 노드에서 **이름이 아닌** 자리
 _DECL_SKIP_TYPES = frozenset({"storage_class_specifier", "type_qualifier", ";", ","})
+
+
+def _decl_ident_node(node):
+    """`_decl_ident` 의 노드 판 — 이름이 **어느 노드에서** 나왔는지가 필요할 때(오파싱 판정)."""
+    type_node = node.child_by_field_name("type")
+    type_id = type_node.id if type_node is not None else None
+    for child in node.children:
+        if type_id is not None and child.id == type_id:
+            continue
+        if child.type in _DECL_SKIP_TYPES:
+            continue
+        # (R64 N73 리뷰 W1) ERROR 자식은 건너뛴다 — `static __far const U8 *s_nb_p_data;` 에서 `__far` 가 타입 자리를 먹어
+        #   `U8` 이 ERROR 로 밀려나는데, 그 뒤 `pointer_declarator` 에 진짜 이름이 있다(KJPDS02 `Lib_sha256.c` 산 static 2개).
+        #   ERROR 안의 것을 집으면 유령 `U8`, 선언째 버리면 그 둘이 표에서 사라진다 — 둘 다 아니다.
+        if child.type == "ERROR":
+            continue
+        found = _find_ident_node(child)
+        if found is not None:
+            return found
+    return None
+
+
+def _ident_under_error(ident_node, decl_node) -> bool:
+    """(R64 N73) 이름이 `ERROR` 노드 안에서 나왔는가 — `_decl_ident_node` 가 직계 ERROR 는 건너뛰지만 더 깊은 ERROR
+    (`init_declarator` 안 등)에서 나온 이름은 여기서 거른다. ⚠ 선언 **어딘가에** ERROR 가 있다고 버리면 안 된다 —
+    `static volatile U8 x @0x2400U;` 의 `@주소` 도 ERROR 지만 이름은 맞다(두 프로젝트 최상위 4/4행이 이 모양).
+    이름 노드의 조상만 본다."""
+    q = ident_node.parent
+    while q is not None and q.id != decl_node.id:
+        if q.type == "ERROR":
+            return True
+        q = q.parent
+    return False
 
 
 def _decl_ident(node) -> str:
@@ -208,17 +246,8 @@ def _decl_ident(node) -> str:
     이 모양이고, 산출물 Type 칸 24개가 그 때문에 `enum }` 또는 열거자 본문이었다
     (정본 2,751칸 중 중괄호 포함은 0개).
     """
-    type_node = node.child_by_field_name("type")
-    type_id = type_node.id if type_node is not None else None
-    for child in node.children:
-        if type_id is not None and child.id == type_id:
-            continue
-        if child.type in _DECL_SKIP_TYPES:
-            continue
-        name = _find_ident(child)
-        if name:
-            return name
-    return ""
+    found = _decl_ident_node(node)
+    return found.text.decode("utf-8", errors="ignore") if found is not None else ""
 
 
 # `enum {`, `struct tag {`, `union {` … — 본문을 가진 집합체 타입
@@ -285,11 +314,12 @@ _FALSY_COND = frozenset({"0", "0u", "0U", "0ul", "0UL", "(0)", "false", "FALSE"}
 _TRUTHY_COND = frozenset({"1", "1u", "1U", "(1)", "true", "TRUE"})
 
 
-def _dead_function_nodes(root, src: bytes) -> Set[int]:
-    """비활성 전처리 분기의 function_definition 노드 id 집합.
+def _dead_nodes(root, src: bytes, node_types: Tuple[str, ...]) -> Set[int]:
+    """비활성 전처리 분기 안의 `node_types` 노드 id 집합 — 함수 정의(`_dead_function_nodes`)와 (R64 N73) 파일 스코프 선언이
+    같은 판정을 쓴다.
 
-    - `#if 0 … [#else …] #endif` → then-분기(else/elif 이전) 함수는 죽음.
-    - `#if 1 … #else … #endif`   → else/elif(alternative) 분기 함수는 죽음(중첩 서브트리 포함).
+    - `#if 0 … [#else …] #endif` → then-분기(else/elif 이전)는 죽음.
+    - `#if 1 … #else … #endif`   → else/elif(alternative) 분기는 죽음(중첩 서브트리 포함).
     보수성 원칙: literal 0/1만 판정하고 `#elif` 조건은 평가하지 않는다. 그 결과 `#if 0 / #elif 1 / #else`의
     도달불가 `#else`, `#if 0 / #elif 0`의 죽은 `#elif`는 **살아남을 수 있다(과대포함)**. 이는 의도된 tradeoff —
     영향/추적 도구에서 과대포함(죽은 함수 몇 개 더 노출)은 안전 방향이며, 실함수를 숨기거나 지우거나 ASIL을
@@ -307,13 +337,64 @@ def _dead_function_nodes(root, src: bytes) -> Set[int]:
                 if ch is alt or ch.type in ("preproc_else", "preproc_elif"):
                     continue  # else/elif(활성 후보)는 살림
                 for d in _walk(ch):
-                    if d.type == "function_definition":
+                    if d.type in node_types:
                         dead.add(d.id)
         elif cond_txt in _TRUTHY_COND and alt is not None:
             for d in _walk(alt):
-                if d.type == "function_definition":
+                if d.type in node_types:
                     dead.add(d.id)
     return dead
+
+
+def _dead_function_nodes(root, src: bytes) -> Set[int]:
+    """비활성 전처리 분기의 function_definition 노드 id 집합(`_dead_nodes` 참조)."""
+    return _dead_nodes(root, src, ("function_definition",))
+
+
+# 이 안의 `declaration` 은 파일 스코프가 아니다(지역 변수 · 멤버 · 열거자).
+_NOT_FILE_SCOPE = frozenset({"function_definition", "compound_statement", "struct_specifier", "union_specifier", "enum_specifier"})
+
+
+def _file_scope_declarations(root, src: bytes, dead: Optional[Set[int]] = None, stats: Optional[Dict[str, int]] = None):
+    """(R64 N73) 파일 스코프의 **살아 있는** 변수 선언 노드를 어느 깊이에서든 낸다 — `(node, is_extern)`.
+    `stats["error_rejected"]` 에 ERROR 때문에 버린 선언 수를 더한다(리뷰 W1 — 조용히 버리지 않는다).
+
+    옛 수집기 둘(`_extract_globals`·`_extract_global_decls`)은 `root.children` 만 봐서 `#ifndef X_H … #endif`(include guard)
+    안은 통째로 못 봤다. 실측(KJPDS02 178 파일 · PDS64 127 파일): 그렇게 놓친 산 선언이 **1,481 / 1,032개**(대부분 헤더의
+    extern 이지만 `.c` 의 `#ifdef` 안 정의도 있다 — `Lib_sha256.c`·`Ap_MotorCtrl_PDS.c`). 이름 집합이 비니 그 파일 함수의
+    `used_globals` 가 비어(KJPDS02 함수 107/681개), 문서 표엔 정본이 싣는 `s_nb_ctx` 가 없었다. `_extract_function_defs` 가
+    이미 전체 트리를 도는 것과 같은 규칙으로 맞춘다.
+    - 함수 본문·구조체/공용체/열거체 안의 선언은 제외(지역·멤버·열거자).
+    - 죽은 `#if 0` 분기(`_dead_nodes`)는 제외 — 최상위만 볼 땐 `preproc_if` 아래라 우연히 안 보였던 것을 규칙으로 만든다.
+    - 프로토타입(괄호 있는 선언)은 제외(옛 규칙 그대로).
+    - 이름이 `ERROR` 노드에서 나온 선언은 제외(`_ident_under_error`).
+    """
+    dead = dead if dead is not None else _dead_nodes(root, src, ("declaration",))
+    for node in _walk(root):
+        if node.type != "declaration" or node.id in dead:
+            continue
+        q = node.parent
+        skip = False
+        while q is not None:
+            if q.type in _NOT_FILE_SCOPE:
+                skip = True
+                break
+            q = q.parent
+        if skip:
+            continue
+        decl_text = _node_text(src, node)
+        # Skip function prototypes/declarations at file scope.
+        if "(" in decl_text and ")" in decl_text:
+            continue
+        ident = _decl_ident_node(node)
+        if ident is None or _ident_under_error(ident, node):
+            if stats is not None and ident is not None:
+                stats["error_rejected"] = stats.get("error_rejected", 0) + 1
+            continue
+        is_extern = any(
+            ch.type == "storage_class_specifier" and _node_text(src, ch).strip() == "extern" for ch in node.children
+        )
+        yield node, is_extern
 
 
 # (R62 N69) 위 판정의 **텍스트 판** — 정규식 경로는 트리가 없어 죽은 분기를 모른다.
@@ -1048,33 +1129,33 @@ def _extract_function_defs_regex_fallback(
     return functions
 
 
-def _extract_globals(root, src: bytes) -> List[str]:
+def _extract_globals(root, src: bytes, dead: Optional[Set[int]] = None, decls: Optional[List[Tuple[Any, bool]]] = None) -> List[str]:
+    """파일 스코프 변수 이름(어느 깊이든 — `_file_scope_declarations`). 함수의 `used_globals` 판정 집합.
+    `decls` 를 주면(파일당 한 번 걸은 결과) 다시 걷지 않는다(리뷰 I1)."""
     globals_list: List[str] = []
-    for node in root.children:
-        if node.type != "declaration":
-            continue
-        decl_text = _node_text(src, node)
-        # Skip function prototypes/declarations at global scope.
-        if "(" in decl_text and ")" in decl_text:
-            continue
+    for node, _ in (decls if decls is not None else _file_scope_declarations(root, src, dead)):
         name = _decl_ident(node)
         if name and name not in globals_list:
             globals_list.append(name)
     return globals_list
 
 
-def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
+def _extract_global_decls(
+    root, src: bytes, dead: Optional[Set[int]] = None, decls: Optional[List[Tuple[Any, bool]]] = None
+) -> List[Dict[str, str]]:
+    """파일 스코프 변수 선언 행(`_file_scope_declarations`). `is_extern` 은 소비자가 **선언이 정의를 덮지 않게** 쓰는 표지 —
+    include guard 안 헤더 extern 이 (R64) 수집되면서 한 이름에 선언 행이 여럿 생기는데, 순회 순서상 헤더가 뒤면 정의의
+    file·init·desc 를 헤더 것으로 갈아 끼우게 된다."""
     results: List[Dict[str, str]] = []
-    for node in root.children:
-        if node.type != "declaration":
-            continue
+    for node, is_extern in (decls if decls is not None else _file_scope_declarations(root, src, dead)):
         type_node = node.child_by_field_name("type")
         # ⚠ 익명 집합체는 본문이 통째로 들어온다 — 타입 *이름* 으로 줄인다.
         type_text = _normalize_type_text(_node_text(src, type_node)) if type_node else ""
+        # (R64 리뷰 W1) 직계 ERROR 가 있는 선언의 타입 필드는 못 믿는다 — `static __far const U8 *p;` 의 type 은 `__far` 다.
+        #   비워 두면 소비자가 선언문 텍스트(`decl`)에서 다시 읽는다.
+        if any(ch.type == "ERROR" for ch in node.children):
+            type_text = ""
         decl_text = _node_text(src, node)
-        # Skip function declarations/prototypes and function pointer typedef-like declarations.
-        if "(" in decl_text and ")" in decl_text:
-            continue
         range_text = ""
         range_source = ""
         if decl_text:
@@ -1119,6 +1200,7 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
                     "decl": decl_text,
                     "range_source": range_source,
                     "is_static": "true" if is_static else "false",
+                    "is_extern": "true" if is_extern else "false",
                     "desc": desc_text,
                 }
             )
@@ -1134,6 +1216,7 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
                         "decl": decl_text,
                         "range_source": range_source,
                         "is_static": "true" if is_static else "false",
+                        "is_extern": "true" if is_extern else "false",
                         "desc": desc_text,
                     }
                 )
@@ -1241,6 +1324,7 @@ def parse_c_project(
     globals_detailed: List[Dict[str, str]] = []
     scanned: List[str] = []
     preprocess_stats: Dict[str, int] = {"gcc": 0, "clang": 0, "no-preprocess": 0}
+    decl_stats: Dict[str, int] = {"error_rejected": 0}   # (R64 리뷰 W1) ERROR 때문에 버린 파일 스코프 선언 수
     parser = _make_parser()
     count = 0
     for dirpath, _, filenames in os.walk(root):
@@ -1277,10 +1361,20 @@ def parse_c_project(
             file_globals: Set[str] = set()
             funcs: List[CFunction] = []
             root_node = None
+            file_decls: List[Tuple[Any, bool]] = []
+            extern_names: Set[str] = set()
             if parser is not None:
                 tree = parser.parse(data)
                 root_node = tree.root_node
-                file_globals = set(_extract_globals(root_node, data))
+                # (R64 N73) 죽은 분기 판정과 파일 스코프 선언 순회는 파일당 **한 번**(리뷰 I1) — 이름 집합·extern 표지·상세 행이
+                #   같은 목록에서 나온다.
+                file_decls = list(
+                    _file_scope_declarations(root_node, data, _dead_nodes(root_node, data, ("declaration",)), decl_stats)
+                )
+                file_globals = set(_extract_globals(root_node, data, decls=file_decls))
+                # 아래 이름-only 행도 extern 표지를 실어야 한다 — 이 행엔 타입이 없어 소비자가 `file` 로 헤더를 귀속시키고
+                #   `_infer_type_from_file` 을 돌린다(첫 실측: 정의가 `.c` 에 있는 전역 750/401개의 file 이 헤더로 바뀌었다).
+                extern_names = {_decl_ident(n) for n, is_ext in file_decls if is_ext}
                 funcs = _extract_function_defs(root_node, data, str(path), file_globals)
             if not funcs:
                 funcs = _extract_function_defs_regex_fallback(raw_text, str(path), file_globals)
@@ -1312,8 +1406,11 @@ def parse_c_project(
                     if not g:
                         continue
                     globals_list.add(g)
-                    globals_detailed.append({"name": g, "file": str(path)})
-                for g in _extract_global_decls(root_node, data):
+                    # (R64 N73) 이 파일에서 extern 으로만 선언된 이름이면 표지를 단다(정의 행이 따로 있으면 그쪽이 false).
+                    globals_detailed.append(
+                        {"name": g, "file": str(path), "is_extern": "true" if g in extern_names else "false"}
+                    )
+                for g in _extract_global_decls(root_node, data, decls=file_decls):
                     if not isinstance(g, dict):
                         continue
                     name = g.get("name") or ""
@@ -1332,6 +1429,7 @@ def parse_c_project(
         "globals_detailed": globals_detailed,
         "scanned": scanned,
         "preprocess_stats": preprocess_stats,
+        "decl_error_rejected": decl_stats["error_rejected"],
         # 실제 파서 성공 여부를 정직하게 노출 — import 유무가 아니라 검증된 tree-sitter 파서인지.
         "parser_engine": "tree-sitter" if parser is not None else "regex-fallback",
     }

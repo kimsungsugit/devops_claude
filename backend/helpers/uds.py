@@ -1396,7 +1396,8 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R56 N52) v17: 함수 static 복원 · 프로토타입 한 줄 · called 텍스트 이름만 — 구 캐시가 히트하면 fix 가 프로덕션에서 발화하지 않는다.
 # (R62 N69) v18: 죽은 `#if 0` 함수 제거(함수 수·SwUFn 번호·Calling 칸이 바뀐다) · `@명령` 줄이 설명이던 것 · 헤더 문서 주석 · `comment_origin` 필드.
 # (R63 N70) v19: 죽은 `#if 0` 구간의 전역·매크로·프로토타입 제거(전역 표 행 · Reset 근거 · `lin_checksum` Prototype 이 바뀐다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v19"
+# (R64 N73) v20: tree-sitter 전역 수집이 include guard 안(어느 깊이든)의 산 선언을 본다 — `used_globals`·전역 표 행·타입/설명 출처가 바뀐다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v20"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
