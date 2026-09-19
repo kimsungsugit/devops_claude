@@ -98,9 +98,11 @@ from report_gen.source_parser import (  # noqa: E402
     _scan_source_comment_patterns,
     _short_def_path,
     _strip_c_comments,
+    extract_enum_domains,
     extract_header_function_docs,
     extract_struct_member_arrays,
     extract_struct_member_types,
+    extract_typedef_aliases,
     is_const_type,
     pick_header_doc,
     pick_header_prototype,
@@ -231,6 +233,90 @@ def _source_stage_provenance(
     asil, asil_src = _pick(comment_asil, ovr.get("asil"), sds_asil)
     related, related_src = _pick(comment_related, ovr.get("related"), sds_related)
     return asil, asil_src, related, related_src
+
+
+_PARAM_TAG_RE = re.compile(r"^\s*\[(?:IN|OUT|INOUT)\]\s*", re.I)
+
+
+def _annotate_typedef_bases(
+    globals_info_map: Dict[str, Dict[str, Any]],
+    function_details: Dict[str, Dict[str, Any]],
+    aliases: Dict[str, str],
+    enum_domains: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """(R73 N92) 별칭 타입을 원 선언으로 푼 값을 전역 레코드(`base_type`)와 함수 레코드(`param_base_types`)에 적고,
+    enum 타입이면 그 **닫힌 값 집합**(`value_domain` · `param_value_domains`)도 적는다.
+
+    풀린 것만 적는다 — 별칭이 아닌 선언엔 키를 만들지 않는다(없는 키 = 선언 그대로). 반환은 공시용 계수.
+    """
+    from report_gen.function_analyzer import split_param_annotations
+    from report_gen.source_parser import _TYPE_NOISE_RE, apply_c_type_width, infer_c_type_widths
+    from report_gen.source_parser import resolve_typedef as _resolve_alias
+
+    widths = infer_c_type_widths(aliases)
+    enums = enum_domains or {}
+    stats: Dict[str, Any] = {"aliases": len(aliases or {}), "globals_resolved": 0, "params_resolved": 0,
+                             "c_type_widths": dict(widths),
+                             "enum_types": len({(tuple(v.get("values") or []), tuple(v.get("names") or [])) for v in enums.values()}),
+                             "globals_with_enum_domain": 0, "params_with_enum_domain": 0}
+    if not aliases and not enums:
+        return stats
+
+    def resolve_typedef(decl: str, _aliases: Dict[str, str]) -> str:
+        # 별칭을 원 선언까지 푼 뒤, 그 원 선언이 기본 C 타입이면 프로젝트가 증언한 폭으로 읽는다
+        # (`U16` 을 거치지 않고 `unsigned int x` 로 바로 적힌 선언도 같은 폭을 받는다).
+        return apply_c_type_width(_resolve_alias(decl, _aliases), widths)
+
+    def enum_domain_of(*decls: str) -> Optional[Dict[str, Any]]:
+        # 선언 그대로(`enum en_g_DoorState`) · 별칭을 푼 선언 · 마지막 토큰(typedef 별칭 `e_ReProgSequence`) 순으로 찾는다.
+        for d in decls:
+            core = " ".join(_TYPE_NOISE_RE.sub(" ", str(d or "")).split())
+            for key in (core, core.split()[-1] if core else ""):
+                if key and key in enums:
+                    # 레코드엔 값 집합만 싣는다 — 이름·최소·최대는 payload 루트 `enum_domains[type]` 에 있다(리뷰 W6).
+                    return {"kind": "enum", "type": key, "values": list(enums[key]["values"])}
+        return None
+
+    for _rec in (globals_info_map or {}).values():
+        if not isinstance(_rec, dict):
+            continue
+        raw = str(_rec.get("type") or "").strip()
+        base = resolve_typedef(raw, aliases) if raw else ""
+        if base and base != raw:
+            _rec["base_type"] = base
+            stats["globals_resolved"] += 1
+        _dom = enum_domain_of(raw, _resolve_alias(raw, aliases)) if raw else None
+        if _dom:
+            _rec["value_domain"] = _dom
+            stats["globals_with_enum_domain"] += 1
+    for info in (function_details or {}).values():
+        if not isinstance(info, dict):
+            continue
+        resolved: Dict[str, str] = {}
+        domains: Dict[str, Dict[str, Any]] = {}
+        for raw_entry in list(info.get("inputs") or []) + list(info.get("outputs") or []):
+            s = split_param_annotations(_PARAM_TAG_RE.sub("", str(raw_entry or "").strip()))[0].strip()
+            if not s or re.match(r"^return\b", s, re.I):
+                continue
+            parts = s.replace("*", " * ").split()
+            if len(parts) < 2 or parts[-1] == "*":
+                continue
+            root = re.split(r"->|\.", parts[-1].strip("*&;,"), maxsplit=1)[0]
+            root = re.sub(r"(?:\[[^\]]*\])+$", "", root)
+            decl = " ".join(parts[:-1]).strip()
+            base = resolve_typedef(decl, aliases)
+            if root and base and base != decl and root not in resolved:
+                resolved[root] = base
+            _pdom = enum_domain_of(decl, _resolve_alias(decl, aliases)) if root else None
+            if _pdom and root not in domains:
+                domains[root] = _pdom
+        if resolved:
+            info["param_base_types"] = resolved
+            stats["params_resolved"] += len(resolved)
+        if domains:
+            info["param_value_domains"] = domains
+            stats["params_with_enum_domain"] += len(domains)
+    return stats
 
 
 def _header_origin_label(hdr_doc: Dict[str, str]) -> str:
@@ -498,6 +584,10 @@ def generate_uds_source_sections(
     # 타입 -> {멤버경로: {type, array, bits, desc}}. 배열 차원만 담는 위 맵과
     # **키는 같고 값이 다르다** — 소비처 계약(SUTS/SITS)이 달라 따로 낸다.
     struct_member_types: Dict[str, Dict[str, Dict[str, str]]] = {}
+    typedef_aliases: Dict[str, str] = {}
+    enum_domains: Dict[str, Dict[str, Any]] = {}
+    _typedef_conflicts: Set[str] = set()
+    _enum_conflicts: Set[str] = set()
     # ⚠ 함수 스코프에 둔다 — 접기는 `if parse_c_project is not None:` 안에서만
     #   일어나는데 payload 는 밖에서 쓴다. 안에 선언하면 파서 부재 시 NameError.
     struct_member_arrays: Dict[str, Dict[str, str]] = {}
@@ -686,6 +776,15 @@ def generate_uds_source_sections(
             struct_member_arrays_raw.setdefault(_sty, {}).update(_smm)
         # ⚠ **주석이 남은 원문**(`live_raw`)을 넘긴다. `text` 는 주석이 지워진 판이라 멤버의 자기 주석이
         #    통째로 사라진다(그 함수가 내부에서 길이 보존 blank 를 다시 한다).
+        # (R73 N92) 단순 typedef 별칭. 파일 열거 순서의 first-wins(같은 별칭이 다른 원형으로 또 나오면 첫 것).
+        # 같은 이름이 **다른 내용**으로 또 나오면(`#ifdef` 갈래·이식 계층) 어느 쪽이 이 빌드의 것인지 모른다 — first-wins 로
+        # 고르면 `infer_c_type_widths` 의 "상충 증언은 뺀다" 가 무력해진다(리뷰 W3). 충돌한 이름은 표에서 **뺀다**.
+        for _ta, _tb in extract_typedef_aliases(live_raw).items():
+            if typedef_aliases.setdefault(_ta, _tb) != _tb:
+                _typedef_conflicts.add(_ta)
+        for _en, _ed in extract_enum_domains(live_raw).items():
+            if enum_domains.setdefault(_en, _ed)["values"] != _ed["values"]:
+                _enum_conflicts.add(_en)
         for _sty, _smt in extract_struct_member_types(live_raw).items():
             _dst = struct_member_types.setdefault(_sty, {})
             for _mname, _mrec in _smt.items():
@@ -2619,7 +2718,21 @@ def generate_uds_source_sections(
                         if isinstance(sv, list) and sv:
                             info[gk] = list(sv)
 
+    # (R73 N92) typedef 별칭을 원 선언으로 풀어 **payload 에 싣는다** — 전역엔 `base_type`, 함수엔 `param_base_types`
+    #   (`{파라미터 root: 원 선언}`, 별칭이던 것만). 시험 생성기(SUTS·STS)가 경계값 타입을 풀 때 선언 옆에서 이걸 먼저 본다.
+    #   전역 상태 없이 캐시 payload 와 `function_details` 로 흐르므로 STS(details 만 받음)에도 닿는다.
+    for _cn in _typedef_conflicts:
+        typedef_aliases.pop(_cn, None)
+    for _cn in _enum_conflicts:
+        enum_domains.pop(_cn, None)
+    _td_stats = _annotate_typedef_bases(globals_info_map, function_details, typedef_aliases, enum_domains)
+    _td_stats["alias_conflicts"] = sorted(_typedef_conflicts)
+    _td_stats["enum_conflicts"] = sorted(_enum_conflicts)
+
     return {
+        "typedef_aliases": typedef_aliases,
+        "enum_domains": enum_domains,
+        "typedef_scan": _td_stats,
         "overview": "\n".join(overview_lines),
         "requirements": "\n".join(requirements_lines),
         "interfaces": "\n".join(interfaces_lines),

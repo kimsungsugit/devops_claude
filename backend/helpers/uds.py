@@ -1438,7 +1438,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   옛 `inference` 라벨 payload 가 그대로 나와 이 fix 가 프로덕션에서 발화하지 않는다(리뷰 C1 — 위 v12·v16~v22 와 같은 실패 모드).
 # (R70 N84) v24: 텍스트 폴백 루프의 Related 사슬에도 override 가 선다(AST 루프와 한 사슬) — tree-sitter 가 놓친 함수의
 #   `related`/`related_source` 가 바뀔 수 있다(라이브 두 루트 0건이지만 캐시 payload 안의 값이라 규약대로 올린다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v24"
+# (R73 N92) v25: `typedef_aliases`·`typedef_scan` 키, 전역 레코드 `base_type`, 함수 레코드 `param_base_types` — 구 캐시가 히트하면
+#   SUTS/STS 가 typedef 를 못 풀어 그 칸이 계속 `unknown`(빈 칸)으로 나온다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v25"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

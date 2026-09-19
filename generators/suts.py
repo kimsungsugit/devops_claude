@@ -1040,6 +1040,9 @@ def collect_unit_functions(
             "logic_flow": info.get("logic_flow") or [],
             "calls_list": info.get("calls_list") or [],
             "description": info.get("description", ""),
+            # (R73 N92) enum 타입 변수의 닫힌 값 집합(입력·기대·간접 전역) — 시퀀스가 경계값 대신 열거자 값을 쓴다.
+            "value_domains": _unit_value_domains(
+                info, gim, list(input_vars[:max_inp]) + list(output_vars[:max_out]) + list(indirect_vars)),
             "asil": asil,
             # 그 등급이 **어디서 왔나**. `sds-fuzzy-conflict` 는 "모듈명 부분문자열
             # 매칭에서 후보 등급이 갈렸고 그중 하나를 집었다" 는 뜻이다.
@@ -1047,7 +1050,11 @@ def collect_unit_functions(
             # (R70 N83) 소스에 없고 override 스냅샷에만 있는 함수 — 시험 대상인지는 사람이 정한다(P7). 세어서 보고한다.
             "override_only": bool(info.get("override_only")),
             # (R71 N77) 파라미터 선언 타입 — 시퀀스 생성이 전역 타입 캐시 위에 얹어 쓴다(`bool`·`U16*`·구조체 포인터).
-            "param_types": _param_decl_types(inputs_raw, outputs_raw),
+            #   (R73 N92) 선언이 모르는 타입(typedef)일 때만 소스 단계가 풀어 둔 원 선언(`param_base_types`)을 쓴다.
+            "param_types": {
+                _pn: _prefer_known_decl(_pd, (info.get("param_base_types") or {}).get(_pn))
+                for _pn, _pd in _param_decl_types(inputs_raw, outputs_raw).items()
+            },
             "srs_req_ids": srs_req_ids,
             "precondition": info.get("precondition", ""),
         })
@@ -1838,10 +1845,23 @@ def _gim_to_type_map(gim: Dict[str, Any]) -> Dict[str, str]:
     for var_name, info in (gim or {}).items():
         if not isinstance(info, dict):
             continue
-        vtype = str(info.get("type") or "").strip()
+        vtype = _prefer_known_decl(info.get("type"), info.get("base_type"))
         if vtype:
             out[str(var_name)] = vtype
     return out
+
+
+def _prefer_known_decl(decl: Any, base: Any) -> str:
+    """선언이 이미 아는 타입이면 **선언**, 모르는 타입일 때만 소스 단계가 typedef 를 풀어 둔 원 선언(`base_type`).
+
+    (R73 N92) 순서가 중요하다 — `U16` 은 표가 아는 이름인데 이 프로젝트에선 `typedef unsigned int U16` 이라, 풀린 쪽을
+    먼저 보면 폭을 모르는 `unsigned int` 가 되어 아는 타입 1,647칸이 도로 `unknown` 이 된다(첫 실측).
+    """
+    d = str(decl or "").strip()
+    b = str(base or "").strip()
+    if d and _normalize_type(d) not in ("", _UNKNOWN_TYPE):
+        return d
+    return b or d
 
 
 def set_globals_type_cache(gim: Dict[str, Dict[str, str]]) -> None:
@@ -1926,10 +1946,40 @@ def _normalize_type(raw: str) -> str:
 
 def get_boundary_values(typename: str) -> Dict[str, Any]:
     """타입 키 → 경계값 dict. `unknown`(선언은 있으나 모르는 타입)은 **빈 dict** — 값이 없다는 사실이 답이다."""
-    if typename == _UNKNOWN_TYPE:
+    if typename in (_UNKNOWN_TYPE, _ENUM_TYPE):
+        # `enum` 의 경계는 값 집합(`enum_bounds`)에서만 온다 — 여기로 오면 uint8 기본값으로 접혀 선언 도메인 밖 값이
+        # 선다(리뷰 C1: 같은 unit 표에 `BV_MAX=18` 과 `MCDC_BASE=255`).
         return {}
     normalized = typename.lower().replace(" ", "").replace("_t", "_t")
     return _TYPE_BOUNDARIES.get(normalized, _DEFAULT_BOUNDARY)
+
+
+_ENUM_TYPE = "enum"
+
+
+def enum_bounds(domain: Any) -> Dict[str, Any]:
+    """(R73 N92) enum 의 닫힌 값 집합 → 경계값 dict. 최소·최대·가운데 값은 **열거자 값 그대로**, 범위 밖은 ±1.
+
+    소스 단계가 적어 둔 `value_domain`(`{"values": [...]}`)에서만 만든다 — 값 집합을 모르면 빈 dict(지어내지 않는다).
+    """
+    try:
+        vals = sorted({int(v) for v in ((domain or {}).get("values") or [])})
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    if not vals:
+        return {}
+    return {"min_inv": vals[0] - 1, "min": vals[0], "mid": vals[len(vals) // 2], "max": vals[-1], "max_inv": vals[-1] + 1}
+
+
+def _unit_value_domains(info: Dict[str, Any], gim: Dict[str, Any], names: List[str]) -> Dict[str, Dict[str, Any]]:
+    """unit 변수 이름 → enum 값 집합. 파라미터(`param_value_domains`)가 같은 이름의 전역(`value_domain`)보다 앞선다."""
+    out: Dict[str, Dict[str, Any]] = {}
+    params = info.get("param_value_domains") or {}
+    for v in names:
+        dom = params.get(v) or ((gim.get(v) or {}).get("value_domain") if isinstance(gim.get(v), dict) else None)
+        if isinstance(dom, dict) and dom.get("values"):
+            out[v] = dom
+    return out
 
 
 def _param_decl_types(*raw_groups: List[str]) -> Dict[str, str]:
@@ -2046,6 +2096,16 @@ def generate_sequences(
     _base_cache = type_cache if type_cache is not None else _globals_type_cache
     _ptypes = unit.get("param_types") or {}
     type_cache = {**_base_cache, **_ptypes} if _ptypes else _base_cache
+    # (R73 N92) enum 값 집합이 있는 변수는 타입 `enum` — 경계값은 열거자의 최소/가운데/최대, 범위 밖은 ±1.
+    _domains = unit.get("value_domains") or {}
+
+    def _type_of(v: str) -> str:
+        return _ENUM_TYPE if enum_bounds(_domains.get(v)) else infer_variable_type(v, type_cache)
+
+    def _bounds_of(v: str, t: str) -> Dict[str, Any]:
+        if t == _ENUM_TYPE:
+            return enum_bounds(_domains.get(v))
+        return _get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t)
 
     if not input_vars and not output_vars:
         fn_name = unit.get("name", "function")
@@ -2093,7 +2153,7 @@ def generate_sequences(
         error_expected: Dict[str, Any] = {}
         # 이 경로도 타입을 기록하고(품질 리포트가 0 으로 오보하지 않게) 모르는 타입은 값을 비운다(리뷰 C2 —
         # 예전엔 `const ParamMapEntry_t *` 전역이 NORMAL 0 / ERROR 256 / 기대 255 를 받았다).
-        _ind_types = {_iv: infer_variable_type(_iv, type_cache) for _iv in indirect_vars}
+        _ind_types = {_iv: _type_of(_iv) for _iv in indirect_vars}
         unit["var_types"] = dict(_ind_types)
         unit["unknown_type_vars"] = [_iv for _iv, _t in _ind_types.items() if _t == _UNKNOWN_TYPE]
         if indirect_vars:
@@ -2101,10 +2161,7 @@ def generate_sequences(
                 _vtype = _ind_types[_iv]
                 if _vtype == _UNKNOWN_TYPE:
                     continue
-                _bounds = (
-                    _get_float_bounds_for_var(_iv) if _vtype == "float"
-                    else get_boundary_values(_vtype)
-                )
+                _bounds = _bounds_of(_iv, _vtype)
                 normal_inputs[_iv] = _bounds.get("mid", 0)
                 normal_expected[_iv] = _bounds.get("mid", 0)
                 error_inputs[_iv] = _bounds.get("max_inv", _bounds.get("max", 255) + 1)
@@ -2130,20 +2187,14 @@ def generate_sequences(
                          "description": f"{fn_name}() 반환값 검증: 반환값이 정의된 범위 내 유효한 값임을 확인"})
         return seqs[:max_seq]
 
-    var_types = {v: infer_variable_type(v, type_cache) for v in input_vars}
-    var_bounds = {
-        v: (_get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t))
-        for v, t in var_types.items()
-    }
+    var_types = {v: _type_of(v) for v in input_vars}
+    var_bounds = {v: _bounds_of(v, t) for v, t in var_types.items()}
 
-    out_types = {v: infer_variable_type(v, type_cache) for v in output_vars}
-    out_bounds = {
-        v: (_get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t))
-        for v, t in out_types.items()
-    }
+    out_types = {v: _type_of(v) for v in output_vars}
+    out_bounds = {v: _bounds_of(v, t) for v, t in out_types.items()}
     # 모르는 타입의 변수 — 값을 지어내지 않고 시퀀스에서 **비운다**. 어느 칸이 왜 비었는지는 unit 에 남겨 품질
     # 리포트가 센다(`unknown_type_vars`, 입력·출력·간접 전역을 한 번씩). 타입 분포도 같이 남긴다(라이브 대조용).
-    _ind_types = {gv: infer_variable_type(gv, type_cache) for gv in (unit.get("indirect_vars") or [])}
+    _ind_types = {gv: _type_of(gv) for gv in (unit.get("indirect_vars") or [])}
     unit["var_types"] = {**var_types, **out_types, **_ind_types}
     _unknown_vars = [v for v, t in unit["var_types"].items() if t == _UNKNOWN_TYPE]
     unit["unknown_type_vars"] = _unknown_vars
@@ -2211,7 +2262,8 @@ def generate_sequences(
 
     # GAP 6: MC/DC — Modified Condition/Decision Coverage
     # Extract conditions from logic_flow and generate True/False toggle per condition
-    _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars, type_cache)
+    _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars, type_cache,
+                                                bounds_of=lambda _v: _bounds_of(_v, _type_of(_v)))
     # Add baseline FIRST (all conditions at true values)
     if _mcdc_conditions:
         strategies.append(("MCDC_BASE", "_mcdc_base"))
@@ -2308,8 +2360,8 @@ def generate_sequences(
             # Add the global var as input with boundary value
             if gv_idx < len(_extra_globals):
                 gv = _extra_globals[gv_idx]
-                gv_type = infer_variable_type(gv, type_cache)
-                gv_bnd = _get_float_bounds_for_var(gv) if gv_type == "float" else get_boundary_values(gv_type)
+                gv_type = _ind_types.get(gv) or _type_of(gv)
+                gv_bnd = _bounds_of(gv, gv_type)
                 inp_vals[gv] = _format_test_value(gv_bnd.get("min", 0), var_types.get(gv, gv_type) if gv in var_types else gv_type)
             for v in output_vars:
                 bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
@@ -2320,8 +2372,8 @@ def generate_sequences(
                 bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
                 inp_vals[v] = _format_test_value(bnd.get("max_inv", bnd.get("max", 255) + 1), var_types.get(v, "uint8_t"))
             for gv in _extra_globals:
-                gv_type = infer_variable_type(gv, type_cache)
-                gv_bnd = _get_float_bounds_for_var(gv) if gv_type == "float" else get_boundary_values(gv_type)
+                gv_type = _ind_types.get(gv) or _type_of(gv)
+                gv_bnd = _bounds_of(gv, gv_type)
                 exp_vals[gv] = _format_test_value(gv_bnd.get("mid", 0), gv_type)
         elif bound_key and bound_key.startswith("_cond_"):
             # Condition combination: toggle one input to min, others stay at mid
@@ -2533,8 +2585,13 @@ def _extract_mcdc_conditions(
     logic_flow: List[Dict[str, Any]],
     input_vars: List[str],
     type_cache: Optional[Dict[str, str]] = None,
+    bounds_of: Optional[Any] = None,
 ) -> List[Tuple[str, str, Any, Any, Any]]:
     """Extract MC/DC-relevant conditions from logic_flow.
+
+    `bounds_of(var) -> dict`: 호출자(`generate_sequences`)의 경계 해상 — 파라미터 선언·enum 값 집합을 아는 쪽이다.
+    (R73 리뷰 C1) 없으면 전역 타입 캐시만 본다. 경계를 모르는 변수(`{}`)끼리의 비교는 조건으로 내지 않는다 —
+    예전 `.get("max", 255)` 폴백은 모르는 타입에 uint8 을 지어냈다.
 
     Returns list of (variable, operator, threshold, true_value, false_value) tuples.
     For 'if (A > 10)': variable=A, op='>', threshold=10, true_val=11, false_val=10 (boundary value)
@@ -2553,13 +2610,13 @@ def _extract_mcdc_conditions(
         if ntype != "if":
             # Recurse
             for child in node.get("children", []):
-                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache))
+                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache, bounds_of))
             continue
 
         cond = str(node.get("condition", "")).strip()
         if not cond:
             for child in node.get("children", []):
-                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache))
+                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache, bounds_of))
             continue
 
         # Parse conditions: "var > 10", "var >= other_var", "var == CONST"
@@ -2608,11 +2665,16 @@ def _extract_mcdc_conditions(
                 if m2:
                     rhs_var = m2.group(1)
                     # Use boundary values of the input variable for MC/DC toggle
-                    iv_type = infer_variable_type(iv, type_cache)
-                    iv_bnd = (
-                        _get_float_bounds_for_var(iv) if iv_type == "float"
-                        else get_boundary_values(iv_type)
-                    )
+                    if bounds_of is not None:
+                        iv_bnd = bounds_of(iv) or {}
+                    else:
+                        iv_type = infer_variable_type(iv, type_cache)
+                        iv_bnd = (
+                            _get_float_bounds_for_var(iv) if iv_type == "float"
+                            else get_boundary_values(iv_type)
+                        )
+                    if not iv_bnd:
+                        continue   # 경계를 모르는 변수 — 토글 값을 지어내지 않는다
                     mid = iv_bnd.get("mid", 127)
                     bmin = iv_bnd.get("min", 0)
                     bmax = iv_bnd.get("max", 255)
@@ -2636,7 +2698,7 @@ def _extract_mcdc_conditions(
 
         # Recurse into children
         for child in node.get("children", []):
-            conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache))
+            conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache, bounds_of))
 
     return conditions
 

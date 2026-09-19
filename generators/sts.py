@@ -1537,19 +1537,22 @@ def _generate_simple_steps(
     # Lazy import once (shared via mutable default)
     if "ready" not in _import_cache:
         try:
-            from generators.suts import get_boundary_values, infer_variable_type, type_from_name_pattern
+            from generators.suts import enum_bounds, get_boundary_values, infer_variable_type, type_from_name_pattern
             _import_cache["get_bv"] = get_boundary_values
             _import_cache["infer_type"] = infer_variable_type
             _import_cache["name_type"] = type_from_name_pattern
+            _import_cache["enum_bounds"] = enum_bounds
         except Exception:
             _import_cache["get_bv"] = None
             _import_cache["infer_type"] = None
             _import_cache["name_type"] = None
+            _import_cache["enum_bounds"] = None
         _import_cache["ready"] = True
 
     get_boundary_values = _import_cache["get_bv"]
     infer_variable_type = _import_cache["infer_type"]
     type_from_name_pattern = _import_cache["name_type"]
+    enum_bounds = _import_cache.get("enum_bounds")
 
     name = func_info.get("name", "function")
     inputs = func_info.get("inputs") or []
@@ -1564,15 +1567,26 @@ def _generate_simple_steps(
     var_cache: Dict[str, Dict[str, Any]] = {}  # vname → boundary dict (비어 있으면 경계값 없음)
     var_names: Dict[str, str] = {}             # 원시 엔트리 → 변수명
     if inputs and get_boundary_values and infer_variable_type:
+        _base_types = func_info.get("param_base_types") or {}
         for inp in inputs[:5]:
             decl_type, vname = _split_param_decl(inp)
             var_names[str(inp)] = vname
             if vname not in var_cache:
+                # (R73 N92) enum 파라미터는 소스가 값 집합을 적어 둔 타입이다 — 경계값은 열거자의 최소/최대, 범위 밖은 최대+1.
+                _edom = (func_info.get("param_value_domains") or {}).get(vname)
+                _eb = enum_bounds(_edom) if (enum_bounds and _edom) else {}
+                if _eb:
+                    var_cache[vname] = _eb
+                    continue
                 try:
                     # 선언이 없는 입력은 이름 규칙이 말할 때만 — 기본값 uint8 로 0/255 를 지어내지 않는다(리뷰 W1.
                     #   KJPDS02 실측 입력 981건 중 선언 없는 것 0건이지만 생산자가 바뀌면 이 경로가 열린다).
                     if decl_type:
                         vtype = infer_variable_type(vname, {vname: decl_type})
+                        # (R73 N92) 선언이 모르는 타입(typedef)일 때만 소스 단계가 풀어 둔 원 선언을 본다
+                        #   (`EEPROM_TAddress` → `word *`). 아는 선언(`U16`)은 그대로 — SUTS `_prefer_known_decl` 과 같은 순서.
+                        if vtype == "unknown" and _base_types.get(vname):
+                            vtype = infer_variable_type(vname, {vname: str(_base_types[vname])})
                     else:
                         vtype = (type_from_name_pattern(vname) if type_from_name_pattern else "") or "unknown"
                     var_cache[vname] = get_boundary_values(vtype) or {}

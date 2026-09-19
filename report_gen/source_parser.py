@@ -493,6 +493,166 @@ def _extract_c_macro_defs(text: str) -> List[Tuple[str, str]]:
 #:   전폭 별칭(`REG_X.Byte`)에 레지스터 설명을 쓸 수 있는지 판단하는 근거가 된다.
 #:   기존 소비자(`extract_struct_member_arrays`)는 `.start()` 만 쓰므로 영향 없다.
 _STRUCT_HEAD_RE = re.compile(r"typedef\s+(struct|union)\b[^{;]*\{")
+
+# (R73 N92) 단순 typedef 별칭 — `typedef word * EEPROM_TAddress;` · `typedef unsigned long UINT32;` · `typedef U8 Buf_t[8];`.
+#   본문 `{…}` 이 있는 aggregate 와 함수 포인터(`(`)는 여기 대상이 아니다(그건 스칼라가 아니다).
+_SIMPLE_TYPEDEF_RE = re.compile(r"\btypedef\s+([^;{}()]+?)\s*;")
+_TYPEDEF_BODY_RE = re.compile(r"^(?P<base>.+?)(?P<stars>[\s\*]*)\b(?P<alias>[A-Za-z_]\w*)\s*(?P<arr>(?:\[[^\]]*\])*)$")
+_TYPE_NOISE_RE = re.compile(r"\b(?:const|volatile|static|register|__?(?:far|near|huge))\b|[\*&]|\[[^\]]*\]")
+
+
+def extract_typedef_aliases(text: str) -> Dict[str, str]:
+    """`별칭 -> 원 선언`(포인터·배열 표기 포함). 주석은 가린다. 같은 별칭은 first-wins.
+
+    SUTS/STS 의 경계값 타입 해상은 선언을 표(`uint8_t`·`word`…)와 **정확 일치**로만 읽는다(R71) — 프로젝트 typedef
+    (`EEPROM_TAddress`·`UINT32`)는 표에 없어 `unknown` 이 됐고 그 칸은 값을 비웠다(KJPDS02 run 2118: 426칸). 별칭을
+    원 선언까지 풀어 주면 그 칸이 **실제 타입**으로 돌아온다 — 추측이 아니라 소스의 선언이다.
+    """
+    out: Dict[str, str] = {}
+    if not text or "typedef" not in text:
+        return out
+    masked = _blank_c_comments(text)
+    for m in _SIMPLE_TYPEDEF_RE.finditer(masked):
+        # 다중 선언자(`typedef unsigned char U8, *PU8;`)는 선언자마다 같은 base 를 나눠 갖는다(리뷰 W2 — 통짜로 읽으면
+        # 주 별칭 `U8` 이 사라지고 `PU8 -> "unsigned char U8, *"` 라는 쓰레기가 남는다).
+        parts = [" ".join(x.split()) for x in m.group(1).split(",")]
+        first = _TYPEDEF_BODY_RE.match(parts[0]) if parts and parts[0] else None
+        if not first:
+            continue
+        base = first.group("base").strip()
+        if not base:
+            continue
+        decls = [(first.group("alias"), first.group("stars"), first.group("arr"))]
+        for extra in parts[1:]:
+            em = re.match(r"^(?P<stars>[\s\*]*)(?P<alias>[A-Za-z_]\w*)\s*(?P<arr>(?:\[[^\]]*\])*)$", extra)
+            if em:
+                decls.append((em.group("alias"), em.group("stars"), em.group("arr")))
+        for alias, stars, arr in decls:
+            if alias == base:
+                continue
+            out.setdefault(alias, base + (" *" if "*" in (stars or "") else "") + (arr or ""))
+    return out
+
+
+_ENUM_HEAD_RE = re.compile(r"\b(?P<td>typedef\s+)?enum\b\s*(?P<tag>[A-Za-z_]\w*)?\s*\{")
+_ENUM_INT_RE = re.compile(r"^[-+]?(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*$")
+
+
+def extract_enum_domains(text: str) -> Dict[str, Dict[str, Any]]:
+    """`타입 이름 -> {"min", "max", "values": [...], "names": [...]}` — enum 의 **닫힌 값 집합**.
+
+    (R73 N92) enum 타입 변수는 경계값 표에 없어 `unknown`(값 비움)이었다(KJPDS02 in-scope 423칸 중 enum 이 150칸 이상).
+    그런데 enum 은 소스가 값의 전부를 적어 둔 타입이다 — 최소·최대·범위 밖(±1)을 지어내지 않고 **읽을 수 있다**.
+    키는 `enum Tag` 와 typedef 별칭이다(맨 태그 이름은 키가 아니다 — 아래 주석). 열거자 값이 정수 리터럴이 아니면
+    (매크로·수식) 그 enum 은 **통째로 뺀다** — 일부만 아는 값 집합으로 최소·최대를 말하지 않는다.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not text or "enum" not in text:
+        return out
+    masked = _blank_c_comments(text)
+    for head in _ENUM_HEAD_RE.finditer(masked):
+        i = masked.index("{", head.start())
+        j = _balanced_block(masked, i)
+        if j <= i:
+            continue
+        names: List[str] = []
+        values: List[int] = []
+        cur = -1
+        ok = True
+        for item in masked[i + 1:j].split(","):
+            item = " ".join(item.split())
+            if not item:
+                continue
+            name, _, init = item.partition("=")
+            name, init = name.strip(), init.strip()
+            if not re.match(r"^[A-Za-z_]\w*$", name):
+                ok = False
+                break
+            if init:
+                if not _ENUM_INT_RE.match(init):
+                    ok = False
+                    break
+                cur = int(re.sub(r"[uUlL]+$", "", init), 0)
+            else:
+                cur += 1
+            names.append(name)
+            values.append(cur)
+        if not ok or not values:
+            continue
+        dom = {"min": min(values), "max": max(values), "values": values, "names": names}
+        keys: List[str] = []
+        tag = head.group("tag")
+        if tag:
+            # ⚠ 맨 태그 이름(`Tag`)은 키가 아니다(리뷰 W1) — C 에서 `enum Mode` 와 `typedef struct {…} Mode;` 는 다른
+            #   이름공간이라 공존하고, 맨 이름으로 찾으면 구조체 변수가 enum 경계값을 받는다. 태그는 `enum Tag` 꼴로만 쓴다.
+            keys.append(f"enum {tag}")
+        if head.group("td"):
+            # typedef 꼬리의 **첫 선언자**가 별칭이다(`typedef enum {…} E, *PE;` 도 `E`).
+            end = masked.find(";", j + 1)
+            tail_m = re.match(r"\s*([A-Za-z_]\w*)", masked[j + 1:end if end > j else j + 1])
+            if tail_m:
+                keys.append(tail_m.group(1))
+        for k in keys:
+            out.setdefault(k, dom)
+    return out
+
+
+_WIDTH_ALIAS_RE = re.compile(r"^[vl]?_?(?P<sign>u|s|uint|sint|int)(?P<bits>8|16|32)(?:_t)?$", re.I)
+_PLAIN_C_TYPES = frozenset({
+    "char", "signed char", "unsigned char", "short", "short int", "signed short", "signed short int", "unsigned short",
+    "unsigned short int", "int", "signed", "signed int", "unsigned", "unsigned int", "long", "long int", "signed long",
+    "signed long int", "unsigned long", "unsigned long int",
+})
+
+
+def infer_c_type_widths(aliases: Dict[str, str]) -> Dict[str, str]:
+    """프로젝트의 typedef 가 **증언하는** 기본 C 타입의 폭 — `typedef unsigned int U16;` 이면 이 타깃의 `unsigned int` 는 16비트다.
+
+    `int`/`long` 의 폭은 타깃마다 다르다(S12Z 계열은 int 16비트)라 표로 가정하지 않는다(R71 W1). 대신 폭을 이름에 적은
+    별칭(`U16`·`UINT32`·`s8`·`uint8_t`)이 어떤 기본 타입 위에 서 있는지를 읽는다. 같은 기본 타입에 다른 폭이 증언되면
+    (이식 계층이 섞인 프로젝트) 그 타입은 **뺀다** — 모르는 것으로 둔다.
+    """
+    seen: Dict[str, Set[str]] = {}
+    for alias, decl in (aliases or {}).items():
+        m = _WIDTH_ALIAS_RE.match(str(alias))
+        if not m or "*" in str(decl) or "[" in str(decl):
+            continue
+        base = " ".join(_TYPE_NOISE_RE.sub(" ", str(decl)).lower().split())
+        if base not in _PLAIN_C_TYPES:
+            continue
+        unsigned = m.group("sign").lower() in ("u", "uint")
+        seen.setdefault(base, set()).add(f"{'uint' if unsigned else 'int'}{m.group('bits')}_t")
+    return {base: next(iter(kinds)) for base, kinds in seen.items() if len(kinds) == 1}
+
+
+def apply_c_type_width(decl: str, widths: Dict[str, str]) -> str:
+    """선언의 기본 C 타입을 프로젝트가 증언한 폭 타입으로 바꾼다(`unsigned int *` → `uint16_t *`). 증언이 없으면 그대로."""
+    cur = str(decl or "").strip()
+    if not cur or not widths:
+        return cur
+    base = " ".join(_TYPE_NOISE_RE.sub(" ", cur).lower().split())
+    if base not in widths:
+        return cur
+    return widths[base] + (" *" if ("*" in cur or "[" in cur) else "")
+
+
+def resolve_typedef(decl: str, aliases: Dict[str, str], max_depth: int = 6) -> str:
+    """선언의 타입 이름이 별칭이면 원 선언까지 따라간다(사슬 `max_depth`, 순환은 멈춘다). 별칭이 아니면 그대로."""
+    cur = str(decl or "").strip()
+    seen: Set[str] = set()
+    for _ in range(max_depth):
+        toks = _TYPE_NOISE_RE.sub(" ", cur).split()
+        if not toks or toks[-1] not in (aliases or {}) or toks[-1] in seen:
+            break
+        seen.add(toks[-1])
+        nxt = str(aliases[toks[-1]]).strip()
+        if not nxt or nxt == cur:
+            break
+        # 포인터·배열 표기는 잃지 않는다(읽는 쪽은 어차피 가리키는/원소 타입으로 본다 — 표기는 사실 보존용).
+        if ("*" in cur or "[" in cur) and "*" not in nxt and "[" not in nxt:
+            nxt = nxt + " *"
+        cur = nxt
+    return cur
 _STRUCT_TAIL_RE = re.compile(r"\s*(\w+)\s*;")
 _INNER_HEAD_RE = re.compile(r"(struct|union)\s*\{")
 # 멤버 선언: `UINT8 LIN_data[LIN_MAX_DATA_BYTES];` · `S16 t[3][4];`
