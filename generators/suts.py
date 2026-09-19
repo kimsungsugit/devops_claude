@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.uds_unit_io import resolve_unit_io
@@ -358,6 +359,8 @@ def _resolve_unit_asil(info: Dict[str, Any],
             nk = _norm(key)
             if not nk or is_sds_placeholder_key(nk):
                 continue
+            # ⚠ (R76 N106) STS 요구 매핑은 토큰 경계 규칙(`contains_at_token_start`)으로 갔지만 **여기는 일부러 그대로**다 —
+            #   `test_empty_grade_first_match_still_stops_the_pick` 이 묶는 결정(고치면 정본 대비 over 88→108).
             if nc == nk or nc in nk or nk in nc:
                 got = str(value.get("asil") or "").strip()
                 if picked is None:
@@ -428,6 +431,9 @@ _TYPE_BOUNDARIES: Dict[str, Dict[str, Any]] = {
     "bit":      {"min_inv": -1,     "min": 0,       "mid": 0,    "max": 1,       "max_inv": 2},
 }
 _DEFAULT_BOUNDARY = {"min_inv": -1, "min": 0, "mid": 127, "max": 255, "max_inv": 256}
+
+#: 범위 밖 입력의 기대값을 모를 때 값 앞에 붙는 표시 — 쓰는 곳(기대값)과 세는 곳(품질 리포트)이 같은 상수를 본다.
+_VERIFY_NEEDED_PREFIX = "[검증 필요]"
 
 # Known C types where out-of-range input defaults to saturation (no "[검증 필요]")
 # Unsigned types: deterministic wrap/saturation.
@@ -1869,6 +1875,24 @@ def _gim_to_type_map(gim: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+def _gim_typedef_resolved(gim: Dict[str, Any]) -> set:
+    """`_gim_to_type_map` 이 **풀린 원 선언(`base_type`)을 고른** 변수 이름들(R76 N94).
+
+    타입맵은 문자열만 실어 "선언이 그대로 아는 타입" 과 "typedef 를 풀어서 안 타입" 이 같은 모양이다. 영향도 초안은
+    타입의 근거를 라벨로 보이므로(`globals_map`) 그 둘을 가를 수 있어야 한다 — 별칭 해상은 소스 단계의 추론 한 단계다.
+    판정은 `_prefer_known_decl` 과 같은 식을 쓴다(선언이 모르는 타입이고 풀린 값이 있을 때).
+    """
+    out: set = set()
+    for var_name, info in (gim or {}).items():
+        if not isinstance(info, dict):
+            continue
+        decl = str(info.get("type") or "").strip()
+        base = str(info.get("base_type") or "").strip()
+        if base and _prefer_known_decl(decl, base) == base and base != decl:
+            out.add(str(var_name))
+    return out
+
+
 def _prefer_known_decl(decl: Any, base: Any) -> str:
     """선언이 이미 아는 타입이면 **선언**, 모르는 타입일 때만 소스 단계가 typedef 를 풀어 둔 원 선언(`base_type`).
 
@@ -2186,6 +2210,14 @@ def generate_sequences(
         return t
 
     _range_conflicts: List[str] = []
+    _pointer_ranges: List[str] = []
+
+    def _is_pointer_decl(v: str) -> bool:
+        # 선언 문자열에 `*`·`[` 가 있으면 주소를 받는 자리다(`U16 *Values` · `const U8*` · `U8[]`). 경계값의 타입은 가리키는
+        # 타입이다(R71). ⚠ 파라미터 선언 파서(`_param_decl_types`)는 배열 대괄호를 버려 `U8 buf[]` 가 `U8` 로 온다 — 그 경우는
+        #   여전히 "문서 오류 후보" 로 세인다(값은 같다: 타입 전폭). 계획서 R76 이월 N108.
+        _decl = str(type_cache.get(v) or "")
+        return "*" in _decl or "[" in _decl
 
     def _declared(v: str) -> bool:
         # 타입이 **선언**에서 왔는가(전역 선언·파라미터 선언). 이름 패턴·기본값은 추측이다.
@@ -2199,8 +2231,12 @@ def generate_sequences(
         tb = _TYPE_BOUNDARIES.get(t) if t in _TYPE_BOUNDARIES and t != "float" and _declared(v) else None
         if tb and (rb["min"] < tb["min"] or rb["max"] > tb["max"]):
             _msg = f"{v}({src} {rb['min']}~{rb['max']} vs {t})"
-            if _msg not in _range_conflicts:
-                _range_conflicts.append(_msg)
+            # (R76 N98) 포인터 파라미터에 문서가 적은 범위는 **주소 범위**다(`0 ~ 0xFFFFFFFF`) — 가리키는 타입(`U16`)에
+            #   안 들어가는 게 당연하고 문서 오류가 아니다. 값은 예전과 같이 타입 전폭으로 가고(주소로 경계값을 만들지
+            #   않는다), 계수만 "문서 오류 후보" 에서 떼어 따로 센다. 가리키는 타입에 **들어가는** 범위는 위에서 이미 쓰였다.
+            _bucket = _pointer_ranges if _is_pointer_decl(v) else _range_conflicts
+            if _msg not in _bucket:
+                _bucket.append(_msg)
             return False
         return True
 
@@ -2318,6 +2354,7 @@ def generate_sequences(
         _bounds_of(_gv, _gt)       # 간접 전역의 출처도 남긴다(값은 쓰는 자리에서 다시 구한다)
     unit["bounds_source"] = _bsrc
     unit["range_conflicts"] = _range_conflicts
+    unit["pointer_address_ranges"] = _pointer_ranges
 
     logic_flow = unit.get("logic_flow") or []
 
@@ -2688,7 +2725,7 @@ def _infer_expected_for_strategy(
         if _is_known_type:
             return bmin   # type-inferred saturation to lower bound
         raw = bounds.get("min_inv", bmin)
-        return f"[검증 필요] {raw}"
+        return f"{_VERIFY_NEEDED_PREFIX} {raw}"
 
     if strategy_key == "max_inv":
         if is_bit:
@@ -2700,7 +2737,7 @@ def _infer_expected_for_strategy(
         if _is_known_type:
             return bmax   # type-inferred saturation to upper bound
         raw = bounds.get("max_inv", bmax)
-        return f"[검증 필요] {raw}"
+        return f"{_VERIFY_NEEDED_PREFIX} {raw}"
 
     if strategy_key == "min":
         if is_bit:
@@ -3386,8 +3423,8 @@ def generate_suts_xlsm(
                 cell.border = thin
                 if g_end > g_start:
                     try:
-                        ws.merge_cells(start_row=g_start, start_column=col,
-                                       end_row=g_end, end_column=col)
+                        # (R76 N103) 새로 만든 시트의 순차 블록 — 포함 검사(O(기존 병합 수)) 없는 경로(`_xlsx_merge`).
+                        merge_fresh(ws, g_start, col, g_end, col)
                     except Exception as exc:  # noqa: BLE001
                         _logger.debug("seq group merge skipped (%s%d:%d): %s",
                                       get_column_letter(col), g_start, g_end, exc)
@@ -3401,10 +3438,7 @@ def generate_suts_xlsm(
         if end_row > tc_def_row:
             for mc in merge_cols:
                 try:
-                    ws.merge_cells(
-                        start_row=tc_def_row, start_column=mc,
-                        end_row=end_row, end_column=mc,
-                    )
+                    merge_fresh(ws, tc_def_row, mc, end_row, mc)
                 except Exception as exc:  # noqa: BLE001
                     _logger.debug("TC meta merge skipped (col %d, %d:%d): %s",
                                   mc, tc_def_row, end_row, exc)
@@ -3706,6 +3740,16 @@ def generate_suts_quality_report(
     for u in units:
         for s in (u.get("bounds_source") or {}).values():
             bounds_src_dist[str(s)] = bounds_src_dist.get(str(s), 0) + 1
+    # (R76 N97) 요구 ID 가 **무슨 근거로** 붙었나(`sds_partition` · `sts_mapping` · 둘 다 · `hsis`) — 예전엔 unit 에만 있었다.
+    req_link_dist: Dict[str, int] = {}
+    for u in units:
+        if str(u.get("srs_req_ids") or "").strip():
+            k = str(u.get("srs_req_link") or "") or "unrecorded"
+            req_link_dist[k] = req_link_dist.get(k, 0) + 1
+    # (R76 N95) 범위 밖 입력의 기대값을 **모른다**고 적은 칸(`[검증 필요] N`) — 마커는 정직하지만 몇 칸인지는 어디에도 없었다.
+    verify_needed = sum(
+        1 for u in units for q in all_sequences.get(u["fid"], [])
+        for val in (q.get("expected") or {}).values() if str(val).startswith(_VERIFY_NEEDED_PREFIX))
     unknown_slots = 0
     units_with_unknown = 0
     for u in units:
@@ -3725,6 +3769,11 @@ def generate_suts_quality_report(
         # 문서의 범위가 선언 타입을 넘어 쓰지 않은 것(문서 오류 후보) — 중복 제거한 이름 목록 앞 20개와 수.
         "range_conflicts": sorted({c for u in units for c in (u.get("range_conflicts") or [])})[:20],
         "range_conflict_count": len({c for u in units for c in (u.get("range_conflicts") or [])}),
+        # (R76 N98) 포인터 선언에 적힌 주소 범위 — 문서 오류가 아니라 **다른 축**이라 위 수에서 뺐다(값 처리는 같다: 타입 전폭).
+        "pointer_address_range_count": len({c for u in units for c in (u.get("pointer_address_ranges") or [])}),
+        "pointer_address_ranges": sorted({c for u in units for c in (u.get("pointer_address_ranges") or [])})[:20],
+        "srs_req_link_distribution": req_link_dist,
+        "verify_needed_expected_slots": verify_needed,
         "units_with_srs_req_ids": sum(1 for u in units if str(u.get("srs_req_ids") or "").strip()),
         "unknown_type_var_slots": unknown_slots,
         "units_with_unknown_type_vars": units_with_unknown,
@@ -4242,6 +4291,13 @@ def generate_suts(
     #   후보 0건, 요구 ID 가 붙은 unit 0/933(라이브 로그 "0 units have req IDs now"). 요구는 함수 이름을 적지 않는다.
     #   STS 가 쓰는 요구→함수 매핑(`map_requirements_to_functions`: 주석 Related · SwDS 파티션 · SwUDS 설계-ID 브리지)을
     #   그대로 뒤집어 쓴다 — 같은 실측에서 896/933 unit 에 닿는다. 두 문서가 **같은 매핑**을 봐야 추적성이 맞는다.
+    # (R76 N101) 보강 블록은 실패해도 생성을 막지 않는다(넓은 except) — 그래서 실패가 **로그에만** 남았고, 산출물은
+    #   "요구 ID 없음"·"설명 없음" 으로만 보였다. 어느 단계가 왜 죽었는지 품질 리포트와 검증 경고에 싣는다.
+    _enrich_errors: List[Dict[str, str]] = []
+
+    def _enrich_failed(stage: str, exc: BaseException) -> None:
+        _enrich_errors.append({"stage": stage, "error": f"{type(exc).__name__}: {exc}"[:300]})
+
     with _resolved_doc_input(srs_docx_path, "SRS") as _srs_local:
         if _srs_local:
             _progress(36, "SRS 요구사항 ID 보강 중")
@@ -4267,8 +4323,9 @@ def generate_suts(
                         "(설계 ID 브리지 %s) — 요구 ID 보유 unit %d",
                         len(srs_reqs), _linked, len(units), "on" if _design_ids else "off",
                         sum(1 for u in units if u.get("srs_req_ids")))
-            except Exception as _e:
+            except Exception as _e:  # noqa: BLE001 — 보강 실패가 생성을 막지 않는다. 대신 공시한다
                 _logger.warning("SRS enrichment skipped: %s", _e)
+                _enrich_failed("srs_req_ids", _e)
 
     # ── UDS function description enrichment ──────────────────────────────
     with _resolved_doc_input(uds_path, "UDS") as _uds_local:
@@ -4286,8 +4343,9 @@ def generate_suts(
                             unit["description"] = uds_desc
                             enriched_count += 1
                     _logger.info("UDS descriptions enriched for %d units", enriched_count)
-            except Exception as _e:
+            except Exception as _e:  # noqa: BLE001
                 _logger.warning("UDS description enrichment skipped: %s", _e)
+                _enrich_failed("uds_description", _e)
 
             # ── 설계 ID(SwUFn_xxxx) — SUDS 칸과 TC_ID 의 근거 ──────────────
             # 정본 실측: `TC_ID = "SwUTC_" + SUDS` 가 1,013/1,014 에서 성립한다.
@@ -4309,6 +4367,7 @@ def generate_suts(
                     )
             except Exception as _e:  # noqa: BLE001
                 _logger.warning("UDS design-id enrichment skipped: %s", _e)
+                _enrich_failed("uds_design_ids", _e)
 
     # ── 시험 범위 — 기본은 **SwUDS 기반**(정본과 같은 범위) ────────────────────
     #
@@ -4341,6 +4400,7 @@ def generate_suts(
                 _hsis_data = _load_hsis_signals(_hsis_local)
             except Exception as _hsis_exc:
                 _logger.warning("HSIS 파싱 실패 — 보강 생략: %s", _hsis_exc)
+                _enrich_failed("hsis_parse", _hsis_exc)
     if _hsis_data:
         try:
             _hsis_signals = _hsis_data.get("signals", [])
@@ -4401,6 +4461,7 @@ def generate_suts(
                              enriched_hsis, len(_hsis_signals))
         except Exception as _hsis_exc:
             _logger.warning("HSIS enrichment skipped: %s", _hsis_exc)
+            _enrich_failed("hsis_enrichment", _hsis_exc)
 
     if globals_info_map:
         set_globals_type_cache(globals_info_map)
@@ -4506,6 +4567,10 @@ def generate_suts(
     # (R75) 어느 프로파일로 만들었나 · 확장 전략이 덧붙인 시퀀스 수(기본이면 0).
     quality["tc_profile"] = _profile
     quality["tc_profile_unknown_value"] = _profile_bad
+    # (R76 N104) 세 생성기가 같은 두 키로 "요청한 상한 / 실제로 건 상한" 을 말한다(SITS 가 먼저 썼다). `None` = 상한 없음.
+    quality["caps_requested"] = {"max_sequences": max_sequences}
+    quality["caps_effective"] = {"max_sequences": None if _extended else max_sequences}
+    quality["enrichment_errors"] = _enrich_errors
     quality["extended_sequences"] = sum(
         1 for _s in all_sequences.values() for _q in _s if _q.get("tc_profile") == TC_PROFILE_EXTENDED)
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
@@ -4528,6 +4593,9 @@ def generate_suts(
         "seq_count": total_seq,
     })
     _note_unknown_type_slots(validation, quality)
+    for _err in _enrich_errors:
+        validation.setdefault("warnings", []).append(
+            f"설계 근거 보강 단계 `{_err['stage']}` 가 실패해 건너뛰었다 — {_err['error']}")
     if validation.get("issues"):
         _logger.warning("SUTS validation issues: %s", validation["issues"])
 

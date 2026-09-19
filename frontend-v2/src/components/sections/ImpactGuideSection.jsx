@@ -4,7 +4,7 @@ import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob, isAbortError } from '../../impactPoll.js';
 import { proposeBoundaryTCs, formatSutsLoc } from '../../impactBoundary.js';
-import { reconcileSuts, reconcileSits, reconcileSitsDocTcs, reconcileUds } from '../../impactDocDraft.js';
+import { reconcileSuts, reconcileSits, reconcileSitsDocTcs, reconcileUds, stsPreviewTcs } from '../../impactDocDraft.js';
 // 순수 함수는 컴포넌트 파일 밖 — 컴포넌트 아닌 export 가 섞이면 Fast Refresh 가 깨진다.
 import {
   EMPTY_DIFF_ELEMS, buildDocumentActions, extractDiffElementsCached, matchFileDiff,
@@ -1522,9 +1522,9 @@ export default function ImpactGuideSection({ analysisResult, job }) {
               </div>}
           </div>
           {genTcs
-            ? genTcs.slice(0, 4).map((tc, i) => (
+            ? stsPreviewTcs(genTcs, (docProposal?.sts_meta ?? {})[String(fn).toLowerCase()]?.boundary_tc_index).map(({ tc, no, boundary }, i) => (
               <div key={i} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
-                <div className="text-muted" style={{ fontSize: 8 }}>TC {i + 1}</div>
+                <div className="text-muted" style={{ fontSize: 8 }}>TC {no}{boundary ? ' · 경계값' : ''}</div>
                 {(tc || []).slice(0, 6).map((st, j) => (
                   <div key={j} style={{ fontSize: 9, overflowWrap: 'anywhere' }}>
                     <span className="text-muted">Action: </span>{st.action}
@@ -1550,6 +1550,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                 )}
                 {!m.gen_truncated && genTcs && genTcs.length > 4 && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {genTcs.length}건 중 {shown}건 표시</div>
+                )}
+                {/* (R76 리뷰 W3) 초안은 함수당 상한 밖의 경계값 TC 도 보인다 — 기본 프로파일로 만든 문서엔 그 TC 가 없다.
+                    "생성기를 그대로 보인다" 는 카드의 약속과 어긋나는 한 건이라 말로 밝힌다. */}
+                {m.boundary_tc_extended_only === true && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 경계값 TC 는 함수당 TC 상한 밖이라 기본(정본 규모) 문서에는 실리지 않습니다 — 시험 물량 &lsquo;확장&rsquo; 에서 실립니다</div>
                 )}
                 {m.step_truncated && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 TC의 절차는 {m.step_cap}스텝까지만 표시</div>

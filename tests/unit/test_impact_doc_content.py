@@ -599,7 +599,9 @@ def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=N
     )
     monkeypatch.setattr(
         gsts, "_generate_steps_from_flow",
-        lambda lf, info: (sts_steps if sts_steps is not None else [[{"action": "call s_foo", "expected": "ok"}]]),
+        # (R76 N93) 초안은 `stats=`·`keep_boundary=` 를 넘긴다 — 스텁이 키워드를 안 받으면 TypeError 가 best-effort
+        #   except 에 먹혀 STS 카드가 조용히 사라진다(위 SITS 스텁 주석과 같은 함정).
+        lambda lf, info, **k: (sts_steps if sts_steps is not None else [[{"action": "call s_foo", "expected": "ok"}]]),
     )
 
 

@@ -304,6 +304,8 @@ export default function DocProposalTable({
                       <td style={cellStyle}>
                         {r.type || <span className="text-muted">미상</span>}
                         {r.typeSource === 'name_pattern' && <div className="text-muted" style={{ fontSize: 8 }}>이름 규칙 추정</div>}
+                        {/* (R76 N94) 선언이 별칭이라 typedef 를 풀어서 안 타입 — 소스 실측이지만 해상 한 단계를 거쳤다. */}
+                        {r.typeSource === 'globals_map_typedef' && <div className="text-muted" style={{ fontSize: 8 }}>typedef 해상</div>}
                       </td>
                       <td style={cellStyle}>{r.boundary || <span className="text-muted">—</span>}</td>
                       <td style={cellStyle}>

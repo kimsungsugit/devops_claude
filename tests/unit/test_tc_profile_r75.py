@@ -526,7 +526,9 @@ class TestWiring:
         jenkins = (root / "backend/routers/jenkins.py").read_text(encoding="utf-8")
         local = (root / "backend/routers/local.py").read_text(encoding="utf-8")
         assert '"tc_profile": tc_profile,' in jenkins and jenkins.count("tc_profile=tc_profile,") == 1
-        assert local.count("tc_profile=tc_profile,") == 1
+        # (R76 N105) 로컬 핸들러 9곳 전부로 넓어졌다 — SUTS 3 + SITS 3 은 키워드 인자, STS 3 은 project_config 키.
+        #   핸들러별 단언은 `test_carryover_r76.py::TestLocalHandlers`.
+        assert local.count("tc_profile=tc_profile,") == 6 and local.count('"tc_profile": tc_profile,') == 3
 
     @pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
     def test_choice_is_declared_with_the_generator_spelling(self, doc_type):

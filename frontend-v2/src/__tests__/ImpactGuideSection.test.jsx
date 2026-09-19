@@ -3608,6 +3608,40 @@ describe('ImpactGuideSection — 절단·생략 표기 정직성', () => {
     expect(within(dialog).queryByText(/스텝까지만 표시/)).toBeNull();
   });
 
+  // (R76 N93) 경계값 TC 는 생성기 목록의 마지막 자리라 앞에서 4건만 보이면 분기가 많은 함수에선 안 보였다.
+  it('N93: 경계값 TC 는 미리보기 절단에 잘리지 않고, 기본 문서에 없는 TC 면 그 사실을 말한다', async () => {
+    const tcs = [
+      ...Array.from({ length: 5 }, (_, i) => [{ action: `branch #${i}`, expected: 'ok' }]),
+      [{ action: '입력 설정 (경계 최솟값): a = 0', expected: 'ok' }],
+    ];
+    const { dialog } = await open(base({
+      doc_proposal: {
+        suts: {}, sits: {}, sts: { s_foo: tcs },
+        sts_meta: { s_foo: { gen_total: 6, gen_shown: 6, gen_truncated: false, step_truncated: false, step_cap: 6,
+          boundary_tc_index: 5, boundary_tc_extended_only: true } },
+        uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'generator',
+      },
+    }), { withReqs: true });
+    await waitFor(() => expect(within(dialog).getByText(/경계 최솟값/)).toBeInTheDocument());
+    expect(within(dialog).getByText('TC 6 · 경계값')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/branch #3/)).toBeNull();          // 넷째 칸을 경계값 TC 에 내줬다
+    expect(within(dialog).getByText(/기본\(정본 규모\) 문서에는 실리지 않습니다/)).toBeInTheDocument();
+  });
+
+  it('N93: 상한 안의 경계값 TC 엔 확장 전용 안내를 붙이지 않는다', async () => {
+    const tcs = [[{ action: 'branch #0', expected: 'ok' }], [{ action: '입력 설정 (경계 최솟값): a = 0', expected: 'ok' }]];
+    const { dialog } = await open(base({
+      doc_proposal: {
+        suts: {}, sits: {}, sts: { s_foo: tcs },
+        sts_meta: { s_foo: { gen_total: 2, gen_shown: 2, gen_truncated: false, step_truncated: false, step_cap: 6,
+          boundary_tc_index: 1, boundary_tc_extended_only: false } },
+        uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'generator',
+      },
+    }), { withReqs: true });
+    await waitFor(() => expect(within(dialog).getByText('TC 2 · 경계값')).toBeInTheDocument());
+    expect(within(dialog).queryByText(/문서에는 실리지 않습니다/)).toBeNull();
+  });
+
   // W6: 생략은 doc_content(원문)에서만 일어나고 doc_proposal(생성기 산출)은 남는다.
   //     예전 가드는 `!genSeqs` 를 함께 걸어, 생성기 시퀀스가 있으면 생략 배너를 건너뛰고
   //     "🖊 SUTS 작성 제안" + 전 행 '신규추가'를 그렸다 — 문서에 있는 TC를 없다고 단정.

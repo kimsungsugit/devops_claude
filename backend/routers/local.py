@@ -499,6 +499,16 @@ def _discover_sds_docx() -> Optional[str]:
     return None
 
 
+def _no_discovery() -> Optional[str]:
+    """자동 탐색을 **하지 않는** 입력의 `discover` 자리(R76 N91).
+
+    로컬 SUTS 의 HSIS 가 그렇다: R74 부터 HSIS 의 SW 값 범위가 같은 이름 변수의 **경계값**이 되고 요구 ID 도 거기서 붙는다.
+    저장소 `docs/` 의 HSIS 는 다른 프로젝트(HDPDM01) 문서라, 미지정일 때 그것을 끌어오면 남의 설계 범위로 시험 값을 짓는다.
+    Jenkins 경로는 처음부터 탐색하지 않았다 — 두 경로의 산출물이 같은 입력에서 갈리지 않게 맞춘다. 미지정이면 보강을 건너뛴다.
+    """
+    return None
+
+
 def _doc_or_discovered(
     resolved: Optional[str],
     user_supplied: Any,
@@ -1958,6 +1968,8 @@ async def local_sts_generate(
     # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
     max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2086,6 +2098,7 @@ async def local_sts_generate(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "tc_profile": tc_profile,
         "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
@@ -2159,6 +2172,8 @@ async def local_sts_generate_stream(
     # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
     max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ):
     """Generate STS with SSE progress streaming."""
     import json as _json
@@ -2271,6 +2286,7 @@ async def local_sts_generate_stream(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "tc_profile": tc_profile,
         "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
@@ -2359,6 +2375,8 @@ async def local_sts_generate_async(
     # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
     max_steps_per_tc: Optional[int] = Form(None),
     report_dir: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2467,6 +2485,7 @@ async def local_sts_generate_async(
         "version": version,
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
+        "tc_profile": tc_profile,
         "max_steps_per_tc": max_steps_per_tc,
         "default_test_env": "SwTE_01",
     }
@@ -2660,6 +2679,8 @@ def local_suts_generate(
     sds_path: str = Form(""),
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate SUTS (Software Unit Test Specification) Excel from source code."""
     from suts_generator import generate_suts
@@ -2695,7 +2716,7 @@ def local_suts_generate(
     sds_docx = _doc_or_discovered(sds_docx, sds_path, _discover_sds_docx,
                                   label="SDS", tag="[SUTS_GENERATE] ")
     hsis_suts = _doc_or_discovered(_resolve_doc_path(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2715,6 +2736,7 @@ def local_suts_generate(
             template_path=tpl_path,
             project_config=project_config,
             max_sequences=max_sequences,
+            tc_profile=tc_profile,
             srs_docx_path=srs_docx,
             sds_docx_path=sds_docx,
             uds_path=uds_file,
@@ -2772,6 +2794,8 @@ def local_suts_generate_stream(
     sds_path: str = Form(""),
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ):
     """Generate SUTS with SSE progress streaming."""
     import json as _json
@@ -2807,7 +2831,7 @@ def local_suts_generate_stream(
     sds_docx_stream = _doc_or_discovered(sds_docx_stream, sds_path, _discover_sds_docx,
                                          label="SDS", tag="[SUTS_STREAM] ")
     hsis_suts_stream = _doc_or_discovered(_res_doc(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2833,6 +2857,7 @@ def local_suts_generate_stream(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_sequences=max_sequences,
+                tc_profile=tc_profile,
                 on_progress=_on_progress,
                 srs_docx_path=srs_docx_stream,
                 sds_docx_path=sds_docx_stream,
@@ -2902,6 +2927,8 @@ def local_suts_generate_async(
     sds_path: str = Form(""),
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking SUTS generation. Returns job_id for progress polling."""
     from suts_generator import generate_suts
@@ -2935,7 +2962,7 @@ def local_suts_generate_async(
     sds_docx_async = _res_async(sds_path)
     uds_file_async = _res_async(uds_path)
     hsis_suts_async = _doc_or_discovered(_res_async(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2970,6 +2997,7 @@ def local_suts_generate_async(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_sequences=max_sequences,
+                tc_profile=tc_profile,
                 on_progress=_suts_on_progress,
                 srs_docx_path=srs_docx_async,
                 sds_docx_path=sds_docx_async,
@@ -3129,6 +3157,8 @@ def local_sits_generate(
     # 지어내는 대신 받는다. 비우면 FI TC 는 0건이고, 그 사실은 품질 리포트의
     # `fi_requested`/`fi_emitted`/`fi_unresolved` 로 남는다.
     fi_design_ids: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate SITS (Software Integration Test Specification) Excel from source code."""
     from sits_generator import generate_sits
@@ -3183,6 +3213,7 @@ def local_sits_generate(
             template_path=tpl_path,
             project_config=project_config,
             max_subcases=max_subcases,
+            tc_profile=tc_profile,
             # 미지정이면 인자 자체를 넘기지 않는다 — 생성기 기본값이 단일 출처다.
             **({"max_flows": max_flows} if max_flows is not None else {}),
             srs_docx_path=srs_docx,
@@ -3247,6 +3278,8 @@ def local_sits_generate_stream(
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
     stp_path: str = Form(""),
+    # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
+    tc_profile: str = Form(""),
 ):
     """Generate SITS with SSE progress streaming."""
     import json as _json
@@ -3308,6 +3341,7 @@ def local_sits_generate_stream(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_subcases=max_subcases,
+                tc_profile=tc_profile,
                 **({"max_flows": max_flows} if max_flows is not None else {}),
                 on_progress=_on_progress,
                 srs_docx_path=srs_docx_stream,

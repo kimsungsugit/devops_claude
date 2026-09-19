@@ -1636,6 +1636,30 @@ def _param_type_text(ginfo: Dict[str, Any]) -> str:
     return _param_cell(base)
 
 
+#: enum 값 집합을 **열거**로 적는 최대 개수 — 넘으면 `최소 ~ 최대` 와 개수로 적는다(칸 하나에 수십 개를 늘어놓지 않는다).
+_ENUM_RANGE_LIST_MAX = 8
+
+
+def _enum_domain_range(ginfo: Dict[str, Any]) -> str:
+    """(R76 N96) 범위를 못 구한 **enum 변수**의 Value Range — 소스 단계가 적어 둔 닫힌 값 집합(`value_domain`, R73).
+
+    예전엔 이 칸이 `N/A` 였다: 타입 폭 표가 enum 타입 이름을 모르기 때문이다. 그런데 소스는 열거자 값을 전부 말한다 —
+    SUTS 는 R73 부터 그 집합으로 경계값을 만드는데 같은 사실을 설계서 표는 안 적고 있었다. 정본도 허용값 열거를 쓴다
+    (`0x00, 0x01` — 이 칸의 1.3%). 출처를 함께 적는다(`(타입 폭)` 과 같은 결정): 설계가 정한 의미 범위가 아니라
+    **선언이 허용하는 값**이라는 뜻이다. 값 집합이 없으면 빈 문자열(호출부가 `N/A` 로 둔다 — 지어내지 않는다).
+    """
+    dom = ginfo.get("value_domain") if isinstance(ginfo, dict) else None
+    try:
+        vals = sorted({int(v) for v in ((dom or {}).get("values") or [])})
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    if not vals:
+        return ""
+    if len(vals) <= _ENUM_RANGE_LIST_MAX:
+        return _param_cell(f"{', '.join(str(v) for v in vals)} (enum 열거자)")
+    return _param_cell(f"{vals[0]} ~ {vals[-1]} (enum 열거자 {len(vals)}개)")
+
+
 def _param_value_range(ginfo: Dict[str, Any],
                        type_ranges: Optional[Dict[str, str]] = None) -> str:
     """`Value Range` 열.
@@ -1655,11 +1679,11 @@ def _param_value_range(ginfo: Dict[str, Any],
     """
     raw = re.sub(r"\s+", " ", str(ginfo.get("range") or "")).strip()
     if not raw:
-        return _NA
+        return _enum_domain_range(ginfo) or _NA
     if "~" not in raw:
         # 정본의 소수 표기 — 허용값 열거(`0x0000, 0x08DC, 0x09A6`). 그 외(초기화 블록·
         # 캐스트식·단일 초기값·파서 조각 `}`)는 범위에 대한 주장이 아니다.
-        return _param_cell(raw) if _VALUE_ENUM_RE.match(raw) else _NA
+        return _param_cell(raw) if _VALUE_ENUM_RE.match(raw) else (_enum_domain_range(ginfo) or _NA)
     ranges = type_ranges if type_ranges is not None else _default_type_ranges()
     base_type = re.sub(r"^\s*const\s+", "", str(ginfo.get("type") or "").strip())
     width = str(ranges.get(base_type) or "").strip()

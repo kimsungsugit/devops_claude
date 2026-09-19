@@ -1538,6 +1538,7 @@ def _build_doc_proposal(
         from generators.suts import (
             _DEFAULT_SEQ_COUNT,
             _gim_to_type_map,
+            _gim_typedef_resolved,
             collect_unit_functions,
             determine_gen_method,
             determine_test_method,
@@ -1545,6 +1546,7 @@ def _build_doc_proposal(
         )
         from workflow.impact_doc_draft import build_var_types
 
+        _td_resolved = _gim_typedef_resolved(gim)   # (R76 N94) typedef 를 풀어서 안 타입은 라벨이 그 사실을 말한다
         _local_tc = _gim_to_type_map(gim)   # try 안 — 손상 gim이어도 아래 except가 우아하게 흡수(reviewer W1)
         _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
         for _unit in (collect_unit_functions(_sub_fd, gim) or []):
@@ -1609,7 +1611,7 @@ def _build_doc_proposal(
             for _s in _slim:
                 _vars.extend(_s["inputs"].keys())
                 _vars.extend(_s["expected"].keys())
-            _vt = build_var_types(_vars, _local_tc)
+            _vt = build_var_types(_vars, _local_tc, typedef_resolved=_td_resolved)
             if _vt:
                 out["var_types"][_nm] = _vt
     except Exception as exc:  # noqa: BLE001 — best-effort 표시 초안(분석 비차단)
@@ -1709,10 +1711,24 @@ def _build_doc_proposal(
             # ⚠ 절단 **전** 전량을 먼저 받아 총량을 잰다. `[:sts_tc_cap]`를 먼저 걸면 프론트가
             #   이미 잘린 수(6)를 총량으로 말하게 된다("생성기 TC 6건 중 4건 표시" — 실제로는
             #   20건일 수 있다). SUTS `gen_total`에서 같은 함정을 이미 한 번 고쳤다.
-            _all_tc = [t for t in (_generate_steps_from_flow(_info.get("logic_flow") or [], _info) or []) if t]
+            # (R76 N93) 경계값 TC 는 분기 TC **뒤 마지막 자리**에 선다(R72) — 함수당 상한과 아래 두 절단(`sts_tc_cap` ·
+            #   프론트 4건)에 가장 먼저 잘려, 분기가 많은 함수의 미리보기엔 구조적으로 안 보였다. 초안은 "무슨 시험을 쓸지"
+            #   를 보이는 자리라 `keep_boundary` 로 받고, 자를 땐 마지막 자리를 경계값 TC 에 남기며 그 위치를 알린다.
+            _b_stats: Dict[str, Any] = {}
+            _raw_tc = list(_generate_steps_from_flow(_info.get("logic_flow") or [], _info,
+                                                     stats=_b_stats, keep_boundary=True) or [])
+            # (리뷰 I4·I5) 경계값 TC 는 **생성기가 알려 준 자리**로 집는다 — "마지막" 이라 가정하면 flow 없는 함수(둘째 자리)를
+            #   놓치고, 빈 TC 가 걸러질 때 옆 TC 에 표시가 간다. 아래 표시는 객체 동일성으로 따라간다.
+            _bi = _b_stats.get("boundary_index")
+            _boundary = _raw_tc[_bi] if isinstance(_bi, int) and 0 <= _bi < len(_raw_tc) and _raw_tc[_bi] else None
+            _all_tc = [t for t in _raw_tc if t]
+            _picked = _all_tc[:sts_tc_cap]
+            if _boundary is not None and sts_tc_cap >= 1 and not any(t is _boundary for t in _picked):
+                _picked = _all_tc[:sts_tc_cap - 1] + [_boundary]
             _tcs: List[List[Dict[str, str]]] = []
             _step_cut = False
-            for _tc in _all_tc[:sts_tc_cap]:
+            _b_shown: Optional[int] = None
+            for _tc in _picked:
                 if len(_tc) > step_cap:
                     _step_cut = True
                 _steps = [
@@ -1721,6 +1737,8 @@ def _build_doc_proposal(
                     if isinstance(s, dict)
                 ]
                 if _steps:
+                    if _tc is _boundary:
+                        _b_shown = len(_tcs)
                     _tcs.append(_steps)
             if _tcs:
                 out["sts"][fn] = _tcs
@@ -1730,6 +1748,11 @@ def _build_doc_proposal(
                     "gen_truncated": len(_all_tc) > sts_tc_cap,
                     "step_truncated": _step_cut,
                     "step_cap": step_cap,
+                    # 보낸 목록에서 경계값 TC 의 자리(없으면 None) — 프론트가 4건으로 줄일 때 이 TC 를 남긴다.
+                    "boundary_tc_index": _b_shown,
+                    # (리뷰 W3) 초안은 `keep_boundary` 로 받아 함수당 상한 **밖**의 경계값 TC 도 보인다. 기본 프로파일의 문서는
+                    #   그 TC 를 싣지 않는다(확장 프로파일만) — 화면이 그 차이를 말하도록 사실을 싣는다.
+                    "boundary_tc_extended_only": bool(_b_shown is not None and _b_stats.get("boundary_beyond_function_cap")),
                 }
     except Exception as exc:  # noqa: BLE001
         logger.debug("doc_proposal STS synth failed: %s", exc)

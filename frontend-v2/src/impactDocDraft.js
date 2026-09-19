@@ -740,6 +740,20 @@ function tsvCell(v) {
   return String(v ?? '').replace(/[\t\r\n]+/g, ' ');
 }
 
+// STS 카드 미리보기 상한. 경계값 TC 는 생성기 목록의 **마지막 자리**에 서므로(분기 TC 뒤) 앞에서 N건만 자르면
+// 분기가 많은 함수에선 구조적으로 안 보인다(R76 N93) — 백엔드가 알려 준 자리(`sts_meta.boundary_tc_index`)가
+// 상한 밖이면 마지막 칸을 그 TC 에 준다. 번호(`no`)는 받은 목록에서의 원래 순번이라 건너뛴 것이 드러난다.
+export const STS_PREVIEW_TC_LIMIT = 4;
+export function stsPreviewTcs(genTcs, boundaryIndex) {
+  const list = Array.isArray(genTcs) ? genTcs : [];
+  const bIdx = Number.isInteger(boundaryIndex) && boundaryIndex >= 0 && boundaryIndex < list.length ? boundaryIndex : -1;
+  const head = list.slice(0, STS_PREVIEW_TC_LIMIT).map((tc, i) => ({ tc, no: i + 1, boundary: i === bIdx }));
+  if (bIdx >= STS_PREVIEW_TC_LIMIT) {
+    head[STS_PREVIEW_TC_LIMIT - 1] = { tc: list[bIdx], no: bIdx + 1, boundary: true };
+  }
+  return head;
+}
+
 /**
  * Excel 붙여넣기용 TSV. 열 순서는 **호출부가 넘긴 columns 그대로**(백엔드 문서 컬럼).
  * JS에 열 순서를 하드코딩하지 않는다 — 템플릿마다 다르고, 틀리면 붙여넣기가 통째로 밀린다.

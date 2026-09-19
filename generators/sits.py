@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from backend.services.iso26262_doc_asil_extractor import _RELATED_PREFIX_CANON
 from generators._artifact_check import apply_write_back_check
+from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
@@ -117,6 +118,11 @@ _SITS_METHOD_DEFAULT = "REQ, IFT"   # 통합시험 기본 — 요구 기반 + �
 _SITS_METHOD_FAULT = "FI"           # 고장 주입
 _SITS_GEN_DEFAULT = "AOR, AEC"
 _SITS_GEN_BOUNDARY = "AOR/ABV"
+#: 이 생성기가 Gen 칸에 **쓸 수 있는** 코드의 집합(위 두 값을 가른 것 = AOR·AEC·ABV). 품질 평가기의 방법 다양성 분모가
+#: 이 크기다(`workflow/quality/evaluator.py::_SITS_GEN_METHOD_VOCAB_SIZE` — 가드가 같음을 묶는다). 소개 표
+#: (`_INTRO_GEN_METHODS`, 10종)는 **문서가 설명하는 어휘**지 생성기가 내는 어휘가 아니다.
+SITS_WRITABLE_GEN_CODES = frozenset(
+    c.strip() for v in (_SITS_GEN_DEFAULT, _SITS_GEN_BOUNDARY) for c in v.replace("/", ",").split(",") if c.strip())
 
 # ── Introduction 1.5 / 1.6 — 이 문서가 **자기 어휘를 정의하는 곳** ──────────
 #
@@ -3012,8 +3018,8 @@ def generate_sits_xlsm(
         if _block_end > _tc_row:
             for mc in (_TCID_COL, _SAFETY_COL, _METHOD_COL, _GEN_COL, _RELATED_COL):
                 try:
-                    ws.merge_cells(start_row=_tc_row, start_column=mc,
-                                   end_row=_block_end, end_column=mc)
+                    # (R76 N103) 새로 만든 시트의 순차 TC 블록 — 포함 검사 없는 경로(`_xlsx_merge`, STS·SUTS 와 같다).
+                    merge_fresh(ws, _tc_row, mc, _block_end, mc)
                 except Exception as exc:  # noqa: BLE001
                     _logger.debug("SITS TC merge skipped (col %d, %d:%d): %s",
                                   mc, _tc_row, _block_end, exc)
@@ -3071,12 +3077,14 @@ def generate_sits_quality_report(
     total_sub = sum(len(t.get("sub_cases") or []) for t in itcs)
     avg_sub = round(total_sub / max(total_tc, 1), 1)
 
+    # (R76 N87) 분포는 **문서에 쓰는 값**으로 센다. 예전엔 생성기 내부 라벨(`itc["gen_method"]` — `ABV, AEC` 류)을 셌는데
+    #   라이터는 그 라벨을 쓰지 않는다: Gen 칸은 Test Method 의 짝(`_sits_gen_method`)이라 `AOR, AEC` · `AOR/ABV` 둘뿐이다.
+    #   내부 라벨은 네 분기가 전부 `ABV` 를 품어 늘 3종이 나왔고, 그래서 `method_diversity_pct` 가 22 run 전부 100.0 이었다 —
+    #   문서를 잰 값이 아니었다. 결합자(쉼표 · 슬래시)는 `_split_method_codes` 가 가른다(옛 분리는 `/` 를 몰랐다).
     gen_dist: Dict[str, int] = {}
     for itc in itcs:
-        for m in re.split(r"[,\s]+", itc.get("gen_method") or "ABV"):
-            m = m.strip()
-            if m:
-                gen_dist[m] = gen_dist.get(m, 0) + 1
+        for m in _split_method_codes(_sits_gen_method(itc.get("gen_method", "ABV"), _sits_test_method(itc))):
+            gen_dist[m] = gen_dist.get(m, 0) + 1
 
     with_related = sum(1 for t in itcs if t.get("related_ids"))
     related_pct = round(with_related / max(total_tc, 1) * 100, 1)

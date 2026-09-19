@@ -412,12 +412,17 @@ def _build_global_rows(
 ) -> List[List[str]]:
     if not names:
         return []
+    from report_gen.function_analyzer import _enum_domain_range  # 지연 import — 모듈 로드 시점의 순환을 피한다
+
     cols = len(header_row)
     rows: List[List[str]] = []
     for name in names:
         info = globals_info.get(name, {})
         gtype = info.get("type") or ""
         grange = info.get("range") or ""
+        if not grange and info.get("value_domain"):
+            # (R76 N96) 범위를 못 구한 enum 전역 — 소스가 말한 닫힌 값 집합을 적는다(함수별 표와 같은 함수).
+            grange = _enum_domain_range(info)
         ginit = info.get("init") or ""
         gdesc = info.get("desc") or ""
         row = [""] * cols

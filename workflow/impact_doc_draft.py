@@ -95,11 +95,14 @@ def resolve_var_type(
     type_cache: Optional[Dict[str, str]] = None,
     *,
     annot_types: Optional[Dict[str, str]] = None,
+    typedef_resolved: Optional[set] = None,
 ) -> Optional[Dict[str, str]]:
     """변수명 → `{'type': 'uint16_t', 'source': ...}` 또는 `None`(미상).
 
     우선순위 (근거가 강한 순 — `source`가 그 근거를 밝힌다):
       1. `globals_map`   — `globals_info_map` 실측(소스 파싱). 가장 강함.
+         `globals_map_typedef` 는 같은 자리인데 선언이 **별칭**이라 typedef 를 풀어서 안 경우다(R76 N94,
+         `typedef_resolved` = `generators.suts._gim_typedef_resolved`). 값은 같고 라벨만 한 단계를 밝힌다.
       2. `doc_annotation` — UDS payload의 `[IN] U16 g_x` 어노테이션. 소스가 없는
          cloudium 환경에서 **문서가 직접 말하는** 타입이라 이름 규칙보다 신뢰도가 높다.
       3. `name_pattern`   — 헝가리안 이름 규칙(u16t_Data → uint16_t). 관례일 뿐이라 최약.
@@ -128,7 +131,8 @@ def resolve_var_type(
             if mapped == _UNKNOWN_TYPE:
                 return None
             if mapped:
-                return {"type": mapped, "source": "globals_map"}
+                _via_typedef = bool(typedef_resolved) and key in typedef_resolved
+                return {"type": mapped, "source": "globals_map_typedef" if _via_typedef else "globals_map"}
     # 2) 문서 어노테이션(`[IN] U16 g_x`) — 소스 미해결 환경의 주 근거.
     annots = annot_types if isinstance(annot_types, dict) else {}
     for key in (raw_name, base):
@@ -147,6 +151,7 @@ def build_var_types(
     *,
     annotated: Any = None,
     cap: int = 200,
+    typedef_resolved: Optional[set] = None,
 ) -> Dict[str, Dict[str, str]]:
     """변수명 목록 → `{base_var: {type, source}}`. 미상 변수는 **키 자체를 넣지 않는다**.
 
@@ -164,7 +169,7 @@ def build_var_types(
         if not base or base in seen:
             continue
         seen.add(base)
-        info = resolve_var_type(raw, type_cache, annot_types=annots)
+        info = resolve_var_type(raw, type_cache, annot_types=annots, typedef_resolved=typedef_resolved)
         if info:
             out[base] = info
         if len(seen) >= cap:

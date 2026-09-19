@@ -715,6 +715,47 @@ def normalize_sds_key(value: str) -> str:
     return _SDS_KEY_STRIP.sub("", str(value or "").lower())
 
 
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_TOKEN_SPLIT_RE = re.compile(r"[\s_\-./()]+")
+# 헝가리안 접두 `<타입><범위>_` (`u16s_` · `u8g_` · `bs_`) — 범위 글자(`s`/`g`/`t`)는 그 자체로 토큰 시작이다.
+# 실측: `u16s_DiagCheck_HB_Helper2` 안의 파티션 `s_DiagCheck_HB` 는 `u16` 뒤 `s` 에서 시작한다(옳은 링크).
+_HUNGARIAN_PREFIX_RE = re.compile(r"^(?:[usf]\d{1,2}|b|bit)([sgt])$", re.I)
+
+
+def contains_at_token_start(long_raw: str, long_norm: str, short_norm: str) -> bool:
+    """`short_norm` 이 `long_norm` 안에 있고 그 자리가 `long_raw` 의 **토큰 시작**인가.
+
+    (R76 N106) 부분문자열 일치는 토큰 한가운데에서도 맞는다 — 실측 KJPDS02: `s_UDS_SlipDetect_ReadCustomPayload` 가
+    파티션 `adc` 에 붙었다(`Re**adC**ustom`). 같은 모양을 STS 매처는 이미 한 번 겪었다(`Lin` ⊂ `guide**lin**e`).
+    쓰는 곳은 **STS 요구-함수 매핑 하나**다(`generators/sts.py::_lookup_sds_related_ids`). `generators/suts.py` 의 ASIL 폴백에도
+    같은 부분문자열 규칙이 있지만 거기는 일부러 안 바꿨다 — 첫 매치가 값을 정하는 옛 동작을 회귀 가드가 묶고 있고
+    (`test_empty_grade_first_match_still_stops_the_pick`: 고치면 정본 대비 과분류 88→108), 그 결정을 뒤집는 건 별건이다.
+
+    ⚠ `long_raw` 는 **대소문자가 살아 있는 이름**(소스 함수 이름)이어야 한다. SwDS 파티션 키는 소문자로 접혀 있어
+    (`reproglinrecvtask`) camelCase 경계를 알 수 없다 — 그 방향(함수 이름이 키 **안에** 든 경우)에 이 규칙을 걸면 옳은 링크가
+    끊긴다(첫 실측: `LinRecv` ⊂ `ReprogLinRecvTask` 등 6 함수). 그래서 호출부는 "키가 함수 이름 안에 든" 방향에만 쓴다.
+    토큰은 `_`·공백·camelCase 경계와 헝가리안 접두의 범위 글자에서 시작한다. 시작만 본다(끝은 안 본다).
+    정규화(`normalize_sds_key`)가 문자 단위 제거라 토큰별 길이의 합이 자리다.
+    """
+    if not short_norm or short_norm not in long_norm:
+        return False
+    starts = set()
+    pos = 0
+    for tok in _TOKEN_SPLIT_RE.split(_CAMEL_BOUNDARY_RE.sub(r"\1 \2", str(long_raw or ""))):
+        n = len(normalize_sds_key(tok))
+        if n:
+            starts.add(pos)
+            if _HUNGARIAN_PREFIX_RE.match(tok):
+                starts.add(pos + n - 1)
+            pos += n
+    idx = long_norm.find(short_norm)
+    while idx >= 0:
+        if idx in starts:
+            return True
+        idx = long_norm.find(short_norm, idx + 1)
+    return False
+
+
 def is_sds_placeholder_key(normalized: str) -> bool:
     """정규화된 키가 `n/a`·`TBD` 류의 **근거 부재 표시**인가."""
     return normalized in _SDS_PLACEHOLDER_KEYS

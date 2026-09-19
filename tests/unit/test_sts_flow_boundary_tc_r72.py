@@ -62,7 +62,9 @@ class TestStepsFromFlow:
         stats: dict = {}
         tcs = _generate_steps_from_flow([], _fn(flow=[]), max_steps=15, max_tc=5, stats=stats)
         assert len(tcs) == 3 and _is_boundary(tcs[1]), "flow 없는 함수의 TC1/TC2/TC3 는 종전 그대로"
-        assert stats == {"boundary_appended": False}
+        # (R76 N93) `boundary_index` 는 계수가 아니라 **자리 안내**다 — flow 없는 함수의 경계값 TC 는 둘째 자리(영향도 초안이
+        #   미리보기에서 그 TC 를 남길 때 쓴다). 계수 키(`boundary_tc_candidates` 등)는 여전히 하나도 생기지 않는다.
+        assert stats == {"boundary_appended": False, "boundary_index": 1}
 
     def test_flow_that_yields_no_branch_falls_back_to_simple_steps_without_a_duplicate(self):
         """logic_flow 는 있는데 아는 노드가 없어 분기 TC 가 0 인 함수 — 종전대로 단순 스텝 3개(경계 TC 는 그 안의 하나)이지

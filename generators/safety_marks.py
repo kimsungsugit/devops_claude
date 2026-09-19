@@ -29,6 +29,12 @@ _SAFETY_GRADES = ("A", "B", "C", "D")
 #: "확인했고 안전 관련이 아니다" 를 뜻하는 유일한 값.
 _NON_SAFETY = "QM"
 
+#: `Safety Related` 칸의 두 표기. 읽는 쪽(라이터의 강조 · 품질 리포트의 계수)은 글자를 다시 쓰지 말고 이 상수를 본다.
+#: (R76 N102) STS 라이터와 품질 리포트가 `== "X"` 로 읽어 **비안전 행**에 안전 강조를 칠하고 `safety_test_cases` 로 셌다 —
+#: 2026-08 에 표기를 `X`→`O` 로 바로잡을 때 쓰는 쪽만 고치고 읽는 두 곳이 남았다.
+SAFETY_RELATED_MARK = "O"
+NON_SAFETY_MARK = "X"
+
 
 def resolve_safety_related(asil: Any) -> str:
     """정본의 `Safety Related` 칸 값 — ``O`` / ``X`` / ``""``.
@@ -39,9 +45,9 @@ def resolve_safety_related(asil: Any) -> str:
     """
     val = str(asil or "").strip().upper()
     if val in _SAFETY_GRADES or val.startswith("ASIL"):
-        return "O"
+        return SAFETY_RELATED_MARK
     if val == _NON_SAFETY:
-        return "X"
+        return NON_SAFETY_MARK
     return ""
 
 

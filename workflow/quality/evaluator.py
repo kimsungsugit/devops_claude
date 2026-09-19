@@ -15,6 +15,11 @@ MetricList = List[MetricResult]
 # `tests/unit/test_sts_method_diversity_r69.py` 가 같음을 묶는다 — 어휘가 늘면 여기도 같이 올려야 상한 100 이 맞다.
 _STS_GEN_METHOD_VOCAB_SIZE = 3.0
 
+# (R76 N87) SITS 도 같다 — 분모 3 은 리터럴(`/ 3.0`)이었고 근거가 적혀 있지 않았다. 정본은
+# `generators.sits.SITS_WRITABLE_GEN_CODES`(생성기가 Gen 칸에 쓸 수 있는 코드: AOR·AEC·ABV)이고 가드가 같음을 묶는다.
+# 분자(`gen_method_distribution`)도 이제 문서에 쓰는 값이라, 고장 주입 TC 가 없는 문서는 2/3 = 66.67 이 된다.
+_SITS_GEN_METHOD_VOCAB_SIZE = 3.0
+
 
 def _metric(name: str, value: float, *, threshold: Optional[float] = None) -> MetricResult:
     """단일 메트릭 dict 생성."""
@@ -348,10 +353,10 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
         _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"),
                 threshold=_gate_if_applicable(_gt("sits", "io_coverage_pct"), total)),
     )
-    # 테스트 방법 다양성 (생성 방법 종류 수 / 3, 상한 100%)
+    # 테스트 방법 다양성 (문서에 쓴 생성 방법 코드 종류 수 / 생성기가 쓸 수 있는 코드 수, 상한 100%)
     methods = quality_report.get("gen_method_distribution") or {}
     method_count = len([k for k in methods if k and k != "?"])
-    metrics.append(_metric("method_diversity_pct", round(min(method_count / 3.0, 1.0) * 100, 2)))
+    metrics.append(_metric("method_diversity_pct", round(min(method_count / _SITS_GEN_METHOD_VOCAB_SIZE, 1.0) * 100, 2)))
     # 통합 밀도 (TC당 sub-case 평균 / 7, 상한 100%)
     avg_sub = _safe_float(quality_report, "avg_sub_cases_per_tc")
     metrics.append(_metric("integration_density_pct", round(min(avg_sub / 7.0, 1.0) * 100, 2)))

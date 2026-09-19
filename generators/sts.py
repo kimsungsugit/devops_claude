@@ -17,13 +17,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from generators._xlsx_merge import merge_fresh
-from generators.safety_marks import is_safety_asil
+from generators.safety_marks import SAFETY_RELATED_MARK, is_safety_asil
 from generators.safety_marks import resolve_safety_related as _safety_mark_impl
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _extract_sds_partition_map,
     _merge_sds_partition_map,
+    contains_at_token_start,
     is_sds_placeholder_key,
     normalize_sds_key,
 )
@@ -217,11 +218,17 @@ def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
     return [c for c in dict.fromkeys([c.strip() for c in candidates if c and c.strip()])]
 
 
-def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]]) -> List[str]:
+def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]],
+                            path_out: Optional[List[str]] = None) -> List[str]:
+    """SwDS 파티션의 `related` 에서 요구 ID 를 찾는다. `path_out` 을 주면 **어느 규칙**이 맞혔는지 한 단어를 넣는다 —
+    `sds_exact`(키 그대로) · `sds_normalized`(구두점만 다름) · `sds_substring`(파티션 키가 함수 이름 안에 토큰 경계로 듦) ·
+    `sds_name_in_key`(이름이 소문자로 접힌 키 안에 듦 — 경계를 확인할 수 없는 **가장 약한 근거**)."""
     candidates = _function_sds_candidates(info)
     for candidate in candidates:
         direct = sds_map.get(candidate.lower())
         if direct and direct.get("related"):
+            if path_out is not None:
+                path_out.append("sds_exact")
             return [m.group(1) for m in _REQ_ID_PAT.finditer(str(direct.get("related") or ""))]
     for candidate in candidates:
         nc = normalize_sds_key(candidate)
@@ -231,9 +238,14 @@ def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, s
             nk = normalize_sds_key(key)
             if not nk or is_sds_placeholder_key(nk):
                 continue
-            if nc == nk or nc in nk or nk in nc:
+            # (R76 N106) 키가 함수 이름 **안에** 든 방향엔 토큰 경계를 본다(`Re**adC**ustom` ⊃ `adc` 차단). 반대 방향은 키가
+            #   소문자로 접혀 있어 경계를 알 수 없으므로 옛 부분문자열 그대로다(`contains_at_token_start` docstring).
+            if nc == nk or nc in nk or contains_at_token_start(candidate, nc, nk):
                 ids = [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
                 if ids:
+                    if path_out is not None:
+                        path_out.append("sds_normalized" if nc == nk
+                                        else ("sds_name_in_key" if nc in nk else "sds_substring"))
                     return ids
                 # `related` 가 빈 칸이면 **여기서 끝내지 않는다**. 실측 41건이 전부
                 # `(swdsg) software architecture design guideline….docx`(SDS 안의
@@ -573,7 +585,7 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
                 else:
                     _sw_group = _find("sw variable")
                     # 하위 머리행은 바로 아랫줄이 보통이지만 빈 줄이 낄 수 있다 — 세 줄까지 기다린다(리뷰 W6).
-                    _sub_rows_left = 3 if _sw_group >= 0 else 0
+                    _sub_rows_left = _HSIS_SUB_HEADER_WAIT_ROWS if _sw_group >= 0 else 0
                     if _sw_group < 0:
                         _layout = "fixed-fallback"
                         _logger.warning("HSIS: `SW Variable` 열을 머리행에서 못 찾았다 — 옛 열 번호(%d)로 읽는다", _COL_SW_VAR)
@@ -581,14 +593,12 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         if _sub_rows_left > 0:
             # 묶음 머리 아랫줄 — `SW Variable` 묶음 **바로 아래 구간**의 `Name`·`Type`·`Value Range` 가 하위 열이다
             # (같은 줄의 앞쪽 `Name` 은 Architecture Element 의 것이다).
-            _low = [c.lower() for c in cells]
-            _near = range(max(0, _sw_group - 1), min(len(_low), _sw_group + 5))
-            _n = next((i for i in _near if _low[i] == "name"), -1)
+            _n, _t, _vr = _hsis_sw_variable_subcols([c.lower() for c in cells], _sw_group)
             if _n >= 0:
                 _COL_SW_VAR = _n
                 _layout = "header"
-                _COL_SW_TYPE = next((i for i in _near if _low[i] == "type"), -1)
-                _COL_VALUE_RANGE = next((i for i in _near if _low[i].startswith("value range")), -1)
+                _COL_SW_TYPE = _t
+                _COL_VALUE_RANGE = _vr
                 _sub_rows_left = 0
                 continue
             # 빈 줄이면 더 기다리고, 내용이 있는데 하위 머리행이 아니면 **데이터가 시작된 것**이다 — 기다림을 끝낸다.
@@ -678,6 +688,31 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     return result
 
 
+#: 묶음 머리(`SW Variable`) 아래에서 하위 머리행(Name·Type·Value Range)을 기다리는 줄 수 — HSIS 파서 두 벌이 같이 쓴다.
+#: 넘으면 묶음 열을 이름 열로 읽고 그 사실을 `column_layout` 과 경고로 남긴다(조용히 틀리지 않는다).
+_HSIS_SUB_HEADER_WAIT_ROWS = 3
+
+
+def _hsis_sw_variable_subcols(low_cells: List[str], sw_group: int) -> Tuple[int, int, int]:
+    """`SW Variable` 묶음 머리 **아랫줄**에서 (Name, Type, Value Range) 열 — 없으면 -1.
+
+    묶음 머리 셀은 병합의 좌상단이 아닐 수 있어(실측 KJPDS02 HSIS: 묶음 라벨 열 = 하위 `Type` 열) 그 열 번호를 그대로
+    쓰면 **타입을 변수 이름으로** 읽는다. 하위 열은 묶음 바로 아래 구간(-1 ~ +4)에서 찾는다 — 같은 줄 앞쪽의 `Name` 은
+    Architecture Element 의 것이다. HSIS 파서 두 벌(`_load_hsis_signals` · `parse_hsis_signals`)이 **이 함수 하나**를 쓴다
+    (R76 N99: R74 가 앞의 것만 고쳐 뒤의 것은 25행 전부 `U16`·`U8` 을 SW 변수 이름으로 돌려주고 있었다).
+    """
+    near = range(max(0, sw_group - 1), min(len(low_cells), sw_group + 5))
+    # (리뷰 W6) Name 은 **묶음 열 자체**(병합 좌상단이 이름 열인 표준 배치) → 바로 왼쪽(KJPDS02: 라벨이 Type 열 위) → 오른쪽
+    #   순으로 찾는다. 왼쪽부터 훑으면 묶음 열이 곧 Name 인 문서에서 그 왼쪽의 Architecture Element `Name` 을 집는다.
+    order = [sw_group, sw_group - 1] + [i for i in near if i > sw_group]
+    name = next((i for i in order if 0 <= i < len(low_cells) and low_cells[i] == "name"), -1)
+    if name < 0:
+        return -1, -1, -1
+    return (name,
+            next((i for i in near if low_cells[i] == "type"), -1),
+            next((i for i in near if low_cells[i].startswith("value range")), -1))
+
+
 def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     """Cache-free HSIS xlsx parser with header auto-detection (layout-variant safe).
 
@@ -756,6 +791,27 @@ def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         return {"sw_var_names": [], "signals": [],
                 "available_columns": rows[2][:30] if len(rows) > 2 else []}
 
+    # (R76 N99) `SW Variable` 이 **묶음 머리**면(하위에 Name·Type·Value Range) 그 열은 이름 열이 아니다 — 아랫줄에서 찾는다.
+    #   못 찾으면 옛 동작(묶음 열) 그대로 두되 그 사실을 `column_layout` 에 남긴다.
+    layout = "header"
+    _sw = cols.get("swvar", -1)
+    if _sw >= 0 and "name" not in _norm(rows[hdr_idx][_sw]):
+        layout = "group-fallback"
+        for _off in range(1, _HSIS_SUB_HEADER_WAIT_ROWS + 1):
+            if hdr_idx + _off >= len(rows):
+                break
+            _sub = rows[hdr_idx + _off]
+            _n, _t, _vr = _hsis_sw_variable_subcols([c.lower() for c in _sub], _sw)
+            if _n >= 0:
+                # 머리행 위치는 안 옮긴다 — 하위 머리행은 HSI ID 도 Related 도 없어 아래 데이터 행 판정이 어차피 거른다.
+                cols["swvar"] = _n
+                layout = "header"
+                break
+            if any(_sub):       # 내용이 있는데 하위 머리행이 아니면 데이터가 시작된 것이다
+                break
+        if layout != "header":
+            _logger.warning("HSIS: `SW Variable` 묶음의 하위 머리행(Name)을 못 찾았다 — 묶음 열(%d)을 이름 열로 읽는다", _sw)
+
     data_rows = rows[hdr_idx + 1:]
     # ID 컬럼 disambiguation — 헤더 'id'가 여러 개(Arch Element ID·Connector ID)라
     # 데이터에서 HSI_\d+ 빈도 최대 컬럼을 ID로 확정.
@@ -795,6 +851,7 @@ def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
             "sw_var_name": swv,
             "related_id": related,
             "direction": _get(dr, dir_col),
+            "column_layout": layout,
         })
 
     sw_var_names: List[str] = []
@@ -1045,8 +1102,18 @@ def map_requirements_to_functions(
     function_details: Dict[str, Dict[str, Any]],
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
     uds_design_ids: Optional[Dict[str, List[str]]] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, List[str]]:
     """Map requirement IDs to lists of function IDs (fid).
+
+    `stats_out`(R76 N106): 링크가 **어느 경로**로 붙었는지(함수 수)와 요구당 함수 수의 분포를 넣는다. 라이브 실측
+    (KJPDS02, 함수 1,146): 자기 `related` 0 · 파티션 키 그대로 666 · 구두점만 다름 61 · 키가 이름 안에(토큰 경계 확인) 155 ·
+    **이름이 소문자 키 안에(경계 확인 불가) 141** · 브리지로만 13 · 못 붙음 110 — 일곱 칸의 합이 함수 수다. 요구당 함수 중앙 48 ·
+    최대 577. "요구당 600 함수" 는 SwDS 파티션이 요구를 여러 개씩 적는 **문서의 추적 입도**이고, 약한 근거 두 칸(296)이
+    붙은 함수의 29% 다 — 그 수를 리포트가 말하게 한다.
+    ⚠ 자기 `related` 가 0 인 건 라이브 핸들러가 함수 상세에 SRS/SwDS 보강을 안 태우기 때문이다(화면은 `srs_path`·`sds_path` 를
+      보내는데 보강은 `req_paths` 목록만 본다). 같은 문서를 태운 오프라인 하네스에선 868 함수가 자기 `related` 를 갖고
+      못 붙음이 13 이었다 — 첫 실측을 그 하네스로 재서 수치가 라이브와 달랐다(계획서 R76, 이월 N107).
 
     Uses the `related` field in function_details to find reverse mapping.
 
@@ -1066,6 +1133,7 @@ def map_requirements_to_functions(
         sds_map = _load_default_sds_map()
 
     by_comment = by_sds = linkless = 0
+    _sds_paths: Dict[str, int] = {}
     for fid, info in function_details.items():
         if not isinstance(info, dict):
             continue
@@ -1080,12 +1148,15 @@ def map_requirements_to_functions(
             by_comment += 1
             continue
         hit = False
-        for rid in _lookup_sds_related_ids(info, sds_map):
+        _path: List[str] = []
+        for rid in _lookup_sds_related_ids(info, sds_map, path_out=_path):
             if rid in req_to_fids and fid not in req_to_fids[rid]:
                 req_to_fids[rid].append(fid)
             if rid in req_to_fids:
                 hit = True
         by_sds += 1 if hit else 0
+        if hit and _path:
+            _sds_paths[_path[0]] = _sds_paths.get(_path[0], 0) + 1
         linkless += 0 if hit else 1
 
     # ── 3티어: 설계-ID 브리지 (SwUDS Related ID → 설계 ID → SwDS → 요구) ──────
@@ -1140,6 +1211,23 @@ def map_requirements_to_functions(
         "켜짐" if uds_design_ids else "꺼짐(SwUDS 미지정)", linkless,
     )
 
+    if stats_out is not None:
+        _sizes = sorted(len(v) for v in req_to_fids.values())
+        # (리뷰 W2) `linkless` 는 2티어까지의 수다 — 브리지가 살린 함수를 그대로 "못 붙음" 으로도 세면 같은 함수가 두 칸에
+        #   들어간다. 못 붙은 함수는 **세 티어가 끝난 뒤** 다시 센다. `design_id_bridge_gained` 는 경로 분할의 한 칸이 아니라
+        #   "브리지로 링크가 늘어난 함수 수"(이미 붙어 있던 함수도 포함)라 `own_related + sds_* + unlinked` 와 더하지 않는다.
+        _linked = {f for v in req_to_fids.values() for f in v}
+        _total = sum(1 for i in function_details.values() if isinstance(i, dict))
+        stats_out["requirement_function_mapping"] = {
+            "functions_total": _total,
+            "functions_by_path": {"own_related": by_comment, **_sds_paths},
+            "design_id_bridge_gained": by_design,
+            "design_id_bridge_only": max(0, len(_linked) - by_comment - by_sds),
+            "unlinked": _total - len(_linked),
+            "links": sum(_sizes),
+            "functions_per_requirement": {"median": _sizes[len(_sizes) // 2] if _sizes else 0,
+                                          "max": _sizes[-1] if _sizes else 0},
+        }
     return req_to_fids
 
 
@@ -1261,8 +1349,14 @@ def _generate_steps_from_flow(
     """
     if stats is not None:
         stats["boundary_appended"] = False
+        stats["boundary_index"] = None
     if not logic_flow:
-        return _generate_simple_steps(func_info)
+        _simple = _simple_steps_capped(func_info, max_steps)
+        if stats is not None and len(_simple) >= 3:
+            # `[정상, 경계값, 범위 초과]` — 경계값 TC 가 빠졌으면(`max_steps<4`) 길이가 2 다. `boundary_appended` 는 그대로
+            #   False 다(그 값은 "분기 TC **뒤에 덧붙인** 것" 이라는 뜻으로 요구당 상한 계수에 쓰인다).
+            stats["boundary_index"] = 1
+        return _simple
 
     test_cases: List[List[Dict[str, str]]] = []
     normal_steps: List[Dict[str, str]] = []
@@ -1281,7 +1375,7 @@ def _generate_steps_from_flow(
     elif normal_steps:
         test_cases.append(normal_steps)
     else:
-        test_cases = _generate_simple_steps(func_info)
+        test_cases = _simple_steps_capped(func_info, max_steps)
     if branch_tcs or normal_steps:
         # 경계 TC 는 최소 4 스텝(최솟값 설정·호출·최댓값 설정·호출)이라 `max_steps<4` 면 한 축이 잘린 채 BAA 라벨만 남는다
         # (리뷰 W3) — 그땐 붙이지 않고 "못 붙임" 으로 센다.
@@ -1308,6 +1402,9 @@ def _generate_steps_from_flow(
     if boundary_tc is not None and stats is not None:
         if any(tc is boundary_tc for tc in kept):
             stats["boundary_appended"] = True
+            stats["boundary_index"] = next(i for i, tc in enumerate(kept) if tc is boundary_tc)
+            # 함수당 상한 **밖**에 선 경계값 TC — `keep_boundary` 가 아니면 문서에 없다(기본 프로파일).
+            stats["boundary_beyond_function_cap"] = stats["boundary_index"] >= max_tc
         else:
             stats["boundary_tc_cut_by_function_cap"] = int(stats.get("boundary_tc_cut_by_function_cap") or 0) + 1
     return kept
@@ -1606,6 +1703,22 @@ def _split_param_decl(inp: Any) -> Tuple[str, str]:
         name = re.sub(r"(?:\[[^\]]*\])+$", "", parts[-1].strip("*&;,"))
         return " ".join(parts[:-1]).strip(), name
     return "", s.split(":")[0].strip()
+
+
+def _simple_steps_capped(func_info: Dict[str, Any], max_steps: int) -> List[List[Dict[str, str]]]:
+    """flow 없는 함수의 TC 에도 **같은 스텝 상한**을 건다(R76 N82).
+
+    예전엔 `_generate_steps_from_flow` 가 flow 없는 함수를 상한 절단 **앞에서** 바로 돌려줘, `max_steps_per_tc` 를 낮춰도
+    이 함수들의 TC 만 안 잘렸다(기본 15 에선 TC 가 최대 5 스텝이라 드러나지 않는다). 경계값 TC(TC2)는 flow 함수와 같은
+    규칙이다 — 최소 4 스텝이라 `max_steps<4` 면 한 축이 잘린 채 BAA 라벨만 남으므로 **붙이지 않는다**.
+    """
+    simple = _generate_simple_steps(func_info)
+    if max_steps < 4 and len(simple) >= 2:
+        # 목록은 `[정상]` 또는 `[정상, 경계값, 범위 초과]` 다 — 둘째 자리가 경계값 TC(flow 함수 쪽 `simple[1]` 과 같은 약속).
+        simple = simple[:1] + simple[2:]
+    for tc in simple:
+        tc[:] = tc[:max_steps]
+    return simple
 
 
 def _generate_simple_steps(
@@ -2218,7 +2331,8 @@ def generate_quality_report(
 ) -> Dict[str, Any]:
     total_tc = len(test_cases)
     complete = sum(1 for tc in test_cases if tc.get("steps") and len(tc["steps"]) >= 2)
-    safety_tc = sum(1 for tc in test_cases if tc.get("safety_related") == "X")
+    # (R76 N102) `O` 가 안전 관련이다 — 예전엔 `"X"`(비안전)를 세어 `safety_tc_pct` 가 **비안전 비율**이었다.
+    safety_tc = sum(1 for tc in test_cases if tc.get("safety_related") == SAFETY_RELATED_MARK)
     methods: Dict[str, int] = {}
     gen_methods: Dict[str, int] = {}
     for tc in test_cases:
@@ -2414,7 +2528,8 @@ def generate_sts_xlsm(
         n_steps = len(steps)
         start_row = row_num
         end_row = row_num + n_steps - 1
-        is_safety = tc.get("safety_related") == "X"
+        # (R76 N102) 안전 강조는 `O` 행에 — 예전엔 `"X"`(비안전) 행이 노랗게 칠해졌다.
+        is_safety = tc.get("safety_related") == SAFETY_RELATED_MARK
 
         for si, step in enumerate(steps):
             r = row_num + si
@@ -3057,9 +3172,11 @@ def generate_sts(
     _progress(25, f"요구사항 {len(reqs)}개 파싱 완료")
 
     _progress(30, "요구사항-함수 매핑 중")
+    _map_stats: Dict[str, Any] = {}
     req_to_fids = map_requirements_to_functions(reqs, function_details,
                                                 sds_map=sds_partition_map,
-                                                uds_design_ids=uds_design_ids)
+                                                uds_design_ids=uds_design_ids,
+                                                stats_out=_map_stats)
     mapped = sum(1 for v in req_to_fids.values() if v)
     _progress(40, f"{mapped}/{len(reqs)}개 요구사항 매핑 완료")
 
@@ -3070,6 +3187,7 @@ def generate_sts(
         hsis_signals=hsis_signals or None,
         stats_out=gen_stats,
     )
+    gen_stats.update(_map_stats)
     _progress(60, f"테스트 케이스 {len(test_cases)}개 생성 완료")
     if gen_stats.get("functions_without_tc"):
         _logger.warning(

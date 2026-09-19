@@ -64,7 +64,7 @@ from report_gen.function_analyzer import (  # noqa: E402
     _parse_signature_params,
     _split_param,
 )
-from report_gen.provenance import unrecorded_source  # noqa: E402
+from report_gen.provenance import has_evidence_value, unrecorded_source  # noqa: E402
 from report_gen.requirements import (  # noqa: E402
     _collect_section_lines,
     _extract_function_blocks,
@@ -225,8 +225,11 @@ def _source_stage_provenance(
     ovr = override if isinstance(override, dict) else {}
 
     def _pick(comment: Any, ovr_val: Any, sds_val: Any) -> Tuple[str, str]:
+        # (R76 N86) 실값 판정은 `has_evidence_value` — 예전 truthiness 는 `N/A`·`-`·`none` 같은 **자리표시자 문자열**을
+        #   실값으로 봐서, 앞 단계의 자리표시자가 뒤 단계의 실값(SwDS 의 `A`)을 가리고 라벨은 `comment`/`sds` 로 찍혔다.
+        #   하류(`validation._score_for` 쪽 `has_evidence_value`)는 같은 값을 "값 없음" 으로 읽어 payload 라벨과 갈렸다.
         for val, src in ((comment, "comment"), (ovr_val, _OVERRIDE_SOURCE), (sds_val, "sds")):
-            if val:
+            if has_evidence_value(val):
                 return str(val), src
         return "TBD", unrecorded_source("TBD")
 
