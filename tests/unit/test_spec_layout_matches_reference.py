@@ -93,18 +93,23 @@ def test_sts_vocabulary_matches_its_introduction():
         _DEFAULT_TEST_METHOD,
         _GEN_METHODS,
         _TEST_METHODS,
-        _to_sts_vocab,
+        _classify_steps,
     )
     assert _TEST_METHODS == {"RBT", "FIT"}
     assert _GEN_METHODS == {"AOR", "ECA", "BAA"}
     assert (_DEFAULT_TEST_METHOD, _DEFAULT_GEN_METHOD_STS) == ("RBT", "AOR")
-    # 휴리스틱이 내던 어휘 밖 라벨은 전부 정본 어휘로 좁혀진다.
-    for raw_m, raw_g in (("FNCT", "STA"), ("RVW", "ADF"), ("ELCT", "AFD"), ("FIT", "ERG")):
-        m, g = _to_sts_vocab(raw_m, raw_g)
-        assert m in _TEST_METHODS and g in _GEN_METHODS, f"{raw_m}/{raw_g} → {m}/{g}"
-    # SwUTS 약어는 SwTS 약어로 옮겨진다(같은 개념, 다른 표기).
-    assert _to_sts_vocab("RBT", "AEC")[1] == "ECA"
-    assert _to_sts_vocab("RBT", "ABV")[1] == "BAA"
+    # 분류기(R67 — 라벨은 스텝에서 읽는다)가 내는 값은 전부 정본 어휘 안이다.
+    for steps in (
+        [],
+        [{"action": "f() 호출", "expected": "ok"}],
+        [{"action": "입력 설정 (경계 최댓값): a=255", "expected": "ok"}],
+        [{"action": "입력 설정 (유효 범위 초과): a=256", "expected": "ok"}],
+        [{"action": "조건 충족 설정: ( a > 0 )", "expected": "조건 분기 → True 경로 진입"}],
+        [{"action": "에러 조건 설정: ( p == NULL )", "expected": "에러 처리 경로 진입"}],
+        [{"action": "소스 코드에서 해당 요구사항 구현부 확인", "expected": "ok"}],
+    ):
+        m, g, _ = _classify_steps(steps)
+        assert m in _TEST_METHODS and g in _GEN_METHODS, f"{steps} → {m}/{g}"
 
 
 # ─── SITS ────────────────────────────────────────────────────────────────────

@@ -58,6 +58,9 @@ _DEFAULT_GEN_METHOD_STS = "AOR"  # 정본 실측: 102건 전부 AOR
 # 활동이라(`_generate_review_steps`) 실행 시험과 증거 성격이 다르다.
 # 커버리지를 방법 구분 없이 한 숫자로 내면 "100%"가 실행시험 100%인지 리뷰 포함인지
 # 구분되지 않는다 — 실측(HDPDM01 SRS 63건): 보고 100.0% vs 실행시험 87.3%.
+# ⚠ 위 어휘 정규화 뒤로 시트의 test_method 에 RVW 는 **더 이상 나오지 않는다**(RBT 로
+#   접힘). 리뷰 TC 의 표지는 `tc["review_only"]`(스텝에서 읽음, `_classify_steps`)이고
+#   이 집합은 외부에서 만든 TC dict 와의 호환용으로만 남는다.
 _REVIEW_ONLY_METHODS = {"RVW"}
 
 _DEFAULT_TEST_ENV = "SwTE_01"
@@ -1071,136 +1074,72 @@ _HW_SIGNAL_PAT = re.compile(
     re.I,
 )
 
-_ERROR_GUARD_PAT = re.compile(
-    r"\b(error|fault|fail|invalid|null|timeout|overflow|underflow|out.of.range)\b",
-    re.I,
-)
-
-
-# 내부 휴리스틱이 내는 라벨 → **정본 Introduction 표의 약어**.
-# ⚠ 휴리스틱 자체는 유용하다(어떤 성격의 시험인지 구분한다). 문제는 그 결과 라벨이
-#   SwTS Introduction 1.5/1.6 표에 없는 값이라는 것이었다 — 문서를 읽는 사람이
-#   대조할 표가 없으면 그 칸은 근거가 아니라 장식이다.
-_METHOD_TO_STS_VOCAB = {
-    "RBT": "RBT", "FIT": "FIT",
-    "FNCT": "RBT",   # 기능 시험 = 요구 기반 시험
-    "RVW": "RBT",    # 리뷰도 요구 기반 확인으로 기록한다(정본에 RVW 칸이 없다)
-    "ELCT": "RBT",   # 전기/HW 신호 확인도 요구 기반
-}
-_GEN_TO_STS_VOCAB = {
-    "AOR": "AOR",
-    "AEC": "ECA", "ECA": "ECA",   # 등가 분할 — SwTS 는 ECA, SwUTS 는 AEC 로 쓴다
-    "ABV": "BAA", "BAA": "BAA",   # 경계값 분석 — SwTS 는 BAA, SwUTS 는 ABV
-    "ERG": "AOR", "AFD": "AOR", "ADF": "AOR", "STA": "AOR",
-    "AOI": "AOR", "AUC": "AOR", "ASV": "AOR",
-}
-
-
 # `Safety Related` 칸 — 구현은 `generators/safety_marks.py` 가 단일 출처다.
 # ⚠ 이 파일에 다시 쓰지 말 것. 안전 판정을 고친 커밋 3건(fe9481e·e69b9dd·fb385d8)이
 #   **여기에는 한 번도 안 닿았다** — 복제가 있으면 그 다음 수정도 같은 길을 간다.
 _safety_mark = _safety_mark_impl
 
 
-def _to_sts_vocab(method: str, gen: str) -> Tuple[str, str]:
-    """휴리스틱 라벨을 정본 어휘로 좁힌다. 모르는 값은 정본 최빈값으로 떨어뜨린다."""
-    return (
-        _METHOD_TO_STS_VOCAB.get(str(method or "").strip().upper(), _DEFAULT_TEST_METHOD),
-        _GEN_TO_STS_VOCAB.get(str(gen or "").strip().upper(), _DEFAULT_GEN_METHOD_STS),
-    )
+# ── 라벨은 스텝이 증명한다 (R67 N79)
+# (2026-08-11 의 `_to_sts_vocab` — 휴리스틱 라벨 FNCT/RVW/ELCT/ERG… 를 정본 어휘로
+#  접던 표 — 는 유일 호출자인 휴리스틱과 함께 지웠다. 분류기가 정본 어휘만 낸다.) ─────────────────────────────────────────
+# 예전엔 (test_method, gen_method) 를 **요구 종류·함수 입력 타입**에서 미리 정했다
+# (`u8`/`u16` 입력이 있으면 BAA, TSR 이면 FIT, if 가 있으면 ECA …). 그런데 스텝은
+# logic_flow 에서 따로 만들어져 그 라벨과 무관했다 — 실측(KJPDS02_PV 2026-09-14,
+# TC 294): BAA 51건 중 경계값 스텝이 있는 것 6건, 반대로 AOR 197건 중 27건은 경계값
+# 스텝이 있었다. FIT 213건(72%)은 대부분 "호출 → 반환값 확인" 뿐이었다(정본 102건은
+# 전부 RBT). 라벨은 읽는 사람에게 "이 TC 가 어떤 기법을 적용했는가" 를 말하는 칸이라
+# **완성된 스텝**에서 거꾸로 읽는다. 아래 패턴은 `validate_sts_xlsm` 의 산출물 감사도
+# 같이 쓴다 — 라벨 셀과 스텝 셀을 대조하므로 같은 패턴이어도 검사가 공허하지 않다.
+# 유효 범위 **밖** 의 값(max_inv)도 경계값 분석이다 — SwUTS 형제와 같은 규칙
+# (`resolve_seq_test_method("BV_MAX_INV") == "FI"` 이고 gen 은 ABV). 그 TC 는 FIT + BAA.
+_BOUNDARY_ACTION_PAT = re.compile(
+    r"^입력 설정 \((?:경계 (?:최솟값|최댓값)|유효 범위 초과)\):.*=\s*-?\d")
+_FAULT_ACTION_PAT = re.compile(r"^에러 조건 설정:|^입력 설정 \(유효 범위 초과\):.*=\s*-?\d")
+_PARTITION_ACTION_PAT = re.compile(r"^(?:조건 충족 설정|조건 미충족 설정|else-if 조건 설정):")
+_PARTITION_EXPECTED_PAT = re.compile(r"^switch 분기 → case ")
+# 리뷰 전용 TC 의 스텝(`_generate_review_steps`). 검증방법 어휘가 RBT/FIT 둘뿐이라
+# "RVW" 라벨로는 더 이상 구분할 수 없다 — `_REVIEW_ONLY_METHODS` 주석 참조.
+_REVIEW_ACTION_PAT = re.compile(r"^(?:소스 코드에서 해당 요구사항 구현부 확인|요구사항 내용 리뷰:)")
 
 
-def _determine_test_method(
-    req: Dict[str, Any],
-    func_info: Optional[Dict[str, Any]] = None,
-    logic_flow: Optional[List[Dict[str, Any]]] = None,
-    hsis_signals: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str]:
-    """(test_method, gen_method) — **정본 어휘로 정규화해서** 돌려준다."""
-    return _to_sts_vocab(*_determine_test_method_raw(req, func_info, logic_flow, hsis_signals))
+def _classify_steps(steps: List[Dict[str, str]]) -> Tuple[str, str, bool]:
+    """(test_method, gen_method, review_only) — 스텝 내용에서 읽는다.
+
+    gen_method 는 하나만 적는다(가장 구체적인 기법: BAA > ECA > AOR). 정본은 102건
+    전부 AOR 이고 `Test Case Gen. Method` 칸은 한 값이 관례다.
+    test_method 는 고장을 실제로 넣는 스텝(에러 조건 설정 · 유효 범위 초과 입력)이
+    있을 때만 FIT, 나머지는 RBT. 숫자 없는 "경계 최솟값: param" 은 경계값이 아니다
+    (타입을 몰라 값을 못 만든 자리라 BAA 를 주장하지 않는다).
+    """
+    boundary = fault = partition = review = False
+    for st in steps or ():
+        action = str((st or {}).get("action") or "")
+        expected = str((st or {}).get("expected") or "")
+        if _BOUNDARY_ACTION_PAT.search(action):
+            boundary = True
+        if _FAULT_ACTION_PAT.search(action):
+            fault = True
+        if _PARTITION_ACTION_PAT.search(action) or _PARTITION_EXPECTED_PAT.search(expected):
+            partition = True
+        if _REVIEW_ACTION_PAT.search(action):
+            review = True
+    gen = "BAA" if boundary else ("ECA" if partition else _DEFAULT_GEN_METHOD_STS)
+    method = "FIT" if fault else _DEFAULT_TEST_METHOD
+    return method, gen, review
 
 
-def _determine_test_method_raw(
-    req: Dict[str, Any],
-    func_info: Optional[Dict[str, Any]] = None,
-    logic_flow: Optional[List[Dict[str, Any]]] = None,
-    hsis_signals: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str]:
-    """Return (test_method, gen_method) based on requirement type and function analysis."""
-    rtype = req.get("req_type", "")
-    asil = str(req.get("asil") or "").upper()
+def _relabel_from_steps(test_cases: List[Dict[str, Any]]) -> None:
+    """스텝이 바뀐 뒤(AI 보강 등) 라벨을 다시 읽는다. 멱등.
 
-    # Use HSIS-extended pattern if available, else base pattern
-    _hw_pat = (hsis_signals or {}).get("pat") or _HW_SIGNAL_PAT
-
-    # ── Hardware/Electrical requirement → ELCT + AFD ─────────────────────
-    if rtype == "EI":
-        # Check if it involves hardware signals → ELCT, else fault injection
-        req_desc = str(req.get("description") or req.get("name") or "")
-        func_text = ""
-        if func_info:
-            func_text = " ".join([
-                str(func_info.get("name") or ""),
-                str(func_info.get("description") or ""),
-                str(func_info.get("module_name") or ""),
-            ])
-        if _hw_pat.search(req_desc + " " + func_text):
-            return ("ELCT", "AFD")
-        return ("FIT", "ERG")  # EI without HW signals → error generation
-
-    if rtype in ("TSR", "NTSR"):
-        return ("FIT", "ERG")  # Safety requirements → error generation method
-
-    if not func_info and not logic_flow:
-        # NTR/NTSR with no function: use RBT (requirements-based test)
-        if rtype in ("NTR", "NTSR"):
-            return ("RBT", "ADF")
-        return ("RVW", "ADF")
-
-    has_switch = False
-    has_if = False
-    has_loop = False
-    has_boundary = False
-    has_error_guard = False
-
-    if logic_flow:
-        for node in logic_flow:
-            ntype = node.get("type", "")
-            cond = str(node.get("condition") or "")
-            if ntype == "switch":
-                has_switch = True
-            elif ntype == "if":
-                has_if = True
-                if _ERROR_GUARD_PAT.search(cond):
-                    has_error_guard = True
-            elif ntype == "loop":
-                has_loop = True
-
-    if func_info:
-        inputs = func_info.get("inputs") or []
-        for inp in inputs:
-            inp_str = str(inp).lower()
-            if any(k in inp_str for k in ["range", "min", "max", "limit", "bound"]):
-                has_boundary = True
-            if re.search(r"\bu8\b|\bu16\b|\bu32\b|\bs8\b|\bs16\b|\bs32\b", inp_str):
-                has_boundary = True
-        # Hardware register access in function → ELCT
-        fn_text = str(func_info.get("name") or "") + str(func_info.get("description") or "")
-        if _hw_pat.search(fn_text):
-            return ("ELCT", "AFD")
-
-    if has_switch:
-        return ("FNCT", "STA")
-    if has_error_guard:
-        return ("FIT", "ERG")   # Guard/error conditions → error generation
-    if has_boundary:
-        return ("FIT", "ABV")
-    if has_if:
-        return ("FNCT", "AEC")
-    if has_loop:
-        return ("FNCT", "AOR")
-
-    return ("FIT", "AOR")
+    `review_only` 는 **하향 전용**이다 — 리뷰 TC 는 함수가 매핑되지 않아 생긴 것이라
+    스텝 문구가 바뀌어도 실행 시험이 되지 않는다(R67 리뷰 W1).
+    """
+    for tc in test_cases:
+        method, gen, review = _classify_steps(tc.get("steps") or [])
+        tc["test_method"] = method
+        tc["gen_method"] = _format_gen_method(gen)
+        tc["review_only"] = bool(tc.get("review_only")) or review
 
 
 def _format_gen_method(gen: str) -> str:
@@ -1706,6 +1645,9 @@ def generate_test_cases(
     """Generate all test cases from requirements and function details.
 
     Args:
+        hsis_signals: 호환용으로 받기만 한다. 예전엔 HW 신호 패턴으로 ELCT 라벨을
+            골랐는데 라벨이 스텝에서 나오게 되면서(R67) 여기선 쓰지 않는다 — AI 보강
+            (`enhance_test_cases_with_ai`)이 같은 값을 문맥으로 쓴다.
         stats_out: 주면 생성 통계를 채워 넣는다(절단 표면화용). 요구당 TC 상한
             `max_tc_per_req`(기본 5)은 **함수 루프 자체를 끊으므로**, 요구에 매핑된
             함수가 많으면 대부분이 시험 없이 남는다. 그 사실이 어디에도 안 남으면
@@ -1736,7 +1678,6 @@ def generate_test_cases(
     for req in requirements:
         rid = req["id"]
         fids = req_to_fids.get(rid, [])
-        rtype = req.get("req_type", "")
 
         req_asil = str(req.get("asil") or "").strip()
         if not req_asil and _proj_is_safety:
@@ -1745,14 +1686,15 @@ def generate_test_cases(
         is_safety = is_safety_asil(req_asil)
 
         if not fids:
-            method, gen = _determine_test_method(req, hsis_signals=hsis_signals)
             step_sets = _generate_review_steps(req, max_steps=max_steps)
             for idx, steps in enumerate(step_sets[:max_tc]):
                 tc_id = _make_tc_id(rid, idx + 1)
+                method, gen, review_only = _classify_steps(steps)
                 all_tcs.append(_build_tc_dict(
                     tc_id=tc_id, req=req, steps=steps,
                     test_method=method, gen_method=gen,
                     test_env=test_env, is_safety=is_safety,
+                    review_only=review_only,
                 ))
             continue
 
@@ -1767,7 +1709,6 @@ def generate_test_cases(
             if not isinstance(info, dict):
                 continue
             logic_flow = info.get("logic_flow") or []
-            method, gen = _determine_test_method(req, info, logic_flow, hsis_signals=hsis_signals)
             step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps,
                                                   max_tc=max_tc)
 
@@ -1777,11 +1718,16 @@ def generate_test_cases(
                 tc_counter += 1
                 used_fids.add(fid)
                 tc_id = _make_tc_id(rid, tc_counter)
+                # 라벨은 상한 절단·최소 스텝 보강까지 끝난 **최종 스텝**에서 읽는다 —
+                # 절단으로 경계값 스텝이 잘렸으면 BAA 도 같이 사라져야 한다.
+                final_steps = _ensure_min_steps(steps, info)
+                method, gen, review_only = _classify_steps(final_steps)
                 all_tcs.append(_build_tc_dict(
-                    tc_id=tc_id, req=req, steps=_ensure_min_steps(steps, info),
+                    tc_id=tc_id, req=req, steps=final_steps,
                     test_method=method, gen_method=gen,
                     test_env=test_env, is_safety=is_safety,
                     func_name=info.get("name"),
+                    review_only=review_only,
                 ))
 
     if stats_out is not None:
@@ -1812,6 +1758,7 @@ def _build_tc_dict(
     test_env: str,
     is_safety: bool,
     func_name: Optional[str] = None,
+    review_only: bool = False,
     _bv_cache: Dict[str, Any] = {},  # noqa: B006 — intentional mutable default for lazy init
 ) -> Dict[str, Any]:
     # Lazy-init boundary helpers once (shared across all calls via mutable default)
@@ -1897,6 +1844,8 @@ def _build_tc_dict(
         "precondition": precond,
         "srs_id": req["id"],
         "steps": steps,
+        # 실행 산출물이 없는 리뷰 TC — 시트에는 안 쓰고 추적성 매트릭스의 실행시험 축이 본다.
+        "review_only": bool(review_only),
     }
 
 
@@ -1928,7 +1877,14 @@ def generate_traceability_matrix(
     for tc in test_cases:
         tid = tc["id"]
         srs = tc.get("srs_id", "")
-        is_executable = str(tc.get("test_method") or "").upper() not in _REVIEW_ONLY_METHODS
+        # ⚠ `test_method` 만 보면 이 축은 죽어 있다 — 2026-08-11 어휘 정규화가 RVW 를
+        #   RBT 로 접은 뒤 리뷰 TC 도 실행 시험으로 세어 executable_pct 가 **항상 100**
+        #   이었다(품질 DB 실측: 08-11 이전 run 79.2%/리뷰전용 15 → 이후 100.0%/0,
+        #   실제 09-14 산출물엔 리뷰 전용 요구 4/68). 플래그는 스텝에서 읽는다(R67).
+        is_executable = (
+            not tc.get("review_only")
+            and str(tc.get("test_method") or "").upper() not in _REVIEW_ONLY_METHODS
+        )
         row: Dict[str, int] = {}
         for rid in req_ids:
             if rid == srs:
@@ -2450,6 +2406,9 @@ _STS_AI_SYSTEM_PROMPT = (
     "Rules:\n"
     "- Be specific and technical. Use actual signal names, function names, and parameter values.\n"
     "- For boundary tests, include specific boundary values.\n"
+    "- Keep the Korean action prefixes exactly as given ('입력 설정 (경계 최솟값):', "
+    "'입력 설정 (유효 범위 초과):', '조건 충족 설정:', '에러 조건 설정:' etc.) — the Test Method / "
+    "Gen. Method columns are derived from them after enhancement.\n"
     "- For state transition tests, specify the exact states and transitions.\n"
     "- Keep Korean language for descriptions.\n"
     "- Return JSON: {\"description\":\"...\", \"precondition\":\"...\", \"steps\":[{\"action\":\"...\",\"expected\":\"...\"}]}\n"
@@ -2572,7 +2531,11 @@ def enhance_test_cases_with_ai(
 
     enhanced = 0
     batch_size = min(max_batch, len(test_cases))
-    candidates = [tc for tc in test_cases if tc.get("steps") and len(tc["steps"]) <= 3]
+    # 리뷰 전용 TC(매핑된 함수가 없어 생긴 것)는 보강하지 않는다 — 스텝을 다시 써도
+    # 실행 가능해지지 않고, 리뷰 표지 스텝이 사라지면 실행시험 축(`review_only`)만
+    # 뒤집힌다(R67 리뷰 W1). 리뷰 TC 는 2~3 스텝이라 예전엔 항상 후보 1순위였다.
+    candidates = [tc for tc in test_cases
+                  if tc.get("steps") and len(tc["steps"]) <= 3 and not tc.get("review_only")]
     candidates = candidates[:batch_size]
 
     for tc in candidates:
@@ -2822,6 +2785,8 @@ def generate_sts(
             hsis_signals=hsis_signals or None,
             max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
         )
+        # AI 가 스텝을 갈아 끼웠으면 라벨도 그 스텝을 따라야 한다.
+        _relabel_from_steps(test_cases)
         _progress(75, "AI 향상 완료")
 
     _progress(78, "추적성 매트릭스 생성 중")
@@ -3000,7 +2965,7 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
 
         # ⚠ read_only 워크북에서 ws.cell(row=N, ...) 랜덤 접근은 매 호출마다 시트를 다시
         # 훑어 O(행²)가 된다(이 저장소 실측 전례: 75분 → iter_rows 0.9초). 한 번만 순회한다.
-        needed = ("tc_id", "title", "action", "expected", "srs")
+        needed = ("tc_id", "title", "action", "expected", "srs", "test_method", "gen_method")
         max_needed_col = max(cols[f] for f in needed)
 
         def _val(row_vals: Tuple[Any, ...], field: str) -> str:
@@ -3010,6 +2975,15 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
         # TC ID는 첫 스텝 행에만 있고 Action/Expected는 스텝마다 있다 — TC 블록 단위로 본다.
         cur_has_action = cur_has_expected = False
         has_open_tc = False
+        # 라벨↔스텝 대조 (R67): 라벨 셀은 첫 행, 근거 스텝은 블록 어디든.
+        cur_method = cur_gen = ""
+        cur_boundary = cur_fault = cur_partition = False
+        label_audit: Dict[str, int] = {
+            "baa_total": 0, "baa_without_boundary": 0,
+            "eca_total": 0, "eca_without_partition": 0,
+            "fit_total": 0, "fit_without_fault": 0,
+            "boundary_without_baa": 0, "partition_without_eca": 0, "fault_without_fit": 0,
+        }
 
         def _close_tc() -> None:
             nonlocal no_step_tcs, no_expected_tcs
@@ -3017,6 +2991,26 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
                 no_step_tcs += 1
             if not cur_has_expected:
                 no_expected_tcs += 1
+            gen_u = cur_gen.upper()
+            if "BAA" in gen_u:
+                label_audit["baa_total"] += 1
+                if not cur_boundary:
+                    label_audit["baa_without_boundary"] += 1
+            elif cur_boundary:
+                label_audit["boundary_without_baa"] += 1
+            if "ECA" in gen_u:
+                label_audit["eca_total"] += 1
+                if not cur_partition:
+                    label_audit["eca_without_partition"] += 1
+            elif cur_partition and "BAA" not in gen_u:
+                # BAA 가 ECA 보다 우선이라 경계값+분기 TC 는 BAA 가 맞다(리뷰 W3).
+                label_audit["partition_without_eca"] += 1
+            if cur_method.upper() == "FIT":
+                label_audit["fit_total"] += 1
+                if not cur_fault:
+                    label_audit["fit_without_fault"] += 1
+            elif cur_fault:
+                label_audit["fault_without_fit"] += 1
 
         for row_vals in ws.iter_rows(
             min_row=_HEADER_ROW + 1, max_row=max_row,
@@ -3029,16 +3023,29 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
                 tc_count += 1
                 has_open_tc = True
                 cur_has_action = cur_has_expected = False
+                cur_boundary = cur_fault = cur_partition = False
+                cur_method = _val(row_vals, "test_method")
+                cur_gen = _val(row_vals, "gen_method")
                 if not _val(row_vals, "title"):
                     empty_title_tcs += 1
                 if _val(row_vals, "srs"):
                     reqs_linked += 1
             if not has_open_tc:
                 continue   # TC 시작 전 잔여 행 — 어느 TC에도 귀속되지 않는다
-            if _val(row_vals, "action"):
+            action = _val(row_vals, "action")
+            expected = _val(row_vals, "expected")
+            if action:
                 cur_has_action = True
-            if _val(row_vals, "expected"):
+                if _BOUNDARY_ACTION_PAT.search(action):
+                    cur_boundary = True
+                if _FAULT_ACTION_PAT.search(action):
+                    cur_fault = True
+                if _PARTITION_ACTION_PAT.search(action):
+                    cur_partition = True
+            if expected:
                 cur_has_expected = True
+                if _PARTITION_EXPECTED_PAT.search(expected):
+                    cur_partition = True
         if has_open_tc:
             _close_tc()
 
@@ -3048,6 +3055,22 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
         stats["no_expected_tcs"] = no_expected_tcs
         stats["reqs_linked"] = reqs_linked
         stats["req_linkage_pct"] = round(reqs_linked / tc_count * 100, 1) if tc_count else 0
+        stats["label_audit"] = label_audit
+        _mismatch = [
+            (label, label_audit[key]) for key, label in (
+                ("baa_without_boundary", "BAA 인데 경계값 스텝 없음"),
+                ("eca_without_partition", "ECA 인데 분기 스텝 없음"),
+                ("fit_without_fault", "FIT 인데 고장 주입 스텝 없음"),
+                ("boundary_without_baa", "경계값 스텝이 있는데 BAA 아님"),
+                ("partition_without_eca", "분기 스텝이 있는데 ECA 아님"),
+                ("fault_without_fit", "고장 주입 스텝이 있는데 FIT 아님"),
+            ) if label_audit[key]
+        ]
+        if _mismatch:
+            # 라벨은 시험 기법의 주장이다 — 스텝이 그 주장을 뒷받침하지 않으면 장식이다.
+            warnings.append(
+                "라벨↔스텝 불일치: " + ", ".join(f"{lab} {n}건" for lab, n in _mismatch)
+            )
 
         if tc_count == 0:
             issues.append("No test cases found")
@@ -3154,6 +3177,23 @@ def generate_sts_validation_report(
         f"| 요구사항 연결률 | {stats.get('req_linkage_pct', 0)}% |",
         "",
     ]
+    _audit = stats.get("label_audit") or {}
+    if _audit:
+        lines.extend([
+            "### 라벨 ↔ 스텝 대조 (Test Method / Gen. Method 가 스텝으로 뒷받침되는가)",
+            "",
+            "| 라벨 | TC 수 | 근거 스텝 없음 |",
+            "|------|-----|-----|",
+            f"| BAA (경계값 분석) | {_audit.get('baa_total', 0)} | {_audit.get('baa_without_boundary', 0)} |",
+            f"| ECA (등가 분할) | {_audit.get('eca_total', 0)} | {_audit.get('eca_without_partition', 0)} |",
+            f"| FIT (고장 주입) | {_audit.get('fit_total', 0)} | {_audit.get('fit_without_fault', 0)} |",
+            f"| 경계값 스텝이 있는데 BAA 아님 | {_audit.get('boundary_without_baa', 0)} | — |",
+            f"| 분기 스텝이 있는데 ECA 아님 | {_audit.get('partition_without_eca', 0)} | — |",
+            f"| 고장 주입 스텝이 있는데 FIT 아님 | {_audit.get('fault_without_fit', 0)} | — |",
+            "",
+            "정본 SwTS(2026-08-11 실측 102건)는 전부 RBT / AOR 이다. 위 라벨은 스텝이 뒷받침할 때만 적혔다.",
+            "",
+        ])
 
     if qr:
         lines.extend([
