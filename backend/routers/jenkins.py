@@ -3533,6 +3533,16 @@ def jenkins_suts_generate_async(
     # 생성기 기본값(`generators/suts.py::_DEFAULT_SEQ_COUNT`)과 같은 24.
     # ⚠ 예전엔 6 이었다 — 전략 24종 중 6개만 만들면서 화면은 그 사실을 말하지 않았다.
     max_sequences: int = Form(24),
+    # (R70 N88) 프론트(`DocGenSection.jsx`)는 이 네 문서를 **보내고 있었다**. 핸들러가 선언하지 않아 FastAPI 가
+    #   조용히 버렸고(UDS `reference_doc_path` 와 같은 결함 — `test_docgen_cap_activation.py` 의 그 사례), SUTS 는
+    #   SwUDS 없이 만들어졌다: 범위 `suds` 가 좁혀지지 않고(정본 1,014 vs 생성 1,025), 설계 ID·SwUDS ASIL·SRS 요구
+    #   ID·HSIS 경계가 전부 비었다. 로컬 라우터(`local.py`)는 같은 네 필드를 받아 넘긴다 — 여기만 빠져 있었다.
+    #   ⚠ 로컬과 같아지는 것은 이 네 문서 한정이다 — 로컬의 HSIS 자동 탐색(저장소 `docs/` 글롭, 프로젝트 무관)과
+    #   `ai_config` 는 여기 없다(리뷰 I2).
+    srs_path: str = Form(""),
+    sds_path: str = Form(""),
+    uds_path: str = Form(""),
+    hsis_path: str = Form(""),
 ) -> Dict[str, Any]:
     from suts_generator import generate_suts
 
@@ -3540,6 +3550,15 @@ def jenkins_suts_generate_async(
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
+    # 선택 문서는 worker 경유로 로컬화한다(cloudium `U:` 직독은 PermissionError). 못 읽은 사유는 버리지 않는다.
+    from backend.services.resolver_helpers import resolve_builder_input as _rbi_doc
+    _doc_reasons: List[str] = []
+    _srs_doc = _rbi_doc(srs_path, label="SRS", reasons=_doc_reasons) if srs_path else None
+    _sds_doc = _rbi_doc(sds_path, label="SDS", reasons=_doc_reasons) if sds_path else None
+    _uds_doc = _rbi_doc(uds_path, label="UDS", reasons=_doc_reasons) if uds_path else None
+    _hsis_doc = _rbi_doc(hsis_path, label="HSIS", reasons=_doc_reasons) if hsis_path else None
+    for _why in _doc_reasons:
+        _logger.warning("SUTS 선택 문서 미사용: %s", _why)
     # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
     # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
     # 같아진다. 명세 시트는 어차피 지우고 새로 쓴다.
@@ -3569,14 +3588,21 @@ def jenkins_suts_generate_async(
     def _worker() -> None:
         try:
             _set_progress("jenkins_suts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
+            # (R70 N88) `source_root` 는 등록값 그대로(`;`/`,` 구분 복수 루트). 예전엔 첫 루트(`source_root_path`)만
+            #   넘겨 두 번째 루트(KJPDS02 의 PDS128_FBL)의 함수가 SUTS 에서 조용히 빠졌다 — UDS·STS 라우터와 로컬
+            #   SUTS 라우터는 전체를 넘긴다.
             result = generate_suts(
                 scope=scope,
-                source_root=str(source_root_path),
+                source_root=source_root,
                 output_path=str(out_path),
                 template_path=tpl_path,
                 project_config=project_config,
                 max_sequences=max_sequences,
                 on_progress=_on_progress,
+                srs_docx_path=_srs_doc,
+                sds_docx_path=_sds_doc,
+                uds_path=_uds_doc,
+                hsis_path=_hsis_doc,
             )
             download_url = f"/api/jenkins/suts/download?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
             preview_url = f"/api/jenkins/suts/preview?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
@@ -3594,6 +3620,9 @@ def jenkins_suts_generate_async(
                     "validation": result.get("validation", {}),
                     "validation_report_path": result.get("validation_report_path", ""),
                     "build_label": _build_label(job_url, cache_root, build_selector),
+                    # (R70 리뷰 I1) 못 읽어 뺀 선택 문서의 사유 — 로그에만 두면 사용자는 SwUDS 없는 산출물에도
+                    #   "생성 완료" 만 본다. 빈 목록이 정상이다.
+                    "input_notes": list(_doc_reasons),
                 },
                 output_path=str(out_path),
                 filename=out_filename,

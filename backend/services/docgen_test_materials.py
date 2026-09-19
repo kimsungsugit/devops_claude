@@ -390,6 +390,7 @@ def _measure_suts_inputs(
     globals_info_map: Optional[Dict[str, Any]] = None,
     *,
     units_out: Optional[List[Any]] = None,
+    uds_io_map: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """**입력 변수가 하나도 없는 unit** 과 그 사유.
 
@@ -404,13 +405,16 @@ def _measure_suts_inputs(
         units_out: 주면 수집한 unit 목록을 여기 담는다. `collect_unit_functions` 는
             이 측정에서 가장 비싼 단계라, ASIL 근거 축(`_measure_suts_asil`)이 다시
             부르면 같은 일을 두 번 한다. 저장소의 `stats_out` 규약과 같은 모양이다.
+        uds_io_map: SwUDS 입출력·ASIL 표(`load_uds_unit_io`). (R70 리뷰 W2) 생성기는 이 표를 넘겨 등급을
+            `uds+…` 로 정하는데 측정이 안 넘기면 같은 unit 이 `override`(약함)로 잡혀 근거 축이 과대 보고된다.
     """
     from generators.suts import collect_unit_functions
 
     try:
         # ⚠ `globals_info_map` 을 빠뜨리면 이 패널이 **실제 산출물과 다른 unit 목록**을
         #   센다 — const 전역 억제가 여기서만 안 걸려 "입력 0개" 판정이 어긋난다.
-        units = collect_unit_functions(fd, globals_info_map or {}, sds_map=sds_map or {})
+        units = collect_unit_functions(fd, globals_info_map or {}, sds_map=sds_map or {},
+                                       uds_io_map=uds_io_map)
     except Exception as exc:  # noqa: BLE001 — 생성기 계열이 광범위
         _logger.warning("test_materials: SUTS unit 수집 실패 — %s", exc, exc_info=True)
         return {"measured": False, "reason": f"unit 수집 실패 ({type(exc).__name__})"}
@@ -420,6 +424,11 @@ def _measure_suts_inputs(
     by_name = {
         str(i.get("name") or ""): i for i in (fd or {}).values() if isinstance(i, dict)
     }
+    # (R70) 스냅샷 전용 unit(소스에 없음)은 이 축에서 뺀다 — 입력이 없는 건 **구조적**이지 재료를 잃은 게 아니라서,
+    #   세면 사유 `no_params_no_globals` 가 251 부풀어 정본 기준선(17.1%)과의 비교가 깨진다. 근거 축(`_measure_suts_asil`)은
+    #   전체 목록(`units_out`)을 그대로 본다. 뺀 수는 따로 낸다.
+    snapshot_only = sum(1 for u in units if u.get("override_only"))
+    units = [u for u in units if not u.get("override_only")]
     causes: Dict[str, int] = {}
     samples: Dict[str, List[str]] = {}
     no_input: List[str] = []
@@ -490,11 +499,15 @@ def _measure_suts_inputs(
         "reference_units": 1005,
         "causes": causes,
         "cause_samples": samples,
+        "snapshot_only_excluded": snapshot_only,
     }
 
 
-def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
+def _measure_suts_asil(units: List[Any], *, uds_map: bool = False) -> Dict[str, Any]:
     """안전 판정(`Safety Related`)이 **무엇을 근거로** 정해졌나.
+
+    `uds_map`: unit 을 SwUDS 표와 함께 모았는가. 없이 모았으면 `override`·`sds-*` 수가 생성 시보다 크다(표가 먼저
+    결정하므로) — 그 사실을 결과에 실어 화면이 말하게 한다.
 
     `_resolve_unit_asil` 은 SwUDS 가 침묵한 unit 의 등급을 SDS 파티션 이름의
     **부분문자열 첫 일치**로 집는다. 그 규칙은 대안 6개를 다 재본 뒤 값을 그대로
@@ -511,6 +524,12 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
 
     weak: List[str] = []
     conflict: List[str] = []
+    # (R70 N83) 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`)이 **혼자** 정한 등급. SwUDS 가
+    #   같이 말했으면(`uds+override`) 표가 결정한 것이라 여기 안 센다. 이 스냅샷은 프로젝트 확인이 없는 값이라
+    #   (R68) 부분문자열 매칭과 같은 급의 "근거 약함" 이다 — 예전엔 `source` 로 접혀 이 축이 조용했다.
+    override_only_grade: List[str] = []
+    # 소스에 없고 스냅샷에만 있어 빈 엔트리로 보충된 unit(prototype 자리표시).
+    phantom: List[str] = []
     graded = 0
     # 등급별 분포. **MC/DC 필수 여부(ASIL D)가 여기서만 나온다** — 준비 게이트의 SUTS
     # 상한 경고가 "ASIL D 는 MC/DC 필수" 라는 일반론에 머물러, QM 전용 프로젝트에는
@@ -537,6 +556,10 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
             conflict.append(str(u.get("name") or ""))
         elif ev == "sds-fuzzy":
             weak.append(str(u.get("name") or ""))
+        elif ev == "override":
+            override_only_grade.append(str(u.get("name") or ""))
+        if u.get("override_only"):
+            phantom.append(str(u.get("name") or ""))
     return {
         "measured": True,
         "units": len(units),
@@ -545,10 +568,14 @@ def _measure_suts_asil(units: List[Any]) -> Dict[str, Any]:
         # 갈리기까지** 한 것(= 사전 순서가 등급을 정했다). 둘을 합치면 심각도가 섞인다.
         "fuzzy": len(weak),
         "fuzzy_conflict": len(conflict),
+        # (R70 N83) 저장소 스냅샷이 혼자 정한 등급 · 소스에 없는 스냅샷 전용 unit. 위 둘과 합치지 않는다.
+        "override": len(override_only_grade),
+        "override_only_units": len(phantom),
+        "uds_map": bool(uds_map),
         # 등급 분포 + **등급을 못 찾은 수**. 둘을 합치지 않는다(위 주석).
         "by_grade": by_grade,
         "ungraded": ungraded,
-        "samples": (conflict[:6] + weak[:6])[:8],
+        "samples": (conflict[:6] + weak[:6] + override_only_grade[:4])[:10],
     }
 
 
@@ -711,6 +738,26 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         return {"ok": False, "reason": "소스에서 함수를 찾지 못했습니다", "functions": 0}
 
     sds_map, sds_reason = _load_sds_map(sds_path)
+    # (R70 리뷰 W1) SUTS 축은 **생성기와 같은 함수 목록**을 잰다 — `generate_suts` 는 override 스냅샷에만 있는 함수를
+    #   자리표시 엔트리로 보충(`supplement_override_only`)하므로 여기서도 같은 보충을 건다(사본에 — SITS/STS 축은
+    #   그 보충을 타지 않는 생산 경로라 원본 `fd` 를 쓴다). 안 걸면 스냅샷 전용 unit 이 게이트에선 구조적으로 0 이다.
+    fd_suts: Dict[str, Any] = dict(fd)
+    try:
+        from generators.suts import supplement_override_only
+        supplement_override_only(fd_suts)
+    except Exception as exc:  # noqa: BLE001 — 보충 실패는 생성기와 같이 경고 후 소스 함수만으로 잰다
+        _logger.warning("test_materials: override 보충 실패 — 소스 함수만 잰다: %s", exc)
+    # (R70 리뷰 W2) SwUDS 표도 생성기와 같이 넘긴다 — 없이 재면 표가 정할 등급이 `override`(약함)로 잡혀 과대 보고.
+    _uds_io: Optional[Dict[str, Any]] = None
+    if str(uds_path or "").strip():
+        try:
+            from backend.services.resolver_helpers import resolve_builder_input
+            from generators.uds_unit_io import load_uds_unit_io
+            _local_uds_io = resolve_builder_input(uds_path, label="SwUDS(입출력)")
+            if _local_uds_io:
+                _uds_io = load_uds_unit_io(_local_uds_io) or None
+        except Exception as exc:  # noqa: BLE001 — docx/IPC 계열이 광범위. 없이 잰 사실은 `uds_map` 으로 남는다
+            _logger.warning("test_materials: SwUDS 입출력 표 읽기 실패 — 표 없이 잰다: %s", exc)
     # ⚠ unit 수집은 이 측정에서 가장 비싼 단계다. 입력 축과 ASIL 근거 축이 **같은
     #   목록**을 봐야 하기도 한다 — 따로 두 번 부르면 비용도 두 배고, 그 사이 규칙이
     #   갈리면 두 패널이 서로 다른 그림을 보여 준다(`_dir_tag` 주석의 전례).
@@ -721,8 +768,8 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         "elapsed_s": round(time.time() - t0, 1),
         "sits": _measure_sits(fd, sds_map, sds_reason, uds_path),
         "suts": _measure_suts_types(fd),
-        "suts_inputs": _measure_suts_inputs(fd, sds_map, gim, units_out=_units),
-        "suts_asil": _measure_suts_asil(_units),
+        "suts_inputs": _measure_suts_inputs(fd_suts, sds_map, gim, units_out=_units, uds_io_map=_uds_io),
+        "suts_asil": _measure_suts_asil(_units, uds_map=bool(_uds_io)),
         "sts_mapping": _measure_sts_mapping(fd, sds_map, sds_reason, srs_path, uds_path),
         # UDS 분류 상한이 **실제로 무엇을 잘랐는가**(`uds_generator` 의 `category_caps`).
         # 같은 파서를 이미 돌렸으므로 추가 비용이 0 이다. 준비 게이트는 이 값이 있을

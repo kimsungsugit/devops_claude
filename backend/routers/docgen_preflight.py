@@ -1734,20 +1734,33 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 a = tm.get("suts_asil") or {}
                 if a.get("measured"):
                     _fz, _cf = a.get("fuzzy", 0), a.get("fuzzy_conflict", 0)
+                    # (R70 N83) 저장소 override 스냅샷이 **혼자** 정한 등급도 약한 근거다(프로젝트 확인 없음, R68).
+                    #   예전엔 `source` 로 접혀 이 행이 KJPDS02 에서 228 unit 을 "소스 근거" 로 말했다.
+                    _ov = int(a.get("override", 0) or 0)
+                    _ph = int(a.get("override_only_units", 0) or 0)
+                    _weak_total = _fz + _cf + _ov
+                    _parts: List[str] = []
+                    if _fz or _cf:
+                        _parts.append(
+                            f"{_fz + _cf}개 unit 의 안전 등급이 SwDS 파티션 이름의 **부분문자열 첫 일치**로 정해졌습니다"
+                            + (f" (그중 {_cf}개는 후보 등급까지 갈립니다 = 사전 순서가 등급을 정했습니다)" if _cf else ""))
+                    if _ov:
+                        _parts.append(
+                            f"{_ov}개 unit 의 안전 등급은 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`, "
+                            "이 프로젝트의 값인지 확인되지 않음)이 혼자 정했습니다"
+                            + (f" — 그중 소스에 없는 스냅샷 전용 unit {_ph}개" if _ph else ""))
+                    # 표 없이 잰 값인지는 문장에 남긴다(리뷰 W2) — 생성 시엔 SwUDS 표가 먼저 결정하므로 그때 수치가 더 작다.
+                    _uds_map = bool(a.get("uds_map"))
+                    _tail = ("" if _uds_map else " (이 측정은 SwUDS 표 없이 잰 값입니다)") + \
+                        " — SwUDS 를 주면 그 표가 먼저 결정합니다"
                     steps.append(_step(
                         "suts_asil_evidence", "material",
-                        S_OK if not (_fz or _cf) else S_DEGRADED,
+                        S_OK if not _weak_total else S_DEGRADED,
                         "안전 등급의 근거",
-                        measured={"value": _fz + _cf, "of": a.get("graded", 0),
-                                  "units": a.get("units", 0), "conflict": _cf},
-                        reason=(
-                            f"{_fz + _cf}개 unit 의 안전 등급이 SwDS 파티션 이름의 "
-                            f"**부분문자열 첫 일치**로 정해졌습니다"
-                            + (f" (그중 {_cf}개는 후보 등급까지 갈립니다 = 사전 순서가 "
-                               "등급을 정했습니다)" if _cf else "")
-                            + " — SwUDS 를 주면 그 표가 먼저 결정합니다"
-                            if (_fz or _cf) else ""
-                        ),
+                        measured={"value": _weak_total, "of": a.get("graded", 0),
+                                  "units": a.get("units", 0), "conflict": _cf,
+                                  "override": _ov, "override_only_units": _ph, "uds_map": _uds_map},
+                        reason=("; ".join(_parts) + _tail) if _parts else "",
                         samples=list(a.get("samples") or []),
                     ))
             if req.doc_type == "sts":

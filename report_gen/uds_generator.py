@@ -201,6 +201,9 @@ def _asil_rank(v: Any) -> int:
 #   (KJPDS02 918건)가 전부 "추론" 으로 찍혔다. 라벨은 **값을 준 단계**가 단다. `override` 는 저장소의 정본 역추출 스냅샷
 #   (`docs/uds_function_swcom_override.json`, 함수 이름 키 — 프로젝트 확인 없음)이라 약한 출처(0.60, `inference` 와 같은
 #   점수)로 등록한다: 값과 덮어쓰기 규칙은 그대로고 라벨만 사실이 된다. 프로젝트 귀속은 P7 결정 축(계획서).
+# (R70 N84) 두 루프(AST · 텍스트 폴백)가 **같은 사슬**을 쓴다. R68 까지 폴백 루프의 Related 사슬에만 override 가 없어
+#   같은 함수가 어느 루프로 가느냐(tree-sitter 가 읽었는가)에 따라 Related 가 달라질 수 있었다 — 라이브 두 루트
+#   (KJPDS02 229 · PDS64 256, override 이름 전부 AST 루프)에선 값 변화 0 이지만 규칙이 둘이면 한쪽만 고쳐진다.
 _OVERRIDE_SOURCE = "override"
 
 
@@ -211,12 +214,10 @@ def _source_stage_provenance(
     override: Any,
     sds_asil: Any,
     sds_related: Any,
-    override_related: bool = True,
 ) -> Tuple[str, str, str, str]:
     """(asil, asil_source, related, related_source) — 값을 준 단계가 라벨을 단다.
 
-    `override_related=False` 는 텍스트 폴백 루프용이다. 그 루프의 Related 사슬엔 override 가 원래 없었고
-    (`m_related or SDS or TBD`), 이 라운드는 값을 바꾸지 않으므로 라벨도 그 사슬을 따른다.
+    사슬은 ASIL·Related 둘 다 comment > override > SDS > TBD 하나뿐이다(AST 루프와 텍스트 폴백 루프 공용).
     값이 없으면(`TBD`) 근거도 없다 — `unrecorded_source` 규약대로 `default`(0.30)이지 `inference` 가 아니다.
     """
     ovr = override if isinstance(override, dict) else {}
@@ -228,8 +229,7 @@ def _source_stage_provenance(
         return "TBD", unrecorded_source("TBD")
 
     asil, asil_src = _pick(comment_asil, ovr.get("asil"), sds_asil)
-    related, related_src = _pick(
-        comment_related, ovr.get("related") if override_related else None, sds_related)
+    related, related_src = _pick(comment_related, ovr.get("related"), sds_related)
     return asil, asil_src, related, related_src
 
 
@@ -1918,13 +1918,16 @@ def generate_uds_source_sections(
                 term_return, term_error = _extract_logic_terminal_paths(body_text)
                 # (R65 리뷰 I2) 이 루프(텍스트 폴백 함수)는 헤더 프로토타입을 쓴 적이 없다 — 분모를 맞추기 위해 세기만 한다.
                 _proto_scan["definition:fallback_loop"] = _proto_scan.get("definition:fallback_loop", 0) + 1
-                # 이 루프의 Related 사슬엔 override 가 없다(종전과 같음) — `override_related=False`.
+                # (R70 N84) AST 루프와 같은 사슬 — 예전엔 이 루프의 Related 만 override 를 건너뛰었다.
                 asil_v, asil_src, related_v, related_src = _source_stage_provenance(
                     comment_asil=m_asil, comment_related=m_related,
                     override=_func_override.get(name),
                     sds_asil=_sds_map.get(name.lower(), {}).get("asil"),
-                    sds_related=_lookup_sds_related(name, module_name),
-                    override_related=False)
+                    sds_related=_lookup_sds_related(name, module_name))
+                if related_src == _OVERRIDE_SOURCE:
+                    # 이 루프에서 override 가 Related 를 준 건수 — 옛 사슬(SDS 우선)과 값이 갈릴 수 있던 자리다.
+                    #   라이브 두 루트 0건(R70 실측). 다른 프로젝트에서 이 수가 서면 SwDS 값과 대조할 것(리뷰 I4).
+                    _proto_scan["fallback_related_from_override"] = _proto_scan.get("fallback_related_from_override", 0) + 1
                 detail = {
                     "id": fn_id,
                     "name": name,

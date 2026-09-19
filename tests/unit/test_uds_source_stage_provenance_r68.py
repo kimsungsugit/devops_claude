@@ -91,14 +91,15 @@ class TestSourceStageProvenance:
         assert (asil, asrc) == ("B", "sds")
         assert (rel, rsrc) == ("TBD", "default")
 
-    def test_fallback_loop_related_chain_has_no_override(self):
-        """텍스트 폴백 루프의 Related 사슬엔 override 가 원래 없다 — 값을 바꾸지 않으므로 라벨도 그 사슬을 따른다."""
-        asil, asrc, rel, rsrc = self._run(
-            override={"asil": "A", "related": "SwCom_01"}, sds_related="SwFn_09", override_related=False)
-        assert (asil, asrc) == ("A", "override"), "ASIL 사슬엔 override 가 있다"
-        assert (rel, rsrc) == ("SwFn_09", "sds")
-        _, _, rel, rsrc = self._run(override={"related": "SwCom_01"}, override_related=False)
-        assert (rel, rsrc) == ("TBD", "default")
+    def test_single_chain_no_loop_specific_switch(self):
+        """(R70 N84) 사슬은 하나뿐이다 — R68 의 `override_related=False`(텍스트 폴백 루프 전용 Related 사슬)는 없어졌다.
+        같은 함수가 어느 루프로 가느냐에 따라 Related 가 달라지던 두 번째 규칙이 다시 생기면 여기서 잡힌다."""
+        import inspect
+
+        params = inspect.signature(_source_stage_provenance).parameters
+        assert set(params) == {"comment_asil", "comment_related", "override", "sds_asil", "sds_related"}, sorted(params)
+        asil, asrc, rel, rsrc = self._run(override={"asil": "A", "related": "SwCom_01"}, sds_related="SwFn_09")
+        assert (rel, rsrc) == ("SwCom_01", "override"), "Related 사슬에도 override 가 SDS 보다 앞선다"
 
     def test_labels_are_first_class_vocabulary(self):
         """새 라벨은 점수표·화면 라벨·입력 사슬 표 세 곳에 다 있어야 한다 — 없으면 `unknown` 으로 조용히 접힌다."""
@@ -113,14 +114,12 @@ class TestSourceStageProvenance:
 
 # ─── 2. 값 사슬은 그대로 — 라벨만 바뀐다 ────────────────────────────────────────────
 
-def _legacy_values(comment_asil, comment_related, override, sds_asil, sds_related, override_related=True):
-    """2026-04-09 ~ R67 의 값 식(uds_generator.py 옛 1695·1696·1883·1884행)을 그대로 옮긴 대조군."""
+def _legacy_values(comment_asil, comment_related, override, sds_asil, sds_related):
+    """2026-04-09 ~ R67 의 AST 루프 값 식(uds_generator.py 옛 1695·1696행)을 그대로 옮긴 대조군.
+    (R70 N84) 텍스트 폴백 루프도 이제 이 식을 쓴다 — 옛 폴백 식(`comment or SDS or TBD`)은 대조군에서 뺐다."""
     ovr = override if isinstance(override, dict) else {}
     asil = comment_asil or (ovr.get("asil") if ovr else "") or sds_asil or "TBD"
-    if override_related:
-        related = comment_related or (ovr.get("related") if ovr else "") or sds_related or "TBD"
-    else:
-        related = comment_related or sds_related or "TBD"
+    related = comment_related or (ovr.get("related") if ovr else "") or sds_related or "TBD"
     return str(asil), str(related)
 
 
@@ -131,14 +130,12 @@ class TestValueChainUnchanged:
     _SDS_A = ["", "QM"]
     _SDS_R = ["", "SwFn_09"]
 
-    @pytest.mark.parametrize("override_related", [True, False])
-    def test_values_equal_legacy_chain_for_every_combination(self, override_related):
-        """80가지 조합 × 2 — 값이 하나라도 달라지면 이 라운드는 라벨 정직화가 아니라 내용 변경이다."""
+    def test_values_equal_legacy_chain_for_every_combination(self):
+        """80가지 조합 — 값이 하나라도 달라지면 라벨 정직화가 아니라 내용 변경이다."""
         for ca, cr, ov, sa, sr in itertools.product(self._ASIL, self._REL, self._OVR, self._SDS_A, self._SDS_R):
             asil, _, rel, _ = _source_stage_provenance(
-                comment_asil=ca, comment_related=cr, override=ov, sds_asil=sa, sds_related=sr,
-                override_related=override_related)
-            assert (asil, rel) == _legacy_values(ca, cr, ov, sa, sr, override_related), (ca, cr, ov, sa, sr)
+                comment_asil=ca, comment_related=cr, override=ov, sds_asil=sa, sds_related=sr)
+            assert (asil, rel) == _legacy_values(ca, cr, ov, sa, sr), (ca, cr, ov, sa, sr)
 
     def test_label_names_the_stage_that_gave_the_value(self):
         """라벨 ↔ 값 결합: 라벨이 가리키는 단계의 값과 실제 값이 같아야 한다(값과 라벨의 출처 분리 금지)."""
@@ -261,10 +258,9 @@ class TestGeneratedSections:
         info = by_name["r68_commented_fn"]
         assert (info["asil"], info["asil_source"]) == ("C", "comment")
 
-    def test_fallback_loop_keeps_its_old_related_chain(self, tmp_path, monkeypatch):
-        """AST 가 놓친 함수는 텍스트 폴백 루프로 간다(R62 기법: `parse_c_project` 결과에서 빼낸다). 그 루프의 ASIL 사슬엔
-        override 가 있지만 Related 사슬엔 없다 — 이 라운드는 값을 바꾸지 않으므로 Related 는 `TBD/default` 여야 한다.
-        뮤테이션 M17(폴백 루프에 override Related 추가 = 값 변경)을 잡는다."""
+    def test_fallback_loop_uses_the_same_chain(self, tmp_path, monkeypatch):
+        """AST 가 놓친 함수는 텍스트 폴백 루프로 간다(R62 기법: `parse_c_project` 결과에서 빼낸다). (R70 N84) 그 루프의
+        Related 사슬에도 override 가 선다 — R68 까지는 ASIL 만 override 를 봐 같은 함수가 루프에 따라 다른 Related 를 받았다."""
         import workflow.code_parser as pkg
         from report_gen.uds_generator import generate_uds_source_sections
 
@@ -285,7 +281,7 @@ class TestGeneratedSections:
         by_name = {v["name"]: v for v in sec["function_details"].values() if isinstance(v, dict)}
         info = by_name["main"]
         assert (info["asil"], info["asil_source"]) == (ovr["main"]["asil"], "override")
-        assert (info["related"], info["related_source"]) == ("TBD", "default")
+        assert (info["related"], info["related_source"]) == (ovr["main"]["related"], "override")
 
     def test_no_function_carries_inference_for_asil_or_related(self, sections):
         """소스 단계는 ASIL·Related 를 추론하지 않는다 — 그 두 축에 `inference` 가 남아 있으면 옛 식이 되살아난 것이다."""

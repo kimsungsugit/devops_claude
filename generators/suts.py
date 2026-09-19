@@ -980,6 +980,10 @@ def collect_unit_functions(
         #   이 저장소엔 ASIL 순위표가 이미 여러 벌 있고(하나는 정렬용 역순이다) 여기
         #   또 만들면 다음에 한쪽만 고쳐진다.
         _src_asil = str(info.get("asil") or "").strip()
+        # (R70 N83) 그 값이 소스 `@asil` 인지 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`,
+        #   프로젝트 확인 없음)인지는 소스 단계 라벨(`asil_source`, R68)이 안다. 예전엔 둘 다 "source" 였다 —
+        #   KJPDS02 에서 override 가 준 228 unit 의 등급이 소스 근거로 표시됐고, 준비 게이트의 근거 축도 그렇게 읽었다.
+        _src_kind = "override" if str(info.get("asil_source") or "") == "override" else "source"
         _uds_asil = str((_uds_rec or {}).get("asil") or "").strip()
         # ⚠ 충돌은 **양쪽 다 실제 등급일 때만**이다. `TBD`·`N/A` 는 "근거 없음"이지
         #   반대 주장이 아니다. 문자열이 비었는지만 보면 `TBD vs A` 가 충돌로 잡혀
@@ -987,10 +991,11 @@ def collect_unit_functions(
         #   늑대를 778번 외치는 경고는 없는 것만 못하다.
         _src_grade, _uds_grade = _asil_max_of([_src_asil]), _asil_max_of([_uds_asil])
         if _src_grade and _uds_grade and _src_grade != _uds_grade:
-            _asil_conflicts.append(f"{name}(소스 {_src_grade} vs UDS {_uds_grade})")
+            _asil_conflicts.append(
+                f"{name}({'소스' if _src_kind == 'source' else 'override'} {_src_grade} vs UDS {_uds_grade})")
         asil = _asil_max_of([_src_asil, _uds_asil])
-        _asil_evidence = ("uds+source" if _src_grade and _uds_grade
-                          else "uds" if _uds_grade else "source" if _src_grade else "")
+        _asil_evidence = (f"uds+{_src_kind}" if _src_grade and _uds_grade
+                          else "uds" if _uds_grade else _src_kind if _src_grade else "")
         if not asil:
             # SDS 파티션 폴백 — 값은 예전과 같다. 다만 그 값이 **모듈명 부분문자열
             # 매칭의 첫 일치**라는 사실과, 후보 등급이 갈렸는지를 함께 받는다.
@@ -1039,6 +1044,8 @@ def collect_unit_functions(
             # 그 등급이 **어디서 왔나**. `sds-fuzzy-conflict` 는 "모듈명 부분문자열
             # 매칭에서 후보 등급이 갈렸고 그중 하나를 집었다" 는 뜻이다.
             "asil_evidence": _asil_evidence,
+            # (R70 N83) 소스에 없고 override 스냅샷에만 있는 함수 — 시험 대상인지는 사람이 정한다(P7). 세어서 보고한다.
+            "override_only": bool(info.get("override_only")),
             "srs_req_ids": srs_req_ids,
             "precondition": info.get("precondition", ""),
         })
@@ -1092,6 +1099,19 @@ def collect_unit_functions(
             f" | ⚠ASIL 소스↔SwUDS 충돌 {len(_asil_conflicts)}건(높은 등급 채택): "
             + ", ".join(_asil_conflicts[:3])
             + (" …" if len(_asil_conflicts) > 3 else "")
+        )
+    # (R70 N83) 등급의 근거 분포와, 소스에 없는 override 전용 unit. 둘 다 조용하면 "소스 근거" 로 읽힌다.
+    _ev_dist: Dict[str, int] = {}
+    for _u in units:
+        _k = str(_u.get("asil_evidence") or "") or "none"
+        _ev_dist[_k] = _ev_dist.get(_k, 0) + 1
+    _const_note += " | ASIL 근거 분포 " + (
+        ", ".join(f"{k} {v}" for k, v in sorted(_ev_dist.items())) if _ev_dist else "없음(unit 0)")
+    _ovr_only_units = [u["name"] for u in units if u.get("override_only")]
+    if _ovr_only_units:
+        _const_note += (
+            f" | ⚠override 스냅샷 전용 unit {len(_ovr_only_units)}개(소스에 없음 — prototype 은 자리표시): "
+            + ", ".join(_ovr_only_units[:3]) + (" …" if len(_ovr_only_units) > 3 else "")
         )
     # 시험 범위 불일치 — `component_map` 이 면제(X)로 적은 파일에서 온 unit.
     # ⚠ `uds_generator` 의 파일 수집은 X 를 건너뛰지만 **AST 파서 경로는 루트를 따로
@@ -3345,7 +3365,19 @@ def generate_suts_quality_report(
     )
     io_coverage_pct = round(with_io / max(total_tc, 1) * 100, 1)
 
+    # (R70 N83) 안전 등급의 근거 분포(`collect_unit_functions` 의 `asil_evidence`)와 소스에 없는 override 전용 unit.
+    #   `uds`/`uds+*` 는 SwUDS 표가 정한 것, `source` 는 소스 `@asil`, `override` 는 저장소 스냅샷(프로젝트 확인 없음),
+    #   `sds-*` 는 SwDS 파티션 매칭, `none` 은 근거 없음(TBD). 예전엔 이 리포트가 등급의 근거를 하나도 싣지 않았다.
+    asil_evidence: Dict[str, int] = {}
+    for u in units:
+        ev = str(u.get("asil_evidence") or "") or "none"
+        asil_evidence[ev] = asil_evidence.get(ev, 0) + 1
+    override_only = [str(u.get("name") or "") for u in units if u.get("override_only")]
+
     return {
+        "asil_evidence_distribution": asil_evidence,
+        "override_only_unit_count": len(override_only),
+        "override_only_units": override_only[:20],
         "total_test_cases": total_tc,
         "total_sequences": total_seq,
         "avg_sequences_per_tc": avg_seq,
@@ -3569,6 +3601,110 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
 # Top-level pipeline
 # ---------------------------------------------------------------------------
 
+def _override_only_entry(name: str, ovr_info: Dict[str, Any], fid: str) -> Dict[str, Any]:
+    """override 스냅샷(`docs/uds_function_swcom_override.json`)에만 있고 소스에 없는 함수의 자리표시 엔트리.
+
+    (R70 N83) 이 엔트리의 근거는 저장소 스냅샷뿐이다 — 소스도 주석도 없다. 값을 준 단계가 라벨을 단다(R68 규약):
+    값이 있으면 `override`, 없으면 TBD 에 `default`. 예전엔 라벨을 아예 안 적어 `collect_unit_functions` 의 근거
+    표지가 이 값을 소스 `@asil` 로 읽었다. `override_only` 는 하류가 "소스에 없는 unit" 을 세어 보고하는 표지다
+    (prototype 은 자리표시 — 실 시그니처가 아니다). 본체 인라인이면 전체 생성 없이는 검증할 수 없어 뽑아 둔다.
+    """
+    from report_gen.provenance import unrecorded_source
+
+    o_asil = str(ovr_info.get("asil") or "").strip()
+    o_rel = str(ovr_info.get("related") or "").strip()
+    sc = int(ovr_info.get("swcom") or 0)
+    return {
+        "id": fid,
+        "name": name,
+        "prototype": f"void {name}(void)",
+        "description": "",
+        # 하류 소비자 없음 — 소스 단계 엔트리와 같은 키 집합을 갖게 하는 규약 일관성 목적(리뷰 I6).
+        "description_source": unrecorded_source(""),
+        "asil": o_asil or "TBD",
+        "asil_source": "override" if o_asil else unrecorded_source("TBD"),
+        "related": o_rel or "TBD",
+        "related_source": "override" if o_rel else unrecorded_source("TBD"),
+        "inputs": [],
+        "outputs": [],
+        "logic_flow": [],
+        "calls_list": [],
+        "file": "",
+        "module_name": f"SwCom_{sc:02d}",
+        "override_only": True,
+    }
+
+
+_OVERRIDE_JSON_CANDIDATES = (
+    Path(__file__).resolve().parent.parent / "docs" / "uds_function_swcom_override.json",
+    Path(__file__).resolve().parent / "docs" / "uds_function_swcom_override.json",
+)
+
+
+def supplement_override_only(function_details: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """override 스냅샷에만 있고 소스에 없는 함수를 자리표시 엔트리로 **보충**한다(필터 아님). 제자리 변경.
+
+    반환: `{"found": 목록 파일 유무, "list_size", "source": 보충 전 함수 수, "in_list": 목록 일치 수, "added": 보충 수,
+    "added_names": [...]}`.
+
+    (R70 리뷰 W1) 생성기(`generate_suts`)와 준비 게이트 측정(`docgen_test_materials.measure`)이 **같은 함수**를 불러야
+    게이트가 산출물과 같은 unit 목록을 잰다 — 이 블록이 `generate_suts` 안에 인라인이던 동안 측정 경로는 보충을 안 타서
+    스냅샷 전용 unit 이 게이트에선 구조적으로 0 이었다. 실패(파일 손상 등)는 예외로 올린다 — 호출부가 사유를 남긴다.
+    """
+    stats: Dict[str, Any] = {"found": False, "list_size": 0, "source": len(function_details),
+                             "in_list": 0, "added": 0, "added_names": []}
+    import json as _json
+
+    for ovr_path in _OVERRIDE_JSON_CANDIDATES:
+        if not ovr_path.exists():
+            continue
+        ovr_data = _json.loads(ovr_path.read_text(encoding="utf-8"))
+        stats["found"] = True
+        stats["list_size"] = len(ovr_data)
+        if not ovr_data:
+            break
+        names = set(ovr_data.keys())
+        names_lower = {n.lower() for n in names}
+        # ⚠ 여기서 걸러내지 않는다(호출부 주석 참조). 목록 밖 함수도 그대로 둔다.
+        stats["in_list"] = sum(
+            1 for info in function_details.values()
+            if isinstance(info, dict) and (
+                str(info.get("name") or "") in names or str(info.get("name") or "").lower() in names_lower)
+        )
+        existing = {str(info.get("name") or "").lower() for info in function_details.values() if isinstance(info, dict)}
+        added = 0
+        # (R70 N89) 자리표시 id 는 **비어 있는** 번호여야 한다. 예전 식 `SwUFn_{swcom}{99-n}` 은 함수가 99개 이상인
+        #   모듈(KJPDS02 SwCom_13 126개 · SwCom_35)의 실 함수 id 와 겹쳐 그 함수를 **덮어썼다** — 라이브 5개
+        #   (`s_Ap_PreviousCtrl_ResetFlags` 등)가 SUTS 에서 조용히 사라졌다(1,146+27 이 1,168 이던 이유).
+        next_slot: Dict[int, int] = {}
+        for ovr_name, ovr_info in ovr_data.items():
+            if ovr_name.lower() in existing:
+                continue
+            info = ovr_info if isinstance(ovr_info, dict) else {}
+            sc = int(info.get("swcom") or 0)
+            slot = next_slot.get(sc, 99)
+            fid = f"SwUFn_{sc:02d}{slot:02d}"
+            while fid in function_details and slot > 0:
+                slot -= 1
+                fid = f"SwUFn_{sc:02d}{slot:02d}"
+            if fid in function_details:
+                # 두 자리 번호가 다 찼다 — 본 생성기의 3자리 규약과 같은 꼴로 비켜 선다.
+                fid = f"SwUFn_{sc:02d}{900 + added:03d}"
+            next_slot[sc] = slot - 1
+            function_details[fid] = _override_only_entry(ovr_name, info, fid)
+            added += 1
+            stats["added_names"].append(ovr_name)
+        stats["added"] = added
+        break
+    return stats
+
+
+def _source_function_count(function_details: Dict[str, Dict[str, Any]]) -> int:
+    """품질 리포트의 함수 커버리지 **분모** — 소스에서 찾은 함수 수. (R70 N83) 스냅샷 전용 자리표시 엔트리는 소스 함수가
+    아니므로 빼야 한다: 넣으면 KJPDS02 에서 928/1,168 = 79.5%(게이트 80 미달)가 되는데 소스 함수 기준으론 928/1,141 = 81.3% 다."""
+    return sum(1 for i in function_details.values() if isinstance(i, dict) and not i.get("override_only"))
+
+
 def generate_suts(
     source_root: str,
     output_path: str,
@@ -3665,64 +3801,22 @@ def generate_suts(
     #
     #   그래서 필터를 걷어내고 **탈락 대신 보충만** 한다(목록에 있는데 소스에 없는
     #   함수는 종전대로 빈 엔트리로 추가한다 — 그건 정보를 더하지 빼지 않는다).
-    _ovr_only_names: List[str] = []
+    #   (R70) 보충 자체는 `supplement_override_only` — 준비 게이트 측정도 같은 함수를 부른다(리뷰 W1).
     try:
-        import json as _json
-        for _ovr_path in [
-            Path(__file__).resolve().parent.parent / "docs" / "uds_function_swcom_override.json",
-            Path(__file__).resolve().parent / "docs" / "uds_function_swcom_override.json",
-        ]:
-            if _ovr_path.exists():
-                _ovr_data = _json.loads(_ovr_path.read_text(encoding="utf-8"))
-                _ovr_names = set(_ovr_data.keys())
-                _ovr_names_lower = {n.lower() for n in _ovr_names}
-                if _ovr_names:
-                    before2 = len(function_details)
-                    # ⚠ 여기서 걸러내지 않는다(위 주석 참조). 목록 밖 함수도 그대로 둔다.
-                    _in_list = sum(
-                        1 for info in function_details.values()
-                        if isinstance(info, dict) and (
-                            str(info.get("name") or "") in _ovr_names
-                            or str(info.get("name") or "").lower() in _ovr_names_lower
-                        )
-                    )
-                    # override에 있지만 파서에 없는 함수를 빈 엔트리로 추가
-                    _existing_names = {str(info.get("name") or "").lower() for info in function_details.values() if isinstance(info, dict)}
-                    _added = 0
-                    for _ovr_name, _ovr_info in _ovr_data.items():
-                        if _ovr_name.lower() not in _existing_names:
-                            _sc = _ovr_info.get("swcom", 0)
-                            _fid = f"SwUFn_{_sc:02d}{99 - _added:02d}"
-                            function_details[_fid] = {
-                                "id": _fid,
-                                "name": _ovr_name,
-                                "prototype": f"void {_ovr_name}(void)",
-                                "description": "",
-                                "asil": _ovr_info.get("asil", "TBD"),
-                                "related": _ovr_info.get("related", "TBD"),
-                                "inputs": [],
-                                "outputs": [],
-                                "logic_flow": [],
-                                "calls_list": [],
-                                "file": "",
-                                "module_name": f"SwCom_{_sc:02d}",
-                            }
-                            _added += 1
-                            _ovr_only_names.append(_ovr_name)
-                    # 침묵 금지 — 목록과 소스가 얼마나 어긋나는지 그대로 보고한다.
-                    _progress(
-                        28,
-                        f"override 보강: 소스 {before2}개 중 목록 일치 {_in_list}개 "
-                        f"(+{_added} 보충 → {len(function_details)}개). 필터 아님",
-                    )
-                    _logger.info(
-                        "uds override: source=%d in_list=%d added=%d total=%d "
-                        "(목록 %d개 — 필터로 쓰지 않는다)",
-                        before2, _in_list, _added, len(function_details), len(_ovr_names),
-                    )
-                break
-    except Exception:
-        pass
+        _ovr = supplement_override_only(function_details)
+        if _ovr["found"] and _ovr["list_size"]:
+            # 침묵 금지 — 목록과 소스가 얼마나 어긋나는지 그대로 보고한다.
+            _progress(
+                28,
+                f"override 보강: 소스 {_ovr['source']}개 중 목록 일치 {_ovr['in_list']}개 "
+                f"(+{_ovr['added']} 보충 → {len(function_details)}개). 필터 아님",
+            )
+            _logger.info(
+                "uds override: source=%d in_list=%d added=%d total=%d (목록 %d개 — 필터로 쓰지 않는다)",
+                _ovr["source"], _ovr["in_list"], _ovr["added"], len(function_details), _ovr["list_size"],
+            )
+    except Exception as _ovr_exc:  # noqa: BLE001 — 보충 실패가 생성을 막으면 안 되지만 조용해서도 안 된다(리뷰 W3)
+        _logger.warning("override 보강 실패 — 건너뜀(산출물은 소스 함수만): %s: %s", type(_ovr_exc).__name__, _ovr_exc)
 
     if sds_docx_path:
         _progress(29, "SDS 설계 컨텍스트 로드 중")
@@ -4033,7 +4127,7 @@ def generate_suts(
     total_seq = sum(len(s) for s in all_sequences.values())
     _progress(80, f"시퀀스 생성 완료 - {total_seq}개")
 
-    quality = generate_suts_quality_report(units, all_sequences, len(function_details))
+    quality = generate_suts_quality_report(units, all_sequences, _source_function_count(function_details))
 
     _progress(85, "XLSM 파일 생성 중")
     out = generate_suts_xlsm(template_path, units, all_sequences, output_path, project_config)

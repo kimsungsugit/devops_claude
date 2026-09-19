@@ -270,7 +270,19 @@ def resolve_builder_input(
         out_dir = _materialize_root() / key
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / (Path(raw).name or "document")
-        out.write_bytes(data)
+        # (R70 리뷰 W2) 같은 문서를 두 주체(생성 워커 · 준비 게이트)가 동시에 실체화하면 고정 경로에 비원자
+        #   `write_bytes` 가 겹쳐, 한쪽이 openpyxl 로 여는 도중 50MB SwUDS 가 잘린/혼합 바이트가 됐다(→ "SwUDS 읽기
+        #   실패, 소스 파싱 이름 사용" 경고 한 줄로 강등). pid 파일과 같은 규약: 임시 이름에 쓰고 원자 교체.
+        tmp = out_dir / f"{out.name}.{os.getpid()}-{threading.get_ident()}.part"
+        tmp.write_bytes(data)
+        try:
+            os.replace(tmp, out)
+        except OSError:
+            # Windows 는 다른 스레드가 열어 둔 파일의 교체를 거부할 수 있다. 그 파일은 **완성된** 사본(원자 교체로만
+            # 생긴다)이므로 그대로 쓴다 — 내 임시본만 치운다.
+            tmp.unlink(missing_ok=True)
+            if not out.is_file():
+                raise
     except OSError as exc:
         _note(f"로컬 임시 파일 생성 실패 ({type(exc).__name__}: {str(exc)[:100]})")
         return None

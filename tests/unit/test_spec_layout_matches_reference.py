@@ -256,9 +256,11 @@ def test_override_map_is_not_used_as_a_filter():
     )
 
     # 보충 기능 자체는 남아 있어야 한다(필터를 걷어내며 같이 지우면 안 된다).
+    # (R70) 보충은 `supplement_override_only` 로 뽑혀 생성기와 준비 게이트가 같이 부른다 — 생성기 본체의 호출이 앵커다.
     body = src.read_text(encoding="utf-8", errors="ignore")
     assert "uds_function_swcom_override.json" in body
-    assert "_ovr_only_names" in body
+    gen_body = body[body.index("def generate_suts("):]
+    assert "supplement_override_only(function_details)" in gen_body
 
 
 def test_suts_validators_count_the_real_rows(tmp_path):

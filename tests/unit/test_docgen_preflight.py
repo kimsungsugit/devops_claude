@@ -1094,8 +1094,50 @@ def test_asil_evidence_axis_is_surfaced_for_suts(tmp_path: Path) -> None:
                          "fuzzy": 181, "fuzzy_conflict": 244, "samples": ["g_DrvIn_Main"]}
     step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
     assert step is not None and step["state"] == "degraded"
-    assert step["measured"] == {"value": 425, "of": 962, "units": 1157, "conflict": 244}
+    assert step["measured"] == {"value": 425, "of": 962, "units": 1157, "conflict": 244,
+                                "override": 0, "override_only_units": 0, "uds_map": False}
     assert "갈립니다" in step["reason"], "충돌 건수를 따로 말하지 않았다"
+    assert "override" not in step["reason"], "override 0건인데 그 문장이 나왔다"
+
+
+def test_asil_evidence_says_when_it_was_measured_without_the_uds_table(tmp_path: Path) -> None:
+    """(R70 리뷰 W2) 표 없이 잰 값은 생성 시보다 크다 — 그 사실을 문장에 남기고, 표와 함께 잰 값이면 그 문장이 없다."""
+    mats = _sts_materials()
+    mats["suts_inputs"] = {"measured": False, "reason": "n/a"}
+    base = {"measured": True, "units": 10, "graded": 10, "fuzzy": 0, "fuzzy_conflict": 0, "override": 3,
+            "override_only_units": 0, "samples": []}
+    mats["suts_asil"] = dict(base, uds_map=False)
+    step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
+    assert "SwUDS 표 없이" in step["reason"] and step["measured"]["uds_map"] is False
+    mats["suts_asil"] = dict(base, uds_map=True)
+    step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
+    assert "SwUDS 표 없이" not in step["reason"] and step["measured"]["uds_map"] is True
+
+
+def test_asil_evidence_names_the_override_snapshot(tmp_path: Path) -> None:
+    """(R70 N83) 저장소 override 스냅샷이 혼자 정한 등급도 약한 근거다 — 예전엔 `source` 로 접혀 이 행이 조용했다
+    (KJPDS02 실측 228 unit). 부분문자열 매칭 0건이어도 이 축만으로 degraded 가 되고, 소스에 없는 unit 수를 따로 말한다."""
+    mats = _sts_materials()
+    mats["suts_inputs"] = {"measured": False, "reason": "n/a"}
+    mats["suts_asil"] = {"measured": True, "units": 1146, "graded": 957,
+                         "fuzzy": 0, "fuzzy_conflict": 0, "override": 228, "override_only_units": 22,
+                         "samples": ["Cpu_OnReset"]}
+    step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
+    assert step is not None and step["state"] == "degraded"
+    assert step["measured"]["value"] == 228 and step["measured"]["override"] == 228
+    assert step["measured"]["override_only_units"] == 22
+    assert "uds_function_swcom_override.json" in step["reason"]
+    assert "22개" in step["reason"], "소스에 없는 스냅샷 전용 unit 수가 안 적혔다"
+    assert "부분문자열" not in step["reason"], "퍼지 매칭 0건인데 그 문장이 나왔다"
+
+
+def test_asil_evidence_old_materials_without_override_keys_still_work(tmp_path: Path) -> None:
+    """캐시에 남은 R69 이전 측정(키 없음)도 그대로 읽힌다 — KeyError 로 행이 사라지면 그게 더 큰 침묵이다."""
+    mats = _sts_materials()
+    mats["suts_inputs"] = {"measured": False, "reason": "n/a"}
+    mats["suts_asil"] = {"measured": True, "units": 10, "graded": 10, "fuzzy": 1, "fuzzy_conflict": 0, "samples": []}
+    step = _step(_with_materials(tmp_path, mats, doc_type="suts"), "suts_asil_evidence")
+    assert step["state"] == "degraded" and step["measured"]["override"] == 0
 
 
 def test_asil_evidence_is_quiet_when_all_exact(tmp_path: Path) -> None:
