@@ -64,6 +64,7 @@ from report_gen.function_analyzer import (  # noqa: E402
     _parse_signature_params,
     _split_param,
 )
+from report_gen.provenance import unrecorded_source  # noqa: E402
 from report_gen.requirements import (  # noqa: E402
     _collect_section_lines,
     _extract_function_blocks,
@@ -193,6 +194,43 @@ _BY_NAME_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 def _asil_rank(v: Any) -> int:
     a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
     return _BY_NAME_ASIL_RANK.get(a, -1)
+
+
+# (R68 N72) 소스 단계의 ASIL·Related 출처 라벨. 값 사슬은 2026-04-09(`0b7e1979`) 이래 comment > override > SDS > TBD 인데
+#   라벨은 comment > SDS > `inference` 만 알았다 — override 가 준 값(실측 KJPDS02 228건 · PDS64 255건)과 값이 없는 TBD
+#   (KJPDS02 918건)가 전부 "추론" 으로 찍혔다. 라벨은 **값을 준 단계**가 단다. `override` 는 저장소의 정본 역추출 스냅샷
+#   (`docs/uds_function_swcom_override.json`, 함수 이름 키 — 프로젝트 확인 없음)이라 약한 출처(0.60, `inference` 와 같은
+#   점수)로 등록한다: 값과 덮어쓰기 규칙은 그대로고 라벨만 사실이 된다. 프로젝트 귀속은 P7 결정 축(계획서).
+_OVERRIDE_SOURCE = "override"
+
+
+def _source_stage_provenance(
+    *,
+    comment_asil: Any,
+    comment_related: Any,
+    override: Any,
+    sds_asil: Any,
+    sds_related: Any,
+    override_related: bool = True,
+) -> Tuple[str, str, str, str]:
+    """(asil, asil_source, related, related_source) — 값을 준 단계가 라벨을 단다.
+
+    `override_related=False` 는 텍스트 폴백 루프용이다. 그 루프의 Related 사슬엔 override 가 원래 없었고
+    (`m_related or SDS or TBD`), 이 라운드는 값을 바꾸지 않으므로 라벨도 그 사슬을 따른다.
+    값이 없으면(`TBD`) 근거도 없다 — `unrecorded_source` 규약대로 `default`(0.30)이지 `inference` 가 아니다.
+    """
+    ovr = override if isinstance(override, dict) else {}
+
+    def _pick(comment: Any, ovr_val: Any, sds_val: Any) -> Tuple[str, str]:
+        for val, src in ((comment, "comment"), (ovr_val, _OVERRIDE_SOURCE), (sds_val, "sds")):
+            if val:
+                return str(val), src
+        return "TBD", unrecorded_source("TBD")
+
+    asil, asil_src = _pick(comment_asil, ovr.get("asil"), sds_asil)
+    related, related_src = _pick(
+        comment_related, ovr.get("related") if override_related else None, sds_related)
+    return asil, asil_src, related, related_src
 
 
 def _header_origin_label(hdr_doc: Dict[str, str]) -> str:
@@ -1687,16 +1725,21 @@ def generate_uds_source_sections(
             inferred_precond = comment_precond
             if not inferred_precond and body_text:
                 inferred_precond = _infer_precondition_from_body(body_text, name)
+            asil_v, asil_src, related_v, related_src = _source_stage_provenance(
+                comment_asil=comment_asil, comment_related=comment_related,
+                override=_func_override.get(name),
+                sds_asil=_sds_map.get(name.lower(), {}).get("asil"),
+                sds_related=_lookup_sds_related(name, module_name))
             detail = {
                 "id": fn_id,
                 "name": name,
                 "prototype": signature,
                 "description": desc_text,
-                "asil": comment_asil or (_func_override.get(name, {}).get("asil") if _func_override.get(name) else "") or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
-                "related": comment_related or (_func_override.get(name, {}).get("related") if _func_override.get(name) else "") or _lookup_sds_related(name, module_name) or "TBD",
+                "asil": asil_v,
+                "related": related_v,
                 "description_source": "comment" if comment_desc else "inference",
-                "asil_source": "comment" if comment_asil else ("sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference"),
-                "related_source": "comment" if comment_related else ("sds" if _lookup_sds_related(name, module_name) else "inference"),
+                "asil_source": asil_src,
+                "related_source": related_src,
                 "inputs": inputs_list,
                 "outputs": outputs_list,
                 "precondition": inferred_precond,
@@ -1875,16 +1918,23 @@ def generate_uds_source_sections(
                 term_return, term_error = _extract_logic_terminal_paths(body_text)
                 # (R65 리뷰 I2) 이 루프(텍스트 폴백 함수)는 헤더 프로토타입을 쓴 적이 없다 — 분모를 맞추기 위해 세기만 한다.
                 _proto_scan["definition:fallback_loop"] = _proto_scan.get("definition:fallback_loop", 0) + 1
+                # 이 루프의 Related 사슬엔 override 가 없다(종전과 같음) — `override_related=False`.
+                asil_v, asil_src, related_v, related_src = _source_stage_provenance(
+                    comment_asil=m_asil, comment_related=m_related,
+                    override=_func_override.get(name),
+                    sds_asil=_sds_map.get(name.lower(), {}).get("asil"),
+                    sds_related=_lookup_sds_related(name, module_name),
+                    override_related=False)
                 detail = {
                     "id": fn_id,
                     "name": name,
                     "prototype": signature,
                     "description": desc_text,
-                    "asil": m_asil or (_func_override.get(name, {}).get("asil") if _func_override.get(name) else "") or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
-                    "related": m_related or _lookup_sds_related(name, module_name) or "TBD",
+                    "asil": asil_v,
+                    "related": related_v,
                     "description_source": "comment" if m_desc else "inference",
-                    "asil_source": "comment" if m_asil else ("sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference"),
-                    "related_source": "comment" if m_related else ("sds" if _lookup_sds_related(name, module_name) else "inference"),
+                    "asil_source": asil_src,
+                    "related_source": related_src,
                     "inputs": inputs_list,
                     "outputs": outputs_list,
                     "precondition": m_precond or "N/A",

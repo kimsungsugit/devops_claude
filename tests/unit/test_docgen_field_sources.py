@@ -41,7 +41,8 @@ _SOURCE_FILES = [
 ]
 
 # `unrecorded_source()` 가 돌려주는 값 — 리터럴 대입이 아니라 regex 에 안 걸린다.
-KNOWN_NON_LITERAL = {"default", "inference", "unknown"}
+# `override` 는 `report_gen/uds_generator.py::_source_stage_provenance` 의 반환값(R68) — 같은 이유로 여기 고정한다.
+KNOWN_NON_LITERAL = {"default", "inference", "unknown", "override"}
 
 
 def _literals_in_source() -> dict[str, set[str]]:

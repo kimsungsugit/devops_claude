@@ -2100,6 +2100,9 @@ def generate_asil_related_confidence_report(
         "uds": "UDS",              # requirements.py:1436, impact_orchestrator.py:369
         "swcom": "SDS component",  # impact_orchestrator.py:608
         "reference": "레퍼런스",
+        # (R68 N72) 저장소 `docs/uds_function_swcom_override.json` 이 채운 값. 정본에서 역추출한 스냅샷이지만
+        #   함수 이름 키라 프로젝트 확인이 없다 — `reference`(이번 생성이 읽은 정본) 와 다른 라벨을 둔다.
+        "override": "함수 override 맵(정본 역추출 스냅샷)",  # uds_generator.py:_source_stage_provenance
         "ai": "AI",
         "rag": "지식베이스",         # docx_builder.py:2124
         "call_graph": "콜그래프",    # docx_builder.py:2268 (calls_source)
@@ -2131,6 +2134,9 @@ def generate_asil_related_confidence_report(
         "rule": 0.75,
         "module_inherit": 0.70,   # 모듈에서 물려받음 — 명시 규칙보다 약하다
         "inference": 0.60,
+        # 정본 역추출 스냅샷(프로젝트 확인 없음). 예전엔 이 값이 `inference` 로 찍혔으므로 점수를 같게 두어
+        # 약함 판정·덮어쓰기·신뢰도 평균이 움직이지 않게 한다 — 라벨만 사실이 된다(R68). 올리려면 P7 결정 뒤.
+        "override": 0.60,
         # 근거가 **없어서** 쓴 값. 추론보다 낮아야 한다 — 추론은 최소한 무언가를 보고 한 것이다.
         "default": 0.30,
         # 자기 산출물 회수. 문서에 적혀 있다는 사실은 그 값이 **옳다는 근거가 아니다**
@@ -2198,6 +2204,8 @@ def generate_asil_related_confidence_report(
             return "AI(Gemini) 모델이 코드 컨텍스트로 생성"
         if src == "rule":
             return "함수명/ID 기반 룰로 할당됨"
+        if src == "override":
+            return "저장소 docs/uds_function_swcom_override.json(정본 역추출 스냅샷, 함수 이름 키) 에서 채움 — 이 프로젝트의 값인지는 확인되지 않았다"
         if src == "generated_doc":
             return "생성 UDS DOCX 에서 회수 — 원 유래 미확인(payload 에 출처가 없었다)"
         if src == "default":

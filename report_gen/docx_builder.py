@@ -2971,7 +2971,8 @@ def generate_uds_docx(
     # (R50 리뷰 C1) 모듈 상속의 **씨앗 우선순위** — 예전엔 dict 순서상 첫 non-TBD 값이 씨앗이라, SwDS 가 먼저 채운 QM 이
     #   정본 A 를 가진 형제보다 앞에 오면 모듈 전체가 QM 을 물려받았다(run 2079: module_inherit 1→672). 정본 채움 규칙과
     #   같은 순서로 씨앗을 고른다: 소스 주석 > 정본 > 설계·요구 문서 > 나머지. 같은 등급 안에서는 첫 함수.
-    _SEED_RANK = {"comment": 0, "reference": 1, "uds": 1, "sds": 2, "srs": 2}
+    # (R68) `override`(저장소 역추출 스냅샷) 는 `inference` 와 같은 급(3) — 명시해 둔다. 미등록 기본값 3 과 같지만 의도를 코드로 남긴다.
+    _SEED_RANK = {"comment": 0, "reference": 1, "uds": 1, "sds": 2, "srs": 2, "override": 3}
 
     def _inherit_module_asil(
         func_details: Dict[str, Any],

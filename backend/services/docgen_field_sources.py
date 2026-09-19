@@ -85,6 +85,9 @@ SOURCE_REQUIRED_INPUT: Dict[str, Optional[str]] = {
     "ai": INPUT_AI,
     "call_graph": INPUT_CALL_GRAPH,
     # 입력 불필요 — 생성기 내부 산출. 근거가 아니다.
+    # `override` 는 저장소 파일(`docs/uds_function_swcom_override.json`)이라 사용자 입력이 아니다 — 게이트가
+    #   "확보" 로 세면 입력이 없는 프로젝트가 KJPDS02 스냅샷의 ASIL 로 '준비 완료' 가 된다(R68 N72).
+    "override": None,
     "module_inherit": None,
     "rule": None,
     "inference": None,
@@ -139,6 +142,7 @@ FIELD_SOURCES: Dict[str, List[str]] = {
         # ⚠ 기존 UDS 문서에서 등급을 **직독**하는 경로. 드리프트 가드가 3차로 잡아냈다
         #   (`_build_uds_asil_map`. 저장소가 [A] 38건 under-report 를 고치며 넣은 배선이다).
         "uds",              # requirements.py:1660
+        "override",         # uds_generator.py:_source_stage_provenance (R68 — 리터럴 대입이 아니라 헬퍼 반환값)
         "module_inherit",   # docx_builder.py:2062
         "generated_doc",    # validation.py:1413
         "default",          # docx_builder.py:2172
@@ -150,6 +154,7 @@ FIELD_SOURCES: Dict[str, List[str]] = {
         "hsis",             # local.py:614
         "call_graph",       # docx_builder.py:2553,2559
         "reference",        # docx_builder.py:3158,3166
+        "override",         # uds_generator.py:_source_stage_provenance (R68)
         "rule",             # docx_builder.py:3161 · function_analyzer.py:1097 · helpers/uds.py:427
         "inference",        # docx_builder.py:2160 · function_analyzer.py:1090
         "generated_doc",    # validation.py:1418
@@ -237,6 +242,7 @@ LABEL_TO_SOURCE: Dict[str, str] = {
     "UDS": "uds",
     "SDS component": "swcom",
     "레퍼런스": "reference",
+    "함수 override 맵(정본 역추출 스냅샷)": "override",
     "AI": "ai",
     "지식베이스": "rag",
     "콜그래프": "call_graph",

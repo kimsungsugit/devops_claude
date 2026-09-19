@@ -45,6 +45,16 @@ PLACEHOLDER_VALUES = frozenset({"", "tbd", "n/a", "na", "-", "none"})
 #   - "module_inherit": 모듈에서 물려받음 (0.70)
 #   - "rule"          : 이름 규칙 등 기계적 규칙 (0.75)
 #   - "generated_doc" : 자기 산출물(생성 DOCX)에서 회수, 원 유래 불명 (0.30)
+#   - "override"      : 저장소의 정본 역추출 스냅샷 `docs/uds_function_swcom_override.json`
+#                       (2026-04-09, 함수 이름 키 — 프로젝트 확인 없음) 이 채움 (0.60).
+#                       (R68 N72) 예전엔 이 값이 `inference`/`sds` 로 찍혔다(값과 라벨의 출처가 달랐다).
+#                       점수·약함 판정은 `inference` 와 같게 둔다 — override 가 준 값의 점수·덮어쓰기
+#                       규칙(SwDS·정본이 덮는다)이 종전과 같다. ⚠ 값 없는 TBD 축은 라벨과 무관하다:
+#                       `validation._effective_src` 가 자리표시자를 라벨과 상관없이 `default` 로 재평가하므로
+#                       TBD 918건은 `inference` 라벨 시절에도 이미 0.30 이었다(리뷰 W2). 프로젝트 귀속은 P7.
+#                       ⚠ 옛 식은 override 값에 SDS 도 값이 있으면 `sds`(강함) 라벨을 달아 SwDS 가 그 칸을
+#                       못 덮었다 — 이제 약함이라 덮인다. 확인되지 않은 스냅샷보다 설계 문서가 근거라 의도된
+#                       거동이며, 라이브 실측(run 2111→2114) 그 집합은 1/1,146 건, 최종 값 변화 0 이었다.
 # `comment`(1.00)·`sds`/`srs`/`uds`/`swcom`(0.95)·`rag`(0.85)·`call_graph`(0.80) 은
 # 실제 근거를 본 것이므로 약하지 않다.
 #
@@ -53,7 +63,7 @@ PLACEHOLDER_VALUES = frozenset({"", "tbd", "n/a", "na", "-", "none"})
 #   "강한 출처" 로 분류됐다. 경계는 `tests/unit/test_confidence_provenance_laundering.py`
 #   의 `TestWeakSourceTableAgreesWithScores` 가 양방향으로 고정한다.
 WEAK_SOURCES = frozenset(
-    {"", "unknown", "default", "generated_doc", "inference", "module_inherit", "rule"}
+    {"", "unknown", "default", "generated_doc", "inference", "module_inherit", "rule", "override"}
 )
 
 # 약함/강함을 가르는 점수 경계. `rule`(0.75)까지가 약함, `call_graph`(0.80)부터 강함.

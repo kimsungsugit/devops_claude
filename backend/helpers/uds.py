@@ -1434,7 +1434,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   `void` 타입 7행과 포인터 행의 `0 ~ 255` 범위가 사라진다. SUTS 의 경계값 경로(`infer_variable_type`)는 별개라 이 판이 고치지 않는다 —
 #   리뷰 W3, N77). 같은 이름의 정의 충돌은 첫 소스 루트가 남고 `globals_scan.definition_collisions` 가 `{files, kept, differs}`.
 #   `.c` 안의 `extern` 선언은 정의를 덮지 않는다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v22"
+# (R68 N72) v23: 소스 단계 `asil_source`/`related_source` 가 값을 준 단계를 가리킨다(`override` · `default`) — 구 캐시가 히트하면
+#   옛 `inference` 라벨 payload 가 그대로 나와 이 fix 가 프로덕션에서 발화하지 않는다(리뷰 C1 — 위 v12·v16~v22 와 같은 실패 모드).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v23"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
