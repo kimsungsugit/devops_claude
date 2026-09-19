@@ -454,6 +454,20 @@ def _note_source_caps(issues: IssueCollector, source_sections: Dict[str, Any]) -
             issues.add("source_read_truncated", "warning", "actual",
                        f"파일 내부 읽기 상한에 닿은 파일 {rt}개 — 큰 헤더의 매크로/선언이 잘렸을 수 있다",
                        stage="source", facts={"files": rt, "detail": (gs.get("read_truncated_detail") or [])[:3]})
+        # (R66 N76) 같은 이름의 전역 정의가 여러 `.c` 에 있고 내용(type·static·init·array)이 다르면 표의 그 행은 남은 쪽(첫 소스
+        #   루트) 정의만 말한다 — 이름만 겹친 것(`differs` 빈 것)은 말하지 않는다(PDS64 9 이름 중 내용이 다른 것은 1).
+        coll = gs.get("definition_collisions") or {}
+        if isinstance(coll, dict):
+            conflicting = {k: v for k, v in coll.items() if isinstance(v, dict) and v.get("differs")}
+            if conflicting:
+                shown = sorted(conflicting.items())[:5]
+                issues.add("global_definition_conflict", "warning", "actual",
+                           f"같은 이름의 전역 정의가 여러 파일에 있고 내용이 다른 이름 {len(conflicting)}개 — 전역 표는 첫 소스 루트의 정의만 싣는다: "
+                           + ", ".join(f"{k}({'/'.join(v.get('differs') or [])})" for k, v in shown)
+                           + (" …" if len(conflicting) > len(shown) else ""),
+                           stage="source", facts={"names": sorted(conflicting)[:10],
+                                                  # (리뷰 I5) 파일 목록도 캡 — 3파일 이상 충돌이면 자란다.
+                                                  "sample": {k: {**v, "files": (v.get("files") or [])[:4]} for k, v in shown}})
     # (R65 N74 리뷰 I4) Prototype 출처 — 헤더가 정의와 어긋나 버린 함수(arity·conflict)는 알고도 버린 것이라 말한다. 헤더가 있는데
     #   전부 다른 루트로 읽히면(루트 표기 불일치) 헤더 프로토타입이 통째로 사라지는데 페이로드 안에서만 보이면 아무도 안 본다.
     ps = source_sections.get("prototype_scan") or {}
@@ -1416,7 +1430,11 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R64 N73) v20: tree-sitter 전역 수집이 include guard 안(어느 깊이든)의 산 선언을 본다 — `used_globals`·전역 표 행·타입/설명 출처가 바뀐다.
 # (R65 N74) v21: 헤더 프로토타입을 이름 first-wins 가 아니라 정의와 같은 트리·같은 인자 수로 고른다 — APP/FBL 쌍둥이의 Prototype · `prototype_scan` 키.
 #   같은 판에서 구조체 멤버 정규식이 두 단어 이상 타입(`unsigned long long`)을 읽어 `struct_member_types` 내용도 바뀐다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v21"
+# (R66 N76) v22: tree-sitter 전역 행이 선언자마다 서고 포인터 별·배열 차원을 선언자 것으로 싣는다(`void *`·`l_u8 *` — **UDS 전역 표**의
+#   `void` 타입 7행과 포인터 행의 `0 ~ 255` 범위가 사라진다. SUTS 의 경계값 경로(`infer_variable_type`)는 별개라 이 판이 고치지 않는다 —
+#   리뷰 W3, N77). 같은 이름의 정의 충돌은 첫 소스 루트가 남고 `globals_scan.definition_collisions` 가 `{files, kept, differs}`.
+#   `.c` 안의 `extern` 선언은 정의를 덮지 않는다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v22"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

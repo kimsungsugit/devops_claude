@@ -78,6 +78,7 @@ from report_gen.requirements import (  # noqa: E402
 from report_gen.source_parser import (  # noqa: E402
     _SRC_READ_MAX_BYTES,
     _decl_array_dim,
+    _definition_order,
     _extract_c_definitions,
     _extract_c_function_bodies,
     _extract_c_global_candidates,
@@ -90,9 +91,11 @@ from report_gen.source_parser import (  # noqa: E402
     _extract_function_pointer_call_targets,
     _extract_local_static_candidates,
     _extract_macro_call_names,
+    _norm_def_axis,
     _read_source_text,
     _read_text_limited,
     _scan_source_comment_patterns,
+    _short_def_path,
     _strip_c_comments,
     extract_header_function_docs,
     extract_struct_member_arrays,
@@ -486,6 +489,8 @@ def generate_uds_source_sections(
     module_map: Dict[str, str] = {}
     globals_info_map: Dict[str, Dict[str, str]] = {}
     manual_globals_info_map: Dict[str, Dict[str, str]] = {}
+    # (R66 N76) 정의 충돌로 규칙이 고른 이름 — 뒤의 이름 키 폴백(행 → 맵 빈 칸 채우기)이 진 파일의 값을 다시 넣지 않게.
+    _collision_names: Set[str] = set()
     source_text_cache: Dict[str, str] = {}
     # (R52 N41) 타입 폴백(`_infer_type_from_file`)의 실행 단위 원문 캐시 — 두 호출부가 **같은** 캐시를 넘긴다(한쪽만 넘기면
     #   그쪽은 옛 동작대로 전역마다 파일을 다시 읽는다). 이 함수가 끝나면 버려진다.
@@ -653,6 +658,19 @@ def generate_uds_source_sections(
             if not gname:
                 continue
             prev = manual_globals_info_map.get(gname, {})
+            # (R66 N76 리뷰 C1) `.c` 안의 `extern` 은 선언이지 정의가 아니다 — 이미 있는 항목의 file·init·static 을 갈아 끼우지 않고
+            #   (KJPDS02 `lin_lin21_proto.c:35 extern l_u8 etf_collision_flag;` 가 `lowlevel/lin.c` 의 정의 `= 0` 을 덮었다),
+            #   처음 보는 이름이면 `extern` 표지를 달아 뒤에 오는 정의가 충돌 없이 이기게 한다.
+            if str(g.get("extern") or "").strip().lower() == "true":
+                if prev:
+                    if not prev.get("type") and g.get("type"):
+                        prev["type"] = str(g.get("type") or "").strip()
+                    continue
+                manual_globals_info_map[gname] = {
+                    "type": str(g.get("type") or "").strip(), "array": str(g.get("array") or "").strip(), "file": str(p),
+                    "range": "", "init": "", "range_source": "", "static": "false", "desc": "", "extern": "true",
+                }
+                continue
             manual_globals_info_map[gname] = {
                 "type": str(g.get("type") or prev.get("type") or "").strip(),
                 # 배열 차원(`[60]`). 정본은 배열을 원소 단위로 펼쳐 적는다 —
@@ -954,7 +972,9 @@ def generate_uds_source_sections(
                         f"[{int(x)}]" for x in _dims
                     )
 
-        _global_def_collisions: Dict[str, List[str]] = {}
+        _global_def_collisions: Dict[str, Dict[str, Any]] = {}
+        # (R66 N76) 이름 → {파일: 자기 정의(type·static·init·array)} — 충돌 후처리용.
+        _own_defs: Dict[str, Dict[str, Dict[str, str]]] = {}
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):
@@ -1007,19 +1027,6 @@ def generate_uds_source_sections(
                         is_static = True
                 if gname:
                     incoming_desc = str(g.get("desc") or "").strip()
-                    # (R64 리뷰 W2) 같은 이름의 정의가 **다른 `.c`** 에도 있으면 이 맵은 이름 키라 뒤에 온 쪽이 이긴다(last-wins).
-                    #   KJPDS02 `u8s_DataBuffer`(Sys_UDS_LinComp_PDS.c · Sys_UDS_ParamTuning.c) — 중첩 수집으로 두 번째 정의가
-                    #   보이면서 승자가 바뀌었다. 동작은 두지 않고 충돌을 센다·적는다(정답은 (이름, 파일) 키 — N76).
-                    _pf = str(prev.get("file") or "").strip()
-                    #   이름-only 행(`decl` 없음)도 센다 — 그 행이 먼저 file 을 바꿔 두면 뒤따르는 상세 행에선 충돌이 안 보인다.
-                    if (
-                        _pf and gfile and os.path.normcase(_pf) != os.path.normcase(gfile)
-                        and _pf.lower().endswith((".c", ".cpp")) and gfile.lower().endswith((".c", ".cpp"))
-                    ):
-                        _global_def_collisions.setdefault(gname, [_pf])
-                        if gfile not in _global_def_collisions[gname]:
-                            _global_def_collisions[gname].append(gfile)
-                    static_name_map[gname] = is_static
                     # ⚠ tree-sitter 산출 타입(`gtype`)엔 **`const` 한정자가 없다**.
                     #   텍스트 스캔(`prev`)은 갖고 있는데 여기서 통째로 덮여
                     #   `static const UDSFuncEntry_t s_UdsFuncTbl[…]` 가 그냥
@@ -1028,13 +1035,14 @@ def generate_uds_source_sections(
                     _gtype = gtype or str(prev.get("type") or "").strip()
                     if is_const_type(prev.get("type")) and not is_const_type(_gtype):
                         _gtype = f"const {_gtype}".strip()
-                    globals_info_map[gname] = {
+                    # (R66 리뷰 W1) tree-sitter 행이 선언자별 `array` 를 실으면 그것이 자기 값이다(키가 있으면 빈 값도 사실).
+                    #   없는 옛 행(이름-only)만 문장 꼬리(`_decl_array_dim`)로 폴백한다.
+                    _own_array = str(g.get("array") or "").strip() if "array" in g else _decl_array_dim(gdecl)
+                    _is_extern_row = str(g.get("is_extern") or "").strip().lower() == "true"
+                    _incoming = {
                         "type": _gtype,
-                        # ⚠ tree-sitter 쪽(`globals_detailed`)엔 배열 차원 필드가 없다.
-                        #   텍스트 스캔이 이미 채워둔 값을 **먼저** 쓰고, 없을 때만
-                        #   선언문에서 뽑는다(`decl` 은 문장 전체라 다중 선언자면
-                        #   마지막 것이 나온다 — 그래서 텍스트 스캔이 우선이다).
-                        "array": str(prev.get("array") or "").strip() or _decl_array_dim(gdecl),
+                        # ⚠ 텍스트 스캔이 이미 채워둔 값을 **먼저** 쓰고(const 처럼 그쪽만 아는 것이 있다), 없을 때만 자기 값.
+                        "array": str(prev.get("array") or "").strip() or _own_array,
                         "file": gfile or str(prev.get("file") or "").strip(),
                         "range": grange or str(prev.get("range") or "").strip(),
                         "init": str(g.get("init") or "").strip() or str(prev.get("init") or "").strip(),
@@ -1042,6 +1050,64 @@ def generate_uds_source_sections(
                         "static": "true" if is_static else "false",
                         "desc": incoming_desc or str(prev.get("desc") or "").strip(),
                     }
+                    # (R66 N76) 같은 이름의 정의가 **다른 `.c`** 에도 있다 — 이 맵은 이름 키라 하나만 남는다. 옛 판은 뒤에 온 쪽이
+                    #   이겼고(last-wins) 순서는 파일 열거(local `os.walk` vs cloudium `list_dir`)가 정했다. 실측(KJPDS02 10 · PDS64 9
+                    #   이름): 정의 내용이 다른 것은 PDS64 `BackupArray`(APP `U16` vs FBL `word`) 1건이라 실효는 작지만 R65 와 같은
+                    #   이유로 닫는다 — 누가 남는지는 규칙이 정한다: **소스 루트 순서**(첫 루트가 주 트리) → 경로 문자열. 진 쪽과
+                    #   type·static·init·array 가 다르면 `differs` 에 적어 준비 게이트가 말한다. 두 정의를 표에 다 싣지는 않는다
+                    #   (정본 표엔 파일 열이 없어 같은 이름 두 행은 구분이 안 된다 — 관찰로 남김).
+                    #   이름-only 행(`decl` 없음)도 센다 — 그 행이 먼저 file 을 바꿔 두면 뒤따르는 상세 행에선 충돌이 안 보인다.
+                    # 파일별 **자기** 정의(선언문이 있는 행만) — 아래 후처리가 충돌 이름의 `differs` 와 남은 정의의 칸을 여기서 읽는다.
+                    #   `_incoming` 은 빈 칸을 prev(다른 파일의 텍스트 스캔·이름-only 행)로 메운 병합값이라 비교·복원에 못 쓴다.
+                    #   충돌 판정 **앞**에서 적는다 — 진 쪽 행은 아래서 `continue` 한다.
+                    #   (리뷰 C1) `extern` 행은 정의가 아니다 — 후보에도, 충돌에도 안 넣는다. prev 가 extern 표지뿐이면 그냥 덮는다.
+                    if gdecl and gfile.lower().endswith((".c", ".cpp")) and not _is_extern_row:
+                        _own_defs.setdefault(gname, {})[gfile] = {
+                            "type": gtype, "static": "true" if is_static else "false",
+                            "init": str(g.get("init") or "").strip(), "array": _own_array,
+                        }
+                    if _is_extern_row and not prev:
+                        _incoming["extern"] = "true"
+                    _pf = str(prev.get("file") or "").strip()
+                    if (
+                        _pf and gfile and os.path.normcase(_pf) != os.path.normcase(gfile)
+                        and _pf.lower().endswith((".c", ".cpp")) and gfile.lower().endswith((".c", ".cpp"))
+                        and not _is_extern_row and str(prev.get("extern") or "") != "true"
+                    ):
+                        _entry = _global_def_collisions.setdefault(gname, {"files": [_pf], "kept": _pf, "differs": []})
+                        if gfile not in _entry["files"]:
+                            _entry["files"].append(gfile)
+                        if _definition_order(_pf, _root_strs) <= _definition_order(gfile, _root_strs):
+                            continue   # 먼저 오는 루트/경로의 정의가 남는다 — 뒤에 온 쪽은 적기만
+                        _entry["kept"] = gfile
+                    static_name_map[gname] = is_static
+                    globals_info_map[gname] = _incoming
+            # (R66 N76) 충돌 이름 후처리 — ① `differs`: 파일별 자기 정의끼리 비교(한쪽이 비면 모름, 한정자·공백은 걷는다).
+            #   ② 남은 정의(`kept`)의 array·init·static·type 을 그 파일의 자기 값으로 되돌린다 — 이름-only 행이 먼저 와서 다른
+            #   파일의 배열 크기를 물려받는 경로(`u8s_Buf[4]` 가 `[8]` 로) 를 막는다. const 는 자기 타입에 없으므로 기존 칸이
+            #   const 였고 기본형이 같으면 유지한다.
+            for _cname, _centry in _global_def_collisions.items():
+                _defs = _own_defs.get(_cname) or {}
+                for _axis in ("type", "static", "init", "array"):
+                    _vals = {_norm_def_axis(d.get(_axis)) for d in _defs.values()}
+                    # 타입만 빈 값 = 모름(ERROR 선언). init·array·static 의 빈 값은 사실("초기값 없음")이라 차이다(리뷰 C2).
+                    if _axis == "type":
+                        _vals -= {""}
+                    if len(_vals) > 1 and _axis not in _centry["differs"]:
+                        _centry["differs"].append(_axis)
+                # (리뷰 I4) 참가 파일 중 자기 정의 행이 없는 것(이름-only)이 있으면 비교가 불완전하다 — 모른다고 적는다.
+                if len(_defs) < len(_centry["files"]) and "unknown" not in _centry["differs"]:
+                    _centry["differs"].append("unknown")
+                _kept_own = _defs.get(_centry["kept"])
+                _cinfo = globals_info_map.get(_cname)
+                if not _kept_own or not isinstance(_cinfo, dict):
+                    continue
+                # (리뷰 C2) "없음" 도 복원한다 — kept 에 초기값·배열이 없으면 진 파일의 `9U`·`[8]` 가 남아 있으면 안 된다.
+                #   type·static 은 kept 파일의 상세 행이 자기 값으로 쓰므로(그 행은 `continue` 를 타지 않는다) 복원할 것이 없다 —
+                #   뮤테이션이 등가로 확인해 뺐다. array·init 만 `prev 우선` 병합으로 오염된다.
+                for _axis in ("array", "init"):
+                    _cinfo[_axis] = _kept_own.get(_axis) or ""
+            _collision_names.update(_global_def_collisions)
         # ── Reset Value 판정 (판정은 `report_gen.c_reset` **단일 출처**) ──────────
         # 값과 **출처**를 함께 낸다. 정본은 같은 심볼에 두 값을 적는 곳이 16심볼·100칸
         # (4.6%) 인데, 그게 "C 정적 저장기간(0)" 과 "리셋 함수가 넣는 값" 이 섞인
@@ -1178,8 +1244,16 @@ def generate_uds_source_sections(
             #   같은 이름의 정의가 여러 `.c` 에 있어 이름 키 맵이 한쪽만 남긴 이름(→ 후보 파일 목록).
             "decl_error_rejected": int(ast_result.get("decl_error_rejected") or 0),
             #   경로는 `상위폴더/파일` — APP·FBL 두 루트에 같은 이름의 파일이 있어 파일명만으론 같은 파일로 읽힌다(`EEPROM.c:BackupArray`).
+            #   (R66 N76) `{files, kept, differs}` — 어느 정의가 남았고(`kept`), 진 쪽과 무엇이 달랐는지(`differs`: type/static/init/array).
+            #   `differs` 가 비면 이름만 겹친 것이고, 차 있으면 표의 그 행이 한쪽 정의만 말하고 있다는 뜻이다(게이트 warning).
+            #   (리뷰 I1) 앞에 소스 루트 번호 — APP/FBL 의 `Eeprom/EEPROM.c` 는 같은 문자열이라 번호 없이는 어느 트리가 남았는지 모른다.
             "definition_collisions": {
-                k: ["/".join(Path(f).parts[-2:]) for f in v] for k, v in sorted(_global_def_collisions.items())
+                k: {
+                    "files": [_short_def_path(f, _root_strs) for f in v["files"]],
+                    "kept": _short_def_path(v["kept"], _root_strs),
+                    "differs": list(v["differs"]),
+                }
+                for k, v in sorted(_global_def_collisions.items())
             },
             # 파일 **내부** 절단. 위 c_cap/h_cap 은 "파일 몇 개를 봤나" 이고 이건
             # "본 파일을 끝까지 읽었나" 다 — 둘은 다른 축이라 따로 센다.
@@ -2058,6 +2132,9 @@ def generate_uds_source_sections(
                 continue
             name = str(row[0] or "").strip()
             if not name:
+                continue
+            # (R66 N76 리뷰 C2) 행은 정의마다 하나라 충돌 이름엔 진 파일의 행도 있다 — 규칙이 비워 둔 init 을 그 행이 다시 채웠다(`9U`).
+            if name in _collision_names:
                 continue
             info = globals_info_map.setdefault(name, {})
             if len(row) > 1 and not info.get("type"):

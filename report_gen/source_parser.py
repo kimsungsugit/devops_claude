@@ -1347,6 +1347,29 @@ def _root_index_of(path: str, roots: List[str]) -> int:
     return best
 
 
+def _norm_def_axis(value: Any) -> str:
+    """(R66 N76) 정의 충돌 비교용 정규화 — `const`/`volatile` 를 걷고 공백을 접고 `*` 앞뒤 공백을 없앤다.
+    `U16` vs `word` 는 다르고, `const U8 *` vs `U8*` 는 같다(한정자는 tree-sitter 타입에 없어 비교 축이 아니다)."""
+    s = re.sub(r"\b(?:const|volatile)\b", " ", str(value or ""))
+    s = " ".join(s.split())
+    return re.sub(r"\s*\*\s*", "*", s).strip()
+
+
+def _short_def_path(path: str, roots: List[str]) -> str:
+    """(R66 N76 리뷰 I1) 공시용 짧은 경로 `r0:Eeprom/EEPROM.c` — 루트 번호 + `상위폴더/파일`. 어느 루트에도 안 걸리면 `r-`."""
+    idx = _root_index_of(path, roots)
+    tail = "/".join(Path(str(path or "")).parts[-2:])
+    return f"r{idx if idx >= 0 else '-'}:{tail}"
+
+
+def _definition_order(path: str, roots: List[str]) -> Tuple[int, str]:
+    """(R66 N76) 같은 이름의 정의가 여러 파일에 있을 때 **어느 것이 남는지**의 정렬 키 — (소스 루트 순서, 정규화 경로).
+    첫 루트(주 트리)의 정의가 이기고, 같은 루트면 경로 문자열순. 어느 루트에도 안 걸리면 맨 뒤. 파일 열거 순서(모드 의존)를
+    대신하는 규칙이라 두 모드가 같은 문서를 낸다."""
+    idx = _root_index_of(path, roots)
+    return (idx if idx >= 0 else len(roots), os.path.normcase(os.path.normpath(str(path or ""))))
+
+
 def pick_header_doc(
     candidates: List[Dict[str, str]], file_path: str, roots: Optional[List[str]] = None
 ) -> Dict[str, str]:

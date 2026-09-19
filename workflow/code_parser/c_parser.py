@@ -218,6 +218,29 @@ def _decl_ident_node(node):
     return None
 
 
+def _decl_declarators(node) -> List[Tuple[Any, Any]]:
+    """(R66 N76) 선언의 **모든** 선언자 — `[(선언자 노드, 이름 노드)]`. `U8 a, *b, c[4];` 는 셋이다.
+
+    왜: 옛 판은 `init_declarator` 자식만 돌고, 하나도 없으면 `_decl_ident`(첫 선언자)로 끝냈다 — 초기값 없는 다중 선언
+    `static S32 s32s_En, s32s_Es, s32s_Ed;`(KJPDS02 `Ap_MotorCtrl_PDS.c` 2문장)에서 뒤의 넷이 tree-sitter 이름 집합에 없어
+    그 파일 함수의 `used_globals` 에서 빠졌다(문서 표는 텍스트 스캔이 메워 안 보였다). 타입 자리·한정자·ERROR 자식은
+    이름이 아니고, ERROR 안에서 나온 이름은 버린다(`_ident_under_error`)."""
+    type_node = node.child_by_field_name("type")
+    type_id = type_node.id if type_node is not None else None
+    out: List[Tuple[Any, Any]] = []
+    for child in node.children:
+        if type_id is not None and child.id == type_id:
+            continue
+        if child.type in _DECL_SKIP_TYPES or child.type == "ERROR" or child.type == "comment":
+            continue
+        inner = child.child_by_field_name("declarator") if child.type == "init_declarator" else None
+        ident = _find_ident_node(inner if inner is not None else child)
+        if ident is None or _ident_under_error(ident, node):
+            continue
+        out.append((child, ident))
+    return out
+
+
 def _ident_under_error(ident_node, decl_node) -> bool:
     """(R64 N73) 이름이 `ERROR` 노드 안에서 나왔는가 — `_decl_ident_node` 가 직계 ERROR 는 건너뛰지만 더 깊은 ERROR
     (`init_declarator` 안 등)에서 나온 이름은 여기서 거른다. ⚠ 선언 **어딘가에** ERROR 가 있다고 버리면 안 된다 —
@@ -1134,10 +1157,43 @@ def _extract_globals(root, src: bytes, dead: Optional[Set[int]] = None, decls: O
     `decls` 를 주면(파일당 한 번 걸은 결과) 다시 걷지 않는다(리뷰 I1)."""
     globals_list: List[str] = []
     for node, _ in (decls if decls is not None else _file_scope_declarations(root, src, dead)):
-        name = _decl_ident(node)
-        if name and name not in globals_list:
-            globals_list.append(name)
+        # (R66 N76) 선언자 전부 — 첫 이름만 쓰면 `U8 a, b;` 의 b 가 `used_globals` 판정 집합에서 빠진다.
+        for _child, ident in _decl_declarators(node):
+            name = ident.text.decode("utf-8", errors="ignore")
+            if name and name not in globals_list:
+                globals_list.append(name)
     return globals_list
+
+
+def _pointer_depth(decl_node) -> int:
+    """(R66 N76) 선언자에서 이름까지 내려가며 `pointer_declarator` 를 센다 — `volatile void* volatile DBGAA;` 는 1,
+    `U8 **pp` 는 2, `U8 a, *b` 는 선언자마다 다르다(0 · 1).
+
+    왜: 선언의 `type` 필드는 기본형(`void`)뿐이라 포인터 전역 10/10개(KJPDS02·PDS64)가 표에 `void`·`l_u8` 로 섰다 — 7행은
+    타입 칸이 `void` 였고 3행은 포인터가 `0 ~ 255` 범위를 받았다. 별은 타입이 아니라 선언자에 있어 선언자마다 세어야 한다.
+    ERROR 자식은 건너뛴다(그 안의 `*` 는 못 믿는다 — `_decl_ident_node` 와 같은 규칙)."""
+    depth = 0
+    node = decl_node
+    while node is not None:
+        if node.type == "pointer_declarator":
+            depth += 1
+        if node.type == "identifier":
+            break
+        nxt = node.child_by_field_name("declarator")
+        if nxt is None:
+            nxt = next((ch for ch in node.children if ch.type != "ERROR" and ch.type.endswith("declarator")), None)
+        if nxt is None:
+            nxt = next((ch for ch in node.children if ch.type == "identifier"), None)
+        node = nxt
+    return depth
+
+
+def _with_pointer(type_text: str, depth: int) -> str:
+    """`U8` + 2 → `U8 **`. 텍스트 스캔(`_extract_decl_name_and_type`)의 `base *` 표기와 같은 모양 — 소비자(`is_const_type`·
+    타입 범위 조회)는 두 경로의 값을 한 칸에서 섞어 본다."""
+    if not type_text or depth <= 0:
+        return type_text
+    return f"{type_text} {'*' * depth}"
 
 
 def _extract_global_decls(
@@ -1169,58 +1225,71 @@ def _extract_global_decls(
                 range_source = "decl"
         # ⚠ 자기 **꼬리** 주석이 먼저다. MCU 헤더처럼 `U8 x;  /* 설명 */` 형식이면
         #   앞 주석 자리엔 직전 선언의 꼬리 주석밖에 없다(`_is_trailing_comment`).
-        comment = _extract_trailing_comment(src, node.end_byte) or _extract_leading_comment(
-            src, node.start_byte
-        )
+        trailing = _extract_trailing_comment(src, node.end_byte)
+        comment = trailing or _extract_leading_comment(src, node.start_byte)
         desc_text = ""
+        comment_range = ""
         if comment:
             dtext, _, _, _, rtext, _, _ = _parse_comment_fields(comment)
             desc_text = dtext or ""
             if rtext:
-                range_text = rtext
-                range_source = "comment"
+                comment_range = rtext
         is_static = "static" in decl_text
-        handled = False
-        for child in node.children:
-            if child.type != "init_declarator":
-                continue
-            handled = True
-            decl_node = child.child_by_field_name("declarator") or child
-            name = _find_ident(decl_node) or ""
-            init_node = child.child_by_field_name("value")
-            init_text = _node_text(src, init_node).strip() if init_node else ""
+        # (R66 N76) 선언자마다 한 행 — 초기값 유무와 무관하게(옛 판은 `init_declarator` 가 없으면 첫 이름 하나뿐).
+        #   별·배열 차원은 선언자에 있으므로 행마다 센다: `U8 a, *b, c[4];` → a `U8` · b `U8 *` · c `U8`+`[4]`.
+        #   주석(앞·꼬리)은 **문장 전체**의 것이라 선언자 전부에 준다. 리뷰 W2 는 꼬리 주석을 마지막 선언자에만 주자고 했지만
+        #   실측이 반대였다 — KJPDS02 `static S32 s32s_En, s32s_Es, s32s_Ed; /* Current error, integral value, derivative value */`
+        #   는 셋을 한 문장으로 설명하고, 그 규칙을 넣자 En·Es 의 설명이 비었다(얻은 것 0). MCU 헤더의 "직전 줄 꼬리 주석" 함정은
+        #   선언자가 하나인 문장이라 `_is_trailing_comment` 가 이미 가른다.
+        declarators = _decl_declarators(node)
+        for pos, (child, ident) in enumerate(declarators):
+            name = ident.text.decode("utf-8", errors="ignore")
             if not name:
                 continue
+            if child.type == "init_declarator":
+                decl_node = child.child_by_field_name("declarator") or child
+                init_node = child.child_by_field_name("value")
+                init_text = _node_text(src, init_node).strip() if init_node else ""
+            else:
+                decl_node = child
+                init_text = ""
+            row_range, row_source = range_text, range_source
+            if comment_range:
+                row_range, row_source = comment_range, "comment"
             results.append(
                 {
                     "name": name,
-                    "type": type_text,
+                    "type": _with_pointer(type_text, _pointer_depth(decl_node)),
                     "init": init_text,
-                    "range": range_text,
+                    "range": row_range,
                     "decl": decl_text,
-                    "range_source": range_source,
+                    "range_source": row_source,
                     "is_static": "true" if is_static else "false",
                     "is_extern": "true" if is_extern else "false",
                     "desc": desc_text,
+                    # (리뷰 W1) 배열 차원도 선언자 것 — 문장 꼬리(`_decl_array_dim(decl)`)를 보면 `U8 p, q[4];` 의 p 가 `[4]` 를 받는다.
+                    "array": _array_dims(decl_node, src),
                 }
             )
-        if not handled:
-            name = _decl_ident(node)
-            if name:
-                results.append(
-                    {
-                        "name": name,
-                        "type": type_text,
-                        "init": "",
-                        "range": range_text,
-                        "decl": decl_text,
-                        "range_source": range_source,
-                        "is_static": "true" if is_static else "false",
-                        "is_extern": "true" if is_extern else "false",
-                        "desc": desc_text,
-                    }
-                )
     return results
+
+
+def _array_dims(decl_node, src: bytes) -> str:
+    """(R66 N76 리뷰 W1) 선언자 안의 `array_declarator` 크기를 바깥→안 순서로 모아 `[2][3]` 로. 배열이 아니면 ``""``.
+    `U8 a[2][3]` 은 `array_declarator(array_declarator(a, 2), 3)` 이라 내려가며 모은 것을 뒤집는다. 크기 없는 `[]` 는 `[]`."""
+    dims: List[str] = []
+    node = decl_node
+    while node is not None and node.type != "identifier":
+        if node.type == "array_declarator":
+            size = node.child_by_field_name("size")
+            dims.append(f"[{_node_text(src, size).strip()}]" if size is not None else "[]")
+        nxt = node.child_by_field_name("declarator")
+        if nxt is None:
+            nxt = next((ch for ch in node.children if ch.type != "ERROR" and ch.type.endswith("declarator")), None)
+        if nxt is None:
+            nxt = next((ch for ch in node.children if ch.type == "identifier"), None)
+        node = nxt
+    return "".join(reversed(dims))
 
 
 def _make_parser():
@@ -1374,7 +1443,12 @@ def parse_c_project(
                 file_globals = set(_extract_globals(root_node, data, decls=file_decls))
                 # 아래 이름-only 행도 extern 표지를 실어야 한다 — 이 행엔 타입이 없어 소비자가 `file` 로 헤더를 귀속시키고
                 #   `_infer_type_from_file` 을 돌린다(첫 실측: 정의가 `.c` 에 있는 전역 750/401개의 file 이 헤더로 바뀌었다).
-                extern_names = {_decl_ident(n) for n, is_ext in file_decls if is_ext}
+                # (R66 N76) 선언자 전부 — `extern U8 a, b;` 의 b 도 표지를 받아야 한다.
+                extern_names = {
+                    ident.text.decode("utf-8", errors="ignore")
+                    for n, is_ext in file_decls if is_ext
+                    for _c, ident in _decl_declarators(n)
+                }
                 funcs = _extract_function_defs(root_node, data, str(path), file_globals)
             if not funcs:
                 funcs = _extract_function_defs_regex_fallback(raw_text, str(path), file_globals)

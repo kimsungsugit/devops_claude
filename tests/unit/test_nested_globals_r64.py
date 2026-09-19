@@ -223,10 +223,13 @@ class TestExternDeclarationDoesNotOverrideADefinition:
             },
         )
         # 후보 순서는 텍스트 스캔이 마지막으로 본 파일이 앞이라 순회 순서에 달려 있다 — 집합으로 단언.
+        # (R66 N76) 값은 `{files, kept, differs}` — 남는 쪽은 규칙(루트 순서 → 경로순)이라 같은 루트면 `a.c`.
         coll = sec["globals_scan"]["definition_collisions"]
-        assert {k: sorted(Path(f).name for f in v) for k, v in coll.items()} == {"u8s_Buf": ["a.c", "b.c"]}
-        # 경로는 `상위폴더/파일` — APP·FBL 두 루트의 같은 파일명(`EEPROM.c`)이 구분돼야 한다.
-        assert all("/" in f for f in coll["u8s_Buf"])
+        assert {k: sorted(f.rsplit("/", 1)[-1] for f in v["files"]) for k, v in coll.items()} == {"u8s_Buf": ["a.c", "b.c"]}
+        assert coll["u8s_Buf"]["kept"].endswith("/a.c")
+        assert coll["u8s_Buf"]["differs"] == ["array"]
+        # 경로는 `r<루트>:상위폴더/파일` — APP·FBL 두 루트의 같은 파일명(`EEPROM.c`)이 구분돼야 한다.
+        assert all("/" in f and f.startswith("r0:") for f in coll["u8s_Buf"]["files"])
 
     def test_name_only_rows_carry_the_extern_flag(self, tmp_path):
         # 이름-only 행(`_extract_globals` 산출)에도 표지가 없으면 소비자가 그 행의 file(헤더)로 귀속시킨다.
