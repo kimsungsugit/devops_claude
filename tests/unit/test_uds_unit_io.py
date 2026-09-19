@@ -65,8 +65,10 @@ class TestParseUnitIo:
     def test_reads_input_and_output_names(self, tmp_path):
         path = _docx(_para("SwUFn_0102: g_SysOs_WdiCtrl") + _fn_table(_STD), tmp_path)
         rec = resolve_unit_io(load_uds_unit_io(path), "g_SysOs_WdiCtrl")
-        assert rec == {"inputs": ["u8g_SystemReset_F", "_PTT.Bits.PTT4"],
-                       "outputs": ["_PTT.Bits.PTT3"], "asil": ""}
+        # (R74) 레코드에 `description`·`param_info` 가 더 실린다 — 이름·ASIL 축의 계약은 그대로다.
+        assert {k: rec[k] for k in ("inputs", "outputs", "asil")} == {
+            "inputs": ["u8g_SystemReset_F", "_PTT.Bits.PTT4"], "outputs": ["_PTT.Bits.PTT3"], "asil": ""}
+        assert set(rec) == {"inputs", "outputs", "asil", "description", "param_info", "param_col_layout"}
 
     def test_reads_asil_from_the_function_information_block(self, tmp_path):
         """ASIL 은 같은 표의 `ASIL` 행이다 — 안전 판정(O/X)의 근거가 된다."""

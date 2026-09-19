@@ -389,7 +389,7 @@ def _resolve_srs_req_ids_for_function(
             related = str(entry.get("related", "") or "")
             ids = _SRS_REQ_ID_PAT.findall(related)
             if ids:
-                return ", ".join(ids[:4])
+                return ", ".join(dict.fromkeys(ids))
     # Fuzzy: partial name match
     fn_lower = func_name.lower()
     for key, entry in sds_map.items():
@@ -397,7 +397,7 @@ def _resolve_srs_req_ids_for_function(
             related = str(entry.get("related", "") or "")
             ids = _SRS_REQ_ID_PAT.findall(related)
             if ids:
-                return ", ".join(ids[:4])
+                return ", ".join(dict.fromkeys(ids))
     return ""
 
 
@@ -1039,10 +1039,15 @@ def collect_unit_functions(
             "indirect_vars": indirect_vars,
             "logic_flow": info.get("logic_flow") or [],
             "calls_list": info.get("calls_list") or [],
-            "description": info.get("description", ""),
+            # (R74) SwUDS `Description` 행이 있고 더 길면 그것 — 예전 보강(`_load_uds_descriptions`)은 문단 heading 을 키로 써
+            #   `SwUFn_0101: main` 꼴 문서에서 0건이었다(KJPDS02 실측: 989 함수 전부 Description 보유).
+            "description": max(str(info.get("description") or ""), str((_uds_rec or {}).get("description") or ""), key=len),
             # (R73 N92) enum 타입 변수의 닫힌 값 집합(입력·기대·간접 전역) — 시퀀스가 경계값 대신 열거자 값을 쓴다.
             "value_domains": _unit_value_domains(
                 info, gim, list(input_vars[:max_inp]) + list(output_vars[:max_out]) + list(indirect_vars)),
+            # (R74) SwUDS 파라미터 표의 타입·Value Range — 설계서가 적은 범위가 타입 전폭보다 먼저다.
+            "uds_param_info": _unit_uds_param_info(
+                _uds_rec, list(input_vars[:max_inp]) + list(output_vars[:max_out]) + list(indirect_vars)),
             "asil": asil,
             # 그 등급이 **어디서 왔나**. `sds-fuzzy-conflict` 는 "모듈명 부분문자열
             # 매칭에서 후보 등급이 갈렸고 그중 하나를 집었다" 는 뜻이다.
@@ -1946,7 +1951,7 @@ def _normalize_type(raw: str) -> str:
 
 def get_boundary_values(typename: str) -> Dict[str, Any]:
     """타입 키 → 경계값 dict. `unknown`(선언은 있으나 모르는 타입)은 **빈 dict** — 값이 없다는 사실이 답이다."""
-    if typename in (_UNKNOWN_TYPE, _ENUM_TYPE):
+    if typename in (_UNKNOWN_TYPE, _ENUM_TYPE, _RANGE_TYPE):
         # `enum` 의 경계는 값 집합(`enum_bounds`)에서만 온다 — 여기로 오면 uint8 기본값으로 접혀 선언 도메인 밖 값이
         # 선다(리뷰 C1: 같은 unit 표에 `BV_MAX=18` 과 `MCDC_BASE=255`).
         return {}
@@ -1955,6 +1960,8 @@ def get_boundary_values(typename: str) -> Dict[str, Any]:
 
 
 _ENUM_TYPE = "enum"
+# (R74) 소스 선언은 모르는 타입이지만 설계서(SwUDS Value Range)나 HSIS 가 값 범위를 적어 둔 변수.
+_RANGE_TYPE = "range"
 
 
 def enum_bounds(domain: Any) -> Dict[str, Any]:
@@ -1980,6 +1987,37 @@ def _unit_value_domains(info: Dict[str, Any], gim: Dict[str, Any], names: List[s
         if isinstance(dom, dict) and dom.get("values"):
             out[v] = dom
     return out
+
+
+def _unit_uds_param_info(uds_rec: Optional[Dict[str, Any]], names: List[str]) -> Dict[str, Dict[str, Any]]:
+    """unit 변수 이름 → SwUDS 파라미터 표의 `{"type", "range"}`(R74). 원소로 펼친 이름(`buf[3]`)은 첨자를 떼고 찾는다.
+
+    설계서가 직접 적은 타입·범위라 경계값의 **가장 강한 출처**다(KJPDS02 SwUDS v3.03: 파라미터 5,914행 중 범위가 타입 전폭보다
+    좁은 `0x00 ~ 0x01` 842행 · `0x00 ~ 0x03` 130행 …). 없으면 싣지 않는다.
+    """
+    info = (uds_rec or {}).get("param_info") or {}
+    if not info:
+        return {}
+    lowered = {str(k).lower(): v for k, v in info.items()}
+    out: Dict[str, Dict[str, Any]] = {}
+    for v in names:
+        for key in (v, re.sub(r"\[[^\]]*\]", "", v)):
+            rec = info.get(key) or lowered.get(key.lower())
+            if isinstance(rec, dict) and rec:
+                out[v] = rec
+                break
+    return out
+
+
+def range_bounds(rng: Any) -> Dict[str, Any]:
+    """`[lo, hi]` → 경계값 dict(최소·가운데·최대, 범위 밖 ±1). 정수 두 개가 아니면 빈 dict."""
+    try:
+        lo, hi = int(rng[0]), int(rng[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return {}
+    if lo > hi:
+        return {}
+    return {"min_inv": lo - 1, "min": lo, "mid": (lo + hi) // 2, "max": hi, "max_inv": hi + 1}
 
 
 def _param_decl_types(*raw_groups: List[str]) -> Dict[str, str]:
@@ -2098,14 +2136,59 @@ def generate_sequences(
     type_cache = {**_base_cache, **_ptypes} if _ptypes else _base_cache
     # (R73 N92) enum 값 집합이 있는 변수는 타입 `enum` — 경계값은 열거자의 최소/가운데/최대, 범위 밖은 ±1.
     _domains = unit.get("value_domains") or {}
+    # (R74) 경계값의 출처 순서: **설계서 범위**(SwUDS Value Range) > enum 값 집합 > HSIS SW 값 범위 > 타입 전폭.
+    #   위로 갈수록 이 변수에 대해 구체적으로 말한 문서다. 어느 출처가 정했는지는 `unit["bounds_source"]` 에 남긴다.
+    _uds_info = unit.get("uds_param_info") or {}
+    _hsis_rng = unit.get("hsis_bounds") or {}
+    _bsrc: Dict[str, str] = {}
 
     def _type_of(v: str) -> str:
-        return _ENUM_TYPE if enum_bounds(_domains.get(v)) else infer_variable_type(v, type_cache)
+        if enum_bounds(_domains.get(v)):
+            return _ENUM_TYPE
+        t = infer_variable_type(v, type_cache)
+        if t == _UNKNOWN_TYPE:
+            # 소스 선언은 모르는 타입인데 설계서가 타입을 적었으면 그것(표가 아는 이름일 때만).
+            ut = _normalize_type(str((_uds_info.get(v) or {}).get("type") or ""))
+            if ut and ut != _UNKNOWN_TYPE:
+                return ut
+            if range_bounds((_uds_info.get(v) or {}).get("range")) or range_bounds(_hsis_rng.get(v)):
+                return _RANGE_TYPE
+        return t
+
+    _range_conflicts: List[str] = []
+
+    def _declared(v: str) -> bool:
+        # 타입이 **선언**에서 왔는가(전역 선언·파라미터 선언). 이름 패턴·기본값은 추측이다.
+        return bool(_normalize_type(str(type_cache.get(v) or ""))) and _normalize_type(str(type_cache.get(v) or "")) != _UNKNOWN_TYPE
+
+    def _fits_type(rb: Dict[str, Any], t: str, v: str, src: str) -> bool:
+        # 문서의 범위가 **선언 타입이 담을 수 없는 값**이면 문서 오류다(실측: HSIS `u16g_DrvIn_MOTOR_A2_FB` U16 에
+        # `0x0000 ~ 0xFFFFFU` — F 가 다섯). 그 범위는 쓰지 않고 타입 전폭으로 내려가며, 사실은 센다.
+        # ⚠ 거부권은 **선언된 타입**에만 있다(리뷰 W1) — `_Flag` 라는 이름으로 `bit` 라 추측한 타입이 설계서의 `0 ~ 255` 를
+        #   "문서 오류" 로 기각하면 우선순위(설계서 > 타입)가 뒤집힌다.
+        tb = _TYPE_BOUNDARIES.get(t) if t in _TYPE_BOUNDARIES and t != "float" and _declared(v) else None
+        if tb and (rb["min"] < tb["min"] or rb["max"] > tb["max"]):
+            _msg = f"{v}({src} {rb['min']}~{rb['max']} vs {t})"
+            if _msg not in _range_conflicts:
+                _range_conflicts.append(_msg)
+            return False
+        return True
 
     def _bounds_of(v: str, t: str) -> Dict[str, Any]:
+        rb = range_bounds((_uds_info.get(v) or {}).get("range"))
+        if rb and _fits_type(rb, t, v, "SwUDS"):
+            _bsrc[v] = "uds_range"
+            return rb
         if t == _ENUM_TYPE:
+            _bsrc[v] = "enum"
             return enum_bounds(_domains.get(v))
-        return _get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t)
+        hb = range_bounds(_hsis_rng.get(v))
+        if hb and _fits_type(hb, t, v, "HSIS"):
+            _bsrc[v] = "hsis_range"
+            return hb
+        b = _get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t)
+        _bsrc[v] = "type" if b else "unknown"
+        return b
 
     if not input_vars and not output_vars:
         fn_name = unit.get("name", "function")
@@ -2156,10 +2239,13 @@ def generate_sequences(
         _ind_types = {_iv: _type_of(_iv) for _iv in indirect_vars}
         unit["var_types"] = dict(_ind_types)
         unit["unknown_type_vars"] = [_iv for _iv, _t in _ind_types.items() if _t == _UNKNOWN_TYPE]
+        unit["bounds_source"] = _bsrc
+        unit["range_conflicts"] = _range_conflicts
         if indirect_vars:
             for _iv in indirect_vars[:4]:
                 _vtype = _ind_types[_iv]
                 if _vtype == _UNKNOWN_TYPE:
+                    _bsrc[_iv] = "unknown"
                     continue
                 _bounds = _bounds_of(_iv, _vtype)
                 normal_inputs[_iv] = _bounds.get("mid", 0)
@@ -2198,6 +2284,10 @@ def generate_sequences(
     unit["var_types"] = {**var_types, **out_types, **_ind_types}
     _unknown_vars = [v for v, t in unit["var_types"].items() if t == _UNKNOWN_TYPE]
     unit["unknown_type_vars"] = _unknown_vars
+    for _gv, _gt in _ind_types.items():
+        _bounds_of(_gv, _gt)       # 간접 전역의 출처도 남긴다(값은 쓰는 자리에서 다시 구한다)
+    unit["bounds_source"] = _bsrc
+    unit["range_conflicts"] = _range_conflicts
 
     logic_flow = unit.get("logic_flow") or []
 
@@ -3546,6 +3636,10 @@ def generate_suts_quality_report(
     # (R71 N77) 변수 타입 해상 분포와, 선언은 있는데 모르는 타입이라 값을 비운 칸. 예전엔 그 칸이 전부 uint8 로
     #   지어낸 0/127/255 였다 — 이 수가 0 이 아니어야 정상이고, 그 칸의 값은 사람이 채운다.
     var_type_dist: Dict[str, int] = {}
+    bounds_src_dist: Dict[str, int] = {}
+    for u in units:
+        for s in (u.get("bounds_source") or {}).values():
+            bounds_src_dist[str(s)] = bounds_src_dist.get(str(s), 0) + 1
     unknown_slots = 0
     units_with_unknown = 0
     for u in units:
@@ -3560,6 +3654,12 @@ def generate_suts_quality_report(
         "override_only_unit_count": len(override_only),
         "override_only_units": override_only[:20],
         "var_type_distribution": var_type_dist,
+        # (R74) 경계값을 **무엇이** 정했나 — 설계서 범위 · enum 값 집합 · HSIS 값 범위 · 타입 전폭 · 모름.
+        "bounds_source_distribution": bounds_src_dist,
+        # 문서의 범위가 선언 타입을 넘어 쓰지 않은 것(문서 오류 후보) — 중복 제거한 이름 목록 앞 20개와 수.
+        "range_conflicts": sorted({c for u in units for c in (u.get("range_conflicts") or [])})[:20],
+        "range_conflict_count": len({c for u in units for c in (u.get("range_conflicts") or [])}),
+        "units_with_srs_req_ids": sum(1 for u in units if str(u.get("srs_req_ids") or "").strip()),
         "unknown_type_var_slots": unknown_slots,
         "units_with_unknown_type_vars": units_with_unknown,
         "total_test_cases": total_tc,
@@ -3883,6 +3983,26 @@ def supplement_override_only(function_details: Dict[str, Dict[str, Any]]) -> Dic
     return stats
 
 
+def _link_units_to_requirements(units: List[Dict[str, Any]], fid_to_reqs: Dict[str, List[str]]) -> int:
+    """STS 요구→함수 매핑을 뒤집은 `fid → [요구 ID]` 로 unit 의 `srs_req_ids` 를 채운다. 반환은 매핑이 닿은 unit 수.
+
+    (R74 N90 · 리뷰 W2) 수집 단계(SwDS 파티션 직조회)가 이미 적은 ID 와 **합친다** — 건너뛰면 그 unit 만 옛 경로의 부분
+    집합으로 남는다. 전량을 적고(앞 4개 절단 없음) 어느 근거인지는 `srs_req_link`(`sds_partition`·`sts_mapping`·둘 다)가 말한다.
+    """
+    linked = 0
+    for unit in units:
+        prev = [x.strip() for x in str(unit.get("srs_req_ids") or "").split(",") if x.strip()]
+        mapped = list(dict.fromkeys(fid_to_reqs.get(str(unit.get("fid") or "")) or []))
+        ids = list(dict.fromkeys(prev + mapped))
+        if not ids:
+            continue
+        unit["srs_req_ids"] = ", ".join(ids)
+        unit["srs_req_link"] = "+".join(
+            name for name, on in (("sds_partition", bool(prev)), ("sts_mapping", bool(mapped))) if on)
+        linked += 1 if mapped else 0
+    return linked
+
+
 def _note_unknown_type_slots(validation: Dict[str, Any], quality: Dict[str, Any]) -> None:
     """(R71 N77 · 리뷰 W5) 검증기의 "I/O 변수 없는 TC" 는 시트만 보므로 **일부러 비운 칸**(타입 미상)과 재료를 잃은 칸을
     같은 숫자로 센다. 비운 칸의 수를 경고 옆에 같이 적어 두 0 을 갈라 읽게 한다(0 이면 적지 않는다)."""
@@ -4048,39 +4168,36 @@ def generate_suts(
     # ── SRS requirement ID enrichment ────────────────────────────────────
     # 입력 경로는 resolver 경유로 확보한다(worker-only 입력의 침묵 skip 차단 —
     # _resolved_doc_input 주석 참조). 아래 UDS/HSIS 블록도 같은 규약.
+    #
+    # (R74 N90) 예전엔 요구 본문에서 `…_init|_main|_get…` 꼴 함수 이름을 **정규식으로 찾았다** — KJPDS02 SwRS 68 요구에서
+    #   후보 0건, 요구 ID 가 붙은 unit 0/933(라이브 로그 "0 units have req IDs now"). 요구는 함수 이름을 적지 않는다.
+    #   STS 가 쓰는 요구→함수 매핑(`map_requirements_to_functions`: 주석 Related · SwDS 파티션 · SwUDS 설계-ID 브리지)을
+    #   그대로 뒤집어 쓴다 — 같은 실측에서 896/933 unit 에 닿는다. 두 문서가 **같은 매핑**을 봐야 추적성이 맞는다.
     with _resolved_doc_input(srs_docx_path, "SRS") as _srs_local:
         if _srs_local:
             _progress(36, "SRS 요구사항 ID 보강 중")
             try:
-                from generators.sts import parse_srs_docx_tables
+                from generators.sts import load_uds_design_ids as _sts_design_ids
+                from generators.sts import map_requirements_to_functions, parse_srs_docx_tables
                 srs_reqs = parse_srs_docx_tables(_srs_local)
                 if srs_reqs:
-                    # Build function_name → req_ids map from SRS data
-                    fn_to_reqs: Dict[str, List[str]] = {}
-                    for req in srs_reqs:
-                        req_id = req.get("id", "")
-                        if not req_id:
-                            continue
-                        related = str(req.get("related_id") or req.get("verification") or "")
-                        desc = str(req.get("description") or req.get("name") or "")
-                        # Find function name references in requirement text
-                        for m in re.finditer(r"\b([A-Za-z_]\w*(?:_pds|_init|_main|_run|_update|_check|_calc|_set|_get|_proc))\b", related + " " + desc):
-                            fn_key = m.group(1).lower()
-                            if fn_key not in fn_to_reqs:
-                                fn_to_reqs[fn_key] = []
-                            if req_id not in fn_to_reqs[fn_key]:
-                                fn_to_reqs[fn_key].append(req_id)
-                    # Enrich units that have no srs_req_ids yet
-                    for unit in units:
-                        if unit.get("srs_req_ids"):
-                            continue
-                        fn_lower = unit["name"].lower()
-                        direct = fn_to_reqs.get(fn_lower)
-                        if direct:
-                            unit["srs_req_ids"] = ", ".join(direct[:4])
-                    _logger.info("SRS enrichment: %d reqs parsed, %d units have req IDs now",
-                                 len(srs_reqs),
-                                 sum(1 for u in units if u.get("srs_req_ids")))
+                    _design_ids: Dict[str, Any] = {}
+                    with _resolved_doc_input(uds_path, "UDS(설계 ID 브리지)") as _uds_bridge:
+                        if _uds_bridge:
+                            _design_ids = _sts_design_ids(_uds_bridge) or {}
+                    # ⚠ `sds_map=None` 은 저장소 `docs/` 글롭(프로젝트 무관)이다 — 없으면 빈 맵을 명시한다.
+                    _req_to_fids = map_requirements_to_functions(
+                        srs_reqs, function_details, sds_map=_sds_map or {}, uds_design_ids=_design_ids or None)
+                    _fid_to_reqs: Dict[str, List[str]] = {}
+                    for _rid, _fids in _req_to_fids.items():
+                        for _f in _fids:
+                            _fid_to_reqs.setdefault(_f, []).append(_rid)
+                    _linked = _link_units_to_requirements(units, _fid_to_reqs)
+                    _logger.info(
+                        "SRS enrichment: %d reqs parsed, %d/%d units linked via the STS mapping "
+                        "(설계 ID 브리지 %s) — 요구 ID 보유 unit %d",
+                        len(srs_reqs), _linked, len(units), "on" if _design_ids else "off",
+                        sum(1 for u in units if u.get("srs_req_ids")))
             except Exception as _e:
                 _logger.warning("SRS enrichment skipped: %s", _e)
 
@@ -4168,19 +4285,9 @@ def generate_suts(
                         if _tok and re.match(r"^[A-Za-z_]\w+$", _tok):
                             _hsis_var_map[_tok] = _sig
 
-                # Parse "min...max" or "min - max" from characteristics
-                def _parse_hsis_range(chars: str):
-                    if not chars:
-                        return None, None
-                    m = re.search(r"([-\d.]+)\s*\.{2,3}\s*([-\d.]+)", chars)
-                    if not m:
-                        m = re.search(r"([-\d.]+)\s*[-~]\s*([-\d.]+)", chars)
-                    if m:
-                        try:
-                            return float(m.group(1)), float(m.group(2))
-                        except ValueError:
-                            pass
-                    return None, None
+                # (R74 N90) 경계는 **SW 값 범위** 칸(`Value Range`, 예 `0x0000U ~ 0xFFFFU`)에서 읽는다. 예전엔
+                #   `Characteristics`(`9 to 16V` — 물리 단위)를 SW 경계로 읽으려 했고, 그나마 `hsis_bounds` 는 아무도 안 읽었다.
+                from generators.uds_unit_io import parse_value_range as _parse_value_range
 
                 enriched_hsis = 0
                 for unit in units:
@@ -4196,25 +4303,26 @@ def generate_suts(
                     if not _matched:
                         continue
 
-                    # 1) enrich srs_req_ids from HSIS related_id
-                    if not unit.get("srs_req_ids"):
-                        _hsis_req_ids = [
-                            s["related_id"] for s in _matched
-                            if s.get("related_id") and str(s["related_id"]).strip()
-                        ]
-                        if _hsis_req_ids:
-                            unit["srs_req_ids"] = ", ".join(
-                                list(dict.fromkeys(_hsis_req_ids))[:4]
-                            )
+                    # 1) HSIS Related ID — SW 요구(`Sw…`)면 요구 ID 로, 시스템 요구(`SyTR_…`)면 따로 적는다
+                    #    (R74: 이 HSIS 의 Related ID 는 전부 `SyTR_` 라 `srs_req_ids` 에 넣으면 레벨이 섞인다).
+                    _hsis_req_ids = list(dict.fromkeys(
+                        str(s["related_id"]).strip() for s in _matched
+                        if s.get("related_id") and str(s["related_id"]).strip()))
+                    _sw_ids = [x for x in _hsis_req_ids if x.lower().startswith("sw")]
+                    if _sw_ids and not unit.get("srs_req_ids"):
+                        unit["srs_req_ids"] = ", ".join(_sw_ids)
+                        unit["srs_req_link"] = "hsis"
+                    _sy_ids = [x for x in _hsis_req_ids if not x.lower().startswith("sw")]
+                    if _sy_ids:
+                        unit["hsis_related_ids"] = ", ".join(_sy_ids)
 
                     # 2) store HSIS boundary hints on the unit for sequence generation
                     _hsis_bounds: Dict[str, tuple] = {}
                     for _vname in _unit_vars:
                         if _vname in _hsis_var_map:
-                            _chars = _hsis_var_map[_vname].get("characteristics", "")
-                            _lo, _hi = _parse_hsis_range(_chars)
-                            if _lo is not None and _hi is not None:
-                                _hsis_bounds[_vname] = (_lo, _hi)
+                            _rng = _parse_value_range(_hsis_var_map[_vname].get("value_range", ""))
+                            if _rng is not None:
+                                _hsis_bounds[_vname] = _rng
                     if _hsis_bounds:
                         unit.setdefault("hsis_bounds", {}).update(_hsis_bounds)
 

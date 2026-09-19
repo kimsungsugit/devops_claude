@@ -257,8 +257,12 @@ def _enrich_source_sections_with_docs(
                         info["description_source_detail"] = "hsis+sds_match"
                     current_related = str(info.get("related") or "").strip()
                     if not current_related or current_related.upper() in {"TBD", "N/A", "-"}:
-                        if hsis_related_ids:
-                            info["related"] = hsis_related_ids[0]
+                        # (R74 리뷰 W4) SW 레벨 ID(`Sw…`)만, 전량 — 시스템 요구(`SyTR_…`)를 UDS 요구 칸에 넣지 않는다
+                        #   (`backend/routers/local.py` · SUTS 와 같은 규칙, `generators.sts.hsis_sw_related_ids`).
+                        from generators.sts import hsis_sw_related_ids
+                        _sw_rel = hsis_sw_related_ids([{"related_id": x} for x in hsis_related_ids])
+                        if _sw_rel:
+                            info["related"] = ", ".join(_sw_rel)
                             info["related_source"] = "hsis"
                     elif str(info.get("related_source") or "").strip() == "sds":
                         info["related_source_detail"] = "hsis+sds"

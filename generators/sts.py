@@ -383,6 +383,21 @@ def _load_uds_descriptions(uds_path: str) -> Dict[str, str]:
     return {}
 
 
+def hsis_sw_related_ids(signals: Any) -> List[str]:
+    """HSIS 신호들의 Related ID 중 **SW 레벨**(`Sw…`)만, 순서 보존·중복 제거.
+
+    (R74 리뷰 W4) HSIS 의 Related ID 는 시스템 요구(`SyTR_0401`)인 양식이 있다(KJPDS02 HSIS v2.01 은 전부). 그걸 SW 문서
+    (UDS `related` · SUTS `srs_req_ids`)의 요구 칸에 넣으면 레벨이 섞인다 — 열 번호 상수 시절엔 이 칸이 비어 드러나지 않았다.
+    """
+    out: List[str] = []
+    for s in signals or []:
+        for tok in re.split(r"[\s,;]+", str((s or {}).get("related_id") or "")):
+            tok = tok.strip()
+            if tok.lower().startswith("sw") and tok not in out:
+                out.append(tok)
+    return out
+
+
 def _load_stp_context(stp_path: str) -> str:
     """Extract test strategy/scope text from an STP document (.docx/.pdf/.txt)."""
     if not stp_path:
@@ -510,7 +525,15 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     _COL_SW_VAR = 19
     _COL_RELATED = 20
 
+    # (R74 N90) 열은 **헤더로 찾는다**. 위 상수는 옛 양식(T=SW Variable Name · U=Related ID)이고, KJPDS02 HSIS v2.01 은
+    #   `SW Variable` 이 3열 묶음(ID · Type · **Name** · Initial Value · Value Range)이라 이름이 22열·Related ID 가 25열이다 —
+    #   상수로 읽으면 25 신호에서 SW 변수 1개(`LIN`)만 나왔고 SUTS/SITS 보강이 0건이었다(SUTS 파서 2템플릿과 같은 결함형).
+    #   머리행(묶음 이름)과 그 아랫줄(하위 열 이름) 두 줄을 본다. 못 찾은 열은 옛 상수로 남는다.
+    _COL_SW_TYPE = -1
+    _COL_VALUE_RANGE = -1
+    _layout = "fixed"
     header_found = False
+    _sub_rows_left = 0
     for ri, row in enumerate(ws.iter_rows(values_only=True)):
         if ri > 100:  # HSIS sheets are not that long
             break
@@ -523,7 +546,56 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         if not header_found:
             if "signal" in row_text and ("sw variable" in row_text or "variable name" in row_text):
                 header_found = True
+                _low = [c.lower() for c in cells]
+
+                def _find(*names: str) -> int:
+                    return next((i for i, c in enumerate(_low) if any(c == n or c.startswith(n) for n in names)), -1)
+
+                _c = _find("signal name")
+                _COL_SIG_NAME = _c if _c >= 0 else _COL_SIG_NAME
+                _c = _find("signal type")
+                _COL_SIG_TYPE = _c if _c >= 0 else _COL_SIG_TYPE
+                _c = _find("direction")
+                _COL_DIRECTION = _c if _c >= 0 else _COL_DIRECTION
+                _c = _find("characteristics")
+                _COL_CHARACTERISTICS = _c if _c >= 0 else _COL_CHARACTERISTICS
+                _c = _find("related id")
+                if _c >= 0:
+                    _COL_RELATED = _c
+                _c = next((i for i, c in enumerate(_low) if c == "id"), -1)
+                _COL_ID = _c if _c >= 0 else _COL_ID
+                _c = _find("sw variable name", "variable name")
+                if _c >= 0:
+                    _COL_SW_VAR = _c
+                    _layout = "header"
+                else:
+                    _sw_group = _find("sw variable")
+                    # 하위 머리행은 바로 아랫줄이 보통이지만 빈 줄이 낄 수 있다 — 세 줄까지 기다린다(리뷰 W6).
+                    _sub_rows_left = 3 if _sw_group >= 0 else 0
+                    if _sw_group < 0:
+                        _layout = "fixed-fallback"
+                        _logger.warning("HSIS: `SW Variable` 열을 머리행에서 못 찾았다 — 옛 열 번호(%d)로 읽는다", _COL_SW_VAR)
             continue
+        if _sub_rows_left > 0:
+            # 묶음 머리 아랫줄 — `SW Variable` 묶음 **바로 아래 구간**의 `Name`·`Type`·`Value Range` 가 하위 열이다
+            # (같은 줄의 앞쪽 `Name` 은 Architecture Element 의 것이다).
+            _low = [c.lower() for c in cells]
+            _near = range(max(0, _sw_group - 1), min(len(_low), _sw_group + 5))
+            _n = next((i for i in _near if _low[i] == "name"), -1)
+            if _n >= 0:
+                _COL_SW_VAR = _n
+                _layout = "header"
+                _COL_SW_TYPE = next((i for i in _near if _low[i] == "type"), -1)
+                _COL_VALUE_RANGE = next((i for i in _near if _low[i].startswith("value range")), -1)
+                _sub_rows_left = 0
+                continue
+            # 빈 줄이면 더 기다리고, 내용이 있는데 하위 머리행이 아니면 **데이터가 시작된 것**이다 — 기다림을 끝낸다.
+            _sub_rows_left = (_sub_rows_left - 1) if not any(cells) else 0
+            if _sub_rows_left == 0:
+                _layout = "fixed-fallback"
+                _logger.warning("HSIS: `SW Variable` 묶음의 하위 머리행(Name)을 못 찾았다 — 옛 열 번호(%d)로 읽는다", _COL_SW_VAR)
+            if not any(cells):
+                continue
 
         # Data rows: HSI ID가 있거나 Related에 Sw/Sy 요구 ID가 있으면 데이터 행
         sig_id = cells[_COL_ID] if len(cells) > _COL_ID else ""
@@ -548,6 +620,10 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
             "characteristics": characteristics,
             "sw_var_name": sw_var,
             "related_id": related,
+            # (R74) SW 변수의 선언 타입과 **SW 값 범위**(`0x0000U ~ 0xFFFFU`) — 열이 없는 양식이면 빈 문자열.
+            "sw_var_type": cells[_COL_SW_TYPE] if 0 <= _COL_SW_TYPE < len(cells) else "",
+            "value_range": cells[_COL_VALUE_RANGE] if 0 <= _COL_VALUE_RANGE < len(cells) else "",
+            "column_layout": _layout,
         })
 
     try:

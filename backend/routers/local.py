@@ -633,13 +633,11 @@ def _enrich_function_details_map(
                     # Set related if currently TBD/empty
                     _cur_rel = str(_fn_info.get("related") or "").strip()
                     if not _cur_rel or _cur_rel.upper() in {"TBD", "N/A", "-"}:
-                        _rel_ids = [
-                            str(s.get("related_id") or "").strip()
-                            for s in _matched_sigs
-                            if str(s.get("related_id") or "").strip()
-                        ]
+                        # (R74 리뷰 W4) SW 레벨 ID 만, 전량 — 시스템 요구(`SyTR_…`)를 UDS 요구 칸에 넣지 않고 첫 개만 집지도 않는다.
+                        from generators.sts import hsis_sw_related_ids
+                        _rel_ids = hsis_sw_related_ids(_matched_sigs)
                         if _rel_ids:
-                            _fn_info["related"] = _rel_ids[0]
+                            _fn_info["related"] = ", ".join(_rel_ids)
                             _fn_info["related_source"] = "hsis"
         except Exception as _hsis_exc:
             _logger.warning("HSIS UDS enrichment skipped: %s", _hsis_exc)

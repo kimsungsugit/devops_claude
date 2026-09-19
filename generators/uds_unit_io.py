@@ -132,14 +132,54 @@ def _cell_lines(tc) -> List[str]:
     return out
 
 
+_RANGE_NUM = r"[-+]?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)"
+_RANGE_RE = re.compile(rf"^\s*({_RANGE_NUM})[uUlL]*\s*(?:~|\.{{2,3}}|to)\s*({_RANGE_NUM})[uUlL]*\s*$", re.I)
+
+
+def parse_value_range(text: Any) -> Optional[Tuple[int, int]]:
+    """설계서의 `Value Range` 칸 → `(lo, hi)` 정수. 못 읽으면 None(지어내지 않는다).
+
+    (R74) 표기는 `0x00 ~ 0x01` · `0x0000~0xFFFF` · `0 ~ 100` 이고, 부호 있는 타입은 2의 보수 16진으로 적는다
+    (`0x8000 ~ 0x7FFF` = -32768 ~ 32767 — 실측 KJPDS02 555행). 그래서 **16진이고 lo > hi** 면 자릿수 폭의 부호 있는 값으로 읽는다.
+    실수·단위가 섞인 표기(`9 to 16V`)는 대상이 아니다.
+    """
+    m = _RANGE_RE.match(str(text or "").replace(",", ""))
+    if not m:
+        return None
+    raw_lo, raw_hi = m.group(1), m.group(2)
+    try:
+        lo, hi = int(raw_lo, 0), int(raw_hi, 0)
+    except ValueError:
+        return None
+    if lo > hi and raw_lo.lower().startswith("0x") and raw_hi.lower().startswith("0x"):
+        # ⚠ **정확히 전폭일 때만** 부호 있는 값으로 읽는다(리뷰 C2). 자릿수만 보고 고치면 내림차순 표기
+        #   `0xFFFF ~ 0x0000` 이 (-1, 0), `0x8000 ~ 0x7F` 가 (-32768, 127) 이 되어 최우선 출처에 틀린 범위가 실린다.
+        digits = len(raw_lo) - 2
+        bits = 4 * digits
+        if (len(raw_hi) - 2 == digits and bits in (8, 16, 32)
+                and lo == (1 << (bits - 1)) and hi == (1 << (bits - 1)) - 1):
+            lo -= 1 << bits
+    return (lo, hi) if lo <= hi else None
+
+
 def _parse_table(tbl) -> Dict[str, Any]:
-    """함수 표 하나 → `{"inputs": [...], "outputs": [...], "asil": "..."}`.
+    """함수 표 하나 → `{"inputs": [...], "outputs": [...], "asil": "...", "description": "...", "param_info": {...}}`.
 
     ASIL 은 `[ Function Information ]` 블록의 `ASIL` 행이다(값 예: `A` · `QM` · `N/A`).
+    (R74) `Description` 행과, 파라미터 표(`No | Name | Type | Value Range | Reset Value | Description`)의 **Type·Value Range**
+    도 읽는다 — 설계서가 직접 적은 타입과 범위라 시험 경계값의 가장 강한 출처다(`param_info[이름] = {"type", "range"}`,
+    `N/A` 는 싣지 않는다).
     """
     inputs: List[str] = []
     outputs: List[str] = []
     asil = ""
+    description = ""
+    param_info: Dict[str, Dict[str, Any]] = {}
+    # 파라미터 표의 열은 **머리행으로 찾는다**(리뷰 C1) — `No | Name | Type | Value Range | …` 순서를 상수(2·3)로 박으면
+    #   열 순서가 다른 양식에서 `Reset Value` 를 범위로 읽고도 "설계서가 말했다" 고 적는다(HSIS·SUTS 2템플릿과 같은 결함형).
+    #   머리행을 못 만난 표는 옛 순서(2·3)로 읽고 그 사실을 `param_col_layout` 에 남긴다.
+    col_name, col_type, col_range = 1, 2, 3
+    col_layout = "fixed"
     mode = ""
     for tr in tbl.findall(f"{_W}tr"):
         cells = [" ".join(_cell_lines(tc)) for tc in tr.findall(f"{_W}tc")]
@@ -159,6 +199,20 @@ def _parse_table(tbl) -> Dict[str, Any]:
         if not re.fullmatch(r"\d+", head):
             if head.upper() == "ASIL" and len(cells) > 1:
                 asil = cells[1].strip()
+            if head.lower() == "description" and len(cells) > 1 and not mode and not description:
+                _d = cells[1].strip()
+                if _d.lower() not in _NA:
+                    description = _d
+            if head == "No" and mode:
+                _low = [c.strip().lower() for c in cells]
+                _cn = next((i for i, c in enumerate(_low) if c == "name"), -1)
+                _ct = next((i for i, c in enumerate(_low) if c == "type"), -1)
+                _cr = next((i for i, c in enumerate(_low) if c.startswith("value range") or c == "range"), -1)
+                if _cn >= 0:
+                    col_name = _cn
+                # 못 찾은 열은 **읽지 않는다**(-1) — 옛 상수로 다른 열을 범위라 부르지 않는다.
+                col_type, col_range = _ct, _cr
+                col_layout = "header"
             if head and not head[0].isdigit():
                 # `선행조건` · `Called Function` 등을 만나면 파라미터 구간이 끝난 것이다.
                 if head not in ("No",):
@@ -166,10 +220,20 @@ def _parse_table(tbl) -> Dict[str, Any]:
             continue
         if not mode or len(cells) < 2:
             continue
-        nm = clean_param_name(cells[1])
+        nm = clean_param_name(cells[col_name] if len(cells) > col_name else "")
         if nm:
             (inputs if mode == "in" else outputs).append(nm)
-    return {"inputs": inputs, "outputs": outputs, "asil": asil}
+            _ty = cells[col_type].strip() if 0 <= col_type < len(cells) else ""
+            _rng = parse_value_range(cells[col_range]) if 0 <= col_range < len(cells) else None
+            _rec: Dict[str, Any] = {}
+            if _ty and _ty.lower() not in _NA:
+                _rec["type"] = _ty
+            if _rng is not None:
+                _rec["range"] = [_rng[0], _rng[1]]
+            if _rec and nm not in param_info:
+                param_info[nm] = _rec
+    return {"inputs": inputs, "outputs": outputs, "asil": asil, "description": description, "param_info": param_info,
+            "param_col_layout": col_layout}
 
 
 def load_uds_unit_io(uds_path: Any) -> Dict[str, Any]:
