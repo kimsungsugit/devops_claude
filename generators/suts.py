@@ -1867,10 +1867,19 @@ def infer_variable_type(var_name: str, type_cache: Optional[Dict[str, str]] = No
         #   (0/127/255)가 됐다. 멤버 경로(`s.Word`)는 캐시 키가 아니라 여기 안 오고 이름 패턴이 그대로 맡는다.
         if mapped:
             return mapped
+    return type_from_name_pattern(var_name) or "uint8_t"
+
+
+def type_from_name_pattern(var_name: str) -> str:
+    """이름 규칙(헝가리안 `u16g_`·`_Flag`·`bool` …)만으로 얻는 타입 키. 없으면 `""` — 기본값을 주지 않는다.
+
+    (R72 리뷰 W1) `infer_variable_type` 은 끝에 `uint8_t` 를 지어내므로 "이름이 말한 것" 과 "모른다" 를 구분할 수 없다.
+    선언이 없는 입력에서 경계값을 만들지 말지 정하는 호출자(STS `_generate_simple_steps`)는 이걸 쓴다.
+    """
     for pat, typename in _TYPE_NAME_PATTERNS:
         if pat.search(var_name):
             return typename
-    return "uint8_t"
+    return ""
 
 
 # (R71 N77) 선언이 있는데 경계값을 아는 스칼라가 아닌 타입. `get_boundary_values` 가 **빈 dict** 를 준다 —

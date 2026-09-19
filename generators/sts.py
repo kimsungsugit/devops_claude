@@ -1159,12 +1159,26 @@ def _generate_steps_from_flow(
     func_info: Dict[str, Any],
     max_steps: int = _MAX_STEPS_PER_TC,
     max_tc: int = _MAX_TC_PER_REQ,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> List[List[Dict[str, str]]]:
     """Generate multiple test-case step-lists from a function's logic flow.
 
     Handles nested if/else-if chains, switch-case, loops, and error-path branches.
     Returns a list of test cases, each being a list of {"action", "expected"} dicts.
+
+    (R72 N81) logic_flow 가 있는 함수엔 경계값 TC 가 **아예 없었다** — 경계값은 `_generate_simple_steps`(flow 없는 함수)
+    전용이라 KJPDS02 에서 flow 함수 973개(그중 경계값을 만들 수 있는 입력을 가진 330개)의 BAA 가 0 이었다. 이제 분기
+    TC 뒤에 경계값 TC 하나를 **덧붙인다**(`_generate_simple_steps` 의 TC2 와 같은 것). 정책은 보수적이다: 분기 TC 를
+    밀어내지 않고 **마지막 자리**에 서므로 함수당 상한(`max_tc`)과 요구당 상한(`generate_test_cases`)에 가장 먼저 잘린다.
+    잘린 수는 `stats` 에 남겨(`boundary_tc_cut_by_function_cap`) 상한을 올릴지는 사람이 정한다(T 축).
+    `stats["boundary_appended"]` 는 **이번 호출**의 반환 목록 마지막이 경계값 TC 인지를 호출부에 알린다 — 요구당 상한
+    절단을 셀 때 쓴다. ⚠ `id(tc)` 로 식별하지 않는다(리뷰 C1): 해제된 리스트의 주소를 다음 함수의 분기 TC 가 물려받아
+    분기 TC 가 경계 TC 로 오계수됐다(실측 `kept+cut > candidates`).
+    계수 축은 **(요구, 함수) 쌍**이다 — 여러 요구에 매핑된 함수는 그만큼 여러 번 센다(문서의 TC 수와 같은 축).
+    `boundary_tc_unavailable` 은 flow 함수인데 경계값을 만들 입력이 없어(모르는 타입·입력 없음·`max_steps<4`) 못 붙인 호출 수다.
     """
+    if stats is not None:
+        stats["boundary_appended"] = False
     if not logic_flow:
         return _generate_simple_steps(func_info)
 
@@ -1179,12 +1193,25 @@ def _generate_steps_from_flow(
     if error_tc:
         branch_tcs.append(error_tc)
 
+    boundary_tc: Optional[List[Dict[str, str]]] = None
     if branch_tcs:
         test_cases.extend(branch_tcs)
     elif normal_steps:
         test_cases.append(normal_steps)
     else:
         test_cases = _generate_simple_steps(func_info)
+    if branch_tcs or normal_steps:
+        # 경계 TC 는 최소 4 스텝(최솟값 설정·호출·최댓값 설정·호출)이라 `max_steps<4` 면 한 축이 잘린 채 BAA 라벨만 남는다
+        # (리뷰 W3) — 그땐 붙이지 않고 "못 붙임" 으로 센다.
+        simple = _generate_simple_steps(func_info) if max_steps >= 4 else []
+        if len(simple) >= 2:
+            # TC2 = 경계 최솟값/최댓값 입력 — 타입을 아는 입력이 있을 때만 존재한다(R71: 모르는 타입은 경계값이 없다).
+            boundary_tc = simple[1]
+            test_cases.append(boundary_tc)
+            if stats is not None:
+                stats["boundary_tc_candidates"] = int(stats.get("boundary_tc_candidates") or 0) + 1
+        elif stats is not None:
+            stats["boundary_tc_unavailable"] = int(stats.get("boundary_tc_unavailable") or 0) + 1
 
     for tc in test_cases:
         tc[:] = tc[:max_steps]
@@ -1193,7 +1220,13 @@ def _generate_steps_from_flow(
     #   사용자 상한을 지키는데 여기서 **함수당** 5 로 다시 잘라서, 함수 하나에 매핑된
     #   요구는 상한을 20 으로 올려도 산출이 5 에서 멈췄다 — 이름은 `요구당` 인데
     #   실제로는 `함수당` 이 더 세게 걸리던 것.
-    return test_cases[:max_tc]
+    kept = test_cases[:max_tc]
+    if boundary_tc is not None and stats is not None:
+        if any(tc is boundary_tc for tc in kept):
+            stats["boundary_appended"] = True
+        else:
+            stats["boundary_tc_cut_by_function_cap"] = int(stats.get("boundary_tc_cut_by_function_cap") or 0) + 1
+    return kept
 
 
 def _walk_flow_nodes(
@@ -1504,16 +1537,19 @@ def _generate_simple_steps(
     # Lazy import once (shared via mutable default)
     if "ready" not in _import_cache:
         try:
-            from generators.suts import get_boundary_values, infer_variable_type
+            from generators.suts import get_boundary_values, infer_variable_type, type_from_name_pattern
             _import_cache["get_bv"] = get_boundary_values
             _import_cache["infer_type"] = infer_variable_type
+            _import_cache["name_type"] = type_from_name_pattern
         except Exception:
             _import_cache["get_bv"] = None
             _import_cache["infer_type"] = None
+            _import_cache["name_type"] = None
         _import_cache["ready"] = True
 
     get_boundary_values = _import_cache["get_bv"]
     infer_variable_type = _import_cache["infer_type"]
+    type_from_name_pattern = _import_cache["name_type"]
 
     name = func_info.get("name", "function")
     inputs = func_info.get("inputs") or []
@@ -1533,7 +1569,12 @@ def _generate_simple_steps(
             var_names[str(inp)] = vname
             if vname not in var_cache:
                 try:
-                    vtype = infer_variable_type(vname, {vname: decl_type}) if decl_type else infer_variable_type(vname)
+                    # 선언이 없는 입력은 이름 규칙이 말할 때만 — 기본값 uint8 로 0/255 를 지어내지 않는다(리뷰 W1.
+                    #   KJPDS02 실측 입력 981건 중 선언 없는 것 0건이지만 생산자가 바뀌면 이 경로가 열린다).
+                    if decl_type:
+                        vtype = infer_variable_type(vname, {vname: decl_type})
+                    else:
+                        vtype = (type_from_name_pattern(vname) if type_from_name_pattern else "") or "unknown"
                     var_cache[vname] = get_boundary_values(vtype) or {}
                 except Exception:
                     var_cache[vname] = {}
@@ -1715,6 +1756,8 @@ def generate_test_cases(
     _proj_is_safety = is_safety_asil(project_asil)
 
     all_tcs: List[Dict[str, Any]] = []
+    # (R72 N81) 경계값 TC 의 후보·보존·절단·못 붙임 계수((요구, 함수) 쌍 축). 아래 `stats_out` 엔 정수만 싣는다.
+    _bstats: Dict[str, Any] = {}
 
     for req in requirements:
         rid = req["id"]
@@ -1751,11 +1794,18 @@ def generate_test_cases(
                 continue
             logic_flow = info.get("logic_flow") or []
             step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps,
-                                                  max_tc=max_tc)
+                                                  max_tc=max_tc, stats=_bstats)
+            # (R72 N81) 이번 함수의 경계값 TC 는 **마지막 자리**에만 있다(위치 판정 — id 로 식별하지 않는다, 리뷰 C1).
+            _has_boundary = bool(_bstats.get("boundary_appended"))
 
-            for steps in step_sets:
+            for k, steps in enumerate(step_sets):
                 if tc_counter >= max_tc:
+                    # 요구당 상한이 자른 것 중 경계값 TC — 정책(덧붙이기, 밀어내기 없음)의 값이다. 마지막이 잘린 셈이다.
+                    if _has_boundary:
+                        _bstats["boundary_tc_cut_by_req_cap"] = int(_bstats.get("boundary_tc_cut_by_req_cap") or 0) + 1
                     break
+                if _has_boundary and k == len(step_sets) - 1:
+                    _bstats["boundary_tc_kept"] = int(_bstats.get("boundary_tc_kept") or 0) + 1
                 tc_counter += 1
                 used_fids.add(fid)
                 tc_id = _make_tc_id(rid, tc_counter)
@@ -1781,6 +1831,13 @@ def generate_test_cases(
                 len(used_fids) / max(len(mapped_fids), 1) * 100, 1),
             "requirements_truncated": sorted(set(truncated_reqs)),
             "requirements_truncated_count": len(set(truncated_reqs)),
+            # (R72 N81) flow 함수에 덧붙인 경계값 TC((요구, 함수) 쌍 축): 후보 · 문서에 남은 것 · 함수당/요구당 상한에 잘린 것 ·
+            #   경계값을 만들 입력이 없어 못 붙인 것. 불변식: candidates == kept + cut_by_function_cap + cut_by_req_cap.
+            "boundary_tc_candidates": int(_bstats.get("boundary_tc_candidates") or 0),
+            "boundary_tc_kept": int(_bstats.get("boundary_tc_kept") or 0),
+            "boundary_tc_cut_by_function_cap": int(_bstats.get("boundary_tc_cut_by_function_cap") or 0),
+            "boundary_tc_cut_by_req_cap": int(_bstats.get("boundary_tc_cut_by_req_cap") or 0),
+            "boundary_tc_unavailable": int(_bstats.get("boundary_tc_unavailable") or 0),
         })
 
     return all_tcs
@@ -2007,6 +2064,15 @@ def generate_quality_report(
             f"무시험 {without_tc}개). 요구 커버리지 {cov.get('pct')}%는 요구 단위 값이라 "
             f"이 절단을 반영하지 않는다"
             + (f" — 상한 도달 요구: {shown}{suffix}" if trunc else "")
+        )
+    # (R72 N81) 덧붙인 경계값 TC 가 상한에 잘린 수 — 분기 TC 를 밀어내지 않는 정책이라 잘린 건 그대로 사라진다.
+    _b_cut = int(gen_stats.get("boundary_tc_cut_by_req_cap") or 0) + int(gen_stats.get("boundary_tc_cut_by_function_cap") or 0)
+    if _b_cut:
+        coverage_warnings.append(
+            f"[coverage] 분기 TC 뒤에 덧붙인 경계값 TC {int(gen_stats.get('boundary_tc_candidates') or 0)}건 중 {_b_cut}건이 "
+            f"상한에 잘렸다(요구당 {int(gen_stats.get('boundary_tc_cut_by_req_cap') or 0)} · 함수당 "
+            f"{int(gen_stats.get('boundary_tc_cut_by_function_cap') or 0)}, 남은 것 {int(gen_stats.get('boundary_tc_kept') or 0)}건). "
+            "경계값 TC 는 분기 TC 를 밀어내지 않는다 — 더 넣으려면 max_tc_per_req 를 올릴 것"
         )
 
     return {

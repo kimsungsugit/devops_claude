@@ -93,8 +93,9 @@ class TestGeneratedLabelsFollowSteps:
         req = req or {"id": "SwTR_0001", "req_type": "TSR", "asil": "B"}
         return generate_test_cases([req], fd, {req["id"]: list(fd)}, cfg or {"max_tc_per_req": 9})
 
-    def test_typed_inputs_with_branch_flow_are_not_baa(self):
-        """옛 휴리스틱: `u8` 입력이 있으면 BAA, TSR 이면 FIT. 스텝엔 경계값도 고장도 없다."""
+    def test_typed_inputs_with_branch_flow_label_only_the_tc_that_has_boundary_steps(self):
+        """옛 휴리스틱: `u8` 입력이 있으면 **모든** TC 가 BAA, TSR 이면 FIT. 라벨은 스텝을 따른다 — 분기 TC 는 ECA,
+        (R72 N81) 뒤에 덧붙는 경계값 TC 하나만 경계값 스텝이 있어 BAA 다. 고장 스텝은 없으니 전부 RBT."""
         fd = {"F1": {"id": "F1", "name": "fn", "inputs": ["[IN] u8 mode"], "output": "u8",
                      "logic_flow": [{"type": "if", "condition": "( mode == 1 )",
                                      "true_body": [{"type": "call", "name": "sub"}],
@@ -104,7 +105,8 @@ class TestGeneratedLabelsFollowSteps:
         for tc in tcs:
             m, g, _ = _classify_steps(tc["steps"])
             assert (tc["test_method"], tc["gen_method"]) == (m, g), tc
-        assert {tc["gen_method"] for tc in tcs} == {"ECA"}
+        assert [tc["gen_method"] for tc in tcs[:-1]] and set(tc["gen_method"] for tc in tcs[:-1]) == {"ECA"}
+        assert tcs[-1]["gen_method"] == "BAA" and any("mode=255" in s["action"] for s in tcs[-1]["steps"])
         assert {tc["test_method"] for tc in tcs} == {"RBT"}
 
     def test_guard_branch_produces_fit_only_on_error_path_tc(self):
