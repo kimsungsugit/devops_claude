@@ -143,9 +143,13 @@ _STS_ADVICE = {
     },
     "method_diversity_pct": {
         "label": "테스트 방법 다양성",
-        "low_advice": "테스트 방법이 단조롭습니다(Boundary/Normal만 사용). Error Guessing, Stress, State Transition 등 다양한 방법론을 포함하도록 AI 프롬프트를 조정하세요.",
+        # (R69 N80) 옛 문구는 08-11 이전 어휘(Boundary/Normal/Stress/State Transition)를 말했다 — 지금 STS 의 생성 방법은
+        #   AOR/ECA/BAA 셋뿐이고 라벨은 스텝이 증명한다(R67). 낮다는 것은 경계값(BAA)·등가분할(ECA) **스텝**이 안 나왔다는 뜻이다.
+        "low_advice": "생성 방법이 한두 종류뿐입니다(AOR/ECA/BAA 중). 경계값(BAA) 스텝은 logic_flow 가 없는 함수에서만, 등가분할(ECA) 스텝은 조건/switch 분기에서만 나옵니다 — 요구에 매핑된 함수의 입력 범위·분기가 파싱됐는지 확인하세요. AI 프롬프트로는 늘지 않습니다(라벨은 스텝에서 읽습니다).",
         "from_table": True,   # 임계는 thresholds.py 단일 출처
     },
+    "test_method_kinds": {"label": "시험 방법 종류 수(RBT/FIT)", "low_advice": "", "threshold": None},
+    "gen_method_kinds": {"label": "생성 방법 종류 수(AOR/ECA/BAA)", "low_advice": "", "threshold": None},
     "safety_tc_pct": {
         "label": "안전 관련 TC 비율",
         "low_advice": "안전 관련(safety_related=X) TC가 부족합니다. ASIL 레벨이 지정된 함수에 대해 안전 TC를 추가 생성하세요.",
