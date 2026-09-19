@@ -114,7 +114,7 @@ def resolve_var_type(
     raw_name = str(name or "").strip()
     if not raw_name:
         return None
-    from generators.suts import _TYPE_NAME_PATTERNS, _normalize_type
+    from generators.suts import _TYPE_NAME_PATTERNS, _UNKNOWN_TYPE, _normalize_type
 
     base, _ = base_var(raw_name)
     cache = type_cache if isinstance(type_cache, dict) else {}
@@ -122,6 +122,11 @@ def resolve_var_type(
     for key in (raw_name, base):
         if key and key in cache:
             mapped = _normalize_type(str(cache[key] or ""))
+            # (R71 N77) 선언이 구조체·enum·모르는 typedef 면 **미상**이다 — 여기서 `None` 으로 끝낸다. 어노테이션이나
+            #   이름 규칙으로 내려가면 소스가 "구조체" 라 한 변수에 문서/이름이 스칼라를 붙인다(리뷰 C3). 센티널 문자열은
+            #   이 함수 밖으로 내보내지 않는다(프론트 규약: 키 부재 = 미상).
+            if mapped == _UNKNOWN_TYPE:
+                return None
             if mapped:
                 return {"type": mapped, "source": "globals_map"}
     # 2) 문서 어노테이션(`[IN] U16 g_x`) — 소스 미해결 환경의 주 근거.

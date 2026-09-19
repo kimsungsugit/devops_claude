@@ -1466,6 +1466,31 @@ def _ensure_min_steps(
     return result
 
 
+_PARAM_DIR_TAG_RE = re.compile(r"^\s*\[(?:IN|OUT|INOUT)\]\s*", re.I)
+
+
+def _split_param_decl(inp: Any) -> Tuple[str, str]:
+    """`[IN] const U16 *Values (idx: i)` → `("const U16 *", "Values")`. 타입이 없으면 `("", 이름)`.
+
+    (R71 N77) 이름 뒤 주석형 꼬리는 `split_param_annotations`(단일 출처)로 뗀다 — `(idx: …)` 의 콜론 때문에
+    옛 `split(":")[0]` 은 `[IN] EEPROM_TAddress Addr (idx` 를 이름으로 썼다.
+    """
+    from report_gen.function_analyzer import split_param_annotations
+
+    s = _PARAM_DIR_TAG_RE.sub("", str(inp or "").strip())
+    s = split_param_annotations(s)[0].strip()
+    if not s:
+        return "", ""
+    if re.match(r"^return\b", s, re.I):
+        # 반환 슬롯(`return U8`)은 선언이 아니다 — SUTS 쪽 `_param_decl_types` 와 같은 규칙(리뷰 I4).
+        return "", s.split(":")[0].strip()
+    parts = s.replace("*", " * ").split()
+    if len(parts) >= 2 and parts[-1] != "*":
+        name = re.sub(r"(?:\[[^\]]*\])+$", "", parts[-1].strip("*&;,"))
+        return " ".join(parts[:-1]).strip(), name
+    return "", s.split(":")[0].strip()
+
+
 def _generate_simple_steps(
     func_info: Dict[str, Any],
     _import_cache: Dict[str, Any] = {},  # noqa: B006 — intentional one-time init
@@ -1496,32 +1521,48 @@ def _generate_simple_steps(
     outputs_hint = func_info.get("output") or ""
 
     # Pre-compute boundary values once per variable (reused by TC1/TC2/TC3)
-    var_cache: Dict[str, Dict[str, Any]] = {}  # vname → boundary dict
+    # (R71 N77) 입력 엔트리는 `[IN] U16 *Values`·`[IN] bool Val (idx: i)` 꼴이다. 예전엔 `split(":")[0]` 통째를
+    #   변수명으로 써 스텝에 `[IN] bool Val=255` 가 찍혔고(R67 관찰), 타입은 이름 패턴·기본값(uint8)뿐이라 bool 이
+    #   0/255, 구조체 포인터가 0/127/255 였다. 선언 타입을 그 이름의 타입 캐시로 넘겨 SUTS 와 **같은 규칙**
+    #   (`infer_variable_type`)으로 푼다 — 모르는 타입은 경계값이 없고(빈 dict), 그 변수는 경계 TC 에서 빠진다.
+    var_cache: Dict[str, Dict[str, Any]] = {}  # vname → boundary dict (비어 있으면 경계값 없음)
+    var_names: Dict[str, str] = {}             # 원시 엔트리 → 변수명
     if inputs and get_boundary_values and infer_variable_type:
         for inp in inputs[:5]:
-            vname = str(inp).split(":")[0].strip()
+            decl_type, vname = _split_param_decl(inp)
+            var_names[str(inp)] = vname
             if vname not in var_cache:
                 try:
-                    vtype = infer_variable_type(vname)
-                    var_cache[vname] = get_boundary_values(vtype)
+                    vtype = infer_variable_type(vname, {vname: decl_type}) if decl_type else infer_variable_type(vname)
+                    var_cache[vname] = get_boundary_values(vtype) or {}
                 except Exception:
                     var_cache[vname] = {}
+        if not any(var_cache.values()):
+            var_cache = {}
+
+    def _vn(inp: Any) -> str:
+        return var_names.get(str(inp)) or _split_param_decl(inp)[1]
+
+    def _decl_text(inp: Any) -> str:
+        """값을 못 만든 입력의 표기 — 선언(타입 이름)은 남기고 방향 태그·주석형 꼬리(`(idx: …)`)는 뗀다."""
+        ty, nm = _split_param_decl(inp)
+        return f"{ty} {nm}".strip() if nm else str(inp)
 
     # ── TC1: Normal path ──────────────────────────────────────────────────
     tc1: List[Dict[str, str]] = []
     if inputs and var_cache:
         mid_parts = []
         for inp in inputs[:5]:
-            vname = str(inp).split(":")[0].strip()
+            vname = _vn(inp)
             bnd = var_cache.get(vname)
             if bnd and "mid" in bnd:
                 mid_parts.append(f"{vname}={bnd['mid']}")
             else:
-                mid_parts.append(str(inp))
+                mid_parts.append(_decl_text(inp))
         in_str = ", ".join(mid_parts)
         tc1.append({"action": f"입력 설정 (정상값): {in_str}", "expected": "입력 파라미터가 유효 범위 내 정상 설정됨"})
     elif inputs:
-        in_str = ", ".join(str(i) for i in inputs[:5])
+        in_str = ", ".join(_decl_text(i) for i in inputs[:5])
         tc1.append({"action": f"입력 설정: {in_str}", "expected": "입력 파라미터 정상 설정"})
     tc1.append({"action": f"{name}() 호출", "expected": f"{name} 정상 실행 확인"})
     if calls:
@@ -1557,14 +1598,14 @@ def _generate_simple_steps(
     bnd_parts_min: List[str] = []
     bnd_parts_max: List[str] = []
     for inp in inputs[:5]:
-        vname = str(inp).split(":")[0].strip()
+        vname = _vn(inp)
         bnd = var_cache.get(vname)
         if bnd and "min" in bnd:
             bnd_parts_min.append(f"{vname}={bnd['min']}")
             bnd_parts_max.append(f"{vname}={bnd['max']}")
         else:
-            bnd_parts_min.append(str(inp))
-            bnd_parts_max.append(str(inp))
+            bnd_parts_min.append(_decl_text(inp))
+            bnd_parts_max.append(_decl_text(inp))
     tc2.append({"action": f"입력 설정 (경계 최솟값): {', '.join(bnd_parts_min)}", "expected": "입력 경계 최솟값 설정"})
     tc2.append({"action": f"{name}() 호출", "expected": f"{name} 경계 최솟값 조건 실행 확인"})
     tc2.append({"action": f"입력 설정 (경계 최댓값): {', '.join(bnd_parts_max)}", "expected": "입력 경계 최댓값 설정"})
@@ -1576,18 +1617,18 @@ def _generate_simple_steps(
     tc3: List[Dict[str, str]] = []
     inv_parts: List[str] = []
     for inp in inputs[:5]:
-        vname = str(inp).split(":")[0].strip()
+        vname = _vn(inp)
         bnd = var_cache.get(vname)
         if bnd and "max_inv" in bnd:
             inv_parts.append(f"{vname}={bnd['max_inv']}")
         else:
-            inv_parts.append(str(inp))
+            inv_parts.append(_decl_text(inp))
     tc3.append({"action": f"입력 설정 (유효 범위 초과): {', '.join(inv_parts)}", "expected": "유효 범위 초과 입력 설정"})
     tc3.append({"action": f"{name}() 호출", "expected": f"{name} 범위 초과 입력 방어 처리 확인"})
     # Build concrete saturation expectation from cached boundaries
     sat_parts = []
     for inp in inputs[:3]:
-        vname = str(inp).split(":")[0].strip()
+        vname = _vn(inp)
         bnd = var_cache.get(vname)
         if bnd and "max" in bnd:
             sat_parts.append(f"{vname} 초과 시 출력 포화={bnd['max']} 또는 하한 클램프={bnd['min']}")

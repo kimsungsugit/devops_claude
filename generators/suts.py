@@ -1046,6 +1046,8 @@ def collect_unit_functions(
             "asil_evidence": _asil_evidence,
             # (R70 N83) 소스에 없고 override 스냅샷에만 있는 함수 — 시험 대상인지는 사람이 정한다(P7). 세어서 보고한다.
             "override_only": bool(info.get("override_only")),
+            # (R71 N77) 파라미터 선언 타입 — 시퀀스 생성이 전역 타입 캐시 위에 얹어 쓴다(`bool`·`U16*`·구조체 포인터).
+            "param_types": _param_decl_types(inputs_raw, outputs_raw),
             "srs_req_ids": srs_req_ids,
             "precondition": info.get("precondition", ""),
         })
@@ -1860,6 +1862,9 @@ def infer_variable_type(var_name: str, type_cache: Optional[Dict[str, str]] = No
     if var_name in cache:
         raw = cache[var_name]
         mapped = _normalize_type(raw)
+        # (R71 N77) `unknown` 도 답이다 — 선언은 있는데 우리가 모르는 타입(구조체·enum·`void *`·typedef)이면
+        #   이름 패턴·기본값으로 내려가지 않는다. 예전엔 `""` 로 떨어져 `void *` 전역 12개가 전부 `uint8_t`
+        #   (0/127/255)가 됐다. 멤버 경로(`s.Word`)는 캐시 키가 아니라 여기 안 오고 이름 패턴이 그대로 맡는다.
         if mapped:
             return mapped
     for pat, typename in _TYPE_NAME_PATTERNS:
@@ -1868,23 +1873,86 @@ def infer_variable_type(var_name: str, type_cache: Optional[Dict[str, str]] = No
     return "uint8_t"
 
 
+# (R71 N77) 선언이 있는데 경계값을 아는 스칼라가 아닌 타입. `get_boundary_values` 가 **빈 dict** 를 준다 —
+#   값을 지어내지 않는다(예전엔 `_DEFAULT_BOUNDARY` = uint8 로 접혀 구조체 포인터 `pt_Entry` 에 0/127/255 가 섰다).
+_UNKNOWN_TYPE = "unknown"
+# 폭이 **정의로 정해지는** 이름만 표에 둔다. `int`/`unsigned`/`long`/`char`/`double` 은 타깃(S12Z 계열은 int 16비트)에
+# 따라 폭·부호가 갈리므로 여기 없다 → `unknown`(리뷰 W1·W2). `short` 는 사실상 전 임베디드 타깃에서 16비트라 둔다.
+_TYPE_ALIASES: Dict[str, str] = {
+    "u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t", "s8": "int8_t", "s16": "int16_t", "s32": "int32_t",
+    "int8": "int8_t", "int32": "int32_t", "uint32": "uint32_t", "sint8": "int8_t", "sint16": "int16_t", "sint32": "int32_t",
+    "l_u8": "uint8_t", "l_u16": "uint16_t", "l_u32": "uint32_t", "l_bool": "bool", "l_s8": "int8_t", "l_s16": "int16_t",
+    "byte": "uint8_t", "word": "uint16_t", "dword": "uint32_t", "boolean": "bool", "_bool": "bool",
+    "unsigned char": "uint8_t", "signed char": "int8_t", "unsigned short": "uint16_t", "short": "int16_t",
+    "unsigned short int": "uint16_t", "short int": "int16_t",
+}
+_TYPE_DECORATION_RE = re.compile(r"\[[^\]]*\]|[*&()]|\b__?(?:far|near|huge|interrupt)\b")
+
+
 def _normalize_type(raw: str) -> str:
-    """Map raw C type string to a known boundary type."""
-    r = raw.strip().lower()
-    for key in _TYPE_BOUNDARIES:
-        if key in r:
-            return key
-    alias = {"u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t",
-             "s8": "int8_t", "s16": "int16_t", "s32": "int32_t"}
-    for k, v in alias.items():
-        if r == k:
-            return v
-    return ""
+    """선언 문자열 → 경계값 표의 타입 키. 없으면 `""`(선언 없음) 또는 `"unknown"`(선언은 있는데 모르는 타입).
+
+    (R71 N77) 포인터·배열은 **가리키는/원소 타입**으로 읽는다(정본 VectorCAST 가 포인터를 1원소 이상의 배열로
+    잡는 것과 같은 뜻) — `U16 *Values` 는 uint16 이지 uint8 이 아니다. `const`/`volatile`/`__far` 는 걷어낸다.
+    `void *`·구조체·enum·모르는 typedef 는 `unknown` — 이름 패턴이나 기본값으로 값을 지어내지 않는다.
+    ⚠ 부분문자열로 맞추지 않는다(리뷰 C1): `struct ST_Bits`·`T_InhibitTime`·`Bitmask_t` 가 `bit` 에, `PointerType` 이
+      `int` 에 걸려 구조체에 0/1 경계가 섰다. 정규화한 문자열 **전체** 또는 **마지막 토큰**이 표의 이름과 같을 때만이다
+      (`struct X`·`enum Y` 는 그 규칙만으로 `unknown` 이 된다 — 별도 단락은 등가 변이라 두지 않는다).
+    """
+    r = str(raw or "").strip()
+    if not r:
+        return ""
+    r = _CV_QUALIFIER_RE.sub(" ", r)
+    r = _TYPE_DECORATION_RE.sub(" ", r)
+    r = " ".join(r.lower().split())
+    if not r:
+        return ""
+    for cand in (r, r.split()[-1]):
+        if cand in _TYPE_BOUNDARIES:
+            return cand
+        if cand in _TYPE_ALIASES:
+            return _TYPE_ALIASES[cand]
+    return _UNKNOWN_TYPE
 
 
 def get_boundary_values(typename: str) -> Dict[str, Any]:
+    """타입 키 → 경계값 dict. `unknown`(선언은 있으나 모르는 타입)은 **빈 dict** — 값이 없다는 사실이 답이다."""
+    if typename == _UNKNOWN_TYPE:
+        return {}
     normalized = typename.lower().replace(" ", "").replace("_t", "_t")
     return _TYPE_BOUNDARIES.get(normalized, _DEFAULT_BOUNDARY)
+
+
+def _param_decl_types(*raw_groups: List[str]) -> Dict[str, str]:
+    """파라미터 root 이름 → **선언 타입 문자열**(`U16*`·`const ParamMapEntry_t*`·`bool`).
+
+    (R71 N77) 전역은 `globals_info_map` 에 타입이 있지만 파라미터의 타입 출처는 원시 엔트리의 접두뿐이다
+    (`_root_type_hints` 와 같은 자리 — 그쪽은 구조체 **이름** 만 남기려고 포인터 표기와 앞 토큰을 버리므로
+    경계값 타입엔 못 쓴다). 한 unit 안에서 파라미터 이름은 같은 이름의 전역보다 앞선다.
+    """
+    out: Dict[str, str] = {}
+    for group in raw_groups:
+        for raw in group or []:
+            s = _DIR_TAG_PAT.sub("", str(raw or "").strip(), count=1).strip()
+            s = _strip_param_annotations(blank_c_comments(s).strip())
+            if _RETURN_SLOT_RE.match(s):
+                continue
+            # 이름 축(`_extract_var_names`)과 **같은 가드** — 주석 블록이 통째로 딸려온 파라미터 문자열을 타입으로
+            # 등록하지 않는다(리뷰 W3: `{'macro': 'void) * * This method is …'}`).
+            if len(s) > _PARAM_DECL_MAX_LEN or not _PARAM_DECL_SHAPE.fullmatch(s):
+                continue
+            parts = s.replace("*", " * ").split()
+            if len(parts) < 2:
+                continue
+            name_tok = parts[-1]
+            if name_tok == "*":
+                continue
+            root = re.split(r"->|\.", name_tok.strip("*&;,"), maxsplit=1)[0]
+            root = re.sub(r"(?:\[[^\]]*\])+$", "", root)
+            ty = " ".join(parts[:-1]).strip()
+            if root and ty and root not in out:
+                out[root] = ty
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1962,6 +2030,13 @@ def generate_sequences(
     """
     input_vars = unit.get("input_vars") or []
     output_vars = unit.get("output_vars") or []
+    # (R71 N77) 파라미터 선언 타입을 전역 타입 위에 얹는다 — 예전엔 파라미터는 타입 출처가 없어 전부 이름 패턴·
+    #   기본값(uint8)으로 갔다: `bool ADC_EnUser` 가 0/127/255, `U16 *Values` 가 uint8, `const ParamMapEntry_t *pt`
+    #   가 0/127/255 였다(KJPDS02 실측 — unit 변수 13,081칸 중 선언은 있는데 모르는 타입 1,233 + 구조체 포인터 949).
+    #   두 경로(I/O 없는 unit 의 간접 변수 경로 · 일반 경로) **모두** 이 캐시를 쓴다(리뷰 C2).
+    _base_cache = type_cache if type_cache is not None else _globals_type_cache
+    _ptypes = unit.get("param_types") or {}
+    type_cache = {**_base_cache, **_ptypes} if _ptypes else _base_cache
 
     if not input_vars and not output_vars:
         fn_name = unit.get("name", "function")
@@ -2007,9 +2082,16 @@ def generate_sequences(
         error_inputs: Dict[str, Any] = {}
         normal_expected: Dict[str, Any] = {}
         error_expected: Dict[str, Any] = {}
+        # 이 경로도 타입을 기록하고(품질 리포트가 0 으로 오보하지 않게) 모르는 타입은 값을 비운다(리뷰 C2 —
+        # 예전엔 `const ParamMapEntry_t *` 전역이 NORMAL 0 / ERROR 256 / 기대 255 를 받았다).
+        _ind_types = {_iv: infer_variable_type(_iv, type_cache) for _iv in indirect_vars}
+        unit["var_types"] = dict(_ind_types)
+        unit["unknown_type_vars"] = [_iv for _iv, _t in _ind_types.items() if _t == _UNKNOWN_TYPE]
         if indirect_vars:
             for _iv in indirect_vars[:4]:
-                _vtype = infer_variable_type(_iv, type_cache)
+                _vtype = _ind_types[_iv]
+                if _vtype == _UNKNOWN_TYPE:
+                    continue
                 _bounds = (
                     _get_float_bounds_for_var(_iv) if _vtype == "float"
                     else get_boundary_values(_vtype)
@@ -2050,6 +2132,12 @@ def generate_sequences(
         v: (_get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t))
         for v, t in out_types.items()
     }
+    # 모르는 타입의 변수 — 값을 지어내지 않고 시퀀스에서 **비운다**. 어느 칸이 왜 비었는지는 unit 에 남겨 품질
+    # 리포트가 센다(`unknown_type_vars`, 입력·출력·간접 전역을 한 번씩). 타입 분포도 같이 남긴다(라이브 대조용).
+    _ind_types = {gv: infer_variable_type(gv, type_cache) for gv in (unit.get("indirect_vars") or [])}
+    unit["var_types"] = {**var_types, **out_types, **_ind_types}
+    _unknown_vars = [v for v, t in unit["var_types"].items() if t == _UNKNOWN_TYPE]
+    unit["unknown_type_vars"] = _unknown_vars
 
     logic_flow = unit.get("logic_flow") or []
 
@@ -2064,8 +2152,11 @@ def generate_sequences(
 
     # ── Additional strategies for branch coverage ──
     # GAP 1: Condition combination — toggle each input while others stay at mid
+    # (R71 N77) 토글 대상은 값을 만들 수 있는(타입을 아는) 입력뿐이다 — 모르는 타입을 토글하면 값이 비어 중간값
+    #   시퀀스와 같은 행이 하나 더 생기고 라벨만 "pt_Entry=최솟값" 이라 말한다.
+    _toggle_vars = [v for v in input_vars if var_types.get(v) != _UNKNOWN_TYPE]
     if len(input_vars) >= 2:
-        for toggle_idx in range(min(4, len(input_vars))):
+        for toggle_idx in range(min(4, len(_toggle_vars))):
             strategies.append((f"COND_COMB_{toggle_idx}", f"_cond_{toggle_idx}"))
 
     # GAP 2: Switch-case — generate TC per enum/case value from logic_flow
@@ -2088,7 +2179,8 @@ def generate_sequences(
                         break
                 break
         if not _loop_var and input_vars:
-            _loop_var = input_vars[0]
+            # 값을 만들 수 있는 첫 입력 — 모르는 타입이면 0/1/최댓값을 못 넣어 루프 시퀀스가 빈 행이 된다.
+            _loop_var = next((v for v in input_vars if var_types.get(v) != _UNKNOWN_TYPE), "")
         if _loop_var:
             strategies.append(("LOOP_ZERO", "_loop_0"))
             strategies.append(("LOOP_ONE", "_loop_1"))
@@ -2098,7 +2190,8 @@ def generate_sequences(
     indirect_vars: List[str] = unit.get("indirect_vars") or []
     _extra_globals: List[str] = []
     if indirect_vars:
-        for gv in indirect_vars[:3]:
+        # 모르는 타입의 전역은 토글 대상이 아니다(리뷰 C2 — `void *` 전역이 `{pt_G: 0}` 로 섰다).
+        for gv in [g for g in indirect_vars if _ind_types.get(g) != _UNKNOWN_TYPE][:3]:
             _extra_globals.append(gv)
             strategies.append((f"GLOBAL_{len(_extra_globals)-1}", f"_global_{len(_extra_globals)-1}"))
 
@@ -2224,9 +2317,10 @@ def generate_sequences(
         elif bound_key and bound_key.startswith("_cond_"):
             # Condition combination: toggle one input to min, others stay at mid
             toggle_idx = int(bound_key.split("_")[-1])
-            for i, v in enumerate(input_vars):
+            _toggle_var = _toggle_vars[toggle_idx] if toggle_idx < len(_toggle_vars) else ""
+            for v in input_vars:
                 bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
-                if i == toggle_idx:
+                if v == _toggle_var:
                     raw = bnd.get("min", 0) if toggle_idx % 2 == 0 else bnd.get("max", 0)
                 else:
                     raw = bnd.get("mid", 0)  # others at mid
@@ -2270,10 +2364,15 @@ def generate_sequences(
                 raw = bnd.get("mid", 0)
                 exp_vals[v] = _format_test_value(raw, out_types.get(v, "uint8_t"))
 
+        # (R71 N77) 모르는 타입의 변수는 값을 비운다 — `{}` 경계에서 `.get(key, 0)` 로 만든 0 은 값이 아니라 자리표시다.
+        for _vals in (inp_vals, exp_vals):
+            for _k in [k for k in _vals if k in _unknown_vars]:
+                _vals.pop(_k, None)
+
         # Build human-readable description showing actual variable names and values
         label = _resolve_inv_label(strat_name) if strat_name in _STRAT_LABEL else (
-            _get_strategy_label(strat_name, input_vars, _extra_switch,
-                                _loop_var if _has_loop else "", _extra_globals)
+            _get_strategy_label(strat_name, _toggle_vars if strat_name.startswith("COND_COMB_") else input_vars,
+                                _extra_switch, _loop_var if _has_loop else "", _extra_globals)
         )
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
         exp_parts = [f"{v}={exp_vals[v]}" for v in output_vars if v in exp_vals]
@@ -3373,11 +3472,25 @@ def generate_suts_quality_report(
         ev = str(u.get("asil_evidence") or "") or "none"
         asil_evidence[ev] = asil_evidence.get(ev, 0) + 1
     override_only = [str(u.get("name") or "") for u in units if u.get("override_only")]
+    # (R71 N77) 변수 타입 해상 분포와, 선언은 있는데 모르는 타입이라 값을 비운 칸. 예전엔 그 칸이 전부 uint8 로
+    #   지어낸 0/127/255 였다 — 이 수가 0 이 아니어야 정상이고, 그 칸의 값은 사람이 채운다.
+    var_type_dist: Dict[str, int] = {}
+    unknown_slots = 0
+    units_with_unknown = 0
+    for u in units:
+        for t in (u.get("var_types") or {}).values():
+            var_type_dist[str(t)] = var_type_dist.get(str(t), 0) + 1
+        n_unknown = len(u.get("unknown_type_vars") or [])
+        unknown_slots += n_unknown
+        units_with_unknown += 1 if n_unknown else 0
 
     return {
         "asil_evidence_distribution": asil_evidence,
         "override_only_unit_count": len(override_only),
         "override_only_units": override_only[:20],
+        "var_type_distribution": var_type_dist,
+        "unknown_type_var_slots": unknown_slots,
+        "units_with_unknown_type_vars": units_with_unknown,
         "total_test_cases": total_tc,
         "total_sequences": total_seq,
         "avg_sequences_per_tc": avg_seq,
@@ -3697,6 +3810,16 @@ def supplement_override_only(function_details: Dict[str, Dict[str, Any]]) -> Dic
         stats["added"] = added
         break
     return stats
+
+
+def _note_unknown_type_slots(validation: Dict[str, Any], quality: Dict[str, Any]) -> None:
+    """(R71 N77 · 리뷰 W5) 검증기의 "I/O 변수 없는 TC" 는 시트만 보므로 **일부러 비운 칸**(타입 미상)과 재료를 잃은 칸을
+    같은 숫자로 센다. 비운 칸의 수를 경고 옆에 같이 적어 두 0 을 갈라 읽게 한다(0 이면 적지 않는다)."""
+    unk = int((quality or {}).get("unknown_type_var_slots") or 0)
+    if unk:
+        validation.setdefault("warnings", []).append(
+            f"타입 미상으로 값을 비운 입력/기대 칸 {unk}개({(quality or {}).get('units_with_unknown_type_vars', 0)} unit) — "
+            "구조체·enum·void*·모르는 typedef 는 경계값을 지어내지 않는다. 사람이 채우거나 typedef 를 등록할 것")
 
 
 def _source_function_count(function_details: Dict[str, Dict[str, Any]]) -> int:
@@ -4142,6 +4265,7 @@ def generate_suts(
         "tc_count": len(units),
         "seq_count": total_seq,
     })
+    _note_unknown_type_slots(validation, quality)
     if validation.get("issues"):
         _logger.warning("SUTS validation issues: %s", validation["issues"])
 
