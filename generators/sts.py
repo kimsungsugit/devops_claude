@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import is_safety_asil
 from generators.safety_marks import resolve_safety_related as _safety_mark_impl
+from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _extract_sds_partition_map,
@@ -1236,8 +1238,12 @@ def _generate_steps_from_flow(
     max_steps: int = _MAX_STEPS_PER_TC,
     max_tc: int = _MAX_TC_PER_REQ,
     stats: Optional[Dict[str, Any]] = None,
+    keep_boundary: bool = False,
 ) -> List[List[Dict[str, str]]]:
     """Generate multiple test-case step-lists from a function's logic flow.
+
+    `keep_boundary`(R75 확장 프로파일): 함수당 상한이 경계값 TC 를 자르지 않는다 — 분기 TC `max_tc` 개 **뒤에** 하나 더 선다.
+    기본(False)은 R72 정책 그대로다(덧붙이기만, 상한에 가장 먼저 잘림).
 
     Handles nested if/else-if chains, switch-case, loops, and error-path branches.
     Returns a list of test cases, each being a list of {"action", "expected"} dicts.
@@ -1297,6 +1303,8 @@ def _generate_steps_from_flow(
     #   요구는 상한을 20 으로 올려도 산출이 5 에서 멈췄다 — 이름은 `요구당` 인데
     #   실제로는 `함수당` 이 더 세게 걸리던 것.
     kept = test_cases[:max_tc]
+    if keep_boundary and boundary_tc is not None and not any(tc is boundary_tc for tc in kept):
+        kept = kept + [boundary_tc]
     if boundary_tc is not None and stats is not None:
         if any(tc is boundary_tc for tc in kept):
             stats["boundary_appended"] = True
@@ -1846,6 +1854,8 @@ def generate_test_cases(
     _proj_is_safety = is_safety_asil(project_asil)
 
     all_tcs: List[Dict[str, Any]] = []
+    # (R75) 요구별로 쓴 TC 번호의 끝 — 확장 프로파일이 그 뒤를 이어 쓴다(기본 TC 의 ID 는 그대로).
+    _req_tc_count: Dict[str, int] = {}
     # (R72 N81) 경계값 TC 의 후보·보존·절단·못 붙임 계수((요구, 함수) 쌍 축). 아래 `stats_out` 엔 정수만 싣는다.
     _bstats: Dict[str, Any] = {}
 
@@ -1870,6 +1880,7 @@ def generate_test_cases(
                     test_env=test_env, is_safety=is_safety,
                     review_only=review_only,
                 ))
+            _req_tc_count[rid] = len(step_sets[:max_tc])
             continue
 
         mapped_fids.update(fids)
@@ -1910,15 +1921,107 @@ def generate_test_cases(
                     func_name=info.get("name"),
                     review_only=review_only,
                 ))
+        _req_tc_count[rid] = tc_counter
+
+    # ── (R75) 확장 프로파일 ─────────────────────────────────────────────────
+    # 기본 문서는 요구당 상한 때문에 매핑된 함수의 9%만 시험한다(KJPDS02: 1,037 중 94). 상한을 올리는 것으로는
+    # 못 푼다 — 요구 하나에 함수가 600개씩 매핑돼 (요구, 함수) 쌍이 9,434 이고, 같은 함수가 여러 요구 밑에 되풀이된다.
+    # 확장은 **시험이 하나도 없는 함수마다 한 번씩**, 그 함수를 가장 좁게 가리키는 요구(매핑 함수 수 최소, 동률이면
+    # 문서 순서) 밑에 분기·경계값 TC 를 덧붙인다. 기본 TC 는 ID·순서·내용이 그대로다(포함 관계).
+    _profile, _profile_bad = normalize_tc_profile(config.get("tc_profile"))
+    _ext = {"functions": 0, "tcs": 0, "boundary_tcs": 0, "no_detail": 0, "no_steps": 0, "safety_preferred": 0}
+    _xstats: Dict[str, Any] = {}
+    if _profile == TC_PROFILE_EXTENDED:
+        # 같은 요구 ID 가 두 번 나오면 **첫 등장**이 순서·등급을 정한다(리뷰 I1).
+        _order: Dict[str, int] = {}
+        _req_safety: Dict[str, bool] = {}
+        for i, r in enumerate(requirements):
+            _order.setdefault(r["id"], i)
+            _req_safety.setdefault(r["id"], is_safety_asil(str(r.get("asil") or "").strip()))
+
+        def _width_key(rid: str):
+            # 폭은 **서로 다른** 함수 수 — 상류의 fid 중복이 폭을 부풀려 집을 바꾸지 않게(리뷰 I2).
+            return (len(set(req_to_fids.get(rid) or [])), _order[rid])
+
+        def _home_key(rid: str):
+            # (리뷰 C2) 안전 요구가 먼저다. 폭만 보면 안전 요구(넓음)와 비안전 요구(좁음)에 함께 매핑된 함수가 비안전
+            #   요구 밑으로 가서 Safety Related 가 `X` 로 찍힌다 — "시험이 없다" 를 "비안전이다" 로 바꾸는 under-classification.
+            return (0 if _req_safety[rid] else 1,) + _width_key(rid)
+
+        _home: Dict[str, str] = {}
+        _narrowest: Dict[str, str] = {}
+        for rid, fids in req_to_fids.items():
+            if rid not in _order:
+                continue
+            for fid in fids:
+                if fid not in _home or _home_key(rid) < _home_key(_home[fid]):
+                    _home[fid] = rid
+                if fid not in _narrowest or _width_key(rid) < _width_key(_narrowest[fid]):
+                    _narrowest[fid] = rid
+        # 같은 요구 ID 가 두 번 나와도 두 번째 바퀴는 할 일이 없다 — 그 요구의 함수는 첫 바퀴에서 전부 `used_fids` 에 들어갔다.
+        for req in requirements:
+            rid = req["id"]
+            is_safety = is_safety_asil(str(req.get("asil") or "").strip())
+            n = _req_tc_count.get(rid, 0)
+            for fid in req_to_fids.get(rid, []):
+                if _home.get(fid) != rid or fid in used_fids:
+                    continue
+                info = function_details.get(fid, {})
+                if not isinstance(info, dict) or not info:
+                    _ext["no_detail"] += 1
+                    continue
+                step_sets = _generate_steps_from_flow(info.get("logic_flow") or [], info, max_steps=max_steps,
+                                                      max_tc=max_tc, stats=_xstats, keep_boundary=True)
+                if not step_sets:
+                    _ext["no_steps"] += 1
+                    continue
+                used_fids.add(fid)
+                _ext["functions"] += 1
+                if _narrowest.get(fid) != rid:
+                    _ext["safety_preferred"] += 1
+                _last_is_boundary = bool(_xstats.get("boundary_appended"))
+                for k, steps in enumerate(step_sets):
+                    n += 1
+                    final_steps = _ensure_min_steps(steps, info)
+                    method, gen, review_only = _classify_steps(final_steps)
+                    tc = _build_tc_dict(
+                        tc_id=_make_tc_id(rid, n), req=req, steps=final_steps,
+                        test_method=method, gen_method=gen,
+                        test_env=test_env, is_safety=is_safety,
+                        func_name=info.get("name"),
+                        review_only=review_only,
+                    )
+                    tc["tc_profile"] = TC_PROFILE_EXTENDED
+                    all_tcs.append(tc)
+                    _ext["tcs"] += 1
+                    if _last_is_boundary and k == len(step_sets) - 1:
+                        _ext["boundary_tcs"] += 1
+            _req_tc_count[rid] = n
+        # 문서의 TC 는 요구 순서로 모여 있어야 한다(라이터·추적성 시트가 등장 순서를 쓴다) — 안정 정렬이라 요구 안의 순서는 그대로다.
+        all_tcs.sort(key=lambda tc: _order.get(str(tc.get("srs_id") or ""), len(_order)))
 
     if stats_out is not None:
         stats_out.update({
             "max_tc_per_req": max_tc,
+            # (R75) 어느 프로파일로 만들었나 · 확장이 덧붙인 양. 기본이면 전부 0 이다.
+            "tc_profile": _profile,
+            "tc_profile_unknown_value": _profile_bad,
+            "extended_functions": _ext["functions"],
+            "extended_tcs": _ext["tcs"],
+            "extended_boundary_tcs": _ext["boundary_tcs"],
+            "extended_functions_without_detail": _ext["no_detail"],
+            # 확장이 TC 를 못 만든 함수(스텝 0) · 안전 요구를 우선해 "가장 좁은 요구" 가 아닌 곳에 놓은 함수 ·
+            # 확장 구간의 경계값 후보/못 붙임(모르는 타입·입력 없음) — "값을 지어내지 않는다" 를 검증할 수치다.
+            "extended_functions_without_steps": _ext["no_steps"],
+            "extended_functions_placed_by_safety": _ext["safety_preferred"],
+            "extended_boundary_tc_candidates": int(_xstats.get("boundary_tc_candidates") or 0),
+            "extended_boundary_tc_unavailable": int(_xstats.get("boundary_tc_unavailable") or 0),
             "mapped_functions": len(mapped_fids),
             "functions_with_tc": len(used_fids),
             "functions_without_tc": len(mapped_fids - used_fids),
             "function_tc_coverage_pct": round(
                 len(used_fids) / max(len(mapped_fids), 1) * 100, 1),
+            # ⚠ 확장 프로파일에서도 이 둘은 **기본 구간**이 상한에 닿은 요구다 — 확장 구간은 요구당 상한을 받지 않는다.
             "requirements_truncated": sorted(set(truncated_reqs)),
             "requirements_truncated_count": len(set(truncated_reqs)),
             # (R72 N81) flow 함수에 덧붙인 경계값 TC((요구, 함수) 쌍 축): 후보 · 문서에 남은 것 · 함수당/요구당 상한에 잘린 것 ·
@@ -2142,7 +2245,14 @@ def generate_quality_report(
     # TC 상한에 걸려 시험 없이 남은 함수 — 요구 단위 커버리지는 이 절단을 반영하지 않는다.
     gen_stats = generation_stats or {}
     without_tc = int(gen_stats.get("functions_without_tc") or 0)
-    if without_tc:
+    _is_ext = gen_stats.get("tc_profile") == TC_PROFILE_EXTENDED
+    if without_tc and _is_ext:
+        # (R75 리뷰 W3) 확장은 요구당 상한과 무관하게 함수마다 TC 를 붙인다 — 그래도 남았다면 원인은 상한이 아니다.
+        coverage_warnings.append(
+            f"[coverage] 확장 프로파일인데도 매핑된 함수 {gen_stats.get('mapped_functions')}개 중 {without_tc}개에 TC 가 없다 — "
+            f"함수 상세 없음 {int(gen_stats.get('extended_functions_without_detail') or 0)}개 · 스텝을 만들 수 없음 "
+            f"{int(gen_stats.get('extended_functions_without_steps') or 0)}개(요구당 상한 때문이 아니다)")
+    elif without_tc:
         trunc = list(gen_stats.get("requirements_truncated") or [])
         shown = ", ".join(trunc[:8])
         suffix = f" 외 {len(trunc) - 8}건" if len(trunc) > 8 else ""
@@ -2163,6 +2273,8 @@ def generate_quality_report(
             f"상한에 잘렸다(요구당 {int(gen_stats.get('boundary_tc_cut_by_req_cap') or 0)} · 함수당 "
             f"{int(gen_stats.get('boundary_tc_cut_by_function_cap') or 0)}, 남은 것 {int(gen_stats.get('boundary_tc_kept') or 0)}건). "
             "경계값 TC 는 분기 TC 를 밀어내지 않는다 — 더 넣으려면 max_tc_per_req 를 올릴 것"
+            + (" (확장 프로파일 — 이 수치는 **기본 구간**의 것이다. 기본 구간에서 TC 를 받은 함수는 확장이 되풀이하지 않으므로 "
+               "거기서 잘린 경계값 TC 는 확장 문서에도 없다)" if _is_ext else "")
         )
 
     return {
@@ -2335,15 +2447,10 @@ def generate_sts_xlsm(
                     ws.cell(row=r, column=ci).fill = safety_fill
 
         if n_steps > 1:
+            # (R75) `ws.merge_cells` 는 병합마다 기존 병합 전부를 훑어 문서 전체로 O(n²)이다(TC 2,687 에 264초).
+            #   이 시트는 위에서 새로 만들었고 TC 블록은 서로 겹치지 않으므로 검사 없는 경로를 쓴다.
             for mc in _MERGE_COLS:
-                col = mc + 1
-                try:
-                    ws.merge_cells(
-                        start_row=start_row, start_column=col,
-                        end_row=end_row, end_column=col,
-                    )
-                except Exception:
-                    pass
+                merge_fresh(ws, start_row, mc + 1, end_row, mc + 1)
 
         row_num = end_row + 1
 

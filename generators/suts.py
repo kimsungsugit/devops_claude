@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
+from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.c_return import returns_value
 from report_gen.doc_kind import is_sds_filename
@@ -116,6 +117,11 @@ _MAX_SEQUENCES = 10
 #   (switch 6개면 MC/DC 7 → 1). ISO 26262 ASIL D 는 MC/DC 가 필수다.
 _DEFAULT_SEQ_COUNT = 24
 _STRATEGY_CATALOG_MAX = 30
+# 기본 카탈로그가 전략 종류별로 내는 **자리 수**. 생성부(`generate_sequences`)와 판별부(`is_extended_strategy`)가
+# 같은 상수를 본다 — 따로 적으면 한쪽만 바뀌어도 아무것도 안 깨진 채 공시가 틀린다(R75 리뷰 X5).
+_BASE_SWITCH_SLOTS = 6
+_BASE_GLOBAL_SLOTS = 3
+_BASE_MCDC_SLOTS = 6
 
 # 시험 범위의 **유일한 정의**. 준비 게이트(`docgen_preflight`)도 이걸 import 한다.
 SCOPE_REFERENCE = "suds"    # SwUDS 설계 ID 가 있는 함수만 — 정본과 같은 범위(기본)
@@ -456,7 +462,14 @@ def _get_strategy_label(strat_name: str, input_vars: Optional[List[str]] = None,
     if strat_name.startswith("COND_COMB_"):
         idx = int(strat_name.split("_")[-1])
         var = input_vars[idx] if idx < len(input_vars) else f"var{idx}"
-        return f"조건 조합: {var}=최솟값, 나머지=중간값 → 분기 커버리지 향상"
+        # (R75) 값은 짝수 번째=최솟값·홀수 번째=최댓값인데 라벨은 늘 "최솟값" 이라 표의 값과 설명이 어긋났다.
+        side = "최솟값" if idx % 2 == 0 else "최댓값"
+        return f"조건 조합: {var}={side}, 나머지=중간값 → 분기 커버리지 향상"
+    if strat_name.startswith("OAT_"):
+        _, _i, _side = strat_name.split("_")
+        idx = int(_i)
+        var = input_vars[idx] if idx < len(input_vars) else f"var{idx}"
+        return f"단독 경계: {var}={'최솟값' if _side == 'MIN' else '최댓값'}, 나머지=중간값 → 입력별 경계 영향 분리"
     if strat_name.startswith("SWITCH_"):
         idx = int(strat_name.split("_")[-1])
         if idx < len(switch_cases):
@@ -2078,6 +2091,17 @@ def determine_gen_method(unit: Dict[str, Any]) -> str:
 resolve_safety_related = _resolve_safety_related
 
 
+def is_extended_strategy(strategy: Any) -> bool:
+    """확장 프로파일에서만 나오는 전략인가 — OAT 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(6+)."""
+    s = str(strategy or "").strip()
+    if s.startswith("OAT_"):
+        return True
+    for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
+        if s.startswith(prefix) and s[len(prefix):].isdigit():
+            return int(s[len(prefix):]) >= base_n
+    return False
+
+
 def resolve_seq_test_method(strategy: Any) -> str:
     """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다."""
     return _METHOD_FI if str(strategy or "").strip() in _FI_STRATEGIES else _METHOD_REQ
@@ -2111,10 +2135,16 @@ def determine_test_method(unit: Dict[str, Any]) -> str:
 
 def generate_sequences(
     unit: Dict[str, Any],
-    max_seq: int = _DEFAULT_SEQ_COUNT,
+    max_seq: Optional[int] = _DEFAULT_SEQ_COUNT,
     type_cache: Optional[Dict[str, str]] = None,
+    extended: bool = False,
 ) -> List[Dict[str, Any]]:
     """Generate test sequences for a unit function.
+
+    `extended`(R75 확장 프로파일): 기본 전략 목록은 **그대로 앞에** 두고(같은 이름·같은 값) 그 뒤에 덧붙인다 —
+    7번째 이후의 switch case · 4번째 이후의 전역 · 7번째 이후의 MC/DC 조건 · 입력마다 최솟값/최댓값 **단독 변경**(OAT,
+    조건 조합이 이미 만든 (변수, 방향)은 건너뜀). 값은 같은 `_bounds_of` 에서 오고 모르는 타입은 확장에서도 비운다.
+    `max_seq=None` 이면 자르지 않는다.
 
     Produces boundary-value and error-condition test sequences matching
     the reference SUTS patterns:
@@ -2310,8 +2340,9 @@ def generate_sequences(
             strategies.append((f"COND_COMB_{toggle_idx}", f"_cond_{toggle_idx}"))
 
     # GAP 2: Switch-case — generate TC per enum/case value from logic_flow
-    _extra_switch = _extract_switch_cases(logic_flow, input_vars)[:6]
-    for sw_idx in range(len(_extra_switch)):
+    _all_switch = _extract_switch_cases(logic_flow, input_vars)
+    _extra_switch = _all_switch if extended else _all_switch[:_BASE_SWITCH_SLOTS]
+    for sw_idx in range(min(_BASE_SWITCH_SLOTS, len(_extra_switch))):
         strategies.append((f"SWITCH_{sw_idx}", f"_switch_{sw_idx}"))
 
     # GAP 3: Loop boundary — 0/1/max iterations for loop-containing functions
@@ -2341,9 +2372,11 @@ def generate_sequences(
     _extra_globals: List[str] = []
     if indirect_vars:
         # 모르는 타입의 전역은 토글 대상이 아니다(리뷰 C2 — `void *` 전역이 `{pt_G: 0}` 로 섰다).
-        for gv in [g for g in indirect_vars if _ind_types.get(g) != _UNKNOWN_TYPE][:3]:
+        _known_globals = [g for g in indirect_vars if _ind_types.get(g) != _UNKNOWN_TYPE]
+        for gv in (_known_globals if extended else _known_globals[:_BASE_GLOBAL_SLOTS]):
             _extra_globals.append(gv)
-            strategies.append((f"GLOBAL_{len(_extra_globals)-1}", f"_global_{len(_extra_globals)-1}"))
+            if len(_extra_globals) <= _BASE_GLOBAL_SLOTS:
+                strategies.append((f"GLOBAL_{len(_extra_globals)-1}", f"_global_{len(_extra_globals)-1}"))
 
     # GAP 5: Void side-effect — for functions with inputs but no outputs,
     # add sequence using indirect_vars as expected outputs
@@ -2357,8 +2390,27 @@ def generate_sequences(
     # Add baseline FIRST (all conditions at true values)
     if _mcdc_conditions:
         strategies.append(("MCDC_BASE", "_mcdc_base"))
-    for mc_idx in range(len(_mcdc_conditions[:6])):
+    for mc_idx in range(len(_mcdc_conditions[:_BASE_MCDC_SLOTS])):
         strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
+
+    # (R75) 확장 — 위까지가 기본 카탈로그(최대 30)다. 확장은 그 **뒤에만** 붙는다(기본 문서와 포함 관계).
+    _base_strategy_count = len(strategies)
+    unit["base_strategy_count"] = _base_strategy_count
+    if extended:
+        for sw_idx in range(_BASE_SWITCH_SLOTS, len(_extra_switch)):
+            strategies.append((f"SWITCH_{sw_idx}", f"_switch_{sw_idx}"))
+        for gv_idx in range(_BASE_GLOBAL_SLOTS, len(_extra_globals)):
+            strategies.append((f"GLOBAL_{gv_idx}", f"_global_{gv_idx}"))
+        for mc_idx in range(_BASE_MCDC_SLOTS, len(_mcdc_conditions)):
+            strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
+        # 단독 경계(OAT): 입력 하나만 경계로, 나머지는 중간값. 입력이 하나뿐이면 BV_MIN/BV_MAX 가 이미 그것이다.
+        if len(input_vars) >= 2:
+            for t_idx in range(len(_toggle_vars)):
+                for side in ("min", "max"):
+                    # 조건 조합(앞 4개)이 이미 만든 (변수, 방향): 짝수 번째=min, 홀수 번째=max.
+                    if t_idx < 4 and side == ("min" if t_idx % 2 == 0 else "max"):
+                        continue
+                    strategies.append((f"OAT_{t_idx}_{side.upper()}", f"_oat_{t_idx}_{side}"))
 
     # Pre-compute clamp/guard analysis once (avoid repeated DFS per strategy)
     check_vars = output_vars or input_vars
@@ -2380,7 +2432,7 @@ def generate_sequences(
             return f"유효 {direction}: 방어 처리 확인 (포화 추정)"
 
     sequences: List[Dict[str, Any]] = []
-    for idx, (strat_name, bound_key) in enumerate(strategies[:max_seq]):
+    for idx, (strat_name, bound_key) in enumerate(strategies if max_seq is None else strategies[:max_seq]):
         seq_num = idx + 1
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
@@ -2461,7 +2513,7 @@ def generate_sequences(
             for v in input_vars:
                 bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
                 inp_vals[v] = _format_test_value(bnd.get("max_inv", bnd.get("max", 255) + 1), var_types.get(v, "uint8_t"))
-            for gv in _extra_globals:
+            for gv in _extra_globals[:_BASE_GLOBAL_SLOTS]:
                 gv_type = _ind_types.get(gv) or _type_of(gv)
                 gv_bnd = _bounds_of(gv, gv_type)
                 exp_vals[gv] = _format_test_value(gv_bnd.get("mid", 0), gv_type)
@@ -2475,6 +2527,17 @@ def generate_sequences(
                     raw = bnd.get("min", 0) if toggle_idx % 2 == 0 else bnd.get("max", 0)
                 else:
                     raw = bnd.get("mid", 0)  # others at mid
+                inp_vals[v] = _format_test_value(raw, var_types.get(v, "uint8_t"))
+            for v in output_vars:
+                bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key and bound_key.startswith("_oat_"):
+            # (R75) 단독 경계: 한 입력만 최솟값/최댓값, 나머지는 중간값
+            _, _, _oi, _oside = bound_key.split("_")
+            _oat_var = _toggle_vars[int(_oi)] if int(_oi) < len(_toggle_vars) else ""
+            for v in input_vars:
+                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                raw = bnd.get(_oside, 0) if v == _oat_var else bnd.get("mid", 0)
                 inp_vals[v] = _format_test_value(raw, var_types.get(v, "uint8_t"))
             for v in output_vars:
                 bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
@@ -2522,7 +2585,7 @@ def generate_sequences(
 
         # Build human-readable description showing actual variable names and values
         label = _resolve_inv_label(strat_name) if strat_name in _STRAT_LABEL else (
-            _get_strategy_label(strat_name, _toggle_vars if strat_name.startswith("COND_COMB_") else input_vars,
+            _get_strategy_label(strat_name, _toggle_vars if strat_name.startswith(("COND_COMB_", "OAT_")) else input_vars,
                                 _extra_switch, _loop_var if _has_loop else "", _extra_globals)
         )
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
@@ -2545,6 +2608,9 @@ def generate_sequences(
             "strategy": strat_name,
             "description": description,
         })
+        if idx >= _base_strategy_count:
+            # 확장 전략의 표시는 **만든 자리에서** 단다 — 이름을 되읽어 추정하지 않는다(리뷰 W2·X5).
+            sequences[-1]["tc_profile"] = TC_PROFILE_EXTENDED
 
     return sequences
 
@@ -4033,10 +4099,13 @@ def generate_suts(
     hsis_path: Optional[str] = None,
     target_function_names: Optional[List[str]] = None,
     scope: str = "suds",
+    tc_profile: str = "",
 ) -> Dict[str, Any]:
     """Top-level SUTS generation pipeline.
 
     Args (추가):
+        tc_profile: `""`/`"reference"`(기본) = 정본 규모. `"extended"` = 시퀀스 상한 없이 + 확장 전략
+            (`generate_sequences(extended=True)`). 단일 정의는 `generators/tc_profile.py`.
         scope: `"suds"`(기본) = SwUDS 설계 ID 가 있는 함수만 — **정본과 같은 범위**.
             `"source"` = 소스에서 찾은 함수 전부. SwUDS 문서가 없으면 `"suds"` 여도
             좁히지 않고 그 사실을 보고한다.
@@ -4412,10 +4481,14 @@ def generate_suts(
     _logger.info("Units needing AI enhancement: %d", len(_void_no_vars))
 
     _progress(40, "테스트 시퀀스 생성 시작")
+    _profile, _profile_bad = normalize_tc_profile(tc_profile)
+    _extended = _profile == TC_PROFILE_EXTENDED
+    if _profile_bad:
+        _logger.warning("SUTS: 모르는 tc_profile %r — 기본(정본 규모)으로 만든다", _profile_bad)
     all_sequences: Dict[str, List[Dict[str, Any]]] = {}
     ai_enhanced = 0
     for i, unit in enumerate(units):
-        seqs = generate_sequences(unit, max_sequences)
+        seqs = generate_sequences(unit, None if _extended else max_sequences, extended=_extended)
         if ai_config and unit["fid"] in _void_no_vars:
             seqs = enhance_sequences_with_ai(unit, seqs, ai_config)
             ai_enhanced += 1
@@ -4430,6 +4503,16 @@ def generate_suts(
     _progress(80, f"시퀀스 생성 완료 - {total_seq}개")
 
     quality = generate_suts_quality_report(units, all_sequences, _source_function_count(function_details))
+    # (R75) 어느 프로파일로 만들었나 · 확장 전략이 덧붙인 시퀀스 수(기본이면 0).
+    quality["tc_profile"] = _profile
+    quality["tc_profile_unknown_value"] = _profile_bad
+    quality["extended_sequences"] = sum(
+        1 for _s in all_sequences.values() for _q in _s if _q.get("tc_profile") == TC_PROFILE_EXTENDED)
+    # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
+    #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
+    quality["sequences_beyond_reference_cap"] = (sum(
+        max(0, min(int(_u.get("base_strategy_count") or 0), len(all_sequences.get(_u["fid"]) or [])) - int(max_sequences))
+        for _u in units) if _extended else 0)
 
     _progress(85, "XLSM 파일 생성 중")
     out = generate_suts_xlsm(template_path, units, all_sequences, output_path, project_config)

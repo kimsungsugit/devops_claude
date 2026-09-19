@@ -51,20 +51,24 @@ const CAP_PARAMS = {
     template_source: 'template_source',
     unmatched_headings: 'unmatched_headings',
   },
+  // `tc_profile`(R75): 시험 물량 — 미설정이면 정본 규모(기본), 'extended' 면 확장. 판정은 생성기가 한다.
   sts: {
     max_tc_per_req: 'max_tc_per_req',
     max_steps_per_tc: 'max_steps_per_tc',
     template_source: 'template_source',
+    tc_profile: 'tc_profile',
   },
   suts: {
     max_sequences: 'max_sequences',
     suts_scope: 'scope',
     template_source: 'template_source',
+    tc_profile: 'tc_profile',
   },
   sits: {
     max_subcases: 'max_subcases',
     max_flows: 'max_flows',
     template_source: 'template_source',
+    tc_profile: 'tc_profile',
   },
 };
 

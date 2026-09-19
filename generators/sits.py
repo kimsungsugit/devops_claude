@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from backend.services.iso26262_doc_asil_extractor import _RELATED_PREFIX_CANON
 from generators._artifact_check import apply_write_back_check
 from generators.safety_marks import resolve_safety_related
+from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
 from report_gen.doc_kind import is_sds_filename
 from report_gen.source_roots import first_source_root
@@ -1237,6 +1238,9 @@ def collect_integration_flows(
             "in_design_doc": fn_name.lower() in (uds_swcom_map or {}),
             "asil": _cand_asil,
             "swcom_id": _infer_swcom_id(my_module, swcom_counter),
+            # (R75 리뷰 C3) **후보 전체 기준** 순번 — 설계 ID 를 못 찾은 흐름의 TC ID 폴백이 쓴다. 선별된 목록 안의
+            #   위치로 번호를 매기면 상한(=프로파일)에 따라 같은 흐름의 ID 가 밀린다(`swcom_id` 와 같은 처방).
+            "candidate_index": len(candidates) + 1,
         })
 
     # ── 캡 적용: 안전등급 높은 쪽을 남기고, 잘린 내역을 stats_out 에 남긴다 ────
@@ -1584,6 +1588,7 @@ def collect_integration_flows(
             "functions": _chain_nodes,
             "module_name": my_module,
             "swcom_id": swcom_id,
+            "candidate_index": _cand.get("candidate_index"),
             "input_vars": input_vars,
             "input_raws": input_raws,   # annotated originals for type inference
             "expected_vars": expected_vars,
@@ -2005,7 +2010,8 @@ def generate_itc_list(
             _design_hits += 1
             tc_id = f"SwITC_{_sid}"
         else:
-            tc_id = f"SwITC_{idx:02d}"
+            # 후보 전체 기준 순번(없으면 — 흐름을 직접 만든 호출자 — 목록 위치). 상한이 바뀌어도 같은 흐름은 같은 ID 다.
+            tc_id = f"SwITC_{int(flow.get('candidate_index') or idx):02d}"
         gen_method = _determine_gen_method_for_flow(flow)
         sub_cases = _generate_sub_cases(
             flow, max_cases=max_subcases,
@@ -3348,6 +3354,19 @@ def generate_sits_validation_report(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def resolve_profile_caps(tc_profile: Any, max_subcases: Any, max_flows: Any) -> Tuple[str, str, int, Optional[int]]:
+    """(R75) 시험 물량 프로파일이 두 상한을 어떻게 바꾸는가 — `(프로파일, 못 알아본 값, max_subcases, max_flows)`.
+
+    기본(정본 규모)은 요청값 그대로다. 확장은 sub-case 를 후보 전량(`_SUBCASE_CATALOG_MAX`)까지 올리고 흐름 상한을
+    없앤다(`None` = `_select_flows_within_cap` 이 자르지 않는다). 확장은 상한을 **낮추지 않는다** — 더 크게 줬으면 그 값.
+    KJPDS02 실측: 기본은 찾은 흐름 360 중 240 을 빼고 그중 79 가 안전 관련이다.
+    """
+    profile, bad = normalize_tc_profile(tc_profile)
+    if profile != TC_PROFILE_EXTENDED:
+        return profile, bad, max_subcases, max_flows
+    return profile, bad, max(int(max_subcases or 0), _SUBCASE_CATALOG_MAX), None
+
+
 def generate_sits(
     source_root: str,
     output_path: str,
@@ -3369,6 +3388,9 @@ def generate_sits(
     # `generate_itc_list` 의 FI 블록 주석 참조. 주지 않으면 전용 FI TC 는 0건이고
     # 그 사실이 로그와 `fi_requested`(=0)로 남는다.
     fi_design_ids: Optional[Sequence[str]] = None,
+    # (R75) `""`/`"reference"`(기본) = 위 두 상한 그대로. `"extended"` = 찾은 흐름 전부 + sub-case 후보 전부.
+    #   단일 정의는 `generators/tc_profile.py`. 확장은 상한을 **낮추지 않는다**(사용자가 더 크게 줬으면 그 값).
+    tc_profile: str = "",
 ) -> Dict[str, Any]:
     """Top-level SITS generation pipeline.
 
@@ -3405,6 +3427,14 @@ def generate_sits(
 
     _logger.info("=== SITS Generation Start ===")
     t0 = time.time()
+
+    _caps_requested = {"max_subcases": max_subcases, "max_flows": max_flows}
+    _profile, _profile_bad, max_subcases, max_flows = resolve_profile_caps(  # type: ignore[assignment]
+        tc_profile, max_subcases, max_flows)
+    if _profile_bad:
+        _logger.warning("SITS: 모르는 tc_profile %r — 기본(정본 규모)으로 만든다", _profile_bad)
+    if _profile == TC_PROFILE_EXTENDED:
+        _logger.info("SITS: 확장 프로파일 — 흐름 상한 없음 · sub-case 상한 %d(요청값 %s)", max_subcases, _caps_requested)
 
     _progress(5, "SITS 생성 시작")
 
@@ -3659,6 +3689,11 @@ def generate_sits(
     _progress(70, "품질 보고서 생성 중")
     quality_report = generate_sits_quality_report(
         itcs, total_source_functions, flow_stats=flow_stats)
+    # (R75) 어느 프로파일로 만들었나 · 요청된 상한과 실제로 쓴 상한(확장이면 다르다).
+    quality_report["tc_profile"] = _profile
+    quality_report["tc_profile_unknown_value"] = _profile_bad
+    quality_report["caps_requested"] = _caps_requested
+    quality_report["caps_effective"] = {"max_subcases": max_subcases, "max_flows": max_flows}
 
     # ── Stage 9: XLSM generation ─────────────────────────────────────────────
     _progress(80, "XLSM 파일 생성 중")

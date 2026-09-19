@@ -3291,6 +3291,9 @@ async def jenkins_sts_generate_async(
     # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
     # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
     max_steps_per_tc: Optional[int] = Form(None),
+    # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
+    #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     from sts_generator import generate_sts
@@ -3393,6 +3396,7 @@ async def jenkins_sts_generate_async(
         "asil_level": asil_level,
         "max_tc_per_req": max_tc_per_req,
         "max_steps_per_tc": max_steps_per_tc,
+        "tc_profile": tc_profile,
         "default_test_env": "SwTE_01",
     }
     _set_progress("jenkins_sts", job_url, build_selector, {"stage": "start", "percent": 1, "message": "STS start", "done": False, "error": ""}, job_id=job_id)
@@ -3543,6 +3547,9 @@ def jenkins_suts_generate_async(
     sds_path: str = Form(""),
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
+    # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
+    #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     from suts_generator import generate_suts
 
@@ -3598,6 +3605,7 @@ def jenkins_suts_generate_async(
                 template_path=tpl_path,
                 project_config=project_config,
                 max_sequences=max_sequences,
+                tc_profile=tc_profile,
                 on_progress=_on_progress,
                 srs_docx_path=_srs_doc,
                 sds_docx_path=_sds_doc,

@@ -139,6 +139,46 @@ def _template_source_choice() -> Dict[str, Any]:
     }
 
 
+_TC_PROFILE_EFFECT = {
+    "sts": "기본은 요구당 상한까지만 만들어 **매핑된 함수의 대부분이 시험 없이 남습니다**(실측 KJPDS02: 1,037개 중 "
+           "94개만 시험, TC 295). 확장은 기본 TC 를 그대로 두고(같은 ID·같은 순서) 그 뒤에, 시험이 하나도 없는 함수마다 "
+           "안전 요구를 먼저, 그다음 그 함수를 가장 좁게 가리키는 요구 밑에 분기·경계값 TC 를 덧붙입니다(같은 실측 2026-09-20: "
+           "TC 2,210 · 함수 1,037/1,037). "
+           "상한을 올리는 것과 다릅니다 — 요구 하나에 함수가 600개씩 매핑돼 상한만 올리면 같은 함수가 여러 요구 "
+           "밑에 되풀이됩니다.",
+    "suts": "기본은 전략 24종 상한에 조건 조합 4 · switch 6 · 전역 3 · MC/DC 조건 6 까지입니다. 확장은 기본 시퀀스를 "
+            "그대로 두고 그 뒤에 입력마다 최솟값/최댓값 **단독 변경**(나머지는 중간값)과 나머지 case·전역·MC/DC 조건을 "
+            "덧붙이며 시퀀스 상한을 두지 않습니다. 값은 같은 출처(설계서 범위 > enum > HSIS > 선언 타입)에서 오고 "
+            "모르는 타입은 확장에서도 비웁니다.",
+    "sits": "기본은 통합 흐름 120 · sub-case 7 까지입니다(실측 KJPDS02: 찾은 흐름 360 중 240 이 빠지고 그중 79 가 "
+            "안전 관련). 확장은 찾은 흐름 전부와 sub-case 후보 전부를 담습니다(실측 TC 120 → 360 · sub-case 840 → "
+            "4,671). 아래 두 상한을 직접 더 크게 정했으면 그 값을 씁니다 — 확장은 상한을 낮추지 않습니다.",
+}
+
+
+def _tc_profile_choice(doc_type: str) -> Dict[str, Any]:
+    """시험 물량 프로파일 — **정본 규모(기본)** 냐 **확장**이냐. 세 시험 규격서가 공유한다.
+
+    사용자 결정(2026-09-19): 정본과 비슷하게 만드는 기본은 그대로 두고, 품질 좋은 TC 를 더 많이 내는 **옵션**을 둔다.
+    옵션 값의 철자·의미는 `generators/tc_profile.py` 단일 출처를 쓴다 — 해석도 생성기가 한다.
+    """
+    from generators.tc_profile import TC_PROFILE_EXTENDED
+    return {
+        "param": "tc_profile",
+        "row": "tc_profile",
+        # `api: ""` = 미설정이 곧 서버 기본(정본 규모). 기본값의 정의는 `normalize_tc_profile` 이 갖는다.
+        "api": "",
+        "adjustable": True,
+        "options": [
+            # 같은 뜻의 값 둘(""·"reference")을 다 내면 화면에 "정본 규모" 가 두 줄 선다(리뷰 I6) — 미설정 하나로 둔다.
+            #   `reference` 문자열은 API 로는 여전히 받는다(`normalize_tc_profile`).
+            {"value": "", "label": "정본 규모 (기본)"},
+            {"value": TC_PROFILE_EXTENDED, "label": "확장 — 근거 있는 시험을 상한 없이"},
+        ],
+        "effect": _TC_PROFILE_EFFECT[doc_type],
+    }
+
+
 def _unmatched_headings_choice() -> Dict[str, Any]:
     """UDS 전용 — **정본에만 있는 남의 함수 절**을 남길지 지울지.
 
@@ -299,7 +339,8 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
                                    "effect": "TC 당 스텝 상한 — 넘는 스텝은 **잘려서 "
                                              "시험 절차에 남지 않습니다**(AI 보강 스텝도 "
                                              "같은 상한을 받습니다)"}},
-        choices={"template_source": _template_source_choice()},
+        choices={"template_source": _template_source_choice(),
+                 "tc_profile": _tc_profile_choice("sts")},
         handler="POST /api/jenkins/sts/generate-async",
     ),
     "suts": _doc(
@@ -330,6 +371,7 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         #   오래 이 표가 없어 화면·라우터·가드가 각자 그 사실을 적어 두고 있었다.
         choices={
             "template_source": _template_source_choice(),
+            "tc_profile": _tc_profile_choice("suts"),
             "suts_scope": {
                 "param": "scope",
                 "row": "scope",
@@ -375,7 +417,8 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
               "max_flows": {"api": 120, "generator": 120, "adjustable": True,
                             "effect": "통합 흐름 상한 — 넘으면 안전등급 높은 쪽부터 남기고 "
                                       "**잘린 흐름은 시험 규격에 존재하지 않습니다**"}},
-        choices={"template_source": _template_source_choice()},
+        choices={"template_source": _template_source_choice(),
+                 "tc_profile": _tc_profile_choice("sits")},
         handler="POST /api/local/sits/generate-async",
     ),
     # ── SwUT 3종 ────────────────────────────────────────────────────────────

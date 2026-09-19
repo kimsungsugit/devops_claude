@@ -45,6 +45,9 @@ from backend.services import docgen_test_materials as _tm
 from backend.services.swut_meta_resolver import (
     folder_contents_hint as _resolver_folder_contents_hint,
 )
+from generators.tc_profile import TC_PROFILE_EXTENDED as _TC_PROFILE_EXTENDED
+from generators.tc_profile import TC_PROFILE_REFERENCE as _TC_PROFILE_REFERENCE
+from generators.tc_profile import normalize_tc_profile as _normalize_tc_profile
 from report_gen.source_roots import first_source_root
 
 router = APIRouter()
@@ -463,6 +466,17 @@ def _tm_lookup_paths(inputs: Dict[str, str]) -> Dict[str, str]:
         "srs_path": str(inputs.get(_req.IN_SWRS) or ""),
         "uds_path": str(inputs.get(_req.IN_UDS_DOC) or ""),
     }
+
+
+# (R75) 확장 프로파일이 **생성기 안에서** 푸는 상한과, 그 행이 대신 말할 문장. 생성기와 어긋나면 게이트가 거짓말을
+#   하므로 가드가 세 생성기의 실제 동작과 대조한다(`test_tc_profile_r75.py`).
+_CAPS_LIFTED_BY_EXTENDED: Dict[str, str] = {
+    "max_tc_per_req": "**확장 프로파일**에서는 이 값이 요구당 상한이 아니라 기본 TC 구간과 **함수당** 분기 TC 상한으로만 "
+                      "작동합니다 — 시험 없는 함수는 요구당 상한과 무관하게 전부 TC 를 받습니다",
+    "max_sequences": "**확장 프로파일**은 시퀀스 상한을 두지 않습니다 — 기본 전략 전량 뒤에 확장 전략이 붙습니다",
+    "max_subcases": "**확장 프로파일**은 sub-case 후보 전부를 담습니다(직접 더 크게 정했으면 그 값)",
+    "max_flows": "**확장 프로파일**은 찾은 통합 흐름을 전부 담습니다",
+}
 
 
 def _suts_normalize_scope(scope: Any) -> "tuple[str, str]":
@@ -1183,6 +1197,13 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 조용히 사라지고 verdict 만 초록이었다(2026-09-03 감사 P-6⑦).
     req = _normalize_doc_type(req)
     spec = _req.requirements_for(req.doc_type)
+    # (R75) 시험 물량 프로파일. 확장이면 상한 몇 개는 **생성기가 풀어 버린다** — 상한을 말하는 행(측정 행·결정 행
+    #   모두)이 기본값 기준으로 "N개가 빠집니다" 라고 하면 만들어질 문서와 반대말이 된다(게이트는 타이핑이 아니라
+    #   문서를 잰다). 리뷰 C1: 처음엔 결정 행(`cap_*`)만 고쳐서 같은 패널의 측정 행 둘이 동시에 반대말을 했다.
+    _tc_choice = (spec.get("choices") or {}).get("tc_profile") or {}
+    _tc_profile, _tc_profile_bad = (_normalize_tc_profile(req.caps.get("tc_profile"))
+                                    if _tc_choice else (_TC_PROFILE_REFERENCE, ""))
+    _tc_extended = _tc_profile == _TC_PROFILE_EXTENDED
     resolver = get_resolver()
     inputs, origins = _resolve_inputs_with_origin(req)
     steps: List[Dict[str, Any]] = []
@@ -1627,15 +1648,21 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 #   재측정 없이 계산된다(`docgen_test_materials._measure_sits`).
                 _eff_flows = _cap_user_value(req.caps, "max_flows") or int(s["cap"] or 0)
                 _flow_head = _eff_flows - int(s["flows_total"] or 0)
+                if _tc_extended:
+                    # 확장은 흐름 상한을 두지 않는다 — 찾은 흐름이 전부 문서에 선다. 여유를 "넉넉함" 으로 두어 아래 판정을
+                    #   ok 로 보내고, 상한(`of`)·여유는 화면에 싣지 않는다.
+                    _flow_head = 1
                 steps.append(_step(
                     "sits_flows", "material",
                     S_DEGRADED if _flow_head <= 0 else S_OK, "통합 흐름",
-                    measured={"value": s["flows_total"], "of": _eff_flows,
-                              "headroom": _flow_head},
+                    measured=({"value": s["flows_total"], "lifted_by_profile": _TC_PROFILE_EXTENDED} if _tc_extended else
+                              {"value": s["flows_total"], "of": _eff_flows, "headroom": _flow_head}),
                     # ⚠ 이미 잘리는 것과 곧 잘릴 것은 다른 말이다. 라이브에서 여유가
                     #   **-25**(즉 25개가 이미 빠지는 중)인데 "함수가 늘면 잘리기
                     #   시작한다" 는 미래형 문구가 나왔다 — 현재 손실을 예고로 읽게 한다.
                     reason=(
+                        f"**확장 프로파일** — 찾은 흐름 {s['flows_total']}개를 전부 담습니다(흐름 상한 없음)"
+                        if _tc_extended else
                         f"흐름 {abs(_flow_head)}개가 상한({_eff_flows})을 넘어 시험 규격에서 "
                         "빠집니다 — 안전등급이 높은 쪽부터 남지만, 빠진 흐름은 문서에 "
                         "존재하지 않습니다"
@@ -1820,13 +1847,21 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                     else:
                         _beyond = int(m.get("functions_beyond_cap") or 0)
                         _over = m.get("requirements_over_cap")
+                    if _tc_extended:
+                        # 확장은 기본 구간 뒤에 시험 없는 함수마다 TC 를 붙인다 — 요구당 상한은 누구도 버리지 않는다.
+                        _beyond_ref, _beyond = _beyond, 0
                     steps.append(_step(
                         "sts_tc_cap", "material",
                         S_OK if not _beyond else S_DEGRADED, "요구당 TC 상한",
                         measured={"value": m.get("mapped_functions"), "cap": _eff_tc,
                                   "beyond_cap": _beyond,
-                                  "requirements_over_cap": _over},
+                                  "requirements_over_cap": _over,
+                                  "lifted_by_profile": _TC_PROFILE_EXTENDED if _tc_extended else None,
+                                  "beyond_cap_in_reference": _beyond_ref if _tc_extended else None},
                         reason=(
+                            f"**확장 프로파일** — 기본 구간에서 요구당 상한({_eff_tc})에 걸리는 함수 {_beyond_ref}개도 "
+                            "그 뒤에 각자 TC 를 받습니다(함수마다 한 번, 안전 요구 → 가장 좁은 요구 순으로 고른 요구 밑에)"
+                            if _tc_extended else
                             f"매핑된 함수 {m.get('mapped_functions')}개 중 **최소** "
                             f"{_beyond}개가 요구당 상한({_eff_tc})에 걸려 시험되지 "
                             f"않습니다. 남는 {_eff_tc}개가 무엇인지는 관련성이 아니라 "
@@ -2003,6 +2038,14 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             "adjustable": adjustable,
         }
         reason = str(cap.get("effect") or "")
+        if _tc_extended and cap_name in _CAPS_LIFTED_BY_EXTENDED:
+            picked = _cap_user_value(req.caps, cap_name)
+            if picked is not None:
+                measured["user_value"] = picked
+            measured["lifted_by_profile"] = _TC_PROFILE_EXTENDED
+            steps.append(_step(f"cap_{cap_name}", "decision", S_OK, cap_name, measured=measured,
+                               reason=f"{reason} — {_CAPS_LIFTED_BY_EXTENDED[cap_name]}"))
+            continue
         if not adjustable:
             # 왜 못 바꾸는지를 반드시 말한다. **env 와 코드 상수는 다른 말이다** —
             # 뭉뚱그리면 있지도 않은 환경변수를 찾아 헤매게 된다.
@@ -2231,6 +2274,22 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 "빈 값을 QM 으로 채우지는 않습니다 — 근거 없는 등급은 지어내지 않습니다. "
                 "옆에서 바로 고르세요(설정 > 공통 메타 > ASIL 레벨과 같은 값입니다)."
             ),
+        ))
+
+    # ── 5-a2. 시험 물량 프로파일 — 정본 규모(기본)냐 확장이냐 ────────────────
+    # 판정 규칙은 여기 복제하지 않는다 — `generators/tc_profile.normalize_tc_profile` 을 생성기와 같이 쓴다.
+    if _tc_choice:
+        _tc_reason = str(_tc_choice.get("effect") or "")
+        _tc_now = ("현재 **확장**입니다 — 기본 문서의 시험을 전부 담고 그 뒤에 덧붙입니다. 문서가 커지고 생성이 "
+                   "오래 걸립니다." if _tc_extended else
+                   "현재 **정본 규모**(기본)입니다.")
+        steps.append(_step(
+            "tc_profile", "decision", S_OK if not _tc_profile_bad else S_DEGRADED, "시험 물량",
+            measured={"value": _tc_profile, "stored": _tc_profile_bad or None,
+                      "choice": "tc_profile", "options": _tc_choice.get("options") or None,
+                      "picked": str(req.caps.get("tc_profile") or "")},
+            reason=(f"저장된 값 `{_tc_profile_bad}` 을 알 수 없어 기본값으로 되돌렸습니다 — {_tc_now} {_tc_reason}"
+                    if _tc_profile_bad else f"{_tc_now} {_tc_reason}"),
         ))
 
     # ── 5-b. 시험 범위 — 캡과 같은 성격의 **사용자 결정** ────────────────────

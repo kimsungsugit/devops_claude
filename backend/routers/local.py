@@ -3382,6 +3382,9 @@ def local_sits_generate_async(
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
     stp_path: str = Form(""),
+    # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
+    #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
+    tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking SITS generation. Returns job_id for progress polling."""
     from sits_generator import generate_sits
@@ -3462,6 +3465,7 @@ def local_sits_generate_async(
                 project_config=project_config,
                 max_subcases=max_subcases,
                 **({"max_flows": max_flows} if max_flows is not None else {}),
+                tc_profile=tc_profile,
                 on_progress=_sits_on_progress,
                 srs_docx_path=srs_docx_async,
                 sds_docx_path=sds_docx_async,
