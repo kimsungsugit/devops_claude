@@ -517,6 +517,11 @@ def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
         "overall_statement_pct": _pct("statement"),
         "overall_branch_pct": _pct("branch"),
         "overall_mcdc_pct": 0.0 if _mcdc_degenerate else _pct("mcdc"),
+        # 위 0.0 은 "실측 0%" 가 아니라 **중화된 값**이다. 소비처가 `None`(미측정)과
+        # 같은 부류로 셀 수 있게 사실을 따로 싣는다 — 안 실으면 ASIL D 게이트가
+        # 켜졌을 때 "커버리지 0%" 로 읽혀 **없는 결함을 지어내고**, 정작 조치
+        # (측정 활성화)는 어디에도 안 뜬다(`evaluator._unmeasured` 가 소비).
+        "mcdc_degenerate": _mcdc_degenerate,
         "functions_with_coverage": sum(1 for fc in function_rows if fc.statement.total > 0),
         # 분모가 몇 개 함수에서 왔는지 — 백분율만 보면 "1개 함수 100%"와
         # "200개 함수 100%"가 같아 보인다. 미측정(None)과도 함께 읽어야 한다.

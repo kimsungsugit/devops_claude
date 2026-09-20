@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from workflow.asil_propagation import normalize_asil
+
 from .thresholds import require_gate_threshold as _gt
 
 _logger = logging.getLogger("workflow.quality.evaluator")
@@ -426,15 +428,26 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     분기/MC-DC 는 참고지표(threshold=None)로 점수 미반영 — QM/A 모듈 과잉 FAIL 방지.
     """
     metrics: MetricList = []
-    a = str(asil or "").upper().strip()
+    # ⚠ 예전엔 `str(asil or "").upper().strip()` 이었다. 그 판정은 **단문자만** 인식하는데
+    #   실제로 흐르는 값은 전부 `"ASIL B"` 형식이라(UI `ASIL_CHOICES`·`config/swut_meta.json`·
+    #   `schemas.py` 기본값) 아래 두 게이트가 **한 번도 켜진 적이 없었다**
+    #   (`reports/quality.sqlite` 실측 40건 중 단문자 0건). ISO 26262 에서 ASIL D 의
+    #   MC/DC 100% 는 필수 요구인데 그 축이 조용히 빠진 채 "통과" 로 보였다.
+    #   정규화는 `asil_propagation.normalize_asil` **단일 출처**로 한다 — 이 저장소엔
+    #   ASIL 정규화가 이미 6벌 이상 있고, 일곱 번째를 더하는 것이 그 실패의 형태다.
+    a = normalize_asil(asil)
 
     # ── 미측정 축 표면화 (게이트는 그대로 둔다) ──────────────────────────────
     # `compute_coverage_rollup` 은 실측 분모가 0 이면 이제 None 을 낸다(예전엔 0.0 —
     # "측정 안 함"과 "실측 0%"가 같은 값이었다). `_safe_float` 가 None 을 0.0 으로
-    # 접으므로 **게이트 판정 자체는 오늘과 동일**하다(미측정 → 0.0 → threshold 100 FAIL).
+    # 접으므로 미측정은 → 0.0 → threshold 100 FAIL 이 된다.
     # 일부러 그렇게 둔다: ASIL 필수 커버리지 축을 "미평가" 로 바꾸면 지금 FAIL 하던 것이
     # 판정 없음으로 완화된다. 대신 **FAIL 의 사유**를 아래 지표로 구분 가능하게 만든다
     # ("커버리지가 0%" 가 아니라 "측정 자체를 안 함").
+    #
+    # ⚠ 예전 주석은 "게이트 판정 자체는 오늘과 동일" 이라고 적었는데, ASIL 접두 정규화가
+    #   들어오며 **그 전제가 깨졌다** — ASIL B+ 에서 분기·MC/DC 가 실제로 판정을 만든다.
+    #   그래서 사유 지표가 이제는 참고가 아니라 **조치를 가르는 값**이다.
     _unmeasured = [
         ax for ax, key in (
             ("statement", "overall_statement_pct"),
@@ -443,10 +456,23 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
         )
         if summary.get(key) is None
     ]
+    # ⚠ `overall_mcdc_pct` 는 퇴화 시 **리터럴 0.0 으로 중화**되어 오므로 위 None 검사에
+    #   안 걸린다(`swut_input_adapter.compute_coverage_rollup`). 생산자가 함께 싣는
+    #   사실로 합류시킨다 — 안 하면 ASIL D 의 MC/DC FAIL 이 사유 0 으로 나가고,
+    #   어드바이저가 "테스트 조합을 보강하세요"(분모 0 이라 값이 안 변한다)를 최우선
+    #   조치로 띄운다. 침묵보다 나쁜 **틀린 지시**다.
+    if summary.get("mcdc_degenerate") and "mcdc" not in _unmeasured:
+        _unmeasured.append("mcdc")
     metrics.append(_metric("coverage_unmeasured_axes", float(len(_unmeasured))))
     _measured_fn = (summary.get("measured_functions") or {}) if isinstance(summary, dict) else {}
     metrics.append(_metric("coverage_measured_functions",
                            _safe_float(_measured_fn, "statement")))
+    # 새로 게이트 축이 된 두 축의 분모도 공시한다 — 생산자는 이미 세어 두는데
+    # (`measured_functions.branch/mcdc`) 소비처가 statement 만 싣고 버리고 있었다.
+    # 백분율만 보면 "1개 함수 100%" 와 "1014개 함수 100%" 가 같아 보인다.
+    for _ax in ("branch", "mcdc"):
+        metrics.append(_metric(f"coverage_measured_functions_{_ax}",
+                               _safe_float(_measured_fn, _ax)))
     metrics.append(_metric("coverage_synthesized_rows",
                            _safe_float(summary, "synthesized_rows")))
 
@@ -510,8 +536,17 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     return metrics
 
 
-def evaluate_swit_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) -> MetricList:
+def evaluate_swit_coverage(summary: Dict[str, Any]) -> MetricList:
     """SwIT Coverage Report(SwITCV) summary -> MetricList.
+
+    ## ⚠ `asil` 인자는 **일부러 없다**
+
+    예전엔 `evaluate_coverage` 와 같은 `*, asil=None` 을 받았는데 **본문에서 한 번도
+    읽지 않았다**. 호출부(`recorder.py`)는 값을 넘기고 있었다. 받는 시그니처는
+    "ASIL 로 무언가 판정한다" 는 주장인데 여기선 거짓이고, 형제 함수와 모양이 같아
+    더 잘 오독된다. 아래 §게이트 축이 적은 대로 이 문서의 두 축은 등급과 무관하다.
+    등급별 축이 정말 필요해지면 그때 인자를 **쓰면서** 추가할 것.
+    (`tests/unit/test_quality_gate_asil_prefix.py` 가 재등장을 막는다.)
 
     ## 왜 ``evaluate_coverage`` 를 재사용하지 않나
 

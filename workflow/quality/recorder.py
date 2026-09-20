@@ -563,8 +563,10 @@ def _record_run_impl(
         # 정본이 지목하는 미달(Functions/Function Calls)은 어느 지표에도 안 뜬다.
         # evaluate_swit_coverage docstring 참조. SwUTCV 는 실측 구문 커버리지를
         # 내므로(실측 99.45%/1014함수) 위 분기 그대로 둔다.
-        _meta = kwargs.get("meta") or {}
-        metrics = evaluate_swit_coverage(quality_data, asil=_meta.get("asil_level"))
+        # ⚠ 예전엔 여기서 `asil=_meta.get("asil_level")` 을 넘겼는데 **그 함수는 값을
+        #   읽지 않았다**. 넘기는 쪽만 보면 ASIL 판정이 걸리는 것처럼 읽힌다 —
+        #   SwITCV 의 두 축은 등급과 무관하다(그쪽 docstring §게이트 축).
+        metrics = evaluate_swit_coverage(quality_data)
     elif doc_type in ("sutr", "sitr"):
         # 커버리지 문서(swut/swit)와 **다른 평가기** — 시험 결과 보고서는 커버리지 축을
         # 내지 않으므로 evaluate_coverage 에 넣으면 미측정 축이 0% FAIL 로 둔갑한다.
@@ -708,7 +710,36 @@ def _record_run_impl(
         prev_run_id = None
         if prev_run and prev_run.summary:
             prev_run_id = prev_run.id
-            score_delta = round(overall - prev_run.summary.overall_score, 2)
+            # ⚠ **두 점수가 같은 축 집합으로 잰 값일 때만 뺀다.**
+            # `compute_overall_score` 는 `threshold is not None` 인 지표만 평균하므로,
+            # 게이트 축이 늘면 **소스·문서를 한 글자도 안 바꿔도 점수가 떨어진다**.
+            # ASIL 접두 정규화가 바로 그런 변화를 만들었다(실측, 같은 CANON 입력):
+            #   ASIL A 축2 = 74.86 · ASIL B/C 축3 = 66.35 · ASIL D 축4 = 49.76
+            # 이걸 그대로 빼면 화면의 `↓ −8.5` 가 품질 하락으로 읽힌다 — 실제로는
+            # **더 엄격하게 재기 시작한 것**이다. 척도가 다르면 delta 를 만들지 않는다
+            # (없는 비교를 지어내지 않는다 — `prev_run_id` 는 남겨 "비교 대상은 있었다" 를 보존).
+            _prev_gated = next(
+                (int(s.value) for s in (prev_run.scores or [])
+                 if str(getattr(s, "metric_name", "")) == "gated_metric_count"
+                 and getattr(s, "value", None) is not None),
+                None,
+            )
+            _now_gated = int(verdict["gated_count"])
+            if _prev_gated is not None and _prev_gated != _now_gated:
+                _logger.warning(
+                    "점수 척도가 바뀌어 delta 를 계산하지 않는다 (doc_type=%s, run=%s): "
+                    "게이트 축 %d개 → %d개. 두 점수는 서로 다른 축 집합의 평균이라 뺄셈이 "
+                    "품질 변화를 뜻하지 않는다.",
+                    doc_type, run.id, _prev_gated, _now_gated,
+                )
+                run_meta = dict(run_meta or {})
+                run_meta["score_scale_changed"] = {
+                    "prev_gated_metric_count": _prev_gated,
+                    "gated_metric_count": _now_gated,
+                }
+                run.meta_json = json.dumps(run_meta, ensure_ascii=False)
+            else:
+                score_delta = round(overall - prev_run.summary.overall_score, 2)
 
         # fn_count 추출 (doc_type별 분모)
         fn_count = None

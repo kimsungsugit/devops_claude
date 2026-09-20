@@ -258,6 +258,29 @@ _SWUT_ADVICE = {
     },
 }
 
+# ── 미측정 축의 조치는 다르다 (ASIL 접두 정규화 후속) ──────────────────────
+#
+# ASIL B+ 에서 분기·MC/DC 가 실제 게이트가 되면서, **측정 자체가 없는 축**도 미달로
+# 잡히기 시작했다. 그 자리에 기존 문구가 나가면 "복합 조건의 각 피연산자가 …
+# 테스트 조합을 보강하세요" 라고 안내하는데, 분모가 0 이라 **TC 를 아무리 늘려도
+# 값이 안 변한다**. 침묵보다 나쁜 틀린 지시다(라이브 합성 run 으로 실증).
+#
+# 축을 특정하는 근거는 `coverage_measured_functions*`(실측 함수 수)다 —
+# `coverage_unmeasured_axes` 는 개수만 알려 줘 어느 축인지 못 가린다.
+_MEASURED_DENOM_KEY = {
+    "statement_coverage_pct": "coverage_measured_functions",
+    "branch_coverage_pct": "coverage_measured_functions_branch",
+    "mcdc_coverage_pct": "coverage_measured_functions_mcdc",
+}
+
+_UNMEASURED_ADVICE = (
+    "이 축은 **측정 자체가 없습니다**(실측 함수 0개) — 테스트를 추가해도 값이 변하지 "
+    "않습니다. VectorCAST 산출물에 해당 커버리지가 수집됐는지(MC/DC 는 리포트에 pairs "
+    "컬럼이 있어야 한다), 대상 함수가 하니스에 포함됐는지를 먼저 확인하세요. "
+    "ISO 26262 상 '미달'이 아니라 '측정 미수행'이며, 조치는 측정 활성화입니다."
+)
+
+
 # SwReport 통합 Summary roll-up — P/F verdict 집계(커버리지 아님).
 _SWIT_COVERAGE_ADVICE = {
     # SwITCV 는 구문/분기 문서가 아니다 — 정본 4.Coverage 가 싣는 두 줄이 곧 축이다.
@@ -556,17 +579,31 @@ def suggest_improvements(
                 else:
                     priority = "low"
 
+                # 측정 자체가 없는 축이면 **조치가 다르다** — 문구를 갈아끼운다.
+                # 판정 근거는 그 축의 실측 함수 수(분모)다. 지표가 없는 구 run 은
+                # 판정 불가이므로 기존 문구를 그대로 둔다(없는 사실을 지어내지 않는다).
+                advice = rule["low_advice"]
+                unmeasured = False
+                _denom_obj = scores.get(_MEASURED_DENOM_KEY.get(metric_name, ""))
+                if _denom_obj is not None and _denom_obj.value is not None and int(_denom_obj.value) == 0:
+                    advice = _UNMEASURED_ADVICE
+                    unmeasured = True
+
                 suggestions.append({
                     "metric": metric_name,
                     "label": rule["label"],
                     "value": round(value, 1),
                     "threshold": threshold,
                     "gap": round(gap, 1),
-                    "advice": rule["low_advice"],
+                    "advice": advice,
                     "priority": priority,
                     # 화면이 "게이트 미달" 과 "참고 임계 미달" 을 구별할 수 있게 사실을 싣는다.
                     # 임계의 출처가 평가기(DB)인지 rule 리터럴인지가 곧 그 구별이다.
                     "gated": gated,
+                    # "미달" 과 "측정 미수행" 의 구별 — 우선순위는 낮추지 않는다.
+                    # ASIL D 에서 MC/DC 미측정은 감사 불가라 오히려 급한 축이고,
+                    # 다른 것은 **해야 할 일**이다(TC 추가 아님).
+                    "unmeasured": unmeasured,
                 })
 
         # 우선순위 정렬 (high > medium > low, gap 큰 순)

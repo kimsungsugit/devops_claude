@@ -19,6 +19,7 @@ by_target` — 실측 요구 68건 전부 보유), 같은 파일의 `links` 에 
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from workflow.coverage_gap import _ASIL_METRIC, _norm_fn
@@ -32,9 +33,38 @@ ASIL_PROPAGATION_NOTE = (
 )
 
 
+#: `ASIL D` · `ASIL-D` · `ASIL_D` · `ASIL:D` 의 접두. 어휘는
+#: `swut_asil_resolver._normalize_asil` 의 regex 와 같은 구분자 집합을 쓴다 —
+#: 두 곳이 다른 표기를 받으면 같은 문서가 경로마다 다른 등급을 얻는다.
+#:
+#: 두 가지가 **일부러** 이렇다:
+#: - `*` 라 구분자 0개도 받는다 → `ASILD` = `D`. 형제 regex 도 `*` 이므로 같은 완화다.
+#: - `^` 앵커가 있어 형제(`search`)보다 **엄격**하다. 없으면 `QM ASIL` 의 가운데를
+#:   지워 `QM` 이라는 **등급을 주워 온다** — 산문에서 등급을 만들어내지 않기 위한 앵커다.
+_ASIL_PREFIX_RE = re.compile(r"^ASIL[\s\-:_]*")
+
+
 def normalize_asil(value: Any) -> Optional[str]:
-    """표준 등급만 통과 — 'C(D)' 같은 비표준 표기는 None(미상)."""
+    """표준 등급만 통과 — 'C(D)' 같은 비표준 표기는 None(미상).
+
+    **`ASIL D` 는 비표준 표기가 아니라 같은 등급의 다른 표기**다. 접두를 벗긴 뒤
+    같은 검사를 하므로 `C(D)` 는 여전히 None 이고, 이 함수의 엄격함은 그대로다.
+
+    ⚠ 접두를 안 벗기던 판이 실제 결함을 만들었다: `workflow/quality/evaluator.py`
+    의 분기(ASIL B+)·MC/DC(ASIL D) 커버리지 게이트가 **한 번도 켜지지 않았다**.
+    UI 선택지(`DocGenPreflightPanel.jsx` `ASIL_CHOICES`)·`config/swut_meta.json`·
+    스키마 기본값이 전부 `"ASIL A"` 형식인데 판정은 단문자만 인식했다
+    (`reports/quality.sqlite` 실측 40건 중 단문자 **0건**).
+
+    ⚠ 반환은 `None`(미상)이지 `""` 가 아니다. 둘을 같은 값으로 접으면 "등급을
+    모른다" 와 "등급이 없다" 가 구별되지 않아 모듈 docstring 의 정직성 규약
+    (오분류보다 미상이 낫다)이 무너진다.
+    """
     s = str(value or "").strip().upper()
+    # 뒤에 `.strip()` 을 붙이지 않는다 — 앞 `strip()` 이 후행 공백을 이미 걷고
+    # `[\s\-:_]*` 가 탐욕적이라 접두 뒤 공백까지 먹는다. 실측 12종 입력에서
+    # 차이 0건 = 죽은 방어다(겹쳐 막으면 뮤테이션이 통째로 살아남는다).
+    s = _ASIL_PREFIX_RE.sub("", s)
     return s if s in _ASIL_METRIC else None
 
 

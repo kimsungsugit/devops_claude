@@ -20,6 +20,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from workflow.asil_propagation import ASIL_RANK as _ASIL_RANK
+from workflow.asil_propagation import normalize_asil as _normalize_asil_grade
 from workflow.coverage_gap import _ASIL_METRIC, _norm_fn
 
 # v2(N4): IT 행 생성 · 변경 함수 축(changed_*) · ccn 기반 최소 케이스 수 추정 · 카탈로그 확장.
@@ -137,10 +138,22 @@ def _pct(x: Optional[float]) -> str:
 
 
 def _asil_of(raw: Any) -> Optional[str]:
-    """주입 ASIL 값 정규화 — dict({asil,source})·평면 문자열 양쪽 수용, 비표준은 미상."""
+    """주입 ASIL 값 정규화 — dict({asil,source})·평면 문자열 양쪽 수용, 비표준은 미상.
+
+    등급 **판정**은 `asil_propagation.normalize_asil` 단일 출처다. 이 함수의 몫은
+    dict 껍질을 벗기는 것까지다.
+
+    ⚠ 예전엔 `s in _ASIL_METRIC` 을 여기서 직접 했다. 동작이 같아 무해해 보였지만,
+    `normalize_asil` 이 `ASIL D` 접두를 받도록 고쳐지는 순간 **둘이 갈렸다**
+    (`normalize_asil("ASIL D")="D"` vs 여기 `None`). 오늘의 유일한 프로덕션 호출부
+    (`summary_insight` → `merge_asil_sources` 산출)는 이미 letter 라 무해하지만,
+    `build_coverage_rows` docstring 은 "주석 맵(평면 문자열)도 받는다" 고 계약을
+    넓혀 두었다 — 그 경로가 쓰이면 같은 함수가 한 패널에선 `D`, 다른 패널에선
+    미상으로 뜬다. 복제를 만들지 않는 것과 **이미 있는 복제를 갈라 두지 않는 것**은
+    같은 규약이다.
+    """
     val = raw.get("asil") if isinstance(raw, dict) else raw
-    s = str(val or "").strip().upper()
-    return s if s in _ASIL_METRIC else None
+    return _normalize_asil_grade(val)
 
 
 def suggested_min_cases(ccn: Optional[float], gap_kind: Optional[str] = None) -> Optional[int]:
