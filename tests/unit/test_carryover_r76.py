@@ -746,11 +746,7 @@ class TestLocalHandlers:
         assert src.count('_no_discovery, label="HSIS")') == 1, name
         assert "_discover_hsis_path" not in src
 
-    @pytest.mark.parametrize("name", [n for n in _LOCAL_DOC_HANDLERS if "_suts_" not in n])
-    def test_sts_and_sits_discovery_is_a_recorded_decision(self, name):
-        """(리뷰 G8) STS·SITS 로컬 핸들러는 HSIS 자동 탐색을 **아직 쓴다** — SITS 는 읽기만 하고 안 쓰며, STS 는 AI 보강
-        프롬프트에 신호 이름이 실린다(이월 N111). 누가 '일관성' 으로 한쪽을 바꾸면 이 테스트가 그 결정을 묻는다."""
-        assert _handler_source(name).count('_discover_hsis_path, label="HSIS")') == 1, name
+    # (R77 N111) STS·SITS 의 자동 탐색도 끊었다 — 9곳 전부를 `test_followups_r77.py::TestNoForeignHsis` 가 묶는다.
 
     def test_unspecified_hsis_resolves_to_none_and_a_bad_path_still_warns(self, caplog):
         from backend.routers.local import _doc_or_discovered, _no_discovery

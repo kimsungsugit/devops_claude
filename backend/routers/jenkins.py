@@ -3407,6 +3407,12 @@ async def jenkins_sts_generate_async(
     def _worker() -> None:
         try:
             _set_progress("jenkins_sts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
+            # ⚠ (R77 N107) `req_doc_paths`·`sds_doc_paths` 는 `req_paths` 폼에서만 온다 — 화면이 보내는 `srs_path`·`sds_path` 는
+            #   **일부러** 이 보강에 태우지 않는다. 실측(KJPDS02): 태우면 "어느 요구에도 못 붙은 함수 110 → 13" 이 되지만 늘어난
+            #   링크의 출처는 보강 매처의 **추측 매칭**이다(프로토타입·설명의 토큰 겹침 392 함수 중 236 이 STS 매처와 다른 요구를
+            #   말한다 — `PP1_BUZZER_PWM_Disable` 이 LIN 요구를 받는 식). 이름이 맞은 557 함수는 두 매처가 같은 답이라 얻는 게 없고,
+            #   함수 ASIL 출처도 SwUDS 728 → SwDS 813 으로 뒤집힌다(정본 SwUDS 우선 규칙과 반대). SwDS 는 아래 `generate_sts` 가
+            #   `sds_path` 로 직접 읽어 같은 문서를 STS 매처로 조회한다. 숫자가 좋아지는 쪽이 옳은 쪽이 아니었다(계획서 R77).
             function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths, uds_path=uds_path, source_root=source_root)
             result = generate_sts(
                 requirements_text=req_texts,

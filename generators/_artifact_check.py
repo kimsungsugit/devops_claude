@@ -27,9 +27,10 @@ sub-case 를 34.8% 과소 계수하고 있었던 것처럼(라이터 포맷 변�
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Mapping
 
-__all__ = ["compare_generated_vs_written", "apply_write_back_check"]
+__all__ = ["compare_generated_vs_written", "apply_write_back_check", "sheet_base_name"]
 
 
 def compare_generated_vs_written(
@@ -103,3 +104,16 @@ def apply_write_back_check(
         validation["valid"] = False
 
     return validation
+
+
+_SHEET_NUMBER_PREFIX_RE = re.compile(r"^\s*\d+\s*\.\s*")
+
+
+def sheet_base_name(name: Any) -> str:
+    """시트 이름에서 번호 접두(`1.` · `2. `)를 뗀 소문자 이름 — 양식마다 번호가 붙기도 안 붙기도 한다.
+
+    (R77 N114) 정본(KJPDS02 SwUTS·SwTS)의 시트는 `Introduction` 인데 STS·SUTS 검증기는 `1.Introduction` 을 글자 그대로
+    찾았다. 시트가 **있는데도** SUTS 는 `valid: False`(그 한 줄이 유일한 사유), STS 는 거짓 경고를 매 생성마다 냈다.
+    SITS 검증기는 같은 사실을 이미 알고 있었다(`_find_ws(wb, "Introduction", "1.Introduction")`) — 세 벌 중 한 벌만 고쳐진 모양.
+    """
+    return _SHEET_NUMBER_PREFIX_RE.sub("", str(name or "")).strip().lower()

@@ -167,11 +167,15 @@ def _read_xlsx_rows(path: Path) -> str:
     return "\n".join(rows)
 
 
-def _discover_hsis_path(repo_root: Path) -> str:
-    docs_dir = repo_root / "docs"
-    if not docs_dir.exists():
-        return ""
-    for p in docs_dir.iterdir():
+def _hsis_from_given_docs(docs: list) -> str:
+    """사용자가 **준 문서 목록**에서 HSIS(xlsx/xlsm) 하나. 없으면 빈 문자열.
+
+    (R77 N111) 예전엔 저장소 `docs/` 를 뒤졌다(`_discover_hsis_path`) — 거기 있는 HSIS 는 다른 프로젝트(HDPDM01) 문서이고,
+    레지스터 이름이 프로젝트끼리 겹쳐 남의 요구 ID 가 `related_source="hsis"` 로 적혔다. API 경로(`backend/routers/local.py`)와
+    같은 규칙: 준 것만 쓴다.
+    """
+    for p in docs or []:
+        p = Path(p)
         if p.is_file() and p.suffix.lower() in {".xlsx", ".xlsm"} and "hsis" in p.name.lower():
             return str(p)
     return ""
@@ -183,6 +187,7 @@ def _enrich_source_sections_with_docs(
     *,
     req_doc_paths: list[str],
     sds_doc_paths: list[str],
+    hsis_path: str = "",
 ) -> dict:
     sections = source_sections if isinstance(source_sections, dict) else {}
     details = sections.get("function_details", {})
@@ -197,7 +202,6 @@ def _enrich_source_sections_with_docs(
         sds_doc_paths=sds_doc_paths,
     )
 
-    hsis_path = _discover_hsis_path(repo_root)
     if hsis_path:
         try:
             from generators.sts import _load_hsis_signals
@@ -608,6 +612,7 @@ def main() -> None:
             source_sections,
             req_doc_paths=req_doc_paths,
             sds_doc_paths=sds_doc_paths,
+            hsis_path=_hsis_from_given_docs(docs),
         )
         logger.info("source parsing completed")
     req_from_docs = rg.generate_uds_requirements_from_docs(req_texts) if req_texts else ""

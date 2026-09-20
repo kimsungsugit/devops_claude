@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from generators._artifact_check import apply_write_back_check
+from generators._artifact_check import apply_write_back_check, sheet_base_name
 from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import SAFETY_RELATED_MARK, is_safety_asil
 from generators.safety_marks import resolve_safety_related as _safety_mark_impl
@@ -218,6 +218,36 @@ def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
     return [c for c in dict.fromkeys([c.strip() for c in candidates if c and c.strip()])]
 
 
+#: 문서 보강(`report_gen.requirements.enrich_function_details_with_docs`)의 SwDS 매칭 방식 중 **이름이 맞은 것**.
+#: 나머지(`related_prototype` = 프로토타입·설명의 토큰 겹침 점수, `normalized_overlap` = 컴포넌트 단위 부분 일치)는 추측이다.
+_ENRICH_NAME_MATCH_MODES = frozenset({"direct", "normalized_exact"})
+
+
+def _related_is_fuzzy_enrichment(info: Dict[str, Any]) -> bool:
+    """이 함수의 `related` 가 문서 보강의 **추측 매칭**에서 왔는가(R77 N107).
+
+    보강은 SwDS 를 STS 매퍼와 **다른 매처**로 읽어 `related` 를 채우고 출처를 `sds` 로 적는다. 이름이 맞은 경우는 두 매처가
+    같은 답을 낸다(실측 KJPDS02 557/557). 갈리는 건 추측 매칭이다: 392 함수 중 236 이 STS 매처와 **다른 요구**를 말하고
+    (`PP1_BUZZER_PWM_Disable` ← `g_drvout_main_reset` 의 LIN 요구 · `lin_lld_get_status` ← `g_syssleepctrl`),
+    그 값을 "함수 자신의 related" 로 받으면 가장 약한 근거가 가장 강한 티어로 들어온다 — 출처 세탁이다.
+    매칭 방식이 기록돼 있지 않으면(보강을 안 탄 함수 · 주석/override 에서 온 값) 추측이 아니다.
+
+    ⚠ 방식 **라벨만 믿지 않는다**(리뷰 W1). 보강의 `normalized_exact` 는 `[^a-z0-9]` 를 지우는 정규화라 **한글을 통째로
+      버린다** — 파티션 `차속에 따른 도어 open 방지` 가 `open` 이 되어 아무 `…Open…` 이름과 "정확히" 맞는다(이 파일의
+      `normalize_sds_key` docstring 이 적어 둔 그 붕괴). 그래서 맞았다는 키(`sds_match_key`)를 **한글을 보존하는 정규화**로
+      함수의 후보 이름과 다시 대조하고, 안 맞으면 추측으로 친다. 실측 KJPDS02: 이름 일치 754 함수 전부 통과(오판 0).
+    """
+    if str(info.get("related_source") or "").strip().lower() != "sds":
+        return False
+    mode = str(info.get("sds_match_mode") or "").strip()
+    if not mode:
+        return False
+    if mode not in _ENRICH_NAME_MATCH_MODES:
+        return True
+    key = normalize_sds_key(str(info.get("sds_match_key") or ""))
+    return not key or key not in {normalize_sds_key(c) for c in _function_sds_candidates(info)}
+
+
 def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, str]],
                             path_out: Optional[List[str]] = None) -> List[str]:
     """SwDS 파티션의 `related` 에서 요구 ID 를 찾는다. `path_out` 을 주면 **어느 규칙**이 맞혔는지 한 단어를 넣는다 —
@@ -230,22 +260,33 @@ def _lookup_sds_related_ids(info: Dict[str, Any], sds_map: Dict[str, Dict[str, s
             if path_out is not None:
                 path_out.append("sds_exact")
             return [m.group(1) for m in _REQ_ID_PAT.finditer(str(direct.get("related") or ""))]
-    for candidate in candidates:
-        nc = normalize_sds_key(candidate)
+    # (R77 N107) **정규화 일치를 전 후보에 대해 먼저** 본다. 예전엔 후보 하나마다 "일치 또는 부분문자열" 을 같이 봐서, 첫 후보
+    #   (함수 이름)의 부분문자열이 뒤 후보(모듈 이름)의 **정확한** 일치를 가렸다 — 실측 KJPDS02: `sf_GetEepromVersionState`
+    #   (모듈 `LinUds` = 파티션 `lin_uds`)가 이름 속 `eeprom` 때문에 EEPROM 컴포넌트의 요구를 받았다. 강한 근거가 먼저다.
+    normed = [(c, normalize_sds_key(c)) for c in candidates]
+    keyed = [(k, normalize_sds_key(k), v) for k, v in sds_map.items()]
+    keyed = [(k, nk, v) for k, nk, v in keyed if nk and not is_sds_placeholder_key(nk)]
+    for _candidate, nc in normed:
         if not nc:
             continue
-        for key, value in sds_map.items():
-            nk = normalize_sds_key(key)
-            if not nk or is_sds_placeholder_key(nk):
-                continue
-            # (R76 N106) 키가 함수 이름 **안에** 든 방향엔 토큰 경계를 본다(`Re**adC**ustom` ⊃ `adc` 차단). 반대 방향은 키가
-            #   소문자로 접혀 있어 경계를 알 수 없으므로 옛 부분문자열 그대로다(`contains_at_token_start` docstring).
-            if nc == nk or nc in nk or contains_at_token_start(candidate, nc, nk):
+        for _key, nk, value in keyed:
+            if nc == nk:
                 ids = [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
                 if ids:
                     if path_out is not None:
-                        path_out.append("sds_normalized" if nc == nk
-                                        else ("sds_name_in_key" if nc in nk else "sds_substring"))
+                        path_out.append("sds_normalized")
+                    return ids
+    for candidate, nc in normed:
+        if not nc:
+            continue
+        for _key, nk, value in keyed:
+            # (R76 N106) 키가 함수 이름 **안에** 든 방향엔 토큰 경계를 본다(`Re**adC**ustom` ⊃ `adc` 차단). 반대 방향은 키가
+            #   소문자로 접혀 있어 경계를 알 수 없으므로 옛 부분문자열 그대로다(`contains_at_token_start` docstring).
+            if nc != nk and (nc in nk or contains_at_token_start(candidate, nc, nk)):
+                ids = [m.group(1) for m in _REQ_ID_PAT.finditer(str(value.get("related") or ""))]
+                if ids:
+                    if path_out is not None:
+                        path_out.append("sds_name_in_key" if nc in nk else "sds_substring")
                     return ids
                 # `related` 가 빈 칸이면 **여기서 끝내지 않는다**. 실측 41건이 전부
                 # `(swdsg) software architecture design guideline….docx`(SDS 안의
@@ -1132,18 +1173,22 @@ def map_requirements_to_functions(
     if sds_map is None:
         sds_map = _load_default_sds_map()
 
-    by_comment = by_sds = linkless = 0
+    by_comment = by_sds = by_fuzzy = linkless = 0
     _sds_paths: Dict[str, int] = {}
     for fid, info in function_details.items():
         if not isinstance(info, dict):
             continue
         related = str(info.get("related") or info.get("comment_related") or "")
+        # (R77 N107) 함수의 `related` 가 **문서 보강의 추측 매칭**에서 왔으면 "자기 related" 가 아니다 — 아래 SwDS 조회를 먼저 하고,
+        #   거기서 못 찾았을 때만 그 값을 쓰며 경로를 `enrich_fuzzy` 로 적는다(`_related_is_fuzzy_enrichment`).
+        _fuzzy = _related_is_fuzzy_enrichment(info)
         matched = False
-        for m in _REQ_ID_PAT.finditer(related):
-            rid = m.group(1)
-            if rid in req_to_fids and fid not in req_to_fids[rid]:
-                req_to_fids[rid].append(fid)
-                matched = True
+        if not _fuzzy:
+            for m in _REQ_ID_PAT.finditer(related):
+                rid = m.group(1)
+                if rid in req_to_fids and fid not in req_to_fids[rid]:
+                    req_to_fids[rid].append(fid)
+                    matched = True
         if matched:
             by_comment += 1
             continue
@@ -1157,6 +1202,16 @@ def map_requirements_to_functions(
         by_sds += 1 if hit else 0
         if hit and _path:
             _sds_paths[_path[0]] = _sds_paths.get(_path[0], 0) + 1
+        if not hit and _fuzzy:
+            for m in _REQ_ID_PAT.finditer(related):
+                rid = m.group(1)
+                if rid in req_to_fids:
+                    hit = True
+                    if fid not in req_to_fids[rid]:
+                        req_to_fids[rid].append(fid)
+            if hit:
+                by_fuzzy += 1
+                _sds_paths["enrich_fuzzy"] = _sds_paths.get("enrich_fuzzy", 0) + 1
         linkless += 0 if hit else 1
 
     # ── 3티어: 설계-ID 브리지 (SwUDS Related ID → 설계 ID → SwDS → 요구) ──────
@@ -1222,7 +1277,7 @@ def map_requirements_to_functions(
             "functions_total": _total,
             "functions_by_path": {"own_related": by_comment, **_sds_paths},
             "design_id_bridge_gained": by_design,
-            "design_id_bridge_only": max(0, len(_linked) - by_comment - by_sds),
+            "design_id_bridge_only": max(0, len(_linked) - by_comment - by_sds - by_fuzzy),
             "unlinked": _total - len(_linked),
             "links": sum(_sizes),
             "functions_per_requirement": {"median": _sizes[len(_sizes) // 2] if _sizes else 0,
@@ -3353,8 +3408,9 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
         stats["sheets"] = wb.sheetnames
         stats["sheet_count"] = len(wb.sheetnames)
 
+        _present = {sheet_base_name(n) for n in wb.sheetnames}     # (R77 N114) 번호 접두 무시 — 정본은 `Introduction`
         for s in ("Cover", "History", "1.Introduction"):
-            if s not in wb.sheetnames:
+            if sheet_base_name(s) not in _present:
                 warnings.append(f"Optional sheet missing: {s}")
 
         sts_sheet = next((c for c in _STS_SHEET_CANDIDATES if c in wb.sheetnames), None)

@@ -1390,6 +1390,10 @@ function EvidenceDetail({ run, detail }) {
   const conf = ev?.confidence;
   const val = ev?.docx_validate;
   const ref = ev?.reference;
+  // (R77 N110) 생성 공시 — 문구·판정은 서버(`report_gen/generation_disclosures.py`)가 단일 출처다.
+  //   여기서 label/value/note 를 다시 만들면 두 곳이 갈린다(이 저장소가 게이트 판정에서 겪은 결함).
+  const gen = ev?.generation;
+  const genItems = Array.isArray(gen?.items) ? gen.items : [];
   const sugg = detail.advice?.suggestions || [];
 
   return (
@@ -1656,6 +1660,45 @@ function EvidenceDetail({ run, detail }) {
           </ul>
         )}
       </div>
+
+      {/* 1-b. 생성 공시 — "무엇을 자르고·비우고·못 했는가" (R77 N110)
+          생성기는 절단·미상 축을 `quality_report` 에 계속 늘려 적었는데 읽는 화면이 0곳이었다
+          (2026-09-20 실측). 원시 JSON 을 여는 사람에게만 말하는 공시는 절반만 된 공시다.
+          문구·tone 은 전부 서버가 정한다 — 여기서 판정을 복제하지 않는다. */}
+      {ev && (
+        <div data-testid="generation-disclosures">
+          <div style={{ fontWeight: 700, fontSize: 'var(--text-xs)', marginBottom: 4 }}>생성 공시</div>
+          {gen?.present && genItems.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: '1.1em', fontSize: 'var(--text-xs)', lineHeight: 1.6 }}
+              aria-label="생성 공시">
+              {genItems.map((it, i) => (
+                <li key={`${it?.key ?? 'item'}-${i}`}
+                  style={{ marginBottom: 4, color: it?.tone === 'warning' ? 'var(--color-warning)' : undefined }}>
+                  <strong>{String(it?.label ?? '')}</strong>
+                  {': '}{String(it?.value ?? '')}
+                  {/* 뜻을 값 옆에 붙인다 — "비운 칸 146" 은 뜻 없이는 결함으로 읽힌다 */}
+                  <div style={{ color: 'var(--text-muted)' }}>{String(it?.note ?? '')}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {/* 항목 0건은 "손실 없음" 이 아니라 "이 산출물이 아무 축도 기록하지 않았음" 이다 */}
+          {gen?.present && genItems.length === 0 && (
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              이 산출물은 공시 항목을 하나도 기록하지 않았다(공시를 남기기 전 생성기) — 손실이 0 이라는 뜻이 아니다.
+            </span>
+          )}
+          {/* 부재는 반드시 사유와 함께 — 섹션 자체가 없으면(구 백엔드) 사이드카 부재와 다른 일이다 */}
+          {!gen?.present && (
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              생성 공시 없음 — {gen ? (gen.reason || '사유 미상') : '서버 응답에 generation 섹션이 없다(구 백엔드)'}
+              {/* (리뷰 W4) 형제 섹션들과 같은 꼬리표 — 이게 없으면 SwUT/SwIT 처럼 공시를 아예 만들지 않는
+                  산출물에서 "payload 사이드카 없음" 만 보여 사용자가 없는 파일을 찾게 된다. */}
+              {ev.expected_sidecars?.generation === false && ' (이 문서 종류는 생성 공시를 만들지 않는다)'}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* 2. 조치 제안 (백엔드 advisor 의 한국어 label + 조치문 그대로) */}
       <div>

@@ -45,8 +45,10 @@ __all__ = [
     "read_confidence_report",
     "read_docx_validation",
     "read_reference_enrichment",
+    "read_generation_disclosures",
     "read_evidence",
     "EVIDENCE_SECTIONS",
+    "DISCLOSURE_ARTIFACT_SUFFIXES",
     "SIDECAR_SUFFIXES",
     "GEN_STATS_SUFFIX",
     "PAYLOAD_SUFFIX",
@@ -66,8 +68,13 @@ SIDECAR_SUFFIXES = {
 GEN_STATS_SUFFIX = ".gen_stats.json"
 PAYLOAD_SUFFIX = ".payload.json"
 
+# (R77 N110) 생성 공시는 XLSM/XLSX 산출물 옆 `<out>.payload.json` 의 `quality_report` 에서 온다.
+#   UDS(DOCX)도 payload 사이드카를 쓰지만 거기엔 `quality_report` 가 없다 — 그 사실을 "읽기 실패" 가
+#   아니라 **해당 없음**으로 말해야 화면이 UDS 문서에 "공시가 사라졌다" 고 적지 않는다.
+DISCLOSURE_ARTIFACT_SUFFIXES = (".xlsm", ".xlsx")
+
 # `read_evidence` 가 내는 섹션 — 이 순서로 응답에 실린다. `sections=` 는 이 이름들만 받는다.
-EVIDENCE_SECTIONS = ("gate_report", "confidence", "docx_validate", "reference")
+EVIDENCE_SECTIONS = ("gate_report", "confidence", "docx_validate", "reference", "generation")
 # (리뷰 W3) 섹션 이름의 출처가 둘(사이드카 접미사 표 + 이 튜플)이라 — 새 사이드카를 표에만 적으면 어느 분기에서도
 #   읽히지 않고 `sections=("새키",)` 는 ValueError 가 된다. import 시점에 포함을 강제한다.
 assert set(SIDECAR_SUFFIXES) <= set(EVIDENCE_SECTIONS), "SIDECAR_SUFFIXES 의 키는 전부 EVIDENCE_SECTIONS 에 있어야 한다"
@@ -685,8 +692,55 @@ def read_reference_enrichment(gen_stats_path: Path, payload_path: Path) -> Dict[
     }
 
 
+def read_generation_disclosures(payload_path: Path) -> Dict[str, Any]:
+    """생성 공시 — `<out>.payload.json` 의 `quality_report` → 화면이 그릴 한국어 항목 목록. (R77 N110)
+
+    ## 왜 이 섹션이 생겼나
+
+    STS/SUTS/SITS 생성기는 R71~R76 동안 "무엇을 자르고·비우고·못 했는가" 를 `quality_report` 에
+    계속 늘려 적었는데, 2026-09-20 실측으로 **`frontend-v2/src` 에서 그 키를 읽는 곳이 0건**이었다.
+    원시 JSON 을 여는 사람에게만 말하는 공시는 절반만 된 공시다.
+
+    ## 계약
+
+    - `doc_type` 은 **payload 의 `artifact_type`** 에서 읽는다. 클라이언트가 경로도 문서 종류도
+      보내지 않는다는 이 모듈의 보안 규약을 유지하기 위해서고, DB 의 `doc_type` 이 틀려도 산출물
+      옆 파일이 진실이라는 `read_docx_validation` 의 규약과도 같은 방향이다.
+    - 문구·판정은 이 함수가 만들지 않는다 — `generation_disclosures.build_disclosures` 단일 출처.
+    - `items: []` 는 "공시할 것이 없음" 이 아니라 "이 산출물이 아는 축을 하나도 기록하지 않았음"
+      이다(구판 생성기). `present:False` 와 구별된다.
+    """
+    payload, why = _read_json_dict(payload_path, "payload 사이드카")
+    if payload is None:
+        return _absent(why or "payload 사이드카 없음")
+    # (리뷰 I8) 세 가지를 **한 사유로 접지 않는다** — 화면에서 뜻이 전부 다르다.
+    #   ① 키 자체가 없다      = 공시를 남기기 전 생성기(구판 산출물)
+    #   ② dict 가 아니다      = 기록이 깨졌다(형식 오류 — 구판이 아니라 결함)
+    #   ③ 빈 dict            = 생성이 끝까지 가지 못했다. `backend/helpers/common.py` 가 실패 경로에서
+    #                          기본값 `{}` 를 쓰므로, 이걸 `present:True, items:[]` 로 내면 **실패한
+    #                          산출물이 "아무것도 자르지 않았다"** 로 읽힌다.
+    if "quality_report" not in payload:
+        return _absent("payload 에 quality_report 키 없음(공시를 남기기 전 생성기)")
+    qr = payload.get("quality_report")
+    if not isinstance(qr, dict):
+        return _absent(f"quality_report 형식이 dict 가 아님({type(qr).__name__}) — 산출물 기록이 깨졌다")
+    if not qr:
+        return _absent("quality_report 가 비었다 — 생성이 끝까지 가지 못한 산출물(실패 경로의 기본값 {})")
+    artifact = payload.get("artifact_type")
+    doc_type = str(artifact).strip().lower() if isinstance(artifact, str) else ""
+
+    from report_gen.generation_disclosures import build_disclosures
+
+    return {
+        "present": True,
+        # 무엇으로 읽었는지 — `None` 이면 payload 가 문서 종류를 기록하지 않아 공통 항목만 나온다.
+        "doc_type_hint": doc_type or None,
+        "items": build_disclosures(doc_type, qr),
+    }
+
+
 def read_evidence(docx_path: str, sections: Optional[Iterable[str]] = None) -> Dict[str, Any]:
-    """산출물 DOCX 경로 → 근거 4종 묶음(사이드카 3종 + 참조 보강).
+    """산출물 경로 → 근거 5종 묶음(사이드카 3종 + 참조 보강 + 생성 공시).
 
     경로는 **호출자(서버)가 DB 에서 꺼낸 값**이어야 한다. 클라이언트가 보낸 경로를
     그대로 넣으면 임의 파일 읽기가 된다 — endpoint 는 run_id 만 받는다.
@@ -724,6 +778,13 @@ def read_evidence(docx_path: str, sections: Optional[Iterable[str]] = None) -> D
         "docx_validate": lambda: read_docx_validation(_side(SIDECAR_SUFFIXES["docx_validate"])),
         # (R47 N26) 통계는 접미사 덧붙임, payload 는 치환 — 라이터 둘의 규칙이 다르다.
         "reference": lambda: read_reference_enrichment(Path(raw + GEN_STATS_SUFFIX), _side(PAYLOAD_SUFFIX)),
+        # (R77 N110) 공시는 XLSM/XLSX 산출물만 남긴다. DOCX(UDS) 에 대고 "quality_report 없음" 이라고
+        #   답하면 화면이 사라진 공시를 찾게 되므로, 확장자로 먼저 갈라 **해당 없음**이라고 말한다.
+        "generation": lambda: (
+            read_generation_disclosures(_side(PAYLOAD_SUFFIX))
+            if base.suffix.lower() in DISCLOSURE_ARTIFACT_SUFFIXES
+            else _absent(f"생성 공시는 XLSM/XLSX 산출물(STS·SUTS·SITS)만 남긴다 — "
+                         f"{base.suffix or '확장자 없는 경로'} 산출물엔 해당 없음")),
     }
     out: Dict[str, Any] = {"output_path_present": base.exists()}
     for k in EVIDENCE_SECTIONS:

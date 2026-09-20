@@ -72,9 +72,10 @@ class TestSwUdsTable:
     def test_description_type_and_range_are_read(self, tmp_path):
         rec = resolve_unit_io(load_uds_unit_io(_docx(tmp_path, _TABLE)), "Fn")
         assert rec["description"] == "WDI 를 토글한다"
-        assert rec["param_info"]["u8g_Flag"] == {"type": "U8", "range": [0, 1]}
+        # (R77 N113) 범위를 읽은 칸은 **원문**도 같이 싣는다(상충 공시가 해석된 수만 보이지 않게).
+        assert rec["param_info"]["u8g_Flag"] == {"type": "U8", "range": [0, 1], "range_text": "0x00 ~ 0x01"}
         assert rec["param_info"]["s16g_Pos"]["range"] == [-32768, 32767]
-        assert rec["param_info"]["u8g_Out"] == {"type": "U8", "range": [0, 100]}
+        assert {k: rec["param_info"]["u8g_Out"][k] for k in ("type", "range")} == {"type": "U8", "range": [0, 100]}
         assert "pt_X" not in rec["param_info"], "`N/A` 는 근거가 아니다 — 싣지 않는다"
         assert rec["inputs"] == ["u8g_Flag", "s16g_Pos", "st_Mode", "pt_X"]
 
@@ -243,7 +244,7 @@ class TestReviewFindings:
                 + _row("[ Input Parameters ]") + _row("No", "Name", "Reset Value", "Type", "Description", "Value Range")
                 + _row("1", "u8g_Flag", "0x00 ~ 0x7F", "U8", "플래그", "0x00 ~ 0x01"))
         rec = resolve_unit_io(load_uds_unit_io(_docx(tmp_path, rows)), "Fn")
-        assert rec["param_info"]["u8g_Flag"] == {"type": "U8", "range": [0, 1]} and rec["param_col_layout"] == "header"
+        assert rec["param_info"]["u8g_Flag"] == {"type": "U8", "range": [0, 1], "range_text": "0x00 ~ 0x01"} and rec["param_col_layout"] == "header"
 
     def test_missing_range_column_reads_nothing_rather_than_another_column(self, tmp_path):
         rows = (_row("[ Function Information ]") + _row("Name", "Fn")

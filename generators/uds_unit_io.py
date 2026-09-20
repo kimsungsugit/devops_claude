@@ -230,6 +230,9 @@ def _parse_table(tbl) -> Dict[str, Any]:
                 _rec["type"] = _ty
             if _rng is not None:
                 _rec["range"] = [_rng[0], _rng[1]]
+                # (R77 N113) 원문도 같이 싣는다 — 상충 공시가 해석된 수만 보이면(`134217727~2147483648`) 문서의 오타
+                #   (`0x7FFFFFF~ 0x80000000`, F 가 일곱)인지 파서의 오독인지 읽는 사람이 가를 수 없다.
+                _rec["range_text"] = " ".join(str(cells[col_range]).split())
             if _rec and nm not in param_info:
                 param_info[nm] = _rec
     return {"inputs": inputs, "outputs": outputs, "asil": asil, "description": description, "param_info": param_info,

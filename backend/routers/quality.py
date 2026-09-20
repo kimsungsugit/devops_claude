@@ -233,7 +233,7 @@ def get_run(run_id: int) -> Dict[str, Any]:
 
 @router.get("/runs/{run_id}/evidence")
 def get_run_evidence(run_id: int) -> Dict[str, Any]:
-    """"왜 이 점수인가" 의 근거 — 산출물 옆 사이드카 3종을 읽어 낸다.
+    """"왜 이 점수인가" 의 근거 — 산출물 옆 사이드카를 읽어 낸다.
 
     ## 왜 run_id 만 받나 (보안)
 
@@ -243,8 +243,9 @@ def get_run_evidence(run_id: int) -> Dict[str, Any]:
 
     ## 응답 계약
 
-    세 섹션(`gate_report` / `confidence` / `docx_validate`)은 각각 `present` 를
-    갖고, `False` 면 `reason` 이 붙는다. **부재를 빈 dict 나 0 으로 내지 않는다** —
+    각 섹션(`gate_report` / `confidence` / `docx_validate` / `reference` /
+    `generation`)은 저마다 `present` 를 갖고, `False` 면 `reason` 이 붙는다.
+    **부재를 빈 dict 나 0 으로 내지 않는다** —
     화면이 그걸 "근거상 문제 없음" 으로 그리면 그게 곧 거짓 증거다.
 
     산출물이 없는 run(실측상 다수 — `output_path` 는 오래 기록되지 않았다)도
@@ -267,6 +268,7 @@ def get_run_evidence(run_id: int) -> Dict[str, Any]:
 
     try:
         from report_gen.evidence import VALIDATION_SIDECAR_WRITERS, read_evidence
+        from report_gen.generation_disclosures import DISCLOSURE_DOC_TYPES
     except ImportError:
         raise HTTPException(status_code=503, detail="evidence module not available") from None
 
@@ -284,6 +286,10 @@ def get_run_evidence(run_id: int) -> Dict[str, Any]:
         "confidence": dt == "uds",
         "docx_validate": dt in VALIDATION_SIDECAR_WRITERS,
         "reference": dt == "uds",        # (R47 N26) 참조 SwUDS 보강은 UDS 빌더만 한다
+        # (R77 N110) 생성 공시는 `quality_report` 를 payload 에 남기는 XLSM 생성기만 만든다.
+        #   목록을 여기 손으로 적지 않는다 — 문서 종류를 늘릴 때 화면이 "이 문서 종류는 공시를
+        #   만들지 않는다" 는 거짓을 적게 된다(`VALIDATION_SIDECAR_WRITERS` 에서 겪은 결함).
+        "generation": dt in DISCLOSURE_DOC_TYPES,
     }
     payload["sidecars_expected"] = (dt == "uds")   # 구 소비처 호환 — gate/confidence 기준
     return payload

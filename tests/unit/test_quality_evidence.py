@@ -626,8 +626,9 @@ class TestExpectedSidecarsPerSection:
         out = _write_validation(tmp_path, "sts_live", ".xlsm", _SUTS_XLSM_MD.replace("SUTS", "STS"))
         rid = make_run("sts", output_path=out)
         body = client.get(f"/api/quality/runs/{rid}/evidence").json()
+        # (R77 N110) STS 는 게이트/참조 사이드카는 안 만들지만 `.validation.md` 와 생성 공시는 만든다.
         assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": True,
-                                             "reference": False}
+                                             "reference": False, "generation": True}
         assert body["sidecars_expected"] is False            # 구 소비처 호환
         assert body["docx_validate"]["format"] == "xlsm"
         assert body["docx_validate"]["ok"] is False
@@ -637,8 +638,9 @@ class TestExpectedSidecarsPerSection:
         client, make_run = api
         rid = make_run("uds", output_path=sidecars)
         body = client.get(f"/api/quality/runs/{rid}/evidence").json()
+        # UDS 는 사이드카 4종을 다 만들지만 **생성 공시는 만들지 않는다**(payload 에 quality_report 가 없다).
         assert body["expected_sidecars"] == {"gate_report": True, "confidence": True, "docx_validate": True,
-                                             "reference": True}
+                                             "reference": True, "generation": False}
 
     @pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
     def test_every_xlsm_writer_expects_a_validation_sidecar(self, api, doc_type):
@@ -665,7 +667,7 @@ class TestExpectedSidecarsPerSection:
         rid = make_run(doc_type)
         body = client.get(f"/api/quality/runs/{rid}/evidence").json()
         assert body["expected_sidecars"] == {"gate_report": False, "confidence": False, "docx_validate": False,
-                                             "reference": False}
+                                             "reference": False, "generation": False}
 
 # ==============================================================
 # 6. 참조 SwUDS 보강 근거 (R47 N26)
@@ -985,7 +987,7 @@ class TestSectionSelection:
         """(리뷰 뮤턴트 2) 상수 자신과 비교하면 동어반복 — 응답 키 순서를 리터럴로 고정한다."""
         from report_gen.evidence import EVIDENCE_SECTIONS, read_evidence
 
-        assert EVIDENCE_SECTIONS == ("gate_report", "confidence", "docx_validate", "reference")
+        assert EVIDENCE_SECTIONS == ("gate_report", "confidence", "docx_validate", "reference", "generation")
         assert list(read_evidence(str(sidecars))) == ["output_path_present", *EVIDENCE_SECTIONS]
 
     def test_every_sidecar_suffix_is_a_readable_section(self):

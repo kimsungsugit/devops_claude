@@ -472,18 +472,6 @@ def _load_sts_ai_config() -> Optional[Dict[str, Any]]:
     return None
 
 
-def _discover_hsis_path() -> Optional[str]:
-    """Auto-discover HSIS xlsx file from docs/ directory."""
-    try:
-        docs_dir = Path(__file__).resolve().parents[2] / "docs"
-        for p in docs_dir.glob("*.xlsx"):
-            if "hsis" in p.name.lower():
-                return str(p)
-    except Exception:
-        pass
-    return None
-
-
 def _discover_srs_docx() -> Optional[str]:
     """저장소 `docs/` 에서 SRS docx 하나를 고른다(프로젝트 무관)."""
     for p in _discover_default_req_docs().get("req", []):
@@ -500,11 +488,15 @@ def _discover_sds_docx() -> Optional[str]:
 
 
 def _no_discovery() -> Optional[str]:
-    """자동 탐색을 **하지 않는** 입력의 `discover` 자리(R76 N91).
+    """자동 탐색을 **하지 않는** 입력의 `discover` 자리 — HSIS 가 그렇다(R76 N91 SUTS · R77 N111 나머지 전부).
 
-    로컬 SUTS 의 HSIS 가 그렇다: R74 부터 HSIS 의 SW 값 범위가 같은 이름 변수의 **경계값**이 되고 요구 ID 도 거기서 붙는다.
-    저장소 `docs/` 의 HSIS 는 다른 프로젝트(HDPDM01) 문서라, 미지정일 때 그것을 끌어오면 남의 설계 범위로 시험 값을 짓는다.
-    Jenkins 경로는 처음부터 탐색하지 않았다 — 두 경로의 산출물이 같은 입력에서 갈리지 않게 맞춘다. 미지정이면 보강을 건너뛴다.
+    저장소 `docs/` 의 HSIS 는 다른 프로젝트(HDPDM01) 문서다. 미지정일 때 그것을 끌어오면:
+    - SUTS: R74 부터 HSIS 의 SW 값 범위가 같은 이름 변수의 **경계값**이 되고 요구 ID 도 거기서 붙는다 — 남의 설계 범위로 시험 값을 짓는다.
+    - STS: 신호 이름·`HSI_xx` ID 가 AI 보강 프롬프트의 컨텍스트와 시험 환경 판정 패턴에 실린다.
+    - 함수 상세 보강(`_enrich_function_details_map`): 레지스터 이름은 프로젝트끼리 겹친다(`PIEL_PIEL0`) — 남의 HSIS 의 요구 ID 가
+      `related` 에 `hsis` 출처로 적힌다.
+    - SITS: 생성기가 읽기만 하고 쓰지 않는다(무해하지만 같은 규칙으로 둔다 — 비대칭은 다음 수정에서 한쪽만 고쳐진다).
+    Jenkins 경로는 처음부터 탐색하지 않았다. 미지정이면 보강을 건너뛴다. 탐색 함수(`_discover_hsis_path`)는 지웠다.
     """
     return None
 
@@ -577,6 +569,7 @@ def _enrich_function_details_map(
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
     uds_path: Optional[str] = None,
+    hsis_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     details = function_details if isinstance(function_details, dict) else {}
     req_paths, sds_paths = _resolve_req_doc_sets(req_doc_paths, sds_doc_paths)
@@ -600,7 +593,16 @@ def _enrich_function_details_map(
                     pass
     # HSIS enrichment: functions using HSIS signal variables get
     # description_source/related_source upgraded from "inference" to "hsis"
-    _hsis_p = _discover_hsis_path()
+    # (R77 N111) **호출자가 준 HSIS 만** 쓴다. 예전엔 여기서 저장소 `docs/` 를 직접 뒤졌다 — 사용자 입력 자리가 없어 "대체가
+    #   아니다" 라는 이유로 허용돼 있었지만, 그 문서는 다른 프로젝트의 것이고 결과는 `related_source="hsis"` 로 남는다.
+    #   경로 해석은 worker 경유(cloudium `U:` 직독 불가). 미지정·해석 실패면 이 보강을 건너뛴다.
+    _hsis_p: Optional[str] = None
+    if hsis_path and str(hsis_path).strip() and details:
+        from backend.services.resolver_helpers import resolve_builder_input as _rbi_hsis
+        _hsis_skips: List[str] = []
+        _hsis_p = _rbi_hsis(str(hsis_path), label="HSIS", reasons=_hsis_skips)
+        if not _hsis_p:
+            _logger.warning("함수 상세의 HSIS 보강을 건너뛴다 — 지정한 HSIS 를 읽지 못했다: %s", "; ".join(_hsis_skips)[:300])
     if _hsis_p and details:
         try:
             from generators.sts import _load_hsis_signals
@@ -2054,6 +2056,7 @@ async def local_sts_generate(
                 req_doc_paths=req_doc_paths,
                 sds_doc_paths=sds_doc_paths,
                 uds_path=uds_path,
+                hsis_path=hsis_path,
             )
             _logger.info("[STS_GENERATE][%s] parsed %d functions from source", req_id, len(function_details))
         except Exception as e:
@@ -2075,7 +2078,7 @@ async def local_sts_generate(
     uds_file_path = _resolve_opt(uds_path)
     stp_docx_path = _resolve_opt(stp_path)
     hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
     if opt_skips:
         _logger.warning("STS(sync): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
@@ -2250,6 +2253,7 @@ async def local_sts_generate_stream(
                 req_doc_paths=req_doc_paths,
                 sds_doc_paths=sds_doc_paths,
                 uds_path=uds_path,
+                hsis_path=hsis_path,
             )
         except Exception:
             pass
@@ -2265,7 +2269,7 @@ async def local_sts_generate_stream(
     uds_file_path = _resolve_opt2(uds_path)
     stp_docx_path = _resolve_opt2(stp_path)
     hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
     if opt_skips2:
         _logger.warning("STS(stream): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips2), "; ".join(opt_skips2)[:400])
@@ -2461,7 +2465,7 @@ async def local_sts_generate_async(
     uds_file_path = _resolve_opt3(uds_path)
     stp_docx_path = _resolve_opt3(stp_path)
     hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
     if opt_skips3:
         _logger.warning("STS(async): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips3), "; ".join(opt_skips3)[:400])
@@ -2524,6 +2528,7 @@ async def local_sts_generate_async(
                         req_doc_paths=req_doc_paths,
                         sds_doc_paths=sds_doc_paths,
                         uds_path=uds_path,
+                        hsis_path=hsis_path,
                     )
                 except Exception as e:
                     _logger.warning("[STS_ASYNC][%s] source parsing warning: %s", job_id, e)
@@ -3193,7 +3198,7 @@ def local_sits_generate(
     sds_docx = _resolve_doc_path_sits(sds_path)
     uds_file = _resolve_doc_path_sits(uds_path)
     hsis_file = _doc_or_discovered(_resolve_doc_path_sits(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
     stp_file = _resolve_doc_path_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)
@@ -3315,7 +3320,7 @@ def local_sits_generate_stream(
     sds_docx_stream = _res_doc_sits(sds_path)
     uds_file_stream = _res_doc_sits(uds_path)
     hsis_stream = _doc_or_discovered(_res_doc_sits(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
     stp_stream = _res_doc_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)
@@ -3460,7 +3465,7 @@ def local_sits_generate_async(
     sds_docx_async = _res_async_sits(sds_path)
     uds_file_async = _res_async_sits(uds_path)
     hsis_async = _doc_or_discovered(_res_async_sits(hsis_path), hsis_path,
-                              _discover_hsis_path, label="HSIS")
+                              _no_discovery, label="HSIS")
     stp_async = _res_async_sits(stp_path)
     if sits_opt_skips:
         _logger.warning("SITS: 선택 입력 %d건이 빠진 채 생성한다 — %s",

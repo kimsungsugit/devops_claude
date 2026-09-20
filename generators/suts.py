@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from generators._artifact_check import apply_write_back_check
+from generators._artifact_check import sheet_base_name as _sheet_base_name
 from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
@@ -2231,6 +2232,9 @@ def generate_sequences(
         tb = _TYPE_BOUNDARIES.get(t) if t in _TYPE_BOUNDARIES and t != "float" and _declared(v) else None
         if tb and (rb["min"] < tb["min"] or rb["max"] > tb["max"]):
             _msg = f"{v}({src} {rb['min']}~{rb['max']} vs {t})"
+            _raw_text = str((_uds_info.get(v) or {}).get("range_text") or "") if src == "SwUDS" else ""
+            if _raw_text:
+                _msg += f" ← 원문 `{_raw_text}`"
             # (R76 N98) 포인터 파라미터에 문서가 적은 범위는 **주소 범위**다(`0 ~ 0xFFFFFFFF`) — 가리키는 타입(`U16`)에
             #   안 들어가는 게 당연하고 문서 오류가 아니다. 값은 예전과 같이 타입 전폭으로 가고(주소로 경계값을 만들지
             #   않는다), 계수만 "문서 오류 후보" 에서 떼어 따로 센다. 가리키는 타입에 **들어가는** 범위는 위에서 이미 쓰였다.
@@ -3796,6 +3800,18 @@ def generate_suts_quality_report(
 # Document validation
 # ---------------------------------------------------------------------------
 
+_SUTS_SPEC_SHEET = "2.SW Unit Test Spec"
+
+
+def _find_spec_sheet(sheetnames: Any) -> Optional[str]:
+    """명세 시트의 **실제 이름** — 글자 그대로 있으면 그것, 없으면 번호 접두만 다른 시트. 없으면 None."""
+    names = list(sheetnames or [])
+    if _SUTS_SPEC_SHEET in names:
+        return _SUTS_SPEC_SHEET
+    want = _sheet_base_name(_SUTS_SPEC_SHEET)
+    return next((n for n in names if _sheet_base_name(n) == want), None)
+
+
 def validate_suts_xlsm(
     xlsm_path: str,
     expected_tc_range: Optional[tuple] = None,
@@ -3832,21 +3848,25 @@ def validate_suts_xlsm(
         return {"valid": False, "issues": [f"Cannot open: {e}"],
                 "warnings": warnings, "stats": {}}
 
-    required_sheets = ["2.SW Unit Test Spec"]
-    for s in required_sheets:
-        if s not in wb.sheetnames:
-            issues.append(f"Missing required sheet: {s}")
+    # (R77 리뷰 I4) 명세 시트도 **번호 접두를 떼고** 찾는다 — 글자 그대로만 찾으면 이름이 `SW Unit Test Spec` 인 양식에서
+    #   "필수 시트 없음" 한 줄만 남고 아래 TC·시퀀스 검사가 통째로 건너뛰어진다(0 을 세고 조용해지는 fail-open).
+    _spec_sheet = _find_spec_sheet(wb.sheetnames)
+    if _spec_sheet is None:
+        issues.append(f"Missing required sheet: {_SUTS_SPEC_SHEET}")
 
-    expected_sheets = ["Cover", "History", "1.Introduction", "1.Test Environment",
-                       "2.SW Unit Test Spec", "3.Traceability"]
+    expected_sheets = ["Cover", "History", "1.Introduction", "1.Test Environment", "3.Traceability"]
     stats["sheets"] = wb.sheetnames
     stats["sheet_count"] = len(wb.sheetnames)
+    # (R77 N114) ① 시트는 **번호 접두를 떼고** 찾는다 — 정본(KJPDS02 SwUTS)의 시트 이름은 `Introduction` 인데 여기는
+    #   `1.Introduction` 만 찾아, 시트가 **있는데도** 라이브 SUTS 가 매번 `valid: False` 였다(R75·R76 실측, 사유 이 한 줄).
+    #   ② "선택" 시트의 부재는 판정을 뒤집지 않는다 — 형제 검증기(`validate_sts_xlsm`)는 처음부터 경고였다. 필수 시트는 위에서 본다.
+    _present = {_sheet_base_name(n) for n in wb.sheetnames}
     for s in expected_sheets:
-        if s not in wb.sheetnames:
-            issues.append(f"Optional sheet missing: {s}")
+        if _sheet_base_name(s) not in _present:
+            warnings.append(f"Optional sheet missing: {s}")
 
-    if "2.SW Unit Test Spec" in wb.sheetnames:
-        ws = wb["2.SW Unit Test Spec"]
+    if _spec_sheet is not None:
+        ws = wb[_spec_sheet]
         # ⚠ 레이아웃을 **하드코딩하지 않는다**. 예전엔 `min_row=7`·`max_col=149`·
         #   `row[12]`(옛 Seq.No)·`row[13:62]`(옛 Input) 가 박혀 있었다. 정본 레이아웃
         #   으로 바꾸자 검증기가 시퀀스 7,267건을 **1,576건으로** 셌다(-5,691).
@@ -4873,13 +4893,18 @@ def validate_suts_output(xlsm_path: str) -> Dict[str, Any]:
     warnings: List[str] = []
     stats: Dict[str, Any] = {"sheets": wb.sheetnames, "sheet_count": len(wb.sheetnames)}
 
-    expected_sheets = ["Cover", "History", "1.Introduction", "1.Test Environment", "2.SW Unit Test Spec"]
-    for s in expected_sheets:
-        if s not in wb.sheetnames:
-            issues.append(f"Missing sheet: {s}")
+    # (R77 N114 · 리뷰 W3) `validate_suts_xlsm` 과 **같은 판정**이다 — 명세 시트는 필수(issue), 나머지는 선택(warning), 이름은
+    #   번호 접두 무시. 한쪽만 고치면 같은 파일을 두 검증기가 PASS/FAIL 로 갈라 말한다(형제 검증기 계약).
+    _spec_sheet = _find_spec_sheet(wb.sheetnames)
+    if _spec_sheet is None:
+        issues.append(f"Missing sheet: {_SUTS_SPEC_SHEET}")
+    _present = {_sheet_base_name(n) for n in wb.sheetnames}
+    for s in ("Cover", "History", "1.Introduction", "1.Test Environment"):
+        if _sheet_base_name(s) not in _present:
+            warnings.append(f"Optional sheet missing: {s}")
 
-    if "2.SW Unit Test Spec" in wb.sheetnames:
-        ws = wb["2.SW Unit Test Spec"]
+    if _spec_sheet is not None:
+        ws = wb[_spec_sheet]
         tc_count = 0
         seq_count = 0
         total_inp = 0
