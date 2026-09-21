@@ -15,7 +15,13 @@ from generators import sits as sits_mod
 from generators._xlsx_merge import merge_fresh
 from generators.sts import _classify_steps, _generate_steps_from_flow, generate_sts_xlsm, generate_test_cases
 from generators.suts import generate_sequences, is_extended_strategy
-from generators.tc_profile import TC_PROFILE_EXTENDED, TC_PROFILE_REFERENCE, is_extended, normalize_tc_profile
+from generators.tc_profile import (
+    TC_PROFILE_EXTENDED,
+    TC_PROFILE_RECOMMENDED,
+    TC_PROFILE_REFERENCE,
+    is_extended,
+    normalize_tc_profile,
+)
 
 
 class TestProfileValue:
@@ -138,9 +144,24 @@ class TestStsProfile:
         assert not any("tc_profile" in t for t in base)
 
     def test_extended_contains_the_reference_document_unchanged(self):
+        """확장은 기본 문서의 시험을 **같은 ID·같은 순서·같은 요구 밑에** 담고 그 뒤에 덧붙인다.
+
+        ⚠ R78 에서 프리셋이 셋이 되며 이 불변식의 **비교 대상이 바뀌었다**.
+          `reference ⊂ recommended ⊂ extended` 이고 확장은 근거 보강도 켜므로, 확장 안의
+          기본 구간은 정본 규모본과 **기대결과 문장이 다르다**(그게 보강의 정의다).
+          구조(ID·순서·요구 배치·기법 라벨)는 정본 규모본과 같고, 스텝까지 같아야 하는 상대는
+          **권장본**이다 — 둘은 물량만 다르기 때문이다. 두 축을 한 단언에 섞으면
+          "확장이 기본을 밀어냈다" 와 "확장이 근거를 올렸다" 가 구별되지 않는다.
+        """
         base, _ = _sts(None)
+        rec, _ = _sts(TC_PROFILE_RECOMMENDED)
         ext, st = _sts("extended")
-        assert [_key(t) for t in ext if t.get("tc_profile") != TC_PROFILE_EXTENDED] == [_key(t) for t in base]
+        kept = [t for t in ext if t.get("tc_profile") != TC_PROFILE_EXTENDED]
+        # 구조 축 — 정본 규모본과 같다
+        assert [(t["id"], t["srs_id"], t["title"], t["gen_method"]) for t in kept] ==                [(t["id"], t["srs_id"], t["title"], t["gen_method"]) for t in base]
+        # 스텝 축 — 권장본과 같다(근거 보강이 둘 다 켜져 있다)
+        assert [_key(t) for t in kept] == [_key(t) for t in rec]
+        assert len(rec) == len(base), "권장은 물량을 안 늘린다"
         assert len(ext) == len(base) + st["extended_tcs"] and st["extended_tcs"] > 0
         assert len({t["id"] for t in ext}) == len(ext), "확장 TC 의 ID 는 기본 TC 뒤를 잇는다 — 겹치면 안 된다"
 
@@ -411,7 +432,9 @@ class TestGateRow:
     def test_row_shows_the_default_and_the_pick(self, doc_type, tmp_path):
         row = self._steps(doc_type, tmp_path)["tc_profile"]
         assert row["measured"]["value"] == TC_PROFILE_REFERENCE and row["measured"]["choice"] == "tc_profile"
-        assert [o["value"] for o in row["measured"]["options"]] == ["", TC_PROFILE_EXTENDED]
+        assert [o["value"] for o in row["measured"]["options"]] == [
+            "", TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED,
+        ], "선택지는 물량·근거 3단계다(R78 에서 recommended 추가)"
         assert "정본 규모" in row["reason"] and "현재 **확장**" not in row["reason"]
         picked = self._steps(doc_type, tmp_path, {"tc_profile": "extended"})["tc_profile"]
         assert picked["measured"]["value"] == TC_PROFILE_EXTENDED and picked["measured"]["picked"] == "extended"
@@ -537,7 +560,9 @@ class TestWiring:
         ch = req.requirements_for(doc_type)["choices"]["tc_profile"]
         assert ch["param"] == "tc_profile" and ch["api"] == "" and ch["adjustable"] is True
         # 같은 뜻의 값 둘(""·"reference")을 다 내면 화면에 "정본 규모" 가 두 줄 선다(리뷰 I6) — 미설정 하나만 낸다.
-        assert [o["value"] for o in ch["options"]] == ["", TC_PROFILE_EXTENDED]
+        assert [o["value"] for o in ch["options"]] == [
+            "", TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED,
+        ]
         assert ch["effect"]
 
     def test_uds_has_no_such_choice(self):

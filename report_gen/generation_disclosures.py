@@ -30,7 +30,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from generators.tc_profile import TC_PROFILE_EXTENDED, TC_PROFILE_REFERENCE
+from generators.tc_profile import (
+    TC_PROFILE_EXTENDED,
+    TC_PROFILE_RECOMMENDED,
+    TC_PROFILE_REFERENCE,
+)
 
 __all__ = ["build_disclosures", "DISCLOSURE_TONES", "DISCLOSURE_DOC_TYPES"]
 
@@ -115,7 +119,13 @@ def _common_items(qr: Dict[str, Any], alt: Dict[str, Any]) -> List[Dict[str, Any
         if prof == TC_PROFILE_EXTENDED:
             label_v = "확장"
             note = ("근거 있는 시험을 상한 없이 덧붙인 문서다 — 기본(정본 규모) 문서의 시험을 "
-                    "같은 ID·같은 순서로 전부 담고 그 뒤에 덧붙인다.")
+                    "같은 ID·같은 순서로 전부 담고 그 뒤에 덧붙인다. 시험 근거 보강도 함께 켜진다.")
+        elif prof == TC_PROFILE_RECOMMENDED:
+            label_v = "권장(물량은 정본 규모)"
+            note = ("TC 수는 기본과 같고 **시험 근거만** 올린 문서다 — 기대결과를 관측 대상이 "
+                    "드러나는 문장으로 바꾸고(반환값·**쓰기** 전역), 하한 위반 경계값을 덧붙인다. "
+                    "근거가 없는 자리는 바꾸지 않고 아래 '근거 없어 둔 기대결과' 로 센다. "
+                    "산출이 바뀌는 것은 STS 뿐이다 — SUTS·SITS 는 이 프로파일에서 내용이 같다.")
         elif prof == TC_PROFILE_REFERENCE:
             label_v = "정본 규모(기본)"
             note = "정본과 같은 규모로만 만든 문서다 — 아래 상한에 걸린 시험은 이 문서에 없다."
@@ -183,6 +193,20 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.append(_item(
             "sts_max_tc_per_req", "요구당 TC 상한", str(cap),
             "한 요구 밑에 만드는 시험의 최대 개수다. 이 상한에 걸린 요구의 나머지 시험은 이 문서에 없다."))
+
+    # 근거 보강(`recommended` 이상)이 바꾼 기대결과 수 / **근거가 없어 그대로 둔 수**.
+    # 뒤 숫자가 곧 "지어내지 않았다" 의 증거라 0 이어도 싣는다 — 다만 보강을 안 켠 문서
+    # (둘 다 0)에서는 항목 자체를 만들지 않는다(키 없으면 항목 없음 규약과 같은 뜻).
+    _enr, _nb = _int(gs, "expected_enriched"), _int(gs, "expected_no_basis")
+    if (_enr or 0) or (_nb or 0):
+        out.append(_item(
+            "sts_expected_enriched", "관측 대상을 적은 기대결과", str(_enr or 0),
+            "무엇을 보고 합격인지 말하지 않던 문장을 관측 대상이 드러나게 바꾼 **스텝 수**다 — "
+            "`기대 결과와 일치`→`반환값: (U16)` · `{함수} 정상 실행 확인`→`… 실행 후 글로벌 g_X 갱신` · "
+            "`입력 경계 최솟값 설정`→`경계 최솟값 적용: n=0`. 문서에 실린 스텝만 센다(만든 수가 아니다)."))
+        out.append(_item(
+            "sts_expected_no_basis", "근거 없어 둔 기대결과", str(_nb or 0),
+            "반환 타입도 전역도 모르는 함수라 문장을 **바꾸지 않은** 수다 — 관측 대상을 지어내지 않았다는 뜻이다."))
 
     # 함수 기준 커버리지 — 요구 커버리지 100% 와 **다른 축**이다. 요구는 전부 덮였는데
     # 요구당 TC 상한 때문에 매핑된 함수 1,036개 중 93개만 시험을 가진 run 이 실재한다(2026-09-20).
@@ -463,6 +487,23 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "sits_chain_truncated", "잘린 호출 사슬", f"{chain_cut}개 흐름",
             f"흐름은 실렸지만 호출 경로가 노드 상한({_int(fc, 'chain_max_nodes') or '—'})에 걸려 끝까지 적히지 "
             "않았다 — 시험 절차가 경로의 앞부분만 담는다.", tone="warning"))
+
+    # Gen Method 라벨 축 — 보강을 켰을 때만 싣는다(안 켠 문서는 말할 게 없다).
+    #   ⚠ 0 도 싣는다: 켰는데 0 이면 "경계 sub-case 가 없어 라벨을 안 붙였다" 는 뜻이고,
+    #     그게 곧 라벨만 바꾸지 않았다는 증거다. 켠 사실 자체는 위 공통 항목이 말한다.
+    # 경계값 진단 — **Gen 칸은 안 바뀐다**. "문서가 실제로 경계를 흔들었는가" 만 말한다.
+    #   키가 있으면 0 이어도 싣는다(0 은 "안 흔들었다" 는 적극적 사실이다).
+    _bv = _int(fc, "flows_with_boundary_subcases")
+    if _bv is not None:
+        _tot = _int(qr, "total_test_cases")
+        _k = _int(fc, "boundary_subcase_min_distinct")
+        out.append(_item(
+            "sits_boundary_subcases", "경계를 흔든 흐름",
+            f"{_show(_bv)}" + (f" / {_tot}" if _tot else ""),
+            f"sub-case 가 같은 입력을 {_k or '여러'}값 이상으로 바꿔 본 TC 수다. "
+            "⚠ sub-case 상한에 크게 좌우된다 — 상한이 그 값보다 작으면 전부 0 이 된다. "
+            "Gen Method 칸은 이 수와 무관하게 정본 짝(`REQ, IFT`↔`AOR, AEC` · `FI`↔`AOR/ABV`)을 따른다: "
+            "정본마다 ABV 표기 관례가 갈려(KJPDS02 9% vs HDPDM01 99%) 유도하지 않고 수치만 보고한다."))
 
     # Related ID 칸 절단.
     rel_cut = _int(fc, "related_truncated_ids")

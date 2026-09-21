@@ -46,6 +46,7 @@ from backend.services.swut_meta_resolver import (
     folder_contents_hint as _resolver_folder_contents_hint,
 )
 from generators.tc_profile import TC_PROFILE_EXTENDED as _TC_PROFILE_EXTENDED
+from generators.tc_profile import TC_PROFILE_RECOMMENDED as _TC_PROFILE_RECOMMENDED
 from generators.tc_profile import TC_PROFILE_REFERENCE as _TC_PROFILE_REFERENCE
 from generators.tc_profile import normalize_tc_profile as _normalize_tc_profile
 from report_gen.source_roots import first_source_root
@@ -2280,9 +2281,19 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 판정 규칙은 여기 복제하지 않는다 — `generators/tc_profile.normalize_tc_profile` 을 생성기와 같이 쓴다.
     if _tc_choice:
         _tc_reason = str(_tc_choice.get("effect") or "")
-        _tc_now = ("현재 **확장**입니다 — 기본 문서의 시험을 전부 담고 그 뒤에 덧붙입니다. 문서가 커지고 생성이 "
-                   "오래 걸립니다." if _tc_extended else
-                   "현재 **정본 규모**(기본)입니다.")
+        if _tc_extended:
+            _tc_now = ("현재 **확장**입니다 — 기본 문서의 시험을 전부 담고 그 뒤에 덧붙입니다. 문서가 커지고 생성이 "
+                       "오래 걸립니다. 시험 근거 보강도 함께 켜집니다.")
+        elif _tc_profile == _TC_PROFILE_RECOMMENDED:
+            # 물량 축과 근거 축이 한 선택지에 묶여 있다 — "물량은 확장인데 근거는 기본" 은 고를 수 없다.
+            # 그 제약을 여기서 말해 둔다(`generators/tc_profile.py` docstring 과 같은 내용).
+            _tc_now = ("현재 **권장**입니다 — TC 수는 정본 규모 그대로이고 시험 근거만 올립니다"
+                       "(기대결과에 관측 대상을 적고, 하한 위반 경계값을 덧붙입니다). "
+                       "근거가 없는 자리는 바꾸지 않고 생성 공시에 그 수를 적습니다. "
+                       "⚠ 지금 산출이 바뀌는 것은 **STS 뿐**입니다 — SUTS 는 값 칸이 이미 99% 차 있고, "
+                       "SITS 는 경계 sub-case 수를 공시에만 적습니다(위 '적용 효과' 참조).")
+        else:
+            _tc_now = "현재 **정본 규모**(기본)입니다."
         steps.append(_step(
             "tc_profile", "decision", S_OK if not _tc_profile_bad else S_DEGRADED, "시험 물량",
             measured={"value": _tc_profile, "stored": _tc_profile_bad or None,

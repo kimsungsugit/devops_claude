@@ -124,6 +124,33 @@ _SITS_GEN_BOUNDARY = "AOR/ABV"
 SITS_WRITABLE_GEN_CODES = frozenset(
     c.strip() for v in (_SITS_GEN_DEFAULT, _SITS_GEN_BOUNDARY) for c in v.replace("/", ",").split(",") if c.strip())
 
+# ── 경계값 진단 — **라벨을 바꾸지 않는다** ──────────────────────────────────
+#
+# R78 은 여기에 `AOR, ABV, AEC` 라벨을 붙이려다 되돌렸다. 근거와 반증을 같이 남긴다:
+#
+#   ✔ 찬성 — 두 정본의 관례가 **서로 반대다**(2026-09-21 실측):
+#       KJPDS02_PV v1.02 (54 TC)  ABV 5건(9%).  `REQ, IFT`↔`AOR, AEC` 49 · `FI`↔`AOR/ABV` 5
+#       HDPDM01    v2.02 (77 TC)  ABV 76건(99%). `ABV, AEC` 57 · `AOR, ABV` 16 · `ABV, AEC, AOR` 1
+#     HDPDM01 은 Test Method 열이 **아예 없고**, 77 중 68 이 `-1/0/127/255/256` 를 담은 채 ABV 를 단다.
+#
+#   ✘ 반대 3건 — 이쪽이 이겼다:
+#     ① 붙이려던 문자열 `AOR, ABV, AEC` 는 **두 정본 어디에도 0건**이다(HDPDM01 지배형은
+#        `ABV, AEC` 57, KJPDS02 는 `AOR, AEC` 49). 지금 기본값은 KJPDS02 와 **100% 일치**하는데,
+#        붙이면 "어느 쪽과도 안 맞는" 값이 된다 — 감사자가 정본과 나란히 놓고 보는 칸이다.
+#     ② 판정 조건이 TC 를 하나도 **가르지 못한다**: `max_subcases` 가 3 이상이면 전 흐름이
+#        참이고 2 이하면 전 흐름이 거짓인 계단 함수다(실측 0/120 · 0/120 · 120/120 · …).
+#        "산출을 되읽어 정한다" 는 약속이 실제로는 설정값 하나를 되읽는 것이었다.
+#     ③ sub-case 라벨을 **생성기 자신이 `EC1:무효-하한` … `EC7:무효-상한`(등가분할)** 이라 부른다.
+#        같은 7값 세트를 ABV 로 재해석하면 `method_diversity_pct` 가 66.67 → 100.0 으로 오르는데,
+#        문서는 한 글자도 안 바뀐다 — R76 N87 이 고친 "측정치가 문서가 아니라 자기를 잰다" 그대로다.
+#
+# 그래서 **수치만 보고**하고 칸은 건드리지 않는다. 프로젝트별 관례를 라벨에 반영하려면
+# 그건 유도가 아니라 **입력**이어야 한다(FI 선별을 입력으로 받기로 한 것과 같은 판단).
+
+#: 같은 입력을 **몇 값으로** 흔들어야 경계값 분석이라 부를 수 있는가 — 위 ② 때문에 이 값은
+#: 라벨을 정하지 않고 **진단 수치의 정의**로만 쓴다.
+_SITS_BV_MIN_DISTINCT = 3
+
 # ── Introduction 1.5 / 1.6 — 이 문서가 **자기 어휘를 정의하는 곳** ──────────
 #
 # ⚠ 감사자는 3번 시트의 `REQ, IFT` · `FI` 를 보고 1.5 표에서 그 코드를 찾는다.
@@ -275,6 +302,44 @@ def _sits_gen_method(gen: Any, test_method: Optional[str] = None) -> str:
         return _SITS_GEN_BOUNDARY if m.startswith(_SITS_METHOD_FAULT) else _SITS_GEN_DEFAULT
     g = str(gen or "").strip().upper()
     return _SITS_GEN_BOUNDARY if ("ABV" in g or "BV" in g) else _SITS_GEN_DEFAULT
+
+
+def _has_boundary_subcases(sub_cases: Any) -> bool:
+    """이 TC 의 sub-case 가 **실제로** 같은 입력을 여러 값으로 흔들었는가.
+
+    ⚠ 판정은 생성기 내부 라벨이 아니라 **산출물에서 되읽어** 한다. `gen_method`
+      내부 라벨은 네 분기가 모두 `ABV` 를 품어 늘 참이 되므로(`_sits_gen_method`
+      docstring 의 실측) 라벨로 라벨을 정하면 아무것도 안 재는 것과 같다.
+
+    `Scenario`(입출력 없는 흐름의 대체 축)와 `N/A` 는 세지 않는다 — 그 경로는
+    `_generate_sub_cases` 가 경계값을 **만들지 않은** 경로다.
+    """
+    per_var: Dict[str, set] = {}
+    for sc in sub_cases or []:
+        for k, v in ((sc or {}).get("inputs") or {}).items():
+            if str(k).strip() == "Scenario":
+                continue
+            s = str(v).strip()
+            if not s or s.upper() == "N/A":
+                continue
+            per_var.setdefault(str(k), set()).add(s)
+    return any(len(vals) >= _SITS_BV_MIN_DISTINCT for vals in per_var.values())
+
+
+def _sits_gen_method_for_itc(itc: Dict[str, Any]) -> str:
+    """Gen 칸에 **쓸 값** — 라이터와 품질 리포트의 단일 출처.
+
+    두 곳이 각자 `_sits_gen_method` 를 부르던 시절, 리포트는 내부 라벨을 세고
+    라이터는 짝을 썼다(R76 N87: `method_diversity_pct` 가 22 run 전부 100.0 —
+    문서를 잰 값이 아니었다). **분포는 문서에 쓰는 값으로 센다**는 규약을 지키려면
+    값을 고르는 자리가 하나여야 한다.
+
+    ⚠ **근거 보강 프로파일은 이 값을 바꾸지 않는다.** R78 이 여기에 ABV 를 붙이려다
+      되돌렸다 — 사유 3건은 위 `_SITS_BV_MIN_DISTINCT` 블록에 적었다(문자열이 두 정본
+      어디에도 없음 · 판정이 `max_subcases` 의 계단 함수 · 같은 7값 세트를 생성기가
+      스스로 등가분할이라 부름). 보강은 `flows_with_boundary_subcases` **수치로만** 나간다.
+    """
+    return _sits_gen_method(itc.get("gen_method", "ABV"), _sits_test_method(itc))
 
 # ⚠ 주석의 숫자는 **옛 레이아웃**(67/70)이었다. 실제 값은 정본과 같은 82/113 이다
 #   — 배열 펼침 예산이 이 값이라 숫자를 잘못 읽으면 15+43칸을 안 쓰는 줄 안다.
@@ -924,6 +989,8 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
     "strategy_blocks_truncated",
     "relid_check_rows", "relid_tidy_rows", "relid_index_rows",
+    # 경계값 진단 축 — Gen 칸은 안 바뀐다. 이 수는 "문서가 실제로 경계를 흔들었는가" 만 말한다.
+    "flows_with_boundary_subcases", "boundary_subcase_min_distinct",
 )
 
 # 그중 **손실 축** — "몇 개를 못 실었나". 요약 표면(영향도 카드)은 전 키를 싣기엔
@@ -2924,7 +2991,6 @@ def generate_sits_xlsm(
         input_vars = itc.get("input_vars") or []
         expected_vars = itc.get("expected_vars") or []
         related_str = ", ".join(itc.get("related_ids") or [])
-        gen_method = itc.get("gen_method", "ABV")
 
         # TC header row
         tc_desc = (
@@ -2945,13 +3011,15 @@ def generate_sits_xlsm(
         ws.cell(row=current_row, column=_SAFETY_COL).border = thin
         # ⚠ Gen 은 Method 에서 유도한다 — 정본에서 둘은 짝이다(`_sits_gen_method`).
         #   독립으로 정하면 정본에 없는 조합이 나온다(실측: 367건 전부 그랬다).
+        #   값을 고르는 자리는 `_sits_gen_method_for_itc` **하나뿐**이다 — 품질 리포트도
+        #   같은 함수를 불러야 "분포는 문서에 쓰는 값으로 센다" 가 유지된다(R76 N87).
         _test_method = _sits_test_method(itc)
         ws.cell(row=current_row, column=_METHOD_COL,
                 value=_test_method).font = data_font
         ws.cell(row=current_row, column=_METHOD_COL).alignment = center
         ws.cell(row=current_row, column=_METHOD_COL).border = thin
         ws.cell(row=current_row, column=_GEN_COL,
-                value=_sits_gen_method(gen_method, _test_method)).font = data_font
+                value=_sits_gen_method_for_itc(itc)).font = data_font
         ws.cell(row=current_row, column=_GEN_COL).alignment = center
         ws.cell(row=current_row, column=_GEN_COL).border = thin
         ws.cell(row=current_row, column=_RELATED_COL, value=related_str).font = data_font
@@ -3083,7 +3151,7 @@ def generate_sits_quality_report(
     #   문서를 잰 값이 아니었다. 결합자(쉼표 · 슬래시)는 `_split_method_codes` 가 가른다(옛 분리는 `/` 를 몰랐다).
     gen_dist: Dict[str, int] = {}
     for itc in itcs:
-        for m in _split_method_codes(_sits_gen_method(itc.get("gen_method", "ABV"), _sits_test_method(itc))):
+        for m in _split_method_codes(_sits_gen_method_for_itc(itc)):
             gen_dist[m] = gen_dist.get(m, 0) + 1
 
     with_related = sum(1 for t in itcs if t.get("related_ids"))
@@ -3690,6 +3758,12 @@ def generate_sits(
                              fi_flows=_fi_flows or None)
     if flow_stats is not None:
         flow_stats["fi_unresolved"] = len(_fi_unresolved)
+        # 경계값 **진단** — Gen 칸은 안 건드린다(위 `_SITS_BV_MIN_DISTINCT` 블록의 사유 3건).
+        #   "이 문서의 흐름 중 몇 개가 같은 입력을 세 값 이상으로 흔들었나" 를 그대로 보고한다.
+        #   ⚠ 이 수는 `max_subcases` 에 크게 좌우된다(3 미만이면 전부 0) — 그 사실을 공시가 말한다.
+        flow_stats["flows_with_boundary_subcases"] = sum(
+            1 for _t in itcs if _has_boundary_subcases(_t.get("sub_cases")))
+        flow_stats["boundary_subcase_min_distinct"] = _SITS_BV_MIN_DISTINCT
 
     _progress(65, f"{len(itcs)}개 TC, {sum(len(t['sub_cases']) for t in itcs)}개 sub-case 생성 완료")
 

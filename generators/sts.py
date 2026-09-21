@@ -19,7 +19,11 @@ from generators._artifact_check import apply_write_back_check, sheet_base_name
 from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import SAFETY_RELATED_MARK, is_safety_asil
 from generators.safety_marks import resolve_safety_related as _safety_mark_impl
-from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
+from generators.tc_profile import (
+    TC_PROFILE_EXTENDED,
+    is_evidence_enriched,
+    normalize_tc_profile,
+)
 from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
     _extract_sds_partition_map,
@@ -28,6 +32,10 @@ from report_gen.requirements import (
     is_sds_placeholder_key,
     normalize_sds_key,
 )
+
+# ASIL 등급 표기 정규화 **단일 출처**. `"ASIL A"` 처럼 접두가 붙은 값에서 등급만 뽑는다 —
+# 이 저장소엔 정규화가 이미 여럿이라 새로 만들지 않는다. 증분 실측 2.0ms / +2모듈.
+from workflow.asil_propagation import normalize_asil
 
 _logger = logging.getLogger(__name__)
 
@@ -1382,6 +1390,11 @@ def _generate_steps_from_flow(
     max_tc: int = _MAX_TC_PER_REQ,
     stats: Optional[Dict[str, Any]] = None,
     keep_boundary: bool = False,
+    # ⚠ 여기서부터 **키워드 전용**이다. 이 함수는 위치 인자가 이미 여섯이라, 신규 인자를
+    #   맨 끝에 붙이는 것만으로는 미래의 호출부가 `enrich` 자리에 다른 값을 조용히 바인딩하는
+    #   것을 못 막는다. 아래 두 폴백(`_generate_simple_steps`·`_simple_steps_capped`)도 같은 규약이다.
+    *,
+    enrich: bool = False,
 ) -> List[List[Dict[str, str]]]:
     """Generate multiple test-case step-lists from a function's logic flow.
 
@@ -1406,7 +1419,7 @@ def _generate_steps_from_flow(
         stats["boundary_appended"] = False
         stats["boundary_index"] = None
     if not logic_flow:
-        _simple = _simple_steps_capped(func_info, max_steps)
+        _simple = _simple_steps_capped(func_info, max_steps, enrich=enrich)
         if stats is not None and len(_simple) >= 3:
             # `[정상, 경계값, 범위 초과]` — 경계값 TC 가 빠졌으면(`max_steps<4`) 길이가 2 다. `boundary_appended` 는 그대로
             #   False 다(그 값은 "분기 TC **뒤에 덧붙인** 것" 이라는 뜻으로 요구당 상한 계수에 쓰인다).
@@ -1430,11 +1443,13 @@ def _generate_steps_from_flow(
     elif normal_steps:
         test_cases.append(normal_steps)
     else:
-        test_cases = _simple_steps_capped(func_info, max_steps)
+        test_cases = _simple_steps_capped(func_info, max_steps, enrich=enrich)
     if branch_tcs or normal_steps:
         # 경계 TC 는 최소 4 스텝(최솟값 설정·호출·최댓값 설정·호출)이라 `max_steps<4` 면 한 축이 잘린 채 BAA 라벨만 남는다
         # (리뷰 W3) — 그땐 붙이지 않고 "못 붙임" 으로 센다.
-        simple = _generate_simple_steps(func_info) if max_steps >= 4 else []
+        # ⚠ 여기서 나온 목록은 **경계 TC 한 개만** 골라 쓴다. 계수는 여기서 하지 않는다 —
+        #   표식만 붙고, 문서에 실린 스텝만 `_drain_evidence_marks` 가 센다.
+        simple = _generate_simple_steps(func_info, enrich=enrich) if max_steps >= 4 else []
         if len(simple) >= 2:
             # TC2 = 경계 최솟값/최댓값 입력 — 타입을 아는 입력이 있을 때만 존재한다(R71: 모르는 타입은 경계값이 없다).
             boundary_tc = simple[1]
@@ -1692,10 +1707,140 @@ def _collect_guard_conds(
     return result
 
 
+#: 반환이 **없다**는 뜻으로 쓰이는 값들(소문자 비교). `out_hint` 시절엔 힌트를 안 붙이는
+#: 조건이라 `void`/`None` 둘로 충분했지만, 지금은 `반환값: (…)` 라는 **단언**을 만드는
+#: 자리라 파서가 못 읽어 채운 자리표시자까지 걸러야 한다 — `반환값: (N/A)` 는 근거가 아니다.
+_NO_RETURN_TOKENS = frozenset({"void", "none", "n/a", "na", "-", "", "tbd", "?", "unknown"})
+
+
+def _writes_global(raw: Any) -> bool:
+    """이 전역 선언 텍스트가 **쓰기**(OUT/INOUT)인가 — 방향 태그가 유일한 근거다.
+
+    태그가 없으면(구판 파서·손으로 넣은 항목) 판정할 수 없으므로 **거짓**으로 본다.
+    "모르면 안 쓴다" 가 이 라운드의 규약이고, 반대로 두면 태그 없는 입력이 전부
+    "값이 바뀐다" 고 단언된다.
+    """
+    # ⚠ 이 파일의 `_PARAM_DIR_TAG_RE` 는 **`IN|OUT|INOUT` 셋만** 안다 — `INDIRECT`·
+    #   `INDIRECT2` 를 모른다. 방향 판정을 그걸로 하면 두 태그가 "태그 없음" 으로 떨어진다.
+    #   태그 목록과 그 의미의 단일 출처는 생산자 쪽(`function_analyzer`)이다.
+    from report_gen.function_analyzer import _DIRECTION_TAG_RE, _TAG_TO_COLUMNS
+    m = _DIRECTION_TAG_RE.match(str(raw).strip())
+    if not m:
+        return False
+    return bool(_TAG_TO_COLUMNS.get(m.group(1).upper(), (False, False))[1])
+
+
+def _observation_basis(func_info: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    """이 함수에서 **무엇을 관측할 수 있는가** — 근거 보강의 단일 출처.
+
+    `("return", "U16")` · `("globals", "g_State, g_Cnt")` · `("", "")` 중 하나.
+    빈 값은 "관측 대상을 모른다" 는 뜻이고, 그때 호출자는 **문장을 바꾸지 않는다**.
+
+    기대결과를 고치는 자리가 셋(`_ensure_min_steps` 의 호출 스텝·출력 스텝,
+    `_generate_simple_steps` 의 TC1 호출 스텝)이라 판정을 여기 모은다 — 복제하면
+    한쪽만 고쳐지는 이 저장소의 반복 실패 모드가 된다.
+
+    ⚠ 전역 원소는 `"[OUT] REG_LP0DR"` · `"[INDIRECT] tbl (size: 8) (idx: 7, …)"` 같은
+      **선언 텍스트**다. 그대로 쓰면 방향 태그와 주석 꼬리가 기대결과 칸에 실린다
+      (라이브 실측에서 잡혔다). 이름만 뽑는 단일 출처는 `_split_param_decl` 이다.
+    ⚠ `str(None)` 은 `"None"` 이라 **빈 값이 아니다** — 이름 키가 없는 항목을 그대로
+      통과시키면 `글로벌 None 값 변화 관측` 이 나간다(자체 시험이 잡았다).
+    ⚠ **방향 태그를 버리면 안 된다.** `[IN]` 은 그 전역을 *읽기만* 한다는 뜻이고
+      (`uds_generator.py`: `lhs` 없으면 IN), 거기에 "갱신 / 값 변화 관측" 을 적으면
+      감사 문서가 일어나지 않는 일을 단언한다. 실측(HDPDM01 447함수): globals 를 근거로
+      삼은 370 중 **164(44%)가 고른 전역이 전부 읽기 전용**이었다. 쓰기 방향
+      (`OUT`/`INOUT`)만 근거로 삼고, 나머지는 근거 없음으로 떨어뜨린다.
+      방향 → (입력, 기대) 판정은 `function_analyzer._TAG_TO_COLUMNS` **단일 출처**를 쓴다.
+    """
+    if not func_info:
+        return "", ""
+    _out = func_info.get("output")
+    _out = str(_out).strip() if _out is not None else ""
+    if _out and _out.lower() not in _NO_RETURN_TOKENS:
+        return "return", _out
+    names: List[str] = []
+    for g in (func_info.get("globals_global") or func_info.get("globals") or []):
+        raw = g.get("name") if isinstance(g, dict) else g
+        if raw is None:
+            continue
+        if not _writes_global(raw):
+            continue
+        _n = _split_param_decl(raw)[1]
+        if _n and _n not in names:
+            names.append(_n)
+        if len(names) >= 2:
+            break
+    return ("globals", ", ".join(names)) if names else ("", "")
+
+
+#: 근거 보강 표식이 붙는 임시 키. **문서에 나가기 전에 반드시 뗀다**(`_drain_evidence_marks`).
+_EV_MARK = "_ev"
+
+
+def _mark(step: Dict[str, str], key: str) -> Dict[str, str]:
+    """이 스텝의 기대결과를 보강했는가(`expected_enriched`) / 근거가 없어 그대로 뒀는가(`expected_no_basis`).
+
+    ⚠ **만든 자리에서 세지 않는다.** 생성기는 문서에 실리지 않을 스텝도 만든다 —
+      `_generate_simple_steps` 는 TC1·TC2·TC3 셋을 내는데 흐름이 있는 함수에서는
+      그중 **경계 TC 하나만** 골라 쓰고, 요구당 상한에 걸려 통째로 빠지는 TC 도 있다.
+      만든 수를 공시하면 "문서에 이만큼 있다" 는 거짓이 된다(실측: 만든 수 298 vs
+      문서에 실린 수 440 — 방향이 양쪽으로 다 어긋났다).
+
+      그래서 표식만 남기고, 계수는 **최종 스텝 목록이 확정된 뒤**
+      `_drain_evidence_marks` 가 한다. 이 저장소의 "분포는 문서에 쓰는 값으로 센다"
+      규약(R76 N87)과 같은 원칙이다.
+    """
+    step[_EV_MARK] = key
+    return step
+
+
+def _drain_evidence_marks(steps: List[Dict[str, str]], stats: Optional[Dict[str, int]]) -> None:
+    """확정된 스텝에서 표식을 **떼면서** 센다 — 계수와 산출물이 구조적으로 어긋날 수 없다.
+
+    표식은 반드시 떼야 한다: 스텝 dict 는 그대로 라이터와 중간 JSON 으로 흘러간다.
+    """
+    for st in steps:
+        k = st.pop(_EV_MARK, None)
+        if k and stats is not None:
+            stats[k] = stats.get(k, 0) + 1
+
+
+def _call_step(
+    name: str,
+    *,
+    enrich: bool = False,
+    kind: str = "",
+    basis: str = "",
+) -> Dict[str, str]:
+    """`{name}() 호출` 스텝 — **무엇을 보고 정상인지** 말하는 기대결과와 함께.
+
+    `{name} 정상 실행 확인` 은 실행됐다는 것 말고 아무것도 단언하지 않는다(라이브 실측
+    HDPDM01: 서술 713행 중 다수가 이 문장). 관측 대상을 알면 그것을 적고, 모르면
+    **문장을 그대로 둔다**.
+
+    이 스텝을 만드는 자리가 둘(`_ensure_min_steps` · `_generate_simple_steps` 의 TC1)이라
+    여기 모은다. 흐름에서 나오는 **다른 함수** 호출 노드(`_generate_steps_from_flow`)는
+    그 함수의 반환·전역을 모르므로 근거가 없고, 그래서 이 헬퍼를 쓰지 않는다.
+    """
+    exp = f"{name} 정상 실행 확인"
+    mark = ""
+    if enrich:
+        if kind == "return":
+            exp, mark = f"{name} 반환값 획득 ({basis})", "expected_enriched"
+        elif kind == "globals":
+            exp, mark = f"{name} 실행 후 글로벌 {basis} 갱신", "expected_enriched"
+        else:
+            mark = "expected_no_basis"
+    step = {"action": f"{name}() 호출", "expected": exp}
+    return _mark(step, mark) if mark else step
+
+
 def _ensure_min_steps(
     steps: List[Dict[str, str]],
     func_info: Dict[str, Any],
     min_count: int = 3,
+    *,
+    enrich: bool = False,
 ) -> List[Dict[str, str]]:
     """Guarantee every TC has at least `min_count` steps.
 
@@ -1703,28 +1848,41 @@ def _ensure_min_steps(
       1. A function-call step (if not already present)
       2. An output-verification step
       3. A state-check step (if still below min_count)
+
+    ``enrich`` (근거 보강, `tc_profile` 이 `recommended` 이상): 출력 확인 스텝의 기대결과를
+    **관측 대상이 드러나는** 문장으로 바꾼다. `기대 결과와 일치` 는 무엇을 보고 합격인지
+    말하지 않는다 — 실측 1,128행이 그 문장이었다.
+
+    ⚠ **근거가 없으면 바꾸지 않는다.** 반환 타입도 전역도 모르는 함수는 현행 문장을 그대로
+      두고 ``stats["expected_no_basis"]`` 를 올린다. 문장만 그럴듯하게 만드는 것은
+      "무엇을 관측하는지" 를 지어내는 것이고, 그건 감사 문서에서 가장 나쁜 실패다.
     """
     result = list(steps)
     name = func_info.get("name", "function") if func_info else "function"
-    outputs = func_info.get("output") if func_info else None
+    _kind, _basis = _observation_basis(func_info)
+    _out = _basis if _kind == "return" else ""
 
     has_call = any("() 호출" in s.get("action", "") for s in result)
     if not has_call:
-        result.append({
-            "action": f"{name}() 호출",
-            "expected": f"{name} 정상 실행 확인",
-        })
+        result.append(_call_step(name, enrich=enrich, kind=_kind, basis=_basis))
 
     has_output_check = any(
         any(kw in s.get("action", "") for kw in ("출력", "반환값", "확인"))
         for s in result
     )
     if not has_output_check or len(result) < min_count:
-        out_hint = f" ({outputs})" if outputs and str(outputs).strip() not in ("void", "None", "") else ""
-        result.append({
-            "action": "출력/반환값 확인",
-            "expected": f"기대 결과와 일치{out_hint}",
-        })
+        expected = f"기대 결과와 일치{f' ({_out})' if _out else ''}"
+        _m = ""
+        if enrich:
+            # 같은 문서가 이미 쓰는 정답 형태를 넓힌다(`반환값: ( … )` · `글로벌 … 값 변화 관측`).
+            if _kind == "return":
+                expected, _m = f"반환값: ({_basis})", "expected_enriched"
+            elif _kind == "globals":
+                expected, _m = f"글로벌 {_basis} 값 변화 관측", "expected_enriched"
+            else:
+                _m = "expected_no_basis"            # 근거 부재 — 문장을 바꾸지 않는다
+        _st = {"action": "출력/반환값 확인", "expected": expected}
+        result.append(_mark(_st, _m) if _m else _st)
 
     if len(result) < min_count:
         result.append({
@@ -1760,14 +1918,14 @@ def _split_param_decl(inp: Any) -> Tuple[str, str]:
     return "", s.split(":")[0].strip()
 
 
-def _simple_steps_capped(func_info: Dict[str, Any], max_steps: int) -> List[List[Dict[str, str]]]:
+def _simple_steps_capped(func_info: Dict[str, Any], max_steps: int, *, enrich: bool = False) -> List[List[Dict[str, str]]]:
     """flow 없는 함수의 TC 에도 **같은 스텝 상한**을 건다(R76 N82).
 
     예전엔 `_generate_steps_from_flow` 가 flow 없는 함수를 상한 절단 **앞에서** 바로 돌려줘, `max_steps_per_tc` 를 낮춰도
     이 함수들의 TC 만 안 잘렸다(기본 15 에선 TC 가 최대 5 스텝이라 드러나지 않는다). 경계값 TC(TC2)는 flow 함수와 같은
     규칙이다 — 최소 4 스텝이라 `max_steps<4` 면 한 축이 잘린 채 BAA 라벨만 남으므로 **붙이지 않는다**.
     """
-    simple = _generate_simple_steps(func_info)
+    simple = _generate_simple_steps(func_info, enrich=enrich)
     if max_steps < 4 and len(simple) >= 2:
         # 목록은 `[정상]` 또는 `[정상, 경계값, 범위 초과]` 다 — 둘째 자리가 경계값 TC(flow 함수 쪽 `simple[1]` 과 같은 약속).
         simple = simple[:1] + simple[2:]
@@ -1779,6 +1937,8 @@ def _simple_steps_capped(func_info: Dict[str, Any], max_steps: int) -> List[List
 def _generate_simple_steps(
     func_info: Dict[str, Any],
     _import_cache: Dict[str, Any] = {},  # noqa: B006 — intentional one-time init
+    *,
+    enrich: bool = False,
 ) -> List[List[Dict[str, str]]]:
     """Fallback: generate 1~3 TCs from function info (no logic_flow).
 
@@ -1855,6 +2015,9 @@ def _generate_simple_steps(
         ty, nm = _split_param_decl(inp)
         return f"{ty} {nm}".strip() if nm else str(inp)
 
+    # 이 함수에서 관측할 수 있는 것(반환 / 전역 / 없음). 판정은 `_observation_basis` 하나다.
+    _obs_kind, _obs_basis = _observation_basis(func_info)
+
     # ── TC1: Normal path ──────────────────────────────────────────────────
     tc1: List[Dict[str, str]] = []
     if inputs and var_cache:
@@ -1871,7 +2034,8 @@ def _generate_simple_steps(
     elif inputs:
         in_str = ", ".join(_decl_text(i) for i in inputs[:5])
         tc1.append({"action": f"입력 설정: {in_str}", "expected": "입력 파라미터 정상 설정"})
-    tc1.append({"action": f"{name}() 호출", "expected": f"{name} 정상 실행 확인"})
+    # 호출 스텝의 기대결과는 **관측 대상**을 말한다 — 판정은 `_call_step`(단일 출처).
+    tc1.append(_call_step(name, enrich=enrich, kind=_obs_kind, basis=_obs_basis))
     if calls:
         call_str = ", ".join(calls[:4])
         tc1.append({"action": f"내부 호출 확인: {call_str}", "expected": "하위 함수 정상 호출"})
@@ -1904,18 +2068,30 @@ def _generate_simple_steps(
     tc2: List[Dict[str, str]] = []
     bnd_parts_min: List[str] = []
     bnd_parts_max: List[str] = []
+    _has_bnd = False        # 한 변수라도 **실값** 경계를 얻었는가(선언 텍스트 폴백과 구별)
     for inp in inputs[:5]:
         vname = _vn(inp)
         bnd = var_cache.get(vname)
         if bnd and "min" in bnd:
+            _has_bnd = True
             bnd_parts_min.append(f"{vname}={bnd['min']}")
             bnd_parts_max.append(f"{vname}={bnd['max']}")
         else:
             bnd_parts_min.append(_decl_text(inp))
             bnd_parts_max.append(_decl_text(inp))
-    tc2.append({"action": f"입력 설정 (경계 최솟값): {', '.join(bnd_parts_min)}", "expected": "입력 경계 최솟값 설정"})
+    # 기대결과가 액션을 되풀이하면(`입력 경계 최솟값 설정`) Expected 칸만 보는 감사자는
+    # **어떤 값을 넣었는지 모른다**(라이브 실측 144행). 실값이 있을 때만 그 값을 적는다 —
+    # 타입을 몰라 선언 텍스트만 나열한 경우(`_has_bnd` False)는 그대로 둔다.
+    _min_exp = (f"경계 최솟값 적용: {', '.join(bnd_parts_min)}"
+                if (enrich and _has_bnd) else "입력 경계 최솟값 설정")
+    _max_exp = (f"경계 최댓값 적용: {', '.join(bnd_parts_max)}"
+                if (enrich and _has_bnd) else "입력 경계 최댓값 설정")
+    _bm = ("expected_enriched" if _has_bnd else "expected_no_basis") if enrich else ""
+    _s_min = {"action": f"입력 설정 (경계 최솟값): {', '.join(bnd_parts_min)}", "expected": _min_exp}
+    _s_max = {"action": f"입력 설정 (경계 최댓값): {', '.join(bnd_parts_max)}", "expected": _max_exp}
+    tc2.append(_mark(_s_min, _bm) if _bm else _s_min)
     tc2.append({"action": f"{name}() 호출", "expected": f"{name} 경계 최솟값 조건 실행 확인"})
-    tc2.append({"action": f"입력 설정 (경계 최댓값): {', '.join(bnd_parts_max)}", "expected": "입력 경계 최댓값 설정"})
+    tc2.append(_mark(_s_max, _bm) if _bm else _s_max)
     tc2.append({"action": f"{name}() 호출", "expected": f"{name} 경계 최댓값 조건 실행 확인"})
     tc2.append({"action": "경계값 출력 확인",
                 "expected": f"최솟값({', '.join(bnd_parts_min)}), 최댓값({', '.join(bnd_parts_max)}) 입력 시 유효 범위 내 정상 처리"})
@@ -1932,6 +2108,27 @@ def _generate_simple_steps(
             inv_parts.append(_decl_text(inp))
     tc3.append({"action": f"입력 설정 (유효 범위 초과): {', '.join(inv_parts)}", "expected": "유효 범위 초과 입력 설정"})
     tc3.append({"action": f"{name}() 호출", "expected": f"{name} 범위 초과 입력 방어 처리 확인"})
+
+    # 근거 보강: **하한 위반**(min_inv). 표준 BVA 6점 중 이 문서는 min·max·max_inv 세 점만
+    # 쓰고 있었는데, `min_inv` 는 `_TYPE_BOUNDARIES` 에 **이미 있다**(uint8 `{-1, 0, …}`).
+    # 기존 스텝을 밀어내지 않고 뒤에 덧붙인다(포함 관계). 경계를 모르는 변수만 있으면
+    # 붙이지 않는다 — 선언 텍스트만 나열한 "범위 미만" 스텝은 시험이 아니다.
+    if enrich:
+        _lo_parts: List[str] = []
+        _has_lo = False
+        for inp in inputs[:5]:
+            vname = _vn(inp)
+            bnd = var_cache.get(vname)
+            if bnd and "min_inv" in bnd:
+                _lo_parts.append(f"{vname}={bnd['min_inv']}")
+                _has_lo = True
+            else:
+                _lo_parts.append(_decl_text(inp))
+        if _has_lo:
+            tc3.append({"action": f"입력 설정 (유효 범위 미만): {', '.join(_lo_parts)}",
+                        "expected": "유효 범위 미만 입력 설정"})
+            tc3.append({"action": f"{name}() 호출",
+                        "expected": f"{name} 범위 미만 입력 방어 처리 확인"})
     # Build concrete saturation expectation from cached boundaries
     sat_parts = []
     for inp in inputs[:3]:
@@ -2013,6 +2210,14 @@ def generate_test_cases(
     max_steps = config.get("max_steps_per_tc") or _MAX_STEPS_PER_TC
     test_env = config.get("default_test_env", _DEFAULT_TEST_ENV)
 
+    # 시험 **근거** 보강(`recommended` 이상) — 물량 축(`is_extended`)과 **다른 축**이다.
+    # TC 를 늘리지 않고 기대결과를 관측 가능한 형태로 바꾼다. 실측(2026-09-20): 스텝
+    # 8,130행 중 관측 가능한 기대결과가 26%뿐이고 `기대 결과와 일치` 가 1,128행이었다.
+    # ⚠ 근거가 없으면(반환 타입도 전역도 모름) **현행 문장을 그대로 둔다** — 지어내지 않고,
+    #   그 수를 `expected_no_basis` 로 공시한다.
+    _evidence = is_evidence_enriched(config.get("tc_profile"))
+    _estats: Dict[str, int] = {"expected_enriched": 0, "expected_no_basis": 0}
+
     # 캡 **전** 총량을 먼저 센다 — 소비처에서 결과 길이로 되짚으면 절단을 못 본다.
     mapped_fids: set = set()
     used_fids: set = set()
@@ -2063,7 +2268,7 @@ def generate_test_cases(
                 continue
             logic_flow = info.get("logic_flow") or []
             step_sets = _generate_steps_from_flow(logic_flow, info, max_steps=max_steps,
-                                                  max_tc=max_tc, stats=_bstats)
+                                                  max_tc=max_tc, stats=_bstats, enrich=_evidence)
             # (R72 N81) 이번 함수의 경계값 TC 는 **마지막 자리**에만 있다(위치 판정 — id 로 식별하지 않는다, 리뷰 C1).
             _has_boundary = bool(_bstats.get("boundary_appended"))
 
@@ -2080,7 +2285,9 @@ def generate_test_cases(
                 tc_id = _make_tc_id(rid, tc_counter)
                 # 라벨은 상한 절단·최소 스텝 보강까지 끝난 **최종 스텝**에서 읽는다 —
                 # 절단으로 경계값 스텝이 잘렸으면 BAA 도 같이 사라져야 한다.
-                final_steps = _ensure_min_steps(steps, info)
+                final_steps = _ensure_min_steps(steps, info, enrich=_evidence)
+                # 공시 수 = **문서에 들어간** 수. 표식은 여기서 떼면서 센다.
+                _drain_evidence_marks(final_steps, _estats)
                 method, gen, review_only = _classify_steps(final_steps)
                 all_tcs.append(_build_tc_dict(
                     tc_id=tc_id, req=req, steps=final_steps,
@@ -2139,7 +2346,8 @@ def generate_test_cases(
                     _ext["no_detail"] += 1
                     continue
                 step_sets = _generate_steps_from_flow(info.get("logic_flow") or [], info, max_steps=max_steps,
-                                                      max_tc=max_tc, stats=_xstats, keep_boundary=True)
+                                                      max_tc=max_tc, stats=_xstats, keep_boundary=True,
+                                                      enrich=_evidence)
                 if not step_sets:
                     _ext["no_steps"] += 1
                     continue
@@ -2150,7 +2358,8 @@ def generate_test_cases(
                 _last_is_boundary = bool(_xstats.get("boundary_appended"))
                 for k, steps in enumerate(step_sets):
                     n += 1
-                    final_steps = _ensure_min_steps(steps, info)
+                    final_steps = _ensure_min_steps(steps, info, enrich=_evidence)
+                    _drain_evidence_marks(final_steps, _estats)
                     method, gen, review_only = _classify_steps(final_steps)
                     tc = _build_tc_dict(
                         tc_id=_make_tc_id(rid, n), req=req, steps=final_steps,
@@ -2199,6 +2408,11 @@ def generate_test_cases(
             "boundary_tc_cut_by_function_cap": int(_bstats.get("boundary_tc_cut_by_function_cap") or 0),
             "boundary_tc_cut_by_req_cap": int(_bstats.get("boundary_tc_cut_by_req_cap") or 0),
             "boundary_tc_unavailable": int(_bstats.get("boundary_tc_unavailable") or 0),
+            # 근거 보강(`recommended` 이상): 출력 확인 스텝의 기대결과를 관측 대상이 드러나는
+            # 문장으로 바꾼 수 · **근거가 없어 그대로 둔 수**. 뒤 숫자가 곧 "지어내지 않았다" 의
+            # 증거다(기본 프로파일에서는 둘 다 0).
+            "expected_enriched": _estats["expected_enriched"],
+            "expected_no_basis": _estats["expected_no_basis"],
         })
 
     return all_tcs
@@ -2246,10 +2460,22 @@ def _build_tc_dict(
         precond_parts.append(f"{func_name}() 호출 가능 상태")
     asil_val = str(req.get("asil") or "").strip()
     if is_safety_asil(asil_val):
-        precond_parts.append(f"ASIL {asil_val} 안전 조건 충족")
+        # ⚠ `req["asil"]` 은 `"ASIL A"` 형식으로 들어올 수 있다 — `project_config["asil_level"]`
+        #   을 그대로 싣는 경로(:2035)가 있고 UI 선택지가 그 형식이다. 그대로 f-string 에
+        #   넣으면 **`ASIL ASIL A`** 가 된다(실측 571/2,209 TC = 25%).
+        #   등급만 뽑아 쓴다. 정규화 단일 출처는 `asil_propagation.normalize_asil` 이고,
+        #   미상 등급(`"Z"` 류)은 None 을 내므로 그때만 원문을 그대로 둔다
+        #   (`is_safety_asil` 은 미상을 보수적으로 True 로 보므로 이 가지가 열린다).
+        _grade = normalize_asil(asil_val) or asil_val
+        precond_parts.append(f"ASIL {_grade} 안전 조건 충족")
 
     # Extract variable names from step actions
+    # ⚠ 한 TC 의 스텝 여러 개가 **같은 변수**를 설정한다(TC2 는 최솟값·최댓값 두 스텝이
+    #   같은 목록을 쓴다). 그대로 모으면 `입력: msg_length=127, msg_length=127` 처럼
+    #   같은 토큰이 두 번 서고, 아래 `[:4]` 상한이 중복으로 채워져 **다른 변수가 밀려난다**
+    #   (실측 356/2,209 TC = 16%). 순서는 보존하고 중복만 뺀다.
     input_vars: List[str] = []
+    _seen_vars: set = set()
     for step in steps:
         action = step.get("action", "")
         m_inp = re.search(r"입력 설정[^:]*:\s*(.+)", action)
@@ -2258,6 +2484,9 @@ def _build_tc_dict(
             for v in re.split(r",\s*", vars_str):
                 vname = re.split(r"[=\s]", v.strip())[0].strip()
                 if vname and len(vname) < 40 and not vname.startswith("("):
+                    if vname in _seen_vars:
+                        continue
+                    _seen_vars.add(vname)
                     input_vars.append(vname)
     if input_vars:
         _get_bv = _bv_cache.get("get_bv")

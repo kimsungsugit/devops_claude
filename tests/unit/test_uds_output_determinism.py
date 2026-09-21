@@ -100,6 +100,17 @@ U8 Sample(const U8 * Data, U8 * Out, U8 Sel)
 _CHILD = """
 import json, sys
 sys.path.insert(0, sys.argv[1])
+# 이 자식 프로세스는 **conftest 의 격리를 못 받는다**(`_default_local_resolver` 는 같은
+# 프로세스의 fixture 다). 그래서 `config/file_mode.json` 이 cloudium 인 머신에서는
+# `generate_uds_source_sections` 의 경로 판정이 worker(127.0.0.1)로 나가고, 워커가 안 떠
+# 있으면 `PermissionError` 로 죽는다 — **같은 코드가 머신에 따라 통과/실패**한다.
+# 이 시험이 재는 것은 해시 시드 독립성이지 파일 모드가 아니므로 여기서 로컬로 고정한다.
+# (2026-09-21: 이 머신에서 재현 — HEAD 에 `config/file_mode.json` 만 복사해도 같다)
+try:
+    from backend.services import file_resolver as _fr
+    _fr._resolver = _fr.LocalFileResolver()
+except Exception:   # backend 없는 환경 — 그때는 원래 로컬이다
+    pass
 from report_gen.uds_generator import generate_uds_source_sections
 res = generate_uds_source_sections(sys.argv[2], preprocess=False)
 # (리뷰 W6) 네 필드만 비교하면 `global_data`(c_parser 의 set 순회) 같은 다른 축을 못 본다 — **전체**를 내보낸다.
