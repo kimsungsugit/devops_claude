@@ -148,7 +148,9 @@ _STS_ADVICE = {
         "low_advice": "생성 방법이 한두 종류뿐입니다(AOR/ECA/BAA 중). 경계값(BAA) 스텝은 logic_flow 가 없는 함수에서만, 등가분할(ECA) 스텝은 조건/switch 분기에서만 나옵니다 — 요구에 매핑된 함수의 입력 범위·분기가 파싱됐는지 확인하세요. AI 프롬프트로는 늘지 않습니다(라벨은 스텝에서 읽습니다).",
         "from_table": True,   # 임계는 thresholds.py 단일 출처
     },
-    "test_method_kinds": {"label": "시험 방법 종류 수(RBT/FIT)", "low_advice": "", "threshold": None},
+    # (R79) 어휘에 `RVW`(리뷰 전용 TC)가 들어와 최대 2 → **3** 이 됐다. 비게이트 참고지표라
+    #   판정은 안 바뀌지만 **품질 DB 시계열이 끊긴다**(실측 1 → 2) — 정정이지 회귀가 아니다.
+    "test_method_kinds": {"label": "시험 방법 종류 수(RBT/FIT/RVW)", "low_advice": "", "threshold": None},
     "gen_method_kinds": {"label": "생성 방법 종류 수(AOR/ECA/BAA)", "low_advice": "", "threshold": None},
     "safety_tc_pct": {
         "label": "안전 관련 TC 비율",

@@ -73,8 +73,14 @@ class TestClassifySteps:
         assert _classify_steps(steps)[1] == "BAA"
 
     def test_review_steps_are_flagged(self):
+        """리뷰 스텝 → `RVW`. ⚠ 2026-09-21 이전엔 `RBT` 였다.
+
+        그 근거는 "정본 검증방법 어휘가 RBT/FIT 둘뿐" 이었는데 정본 재측정에서
+        **RVW 가 5/59** 로 나왔다(`generators/sts.py` 어휘 블록). 근거가 틀렸으므로
+        되돌렸다 — 리뷰는 실행 시험이 아니라 `RBT` 라고 적으면 감사 문서가 거짓말을 한다.
+        """
         steps = [_s("소스 코드에서 해당 요구사항 구현부 확인"), _s("요구사항 내용 리뷰: 전원 관리")]
-        assert _classify_steps(steps) == ("RBT", "AOR", True)
+        assert _classify_steps(steps) == ("RVW", "AOR", True)
 
     def test_plain_call_is_rbt_aor(self):
         steps = [_s("f() 호출"), _s("함수 반환값 확인"), _s("출력/반환값 확인")]
@@ -128,12 +134,19 @@ class TestGeneratedLabelsFollowSteps:
         labels = [(tc["test_method"], tc["gen_method"]) for tc in tcs]
         assert labels == [("RBT", "AOR"), ("RBT", "BAA"), ("FIT", "BAA")], labels
 
-    def test_review_only_tc_is_flagged_and_labelled_rbt_aor(self):
+    def test_review_only_tc_is_flagged_and_labelled_rvw_aor(self):
+        """리뷰 전용 TC 는 플래그와 **칸**이 같은 말을 한다 — 둘 다 "리뷰" 다.
+
+        커버리지 경고문이 이미 "코드 리뷰(RVW)로만 덮였다" 라고 쓰는데 칸은 `RBT` 였다
+        (2026-08-11 ~ 09-21). 문서 자신의 1.5 범례도 `RVW = Review - 코드 리뷰` 다.
+        """
+        from generators.sts import _REVIEW_ONLY_METHODS
         req = {"id": "SwNTR_0201", "req_type": "NTR", "description": "문서화 요구"}
         tcs = generate_test_cases([req], {}, {})
         assert len(tcs) == 1
         assert tcs[0]["review_only"] is True
-        assert (tcs[0]["test_method"], tcs[0]["gen_method"]) == ("RBT", "AOR")
+        assert (tcs[0]["test_method"], tcs[0]["gen_method"]) == ("RVW", "AOR")
+        assert tcs[0]["test_method"] in _REVIEW_ONLY_METHODS
 
     def test_function_tc_is_not_review_only(self):
         fd = {"F1": {"id": "F1", "name": "fn", "inputs": [], "output": "void", "logic_flow": []}}

@@ -263,7 +263,9 @@ def evaluate_sts(quality_report: Dict[str, Any]) -> MetricList:
     #   이라 advisory 임계 60 은 구조적으로 도달 불가였다(품질 DB: 08-11 이전 run 100.0, 이후 4 run 전부 40.0). 5 는 옛
     #   5어휘 시절의 분모다. 기법 다양성이 실제로 갈리는 축은 생성 방법(AOR/ECA/BAA — R67 부터 스텝이 증명한다)이라 그쪽으로
     #   옮긴다. 분모 3 = `generators.sts._GEN_METHODS` 크기(테스트가 묶는다 — 런타임 import 는 하지 않는다, openpyxl 의존).
-    #   test_method 종류 수는 참고지표로 남긴다(둘 다 나오면 2). 시계열 단절: 40 → 새 정의값(정정이지 회귀가 아니다).
+    #   test_method 종류 수는 참고지표로 남긴다. 시계열 단절: 40 → 새 정의값(정정이지 회귀가 아니다).
+    #   (R79) 그 참고지표의 상한이 2 → **3** 이 됐다 — 리뷰 전용 TC 가 `RVW` 를 받기 때문이다
+    #   (`generators.sts._TEST_METHODS`). 비게이트라 판정은 불변이나 시계열은 여기서 한 번 더 끊긴다.
     gen_methods = quality_report.get("gen_method_distribution") or {}
     gen_kinds = len([k for k in gen_methods if k and k != "?"])
     metrics.append(_metric("method_diversity_pct", round(min(gen_kinds / _STS_GEN_METHOD_VOCAB_SIZE, 1.0) * 100, 2)))

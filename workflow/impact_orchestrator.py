@@ -1623,6 +1623,7 @@ def _build_doc_proposal(
     # max_flows는 전체 함수 수 이상으로 — 기본 120 캡에 대상이 정렬순서상 잘려나가는 것을 막는다.
     try:
         from generators.sits import (
+            _sits_gen_method_for_itc,
             collect_integration_flows,
             generate_itc_list,
             load_uds_asil_map,
@@ -1664,7 +1665,17 @@ def _build_doc_proposal(
             f for f in _flows
             if str(f.get("entry_fn") or "").strip().lower() in changed_set
         ]
-        for _itc in (generate_itc_list(_tgt_flows, design_ids=_design_ids)
+        # ⚠ `max_subcases` 를 안 넘기면 생성기 기본값 14 를 쓰는데 **문서 기본 경로는 7**
+        #   이다(`_run_sits_generation` · 로컬 생성 라우터 3곳 · 요구 공시
+        #   `caps.max_subcases.api` 전부 7). 실측(KJPDS02_PV 360 흐름): 14 → sub-case
+        #   4,643 · 7 → 2,520. 카드의 `total`/`truncated` 가 그 수를 그대로 말하므로,
+        #   안 맞추면 문서에 없는 절단("4,643건 중 6건")을 경고한다.
+        #   ⚠ 7은 **기본값**이다 — 사용자가 Form 으로 더 크게 주거나 `tc_profile=extended`
+        #     면 실제 문서는 7이 아니다(`sits.resolve_profile_caps`). 초안은 그 선택을
+        #     받지 못하므로(영향도 요청에 `tc_profile`·`max_subcases` 가 없다) 이 카드는
+        #     **기본 프로파일 기준**이고, 그 경우 카드가 문서보다 작게 말한다.
+        for _itc in (generate_itc_list(_tgt_flows, max_subcases=_SITS_DEFAULT_SUBCASES,
+                                       design_ids=_design_ids)
                      if _tgt_flows else []):
             _nm = str(_itc.get("entry_fn") or "").strip().lower()
             if _nm not in changed_set or _nm in out["sits"]:
@@ -1688,7 +1699,13 @@ def _build_doc_proposal(
                 "sub_cases": _subs,
                 # 문서 컬럼(TC ID / Gen.Method / Related ID(SwDS))도 생성기 산출인데 버려졌었다.
                 "tc_id": str(_itc.get("tc_id") or ""),
-                "gen_method": str(_itc.get("gen_method") or "")[:40],
+                # ⚠ 내부 라벨(`itc["gen_method"]`)이 아니라 **라이터가 쓰는 값**이다.
+                #   내부 라벨은 `_determine_gen_method_for_flow` 의 네 분기가 전부 ABV 를 품어
+                #   (`ABV` · `ABV, AEC` · `AOR, ABV`) 문서 어휘(`AOR, AEC` · `AOR/ABV`)와
+                #   **교집합이 0** 이다 — 실측 KJPDS02_PV 360 TC 전건 불일치였다.
+                #   SUTS 쪽은 처음부터 라이터와 같은 `determine_gen_method` 를 쓴다(위 블록) —
+                #   "분포는 문서에 쓰는 값으로 센다"(R76 N87) 의 세 번째 표면이다.
+                "gen_method": _sits_gen_method_for_itc(_itc)[:40],
                 "related_ids": [str(x) for x in (_itc.get("related_ids") or [])][:10],
                 "asil": str(_itc.get("asil") or ""),
                 "module_name": str(_itc.get("module_name") or "")[:80],

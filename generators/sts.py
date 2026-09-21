@@ -47,31 +47,91 @@ _REQ_ID_PAT = re.compile(
     r"\b(Sw(?:TR|TSR|NTR|NTSR|EI|CNF|ST|STR)_\d+)\b"
 )
 
-# 정본(KJPDS02_SwTS v1.02) 시트명. SwITS 의 `3.SW Integration Test Spec` 과 다르다.
+# 우리가 쓰는 시트명 = **KJPDS02 정본과 같다**. HDPDM01 정본은 같은 자리를
+# `3.SW Integration Test Spec` 이라 부른다(그쪽 템플릿 잔재 — 열이 FS_REQ/SRS 다).
+# 읽는 쪽은 둘 다 받는다(`_STS_SHEET_CANDIDATES`).
 _SPEC_SHEET_NAME = "3.SW Test Spec"
 
 # ── 값 어휘 — **STS 정본의 Introduction 1.5/1.6** 이 출처다 ──────────────────
 #
-# ⚠ 같은 개념이라도 **문서마다 약어가 다르다**. 실측(2026-08-11):
-#     SwTS  1.5 Test Method  : Requirement-based test=RBT · Fault injection test=FIT
-#     SwTS  1.6 Generation   : Analysis of requirements=AOR · Equivalent class=ECA
-#                              · Boundary value analysis=BAA
-#     SwUTS 1.5 Test Method  : REQ · IFT · FI          ← 다른 약어
-#     SwUTS 1.6 Generation   : AOR · AEC · ABV · ERG   ← 다른 약어
-#   통일하지 말 것. 예전 판은 `FNCT`/`RVW`/`ELCT`/`ERG` 를 썼는데 **SwTS Introduction
-#   표에 없는 값**이라 문서를 읽는 사람이 대조할 표가 없었다.
-_TEST_METHODS = {"RBT", "FIT"}
+# ## ⚠ 정본이 **둘이고 관례가 반대다** (2026-09-21 전수 확인)
+#
+#   ① `.codex_tmp/_in_sts.xlsm` — `HKY-[KJPDS02]-SwTS-28A4` v1.02 **Approved**
+#      sha256[:16]=02d67baeadbd39d0 · 시트 `3.SW Test Spec` · **TC 102**
+#        1.5 Test Method : RBT · FIT                (2종)   → 데이터 **RBT 102 (100%)**
+#        1.6 Generation  : AOR · ECA · BAA          (3종)   → 데이터 **AOR 102 (100%)**
+#      ⚠ 사람이 쓴 문서다(A열 행번호 0/346 · 153행 Safety 소문자 `x` · History `■`).
+#
+#   ② `(HDPDM01_STS) Software Test Specification_v1.02_230116.xlsm`
+#      sha256[:16]=359de4ef4cf9e68d (이 PC 사본 9개 전부 동일) · 시트
+#      `3.SW Integration Test Spec` · **TC 59** (라벨 6열이 전부 59칸)
+#        1.5 Test Method : FNCT · FIT · ELCT · RVW  (4종, RBT 없음)
+#                          → 데이터 FNCT 28 · FIT 13 · RBT 13 · RVW 5
+#        1.6 Generation  : AOR · AOI · AEC · ABV · ERG · AFD · ADF · AUC (8종)
+#                          → 데이터 AOR 45 · AOR+AOI 8 · AOI 6
+#
+#   **아래 어휘는 ①(KJPDS02)을 따른다** — `_TEST_METHODS`·`_GEN_METHODS` 가 그 문서의
+#   1.5/1.6 범례와 정확히 같다. ②에 맞추려고 `ECA`→`AEC`, `BAA`→`ABV` 로 바꾸면
+#   ①과 어긋난다. **관례가 갈리면 유도하지 말고 입력으로 받을 것**
+#   (SwITS ABV 에서 같은 판단: `generators/sits.py` `_SITS_BV_MIN_DISTINCT`).
+#
+#   재현: 각 파일의 6행을 헤더로 잡고 `Test Method`/`Test Case Generation Method`
+#         열의 비지 않은 셀을 센다(병합이라 TC 당 1칸). 범례는 `1.Introduction` 29~46행.
+#
+# ⚠ 같은 개념이라도 **문서마다 약어가 다르다**:
+#     SwTS ①  1.5 : RBT · FIT          / 1.6 : AOR · ECA · BAA
+#     SwTS ②  1.5 : FNCT · FIT · ELCT · RVW / 1.6 : AOR · AOI · AEC · ABV · ERG …
+#     SwUTS   1.5 : REQ · IFT · FI      / 1.6 : AOR · AEC · ABV · ERG
+#   통일하지 말 것.
+
+#: 생성 문서의 Introduction 1.5 에 **인쇄되는** 범례.
+#: ⚠ 이 목록은 **두 정본 어느 쪽과도 같지 않은 하이브리드**다(①은 RBT·FIT 2종, ②는
+#:   FNCT·FIT·ELCT·RVW 4종). R79 이전부터 이 5종이었고 R79 는 하드코딩을 상수로 올리기만
+#:   했다 — 값을 고르는 것은 프로젝트 관례라 여기서 정할 수 없기 때문이다. 다음 라운드의
+#:   올바른 형태는 `project_config` **입력**이다(위 "갈리면 입력으로" 와 같은 판단).
+#: 생성기가 칸에 쓰는 어휘(`_TEST_METHODS`)는 적어도 이 표의 부분집합이어야 한다 —
+#: 표에 없는 코드를 적으면 읽는 사람이 대조할 데가 없다. 반대 방향(표에만 있고 안 쓰는
+#: 코드)은 허용한다: 표는 표준 어휘를 설명하는 자리다(SwITS `_INTRO_GEN_METHODS` 10종).
+_INTRO_TEST_METHODS: Tuple[Tuple[str, str], ...] = (
+    ("FNCT", "Functional test - 기능 테스트"),
+    ("FIT", "Fault Injection test - 결함 주입 테스트"),
+    ("ELCT", "Electrical test - 전기적 테스트"),
+    ("RVW", "Review - 코드 리뷰"),
+    ("RBT", "Requirements Based test - 요구사항 기반 테스트"),
+)
+
+#: ⚠ `RVW` 는 ①의 1.5 범례에 없다(②엔 있다). 그래도 쓰는 이유는 **정본 수가 아니라
+#:   내부 정합성**이다 — 아래 `_REVIEW_ONLY_METHODS` 주석 참조. ①엔 리뷰 전용 TC 자체가
+#:   없어(102건 전부 RBT) 그 문서가 "리뷰를 RBT 라 부르라" 고 말한 적이 없다.
+_TEST_METHODS = {"RBT", "FIT", "RVW"}
+#: ①의 1.6 범례와 **정확히 같다**. ②는 같은 개념을 `AEC`/`ABV` 로 쓴다(위 참조).
 _GEN_METHODS = {"AOR", "ECA", "BAA"}
-_DEFAULT_TEST_METHOD = "RBT"   # 정본 실측: 102건 전부 RBT
-_DEFAULT_GEN_METHOD_STS = "AOR"  # 정본 실측: 102건 전부 AOR
+_DEFAULT_TEST_METHOD = "RBT"     # ① 102/102 · ② 13/59. 실행 시험의 기본값
+_DEFAULT_GEN_METHOD_STS = "AOR"  # ① 102/102 · ② 45/59 단독(+8건은 AOI 와 병기)
 
 # 실행 산출물이 없는 검증방법. RVW 는 "소스 코드에서 구현부 확인" 같은 **사람이 읽는**
 # 활동이라(`_generate_review_steps`) 실행 시험과 증거 성격이 다르다.
 # 커버리지를 방법 구분 없이 한 숫자로 내면 "100%"가 실행시험 100%인지 리뷰 포함인지
 # 구분되지 않는다 — 실측(HDPDM01 SRS 63건): 보고 100.0% vs 실행시험 87.3%.
-# ⚠ 위 어휘 정규화 뒤로 시트의 test_method 에 RVW 는 **더 이상 나오지 않는다**(RBT 로
-#   접힘). 리뷰 TC 의 표지는 `tc["review_only"]`(스텝에서 읽음, `_classify_steps`)이고
-#   이 집합은 외부에서 만든 TC dict 와의 호환용으로만 남는다.
+# ⚠ 2026-08-11 ~ 09-21 사이엔 이 값이 **한 번도 시트에 안 나왔다** — 어휘 정규화가
+#   RVW 를 RBT 로 접었기 때문이다. R79 가 되돌렸다.
+#
+#   ⚠ 되돌린 근거를 "정본 재측정" 에 걸지 말 것 — **두 정본이 반대로 말한다**
+#     (① KJPDS02 RVW 0/102 · ② HDPDM01 RVW 5/59). 근거는 **내부 정합성**이다:
+#       · 문서 자신의 1.5 범례가 `RVW = Review - 코드 리뷰` 를 싣는데 칸엔 안 나왔다,
+#       · 커버리지 경고문이 "코드 리뷰(RVW)로만 덮였다" 고 말하는데 칸엔 `RBT` 였다,
+#       · 생성기는 그 TC 가 리뷰 전용임을 **알고**(`tc["review_only"]`) 커버리지에서
+#         빼면서, 칸에는 `RBT`(요구 기반 **시험**)라 적어 실행되지 않은 검증을
+#         실행된 것처럼 말했다.
+#     ①엔 리뷰 전용 TC 자체가 없다(102건 전부 RBT) — 그 문서가 "리뷰를 RBT 라 부르라"
+#     고 말한 적은 없으므로, 이 변경은 ①과 충돌하지 않는다.
+#
+#   판정 자체는 여전히 `tc["review_only"]`(스텝에서 읽음)가 단일 출처다 — 이 집합은
+#   외부에서 만든 TC dict 와의 호환용 보조 축이다.
+#   ⚠ 두 축은 **대칭이 아니다**: `_relabel_from_steps` 에서 `review_only` 는 sticky(`or`)
+#     인데 `test_method` 는 매번 재대입된다. 스텝이 리뷰 패턴을 잃으면
+#     `review_only=True` 인데 칸은 `RBT` 로 갈릴 수 있다. 지금은 AI 보강이 리뷰 TC 를
+#     **제외**하므로(`enhance_test_cases_with_ai`) 도달 불가다 — 그 가드에 의존한다.
 _REVIEW_ONLY_METHODS = {"RVW"}
 
 _DEFAULT_TEST_ENV = "SwTE_01"
@@ -1316,8 +1376,10 @@ _safety_mark = _safety_mark_impl
 # (`u8`/`u16` 입력이 있으면 BAA, TSR 이면 FIT, if 가 있으면 ECA …). 그런데 스텝은
 # logic_flow 에서 따로 만들어져 그 라벨과 무관했다 — 실측(KJPDS02_PV 2026-09-14,
 # TC 294): BAA 51건 중 경계값 스텝이 있는 것 6건, 반대로 AOR 197건 중 27건은 경계값
-# 스텝이 있었다. FIT 213건(72%)은 대부분 "호출 → 반환값 확인" 뿐이었다(정본 102건은
-# 전부 RBT). 라벨은 읽는 사람에게 "이 TC 가 어떤 기법을 적용했는가" 를 말하는 칸이라
+# 스텝이 있었다. FIT 213건(72%)은 대부분 "호출 → 반환값 확인" 뿐이었다
+# (정본 ① KJPDS02 SwTS 102건은 **전부 RBT** · 정본 ② HDPDM01 59건 중 FIT 는 13건 —
+#  두 정본의 식별자와 분포는 위 어휘 블록에).
+# 라벨은 읽는 사람에게 "이 TC 가 어떤 기법을 적용했는가" 를 말하는 칸이라
 # **완성된 스텝**에서 거꾸로 읽는다. 아래 패턴은 `validate_sts_xlsm` 의 산출물 감사도
 # 같이 쓴다 — 라벨 셀과 스텝 셀을 대조하므로 같은 패턴이어도 검사가 공허하지 않다.
 # 유효 범위 **밖** 의 값(max_inv)도 경계값 분석이다 — SwUTS 형제와 같은 규칙
@@ -1327,18 +1389,20 @@ _BOUNDARY_ACTION_PAT = re.compile(
 _FAULT_ACTION_PAT = re.compile(r"^에러 조건 설정:|^입력 설정 \(유효 범위 초과\):.*=\s*-?\d")
 _PARTITION_ACTION_PAT = re.compile(r"^(?:조건 충족 설정|조건 미충족 설정|else-if 조건 설정):")
 _PARTITION_EXPECTED_PAT = re.compile(r"^switch 분기 → case ")
-# 리뷰 전용 TC 의 스텝(`_generate_review_steps`). 검증방법 어휘가 RBT/FIT 둘뿐이라
-# "RVW" 라벨로는 더 이상 구분할 수 없다 — `_REVIEW_ONLY_METHODS` 주석 참조.
+# 리뷰 전용 TC 의 스텝(`_generate_review_steps`). 이 패턴에 걸리면 검증방법은 **RVW** 다
+# — 정본에도 5건 있다. `_REVIEW_ONLY_METHODS` 주석에 되돌린 사유를 적었다.
 _REVIEW_ACTION_PAT = re.compile(r"^(?:소스 코드에서 해당 요구사항 구현부 확인|요구사항 내용 리뷰:)")
 
 
 def _classify_steps(steps: List[Dict[str, str]]) -> Tuple[str, str, bool]:
     """(test_method, gen_method, review_only) — 스텝 내용에서 읽는다.
 
-    gen_method 는 하나만 적는다(가장 구체적인 기법: BAA > ECA > AOR). 정본은 102건
-    전부 AOR 이고 `Test Case Gen. Method` 칸은 한 값이 관례다.
-    test_method 는 고장을 실제로 넣는 스텝(에러 조건 설정 · 유효 범위 초과 입력)이
-    있을 때만 FIT, 나머지는 RBT. 숫자 없는 "경계 최솟값: param" 은 경계값이 아니다
+    gen_method 는 하나만 적는다(가장 구체적인 기법: BAA > ECA > AOR). 두 정본 모두
+    한 값이 관례다 — ① KJPDS02 102/102 `AOR`, ② HDPDM01 59건 중 45건 `AOR` 단독
+    (나머지 14건은 `AOI` 를 쓰거나 병기한다. 위 어휘 블록 참조).
+    test_method 는 **리뷰 스텝이 있으면 RVW**, 그 다음 고장을 실제로 넣는 스텝
+    (에러 조건 설정 · 유효 범위 초과 입력)이 있으면 FIT, 나머지는 RBT.
+    숫자 없는 "경계 최솟값: param" 은 경계값이 아니다
     (타입을 몰라 값을 못 만든 자리라 BAA 를 주장하지 않는다).
     """
     boundary = fault = partition = review = False
@@ -1354,7 +1418,10 @@ def _classify_steps(steps: List[Dict[str, str]]) -> Tuple[str, str, bool]:
         if _REVIEW_ACTION_PAT.search(action):
             review = True
     gen = "BAA" if boundary else ("ECA" if partition else _DEFAULT_GEN_METHOD_STS)
-    method = "FIT" if fault else _DEFAULT_TEST_METHOD
+    # ⚠ 리뷰가 **먼저**다. 리뷰 TC 는 실행 산출물이 없으므로 고장 주입이든 아니든
+    #   `RBT`(요구 기반 **시험**)도 `FIT`(고장 **주입**)도 아니다 — 둘 다 "실행했다" 는
+    #   뜻이라 감사 문서에서 거짓이 된다. 정본도 이 자리에 RVW 를 쓴다(5/59).
+    method = "RVW" if review else ("FIT" if fault else _DEFAULT_TEST_METHOD)
     return method, gen, review
 
 
@@ -2717,6 +2784,12 @@ def generate_sts_xlsm(
     if template_path and Path(template_path).is_file():
         wb = openpyxl.load_workbook(template_path, keep_vba=True)
         _logger.info("Loaded STS template: %s", template_path)
+        # ⚠ 이 갈래는 `_create_intro_sheet` 를 부르지 않는다 — 1.5 범례는 **템플릿이
+        #   갖고 있던 것**이다. 두 정본의 범례가 반대라(위 어휘 블록) 템플릿에 없는
+        #   코드를 칸에 적을 수 있다: KJPDS02 템플릿(1.5 = RBT·FIT)에 리뷰 전용 TC 가
+        #   생기면 칸엔 `RVW`, 범례엔 없다. 모듈 상수끼리만 보는 시험
+        #   (`_TEST_METHODS <= _legend`)은 이 경로를 못 보므로 **실행시에 대조**한다.
+        _warn_template_legend_gap(wb, test_cases)
     else:
         wb = openpyxl.Workbook()
         _create_cover_sheet(wb, project_id, doc_id, version, asil_level)
@@ -3033,20 +3106,47 @@ def _create_history_sheet(wb):
         cell.alignment = center if ci in (2, 3) else left
 
 
+def _warn_template_legend_gap(wb: Any, test_cases: List[Dict[str, Any]]) -> None:
+    """템플릿의 1.5 범례에 **없는** 검증방법을 칸에 쓰게 되면 경고한다.
+
+    범례는 읽는 사람이 칸을 대조하는 유일한 표다. 두 SwTS 정본의 범례가 반대라
+    (KJPDS02 `RBT·FIT` vs HDPDM01 `FNCT·FIT·ELCT·RVW`) 어느 템플릿을 받느냐에 따라
+    같은 산출물이 대조 가능하기도, 불가능하기도 하다. 값을 바꾸지 않고 **사실만** 남긴다
+    — 범례가 정답이라고 단정할 근거가 없기 때문이다(관례는 프로젝트가 정한다).
+    """
+    try:
+        ws = next((wb[n] for n in wb.sheetnames if "introduction" in n.lower()), None)
+        if ws is None:
+            return
+        legend = {
+            str(c.value).strip().upper()
+            for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row or 0, 80))
+            for c in row
+            if c.value is not None and 2 <= len(str(c.value).strip()) <= 6
+            and str(c.value).strip().isalpha()
+        }
+        if not legend:
+            return
+        used = {str(tc.get("test_method") or "").strip().upper() for tc in test_cases or ()}
+        gap = sorted(m for m in used if m and m not in legend)
+        if gap:
+            _logger.warning(
+                "STS: 템플릿 Introduction 1.5 범례에 없는 검증방법을 칸에 씁니다 — %s "
+                "(읽는 사람이 대조할 표가 없습니다). 프로젝트 범례를 확인하세요",
+                ", ".join(gap))
+    except Exception as exc:  # noqa: BLE001 — 템플릿 형태가 제각각. 경고 실패가 생성을 막으면 안 된다
+        _logger.debug("STS: 템플릿 범례 대조 실패 — %s", exc)
+
+
 def _create_intro_sheet(wb):
     ws = wb.create_sheet("1.Introduction")
     ws["A1"] = "1. Introduction"
     ws["A3"] = "1.1 Purpose"
     ws["A4"] = "본 문서는 소프트웨어 테스트 사양을 기술한다."
     ws["A6"] = "1.5 Test Method"
-    methods = [
-        ("FNCT", "Functional test - 기능 테스트"),
-        ("FIT", "Fault Injection test - 결함 주입 테스트"),
-        ("ELCT", "Electrical test - 전기적 테스트"),
-        ("RVW", "Review - 코드 리뷰"),
-        ("RBT", "Requirements Based test - 요구사항 기반 테스트"),
-    ]
-    for i, (code, desc) in enumerate(methods):
+    # ⚠ 목록을 여기에 복제하지 않는다 — 예전엔 이 표와 `_TEST_METHODS` 가 따로 놀아
+    #   시트가 설명하는 코드(RVW)를 생성기가 한 번도 안 쓰는 상태를 아무도 못 봤다.
+    for i, (code, desc) in enumerate(_INTRO_TEST_METHODS):
         ws.cell(row=8 + i, column=1, value=code)
         ws.cell(row=8 + i, column=2, value=desc)
 
@@ -3898,7 +3998,14 @@ def generate_sts_validation_report(
             f"| 분기 스텝이 있는데 ECA 아님 | {_audit.get('partition_without_eca', 0)} | — |",
             f"| 고장 주입 스텝이 있는데 FIT 아님 | {_audit.get('fault_without_fit', 0)} | — |",
             "",
-            "정본 SwTS(2026-08-11 실측 102건)는 전부 RBT / AOR 이다. 위 라벨은 스텝이 뒷받침할 때만 적혔다.",
+            "⚠ SwTS 정본은 **둘이고 표기 관례가 반대다**(2026-09-21 실측). "
+            "① KJPDS02_SwTS v1.02 — TC 102, Test Method `RBT` 102, Gen `AOR` 102, "
+            "범례는 RBT·FIT / AOR·ECA·BAA. "
+            "② HDPDM01_STS v1.02 — TC 59, Test Method FNCT 28·FIT 13·RBT 13·RVW 5, "
+            "Gen AOR 45·AOR+AOI 8·AOI 6, 범례는 FNCT·FIT·ELCT·RVW / AOR·AOI·AEC·ABV·ERG·AFD·ADF·AUC. "
+            "이 생성기의 어휘(RBT·FIT·RVW / AOR·ECA·BAA)는 ①을 따른다 — ②와는 "
+            "Gen 약어가 다르므로(ECA↔AEC, BAA↔ABV) ② 기준 프로젝트라면 표기를 확인할 것. "
+            "위 라벨은 스텝이 뒷받침할 때만 적혔다.",
             "",
         ])
 

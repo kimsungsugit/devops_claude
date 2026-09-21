@@ -88,16 +88,26 @@ def test_sts_sheet_name_is_not_the_integration_one():
 
 
 def test_sts_vocabulary_matches_its_introduction():
+    """시험 이름 그대로 — 생성기가 내는 코드는 **문서 1.5 범례 안**에 있어야 한다.
+
+    ⚠ 예전 판은 이름만 그렇고 `_TEST_METHODS == {"RBT","FIT"}` 만 단언했다. 그래서
+      범례가 설명하는 `RVW`(코드 리뷰)를 생성기가 한 번도 안 쓰는 상태 — 리뷰 전용 TC 에
+      `RBT`(요구 기반 **시험**)를 적던 상태 — 를 아무것도 잡지 못했다.
+    """
     from generators.sts import (
         _DEFAULT_GEN_METHOD_STS,
         _DEFAULT_TEST_METHOD,
         _GEN_METHODS,
+        _INTRO_TEST_METHODS,
         _TEST_METHODS,
         _classify_steps,
     )
-    assert _TEST_METHODS == {"RBT", "FIT"}
+    _legend = {c for c, _d in _INTRO_TEST_METHODS}
+    assert _TEST_METHODS == {"RBT", "FIT", "RVW"}
     assert _GEN_METHODS == {"AOR", "ECA", "BAA"}
     assert (_DEFAULT_TEST_METHOD, _DEFAULT_GEN_METHOD_STS) == ("RBT", "AOR")
+    # ① 칸에 적는 코드는 전부 문서가 설명하는 코드다(반대 방향은 허용 — 표는 표준 어휘).
+    assert _TEST_METHODS <= _legend, sorted(_TEST_METHODS - _legend)
     # 분류기(R67 — 라벨은 스텝에서 읽는다)가 내는 값은 전부 정본 어휘 안이다.
     for steps in (
         [],
@@ -110,6 +120,117 @@ def test_sts_vocabulary_matches_its_introduction():
     ):
         m, g, _ = _classify_steps(steps)
         assert m in _TEST_METHODS and g in _GEN_METHODS, f"{steps} → {m}/{g}"
+
+
+def test_review_only_tc_is_labelled_review_not_a_test():
+    """리뷰 전용 TC 의 검증방법은 `RVW` — `RBT`/`FIT` 는 "실행했다" 는 뜻이다.
+
+    정본(HDPDM01_STS v1.02, 59 TC)도 이 자리에 RVW 를 5건 쓴다. 문서 자신의 1.5 범례가
+    `RVW = Review - 코드 리뷰` 라 적고, 커버리지 경고문도 "코드 리뷰(RVW)로만 덮였다"
+    라고 말한다 — 칸만 `RBT` 였다(2026-08-11 ~ 09-21).
+    """
+    from generators.sts import _REVIEW_ONLY_METHODS, _classify_steps, _generate_review_steps
+
+    for tc in _generate_review_steps({"id": "SwRS_01", "description": "요구 본문",
+                                      "verification": "1) 코드 검토"}):
+        method, _gen, review = _classify_steps(tc)
+        assert review is True
+        assert method == "RVW", tc
+        # 두 축(라벨 / 플래그)이 같은 답을 낸다 — 커버리지는 이 둘을 AND 로 읽는다.
+        assert method.upper() in _REVIEW_ONLY_METHODS
+
+    # 대조군 — 고장 주입 스텝이 섞여도 리뷰가 이긴다(리뷰엔 실행 산출물이 없다).
+    mixed = [{"action": "소스 코드에서 해당 요구사항 구현부 확인", "expected": "ok"},
+             {"action": "에러 조건 설정: ( p == NULL )", "expected": "에러 처리 경로 진입"}]
+    assert _classify_steps(mixed)[0] == "RVW"
+    # 음성 대조군 — 리뷰 스텝이 없으면 종전 그대로다(뮤테이션 가드).
+    assert _classify_steps(mixed[1:])[0] == "FIT"
+    assert _classify_steps([{"action": "f() 호출", "expected": "ok"}])[0] == "RBT"
+
+
+def test_template_path_warns_when_a_code_is_outside_the_template_legend(caplog):
+    """템플릿 갈래는 범례를 **안 만든다** — 칸에 범례 밖 코드를 쓰면 경고한다.
+
+    두 SwTS 정본의 1.5 범례가 반대라(① RBT·FIT / ② FNCT·FIT·ELCT·RVW) 어느 템플릿을
+    받느냐에 따라 같은 산출물이 대조 가능하기도 불가능하기도 하다. 실측으로 둘 다
+    걸린다 — ① 템플릿엔 `RVW` 가, ② 템플릿엔 `RBT` 가 범례에 없다.
+
+    모듈 상수끼리 보는 `test_sts_vocabulary_matches_its_introduction` 은 이 경로를
+    구조적으로 못 본다(템플릿은 런타임 입력이다).
+    """
+    import logging
+
+    from openpyxl import Workbook
+
+    from generators.sts import _warn_template_legend_gap
+
+    def _wb(codes):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "1.Introduction"
+        ws["A6"] = "1.5 Test Method"
+        for i, c in enumerate(codes):
+            ws.cell(row=8 + i, column=1, value=c)
+            ws.cell(row=8 + i, column=2, value="설명")
+        return wb
+
+    tcs = [{"test_method": "RBT"}, {"test_method": "RVW"}, {"test_method": "FIT"}]
+
+    # ① KJPDS02 관례 — RVW 가 범례에 없다
+    with caplog.at_level(logging.WARNING, logger="generators.sts"):
+        caplog.clear()
+        _warn_template_legend_gap(_wb(["RBT", "FIT"]), tcs)
+    assert "RVW" in caplog.text and "범례에 없는" in caplog.text
+
+    # ② HDPDM01 관례 — 이번엔 RBT 가 범례에 없다(반대 방향도 잡는다)
+    with caplog.at_level(logging.WARNING, logger="generators.sts"):
+        caplog.clear()
+        _warn_template_legend_gap(_wb(["FNCT", "FIT", "ELCT", "RVW"]), tcs)
+    assert "RBT" in caplog.text
+
+    # 음성 대조군 — 전부 범례 안이면 조용하다(늑대소년 금지)
+    with caplog.at_level(logging.WARNING, logger="generators.sts"):
+        caplog.clear()
+        _warn_template_legend_gap(_wb(["RBT", "FIT", "RVW"]), tcs)
+    assert "범례에 없는" not in caplog.text
+
+    # 범례를 못 읽었으면(시트 부재) 조용하다 — 0 을 "위반 없음" 으로 꾸미지 않는다
+    with caplog.at_level(logging.WARNING, logger="generators.sts"):
+        caplog.clear()
+        _warn_template_legend_gap(Workbook(), tcs)
+    assert "범례에 없는" not in caplog.text
+
+
+def test_both_sts_references_are_recorded_with_their_identity():
+    """SwTS 정본이 **둘**이라는 사실이 어휘 옆에 남아 있어야 한다.
+
+    ⚠ 이 시험의 첫 판(R79 초안)은 `"102건 전부 …"` 를 **금지 문자열**로 잡았다. 그건
+      틀렸다 — 102 는 실재하는 정본 ①(`HKY-[KJPDS02]-SwTS-28A4` v1.02 Approved,
+      TC 102 · Test Method RBT 102 · Gen AOR 102)의 참값이다. 내가 그 문서를 못 찾고
+      "정본은 HDPDM01 하나뿐" 이라고 단정하는 바람에 **참인 측정치를 영구 금지**할
+      뻔했다 (`[[feedback_two_reference_docs_disagree]]`: 정본 수부터 세라).
+
+    그래서 이 시험은 금지가 아니라 **보존**을 잰다: 두 정본의 식별자와 분포가 둘 다
+    적혀 있고, 생성 문서에 인쇄되는 문장도 둘 다 말하는가.
+
+    ⚠ 이 시험은 **행동을 재지 않는다**(소스 텍스트 검사다). 라벨 동작은
+    `test_review_only_tc_is_labelled_review_not_a_test` 와
+    `test_sts_vocabulary_matches_its_introduction` 이 잰다.
+    """
+    from pathlib import Path
+
+    src = Path("generators/sts.py").read_text(encoding="utf-8")
+    # ① KJPDS02 — 파일 식별자 + 실측
+    for token in ("02d67baeadbd39d0", "KJPDS02", "TC 102", "RBT 102", "AOR 102"):
+        assert token in src, "정본 ①의 기록이 사라졌다: " + token
+    # ② HDPDM01 — 파일 식별자 + 실측
+    for token in ("359de4ef4cf9e68d", "HDPDM01", "TC 59", "FNCT 28", "RVW 5"):
+        assert token in src, "정본 ②의 기록이 사라졌다: " + token
+    # 관례가 **반대**라는 사실과 두 어휘의 대응이 같이 남아 있다.
+    assert "관례가 반대" in src
+    assert "ECA" in src and "AEC" in src
+    # 생성 문서에 인쇄되는 문장도 두 정본을 말한다(주석만 고치고 산출물을 두면 안 된다).
+    assert "SwTS 정본은 **둘이고 표기 관례가 반대다**" in src
 
 
 # ─── SITS ────────────────────────────────────────────────────────────────────

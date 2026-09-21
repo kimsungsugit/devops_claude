@@ -1090,11 +1090,85 @@ def test_build_doc_proposal_restores_sits_case_labels_and_meta(monkeypatch):
 
     s = out["sits"]["s_foo"]
     assert s["tc_id"] == "SwITC_SwUFn_0101"
-    assert (s["gen_method"], s["asil"], s["module_name"]) == ("AEC", "B", "diag")
+    # ⚠ Gen 칸은 내부 라벨(`"AEC"`)이 아니라 **라이터가 쓰는 값**이다 —
+    #   `_sits_gen_method_for_itc` 가 Test Method 와 짝지어 정한다(기본 `REQ, IFT` ↔ `AOR, AEC`).
+    assert (s["gen_method"], s["asil"], s["module_name"]) == ("AOR, AEC", "B", "diag")
     assert s["related_ids"] == ["SwDS_11"]
     assert len(s["sub_cases"]) == 6          # sub_cap 기본 3 → 6
     assert s["total"] == 9 and s["truncated"] is True   # 절단 표면화
     assert s["sub_cases"][0]["case_label"] == "0 [EC0:무효-하한]"
+
+
+def test_doc_proposal_sits_gen_method_is_the_value_the_writer_writes(monkeypatch):
+    """Gen 칸은 **문서에 쓰는 값**이지 생성기 내부 라벨이 아니다 (R76 N87 의 세 번째 표면).
+
+    내부 라벨을 만드는 `_determine_gen_method_for_flow` 는 네 분기가 **전부 ABV 를 품는다**
+    (`AOR, ABV` · `ABV, AEC` · `ABV`). 문서 어휘는 `AOR, AEC` · `AOR/ABV` 둘뿐이라 두 집합의
+    교집합이 0 이고, 실측(KJPDS02_PV 360 흐름)에서 카드와 문서가 **360/360 전건** 달랐다.
+
+    같은 카드의 SUTS 칸은 처음부터 라이터와 같은 `determine_gen_method` 를 쓴다 — 이 시험은
+    SITS 쪽이 그 비대칭을 되찾지 않는지 본다.
+    """
+    import generators.sits as gsits
+    from generators.sits import _sits_gen_method_for_itc
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    # 내부 라벨 3종(실측 분포) + FI 짝 1종. 어느 것도 문서 어휘가 아니다.
+    _itcs = [
+        {"entry_fn": "s_plain", "call_chain": "c", "gen_method": "ABV, AEC"},
+        {"entry_fn": "s_mixed", "call_chain": "c", "gen_method": "AOR, ABV"},
+        {"entry_fn": "s_bare", "call_chain": "c", "gen_method": "ABV"},
+        {"entry_fn": "s_fault", "call_chain": "c", "gen_method": "ABV", "test_method": "FI"},
+    ]
+    for _t in _itcs:
+        _t["sub_cases"] = [{"inputs": {"x": 0}, "expected": {"ret": 0}, "precondition": "p"}]
+    _names = {t["entry_fn"] for t in _itcs}
+    # 흐름을 안 맞추면 `_tgt_flows` 가 비어 `generate_itc_list` 가 **아예 안 불린다** —
+    # 그때 카드가 통째로 비어 단언이 무엇도 재지 않는다.
+    _stub_generators(monkeypatch,
+                     sits_flows=[{"entry_fn": n, "call_chain": "c"} for n in sorted(_names)])
+    monkeypatch.setattr(gsits, "generate_itc_list", lambda flows, **k: _itcs)
+    out = _build_doc_proposal(
+        _proposal_sections({n: {"name": n} for n in _names}), set(_names))
+
+    got = {n: out["sits"][n]["gen_method"] for n in _names}
+    # ① 라이터와 **같은 함수**가 정한 값이다(값을 여기 복제하지 않는다 — 단일 출처 확인).
+    assert got == {t["entry_fn"]: _sits_gen_method_for_itc(t) for t in _itcs}
+    # ② 그 값은 문서 어휘 둘 중 하나다. 내부 라벨이 새어 나오면 여기서 죽는다.
+    assert set(got.values()) <= {"AOR, AEC", "AOR/ABV"}, got
+    # ③ Test Method 와 짝이다 — FI 만 경계값 짝을 받는다(정본 실측 54건에 다른 조합 0건).
+    assert got["s_fault"] == "AOR/ABV"
+    assert {got["s_plain"], got["s_mixed"], got["s_bare"]} == {"AOR, AEC"}
+    # ④ 내부 라벨을 그대로 실으면 통과하지 못한다(뮤테이션 가드).
+    assert not (set(got.values()) & {t["gen_method"] for t in _itcs}),         "내부 라벨이 카드에 새어 나왔다"
+
+
+def test_doc_proposal_sits_uses_the_document_subcase_budget(monkeypatch):
+    """초안의 sub-case 예산은 **문서 경로와 같은 7** 이다 — 생성기 기본값 14 가 아니다.
+
+    카드는 `total`/`truncated` 로 "N건 중 M건" 을 말하는데, 예산이 다르면 **문서에 없는
+    절단**을 경고한다. 실측(KJPDS02_PV 360 흐름): 14 → sub-case 4,643 · 7 → 2,520.
+    문서 경로 셋(`_run_sits_generation` · 로컬 생성 라우터 3곳 · 요구 공시
+    `caps.max_subcases.api`)이 전부 7 이다.
+    """
+    import generators.sits as gsits
+    from workflow.impact_orchestrator import _SITS_DEFAULT_SUBCASES, _build_doc_proposal
+
+    seen = {}
+
+    def _spy(flows, max_subcases=14, **k):
+        seen["max_subcases"] = max_subcases
+        return [{"entry_fn": "s_foo", "call_chain": "c",
+                 "sub_cases": [{"inputs": {"x": i}, "expected": {"ret": i}, "precondition": "p"}
+                               for i in range(max_subcases)]}]
+
+    _stub_generators(monkeypatch)
+    monkeypatch.setattr(gsits, "generate_itc_list", _spy)
+    out = _build_doc_proposal(_proposal_sections({"f1": {"name": "s_foo"}}), {"s_foo"})
+
+    assert seen["max_subcases"] == _SITS_DEFAULT_SUBCASES == 7, seen
+    # 총량은 문서 예산으로 센다 — 기본값 14 를 쓰면 여기서 갈린다.
+    assert out["sits"]["s_foo"]["total"] == 7
 
 
 def test_build_doc_proposal_var_types_omit_unknown(monkeypatch):
