@@ -235,9 +235,12 @@ class TestMcdcUsesTheSameBounds:
         seqs = generate_sequences(u, 30, type_cache={})
         st_values = {s["inputs"]["st"] for s in seqs if "st" in s["inputs"]}
         assert st_values and st_values <= {15, 16, 17, 18, 19}, st_values
-        mcdc = {s["strategy"]: s["inputs"] for s in seqs if s["strategy"].startswith("MCDC")}
-        assert mcdc["MCDC_BASE"]["st"] == 18 and mcdc["MCDC_0"]["st"] == 16, \
-            f"MC/DC 토글은 열거자의 최대(참 쪽)·최소(거짓 쪽)다 — 호출자의 경계 해상을 안 쓰면 이 변수의 토글이 통째로 빠진다: {mcdc}"
+        mcdc = [s["inputs"] for s in seqs if s["strategy"].startswith("MCDC")]
+        # (R80) MC/DC 는 식을 평가해 고른 설계 벡터다 — 열거형 변수는 **열거자 값만** 쓰고, 쌍의 두 행은 결정이 뒤집힌다.
+        assert mcdc and all(v["st"] in (16, 17, 18) for v in mcdc), \
+            f"MC/DC 벡터가 열거자 값 집합을 벗어났다 — 호출자의 도메인 해상을 안 쓰면 uint8 로 접힌다: {mcdc}"
+        pair = u["mcdc_design"]["decisions"][0]["pairs"][0]
+        assert pair["decision_a"] != pair["decision_b"] and pair["retained_status"] == "retained"
 
     def test_unknown_typed_condition_variable_is_not_given_uint8_toggles(self):
         u = {"fid": "F", "name": "Fn", "prototype": "void Fn(void)", "input_vars": ["pt", "n"], "output_vars": [],

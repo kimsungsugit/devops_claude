@@ -768,6 +768,11 @@ class TestSessionsRouter:
 class TestProfilesRouter:
     """Tests for /api/profiles endpoints."""
 
+    @pytest.fixture(autouse=True)
+    def isolate_profile_storage(self, tmp_path, monkeypatch):
+        """Keep profile endpoint tests away from the user's real settings."""
+        monkeypatch.setattr("backend.helpers.session.SETTINGS_FILE", tmp_path / "profiles.json")
+
     def test_list_profiles_returns_names(self):
         """GET /api/profiles returns names list."""
         r = client.get("/api/profiles")

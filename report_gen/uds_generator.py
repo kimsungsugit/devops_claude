@@ -1846,6 +1846,9 @@ def generate_uds_source_sections(
                 "outputs": outputs_list,
                 "precondition": inferred_precond,
                 "file": str(file_path) if file_path else "",
+                "source_unavailable_reason": "source_read_truncated" if any(p == file_path for p, _ in _read_truncated) else "",
+                "source_text_complete": bool(source_text_cache.get(file_path)) and not any(p == file_path for p, _ in _read_truncated),
+                "source_path": str(file_path) if file_path else "",
                 "module_name": Path(file_path).stem if file_path else "",
                 "comment_description": comment_desc,
                 "comment_origin": comment_origin,   # "" = 정의 앞 주석(또는 주석 없음) · "header:<파일>" = 헤더 프로토타입의 문서 주석
@@ -2044,6 +2047,9 @@ def generate_uds_source_sections(
                     "outputs": outputs_list,
                     "precondition": m_precond or "N/A",
                     "file": str(file_path) if file_path else "",
+                    "source_unavailable_reason": "source_read_truncated" if any(p == file_path for p, _ in _read_truncated) else "",
+                    "source_text_complete": bool(source_text_cache.get(file_path)) and not any(p == file_path for p, _ in _read_truncated),
+                    "source_path": str(file_path) if file_path else "",
                     "module_name": Path(file_path).stem if file_path else "",
                     "comment_description": m_desc,
                     "comment_origin": m_origin,
@@ -2758,6 +2764,15 @@ def generate_uds_source_sections(
         "function_table_rows": function_table_rows,
         "function_details": function_details,
         "function_details_by_name": function_details_by_name,
+        # (R80) 함수를 정의한 파일의 **완전한** 원문 — 파일당 한 번. 함수 레코드는 `source_path` 로 참조한다.
+        #   함수마다 전문을 실었더니 캐시가 14배(2.4→34MB)가 되고 UDS 사이드카(`.payload.json`)에 소스 사본이 남았다.
+        #   잘려 읽힌 파일은 넣지 않는다 — 소스 oracle 이 잘린 원문을 완전한 것으로 믿으면 안 된다.
+        "source_files": {
+            path: source_text_cache[path]
+            for path in sorted({str(d.get("source_path") or "") for d in function_details.values()
+                                if d.get("source_text_complete")})
+            if path and source_text_cache.get(path)
+        },
         # {fid: body 앞 400자}. detail 밖에 두어 by_name 중복 직렬화를 피한다(위 선언부 주석).
         "function_body_snippets": function_body_snippets,
         # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이

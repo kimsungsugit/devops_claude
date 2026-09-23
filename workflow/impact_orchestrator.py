@@ -1539,6 +1539,7 @@ def _build_doc_proposal(
             _DEFAULT_SEQ_COUNT,
             _gim_to_type_map,
             _gim_typedef_resolved,
+            attach_unit_sources,
             collect_unit_functions,
             determine_gen_method,
             determine_test_method,
@@ -1549,7 +1550,10 @@ def _build_doc_proposal(
         _td_resolved = _gim_typedef_resolved(gim)   # (R76 N94) typedef 를 풀어서 안 타입은 라벨이 그 사실을 말한다
         _local_tc = _gim_to_type_map(gim)   # try 안 — 손상 gim이어도 아래 except가 우아하게 흡수(reviewer W1)
         _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
-        for _unit in (collect_unit_functions(_sub_fd, gim) or []):
+        _sub_units = collect_unit_functions(_sub_fd, gim) or []
+        # (R80) 문서 생성과 같은 원문 입력 — 소스 단계의 파일당 원문 맵(`source_files`)에서 붙인다.
+        attach_unit_sources(_sub_units, sections.get("source_files"))
+        for _unit in _sub_units:
             _nm = str(_unit.get("name") or "").strip().lower()
             if _nm not in changed_set or _nm in out["suts"]:
                 continue

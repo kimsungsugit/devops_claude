@@ -807,32 +807,31 @@ def test_generate_sequences_type_cache_overrides_global():
         gsuts._globals_type_cache.clear()
 
 
-def test_extract_mcdc_conditions_threads_type_cache_into_recursion():
-    """_extract_mcdc_conditions의 재귀 자기호출(중첩 if/children)에도 type_cache가 스레드된다.
+def test_mcdc_design_domains_follow_the_callers_type_cache_in_nested_decisions():
+    """(R80) MC/DC 도메인은 호출자의 type_cache(=선언)에서 오고, 중첩 if 의 결정에도 같은 도메인이 쓰인다.
 
-    중첩 조건은 재귀 경로로만 도달하므로, 재귀에서 type_cache를 흘리면(과거 스냅샷 결함) 안쪽
-    var-vs-var 조건의 MC/DC 경계값이 전역(폴백 uint8)을 읽는다. 바깥 if의 children에 안쪽 if를
-    두고, 주입(U32) vs 미주입(전역 비움→uint8) 대조로 재귀 스레딩을 보증한다."""
+    예전 regex 경로(`_extract_mcdc_conditions`)는 재귀에서 type_cache 를 흘려 uint8 로 접히는 결함이 있었다(이 테스트의
+    전신). 새 엔진(`generators.mcdc_design`)은 도메인을 한 번 풀어 모든 결정에 쓰므로, 같은 계약을 **중첩 결정**으로 지킨다.
+    대조군: 선언이 없으면(전역 캐시 비움) 이름 패턴으로 도메인을 지어내지 않는다 — 결정은 unsupported, MC/DC 행 0."""
     import generators.suts as gsuts
 
-    gsuts._globals_type_cache.clear()   # 전역 비움 → 미주입 시 uint8 폴백(대조군)
+    gsuts._globals_type_cache.clear()
     try:
-        # 바깥 if(children) → 안쪽 if 'big > small'(var-vs-var, 재귀로만 도달)
         flow = [{"type": "if", "condition": "outer > 0", "children": [
             {"type": "if", "condition": "big > small", "children": []},
         ]}]
-        ivars = ["big", "small", "outer"]
+        unit = {"name": "f", "input_vars": ["big", "small", "outer"], "output_vars": [], "logic_flow": flow}
+        seqs = gsuts.generate_sequences(unit, None, type_cache={"big": "U32", "small": "U8", "outer": "U8"})
+        report = unit["mcdc_design"]
+        assert report["domains"]["big"]["max"] == 2**32 - 1, report["domains"]
+        nested = [d for d in report["decisions"] if d["expression"] == "big > small"]
+        assert nested and nested[0]["status"] == "designed", report["decisions"]
+        assert any(s["strategy"].startswith("MCDC_") for s in seqs)
 
-        inj = gsuts._extract_mcdc_conditions(flow, ivars, {"big": "U32"})
-        big_inj = [c for c in inj if c[0] == "big"]
-        assert big_inj, f"중첩 var-vs-var 조건 미추출: {inj}"
-        # tuple=(var, op, rhs, true_val, false_val); '>'→true_val=bmax. U32 max면 재귀 스레드 성공.
-        assert big_inj[0][3] == 4294967295, f"재귀에 type_cache 미스레드(uint8 폴백): {big_inj}"
-
-        # 대조군: 미주입(전역 비움) → uint8 폴백(255). 재귀가 None을 흘려도 이 값이라 회귀 검출 가능.
-        glob = gsuts._extract_mcdc_conditions(flow, ivars)
-        big_glob = [c for c in glob if c[0] == "big"]
-        assert big_glob and big_glob[0][3] == 255
+        bare = {"name": "f", "input_vars": ["big", "small", "outer"], "output_vars": [], "logic_flow": flow}
+        seqs = gsuts.generate_sequences(bare)
+        assert not any(s["strategy"].startswith("MCDC_") for s in seqs)
+        assert all(d["status"] == "unsupported" for d in bare["mcdc_design"]["decisions"])
     finally:
         gsuts._globals_type_cache.clear()
 

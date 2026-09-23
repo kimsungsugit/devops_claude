@@ -28,6 +28,7 @@ from generators._artifact_check import apply_write_back_check
 from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
+from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
 from report_gen.doc_kind import is_sds_filename
 from report_gen.source_roots import first_source_root
@@ -1854,6 +1855,26 @@ def _generate_sub_cases(
     stp_environments: Optional[List[str]] = None,
     gen_method: str = "ABV",
 ) -> List[Dict[str, Any]]:
+    """Generate candidates without presenting type-based guesses as an oracle.
+
+    A call chain alone supplies neither argument bindings nor output semantics.
+    Until an integration model supplies those, preserve candidate values for
+    review and expose unresolved expectations in the actual specification.
+    """
+    cases = _generate_sub_case_candidates(flow, max_cases, stp_environments, gen_method)
+    observables = list(dict.fromkeys(
+        name for case in cases for name in (case.get("expected") or {})
+    ))
+    context = {"name": flow.get("entry_fn", ""), "output_vars": observables}
+    return apply_sequence_evidence(context, cases)
+
+
+def _generate_sub_case_candidates(
+    flow: Dict[str, Any],
+    max_cases: int = _DEFAULT_SUBCASES,
+    stp_environments: Optional[List[str]] = None,
+    gen_method: str = "ABV",
+) -> List[Dict[str, Any]]:
     """Generate sub-cases (boundary value rows) for an integration flow.
 
     Each sub-case has:
@@ -3143,6 +3164,9 @@ def generate_sits_quality_report(
 ) -> Dict[str, Any]:
     total_tc = len(itcs)
     total_sub = sum(len(t.get("sub_cases") or []) for t in itcs)
+    expected_evidence = summarize_expected_evidence([
+        case for itc in itcs for case in (itc.get("sub_cases") or [])
+    ])
     avg_sub = round(total_sub / max(total_tc, 1), 1)
 
     # (R76 N87) 분포는 **문서에 쓰는 값**으로 센다. 예전엔 생성기 내부 라벨(`itc["gen_method"]` — `ABV, AEC` 류)을 셌는데
@@ -3237,6 +3261,7 @@ def generate_sits_quality_report(
     return {
         "total_test_cases": total_tc,
         "total_sub_cases": total_sub,
+        "expected_evidence": expected_evidence,
         "avg_sub_cases_per_tc": avg_sub,
         # 캡에 잘린 흐름이 있으면 비지 않는다(없으면 {} — 소비처는 .get 으로 읽는다).
         "integration_flow_coverage": flow_cov,
@@ -3872,6 +3897,9 @@ def generate_sits(
                             "precondition": sc.get("precondition", ""),
                             "inputs": sc.get("inputs") or {},
                             "expected": sc.get("expected") or {},
+                            "expected_evidence": sc.get("expected_evidence") or {},
+                            "expected_candidates": sc.get("expected_candidates") or {},
+                            "execution_status": sc.get("execution_status", "not_run"),
                         }
                         for i, sc in enumerate(itc.get("sub_cases") or [])
                     ],

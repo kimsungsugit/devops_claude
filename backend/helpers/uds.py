@@ -1440,7 +1440,12 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   `related`/`related_source` 가 바뀔 수 있다(라이브 두 루트 0건이지만 캐시 payload 안의 값이라 규약대로 올린다).
 # (R73 N92) v25: `typedef_aliases`·`typedef_scan` 키, 전역 레코드 `base_type`, 함수 레코드 `param_base_types` — 구 캐시가 히트하면
 #   SUTS/STS 가 typedef 를 못 풀어 그 칸이 계속 `unknown`(빈 칸)으로 나온다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v25"
+# (R80) v26: 함수 레코드 `source_text`·`source_path`·`source_text_complete`·`source_unavailable_reason`(P1 소스 oracle·MC/DC
+#   소스 경로의 입력). 이 필드를 추가한 P1 변경이 버전을 안 올려 **실 생성은 v25 캐시를 히트** — 원문이 한 번도 도달하지
+#   않았고 SUTS 기대값 계산·MC/DC 는 전부 `logic_flow`(손실 텍스트)로만 돌았다(R80 실측: 194 결정 전부 source_kind=logic_flow).
+# (R80) v27: 원문을 함수 레코드에서 빼고 최상위 `source_files`(파일당 1회)로 옮겼다. 같은 v26 안에 두 모양(레코드마다 전문
+#   34MB / 파일 맵 3MB)이 공존해 옛 캐시가 히트하면 사이드카에 소스 사본이 다시 실렸다(리뷰 R3 W-A) — 모양이 바뀌면 올린다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v27"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -2444,7 +2449,9 @@ def _generate_docx_with_retry(
             return record
 
         try:
-            payload_file.write_text(json.dumps(stage_payload, ensure_ascii=False), encoding="utf-8")
+            # (R80) 원문 맵은 DOCX 단계가 쓰지 않는다 — 산출물 폴더의 임시 파일에 소스 사본을 남기지 않는다.
+            payload_file.write_text(json.dumps({k: v for k, v in stage_payload.items() if k != "source_files"},
+                                               ensure_ascii=False), encoding="utf-8")
             checkpoint.write_text(
                 json.dumps(
                     {

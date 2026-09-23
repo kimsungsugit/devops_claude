@@ -57,11 +57,13 @@ def _max_suts_unit() -> dict:
       **출력 변수가 없어야** 붙는다. 출력을 두면 29 에서 멈춘다 — 30 이라는 수가
       도달 가능한지 자체가 여기서 판별된다.
     """
-    cond = " && ".join(f"u8V{i} > {i}" for i in range(8))   # MC/DC 토글 6종(상한)
+    cond = " && ".join(f"u8V{i} > {i}" for i in range(8))   # 조건 8개 → 설계 벡터 9개 → 기본 자리 7(상한)
     return {
         "name": "fn_max",
         "prototype": "void fn_max(U8 a)",
         "input_vars": [f"u8V{i}" for i in range(8)],
+        # (R80) MC/DC 도메인은 **선언**에서만 온다(이름 패턴 `u8` 추측 금지) — 선언이 없으면 MC/DC 행이 0 이라 30 이 안 나온다.
+        "param_types": {f"u8V{i}": "U8" for i in range(8)},
         "output_vars": [],
         "indirect_vars": [f"u8gS{i}" for i in range(4)],
         "logic_flow": [

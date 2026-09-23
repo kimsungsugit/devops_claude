@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -51,10 +52,12 @@ def _detect_columns(ws: Any) -> Dict[str, Any]:
         "seq_text": _SEQUENCE_TEXT_COL, "tc_gen_method": _TC_GEN_METHOD_COL,
         "seq_no": _SEQ_NO_COL, "input_start": _INPUT_COL_START, "input_end": _INPUT_COL_END,
         "output_start": _OUTPUT_COL_START, "output_end": _OUTPUT_COL_END, "related": _RELATED_COL,
+        "data_start": _DATA_START_ROW,
     }
     inpt0 = input_hdr = expected = related = None
     found: Dict[str, int] = {}
     gen_cols: List[int] = []
+    tc_header_row = None
     maxc = min(int(ws.max_column or 0), _MAX_SCAN_COLS)
     for r in range(1, _HEADER_SCAN_ROWS + 1):
         for c in range(1, maxc + 1):
@@ -69,6 +72,8 @@ def _detect_columns(ws: Any) -> Dict[str, Any]:
             # strip/replace만으론 라벨이 안 맞아 header_driven 문서에서 test_method/gen_method 를
             # 조용히 None(→"")으로 떨궜다(HDPDM01 생성본 재파싱 시 provenance 침묵 손실).
             tn = " ".join(t.replace("_", " ").split())
+            if c == _TC_ID_COL and tn == "tc id" and tc_header_row is None:
+                tc_header_row = r
             if inpt0 is None and re.fullmatch(r"(?:inpt|input)\[0\]", tn):
                 inpt0 = c
             if input_hdr is None and tn == "input":
@@ -99,6 +104,14 @@ def _detect_columns(ws: Any) -> Dict[str, Any]:
     # output/related와 섞으면 역전/혼합 밴드(예 [63..29] 공집합, 입력밴드가 expected 열 흡수)를 만들어
     # expected 값이 input으로 오분류되는 침묵 손상이 난다 → 부분탐지는 전부 상수 폴백(구 파서 동작).
     header_driven = input_start is not None and expected is not None
+    if header_driven and tc_header_row is not None:
+        # Both reference layouts have a TC_ID header, but start at row 5 or 7.
+        # Only trust this anchor together with complete input/output bands.
+        header_end = tc_header_row
+        for merged in ws.merged_cells.ranges:
+            if merged.min_col <= _TC_ID_COL <= merged.max_col and merged.min_row <= tc_header_row <= merged.max_row:
+                header_end = max(header_end, merged.max_row)
+        cols["data_start"] = header_end + 1
     if input_start is not None and expected is not None:
         cols["input_start"] = input_start
         cols["seq_no"] = input_start - 1
@@ -162,7 +175,7 @@ def _extract_related_ids(*texts: str) -> List[str]:
 
 def _iter_tc_blocks(ws: Any, cols: Dict[str, Any]) -> Iterable[Tuple[int, int]]:
     tc_col = cols["tc_id"] or _TC_ID_COL
-    row = _DATA_START_ROW
+    row = cols.get("data_start", _DATA_START_ROW)
     max_row = ws.max_row
     while row <= max_row:
         if _clean_text(ws.cell(row=row, column=tc_col).value):
@@ -331,6 +344,155 @@ def bare_fn_name(name: Any) -> str:
     return toks[-1] if toks else s          # 반환타입·한정자(static 등) 뒤 마지막 토큰이 함수명
 
 
+def _attach_test_evidence(workbook: Any, units: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Join provenance by rendered TC identity; never trust stale numeric evidence."""
+    if "Test Evidence" not in workbook.sheetnames:
+        return []  # Legacy references have no generated provenance sheet.
+    rows = workbook["Test Evidence"].iter_rows(values_only=True)
+    headers = list(next(rows, ()))
+    required = {"Test Case ID", "Sequence", "Observable", "Expected", "Status", "Oracle", "Execution"}
+    index: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    case_names: Dict[Tuple[str, str], List[str]] = {}
+    duplicate = set()
+    if required.issubset(headers):
+        for row in rows:
+            item = dict(zip(headers, row, strict=False))
+            key = tuple(_clean_text(item.get(k)) for k in ("Test Case ID", "Sequence", "Observable"))
+            if key in index:
+                duplicate.add(key)
+            else:
+                case_names.setdefault(key[:2], []).append(key[2])
+            index[key] = item
+    counts: Dict[str, int] = {}
+    for unit in units:
+        for case in unit.get("test_cases") or []:
+            tc, seq = _clean_text(case.get("base_tc_id")), _clean_text(case.get("sequence_no"))
+            existing = case.get("expected") or {}
+            names = list(dict.fromkeys([*existing, *case_names.get((tc, seq), [])]))
+            evidence = {}
+            for name in names:
+                key = (tc, seq, name)
+                item = index.get(key)
+                reason = ""
+                if item is None:
+                    reason = "missing_expected_evidence"
+                elif key in duplicate:
+                    reason = "ambiguous_expected_evidence"
+                elif _normalize_scalar(item.get("Expected")) != existing.get(name):
+                    reason = "stale_expected_evidence"
+                if not reason:
+                    try:
+                        saved_inputs = json.loads(_clean_text(item.get("Inputs JSON")))
+                    except (ValueError, TypeError):
+                        saved_inputs = None
+                    if not isinstance(saved_inputs, dict):
+                        reason = "missing_input_evidence"
+                    elif {k: _normalize_scalar(v) for k, v in saved_inputs.items()} != (case.get("inputs") or {}):
+                        reason = "stale_input_evidence"
+                    elif _clean_text(item.get("Function")) != bare_fn_name(unit.get("unit_name", "")):
+                        reason = "stale_function_evidence"
+                status = _clean_text(item.get("Status")) if item else "unrecorded"
+                oracle = _clean_text(item.get("Oracle")) if item else "none"
+                if not reason and oracle != {"derived": "source", "unknown": "none",
+                                             "proposed": "ai", "unrecorded": "none"}.get(status):
+                    reason = "invalid_expected_evidence"
+                source_hash = _clean_text(item.get("Source SHA256")) if item else ""
+                if not reason and status == "derived" and not re.fullmatch(r"[a-f0-9]{64}", source_hash):
+                    reason = "missing_source_hash"
+                if reason:
+                    status, oracle = "conflict", "none"
+                    if name in existing:
+                        existing[name] = {"verification_required": True, "raw": f"[검증 필요] {reason}"}
+                    counts[reason] = counts.get(reason, 0) + 1
+                elif status == "derived":
+                    counts["source_oracle_requires_requirement_review"] = counts.get("source_oracle_requires_requirement_review", 0) + 1
+                elif name in existing and not (isinstance(existing[name], dict)
+                                               and existing[name].get("verification_required")):
+                    existing[name] = {"verification_required": True, "raw": "[검증 필요] unproven_expected_evidence"}
+                    counts["unproven_expected_evidence"] = counts.get("unproven_expected_evidence", 0) + 1
+                evidence[name] = {
+                    "status": status, "oracle_kind": oracle,
+                    "source_hash": source_hash,
+                    "source_path": _clean_text(item.get("Source path")) if item else "",
+                    "source_hash_scope": _clean_text(item.get("Source hash scope")) if item else "",
+                    "reason": reason or _clean_text(item.get("Reason")),
+                    "execution_status": "not_run", "requirement_verified": False,
+                }
+            case["expected_evidence"] = evidence
+            case["execution_status"] = "not_run"
+    return [{"code": code, "message": f"{code}: {count} expected slots; review provenance before execution."}
+            for code, count in sorted(counts.items())]
+
+
+def _attach_mcdc_design(workbook: Any, units: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Preserve design evidence without promoting worksheet claims to coverage.
+
+    Input identity is checked here; the original source and target instrumentation
+    are unavailable at import, so even consistent rows require revalidation.
+    """
+    if "MCDC Design" not in workbook.sheetnames:
+        return []
+    rows = workbook["MCDC Design"].iter_rows(values_only=True)
+    headers = list(next(rows, ()))
+    required = {"Test Case ID", "Function", "Decision ID", "Pair ID", "Sequence A",
+                "Sequence B", "Inputs A JSON", "Inputs B JSON"}
+    if not required.issubset(headers):
+        return [{"code": "invalid_mcdc_design_schema", "message": "MC/DC design requires source revalidation."}]
+    by_tc: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        item = dict(zip(headers, row, strict=False))
+        by_tc.setdefault(_clean_text(item.get("Test Case ID")), []).append(item)
+    conflicts = not_retained = 0
+    for unit in units:
+        cases = unit.get("test_cases") or []
+        case_counts = Counter((_clean_text(c.get("base_tc_id")), _clean_text(c.get("sequence_no"))) for c in cases)
+        case_index = {(_clean_text(c.get("base_tc_id")), _clean_text(c.get("sequence_no"))): c for c in cases}
+        evidence = []
+        for tc in dict.fromkeys(key[0] for key in case_index):
+            items = by_tc.get(tc, [])
+            identities = [(_clean_text(i.get("Decision ID")), _clean_text(i.get("Pair ID")),
+                           _clean_text(i.get("Condition ID"))) for i in items]
+            identity_counts = Counter(identities)
+            for item, identity in zip(items, identities, strict=True):
+                reason = ""
+                if identity_counts[identity] != 1:
+                    reason = "duplicate_mcdc_design"
+                elif _clean_text(item.get("Function")) != bare_fn_name(unit.get("unit_name", "")):
+                    reason = "stale_mcdc_function"
+                elif identity[1] and _clean_text(item.get("Retained")) in ("truncated", "invalidated"):
+                    # 생성기가 이미 "행 상한/재검증에서 탈락" 이라 적은 쌍 — 충돌이 아니라 **미보유**다. 커버리지 주장 없이 싣는다.
+                    not_retained += 1
+                    evidence.append({"worksheet_evidence": item, "verification_status": "not_retained",
+                                     "reason": f"mcdc_pair_{_clean_text(item.get('Retained'))}",
+                                     "execution_status": "not_run", "executed_mcdc_coverage": None})
+                    continue
+                elif identity[1]:
+                    for side in ("A", "B"):
+                        case_key = (tc, _clean_text(item.get(f"Sequence {side}")))
+                        case = case_index.get(case_key)
+                        if case_counts[case_key] > 1:
+                            reason = "ambiguous_mcdc_sequence"
+                            break
+                        try:
+                            saved = json.loads(_clean_text(item.get(f"Inputs {side} JSON")))
+                        except (TypeError, ValueError):
+                            saved = None
+                        if case is None or not isinstance(saved, dict):
+                            reason = "missing_mcdc_pair_input"
+                            break
+                        if {k: _normalize_scalar(v) for k, v in saved.items()} != (case.get("inputs") or {}):
+                            reason = "stale_mcdc_pair_input"
+                            break
+                conflicts += bool(reason)
+                evidence.append({"worksheet_evidence": item, "verification_status": "conflict" if reason else "source_revalidation_required",
+                                 "reason": reason or "imported_design_is_not_execution_coverage",
+                                 "execution_status": "not_run", "executed_mcdc_coverage": None})
+        unit["mcdc_design_evidence"] = evidence
+    return [{"code": "mcdc_design_requires_revalidation",
+             "message": f"Imported MC/DC design is not measured coverage; {conflicts} conflicting rows, "
+                        f"{not_retained} pairs not retained by the generator (truncated/invalidated)."}]
+
+
 def build_vectorcast_model(
     suts_path: str,
     *,
@@ -371,6 +533,8 @@ def build_vectorcast_model(
         if unit["warnings"]:
             export_warnings.extend(unit["warnings"])
         units.append(unit)
+    export_warnings.extend(_attach_test_evidence(workbook, units))
+    export_warnings.extend(_attach_mcdc_design(workbook, units))
     workbook.close()
     return {
         "schema_version": "1.0",

@@ -309,7 +309,8 @@ class TestSutsProfile:
         assert not any("tc_profile" in s for s in ref)
         assert [s.get("tc_profile") == TC_PROFILE_EXTENDED for s in ext] == [is_extended_strategy(s["strategy"]) for s in ext]
         assert u["base_strategy_count"] == len(ref) == sum(1 for s in ext if "tc_profile" not in s)
-        assert (suts_mod._BASE_SWITCH_SLOTS, suts_mod._BASE_GLOBAL_SLOTS, suts_mod._BASE_MCDC_SLOTS) == (6, 3, 6), "정본 규모의 정의"
+        assert (suts_mod._BASE_SWITCH_SLOTS, suts_mod._BASE_GLOBAL_SLOTS, suts_mod._BASE_MCDC_SLOTS) == (6, 3, 7), \
+            "정본 규모의 정의 — MC/DC 7 = 예전 BASE 1 + 토글 6 과 같은 자리 수(R80 설계 벡터)"
 
     def test_one_at_a_time_covers_every_input_side_not_already_made(self):
         ext = {s["strategy"]: s for s in generate_sequences(_unit(), None, type_cache={}, extended=True)}
@@ -369,7 +370,7 @@ class TestSutsProfile:
 
     @pytest.mark.parametrize("name, expected", [
         ("OAT_0_MIN", True), ("SWITCH_6", True), ("SWITCH_5", False), ("GLOBAL_3", True), ("GLOBAL_2", False),
-        ("MCDC_6", True), ("MCDC_5", False), ("MCDC_BASE", False), ("BV_MAX", False), ("COND_COMB_3", False), ("", False), (None, False),
+        ("MCDC_7", True), ("MCDC_6", False), ("MCDC_BASE", False), ("BV_MAX", False), ("COND_COMB_3", False), ("", False), (None, False),
     ])
     def test_extended_strategy_names(self, name, expected):
         assert is_extended_strategy(name) is expected

@@ -6,6 +6,7 @@ and multiple test sequences (boundary values, error conditions, etc.).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -20,8 +21,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from generators._artifact_check import apply_write_back_check
 from generators._artifact_check import sheet_base_name as _sheet_base_name
 from generators._xlsx_merge import merge_fresh
+from generators.mcdc_design import build_mcdc_design, finalize_mcdc_design
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
+from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.c_return import returns_value
 from report_gen.doc_kind import is_sds_filename
@@ -109,7 +112,9 @@ _GEN_EQUIV = "AOR/AEC"     # 등가 분할(조건·분기 조합)
 
 _MAX_SEQUENCES = 10
 # 전략 카탈로그의 **이론적 최대는 30** 이다(실측, `generate_sequences` 의 append 지점):
-#   6 BV + 4 COND_COMB + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 7 MC/DC(BASE 1 + 토글 6)
+#   6 BV + 4 COND_COMB + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 7 MC/DC(설계 벡터 7)
+#   (R80) MC/DC 는 예전 `BASE 1 + 토글 6` 을 **설계 벡터 7개**로 바꿨다 — 같은 자리 수(정본 규모 유지), 내용만 식 평가로
+#   찾은 독립 영향 쌍의 입력이다. 조건 n 개의 unique-cause 는 대개 n+1 벡터라 7 이면 조건 6개까지 다 담긴다.
 #
 # ⚠ 그러므로 24 는 "카탈로그 전체" 가 아니라 **캡**이다. 예전 주석은 `6 MC/DC` 로 적어
 #   `MCDC_BASE` 를 빠뜨렸고 합도 29 였다 — 그 숫자가 화면 공시문까지 번져 사용자에게
@@ -123,7 +128,7 @@ _STRATEGY_CATALOG_MAX = 30
 # 같은 상수를 본다 — 따로 적으면 한쪽만 바뀌어도 아무것도 안 깨진 채 공시가 틀린다(R75 리뷰 X5).
 _BASE_SWITCH_SLOTS = 6
 _BASE_GLOBAL_SLOTS = 3
-_BASE_MCDC_SLOTS = 6
+_BASE_MCDC_SLOTS = 7
 
 # 시험 범위의 **유일한 정의**. 준비 게이트(`docgen_preflight`)도 이걸 import 한다.
 SCOPE_REFERENCE = "suds"    # SwUDS 설계 ID 가 있는 함수만 — 정본과 같은 범위(기본)
@@ -495,10 +500,9 @@ def _get_strategy_label(strat_name: str, input_vars: Optional[List[str]] = None,
         return f"글로벌 상태: {gv}=최솟값 → 글로벌 의존 분기 커버"
     if strat_name == "VOID_SIDE_EFFECT":
         return "Void 부작용: 입력 경계 초과 → 글로벌 변수 상태 변화 검증"
-    if strat_name == "MCDC_BASE":
-        return "MC/DC baseline: 모든 조건 True → 결정 True 확인"
     if strat_name.startswith("MCDC_"):
-        return "MC/DC: 개별 조건 토글 → 결정 결과 변화 확인 (ASIL D)"
+        # 실제 라벨은 생성부가 쌍 구성(결정·조건·진리값)으로 덮어쓴다(`_mcdc_vector_label`). 여기는 이름만 온 경우의 자리표시다.
+        return "MC/DC 설계 벡터 (식 평가, 도달성 미검증·미실행)"
     return strat_name
 
 # Domain-keyword based float boundaries for physical/engineering signals
@@ -1049,6 +1053,12 @@ def collect_unit_functions(
             "verify_scope": _verify,
             "fid": fid,
             "name": name,
+            "source_text": info.get("source_text") or "",
+            "source_path": info.get("source_path") or "",
+            "source_unavailable_reason": info.get("source_unavailable_reason") or "",
+            # 원문이 레코드에 없으면(R80: 파일당 `source_files` 맵으로 옮김) `attach_unit_sources` 가 붙일 때까지 미완결이다 —
+            #   붙이지 않은 호출자가 "완결된 빈 원문" 으로 오독하지 않게(리뷰 R3 Info).
+            "source_text_complete": bool(info.get("source_text")) and info.get("source_text_complete", True),
             "prototype": prototype,
             "component": component,
             "input_vars": input_vars[:max_inp],
@@ -2117,7 +2127,7 @@ resolve_safety_related = _resolve_safety_related
 
 
 def is_extended_strategy(strategy: Any) -> bool:
-    """확장 프로파일에서만 나오는 전략인가 — OAT 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(6+)."""
+    """확장 프로파일에서만 나오는 전략인가 — OAT 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
     if s.startswith("OAT_"):
         return True
@@ -2167,7 +2177,7 @@ def generate_sequences(
     """Generate test sequences for a unit function.
 
     `extended`(R75 확장 프로파일): 기본 전략 목록은 **그대로 앞에** 두고(같은 이름·같은 값) 그 뒤에 덧붙인다 —
-    7번째 이후의 switch case · 4번째 이후의 전역 · 7번째 이후의 MC/DC 조건 · 입력마다 최솟값/최댓값 **단독 변경**(OAT,
+    7번째 이후의 switch case · 4번째 이후의 전역 · 8번째 이후의 MC/DC 설계 벡터 · 입력마다 최솟값/최댓값 **단독 변경**(OAT,
     조건 조합이 이미 만든 (변수, 방향)은 건너뜀). 값은 같은 `_bounds_of` 에서 오고 모르는 타입은 확장에서도 비운다.
     `max_seq=None` 이면 자르지 않는다.
 
@@ -2341,7 +2351,7 @@ def generate_sequences(
             seqs.append({"seq_num": 4, "inputs": {}, "expected": {},
                          "strategy": "RETURN_CHECK",
                          "description": f"{fn_name}() 반환값 검증: 반환값이 정의된 범위 내 유효한 값임을 확인"})
-        return seqs[:max_seq]
+        return apply_sequence_evidence(unit, seqs[:max_seq])
 
     var_types = {v: _type_of(v) for v in input_vars}
     var_bounds = {v: _bounds_of(v, t) for v, t in var_types.items()}
@@ -2424,14 +2434,16 @@ def generate_sequences(
     if input_vars and not output_vars and indirect_vars:
         strategies.append(("VOID_SIDE_EFFECT", "_void_se"))
 
-    # GAP 6: MC/DC — Modified Condition/Decision Coverage
-    # Extract conditions from logic_flow and generate True/False toggle per condition
-    _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars, type_cache,
-                                                bounds_of=lambda _v: _bounds_of(_v, _type_of(_v)))
-    # Add baseline FIRST (all conditions at true values)
-    if _mcdc_conditions:
-        strategies.append(("MCDC_BASE", "_mcdc_base"))
-    for mc_idx in range(len(_mcdc_conditions[:_BASE_MCDC_SLOTS])):
+    # GAP 6: MC/DC — 결정식을 **실제로 평가해** 찾은 unique-cause 독립 영향 쌍의 입력 벡터(`generators.mcdc_design`).
+    # ⚠ 예전 경로(regex `_extract_mcdc_conditions`)는 "전부 참 + 하나만 거짓(나머지 중간값)" 을 만들어 OR 식에서
+    #   독립 영향이 0 이었다(`a>10 || b>20` 에서 a 를 뒤집어도 b 가 참이라 결과가 안 바뀐다) — 기법 주장만 있고 쌍이 없었다.
+    #   도메인은 **선언**에서 온 것만 쓴다(이름 패턴 추측 금지). 못 푸는 결정은 쌍 없이 사유를 남기고 분모에 남는다.
+    _mcdc_report = build_mcdc_design(unit, declared_domains=_mcdc_declared_domains(
+        input_vars, _type_of, _domains, _declared, _is_pointer_decl, set(_ptypes)))
+    unit["mcdc_design"] = _mcdc_report
+    _mcdc_vectors: List[Dict[str, int]] = list(_mcdc_report.get("selected_inputs") or [])
+    _mcdc_roles = _mcdc_vector_roles(_mcdc_report)
+    for mc_idx in range(min(len(_mcdc_vectors), _BASE_MCDC_SLOTS)):
         strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
 
     # (R75) 확장 — 위까지가 기본 카탈로그(최대 30)다. 확장은 그 **뒤에만** 붙는다(기본 문서와 포함 관계).
@@ -2442,7 +2454,7 @@ def generate_sequences(
             strategies.append((f"SWITCH_{sw_idx}", f"_switch_{sw_idx}"))
         for gv_idx in range(_BASE_GLOBAL_SLOTS, len(_extra_globals)):
             strategies.append((f"GLOBAL_{gv_idx}", f"_global_{gv_idx}"))
-        for mc_idx in range(_BASE_MCDC_SLOTS, len(_mcdc_conditions)):
+        for mc_idx in range(_BASE_MCDC_SLOTS, len(_mcdc_vectors)):
             strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
         # 단독 경계(OAT): 입력 하나만 경계로, 나머지는 중간값. 입력이 하나뿐이면 BV_MIN/BV_MAX 가 이미 그것이다.
         if len(input_vars) >= 2:
@@ -2478,45 +2490,17 @@ def generate_sequences(
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
 
-        if bound_key == "_mcdc_base":
-            # MC/DC baseline: all conditions at true values
+        mcdc_label = ""
+        if bound_key and bound_key.startswith("_mcdc_"):
+            # MC/DC 설계 벡터 — 값은 엔진이 식을 평가해 고른 그대로다(중간값·임의 보정 없음). 기대값은 이 벡터가
+            # 말해 주지 않는다: 결정 결과 ≠ 출력값이라 자리만 두고 `apply_sequence_evidence` 가 근거를 붙인다.
+            vector = _mcdc_vectors[int(bound_key.split("_")[-1])]
             for v in input_vars:
-                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
-                # Check if this var has an MCDC condition
-                mc_true = None
-                for mc in _mcdc_conditions:
-                    if mc[0] == v:
-                        mc_true = mc[3]  # true_val
-                        break
-                if mc_true is not None:
-                    inp_vals[v] = _format_test_value(mc_true, var_types.get(v, "uint8_t"))
-                else:
-                    inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
+                inp_vals[v] = vector[v]
             for v in output_vars:
-                bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
-                exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
-        elif bound_key and bound_key.startswith("_mcdc_"):
-            # MC/DC: toggle one condition to flip the decision outcome
-            mc_idx = int(bound_key.split("_")[-1])
-            if mc_idx < len(_mcdc_conditions):
-                mc_var, _, _, _, mc_false_val = _mcdc_conditions[mc_idx]
-                # Clamp mc_false_val to type boundary to prevent overflow (e.g. 256 for uint8)
-                try:
-                    _mc_type = var_types.get(mc_var, "uint8_t")
-                    _mc_bnd = var_bounds.get(mc_var, _DEFAULT_BOUNDARY)
-                    mc_false_val = max(_mc_bnd.get("min", 0), min(mc_false_val, _mc_bnd.get("max", 255)))
-                except (TypeError, ValueError):
-                    pass
-                for v in input_vars:
-                    bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
-                    if v == mc_var:
-                        # Set to the false-side value (toggle from baseline true)
-                        inp_vals[v] = _format_test_value(mc_false_val, var_types.get(v, "uint8_t"))
-                    else:
-                        inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
-                for v in output_vars:
-                    bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
-                    exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+                exp_vals[v] = f"{_VERIFY_NEEDED_PREFIX} mcdc_design_vector"
+            # 라벨은 쌍이 행 상한 뒤에도 살아남았는지 알아야 쓸 수 있다 — finalize 뒤에 다시 쓴다(리뷰 C1).
+            mcdc_label = "MC/DC 설계 벡터"
         elif bound_key and bound_key.startswith("_loop_"):
             # Loop boundary: set loop counter var to 0 / 1 / max
             loop_key = bound_key.split("_")[-1]
@@ -2629,6 +2613,8 @@ def generate_sequences(
             _get_strategy_label(strat_name, _toggle_vars if strat_name.startswith(("COND_COMB_", "OAT_")) else input_vars,
                                 _extra_switch, _loop_var if _has_loop else "", _extra_globals)
         )
+        if mcdc_label:
+            label = mcdc_label
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
         exp_parts = [f"{v}={exp_vals[v]}" for v in output_vars if v in exp_vals]
         # Include extra expected vars (e.g., globals from VOID_SIDE_EFFECT)
@@ -2653,7 +2639,148 @@ def generate_sequences(
             # 확장 전략의 표시는 **만든 자리에서** 단다 — 이름을 되읽어 추정하지 않는다(리뷰 W2·X5).
             sequences[-1]["tc_profile"] = TC_PROFILE_EXTENDED
 
-    return sequences
+    # 행 상한(`strategies[:max_seq]`)을 **적용한 뒤** 쌍을 다시 검증한다 — 한쪽 행만 남은 쌍은 `truncated` 로 공시되고
+    # 커버리지 주장에서 빠진다. MC/DC 행끼리만 묶는다(같은 입력의 BV 행을 쌍 구성원으로 잡으면 설계 근거가 섞인다).
+    _mcdc_rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
+    finalize_mcdc_design(_mcdc_report, _mcdc_rows)
+    for _row in _mcdc_rows:
+        # (리뷰 C1) "독립 영향 쌍" 은 **두 행이 모두 남아 재검증을 통과한** 쌍(`seq["mcdc_design"]`)에만 쓴다. 짝 행이 잘렸거나
+        # 무효가 된 벡터는 그 사실을 라벨에 적는다 — 예전엔 절단 전 라벨이 남아 MCDC Design 시트(truncated)와 모순됐다.
+        _roles = _mcdc_roles.get(_mcdc_vector_key({k: _row["inputs"].get(k) for k in _row["inputs"]}), [])
+        _lines = str(_row.get("description") or "").split("\n")
+        _lines[0] = _mcdc_vector_label(_row.get("mcdc_design") or [],
+                                       [r["pair"].get("retained_status", "") for r in _roles])
+        _row["description"] = "\n".join(_lines)
+    return apply_sequence_evidence(unit, sequences)
+
+
+def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict[str, str]]) -> int:
+    """unit 에 정의 파일의 원문을 붙인다(`source_files` = 소스 단계의 파일당 1회 맵). 붙인 unit 수를 돌려준다.
+
+    원문은 소스 oracle(`apply_sequence_evidence`)과 MC/DC 소스 경로의 입력이다. 맵에 없으면(잘려 읽힘·원격 미확보)
+    비워 두고 사유를 남긴다 — 빈 원문을 "지원 안 되는 코드" 로 오독하지 않게 `source_unavailable_reason` 이 말한다.
+    """
+    attached = 0
+    files = source_files or {}
+    for unit in units:
+        if unit.get("source_text"):
+            attached += 1
+            continue
+        text = files.get(str(unit.get("source_path") or ""))
+        if text:
+            unit["source_text"], unit["source_text_complete"] = text, True
+            attached += 1
+        elif unit.get("source_path") and not unit.get("source_unavailable_reason"):
+            unit["source_unavailable_reason"] = "source_file_not_in_source_stage"
+    return attached
+
+
+def _mcdc_declared_domains(input_vars: List[str], type_of: Any, value_domains: Dict[str, Any],
+                           declared: Any, is_pointer: Any = None,
+                           parameter_names: Optional[set] = None) -> Dict[str, Dict[str, Any]]:
+    """MC/DC 탐색 도메인 — **선언**이 정한 정수 도메인만(이름 패턴·기본값 추측 제외).
+
+    선언 타입(파라미터·전역 선언 → `_TYPE_ALIASES` 로 폭이 정의된 이름)은 타입 전폭, enum 은 열거자 값 집합이다.
+    설계 범위(SwUDS Value Range)는 엔진이 **선언 도메인 안에서만** 좁힌다(`build_mcdc_design`) — 여기서 넓히지 않는다.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for v in input_vars:
+        if is_pointer is not None and is_pointer(v):
+            # (리뷰 W2) 포인터·배열의 SUTS 값은 **가리키는 대상**의 값이다. `if (pv)` 의 진리값은 주소라 그 값으로
+            # 쌍을 만들면 실행 시 두 행 모두 참인 가짜 쌍이 된다 — 도메인을 주지 않는다(결정은 unsupported 로 남는다).
+            continue
+        origin = "parameter" if parameter_names and v in parameter_names else "global"
+        t = type_of(v)
+        if t == _ENUM_TYPE:
+            raw = (value_domains.get(v) or {}).get("values") or []
+            values = sorted({int(x) for x in raw if isinstance(x, int) and not isinstance(x, bool)})
+            if values:
+                out[v] = {"min": values[0], "max": values[-1], "values": values, "type": "enum",
+                          "source": "enum_declaration", "origin": origin}
+            continue
+        if t in ("float", _UNKNOWN_TYPE, _RANGE_TYPE, "") or t not in _TYPE_BOUNDARIES or not declared(v):
+            continue
+        tb = _TYPE_BOUNDARIES[t]
+        out[v] = {"min": int(tb["min"]), "max": int(tb["max"]), "type": t, "source": "declared_type", "origin": origin}
+    return out
+
+
+def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """MC/DC **설계** 집계(품질 리포트용) — 실행 커버리지가 아니다. 쌍을 못 만든 결정도 분모에 남고 사유별로 센다.
+
+    `retained_pairs` 는 행 상한 뒤에도 두 행이 모두 남은 쌍, `truncated_pairs` 는 상한에 잘린 쌍이다(침묵 절단 금지).
+    """
+    out: Dict[str, Any] = {"units": 0, "decisions": 0, "conditions": 0, "designed": 0, "partial": 0,
+                           "no_pair_found": 0, "unsupported": 0, "conditions_paired": 0, "retained_pairs": 0,
+                           "truncated_pairs": 0, "invalidated_pairs": 0, "unsupported_reasons": {},
+                           "unenumerated_functions": 0, "unenumerated_reasons": {}, "design_range_conflicts": [],
+                           "execution_status": "not_run", "reachability": "unverified"}
+    out["units_not_analyzed"] = 0
+    for unit in units:
+        report = unit.get("mcdc_design")
+        if not report:
+            # 입출력이 없어 전략 목록을 쓰지 않는 unit(조기 반환) — 분석 안 한 것이지 결정이 없는 것이 아니다.
+            out["units_not_analyzed"] += 1
+            continue
+        out["units"] += 1
+        for name, dom in (report.get("domains") or {}).items():
+            if dom.get("design_range_conflict"):
+                # 설계 범위가 선언 타입/열거자와 안 맞아 MC/DC 는 **선언** 도메인을 썼다 — BV 행과 도메인이 갈릴 수 있다.
+                out["design_range_conflicts"].append(f"{report.get('function', '')}.{name}")
+        for d in report.get("decisions") or []:
+            if d.get("status") == "unenumerated":
+                out["unenumerated_functions"] += 1
+                reason = str(d.get("reason") or "unknown").split(":", 1)[0]
+                out["unenumerated_reasons"][reason] = out["unenumerated_reasons"].get(reason, 0) + 1
+                continue
+            out["decisions"] += 1
+            out["conditions"] += len(d.get("conditions") or [])
+            status = d.get("status", "unsupported")
+            out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
+            if status == "unsupported":
+                reason = str(d.get("reason") or "unknown").split(":", 1)[0]
+                out["unsupported_reasons"][reason] = out["unsupported_reasons"].get(reason, 0) + 1
+            for pair in d.get("pairs") or []:
+                out["conditions_paired"] += 1
+                key = {"retained": "retained_pairs", "invalidated": "invalidated_pairs"}.get(
+                    pair.get("retained_status"), "truncated_pairs")
+                out[key] += 1
+    return out
+
+
+def _mcdc_vector_key(inputs: Dict[str, Any]) -> str:
+    return json.dumps(inputs, sort_keys=True)
+
+
+def _mcdc_vector_roles(report: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    """입력 벡터 → 그 벡터가 구성원인 (결정, 조건, 역할, 진리값, 결정값) 목록."""
+    roles: Dict[str, List[Dict[str, Any]]] = {}
+    for decision in report.get("decisions") or []:
+        for pair in decision.get("pairs") or []:
+            for side in ("a", "b"):
+                roles.setdefault(_mcdc_vector_key(pair[f"inputs_{side}"]), []).append({
+                    "decision_id": decision["decision_id"], "condition_id": pair["condition_id"], "role": side.upper(),
+                    "truth": pair[f"truth_{side}"], "decision": pair[f"decision_{side}"], "pair": pair})
+    return roles
+
+
+def _mcdc_vector_label(retained: List[Dict[str, Any]], lost_statuses: Optional[List[str]] = None) -> str:
+    """행 라벨. `retained` = finalize 가 그 행에 붙인 **살아남은** 쌍 구성 기록(`seq["mcdc_design"]`).
+
+    `lost_statuses` = 이 벡터가 구성원인 쌍들의 finalize 결과 — 살아남은 쌍이 없을 때 **왜** 없는지(절단/재검증 탈락)를 적는다.
+    """
+    if not retained:
+        lost = [s for s in (lost_statuses or []) if s != "retained"]
+        if lost:
+            cause = " · ".join(f"{label} {lost.count(key)}건" for key, label in
+                               (("truncated", "짝 행 상한 절단"), ("invalidated", "재검증 탈락")) if lost.count(key))
+            return f"MC/DC 설계 벡터 — 독립 영향 쌍 미성립({cause}, MCDC Design 시트 참조)"
+        return "MC/DC 설계 벡터"
+    parts = []
+    for r in retained:
+        truth = "".join("T" if x else "F" for x in r["truth"])
+        parts.append(f"{r['decision_id']}:{r['condition_id']}({r['role'].upper()}) 조건[{truth}]→결정 {'T' if r['decision'] else 'F'}")
+    return "MC/DC 독립 영향 쌍: " + ", ".join(parts) + " (식 평가 설계, 도달성 미검증·미실행)"
 
 
 def _format_test_value(value: Any, typename: str) -> Any:
@@ -2776,128 +2903,6 @@ def _is_state_machine_var(var_name: str) -> bool:
     keywords = ("state", "_st_", "_sts", "status", "mode", "phase", "stage",
                  "step", "fsm", "_sm_")
     return any(kw in name for kw in keywords)
-
-
-def _extract_mcdc_conditions(
-    logic_flow: List[Dict[str, Any]],
-    input_vars: List[str],
-    type_cache: Optional[Dict[str, str]] = None,
-    bounds_of: Optional[Any] = None,
-) -> List[Tuple[str, str, Any, Any, Any]]:
-    """Extract MC/DC-relevant conditions from logic_flow.
-
-    `bounds_of(var) -> dict`: 호출자(`generate_sequences`)의 경계 해상 — 파라미터 선언·enum 값 집합을 아는 쪽이다.
-    (R73 리뷰 C1) 없으면 전역 타입 캐시만 본다. 경계를 모르는 변수(`{}`)끼리의 비교는 조건으로 내지 않는다 —
-    예전 `.get("max", 255)` 폴백은 모르는 타입에 uint8 을 지어냈다.
-
-    Returns list of (variable, operator, threshold, true_value, false_value) tuples.
-    For 'if (A > 10)': variable=A, op='>', threshold=10, true_val=11, false_val=10 (boundary value)
-    """
-    conditions: List[Tuple[str, str, Any, Any, Any]] = []
-    seen_keys: set = set()
-    _OPS = {"<": ("<", lambda t: t - 1, lambda t: t),
-            ">": (">", lambda t: t + 1, lambda t: t),
-            "<=": ("<=", lambda t: t, lambda t: t + 1),
-            ">=": (">=", lambda t: t, lambda t: t - 1),
-            "==": ("==", lambda t: t, lambda t: t + 1),
-            "!=": ("!=", lambda t: t + 1, lambda t: t)}
-
-    for node in logic_flow:
-        ntype = str(node.get("type", "")).lower()
-        if ntype != "if":
-            # Recurse
-            for child in node.get("children", []):
-                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache, bounds_of))
-            continue
-
-        cond = str(node.get("condition", "")).strip()
-        if not cond:
-            for child in node.get("children", []):
-                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache, bounds_of))
-            continue
-
-        # Parse conditions: "var > 10", "var >= other_var", "var == CONST"
-        # Also extract condition variables NOT in input_vars (locals, constants)
-        _cond_vars = re.findall(r"[a-zA-Z_]\w+", cond)
-        _all_vars = list(input_vars)
-        for cv in _cond_vars:
-            if cv.lower() not in {v.lower() for v in _all_vars} and len(cv) > 2:
-                if cv.lower() not in ("if", "else", "true", "false", "null", "void", "return"):
-                    _all_vars.append(cv)
-
-        for iv in _all_vars:
-            for op_str, (op_label, true_fn, false_fn) in _OPS.items():
-                # Pattern 1: var OP numeric_constant ("var > 10", "var>=0x0A")
-                pat_num = re.compile(
-                    rf"(?:^|[^a-zA-Z_]){re.escape(iv)}\s*{re.escape(op_str)}\s*([\-]?(?:0[xX][0-9a-fA-F]+|\d+))",
-                    re.IGNORECASE,
-                )
-                m = pat_num.search(cond)
-                if m:
-                    try:
-                        threshold = int(m.group(1), 0)
-                        true_val = true_fn(threshold)
-                        false_val = false_fn(threshold)
-                        key = (iv, op_str, threshold)
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            conditions.append((iv, op_label, threshold, true_val, false_val))
-                    except (ValueError, TypeError):
-                        pass
-                    continue
-
-                # Pattern 2: var OP other_variable ("var >= other_var")
-                # Also try: other_var OP input_var (reversed operand order)
-                pat_var = re.compile(
-                    rf"(?:^|[^a-zA-Z_]){re.escape(iv)}\s*{re.escape(op_str)}\s*([a-zA-Z_]\w+)",
-                    re.IGNORECASE,
-                )
-                # Also match when input_var is on the RIGHT side: "local_var >= input_var"
-                _reverse_ops = {">": "<", "<": ">", ">=": "<=", "<=": ">=", "==": "==", "!=": "!="}
-                pat_rev = re.compile(
-                    rf"([a-zA-Z_]\w+)\s*{re.escape(op_str)}\s*{re.escape(iv)}(?:[^a-zA-Z_]|$)",
-                    re.IGNORECASE,
-                )
-                m2 = pat_var.search(cond) or pat_rev.search(cond)
-                if m2:
-                    rhs_var = m2.group(1)
-                    # Use boundary values of the input variable for MC/DC toggle
-                    if bounds_of is not None:
-                        iv_bnd = bounds_of(iv) or {}
-                    else:
-                        iv_type = infer_variable_type(iv, type_cache)
-                        iv_bnd = (
-                            _get_float_bounds_for_var(iv) if iv_type == "float"
-                            else get_boundary_values(iv_type)
-                        )
-                    if not iv_bnd:
-                        continue   # 경계를 모르는 변수 — 토글 값을 지어내지 않는다
-                    mid = iv_bnd.get("mid", 127)
-                    bmin = iv_bnd.get("min", 0)
-                    bmax = iv_bnd.get("max", 255)
-                    # For "var >= other": true when var is high, false when var is low
-                    if op_str in (">", ">="):
-                        true_val = bmax
-                        false_val = bmin
-                    elif op_str in ("<", "<="):
-                        true_val = bmin
-                        false_val = bmax
-                    elif op_str == "==":
-                        true_val = mid
-                        false_val = bmin if mid != bmin else bmax
-                    else:  # !=
-                        true_val = bmin if mid != bmin else bmax
-                        false_val = mid
-                    key = (iv, op_str, rhs_var)
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        conditions.append((iv, op_label, rhs_var, true_val, false_val))
-
-        # Recurse into children
-        for child in node.get("children", []):
-            conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache, bounds_of))
-
-    return conditions
 
 
 def _extract_switch_cases(
@@ -3168,12 +3173,14 @@ def enhance_sequences_with_ai(
         applied = 0
         for item in payload:
             if _validate_ai_sequence_item(item, valid_nums):
-                seq_map[item["seq_num"]]["expected"].update(item["expected"])
+                allowed = set(_out_vars) | set(_indirect) | set(seq_map[item["seq_num"]].get("expected") or {})
+                seq_map[item["seq_num"]].setdefault("ai_expected_candidates", {}).update({
+                    key: value for key, value in item["expected"].items() if key in allowed})
                 applied += 1
         if applied:
             _logger.info("AI enhanced %d/%d sequences for %s", applied, len(payload), unit.get("name"))
 
-    return sequences
+    return apply_sequence_evidence(unit, sequences)
 
 
 # ---------------------------------------------------------------------------
@@ -3302,6 +3309,7 @@ def generate_suts_xlsm(
     row_num = _DATA_START_ROW
     tc_count = 0
     total_seq = 0
+    rendered_tc_ids: Dict[str, str] = {}
 
     for unit in units:
         fid = unit["fid"]
@@ -3319,6 +3327,7 @@ def generate_suts_xlsm(
         # 그 규칙을 따르고, 못 찾았으면 종전대로 내부 fid 로 만든다 — TC_ID 는 시트의
         # 키라 비울 수 없기 때문이다(비우면 행을 식별할 수 없다).
         tc_id = f"SwUTC_{suds_id or fid}"
+        rendered_tc_ids[fid] = tc_id
         start_row = row_num
 
         # TC 정의 행 — 정본에서 이 행은 **변수명 행**이다. 시퀀스 번호·Test Method·
@@ -3453,6 +3462,38 @@ def generate_suts_xlsm(
 
     # --- Traceability sheet: Component → Function → TC ---
     _write_suts_traceability_sheet(wb, units, thin, hdr_fill, hdr_font, data_font)
+    # Preserve the distinction between source consistency and requirement truth
+    # in the exported artifact: the reference TC layout has no description cell.
+    if "Test Evidence" in wb.sheetnames:
+        del wb["Test Evidence"]
+    evidence_ws = wb.create_sheet("Test Evidence")
+    evidence_ws.append(["Function ID", "Function", "Sequence", "Observable", "Expected",
+                        "Status", "Oracle", "Execution", "Source SHA256", "Source path", "Reason",
+                        "Test Case ID", "Source hash scope", "Inputs JSON"])
+    for cell in evidence_ws[1]:
+        cell.font, cell.fill, cell.border = hdr_font, hdr_fill, thin
+    evidence_ws.freeze_panes = "A2"
+    for unit in units:
+        for seq in all_sequences.get(unit["fid"], []):
+            for var in dict.fromkeys([*(seq.get("expected") or {}), *(seq.get("expected_evidence") or {})]):
+                value = (seq.get("expected") or {}).get(var, "")
+                ev = (seq.get("expected_evidence") or {}).get(var) or {}
+                evidence_ws.append([unit["fid"], unit.get("name", ""), seq.get("seq_num"), var,
+                                    value, ev.get("status", "unrecorded"), ev.get("oracle_kind", "none"),
+                                    ev.get("execution_status", "not_run"), ev.get("source_hash", ""),
+                                    ev.get("source_path", ""), ev.get("reason", "provenance_missing"),
+                                    rendered_tc_ids.get(unit["fid"], ""), ev.get("source_hash_scope", ""),
+                                    json.dumps(seq.get("inputs") or {}, ensure_ascii=False, sort_keys=True)])
+                for cell in evidence_ws[evidence_ws.max_row]:
+                    cell.font = data_font
+                    # Treat all provenance strings as text, including paths/IDs
+                    # beginning with spreadsheet formula characters.
+                    if isinstance(cell.value, str):
+                        cell.data_type = "s"
+    evidence_ws.auto_filter.ref = evidence_ws.dimensions
+    for col in "ABCDEFGHIJKLMN":
+        evidence_ws.column_dimensions[col].width = 24 if col not in "IJK" else 48
+    _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, thin, hdr_fill, hdr_font, data_font)
 
     # --- Remove default sheet if we created new workbook ---
     if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
@@ -3463,6 +3504,71 @@ def generate_suts_xlsm(
     wb.save(str(out))
     _logger.info("SUTS saved: %s", out)
     return str(out)
+
+
+_MCDC_SHEET = "MCDC Design"
+_MCDC_HEADERS = ["Test Case ID", "Function", "Decision ID", "Condition ID", "Pair ID", "Sequence A", "Sequence B",
+                 "Inputs A JSON", "Inputs B JSON", "Truth A", "Truth B", "Decision A", "Decision B", "Retained",
+                 "Decision Expression", "Decision Status", "Reason", "Source Kind", "Source SHA256",
+                 "Search Complete", "Execution", "Reachability"]
+
+
+def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, hdr_fill, hdr_font, data_font):
+    """MC/DC **설계** 근거 시트 — 결정별 독립 영향 쌍과, 쌍을 못 만든 결정의 사유(분모 유지).
+
+    정본 시험 시트엔 이 정보를 담을 칸이 없다(열 구조 불변). 이 시트는 실행 커버리지가 아니다: `Execution` 은 늘
+    `not_run`, `Reachability` 는 `unverified` 다. 내보내기(`tools/export_suts_vectorcast._attach_mcdc_design`)는 이 시트를
+    입력 일치로만 재검증하고 커버리지로 승격하지 않는다.
+    """
+    from openpyxl.utils import get_column_letter
+
+    if _MCDC_SHEET in wb.sheetnames:
+        del wb[_MCDC_SHEET]
+    ws = wb.create_sheet(_MCDC_SHEET)
+    ws.append(_MCDC_HEADERS)
+    for cell in ws[1]:
+        cell.font, cell.fill, cell.border = hdr_font, hdr_fill, border
+    ws.freeze_panes = "A2"
+
+    def _truth(values):
+        return "".join("T" if v else "F" for v in values or [])
+
+    for unit in units:
+        report = unit.get("mcdc_design") or {}
+        by_seq = {s.get("seq_num"): s for s in all_sequences.get(unit["fid"], [])}
+        tc_id = rendered_tc_ids.get(unit["fid"], "")
+        for decision in report.get("decisions") or []:
+            common = [decision.get("expression", ""), decision.get("status", ""), decision.get("reason", ""),
+                      decision.get("source_kind", ""), decision.get("source_hash", ""),
+                      "yes" if decision.get("search_complete") else "no", "not_run", "unverified"]
+            pairs = decision.get("pairs") or []
+            first_row = ws.max_row + 1
+            if not pairs:
+                # 쌍 없는 결정도 한 행 — 빠지면 "MC/DC 설계 완료" 로 오독된다(분모에서 사라진다).
+                ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), "", "", "", "", "", "", "",
+                           "", "", "", "", *common])
+            for pair in pairs:
+                retained = pair.get("retained_status", "")
+                inputs = []
+                for side in ("a", "b"):
+                    seq = by_seq.get(pair.get(f"seq_{side}")) if retained == "retained" else None
+                    inputs.append(json.dumps((seq or {}).get("inputs") if seq else pair.get(f"inputs_{side}") or {},
+                                             ensure_ascii=False, sort_keys=True))
+                ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), pair.get("condition_id", ""),
+                           pair.get("pair_id", ""),
+                           pair.get("seq_a") if retained == "retained" else "",
+                           pair.get("seq_b") if retained == "retained" else "",
+                           inputs[0], inputs[1], _truth(pair.get("truth_a")), _truth(pair.get("truth_b")),
+                           "T" if pair.get("decision_a") else "F", "T" if pair.get("decision_b") else "F", retained,
+                           *common])
+            for row_cells in ws.iter_rows(min_row=first_row, max_row=ws.max_row):
+                for cell in row_cells:
+                    cell.font = data_font
+                    if isinstance(cell.value, str):
+                        cell.data_type = "s"   # 식·JSON 이 `=`·`-` 로 시작해도 수식으로 읽히지 않게
+    ws.auto_filter.ref = ws.dimensions
+    for idx, _ in enumerate(_MCDC_HEADERS, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = 40 if idx in (8, 9, 15, 17, 19) else 16
 
 
 def _write_suts_traceability_sheet(wb, units, border, hdr_fill, hdr_font, data_font):
@@ -3778,6 +3884,9 @@ def generate_suts_quality_report(
         "pointer_address_ranges": sorted({c for u in units for c in (u.get("pointer_address_ranges") or [])})[:20],
         "srs_req_link_distribution": req_link_dist,
         "verify_needed_expected_slots": verify_needed,
+        "mcdc_design_summary": summarize_mcdc_design(units),
+        "expected_evidence_summary": summarize_expected_evidence([
+            seq for seqs in all_sequences.values() for seq in seqs]),
         "units_with_srs_req_ids": sum(1 for u in units if str(u.get("srs_req_ids") or "").strip()),
         "unknown_type_var_slots": unknown_slots,
         "units_with_unknown_type_vars": units_with_unknown,
@@ -4290,6 +4399,7 @@ def generate_suts(
     units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map,
                                    uds_io_map=_uds_io,
                                    struct_members=report_data.get("struct_member_arrays") or {})
+    attach_unit_sources(units, report_data.get("source_files"))
 
     if not units:
         _logger.warning("No unit functions found!")
