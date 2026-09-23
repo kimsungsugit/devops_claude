@@ -2649,7 +2649,8 @@ def generate_sequences(
     # 행 상한(`strategies[:max_seq]`)을 **적용한 뒤** 쌍을 다시 검증한다 — 한쪽 행만 남은 쌍은 `truncated` 로 공시되고
     # 커버리지 주장에서 빠진다. MC/DC 행끼리만 묶는다(같은 입력의 BV 행을 쌍 구성원으로 잡으면 설계 근거가 섞인다).
     _mcdc_rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
-    finalize_mcdc_design(_mcdc_report, _mcdc_rows)
+    # (R2c) 함수 실행 모델로 설계한 결정(`evaluation=source_path`)은 행 입력으로 oracle 을 다시 돌려 검증한다 — unit 필요.
+    finalize_mcdc_design(_mcdc_report, _mcdc_rows, unit)
     for _row in _mcdc_rows:
         # (리뷰 C1) "독립 영향 쌍" 은 **두 행이 모두 남아 재검증을 통과한** 쌍(`seq["mcdc_design"]`)에만 쓴다. 짝 행이 잘렸거나
         # 무효가 된 벡터는 그 사실을 라벨에 적는다 — 예전엔 절단 전 라벨이 남아 MCDC Design 시트(truncated)와 모순됐다.
@@ -2771,8 +2772,18 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["conditions"] += len(d.get("conditions") or [])
             status = d.get("status", "unsupported")
             out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
+            if d.get("evaluation") == "source_path" or d.get("path_refusal"):
+                # (R2c 리뷰 I3) 함수 실행 모델로 다시 본 결정(설계했든 거부했든) — 식 엔진 거부 사유 분포를 잃지 않는다
+                path = out.setdefault("source_path", {"decisions": 0, "designed": 0, "refused": 0, "static_reasons": {}})
+                path["decisions"] += 1
+                path["designed"] += status == "designed"
+                path["refused"] += bool(d.get("path_refusal"))
+                why = str(d.get("static_reason") or "unknown").split(":", 1)[0]
+                path["static_reasons"][why] = path["static_reasons"].get(why, 0) + 1
             if status == "unsupported":
-                reason = str(d.get("reason") or "unknown").split(":", 1)[0]
+                # ``path_evaluation:<state>`` 은 상태까지 — 하나로 뭉치면 사유가 사라진다
+                parts = str(d.get("reason") or "unknown").split(":")
+                reason = ":".join(parts[:2]) if parts[0] in ("path_evaluation", "path_refused") else parts[0]
                 out["unsupported_reasons"][reason] = out["unsupported_reasons"].get(reason, 0) + 1
             for pair in d.get("pairs") or []:
                 out["conditions_paired"] += 1
@@ -2812,9 +2823,26 @@ def _mcdc_vector_label(retained: List[Dict[str, Any]], lost_statuses: Optional[L
         return "MC/DC 설계 벡터"
     parts = []
     for r in retained:
-        truth = "".join("T" if x else "F" for x in r["truth"])
+        truth = _mcdc_truth_text(r["truth"], r.get("observed"))
         parts.append(f"{r['decision_id']}:{r['condition_id']}({r['role'].upper()}) 조건[{truth}]→결정 {'T' if r['decision'] else 'F'}")
-    return "MC/DC 독립 영향 쌍: " + ", ".join(parts) + " (식 평가 설계, 도달성 미검증·미실행)"
+    # (R2c) 함수 실행 모델로 설계한 쌍은 "식 평가" 가 아니다 — 모델상 도달했을 뿐 실행 도달성은 여전히 미검증
+    kinds = {r.get("evaluation") or "expression" for r in retained}
+    basis = "함수 실행 모델 설계" if kinds == {"source_path"} else "식 평가 설계" if kinds == {"expression"} else "식 평가·함수 실행 모델 설계"
+    ub = sorted({k for r in retained for k in r.get("possible_ub") or []})
+    tail = f" · 결정 이후 가능 UB: {'+'.join(ub)}" if ub else ""
+    return "MC/DC 독립 영향 쌍: " + ", ".join(parts) + f" ({basis}, 도달성 미검증·미실행{tail})"
+
+
+def _mcdc_truth_text(values: Any, observed: Any = None) -> str:
+    """조건 진리값 표기 — 단락 평가로 **평가되지 않은** 조건은 ``-``(don't-care), 입력이 정하지 못한 값도 ``-``.
+
+    (R2c 리뷰 W1) 평가되지 않은 조건을 복사본에서 계산한 T/F 로 적으면 unique-cause 쌍이 두 조건을 뒤집은 것처럼 보인다.
+    """
+    marks = []
+    for i, v in enumerate(values or []):
+        evaluated = observed is None or (i < len(observed) and observed[i])
+        marks.append("-" if v is None or not evaluated else ("T" if v else "F"))
+    return "".join(marks)
 
 
 def _format_test_value(value: Any, typename: str) -> Any:
@@ -3551,7 +3579,7 @@ _MCDC_SHEET = "MCDC Design"
 _MCDC_HEADERS = ["Test Case ID", "Function", "Decision ID", "Condition ID", "Pair ID", "Sequence A", "Sequence B",
                  "Inputs A JSON", "Inputs B JSON", "Truth A", "Truth B", "Decision A", "Decision B", "Retained",
                  "Decision Expression", "Decision Status", "Reason", "Source Kind", "Source SHA256",
-                 "Search Complete", "Execution", "Reachability"]
+                 "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB"]
 
 
 def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, hdr_fill, hdr_font, data_font):
@@ -3571,8 +3599,6 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
         cell.font, cell.fill, cell.border = hdr_font, hdr_fill, border
     ws.freeze_panes = "A2"
 
-    def _truth(values):
-        return "".join("T" if v else "F" for v in values or [])
 
     for unit in units:
         report = unit.get("mcdc_design") or {}
@@ -3581,12 +3607,14 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
         for decision in report.get("decisions") or []:
             common = [decision.get("expression", ""), decision.get("status", ""), decision.get("reason", ""),
                       decision.get("source_kind", ""), decision.get("source_hash", ""),
-                      "yes" if decision.get("search_complete") else "no", "not_run", "unverified"]
+                      "yes" if decision.get("search_complete") else "no", "not_run", "unverified",
+                      # (R2c) expression = 결정식만 평가 · source_path = 함수 실행 모델(지역변수·결정 전 갱신 포함)
+                      decision.get("evaluation") or "expression"]
             pairs = decision.get("pairs") or []
             if not pairs:
                 # 쌍 없는 결정도 한 행 — 빠지면 "MC/DC 설계 완료" 로 오독된다(분모에서 사라진다).
                 ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), "", "", "", "", "", "", "",
-                           "", "", "", "", *common])
+                           "", "", "", "", *common, ""])
             for pair in pairs:
                 retained = pair.get("retained_status", "")
                 inputs = []
@@ -3594,13 +3622,16 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                     seq = by_seq.get(pair.get(f"seq_{side}")) if retained == "retained" else None
                     inputs.append(json.dumps((seq or {}).get("inputs") if seq else pair.get(f"inputs_{side}") or {},
                                              ensure_ascii=False, sort_keys=True))
+                # (R2c 리뷰 W7) 모델 실행이 결정 **이후** 가질 수 있는 UB — 쌍은 그 UB 가 없는 실행에서만 성립한다
+                ub = sorted(set(pair.get("possible_ub_a") or []) | set(pair.get("possible_ub_b") or []))
                 ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), pair.get("condition_id", ""),
                            pair.get("pair_id", ""),
                            pair.get("seq_a") if retained == "retained" else "",
                            pair.get("seq_b") if retained == "retained" else "",
-                           inputs[0], inputs[1], _truth(pair.get("truth_a")), _truth(pair.get("truth_b")),
+                           inputs[0], inputs[1], _mcdc_truth_text(pair.get("truth_a"), pair.get("observed_a")),
+                           _mcdc_truth_text(pair.get("truth_b"), pair.get("observed_b")),
                            "T" if pair.get("decision_a") else "F", "T" if pair.get("decision_b") else "F", retained,
-                           *common])
+                           *common, "+".join(ub)])
     # 한 번에 서식 — 결정마다 ``ws.max_row``(= 전 셀 ``max``)를 부르면 결정 수 × 셀 수로 커진다
     for row_cells in ws.iter_rows(min_row=2):
         for cell in row_cells:

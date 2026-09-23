@@ -40,6 +40,12 @@ def _scope(main_text, headers=None, main="unit.c", extra_units=None):
     return context, cpc.build_scopes(context, [_p(main)])[_p(main)]
 
 
+def _why(decision):
+    """The expression engine's verdict on a decision. (R2c) a decision it cannot bind is designed again on the modeled
+    function run; its own reason is kept as ``static_reason`` — these tests guard the binding rules themselves."""
+    return decision.get("static_reason", decision["reason"])
+
+
 def _unit(text, name, scope, inputs=()):
     # No fixed SUTS row in these engine tests: globals the engine binds may join the vector (inventory mode).
     return {"name": name, "input_vars": list(inputs), "source_text": text, "source_path": _p("unit.c"),
@@ -207,7 +213,7 @@ def test_writes_rebind_an_input_only_when_they_can_run_first(body, reason):
     _ctx, scope = _scope(text)
     report = build_mcdc_design(_unit(text, "f", scope))
     target = next(d for d in report["decisions"] if "g_x" in d["expression"] and "g_y" not in d["expression"])
-    assert target["reason"] == reason
+    assert _why(target) == reason
 
 
 @pytest.mark.parametrize("prefix, reason", [
@@ -220,7 +226,7 @@ def test_callees_that_may_write_a_global_before_the_decision_unbind_it(prefix, r
             f"void f(void) {{ {prefix} if (g_x == 2U) {{ }} touch(); }}\n")
     _ctx, scope = _scope(text)
     report = build_mcdc_design(_unit(text, "f", scope))
-    assert report["decisions"][0]["reason"] == reason
+    assert _why(report["decisions"][0]) == reason
 
 
 def test_if_inside_a_body_is_resolved_and_its_condition_is_not_a_decision():
@@ -239,7 +245,7 @@ def test_identical_coupled_conditions_are_proven_infeasible_not_searched_out():
     text = '#include "common.h"\nvoid f(U8 a, U8 b, U8 c) { if ((a == 1U && b == 1U) || (a == 1U && c == 1U)) { } }\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["a", "b", "c"]))["decisions"][0]
-    assert decision["reason"] == "unique_cause_infeasible:coupled_condition"
+    assert _why(decision) == "unique_cause_infeasible:coupled_condition"
     assert {c["condition_id"] for c in decision["infeasible_conditions"]} == {"C1", "C3"}
     assert {p["condition_id"] for p in decision["pairs"]} == {"C2", "C4"}
 
@@ -248,7 +254,7 @@ def test_a_decision_over_constants_only_is_a_constant_decision():
     text = '#include "common.h"\n#define A 3\nvoid f(void) { if (A <= 5) { } }\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope))["decisions"][0]
-    assert decision["reason"] == "unique_cause_infeasible:constant_decision"
+    assert _why(decision) == "unique_cause_infeasible:constant_decision"
     assert decision["constant_value"] is True
 
 
@@ -270,7 +276,7 @@ def test_identifier_reasons_name_the_declaration_fact():
     text = ('#include "common.h"\n#define REG PORT.bit\nvoid f(void) { U8 t = 0U; '
             "if (t == 1U) { } if (REG == 1U) { } if (nowhere == 1U) { } }\n")
     _ctx, scope = _scope(text)
-    reasons = [d["reason"] for d in build_mcdc_design(_unit(text, "f", scope))["decisions"]]
+    reasons = [_why(d) for d in build_mcdc_design(_unit(text, "f", scope))["decisions"]]
     assert reasons == ["local_variable_not_input:t", "macro_value_unresolved:REG:register_or_struct_field",
                        "identifier_undeclared:nowhere"]
 
@@ -336,7 +342,7 @@ def test_c1_unparenthesized_macro_body_is_not_one_value():
     text = ('#include "common.h"\n#define MASK 0x01U | 0x02U\n#define LIM 10U + 5U\n#define OK ( 10U + 5U )\n'
             "void f(U8 x) { if ((x & MASK) != 0U) { } if (x > LIM) { } if (x > OK) { } }\n")
     _ctx, scope = _scope(text)
-    reasons = [d["reason"] for d in build_mcdc_design(_unit(text, "f", scope, ["x"]))["decisions"]]
+    reasons = [_why(d) for d in build_mcdc_design(_unit(text, "f", scope, ["x"]))["decisions"]]
     assert reasons[0] == "macro_value_unresolved:MASK:macro_body_not_parenthesized"
     assert reasons[1] == "macro_value_unresolved:LIM:macro_body_not_parenthesized"
     assert reasons[2] == "unique_cause_pairs_found"
@@ -380,7 +386,7 @@ def test_c3_macro_invocations_that_write_their_arguments_rebind_them(macro, call
     text = f'#include "common.h"\n{macro}void f(U8 x, U8 y) {{ {call} if ((x == 1U) && (y == 1U)) {{ }} }}\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "y"]))["decisions"][0]
-    assert decision["reason"] == "input_modified_before_decision:x"
+    assert _why(decision) == "input_modified_before_decision:x"
 
 
 def test_c3_object_like_macro_statement_is_a_call_site():
@@ -389,7 +395,7 @@ def test_c3_object_like_macro_statement_is_a_call_site():
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x"]))["decisions"][0]
     # The expansion writes g_flag before the decision (recorded as a write since review round 2).
-    assert decision["reason"] == "input_modified_before_decision:g_flag"
+    assert _why(decision) == "input_modified_before_decision:g_flag"
 
 
 def test_c3_file_scope_address_and_block_extern_in_a_callee_count():
@@ -397,7 +403,7 @@ def test_c3_file_scope_address_and_block_extern_in_a_callee_count():
             "void set(void) { extern U8 g_m; g_m = 1U; }\n"
             "void f(void) { set(); if (g_cnt == 1U) { } if (g_m == 1U) { } }\n")
     _ctx, scope = _scope(text)
-    reasons = [d["reason"] for d in build_mcdc_design(_unit(text, "f", scope))["decisions"]]
+    reasons = [_why(d) for d in build_mcdc_design(_unit(text, "f", scope))["decisions"]]
     assert reasons == ["global_address_taken:g_cnt", "global_modified_by_callee:set:g_m"]
 
 
@@ -405,7 +411,7 @@ def test_c3_a_parameter_shadowed_by_a_block_local_is_not_designed():
     text = '#include "common.h"\nvoid f(U8 x, U8 y) { { U8 x = 5U; if ((x == 1U) && (y == 1U)) { } } }\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "y"]))["decisions"][0]
-    assert decision["reason"] == "identifier_shadowed_by_local:x"
+    assert _why(decision) == "identifier_shadowed_by_local:x"
 
 
 def test_w1_body_if_on_a_macro_that_changes_value_is_undecided_not_dropped():
@@ -413,7 +419,7 @@ def test_w1_body_if_on_a_macro_that_changes_value_is_undecided_not_dropped():
             "void f(U8 x) {\n#if FEAT == 1\n if (x == 1U) { }\n#endif\n}\n#undef FEAT\n#define FEAT 0\n")
     _ctx, scope = _scope(text)
     decisions = build_mcdc_design(_unit(text, "f", scope, ["x"]))["decisions"]
-    assert [d["reason"] for d in decisions] == ["conditional_compilation_unresolved"]
+    assert [_why(d) for d in decisions] == ["conditional_compilation_unresolved"]
 
 
 def test_w2_if_arithmetic_with_unsigned_operands_and_negatives_is_undecided():
@@ -426,7 +432,7 @@ def test_w3_enum_object_against_a_possibly_negative_operand_is_refused():
     text = ('#include "common.h"\ntypedef enum { E0, E1 } E;\nE g_e;\n'
             "void f(S8 s) { if ((g_e > s) && (s < 0)) { } if (g_e == E1) { } }\n")
     _ctx, scope = _scope(text)
-    reasons = [d["reason"] for d in build_mcdc_design(_unit(text, "f", scope, ["s"]))["decisions"]]
+    reasons = [_why(d) for d in build_mcdc_design(_unit(text, "f", scope, ["s"]))["decisions"]]
     assert reasons == ["enum_underlying_type_implementation_defined", "unique_cause_pairs_found"]
 
 
@@ -453,14 +459,14 @@ def test_w5_functions_after_a_vendor_syntax_error_are_compiled_and_scanned():
     closure = cpc.function_write_closure(context)
     assert "take" in closure["functions"] and "g_a" in closure["address_taken"]
     decision = build_mcdc_design(_unit(text, "f", scope, ["x"]))["decisions"][0]
-    assert decision["reason"] == "unique_cause_pairs_found"
+    assert _why(decision) == "unique_cause_pairs_found"
 
 
 def test_i1_guarded_division_never_claims_a_complete_search_without_pairs():
     text = '#include "common.h"\nvoid f(U8 d, U8 n) { if ((d != 0U) && ((n / d) > 3U)) { } }\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["d", "n"]))["decisions"][0]
-    assert decision["reason"] in {"unique_cause_pairs_found", "no_pair_undefined_behavior_candidates_skipped"}
+    assert _why(decision) in {"unique_cause_pairs_found", "no_pair_undefined_behavior_candidates_skipped"}
 
 
 def test_i2_int_min_remainder_minus_one_is_undefined():
@@ -476,7 +482,7 @@ def test_i5_a_scope_for_another_text_of_the_file_is_not_used():
     unit = {**_unit(text, "f", scope, ["x"]), "source_text": text + "/* edited */\n"}
     report = build_mcdc_design(unit)
     assert report["project_context_status"] == "source_text_mismatch"
-    assert report["decisions"][0]["reason"] == "preprocessor_context_unresolved"
+    assert _why(report["decisions"][0]) == "preprocessor_context_unresolved"
 
 
 def test_a_context_of_another_schema_is_not_attached():
@@ -518,7 +524,7 @@ def test_round2_macro_mediated_writes_rebind_the_input(macros, stmt, target):
     decision = build_mcdc_design(unit)["decisions"][0]
     # A macro whose body this unit cannot pin down is named as the cause (review round 3 W1); a known body
     # writes the target itself.
-    reason = decision["reason"]
+    reason = _why(decision)
     assert reason == f"input_modified_before_decision:{target}" or reason.startswith("input_binding_unverified:macro:")
     if "#if" in macros or "#undef" in tail:
         macro = stmt.split("(")[0].rstrip(";")
@@ -530,14 +536,14 @@ def test_round2_alias_write_in_a_callee_is_an_unknown_callee():
             "void f(void) { reset(); if (g_cnt == 1U) { } }\n")
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope))["decisions"][0]
-    assert decision["reason"] == "global_binding_unverified:unknown_callee:macro_write:G_ALIAS"
+    assert _why(decision) == "global_binding_unverified:unknown_callee:macro_write:G_ALIAS"
 
 
 def test_round2_call_to_an_undeclared_name_after_a_missing_include_may_be_a_macro():
     text = '#include "common.h"\n#include "gone.h"\nvoid f(U8 x, U8 y) { RESET(x); if ((x == 1U) && (y == 1U)) { } }\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "y"]))["decisions"][0]
-    assert decision["reason"] == "input_binding_unverified:undeclared_after_missing_include:RESET"
+    assert _why(decision) == "input_binding_unverified:undeclared_after_missing_include:RESET"
 
 
 def test_round2_enum_object_inside_arithmetic_is_refused():
@@ -545,7 +551,7 @@ def test_round2_enum_object_inside_arithmetic_is_refused():
             "void f(U8 y) { if (((g_e - 1) < 0) && (y == 1U)) { } }\n")
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["y"]))["decisions"][0]
-    assert decision["reason"] == "enum_underlying_type_implementation_defined"
+    assert _why(decision) == "enum_underlying_type_implementation_defined"
 
 
 def test_round2_a_missing_include_after_a_definition_leaves_it_unverified():
@@ -567,14 +573,14 @@ def test_round3_two_level_alias_address_reaches_the_global():
             "void touch(void) { clr(&A1); }\nvoid f(void) { if (g_c == 1U) { } }\n")
     context, scope = _scope(text)
     assert "g_c" in cpc.function_write_closure(context)["address_taken"]
-    assert build_mcdc_design(_unit(text, "f", scope))["decisions"][0]["reason"] == "global_address_taken:g_c"
+    assert _why(build_mcdc_design(_unit(text, "f", scope))["decisions"][0]) == "global_address_taken:g_c"
 
 
 def test_round3_a_macro_named_like_a_function_is_what_runs():
     text = ('#include "common.h"\nU8 g_c;\nvoid do_clear(void) { g_c = 0U; }\nvoid reset(void) { }\n'
             "#define reset() do_clear()\nvoid f(void) { reset(); if (g_c == 1U) { } }\n")
     _ctx, scope = _scope(text)
-    reason = build_mcdc_design(_unit(text, "f", scope))["decisions"][0]["reason"]
+    reason = _why(build_mcdc_design(_unit(text, "f", scope))["decisions"][0])
     assert reason == "global_modified_by_callee:do_clear:g_c"
 
 
@@ -587,8 +593,9 @@ def test_round3_argument_aliases_and_token_pasting_count_as_writes(macros, stmt,
     text = f'#include "common.h"\n{macros}void f(U8 x, U8 x_v, U8 y) {{ {stmt} if (({read} == 1U) && (y == 1U)) {{ }} }}\n'
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "x_v", "y"]))["decisions"][0]
-    assert decision["status"] == "unsupported"
-    assert decision["reason"].split(":")[0] in {"input_modified_before_decision", "input_binding_unverified"}
+    assert _why(decision).split(":")[0] in {"input_modified_before_decision", "input_binding_unverified"}
+    # (R2c) the modeled run sees the write too: the read value is 0 (never 1) or unknown — no pair either way
+    assert decision["pairs"] == [] and decision["status"] in {"unsupported", "no_pair_found"}
 
 
 def test_round3_an_undecided_constant_macro_does_not_refuse_unrelated_decisions():
@@ -597,7 +604,7 @@ def test_round3_an_undecided_constant_macro_does_not_refuse_unrelated_decisions(
     _ctx, scope = _scope(text)
     assert scope["macro_status"]["GAIN"] == "unknown"
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "y"]))["decisions"][0]
-    assert decision["reason"] == "unique_cause_pairs_found"
+    assert _why(decision) == "unique_cause_pairs_found"
 
 
 def test_round3_a_declared_library_call_after_a_missing_include_is_not_a_macro():
@@ -605,7 +612,7 @@ def test_round3_a_declared_library_call_after_a_missing_include_is_not_a_macro()
             "void f(U8 x, U8 y) { U8 t; lib_copy(&t, 1U); if ((x == 1U) && (y == 1U)) { } }\n")
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "y"]))["decisions"][0]
-    assert decision["reason"] == "unique_cause_pairs_found"
+    assert _why(decision) == "unique_cause_pairs_found"
 
 
 # ── R2b: arrays, const tables, macro parameters, pointer writes (source oracle inputs) ─────────────

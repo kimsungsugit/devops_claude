@@ -12,6 +12,13 @@ of reachability or execution. What is *not* independent here: enumerator and con
 typedefs are emitted from the engine's resolution; enum-typed inputs are bound as ``int`` (the engine's model);
 the preprocessor configuration (which ``#if`` arm is active) and input binding (writes before the decision) are
 the engine's claims and are not checked by this oracle.
+
+(R2c) A decision designed on the modeled function run (``evaluation == "source_path"``: it reads a local or an input
+rewritten before it) cannot be checked as a lone expression. Its pairs go to the whole-function constexpr harness of
+``scripts/source_oracle_clang_check.py`` instead: the body is compiled verbatim with each such decision and its
+conditions wrapped in recorders, and clang must find, in the run of each pair member, an evaluation with exactly the
+claimed evaluated conditions, values and outcome — for all three fill values of the state the vector leaves unset.
+Callees are stubs there (they write nothing and return the fill value).
 """
 from __future__ import annotations
 
@@ -38,7 +45,11 @@ def _decisions(source_root: Path):
                 texts[str(path.resolve())] = path.read_bytes().decode("utf-8")
             except UnicodeDecodeError:
                 continue
-    context = build_project_context(texts)
+    # the same build configuration the inventory and the generator use (toolchain headers from ``.cproject``)
+    from generators.c_project_context import detect_build_config
+    cproject = source_root / ".cproject"
+    context = build_project_context(texts, detect_build_config(
+        {str(cproject): cproject.read_text(encoding="utf-8", errors="replace")} if cproject.is_file() else {}))
     units = [p for p in texts if p.lower().endswith(".c")]
     scopes = build_scopes(context, units)
     parser = _make_parser()
@@ -94,10 +105,31 @@ def _prelude(context, scope):
     return lines
 
 
+def _path_claims(unit, report):
+    """(R2c) Whole-function harness claims for the path-designed pairs of one function (one instrument per function)."""
+    from source_oracle_clang_check import decision_claim
+    path = [d for d in report["decisions"] if d.get("evaluation") == "source_path" and d.get("pairs")]
+    if not path:
+        return []
+    instrument = {"decisions": [{"span": tuple(d["path_spec"]["key"][:2]),
+                                 "atoms": [tuple(a[:2]) for a in d["path_spec"]["atoms"]]} for d in path]}
+    claims = []
+    for index, decision in enumerate(path):
+        for pair in decision["pairs"]:
+            for side in ("a", "b"):
+                expr = decision_claim(index, pair[f"truth_{side}"], pair[f"observed_{side}"], pair[f"decision_{side}"])
+                claims.append({"unit": unit, "inputs": pair[f"inputs_{side}"], "outputs": {expr: 1},
+                               "possible_ub": pair.get(f"possible_ub_{side}") or [],
+                               "instrument": instrument, "label": f"{report['function']}:{pair['pair_id']}:{side}"})
+    return claims
+
+
 def _checks(path, report):
     """(label, expression text, expected int) for every retained design claim of a decision."""
     domains = report["domains"]
     for decision in report["decisions"]:
+        if decision.get("evaluation") == "source_path":
+            continue  # reads a local / a rewritten input: checked by the function harness (`_path_claims`)
         for pair in decision.get("pairs") or []:
             for side in ("a", "b"):
                 inputs = pair[f"inputs_{side}"]
@@ -121,7 +153,9 @@ def main():
     results = {"target": args.target, "units": 0, "pairs_checked": 0, "claims_checked": 0, "mismatches": [],
                "compile_errors": [], "scope": "expression semantics only; not execution, not reachability"}
     by_unit: dict[str, list] = {}
-    for path, _unit, report, context, scope in _decisions(args.source_root):
+    path_claims = []
+    for path, unit, report, context, scope in _decisions(args.source_root):
+        path_claims.extend(_path_claims(unit, report))
         entries = list(_checks(path, report))
         if not entries:
             continue
@@ -157,12 +191,19 @@ def main():
             other = [ln for ln in proc.stderr.splitlines() if "error:" in ln and "static assertion failed" not in ln]
             if other:
                 results["compile_errors"].append({"unit": Path(path).name, "errors": other[:5], "count": len(other)})
+    if path_claims:
+        from source_oracle_clang_check import check_claims
+        checked = check_claims(path_claims, clang=args.clang, target=args.target)
+        results["path_pairs"] = {k: checked[k] for k in ("claims", "checked", "agree", "agree_with_stubbed_callees",
+                                                         "mismatch", "eval_error", "unchecked", "unchecked_reasons")}
+        results["mismatches"] += [{"claim": m["function"] + ":path", **m} for m in checked["mismatches"]]
+        results["path_eval_errors"] = checked["eval_errors"]
     summary = {k: (len(v) if isinstance(v, list) else v) for k, v in results.items()}
     print(json.dumps(summary))
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    return 1 if results["mismatches"] or results["compile_errors"] else 0
+    return 1 if results["mismatches"] or results["compile_errors"] or results.get("path_eval_errors") else 0
 
 
 if __name__ == "__main__":

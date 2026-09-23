@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+from collections import Counter
 from typing import Any
 
 from generators import c_project_context as cpc
@@ -922,8 +923,525 @@ def _source_decisions(unit, declared_domains=None):
     return found, domains, source_kind, "", issue
 
 
+def _apply_design_range(unit, name, domain):
+    """Narrow a declared domain to the unit's SwUDS design range (or explicit enumerated values) — never widen it."""
+    from generators.suts import enum_bounds, range_bounds
+    domain["type_min"], domain["type_max"] = domain["min"], domain["max"]
+    ranged = range_bounds(((unit.get("uds_param_info") or {}).get(name) or {}).get("range"))
+    enumerated = enum_bounds((unit.get("value_domains") or {}).get(name))
+    constraint = ranged or enumerated
+    if not constraint:
+        return
+    lo, hi = constraint.get("min"), constraint.get("max")
+    if type(lo) is not int or type(hi) is not int or not domain["min"] <= lo <= hi <= domain["max"]:
+        # A design range the declared type cannot hold is a document defect (SUTS `_fits_type` treats it the
+        # same way): keep the declared domain, never widen it, and disclose the conflict on the domain.
+        # Blanking every decision of the unit here hid 27 real functions behind one phantom row (R80).
+        domain["design_range_conflict"] = {"min": lo, "max": hi,
+                                           "source": "uds_range" if ranged else "explicit_enum_values"}
+        return
+    kept = [v for v in (domain.get("values") or []) if lo <= v <= hi]
+    if domain.get("values") and not kept:
+        # No enumerator lies in the design range: the two documents disagree — keep the declaration.
+        domain["design_range_conflict"] = {"min": lo, "max": hi, "source": "uds_range" if ranged
+                                           else "explicit_enum_values", "reason": "no_enumerator_in_range"}
+        return
+    domain["min"], domain["max"] = lo, hi
+    domain["constraint_source"] = "uds_range" if ranged else "explicit_enum_values"
+    if kept:
+        domain["values"] = kept
+
+
+# (R2c) Reasons the *expression* engine gives up on a decision whose value the function itself determines: it reads a
+# local, an input the function rewrites before the decision, or a global a callee / pointer may change. The source
+# oracle runs the whole function instead (`c_source_oracle.observe_decisions`) and reports what each condition holds
+# when the decision is reached on the modeled run.
+_PATH_FAMILY = ("local_variable_not_input:", "input_modified_before_decision:", "global_address_taken:",
+                "global_binding_unverified:", "global_modified_by_callee:", "input_binding_unverified:",
+                "identifier_shadowed_by_local:")
+_PATH_SAMPLES = 12
+
+
+def _path_ir(node, raw, atoms):
+    """The ``&&``/``||``/``!`` structure of a decision with its conditions as leaves (same order as the inventory)."""
+    n = _unwrap(node)
+    if n.type == "binary_expression" and _text(n.child_by_field_name("operator"), raw) in {"&&", "||"}:
+        op = _text(n.child_by_field_name("operator"), raw)
+        return [op, _path_ir(n.child_by_field_name("left"), raw, atoms), _path_ir(n.child_by_field_name("right"), raw, atoms)]
+    if n.type == "unary_expression" and _text(n.child_by_field_name("operator"), raw) == "!":
+        return ["!", _path_ir(n.child_by_field_name("argument"), raw, atoms)]
+    atoms.append(n)
+    return ["atom", len(atoms) - 1]
+
+
+def _enclosing_function(node):
+    while node is not None and node.type != "function_definition":
+        node = node.parent
+    return node
+
+
+def _body_constants(nodes, raw, constants_map, widths):
+    """Integer values the text names (literals, integer macros, enumerators) — in order of first appearance."""
+    out = []
+    for root in nodes:
+        for x in _walk(root):
+            try:
+                if x.type == "number_literal" and widths:
+                    value, t = cpc.literal(_text(x, raw), widths)
+                    if not cpc.is_float(t):
+                        out.append(value)
+                elif x.type == "identifier" and _text(x, raw) in constants_map:
+                    c = constants_map[_text(x, raw)]
+                    if not cpc.is_float(c["type"]):
+                        out.append(c["value"])
+            except (cpc.Unresolved, KeyError, TypeError, ValueError):
+                continue
+    return list(dict.fromkeys(v for v in out if type(v) is int))
+
+
+def _path_samples(domain, constants):
+    if domain.get("values"):
+        return list(domain["values"])
+    lo, hi = domain["min"], domain["max"]
+    if hi - lo <= 15:
+        return list(range(lo, hi + 1))
+    candidates = [0, 1, -1, lo, hi] + [c + d for c in constants for d in (0, -1, 1)]
+    return list(dict.fromkeys(v for v in candidates if lo <= v <= hi))[:_PATH_SAMPLES]
+
+
+def _exits(stmt):
+    """Does this statement always leave the enclosing block (``return``/``break``/``continue``/``goto``)?"""
+    if stmt is None:
+        return False
+    if stmt.type in {"return_statement", "break_statement", "continue_statement", "goto_statement"}:
+        return True
+    if stmt.type == "compound_statement":
+        body = [c for c in stmt.named_children if c.type != "comment"]
+        return bool(body) and _exits(body[-1])
+    if stmt.type == "else_clause":
+        inner = [c for c in stmt.named_children if c.type != "comment"]
+        return bool(inner) and _exits(inner[-1])
+    if stmt.type == "if_statement":
+        return _exits(stmt.child_by_field_name("consequence")) and _exits(stmt.child_by_field_name("alternative"))
+    return False
+
+
+def _guard_chain(node):
+    """Control conditions a statement sits under, outermost first, with the outcome that leads to it: an ``if`` arm
+    (true / false), a loop body (true, at least once), a ``?:`` arm, and an earlier ``if`` in an enclosing block whose one
+    arm always leaves the block (``if (x != 3U) { return; }`` — the other outcome leads on). ``switch`` and ``do``
+    impose none we can read."""
+    chain = []
+    child, parent = node, node.parent
+    while parent is not None and parent.type != "function_definition":
+        if parent.type == "compound_statement":
+            early = []
+            for sibling in parent.named_children:
+                if sibling.start_byte >= child.start_byte:
+                    break
+                if sibling.type == "if_statement" and sibling.child_by_field_name("condition") is not None:
+                    cons, alt = sibling.child_by_field_name("consequence"), sibling.child_by_field_name("alternative")
+                    if _exits(cons) and not _exits(alt):
+                        early.append((sibling.child_by_field_name("condition"), False))
+                    elif alt is not None and _exits(alt) and not _exits(cons):
+                        early.append((sibling.child_by_field_name("condition"), True))
+            chain.extend(reversed(early))
+        cond = parent.child_by_field_name("condition")
+        if parent.type in {"if_statement", "conditional_expression"} and cond is not None and cond != child:
+            arms = [(parent.child_by_field_name("consequence"), True), (parent.child_by_field_name("alternative"), False)]
+            for arm, outcome in arms:
+                if arm is not None and arm.start_byte <= node.start_byte < arm.end_byte:
+                    chain.append((cond, outcome))
+        elif parent.type in {"while_statement", "for_statement"} and cond is not None:
+            body = parent.child_by_field_name("body")
+            if body is not None and body.start_byte <= node.start_byte < body.end_byte:
+                chain.append((cond, True))
+        child, parent = parent, parent.parent
+    return list(reversed(chain))
+
+
+def _read_names(body, raw):
+    """Identifiers the body reads, in order — a name that only ever stands left of a plain ``=`` is written, not read
+    (an input only it assigns would spend the search budget for nothing: R2c review round 1 I2)."""
+    out = []
+    for x in _walk(body):
+        if x.type != "identifier":
+            continue
+        parent = x.parent
+        if parent is not None and parent.type == "assignment_expression" and parent.child_by_field_name("left") == x \
+                and _text(parent.child_by_field_name("operator"), raw) == "=":
+            continue
+        out.append(_text(x, raw))
+    return list(dict.fromkeys(out))
+
+
+def _macro_argument_host(node, raw, scope):
+    """The macro (active in this unit, or one its configuration cannot decide) whose argument list contains this node,
+    or ``""`` — a macro defined only in an inactive arm is not one here: the call is the function (review round 2 I-b)."""
+    status = (scope or {}).get("macro_status") or {}
+    parent = node.parent
+    while parent is not None and parent.type != "function_definition":
+        if parent.type == "call_expression":
+            f, args = parent.child_by_field_name("function"), parent.child_by_field_name("arguments")
+            name = _text(f, raw) if f is not None and f.type == "identifier" else ""
+            undeclared = bool((scope or {}).get("missing_includes")) and name and name not in status \
+                and name not in ((scope or {}).get("prototypes") or ()) \
+                and name not in (((scope or {}).get("effects") or {}).get("functions") or {})
+            if name and (name in status or undeclared) and args is not None \
+                    and args.start_byte <= node.start_byte and node.end_byte <= args.end_byte:
+                # an undeclared name after a missing include may be that header's macro (review round 3 I1)
+                return name
+        parent = parent.parent
+    return ""
+
+
+# builtins that evaluate their argument like a function would — every other ``__builtin_*`` may not
+# (``__builtin_constant_p``, ``__builtin_types_compatible_p``, ``__builtin_choose_expr``, ``__builtin_object_size``)
+EVALUATING_BUILTINS = frozenset({"__builtin_expect", "__builtin_abs", "__builtin_labs", "__builtin_popcount",
+                                 "__builtin_clz", "__builtin_ctz", "__builtin_bswap16", "__builtin_bswap32"})
+
+
+def _not_a_run_time_decision(node, raw, scope):
+    """Why this decision is not evaluated when the function runs, or ``""``: inside ``sizeof``/``_Alignof``/``_Generic``
+    (unevaluated operands, C11 6.5.3.4p2 / 6.5.1.1p3), inside a builtin that need not evaluate its argument, or a
+    compile-time constant (a ``case`` label, an array size, a ``static`` initializer — evaluated once, before)."""
+    child, parent = node, node.parent
+    while parent is not None and parent.type != "function_definition":
+        if parent.type in {"sizeof_expression", "alignof_expression", "generic_expression"}:
+            return "decision_in_unevaluated_operand"
+        if parent.type == "call_expression":
+            f = parent.child_by_field_name("function")
+            name = _text(f, raw) if f is not None and f.type == "identifier" else ""
+            if name.startswith("__builtin_") and name not in EVALUATING_BUILTINS:
+                return "decision_in_unevaluated_operand:" + name
+        if parent.type == "case_statement" and parent.child_by_field_name("value") == child:
+            return "decision_in_constant_expression:case_label"
+        if parent.type == "array_declarator":
+            return "decision_in_constant_expression:array_size"
+        if parent.type == "declaration" and any(c.type == "storage_class_specifier" and _text(c, raw) == "static"
+                                                for c in parent.children):
+            return "decision_in_constant_expression:static_initializer"
+        child, parent = parent, parent.parent
+    return ""
+
+
+def _refuse_path(decision, why):
+    """(R2c review round 2 N-W2) A decision the path engine turns away says so in its reason — the expression engine's
+    reason alone reads as if the path engine had never looked."""
+    if decision.get("path_refusal"):
+        return  # the first refusal is the cause — a later safety net must not overwrite it (review round 3 I3)
+    decision["path_refusal"] = why
+    decision.setdefault("static_reason", decision.get("reason", ""))
+    decision["reason"] = "path_refused:" + why
+
+
+def _macro_hides_conditions(atom, raw, scope):
+    """Name of a macro in this condition whose expansion (transitively) holds ``&&``, ``||`` or ``?:`` — or whose body
+    this unit cannot see — else ``""``. Integer constants are values, never conditions."""
+    status = (scope or {}).get("macro_status") or {}
+    constants = scope["constants"] if (scope or {}).get("constants") is not None else {}
+    bodies = {**((scope or {}).get("macro_bodies") or {}), **((scope or {}).get("function_like_macro_bodies") or {})}
+    stack = [(t, t) for t in dict.fromkeys(_text(x, raw) for x in _walk(atom) if x.type == "identifier")
+             if t in status and t not in constants]
+    seen = set()
+    while stack:
+        name, root = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = bodies.get(name)
+        if status.get(name) != "active" or body is None or re.search(r"&&|\|\||\?", body):
+            return root
+        stack.extend((t, root) for t in re.findall(r"[A-Za-z_]\w*", body) if t in status and t not in constants)
+    return ""
+
+
+def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
+                 max_steps):
+    """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
+
+    Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
+    reads). Search, per decision: climb towards it along its guard chain (one input changed at a time, keeping the
+    vector that satisfies more of the chain), then vary the reaching vectors — one input at a time, then the product
+    of the inputs that changed its observation. Never complete: ``search_complete`` stays false (a failed search is no
+    proof). A decision in a loop is evaluated once per iteration: every distinct evaluation is a candidate row.
+
+    Budget: ``max_runs`` vectors and ``max_steps`` interpreter steps summed over them, per function — a deterministic
+    cost bound (a vector costs what its run executes), so the same source always gets the same design."""
+    from generators import c_source_oracle as cso
+    if not cso.scope_matches(unit):
+        for decision, _node, _raw in candidates:
+            _refuse_path(decision, "project_scope_missing_or_mismatched")
+        return
+    fn = _enclosing_function(candidates[0][1])
+    raw = candidates[0][2]
+    specs = []
+    for decision, node, _raw in candidates:
+        atoms = []
+        try:
+            ir = _path_ir(node, raw, atoms)
+        except Unsupported as exc:
+            _refuse_path(decision, str(exc))
+            continue
+        if len(atoms) > max_conditions:
+            _refuse_path(decision, "decision_or_condition_budget")
+            continue
+        hidden = next((h for a in atoms if (h := _macro_hides_conditions(a, raw, scope))), "")
+        if hidden:
+            # ``BOTH(t, b)`` = ``(((t) > 3U) && ((b) == 1U))``: after preprocessing the decision has more conditions
+            # than this text shows — a pair on the macro as one condition flips two (R2c review round 1 C3)
+            _refuse_path(decision, "decision_conditions_hidden_in_macro:" + hidden)
+            continue
+        if any(x.type == "binary_expression" and _text(x.child_by_field_name("operator"), raw) in {"&&", "||"}
+               for a in atoms for x in _walk(a)):
+            # ``((a || b) != 0U)`` as one condition: the inner ``b`` would never get a pair, yet the decision would
+            # read "designed" (review round 2 N-W1) — the expression engine refuses the same shape
+            _refuse_path(decision, "nested_boolean_in_condition")
+            continue
+        specs.append((decision, {"key": [node.start_byte, node.end_byte, node.type],
+                                 "atoms": [[a.start_byte, a.end_byte, a.type] for a in atoms], "ir": ir}, atoms, node))
+    if not specs or fn is None:
+        return
+    # inputs: the row's inputs with a declared domain; inventory mode adds the scalar globals the function reads
+    names = list(row_names)
+    globals_ = scope.get("globals") or {}
+    if unit.get("mcdc_free_globals"):
+        names += [n for n in _read_names(fn.child_by_field_name("body"), raw) if n in globals_ and n not in names]
+    inputs = []
+    for name in names:
+        if name in globals_ and (globals_[name].get("volatile") or globals_[name].get("const")):
+            continue  # the run never reads an input value for these (review round 2 I-a)
+        if name not in domains and name in globals_:
+            g = globals_[name]
+            try:
+                domains[name] = _scope_domain(g["type"], g["typename"], scope, "global_declaration", origin="global",
+                                              declared_at=f"{os.path.basename(g['file'])}:{g['line']}")
+            except cpc.Unresolved:
+                continue
+            _apply_design_range(unit, name, domains[name])
+        if name in domains:
+            inputs.append(name)
+    widths = (scope.get("target") or {}).get("widths") or {}
+    constants_map = scope["constants"] if scope.get("constants") is not None else {}
+    chains = [_guard_chain(node) for _d, _s, _a, node in specs]
+    guard_nodes = list({(g.start_byte, g.end_byte, g.type): g for chain in chains for g, _o in chain}.values())
+    guard_index = {(g.start_byte, g.end_byte, g.type): i for i, g in enumerate(guard_nodes)}
+    decision_constants = _body_constants([a for _d, _s, atoms, _n in specs for a in atoms] + guard_nodes, raw,
+                                         constants_map, widths)
+    body_constants = _body_constants([fn.child_by_field_name("body")], raw, constants_map, widths)
+    constants = list(dict.fromkeys(decision_constants + body_constants))
+    samples = {name: _path_samples(domains[name], constants) for name in inputs}
+    base = {name: _default_value(domains[name]) for name in inputs}
+    cache: dict[tuple, tuple] = {}
+    order: list[dict] = []  # vectors in the order they ran — every scan below is deterministic
+    plan = [spec for _d, spec, _a, _n in specs]
+    guards = [[g.start_byte, g.end_byte, g.type] for g in guard_nodes]
+    pairers = [_Pairer(decision["decision_id"], len(atoms)) for decision, _s, atoms, _n in specs]
+    tallies = [Counter() for _ in specs]
+    spent = [0]
+
+    def vkey(v):
+        return tuple(sorted(v.items()))
+
+    def exhausted():
+        return len(cache) >= max_runs or spent[0] >= max_steps
+
+    def observation(r, index):
+        if r["status"] != "supported":
+            return {"state": "unsupported", "reason": r["reason"]}
+        return r["decisions"].get(index) or {"state": "missing"}
+
+    def run(vectors):
+        """Run the vectors not run yet (in chunks: the step budget is checked between them); feed every observation to
+        the decisions' pair finders. Returns the vectors that ran."""
+        todo, seen = [], set()
+        for v in vectors:
+            k = vkey(v)
+            if k not in cache and k not in seen:
+                todo.append(v)
+                seen.add(k)
+        added = []
+        for start in range(0, len(todo), 16):
+            if exhausted():
+                break
+            chunk = todo[start:start + max(0, min(16, max_runs - len(cache)))]
+            for v, r in zip(chunk, cso.observe_decisions(unit, chunk, plan, guards), strict=True):
+                cache[vkey(v)] = (v, r)
+                order.append(v)
+                added.append(v)
+                spent[0] += int(r.get("steps") or 0)
+                for index in range(len(specs)):
+                    s = observation(r, index)
+                    tallies[index][s["state"] + (":" + s["reason"].split(":", 1)[0] if s.get("reason") else "")] += 1
+                    if s["state"] == "evaluated":
+                        for inst in s["instances"]:
+                            pairers[index].add(v, inst, r.get("possible_undefined_behavior") or [])
+        return added
+
+    def reaches(v, index):
+        return observation(cache[vkey(v)][1], index)["state"] not in ("unreached", "missing", "unsupported")
+
+    def progress(v, index):
+        """(reached, guards of the chain satisfied in order on the best path) — the climb's objective."""
+        r = cache[vkey(v)][1]
+        if r["status"] != "supported":
+            return (False, -1)
+        if reaches(v, index):
+            return (True, len(chains[index]))
+        best = 0
+        paths = r.get("guards") or {}
+        for path in range(max((len(p) for p in paths.values()), default=0)):
+            depth = 0
+            for g, outcome in chains[index]:
+                seq = (paths.get(guard_index[(g.start_byte, g.end_byte, g.type)]) or [])
+                if path >= len(seq) or outcome not in seq[path]:
+                    break
+                depth += 1
+            best = max(best, depth)
+        return (False, best)
+
+    def neighbours(v):
+        return [{**v, name: value} for name in inputs for value in samples[name] if value != v[name]]
+
+    run([base])
+    for index in range(len(specs)):
+        if pairers[index].complete() or not order:
+            continue
+        # 1. climb towards the decision along its guard chain
+        best = max(order, key=lambda v: progress(v, index))
+        while not progress(best, index)[0] and not exhausted():
+            added = run(neighbours(best))
+            if not added:
+                break
+            candidate = max(added, key=lambda v: progress(v, index))
+            if progress(candidate, index) <= progress(best, index):
+                break
+            best = candidate
+        # 2. around the vectors that reach it, breadth first: one input at a time from each (a vector a neighbour found
+        #    joins the frontier — ``A && B`` needs A true before B's input matters), then the product of the inputs
+        #    that changed its observation
+        frontier = [v for v in order if reaches(v, index)]
+        on_frontier = {vkey(v) for v in frontier}
+        expanded = 0
+        while expanded < len(frontier) and not exhausted() and not pairers[index].complete():
+            for v in run(neighbours(frontier[expanded])):
+                if reaches(v, index) and vkey(v) not in on_frontier:
+                    frontier.append(v)
+                    on_frontier.add(vkey(v))
+            expanded += 1
+        if frontier and not pairers[index].complete() and not exhausted():
+            anchor = frontier[0]
+            here = observation(cache[vkey(anchor)][1], index)
+            influence = [name for name in inputs
+                         if any(vkey({**anchor, name: value}) in cache
+                                and observation(cache[vkey({**anchor, name: value})][1], index) != here
+                                for value in samples[name])]
+            if influence:
+                combos = itertools.islice(itertools.product(*(samples[name] for name in influence)),
+                                          max(0, max_runs - len(cache)))
+                run([{**anchor, **dict(zip(influence, combo, strict=True))} for combo in combos])
+    for index, (decision, spec, atoms, _node) in enumerate(specs):
+        pairs = pairers[index].pairs
+        states = tallies[index]
+        decision.update(evaluation="source_path", static_reason=decision["reason"], path_spec=spec,
+                        conditions=[{"condition_id": f"C{i + 1}", "expression": _text(a, raw)} for i, a in enumerate(atoms)],
+                        path_search={"runs": len(cache), "steps": spent[0], "budget_exhausted": exhausted(),
+                                     "inputs": inputs, "guards": len(chains[index]),
+                                     "observations": dict(states.most_common())},
+                        candidate_count=len(cache), search_complete=False)
+        for pair in pairs.values():
+            for side in ("a", "b"):
+                # same key form as the expression path's vectors: one vector, one row
+                selected.setdefault(json.dumps(pair[f"inputs_{side}"], sort_keys=True), pair[f"inputs_{side}"])
+        decision["pairs"] = [pairs[i] for i in sorted(pairs)]
+        if len(pairs) == len(atoms):
+            decision["status"], decision["reason"] = "designed", "unique_cause_pairs_found"
+        elif pairs:
+            decision["status"], decision["reason"] = "partial", "path_search_incomplete"
+        elif states.get("evaluated"):
+            decision["status"], decision["reason"] = "no_pair_found", "path_search_no_pair"
+        else:
+            # never determined on any run: keep "unsupported" with what the modeled run says instead of the binding
+            top = next(iter(states.most_common(1)), ("no_run", 0))[0]
+            decision["reason"] = "path_evaluation:" + top
+    for name in inputs:
+        report["domains"].setdefault(name, domains[name])
+
+
+def _short_circuit_unique_cause(a, b, i):
+    """Unique cause with short-circuit don't-care: condition ``i`` is evaluated in both and differs, the outcome differs,
+    and every other condition evaluated in *both* has the same value — one the short circuit skips on either side cannot
+    have caused the difference (VectorCAST's MC/DC tables mark it as don't-care too)."""
+    if a["decision"] == b["decision"] or not (a["observed"][i] and b["observed"][i]) or a["truth"][i] == b["truth"][i]:
+        return False
+    return all(j == i or not (a["observed"][j] and b["observed"][j]) or a["truth"][j] == b["truth"][j]
+               for j in range(len(a["truth"])))
+
+
+class _Pairer:
+    """Unique-cause pairs of one decision, found incrementally as evaluations arrive (`_short_circuit_unique_cause`).
+    The two evaluations may come from one run (two iterations of a loop). Evaluations are compared per distinct
+    evaluated pattern, so the cost does not grow with the number of runs that repeat a pattern."""
+
+    def __init__(self, decision_id, conditions):
+        self.did, self.n, self.pairs, self.groups = decision_id, conditions, {}, {}
+
+    def complete(self):
+        return len(self.pairs) == self.n
+
+    def add(self, inputs, inst, possible_ub=()):
+        # ``possible_ub``: undefined behaviour the run may have *after* the decision (disclosed, as for outputs)
+        row = {"inputs": inputs, "truth": inst["truth"], "decision": inst["decision"], "observed": inst["observed"],
+               "possible_ub": list(possible_ub)}
+        pattern = tuple(t if o else "*" for t, o in zip(inst["truth"], inst["observed"], strict=True))
+        for i in range(self.n):
+            if i in self.pairs or not inst["observed"][i]:
+                continue
+            mine = self.groups.setdefault((i, inst["truth"][i], inst["decision"]), {})
+            if pattern in mine:
+                continue
+            mine[pattern] = row
+            for other in self.groups.get((i, not inst["truth"][i], not inst["decision"]), {}).values():
+                if _short_circuit_unique_cause(other, row, i):
+                    pair = {"pair_id": f"{self.did}:C{i + 1}:P1", "condition_id": f"C{i + 1}", "retained_status": "pending"}
+                    for suffix, member in (("a", other), ("b", row)):
+                        for key, value in member.items():
+                            pair[f"{key}_{suffix}"] = value
+                    self.pairs[i] = pair
+                    break
+
+
+def _path_revalidation(decision, lookup, unit, normalized):
+    """(R2c) Re-run the oracle on every emitted row a pair of this decision names.
+
+    ``{row key: {pair_id + side: evaluate_decision-shaped}}`` — each side is checked for *its* claimed evaluation among
+    the row's evaluations (a loop may evaluate the decision several times in one run)."""
+    from generators import c_source_oracle as cso
+    if unit is None:
+        return {}
+    keys = {}
+    for pair in decision["pairs"]:
+        for side in ("a", "b"):
+            row = lookup.get(json.dumps(pair[f"inputs_{side}"], sort_keys=True))
+            if row is not None:
+                v = normalized(row["inputs"])
+                keys.setdefault(json.dumps(v, sort_keys=True), v)
+    runs = dict(zip(keys, cso.observe_decisions(unit, list(keys.values()), [decision["path_spec"]]), strict=True))
+    out = {}
+    for pair in decision["pairs"]:
+        for side in ("a", "b"):
+            row = lookup.get(json.dumps(pair[f"inputs_{side}"], sort_keys=True))
+            r = runs.get(json.dumps(normalized(row["inputs"]), sort_keys=True)) if row is not None else None
+            s = (r or {}).get("decisions", {}).get(0) or {}
+            claimed = {"truth": pair.get(f"truth_{side}"), "observed": pair.get(f"observed_{side}"),
+                       "decision": pair.get(f"decision_{side}")}
+            if r and r["status"] == "supported" and s.get("state") == "evaluated" and claimed in s["instances"]:
+                out[(pair["pair_id"], side)] = {"status": "supported", **claimed}
+    return out
+
+
 def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_conditions: int = 12,
-                      max_decisions: int = 64,
+                      max_decisions: int = 64, max_path_runs: int = 1536, max_path_steps: int = 30_000,
                       declared_domains: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Find real-input unique-cause pairs within explicit search budgets.
 
@@ -934,9 +1452,10 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     from a *declaration* (project typedef, enum declaration) — never from a
     naming convention. It only fills names the source/metadata left unresolved.
     """
-    report = {"schema_version": 2, "function": unit.get("name", ""), "decisions": [],
+    report = {"schema_version": 3, "function": unit.get("name", ""), "decisions": [],
               "selected_inputs": [], "execution_status": "not_run", "reachability": "unverified",
               "budgets": {"max_candidates": max_candidates, "max_conditions": max_conditions, "max_decisions": max_decisions,
+                          "max_path_runs": max_path_runs, "max_path_steps": max_path_steps,
                           # per variable-connected component, and again for the combination of components
                           "max_candidates_scope": "per_component_and_combination"}}
     extra: dict[str, Any] = {}
@@ -970,31 +1489,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
         report["target"] = {"widths": widths, "basis": "typedef_name_testimony"}
     # Reuse the existing input-domain parser. Only narrow an already explicit
     # declared integer domain; a design range alone cannot invent a C type.
-    from generators.suts import enum_bounds, range_bounds
     for name, domain in domains.items():
-        domain["type_min"], domain["type_max"] = domain["min"], domain["max"]
-        ranged = range_bounds(((unit.get("uds_param_info") or {}).get(name) or {}).get("range"))
-        enumerated = enum_bounds((unit.get("value_domains") or {}).get(name))
-        constraint = ranged or enumerated
-        if constraint:
-            lo, hi = constraint.get("min"), constraint.get("max")
-            if type(lo) is not int or type(hi) is not int or not domain["min"] <= lo <= hi <= domain["max"]:
-                # A design range the declared type cannot hold is a document defect (SUTS `_fits_type` treats it the
-                # same way): keep the declared domain, never widen it, and disclose the conflict on the domain.
-                # Blanking every decision of the unit here hid 27 real functions behind one phantom row (R80).
-                domain["design_range_conflict"] = {"min": lo, "max": hi,
-                                                   "source": "uds_range" if ranged else "explicit_enum_values"}
-            else:
-                kept = [v for v in (domain.get("values") or []) if lo <= v <= hi]
-                if domain.get("values") and not kept:
-                    # No enumerator lies in the design range: the two documents disagree — keep the declaration.
-                    domain["design_range_conflict"] = {"min": lo, "max": hi, "source": "uds_range" if ranged
-                                                       else "explicit_enum_values", "reason": "no_enumerator_in_range"}
-                    continue
-                domain["min"], domain["max"] = lo, hi
-                domain["constraint_source"] = "uds_range" if ranged else "explicit_enum_values"
-                if kept:
-                    domain["values"] = kept
+        _apply_design_range(unit, name, domain)
     report["source_kind"], report["source_hash"] = source_kind, source_hash
     if not found and issue.split(":", 1)[0] in _ENUMERATION_FAILURES:
         # Decisions could not be enumerated at all: record the function once as *unenumerated* (not a decision)
@@ -1008,6 +1504,7 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     # an input list (inventory scripts) take the resolved domains as the row.
     row_names = list(unit["input_vars"] or []) if "input_vars" in unit else list(domains)
     selected = {}
+    path_candidates = []
     for index, (node, raw, context_issue, mutated, kind) in enumerate(found):
         identity = f"{unit.get('source_path', '')}:{unit.get('name', '')}:{node.start_byte if node else index}"
         did = f"D{index + 1}"
@@ -1039,6 +1536,14 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             # first let a symptom such as `unsupported_scalar:call_expression` (``(x) OR (...)``) mask it.
             if context_issue:
                 raise Unsupported(context_issue)
+            if host := _macro_argument_host(node, raw, scope):
+                # ``DBG("%d", (a > 3U) && (b == 1U))``: the expansion decides whether (and how often) this text is a
+                # decision at all — ``#define DBG(...)`` drops it (R2c review round 1 C1 / I1)
+                raise Unsupported("decision_inside_macro_argument:" + host)
+            if not_run := _not_a_run_time_decision(node, raw, scope):
+                # ``sizeof((a > 3U) && (b == 1U))`` is never evaluated (C11 6.5.3.4p2), ``case (A && B):`` is folded
+                # by the compiler — not decisions of the run (R2c review rounds 2 N-W3 / 3 W1 W2 I1)
+                raise Unsupported(not_run)
             try:
                 ir, atoms, variables, constants = _compile(node, raw, domains, constants_map, widths,
                                                            cast_type if scope else None)
@@ -1159,13 +1664,28 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 decision["reason"] = "no_pair_in_candidate_domain" if decision["search_complete"] else "candidate_budget_exhausted"
         except (Unsupported, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
             decision["reason"] = str(exc)
+            if extra and node is not None and str(exc).startswith(_PATH_FAMILY) and index < max_decisions:
+                path_candidates.append((decision, node, raw))
+    if path_candidates:
+        try:
+            _path_design(unit, report, path_candidates, row_names, domains, scope, selected,
+                         max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps)
+        except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
+            for decision, _node, _raw in path_candidates:
+                if decision.get("evaluation") != "source_path":
+                    _refuse_path(decision, f"path_design_exception:{type(exc).__name__}")
     report["selected_inputs"] = list(selected.values())
     finalize_mcdc_design(report, [])
     return report
 
 
-def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]) -> dict[str, Any]:
-    """Bind and revalidate retained pairs after output sequence truncation."""
+def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]],
+                         unit: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Bind and revalidate retained pairs after output sequence truncation.
+
+    A decision designed on the modeled run (``evaluation == "source_path"``, R2c) is revalidated by running the source
+    oracle again on both emitted rows — ``unit`` (with its project scope) is required for that; without it such pairs
+    are ``invalidated``."""
     def normalized(values):
         clean = {}
         for key, value in values.items():
@@ -1179,6 +1699,8 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
         lookup.setdefault(json.dumps(normalized(seq.get("inputs") or {}), sort_keys=True), seq)
     retained = 0
     for decision in report["decisions"]:
+        path_checks = _path_revalidation(decision, lookup, unit, normalized) \
+            if decision.get("evaluation") == "source_path" and decision["pairs"] else {}
         for pair in decision["pairs"]:
             a = lookup.get(json.dumps(pair["inputs_a"], sort_keys=True))
             b = lookup.get(json.dumps(pair["inputs_b"], sort_keys=True))
@@ -1186,15 +1708,23 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
             pair["retained_status"] = "truncated"
             if a is None or b is None:
                 continue
-            widths = (report.get("target") or {}).get("widths")
-            va = evaluate_decision(decision["expression"], normalized(a["inputs"]), report["domains"], report.get("constants"),
-                                   widths, report.get("types"))
-            vb = evaluate_decision(decision["expression"], normalized(b["inputs"]), report["domains"], report.get("constants"),
-                                   widths, report.get("types"))
+            if decision.get("evaluation") == "source_path":
+                va = path_checks.get((pair["pair_id"], "a")) or {"status": "unsupported"}
+                vb = path_checks.get((pair["pair_id"], "b")) or {"status": "unsupported"}
+            else:
+                widths = (report.get("target") or {}).get("widths")
+                va = evaluate_decision(decision["expression"], normalized(a["inputs"]), report["domains"],
+                                       report.get("constants"), widths, report.get("types"))
+                vb = evaluate_decision(decision["expression"], normalized(b["inputs"]), report["domains"],
+                                       report.get("constants"), widths, report.get("types"))
             ci = int(pair["condition_id"][1:]) - 1
             valid = va.get("status") == vb.get("status") == "supported"
-            valid = valid and va["decision"] != vb["decision"] and va["observed"][ci] and vb["observed"][ci]
-            valid = valid and [i for i, (x, y) in enumerate(zip(va["truth"], vb["truth"], strict=True)) if x != y] == [ci]
+            if valid and decision.get("evaluation") == "source_path":
+                valid = _short_circuit_unique_cause(va, vb, ci)  # (R2c) the rule the path search designed with
+            else:
+                valid = valid and va["decision"] != vb["decision"] and va["observed"][ci] and vb["observed"][ci]
+                valid = valid and [i for i, (x, y) in enumerate(zip(va["truth"], vb["truth"], strict=True))
+                                   if x != y] == [ci]
             if not valid:
                 pair["retained_status"] = "invalidated"
                 continue
@@ -1204,6 +1734,9 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
                 seq["mcdc_design"].append({"decision_id": decision["decision_id"], "pair_id": pair["pair_id"],
                     "condition_id": pair["condition_id"], "role": role, "truth": ev["truth"], "observed": ev["observed"],
                     "decision": ev["decision"], "source_hash": report["source_hash"],
+                    "evaluation": decision.get("evaluation") or "expression",
+                    # (R2c review round 1 W7) undefined behaviour the run may have after the decision — disclosed
+                    "possible_ub": list(pair.get(f"possible_ub_{role}") or []),
                     "execution_status": "not_run", "reachability": "unverified"})
     # Same definition as the SUTS quality report: an unenumerated function is not a decision.
     report["summary"] = {"total_decisions": sum(d["status"] != "unenumerated" for d in report["decisions"]),

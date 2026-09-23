@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
+from collections import OrderedDict
 from typing import Any
 
 from generators import c_project_context as cpc
@@ -99,7 +101,8 @@ def _loaded(value, t):
 
 
 class _State:
-    __slots__ = ("store", "mode", "ret", "havoc_all", "havoc_pointer", "havoc_bases", "escaped", "forks", "possible_ub")
+    __slots__ = ("store", "mode", "ret", "havoc_all", "havoc_pointer", "havoc_bases", "escaped", "forks", "possible_ub",
+                 "decisions")
 
     def __init__(self):
         self.store: dict[str, Any] = {}
@@ -111,12 +114,15 @@ class _State:
         self.escaped: set[str] = set()
         self.forks: list[str] = []
         self.possible_ub: set[str] = set()
+        # (R2c) decisions this path evaluated, in order: ``(key, observation)`` — see `_Interp.record_decision`
+        self.decisions: list[tuple] = []
 
     def copy(self):
         s = _State()
         s.store, s.mode, s.ret = dict(self.store), self.mode, self.ret
         s.havoc_all, s.havoc_bases, s.escaped, s.forks = self.havoc_all, dict(self.havoc_bases), set(self.escaped), list(self.forks)
         s.possible_ub = set(self.possible_ub)
+        s.decisions = list(self.decisions)
         s.havoc_pointer = self.havoc_pointer
         return s
 
@@ -143,11 +149,18 @@ def _walk(node):
 
 
 _SIDE_EFFECTS = frozenset({"assignment_expression", "update_expression", "call_expression", "gnu_asm_expression"})
+# builtins that evaluate their argument like a function would (same list as `mcdc_design.EVALUATING_BUILTINS`)
+_EVALUATING_BUILTINS = frozenset({"__builtin_expect", "__builtin_abs", "__builtin_labs", "__builtin_popcount",
+                                  "__builtin_clz", "__builtin_ctz", "__builtin_bswap16", "__builtin_bswap32"})
 
 
 class _Interp:
-    def __init__(self, fn, raw, scope, inputs, parser):
+    def __init__(self, fn, raw, scope, inputs, parser, shared=None):
+        """``shared``: a dict one caller keeps across the vectors of one function (same ``fn``/``raw``/``scope``) — what
+        does not depend on the inputs is computed once: the body's address-taken names, macro expansion parses and
+        the node lists `check_sequencing` walks (R2c: per-vector re-walking was 40% of a path search)."""
         self.fn, self.raw, self.scope, self.inputs, self.parser = fn, raw, scope, inputs, parser
+        self.shared = shared if shared is not None else {}
         self.widths = (scope.get("target") or {}).get("widths") or {}
         if not self.widths.get("int"):
             # Every integer promotion goes through ``int``; other widths are needed only by the types that use them.
@@ -166,11 +179,21 @@ class _Interp:
         self.closure = effects.get("functions") or {}
         self.address_taken = set(effects.get("address_taken") or ())
         self.steps = 0
-        self.expansions: dict[str, tuple] = {}
+        # text → (node, raw of the parse): the raw buffer lives in the tuple, so sharing it keeps ids stable
+        self.expansions: dict[str, tuple] = self.shared.setdefault("expansions", {})
+        self.walks: dict[tuple, Any] = self.shared.setdefault("walks", {})  # node lists and "plain" flags
         self.params: dict[str, dict] = {}
         self.static_keys: set[str] = set()
         self.kept_raws: list[bytes] = []
+        # (R2c) decisions to observe: ``{(start, end, type): {"key", "atoms": [node], "ir"}}`` over the function's own text
+        self.fn_raw = raw
+        self.watch: dict | None = None
+        # (R2c) control conditions whose outcome to record (``if``/loop/``?:`` conditions guarding a watched decision)
+        self.guards: dict = {}
         self.function_name = ""
+        if "body_address_names" in self.shared:
+            self.body_address_names = set(self.shared["body_address_names"])
+            return
         body = fn.child_by_field_name("body")
         # Names whose address the body takes (``&s``): a static local among them may be reached by any pointer write.
         self.body_address_names = {
@@ -191,6 +214,7 @@ class _Interp:
                     self.body_address_names.update(cpc._MACRO_ADDRESS_RE.findall(text))
             elif n.type == "identifier" and _text(n, raw) in self.macro_status:
                 self.body_address_names.update(cpc._MACRO_ADDRESS_RE.findall(self.macro_text_closure(_text(n, raw))))
+        self.shared["body_address_names"] = frozenset(self.body_address_names)
 
     # ── budgets / helpers ────────────────────────────────────────────────────────────────────────
     def tick(self):
@@ -271,10 +295,13 @@ class _Interp:
                 state.store[key] = Unknown(reason)
         state.havoc_bases[base] = reason
 
-    def havoc_everything(self, state, reason):
+    def havoc_everything(self, state, reason, locals_too=False):
+        """``locals_too``: text that expands *in* this function (a macro we cannot model, inline assembly operands, a
+        write through a macro name) can name a parameter or local directly — ``#define ZERO(n) n##_v = 0U`` writes
+        ``x_v`` (R2c: found by the MC/DC path tests). A callee cannot: only escaped locals are its business."""
         for key in list(state.store):
             base = key.split("[", 1)[0]
-            if base.startswith("@") and base not in state.escaped:
+            if base.startswith("@") and base not in state.escaped and not locals_too:
                 continue  # a parameter or local whose address never left the function
             state.store[key] = _havocked(state.store[key], reason)  # an earlier, more specific reason stays
         for base in state.escaped:
@@ -317,7 +344,7 @@ class _Interp:
         elif kind == "ptr":
             self.havoc_pointer_targets(state, target[1])
         elif kind == "all":
-            self.havoc_everything(state, target[1])
+            self.havoc_everything(state, target[1], locals_too=True)  # the target may be any name in scope
 
     def convert_to(self, val, t):
         if isinstance(val.v, Unknown):
@@ -477,9 +504,12 @@ class _Interp:
     def branch(self, states, cond):
         """Split states on a controlling expression: (true states, false states). Unknown → both."""
         yes, no = [], []
+        guard = self.guards.get((cond.start_byte, cond.end_byte, cond.type)) if self.raw is self.fn_raw else None
         for s in states:
             val = self.full_expression_value(s, cond, self.raw)
             truth = self.truth(val)
+            if guard is not None:
+                s.decisions.append((guard, ("outcome", truth)))
             if truth is None:
                 other = s.copy()
                 reason = "branch_on_unknown:" + val.v.reason if isinstance(val.v, Unknown) else "branch_on_unknown"
@@ -746,7 +776,16 @@ class _Interp:
           (``g_x + (rd(), 0U)``) — indeterminately sequenced;
         * a macro that expands to a write or a call inside a larger expression — the text above does not show it.
         """
-        nodes = list(_walk(n))
+        nodes = self.nodes_of(n, raw)
+        if raw is self.fn_raw:
+            # Without a write, a call or a macro nothing below can refuse (R2c: most conditions are plain reads).
+            plain = self.walks.get(("plain", n.start_byte, n.end_byte, n.type))
+            if plain is None:
+                plain = self.walks[("plain", n.start_byte, n.end_byte, n.type)] = not any(
+                    x.type in _SIDE_EFFECTS or (x.type == "identifier" and _text(x, raw) in self.macro_status)
+                    for x in nodes)
+            if plain:
+                return
         writes = [x for x in nodes if x.type in {"assignment_expression", "update_expression"}]
         idents = [x for x in nodes if x.type == "identifier" and not (
             x.parent is not None and x.parent.type == "call_expression" and x.parent.child_by_field_name("function") == x)]
@@ -859,6 +898,16 @@ class _Interp:
                 name = _text(x, raw) if x.type == "identifier" else ""
                 if name in self.macro_status and not self.macro_constant(name) and not self.transparent_macro(name):
                     raise Unsupported("macro_in_order_dependent_expression:" + name)
+
+    def nodes_of(self, n, raw):
+        """``list(_walk(n))`` — cached for the function's own text (its buffer outlives every vector)."""
+        if raw is not self.fn_raw:
+            return list(_walk(n))
+        key = (n.start_byte, n.end_byte, n.type)
+        nodes = self.walks.get(key)
+        if nodes is None:
+            nodes = self.walks[key] = list(_walk(n))
+        return nodes
 
     def macro_constant(self, name):
         return self.macro_status.get(name) == "active" and name in self.constants
@@ -1010,6 +1059,10 @@ class _Interp:
         self.tick()
         if depth > 200:
             raise Unsupported("expression_depth_budget")
+        if self.watch is not None and raw is self.fn_raw:
+            spec = self.watch.get((n.start_byte, n.end_byte, n.type))
+            if spec is not None:
+                self.record_decision(state, spec)
         k = n.type
         if k == "parenthesized_expression":
             inner = _named(n)
@@ -1071,7 +1124,7 @@ class _Interp:
         if k == "string_literal" or k == "concatenated_string":
             return _Val(Unknown("string_literal"), None)
         if k == "gnu_asm_expression":
-            self.havoc_everything(state, "inline_assembly")
+            self.havoc_everything(state, "inline_assembly", locals_too=True)  # ``: "=r"(x)`` writes a local
             return _Val(Unknown("inline_assembly"), None)
         if k == "compound_literal_expression" or k == "initializer_list":
             inner = n.child_by_field_name("value") if k == "compound_literal_expression" else n
@@ -1153,7 +1206,7 @@ class _Interp:
         if reason:
             if self.macro_effectful(name):
                 # What we cannot evaluate may still write: its effects must not vanish (R2b review round 2 A).
-                self.havoc_everything(state, reason)
+                self.havoc_everything(state, reason, locals_too=True)
             return _Val(Unknown(reason), None)
         self.check_sequencing(state, node, eraw)  # the expansion's own order (``g_x + g_x++``; round 2 B)
         return self.expression(state, node, eraw, depth + 1)
@@ -1281,9 +1334,13 @@ class _Interp:
                    self.macro_status.get(_text(x, raw)) != "active" for x in _walk(n))
 
     def conditional(self, state, n, raw, depth):
-        cond = self.expression(state, n.child_by_field_name("condition"), raw, depth + 1)
+        cond_node = n.child_by_field_name("condition")
+        cond = self.expression(state, cond_node, raw, depth + 1)
         a_node, b_node = n.child_by_field_name("consequence"), n.child_by_field_name("alternative")
         truth = self.truth(cond)
+        guard = self.guards.get((cond_node.start_byte, cond_node.end_byte, cond_node.type)) if raw is self.fn_raw else None
+        if guard is not None:
+            state.decisions.append((guard, ("outcome", truth)))
         if truth is None:
             if any(x.type in _SIDE_EFFECTS for node in (a_node, b_node) for x in _walk(node)):
                 raise Unsupported("side_effect_under_unknown_condition")
@@ -1324,8 +1381,10 @@ class _Interp:
             if not str(exc).startswith("undefined_behavior:"):
                 raise
             state.possible_ub.add("operand_under_unknown_condition")
+            self.maybe_decisions(state, probe)
             return _Val(Unknown(str(exc)), None)
         if runs_maybe:
+            self.maybe_decisions(state, probe)
             changed = (probe.havoc_all != state.havoc_all or probe.havoc_pointer != state.havoc_pointer
                        or probe.havoc_bases != state.havoc_bases or probe.store.keys() != state.store.keys()
                        or any(probe.store[k] is not v for k, v in state.store.items()))
@@ -1334,6 +1393,70 @@ class _Interp:
             state.escaped |= probe.escaped
             state.possible_ub |= probe.possible_ub
         return value
+
+    def maybe_decisions(self, state, probe):
+        """(R2c) A decision inside an operand that runs on *some* executions was maybe evaluated — never an
+        observation of this path, and never "not reached" either."""
+        state.decisions.extend((key, ("maybe",)) for key, _obs in probe.decisions[len(state.decisions):])
+
+    def atom_effectful(self, atom, raw):
+        """(R2c) Would evaluating this condition change state? Its truth is read on a copy of the state before the
+        decision runs, so a write or a call in one condition could change what a later one reads."""
+        for x in _walk(atom):
+            if x.type in {"assignment_expression", "update_expression", "gnu_asm_expression"}:
+                return True
+            if x.type == "call_expression" and not (self.is_cast_call(x, raw) or self.pure_macro_call(x, raw)):
+                return True
+            if x.type == "identifier" and _text(x, raw) in self.macro_status and _text(x, raw) not in self.macro_params \
+                    and self.macro_effectful(_text(x, raw)):
+                return True
+        return False
+
+    def record_decision(self, state, spec):
+        """(R2c) Observe one evaluation of a watched decision on this path: each condition's truth in the state the
+        decision starts from, which conditions the short circuit evaluates, and the outcome. A condition whose value
+        the inputs do not determine (or whose evaluation is undefined) has truth ``None``; if the short circuit reaches
+        it, the outcome is undetermined."""
+        if state.possible_ub:
+            # Undefined behaviour that depends on an unknown value may already have happened on this path: whether and
+            # how the decision is reached is then not determined.
+            state.decisions.append((spec["key"], ("undetermined", "possible_undefined_behavior_before_decision")))
+            return
+        truths, reasons = [], []
+        saved, self.watch = self.watch, None
+        try:
+            for atom in spec["atoms"]:
+                probe = state.copy()
+                try:
+                    v = self.expression(probe, atom, self.fn_raw)
+                    truths.append(self.truth(v))
+                    reasons.append(v.v.reason if isinstance(v.v, Unknown) else "")
+                except Unsupported as exc:
+                    truths.append(None)
+                    reasons.append(str(exc))
+        finally:
+            self.watch = saved
+        observed = [False] * len(truths)
+
+        def visit(node):
+            if node[0] == "atom":
+                observed[node[1]] = True
+                return truths[node[1]]
+            if node[0] == "!":
+                inner = visit(node[1])
+                return None if inner is None else not inner
+            left = visit(node[1])
+            if left is None:
+                return None
+            if (node[0] == "&&" and not left) or (node[0] == "||" and left):
+                return left
+            return visit(node[2])
+        outcome = visit(spec["ir"])
+        if outcome is None:
+            why = next((reasons[i] for i, t in enumerate(truths) if observed[i] and t is None), "") or "unknown"
+            state.decisions.append((spec["key"], ("undetermined", why)))
+            return
+        state.decisions.append((spec["key"], ("evaluated", tuple(truths), tuple(observed), bool(outcome))))
 
     def conditional_type(self, a, b):
         if a.t is None or b.t is None or cpc.is_float(a.t) or cpc.is_float(b.t):
@@ -1379,6 +1502,9 @@ class _Interp:
                 # Not a directly named array object: a pointer, an array member or an array of aggregates — the
                 # element written may be any object reachable through it.
                 self.expression_base_effects_for_lvalue(state, arg, raw, depth)
+                # ``p[i]`` is ``*(p + i)``: the element may lie outside the object ``p`` points into, as for ``p + i``
+                # (R2c: clang reads ``tbl[255]`` of a 64-element buffer while the run disclosed nothing)
+                state.possible_ub.add("pointer_arithmetic_untyped")
                 return ("ptr", "subscript_write_through_pointer_or_aggregate")
             key, t, length, volatile = array
             if isinstance(iv.v, Unknown) or iv.t is None:
@@ -1557,11 +1683,20 @@ class _Interp:
         name = _text(f, raw) if f is not None and f.type == "identifier" else "<indirect>"
         if name in self.macro_status:
             return self.macro_call(state, name, arg_nodes, raw, depth)
-        for a in arg_nodes:
-            self.argument(state, a, raw, depth)
         info = self.closure.get(name)
+        # Declared nowhere we can read, after a missing include: it may be a macro from that header, which can write a
+        # parameter or local in place (``RESET(x)``, R2c review round 1 C2) — or drop its arguments (``ASSERT(c)`` as
+        # ``((void)0)``): a decision in them is maybe evaluated, never observed (round 2 N-C1).
+        maybe_macro = info is None and self.lookup(name) is None and name not in (self.params or {}) \
+            and name not in (self.scope.get("prototypes") or ()) and bool(self.scope.get("missing_includes"))
+        if maybe_macro or (name.startswith("__builtin_") and name not in _EVALUATING_BUILTINS):
+            # (review round 3 W2) ``__builtin_constant_p(x)`` does not evaluate ``x``: a decision there is maybe run
+            self.unmodeled_macro_arguments(state, arg_nodes, raw, depth)
+        else:
+            for a in arg_nodes:
+                self.argument(state, a, raw, depth)
         if info is None or name in (self.params or {}) or self.lookup(name) is not None:
-            self.havoc_everything(state, "unknown_callee:" + name)
+            self.havoc_everything(state, "unknown_callee:" + name, locals_too=maybe_macro)
             return _Val(Unknown("call_return_value:" + name), None)
         if self.function_name and self.function_name in (info.get("reaches") or ()):
             self.havoc_statics(state, f"recursion_through:{name}")  # the callee may re-enter this function
@@ -1590,20 +1725,27 @@ class _Interp:
         params = self.macro_params.get(name)
         if self.macro_status.get(name) != "active" or body is None or params is None or "..." in params \
                 or "#" in body or len(params) != len(arg_nodes) or depth > 40:
-            for a in arg_nodes:
-                self.argument(state, a, raw, depth)
-            self.havoc_everything(state, "macro_call_unmodeled:" + name)
+            self.unmodeled_macro_arguments(state, arg_nodes, raw, depth)
+            self.havoc_everything(state, "macro_call_unmodeled:" + name, locals_too=True)
             return _Val(Unknown("macro_call_unmodeled:" + name), None)
         text = _substitute(body, params, [_text(a, raw) for a in arg_nodes])
         node, eraw = self.macro_node(text)
         if node is None:
-            for a in arg_nodes:
-                self.argument(state, a, raw, depth)
-            self.havoc_everything(state, "macro_call_not_an_expression:" + name)
+            self.unmodeled_macro_arguments(state, arg_nodes, raw, depth)
+            self.havoc_everything(state, "macro_call_not_an_expression:" + name, locals_too=True)
             return _Val(Unknown("macro_call_not_an_expression:" + name), None)
         # ``DBL(g_x++)`` → ``((g_x++)+(g_x++))``: the expansion is what runs (R2b review round 2 B).
         self.check_sequencing(state, node, eraw)
         return self.expression(state, node, eraw, depth + 1)
+
+    def unmodeled_macro_arguments(self, state, arg_nodes, raw, depth):
+        """Arguments of a macro whose expansion we cannot see: their effects are kept, but whether they run at all
+        (``#define DBG(...)`` drops them, ``report(#c)`` only stringifies) is unknown — a decision inside one was maybe
+        evaluated, never observed (R2c review round 1 C1)."""
+        mark = len(state.decisions)
+        for a in arg_nodes:
+            self.argument(state, a, raw, depth)
+        state.decisions[mark:] = [(key, ("maybe",)) for key, _obs in state.decisions[mark:]]
 
     def macro_statements(self, n, raw):
         """(name, statements, raw) when ``n`` — the whole expression of a statement — is a macro invocation whose
@@ -1749,6 +1891,42 @@ def _unwrap(node):
     return node
 
 
+_TREES = threading.local()
+
+
+def _parsed_function(parser, raw, name, scope):
+    """(root, function node, shared) of ``name`` in this text — the parse, the lookup and the input-independent work of
+    `_Interp` (``shared``) are cached per thread for the last few texts (R2c: a path search calls the oracle in chunks;
+    re-parsing a 160 KB unit per chunk dominated its cost)."""
+    cache = getattr(_TREES, "cache", None)
+    if cache is None:
+        cache = _TREES.cache = OrderedDict()
+    key = (hashlib.sha256(raw).hexdigest(), id(parser))
+    hit = cache.get(key)
+    if hit is None or hit[0] != raw:
+        hit = (raw, parser.parse(raw), OrderedDict())
+        cache[key] = hit
+        while len(cache) > 8:
+            cache.popitem(last=False)
+    cache.move_to_end(key)
+    _raw, tree, functions = hit
+    fkey = (name, id(scope))
+    if fkey in functions:
+        functions.move_to_end(fkey)
+    while len(functions) >= 256 and fkey not in functions:
+        functions.popitem(last=False)  # bounded: a long-lived backend sees new scopes on every generation (review W5)
+    if fkey not in functions or functions[fkey][0] is not scope:
+        # the entry holds the scope itself: while cached, its id cannot be reused by another scope
+        try:
+            functions[fkey] = (scope, _find_function(tree.root_node, raw, name, scope), {})
+        except Unsupported as exc:
+            functions[fkey] = (scope, exc, {})
+    found = functions[fkey][1]
+    if isinstance(found, Unsupported):
+        raise Unsupported(str(found))
+    return tree.root_node, found, functions[fkey][2]
+
+
 def _find_function(root, raw, name, scope):
     from generators.mcdc_design import _compile_state, _function_name, _has_error
     matches, stack = [], [root]
@@ -1849,7 +2027,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
         if parser is None:
             raise Unsupported("tree_sitter_unavailable")
         raw = source.encode()
-        fn = _find_function(parser.parse(raw).root_node, raw, str(unit.get("name") or ""), scope)
+        _root, fn, shared = _parsed_function(parser, raw, str(unit.get("name") or ""), scope)
     except Exception as exc:  # noqa: BLE001 — never raise into the generator; the reason is the record
         reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
         return [{**base, "status": "unsupported", "reason": reason,
@@ -1858,9 +2036,9 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
     for inputs, outs in zip(sequences_inputs, outputs, strict=True):
         record = dict(base)
         try:
-            interp = _Interp(fn, raw, scope, dict(inputs or {}), parser)
+            interp = _Interp(fn, raw, scope, dict(inputs or {}), parser, shared)
             interp.function_name = str(unit.get("name") or "")
-            interp.prescan()
+            _prescan_once(interp, shared)  # path-independent refusals: once per function
             state = _State()
             interp.bind_parameters(state)
             finals = interp.run([state], fn.child_by_field_name("body"))
@@ -1891,3 +2069,156 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             record.update(status="unsupported", reason=reason, outputs={o: {"reason": reason} for o in outs})
         results.append(record)
     return results
+
+
+def _prescan_once(interp, shared):
+    """Run `_Interp.prescan` once per function and remember its verdict — only once it is known: a failure that is not a
+    refusal is recorded as one, never as a pass (R2c review round 1 W4: recording "" first let later vectors skip it)."""
+    if "prescan" not in shared:
+        try:
+            interp.prescan()
+            verdict = ""
+        except Unsupported as exc:
+            verdict = str(exc)
+        except Exception as exc:  # noqa: BLE001 — the reason is the verdict (fail-closed)
+            verdict = f"oracle_exception:{type(exc).__name__}"
+        shared["prescan"] = verdict
+    if shared["prescan"]:
+        raise Unsupported(shared["prescan"])
+
+
+def _node_at(root, key):
+    """The node with this ``(start, end, type)`` in a parse of the same text, or None."""
+    start, end, typ = key
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.start_byte > start or n.end_byte < end:
+            continue
+        if n.start_byte == start and n.end_byte == end and n.type == typ:
+            return n
+        stack.extend(n.children)
+    return None
+
+
+def _summarize(finals, key):
+    """What the paths of one run say about one decision. ``evaluated`` only when every path evaluates it the same
+    determined way, the same number of times (a loop evaluates it once per iteration): ``instances`` are the distinct
+    evaluations in order of first occurrence. Else why not."""
+    per_path = [[obs for k, obs in s.decisions if k == key] for s in finals]
+    if all(not obs for obs in per_path):
+        return {"state": "unreached"}
+    if any(o[0] == "maybe" for obs in per_path for o in obs):
+        return {"state": "maybe_evaluated"}
+    if any(not obs for obs in per_path):
+        return {"state": "path_dependent_reach"}
+    undetermined = next((o for obs in per_path for o in obs if o[0] == "undetermined"), None)
+    if undetermined is not None:
+        return {"state": "undetermined", "reason": undetermined[1]}
+    if len({tuple(obs) for obs in per_path}) != 1:
+        return {"state": "path_dependent_value"}
+    instances = list(dict.fromkeys(per_path[0]))
+    return {"state": "evaluated", "evaluations": len(per_path[0]),
+            "instances": [{"truth": list(t), "observed": list(o), "decision": d} for _tag, t, o, d in instances]}
+
+
+def _guard_paths(finals, key):
+    """Per path, the outcomes (True / False / None = undetermined) a guard condition had, in order."""
+    return [[obs[1] if obs[0] == "outcome" else None for k, obs in s.decisions if k == key] for s in finals]
+
+
+def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
+                      decisions: list[dict[str, Any]], guards: list[list] | tuple = ()) -> list[dict[str, Any]]:
+    """(R2c) Per input vector: how each decision of the function evaluates on the modeled run.
+
+    ``decisions``: ``[{"key": [start, end, type], "atoms": [[start, end, type], ...], "ir": nested list}]`` over the
+    unit's source text (the decision node, its conditions in order, and the ``&&``/``||``/``!`` structure with
+    ``["atom", i]`` leaves). Per vector: ``{"status", "reason", "decisions": {index: summary}}`` where a summary is
+    ``{"state": "evaluated", "evaluations", "instances": [{"truth", "observed", "decision"}]}`` only when every modeled
+    path evaluates the decision the same determined way (see `_summarize`). A decision with a condition that writes or
+    calls is ``effectful_condition`` for every vector (see `_Interp.atom_effectful`). ``guards``: control conditions
+    (``[start, end, type]`` of an ``if``/loop/``?:`` condition) whose outcomes per path are returned under ``"guards"``
+    — how far a vector gets towards a decision it does not reach. Never raises.
+
+    Like `evaluate_outputs` this is a model of the source, not an execution: reachability here is modeled, callee
+    effects are the project write closure, and undefined behaviour proven on a run makes that vector unsupported.
+    """
+    source = str(unit.get("source_text") or "")
+    try:
+        if not source or not unit.get("source_text_complete", True):
+            raise Unsupported(unit.get("source_unavailable_reason") or "authoritative_source_missing")
+        if len(source) > 2_000_000:
+            raise Unsupported("source_budget")
+        if not scope_matches(unit):
+            raise Unsupported("project_scope_missing_or_mismatched")
+        scope = unit["project_scope"]
+        parser = cpc.shared_parser()
+        if parser is None:
+            raise Unsupported("tree_sitter_unavailable")
+        raw = source.encode()
+        _root, fn, shared = _parsed_function(parser, raw, str(unit.get("name") or ""), scope)
+        guard_keys = {}
+        for index, g in enumerate(guards):
+            guard_keys[tuple(g)] = ("guard", index)
+        specs, broken = {}, {}
+        for index, d in enumerate(decisions):
+            node = _node_at(fn, tuple(d["key"]))
+            atoms = [_node_at(fn, tuple(a)) for a in d.get("atoms") or []]
+            if node is None or not atoms or any(a is None for a in atoms):
+                broken[index] = "decision_node_not_found"
+                continue
+            specs[(node.start_byte, node.end_byte, node.type)] = {"key": index, "atoms": atoms, "ir": _ir_tuple(d["ir"])}
+    except Exception as exc:  # noqa: BLE001 — never raise into the generator; the reason is the record
+        reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
+        return [{"status": "unsupported", "reason": reason, "decisions": {}} for _ in vectors]
+    probe_interp = None
+    try:
+        probe_interp = _Interp(fn, raw, scope, {}, parser, shared)
+        _prescan_once(probe_interp, shared)  # path-independent refusals: once per function, not per vector
+        for key, spec in list(specs.items()):
+            if any(probe_interp.atom_effectful(a, raw) for a in spec["atoms"]):
+                broken[spec["key"]] = "effectful_condition"
+                del specs[key]
+    except Exception as exc:  # noqa: BLE001 — never raise into the generator (R2c review round 1 W4)
+        reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
+        return [{"status": "unsupported", "reason": reason, "decisions": {}} for _ in vectors]
+    results = []
+    for inputs in vectors:
+        record = {"status": "supported", "reason": "", "decisions": {i: {"state": why} for i, why in broken.items()}}
+        interp = None
+        try:
+            interp = _Interp(fn, raw, scope, dict(inputs or {}), parser, shared)
+            interp.function_name = str(unit.get("name") or "")
+            interp.watch = specs
+            interp.guards = guard_keys
+            state = _State()
+            interp.bind_parameters(state)
+            finals = interp.run([state], fn.child_by_field_name("body"))
+            if any(s.mode in {"break", "continue"} for s in finals):
+                raise Unsupported("jump_outside_loop")
+            record["steps"] = interp.steps  # (R2c) the run's cost: callers budget searches by it (deterministic)
+            for spec in specs.values():
+                record["decisions"][spec["key"]] = _summarize(finals, spec["key"])
+            if guard_keys:
+                record["guards"] = {index: _guard_paths(finals, ("guard", index)) for index in range(len(guards))}
+            possible = sorted({k for s in finals for k in s.possible_ub})
+            if possible:
+                # Undefined behaviour that depends on an unknown value may happen on this run *after* the decision (an
+                # observation with it before is ``undetermined``): disclosed, as for outputs.
+                record["possible_undefined_behavior"] = possible
+        except Unsupported as exc:
+            record.update(status="unsupported", reason=str(exc), steps=interp.steps if interp is not None else 0)
+        except Exception as exc:  # noqa: BLE001 — never raise into the generator; recorded as the reason
+            record.update(status="unsupported", reason=f"oracle_exception:{type(exc).__name__}",
+                          steps=interp.steps if interp is not None else 0)
+        results.append(record)
+    return results
+
+
+def _ir_tuple(ir):
+    """JSON form (``["&&", l, r]``, ``["!", x]``, ``["atom", i]``) → the tuple form `record_decision` walks."""
+    if ir[0] == "atom":
+        return ("atom", int(ir[1]))
+    if ir[0] == "!":
+        return ("!", _ir_tuple(ir[1]))
+    return (ir[0], _ir_tuple(ir[1]), _ir_tuple(ir[2]))

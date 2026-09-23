@@ -136,10 +136,57 @@ def _fill_for(t, fill):
     return max(lo, min(hi, fill))
 
 
-def _harness(unit, claims, fn, raw, enum_base="int"):
+_MAX_EVALUATIONS = 256
+
+
+def _instrumented_body(fn, raw, instrument):
+    """(R2c) The body text with every instrumented decision wrapped: ``(begin(d), end(d, (<decision>)))`` and each of its
+    conditions ``atom(d, i, (<condition>))`` — clang then records, per evaluation of the decision, which conditions the
+    short circuit evaluated with which value, and the outcome. Nested or overlapping spans: ``None`` (unchecked)."""
+    body = fn.child_by_field_name("body")
+    edits = []
+    for d, decision in enumerate(instrument["decisions"]):
+        s, e = decision["span"]
+        edits.append((s, e, f"((__oracle_begin({d}), __oracle_end({d}, (", "))))"))
+        for i, (a0, a1) in enumerate(decision["atoms"]):
+            edits.append((a0, a1, f"__oracle_atom({d}, {i}, (", "))"))
+    edits.sort(key=lambda x: (x[0], -x[1]))
+    for (s1, e1, *_), (s2, e2, *_) in zip(edits, edits[1:], strict=False):
+        if s2 < e1 and e2 > e1:
+            return None  # overlapping, not nested
+    spans = [(s, e) for s, e, *_ in edits]
+    for i, (s1, e1) in enumerate(spans):
+        # a decision may contain only its own conditions; decisions inside another decision are not instrumented
+        inside = [j for j, (s2, e2) in enumerate(spans) if j != i and s1 <= s2 and e2 <= e1 and (s2, e2) != (s1, e1)]
+        if any(edits[j][2].startswith("((__oracle_begin") for j in inside):
+            return None
+    if any(not (body.start_byte <= s and e <= body.end_byte) for s, e in spans):
+        return None
+
+    def render(lo, hi, items):
+        out, pos, k = [], lo, 0
+        while k < len(items):
+            s, e, pre, post = items[k]
+            inner = []
+            k += 1
+            while k < len(items) and items[k][0] < e:
+                inner.append(items[k])
+                k += 1
+            out.append(raw[pos:s])
+            out.append(pre.encode() + render(s, e, inner) + post.encode())
+            pos = e
+        out.append(raw[pos:hi])
+        return b"".join(out)
+    text = render(body.start_byte, body.end_byte, edits).decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
     """C++ text for one function and its claims: (source, {line: (claim index, output, value, variant)}, reason, meta).
 
-    ``meta``: ``callees`` (stubbed calls — callee effects are not checked), ``enum`` (an enumeration type is used)."""
+    ``meta``: ``callees`` (stubbed calls — callee effects are not checked), ``enum`` (an enumeration type is used).
+    ``instrument`` (R2c): ``{"decisions": [{"span": (start, end), "atoms": [(start, end), ...]}]}`` — decisions whose
+    evaluations the claims' outputs name through `decision_claim` expressions."""
     from generators import c_project_context as cpc
     from generators.mcdc_design import _function_name
     scope = unit["project_scope"]
@@ -148,6 +195,10 @@ def _harness(unit, claims, fn, raw, enum_base="int"):
         return None, {}, "function_declarator_not_direct", {}
     # CRLF sources: a ``\r`` left in the text makes clang count an extra line (R2b review W7).
     body = _text(fn.child_by_field_name("body"), raw).replace("\r\n", "\n").replace("\r", "\n")
+    if instrument:
+        body = _instrumented_body(fn, raw, instrument)
+        if body is None:
+            return None, {}, "decision_instrumentation_overlap", {}
     rtype = " ".join([_text(c, raw) for c in fn.named_children if c.type == "type_qualifier"] +
                      [_text(fn.child_by_field_name("type"), raw)])
     params = []
@@ -241,6 +292,16 @@ def _harness(unit, claims, fn, raw, enum_base="int"):
                     lines.append(f"  for (int __oracle_k = 0; __oracle_k < 64; ++__oracle_k) __oracle_buf_{i}[__oracle_k] = {fill};")
                     args.append(f"__oracle_buf_{i}")
             plist = ", ".join(p[1] for p in params)
+            if instrument:
+                nd = len(instrument["decisions"])
+                na = max(len(d["atoms"]) for d in instrument["decisions"])
+                lines.append(f"  int __oracle_cnt[{nd}] = {{}}; int __oracle_rec[{nd}][{_MAX_EVALUATIONS}][{na}] = {{}};"
+                             f" int __oracle_out[{nd}][{_MAX_EVALUATIONS}] = {{}};")
+                lines.append("  auto __oracle_begin = [&](int __d) -> int { ++__oracle_cnt[__d]; return 0; };")
+                lines.append(f"  auto __oracle_atom = [&](int __d, int __a, bool __v) -> bool {{ if (__oracle_cnt[__d] <= "
+                             f"{_MAX_EVALUATIONS}) __oracle_rec[__d][__oracle_cnt[__d] - 1][__a] = __v ? 2 : 1; return __v; }};")
+                lines.append(f"  auto __oracle_end = [&](int __d, bool __v) -> bool {{ if (__oracle_cnt[__d] <= "
+                             f"{_MAX_EVALUATIONS}) __oracle_out[__d][__oracle_cnt[__d] - 1] = __v ? 2 : 1; return __v; }};")
             lines.append(f"  auto __oracle_fn = [&]({plist}) -> {rtype}")
             lines.append(body)
             lines.append("  ;")
@@ -276,6 +337,18 @@ def _harness(unit, claims, fn, raw, enum_base="int"):
     meta = {"callees": bool(callees), "enum": any(isinstance(types.get(x), dict) and types[x].get("enum") for x in tokens)
             or any((globals_.get(g) or arrays.get(g) or {}).get("type", {}).get("enum") for g in used_globals)}
     return text, checks, "", meta
+
+
+def decision_claim(d, truth, observed, outcome):
+    """(R2c) Output expression for a path-designed MC/DC claim: 1 when some evaluation of instrumented decision ``d``
+    in the run had exactly these evaluated conditions (``observed``) with these values and this outcome, else 0. When
+    the decision was evaluated more often than the recorder holds, the expression throws: not a constant expression, so
+    the claim is counted *unchecked* (``constexpr_limit``) — neither agreed nor contradicted."""
+    codes = [(2 if t else 1) if o else 0 for t, o in zip(truth, observed, strict=True)]
+    atoms = " && ".join(f"__oracle_rec[{d}][__e][{i}] == {c}" for i, c in enumerate(codes))
+    return (f"[&]() -> long long {{ if (__oracle_cnt[{d}] > {_MAX_EVALUATIONS}) throw 0; "
+            f"for (int __e = 0; __e < __oracle_cnt[{d}]; ++__e) if ({atoms} && __oracle_out[{d}][__e] == "
+            f"{2 if outcome else 1}) return 1; return 0; }}()")
 
 
 def _one_line(body):
@@ -369,7 +442,8 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
     groups: dict[tuple, list] = {}
     for claim in claims:
         unit = claim["unit"]
-        groups.setdefault((unit.get("source_path") or "", unit.get("name") or "", id(unit["project_scope"])), []).append(claim)
+        groups.setdefault((unit.get("source_path") or "", unit.get("name") or "", id(unit["project_scope"]),
+                           id(claim.get("instrument"))), []).append(claim)
     report = {"target": target, "fills": list(_FILLS), "enum_bases": list(_ENUM_BASES),
               "claims": sum(len(c["outputs"]) for c in claims),
               "checked": 0, "agree": 0, "agree_with_stubbed_callees": 0, "mismatch": 0, "eval_error": 0, "unchecked": 0,
@@ -388,7 +462,8 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
         for bi, base in enumerate(_ENUM_BASES):
             try:
                 fn = _find_function(parser.parse(raw).root_node, raw, unit["name"], unit["project_scope"])
-                source, checks, reason, meta = _harness(unit, group, fn, raw, enum_base=base)
+                source, checks, reason, meta = _harness(unit, group, fn, raw, enum_base=base,
+                                                        instrument=group[0].get("instrument"))
             except Exception as exc:  # noqa: BLE001 — any harness failure is an unchecked unit, reported by name
                 source, checks, reason = None, {}, f"harness_exception:{type(exc).__name__}"
             if source is None:
