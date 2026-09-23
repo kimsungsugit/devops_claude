@@ -2495,8 +2495,11 @@ def generate_sequences(
             # MC/DC 설계 벡터 — 값은 엔진이 식을 평가해 고른 그대로다(중간값·임의 보정 없음). 기대값은 이 벡터가
             # 말해 주지 않는다: 결정 결과 ≠ 출력값이라 자리만 두고 `apply_sequence_evidence` 가 근거를 붙인다.
             vector = _mcdc_vectors[int(bound_key.split("_")[-1])]
+            # (R81) 결정이 읽지 않는데 도메인을 모르는 입력(포인터·배열·구조체)은 벡터에 없다 — 칸을 비운다(추측값 금지).
+            #   exporter 는 빈 칸을 "키 없음" 으로 읽어 MCDC Design 시트의 벡터 JSON 과 그대로 맞춘다.
             for v in input_vars:
-                inp_vals[v] = vector[v]
+                if v in vector:
+                    inp_vals[v] = vector[v]
             for v in output_vars:
                 exp_vals[v] = f"{_VERIFY_NEEDED_PREFIX} mcdc_design_vector"
             # 라벨은 쌍이 행 상한 뒤에도 살아남았는지 알아야 쓸 수 있다 — finalize 뒤에 다시 쓴다(리뷰 C1).
@@ -2606,6 +2609,10 @@ def generate_sequences(
         # (R71 N77) 모르는 타입의 변수는 값을 비운다 — `{}` 경계에서 `.get(key, 0)` 로 만든 0 은 값이 아니라 자리표시다.
         for _vals in (inp_vals, exp_vals):
             for _k in [k for k in _vals if k in _unknown_vars]:
+                # (R81 리뷰 W5) MC/DC 벡터 값은 엔진이 **선언**에서 푼 도메인에서 왔다 — SUTS 타입 표가 못 풀었다고 지우면
+                #   finalize 가 짝을 못 찾아 "절단" 으로, 공란 라벨이 "결정 무관" 으로 오표기한다.
+                if _vals is inp_vals and bound_key and bound_key.startswith("_mcdc_"):
+                    continue
                 _vals.pop(_k, None)
 
         # Build human-readable description showing actual variable names and values
@@ -2650,15 +2657,23 @@ def generate_sequences(
         _lines = str(_row.get("description") or "").split("\n")
         _lines[0] = _mcdc_vector_label(_row.get("mcdc_design") or [],
                                        [r["pair"].get("retained_status", "") for r in _roles])
+        _blank = [v for v in input_vars if v not in _row["inputs"]]
+        if _blank:
+            # (R81) 결정이 읽지 않고 도메인도 모르는 입력은 비운 칸이다 — 값이 없다는 것을 행에서 말한다.
+            _lines[0] += f" · 설계 밖 입력(공란, 결정 무관·도메인 미상): {', '.join(_blank)}"
         _row["description"] = "\n".join(_lines)
     return apply_sequence_evidence(unit, sequences)
 
 
-def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict[str, str]]) -> int:
+def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict[str, str]],
+                        project_context: Optional[Dict[str, Any]] = None) -> int:
     """unit 에 정의 파일의 원문을 붙인다(`source_files` = 소스 단계의 파일당 1회 맵). 붙인 unit 수를 돌려준다.
 
     원문은 소스 oracle(`apply_sequence_evidence`)과 MC/DC 소스 경로의 입력이다. 맵에 없으면(잘려 읽힘·원격 미확보)
     비워 두고 사유를 남긴다 — 빈 원문을 "지원 안 되는 코드" 로 오독하지 않게 `source_unavailable_reason` 이 말한다.
+
+    (R81) `project_context`(소스 단계 `project_context`)가 있으면 unit 마다 정의 파일의 번역 단위 범위(`project_scope` —
+    typedef·매크로·열거자·전역·`#if` 상태)를 붙인다. 같은 파일의 unit 은 한 범위 객체를 공유한다(복사 없음).
     """
     attached = 0
     files = source_files or {}
@@ -2672,6 +2687,19 @@ def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict
             attached += 1
         elif unit.get("source_path") and not unit.get("source_unavailable_reason"):
             unit["source_unavailable_reason"] = "source_file_not_in_source_stage"
+    if project_context and (project_context.get("files") or {}):
+        from generators.c_project_context import SCHEMA_VERSION, build_scopes
+        if project_context.get("schema_version") != SCHEMA_VERSION:
+            # 옛 모양의 문맥(캐시)으로 범위를 만들면 조용히 틀린 판정을 낸다 — 붙이지 않는다(MC/DC 는 범위 없는 경로로 간다).
+            for unit in units:
+                unit.setdefault("project_context_status", f"schema_mismatch:{project_context.get('schema_version')}")
+            return attached
+        paths = [str(u.get("source_path") or "") for u in units if u.get("source_text")]
+        scopes = build_scopes(project_context, [p for p in paths if p in project_context["files"]])
+        for unit in units:
+            scope = scopes.get(str(unit.get("source_path") or ""))
+            if scope is not None and unit.get("source_text"):
+                unit["project_scope"] = scope
     return attached
 
 
@@ -2714,6 +2742,10 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "no_pair_found": 0, "unsupported": 0, "conditions_paired": 0, "retained_pairs": 0,
                            "truncated_pairs": 0, "invalidated_pairs": 0, "unsupported_reasons": {},
                            "unenumerated_functions": 0, "unenumerated_reasons": {}, "design_range_conflicts": [],
+                           # (R81) 결정이 읽지 않는 입력의 도메인을 몰라 벡터가 비워 둔 결정(행은 그 칸이 공란)
+                           "decisions_with_blank_inputs": 0,
+                           # (R81 리뷰 I5) 쌍이 없음을 **증명**한 결정(강결합 동일 조건·상수 결정) — 탐색 실패와 분리
+                           "proven_infeasible": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     for unit in units:
@@ -2734,6 +2766,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                 out["unenumerated_reasons"][reason] = out["unenumerated_reasons"].get(reason, 0) + 1
                 continue
             out["decisions"] += 1
+            out["decisions_with_blank_inputs"] += bool(d.get("inputs_not_designed"))
+            out["proven_infeasible"] += str(d.get("reason") or "").startswith("unique_cause_infeasible:")
             out["conditions"] += len(d.get("conditions") or [])
             status = d.get("status", "unsupported")
             out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
@@ -4399,7 +4433,7 @@ def generate_suts(
     units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map,
                                    uds_io_map=_uds_io,
                                    struct_members=report_data.get("struct_member_arrays") or {})
-    attach_unit_sources(units, report_data.get("source_files"))
+    attach_unit_sources(units, report_data.get("source_files"), report_data.get("project_context"))
 
     if not units:
         _logger.warning("No unit functions found!")

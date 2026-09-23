@@ -483,6 +483,50 @@ def _did_pattern_hits(fn_body: str, patterns: List["re.Pattern[str]"]) -> Tuple[
     return [v for _, v in hits], dropped
 
 
+
+def _build_project_context(source_text_cache: Dict[str, str], read_truncated: List[Tuple[str, int]],
+                           roots=(), walk=None, read=None, max_files: int = 4000) -> Dict[str, Any]:
+    """루트 아래 **모든** `.c`/`.h` 원문으로 프로젝트 C 문맥을 만든다(`generators.c_project_context`). 실패는 사유로 남긴다.
+
+    ⚠ 문서 범위와 컴파일 문맥은 다르다: 소스 단계는 component_map `verify=X` 파일(LIN 드라이버·`Include_File_Management.h`)을
+    문서 대상에서 빼는데, 그 목록으로 문맥을 만들었더니 모든 파일이 include 하는 헤더가 사라져 실 생성의 MC/DC 가 전부
+    `identifier_undeclared` 가 됐다(R81 실측: 인벤토리 393 설계 vs 실 생성 0). 그래서 루트를 따로 훑는다. 이미 읽은 원문은
+    재사용하고, 상한에 잘려 읽힌 파일은 전부 다시 읽는다(`read` 는 상한 없음).
+    """
+    truncated = {str(p) for p, _n in read_truncated}
+    texts = {str(p): t for p, t in source_text_cache.items()
+             if str(p).lower().endswith((".c", ".h")) and t and str(p) not in truncated}
+    unread: List[str] = []
+    at_cap = False
+    if walk is not None and read is not None:
+        seen = 0
+        for root in roots or ():
+            for path in walk(root):
+                if path.suffix.lower() not in (".c", ".h"):
+                    continue
+                seen += 1
+                if seen > max_files:
+                    at_cap = True
+                    break
+                key = str(path)
+                if key not in texts:
+                    text = read(path)
+                    if text:
+                        texts[key] = text
+                    else:
+                        unread.append(key)
+    try:
+        from generators.c_project_context import build_project_context
+        context = build_project_context(texts)
+    except (ImportError, ValueError, RecursionError, AttributeError, TypeError) as exc:
+        _logger.warning("프로젝트 C 문맥 생성 실패 — MC/DC 는 프로젝트 헤더를 해석하지 못한다: %s", exc)
+        return {"status": f"build_failed:{type(exc).__name__}"}
+    # 문맥에 못 넣은 파일 — 그 파일의 선언이 필요한 식별자는 값을 확정하지 않는다(엔진은 `partial_context` 로 표시).
+    context["incomplete_files"] = sorted(unread + [p for p in truncated if p not in texts])
+    context["file_cap_reached"] = at_cap
+    return context
+
+
 def generate_uds_source_sections(
     source_root: str,
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
@@ -2773,6 +2817,10 @@ def generate_uds_source_sections(
                                 if d.get("source_text_complete")})
             if path and source_text_cache.get(path)
         },
+        # (R81) 프로젝트 C 문맥 — 대상 정수 폭(typedef 증언)·전처리 이벤트·매크로·열거자·전역·함수 쓰기 효과. MC/DC 설계가
+        #   프로젝트 헤더(`U16`, `((U16)(5000U / u8g_T_MAIN))`, 헤더 전역)를 **선언에서** 해석하는 입력이다. 잘려 읽힌 파일은
+        #   넣지 않는다(뒷부분의 `#undef`·재정의를 못 본 채 값을 확정하면 안 된다) — 빠진 파일은 `incomplete_files` 에 남긴다.
+        "project_context": _build_project_context(source_text_cache, _read_truncated, _roots, _src_walk, _src_read),
         # {fid: body 앞 400자}. detail 밖에 두어 by_name 중복 직렬화를 피한다(위 선언부 주석).
         "function_body_snippets": function_body_snippets,
         # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이

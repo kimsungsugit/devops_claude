@@ -1552,7 +1552,7 @@ def _build_doc_proposal(
         _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
         _sub_units = collect_unit_functions(_sub_fd, gim) or []
         # (R80) 문서 생성과 같은 원문 입력 — 소스 단계의 파일당 원문 맵(`source_files`)에서 붙인다.
-        attach_unit_sources(_sub_units, sections.get("source_files"))
+        attach_unit_sources(_sub_units, sections.get("source_files"), sections.get("project_context"))
         for _unit in _sub_units:
             _nm = str(_unit.get("name") or "").strip().lower()
             if _nm not in changed_set or _nm in out["suts"]:

@@ -9,9 +9,11 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import re
 from typing import Any
 
+from generators import c_project_context as cpc
 from generators.c_test_semantics import _TYPES
 from workflow.code_parser.c_parser import _make_parser
 
@@ -19,6 +21,7 @@ from workflow.code_parser.c_parser import _make_parser
 _ENUMERATION_FAILURES = frozenset({
     "tree_sitter_unavailable", "source_budget", "source_parse_error", "source_ast_budget",
     "function_identity_missing_or_ambiguous", "source_text_incomplete", "source_exception",
+    "function_not_compiled_in_configuration",
 })
 
 
@@ -57,34 +60,108 @@ def _display_expression(node, raw):
         return _text(node, raw)
 
 
-def _compile(node, raw, domains):
-    atoms, variables, constants = [], set(), set()
-    def scalar(n):
+_ARITH_OPS = frozenset({"+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"})
+
+
+def _compile(node, raw, domains, constants=None, widths=None, types=None):
+    """Decision → IR over atoms.
+
+    ``constants`` maps names to ``{"value", "type"}`` resolved from declarations (object-like macros,
+    enumerators). ``widths`` (target integer widths from typedef testimony) switches comparisons to exact
+    C semantics: every operand then needs a C type, and both sides go through the usual arithmetic
+    conversions (``U16 < S16`` compares as ``unsigned int`` on a 16-bit-int target). With widths, operands
+    may also be integer arithmetic, bitwise and cast expressions (``(x & MASK) == MASK``, ``(S16)u < s``);
+    ``types`` resolves a cast's type name to a C type (callable or dict).
+    """
+    atoms, variables, values_seen = [], set(), set()
+    constants = {} if constants is None else constants  # a lazy constants map is empty until asked
+    def lift(fn, *args):
+        try:
+            return fn(*args)
+        except cpc.Unresolved as exc:
+            raise Unsupported(str(exc)) from exc
+    def cast_type(type_node):
+        text = " ".join(_text(type_node, raw).split())
+        if callable(types):
+            return lift(types, text)
+        if isinstance(types, dict) and text in types:
+            return types[text]
+        raise Unsupported("cast_type_unresolved:" + text)
+    def term(n):
         n = _unwrap(n)
         text = _text(n, raw)
         if n.type == "identifier":
-            if text not in domains:
-                raise Unsupported("missing_declared_domain:" + text)
-            variables.add(text)
-            return ("var", text)
+            if text in domains:
+                variables.add(text)
+                t = domains[text].get("ctype") if widths else None
+                if widths and t is None:
+                    raise Unsupported("operand_c_type_unresolved:" + text)
+                return ("var", text, t)
+            if text in constants:
+                value = constants[text]["value"]
+                values_seen.add(value)
+                return ("constant", value, constants[text]["type"] if widths else None)
+            raise Unsupported("missing_declared_domain:" + text)
+        if n.type == "number_literal" and widths:
+            value, t = lift(cpc.literal, text, widths)
+            values_seen.add(value)
+            return ("constant", value, t)
         if n.type == "number_literal" and re.fullmatch(r"(?:0|[1-9][0-9]*|0[xX][0-9a-fA-F]+)", text):
             value = int(text, 16 if "x" in text.lower() else 10)
             if value > 32767:
                 raise Unsupported("literal_target_type_unresolved")
-            constants.add(value)
-            return ("constant", value)
-        if n.type == "unary_expression" and _text(n.child_by_field_name("operator"), raw) in {"+", "-"}:
-            arg = scalar(n.child_by_field_name("argument"))
-            if arg[0] != "constant":
+            values_seen.add(value)
+            return ("constant", value, None)
+        op = _text(n.child_by_field_name("operator"), raw) if n.type in {"unary_expression", "binary_expression"} else ""
+        if n.type == "unary_expression" and op in {"+", "-", "~"}:
+            arg = term(n.child_by_field_name("argument"))
+            if arg[0] == "constant" and op != "~":
+                if widths:
+                    value, t = lift(cpc.arith, op, None, (arg[1], arg[2]), widths)
+                else:
+                    value, t = (arg[1] if op == "+" else -arg[1]), None
+                values_seen.add(value)
+                return ("constant", value, t)
+            if not widths:
                 raise Unsupported("arithmetic_operand_unsupported")
-            value = arg[1] if text.lstrip().startswith("+") else -arg[1]
-            constants.add(value)
-            return ("constant", value)
+            return ("expr", (op, (arg,), widths), lift(cpc.promote, arg[2], widths))
+        if not widths:
+            raise Unsupported("unsupported_scalar:" + n.type)
+        if n.type == "binary_expression" and op in _ARITH_OPS:
+            left, right = term(n.child_by_field_name("left")), term(n.child_by_field_name("right"))
+            if cpc.is_float(left[2]) or cpc.is_float(right[2]):
+                raise Unsupported("floating_operand")
+            if _contains_enum(left) or _contains_enum(right):
+                # Arithmetic on an enumeration object depends on its implementation-defined type (review round 2 W1).
+                raise Unsupported("enum_underlying_type_implementation_defined")
+            t = lift(cpc.promote, left[2], widths) if op in {"<<", ">>"} else lift(cpc.usual_conversion, left[2], right[2], widths)
+            if left[0] == right[0] == "constant":
+                value, t = lift(cpc.arith, op, (left[1], left[2]), (right[1], right[2]), widths)
+                values_seen.add(value)
+                return ("constant", value, t)
+            return ("expr", (op, (left, right), widths), t)
+        if n.type == "cast_expression":
+            t = cast_type(n.child_by_field_name("type"))
+            inner = term(n.child_by_field_name("value"))
+            if cpc.is_float(t) or cpc.is_float(inner[2]):
+                raise Unsupported("floating_operand")
+            return ("cast", inner, t)
+        if n.type == "call_expression":
+            f, args = n.child_by_field_name("function"), n.child_by_field_name("arguments")
+            inner_names = [c for c in f.named_children if c.type != "comment"] if f is not None and f.type == "parenthesized_expression" else []
+            arg_nodes = [c for c in args.named_children if c.type != "comment"] if args is not None else []
+            if len(inner_names) == 1 and inner_names[0].type in {"identifier", "type_identifier"} and len(arg_nodes) == 1:
+                # ``(T)(x)`` is a cast exactly when ``T`` names a type.
+                t = cast_type(inner_names[0])
+                inner = term(arg_nodes[0])
+                if cpc.is_float(t) or cpc.is_float(inner[2]):
+                    raise Unsupported("floating_operand")
+                return ("cast", inner, t)
         raise Unsupported("unsupported_scalar:" + n.type)
-    def bounds(term):
-        if term[0] == "constant":
-            return term[1], term[1]
-        d = domains[term[1]]
+    def bounds(t):
+        if t[0] == "constant":
+            return t[1], t[1]
+        d = domains[t[1]]
         return d.get("type_min", d["min"]), d.get("type_max", d["max"])
     def build(n):
         n = _unwrap(n)
@@ -92,36 +169,97 @@ def _compile(node, raw, domains):
             op = _text(n.child_by_field_name("operator"), raw)
             if op in {"&&", "||"}:
                 return (op, build(n.child_by_field_name("left")), build(n.child_by_field_name("right")))
-            if op not in {"<", "<=", ">", ">=", "==", "!="}:
+            if op in {"<", "<=", ">", ">=", "==", "!="}:
+                left, right = term(n.child_by_field_name("left")), term(n.child_by_field_name("right"))
+                if widths:
+                    if cpc.is_float(left[2]) or cpc.is_float(right[2]):
+                        raise Unsupported("floating_operand")
+                    if (_enum_object(left) and _may_be_negative(right, domains)) or \
+                            (_enum_object(right) and _may_be_negative(left, domains)):
+                        # An enumeration object's type is implementation-defined (C11 6.7.2.2p4): compilers pick
+                        # unsigned int when no enumerator is negative, and then -1 compares as UINT_MAX (review W3).
+                        raise Unsupported("enum_underlying_type_implementation_defined")
+                    atom = (op, left, right, lift(cpc.usual_conversion, left[2], right[2], widths))
+                else:
+                    lb, rb = bounds(left), bounds(right)
+                    if (lb[0] == 0 and lb[1] > 32767 and rb[0] < 0) or (rb[0] == 0 and rb[1] > 32767 and lb[0] < 0):
+                        raise Unsupported("target_dependent_unsigned_comparison")
+                    atom = (op, left, right, None)
+            elif widths and op in _ARITH_OPS:
+                atom = ("truth", term(n))
+            else:
                 raise Unsupported("unsupported_atom_operator:" + op)
-            left, right = scalar(n.child_by_field_name("left")), scalar(n.child_by_field_name("right"))
-            lb, rb = bounds(left), bounds(right)
-            if (lb[0] == 0 and lb[1] > 32767 and rb[0] < 0) or (rb[0] == 0 and rb[1] > 32767 and lb[0] < 0):
-                raise Unsupported("target_dependent_unsigned_comparison")
-            atom = (op, left, right)
         elif n.type == "unary_expression" and _text(n.child_by_field_name("operator"), raw) == "!":
             return ("!", build(n.child_by_field_name("argument")))
         else:
-            atom = ("truth", scalar(n))
+            atom = ("truth", term(n))
         index = len(atoms)
         atoms.append({"condition_id": f"C{index + 1}", "expression": _text(n, raw), "_atom": atom})
         return ("atom", index)
     ir = build(node)
-    return ir, atoms, sorted(variables), constants
+    return ir, atoms, sorted(variables), values_seen
+
+
+def _contains_enum(term):
+    if term[0] == "var":
+        return bool((term[2] or {}).get("enum"))
+    if term[0] == "cast":
+        return _contains_enum(term[1])
+    if term[0] == "expr":
+        return any(_contains_enum(a) for a in term[1][1])
+    return False
+
+
+def _enum_object(term):
+    return term[0] == "var" and bool((term[2] or {}).get("enum"))
+
+
+def _may_be_negative(term, domains):
+    if term[0] == "constant":
+        return term[1] < 0
+    if term[0] == "var":
+        return domains[term[1]]["min"] < 0
+    return bool((term[2] or {}).get("signed"))
+
+
+def _term_value(term, inputs):
+    """Value of a compiled operand under C semantics; raises ``cpc.Unresolved`` on undefined behavior."""
+    kind = term[0]
+    if kind == "var":
+        return inputs[term[1]]
+    if kind == "constant":
+        return term[1]
+    if kind == "cast":
+        return cpc.convert(_term_value(term[1], inputs), term[2])
+    op, args, widths = term[1]
+    if len(args) == 1:
+        return cpc.arith(op, None, (_term_value(args[0], inputs), args[0][2]), widths)[0]
+    return cpc.arith(op, (_term_value(args[0], inputs), args[0][2]), (_term_value(args[1], inputs), args[1][2]), widths)[0]
 
 
 def _atom_truth(atom, inputs):
-    def scalar(term):
-        return inputs[term[1]] if term[0] == "var" else term[1]
-    a = scalar(atom[1])
+    a = _term_value(atom[1], inputs)
     if atom[0] == "truth":
         return bool(a)
-    b = scalar(atom[2])
+    b = _term_value(atom[2], inputs)
+    if atom[3] is not None:
+        a, b = cpc.convert(a, atom[3]), cpc.convert(b, atom[3])
     return {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b, "==": a == b, "!=": a != b}[atom[0]]
 
 
+def _term_variables(term):
+    if term[0] == "var":
+        return [term[1]]
+    if term[0] == "cast":
+        return _term_variables(term[1])
+    if term[0] == "expr":
+        return [name for arg in term[1][1] for name in _term_variables(arg)]
+    return []
+
+
 def _atom_variables(atom):
-    return [term[1] for term in atom[1:] if term[0] == "var"]
+    terms = atom[1:2] if atom[0] == "truth" else atom[1:3]
+    return list(dict.fromkeys(name for t in terms for name in _term_variables(t)))
 
 
 def _evaluate(ir, atoms, inputs):
@@ -139,12 +277,16 @@ def _evaluate(ir, atoms, inputs):
     return truth, bool(visit(ir)), observed
 
 
-def evaluate_decision(expression: str, inputs: dict[str, int], domains: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def evaluate_decision(expression: str, inputs: dict[str, int], domains: dict[str, dict[str, Any]],
+                      constants: dict[str, dict[str, Any]] | None = None,
+                      widths: dict[str, int] | None = None,
+                      types: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Evaluate pure integer decision truth and short-circuit observations.
 
     Domain metadata must describe explicit integer declarations. This helper
     verifies expression mathematics only; it cannot authenticate source or
-    prove reachability or target execution.
+    prove reachability or target execution. ``constants``/``widths`` are the
+    ones the design used (``report["constants"]``, ``report["target"]["widths"]``).
     """
     try:
         parser = _make_parser()
@@ -157,7 +299,7 @@ def evaluate_decision(expression: str, inputs: dict[str, int], domains: dict[str
         condition = next(n.child_by_field_name("condition") for n in _walk(root) if n.type == "if_statement")
         if _text(condition, raw) != "(" + expression + ")":
             raise Unsupported("expression_not_consumed_completely")
-        ir, atoms, variables, _ = _compile(condition, raw, domains)
+        ir, atoms, variables, _ = _compile(condition, raw, domains, constants, widths, types)
         if len(atoms) > 64:
             raise Unsupported("condition_budget")
         for name in variables:
@@ -167,7 +309,7 @@ def evaluate_decision(expression: str, inputs: dict[str, int], domains: dict[str
         return {"status": "supported", "truth": truth, "decision": decision, "observed": observed,
                 "conditions": [{k: v for k, v in c.items() if not k.startswith("_")} for c in atoms],
                 "execution_status": "not_run", "reachability": "unverified"}
-    except (Unsupported, ValueError, KeyError, TypeError, AttributeError, RecursionError, StopIteration) as exc:
+    except (Unsupported, cpc.Unresolved, ValueError, KeyError, TypeError, AttributeError, RecursionError, StopIteration) as exc:
         return {"status": "unsupported", "reason": str(exc), "execution_status": "not_run"}
 
 
@@ -178,7 +320,7 @@ def _default_value(domain):
     return max(domain["min"], min(0, domain["max"]))
 
 
-def _realizable_truths(atoms, variables, values, defaults, budget):
+def _realizable_truths(atoms, variables, values, defaults, budget, skipped=None):
     """Per variable-connected component, the atom truth tuples real inputs can realize.
 
     Atoms sharing a variable are searched together, so shared-variable
@@ -208,13 +350,444 @@ def _realizable_truths(atoms, variables, values, defaults, budget):
             evaluated += 1
             assignment = dict(zip(names, vector, strict=True))
             probe = {**defaults, **assignment}
-            realized.setdefault(tuple(_atom_truth(atoms[i]["_atom"], probe) for i in member_atoms), assignment)
+            try:
+                truths = tuple(_atom_truth(atoms[i]["_atom"], probe) for i in member_atoms)
+            except cpc.Unresolved:
+                # undefined behavior for this input (overflow, division by zero): not a test vector
+                if skipped is not None:
+                    skipped[0] += 1
+                continue
+            realized.setdefault(truths, assignment)
             if len(realized) == 2 ** len(member_atoms):
                 break
         else:
             complete = complete and space <= max(0, budget)
         components.append(list(realized.values()))
     return components, complete, evaluated
+
+
+def _function_name(fn, raw):
+    d = fn.child_by_field_name("declarator")
+    while d is not None and d.type != "function_declarator":
+        d = d.child_by_field_name("declarator")
+    ident = d.child_by_field_name("declarator") if d is not None else None
+    return (_text(ident, raw) if ident is not None and ident.type == "identifier" else ""), d
+
+
+def _has_error(node):
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == "ERROR" or n.is_missing:
+            return True
+        stack.extend(n.children)
+    return False
+
+
+_CONDITIONAL_BLOCKS = frozenset({"preproc_if", "preproc_ifdef", "preproc_else", "preproc_elif", "preproc_elifdef"})
+_PP_BRANCHES = frozenset({"preproc_if", "preproc_ifdef", "preproc_elif", "preproc_elifdef"})
+_PP_LINES = frozenset({"preproc_def", "preproc_function_def", "preproc_call", "preproc_include"})
+
+
+def _in_preproc_condition(node):
+    """Inside the condition of an ``#if``/``#elif`` — preprocessor arithmetic, never a run-time decision."""
+    child, parent = node, node.parent
+    while parent is not None:
+        if parent.type in _PP_BRANCHES and parent.child_by_field_name("condition") == child:
+            return True
+        child, parent = parent, parent.parent
+    return False
+
+
+def _live_nodes(root, raw, scope):
+    """Nodes the configuration compiles, with an ``undecided`` flag for ``#if`` arms the macro state cannot decide.
+
+    Inactive arms are skipped entirely (their writes, calls and decisions do not exist in this build); the
+    ``#if`` condition itself is preprocessor arithmetic and never a decision.
+    """
+    out, stack = [], [(root, False)]
+    while stack:
+        n, undecided = stack.pop()
+        if n.type in _PP_BRANCHES:
+            cond, name, alt = n.child_by_field_name("condition"), n.child_by_field_name("name"), n.child_by_field_name("alternative")
+            arm = [c for c in n.named_children if c != cond and c != name and c != alt]
+            verdict = cpc.pp_condition(scope, n, raw)
+            chosen = [] if verdict is False else arm
+            other = [] if verdict is True else ([alt] if alt is not None else [])
+            flag = undecided or verdict is None
+            stack.extend((c, flag) for c in reversed(chosen + other))
+            continue
+        if n.type == "preproc_else":
+            stack.extend((c, undecided) for c in reversed(n.named_children))
+            continue
+        if n.type in _PP_LINES:
+            continue
+        out.append((n, undecided))
+        stack.extend((c, undecided) for c in reversed(n.named_children))
+    return out
+_LOOPS = frozenset({"while_statement", "do_statement", "for_statement"})
+
+
+def _scope_domain(t, typename, scope, source, **extra):
+    """Integer domain of a resolved C type; an enum-typed object ranges over its enumerators (the declared value set)."""
+    lo, hi = cpc.type_range(t)
+    domain = {"min": lo, "max": hi, "type": typename, "source": source, "ctype": t, **extra}
+    if t.get("enum"):
+        enum = (scope.get("enum_types") or {}).get(t["enum"]) or {}
+        values = sorted({scope["constants"][m["name"]]["value"] for m in enum.get("members") or []
+                         if m["name"] in scope["constants"]})
+        if not values or len(values) != len(enum.get("members") or []):
+            raise cpc.Unresolved("enum_values_unresolved:" + t["enum"])
+        domain.update(min=values[0], max=values[-1], values=values)
+    return domain
+
+
+def _scope_type(scope, text):
+    text = " ".join(str(text).split())
+    if text in scope["types"]:
+        return scope["types"][text]
+    if text in scope["unresolved_types"]:
+        raise cpc.Unresolved(scope["unresolved_types"][text])
+    kind = cpc.base_kind(text)
+    if kind is None:
+        raise cpc.Unresolved("type_undeclared:" + text)
+    if kind[1] is None:
+        raise cpc.Unresolved("plain_char_signedness_unknown")
+    return cpc.ctype(kind[0], kind[1], scope["target"]["widths"])
+
+
+def _compile_state(fn, states):
+    """Preprocessor state of a function definition (``None`` = not compiled in this build). Definitions inside a
+    file-level parse-recovery container are events of their own (`cpc._events`), so the lookup is direct."""
+    return states.get(fn.start_byte)
+
+
+def _scoped_source_decisions(unit, scope, declared_domains):
+    """Source path with the translation unit's resolved project scope (typedefs, macros, enumerators, globals).
+
+    Unlike the scope-less path, an unresolved include or ``#define`` elsewhere does not block the function:
+    each decision fails only on what *it* reads, with that identifier's own reason.
+    """
+    source = str(unit.get("source_text") or "")
+    issue = "" if unit.get("source_text_complete", True) else "source_text_incomplete"
+    parser = _make_parser()
+    if parser is None:
+        return [], {}, "source", "", "tree_sitter_unavailable", {}
+    if len(source) > 2_000_000:
+        return [], {}, "source", "", "source_budget", {}
+    raw = source.encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    root = parser.parse(raw).root_node
+    matches = []
+    stack = [root]
+    visited = 0
+    while stack:
+        n = stack.pop()
+        visited += 1
+        if visited > 200000:
+            return [], {}, "source", digest, "source_ast_budget", {}
+        if n.type == "function_definition":
+            if _function_name(n, raw)[0] == unit.get("name"):
+                matches.append(n)
+            continue
+        stack.extend(n.named_children)
+    states = scope.get("main_file_states") if scope.get("main_file_sha256") == digest else None
+    if states is not None and matches:
+        # Definitions the configuration does not compile (inactive ``#if`` arm) are not this function.
+        compiled = [n for n in matches if _compile_state(n, states) is not None]
+        if not compiled:
+            return [], {}, "source", digest, "function_not_compiled_in_configuration", {}
+        matches = compiled
+    if len(matches) != 1:
+        return [], {}, "source", digest, "function_identity_missing_or_ambiguous", {}
+    fn = matches[0]
+    if _has_error(fn):
+        # Errors elsewhere in the file (vendor extensions such as ``__interrupt`` or ``@address``) do not make this
+        # function's tree unreliable; an error inside it does.
+        return [], {}, "source", digest, "source_parse_error", {}
+    if states is not None:
+        if _compile_state(fn, states) == "unknown":
+            issue = issue or "conditional_compilation_unresolved"
+    else:
+        # No preprocessor state for this text (hash mismatch): any enclosing ``#if`` is undecided.
+        ancestor = fn.parent
+        while ancestor is not None:
+            if ancestor.type in _CONDITIONAL_BLOCKS:
+                issue = issue or "conditional_compilation_unresolved"
+                break
+            ancestor = ancestor.parent
+    extra = {"scope": scope, "params": {}, "param_reasons": {}, "locals": set(), "calls": [], "loops": [],
+             "writes": [], "has_goto": False, "effects": scope.get("effects") or {}}
+    macro_bodies = scope.get("macro_bodies") or {}
+    macro_status = scope.get("macro_status") or {}
+    known_functions = (scope.get("effects") or {}).get("functions") or {}
+    tree_macros = (scope.get("effects") or {}).get("macros") or {}
+
+    def macro_writes(name, depth=0):
+        """May expanding this macro write — itself or through a macro it invokes (transitive)?
+
+        A macro whose body this unit cannot pin down (undecided ``#if`` / redefined) is judged by the union of every
+        definition in the tree — the same view the callee closure uses (review round 3 W1)."""
+        if depth > 6:
+            return True
+        if macro_status.get(name) != "active":
+            union = tree_macros.get(name)
+            if union is None or scope.get("missing_includes"):
+                return True
+            return union["writes"] or any(c in macro_status and macro_writes(c, depth + 1) for c in union["calls"])
+        body = macro_bodies.get(name, "")
+        fx = cpc.macro_side_effects(body)
+        if fx["writes"] and "##" in body:
+            return True
+        return fx["writes"] or any(c in macro_status and macro_writes(c, depth + 1) for c in fx["calls"])
+
+    def macro_targets(name, depth=0):
+        """Names an active macro's expansion mentions (object-like aliases expanded); ``*`` if unknowable
+        (undecided/redefined body, or token pasting ``##`` that forms names we cannot see)."""
+        body = macro_bodies.get(name, "")
+        if macro_status.get(name) != "active" or depth > 6 or "##" in body:
+            return {"*"}
+        names = set(re.findall(r"\b[A-Za-z_]\w*\b", body))
+        for inner in [x for x in names if x in macro_status]:
+            names |= macro_targets(inner, depth + 1)
+        return names
+
+    def expand(name):
+        return macro_targets(name) if name in macro_status else {name}
+
+    def record_writes(position, node, names, cause=""):
+        extra["writes"].extend((position, name, node, cause) for name in names)
+    domains = {}
+    _, fdecl = _function_name(fn, raw)
+    params = fdecl.child_by_field_name("parameters")
+    for p in params.named_children:
+        if p.type != "parameter_declaration":
+            continue
+        ident, typ = p.child_by_field_name("declarator"), p.child_by_field_name("type")
+        if ident is None:
+            continue  # ``(void)`` or an unnamed parameter
+        name = cpc._declared_name(ident, raw)
+        extra["params"][name] = ident.type
+        quals = [_text(c, raw) for c in p.named_children if c.type == "type_qualifier"]
+        caller = (declared_domains or {}).get(name)
+        try:
+            if ident.type != "identifier":
+                raise cpc.Unresolved("parameter_not_scalar:" + ident.type.replace("_declarator", ""))
+            if "volatile" in quals:
+                raise cpc.Unresolved("volatile_parameter")
+            t = _scope_type(scope, _text(typ, raw))
+            domains[name] = _scope_domain(t, _text(typ, raw), scope, "source_parameter")
+        except cpc.Unresolved as exc:
+            if ident.type == "identifier" and caller and caller.get("origin") == "parameter" and caller.get("ctype"):
+                domains[name] = dict(caller)
+            else:
+                extra["param_reasons"][name] = str(exc)
+    body = fn.child_by_field_name("body")
+    live = _live_nodes(body, raw, scope)
+    undecided = {(n.start_byte, n.end_byte, n.type) for n, flag in live if flag}
+    nodes = [n for n, _flag in live]
+    # Writes are kept with their position: only a write that can execute before an evaluation rebinds the input
+    # (see `_rebinding_write`). The scope-less path keeps the whole-body set.
+    mutated: set[str] = set()
+    for n in nodes:
+        operand = n.child_by_field_name("left") if n.type == "assignment_expression" else n.child_by_field_name("argument")
+        if n.type in {"assignment_expression", "update_expression"} or (n.type in {"unary_expression", "pointer_expression"} and _text(n, raw).lstrip().startswith("&")):
+            if operand is not None:
+                for x in _walk(operand):
+                    if x.type != "identifier":
+                        continue
+                    # A write target that is a macro writes what it expands to (``G_ALIAS = 0U``).
+                    target = _text(x, raw)
+                    record_writes(n.start_byte, n, expand(target), cause=("macro:" + target) if target in macro_status else "")
+        if n.type == "declaration":
+            for child in n.named_children:
+                name = cpc._declared_name(child, raw) if child.type not in {"type_qualifier", "storage_class_specifier", "primitive_type", "type_identifier", "sized_type_specifier", "struct_specifier", "enum_specifier", "union_specifier"} else ""
+                if name:
+                    extra["locals"].add(name)
+        if n.type in {"goto_statement", "labeled_statement"}:
+            extra["has_goto"] = True
+        if n.type == "call_expression":
+            f = n.child_by_field_name("function")
+            callee = _text(f, raw) if f is not None and f.type == "identifier" else "<indirect>"
+            extra["calls"].append((n.start_byte, callee, n))
+            args = n.child_by_field_name("arguments")
+            if callee in macro_status and macro_writes(callee):
+                # A macro that (possibly through another macro) assigns or takes an address may do it to its
+                # *arguments* (``CLR_BIT(x, 0U)``, ``CLR(v) clr(&(v))``) or to names in its own text: all written.
+                # Argument names are expanded too (``CLR(SELF)`` with ``#define SELF x``, review round 3 C1).
+                written = {t for x in _walk(args) if x.type == "identifier" for t in expand(_text(x, raw))}
+                record_writes(n.start_byte, n, written | macro_targets(callee), cause="macro:" + callee)
+            elif callee not in macro_status and callee not in known_functions and callee != "<indirect>" \
+                    and callee not in (scope.get("prototypes") or ()) and scope.get("missing_includes"):
+                # Declared nowhere we can read, after a missing include: it may be a macro from that header.
+                record_writes(n.start_byte, n, {"*"}, cause="undeclared_after_missing_include:" + callee)
+        if n.type == "identifier" and _text(n, raw) in macro_status and not (
+                n.parent is not None and n.parent.type == "call_expression" and n.parent.child_by_field_name("function") == n):
+            name = _text(n, raw)
+            fx = cpc.macro_side_effects(macro_bodies.get(name, ""))
+            if macro_status[name] != "active" or fx["writes"] or fx["calls"]:
+                # An object-like macro with effects (``CLEAR_FLAG;`` = ``(g_flag = 0U)``, ``ZERO_X`` = ``x = 0U``) or
+                # one whose body is not known is a call site that may write what it names (review C3c, round 2 C1).
+                extra["calls"].append((n.start_byte, name, n))
+                if macro_writes(name):
+                    record_writes(n.start_byte, n, macro_targets(name), cause="macro:" + name)
+        if n.type in _LOOPS:
+            extra["loops"].append((n.start_byte, n.end_byte))
+    def decision_issue(n):
+        return issue or ("conditional_compilation_unresolved" if (n.start_byte, n.end_byte, n.type) in undecided else "")
+    found, seen = [], set()
+    for n in nodes:
+        if n.type in {"if_statement", "while_statement", "do_statement", "for_statement", "conditional_expression"}:
+            c = n.child_by_field_name("condition")
+            if c is not None:
+                found.append((c, raw, decision_issue(n), mutated, n.type))
+                seen.update((x.start_byte, x.end_byte) for x in _walk(c))
+    for n in nodes:
+        if (n.start_byte, n.end_byte) in seen:
+            continue
+        logical = n.type == "binary_expression" and _text(n.child_by_field_name("operator"), raw) in {"&&", "||"}
+        logical |= n.type == "unary_expression" and _text(n.child_by_field_name("operator"), raw) == "!"
+        if logical:
+            found.append((n, raw, decision_issue(n), mutated, "boolean_expression"))
+            seen.update((x.start_byte, x.end_byte) for x in _walk(n))
+    found.sort(key=lambda item: item[0].start_byte)
+    # Globals the decisions read become inputs through their declaration — added before the design-range
+    # narrowing so an SwUDS range applies to them as to parameters. Binding is checked per decision.
+    globals_ = scope.get("globals") or {}
+    extra["global_reasons"] = {}
+    for node, *_ in found:
+        for x in _walk(node):
+            name = _text(x, raw) if x.type == "identifier" else ""
+            if not name or name in domains or name in extra["params"] or name in extra["locals"] or name not in globals_:
+                continue
+            g = globals_[name]
+            try:
+                domains[name] = _scope_domain(g["type"], g["typename"], scope, "global_declaration", origin="global",
+                                              declared_at=f"{os.path.basename(g['file'])}:{g['line']}")
+            except cpc.Unresolved as exc:
+                extra["global_reasons"][name] = str(exc)
+    return found, domains, "source", digest, issue, extra
+
+
+def _identifier_reason(name, extra):
+    """Why a decision identifier has no domain — the specific declaration fact, not a generic miss."""
+    scope = extra.get("scope") or {}
+    if name in extra.get("params", {}):
+        return f"parameter_domain_unresolved:{name}:{extra['param_reasons'].get(name, 'unknown')}"
+    if name in extra.get("locals", set()):
+        return "local_variable_not_input:" + name
+    if name in extra.get("global_reasons", {}):
+        return f"global_domain_unresolved:{name}:{extra['global_reasons'][name]}"
+    if name in (scope.get("unresolved_globals") or {}):
+        return f"global_domain_unresolved:{name}:{scope['unresolved_globals'][name]}"
+    if name in (scope.get("unresolved_constants") or {}):
+        return f"macro_value_unresolved:{name}:{scope['unresolved_constants'][name]}"
+    if name in (scope.get("function_like_macros") or {}):
+        return "function_like_macro:" + name
+    return "identifier_undeclared:" + name + (":partial_context" if scope.get("missing_includes") else "")
+
+
+def _may_precede(event, decision, extra):
+    """Can ``event`` (a write or call node) execute before ``decision`` is evaluated in the same invocation?
+
+    Yes if it is in a loop enclosing the decision (a later iteration), or with ``goto``. Otherwise it must be
+    lexically earlier (or inside the decision) and not in the other arm of an ``if`` whose arm holds the decision
+    — the two arms are exclusive. ``switch`` arms are not treated as exclusive (fall-through)."""
+    if extra.get("has_goto"):
+        return True
+    if any(lo <= decision.start_byte < hi and lo <= event.start_byte < hi for lo, hi in extra.get("loops", [])):
+        return True
+    if event.start_byte >= decision.end_byte:
+        return False
+    ancestor = event.parent
+    while ancestor is not None:
+        if ancestor.type == "if_statement":
+            arms = [ancestor.child_by_field_name("consequence"), ancestor.child_by_field_name("alternative")]
+            spans = [(a.start_byte, a.end_byte) for a in arms if a is not None]
+            event_arm = next((i for i, (lo, hi) in enumerate(spans) if lo <= event.start_byte < hi), None)
+            decision_arm = next((i for i, (lo, hi) in enumerate(spans) if lo <= decision.start_byte < hi), None)
+            if event_arm is not None and decision_arm is not None and event_arm != decision_arm:
+                return False
+        ancestor = ancestor.parent
+    return True
+
+
+def _rebinding_write(name, decision, extra):
+    """Reason a write to ``name`` — or to anything (``*``: an expansion we cannot see) — can run before this
+    evaluation (see `_may_precede`), or ``""``. A ``*`` write names its cause, not the variable (review round 3 W1)."""
+    for _pos, target, node, cause in extra.get("writes", []):
+        if target in (name, "*") and _may_precede(node, decision, extra):
+            if target == "*":
+                return "input_binding_unverified:" + (cause or "unknown_expansion")
+            return "input_modified_before_decision:" + name
+    return ""
+
+
+def _global_binding_issue(name, decision, extra):
+    """Reason the value at the decision may differ from the value set at function entry, or ``""``.
+
+    Callees that can run before this evaluation — lexically earlier calls, calls inside the decision itself, and
+    every call inside a loop that encloses the decision — must not (transitively) write the global; unknown or
+    indirect code might.
+    """
+    scope = extra.get("scope") or {}
+    info = (scope.get("globals") or {}).get(name) or {}
+    if info.get("volatile"):
+        return "volatile_input_unmodeled:" + name
+    if info.get("const"):
+        return "const_object_not_input:" + name
+    effects = extra.get("effects") or {}
+    if name in (effects.get("address_taken") or set()):
+        return "global_address_taken:" + name
+    functions = effects.get("functions") or {}
+    macros = {**(scope.get("macro_bodies") or scope.get("function_like_macro_bodies") or {}),
+              "__status__": scope.get("macro_status") or {}, "__tree__": effects.get("macros") or {},
+              "__missing_includes__": bool(scope.get("missing_includes"))}
+    for _, callee, call in extra.get("calls", []):
+        if not _may_precede(call, decision, extra):
+            continue
+        reason = _callee_writes(callee, name, functions, macros, 0)
+        if reason:
+            return reason
+    return ""
+
+
+def _callee_writes(callee, name, functions, macros, depth):
+    if callee == "<indirect>":
+        return "global_binding_unverified:indirect_call"
+    scope_status = macros.get("__status__", {})
+    if callee in scope_status and scope_status[callee] != "active":
+        # Body undecided in this unit: judge by every definition in the tree (review round 3 W1).
+        union = macros.get("__tree__", {}).get(callee)
+        if union is None or union["writes"] or macros.get("__missing_includes__"):
+            return "global_binding_unverified:macro_body_unknown:" + callee
+        for inner in union["calls"]:
+            reason = _callee_writes(inner, name, functions, macros, depth + 1) if depth < 4 else "global_binding_unverified:depth"
+            if reason:
+                return reason
+        return ""
+    if callee in functions and callee not in macros:
+        # (A macro of the same name is expanded instead of calling the function — review round 3 C1.)
+        info = functions[callee]
+        if name in info["writes"]:
+            return f"global_modified_by_callee:{callee}:{name}"
+        if info["unknown_callees"]:
+            return f"global_binding_unverified:unknown_callee:{sorted(info['unknown_callees'])[0]}"
+        return ""
+    if callee in macros and depth < 4:
+        body = macros[callee]
+        fx = cpc.macro_side_effects(body)
+        if re.search(r"\b" + re.escape(name) + r"\b", body) and fx["writes"]:
+            return f"global_modified_by_callee:{callee}:{name}"
+        if fx["writes"]:
+            # The macro assigns / takes an address (``<<=`` included) — possibly of this global via an argument.
+            return "global_binding_unverified:macro_assignment:" + callee
+        for inner in fx["calls"]:
+            reason = _callee_writes(inner, name, functions, macros, depth + 1)
+            if reason:
+                return reason
+        return ""
+    return "global_binding_unverified:unknown_callee:" + callee
 
 
 def _source_decisions(unit, declared_domains=None):
@@ -297,7 +870,7 @@ def _source_decisions(unit, declared_domains=None):
                     if ident is not None and ident.type == "identifier":
                         mutated.add(_text(ident, raw))
         found = []
-        seen = set()
+        seen = {(x.start_byte, x.end_byte) for x in nodes if _in_preproc_condition(x)}
         for n in nodes:
             if n.type in {"if_statement", "while_statement", "do_statement", "for_statement", "conditional_expression"}:
                 c = n.child_by_field_name("condition")
@@ -366,13 +939,35 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
               "budgets": {"max_candidates": max_candidates, "max_conditions": max_conditions, "max_decisions": max_decisions,
                           # per variable-connected component, and again for the combination of components
                           "max_candidates_scope": "per_component_and_combination"}}
+    extra: dict[str, Any] = {}
     try:
-        found, domains, source_kind, source_hash, issue = _source_decisions(unit, declared_domains)
+        scope_text_matches = bool(unit.get("project_scope")) and unit["project_scope"].get("main_file_sha256") == \
+            hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest()
+        if unit.get("project_scope") and not scope_text_matches:
+            # The scope describes another text of this file: none of its facts may be used (review I5).
+            report["project_context_status"] = "source_text_mismatch"
+        if unit.get("source_text") and scope_text_matches:
+            found, domains, source_kind, source_hash, issue, extra = _scoped_source_decisions(
+                unit, unit["project_scope"], declared_domains)
+        else:
+            found, domains, source_kind, source_hash, issue = _source_decisions(unit, declared_domains)
     except (ValueError, AttributeError, TypeError, RecursionError) as exc:
         # An exception while listing decisions is an enumeration failure too — without this the function
         # vanished from every count (review round 3 W-B).
         found, domains, source_kind, source_hash, issue = [], {}, "unknown", "", f"source_exception:{type(exc).__name__}"
+    scope = extra.get("scope") or {}
+    widths = (scope.get("target") or {}).get("widths") or None
+    constants_map = scope["constants"] if scope.get("constants") is not None else {}  # lazy: empty until asked
     report["domains"] = domains
+    report["constants"] = {}
+    report["types"] = {}
+    def cast_type(text):
+        t = _scope_type(scope, text)
+        report["types"][text] = t
+        return t
+    if widths:
+        # Exact C conversions below rest on this testimony; re-validation (finalize) uses the same widths.
+        report["target"] = {"widths": widths, "basis": "typedef_name_testimony"}
     # Reuse the existing input-domain parser. Only narrow an already explicit
     # declared integer domain; a design range alone cannot invent a C type.
     from generators.suts import enum_bounds, range_bounds
@@ -444,13 +1039,42 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             # first let a symptom such as `unsupported_scalar:call_expression` (``(x) OR (...)``) mask it.
             if context_issue:
                 raise Unsupported(context_issue)
-            ir, atoms, variables, constants = _compile(node, raw, domains)
+            try:
+                ir, atoms, variables, constants = _compile(node, raw, domains, constants_map, widths,
+                                                           cast_type if scope else None)
+            except Unsupported as exc:
+                if extra and str(exc).startswith("missing_declared_domain:"):
+                    raise Unsupported(_identifier_reason(str(exc).split(":", 1)[1], extra)) from exc
+                raise
             decision["conditions"] = [{k: v for k, v in atom.items() if not k.startswith("_")} for atom in atoms]
+            for x in _walk(node):
+                name = _text(x, raw) if x.type == "identifier" else ""
+                if name in constants_map and name not in domains:
+                    c = constants_map[name]
+                    report["constants"][name] = {"value": c["value"], "type": c["type"], "kind": c.get("kind", ""),
+                                                 "declared_at": f"{os.path.basename(c.get('file', ''))}:{c.get('line', '')}"}
             if set(variables) & mutated:
                 raise Unsupported("input_binding_modified_or_shadowed")
-            if set(unit.get("input_vars") or []) - set(domains):
-                raise Unsupported("unit_input_domain_unresolved")
-            if missing := sorted(set(variables) - set(row_names)):
+            for name in variables if extra else []:
+                if name in extra["params"] and name in extra["locals"]:
+                    # A block-scope declaration reuses the parameter's name: which object the decision reads depends
+                    # on scopes this engine does not track (review C3g, MISRA 5.3).
+                    raise Unsupported("identifier_shadowed_by_local:" + name)
+                if reason := _rebinding_write(name, node, extra):
+                    raise Unsupported(reason)
+                if name not in extra["params"] and (reason := _global_binding_issue(name, node, extra)):
+                    raise Unsupported(reason)
+            # An input the decision does not read cannot change its outcome: a missing domain for it (pointer, array,
+            # struct) no longer blocks the decision (R80 carry-over — one pointer parameter blocked every decision of
+            # the function). The vector leaves it unset and says so; the row shows a blank cell, never a guess.
+            if not_designed := sorted(set(row_names) - set(domains)):
+                decision["inputs_not_designed"] = not_designed
+            # Globals resolved from their declaration may join the vector only where no fixed row exists (inventory /
+            # oracle). A SUTS row renders the unit's input columns only: a global outside them would be a hidden input
+            # (R80 review W5; the exporter reports it as `stale_mcdc_pair_input`) — the UDS input list omits it.
+            engine_globals = [v for v in variables if v not in row_names and unit.get("mcdc_free_globals")
+                              and domains[v].get("source") == "global_declaration"]
+            if missing := sorted(set(variables) - set(row_names) - set(engine_globals)):
                 # The row cannot set this variable (not a unit input — cap or I/O renaming): a pair designed on it
                 # would be emitted without its deciding value and then misreported as truncated (R80 review W5).
                 raise Unsupported("decision_variable_not_in_unit_inputs:" + missing[0])
@@ -470,16 +1094,21 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             decision["candidate_space_size"] = size
             decision["domain_exhaustive"] = all(len(values[i]) == domains[name]["max"] - domains[name]["min"] + 1 for i, name in enumerate(variables))
             by_signature, pairs = {}, {}
-            defaults = {name: _default_value(domains[name]) for name in row_names if name in domains}
+            defaults = {name: _default_value(domains[name]) for name in [*row_names, *engine_globals] if name in domains}
+            ub_skipped = [0]
             components, components_complete, decision["component_candidate_count"] = _realizable_truths(
-                atoms, variables, values, defaults, max_candidates)
+                atoms, variables, values, defaults, max_candidates, ub_skipped)
             combined_size = math.prod(len(c) for c in components)
             for parts in itertools.islice(itertools.product(*components), max(0, max_candidates)):
                 inputs = dict(defaults)
                 for part in parts:
                     inputs.update(part)
-                truth, outcome, observed = _evaluate(ir, atoms, inputs)
                 decision["candidate_count"] += 1
+                try:
+                    truth, outcome, observed = _evaluate(ir, atoms, inputs)
+                except cpc.Unresolved:
+                    decision["undefined_behavior_candidates"] = decision.get("undefined_behavior_candidates", 0) + 1
+                    continue
                 bits = sum((1 << i) for i, v in enumerate(truth) if v)
                 row = {"inputs": inputs, "truth": truth, "decision": outcome, "observed": observed}
                 for i in range(len(atoms)):
@@ -501,8 +1130,33 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             decision["pairs"] = [pairs[i] for i in sorted(pairs)]
             decision["search_complete"] = components_complete and decision["candidate_count"] == combined_size
             decision["status"] = "designed" if len(pairs) == len(atoms) else ("partial" if pairs else "no_pair_found")
-            decision["reason"] = "unique_cause_pairs_found" if len(pairs) == len(atoms) else (
-                "no_pair_in_candidate_domain" if decision["search_complete"] else "candidate_budget_exhausted")
+            # A condition identical to another one (same compiled atom) always has the same truth value as its twin:
+            # it can never flip alone, so no unique-cause pair exists for it — a proof, not a failed search
+            # (``A && B || A && C``; masking MC/DC would be needed). Recorded per condition.
+            infeasible = []
+            for i in range(len(atoms)):
+                twin = next((j for j in range(len(atoms)) if j != i and atoms[j]["_atom"] == atoms[i]["_atom"]), None)
+                if i not in pairs and twin is not None:
+                    infeasible.append({"condition_id": f"C{i + 1}", "coupled_with": f"C{twin + 1}",
+                                       "reason": "strongly_coupled_identical_condition"})
+            if infeasible:
+                decision["infeasible_conditions"] = infeasible
+            if not variables:
+                # Every operand is a constant: the decision always has one value (the other outcome is unreachable),
+                # so no condition can show an independent effect.
+                _truth, decision["constant_value"], _observed = _evaluate(ir, atoms, {})
+                decision["reason"] = "unique_cause_infeasible:constant_decision"
+            elif len(pairs) == len(atoms):
+                decision["reason"] = "unique_cause_pairs_found"
+            elif len(pairs) + len(infeasible) == len(atoms):
+                decision["reason"] = "unique_cause_infeasible:coupled_condition"
+            elif ub_skipped[0] or decision.get("undefined_behavior_candidates"):
+                # Every condition is evaluated per candidate, so an input that is undefined only in a condition the
+                # short circuit would skip (``d != 0 && n / d > 3``) is dropped too: not a proof of no pair (review I1).
+                decision["undefined_behavior_candidates"] = decision.get("undefined_behavior_candidates", 0) + ub_skipped[0]
+                decision["reason"] = "no_pair_undefined_behavior_candidates_skipped"
+            else:
+                decision["reason"] = "no_pair_in_candidate_domain" if decision["search_complete"] else "candidate_budget_exhausted"
         except (Unsupported, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
             decision["reason"] = str(exc)
     report["selected_inputs"] = list(selected.values())
@@ -532,8 +1186,11 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
             pair["retained_status"] = "truncated"
             if a is None or b is None:
                 continue
-            va = evaluate_decision(decision["expression"], normalized(a["inputs"]), report["domains"])
-            vb = evaluate_decision(decision["expression"], normalized(b["inputs"]), report["domains"])
+            widths = (report.get("target") or {}).get("widths")
+            va = evaluate_decision(decision["expression"], normalized(a["inputs"]), report["domains"], report.get("constants"),
+                                   widths, report.get("types"))
+            vb = evaluate_decision(decision["expression"], normalized(b["inputs"]), report["domains"], report.get("constants"),
+                                   widths, report.get("types"))
             ci = int(pair["condition_id"][1:]) - 1
             valid = va.get("status") == vb.get("status") == "supported"
             valid = valid and va["decision"] != vb["decision"] and va["observed"][ci] and vb["observed"][ci]

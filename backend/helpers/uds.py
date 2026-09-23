@@ -1445,7 +1445,12 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   않았고 SUTS 기대값 계산·MC/DC 는 전부 `logic_flow`(손실 텍스트)로만 돌았다(R80 실측: 194 결정 전부 source_kind=logic_flow).
 # (R80) v27: 원문을 함수 레코드에서 빼고 최상위 `source_files`(파일당 1회)로 옮겼다. 같은 v26 안에 두 모양(레코드마다 전문
 #   34MB / 파일 맵 3MB)이 공존해 옛 캐시가 히트하면 사이드카에 소스 사본이 다시 실렸다(리뷰 R3 W-A) — 모양이 바뀌면 올린다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v27"
+# (R81) v28: 최상위 `project_context`(typedef 폭 증언·전처리 이벤트·매크로·열거자·전역·함수 쓰기 효과 — P2 R2 MC/DC 가 프로젝트
+#   헤더를 해석하는 입력). 옛 캐시가 히트하면 MC/DC 가 다시 전 결정을 전처리 미해석으로 떨어뜨린다.
+# (R81) v29: 프로젝트 문맥을 문서 범위 필터와 무관하게 루트 전체 `.c/.h` 로 만든다 — v28 캐시는 LIN·include 관리 헤더가 빠진 문맥이다.
+# (R81) v30: project_context 스키마 2(복구 컨테이너 안 이벤트·파일 단위 주소 취득·함수 식별자) — v29 문맥은 옛 모양이다.
+# (R81) v31: project_context 스키마 3(파일별 prototypes).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v31"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -2450,7 +2455,9 @@ def _generate_docx_with_retry(
 
         try:
             # (R80) 원문 맵은 DOCX 단계가 쓰지 않는다 — 산출물 폴더의 임시 파일에 소스 사본을 남기지 않는다.
-            payload_file.write_text(json.dumps({k: v for k, v in stage_payload.items() if k != "source_files"},
+            # (R81) 프로젝트 문맥도 같은 이유로 뺀다(소스에서 다시 만들 수 있는 파생물이고 크다).
+            payload_file.write_text(json.dumps({k: v for k, v in stage_payload.items()
+                                                if k not in ("source_files", "project_context")},
                                                ensure_ascii=False), encoding="utf-8")
             checkpoint.write_text(
                 json.dumps(
