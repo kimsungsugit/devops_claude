@@ -1450,7 +1450,11 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R81) v29: 프로젝트 문맥을 문서 범위 필터와 무관하게 루트 전체 `.c/.h` 로 만든다 — v28 캐시는 LIN·include 관리 헤더가 빠진 문맥이다.
 # (R81) v30: project_context 스키마 2(복구 컨테이너 안 이벤트·파일 단위 주소 취득·함수 식별자) — v29 문맥은 옛 모양이다.
 # (R81) v31: project_context 스키마 3(파일별 prototypes).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v31"
+# (R2b) v32: project_context 스키마 4(전역 배열 차원·const 배열 초기값·함수형 매크로 인자 — 소스 oracle 입력).
+# (R2b) v33: project_context 스키마 5(`build` — `.cproject` 툴체인 include 경로. 트리에 없는 따옴표 include 를 툴체인
+#   헤더로 해석한다 — KJPDS02_PV 는 `hidef.h` 하나 때문에 그 뒤 헤더 전부가 미정이었다).
+# (R2b) v34: project_context 스키마 6(`roots` — APP·BOOT 가 같은 헤더명을 가질 때 include 를 소스 루트별로 해석).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v34"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -1475,7 +1479,8 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
             return None  # U:\ 등 접근 거부(PermissionError) → 로컬 아님 → 디스크캐시 skip
         for dp, _dns, fns in os.walk(rp):
             for fn in fns:
-                if not fn.lower().endswith((".c", ".h")):
+                # ``.cproject`` decides toolchain headers in the project context (R2b review round 5 W-c)
+                if not fn.lower().endswith((".c", ".h")) and fn != ".cproject":
                     continue
                 fpath = Path(dp) / fn
                 try:

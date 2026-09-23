@@ -3503,10 +3503,14 @@ def generate_suts_xlsm(
     evidence_ws = wb.create_sheet("Test Evidence")
     evidence_ws.append(["Function ID", "Function", "Sequence", "Observable", "Expected",
                         "Status", "Oracle", "Execution", "Source SHA256", "Source path", "Reason",
-                        "Test Case ID", "Source hash scope", "Inputs JSON"])
+                        "Test Case ID", "Source hash scope", "Inputs JSON", "Basis", "Assumptions"])
     for cell in evidence_ws[1]:
         cell.font, cell.fill, cell.border = hdr_font, hdr_fill, thin
     evidence_ws.freeze_panes = "A2"
+    # Count rows and address cells by (row, column): openpyxl ``ws.max_row`` and ``ws[row]`` (via ``max_column``) each
+    # scan every cell, quadratic over this loop (KJPDS02_PV: 30+ minutes on this sheet alone).
+    evidence_row = 1
+    evidence_cols = evidence_ws.max_column
     for unit in units:
         for seq in all_sequences.get(unit["fid"], []):
             for var in dict.fromkeys([*(seq.get("expected") or {}), *(seq.get("expected_evidence") or {})]):
@@ -3517,16 +3521,19 @@ def generate_suts_xlsm(
                                     ev.get("execution_status", "not_run"), ev.get("source_hash", ""),
                                     ev.get("source_path", ""), ev.get("reason", "provenance_missing"),
                                     rendered_tc_ids.get(unit["fid"], ""), ev.get("source_hash_scope", ""),
-                                    json.dumps(seq.get("inputs") or {}, ensure_ascii=False, sort_keys=True)])
-                for cell in evidence_ws[evidence_ws.max_row]:
+                                    json.dumps(seq.get("inputs") or {}, ensure_ascii=False, sort_keys=True),
+                                    # (R2b) assigned vs unchanged_input, and what a derived value rests on
+                                    ev.get("basis", ""), "; ".join(ev.get("assumptions") or ())])
+                evidence_row += 1
+                for cell in (evidence_ws.cell(evidence_row, c) for c in range(1, evidence_cols + 1)):
                     cell.font = data_font
                     # Treat all provenance strings as text, including paths/IDs
                     # beginning with spreadsheet formula characters.
                     if isinstance(cell.value, str):
                         cell.data_type = "s"
     evidence_ws.auto_filter.ref = evidence_ws.dimensions
-    for col in "ABCDEFGHIJKLMN":
-        evidence_ws.column_dimensions[col].width = 24 if col not in "IJK" else 48
+    for col in "ABCDEFGHIJKLMNOP":
+        evidence_ws.column_dimensions[col].width = 24 if col not in "IJKP" else 48
     _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, thin, hdr_fill, hdr_font, data_font)
 
     # --- Remove default sheet if we created new workbook ---
@@ -3576,7 +3583,6 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                       decision.get("source_kind", ""), decision.get("source_hash", ""),
                       "yes" if decision.get("search_complete") else "no", "not_run", "unverified"]
             pairs = decision.get("pairs") or []
-            first_row = ws.max_row + 1
             if not pairs:
                 # 쌍 없는 결정도 한 행 — 빠지면 "MC/DC 설계 완료" 로 오독된다(분모에서 사라진다).
                 ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), "", "", "", "", "", "", "",
@@ -3595,11 +3601,12 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                            inputs[0], inputs[1], _truth(pair.get("truth_a")), _truth(pair.get("truth_b")),
                            "T" if pair.get("decision_a") else "F", "T" if pair.get("decision_b") else "F", retained,
                            *common])
-            for row_cells in ws.iter_rows(min_row=first_row, max_row=ws.max_row):
-                for cell in row_cells:
-                    cell.font = data_font
-                    if isinstance(cell.value, str):
-                        cell.data_type = "s"   # 식·JSON 이 `=`·`-` 로 시작해도 수식으로 읽히지 않게
+    # 한 번에 서식 — 결정마다 ``ws.max_row``(= 전 셀 ``max``)를 부르면 결정 수 × 셀 수로 커진다
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.font = data_font
+            if isinstance(cell.value, str):
+                cell.data_type = "s"   # 식·JSON 이 `=`·`-` 로 시작해도 수식으로 읽히지 않게
     ws.auto_filter.ref = ws.dimensions
     for idx, _ in enumerate(_MCDC_HEADERS, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = 40 if idx in (8, 9, 15, 17, 19) else 16

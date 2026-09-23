@@ -515,9 +515,18 @@ def _build_project_context(source_text_cache: Dict[str, str], read_truncated: Li
                         texts[key] = text
                     else:
                         unread.append(key)
+    cprojects: Dict[str, str] = {}
+    if read is not None:
+        for root in roots or ():
+            try:
+                text = read(Path(root) / ".cproject")
+            except (OSError, ValueError, PermissionError):
+                text = ""
+            if text:
+                cprojects[str(Path(root) / ".cproject")] = text
     try:
-        from generators.c_project_context import build_project_context
-        context = build_project_context(texts)
+        from generators.c_project_context import build_project_context, detect_build_config
+        context = build_project_context(texts, detect_build_config(cprojects), roots=[str(r) for r in roots or ()])
     except (ImportError, ValueError, RecursionError, AttributeError, TypeError) as exc:
         _logger.warning("프로젝트 C 문맥 생성 실패 — MC/DC 는 프로젝트 헤더를 해석하지 못한다: %s", exc)
         return {"status": f"build_failed:{type(exc).__name__}"}

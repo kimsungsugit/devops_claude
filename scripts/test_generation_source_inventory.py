@@ -17,6 +17,43 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def _oracle_probe(unit: dict, fn, raw: bytes) -> dict:
+    """(R2b) Source oracle capability on one probe vector: every parameter and every modeled object the body names
+    set to 0 (in range for every integer type). Outputs: the return value and every modeled object the body writes.
+    One vector says what the oracle *can* derive, not what a document's sequences will get."""
+    from generators.c_project_context import _function_effects
+    from generators.c_source_oracle import evaluate_outputs
+    from generators.mcdc_design import _function_name
+    scope = unit["project_scope"]
+    fx = _function_effects(fn, raw)
+    _name, fdecl = _function_name(fn, raw)
+    inputs = {}
+    for prm in fdecl.child_by_field_name("parameters").named_children if fdecl is not None else []:
+        d = prm.child_by_field_name("declarator")
+        if d is not None and d.type == "identifier":
+            inputs[raw[d.start_byte:d.end_byte].decode("utf-8", errors="replace")] = 0
+    arrays, globals_ = scope.get("arrays") or {}, scope.get("globals") or {}
+    for name in set(fx["idents"]) | set(fx["writes"]):
+        if name in globals_:
+            inputs[name] = 0
+        elif name in arrays and arrays[name].get("length"):
+            inputs.update({f"{name}[{k}]": 0 for k in range(arrays[name]["length"])})
+    rtype = raw[fn.child_by_field_name("type").start_byte:fn.child_by_field_name("type").end_byte].decode("utf-8", errors="replace")
+    outputs = [] if rtype.strip() == "void" else ["return"]
+    for name in fx["writes"]:
+        if name in arrays and arrays[name].get("length"):
+            outputs.extend(f"{name}[{k}]" for k in range(arrays[name]["length"]))
+        else:
+            outputs.append(name)
+    result = evaluate_outputs(unit, [inputs], [outputs])[0]
+    slots = result["outputs"].values()
+    return {"status": result["status"], "reason": result.get("reason", ""), "outputs": len(outputs),
+            "derived": sum("value" in v for v in slots),
+            "assigned": sum(v.get("basis") == "assigned" for v in slots),
+            "possible_undefined_behavior": result.get("possible_undefined_behavior") or [],
+            "unknown_reasons": dict(Counter(v["reason"].split(":", 1)[0] for v in slots if "reason" in v))}
+
+
 def inventory(source_root: Path, project_context: bool = True) -> dict:
     from generators.c_project_context import build_project_context, build_scopes
     from generators.mcdc_design import build_mcdc_design
@@ -27,14 +64,19 @@ def inventory(source_root: Path, project_context: bool = True) -> dict:
         raise RuntimeError("tree_sitter_unavailable")
     scopes, context = {}, None
     if project_context:
-        texts = {}
+        texts, unread = {}, []
         for path in sorted(source_root.rglob("*")):
             if path.suffix.lower() in (".c", ".h") and path.is_file():
                 try:
                     texts[str(path.resolve())] = path.read_bytes().decode("utf-8")
                 except UnicodeDecodeError:
-                    continue  # an incompletely decoded file is not authoritative context
-        context = build_project_context(texts)
+                    unread.append(str(path.resolve()))  # not authoritative context — and not a toolchain header
+        from generators.c_project_context import detect_build_config
+        cproject = Path(source_root) / ".cproject"
+        build = detect_build_config({str(cproject): cproject.read_text(encoding="utf-8", errors="replace")}
+                                    if cproject.is_file() else {})
+        context = build_project_context(texts, build)
+        context["incomplete_files"] = unread
         scopes = build_scopes(context, [p for p in texts if p.lower().endswith(".c")])
     files, functions = [], []
     for path in sorted(source_root.rglob("*.c")):
@@ -80,8 +122,11 @@ def inventory(source_root: Path, project_context: bool = True) -> dict:
                     if str(path.resolve()) in scopes:
                         unit["project_scope"] = scopes[str(path.resolve())]
                     report = build_mcdc_design(unit)
-                    functions.append({"path": str(path.resolve()), "function": unit["name"],
-                                      "line": node.start_point[0] + 1, "design": report})
+                    record = {"path": str(path.resolve()), "function": unit["name"],
+                              "line": node.start_point[0] + 1, "design": report}
+                    if unit.get("project_scope"):
+                        record["oracle"] = _oracle_probe(unit, node, raw)
+                    functions.append(record)
             for child in node.named_children:
                 visit(child)
         visit(root)
@@ -115,7 +160,28 @@ def inventory(source_root: Path, project_context: bool = True) -> dict:
                             for d in located),
                         "reason_category_counts": dict(Counter(str(d.get("reason", "")).split(":", 1)[0]
                                                                for d in decisions if d.get("reason")).most_common()),
-                        "reason_counts": dict(reasons.most_common())}}
+                        "reason_counts": dict(reasons.most_common()),
+                        "source_oracle": _oracle_summary(functions)}}
+
+
+def _oracle_summary(functions: list[dict]) -> dict | None:
+    probes = [f["oracle"] for f in functions if "oracle" in f]
+    if not probes:
+        return None
+    unknown: Counter = Counter()
+    for probe in probes:
+        unknown.update(probe["unknown_reasons"])
+    return {"probe": "one vector per function: every parameter and named modeled object = 0",
+            "functions": len(functions), "probed": len(probes),
+            "functions_with_derived_output": sum(p["derived"] > 0 for p in probes),
+            "functions_with_assigned_derived_output": sum(p["assigned"] > 0 for p in probes),
+            "functions_without_outputs": sum(p["outputs"] == 0 for p in probes),
+            "functions_unsupported": sum(p["status"] != "supported" for p in probes),
+            "function_unsupported_reasons": dict(Counter(p["reason"].split(":", 1)[0] for p in probes
+                                                         if p["status"] != "supported").most_common()),
+            "outputs": sum(p["outputs"] for p in probes), "outputs_derived": sum(p["derived"] for p in probes),
+            "outputs_assigned": sum(p["assigned"] for p in probes),
+            "output_unknown_reasons": dict(unknown.most_common())}
 
 
 def main():

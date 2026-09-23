@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from generators.c_source_oracle import evaluate_outputs, scope_matches
 from generators.c_test_semantics import evaluate_function_inputs
 
 VERIFY_PREFIX = "[검증 필요]"
@@ -17,20 +18,36 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
     source = str(unit.get("source_text") or "")
     if not unit.get("source_text_complete", True):
         source = ""
-    results = evaluate_function_inputs(source, str(unit.get("name") or ""), [s.get("inputs") or {} for s in sequences]) if source else [
-        {"status": "unsupported", "reason": unit.get("source_unavailable_reason") or "authoritative_source_missing"} for _ in sequences]
-    for seq, evaluated in zip(sequences, results, strict=True):
+    output_lists = [list(dict.fromkeys([*(unit.get("output_vars") or []), *(s.get("expected") or {}),
+                                        *(s.get("ai_expected_candidates") or {})])) for s in sequences]
+    scoped = bool(source) and scope_matches(unit)
+    # A project scope of another text (edited file, normalized line ends) is never used — say so (R2b review I1).
+    scope_note = "project_scope_mismatch" if source and unit.get("project_scope") and not scoped else ""
+    if scoped:
+        # (R2b) Project-context oracle: every output — globals, array elements, return — for the whole function.
+        results = evaluate_outputs(unit, [s.get("inputs") or {} for s in sequences], output_lists)
+    elif source:
+        results = evaluate_function_inputs(source, str(unit.get("name") or ""), [s.get("inputs") or {} for s in sequences])
+    else:
+        results = [{"status": "unsupported", "reason": unit.get("source_unavailable_reason") or "authoritative_source_missing"}
+                   for _ in sequences]
+    for seq, evaluated, outputs in zip(sequences, results, output_lists, strict=True):
         old = seq.get("expected") or {}
         candidates = seq.setdefault("expected_candidates", {})
         for key, value in old.items():
             if not str(value).startswith(VERIFY_PREFIX) and not (seq.get("expected_evidence") or {}).get(key):
                 candidates.setdefault(key, value)
-        outputs = list(dict.fromkeys([*(unit.get("output_vars") or []), *old, *(seq.get("ai_expected_candidates") or {})]))
         expected, evidence = {}, {}
         for var in outputs:
-            derived = var == "return" and evaluated["status"] == "supported"
+            if scoped:
+                slot = (evaluated.get("outputs") or {}).get(var) or {"reason": evaluated.get("reason", "unsupported_output_binding")}
+                derived, value = "value" in slot, slot.get("value")
+                reason = evaluated.get("reason", "") if derived else slot.get("reason", "unsupported_output_binding")
+            else:
+                derived = var == "return" and evaluated["status"] == "supported"
+                value = evaluated.get("value")
+                reason = evaluated.get("reason", "unsupported_output_binding") if var == "return" else "unsupported_output_binding"
             ai = (seq.get("ai_expected_candidates") or {}).get(var)
-            reason = evaluated.get("reason", "unsupported_output_binding") if var == "return" else "unsupported_output_binding"
             item = {"status": "derived" if derived else ("proposed" if ai is not None else "unknown"),
                     "oracle_kind": "source" if derived else ("ai" if ai is not None else "none"),
                     "reason": reason, "execution_status": "not_run",
@@ -39,10 +56,17 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                     "source_path": str(unit.get("source_path") or ""),
                     "function_name": str(unit.get("name") or ""),
                     "requirement_verified": False}
+            if scoped and derived:
+                item["basis"] = slot.get("basis", "")
+                item["assumptions"] = list(evaluated.get("assumptions") or ())
+            if scope_note:
+                item["project_scope"] = scope_note
+                if not derived:
+                    item["reason"] = f"{scope_note};{reason}"
             # Preserve intentionally omitted unknown-type/pointer value cells;
             # provenance still records that observable as unresolved.
             if derived or var in old or var in (seq.get("ai_expected_candidates") or {}):
-                expected[var] = evaluated["value"] if derived else f"{VERIFY_PREFIX} {reason}"
+                expected[var] = value if derived else f"{VERIFY_PREFIX} {reason}"
             evidence[var] = item
         seq["expected"], seq["expected_evidence"] = expected, evidence
         seq["execution_status"] = "not_run"
@@ -58,10 +82,17 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
 
 def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, int]:
     """Count all expected slots, treating absent provenance as unrecorded."""
-    counts = {"derived": 0, "unknown": 0, "proposed": 0, "unrecorded": 0, "total": 0}
+    counts = {"derived": 0, "unknown": 0, "proposed": 0, "unrecorded": 0, "total": 0,
+              # (R2b) ``derived`` split: a value the function assigned vs an output it left as the sequence set it.
+              "derived_assigned": 0, "derived_unchanged_input": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
-            status = (seq.get("expected_evidence", {}).get(var) or {}).get("status", "unrecorded")
-            counts[status if status in counts and status != "total" else "unrecorded"] += 1
+            item = seq.get("expected_evidence", {}).get(var) or {}
+            status = item.get("status", "unrecorded")
+            counts[status if status in {"derived", "unknown", "proposed"} else "unrecorded"] += 1
             counts["total"] += 1
+            if status == "derived" and item.get("basis") == "unchanged_input":
+                counts["derived_unchanged_input"] += 1
+            elif status == "derived":
+                counts["derived_assigned"] += 1
     return counts

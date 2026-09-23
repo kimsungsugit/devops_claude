@@ -33,14 +33,28 @@
 |---|---|---|---|
 | R1 | MC/DC 엔진 SUTS 배선 + "MCDC Design" 시트 + 성분 탐색 | P2 | 완료(아래 R1 기록) — 실소스 적용률 0, R2 로 |
 | R2 | 실소스 도메인 해석(프로젝트 typedef·정수 `#define`·헤더 전역, 함수 노드 한정 파싱, 16bit int) | P2/G3 | 완료(아래 R2 기록) — G3 복합 61.1% 충족, G2 는 R2b 로 분리 |
-| R2b | 소스 oracle(`c_test_semantics`)을 프로젝트 문맥 위로 — 전역 출력·매크로·16bit 산술, 값 전파(지역변수·결정 전 갱신) | P1/G2 | 대기 |
-| R3 | 정본 revision 정합(`svn log`+export to `.codex_tmp`) + 정본 벡터/판정값 파서 | P0 | 대기 |
+| R2b | 소스 oracle 을 프로젝트 문맥 위로 — 전역 출력·매크로·16bit 산술·callee 효과·경로 분기(`generators/c_source_oracle.py`) + clang 독립 대조 | P1/G2 | 완료(아래 R2b 기록) — G2 충족(반증 0 · 함수 43.5%) |
+| R2c | MC/DC 지역변수 값 전파·결정 전 입력 갱신(oracle 의 경로 상태를 결정식 평가에 재사용) | P2/G3 | 대기 |
+| R3 | ~~`svn log`+export~~ → **오프라인 정합**(SVN 접근 불가, 2026-09-24): 정본 SUTS 입력 벡터를 현재 소스에 oracle 로 재평가 → 정본 기대값과 일치/불일치를 함수별로 분류해 정합 함수 범위를 추정 + 정본 벡터/판정값 파서 | P0 | 대기 |
 | R4 | mutation harness(gcc·등가 mutant 판정) + 버그수정 replay → G1·G2 기준선 | P0/P6 | 대기 |
 | R5 | 요구 정량 모델 `generators/requirement_oracle.py` + gold set | P3 | 대기 |
 | R6 | STS 적용(임계±분해능·duration±δ·부정 시나리오, "Requirement Evidence" 시트) | P3 | 대기 |
 | R7 | SITS 인터페이스 계약(인자 바인딩·전역 producer→consumer·오류 전파·타이머, "Interface Evidence" 시트) | P4 | 대기 |
 | R8 | SITS fixture 실행 + fault 판별(G5) | P4 | 대기 |
 | R9 | API/UI/품질 보고 연결 + HDPDM01 우월성 보고(정합 함수 범위만) | P5/P6 | 대기 |
+| R10~R14 | 정본에 없는 기능·성능(아래 "정본 초과 후보") | P5/P6 | 대기 |
+
+### 정본 초과 후보 (나중 라운드, 2026-09-24 사용자 방향)
+
+> 정본과 같은 형식을 재현하는 데 그치지 않는다. 정본보다 나은 기능·성능이 있으면 그것을 목표로 삼는다. 아래 항목은 전부 **이미 엔진이 알고 있는데 문서로 나가지 않는 정보**이거나 실측으로 확인된 병목이다.
+
+| 라운드 | 내용 | 근거(실측) | 통과 조건 |
+|---|---|---|---|
+| R10 소스 소견 시트 | oracle·MC/DC 가 이미 판정하는 결함 후보를 "Source Findings" 시트로 낸다: 입증된 UB 경로, 미지 입력에서 가능한 부호 오버플로, 비순차 접근, dangling else·다문장 매크로, 부동소수 정밀도 의존 문턱, 구성 의존 `#if`, UDS 입력 누락 후보. 정본은 시험 명세만 담는다 | HDPDM01 Test Evidence `undefined_behavior` 338칸, `u16s_MAGNET_ERR_UPPER_LIMIT` 473/474, `s_DoorStopCaseCheck` −32768−90(_pv, clang 재현) | 소견마다 clang 재현 증거 또는 "재현 불가" 사유. 오탐률 공개 |
+| R11 기대값 host 실행 입증 | derived 벡터를 host 에서 컴파일·실행해 `not_run` → `host_executed` 로 올린다(ECU 실행과 구분). VectorCAST 패키지에 근거와 함께 싣는다 | 지금은 clang 상수 평가 대조만 있다(실행 아님) | 실행 결과와 불일치 0, 실행 못 한 이유 공시 |
+| R12 변경 영향 재계산 | 소스 해시가 바뀐 함수만 oracle 로 재평가 → 기대값이 바뀐 TC 목록 = 회귀 영향. SVN 없이 로컬 스냅샷 해시로 동작 | Test Evidence 에 함수별 `Source SHA256` 이 이미 있다 | 합성 변경에서 영향 TC 누락 0 |
+| R13 생성 성능 가드 | 생성 시간을 측정 지표로 고정(HDPDM01 ≤ 90초 · KJPDS02_PV ≤ 240초, 소스 캐시 hit 기준) + openpyxl 전 셀 스캔 호출(`ws.max_row`/`ws[row]`) 재발 가드 | R2b 에서 Test Evidence 시트가 이차 비용이었다(아래 기록) | 회귀 시 실패하는 가드 |
+| R14 G2 확장 | 최대 미상 사유 해소: callee 포인터 쓰기를 인자 별칭으로 좁힘, callee 효과 요약(summary) 합성, 호출 반환값 전파 | 미상 1위 `callee_pointer_write` HDPDM01 12,082칸 · _pv 7,593칸, `callee_effects_unknown` _pv 7,140칸 | 반증 0 유지, 함수 비율 상승 |
 
 정본 STS·SITS 는 HIL/CANoe 를 전제로 하므로 PC 에서 실행할 수 없다. 그래서 정본과 생성본 모두 "어떤 fault 를 판별하는가"라는 같은 기준으로 주석 채점한다. 실행 비교는 SUTS 벡터만 한다.
 
@@ -139,4 +153,49 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
 - **이월(추적 경고)**: R4-W1 — callee 가 **레지스터 매크로**(`PTP_PTP7` 등 volatile 비트필드)에 쓰면 그 뒤 모든 전역 읽기가 `unknown_callee:macro_write:*` 로 과잉 거부된다(실소스 9건, 틀린 쌍 아님). 쓰기 대상을 매크로 정의 합집합으로 펼치면 풀린다. `pp_assumptions` 는 아직 SUTS 품질 리포트에 노출되지 않는다. 다음 역량 증가는 바인딩이 아니라 **지역변수 값 전파(159)·결정 전 갱신(112)·레지스터 필드(34)** 쪽이다.
 - **G2 미달(이월 R2b)**: Test Evidence derived 는 여전히 0 — 기대값 소스 oracle(`c_test_semantics`)이 전처리가 있는 코드를 거부하고 반환값만 모델링한다(실 함수 대부분은 전역 출력의 void 함수). 전역 출력·값 전파가 필요해 별도 라운드로 뗐다.
 
-다음 구현은 R2b(소스 oracle 문맥 확장 — G2) 또는 R3(정본 revision 정합)이다. P3 정량 요구 oracle, P4 통합 상태·시간·오류 전파, P5 UI 근거 표시와 실 프로젝트 비교는 계속 남아 있다.
+## R2b 기록 — 소스 oracle 을 프로젝트 문맥 위로 (2026-09-24, R82)
+
+- **엔진** `generators/c_source_oracle.py`(신규): 16비트 int C11 의미(`cpc` 의 `arith`·`convert`·`promote`·`usual_conversion`)로 함수 본문을 해석한다. 미상 값은 사유를 달고 다닌다. 미상 조건에서는 경로를 나눠 모든 경로가 같은 값일 때만 확정한다. 출력 근거는 `assigned`(어느 경로가 썼음)와 `unchanged_input`(아무도 안 써서 입력 그대로)으로 나눈다. 뒤쪽이 앞쪽을 부풀리지 않게 하려는 것이다. 입증된 UB 는 평가 전체를 거부한다. 가능한 UB 는 `possible_undefined_behavior` 로 공시한다. callee 효과는 프로젝트 쓰기 폐포로 havoc 한다. 포인터 쓰기는 배열·주소 취득 객체·탈출 지역만 havoc 하고, 미상 callee 는 static 지역까지 전부 havoc 한다. 재귀는 `reaches` 로 추적한다. enum 객체는 int·unsigned int·signed char·unsigned char 네 기반 타입이 모두 같은 값일 때만 확정한다. 순서점은 LCA 기준 비순차 접근·별칭·포인터 쓰기 충돌로 검사하고, 순서 의존 식 안의 매크로도 본다. 경로와 무관한 전처리 위험(선언자로 쓰인 매크로명, 중괄호 없는 본문의 다문장 매크로, dangling else, 함수 뒤에 정의된 매크로)은 선검사한다.
+- **배선**: `test_evidence` 는 `scope_matches`(스키마 = `cpc.SCHEMA_VERSION` + sha256 일치)일 때 새 엔진을 쓰고, 아니면 기존 `c_test_semantics` 를 쓴다. 범위가 다르면 `project_scope_mismatch` 로 공시한다. Test Evidence 시트에 O `Basis` · P `Assumptions` 열을 추가했다. 가정에는 툴체인 헤더와 typedef 폭 증언이 들어간다. 요약에 `derived_assigned`·`derived_unchanged_input` 을 추가했다. 문맥 스키마 6, 소스 캐시 v34(`.cproject` 가 서명에 들어감).
+- **문맥 결함 (KJPDS02_PV 에서 발견)**: ① 미정 영역에서 `#if` 를 평가하지 않아 매크로 5,933 개 중 5,923 개가 미상이었다. ② `hidef.h` 같은 툴체인 헤더가 누락 include 로 처리됐다. 그래서 `.cproject` 의 `${MCUToolsBaseDir}…/include` 를 근거로 삼되, 트리에 같은 이름이 0 개이고 미완독 파일이 없으며 `.h` 이고 파일 상한에 걸리지 않았을 때만 툴체인 헤더로 인정한다(R5 리뷰 C-A/C-B). ③ APP(NE1AW_PORTING)와 FBL(PDS128_FBL)이 `lin.h`·`EEPROM.h` 를 둘 다 가져 모호해졌다. 그래서 include 를 소스 루트별로 해석한다(`roots`).
+- **clang 독립 대조** `scripts/source_oracle_clang_check.py`(신규): 생성된 xlsm 의 derived 주장마다 C++20 constexpr 하네스를 만들어 `--target=msp430` 로 컴파일한다. 비입력 상태는 0·90·201 세 가지로 채우고, enum 기반 타입 4 종을 모두 쓴다. canary `static_assert` 로 하네스가 실제로 평가하는지 확인하고, `-Werror=unsequenced` 를 켠다. stub callee 에 기대 일치한 주장은 따로 센다. 불일치나 평가 오류가 있으면 종료 코드 1 이다. 하네스는 엔진의 전처리 판정(활성 매크로·본문)을 재사용하므로, 전처리 판정이 틀려도 동의해 버린다(docstring 에 한계로 명시).
+- **실측 — 반증 0 (G2 첫 지표)**:
+
+| 프로젝트 | derived / 전체 칸 | assigned · unchanged_input | derived 함수 | clang 확인 · 일치 · 불일치 | 미확인(사유) |
+|---|---|---|---|---|---|
+| HDPDM01 (339 TC · 3,493 시퀀스) | **6,489** / 29,044 (R2: 0) | 5,644 · 845 | **188** / 432 = **43.5%**(assigned 178 = 41.2%) | 5,717 · 5,717 · **0** (stub callee 2,493) | 772 — 하네스 컴파일 542(툴체인 헤더의 레지스터 매크로 `PWM1PER1` 등 · C++ enum 전방 참조) · constexpr 한도 230 |
+| KJPDS02_PV (933 TC · 8,805 시퀀스, APP+FBL) | **7,612** / 46,027 | 6,715 · 897 | 332 / 860 (증거 시트 기준) | 6,539 · 6,539 · **0** (stub 1,541) | 1,073 — 하네스 컴파일 845 · constexpr 한도 178 · 단위에서 비활성 매크로 39 · 가능 UB 공시 11 |
+
+  인벤토리(함수마다 0 벡터 1 개로 probe, 소스 전체): HDPDM01 **232/432**(assigned 196). KJPDS02_PV APP 는 30 → **339/953**(assigned 295). MC/DC 는 HDPDM01 복합 151/247(61.1%, R2 와 같음), KJPDS02_PV APP 설계 25 → 447, 복합 83/361. **G2 '함수 ≥35%' 충족**(HDPDM01 43.5%, 전체 432 분모). 미상 1 위는 `callee_pointer_write`(HDPDM01 12,082칸 · _pv 7,593칸)이고, _pv 는 `callee_effects_unknown` 7,140칸이 뒤를 잇는다. 둘 다 R14 로 넘긴다.
+- **clang 이 찾은 엔진 결함**: `s_DoorStopCaseCheck`(`Ap_DoorCtrl_PDS.c`)의 `s16g_ApiIn_Pos50Deg - s16t_Position_100` 은 두 번째 항이 미상 callee 반환값이다. −32768 − 90 에서 16 비트 int 가 넘친다(UB). 그런데도 뒤쪽 무조건 대입이 "정의된 실행"으로 확정되고 있었다(clang 평가 오류 4 건). 원인은 미상 피연산자가 있는 부호 `+ - *` 가 나눗셈·시프트와 달리 가능 UB 를 기록하지 않은 것이다.
+  - 고친 규칙: 피연산자 **범위로 넘칠 수 있을 때만** `signed_overflow_unknown_operand` 로 공시한다. `U8+U8` 은 16 비트 int 를 못 넘으므로 공시하지 않는다.
+  - 범위의 출처: 미상 값의 구간은 식 값(`_Val.r`)에 두고, 명시적으로만 붙인다. 붙는 곳은 캐스트(`(S32)s16 * 2L` 은 공시 안 함), 넘칠 수 없음이 증명된 산술, 저장했다 다시 읽은 값이다.
+  - 구간을 믿는 조건: 읽는 타입의 범위 안에 들어갈 때만 믿는다. 그래서 `U8 = [-128,127]` 처럼 wrap 할 수 있는 변환 뒤에는 타입 범위로 돌아간다.
+  - 타입을 모르는 피연산자: 호출 반환값이나 미해석 매크로는 `signed_overflow_untyped_operand`, 포인터는 `pointer_arithmetic_untyped` 로 공시한다. `sizeof` 는 `size_t` 가 부호 없는 타입이므로 int 이하와의 연산에서 공시하지 않는다.
+  - 검사기도 좁혔다: clang 평가 오류는 **공시된 종류가 그 오류 문구를 설명할 때만** "가능 UB 공시"로 넘기고, 나머지는 반증으로 남긴다(fail-closed).
+  - 결과: 공시 뒤 _pv 평가 오류 4 → 0.
+- **숨은 성능 결함 (P1 부터)**: Test Evidence 시트를 쓸 때 행마다 `ws.max_row` 와 `ws[row]` 를 불렀다. openpyxl 은 둘 다 전 셀 `max()` 로 계산하므로 행 수에 대해 이차 비용이다. HDPDM01 은 이 시트만 735 초가 걸렸고, KJPDS02_PV 는 30 분이 넘도록 끝나지 않았다. 지금은 행 번호를 직접 세고 `ws.cell(r, c)` 를 쓴다. MC/DC 시트는 한 번에 서식을 입힌다. 소스 캐시 hit 기준 전체 생성 시간은 **HDPDM01 786 → 89 초**, **KJPDS02_PV 미완료 → 236 초**다(두 프로젝트 동시 실행 기준. 부하가 덜할 때는 67 초 · 179 초). R1 의 851 초와 R2 의 479 초에도 이 비용이 들어 있었다.
+- **리뷰**: deep-reviewer 8 라운드. 반례는 전부 테스트로 남겼다(`test_c_source_oracle` ~150, `test_c_project_context` 추가분). 라운드별 결함은 아래와 같고 전부 수정했다.
+  - R1: 순차 매크로 치환, speculative 상태 유실, 초기화자 항목, 괄호 포인터 쓰기, 매크로 `&`, static, 순서점, enum `?:`, 다문장 매크로, switch 스코프. 검사기 쪽은 CRLF·enum·stub 공시.
+  - R2: 비활성 매크로 쓰기, 확장 순서점, 검사기 fake-green(canary 도입).
+  - R3: 매크로 재귀, 중첩 매크로, 깊은 dangling else, 함수 포인터 callee, `&(x)`, 전이 주소 매크로, 매크로명 선언자.
+  - R4: LHS 매크로 순서점, typedef 포인터, 포인터 배열, id 재사용, 중첩 확장 선검사, typedef 캐스트, 함수 뒤 매크로, 문자 리터럴, 리터럴 치환, 블록 섀도.
+  - R5: 모호하거나 미완독인 헤더를 툴체인으로 오분류.
+  - R6(가능 UB 델타): 연산자가 피연산자의 `Unknown` 객체를 결과로 재사용해 **다른 값의 구간**을 믿었다(`((S16)u8 | 0x7F00) + 32000` 미공시). 타입 없는 피연산자(호출 반환값)는 검사 전에 빠져나갔다. → 구간을 공유 객체에서 식 값으로 옮기고, 타입 미상 공시를 추가했다.
+  - R7: havoc 이 "먼저 온 구체적 사유 유지"를 하면서 구간까지 남겼다(`g = (S16)u8; ext(); g * 100` 미공시). `sizeof`·포인터가 부호 오버플로로 과잉 공시됐다. 검사기가 공시가 하나라도 있으면 모든 평가 오류를 넘겼다. → havoc 은 구간을 벗기고, 태그를 분리하고, 검사기는 오류 문구로 대조한다.
+  - R8: R7 수정이 LGTM 이다(havoc 세 곳 각각을 뮤테이션하면 테스트가 실패). 남은 Warning 은 검사기 정규식의 `shift` 가 clang 출력 속 함수 이름 `do_shift` 에도 걸리는 것이었다. clang 의 시프트 진단 문구로 좁혔다.
+- **검증**:
+  - 테스트: `test_c_source_oracle` + `test_c_project_context` 235 passed. 가드 뮤테이션은 구간 신뢰 · 캐스트 구간 · 저장 시 벗김 · 연산자 전달 · 로드 lift · havoc 3 곳 · sizeof 면제를 각각 검출했다.
+  - 최종 생성본 clang 대조: HDPDM01 불일치 0 · 평가 오류 0, KJPDS02_PV 불일치 0 · 평가 오류 0(가능 UB 공시로 넘긴 것 11).
+  - 가능 UB 공시가 붙은 derived 칸(오류 문구와 대조해 통과): HDPDM01 `signed_overflow_unknown_operand` 122. KJPDS02_PV 는 `division_by_unknown` 142 · `signed_overflow_unknown_operand` 122 · `signed_overflow_untyped_operand` 3.
+  - 전체 스위트(`tests/`, `-n 5`): 최종 코드 **11,301 passed · 11 skipped · 0 failed · 545 초**(단독 실행). R6 수정 전에는 11,268 passed · 860 초(재생성 병행).
+- **남은 한계 (공시)**:
+  - R-1: callee 안에서 뒤늦게 나오는 함수 수준 섀도 선언(MISRA 5.3 위반 코드).
+  - R-2: 함수 **뒤에** include 되는 헤더의 매크로(MISRA 20.1 위반 코드).
+  - W-a: FBL 을 단독으로 돌리면 int 폭 typedef 증언이 없어 0 이다. 병합 문맥에서는 APP typedef 의 폭을 쓰고, 이를 assumptions 로 공시한다.
+  - 검사기 미확인: HDPDM01 772 · _pv 1,073.
+  - stub callee 에 기대 일치한 주장(HDPDM01 2,493 · _pv 1,541)은 callee 가 실제로 그 값을 내는지까지는 입증하지 않는다.
+  - 소스 계산 기대값은 **코드 일관성**의 근거다. 요구 적합성은 입증하지 않는다(설계 원칙 유지).
+- **R3 변경**: 외부망이라 SVN 에 접근할 수 없다. 위 라운드 표의 오프라인 정합으로 바꾼다. 정본 SUTS 벡터를 이 엔진으로 재평가해 일치하는 함수를 "현재 소스와 정합" 후보로 삼고, 불일치는 소스 변경과 정본 오류 후보로 나눠 공시한다.
+
+다음 구현은 R2c(MC/DC 지역변수 값 전파) 또는 R3(오프라인 정합)이다. P3 정량 요구 oracle, P4 통합 상태·시간·오류 전파, P5 UI 근거 표시, 그리고 R10~R14 정본 초과 후보가 남아 있다.

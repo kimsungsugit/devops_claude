@@ -606,3 +606,96 @@ def test_round3_a_declared_library_call_after_a_missing_include_is_not_a_macro()
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope, ["x", "y"]))["decisions"][0]
     assert decision["reason"] == "unique_cause_pairs_found"
+
+
+# ── R2b: arrays, const tables, macro parameters, pointer writes (source oracle inputs) ─────────────
+
+def test_one_dimensional_arrays_get_element_type_and_length_from_any_visible_declaration():
+    text = '#include "common.h"\n#include "a.h"\nU16 g_arr[4];\nU8 g_two[2][3];\nvoid f(void) { }\n'
+    _ctx, scope = _scope(text, headers={"a.h": "extern U16 g_arr[];\n"})
+    arr = scope["arrays"]["g_arr"]
+    assert (arr["length"], arr["type"]["bits"], arr["type"]["signed"], arr["values"]) == (4, 16, False, None)
+    assert "g_two" not in scope["arrays"]  # multi-dimensional: not modeled
+    assert scope["unresolved_globals"]["g_arr"] == "global_not_scalar:array"  # still no scalar input
+
+
+def test_a_const_lookup_table_keeps_its_values_and_c_zero_fill():
+    text = ('#include "common.h"\n#define K2 ((U8)20U)\nstatic const U8 k_tab[4] = {10U, K2, 30U};\n'
+            'const volatile U8 k_reg[2] = {1U, 2U};\nstatic const U8 k_desig[2] = {[1] = 3U};\nvoid f(void) { }\n')
+    _ctx, scope = _scope(text)
+    assert scope["arrays"]["k_tab"]["values"] == [10, 20, 30, 0]
+    assert scope["arrays"]["k_reg"]["values"] is None      # volatile: the value is the hardware's
+    assert scope["arrays"]["k_desig"]["values"] is None    # designated initializers are not modeled
+
+
+def test_function_like_macro_parameters_are_recorded():
+    _ctx, scope = _scope('#include "common.h"\n#define MAX(a, b) (((a) > (b)) ? (a) : (b))\n#define LOG(...) (0)\nvoid f(void) { }\n')
+    assert scope["function_like_macro_params"]["MAX"] == ["a", "b"]
+    assert scope["function_like_macro_params"]["LOG"] == ["..."]
+
+
+@pytest.mark.parametrize("body, pointer_write", [
+    ("void w(U8 *p) { p[0] = 0U; }", True),           # subscript through a pointer parameter
+    ("void w(U8 *p) { p[1]++; }", True),
+    ("void w(void) { U8 *q = &g_c; q[0] = 1U; }", True),  # through a pointer local
+    ("void w(void) { U8 a[2]; a[0] = 1U; }", False),   # a local array is written by name
+    ("void w(void) { g_c = 1U; }", False),
+])
+def test_writes_through_a_shadowed_pointer_name_are_pointer_writes(body, pointer_write):
+    context = cpc.build_project_context({_p("common.h"): COMMON, _p("unit.c"): '#include "common.h"\nU8 g_c;\n' + body + "\n"})
+    assert cpc.function_write_closure(context)["functions"]["w"]["pointer_write"] is pointer_write
+
+
+# ── R2b on KJPDS02_PV: guarded headers under undecided #if, toolchain headers ─────────────────────
+
+def test_a_guarded_header_included_again_under_an_undecided_if_keeps_its_macros():
+    # ``#ifndef COMMON_IT_H`` is decided (false) even inside an undecided region: the body is not re-run as unknown.
+    header = "#ifndef G_H\n#define G_H\n#define u8g_GATE ((U8)(1U))\n#endif\n"
+    text = '#include "common.h"\n#include "g.h"\n#ifdef FROM_BUILD\n#include "g.h"\n#endif\nvoid f(void) { }\n'
+    _ctx, scope = _scope(text, headers={"g.h": header})
+    assert scope["macro_status"]["u8g_GATE"] == "active"
+    assert scope["constants"]["u8g_GATE"]["value"] == 1
+
+
+def test_a_quoted_include_found_nowhere_is_a_toolchain_header_only_with_build_evidence():
+    files = {_p("common.h"): COMMON, _p("h.h"): '#include "hidef.h"\n#ifndef H_H\n#define H_H\n#define K ((U8)(3U))\n#endif\n',
+             _p("unit.c"): '#include "common.h"\n#include "h.h"\nvoid f(void) { }\n'}
+    plain = cpc.build_scopes(cpc.build_project_context(files), [_p("unit.c")])[_p("unit.c")]
+    assert plain["missing_includes"] == ["hidef.h"] and "K" not in plain["constants"]   # a gap: everything after is undecided
+    cproject = '<option superClass="x.include"><listOptionValue value="&quot;${MCUToolsBaseDir}/S12lisa_Support/s12lisac/include&quot;"/></option>'
+    build = cpc.detect_build_config({_p(".cproject"): cproject})
+    assert build["toolchain_include_dirs"] == ["${MCUToolsBaseDir}/S12lisa_Support/s12lisac/include"]
+    scope = cpc.build_scopes(cpc.build_project_context(files, build), [_p("unit.c")])[_p("unit.c")]
+    assert scope["missing_includes"] == [] and scope["toolchain_includes"] == ["hidef.h"]
+    assert scope["constants"]["K"]["value"] == 3
+    assert any("toolchain header" in a for a in scope["pp_assumptions"])
+
+
+@pytest.mark.parametrize("case", ["ambiguous", "unread", "not_a_header"])
+def test_an_ambiguous_or_unread_project_header_is_never_a_toolchain_header(case):
+    # review round 5 C-A / C-B: only a ``.h`` with no candidate in the tree and no failed read is the toolchain's
+    cproject = '<listOptionValue value="&quot;${MCUToolsBaseDir}/S12lisa_Support/s12lisac/include&quot;"/>'
+    build = cpc.detect_build_config({_p(".cproject"): cproject})
+    name = {"ambiguous": "cfg.h", "unread": "cfg.h", "not_a_header": "cfg.inc"}[case]
+    files = {_p("common.h"): COMMON, _p("unit.c"): f'#include "common.h"\n#include "{name}"\nvoid f(void) {{ }}\n'}
+    if case == "ambiguous":
+        files[_p("app/cfg.h")] = "#define FEAT_ON 1\n"
+        files[_p("boot/cfg.h")] = "\n"
+    context = cpc.build_project_context(files, build)
+    if case == "unread":
+        context["incomplete_files"] = [_p("app/cfg.h")]
+    scope = cpc.build_scopes(context, [_p("unit.c")])[_p("unit.c")]
+    assert scope["toolchain_includes"] == [] and scope["missing_includes"] == [name]
+
+
+def test_a_header_name_two_source_roots_share_resolves_within_the_includers_root():
+    files = {_p("app/common.h"): COMMON, _p("app/lin.h"): "#define LIN_APP ((U8)(1U))\n",
+             _p("boot/lin.h"): "#define LIN_BOOT ((U8)(2U))\n",
+             _p("app/src/unit.c"): '#include "common.h"\n#include "lin.h"\nvoid f(void) { }\n'}
+    merged = cpc.build_project_context(files)
+    scope = cpc.build_scopes(merged, [_p("app/src/unit.c")])[_p("app/src/unit.c")]
+    assert scope["missing_includes"] == ["lin.h"]                      # without roots: ambiguous, a gap
+    rooted = cpc.build_project_context(files, roots=[_p("app"), _p("boot")])
+    scope = cpc.build_scopes(rooted, [_p("app/src/unit.c")])[_p("app/src/unit.c")]
+    assert scope["missing_includes"] == [] and scope["constants"]["LIN_APP"]["value"] == 1
+    assert "LIN_BOOT" not in scope["macro_status"]

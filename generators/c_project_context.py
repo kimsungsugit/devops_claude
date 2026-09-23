@@ -26,7 +26,11 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 3  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 6  # 3: per-file `prototypes`; closure `macros` (tree union)
+# 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
+# 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
+# 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
+_ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
 _WIDTH_NAME_RE = re.compile(r"^[vl]?_?(?P<sign>u|s|uint|sint|int)(?P<bits>8|16|32|64)(?:_t)?$", re.I)
@@ -409,9 +413,14 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
         elif node.type in {"preproc_def", "preproc_function_def"}:
             name = _text(node.child_by_field_name("name"), raw)
             value = node.child_by_field_name("value")
-            rec["macros"].setdefault(name, []).append({
-                "body": strip_comments(_text(value, raw)) if value is not None else "", "line": line, "pos": pos,
-                "conditional": conditional, "function_like": node.type == "preproc_function_def"})
+            entry = {"body": strip_comments(_text(value, raw)) if value is not None else "", "line": line, "pos": pos,
+                     "conditional": conditional, "function_like": node.type == "preproc_function_def"}
+            if entry["function_like"]:
+                # Parameter names let a consumer expand an invocation (R2b source oracle); ``...`` is kept as a token.
+                plist = node.child_by_field_name("parameters")
+                entry["params"] = ([_text(c, raw) for c in plist.children if c.type in {"identifier", "..."}]
+                                   if plist is not None else [])
+            rec["macros"].setdefault(name, []).append(entry)
         elif node.type == "preproc_call" and _text(node.child_by_field_name("directive"), raw).strip() == "#undef":
             arg = node.child_by_field_name("argument")
             if arg is not None:
@@ -464,13 +473,32 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
                 if not name:
                     continue
                 shape = "scalar" if target.type == "identifier" else target.type.replace("_declarator", "")
+                dims, inner = [], target
+                while inner is not None and inner.type == "array_declarator":
+                    size = inner.child_by_field_name("size")
+                    dims.append(strip_comments(_text(size, raw)).strip() if size is not None else "")
+                    inner = inner.child_by_field_name("declarator")
+                if dims and (inner is None or inner.type != "identifier"):
+                    shape = "array_of_" + (inner.type.replace("_declarator", "") if inner is not None else "unknown")
+                init_node = d.child_by_field_name("value") if d.type == "init_declarator" else None
+                init_text = strip_comments(_text(init_node, raw)) if init_node is not None else ""
+                for call in (_walk(init_node) if init_node is not None else ()):
+                    f = call.child_by_field_name("function") if call.type == "call_expression" else None
+                    if f is not None and f.type == "identifier":
+                        args = call.child_by_field_name("arguments")
+                        rec.setdefault("file_call_args", {}).setdefault(_text(f, raw), []).extend(
+                            re.findall(r"\b[A-Za-z_]\w*\b", _text(args, raw)) if args is not None else [])
                 rec["globals"].setdefault(name, []).append({
                     "type": typename, "shape": shape, "line": line, "pos": pos, "conditional": conditional,
                     "extern": "extern" in quals, "static": "static" in quals,
                     "volatile": "volatile" in quals, "const": "const" in quals,
                     "initialized": d.type == "init_declarator",
-                    "init": strip_comments(_text(d.child_by_field_name("value"), raw))[:400]
-                    if d.type == "init_declarator" and d.child_by_field_name("value") is not None else ""})
+                    "init": init_text[:400],
+                    # Array dimensions outermost first (``U8 a[2][3]`` → ["2", "3"]; ``extern U8 a[]`` → [""]). A const
+                    # array's full initializer (a lookup table) is kept up to a budget; beyond it the value is unknown.
+                    "dims": list(reversed(dims)) if dims else [],
+                    "array_init": init_text if dims and "const" in quals and len(init_text) <= _ARRAY_INIT_BUDGET else "",
+                    "array_init_truncated": bool(dims and "const" in quals and len(init_text) > _ARRAY_INIT_BUDGET)})
         elif node.type == "function_definition":
             name, _ = _function_name(node, raw)
             if name:
@@ -493,6 +521,23 @@ def _address_taken(root, raw):
 _ASSIGN_RE = re.compile(r"\+\+|--|<<=|>>=|[-+*/%&|^]=|(?<![=!<>])=(?!=)")
 _ADDRESS_OF_RE = re.compile(r"(?:^|[(,=!~?:;{}]|&&|\|\||\breturn\b)\s*&(?!&)")
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+# Unary ``&``: at the start of the body, after ``(`` ``,`` ``=`` or another operator, or after a pointer cast
+# (``((U8 *)&g)``) — never a binary ``(v) & (m)`` (R2b review round 2 F, round 3 W1).
+_MACRO_ADDRESS_RE = re.compile(r"(?:(?:^|[(,=!~?:;{}+\-*/%<>|^]|\breturn\b)|\(\s*[A-Za-z_][\w\s]*\*[\w\s*]*\))\s*&(?!&)[\s(]*([A-Za-z_]\w*)")
+# ``(NAME)&x``: a cast exactly when NAME is a type — decided against the project's type names (round 4 C6).
+_PAREN_AMP_RE = re.compile(r"\(\s*([A-Za-z_][\w\s*]*?)\s*\)\s*&(?!&)[\s(]*([A-Za-z_]\w*)")
+_TYPE_WORDS = frozenset({"const", "volatile", "unsigned", "signed", "char", "short", "int", "long", "float", "double",
+                         "_Bool", "void", "struct", "union", "enum"})
+
+
+def macro_addresses(body: str, type_names=frozenset()) -> set[str]:
+    """Names whose address a macro body may take: unary ``&``, ``return &x``, and ``&x`` after a cast to a type."""
+    names = set(_MACRO_ADDRESS_RE.findall(body))
+    for group, name in _PAREN_AMP_RE.findall(body):
+        words = [w for w in re.split(r"[\s*]+", group) if w]
+        if words and all(w in type_names or w in _TYPE_WORDS for w in words):
+            names.add(name)
+    return names
 
 
 def macro_side_effects(body: str) -> dict[str, Any]:
@@ -537,6 +582,8 @@ def _collect_enum(node, raw, rec, conditional, line, pos=0):
 def _function_effects(fn, raw):
     """Direct writes, address-taken identifiers, pointer writes and callees of one function body."""
     writes, taken, calls, locals_, idents = set(), set(), set(), set(), set()
+    local_arrays, indirect, top_locals = set(), set(), set()
+    call_args: dict[str, set[str]] = {}
     pointer_write = False
     body = fn.child_by_field_name("body")
     stack = [body] if body is not None else []
@@ -561,6 +608,11 @@ def _function_effects(fn, raw):
             f = n.child_by_field_name("function")
             if f is not None and f.type == "identifier":
                 calls.add(_text(f, raw))
+                args = n.child_by_field_name("arguments")
+                # Argument base names per callee: a function-like macro ``#define SAVE(v) (g_p = &(v))`` takes the
+                # address of what the call passes (R2b review round 2 F).
+                call_args.setdefault(_text(f, raw), set()).update(
+                    b for a in (args.named_children if args is not None else []) for b in [_base_identifier(a, raw)] if b)
             else:
                 calls.add("<indirect>")
         elif n.type == "declaration":
@@ -570,12 +622,28 @@ def _function_effects(fn, raw):
                     name = _declared_name(d, raw)
                     if name:
                         locals_.add(name)
+                        if n.parent is not None and n.parent == body:
+                            top_locals.add(name)  # declared at function level: shadows for the whole body
+                        inner = d.child_by_field_name("declarator") if d.type == "init_declarator" else d
+                        if inner is not None and inner.type == "array_declarator":
+                            local_arrays.add(name)
         elif n.type == "identifier":
             idents.add(_text(n, raw))
         if target is not None:
             base = _base_identifier(target, raw)
             if base:
                 writes.add(base)
+                bare = target
+                while bare.type == "parenthesized_expression" and bare.named_children:
+                    bare = bare.named_children[0]  # ``(p[0]) = 0U`` is ``p[0] = 0U`` (R2b review C5)
+                if bare.type != "identifier":
+                    # ``p[i] = …`` / ``s.f = …``: through a pointer when ``p`` is one. Only a single ``a[i]`` on a local
+                    # array stays inside it — ``ps[0][0]``, ``a[0].p[0]`` go through what the element holds (round 4 C3).
+                    arg = bare.child_by_field_name("argument") if bare.type == "subscript_expression" else None
+                    while arg is not None and arg.type == "parenthesized_expression" and arg.named_children:
+                        arg = arg.named_children[0]
+                    single = arg is not None and arg.type == "identifier"
+                    indirect.add((base, single))
             else:
                 pointer_write = True
     params = set()
@@ -585,10 +653,17 @@ def _function_effects(fn, raw):
         name = _declared_name(p.child_by_field_name("declarator"), raw) if p.child_by_field_name("declarator") is not None else ""
         if name:
             params.add(name)
-    shadow = locals_ | params
+    every_local = locals_ | params
+    # A subscript/member write on a parameter or a non-array local writes *through* it (``void clr(U8 *p) { p[0] = 0U; }``)
+    # — to an object the closure cannot name. It used to vanish with the shadowed name (R2b source oracle).
+    pointer_write = pointer_write or any(b in every_local and not (b in local_arrays and single) for b, single in indirect)
+    # Only names declared for the whole body (parameters, function-level locals) hide a global of the same name: one
+    # declared in a nested block does so only inside it, so a write elsewhere may be the global's (round 4 C10).
+    shadow = top_locals | params
     # ``idents``: every name the body uses — an object-like macro among them may have side effects (``CLEAR_FLAG;``).
     return {"writes": sorted(writes - shadow), "address_taken": sorted(taken - shadow), "calls": sorted(calls),
-            "pointer_write": pointer_write, "idents": sorted(idents - shadow - calls)}
+            "pointer_write": pointer_write, "idents": sorted(idents - every_local - calls),
+            "call_args": {k: sorted(v - shadow) for k, v in call_args.items() if v - shadow}}
 
 
 def _base_identifier(node, raw):
@@ -609,10 +684,45 @@ def _base_identifier(node, raw):
     return ""
 
 
-def build_project_context(files: dict[str, str]) -> dict[str, Any]:
-    """Scan every complete ``.c``/``.h`` text once. ``files`` maps path → complete source text."""
+_TOOLCHAIN_INCLUDE_RE = re.compile(r"\$\{MCUToolsBaseDir\}[^\"&]*?/include(?=&quot;|\")")
+
+
+def _toolchain_header(context: dict[str, Any], name: str) -> bool:
+    """A quoted include the tree cannot resolve is the toolchain's only when (R2b review round 5 C-A/C-B):
+    the build configuration names toolchain include directories; no file of that name exists in the tree (an
+    *ambiguous* project header — two ``cfg.h`` — is not a toolchain header); no file of that name failed to be read
+    and the scan was not cut at its file cap (an unread project header is not one either); and it is a ``.h``."""
+    if not (context.get("build") or {}).get("toolchain_include_dirs"):
+        return False
+    base = os.path.basename(name).lower()
+    if not base.endswith(".h") or context.get("file_cap_reached"):
+        return False
+    if (context.get("headers") or {}).get(base):
+        return False
+    return base not in {os.path.basename(p).lower() for p in context.get("incomplete_files") or ()}
+
+
+def detect_build_config(cproject_texts: dict[str, str]) -> dict[str, Any]:
+    """Toolchain include directories a build configuration names (Eclipse/CodeWarrior ``.cproject``).
+
+    Evidence for one question only: a quoted ``#include`` found nowhere in the source tree — C11 6.10.2p3 retries it
+    as ``<...>``, i.e. in these directories — is the toolchain's header (``hidef.h``), not a project header that went
+    missing. Without such evidence the include stays a gap (everything after it undecided)."""
+    dirs: set[str] = set()
+    for text in cproject_texts.values():
+        dirs.update(_TOOLCHAIN_INCLUDE_RE.findall(text or ""))
+    return {"toolchain_include_dirs": sorted(dirs), "evidence": sorted(p for p, t in cproject_texts.items()
+                                                                      if _TOOLCHAIN_INCLUDE_RE.search(t or ""))}
+
+
+def build_project_context(files: dict[str, str], build: dict[str, Any] | None = None,
+                          roots: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+    """Scan every complete ``.c``/``.h`` text once. ``files`` maps path → complete source text.
+    ``build``: `detect_build_config` of the tree's build configuration, when there is one. ``roots``: the source roots
+    when there are several (separate builds) — a header name both have resolves within the includer's own root."""
     parser = _make_parser()
-    context: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "files": {}, "headers": {}, "target": {}}
+    context: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "files": {}, "headers": {}, "target": {},
+                               "build": dict(build or {}), "roots": [str(r) for r in roots if r]}
     if parser is None:
         context["status"] = "tree_sitter_unavailable"
         return context
@@ -918,7 +1028,8 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
         bodies[("<build>", name)] = {"name": name, "body": body, "function_like": False, "file": "<build>", "line": 0}
         macros[name] = ("<build>", name)
     out: dict[str, Any] = {"states": {}, "macros": macros, "varied": set(), "missing_includes": [], "system_includes": [],
-                           "files": [], "errors": [], "unknown_conditions": 0, "gaps": 0, "defined_after_gaps": {}}
+                           "toolchain_includes": [], "files": [], "errors": [], "unknown_conditions": 0, "gaps": 0,
+                           "defined_after_gaps": {}}
     env = {"macros": macros, "bodies": bodies, "parser": parser, "gap": False, "varied": set(),
            "defined_anywhere": (known_names if known_names is not None else defined_names(context)) | set(defines or ())}
     out["defined_anywhere"] = env["defined_anywhere"]
@@ -958,6 +1069,12 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
                         out["system_includes"].append(ev["name"])
                     continue
                 found = _resolve_include(context, path, ev["name"])
+                if not found and _toolchain_header(context, ev["name"]):
+                    # Found nowhere in the tree, and the build searches toolchain directories: the compiler's header
+                    # (C11 6.10.2p3 retries a failed quoted include as <...>). Treated like a system header.
+                    if ev["name"] not in out["toolchain_includes"]:
+                        out["toolchain_includes"].append(ev["name"])
+                    continue
                 if not found:
                     if ev["name"] not in out["missing_includes"]:
                         out["missing_includes"].append(ev["name"])
@@ -972,7 +1089,11 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
                 run(found, files[found].get("events") or [], mode, depth + 1)
                 stack.pop()
             elif op == "if":
-                verdict = None if mode == _UNKNOWN or parser is None else _pp_condition(ev, env)
+                # Decided conditions are decided inside an undecided region too: whether the region runs does not
+                # change the table before it. Not evaluating them re-ran a guarded header's whole body as "unknown"
+                # when it was included again under an undecided ``#if`` — every macro it defines became unknown
+                # (KJPDS02_PV: 5,923 of 5,933 macros, ``#ifndef COMMON_IT_H`` already defined; R2b).
+                verdict = None if parser is None else _pp_condition(ev, env)
                 if verdict is None:
                     if mode == "active":
                         out["unknown_conditions"] += 1
@@ -998,13 +1119,14 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     scope: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "path": path, "target": {"widths": widths},
                              "types": {}, "unresolved_types": {}, "constants": {}, "unresolved_constants": {},
                              "enum_types": {}, "globals": {}, "unresolved_globals": {}, "function_like_macros": [],
-                             "function_like_macro_bodies": {},
+                             "function_like_macro_bodies": {}, "function_like_macro_params": {}, "arrays": {},
                              "missing_includes": [], "system_includes": [], "files": []}
     if path not in files:
         scope["status"] = "file_not_in_project_context"
         return scope
     pp = preprocess_unit(context, path, bodies, known_names=known_names)
     scope["missing_includes"], scope["system_includes"], scope["files"] = pp["missing_includes"], pp["system_includes"], pp["files"]
+    scope["toolchain_includes"] = pp["toolchain_includes"]
     scope["preprocessor"] = {"unknown_conditions": pp["unknown_conditions"], "errors": pp["errors"][:5],
                              "varied_macros": sorted(pp["varied"])[:20]}
     states = pp["states"]
@@ -1118,6 +1240,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     scope["pp_assumptions"] = [
         "a name some project file #defines is not also a build -D (only names the tree never defines are undecided)",
         "system headers (<...>) do not define names the project defines",
+        "a quoted include found nowhere in the source tree, in a build whose configuration lists toolchain include "
+        "directories, is a toolchain header (C11 6.10.2p3) and, like <...> headers, does not define project names",
         "floating literals round to nearest (IEC 60559)",
         "a call to a name declared nowhere (unit without missing includes) is a function, not a -D macro",
         "inline assembly does not write C objects by name",
@@ -1225,6 +1349,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             if name not in undefs and not any(d["conditional"] for d in defs) and len({d["body"] for d in defs}) == 1:
                 # Only an unambiguous body can show what an invocation does (callee side-effect checks).
                 scope["function_like_macro_bodies"][name] = defs[0]["body"]
+                if "params" in defs[0]:
+                    scope["function_like_macro_params"][name] = list(defs[0]["params"])
     # Constants are resolved on first lookup (review W7: evaluating every visible macro up front — the 671 KB
     # register header, in every unit — was most of the scope cost). Lookups populate `unresolved_constants`.
     scope["constants"] = _LazyConstants(constant)
@@ -1239,6 +1365,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             if len({(d["type"], d["shape"]) for d in defs}) != 1:
                 raise Unresolved("global_declarations_disagree")
             d = defs[0]
+            if d["shape"] == "array" and d["type"] != "struct":
+                _scope_array(scope, name, defs, pp, type_of, agreeing, parser)
             if d["shape"] != "scalar":
                 raise Unresolved("global_not_scalar:" + d["shape"])
             if d["type"] == "struct":
@@ -1268,6 +1396,66 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             scope["unresolved_globals"][name] = str(exc)
     scope["status"] = "resolved" if not scope["missing_includes"] else "partial"
     return scope
+
+
+def _scope_array(scope, name, defs, pp, type_of, agreeing, parser):
+    """A one-dimensional array of a resolved scalar element type: element type, length and — for a ``const``
+    object with one visible initialized definition — its element values. Anything else stays unrecorded (the
+    array is then no modeled object; ``unresolved_globals`` keeps its reason)."""
+    dims = {tuple(x.get("dims") or ()) for x in defs}
+    lengths = {x[0] for x in dims if len(x) == 1 and x[0]}
+    if any(len(x) != 1 for x in dims) or len(lengths) > 1 or pp["gaps"]:
+        return
+    try:
+        elem = type_of(defs[0]["type"])
+        length = None
+        if lengths:
+            value, t, _extra = agreeing(next(iter(lengths)), macro_body=False)
+            if is_float(t) or type(value) is not int or value <= 0:
+                return
+            length = value
+        volatile = any(x["volatile"] for x in defs) or "volatile" in (elem.get("qualifiers") or [])
+        const = any(x["const"] for x in defs) or "const" in (elem.get("qualifiers") or [])
+        record = {"type": elem, "typename": defs[0]["type"], "length": length, "file": defs[0]["file"],
+                  "line": defs[0]["line"], "volatile": volatile, "const": const, "values": None}
+        inits = [x for x in defs if x.get("array_init") or x.get("array_init_truncated")]
+        if const and not volatile and len(inits) == 1 and inits[0].get("array_init"):
+            record["values"] = _array_values(inits[0]["array_init"], elem, length, agreeing, parser)
+            if record["values"] is not None and length is None:
+                record["length"] = len(record["values"])
+        scope["arrays"][name] = record
+    except Unresolved:
+        return
+
+
+def _array_values(text, elem, length, agreeing, parser):
+    """Element values of ``{a, b, c}`` (positional only; trailing elements are 0 as in C). None when any
+    element is not an integer constant expression, a designator is used, or the list overruns the length."""
+    raw = ("int __probe[] = " + text + ";").encode("utf-8")
+    root = parser.parse(raw).root_node
+    init = next((x for x in _walk(root) if x.type == "initializer_list"), None)
+    if root.has_error or init is None or _text(init, raw) != text.strip():
+        return None
+    items = [c for c in init.named_children if c.type != "comment"]
+    if any(c.type in {"initializer_pair", "initializer_list"} for c in items):
+        return None
+    if length is not None and len(items) > length:
+        return None
+    values = []
+    for c in items:
+        try:
+            value, t, _extra = agreeing(_text(c, raw), macro_body=False)
+        except Unresolved:
+            return None
+        if is_float(t) or is_float(elem):
+            return None
+        try:
+            values.append(convert(value, elem))
+        except Unresolved:
+            return None
+    if length is not None:
+        values.extend([0] * (length - len(values)))
+    return values
 
 
 class _LazyConstants(dict):
@@ -1305,7 +1493,20 @@ def _resolve_include(context, current, name):
         if os.path.normcase(os.path.normpath(p)) == local:
             return p
     candidates = context["headers"].get(os.path.basename(name).lower()) or []
+    if len(candidates) > 1 and context.get("roots"):
+        # Several source roots are separate builds (APP and BOOT both have ``lin.h``): each sees its own tree only.
+        mine = _root_of(context, current)
+        candidates = [c for c in candidates if mine and _root_of(context, c) == mine]
     return candidates[0] if len(candidates) == 1 else ""
+
+
+def _root_of(context, path):
+    p = os.path.normcase(os.path.normpath(path))
+    for r in context.get("roots") or ():
+        rn = os.path.normcase(os.path.normpath(r))
+        if p == rn or p.startswith(rn.rstrip("\\/") + os.sep):
+            return rn
+    return ""
 
 
 def evaluate_constant_expression(text, parser, widths, constant, type_of, global_defs=None, mode="f64", flags=None):
@@ -1476,6 +1677,15 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 entry["idents"].update(d.get("idents") or ())
                 entry["pointer_write"] = entry["pointer_write"] or d["pointer_write"]
                 taken.update(d["address_taken"])
+    macro_text: dict[str, list[str]] = {}
+    for rec in (context.get("files") or {}).values():
+        for mname, defs in rec["macros"].items():
+            macro_text.setdefault(mname, []).extend(d.get("body") or "" for d in defs)
+    # A macro that *mentions* another macro expands it (``#define WRAP INNER``, ``#define AGAIN() CALL_F``): follow it
+    # like a call, so its writes and its calls count (R2b review round 3 C1/C2 — only ``NAME(`` was followed).
+    for mname, texts in macro_text.items():
+        macro_fx[mname]["calls"].update(t for text in texts for t in re.findall(r"\b[A-Za-z_]\w*\b", text)
+                                        if t in macro_fx and t != mname)
     closure: dict[str, dict[str, Any]] = {}
     for name in direct:
         writes, unknown, pointer_write, seen, stack = set(), set(), False, set(), [name]
@@ -1504,7 +1714,52 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
             pointer_write = pointer_write or entry["pointer_write"]
             stack.extend(entry["calls"])
             stack.extend(i for i in entry["idents"] if i in macro_fx and i not in direct)
-        closure[name] = {"writes": writes, "unknown_callees": unknown, "pointer_write": pointer_write}
+        # ``reaches``: every function this one may (transitively) call — itself included when some path calls it
+        # again (recursion, direct or through others): the caller's static locals may change (R2b review W1, round 2 A).
+        recursive = any(name in (direct[x]["calls"] if x in direct else ()) or
+                        name in ((macro_fx.get(x) or {}).get("calls") or ()) or
+                        (x in macro_fx and re.search(r"\b" + re.escape(name) + r"\b", " ".join(macro_text.get(x, ()))))
+                        for x in seen)  # through a macro too: ``#define AGAIN() f(0U)`` (round 3 C1)
+        closure[name] = {"writes": writes, "unknown_callees": unknown, "pointer_write": pointer_write,
+                         "reaches": (seen - {name}) | ({name} if recursive else set())}
+    # ``&g`` inside a macro body (``#define CFG_PTR (&g_cfg)``) takes g's address wherever the macro is used — the
+    # function scan only sees ``CFG_PTR`` (R2b review C6).
+    type_names = frozenset(n for rec in (context.get("files") or {}).values() for n in rec.get("typedefs") or ())
+    for rec in (context.get("files") or {}).values():
+        for defs in rec["macros"].values():
+            for d in defs:
+                taken.update(macro_addresses(d.get("body") or "", type_names))
+    # A macro that takes an address — in its own text or through a macro it invokes (closed transitively; round 3
+    # C7): every name passed to it may have its address taken, wherever the invocation is (function body, file-scope
+    # initializer, another macro's body). Over-approximates (any argument, not only ``&param``): only refuses more.
+    address_params = {name for name, texts in macro_text.items() if any(macro_addresses(t, type_names) for t in texts)}
+    changed = True
+    while changed:
+        changed = False
+        for name, texts in macro_text.items():
+            if name not in address_params and any(address_params & set(re.findall(r"\b[A-Za-z_]\w*\b", t)) for t in texts):
+                address_params.add(name)
+                changed = True
+    for rec in (context.get("files") or {}).values():
+        for macro in address_params & set(rec.get("file_call_args") or {}):
+            taken.update(rec["file_call_args"][macro])
+        for defs in rec["functions"].values():
+            for d in defs:
+                for macro in address_params & set(d.get("call_args") or {}):
+                    taken.update(d["call_args"][macro])
+    # ...and where another macro's body invokes it (``#define CFG_PTR ADDR(g_cfg)``): every name in the arguments.
+    if address_params:
+        invoke = re.compile(r"\b(" + "|".join(re.escape(m) for m in sorted(address_params)) + r")\s*\(")
+        for rec in (context.get("files") or {}).values():
+            for defs in rec["macros"].values():
+                for d in defs:
+                    body = d.get("body") or ""
+                    for m in invoke.finditer(body):
+                        depth, end = 1, m.end()
+                        while end < len(body) and depth:
+                            depth += {"(": 1, ")": -1}.get(body[end], 0)
+                            end += 1
+                        taken.update(re.findall(r"\b[A-Za-z_]\w*\b", body[m.end():end - 1]))
     # ``&ALIAS`` takes the address of what the macro names: expand alias macros into their identifiers.
     pending, expanded = [t for t in taken if t in macro_fx], set()
     while pending:  # to a fixpoint: ``#define A1 A2`` / ``#define A2 g_c`` (review round 3 C1)
