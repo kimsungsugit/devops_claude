@@ -520,6 +520,34 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"확장 전략 {_show(ext_seq)} · 상한 해제분 {_show(beyond)}",
             "확장 전략이 새로 만든 시퀀스와, 기본 카탈로그 안에 있었지만 시퀀스 상한에 잘리던 자리다. "
             "둘을 합치면 기본 문서 대비 증분이다."))
+
+    # (R15) 행동 경계 행 — 확장 프로파일에서만 기록된다(기본 문서엔 키가 없어 항목도 없다).
+    bs = qr.get("boundary_search")
+    if isinstance(bs, dict):
+        skipped = bs.get("not_searched") if isinstance(bs.get("not_searched"), dict) else {}
+        out.append(_item(
+            "suts_boundary_rows", "행동 경계 행",
+            f"{_show(_int(qr, 'boundary_rows'))}행 · 경계 {_show(_int(bs, 'boundaries'))} · 탐색한 unit "
+            f"{_show(_int(bs, 'searched'))}/{_show(_int(bs, 'units'))} (행이 붙은 unit {_show(_int(bs, 'with_rows'))})",
+            "입력 하나를 움직여 소스 oracle 이 도출한 출력이 계단처럼 바뀌는 인접한 두 값을 찾아 행으로 **더한** 것이다(기존 "
+            "행은 옮기지 않는다). 기대값은 다른 행과 같은 oracle 이 도출한다 — 모델 탐색이지 실행이 아니다. 기준 행이 비운 "
+            "입력은 선언 범위의 중간값 근처로 채우고 행 설명에 그 값을 적는다. enum 은 열거자 값만 쓴다. 기준 행이 상한보다 "
+            "많으면 서로 다른 출력 상태에 이르는 행을 먼저 쓴다. "
+            + (f"탐색하지 못한 unit: {_dist(skipped)}. " if skipped else "")
+            + (f"경계 탐색에 들어가지 않은 unit {_show(_int(bs, 'units_without_search'))}(입출력 없는 unit 경로). "
+               if _int(bs, "units_without_search") else "")
+            + (f"예산을 다 쓴 unit {_show(_int(bs, 'budget_exhausted'))}(평가 상한 "
+               f"{_show(_int(bs, 'evaluation_budget_exhausted'))} · 경계 상한 {_show(_int(bs, 'boundary_cap_reached'))})"
+               " 은 경계를 더 가질 수 있다. " if _int(bs, "budget_exhausted")
+               else "예산을 다 쓴 unit 은 없다. " if _int(bs, "budget_exhausted") == 0 else "")
+            + (f"기준 행 상한에 잘린 unit {_show(_int(bs, 'bases_capped'))} · 상수 상한에 잘린 unit "
+               f"{_show(_int(bs, 'constants_capped'))} · 너무 커서 움직이지 않은 값 집합 "
+               f"{_show(_int(bs, 'value_sets_capped'))}."
+               if any(_int(bs, k) for k in ("bases_capped", "constants_capped", "value_sets_capped")) else "")
+            + (f" 탐색 중 오류로 경계 행 없이 둔 unit {_show(_int(skipped, 'error'))} — 로그에 traceback 이 있다."
+               if _int(skipped, "error") else ""),
+            # (리뷰 2라운드 W4) 오류로 건너뛴 unit 이 있으면 경고 — 행 수가 줄어든 것만으로는 버그가 안 보인다
+            tone=_tone(bool(_int(bs, "budget_exhausted")) or bool(_int(skipped, "error")))))
     return out
 
 

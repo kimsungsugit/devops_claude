@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import time
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -21,10 +22,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from generators._artifact_check import apply_write_back_check
 from generators._artifact_check import sheet_base_name as _sheet_base_name
 from generators._xlsx_merge import merge_fresh
+from generators.boundary_rows import BOUNDARY_PREFIX, find_boundaries
 from generators.mcdc_design import build_mcdc_design, finalize_mcdc_design
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
-from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
+from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.c_return import returns_value
 from report_gen.doc_kind import is_sds_filename
@@ -2129,14 +2131,88 @@ resolve_safety_related = _resolve_safety_related
 
 
 def is_extended_strategy(strategy: Any) -> bool:
-    """확장 프로파일에서만 나오는 전략인가 — OAT 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
+    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
-    if s.startswith("OAT_"):
+    if s.startswith(("OAT_", BOUNDARY_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
             return int(s[len(prefix):]) >= base_n
     return False
+
+
+def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
+                          output_vars: List[str], var_types: Dict[str, str], var_bounds: Dict[str, Dict[str, Any]],
+                          unknown_vars: set) -> None:
+    """(R15) 행동 경계 행 — `generators.boundary_rows.find_boundaries` 가 소스 oracle 로 찾은 인접 입력 쌍을 시퀀스 뒤에 붙인다.
+
+    움직일 수 있는 입력은 정수 경계가 정해진 것만(모르는 타입·부동소수·경계 미상 제외 — 값을 지어내지 않는다). enum 은
+    **열거자 값 집합**으로 넘긴다 — 열거자 사이의 정수는 쓰지 않는다(리뷰 C2). 기준 행 후보는 전 입력 중간값(BV_MID) → MC/DC
+    설계 벡터 → 조건 조합 → 나머지 순으로 넘기고, 후보가 상한보다 많으면 탐색기가 한 번씩 돌려 **서로 다른 출력 상태**·도출
+    출력이 많은 행을 먼저 쓴다(이 순서는 동률일 때만). 도메인 밖 값을 가진 행(BV_*_INV)은 기준이 아니다. 기대값은 여기서 적지 않는다: 붙인 뒤
+    같은 oracle(`apply_sequence_evidence`)이 모든 행과 똑같이 도출한다. 탐색 요약은 `unit["boundary_search"]` 에 남는다.
+    탐색이 실패해도 문서는 만든다 — 그 unit 만 경계 행 없이 두고 사유를 남긴다(리뷰 C1).
+    """
+    enum_sets = unit.get("value_domains") or {}
+    domains: Dict[str, Any] = {}
+    for v in input_vars:
+        if v in unknown_vars or var_types.get(v) == "float":
+            continue
+        if var_types.get(v) == _ENUM_TYPE:
+            try:
+                vals = sorted({int(x) for x in ((enum_sets.get(v) or {}).get("values") or [])})
+            except (TypeError, ValueError, AttributeError):
+                vals = []
+            # (리뷰 2라운드 W3) 설계서·HSIS 범위가 경계를 정했으면(`bounds_source`) 그 범위 안의 열거자만 — 범위 밖 열거자는
+            #   BV_MAX_INV 쪽 값이지 정상 경계가 아니다
+            b = var_bounds.get(v) or {}
+            if (unit.get("bounds_source") or {}).get(v) in ("uds_range", "hsis_range") and \
+                    isinstance(b.get("min"), int) and isinstance(b.get("max"), int):
+                vals = [x for x in vals if b["min"] <= x <= b["max"]]
+            if len(vals) >= 2:
+                domains[v] = vals
+            continue
+        b = var_bounds.get(v) or {}
+        lo, hi = b.get("min"), b.get("max")
+        if isinstance(lo, bool) or isinstance(hi, bool) or not isinstance(lo, int) or not isinstance(hi, int) or lo >= hi:
+            continue
+        domains[v] = (lo, hi)
+    outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
+
+    def _rank(s: Dict[str, Any]) -> int:
+        name = str(s.get("strategy") or "")
+        return 0 if name == "BV_MID" else 1 if name.startswith("MCDC_") else 2 if name.startswith("COND_COMB_") else 3
+    order = sorted(sequences, key=_rank)
+    # 행이 비운 입력의 채움 값 — BV_MID 와 같은 중간값에서 출발한다(넓은 범위면 입력마다 위치만큼 옮겨 서로 다르게, enum 은 열거자).
+    mids = {v: (var_bounds.get(v) or {}).get("mid") for v in domains}
+    try:
+        found = find_boundaries(
+            unit, [{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in order], domains, outputs,
+            [s.get("inputs") or {} for s in sequences],
+            defaults={v: m for v, m in mids.items() if isinstance(m, int) and not isinstance(m, bool)})
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 경계 행 탐색 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        unit["boundary_search"] = {"status": f"error:{type(exc).__name__}", "rows": 0}
+        return
+    unit["boundary_search"] = found["report"]
+    for i, row in enumerate(found["rows"]):
+        inputs = {k: _format_test_value(v, var_types.get(k, "uint8_t")) for k, v in row["inputs"].items()}
+        side = "경계 아래" if row["side"] == "lo" else "경계 위"
+        changed = row["outputs_changed"]
+        shown = ", ".join(changed[:3]) + (f" 외 {len(changed) - 3}" if len(changed) > 3 else "")
+        filled = row.get("filled") or {}
+        fill_note = (" · 기준 행이 비운 입력을 채움: " + ", ".join(f"{k}={v}" for k, v in list(filled.items())[:4])
+                     + (f" 외 {len(filled) - 4}" if len(filled) > 4 else "")) if filled else ""
+        label = (f"행동 경계({side}): {row['variable']}={row['lo'] if row['side'] == 'lo' else row['hi']} — "
+                 f"{row['variable']} {row['lo']}→{row['hi']} 에서 {shown} 가 바뀐다"
+                 f"(기준 행 {row['base']}{fill_note}, 소스 oracle 탐색 · 미실행)")
+        sequences.append({
+            "seq_num": len(sequences) + 1, "inputs": inputs,
+            # 관측 자리만 연다 — 값은 뒤의 oracle 이 채운다(바뀐 출력 + 기준 행이 관측하던 출력)
+            "expected": {o: f"{VERIFY_PREFIX} boundary" for o in dict.fromkeys([*changed, *outputs])},
+            "strategy": f"{BOUNDARY_PREFIX}{i}", "description": label, "tc_profile": TC_PROFILE_EXTENDED,
+            "boundary": {k: row[k] for k in ("variable", "side", "lo", "hi", "base", "outputs_changed", "filled")},
+        })
 
 
 def resolve_seq_test_method(strategy: Any) -> str:
@@ -2665,6 +2741,9 @@ def generate_sequences(
             # (R81) 결정이 읽지 않고 도메인도 모르는 입력은 비운 칸이다 — 값이 없다는 것을 행에서 말한다.
             _lines[0] += f" · 설계 밖 입력(공란, 결정 무관·도메인 미상): {', '.join(_blank)}"
         _row["description"] = "\n".join(_lines)
+    if extended:
+        # (R15) 확장 프로파일에만 — 출력이 바뀌는 인접 입력 두 값을 행으로 **더한다**(기존 행은 옮기지 않는다, R4b 교훈).
+        _append_boundary_rows(unit, sequences, input_vars, output_vars, var_types, var_bounds, set(_unknown_vars))
     return apply_sequence_evidence(unit, sequences)
 
 
@@ -4787,6 +4866,27 @@ def generate_suts(
     quality["enrichment_errors"] = _enrich_errors
     quality["extended_sequences"] = sum(
         1 for _s in all_sequences.values() for _q in _s if _q.get("tc_profile") == TC_PROFILE_EXTENDED)
+    if _extended:
+        # (R15) 행동 경계 행 — 탐색하지 못한 unit(범위 없음·정수 입력 없음·출력 없음)과 예산 소진을 분모와 함께 공시한다.
+        _bsearch = [u.get("boundary_search") for u in units if isinstance(u.get("boundary_search"), dict)]
+        quality["boundary_rows"] = sum(
+            1 for _s in all_sequences.values() for _q in _s if str(_q.get("strategy") or "").startswith(BOUNDARY_PREFIX))
+        quality["boundary_search"] = {
+            "units": len(units), "searched": sum(1 for b in _bsearch if b.get("status") == "searched"),
+            "with_rows": sum(1 for b in _bsearch if b.get("rows")),
+            "boundaries": sum(int(b.get("boundaries") or 0) for b in _bsearch),
+            "budget_exhausted": sum(1 for b in _bsearch if b.get("budget_exhausted")),
+            "evaluation_budget_exhausted": sum(1 for b in _bsearch if b.get("evaluation_budget_exhausted")),
+            "boundary_cap_reached": sum(1 for b in _bsearch if b.get("boundary_cap_reached")),
+            # (리뷰 W1) 상한에 잘린 기준 행·상수·값 집합도 unit 수로 공시한다
+            "bases_capped": sum(1 for b in _bsearch if int(b.get("bases_available") or 0) > int(b.get("bases") or 0)),
+            "constants_capped": sum(1 for b in _bsearch if int(b.get("constants_capped_inputs") or 0) > 0),
+            "value_sets_capped": sum(int(b.get("value_sets_capped") or 0) for b in _bsearch),
+            "evaluations": sum(int(b.get("evaluations") or 0) for b in _bsearch),
+            # 상태의 사유 꼬리(`oracle_underived:<reason>`)는 분포에서 떼어 종류로 센다
+            "not_searched": dict(Counter(str(b.get("status")).split(":", 1)[0] for b in _bsearch
+                                         if b.get("status") != "searched")),
+            "units_without_search": len(units) - len(_bsearch)}
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
     #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
     quality["sequences_beyond_reference_cap"] = (sum(
