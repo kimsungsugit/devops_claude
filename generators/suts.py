@@ -918,7 +918,7 @@ def collect_unit_functions(
         # ⚠ 위 SwUDS 대체가 `input_vars` 를 **통째로 교체**하므로 반드시 그 **뒤**다.
         #   그리고 예산(`max_inp`) 계산 **앞**이라야 배열 확장이 이 칸까지 셈한다.
         # ⚠ 기대 열에는 넣지 않는다 — 정본 ExpR 의 stub return 은 0칸이다.
-        _stubs = _stub_return_names(info.get("calls_list"), _nonvoid)
+        _stubs = _stub_return_names(info.get("calls_list"), _nonvoid, own=str(name or ""))
         if _stubs:
             _before_stub = len(input_vars)
             input_vars = list(dict.fromkeys(list(input_vars) + _stubs))
@@ -927,7 +927,7 @@ def collect_unit_functions(
         # ── 그 stub 이 출력 파라미터에 써 넣는 값도 시험 입력이다 ────────
         # ⚠ 반환값 뒤에 둔다 — 정본은 같은 피호출의 `() return` 을 먼저 적는다.
         #   앞에 두면 예산이 빠듯한 unit 에서 순서만으로 맞춤이 뒤바뀐다.
-        _stub_ops = _stub_out_param_names(info.get("calls_list"), _nonvoid, _out_params)
+        _stub_ops = _stub_out_param_names(info.get("calls_list"), _nonvoid, _out_params, own=str(name or ""))
         if _stub_ops:
             _before_op = len(input_vars)
             input_vars = list(dict.fromkeys(list(input_vars) + _stub_ops))
@@ -1654,6 +1654,7 @@ def _stub_out_param_names(
     calls_list: Any,
     nonvoid: Set[str],
     out_params: Dict[str, List[str]],
+    own: str = "",
 ) -> List[str]:
     """stub 된 피호출이 **출력 파라미터에 써 넣는 값** — 정본의 시험 **입력**이다.
 
@@ -1688,7 +1689,7 @@ def _stub_out_param_names(
         nm = str(c or "").strip()
         # 비-void 판정이 곧 "stub 대상" 판정이다. `nm and` 를 겹쳐 두지 않는다 —
         # 빈 이름은 `nonvoid` 에 애초에 안 들어간다(`_stub_return_names` 와 같은 이유).
-        if nm not in nonvoid:
+        if nm not in nonvoid or nm == own:   # 재귀 호출은 stub 대상이 아니다(R14 리뷰 r2 B-I1)
             continue
         for p in (out_params.get(nm) or ()):
             cell = f"{nm}() {p}[0]"
@@ -1698,7 +1699,7 @@ def _stub_out_param_names(
     return out
 
 
-def _stub_return_names(calls_list: Any, nonvoid: Set[str]) -> List[str]:
+def _stub_return_names(calls_list: Any, nonvoid: Set[str], own: str = "") -> List[str]:
     """이 unit 이 호출하는 **비-void** 함수의 반환값 — 정본의 시험 **입력**이다.
 
     VectorCAST 는 피호출 함수를 stub 하고 그 반환값을 주입하므로, 정본 Inpt 열에
@@ -1727,7 +1728,8 @@ def _stub_return_names(calls_list: Any, nonvoid: Set[str]) -> List[str]:
         nm = str(c or "").strip()
         # `nm and` 를 앞에 두지 않는다 — 빈 이름은 `nonvoid` 에 애초에 안 들어간다
         # (`_nonvoid_function_names` 가 거른다). 겹쳐 막으면 뮤테이션이 통째로 산다.
-        if nm in nonvoid and nm not in seen:
+        # (R14 review W1) 재귀 호출은 stub 대상이 아니다 — 시험 대상 함수는 자기 시험에서 실제로 돈다.
+        if nm in nonvoid and nm not in seen and nm != own:
             seen.add(nm)
             out.append(f"{nm}() {_RETURN_VAR}")
     return out
@@ -2793,6 +2795,11 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _summarize_source_findings(units: List[Dict[str, Any]], all_sequences: Dict[str, List[Dict[str, Any]]]):
+    from generators.source_findings import collect_findings, summarize_findings
+    return summarize_findings(collect_findings(units, all_sequences, {}))
+
+
 def _mcdc_vector_key(inputs: Dict[str, Any]) -> str:
     return json.dumps(inputs, sort_keys=True)
 
@@ -3563,6 +3570,9 @@ def generate_suts_xlsm(
     for col in "ABCDEFGHIJKLMNOP":
         evidence_ws.column_dimensions[col].width = 24 if col not in "IJKP" else 48
     _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, thin, hdr_fill, hdr_font, data_font)
+    # (R10) 소스 소견 — oracle 이 기대값을 내다가 증명한 미정의 동작(함수·종류별, 예시 벡터, 재현 여부 공시)
+    from generators.source_findings import collect_findings, write_source_findings_sheet
+    write_source_findings_sheet(wb, collect_findings(units, all_sequences, rendered_tc_ids), hdr_font, hdr_fill, thin)
 
     # --- Remove default sheet if we created new workbook ---
     if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
@@ -3957,6 +3967,8 @@ def generate_suts_quality_report(
         "srs_req_link_distribution": req_link_dist,
         "verify_needed_expected_slots": verify_needed,
         "mcdc_design_summary": summarize_mcdc_design(units),
+        # (R10) 소스 소견 — 기대값 도출 중 증명된 미정의 동작(함수·종류별). 재현은 별도 스크립트(not_run).
+        "source_findings": _summarize_source_findings(units, all_sequences),
         "expected_evidence_summary": summarize_expected_evidence([
             seq for seqs in all_sequences.values() for seq in seqs]),
         "units_with_srs_req_ids": sum(1 for u in units if str(u.get("srs_req_ids") or "").strip()),

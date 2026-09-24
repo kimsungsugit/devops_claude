@@ -26,10 +26,11 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 6  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 7  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
+# 7 (R14): function `return_type` (declared text) and closure `return_type` — one when every definition agrees.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -661,9 +662,15 @@ def _function_effects(fn, raw):
     # declared in a nested block does so only inside it, so a write elsewhere may be the global's (round 4 C10).
     shadow = top_locals | params
     # ``idents``: every name the body uses — an object-like macro among them may have side effects (``CLEAR_FLAG;``).
+    # (R14) the declared return type as written (``U8``, ``Error_t``, ``U8 *``) — a stub's value is converted to it
+    rtype = fn.child_by_field_name("type")
+    rdecl = fn.child_by_field_name("declarator")
+    return_type = (_text(rtype, raw).strip() + (" *" if rdecl is not None and rdecl.type == "pointer_declarator"
+                                                  else "")) if rtype is not None else ""
     return {"writes": sorted(writes - shadow), "address_taken": sorted(taken - shadow), "calls": sorted(calls),
             "pointer_write": pointer_write, "idents": sorted(idents - every_local - calls),
-            "call_args": {k: sorted(v - shadow) for k, v in call_args.items() if v - shadow}}
+            "call_args": {k: sorted(v - shadow) for k, v in call_args.items() if v - shadow},
+            "return_type": return_type}
 
 
 def _base_identifier(node, raw):
@@ -1670,8 +1677,10 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 fx["writes"] = fx["writes"] or one["writes"]
                 fx["calls"].update(one["calls"])
         for name, defs in rec["functions"].items():
-            entry = direct.setdefault(name, {"writes": set(), "calls": set(), "idents": set(), "pointer_write": False})
+            entry = direct.setdefault(name, {"writes": set(), "calls": set(), "idents": set(), "pointer_write": False,
+                                             "return_types": set()})
             for d in defs:
+                entry["return_types"].add(d.get("return_type") or "")
                 entry["writes"].update(d["writes"])
                 entry["calls"].update(d["calls"])
                 entry["idents"].update(d.get("idents") or ())
@@ -1720,8 +1729,11 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                         name in ((macro_fx.get(x) or {}).get("calls") or ()) or
                         (x in macro_fx and re.search(r"\b" + re.escape(name) + r"\b", " ".join(macro_text.get(x, ()))))
                         for x in seen)  # through a macro too: ``#define AGAIN() f(0U)`` (round 3 C1)
+        rtypes = direct[name]["return_types"]
         closure[name] = {"writes": writes, "unknown_callees": unknown, "pointer_write": pointer_write,
-                         "reaches": (seen - {name}) | ({name} if recursive else set())}
+                         "reaches": (seen - {name}) | ({name} if recursive else set()),
+                         # (R14) one declared type when every definition says the same; "" when they differ / unknown
+                         "return_type": next(iter(rtypes)) if len(rtypes) == 1 else ""}
     # ``&g`` inside a macro body (``#define CFG_PTR (&g_cfg)``) takes g's address wherever the macro is used — the
     # function scan only sees ``CFG_PTR`` (R2b review C6).
     type_names = frozenset(n for rec in (context.get("files") or {}).values() for n in rec.get("typedefs") or ())

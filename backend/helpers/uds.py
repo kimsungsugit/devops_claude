@@ -1454,7 +1454,8 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R2b) v33: project_context 스키마 5(`build` — `.cproject` 툴체인 include 경로. 트리에 없는 따옴표 include 를 툴체인
 #   헤더로 해석한다 — KJPDS02_PV 는 `hidef.h` 하나 때문에 그 뒤 헤더 전부가 미정이었다).
 # (R2b) v34: project_context 스키마 6(`roots` — APP·BOOT 가 같은 헤더명을 가질 때 include 를 소스 루트별로 해석).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v34"
+# (R14) v35: project_context 스키마 7(함수 선언 반환 타입 — 시퀀스가 준 `F() return` 스텁 값을 그 타입으로 변환).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v35"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

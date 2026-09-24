@@ -59,6 +59,10 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
             if scoped and derived:
                 item["basis"] = slot.get("basis", "")
                 item["assumptions"] = list(evaluated.get("assumptions") or ())
+                if evaluated.get("stubs"):
+                    # (R14 review W3) the sequence stubbed these callees — the value holds only when the tester stubs
+                    # them too (recorded per sequence: an output that does not use the stub carries it as well)
+                    item["stubs"] = list(evaluated["stubs"])
             if scope_note:
                 item["project_scope"] = scope_note
                 if not derived:
@@ -84,7 +88,9 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
     """Count all expected slots, treating absent provenance as unrecorded."""
     counts = {"derived": 0, "unknown": 0, "proposed": 0, "unrecorded": 0, "total": 0,
               # (R2b) ``derived`` split: a value the function assigned vs an output it left as the sequence set it.
-              "derived_assigned": 0, "derived_unchanged_input": 0}
+              "derived_assigned": 0, "derived_unchanged_input": 0,
+              # (R14) derived in a sequence that stubbed a callee return — an upper bound of the values that rest on it
+              "derived_in_stubbed_sequence": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
             item = seq.get("expected_evidence", {}).get(var) or {}
@@ -95,4 +101,6 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
                 counts["derived_unchanged_input"] += 1
             elif status == "derived":
                 counts["derived_assigned"] += 1
+            if status == "derived" and item.get("stubs"):
+                counts["derived_in_stubbed_sequence"] += 1
     return counts

@@ -27,7 +27,7 @@ from typing import Any
 
 from generators import c_project_context as cpc
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
 _UB_REASONS = frozenset({"signed_overflow", "division_by_zero", "shift_count_out_of_range", "signed_left_shift_overflow",
                          "float_to_int_out_of_range"})
 _EXECUTION_BUDGET = 200_000
@@ -160,6 +160,7 @@ class _Interp:
         does not depend on the inputs is computed once: the body's address-taken names, macro expansion parses and
         the node lists `check_sequencing` walks (R2c: per-vector re-walking was 40% of a path search)."""
         self.fn, self.raw, self.scope, self.inputs, self.parser = fn, raw, scope, inputs, parser
+        self.stubs_used: set[str] = set()   # (R14) callees whose return value the sequence set (``F() return``)
         self.shared = shared if shared is not None else {}
         self.widths = (scope.get("target") or {}).get("widths") or {}
         if not self.widths.get("int"):
@@ -244,9 +245,17 @@ class _Interp:
         """An input value as the object would hold it; out-of-type values are not executable inputs."""
         if isinstance(value, str):
             s = value.strip()
+            named = re.fullmatch(r"([A-Za-z_]\w*)\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*\s*\)", s)
             if re.fullmatch(r"[-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*", s):
                 s = s.rstrip("uUlL")
                 value = int(s, 16) if "x" in s.lower() else int(s, 10)
+            elif named:
+                # ``ERROR_OK (0)`` — the reference's name-and-value notation (R14): the value, if the name agrees
+                num = named.group(2)
+                value = int(num, 16) if "x" in num.lower() else int(num, 10)
+                known = self.constants.get(named.group(1))
+                if known is not None and known.get("value") != value:
+                    return Unknown("input_name_value_conflict:" + name)
             elif s in self.constants:
                 value = self.constants[s]["value"]
             else:
@@ -1713,7 +1722,31 @@ class _Interp:
             if info.get("pointer_write") or opaque:
                 why = "pointer_write" if info.get("pointer_write") else "writes_through:" + opaque[0]
                 self.havoc_pointer_targets(state, f"callee_pointer_write:{name}:{why}")
-        return _Val(Unknown("call_return_value:" + name), None)
+        return self.stub_return(name, info)
+
+    def stub_return(self, name, info):
+        """(R14) A sequence that sets ``F() return`` declares F a stub for this run (the unit-test convention the
+        reference follows): the call returns that value in F's declared return type (a value outside it is refused as
+        ``input_outside_declared_type``, never wrapped). What F writes stays
+        unknown (havocked above) — only the returned value is taken from the sequence. Without the input, or when F's
+        return type is not a resolvable integer type, the value is unknown as before."""
+        key = f"{name}() return"
+        if key not in self.inputs:
+            return _Val(Unknown("call_return_value:" + name), None)
+        if name == self.function_name:
+            # (review R14 W1) the function under test runs for real in its own test — a recursive call is not a stub
+            return _Val(Unknown("stub_of_function_under_test:" + name), None)
+        text = str((info or {}).get("return_type") or "")
+        if not text or "*" in text:
+            return _Val(Unknown("stub_return_type_unresolved:" + name), None)
+        t = self.type_of(text)
+        if not isinstance(t, dict) or cpc.is_float(t):
+            return _Val(Unknown("stub_return_type_unresolved:" + name), None)
+        value = self.check_input(key, t, self.inputs[key])
+        if isinstance(value, Unknown):
+            return _Val(value, None)
+        self.stubs_used.add(name)
+        return _Val(value, t)
 
     def argument(self, state, a, raw, depth):
         """Evaluate an argument. Passing an address (``&x``, a decayed array, a cast of either) only marks the object
@@ -2059,6 +2092,12 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                     assigned = name == "return" or any(_written(s, name) for s in finals)
                     values[name] = {"value": seen[0], "basis": "assigned" if assigned else "unchanged_input"}
             possible = sorted({k for s in finals for k in s.possible_ub})
+            if interp.stubs_used:
+                record["assumptions"] = list(record["assumptions"]) + [
+                    "stubbed by the sequence: " + ", ".join(f"{n}() returns the value set in '{n}() return'"
+                                                            for n in sorted(interp.stubs_used))
+                    + " (what the callee writes stays unknown)"]
+                record["stubs"] = sorted(interp.stubs_used)
             record.update(status="supported", reason="project_context_source_evaluation" +
                           (":possible_ub=" + "+".join(possible) if possible else ""),
                           outputs=values, paths=len(finals), possible_undefined_behavior=possible)

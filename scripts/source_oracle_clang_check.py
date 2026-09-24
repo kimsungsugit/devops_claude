@@ -40,6 +40,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 _FILLS = (0, 90, 201)
+# How the fills of one claim combine. Checking a claim, a contradiction wins over a harness limit. Probing for undefined
+#   behaviour (R10), an evaluation error anywhere is the answer, and a fill clang could not evaluate at all outranks a
+#   placeholder mismatch — "not reproduced" needs every fill evaluated to a value (review R10 round 2 W3).
+_CHECK_RANK = {"agree": 0, "constexpr_limit": 1, "eval_error": 2, "mismatch": 3}
+_PROBE_RANK = {"agree": 0, "mismatch": 1, "constexpr_limit": 2, "eval_error": 4}
 _REAL_EVAL_ERROR = re.compile(r"outside the range of representable|division by zero|cannot refer to element|past-the-end"
                               r"|shift|uninitialized|outside its lifetime|signed integer overflow")
 _IDENT = re.compile(r"\b[A-Za-z_]\w*\b")
@@ -113,6 +119,10 @@ def _input_int(value, constants):
         if re.fullmatch(r"[-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*", s):
             s = s.rstrip("uUlL")
             return int(s, 16) if "x" in s.lower() else int(s, 10)
+        named = re.fullmatch(r"([A-Za-z_]\w*)\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*\s*\)", s)
+        if named:   # ``ERROR_OK (0)`` — as the oracle reads it (R14)
+            num = named.group(2)
+            return int(num, 16) if "x" in num.lower() else int(num, 10)
         if s in constants:
             return constants[s]["value"]
     return None
@@ -291,6 +301,24 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                     lines.append(f"  {typ} __oracle_buf_{i}[64] = {{}};")
                     lines.append(f"  for (int __oracle_k = 0; __oracle_k < 64; ++__oracle_k) __oracle_buf_{i}[__oracle_k] = {fill};")
                     args.append(f"__oracle_buf_{i}")
+            # (R14) a callee the claim's sequence stubs (``F() return``) returns that value, in F's declared type — a
+            #   local lambda shadows the namespace stub for this run only (the oracle takes the same value)
+            for c in callees:
+                key = f"{c}() return"
+                if key not in claim["inputs"]:
+                    continue
+                rt_text = str((((scope.get("effects") or {}).get("functions") or {}).get(c) or {}).get("return_type")
+                              or "")
+                sv = _input_int(claim["inputs"][key], constants)
+                if not rt_text or "*" in rt_text or sv is None:
+                    continue
+                try:
+                    from generators.mcdc_design import _scope_type
+                    rt = _scope_type(scope, rt_text)
+                except cpc.Unresolved:
+                    continue
+                if _fits(sv, rt):
+                    lines.append(f"  auto {c} = [&](auto...) -> {_base_type(rt, enum_base)} {{ return {sv}; }};")
             plist = ", ".join(p[1] for p in params)
             if instrument:
                 nd = len(instrument["decisions"])
@@ -358,7 +386,7 @@ def _one_line(body):
 _TAG = re.compile(r"__oracle_check_\d+_\d+_\d+")
 
 
-def _run_tu(source, checks, path, clang, target, timeout):
+def _run_tu(source, checks, path, clang, target, timeout, ub_probe=False):
     """Compile one harness. Returns ({(claim, output): verdict}, {(claim, output): detail}) or a unit-level reason."""
     Path(path).write_text(source, encoding="utf-8", newline="\n")
     try:
@@ -411,27 +439,31 @@ def _run_tu(source, checks, path, clang, target, timeout):
         return None, None, "harness_compile_error:" + (other_errors[0] if other_errors else f"rc={proc.returncode}")
     verdict: dict[tuple, str] = {}
     detail: dict[tuple, str] = {}
+    rank = _PROBE_RANK if ub_probe else _CHECK_RANK
     for tag, (index, name, _value, variant, _tag) in by_tag.items():
         msgs = errors.get(tag)
         k = (index, name)
         if not msgs:
-            verdict.setdefault(k, "agree")
-            continue
-        if any("static assertion failed" in x for x in msgs):
-            verdict[k] = "mismatch"
-            detail[k] = next((x for x in msgs if "evaluates to" in x), msgs[0]) + f" (fill={_FILLS[variant]})"
-        elif verdict.get(k) != "mismatch":
-            # Undefined behaviour or an indeterminate read on the path contradicts a "derived" claim; anything else
-            # (``reinterpret_cast`` of an array argument, a volatile read) is a limit of the harness.
-            real = any(_REAL_EVAL_ERROR.search(x) for x in msgs)
-            if real or verdict.get(k) != "eval_error":
-                verdict[k] = "eval_error" if real else "constexpr_limit"
-            detail.setdefault(k, " | ".join(msgs[:3]))
+            one = "agree"
+        elif any(_REAL_EVAL_ERROR.search(x) for x in msgs) and (ub_probe or not any("static assertion failed" in x
+                                                                               for x in msgs)):
+            # Undefined behaviour or an indeterminate read on the path contradicts a "derived" claim (and, probing, is
+            # the answer — the asserted value is a placeholder: review round 1 W6)
+            one = "eval_error"
+        elif any("static assertion failed" in x for x in msgs):
+            one = "mismatch"
+        else:
+            one = "constexpr_limit"   # ``reinterpret_cast`` of an array argument, a volatile read: a harness limit
+        if rank[one] > rank[verdict.get(k, "agree")] or k not in verdict:
+            verdict[k] = one
+            if msgs:
+                text = next((x for x in msgs if "evaluates to" in x), None) if one == "mismatch" else None
+                detail[k] = (text or " | ".join(msgs[:3])) + f" (fill={_FILLS[variant]})"
     return verdict, detail, ""
 
 
 def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430", work_dir: str | None = None,
-                 timeout: int = 120) -> dict:
+                 timeout: int = 120, ub_probe: bool = False) -> dict:
     """``claims``: ``[{"unit": unit-with-project_scope, "inputs": {...}, "outputs": {name: value}, "possible_ub": [...]}]``.
 
     ``agree`` counts claims that held for every fill value (and, when the function uses an enumeration, for every
@@ -469,12 +501,13 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
             if source is None:
                 failure = reason
                 break
-            one, one_detail, reason = _run_tu(source, checks, os.path.join(work, f"u{gi}_{bi}.cpp"), clang, target, timeout)
+            one, one_detail, reason = _run_tu(source, checks, os.path.join(work, f"u{gi}_{bi}.cpp"), clang, target, timeout,
+                                              ub_probe=ub_probe)
             if one is None:
                 failure = reason
                 break
+            rank = _PROBE_RANK if ub_probe else _CHECK_RANK
             for k, v in one.items():
-                rank = {"agree": 0, "constexpr_limit": 1, "eval_error": 2, "mismatch": 3}
                 if rank[v] >= rank.get(verdict.get(k, "agree"), 0):
                     verdict[k] = v
                     if k in one_detail:
@@ -482,6 +515,12 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
             if not meta.get("enum"):
                 break  # no enumeration involved: one underlying type is the whole story
         if failure:
+            for claim in group:   # (R11) every output of the group gets this verdict
+                verdicts_of = claim.setdefault("verdicts", {})
+                for name in claim["outputs"]:
+                    verdicts_of[name] = ("eval_error" if failure == "unsequenced_in_source" else
+                                         "mismatch" if failure == "unattributed_assertion_failure" else
+                                         "unchecked:" + failure.split(":")[0])
             if failure == "unsequenced_in_source":
                 # The body itself is order-dependent: a claim on it is a real contradiction, not a harness limit.
                 for index, claim in enumerate(group):
@@ -507,6 +546,10 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
                 # The oracle disclosed that this run may be undefined (an unknown divisor/shift/index/overflow — the
                 # fill values chose one) and clang reports that kind: not a counterexample to a disclosed claim.
                 v = "possible_ub_disclosed"
+            # (R11) the verdict per claim output, for callers that annotate rows
+            group[index].setdefault("verdicts", {})[name] = (
+                "unchecked:" + v if v in {"constexpr_limit", "possible_ub_disclosed"} else
+                "agree_with_stubbed_callees" if v == "agree" and meta.get("callees") else v)
             if v in {"constexpr_limit", "possible_ub_disclosed"}:
                 report["unchecked"] += 1
                 report["unchecked_reasons"][v] += 1
@@ -540,6 +583,7 @@ def _claims_from_xlsm(xlsm: str, source_root: str) -> tuple[list[dict], dict]:
         key = (d["Source path"], d["Function"], d["Test Case ID"], d["Sequence"])
         reason = str(d.get("Reason") or "")
         g = grouped.setdefault(key, {"inputs": json.loads(d.get("Inputs JSON") or "{}"), "outputs": {},
+                                     "source_hash": str(d.get("Source SHA256") or ""),
                                      "possible_ub": reason.split("possible_ub=", 1)[1].split("+") if "possible_ub=" in reason else []})
         g["outputs"][d["Observable"]] = int(d["Expected"])
     # Several roots (``APP,BOOT``) are joined with ``,``/``;`` as in the SCM registry — one context, as generated.
@@ -561,15 +605,27 @@ def _claims_from_xlsm(xlsm: str, source_root: str) -> tuple[list[dict], dict]:
     scopes = build_scopes(context, paths)
     units: dict[tuple, dict] = {}
     claims = []
+    skipped: dict[tuple, str] = {}
     for (path, fn, _tc, _seq), g in grouped.items():
         if path not in scopes:
+            skipped[(path, fn, _tc, _seq)] = "source_missing"
+            continue
+        # (review R11 W4) the row was derived from the text its hash names: a changed file is not what it claims about
+        if g["source_hash"] and g["source_hash"] not in _text_hashes(texts[path]):
+            skipped[(path, fn, _tc, _seq)] = "source_changed"
             continue
         unit = units.setdefault((path, fn), {"name": fn, "source_text": texts[path], "source_path": path,
                                              "project_scope": scopes[path]})
-        claims.append({"unit": unit, **g})
+        claims.append({"unit": unit, "key": (path, fn, _tc, _seq), **g})
     meta = {"xlsm": xlsm, "source_root": source_root, "derived_sequences": len(grouped),
-            "sequences_with_source": len(claims)}
+            "sequences_with_source": len(claims), "skipped_sequences": skipped,
+            "skipped_reasons": dict(Counter(skipped.values()))}
     return claims, meta
+
+
+def _text_hashes(text: str) -> set[str]:
+    """The text's SHA-256 as read and with CRLF → LF (the generator's local mode reads with universal newlines)."""
+    return {hashlib.sha256(text.encode()).hexdigest(), hashlib.sha256(text.replace("\r\n", "\n").encode()).hexdigest()}
 
 
 def main(argv=None) -> int:
@@ -581,6 +637,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
     claims, meta = _claims_from_xlsm(args.xlsm, args.source_root)
+    meta = {k: v for k, v in meta.items() if k != "skipped_sequences"}
     report = {**meta, **check_claims(claims, clang=args.clang, target=args.target)}
     text = json.dumps(report, ensure_ascii=False, indent=1, default=str)
     if args.out:
