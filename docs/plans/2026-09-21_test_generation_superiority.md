@@ -35,7 +35,7 @@
 | R2 | 실소스 도메인 해석(프로젝트 typedef·정수 `#define`·헤더 전역, 함수 노드 한정 파싱, 16bit int) | P2/G3 | 완료(아래 R2 기록) — G3 복합 61.1% 충족, G2 는 R2b 로 분리 |
 | R2b | 소스 oracle 을 프로젝트 문맥 위로 — 전역 출력·매크로·16bit 산술·callee 효과·경로 분기(`generators/c_source_oracle.py`) + clang 독립 대조 | P1/G2 | 완료(아래 R2b 기록) — G2 충족(반증 0 · 함수 43.5%) |
 | R2c | MC/DC 지역변수 값 전파·결정 전 입력 갱신(oracle 의 경로 상태를 결정식 평가에 재사용) | P2/G3 | 완료(아래 R2c 기록) — SUTS 설계 결정 HDPDM01 307→400 · _pv 373→606, 경로 쌍 clang 반증 0 |
-| R3 | ~~`svn log`+export~~ → **오프라인 정합**(SVN 접근 불가, 2026-09-24): 정본 SUTS 입력 벡터를 현재 소스에 oracle 로 재평가 → 정본 기대값과 일치/불일치를 함수별로 분류해 정합 함수 범위를 추정 + 정본 벡터/판정값 파서 | P0 | 대기 |
+| R3 | ~~`svn log`+export~~ → **오프라인 정합**(SVN 접근 불가, 2026-09-24): 정본 SUTS 입력 벡터를 현재 소스에 oracle 로 재평가 → 정본 기대값과 일치/불일치를 함수별로 분류해 정합 함수 범위를 추정 + 정본 벡터/판정값 파서 | P0 | 완료(아래 R3 기록) — 정합 유닛 212 · 불일치 0 |
 | R4 | mutation harness(gcc·등가 mutant 판정) + 버그수정 replay → G1·G2 기준선 | P0/P6 | 대기 |
 | R5 | 요구 정량 모델 `generators/requirement_oracle.py` + gold set | P3 | 대기 |
 | R6 | STS 적용(임계±분해능·duration±δ·부정 시나리오, "Requirement Evidence" 시트) | P3 | 대기 |
@@ -227,9 +227,17 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
 - **검증**: `test_mcdc_path_design` 36 · 관련 스위트 403 passed, 새 가드 뮤테이션 16 개 중 15 개를 테스트가 잡는다(scope 고정 해제 1 건은 id 키와 중복이라 생존). 전체 스위트(`tests/`, `-n 5`, 3 라운드 수정 전) 11,366 passed · 11 skipped · 0 failed · 518 초.
 - **남은 한계(공시)**: 탐색은 완전하지 않다(예산·표본값). callee 반환값·스텁 효과는 미상으로 둔다. finalize 재검증은 같은 oracle 이다. 결정 이후 가능 UB 는 제외가 아니라 공시다.
 
-## R3 · R4 준비 (2026-09-24)
+## R3 기록 — 정본 SUTS 오프라인 정합 (2026-09-24, R84)
 
-- R3 `scripts/reference_alignment.py`: 정본 SUTS(v3.01) 벡터를 현재 소스(APP+FBL)에 oracle 로 재평가 — 함수 정합 215 · 미상 192 · 매크로 정의(ISR) 12 · 소스에 없음 1, 칸 일치 3,269 · 불일치 0. 커밋은 R2c 다음.
+- **왜**: 정본이 쓰인 소스 revision 을 SVN 없이 꺼낼 수 없다. revision diff 대신 정본의 시퀀스(입력 → 기대값)를 **현재 소스**(APP `PDS64_RD` + FBL `PDS64_FBL`)에 소스 oracle 로 다시 돌려, 정본이 적은 기대값과 칸마다 일치·불일치·비교 불가를 가른다(`scripts/reference_alignment.py`). 일치하는 유닛이 R4·R9 의 비교 범위다 — 함수가 안 바뀌었다는 증명이 아니라 "표본 벡터가 일치한다" 는 뜻이다.
+- **판정**: 유닛별로 `aligned`(비교 가능 칸이 있고 전부 일치, 그중 함수가 **계산한** 값이 하나 이상) · `echo_only`(일치가 전부 함수가 쓰지 않은 입력의 반향) · `divergent` · `unknown`(사유 보존) · `no_reference_expectation` · `no_sequences` · `ambiguous_definition` · `definition_not_parsed`(ISR 매크로 정의) · `not_in_source` · `error:<type>`(그 유닛만 남기고 계속, 종료 코드 1). 정본이 형 범위 밖 값을 쓰면(`U8` 에 `-1`) C 대입 변환으로 넣고 변환 내역을 공시한다. 정본이 이름(`K_NINE`)으로 적은 기대값은 현재 소스의 값으로 읽고 `agree_via_reference_symbol` 로 따로 센다.
+- **같은 이름의 정의가 둘**(APP·FBL 의 `EEPROM_Init` 등 17 유닛): 모든 정의에서 평가하고, 비교 가능한 칸이 있는 정의만 유닛을 가질 수 있으며 **일치 수**로만 고른다(불일치가 적다는 이유로 고르면 불일치를 숨긴다). 일치 수가 같으면 경로가 모호하다 — 전부 불일치하면 `divergent`, 일부만이면 불일치를 남긴 `ambiguous_definition`. 후보별 칸 수를 모두 남긴다.
+- **실측(HDPDM01, `--clang`)**: 유닛 aligned **212** · unknown 150 · no_reference_expectation 43 · definition_not_parsed 7 · no_sequences 4 · echo_only 3 · not_in_source 1. 칸 일치 **3,269** · **불일치 0** · 비교 불가 6,404(1위 `observable_form_unmodeled`, `callee_pointer_write`, `written_by_callee`, `call_return_value`). 일치 근거: 함수가 쓴 값 2,789 · 입력 반향 480(그중 기호 기대값 380). 정합 유닛 중 증거 강도(일치/전체 칸) 20% 미만 14 · 50% 미만 44. 다중 정의 17 유닛 중 불일치 후보 0 — "불일치 0" 은 후보 전부에서 성립한다. clang 재대조 대상(불일치) 없음.
+- **리뷰**: deep-reviewer 2 라운드. R1 Critical — 후보 선택 키 `(불일치==0, 일치, −불일치)` 가 불일치 없는 쪽을 먼저 골라 불일치를 숨길 수 있었다(실측 17 유닛 중 17 이 FBL 정의로 확정, 탈락 후보 기록 없음). 그 밖에 입력 반향 일치를 정합으로 셈, 변환 내역 미기록, 사유 없는 unknown, clang 의 스텁 callee 일치 무시, 이름 키 소비자(R4)의 중복 유닛 병합, `--out` 이 읽기 전용 입력을 덮을 수 있음. R2 — 동률에서 불일치가 적은 쪽 선택·전원 불일치 동률의 소실, 기호 기대값을 R4 가 다르게 읽음, 생성본 쪽 중복 이름 미제외, 기준 합계의 겹쳐 세기. 전부 반영했고 새 가드 12 개 중 12 개를 테스트가 잡는다(뮤테이션).
+- **한계(공시)**: 소스 oracle 은 모델이다(불일치가 나오면 clang 으로 재대조). 비교 불가 칸이 2/3 이라 정합은 표본 범위에서의 주장이다. SVN 이 되면 revision 정합으로 대체한다.
+
+## R4 준비 (2026-09-24)
+
 - R4 `scripts/mutation_eval.py`: 정합 함수 191 개, 구별 가능한 변이 1,599 개 중 정본 79.9% · 생성본 64.6% 판별(−15.3%p). 정본만 판별한 518 개 중 442 개는 생성본이 그 출력을 적고도 경계·상태 벡터가 없어 못 가른 것이다. 커밋은 R3 다음.
 
-다음 구현은 R3(오프라인 정합) 커밋, R4(변이 판별 기준선 + 변이 유도 벡터 선택)이다. P3 정량 요구 oracle, P4 통합 상태·시간·오류 전파, P5 UI 근거 표시, 그리고 R10~R14 정본 초과 후보가 남아 있다.
+다음 구현은 R4(변이 판별 기준선 + 변이 유도 벡터 선택)이다. P3 정량 요구 oracle, P4 통합 상태·시간·오류 전파, P5 UI 근거 표시, 그리고 R10~R14 정본 초과 후보가 남아 있다.

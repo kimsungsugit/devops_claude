@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import Any
+
+from report_gen.atomic_io import replace_with_retry
 
 try:
     from filelock import FileLock
@@ -54,7 +55,7 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
         newline="\n",  # `.gitattributes` `*.json text eol=lf` — 저장 한 번으로 줄끝이 뒤집히지 않게
     )
-    os.replace(str(tmp), str(path))
+    replace_with_retry(str(tmp), str(path))  # Windows scanner holds the just-written file (atomic_io)
 
 
 def _ensure_file() -> None:

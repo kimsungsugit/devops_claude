@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 import zipfile
 from pathlib import Path
@@ -81,6 +82,27 @@ def normalize_zip_member_times(path: Path, *, date_time: _DateTime6 = ZIP_FIXED_
             pass  # silent-ok: 성공 경로에선 이미 replace 돼 없고, 실패 경로의 정리 실패는 결과를 바꾸지 않는다
 
 
+# Windows: a file just written is often opened for a moment by an antivirus / indexer scanner, and ``os.replace`` onto
+# it fails with a sharing violation (``PermissionError: [WinError 5]``). Seen in the test gate: the second
+# ``users.add_user`` of a fixture failed 2 of 3 runs. The rename is retried briefly; any other error, or the same one
+# on another OS (a real permission problem there), is raised at once.
+_REPLACE_ATTEMPTS = 20
+_REPLACE_DELAY_S = 0.05
+_IS_WINDOWS = os.name == "nt"
+
+
+def replace_with_retry(src, dst) -> None:
+    """``os.replace(src, dst)``, retried for up to ~1 s on a Windows sharing violation, then raised as is."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if not _IS_WINDOWS or attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_DELAY_S)
+
+
 def atomic_write_text(out: Path, text: str, *, encoding: str = "utf-8") -> None:
     """`text` 를 `out` 에 원자적으로 기록한다(임시 파일 + `os.replace`)."""
     out = Path(out)
@@ -89,7 +111,7 @@ def atomic_write_text(out: Path, text: str, *, encoding: str = "utf-8") -> None:
     tmp = out.with_name(f"{out.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text, encoding=encoding)
-        os.replace(tmp, out)
+        replace_with_retry(tmp, out)
     except BaseException:
         try:
             tmp.unlink()

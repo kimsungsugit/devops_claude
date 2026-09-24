@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover
     FileLock = None  # type: ignore[assignment]
 
 from backend.services.auth_service import hash_password, verify_password
+from report_gen.atomic_io import replace_with_retry
 
 # 46차 W32 — timing attack 차단용 dummy hash.
 # unknown user verify 시에도 동일한 bcrypt round 호출하여 응답 시간 동등화 → user enumeration 차단.
@@ -95,7 +96,7 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
         # 뒤집힌다. 같은 실수가 훅 스크립트에서 나면 bash 가 실행을 거부한다.
         newline="\n",
     )
-    os.replace(str(tmp), str(path))
+    replace_with_retry(str(tmp), str(path))  # Windows scanner holds the just-written file (atomic_io)
 
 
 def _ensure_file() -> None:
