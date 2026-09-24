@@ -3144,6 +3144,11 @@ def generate_sits_xlsm(
             _n_iface = write_interface_evidence_sheet(wb, itcs or [])
             if isinstance(_sctx.get("stats_out"), dict):
                 _sctx["stats_out"]["interface_evidence_rows"] = _n_iface
+            # (R16) 기대값 근거 — 칸마다 도출(해석한 callee·가정) 또는 못 한 사유
+            from generators.integration_oracle import write_integration_evidence_sheet
+            _n_ev = write_integration_evidence_sheet(wb, itcs or [])
+            if isinstance(_sctx.get("stats_out"), dict):
+                _sctx["stats_out"]["test_evidence_rows"] = _n_ev
         except Exception as exc:  # noqa: BLE001 — 근거 시트 실패가 규격 시트를 못 죽인다
             _logger.warning("SITS: 근거 시트 생성 실패(%s) — 규격 시트는 그대로 저장한다: %s",
                             type(exc).__name__, exc)
@@ -3289,6 +3294,8 @@ def generate_sits_quality_report(
         "total_source_functions": total_source_functions,
         # (R7) 인터페이스 계약: 모듈 경계 호출·반환 사용·제안값 근거/못 정한 사유별 수(추출 실패면 {"error": …})
         "interface_contract": fs.get("interface_contract"),
+        # (R16) 통합 기대값: 함수 간 oracle 이 도출한 칸·못 한 사유·해석 못 한 callee 사유(실패면 {"status": "error:…"})
+        "integration_oracle": fs.get("integration_oracle"),
     }
 
 
@@ -3653,6 +3660,8 @@ def generate_sits(
 
     function_details: Dict[str, Dict[str, Any]] = {}
     total_source_functions = 0
+    # (R16) 함수 간 oracle 의 입력(파일 원문·프로젝트 C 문맥) — 전체 파서 경로에서만 생긴다(경량 파서는 없음).
+    _oracle_source: Optional[Dict[str, Any]] = None
     try:
         try:
             from backend.helpers import _get_source_sections_cached
@@ -3661,6 +3670,7 @@ def generate_sits(
             from report_generator import generate_uds_source_sections
             report_data = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
         function_details = report_data.get("function_details", {})
+        _oracle_source = report_data
         # 배열 **선언 크기**의 출처. 이걸 안 꺼내면 흐름 수집이 `(size: N)` 꼬리가
         # 붙은 엔트리만 펼치고, 문서 유래 이름(꼬리 없음)은 base 한 칸으로 나간다
         # — SUTS 가 7차 라운드에서 겪은 사각과 같은 형태다.
@@ -3836,6 +3846,20 @@ def generate_sits(
         flow_stats["flows_with_boundary_subcases"] = sum(
             1 for _t in itcs if _has_boundary_subcases(_t.get("sub_cases")))
         flow_stats["boundary_subcase_min_distinct"] = _SITS_BV_MIN_DISTINCT
+
+    # (R16, 격차 ②) 통합 기대값 — 흐름의 진입 함수를 callee 본문까지 따라 해석해(stub 아님) 관측 변수의 값을 도출한다.
+    #   도출 못 한 칸은 사유와 함께 `[검증 필요]` 로 남는다. 실행 결과가 아니다(하드웨어·인터럽트·다른 태스크는 모델 밖).
+    if (project_config or {}).get("integration_oracle", True):
+        _progress(62, "통합 기대값 도출(함수 간 소스 oracle)")
+        try:
+            from generators.integration_oracle import attach_integration_evidence
+            flow_stats["integration_oracle"] = attach_integration_evidence(
+                itcs, _oracle_source, function_details, _shared_c_parser(),
+                on_progress=lambda i, n: _progress(62, f"통합 기대값 도출(함수 간 소스 oracle) — TC {i}/{n}")
+                if i == 1 or i == n or i % 10 == 0 else None)
+        except Exception as exc:  # noqa: BLE001 — 도출 실패가 규격을 못 죽인다(칸은 `[검증 필요]` 그대로, 사유는 남긴다)
+            _logger.warning("SITS: 통합 기대값 도출 실패(%s)", type(exc).__name__, exc_info=True)
+            flow_stats["integration_oracle"] = {"status": f"error:{type(exc).__name__}", "error": str(exc)[:200]}
 
     # (R7, P4/G5) 인터페이스 계약 — 경로상 모듈 경계 호출(반환 사용·비교 상수·인자 바인딩)과 전역 생산→소비를 소스에서
     #   읽어 **근거로만** 싣는다. 흐름의 callee 는 통합 대상이라 반환을 주입하면 통합 시험이 stub 시험이 된다(리뷰 W1) —

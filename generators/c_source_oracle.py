@@ -192,6 +192,14 @@ class _Interp:
         # (R2c) control conditions whose outcome to record (``if``/loop/``?:`` conditions guarding a watched decision)
         self.guards: dict = {}
         self.function_name = ""
+        # (R16) interprocedural: the evaluation's `_World` (None = callees are effects only, as before), this
+        # activation's parameter keys (a callee's ``@param:x`` must not be the caller's) and its step ceiling.
+        self.world: Any = None
+        # (R16 review C-R2-1) call sites whose order against another effectful call is unspecified: run as effects only
+        self.no_inline: set[tuple] = set()
+        self.no_inline_depth = 0
+        self.param_prefix = "@param:"
+        self.limit = _EXECUTION_BUDGET
         if "body_address_names" in self.shared:
             self.body_address_names = set(self.shared["body_address_names"])
             return
@@ -218,9 +226,17 @@ class _Interp:
         self.shared["body_address_names"] = frozenset(self.body_address_names)
 
     # ── budgets / helpers ────────────────────────────────────────────────────────────────────────
+    def raw_tag(self, raw):
+        """What a local's key says about the text it is declared in. The function's own unit text is named by its unit
+        (R16 review C1: callers in different units handed the same callee text as different buffers — one ``static``
+        became two objects); a statement-macro expansion by its buffer, which is kept alive (`kept_raws`)."""
+        if raw is self.fn_raw and self.scope.get("path"):
+            return "u:" + str(self.scope["path"])
+        return f"e{id(raw)}"
+
     def tick(self):
         self.steps += 1
-        if self.steps > _EXECUTION_BUDGET:
+        if self.steps > self.limit:
             raise Unsupported("execution_budget")
 
     def lift(self, fn, *args):
@@ -281,9 +297,13 @@ class _Interp:
     def initial(self, state, key, base, t, volatile=False):
         if volatile:
             return Unknown("volatile_object:" + base)
+        if self.world is not None and base in self.world.ambiguous:
+            # (R16 review W-R2-1) ``static U8 s_init`` in two units: an input named ``s_init`` means neither for sure
+            return Unknown("object_name_ambiguous_in_project:" + base)
         if state.havoc_all:
             return Unknown(state.havoc_all)
-        if state.havoc_pointer and (base in self.arrays or base in self.address_taken):
+        if state.havoc_pointer and (base in self.arrays or base in self.address_taken
+                                    or (self.world is not None and base in self.world.array_names)):
             return Unknown(state.havoc_pointer)
         if base in state.havoc_bases:
             return Unknown(state.havoc_bases[base])
@@ -319,26 +339,39 @@ class _Interp:
         self.havoc_statics(state, reason)  # unknown code may call back into this function
         if not state.havoc_all:
             state.havoc_all = reason
+        if self.world is not None:
+            self.world.all_havocs += 1
 
     def havoc_statics(self, state, reason):
+        # (R16) with callees interpreted, the static locals of every activation this evaluation ran are in the store:
+        # code that may re-enter this function may re-enter any of them too
+        statics = self.static_keys if self.world is None else self.world.all_statics() | self.static_keys
         for key in list(state.store):
-            if key.split("[", 1)[0] in self.static_keys:
+            if key.split("[", 1)[0] in statics:
                 state.store[key] = _havocked(state.store[key], reason)
-        for base in self.static_keys:
+        for base in statics:
             state.havoc_bases.setdefault(base, reason)
 
     def havoc_pointer_targets(self, state, reason):
         """A write through a pointer: it reaches only an object whose address was taken somewhere in the project,
         an array (arrays decay to pointers without ``&``) or a local whose address left this function — given that
         an integer converted to a pointer addresses hardware, not a C object (see ``ASSUMPTIONS``)."""
+        world = self.world
+        arrays, globals_ = self.arrays, self.globals
+        other_arrays = world.array_names if world is not None else ()
+        other_globals = world.global_names if world is not None else ()
         for key in list(state.store):
             base = key.split("[", 1)[0]
-            if base in state.escaped or base in self.arrays or (base in self.globals and base in self.address_taken):
+            # (R16 review C4) with callees interpreted, the store holds objects of other units: judged by all of them
+            if base in state.escaped or base in arrays or base in other_arrays or (
+                    (base in globals_ or base in other_globals) and base in self.address_taken):
                 state.store[key] = _havocked(state.store[key], reason)
         for base in state.escaped:
             state.havoc_bases.setdefault(base, reason)
         if not state.havoc_pointer:
             state.havoc_pointer = reason
+        if world is not None:
+            world.pointer_havocs += 1
 
     def store(self, state, target, val):
         kind = target[0]
@@ -375,11 +408,14 @@ class _Interp:
         return [cpc.ctype(k, s, self.widths) for k, s in (("int", True), ("int", False), ("char", True), ("char", False))]
 
     # ── function entry ───────────────────────────────────────────────────────────────────────────
-    def bind_parameters(self, state):
+    def bind_parameters(self, state, args=None):
+        """Parameters from the sequence's inputs — or, for an interpreted callee (R16), from the caller's argument
+        values (``args``: `_Val` per argument, in order; a count that does not match refuses the activation)."""
         from generators.mcdc_design import _function_name
         _, fdecl = _function_name(self.fn, self.raw)
         frame: dict[str, dict] = {}
         params = fdecl.child_by_field_name("parameters")
+        position = 0
         for p in _named(params):
             if p.type != "parameter_declaration":
                 if p.type == "variadic_parameter":
@@ -389,14 +425,23 @@ class _Interp:
             if ident is None:
                 continue
             name = cpc._declared_name(ident, self.raw)
-            key = "@param:" + name
+            key = self.param_prefix + name
             quals = [_text(c, self.raw) for c in p.named_children if c.type == "type_qualifier"]
+            arg = None
+            if args is not None:
+                if position >= len(args):
+                    raise Unsupported("argument_count_mismatch")
+                arg = args[position]
+            position += 1
             if ident.type == "identifier":
                 t = self.type_of(" ".join(quals + [_text(typ, self.raw)]))
                 volatile = "volatile" in quals or (isinstance(t, dict) and "volatile" in (t.get("qualifiers") or []))
                 info = {"key": key, "type": t if isinstance(t, dict) else None, "volatile": volatile, "kind": "param"}
                 if isinstance(t, Unknown):
                     state.store[key] = t
+                elif args is not None:
+                    # C11 6.5.2.2p7: the argument is converted, as if by assignment, to the parameter's type
+                    state.store[key] = self.convert_to(arg, t) if arg is not None else Unknown("argument_missing:" + name)
                 elif name in self.inputs:
                     state.store[key] = self.check_input(name, t, self.inputs[name])
                 else:
@@ -406,6 +451,8 @@ class _Interp:
                 state.store[key] = Unknown("pointer_parameter:" + name)
             frame[name] = info
             self.params[name] = info
+        if args is not None and position != len(args):
+            raise Unsupported("argument_count_mismatch")
         self.lexical.append(frame)
 
     # ── statements ───────────────────────────────────────────────────────────────────────────────
@@ -558,35 +605,52 @@ class _Interp:
             done = [s for s in states if s.mode != "normal"]
             pending = [s for s in states if s.mode == "normal"]
             first = k == "do_statement"
-            iterations = 0
-            while pending:
-                iterations += 1
-                if iterations > _LOOP_BUDGET:
-                    raise Unsupported("loop_iteration_budget")
-                if not first and cond is not None:
-                    pending, exits = self.branch(pending, cond)
-                    done.extend(exits)
-                first = False
-                if not pending:
-                    break
-                after = self.run(pending, body) if body is not None else pending
-                pending = []
-                for s in after:
-                    if s.mode == "break":
-                        s.mode = "normal"
-                        done.append(s)
-                    elif s.mode == "return":
-                        done.append(s)
-                    else:
-                        s.mode = "normal"
-                        pending.append(s)
-                if update is not None:
-                    pending = [self.full_expression(s, update, self.raw) for s in pending]
-                if len(done) + len(pending) > _PATH_BUDGET:
-                    raise Unsupported("path_budget")
-            return done
+            if pending and self.world is not None and _endless(n, cond, self.raw, self):
+                # (R16 review C-R2-3) ``while (1U) {}`` with no way out: the path never returns to its caller — what
+                # a test observes then is not a return state. Refused, never assumed to return.
+                raise Unsupported("non_terminating_loop")
+            exits_before = len(done)
+            try:
+                return self.loop_iterations(pending, done, first, cond, body, update)
+            except Unsupported as exc:
+                # (R16 review C-R3-3) a loop whose controlling expression is constant is not one the implementation may
+                # assume to terminate (C11 6.8.5p6): out of budget with no path out yet, it may never end — never
+                # assumed to return. (W-R4-3) once some path left it (a polled register), the caller's fallback stands.
+                if self.world is not None and str(exc) in {"loop_iteration_budget", "execution_budget", "path_budget"} \
+                        and len(done) == exits_before and _constant_condition(cond, self.raw, self):
+                    raise Unsupported("constant_condition_loop_unfinished") from exc
+                raise
         finally:
             self.lexical.pop()
+
+    def loop_iterations(self, pending, done, first, cond, body, update):
+        iterations = 0
+        while pending:
+            iterations += 1
+            if iterations > _LOOP_BUDGET:
+                raise Unsupported("loop_iteration_budget")
+            if not first and cond is not None:
+                pending, exits = self.branch(pending, cond)
+                done.extend(exits)
+            first = False
+            if not pending:
+                break
+            after = self.run(pending, body) if body is not None else pending
+            pending = []
+            for s in after:
+                if s.mode == "break":
+                    s.mode = "normal"
+                    done.append(s)
+                elif s.mode == "return":
+                    done.append(s)
+                else:
+                    s.mode = "normal"
+                    pending.append(s)
+            if update is not None:
+                pending = [self.full_expression(s, update, self.raw) for s in pending]
+            if len(done) + len(pending) > _PATH_BUDGET:
+                raise Unsupported("path_budget")
+        return done
 
     def switch(self, states, n):
         raw = self.raw
@@ -673,7 +737,7 @@ class _Interp:
             if "extern" in storage:
                 frame[name] = {"extern": True}
                 continue
-            key = f"@local:{name}@{id(raw)}:{target.start_byte}"  # one statement-macro expansion ≠ another (round 2 H)
+            key = f"@local:{name}@{self.raw_tag(raw)}:{target.start_byte}"  # one macro expansion ≠ another (round 2 H)
             volatile = "volatile" in quals or (isinstance(t, dict) and "volatile" in (t.get("qualifiers") or []))
             if target.type == "identifier":
                 info = {"key": key, "type": t if isinstance(t, dict) else None, "volatile": volatile, "kind": "local"}
@@ -899,6 +963,8 @@ class _Interp:
             if not any(x.type == "identifier" and _text(x, raw) in self.macro_status and not self.macro_constant(_text(x, raw))
                        for x in _walk(left)):
                 top.add(_key(_unwrap(root.child_by_field_name("right"))))
+        if self.world is not None:
+            self.mark_unordered_calls(nodes, raw, inside, state)
         nested = [x for x in nodes if _key(x) not in top and (
             x.type in {"assignment_expression", "update_expression", "gnu_asm_expression"}
             or (x.type == "call_expression" and not self.is_cast_call(x, raw) and not self.pure_macro_call(x, raw)))]
@@ -907,6 +973,59 @@ class _Interp:
                 name = _text(x, raw) if x.type == "identifier" else ""
                 if name in self.macro_status and not self.macro_constant(name) and not self.transparent_macro(name):
                     raise Unsupported("macro_in_order_dependent_expression:" + name)
+
+    def mark_unordered_calls(self, nodes, raw, inside, state):
+        """(R16 review C-R2-1, C-R3-1/2) A call's body runs indeterminately sequenced with the rest of its full expression
+        (C11 6.5.2.2p10): ``Rd() - Rd()``, ``Rd() + (g_in = 5U)``, ``Rd() + (Ext(), 0U)``. Interpreting it in text order
+        would present one order's result as the program's. A project call (or a function-like macro whose arguments
+        hold one — its expansion runs from another buffer) that is unordered with a write, with unknown code, or with an
+        effectful call runs as effects only (its result unknown), as it would without a world."""
+        sites = []   # (node, markable, effectful, kind)
+        for x in nodes:
+            if x.type in {"assignment_expression", "update_expression", "gnu_asm_expression"}:
+                sites.append((x, False, True, "write"))
+            elif x.type == "call_expression" and not self.is_cast_call(x, raw):
+                f = x.child_by_field_name("function")
+                name = _text(f, raw) if f is not None and f.type == "identifier" else ""
+                if name and name in self.macro_status:
+                    if name in self.macro_params:
+                        args = x.child_by_field_name("arguments")
+                        inner = [c for c in _walk(args) if c.type == "call_expression"] if args is not None else []
+                        if inner:
+                            sites.append((x, True, True, "macro"))
+                elif name and name in self.closure:
+                    sites.append((x, True, self.world.effectful(name, self.closure), "call"))
+                else:
+                    sites.append((x, False, True, "unknown"))   # no definition we model, or an indirect call
+        for x in nodes:
+            if x.type == "assignment_expression" and _op(x, raw) not in {"=", ""}:
+                # (review C-R4-1) ``g op= f()``: the read of ``g`` is unsequenced with ``f()``'s body — a callee that
+                # may write ``g`` makes the result order-dependent (C11 6.5.16p3, 6.5.2.2p10). A target no callee can
+                # reach (``u8t_err |= Check()``, a local whose address never left) keeps the call interpreted.
+                right = x.child_by_field_name("right")
+                left = x.child_by_field_name("left")
+                base = cpc._base_identifier(left, raw) if left is not None else ""
+                plain = left is not None and _unwrap(left) is not None and _unwrap(left).type == "identifier"
+                for node, markable, effectful, kind in sites:
+                    if not (markable and effectful and right is not None and right.start_byte <= node.start_byte
+                            and node.end_byte <= right.end_byte):
+                        continue
+                    if kind == "call" and base and plain:
+                        f = node.child_by_field_name("function")
+                        if not self.call_may_write(_text(f, raw), self.resolve_alias(base), state):
+                            continue
+                    self.no_inline.add((id(raw), node.start_byte, node.end_byte))
+        if len(sites) < 2:
+            return
+        for i, (a, ma, ea, _ka) in enumerate(sites):
+            for b, mb, eb, _kb in sites[i + 1:]:
+                if not (ma or mb) or not (ea or eb):
+                    continue
+                if inside(a, b) or inside(b, a) or _sequenced_apart(a, b, raw):
+                    continue   # nested: an argument (or assigned value) is evaluated before its call (store)
+                for node, markable in ((a, ma), (b, mb)):
+                    if markable:
+                        self.no_inline.add((id(raw), node.start_byte, node.end_byte))
 
     def nodes_of(self, n, raw):
         """``list(_walk(n))`` — cached for the function's own text (its buffer outlives every vector)."""
@@ -1095,7 +1214,14 @@ class _Interp:
         if k == "identifier":
             return self.read_identifier(state, _text(n, raw), n, raw, depth)
         if k == "cast_expression":
-            t = self.type_of(_text(n.child_by_field_name("type"), raw))
+            type_text = _text(n.child_by_field_name("type"), raw)
+            head = re.match(r"\s*([A-Za-z_]\w*)\s*\(", type_text)
+            if head and head.group(1) not in _TYPE_WORDS and not isinstance(self.type_of(head.group(1)), dict):
+                # (R16 review C-R3-4, W-R4-2) ``(Inc()) + 1U`` parses as a cast of ``+1U`` to the "type" ``Inc()``: the
+                # call would never run. A name that is no type followed by ``(`` is that misparse — refused. A real
+                # type (``void (*)(void)``, ``U8 (*)[4]``) keeps the old behaviour: an unknown value.
+                raise Unsupported("cast_parse_of_parenthesized_expression")
+            t = self.type_of(type_text)
             inner = self.expression(state, n.child_by_field_name("value"), raw, depth + 1)
             return self.cast(inner, t)
         if k == "unary_expression":
@@ -1691,6 +1817,13 @@ class _Interp:
                     return self.cast(self.expression(state, arg_nodes[0], raw, depth + 1), t)
         name = _text(f, raw) if f is not None and f.type == "identifier" else "<indirect>"
         if name in self.macro_status:
+            if (id(raw), n.start_byte, n.end_byte) in self.no_inline:
+                # (review C-R3-2) the expansion is parsed from its own buffer: the mark on this site covers it all
+                self.no_inline_depth += 1
+                try:
+                    return self.macro_call(state, name, arg_nodes, raw, depth)
+                finally:
+                    self.no_inline_depth -= 1
             return self.macro_call(state, name, arg_nodes, raw, depth)
         info = self.closure.get(name)
         # Declared nowhere we can read, after a missing include: it may be a macro from that header, which can write a
@@ -1701,13 +1834,26 @@ class _Interp:
         if maybe_macro or (name.startswith("__builtin_") and name not in _EVALUATING_BUILTINS):
             # (review round 3 W2) ``__builtin_constant_p(x)`` does not evaluate ``x``: a decision there is maybe run
             self.unmodeled_macro_arguments(state, arg_nodes, raw, depth)
+            values = None
         else:
-            for a in arg_nodes:
-                self.argument(state, a, raw, depth)
+            values = [self.argument(state, a, raw, depth) for a in arg_nodes]
         if info is None or name in (self.params or {}) or self.lookup(name) is not None:
             self.havoc_everything(state, "unknown_callee:" + name, locals_too=maybe_macro)
             return _Val(Unknown("call_return_value:" + name), None)
-        if self.function_name and self.function_name in (info.get("reaches") or ()):
+        if self.world is not None and values is not None and f"{name}() return" not in self.inputs \
+                and not self.no_inline_depth and (id(raw), n.start_byte, n.end_byte) not in self.no_inline:
+            # (R16) a callee with one definition in the project runs for real on this state; when it cannot (no
+            # definition, recursion, an unsupported statement, its share of the budget) the effects below stand.
+            returned = self.world.inline(self, state, name, values)
+            if returned is not None:
+                return returned
+        if self.world is not None:
+            # (R16 review C2) a callee run as effects only may run any function it reaches — among them one this
+            # evaluation interpreted (its static locals are in the store) or one on the call stack
+            touched = set(info.get("reaches") or ()) | {name}
+            if info.get("unknown_callees") or touched & self.world.interpreted_names():
+                self.havoc_statics(state, f"callee_not_interpreted:{name}")
+        elif self.function_name and self.function_name in (info.get("reaches") or ()):
             self.havoc_statics(state, f"recursion_through:{name}")  # the callee may re-enter this function
         writes = sorted(info.get("writes") or ())
         # A written name that is not a modeled scalar or array object (a pointer, a struct with pointer members)
@@ -1751,7 +1897,7 @@ class _Interp:
     def argument(self, state, a, raw, depth):
         """Evaluate an argument. Passing an address (``&x``, a decayed array, a cast of either) only marks the object
         escaped; whether the callee writes through it is the call's question (``pointer_write`` in its closure)."""
-        self.expression(state, a, raw, depth + 1)
+        return self.expression(state, a, raw, depth + 1)
 
     def macro_call(self, state, name, arg_nodes, raw, depth):
         body = self.fmacro_bodies.get(name)
@@ -1832,6 +1978,273 @@ class _Interp:
         if len(states) != 1 or states[0].mode != "normal":
             raise Unsupported("macro_statement_control_flow")
         return states[0]
+
+_INLINE_DEPTH = 12          # (R16) callee activations below the function under test
+_MISSING = object()
+# (R16 review W-R2-4, C-R2-3) a callee's refusal that is about the program, not the model: undefined behaviour (6.5p2
+# unsequenced side effects), a path that never returns — the integrated run has no return state to observe
+_REFUSING_IN_CALLEE = frozenset({"unsequenced_side_effects", "non_terminating_loop",
+                                 "constant_condition_loop_unfinished",
+                                 # (review W-R4-1) the hidden call is in no write closure: effects-only would drop it
+                                 "cast_parse_of_parenthesized_expression"})
+_TYPE_WORDS = frozenset({"void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool",
+                         "struct", "union", "enum", "const", "volatile", "__typeof__", "__typeof", "typeof"})
+
+
+def _constant_condition(cond, raw, interp):
+    """The loop's controlling expression is absent or a nonzero integer constant expression: only literals, constant
+    macros and constants (review W-R3-1 — not a macro that reads state or calls; evaluated on no state at all)."""
+    if cond is None:
+        return True
+    for x in _walk(cond):
+        if x.type in _SIDE_EFFECTS:
+            return False
+        if x.type == "identifier":
+            name = _text(x, raw)
+            if not (interp.macro_constant(name) if name in interp.macro_status else name in interp.constants):
+                return False
+    saved, interp.world = interp.world, None   # no callee can run while judging a constant
+    try:
+        v = interp.expression(_State(), cond, raw)
+    except Unsupported:
+        return False
+    finally:
+        interp.world = saved
+    return isinstance(v.v, int) and v.v != 0
+
+
+def _endless(n, cond, raw, interp):
+    """A loop with a constant nonzero (or absent) condition and no way out: no ``break`` that leaves it, no
+    ``return``/``goto``/``longjmp`` anywhere in its body."""
+    if not _constant_condition(cond, raw, interp):
+        return False
+    body = n.child_by_field_name("body")
+    if body is None:
+        return True
+    stack = [(body, False)]
+    while stack:
+        x, nested = stack.pop()
+        if x.type in {"return_statement", "goto_statement"}:
+            return False
+        if x.type == "break_statement" and not nested:
+            return False
+        if x.type == "call_expression":
+            f = x.child_by_field_name("function")
+            if f is not None and _text(f, raw) in {"longjmp", "_longjmp", "siglongjmp", "exit", "_Exit", "abort"}:
+                return False
+        inner = nested or x.type in {"while_statement", "do_statement", "for_statement", "switch_statement"}
+        stack.extend((c, inner) for c in x.named_children)
+    return True
+
+
+def _linkage_entries(scope, cache):
+    """(name, owner, kind, record) of a scope's modeled objects — owner is the unit for ``static``, else "". ``cache``
+    lives as long as the scopes it holds (the provider's — review W5: a module-level cache kept scopes of every past
+    generation and was shared across threads)."""
+    hit = cache.get(id(scope))
+    if hit is not None and hit[0] is scope:
+        return hit[1]
+    unit = str(scope.get("path") or "")
+    entries = tuple((name, unit if rec.get("static") else "", kind, rec)
+                    for kind, table in (("global", scope.get("globals") or {}), ("array", scope.get("arrays") or {}))
+                    for name, rec in table.items())
+    cache[id(scope)] = (scope, entries)
+    return entries
+
+
+class _World:
+    """(R16) One evaluation's interprocedural context — callees with a definition in the project run for real.
+
+    ``provider.definition(name, caller_path)`` gives ``(raw, fn, scope, shared, path)`` of the one definition a call
+    binds to (or raises `Unsupported`). The callee runs on a copy of the caller's state, its parameters bound to the
+    argument values; its final paths are **joined** back into the caller's one state: an object on which paths
+    disagree becomes unknown (``path_dependent_in_callee``), as does a return value they disagree on. Nothing the
+    callee does is dropped: havoc marks, escapes, possible UB and forks carry over; UB proven inside it refuses the
+    evaluation as it would in the caller. A call that cannot run (no definition, recursion, depth, an unsupported
+    statement, its budget share) falls back to the write-closure effects — the same unknowns as without a world.
+
+    Globals are keyed by name across translation units, so a name must mean one object: an internal-linkage object
+    (``static``) belongs to its translation unit, and a callee whose unit sees a same-named object of another
+    linkage is not run (``linkage_collision``)."""
+
+    def __init__(self, provider, entry, path):
+        self.provider = provider
+        self.stack = [entry]
+        self.linkage: dict[str, str] = {}
+        self.objects: dict[str, tuple[str, dict]] = {}   # name → ("global" | "array", record) of every admitted unit
+        self.failed: dict[str, str] = {}
+        self.inlined: dict[str, int] = {}
+        self.not_inlined: dict[str, int] = {}
+        self.activations = 0
+        self.admitted: set[int] = set()   # ids of scopes held alive by the provider / the entry unit
+        self.static_keys: set[str] = set()   # static locals of every callee activation run so far
+        self.types: dict[str, str] = {}     # declared type of each external object name (review W1)
+        self.array_names: set[str] = set()
+        self.global_names: set[str] = set()
+        self.kept: list[bytes] = []          # macro-expansion buffers of finished activations (their ids are in keys)
+        self.pointer_havocs = 0
+        self.all_havocs = 0
+        cache = getattr(provider, "linkage_cache", None)
+        self.linkage_cache = cache if isinstance(cache, dict) else {}
+        self.ambiguous = getattr(provider, "ambiguous_names", None) or frozenset()
+        if self.admit(entry.scope) is not None:  # one unit cannot collide with itself
+            raise Unsupported("linkage_collision_in_entry_unit")
+
+    def admit(self, scope):
+        """The first name whose linkage differs from what an earlier unit said, or None (then the unit is recorded)."""
+        if id(scope) in self.admitted:
+            return None
+        entries = _linkage_entries(scope, self.linkage_cache)
+        for name, owner, _kind, rec in entries:
+            if self.linkage.get(name, owner) != owner:
+                return name
+            if not owner and name in self.types and self.types[name] != str(rec.get("typename") or ""):
+                return name   # ``extern U8 g`` here, ``U16 g`` there: not one object as far as this model can tell
+        for name, owner, kind, rec in entries:
+            self.linkage[name] = owner
+            self.objects.setdefault(name, (kind, rec))
+            (self.array_names if kind == "array" else self.global_names).add(name)
+            if not owner:
+                self.types.setdefault(name, str(rec.get("typename") or ""))
+        self.admitted.add(id(scope))
+        return None
+
+    def all_statics(self):
+        """Static locals of every activation this evaluation ran or is running."""
+        out = set(self.static_keys)
+        for it in self.stack:
+            out |= it.static_keys
+        return out
+
+    def interpreted_names(self):
+        return set(self.inlined) | {it.function_name for it in self.stack}
+
+    def effectful(self, name, closure):
+        """Could calling ``name`` change anything another call reads — a write, a pointer write, unknown code, or a
+        static local in it or anything it reaches? (Unknown → yes.)"""
+        info = closure.get(name)
+        if info is None or info.get("writes") or info.get("pointer_write") or info.get("unknown_callees"):
+            return True
+        has_statics = getattr(self.provider, "has_static_locals", None)
+        if has_statics is None:
+            return True
+        return any(has_statics(f) for f in {name} | set(info.get("reaches") or ()))
+
+    def fail(self, name, reason):
+        self.failed.setdefault(name, reason)
+        key = reason.split(":", 1)[0]
+        self.not_inlined[key] = self.not_inlined.get(key, 0) + 1
+        return None
+
+    def inline(self, caller, state, name, args):
+        if name in self.failed:
+            return self.fail(name, self.failed[name])
+        if any(it.function_name == name for it in self.stack):
+            # the callee re-enters a running activation: its static locals may change (the fallback havocs the rest)
+            for it in self.stack:
+                it.havoc_statics(state, "recursion_through:" + name)
+            return self.fail(name, "recursion")
+        if len(self.stack) > _INLINE_DEPTH:
+            return self.fail(name, "inline_depth")
+        try:
+            raw, fn, scope, shared, _path = self.provider.definition(name, str(caller.scope.get("path") or ""))
+        except Unsupported as exc:
+            return self.fail(name, "definition:" + str(exc))
+        collision = self.admit(scope)
+        if collision is not None:
+            return self.fail(name, "linkage_collision:" + collision)
+        sub = _Interp(fn, raw, scope, caller.inputs, caller.parser, shared)
+        sub.function_name, sub.world = name, self
+        self.activations += 1
+        sub.param_prefix = f"@param{self.activations}:"
+        # a callee may spend at most half of what is left: a failed callee still leaves the caller room to finish
+        sub.steps, sub.limit = caller.steps, caller.steps + max(1, (caller.limit - caller.steps) // 2)
+        entry = state.copy()
+        before = set(entry.store)
+        self.stack.append(sub)
+        try:
+            _prescan_once(sub, shared)
+            sub.bind_parameters(entry, args)
+            finals = sub.run([entry], fn.child_by_field_name("body"))
+            if any(s.mode in {"break", "continue"} for s in finals):
+                raise Unsupported("jump_outside_loop")
+        except Unsupported as exc:
+            caller.steps = sub.steps
+            if str(exc).startswith("undefined_behavior:") or str(exc) in _REFUSING_IN_CALLEE:
+                raise  # proven on a path of the integrated run: the evaluation has no defined result
+            return self.fail(name, str(exc))
+        finally:
+            self.stack.pop()
+            self.kept.extend(sub.kept_raws)   # their ids are in local keys (review I2)
+        caller.steps = sub.steps
+        caller.stubs_used |= sub.stubs_used
+        self.static_keys |= sub.static_keys
+        merged, returned = self.join(sub, finals, name)
+        for key in list(merged.store):  # the callee's parameters and automatic locals end with its activation
+            base = key.split("[", 1)[0]
+            if key not in before and key.startswith("@") and base not in self.static_keys and base not in merged.escaped:
+                del merged.store[key]   # (review I1) statics of callees it called stay too
+        ret = state.ret
+        for slot in _State.__slots__:
+            setattr(state, slot, getattr(merged, slot))
+        state.mode, state.ret = "normal", ret
+        # (review C3, W-R2-2) no re-application here: the callee's own havoc already judges by every admitted unit's
+        # objects and every activation's static locals (`havoc_pointer_targets`, `all_statics`).
+        self.inlined[name] = self.inlined.get(name, 0) + 1
+        return returned
+
+    @staticmethod
+    def join(sub, finals, name):
+        """One state and the returned value from the callee's final paths (see the class doc)."""
+        rt = sub.return_type()
+        void = isinstance(rt, Unknown) and rt.reason != "return_type_not_scalar" \
+            and _text(sub.fn.child_by_field_name("type"), sub.raw).strip() == "void"
+        if len(finals) == 1:
+            merged = finals[0]
+        else:
+            merged = finals[0].copy()
+            why = "path_dependent_in_callee:" + name
+            # only the keys some path holds differently (the paths share most objects by identity — compared in C)
+            try:
+                first_items = set(finals[0].store.items())
+                differing = set()
+                for s in finals[1:]:
+                    differing.update(k for k, _v in first_items.symmetric_difference(s.store.items()))
+            except TypeError:  # a value that does not hash: compare every key
+                differing = set().union(*(s.store for s in finals))
+            for key in differing:
+                values = [s.store.get(key, _MISSING) for s in finals]
+                first = values[0]
+                if first is _MISSING or isinstance(first, Unknown) or any(
+                        v is _MISSING or isinstance(v, Unknown) or v != first for v in values[1:]):
+                    known = next((v for v in values if isinstance(v, Unknown)), None)
+                    same_unknown = known is not None and all(isinstance(v, Unknown) and v.reason == known.reason
+                                                             for v in values)
+                    merged.store[key] = Unknown(known.reason) if same_unknown else Unknown(why)
+            for s in finals[1:]:
+                merged.havoc_all = merged.havoc_all or s.havoc_all
+                merged.havoc_pointer = merged.havoc_pointer or s.havoc_pointer
+                for base, reason in s.havoc_bases.items():
+                    merged.havoc_bases.setdefault(base, reason)
+                merged.escaped |= s.escaped
+                merged.possible_ub |= s.possible_ub
+                merged.forks.extend(f for f in s.forks if f not in merged.forks)
+            if "callee_paths:" + name not in merged.forks:   # a loop joins the same callee many times: once is the fact
+                merged.forks.append("callee_paths:" + name)
+        if void:
+            return merged, _Val(Unknown("void_call_value:" + name), None)
+        if not isinstance(rt, dict):
+            return merged, _Val(Unknown(rt.reason if isinstance(rt, Unknown) else "return_type_unresolved"), None)
+        rets = [s.ret if s.mode == "return" else None for s in finals]
+        if any(r is None for r in rets):
+            return merged, _Val(Unknown("no_return_value_on_path:" + name), rt)
+        values = [r.v for r in rets]
+        if all(not isinstance(v, Unknown) for v in values) and len(set(values)) == 1:
+            return merged, _Val(values[0], rt)
+        if len(values) == 1:
+            return merged, _loaded(values[0], rt)
+        return merged, _Val(Unknown("path_dependent_in_callee:" + name), rt)
+
 
 def _substitute(body, params, args):
     """Replace every parameter by its argument text in *one* pass — ``SUB(a, b)`` called as ``SUB(b, 1U)`` must not
@@ -1998,11 +2411,18 @@ def _observe(interp, state, name):
     macro_status = interp.macro_status
     if base in macro_status:
         return Unknown("observable_is_a_macro:" + base)
-    if index is None and base in interp.globals:
-        g = interp.globals[base]
+    globals_, arrays = interp.globals, interp.arrays
+    if interp.world is not None and base in interp.world.ambiguous:
+        return Unknown("observable_name_ambiguous_in_project:" + base)
+    if base not in globals_ and base not in arrays and interp.world is not None and base in interp.world.objects:
+        # (R16) an object of another translation unit an interpreted callee saw (one linkage — `_World.admit`)
+        kind, rec = interp.world.objects[base]
+        globals_, arrays = ({base: rec}, {}) if kind == "global" else ({}, {base: rec})
+    if index is None and base in globals_:
+        g = globals_[base]
         return interp.read_key(state, base, base, g["type"], g.get("volatile"))
-    if index is not None and base in interp.arrays:
-        a = interp.arrays[base]
+    if index is not None and base in arrays:
+        a = arrays[base]
         if a["length"] is None or not 0 <= int(index) < a["length"]:
             return Unknown("observable_index_outside_array")
         v = interp.read_target(state, ("key", f"{base}[{int(index)}]", a["type"], a.get("volatile", False)))
@@ -2051,6 +2471,8 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
     try:
         if not source or not unit.get("source_text_complete", True):
             raise Unsupported(unit.get("source_unavailable_reason") or "authoritative_source_missing")
+        if unit.get("oracle_refusal"):
+            raise Unsupported(str(unit["oracle_refusal"]))  # (R16) the caller decided not to run these sequences — why
         if len(source) > 2_000_000:
             raise Unsupported("source_budget")
         if not scope_matches(unit):
@@ -2065,12 +2487,24 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
         reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
         return [{**base, "status": "unsupported", "reason": reason,
                  "outputs": {o: {"reason": reason} for o in outs}} for outs in outputs]
+    provider = unit.get("callee_provider")
+    if provider is not None:
+        # (R16) integration reading: callees with a project definition run for real (see `_World`)
+        base["assumptions"] = [a for a in base["assumptions"] if not a.startswith("callee effects are")] + [
+            "callees with one definition in the project are interpreted with the argument values (the integrated "
+            "code, not stubs); where a callee cannot be interpreted its effects are the project write closure — "
+            "outputs it may write are unknown",
+            "hardware, interrupts and concurrent tasks do not change objects during the run (volatile reads are unknown)"]
+        base["oracle"] = "project_context_source_interprocedural"
     results = []
     for inputs, outs in zip(sequences_inputs, outputs, strict=True):
         record = dict(base)
         try:
             interp = _Interp(fn, raw, scope, dict(inputs or {}), parser, shared)
             interp.function_name = str(unit.get("name") or "")
+            world = None
+            if provider is not None:
+                interp.world = world = _World(provider, interp, str(unit.get("source_path") or ""))
             _prescan_once(interp, shared)  # path-independent refusals: once per function
             state = _State()
             interp.bind_parameters(state)
@@ -2098,6 +2532,11 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                                                             for n in sorted(interp.stubs_used))
                     + " (what the callee writes stays unknown)"]
                 record["stubs"] = sorted(interp.stubs_used)
+            if world is not None:
+                # (R16) which callees ran for real and why the others did not (per sequence — the value's footing)
+                record["interprocedural"] = {"inlined": dict(sorted(world.inlined.items())),
+                                             "not_inlined": dict(sorted(world.not_inlined.items())),
+                                             "failed": dict(sorted(world.failed.items()))}
             record.update(status="supported", reason="project_context_source_evaluation" +
                           (":possible_ub=" + "+".join(possible) if possible else ""),
                           outputs=values, paths=len(finals), possible_undefined_behavior=possible)

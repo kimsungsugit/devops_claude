@@ -705,6 +705,42 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                   f"(함수 포인터·식을 거친 호출) {_unresolved}.",
                 tone=_tone(bool(lost))))
 
+    # (R16, 격차 ②) 통합 기대값 — 진입 함수를 callee 본문까지 해석해 도출한 칸. 도출이 곧 요구 적합성은 아니다.
+    io = qr.get("integration_oracle")
+    if isinstance(io, dict) and io.get("status"):
+        status = str(io.get("status"))
+        if status != "evaluated":
+            out.append(_item(
+                "sits_integration_oracle", "통합 기대값(소스 도출)",
+                "도출 실패" if status.startswith("error") else "도출 안 함",
+                f"기대값을 소스에서 도출하지 못했다({status}"
+                + (f" — {str(io.get('error'))[:160]}" if io.get("error") else "")
+                + ") — 모든 기대값 칸이 '[검증 필요]' 로 남는다.",
+                tone="warning"))
+        else:
+            cells, derived = _int(io, "cells"), _int(io, "derived")
+            skipped = {k: v for k, v in (io.get("tc_skipped") or {}).items() if v}
+            reasons = io.get("unknown_reasons") or {}
+            not_inl = io.get("not_inlined") or {}
+            out.append(_item(
+                "sits_integration_oracle", "통합 기대값(소스 도출)",
+                f"{_show(derived)} / {_show(cells)}칸 (흐름이 쓴 값 {_show(_int(io, 'derived_assigned'))}) · 값이 있는 TC "
+                f"{_show(_int(io, 'tc_with_derived'))}/{_show(_int(io, 'tc_total'))}",
+                "흐름의 진입 함수를 callee 본문까지 따라 해석해(stub 이 아니라 통합된 코드) 관측 변수의 값을 도출했다 — 코드 "
+                "일관성 값이지 요구 적합성·실행 결과가 아니다(하드웨어·인터럽트·다른 태스크는 모델 밖). 이 값들은 아직 "
+                "독립 경로(clang 등)로 대조하지 않았다. "
+                f"도출 칸 중 흐름이 쓴 값 {_show(_int(io, 'derived_assigned'))} · 입력을 그대로 둔 값 "
+                f"{_show(_int(io, 'derived_unchanged_input'))}."
+                + (" 도출 못 한 칸의 사유(상위): " + ", ".join(f"{k} {v}" for k, v in list(reasons.items())[:6])
+                   + (f" 외 {int(io['unknown_reason_kinds']) - 6}종" if int(io.get("unknown_reason_kinds") or 0) > 6 else "")
+                   + "." if reasons else "")
+                + (" 해석하지 못해 쓰기 효과만 반영한 callee 호출: " + ", ".join(f"{k} {v}" for k, v in list(not_inl.items())[:6])
+                   + (f" 외 {len(not_inl) - 6}종" if len(not_inl) > 6 else "") + "." if not_inl else "")
+                + (" 도출하지 않은 TC: " + ", ".join(f"{k} {v}" for k, v in skipped.items()) + "." if skipped else "")
+                + (f" 첫 sub-case 들이 모두 단계 상한을 넘은 흐름 {_int(io, 'tc_budget_cut')}개는 나머지 sub-case 를 돌리지 "
+                   "않았다(칸마다 그 사유)." if _int(io, "tc_budget_cut") else ""),
+                tone=_tone(bool(skipped))))
+
     # sub-case 물량 — 흐름당 몇 갈래를 시험했나.
     sub = _int(qr, "total_sub_cases")
     if sub is not None:

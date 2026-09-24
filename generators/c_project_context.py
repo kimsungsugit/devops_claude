@@ -26,11 +26,13 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 7  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 8  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
 # 7 (R14): function `return_type` (declared text) and closure `return_type` — one when every definition agrees.
+# 8 (R16): a function-type "cast" (``(F()) + 1U``, tree-sitter's reading of a parenthesized call) is the call ``F`` in the
+#    function's `calls` — the write closure used to miss it.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -508,6 +510,18 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
     return rec
 
 
+def _cast_hidden_call(n, raw) -> str:
+    """The callee a function-type "cast" is (``(F())`` read as a cast to ``F()``), or ""."""
+    t = n.child_by_field_name("type")
+    if t is None:
+        return ""
+    decl = t.child_by_field_name("declarator")
+    if decl is None or decl.type != "abstract_function_declarator" or decl.child_by_field_name("declarator") is not None:
+        return ""
+    spec = t.child_by_field_name("type")
+    return _text(spec, raw) if spec is not None and spec.type == "type_identifier" else "<indirect>"
+
+
 def _address_taken(root, raw):
     names = set()
     for n in _walk(root):
@@ -605,6 +619,10 @@ def _function_effects(fn, raw):
             base = _base_identifier(n.child_by_field_name("argument"), raw)
             if base:
                 taken.add(base)
+        elif n.type == "cast_expression" and (hidden := _cast_hidden_call(n, raw)):
+            # (R16 review W-R4-1) ``(Inc()) + 1U`` parses as a cast of ``+1U`` to the function type ``Inc()`` — no C
+            # cast has a function type, so it is the call ``Inc()``: its effects belong to this function's closure
+            calls.add(hidden)
         elif n.type == "call_expression":
             f = n.child_by_field_name("function")
             if f is not None and f.type == "identifier":
@@ -1397,8 +1415,10 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                     continue
                 except Unresolved as exc:
                     scope["unresolved_constants"][name] = "const_initializer_unresolved:" + str(exc)
+            # ``static``: internal linkage — the object belongs to this translation unit (R16: an interpreted callee of
+            # another unit must not read it by the same name)
             scope["globals"][name] = {"type": t, "typename": d["type"], "file": d["file"], "line": d["line"],
-                                      "volatile": volatile, "const": const}
+                                      "volatile": volatile, "const": const, "static": any(x.get("static") for x in defs)}
         except Unresolved as exc:
             scope["unresolved_globals"][name] = str(exc)
     scope["status"] = "resolved" if not scope["missing_includes"] else "partial"
@@ -1424,7 +1444,8 @@ def _scope_array(scope, name, defs, pp, type_of, agreeing, parser):
         volatile = any(x["volatile"] for x in defs) or "volatile" in (elem.get("qualifiers") or [])
         const = any(x["const"] for x in defs) or "const" in (elem.get("qualifiers") or [])
         record = {"type": elem, "typename": defs[0]["type"], "length": length, "file": defs[0]["file"],
-                  "line": defs[0]["line"], "volatile": volatile, "const": const, "values": None}
+                  "line": defs[0]["line"], "volatile": volatile, "const": const, "values": None,
+                  "static": any(x.get("static") for x in defs)}
         inits = [x for x in defs if x.get("array_init") or x.get("array_init_truncated")]
         if const and not volatile and len(inits) == 1 and inits[0].get("array_init"):
             record["values"] = _array_values(inits[0]["array_init"], elem, length, agreeing, parser)

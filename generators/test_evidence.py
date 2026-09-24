@@ -63,6 +63,9 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                     # (R14 review W3) the sequence stubbed these callees — the value holds only when the tester stubs
                     # them too (recorded per sequence: an output that does not use the stub carries it as well)
                     item["stubs"] = list(evaluated["stubs"])
+                if (evaluated.get("interprocedural") or {}).get("inlined"):
+                    # (R16) the value rests on these callees' interpreted bodies (integration reading, not stubs)
+                    item["callees_interpreted"] = sorted(evaluated["interprocedural"]["inlined"])
             if scope_note:
                 item["project_scope"] = scope_note
                 if not derived:
@@ -74,6 +77,8 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
             evidence[var] = item
         seq["expected"], seq["expected_evidence"] = expected, evidence
         seq["execution_status"] = "not_run"
+        if evaluated.get("interprocedural") is not None:
+            seq["interprocedural"] = evaluated["interprocedural"]
         # Remove earlier prose containing invented expectations as well.
         desc = str(seq.get("description") or "")
         seq["description"] = "\n".join(line for line in desc.splitlines() if not line.startswith(("Expected:", "근거: 소스 계산")))
