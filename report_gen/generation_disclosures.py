@@ -317,6 +317,36 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "모든 함수가 적어도 하나의 요구에 붙었다.",
                 tone=_tone(bool(unlinked))))
 
+    # (R6/R9) 요구 원문 경계 TC — 판정이 요구 문장에서 온다. 못 쓴 사실은 사유별로 보인다(0 과 미기록을 구분).
+    rb = gs.get("requirement_boundary") if isinstance(gs.get("requirement_boundary"), dict) else None
+    if rb is not None and rb.get("error"):
+        out.append(_item("sts_requirement_boundary", "요구 원문 경계 TC", "생성 실패",
+                         f"요구 원문 경계 TC 를 만들지 못해 넣지 않았다 — {str(rb['error'])[:160]}. 나머지 STS 는 그대로다.",
+                         tone="warning"))
+    elif rb is not None:
+        skipped = {k.split(":", 1)[1]: v for k, v in rb.items() if k.startswith("skipped:") and v}
+        _why = {"kind_symbolic": "기호 비교(값 미상)", "kind_range": "범위", "not_an_order_comparison": "순서 비교 아님",
+                "no_subject_for_value": "주어 없음", "response_constraint": "응답 제약(측정 대상)",
+                "negated_condition": "부정 절", "same_subject_combination_unstated": "결합 미기재",
+                "monitored_quantity_unknown": "감시량 미상", "duplicate_fact": "중복", "outcome_section": "출력·완료 조건",
+                "reference_label": "기준값 라벨", "value_outside_subject_type": "변수 폭 밖의 값"}
+
+        def _n(key):   # the producer's Counter keeps only non-zero keys: in a present block, absent is 0 (review W8)
+            return _int(rb, key) or 0
+        out.append(_item(
+            "sts_requirement_boundary", "요구 원문 경계 TC",
+            f"TC {_n('tcs')} · 스텝 {_n('steps')} · 사실 {_n('facts_used')} / {_n('facts')}",
+            "요구 문장이 직접 적은 임계·유지시간마다 경계 3점(적힌 정밀도 한 단위)을 두고, 판정은 그 문장의 조건 결합대로 "
+            "요구 원문에서 낸다(코드가 아니라 요구 기준 — 조건 밖의 점은 '그 문장의 동작 대상 아님'). 근거 문장은 "
+            "'Requirement Evidence' 시트에 있다."
+            + (" 못 쓴 사실: " + ", ".join(f"{_why.get(k, k)} {v}" for k, v in sorted(skipped.items())) + "."
+               if skipped else "")
+            + (f" 변수 폭 밖이라 뺀 경계 점 {_n('points_outside_subject_type')}." if _n("points_outside_subject_type")
+               else "")
+            + (f" 'Requirement Evidence' 시트를 쓰지 못했다 — {str(rb['evidence_sheet_error'])[:160]}."
+               if rb.get("evidence_sheet_error") else ""),
+            tone=_tone(bool(rb.get("evidence_sheet_error")))))
+
     # 안전 관련 TC — 분모(전체 TC)와 함께 둬야 "142건" 이 많은지 적은지 읽힌다.
     safety_tc = _int(qr, "safety_test_cases")
     if safety_tc is not None:
@@ -328,9 +358,67 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+# (R7) 인터페이스 제안 값의 근거·못 정한 사유 — 영문 키를 화면에 그대로 내지 않는다(리뷰 r2 Info 6)
+_SITS_BASIS = {"return_type_bounds": "반환 타입 경계", "compared_value_and_neighbour": "비교 상수와 이웃",
+               "enum_sibling": "열거 형제", "truth_value": "참/거짓"}
+_ERROR_BASES = {"compared_value_and_neighbour", "enum_sibling", "truth_value"}
+_SITS_SKIP = {"compared_value_unresolved": "비교 상수 미해석", "switch_cases_not_modeled": "switch 분기 미모델",
+              "enum_has_no_other_value": "다른 값이 없는 열거", "neighbour_outside_return_type": "이웃 값이 반환 타입 밖",
+              "return_type_bounds_unknown": "반환 타입 범위 미상"}
+
+
 # ── SUTS ───────────────────────────────────────────────────────────────────
 def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
+
+    # (R9) 기대값 근거 — 확정값은 소스 계산(derived)뿐이고 나머지는 [검증 필요] 다. 실행 결과가 아니다.
+    ev = qr.get("expected_evidence_summary")
+    if isinstance(ev, dict) and _int(ev, "total") is not None:
+        out.append(_item(
+            "suts_expected_evidence", "기대값 근거",
+            f"소스 계산 {_show(_int(ev, 'derived'))} (함수가 쓴 값 {_show(_int(ev, 'derived_assigned'))} · 입력 그대로 "
+            f"{_show(_int(ev, 'derived_unchanged_input'))}) · 미상 {_show(_int(ev, 'unknown'))} · 제안 "
+            f"{_show(_int(ev, 'proposed'))} · 근거 미기록 {_show(_int(ev, 'unrecorded'))} / 전체 {_show(_int(ev, 'total'))}칸",
+            "확정 기대값은 소스 oracle 이 함수 본문을 해석해 낸 값만이다(요구 적합성·타깃 실행은 아님 — "
+            "execution_status=not_run). 나머지 칸은 [검증 필요] 와 사유를 적었다. 근거는 'Test Evidence' 시트에 있다."
+            + (f" 그중 {_int(ev, 'derived_in_stubbed_sequence')}칸은 피호출 함수의 반환값을 시퀀스 입력"
+               "('F() return')으로 stub 한 시퀀스에서 나왔다 — 시험도 그 함수를 stub 해야 성립한다(시퀀스 단위로 센 상한)."
+               if _int(ev, "derived_in_stubbed_sequence") else "")))
+
+    # (R10) 소스 소견 — 기대값을 내다가 증명한 미정의 동작. 결함 **후보**다(입력이 호출 측에서 가능한지는 사람 판단).
+    sf = qr.get("source_findings")
+    if isinstance(sf, dict) and _int(sf, "findings") is not None:
+        kinds = sf.get("by_kind") if isinstance(sf.get("by_kind"), dict) else {}
+        out.append(_item(
+            "suts_source_findings", "소스 소견(결함 후보)",
+            f"소견 {_show(_int(sf, 'findings'))} (함수 {_show(_int(sf, 'functions'))} · 시퀀스 {_show(_int(sf, 'sequences'))})",
+            "소스 oracle 이 기대값을 계산하다 이 입력에서 적어도 한 실행 경로가 C 미정의 동작(부호 오버플로·0 나눗셈 등)에 "
+            "닿는 것을 찾은 곳이다(입력이 정하지 않은 조건의 분기일 수 있다). 입력이 호출 측에서 실제로 가능한지는 확인이 "
+            "필요하다 — 'Source Findings' 시트에 예시 벡터가 있다."
+            + (" 종류: " + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) + "." if kinds else "")
+            + " clang 재현은 scripts/source_findings.py --clang 으로 따로 돌린다(이 문서에서는 미실행).",
+            tone=_tone(bool(_int(sf, "findings")))))
+
+    # (R9) MC/DC 설계 — 결정식을 실제로 평가해 찾은 unique-cause 쌍. 못 푼 결정은 분모에 남는다.
+    mc = qr.get("mcdc_design_summary")
+    if isinstance(mc, dict) and _int(mc, "decisions") is not None:
+        path = mc.get("source_path") if isinstance(mc.get("source_path"), dict) else {}
+        out.append(_item(
+            "suts_mcdc_design", "MC/DC 설계",
+            f"결정 {_show(_int(mc, 'decisions'))} 중 설계 {_show(_int(mc, 'designed'))} · 부분 "
+            f"{_show(_int(mc, 'partial'))} · 쌍 못 찾음 {_show(_int(mc, 'no_pair_found'))} · 미지원 "
+            f"{_show(_int(mc, 'unsupported'))} · 유지 쌍 {_show(_int(mc, 'retained_pairs'))}"
+            + (f" (함수 실행 모델로 설계한 결정 {_show(_int(path, 'designed'))} / {_show(_int(path, 'decisions'))})"
+               if path else ""),
+            "쌍은 소스 결정식을 평가해 찾은 설계다 — 도달성·타깃 실행은 주장하지 않는다(reachability=unverified). "
+            "행 상한에 잘린 쌍은 '절단', 재검증에서 떨어진 쌍은 '무효' 로 따로 센다"
+            + (f"(절단 {_show(_int(mc, 'truncated_pairs'))} · 무효 {_show(_int(mc, 'invalidated_pairs'))})."
+               if _int(mc, "truncated_pairs") is not None else ".")
+            + (f" 결정을 나열하지 못한 함수 {_show(_int(mc, 'unenumerated_functions'))} · 분석하지 못한 unit "
+               f"{_show(_int(mc, 'units_not_analyzed'))} 는 위 분모 밖이다."
+               if (_int(mc, "unenumerated_functions") or _int(mc, "units_not_analyzed")) else "")
+            + " 결정별 근거는 'MCDC Design' 시트에 있다.",
+            tone=_tone(bool(_int(mc, "invalidated_pairs")))))
 
     # 비운 칸 — **결함이 아니다**(info). 예전엔 이 칸을 전부 uint8 로 지어낸 0/127/255 로 채웠다.
     unk = _int(qr, "unknown_type_var_slots")
@@ -544,6 +632,50 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.append(_item(
             "sits_strategy_error", "전략 시트 생성 실패", "실패",
             f"통합 전략 근거 시트를 만들지 못했다 — {err[:160]}", tone="warning"))
+
+    # (R7/R9) 인터페이스 계약 — 근거로만 싣는다(시험 내용은 바꾸지 않는다). 못 읽은 파일·모호한 함수는 계약에서 빠진다.
+    ic = qr.get("interface_contract")
+    if isinstance(ic, dict):
+        if ic.get("error"):
+            out.append(_item("sits_interface_contract", "인터페이스 계약", "추출 실패",
+                             f"인터페이스 계약을 읽지 못했다 — {str(ic['error'])[:160]}. 'Interface Evidence' 시트가 없다.",
+                             tone="warning"))
+        else:
+            # (R7 리뷰 r2 W-5) 경고는 **실제로 빠진 것**이 있을 때만 — 두 번 정의된 이름이 있어도 흐름에 안 나오면 손실 0
+            lost = (_int(ic, "unreadable_source_files") or 0) + (_int(ic, "ambiguous_functions") or 0)
+            skipped = {k.split(":", 1)[1]: v for k, v in ic.items() if k.startswith("suggestion_skipped:") and v}
+            basis = {k.split(":", 1)[1]: v for k, v in ic.items() if k.startswith("suggestion_basis:") and v}
+            # (W-4) 흐름끼리 겹치므로 흐름별 합계는 같은 호출을 여러 번 센다 — 고유 수를 먼저, 합계는 괄호로
+            if _int(ic, "distinct_cross_module_calls") is not None:
+                value = (f"고유 모듈 경계 호출 {_show(_int(ic, 'distinct_cross_module_calls'))} · 쓰이는 반환 "
+                         f"{_show(_int(ic, 'distinct_used_returns'))} · 전역 생산→소비 "
+                         f"{_show(_int(ic, 'distinct_global_flows'))} (흐름별 합계 {_show(_int(ic, 'cross_module_calls'))}"
+                         f" · {_show(_int(ic, 'used_returns'))} · {_show(_int(ic, 'global_flows'))})")
+            else:
+                value = (f"흐름별 합계 — 모듈 경계 호출 {_show(_int(ic, 'cross_module_calls'))} · 쓰이는 반환 "
+                         f"{_show(_int(ic, 'used_returns'))} · 전역 생산→소비 {_show(_int(ic, 'global_flows'))}")
+            _unresolved = (f"고유 {_show(_int(ic, 'distinct_unresolved_calls'))}"
+                           if _int(ic, "distinct_unresolved_calls") is not None
+                           else f"{_show(_int(ic, 'unresolved_calls'))}(흐름별 합계)")
+            out.append(_item(
+                "sits_interface_contract", "인터페이스 계약(근거)", value,
+                "흐름의 모듈 경계 호출(반환 사용·비교 상수·인자 바인딩)과 모듈 간 전역 흐름을 소스에서 읽어 'Interface Evidence' "
+                "시트에 실었다(둘 다 0 이면 시트가 없다). 쓰이는 반환마다 시험이 몰 수 있는 값을 '제안'으로 적었고 시험에는 적용하지 않았다(흐름의 "
+                "callee 는 통합 대상이다)."
+                + (" 제안 값의 근거: " + ", ".join(f"{_SITS_BASIS.get(k, k)} {v}" for k, v in sorted(basis.items()))
+                   + ("." if set(basis) & _ERROR_BASES else " — 오류 비교에서 나온 값이 없어 오류 전파를 겨냥한 제안이 아니다.")
+                   if basis else "")
+                + (" 값을 못 정한 반환: " + ", ".join(f"{_SITS_SKIP.get(k, k)} {v}" for k, v in sorted(skipped.items()))
+                   + "." if skipped else "")
+                + (f" 못 읽은 소스 파일 {_show(_int(ic, 'unreadable_source_files'))} · 두 번 정의된 함수의 흐름 등장 "
+                   f"{_show(_int(ic, 'ambiguous_functions'))}회는 계약에서 빠졌다." if lost else "")
+                + (f" 두 번 정의된 함수 이름 {_show(_int(ic, 'duplicate_function_names'))}개는 흐름에 나오지 않는다."
+                   if not _int(ic, "ambiguous_functions") and _int(ic, "duplicate_function_names") else "")
+                + (f" 전처리 없이 읽어 함수로 잘못 잡힌 정의(`if` 등) {_int(ic, 'keyword_named_definitions')}개는 무시했다."
+                   if _int(ic, "keyword_named_definitions") else "")
+                + f" 소스에서 못 찾은 흐름 함수 {_show(_int(ic, 'missing_functions'))}회 · 이름으로 풀 수 없는 호출"
+                  f"(함수 포인터·식을 거친 호출) {_unresolved}.",
+                tone=_tone(bool(lost))))
 
     # sub-case 물량 — 흐름당 몇 갈래를 시험했나.
     sub = _int(qr, "total_sub_cases")

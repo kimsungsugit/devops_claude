@@ -481,7 +481,7 @@ def _load_uds_descriptions(uds_path: str) -> Dict[str, str]:
         for ws in wb.worksheets:
             headers: List[str] = []
             name_col = desc_col = -1
-            for ri, row in enumerate(ws.iter_rows(values_only=True)):
+            for ri, row in enumerate(ws.iter_rows(values_only=True)):  # scan-ok: one pass per sheet
                 cells = [str(c or "").strip() for c in row]
                 if ri == 0:
                     headers = [c.lower() for c in cells]
@@ -1384,8 +1384,9 @@ _safety_mark = _safety_mark_impl
 # 같이 쓴다 — 라벨 셀과 스텝 셀을 대조하므로 같은 패턴이어도 검사가 공허하지 않다.
 # 유효 범위 **밖** 의 값(max_inv)도 경계값 분석이다 — SwUTS 형제와 같은 규칙
 # (`resolve_seq_test_method("BV_MAX_INV") == "FI"` 이고 gen 은 ABV). 그 TC 는 FIT + BAA.
+# (R6) ``입력 설정 (요구 경계): X = 8.4V`` — a point around a threshold the requirement text states
 _BOUNDARY_ACTION_PAT = re.compile(
-    r"^입력 설정 \((?:경계 (?:최솟값|최댓값)|유효 범위 초과)\):.*=\s*-?\d")
+    r"^입력 설정 \((?:경계 (?:최솟값|최댓값)|유효 범위 초과|요구 경계)\):.*=\s*-?\d")
 _FAULT_ACTION_PAT = re.compile(r"^에러 조건 설정:|^입력 설정 \(유효 범위 초과\):.*=\s*-?\d")
 _PARTITION_ACTION_PAT = re.compile(r"^(?:조건 충족 설정|조건 미충족 설정|else-if 조건 설정):")
 _PARTITION_EXPECTED_PAT = re.compile(r"^switch 분기 → case ")
@@ -2499,6 +2500,7 @@ def _build_tc_dict(
     is_safety: bool,
     func_name: Optional[str] = None,
     review_only: bool = False,
+    derive_inputs: bool = True,
     _bv_cache: Dict[str, Any] = {},  # noqa: B006 — intentional mutable default for lazy init
 ) -> Dict[str, Any]:
     # Lazy-init boundary helpers once (shared across all calls via mutable default)
@@ -2555,7 +2557,9 @@ def _build_tc_dict(
                         continue
                     _seen_vars.add(vname)
                     input_vars.append(vname)
-    if input_vars:
+    # (R6 리뷰 r2 W7) 요구 경계 TC 는 스텝이 값을 정한다 — 이름에서 추정한 "중간값" 초기값을 사전조건에 넣으면 스텝과
+    #   모순된다(`u16s_MAGNET_ERR_TM=32767` 이면 100ms 스텝의 기대가 성립할 수 없다).
+    if input_vars and derive_inputs:
         _get_bv = _bv_cache.get("get_bv")
         _infer_t = _bv_cache.get("infer_type")
 
@@ -2765,8 +2769,9 @@ def generate_sts_xlsm(
     trace: Dict[str, Any],
     output_path: str,
     project_config: Optional[Dict[str, Any]] = None,
+    sheet_errors: Optional[List[str]] = None,
 ) -> str:
-    """Generate STS XLSM file."""
+    """Generate STS XLSM file. ``sheet_errors`` collects why an optional evidence sheet was left out."""
     try:
         import openpyxl
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -2925,6 +2930,16 @@ def generate_sts_xlsm(
                 merge_fresh(ws, start_row, mc + 1, end_row, mc + 1)
 
         row_num = end_row + 1
+
+    # --- (R6) Requirement Evidence sheet: 요구 경계 TC 의 스텝마다 원문 문장·사실·자극점 ---
+    #   (리뷰 r5 W-D) 기본 켜짐 부가 시트라 실패해도 STS 는 저장한다 — 사유는 호출자가 공시에 싣는다.
+    try:
+        from generators.sts_requirement_tc import write_requirement_evidence_sheet
+        write_requirement_evidence_sheet(wb, test_cases)
+    except Exception as exc:  # noqa: BLE001 — disclosed through ``sheet_errors`` (generation_stats)
+        _logger.warning("Requirement Evidence sheet skipped: %s", exc, exc_info=True)
+        if sheet_errors is not None:
+            sheet_errors.append(f"{type(exc).__name__}: {exc}")
 
     # --- Traceability sheet ---
     _write_traceability_sheet(wb, trace, thin_border, header_fill, header_font, data_font)
@@ -3595,6 +3610,26 @@ def generate_sts(
         _relabel_from_steps(test_cases)
         _progress(75, "AI 향상 완료")
 
+    # (R6, P3/G4) 요구 문장이 직접 적은 임계값·유지시간의 경계 TC — 함수 흐름 TC 와 달리 판정이 **요구 원문**에서 온다.
+    #   AI 보강 **뒤**에 붙인다(보강이 스텝을 갈아 끼우면 원문 판정이 사라진다). 요구당 상한(max_tc_per_req)은 함수 TC 의
+    #   것이라 여기엔 걸지 않고, 덧붙인 수·못 쓴 사실의 사유를 generation_stats 에 싣는다.
+    if (project_config or {}).get("requirement_boundary_tcs", True):
+        _test_env = (project_config or {}).get("default_test_env", _DEFAULT_TEST_ENV)
+
+        def _build(**kw):
+            return _build_tc_dict(test_env=_test_env, derive_inputs=False,
+                                  is_safety=is_safety_asil(str(kw["req"].get("asil") or "").strip()), **kw)
+        _before_rb = list(test_cases)
+        try:
+            from generators.sts_requirement_tc import append_requirement_boundary_tcs
+            gen_stats["requirement_boundary"] = append_requirement_boundary_tcs(
+                test_cases, reqs, _build, _make_tc_id, _classify_steps,
+                max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC)
+        except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below
+            test_cases[:] = _before_rb   # nothing half-added
+            _logger.warning("requirement boundary TCs skipped: %s", exc, exc_info=True)
+            gen_stats["requirement_boundary"] = {"error": f"{type(exc).__name__}: {exc}"}
+
     _progress(78, "추적성 매트릭스 생성 중")
     trace = generate_traceability_matrix(test_cases, reqs)
 
@@ -3602,7 +3637,10 @@ def generate_sts(
     quality = generate_quality_report(test_cases, trace, generation_stats=gen_stats)
 
     _progress(85, "XLSM 파일 생성 중")
-    out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config)
+    _sheet_errors: List[str] = []
+    out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config, sheet_errors=_sheet_errors)
+    if _sheet_errors and isinstance(gen_stats.get("requirement_boundary"), dict):
+        gen_stats["requirement_boundary"]["evidence_sheet_error"] = _sheet_errors[0]   # quality 가 같은 dict 를 든다
 
     _progress(92, "생성 문서 자동 검증 중")
     try:
