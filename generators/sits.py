@@ -2269,7 +2269,7 @@ def _fill_sits_front_matter(
                           ("G28", fm.get("status") or "Open"),
                           ("G29", fm.get("date") or ""), ("G30", fm.get("author") or "")):
             if val:
-                ws[cell] = val
+                ws[cell] = val  # scan-ok: a cell address ("G26"), not a row
                 stats["cover"] += 1
     else:
         stats["missing"].append("Cover")
@@ -3139,6 +3139,11 @@ def generate_sits_xlsm(
                 _sctx.get("calls_map") or {}, _sctx.get("file_of") or {},
                 _sctx.get("uds_related_map") or {}, _sctx.get("design_ids"),
                 _sctx.get("stats_out"), id_of_entry=_id_of_entry)
+            # (R7) 인터페이스 근거 — 호출·반환 사용·제안값(미적용)과 근거(또는 못 정한 사유)·인자 바인딩·전역 생산→소비
+            from generators.interface_contract import write_interface_evidence_sheet
+            _n_iface = write_interface_evidence_sheet(wb, itcs or [])
+            if isinstance(_sctx.get("stats_out"), dict):
+                _sctx["stats_out"]["interface_evidence_rows"] = _n_iface
         except Exception as exc:  # noqa: BLE001 — 근거 시트 실패가 규격 시트를 못 죽인다
             _logger.warning("SITS: 근거 시트 생성 실패(%s) — 규격 시트는 그대로 저장한다: %s",
                             type(exc).__name__, exc)
@@ -3282,6 +3287,8 @@ def generate_sits_quality_report(
         "gen_method_distribution": gen_dist,
         "swcom_distribution": swcom_dist,
         "total_source_functions": total_source_functions,
+        # (R7) 인터페이스 계약: 모듈 경계 호출·반환 사용·제안값 근거/못 정한 사유별 수(추출 실패면 {"error": …})
+        "interface_contract": fs.get("interface_contract"),
     }
 
 
@@ -3466,6 +3473,46 @@ def resolve_profile_caps(tc_profile: Any, max_subcases: Any, max_flows: Any) -> 
     if profile != TC_PROFILE_EXTENDED:
         return profile, bad, max_subcases, max_flows
     return profile, bad, max(int(max_subcases or 0), _SUBCASE_CATALOG_MAX), None
+
+
+def _read_source_texts(source_root: str) -> Tuple[Dict[str, str], List[str]]:
+    """(R7) `.c`/`.h` texts under every root (comma/semicolon separated) and the files that could not be read as
+    UTF-8 — left out, never read with a guessed encoding, and **counted** (their functions are missing from every
+    contract — review W5)."""
+    texts: Dict[str, str] = {}
+    unread: List[str] = []
+    for root in [r.strip() for r in re.split(r"[,;]", str(source_root or "")) if r.strip()]:
+        base = Path(root)
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if p.suffix.lower() in (".c", ".h") and p.is_file():
+                try:
+                    texts[str(p)] = p.read_bytes().decode("utf-8")
+                except (UnicodeDecodeError, OSError):
+                    unread.append(str(p))
+    return texts, unread
+
+
+def _shared_c_parser():
+    from generators.c_project_context import shared_parser
+    return shared_parser()
+
+
+def _iface_type_bounds(type_text: str) -> Optional[Tuple[int, int]]:
+    """(R7) Declared return type → (min, max) for a suggested return value, or None. Plain ``int``/``short``/``long`` are left out:
+    their width is the target's (S12Z: 16-bit ``int``), not something to assume here."""
+    t = str(type_text or "").strip()
+    if not t or t.endswith("*") or re.search(r"\b(?:int|short|long)\b", t):
+        return None
+    from generators.suts import _TYPE_BOUNDARIES, _normalize_type
+    n = _normalize_type(t)
+    if n == "bool":
+        return (0, 1)
+    b = _TYPE_BOUNDARIES.get(n)
+    if not b or n == "float" or not isinstance(b.get("min"), int):
+        return None
+    return (b["min"], b["max"])
 
 
 def generate_sits(
@@ -3789,6 +3836,19 @@ def generate_sits(
         flow_stats["flows_with_boundary_subcases"] = sum(
             1 for _t in itcs if _has_boundary_subcases(_t.get("sub_cases")))
         flow_stats["boundary_subcase_min_distinct"] = _SITS_BV_MIN_DISTINCT
+
+    # (R7, P4/G5) 인터페이스 계약 — 경로상 모듈 경계 호출(반환 사용·비교 상수·인자 바인딩)과 전역 생산→소비를 소스에서
+    #   읽어 **근거로만** 싣는다. 흐름의 callee 는 통합 대상이라 반환을 주입하면 통합 시험이 stub 시험이 된다(리뷰 W1) —
+    #   오류 전파 시험이 몰아야 할 값은 "제안(미적용)" 으로 "Interface Evidence" 시트와 quality_report 에 남긴다.
+    if (project_config or {}).get("interface_contract", True):
+        try:
+            from generators.interface_contract import attach_interface_contract
+            _iface_texts, _iface_unread = _read_source_texts(source_root)
+            flow_stats["interface_contract"] = attach_interface_contract(
+                itcs, _iface_texts, _shared_c_parser(), _iface_type_bounds, unreadable=_iface_unread)
+        except Exception as exc:  # noqa: BLE001 — 계약 추출 실패가 규격 시트를 못 죽인다(사유는 남긴다)
+            _logger.warning("SITS: 인터페이스 계약 추출 실패(%s): %s", type(exc).__name__, exc)
+            flow_stats["interface_contract"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
     _progress(65, f"{len(itcs)}개 TC, {sum(len(t['sub_cases']) for t in itcs)}개 sub-case 생성 완료")
 
