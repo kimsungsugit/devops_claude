@@ -533,9 +533,10 @@ class TestWiring:
 
         real = suts_mod.generate_sequences
 
-        def _seqs(unit, max_seq=24, type_cache=None, extended=False):
+        def _seqs(unit, max_seq=24, type_cache=None, extended=False, **kw):
+            # (R19) 확장은 경계 행 없이 만들고 입력 보완 뒤 한 번 붙인다(`boundary_rows=False`)
             seen["suts"] = (max_seq, extended)
-            return real(unit, max_seq, type_cache, extended)
+            return real(unit, max_seq, type_cache, extended, **kw)
 
         monkeypatch.setattr(suts_mod, "generate_sequences", _seqs)
         out = suts_mod.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "u.xlsm"), scope="source", tc_profile=profile)

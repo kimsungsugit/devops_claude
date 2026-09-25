@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from generators._artifact_check import apply_write_back_check
 from generators._artifact_check import sheet_base_name as _sheet_base_name
@@ -2131,9 +2131,10 @@ resolve_safety_related = _resolve_safety_related
 
 
 def is_extended_strategy(strategy: Any) -> bool:
-    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
+    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19) 전부, 그리고 기본 자리 수를 넘는
+    SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
-    if s.startswith(("OAT_", BOUNDARY_PREFIX)):
+    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2141,18 +2142,10 @@ def is_extended_strategy(strategy: Any) -> bool:
     return False
 
 
-def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
-                          output_vars: List[str], var_types: Dict[str, str], var_bounds: Dict[str, Dict[str, Any]],
-                          unknown_vars: set) -> None:
-    """(R15) 행동 경계 행 — `generators.boundary_rows.find_boundaries` 가 소스 oracle 로 찾은 인접 입력 쌍을 시퀀스 뒤에 붙인다.
-
-    움직일 수 있는 입력은 정수 경계가 정해진 것만(모르는 타입·부동소수·경계 미상 제외 — 값을 지어내지 않는다). enum 은
-    **열거자 값 집합**으로 넘긴다 — 열거자 사이의 정수는 쓰지 않는다(리뷰 C2). 기준 행 후보는 전 입력 중간값(BV_MID) → MC/DC
-    설계 벡터 → 조건 조합 → 나머지 순으로 넘기고, 후보가 상한보다 많으면 탐색기가 한 번씩 돌려 **서로 다른 출력 상태**·도출
-    출력이 많은 행을 먼저 쓴다(이 순서는 동률일 때만). 도메인 밖 값을 가진 행(BV_*_INV)은 기준이 아니다. 기대값은 여기서 적지 않는다: 붙인 뒤
-    같은 oracle(`apply_sequence_evidence`)이 모든 행과 똑같이 도출한다. 탐색 요약은 `unit["boundary_search"]` 에 남는다.
-    탐색이 실패해도 문서는 만든다 — 그 unit 만 경계 행 없이 두고 사유를 남긴다(리뷰 C1).
-    """
+def _boundary_domains(unit: Dict[str, Any], input_vars: List[str], var_types: Dict[str, str],
+                      var_bounds: Dict[str, Dict[str, Any]], unknown_vars: set) -> Dict[str, Any]:
+    """입력마다 움직일 수 있는 정수 도메인 — `(lo, hi)` 범위 또는 enum 열거자 목록(R15 경계 행·R19 MC/DC 채움 행 공용).
+    모르는 타입·부동소수·경계 미상은 싣지 않는다(값을 지어내지 않는다)."""
     enum_sets = unit.get("value_domains") or {}
     domains: Dict[str, Any] = {}
     for v in input_vars:
@@ -2177,6 +2170,22 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         if isinstance(lo, bool) or isinstance(hi, bool) or not isinstance(lo, int) or not isinstance(hi, int) or lo >= hi:
             continue
         domains[v] = (lo, hi)
+    return domains
+
+
+def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
+                          output_vars: List[str], var_types: Dict[str, str], var_bounds: Dict[str, Dict[str, Any]],
+                          unknown_vars: set) -> None:
+    """(R15) 행동 경계 행 — `generators.boundary_rows.find_boundaries` 가 소스 oracle 로 찾은 인접 입력 쌍을 시퀀스 뒤에 붙인다.
+
+    움직일 수 있는 입력은 정수 경계가 정해진 것만(모르는 타입·부동소수·경계 미상 제외 — 값을 지어내지 않는다). enum 은
+    **열거자 값 집합**으로 넘긴다 — 열거자 사이의 정수는 쓰지 않는다(리뷰 C2). 기준 행 후보는 전 입력 중간값(BV_MID) → MC/DC
+    설계 벡터 → 조건 조합 → 나머지 순으로 넘기고, 후보가 상한보다 많으면 탐색기가 한 번씩 돌려 **서로 다른 출력 상태**·도출
+    출력이 많은 행을 먼저 쓴다(이 순서는 동률일 때만). 도메인 밖 값을 가진 행(BV_*_INV)은 기준이 아니다. 기대값은 여기서 적지 않는다: 붙인 뒤
+    같은 oracle(`apply_sequence_evidence`)이 모든 행과 똑같이 도출한다. 탐색 요약은 `unit["boundary_search"]` 에 남는다.
+    탐색이 실패해도 문서는 만든다 — 그 unit 만 경계 행 없이 두고 사유를 남긴다(리뷰 C1).
+    """
+    domains = _boundary_domains(unit, input_vars, var_types, var_bounds, unknown_vars)
     outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
 
     def _rank(s: Dict[str, Any]) -> int:
@@ -2215,6 +2224,77 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         })
 
 
+# (R19) MC/DC 채움 행 — 설계 벡터는 결정이 읽는 입력만 적어 나머지 칸이 비고, 함수가 그 입력을 읽으면 기대값이 서지 않는다
+#   (HDPDM01 확장: `initial_value_not_in_inputs` 공란 1,034칸이 **전부** MC/DC 행 324행). 벡터 행은 그대로 두고(쌍 재검증은 행을
+#   벡터 JSON 으로 찾는다) 채운 **동반 행**을 더한다. 쌍의 구성원이 아니다 — MC/DC 주장은 원래 행에만 있다.
+MCDC_FILL_PREFIX = "FILLED_MCDC_"
+
+
+def _append_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
+                           output_vars: List[str], var_types: Dict[str, str], fill: Dict[str, int]) -> None:
+    """(R19, 확장 프로파일) MC/DC 설계 벡터 행마다, 벡터가 비운 입력을 경계 행(R15)과 **같은 규칙**(`blank_fill`: 중간값에서
+    입력 위치만큼 옮긴 값, enum 은 열거자)으로 채운 행을 하나 더한다. 도메인을 모르는 입력은 여전히 비운다. 같은 입력의 행이
+    이미 있으면 더하지 않는다. 기대값은 뒤의 oracle 이 모든 행과 똑같이 도출한다. 요약은 `unit["mcdc_fill"]`.
+    `fill` 은 선언 타입·열거자가 있는 입력의 채움 값이다(이름 패턴 타입은 추측이라 채우지 않는다 — 리뷰 R1 W5)."""
+    seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in sequences}
+    rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
+    report = {"mcdc_rows": len(rows), "rows_with_blanks": 0, "rows": 0, "not_fillable": 0, "duplicates": 0,
+              "pruned": 0}
+    for row in rows:
+        vector = row.get("inputs") or {}
+        blank = [v for v in input_vars if v not in vector]
+        if not blank:
+            continue
+        report["rows_with_blanks"] += 1
+        filled = [v for v in blank if v in fill]
+        if not filled:
+            report["not_fillable"] += 1
+            continue
+        inputs = {v: vector[v] if v in vector else _format_test_value(fill[v], var_types.get(v, "uint8_t"))
+                  for v in input_vars if v in vector or v in fill}
+        key = json.dumps(inputs, sort_keys=True, default=str)
+        if key in seen:
+            report["duplicates"] += 1
+            continue
+        seen.add(key)
+        shown = ", ".join(f"{v}={inputs[v]}" for v in filled[:4]) + (f" 외 {len(filled) - 4}" if len(filled) > 4 else "")
+        left = [v for v in blank if v not in fill]
+        sequences.append({
+            "seq_num": len(sequences) + 1, "inputs": inputs,
+            "expected": {o: f"{VERIFY_PREFIX} mcdc_fill" for o in output_vars},
+            "strategy": f"{MCDC_FILL_PREFIX}{report['rows']}", "tc_profile": TC_PROFILE_EXTENDED,
+            "description": (f"MC/DC 설계 벡터(시퀀스 {row.get('seq_num')})의 결정 무관 입력을 채운 행: {shown}"
+                            + (f" · 선언 타입이 없어 비운 입력(이름 패턴 타입은 추측): {', '.join(left[:4])}" if left else "")
+                            + " — MC/DC 쌍의 구성원이 아니다(기대값은 소스 oracle 도출 · 미실행)"),
+            "mcdc_fill": {"from_sequence": row.get("seq_num"), "filled": {v: inputs[v] for v in filled}},
+        })
+        report["rows"] += 1
+    unit["mcdc_fill"] = report
+
+
+def _prune_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """(R19 리뷰 R1 W4) 근거가 붙은 뒤, 채움 행이 원래 MC/DC 행보다 **더 도출한 칸이 없으면** 뺀다(채운 입력을 함수가 읽지
+    않았다 — HDPDM01 첫 판 478행 중 157행). 뒤 행의 번호는 다시 매긴다(채움 행 앞의 MC/DC 행 번호는 그대로)."""
+    fills = [s for s in sequences if str(s.get("strategy") or "").startswith(MCDC_FILL_PREFIX)]
+    if not fills:
+        return sequences
+    by_num = {s.get("seq_num"): s for s in sequences}
+
+    def derived(seq: Dict[str, Any]) -> set:
+        return {k for k, e in (seq.get("expected_evidence") or {}).items() if (e or {}).get("status") == "derived"}
+    drop = {id(f) for f in fills
+            if not (derived(f) - derived(by_num.get((f.get("mcdc_fill") or {}).get("from_sequence")) or {}))}
+    if not drop:
+        return sequences
+    kept = [s for s in sequences if id(s) not in drop]
+    for i, s in enumerate(kept):
+        s["seq_num"] = i + 1
+    report = unit.get("mcdc_fill") if isinstance(unit.get("mcdc_fill"), dict) else {}
+    report["pruned"] = int(report.get("pruned") or 0) + len(drop)
+    report["rows"] = int(report.get("rows") or 0) - len(drop)
+    return kept
+
+
 def resolve_seq_test_method(strategy: Any) -> str:
     """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다."""
     return _METHOD_FI if str(strategy or "").strip() in _FI_STRATEGIES else _METHOD_REQ
@@ -2223,7 +2303,7 @@ def resolve_seq_test_method(strategy: Any) -> str:
 def resolve_seq_gen_method(strategy: Any) -> str:
     """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
     s = str(strategy or "").strip()
-    if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC"):
+    if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX):
         return _GEN_EQUIV
     return _GEN_BOUNDARY
 
@@ -2251,13 +2331,15 @@ def generate_sequences(
     max_seq: Optional[int] = _DEFAULT_SEQ_COUNT,
     type_cache: Optional[Dict[str, str]] = None,
     extended: bool = False,
+    boundary_rows: bool = True,
 ) -> List[Dict[str, Any]]:
     """Generate test sequences for a unit function.
 
     `extended`(R75 확장 프로파일): 기본 전략 목록은 **그대로 앞에** 두고(같은 이름·같은 값) 그 뒤에 덧붙인다 —
     7번째 이후의 switch case · 4번째 이후의 전역 · 8번째 이후의 MC/DC 설계 벡터 · 입력마다 최솟값/최댓값 **단독 변경**(OAT,
     조건 조합이 이미 만든 (변수, 방향)은 건너뜀). 값은 같은 `_bounds_of` 에서 오고 모르는 타입은 확장에서도 비운다.
-    `max_seq=None` 이면 자르지 않는다.
+    `max_seq=None` 이면 자르지 않는다. `boundary_rows=False` 는 확장에서도 경계 행 탐색(R15)을 건너뛴다 — 소스가 읽는
+    입력을 찾는 중간 회차(R19 `complete_source_read_inputs`)용이고, 문서에 실리는 마지막 회차는 늘 탐색한다.
 
     Produces boundary-value and error-condition test sequences matching
     the reference SUTS patterns:
@@ -2276,7 +2358,10 @@ def generate_sequences(
     #   두 경로(I/O 없는 unit 의 간접 변수 경로 · 일반 경로) **모두** 이 캐시를 쓴다(리뷰 C2).
     _base_cache = type_cache if type_cache is not None else _globals_type_cache
     _ptypes = unit.get("param_types") or {}
-    type_cache = {**_base_cache, **_ptypes} if _ptypes else _base_cache
+    # (R19) 소스가 읽어 더한 입력의 **선언** 타입(번역 단위 범위에서) — 전역 표가 이미 아는 이름이면 그 표가 이긴다.
+    _src_types = {k: v for k, v in (unit.get("source_input_types") or {}).items()
+                  if _normalize_type(str(_base_cache.get(k) or "")) in ("", _UNKNOWN_TYPE)}
+    type_cache = {**_base_cache, **_src_types, **_ptypes} if (_ptypes or _src_types) else _base_cache
     # (R73 N92) enum 값 집합이 있는 변수는 타입 `enum` — 경계값은 열거자의 최소/가운데/최대, 범위 밖은 ±1.
     _domains = unit.get("value_domains") or {}
     # (R74) 경계값의 출처 순서: **설계서 범위**(SwUDS Value Range) > enum 값 집합 > HSIS SW 값 범위 > 타입 전폭.
@@ -2285,10 +2370,19 @@ def generate_sequences(
     _hsis_rng = unit.get("hsis_bounds") or {}
     _bsrc: Dict[str, str] = {}
 
-    def _type_of(v: str) -> str:
-        if enum_bounds(_domains.get(v)):
+    # (R19 리뷰 R2) 소스 읽기가 붙인 선언 타입·열거자 — 카탈로그 **구조**(GLOBAL 행을 둘 전역)를 정할 땐 빼고 본다: 정본 규모
+    #   문서가 모르던 타입이 여기서 풀리면 GLOBAL 행이 기본 영역에 끼어든다.
+    _r19_typed = set(_src_types) | {k for k, d in _domains.items()
+                                    if isinstance(d, dict) and d.get("source") == "translation_unit_declaration"}
+    _design_cache = {**_base_cache, **_ptypes} if _ptypes else _base_cache
+    # (리뷰 R3 W1) 입력 보완이 열거자를 덮어쓴 이름은 덮기 전 영역(전역 표의 값 집합)으로 본다 — 없으면 정본 규모처럼 모름
+    _design_domains = unit.get("design_value_domains") or {}
+
+    def _type_of(v: str, design: bool = False) -> str:
+        r19 = design and v in _r19_typed
+        if enum_bounds(_design_domains.get(v) if r19 else _domains.get(v)):
             return _ENUM_TYPE
-        t = infer_variable_type(v, type_cache)
+        t = infer_variable_type(v, _design_cache if r19 else type_cache)
         if t == _UNKNOWN_TYPE:
             # 소스 선언은 모르는 타입인데 설계서가 타입을 적었으면 그것(표가 아는 이름일 때만).
             ut = _normalize_type(str((_uds_info.get(v) or {}).get("type") or ""))
@@ -2463,13 +2557,20 @@ def generate_sequences(
     # GAP 1: Condition combination — toggle each input while others stay at mid
     # (R71 N77) 토글 대상은 값을 만들 수 있는(타입을 아는) 입력뿐이다 — 모르는 타입을 토글하면 값이 비어 중간값
     #   시퀀스와 같은 행이 하나 더 생기고 라벨만 "pt_Entry=최솟값" 이라 말한다.
-    _toggle_vars = [v for v in input_vars if var_types.get(v) != _UNKNOWN_TYPE]
-    if len(input_vars) >= 2:
-        for toggle_idx in range(min(4, len(_toggle_vars))):
-            strategies.append((f"COND_COMB_{toggle_idx}", f"_cond_{toggle_idx}"))
+    # (R19) 카탈로그의 **구조**(조건 조합·switch·루프·MC/DC 자리)는 설계 입력 목록으로 정한다. 확장 프로파일이 소스가 읽어 더한
+    #   입력은 기본 카탈로그의 자리·순서를 바꾸지 않는다(R75 포함 관계 — 리뷰 R1 C1: 더한 입력이 조건 조합 행을 기본 영역에 끼워
+    #   MC/DC 자리를 밀었다). 그 행에서 더한 입력은 고정값(`_fill_all`)이고 극값은 확장 행(OAT·경계)에서만 움직인다.
+    _design_inputs = ([v for v in unit["design_input_vars"] if v in input_vars]
+                      if isinstance(unit.get("design_input_vars"), list) else list(input_vars))
+    _added_inputs = [v for v in input_vars if v not in set(_design_inputs)]
+    _design_toggles = [v for v in _design_inputs if var_types.get(v) != _UNKNOWN_TYPE]
+    _toggle_vars = _design_toggles + [v for v in _added_inputs if var_types.get(v) != _UNKNOWN_TYPE]
+    _cond_count = min(4, len(_design_toggles)) if len(_design_inputs) >= 2 else 0
+    for toggle_idx in range(_cond_count):
+        strategies.append((f"COND_COMB_{toggle_idx}", f"_cond_{toggle_idx}"))
 
     # GAP 2: Switch-case — generate TC per enum/case value from logic_flow
-    _all_switch = _extract_switch_cases(logic_flow, input_vars)
+    _all_switch = _extract_switch_cases(logic_flow, _design_inputs)
     _extra_switch = _all_switch if extended else _all_switch[:_BASE_SWITCH_SLOTS]
     for sw_idx in range(min(_BASE_SWITCH_SLOTS, len(_extra_switch))):
         strategies.append((f"SWITCH_{sw_idx}", f"_switch_{sw_idx}"))
@@ -2483,14 +2584,14 @@ def generate_sequences(
         for n in logic_flow:
             if str(n.get("type", "")).lower() == "loop":
                 cond = str(n.get("condition", ""))
-                for iv in input_vars:
+                for iv in _design_inputs:
                     if iv.lower() in cond.lower():
                         _loop_var = iv
                         break
                 break
-        if not _loop_var and input_vars:
+        if not _loop_var and _design_inputs:
             # 값을 만들 수 있는 첫 입력 — 모르는 타입이면 0/1/최댓값을 못 넣어 루프 시퀀스가 빈 행이 된다.
-            _loop_var = next((v for v in input_vars if var_types.get(v) != _UNKNOWN_TYPE), "")
+            _loop_var = next((v for v in _design_inputs if var_types.get(v) != _UNKNOWN_TYPE), "")
         if _loop_var:
             strategies.append(("LOOP_ZERO", "_loop_0"))
             strategies.append(("LOOP_ONE", "_loop_1"))
@@ -2501,7 +2602,7 @@ def generate_sequences(
     _extra_globals: List[str] = []
     if indirect_vars:
         # 모르는 타입의 전역은 토글 대상이 아니다(리뷰 C2 — `void *` 전역이 `{pt_G: 0}` 로 섰다).
-        _known_globals = [g for g in indirect_vars if _ind_types.get(g) != _UNKNOWN_TYPE]
+        _known_globals = [g for g in indirect_vars if _type_of(g, design=True) != _UNKNOWN_TYPE]
         for gv in (_known_globals if extended else _known_globals[:_BASE_GLOBAL_SLOTS]):
             _extra_globals.append(gv)
             if len(_extra_globals) <= _BASE_GLOBAL_SLOTS:
@@ -2509,15 +2610,18 @@ def generate_sequences(
 
     # GAP 5: Void side-effect — for functions with inputs but no outputs,
     # add sequence using indirect_vars as expected outputs
-    if input_vars and not output_vars and indirect_vars:
+    if _design_inputs and not output_vars and indirect_vars:
         strategies.append(("VOID_SIDE_EFFECT", "_void_se"))
 
     # GAP 6: MC/DC — 결정식을 **실제로 평가해** 찾은 unique-cause 독립 영향 쌍의 입력 벡터(`generators.mcdc_design`).
     # ⚠ 예전 경로(regex `_extract_mcdc_conditions`)는 "전부 참 + 하나만 거짓(나머지 중간값)" 을 만들어 OR 식에서
     #   독립 영향이 0 이었다(`a>10 || b>20` 에서 a 를 뒤집어도 b 가 참이라 결과가 안 바뀐다) — 기법 주장만 있고 쌍이 없었다.
     #   도메인은 **선언**에서 온 것만 쓴다(이름 패턴 추측 금지). 못 푸는 결정은 쌍 없이 사유를 남기고 분모에 남는다.
-    _mcdc_report = build_mcdc_design(unit, declared_domains=_mcdc_declared_domains(
-        input_vars, _type_of, _domains, _declared, _is_pointer_decl, set(_ptypes)))
+    # (R19) 설계 입력 목록 위에서 — 기본 자리(`_BASE_MCDC_SLOTS`)의 벡터가 정본 규모 문서와 같다. 더한 입력만 읽는 결정은
+    #   예전처럼 `decision_variable_not_in_unit_inputs` 로 남는다(확장 MC/DC 설계는 후속).
+    _mcdc_unit = dict(unit, input_vars=list(_design_inputs)) if _added_inputs else unit
+    _mcdc_report = build_mcdc_design(_mcdc_unit, declared_domains=_mcdc_declared_domains(
+        _design_inputs, _type_of, _domains, _declared, _is_pointer_decl, set(_ptypes)))
     unit["mcdc_design"] = _mcdc_report
     _mcdc_vectors: List[Dict[str, int]] = list(_mcdc_report.get("selected_inputs") or [])
     _mcdc_roles = _mcdc_vector_roles(_mcdc_report)
@@ -2537,9 +2641,11 @@ def generate_sequences(
         # 단독 경계(OAT): 입력 하나만 경계로, 나머지는 중간값. 입력이 하나뿐이면 BV_MIN/BV_MAX 가 이미 그것이다.
         if len(input_vars) >= 2:
             for t_idx in range(len(_toggle_vars)):
+                if t_idx < len(_design_toggles) and len(_design_inputs) < 2:
+                    continue   # (R19 리뷰 R2 W2') 설계 입력이 하나면 BV_MIN/BV_MAX 가 이미 그 단독 변경이다
                 for side in ("min", "max"):
                     # 조건 조합(앞 4개)이 이미 만든 (변수, 방향): 짝수 번째=min, 홀수 번째=max.
-                    if t_idx < 4 and side == ("min" if t_idx % 2 == 0 else "max"):
+                    if t_idx < _cond_count and side == ("min" if t_idx % 2 == 0 else "max"):
                         continue
                     strategies.append((f"OAT_{t_idx}_{side.upper()}", f"_oat_{t_idx}_{side}"))
 
@@ -2561,6 +2667,16 @@ def generate_sequences(
             return f"유효 {direction}: 가드 조건에 의한 에러 처리 확인"
         else:
             return f"유효 {direction}: 방어 처리 확인 (포화 추정)"
+
+    _fill_all: Dict[str, int] = {}
+    if extended:
+        from generators.boundary_rows import blank_fill
+        _fill_domains = {v: d for v, d in _boundary_domains(unit, input_vars, var_types, var_bounds,
+                                                            set(_unknown_vars)).items()
+                         if var_types.get(v) == _ENUM_TYPE or _declared(v)}
+        _fill_all = blank_fill(_fill_domains, {v: m for v in _fill_domains
+                                               if isinstance(m := (var_bounds.get(v) or {}).get("mid"), int)
+                                               and not isinstance(m, bool)})
 
     sequences: List[Dict[str, Any]] = []
     for idx, (strat_name, bound_key) in enumerate(strategies if max_seq is None else strategies[:max_seq]):
@@ -2684,6 +2800,27 @@ def generate_sequences(
                 raw = bnd.get("mid", 0)
                 exp_vals[v] = _format_test_value(raw, out_types.get(v, "uint8_t"))
 
+        # (R19) 더한 입력은 이 행의 전략이 움직이는 대상이 아니면 고정값 — 설계 열의 값은 정본 규모 문서와 같다. BV_MIN 이 더한
+        #   입력까지 형 끝값으로 밀면 전에 도출하던 칸이 미정의 동작으로 사라졌다(리뷰 R1 W3: 2 unit 7칸). MC/DC 벡터는 그대로.
+        _fixed: List[str] = []
+        if _added_inputs and not (bound_key or "").startswith("_mcdc_"):
+            _target = ""
+            if (bound_key or "").startswith("_oat_"):
+                _oi = int(bound_key.split("_")[2])
+                _target = _toggle_vars[_oi] if _oi < len(_toggle_vars) else ""
+            elif (bound_key or "").startswith("_global_"):
+                # (리뷰 R2 C1) GLOBAL 행이 최솟값으로 움직이는 전역이 더한 입력이면 그 값을 덮지 않는다(정본 행의 자극)
+                _gi = int(bound_key.split("_")[-1])
+                _target = _extra_globals[_gi] if _gi < len(_extra_globals) else ""
+            for v in _added_inputs:
+                if v == _target:
+                    continue
+                if v in _fill_all:
+                    inp_vals[v] = _format_test_value(_fill_all[v], var_types.get(v, "uint8_t"))
+                    _fixed.append(v)
+                else:
+                    inp_vals.pop(v, None)
+
         # (R71 N77) 모르는 타입의 변수는 값을 비운다 — `{}` 경계에서 `.get(key, 0)` 로 만든 0 은 값이 아니라 자리표시다.
         for _vals in (inp_vals, exp_vals):
             for _k in [k for k in _vals if k in _unknown_vars]:
@@ -2707,6 +2844,9 @@ def generate_sequences(
             if v not in output_vars:
                 exp_parts.append(f"{v}={exp_vals[v]}")
         desc_lines = [label]
+        if _fixed:
+            desc_lines.append("소스가 읽어 더한 입력(설계서 입력 표 밖 · 이 행에선 고정값): "
+                              + ", ".join(f"{v}={inp_vals[v]}" for v in _fixed))
         if inp_parts:
             desc_lines.append("Input: " + ", ".join(inp_parts))
         if exp_parts:
@@ -2728,7 +2868,15 @@ def generate_sequences(
     # 커버리지 주장에서 빠진다. MC/DC 행끼리만 묶는다(같은 입력의 BV 행을 쌍 구성원으로 잡으면 설계 근거가 섞인다).
     _mcdc_rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
     # (R2c) 함수 실행 모델로 설계한 결정(`evaluation=source_path`)은 행 입력으로 oracle 을 다시 돌려 검증한다 — unit 필요.
-    finalize_mcdc_design(_mcdc_report, _mcdc_rows, unit)
+    finalize_mcdc_design(_mcdc_report, _mcdc_rows, _mcdc_unit)
+    if _added_inputs:
+        # (리뷰 R2 W3') 설계 입력 목록 위의 MC/DC 라 더한 입력을 읽는 결정은 거절된다 — 확장 문서엔 그 열이 있으니 "입력 목록 밖"
+        #   이라 쓰면 거짓이다. 사유를 바꿔 적는다(확장 MC/DC 설계는 후속).
+        _added_set = set(_added_inputs)
+        for _d in _mcdc_report.get("decisions") or []:
+            _r = str(_d.get("reason") or "")
+            if _r.startswith("decision_variable_not_in_unit_inputs:") and _r.split(":", 1)[1] in _added_set:
+                _d["reason"] = "decision_reads_source_read_input_not_designed:" + _r.split(":", 1)[1]
     for _row in _mcdc_rows:
         # (리뷰 C1) "독립 영향 쌍" 은 **두 행이 모두 남아 재검증을 통과한** 쌍(`seq["mcdc_design"]`)에만 쓴다. 짝 행이 잘렸거나
         # 무효가 된 벡터는 그 사실을 라벨에 적는다 — 예전엔 절단 전 라벨이 남아 MCDC Design 시트(truncated)와 모순됐다.
@@ -2742,9 +2890,270 @@ def generate_sequences(
             _lines[0] += f" · 설계 밖 입력(공란, 결정 무관·도메인 미상): {', '.join(_blank)}"
         _row["description"] = "\n".join(_lines)
     if extended:
-        # (R15) 확장 프로파일에만 — 출력이 바뀌는 인접 입력 두 값을 행으로 **더한다**(기존 행은 옮기지 않는다, R4b 교훈).
-        _append_boundary_rows(unit, sequences, input_vars, output_vars, var_types, var_bounds, set(_unknown_vars))
-    return apply_sequence_evidence(unit, sequences)
+        # (R19) MC/DC 벡터가 비운 결정 무관 입력을 채운 동반 행(벡터 행·쌍 주장은 그대로). 선택 확장이라 실패해도 문서는 만든다.
+        try:
+            _append_mcdc_fill_rows(unit, sequences, input_vars, output_vars, var_types, _fill_all)
+        except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+            _logger.warning("SUTS MC/DC 채움 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            sequences[:] = [s for s in sequences if not str(s.get("strategy") or "").startswith(MCDC_FILL_PREFIX)]
+            unit["mcdc_fill"] = {"error": type(exc).__name__}
+    sequences = apply_sequence_evidence(unit, sequences)
+    if not extended:
+        return sequences
+    sequences = _prune_mcdc_fill_rows(unit, sequences)
+    # (R15) 경계 행 — 확장 프로파일에만. 출력이 바뀌는 인접 입력 두 값을 행으로 **더한다**(기존 행은 옮기지 않는다, R4b 교훈).
+    #   `boundary_rows=False` 면 탐색에 쓸 문맥만 남기고 호출자가 마지막에 한 번 붙인다(`append_boundary_rows`, R19 리뷰 W6).
+    ctx = {"input_vars": list(input_vars), "output_vars": list(output_vars), "var_types": dict(var_types),
+           "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars)}
+    if boundary_rows:
+        return append_boundary_rows(unit, sequences, ctx)
+    unit["_boundary_ctx"] = ctx
+    return sequences
+
+
+def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
+                         ctx: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """(R15/R19) 근거가 붙은 시퀀스 뒤에 경계 행을 더하고 **새 행에만** 근거를 붙인다(행마다 독립이라 결과는 한 번에 붙인 것과
+    같다). `ctx` 가 없으면 `generate_sequences(..., boundary_rows=False)` 가 unit 에 남긴 문맥을 꺼낸다(없으면 그대로 — 입출력
+    없는 unit 경로)."""
+    ctx = ctx if ctx is not None else unit.pop("_boundary_ctx", None)
+    unit.pop("_boundary_ctx", None)
+    if not ctx:
+        return sequences
+    n = len(sequences)
+    _append_boundary_rows(unit, sequences, ctx["input_vars"], ctx["output_vars"], ctx["var_types"], ctx["var_bounds"],
+                          set(ctx["unknown"]))
+    if len(sequences) > n:
+        sequences[n:] = apply_sequence_evidence(unit, sequences[n:])
+    return sequences
+
+
+# ── (R19) 소스가 읽는 입력 ──────────────────────────────────────────────────────────────────────────────────────
+# oracle 이 기대값을 못 낸 사유 `initial_value_not_in_inputs:X` = 이 행으로 함수를 돌리면 X 를 **쓰기 전에 읽는데** 행이 X 의
+# 값을 주지 않았다. 시험 입력 목록(설계서 입력 표·소스 분석)이 그 객체를 빠뜨렸다는 뜻이다. 실측(R17 확장 생성본 · R4 하네스):
+# 정본만 판별한 변이 HDPDM01 347 중 244 · KJPDS02_PV 257 중 124 가 이런 함수에 있다 — 예: HDPDM01 SwUDS v1.07 이
+# `s_MoveStartClose_GainMeasure` 의 입력으로 **Open** gain 을 적었고 소스는 **Close** gain 을 읽는다(정본 SUTS 는 소스를 따랐다).
+_SOURCE_READ_RE = re.compile(r"initial_value_not_in_inputs:([A-Za-z_]\w*(?:\[\d+\])?)(?![\w.\[])")
+_SOURCE_READ_ROUNDS = 3
+
+
+def source_read_names(sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """행이 값을 주지 않았는데 함수가 초기값을 읽은 이름 → {"slots": 칸 수, "sequences": [행 번호…]}(기대값 근거의 사유에서).
+
+    멤버 경로(`s.a`)·2차원 첨자는 이름으로 싣지 않는다(시험 입력 한 칸으로 줄 수 있는 모양이 아니다)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for seq in sequences:
+        for ev in (seq.get("expected_evidence") or {}).values():
+            for name in _SOURCE_READ_RE.findall(str((ev or {}).get("reason") or "")):
+                rec = out.setdefault(name, {"slots": 0, "sequences": []})
+                rec["slots"] += 1
+                if seq.get("seq_num") not in rec["sequences"]:
+                    rec["sequences"].append(seq.get("seq_num"))
+    return out
+
+
+_SCOPE_TYPE_KEYS = {(8, False): "uint8_t", (8, True): "int8_t", (16, False): "uint16_t", (16, True): "int16_t",
+                    (32, False): "uint32_t", (32, True): "int32_t"}
+
+
+def scope_input_types(unit: Dict[str, Any], names: List[str]
+                      ) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]], Dict[str, str]]:
+    """(R19) 번역 단위 범위가 **선언으로** 아는 입력의 타입 — (경계값 표의 타입 키, enum 값 집합, 못 정한 이름의 사유).
+
+    범위가 해석한 타입의 폭·부호로 키를 정하고(표가 모르는 typedef 이름도 해석된 타입으로 읽는다), enum 은 그 번역 단위의
+    열거자 값 집합을 준다(`mcdc_design._scope_domain` — 같은 이름의 static 이 두 unit 에 있어도 이 unit 의 것). 사유:
+    `type_not_resolved`(범위가 타입을 못 풂) · `no_boundary_table_for_type`(풀렸지만 64비트 등 경계값 표에 없음) ·
+    `enum_values_unresolved`. 추측하지 않는다."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    types: Dict[str, str] = {}
+    domains: Dict[str, Dict[str, Any]] = {}
+    reasons: Dict[str, str] = {}
+    if not scope:
+        return types, domains, {n: "no_project_scope" for n in names}
+    from generators import c_project_context as cpc
+    from generators.mcdc_design import _scope_domain
+    for name in names:
+        base, _, rest = name.partition("[")
+        table = (scope.get("arrays") if rest else scope.get("globals")) or {}
+        rec = table.get(base)
+        t = rec.get("type") if isinstance(rec, dict) else None
+        if not isinstance(t, dict):
+            reasons[name] = "type_not_resolved"
+            continue
+        if rec.get("volatile") or rec.get("const") or cpc.is_float(t):
+            reasons[name] = "not_a_settable_integer"
+            continue
+        if t.get("enum"):
+            try:
+                dom = _scope_domain(t, str(rec.get("typename") or ""), scope, "enum_declaration")
+            except (cpc.Unresolved, KeyError, TypeError):
+                reasons[name] = "enum_values_unresolved"
+                continue
+            domains[name] = {"values": list(dom["values"]), "source": "translation_unit_declaration"}
+            continue
+        key = "bool" if t.get("kind") == "_Bool" else _SCOPE_TYPE_KEYS.get((t.get("bits"), bool(t.get("signed"))), "")
+        if key:
+            types[name] = key
+        else:
+            reasons[name] = "no_boundary_table_for_type"
+    return types, domains, reasons
+
+
+def _source_object_decl(scope: Dict[str, Any], name: str) -> Tuple[Optional[str], str]:
+    """(선언 타입 이름, "") 또는 (None, 더하지 않는 사유). 번역 단위 범위의 **프로그램 객체**만 — 지역·매개변수·모르는 이름은
+    입력으로 더하지 않는다. 원소(`a[3]`)는 1차원 배열 표의 원소 타입, 길이를 알면 범위 안일 때만."""
+    base, _, rest = name.partition("[")
+    if rest:
+        rec = (scope.get("arrays") or {}).get(base)
+        if not isinstance(rec, dict):
+            return None, "element_of_unmodeled_array"
+        length = rec.get("length")
+        if isinstance(length, int) and not 0 <= int(rest.rstrip("]")) < length:
+            return None, "element_out_of_range"
+    else:
+        rec = (scope.get("globals") or {}).get(base)
+        if not isinstance(rec, dict):
+            return None, ("array_object" if base in (scope.get("arrays") or {}) else "not_a_program_object")
+    if rec.get("const"):
+        return None, "const_object"
+    if rec.get("volatile"):
+        return None, "volatile_object"
+    from generators.c_project_context import is_float
+    if isinstance(rec.get("type"), dict) and is_float(rec["type"]):
+        return None, "float_object"
+    typename = str(rec.get("typename") or "").strip()
+    if not typename:
+        return None, "no_declared_type"
+    return typename, ""
+
+
+def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
+                                regenerate: Callable[[], List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """(R19, 확장 프로파일) 소스가 읽는데 입력 목록에 없는 프로그램 객체를 **선언 타입으로** 입력 열에 더하고 다시 만든다.
+
+    회차마다 `source_read_names` 가 찾은 이름 중 번역 단위의 스칼라 객체(또는 1차원 배열 원소)만 더한다. 더한 입력은 기본 카탈로그
+    행에선 고정값이고(구조는 `unit["design_input_vars"]` = 설계 입력 목록으로 정해진다 — `generate_sequences`), OAT·경계 행에서
+    선언 타입(enum 은 그 번역 단위의 열거자) 범위를 움직인다. 더한 입력이 새 경로를 열어 또 다른 이름이 보이면 다음 회차(최대
+    `_SOURCE_READ_ROUNDS`)에서 더한다. `regenerate()` 는 경계 행 없이 다시 만든다 — 경계 행은 호출자가 마지막에 한 번 붙인다.
+    입출력이 없는 unit(전략 목록 대신 호출 시퀀스를 쓰는 경로)은 건드리지 않는다. 기록은 `unit["source_read_inputs"]`:
+    더한 이름(처음 본 칸 수·회차·타입) · 더하지 않은 이름과 사유 · 마지막 행들에서도 값이 없는 이름(`remaining`)."""
+    record: Dict[str, Any] = {"added": {}, "not_added": {}, "rounds": 0, "remaining": {}}
+    unit["source_read_inputs"] = record
+    if not (unit.get("input_vars") or unit.get("output_vars")):
+        record["not_added"] = {n: "unit_without_inputs_or_outputs" for n in source_read_names(sequences)}
+        return sequences
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
+    for _round in range(_SOURCE_READ_ROUNDS):
+        found = source_read_names(sequences)
+        inputs = list(unit.get("input_vars") or [])
+        new: List[str] = []
+        for name, rec in sorted(found.items(), key=lambda kv: (-kv[1]["slots"], kv[0])):
+            if name in inputs or name in record["added"] or name in record["not_added"]:
+                continue   # 열은 있는데 그 행이 비운 칸(MC/DC 벡터) — 채움 행의 몫
+            typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
+            if not why:
+                key, enum, reasons = scope_input_types(unit, [name])
+                why = reasons.get(name, "")
+            if why:
+                record["not_added"][name] = why
+                continue
+            if len(inputs) + len(new) >= max_inp:
+                record["not_added"][name] = "input_columns_full"
+                continue
+            new.append(name)
+            record["added"][name] = {"slots": rec["slots"], "round": _round + 1, "type": typename,
+                                     "value_type": key.get(name) or "enum"}
+            if name in key:
+                unit["source_input_types"] = {**(unit.get("source_input_types") or {}), name: key[name]}
+            else:
+                # (리뷰 R1 I5) 그 번역 단위의 열거자 — 전역 표는 이름으로 묶여 같은 이름의 다른 static 것일 수 있다.
+                #   덮기 전 값 집합은 카탈로그 구조 판정용으로 남긴다(리뷰 R3 W1: GLOBAL 행이 기본 영역에서 사라졌다).
+                prev = (unit.get("value_domains") or {}).get(name)
+                if prev:
+                    unit["design_value_domains"] = {**(unit.get("design_value_domains") or {}), name: prev}
+                unit["value_domains"] = {**(unit.get("value_domains") or {}), name: enum[name]}
+        if not new:
+            break
+        unit.setdefault("design_input_vars", list(inputs))
+        unit["input_vars"] = inputs + new
+        record["rounds"] = _round + 1
+        sequences = regenerate()
+    _record_remaining(unit, sequences)
+    return sequences
+
+
+def _record_remaining(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
+    """(리뷰 R1 W2) 남은 이름은 늘 같은 정의로 — 행들이 여전히 값 없이 읽는 프로그램 객체(입력 열 밖) + 더했는데 어느 행도 값을
+    주지 못한 열. MC/DC 벡터 행의 공란은 설계대로라 세지 않는다(채움 행이 그 몫). 경계 행을 붙인 뒤에도 다시 센다(리뷰 R2 I4)."""
+    record = unit.get("source_read_inputs")
+    if not isinstance(record, dict) or record.get("error"):
+        return
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
+    now = set(unit.get("input_vars") or [])
+    final = source_read_names(sequences)
+    record["remaining"] = {n: r["slots"] for n, r in final.items() if n not in now and n.partition("[")[0] in objects}
+    for n, added in (record.get("added") or {}).items():
+        if not any(n in (q.get("inputs") or {}) for q in sequences):
+            record["remaining"][n] = final.get(n, {}).get("slots", 0)
+            added["no_value_in_any_row"] = True
+
+
+def extended_unit_sequences(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R19) 확장 프로파일의 unit 시퀀스 — 경계 행 없이 만들고 → 소스가 읽는 입력을 더해 다시 만들고 → 경계 행을 **한 번** 붙인다
+    (리뷰 R1 W6: 첫 판은 경계 탐색을 두 번 했다). 입력 보완이 실패하면 그 unit 은 설계 입력 목록 그대로 만든다(선택 확장이 문서를
+    잃게 하지 않는다 — R15 규칙)."""
+    seqs = generate_sequences(unit, None, extended=True, boundary_rows=False)
+    snapshot = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+                for k in ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains")
+                if (v := unit.get(k)) is not None}
+    try:
+        seqs = complete_source_read_inputs(
+            unit, seqs, lambda: generate_sequences(unit, None, extended=True, boundary_rows=False))
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 소스 읽기 입력 보완 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        for k in ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains"):
+            unit.pop(k, None)
+        unit.update(snapshot)
+        unit["source_read_inputs"] = {"error": type(exc).__name__, "added": {}, "not_added": {}, "rounds": 0,
+                                      "remaining": {}}
+        seqs = generate_sequences(unit, None, extended=True, boundary_rows=False)
+    seqs = append_boundary_rows(unit, seqs)
+    _record_remaining(unit, seqs)
+    return seqs
+
+
+def input_list_gaps(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """함수가 초기값을 읽는데 시험 입력 목록에 없던 **프로그램 객체** → {"slots", "sequences", "added"}(소스 소견의 한 종류).
+
+    확장 프로파일에선 R19 가 더한 이름 — 이 문서에선 막힌 칸이 아니므로 칸 수·행 번호는 0/빈 목록이다(처음 본 칸 수는 품질 리포트
+    `source_read_inputs.slots_first_seen`, 리뷰 R1 W5) — 과 여전히 값 없이 읽는 이름, 기본 프로파일에선 문서 행의 사유에서 본
+    이름이다. 지역·멤버 경로·모르는 이름은 입력 목록의 결손이 아니다."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
+    rec = unit.get("source_read_inputs") if isinstance(unit.get("source_read_inputs"), dict) else {}
+    gaps: Dict[str, Dict[str, Any]] = {n: {"slots": 0, "sequences": [], "added": True} for n in (rec.get("added") or {})}
+    inputs = set(unit.get("input_vars") or [])
+    for name, r in source_read_names(sequences).items():
+        if name not in inputs and name not in gaps and name.partition("[")[0] in objects:
+            gaps[name] = {**r, "added": False}
+    return gaps
+
+
+def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """품질 리포트 `source_read_inputs` — 더한 unit·이름, 더하지 않은 사유 분포, 마지막 회차에 남은 이름(확장 프로파일)."""
+    recs = [u.get("source_read_inputs") for u in units if isinstance(u.get("source_read_inputs"), dict)]
+    not_added = Counter(why for r in recs for why in (r.get("not_added") or {}).values())
+    return {"units": len(recs), "units_with_added": sum(1 for r in recs if r.get("added")),
+            "names_added": sum(len(r.get("added") or {}) for r in recs),
+            "slots_first_seen": sum(int(a.get("slots") or 0) for r in recs for a in (r.get("added") or {}).values()),
+            "not_added": dict(sorted(not_added.items())),
+            "units_input_columns_full": sum(1 for r in recs if "input_columns_full" in (r.get("not_added") or {}).values()),
+            "max_rounds": max((int(r.get("rounds") or 0) for r in recs), default=0),
+            "units_with_remaining": sum(1 for r in recs if r.get("remaining")),
+            "names_remaining": sum(len(r.get("remaining") or {}) for r in recs),
+            "errors": sum(1 for r in recs if r.get("error"))}
 
 
 def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict[str, str]],
@@ -2875,8 +3284,17 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _summarize_source_findings(units: List[Dict[str, Any]], all_sequences: Dict[str, List[Dict[str, Any]]]):
-    from generators.source_findings import collect_findings, summarize_findings
-    return summarize_findings(collect_findings(units, all_sequences, {}))
+    from generators import source_findings as sf
+    out = sf.summarize_findings(sf.collect_findings(units, all_sequences, {}))
+    # (R19) 입력 목록 밖 읽기는 미정의 동작 소견과 따로 센다(`findings` 는 그대로 UB 소견 수)
+    gaps = sf.collect_input_gap_findings(units, _input_list_gaps(units, all_sequences), {})
+    out["input_list_gaps"] = sf.summarize_input_gaps(gaps)
+    return out
+
+
+def _input_list_gaps(units: List[Dict[str, Any]], all_sequences: Dict[str, List[Dict[str, Any]]]
+                     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    return {u["fid"]: input_list_gaps(u, all_sequences.get(u["fid"]) or []) for u in units}
 
 
 def _mcdc_vector_key(inputs: Dict[str, Any]) -> str:
@@ -3650,8 +4068,12 @@ def generate_suts_xlsm(
         evidence_ws.column_dimensions[col].width = 24 if col not in "IJKP" else 48
     _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, thin, hdr_fill, hdr_font, data_font)
     # (R10) 소스 소견 — oracle 이 기대값을 내다가 증명한 미정의 동작(함수·종류별, 예시 벡터, 재현 여부 공시)
-    from generators.source_findings import collect_findings, write_source_findings_sheet
-    write_source_findings_sheet(wb, collect_findings(units, all_sequences, rendered_tc_ids), hdr_font, hdr_fill, thin)
+    # (R19) + 입력 목록 밖 읽기(함수가 초기값을 읽는데 시험 입력 목록에 없는 객체) — unit 마다 한 행
+    from generators.source_findings import collect_findings, collect_input_gap_findings, write_source_findings_sheet
+    write_source_findings_sheet(
+        wb, collect_findings(units, all_sequences, rendered_tc_ids)
+        + collect_input_gap_findings(units, _input_list_gaps(units, all_sequences), rendered_tc_ids),
+        hdr_font, hdr_fill, thin)
 
     # --- Remove default sheet if we created new workbook ---
     if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
@@ -4842,7 +5264,8 @@ def generate_suts(
     all_sequences: Dict[str, List[Dict[str, Any]]] = {}
     ai_enhanced = 0
     for i, unit in enumerate(units):
-        seqs = generate_sequences(unit, None if _extended else max_sequences, extended=_extended)
+        # (R19) 확장: 소스가 읽는데 입력 목록에 없는 객체를 선언 타입으로 더해 다시 만든다 — 기본 프로파일은 정본 규모라 그대로.
+        seqs = extended_unit_sequences(unit) if _extended else generate_sequences(unit, max_sequences)
         if ai_config and unit["fid"] in _void_no_vars:
             seqs = enhance_sequences_with_ai(unit, seqs, ai_config)
             ai_enhanced += 1
@@ -4890,6 +5313,14 @@ def generate_suts(
             "not_searched": dict(Counter(str(b.get("status")).split(":", 1)[0] for b in _bsearch
                                          if b.get("status") != "searched")),
             "units_without_search": len(units) - len(_bsearch)}
+        # (R19) 소스가 읽어 더한 입력 — 설계서 입력 목록과 달라지는 열이라 분모와 사유를 함께 공시한다.
+        quality["source_read_inputs"] = summarize_source_read_inputs(units)
+        # (R19) MC/DC 채움 행 — 벡터가 비운 결정 무관 입력을 채운 동반 행(쌍 주장 없음)
+        _fills = [u.get("mcdc_fill") for u in units if isinstance(u.get("mcdc_fill"), dict)]
+        quality["mcdc_fill"] = {k: sum(int(f.get(k) or 0) for f in _fills)
+                                for k in ("mcdc_rows", "rows_with_blanks", "rows", "not_fillable", "duplicates", "pruned")}
+        quality["mcdc_fill"]["units_with_rows"] = sum(1 for f in _fills if f.get("rows"))
+        quality["mcdc_fill"]["errors"] = sum(1 for f in _fills if f.get("error"))
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
     #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
     quality["sequences_beyond_reference_cap"] = (sum(

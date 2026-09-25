@@ -175,6 +175,31 @@ class _Axis:
         return self.values[len(self.values) // 2] if self.values is not None else (self.lo + self.hi) // 2
 
 
+def _fill_values(axes: dict[str, "_Axis"], defaults: dict[str, int] | None) -> dict[str, int]:
+    """A value for each input a row leaves blank: the caller's mid value, moved by the input's position in a range wide
+    enough (two inputs a branch switches between must differ), an enumerator for a value set."""
+    fill: dict[str, int] = {}
+    wide = [k for k, a in axes.items() if a.values is None]
+    for k, v in (defaults or {}).items():
+        axis = axes.get(k)
+        if axis is None:
+            continue
+        if axis.values is not None:
+            fill[k] = v if axis.contains(v) else axis.middle()   # an enum is filled with an enumerator
+        elif axis.contains(v):
+            n = wide.index(k)
+            fill[k] = min(v + n, axis.hi) if axis.hi - axis.lo > 2 * len(axes) else v
+    return fill
+
+
+def blank_fill(domains: dict[str, Any], defaults: dict[str, int] | None) -> dict[str, int]:
+    """(R19) The fill `find_boundaries` gives a base row's blank inputs, for callers that fill a row themselves (the
+    extended SUTS fills MC/DC vectors). Same domains, same rule — one definition."""
+    axes = {var: _Axis(dom) for var, dom in domains.items()
+            if dom and not (isinstance(dom, (list, frozenset, set)) and len(dom) > MAX_VALUE_SET)}
+    return _fill_values(axes, defaults)
+
+
 def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: dict[str, Any],
                     outputs: list[str], existing: list[dict[str, Any]] | None = None,
                     defaults: dict[str, int] | None = None) -> dict[str, Any]:
@@ -233,17 +258,7 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
                     report.setdefault("oracle_unsupported_reason", str(r.get("reason") or "")[:80])
         return [memo[k] for k in keys]
 
-    fill: dict[str, int] = {}
-    wide = [k for k, a in axes.items() if a.values is None]
-    for k, v in (defaults or {}).items():
-        axis = axes.get(k)
-        if axis is None:
-            continue
-        if axis.values is not None:
-            fill[k] = v if axis.contains(v) else axis.middle()   # an enum is filled with an enumerator
-        elif axis.contains(v):
-            n = wide.index(k)
-            fill[k] = min(v + n, axis.hi) if axis.hi - axis.lo > 2 * len(axes) else v
+    fill = _fill_values(axes, defaults)
     usable: list[tuple[dict[str, int], str, list[str]]] = []
     for base in bases:
         values = {k: _as_int(v) for k, v in (base.get("inputs") or {}).items()}

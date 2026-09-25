@@ -402,6 +402,17 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (" 종류: " + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) + "." if kinds else "")
             + " clang 재현은 scripts/source_findings.py --clang 으로 따로 돌린다(이 문서에서는 미실행).",
             tone=_tone(bool(_int(sf, "findings")))))
+        # (R19) 입력 목록 밖 읽기 — 같은 시트의 다른 종류(`read_not_in_unit_inputs`), 미정의 동작 소견 수에 넣지 않는다
+        gaps = sf.get("input_list_gaps")
+        if isinstance(gaps, dict) and _int(gaps, "functions") is not None:
+            out.append(_item(
+                "suts_input_list_gaps", "입력 목록 밖 읽기",
+                f"함수 {_show(_int(gaps, 'functions'))} · 객체 {_show(_int(gaps, 'names'))}",
+                "함수가 초기값을 읽는데(이 입력으로 돌리면 쓰기 전에 읽는다) 시험 입력 목록(설계서 입력 표·소스 분석)에 없는 "
+                "프로그램 객체다 — 설계서 입력 누락 또는 입력으로 적지 않은 내부 상태 후보. 'Source Findings' 시트의 "
+                "`read_not_in_unit_inputs` 행에 함수별 이름이 있다. 확장 프로파일은 이 객체를 입력 열로 더했다('소스가 읽어 더한 "
+                "입력').",
+                tone=_tone(bool(_int(gaps, "functions")))))
 
     # (R9) MC/DC 설계 — 결정식을 실제로 평가해 찾은 unique-cause 쌍. 못 푼 결정은 분모에 남는다.
     mc = qr.get("mcdc_design_summary")
@@ -552,6 +563,48 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(skipped, "error") else ""),
             # (리뷰 2라운드 W4) 오류로 건너뛴 unit 이 있으면 경고 — 행 수가 줄어든 것만으로는 버그가 안 보인다
             tone=_tone(bool(_int(bs, "budget_exhausted")) or bool(_int(skipped, "error")))))
+    # (R19) 소스가 읽어 더한 입력 — 확장 프로파일에서만 기록된다. 설계서 입력 목록과 열이 달라지므로 늘 공시한다.
+    sr = qr.get("source_read_inputs")
+    if isinstance(sr, dict):
+        not_added = sr.get("not_added") if isinstance(sr.get("not_added"), dict) else {}
+        out.append(_item(
+            "suts_source_read_inputs", "소스가 읽어 더한 입력",
+            f"unit {_show(_int(sr, 'units_with_added'))}/{_show(_int(sr, 'units'))} · 이름 {_show(_int(sr, 'names_added'))}"
+            f" · 남은 이름 {_show(_int(sr, 'names_remaining'))}",
+            "소스 oracle 이 '초기값이 입력에 없다' 고 답한 객체(함수가 이 행으로 돌면 쓰기 전에 읽는다)를 번역 단위의 선언 타입으로 "
+            "입력 열에 더하고 행을 다시 만들었다 — 설계서 입력 표와 다른 열이다. 기본 카탈로그 행의 자리·순서·설계 열 값은 정본 규모 "
+            "문서와 같고 그 행에서 더한 입력은 고정값이다. 더한 입력의 범위(선언 타입 전폭, enum 은 그 번역 단위의 열거자 — 설계서·"
+            "HSIS 는 이 이름을 적지 않았다)는 단독 경계(OAT)·행동 경계 행이 움직인다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 "
+            f"회차에 더한다(최대 {_show(_int(sr, 'max_rounds'))}회차 사용). 지역·매개변수·멤버 경로·const·volatile·부동소수 "
+            "객체와 경계값 표가 없는 타입(64비트 등)은 더하지 않는다"
+            + (f"(더하지 않은 사유: {_dist(not_added)})" if not_added else "") + ". "
+            + (f"입력 열 상한에 막힌 unit {_show(_int(sr, 'units_input_columns_full'))}. "
+               if _int(sr, "units_input_columns_full") else "")
+            + (f"마지막 회차에도 남은 이름 {_show(_int(sr, 'names_remaining'))}(unit {_show(_int(sr, 'units_with_remaining'))})"
+               " 은 그 칸을 [검증 필요] 로 둔다. " if _int(sr, "names_remaining") else "")
+            + "MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(그 결정의 MC/DC 는 "
+            "설계 입력 목록 위에서만 설계한다 — 더한 입력을 읽는 결정은 `decision_reads_source_read_input_not_designed`)."
+            + (f" 입력 보완 중 오류로 설계 입력 목록 그대로 둔 unit {_show(_int(sr, 'errors'))} — 로그에 traceback 이 있다."
+               if _int(sr, "errors") else ""),
+            tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors")))))
+    # (R19) MC/DC 채움 행 — 확장 프로파일에서만 기록된다
+    mf = qr.get("mcdc_fill")
+    if isinstance(mf, dict):
+        out.append(_item(
+            "suts_mcdc_fill_rows", "MC/DC 채움 행",
+            f"{_show(_int(mf, 'rows'))}행 (공란이 있는 MC/DC 벡터 {_show(_int(mf, 'rows_with_blanks'))}/"
+            f"{_show(_int(mf, 'mcdc_rows'))})",
+            "MC/DC 설계 벡터는 결정이 읽는 입력만 적어 나머지 칸이 비고, 함수가 그 입력을 읽으면 기대값이 서지 않는다. 벡터 행은 "
+            "그대로 두고 비운 입력을 행동 경계 행과 같은 규칙(선언 타입 범위의 중간값에서 입력 위치만큼 옮긴 값, enum 은 열거자 — "
+            "이름 패턴으로 추측한 타입은 채우지 않는다)으로 채운 행을 더했다 — MC/DC 쌍의 구성원이 아니며(쌍 주장은 원래 행에만 "
+            "있다) 기대값은 다른 행과 같은 oracle 이 도출한다. 원래 벡터보다 더 도출하는 칸이 없는 채움 행은 뺐다."
+            + (f" 더 도출하는 칸이 없어 뺀 행 {_show(_int(mf, 'pruned'))}." if _int(mf, "pruned") else "")
+            + (f" 선언 타입이 없어 채우지 못한 벡터 {_show(_int(mf, 'not_fillable'))}." if _int(mf, "not_fillable") else "")
+            + (f" 채운 결과가 이미 있는 행과 같아 더하지 않은 것 {_show(_int(mf, 'duplicates'))}."
+               if _int(mf, "duplicates") else "")
+            + (f" 채움 단계 오류로 채움 행 없이 둔 unit {_show(_int(mf, 'errors'))} — 로그에 traceback 이 있다."
+               if _int(mf, "errors") else ""),
+            tone=_tone(bool(_int(mf, "errors")))))
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     return out
 
