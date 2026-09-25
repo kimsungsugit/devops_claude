@@ -212,3 +212,11 @@ def test_the_generator_reads_every_root_and_counts_what_it_could_not_read(tmp_pa
     (b / "z.c").write_bytes(b"\xff\xfe")
     texts, unread = _read_source_texts(f"{a};{b},{tmp_path / 'missing'}")
     assert sorted(Path(p).name for p in texts) == ["x.c", "y.h"] and [Path(p).name for p in unread] == ["z.c"]
+
+
+def test_a_leading_interface_label_is_not_part_of_the_first_function():
+    from sits_interface_eval import _chain_functions
+    assert _chain_functions("Interface : s_SystemHashCalculate -> g_Lib_Sha256_Nb_GetState") == [
+        "s_SystemHashCalculate", "g_Lib_Sha256_Nb_GetState"]
+    assert _chain_functions("Verify integration: a → b()") == ["a", "b"]
+    assert _chain_functions("main -> s_Init") == ["main", "s_Init"]

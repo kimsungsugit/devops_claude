@@ -26,13 +26,18 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 8  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 11  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
 # 7 (R14): function `return_type` (declared text) and closure `return_type` — one when every definition agrees.
 # 8 (R16): a function-type "cast" (``(F()) + 1U``, tree-sitter's reading of a parenthesized call) is the call ``F`` in the
 #    function's `calls` — the write closure used to miss it.
+# 9 (R17): `build.configurations` — the -D set of each `.cproject` and whether it is complete (names neither the tree nor
+#    the build defines become undefined in #if instead of undecided).
+# 10 (R17): per-file `body_condition_names` (identifiers of function-body #if conditions — the scope's
+#    `assumed_undefined_body`).
+# 11 (R17): `build.configurations` fails closed on more -D spellings and C++/C tool disagreement.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -405,6 +410,8 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
     rec: dict[str, Any] = {"path": path, "includes": [], "system_includes": [], "typedefs": {}, "macros": {}, "undefs": [],
                            "enums": {}, "enumerators": {}, "globals": {}, "functions": {}, "parse_error": root.has_error,
                            "sha256": hashlib.sha256(raw).hexdigest(), "events": _events(root.named_children, raw),
+                           # (R17) identifiers of #if/#ifdef/#elif inside function bodies (pp_condition decides them)
+                           "body_condition_names": _body_condition_names(root, raw),
                            # ``&x`` anywhere in the file — file-scope initializers (``{&g_cnt}``) included (review C3d).
                            "address_taken": sorted(_address_taken(root, raw))}
     for node, conditional in _items(_guard_body(root, raw), raw):
@@ -520,6 +527,18 @@ def _cast_hidden_call(n, raw) -> str:
         return ""
     spec = t.child_by_field_name("type")
     return _text(spec, raw) if spec is not None and spec.type == "type_identifier" else "<indirect>"
+
+
+def _body_condition_names(root, raw) -> list[str]:
+    names: set[str] = set()
+    for fn in (n for n in _walk(root) if n.type == "function_definition"):
+        for n in _walk(fn):
+            if n.type in {"preproc_if", "preproc_ifdef", "preproc_elif", "preproc_elifdef"}:
+                for part in (n.child_by_field_name("condition"), n.child_by_field_name("name")):
+                    if part is not None:
+                        names.update(_text(x, raw) for x in _walk(part) if x.type == "identifier")
+    names.discard("defined")
+    return sorted(names)
 
 
 def _address_taken(root, raw):
@@ -728,16 +747,162 @@ def _toolchain_header(context: dict[str, Any], name: str) -> bool:
 
 
 def detect_build_config(cproject_texts: dict[str, str]) -> dict[str, Any]:
-    """Toolchain include directories a build configuration names (Eclipse/CodeWarrior ``.cproject``).
+    """What a build configuration (Eclipse/CodeWarrior ``.cproject``) says, as evidence for two questions:
 
-    Evidence for one question only: a quoted ``#include`` found nowhere in the source tree — C11 6.10.2p3 retries it
-    as ``<...>``, i.e. in these directories — is the toolchain's header (``hidef.h``), not a project header that went
-    missing. Without such evidence the include stays a gap (everything after it undecided)."""
+    * toolchain include directories — a quoted ``#include`` found nowhere in the source tree (C11 6.10.2p3 retries it as
+      ``<...>``, i.e. in these directories) is the toolchain's header (``hidef.h``), not a project header that went
+      missing. Without such evidence the include stays a gap (everything after it undecided);
+    * (R17) the macros the build defines — per configuration file: every ``-D`` the compiler tools' options carry (a
+      preprocessor-symbols list option, ``-D`` tokens in "other flags"). ``complete`` only when the file declares compiler
+      tools and every build configuration in it defines the same set: a name that neither the tree nor this set defines
+      is then undefined in ``#if`` (`_pp_undefined`) instead of undecided."""
     dirs: set[str] = set()
     for text in cproject_texts.values():
         dirs.update(_TOOLCHAIN_INCLUDE_RE.findall(text or ""))
     return {"toolchain_include_dirs": sorted(dirs), "evidence": sorted(p for p, t in cproject_texts.items()
-                                                                      if _TOOLCHAIN_INCLUDE_RE.search(t or ""))}
+                                                                      if _TOOLCHAIN_INCLUDE_RE.search(t or "")),
+            "configurations": {p: _build_defines(t or "") for p, t in sorted(cproject_texts.items())}}
+
+
+_DEFINE_TOKEN = re.compile(r"-D([A-Za-z_]\w*)(?:=([^\s\"'$`\\]*))?")
+_RISKY_FLAG = re.compile(r"(?:^|\s)[\"']?-(?:D|U|include|prefix|imacros|AddIncl)")   # case matters: -double_size
+# (review R2 W3) flags that pull options from elsewhere — HIWARE ``-Env"COMPOPTIONS=-DX"``, ``-Prod=project.ini``,
+# ``-ArgFile``, response files ``@file``, ``--preinclude``: what they define is not in this file
+# the command-line placeholders CDT fills itself (the option values, inputs, outputs, tool directories)
+_CDT_PLACEHOLDER = re.compile(r"\$\{(?:COMMAND|FLAGS|INPUTS|OUTPUT|OUTPUT_FLAG|OUTPUT_PREFIX|EXTENSION|ProjDirPath|ProjName|MCUToolsBaseDir|[A-Za-z0-9]+_ToolsDir)\}")
+_INDIRECT_FLAG = re.compile(
+    r"(?:^|\s)[\"']?(?:-Env|-Prod|-ArgFile|--preinclude|--define|--undefine|--include|--imacros|-W[pP],|-Xpreprocessor"
+    r"|/[DU]|@\S)|\$[({]")   # (review R3 W-R3-2) other spellings of -D/-U/forced includes, build variables
+
+
+def _build_defines(text: str) -> dict[str, Any]:
+    """``{"defines": {name: body}, "complete": bool, "reason": str}`` of one ``.cproject`` — fail closed.
+
+    Read: the C compiler tool of the project-wide folder (``folderInfo resourcePath=""``) of every build configuration
+    (a ``configuration`` with a ``toolChain``): a preprocessor-symbols list (``valueType="definedSymbols"``) and plain
+    ``-DNAME[=VALUE]`` tokens in string options. Anything this reading cannot account for makes the file *incomplete*
+    (names stay undecided, as without it): a user makefile (``managedBuildOn="false"``); an undefine list or ``-U``;
+    a quoted, expanded or spaced ``-D``; a forced include (``-include``/``-prefix``/"additional include files"); any
+    option with a value on a file or sub-folder (``fileInfo``, ``folderInfo`` with a ``resourcePath``) or on the
+    preprocessor tool; configurations that define different sets (which one is built is not recorded)."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return {"defines": {}, "complete": False, "reason": "cproject_unparsable"}
+
+    def incomplete(reason):
+        return {"defines": {}, "complete": False, "reason": reason}
+
+    def has_value(opt):
+        return bool((opt.get("value") or "").strip()) or any(
+            (v.get("value") or "").strip() for v in opt.iter("listOptionValue"))
+
+    configs = [c for c in root.iter("configuration") if c.find(".//toolChain") is not None]
+    if not configs:
+        return incomplete("no_build_configuration")
+    sets = []
+    for config in configs:
+        for builder in config.iter("builder"):
+            if (builder.get("managedBuildOn") or "").lower() == "false":
+                return incomplete("unmanaged_build")
+        scoped = [x for x in config if x.tag == "fileInfo" or (x.tag == "folderInfo" and (x.get("resourcePath") or ""))]
+        if any(has_value(o) for x in scoped for o in x.iter("option")):
+            return incomplete("resource_scoped_options")
+        bases = [x for x in config if x.tag == "folderInfo" and not (x.get("resourcePath") or "")]
+        if len(bases) != 1:
+            return incomplete("no_project_folder_options" if not bases else "several_project_folder_options")
+        base = bases[0]
+        for chain in base.iter("toolChain"):
+            if any(has_value(o) for o in chain.findall("option")):
+                return incomplete("toolchain_options")   # (review R2 W3) options of the tool chain itself
+        for element in list(base.iter("tool")) + list(config.iter("builder")):
+            for a in ("command", "commandLinePattern", "arguments"):
+                text = _CDT_PLACEHOLDER.sub(" ", element.get(a) or "")   # ${COMMAND} ${FLAGS} ${INPUTS} … are the tool's own
+                if _RISKY_FLAG.search(text) or _INDIRECT_FLAG.search(text):
+                    return incomplete("tool_command_flags")
+        # (review R3 W-R3-2) the C compiler: a C++ tool's defines do not reach a .c unit
+        compilers = [t for t in base.iter("tool") if "compiler" in (t.get("superClass") or "").lower()
+                     and not re.search(r"cpp|c\+\+|g\+\+|cxx", (t.get("superClass") or "").lower())]
+        if not compilers:
+            return incomplete("configuration_without_compiler_tool")
+        for t in base.iter("tool"):
+            if "preprocessor" in (t.get("superClass") or "").lower() and any(has_value(o) for o in t.iter("option")):
+                return incomplete("preprocessor_tool_options")
+        defines: dict[str, str] = {}
+        per_tool: list[dict[str, str]] = []
+        for tool in compilers:
+            before = dict(defines)
+            defines = {}
+            for opt in tool.iter("option"):
+                kind = ((opt.get("superClass") or "") + " " + (opt.get("name") or "") + " "
+                        + (opt.get("valueType") or "")).lower()
+                values = [v.get("value") or "" for v in opt.iter("listOptionValue")]
+                if "undef" in kind:
+                    if has_value(opt):
+                        return incomplete("undefine_option")
+                    continue
+                if any(k in kind for k in ("addincl", "includefiles", "include files", "prefix", "forced")):
+                    if has_value(opt):
+                        return incomplete("forced_include_option")
+                    continue
+                vtype = (opt.get("valueType") or "").lower()
+                if vtype in {"boolean", "enumerated", "includepath"}:
+                    continue   # a switch ("Generate debug symbols") or search directories — no macro comes from them
+                if "definedsymbols" in kind or any(k in kind for k in ("defin", "symbol", "macro")):
+                    if (opt.get("value") or "").strip():
+                        return incomplete("define_option_value_unreadable")
+                    for v in values:
+                        name, eq, body = v.strip().partition("=")
+                        if not re.fullmatch(r"[A-Za-z_]\w*", name) or any(c in body for c in "\"'$`\\ "):
+                            return incomplete("define_value_unreadable")
+                        defines[name] = body if eq else "1"
+                    continue
+                if values and vtype != "string":
+                    # (review R2 W3) a list option this reading does not know (``dOpts = BARE``): its entries may be
+                    # macros under another spelling — not evidence
+                    return incomplete("compiler_list_option_unrecognized")
+                for text_value in [opt.get("value") or ""] + values:
+                    if _INDIRECT_FLAG.search(text_value):
+                        return incomplete("compiler_flag_indirection")   # -Env"COMPOPTIONS=…", -Prod, -ArgFile, @file
+                    if not _RISKY_FLAG.search(text_value):
+                        continue
+                    rest = _DEFINE_TOKEN.sub(" ", text_value)
+                    if _RISKY_FLAG.search(rest):
+                        return incomplete("compiler_flag_unreadable")   # -U, quoted/expanded -D, forced include
+                    for tok in text_value.split():
+                        m = _DEFINE_TOKEN.fullmatch(tok)
+                        if m is None and re.search(r"-D", tok):   # ``"-DFOO"``, ``-D${X}``, ``-DV="1 2"``
+                            return incomplete("compiler_flag_unreadable")
+                        if m:
+                            defines[m.group(1)] = m.group(2) if m.group(2) is not None else "1"
+            per_tool.append(defines)
+            defines = {**before, **defines}
+        if len(compilers) > 1 and len({tuple(sorted(d.items())) for d in per_tool}) > 1:
+            return incomplete("compiler_tools_disagree")
+        sets.append(defines)
+    if any(d != sets[0] for d in sets[1:]):
+        return incomplete("configurations_disagree")
+    return {"defines": sets[0], "complete": True, "reason": ""}
+
+
+# (R17) Names an implementation may define: reserved identifiers (C11 7.1.3 — any leading underscore, conservatively),
+# the standard library's names and its reserved families (C11 7.31: E[0-9A-Z]…, SIG…, LC_…, PRI/SCN…, FE_…, ATOMIC_…,
+# TIME_…, FLT_/DBL_/LDBL_…) and the toolchain's own header names seen in these trees (hidef.h). Never taken as
+# undefined on build evidence.
+_STANDARD_NAME_RE = re.compile(
+    r"^(?:u?int(?:_least|_fast)?\d+_t|u?intptr_t|u?intmax_t|size_t|ptrdiff_t|wchar_t|wint_t|bool|true|false|NULL|EOF|WEOF|"
+    r"CHAR_BIT|MB_LEN_MAX|[A-Z0-9_]*_(?:MAX|MIN|EPSILON|DIG|MANT_DIG|RADIX)|U?INT\w*_C|offsetof|va_\w+|errno|"
+    r"E[0-9A-Z]\w*|SIG[A-Z_]\w*|LC_[A-Z]\w*|PRI[a-zX]\w*|SCN[a-zX]\w*|FE_[A-Z]\w*|ATOMIC_[A-Z]\w*|TIME_[A-Z]\w*|"
+    r"(?:FLT|DBL|LDBL)_\w+|EXIT_(?:SUCCESS|FAILURE)|SEEK_(?:SET|CUR|END)|BUFSIZ|FILENAME_MAX|FOPEN_MAX|L_tmpnam|TMP_MAX|"
+    r"CLOCKS_PER_SEC|HUGE_VALL?|HUGE_VALF|INFINITY|NAN|FP_\w+|math_errhandling|stdin|stdout|stderr|assert|NDEBUG|"
+    r"static_assert|alignas|alignof|noreturn|thread_local|complex|imaginary|I|"
+    r"EnableInterrupts|DisableInterrupts|asm|interrupt|near|far|TRUE|FALSE|"
+    r"(?:is|to|str|mem|wcs|atomic_|memory_order_|cnd_|mtx_|thrd_|tss_)[a-z_]\w*|CMPLX\w*|getc|putchar|setjmp)$")
+
+
+def _implementation_may_define(name: str) -> bool:
+    return name.startswith("_") or bool(_STANDARD_NAME_RE.match(name))
 
 
 def build_project_context(files: dict[str, str], build: dict[str, Any] | None = None,
@@ -873,7 +1038,14 @@ def _pp_undefined(name, env):
     A name the project never defines anywhere can only come from the build (``-D``) or the compiler; after a
     missing include, any name might have been defined there. Both are undecided, never 0 (R81 review C2).
     """
-    if name not in env["defined_anywhere"] or env["gap"]:
+    if env["gap"]:
+        raise _PPUnknown("undefined_outside_tree:" + name)
+    if name not in env["defined_anywhere"]:
+        if env.get("build_defines_complete") and not _implementation_may_define(name):
+            # (R17) the build configuration lists every -D (none for this name) and the name is not the
+            # implementation's to define: undefined, 0 (C11 6.10.1p4) — recorded as an assumption of the unit
+            env["assumed_undefined"].add(name)
+            return 0
         raise _PPUnknown("undefined_outside_tree:" + name)
     return 0
 
@@ -989,7 +1161,7 @@ def shared_parser():
     return parser
 
 
-def pp_condition(scope: dict[str, Any], node, raw: bytes) -> bool | None:
+def pp_condition(scope: dict[str, Any], node, raw: bytes, assumed: set | None = None) -> bool | None:
     """Verdict of an ``#if``/``#ifdef``/``#elif`` node inside a function of this unit (None = undecided).
 
     The table is the one at the end of the unit, so a macro whose value changed during the unit decides
@@ -1007,7 +1179,11 @@ def pp_condition(scope: dict[str, Any], node, raw: bytes) -> bool | None:
         ev = {"expr": strip_comments(_text(cond, raw)) if cond is not None else ""}
     env = {"macros": scope.get("pp_macros") or {}, "bodies": scope.get("pp_bodies") or {}, "parser": parser,
            "defined_anywhere": scope.get("pp_defined_anywhere") or set(), "gap": bool(scope.get("missing_includes")),
-           "varied": set(scope.get("pp_varied") or ())}
+           "varied": set(scope.get("pp_varied") or ()),
+           # (R17 review W1) the unit's build evidence decides a name inside a function body as it does at file scope;
+           # names taken as undefined here go to ``assumed`` (the caller's record of what its values rest on)
+           "build_defines_complete": bool((scope.get("build_defines") or {}).get("complete")),
+           "assumed_undefined": assumed if assumed is not None else set()}
     return _pp_condition(ev, env)
 
 
@@ -1036,7 +1212,8 @@ def defined_names(context: dict[str, Any]) -> set[str]:
 
 
 def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = None,
-                    defines: dict[str, str] | None = None, known_names: set[str] | None = None) -> dict[str, Any]:
+                    defines: dict[str, str] | None = None, known_names: set[str] | None = None,
+                    build_defines_complete: bool = False) -> dict[str, Any]:
     """Walk ``main`` and its quoted includes in order, tracking the macro table like the compiler would.
 
     Returns declaration states ``{(file, pos): "active" | "unknown"}`` (absent = not compiled in this
@@ -1056,8 +1233,10 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
                            "toolchain_includes": [], "files": [], "errors": [], "unknown_conditions": 0, "gaps": 0,
                            "defined_after_gaps": {}}
     env = {"macros": macros, "bodies": bodies, "parser": parser, "gap": False, "varied": set(),
-           "defined_anywhere": (known_names if known_names is not None else defined_names(context)) | set(defines or ())}
+           "defined_anywhere": (known_names if known_names is not None else defined_names(context)) | set(defines or ()),
+           "build_defines_complete": build_defines_complete, "assumed_undefined": set()}
     out["defined_anywhere"] = env["defined_anywhere"]
+    out["assumed_undefined"] = env["assumed_undefined"]
     stack: list[str] = []
 
     def run(path, events, mode, depth):
@@ -1149,7 +1328,14 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     if path not in files:
         scope["status"] = "file_not_in_project_context"
         return scope
-    pp = preprocess_unit(context, path, bodies, known_names=known_names)
+    build = _unit_build_defines(context, path)
+    pp = preprocess_unit(context, path, bodies, defines=build["defines"], known_names=known_names,
+                         build_defines_complete=build["complete"])
+    scope["build_defines"] = {"evidence": build["evidence"], "complete": build["complete"], "reason": build["reason"],
+                              "defines": dict(build["defines"])}
+    scope["assumed_undefined"] = sorted(pp["assumed_undefined"])
+    # (R17 review R2 W1) names a function-body #if of this unit takes as undefined on the same evidence (every body
+    # condition's names — the MC/DC design and the disclosures read this; one oracle run records only what it met)
     scope["missing_includes"], scope["system_includes"], scope["files"] = pp["missing_includes"], pp["system_includes"], pp["files"]
     scope["toolchain_includes"] = pp["toolchain_includes"]
     scope["preprocessor"] = {"unknown_conditions": pp["unknown_conditions"], "errors": pp["errors"][:5],
@@ -1244,10 +1430,28 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             macro_defs[name] = [{"body": "", "function_like": False, "conditional": True, "file": "", "line": 0}]
             continue
         p, pos = key
+        if p == "<build>":
+            # (R17) a -D of the build configuration: its body is the one the configuration gives
+            macro_defs[name] = [{"body": str(build["defines"].get(name, "1")), "function_like": False,
+                                 "conditional": False, "file": "<build>", "line": 0, "params": None}]
+            continue
         d = next((x for x in files[p]["macros"].get(name, []) if x.get("pos") == pos), None)
         if d is not None:
             macro_defs[name] = [{**d, "file": p, "conditional": False}]
     undefs = set(pp["varied"])
+    # (review R3 W-R3-1) through macro bodies too: ``#if FEATURE_X`` with ``#define FEATURE_X (CFG_B)`` rests on CFG_B
+    reached, pending = set(), list(files[path].get("body_condition_names") or ())
+    while pending and len(reached) < 4096:
+        n = pending.pop()
+        if n in reached:
+            continue
+        reached.add(n)
+        for d in macro_defs.get(n) or ():
+            pending.extend(re.findall(r"\b[A-Za-z_]\w*\b", str(d.get("body") or "")))
+    scope["assumed_undefined_body"] = sorted(
+        n for n in reached
+        if build["complete"] and not pp.get("gaps") and n not in pp["defined_anywhere"]
+        and not _implementation_may_define(n))
     # Final macro table for ``#if`` inside function bodies (``pp_condition``) — bodies after every header.
     scope["pp_macros"] = {name: (_UNKNOWN if key == _UNKNOWN else name) for name, key in pp["macros"].items()}
     scope["pp_bodies"] = {name: d[0] for name, d in macro_defs.items() if pp["macros"].get(name) != _UNKNOWN}
@@ -1263,7 +1467,18 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     scope["macro_status"].update({name: "varied" for name in pp["varied"] if name not in scope["macro_status"]})
     scope["prototypes"] = sorted({n for p, rec in recs for n in rec.get("prototypes") or ()})
     scope["pp_assumptions"] = [
-        "a name some project file #defines is not also a build -D (only names the tree never defines are undecided)",
+        "a name some project file #defines is not also a build -D (a name the tree never defines is undecided unless "
+        "the build configuration's -D set is known — see below)",
+        *(["the build configuration " + os.path.basename(os.path.dirname(scope["build_defines"]["evidence"])) + "/.cproject "
+           "defines only the macros its compiler options list (" + (", ".join(sorted(scope["build_defines"]["defines"]))
+                                                                    or "none") + "); a name that neither the tree nor "
+           "the build defines and that is not the implementation's (no leading underscore, no standard name) is undefined "
+           "in #if — assuming the toolchain plugin's default options add no -D (the file stores only non-default values), "
+           "the compiler predefines only reserved names, headers outside the tree (toolchain hidef.h/stdtypes.h, <...>) "
+           "and the build environment (COMPOPTIONS, DEFAULT.ENV) define none of these: "
+           + ", ".join(scope["assumed_undefined"][:12])
+           + (f" (+{len(scope['assumed_undefined']) - 12})" if len(scope["assumed_undefined"]) > 12 else "")]
+          if scope["assumed_undefined"] else []),
         "system headers (<...>) do not define names the project defines",
         "a quoted include found nowhere in the source tree, in a build whose configuration lists toolchain include "
         "directories, is a toolchain header (C11 6.10.2p3) and, like <...> headers, does not define project names",
@@ -1528,6 +1743,47 @@ def _resolve_include(context, current, name):
     return candidates[0] if len(candidates) == 1 else ""
 
 
+def summarize_build_assumptions(scopes) -> dict[str, Any]:
+    """(R17) What the #if verdicts of these units rest on, for a generation's disclosure: how many units had complete
+    build-configuration evidence, why the others did not, and which names were taken as undefined on it."""
+    from collections import Counter
+    seen, reasons, names, units, complete, with_names = set(), Counter(), set(), 0, 0, 0
+    for scope in scopes:
+        if not isinstance(scope, dict) or id(scope) in seen:
+            continue
+        seen.add(id(scope))
+        units += 1
+        build = scope.get("build_defines") or {}
+        if build.get("complete"):
+            complete += 1
+        else:
+            reasons[str(build.get("reason") or "no_build_configuration_for_unit")] += 1
+        assumed = set(scope.get("assumed_undefined") or ()) | set(scope.get("assumed_undefined_body") or ())
+        if assumed:
+            with_names += 1
+            names.update(assumed)
+    return {"units": units, "units_with_complete_build_evidence": complete, "incomplete_reasons": dict(reasons),
+            "units_with_assumed_undefined": with_names, "assumed_undefined_names": sorted(names)[:40],
+            "assumed_undefined_total": len(names)}
+
+
+def _unit_build_defines(context, path):
+    """(R17) The build configuration that compiles ``path``: the ``.cproject`` of its source root (the only one when the
+    context has one root and one configuration). Unknown → not complete (names stay undecided, as before)."""
+    configs = ((context.get("build") or {}).get("configurations") or {})
+    root = _root_of(context, path)
+    chosen = None
+    if root:
+        chosen = next((p for p in configs if os.path.normcase(os.path.dirname(os.path.normpath(p))) == root), None)
+    elif len(configs) == 1 and not (context.get("roots") or ()):
+        chosen = next(iter(configs))   # (review I4) a unit outside the one root is not that build's
+    if chosen is None:
+        return {"evidence": "", "complete": False, "reason": "no_build_configuration_for_unit", "defines": {}}
+    rec = configs[chosen]
+    return {"evidence": chosen, "complete": bool(rec.get("complete")), "reason": rec.get("reason", ""),
+            "defines": dict(rec.get("defines") or {})}
+
+
 def _root_of(context, path):
     p = os.path.normcase(os.path.normpath(path))
     for r in context.get("roots") or ():
@@ -1674,6 +1930,10 @@ def build_scopes(context: dict[str, Any], paths) -> dict[str, dict[str, Any]]:
             if g.get("const") and not g.get("volatile") and len(defs) == 1 and defs[0].get("typename") == g.get("typename"):
                 scope["constants"][name] = {**defs[0], "kind": "const_object_linked"}
                 del scope["globals"][name]
+                # (R17 review R2 W2) the value was decided in the defining unit, under that unit's #if verdicts
+                owner = scopes.get(defs[0].get("file")) if defs[0].get("file") in scopes else None
+                if owner is not None and owner.get("assumed_undefined"):
+                    scope["assumed_undefined"] = sorted(set(scope["assumed_undefined"]) | set(owner["assumed_undefined"]))
     return {path: scopes[path] for path in wanted}
 
 

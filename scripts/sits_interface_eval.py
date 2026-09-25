@@ -96,7 +96,10 @@ def concrete(value) -> bool:
 
 
 def _chain_functions(text: str) -> list[str]:
-    text = re.sub(r"^Verify integration:\s*", "", text or "")
+    # A leading label is not a function: ``Verify integration: a → b`` (generated) and ``Interface : main -> …``
+    # (KJPDS02_PV reference, 47 of 54 tests — R17: reading it as part of the first name dropped the real entry function,
+    # so the first-closure rule started one call deeper).
+    text = re.sub(r"^\s*(?:Verify integration|Interface)\s*:\s*", "", text or "", flags=re.I)
     return [p.strip().rstrip("()").strip() for p in re.split(r"->|→|\n", text) if p.strip().rstrip("()").strip()]
 
 

@@ -161,6 +161,8 @@ class _Interp:
         the node lists `check_sequencing` walks (R2c: per-vector re-walking was 40% of a path search)."""
         self.fn, self.raw, self.scope, self.inputs, self.parser = fn, raw, scope, inputs, parser
         self.stubs_used: set[str] = set()   # (R14) callees whose return value the sequence set (``F() return``)
+        # (R17) names a function-body #if took as undefined on build-configuration evidence (see `_scope_assumptions`)
+        self.assumed_undefined: set[str] = set()
         self.shared = shared if shared is not None else {}
         self.widths = (scope.get("target") or {}).get("widths") or {}
         if not self.widths.get("int"):
@@ -487,7 +489,7 @@ class _Interp:
                 self.lexical.pop()
             return states
         if k in {"preproc_if", "preproc_ifdef", "preproc_elif", "preproc_elifdef"}:
-            verdict = cpc.pp_condition(self.scope, n, raw)
+            verdict = cpc.pp_condition(self.scope, n, raw, self.assumed_undefined)
             if verdict is None:
                 raise Unsupported("conditional_compilation_unresolved")
             cond, name, alt = n.child_by_field_name("condition"), n.child_by_field_name("name"), n.child_by_field_name("alternative")
@@ -2178,6 +2180,10 @@ class _World:
             self.kept.extend(sub.kept_raws)   # their ids are in local keys (review I2)
         caller.steps = sub.steps
         caller.stubs_used |= sub.stubs_used
+        # (R17 review W2) the callee's unit text rests on its own #if verdicts too
+        caller.assumed_undefined |= sub.assumed_undefined | set(scope.get("assumed_undefined") or ())
+        caller.assumed_undefined |= set((getattr(self.provider, "binding_assumptions", None) or {}).get(
+            (name, str(caller.scope.get("path") or "")), ()))
         self.static_keys |= sub.static_keys
         merged, returned = self.join(sub, finals, name)
         for key in list(merged.store):  # the callee's parameters and automatic locals end with its activation
@@ -2445,6 +2451,11 @@ def _scope_assumptions(unit: dict[str, Any]) -> list[str]:
     if scope.get("toolchain_includes"):
         out.append("toolchain headers (not in the source tree, resolved by the build configuration): "
                    + ", ".join(scope["toolchain_includes"][:8]) + " — assumed not to define project names")
+    if scope.get("assumed_undefined"):
+        # (R17) the #if verdicts the unit's text rests on: names taken as undefined on build-configuration evidence
+        out.append("undefined in #if on build-configuration evidence (no -D, not an implementation name): "
+                   + ", ".join(scope["assumed_undefined"][:12])
+                   + (f" (+{len(scope['assumed_undefined']) - 12})" if len(scope["assumed_undefined"]) > 12 else ""))
     widths = (scope.get("target") or {}).get("widths") or {}
     if widths:
         out.append("integer widths from typedef testimony: " + ", ".join(f"{k}={v}" for k, v in sorted(widths.items())))
@@ -2532,6 +2543,16 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                                                             for n in sorted(interp.stubs_used))
                     + " (what the callee writes stays unknown)"]
                 record["stubs"] = sorted(interp.stubs_used)
+            own = set((unit.get("project_scope") or {}).get("assumed_undefined") or ())
+            if interp.assumed_undefined - own:
+                # (R17) #if verdicts this run rested on beyond the unit's file-level ones: function bodies, callee units
+                extra = sorted(interp.assumed_undefined - own)
+                record["assumptions"] = list(record["assumptions"]) + [
+                    "undefined in #if on build-configuration evidence (function bodies / interpreted callee units): "
+                    + ", ".join(extra[:12]) + (f" (+{len(extra) - 12})" if len(extra) > 12 else "")]
+                record["assumed_undefined"] = sorted(interp.assumed_undefined | own)
+            elif own:
+                record["assumed_undefined"] = sorted(own)
             if world is not None:
                 # (R16) which callees ran for real and why the others did not (per sequence — the value's footing)
                 record["interprocedural"] = {"inlined": dict(sorted(world.inlined.items())),

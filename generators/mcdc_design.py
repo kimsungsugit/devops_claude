@@ -1675,6 +1675,10 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 if decision.get("evaluation") != "source_path":
                     _refuse_path(decision, f"path_design_exception:{type(exc).__name__}")
     report["selected_inputs"] = list(selected.values())
+    names = set((scope or {}).get("assumed_undefined") or ()) | set((scope or {}).get("assumed_undefined_body") or ())
+    if names:
+        # (R17 review R2 W1) the live arms of this unit's #if rest on build-configuration evidence for these names
+        report["assumed_undefined"] = sorted(names)
     finalize_mcdc_design(report, [])
     return report
 

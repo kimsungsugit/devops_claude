@@ -58,6 +58,7 @@ class CalleeProvider:
                 (self.defs if path.lower().endswith(".c") else self.header_defs).setdefault(name, []).append(path)
         self.cache: dict[tuple[str, str], Any] = {}
         self.linkage_cache: dict[int, tuple] = {}   # `_World.admit`'s per-scope entries — lives with these scopes
+        self.binding_assumptions: dict[tuple[str, str], set[str]] = {}   # (R17) names a binding choice rested on
         self._statics_by_file: dict[str, Any] = {}
         # (review W-R2-1) names that denote more than one object in the project: an internal-linkage object of one
         # unit and any other object of the same name (a header ``static`` counts once per including unit)
@@ -146,6 +147,10 @@ class CalleeProvider:
             except Unsupported as exc:
                 if str(exc) != "function_not_compiled_in_configuration":
                     doubts.append(str(exc))
+                else:
+                    # (R17 review R2 W2) excluded by that unit's #if verdicts: the binding rests on them too
+                    self.binding_assumptions.setdefault((name, caller_unit), set()).update(
+                        set(scope.get("assumed_undefined") or ()) | set(scope.get("assumed_undefined_body") or ()))
                 continue
             if path == caller_unit:
                 return raw, fn, scope, shared, path  # the caller's unit names its own definition
@@ -193,6 +198,8 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
     units = [p for p in context["files"] if p.lower().endswith(".c") and p in files]
     scopes = build_scopes(context, units)
     stats["units_scoped"] = len(scopes)
+    from generators.c_project_context import summarize_build_assumptions
+    stats["build_assumptions"] = summarize_build_assumptions(scopes.values())   # (R17)
     provider = CalleeProvider(context, files, scopes, parser)
     skipped: Counter = Counter()
     reasons: Counter = Counter()

@@ -63,6 +63,9 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                     # (R14 review W3) the sequence stubbed these callees — the value holds only when the tester stubs
                     # them too (recorded per sequence: an output that does not use the stub carries it as well)
                     item["stubs"] = list(evaluated["stubs"])
+                if evaluated.get("assumed_undefined"):
+                    # (R17) #if verdicts this value rests on: names undefined on build-configuration evidence
+                    item["assumed_undefined"] = list(evaluated["assumed_undefined"])
                 if (evaluated.get("interprocedural") or {}).get("inlined"):
                     # (R16) the value rests on these callees' interpreted bodies (integration reading, not stubs)
                     item["callees_interpreted"] = sorted(evaluated["interprocedural"]["inlined"])
@@ -95,7 +98,9 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
               # (R2b) ``derived`` split: a value the function assigned vs an output it left as the sequence set it.
               "derived_assigned": 0, "derived_unchanged_input": 0,
               # (R14) derived in a sequence that stubbed a callee return — an upper bound of the values that rest on it
-              "derived_in_stubbed_sequence": 0}
+              "derived_in_stubbed_sequence": 0,
+              # (R17) derived where the text's #if verdicts rest on build-configuration evidence (names taken as undefined)
+              "derived_on_assumed_undefined": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
             item = seq.get("expected_evidence", {}).get(var) or {}
@@ -108,4 +113,6 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
                 counts["derived_assigned"] += 1
             if status == "derived" and item.get("stubs"):
                 counts["derived_in_stubbed_sequence"] += 1
+            if status == "derived" and item.get("assumed_undefined"):
+                counts["derived_on_assumed_undefined"] += 1
     return counts

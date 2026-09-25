@@ -383,7 +383,11 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "execution_status=not_run). 나머지 칸은 [검증 필요] 와 사유를 적었다. 근거는 'Test Evidence' 시트에 있다."
             + (f" 그중 {_int(ev, 'derived_in_stubbed_sequence')}칸은 피호출 함수의 반환값을 시퀀스 입력"
                "('F() return')으로 stub 한 시퀀스에서 나왔다 — 시험도 그 함수를 stub 해야 성립한다(시퀀스 단위로 센 상한)."
-               if _int(ev, "derived_in_stubbed_sequence") else "")))
+               if _int(ev, "derived_in_stubbed_sequence") else "")
+            # (R17) 빌드 설정 증거로 #if 를 판정한 unit 의 칸 — 그 unit 의 가정 이름을 모두 싣는다(상한)
+            + (f" {_int(ev, 'derived_on_assumed_undefined')}칸은 빌드 설정 증거로 '정의 없음'이라 본 이름에 기댄 #if 판정이 있는 "
+               "unit 의 값이다 — unit 단위로 센 상한이라 그 판정이 값에 닿지 않은 칸도 포함한다(아래 '빌드 설정 매크로 판정')."
+               if _int(ev, "derived_on_assumed_undefined") else "")))
 
     # (R10) 소스 소견 — 기대값을 내다가 증명한 미정의 동작. 결함 **후보**다(입력이 호출 측에서 가능한지는 사람 판단).
     sf = qr.get("source_findings")
@@ -548,6 +552,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(skipped, "error") else ""),
             # (리뷰 2라운드 W4) 오류로 건너뛴 unit 이 있으면 경고 — 행 수가 줄어든 것만으로는 버그가 안 보인다
             tone=_tone(bool(_int(bs, "budget_exhausted")) or bool(_int(skipped, "error")))))
+    out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     return out
 
 
@@ -741,6 +746,9 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                    "않았다(칸마다 그 사유)." if _int(io, "tc_budget_cut") else ""),
                 tone=_tone(bool(skipped))))
 
+    out.extend(_build_assumption_item((qr.get("integration_oracle") or {}).get("build_assumptions"),
+                                      "sits_build_assumptions"))
+
     # sub-case 물량 — 흐름당 몇 갈래를 시험했나.
     sub = _int(qr, "total_sub_cases")
     if sub is not None:
@@ -749,6 +757,27 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "sits_sub_cases", "sub-case", f"{sub}건" + (f" / TC {tc}" if tc is not None else ""),
             "한 통합 흐름 안에서 갈라 시험한 갈래 수다. sub-case 상한에 걸리면 갈래가 줄어든다."))
     return out
+
+
+def _build_assumption_item(block: Any, key: str) -> List[Dict[str, Any]]:
+    """(R17) #if 판정이 빌드 설정 증거에 기댄 정도 — 트리·빌드 어디에도 정의가 없는 이름을 0 으로 본 unit 과 그 이름."""
+    if not isinstance(block, dict) or not _int(block, "units"):
+        return []   # no unit had a project scope (no context, schema mismatch): nothing to say about #if verdicts
+    names = [str(x) for x in (block.get("assumed_undefined_names") or [])]
+    total = _int(block, "assumed_undefined_total") or 0
+    reasons = block.get("incomplete_reasons") or {}
+    return [_item(
+        key, "빌드 설정 매크로 판정",
+        f"완전한 빌드 설정 {_show(_int(block, 'units_with_complete_build_evidence'))}/{_show(_int(block, 'units'))} unit · "
+        f"정의 없음으로 본 이름 {total}개",
+        "빌드 설정(.cproject)의 컴파일러 옵션이 정의하는 매크로(-D)를 다 읽을 수 있으면, 트리와 빌드 어디에도 정의가 없고 구현이 "
+        "정의할 수 있는 이름(밑줄로 시작·표준 라이브러리 이름)도 아닌 이름을 #if 에서 0 으로 본다(C11 6.10.1p4). 가정: 툴체인 "
+        "플러그인의 기본 옵션이 -D 를 더하지 않고(파일은 기본값이 아닌 옵션만 저장한다), 컴파일러는 예약된 이름만 미리 정의하며, "
+        "트리 밖 헤더(툴체인 hidef.h·stdtypes.h, <...>)와 빌드 환경(COMPOPTIONS, DEFAULT.ENV)이 이 이름들을 정의하지 않는다."
+        + (" 0 으로 본 이름: " + ", ".join(names[:12]) + (f" 외 {total - 12}개" if total > 12 else "") + "." if names else "")
+        + (" 빌드 설정을 증거로 쓰지 못한 unit 의 사유: " + _dist(reasons) + " — 이 unit 들은 이전처럼 미결로 둔다."
+           if reasons else ""),
+        tone="info")]
 
 
 _BY_DOC_TYPE = {"sts": _sts_items, "suts": _suts_items, "sits": _sits_items}

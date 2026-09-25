@@ -4866,6 +4866,9 @@ def generate_suts(
     quality["enrichment_errors"] = _enrich_errors
     quality["extended_sequences"] = sum(
         1 for _s in all_sequences.values() for _q in _s if _q.get("tc_profile") == TC_PROFILE_EXTENDED)
+    # (R17) #if verdicts on build-configuration evidence — units, reasons, names taken as undefined
+    from generators.c_project_context import summarize_build_assumptions
+    quality["build_assumptions"] = summarize_build_assumptions(u.get("project_scope") for u in units)
     if _extended:
         # (R15) 행동 경계 행 — 탐색하지 못한 unit(범위 없음·정수 입력 없음·출력 없음)과 예산 소진을 분모와 함께 공시한다.
         _bsearch = [u.get("boundary_search") for u in units if isinstance(u.get("boundary_search"), dict)]

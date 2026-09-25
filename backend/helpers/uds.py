@@ -1456,7 +1456,10 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R2b) v34: project_context 스키마 6(`roots` — APP·BOOT 가 같은 헤더명을 가질 때 include 를 소스 루트별로 해석).
 # (R14) v35: project_context 스키마 7(함수 선언 반환 타입 — 시퀀스가 준 `F() return` 스텁 값을 그 타입으로 변환).
 # (R16) v36: project_context 스키마 8(함수형 "캐스트" `(F()) + 1U` 를 호출 F 로 — 쓰기 closure 가 그 호출의 효과를 놓쳤다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v36"
+# (R17) v37: project_context 스키마 9(빌드 설정의 -D 집합 — 트리·빌드 어디에도 정의가 없는 이름을 #if 에서 0 으로).
+# (R17) v38: project_context 스키마 10(함수 본문 #if 조건의 이름 — 빌드 설정 가정의 공시 범위).
+# (R17) v39: project_context 스키마 11(빌드 설정 -D 판독을 더 좁게 — 다른 -D 표기·C++ 도구 불일치면 증거 아님).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v39"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
