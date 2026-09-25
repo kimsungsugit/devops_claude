@@ -29,6 +29,22 @@ Two measures, both scored on what a *reference* (or generated) STS workbook says
   number measures whether it wrote every fact it could, and the reference's number measures what the reference tests —
   an independent mutant source (human-labelled facts, `--review-csv`) is needed before either is called superior.
 
+* **cross-source discrimination** (R18, gap ③): mutants made from the **reference STS's own thresholds** — boundaries
+  human testers wrote, independent of the extractor — scored on both suites with the same point rule. The verdict is
+  the single comparison the tester wrote (``15도 미만`` → ``x < 15``), and a point is any stimulus of that requirement
+  in a compatible unit: the threshold names no subject, so a point on another quantity of the same unit could be
+  credited — kills are split by whether the requirement has one subject in that unit (``killed_single_subject``) or
+  several (``killed_multi_subject``, an upper bound). This source favours what the reference chose to test, the
+  extractor's favours what the SRS states — the generated suite is scored here on mutants it did not produce (the
+  reference's own row is self-sourced: its regions are the thresholds, so only its points are reported). Thresholds
+  the SRS block does not state are kept — a suite built from the SRS alone cannot know them (they may come from a
+  system specification, a scenario precondition, or an SRS revision the reference was not written against).
+  Left out and counted (``excluded``): thresholds only in the expected-result column, ones every row writes in both
+  its action and its expected cell (``judgement_copied_to_action``), ones the SRS states only as a response constraint,
+  unitless ones (``no_unit``). ``killable`` marks mutants a point can kill at all (a widening mutant never can); kills
+  are split into ``killed_single_subject`` / ``killed_multi_subject`` / ``killed_unnamed_subject``, and a suite with no
+  point in a compatible unit is not measured (``measurable`` false — the same holds for the R5 ``discrimination``).
+
 Usage:
     .venv/Scripts/python.exe scripts/requirement_oracle_eval.py --srs SRS.txt --sts STS.xlsm [--sts-generated GEN.xlsm]
         --out r5.json [--review-csv facts.csv]
@@ -55,12 +71,19 @@ from generators.requirement_oracle import (  # noqa: E402
     written_step,
 )
 
-_UNIT = r"(?:km/h|KPH|m/s|step|sec|ms|deg|℃|°C|mV|mA|Hz|V|s|초|분|도|%|A)"   # longest first (``5step`` is not s)
+# longest first (``5step`` is not s); ``8v 이하``/``Km/h`` as the documents write them (R18 review W5)
+_UNIT = r"(?:[Kk]m/h|KM/H|KPH|m/s|step|sec|ms|deg|℃|°C|mV|mv|mA|uA|µA|Hz|V|v|s|초|분|도|%|A)"
 _NUM = r"\d+(?:\.\d+)?"
+# a written threshold: its own number — not the tail of ``0x1FF0``, with its sign (``-4도``) and without its thousands
+# separators (``1,000ms``) — R18 review W5
+# (not ``\w``: Hangul is a word character, and ``열림각15도 이상`` / ``전압을9V 이상`` are thresholds — R18 review R2 W-B;
+#  after a comma only a thousands group is refused — ``1,000`` is one number, ``Task(5,10,50ms)`` ends in ``50ms`` — R3 I-1)
+_CMP_NUM = r"(?<![0-9A-Za-z_.])(?!(?<=\d,)\d{3}(?!\d))-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 _OPS = {"이상": ">=", "이하": "<=", "미만": "<", "초과": ">"}
-_COMPARATOR = re.compile(rf"(?P<num>{_NUM})\s*(?P<unit>{_UNIT})?\s*(?:\(\s*0x[0-9A-Fa-f]+\s*\))?\s*(?P<op>이상|이하|미만|초과)")
-_TOLERANCE = re.compile(rf"(?P<num>{_NUM})\s*(?P<unit>{_UNIT})?\s*±\s*(?P<tol>{_NUM})\s*(?P<tunit>{_UNIT})?")
-_POINT = re.compile(rf"(?P<num>{_NUM})\s*(?P<unit>{_UNIT})\s*(?:\(\s*0x[0-9A-Fa-f]+\s*\))?\s*(?:로|으로|에서|를|을|만큼)?\s*"
+_COMPARATOR = re.compile(rf"(?P<num>{_CMP_NUM})\s*(?P<unit>{_UNIT})?\s*(?:\(\s*0x[0-9A-Fa-f]+\s*\))?\s*"
+                         rf"(?P<op>이상|이하|미만|초과)")
+_TOLERANCE = re.compile(rf"(?P<num>{_CMP_NUM})\s*(?P<unit>{_UNIT})?\s*±\s*(?P<tol>{_NUM})\s*(?P<tunit>{_UNIT})?")
+_POINT = re.compile(rf"(?P<num>{_CMP_NUM})\s*(?P<unit>{_UNIT})\s*(?:\(\s*0x[0-9A-Fa-f]+\s*\))?\s*(?:로|으로|에서|를|을|만큼)?\s*"
                     rf"(?:설정|인가|유지|입력|회전|이동|열|닫|대기|경과)")
 # ``u16g_ApiIn_Vsup = 1605 설정`` — a named stimulus; its unit may be absent (a raw ADC count)
 _NAMED_POINT = re.compile(rf"(?P<sig>[A-Za-z_][A-Za-z0-9_]*|[가-힣A-Za-z][가-힣A-Za-z0-9_ ]{{0,30}}?)\s*=\s*"
@@ -81,7 +104,8 @@ _SRS_ID = re.compile(r"Sw[A-Za-z]+_[A-Za-z0-9_]+")
 
 def _unit(u: str | None) -> str:
     u = (u or "").strip()
-    return {"sec": "s", "초": "s", "deg": "도", "°C": "℃", "KPH": "km/h"}.get(u, u)
+    return {"sec": "s", "초": "s", "deg": "도", "°C": "℃", "KPH": "km/h", "Km/h": "km/h", "KM/H": "km/h", "v": "V",
+            "mv": "mV", "µA": "uA"}.get(u, u)
 
 
 _TIME = {"ms": 0.001, "s": 1.0, "분": 60.0}
@@ -110,7 +134,7 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
             raise ValueError(f"no STS spec sheet in {Path(path).name}: {wb.sheetnames}")
         out: dict[str, dict[str, list]] = {}
         srs = None
-        for row in wb[name].iter_rows(min_row=4, values_only=True):
+        for row_no, row in enumerate(wb[name].iter_rows(min_row=4, values_only=True), start=4):
             cells = list(row) + [None] * 13
             ids = _SRS_ID.findall(str(cells[12] or ""))
             if ids:
@@ -123,13 +147,14 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
                 taken = []
                 for m in _TOLERANCE.finditer(text):
                     taken.append((m.start(), m.end()))
-                    slot["tolerances"].append({"value": float(m.group("num")), "unit": _unit(m.group("unit")),
+                    slot["tolerances"].append({"value": float(m.group("num").replace(",", "")), "unit": _unit(m.group("unit")),
                                                "raw": m.group(0), "role": role})
                 for m in _COMPARATOR.finditer(text):
                     if any(s <= m.start() < e for s, e in taken):
                         continue
-                    item = {"value": float(m.group("num")), "unit": _unit(m.group("unit")), "op": _OPS[m.group("op")],
-                            "raw": m.group(0), "role": role}
+                    item = {"value": float(m.group("num").replace(",", "")), "unit": _unit(m.group("unit")),
+                            "op": _OPS[m.group("op")], "raw": m.group(0), "role": role, "row": row_no,
+                            "text": m.group("num").replace(",", "")}   # as written: sign and decimal places
                     slot["thresholds"].append(item)
                     if role == "action":
                         slot["regions"].append(item)
@@ -145,8 +170,8 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
                     for m in _POINT.finditer(text):
                         if any(s <= m.start() < e for s, e in named):
                             continue
-                        slot["points"].append({"value": float(m.group("num")), "unit": _unit(m.group("unit")),
-                                               "signal": None, "raw": m.group(0)})
+                        slot["points"].append({"value": float(m.group("num").replace(",", "")),
+                                               "unit": _unit(m.group("unit")), "signal": None, "raw": m.group(0)})
         return out
     finally:
         wb.close()
@@ -163,8 +188,8 @@ def _stated_in(text: str, value: float, unit: str) -> bool:
     """The quantity is written in the requirement's own text: the number followed by a compatible unit (``3도``,
     ``300ms`` for ``0.3 s``). A bare number is not enough — list numbers (``15. …``), IDs (``SyEI_03``) and other
     quantities (``50스텝`` for ``50도``) would make gold items the text never states."""
-    for m in re.finditer(rf"(?<![\d.])(?P<num>{_NUM})\s*(?P<unit>{_UNIT})", text):
-        if _same_quantity(float(m.group("num")), m.group("unit"), value, unit):
+    for m in re.finditer(rf"(?P<num>{_CMP_NUM})\s*(?P<unit>{_UNIT})", text):
+        if _same_quantity(float(m.group("num").replace(",", "")), m.group("unit"), value, unit):
             return True
     return False
 
@@ -303,11 +328,174 @@ def discrimination(mutants: list[dict], sts: dict) -> dict[str, Any]:
                      "points": points, "killed_by_point": hit, "separated_where_original_false": side,
                      "boundary_region": region})
     n = len(mutants)
-    return {"mutants": n, "killed": killed, "rate": round(killed / n, 4) if n else None,
-            "killed_either_side": either, "rate_either_side": round(either / n, 4) if n else None,
+    # (R18 review R3 W-3) a suite with no usable point for any mutant is not measured by points: its 0 is no score
+    measurable = any(r["points"] for r in rows)
+    return {"mutants": n, "measurable": measurable, "killed": killed,
+            "rate": round(killed / n, 4) if n and measurable else None,
+            "killed_either_side": either, "rate_either_side": round(either / n, 4) if n and measurable else None,
             "killed_optimistic": optimistic, "rate_optimistic": round(optimistic / n, 4) if n else None,
             "unjudgeable_combination": unjudgeable,
             "by_kind": {k: {"mutants": total[k], "killed": by_kind[k]} for k in total}, "rows": rows}
+
+
+_COMPARE = {">=": lambda x, v: x >= v, ">": lambda x, v: x > v, "<=": lambda x, v: x <= v, "<": lambda x, v: x < v}
+_FLIP = {">=": ">", ">": ">=", "<=": "<", "<": "<="}
+
+
+def _units_compatible(a: str | None, b: str | None) -> bool:
+    """Both units written and the same quantity: the same unit, or two time units (``300ms`` / ``0.3 s``). A threshold
+    or a point without a unit cannot be placed without a subject (points and regions judged alike — R18 review W4)."""
+    a, b = _unit(a), _unit(b)
+    if not a or not b:
+        return False
+    return a == b or (_seconds(1.0, a) is not None and _seconds(1.0, b) is not None)
+
+
+def _killable(op: str, value: Decimal, m_op: str, m_value: Decimal) -> bool:
+    """Is there a point where the written comparison holds and the mutant's does not? A mutant that only widens the
+    condition (``<`` → ``<=``, the value moved outward) can never be killed by a point that asserts the behaviour."""
+    if op in {">=", ">"}:
+        return m_value > value or (m_value == value and op == ">=" and m_op == ">")
+    return m_value < value or (m_value == value and op == "<=" and m_op == "<")
+
+
+def reference_mutants(reference: dict, blocks: dict[str, str] | None = None,
+                      facts_by_req: dict[str, list] | None = None) -> tuple[list[dict], dict[str, int]]:
+    """(R18) Mutants of every distinct order threshold the reference STS writes **as a stimulus** for a requirement:
+    the boundary inclusion flipped and the value moved one **written** step (``0.8`` → ±0.1, ``15`` → ±1, the finest
+    when a value is written twice). Left out, counted (R18 review W2, I4, R2 W-A): a threshold only in the
+    expected-result column (an output judgement); one every row writes in **both** its action and its expected cell
+    (acceptance criteria copied, ``CPU 부하 70%이하``); one the SRS states only as a response constraint
+    (``100ms 이내``); a unitless one. Each mutant carries whether the SRS block states the quantity, whether the block
+    exists, and whether the extractor recalled it."""
+    out, excluded = [], Counter()
+    for req, slot in sorted(reference.items()):
+        groups: dict[tuple, dict] = {}
+        for t in slot["thresholds"]:
+            if t["op"] not in _FLIP:
+                excluded["not_an_order_comparison"] += 1
+                continue
+            text = t.get("text") or str(t["value"])
+            key = (Decimal(text), _unit(t["unit"]), t["op"])
+            g = groups.setdefault(key, {"text": text, "roles": set(), "raw": t["raw"], "rows": {}})
+            g["roles"].add(t["role"])
+            g["rows"].setdefault(t.get("row"), set()).add(t["role"])
+            if len(text.split(".")[1] if "." in text else "") > len(g["text"].split(".")[1] if "." in g["text"] else ""):
+                g["text"] = text   # the finer written precision (``1.30`` over ``1.3`` — R18 review I2)
+        for (value, unit, op), g in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+            if "action" not in g["roles"]:
+                excluded["expected_result_only"] += 1
+                continue
+            if all(roles == {"action", "expected"} for r, roles in g["rows"].items() if "action" in roles and r is not None) \
+                    and any(r is not None for r in g["rows"]):
+                # every row that writes it as an action also writes it as that row's judgement: acceptance criteria
+                # copied into both cells (KJPDS02 SwNTR_0301 ``CPU 부하 70%이하``) — R18 review R2 W-A
+                excluded["judgement_copied_to_action"] += 1
+                continue
+            if not unit:
+                excluded["no_unit"] += 1   # a point cannot be placed on a unitless threshold without its subject (I-d)
+                continue
+            block = (blocks or {}).get(req)
+            stated = _stated_in(block or "", float(value), unit)
+            same = [(f, line) for f, line in (facts_by_req or {}).get(req, [])
+                    if any(_same_quantity(float(value), unit, x, f.get("unit") or "") for x in _fact_values(f))]
+            # a response constraint (``100ms 이내``) is measured, not stimulated. (Not by section: the extractor's
+            # section runs on past the last ``<Output>`` heading into the attribute table, so HDPDM01's verification
+            # criteria ``Param( 3도 ) 초과한 열림각에서 끼임 발생한 경우`` — an input — read as Output; R2 I-a)
+            if same and all(f.get("role") == "response_constraint" for f, _line in same):
+                excluded["srs_states_it_as_output"] += 1
+                continue
+            step = Decimal(1).scaleb(-len(g["text"].split(".")[1]) if "." in g["text"] else 0)
+            base = {"req_id": req, "unit": unit, "op": op, "value": value, "raw": g["raw"], "stated_in_srs": stated,
+                    "srs_block_found": block is not None, "recalled_by_extractor": bool(same)}
+            for mutant, m_op, m_value in (("boundary_inclusion", _FLIP[op], value), ("value_shift", op, value - step),
+                                          ("value_shift", op, value + step)):
+                out.append({**base, "mutant": mutant, "m_op": m_op, "m_value": m_value,
+                            "killable": _killable(op, value, m_op, m_value)})
+    return out, dict(excluded)
+
+
+def _subject_groups(points: list[dict]) -> list[str]:
+    """Distinct subjects among named points: a name that ends a longer one (``Low Power mode 천이 시간`` /
+    ``High -> Low Power mode 천이 시간``) is that one; two long names a short one ends both of stay two
+    (``저 전압 … 기준 전압`` / ``과 전압 … 기준 전압``). Longest first, so the result does not depend on the order
+    the points come in (R18 review R3 W-1)."""
+    names = sorted({p.get("signal") for p in points if p.get("signal")}, key=lambda x: (-len(_tokens(x)), x))
+    groups: list[str] = []
+    for name in names:
+        if not any(_same_signal(name, g) for g in groups):
+            groups.append(name)
+    return groups
+
+
+def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = False) -> dict[str, Any]:
+    """(R18) ``killed``: a point of the requirement, in a compatible unit, where the written comparison holds and the
+    mutant's does not (the step expects the behaviour there). ``killed_either_side`` counts a separation on either
+    side; ``killed_optimistic`` also credits a comparator region at the threshold's own value (``15도 이상``), as if
+    the tester had chosen the boundary value itself — **not reported for the suite the thresholds came from**: its
+    regions *are* those thresholds, so the number would be fixed by construction (R18 review C1). A suite with no point
+    in a compatible unit for any mutant is not measured (``measurable`` false, rates None — R2 W-D). A point names its
+    subject only sometimes: kills are split into ``killed_single_subject`` (the requirement's same-unit points name one
+    subject), ``killed_multi_subject`` (several — another quantity of that unit could have supplied it, an upper bound)
+    and ``killed_unnamed_subject`` (an unnamed point: any quantity of that unit — R2 W-E)."""
+    killed = either = optimistic = with_points = killable = single = multi = unnamed = 0
+    by_stated = Counter()
+    recall = Counter()
+    rows = []
+    for m in mutants:
+        slot = sts.get(m["req_id"]) or {}
+        points = [p for p in slot.get("points", []) if _units_compatible(p["unit"], m["unit"])]
+        with_points += bool(points)
+        hit = side = None
+        for p in points:
+            x = Decimal(str(p["value"])) * _scale(p["unit"], m["unit"])
+            a, b = _COMPARE[m["op"]](x, m["value"]), _COMPARE[m["m_op"]](x, m["m_value"])
+            if a and not b and hit is None:
+                hit = p
+            if a != b and side is None:
+                side = p
+        region = next((r["raw"] for r in slot.get("regions", []) if _units_compatible(r["unit"], m["unit"])
+                       and _same_quantity(r["value"], r["unit"], float(m["value"]), m["unit"])), None)
+        subjects = _subject_groups(points)
+        killed += hit is not None
+        either += hit is not None or side is not None
+        optimistic += hit is not None or region is not None
+        killable += m["killable"]
+        if hit is not None:
+            if not hit.get("signal"):
+                unnamed += 1
+            elif len(subjects) == 1 and all(p.get("signal") for p in points):
+                single += 1
+            else:
+                multi += 1
+        by_stated[(m["stated_in_srs"], hit is not None)] += 1
+        recall[(m["recalled_by_extractor"], hit is not None)] += 1
+        rows.append({**m, "value": float(m["value"]), "m_value": float(m["m_value"]),
+                     "points": [p["value"] for p in points], "killed_by_point": None if hit is None else hit["value"],
+                     "killed_by_signal": None if hit is None else (hit.get("signal") or ""),
+                     "subjects_in_unit": subjects, "boundary_region": None if self_sourced else region})
+    n = len(mutants)
+    measurable = bool(with_points)
+
+    def rate(k, d):
+        return round(k / d, 4) if measurable and d else None
+    stated = sum(v for (st, _k), v in by_stated.items() if st)
+    return {"mutants": n, "measurable": measurable, "killed": killed, "rate": rate(killed, n),
+            "killed_either_side": either, "rate_either_side": rate(either, n),
+            "killed_optimistic": None if self_sourced else optimistic,
+            "rate_optimistic": None if self_sourced or not n else round(optimistic / n, 4),
+            "self_sourced": self_sourced,
+            "self_sourced_note": "the suite the thresholds came from: its regions are those thresholds, so the "
+                                 "optimistic rate would be fixed by construction — not reported" if self_sourced else "",
+            # an unkillable mutant never satisfies "holds and the mutant does not": every kill is of a killable one
+            "killable_mutants": killable, "rate_of_killable": rate(killed, killable),
+            "killed_single_subject": single, "killed_multi_subject": multi, "killed_unnamed_subject": unnamed,
+            "mutants_with_a_point_in_unit": with_points,
+            "stated_in_srs": {"mutants": stated, "killed": by_stated[(True, True)]},
+            "not_stated_in_srs": {"mutants": n - stated, "killed": by_stated[(False, True)]},
+            "recalled_by_extractor": {"killed": recall[(True, True)], "not_killed": recall[(True, False)]},
+            "not_recalled": {"killed": recall[(False, True)], "not_killed": recall[(False, False)]},
+            "rows": rows}
 
 
 def _scale(point_unit: str, fact_unit: str) -> Decimal:
@@ -334,8 +522,22 @@ def evaluate(srs_text: str, sts_path: str, generated_path: str | None = None) ->
               "mutants_excluded": excluded,
               "independence_note": "a generated STS built from the same extractor is discriminated by construction",
               "discrimination": {"reference": discrimination(mutants, reference)}}
-    if generated_path:
-        report["discrimination"]["generated"] = discrimination(mutants, read_sts(generated_path))
+    generated = read_sts(generated_path) if generated_path else None
+    if generated is not None:
+        report["discrimination"]["generated"] = discrimination(mutants, generated)
+    # (R18) the other direction: mutants from the reference's own thresholds (independent of the extractor)
+    facts_by_req = {r["req_id"]: [(f, line) for line in r["lines"] for f in line["facts"]] for r in m["requirements"]}
+    cross, cross_excluded = reference_mutants(reference, blocks, facts_by_req)
+    report["cross_source"] = {
+        "source": "reference STS thresholds (human-written), stimuli only", "thresholds": len(cross) // 3,
+        "boundaries": len({(x["req_id"], x["value"], x["unit"]) for x in cross}), "excluded": cross_excluded,
+        "note": "the generated suite is scored on mutants it did not produce (the reference's thresholds); the "
+                "reference's own row shows its points only — its regions are these thresholds (self-sourced). A point "
+                "counts for any subject of the requirement in a compatible unit (the threshold names none): see "
+                "killed_single_subject / killed_multi_subject",
+        "reference": cross_discrimination(cross, reference, self_sourced=True)}
+    if generated is not None:
+        report["cross_source"]["generated"] = cross_discrimination(cross, generated)
     return report
 
 
@@ -371,7 +573,10 @@ def main(argv=None) -> int:
     print(json.dumps({"recall": report["recall"]["recall"], "gold": report["recall"]["gold_items"],
                       "operator_consistent": report["recall"]["operator_consistent"],
                       "not_stated_in_srs": len(report["recall"]["not_stated_in_srs"]),
-                      **{k: (v["killed"], v["killed_optimistic"], v["mutants"]) for k, v in d.items()}},
+                      **{k: (v["killed"] if v["measurable"] else None, v["killed_optimistic"], v["mutants"])
+                         for k, v in d.items()},
+                      **{f"cross_{k}": (v["killed"] if v["measurable"] else None, v["killed_optimistic"], v["mutants"])
+                         for k, v in report["cross_source"].items() if isinstance(v, dict) and "killed" in v}},
                      ensure_ascii=False))
     return 0
 
