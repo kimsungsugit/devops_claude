@@ -163,3 +163,30 @@ def test_a_label_that_names_a_signal_gives_the_signal():
 def test_a_noun_after_the_value_does_not_replace_an_identifier_subject():
     facts, _ = _facts("- u16g_Speed 가 3km/h 이하의 차량 속도")
     assert facts[0]["signal"] == "u16g_Speed"
+
+
+@pytest.mark.parametrize("sentence", [
+    # KJPDS02 SwRS SwTR_0605 [FS_REQ_MD_20]: the time phrase before ``9V`` was taken for its subject (R20)
+    "도어 닫힘 작동중, 배터리 저전압(B+ < 8.6V)이 500ms 이내에 9V 이상으로 복귀할 경우 남은 작동을 수행한다.",
+    "전압이 100ms 동안 9V 이상이면",
+    "전원 인가 200ms 후에 5V 이상이면",
+])
+def test_a_quantity_or_time_phrase_before_a_value_is_not_its_subject(sentence):
+    facts, _ = _facts(sentence)
+    v = [f for f in facts if f["kind"] == "threshold" and f.get("unit") == "V" and f["value"] in (9, 5)]
+    assert v and v[0]["signal"] is None, v                 # unnamed, not "500ms 이내에" / "100ms 동안"
+    assert all(not str(f.get("signal") or "").endswith(")") for f in facts)   # nor "8.6V)"
+
+
+@pytest.mark.parametrize("sentence, subject", [
+    ("- 배터리 전압이 9V 이상이면", "배터리 전압"),
+    ("- 후방 센서가 5V 이상이면", "후방 센서"),        # a word merely starting like a time postposition is a word
+    ("- 전원이 9V 이상이면", "전원"),
+    ("- 이전값이 9V 이상이면", "이전값"),
+    ("- 2차 전압이 5V 이상이면", "2차 전압"),          # review W1: a leading digit alone is no quantity token
+    ("- 10ms마다 전압이 5V 이상이면", "전압"),
+])
+def test_subject_words_that_only_look_like_quantities_or_time_words_are_kept(sentence, subject):
+    facts, _ = _facts(sentence)
+    assert facts[0]["signal"] == subject
+

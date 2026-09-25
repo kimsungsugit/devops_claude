@@ -83,6 +83,11 @@ _PARTICLE = re.compile(r"(이|가|은|는|의|을|를|에서|로|으로)$")
 _NOT_SUBJECT = frozenset({"특정", "기준", "시간", "범위인", "상태", "경우", "값이", "값", "이상", "이하", "미만", "초과", "또는", "이거나",
                           "거나", "그리고", "상태로", "상태에서", "전압으로", "만약", "만일"})
 _NEGATION = re.compile(r"않|아닌|아니|아닐|아님|없|제외|못|벗어나")
+# (R20) not a subject word: a whole quantity token (``500ms``, ``8.6V)이``, ``10ms마다``) or a time postposition
+#   (``이내에``, ``동안``, ``후``). Whole-token matches only — ``2차 전압`` keeps ``2차`` (review W1: a leading digit alone
+#   cut the subject to ``전압``).
+_TIME_POSTPOSITION = re.compile(r"(?:이내|동안|이후|이전|후|뒤|전|경과|마다)(?:에|에도|부터)?")
+_QUANTITY_WORD = re.compile(rf"[-+]?(?:{_NUM})(?:{_UNIT})?\)?(?:{_TIME_POSTPOSITION.pattern})?")
 _CLAUSE_END = re.compile(r"[,.;→]|경우|때|시\b|면\s")
 # ``0.6m/s이상의 Door 속도`` — the subject follows the value
 _SUBJECT_AFTER = re.compile(r"^\s*의\s+([A-Za-z가-힣][A-Za-z0-9가-힣_]*(?:\s+[A-Za-z가-힣][A-Za-z0-9가-힣_]*)?)")
@@ -116,6 +121,11 @@ def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
     words: list[str] = []
     for token in reversed(tokens[-3:]):
         bare = _PARTICLE.sub("", token.strip("()[]"))
+        if _QUANTITY_WORD.fullmatch(bare) or _TIME_POSTPOSITION.fullmatch(bare):
+            # (R20) ``B+ < 8.6V)이 500ms 이내에 9V 이상``: a quantity or a time postposition among the words before the
+            #   value is another condition, not the subject — ``500ms 이내에`` was the subject of ``9V 이상`` (KJPDS02
+            #   SwTR_0605). The subject words collected after it (nearer the value) stay.
+            break
         if not bare or bare in _NOT_SUBJECT or not re.search(r"[A-Za-z가-힣]", bare) \
                 or bare.upper() in {"OR", "AND"} or re.search(r"(?:거나|이고|하고)$", bare) \
                 or re.search(r"(?:며|면|여|서|고|되|는데)$", token):   # a verb ending closes the clause before it
