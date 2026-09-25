@@ -2272,6 +2272,43 @@ def _append_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]]
     unit["mcdc_fill"] = report
 
 
+def _drop_duplicate_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], extended: bool) -> List[Dict[str, Any]]:
+    """(R23) 입력이 같은 TC 의 앞 행과 똑같은 행: 확장 전략 행(OAT_*, 기본 자리를 넘는 SWITCH_/GLOBAL_)이면 빼고 뒤 행 번호를
+    다시 매긴다. 정본 규모 카탈로그 행의 중복은 남기고 센다. 기록 `unit["duplicate_rows"]`."""
+    seen: set = set()
+    kept: List[Dict[str, Any]] = []
+    record = {"reference_rows_duplicated": 0, "extended_rows_dropped": 0, "extended_rows_duplicated_kept": 0}
+    for seq in sequences:
+        key = json.dumps(seq.get("inputs") or {}, sort_keys=True, default=str)
+        strategy = str(seq.get("strategy") or "")
+        if key in seen:
+            droppable = extended and seq.get("tc_profile") == TC_PROFILE_EXTENDED and \
+                strategy.startswith(("OAT_", "SWITCH_", "GLOBAL_"))
+            if droppable:
+                record["extended_rows_dropped"] += 1
+                continue
+            if seq.get("tc_profile") != TC_PROFILE_EXTENDED:
+                record["reference_rows_duplicated"] += 1
+            else:
+                record["extended_rows_duplicated_kept"] += 1   # (리뷰 I2) MC/DC 벡터 행 — 쌍이 벡터로 찾는다
+        seen.add(key)
+        kept.append(seq)
+    if record["extended_rows_dropped"]:
+        for i, seq in enumerate(kept):
+            seq["seq_num"] = i + 1
+    unit["duplicate_rows"] = record
+    return kept
+
+
+def summarize_duplicate_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    recs = [u.get("duplicate_rows") for u in units if isinstance(u.get("duplicate_rows"), dict)]
+    return {"units": len(recs),
+            "reference_rows_duplicated": sum(int(r.get("reference_rows_duplicated") or 0) for r in recs),
+            "units_with_reference_duplicates": sum(1 for r in recs if r.get("reference_rows_duplicated")),
+            "extended_rows_dropped": sum(int(r.get("extended_rows_dropped") or 0) for r in recs),
+            "extended_rows_duplicated_kept": sum(int(r.get("extended_rows_duplicated_kept") or 0) for r in recs)}
+
+
 def _prune_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """(R19 리뷰 R1 W4) 근거가 붙은 뒤, 채움 행이 원래 MC/DC 행보다 **더 도출한 칸이 없으면** 뺀다(채운 입력을 함수가 읽지
     않았다 — HDPDM01 첫 판 478행 중 157행). 뒤 행의 번호는 다시 매긴다(채움 행 앞의 MC/DC 행 번호는 그대로)."""
@@ -2338,7 +2375,8 @@ def generate_sequences(
     `extended`(R75 확장 프로파일): 기본 전략 목록은 **그대로 앞에** 두고(같은 이름·같은 값) 그 뒤에 덧붙인다 —
     7번째 이후의 switch case · 4번째 이후의 전역 · 8번째 이후의 MC/DC 설계 벡터 · 입력마다 최솟값/최댓값 **단독 변경**(OAT,
     조건 조합이 이미 만든 (변수, 방향)은 건너뜀). 값은 같은 `_bounds_of` 에서 오고 모르는 타입은 확장에서도 비운다.
-    `max_seq=None` 이면 자르지 않는다. `boundary_rows=False` 는 확장에서도 경계 행 탐색(R15)을 건너뛴다 — 소스가 읽는
+    `max_seq=None` 이면 자르지 않는다. (R23) 입력이 같은 TC 의 앞 행과 똑같은 확장 전략 행(OAT·기본 자리를 넘는
+    SWITCH/GLOBAL)은 빼고 번호를 다시 매긴다(`unit["duplicate_rows"]`). `boundary_rows=False` 는 확장에서도 경계 행 탐색(R15)을 건너뛴다 — 소스가 읽는
     입력을 찾는 중간 회차(R19 `complete_source_read_inputs`)용이고, 문서에 실리는 마지막 회차는 늘 탐색한다.
 
     Produces boundary-value and error-condition test sequences matching
@@ -2866,6 +2904,11 @@ def generate_sequences(
 
     # 행 상한(`strategies[:max_seq]`)을 **적용한 뒤** 쌍을 다시 검증한다 — 한쪽 행만 남은 쌍은 `truncated` 로 공시되고
     # 커버리지 주장에서 빠진다. MC/DC 행끼리만 묶는다(같은 입력의 BV 행을 쌍 구성원으로 잡으면 설계 근거가 섞인다).
+    # (R23) 같은 TC 안에서 입력이 앞 행과 똑같은 행 — 기대값도 같아(결정적 oracle) 정보가 없다. 확장 전략 행(OAT·기본 자리를
+    #   넘는 SWITCH/GLOBAL)은 근거 계산 전에 빼고, 정본 규모 카탈로그 행은 R75 포함 관계 때문에 두되 센다. MC/DC 행은 쌍이 벡터로
+    #   행을 찾으므로, 경계·채움 행은 만들 때 이미 겹침을 피하므로 대상이 아니다. ⚠ finalize **앞**에서 한다 — finalize 가 쌍에
+    #   행 번호(`seq_a`/`seq_b`)를 적어 두므로, 뒤에서 번호를 다시 매기면 MCDC Design 시트가 엉뚱한 행을 가리킨다(리뷰 R1 C1).
+    sequences = _drop_duplicate_rows(unit, sequences, extended)
     _mcdc_rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
     # (R2c) 함수 실행 모델로 설계한 결정(`evaluation=source_path`)은 행 입력으로 oracle 을 다시 돌려 검증한다 — unit 필요.
     finalize_mcdc_design(_mcdc_report, _mcdc_rows, _mcdc_unit)
@@ -5361,6 +5404,8 @@ def generate_suts(
     quality["build_assumptions"] = summarize_build_assumptions(u.get("project_scope") for u in units)
     # (R21) 행이 설정해 열로 보인 입력·기대값(두 프로파일)
     quality["row_io_columns"] = summarize_row_io(units)
+    # (R23) 입력이 앞 행과 같은 행 — 정본 규모 행은 남기고 세며, 확장 전략 행은 뺀 수
+    quality["duplicate_rows"] = summarize_duplicate_rows(units)
     if _extended:
         # (R15) 행동 경계 행 — 탐색하지 못한 unit(범위 없음·정수 입력 없음·출력 없음)과 예산 소진을 분모와 함께 공시한다.
         _bsearch = [u.get("boundary_search") for u in units if isinstance(u.get("boundary_search"), dict)]

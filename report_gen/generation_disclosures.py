@@ -563,6 +563,23 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(skipped, "error") else ""),
             # (리뷰 2라운드 W4) 오류로 건너뛴 unit 이 있으면 경고 — 행 수가 줄어든 것만으로는 버그가 안 보인다
             tone=_tone(bool(_int(bs, "budget_exhausted")) or bool(_int(skipped, "error")))))
+    # (R23) 입력이 같은 TC 의 앞 행과 똑같은 행 — 두 프로파일. 둘 다 0 이면 감춘다.
+    dr = qr.get("duplicate_rows")
+    if isinstance(dr, dict) and (_int(dr, "reference_rows_duplicated") or _int(dr, "extended_rows_dropped")
+                                 or _int(dr, "extended_rows_duplicated_kept")):
+        out.append(_item(
+            "suts_duplicate_rows", "입력이 앞 행과 같은 행",
+            f"정본 규모 행 {_show(_int(dr, 'reference_rows_duplicated'))}(unit {_show(_int(dr, 'units_with_reference_duplicates'))},"
+            f" 남김) · 확장 행 {_show(_int(dr, 'extended_rows_dropped'))}(뺌)",
+            "같은 TC 안에서 입력이 앞 행과 똑같은 행은 기대값도 같아(결정적 oracle) 새 정보가 없다. 정본 규모 카탈로그 행은 전략별 "
+            "자리(경계값·조건 조합·루프 …)가 정본 문서와 같아야 해 남기고 센다 — 예: 입력이 하나인 unit 의 MIXED 는 BV_MIN 과 같고, "
+            "타입을 몰라 값을 비운 입력만 있는 unit 은 여러 행이 빈 입력이다. 확장 전략 행(단독 경계 OAT·기본 자리를 넘는 "
+            "switch/GLOBAL)은 근거를 계산하기 전에 뺐다 — 예: 0/1 플래그의 최솟값은 중간값과 같아 OAT_MIN 이 BV_MID 와 겹친다. "
+            "MC/DC 설계 벡터 행은 쌍이 벡터로 행을 찾으므로 빼지 않는다"
+            + (f"(앞 행과 같아 남긴 확장 MC/DC 행 {_show(_int(dr, 'extended_rows_duplicated_kept'))})."
+               if _int(dr, "extended_rows_duplicated_kept") else ".")
+            + (" 확장 문서의 '정본 규모 행' 에는 정본 규모 상한을 넘어 이어지는 기본 카탈로그 행도 들어 있다."
+               if qr.get("tc_profile") == "extended" else "")))
     # (R21) 행이 설정해 열로 보인 입력·기대값 — 두 프로파일. 0 이면 감춘다(항목 존재 조건).
     ri = qr.get("row_io_columns")
     if isinstance(ri, dict) and (_int(ri, "inputs_shown") or _int(ri, "outputs_shown") or _int(ri, "downgraded_slots")):
