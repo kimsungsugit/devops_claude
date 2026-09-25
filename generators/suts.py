@@ -3134,11 +3134,75 @@ def input_list_gaps(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Di
     objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
     rec = unit.get("source_read_inputs") if isinstance(unit.get("source_read_inputs"), dict) else {}
     gaps: Dict[str, Dict[str, Any]] = {n: {"slots": 0, "sequences": [], "added": True} for n in (rec.get("added") or {})}
-    inputs = set(unit.get("input_vars") or [])
+    # (R21 리뷰 W1) 한 행(GLOBAL)이 설정해 열로 보인 이름도, 다른 행이 값 없이 읽으면 입력 목록의 결손이다
+    shown = set(((unit.get("row_io_columns") or {}).get("inputs_shown")) or [])
+    inputs = set(unit.get("input_vars") or []) - shown
     for name, r in source_read_names(sequences).items():
         if name not in inputs and name not in gaps and name.partition("[")[0] in objects:
             gaps[name] = {**r, "added": False}
     return gaps
+
+
+def render_row_io(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R21) 행이 설정하는 입력·적는 기대값인데 TC 의 열에 없는 이름을 열로 보인다(두 프로파일).
+
+    GLOBAL 행은 간접 전역을 최솟값으로, 입출력 없는 unit 의 호출 시퀀스는 간접 전역을 입력·기대값으로 적는데 명세 시트는
+    `input_vars`·`output_vars` 열만 써서 그 값이 문서에 없었다 — oracle 은 그 숨은 입력으로 기대값을 도출했다(정본 규모 문서
+    KJPDS02_PV 181 unit · 442 행 · 확정 410 칸, HDPDM01 확장 64 unit · 214 행). 첫 사용 순서로 열 뒤에 붙이고, 입력 열 상한을
+    넘어 보일 수 없는 입력을 쓰는 행은 확정 칸을 `input_not_in_document:<이름>` 으로 내린다(문서에 없는 자극에 기댄 값은 확정이
+    아니다). 출력은 상한을 넘으면 열로 보이지 않을 뿐(단언하지 않음) 센다. 기록은 `unit["row_io_columns"]`."""
+    # (리뷰 R2 I-c) 두 번 불려도 앞의 기록을 잃지 않는다 — 앞에서 보인 이름은 이미 열이고, 여기 기록에 그대로 남는다
+    prev = unit.get("row_io_columns") if isinstance(unit.get("row_io_columns"), dict) else {}
+    record: Dict[str, Any] = {"inputs_shown": [], "inputs_over_cap": [], "outputs_shown": [], "outputs_over_cap": [],
+                              "downgraded_slots": int(prev.get("downgraded_slots") or 0)}
+    for key, field, cap in (("input", "inputs", _INPUT_COL_END - _INPUT_COL_START + 1),
+                            ("output", "expected", _OUTPUT_COL_END - _OUTPUT_COL_START + 1)):
+        cols = list(unit.get(f"{key}_vars") or [])
+        known = set(cols)
+        hidden: List[str] = []
+        for seq in sequences:
+            for name in (seq.get(field) or {}):
+                if name not in known and name not in hidden:
+                    hidden.append(name)
+        room = max(0, cap - len(cols))
+        if hidden[:room]:
+            unit[f"{key}_vars"] = cols + hidden[:room]
+        record[f"{key}s_shown"] = list(prev.get(f"{key}s_shown") or []) + hidden[:room]
+        record[f"{key}s_over_cap"] = hidden[room:]
+    over = set(record["inputs_over_cap"])
+    for seq in sequences if over else []:
+        used = [n for n in (seq.get("inputs") or {}) if n in over]
+        if not used:
+            continue
+        reason = "input_not_in_document:" + ",".join(used[:3]) + (f"+{len(used) - 3}" if len(used) > 3 else "")
+        for var, ev in (seq.get("expected_evidence") or {}).items():
+            if (ev or {}).get("status") == "derived":
+                # (리뷰 I1) 확정의 근거(계산 근거·가정·stub·해석한 callee)는 떼어 낸다 — 미상 칸이 근거를 말하면 안 된다
+                for k in ("basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only"):
+                    ev.pop(k, None)
+                ev.update(status="unknown", oracle_kind="none", reason=reason)
+                seq.setdefault("expected", {})[var] = f"{VERIFY_PREFIX} {reason}"
+                record["downgraded_slots"] += 1
+        desc = [ln for ln in str(seq.get("description") or "").splitlines() if not ln.startswith(("Expected:", "근거: 소스 계산"))]
+        if seq.get("expected"):
+            desc.append("Expected: " + ", ".join(f"{v}={x}" for v, x in seq["expected"].items()))
+        if any((e or {}).get("status") == "derived" for e in (seq.get("expected_evidence") or {}).values()):
+            desc.append("근거: 소스 계산 (요구 적합성 미검증, 실행 미실시)")
+        seq["description"] = "\n".join(desc)
+    unit["row_io_columns"] = record
+    return record
+
+
+def summarize_row_io(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    recs = [u.get("row_io_columns") for u in units if isinstance(u.get("row_io_columns"), dict)]
+    return {"units": len(recs),
+            "units_with_inputs_shown": sum(1 for r in recs if r.get("inputs_shown")),
+            "inputs_shown": sum(len(r.get("inputs_shown") or []) for r in recs),
+            "units_with_outputs_shown": sum(1 for r in recs if r.get("outputs_shown")),
+            "outputs_shown": sum(len(r.get("outputs_shown") or []) for r in recs),
+            "inputs_over_cap": sum(len(r.get("inputs_over_cap") or []) for r in recs),
+            "outputs_over_cap": sum(len(r.get("outputs_over_cap") or []) for r in recs),
+            "downgraded_slots": sum(int(r.get("downgraded_slots") or 0) for r in recs)}
 
 
 def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -5275,6 +5339,9 @@ def generate_suts(
             _progress(pct, f"시퀀스 생성 {i+1}/{len(units)}")
     if ai_enhanced:
         _logger.info("AI enhanced %d void-function units", ai_enhanced)
+    # (R21) 행이 설정하는 입력·적는 기대값을 TC 의 열로 — 문서에 없는 자극에 기댄 기대값을 남기지 않는다(두 프로파일)
+    for unit in units:
+        render_row_io(unit, all_sequences.get(unit["fid"]) or [])
 
     total_seq = sum(len(s) for s in all_sequences.values())
     _progress(80, f"시퀀스 생성 완료 - {total_seq}개")
@@ -5292,6 +5359,8 @@ def generate_suts(
     # (R17) #if verdicts on build-configuration evidence — units, reasons, names taken as undefined
     from generators.c_project_context import summarize_build_assumptions
     quality["build_assumptions"] = summarize_build_assumptions(u.get("project_scope") for u in units)
+    # (R21) 행이 설정해 열로 보인 입력·기대값(두 프로파일)
+    quality["row_io_columns"] = summarize_row_io(units)
     if _extended:
         # (R15) 행동 경계 행 — 탐색하지 못한 unit(범위 없음·정수 입력 없음·출력 없음)과 예산 소진을 분모와 함께 공시한다.
         _bsearch = [u.get("boundary_search") for u in units if isinstance(u.get("boundary_search"), dict)]

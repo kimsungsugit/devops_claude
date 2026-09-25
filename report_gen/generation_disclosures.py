@@ -563,6 +563,25 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(skipped, "error") else ""),
             # (리뷰 2라운드 W4) 오류로 건너뛴 unit 이 있으면 경고 — 행 수가 줄어든 것만으로는 버그가 안 보인다
             tone=_tone(bool(_int(bs, "budget_exhausted")) or bool(_int(skipped, "error")))))
+    # (R21) 행이 설정해 열로 보인 입력·기대값 — 두 프로파일. 0 이면 감춘다(항목 존재 조건).
+    ri = qr.get("row_io_columns")
+    if isinstance(ri, dict) and (_int(ri, "inputs_shown") or _int(ri, "outputs_shown") or _int(ri, "downgraded_slots")):
+        out.append(_item(
+            "suts_row_io_columns", "행이 설정해 열로 보인 이름",
+            f"입력 {_show(_int(ri, 'inputs_shown'))}(unit {_show(_int(ri, 'units_with_inputs_shown'))}) · 기대값 "
+            f"{_show(_int(ri, 'outputs_shown'))}(unit {_show(_int(ri, 'units_with_outputs_shown'))})",
+            "GLOBAL 행(간접 변수를 최솟값으로)과 입출력 없는 unit 의 호출 시퀀스가 설정·기대하는 간접 변수(전역·레지스터 필드·"
+            "멤버 경로 포함)를 TC 의 입력·기대값 열로 보였다 — 예전 문서는 이 값을 싣지 않아 기대값이 문서에 없는 자극에 기댔다. "
+            "값은 그것을 설정한 행(GLOBAL 행, 확장 프로파일에선 그 행을 기준으로 한 경계 행)에만 있고 다른 행은 비어 있다(설정하지 "
+            "않음 — 그 행들은 이 이름에 기댄 확정값이 없다). 호출 시퀀스의 오류 경로 행은 BV_*_INV 처럼 형 밖 값을 싣는다. "
+            "열이 늘어 TC 의 입출력 변수 수·'입출력 없는 TC' 수·생성 방법 표기가 예전 문서와 달라진다(기본 프로파일도 설계서 입력 "
+            "표보다 열이 많다). 같은 이름을 다른 행이 값 없이 읽으면 '입력 목록 밖 읽기' 소견에도 남는다."
+            + (f" 입력 열 상한 때문에 보이지 못한 입력 {_show(_int(ri, 'inputs_over_cap'))} — 그 입력을 쓰는 행의 확정 칸 "
+               f"{_show(_int(ri, 'downgraded_slots'))}을 [검증 필요](input_not_in_document)로 내렸다."
+               if _int(ri, "inputs_over_cap") else "")
+            + (f" 기대값 열 상한 때문에 보이지 못한 기대값 {_show(_int(ri, 'outputs_over_cap'))}(단언하지 않음)."
+               if _int(ri, "outputs_over_cap") else ""),
+            tone=_tone(bool(_int(ri, "inputs_over_cap")))))
     # (R19) 소스가 읽어 더한 입력 — 확장 프로파일에서만 기록된다. 설계서 입력 목록과 열이 달라지므로 늘 공시한다.
     sr = qr.get("source_read_inputs")
     if isinstance(sr, dict):
