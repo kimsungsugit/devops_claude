@@ -190,3 +190,36 @@ def test_subject_words_that_only_look_like_quantities_or_time_words_are_kept(sen
     facts, _ = _facts(sentence)
     assert facts[0]["signal"] == subject
 
+
+
+def test_the_attribute_table_after_an_output_section_is_not_output():
+    # R22 (HDPDM01 SwTR_0202): the verification criteria's input conditions sat under the preceding <Output> heading
+    body = ("<Output>\n- PDSM이 Motor 동작을 중단한다.\nASIL\tA\n"
+            "Verification criteria\t1. 끼임 발생시 Motor 동작 확인.\n"
+            "6. 차량 속도가 3km/h 이하인 상태에서 끼임 발생한 경우 동작 확인")
+    _, req = _facts(body, "SwTR_0202")
+    (line,) = [x for x in req["lines"] if "3km/h" in x["text"]]
+    assert line["section"] == "Verification criteria" and line["joins_previous"] == ""
+    from generators.requirement_oracle import is_outcome_section
+    assert not is_outcome_section(line["section"])
+
+
+def test_output_lines_before_the_table_stay_output():
+    body = "<Output>\n- 모터 전류가 5A 이하로 유지된다.\nASIL\tA"
+    _, req = _facts(body, "SwTR_0202")
+    (line,) = [x for x in req["lines"] if "5A" in x["text"]]
+    assert line["section"] == "Output"
+
+
+def test_a_numbered_or_circled_line_is_not_an_attribute_row():
+    body = "<Output>\n①\t속도가 3km/h 이하로 감소한다.\n1.\t전압이 9V 이상이면"
+    _, req = _facts(body, "SwTR_0202")
+    assert {x["section"] for x in req["lines"]} == {"Output"}
+
+
+def test_an_attribute_row_does_not_join_the_line_before_it():
+    # R22 review W1: the reset of the join run was asserted, never measured
+    _, req = _facts("<Input>\n- 전압이 9V 이상 AND\nRange\t전류 5A 이하")
+    (line,) = [x for x in req["lines"] if "5A" in x["text"]]
+    assert line["section"] == "Range" and line["joins_previous"] == ""
+

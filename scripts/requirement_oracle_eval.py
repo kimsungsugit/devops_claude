@@ -399,9 +399,9 @@ def reference_mutants(reference: dict, blocks: dict[str, str] | None = None,
             stated = _stated_in(block or "", float(value), unit)
             same = [(f, line) for f, line in (facts_by_req or {}).get(req, [])
                     if any(_same_quantity(float(value), unit, x, f.get("unit") or "") for x in _fact_values(f))]
-            # a response constraint (``100ms 이내``) is measured, not stimulated. (Not by section: the extractor's
-            # section runs on past the last ``<Output>`` heading into the attribute table, so HDPDM01's verification
-            # criteria ``Param( 3도 ) 초과한 열림각에서 끼임 발생한 경우`` — an input — read as Output; R2 I-a)
+            # a response constraint (``100ms 이내``) is measured, not stimulated. (Not by section: a section says where
+            # a line sits, not what its value does — R2 I-a; since R22 an attribute row such as the verification
+            # criteria also ends an ``<Output>`` section, so ``Param( 3도 ) 초과한 열림각`` is no longer read as Output)
             if same and all(f.get("role") == "response_constraint" for f, _line in same):
                 excluded["srs_states_it_as_output"] += 1
                 continue

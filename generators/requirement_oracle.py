@@ -302,6 +302,10 @@ def _combination(line: str, facts: list[dict]) -> str:
 
 
 _OUTCOME_SECTION = re.compile(r"완료|output|출력|결과|expected", re.IGNORECASE)
+# (R22) an attribute-table row (``ASIL<TAB>A``, ``Verification criteria<TAB>1. …``) starts another field of the requirement
+#   table: the ``<Output>`` section above it ends there (HDPDM01 SwTR_0202: the verification criteria's input conditions
+#   ``3도 초과한 열림각`` / ``3km/h 이하`` were read as outputs and never stimulated)
+_ATTRIBUTE_ROW = re.compile(r"([A-Za-z][A-Za-z ]{0,30}[A-Za-z])\t")
 
 
 def is_outcome_section(section: str) -> bool:
@@ -439,6 +443,9 @@ def extract(text: str) -> list[dict[str, Any]]:
             head = re.fullmatch(r"\s*<\s*([^<>]{1,40}?)\s*>\s*", raw_line)
             if head:
                 section = head.group(1)   # ``<Pre Condition>`` / ``<완료조건>`` / ``<Output>``: the role of what follows
+            attribute = None if head else _ATTRIBUTE_ROW.match(raw_line)
+            if attribute:
+                section = attribute.group(1)   # (R22) the table's next field — its lines are not the section above
             stripped = raw_line.strip()
             lone = _LONE.match(raw_line)
             if lone:
@@ -456,8 +463,8 @@ def extract(text: str) -> list[dict[str, Any]]:
             tail_join = "and" if _TAIL_AND.search(tail) else "or" if _TAIL_OR.search(tail) else ""
             joins = "and" if _HEAD_AND.match(raw_line) or _HEAD_PARTICLE.match(raw_line) else \
                 "or" if _HEAD_OR.match(raw_line) else pending or prev_tail
-            if head:
-                joins = ""                 # a section heading ends every run
+            if head or attribute:
+                joins = ""                 # a section heading (or the table's next field) ends every run
             chain = chain + [previous_text] if joins and previous_text else []
             if open_line is not None:
                 if joins and not open_line["continues"]:
