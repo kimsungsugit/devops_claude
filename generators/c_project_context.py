@@ -26,7 +26,7 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 11  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 12  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -38,6 +38,8 @@ SCHEMA_VERSION = 11  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 10 (R17): per-file `body_condition_names` (identifiers of function-body #if conditions — the scope's
 #    `assumed_undefined_body`).
 # 11 (R17): `build.configurations` fails closed on more -D spellings and C++/C tool disagreement.
+# 12 (R16b): a typedef whose new name the grammar knows as a primitive (``typedef unsigned char bool;``,
+#    ``typedef signed char int8_t;``) is recorded — it was dropped, so ``bool`` stayed ``_Bool``.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -49,6 +51,8 @@ _FLOAT_RE = re.compile(r"^(?P<sign>[-+]?)(?P<number>(?:[0-9]+\.[0-9]*|\.[0-9]+)(
 FLOAT = {"kind": "float", "bits": 32, "signed": True, "rank": 10}
 DOUBLE = {"kind": "double", "bits": 64, "signed": True, "rank": 11}
 _STD_TYPES = frozenset({"uint8_t", "int8_t", "uint16_t", "int16_t", "uint32_t", "int32_t", "uint64_t", "int64_t"})
+# names the grammar or the library gives a meaning that a project's own typedef overrides (R16b review R2)
+_PROJECT_MAY_TYPEDEF = _STD_TYPES | {"bool"}
 
 
 class Unresolved(ValueError):
@@ -440,11 +444,17 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
             base = " ".join(_text(c, raw) for c in node.named_children if c.type == "type_qualifier" or c == typ)
             _collect_enum(typ, raw, rec, conditional, line, pos)
             aggregate = typ is not None and typ.type in {"struct_specifier", "union_specifier"}
+            # the new name is a ``type_identifier`` — or a ``primitive_type`` when the grammar knows the name
+            # (``typedef unsigned char bool;``, ``typedef signed char int8_t;`` in KJPDS02 PE_Types.h: dropped before
+            # R16b, so ``bool`` stayed ``_Bool`` and ``uint8_t`` stayed rank-unknown)
+            def is_name(d):   # a primitive only for the names a project may typedef (a misparse of
+                return d != typ and (d.type == "type_identifier" or   # ``typedef FAR unsigned char X;`` is no ``char``)
+                                     (d.type == "primitive_type" and _text(d, raw) in _PROJECT_MAY_TYPEDEF))
             for d in node.named_children:
-                if d.type == "type_identifier" and d != typ and aggregate:
+                if is_name(d) and aggregate:
                     rec["typedefs"].setdefault(_text(d, raw), []).append({"base": "", "shape": "struct", "line": line,
                                                                          "pos": pos, "conditional": conditional})
-                elif d.type == "type_identifier" and d != typ:
+                elif is_name(d):
                     shape = "enum" if typ is not None and typ.type == "enum_specifier" else "scalar"
                     enum_tag = ""
                     if shape == "enum":
@@ -1378,14 +1388,10 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             if len(defs) != 1 or defs[0]["conditional"]:
                 raise Unresolved("enum_definition_missing_or_ambiguous")
             t = {**ctype("int", True, widths), "enum": core}
-        elif (bk := base_kind(core)) is not None:
-            if bk[1] is None:
-                raise Unresolved("plain_char_signedness_unknown")
-            t = ctype(bk[0], bk[1], widths)
-        elif core in _STD_TYPES:
-            # The width is fixed but the underlying type (and so its conversion rank) is the target's choice.
-            raise Unresolved("stdint_type_rank_unknown:" + core)
-        elif core in raw_typedefs:
+        elif core in raw_typedefs and (core in _PROJECT_MAY_TYPEDEF or base_kind(core) is None):
+            # ``bool`` (not a keyword before C23 — ``<stdbool.h>`` makes it ``_Bool``) and the ``<stdint.h>`` names are
+            # what the project says when it typedefs them itself: ``typedef unsigned char bool;`` keeps 2 as 2, not 1
+            # (R16b review R2 — the clang check found the model normalising it)
             defs = raw_typedefs[core]
             bases = {d.get("base") for d in defs}
             if any(d.get("conditional") for d in defs) or len(bases) != 1:
@@ -1397,6 +1403,13 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             t["typedef"] = core
             if d.get("volatile"):
                 qualifiers.add("volatile")
+        elif (bk := base_kind(core)) is not None:
+            if bk[1] is None:
+                raise Unresolved("plain_char_signedness_unknown")
+            t = ctype(bk[0], bk[1], widths)
+        elif core in _STD_TYPES:
+            # The width is fixed but the underlying type (and so its conversion rank) is the target's choice.
+            raise Unresolved("stdint_type_rank_unknown:" + core)
         else:
             raise Unresolved("type_undeclared:" + core)
         if qualifiers:

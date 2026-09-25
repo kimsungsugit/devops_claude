@@ -1459,7 +1459,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R17) v37: project_context 스키마 9(빌드 설정의 -D 집합 — 트리·빌드 어디에도 정의가 없는 이름을 #if 에서 0 으로).
 # (R17) v38: project_context 스키마 10(함수 본문 #if 조건의 이름 — 빌드 설정 가정의 공시 범위).
 # (R17) v39: project_context 스키마 11(빌드 설정 -D 판독을 더 좁게 — 다른 -D 표기·C++ 도구 불일치면 증거 아님).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v39"
+# (R16b) v40: project_context 스키마 12(`typedef unsigned char bool;`·`typedef … int8_t;` 를 기록 — KJPDS02 PE_Types.h 의
+#   bool 이 `_Bool` 로 읽혀 2 가 1 이 됐다).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v40"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

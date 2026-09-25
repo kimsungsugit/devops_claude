@@ -274,8 +274,8 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
 
 
 TEST_EVIDENCE_HEADERS = ["Test Case ID", "Case", "Entry function", "Observable", "Expected", "Status", "Oracle",
-                         "Execution", "Basis", "Reason", "Callees interpreted", "Source path", "Source SHA256",
-                         "Inputs JSON", "Assumptions"]
+                         "Execution", "Basis", "Reason", "Callees interpreted", "Callees effects-only", "Source path",
+                         "Source SHA256", "Inputs JSON", "Assumptions"]
 
 
 _CELL_MAX = 32_767   # Excel's text cell limit: longer text makes the workbook "need repair" (review W7)
@@ -303,7 +303,7 @@ def write_integration_evidence_sheet(wb, itcs: list[dict[str, Any]]) -> int:
                              value if isinstance(value, int) else str(value), ev.get("status", "unrecorded"),
                              ev.get("oracle_kind", "none"), ev.get("execution_status", "not_run"), ev.get("basis", ""),
                              ev.get("reason", "provenance_missing"), ", ".join(ev.get("callees_interpreted") or ()),
-                             ev.get("source_path", ""), ev.get("source_hash", ""),
+                             ", ".join(ev.get("callees_effects_only") or ()), ev.get("source_path", ""), ev.get("source_hash", ""),
                              _cell(json.dumps(sub.get("inputs") or {}, ensure_ascii=False, sort_keys=True, default=str)),
                              _cell("; ".join(ev.get("assumptions") or ()))])
     if not any(r[6] == "source" for r in rows):

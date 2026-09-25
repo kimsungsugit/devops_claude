@@ -46,6 +46,7 @@
 | R15 | 격차 ① SUTS 확장 프로파일 **행동 경계 행**(원본 코드 oracle 로 출력이 계단처럼 바뀌는 인접 입력 쌍을 찾아 행으로 **더함**) | P6/G1 | 완료(아래 R15 기록) — 확장 프로파일 변이 판별 HDPDM01 71.6%→81.3%(정본 73.1%) · KJPDS02_PV 78.5%→84.0%(정본 72.0%) |
 | R16 | 격차 ② **함수 간 소스 oracle** — SITS 진입 함수를 callee 본문까지 해석(stub 아님)해 기대값 도출 + 인터페이스 결함을 같은 oracle 로 **실행**하는 측정기 | P4/G5 | 완료(아래 R16 기록) — HDPDM01 생성 SITS 확정 칸 0 → 10,479 · 인터페이스 결함 입력 판별 정본 26.4% / 생성 93.7% · 독립(clang) 대조 미실시 |
 | R17 | KJPDS02_PV 전처리 — 빌드 설정(.cproject) 이 정의하는 -D 를 끝까지 읽을 수 있으면, 트리·빌드 어디에도 정의가 없는 비예약 이름을 `#if` 에서 0 으로(C11 6.10.1p4) | P2/G2·G5 | 완료(아래 R17 기록) — PV SITS 확정 칸 5,927 → 8,674 · 인터페이스 결함 가름 57 → 121(정본 쪽은 모델이 최상위 흐름을 못 끝내 미측정에 가까움) · 정본 기대값 모순 0(체인 라벨 측정기 결함 정정 후) · PV SUTS 정합 유닛 345 → 357 |
+| R16b | R16 생성 SITS 기대값의 **독립(clang) 대조** — 진입 함수와 도달하는 프로젝트 함수를 C++20 constexpr 구조체의 멤버 함수로 원문 그대로 컴파일해 실행 | P4/G2 | 완료(아래 R16b 기록) — 모순 **0** (HDPDM01 10,492 칸 중 강한 일치 5,078 · KJPDS02_PV 8,674 칸 중 5,834) · 대조와 리뷰가 모델 결함 3 건을 찾아 고침(switch 선언 범위 · 중첩 case · `typedef unsigned char bool;`) |
 
 ### 정본 초과 후보 (나중 라운드, 2026-09-24 사용자 방향)
 
@@ -365,3 +366,23 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
 - **정본 입력 판별 0 의 뜻**: 정본이 결함을 못 가른다는 뜻이 **아니다**. 모델이 정본 진입점(최상위 흐름)을 경로 예산 안에 끝내지 못해 정본 행 447 중 19 행만 관측값이 정해졌고, 정해지지 않은 행은 어느 쪽으로도 세지 않는다. PV 에서 "생성이 정본보다 많이 가른다" 는 이 측정으로는 **주장할 수 없다** — 성립한 것은 생성 SITS 의 자극이 가르는 결함 121 개(적힌 기대값으로 86 개)이고, 정본 쪽은 미측정에 가깝다.
 - **판정**: 전처리가 풀리자 KJPDS02_PV 에서 SITS 측정이 처음으로 성립했다. SUTS 효과는 작다(정합 유닛 +12, 판별 +15) — PV SUTS 에서 oracle 이 도출하지 못한 unit 은 전처리가 아니라 다른 원인이 대부분이다(372 → 359). clang 이 트리 밖 이름을 똑같이 미정의로 보므로 R3 의 clang 일치는 R17 가정의 **검증이 아니라 일관성**이다(리뷰 I1).
 - **리뷰**: deep-reviewer 3 라운드. R1 Critical 2(latent — 파일·폴더·다른 도구의 정의를 합침, 이해 못 한 `-D` 표기·강제 include·makefile 빌드를 완전으로 판정) + 함수 본문 `#if` 미적용·공시 부분. R2 Warning 4(본문 이름이 MC/DC·공시에 안 닿음 — 실 FBL `CRC_DEBUG_ENABLE`, 다른 unit 판정의 이름 미전달, 허용 목록화, 칸별 기록). R3 Warning 3(매크로를 거친 본문 이름, `--define`·`/D`·`${}`·C++ 도구 정의, 트리 밖 헤더·환경 가정 공시). 전부 반영, 회귀 테스트 53(빌드 정의) + 1(체인 라벨), 뮤테이션으로 확인. 프로젝트 문맥 스키마 8→11 · 소스 단계 캐시 v36→v39.
+
+## R16b 기록 — 통합 기대값의 독립 clang 대조 (2026-09-25, R92)
+
+- **무엇**: R16 의 SITS 기대값은 같은 oracle 이 만든 값이라 공시에 "독립 경로 대조 미실시" 로 적혀 있었다. `scripts/integration_oracle_clang_check.py` 가 이제 Test Evidence 의 `derived` 칸마다 clang 으로 다시 잰다 — 진입 함수와 그것이 호출로 닿는 **프로젝트 함수를 원문 그대로** C++20 `constexpr` 구조체의 멤버 함수로 컴파일하고(프로그램 객체 = 데이터 멤버, `--target=msp430` 16비트 int, 각 unit 의 typedef 가 증언하는 폭을 `static_assert`), claim 마다 입력을 새 인스턴스에 넣고 진입을 호출해 관측값을 `static_assert` 한다. 상수 평가가 변환·승격·제어 흐름·인자 전달·callee 의 쓰기/반환·포인터 쓰기를 대상 정수 의미로 실행하고, 부호 오버플로·0 나누기·범위 밖 색인·불확정 지역 읽기를 오류로 거부한다. claim 이 정하지 않은 객체와 돌리지 않는 함수의 반환은 채움값 3 개(0/90/201) · 열거형은 허용 기저 타입마다.
+- **공유하는 것(독립 아님)**: 호출이 어느 정의에 묶이는가(`CalleeProvider`), 매크로 활성·본문(R17 빌드 가정 포함), typedef 폭, 열거자·const 값. **돌리지 않는 함수를 구조체가 경로별로 셈**: *unbound*(모델도 못 묶음) · 모델이 그 claim 에서 **해석하지 않은** callee(Test Evidence `Callees interpreted` 에 없음 — 모델은 쓰기 closure 로 읽었다) — 둘 다 반환은 채움값·쓰기 없음, 반환에 기댄 값이면 모순 · *cut*(clang 이 컴파일 못 함 — 그 쓰기가 빠지므로 불일치는 판정 안 함) · clang 의 unsequenced 경고 함수(도달하면 미판정). 모델이 **어느 호출 지점에서든** 쓰기 closure 로 읽은 callee(새 열 `Callees effects-only`)를 지나는 경로의 평가 오류는 모델이 볼 수 없던 UB 라 미판정. `static` 지역은 멤버로(진입값 = 채움값, 모델도 미지), 두 unit 의 같은 이름 `static` 객체·함수는 unit 마다 따로, `enum TAG` 는 기저 typedef 로, `typedef … bool` 은 이름을 바꿔. 호출은 파싱 기준(주석·`#if defined(…)` 는 호출 아님).
+
+| 프로젝트 | claim 칸 | 강한 일치(stub 미도달) | 약한 일치(stub 도달) | 미판정 | 불일치 / UB |
+|---|---|---|---|---|---|
+| HDPDM01 | 10,492 | 5,078 (48.4%) | 1,526 (cut 1,464 · stub 62) | 3,888 | 0 / 0 |
+| KJPDS02_PV | 8,674 | 5,834 (67.3%) | 1,937 (cut 1,246 · stub 691) | 903 | 0 / 0 |
+
+  미판정 사유(상위) — HDPDM01: constexpr_limit 1,482, cut_callee_reached 1,307, group:entry_does_not_compile 995, possible_ub_disclosed 104 · KJPDS02_PV: cut_callee_reached 548, group:entry_does_not_compile 273, group:parameter_type_unresolved 70, possible_ub_disclosed 12. `constexpr_limit` 은 소스의 재해석 캐스트(`(U8*)g_DoorState_his` — 열거형 배열을 바이트로; 기저가 int 면 clang 이 평가할 수 없고 claim 은 모든 허용 기저에서 성립해야 하므로 미판정이 맞다). 진입 컴파일 실패는 구조체·공용체 객체(`DiagData`·`lin_tl_rx_queue`)·구조체 typedef — 모델도 그 객체를 모델링하지 않는다. 소요: HDPDM01 41초 · KJPDS02_PV 37초(워커 2).
+- **첫 측정 → 최종**: 첫 판(HDPDM01 강한 일치 4,875)은 주석 속 `conversion(` 과 `__asm(` 을 호출로 읽어 stub 을 만들었고 `__asm` stub 이 구조체 전체를 깨뜨렸다(466 칸). KJPDS02_PV 는 `enum en_g_DoorState g_DoorState;`(typedef 없는 태그)로 진입 825 칸이 컴파일되지 않았다.
+- **대조·리뷰가 찾은 모델 결함(생성기 수정)** — 실 소스 4 트리 영향은 괄호 안:
+  1. `c_source_oracle` switch: 앞 `case` 아래 선언한 지역이 뒤 `case` 로 점프한 경로에선 선언되지 않아 같은 이름의 **전역**으로 읽혔다(C11 6.2.1p4 · 6.8.4.2p7). 뒤 case 로 들어오는 상태가 앞 case 의 선언을 초기화 없이 선언한다(이 형태 0 개).
+  2. 같은 switch: 앞 case 의 블록 안에 든 `case` 레이블(`else { case 3U: … }`)을 무시해 "어느 case 도 아님" 값을 냈다 → 그런 switch 는 해석하지 않는다(0 개).
+  3. `c_project_context` typedef 수집: tree-sitter 가 `bool`·`int8_t` 를 원시 타입으로 읽어 `typedef unsigned char bool;`(KJPDS02 `PE_Types.h`)과 `typedef signed char int8_t;` 를 **버렸다** — `bool` 이 `_Bool` 로 남아 `(bool)2` 가 1 이 됐다. 이제 기록하고(프로젝트 typedef 가 이긴다, `const bool` 포함), 컨텍스트 스키마 11→12 · 소스 단계 캐시 v39→v40. PV 영향: SUTS 확정 칸 23,296 그대로 · 변이 판별 1,449/1,696 → 1,449/1,696(불변) · SITS 확정 8,674 그대로 — `bool` 변수가 0/1 밖 값을 받는 경로가 이번 시험에 없었다.
+- **판정**: 두 프로젝트에서 clang 이 반증한 확정 기대값은 **0** 이다. 다만 "0 모순" 은 대조한 부분의 결론이다 — 강한 일치는 HDPDM01 48.4%, KJPDS02_PV 67.3% 이고 나머지는 약한 일치(돌리지 않은 함수가 경로에 있음) 또는 미판정이다. 공유 가정(바인딩·전처리)은 이 대조로 검증되지 않는다. 생성본마다 이 스크립트를 따로 돌려야 한다(생성 중엔 돌지 않음 — 공시 문구에 스크립트 이름을 적었다). 단위 수준 clang 대조(`source_oracle_clang_check.py`)도 `typedef … bool` 을 이름 바꿔 컴파일한다(전엔 그런 함수가 전부 미판정).
+- **남은 것(실 소스 노출 0)**: 모델이 펼치지 못한 매크로(가변 인자·함수 별칭 `#define Read Drv_Read`)를 거친 호출은 `Callees effects-only` 에 기록되지 않아 그 callee 안의 UB 가 모순으로 보일 수 있다 · 효과만 읽은 판정이 호출 지점이 아니라 이름 단위라 같은 callee 를 해석한 지점의 진짜 UB 도 미판정으로 가린다 · 주소를 안 받은 불확정 지역 읽기를 모델이 공시하지 않는다(clang 은 잡는다).
+- **리뷰**: deep-reviewer 4 라운드. R1 Critical 3(대소문자만 다른 그룹 이름이 한 폴더를 공유해 병렬에서 남의 결과로 agree · case 뒤 static rename 범위 · 첫 선언 레코드가 const 표 값을 잃음) + W12(쉼표·호출 스택 속 `shift` 로 거짓 UB, 관측값이 진입 unit 상수로 읽힘, 입력 상수를 진입 unit 에서만 풂, 시퀀스 stub 이 진입에도 적용, unsequenced 처리, 공시 UB 가 첫 채움값만, 아무것도 안 잰 실행이 0 종료, 폭, 두 unit 같은 이름 static …). R2 Critical 1(모델이 효과로 읽은 callee 를 돌려 거짓 UB) + W3(진입 unit 관점의 이름, 미판정만인 실행 종료 코드, 중첩 case). R3 W3(한 지점만 효과로 읽은 callee · `const bool` · 단위 대조의 `bool`). R4 LGTM + W2(clang 역추적 10 프레임 제한이 효과 프레임을 가림 · 시트 경로 테스트). 회귀 테스트 40(첫 판 13 + 리뷰 재현 27), 인프로세스 뮤테이션으로 확인.

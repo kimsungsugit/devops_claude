@@ -660,6 +660,15 @@ class _Interp:
         cases = [c for c in _named(body)] if body is not None else []
         if any(c.type != "case_statement" for c in cases):
             raise Unsupported("switch_body_statement_outside_case")
+        # (R16b review R2 WR2-3) a label inside a block of an earlier case (``else { case 3U: … }``) is a jump target
+        # of this switch too — only direct labels are modelled, so such a switch is not interpreted
+        stack = [x for c in cases for x in _named(c)]
+        while stack:
+            x = stack.pop()
+            if x.type == "case_statement":
+                raise Unsupported("case_label_in_nested_block")
+            if x.type != "switch_statement":   # a nested switch's labels are its own
+                stack.extend(_named(x))
         labels = []
         for c in cases:
             v = c.child_by_field_name("value")
@@ -701,8 +710,16 @@ class _Interp:
         running: list = []
         self.lexical.append({})  # declarations after a case label live in the switch body's block (review W6)
         try:
+            skipped_decls: list = []
             for i, c in enumerate(cases):
+                for s in entering.get(i, []):
+                    # (R16b review C2) a jump to this label passes the declarations of the earlier cases: their names
+                    # are in scope to the end of the switch block (C11 6.2.1p4) — a later ``cnt`` is that local, not a
+                    # global of the same name — but their initializers did not run (6.8.4.2p7)
+                    for d in skipped_decls:
+                        self.declaration(s, d, skipped=True)
                 running = running + entering.get(i, [])
+                skipped_decls.extend(stmt for stmt in c.named_children if stmt.type == "declaration")
                 value = c.child_by_field_name("value")
                 for stmt in c.named_children:
                     if stmt == value or stmt.type == "comment":
@@ -719,7 +736,9 @@ class _Interp:
             raise Unsupported("path_budget")
         return out
 
-    def declaration(self, state, n):
+    def declaration(self, state, n, skipped=False):
+        """``skipped``: the declaration was jumped over (a later ``case``) — its name is in scope, its initializer
+        did not run: a non-static local holds an indeterminate value, a static one its persistent state."""
         raw = self.raw
         quals = [_text(c, raw) for c in n.named_children if c.type in {"type_qualifier", "storage_class_specifier"}]
         typ = n.child_by_field_name("type")
@@ -753,7 +772,7 @@ class _Interp:
                     if key not in state.store:
                         state.store[key] = Unknown("static_local_state:" + name)
                     continue
-                if value is None:
+                if value is None or skipped:
                     state.store[key] = Unknown("uninitialized_local:" + name)
                 elif value.type == "initializer_list":
                     self.initializer(state, value, raw, 0)
@@ -782,12 +801,14 @@ class _Interp:
                         state.havoc_bases[key] = "static_local_state:" + name
                     continue
                 if length is None:
-                    if value is not None:
+                    if value is not None and not skipped:
                         self.initializer(state, value, raw, 0)
                     state.havoc_bases[key] = "local_array_length_unresolved:" + name
                     continue
                 for i in range(length):
                     state.store[f"{key}[{i}]"] = Unknown("uninitialized_local:" + name)
+                if skipped:
+                    continue
                 if items is not None:
                     self.check_sequencing(state, value, raw)  # items are unsequenced with each other (C11 6.7.9p23)
                     if any(i.type in {"initializer_pair", "initializer_list"} for i in items) or len(items) > length:
@@ -809,7 +830,7 @@ class _Interp:
                 # Pointers and other declarators: the local exists, its value is not modeled.
                 frame[name] = {"key": key, "type": None, "pointer": True, "kind": "local"}
                 state.store[key] = Unknown("pointer_local:" + name)
-                if value is not None:
+                if value is not None and not skipped:
                     self.initializer(state, value, raw, 0)
 
     def initializer(self, state, node, raw, depth):
@@ -1850,6 +1871,7 @@ class _Interp:
             if returned is not None:
                 return returned
         if self.world is not None:
+            self.world.effects_only[name] = self.world.effects_only.get(name, 0) + 1
             # (R16 review C2) a callee run as effects only may run any function it reaches — among them one this
             # evaluation interpreted (its static locals are in the store) or one on the call stack
             touched = set(info.get("reaches") or ()) | {name}
@@ -2077,6 +2099,9 @@ class _World:
         self.failed: dict[str, str] = {}
         self.inlined: dict[str, int] = {}
         self.not_inlined: dict[str, int] = {}
+        # (R16b review R3 W3-1) callees run as their write closure at some call site (budget, depth, a sequence stub,
+        #   an unsequenced site, no definition, …) — a callee may be in both this and `inlined`
+        self.effects_only: dict[str, int] = {}
         self.activations = 0
         self.admitted: set[int] = set()   # ids of scopes held alive by the provider / the entry unit
         self.static_keys: set[str] = set()   # static locals of every callee activation run so far
@@ -2557,6 +2582,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                 # (R16) which callees ran for real and why the others did not (per sequence — the value's footing)
                 record["interprocedural"] = {"inlined": dict(sorted(world.inlined.items())),
                                              "not_inlined": dict(sorted(world.not_inlined.items())),
+                                             "effects_only": dict(sorted(world.effects_only.items())),
                                              "failed": dict(sorted(world.failed.items()))}
             record.update(status="supported", reason="project_context_source_evaluation" +
                           (":possible_ub=" + "+".join(possible) if possible else ""),

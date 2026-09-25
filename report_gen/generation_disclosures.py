@@ -732,8 +732,8 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"{_show(derived)} / {_show(cells)}칸 (흐름이 쓴 값 {_show(_int(io, 'derived_assigned'))}) · 값이 있는 TC "
                 f"{_show(_int(io, 'tc_with_derived'))}/{_show(_int(io, 'tc_total'))}",
                 "흐름의 진입 함수를 callee 본문까지 따라 해석해(stub 이 아니라 통합된 코드) 관측 변수의 값을 도출했다 — 코드 "
-                "일관성 값이지 요구 적합성·실행 결과가 아니다(하드웨어·인터럽트·다른 태스크는 모델 밖). 이 값들은 아직 "
-                "독립 경로(clang 등)로 대조하지 않았다. "
+                "일관성 값이지 요구 적합성·실행 결과가 아니다(하드웨어·인터럽트·다른 태스크는 모델 밖). 이 문서의 값은 생성 중 "
+                "독립 경로(clang 등)로 대조하지 않았다 — scripts/integration_oracle_clang_check.py 가 생성본을 따로 잰다. "
                 f"도출 칸 중 흐름이 쓴 값 {_show(_int(io, 'derived_assigned'))} · 입력을 그대로 둔 값 "
                 f"{_show(_int(io, 'derived_unchanged_input'))}."
                 + (" 도출 못 한 칸의 사유(상위): " + ", ".join(f"{k} {v}" for k, v in list(reasons.items())[:6])

@@ -314,6 +314,7 @@ def test_quality_report_and_disclosure_carry_the_block():
     item = {i["key"]: i for i in build_disclosures("sits", qr)}["sits_integration_oracle"]
     assert item["value"] == "10479 / 48938칸 (흐름이 쓴 값 5511) · 값이 있는 TC 63/120"
     assert "독립 경로(clang 등)로 대조하지 않았다" in item["note"]
+    assert "integration_oracle_clang_check.py" in item["note"]   # (R16b) where the check lives
     assert "흐름이 쓴 값 5511" in item["note"] and "입력을 그대로 둔 값 4968" in item["note"]
     assert "path_budget 7021" in item["note"] and "흐름 1개는 나머지 sub-case 를 돌리지 않았다" in item["note"]
     assert "실행 결과가 아니다" in item["note"] and item["tone"] == "info"

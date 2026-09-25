@@ -449,6 +449,15 @@ def _scope_type(scope, text):
         return scope["types"][text]
     if text in scope["unresolved_types"]:
         raise cpc.Unresolved(scope["unresolved_types"][text])
+    words = text.split()
+    core = " ".join(w for w in words if w not in {"const", "volatile"})
+    if core != text and core in cpc._PROJECT_MAY_TYPEDEF and (core in scope["types"] or core in scope["unresolved_types"]):
+        # (R16b review R3 W3-2) ``const bool`` where the project typedefs ``bool``: the project's type, qualified —
+        # ``base_kind`` below would read the grammar's ``_Bool``
+        if core in scope["unresolved_types"]:
+            raise cpc.Unresolved(scope["unresolved_types"][core])
+        quals = sorted({w for w in words if w in {"const", "volatile"}} | set(scope["types"][core].get("qualifiers") or []))
+        return {**scope["types"][core], "qualifiers": quals}
     kind = cpc.base_kind(text)
     if kind is None:
         raise cpc.Unresolved("type_undeclared:" + text)

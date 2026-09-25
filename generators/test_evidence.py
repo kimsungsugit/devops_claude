@@ -69,6 +69,9 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                 if (evaluated.get("interprocedural") or {}).get("inlined"):
                     # (R16) the value rests on these callees' interpreted bodies (integration reading, not stubs)
                     item["callees_interpreted"] = sorted(evaluated["interprocedural"]["inlined"])
+                if (evaluated.get("interprocedural") or {}).get("effects_only"):
+                    # (R16b review R3 W3-1) and these ran as their write closure at some call site
+                    item["callees_effects_only"] = sorted(evaluated["interprocedural"]["effects_only"])
             if scope_note:
                 item["project_scope"] = scope_note
                 if not derived:
