@@ -170,11 +170,11 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
              sample: int = 24, derived_only: bool = True) -> dict:
     """``derived_only``: the generated suite states only the slots its Test Evidence marks ``derived`` (a generated
     SUTS); ``False`` reads it like a reference (every integer it states) — for comparing two reference-style suites."""
-    from reference_alignment import _convert_inputs, _definitions, _load_source, _param_types, reference_value
+    from reference_alignment import _convert_inputs, _definitions, _load_source, _param_types
 
     from generators import c_project_context as cpc
     from generators.c_project_context import build_scopes
-    from generators.c_source_oracle import Unsupported, _parsed_function, evaluate_outputs
+    from generators.c_source_oracle import Unsupported, _parsed_function, evaluate_outputs, read_reference_cell
     ref_suite, ref_names_dup = _suite_from_workbook(reference, generated=False)
     gen_suite, gen_names_dup = _suite_from_workbook(generated, generated=derived_only)
     texts, context, _unread = _load_source(roots)
@@ -193,6 +193,7 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
     scopes = build_scopes(context, sorted(set(targets.values())))
     functions, totals = [], Counter()
     by_operator: dict[str, Counter] = {}
+    cells = {"reference": Counter(), "generated": Counter()}   # (R26) how each suite's expected cells were read
     for name, path in sorted(targets.items()):
         scope = scopes[path]
         raw = texts[path].encode()
@@ -205,13 +206,19 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
             continue
         params = _param_types(unit)
         constants = scope.get("constants") if scope.get("constants") is not None else {}
+        function_like = scope.get("function_like_macros") or ()
         suites = {}
         for label, suite in (("reference", ref_suite[name]), ("generated", gen_suite[name])):
             cases = []
             for case in suite:
                 inputs, _conv = _convert_inputs(scope, params, case["inputs"])
-                expected = {s: v for s, raw in case["expected"].items()
-                            if (v := reference_value(raw, constants)) is not None}
+                expected = {}
+                for s, raw_cell in case["expected"].items():
+                    # (R26) the oracle's reader: ``NAME(5)`` is a stated value too (R24 review r3 C1)
+                    v, kind = read_reference_cell(raw_cell, constants, function_like)
+                    cells[label][kind] += 1
+                    if v is not None:
+                        expected[s] = v
                 cases.append({"inputs": inputs, "expected": expected})
             suites[label] = cases
         slots = sorted({s for cases in suites.values() for c in cases for s in c["expected"]})
@@ -279,6 +286,7 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
                "generated_kill_rate": round(totals["killed_by_generated"] / dist, 4) if dist else None,
                "functions": sum(1 for f in functions if "mutants" in f),
                "excluded_duplicate_reference_names": excluded,
+               "expected_cells": {label: dict(c.most_common()) for label, c in cells.items()},
                # per operator: which kinds of change each suite tells apart (distinguished mutants only)
                "by_operator": {op: dict(c) for op, c in sorted(by_operator.items())}}
     if dist:

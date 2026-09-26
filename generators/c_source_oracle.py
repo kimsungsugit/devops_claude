@@ -149,6 +149,64 @@ def _walk(node):
 
 
 _SIDE_EFFECTS = frozenset({"assignment_expression", "update_expression", "call_expression", "gnu_asm_expression"})
+_REF_INT = re.compile(r"[-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*")
+# ``en_s_Buzzer_3_Flashing_Long(5)`` / ``ERROR_OK (0)`` — how a reference writes an enumerator with its value (R14)
+_REF_NAMED = re.compile(r"([A-Za-z_]\w*)\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*\s*\)")
+REFERENCE_NO_VALUE = frozenset({"", "-", "—", "N/A", "n/a", "NA"})
+# every kind `read_reference_cell` returns — a consumer that maps kinds maps all of them (R26 review X5)
+REFERENCE_CELL_KINDS = frozenset({"int", "symbol", "named", "named_unconfirmed", "conflict", "no_value", "function_like",
+                                  "not_integer"})
+
+
+def _ref_int(text):
+    text = text.rstrip("uUlL")
+    return int(text, 16) if "x" in text.lower() else int(text, 10)
+
+
+def read_reference_cell(value, constants=None, function_like=()) -> tuple[int | None, str]:
+    """(R26) The one reader of a suite cell — an input or an expected value — for the oracle and every measurement script
+    (R3 alignment, R4 mutants, R24 replay, the clang checks). Before, the oracle read ``NAME(5)`` in inputs while the
+    scripts' reader dropped it in expected cells (R24 review r3 C1). Returns ``(value, kind)``:
+
+    * ``int`` — a number (a spreadsheet value, or decimal/hex text; ``08`` and ``010`` are 8 and 10: a cell is not C
+      source),
+    * ``symbol`` — a constant's name, read through the unit's current value,
+    * ``named`` — ``NAME(5)`` where the unit's ``NAME`` is 5; ``named_unconfirmed`` — the unit does not resolve ``NAME``:
+      the value in parentheses is the cell's own statement,
+
+    else ``None`` with ``no_value`` (``-``, ``N/A``, blank — ``NA`` only when the unit defines no constant ``NA``),
+    ``conflict`` (``NAME(5)`` where the unit's ``NAME`` is 4 — which value the cell means is unknown), ``function_like``
+    (``MS(100)``: a macro call, not the value in its parentheses) or ``not_integer`` (floats, booleans, register text).
+    Kinds: `REFERENCE_CELL_KINDS`."""
+    if isinstance(value, bool):
+        return None, "not_integer"
+    if isinstance(value, int):
+        return value, "int"
+    if isinstance(value, float):
+        return (int(value), "int") if value.is_integer() else (None, "not_integer")
+    text = str(value if value is not None else "").strip()
+    if _REF_INT.fullmatch(text):
+        return _ref_int(text), "int"
+    constants = constants if constants is not None else {}
+    if text and text in constants:
+        # before the no-value words: a unit's own ``NA`` is a value (as the readers before R26 read it — review I2)
+        known = (constants[text] or {}).get("value")
+        return (known, "symbol") if isinstance(known, int) and not isinstance(known, bool) else (None, "not_integer")
+    if text in REFERENCE_NO_VALUE:
+        return None, "no_value"
+    m = _REF_NAMED.fullmatch(text)
+    if m is None:
+        return None, "not_integer"
+    if m.group(1) in set(function_like or ()):
+        return None, "function_like"
+    stated = _ref_int(m.group(2))
+    known = (constants.get(m.group(1)) or {}).get("value")
+    if isinstance(known, (int, float)) and not isinstance(known, bool):
+        # the unit resolves the name — a float ``K_GAIN`` 1.5 against ``K_GAIN(1)`` is a conflict (review r2 I-b)
+        return (stated, "named") if known == stated else (None, "conflict")
+    return stated, "named_unconfirmed"
+
+
 # builtins that evaluate their argument like a function would (same list as `mcdc_design.EVALUATING_BUILTINS`)
 _EVALUATING_BUILTINS = frozenset({"__builtin_expect", "__builtin_abs", "__builtin_labs", "__builtin_popcount",
                                   "__builtin_clz", "__builtin_ctz", "__builtin_bswap16", "__builtin_bswap32"})
@@ -262,21 +320,13 @@ class _Interp:
     def check_input(self, name, t, value):
         """An input value as the object would hold it; out-of-type values are not executable inputs."""
         if isinstance(value, str):
-            s = value.strip()
-            named = re.fullmatch(r"([A-Za-z_]\w*)\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*\s*\)", s)
-            if re.fullmatch(r"[-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*", s):
-                s = s.rstrip("uUlL")
-                value = int(s, 16) if "x" in s.lower() else int(s, 10)
-            elif named:
-                # ``ERROR_OK (0)`` — the reference's name-and-value notation (R14): the value, if the name agrees
-                num = named.group(2)
-                value = int(num, 16) if "x" in num.lower() else int(num, 10)
-                known = self.constants.get(named.group(1))
-                if known is not None and known.get("value") != value:
-                    return Unknown("input_name_value_conflict:" + name)
-            elif s in self.constants:
-                value = self.constants[s]["value"]
-            else:
+            # (R26) the shared cell reader: ``5U``, ``0x1F``, a constant's name, ``ERROR_OK (0)`` (R14)
+            value, kind = read_reference_cell(value, self.constants, self.scope.get("function_like_macros"))
+            if kind == "conflict":
+                return Unknown("input_name_value_conflict:" + name)
+            if kind == "function_like":
+                return Unknown("input_macro_call_not_a_value:" + name)
+            if value is None:
                 return Unknown("input_not_an_integer:" + name)
         if isinstance(value, bool) or type(value) is not int:
             return Unknown("input_not_an_integer:" + name)
@@ -959,10 +1009,7 @@ class _Interp:
                     raise Unsupported("macro_side_effect_in_expression:" + callee)
                 continue
             if f is not None and f.type == "parenthesized_expression":
-                inner = _named(f)
-                args = _named(c.child_by_field_name("arguments")) if c.child_by_field_name("arguments") is not None else []
-                if len(inner) == 1 and inner[0].type in {"identifier", "type_identifier"} and len(args) == 1 \
-                        and isinstance(self.type_of(_text(inner[0], raw)), dict):
+                if self.is_cast_call(c, raw):
                     continue  # ``(T)(x)`` is a cast
                 callee = "<indirect>"  # ``(*fp)()`` / ``(fp)()``: unknown code (round 3 C5)
             for x in idents:
@@ -1084,6 +1131,9 @@ class _Interp:
             and not self.macro_effectful(_text(f, raw))
 
     def is_cast_call(self, c, raw):
+        """``(T)(x)`` — tree-sitter's parse of a cast whose type is a typedef name — is a cast when ``T`` names a type.
+        (R26) The one judgement: evaluation (`call`), sequencing, the effect questions (`operand_effectful`,
+        `atom_effectful`, `mark_unordered_calls`) and the loop-constant walk all ask it."""
         f = c.child_by_field_name("function")
         if f is None or f.type != "parenthesized_expression":
             return False
@@ -1477,7 +1527,7 @@ class _Interp:
                 rt = self.truth(right)
                 return _Val(Unknown(right.v.reason) if rt is None else int(rt), self.int_t)
             # Unknown left operand: the right operand may or may not run.
-            if any(x.type in _SIDE_EFFECTS for x in _walk(right_node)) or self.has_macro_call(right_node, raw):
+            if self.operand_effectful(right_node, raw) or self.has_macro_call(right_node, raw):
                 raise Unsupported("side_effect_under_unknown_condition")
             right = self.speculative(state, right_node, raw, depth, runs_maybe=True)
             rt = self.truth(right)
@@ -1486,6 +1536,13 @@ class _Interp:
             return _Val(left.v if isinstance(left.v, Unknown) else Unknown("unknown"), self.int_t)
         right = self.expression(state, right_node, raw, depth + 1)
         return self.arith_values(op, left, right, state)
+
+    def operand_effectful(self, node, raw):
+        """Can evaluating this operand change state — asked of the right operand of ``&&``/``||`` under an unknown left
+        and of the arms of ``?:``. (R26) ``(U8)(x)`` parses as a call of ``(U8)``: it is a cast here as it is where it is
+        evaluated (`call`), not a side effect — its argument is still walked (``(U8)(g++)`` is one)."""
+        return any(x.type in _SIDE_EFFECTS and not (x.type == "call_expression" and self.is_cast_call(x, raw))
+                   for x in _walk(node))
 
     def has_macro_call(self, n, raw):
         return any(x.type == "identifier" and _text(x, raw) in self.macro_status and
@@ -1500,7 +1557,7 @@ class _Interp:
         if guard is not None:
             state.decisions.append((guard, ("outcome", truth)))
         if truth is None:
-            if any(x.type in _SIDE_EFFECTS for node in (a_node, b_node) for x in _walk(node)):
+            if any(self.operand_effectful(node, raw) for node in (a_node, b_node)):
                 raise Unsupported("side_effect_under_unknown_condition")
             a = self.speculative(state, a_node, raw, depth, runs_maybe=True)
             b = self.speculative(state, b_node, raw, depth, runs_maybe=True)
@@ -1512,7 +1569,7 @@ class _Interp:
             return _Val(cond.v, t if isinstance(t, dict) else None)
         chosen, other = (a_node, b_node) if truth else (b_node, a_node)
         value = self.expression(state, chosen, raw, depth + 1)
-        if any(x.type in _SIDE_EFFECTS for x in _walk(other)):
+        if self.operand_effectful(other, raw):
             return _Val(Unknown("conditional_type_unresolved"), None)
         o = self.speculative(state, other, raw, depth)
         t = self.conditional_type(value, o) if truth else self.conditional_type(o, value)
@@ -1832,12 +1889,9 @@ class _Interp:
     def call(self, state, n, raw, depth):
         f, args = n.child_by_field_name("function"), n.child_by_field_name("arguments")
         arg_nodes = _named(args) if args is not None else []
-        if f is not None and f.type == "parenthesized_expression":
-            inner = _named(f)
-            if len(inner) == 1 and inner[0].type in {"identifier", "type_identifier"} and len(arg_nodes) == 1:
-                t = self.type_of(_text(inner[0], raw))
-                if isinstance(t, dict):  # ``(T)(x)`` is a cast exactly when ``T`` names a type
-                    return self.cast(self.expression(state, arg_nodes[0], raw, depth + 1), t)
+        if self.is_cast_call(n, raw):
+            # ``(T)(x)`` is a cast exactly when ``T`` names a type — the one judgement every site asks (R26 review W4)
+            return self.cast(self.expression(state, arg_nodes[0], raw, depth + 1), self.type_of(_text(_named(f)[0], raw)))
         name = _text(f, raw) if f is not None and f.type == "identifier" else "<indirect>"
         if name in self.macro_status:
             if (id(raw), n.start_byte, n.end_byte) in self.no_inline:
@@ -2020,7 +2074,14 @@ def _constant_condition(cond, raw, interp):
     macros and constants (review W-R3-1 — not a macro that reads state or calls; evaluated on no state at all)."""
     if cond is None:
         return True
-    for x in _walk(cond):
+    stack = [cond]
+    while stack:
+        x = stack.pop()
+        if x.type == "call_expression" and interp.is_cast_call(x, raw):
+            # (R26) ``while ((U8)(1U))``: a cast — its type name is not a value to judge, its argument is
+            stack.extend(_named(x.child_by_field_name("arguments")))
+            continue
+        stack.extend(x.named_children)
         if x.type in _SIDE_EFFECTS:
             return False
         if x.type == "identifier":

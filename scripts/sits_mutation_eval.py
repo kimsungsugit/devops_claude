@@ -33,6 +33,9 @@ returned result has no same-length edit that only drops the use: counted as ``no
 The oracle is a model of the source (hardware, interrupts and other tasks are outside it), not a target run: kills are
 source-consistency kills, as in R4.
 
+(R26) Expected cells are read by the oracle's cell reader in every unit the test's call closure reaches (a name may be
+defined only where the output is written); each suite's ``expected_cells`` counts how its cells were read.
+
 Usage:
     .venv/Scripts/python.exe scripts/sits_mutation_eval.py --source-root ROOT --reference REF.xlsm
         --generated GEN.xlsm --out r16_mut.json [--max-faults N]
@@ -52,23 +55,44 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-_NAMED_VALUE = re.compile(r"^\s*(?:[A-Za-z_]\w*\s*)?\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|\d+))[uUlL]*\s*\)\s*$")
-_NUMBER = re.compile(r"^\s*([-+]?(?:0[xX][0-9a-fA-F]+|\d+))[uUlL]*\s*$")
+# a SITS writes a bare ``(3)`` too — its number, before the shared reader
+_BARE_PARENS = re.compile(r"^\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*)\s*\)\s*$")
 
 
-def as_int(value) -> int | None:
-    """A written integer expectation: ``5``, ``0x10``, ``5U``, ``E_OK (0)``, ``(3)``; anything else None."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    m = _NUMBER.match(str(value)) or _NAMED_VALUE.match(str(value))
-    if not m:
-        return None
-    text = m.group(1)
-    return int(text, 16) if "x" in text.lower() else int(text, 10)
+def read_cell(value, scopes: list[dict] | None = None) -> tuple[int | None, str]:
+    """``(value, kind)`` of a written expectation — ``5``, ``0x10``, ``5U``, ``E_OK (0)``, ``(3)``, a constant's name.
+    (R26 review W1) Read by the oracle's reader (`read_reference_cell`) in every unit of ``scopes`` — the entry's, then
+    the units its call closure reaches, since a name may be defined only where the output is written (review r2 I-a):
+    ``TIME_MS(100)`` states no value (a macro call) and ``en_on(4)`` where a unit's ``en_on`` is 5 is a conflict — in
+    any unit. Units reading different numbers are ``units_disagree``; a unit that resolves the name outranks one that
+    does not. The oracle reads a row's *inputs* in the unit that reads each object (`check_input`); an expected cell
+    has no single reading unit, hence the union. Kinds: `REFERENCE_CELL_KINDS` plus the SITS-local ``units_disagree``
+    and ``reader_error:<type>``."""
+    from generators.c_source_oracle import REFERENCE_NO_VALUE, read_reference_cell
+    if isinstance(value, str) and (m := _BARE_PARENS.match(value)):
+        value = m.group(1)
+    scopes = scopes or [{}]
+    if isinstance(value, str) and value.strip() in REFERENCE_NO_VALUE:
+        scopes = scopes[:1]   # ``NA`` is a unit's value only in the entry's unit, not wherever the closure reaches (r3 I1)
+    try:
+        reads = [read_reference_cell(value, s.get("constants"), s.get("function_like_macros")) for s in scopes]
+    except Exception as exc:  # noqa: BLE001 — one cell must not end the run; counted as its own kind (review r3)
+        return None, f"reader_error:{type(exc).__name__}"
+    for unread in ("function_like", "conflict"):
+        if any(kind == unread for _v, kind in reads):
+            return None, unread
+    values = {v for v, _kind in reads if v is not None}
+    if len(values) > 1:
+        return None, "units_disagree"   # SITS-local: two units read two numbers (apart from NAME≠v — r3 I2)
+    if not values:
+        return None, reads[0][1]
+    kinds = [kind for v, kind in reads if v is not None]
+    return values.pop(), next((k for k in ("int", "symbol", "named") if k in kinds), kinds[0])
+
+
+def as_int(value, scope: dict | None = None) -> int | None:
+    """The integer `read_cell` reads in one unit (``None`` when it states none)."""
+    return read_cell(value, [scope] if scope else None)[0]
 
 
 def _input_name(name: str) -> str:
@@ -298,6 +322,8 @@ def evaluate(roots: list[Path], reference: str, generated: str, max_faults: int 
     from concurrent.futures import ProcessPoolExecutor
 
     from sits_interface_eval import _chain_functions, _exercised, read_sits
+
+    from generators import c_project_context as cpc
     t0 = time.time()
     env = _setup(roots)
     index, graph, base = env["index"], env["graph"], env["base"]
@@ -344,10 +370,26 @@ def evaluate(roots: list[Path], reference: str, generated: str, max_faults: int 
         # could not evaluate — a limit of the model, not a verdict on the suite
         stats = {s: {"stated_integer": 0, "determined": 0, "reproduced": 0, "contradicted": 0, "rows": 0,
                      "rows_judging": 0, "rows_determined": 0, "observed_determined": 0} for s in suites}
+        cells = {s: Counter() for s in suites}   # (R26 review r2 W2) how each suite's expected cells were read
         for t, original in zip(tests, originals, strict=True):
             keep = []
+            # the entry's unit first, then every unit its call closure reaches (review r2 I-a) — a name two units define
+            # (APP's and BOOT's ``EEPROM_Init``) names no one unit: left out, as the contract's members are (r3 W2)
+            reached = (_project_path(env, index.defs[f][2]) for f in sorted(t["exercised"])
+                       if f in index.defs and f not in index.duplicates)
+            # only the entry's own build (root): the closure can still pass through the other build's definition of a
+            # duplicate name to a function only that build has (review r4 Info-1) — `_resolve_include`'s rule
+            build = cpc._root_of(base.context, t["path"])
+            unit_scopes = [base.scopes[t["path"]], *(base.scopes[p] for p in dict.fromkeys(reached)
+                                                     if p and p != t["path"] and p in base.scopes
+                                                     and cpc._root_of(base.context, p) == build)]
             for (inputs, e), orig in zip(t["rows"], original, strict=True):
-                stated = {n: as_int(v) for n, v in e.items() if as_int(v) is not None}
+                stated = {}
+                for n, raw_cell in e.items():
+                    v, kind = read_cell(raw_cell, unit_scopes)
+                    cells[t["suite"]][kind] += 1
+                    if v is not None:
+                        stated[n] = v
                 passing = {n: v for n, v in stated.items() if orig.get(n) == v}
                 known = {n: v for n, v in orig.items() if v is not None}
                 stats[t["suite"]]["rows"] += 1
@@ -367,6 +409,8 @@ def evaluate(roots: list[Path], reference: str, generated: str, max_faults: int 
                                 "exercised": t["exercised"], "rows": [(i, {}) for i, _p, _o in keep],
                                 "outputs": list(dict.fromkeys(n for _i, _p, o in keep for n in o)),
                                 "passing": [p for _i, p, _o in keep], "original": [o for _i, _p, o in keep]})
+        for s in suites:
+            stats[s]["expected_cells"] = dict(cells[s].most_common())
         progress(f"originals evaluated · {stats} · {time.time() - t0:.0f}s")
         jobs = [(f, [{k: v for k, v in t.items() if k != "exercised"} for t in compact if f["at"] in t["exercised"]])
                 for f in fault_list]

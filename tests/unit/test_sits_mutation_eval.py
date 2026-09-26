@@ -164,3 +164,58 @@ def test_evaluate_reads_both_suites_on_one_observation_set(env, monkeypatch):
     assert (s["generated"]["killed"], s["generated"]["input_killed"]) == (1, 1)
     # loopw's write sits in a for clause: no edit; the swap is made and reached
     assert s["edits"] == {"made": 1, "write_not_a_statement": 1} and s["not_exercised"] == 0
+
+
+def _evaluate_with(monkeypatch, files, ref_cell, gen_cell, duplicates=()):
+    """``evaluate`` on the fixture project (``files``) with one reference and one generated row on g_c."""
+    import sits_interface_eval as sie
+    ctx = cpc.build_project_context(files)
+    parser = cpc.shared_parser()
+    project = sme.Project(ctx, files, cpc.build_scopes(ctx, [p for p in files if p.endswith(".c")]), parser)
+    index = SourceIndex(files, parser)
+    index.duplicates |= set(duplicates)
+    swap = {"kind": "arguments_swapped", "at": "entry", "callee": "prod", "line": 6, "args": ["g_b", "g_c"],
+            "params": ["x", "y"]}
+    setup = {"index": index, "graph": sie.call_graph(index), "faults": [swap], "base": project,
+             "key_of": {os.path.normcase(os.path.abspath(p)): p for p in files}}
+    monkeypatch.setattr(sme, "_setup", lambda roots: setup)
+    saved = dict(sme._W)
+
+    def fake_read(path):
+        value = ref_cell if path == "ref" else gen_cell
+        return [{"tc_id": f"{path}_1", "chain": "entry", "title": "", "inputs": ["g_b", "g_c"], "expected": ["g_c"],
+                 "rows": [{"g_b": 9, "g_c": 4}], "expected_rows": [{"g_c": value}]}]
+    monkeypatch.setattr(sie, "read_sits", fake_read)
+    try:
+        return sme.evaluate([Path(ROOT)], "ref", "gen", workers=0, progress=lambda m: None)["summary"]
+    finally:
+        sme._W.clear()
+        sme._W.update(saved)
+
+
+def test_evaluate_reads_expected_cells_with_the_units_macros_and_discloses_them(monkeypatch):
+    # R26 review W1/r2 W1 (MX1): the expected cells are read in the units the test reaches — ``TIME_MS(100)`` is a macro
+    # call there (no value, not a contradiction of the oracle's 3); ``K_THREE`` is a stated value; each suite discloses
+    # how its cells were read (r2 W2)
+    files = _files()
+    files[os.path.join(ROOT, "m.h")] = H + "#define TIME_MS(x) ((x) / 5U)\n#define K_THREE 3U\n"
+    s = _evaluate_with(monkeypatch, files, "TIME_MS(100)", "K_THREE")
+    assert s["reference"]["expected_cells"] == {"function_like": 1}
+    assert (s["reference"]["stated_integer"], s["reference"]["contradicted"]) == (0, 0)
+    assert s["generated"]["expected_cells"] == {"symbol": 1}
+    assert (s["generated"]["stated_integer"], s["generated"]["reproduced"]) == (1, 1)   # g_c = (U8)get() = 3
+
+
+def test_evaluate_reads_a_name_the_callee_unit_alone_defines(monkeypatch):
+    # review r3 W1 (MY1): ``K_ONLY_B`` is defined in b.c only (where ``get`` writes g_c's value) — the entry's unit does
+    # not know it; the closure union reads it. (r3 W2) A closure member two units define pulls in no unit.
+    files = _files()
+    files[os.path.join(ROOT, "b.c")] = "#define K_ONLY_B 3U\n" + B
+    s = _evaluate_with(monkeypatch, files, "K_ONLY_B", 3)
+    assert s["reference"]["expected_cells"] == {"symbol": 1} and s["reference"]["reproduced"] == 1
+    s = _evaluate_with(monkeypatch, files, "K_ONLY_B", 3, duplicates={"prod", "get"})
+    assert s["reference"]["expected_cells"] == {"not_integer": 1} and s["reference"]["stated_integer"] == 0
+    # review r4 Info-1: a unit of another build (root) never joins the union — here every file is its own build
+    monkeypatch.setattr(cpc, "_root_of", lambda context, path: os.path.basename(path))
+    s = _evaluate_with(monkeypatch, files, "K_ONLY_B", 3)
+    assert s["reference"]["expected_cells"] == {"not_integer": 1}

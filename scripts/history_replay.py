@@ -19,8 +19,9 @@ it states passes after while the older value at its own input is unknown (a star
 newer value is unknown and the older one fails or is unknown too, or it could not be read where its own case does not
 show the two bodies equal: whether that case would fail is not decidable here; **missed** — otherwise.
 ``missed_by_both`` counts only pairs both suites miss; a pair that is not replayed carries no verdict. Suite cells are
-read as the R3 reader does, plus the ``NAME(5)`` notation a reference writes for an enumerator (not a function-like
-macro call); ``-``/``N/A`` state no value (``suite_cells`` counts them per suite and role).
+read by the oracle's reader that R3 and R4 share (R26): integers, constants' names and the ``NAME(5)`` notation a
+reference writes for an enumerator (not a function-like macro call); ``-``/``N/A`` state no value (``suite_cells`` counts
+them per suite and role).
 
 A pair that is compared and never distinguished stays *undecided* (the bodies may be equivalent on these vectors) —
 unless the bodies write members, pointers or computed indices differently, directly or through the value of a local
@@ -84,9 +85,14 @@ _PREFIX_FALLBACK = re.compile(rf"^\s*\d+\s+\d+\s+(?:{_MARK})*\*?")
 _LEFTOVER = re.compile(r"^\s*(?:\((?:[A-Z]{1,2}|\s)\)){1,4}(?=\s|$)")
 UNREAD = "/*history_replay:unread-coverage-column*/"
 _LITERAL = re.compile(r"\b(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)[uUlLfF]*\b")
-# ``en_s_Buzzer_3_Flashing_Long(5)`` — how a reference writes an enumerator with its value
-_NAMED_VALUE = re.compile(r"\s*([A-Za-z_]\w*)\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*)\s*\)\s*")
-_NO_VALUE = frozenset({"", "-", "—", "N/A", "n/a", "NA"})   # a cell that states no value (the R3 reader's reading)
+# (R26) how a suite cell's reading is counted in ``suite_cells`` (keys kept from R24): ``None`` is not counted
+# ``named`` is the unit-confirmed ``NAME(5)`` as in R3/R4 ``expected_cells``; ``named_unconfirmed`` (the unit does not
+# resolve NAME) is its own key — R24 counted both as ``named`` (R26 review r2 W3)
+CELL_TAGS = {"int": None, "symbol": None, "named": "named", "named_unconfirmed": "named_unconfirmed",
+             "conflict": "named_conflict", "no_value": "no_value", "function_like": "unreadable",
+             "not_integer": "unreadable"}
+# an input cell counts only when it uses the ``NAME(5)`` notation (a macro call included)
+_NOTATION_KINDS = frozenset({"named", "named_unconfirmed", "conflict", "function_like"})
 _STATUSES = ("replayed", "undecided", "unobserved_difference", "difference_not_compared", "calibration_not_reached",
              "not_comparable", "not_replayable", "signature_changed", "no_suite", "unit_mismatch", "ambiguous_name",
              "ambiguous_listing", "listing_unparsed")
@@ -363,11 +369,11 @@ def replay_function(texts: dict[str, str], context: dict, path: str, name: str, 
     """Run the current function, the newer and the older body (each put in place of the current definition) on the
     suites' vectors plus a sample; ``suites`` is {"reference"|"generated": [{"inputs", "expected": {slot: raw}}]}."""
     from mutation_eval import _sample_vectors
-    from reference_alignment import _convert_inputs, _param_types, reference_value
+    from reference_alignment import _convert_inputs, _param_types
 
     from generators import c_project_context as cpc
     from generators.c_project_context import build_project_context, build_scopes
-    from generators.c_source_oracle import Unsupported, _parsed_function, evaluate_outputs
+    from generators.c_source_oracle import Unsupported, _parsed_function, evaluate_outputs, read_reference_cell
 
     def run(body: str | None) -> list[dict]:
         if body is None:
@@ -394,42 +400,26 @@ def replay_function(texts: dict[str, str], context: dict, path: str, name: str, 
         cells: Counter = Counter()
         function_like = set(scope.get("function_like_macros") or ())
 
-        def cell(raw_value, where: str) -> tuple[int | None, str]:
-            # the reference's integer, or the ``NAME(5)`` notation a reference writes for an enumerator — the number in
-            # parentheses is the value it states (review r3 C1: the shared reader dropped KJPDS02_PV's expected cells in
-            # this notation; the oracle already read the input ones, r4 I1). Not a function-like macro call
-            # (``MS(100)``); a NAME the unit defines with another value is a conflict; ``-``/``N/A`` state no value
-            v = reference_value(raw_value, constants)
-            if v is not None:
-                return v, "int"
-            text_value = str(raw_value if raw_value is not None else "").strip()
-            if text_value in _NO_VALUE:
-                cells[f"{where}_no_value"] += 1
-                return None, "no_value"
-            m = _NAMED_VALUE.fullmatch(text_value)
-            number = m.group(2) if m is not None else ""
-            stated = _int_literal(number.lstrip("+-")) if m is not None and m.group(1) not in function_like else None
-            if stated is None:
-                cells[f"{where}_unreadable"] += 1
-                return None, "unreadable"
-            stated = -stated if number.startswith("-") else stated
-            known = (constants.get(m.group(1)) or {}).get("value")
-            if isinstance(known, int) and known != stated:
-                cells[f"{where}_named_conflict"] += 1
-                return None, "conflict"
-            cells[f"{where}_named"] += 1
-            return stated, "named"
+        def cell(raw_value, where: str, count_all: bool = True) -> tuple[int | None, str]:
+            # (R26) the oracle's reader (`read_reference_cell`), shared with R3/R4: an integer, a constant's name, or the
+            # ``NAME(5)`` notation a reference writes for an enumerator (review r3 C1 — before R26 the shared reader
+            # dropped it in expected cells); not a function-like macro call (``MS(100)``); a NAME the unit defines with
+            # another value is a conflict; ``-``/``N/A`` state no value. Counted per suite and role; inputs count only
+            # the notation (``count_all=False`` — an input cell is mostly a plain number)
+            v, kind = read_reference_cell(raw_value, constants, function_like)
+            tag = CELL_TAGS[kind]   # every kind is mapped (a new one fails here, not silently uncounted — review X5)
+            if tag and (count_all or kind in _NOTATION_KINDS):
+                cells[f"{where}_{tag}"] += 1
+            return v, kind
         cases: dict[str, list[dict]] = {}
         for label in ("reference", "generated"):
             cases[label] = []
             for case in suites.get(label) or []:
-                named_inputs = {}
-                for k, raw_value in (case["inputs"] or {}).items():
-                    if _NAMED_VALUE.fullmatch(str(raw_value or "").strip()):
-                        v, _kind = cell(raw_value, f"{label}_inputs")
-                        if v is not None:
-                            named_inputs[k] = v
-                inputs, _conversions = _convert_inputs(scope, params, {**case["inputs"], **named_inputs})
+                for raw_value in (case["inputs"] or {}).values():
+                    cell(raw_value, f"{label}_inputs", count_all=False)
+                # `_convert_inputs` reads each input through the same reader; a conflicting or unreadable one reaches
+                # the oracle as written and is an unknown there (``input_name_value_conflict`` …)
+                inputs, _conversions = _convert_inputs(scope, params, case["inputs"])
                 expected, unreadable = {}, set()
                 for s, raw_value in case["expected"].items():
                     v, kind = cell(raw_value, f"{label}_expected")

@@ -119,24 +119,15 @@ def _base_type(t, enum_base="int"):
     return ("unsigned " if not t["signed"] else "signed ") + t["kind"]
 
 
-def _input_int(value, constants):
-    """A sequence input as the oracle reads it (``"0x0"``, ``"5U"``, an enumerator name) — else None (round 2 I)."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
+def _input_int(value, constants, function_like=()):
+    """A sequence input as the oracle reads it (``"0x0"``, ``"5U"``, an enumerator name, ``ERROR_OK (0)``) — else None
+    (round 2 I). (R26) The oracle's own reader, so a ``NAME(5)`` whose name the unit defines otherwise or a macro call
+    (``MS(100)``) is unread here exactly as the oracle leaves it unknown; a non-string input is an ``int`` or nothing
+    (`_Interp.check_input`)."""
+    from generators.c_source_oracle import read_reference_cell
     if isinstance(value, str):
-        s = value.strip()
-        if re.fullmatch(r"[-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*", s):
-            s = s.rstrip("uUlL")
-            return int(s, 16) if "x" in s.lower() else int(s, 10)
-        named = re.fullmatch(r"([A-Za-z_]\w*)\s*\(\s*([-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*\s*\)", s)
-        if named:   # ``ERROR_OK (0)`` — as the oracle reads it (R14)
-            num = named.group(2)
-            return int(num, 16) if "x" in num.lower() else int(num, 10)
-        if s in constants:
-            return constants[s]["value"]
-    return None
+        return read_reference_cell(value, constants, function_like)[0]
+    return value if type(value) is int else None
 
 
 def _fits(value, t):
@@ -284,7 +275,7 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
         for c in callees:
             lines.append(f"template<class... __oracle_A> constexpr int {c}(__oracle_A...) {{ return __oracle_stub; }}")
         for index, claim in enumerate(claims):
-            inputs = {k: _input_int(v, constants) for k, v in claim["inputs"].items()}
+            inputs = {k: _input_int(v, constants, scope.get("function_like_macros")) for k, v in claim["inputs"].items()}
             lines.append(f"constexpr long long __oracle_run_{index}(int __oracle_which) {{")
             for g in used_globals:
                 if g in globals_:
@@ -325,7 +316,7 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                     continue
                 rt_text = str((((scope.get("effects") or {}).get("functions") or {}).get(c) or {}).get("return_type")
                               or "")
-                sv = _input_int(claim["inputs"][key], constants)
+                sv = _input_int(claim["inputs"][key], constants, scope.get("function_like_macros"))
                 if not rt_text or "*" in rt_text or sv is None:
                     continue
                 try:

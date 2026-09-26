@@ -26,9 +26,12 @@ evidence strength (agreeing / all stated slots) is reported per unit.
 
 Inputs outside the declared type (the reference writes ``-1`` into a ``U8``) are converted the way C converts the value
 assigned to that object (``-1`` → ``255``) — that is what a test harness assignment does — and every distinct
-conversion is listed per unit (``input_conversions`` with a count). Inputs that are not integers (an enumerator name)
-are resolved through the unit's constants; anything else is passed as is (the oracle then reports
-``input_not_an_integer``).
+conversion is listed per unit (``input_conversions`` with a count; ``written`` keeps a ``NAME(5)`` cell's text). (R26)
+Every cell — input or expected — is read by the oracle's reader (`generators.c_source_oracle.read_reference_cell`):
+integers, the unit's constants and the ``NAME(5)`` notation a reference writes for an enumerator. An input it cannot
+read reaches the oracle as written and is unknown there (``input_not_an_integer``, ``input_name_value_conflict`` when
+the unit defines ``NAME`` as another value, ``input_macro_call_not_a_value`` for ``MS(100)``). ``expected_cells``
+counts how each expected cell was read; a conflicting ``NAME(5)`` is not comparable (``reference_name_value_conflict``).
 
 A name defined more than once (the application and the boot loader both define ``EEPROM_Init``) is evaluated on every
 definition. Only a definition with comparable slots can claim the unit; the one with the most agreements wins and keeps
@@ -53,24 +56,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-_INT = re.compile(r"[-+]?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*")
-
-
-def reference_value(value: Any, constants: dict | None = None) -> int | None:
-    """An integer the reference cell states, else None (``-``, ``N/A``, register text, floats)."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if value.is_integer() else None
-    text = str(value or "").strip()
-    if _INT.fullmatch(text):
-        text = text.rstrip("uUlL")
-        return int(text, 16) if "x" in text.lower() else int(text, 10)
-    if constants is not None and text in constants and isinstance(constants[text].get("value"), int):
-        return constants[text]["value"]
-    return None
+def reference_value(value: Any, constants: dict | None = None, function_like=()) -> int | None:
+    """An integer the reference cell states, else None (``-``, ``N/A``, register text, floats, ``NAME(5)`` whose name
+    the unit defines otherwise, a macro call). (R26) Read by the oracle's reader — `read_reference_cell`."""
+    from generators.c_source_oracle import read_reference_cell
+    return read_reference_cell(value, constants, function_like)[0]
 
 
 def _object_type(scope: dict, fn_params: dict, name: str):
@@ -92,9 +82,11 @@ def _convert_inputs(scope: dict, fn_params: dict, inputs: dict) -> tuple[dict, l
     """Reference inputs as the objects would hold them after assignment; conversions are returned for disclosure."""
     from generators import c_project_context as cpc
     constants = scope.get("constants") if scope.get("constants") is not None else {}
+    from generators.c_source_oracle import read_reference_cell
+    function_like = scope.get("function_like_macros") or ()
     out, converted = {}, []
     for name, raw in (inputs or {}).items():
-        value = reference_value(raw, constants)
+        value, kind = read_reference_cell(raw, constants, function_like)
         if value is None:
             out[name] = raw
             continue
@@ -107,7 +99,10 @@ def _convert_inputs(scope: dict, fn_params: dict, inputs: dict) -> tuple[dict, l
                 except cpc.Unresolved:
                     out[name] = value
                     continue
-                converted.append({"input": name, "reference": value, "held": held})
+                entry = {"input": name, "reference": value, "held": held}
+                if kind in ("named", "named_unconfirmed"):
+                    entry["written"] = str(raw).strip()   # the notation, not only its number (R26 review I1)
+                converted.append(entry)
                 value = held
         out[name] = value
     return out, converted
@@ -234,7 +229,7 @@ def _guard_output(out: Path, reference: str, roots: list[Path], inputs: tuple[st
 
 def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str = "clang") -> dict:
     from generators.c_project_context import build_scopes
-    from generators.c_source_oracle import evaluate_outputs
+    from generators.c_source_oracle import evaluate_outputs, read_reference_cell
     from tools.export_suts_vectorcast import bare_fn_name, build_vectorcast_model
     model = build_vectorcast_model(reference)
     texts, context, unread = _load_source(roots)
@@ -249,6 +244,7 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
                 "project_scope": scopes[path]}
         params = _param_types(unit)
         constants = scopes[path].get("constants") if scopes[path].get("constants") is not None else {}
+        function_like = scopes[path].get("function_like_macros") or ()
         vectors, outs, conversions = [], [], []
         for case in ref_unit["test_cases"]:
             inputs, converted = _convert_inputs(scopes[path], params, case.get("inputs") or {})
@@ -256,16 +252,19 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
             outs.append(list((case.get("expected") or {}).keys()))
             conversions.append(converted)
         slots, reasons, bases, disagreements, found = Counter(), Counter(), Counter(), [], []
+        cells = Counter()   # (R26) how each expected cell was read: int · symbol · named · conflict · no_value · …
         via_symbol = 0
         for case, inputs, converted, result in zip(ref_unit["test_cases"], vectors, conversions,
                                                     evaluate_outputs(unit, vectors, outs), strict=True):
             for slot, expected_raw in (case.get("expected") or {}).items():
-                expected = reference_value(expected_raw, constants)
+                expected, cell = read_reference_cell(expected_raw, constants, function_like)
+                cells[cell] += 1
                 got = result["outputs"].get(slot) or {}
                 if expected is None:
-                    # the reference states no integer here: nothing to compare, whatever the oracle says (r2 Info 1)
+                    # the reference states no integer here: nothing to compare, whatever the oracle says (r2 Info 1);
+                    # ``NAME(5)`` whose name the unit defines as another value may mean either (R26)
                     kind = "not_comparable"
-                    reasons["reference_value_not_integer"] += 1
+                    reasons["reference_name_value_conflict" if cell == "conflict" else "reference_value_not_integer"] += 1
                 elif "value" not in got:
                     kind = "not_comparable"
                     reasons[str(got.get("reason", "")).split(":", 1)[0]] += 1
@@ -273,9 +272,9 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
                     kind = "agree"
                     # (review W1) an input left unchanged "agrees" without the code doing anything
                     bases[str(got.get("basis") or "unknown")] += 1
-                    if reference_value(expected_raw) is None:
+                    if cell == "symbol":
                         # a name the reference wrote agrees through its *current* value (review Info 5) — counted
-                        # within the bases above, not as one more basis (review r2 W-E)
+                        # within the bases above, not as one more basis (review r2 W-E). ``NAME(5)`` states its own.
                         via_symbol += 1
                 else:
                     kind = "disagree"
@@ -287,10 +286,11 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
                     found.append({"unit": unit, "inputs": inputs, "outputs": {slot: got["value"]},
                                   "possible_ub": entry["possible_ub"], "_entry": entry})
                 slots[kind] += 1
-        distinct = Counter((c["input"], c["reference"], c["held"]) for cs in conversions for c in cs)
+        distinct = Counter((c["input"], c["reference"], c["held"], c.get("written")) for cs in conversions for c in cs)
         return {"path": path, "slots": slots, "reasons": reasons, "bases": bases, "via_symbol": via_symbol,
-                "disagreements": disagreements, "claims": found,
-                "conversions": [{"input": i, "reference": r, "held": h, "count": n} for (i, r, h), n in distinct.items()]}
+                "cells": cells, "disagreements": disagreements, "claims": found,
+                "conversions": [{"input": i, "reference": r, "held": h, "count": n, **({"written": w} if w else {})}
+                                for (i, r, h, w), n in distinct.items()]}
 
     def summarize(candidate):
         return {"path": candidate["path"], **{k: candidate["slots"][k] for k in ("agree", "disagree", "not_comparable")},
@@ -356,6 +356,7 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
         record.update(source_path=chosen["path"],
                       source_sha256=hashlib.sha256(texts[chosen["path"]].encode()).hexdigest(),
                       slots=dict(slots), agree_basis=dict(bases), agree_via_reference_symbol=chosen["via_symbol"],
+                      expected_cells=dict(chosen["cells"].most_common()),
                       unknown_reasons=dict(chosen["reasons"].most_common()),
                       disagreements=chosen["disagreements"], input_conversions=chosen["conversions"],
                       evidence_strength=round(slots["agree"] / sum(slots.values()), 4) if sum(slots.values()) else None)
@@ -382,6 +383,9 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
         "summary": {"functions": len(functions), "status": dict(status.most_common()), "slots": dict(slot_counts),
                     "agree_basis": dict(sum((Counter(f.get("agree_basis") or {}) for f in functions), Counter())),
                     "agree_via_reference_symbol": sum(f.get("agree_via_reference_symbol") or 0 for f in functions),
+                    # (R26) how the expected cells of the counted units were read (``named`` = ``NAME(5)``)
+                    "expected_cells": dict(sum((Counter(f.get("expected_cells") or {}) for f in functions),
+                                               Counter()).most_common()),
                     # units whose slots are not in ``slots`` (no single definition to count them against)
                     "units_without_slot_totals": sum(1 for f in functions if f.get("tied_definitions")
                                                      or f.get("unknown_reasons_by_definition")),
@@ -413,7 +417,7 @@ def main(argv=None) -> int:
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     s = report["summary"]
     print(json.dumps({k: s[k] for k in ("status", "slots", "agree_basis", "agree_via_reference_symbol",
-                                        "multiply_defined_units",
+                                        "expected_cells", "multiply_defined_units",
                                         "duplicate_reference_names", "unreadable_source_files", "clang")},
                      ensure_ascii=False))
     errors = sum(n for k, n in s["status"].items() if k.startswith("error:"))

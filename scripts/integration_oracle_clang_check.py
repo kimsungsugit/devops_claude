@@ -576,12 +576,21 @@ def _input_value(value, scopes):
     """A claim input as an integer, read with the constants of every unit that may read it (the model resolves a name
     such as ``K_RUN`` in the unit that uses it): ``(value, "")``, ``(None, "")`` when no unit can read it (the model
     could not either — the fills stand in), or ``(None, reason)`` when units disagree (review R1 W3)."""
-    seen = set()
+    # (R26) A unit that cannot read the name at all (``not_integer`` — it does not know it) does not disagree: the model
+    # resolves a name in the unit that uses it (review r2 I-c); a conflict or a macro call there does.
+    from generators.c_source_oracle import read_reference_cell
+    seen, unread = set(), False
     for scope in scopes:
-        v = _input_int(value, scope["constants"])
+        if isinstance(value, str):
+            v, kind = read_reference_cell(value, scope["constants"], scope.get("function_like_macros"))
+            # (R26 review I4) a unit where ``NAME(5)`` conflicts or is a macro call leaves the input unknown — the
+            # units disagree even if another reads a number
+            unread |= kind in ("conflict", "function_like")
+        else:
+            v = _input_int(value, scope["constants"])
         if v is not None:
             seen.add(v)
-    if len(seen) > 1:
+    if len(seen) > 1 or (seen and unread):
         return None, "input_value_differs_between_units"
     return (next(iter(seen)) if seen else None), ""
 

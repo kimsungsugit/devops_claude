@@ -507,10 +507,12 @@ def test_an_enumerator_written_with_its_value_is_a_stated_value(tmp_path, projec
                       [(1, {"g_i": "en_ten(10)"}, {"g_o": "en_on(1)"}), (2, {"g_i": 0}, {"g_o": "K_ONE(2)"})])])
     report, rec = _replay(tmp_path, project, OLD_F, NEW_F, ref=ref)
     assert rec["reference"]["verdict"] == "detected" and rec["reference"]["examples"][0]["expected"] == 1
-    # review r4 I1: counted per suite and role — K_ONE is 1, not 2
-    assert rec["suite_cells"]["reference_expected_named"] == 1 and rec["suite_cells"]["reference_inputs_named"] == 1
-    assert rec["suite_cells"]["reference_expected_named_conflict"] == 1
-    assert report["summary"]["suite_cells_reference_expected_named"] == 1
+    # review r4 I1: counted per suite and role — K_ONE is 1, not 2. (R26 review r2 W3) en_on/en_ten are not defined
+    # in this unit: ``named_unconfirmed``, apart from a unit-confirmed ``named``
+    cells = rec["suite_cells"]
+    assert cells["reference_expected_named_unconfirmed"] == 1 and cells["reference_inputs_named_unconfirmed"] == 1
+    assert cells["reference_expected_named_conflict"] == 1 and "reference_expected_named" not in cells
+    assert report["summary"]["suite_cells_reference_expected_named_unconfirmed"] == 1
 
 
 def test_an_unknown_older_value_on_any_stated_slot_is_undetermined_not_missed(tmp_path, project):
@@ -701,9 +703,15 @@ def test_an_unreadable_cell_counts_only_where_its_own_case_does_not_show_the_bod
 
 
 def test_named_values_negative_and_function_like_macro():
-    # review r4 I2: ``NAME(-3)`` is -3; ``MS(100)`` is a macro call, not an enumerator's value; ``NAME(08)`` unreadable
+    # review r4 I2: ``NAME(-3)`` is -3; ``MS(100)`` is a macro call, not an enumerator's value. (R26) The cell is read by
+    # the oracle's reader: ``NAME(08)`` is 8 as the cell ``08`` is (a spreadsheet value, not C source) — a source
+    # literal ``08`` is still no number
     import history_replay as hr
-    assert hr._NAMED_VALUE.fullmatch("en_neg(-3)").group(2) == "-3"
+
+    from generators.c_source_oracle import read_reference_cell
+    assert read_reference_cell("en_neg(-3)") == (-3, "named_unconfirmed")
+    assert read_reference_cell("MS(100)", {}, {"MS"}) == (None, "function_like")
+    assert read_reference_cell("en_x(08)") == (8, "named_unconfirmed") and read_reference_cell("08") == (8, "int")
     assert hr._int_literal("08") is None
 
 
@@ -717,7 +725,19 @@ def test_named_value_cells_through_a_replay(tmp_path, project):
                                                                        (3, {"g_i": 0}, {"g_o": "en_x(08)"})])])
     _report_, rec = _replay(tmp_path, project, OLD_F, NEW_F, ref=ref)
     cells = rec["suite_cells"]
-    assert cells.get("reference_expected_unreadable") == 2 and cells.get("reference_expected_named") == 1
+    # ``MS(5)`` is a macro call (unreadable); ``en_z(-0)`` and ``en_x(08)`` are 0 and 8 (R26: the shared reader) —
+    # names this unit does not define
+    assert cells.get("reference_expected_unreadable") == 1 and cells.get("reference_expected_named_unconfirmed") == 2
+
+
+def test_input_cells_count_only_the_named_notation(tmp_path, project):
+    # R26 review W2 M7: an input written ``-`` or as a plain number adds no ``suite_cells`` key (the R24 report's keys)
+    ref = tmp_path / "docs" / "inputs_ref.xlsm"
+    _reference(ref, [("SwUTC_1", "void f( void )", ["g_i", "g_p"], ["g_o"],
+                      [(1, {"g_i": 10, "g_p": "-"}, {"g_o": 1}), (2, {"g_i": "en_ten(10)", "g_p": 0}, {"g_o": 1})])])
+    _report_, rec = _replay(tmp_path, project, OLD_F, NEW_F, ref=ref)
+    assert {k for k in rec["suite_cells"] if "_inputs_" in k} == {"reference_inputs_named_unconfirmed"}
+    assert rec["suite_cells"]["reference_inputs_named_unconfirmed"] == 1
 
 
 def test_a_pointer_output_write_is_kept_and_a_renamed_local_index_is_not_a_difference():
@@ -805,7 +825,8 @@ def test_a_negative_named_value_and_generated_cells_counted_under_generated(tmp_
     _reference(gen, [("SwUTC_1", "void f( void )", ["g_i"], ["g_o"], [(1, {"g_i": "en_ten(10)"}, {"g_o": 0})])])
     _report_, rec = _replay(tmp_path, project, new.replace(">=", ">"), new, ref=ref, gen=gen)
     assert rec["reference"]["verdict"] == "detected"
-    assert rec["suite_cells"].get("generated_inputs_named") == 1 and "reference_inputs_named" not in rec["suite_cells"]
+    assert rec["suite_cells"].get("generated_inputs_named_unconfirmed") == 1
+    assert not any(k.startswith("reference_inputs_") for k in rec["suite_cells"])
 
 
 def test_a_no_value_cell_where_the_case_separates_is_not_unknown(tmp_path, project):
