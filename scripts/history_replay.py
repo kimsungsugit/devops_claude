@@ -37,7 +37,10 @@ the newer parameters; ``rename`` when only the names changed).
 A changed body is not a defect by itself: most changes between two logs are features, refactors and tuning. A change
 counts as a **documented fix** only through an evidence file (``--evidence``) that quotes the project document (problem
 list, release sheet) describing it; the replay reports every change and the documented subset separately and never
-infers a defect from the code.
+infers a defect from the code. (R27) An evidence entry may say what the document calls the change (``nature``, see
+`check_evidence`); ``documented_fixes.by_nature`` splits the subset — a function whose entries disagree is ``mixed``,
+one with any unlabelled entry ``unlabeled`` — each bucket with the part a document names directly (``direct``), and
+``documented_fixes.bug_fixes`` is the ``defect`` bucket (G1(b) counts bug fixes, not requirement changes).
 
 Detections are source-consistency detections, as in R4: the generated suite's expected values come from the current
 code, so a detection shows that its inputs separate the older behaviour from the newer — a regression to the older code
@@ -545,12 +548,38 @@ def replay_function(texts: dict[str, str], context: dict, path: str, name: str, 
     return record
 
 
+EVIDENCE_NATURES = frozenset({"defect", "requirement", "static_analysis"})
+EVIDENCE_MATCHES = frozenset({"direct", "indirect", "candidate"})
+
+
+def check_evidence(evidence: dict | None) -> None:
+    """(R27) An evidence file is ``{"functions": {name: [entry, …]}}``, each entry an object quoting a document. ``nature``
+    (absent, or `EVIDENCE_NATURES`: ``defect`` — the document calls it a fix of wrong behaviour; ``requirement`` — a new
+    or changed specification; ``static_analysis`` — the document names only a static-analysis pass, the link to this
+    diff is a candidate) and ``match`` (absent, or `EVIDENCE_MATCHES`). ``mixed``/``unlabeled`` are the replay's own
+    buckets, never input. Raises ValueError naming the function."""
+    if evidence is None:
+        return
+    functions = evidence.get("functions") if isinstance(evidence, dict) else None
+    if not isinstance(functions, dict):
+        raise ValueError("evidence: 'functions' must be an object {name: [entries]}")
+    for name, entries in functions.items():
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            raise ValueError(f"evidence for {name}: a list of entry objects is required")
+        for e in entries:
+            if e.get("nature") is not None and e["nature"] not in EVIDENCE_NATURES:
+                raise ValueError(f"evidence for {name}: nature {e['nature']!r} is not one of {sorted(EVIDENCE_NATURES)}")
+            if e.get("match") is not None and e["match"] not in EVIDENCE_MATCHES:
+                raise ValueError(f"evidence for {name}: match {e['match']!r} is not one of {sorted(EVIDENCE_MATCHES)}")
+
+
 def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict, old_log: Path, new_log: Path,
              evidence: dict | None = None, sample: int = 24, derived_only: bool = True) -> dict[str, Any]:
     """``derived_only``: the generated suite states only the slots its Test Evidence marks ``derived`` (as in R4)."""
     from mutation_eval import _suite_from_workbook
     from reference_alignment import _load_source
 
+    check_evidence(evidence)   # before the replay: a malformed file must not cost the run (review W2)
     (old, old_stats), (new, new_stats) = listing_functions(old_log), listing_functions(new_log)
     diff = changed_functions(old, new)
     ref_suite, ref_dup = _suite_from_workbook(reference, generated=False)
@@ -617,6 +646,20 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict,
         return {"changes": len(rows), "replayed": len(done), **{f"detected_by_{k}": sum(r[k]["detects"] for r in done)
                                                                 for k in ("reference", "generated")},
                 "statuses": dict(Counter(r["status"] for r in rows))}
+
+    def nature(rec: dict) -> str:
+        # (R27) what the documents call the change (`EVIDENCE_NATURES`). One diff whose entries disagree is ``mixed`` —
+        # its detection cannot be given to either; any entry without a label makes it ``unlabeled``
+        kinds = {str(e.get("nature") or "unlabeled") for e in rec["documented_fix"]}
+        return next(iter(kinds)) if len(kinds) == 1 else ("unlabeled" if "unlabeled" in kinds else "mixed")
+
+    def bucket(rows: list[dict]) -> dict[str, Any]:
+        # (review W1) with the subset a document names directly — an indirect entry names the area only
+        direct = [r for r in rows if any(e.get("match") == "direct" for e in r["documented_fix"])]
+        return {**subset(rows), "direct": subset(direct)}
+    documented_rows = [r for r in records if r.get("documented_fix")]
+    by_nature = {n: bucket([r for r in documented_rows if nature(r) == n])
+                 for n in sorted({"defect", "requirement"} | {nature(r) for r in documented_rows})}
     unmatched = sorted(set(documented) - {r["function"] for r in records})
     return {"kind": "historical change replay (unit level, source oracle); detections are source-consistency — not "
                     "requirement conformance, not a target run",
@@ -627,7 +670,9 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict,
                         "units_only_old": diff["units_only_old"], "units_only_new": diff["units_only_new"],
                         "old": old_stats, "new": new_stats},
             "summary": {**dict(totals), "changes": len(records), "not_replayable_reasons": dict(reasons)},
-            "documented_fixes": {**subset([r for r in records if r.get("documented_fix")]),
+            # the top-level counts are every documented change; G1(b) (past *bug-fix* replay) reads ``bug_fixes`` —
+            # the changes every quoted document calls a defect (review W3)
+            "documented_fixes": {**subset(documented_rows), "bug_fixes": by_nature["defect"], "by_nature": by_nature,
                                  "evidence_functions_not_changed_here": unmatched},
             "functions": records}
 
@@ -640,7 +685,8 @@ def main(argv=None) -> int:
     ap.add_argument("--generated", required=True)
     ap.add_argument("--source-root", required=True)
     ap.add_argument("--alignment", required=True, help="R3 alignment JSON: only its aligned functions are replayed")
-    ap.add_argument("--evidence", default="", help="JSON {functions: {name: [{document, id, quote}]}}")
+    ap.add_argument("--evidence", default="",
+                    help="JSON {functions: {name: [{document, id, quote, link, match, nature}]}} (see check_evidence)")
     ap.add_argument("--sample", type=int, default=24)
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)

@@ -56,6 +56,7 @@
 | R24 | 격차 G1(b) **과거 결함 수정 replay** — SVN 대신 Cloudium 단위시험 로그(VectorCAST aggregate coverage report 가 버전별 unit 소스를 담음)에서 수정 전·후 함수 본문을 얻어 현재 소스에 끼워 두 스위트를 실행(`scripts/history_replay.py`) | P0/G1 | 완료(아래 R24 기록) — HDPDM01 문서로 확인한 결함 수정 6 중 replay 3: 정본 3/3 · 생성 3/3 검출(G1(b) ≥1 충족) · 전체 변경 83 중 가른 35: 정본 18 · 생성 25 |
 | R25 | (사용자 요청) R24 에 쓴 Cloudium 자료를 **입력 문서**로 — SCM 레지스트리 `linked_docs` 에 `syds` · `problem_list` · `release_notes` · `ut_log_history` · `fault_injection` 칸 + 설정 화면 '결함 판별 근거 자료' 구획, HDPDM01·KJPDS02_PV 경로 등록 | P0/G1·G4 | 완료(아래 R25 기록) — 새로 등록 16 경로 · 기존 PV SyRS 포함 17 경로 전부 실재 확인 |
 | R26 | (R24 이월) **정본 칸 판독기 하나** — `NAME(5)` 기대값을 R3·R4 가 버리던 것, 판독기 5 벌(oracle 입력·R3/R4·replay·clang 대조·SITS)을 `read_reference_cell` 하나로 + **oracle 캐스트 판정 하나** — `(U8)(x)` 를 값에서는 캐스트, 부작용·루프 상수 질문에서는 호출로 보던 것 | P0/G1·G2 | 완료(아래 R26 기록) — PV 정합 357 → **380**(불일치 21 불변) · PV 변이 판별 격차 +20.7%p → **+19.1%p**(정본 판별이 늘어서, 목표 +15%p 는 유지) · HDPDM01 불변(+22.6%p) · replay 둘 다 놓침 0 유지 |
+| R27 | G1(b) KJPDS02_PV — 배포 기록(Release Sheet v0.12~v0.20)을 근거 파일로, 문서 확인 변경을 **문서가 부르는 성격**(결함 · 요구 · 정적 검증)으로 나눠 G1(b) 는 결함만 셈(`documented_fixes.bug_fixes`) | P0/G1 | 완료(아래 R27 기록) — PV 순수 결함 수정 replay **0 건(미측정 `—`)**: 문서가 결함이라 부른 두 항목은 이 구간에 새로 생긴 함수에 있음 · 결함+요구 혼합 2 건 정본 2/2 · 생성 2/2 · HDPDM01 결함 3/3 · 3/3(직접 근거 2/2 · 2/2) |
 
 ### 정본 초과 후보 (나중 라운드, 2026-09-24 사용자 방향)
 
@@ -534,3 +535,30 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
 - **G1 상태**: G1(a) 는 PV +19.1%p · HD +22.6%p 로 목표(+15%p) 유지, "정본 판별분 100% 유지"는 여전히 미달(PV 정본만 280 · HD 285). G1(b) 는 R24 판정 그대로(문서 확인 수정 3/3 동률, 둘 다 놓침 0).
 - **리뷰**: deep-reviewer 4 라운드. R1 Critical 0 · W4 — 판독기 한 벌(SITS `as_int`)이 남음 · 뮤테이션 생존 7 종(캐스트 인자 판정 · 결정된 `?:` 의 안 가는 갈래가 callee 를 인라인 · 함수형 매크로 집합 배선 3 곳 · replay 입력 키 · `010`) · 생성 SUTS 가 R26 전 산출물이면 버전이 섞임 · 캐스트 판정 인라인 복제 2 곳. R2 W3 — 새 배선 뮤테이션 2 종 생존 · SITS 칸 판독 종류 공시 없음 · `named` 가 R24 와 R3/R4 에서 다른 집합. R3 W2 — closure 합집합 배선 무방비 · 중복 이름 함수로 다른 빌드 unit 이 섞임. R4 Critical 0 · Warning 0(Info: 같은 빌드 루트로 제한 — 반영). 전부 반영, 가드 뮤테이션 **26 종 전부 검출**.
 - **한계(공시)**: oracle `check_input` 은 문자열이 아닌 입력은 `int` 만 받는다(측정 스크립트 쪽 판독기는 `3.0` 을 3 으로 읽음 — R26 전부터). 블록 안 함수 포인터가 typedef 이름을 가리면 `(X)(y)` 를 캐스트로 본다(R26 전부터 `call` 에 있던 것 — MISRA 금지 형태). R4·R24 는 입력 변환 내역을 버린다(R3 만 공시). 같은 빌드의 `static` 동명 함수도 중복 이름으로 빠져 SITS 합집합에서 제외된다(보수적 — 값을 지어내지 않음).
+
+## R27 기록 — KJPDS02_PV 문서 확인 변경: 배포 기록, 성격별로 (2026-09-26, R102)
+
+- **자료**: R25 에서 입력 문서(`linked_docs.release_notes`)로 등록한 KJPDS02 배포 기록 사본(`.codex_tmp/pv_sys_docs/release_sheets`). replay 구간 DV_251104 → PV_2661 에는 v0.12(251118) · v0.13(251127) · v0.14(260129) · v0.20(SW 2631, 260320) 네 시트뿐이고, **2632~2661 배포는 시트가 없다** — diff 에 기록되지 않은 변경이 섞일 수 있다. PV 문제 대장(PIL v0.10)은 2025-05 판이라 이 구간을 덮지 않는다.
+- **왜 성격을 나누나**: G1(b) 는 "과거 **버그 수정** replay" 다. HDPDM01 근거는 전부 결함 대장(TDL · PIL)과 그 수정 문구였지만, KJPDS02 배포 기록은 결함 수정 옆에 HMC · Waymo 요구 반영을 같은 형식으로 적는다. 그대로 세면 요구 변경이 '문서 확인 수정' 으로 부풀려진다(리뷰 W3).
+- **도구** `scripts/history_replay.py`: 근거 항목에 `nature`(`defect` — 문서가 잘못된 동작의 수정이라 부름 · `requirement` — 새·바뀐 사양 · `static_analysis` — 문서가 정적 검증 활동만 적음, diff 연결은 추론)와 `match`(`direct` · `indirect` · `candidate`). 한 함수의 항목들이 성격이 갈리면 `mixed`(한 diff 에 둘이 섞여 검출을 어느 쪽에도 줄 수 없음), 라벨 없는 항목이 있으면 `unlabeled`. `documented_fixes.by_nature` 버킷마다 문서가 동작을 직접 적은 부분(`direct`)을 따로 내고, G1(b) 는 `documented_fixes.bug_fixes`(= `defect` 버킷)만 읽는다. 상위 합계는 전과 같이 문서 확인 **변경** 전체다. 근거 파일은 replay 전에 모양을 검사한다(`check_evidence` — 목록·객체, 허용된 성격·일치, `mixed`/`unlabeled` 는 예약어; 전엔 잘못된 항목이 replay 를 다 돈 뒤 이름 없이 죽었다).
+- **KJPDS02_PV 근거**(`.codex_tmp/capability_eval/r27_evidence_pv.json`, diff 와 문구를 한 줄씩 대조):
+
+| 함수 | 문서 항목(성격 · 일치) | replay | 정본 · 생성 |
+|---|---|---|---|
+| `s_UDS_WDBI_UserOptRecordId` | v0.14 #5 "WDBI 요청 수신 시 NRC 응답 코드 변경: 0x21 → 0x33"(결함 · 간접 — DV 본문엔 보안 검사도 0x21 도 없고 diff 는 보안 게이트 + 0x33 을 더한다) + v0.20 3.1) HBPDSMV2-496 "Security Access 상태는 WDBI 메시지 수신 … 시 초기화"(요구 · 직접) → **혼합** | 가름 | 검출 · 검출 |
+| `s_AutoStop_LinCMDCheck` | v0.14 1.1) HBPDSMV2-488 "Auto Close 동작 중 PDS Disable Command 수신 시 즉시 Stop"(요구 · 직접) + v0.20 #4 정적 검증(후보 — 카운터 포화 · U8 개명) → **혼합** | 가름 | 검출 · 검출 |
+| `s_DoorState_ActiveHolding_Check` | v0.13 #2 HBPDSMV2-481(요구 · 직접) · v0.12 #4 경사값 유효성(요구 · 직접) · v0.20 1.3) 평지 판단 범위(요구 · 간접) → **요구** | 가름 | 미확정 · 미확정 |
+| `s_LinFailCheckTimer` | v0.20 #4 "정적 검증 … QAC … CodeSonar 수정사항 반영"(정적 검증 · 후보 — 두 LIN 고장 타이머가 0xFFFF 에서 포화) | 가름 | 검출 · **놓침** |
+| `s_EncoderFailureJudgment` | 같은 항목(정적 검증 · 후보 — 카운터 포화 · U8 개명) | 가름 | 검출 · 검출 |
+
+  함수로 특정하지 못한 문서 항목(근거 파일 `documents_not_tied_to_a_changed_function`): **v0.13 #1 HBPDSMV2-478**("… Antipinch가 감지될 경우 도어가 Pop-up 위치로 이동하지 않고, 이후 Antipinch 기능이 동작하지 않던 문제 수정" — 결함) · **v0.13 #3 HBPDSMV2-482**(E2E 카운터 0~15 → 0~14 — 결함) · v0.13 #4 HBPDSMV2-484(요구). 셋 다 이 구간에 **새로 생긴 함수**(`s_DoorState_AutoClose_Handle*` · `u8s_DoorState_AutoClose_ShouldStop` · `s_ApiIn_E2EProFileCheck` · `u8s_E2E_*_ProFileCheck_SBCM0/1` — 추가 345 함수)에 구현돼 이전 본문이 없다.
+
+- **결과**:
+
+| 프로젝트 · 구간 | 결함(`bug_fixes`) 변경 · replay · 정본 · 생성 | 그중 직접 근거 | 혼합 | 요구 | 정적 검증 후보 |
+|---|---|---|---|---|---|
+| KJPDS02_PV DV → PV_2661 | 0 · — · — · — | — | 2 · 2/2 · 2/2 | 1 · 0 · 0(미확정 1 · 1) | 2 · 정본 2/2 · 생성 1/2 |
+| HDPDM01 v1.02 → v1.05 | 6 · 3 · **3/3 · 3/3** | 3 · 2 · 2/2 · 2/2 | 0 | 0 | 0 |
+
+- **판정**: G1(b) 는 HDPDM01 에서 R24 판정 그대로(버그 수정 3/3 동률). **KJPDS02_PV 의 버그 수정 replay 는 측정할 수 없었다(`—`)** — 문서가 결함이라 부른 항목은 새 함수에 있거나 요구 반영과 한 diff 에 섞였다. 혼합 2 건은 두 스위트 모두 가른다. 정적 검증 후보에서 생성 SUTS 가 `s_LinFailCheckTimer` 를 놓친 것은 0xFFFF 포화 경계를 적지 않아서다(정본은 적음) — 결함 수정으로 세지는 않지만 경계 행 생성의 빈틈으로 기록한다.
+- **리뷰**: reviewer standard 1 회 — Critical 1(데이터: "정적 검증 … 반영" 한 줄을 카운터 포화 diff 들의 결함 근거로 쓴 것은 코드 패턴에서 결함을 추론한 것 — 특히 `s_IsDoorStop` 은 포화가 아니라 0xFE 센티널 제거라 어느 문서도 설명하지 않음 → 근거에서 빼고, 정적 검증은 `static_analysis`·`candidate` 로 분리) · W5(`match` 미반영 → 버킷별 `direct` · 근거 파일 사후 크래시 → 사전 검사 · 상위 키가 여전히 'fixes' → `bug_fixes` 명시 키 · 구간 꼬리(2632~2661) 누락 → note · 단일 함수 테스트 → 두 버킷 분할 불변식 · 명시 `null`) · Info 6(WDBI 직접 → 간접, ActiveHolding 근거 보강, 빈 버킷 키 항상 출력, help 문구 등). 전부 반영, 가드 뮤테이션 7 종 전부 검출.

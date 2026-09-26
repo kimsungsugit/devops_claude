@@ -362,6 +362,57 @@ def test_a_documented_fix_comes_only_from_quoted_evidence(tmp_path, project):
     assert "documented_fix" not in rec2 and plain["documented_fixes"]["changes"] == 0
 
 
+@pytest.mark.parametrize("natures, bucket", [
+    (["defect"], "defect"), (["requirement", "requirement"], "requirement"), (["static_analysis"], "static_analysis"),
+    (["defect", "requirement"], "mixed"),        # one diff carries both: its detection belongs to neither alone
+    (["defect", "absent"], "unlabeled"), (["absent"], "unlabeled"),
+    ([None], "unlabeled"),                       # an explicit ``null`` is no label (review W5 M2)
+])
+def test_documented_changes_are_split_by_what_the_documents_call_them(tmp_path, project, natures, bucket):
+    # R27: a release sheet lists requirement changes next to fixes — G1(b) counts bug fixes, so the subset is split
+    entries = [{"document": "Release Sheet", "id": f"ITEM_{i}", "quote": "q", "match": "direct",
+                **({"nature": n} if n != "absent" else {})} for i, n in enumerate(natures)]
+    report, _rec = _replay(tmp_path, project, OLD_F, NEW_F, evidence={"functions": {"f": entries}})
+    d = report["documented_fixes"]
+    by_nature = d["by_nature"]
+    assert {n for n, b in by_nature.items() if b["changes"]} == {bucket}
+    assert {"defect", "requirement"} <= set(by_nature)          # always reported, zero or not (review I6)
+    assert by_nature[bucket]["replayed"] == 1 and by_nature[bucket]["detected_by_reference"] == 1
+    assert by_nature[bucket]["direct"]["changes"] == 1
+    assert d["bug_fixes"] == by_nature["defect"]                 # G1(b) reads the defect bucket only (review W3)
+    assert d["bug_fixes"]["changes"] == (1 if bucket == "defect" else 0)
+
+
+def test_the_buckets_partition_the_documented_changes(tmp_path, project):
+    # review W5 M1: two documented functions in two buckets — each bucket counts its own, the sum is the whole
+    root, ref, gen, alignment = project
+    old_dir, new_dir = _logs(tmp_path, OLD_F, NEW_F)
+    other = [("", "void g( void )"), ("", "{"), ("1 0     (T)", "g"), ("", "  g_p = 1U;"), ("", "}")]
+    (old_dir / "r2.html").write_text(_report("other", other), encoding="utf-8")
+    (new_dir / "r2.html").write_text(_report("other", other[:3] + [("", "  g_p = 2U;"), ("", "}")]), encoding="utf-8")
+    evidence = {"functions": {"f": [{"document": "PL", "id": "TDL_1", "quote": "q", "nature": "defect", "match": "indirect"}],
+                              "g": [{"document": "RS", "id": "1", "quote": "q", "nature": "requirement"}]}}
+    report = evaluate(str(ref), str(gen), [root], alignment, old_dir, new_dir, evidence, derived_only=False)
+    d = report["documented_fixes"]
+    assert d["changes"] == 2 and sum(b["changes"] for b in d["by_nature"].values()) == 2
+    assert d["by_nature"]["defect"]["changes"] == 1 and d["by_nature"]["requirement"]["changes"] == 1
+    assert d["bug_fixes"]["direct"]["changes"] == 0              # the defect entry names the area only
+
+
+@pytest.mark.parametrize("evidence, message", [
+    ({"functions": {"f": {"document": "PL"}}}, "list of entry objects"),
+    ({"functions": {"f": ["TDL_1"]}}, "list of entry objects"),
+    ({"functions": {"f": [{"nature": "Defect"}]}}, "nature 'Defect'"),
+    ({"functions": {"f": [{"nature": "mixed"}]}}, "nature 'mixed'"),      # the replay's own bucket, never input
+    ({"functions": {"f": [{"match": "exact"}]}}, "match 'exact'"),
+    ({"functions": []}, "'functions' must be an object"),
+])
+def test_a_malformed_evidence_file_is_refused_before_the_replay(tmp_path, project, evidence, message):
+    # review W2: the shape is checked first — a bad entry used to end the run after every replay, unnamed
+    with pytest.raises(ValueError, match=message):
+        _replay(tmp_path, project, OLD_F, NEW_F, evidence=evidence)
+
+
 def test_a_listing_of_another_unit_or_an_unaligned_function_is_not_replayed(tmp_path, project):
     root, ref, gen, alignment = project
     old_dir, new_dir = _logs(tmp_path, OLD_F, NEW_F, unit="other_unit")
