@@ -94,6 +94,9 @@ _BASIS_MARK = " — 근거:"   # a quoted requirement after it is not a stimulus
 _BOUNDARY_STEP = re.compile(rf"^입력 설정 \(요구 경계\):\s*(?P<sig>.+?)\s+=\s+(?P<num>-?(?:0[xX][0-9A-Fa-f]+|{_NUM}))"
                             rf"\s*(?P<unit>{_UNIT})?")
 _DURATION_SUFFIX = " 지속 시간"
+# (R29) a step the generator traced to a system block names it after the basis mark:
+#   ``… — 근거: 500ms 초과 [SyDS SyII_06 · Range — SwTR_0601 Related ID]`` (``generators/sts_requirement_tc``)
+_TRACED = re.compile(r"\[(?P<doc>Sy[A-Za-z]+) (?P<id>Sy[A-Za-z]+_[0-9_]+) · [^\]]*? — \S+ Related ID\]\s*$")
 
 
 def _num(text: str) -> float:
@@ -159,8 +162,10 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
                     if role == "action":
                         slot["regions"].append(item)
                 if role == "action" and (b := _BOUNDARY_STEP.match(text)):
+                    traced = _TRACED.search(str(cells[col] or ""))
                     slot["points"].append({"value": _num(b.group("num")), "unit": _unit(b.group("unit")),
-                                           "signal": b.group("sig").strip(), "raw": b.group(0)})
+                                           "signal": b.group("sig").strip(), "raw": b.group(0),
+                                           "traced": f"{traced.group('doc')} {traced.group('id')}" if traced else None})
                 elif role == "action":
                     named = []
                     for m in _NAMED_POINT.finditer(text):
@@ -438,13 +443,15 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
     subject only sometimes: kills are split into ``killed_single_subject`` (the requirement's same-unit points name one
     subject), ``killed_multi_subject`` (several — another quantity of that unit could have supplied it, an upper bound)
     and ``killed_unnamed_subject`` (an unnamed point: any quantity of that unit — R2 W-E)."""
-    killed = either = optimistic = with_points = killable = single = multi = unnamed = 0
+    killed = either = optimistic = with_points = killable = single = multi = unnamed = via_trace = 0
     by_stated = Counter()
     recall = Counter()
     rows = []
     for m in mutants:
         slot = sts.get(m["req_id"]) or {}
-        points = [p for p in slot.get("points", []) if _units_compatible(p["unit"], m["unit"])]
+        # the requirement's own points first: a kill is credited to a traced system point only when none of them kills
+        points = sorted((p for p in slot.get("points", []) if _units_compatible(p["unit"], m["unit"])),
+                        key=lambda p: bool(p.get("traced")))
         with_points += bool(points)
         hit = side = None
         for p in points:
@@ -456,15 +463,19 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
                 side = p
         region = next((r["raw"] for r in slot.get("regions", []) if _units_compatible(r["unit"], m["unit"])
                        and _same_quantity(r["value"], r["unit"], float(m["value"]), m["unit"])), None)
-        subjects = _subject_groups(points)
+        # (R29 review I1) a kill by the requirement's own point is classified among its own points: points traced to a
+        #   system block add subjects of the same unit, which would demote an own kill to "several subjects"
+        pool = [p for p in points if not p.get("traced")] if hit is not None and not hit.get("traced") else points
+        subjects = _subject_groups(pool)
         killed += hit is not None
+        via_trace += hit is not None and bool(hit.get("traced"))
         either += hit is not None or side is not None
         optimistic += hit is not None or region is not None
         killable += m["killable"]
         if hit is not None:
             if not hit.get("signal"):
                 unnamed += 1
-            elif len(subjects) == 1 and all(p.get("signal") for p in points):
+            elif len(subjects) == 1 and all(p.get("signal") for p in pool):
                 single += 1
             else:
                 multi += 1
@@ -472,6 +483,7 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
         recall[(m["recalled_by_extractor"], hit is not None)] += 1
         rows.append({**m, "value": float(m["value"]), "m_value": float(m["m_value"]),
                      "points": [p["value"] for p in points], "killed_by_point": None if hit is None else hit["value"],
+                     "killed_by_trace": None if hit is None else hit.get("traced"),
                      "killed_by_signal": None if hit is None else (hit.get("signal") or ""),
                      "subjects_in_unit": subjects, "boundary_region": None if self_sourced else region})
     n = len(mutants)
@@ -490,6 +502,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
             # an unkillable mutant never satisfies "holds and the mutant does not": every kill is of a killable one
             "killable_mutants": killable, "rate_of_killable": rate(killed, killable),
             "killed_single_subject": single, "killed_multi_subject": multi, "killed_unnamed_subject": unnamed,
+            # (R29) kills only a point traced to a system block made (the requirement's own points kill none of them)
+            "killed_via_traced_system": via_trace,
             "mutants_with_a_point_in_unit": with_points,
             "stated_in_srs": {"mutants": stated, "killed": by_stated[(True, True)]},
             "not_stated_in_srs": {"mutants": n - stated, "killed": by_stated[(False, True)]},

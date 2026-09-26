@@ -1972,6 +1972,9 @@ async def local_sts_generate(
     report_dir: str = Form(""),
     # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
     tc_profile: str = Form(""),
+    # (R29, G4(b)) 시스템 요구·설계서 — 주 핸들러(`/api/jenkins/sts/generate-async`)와 같은 인자.
+    syrs_path: str = Form(""),
+    syds_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2079,6 +2082,8 @@ async def local_sts_generate(
     stp_docx_path = _resolve_opt(stp_path)
     hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
                               _no_discovery, label="HSIS")
+    from backend.services.resolver_helpers import resolve_system_requirement_docs
+    system_docs = resolve_system_requirement_docs(syrs_path, syds_path)
     if opt_skips:
         _logger.warning("STS(sync): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
@@ -2122,6 +2127,7 @@ async def local_sts_generate(
             uds_path=uds_file_path,
             stp_path=stp_docx_path,
             hsis_path=hsis_file_path,
+            **system_docs,
             ai_config=_sts_ai_cfg,
             source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
         )
@@ -2177,6 +2183,9 @@ async def local_sts_generate_stream(
     report_dir: str = Form(""),
     # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
     tc_profile: str = Form(""),
+    # (R29, G4(b)) 시스템 요구·설계서 — 주 핸들러(`/api/jenkins/sts/generate-async`)와 같은 인자.
+    syrs_path: str = Form(""),
+    syds_path: str = Form(""),
 ):
     """Generate STS with SSE progress streaming."""
     import json as _json
@@ -2270,6 +2279,8 @@ async def local_sts_generate_stream(
     stp_docx_path = _resolve_opt2(stp_path)
     hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
                               _no_discovery, label="HSIS")
+    from backend.services.resolver_helpers import resolve_system_requirement_docs
+    system_docs2 = resolve_system_requirement_docs(syrs_path, syds_path)
     if opt_skips2:
         _logger.warning("STS(stream): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips2), "; ".join(opt_skips2)[:400])
@@ -2314,6 +2325,7 @@ async def local_sts_generate_stream(
                 uds_path=uds_file_path,
                 stp_path=stp_docx_path,
                 hsis_path=hsis_file_path2,
+                **system_docs2,
                 ai_config=_sts_ai_cfg2,
                 on_progress=_on_progress,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
@@ -2381,6 +2393,9 @@ async def local_sts_generate_async(
     report_dir: str = Form(""),
     # (R76 N105) 시험 물량 프로파일 — 주 핸들러(`*-async`)와 같은 인자. 해석은 생성기가 한다(`generators/tc_profile.py`).
     tc_profile: str = Form(""),
+    # (R29, G4(b)) 시스템 요구·설계서 — 주 핸들러(`/api/jenkins/sts/generate-async`)와 같은 인자.
+    syrs_path: str = Form(""),
+    syds_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2466,6 +2481,8 @@ async def local_sts_generate_async(
     stp_docx_path = _resolve_opt3(stp_path)
     hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
                               _no_discovery, label="HSIS")
+    from backend.services.resolver_helpers import resolve_system_requirement_docs
+    system_docs3 = resolve_system_requirement_docs(syrs_path, syds_path)
     if opt_skips3:
         _logger.warning("STS(async): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips3), "; ".join(opt_skips3)[:400])
@@ -2549,6 +2566,7 @@ async def local_sts_generate_async(
                 uds_path=uds_file_path,
                 stp_path=stp_docx_path,
                 hsis_path=hsis_file_path3,
+                **system_docs3,
                 ai_config=_load_sts_ai_config(),
                 on_progress=_sts_on_progress,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)

@@ -223,3 +223,47 @@ def test_an_attribute_row_does_not_join_the_line_before_it():
     (line,) = [x for x in req["lines"] if "5A" in x["text"]]
     assert line["section"] == "Range" and line["joins_previous"] == ""
 
+
+
+def test_an_inline_case_label_is_the_section_of_its_line_and_the_lines_after_it():
+    # R29 review C2: a system block's verification case (``Input : …`` / ``Output : …``) — the Output line is an outcome
+    body = "Case 1\nInput : 입력전원 8.9V 미만\nOutput : 암전류가 10mA 이상으로 상승하는지 확인\n  그리고 전압 5V 이하\n" \
+           "1)Precondition : 전원 9V 이상"
+    _, req = _facts(body)
+    sections = {x["text"]: x["section"] for x in req["lines"]}
+    assert sections["Input : 입력전원 8.9V 미만"] == "Input"
+    assert sections["Output : 암전류가 10mA 이상으로 상승하는지 확인"] == "Output"
+    assert sections["그리고 전압 5V 이하"] == "Output"          # still the Output case until the next label
+    assert sections["1)Precondition : 전원 9V 이상"] == "Precondition"
+    out = next(x for x in req["lines"] if x["section"] == "Output" and "10mA" in x["text"])
+    assert out["joins_previous"] == ""                            # a label ends the run
+
+
+def test_a_time_sharing_the_subject_of_a_condition_on_another_quantity_is_its_hold_time():
+    # R29 review C2: ``저전압 : 8.5V 이하 500ms 초과`` — the subject is shared, the time is how long the condition lasts
+    facts, _ = _facts("저전압 : 8.5V 이하 500ms 초과")
+    volt, hold = facts
+    assert (volt["kind"], volt["signal"], volt["unit"]) == ("threshold", "저전압", "V")
+    assert (hold["kind"], hold["signal"], hold["op"], hold["seconds"]) == ("duration", "저전압", ">", 0.5)
+    # two voltages share a subject and stay thresholds (``8.5V미만이거나 16.04V 이상``)
+    a, b = _facts("- Battery 전압이 8.5V미만이거나 16.04V 이상인 경우")[0]
+    assert (a["kind"], b["kind"], b["signal"]) == ("threshold", "threshold", "Battery 전압")
+
+
+def test_an_inline_label_never_leaves_an_outcome_a_heading_opened():
+    # R29 review r2 W-2: under ``<Output>`` an ``Input :`` line is still what the requirement produces
+    _, req = _facts("<Output>\nInput : 모터 출력 10V 이상 유지\n<Input>\nOutput : 전류 5A 이하")
+    sections = {x["text"]: x["section"] for x in req["lines"]}
+    assert sections["Input : 모터 출력 10V 이상 유지"] == "Output"
+    assert sections["Output : 전류 5A 이하"] == "Output"          # an inline label still leaves a non-outcome heading
+    _, req = _facts("Output : 전류 5A 이하\nCase 2\n전압 9V 이상")
+    assert {x["text"]: x["section"] for x in req["lines"]}["전압 9V 이상"] == "Output"   # ``Case`` is not a label
+
+
+@pytest.mark.parametrize("body", ["배터리 전압 9V 미만 또는 3초 이상",       # alternatives joined by *or*: not a hold time
+                                  "B+ 전압이 9V 미만 or 3초 이상",            # R29 review r3 I2: lowercase ``or`` too
+                                  "B+ 전압이 9V 미만거나 3초 이상",
+                                  "u16s_Tm: 100ms 이상이고 200ms 미만"])     # a time sharing a time's subject
+def test_a_shared_time_stays_a_threshold_across_or_and_next_to_another_time(body):
+    facts, _ = _facts(body)
+    assert [f["kind"] for f in facts] == ["threshold", "threshold"] and facts[1].get("subject_shared")

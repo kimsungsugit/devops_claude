@@ -153,6 +153,11 @@ def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
     return None, ""
 
 
+# every *or* the sharing connective accepts (``이거나``/``거나``/``또는``/``or``/``OR``/``||``) — `_OR` itself leaves out
+#   the bare ``거나`` and the lowercase ``or`` (R29 review r3 I2), and changing it would change how lines combine
+_ALTERNATIVE = re.compile(r"거나|또는|\bor\b|\|\|", re.IGNORECASE)
+
+
 def _share_subjects(line: str, facts: list[dict]) -> None:
     """``A 이 8.5V미만이거나 16.04V 이상``: a value whose clause names no subject, joined to the previous fact only by a
     connective, compares the same subject (``subject_shared``)."""
@@ -163,6 +168,13 @@ def _share_subjects(line: str, facts: list[dict]) -> None:
         connective = re.fullmatch(r"\s*(?:이거나|거나|또는|or|OR|,|이고|고)?\s*(?:인|인\s*경우)?\s*", between)
         if prev.get("signal") and connective and (not fact.get("signal") or fact.get("signal_kind") == "phrase"):
             fact["signal"], fact["signal_kind"], fact["subject_shared"] = prev["signal"], prev["signal_kind"], True
+            if fact["kind"] == "threshold" and fact.get("unit") in _TIME_UNITS \
+                    and (prev.get("unit") or "") not in _TIME_UNITS and not _ALTERNATIVE.search(between):
+                # (R29 review C2) ``저전압 : 8.5V 이하 500ms 초과``: a time after a condition on another quantity is how
+                #   long that condition lasts — the rule `_line_facts` applies when the time names its own subject
+                #   (``LIN 통신이 15초이상 끊길 경우``), missed here because the subject arrives by sharing. Not across
+                #   *or* (``9V 미만 또는 3초 이상`` — two alternatives, not a hold time: review r2 W-4)
+                fact.update(kind="duration", seconds=round(fact["value"] * _TIME_UNITS[fact["unit"]], 6))
 
 
 def _line_facts(line: str, offset: int) -> list[dict[str, Any]]:
@@ -306,6 +318,12 @@ _OUTCOME_SECTION = re.compile(r"완료|output|출력|결과|expected", re.IGNORE
 #   table: the ``<Output>`` section above it ends there (HDPDM01 SwTR_0202: the verification criteria's input conditions
 #   ``3도 초과한 열림각`` / ``3km/h 이하`` were read as outputs and never stimulated)
 _ATTRIBUTE_ROW = re.compile(r"([A-Za-z][A-Za-z ]{0,30}[A-Za-z])\t")
+# (R29 review C2) a verification case's inline label (``Input : 입력전원 8.9V 미만`` / ``Output : 암전류가 10mA 이상으로
+#   상승하는지 확인`` / ``1)Precondition : …``) is the section of its line and of the lines after it — without it an
+#   ``Output :`` line of a system block's verification criteria was stepped as a stimulus. (review r2 W-2) ``Case n`` is
+#   not a label: nothing measured needs it, and it would end an outcome section
+_INLINE_LABEL = re.compile(r"\s*(?:\d+\)\s*)?(Input|Output|Pre-?\s?condition|Preconditioin|Expected(?:\s+Result)?|"
+                           r"입력|출력|결과|기대\s*결과)\s*\d*\s*(?::|$)", re.IGNORECASE)
 
 
 def is_outcome_section(section: str) -> bool:
@@ -433,6 +451,7 @@ def extract(text: str) -> list[dict[str, Any]]:
         lines = []
         pos = block["start"]
         section = ""
+        headed_outcome = False             # the section is an outcome a ``<…>`` heading opened
         # the last non-empty line, its line-end connective, a connective alone on a line, and the run of lines joined
         #   to each other up to here (``A AND`` / ``B AND`` / ``C`` / ``가 50ms 지속되면``: the hold time quotes all
         #   three — review r5 W-A)
@@ -443,9 +462,18 @@ def extract(text: str) -> list[dict[str, Any]]:
             head = re.fullmatch(r"\s*<\s*([^<>]{1,40}?)\s*>\s*", raw_line)
             if head:
                 section = head.group(1)   # ``<Pre Condition>`` / ``<완료조건>`` / ``<Output>``: the role of what follows
+                headed_outcome = is_outcome_section(section)
             attribute = None if head else _ATTRIBUTE_ROW.match(raw_line)
             if attribute:
                 section = attribute.group(1)   # (R22) the table's next field — its lines are not the section above
+                headed_outcome = False
+            inline = None if head or attribute else _INLINE_LABEL.match(raw_line)
+            if inline and not headed_outcome:
+                # (R29 review C2) ``Output : 암전류가 10mA 이상으로 상승하는지 확인`` — a verification case's inline label
+                #   is a heading for its own line and the lines after it (``Input : …`` / ``Output : …`` alternate).
+                #   (R29 review r2 W-2) never out of an outcome a ``<Output>`` / ``<완료조건>`` heading opened: an
+                #   ``Input :`` line there is still what the requirement produces
+                section = inline.group(1)
             stripped = raw_line.strip()
             lone = _LONE.match(raw_line)
             if lone:
@@ -463,7 +491,7 @@ def extract(text: str) -> list[dict[str, Any]]:
             tail_join = "and" if _TAIL_AND.search(tail) else "or" if _TAIL_OR.search(tail) else ""
             joins = "and" if _HEAD_AND.match(raw_line) or _HEAD_PARTICLE.match(raw_line) else \
                 "or" if _HEAD_OR.match(raw_line) else pending or prev_tail
-            if head or attribute:
+            if head or attribute or inline:
                 joins = ""                 # a section heading (or the table's next field) ends every run
             chain = chain + [previous_text] if joins and previous_text else []
             if open_line is not None:

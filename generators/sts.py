@@ -3448,6 +3448,9 @@ def generate_sts(
     ai_config: Optional[Dict[str, Any]] = None,
     on_progress: Optional[Any] = None,
     source_root: Optional[str] = None,
+    syrs_path: Optional[str] = None,
+    syds_path: Optional[str] = None,
+    system_input_skips: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -3469,6 +3472,11 @@ def generate_sts(
             와 동일한 역할이며, 과거 이 파라미터가 없는 채로 record_run 이
             source_root 를 참조해 NameError → except 로 삼켜져 **STS 품질 기록이
             통째로 유실**되고 있었다.
+        syrs_path / syds_path: (R29, G4(b)) 시스템 요구·설계서 DOCX. 주면 요구 경계 TC 가 SRS 블록의
+            Related ID 가 **직접** 가리키는 시스템 블록의 문장도 같은 규칙으로 읽는다(1 홉 — 값으로 찾아 붙이지
+            않는다). 못 읽은 문서는 품질 리포트에 사유로 남는다.
+        system_input_skips: 호출자가 위 두 경로를 로컬화하지 못한 사유(worker 경유 실패 등) — 생성기는 그
+            문서를 받지 못했으므로 공시만 한다.
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage
@@ -3621,10 +3629,20 @@ def generate_sts(
                                   is_safety=is_safety_asil(str(kw["req"].get("asil") or "").strip()), **kw)
         _before_rb = list(test_cases)
         try:
-            from generators.sts_requirement_tc import append_requirement_boundary_tcs
+            from generators.sts_requirement_tc import append_requirement_boundary_tcs, load_system_requirements
+            # (R29) 시스템 요구 문서 — 준 것만 읽는다. 하나도 안 줬으면 추적 자체를 하지 않고(`system=None`)
+            #   그 사실을 `system_documents: []` 로 남긴다(0 과 미입력을 구분).
+            _sy_docs = [("SyRS", syrs_path), ("SyDS", syds_path)]
+            _system, _sy_records = load_system_requirements(_sy_docs)
+            if _sy_records:
+                _progress(76, f"시스템 요구 블록 {len(_system)}개 로드")
             gen_stats["requirement_boundary"] = append_requirement_boundary_tcs(
                 test_cases, reqs, _build, _make_tc_id, _classify_steps,
-                max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC)
+                max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
+                system=_system if any("blocks" in r for r in _sy_records) else None)
+            gen_stats["requirement_boundary"]["system_documents"] = _sy_records
+            if system_input_skips:
+                gen_stats["requirement_boundary"]["system_input_skips"] = [str(s)[:200] for s in system_input_skips]
         except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below
             test_cases[:] = _before_rb   # nothing half-added
             _logger.warning("requirement boundary TCs skipped: %s", exc, exc_info=True)

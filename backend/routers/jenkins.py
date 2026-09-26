@@ -3294,6 +3294,9 @@ async def jenkins_sts_generate_async(
     # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
     #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
     tc_profile: str = Form(""),
+    # (R29, G4(b)) 시스템 요구·설계서 — SRS Related ID 가 직접 가리키는 블록의 임계로 요구 경계 TC 를 더한다.
+    syrs_path: str = Form(""),
+    syds_path: str = Form(""),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     from sts_generator import generate_sts
@@ -3374,6 +3377,8 @@ async def jenkins_sts_generate_async(
     if opt_skips:
         _logger.warning("STS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
+    from backend.services.resolver_helpers import resolve_system_requirement_docs
+    system_docs = resolve_system_requirement_docs(syrs_path, syds_path)
 
     # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
     # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
@@ -3426,6 +3431,7 @@ async def jenkins_sts_generate_async(
                 stp_path=stp_docx_path,
                 on_progress=_on_progress,
                 source_root=str(source_root_path) if source_root_path else None,  # 품질 DB project_root
+                **system_docs,
             )
             download_url = f"/api/jenkins/sts/download?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
             preview_url = f"/api/jenkins/sts/preview?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"

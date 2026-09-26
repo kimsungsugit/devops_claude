@@ -192,6 +192,15 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
       }
       if (hsisPath) formData.append('hsis_path', hsisPath);
       if (stpPath) formData.append('stp_path', stpPath);
+      // (R29, G4(b)) STS 요구 경계 TC 의 시스템 추적 입력 — SRS Related ID 가 직접 가리키는 SyRS·SyDS 블록의 임계.
+      //   STS 핸들러만 받는다(다른 문서 핸들러는 선언하지 않아 FastAPI 가 버리므로 보내지 않는다).
+      //   우선순위는 게이트(`docgen_preflight._pick`)와 같다: 설정 경로 > SCM 등록 문서.
+      if (docType === 'sts') {
+        const syrsPath = docPaths.syrs || linkedDocs.syrs || '';
+        const sydsPath = docPaths.syds || linkedDocs.syds || '';
+        if (syrsPath) formData.append('syrs_path', syrsPath);
+        if (sydsPath) formData.append('syds_path', sydsPath);
+      }
       // 생성 상한 — **설정된 것만** 보낸다. 안 보내면 생성기 기본값이 쓰이고, 그게
       // 단일 출처다(여기서 숫자를 복제하면 생성기 상수와 갈라진다).
       // 실측 kjpds02_pv: 통합 흐름 145 라 기본 120 으로는 25개가 규격에서 빠진다.

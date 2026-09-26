@@ -62,6 +62,8 @@ IN_TEMPLATE = "template"
 IN_VCAST = "vectorcast"
 IN_SPEC_DOC = "spec_doc"        # SUTR↔SwUTS / SITR↔SwITS 대응 규격서
 IN_LEVEL_ARTIFACTS = "level_artifacts"   # 통합 Summary 의 레벨별 산출물
+IN_SYRS = "syrs"                # (R29) 시스템 요구사항 — STS 요구 경계의 추적 입력
+IN_SYDS = "syds"                # (R29) 시스템 설계서 — 같은 용도
 
 INPUT_LABELS: Dict[str, str] = {
     IN_SOURCE_ROOT: "소스 코드 루트",
@@ -74,6 +76,8 @@ INPUT_LABELS: Dict[str, str] = {
     IN_VCAST: "VectorCAST 결과",
     IN_SPEC_DOC: "대응 시험 규격서",
     IN_LEVEL_ARTIFACTS: "레벨별 산출물",
+    IN_SYRS: "SyRS(시스템 요구)",
+    IN_SYDS: "SyDS(시스템 설계)",
 }
 
 
@@ -332,6 +336,10 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             IN_SWDS: "시험 스텝 상세도가 낮아집니다",
             IN_UDS_DOC: "함수 설명 보강이 빠집니다",
             IN_STP: "시험 전략 문맥이 빠집니다",
+            # (R29, G4(b)) SRS 블록의 Related ID 가 직접 가리키는 시스템 블록의 임계 — 없으면 SRS 가 직접 적은 값만 경계
+            #   TC 가 된다(실측 HDPDM01: 정본 STS 자극 임계 중 SRS 밖 값의 변이 판별 0)
+            IN_SYRS: "SRS 가 적지 않은 시스템 요구 임계의 경계 TC 가 빠집니다",
+            IN_SYDS: "SRS 가 적지 않은 시스템 설계(인터페이스·범위) 임계의 경계 TC 가 빠집니다",
             IN_TEMPLATE: "기본 양식으로 만듭니다(회사 표준 서식이 아닐 수 있습니다)",
         },
         fields=["related"],

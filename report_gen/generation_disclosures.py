@@ -329,7 +329,8 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "no_subject_for_value": "주어 없음", "response_constraint": "응답 제약(측정 대상)",
                 "negated_condition": "부정 절", "same_subject_combination_unstated": "결합 미기재",
                 "monitored_quantity_unknown": "감시량 미상", "duplicate_fact": "중복", "outcome_section": "출력·완료 조건",
-                "reference_label": "기준값 라벨", "value_outside_subject_type": "변수 폭 밖의 값"}
+                "reference_label": "기준값 라벨", "value_outside_subject_type": "변수 폭 밖의 값",
+                "output_requirement": "출력 의무(…이하여야 한다)", "subject_unclear": "주어 불명확"}
 
         def _n(key):   # the producer's Counter keeps only non-zero keys: in a present block, absent is 0 (review W8)
             return _int(rb, key) or 0
@@ -346,6 +347,58 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 'Requirement Evidence' 시트를 쓰지 못했다 — {str(rb['evidence_sheet_error'])[:160]}."
                if rb.get("evidence_sheet_error") else ""),
             tone=_tone(bool(rb.get("evidence_sheet_error")))))
+        out.extend(_traced_system_items(rb, _why))
+    return out + _sts_tail_items(qr)
+
+
+def _traced_system_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[Dict[str, Any]]:
+    """(R29, G4(b)) 시스템 요구 추적 경계 TC. 블록에 `system_documents` 가 없으면 이 기능 전의 산출물이라 항목을
+    만들지 않는다(없음과 0 을 구분). 문서를 하나도 안 줬으면 '입력 없음', 못 읽었으면 경고."""
+    docs = rb.get("system_documents")
+    if not isinstance(docs, list):
+        return []
+    skips = [str(s) for s in (rb.get("system_input_skips") or [])]
+    errors = [d for d in docs if isinstance(d, dict) and d.get("error")]
+    read = [d for d in docs if isinstance(d, dict) and "blocks" in d]
+
+    def _n(key):
+        return _int(rb, "traced:" + key) or 0
+    problems = [f"{d.get('doc')} {d.get('file') or ''} 읽기 실패 — {str(d.get('error'))[:120]}" for d in errors] \
+        + [f"로컬화 실패 — {s[:160]}" for s in skips] \
+        + [f"{d.get('doc')} {d.get('file') or ''} 에서 시스템 요구 표를 하나도 찾지 못했다(양식이 다르거나 다른 문서)"
+           for d in read if not d.get("blocks")]   # (review W3) read but empty is not "no input"
+    given = {str(d.get("doc")) for d in docs if isinstance(d, dict)}
+    absent = [label for label in ("SyRS", "SyDS") if label not in given]
+    if not read:
+        return [_item(
+            "sts_traced_system_boundary", "시스템 요구 추적 경계 TC", "입력 없음" if not problems else "읽지 못함",
+            ("SyRS·SyDS 를 받지 못해 SRS 가 직접 적은 임계만 경계 TC 가 됐다 — SRS 블록의 Related ID 가 가리키는 시스템 "
+             "요구의 임계(정본 STS 가 자극으로 쓰는 값 중 SRS 밖의 것)는 시험하지 않았다."
+             + (" " + " / ".join(problems) if problems else "")),
+            tone=_tone(bool(problems)))]
+    skipped = {k.split(":", 2)[2]: v for k, v in rb.items() if k.startswith("traced:skipped:") and v}
+    labels = {**why_text, "already_stepped": "SRS·다른 블록에서 이미 시험(같은 주어 표기일 때만)"}
+    files = ", ".join(f"{d.get('doc')} {d.get('file') or ''} 블록 {d.get('blocks')}" for d in read)
+    by_block = rb.get("traced_facts_by_block") if isinstance(rb.get("traced_facts_by_block"), dict) else {}
+    return [_item(
+        "sts_traced_system_boundary", "시스템 요구 추적 경계 TC",
+        f"TC {_n('tcs')} · 스텝 {_n('steps')} · 사실 {_n('facts_used')} / {_n('facts')}",
+        f"SRS 블록의 Related ID 가 **직접** 가리키는 시스템 블록(1 홉, 값으로 찾아 붙이지 않음)의 문장을 요구 원문과 같은 "
+        f"규칙으로 읽어 경계 3점을 두었다 — 스텝은 시스템 문장을 인용하고 출처 블록을 적는다('Requirement Evidence' "
+        f"시트의 Source Document). 시험 결과(Output 줄·Action·출력 의무)는 자극으로 쓰지 않는다. 문서: {files}"
+        + (f" · 받지 않은 문서: {', '.join(absent)}" if absent else "")
+        + f". 인용 {_n('cited')} 회 중 문서에 없는 ID {_n('cited_not_in_documents')}."
+        + (" 사실을 가장 많이 낸 블록: " + ", ".join(f"{k} {v}" for k, v in list(by_block.items())[:5])
+           + f" (블록 {_int(rb, 'traced_blocks_used') or len(by_block)} 개 — 여러 요구가 같은 블록을 인용하면 요구마다 "
+             "다시 시험한다)." if by_block else "")
+        + (" 못 쓴 사실: " + ", ".join(f"{labels.get(k, k)} {v}" for k, v in sorted(skipped.items())) + "."
+           if skipped else "")
+        + (" " + " / ".join(problems) if problems else ""),
+        tone=_tone(bool(problems)))]
+
+
+def _sts_tail_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
 
     # 안전 관련 TC — 분모(전체 TC)와 함께 둬야 "142건" 이 많은지 적은지 읽힌다.
     safety_tc = _int(qr, "safety_test_cases")
