@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-
 _FID_PAT = re.compile(r"(SwUFn_\d+)")
 
 

@@ -165,4 +165,108 @@ describe('Settings', () => {
     // Assert
     expect(screen.getByPlaceholderText('my-project')).toBeInTheDocument();
   });
+
+  it('인터랙션: SCM 폼에 정적분석 폴더(codesonar) 필드가 VectorCAST 필드와 함께 표시된다', async () => {
+    // Arrange — 정적분석 패널(linked_docs.codesonar) 데이터 소스를 UI로 등록 가능해야 함
+    const user = userEvent.setup();
+    render(<Settings />);
+
+    // Act
+    await user.click(screen.getByText('+ 새 SCM 등록'));
+
+    // Assert — VectorCAST 결과 로그와 별개로 '정적분석 폴더' 필드가 렌더된다
+    // (VectorCAST 문구는 codesonar hint에도 등장하므로 getAllByText, '정적분석 폴더' 라벨은 유일)
+    expect(screen.getAllByText(/VectorCAST 결과 로그/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/정적분석 폴더/)).toBeInTheDocument();
+  });
+
+  // R25: 결함 판별 근거 자료(시스템 설계서·문제관리 대장·배포 기록·단위시험 로그 이력·결함 주입 시험)를 입력 문서로 등록
+  it('인터랙션: 결함 판별 근거 자료 칸이 표시되고 등록 시 새 키가 서버로 간다', async () => {
+    const user = userEvent.setup();
+    const { post: mockPost } = await import('../api.js');
+    mockPost.mockResolvedValueOnce({ item: { linked_docs: {
+      syds: 'U:/p/SyDS.docx', problem_list: '', release_notes: [], ut_log_history: ['U:/p/Log/v1.02'],
+      fault_injection: [],
+    } } });
+    render(<Settings />);
+    await user.click(screen.getByText('+ 새 SCM 등록'));
+
+    expect(screen.getByText('결함 판별 근거 자료')).toBeInTheDocument();
+    expect(screen.getByText('SyDS 경로')).toBeInTheDocument();
+    expect(screen.getByText('문제관리 대장 경로')).toBeInTheDocument();
+    expect(screen.getByText(/FW 배포 기록/)).toBeInTheDocument();
+    expect(screen.getByText(/단위시험 로그 이력/)).toBeInTheDocument();
+    expect(screen.getByText(/결함 주입 시험 · FMEA/)).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText('my-project'), 'p1');
+    await user.type(screen.getByPlaceholderText('My Project'), 'P1');
+    await user.type(screen.getByPlaceholderText('/docs/syds.docx'), 'U:/p/SyDS.docx');
+    const logInput = screen.getByPlaceholderText(/01\.Log\\v1\.02_230109/);
+    await user.type(logInput, 'U:/p/Log/v1.02{Enter}');
+    await user.click(screen.getByText('등록'));
+
+    const call = mockPost.mock.calls.find(c => c[0] === '/api/scm/register');
+    expect(call).toBeTruthy();
+    const docs = call[1].linked_docs;
+    expect(docs.syds).toBe('U:/p/SyDS.docx');
+    expect(docs.ut_log_history).toEqual(['U:/p/Log/v1.02']);
+    expect(docs.release_notes).toEqual([]);
+    expect(docs.fault_injection).toEqual([]);
+    expect(docs.problem_list).toBe('');
+  });
+
+  // R25 리뷰 I8: 기존 SCM 을 편집해 저장하면 등록돼 있던 목록 칸(순서 포함)과 SyRS/SyDS 가 그대로 실린다
+  it('인터랙션: 기존 SCM 편집 저장 시 결함 판별 근거 자료가 보존된다', async () => {
+    const { api } = await import('../api.js');
+    const saved = { id: 'p1', name: 'P1', scm_type: 'svn', linked_docs: {
+      srs: 'U:/p/SRS.docx', syrs: 'U:/p/SyRS.docx', syds: 'U:/p/SyDS.docx',
+      ut_log_history: ['U:/p/Log/v1.02', 'U:/p/Log/v1.05'], release_notes: ['U:/p/06.FW 배포'],
+    } };
+    api.mockImplementation((url, opts) => {
+      if (url === '/api/scm/list') return Promise.resolve([saved]);
+      if (url === '/api/scm/update/p1') return Promise.resolve({ item: JSON.parse(opts.body) });
+      return Promise.resolve(undefined);
+    });
+    const user = userEvent.setup();
+    render(<Settings />);
+    await waitFor(() => expect(screen.getByText('편집')).toBeInTheDocument());
+    await user.click(screen.getByText('편집'));
+    expect(screen.getByText('U:/p/Log/v1.02')).toBeInTheDocument();
+    await user.click(screen.getByText('수정 저장'));
+
+    const call = api.mock.calls.find(c => c[0] === '/api/scm/update/p1');
+    expect(call).toBeTruthy();
+    const docs = JSON.parse(call[1].body).linked_docs;
+    expect(docs.ut_log_history).toEqual(['U:/p/Log/v1.02', 'U:/p/Log/v1.05']);
+    expect(docs.release_notes).toEqual(['U:/p/06.FW 배포']);
+    expect(docs.syrs).toBe('U:/p/SyRS.docx');
+    expect(docs.syds).toBe('U:/p/SyDS.docx');
+    expect(docs.fault_injection).toEqual([]);          // a key the saved entry lacked comes from the form default
+    expect(docs.problem_list).toBe('');
+    expect(docs.syits).toBe('');                        // previously missing from the form default (undefined)
+  });
+
+  // STS-SETTINGS-010: 입력 자료 — 기준 SCM 연결문서 상속(이슈③, 이중 입력 제거)
+  it('인터랙션: SCM이 있으면 입력 자료에 기준 SCM 상속 UI가 표시되고 빈 칸 채우기가 동작한다', async () => {
+    // Arrange: '/api/scm/list'만 SCM 목록 반환(다른 api 호출은 기존대로 undefined)
+    const { api } = await import('../api.js');
+    api.mockImplementation((url) =>
+      url === '/api/scm/list'
+        ? Promise.resolve([{ id: 'kjpds02', name: 'KJPDS02', linked_docs: { srs: 'C:/d/SRS.docx', uds: 'C:/d/UDS.docx' } }])
+        : Promise.resolve(undefined));
+    const user = userEvent.setup();
+    render(<Settings />);
+
+    // Act: 기준 SCM 상속 셀렉터가 나타나면 SCM 선택 후 '빈 칸 채우기'
+    await waitFor(() => expect(screen.getByText(/기준 SCM \(연결 문서 상속\)/)).toBeInTheDocument());
+    await user.selectOptions(screen.getByLabelText(/기준 SCM \(연결 문서 상속\)/), 'kjpds02');
+    await user.click(screen.getByText('빈 칸 채우기'));
+
+    // Assert: doc_paths에 SCM 연결문서가 복사됨(localStorage)
+    await waitFor(() => {
+      const stored = JSON.parse(localStorageMock.getItem('devops_v2_doc_paths') || '{}');
+      expect(stored.srs).toBe('C:/d/SRS.docx');
+      expect(stored.uds).toBe('C:/d/UDS.docx');
+    });
+  });
 });

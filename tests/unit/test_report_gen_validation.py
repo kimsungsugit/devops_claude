@@ -1,8 +1,6 @@
 """Unit tests for report_gen.validation pure-logic functions."""
 from __future__ import annotations
 
-import pytest
-
 
 class TestValidCallNames:
     def test_filters_keywords_and_short_upper(self):
@@ -204,7 +202,11 @@ class TestParseQualityGateSummary:
             "- Called fill: `25` / `42` (59.5%)\n"
         )
         result = _parse_quality_gate_summary(text)
-        assert result["gate_pass"] == "true"
+        # ⚠ 계약 변경(2026-08-03): 예전엔 `'true'` **문자열**이었다. 같은 파일을 읽는
+        #    uds.py 쪽은 bool 을 냈고, JS 에서 `'false'` 는 truthy 라 화면에 닿으면
+        #    FAIL 이 PASS 로 그려진다. 이제 둘 다 `report_gen.gate_report` 단일 출처.
+        assert result["gate_pass"] is True
+        assert result["gate_pass_status"] == "ok"
         assert "description_fill" in result["metrics"]
         assert result["metrics"]["description_fill"] == "71.4%"
 
@@ -212,8 +214,28 @@ class TestParseQualityGateSummary:
         from report_gen.validation import _parse_quality_gate_summary
 
         result = _parse_quality_gate_summary("")
-        assert result["gate_pass"] == ""
+        # 빈 입력은 "판정 불가" 지 통과가 아니다 — `''`(falsy) 가 아니라 명시적 None.
+        assert result["gate_pass"] is None
+        assert result["gate_pass_status"] == "not_found"
         assert result["metrics"] == {}
+
+    def test_two_gate_lines_are_unjudgeable_not_a_guess(self):
+        """본문에 `Gate pass:` 가 2회 이상이면 **어느 것도 고르지 않는다**.
+
+        예전엔 이 함수가 마지막 매치를, uds.py 가 첫 매치를 취해 같은 파일에
+        정반대 판정이 나왔다. 검토 의견 한 줄이 게이트를 뒤집는 경로였다.
+        """
+        from report_gen.validation import _parse_quality_gate_summary
+
+        result = _parse_quality_gate_summary(
+            "- Gate pass: `false`\n"
+            "- Description fill: `30` / `42` (71.4%)\n"
+            "\n## 검토 의견\n이전 릴리스에선 Gate pass: True 였습니다.\n"
+        )
+        assert result["gate_pass"] is None
+        assert result["gate_pass_status"] == "ambiguous"
+        # 지표는 그대로 읽힌다 — 판정만 보류한다.
+        assert result["metrics"]["description_fill"] == "71.4%"
 
 
 class TestLoadUdsPayloadForDocx:
@@ -225,6 +247,7 @@ class TestLoadUdsPayloadForDocx:
 
     def test_loads_payload_json(self, tmp_path):
         import json
+
         from report_gen.validation import _load_uds_payload_for_docx
 
         docx_path = tmp_path / "test.docx"
@@ -251,7 +274,7 @@ class TestGenerateUdsConstraintsReport:
             }
         }
         out = tmp_path / "constraints.md"
-        result = generate_uds_constraints_report(payload, str(out))
+        generate_uds_constraints_report(payload, str(out))   # 파일 생성이 목적
         assert (tmp_path / "constraints.md").exists()
         text = out.read_text(encoding="utf-8")
         assert "UDS Constraint" in text
@@ -323,8 +346,9 @@ class TestValidateUdsDocxStructure:
         assert any("not found" in i for i in result["issues"])
 
     def test_docx_not_installed(self, monkeypatch):
-        from report_gen.validation import validate_uds_docx_structure
         import builtins
+
+        from report_gen.validation import validate_uds_docx_structure
 
         original_import = builtins.__import__
 

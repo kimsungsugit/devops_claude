@@ -1,13 +1,11 @@
 """Unit tests for workflow.rag.searcher — tokenizer, keyword search, RRF."""
 from __future__ import annotations
 
-import pytest
-
 from workflow.rag.searcher import (
+    _apply_boosts,
+    _rrf_merge,
     _tokenize,
     keyword_search,
-    _rrf_merge,
-    _apply_boosts,
 )
 
 

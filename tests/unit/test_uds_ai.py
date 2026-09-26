@@ -7,18 +7,18 @@ import json
 from unittest.mock import patch
 
 from workflow.uds_ai import (
-    _trim_text,
+    _build_section_prompt,
+    _collect_function_set,
+    _dynamic_max_retries,
+    _extract_json_payload,
     _normalize_evidence_item,
     _normalize_evidence_list,
     _normalize_section,
-    _extract_json_payload,
     _parse_decision,
     _quality_warnings,
-    _validate_sections,
     _repair_missing_sections,
-    _build_section_prompt,
-    _dynamic_max_retries,
-    _collect_function_set,
+    _trim_text,
+    _validate_sections,
 )
 
 
@@ -431,3 +431,200 @@ class TestQualityWarningsSemanticJudge:
         ]
         result = categorize_warnings(warnings)
         assert result["judge"] == 1
+
+
+class TestFunctionDescriptionPass2Body:
+    """2차 refinement의 body는 function_details가 아니라 body_snippets 인자에서 온다.
+
+    회귀 대상: uds_ai가 `function_details[fid]["body_text"]`를 읽었으나 어느 detail 생성
+    지점도 그 키를 넣지 않아 Pass 2가 **한 번도 실행된 적 없는 dead path**였다.
+    """
+
+    _FD = {
+        "F1": {
+            "name": "foo_func",
+            "description_source": "inference",
+            "prototype": "void foo_func(void)",
+        },
+    }
+    _BODY = "if (u16t_Data > 0) { s_DoSomething(); } else { s_HandleError(); }"
+
+    def _run(self, body_snippets):
+        stages: list = []
+
+        def _fake_call_role(cfg, *, role, stage, messages, **kw):
+            stages.append(stage)
+            return {"ok": True, "output": json.dumps(
+                {"foo_func": "주기적으로 호출되어 입력을 검사하고 오류를 처리한다."},
+                ensure_ascii=False,
+            )}
+
+        with patch("workflow.uds_ai.load_oai_configs", return_value=[{"model": "gemini-flash"}]), \
+                patch("workflow.uds_ai._call_role", side_effect=_fake_call_role):
+            from workflow.uds_ai import generate_ai_function_descriptions
+            res = generate_ai_function_descriptions(
+                dict(self._FD), {}, body_snippets=body_snippets,
+            )
+        return stages, res
+
+    def test_pass1_always_runs(self):
+        stages, res = self._run(None)
+        assert any(s.startswith("func_desc_batch_") for s in stages)
+        assert res.get("foo_func")
+
+    def test_without_snippets_pass2_does_not_run(self):
+        """인자가 없으면 2차 패스는 돌지 않는다(기존 동작 — 단, 이제 사유가 로그에 남는다)."""
+        stages, _ = self._run(None)
+        assert [s for s in stages if "p2" in s] == []
+
+    def test_with_snippets_pass2_runs(self):
+        """snippet을 넘기면 2차 패스가 실제로 실행된다(과거엔 넘길 방법 자체가 없었다)."""
+        stages, _ = self._run({"F1": self._BODY})
+        assert [s for s in stages if "p2" in s], f"pass2 미실행: {stages}"
+
+    def test_legacy_body_key_in_detail_still_works(self):
+        """외부 호출자가 detail에 body를 직접 채운 경우도 폴백으로 인정한다."""
+        fd = {"F1": {**self._FD["F1"], "body": self._BODY}}
+        stages: list = []
+
+        def _fake_call_role(cfg, *, role, stage, messages, **kw):
+            stages.append(stage)
+            return {"ok": True, "output": json.dumps(
+                {"foo_func": "주기적으로 호출되어 입력을 검사하고 오류를 처리한다."},
+                ensure_ascii=False,
+            )}
+
+        with patch("workflow.uds_ai.load_oai_configs", return_value=[{"model": "gemini-flash"}]), \
+                patch("workflow.uds_ai._call_role", side_effect=_fake_call_role):
+            from workflow.uds_ai import generate_ai_function_descriptions
+            generate_ai_function_descriptions(fd, {}, body_snippets=None)
+        assert [s for s in stages if "p2" in s], f"legacy body 폴백 실패: {stages}"
+
+    def test_short_body_is_not_a_pass2_candidate(self):
+        """20자 미만 body는 정제 근거가 못 되므로 후보에서 빠진다(기존 규칙 유지)."""
+        stages, _ = self._run({"F1": "x = 1;"})
+        assert [s for s in stages if "p2" in s] == []
+
+
+class TestAiReviewDecisionSurfaced:
+    """retry 소진 후에도 reject인 초안을 승인본과 구분할 수 있어야 한다.
+
+    회귀 대상: while 루프가 max_retries를 소진하면 decision이 여전히 reject여도
+    best_raw를 그대로 최종본으로 반환했고, 그 사실이 반환값 어디에도 없었다.
+    """
+
+    @staticmethod
+    def _payload_json():
+        base = {"text": "이 단위는 입력을 검사하고 결과를 반환한다.", "evidence": []}
+        return json.dumps({
+            "overview": dict(base), "requirements": dict(base),
+            "interfaces": dict(base), "uds_frames": dict(base), "notes": dict(base),
+            "logic_diagrams": [],
+        }, ensure_ascii=False)
+
+    def _run(self, *, review_verdict: str):
+        import config as _config
+        payload_json = self._payload_json()
+
+        def _fake_call_role(cfg, *, role, stage, messages, **kw):
+            if stage == "uds_review":
+                return {"ok": True, "output": json.dumps(
+                    {"decision": review_verdict, "reason": "근거 불충분"}, ensure_ascii=False)}
+            if stage == "uds_audit":
+                return {"ok": True, "output": json.dumps({"decision": "accept", "reason": ""})}
+            return {"ok": True, "output": payload_json}
+
+        with patch("workflow.uds_ai.load_oai_config", return_value={"model": "m"}), \
+                patch("workflow.uds_ai._call_role", side_effect=_fake_call_role), \
+                patch("workflow.uds_ai._load_prompt", return_value="prompt"), \
+                patch.object(_config, "UDS_JUDGE_ENABLED", False):
+            from workflow.uds_ai import generate_uds_ai_sections
+            return generate_uds_ai_sections(
+                requirements_text="요구사항", source_sections={},
+                notes_text="", logic_items=[], detailed=False,
+            )
+
+    def test_reject_is_reported_in_result(self):
+        sections = self._run(review_verdict="reject")
+        assert sections is not None
+        assert sections["ai_review_decision"] == "reject"
+        assert sections["ai_review_retry_count"] >= 1
+        assert any("[ai-review]" in w for w in sections["quality_warnings"]), \
+            sections["quality_warnings"]
+
+    def test_accept_has_no_review_warning(self):
+        sections = self._run(review_verdict="accept")
+        assert sections is not None
+        assert sections["ai_review_decision"] == "accept"
+        assert sections["ai_review_retry_count"] == 0
+        assert not [w for w in sections["quality_warnings"] if "[ai-review]" in w]
+
+
+class TestParallelSectionsPathDeclaresUnreviewed:
+    """UDS_PARALLEL_SECTIONS=True 경로는 검증 루프를 타지 않는다 — 그 사실이 드러나야 한다.
+
+    회귀 대상: 이 분기는 reviewer/auditor/semantic/judge를 전혀 거치지 않고 조기 return
+    하는데, 순차 경로가 채우는 confidence/semantic_validated/semantic_report/
+    ai_review_decision/ai_review_retry_count 를 하나도 안 채웠다. 소비자가 `.get()`으로
+    읽으면 None(=falsy)이라 '문제 없음'과 구분되지 않았다.
+    """
+
+    @staticmethod
+    def _section_json():
+        base = {"text": "이 단위는 입력을 검사하고 결과를 반환한다.", "evidence": []}
+        return json.dumps({
+            "overview": dict(base), "requirements": dict(base),
+            "interfaces": dict(base), "uds_frames": dict(base), "notes": dict(base),
+            "logic_diagrams": [],
+        }, ensure_ascii=False)
+
+    def _run(self, *, parallel: bool):
+        import config as _config
+        payload_json = self._section_json()
+
+        def _fake_call_role(cfg, *, role, stage, messages, **kw):
+            if stage == "uds_review":
+                return {"ok": True, "output": json.dumps({"decision": "accept", "reason": ""})}
+            if stage == "uds_audit":
+                return {"ok": True, "output": json.dumps({"decision": "accept", "reason": ""})}
+            return {"ok": True, "output": payload_json}
+
+        def _fake_parallel(cfg, user_payload, analysis_payload):
+            return json.loads(payload_json)
+
+        with patch("workflow.uds_ai.load_oai_config", return_value={"model": "m"}), \
+                patch("workflow.uds_ai._call_role", side_effect=_fake_call_role), \
+                patch("workflow.uds_ai._parallel_sections", side_effect=_fake_parallel), \
+                patch("workflow.uds_ai._load_prompt", return_value="prompt"), \
+                patch.object(_config, "UDS_JUDGE_ENABLED", False), \
+                patch.object(_config, "UDS_PARALLEL_SECTIONS", parallel):
+            from workflow.uds_ai import generate_uds_ai_sections
+            return generate_uds_ai_sections(
+                requirements_text="요구사항", source_sections={},
+                notes_text="", logic_items=[], detailed=False,
+            )
+
+    def test_parallel_path_marks_result_unreviewed(self):
+        sections = self._run(parallel=True)
+        assert sections is not None
+        assert sections["ai_review_decision"] == "not_reviewed"
+        assert sections["ai_review_retry_count"] == 0
+        assert sections["semantic_validated"] is False
+        assert sections["confidence"] == 0.0
+        assert isinstance(sections["semantic_report"], dict)
+        assert any("[ai-review]" in w and "UDS_PARALLEL_SECTIONS" in w
+                   for w in sections["quality_warnings"]), sections["quality_warnings"]
+
+    def test_parallel_and_sequential_return_the_same_keys(self):
+        """계약 불일치 자체가 결함이었다 — 두 경로의 키 집합이 같아야 한다."""
+        par = self._run(parallel=True)
+        seq = self._run(parallel=False)
+        assert par is not None and seq is not None
+        assert set(par) == set(seq), set(par) ^ set(seq)
+
+    def test_sequential_path_is_still_reviewed(self):
+        """대조군: 순차 경로는 not_reviewed가 아니어야 한다(무조건 미검토 표시 방지)."""
+        sections = self._run(parallel=False)
+        assert sections is not None
+        assert sections["ai_review_decision"] == "accept"
+        assert not [w for w in sections["quality_warnings"] if "UDS_PARALLEL_SECTIONS" in w]

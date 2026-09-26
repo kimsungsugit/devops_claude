@@ -1,13 +1,15 @@
 """Auto-generated router: code"""
-from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
-import json
-import traceback
 import logging
-from pathlib import Path
-from backend.helpers import _extract_call_graph_payload, _extract_dependency_map_payload, _get_source_sections_cached, _to_swcom_from_fn
+from typing import Any, Dict, List
 
+from fastapi import APIRouter, HTTPException, Query
+
+from backend.helpers import (
+    _extract_call_graph_payload,
+    _extract_dependency_map_payload,
+    _get_source_sections_cached,
+    _to_swcom_from_fn,
+)
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")

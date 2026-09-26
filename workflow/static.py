@@ -1,13 +1,14 @@
 # /app/workflow/static.py
 import json
-import os
 import re
 import time as _time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
 from xml.etree import ElementTree as ET
+
 import analysis_tools as tools
+
 from .common import Issue, standardize_result
 
 _DEFAULT_TOTAL_TIMEOUT = 3600

@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
-import time
 import logging
+import time
 from collections import defaultdict
 from typing import Dict
 
@@ -98,12 +98,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 _CLOUDIUM_PATH_KEYS = frozenset({
     "path", "file_path", "doc_path", "document_path", "target",
     "uds_path", "sts_path", "suts_path", "sits_path",
-    "srs_path", "sds_path",
+    "srs_path", "sds_path", "syrs_path",
     "template_path", "ai_example_path", "ai_examples_path",
     "source_root", "source_dir", "report_dir", "cache_root",
     "folder", "root", "status_path",
     "validation_report_path", "residual_report_path",
     "stp_path", "hsis_path", "output_dir",
+    # 같은 종류의 납품 정본 — 템플릿 후보로 쓰인다(`docgen_template_source`).
+    # cloudium(`U:`)에 등록되므로 다른 문서 경로와 같은 게이트를 타야 한다.
+    "reference_doc_path",
     # SwReport 통합 Summary — source_paths(JSON list)의 element(단일 path)는 C-N1
     # list 처리가 parent_key="source_paths"로 _check_path_value를 호출하므로 여기 등록 시
     # 각 element가 cloudium gate 검사됨 (리뷰 S3/X4 — 방어심층 1단 복원).

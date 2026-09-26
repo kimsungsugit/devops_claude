@@ -1,0 +1,257 @@
+﻿SwUFn ID	함수명	현재 Related ID	계층(자동판정 — 휴리스틱이며 확정 아님, 오분류 발견 시 알려주십시오)	제외 사유
+SwUFn_35129	CheckProgDependencies	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35130	ChkProgRespPending	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35163	ClearReprogActive	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3523	EepConstAddressToValue	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3538	EepEraseBoundaryPreciseSector	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3528	EepHasMgmtStatusError	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3527	EepIsCommandBusy	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3537	EepIsFullPreciseSector	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3530	EepLoadPhraseWord	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3522	EEPROM_ErasePreciseBlock	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3536	EepServicePreciseEraseCallback	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3532	EepSetupFCCOB	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3526	EepTryAddOffset	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3535	EepValidatePreciseEraseRange	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3524	EepValueToVolatileWordAddress	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3525	EepValueToWordAddress	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3508	EraseFlashSector	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3506	FTMRZ_Init	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3509	FTMRZ_Prog_Phrase	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1196	g_InlineModeEEPROMSet	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1173	g_SysEepromCtrl_SafeWrite_ProcessQueue	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3583	LinUdsInit	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35172	LinUdsToTp	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3566	MainInitReprogServices	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3570	MainProcessReprogCycle	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3568	MainStartReprogSession	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3507	PFLASH_Send_Command	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1186	s_DiagEepromWrite_AssistFail	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1185	s_DiagEepromWrite_CloseFail	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1178	s_DiagEepromWrite_OpenFail	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1163	s_EepromReadVersionData	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1162	s_EepromSysInfoDataRead_All	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1189	s_SysEepromCtrl_AddU32_Guarded	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1192	s_SysEepromCtrl_CopyTunningTables	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1161	s_SysEepromCtrl_InitializeEepromData	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1191	s_SysEepromCtrl_MakeEepromAddr	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1194	s_SysEepromCtrl_ReadByte_AbsAddr	SWCOM_33	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1180	s_SysEepromCtrl_ResetControlAndOffsets	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1184	s_SysEepromCtrl_ResetDiagAndIndices	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1181	s_SysEepromCtrl_ResetGains	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1179	s_SysEepromCtrl_ResetInlineAndInfo	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1182	s_SysEepromCtrl_ResetSpeeds	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1159	s_SysEepromCtrl_ResetTables	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1183	s_SysEepromCtrl_ResetTempAndNewParams	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1160	s_SysEepromCtrl_ResetVariables	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1193	s_SysEepromCtrl_SafeWrite_EnqueueDispatch	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1170	s_SysEepromCtrl_SafeWrite_WriteCallback	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1190	s_SysEepromCtrl_ScaleU8ToU16	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1195	s_SysEepromCtrl_WriteByte_AbsAddr	SWCOM_33	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1174	s_SysEepromCtrl_WriteData_Direct	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1175	s_SysEepromCtrl_WriteSystemFlag	SWCOM_11	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_33100	s_UDS_MakeEepromAddr	SWCOM_33	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2108	SetupFCCOB	SWCOM_21	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35144	sf_BuildRequestDownloadResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35137	sf_BuildRoutineControlResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35146	sf_BuildTransferDataResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35150	sf_CaptureCrc32Data	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35133	sf_ClearPreviousVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35141	sf_CommitVerifiedAppVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35162	sf_EraseApplicationArea	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35139	sf_EraseApplicationSectors	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35156	sf_ExecuteStandardSecureFlashVerification	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35134	sf_GetEepromVersionState	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35154	sf_HandleFirmwareTransferData	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35153	sf_HandleSignatureTransferData	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35157	sf_HandleStandardSecureFlashResult	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35161	sf_IsAppVersionValid	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35166	sf_IsEepromVersionValid	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35160	sf_IsFirmwareInstalled	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35149	sf_IsFirmwareTransferLengthAccepted	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35140	sf_IsRequestedVersionAllowed	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35145	sf_IsTransferDataBlockSequenceValid	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3553	sf_LinAccumulateChecksum	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3547	sf_LinBreakDetectWait	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3554	sf_LinCheckSum	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3560	sf_LinCompleteRxFrame	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3549	sf_LinDataPolling	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3550	sf_LinDecrementWordToZero	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3559	sf_LinHandleDataState	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3558	sf_LinHandlePidState	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3561	sf_LinHandleReceiveState	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3562	sf_LinHandleTransmitState	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3548	sf_LinHeaderCheck	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3551	sf_LinIncrementByte	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3552	sf_LinIncrementWord	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3555	sf_LinIntCheckSum	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3557	sf_LinStartDataTx	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3556	sf_LinStartPendingResponseTx	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35171	sf_LinTpGetNextCfNum	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35175	sf_LinTpParserMF	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35174	sf_LinTpParserSF	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3590	sf_LinUdsChkProDepenency	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3597	sf_LinUdsCommunicationControl	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3596	sf_LinUdsControlDTCSetting	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3586	sf_LinUdsDiagnosticSessionControl	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3595	sf_LinUdsECUReset	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3589	sf_LinUdsEraseMemory	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35100	sf_LinUdsIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3598	sf_LinUdsNegativeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3599	sf_LinUdsOutOfRangeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3592	sf_LinUdsRequestDownload	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35122	sf_LinUdsResponsePending	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3588	sf_LinUdsRoutineControl	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3587	sf_LinUdsSecurityAccess	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35101	sf_LinUdsSequenceErrorResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3593	sf_LinUdsTransferData	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3594	sf_LinUdsTransferExit	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3591	sf_LinUdsVersionCheck	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35147	sf_LoadSignatureHeader	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35142	sf_ParseRequestDownloadField	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35155	sf_PushSecureFlashRange	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35131	sf_ReadAppVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35164	sf_ReadEepromVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35127	sf_ReadU16MsbFirst	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35128	sf_ReadU32MsbFirst	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3584	sf_ResetAfterNegativeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35143	sf_ResolveRequestDownloadTarget	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35159	sf_RunCrc32Verification	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35158	sf_RunStandardSecureFlashVerification	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35132	sf_SavePreviousVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35124	sf_SecurityAccessAlgorithm	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35123	sf_SecurityCheck	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35110	sf_SendCommunicationOutOfRangeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35107	sf_SendDispatchOutOfRangeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35106	sf_SendMiscNrcResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35117	sf_SendOptionalIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35116	sf_SendRequestDownloadIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35109	sf_SendRequestDownloadOutOfRangeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35105	sf_SendResetNrcResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35114	sf_SendRoutineIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35103	sf_SendRoutineNrcResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35108	sf_SendRoutineOutOfRangeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35120	sf_SendRoutineSequenceErrorResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35113	sf_SendSecurityIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35119	sf_SendSecuritySequenceErrorResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35112	sf_SendSessionIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35102	sf_SendSessionNrcResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35118	sf_SendSessionSequenceErrorResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35115	sf_SendTransferIncorMsgLengthResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35111	sf_SendTransferOutOfRangeResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35121	sf_SendTransferSequenceErrorResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35104	sf_SendVersionNrcResponse	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35148	sf_StoreSignatureData	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35136	sf_SyncEepromPreviousVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35135	sf_SyncFlashPreviousVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35138	sf_SyncPreviousVersionBeforeErase	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35125	sf_TryAddU32	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35126	sf_TrySubU16	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35152	sf_UpdateTransferExitSequenceForFirmware	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35167	sf_VersionsMatch	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35165	sf_WriteEepromVersion	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35151	sf_WriteTransferDataToFlash	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2107	WriteWord	SWCOM_21	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3534	WriteWord	SWCOM_35	BOOT_REPROG	부트로더·재프로그래밍(flash/EEPROM) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2205	ADC_MONITOR_HWEnDi	SWCOM_22	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0226	g_DrvIn_DRV8706SQ_Init_Left	SWCOM_02	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0916	g_PLLOnWakeNotify	SWCOM_09	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3517	lin_lld_sci_init	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3539	LinInit	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3543	LinInt_PrepareResponsePending	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3544	LinInt_StartInterruptMode	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3545	LinInt_StopInterruptMode	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35173	LinRawToTp	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3541	LinRecv	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3540	LinSend	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3542	LinSendForProgSession	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35170	LinTpMsgInit	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1718	PE_Determine_Reset_Source	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1717	PE_Get_Reset_Source	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1713	PE_Initialize_Communication	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1712	PE_Initialize_Core	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1720	PE_Initialize_GPIO	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1721	PE_Initialize_GPIO_Part1	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1722	PE_Initialize_GPIO_Part2	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1719	PE_Initialize_Interrupt_Priorities	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1715	PE_Initialize_Motor_PWM	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1716	PE_Initialize_Peripherals	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1714	PE_Initialize_Timers	SWCOM_17	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1802	PL0_WAKE_UP_OnInterrupt	SWCOM_18	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2402	PP1_BUZZER_PWM_Disable	SWCOM_24	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2401	PP1_BUZZER_PWM_Enable	SWCOM_24	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2404	PP1_BUZZER_PWM_Init	SWCOM_24	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2403	PP1_BUZZER_PWM_SetRatio16	SWCOM_24	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2406	PP1_SetRatio	SWCOM_24	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2305	PP2_SetRatio	SWCOM_23	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_2306	PP4_SetRatio	SWCOM_23	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1801	PT6_MOTOR_SPEED_OnCapture	SWCOM_18	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3505	RTI_CheckTimer	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3503	RTI_Disable	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3504	RTI_Enable	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3502	RTI_Init	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0310	s_ApiIn_LinRx_ProcessSbcmMsg	SWCOM_03	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0311	s_ApiIn_LinRx_ProcessSbcmMsg2	SWCOM_03	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0438	s_ApiIn_PackSBCM0Bytes	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0437	s_ApiIn_ReadSBCM0RawSignals	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1222	s_DriveIC_ClearFaults	SWCOM_12	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0224	s_DrvIn_SPI_WriteDrv8706	SWCOM_02	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0225	s_DrvIn_SPI_WriteIIM20670	SWCOM_02	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0804	s_DrvOut_SetPWMDutyDirect	SWCOM_08	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0217	s_IIM20670_Init	SWCOM_02	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0713	s_LinTx_DTC_ProcessTable	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0706	s_LinTx_DTC_WriteBuzzerError	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0705	s_LinTx_DTC_WriteHallSensorError	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0704	s_LinTx_DTC_WriteHighVoltage	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0707	s_LinTx_DTC_WriteMotorCircuitOpen	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0709	s_LinTx_DTC_WriteMotorOutShortHigh	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0708	s_LinTx_DTC_WriteMotorOutShortLow	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0712	s_LinTx_DTC_WriteOverCurrent	SWCOM_07	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0805	s_PWM_SetFrequency	SWCOM_08	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3546	SCI0_ISR	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3519	SCI_T_Bytes	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1803	SPICtrlTimer_OnInterrupt	SWCOM_18	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3514	TIM0_Ch0_ISR	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3513	TIM0_GetNextCompareValue	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3510	TIM0_Init	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3511	TIM0_Start	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_3512	TIM0_Stop	SWCOM_35	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0403	u16s_AdcToVoltage	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1223	u16s_DriveIC_StateHandler	SWCOM_12	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0439	u8s_ApiIn_CalcSBCM0Crc	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0920	u8s_CpuOscStatusCheck	SWCOM_09	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0919	u8s_CpuPllStatusCheck	SWCOM_09	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0921	u8s_CpustatusCheckIn1Min	SWCOM_09	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1221	u8s_DriveIC_DetectError	SWCOM_12	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0427	u8s_E2E_AC_ProFileCheck_SBCM0	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0428	u8s_E2E_AC_ProFileCheck_SBCM1	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0429	u8s_E2E_CRC_ProFileCheck_SBCM0	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0430	u8s_E2E_CRC_ProFileCheck_SBCM1	SWCOM_04	BSW_DRIVER	기본 SW 드라이버(타이머/SPI/포트/ISR) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0132	g_Lib_Sha256_Nb_Reset	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1177	g_Lib_u16bit_ArrayClear	SWCOM_11	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1176	g_Lib_u8bit_ArrayClear	SWCOM_11	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0409	s16s_ApiIn_MotorCurrent_Conv	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1187	s_Lib_SafeWriteQueue_ProcessEntry	SWCOM_11	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_1188	s_Lib_SafeWriteQueue_ProcessSafeWrites	SWCOM_11	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0142	s_sha256_accumulate_state	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0133	s_sha256_add_u32_mod	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0140	s_sha256_expand_word	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0125	s_sha256_final	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0126	s_Sha256_Hash_Init	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0123	s_sha256_init	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0141	s_sha256_round_step	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0134	s_sha256_sub_u32_guarded	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0122	s_sha256_transform	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0124	s_sha256_update	SWCOM_01	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0431	s_VsupMovingAverage8_FC	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35168	StdUtilCopyData	SWCOM_35	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_35169	StdUtilDataSet	SWCOM_35	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0411	u16s_ApiIn_ActivePwrMon_Conv	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0410	u16s_ApiIn_BuzzLvl_Conv	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0416	u16s_ApiIn_MotorFB_Conv	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0607	u16s_ApiOut_MotorPwmDuty_Conv	SWCOM_13	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0219	u16s_MotorSpeed_MovingAverage	SWCOM_02	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0425	u8g_Lib_s16bit_RangeCheck	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0424	u8g_Lib_u16bit_RangeCheck	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0423	u8g_Lib_u8bit_RangeCheck	SWCOM_04	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님
+SwUFn_0608	u8s_ApiOut_MotorCtrl_Conv	SWCOM_13	LIB_UTIL	범용 라이브러리(해시/문자열/유틸) — 앱 기능 설계(SwFn)의 대상이 아님

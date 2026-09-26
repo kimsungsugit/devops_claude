@@ -62,6 +62,9 @@ def test_sits_strategy1_trace_sheet(tmp_path: Path) -> None:
     assert ("SWRS_004", "SwITC_03") in pairs
     # 모든 행이 SITS source
     assert {r["source"] for r in res["vcast_rows"]} == {"SITS"}
+    # W6 경계: 직접 요구 매핑이 있으면 warning 없이 정상
+    assert res.get("direct_mapped", 0) > 0
+    assert "warning" not in res
 
 
 def test_sits_strategy1_empty_streak_break(tmp_path: Path) -> None:
@@ -181,3 +184,71 @@ def test_sits_explicit_sheet_name(tmp_path: Path) -> None:
     assert res["ok"] is True
     pairs = {(r["requirement_id"], r["testcase"]) for r in res["vcast_rows"]}
     assert ("SWRS_700", "SwITC_07") in pairs
+
+
+def test_sits_strategy1_recognized_but_zero_warns(tmp_path: Path) -> None:
+    """Strategy 1: 시트는 인식했으나 매핑 0건이면 warning+available_sheets를 실어 silent 폐기를
+    막는다 (SITS silent-empty 표면화). 과거엔 시트를 찾고도 0행이면 아무 신호 없이 빈 배열만
+    반환해 SITS 밴드가 조용히 비었다(Strategy2 '시트 없음' 경로만 warning을 실었음 — 비대칭 해소)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Traceability"  # Strategy1
+    ws.cell(4, 2, "SwITC_0101")            # TC는 있으나
+    ws.cell(4, 4, "설명만 있고 요구 ID 없음")   # col4+에 req id 없음 → 0행
+
+    res = jenkins_sits_extract_traceability({"path": _save(wb, tmp_path, "sits_zero.xlsx")})
+
+    assert res["ok"] is True
+    assert res["vcast_rows"] == []
+    assert res.get("direct_mapped") == 0
+    assert "warning" in res
+    assert isinstance(res.get("available_sheets"), list) and res["available_sheets"]
+
+
+def test_sits_strategy2_all_entry_fn_only_warns(tmp_path: Path) -> None:
+    """Strategy 2: 추출 행이 전부 entry_fn만(requirement_id="")이면 직접 요구 매핑이 0이므로
+    warning을 표면화한다 (W6 — testcase/entry_fn만 있는 행이 성공으로 오인돼 silent되지 않게)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "SW Integration Test"
+    ws.cell(6, 10, "Related SwRS")  # related_col=10 (본문에서 비움 → req 없음)
+    ws.cell(7, 2, "SwITC_06")
+    ws.cell(7, 3, "Verify integration: LoneFn -> Sub")
+
+    res = jenkins_sits_extract_traceability({"path": _save(wb, tmp_path, "sits_lone.xlsx")})
+
+    assert res["ok"] is True
+    assert res["vcast_rows"]                 # entry_fn 행은 존재
+    assert res.get("direct_mapped") == 0     # 직접 요구 매핑은 0
+    assert "warning" in res                  # → 표면화
+
+
+def test_sits_strategy1_related_col_beyond_199(tmp_path: Path) -> None:
+    """Strategy 1: Related ID 열이 199열을 넘어도 스캔한다.
+
+    회귀 근거 — 과거 `max_col = min(max_column or 199, 199)` 는 199를 폴백값이자
+    **하드 상한**으로 겸용했다. 실측 KJPDS02_PV SwITS(v1.02)는 Input 82열 +
+    Expected Result 113열이 붙어 max_column=205 이고 `Related ID` 가 **204열**이라
+    통째로 스캔 밖이었다: TC 54개 중 5개만 인식돼 매핑 10행(상한 해제 시 54개/357행).
+    문서는 열렸고 시트도 찾은 상태라 경고조차 뜨지 않는 침묵 손실이었다.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "3.SW Integration Test Spec"  # "test spec" 키워드 → Strategy 1
+    ws.cell(4, 2, "SwITC_SwUFn_0101_01")     # col 2 = TC id
+    ws.cell(4, 204, "SwCom_01, SwSTR_02")    # ★ 199 초과 — 구 코드에선 미스캔
+    # 199 이하 열도 여전히 읽혀야 한다(상한 제거가 기존 경로를 깨지 않는지).
+    ws.cell(5, 2, "SwITC_SwUFn_0112")
+    ws.cell(5, 4, "SwCom_30")
+
+    res = jenkins_sits_extract_traceability(
+        {"path": _save(wb, tmp_path, "sits_wide.xlsx")})
+
+    assert res["ok"] is True
+    pairs = {(r["requirement_id"], r["testcase"]) for r in res["vcast_rows"]}
+    assert ("SWCOM_01", "SwITC_SwUFn_0101_01") in pairs
+    assert ("SWSTR_02", "SwITC_SwUFn_0101_01") in pairs
+    assert ("SWCOM_30", "SwITC_SwUFn_0112") in pairs

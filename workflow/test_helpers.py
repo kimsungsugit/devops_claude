@@ -47,8 +47,15 @@ def param_placeholder(param: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def parse_param_name(raw: str) -> str:
-    """Extract the last identifier from a C parameter declaration."""
-    ids = re.findall(r"[A-Za-z_]\w*", raw or "")
+    """Extract the last identifier from a C parameter declaration.
+
+    ⚠ 앞의 `\\b` 가 없으면 **정수 리터럴 접미사가 이름이 된다**:
+      `U8 buf[10U]` -> `['U8','buf','U']` -> 이름이 `buf` 가 아니라 **`U`**.
+    근거·피해 규모는 `workflow/code_parser/c_parser.py::c_identifiers` 주석 참조
+    (그 정규식이 정본이다 — 여기는 stub 테스트가 이 모듈을 통째로 MagicMock 으로
+    바꿔치기해서 import 를 늘리지 않는다).
+    """
+    ids = re.findall(r"\b[A-Za-z_]\w*", raw or "")
     if not ids:
         return ""
     return ids[-1]

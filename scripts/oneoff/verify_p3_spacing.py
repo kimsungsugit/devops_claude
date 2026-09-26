@@ -2,8 +2,10 @@
 paragraphs between sibling Heading 2 sections) is preserved in the
 rebuild path output."""
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 from docx import Document
 
 

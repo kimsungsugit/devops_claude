@@ -1,14 +1,19 @@
 ---
 name: report-quality
 description: 보고서 품질을 검증하고 개선합니다. analysis_summary 확장, 커버리지 정규화, 정적분석 결과 통합, Domain Tests 수정.
-trigger: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정규화, Clang-Tidy 요청 시
+when_to_use: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정규화, Clang-Tidy 요청 시
 ---
 
 # /report-quality 스킬
 
 파이프라인 보고서의 품질을 검증하고 개선 작업을 수행합니다.
 
-## 현재 문제점 (계획서 기준)
+> ⚠ 아래 "문제점"과 Phase 목록은 **작성 시점의 스냅샷**이지 현재 상태가 아니다.
+> 수치(예: 커버리지 72.8% vs 94%, `analysis_summary.md` 38줄)는 그때의 관측값이며
+> 이미 해소됐을 수 있다. **먼저 실제 산출물을 직접 확인해 현재 상태를 재측정한 뒤**,
+> 아래는 "과거에 이런 유형의 결함이 있었다"는 점검 체크리스트로만 사용할 것.
+
+## 문제점 스냅샷 (작성 시점 기준 — 재측정 필요)
 1. `analysis_summary.md` 38줄 → 상세 메트릭 부족
 2. Clang-Tidy 결과 파일 미저장 (메모리만)
 3. Fuzzing 통합 요약 누락
@@ -43,13 +48,19 @@ trigger: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정�
 ## 검증 방법
 ```bash
 # 테스트 실행
-pytest tests/unit/ -v --tb=short -k "report"
+.venv/Scripts/python.exe -m pytest tests/unit/ -v --tb=short -k "report"
 
 # analysis_summary 확인
 cat reports/analysis_summary.md | wc -l  # 목표: 100줄+
 
 # 커버리지 비교
-python -c "import json; print(json.load(open('reports/coverage.json'))['line_rate'])"
+# ⚠ reports/coverage.json 은 **존재하지 않는다**(FileNotFoundError).
+#    실제 산출물은 Cobertura XML 이고 속성명도 `line_rate` 가 아니라 `line-rate`(하이픈).
+.venv/Scripts/python.exe -c "
+import xml.etree.ElementTree as ET
+r = ET.parse('reports/coverage/coverage.xml').getroot()
+print('line-rate=%s branch-rate=%s' % (r.get('line-rate'), r.get('branch-rate')))
+"
 ```
 
 ## 출력

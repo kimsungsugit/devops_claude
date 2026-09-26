@@ -1,12 +1,13 @@
 ---
 name: start-work
-description: 모든 개발 작업의 진입점. 계획→설계→구현→테스트→리뷰→문서화를 강제하며, 변경 영역에 따라 적절한 에이전트를 자동 라우팅합니다.
-trigger: |
-  코드 변경을 수반하는 모든 요청. 신규 작업과 후속 지시 모두 포함:
+description: 코드 변경 작업의 **기본 진입점**. 계획→설계→구현→테스트→리뷰→문서화 Gate를 강제하고 변경 영역에 따라 에이전트를 자동 라우팅합니다. 긴급 명시 시엔 Gate를 생략하는 `/hotfix`, 고치지 않고 원인만 규명할 땐 `/debug-diagnose`가 대신 맡습니다.
+when_to_use: |
+  코드 변경을 수반하는 모든 요청 (아래 두 예외를 뺀 기본값). 신규 작업과 후속 지시 모두 포함:
   - 신규: 기능 추가, 버그 수정, 리팩토링, 개선, 구현, 개발, 만들어줘, 수정해줘, 고쳐줘, 변경해줘
   - 후속/연속: 다 고쳐, 다 수정, 이어서, 이어서 진행, 추가로, 다음 진행, 후속 처리, 계속 진행, 마저 해줘, 나머지도, 다른것도
   - 리뷰 후속: "1번부터 진행", "❶부터 고쳐", "Critical 수정해줘" 같이 직전 검토 결과를 기반으로 한 수정 지시
-  단, 단순 정보 조회·설명·계획 논의만 요청한 경우는 제외 (예: "어떻게 동작해?", "왜 이렇게 됐어?", "계획만 보여줘")
+  제외 ①: 단순 정보 조회·설명·계획 논의 (예: "어떻게 동작해?", "계획만 보여줘")
+  제외 ②: 긴급 명시("긴급/지금 당장/프로덕션 장애")→`/hotfix`, 원인 규명만("왜 안되지?", "왜 이렇게 됐어?")→`/debug-diagnose`
 ---
 
 # /start-work (필수 진입점)
@@ -52,7 +53,7 @@ trigger: |
 ### Gate 4: 검증
 7. **tester** 에이전트에 위임
    ```bash
-   python -m pytest tests/unit/ -q --tb=short
+   .venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short
    cd frontend-v2 && npm test  # 프론트엔드 변경 시
    ```
 8. ISO 26262: 안전 관련 테스트(ASIL C/D) 실패 시 자동 수정하지 않고 보고
@@ -63,7 +64,7 @@ UDS/STS/SUTS 생성 작업인 경우, 생성 완료 후 자동으로 품질을 �
 
 **평가 단계:**
 ```bash
-python -c "
+.venv/Scripts/python.exe -c "
 from workflow.quality.db import init_db, get_session
 from workflow.quality.models import GenerationRun, QualitySummary
 init_db()
@@ -97,12 +98,12 @@ with get_session() as s:
 
 #### Gate 5 진입 전: review_depth 결정
 
-review_depth (meta / light / standard / deep) 정의·키워드 트리거·ASIL 자동 판정·변경 통계 측정 시점은 모두 **`.claude/agents/reviewer/reviewer.md` `## 검토 깊이 자동 판정`** 단일 출처를 따른다.
+review_depth (meta / light / standard / deep) 정의·키워드 트리거·ASIL 자동 판정·변경 통계 측정 시점은 모두 **`.claude/agents/reviewer/reviewer.md` `### 검토 깊이 자동 판정`** 단일 출처를 따른다.
 
 Gate 5에서의 동작:
 - **meta** → Gate 5 생략, 메인 에이전트가 X4/X5/X6 정책 일관성만 직접 점검
 - **light** → Gate 5 생략 가능, 단 CLAUDE.md @import `self-review.md`의 미니 체크리스트(11개, X9 포함) 점검 의무
-- **standard** → reviewer **단일 호출** (S/P/Q/R/F + X1~X8 전체). Critical 0이면 Gate 6, 있으면 1회 fix 후 재검토 1회만
+- **standard** → reviewer **단일 호출** (S/P/Q/R/F + X1~X9 전체). Critical 0이면 Gate 6, 있으면 1회 fix 후 재검토 1회만
 - **deep** → 아래 **적응형 3~5회 루프** 발동
 
 #### deep depth: 적응형 검증 루프 (deep에서만 발동)
@@ -122,12 +123,12 @@ while round <= MAX_ROUNDS:
        - 보안/성능/예외처리 (S1~S5, P1~P4, Q1~Q4)
        - 프론트엔드 코드 패턴 (R1~R7)
        - ISO 26262 (F1~F8): MISRA-C, ASIL, 추적성
-       - X1~X8 비정형 비판 — **시나리오 / timeline / 트리** 의무 (deep-reviewer.md 참조)
-       - deep-reviewer 호출 실패(403 등) 시 sonnet reviewer로 폴백, 그래도 실패하면 메인 에이전트 미니 체크리스트 11개
+       - X1~X9 비정형 비판 — **시나리오 / timeline / 트리** 의무 (deep-reviewer.md 참조)
+       - deep-reviewer 호출 실패(403 등) 시 reviewer 로 폴백(모델은 같고 **의무가 얕다** — X1~X9 전수·timeline·트리가 빠진다), 그래도 실패하면 메인 에이전트 미니 체크리스트 11개
     
     2. 종합 품질 검사 실행:
-       python scripts/quality_check.py --round {round} --json
-       → JSON에서 counts.critical 읽기
+       .venv/Scripts/python.exe scripts/quality_check.py --round {round} --json
+       → JSON에서 counts.critical **과 verified/not_run** 읽기
     
     3. 이슈 분류 및 수정:
        - Critical: coder에게 수정 위임 → 다음 라운드 진입
@@ -136,9 +137,17 @@ while round <= MAX_ROUNDS:
     4. 진행/정체 판정:
        current_critical = result["counts"]["critical"]
        
+       # ⚠ critical==0 은 "검증했고 깨끗함"이 아니라 "Critical로 분류된 게 없음"일 뿐이다.
+       #    도구 부재(DISABLED)·타임아웃(TIMEOUT)·대응 테스트 없음(no_module_tests)·
+       #    예산 초과(budget_exceeded)는 전부 Critical이 아니어서, 아무것도 안 돌렸는데도
+       #    critical==0 이 나온다. verified=False 면 그 사실을 사용자에게 **명시 보고**하고
+       #    "테스트 통과"라고 쓰지 말 것.
+       if not result.get("verified", True):
+           report(f"⚠ 미검증 항목: {result.get('not_run')} — 이 라운드는 회귀를 확인하지 못했다")
+       
        if current_critical == 0:
            if round >= MIN_ROUNDS:
-               break  # 정상 종료 → Gate 6 진행
+               break  # 정상 종료 → Gate 6 진행 (단, verified=False면 위 경고를 보고에 포함)
            # MIN_ROUNDS 미만이면 계속 (플레이키 탐지)
        
        elif prev_critical is not None:
@@ -182,7 +191,7 @@ Round 3: Critical 5 (정체) → 중단, 사용자 보고 ✗
 ```
 
 ### Gate 6: 문서화
-11. 변경내역 기록, 필요시 **documenter** 에이전트에 위임
+9. 변경내역 기록, 필요시 **documenter** 에이전트에 위임
 
 ## 게이트 생략 조건
 

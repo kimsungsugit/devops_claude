@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from report_gen.source_roots import split_source_roots
+
 _logger = logging.getLogger(__name__)
 
 
@@ -36,7 +38,7 @@ def generate_component_map_from_sds(
         return {"entries": [], "stats": {"error": "SDS 파싱 실패"}, "output_path": ""}
 
     # 소스 파일 수집
-    roots = [Path(p.strip()).resolve() for p in source_root.replace(";", ",").split(",") if p.strip()]
+    roots = [Path(p).resolve() for p in split_source_roots(source_root)]
     source_files: List[Path] = []
     for root in roots:
         if root.exists():
@@ -48,7 +50,6 @@ def generate_component_map_from_sds(
     swcom_entries: Dict[str, Dict[str, str]] = {}
     for key, info in sds_map.items():
         asil = info.get("asil", "")
-        related = info.get("related", "")
         # SwCom ID 추출
         swcom_match = re.search(r"SwCom[_\s-]*(\d+)", key, re.I)
         if swcom_match:

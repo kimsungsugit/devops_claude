@@ -3,6 +3,18 @@
 
 Links VectorCAST test coverage data with UDS function details to provide
 a unified traceability view: Requirement -> UDS Function -> Test Coverage.
+
+⚠ **이 모듈은 현재 어디서도 import 되지 않는다**(2026-07-29 확인 — 참조는 주석과 외부
+계획서 문서뿐). 되살리기 전에 아래 두 가지를 먼저 고칠 것:
+
+1. `summary["avg_statement_coverage"]` / `["avg_branch_coverage"]` 는 **함수별 백분율의
+   비가중 평균**이다(`_avg`). 전체 커버리지가 아니다 — 문장 1개짜리 함수와 500줄 함수가
+   같은 가중치를 갖는다. 이름이 `avg_` 라 그 자체로는 거짓말이 아니지만, 소비처가
+   "전체 구문 커버리지" 로 읽으면 틀린 수치가 된다.
+2. 고치려면 pooled 분자/분모가 필요한데 **이 계층엔 분자·분모가 없다** — `_parse_pct`
+   가 `"75%"` 같은 백분율만 뽑는다. 먼저 파서가 `"69 / 79 (75%)"` 형태에서 counts 를
+   보존하도록 바꿔야 한다(`backend/services/swut_input_adapter._parse_metric_cell`
+   가 이미 그 정규식을 갖고 있으니 재사용할 것).
 """
 
 from __future__ import annotations

@@ -1,18 +1,14 @@
 """Auto-generated router: profiles"""
-from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
-import json
-import traceback
 import logging
-from pathlib import Path
 from datetime import datetime
+from typing import Any, Dict
 
+from fastapi import APIRouter, HTTPException
+
+from backend.helpers import _load_raw_profiles, _normalize_profile, _save_raw_profiles
 from backend.schemas import (
     SessionNamePayload,
 )
-from backend.helpers import _load_raw_profiles, _normalize_profile, _save_raw_profiles
-
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")

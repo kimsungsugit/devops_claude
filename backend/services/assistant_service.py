@@ -1,12 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
 import os
 import re
-import time
 import threading
+import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -18,11 +19,13 @@ from backend.mcp import (
     get_jenkins_mcp_server,
     get_report_mcp_server,
 )
-from backend.services.files import list_log_candidates, parse_coverage_xml, tail_text
 from backend.services.chat_approval_store import save_pending_approval
-from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
+from backend.services.files import list_log_candidates, parse_coverage_xml
+from backend.services.jenkins_helpers import _job_slug
+from backend.services.paths import is_under_any, safe_resolve_under
 from workflow.ai import agent_call, load_oai_config, load_oai_configs
 from workflow.chat_graph import emit_graph_event, new_chat_graph_state, run_chat_graph
+
 try:
     from workflow.mcp_bridge import get_langchain_mcp_tool_map
 except ImportError:
@@ -33,7 +36,8 @@ from workflow.retrieval import retrieve_contexts
 _chat_perf_logger = logging.getLogger("devops_chat_perf")
 _CHAT_PERF_LOG = str(os.environ.get("DEVOPS_CHAT_PERF_LOG", "1")).strip().lower() in ("1", "true", "yes")
 _report_bundle_cache_lock = threading.Lock()
-_report_bundle_cache: Dict[str, Tuple[Tuple[int, ...], Dict[str, Any]]] = {}
+_REPORT_BUNDLE_CACHE_MAX = 64
+_report_bundle_cache: OrderedDict[str, Tuple[Tuple[int, ...], Dict[str, Any]]] = OrderedDict()
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -135,9 +139,9 @@ def _parse_structured_answer_payload(answer: str) -> Dict[str, Any]:
     if not isinstance(obj, dict):
         return {"answer": text, "evidence": [], "next_steps": []}
 
-    answer_line = str(obj.get("?듬?") or obj.get("answer") or "").strip()
-    evidence = _coerce_text_list(obj.get("洹쇨굅") or obj.get("evidence") or [])
-    next_steps = _coerce_text_list(obj.get("?ㅼ쓬 ?④퀎") or obj.get("next_steps") or obj.get("nextSteps") or [])
+    answer_line = str(obj.get("답변") or obj.get("answer") or "").strip()
+    evidence = _coerce_text_list(obj.get("근거") or obj.get("evidence") or [])
+    next_steps = _coerce_text_list(obj.get("다음 단계") or obj.get("next_steps") or obj.get("nextSteps") or [])
     return {
         "answer": answer_line or text,
         "evidence": evidence,
@@ -157,13 +161,13 @@ def _normalize_chat_answer_text(answer: str) -> str:
     evidence = list(parsed.get("evidence") or [])
     if isinstance(evidence, list) and evidence:
         lines.append("")
-        lines.append("**洹쇨굅**")
+        lines.append("**근거**")
         lines.extend([f"- {str(item).strip()}" for item in evidence if str(item).strip()])
 
     next_steps = list(parsed.get("next_steps") or [])
     if isinstance(next_steps, list) and next_steps:
         lines.append("")
-        lines.append("**?ㅼ쓬 ?④퀎**")
+        lines.append("**다음 단계**")
         lines.extend([f"{idx}. {str(item).strip()}" for idx, item in enumerate(next_steps, start=1) if str(item).strip()])
 
     normalized = "\n".join(lines).strip()
@@ -211,6 +215,7 @@ def read_report_bundle(report_dir: Path) -> Dict[str, Any]:
     with _report_bundle_cache_lock:
         cached = _report_bundle_cache.get(cache_key)
         if cached and cached[0] == signature:
+            _report_bundle_cache.move_to_end(cache_key)
             return dict(cached[1])
 
     summary = _read_json(report_dir / "analysis_summary.json", default={})
@@ -244,6 +249,9 @@ def read_report_bundle(report_dir: Path) -> Dict[str, Any]:
     }
     with _report_bundle_cache_lock:
         _report_bundle_cache[cache_key] = (signature, bundle)
+        _report_bundle_cache.move_to_end(cache_key)
+        while len(_report_bundle_cache) > _REPORT_BUNDLE_CACHE_MAX:
+            _report_bundle_cache.popitem(last=False)
     return dict(bundle)
 
 
@@ -512,6 +520,19 @@ def _build_context_fallback_answer(
 
 
 def _kb_hints(question: str, report_dir: Optional[Path]) -> Tuple[str, List[str]]:
+    """⚠ **호출자 0건 (dead code)** — 라이브 KB 근거 경로는
+    `_retrieval_hints` → `workflow/retrieval/hybrid.py::_report_hits` 다.
+
+    되살릴 때 **먼저 고쳐야 할 결함**: 아래 `float(score) < 0.3` 컷은 `kb.search` 가
+    keyword/semantic 단독 점수를 낸다는 가정에서 왔는데, 지금은 RRF 융합 점수를 낸다.
+    RRF 상한은 `2/(k+1)` = **0.0328**(k=60 기본값)이라 이 문턱은 **구조적으로 통과 불가**다.
+    `_kb_hints` 는 role/stage 를 안 넘기므로 부스트도 req_id 정확일치(+0.4) 하나뿐 —
+    질문에 요구ID 가 없으면 KB 근거가 전량 탈락하고, 반환값 `("", [])` 은 "KB 가 비었음"
+    과 구별되지 않는다. (`< 0.3` 은 Initial commit, RRF 는 a9cd852 — 리팩터가 척도를
+    10배 바꿨는데 소비처 문턱은 그대로 남은 경우다.)
+
+    되살릴 거면 `_search_type` 으로 척도를 구분하거나 최고점 대비 상대 컷을 쓸 것.
+    """
     started = time.perf_counter()
     if not report_dir:
         return "", []
@@ -561,17 +582,30 @@ def _retrieval_hints(
     question_type: str,
     report_dir: Optional[Path],
     ui_context: Optional[Dict[str, Any]],
+    notes_out: Optional[List[str]] = None,
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """근거 블록 텍스트 + sources + citations.
+
+    Args:
+        notes_out: 주면 검색 진단(KB 시맨틱 축 비활성 등)을 넣는다. 근거가 적거나 없을 때
+            **왜** 그런지를 사용자 응답(`retrieval_notes`)과 LLM 컨텍스트 양쪽에 전달하기
+            위한 채널이다 — "KB 가 비었음" 과 "검색이 동작 안 함" 은 다른 상황이다.
+    """
     started = time.perf_counter()
+    local_notes: List[str] = []
     hits = retrieve_contexts(
         question=question,
         question_type=question_type,
         report_dir=report_dir,
         ui_context=ui_context,
         top_k=6,
+        notes_out=local_notes,
     )
+    if notes_out is not None:
+        notes_out.extend(local_notes)
     if not hits:
-        return "", [], []
+        # hits 가 비어도 note 는 남긴다 — 진단이 사라지면 "근거 없음" 으로만 보인다.
+        return ("\n".join(f"- RET#note: {n}" for n in local_notes), [], [])
 
     lines: List[str] = []
     sources: List[str] = []
@@ -598,13 +632,17 @@ def _retrieval_hints(
         )
     if _CHAT_PERF_LOG:
         _chat_perf_logger.info(
-            "retrieval_hints report_dir=%s question_chars=%d hits=%d elapsed_ms=%.1f",
+            "retrieval_hints report_dir=%s question_chars=%d hits=%d elapsed_ms=%.1f notes=%d",
             report_dir,
             len(question or ""),
             len(lines),
             (time.perf_counter() - started) * 1000.0,
+            len(local_notes),
         )
-    return "\n".join(lines), sources, citations
+    # 진단은 근거 목록 **앞**에 둔다 — LLM 이 뒤쪽 컨텍스트를 절단할 수 있고, 근거의
+    # 신뢰 범위를 먼저 알아야 한다.
+    note_lines = [f"- RET#note: {n}" for n in local_notes]
+    return "\n".join(note_lines + lines), sources, citations
 
 
 def _call_mcp_tool(
@@ -752,6 +790,54 @@ def _approved_approval_ids(ui_context: Optional[Dict[str, Any]]) -> set[str]:
     return {str(item).strip() for item in values if str(item).strip()}
 
 
+def _is_informational_question(text: str) -> bool:
+    """실행 요청이 아니라 방법/이유/현황을 '묻는' 질문이면 True (승인 false positive 억제).
+
+    risky_keyword(수정/edit 등)가 들어 있어도, 정보성 marker(방법/어떻게/알려…)가 있고
+    명시적 명령형 marker(해줘/진행해…)가 없으면 실행 요청이 아니라고 본다.
+    """
+    info_markers = (
+        "방법", "법은", "하는 법", "어떻게", "왜", "무엇", "뭐야", "뭔지", "설명", "알려",
+        "보여", "조회", "목록", "리스트", "현황", "분석", "확인해줄",
+        "how ", "what ", "why ", "explain", "show ", "list ", "which ",
+    )
+    imperative_markers = (
+        "해줘", "해 줘", "해주세요", "해주라", "하라", "해라", "할래", "진행해", "실행해",
+        "수행해", "처리해", "go ahead", "do it", "please ",
+    )
+    has_info = any(m in text for m in info_markers)
+    has_imperative = any(m in text for m in imperative_markers)
+    return has_info and not has_imperative
+
+
+# 위험 토큰: 영문은 단어경계 매칭(edit⊂editor/credit, push⊂pushed, commit⊂committed,
+# write⊂rewrite 등 substring 오탐 차단), 한글은 substring.
+_RISKY_EN_TOKENS = ("write", "patch", "edit", "modify", "commit", "push", "rerun", "deploy", "publish")
+_RISKY_KO_TOKENS = ("수정", "패치", "커밋", "푸시", "재실행", "배포", "업로드")
+_RISKY_EN_RE = re.compile(r"(?<![a-z])(" + "|".join(_RISKY_EN_TOKENS) + r")(?![a-z])", re.IGNORECASE)
+
+
+def _match_risky_tokens(text: str) -> set:
+    """text 에서 발견된 위험 토큰 집합(영문 단어경계 + 한글 substring)."""
+    found = {m.group(1).lower() for m in _RISKY_EN_RE.finditer(text or "")}
+    for ko in _RISKY_KO_TOKENS:
+        if ko in (text or ""):
+            found.add(ko)
+    return found
+
+
+# 부정문: 위험 토큰이 있어도 "~하지마/말고/없이/don't ~"면 실행 요청이 아니다(승인 억제).
+_NEGATION_MARKERS = (
+    # "없이" 는 "문제없이/차질없이" 관용구 오탐이 커서 제외(W1). 행위 부정 marker 만.
+    "하지 마", "하지마", "하지 말", "하지말", "말고", "말아", "말라", "금지",
+    "안 하", "안하", "don't", "do not", "without", "no need", "shouldn't", "should not",
+)
+
+
+def _has_negation(text: str) -> bool:
+    return any(m in (text or "") for m in _NEGATION_MARKERS)
+
+
 def _build_approval_request(
     *,
     question: str,
@@ -766,11 +852,13 @@ def _build_approval_request(
 
     force_probe = bool((ui_context or {}).get("force_approval"))
     text = str(question or "").lower()
-    risky_keywords = (
-        "write", "patch", "edit", "modify", "commit", "push", "rerun", "deploy", "publish",
-        "수정", "패치", "커밋", "푸시", "재실행", "배포", "업로드",
-    )
-    if not force_probe and not any(token in text for token in risky_keywords):
+    risky = _match_risky_tokens(text)
+    if not force_probe and not risky:
+        return None
+    # false positive 억제: "수정 방법/어떻게 ~?" 같은 정보성 질문이나 "~하지마/말고/
+    # don't ~" 같은 부정문은 실행 요청이 아니다. 챗은 비실행(RAG-then-generate, 함수콜
+    # 아님)이므로 이런 질문에 승인 게이트를 띄우면 UX 저해뿐 — force_approval 이면 진행.
+    if not force_probe and (_is_informational_question(text) or _has_negation(text)):
         return None
 
     if existing_id and existing:
@@ -779,15 +867,15 @@ def _build_approval_request(
     action_type = "write_file"
     tool_name = "pending_mutation"
     risk_level = "medium"
-    if any(token in text for token in ("deploy", "publish", "배포", "업로드")):
+    if risky & {"deploy", "publish", "배포", "업로드"}:
         action_type = "publish_report"
         tool_name = "publish_reports"
         risk_level = "high"
-    elif any(token in text for token in ("rerun", "재실행")):
+    elif risky & {"rerun", "재실행"}:
         action_type = "trigger_jenkins"
         tool_name = "sync_jenkins"
         risk_level = "medium"
-    elif any(token in text for token in ("commit", "push", "커밋", "푸시")):
+    elif risky & {"commit", "push", "커밋", "푸시"}:
         action_type = "git_operation"
         tool_name = "git_commit"
         risk_level = "high"
@@ -806,6 +894,78 @@ def _build_approval_request(
     }
 
 
+def _trusted_base_roots() -> List[Path]:
+    """챗 컨텍스트 수집이 파일을 읽어도 되는 신뢰 베이스 디렉토리 집합.
+
+    report_dir / project_root / oai_config_path 등 사용자 제어 경로를 이 루트들
+    하위로만 confine 한다(path traversal/임의 파일 읽기 차단). jenkins.py 의
+    is_under_any fail-closed 패턴과 동일.
+    """
+    try:
+        repo_root = Path(config.__file__).resolve().parent
+    except Exception:
+        repo_root = Path.cwd().resolve()
+    roots: List[Path] = [repo_root]
+
+    def _add(p: Any) -> None:
+        if not p:
+            return
+        try:
+            roots.append(Path(str(p)).expanduser().resolve())
+        except Exception:
+            pass
+
+    _add(getattr(config, "DEFAULT_PROJECT_ROOT", None))
+    # 리포트 디렉토리(상대면 repo 와 CWD 양쪽 — 코드베이스의 CWD split-brain 대응)
+    rd = getattr(config, "DEFAULT_REPORT_DIR", "reports")
+    try:
+        rdp = Path(rd)
+        if rdp.is_absolute():
+            roots.append(rdp.resolve())
+        else:
+            roots.append((repo_root / rdp).resolve())
+            roots.append(rdp.resolve())  # CWD 기준(_resolve_report_dir session 분기와 정합)
+    except Exception:
+        pass
+    for jr in (getattr(config, "JENKINS_SERVER_ROOTS", []) or []):
+        _add(jr)
+
+    seen: set = set()
+    out: List[Path] = []
+    for r in roots:
+        key = str(r)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _confine_path(raw: Optional[str], *, extra_roots: Optional[List[Path]] = None) -> Optional[Path]:
+    """raw 경로를 신뢰 루트 하위로 confine. 벗어나면 None(fail-closed)."""
+    if not raw:
+        return None
+    try:
+        p = Path(str(raw)).expanduser().resolve()
+    except Exception:
+        return None
+    roots = _trusted_base_roots()
+    if extra_roots:
+        roots = roots + list(extra_roots)
+    return p if is_under_any(p, roots) else None
+
+
+def _safe_project_root(ui_context: Optional[Dict[str, Any]]) -> str:
+    """ui_context.project_root 를 신뢰 루트 하위로만 허용. 벗어나면 안전 기본값으로 강등."""
+    raw = str(((ui_context or {}).get("project_root")) or "").strip()
+    if raw:
+        confined = _confine_path(raw)
+        if confined is not None:
+            return str(confined)
+        _chat_perf_logger.warning("chat: project_root outside trusted roots ignored: %r", raw)
+    default_root = getattr(config, "DEFAULT_PROJECT_ROOT", None)
+    return str(default_root) if default_root else str(Path.cwd())
+
+
 def _build_context(
     *,
     mode: str,
@@ -817,7 +977,19 @@ def _build_context(
     jenkins_build_selector: Optional[str] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     graph_state: Optional[Any] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    notes_out: Optional[List[str]] = None,
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """LLM 컨텍스트 블록 + sources + citations.
+
+    Args:
+        notes_out: 주면 검색 진단을 넣는다(반환 튜플 arity 는 유지 — additive).
+            응답의 `retrieval_notes` 로 사용자에게 전달된다.
+    """
+    def _cancelled() -> bool:
+        # 클라이언트 disconnect 시 남은 컨텍스트 블록 진입을 막아 좀비 작업 단축
+        return bool(cancel_check and cancel_check())
+
     sources: List[str] = []
     citations: List[Dict[str, Any]] = []
     blocks: List[str] = []
@@ -835,7 +1007,7 @@ def _build_context(
         sources.append("ui_context")
         citations.append({"source_type": "ui_context", "label": "ui_context", "uri": "", "path": "", "snippet": ""})
 
-    if report_dir and report_dir.exists():
+    if report_dir and report_dir.exists() and not _cancelled():
         bundle = report_mcp.read_bundle(report_dir)
         summary_tool = _call_mcp_tool(
             server=report_mcp,
@@ -900,7 +1072,10 @@ def _build_context(
                     sources.append(f"log:{key}")
                     citations.append(_citation_from_tool_result(log_tool, f"log:{key}", "log"))
 
-    if mode == "jenkins" and jenkins_job_url and jenkins_cache_root:
+    # 주: jenkins_cache_root 는 report_dir/project_root 와 같은 입력표면이나 여기서
+    # confine 하지 않는다 — jenkins 빌더 캐시 루트는 repo 밖(사용자 캐시)일 수 있어
+    # 신뢰 루트 confine 시 정당 흐름이 깨진다. 캐시 경로 검증은 jenkins 빌더 책임.
+    if mode == "jenkins" and jenkins_job_url and jenkins_cache_root and not _cancelled():
         jenkins_mcp = get_jenkins_mcp_server()
         summary_tool = _call_mcp_tool(
             server=jenkins_mcp,
@@ -968,8 +1143,8 @@ def _build_context(
                 sources.append("log:jenkins_console")
                 citations.append(_citation_from_tool_result(console_tool, "log:jenkins_console", "jenkins"))
 
-    if question_type == "git":
-        project_root = str(((ui_context or {}).get("project_root")) or Path.cwd())
+    if question_type == "git" and not _cancelled():
+        project_root = _safe_project_root(ui_context)
         workdir_rel = str(((ui_context or {}).get("workdir_rel")) or ".")
         git_status_tool = _call_mcp_tool(
             server=git_mcp,
@@ -1026,8 +1201,8 @@ def _build_context(
                 sources.append("git_log")
                 citations.append(_citation_from_tool_result(git_log_tool, "git_log", "git"))
 
-    if question_type == "code":
-        project_root = str(((ui_context or {}).get("project_root")) or Path.cwd())
+    if question_type == "code" and not _cancelled():
+        project_root = _safe_project_root(ui_context)
         workdir_rel = str(((ui_context or {}).get("workdir_rel")) or ".")
         search_tool = _call_mcp_tool(
             server=code_mcp,
@@ -1070,7 +1245,7 @@ def _build_context(
                             sources.append("code_excerpt")
                             citations.append(_citation_from_tool_result(read_range_tool, f"code:{rel_path}", "code"))
 
-    if question_type == "docs":
+    if question_type == "docs" and not _cancelled():
         search_tool = _call_mcp_tool(
             server=docs_mcp,
             tool_name="search_docs",
@@ -1112,7 +1287,8 @@ def _build_context(
         question_type=question_type,
         report_dir=report_dir,
         ui_context=ui_context,
-    ) if policy.get("include_kb") or question_type in ("code", "docs") else ("", [], [])
+        notes_out=notes_out,
+    ) if (policy.get("include_kb") or question_type in ("code", "docs")) and not _cancelled() else ("", [], [])
     if retrieval_text:
         blocks.append(_format_block("retrieval", _trim_text(retrieval_text, max_chars=3500)))
         sources.extend(retrieval_sources)
@@ -1124,10 +1300,20 @@ def _build_context(
 
 def _resolve_report_dir(report_dir: Optional[str], session_id: Optional[str]) -> Optional[Path]:
     if report_dir:
-        return Path(report_dir).expanduser().resolve()
+        # 보안: 신뢰 루트 하위로만 허용(임의 절대경로 → 로그/JSON 파일 내용 유출 차단).
+        confined = _confine_path(report_dir)
+        if confined is not None:
+            return confined
+        _chat_perf_logger.warning("chat: report_dir outside trusted roots ignored: %r", report_dir)
+        # session_id 폴백이 없으면 컨텍스트 없이 진행(.exists() 검사에서 자연 skip)
     if session_id:
         base = Path(getattr(config, "DEFAULT_REPORT_DIR", "reports")).resolve()
-        return (base / "sessions" / session_id).resolve()
+        # 보안: session_id 의 path traversal(../ 등) 차단 — 같은 입력표면.
+        try:
+            return safe_resolve_under(base, f"sessions/{session_id}")
+        except Exception:
+            _chat_perf_logger.warning("chat: invalid session_id ignored: %r", session_id)
+            return None
     return None
 
 
@@ -1155,6 +1341,11 @@ def _prioritize_model_candidates(
     return prioritized[0], prioritized + deferred
 
 
+def _chat_max_turns() -> int:
+    """대화 이력에 포함할 최근 메시지 수 (config.CHAT_MAX_TURNS, 기본 16)."""
+    return int(getattr(config, "CHAT_MAX_TURNS", 16) or 16)
+
+
 def _build_chat_messages(
     *,
     mode: str,
@@ -1164,44 +1355,44 @@ def _build_chat_messages(
     history: Optional[List[Dict[str, str]]],
 ) -> List[Dict[str, str]]:
     base_prompt = (
-        "?덈뒗 DevOps ?뚰겕?뚮줈??遺꾩꽍 ?꾩슦誘몃떎. 諛섎뱶???쒓뎅?대줈 ?듬??쒕떎.\n"
-        "?몃? ??寃?됱씠??異붿륫? 湲덉??섍퀬, ?쒓났??而⑦뀓?ㅽ듃留??ъ슜?쒕떎.\n"
-        "而⑦뀓?ㅽ듃???녿뒗 ?댁슜? 紐⑤Ⅸ?ㅺ퀬 留먰븯怨?異붽? ?뺣낫瑜??붿껌?쒕떎.\n"
-        "?듬? 援ъ“???ㅼ쓬???곕Ⅸ??\n"
-        "1) ?듬?\n"
-        "2) 洹쇨굅(?ъ슜???뚯뒪 ?쇰꺼)\n"
-        "3) ?ㅼ쓬 ?④퀎(?덉쓣 ?뚮쭔)\n"
+        "너는 DevOps 플랫폼 분석 도우미다. 답변은 한국어로 한다.\n"
+        "근거 없는 추측은 금지하고, 제공된 컨텍스트만 사용한다.\n"
+        "컨텍스트에 없는 내용은 모른다고 말하고 추가 정보를 요청한다.\n"
+        "답변 구조는 다음을 따른다:\n"
+        "1) 답변\n"
+        "2) 근거(사용한 소스 라벨)\n"
+        "3) 다음 단계(있을 때만)\n"
     )
 
     if mode == "jenkins":
         mode_hint = (
-            "?꾩옱 Jenkins CI/CD ?뚯씠?꾨씪??遺꾩꽍 紐⑤뱶?대떎. "
-            "鍮뚮뱶 ?ㅽ뙣 ?먯씤, ?뚯씠?꾨씪??蹂듦뎄 諛⑸쾿, PRQA/VectorCAST 寃곌낵 ?댁꽍??吏묒쨷?쒕떎.\n"
+            "현재 Jenkins CI/CD 파이프라인 분석 모드다. "
+            "빌드 실패 원인, 파이프라인 복구 방법, PRQA/VectorCAST 결과 해석에 집중한다.\n"
         )
     else:
         mode_hint = (
-            "?꾩옱 濡쒖뺄 鍮뚮뱶/?뚯뒪??遺꾩꽍 紐⑤뱶?대떎. "
-            "?뚯뒪??而ㅻ쾭由ъ? ?μ긽, ?뺤쟻遺꾩꽍 ?댁뒋 ?섏젙, 鍮뚮뱶 ?ㅻ쪟 ?닿껐??吏묒쨷?쒕떎.\n"
+            "현재 로컬 빌드/테스트 분석 모드다. "
+            "테스트 커버리지 향상, 정적분석 이슈 수정, 빌드 오류 해결에 집중한다.\n"
         )
 
     if current_view == "editor":
         view_hint = (
-            "?ъ슜?먭? ?먮뵒??酉곗뿉 ?덈떎. 肄붾뱶 ?섏젙, ?댁뒋 ?닿껐, 由ы뙥?좊쭅 媛?대뱶瑜?援ъ껜?곸쑝濡??쒓났?쒕떎. "
-            "媛?ν븯硫?肄붾뱶 釉붾줉?쇰줈 ?섏젙 ?덉떆瑜?蹂댁뿬以??\n"
+            "사용자가 에디터 뷰에 있다. 코드 수정, 이슈 해결, 리팩터링 가이드를 구체적으로 제공한다. "
+            "가능하면 코드 블록으로 수정 예시를 보여준다.\n"
         )
     elif current_view == "workflow":
         view_hint = (
-            "?ъ슜?먭? ?뚰겕?뚮줈??酉곗뿉 ?덈떎. ?뚰겕?뚮줈???ㅽ뻾 ?곹깭 ?댁꽍, ?몃윭釉붿뒋?? "
-            "?ㅼ쓬 ?ㅽ뻾 ?④퀎瑜??덈궡?쒕떎.\n"
+            "사용자가 워크플로우 뷰에 있다. 워크플로우 실행 상태 해석, 트러블슈팅, "
+            "다음 실행 단계를 안내한다.\n"
         )
     else:
         view_hint = (
-            "?ъ슜?먭? ??쒕낫??酉곗뿉 ?덈떎. ?붿빟 ?곗씠???댁꽍, 硫뷀듃由??ㅻ챸, "
-            "?곗꽑?쒖쐞 湲곕컲 ?ㅼ쓬 ?④퀎瑜?異붿쿇?쒕떎.\n"
+            "사용자가 대시보드 뷰에 있다. 요약 데이터 해석, 메트릭 설명, "
+            "우선순위 기반 다음 단계를 추천한다.\n"
         )
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": base_prompt + mode_hint + view_hint}]
-    for msg in (history or [])[-16:]:
+    for msg in (history or [])[-_chat_max_turns():]:
         role = msg.get("role") or "user"
         text = msg.get("text") or ""
         if not text.strip():
@@ -1210,9 +1401,81 @@ def _build_chat_messages(
             role = "user"
         messages.append({"role": role, "content": text})
 
-    user_prompt = f"吏덈Ц: {question}\n\n而⑦뀓?ㅽ듃:\n{context}\n"
+    user_prompt = f"질문: {question}\n\n컨텍스트:\n{context}\n"
     messages.append({"role": "user", "content": user_prompt})
     return messages
+
+
+def _is_anthropic_cfg(cfg: Dict[str, Any]) -> bool:
+    """후보 cfg 가 Anthropic(Claude) 공급자인지 판별."""
+    api_type = str(cfg.get("api_type") or cfg.get("provider") or "").strip().lower()
+    if api_type in ("anthropic", "claude"):
+        return True
+    if not api_type and "claude" in str(cfg.get("model") or "").lower():
+        return True
+    return False
+
+
+def _call_anthropic(cfg: Dict[str, Any], messages: List[Dict[str, str]]) -> Tuple[str, str]:
+    """Anthropic(Claude) 후보를 llm_adapters.AnthropicAdapter 경유로 호출.
+
+    ai.llm_call(agent_call) 은 gemini/openai_compat 만 분기해 Claude 를 못 쓴다(D4).
+    이미 구현된 AnthropicAdapter 를 재사용하되, 에러는 _run_llm_candidates 의
+    blocked_api_types 폴백 흐름과 호환되는 코드로 정규화한다.
+
+    Returns: (output, error_code) — 성공 시 error_code 는 "".
+
+    이미 _is_anthropic_cfg 로 공급자를 확정했으므로 get_adapter(LLM_PROVIDER env 가
+    api_type 보다 우선 — 전역 오설정 시 잘못된 어댑터 반환) 대신 AnthropicAdapter 를
+    직접 생성해 감지 결과를 그대로 존중한다.
+    """
+    try:
+        from workflow.llm_adapters import AnthropicAdapter
+    except Exception:
+        return "", "anthropic_sdk_missing"
+    try:
+        temperature = float(cfg.get("temperature", 0.3) or 0.3)
+    except (TypeError, ValueError):
+        temperature = 0.3
+    try:
+        max_tokens = int(cfg.get("max_tokens") or cfg.get("max_output_tokens") or 4096)
+    except (TypeError, ValueError):
+        max_tokens = 4096
+    try:
+        timeout = float(cfg.get("timeout") or getattr(config, "CHAT_LLM_TIMEOUT_SEC", 300.0))
+    except (TypeError, ValueError):
+        timeout = 300.0
+    try:
+        adapter = AnthropicAdapter(cfg)
+        result = adapter.generate(
+            messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        ) or {}
+        # ⚠ 잘린 응답(max_tokens/차단)을 완결 답변으로 돌려주지 않는다. 다른 챗 경로
+        # (`agent_call`)는 절단을 재시도 사유로 다뤄 소진 시 빈 답을 내므로, 이쪽만
+        # 잘린 답을 통과시키면 **같은 챗이 공급자에 따라 다르게 정직해진다**.
+        # 코드를 돌려주면 `_run_llm_candidates` 가 다음 후보로 넘어간다.
+        if result.get("truncated"):
+            _chat_perf_logger.warning(
+                "anthropic 응답이 비정상 종료(finish_reason=%s) — 후보 폴백",
+                result.get("finish_reason"),
+            )
+            return "", "truncated_response"
+        if result.get("model_mismatch"):
+            _chat_perf_logger.warning(
+                "anthropic 요청 모델(%s)과 응답 모델(%s) 불일치",
+                cfg.get("model"), result.get("model_reported"),
+            )
+        return str(result.get("output") or "").strip(), ""
+    except ImportError:
+        return "", "anthropic_sdk_missing"
+    except Exception as exc:  # noqa: BLE001 — 후보 폴백 위해 광범위 포착(원인은 코드로 정규화)
+        low = str(exc).lower()
+        if ("api" in low and "key" in low) or "authentication" in low or "401" in low or "unauthor" in low:
+            return "", "missing_api_key"
+        if "denied" in low or "connection" in low or "network" in low or "timeout" in low:
+            return "", "network_denied"
+        _chat_perf_logger.warning("anthropic adapter call failed: %s", exc, exc_info=True)
+        return "", "anthropic_error"
 
 
 def _run_llm_candidates(
@@ -1220,6 +1483,7 @@ def _run_llm_candidates(
     cfg: Dict[str, Any],
     cfg_candidates: List[Dict[str, Any]],
     messages: List[Dict[str, str]],
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, Dict[str, Any], str, float]:
     llm_started = time.perf_counter()
     candidate_cfgs: List[Dict[str, Any]] = []
@@ -1243,21 +1507,34 @@ def _run_llm_candidates(
     selected_cfg = cfg
     blocked_api_types = set()
     for candidate_cfg in candidate_cfgs or [cfg]:
+        if cancel_check and cancel_check():  # disconnect 시 추가 후보 시도 중단
+            break
         api_type = str(candidate_cfg.get("api_type") or "").strip().lower()
         if api_type and api_type in blocked_api_types:
             continue
         selected_cfg = candidate_cfg
-        agent_result = agent_call(candidate_cfg, messages, log_dir=None, role="assistant", stage="chat_assistant")
-        answer = str(agent_result.get("output") or "").strip()
-        attempts = agent_result.get("attempts") or []
-        if attempts and isinstance(attempts[-1], dict):
-            llm_meta = attempts[-1].get("llm_meta") or {}
-            if isinstance(llm_meta, dict):
-                last_llm_error = str(llm_meta.get("error") or "").strip().lower()
-        if last_llm_error in ("network_denied", "missing_api_key", "gemini_sdk_missing") and api_type:
+        if _is_anthropic_cfg(candidate_cfg):
+            # Anthropic(Claude): ai.llm_call(agent_call) 미지원 → 어댑터 경유 (D4)
+            answer, last_llm_error = _call_anthropic(candidate_cfg, messages)
+        else:
+            agent_result = agent_call(candidate_cfg, messages, log_dir=None, role="assistant", stage="chat_assistant")
+            answer = str(agent_result.get("output") or "").strip()
+            last_llm_error = ""
+            attempts = agent_result.get("attempts") or []
+            if attempts and isinstance(attempts[-1], dict):
+                llm_meta = attempts[-1].get("llm_meta") or {}
+                if isinstance(llm_meta, dict):
+                    last_llm_error = str(llm_meta.get("error") or "").strip().lower()
+        if last_llm_error in (
+            "network_denied", "missing_api_key", "gemini_sdk_missing",
+            "anthropic_sdk_missing", "anthropic_error",
+        ) and api_type:
             blocked_api_types.add(api_type)
         if answer:
             break
+    if not answer and not last_llm_error:
+        # 모든 후보가 사전 차단되어 한 번도 호출되지 못한 경우 — 원인을 명시
+        last_llm_error = "all_blocked"
     return answer, selected_cfg, last_llm_error, (time.perf_counter() - llm_started) * 1000.0
 
 
@@ -1275,6 +1552,8 @@ def answer_chat(
     jenkins_cache_root: Optional[str] = None,
     jenkins_build_selector: Optional[str] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    requester: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     total_started = time.perf_counter()
     if not question or not question.strip():
@@ -1282,10 +1561,11 @@ def answer_chat(
             "ok": False,
             "request_id": "",
             "thread_id": "",
-            "answer": "吏덈Ц??鍮꾩뼱 ?덉뒿?덈떎.",
+            "answer": "질문이 비어 있습니다.",
             "sources": [],
             "citations": [],
             "evidence": [],
+            "retrieval_notes": [],
             "next_steps": [],
             "structured": {"answer": "", "evidence": [], "next_steps": []},
             "approval_required": False,
@@ -1311,6 +1591,10 @@ def answer_chat(
     context = ""
     prompt_chars = 0
     last_llm_error = ""
+    # 근거 검색 진단(KB 시맨틱 축 비활성 등) — 근거가 적거나 없을 때 **왜** 그런지를
+    # 응답의 `retrieval_notes` 로 사용자에게 알린다. 경고는 근거가 아니므로
+    # `evidence`/`citations` 에 섞지 않는다.
+    retrieval_notes: List[str] = []
 
     def _node_classify(_state):
         return {"intent": question_type}
@@ -1319,6 +1603,7 @@ def answer_chat(
         nonlocal context_elapsed_ms, sources, context, citations
         started = time.perf_counter()
         context, sources, citations = _build_context(
+            notes_out=retrieval_notes,
             mode=mode,
             question=question,
             report_dir=resolved_report_dir,
@@ -1328,6 +1613,7 @@ def answer_chat(
             jenkins_build_selector=jenkins_build_selector,
             progress_callback=progress_callback,
             graph_state=_state,
+            cancel_check=cancel_check,
         )
         context_elapsed_ms = (time.perf_counter() - started) * 1000.0
         return {
@@ -1338,7 +1624,18 @@ def answer_chat(
         }
 
     def _node_select_model(_state):
-        cfg_path = str(oai_config_path or getattr(config, "DEFAULT_OAI_CONFIG_PATH", None) or "").strip() or None
+        # 보안(S1): oai_config_path 는 클라이언트(요청 본문)가 제어할 수 없다 — repo 내
+        # 임의 JSON 을 LLM cfg 로 지정해 base_url 을 바꾸는 SSRF-lite 표면을 차단하기 위해
+        # 서버 고정값(env CHAT_OAI_CONFIG_PATH > config.DEFAULT_OAI_CONFIG_PATH)만 쓴다.
+        cfg_path = str(
+            getattr(config, "CHAT_OAI_CONFIG_PATH", None)
+            or getattr(config, "DEFAULT_OAI_CONFIG_PATH", None)
+            or ""
+        ).strip() or None
+        if str(oai_config_path or "").strip():
+            _chat_perf_logger.warning(
+                "chat: client-supplied oai_config_path ignored (server-fixed): %r", oai_config_path,
+            )
         cfg = load_oai_config(cfg_path)
         cfg_candidates = load_oai_configs(cfg_path)
         if not cfg:
@@ -1354,6 +1651,10 @@ def answer_chat(
         }
 
     def _node_approval_gate(_state):
+        # 선행 노드(build_context/select_model) 실패 시 승인 영속화/감사 skip
+        # (고아 pending·dangling 감사 방지; _node_llm_answer 의 errors 가드와 대칭).
+        if _state.errors:
+            return {"approval_required": False, "approval_request": None}
         approval_request = _build_approval_request(
             question=question,
             question_type=question_type,
@@ -1364,9 +1665,7 @@ def answer_chat(
                 "approval_required": False,
                 "approval_request": None,
             }
-        _state.approval_required = True
-        _state.approval_request = dict(approval_request)
-        save_pending_approval(
+        saved = save_pending_approval(
             approval_request["approval_id"],
             {
                 "request_id": _state.request_id,
@@ -1383,8 +1682,32 @@ def answer_chat(
                 "jenkins_cache_root": jenkins_cache_root,
                 "jenkins_build_selector": jenkins_build_selector,
                 "approval_request": approval_request,
+                "owner": requester,
             },
         )
+        if not saved:
+            # 저장 실패 시 승인 카드를 띄우면 resolve 가 404 → 혼란. 게이트를 생략하고
+            # 일반 답변으로 진행(챗은 비실행이라 안전). created 감사도 남기지 않음.
+            _chat_perf_logger.warning(
+                "chat: save_pending_approval failed — approval gate skipped (approval_id=%s)",
+                approval_request.get("approval_id"),
+            )
+            return {"approval_required": False, "approval_request": None}
+        _state.approval_required = True
+        _state.approval_request = dict(approval_request)
+        try:
+            from backend.services.chat_approval_audit import record_audit as _rec_audit
+            _rec_audit(
+                approval_id=approval_request["approval_id"],
+                status="created",
+                owner=requester,
+                action_type=approval_request.get("action_type"),
+                risk_level=approval_request.get("risk_level"),
+                tool_name=approval_request.get("tool_name"),
+                question=question,
+            )
+        except Exception:
+            pass
         emit_graph_event(
             progress_callback,
             event_type="approval_required",
@@ -1398,8 +1721,11 @@ def answer_chat(
 
     def _node_llm_answer(_state):
         nonlocal llm_elapsed_ms, selected_cfg, prompt_chars, last_llm_error
+        # _skipped: stepper 가 이 노드를 '완료(0ms)' 가 아닌 '건너뜀' 으로 렌더하도록 신호.
         if _state.errors or _state.approval_required:
-            return {}
+            return {"_skipped": True}
+        if cancel_check and cancel_check():  # disconnect 후 LLM 호출 진입 차단
+            return {"_skipped": True}
         current_view = str((ui_context or {}).get("current_view", "dashboard"))
         messages = _build_chat_messages(
             mode=mode,
@@ -1413,6 +1739,7 @@ def answer_chat(
             cfg=dict(_state.extra.get("cfg") or {}),
             cfg_candidates=list(_state.extra.get("cfg_candidates") or []),
             messages=messages,
+            cancel_check=cancel_check,
         )
         return {
             "answer": answer_text,
@@ -1430,10 +1757,10 @@ def answer_chat(
         ("approval_gate", _node_approval_gate),
         ("llm_answer", _node_llm_answer),
     ]
-    state = run_chat_graph(initial_state=state, nodes=nodes, event_callback=progress_callback)
+    state = run_chat_graph(initial_state=state, nodes=nodes, event_callback=progress_callback, cancel_check=cancel_check)
 
     if state.errors:
-        fallback = "?꾩옱 LLM ?ㅼ젙??遺덈윭?ㅼ? 紐삵뻽?듬땲?? ?대? 由ы룷??濡쒓렇 湲곕컲?쇰줈 異붽? ?뺣낫瑜??쒓났??二쇱꽭??"
+        fallback = "현재 LLM 설정을 불러오지 못했습니다. 이전 리포트 로그 기반으로 추가 정보를 제공해 주세요."
         return {
             "ok": False,
             "request_id": state.request_id,
@@ -1441,7 +1768,8 @@ def answer_chat(
             "answer": fallback,
             "sources": sources,
             "citations": citations,
-            "evidence": evidence,
+            "evidence": _build_evidence(citations=citations, sources=sources),
+            "retrieval_notes": list(retrieval_notes),
             "next_steps": _default_next_steps(question_type),
             "structured": {"answer": fallback, "evidence": [], "next_steps": _default_next_steps(question_type)},
             "approval_required": bool(state.approval_required),
@@ -1458,6 +1786,7 @@ def answer_chat(
             "sources": sources,
             "citations": citations,
             "evidence": _build_evidence(citations=citations, sources=sources),
+            "retrieval_notes": list(retrieval_notes),
             "next_steps": ["작업 내용을 검토합니다.", "승인 또는 거절을 선택합니다."],
             "approval_required": True,
             "approval_request": state.approval_request,
@@ -1489,7 +1818,7 @@ def answer_chat(
                 payload={"reason": "network_denied"},
             )
         else:
-            answer = "?꾩옱 ?묐떟???앹꽦?섏? 紐삵뻽?듬땲?? 吏덈Ц??議곌툑 ??援ъ껜?뷀빐 二쇱꽭??"
+            answer = "현재 답변을 생성하지 못했습니다. 질문을 조금 더 구체화해 주세요."
 
     if answer:
         parsed_answer = _parse_structured_answer_payload(answer)
@@ -1509,7 +1838,7 @@ def answer_chat(
             str(resolved_report_dir) if resolved_report_dir else "",
             str(selected_cfg.get("model") or ""),
             len(question or ""),
-            len((history or [])[-16:]),
+            len((history or [])[-_chat_max_turns():]),
             len(context or ""),
             prompt_chars,
             len(sources),
@@ -1542,6 +1871,7 @@ def answer_chat(
         "sources": sources,
         "citations": citations,
         "evidence": combined_evidence,
+        "retrieval_notes": list(retrieval_notes),
         "next_steps": next_steps,
         "approval_required": bool(state.approval_required),
         "approval_request": state.approval_request,

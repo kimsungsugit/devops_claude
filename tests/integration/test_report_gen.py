@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 from report.c_parsing import (
-    _extract_c_prototypes,
     _extract_c_definitions,
     _extract_c_function_bodies,
-    _extract_c_macros,
     _extract_c_global_candidates,
+    _extract_c_macros,
+    _extract_c_prototypes,
     _strip_c_comments,
 )
 

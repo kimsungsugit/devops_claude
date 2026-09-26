@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from report_gen.source_parser import (
     _extract_c_global_candidates,
-    _extract_local_static_candidates,
     _extract_fallback_call_names,
-    _extract_macro_call_names,
     _extract_function_pointer_call_targets,
+    _extract_local_static_candidates,
+    _extract_macro_call_names,
 )
 
 

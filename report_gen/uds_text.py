@@ -1,14 +1,10 @@
 """report_gen.uds_text - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
-import csv
 import logging
-import time
+import os
+import re
 from html import escape
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List
 
 from report.constants import UDS_RULES
 

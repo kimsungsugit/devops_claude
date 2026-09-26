@@ -103,27 +103,31 @@ curl -X POST http://localhost:9000/api/auth/refresh \
 
 ## 일상 운영
 
-### Admin이 사용자 등록
+### Admin이 사용자 등록 (R48-a, 2026-09-14 — API·화면)
 
-현재는 `config/users.json` 직접 편집 또는 API 호출:
+**설정 > 관리자 모드 > 👥 계정·승인자** 블록, 또는 API(전부 **JWT + admin** — X-User 만으로는 401):
 
 ```bash
-# users.json 편집 (lru_cache + mtime invalidate 자동 반영, backend 재기동 불필요)
-{
-  "users": [
-    {
-      "username": "newuser",
-      "password_hash": "<bcrypt hash — 운영 도구 사용 권장>",
-      "must_change_password": true,
-      "created_at": "2026-05-18T09:00:00+00:00",
-      "token_version": 0
-    }
-  ],
-  "schema_version": 1
-}
+# 생성 — 임시 비밀번호는 admin 이 정해 본인에게 직접 전달. 서버는 되돌려 주지 않고 첫 로그인에서 변경을 강제한다
+curl -X POST http://127.0.0.1:9000/api/auth/users -H "Authorization: Bearer $ACCESS" -H "Content-Type: application/json" \
+  -d '{"username":"approver01","temp_password":"<8자 이상>","approver":true,"admin":false}'
+# 목록(해시 없음) · 역할 · 삭제
+curl http://127.0.0.1:9000/api/auth/users -H "Authorization: Bearer $ACCESS"
+curl -X PUT http://127.0.0.1:9000/api/auth/users/approver01/roles -H "Authorization: Bearer $ACCESS" -H "Content-Type: application/json" -d '{"approver":true}'
+curl -X DELETE http://127.0.0.1:9000/api/auth/users/approver01 -H "Authorization: Bearer $ACCESS"
 ```
 
-향후 admin Settings UI 추가 예정 (별도 라운드).
+- 사용자 이름은 `[A-Za-z0-9._-]` 2~64자, 영문/숫자로 시작·끝, `..` 불가(캐시 경로 `{base}/{user}/` 에 들어가는 값이다).
+- 자기 자신 삭제·admin 해제는 **409** `SELF_DELETE`/`SELF_DEMOTE`(lockout 방어 — 행위자가 admin 이라 남을 내려도 자기가 남으므로 '마지막 admin' 검사는 따로 두지 않는다). 삭제는 역할(admin·승인자)부터 지운다 — 같은 이름의 새 계정이 역할을 상속하지 않게.
+- 계정·역할 변경은 `reports/account_audit.jsonl`(git 밖) 에 append-only 로 남는다 — "누가 누구에게 승인 권한을 줬나" 까지가 4-eyes 의 증거다. 승인자 목록 조회(`GET /api/auth/approvers`)는 admin 전용(검토 응답의 마스킹된 이름을 되맞히지 못하게).
+- `config/users.json` 직접 편집도 여전히 동작한다(mtime invalidate). 그러나 bcrypt 해시를 손으로 만들 이유가 없어졌다.
+
+### 승인자(approver) 역할 (R48-a)
+
+검토 기록(`POST /api/review/runs/{id}`)은 **admin 또는 승인자**(`config/approvers.json`)만 남기고, **자기가 만든 run 은
+누구도 판정할 수 없다**(`generation_runs.created_by` ↔ 검토자, 403 `SELF_REVIEW`). 그래서 문서를 생성하는 계정과 다른
+승인자 계정이 하나 이상 있어야 승인 절차가 성립한다. 게시(`POST /api/jenkins/uds/publish`)는 그 파일 바이트에
+`approved` 기록이 있어야 한다(409 `NOT_APPROVED`).
 
 ### Admin 권한 부여 (40차 admin_users.json)
 

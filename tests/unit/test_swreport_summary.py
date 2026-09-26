@@ -191,6 +191,8 @@ def test_build_fail_cell_marked(fixture_bytes):
     from backend.services.design_tokens import FAIL_FILL_RGB
     res = build_summary_report(fixture_bytes, [("self", fixture_bytes)])
     wb = openpyxl.load_workbook(io.BytesIO(res.xlsm_bytes))
+    # 라운드 107 — ES95411 템플릿 보존 수식 재계산 보장 (fullCalcOnLoad 회귀 가드).
+    assert wb.calculation.fullCalcOnLoad is True
     ws = wb["Summary"]
     fill = ws.cell(row=21, column=14).fill
     assert fill is not None and fill.fgColor is not None

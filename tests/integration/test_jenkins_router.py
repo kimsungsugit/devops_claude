@@ -15,15 +15,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture(scope="module")
-def client():
-    from backend.main import app
-    return TestClient(app)
-
 
 class TestJenkinsJobsValidation:
     """POST /api/jenkins/jobs — 입력 유효성 및 에러 처리.

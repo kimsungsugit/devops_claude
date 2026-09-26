@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import importlib
-import pytest
 
+import pytest
 
 REPORT_GEN_MODULES = [
     "report_gen",
@@ -48,7 +48,7 @@ class TestReportGenImports:
 
     def test_cross_module_function_access(self):
         """Functions that depend on cross-module imports resolve."""
-        from report_gen.utils import _safe_dict, _safe_list, _fmt_bool
+        from report_gen.utils import _fmt_bool, _safe_dict, _safe_list
 
         assert _safe_dict(None) == {}
         assert _safe_dict({"a": 1}) == {"a": 1}
@@ -59,14 +59,14 @@ class TestReportGenImports:
 
     def test_constants_available(self):
         """report.constants should be importable."""
-        from report.constants import UDS_RULES, DEFAULT_TYPE_RANGES
+        from report.constants import DEFAULT_TYPE_RANGES, UDS_RULES
 
         assert isinstance(UDS_RULES, (dict, list))
         assert isinstance(DEFAULT_TYPE_RANGES, dict)
 
     def test_c_parsing_available(self):
         """report.c_parsing functions should be importable."""
-        from report.c_parsing import _strip_c_comments, _extract_c_prototypes
+        from report.c_parsing import _extract_c_prototypes, _strip_c_comments
 
         assert callable(_strip_c_comments)
         assert callable(_extract_c_prototypes)
@@ -92,6 +92,7 @@ class TestConfigFunctions:
     def test_resolve_oai_api_keys(self):
         """config.resolve_oai_api_keys replaces ENV: placeholders."""
         import os
+
         from config import resolve_oai_api_keys
 
         os.environ["_TEST_API_KEY"] = "test-secret-123"
@@ -208,6 +209,7 @@ class TestValidationHelpers:
 
     def test_remove_docx_paragraphs_keeps_na_in_function_info_tables(self):
         import docx
+
         from report_gen.docx_builder import _remove_docx_paragraphs
 
         doc = docx.Document()

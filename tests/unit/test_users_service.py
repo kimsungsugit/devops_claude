@@ -126,8 +126,8 @@ class TestTimingSafetyW32:
     """
 
     def test_unknown_user_calls_dummy_verify(self, _isolated_users, monkeypatch):
-        from backend.services import users as us
         from backend.services import auth_service as svc
+        from backend.services import users as us
         call_count = {"verify": 0}
         orig_verify = svc.verify_password
 
@@ -154,6 +154,7 @@ class TestTimingSafetyW32:
     def test_unknown_vs_wrong_password_similar_duration(self, _isolated_users):
         """timing 균등화 — loose check (ratio 0.3 ~ 3.0 범위)."""
         import time
+
         from backend.services import users as us
         # warmup으로 dummy hash 첫 계산 비용 제거
         us.warmup_dummy_hash()

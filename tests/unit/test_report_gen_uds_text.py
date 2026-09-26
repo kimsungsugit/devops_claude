@@ -1,8 +1,6 @@
 """Unit tests for report_gen.uds_text — text formatting and UDS rules."""
 from __future__ import annotations
 
-import pytest
-
 
 class TestApplySentenceRules:
     def test_truncates_sentences(self):

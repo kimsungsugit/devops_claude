@@ -3,3 +3,4 @@
 -r requirements-llm.txt
 -r backend/requirements.txt
 -r requirements-dev.txt
+pdfplumber>=0.11
