@@ -15,6 +15,7 @@ const KIND_LABEL = Object.freeze({ actual: '문제가 된 것', potential: '문�
 const SOURCE_LABEL = Object.freeze({
   generation: '생성 중', gate_report: '게이트 리포트', docx_validate: '구조 검증', confidence: '신뢰도',
   reference: '참조 SwUDS', scores: '기록 점수', evidence: '근거',
+  generation_disclosures: '생성 공시',
 });
 
 function severityTone(sev) { return SEVERITY_TONE[sev] || 'neutral'; }

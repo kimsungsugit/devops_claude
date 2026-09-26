@@ -3,6 +3,7 @@ import { api, post, getUsername } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import IssueList from '../IssueList.jsx';
+import { metricLabel } from '../../metricLabels.js';
 import {
   verdictOf, trendVerdictOf, metricVerdictOf, TONE_COLOR,
   reviewVerdictOf, reviewErrorText, reviewFreshnessOf, reviewDecisionTone, REVIEW_DECISIONS, REVIEW_DECISION_LABEL,
@@ -751,7 +752,13 @@ export default function QualityGateSection({ analysisResult, onSubChange, initia
                           const g = metricVerdictOf(s?.gate_pass ?? null);
                           return (
                             <tr key={`${s.metric_name}-${i}`}>
-                              <td>{s.metric_name}</td>
+                              {/* (R30) 비게이트 근거 지표(요구 경계·확정 기대값·MC/DC·통합 기대값…)도 여기 보인다 — 라벨 + 원 코드 */}
+                              <td>
+                                {metricLabel(s.metric_name)}
+                                {metricLabel(s.metric_name) !== s.metric_name && (
+                                  <code style={{ marginLeft: 6, fontSize: '0.85em', color: 'var(--text-muted)' }}>{s.metric_name}</code>
+                                )}
+                              </td>
                               <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                                 {s.value == null ? '—' : Number(s.value).toFixed(2)}
                               </td>

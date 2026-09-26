@@ -170,6 +170,20 @@ describe('QualityGateSection — 근거의 미기록을 명시한다', () => {
     await waitFor(() => expect(screen.getByText('—(비게이트)')).toBeInTheDocument());
   });
 
+  it('(R30) 생성 근거 지표는 한국어 라벨과 원 코드로 보인다 — 모르는 코드는 코드 그대로', async () => {
+    stubApi({ detail: { id: 776, doc_type: 'suts', scores: [
+      { metric_name: 'expected_derived_pct', value: 25, gate_pass: null, threshold: null },
+      { metric_name: 'some_unknown_metric', value: 1, gate_pass: null, threshold: null },
+    ] } });
+    const user = userEvent.setup();
+    render(<QualityGateSection />);
+    await waitFor(() => expect(screen.getByText('#776')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: '근거 보기' }));
+    await waitFor(() => expect(screen.getByText('확정 기대값 비율')).toBeInTheDocument());
+    expect(screen.getByText('expected_derived_pct')).toBeInTheDocument();
+    expect(screen.getByText('some_unknown_metric')).toBeInTheDocument();   // 지어내지 않는다
+  });
+
   it('게이트 사유가 있으면 함께 보인다 (백엔드 gate_reason)', async () => {
     stubApi({
       runs: [runRow({ gate_reason: 'no_gated_metric' })],

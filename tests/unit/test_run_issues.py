@@ -98,8 +98,9 @@ class TestSources:
         assert codes["validation_issue"]["message"] == "heading 3개가 빈 명세로 출력됨"
         # confidence B 는 항목 없음
         assert not [c for c in codes if c.startswith("confidence")]
+        # (R30) UDS(docx) 는 생성 공시를 남기지 않는다 — 공시 축은 "해당 없음"(None), 0 이 아니다
         assert out["sources"] == {"generation": False, "gate_report": True, "docx_validate": True,
-                                  "confidence": True, "reference": False, "scores": 0}
+                                  "confidence": True, "reference": False, "generation_disclosures": None, "scores": 0}
         assert out["counts"]["total"] == len(out["issues"])
         assert out["counts"]["actual"] + out["counts"]["potential"] == out["counts"]["total"]
 

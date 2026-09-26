@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -185,6 +186,49 @@ def _from_reference(r: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _from_generation_disclosures(gd: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R30) 생성 공시 중 **경고** 톤 항목 — 공시 보드에만 있던 "못 만든 것·못 읽은 것" 을 검토 목록에도 올린다.
+
+    문구·판정은 `report_gen.generation_disclosures` 가 정한다(여기서 다시 판정하지 않는다). 정보 톤은 규모 공시라 항목이
+    아니다. 경고는 산출물에 무엇이 빠졌다는 뜻이지 산출물이 틀렸다는 단정이 아니므로 `potential` 로 적는다.
+    """
+    if not gd or not gd.get("present"):
+        return []
+    out: List[Dict[str, Any]] = []
+    for it in gd.get("items") or []:
+        if not isinstance(it, dict) or it.get("tone") != "warning" or not it.get("key"):
+            continue
+        text = " ".join(_basename_paths(f"{it.get('label') or it['key']}: {it.get('value') or ''} — {it.get('note') or ''}")
+                        .replace("**", "").split())
+        if len(text) > _MESSAGE_CAP:
+            # (R30 review W3) 공시 문구는 사유(못 읽은 문서·예외)를 끝에 적는다 — 앞만 남기면 경고가 이유를 잃는다
+            text = f"{text[:_MESSAGE_CAP - 170]} … {text[-120:]} (전문: 생성 공시)"
+        out.append(_issue(f"disclosure:{it['key']}", "warning", "potential", text,
+                          source="generation_disclosures", facts={"key": it["key"], "value": it.get("value")}))
+    return out
+
+
+_MESSAGE_CAP = 400   # `_issue` 가 message 를 자르는 길이
+
+# (R30 review r2 W8) 공시 문구에는 예외 문장(`FileNotFoundError: … 'D:\…\SyRS.docx'`)이 섞인다 — 검토 목록과 설명 프롬프트
+#   (외부 LLM)로는 파일 이름만 보낸다(`backend/routers/review.py` "서버 절대경로는 싣지 않는다", `helpers/uds.py` 같은 규약).
+_QUOTED_PATH = re.compile(r"""(['"])((?:[A-Za-z]:|\\\\|/)[^'"]*[\\/][^'"]*)\1""")
+_BARE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/])[^\s'\"]+|(?<!\S)/(?:[^\s/]+/)+[^\s/]+")
+
+
+def _basename_paths(text: str) -> str:
+    text = _QUOTED_PATH.sub(lambda m: m.group(1) + re.split(r"[\\/]", m.group(2))[-1] + m.group(1), text)
+    return _BARE_PATH.sub(lambda m: re.split(r"[\\/]", m.group(0))[-1], text)
+
+
+def _disclosing_doc_types() -> frozenset:
+    """생성 공시를 남기는 문서 종류 — 단일 출처 `report_gen.generation_disclosures.DISCLOSURE_DOC_TYPES`(R30 review r2 W7:
+    손 목록이면 새 종류가 공시를 남기기 시작해도 여기서는 '해당 없음' 으로 남는다). 이 종류에서 공시를 못 읽으면 '근거
+    없음'(False), 다른 종류는 None."""
+    from report_gen.generation_disclosures import DISCLOSURE_DOC_TYPES
+    return DISCLOSURE_DOC_TYPES
+
+
 def _from_scores(scores: List[QualityScore]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for s in scores or []:
@@ -206,7 +250,7 @@ def collect_run_issues(session: Session, run_id: int) -> Dict[str, Any]:
     items.extend(gen_items)
 
     sources: Dict[str, Any] = {"generation": recorded, "gate_report": None, "docx_validate": None,
-                               "confidence": None, "reference": None, "scores": 0}
+                               "confidence": None, "reference": None, "generation_disclosures": None, "scores": 0}
     dt = str(run.doc_type or "").strip().lower()
     if run.output_path:
         try:
@@ -226,20 +270,29 @@ def collect_run_issues(session: Session, run_id: int) -> Dict[str, Any]:
             items.extend(_from_confidence(c))
             items.extend(_from_reference(r))
         items.extend(_from_validation(v))
+        gd = ev.get("generation") or {}
+        disclosed = _from_generation_disclosures(gd)
         sources.update({"gate_report": bool(g.get("present")) if dt == "uds" else None,
                         "docx_validate": bool(v.get("present")),
                         "confidence": bool(c.get("present")) if dt == "uds" else None,
-                        "reference": bool(r.get("present")) if dt == "uds" else None})
+                        "reference": bool(r.get("present")) if dt == "uds" else None,
+                        # 공시를 남기는 산출물(STS·SUTS·SITS): 경고 항목 수, 공시를 못 읽었으면 False(근거 없음 —
+                        #   목록이 비어도 "문제 없음" 이 아니다, review W2). 그 밖의 종류는 None(해당 없음)
+                        "generation_disclosures": len(disclosed) if gd.get("present")
+                        else (False if dt in _disclosing_doc_types() else None)})
         if ev and ev.get("output_path_present") is False:
             items.append(_issue("output_file_missing", "warning", "actual",
                                 "기록된 경로에 산출물 파일이 없다 — 검토는 기록 해시에만 붙는다", source="evidence"))
     else:
+        disclosed = []
         items.append(_issue("output_path_unrecorded", "risk", "potential",
                             "산출물 경로가 기록되지 않은 run — 사이드카 근거를 찾을 수 없다", source="evidence"))
 
     sc = _from_scores(list(run.scores or []))
     items.extend(sc)
     sources["scores"] = len(sc)
+    # (review Info 4) 공시 경고는 게이트 미달(error) 뒤에 — 설명 프롬프트의 항목 상한이 게이트 실패를 밀어내지 않게
+    items.extend(disclosed)
 
     counts = {"actual": 0, "potential": 0, "by_severity": {"error": 0, "warning": 0, "risk": 0}}
     for it in items:

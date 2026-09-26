@@ -94,6 +94,19 @@ _RULE_ACTION: Dict[str, str] = {
     "quick_gate_fail": "빠른 게이트 FAIL — 미달 축의 조치를 따른다.",
     "threshold_missing": "임계가 없는 축이 있어 fail-closed 됐다 — 설정을 채운다.",
     "issues_truncated": "항목 상한을 넘었다 — 백엔드 로그에서 나머지를 본다.",
+    # (R30) 생성 공시의 경고 항목 — 문구가 무엇이 빠졌는지와 사유를 이미 말한다. 기본은 결손(못 읽은 입력·생성 실패·절단)
+    "disclosure": "생성 공시가 경고한 결손이다 — 공시 문구의 사유(못 읽은 입력·생성 실패·절단)를 해소하고 다시 생성하거나, "
+                  "빠진 채 승인할지 검토자가 정한다.",
+    # (R30 review W4) 결손이 아니라 **확인할 사실**인 공시 — 다시 생성해도 바뀌지 않는다
+    "disclosure:suts_source_findings": "소스 결함 후보(C 미정의 동작)다 — 재생성으로 사라지지 않는다. 'Source Findings' 시트의 예시 "
+                                       "입력이 호출 측에서 가능한지 확인해 소스를 고치거나, 불가능한 이유를 기록한다.",
+    "disclosure:suts_input_list_gaps": "함수가 읽는데 설계서 입력 목록에 없는 객체다 — SwUDS 입력 표를 보강하거나 내부 상태로 정리한다.",
+    "disclosure:suts_range_conflicts": "설계서의 값 범위가 선언 타입 폭을 벗어난다 — 설계서와 소스 중 틀린 쪽을 고친다(시험은 타입 폭으로 했다).",
+    "disclosure:suts_asil_evidence": "근거 없는 ASIL 이 있다 — 등급을 지어내지 않았으니 SwUDS·SwDS 에서 정하거나 소스에 @asil 을 단다.",
+    "disclosure:sts_mapping_basis": "약한 근거(부분 문자열·추측 매칭)로 요구에 붙은 함수가 있다 — 추적성 판정 때 따로 보고, SwDS Related "
+                                    "ID·SwUDS 설계 ID 로 근거를 보강한다.",
+    "disclosure:sts_unlinked_functions": "어느 요구에도 붙지 못한 함수다 — 요구 누락인지 요구 밖 함수인지 정하고, 필요하면 SwDS Related "
+                                         "ID 를 보강한다.",
 }
 _DEFAULT_ACTION = "관측된 사실을 확인하고, 입력을 고친 뒤 다시 생성한다."
 

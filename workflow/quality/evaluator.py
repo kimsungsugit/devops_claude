@@ -276,7 +276,52 @@ def evaluate_sts(quality_report: Dict[str, Any]) -> MetricList:
     # 총 TC 수 (참고용)
     metrics.append(_metric("total_test_cases", total))
 
+    metrics.extend(_sts_evidence_metrics(gen_stats))
     return metrics
+
+
+# ── (R30) 생성 근거를 품질 게이트 보드에 — **전부 비게이트** ────────────────────────────────────────────────
+#
+# R1~R29 의 근거(요구 원문·시스템 추적 경계, 확정 기대값, MC/DC 설계, 소스 소견, 통합 기대값)는 생성 공시로만 보였고
+# **어떤 게이트도 읽지 않았다**(2026-09-27 사용자 질문 "게이트에 다 표현되지?" 에 대한 조사). 여기서 품질 DB 지표로도 남겨
+# 품질 게이트의 run 상세 표(`QualityGateSection`)에 비게이트 행으로 보이게 한다 — 추세(`/api/quality/trend`)는 점수·판정만
+# 싣고, 개선 제안은 임계 없는 지표를 건너뛰므로 거기엔 나오지 않는다. 임계는 걸지 않는다 — 기존 프로젝트의 pass/fail 을 뒤집지 않는 것이 이 모듈의
+# 정책이고(`flow_emit_pct` 와 같은 취급), 이 수들은 "많을수록 좋다" 가 아니라 근거의 규모다. 블록이 없는 구판 산출물은
+# 지표를 만들지 않는다(없음과 0 을 구분 — 0% 로 그리면 "근거가 하나도 없다" 로 읽힌다).
+
+def _evidence(name: str, value: float) -> MetricResult:
+    """근거 지표 — 비게이트이고, 게이트 축이 하나도 없는 run 의 폴백 점수(`_pct` 평균)에도 끼지 않는다(R30 review r2 I-2:
+    근거 비율이 그 점수를 움직였다). 표식은 메모리 안에서만 쓰인다 — recorder 는 이름·값·임계·판정만 DB 에 적는다."""
+    return {**_metric(name, value), "evidence": True}
+
+
+def _count(d: Dict[str, Any], key: str) -> float:
+    v = d.get(key)
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _sts_evidence_metrics(gen_stats: Dict[str, Any]) -> MetricList:
+    rb = gen_stats.get("requirement_boundary") if isinstance(gen_stats, dict) else None
+    if not isinstance(rb, dict):
+        return []
+    out: MetricList = [_evidence("requirement_boundary_failed", 1.0 if rb.get("error") else 0.0)]
+    if rb.get("error"):
+        return out
+    out.append(_evidence("requirement_boundary_tcs", _count(rb, "tcs")))
+    if _count(rb, "facts") > 0:
+        out.append(_evidence("requirement_boundary_fact_use_pct",
+                           round(_count(rb, "facts_used") / _count(rb, "facts") * 100, 2)))
+    docs = rb.get("system_documents")
+    if isinstance(docs, list):   # R29 이후 산출물 — 시스템 문서를 안 줬으면 빈 목록
+        # (R30 review Info 1) 표를 하나도 못 찾은 문서(양식이 다르거나 다른 문서)는 읽었어도 쓸 수 없었다 — 못 읽은 쪽에 센다
+        read = [d for d in docs if isinstance(d, dict) and _count(d, "blocks") > 0]
+        unread = sum(1 for d in docs if isinstance(d, dict) and (d.get("error") or ("blocks" in d and not _count(d, "blocks")))) \
+            + len(rb.get("system_input_skips") or [])
+        out.append(_evidence("traced_system_documents_read", float(len(read))))
+        out.append(_evidence("traced_system_documents_unread", float(unread)))
+        if read:
+            out.append(_evidence("traced_system_boundary_tcs", _count(rb, "traced:tcs")))
+    return out
 
 
 def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
@@ -320,7 +365,27 @@ def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
     metrics.append(_metric("total_test_cases", total))
     metrics.append(_metric("total_sequences", _safe_float(quality_report, "total_sequences")))
 
+    metrics.extend(_suts_evidence_metrics(quality_report))
     return metrics
+
+
+def _suts_evidence_metrics(qr: Dict[str, Any]) -> MetricList:
+    """(R30) 확정 기대값(소스 oracle 도출)·MC/DC 설계·소스 소견 — 비게이트. 블록이 없으면 지표도 없다."""
+    out: MetricList = []
+    ev = qr.get("expected_evidence_summary") if isinstance(qr, dict) else None
+    if isinstance(ev, dict) and _count(ev, "total") > 0:
+        out.append(_evidence("expected_derived_cells", _count(ev, "derived")))
+        out.append(_evidence("expected_derived_pct", round(_count(ev, "derived") / _count(ev, "total") * 100, 2)))
+        out.append(_evidence("expected_unknown_cells", _count(ev, "unknown")))
+    mc = qr.get("mcdc_design_summary") if isinstance(qr, dict) else None
+    if isinstance(mc, dict) and "decisions" in mc:
+        if _count(mc, "decisions") > 0:
+            out.append(_evidence("mcdc_designed_pct", round(_count(mc, "designed") / _count(mc, "decisions") * 100, 2)))
+        out.append(_evidence("mcdc_invalidated_pairs", _count(mc, "invalidated_pairs")))
+    sf = qr.get("source_findings") if isinstance(qr, dict) else None
+    if isinstance(sf, dict) and "findings" in sf:
+        out.append(_evidence("source_findings", _count(sf, "findings")))
+    return out
 
 
 def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
@@ -400,7 +465,27 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
             # "그런 축이 없다" 와 구별되지 않는다.
             _logger.debug("SITS 흐름 지표 중 수치화 불가: %s", ", ".join(_unrepresentable))
             metrics.append(_metric("flow_metrics_unrepresentable", float(len(_unrepresentable))))
+    metrics.extend(_sits_evidence_metrics(quality_report))
     return metrics
+
+
+def _sits_evidence_metrics(qr: Dict[str, Any]) -> MetricList:
+    """(R30) 통합 기대값(함수 간 소스 oracle 도출)·인터페이스 계약 추출 — 비게이트. 블록이 없으면 지표도 없다."""
+    out: MetricList = []
+    io = qr.get("integration_oracle") if isinstance(qr, dict) else None
+    if isinstance(io, dict) and io.get("status"):
+        status = str(io.get("status"))
+        # (R30 review W1) "도출했나" 를 적는다 — 프로젝트 문맥이 없거나 파서가 없어 **돌지 않은** 경우를 "실패 0" 으로 적으면
+        #   성공으로 읽힌다. 왜 안 됐는지(오류·미실행)는 생성 공시가 말한다.
+        out.append(_evidence("integration_oracle_evaluated", 1.0 if status == "evaluated" else 0.0))
+        if status == "evaluated" and _count(io, "cells") > 0:
+            out.append(_evidence("integration_expected_derived_cells", _count(io, "derived")))
+            out.append(_evidence("integration_expected_derived_pct",
+                               round(_count(io, "derived") / _count(io, "cells") * 100, 2)))
+    ic = qr.get("interface_contract") if isinstance(qr, dict) else None
+    if isinstance(ic, dict):
+        out.append(_evidence("interface_contract_failed", 1.0 if ic.get("error") else 0.0))
+    return out
 
 
 def evaluate_swreport(summary: Dict[str, Any]) -> MetricList:
@@ -830,8 +915,9 @@ def compute_overall_score(metrics: MetricList) -> float:
     """
     scored = [m for m in metrics if m.get("threshold") is not None]
     if not scored:
-        # threshold가 없으면 _pct 메트릭의 value 평균
-        vals = [m["value"] for m in metrics if m.get("metric_name", "").endswith("_pct")]
+        # threshold가 없으면 _pct 메트릭의 value 평균 — (R30) 생성 근거 지표는 빼고(규모 공시지 품질 점수가 아니다)
+        vals = [m["value"] for m in metrics
+                if m.get("metric_name", "").endswith("_pct") and not m.get("evidence")]
         return round(sum(vals) / max(len(vals), 1), 2)
 
     total = 0.0

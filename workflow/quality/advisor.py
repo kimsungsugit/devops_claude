@@ -131,6 +131,30 @@ _STS_ADVICE = {
         "low_advice": "",
         "threshold": None,
     },
+    # ── (R30) 요구 경계 TC 근거(비게이트) ──
+    "requirement_boundary_failed": {
+        "label": "요구 원문 경계 TC 생성 실패",
+        "low_advice": "1 이면 요구 원문 경계 TC 를 만들지 못해 넣지 않았습니다 — 생성 공시에 예외가 적혀 있습니다.",
+        "threshold": None,
+    },
+    "requirement_boundary_tcs": {"label": "요구 원문 경계 TC 수", "low_advice": "", "threshold": None},
+    "requirement_boundary_fact_use_pct": {
+        "label": "요구 사실 사용률(경계 TC 가 된 사실)",
+        "low_advice": "요구 문장에서 읽은 임계·유지시간 중 경계 TC 가 된 비율입니다. 못 쓴 사실의 사유(주어 없음·기호 비교 등)는 생성 공시에 있습니다.",
+        "threshold": None,
+    },
+    "traced_system_documents_read": {"label": "읽은 시스템 요구 문서 수(SyRS·SyDS)", "low_advice": "", "threshold": None},
+    "traced_system_documents_unread": {
+        "label": "읽지 못한 시스템 요구 문서 수",
+        "low_advice": "지정했는데 열지 못했거나 시스템 요구 표를 하나도 찾지 못한 SyRS·SyDS 입니다 — 경로·권한·양식을 확인하세요(생성 공시에 사유).",
+        "threshold": None,
+    },
+    "traced_system_boundary_tcs": {
+        "label": "시스템 요구 추적 경계 TC 수",
+        "low_advice": "SRS Related ID 가 직접 가리키는 SyRS·SyDS 블록의 임계로 만든 경계 TC 수입니다. 0 이면 인용된 블록에 시험할 "
+                      "임계가 없거나, 입력 문서가 없거나, 문서에서 시스템 요구 표를 찾지 못했습니다(생성 공시).",
+        "threshold": None,
+    },
     "function_tc_coverage_pct": {
         "label": "함수 기준 TC 보유율",
         "low_advice": "요구당 TC 상한(max_tc_per_req)에 걸려 매핑된 함수 대부분이 시험 없이 남습니다. 상한을 올리거나, 요구-함수 매핑을 좁혀(모듈 단위 → 함수 단위 SDS Related ID) 요구당 함수 수를 줄이세요.",
@@ -179,6 +203,34 @@ _SUTS_ADVICE = {
         "label": "로직 플로우 보유율",
         "low_advice": "로직 플로우(if/switch/loop)가 추출되지 않은 함수가 많습니다. 소스 코드가 복잡도가 낮은 단순 함수일 수 있으며, 이 경우 정상입니다.",
         "from_table": True,   # 임계는 thresholds.py 단일 출처
+    },
+    # ── (R30) 생성 근거(비게이트) — 공시 보드에만 있던 수를 품질 DB 에도. 임계 없음(라벨 정본만). ──
+    "expected_derived_pct": {
+        "label": "확정 기대값 비율(소스 도출)",
+        "low_advice": "기대값 칸 중 소스 oracle 이 함수 본문을 해석해 확정한 칸의 비율입니다(요구 적합성·타깃 실행은 아님). 낮으면 "
+                      "'Test Evidence' 시트의 미상 사유(피호출 함수 포인터 쓰기·전처리 판정 등)를 보세요 — 확장 프로파일·빌드 설정(.cproject) "
+                      "경로가 있으면 늘어납니다.",
+        "threshold": None,
+    },
+    "expected_derived_cells": {"label": "확정 기대값 칸 수", "low_advice": "", "threshold": None},
+    "expected_unknown_cells": {"label": "기대값 미상 칸 수", "low_advice": "", "threshold": None},
+    "mcdc_designed_pct": {
+        "label": "MC/DC 설계율(모든 조건 쌍을 찾은 결정)",
+        "low_advice": "결정식을 실제로 평가해 모든 조건의 독립 영향 쌍을 찾은 결정의 비율입니다(일부 조건만 찾은 '부분' 결정은 빠집니다). "
+                      "미지원·쌍 못 찾음 사유는 'MCDC Design' 시트에 있습니다.",
+        "threshold": None,
+    },
+    "mcdc_invalidated_pairs": {
+        "label": "재검증에서 떨어진 MC/DC 쌍",
+        "low_advice": "두 행이 문서에 남았지만 마지막 재검증에서 독립 영향이 성립하지 않은 쌍 수입니다(행 상한에 잘린 쌍은 '절단' 으로 따로 "
+                      "셉니다). 'MCDC Design' 시트에서 그 결정의 사유를 보세요.",
+        "threshold": None,
+    },
+    "source_findings": {
+        "label": "소스 소견(결함 후보)",
+        "low_advice": "기대값을 계산하다 C 미정의 동작(부호 오버플로·0 나눗셈 등)에 닿는 입력을 찾은 곳입니다. 결함 후보이므로 "
+                      "'Source Findings' 시트의 예시 벡터가 호출 측에서 실제로 가능한지 검토하세요.",
+        "threshold": None,
     },
 }
 
@@ -432,6 +484,24 @@ _SITS_ADVICE = {
         "label": "I/O 커버리지",
         "low_advice": "입출력 변수가 없는 통합 TC 가 많습니다. 시스템 인터페이스(신호/메시지) 정의가 소스에 반영됐는지 확인하세요.",
         "from_table": True,   # 임계는 thresholds.py 단일 출처
+    },
+    # ── (R30) 통합 근거(비게이트) ──
+    "integration_oracle_evaluated": {
+        "label": "통합 기대값 도출 여부",
+        "low_advice": "0 이면 통합 기대값을 소스에서 도출하지 않아(오류 또는 프로젝트 문맥·파서 없음) 모든 기대값 칸이 '[검증 필요]' "
+                      "입니다 — 생성 공시에 사유가 있습니다.",
+        "threshold": None,
+    },
+    "integration_expected_derived_cells": {"label": "통합 확정 기대값 칸 수", "low_advice": "", "threshold": None},
+    "integration_expected_derived_pct": {
+        "label": "통합 확정 기대값 비율(소스 도출)",
+        "low_advice": "진입 함수를 callee 본문까지 해석해 확정한 관측 칸 비율입니다(코드 일관성 값 — 요구 적합성·실행 아님). 도출 못 한 사유는 생성 공시에 있습니다.",
+        "threshold": None,
+    },
+    "interface_contract_failed": {
+        "label": "인터페이스 계약 추출 실패",
+        "low_advice": "1 이면 'Interface Evidence' 시트가 없습니다 — 생성 공시에 예외가 적혀 있습니다.",
+        "threshold": None,
     },
     # ── 캡 절단 축(비게이트) ── TC 수만 보면 "전부 시험함" 으로 읽히므로 별도 노출.
     "flow_emit_pct": {
