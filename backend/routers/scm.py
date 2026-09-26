@@ -168,7 +168,9 @@ def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
             try:
                 doc_paths = list(linked.model_dump().values())
             except AttributeError:
-                doc_paths = [linked.get(k, "") for k in ("srs", "sds", "uds", "sts", "suts", "sits", "hsis", "stp", "syrs", "syts", "syits", "vectorcast")]
+                # dict 로 온 항목: 스키마의 **모든** 칸을 순회한다 — 손으로 적은 키 튜플은 codesonar·템플릿·
+                # 결함 판별 근거 자료(R25) 칸을 빠뜨린 채 낡아 있었다(리뷰 I1)
+                doc_paths = [linked.get(k, "") for k in ScmLinkedDocs.model_fields]
             # vectorcast는 복수 경로 list — 단일 string 필드와 함께 평탄화한다.
             flat: list[str] = []
             for v in doc_paths:

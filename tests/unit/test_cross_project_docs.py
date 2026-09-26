@@ -66,6 +66,14 @@ def test_문서종류_어휘는_식별자가_아니다():
     assert project_tokens("Software Unit Design Specification Document Report") == set()
 
 
+def test_결함_판별_근거_자료의_문서종류_어휘도_식별자가_아니다():
+    """R25 리뷰 W1: `SWFMEA_220801.xlsx` 가 HDPDM01 에 등록되자 'SWFMEA' 가 프로젝트 ID 로 잡혀 '다른 프로젝트'가 됐다."""
+    assert project_tokens("SWFMEA_220801 Fault Injection Problem Release Sheet System Requirements History") == set()
+    v = cross_project_verdict(["hdpdm01", "HDPDM01"], "U:/p/Data/SWFMEA_220801.xlsx")
+    assert v["same_project"] is None and v["reason"] == "doc_no_token"
+    assert cross_project_verdict(["hdpdm01"], "(HDPDM01_PL) Problem List_v0.18.xlsx")["same_project"] is True
+
+
 # ── B·C — 판정 불가를 확인됨으로 접지 않는다 ──────────────────────────────
 
 def test_같은_프로젝트면_True():

@@ -167,9 +167,14 @@ function ScmSection() {
       builder_project_id: '',
       linked_docs: {
         srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '',
+        syrs: '', syts: '', syits: '',
         // 문서별 생성 템플릿(UDS .docx / 시험 규격서 .xlsm) — 형식이 달라 키를 나눈다.
         uds_template: '', sts_template: '', suts_template: '', sits_template: '',
         vectorcast: [], codesonar: [],
+        // 결함 판별 근거 자료 — 시스템 설계서·문제관리 대장·FW 배포 기록·버전별 단위시험 로그·결함 주입 시험.
+        // 프로젝트마다 같은 종류가 나오므로 입력 문서로 받아 둔다(백엔드 `ScmLinkedDocs` 와 같은 키).
+        syds: '', problem_list: '',
+        release_notes: [], ut_log_history: [], fault_injection: [],
       },
     };
   }
@@ -331,6 +336,29 @@ function ScmSection() {
     }
   };
 
+  // 결함 판별 근거 자료의 복수 경로 칸(배포 기록 · 단위시험 로그 이력 · 결함 주입 시험/FMEA). vectorcast/codesonar 와
+  // 같은 편집기를 쓰되 키만 다르다 — 칸마다 setter/picker 를 복제하지 않는다.
+  const setLinkedList = (key, arr) =>
+    setForm(p => ({ ...p, linked_docs: { ...p.linked_docs, [key]: Array.isArray(arr) ? arr : [] } }));
+
+  const pickLinkedListPath = async (key, title, kind) => {
+    try {
+      const picked = await post('/api/file-mode/browse-file', { title, kind });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return;
+      }
+      const cur = Array.isArray(form.linked_docs[key]) ? form.linked_docs[key] : [];
+      if (cur.includes(picked.path)) { toast('info', '이미 추가된 경로입니다.'); return; }
+      setLinkedList(key, [...cur, picked.path]);
+      await ensureCloudiumPrefix(picked.path);
+      toast('success', '경로 추가됨');
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+    }
+  };
+
   // 정적분석 폴더(codesonar)도 복수 경로 — CodeSonar/QAC HIS/CPD/CodeEye 리포트 폴더.
   // 테스트 결과 '정적분석' 패널이 linked_docs.codesonar를 읽으므로 vectorcast와 별도 필드로 관리.
   const setCodesonarPaths = (arr) =>
@@ -433,16 +461,16 @@ function ScmSection() {
           <div className="field-group cols-3">
             {/* 템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
                 예전엔 필드가 없어 설정의 공용 `template` 하나가 양쪽에 갔다. */}
-            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syts', 'syits',
-              'uds_template', 'sts_template', 'suts_template', 'sits_template'].map(k => (
+            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syds', 'syts', 'syits',
+              'problem_list', 'uds_template', 'sts_template', 'suts_template', 'sits_template'].map(k => (
               <div className="field" key={k}>
-                <label>{k.toUpperCase()} 경로</label>
+                <label>{LINKED_DOC_LABELS[k] || k.toUpperCase()} 경로</label>
                 <div style={{ display: 'flex', gap: 4 }}>
                   <input
                     style={{ flex: 1 }}
                     value={form.linked_docs[k] || ''}
                     onChange={e => setLinked(k, e.target.value)}
-                    placeholder={['syts', 'syits', 'hsis'].includes(k) ? `/docs/${k}.xlsx` : `/docs/${k}.docx`}
+                    placeholder={['syts', 'syits', 'hsis', 'problem_list'].includes(k) ? `/docs/${k}.xlsx` : `/docs/${k}.docx`}
                   />
                   <button
                     type="button"
@@ -472,6 +500,21 @@ function ScmSection() {
               hint="테스트 결과 '정적분석' 패널이 이 폴더에서 CodeSonar(PDF)·CPD(XML)·QAC HIS(PDF)·CodeEye(PDF)를 찾아 표시합니다. VectorCAST 결과 로그와는 다른 필드입니다."
             />
           </div>
+          <div className="settings-section-title" style={{ fontSize: 12, margin: '12px 0 8px', paddingBottom: 8 }}>
+            결함 판별 근거 자료
+          </div>
+          {LINKED_LIST_FIELDS.map(f => (
+            <div className="field span-2" style={{ marginTop: 8 }} key={f.key}>
+              <label>{f.label}</label>
+              <VcastDocsEditor
+                paths={form.linked_docs[f.key]}
+                onChange={arr => setLinkedList(f.key, arr)}
+                onBrowse={() => pickLinkedListPath(f.key, f.title, f.kind)}
+                placeholder={f.placeholder}
+                hint={f.hint}
+              />
+            </div>
+          ))}
           <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>{editMode ? '수정 저장' : '등록'}</button>
         </div>
       )}
@@ -1314,6 +1357,32 @@ function SourceRootEditor({ value, onChange }) {
     </div>
   );
 }
+
+// 연결 문서 단일 경로 칸의 표시 이름 — 없으면 키를 대문자로(`SRS 경로`). 새 칸만 사람이 읽는 이름을 준다.
+const LINKED_DOC_LABELS = { syds: 'SyDS', problem_list: '문제관리 대장' };
+
+// 결함 판별 근거 자료의 복수 경로 칸(백엔드 `ScmLinkedDocs` 의 list 필드와 같은 키). 시험 명세 생성이 아니라
+// 판별 측정·추적에 쓰는 자료라 VectorCAST·정적분석 칸과 구획을 나눈다.
+const LINKED_LIST_FIELDS = [
+  {
+    key: 'release_notes', label: 'FW 배포 기록 (Software Release Sheet — 파일 또는 폴더, 복수)', kind: 'directory',
+    title: 'FW 배포 기록 폴더 선택 (Release Sheet)',
+    placeholder: 'U:\\...\\06.소스코드 이력관리\\01.FW 배포 (폴더 경로)',
+    hint: '배포별 변경 설명 — 코드 변경이 문서로 확인된 결함 수정인지의 근거입니다.',
+  },
+  {
+    key: 'ut_log_history', label: '단위시험 로그 이력 (버전별 폴더 — 오래된 것부터, 복수)', kind: 'directory',
+    title: '단위시험 로그 폴더 선택 (버전 하나)',
+    placeholder: 'U:\\...\\10.SW 단위테스트\\03.Test Result\\01.Log\\v1.02_230109 (폴더 경로)',
+    hint: 'VectorCAST Aggregate Coverage Report 가 그 시점 unit 코드를 담아, SVN 없이 과거 소스로 쓰입니다(scripts/history_replay.py). 오래된 버전부터 추가하세요.',
+  },
+  {
+    key: 'fault_injection', label: '결함 주입 시험 · FMEA (복수)', kind: 'file',
+    title: '결함 주입 시험 명세 또는 FMEA 선택',
+    placeholder: 'U:\\...\\01.Fault Injection Test\\...\\SW Fault Injection Test Specification.xlsm',
+    hint: '사람이 정한 결함 모드 — 통합 시험 판별을 잴 독립 기준 후보입니다.',
+  },
+];
 
 // VectorCAST 결과 로그 복수 경로 편집기. 부트로더/FBL/APP 등 결과가 별도
 // vectorcast_rag.json으로 나올 수 있어 SCM별로 여러 경로를 등록한다. paths는

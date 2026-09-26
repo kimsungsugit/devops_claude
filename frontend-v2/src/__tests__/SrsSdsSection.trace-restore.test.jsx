@@ -47,6 +47,7 @@ const keyOf = (over = {}) => {
     srs: d.srs || '', sds: d.sds || '', hsis: d.hsis || '',
     jobUrl: JOB.url, sourceRoot: '',
     sts: d.sts || '', suts: d.suts || '', sits: d.sits || '', syts: d.syts || '', syits: d.syits || '',
+    syrs: d.syrs || '',
     vcast: (Array.isArray(d.vectorcast) ? d.vectorcast.filter(Boolean) : []).join(','),
   });
 };
@@ -177,7 +178,7 @@ describe('SrsSdsSection — 추적성 매트릭스 마운트 복원', () => {
     const otherKey = JSON.stringify({
       srs: LINKED.srs, sds: LINKED.sds, hsis: LINKED.hsis,
       jobUrl: 'http://jenkins/job/OTHER/', sourceRoot: '',
-      sts: LINKED.sts, suts: LINKED.suts, sits: '', syts: '', syits: '', vcast: '',
+      sts: LINKED.sts, suts: LINKED.suts, sits: '', syts: '', syits: '', syrs: '', vcast: '',
     });
     const otherBinding = JSON.stringify({
       jobUrl: 'http://jenkins/job/OTHER/', sourceRoot: '',

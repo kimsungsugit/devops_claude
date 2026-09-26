@@ -47,7 +47,7 @@ const SCM = { id: 'scm-1', name: 'MyRepo', source_root: '', linked_docs: LINKED 
 const keyOf = () => JSON.stringify({
   srs: LINKED.srs, sds: LINKED.sds, hsis: LINKED.hsis,
   jobUrl: JOB.url, sourceRoot: '',
-  sts: LINKED.sts, suts: LINKED.suts, sits: '', syts: '', syits: '',
+  sts: LINKED.sts, suts: LINKED.suts, sits: '', syts: '', syits: '', syrs: '',
   vcast: '',
 });
 const bindingOf = () => JSON.stringify({

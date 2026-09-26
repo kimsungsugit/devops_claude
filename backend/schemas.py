@@ -144,6 +144,35 @@ class ScmLinkedDocs(BaseModel):
     # 받는다(미정의 시 누락 → '등록된 정적분석 경로 없음'). scm.py의 allowed_prefixes 자동
     # 병합(linked.model_dump().values())에도 포함돼 cloudium 접근 prefix가 자동 등록된다.
     codesonar: List[str] = Field(default_factory=list)
+    # ── 결함 판별 근거 자료(R25) ─────────────────────────────────────────────────────────────
+    # 시험 명세 생성이 아니라 **판별 측정·추적**에 쓰는 프로젝트 자료. 프로젝트마다 같은 종류가
+    # 나오므로(시스템 설계서·문제관리 대장·FW 배포 기록·버전별 단위시험 로그·결함 주입 시험)
+    # 입력 문서로 받아 둔다 — 예전엔 `.codex_tmp` 사본 경로를 스크립트 인자로 손으로 넘겼다.
+    # 여기 정의돼야 model_dump 에서 살아남고, scm.py 의 allowed_prefixes 자동 병합·
+    # `linked-docs-status` 존재 확인이 그대로 따라온다(두 곳 다 필드를 순회한다).
+    # SyDS — SRS Related ID 의 설계 쪽(SyDB·SyII·SyEI·SyFN…)이 여기서 풀린다(SyRS 는 SyTR·SyTSR…).
+    syds: str = ""
+    # 문제관리 대장(Test Defect List·Project Issue List) — 코드 변경이 **문서로 확인된 결함 수정**인지의 근거.
+    problem_list: str = ""
+    # FW 배포 기록(Software Release Sheet 등) — 파일 또는 폴더, 복수. 배포별 변경 설명.
+    release_notes: List[str] = Field(default_factory=list)
+    # 버전별 단위시험 로그 폴더 — **오래된 것부터** 나열. VectorCAST aggregate coverage report 가
+    # 그 시점 unit 코드를 담아 SVN 없이 과거 소스가 된다(`scripts/history_replay.py`).
+    ut_log_history: List[str] = Field(default_factory=list)
+    # SW 결함 주입 시험 **명세**·FMEA — 사람이 정한 결함 모드(통합 시험 판별의 독립 기준 후보).
+    # ⚠ SwIT 빌더의 `fault_injection_result_path`(결함 주입 시험 **결과** 파일)와는 다른 산출물이다.
+    fault_injection: List[str] = Field(default_factory=list)
+
+    @field_validator("vectorcast", "codesonar", "release_notes", "ut_log_history", "fault_injection", mode="before")
+    @classmethod
+    def _path_list(cls, value: Any) -> Any:
+        """복수 경로 칸에 손으로 적은 문자열 하나·``null`` 을 목록으로 받는다(R25 리뷰 I2). 거부하면
+        `load_registry_store` 가 검증 실패로 **레지스트리 전체를 빈 스토어로 바꾼다** — 전 SCM 항목이 사라진다."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        return value
 
 
 class ScmRegistryEntry(BaseModel):

@@ -26,7 +26,7 @@
         "sds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/03.SW 아키텍처 설계/02.SDS/(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
         "hsis": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/02.시스템 아키텍처 설계/03.HSIS/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
         "stp": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/02.Test Plan/01.STP/(HDPDM01_STP) Software Test Plan_v1.01_20230113_B.docx",
-        "syrs": "",
+        "syrs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/01.시스템 요구사항/01.SyRS/(HDPDM01_SyRS) System Requirements Specification_v6.01_221221.docx",
         "syts": "",
         "syits": "",
         "vectorcast": [],
@@ -36,10 +36,25 @@
         "sits_template": "",
         "codesonar": [
           "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/09.정적분석/01.Static Aanlysis"
+        ],
+        "syds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/02.시스템 아키텍처 설계/02.SyDS/(HDPDM01_SyDS) System Design Specification_v3.03_20230420.docx",
+        "problem_list": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/12.문제관리(PRM)/02.문제관리 대장/(HDPDM01_PL) Problem List_v0.18_20231012.xlsx",
+        "release_notes": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/06.소스코드 이력관리/01.FW 배포"
+        ],
+        "ut_log_history": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/03.Test Result/01.Log/v1.02_230109",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/03.Test Result/01.Log/v1.05_231214",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/03.Test Result/01.Log/v1.06_231219",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/03.Test Result/01.Log/v2.02_240219"
+        ],
+        "fault_injection": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/12. 기타 테스트/01.Fault Injection Test/01.Test Specification/01.Test Spec/(HDPDM01) SW Fault Injection Test Specification _v1.02_230131.xlsm",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/12. 기타 테스트/01.Fault Injection Test/01.Test Specification/01.Test Spec/Data/SWFMEA_220801.xlsx"
         ]
       },
       "created_at": "2026-03-23T14:10:41",
-      "updated_at": "2026-09-09T19:24:28",
+      "updated_at": "2026-09-26T14:17:45",
       "last_triggered": "",
       "last_revision": ""
     },
@@ -84,10 +99,21 @@
         "sits_template": "U:/연구소/2000 연구소 공용/2200 개발 사양/2220 개발표준 Template/★개발템플릿 Version3/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS/(XXXX_SwITS) Software Integration Test Specification_v0.10_2XXXXX.xlsm",
         "codesonar": [
           "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/08.SW 정적분석/01.Log/2.PV_v2631"
-        ]
+        ],
+        "syds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/02.시스템 아키텍처 설계/01.SyDS/(KJPDS02_SyDS) System Design Specification_v3.01_2600401_R.docx",
+        "problem_list": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/03.운영(연구소)/01.문제관리/02.문제관리 대장/(KJPDS02_PIL) Problem Item List_v0.10_250514.xlsm",
+        "release_notes": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/06.변경관리/02.Release Sheet"
+        ],
+        "ut_log_history": [
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/1.DV/UT_Report_251104",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/2.PV_2631/1.APP_UT_report_260611",
+          "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/3.PV_2661"
+        ],
+        "fault_injection": []
       },
       "created_at": "2026-07-06T09:33:48",
-      "updated_at": "2026-09-09T17:54:08",
+      "updated_at": "2026-09-26T14:17:45",
       "last_triggered": "",
       "last_revision": ""
     }

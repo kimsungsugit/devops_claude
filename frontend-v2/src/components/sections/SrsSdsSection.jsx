@@ -174,6 +174,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
     srs: docPaths.srs || '', sds: docPaths.sds || '', hsis: docPaths.hsis || docs.hsis || '',
     jobUrl: job?.url || '', sourceRoot: activeScm?.source_root || '',
     sts: docs.sts || '', suts: docs.suts || '', sits: docs.sits || '', syts: docs.syts || '', syits: docs.syits || '',
+    // SyRS 는 HSIS/SyTS 의 시스템 기준 커버리지 입력이다(아래 syrs_path) — 키에 없으면 SyRS 를 등록·변경해도
+    // 옛 매트릭스가 같은 키로 'stale:false' 복원된다(R25 리뷰 W2: hdpdm01 syrs 가 빈 값→SyRS v6.01)
+    syrs: docPaths.syrs || docs.syrs || '',
     vcast: (Array.isArray(docs?.vectorcast) ? docs.vectorcast : []).filter(Boolean).join(','),
   }), [docPaths, job?.url, activeScm?.source_root]);
 

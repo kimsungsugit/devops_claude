@@ -54,6 +54,9 @@ PROJECT_TOKEN_STOPWORDS = frozenset({
     "SYRS", "SYTS", "HSIS", "SPEC", "SPECIFICATION", "SOFTWARE", "UNIT", "DESIGN",
     "DOCUMENT", "REPORT", "FINAL", "DRAFT", "TEMPLATE", "TOKENIZED", "LOCAL",
     "REFERENCE", "REVISION", "VERSION", "COMMON", "SAMPLE", "OUTPUT",
+    # 결함 판별 근거 자료(R25 입력 문서) — `SWFMEA_220801.xlsx` 가 'SWFMEA' 를 프로젝트 ID 로 삼아
+    # 방금 등록한 HDPDM01 자료를 "다른 프로젝트"로 확정했다(리뷰 W1)
+    "SWFMEA", "FAULT", "INJECTION", "PROBLEM", "RELEASE", "SHEET", "SYSTEM", "REQUIREMENTS", "HISTORY",
 })
 
 
