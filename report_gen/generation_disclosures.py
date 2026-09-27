@@ -349,7 +349,64 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if rb.get("evidence_sheet_error") else ""),
             tone=_tone(bool(rb.get("evidence_sheet_error")))))
         out.extend(_traced_system_items(rb, _why))
+        out.extend(_inclusion_conflict_items(rb))
     return out + _sts_tail_items(qr)
+
+
+_CONFLICT_TAG = {"outcome": " [결과]", "stimulus": " [시험 입력]"}
+
+
+def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R33) 요구 문서 간 경계 포함 불일치 후보 — 시스템 문서를 읽은 생성에만 있다(없음과 0 을 구분: 키가 없으면 항목 없음).
+    비교할 인용 블록이 하나도 없었으면 0 이 아니라 '—'(review W4). 검토 목록은 앞 230 자·끝 120 자를 남기므로 쌍과 오류
+    수를 설명보다 앞에 둔다."""
+    n = _int(rb, "inclusion_conflicts")
+    if n is None:
+        return []
+    compared = _int(rb, "inclusion_blocks_compared")
+    errors = [str(e) for e in (rb.get("inclusion_conflict_errors") or [])]
+    n_err = _int(rb, "inclusion_conflict_error_count") or len(errors)
+    err_note = (f" 비교 중 오류로 건너뛴 요구 {n_err}개(예: {errors[0][:80]})." if errors else "")
+    if compared == 0:
+        return [_item("sts_requirement_inclusion_conflicts", "요구 문서 간 경계 포함 불일치", "—",
+                      "요구가 인용한 시스템 블록 중 읽은 문서에 있는 것이 없어 비교하지 못했다(0 건이 아니라 미측정)."
+                      + err_note, tone=_tone(bool(errors)))]
+    scope = f"블록 {compared} 곳(요구 × 블록)" if compared is not None else "블록"
+    if not n:
+        return [_item("sts_requirement_inclusion_conflicts", "요구 문서 간 경계 포함 불일치",
+                      "0건" + (f" · 오류 {n_err}" if errors else ""),
+                      f"SRS 와 그 요구가 Related ID 로 인용한 {scope}에서 같은 값·같은 단위를 경계 포함만 다르게 적은 쌍을 "
+                      "찾지 못했다(한 출처 — SRS 원문 또는 한 블록 — 안의 쌍은 보지 않는다)." + err_note,
+                      tone=_tone(bool(errors)))]
+    items = [i for i in (rb.get("inclusion_conflict_items") or []) if isinstance(i, dict)]
+
+    def _side(x):
+        ref = f" (기준 {x.get('reference')})" if x.get("reference") else ""
+        return f"{x.get('source')} `{x.get('subject')} {x.get('text')}{ref}`"
+
+    def _flag(i):
+        if i.get("same_subject"):
+            return ""
+        return " (한쪽 주어 없음 — 원문으로 같은 조건인지 확인)" if i.get("subject_missing") else \
+            " (주어 이름이 다름 — 같은 신호인지 먼저 확인)"
+    shown = [f"{i.get('srs_id')}{_CONFLICT_TAG.get(str(i.get('role')), '')}: {_side(i.get('a') or {})} ↔ "
+             f"{_side(i.get('b') or {})}{_flag(i)}" for i in items[:5]]
+    reqs, vals = _int(rb, "inclusion_conflict_requirements"), _int(rb, "inclusion_conflict_values")
+    return [_item(
+        "sts_requirement_inclusion_conflicts", "요구 문서 간 경계 포함 불일치 후보",
+        f"{n}건" + (f" (요구 {reqs} · 값 {vals})" if reqs is not None and vals is not None else "")
+        + (f" · 오류 {n_err}" if errors else ""),
+        " / ".join(shown)
+        + (f" 외 {n - len(shown)}건(품질 리포트 `inclusion_conflict_items` 에 {len(items)}건까지)." if n > len(shown) else ".")
+        + err_note
+        + f" — SRS 와 그 요구가 Related ID 로 인용한 SyRS·SyDS 블록(또는 두 블록)이 같은 값·같은 단위를 경계 포함만 "
+          "달리 적은 곳이다(이상 ↔ 초과, 이하 ↔ 미만): 조건끼리는 그 값이 한 문서의 조건에는 들고 다른 문서의 조건에는 들지 "
+          "않는다, [결과] 는 결과 기준끼리, [시험 입력] 은 검증 기준(시험 기술)의 입력이 요구 조건이 제외한 값을 포함한다"
+          "(그 값에서 반응을 기대하는 긍정 시험이면 요구가 반응하지 않는 입력에서 반응을 기대한다 — 부정 시험이면 판정은 "
+          "갈리지 않으니 원문으로 확인; 시험 입력이 더 엄격한 쪽은 후보가 아니다). 어느 쪽이 맞는지는 생성기가 정하지 않는다(경계 TC 는 각 문장대로 판정) — 문서 "
+          f"검토로 정할 결함 후보다. 값과 단위로만 짝지었으니 주어 표시를 먼저 볼 것. 범위: 인용 {scope}, 한 출처(SRS "
+          "원문 또는 한 블록) 안의 쌍은 보지 않는다.",
+        tone="warning")]
 
 
 def _traced_system_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[Dict[str, Any]]:

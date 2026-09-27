@@ -424,6 +424,99 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
     return groups
 
 
+# (R33) ``이상`` ↔ ``초과`` and ``이하`` ↔ ``미만``: the same value with the other boundary inclusion
+_INCLUSION_FLIP = {">=": ">", ">": ">=", "<=": "<", "<": "<="}
+MAX_INCLUSION_CONFLICTS = 30     # items kept for the report (all are counted)
+
+
+# (R33 review W3) a hold time whose words state no inclusion (``500ms 동안 유지``) got ``>=`` from the extractor: it
+#   wrote none, so it disagrees with nothing
+_WRITTEN_INCLUSION = re.compile(r"이상|초과|이하|미만|이내|[<>]")
+
+
+def _conflict_role(line: dict, fact: dict, verification: bool) -> str:
+    """``condition`` — or ``outcome`` for what the requirement produces (an ``<Output>``/``Output :`` section, a system
+    block's Action / System Behavior, an obligation ``…이하여야 한다``) — the split `_skip_reason` makes for stepping
+    (R33 review W2: an input condition and an output value of the same number are not one statement) — or
+    ``stimulus`` for anything else of a **verification criteria** field (the SRS ``verification`` text, a block's
+    "Verification criteria"): it describes tests — ``Input : 입력전원 8.5V 이하`` / ``Precondition : …`` and the SRS's
+    unlabelled ``2. 500ms 초과 저전압 상황 동작 확인`` alike — the range a test chooses its input from, not the
+    requirement's condition (R33 review r2 W-A, r3 W-2)."""
+    raw = line.get("raw") or line["text"]
+    if is_outcome_section(line.get("section") or "") or _OBLIGATION.match(raw[fact["line_span"][1]:]):
+        return "outcome"
+    return "stimulus" if verification else "condition"
+
+
+def _joins(ra: str, a: dict, rb: str, b: dict) -> bool:
+    """Do two facts of these roles make a candidate? A condition with a condition, an outcome with an outcome — and a
+    test input with a condition only when the **input** includes the value the condition excludes (``Input : 8.5V 이하``
+    against ``8.5V 미만``: the test expects a reaction where the requirement gives none). A stricter input (``Input :
+    4.85V 미만`` against ``4.85V 이하``) only leaves the value untested — no disagreement."""
+    if ra == rb:
+        return ra != "stimulus"
+    if {ra, rb} == {"stimulus", "condition"}:
+        stimulus = a if ra == "stimulus" else b
+        return stimulus["op"] in {"<=", ">="}
+    return False
+
+
+def inclusion_conflicts(req: dict[str, Any], system: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """(R33) Where the requirement's own text and a system block it cites (or two such blocks) state the **same value in
+    the same unit with the other boundary inclusion**, in roles that can disagree (`_joins`: two conditions, two
+    outcomes, or a test input that includes a value a condition excludes) — HDPDM01
+    ``SwTSR_0104``: SRS ``u16g_ApiIn_Vsup < 8.5V`` against SyDS ``SySM_04`` ``입력전원 8.5V 이하``: 8.5 V is inside one
+    document's condition and outside the other's. The link is explicit (the SRS Related ID); the pairing is by value
+    and unit only, so ``same_subject`` is true only when both facts name the same subject (`subject_of`) — otherwise the
+    reviewer first checks they are one quantity. Which document is right is not decided here; the boundary TCs judge
+    each sentence as written. Not candidates: a negated condition, a response time (``500ms 이내``), a hold time that
+    writes no inclusion (``500ms 동안 유지``), a pair within one source (the SRS text, or the fields of one block —
+    those are not examined). Pairs are formed within (unit, value) buckets."""
+    items = []
+    for key in ("description", "verification"):          # `requirement_facts`, keeping which field a fact is in
+        for b in extract(f"ID\t{req.get('id', '')}\n{req.get(key) or ''}\n"):
+            items += [(line, fact, None, key == "verification") for line in b["lines"] for fact in line["facts"]]
+    items += [(line, fact, source, source.get("field") == "Verification criteria")
+              for line, fact, source in traced_system_facts(req, system, Counter())]
+    buckets: dict[tuple, list] = {}
+    for line, fact, source, verification in items:
+        if fact["kind"] not in {"threshold", "duration"} or fact.get("op") not in _INCLUSION_FLIP \
+                or not isinstance(fact.get("value"), (int, float)) or isinstance(fact.get("value"), bool) \
+                or fact.get("negated") or fact.get("role") == "response_constraint" \
+                or not _WRITTEN_INCLUSION.search(str(fact.get("raw") or "")):
+            continue            # a response time (``500ms 이내``) is measured, not a condition — not the same statement
+        buckets.setdefault((fact.get("unit") or "", exact_value(fact)), []).append(
+            (line, fact, source, _conflict_role(line, fact, verification)))
+    out: list[dict[str, Any]] = []
+    seen: set = set()
+
+    def side(line, fact, source):
+        subject = _subject_text(fact) if fact.get("signal_kind") == "parameter" else subject_of(fact)
+        return {"source": source_label(source), "subject": subject or "주어 없음", "op": fact["op"],
+                "reference": fact["signal"] if fact.get("signal_kind") == "parameter" else None,
+                "text": f"{fact.get('value_text') or fact['value']}{fact.get('unit') or ''} {_OP_TEXT[fact['op']]}",
+                "line": _clip(line["text"], 160)}
+
+    for (unit, value), group in buckets.items():
+        for i, (la, a, sa, ra) in enumerate(group):
+            for lb, b, sb, rb in group[i + 1:]:
+                if ((sa or {}).get("doc"), (sa or {}).get("id")) == ((sb or {}).get("doc"), (sb or {}).get("id")):
+                    continue        # one source (the SRS text, or one block's fields) — not two documents
+                if _INCLUSION_FLIP[a["op"]] != b["op"] or not _joins(ra, a, rb, b):
+                    continue
+                role = "stimulus" if "stimulus" in (ra, rb) else ra
+                key = (unit, value, role, frozenset({((sa or {}).get("doc"), (sa or {}).get("id"), a["op"]),
+                                                   ((sb or {}).get("doc"), (sb or {}).get("id"), b["op"])}))
+                if key in seen:
+                    continue
+                seen.add(key)
+                named = subject_of(a) is not None and subject_of(b) is not None
+                out.append({"srs_id": req.get("id", ""), "value": str(exact_value(a)), "unit": unit, "role": role,
+                            "same_subject": bool(named and subject_of(a) == subject_of(b)),
+                            "subject_missing": not named, "a": side(la, a, sa), "b": side(lb, b, sb)})
+    return out
+
+
 def source_label(source: dict | None) -> str:
     """``SyDS SyII_06 · Range`` — or ``SRS`` for the requirement's own text."""
     return f"{source['doc']} {source['id']} · {source['field']}" if source else "SRS"
@@ -443,6 +536,9 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     document (the SRS, or the system requirements it cites — R29). Returns the counts for the quality report."""
     stats: Counter = Counter()
     fanout: Counter = Counter()
+    conflicts: list[dict[str, Any]] = []
+    conflict_errors: list[str] = []
+    compared_blocks = 0
     last: dict[str, int] = {}
     for tc in test_cases:
         rid = str(tc.get("srs_id") or "")
@@ -452,6 +548,12 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     added: list[dict] = []
     for req in requirements:
         groups = boundary_steps(req, stats, system)
+        if system is not None:
+            compared_blocks += sum(1 for sid in cited_system_ids(req) if sid in system)
+            try:
+                conflicts += inclusion_conflicts(req, system)
+            except Exception as exc:  # noqa: BLE001 — an optional finding never costs the boundary TCs (review I8)
+                conflict_errors.append(f"{req.get('id', '')}: {type(exc).__name__}: {exc}"[:200])
         chunks: list[list[dict]] = []
         for g in groups:
             # a fact with conditions to hold is its own TC: its precondition must not contradict another fact's steps
@@ -491,6 +593,19 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         #   traced facts (the most first, ties by ID) — HDPDM01 ``SySM_04`` alone carried 35 of 74
         out["traced_facts_by_block"] = dict(sorted(fanout.items(), key=lambda kv: (-kv[1], kv[0]))[:10])
         out["traced_blocks_used"] = len(fanout)
+    if system is not None:
+        # (R33) requirement-document inconsistencies found on the way — counted in full, the first ones itemised: safety
+        #   requirements first (review I7: SwTSR_0104 fell behind "외 5건"), then by requirement ID
+        conflicts.sort(key=lambda c: (not str(c["srs_id"]).startswith("SwTSR"), str(c["srs_id"])))
+        out["inclusion_conflicts"] = len(conflicts)
+        out["inclusion_conflict_items"] = conflicts[:MAX_INCLUSION_CONFLICTS]
+        out["inclusion_conflict_requirements"] = len({c["srs_id"] for c in conflicts})
+        out["inclusion_conflict_values"] = len({(c["srs_id"], Decimal(c["value"]), c["unit"]) for c in conflicts})
+        # (review W4) how many cited blocks were there to compare with — 0 means nothing was compared, not "none found"
+        out["inclusion_blocks_compared"] = compared_blocks
+        if conflict_errors:
+            out["inclusion_conflict_errors"] = conflict_errors[:5]
+            out["inclusion_conflict_error_count"] = len(conflict_errors)
     return out
 
 
