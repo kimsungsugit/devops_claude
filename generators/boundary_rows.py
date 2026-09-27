@@ -283,7 +283,7 @@ def compared_constants(unit: dict[str, Any], names: list[str], stats: dict | Non
                 arg = node.child_by_field_name("argument")
                 inner = typed(arg) if arg is not None and op is not None and text(op) in ("-", "+") else None
                 return cpc.arith(text(op), None, inner, widths) if inner is not None else None
-            if node.type == "identifier":
+            if cpc.is_name_node(node):  # (R35) ``TRUE``/``FALSE`` too
                 entry = constants.get(text(node))
                 if isinstance(entry, dict) and isinstance(entry.get("value"), int) and not isinstance(entry["value"], bool) \
                         and isinstance(entry.get("type"), dict):

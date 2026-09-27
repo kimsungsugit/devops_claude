@@ -40,6 +40,10 @@ SCHEMA_VERSION = 12  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 11 (R17): `build.configurations` fails closed on more -D spellings and C++/C tool disagreement.
 # 12 (R16b): a typedef whose new name the grammar knows as a primitive (``typedef unsigned char bool;``,
 #    ``typedef signed char int8_t;``) is recorded — it was dropped, so ``bool`` stayed ``_Bool``.
+# (R35, no bump) closure `macros` entries gained `names` · `function_like` · `opaque` · `conditional_ops` (see
+#    `undecided_macro_view`). The closure is built from the context each time scopes are built (`build_scopes`), never
+#    stored with it: a cached context gets the new fields as it is. Bumping here without the source-stage cache version
+#    (`backend/helpers/uds.py` `_SOURCE_SECTIONS_SCHEMA_VERSION`) makes every cached context refuse its scopes.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -57,6 +61,16 @@ _PROJECT_MAY_TYPEDEF = _STD_TYPES | {"bool"}
 
 class Unresolved(ValueError):
     """A value or type the declarations do not determine."""
+
+
+# (R35) tree-sitter-c parses ``TRUE``/``FALSE`` (and ``true``/``false``) as ``true``/``false`` keyword nodes outside
+# ``#if``; the preprocessor sees names — a project's ``#define TRUE 1U``, <stdbool.h>'s ``true``. Wherever a node is asked
+# "is this a name (a macro, a constant, an object)?", these node types answer like ``identifier``.
+NAME_NODE_TYPES = frozenset({"identifier", "true", "false"})
+
+
+def is_name_node(node) -> bool:
+    return node is not None and node.type in NAME_NODE_TYPES
 
 
 # ── C integer types ─────────────────────────────────────────────────────────────────────────────
@@ -584,6 +598,110 @@ def macro_addresses(body: str, type_names=frozenset()) -> set[str]:
     return names
 
 
+def _call_through_expression(body: str, type_names=frozenset(), cast_words: set | None = None) -> bool:
+    """A call whose callee is not a name: ``(*g_fp)()``, ``(fp)()``, ``tbl[i]()``, ``((a) ? f : g)(x)``, ``f(x)(y)``.
+    ``(T)(x)`` is a cast when every word of ``T`` is a type — decided against the project's type names; the words of
+    such a ``T`` go to ``cast_words`` (a unit that does not see them as types reads a call there: review R35 round 3
+    W2, `undecided_macro_view`)."""
+    for m in re.finditer(r"([\])])\s*\(", body):
+        if m.group(1) == "]":
+            return True
+        end, depth, i = m.start(1), 0, m.start(1)
+        while i >= 0:
+            depth += {")": 1, "(": -1}.get(body[i], 0)
+            if depth == 0:
+                break
+            i -= 1
+        words = [w for w in re.split(r"[\s*]+", body[i + 1:end]) if w] if i >= 0 else []
+        if not words or not all(w in type_names or w in _TYPE_WORDS for w in words):
+            return True
+        if cast_words is not None:
+            cast_words.update(w for w in words if w not in _TYPE_WORDS)
+    return False
+
+
+_TEXT_LITERAL_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'')
+
+
+def _brackets_balanced(body: str) -> bool:
+    """``()``/``[]``/``{}`` pair up outside string and character literals. ``#define LP (`` + ``(wr LP 0U))``: the
+    text of neither shows the call their expansion forms (review R35 round 3 W3)."""
+    stack = []
+    for ch in _TEXT_LITERAL_RE.sub('""', body):
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in ")]}":
+            if not stack or stack.pop() != {")": "(", "]": "[", "}": "{"}[ch]:
+                return False
+    return not stack
+
+
+def macro_body_opaque(body: str, type_names=frozenset(), cast_words: set | None = None) -> bool:
+    """(R35) May a macro body do what the text-level `macro_side_effects` cannot see? Token pasting or stringizing
+    (``W##R`` forms a name no scan reads), a line splice the body kept (``wr \\ ()`` — the scan's ``name(`` and
+    ``)(`` do not match across it; review round 2 C2), a call through an expression (`_call_through_expression`), or
+    an address taken where `_ADDRESS_OF_RE` does not look (``((U8 *)&loc)`` — `macro_addresses`). Only a macro none
+    of whose definitions is opaque — nor any macro they mention (`function_write_closure` closes it) — can be judged
+    by the union of their text (review R35 round 1 C1, round 2 C1')."""
+    return "#" in body or "\\" in body or not _brackets_balanced(body) \
+        or _call_through_expression(body, type_names, cast_words) or bool(macro_addresses(body, type_names))
+
+
+def undecided_macro_view(scope: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """(R35) What a macro this unit cannot pin down (defined under an undecided ``#if``, or redefined) may expand to,
+    judged by every definition the tree has — ``None`` when that is not the whole story: no tree definition, a missing
+    include (it may define the name), a build ``-D`` of that name (a body outside the tree), or a definition whose
+    text hides what it does, itself or through a macro it mentions (`macro_body_opaque`, `_macro_closure`), or a word
+    read as a cast that is not an unconditional typedef of this unit (``scope["typedef_names"]``). One judgment for the source oracle and the MC/DC design (review R35 round 1 W3). Headers outside the
+    tree (``<...>``, toolchain) are not read: the scope's disclosed assumption that they define no project name. A
+    ``#define`` inside a function body is in neither the union nor the unit's macro table (a gap older than R35)."""
+    effects = scope.get("effects") or {}
+    if name not in (effects.get("macros") or {}) or scope.get("missing_includes") \
+            or name in ((scope.get("build_defines") or {}).get("defines") or {}):
+        return None
+    view = _macro_closure(effects, name)
+    if view["opaque"]:
+        return None
+    if view["cast_words"] and (not set(view["cast_words"]) <= set(scope.get("typedef_names") or ())
+                               or set(view["cast_words"]) & set(scope.get("macro_status") or ())):
+        # ``((Hook)())`` read as a cast because ``Hook`` is a typedef somewhere in the tree — not an unconditional
+        # typedef this unit sees, where it may be the function pointer being called (review R35 rounds 3 W2 / 4 C4);
+        # nor a word that is also a macro here: ``#define Hook g_fp`` rescans ``(Hook)()`` into a call (round 5 W1)
+        return None
+    return view
+
+
+def _macro_closure(effects: dict[str, Any], name: str) -> dict[str, Any]:
+    """(R35) A tree macro's union entry with what it adds up to through every macro its bodies mention (transitively):
+    ``opaque`` (``#define HOOK CALL_FP`` with ``#define CALL_FP ((*g_fp)())`` hides a call too — review round 2 C1'),
+    ``reach_names`` (every name the expansion may contain: ``#define ARR2 LP`` with ``#define LP (la)`` may hand out
+    a local array — round 3 C3) and ``cast_words``. Computed for the names a view is asked about and kept in
+    ``effects`` (one depth-first walk each — a fixpoint over the whole tree was quadratic in forward-reference chains:
+    round 4 W2). An entry without ``opaque`` (a closure built by code before R35) counts as opaque. ``name`` must be
+    a key of ``effects["macros"]`` (the view checks); the result is shared and read-only — it holds the union's own
+    ``calls``/``names`` lists."""
+    cache = effects.setdefault("_macro_closure", {})
+    if name in cache:
+        return cache[name]
+    macros = effects.get("macros") or {}
+    opaque, reach, casts, seen, stack = False, set(), set(), set(), [name]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        entry = macros.get(current)
+        if entry is None:
+            continue
+        opaque = opaque or entry.get("opaque", True)
+        reach.update(entry.get("names") or ())
+        casts.update(entry.get("cast_words") or ())
+        stack.extend(c for c in entry.get("calls") or () if c in macros)
+    view = {**macros[name], "opaque": opaque, "reach_names": tuple(sorted(reach)), "cast_words": tuple(sorted(casts))}
+    cache[name] = view
+    return view
+
+
 def macro_side_effects(body: str) -> dict[str, Any]:
     """What expanding a macro body may do: write (assignment of any kind, ``++``/``--``, ``&`` escaping an
     operand) and which names it invokes. Text-level, so it over-approximates — it is used only to *refuse*."""
@@ -1021,8 +1139,8 @@ def self_delimiting(node) -> bool:
     value independent of the use site (R81 review C1).
     """
     t = node.type
-    if t in {"identifier", "number_literal", "char_literal", "parenthesized_expression", "call_expression",
-             "field_expression", "subscript_expression"}:  # postfix expressions bind tighter than any operator
+    if t in NAME_NODE_TYPES or t in {"number_literal", "char_literal", "parenthesized_expression", "call_expression",
+                                     "field_expression", "subscript_expression"}:  # postfix binds tighter than any operator
         return True
     if t == "cast_expression":
         return self_delimiting(node.child_by_field_name("value"))
@@ -1086,7 +1204,7 @@ def _pp_value(node, raw, env, depth):
             return int(digits, 16) if digits[:2].lower() == "0x" else (int(digits, 8) if digits.startswith("0") and len(digits) > 1 else int(digits))
         except ValueError as exc:
             raise _PPUnknown("literal") from exc
-    if t == "identifier":
+    if t in NAME_NODE_TYPES:  # (R35) a macro body parsed as an expression: ``#define TRUE (!FALSE)``
         name = _text(node, raw)
         if name in env["varied"]:
             raise _PPUnknown("macro_varies:" + name)
@@ -1369,6 +1487,10 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         for name, defs in rec["typedefs"].items():
             raw_typedefs.setdefault(name, []).extend(visible(p, defs))
     raw_typedefs = {k: v for k, v in raw_typedefs.items() if v}
+    # (R35 review round 4 C4) the typedef names this unit sees, none defined under an undecided #if: a word a macro body
+    # uses as a cast is one only if it is here. Fixed at build time — ``unresolved_types`` also holds conditional
+    # typedefs and grows with every name a constant evaluation tried as a type (``type_undeclared:X``)
+    scope["typedef_names"] = sorted(n for n, defs in raw_typedefs.items() if not any(d["conditional"] for d in defs))
     enums: dict[str, list[dict]] = {}
     for p, rec in recs:
         for key, defs in rec["enums"].items():
@@ -1858,7 +1980,7 @@ def _eval(n, env, depth):
         return value, t
     if kind == "char_literal":
         raise Unresolved("char_literal_unsupported")
-    if kind == "identifier":
+    if kind in NAME_NODE_TYPES:  # (R35) ``TRUE``/``FALSE`` are names here too
         name = _text(n, raw)
         if name in env["globals"]:
             raise Unresolved("depends_on_variable:" + name)
@@ -1962,14 +2084,23 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
     direct: dict[str, dict[str, Any]] = {}
     taken: set[str] = set()
     macro_fx: dict[str, dict[str, Any]] = {}
+    type_names = frozenset(n for rec in (context.get("files") or {}).values() for n in rec.get("typedefs") or ())
     for rec in (context.get("files") or {}).values():
         taken.update(rec.get("address_taken") or ())
         for name, defs in rec["macros"].items():
-            fx = macro_fx.setdefault(name, {"writes": False, "calls": set()})
+            fx = macro_fx.setdefault(name, {"writes": False, "calls": set(), "names": set(), "function_like": False,
+                                            "opaque": False, "conditional_ops": False, "cast_words": set()})
             for d in defs:
-                one = macro_side_effects(d.get("body") or "")
+                body = d.get("body") or ""
+                one = macro_side_effects(body)
                 fx["writes"] = fx["writes"] or one["writes"]
                 fx["calls"].update(one["calls"])
+                # (R35) every name any definition mentions — what reading an undecided macro may read — and whether
+                # some definition's text hides its effects (then the union says nothing) or holds a decision operator
+                fx["names"].update(re.findall(r"\b[A-Za-z_]\w*\b", body))
+                fx["function_like"] = fx["function_like"] or bool(d.get("function_like"))
+                fx["opaque"] = fx["opaque"] or macro_body_opaque(body, type_names, fx["cast_words"])
+                fx["conditional_ops"] = fx["conditional_ops"] or bool(re.search(r"&&|\|\||\?", body))
         for name, defs in rec["functions"].items():
             entry = direct.setdefault(name, {"writes": set(), "calls": set(), "idents": set(), "pointer_write": False,
                                              "return_types": set()})
@@ -2030,7 +2161,6 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                          "return_type": next(iter(rtypes)) if len(rtypes) == 1 else ""}
     # ``&g`` inside a macro body (``#define CFG_PTR (&g_cfg)``) takes g's address wherever the macro is used — the
     # function scan only sees ``CFG_PTR`` (R2b review C6).
-    type_names = frozenset(n for rec in (context.get("files") or {}).values() for n in rec.get("typedefs") or ())
     for rec in (context.get("files") or {}).values():
         for defs in rec["macros"].values():
             for d in defs:
@@ -2080,5 +2210,10 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 pending.extend(n for n in names if n in macro_fx)
     # One view of a macro across the tree (union of every definition), shared with the per-function engine so an
     # undecided macro is judged the same way in both places (review round 3 W1 / X5).
-    macros = {name: {"writes": fx["writes"], "calls": sorted(fx["calls"])} for name, fx in macro_fx.items()}
+    # (R35) ``names``/``function_like``/``opaque``/``conditional_ops``/``cast_words`` — each definition's own text;
+    # what they add up to through the macros a body mentions is `undecided_macro_view`'s (`_macro_closure`)
+    macros = {name: {"writes": fx["writes"], "calls": sorted(fx["calls"]), "names": sorted(fx["names"]),
+                     "function_like": fx["function_like"], "opaque": fx["opaque"],
+                     "conditional_ops": fx["conditional_ops"], "cast_words": sorted(fx["cast_words"])}
+              for name, fx in macro_fx.items()}
     return {"functions": closure, "address_taken": taken, "macros": macros}

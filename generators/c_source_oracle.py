@@ -260,6 +260,8 @@ class _Interp:
         effects = scope.get("effects") or {}
         self.closure = effects.get("functions") or {}
         self.address_taken = set(effects.get("address_taken") or ())
+        # (R35) name → judgment of an undecided macro (`macro_effectful` / `inert_macro` at the top of a question)
+        self.macro_memo: dict[tuple[str, str, int], bool] = self.shared.setdefault("undecided_macro_memo", {})
         self.steps = 0
         # text → (node, raw of the parse): the raw buffer lives in the tuple, so sharing it keeps ids stable
         self.expansions: dict[str, tuple] = self.shared.setdefault("expansions", {})
@@ -281,6 +283,24 @@ class _Interp:
         self.no_inline_depth = 0
         self.param_prefix = "@param:"
         self.limit = _EXECUTION_BUDGET
+        if "fn_names" not in self.shared:
+            # (R35 review round 3 C3) parameters, block-scope objects and statics this function declares: an undecided
+            # macro whose expansion may name one of them may hand out its address (``&OBJ``, a decaying ``ARR``,
+            # ``put(ARR)``) — the text of the macro holds no ``&`` to see
+            def declared(d):
+                # ``U8 (*cb)(U8)`` / ``U8 (*pfa)[4]``: through the parenthesized declarator too (review round 4 W1)
+                while d is not None and d.type != "identifier":
+                    d = (next((c for c in d.named_children if c.type != "comment"), None)
+                         if d.type == "parenthesized_declarator" else d.child_by_field_name("declarator"))
+                return _text(d, raw) if d is not None else ""
+            self.shared["fn_names"] = frozenset(
+                declared(d) for x in _walk(fn)
+                for d in ([x.child_by_field_name("declarator")] if x.type == "parameter_declaration" else
+                          [c for c in x.named_children
+                           if c.type in {"init_declarator", "identifier", "array_declarator", "pointer_declarator",
+                                         "function_declarator", "parenthesized_declarator", "attributed_declarator"}]
+                          if x.type == "declaration" else []) if d is not None) - {""}
+        self.fn_names = self.shared["fn_names"]
         if "body_address_names" in self.shared:
             self.body_address_names = set(self.shared["body_address_names"])
             return
@@ -302,7 +322,7 @@ class _Interp:
                         _text(x, raw) for a in (args.named_children if args is not None else []) for x in _walk(a)
                         if x.type == "identifier")
                     self.body_address_names.update(cpc._MACRO_ADDRESS_RE.findall(text))
-            elif n.type == "identifier" and _text(n, raw) in self.macro_status:
+            elif cpc.is_name_node(n) and _text(n, raw) in self.macro_status:
                 self.body_address_names.update(cpc._MACRO_ADDRESS_RE.findall(self.macro_text_closure(_text(n, raw))))
         self.shared["body_address_names"] = frozenset(self.body_address_names)
 
@@ -949,12 +969,12 @@ class _Interp:
             plain = self.walks.get(("plain", n.start_byte, n.end_byte, n.type))
             if plain is None:
                 plain = self.walks[("plain", n.start_byte, n.end_byte, n.type)] = not any(
-                    x.type in _SIDE_EFFECTS or (x.type == "identifier" and _text(x, raw) in self.macro_status)
+                    x.type in _SIDE_EFFECTS or (cpc.is_name_node(x) and _text(x, raw) in self.macro_status)
                     for x in nodes)
             if plain:
                 return
         writes = [x for x in nodes if x.type in {"assignment_expression", "update_expression"}]
-        idents = [x for x in nodes if x.type == "identifier" and not (
+        idents = [x for x in nodes if cpc.is_name_node(x) and not (
             x.parent is not None and x.parent.type == "call_expression" and x.parent.child_by_field_name("function") == x)]
         # Objects whose address this very expression hands out (``&b``, a decaying local array): a callee or a
         # pointer write in the same expression may reach them (R2b review round 2 B).
@@ -1051,8 +1071,8 @@ class _Interp:
             left = root.child_by_field_name("left")
             # The left operand's value computations (an index) are unsequenced with the right operand (C11 6.5.16p3):
             # the right side is a safe top only when the left one hides nothing (round 4 C1).
-            if not any(x.type == "identifier" and _text(x, raw) in self.macro_status and not self.macro_constant(_text(x, raw))
-                       for x in _walk(left)):
+            if not any(cpc.is_name_node(x) and _text(x, raw) in self.macro_status and not self.macro_constant(_text(x, raw))
+                       and not self.inert_macro(_text(x, raw)) for x in _walk(left)):
                 top.add(_key(_unwrap(root.child_by_field_name("right"))))
         if self.world is not None:
             self.mark_unordered_calls(nodes, raw, inside, state)
@@ -1061,8 +1081,9 @@ class _Interp:
             or (x.type == "call_expression" and not self.is_cast_call(x, raw) and not self.pure_macro_call(x, raw)))]
         if nested:
             for x in nodes:
-                name = _text(x, raw) if x.type == "identifier" else ""
-                if name in self.macro_status and not self.macro_constant(name) and not self.transparent_macro(name):
+                name = _text(x, raw) if cpc.is_name_node(x) else ""
+                if name in self.macro_status and not self.macro_constant(name) and not self.transparent_macro(name) \
+                        and not self.inert_macro(name):
                     raise Unsupported("macro_in_order_dependent_expression:" + name)
 
     def mark_unordered_calls(self, nodes, raw, inside, state):
@@ -1131,6 +1152,24 @@ class _Interp:
     def macro_constant(self, name):
         return self.macro_status.get(name) == "active" and name in self.constants
 
+    def inert_macro(self, name, depth=0):
+        """(R35) An undecided object-like macro that reads no object, writes nothing and calls nothing in any definition
+        the tree has (numbers, type names, constants, other inert macros): its value is unknown, but no order of
+        evaluation can change it. (``union["writes"]`` is also refused earlier — `check_sequencing` rejects an
+        effectful macro before it asks this — and is kept here so the judgment stands on its own.)"""
+        if depth > 8 or self.macro_status.get(name) == "active" or name in self.macro_params:
+            return False
+        if ("inert", name, depth) in self.macro_memo:
+            return self.macro_memo[("inert", name, depth)]
+        union = cpc.undecided_macro_view(self.scope, name)
+        verdict = not (union is None or union.get("function_like") or union["writes"] or "names" not in union) and all(
+            t in {"sizeof"} or self.macro_constant(t) or isinstance(self.type_of(t), dict) or cpc.base_kind(t) is not None
+            or (t != name and t in self.macro_status and self.inert_macro(t, depth + 1)) for t in union["names"])
+        # keyed by depth: the verdict is then a function of (name, depth) alone — a cut-off reached from one question
+        # never answers another asked shallower (review round 3 W1: row order changed cells)
+        self.macro_memo[("inert", name, depth)] = verdict
+        return verdict
+
     def transparent_macro(self, name, depth=0):
         """A function-like macro that neither writes nor calls and reads nothing but its parameters (and constants,
         type names, other transparent macros): whatever it reads is an argument — a node of this tree."""
@@ -1198,7 +1237,7 @@ class _Interp:
             raise Unsupported("macro_expansion_depth")
         for root in roots:
             for n in _walk(root):
-                if n.type == "identifier" and self.defined_after_function(_text(n, raw)):
+                if cpc.is_name_node(n) and self.defined_after_function(_text(n, raw)):
                     raise Unsupported("macro_defined_after_function:" + _text(n, raw))
                 if n.type == "declaration":
                     for d in n.named_children:
@@ -1223,8 +1262,27 @@ class _Interp:
 
     def macro_effectful(self, name, depth=0):
         """May expanding ``name`` write or call a function (transitively through other macros)?"""
-        if depth > 8 or self.macro_status.get(name) != "active":
+        if depth > 8:
             return True
+        if self.macro_status.get(name) != "active":
+            # (R35) an undecided macro whose every definition in the tree neither writes nor calls — and none hides
+            # what it does from the text scan (`cpc.undecided_macro_view`) — expands to something effect-free whichever
+            # one the build picks (``#ifdef __MISRA__ TRUE 1u #else TRUE 1``)
+            if ("effectful", name, depth) in self.macro_memo:
+                return self.macro_memo[("effectful", name, depth)]
+            union = cpc.undecided_macro_view(self.scope, name)
+            calls = set(union["calls"]) if union is not None else set()
+            verdict = union is None or union["writes"] or union.get("reach_names") is None \
+                or bool(set(union["reach_names"]) & self.fn_names) \
+                or any(
+                c not in {"sizeof", "defined"} and (c not in self.macro_status or self.macro_effectful(c, depth + 1))
+                and not isinstance(self.type_of(c), dict) for c in sorted(calls)) or any(
+                # a macro of this unit it mentions is expanded too (a build -D the tree union does not know; I4)
+                t != name and t in self.macro_status and self.macro_effectful(t, depth + 1)
+                for t in sorted(set(union.get("names", ())) - calls))
+            # keyed by depth: deterministic whatever was asked before (review round 3 W1)
+            self.macro_memo[("effectful", name, depth)] = verdict
+            return verdict
         body = self.fmacro_bodies.get(name) if name in self.macro_params else self.macro_bodies.get(name)
         if body is None:
             return True
@@ -1298,9 +1356,10 @@ class _Interp:
             body = _text(n, raw)
             m = re.fullmatch(r"'([ -&(-\[\]-~])'", body)  # printable ASCII except ' and \ (round 4 C8)
             return _Val(ord(m.group(1)), self.int_t) if m else _Val(Unknown("char_literal_unmodeled"), self.int_t)
-        if k in {"true", "false"}:
-            return _Val(Unknown("bool_keyword_unmodeled"), None)
-        if k == "identifier":
+        if k in cpc.NAME_NODE_TYPES:
+            # (R35) ``TRUE``/``FALSE`` (and ``true``/``false``) parse as keywords, but the preprocessor sees names — a
+            #   project's ``#define TRUE 1U`` (Processor Expert drivers, KJPDS02_PV) or <stdbool.h>. Read it as the
+            #   identifier it is: a macro the unit defines gives its value, anything else stays unknown
             return self.read_identifier(state, _text(n, raw), n, raw, depth)
         if k == "cast_expression":
             type_text = _text(n.child_by_field_name("type"), raw)
@@ -1561,8 +1620,11 @@ class _Interp:
                    for x in _walk(node))
 
     def has_macro_call(self, n, raw):
-        return any(x.type == "identifier" and _text(x, raw) in self.macro_status and
-                   self.macro_status.get(_text(x, raw)) != "active" for x in _walk(n))
+        # (R35) an undecided macro hides a call only if some definition in the tree has one (or the tree is not the
+        # whole story) — the same judgment `macro_effectful` makes of it
+        return any(cpc.is_name_node(x) and _text(x, raw) in self.macro_status and
+                   self.macro_status.get(_text(x, raw)) != "active" and self.macro_effectful(_text(x, raw))
+                   for x in _walk(n))
 
     def conditional(self, state, n, raw, depth):
         cond_node = n.child_by_field_name("condition")
@@ -1638,7 +1700,7 @@ class _Interp:
                 return True
             if x.type == "call_expression" and not (self.is_cast_call(x, raw) or self.pure_macro_call(x, raw)):
                 return True
-            if x.type == "identifier" and _text(x, raw) in self.macro_status and _text(x, raw) not in self.macro_params \
+            if cpc.is_name_node(x) and _text(x, raw) in self.macro_status and _text(x, raw) not in self.macro_params \
                     and self.macro_effectful(_text(x, raw)):
                 return True
         return False
@@ -2100,7 +2162,7 @@ def _constant_condition(cond, raw, interp):
         stack.extend(x.named_children)
         if x.type in _SIDE_EFFECTS:
             return False
-        if x.type == "identifier":
+        if cpc.is_name_node(x):  # (R35) ``while (TRUE)``
             name = _text(x, raw)
             if not (interp.macro_constant(name) if name in interp.macro_status else name in interp.constants):
                 return False

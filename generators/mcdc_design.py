@@ -91,7 +91,8 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
     def term(n):
         n = _unwrap(n)
         text = _text(n, raw)
-        if n.type == "identifier":
+        # (R35) ``TRUE``/``FALSE`` parse as tree-sitter ``true``/``false`` keywords; to the preprocessor they are names
+        if n.type in cpc.NAME_NODE_TYPES:
             if text in domains:
                 variables.add(text)
                 t = domains[text].get("ctype") if widths else None
@@ -531,7 +532,6 @@ def _scoped_source_decisions(unit, scope, declared_domains):
     macro_bodies = scope.get("macro_bodies") or {}
     macro_status = scope.get("macro_status") or {}
     known_functions = (scope.get("effects") or {}).get("functions") or {}
-    tree_macros = (scope.get("effects") or {}).get("macros") or {}
 
     def macro_writes(name, depth=0):
         """May expanding this macro write — itself or through a macro it invokes (transitive)?
@@ -541,8 +541,8 @@ def _scoped_source_decisions(unit, scope, declared_domains):
         if depth > 6:
             return True
         if macro_status.get(name) != "active":
-            union = tree_macros.get(name)
-            if union is None or scope.get("missing_includes"):
+            union = cpc.undecided_macro_view(scope, name)  # (R35) the oracle's judgment too
+            if union is None:
                 return True
             return union["writes"] or any(c in macro_status and macro_writes(c, depth + 1) for c in union["calls"])
         body = macro_bodies.get(name, "")
@@ -631,7 +631,7 @@ def _scoped_source_decisions(unit, scope, declared_domains):
                     and callee not in (scope.get("prototypes") or ()) and scope.get("missing_includes"):
                 # Declared nowhere we can read, after a missing include: it may be a macro from that header.
                 record_writes(n.start_byte, n, {"*"}, cause="undeclared_after_missing_include:" + callee)
-        if n.type == "identifier" and _text(n, raw) in macro_status and not (
+        if cpc.is_name_node(n) and _text(n, raw) in macro_status and not (
                 n.parent is not None and n.parent.type == "call_expression" and n.parent.child_by_field_name("function") == n):
             name = _text(n, raw)
             fx = cpc.macro_side_effects(macro_bodies.get(name, ""))
@@ -751,8 +751,7 @@ def _global_binding_issue(name, decision, extra):
         return "global_address_taken:" + name
     functions = effects.get("functions") or {}
     macros = {**(scope.get("macro_bodies") or scope.get("function_like_macro_bodies") or {}),
-              "__status__": scope.get("macro_status") or {}, "__tree__": effects.get("macros") or {},
-              "__missing_includes__": bool(scope.get("missing_includes"))}
+              "__status__": scope.get("macro_status") or {}, "__view_scope__": {**scope, "effects": effects}}
     for _, callee, call in extra.get("calls", []):
         if not _may_precede(call, decision, extra):
             continue
@@ -767,9 +766,10 @@ def _callee_writes(callee, name, functions, macros, depth):
         return "global_binding_unverified:indirect_call"
     scope_status = macros.get("__status__", {})
     if callee in scope_status and scope_status[callee] != "active":
-        # Body undecided in this unit: judge by every definition in the tree (review round 3 W1).
-        union = macros.get("__tree__", {}).get(callee)
-        if union is None or union["writes"] or macros.get("__missing_includes__"):
+        # Body undecided in this unit: judge by every definition in the tree (review round 3 W1) — through the view
+        # the source oracle uses (R35: none may be opaque to the text scan, no -D of the name, no missing include)
+        union = cpc.undecided_macro_view(macros.get("__view_scope__") or {}, callee)
+        if union is None or union["writes"]:
             return "global_binding_unverified:macro_body_unknown:" + callee
         for inner in union["calls"]:
             reason = _callee_writes(inner, name, functions, macros, depth + 1) if depth < 4 else "global_binding_unverified:depth"
@@ -999,7 +999,7 @@ def _body_constants(nodes, raw, constants_map, widths):
                     value, t = cpc.literal(_text(x, raw), widths)
                     if not cpc.is_float(t):
                         out.append(value)
-                elif x.type == "identifier" and _text(x, raw) in constants_map:
+                elif cpc.is_name_node(x) and _text(x, raw) in constants_map:
                     c = constants_map[_text(x, raw)]
                     if not cpc.is_float(c["type"]):
                         out.append(c["value"])
@@ -1150,7 +1150,7 @@ def _macro_hides_conditions(atom, raw, scope):
     status = (scope or {}).get("macro_status") or {}
     constants = scope["constants"] if (scope or {}).get("constants") is not None else {}
     bodies = {**((scope or {}).get("macro_bodies") or {}), **((scope or {}).get("function_like_macro_bodies") or {})}
-    stack = [(t, t) for t in dict.fromkeys(_text(x, raw) for x in _walk(atom) if x.type == "identifier")
+    stack = [(t, t) for t in dict.fromkeys(_text(x, raw) for x in _walk(atom) if cpc.is_name_node(x))
              if t in status and t not in constants]
     seen = set()
     while stack:
@@ -1158,8 +1158,16 @@ def _macro_hides_conditions(atom, raw, scope):
         if name in seen:
             continue
         seen.add(name)
+        if status.get(name) != "active":
+            # (R35) undecided: every tree definition (`cpc.undecided_macro_view`) — hidden conditions only if one has
+            # a decision operator (``TRUE`` is ``1u`` or ``1``: its value is unknown, it hides no condition)
+            view = cpc.undecided_macro_view(scope or {}, name)
+            if view is None or view.get("conditional_ops", True):
+                return root
+            stack.extend((t, root) for t in view.get("names", ()) if t in status and t not in constants)
+            continue
         body = bodies.get(name)
-        if status.get(name) != "active" or body is None or re.search(r"&&|\|\||\?", body):
+        if body is None or re.search(r"&&|\|\||\?", body):
             return root
         stack.extend((t, root) for t in re.findall(r"[A-Za-z_]\w*", body) if t in status and t not in constants)
     return ""
@@ -1562,7 +1570,9 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 raise
             decision["conditions"] = [{k: v for k, v in atom.items() if not k.startswith("_")} for atom in atoms]
             for x in _walk(node):
-                name = _text(x, raw) if x.type == "identifier" else ""
+                # (R35) the same names ``_compile`` read: ``TRUE``/``FALSE`` are ``true``/``false`` nodes, and
+                #   ``finalize_mcdc_design`` re-evaluates the pairs with exactly these constants
+                name = _text(x, raw) if cpc.is_name_node(x) else ""
                 if name in constants_map and name not in domains:
                     c = constants_map[name]
                     report["constants"][name] = {"value": c["value"], "type": c["type"], "kind": c.get("kind", ""),
