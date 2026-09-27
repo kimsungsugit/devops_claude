@@ -5,6 +5,7 @@ Reachability at the source occurrence remains explicitly unverified.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import itertools
 import json
@@ -1173,8 +1174,35 @@ def _macro_hides_conditions(atom, raw, scope):
     return ""
 
 
+_STUB_RETURN_RE = re.compile(r"([A-Za-z_]\w*)\(\) return")
+
+
+def _stub_return_domain(name, scope, own):
+    """(R36) A row input ``F() return`` is the value the stubbed call returns on that row (the source oracle's
+    `stub_return`, R14). Its domain is F's declared return type, under the oracle's own conditions: F is a project
+    function whose definitions agree on one return type, an integer (not a pointer, not floating), and not the function
+    under test (its own recursive call runs for real). Anything else gets no domain: the name is not a search input,
+    the oracle reads that call's value as unknown and the row leaves the cell blank. Where the oracle still does not
+    take the stub (a callee name hidden by a parameter or local, a function-like macro of the same name, an enumerator
+    outside 0..127) the search only spends budget — pairs come from the oracle's observations, never from the domain."""
+    m = _STUB_RETURN_RE.fullmatch(name)
+    if not m or m.group(1) == own:
+        return None
+    info = ((scope.get("effects") or {}).get("functions") or {}).get(m.group(1))
+    text = str((info or {}).get("return_type") or "")
+    if not info or not text or "*" in text:
+        return None
+    try:
+        t = _scope_type(scope, text)
+        if cpc.is_float(t):
+            return None
+        return _scope_domain(t, text, scope, "stub_return", origin="stub", callee=m.group(1))
+    except cpc.Unresolved:
+        return None
+
+
 def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                 max_steps):
+                 max_steps, extra_domains=None, strict_steps=False):
     """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
 
     Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
@@ -1184,7 +1212,10 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     proof). A decision in a loop is evaluated once per iteration: every distinct evaluation is a candidate row.
 
     Budget: ``max_runs`` vectors and ``max_steps`` interpreter steps summed over them, per function — a deterministic
-    cost bound (a vector costs what its run executes), so the same source always gets the same design."""
+    cost bound (a vector costs what its run executes), so the same source always gets the same design.
+
+    ``extra_domains``: row inputs searched beyond those with a declared domain (R36 — the stub return values of the
+    second search, `_stub_path_pass`); ``strict_steps``: every run stops at what the step budget has left."""
     from generators import c_source_oracle as cso
     if not cso.scope_matches(unit):
         for decision, _node, _raw in candidates:
@@ -1236,6 +1267,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             except cpc.Unresolved:
                 continue
             _apply_design_range(unit, name, domains[name])
+        if name not in domains and name in (extra_domains or {}):
+            domains[name] = extra_domains[name]   # (R36) a stub return value — the second search only
         if name in domains:
             inputs.append(name)
     widths = (scope.get("target") or {}).get("widths") or {}
@@ -1282,7 +1315,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             if exhausted():
                 break
             chunk = todo[start:start + max(0, min(16, max_runs - len(cache)))]
-            for v, r in zip(chunk, cso.observe_decisions(unit, chunk, plan, guards), strict=True):
+            limit = max(0, max_steps - spent[0]) if strict_steps else None
+            for v, r in zip(chunk, cso.observe_decisions(unit, chunk, plan, guards, step_limit=limit), strict=True):
                 cache[vkey(v)] = (v, r)
                 order.append(v)
                 added.append(v)
@@ -1383,6 +1417,70 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             decision["reason"] = "path_evaluation:" + top
     for name in inputs:
         report["domains"].setdefault(name, domains[name])
+
+
+def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
+                    max_steps):
+    """(R36) A second search for the decisions the first did not design, where a value a call returned may be what it
+    lacked (``r = F(); if ((r == 3U) && …)``): the row inputs ``F() return`` — the values the SUTS row injects into
+    F's stub (R14, `_stub_return_domain`) — join the search. Merged condition by condition: every decision keeps the
+    first search's result, pairs and rows exactly (their order too — the reference profile renders only the first MC/DC
+    vectors: replacing a first-search pair lost it there, review round 2 C1); a condition the first search did not pair
+    takes the second search's pair, which records the stubs its rows set (``stub_inputs`` — those rows hold only where
+    F runs as a stub). The second search has its own budget (``report["stub_search"]``) and every run stops at what
+    that budget has left; its record stays next to the first one (``stub_search`` on the decision)."""
+    own = str(unit.get("name") or "")
+    stubs = {}
+    for name in row_names:
+        if name not in domains and (domain := _stub_return_domain(name, scope, own)) is not None:
+            stubs[name] = domain
+    # every decision the first search did not design: a call's unknown value shows as ``undetermined:call_return_value``
+    # when a condition reads it, but also as ``path_dependent_reach`` (a guard reads it) or ``path_budget`` (the paths it
+    # splits) — the observations do not say which unknown did it (R36 measurement: the first two alone missed 30 of 92)
+    retry = [(d, node, raw) for d, node, raw in candidates
+             if stubs and d.get("evaluation") == "source_path" and d.get("status") != "designed"]
+    if not retry:
+        return
+    first = {id(d): copy.deepcopy(d) for d, _n, _r in retry}   # every decision goes back to this, then merges
+    record = report.setdefault("stub_search", {"max_runs": max_runs, "max_steps": max_steps, "decisions_searched": 0,
+                                                "decisions_improved": 0, "conditions_added": 0})
+    record["decisions_searched"] += len(retry)
+    try:
+        _path_design(unit, {"domains": {}}, retry, row_names, dict(domains), scope, {}, max_conditions=max_conditions,
+                     max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True)
+    except Exception as exc:  # noqa: BLE001 — the first search's result stands (review round 2 I1); the reason is kept
+        for d, _n, _r in retry:
+            d.clear()
+            d.update(first[id(d)])
+        record["error"] = type(exc).__name__
+        return
+    used_stubs = set()
+    for d, _n, _r in retry:
+        second = {p["condition_id"]: p for p in d.get("pairs") or []}
+        second_record = d.get("path_search")
+        d.clear()
+        d.update(first[id(d)])
+        have = {p["condition_id"] for p in d.get("pairs") or []}
+        added = [second[c] for c in sorted(second, key=lambda c: int(c[1:])) if c not in have]
+        if not added:
+            continue
+        for pair in added:
+            pair["stub_inputs"] = sorted(k for k in {**pair["inputs_a"], **pair["inputs_b"]} if k in stubs)
+            used_stubs.update(pair["stub_inputs"])
+            for side in ("a", "b"):
+                # after every first-search vector: the rows the first search chose keep their places
+                selected.setdefault(json.dumps(pair[f"inputs_{side}"], sort_keys=True), pair[f"inputs_{side}"])
+        d["pairs"] = sorted([*(d.get("pairs") or []), *added], key=lambda p: int(p["condition_id"][1:]))
+        d["stub_inputs"] = sorted({k for p in added for k in p["stub_inputs"]})
+        d["stub_search"] = second_record
+        if len(d["pairs"]) == len(d.get("conditions") or []):
+            d["status"], d["reason"] = "designed", "unique_cause_pairs_found"
+        else:
+            d["status"], d["reason"] = "partial", "path_search_incomplete"
+        record["decisions_improved"] += 1
+        record["conditions_added"] += len(added)
+    for name in sorted(used_stubs):
+        report["domains"].setdefault(name, stubs[name])
 
 
 def _short_circuit_unique_cause(a, b, i):
@@ -1689,6 +1787,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
         try:
             _path_design(unit, report, path_candidates, row_names, domains, scope, selected,
                          max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps)
+            _stub_path_pass(unit, report, path_candidates, row_names, domains, scope, selected,
+                            max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps)
         except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":

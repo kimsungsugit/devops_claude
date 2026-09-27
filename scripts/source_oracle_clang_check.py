@@ -13,8 +13,12 @@ Independence and its limits:
   on — globals the sequence leaves unset, callee return values — three different fill values. A claim holds
   only if all three runs give the claimed value, so an output that secretly depends on an unset global or a
   call result is caught;
-* callees are stubs that return the fill value and write nothing: the oracle's claim that a callee cannot
-  change an output (project write closure) is **not** checked here;
+* callees are stubs that return the fill value; one the project write closure says may write through a pointer
+  (``pointer_write``, or unknown code) writes the fill value through each non-const scalar pointer argument (R36 — the
+  oracle holds such a pointee as any value; before, the constexpr run stopped at the uninitialized local — and a
+  missing havoc of a scalar pointee was agreed with). Only ``*p`` is written: the other elements of an array, a
+  struct's members and an enum pointee are not, so a missing havoc there is still not caught. The rest write nothing:
+  the oracle's claim that a callee cannot change an output (project write closure) is **not** checked here;
 * enumerator, ``const`` object and ``const`` array element values are the engine's (as in
   ``mcdc_design_clang_oracle.py``);
 * every macro is defined at the top of the harness: where a macro is defined relative to the function is not
@@ -269,11 +273,23 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                       and m.group(1) not in globals_ and m.group(1) not in arrays and not m.group(1).startswith("__oracle")})
     used_globals = [g for g in sorted(tokens) if (g in globals_ or g in arrays) and g not in status]
     checks: dict[int, tuple] = {}
+    closure = (scope.get("effects") or {}).get("functions") or {}
+
+    def writes_through_pointer(callee):
+        info = closure.get(callee)
+        return info is None or bool(info.get("pointer_write") or info.get("unknown_callees"))
+
     for variant, fill in enumerate(_FILLS):
         lines.append(f"namespace __oracle_v{variant} {{")
         lines.append(f"constexpr int __oracle_stub = {fill};")
+        # (R36) what a pointer-writing stub leaves in a scalar pointee: the fill value (the oracle holds any value)
+        lines.append("template<class __oracle_T> constexpr void __oracle_put(const __oracle_T&) {}")
+        lines.append("template<class __oracle_T> constexpr void __oracle_put(__oracle_T* __p) { if constexpr "
+                     "(__is_arithmetic(__oracle_T) && !__is_const(__oracle_T)) { if (__p) *__p = (__oracle_T)__oracle_stub; } }")
         for c in callees:
-            lines.append(f"template<class... __oracle_A> constexpr int {c}(__oracle_A...) {{ return __oracle_stub; }}")
+            put = "(__oracle_put(__a), ...); " if writes_through_pointer(c) else ""
+            lines.append(f"template<class... __oracle_A> constexpr int {c}([[maybe_unused]] __oracle_A... __a) "
+                         f"{{ {put}return __oracle_stub; }}")
         for index, claim in enumerate(claims):
             inputs = {k: _input_int(v, constants, scope.get("function_like_macros")) for k, v in claim["inputs"].items()}
             lines.append(f"constexpr long long __oracle_run_{index}(int __oracle_which) {{")
@@ -325,7 +341,9 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                 except cpc.Unresolved:
                     continue
                 if _fits(sv, rt):
-                    lines.append(f"  auto {c} = [&](auto...) -> {_base_type(rt, enum_base)} {{ return {sv}; }};")
+                    put = "(__oracle_put(__a), ...); " if writes_through_pointer(c) else ""
+                    lines.append(f"  auto {c} = [&]([[maybe_unused]] auto... __a) -> {_base_type(rt, enum_base)} "
+                                 f"{{ {put}return {sv}; }};")
             plist = ", ".join(p[1] for p in params)
             if instrument:
                 nd = len(instrument["decisions"])

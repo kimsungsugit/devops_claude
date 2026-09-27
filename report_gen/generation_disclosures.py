@@ -543,6 +543,17 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 결정을 나열하지 못한 함수 {_show(_int(mc, 'unenumerated_functions'))} · 분석하지 못한 unit "
                f"{_show(_int(mc, 'units_not_analyzed'))} 는 위 분모 밖이다."
                if (_int(mc, "unenumerated_functions") or _int(mc, "units_not_analyzed")) else "")
+            + (f" 피호출 함수의 stub 반환값(`F() return` 칸)을 넣어 짝지은 조건이 있는 결정 "
+               f"{_show(_int(mc, 'stub_input_decisions'))} · 그런 쌍 {_show(_int(mc, 'stub_input_pairs'))}(행 상한 뒤 유지 "
+               f"{_show(_int(mc, 'stub_input_pairs_retained'))}) — 그 행은 해당 함수를 stub 으로 실행할 때만 성립한다"
+               "('Stub Inputs' 열). stub 값 탐색은 1차 탐색이 설계하지 못한 결정에만, 별도 예산으로 돈다"
+               f"(대상 결정 {_show(_int(mc, 'stub_search_decisions'))} · 조건을 더한 결정 "
+               f"{_show(_int(mc, 'stub_search_improved'))}"
+               + (f" · 탐색 실패로 1차 결과를 유지한 함수 {_show(_int(mc, 'stub_search_errors'))}"
+                  if _int(mc, "stub_search_errors") else "")
+               + "); 1차 탐색의 MC/DC 쌍과 행은 바뀌지 않는다 — 다만 행 상한이 찬 TC 에서는 새 MC/DC 행이 경계 행을 "
+               "밀어낼 수 있다."
+               if _int(mc, "stub_input_decisions") else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
             tone=_tone(bool(_int(mc, "invalidated_pairs")))))
 

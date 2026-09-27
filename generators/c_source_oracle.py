@@ -2792,7 +2792,8 @@ def _guard_paths(finals, key):
 
 
 def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
-                      decisions: list[dict[str, Any]], guards: list[list] | tuple = ()) -> list[dict[str, Any]]:
+                      decisions: list[dict[str, Any]], guards: list[list] | tuple = (),
+                      step_limit: int | None = None) -> list[dict[str, Any]]:
     """(R2c) Per input vector: how each decision of the function evaluates on the modeled run.
 
     ``decisions``: ``[{"key": [start, end, type], "atoms": [[start, end, type], ...], "ir": nested list}]`` over the
@@ -2847,11 +2848,21 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
         reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
         return [{"status": "unsupported", "reason": reason, "decisions": {}} for _ in vectors]
     results = []
+    # (R36) ``step_limit``: the caller's search budget left. A run may use a quarter of what is left (at least 2,000
+    # steps while that much is left) and a vector after it is spent does not run — one loop that a stub value never lets
+    # end (``while (st() != 3U)``) would otherwise run to the loop budget and take the whole search with it
+    remaining = step_limit
     for inputs in vectors:
         record = {"status": "supported", "reason": "", "decisions": {i: {"state": why} for i, why in broken.items()}}
+        if remaining is not None and remaining <= 0:
+            record.update(status="unsupported", reason="search_step_budget", steps=0)
+            results.append(record)
+            continue
         interp = None
         try:
             interp = _Interp(fn, raw, scope, dict(inputs or {}), parser, shared)
+            if remaining is not None:
+                interp.limit = min(interp.limit, max(remaining // 4, min(remaining, 2_000)))
             interp.function_name = str(unit.get("name") or "")
             interp.watch = specs
             interp.guards = guard_keys
@@ -2875,6 +2886,8 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
         except Exception as exc:  # noqa: BLE001 — never raise into the generator; recorded as the reason
             record.update(status="unsupported", reason=f"oracle_exception:{type(exc).__name__}",
                           steps=interp.steps if interp is not None else 0)
+        if remaining is not None:
+            remaining -= int(record.get("steps") or 0)
         results.append(record)
     return results
 

@@ -19,6 +19,10 @@ rewritten before it) cannot be checked as a lone expression. Its pairs go to the
 conditions wrapped in recorders, and clang must find, in the run of each pair member, an evaluation with exactly the
 claimed evaluated conditions, values and outcome — for all three fill values of the state the vector leaves unset.
 Callees are stubs there (they write nothing and return the fill value).
+
+(R36) ``--stub-returns``: the unit's inputs also hold ``F() return`` for every function its body calls (the SUTS rows
+carry these for non-void callees — `generators/suts._stub_return_names`), so the MC/DC design's second search runs on
+the stub values and those pairs reach the whole-function harness, which returns the pair's value from F's stub.
 """
 from __future__ import annotations
 
@@ -33,7 +37,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def _decisions(source_root: Path):
+def _called_names(node, raw):
+    """Names of the functions this definition calls directly (``name(...)``), in order of first call."""
+    names, stack = [], [node]
+    while stack:
+        n = stack.pop()
+        stack.extend(reversed(n.named_children))
+        if n.type == "call_expression":
+            f = n.child_by_field_name("function")
+            if f is not None and f.type == "identifier":
+                names.append(raw[f.start_byte:f.end_byte].decode())
+    return list(dict.fromkeys(names))
+
+
+def _decisions(source_root: Path, stub_returns: bool = False):
     from generators.c_project_context import build_project_context, build_scopes
     from generators.mcdc_design import build_mcdc_design
     from workflow.code_parser.c_parser import _make_parser
@@ -73,7 +90,11 @@ def _decisions(source_root: Path):
                 d = p.child_by_field_name("declarator")
                 if d is not None and d.type == "identifier":
                     params.append(raw[d.start_byte:d.end_byte].decode())
-            unit = {"name": raw[name_node.start_byte:name_node.end_byte].decode(), "input_vars": params,
+            own = raw[name_node.start_byte:name_node.end_byte].decode()
+            if stub_returns:
+                params += [f"{c}() return" for c in _called_names(node.child_by_field_name("body") or node, raw)
+                           if c != own]
+            unit = {"name": own, "input_vars": params,
                     "source_text": texts[path], "source_path": path, "source_text_complete": True, "mcdc_free_globals": True,
                     "project_scope": scopes[path]}
             yield path, unit, build_mcdc_design(unit), context, scopes[path]
@@ -120,7 +141,8 @@ def _path_claims(unit, report):
                 expr = decision_claim(index, pair[f"truth_{side}"], pair[f"observed_{side}"], pair[f"decision_{side}"])
                 claims.append({"unit": unit, "inputs": pair[f"inputs_{side}"], "outputs": {expr: 1},
                                "possible_ub": pair.get(f"possible_ub_{side}") or [],
-                               "instrument": instrument, "label": f"{report['function']}:{pair['pair_id']}:{side}"})
+                               "instrument": instrument, "label": f"{report['function']}:{pair['pair_id']}:{side}",
+                               "stub": bool(pair.get("stub_inputs"))})
     return claims
 
 
@@ -149,12 +171,19 @@ def main():
     ap.add_argument("--target", default="msp430", help="clang target with the ECU's integer widths")
     ap.add_argument("--clang", default="clang")
     ap.add_argument("--output", type=Path)
+    ap.add_argument("--stub-returns", action="store_true",
+                    help="(R36) add the called functions' 'F() return' to the inputs — checks the stub-value pairs")
     args = ap.parse_args()
     results = {"target": args.target, "units": 0, "pairs_checked": 0, "claims_checked": 0, "mismatches": [],
                "compile_errors": [], "scope": "expression semantics only; not execution, not reachability"}
     by_unit: dict[str, list] = {}
     path_claims = []
-    for path, unit, report, context, scope in _decisions(args.source_root):
+    results["stub_returns"] = bool(args.stub_returns)
+    results["stub_input_decisions"] = results["stub_input_pairs"] = 0
+    for path, unit, report, context, scope in _decisions(args.source_root, args.stub_returns):
+        stubbed = [d for d in report["decisions"] if d.get("stub_inputs")]
+        results["stub_input_decisions"] += len(stubbed)
+        results["stub_input_pairs"] += sum(len(d.get("pairs") or []) for d in stubbed)
         path_claims.extend(_path_claims(unit, report))
         entries = list(_checks(path, report))
         if not entries:
@@ -193,11 +222,23 @@ def main():
                 results["compile_errors"].append({"unit": Path(path).name, "errors": other[:5], "count": len(other)})
     if path_claims:
         from source_oracle_clang_check import check_claims
-        checked = check_claims(path_claims, clang=args.clang, target=args.target)
-        results["path_pairs"] = {k: checked[k] for k in ("claims", "checked", "agree", "agree_with_stubbed_callees",
-                                                         "mismatch", "eval_error", "unchecked", "unchecked_reasons")}
-        results["mismatches"] += [{"claim": m["function"] + ":path", **m} for m in checked["mismatches"]]
-        results["path_eval_errors"] = checked["eval_errors"]
+        keys = ("claims", "checked", "agree", "agree_with_stubbed_callees", "mismatch", "eval_error", "unchecked")
+        results["path_pairs"] = {**dict.fromkeys(keys, 0), "unchecked_reasons": {}}
+        results["path_eval_errors"] = []
+        # (R36) the pairs the stub-value search found are checked (and reported) on their own as well
+        for part, claims in (("stub_path_pairs", [c for c in path_claims if c.get("stub")]),
+                             ("", [c for c in path_claims if not c.get("stub")])):
+            if not claims:
+                continue
+            checked = check_claims(claims, clang=args.clang, target=args.target)
+            for k in keys:
+                results["path_pairs"][k] += checked[k]
+            for why, n in (checked.get("unchecked_reasons") or {}).items():
+                results["path_pairs"]["unchecked_reasons"][why] = results["path_pairs"]["unchecked_reasons"].get(why, 0) + n
+            if part:
+                results[part] = {k: checked[k] for k in (*keys, "unchecked_reasons")}
+            results["mismatches"] += [{"claim": m["function"] + ":path", **m} for m in checked["mismatches"]]
+            results["path_eval_errors"] += checked["eval_errors"]
     summary = {k: (len(v) if isinstance(v, list) else v) for k, v in results.items()}
     print(json.dumps(summary))
     if args.output:

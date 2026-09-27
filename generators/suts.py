@@ -3520,6 +3520,10 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "decisions_with_blank_inputs": 0,
                            # (R81 리뷰 I5) 쌍이 없음을 **증명**한 결정(강결합 동일 조건·상수 결정) — 탐색 실패와 분리
                            "proven_infeasible": 0,
+                           # (R36) 피호출 stub 반환값(`F() return`)을 행에 넣어 설계한 결정·쌍 — 그 행은 F 가 stub 일 때만 성립
+                           "stub_input_decisions": 0, "stub_input_pairs": 0, "stub_input_pairs_retained": 0,
+                           # (R36) 2차 탐색(stub 값)을 받은 결정 · 조건을 더한 결정 — 예산은 1차와 별도(함수당 같은 한도)
+                           "stub_search_decisions": 0, "stub_search_improved": 0, "stub_search_errors": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     for unit in units:
@@ -3529,6 +3533,10 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["units_not_analyzed"] += 1
             continue
         out["units"] += 1
+        stub_search = report.get("stub_search") or {}
+        out["stub_search_decisions"] += int(stub_search.get("decisions_searched") or 0)
+        out["stub_search_improved"] += int(stub_search.get("decisions_improved") or 0)
+        out["stub_search_errors"] += bool(stub_search.get("error"))   # 2차 탐색이 실패해 1차 결과로 되돌린 함수
         for name, dom in (report.get("domains") or {}).items():
             if dom.get("design_range_conflict"):
                 # 설계 범위가 선언 타입/열거자와 안 맞아 MC/DC 는 **선언** 도메인을 썼다 — BV 행과 도메인이 갈릴 수 있다.
@@ -3545,6 +3553,12 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["conditions"] += len(d.get("conditions") or [])
             status = d.get("status", "unsupported")
             out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
+            if d.get("stub_inputs"):
+                out["stub_input_decisions"] += 1
+            for pair in d.get("pairs") or []:
+                if pair.get("stub_inputs"):
+                    out["stub_input_pairs"] += 1
+                    out["stub_input_pairs_retained"] += pair.get("retained_status") == "retained"
             if d.get("evaluation") == "source_path" or d.get("path_refusal"):
                 # (R2c 리뷰 I3) 함수 실행 모델로 다시 본 결정(설계했든 거부했든) — 식 엔진 거부 사유 분포를 잃지 않는다
                 path = out.setdefault("source_path", {"decisions": 0, "designed": 0, "refused": 0, "static_reasons": {}})
@@ -4373,7 +4387,7 @@ _MCDC_SHEET = "MCDC Design"
 _MCDC_HEADERS = ["Test Case ID", "Function", "Decision ID", "Condition ID", "Pair ID", "Sequence A", "Sequence B",
                  "Inputs A JSON", "Inputs B JSON", "Truth A", "Truth B", "Decision A", "Decision B", "Retained",
                  "Decision Expression", "Decision Status", "Reason", "Source Kind", "Source SHA256",
-                 "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB"]
+                 "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB", "Stub Inputs"]
 
 
 def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, hdr_fill, hdr_font, data_font):
@@ -4405,10 +4419,13 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                       # (R2c) expression = 결정식만 평가 · source_path = 함수 실행 모델(지역변수·결정 전 갱신 포함)
                       decision.get("evaluation") or "expression"]
             pairs = decision.get("pairs") or []
+            # (R36) 쌍의 행이 설정하는 피호출 stub 반환값(쌍 단위 — 1차 탐색 쌍은 비어 있다) — 실행 환경에서 그 함수가
+            #   stub 이어야 그 쌍이 성립한다. 쌍 없는 결정 행은 결정 단위(2차 탐색 쌍이 없으면 비어 있다)
+            stubs = ", ".join(decision.get("stub_inputs") or [])
             if not pairs:
                 # 쌍 없는 결정도 한 행 — 빠지면 "MC/DC 설계 완료" 로 오독된다(분모에서 사라진다).
                 ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), "", "", "", "", "", "", "",
-                           "", "", "", "", *common, ""])
+                           "", "", "", "", *common, "", stubs])
             for pair in pairs:
                 retained = pair.get("retained_status", "")
                 inputs = []
@@ -4425,7 +4442,7 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                            inputs[0], inputs[1], _mcdc_truth_text(pair.get("truth_a"), pair.get("observed_a")),
                            _mcdc_truth_text(pair.get("truth_b"), pair.get("observed_b")),
                            "T" if pair.get("decision_a") else "F", "T" if pair.get("decision_b") else "F", retained,
-                           *common, "+".join(ub)])
+                           *common, "+".join(ub), ", ".join(pair.get("stub_inputs") or [])])
     # 한 번에 서식 — 결정마다 ``ws.max_row``(= 전 셀 ``max``)를 부르면 결정 수 × 셀 수로 커진다
     for row_cells in ws.iter_rows(min_row=2):
         for cell in row_cells:
