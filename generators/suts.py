@@ -2131,10 +2131,10 @@ resolve_safety_related = _resolve_safety_related
 
 
 def is_extended_strategy(strategy: Any) -> bool:
-    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19) 전부, 그리고 기본 자리 수를 넘는
-    SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
+    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19)·설계 범위 밖 강건성 행(R31) 전부, 그리고 기본
+    자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
-    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX)):
+    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2188,10 +2188,7 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     domains = _boundary_domains(unit, input_vars, var_types, var_bounds, unknown_vars)
     outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
 
-    def _rank(s: Dict[str, Any]) -> int:
-        name = str(s.get("strategy") or "")
-        return 0 if name == "BV_MID" else 1 if name.startswith("MCDC_") else 2 if name.startswith("COND_COMB_") else 3
-    order = sorted(sequences, key=_rank)
+    order = sorted(sequences, key=_base_rank)
     # 행이 비운 입력의 채움 값 — BV_MID 와 같은 중간값에서 출발한다(넓은 범위면 입력마다 위치만큼 옮겨 서로 다르게, enum 은 열거자).
     mids = {v: (var_bounds.get(v) or {}).get("mid") for v in domains}
     try:
@@ -2222,6 +2219,173 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
             "strategy": f"{BOUNDARY_PREFIX}{i}", "description": label, "tc_profile": TC_PROFILE_EXTENDED,
             "boundary": {k: row[k] for k in ("variable", "side", "lo", "hi", "base", "outputs_changed", "filled")},
         })
+
+
+# (R31) 설계 범위 밖 강건성 행 — 설계서·HSIS 가 입력 범위를 정했는데(`uds_range`/`hsis_range`) 함수 본문이 그 입력을 범위
+#   **밖이면서 선언 타입 안**인 상수와 직접 비교하면(`u16s_Tm < u16g_MAX`, 설계 범위 0~60), 코드가 그 값을 다룬다는 뜻이다 —
+#   정본 시험자는 그 경계(0xFFFE·0xFFFF)를 FI 로 적었고, 경계 행(R15)은 설계 범위 안에서만 움직여 거기 닿지 않았다
+#   (R26 측정: 정본만 판별한 변이 KJPDS02_PV 280 중 150 · HDPDM01 285 중 19 가 생성 스위트가 쓰는 값 범위 밖의 입력을
+#   요구했다). 코드 상수에서 나온 경계값 분석이지 변이에서 나온 값이 아니다. 기대값은 다른 행과 같은 oracle 이 도출한다(타입 밖
+#   값은 행으로 만들지 않는다 — oracle 도 실행 불가 입력으로 거부한다).
+ROBUST_PREFIX = "ROBUST_"
+MAX_ROBUST_ROWS = 12          # unit 당 — 넘으면 자르고 센다
+MAX_ROBUST_BASES = 6          # 비교가 살아 있는 기준 행을 찾을 후보 수(비교마다 후보 × 4 점 평가)
+# unit 보고서와 품질 집계가 같은 키를 쓴다(리뷰 2라운드 W2-D: 집계 튜플에서 키 하나가 빠지면 공시 문장이 조용히 사라진다)
+ROBUSTNESS_REPORT_KEYS = (
+    "inputs_with_design_range", "inputs_type_unconfirmed", "inputs_no_type_width", "inputs_shadowed", "body_unread",
+    "compared_constants_outside_design", "constants_outside_type", "live", "not_live", "no_base", "unprobed",
+    "underived", "macro_argument_live", "macro_argument_unconfirmed", "undecided_preprocessor_blocks", "rows", "cut",
+    "duplicates")
+
+
+def summarize_robustness_rows(units: List[Dict[str, Any]]) -> Dict[str, int]:
+    """(R31) unit 보고서 합계 + 상한 · 행이 생긴 unit · 실패 unit — 품질 보고서 `robustness_rows`(생성 공시가 읽는다)."""
+    reports = [u.get("robustness_rows") for u in units if isinstance(u.get("robustness_rows"), dict)]
+    out = {k: sum(int(r.get(k) or 0) for r in reports) for k in ROBUSTNESS_REPORT_KEYS}
+    out.update(cap_per_unit=MAX_ROBUST_ROWS, units_with_rows=sum(1 for r in reports if r.get("rows")),
+               errors=sum(1 for r in reports if r.get("error")))
+    return out
+
+
+def _base_rank(s: Dict[str, Any]) -> int:
+    """기준 행 후보 순서 — 전 입력 중간값(BV_MID) → MC/DC 설계 벡터 → 조건 조합 → 나머지(R15 경계 행·R31 강건성 행 공용)."""
+    name = str(s.get("strategy") or "")
+    return 0 if name == "BV_MID" else 1 if name.startswith("MCDC_") else 2 if name.startswith("COND_COMB_") else 3
+
+
+def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
+                            output_vars: List[str], var_types: Dict[str, str], var_bounds: Dict[str, Dict[str, Any]],
+                            unknown_vars: set, declared: Optional[set] = None) -> None:
+    """(R31, 확장 프로파일) 타입 폭이 **선언으로 확정된** 입력마다(``declared`` — 이름 패턴·기본값으로 추측한 타입, 타깃마다
+    폭이 다른 선언, 포인터는 타입 폭이 지어낸 값이라 뺀다 — R19 채움과 같은 규칙): 설계 범위 [lo, hi] 밖이고 선언 타입 안인
+    **직접 비교 상수** K 의 K−1·K·K+1 중 설계 범위 밖·타입 안인 점에 FI 행을 더한다. 기준 행은 후보(`_base_rank` 순, FI 가 아니고 설계 범위가 정해진 입력이 전부 그 범위 안인
+    정수 행, 최대 `MAX_ROBUST_BASES`) 중 K−2~K+1 에서 원본 코드를 돌려 도출 출력이 한 기울기로 움직이지 않는 첫 행 — 비교가
+    **살아 있는** 행이다(포화 가드는 `x+1` 이 K 에서 멈춘다; KJPDS02_PV `s_LinFailCheckTimer` 의 BV_MID 는 LIN 이상 플래그가
+    0 이라 가드에 가지 않았다). 살아 있는 행을 못 찾으면(`not_live`) 첫 후보에 두고 행 설명에 그렇게 적는다 — 유효한 상태에서
+    값 하나만 범위 밖으로 넣는 FI 행으로는 여전히 성립하고, 살아 있음은 기준을 고르는 기준이지 행을 빼는 기준이 아니다.
+    후보가 없으면 행을 만들지 않고(`no_base`), 점이 셋 미만이라 살아 있음을 볼 수 없으면(`unprobed`) 첫 후보에 둔다.
+    살아 있는 비교의 점이 먼저 자리를 받는다(상한에 잘리는 것은 살아 있지 않은 쪽부터). 살아 있는 점만으로 상한이 차면 남은
+    상수는 탐침하지 않고 그 점을 잘린 점으로 센다(리뷰 2라운드 I4 — 평가 비용). 같은 입력의 행이 이미 있으면 더하지 않는다.
+    살아 있지 않은 기준 행 위의 점은 oracle 이 출력 하나라도 도출할 때만 행이 된다(`underived` — 리뷰 2라운드 W1: 기대값 칸이
+    전부 "[검증 필요]" 인 FI 행에 "oracle 도출" 이라 적었다; 살아 있는 점은 그 판정이 이미 전 점의 도출을 요구한다).
+    본문을 확정하지 못한 매크로의 인자 안에서만 나온 비교(이 빌드에 없을 수 있다)는 **살아 있는 기준 행이 있을 때만**
+    쓴다(`macro_argument_live` / `macro_argument_unconfirmed` — 리뷰 3·4라운드 W-1; 본문을 아는 매크로는
+    `compared_constants` 가 본문으로 판정). 요약은 `unit["robustness_rows"]`(키는 `ROBUSTNESS_REPORT_KEYS`)."""
+    from generators.boundary_rows import _as_int, compared_constants, comparison_is_live, derives_any
+    src = unit.get("bounds_source") or {}
+    declared = set(declared or ())
+    ranged = [v for v in input_vars
+              if src.get(v) in ("uds_range", "hsis_range") and v not in unknown_vars and var_types.get(v) != "float"
+              and isinstance((var_bounds.get(v) or {}).get("min"), int)
+              and isinstance((var_bounds.get(v) or {}).get("max"), int)]
+    designed = [v for v in ranged if v in declared]
+    report = dict.fromkeys(ROBUSTNESS_REPORT_KEYS, 0)
+    report.update(inputs_with_design_range=len(designed), inputs_type_unconfirmed=len(ranged) - len(designed))
+    unit["robustness_rows"] = report
+    if not designed or not sequences:
+        return
+    stats: Dict[str, int] = {}
+    compared = compared_constants(unit, designed, stats)
+    for key in ("undecided_preprocessor_blocks", "inputs_shadowed", "body_unread"):
+        report[key] = int(stats.get(key) or 0)
+    macro_only = stats.get("macro_argument_constants") or {}
+    seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in sequences}
+    outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
+    bases: List[tuple] = []
+    for s in sorted(sequences, key=_base_rank):
+        if resolve_seq_test_method(s.get("strategy")) == _METHOD_FI:
+            continue                        # a base holds valid values only (the FI rows carry out-of-range ones)
+        ints = {k: _as_int(x) for k, x in (s.get("inputs") or {}).items()}
+        if not ints or any(x is None for x in ints.values()) or any(e[0] == ints for e in bases):
+            continue
+        if any(u in ints and not var_bounds[u]["min"] <= ints[u] <= var_bounds[u]["max"] for u in ranged):
+            continue                        # (review I3) a REQ row may carry a case value outside the design range
+        bases.append((ints, s))
+        if len(bases) >= MAX_ROBUST_BASES:
+            break
+    live_points: List[tuple] = []
+    other_points: List[tuple] = []
+    live_keys: set = set()
+
+    def row_key(base_inputs: Dict[str, Any], v: str, p: int) -> str:
+        return json.dumps({**base_inputs, v: _format_test_value(p, var_types.get(v, "uint8_t"))}, sort_keys=True,
+                          default=str)
+
+    for v in designed:
+        dlo, dhi = var_bounds[v]["min"], var_bounds[v]["max"]
+        tb = get_boundary_values(var_types.get(v, ""))
+        tlo, thi = (tb or {}).get("min"), (tb or {}).get("max")
+        if not isinstance(tlo, int) or not isinstance(thi, int):
+            report["inputs_no_type_width"] += 1         # (review round 2 I5) e.g. an enum with a design range
+            continue
+        for k in sorted(set(compared.get(v, ())) | set(macro_only.get(v, ()))):
+            in_macro = k not in compared.get(v, ())
+            if dlo <= k <= dhi:
+                continue
+            if not tlo <= k <= thi:
+                report["constants_outside_type"] += 1
+                continue
+            report["compared_constants_outside_design"] += 1
+            if not bases:
+                report["no_base"] += 1
+                continue
+            points = [(p, in_macro) for p in (k - 1, k, k + 1) if tlo <= p <= thi and not dlo <= p <= dhi]
+            if len(live_keys) >= MAX_ROBUST_ROWS:
+                report["cut"] += len(points)            # the cap is full of rows whose comparison is live
+                continue
+            probe = [p for p in (k - 2, k - 1, k, k + 1) if tlo <= p <= thi]
+            if len(probe) < 3:
+                chosen, live = bases[0], None
+            else:
+                chosen = next((b for b in bases if comparison_is_live(unit, b[0], v, probe, outputs)), None)
+                live = chosen is not None
+            if in_macro and not live:
+                report["macro_argument_unconfirmed"] += 1   # the comparison may not exist in this build
+                continue
+            if live:
+                report["live"] += 1
+                report["macro_argument_live"] += int(in_macro)
+            elif live is None:
+                report["unprobed"] += 1
+            elif not live:
+                report["not_live"] += 1
+                chosen = bases[0]
+            if live:
+                live_points += [(v, k, p, chosen, live, m) for p, m in points]
+                live_keys.update(key for key in (row_key(chosen[1].get("inputs") or {}, v, p) for p, _m in points)
+                                 if key not in seen)
+            else:
+                other_points += [(v, k, p, chosen, live, m) for p, m in points]
+    for v, k, p, (base_ints, base), live, in_macro in live_points + other_points:
+        inputs = {**(base.get("inputs") or {}), v: _format_test_value(p, var_types.get(v, "uint8_t"))}
+        key = json.dumps(inputs, sort_keys=True, default=str)
+        if key in seen:
+            report["duplicates"] += 1
+            continue
+        if report["rows"] >= MAX_ROBUST_ROWS:
+            report["cut"] += 1
+            continue
+        if not live and not derives_any(unit, {**base_ints, v: p}, outputs):
+            report["underived"] += 1
+            continue
+        seen.add(key)
+        dlo, dhi = var_bounds[v]["min"], var_bounds[v]["max"]
+        reach = (" — 본문을 확정하지 못한 매크로의 인자 안 비교, 이 기준 행에서 원본 코드의 출력이 그 점들에서 꺾이는 것을 "
+                 "봤다(다른 원인일 수도 있다)" if in_macro else
+                 "" if live else
+                 " — 이 기준 행에서 그 비교에 닿는지 확인하지 못했다(비교가 살아 있는 기준 행을 못 찾음)" if live is False else
+                 " — 점이 셋 미만이라 이 기준 행이 그 비교에 닿는지 보지 않았다")
+        sequences.append({
+            "seq_num": len(sequences) + 1, "inputs": inputs,
+            "expected": {o: f"{VERIFY_PREFIX} robustness" for o in outputs},
+            "strategy": f"{ROBUST_PREFIX}{report['rows']}", "tc_profile": TC_PROFILE_EXTENDED,
+            "description": (f"설계 범위 밖 강건성: {v}={p} — 소스에 {v} 와 상수 {k} 의 직접 비교가 있다(설계 범위 {dlo}~{dhi} 밖 · "
+                            f"선언 타입 안, 기준 행 {base.get('strategy')}{reach}). 기대값은 소스 oracle 이 도출한 출력만 "
+                            "확정(코드 일관성 · 미실행)"),
+            "robustness": {"variable": v, "constant": k, "value": p, "design_range": [dlo, dhi], "live": live,
+                           "in_macro_argument": in_macro},
+        })
+        report["rows"] += 1
 
 
 # (R19) MC/DC 채움 행 — 설계 벡터는 결정이 읽는 입력만 적어 나머지 칸이 비고, 함수가 그 입력을 읽으면 기대값이 서지 않는다
@@ -2333,8 +2497,9 @@ def _prune_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]])
 
 
 def resolve_seq_test_method(strategy: Any) -> str:
-    """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다."""
-    return _METHOD_FI if str(strategy or "").strip() in _FI_STRATEGIES else _METHOD_REQ
+    """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다. (R31) 설계 범위 밖 강건성 행도 FI."""
+    s = str(strategy or "").strip()
+    return _METHOD_FI if s in _FI_STRATEGIES or s.startswith(ROBUST_PREFIX) else _METHOD_REQ
 
 
 def resolve_seq_gen_method(strategy: Any) -> str:
@@ -2947,7 +3112,9 @@ def generate_sequences(
     # (R15) 경계 행 — 확장 프로파일에만. 출력이 바뀌는 인접 입력 두 값을 행으로 **더한다**(기존 행은 옮기지 않는다, R4b 교훈).
     #   `boundary_rows=False` 면 탐색에 쓸 문맥만 남기고 호출자가 마지막에 한 번 붙인다(`append_boundary_rows`, R19 리뷰 W6).
     ctx = {"input_vars": list(input_vars), "output_vars": list(output_vars), "var_types": dict(var_types),
-           "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars)}
+           "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars),
+           # (R31 review W5) 타입이 선언에서 온 입력 — 추측 타입의 폭으로 "타입 안" 을 판정하지 않는다
+           "declared": sorted(v for v in input_vars if _declared(v) and not _is_pointer_decl(v))}
     if boundary_rows:
         return append_boundary_rows(unit, sequences, ctx)
     unit["_boundary_ctx"] = ctx
@@ -2966,6 +3133,15 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     n = len(sequences)
     _append_boundary_rows(unit, sequences, ctx["input_vars"], ctx["output_vars"], ctx["var_types"], ctx["var_bounds"],
                           set(ctx["unknown"]))
+    # (R31) 설계 범위 밖 강건성 행 — 경계 행 뒤에. 선택 확장이라 실패해도 문서는 만든다(그 unit 만 사유를 남긴다).
+    m = len(sequences)
+    try:
+        _append_robustness_rows(unit, sequences, ctx["input_vars"], ctx["output_vars"], ctx["var_types"],
+                                ctx["var_bounds"], set(ctx["unknown"]), set(ctx.get("declared") or ()))
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 강건성 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        del sequences[m:]
+        unit["robustness_rows"] = {"error": type(exc).__name__, "rows": 0}
     if len(sequences) > n:
         sequences[n:] = apply_sequence_evidence(unit, sequences[n:])
     return sequences
@@ -5435,6 +5611,8 @@ def generate_suts(
                                 for k in ("mcdc_rows", "rows_with_blanks", "rows", "not_fillable", "duplicates", "pruned")}
         quality["mcdc_fill"]["units_with_rows"] = sum(1 for f in _fills if f.get("rows"))
         quality["mcdc_fill"]["errors"] = sum(1 for f in _fills if f.get("error"))
+        # (R31) 설계 범위 밖 강건성 행 — 직접 비교 상수가 설계 범위 밖·타입 안인 입력, 상한에 잘린 점, 실패 unit
+        quality["robustness_rows"] = summarize_robustness_rows(units)
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
     #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
     quality["sequences_beyond_reference_cap"] = (sum(

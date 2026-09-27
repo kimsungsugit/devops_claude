@@ -694,6 +694,54 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 채움 단계 오류로 채움 행 없이 둔 unit {_show(_int(mf, 'errors'))} — 로그에 traceback 이 있다."
                if _int(mf, "errors") else ""),
             tone=_tone(bool(_int(mf, "errors")))))
+    # (R31) 설계 범위 밖 강건성 행 — 확장 프로파일에만 있다
+    rr = qr.get("robustness_rows")
+    if isinstance(rr, dict):
+        out.append(_item(
+            "suts_robustness_rows", "설계 범위 밖 강건성 행",
+            f"{_show(_int(rr, 'rows'))}행 (unit {_show(_int(rr, 'units_with_rows'))} · 설계 범위·선언 타입이 있는 입력 "
+            f"{_show(_int(rr, 'inputs_with_design_range'))} · 설계 범위 밖 직접 비교 상수 "
+            f"{_show(_int(rr, 'compared_constants_outside_design'))}, 살아 있는 기준 {_show(_int(rr, 'live'))})",
+            "설계서·HSIS 가 입력 범위를 정했는데 소스가 그 입력을 범위 밖·선언 타입 안의 상수와 직접 비교하는 곳(예: 설계 범위 "
+            "0~60 인 타이머를 `< u16g_MAX` 로 포화 보호)에, 그 상수의 −1·0·+1 중 설계 범위 밖·타입 안 값으로 입력 하나만 바꾼 "
+            "FI 행을 더했다 — 코드 상수에서 나온 경계값이다. 행의 기준은 그 비교가 **살아 있는**(그 점들에서 도출 출력이 한 "
+            "기울기로 움직이지 않는) 기존 행을 먼저 찾아 쓰고, 못 찾으면 첫 기준 행이다(값의 '살아 있는 기준' 이 찾은 상수 수). 기대값은 다른 행과 같은 소스 oracle 이 도출한 코드 일관성 값이지 설계 적합성이 "
+            "아니다(설계는 그 값을 허용하지 않는다). oracle 이 출력을 하나도 도출하지 못하는 점은 행으로 만들지 않는다."
+            + (f" 비교가 살아 있는 기준 행을 못 찾은 상수 {_show(_int(rr, 'not_live'))} — 그 점은 첫 기준 행에 두었고(도출되는 "
+               "점만 행이 된다) 비교에 닿지 않을 수 있다(가드 조건이 기준 행에서 거짓이거나 출력을 도출하지 못함, 행 설명에도 "
+               "적었다)." if _int(rr, "not_live") else "")
+            + (f" 본문을 확정하지 못한 매크로의 인자 안에서만 나온 비교라 이 빌드에 있는지 확인하지 못해(살아 있는 기준 행을 못 "
+               f"찾았거나 점이 셋 미만) 쓰지 않은 상수 {_show(_int(rr, 'macro_argument_unconfirmed'))}."
+               if _int(rr, "macro_argument_unconfirmed") else "")
+            + (f" 본문을 확정하지 못한 매크로의 인자 안에서만 나온 비교 중 살아 있는 기준 행에서 원본 코드가 꺾이는 것을 보고 쓴 "
+               f"상수 {_show(_int(rr, 'macro_argument_live'))} — 꺾임이 다른 원인일 수도 있어 이 빌드에 그 비교가 있는지는 "
+               "확인되지 않았다(행 설명에 적었다)." if _int(rr, "macro_argument_live") else "")
+            + (f" 점이 셋 미만(타입 끝)이라 살아 있음을 보지 않고 첫 기준 행에 둔 상수 {_show(_int(rr, 'unprobed'))}."
+               if _int(rr, "unprobed") else "")
+            + (f" 유효한 기준 행이 없어 행을 만들지 않은 상수 {_show(_int(rr, 'no_base'))}." if _int(rr, "no_base") else "")
+            + (f" oracle 이 출력을 하나도 도출하지 못해 만들지 않은 점 {_show(_int(rr, 'underived'))}."
+               if _int(rr, "underived") else "")
+            + (f" 타입 폭이 선언으로 확정되지 않아(이름 패턴·기본값 추측, 타깃마다 폭이 다른 선언, 포인터) 보지 않은 입력 "
+               f"{_show(_int(rr, 'inputs_type_unconfirmed'))}." if _int(rr, "inputs_type_unconfirmed") else "")
+            + (f" 타입 폭을 모르는 입력(설계 범위가 있는 enum 등) {_show(_int(rr, 'inputs_no_type_width'))}."
+               if _int(rr, "inputs_no_type_width") else "")
+            + (f" 함수 본문을 읽지 못해 비교 상수를 찾지 않은 unit {_show(_int(rr, 'body_unread'))}."
+               if _int(rr, "body_unread") else "")
+            + (f" 본문의 지역 변수가 이름을 가려 보지 않은 입력 {_show(_int(rr, 'inputs_shadowed'))}."
+               if _int(rr, "inputs_shadowed") else "")
+            + (f" 이 빌드에서 켜질지 판정하지 못한 `#if`·`#elif` 지시문 {_show(_int(rr, 'undecided_preprocessor_blocks'))}개는 "
+               "그 뒤 분기까지 읽지 않았다(꺼진 분기의 비교는 행으로 만들지 않는다)."
+               if _int(rr, "undecided_preprocessor_blocks") else "")
+            + (f" unit 당 상한 {_show(_int(rr, 'cap_per_unit'))}행에 잘린 점 {_show(_int(rr, 'cut'))}(상한이 비교가 살아 "
+               "있는 행으로 찬 뒤의 상수는 탐침하지 않고 그 점을 모두 센다 — 이미 있는 행과 겹칠 점이 포함될 수 있다)."
+               if _int(rr, "cut") else "")
+            + (f" 이미 있는 행과 입력이 같아 더하지 않은 점 {_show(_int(rr, 'duplicates'))}."
+               if _int(rr, "duplicates") else "")
+            + (f" 선언 타입 밖이라 쓰지 않은 상수 {_show(_int(rr, 'constants_outside_type'))}."
+               if _int(rr, "constants_outside_type") else "")
+            + (f" 강건성 단계 오류로 행 없이 둔 unit {_show(_int(rr, 'errors'))} — 로그에 traceback 이 있다."
+               if _int(rr, "errors") else ""),
+            tone=_tone(bool(_int(rr, "errors")) or bool(_int(rr, "cut")))))
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     return out
 

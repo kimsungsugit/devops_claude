@@ -110,6 +110,260 @@ def body_constants(unit: dict[str, Any]) -> tuple[list[int], int]:
     return ordered, len(ordered)
 
 
+_COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "==", "!="})
+_PREPROC_CONDITIONAL = frozenset({"preproc_if", "preproc_ifdef", "preproc_elif", "preproc_elifdef"})
+
+
+def _bare(node):
+    """``(x)`` / ``(U16)x`` / ``((U16)(x))`` → the operand itself."""
+    while node is not None and node.type in ("parenthesized_expression", "cast_expression"):
+        if node.type == "cast_expression":
+            node = node.child_by_field_name("value")
+        else:
+            inner = [c for c in node.named_children if c.type != "comment"]
+            node = inner[-1] if inner else None
+    return node
+
+
+def _declared_locals(body, raw: bytes) -> set[str]:
+    """Names a function body declares (any arm, any depth) — ``U8 x = 0, *p, a[3];`` → {x, p, a}; ``void (*f)(void)``
+    → {f}. A block-scope ``extern`` names the global itself, so it is no local."""
+    names: set[str] = set()
+    stack = [body] if body is not None else []
+    while stack:
+        node = stack.pop()
+        stack.extend(node.named_children)
+        if node.type != "declaration" or any(
+                c.type == "storage_class_specifier" and raw[c.start_byte:c.end_byte].strip() == b"extern"
+                for c in node.children):
+            continue
+        for d in node.children_by_field_name("declarator"):
+            while d is not None and d.type != "identifier":
+                d = d.child_by_field_name("declarator") or next(
+                    (c for c in d.named_children if c.type == "identifier" or c.type.endswith("declarator")), None)
+            if d is not None:
+                names.add(raw[d.start_byte:d.end_byte].decode("utf-8", errors="replace"))
+    return names
+
+
+def _macro_argument_kind(scope: dict[str, Any], name: str, index: int, count: int) -> str:
+    """What becomes of argument ``index`` of an invocation of macro ``name`` (``count`` arguments): "direct" — the one
+    known body uses that parameter as an expression and invokes no macro (``SEL(c, a, b) ((c) ? (a) : (b))``); "dropped"
+    — the body never uses it (``DBG_CHECK(c)`` with an empty body: no comparison in this build, like a dead ``#if``
+    arm); "unknown" — anything else (several or conditional bodies, ``#undef``, an object-like alias, ``#``/``##``,
+    ``__VA_ARGS__``, a macro inside the body). The oracle's view of the macro: which names are macros and which body is
+    active (``macro_status`` "active" · ``macro_bodies`` · ``pp_bodies`` — a definition under a decided ``#if`` too)."""
+    definition = (scope.get("pp_bodies") or {}).get(name) or {}
+    body = (scope.get("macro_bodies") or {}).get(name)
+    params = definition.get("params") if definition.get("function_like") else None
+    status = scope.get("macro_status") or {}
+    if status.get(name) != "active" or body is None or not isinstance(params, list) or len(params) != count \
+            or not 0 <= index < count or "..." in params:
+        return "unknown"
+    # the stored body is comment-free already (`cpc.strip_comments`, literal-aware) — only string literals go here
+    tokens = set(_IDENT.findall(_STRING.sub(" ", body)))
+    if params[index] not in tokens:
+        # (review round 5 W-2) an argument reaches the expansion only through its parameter (C11 6.10.3.1): a body
+        #   without it drops the argument whatever other macros the body uses
+        return "dropped"
+    if "#" in body or any(t in status for t in tokens):
+        return "unknown"
+    return "direct"
+
+
+def compared_constants(unit: dict[str, Any], names: list[str], stats: dict | None = None) -> dict[str, set[int]]:
+    """(R31) For each name: the integer constants the function body compares it with **directly** (``x < K``,
+    ``K >= x``, ``(U16)x == K``, ``(U16)(x) != K``) — a literal (``0xFFFF``, ``-5``, ``(-300)``) or an identifier the
+    project scope resolves to an integer (``u16g_MAX``), valued as C values it: the oracle's own typed literal and unary
+    arithmetic (`cpc.literal` / `cpc.arith` — ``-1U`` is the type's maximum, not -1; review round 3 I-4). Only the arms
+    of ``#if``/``#ifdef``/``#elif`` this build compiles (the oracle's verdict, `cpc.pp_condition`) — a directive it cannot
+    decide is not read, with every arm after it, and is counted in ``stats["undecided_preprocessor_blocks"]`` (R31 review
+    W2: a comparison in a dead ``#if`` arm was written as "the source compares"). A cast on the constant's side keeps the
+    constant only when the value fits the cast type (``(S8)200`` is -56 in C — review round 2 W3); a cast type the scope
+    cannot size drops it. A comparison inside a macro invocation's argument may not exist in this build (``DBG_CHECK(x <
+    200)`` may expand to nothing — review round 3 W-1). With the macro's one known body the argument is read as written
+    or dropped (`_macro_argument_kind`, review round 4 W-1(b): a liveness probe alone was fooled by ``g_a / 10`` stepping
+    at 200); otherwise such a constant, when no direct comparison gives it too, is returned in
+    ``stats["macro_argument_constants"]`` ({name: set}) instead — the caller uses it only on a base where the original
+    code turns at those points. A callee is a macro whenever the oracle says so (``macro_status`` — also names under an
+    undecided ``#if``, ``#undef``-ed ones and object-like aliases; review round 4 W-1(a)). A name the body declares as a local is not the input there —
+    it is skipped and counted in ``stats["inputs_shadowed"]``. Not a constant another expression reaches (``x + 1 < K``,
+    ``a[x] == K``). Known limits (they miss, never invent): character literals, constant expressions (``K - 1``), ``~K``,
+    a target whose ``int`` width is unknown (the literal has no C type), ``x == -1`` for an unsigned type as wide as
+    ``int`` (C compares it with the type's maximum — the constant is then outside the declared type and counted there by
+    the caller). A cast on the **input's** side is stripped (``(U8)x == 200`` is read as ``x`` against 200 — the rows sit
+    where that comparison turns for the untruncated values). Empty, and ``stats["body_unread"] = 1``, when the body cannot
+    be read."""
+    from generators.c_source_oracle import cast_call_operand
+    from generators.mcdc_design import _scope_type
+    stats = stats if stats is not None else {}
+    scope = unit.get("project_scope")
+    raw = str(unit.get("source_text") or "").encode()
+    out: dict[str, set[int]] = {}
+    in_macro: dict[str, set[int]] = {}
+    try:
+        _root, fn, _shared = _parsed_function(cpc.shared_parser(), raw, str(unit.get("name") or ""), scope)
+        body = fn.child_by_field_name("body")
+    except (Unsupported, cpc.Unresolved, AttributeError):
+        stats["body_unread"] = 1
+        return out
+    shadowed = set(names) & _declared_locals(body, raw)
+    if shadowed:
+        stats["inputs_shadowed"] = len(shadowed)
+    wanted = set(names) - shadowed
+    constants = (scope or {}).get("constants")
+    if constants is None:
+        constants = {}
+    widths = ((scope or {}).get("target") or {}).get("widths") or {}
+    macros = set((scope or {}).get("macro_status") or ()) | set((scope or {}).get("function_like_macros") or ())
+
+    def text(node) -> str:
+        return raw[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+    def bare(node):
+        """`_bare`, and ``(U16)(x)`` — the oracle's one cast judgement (`c_source_oracle.cast_call_operand`, R26)."""
+        while True:
+            node = _bare(node)
+            operand = cast_call_operand(node, raw, scope)
+            if operand is None:
+                return node
+            node = operand
+
+    def peel(node) -> tuple[Any, list[str]]:
+        """``((S8)(200))`` → (the literal, ["S8"]) — the cast types, outermost first."""
+        casts: list[str] = []
+        while node is not None:
+            if node.type == "parenthesized_expression":
+                inner = [c for c in node.named_children if c.type != "comment"]
+                node = inner[-1] if inner else None
+            elif node.type == "cast_expression":
+                t = node.child_by_field_name("type")
+                casts.append(text(t) if t is not None else "")
+                node = node.child_by_field_name("value")
+            else:
+                operand = cast_call_operand(node, raw, scope)
+                if operand is None:
+                    break
+                callee = [c for c in node.child_by_field_name("function").named_children if c.type != "comment"]
+                casts.append(text(callee[0]))
+                node = operand
+        return node, casts
+
+    def cast_type(cast: str) -> dict | None:
+        try:
+            t = _scope_type(scope, cast)
+        except (cpc.Unresolved, KeyError, TypeError):
+            return None
+        if not isinstance(t, dict) or not isinstance(t.get("bits"), int) or t.get("kind") in ("float", "double"):
+            return None
+        return t
+
+    def typed(node) -> tuple[int, dict] | None:
+        node, casts = peel(node)
+        got = atom(node)
+        for cast in reversed(casts):
+            t = cast_type(cast)
+            if got is None or t is None:
+                return None
+            lo, hi = cpc.type_range(t)
+            if not lo <= got[0] <= hi:
+                return None             # a converting cast: C compares with another value — miss rather than invent
+            got = (got[0], t)
+        return got
+
+    def atom(node) -> tuple[int, dict] | None:
+        try:
+            if node is None:
+                return None
+            if node.type == "number_literal":
+                v, t = cpc.literal(text(node), widths)
+                return (v, t) if isinstance(v, int) and not cpc.is_float(t) else None
+            if node.type == "unary_expression":
+                op = node.child_by_field_name("operator")
+                arg = node.child_by_field_name("argument")
+                inner = typed(arg) if arg is not None and op is not None and text(op) in ("-", "+") else None
+                return cpc.arith(text(op), None, inner, widths) if inner is not None else None
+            if node.type == "identifier":
+                entry = constants.get(text(node))
+                if isinstance(entry, dict) and isinstance(entry.get("value"), int) and not isinstance(entry["value"], bool) \
+                        and isinstance(entry.get("type"), dict):
+                    return entry["value"], entry["type"]
+        except (cpc.Unresolved, ValueError, ArithmeticError, RecursionError, TypeError, KeyError):
+            return None
+        return None
+
+    stack = [(body, False)] if body is not None else []
+    while stack:
+        node, inside_macro = stack.pop()
+        if node.type in _PREPROC_CONDITIONAL:
+            verdict = cpc.pp_condition(scope, node, raw, set())
+            cond, name, alt = (node.child_by_field_name("condition"), node.child_by_field_name("name"),
+                               node.child_by_field_name("alternative"))
+            if verdict is None:
+                stats["undecided_preprocessor_blocks"] = stats.get("undecided_preprocessor_blocks", 0) + 1
+                continue
+            if verdict:
+                stack.extend((c, inside_macro) for c in node.named_children if c not in (cond, name, alt))
+            elif alt is not None:
+                stack.append((alt, inside_macro))
+            continue
+        callee = node.child_by_field_name("function") if node.type == "call_expression" else None
+        if callee is not None and callee.type == "identifier" and text(callee) in macros:
+            args_node = node.child_by_field_name("arguments")
+            args = [c for c in args_node.named_children if c.type != "comment"] if args_node is not None else []
+            for i, arg in enumerate(args):
+                kind = _macro_argument_kind(scope or {}, text(callee), i, len(args))
+                if kind != "dropped":
+                    stack.append((arg, inside_macro or kind == "unknown"))
+            continue
+        stack.extend((c, inside_macro) for c in node.named_children)
+        if node.type != "binary_expression":
+            continue
+        op = node.child_by_field_name("operator")
+        if op is None or text(op) not in _COMPARISON_OPS:
+            continue
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        for this, other in ((left, right), (right, left)):
+            this = bare(this)               # the input's side sheds its casts; the constant's side keeps them for typed()
+            if this is not None and this.type == "identifier" and text(this) in wanted:
+                got = typed(other)
+                if got is not None:
+                    (in_macro if inside_macro else out).setdefault(text(this), set()).add(got[0])
+    only_in_macro = {n: ks - out.get(n, set()) for n, ks in in_macro.items() if ks - out.get(n, set())}
+    if only_in_macro:
+        stats["macro_argument_constants"] = only_in_macro
+    return out
+
+
+def comparison_is_live(unit: dict[str, Any], base: dict[str, int], var: str, points: list[int],
+                       outputs: list[str]) -> bool:
+    """(R31) Does ``base`` reach the code's comparison of ``var`` with a constant among ``points`` (ascending, at least
+    three)? — some integer output the oracle derives at every point is **not affine** over them: ``x + 1`` below a
+    saturation guard and flat at it, a step at ``x > K``, a spike at ``x == K``. An output unchanged, or changing at one
+    rate over all points, says this base never meets the comparison there (the guarded branch is not taken). Only the
+    original code is evaluated — no mutant is consulted. A limit: an output non-linear in ``var`` for another reason
+    (``var & 1``, ``var / 10``) also answers yes. The answer picks a base row; only for a comparison inside an argument
+    of a macro whose body is not known does it also decide whether the constant is used (`compared_constants`)."""
+    results = evaluate_outputs(unit, [{**base, var: p} for p in points], [outputs] * len(points))
+    sigs = [_signature(r, outputs) for r in results]
+    for k in range(len(outputs)):
+        vals = [s[k] for s in sigs]
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in vals):
+            continue
+        slopes = {Fraction(vals[i + 1] - vals[i], points[i + 1] - points[i]) for i in range(len(vals) - 1)}
+        if len(slopes) > 1:
+            return True
+    return False
+
+
+def derives_any(unit: dict[str, Any], inputs: dict[str, int], outputs: list[str]) -> bool:
+    """(R31 review round 2 W1) Does the oracle derive at least one of ``outputs`` at ``inputs``? A row whose every
+    expectation stays "[검증 필요]" asserts nothing the oracle stands behind."""
+    if not outputs:
+        return False
+    return any(v is not None for v in _signature(evaluate_outputs(unit, [inputs], [outputs])[0], outputs))
+
+
 def _signature(result: dict[str, Any], outputs: list[str]) -> tuple:
     slots = result.get("outputs") or {}
     return tuple((slots.get(o) or {}).get("value") for o in outputs)

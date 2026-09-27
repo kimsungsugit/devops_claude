@@ -140,6 +140,27 @@ def _op(node, raw):
     return _text(o, raw) if o is not None else ""
 
 
+def cast_call_operand(c, raw, scope):
+    """The operand of ``(T)(x)`` when ``c`` is that cast — tree-sitter parses a cast to a typedef name as a call — else
+    None. ``T`` is a type when the scope resolves it (`_Interp.type_of`: normalised text, `mcdc_design._scope_type`; an
+    unresolved name is not a type). The one cast judgement (R26) — the interpreter and R31's constant walk share it."""
+    if c is None or c.type != "call_expression":
+        return None
+    f = c.child_by_field_name("function")
+    if f is None or f.type != "parenthesized_expression":
+        return None
+    inner = _named(f)
+    args = _named(c.child_by_field_name("arguments")) if c.child_by_field_name("arguments") is not None else []
+    if len(inner) != 1 or inner[0].type not in {"identifier", "type_identifier"} or len(args) != 1:
+        return None
+    from generators.mcdc_design import _scope_type
+    try:
+        is_type = isinstance(_scope_type(scope, " ".join(_text(inner[0], raw).split())), dict)
+    except cpc.Unresolved:
+        is_type = False
+    return args[0] if is_type else None
+
+
 def _walk(node):
     stack = [node]
     while stack:
@@ -1133,14 +1154,9 @@ class _Interp:
     def is_cast_call(self, c, raw):
         """``(T)(x)`` — tree-sitter's parse of a cast whose type is a typedef name — is a cast when ``T`` names a type.
         (R26) The one judgement: evaluation (`call`), sequencing, the effect questions (`operand_effectful`,
-        `atom_effectful`, `mark_unordered_calls`) and the loop-constant walk all ask it."""
-        f = c.child_by_field_name("function")
-        if f is None or f.type != "parenthesized_expression":
-            return False
-        inner = _named(f)
-        args = _named(c.child_by_field_name("arguments")) if c.child_by_field_name("arguments") is not None else []
-        return len(inner) == 1 and inner[0].type in {"identifier", "type_identifier"} and len(args) == 1 \
-            and isinstance(self.type_of(_text(inner[0], raw)), dict)
+        `atom_effectful`, `mark_unordered_calls`) and the loop-constant walk all ask it — and (R31) the robustness rows'
+        compared-constant walk (`boundary_rows.compared_constants`), through `cast_call_operand`."""
+        return cast_call_operand(c, raw, self.scope) is not None
 
     def macro_text_closure(self, name, depth=0, seen=None):
         """The text of a macro and of every macro it mentions (transitively) — what an expansion may contain."""
