@@ -31,10 +31,13 @@ Two measures, both scored on what a *reference* (or generated) STS workbook says
 
 * **cross-source discrimination** (R18, gap ③): mutants made from the **reference STS's own thresholds** — boundaries
   human testers wrote, independent of the extractor — scored on both suites with the same point rule. The verdict is
-  the single comparison the tester wrote (``15도 미만`` → ``x < 15``), and a point is any stimulus of that requirement
-  in a compatible unit: the threshold names no subject, so a point on another quantity of the same unit could be
-  credited — kills are split by whether the requirement has one subject in that unit (``killed_single_subject``) or
-  several (``killed_multi_subject``, an upper bound). This source favours what the reference chose to test, the
+  the single comparison the tester wrote (``15도 미만`` → ``x < 15``), and a point is a stimulus of that requirement in
+  a compatible unit **whose step states its verdict** and states the original's there (R32 review C2: a generated
+  boundary step's ``조건 […] 성립/불성립 →``; a step that says 불성립 where the original holds contradicts it rather
+  than killing the mutant — ``separated_against_verdict``; a stimulus with no written verdict —
+  ``separated_verdict_unknown`` — asserts nothing). The threshold names no subject, so a point on another quantity of
+  the same unit could be credited — kills are split by whether the requirement has one subject in that unit
+  (``killed_single_subject``) or several (``killed_multi_subject``, an upper bound). This source favours what the reference chose to test, the
   extractor's favours what the SRS states — the generated suite is scored here on mutants it did not produce (the
   reference's own row is self-sourced: its regions are the thresholds, so only its points are reported). Thresholds
   the SRS block does not state are kept — a suite built from the SRS alone cannot know them (they may come from a
@@ -42,8 +45,10 @@ Two measures, both scored on what a *reference* (or generated) STS workbook says
   Left out and counted (``excluded``): thresholds only in the expected-result column, ones every row writes in both
   its action and its expected cell (``judgement_copied_to_action``), ones the SRS states only as a response constraint,
   unitless ones (``no_unit``). ``killable`` marks mutants a point can kill at all (a widening mutant never can); kills
-  are split into ``killed_single_subject`` / ``killed_multi_subject`` / ``killed_unnamed_subject``, and a suite with no
-  point in a compatible unit is not measured (``measurable`` false — the same holds for the R5 ``discrimination``).
+  are split into ``killed_single_subject`` / ``killed_multi_subject`` / ``killed_unnamed_subject`` (the last is 0 by
+  construction since R32: an unnamed stimulus comes from a step that writes no verdict), and a suite with no point in a
+  compatible unit **with a written verdict** is not measured (``measurable`` false — a human-written reference is never
+  measured here: its steps write no verdict in that form; the R5 ``discrimination`` needs a usable point).
 
 Usage:
     .venv/Scripts/python.exe scripts/requirement_oracle_eval.py --srs SRS.txt --sts STS.xlsm [--sts-generated GEN.xlsm]
@@ -97,6 +102,9 @@ _DURATION_SUFFIX = " 지속 시간"
 # (R29) a step the generator traced to a system block names it after the basis mark:
 #   ``… — 근거: 500ms 초과 [SyDS SyII_06 · Range — SwTR_0601 Related ID]`` (``generators/sts_requirement_tc``)
 _TRACED = re.compile(r"\[(?P<doc>Sy[A-Za-z]+) (?P<id>Sy[A-Za-z]+_[0-9_]+) · [^\]]*? — \S+ Related ID\]\s*$")
+# (R32 review C2) the verdict a generated boundary step expects at its point, from its expected result (column L):
+#   ``조건 [저전압 8.5V 이하] 성립 → …`` / ``조건 [...] 불성립 → …`` (``generators/sts_requirement_tc.boundary_steps``)
+_VERDICT = re.compile(r"^조건 \[.*?\] (성립|불성립) →", re.S)
 
 
 def _num(text: str) -> float:
@@ -163,9 +171,11 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
                         slot["regions"].append(item)
                 if role == "action" and (b := _BOUNDARY_STEP.match(text)):
                     traced = _TRACED.search(str(cells[col] or ""))
+                    verdict = _VERDICT.match(str(cells[11] or ""))
                     slot["points"].append({"value": _num(b.group("num")), "unit": _unit(b.group("unit")),
                                            "signal": b.group("sig").strip(), "raw": b.group(0),
-                                           "traced": f"{traced.group('doc')} {traced.group('id')}" if traced else None})
+                                           "traced": f"{traced.group('doc')} {traced.group('id')}" if traced else None,
+                                           "holds": None if verdict is None else verdict.group(1) == "성립"})
                 elif role == "action":
                     named = []
                     for m in _NAMED_POINT.finditer(text):
@@ -435,8 +445,15 @@ def _subject_groups(points: list[dict]) -> list[str]:
 
 def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = False) -> dict[str, Any]:
     """(R18) ``killed``: a point of the requirement, in a compatible unit, where the written comparison holds and the
-    mutant's does not (the step expects the behaviour there). ``killed_either_side`` counts a separation on either
-    side; ``killed_optimistic`` also credits a comparator region at the threshold's own value (``15도 이상``), as if
+    mutant's does not **and the suite's step expects the behaviour there** (its verdict is *성립*). (R32 review C2) the
+    verdict was not read before: a point where the step itself says *불성립* separated the mutant and was counted — a
+    test that expects no behaviour where the original has it does not kill the mutant, it contradicts the original
+    (HDPDM01 18 of 25 kills, KJPDS02_PV 9 of 13 came from such points). A separation against the step's verdict is
+    ``separated_against_verdict`` — two documents disagree (SyDS ``500ms 초과`` vs the reference ``500ms 이상``) or the
+    step judges the complementary condition (``활성화 구간 50도 미만`` against the reference's ``50도 이상``);
+    one at a point whose verdict is not written (a stimulus of another kind of step) is ``separated_verdict_unknown``
+    — neither is a kill. ``killed_either_side`` counts a separation on either side where the step's verdict is the
+    original's; ``killed_optimistic`` also credits a comparator region at the threshold's own value (``15도 이상``), as if
     the tester had chosen the boundary value itself — **not reported for the suite the thresholds came from**: its
     regions *are* those thresholds, so the number would be fixed by construction (R18 review C1). A suite with no point
     in a compatible unit for any mutant is not measured (``measurable`` false, rates None — R2 W-D). A point names its
@@ -444,6 +461,7 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
     subject), ``killed_multi_subject`` (several — another quantity of that unit could have supplied it, an upper bound)
     and ``killed_unnamed_subject`` (an unnamed point: any quantity of that unit — R2 W-E)."""
     killed = either = optimistic = with_points = killable = single = multi = unnamed = via_trace = 0
+    against_verdict = verdict_unknown = 0
     by_stated = Counter()
     recall = Counter()
     rows = []
@@ -452,14 +470,25 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
         # the requirement's own points first: a kill is credited to a traced system point only when none of them kills
         points = sorted((p for p in slot.get("points", []) if _units_compatible(p["unit"], m["unit"])),
                         key=lambda p: bool(p.get("traced")))
-        with_points += bool(points)
-        hit = side = None
+        # (R32 review r2 W1) only a point whose step states a verdict can kill — without one the suite is not measured
+        #   here (its 0 would read as a score)
+        with_points += any(p.get("holds") is not None for p in points)
+        hit = side = against = unknown = None
         for p in points:
             x = Decimal(str(p["value"])) * _scale(p["unit"], m["unit"])
             a, b = _COMPARE[m["op"]](x, m["value"]), _COMPARE[m["m_op"]](x, m["m_value"])
+            if a == b:
+                continue
+            verdict = p.get("holds")
+            if verdict is None:
+                unknown = unknown or p          # the step states no verdict here: nothing is asserted
+                continue
+            if verdict != a:
+                against = against or p          # the step expects the mutant's verdict: the documents disagree
+                continue
             if a and not b and hit is None:
                 hit = p
-            if a != b and side is None:
+            if side is None:
                 side = p
         region = next((r["raw"] for r in slot.get("regions", []) if _units_compatible(r["unit"], m["unit"])
                        and _same_quantity(r["value"], r["unit"], float(m["value"]), m["unit"])), None)
@@ -468,6 +497,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
         pool = [p for p in points if not p.get("traced")] if hit is not None and not hit.get("traced") else points
         subjects = _subject_groups(pool)
         killed += hit is not None
+        against_verdict += side is None and against is not None
+        verdict_unknown += side is None and against is None and unknown is not None
         via_trace += hit is not None and bool(hit.get("traced"))
         either += hit is not None or side is not None
         optimistic += hit is not None or region is not None
@@ -485,6 +516,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
                      "points": [p["value"] for p in points], "killed_by_point": None if hit is None else hit["value"],
                      "killed_by_trace": None if hit is None else hit.get("traced"),
                      "killed_by_signal": None if hit is None else (hit.get("signal") or ""),
+                     "separated_against_verdict": None if against is None else against["value"],
+                     "separated_verdict_unknown": None if unknown is None else unknown["value"],
                      "subjects_in_unit": subjects, "boundary_region": None if self_sourced else region})
     n = len(mutants)
     measurable = bool(with_points)
@@ -502,6 +535,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
             # an unkillable mutant never satisfies "holds and the mutant does not": every kill is of a killable one
             "killable_mutants": killable, "rate_of_killable": rate(killed, killable),
             "killed_single_subject": single, "killed_multi_subject": multi, "killed_unnamed_subject": unnamed,
+            # (R32 review C2) separations that are no kill — see the docstring
+            "separated_against_verdict": against_verdict, "separated_verdict_unknown": verdict_unknown,
             # (R29) kills only a point traced to a system block made (the requirement's own points kill none of them)
             "killed_via_traced_system": via_trace,
             "mutants_with_a_point_in_unit": with_points,
@@ -548,7 +583,8 @@ def evaluate(srs_text: str, sts_path: str, generated_path: str | None = None) ->
         "note": "the generated suite is scored on mutants it did not produce (the reference's thresholds); the "
                 "reference's own row shows its points only — its regions are these thresholds (self-sourced). A point "
                 "counts for any subject of the requirement in a compatible unit (the threshold names none): see "
-                "killed_single_subject / killed_multi_subject",
+                "killed_single_subject / killed_multi_subject. A point kills only where its step states a verdict and "
+                "states the original's (R32): separated_against_verdict / separated_verdict_unknown are no kills",
         "reference": cross_discrimination(cross, reference, self_sourced=True)}
     if generated is not None:
         report["cross_source"]["generated"] = cross_discrimination(cross, generated)

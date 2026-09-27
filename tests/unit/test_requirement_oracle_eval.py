@@ -192,8 +192,8 @@ def test_widening_mutants_are_marked_unkillable():
 
 def test_a_cross_source_mutant_is_killed_only_where_the_written_comparison_holds(tmp_path):
     cs = _cross([("SwTC_1", "열림각 0.8m/s 이상 속도로 닫음", "정지", "SwTR_0203")],
-                [("SwTC_9", "입력 설정 (요구 경계): 닫힘 속도 = 0.8m/s 설정", "", "SwTR_0203"),
-                 ("", "입력 설정 (요구 경계): 닫힘 속도 = 0.7m/s 설정", "", "")], tmp_path)
+                [("SwTC_9", "입력 설정 (요구 경계): 닫힘 속도 = 0.8m/s 설정", "조건 [닫힘 속도 0.8m/s 이상] 성립 → 이 문장이 기술한 동작 수행 확인: …", "SwTR_0203"),
+                 ("", "입력 설정 (요구 경계): 닫힘 속도 = 0.7m/s 설정", "조건 [닫힘 속도 0.8m/s 이상] 불성립 → 이 문장의 동작 대상 아님(같은 요구의 다른 문장 판정을 따른다): …", "")], tmp_path)
     d = cs["generated"]
     rows = {(m["mutant"], m["m_op"], m["m_value"]): m for m in d["rows"]}
     assert rows[("boundary_inclusion", ">", 0.8)]["killed_by_point"] == 0.8   # 0.8 >= 0.8, not > 0.8
@@ -214,16 +214,51 @@ def test_a_cross_source_mutant_is_killed_only_where_the_written_comparison_holds
 def test_the_generated_suite_is_scored_and_the_reference_is_not_credited_for_it(tmp_path):
     # review W6: a kill only the generated suite makes must show in its row and not in the reference's
     cs = _cross([("SwTC_1", "전원을 16V 이상 인가", "", "SwEI_01")],
-                [("SwTC_9", "전원을 16V로 설정한다.", "", "SwEI_01")], tmp_path)
+                [("SwTC_9", "입력 설정 (요구 경계): 전원 = 16V 설정", "조건 [전원 16V 이상] 성립 → 이 문장이 기술한 동작 수행 확인: …", "SwEI_01")], tmp_path)
     assert cs["generated"]["killed"] == 2 and cs["reference"]["killed"] == 0
     assert cs["generated"]["stated_in_srs"] == {"mutants": 0, "killed": 0}          # ``16V`` is not in SwEI_01's text
     assert cs["generated"]["not_stated_in_srs"] == {"mutants": 3, "killed": 2}
 
 
+def test_a_point_whose_step_states_no_verdict_or_the_mutants_verdict_kills_nothing(tmp_path):
+    # (R32 review C2) HDPDM01 SwTR_0102: the reference tests ``0.8m/s 이상`` (Tip-To-Run); the generated step at 0.8 is
+    #   about ``Manual Assist조건 0.8m/s 미만`` and says 불성립 — it expects no behaviour where the original has it
+    cs = _cross([("SwTC_1", "도어 속도 0.8m/s 이상으로 닫음", "Tip-To-Run", "SwTR_0102")],
+                [("SwTC_9", "입력 설정 (요구 경계): Manual Assist조건 = 0.8m/s 설정",
+                  "조건 [Manual Assist조건 0.8m/s 미만] 불성립 → 이 문장의 동작 대상 아님(같은 요구의 다른 문장 판정을 따른다): …", "SwTR_0102")], tmp_path)
+    g = cs["generated"]
+    assert g["killed"] == 0 and g["killed_either_side"] == 0 and g["separated_against_verdict"] == 2
+    assert {r["mutant"]: r["separated_against_verdict"] for r in g["rows"] if r["killable"]} == \
+        {"boundary_inclusion": 0.8, "value_shift": 0.8}
+    # a stimulus of another kind of step (no verdict written): separated, not killed — and with no written verdict at
+    #   all the suite is not measured (its 0 is no score, review r2 W1)
+    cs = _cross([("SwTC_1", "전원을 16V 이상 인가", "", "SwEI_01")],
+                [("SwTC_9", "전원을 16V로 설정한다.", "", "SwEI_01")], tmp_path / "u")
+    assert cs["generated"]["killed"] == 0 and cs["generated"]["separated_verdict_unknown"] == 2
+    assert not cs["generated"]["measurable"] and cs["generated"]["rate"] is None
+    # a mutant another point kills is not also counted as separated against the verdict / without one
+    cs = _cross([("SwTC_1", "도어 속도 0.8m/s 이상으로 닫음", "", "SwTR_0102")],
+                [("SwTC_9", "입력 설정 (요구 경계): 도어 속도 = 0.8m/s 설정", "조건 [도어 속도 0.8m/s 이상] 성립 → 이 문장이 기술한 동작 수행 확인: …", "SwTR_0102"),
+                 ("", "입력 설정 (요구 경계): Manual Assist조건 = 0.8m/s 설정", "조건 [Manual Assist조건 0.8m/s 미만] 불성립 → 이 문장의 동작 대상 아님(같은 요구의 다른 문장 판정을 따른다): …", ""),
+                 ("", "도어 속도를 0.8m/s로 설정한다.", "", "")], tmp_path / "k")
+    g = cs["generated"]
+    assert g["killed"] == 2 and g["separated_against_verdict"] == 0 and g["separated_verdict_unknown"] == 0
+
+
+def test_the_verdict_is_read_from_the_head_of_the_expected_result(tmp_path):
+    # (review r2 W6) anchored and non-greedy: a quoted verdict later in the cell, or text before the head, is not it
+    rows = [("SwTC_9", "입력 설정 (요구 경계): 도어 속도 = 0.8m/s 설정",
+             "조건 [도어 속도 0.8m/s 이상] 성립 → 인용: 조건 [x] 불성립 → y", "SwTR_0102"),
+            ("", "입력 설정 (요구 경계): 도어 속도 = 0.7m/s 설정", "비고: 조건 [도어 속도 0.8m/s 이상] 불성립 → z", "")]
+    points = ev.read_sts(_sts(tmp_path / "v.xlsx", rows))["SwTR_0102"]["points"]
+    assert [p["holds"] for p in points] == [True, None]
+
+
 def test_units_time_scaling_and_a_point_on_another_quantity(tmp_path):
     srs = "ID\tSwTR_0605\nName\tT\n- 저전압 300ms 이상 유지 시\n"
     cs = _cross([("SwTC_1", "저전압 300ms 이상 유지", "", "SwTR_0605")],
-                [("SwTC_9", "입력 설정 (요구 경계): 저전압 지속 시간 = 0.3s 설정", "", "SwTR_0605"),
+                [("SwTC_9", "입력 설정 (요구 경계): 저전압 지속 시간 = 0.3s 설정", "조건 [저전압 지속 시간 300ms 이상] 성립 → 이 문장이 기술한 동작 수행 확인: …",
+                  "SwTR_0605"),
                  ("", "열림각 300도로 설정", "", "")], tmp_path, srs)
     d = cs["generated"]
     killed = {(m["m_op"], m["m_value"]) for m in d["rows"] if m["killed_by_point"] is not None}
@@ -324,14 +359,16 @@ def test_both_sides_of_one_boundary_and_the_subject_split(tmp_path):
     # I1: ``15도 이상`` and ``15도 미만`` are one boundary, two thresholds. W-E: an unnamed point is its own category,
     # two named subjects in one unit make a kill "multi"
     cs = _cross([("SwTC_1", "각도 15도 이상 열림", "", "SwTR_0201"), ("", "각도 15도 미만 닫힘", "", "")],
-                [("SwTC_9", "입력 설정 (요구 경계): 열림각 = 15도 설정", "", "SwTR_0201"),
-                 ("", "입력 설정 (요구 경계): 경사각 = 30도 설정", "", "")], tmp_path)
+                [("SwTC_9", "입력 설정 (요구 경계): 열림각 = 15도 설정", "조건 [열림각 15도 이상] 성립 → 이 문장이 기술한 동작 수행 확인: …", "SwTR_0201"),
+                 ("", "입력 설정 (요구 경계): 경사각 = 30도 설정", "조건 [경사각 30도 이상] 성립 → 이 문장이 기술한 동작 수행 확인: …", "")], tmp_path)
     assert (cs["thresholds"], cs["boundaries"]) == (2, 1)
     g = cs["generated"]
     assert g["killed"] > 0 and g["killed_multi_subject"] == g["killed"] and g["killed_single_subject"] == 0
+    # an unnamed point comes from another kind of step — it writes no verdict, so it separates without killing (R32 C2)
     cs = _cross([("SwTC_1", "각도 15도 이상 열림", "", "SwTR_0201")],
                 [("SwTC_9", "전원 인가 후 15도로 설정", "", "SwTR_0201")], tmp_path / "u")
-    assert cs["generated"]["killed"] == cs["generated"]["killed_unnamed_subject"] > 0
+    assert cs["generated"]["killed"] == cs["generated"]["killed_unnamed_subject"] == 0
+    assert cs["generated"]["separated_verdict_unknown"] > 0
 
 
 def test_an_unmeasured_reference_reports_no_rate(tmp_path):

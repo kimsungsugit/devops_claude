@@ -330,7 +330,8 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "negated_condition": "부정 절", "same_subject_combination_unstated": "결합 미기재",
                 "monitored_quantity_unknown": "감시량 미상", "duplicate_fact": "중복", "outcome_section": "출력·완료 조건",
                 "reference_label": "기준값 라벨", "value_outside_subject_type": "변수 폭 밖의 값",
-                "output_requirement": "출력 의무(…이하여야 한다)", "subject_unclear": "주어 불명확"}
+                "output_requirement": "출력 의무(…이하여야 한다)", "subject_unclear": "주어 불명확",
+                "parenthesis_labels_may_share_a_quantity": "괄호 앞 이름이 같은 단위의 다른 조건과 결합(한 양일 수 있음)"}
 
         def _n(key):   # the producer's Counter keeps only non-zero keys: in a present block, absent is 0 (review W8)
             return _int(rb, key) or 0

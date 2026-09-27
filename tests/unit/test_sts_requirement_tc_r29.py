@@ -378,7 +378,10 @@ def _sts(path: Path, rows):
     for _ in range(3):
         ws.append([""])
     for tc, action, srs in rows:
-        ws.append(["", tc, "", "", "", "", "", "", "d", "", action, "", srs])
+        # (R32 review C2) the evaluator credits a boundary step only where its expected result says 성립: every
+        #   boundary point here is one where the step's own condition holds
+        expected = "조건 [x] 성립 → 이 문장이 기술한 동작 수행 확인: …" if action.startswith("입력 설정 (요구 경계)") else ""
+        ws.append(["", tc, "", "", "", "", "", "", "d", "", action, expected, srs])
     wb.save(path)
     return str(path)
 

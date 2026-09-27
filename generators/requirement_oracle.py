@@ -102,6 +102,41 @@ _PREDICATE_AFTER = re.compile(r"^\s*([가-힣]+)")
 _VERB_END = re.compile(r"(?:다|며|면|고|서|는데|하여|되어|인|한|할|된|될|길|질)$")
 
 
+# (R32) ``LIN Signal 이 300ms 이상`` — a subject particle written apart from its noun
+_DETACHED_SUBJECT_PARTICLE = frozenset({"이", "가", "은", "는"})
+_CONNECTIVE_WORD = frozenset({"및", "또는", "이거나", "그리고", "혹은", "OR", "AND", "or", "and"})
+
+
+def _ends_subject(bare: str, token: str) -> bool:
+    """A word no subject phrase reaches past (both word loops — `_signal_before` and `_paren_owner`, R32 review W3): a
+    quantity (``500ms``), a time postposition (``이내에``), a non-subject word, no letter, a connective (``OR`` · ``거나``),
+    a verb ending on the written token (``하며`` · ``되면``)."""
+    return bool(_QUANTITY_WORD.fullmatch(bare) or _TIME_POSTPOSITION.fullmatch(bare) or not bare or bare in _NOT_SUBJECT
+                or not re.search(r"[A-Za-z가-힣]", bare) or bare.upper() in {"OR", "AND"}
+                or re.search(r"(?:거나|이고|하고)$", bare) or re.search(r"(?:며|면|여|서|고|되|는데)$", token))
+
+
+# (R32 review W3) what a parenthesis owner must not be: a when-clause (``감소시`` · ``이상일때``), a range (``0~5V``) or
+#   another parenthesis, a requirement / system ID (``SwTR_0102``). A name with a digit (``B1 전원``) still owns
+_NOT_OWNER = re.compile(r"(?:시|때)$|[~()]|^(?:Sw|Sy)[A-Za-z]*_\d")
+
+
+def _paren_owner(line: str, paren: int) -> str | None:
+    """(R32) ``저전압(8.5V 이하, 500ms 초과)`` / ``Manual Assist조건(0.8m/s 미만)`` / ``차속 입력(10km/h 이상)``: up to two
+    words right before the parenthesis a value opens, within its table cell — the noun the parenthesis qualifies. The
+    `_ends_subject` words end it, and so does a word carrying a particle (``동작상태에서``), a connective (``및``), a verb
+    form (``감소한``) or a `_NOT_OWNER` word — ``이상인 경우(1.3m/s 초과)`` names nothing (the owner is a word, never a
+    guess)."""
+    words: list[str] = []
+    for token in reversed(line[:paren].split("\t")[-1].split()[-2:]):
+        bare = token.strip("[]")
+        if _ends_subject(bare, token) or bare in _CONNECTIVE_WORD or _PARTICLE.search(bare) or _VERB_END.search(bare) \
+                or _NOT_OWNER.search(bare):
+            break
+        words.insert(0, bare)
+    return " ".join(words) or None
+
+
 def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
     """The subject of a number at ``pos``: the last C identifier / CamelCase name before it in its clause, else the
     one or two words right before it with the particle removed (``Battery 전압이`` → ``Battery 전압``).
@@ -120,15 +155,13 @@ def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
     tokens = [t for t in re.split(r"\s+", clause.strip(" (-")) if t]
     words: list[str] = []
     for token in reversed(tokens[-3:]):
+        if not words and token in _DETACHED_SUBJECT_PARTICLE:
+            continue                # (R32) ``LIN Signal 이 300ms 이상``: the particle is written apart from its noun
         bare = _PARTICLE.sub("", token.strip("()[]"))
-        if _QUANTITY_WORD.fullmatch(bare) or _TIME_POSTPOSITION.fullmatch(bare):
+        if _ends_subject(bare, token):
             # (R20) ``B+ < 8.6V)이 500ms 이내에 9V 이상``: a quantity or a time postposition among the words before the
             #   value is another condition, not the subject — ``500ms 이내에`` was the subject of ``9V 이상`` (KJPDS02
-            #   SwTR_0605). The subject words collected after it (nearer the value) stay.
-            break
-        if not bare or bare in _NOT_SUBJECT or not re.search(r"[A-Za-z가-힣]", bare) \
-                or bare.upper() in {"OR", "AND"} or re.search(r"(?:거나|이고|하고)$", bare) \
-                or re.search(r"(?:며|면|여|서|고|되|는데)$", token):   # a verb ending closes the clause before it
+            #   SwTR_0605); a verb ending closes the clause before it. The subject words collected after it stay.
             break
         words.insert(0, bare)
         if bare != token:           # a particle ends the subject phrase: the word before may still belong to it
@@ -150,6 +183,12 @@ def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
             # ``저 전압 고장 검출 기준 전압: 8.50V 이하`` names the threshold itself, not a quantity to set (r3 W1)
             return name, "reference_label"
         return name, "label"
+    if open_paren >= 0 and clause_start == open_paren:
+        # (R32) the value opens a parenthesis and nothing inside names it: the noun before the parenthesis does —
+        #   ``저전압(8.5V 이하, 500ms 초과)`` (the most frequent reason a traced system fact had no subject: HDPDM01 · PV)
+        owner = _paren_owner(line, open_paren)
+        if owner:
+            return owner, "paren_owner"
     return None, ""
 
 
@@ -249,6 +288,11 @@ def _line_facts(line: str, offset: int) -> list[dict[str, Any]]:
             continue
         taken.append((m.start(), m.end()))
         signal, how = _signal_before(line, m.start())
+        if how == "paren_owner" and (m.group("unit") or "") in _TIME_UNITS:
+            # (R32 review W3) ``CAN 미수신 시 Sleep 모드(15초 이상) 진입``: the name before a time parenthesis is often
+            #   the result the time leads to, not what lasts — stepping it would set the outcome as a stimulus. A time
+            #   in a parenthesis still takes a subject shared from the value before it (``저전압(8.5V 이하, 500ms 초과)``)
+            signal, how = None, ""
         after = _SUBJECT_AFTER.match(line[m.end():])
         if after and how not in {"identifier", "label"}:
             # ``0.6m/s이상의 Door 속도`` — the noun the value qualifies comes after it (review W5); a verb (``값을
@@ -280,7 +324,7 @@ def _line_facts(line: str, offset: int) -> list[dict[str, Any]]:
     if row and _SIGNAL_IDENT.fullmatch(row):
         # a table row (``u16g_ApiIn_Vsup<TAB>850 ~ 1,604<TAB>8.50V ~ 16.04V``): its values describe the row's signal
         for f in facts:
-            if not f.get("signal") or f.get("signal_kind") == "phrase":
+            if not f.get("signal") or f.get("signal_kind") in ("phrase", "paren_owner"):
                 f["signal"], f["signal_kind"] = row, "table_row"
     for f in facts:
         f["_start"], f["_end"] = f["span"][0] - offset, f["span"][1] - offset
@@ -374,13 +418,98 @@ def _separator(text: str) -> str:
     return "or" if has_or and not has_and else "and" if has_and and not has_or else "unstated"
 
 
+_OPEN, _CLOSE = "(（", ")）"   # (R32 review r2 W5) a full-width parenthesis is one too
+
+
+def _open_parens(raw: str, pos: int) -> list[int]:
+    """Starts of the parentheses still open at ``pos``, outermost first (an unmatched ``)`` — ``2)`` of a list — closes
+    nothing)."""
+    stack: list[int] = []
+    for i, ch in enumerate(raw[:pos]):
+        if ch in _OPEN:
+            stack.append(i)
+        elif ch in _CLOSE and stack:
+            stack.pop()
+    return stack
+
+
+def _close_of(raw: str, start: int) -> int:
+    """Index of the parenthesis closing the one opened at ``start`` (``len(raw)`` when it never closes)."""
+    depth = 0
+    for i in range(start, len(raw)):
+        if raw[i] in _OPEN:
+            depth += 1
+        elif raw[i] in _CLOSE:
+            depth -= 1
+            if not depth:
+                return i
+    return len(raw)
+
+
+def _level_text(raw: str, first: dict[str, Any], second: dict[str, Any]) -> str:
+    """The words between two facts (``first`` before ``second``) at their own level: from after every parenthesis
+    ``first`` sits in that closes before ``second`` (``저전압(B+ < 8.5V, 시동조건 제외)이 500ms`` — the comma is inside
+    the condition's own parenthesis), with every parenthesis opened and closed in between dropped, and nothing of one
+    ``second`` sits in. An unmatched ``)`` (``2)`` of a list) is an ordinary character (review r2 W5: it erased the
+    clause end before it)."""
+    lo, hi = first["line_span"][1], second["line_span"][0]
+    inside_second = set(_open_parens(raw, hi))
+    for group in _open_parens(raw, first["line_span"][0]):
+        if group not in inside_second:
+            lo = max(lo, _close_of(raw, group) + 1)
+    kept: list[str] = []
+    depth = 0
+    for ch in raw[lo:hi]:
+        if ch in _OPEN:
+            depth += 1
+        elif ch in _CLOSE and depth:
+            depth -= 1
+        elif not depth:
+            kept.append(ch)
+    return "".join(kept)
+
+
+# the end of a condition clause between a hold time and a condition (R32 review W1): a comma, a sentence end — also one
+#   with no space after it (``제한한다.이후`` · ``…함.이후``) — ``경우``, ``때``, ``시``, ``…면 ``, ``…며 ``. Not a decimal
+#   point (``8.5V``)
+_HOLD_CLAUSE_END = re.compile(r"[,;→，]|[.。](?:\s|$)|(?:다|함|음)\.|경우|때|시\b|면\s|며\s")
+
+
+def _qualifies(raw: str, facts: list[dict[str, Any]], duration: dict[str, Any], condition: dict[str, Any]) -> bool:
+    """(R32) Does the hold time qualify the condition? A named hold time (``저전압 … 500ms 초과``, the subject shared or
+    its own) qualifies its own subject only — ``저전압(8.5V 이하, 500ms 초과) 및 고전압(16.5V 이상 500ms 초과)``: 고전압's
+    500ms says nothing of 저전압. An unnamed one qualifies the conditions of its own clause (no `_HOLD_CLAUSE_END` between
+    them at their level) — and, when a parenthesis around it holds conditions too, only those: ``B+ 전압이 8.9V 미만일
+    경우 … 정상범위(9V~16V 250ms 유지)로 진입`` / ``…제한하며, 9V 이상 250ms 유지 시`` (the 250ms belongs to the range /
+    to 9V, not to 8.9V — the R29 residual: `joint` joined a hold time with anything by *and*), while ``… 인 상태로 특정
+    시간(u16s_X_TM : 100ms) 이상 유지`` (a parenthesis holding the time alone) and ``저전압(B+ < 8.5V, 시동조건 제외)이
+    500ms 초과하여 유지`` (a comma inside the condition's own parenthesis) still qualify the condition before them."""
+    held = duration.get("signal") if duration.get("signal_kind") != "parameter" else None
+    if held and subject_of(condition) is not None:
+        return held == subject_of(condition)
+    d, c = duration["line_span"][0], condition["line_span"][0]
+    for group in reversed(_open_parens(raw, d)):
+        # the innermost parenthesis around the hold time that holds a condition too bounds it (``정상범위(9V~16V
+        #   (250ms 유지))``); one holding the time alone (``특정 시간(u16s_TM : 100ms)``) does not. Being inside it is
+        #   necessary, not enough — its own clauses still split (``상태(B+ 전압 8.9V 미만, 9V 이상 250ms 유지)``: review r3 W1)
+        if any(f["kind"] != "duration" and group in _open_parens(raw, f["line_span"][0]) for f in facts):
+            if group not in _open_parens(raw, c):
+                return False
+            break
+    first, second = (condition, duration) if c < d else (duration, condition)
+    return not _HOLD_CLAUSE_END.search(_level_text(raw, first, second))
+
+
 def joint(line: dict[str, Any], a: dict[str, Any], b: dict[str, Any]) -> str:
     """How two facts of one line join, read from the words between them: ``or`` / ``and`` / ``unstated``. A hold time
-    and a condition join by *and* (``A 또는 B 인 상태로 100ms 유지``: the time qualifies the condition). With facts in
-    between, every separator on the way must be the same connective."""
-    if (a["kind"] == "duration") != (b["kind"] == "duration"):
-        return "and"
+    and the condition it qualifies join by *and* (``A 또는 B 인 상태로 100ms 유지``: the time qualifies the condition —
+    `_qualifies`); a hold time and another condition are read like any two facts. With facts in between, every separator
+    on the way must be the same connective."""
     raw = line.get("raw") or line["text"]
+    if (a["kind"] == "duration") != (b["kind"] == "duration"):
+        duration, condition = (a, b) if a["kind"] == "duration" else (b, a)
+        if _qualifies(raw, line["facts"], duration, condition):
+            return "and"
     ordered = sorted(line["facts"], key=lambda f: f["line_span"][0])
     i, j = sorted((ordered.index(a), ordered.index(b)))
     seps = {_separator(raw[ordered[k]["line_span"][1]:ordered[k + 1]["line_span"][0]]) for k in range(i, j)}

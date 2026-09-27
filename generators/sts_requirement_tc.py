@@ -223,6 +223,30 @@ _UNCLEAR_SUBJECT = re.compile(r"[/·,:;~\-]$|(?:^|\s)(?:따라|의해|대해|위
 _VERB_PHRASE = re.compile(r"\S(?:을|를)\s+\S")
 
 
+def _label_shares_a_quantity(line: dict, fact: dict) -> bool:
+    """(R32 review C1 · r2 W2) ``Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 …)`` / ``도어 속도가
+    0.8m/s 미만이거나 Tip-To-Run 조건(0.8m/s 이상)``: a label before a parenthesis names a condition, not a quantity —
+    with another condition (a threshold or a range, not negated, not an obligation) in the same non-empty unit under
+    another name, joined to it by a **stated** *or* / *and*, the two may be one quantity (the door speed). Then the
+    stated join would make the step hold the other "false" / "true" at a point where it is not the step's to say (a step
+    said 불성립 at 0.8 m/s and told the tester to hold Tip-To-Run false there). An unstated join already tells the tester
+    to check it and stays."""
+    unit = fact.get("unit") or ""
+    if not unit:
+        return False
+    raw = line.get("raw") or line["text"]
+    for other in line["facts"]:
+        if other is fact or other["kind"] not in {"threshold", "range"} or other.get("status") != "parsed" \
+                or other.get("negated") or (other.get("unit") or "") != unit \
+                or "paren_owner" not in (fact.get("signal_kind"), other.get("signal_kind")) \
+                or (subject_of(other) if other["kind"] == "threshold" else other.get("signal")) == subject_of(fact) \
+                or _OBLIGATION.match(raw[other["line_span"][1]:]):
+            continue
+        if joint(line, fact, other) in {"or", "and"}:
+            return True
+    return False
+
+
 def _skip_reason(line: dict, fact: dict) -> str:
     if fact["status"] != "parsed":
         return str(fact.get("reason") or "not_parsed")
@@ -241,6 +265,8 @@ def _skip_reason(line: dict, fact: dict) -> str:
         return "reference_label"            # ``기준 전압: 8.50V 이하`` names the threshold, not what to set (r3 W1)
     if fact["kind"] == "threshold" and fact.get("signal_kind") == "parameter" and not fact.get("monitored"):
         return "monitored_quantity_unknown"
+    if fact["kind"] == "threshold" and _label_shares_a_quantity(line, fact):
+        return "parenthesis_labels_may_share_a_quantity"
     if _OBLIGATION.match((line.get("raw") or line["text"])[fact["line_span"][1]:]):
         # (R29 review C2) ``암전류는 0.3mA 이하여야 한다`` / ``최소 전류는 0.3mA 이하로 유지한다``: what the system must
         #   produce, not a condition to set — ``300ms 이상 유지시`` (a condition) is not matched
@@ -487,7 +513,10 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
     ws.append(REQUIREMENT_EVIDENCE_HEADERS)
     for tc_id, e in rows:
         points = ", ".join(f"{p['point']}({'T' if p['holds'] else 'F'})" for p in e["points"])
-        ws.append([tc_id, e["srs_id"], e["kind"], e.get("signal") or "—", e.get("reference_constant") or "—", e["op"],
+        subject = e.get("signal") or "—"
+        if e.get("signal_kind") == "paren_owner":
+            subject += " (괄호 앞 명사)"   # (R32 review I4) a weaker subject than a signal name: the reviewer sees it
+        ws.append([tc_id, e["srs_id"], e["kind"], subject, e.get("reference_constant") or "—", e["op"],
                    e["value"], e["unit"] or "—", e["step"], e["step_basis"], points, e["combination_note"] or "—",
                    _clip(e["line"], 300), e["line_sha256"], source_label(e.get("source"))])
     return len(rows)
