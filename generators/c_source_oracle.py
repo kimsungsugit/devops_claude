@@ -1692,18 +1692,57 @@ class _Interp:
         observation of this path, and never "not reached" either."""
         state.decisions.extend((key, ("maybe",)) for key, _obs in probe.decisions[len(state.decisions):])
 
-    def atom_effectful(self, atom, raw):
+    def atom_effectful(self, atom, raw, reads=frozenset()):
         """(R2c) Would evaluating this condition change state? Its truth is read on a copy of the state before the
-        decision runs, so a write or a call in one condition could change what a later one reads."""
+        decision runs, so a write or a call in one condition could change what a later one reads. (R37) A call the run
+        stubs and whose writes the decision does not read (``reads`` — `decision_reads`) is not such a change."""
         for x in _walk(atom):
             if x.type in {"assignment_expression", "update_expression", "gnu_asm_expression"}:
                 return True
-            if x.type == "call_expression" and not (self.is_cast_call(x, raw) or self.pure_macro_call(x, raw)):
+            if x.type == "call_expression" and not (self.is_cast_call(x, raw) or self.pure_macro_call(x, raw)
+                                                    or self.stub_call_inert(x, raw, reads)):
                 return True
             if cpc.is_name_node(x) and _text(x, raw) in self.macro_status and _text(x, raw) not in self.macro_params \
                     and self.macro_effectful(_text(x, raw)):
                 return True
         return False
+
+    def decision_reads(self, atoms, raw):
+        """(R37) Every name the given conditions may read: the names in them, and those the macros among them may
+        expand to (``CUR`` → ``g_p``). Asked for a call's condition and the ones after it — a condition evaluated
+        before the call reads the state the decision starts from either way (review I1)."""
+        names = set()
+        for atom in atoms:
+            for x in _walk(atom):
+                if cpc.is_name_node(x):
+                    name = _text(x, raw)
+                    names.add(name)
+                    if name in self.macro_status:
+                        names.update(re.findall(r"\b[A-Za-z_]\w*\b", self.macro_text_closure(name)))
+        return frozenset(names | {self.resolve_alias(n) for n in names})
+
+    def stub_call_inert(self, node, raw, reads):
+        """(R37) ``F(…)`` in a condition, where the run stubs F (the row sets ``F() return`` — `stub_return`): its value
+        is the row's, and its effects are what F's write closure names — the oracle havocs them, as for any stubbed
+        call. When none of them is a name the decision reads (and F writes nothing through a pointer nor calls unknown
+        code), evaluating the condition on the state the decision starts from is what the sequential run would see."""
+        f = node.child_by_field_name("function")
+        if f is None or f.type != "identifier":
+            return False
+        name = _text(f, raw)
+        if f"{name}() return" not in self.inputs or name == self.function_name or name in self.macro_status \
+                or name in self.fn_names or self.lookup(name) is not None:
+            # (review W1) a parameter or local of that name (``U8 (*get)(void)``) is what is called — no stub
+            return False
+        info = self.closure.get(name)
+        if info is None or info.get("unknown_callees") or info.get("pointer_write") \
+                or self.function_name in (info.get("reaches") or ()):
+            # (review W2) a callee that may re-enter the function under test havocs its statics in the run
+            return False
+        writes = set(info.get("writes") or ())
+        if any(w not in self.globals and w not in self.arrays for w in writes):
+            return False   # writes through something the closure cannot name
+        return not (writes & reads)
 
     def record_decision(self, state, spec):
         """(R2c) Observe one evaluation of a watched decision on this path: each condition's truth in the state the
@@ -2793,7 +2832,7 @@ def _guard_paths(finals, key):
 
 def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
                       decisions: list[dict[str, Any]], guards: list[list] | tuple = (),
-                      step_limit: int | None = None) -> list[dict[str, Any]]:
+                      step_limit: int | None = None, inert_stub_calls: bool = False) -> list[dict[str, Any]]:
     """(R2c) Per input vector: how each decision of the function evaluates on the modeled run.
 
     ``decisions``: ``[{"key": [start, end, type], "atoms": [[start, end, type], ...], "ir": nested list}]`` over the
@@ -2837,11 +2876,19 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
         reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
         return [{"status": "unsupported", "reason": reason, "decisions": {}} for _ in vectors]
     probe_interp = None
+    # (R37) stubs every vector sets: a call to one of them in a condition may be judged by its write closure — asked
+    # for by the call-in-condition decisions' own search only (``inert_stub_calls``): every other search sees such a
+    # condition as effectful, as before R37 (review round 4 C1: the judgment leaked into R36's stub search)
+    stubbed = set.intersection(*(set(v or ()) for v in vectors)) if vectors and inert_stub_calls else set()
     try:
-        probe_interp = _Interp(fn, raw, scope, {}, parser, shared)
+        probe_interp = _Interp(fn, raw, scope, {k: 0 for k in stubbed if k.endswith("() return")}, parser, shared)
+        probe_interp.function_name = str(unit.get("name") or "")
         _prescan_once(probe_interp, shared)  # path-independent refusals: once per function, not per vector
         for key, spec in list(specs.items()):
-            if any(probe_interp.atom_effectful(a, raw) for a in spec["atoms"]):
+            # the reads matter only to a stubbed call's judgment — every other search pays nothing (review round 5 I3)
+            if any(probe_interp.atom_effectful(
+                    a, raw, probe_interp.decision_reads(spec["atoms"][i:], raw) if stubbed else frozenset())
+                   for i, a in enumerate(spec["atoms"])):
                 broken[spec["key"]] = "effectful_condition"
                 del specs[key]
     except Exception as exc:  # noqa: BLE001 — never raise into the generator (R2c review round 1 W4)

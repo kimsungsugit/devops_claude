@@ -552,8 +552,15 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                + (f" · 탐색 실패로 1차 결과를 유지한 함수 {_show(_int(mc, 'stub_search_errors'))}"
                   if _int(mc, "stub_search_errors") else "")
                + "); 1차 탐색의 MC/DC 쌍과 행은 바뀌지 않는다 — 다만 행 상한이 찬 TC 에서는 새 MC/DC 행이 경계 행을 "
-               "밀어낼 수 있다."
+               "밀어낼 수 있다(stub 값 탐색 예산은 함수당 그룹별)."
                if _int(mc, "stub_input_decisions") else "")
+            # (R37) outside the stub clause: a call-condition decision may be designed without a stub (or not at all)
+            + (f" 조건 안에 호출이 있는 결정 {_show(_int(mc, 'call_condition_decisions'))} 은 다른 결정과 따로, 별도 "
+               f"예산으로 탐색했다(설계 {_show(_int(mc, 'call_condition_designed'))} — 함수 호출은 행이 그 피호출을 "
+               "stub 하고 호출이 결정이 읽는 것을 쓰지 않을 때만 관측한다(부작용 없는 함수형 매크로는 stub 없이 관측): "
+               "쓰기 겹침·포인터 쓰기·알 수 없는 피호출·시험 대상 함수로의 재진입·이름 가림·stub 없음·조건 안의 "
+               "쓰기·효과 있는 매크로·평가 순서가 정해지지 않은 식 등은 관측하지 않는다)."
+               if _int(mc, "call_condition_decisions") else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
             tone=_tone(bool(_int(mc, "invalidated_pairs")))))
 

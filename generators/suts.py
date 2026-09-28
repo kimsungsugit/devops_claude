@@ -3524,6 +3524,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "stub_input_decisions": 0, "stub_input_pairs": 0, "stub_input_pairs_retained": 0,
                            # (R36) 2차 탐색(stub 값)을 받은 결정 · 조건을 더한 결정 — 예산은 1차와 별도(함수당 같은 한도)
                            "stub_search_decisions": 0, "stub_search_improved": 0, "stub_search_errors": 0,
+                           # (R37) 조건 안에 호출이 있는 결정 — 함수 실행 모델로 따로(별도 예산) 탐색한 결정 · 그중 설계
+                           "call_condition_decisions": 0, "call_condition_designed": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     for unit in units:
@@ -3553,6 +3555,10 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["conditions"] += len(d.get("conditions") or [])
             status = d.get("status", "unsupported")
             out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
+            if d.get("evaluation") == "source_path" and \
+                    str(d.get("static_reason") or "").startswith("unsupported_scalar:call_expression"):
+                out["call_condition_decisions"] += 1
+                out["call_condition_designed"] += status == "designed"
             if d.get("stub_inputs"):
                 out["stub_input_decisions"] += 1
             for pair in d.get("pairs") or []:

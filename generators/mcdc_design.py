@@ -968,7 +968,9 @@ def _apply_design_range(unit, name, domain):
 # when the decision is reached on the modeled run.
 _PATH_FAMILY = ("local_variable_not_input:", "input_modified_before_decision:", "global_address_taken:",
                 "global_binding_unverified:", "global_modified_by_callee:", "input_binding_unverified:",
-                "identifier_shadowed_by_local:")
+                "identifier_shadowed_by_local:",
+                # (R37) a call in a condition: the modeled run observes it where the row stubs the callee (second search)
+                "unsupported_scalar:call_expression")
 _PATH_SAMPLES = 12
 
 
@@ -1202,7 +1204,7 @@ def _stub_return_domain(name, scope, own):
 
 
 def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                 max_steps, extra_domains=None, strict_steps=False):
+                 max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False):
     """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
 
     Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
@@ -1215,7 +1217,9 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     cost bound (a vector costs what its run executes), so the same source always gets the same design.
 
     ``extra_domains``: row inputs searched beyond those with a declared domain (R36 — the stub return values of the
-    second search, `_stub_path_pass`); ``strict_steps``: every run stops at what the step budget has left."""
+    second search, `_stub_path_pass`); ``strict_steps``: every run stops at what the step budget has left;
+    ``skip_unobservable``: a decision the run cannot observe on any vector (``effectful_condition``,
+    ``decision_node_not_found``) is not searched around (R37 — the call-in-condition decisions' own search)."""
     from generators import c_source_oracle as cso
     if not cso.scope_matches(unit):
         for decision, _node, _raw in candidates:
@@ -1316,7 +1320,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                 break
             chunk = todo[start:start + max(0, min(16, max_runs - len(cache)))]
             limit = max(0, max_steps - spent[0]) if strict_steps else None
-            for v, r in zip(chunk, cso.observe_decisions(unit, chunk, plan, guards, step_limit=limit), strict=True):
+            for v, r in zip(chunk, cso.observe_decisions(unit, chunk, plan, guards, step_limit=limit,
+                                                         inert_stub_calls=skip_unobservable), strict=True):
                 cache[vkey(v)] = (v, r)
                 order.append(v)
                 added.append(v)
@@ -1355,8 +1360,17 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
         return [{**v, name: value} for name in inputs for value in samples[name] if value != v[name]]
 
     run([base])
+    blind = {}
     for index in range(len(specs)):
         if pairers[index].complete() or not order:
+            continue
+        state = ((cache[vkey(order[0])][1].get("decisions") or {}).get(index) or {}).get("state")
+        if skip_unobservable and state in ("effectful_condition", "decision_node_not_found"):
+            blind[index] = state
+            # (review R2-C1) read from the record itself: `observation` answers "unsupported" for a run the base vector
+            # cannot complete, hiding the state every run gives this decision
+            # (R37 review C1) the run cannot observe this decision — the same on every vector of this search: searching
+            # "around" it only spends the function's budget on the decisions after it
             continue
         # 1. climb towards the decision along its guard chain
         best = max(order, key=lambda v: progress(v, index))
@@ -1411,6 +1425,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             decision["status"], decision["reason"] = "partial", "path_search_incomplete"
         elif states.get("evaluated"):
             decision["status"], decision["reason"] = "no_pair_found", "path_search_no_pair"
+        elif index in blind:
+            decision["reason"] = "path_evaluation:" + blind[index]   # (R37 review R3-I2) not searched: that is why
         else:
             # never determined on any run: keep "unsupported" with what the modeled run says instead of the binding
             top = next(iter(states.most_common(1)), ("no_run", 0))[0]
@@ -1420,7 +1436,7 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
 
 
 def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                    max_steps):
+                    max_steps, skip_unobservable=False):
     """(R36) A second search for the decisions the first did not design, where a value a call returned may be what it
     lacked (``r = F(); if ((r == 3U) && …)``): the row inputs ``F() return`` — the values the SUTS row injects into
     F's stub (R14, `_stub_return_domain`) — join the search. Merged condition by condition: every decision keeps the
@@ -1447,7 +1463,8 @@ def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selecte
     record["decisions_searched"] += len(retry)
     try:
         _path_design(unit, {"domains": {}}, retry, row_names, dict(domains), scope, {}, max_conditions=max_conditions,
-                     max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True)
+                     max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True,
+                     skip_unobservable=skip_unobservable)
     except Exception as exc:  # noqa: BLE001 — the first search's result stands (review round 2 I1); the reason is kept
         for d, _n, _r in retry:
             d.clear()
@@ -1541,7 +1558,11 @@ def _path_revalidation(decision, lookup, unit, normalized):
             if row is not None:
                 v = normalized(row["inputs"])
                 keys.setdefault(json.dumps(v, sort_keys=True), v)
-    runs = dict(zip(keys, cso.observe_decisions(unit, list(keys.values()), [decision["path_spec"]]), strict=True))
+    runs = dict(zip(keys, cso.observe_decisions(
+        unit, list(keys.values()), [decision["path_spec"]],
+        # (R37) re-run with the judgment the decision was designed under: only a call-in-condition decision's
+        inert_stub_calls=str(decision.get("static_reason") or "").startswith("unsupported_scalar:call_expression")),
+        strict=True))
     out = {}
     for pair in decision["pairs"]:
         for side in ("a", "b"):
@@ -1785,10 +1806,20 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 path_candidates.append((decision, node, raw))
     if path_candidates:
         try:
-            _path_design(unit, report, path_candidates, row_names, domains, scope, selected,
-                         max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps)
-            _stub_path_pass(unit, report, path_candidates, row_names, domains, scope, selected,
-                            max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps)
+            # (R37 review R3-C1) the decisions that reach the path search only since R37 — a call in a condition —
+            # are searched on their own, with a budget of their own: observing them on every run of the others' search
+            # cost steps, and the budget those decisions had in R36 is theirs unchanged
+            calls = [c for c in path_candidates
+                     if str(c[0].get("reason") or "").startswith("unsupported_scalar:call_expression")]
+            call_ids = {id(c[0]) for c in calls}
+            for group, late in (([c for c in path_candidates if id(c[0]) not in call_ids], False), (calls, True)):
+                if not group:
+                    continue
+                _path_design(unit, report, group, row_names, domains, scope, selected, max_conditions=max_conditions,
+                             max_runs=max_path_runs, max_steps=max_path_steps, skip_unobservable=late)
+                _stub_path_pass(unit, report, group, row_names, domains, scope, selected,
+                                max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
+                                skip_unobservable=late)
         except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":
