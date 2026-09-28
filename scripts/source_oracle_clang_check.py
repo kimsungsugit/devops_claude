@@ -328,7 +328,14 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
             #   local lambda shadows the namespace stub for this run only (the oracle takes the same value)
             for c in callees:
                 key = f"{c}() return"
+                # (R38 review W1) a sequence that sets one of the stub's out-parameters (``F() p[0]``) has the stub
+                #   write through its pointers whatever F's body does — the oracle holds the pointee unknown
+                out_params = any(k.startswith(c + "() ") and k != key for k in claim["inputs"])
                 if key not in claim["inputs"]:
+                    if out_params:
+                        # (review round 2 Info 1) an out-parameter-only stub: its return is not the claim's to use
+                        lines.append(f"  auto {c} = [&]([[maybe_unused]] auto... __a) -> int "
+                                     "{ (__oracle_put(__a), ...); return __oracle_stub; };")
                     continue
                 rt_text = str((((scope.get("effects") or {}).get("functions") or {}).get(c) or {}).get("return_type")
                               or "")
@@ -341,7 +348,7 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                 except cpc.Unresolved:
                     continue
                 if _fits(sv, rt):
-                    put = "(__oracle_put(__a), ...); " if writes_through_pointer(c) else ""
+                    put = "(__oracle_put(__a), ...); " if out_params or writes_through_pointer(c) else ""
                     lines.append(f"  auto {c} = [&]([[maybe_unused]] auto... __a) -> {_base_type(rt, enum_base)} "
                                  f"{{ {put}return {sv}; }};")
             plist = ", ".join(p[1] for p in params)

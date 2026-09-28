@@ -8,7 +8,8 @@ enumerators, const objects, scalar globals and one-dimensional arrays. Nothing i
 * a value the inputs do not determine is *unknown* with its reason — a global the sequence does not set,
   a call's return value, a volatile read, a pointer target, an out-of-type input (``U8 = -1``);
 * a branch on an unknown condition runs both arms; an output is *derived* only when every path agrees;
-* a call havocs what the callee may write (the project write closure, transitively); a write through a pointer
+* a call havocs what the callee may write (the project write closure, transitively) — a call the sequence stubs
+  (``F() return`` / ``F() p[0]``) writes no global or static, only what a pointer argument may reach (R38); a write through a pointer
   (in the function or a callee) reaches arrays, address-taken objects and escaped locals; a callee with unknown
   effects (library, indirect) havocs every global, every escaped local and every static local;
 * undefined behaviour proven on a path (signed overflow, division by zero, shift range, out-of-bounds index,
@@ -27,7 +28,8 @@ from typing import Any
 
 from generators import c_project_context as cpc
 
-SCHEMA_VERSION = 2   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
+SCHEMA_VERSION = 3   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
+#                      3 (R38): a sequence stub writes no global or static (VectorCAST replaces the body — `stubbed_call`)
 _UB_REASONS = frozenset({"signed_overflow", "division_by_zero", "shift_count_out_of_range", "signed_left_shift_overflow",
                          "float_to_int_out_of_range"})
 _EXECUTION_BUDGET = 200_000
@@ -36,7 +38,8 @@ _LOOP_BUDGET = 4096
 ASSUMPTIONS = (
     "undefined behaviour is refused when proven on a path; where it depends on an unknown value (divisor, shift "
     "count, index, overflow of an unknown operand) it is not proven absent — derived values hold for runs without it",
-    "callee effects are the project write closure (a callee is stubbed or real — outputs it may write are unknown)",
+    "callee effects are the project write closure (a callee that runs — outputs it may write are unknown); a callee "
+    "the sequence stubs writes no global or static (what it may put through a pointer argument is unknown)",
     "reachability and termination of callees are not proven",
     "fixed-address register objects are distinct objects (writes to one do not change another)",
     "an integer converted to a pointer addresses hardware, not a C object: a write through a pointer reaches only "
@@ -239,7 +242,13 @@ class _Interp:
         does not depend on the inputs is computed once: the body's address-taken names, macro expansion parses and
         the node lists `check_sequencing` walks (R2c: per-vector re-walking was 40% of a path search)."""
         self.fn, self.raw, self.scope, self.inputs, self.parser = fn, raw, scope, inputs, parser
-        self.stubs_used: set[str] = set()   # (R14) callees whose return value the sequence set (``F() return``)
+        self.stubs_used: set[str] = set()   # (R14, R38) callees the sequence stubs (``F() return`` / ``F() p[0]``)
+        # (R38) the sequence's stub inputs by callee name (``F() return`` / ``F() p[0]``) — `stub_view` asks per call
+        self.stub_keys: dict[str, list[str]] = {}
+        for key in inputs or ():
+            head, sep, _rest = str(key).partition("() ")
+            if sep and head:
+                self.stub_keys.setdefault(head, []).append(key)
         # (R17) names a function-body #if took as undefined on build-configuration evidence (see `_scope_assumptions`)
         self.assumed_undefined: set[str] = set()
         self.shared = shared if shared is not None else {}
@@ -1076,9 +1085,12 @@ class _Interp:
                 top.add(_key(_unwrap(root.child_by_field_name("right"))))
         if self.world is not None:
             self.mark_unordered_calls(nodes, raw, inside, state)
+        # (R38) a call the sequence stubs writes nothing a pointer argument cannot reach (`stub_call_inert`): whichever
+        # order it runs in, what the macro reads is the same
         nested = [x for x in nodes if _key(x) not in top and (
             x.type in {"assignment_expression", "update_expression", "gnu_asm_expression"}
-            or (x.type == "call_expression" and not self.is_cast_call(x, raw) and not self.pure_macro_call(x, raw)))]
+            or (x.type == "call_expression" and not self.is_cast_call(x, raw) and not self.pure_macro_call(x, raw)
+                and not self.stub_call_inert(x, raw)))]
         if nested:
             for x in nodes:
                 name = _text(x, raw) if cpc.is_name_node(x) else ""
@@ -1299,6 +1311,11 @@ class _Interp:
     def call_may_write(self, callee, obj, state, escaping=frozenset()):
         """Could a call to ``callee`` change the object an identifier ``obj`` names here?"""
         closure = self.closure.get(callee)
+        view = self.stub_view(callee)
+        if view is not None:
+            # (R38) a sequence stub (`stubbed_call`) writes no global or static and runs nothing — at most what a
+            # pointer argument reaches
+            closure = {"writes": [], "unknown_callees": [], "reaches": [], "pointer_write": view["pointer"]}
         info = self.lookup(obj)
         escaped = False
         if info is not None and not info.get("extern"):
@@ -1692,57 +1709,51 @@ class _Interp:
         observation of this path, and never "not reached" either."""
         state.decisions.extend((key, ("maybe",)) for key, _obs in probe.decisions[len(state.decisions):])
 
-    def atom_effectful(self, atom, raw, reads=frozenset()):
+    def atom_effectful(self, atom, raw):
         """(R2c) Would evaluating this condition change state? Its truth is read on a copy of the state before the
         decision runs, so a write or a call in one condition could change what a later one reads. (R37) A call the run
-        stubs and whose writes the decision does not read (``reads`` — `decision_reads`) is not such a change."""
+        stubs changes nothing (`stub_call_inert`)."""
         for x in _walk(atom):
             if x.type in {"assignment_expression", "update_expression", "gnu_asm_expression"}:
                 return True
             if x.type == "call_expression" and not (self.is_cast_call(x, raw) or self.pure_macro_call(x, raw)
-                                                    or self.stub_call_inert(x, raw, reads)):
+                                                    or self.stub_call_inert(x, raw)):
                 return True
             if cpc.is_name_node(x) and _text(x, raw) in self.macro_status and _text(x, raw) not in self.macro_params \
                     and self.macro_effectful(_text(x, raw)):
                 return True
         return False
 
-    def decision_reads(self, atoms, raw):
-        """(R37) Every name the given conditions may read: the names in them, and those the macros among them may
-        expand to (``CUR`` → ``g_p``). Asked for a call's condition and the ones after it — a condition evaluated
-        before the call reads the state the decision starts from either way (review I1)."""
-        names = set()
-        for atom in atoms:
-            for x in _walk(atom):
-                if cpc.is_name_node(x):
-                    name = _text(x, raw)
-                    names.add(name)
-                    if name in self.macro_status:
-                        names.update(re.findall(r"\b[A-Za-z_]\w*\b", self.macro_text_closure(name)))
-        return frozenset(names | {self.resolve_alias(n) for n in names})
-
-    def stub_call_inert(self, node, raw, reads):
-        """(R37) ``F(…)`` in a condition, where the run stubs F (the row sets ``F() return`` — `stub_return`): its value
-        is the row's, and its effects are what F's write closure names — the oracle havocs them, as for any stubbed
-        call. When none of them is a name the decision reads (and F writes nothing through a pointer nor calls unknown
-        code), evaluating the condition on the state the decision starts from is what the sequential run would see."""
+    def stub_call_inert(self, node, raw):
+        """(R37) ``F(…)`` in a condition, where the run stubs F (the row sets ``F() return``): its value is the row's and
+        a stub writes no global or static (R38 — `stubbed_call`, the same model as a stubbed call outside a condition),
+        so evaluating the condition on the state the decision starts from is what the sequential run sees. Not when the
+        stub may put something through a pointer argument (the sequence sets one of its out-parameters, or F's closure
+        writes through a pointer or calls unknown code), nor when the called name is not the project function."""
         f = node.child_by_field_name("function")
         if f is None or f.type != "identifier":
             return False
-        name = _text(f, raw)
-        if f"{name}() return" not in self.inputs or name == self.function_name or name in self.macro_status \
-                or name in self.fn_names or self.lookup(name) is not None:
-            # (review W1) a parameter or local of that name (``U8 (*get)(void)``) is what is called — no stub
-            return False
+        view = self.stub_view(_text(f, raw))
+        return view is not None and not view["pointer"]
+
+    def stub_view(self, name):
+        """(R38) The one judgment every site asks of a call to ``name``: None when the sequence does not stub it, else
+        ``{"pointer": whether the stub may put something through a pointer argument}``. The sequence stubs F when it
+        sets one of F's stub inputs (``F() return``, or an out-parameter ``F() p[0]`` — R23) — not the function under
+        test (it runs for real in its own test), not a name the function declares or sees in scope (review R37 W1:
+        ``U8 (*get)(void)`` is what is called), not a macro, not a function without a project definition. The stub
+        may write through a pointer when the sequence sets one of its out-parameters (VectorCAST writes the test
+        case's value), or when F's closure writes through a pointer or calls code the closure cannot see."""
+        prefix = name + "() "
+        keys = self.stub_keys.get(name)
+        if not keys or name == self.function_name or name in self.macro_status or name in self.fn_names \
+                or name in (self.params or {}) or self.lookup(name) is not None:
+            return None
         info = self.closure.get(name)
-        if info is None or info.get("unknown_callees") or info.get("pointer_write") \
-                or self.function_name in (info.get("reaches") or ()):
-            # (review W2) a callee that may re-enter the function under test havocs its statics in the run
-            return False
-        writes = set(info.get("writes") or ())
-        if any(w not in self.globals and w not in self.arrays for w in writes):
-            return False   # writes through something the closure cannot name
-        return not (writes & reads)
+        if info is None:
+            return None
+        out_params = any(k != prefix + "return" for k in keys)
+        return {"pointer": bool(out_params or info.get("pointer_write") or info.get("unknown_callees"))}
 
     def record_decision(self, state, spec):
         """(R2c) Observe one evaluation of a watched decision on this path: each condition's truth in the state the
@@ -2034,6 +2045,9 @@ class _Interp:
         if info is None or name in (self.params or {}) or self.lookup(name) is not None:
             self.havoc_everything(state, "unknown_callee:" + name, locals_too=maybe_macro)
             return _Val(Unknown("call_return_value:" + name), None)
+        view = self.stub_view(name)
+        if view is not None:
+            return self.stubbed_call(state, name, info, view)
         if self.world is not None and values is not None and f"{name}() return" not in self.inputs \
                 and not self.no_inline_depth and (id(raw), n.start_byte, n.end_byte) not in self.no_inline:
             # (R16) a callee with one definition in the project runs for real on this state; when it cannot (no
@@ -2065,12 +2079,21 @@ class _Interp:
                 self.havoc_pointer_targets(state, f"callee_pointer_write:{name}:{why}")
         return self.stub_return(name, info)
 
+    def stubbed_call(self, state, name, info, view):
+        """(R38) The sequence stubs F (`stub_view`): R14 — the harness replaces F's body, as VectorCAST does and the
+        clang check's stubs do. The body does not run, so nothing F would write to a global or a static happens and
+        nothing it calls runs (no re-entry). A stub may still put a test-case value through a pointer argument (the
+        reference sets ``F() p[0]`` — R23): then what pointer arguments may reach stays unknown."""
+        self.stubs_used.add(name)   # the record rests on the stub even when its value is not usable
+        if view["pointer"]:
+            self.havoc_pointer_targets(state, f"stub_pointer_argument:{name}")
+        return self.stub_return(name, info)
+
     def stub_return(self, name, info):
         """(R14) A sequence that sets ``F() return`` declares F a stub for this run (the unit-test convention the
         reference follows): the call returns that value in F's declared return type (a value outside it is refused as
-        ``input_outside_declared_type``, never wrapped). What F writes stays
-        unknown (havocked above) — only the returned value is taken from the sequence. Without the input, or when F's
-        return type is not a resolvable integer type, the value is unknown as before."""
+        ``input_outside_declared_type``, never wrapped). What the stub does to state is `stubbed_call`'s (R38). Without
+        the input, or when F's return type is not a resolvable integer type, the value is unknown as before."""
         key = f"{name}() return"
         if key not in self.inputs:
             return _Val(Unknown("call_return_value:" + name), None)
@@ -2277,8 +2300,8 @@ class _World:
         self.failed: dict[str, str] = {}
         self.inlined: dict[str, int] = {}
         self.not_inlined: dict[str, int] = {}
-        # (R16b review R3 W3-1) callees run as their write closure at some call site (budget, depth, a sequence stub,
-        #   an unsequenced site, no definition, …) — a callee may be in both this and `inlined`
+        # (R16b review R3 W3-1) callees run as their write closure at some call site (budget, depth, an unsequenced
+        #   site, no definition, …; a sequence stub is neither — R38) — a callee may be in both this and `inlined`
         self.effects_only: dict[str, int] = {}
         self.activations = 0
         self.admitted: set[int] = set()   # ids of scopes held alive by the provider / the entry unit
@@ -2742,9 +2765,11 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             possible = sorted({k for s in finals for k in s.possible_ub})
             if interp.stubs_used:
                 record["assumptions"] = list(record["assumptions"]) + [
-                    "stubbed by the sequence: " + ", ".join(f"{n}() returns the value set in '{n}() return'"
-                                                            for n in sorted(interp.stubs_used))
-                    + " (what the callee writes stays unknown)"]
+                    "stubbed by the sequence: " + ", ".join(
+                        f"{n}() returns the value set in '{n}() return'" if f"{n}() return" in interp.inputs
+                        else f"{n}() is a stub (the sequence sets its out-parameters, not its return value)"
+                        for n in sorted(interp.stubs_used))
+                    + " (a stub writes no global or static; what it may put through a pointer argument stays unknown)"]
                 record["stubs"] = sorted(interp.stubs_used)
             own = set((unit.get("project_scope") or {}).get("assumed_undefined") or ())
             if interp.assumed_undefined - own:
@@ -2880,15 +2905,18 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
     # for by the call-in-condition decisions' own search only (``inert_stub_calls``): every other search sees such a
     # condition as effectful, as before R37 (review round 4 C1: the judgment leaked into R36's stub search)
     stubbed = set.intersection(*(set(v or ()) for v in vectors)) if vectors and inert_stub_calls else set()
+    probe_inputs = {k: 0 for k in stubbed if k.endswith("() return")}
+    if probe_inputs:
+        # (R38 review W3) a stub whose out-parameter any vector sets writes through its pointers on that run: the
+        # probe's pointer judgment (`stub_view`) is at least as broad as every vector's
+        probe_inputs.update({k: 0 for v in vectors for k in (v or ())
+                             if "() " in str(k) and not str(k).endswith("() return")})
     try:
-        probe_interp = _Interp(fn, raw, scope, {k: 0 for k in stubbed if k.endswith("() return")}, parser, shared)
+        probe_interp = _Interp(fn, raw, scope, probe_inputs, parser, shared)
         probe_interp.function_name = str(unit.get("name") or "")
         _prescan_once(probe_interp, shared)  # path-independent refusals: once per function, not per vector
         for key, spec in list(specs.items()):
-            # the reads matter only to a stubbed call's judgment — every other search pays nothing (review round 5 I3)
-            if any(probe_interp.atom_effectful(
-                    a, raw, probe_interp.decision_reads(spec["atoms"][i:], raw) if stubbed else frozenset())
-                   for i, a in enumerate(spec["atoms"])):
+            if any(probe_interp.atom_effectful(a, raw) for a in spec["atoms"]):
                 broken[spec["key"]] = "effectful_condition"
                 del specs[key]
     except Exception as exc:  # noqa: BLE001 — never raise into the generator (R2c review round 1 W4)

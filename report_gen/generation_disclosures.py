@@ -493,7 +493,9 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "확정 기대값은 소스 oracle 이 함수 본문을 해석해 낸 값만이다(요구 적합성·타깃 실행은 아님 — "
             "execution_status=not_run). 나머지 칸은 [검증 필요] 와 사유를 적었다. 근거는 'Test Evidence' 시트에 있다."
             + (f" 그중 {_int(ev, 'derived_in_stubbed_sequence')}칸은 피호출 함수의 반환값을 시퀀스 입력"
-               "('F() return')으로 stub 한 시퀀스에서 나왔다 — 시험도 그 함수를 stub 해야 성립한다(시퀀스 단위로 센 상한)."
+               "('F() return')으로 stub 한 시퀀스에서 나왔다 — 시험도 그 함수를 stub 해야 성립한다(같은 유닛의 함수는 "
+               "Stub-By-Function 으로; stub 은 반환값만 주고 전역·정적 변수를 쓰지 않는다고 본다; 포인터 인자로 써 넣는 "
+               "값은 미상. 시퀀스 단위로 센 상한)."
                if _int(ev, "derived_in_stubbed_sequence") else "")
             # (R17) 빌드 설정 증거로 #if 를 판정한 unit 의 칸 — 그 unit 의 가정 이름을 모두 싣는다(상한)
             + (f" {_int(ev, 'derived_on_assumed_undefined')}칸은 빌드 설정 증거로 '정의 없음'이라 본 이름에 기댄 #if 판정이 있는 "
@@ -557,9 +559,10 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             # (R37) outside the stub clause: a call-condition decision may be designed without a stub (or not at all)
             + (f" 조건 안에 호출이 있는 결정 {_show(_int(mc, 'call_condition_decisions'))} 은 다른 결정과 따로, 별도 "
                f"예산으로 탐색했다(설계 {_show(_int(mc, 'call_condition_designed'))} — 함수 호출은 행이 그 피호출을 "
-               "stub 하고 호출이 결정이 읽는 것을 쓰지 않을 때만 관측한다(부작용 없는 함수형 매크로는 stub 없이 관측): "
-               "쓰기 겹침·포인터 쓰기·알 수 없는 피호출·시험 대상 함수로의 재진입·이름 가림·stub 없음·조건 안의 "
-               "쓰기·효과 있는 매크로·평가 순서가 정해지지 않은 식 등은 관측하지 않는다)."
+               "stub 할 때만 관측한다(stub 은 전역·정적 변수를 쓰지 않는다; 부작용 없는 함수형 매크로는 stub 없이 관측): "
+               "포인터 인자로 값을 써 넣을 수 있는 피호출(행이 출력 인자를 설정 · 쓰기 closure 의 포인터 쓰기 · 알 수 없는 "
+               "피호출)·이름 가림·"
+               "stub 없음·조건 안의 쓰기·효과 있는 매크로·평가 순서가 정해지지 않은 식 등은 관측하지 않는다)."
                if _int(mc, "call_condition_decisions") else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
             tone=_tone(bool(_int(mc, "invalidated_pairs")))))

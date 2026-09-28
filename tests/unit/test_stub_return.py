@@ -1,6 +1,6 @@
 """R14 — a sequence that sets ``F() return`` stubs F for that run: the source oracle takes the value (converted to F's
-declared return type) and the clang harness returns the same value, so the claim stays independently checkable. What
-F writes stays unknown. Without the input nothing changes."""
+declared return type) and the clang harness returns the same value, so the claim stays independently checkable. (R38 —
+`test_stub_writes_nothing_r38.py`) a stub writes no global or static. Without the input nothing changes."""
 from __future__ import annotations
 
 import shutil
@@ -61,10 +61,11 @@ def test_without_the_input_a_return_value_stays_unknown(units):
     assert r["outputs"]["g_o"]["reason"].startswith("call_return_value:cal")
 
 
-def test_the_sequence_stub_gives_the_return_value_and_the_callee_effects_stay_unknown(units):
+def test_the_sequence_stub_gives_the_return_value_and_writes_nothing(units):
     r = _run(units["f"], {"cal() return": 5}, ["g_o", "g_s"])
     assert r["outputs"]["g_o"] == {"value": 6, "basis": "assigned"}
-    assert r["outputs"]["g_s"]["reason"].startswith("written_by_callee:cal")   # the stub says nothing about writes
+    # (R38) the stub does not run cal's ``g_side = 1U``: g_side is what the sequence set — here nothing, so unknown
+    assert r["outputs"]["g_s"]["reason"].startswith("initial_value_not_in_inputs:g_side")
     assert r["stubs"] == ["cal"] and any("cal() returns the value set" in a for a in r["assumptions"])
 
 
