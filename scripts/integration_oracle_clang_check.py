@@ -466,7 +466,8 @@ def _base_name(n: str) -> str:
 
 def _declared(scope, name):
     """``(kind, record)`` of the object ``name`` denotes in this unit's scope, or None."""
-    if name in (scope.get("macro_status") or {}):
+    if name in (scope.get("macro_status") or {}) or "." in name:
+        # (R39 review W1) a struct member (``g_t.a``) is no member this harness can declare: its claim is not checked
         return None
     for kind, table in (("global", scope.get("globals") or {}), ("array", scope.get("arrays") or {})):
         rec = table.get(name)

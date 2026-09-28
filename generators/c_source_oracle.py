@@ -44,6 +44,7 @@ ASSUMPTIONS = (
     "fixed-address register objects are distinct objects (writes to one do not change another)",
     "an integer converted to a pointer addresses hardware, not a C object: a write through a pointer reaches only "
     "address-taken objects, arrays and locals whose address escaped",
+    "a write through a struct member array stays inside that member (beyond it is undefined behaviour)",
 )
 
 
@@ -262,6 +263,8 @@ class _Interp:
         self.constants = scope["constants"] if scope.get("constants") is not None else {}
         self.globals = scope.get("globals") or {}
         self.arrays = scope.get("arrays") or {}
+        # (R39) struct objects whose scalar members are objects of their own (``g.a`` in globals, ``g.b`` in arrays)
+        self.struct_globals = scope.get("struct_globals") or {}
         self.macro_status = scope.get("macro_status") or {}
         self.macro_bodies = scope.get("macro_bodies") or {}
         self.macro_params = scope.get("function_like_macro_params") or {}
@@ -399,16 +402,20 @@ class _Interp:
     def initial(self, state, key, base, t, volatile=False):
         if volatile:
             return Unknown("volatile_object:" + base)
-        if self.world is not None and base in self.world.ambiguous:
+        if self.world is not None and (base in self.world.ambiguous or self.world.ambiguous_root(base)):
             # (R16 review W-R2-1) ``static U8 s_init`` in two units: an input named ``s_init`` means neither for sure
             return Unknown("object_name_ambiguous_in_project:" + base)
         if state.havoc_all:
             return Unknown(state.havoc_all)
-        if state.havoc_pointer and (base in self.arrays or base in self.address_taken
+        root = _root_object(base)   # (R39) a member ``g.s.x`` is written whenever its struct ``g`` is
+        if state.havoc_pointer and (base in self.arrays or base in self.address_taken or root in self.address_taken
                                     or (self.world is not None and base in self.world.array_names)):
             return Unknown(state.havoc_pointer)
         if base in state.havoc_bases:
             return Unknown(state.havoc_bases[base])
+        for prefix in _object_prefixes(base):   # ``g.s = h`` made every ``g.s.*`` unknown
+            if prefix in state.havoc_bases:
+                return Unknown(state.havoc_bases[prefix])
         if key in self.inputs:
             return self.check_input(key, t, self.inputs[key])
         return Unknown("initial_value_not_in_inputs:" + key)
@@ -465,8 +472,10 @@ class _Interp:
         for key in list(state.store):
             base = key.split("[", 1)[0]
             # (R16 review C4) with callees interpreted, the store holds objects of other units: judged by all of them
+            # (R39) a struct member is reachable when its struct's address was taken (``&g`` → ``g.a``)
             if base in state.escaped or base in arrays or base in other_arrays or (
-                    (base in globals_ or base in other_globals) and base in self.address_taken):
+                    (base in globals_ or base in other_globals)
+                    and (base in self.address_taken or _root_object(base) in self.address_taken)):
                 state.store[key] = _havocked(state.store[key], reason)
         for base in state.escaped:
             state.havoc_bases.setdefault(base, reason)
@@ -1333,7 +1342,7 @@ class _Interp:
         if obj in (closure.get("writes") or ()):
             return True
         pointer = closure.get("pointer_write") or any(w not in self.globals and w not in self.arrays
-                                                      for w in closure.get("writes") or ())
+                                                      and not self.plain_struct(w) for w in closure.get("writes") or ())
         reachable = escaped or obj in self.arrays or obj in self.address_taken or obj in escaping or (
             obj not in self.globals and obj not in self.arrays)
         return bool(pointer and reachable)
@@ -1408,6 +1417,12 @@ class _Interp:
             target = self.lvalue(state, n, raw, depth)
             return self.read_target(state, target)
         if k == "field_expression":
+            path = self.member_path(n, raw)
+            if path is not None and path in self.globals:
+                g = self.globals[path]
+                return _loaded(self.read_key(state, path, path, g["type"], g.get("volatile")), g["type"])
+            if path is not None and path in self.arrays:
+                return _Val(Unknown("array_value:" + path), None)   # decays to a pointer, as a named array does
             base = self.expression_base_effects(state, n, raw, depth)
             return _Val(Unknown("field_unmodeled:" + base), None)
         if k == "pointer_expression":
@@ -1432,6 +1447,38 @@ class _Interp:
                 self.initializer(state, inner, raw, depth + 1)
             return _Val(Unknown("aggregate_value"), None)
         raise Unsupported("unsupported_expression:" + k)
+
+    def plain_struct(self, name):
+        """(R39) A modeled struct object with no pointer or unmodeled member: a write to it is a write to its members
+        (`havoc_base` covers ``name.*``), never one through something the members do not name."""
+        rec = self.struct_globals.get(name)
+        return rec is not None and not rec.get("opaque_members")
+
+    def member_path(self, n, raw):
+        """(R39) ``g.a`` · ``g.s.x`` · ``(g).a`` on a struct object whose members are modeled (`struct_globals`): the
+        member's flattened name, or None — ``->`` (through a pointer), a parameter or local struct, a macro standing
+        for the object, a subscript on the way (an array of structs) are not modeled members."""
+        parts = []
+        while True:
+            while n.type == "parenthesized_expression" and len(_named(n)) == 1:
+                n = _named(n)[0]
+            if n.type != "field_expression":
+                break
+            if any(c.type == "->" for c in n.children):
+                return None
+            field = n.child_by_field_name("field")
+            if field is None:
+                return None
+            parts.append(_text(field, raw))
+            n = n.child_by_field_name("argument")
+            if n is None:
+                return None
+        if not parts or n.type != "identifier":
+            return None
+        name = _text(n, raw)
+        if name not in self.struct_globals or name in self.macro_status or self.lookup(name) is not None:
+            return None
+        return name + "." + ".".join(reversed(parts))
 
     def expression_base_effects(self, state, n, raw, depth):
         """Evaluate the operands of a member access for their side effects; return a label for the reason."""
@@ -1863,6 +1910,14 @@ class _Interp:
             if is_arrow:
                 self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
                 return ("ptr", "write_through_pointer")
+            path = self.member_path(n, raw)
+            if path is not None:
+                if path in self.globals:
+                    g = self.globals[path]
+                    return ("key", path, g["type"], g.get("volatile", False))
+                # (R39) a member of a modeled struct that is no scalar member (``g.s = h`` — a nested struct, a pointer
+                # or unmodeled member): only what lies under it changes
+                return ("base", path, "field_write:" + path)
             arg = n.child_by_field_name("argument")
             inner = self.lvalue(state, arg, raw, depth + 1)
             if inner[0] == "key":
@@ -1891,6 +1946,13 @@ class _Interp:
         """(key base, element type, length, volatile) of a directly named array; None otherwise."""
         while arg.type == "parenthesized_expression" and len(_named(arg)) == 1:
             arg = _named(arg)[0]
+        if arg.type == "field_expression":
+            # (R39) a member array of a modeled struct object: ``g.b[i]``
+            path = self.member_path(arg, raw)
+            if path is not None and path in self.arrays:
+                a = self.arrays[path]
+                return path, a["type"], a["length"], a.get("volatile", False)
+            return None
         if arg.type != "identifier":
             return None
         name = _text(arg, raw)
@@ -2067,7 +2129,7 @@ class _Interp:
         writes = sorted(info.get("writes") or ())
         # A written name that is not a modeled scalar or array object (a pointer, a struct with pointer members)
         # may be written *through* — to an object the closure cannot name.
-        opaque = [w for w in writes if w not in self.globals and w not in self.arrays]
+        opaque = [w for w in writes if w not in self.globals and w not in self.arrays and not self.plain_struct(w)]
         if info.get("unknown_callees"):
             first = sorted(info["unknown_callees"])[0]
             self.havoc_everything(state, f"callee_effects_unknown:{name}:{first}")
@@ -2315,6 +2377,7 @@ class _World:
         cache = getattr(provider, "linkage_cache", None)
         self.linkage_cache = cache if isinstance(cache, dict) else {}
         self.ambiguous = getattr(provider, "ambiguous_names", None) or frozenset()
+        self.ambiguous_roots = getattr(provider, "ambiguous_struct_roots", None) or frozenset()
         if self.admit(entry.scope) is not None:  # one unit cannot collide with itself
             raise Unsupported("linkage_collision_in_entry_unit")
 
@@ -2336,6 +2399,11 @@ class _World:
                 self.types.setdefault(name, str(rec.get("typename") or ""))
         self.admitted.add(id(scope))
         return None
+
+    def ambiguous_root(self, base):
+        """(R39 review C3) A struct member whose struct names more than one object in the project."""
+        root = _root_object(base)
+        return root != base and root in self.ambiguous_roots
 
     def all_statics(self):
         """Static locals of every activation this evaluation ran or is running."""
@@ -2636,7 +2704,8 @@ def _observe(interp, state, name):
         if state.mode != "return" or state.ret is None:
             return Unknown("no_return_value_on_path")
         return state.ret.v
-    m = re.fullmatch(r"([A-Za-z_]\w*)(?:\[(\d+)\])?", str(name).strip())
+    # (R39) a struct member ``g.s.x`` / ``g.b[2]`` is a modeled object of its own name
+    m = re.fullmatch(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?", str(name).strip())
     if not m:
         return Unknown("observable_form_unmodeled")
     base, index = m.group(1), m.group(2)
@@ -2644,7 +2713,7 @@ def _observe(interp, state, name):
     if base in macro_status:
         return Unknown("observable_is_a_macro:" + base)
     globals_, arrays = interp.globals, interp.arrays
-    if interp.world is not None and base in interp.world.ambiguous:
+    if interp.world is not None and (base in interp.world.ambiguous or interp.world.ambiguous_root(base)):
         return Unknown("observable_name_ambiguous_in_project:" + base)
     if base not in globals_ and base not in arrays and interp.world is not None and base in interp.world.objects:
         # (R16) an object of another translation unit an interpreted callee saw (one linkage — `_World.admit`)
@@ -2662,6 +2731,17 @@ def _observe(interp, state, name):
     if base in (interp.scope.get("unresolved_globals") or {}):
         return Unknown(f"global_unmodeled:{base}:{interp.scope['unresolved_globals'][base]}")
     return Unknown("observable_not_a_modeled_object:" + base)
+
+
+def _root_object(base):
+    """(R39) The object a store key's base belongs to — ``g`` for a struct member ``g.s.x`` or member array ``g.b``."""
+    return base.split(".", 1)[0]
+
+
+def _object_prefixes(base):
+    """(R39) The enclosing objects of a struct member, outermost first: ``g.s.x`` → ``g``, ``g.s``."""
+    parts = base.split(".")
+    return [".".join(parts[:i]) for i in range(1, len(parts))]
 
 
 def _written(state, name):

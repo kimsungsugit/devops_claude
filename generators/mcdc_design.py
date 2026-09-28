@@ -972,6 +972,27 @@ _PATH_FAMILY = ("local_variable_not_input:", "input_modified_before_decision:", 
                 # (R37) a call in a condition: the modeled run observes it where the row stubs the callee (second search)
                 "unsupported_scalar:call_expression")
 _PATH_SAMPLES = 12
+# (R39) a member access in a condition — searched on the modeled run when every access is a modeled struct member
+_FIELD_REASON = "unsupported_scalar:field_expression"
+_MEMBER_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
+
+
+def _fields_modeled(node, raw, scope):
+    """(R39) Every member access in the decision is ``g.a`` / ``g.s.x`` / ``g.b[i]`` on a struct object whose members
+    are modeled (`c_project_context._scope_struct`): the oracle reads it as an object of its own. ``->``, an array of
+    structs or a struct the unit does not flatten keep the expression engine's refusal."""
+    scope = scope or {}
+    structs = scope.get("struct_globals") or {}
+    objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
+    found = False
+    for x in _walk(node):
+        if x.type != "field_expression" or (x.parent is not None and x.parent.type == "field_expression"):
+            continue
+        text = "".join(_text(x, raw).split())
+        if not _MEMBER_RE.fullmatch(text) or text.split(".", 1)[0] not in structs or text not in objects:
+            return False
+        found = True
+    return found
 
 
 def _path_ir(node, raw, atoms):
@@ -1077,6 +1098,15 @@ def _read_names(body, raw):
     (an input only it assigns would spend the search budget for nothing: R2c review round 1 I2)."""
     out = []
     for x in _walk(body):
+        if x.type == "field_expression" and (x.parent is None or x.parent.type != "field_expression"):
+            # (R39 review W2) a struct member read (``g.s.x``) is a name too — the caller keeps the modeled ones
+            text = "".join(_text(x, raw).split())
+            parent = x.parent
+            if _MEMBER_RE.fullmatch(text) and not (
+                    parent is not None and parent.type == "assignment_expression"
+                    and parent.child_by_field_name("left") == x and _text(parent.child_by_field_name("operator"), raw) == "="):
+                out.append(text)
+            continue
         if x.type != "identifier":
             continue
         parent = x.parent
@@ -1204,7 +1234,7 @@ def _stub_return_domain(name, scope, own):
 
 
 def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                 max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False):
+                 max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False, inert_calls=None):
     """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
 
     Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
@@ -1219,8 +1249,11 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     ``extra_domains``: row inputs searched beyond those with a declared domain (R36 — the stub return values of the
     second search, `_stub_path_pass`); ``strict_steps``: every run stops at what the step budget has left;
     ``skip_unobservable``: a decision the run cannot observe on any vector (``effectful_condition``,
-    ``decision_node_not_found``) is not searched around (R37 — the call-in-condition decisions' own search)."""
+    ``decision_node_not_found``) is not searched around (R37 — the call-in-condition decisions' own search);
+    ``inert_calls``: the runs may judge a stubbed call in a condition inert (`observe_decisions` ``inert_stub_calls``) —
+    by default what ``skip_unobservable`` says (R37's call group); R39's member-access group skips without it."""
     from generators import c_source_oracle as cso
+    inert = skip_unobservable if inert_calls is None else inert_calls
     if not cso.scope_matches(unit):
         for decision, _node, _raw in candidates:
             _refuse_path(decision, "project_scope_missing_or_mismatched")
@@ -1321,7 +1354,7 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             chunk = todo[start:start + max(0, min(16, max_runs - len(cache)))]
             limit = max(0, max_steps - spent[0]) if strict_steps else None
             for v, r in zip(chunk, cso.observe_decisions(unit, chunk, plan, guards, step_limit=limit,
-                                                         inert_stub_calls=skip_unobservable), strict=True):
+                                                         inert_stub_calls=inert), strict=True):
                 cache[vkey(v)] = (v, r)
                 order.append(v)
                 added.append(v)
@@ -1436,7 +1469,7 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
 
 
 def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                    max_steps, skip_unobservable=False):
+                    max_steps, skip_unobservable=False, inert_calls=None):
     """(R36) A second search for the decisions the first did not design, where a value a call returned may be what it
     lacked (``r = F(); if ((r == 3U) && …)``): the row inputs ``F() return`` — the values the SUTS row injects into
     F's stub (R14, `_stub_return_domain`) — join the search. Merged condition by condition: every decision keeps the
@@ -1464,7 +1497,7 @@ def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selecte
     try:
         _path_design(unit, {"domains": {}}, retry, row_names, dict(domains), scope, {}, max_conditions=max_conditions,
                      max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True,
-                     skip_unobservable=skip_unobservable)
+                     skip_unobservable=skip_unobservable, inert_calls=inert_calls)
     except Exception as exc:  # noqa: BLE001 — the first search's result stands (review round 2 I1); the reason is kept
         for d, _n, _r in retry:
             d.clear()
@@ -1802,7 +1835,9 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 decision["reason"] = "no_pair_in_candidate_domain" if decision["search_complete"] else "candidate_budget_exhausted"
         except (Unsupported, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
             decision["reason"] = str(exc)
-            if extra and node is not None and str(exc).startswith(_PATH_FAMILY) and index < max_decisions:
+            if extra and node is not None and index < max_decisions and (
+                    str(exc).startswith(_PATH_FAMILY)
+                    or (str(exc).startswith(_FIELD_REASON) and _fields_modeled(node, raw, scope))):
                 path_candidates.append((decision, node, raw))
     if path_candidates:
         try:
@@ -1811,15 +1846,20 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             # cost steps, and the budget those decisions had in R36 is theirs unchanged
             calls = [c for c in path_candidates
                      if str(c[0].get("reason") or "").startswith("unsupported_scalar:call_expression")]
-            call_ids = {id(c[0]) for c in calls}
-            for group, late in (([c for c in path_candidates if id(c[0]) not in call_ids], False), (calls, True)):
+            # (R39) a condition on a struct member (``g.a``) reaches the path search only since R39: its own group too
+            fields = [c for c in path_candidates if str(c[0].get("reason") or "").startswith(_FIELD_REASON)]
+            late_ids = {id(c[0]) for c in calls + fields}
+            groups = (([c for c in path_candidates if id(c[0]) not in late_ids], False, False), (calls, True, True),
+                      (fields, True, False))
+            for group, late, inert in groups:
                 if not group:
                     continue
                 _path_design(unit, report, group, row_names, domains, scope, selected, max_conditions=max_conditions,
-                             max_runs=max_path_runs, max_steps=max_path_steps, skip_unobservable=late)
+                             max_runs=max_path_runs, max_steps=max_path_steps, skip_unobservable=late,
+                             inert_calls=inert)
                 _stub_path_pass(unit, report, group, row_names, domains, scope, selected,
                                 max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
-                                skip_unobservable=late)
+                                skip_unobservable=late, inert_calls=inert)
         except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":

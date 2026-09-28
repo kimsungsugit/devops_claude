@@ -115,7 +115,9 @@ def test_names_come_from_the_reasons_including_nested_ones():
                                                  "g_r": {"reason": "initial_value_not_in_inputs:m[1][2]"},
                                                  "g_s": {"reason": "undefined_behavior:signed_overflow"}}}]
     got = source_read_names(seqs)
-    assert got == {"g_x": {"slots": 2, "sequences": [1, 2]}, "g_buf[3]": {"slots": 1, "sequences": [1]}}
+    # (R39) a struct member path is a name (the reference sets ``lin_tl_rx_queue.queue_header``); a 2-D subscript is not
+    assert got == {"g_x": {"slots": 2, "sequences": [1, 2]}, "g_buf[3]": {"slots": 1, "sequences": [1]},
+                   "s.member": {"slots": 1, "sequences": [2]}}
 
 
 def test_only_program_objects_of_the_unit_are_inputs():

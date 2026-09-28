@@ -3152,14 +3152,16 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
 # 값을 주지 않았다. 시험 입력 목록(설계서 입력 표·소스 분석)이 그 객체를 빠뜨렸다는 뜻이다. 실측(R17 확장 생성본 · R4 하네스):
 # 정본만 판별한 변이 HDPDM01 347 중 244 · KJPDS02_PV 257 중 124 가 이런 함수에 있다 — 예: HDPDM01 SwUDS v1.07 이
 # `s_MoveStartClose_GainMeasure` 의 입력으로 **Open** gain 을 적었고 소스는 **Close** gain 을 읽는다(정본 SUTS 는 소스를 따랐다).
-_SOURCE_READ_RE = re.compile(r"initial_value_not_in_inputs:([A-Za-z_]\w*(?:\[\d+\])?)(?![\w.\[])")
+# (R39) a struct member (``g.a`` · ``g.s.x`` · ``g.b[2]``) is a name too — the reference sets it by that name
+_SOURCE_READ_RE = re.compile(r"initial_value_not_in_inputs:([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?)(?![\w.\[])")
 _SOURCE_READ_ROUNDS = 3
 
 
 def source_read_names(sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """행이 값을 주지 않았는데 함수가 초기값을 읽은 이름 → {"slots": 칸 수, "sequences": [행 번호…]}(기대값 근거의 사유에서).
 
-    멤버 경로(`s.a`)·2차원 첨자는 이름으로 싣지 않는다(시험 입력 한 칸으로 줄 수 있는 모양이 아니다)."""
+    2차원 첨자는 이름으로 싣지 않는다(시험 입력 한 칸으로 줄 수 있는 모양이 아니다). 구조체 멤버 경로(`g.a`)는 R39 부터
+    싣는다 — 정본이 `lin_tl_rx_queue.queue_header` 처럼 입력 한 칸으로 쓰고, oracle 이 멤버를 제 이름의 객체로 읽는다."""
     out: Dict[str, Dict[str, Any]] = {}
     for seq in sequences:
         for ev in (seq.get("expected_evidence") or {}).values():
@@ -3526,6 +3528,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "stub_search_decisions": 0, "stub_search_improved": 0, "stub_search_errors": 0,
                            # (R37) 조건 안에 호출이 있는 결정 — 함수 실행 모델로 따로(별도 예산) 탐색한 결정 · 그중 설계
                            "call_condition_decisions": 0, "call_condition_designed": 0,
+                           # (R39) 구조체 멤버(`g.a`)를 읽는 조건의 결정 — 따로(별도 예산) 탐색한 결정 · 그중 설계
+                           "member_condition_decisions": 0, "member_condition_designed": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     for unit in units:
@@ -3559,6 +3563,10 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                     str(d.get("static_reason") or "").startswith("unsupported_scalar:call_expression"):
                 out["call_condition_decisions"] += 1
                 out["call_condition_designed"] += status == "designed"
+            if d.get("evaluation") == "source_path" and \
+                    str(d.get("static_reason") or "").startswith("unsupported_scalar:field_expression"):
+                out["member_condition_decisions"] += 1
+                out["member_condition_designed"] += status == "designed"
             if d.get("stub_inputs"):
                 out["stub_input_decisions"] += 1
             for pair in d.get("pairs") or []:

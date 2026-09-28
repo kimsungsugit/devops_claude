@@ -1461,7 +1461,10 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R17) v39: project_context 스키마 11(빌드 설정 -D 판독을 더 좁게 — 다른 -D 표기·C++ 도구 불일치면 증거 아님).
 # (R16b) v40: project_context 스키마 12(`typedef unsigned char bool;`·`typedef … int8_t;` 를 기록 — KJPDS02 PE_Types.h 의
 #   bool 이 `_Bool` 로 읽혀 2 가 1 이 됐다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v40"
+# (R39) v41: project_context 스키마 13(구조체 멤버 목록 — 구조체 전역의 스칼라 멤버를 `g.a` 객체로 평탄화).
+# (R39 review round 2) v42: project_context 스키마 14(파스 오류·비트필드 멤버가 있는 구조체 본문은 멤버를 저장하지 않음 —
+#   v41 캐시는 1차 코드 모양이라 거부).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v42"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

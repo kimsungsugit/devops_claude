@@ -134,6 +134,33 @@ def _input_int(value, constants, function_like=()):
     return value if type(value) is int else None
 
 
+def _struct_text(root, members, globals_, arrays, enum_base="int"):
+    """(R39) ``struct { U8 a; U16 b[4]; struct { U8 x; } s; }`` from the members of a flattened struct object."""
+    tree: dict = {}
+    for path in members:
+        node = tree
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = path
+
+    def render(node):
+        out = []
+        for name, sub in node.items():
+            if isinstance(sub, dict):
+                out.append(f"struct {{ {render(sub)} }} {name};")
+                continue
+            full = f"{root}.{sub}"
+            if full in globals_:
+                out.append(f"{_base_type(globals_[full]['type'], enum_base)} {name};")
+            else:
+                a = arrays[full]
+                out.append(f"{_base_type(a['type'], enum_base)} {name}[{a['length']}];")
+        return " ".join(out)
+
+    return f"struct {{ {render(tree)} }}"
+
+
 def _fits(value, t):
     from generators import c_project_context as cpc
     if not isinstance(value, int) or not isinstance(t, dict) or cpc.is_float(t):
@@ -272,6 +299,10 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                       if m.group(1) not in status and m.group(1) not in _KEYWORDS and m.group(1) not in types
                       and m.group(1) not in globals_ and m.group(1) not in arrays and not m.group(1).startswith("__oracle")})
     used_globals = [g for g in sorted(tokens) if (g in globals_ or g in arrays) and g not in status]
+    # (R39) struct objects the body names whose members the oracle models (``g.a`` objects): a local struct of those
+    #   members stands for each — a member the oracle does not model is absent, so code using it does not compile
+    struct_globals = scope.get("struct_globals") or {}
+    used_structs = [g for g in sorted(tokens) if g in struct_globals and g not in status]
     checks: dict[int, tuple] = {}
     closure = (scope.get("effects") or {}).get("functions") or {}
 
@@ -309,6 +340,20 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                         elems = [inputs.get(f"{g}[{k}]") if _fits(inputs.get(f"{g}[{k}]"), a["type"]) else _fill_for(a["type"], fill)
                                  for k in range(a["length"])]
                     lines.append(f"  {_base_type(a['type'], enum_base)} {g}[{a['length']}] = {{{', '.join(str(v) for v in elems)}}};")
+            for g in used_structs:
+                members = struct_globals[g].get("members") or []
+                lines.append(f"  {_struct_text(g, members, globals_, arrays, enum_base)} {g} = {{}};")
+                for path in members:
+                    full = f"{g}.{path}"
+                    if full in globals_:
+                        t = globals_[full]["type"]
+                        value = inputs.get(full)
+                        lines.append(f"  {full} = {value if _fits(value, t) else _fill_for(t, fill)};")
+                        continue
+                    a = arrays[full]
+                    for k in range(a["length"]):
+                        value = inputs.get(f"{full}[{k}]")
+                        lines.append(f"  {full}[{k}] = {value if _fits(value, a['type']) else _fill_for(a['type'], fill)};")
             args = []
             for i, (name, _decl, scalar, typ) in enumerate(params):
                 if scalar:
@@ -395,7 +440,9 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
     if len(checks) != len(tags):
         return None, {}, "assertion_lines_not_unique", {}
     meta = {"callees": bool(callees), "enum": any(isinstance(types.get(x), dict) and types[x].get("enum") for x in tokens)
-            or any((globals_.get(g) or arrays.get(g) or {}).get("type", {}).get("enum") for g in used_globals)}
+            or any((globals_.get(g) or arrays.get(g) or {}).get("type", {}).get("enum") for g in used_globals)
+            or any((globals_.get(f"{g}.{m}") or arrays.get(f"{g}.{m}") or {}).get("type", {}).get("enum")
+                   for g in used_structs for m in struct_globals[g].get("members") or [])}
     return text, checks, "", meta
 
 

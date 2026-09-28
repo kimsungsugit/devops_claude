@@ -26,7 +26,7 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 12  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 14  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -44,6 +44,11 @@ SCHEMA_VERSION = 12  # 3: per-file `prototypes`; closure `macros` (tree union)
 #    `undecided_macro_view`). The closure is built from the context each time scopes are built (`build_scopes`), never
 #    stored with it: a cached context gets the new fields as it is. Bumping here without the source-stage cache version
 #    (`backend/helpers/uds.py` `_SOURCE_SECTIONS_SCHEMA_VERSION`) makes every cached context refuse its scopes.
+# 13 (R39): per-file `structs` (struct/union member lists, `_collect_struct`) and a global's `struct_key` — a scope
+#    flattens a struct object's scalar members into `globals`/`arrays` (`g.a`, `g.b`) and lists it in `struct_globals`.
+#    Paired with `_SOURCE_SECTIONS_SCHEMA_VERSION` v41.
+# 14 (R39 review round 2): a struct body with a parse error in a member, or with bit-fields, keeps no members (``hidden`` /
+#    ``bit_fields``) — a context cached by 13 lacks them. Paired with v42.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -427,6 +432,7 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
     root = parser.parse(raw).root_node
     rec: dict[str, Any] = {"path": path, "includes": [], "system_includes": [], "typedefs": {}, "macros": {}, "undefs": [],
                            "enums": {}, "enumerators": {}, "globals": {}, "functions": {}, "parse_error": root.has_error,
+                           "structs": {},   # (R39) struct/union bodies by key and typedef name (`_collect_struct`)
                            "sha256": hashlib.sha256(raw).hexdigest(), "events": _events(root.named_children, raw),
                            # (R17) identifiers of #if/#ifdef/#elif inside function bodies (pp_condition decides them)
                            "body_condition_names": _body_condition_names(root, raw),
@@ -464,6 +470,10 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
             def is_name(d):   # a primitive only for the names a project may typedef (a misparse of
                 return d != typ and (d.type == "type_identifier" or   # ``typedef FAR unsigned char X;`` is no ``char``)
                                      (d.type == "primitive_type" and _text(d, raw) in _PROJECT_MAY_TYPEDEF))
+            if aggregate:
+                _collect_struct(typ, raw, rec, line, pos, conditional,
+                                names=[_text(d, raw) for d in node.named_children if is_name(d)],
+                                quals={_text(c, raw) for c in node.named_children if c.type == "type_qualifier"})
             for d in node.named_children:
                 if is_name(d) and aggregate:
                     rec["typedefs"].setdefault(_text(d, raw), []).append({"base": "", "shape": "struct", "line": line,
@@ -485,9 +495,12 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
                                                                      "pos": pos, "conditional": conditional})
         elif node.type == "enum_specifier":
             _collect_enum(node, raw, rec, conditional, line, pos)
+        elif node.type in {"struct_specifier", "union_specifier"}:
+            _collect_struct(node, raw, rec, line, pos, conditional)   # (R39) ``struct tag { … };``
         elif node.type == "declaration":
             typ = node.child_by_field_name("type")
             _collect_enum(typ, raw, rec, conditional, line, pos)
+            struct_key = _collect_struct(typ, raw, rec, line, pos, conditional)   # (R39) "" unless a struct/union
             quals = {_text(c, raw) for c in node.named_children if c.type in {"type_qualifier", "storage_class_specifier"}}
             if typ is not None and typ.type in {"struct_specifier", "union_specifier"}:
                 typename = "struct"
@@ -524,6 +537,7 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
                             re.findall(r"\b[A-Za-z_]\w*\b", _text(args, raw)) if args is not None else [])
                 rec["globals"].setdefault(name, []).append({
                     "type": typename, "shape": shape, "line": line, "pos": pos, "conditional": conditional,
+                    "struct_key": struct_key,
                     "extern": "extern" in quals, "static": "static" in quals,
                     "volatile": "volatile" in quals, "const": "const" in quals,
                     "initialized": d.type == "init_declarator",
@@ -739,6 +753,78 @@ def _collect_enum(node, raw, rec, conditional, line, pos=0):
         value = e.child_by_field_name("value")
         members.append({"name": name, "value": " ".join(_text(value, raw).split()) if value is not None else None})
     rec["enums"].setdefault(key, []).append({"members": members, "line": line, "pos": pos, "conditional": conditional})
+
+
+def _field_name(node, raw):
+    """The member a field declarator names (``a``, ``*p``, ``b[4]``, ``(*f)(void)``), or ""."""
+    while node is not None and node.type != "field_identifier":
+        if node.type == "parenthesized_declarator":   # ``(*f)`` — the grammar gives its content no field name
+            node = node.named_children[0] if node.named_children else None
+            continue
+        node = node.child_by_field_name("declarator")
+    return _text(node, raw) if node is not None else ""
+
+
+def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
+    """(R39) Record a struct/union body's members under its key — ``struct tag`` / ``union tag``, or one key per anonymous
+    body — and an alias to the key under each typedef name in ``names`` (with the typedef's own qualifiers ``quals``:
+    ``typedef volatile struct {…} VT;`` makes every ``VT`` object volatile — review C1). Returns the key ("" when
+    ``spec`` is not a struct/union specifier). Members keep their declared type text, array dimensions (outermost
+    first), shape (``scalar`` · ``array`` · the declarator kind otherwise) and bit-field / qualifier flags; an anonymous
+    nested body is recorded under its own key, which is then the member's type. A body with anything but plain member
+    declarations — an ``#if`` around a member, an unnamed struct/union member, a parse error — is ``hidden``: its
+    members cannot all be named (review C2). A union's members are not kept (a union is never flattened)."""
+    if spec is None or spec.type not in {"struct_specifier", "union_specifier"}:
+        return ""
+    kind = "union" if spec.type == "union_specifier" else "struct"
+    tag = spec.child_by_field_name("name")
+    key = f"{kind} {_text(tag, raw)}" if tag is not None else f"{kind} @{rec['path']}:{spec.start_byte}"
+    structs = rec.setdefault("structs", {})
+    alias = {"alias": key, "volatile": "volatile" in quals, "const": "const" in quals, "line": line, "pos": pos,
+             "conditional": conditional}
+    for n in names:
+        structs.setdefault(n, []).append(alias)
+    body = spec.child_by_field_name("body")
+    if body is None:
+        return key
+    members, hidden = [], False
+    for fd in body.named_children:
+        if fd.type == "comment":
+            continue
+        if fd.type != "field_declaration" or fd.has_error:
+            hidden = True   # ``#if FEATURE`` around a member, a parse error, …
+            continue
+        ft = fd.child_by_field_name("type")
+        fquals = {_text(c, raw) for c in fd.named_children if c.type == "type_qualifier"}
+        if ft is not None and ft.type in {"struct_specifier", "union_specifier"}:
+            typename = _collect_struct(ft, raw, rec, line, pos, conditional)
+        elif ft is not None and ft.type == "enum_specifier":
+            etag = ft.child_by_field_name("name")
+            typename = "enum " + _text(etag, raw) if etag is not None else f"enum @{rec['path']}:{ft.start_byte}"
+        else:
+            typename = " ".join(_text(ft, raw).split()) if ft is not None else ""
+        bitfield = any(c.type == "bitfield_clause" for c in fd.named_children)
+        declarators = fd.children_by_field_name("declarator")
+        if not declarators:
+            hidden = True   # an unnamed struct/union member (C11 anonymous member): its members are this struct's
+            continue
+        for d in declarators:
+            dims, inner = [], d
+            while inner is not None and inner.type == "array_declarator":
+                size = inner.child_by_field_name("size")
+                dims.append(strip_comments(_text(size, raw)).strip() if size is not None else "")
+                inner = inner.child_by_field_name("declarator")
+            if inner is not None and inner.type == "field_identifier":
+                shape = "array" if dims else "scalar"
+            else:
+                shape = inner.type.replace("_declarator", "") if inner is not None else "unknown"
+            members.append({"name": _field_name(d, raw), "type": typename, "dims": list(reversed(dims)), "shape": shape,
+                            "bitfield": bitfield, "volatile": "volatile" in fquals, "const": "const" in fquals})
+    bit_fields = any(m["bitfield"] for m in members)   # never flattened: the members are not kept (review I-e)
+    structs.setdefault(key, []).append({"union": kind == "union", "hidden": hidden, "bit_fields": bit_fields,
+                                        "members": [] if kind == "union" or bit_fields else members,
+                                        "line": line, "pos": pos, "conditional": conditional})
+    return key
 
 
 def _function_effects(fn, raw):
@@ -1452,6 +1538,10 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                              "types": {}, "unresolved_types": {}, "constants": {}, "unresolved_constants": {},
                              "enum_types": {}, "globals": {}, "unresolved_globals": {}, "function_like_macros": [],
                              "function_like_macro_bodies": {}, "function_like_macro_params": {}, "arrays": {},
+                             "struct_globals": {},   # (R39) struct objects whose members are modeled (`_scope_struct`)
+                             # (R39 review C3) the objects this unit does not model (a struct it cannot flatten among
+                             # them) → internal linkage: another unit's modeled member of the same root may not be it
+                             "unmodeled_object_linkage": {},
                              "missing_includes": [], "system_includes": [], "files": []}
     if path not in files:
         scope["status"] = "file_not_in_project_context"
@@ -1487,6 +1577,12 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         for name, defs in rec["typedefs"].items():
             raw_typedefs.setdefault(name, []).extend(visible(p, defs))
     raw_typedefs = {k: v for k, v in raw_typedefs.items() if v}
+    # (R39) struct/union bodies this unit sees (by ``struct tag``, anonymous body key and typedef name)
+    raw_structs: dict[str, list[dict]] = {}
+    for p, rec in recs:
+        for key, defs in (rec.get("structs") or {}).items():
+            raw_structs.setdefault(key, []).extend(visible(p, defs))
+    raw_structs = {k: v for k, v in raw_structs.items() if v}
     # (R35 review round 4 C4) the typedef names this unit sees, none defined under an undecided #if: a word a macro body
     # uses as a cast is one only if it is here. Fixed at build time — ``unresolved_types`` also holds conditional
     # typedefs and grows with every name a constant evaluation tried as a type (``type_undeclared:X``)
@@ -1730,8 +1826,14 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     # register header, in every unit — was most of the scope cost). Lookups populate `unresolved_constants`.
     scope["constants"] = _LazyConstants(constant)
 
+    # (R39 review round 3 W-r3) every name a visible file defines or undefines as a macro — ``#define MEMBERS …`` used in a
+    # struct body and ``#undef``-ed after it is not in the end-of-unit table, yet it named the members
+    every_macro_name = {n for _p, rec in recs for n in (rec.get("macros") or {})} | \
+        {u for _p, rec in recs for u in (rec.get("undefs") or [])}
+
     # globals visible to this translation unit
     for name, defs in global_defs.items():
+        is_static = any(x.get("static") for x in defs)
         try:
             if name in macro_defs or name in enumerators:
                 raise Unresolved("name_is_also_a_macro_or_constant")
@@ -1742,6 +1844,9 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             d = defs[0]
             if d["shape"] == "array" and d["type"] != "struct":
                 _scope_array(scope, name, defs, pp, type_of, agreeing, parser)
+            if d["shape"] == "scalar":
+                _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing,   # (R39) no-op unless a struct
+                              macro_names=every_macro_name)
             if d["shape"] != "scalar":
                 raise Unresolved("global_not_scalar:" + d["shape"])
             if d["type"] == "struct":
@@ -1771,8 +1876,106 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                                       "volatile": volatile, "const": const, "static": any(x.get("static") for x in defs)}
         except Unresolved as exc:
             scope["unresolved_globals"][name] = str(exc)
+            scope["unmodeled_object_linkage"][name] = is_static
     scope["status"] = "resolved" if not scope["missing_includes"] else "partial"
     return scope
+
+
+def _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing, macro_names=()):
+    """(R39) A global of a struct type the unit sees the body of: each scalar member — nested structs flattened, one-
+    dimensional member arrays — becomes an object of its own, ``g.a`` in ``globals`` and ``g.b`` in ``arrays``: the
+    name a test sequence sets it by (the reference writes ``lin_tl_rx_queue.queue_header``). The struct object itself
+    stays unresolved (a whole-struct read or write is not modeled). Not modeled at all: a union (members alias), a
+    bit-field member, a ``const`` object, an array of structs, a body seen more than once or under an undecided #if,
+    an unreadable include. A pointer member, a member of an unresolved type or shape is left out and flags the struct
+    ``opaque_members`` (a write to the object may go through something no member names)."""
+    d = defs[0]
+    words = [w for w in str(d["type"]).split() if w not in {"const", "volatile"}]
+    key = d.get("struct_key") if d["type"] == "struct" else " ".join(words)
+    if not key or key not in raw_structs or pp["gaps"] or any(x.get("const") for x in defs) \
+            or any(x.get("dims") for x in defs):
+        return
+    unmodeled: list[str] = []
+
+    def walk(k, prefix, volatile, depth):
+        """The scalar members under ``k`` → {path: (kind, record)}; Unresolved when the body cannot be flattened."""
+        entries = raw_structs.get(k) or []
+        if depth > 4 or len(entries) != 1 or entries[0].get("conditional"):
+            raise Unresolved("struct_definition_missing_or_ambiguous")
+        e = entries[0]
+        if e.get("alias"):
+            if e.get("const"):
+                raise Unresolved("const_struct_type")   # ``typedef const struct {…} CT;`` (review C1)
+            return walk(e["alias"], prefix, volatile or bool(e.get("volatile")), depth + 1)
+        if e.get("union"):
+            raise Unresolved("union")
+        if e.get("hidden"):
+            raise Unresolved("struct_body_hides_members")   # ``#if`` around a member, an unnamed member (review C2)
+        if e.get("bit_fields"):
+            raise Unresolved("bit_field_member")
+        out: dict[str, tuple[str, dict]] = {}
+        for m in e["members"]:
+            if not m.get("name"):
+                raise Unresolved("unnamed_member")
+            if m["name"] in macro_names or any(w in macro_names for w in str(m.get("type") or "").split()):
+                # (review round 2 W2) ``U8 MEMBERS;`` with ``#define MEMBERS a; U8 *hp``: the text is not the members
+                raise Unresolved("struct_member_named_by_macro")
+            path = f"{prefix}.{m['name']}" if prefix else m["name"]
+            vol = volatile or bool(m.get("volatile"))
+            core = " ".join(w for w in str(m.get("type") or "").split() if w not in {"const", "volatile"})
+            if m.get("const") or m.get("shape") not in {"scalar", "array"}:
+                unmodeled.append(path)   # a const or pointer / function-pointer member: no input slot
+                continue
+            if core in raw_structs:
+                if m.get("dims"):
+                    unmodeled.append(path)   # an array of structs
+                    continue
+                try:
+                    out.update(walk(core, path, vol, depth + 1))
+                except Unresolved:
+                    unmodeled.append(path)   # a nested struct that cannot be flattened: none of its members
+                continue
+            try:
+                t = type_of(m["type"])
+            except Unresolved:
+                unmodeled.append(path)
+                continue
+            vol = vol or "volatile" in (t.get("qualifiers") or [])
+            dims = m.get("dims") or []
+            if not dims:
+                out[path] = ("scalar", {"type": t, "typename": core, "volatile": vol})
+                continue
+            length = None
+            if len(dims) == 1 and dims[0]:
+                try:
+                    value, lt, _extra = agreeing(dims[0], macro_body=False)
+                    if not is_float(lt) and type(value) is int and value > 0:
+                        length = value
+                except Unresolved:
+                    length = None
+            if length is None:
+                unmodeled.append(path)   # a multi-dimensional member or one whose length is not a known constant
+                continue
+            out[path] = ("array", {"type": t, "typename": core, "volatile": vol, "length": length})
+        return out
+
+    try:
+        leaves = walk(key, "", any(x.get("volatile") for x in defs), 0)
+    except Unresolved:
+        return
+    if not leaves:
+        return
+    static = any(x.get("static") for x in defs)
+    for path, (kind, r) in leaves.items():
+        rec = {"type": r["type"], "typename": r["typename"], "file": d["file"], "line": d["line"],
+               "volatile": r["volatile"], "const": False, "static": static, "member_of": name}
+        if kind == "scalar":
+            scope["globals"][f"{name}.{path}"] = rec
+        else:
+            scope["arrays"][f"{name}.{path}"] = {**rec, "length": r["length"], "values": None}
+    scope["struct_globals"][name] = {"typename": key, "file": d["file"], "line": d["line"], "static": static,
+                                     "members": sorted(leaves), "unmodeled_members": unmodeled[:20],
+                                     "opaque_members": bool(unmodeled)}
 
 
 def _scope_array(scope, name, defs, pp, type_of, agreeing, parser):

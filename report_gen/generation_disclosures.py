@@ -564,6 +564,12 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                "피호출)·이름 가림·"
                "stub 없음·조건 안의 쓰기·효과 있는 매크로·평가 순서가 정해지지 않은 식 등은 관측하지 않는다)."
                if _int(mc, "call_condition_decisions") else "")
+            # (R39) conditions on struct members: the members are inputs of their own name (``g.a``)
+            + (f" 구조체 멤버(`g.a` — 정본 표기와 같은 입력 이름)를 읽는 조건의 결정 "
+               f"{_show(_int(mc, 'member_condition_decisions'))} 도 따로, 별도 예산으로 탐색했다(설계 "
+               f"{_show(_int(mc, 'member_condition_designed'))} — 포인터를 거친 멤버(`p->a`)·구조체 배열·공용체·"
+               "비트필드 멤버는 모델링하지 않는다)."
+               if _int(mc, "member_condition_decisions") else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
             tone=_tone(bool(_int(mc, "invalidated_pairs")))))
 

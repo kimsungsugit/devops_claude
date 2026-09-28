@@ -68,6 +68,18 @@ class CalleeProvider:
                 for name, rec in table.items():
                     owners.setdefault(name, set()).add(unit if rec.get("static") else "")
         self.ambiguous_names = frozenset(n for n, o in owners.items() if len(o) > 1)
+        # (R39 review C3) a struct member ``s.a`` names its struct ``s``: ambiguous when ``s`` denotes more than one object
+        # — a modeled struct here and an internal-linkage object (flattened or not) of that name in another unit
+        roots: dict[str, set[str]] = {}
+        modeled_roots: set[str] = set()
+        for unit, scope in scopes.items():
+            for name, rec in (scope.get("struct_globals") or {}).items():
+                roots.setdefault(name, set()).add(unit if rec.get("static") else "")
+                modeled_roots.add(name)
+            for name, static in (scope.get("unmodeled_object_linkage") or {}).items():
+                # (review round 2 C3') an external-linkage object counts too (owner "": one object for every unit)
+                roots.setdefault(name, set()).add(unit if static else "")
+        self.ambiguous_struct_roots = frozenset(n for n in modeled_roots if len(roots.get(n) or ()) > 1)
 
     def definition(self, name: str, caller_unit: str):
         key = (name, caller_unit)
