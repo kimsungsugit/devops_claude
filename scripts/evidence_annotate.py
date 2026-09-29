@@ -79,6 +79,9 @@ LEGEND = [("clang_constexpr_agree", "clang 상수 평가(16비트 int 대상)가
            "실제 동작은 확인하지 않았다)"),
           ("clang_mismatch / clang_eval_error", "모순 — 기대값을 낸 모델이 그 자리에서 틀렸다"),
           ("unchecked:<사유>", "하네스가 평가하지 못했다(판정 아님). source_changed = 행을 만든 소스와 지금 소스가 다르다"),
+          ("unchecked:output_not_named_by_body", "평가는 됐지만 검사가 아니다 — 함수 코드가 이 출력을 이름 부르지 않아 "
+           "clang 은 하네스가 넣은 값을 돌려줄 뿐이다. 이 함수의 관측 대상이 맞는지 검토할 것(보고서 "
+           "outputs_not_named_by_body)"),
           ("—", "확정값이 아닌 행 — 확인할 값이 없다"),
           ("(공통)", "타깃 실행이 아니다. Execution 열은 not_run 그대로다.")]
 

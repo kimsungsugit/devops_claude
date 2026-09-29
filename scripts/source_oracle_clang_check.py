@@ -32,6 +32,14 @@ Independence and its limits:
   signed narrowing and ``<<`` of negatives) the oracle claims nothing, so no claim rests on the difference;
 * a unit the harness cannot compile (register structs, ``static`` locals — not allowed in C++20 constexpr,
   vendor syntax) is counted **unchecked**, never agreed;
+* (R41) three spellings are the harness's, not the source's: ``enum TAG`` without a typedef is a typedef of the
+  underlying type (varied like any enum); a ``<stdint.h>`` name the scope leaves unresolved (the project typedefs it
+  under ``#ifndef uint16_t``) is the standard type the target's widths fix — only where every permitted underlying
+  type gives the same values (`_stdint_spelling`), else the unit stays unchecked (a width ``static_assert`` that fails
+  makes the unit ``unchecked:stdint_width_disagrees_with_target``, never a contradiction); an output global the body
+  never names is declared with the claim's input value (else the fill) so the unit compiles and its other outputs are
+  checked — that output itself is ``unchecked:output_not_named_by_body`` (clang would only hand back the harness's own
+  value; a mismatch there stays a mismatch) and listed in ``outputs_not_named_by_body`` for review;
 * the fill values are a sample (0/90/201), not a proof of independence from unset state;
 * C++ sequences some things C leaves unsequenced (``=`` operands since C++17, list-initialization items): the
   oracle refuses those in C, so no claim rests on the difference — but clang cannot catch that refusal missing;
@@ -161,6 +169,45 @@ def _struct_text(root, members, globals_, arrays, enum_base="int"):
     return f"struct {{ {render(tree)} }}"
 
 
+_COMMENT_OR_LITERAL = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
+
+
+def _code_text(text):
+    """``text`` with comments and string / character literals blanked (R41 review I-R2-1)."""
+    return _COMMENT_OR_LITERAL.sub(" ", text)
+
+
+def _untagged(text, enum_tags):
+    """``enum TAG`` (not a definition ``enum TAG {``) → the harness typedef ``__oracle_enum_TAG``: C++ sees an undefined
+    ``enum TAG`` as a forward reference it forbids. The typedef is the underlying type the enum-base loop varies."""
+    if not enum_tags:
+        return text
+    pattern = re.compile(r"\benum\s+(" + "|".join(re.escape(t) for t in sorted(enum_tags, key=len, reverse=True))
+                         + r")\b(?!\s*\{)")
+    return pattern.sub(lambda m: "__oracle_enum_" + m.group(1), text)
+
+
+_STDINT_NAMES = {"int8_t": (8, True), "uint8_t": (8, False), "int16_t": (16, True), "uint16_t": (16, False),
+                 "int32_t": (32, True), "uint32_t": (32, False), "int64_t": (64, True), "uint64_t": (64, False)}
+_WIDTH_TAG = "__oracle_stdint_width_"
+# (R41 review W1) an output the body never names: what clang returns for it is the value the harness put there
+UNNAMED_OUTPUT = "output_not_named_by_body"
+
+
+def _stdint_spelling(name, widths):
+    """(R41) The C++ type for a ``<stdint.h>`` name the unit leaves unresolved (the project's typedef sits under
+    ``#ifndef uint16_t`` — a reserved name the model does not decide), or None. Only a type the target's widths fix:
+    exactly one standard type of that width, or ``short`` and ``int`` of one width — they promote alike (C11 6.3.1.1p2),
+    so every permitted underlying type gives the same values. Two candidates of other ranks (``int``/``long`` of one
+    width) give conversions of different types — the values agree, but the rule stays with a type the widths fix: None
+    (the unit stays unchecked; conservative)."""
+    bits, signed = _STDINT_NAMES[name]
+    kinds = [k for k in ("char", "short", "int", "long", "long long") if widths.get(k) == bits]
+    if not kinds or (len(kinds) > 1 and set(kinds) != {"short", "int"}):
+        return None
+    return ("signed " if signed else "unsigned ") + ("int" if len(kinds) > 1 else kinds[0])
+
+
 def _fits(value, t):
     from generators import c_project_context as cpc
     if not isinstance(value, int) or not isinstance(t, dict) or cpc.is_float(t):
@@ -259,16 +306,23 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
     constants = scope["constants"]
     globals_, arrays, types = scope.get("globals") or {}, scope.get("arrays") or {}, scope.get("types") or {}
     # every identifier the body can reach through macro expansion
-    tokens, pending = set(), list(_IDENT.findall(body) + _IDENT.findall(rtype) + [x for p in params for x in _IDENT.findall(p[1])])
-    while pending:
-        tok = pending.pop()
-        if tok in tokens:
-            continue
-        tokens.add(tok)
-        if tok in macro_bodies:
-            pending.extend(_IDENT.findall(macro_bodies[tok]))
-        if tok in fbodies:
-            pending.extend(_IDENT.findall(fbodies[tok]))
+    def expand(seed):
+        found, pending = set(), list(seed)
+        while pending:
+            tok = pending.pop()
+            if tok in found:
+                continue
+            found.add(tok)
+            if tok in macro_bodies:
+                pending.extend(_IDENT.findall(macro_bodies[tok]))
+            if tok in fbodies:
+                pending.extend(_IDENT.findall(fbodies[tok]))
+        return found
+
+    head = _IDENT.findall(rtype) + [x for p in params for x in _IDENT.findall(p[1])]
+    tokens = expand(_IDENT.findall(body) + head)
+    # (R41 review I-R2-1) what the code names — comments and literals stripped: a write left in a comment is no write
+    code_tokens = expand(_IDENT.findall(_code_text(body)) + head)
     status = scope.get("macro_status") or {}
     macros = [t for t in sorted(tokens) if status.get(t) == "active" and (t in macro_bodies or t in fbodies)]
     if any(status.get(t) not in (None, "active") for t in tokens):
@@ -277,11 +331,32 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
     if kw:
         body, rtype = kw_typedef_renamed(body, kw), kw_typedef_renamed(rtype, kw)
         params = [(n, kw_typedef_renamed(decl, kw), scalar, typ) for n, decl, scalar, typ in params]
+    # (R41) ``enum TAG`` written without a typedef (``enum en_g_DoorState x`` — a parameter, a local, a cast): named by a
+    #   typedef of the underlying type as in `integration_oracle_clang_check`. A parameter's ``typ`` keeps the C spelling
+    #   (the scope resolves it); only the C++ text is renamed.
+    enum_tags = {k.split(None, 1)[1]: v for k, v in types.items()
+                 if isinstance(k, str) and k.startswith("enum ") and isinstance(v, dict) and k.split(None, 1)[1] in tokens}
+    if enum_tags:
+        body, rtype = _untagged(body, enum_tags), _untagged(rtype, enum_tags)
+        params = [(n, _untagged(decl, enum_tags), scalar, typ) for n, decl, scalar, typ in params]
     lines = ["// generated by scripts/source_oracle_clang_check.py — do not edit"]
     for name in sorted(tokens):
         t = types.get(name)
         if isinstance(t, dict) and name not in status:
             lines.append(f"typedef {_base_type(t, enum_base)} {kw_typedef_renamed(name, kw)};")
+    for tag, t in sorted(enum_tags.items()):
+        lines.append(f"typedef {_base_type(t, enum_base)} __oracle_enum_{tag};")
+    unresolved_types = scope.get("unresolved_types") or {}
+    widths = (scope.get("target") or {}).get("widths") or {}
+    for name in sorted(tokens):
+        if name in _STDINT_NAMES and name not in types and name not in status and name in unresolved_types:
+            spelled = _stdint_spelling(name, widths)
+            if spelled is not None:
+                lines.append(f"typedef {spelled} {name};")
+                # (R41 review W2) tagged: a failure is the harness disagreeing with the target (the unit is unchecked
+                #   — `_run_tu`), never an unattributed assertion counted against the oracle
+                lines.append(f'static_assert(sizeof({name}) * __CHAR_BIT__ == {_STDINT_NAMES[name][0]}, '
+                             f'"{_WIDTH_TAG}{name}");')
     # (R40) a pointer parameter whose pointee the unit lays out: a struct pointee's type is declared with the members
     #   the oracle models (code using any other does not compile → unchecked); the claim sets ``p[0]`` / ``p[0].a``
     pointee_layouts = scope.get("pointee_types") or {}
@@ -303,11 +378,12 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                             {"__p" + m: r for m, r in p_arrays.items()}, enum_base)
         lines.append(f"{core} {text[len('struct '):]};" if core.startswith("struct ") else f"typedef {text} {core};")
     for name in macros:
+        # (R41 review I1) a macro body's ``enum TAG`` is renamed like the function text's (the SITS harness does too)
         if name in fbodies:
             lines.append(f"#define {name}({', '.join(fparams.get(name) or [])}) "
-                         f"{kw_typedef_renamed(_one_line(fbodies[name]), kw)}")
+                         f"{_untagged(kw_typedef_renamed(_one_line(fbodies[name]), kw), enum_tags)}")
         else:
-            lines.append(f"#define {name} {kw_typedef_renamed(_one_line(macro_bodies[name]), kw)}")
+            lines.append(f"#define {name} {_untagged(kw_typedef_renamed(_one_line(macro_bodies[name]), kw), enum_tags)}")
     for name in sorted(tokens):
         if name in status or name in globals_ or name in arrays:
             continue
@@ -323,6 +399,30 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
     #   members stands for each — a member the oracle does not model is absent, so code using it does not compile
     struct_globals = scope.get("struct_globals") or {}
     used_structs = [g for g in sorted(tokens) if g in struct_globals and g not in status]
+    # (R41) an output the body never names — a global the oracle holds at its input value because nothing the function
+    #   runs writes it — is declared like the named ones (its input value, else the fill), so the claim is compiled and
+    #   checked instead of failing the whole unit (``use of undeclared identifier``). The stubs write nothing, so this
+    #   checks the value flow only, not the write-closure claim (module docstring).
+    param_names = {p[0] for p in params}
+    body_globals, body_structs = list(used_globals), list(used_structs)
+    unnamed_outputs = set()   # (review W1) clang returns what the harness put there: reported apart, not "agree"
+    for out_name in sorted({str(n) for c in claims for n in c["outputs"]}):
+        root = re.match(r"[A-Za-z_]\w*", out_name)
+        if root is None or root.group(0) in param_names or root.group(0) in status:
+            continue
+        rest, g = out_name[root.end():], root.group(0)
+        if g in code_tokens:
+            continue
+        if not rest and g in globals_:
+            used_globals.append(g)
+        elif re.fullmatch(r"\[\d+\]", rest) and g in arrays:
+            used_globals.append(g)
+        elif rest.startswith((".", "[")) and g in struct_globals:
+            used_structs.append(g)
+        else:
+            continue
+        unnamed_outputs.add(out_name)
+    used_globals, used_structs = list(dict.fromkeys(used_globals)), list(dict.fromkeys(used_structs))
     checks: dict[int, tuple] = {}
     closure = (scope.get("effects") or {}).get("functions") or {}
 
@@ -399,7 +499,7 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                     args.append(f"__oracle_buf_{i}")
                 else:
                     # the pointee varies with the fill too: what the claim does not depend on must not matter
-                    lines.append(f"  {typ} __oracle_buf_{i}[64] = {{}};")
+                    lines.append(f"  {_untagged(typ, enum_tags)} __oracle_buf_{i}[64] = {{}};")
                     lines.append(f"  for (int __oracle_k = 0; __oracle_k < 64; ++__oracle_k) __oracle_buf_{i}[__oracle_k] = {fill};")
                     if name in pointees:   # (R40) a scalar pointee the claim set: ``p[0]``
                         rec = pointees[name][1][""]
@@ -481,10 +581,12 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
             checks[number] = tags[m.group(1)]
     if len(checks) != len(tags):
         return None, {}, "assertion_lines_not_unique", {}
-    meta = {"callees": bool(callees), "enum": any(isinstance(types.get(x), dict) and types[x].get("enum") for x in tokens)
-            or any((globals_.get(g) or arrays.get(g) or {}).get("type", {}).get("enum") for g in used_globals)
+    # (review I4) an output the body never names does not make the unit an enum one: its value is the harness's own
+    meta = {"callees": bool(callees), "unnamed_outputs": unnamed_outputs, "enum": bool(enum_tags)
+            or any(isinstance(types.get(x), dict) and types[x].get("enum") for x in tokens)
+            or any((globals_.get(g) or arrays.get(g) or {}).get("type", {}).get("enum") for g in body_globals)
             or any((globals_.get(f"{g}.{m}") or arrays.get(f"{g}.{m}") or {}).get("type", {}).get("enum")
-                   for g in used_structs for m in struct_globals[g].get("members") or [])}
+                   for g in body_structs for m in struct_globals[g].get("members") or [])}
     return text, checks, "", meta
 
 
@@ -525,6 +627,7 @@ def _run_tu(source, checks, path, clang, target, timeout, ub_probe=False):
         tag_of_line[lineno] = tag
     errors: dict[str, list[str]] = {}
     other_errors, unattributed = [], []
+    width_disagrees = []
     canary = False
     current = None
     for line in (proc.stdout + proc.stderr).splitlines():
@@ -536,6 +639,10 @@ def _run_tu(source, checks, path, clang, target, timeout, ub_probe=False):
         lineno, kind, message = int(m.group(1)), m.group(2), m.group(3)
         if "__oracle_canary" in message:
             canary = True
+            current = None
+            continue
+        if _WIDTH_TAG in message:
+            width_disagrees.append(message)   # (R41 review W2) the harness's typedef, not a claim: the unit is unchecked
             current = None
             continue
         if kind in {"error", "fatal error"}:
@@ -552,6 +659,8 @@ def _run_tu(source, checks, path, clang, target, timeout, ub_probe=False):
     if not canary or proc.returncode != 1:
         # The canary must fail and nothing else may stop clang: otherwise the run proves nothing (round 2 C).
         return None, None, "canary_not_reported:" + (other_errors[0] if other_errors else f"rc={proc.returncode}")
+    if width_disagrees:
+        return None, None, "stdint_width_disagrees_with_target"
     if unattributed:
         return None, None, "unattributed_assertion_failure"
     if any("unsequenced" in e for e in other_errors):
@@ -662,16 +771,27 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
                 report["unchecked"] -= n_outputs
                 report["checked"] += n_outputs
             continue
+        unnamed = meta.get("unnamed_outputs") or set()
         for (index, name), v in verdict.items():
             if v == "eval_error" and _disclosure_explains(group[index].get("possible_ub"), detail.get((index, name))):
                 # The oracle disclosed that this run may be undefined (an unknown divisor/shift/index/overflow — the
                 # fill values chose one) and clang reports that kind: not a counterexample to a disclosed claim.
                 v = "possible_ub_disclosed"
+            if v == "agree" and name in unnamed and not ub_probe:
+                # (R41 review W1) clang returned the value the harness declared the output with: nothing it computed.
+                #   A mismatch there stays one (the claim is not even its own input); an agreement is no check.
+                #   (review W-R2-1) Not in the UB probe: there the asserted value is a placeholder and agree/mismatch
+                #   both say "evaluated without UB" — the probe's answer, whatever the output is
+                v = UNNAMED_OUTPUT
+            if name in unnamed and not ub_probe:
+                # (review I-R3-1) the review list is structural — whatever the verdict (a constexpr limit, a mismatch)
+                report.setdefault("outputs_not_named_by_body", {}).setdefault(
+                    f"{unit['name']} ({unit.get('source_path')})", set()).add(name)
             # (R11) the verdict per claim output, for callers that annotate rows
             group[index].setdefault("verdicts", {})[name] = (
-                "unchecked:" + v if v in {"constexpr_limit", "possible_ub_disclosed"} else
+                "unchecked:" + v if v in {"constexpr_limit", "possible_ub_disclosed", UNNAMED_OUTPUT} else
                 "agree_with_stubbed_callees" if v == "agree" and meta.get("callees") else v)
-            if v in {"constexpr_limit", "possible_ub_disclosed"}:
+            if v in {"constexpr_limit", "possible_ub_disclosed", UNNAMED_OUTPUT}:
                 report["unchecked"] += 1
                 report["unchecked_reasons"][v] += 1
                 continue
@@ -684,6 +804,10 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
                          "output": name, "claimed": group[index]["outputs"][name], "clang": detail.get((index, name))}
                 report["mismatches" if v == "mismatch" else "eval_errors"].append(entry)
     report["unchecked_reasons"] = dict(report["unchecked_reasons"])
+    if "outputs_not_named_by_body" in report:
+        # observables a function cannot change (no write to them in its text): a document-side finding to review
+        #   (e.g. a unit test that observes ``u8s_X`` while the function writes ``u8s_X2``)
+        report["outputs_not_named_by_body"] = {k: sorted(v) for k, v in sorted(report["outputs_not_named_by_body"].items())}
     report["work_dir"] = work
     return report
 
