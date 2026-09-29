@@ -45,6 +45,8 @@ ASSUMPTIONS = (
     "an integer converted to a pointer addresses hardware, not a C object: a write through a pointer reaches only "
     "address-taken objects, arrays and locals whose address escaped",
     "a write through a struct member array stays inside that member (beyond it is undefined behaviour)",
+    "a pointer parameter whose pointee the sequence sets (p[0] / p[0].a) points to a harness object of its own — "
+    "not null, not a program object, not another parameter's pointee",
 )
 
 
@@ -97,6 +99,28 @@ def _untyped_overflow_tag(operands, int_bits):
             x.t.get("bits", 99) <= int_bits for x in operands if isinstance(x.t, dict)):
         return None
     return "signed_overflow_untyped_operand"
+
+
+class _Pointer:
+    """(R40) A pointer value the model knows: to the pointee a test sequence set up for pointer parameter ``target`` (a
+    harness object of its own), or null (``target`` None). Only ``==`` / ``!=`` / ``!``, a truth test and a cast to a
+    pointer type read it; it carries no C type, so everything else makes it an unknown value."""
+    __slots__ = ("target",)
+
+    def __init__(self, target):
+        self.target = target
+
+    def __bool__(self):
+        return self.target is not None
+
+    def __eq__(self, other):
+        return isinstance(other, _Pointer) and other.target == self.target
+
+    def __hash__(self):
+        return hash(("_Pointer", self.target))
+
+    def __repr__(self):
+        return f"_Pointer({self.target!r})"
 
 
 def _loaded(value, t):
@@ -286,6 +310,8 @@ class _Interp:
         self.watch: dict | None = None
         # (R2c) control conditions whose outcome to record (``if``/loop/``?:`` conditions guarding a watched decision)
         self.guards: dict = {}
+        # (R40) pointer parameter → the layout of the pointee the sequence set up for it (`pointee_binding`)
+        self.pointees: dict[str, dict] = {}
         self.function_name = ""
         # (R16) interprocedural: the evaluation's `_World` (None = callees are effects only, as before), this
         # activation's parameter keys (a callee's ``@param:x`` must not be the caller's) and its step ceiling.
@@ -391,6 +417,20 @@ class _Interp:
         if not lo <= value <= hi:
             return Unknown("input_outside_declared_type:" + name)
         return value
+
+    def row_no_value(self, value):
+        """Whether a row cell holds nothing (``-``, blank — `REFERENCE_NO_VALUE`)."""
+        if value is None:
+            return True
+        return isinstance(value, str) and read_reference_cell(value, self.constants)[1] == "no_value"
+
+    def row_integer(self, value):
+        """Whether a row cell holds an integer value (``5U``, ``0x1F``, a constant's name) — `check_input`'s reading."""
+        if isinstance(value, str):
+            value, kind = read_reference_cell(value, self.constants, self.scope.get("function_like_macros"))
+            if kind in ("conflict", "function_like"):
+                return False
+        return type(value) is int
 
     # ── storage ──────────────────────────────────────────────────────────────────────────────────
     def lookup(self, name):
@@ -560,6 +600,14 @@ class _Interp:
             else:
                 info = {"key": key, "type": None, "pointer": True, "kind": "param"}
                 state.store[key] = Unknown("pointer_parameter:" + name)
+                pointee = self.pointee_binding(ident, typ, quals, name) if args is None else None
+                if pointee is not None:
+                    # (R40) the sequence sets up the pointee (``p[0]`` / ``p[0].a``): a harness object of its own that
+                    # any write through a pointer may reach (the pointer can be passed on)
+                    info["pointee"] = pointee
+                    self.pointees[name] = pointee
+                    state.store[key] = _Pointer(name)
+                    state.escaped.add("@pointee:" + name)
             frame[name] = info
             self.params[name] = info
         if args is not None and position != len(args):
@@ -1021,6 +1069,8 @@ class _Interp:
             info = self.lookup(name)
             if info is not None and not info.get("extern"):
                 key = info.get("key", "")
+                if info.get("pointee") and "@pointee:" + name in state.escaped:
+                    return True   # (review R40 W2) ``p->a`` beside ``*g_ptr = …``: g_ptr may point into the pointee
                 return key in state.escaped or name in escaping or name in self.body_address_names
             return name in self.arrays or name in self.address_taken or name in escaping or (
                 name not in self.globals and name in (self.scope.get("unresolved_globals") or {}))
@@ -1047,16 +1097,32 @@ class _Interp:
                 name = self.resolve_alias(_text(x, raw))
                 if (not p1 and name == t1) or (p1 and reachable(name)):
                     raise Unsupported("unsequenced_side_effects")
-        plain_target = None
+        plain_target = store_through = None
         if n.type == "assignment_expression":
             # The object the assignment stores to (``g``, ``arr[i]``, ``s.f``): its base name designates storage and
             # the store is sequenced after the call — only the index expressions inside are reads.
-            base = _unwrap(n.child_by_field_name("left"))
+            left = _unwrap(n.child_by_field_name("left"))
+            base = left
             while base is not None and base.type in {"subscript_expression", "field_expression"} \
                     and not any(ch.type == "->" for ch in base.children):
                 base = _unwrap(base.child_by_field_name("argument"))
             if base is not None and base.type == "identifier":
-                plain_target = _key(base)
+                info = self.lookup(_text(base, raw)) or {}
+                if info.get("pointer") and isinstance(state.store.get(info.get("key")), _Pointer):
+                    # (review R40 round 2 W-B) ``p[0].a = f(&p)``: on a known pointer the store's address computation
+                    #   reads ``p`` — unsequenced with the call (an array's name only designates storage). Through an
+                    #   unknown pointer the store is a write through any pointer whichever ``p`` it uses (round 3 I-1)
+                    store_through = _key(base)
+                else:
+                    plain_target = _key(base)
+            elif left is not None and _text(n.child_by_field_name("operator"), raw) == "=" \
+                    and self.pointee_target(state, left, raw) is not None:
+                # (review R40 W1) ``p->a = f(…)``: the pointee the store lands in is not read and the store follows the
+                # call (C11 6.5.16p3) — beside the call only the pointer ``p`` itself is read
+                pointer = left
+                while pointer is not None and pointer.type != "identifier":
+                    pointer = _unwrap(pointer.child_by_field_name("argument"))
+                store_through = _key(pointer) if pointer is not None else None
         for c in nodes:
             if c.type != "call_expression":
                 continue
@@ -1074,7 +1140,8 @@ class _Interp:
             for x in idents:
                 if inside(x, c) or _key(x) == plain_target or _sequenced_apart(x, c, raw):
                     continue
-                if self.call_may_write(callee, self.resolve_alias(_text(x, raw)), state, escaping):
+                if self.call_may_write(callee, self.resolve_alias(_text(x, raw)), state, escaping,
+                                       pointee=_key(x) != store_through):
                     raise Unsupported("call_unsequenced_with_access:" + callee)
         for x in idents:
             name = _text(x, raw)
@@ -1317,9 +1384,22 @@ class _Interp:
         return any(t != name and t in self.macro_status and self.macro_effectful(t, depth + 1)
                    for t in re.findall(r"\b[A-Za-z_]\w*\b", body))
 
-    def call_may_write(self, callee, obj, state, escaping=frozenset()):
-        """Could a call to ``callee`` change the object an identifier ``obj`` names here?"""
+    def call_may_write(self, callee, obj, state, escaping=frozenset(), pointee=True):
+        """Could a call to ``callee`` change the object an identifier ``obj`` names here? ``pointee``: for a pointer
+        parameter whose pointee the sequence set up, the question is about that pointee (``p->a``) unless the
+        identifier only designates where a store lands (`check_sequencing`) — then about the pointer ``p`` itself."""
         closure = self.closure.get(callee)
+        pointee_info = self.lookup(obj)
+        if pointee and pointee_info is not None and pointee_info.get("pointee"):
+            # (R40) ``p->a`` beside ``f(…)``: f may write the pointee through any pointer (p passed on, stored)
+            view = self.stub_view(callee)
+            if view is not None:
+                return view["pointer"]
+            if closure is None or closure.get("pointer_write") or closure.get("unknown_callees"):
+                return True
+            # (review R40 C1) a write to a name that is no modeled object is a write through it — ``g_q[0].cnt = 5U``
+            #   through a global pointer that may hold p (the same judgment as the call's own havoc)
+            return bool(self.opaque_writes(closure))
         view = self.stub_view(callee)
         if view is not None:
             # (R38) a sequence stub (`stubbed_call`) writes no global or static and runs nothing — at most what a
@@ -1341,11 +1421,16 @@ class _Interp:
             return True
         if obj in (closure.get("writes") or ()):
             return True
-        pointer = closure.get("pointer_write") or any(w not in self.globals and w not in self.arrays
-                                                      and not self.plain_struct(w) for w in closure.get("writes") or ())
+        pointer = closure.get("pointer_write") or self.opaque_writes(closure)
         reachable = escaped or obj in self.arrays or obj in self.address_taken or obj in escaping or (
             obj not in self.globals and obj not in self.arrays)
         return bool(pointer and reachable)
+
+    def opaque_writes(self, closure):
+        """A written name that is not a modeled scalar or array object (a pointer, a struct with pointer members) may
+        be written *through* — to an object the closure cannot name. Sorted: the first names the havoc."""
+        return sorted(w for w in closure.get("writes") or ()
+                      if w not in self.globals and w not in self.arrays and not self.plain_struct(w))
 
     def resolve_alias(self, name, depth=0):
         """``GX`` with ``#define GX g_x`` (or ``(g_x)``) names ``g_x`` — the object a sequencing check must compare."""
@@ -1382,6 +1467,12 @@ class _Interp:
             body = _text(n, raw)
             m = re.fullmatch(r"'([ -&(-\[\]-~])'", body)  # printable ASCII except ' and \ (round 4 C8)
             return _Val(ord(m.group(1)), self.int_t) if m else _Val(Unknown("char_literal_unmodeled"), self.int_t)
+        if k == "null":
+            # (R40) ``NULL`` (a keyword node to tree-sitter) is the project's macro; ``nullptr`` a null pointer
+            text = _text(n, raw).strip()
+            if text == "nullptr":
+                return _Val(_Pointer(None), None)
+            return self.read_identifier(state, text, n, raw, depth)
         if k in cpc.NAME_NODE_TYPES:
             # (R35) ``TRUE``/``FALSE`` (and ``true``/``false``) parse as keywords, but the preprocessor sees names — a
             #   project's ``#define TRUE 1U`` (Processor Expert drivers, KJPDS02_PV) or <stdbool.h>. Read it as the
@@ -1395,6 +1486,14 @@ class _Interp:
                 # call would never run. A name that is no type followed by ``(`` is that misparse — refused. A real
                 # type (``void (*)(void)``, ``U8 (*)[4]``) keeps the old behaviour: an unknown value.
                 raise Unsupported("cast_parse_of_parenthesized_expression")
+            if "*" in type_text:
+                # (R40) a cast to a pointer type keeps a known pointer; the constant 0 becomes the null pointer
+                inner = self.expression(state, n.child_by_field_name("value"), raw, depth + 1)
+                if isinstance(inner.v, _Pointer):
+                    return inner
+                if isinstance(inner.v, int) and not isinstance(inner.v, bool) and inner.v == 0:
+                    return _Val(_Pointer(None), None)
+                return _Val(inner.v if isinstance(inner.v, Unknown) else Unknown("pointer_cast"), None)
             t = self.type_of(type_text)
             inner = self.expression(state, n.child_by_field_name("value"), raw, depth + 1)
             return self.cast(inner, t)
@@ -1417,6 +1516,9 @@ class _Interp:
             target = self.lvalue(state, n, raw, depth)
             return self.read_target(state, target)
         if k == "field_expression":
+            pt = self.pointee_target(state, n, raw)
+            if pt is not None:
+                return self.read_pointee_access(state, *pt)
             path = self.member_path(n, raw)
             if path is not None and path in self.globals:
                 g = self.globals[path]
@@ -1430,6 +1532,9 @@ class _Interp:
             if op == "&":
                 self.address_of(state, n.child_by_field_name("argument"), raw, depth)
                 return _Val(Unknown("address_value"), None)
+            pt = self.pointee_target(state, n, raw)
+            if pt is not None:
+                return self.read_pointee_access(state, *pt)
             self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
             return _Val(Unknown("pointer_dereference"), None)
         if k == "call_expression":
@@ -1447,6 +1552,124 @@ class _Interp:
                 self.initializer(state, inner, raw, depth + 1)
             return _Val(Unknown("aggregate_value"), None)
         raise Unsupported("unsupported_expression:" + k)
+
+    def pointee_binding(self, ident, typ, quals, name):
+        """(R40) The pointee layout of pointer parameter ``name`` (``T *name``, one level) when the sequence sets one of
+        its values (``name[0]`` / ``name[0].a`` — a harness allocates it); None otherwise: the pointer stays unknown."""
+        if ident.type != "pointer_declarator":
+            return None
+        inner = ident.child_by_field_name("declarator")
+        if inner is None or inner.type != "identifier" or typ is None:
+            return None
+        prefix = name + "[0]"
+        if name in self.inputs and not self.row_no_value(self.inputs[name]):
+            return None   # (review R40 W4) the row states the pointer itself (``NULL``, an address): not a harness object
+        if not any((k == prefix or str(k).startswith(prefix + ".") or str(k).startswith(prefix + "["))
+                   and self.row_integer(self.inputs[k]) for k in self.inputs):
+            return None   # (review R40 W4) only a value the row really sets (not ``-``) implies the harness allocated it
+        core = " ".join(w for w in _text(typ, self.raw).split() if w not in {"const", "volatile"})
+        layout = (self.scope.get("pointee_types") or {}).get(core)
+        if not layout or layout.get("reason"):
+            return None
+        return {**layout, "const": "const" in quals, "volatile": "volatile" in quals}
+
+    def pointee_target(self, state, n, raw):
+        """(R40) ``(target, path)`` of an access to a known pointer's pointee — ``*p`` · ``p[0]`` · ``p->a`` ·
+        ``(*p).a`` · ``p[0].a`` · ``p->s.x`` — or None (not through a known pointer). Through null: undefined."""
+        parts = []
+        while True:
+            while n is not None and n.type == "parenthesized_expression" and len(_named(n)) == 1:
+                n = _named(n)[0]
+            if n is None:
+                return None
+            if n.type == "field_expression":
+                field = n.child_by_field_name("field")
+                if field is None:
+                    return None
+                parts.append(_text(field, raw))
+                arrow = any(c.type == "->" for c in n.children)
+                n = n.child_by_field_name("argument")
+                if arrow:
+                    base = n
+                    break
+                continue
+            if n.type == "pointer_expression" and _text(n, raw).lstrip().startswith("*"):
+                base = n.child_by_field_name("argument")
+                break
+            if n.type == "subscript_expression":
+                index = n.child_by_field_name("index")
+                if index is None or index.type != "number_literal" or _text(index, raw).strip().rstrip("uUlL") != "0":
+                    return None
+                base = n.child_by_field_name("argument")
+                break
+            return None
+        while base is not None and base.type == "parenthesized_expression" and len(_named(base)) == 1:
+            base = _named(base)[0]
+        if base is None or base.type != "identifier":
+            return None
+        info = self.lookup(_text(base, raw))
+        if info is None or not info.get("pointer"):
+            return None
+        value = state.store.get(info["key"])
+        if not isinstance(value, _Pointer):
+            return None
+        if value.target is None:
+            raise Unsupported("undefined_behavior:null_pointer_dereference")
+        return value.target, "".join("." + x for x in reversed(parts))
+
+    def pointee_object(self, target, path):
+        """(R40) What ``target[0]<path>`` is: ``("leaf", key, type, volatile)``, ``("array", key, type, length,
+        volatile)`` or ``("other", key)`` (the whole pointee, a nested struct, an unmodeled member)."""
+        layout = self.pointees.get(target) or {}
+        key = f"@pointee:{target}[0]{path}"
+        volatile = bool(layout.get("volatile"))
+        rec = (layout.get("members") or {}).get(path)
+        if rec is not None:
+            return ("leaf", key, rec["type"], volatile or bool(rec.get("volatile")))
+        rec = (layout.get("arrays") or {}).get(path)
+        if rec is not None:
+            return ("array", key, rec["type"], rec["length"], volatile or bool(rec.get("volatile")))
+        return ("other", key)
+
+    def read_pointee_access(self, state, target, path):
+        obj = self.pointee_object(target, path)
+        if obj[0] == "leaf":
+            return _loaded(self.read_pointee(state, obj[1], obj[2], obj[3]), obj[2])
+        if obj[0] == "array":
+            return _Val(Unknown("array_value:" + obj[1][len("@pointee:"):]), None)
+        return _Val(Unknown("pointee_member_unmodeled:" + obj[1][len("@pointee:"):]), None)
+
+    def read_pointee(self, state, key, t, volatile=False):
+        """(R40) A pointee value: stored, or what the sequence set (``p[0].a``) unless a write may have reached it."""
+        if volatile:
+            return Unknown("volatile_object:" + key[len("@pointee:"):])
+        if key in state.store:
+            return state.store[key]
+        if state.havoc_all:
+            return Unknown(state.havoc_all)
+        root = key.split("[", 1)[0]
+        for base in [root, key.rsplit("[", 1)[0] if key.endswith("]") else ""] + _object_prefixes(key):
+            if base and base in state.havoc_bases:
+                return Unknown(state.havoc_bases[base])
+        name = key[len("@pointee:"):]
+        if name in self.inputs:
+            return self.check_input(name, t, self.inputs[name])
+        return Unknown("initial_value_not_in_inputs:" + name)
+
+    def pointer_compare(self, op, left, right):
+        """(R40) ``p == NULL`` · ``p != q``: known pointers compare by what they point to (each pointer parameter's
+        pointee is a harness object of its own); a null pointer constant is ``0``. Anything else is unknown."""
+        def as_pointer(v):
+            if isinstance(v.v, _Pointer):
+                return v.v
+            if isinstance(v.v, int) and not isinstance(v.v, bool) and v.v == 0:
+                return _Pointer(None)
+            return None
+        a, b = as_pointer(left), as_pointer(right)
+        if op not in ("==", "!=") or a is None or b is None:
+            return _Val(Unknown("pointer_operation_unmodeled"), None)
+        equal = a.target == b.target
+        return _Val(int(equal if op == "==" else not equal), self.int_t)
 
     def plain_struct(self, name):
         """(R39) A modeled struct object with no pointer or unmodeled member: a write to it is a write to its members
@@ -1572,6 +1795,8 @@ class _Interp:
         return _Val(self.convert_to(inner, t), t)
 
     def unary(self, op, arg, state=None):
+        if isinstance(arg.v, _Pointer):   # (R40) ``!p``
+            return _Val(int(not arg.v), self.int_t) if op == "!" else _Val(Unknown("pointer_operation_unmodeled"), None)
         if arg.t is None and op == "-" and state is not None:
             tag = _untyped_overflow_tag((arg,), self.int_t["bits"])  # its type (and signedness) is unknown: C2
             if tag:
@@ -1674,6 +1899,8 @@ class _Interp:
                 return _Val(0 if op == "&&" else 1, self.int_t)
             return _Val(left.v if isinstance(left.v, Unknown) else Unknown("unknown"), self.int_t)
         right = self.expression(state, right_node, raw, depth + 1)
+        if isinstance(left.v, _Pointer) or isinstance(right.v, _Pointer):
+            return self.pointer_compare(op, left, right)
         return self.arith_values(op, left, right, state)
 
     def operand_effectful(self, node, raw):
@@ -1885,8 +2112,11 @@ class _Interp:
                 return ("base", name, "unmodeled_object_written:" + name)
             return ("all", "write_to_unresolved_identifier:" + name)
         if k == "subscript_expression":
+            pt = self.pointee_target(state, n, raw)
+            if pt is not None:
+                return self.pointee_lvalue(*pt)
             arg, index = n.child_by_field_name("argument"), n.child_by_field_name("index")
-            array = self.array_object(arg, raw, depth)
+            array = self.array_object(arg, raw, depth, state)
             iv = self.expression(state, index, raw, depth + 1)
             if array is None:
                 # Not a directly named array object: a pointer, an array member or an array of aggregates — the
@@ -1906,6 +2136,9 @@ class _Interp:
                 raise Unsupported("undefined_behavior:array_index_out_of_bounds")
             return ("key", f"{key}[{iv.v}]", t, volatile)
         if k == "field_expression":
+            pt = self.pointee_target(state, n, raw)
+            if pt is not None:
+                return self.pointee_lvalue(*pt)
             is_arrow = any(c.type == "->" for c in n.children)
             if is_arrow:
                 self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
@@ -1924,11 +2157,22 @@ class _Interp:
                 return ("base", inner[1], "field_write")
             return inner
         if k == "pointer_expression":
+            pt = self.pointee_target(state, n, raw)
+            if pt is not None:
+                return self.pointee_lvalue(*pt)
             self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
             return ("ptr", "write_through_pointer")
         if k == "cast_expression":
             return ("ptr", "write_through_cast")
         return ("all", "unsupported_lvalue:" + k)
+
+    def pointee_lvalue(self, target, path):
+        """(R40) Where a write through a known pointer lands: a pointee member (``p->a``), or everything under a
+        non-leaf path (``*p = s`` · ``p->in = h``)."""
+        obj = self.pointee_object(target, path)
+        if obj[0] == "leaf":
+            return ("key", obj[1], obj[2], obj[3])
+        return ("base", obj[1], "pointee_write:" + obj[1][len("@pointee:"):])
 
     def expression_base_effects_for_lvalue(self, state, arg, raw, depth):
         if arg.type != "identifier":
@@ -1942,10 +2186,16 @@ class _Interp:
             return name
         return ""
 
-    def array_object(self, arg, raw, depth):
+    def array_object(self, arg, raw, depth, state=None):
         """(key base, element type, length, volatile) of a directly named array; None otherwise."""
         while arg.type == "parenthesized_expression" and len(_named(arg)) == 1:
             arg = _named(arg)[0]
+        if state is not None and arg.type == "field_expression":
+            # (R40) a member array of a known pointer's pointee: ``p->b[i]``
+            pt = self.pointee_target(state, arg, raw)
+            if pt is not None:
+                obj = self.pointee_object(*pt)
+                return (obj[1], obj[2], obj[3], obj[4]) if obj[0] == "array" else None
         if arg.type == "field_expression":
             # (R39) a member array of a modeled struct object: ``g.b[i]``
             path = self.member_path(arg, raw)
@@ -1975,6 +2225,8 @@ class _Interp:
         if target[0] != "key":
             return _Val(Unknown(target[-1] if target[0] in ("all", "ptr") else target[2]), None)
         _, key, t, volatile = target
+        if key.startswith("@pointee:"):
+            return _loaded(self.read_pointee(state, key, t, volatile), t)   # (R40)
         base = key.split("[", 1)[0]
         if volatile:
             return _Val(Unknown("volatile_object:" + base), t)
@@ -2127,9 +2379,7 @@ class _Interp:
         elif self.function_name and self.function_name in (info.get("reaches") or ()):
             self.havoc_statics(state, f"recursion_through:{name}")  # the callee may re-enter this function
         writes = sorted(info.get("writes") or ())
-        # A written name that is not a modeled scalar or array object (a pointer, a struct with pointer members)
-        # may be written *through* — to an object the closure cannot name.
-        opaque = [w for w in writes if w not in self.globals and w not in self.arrays and not self.plain_struct(w)]
+        opaque = self.opaque_writes(info)
         if info.get("unknown_callees"):
             first = sorted(info["unknown_callees"])[0]
             self.havoc_everything(state, f"callee_effects_unknown:{name}:{first}")
@@ -2700,10 +2950,34 @@ def _find_function(root, raw, name, scope):
 
 def _observe(interp, state, name):
     """Value an output name holds in a final state: an int, or Unknown."""
+    value = _observe_value(interp, state, name)
+    return Unknown("pointer_value") if isinstance(value, _Pointer) else value   # (R40) an address is no expected value
+
+
+_POINTEE_NAME_RE = re.compile(r"([A-Za-z_]\w*)\[0\]((?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?")
+
+
+def _pointee_key(interp, name):
+    """(R40) ``p[0].a`` / ``p[0]`` / ``p[0].b[2]`` → ``(key, type, volatile)`` of a pointee the run set up, else None."""
+    m = _POINTEE_NAME_RE.fullmatch(str(name).strip())
+    if not m or m.group(1) not in getattr(interp, "pointees", {}):
+        return None
+    obj = interp.pointee_object(m.group(1), m.group(2))
+    if obj[0] == "leaf" and m.group(3) is None:
+        return obj[1], obj[2], obj[3]
+    if obj[0] == "array" and m.group(3) is not None and 0 <= int(m.group(3)) < obj[3]:
+        return f"{obj[1]}[{int(m.group(3))}]", obj[2], obj[4]
+    return None
+
+
+def _observe_value(interp, state, name):
     if name == "return":
         if state.mode != "return" or state.ret is None:
             return Unknown("no_return_value_on_path")
         return state.ret.v
+    pointee = _pointee_key(interp, name)
+    if pointee is not None:
+        return interp.read_pointee(state, *pointee)
     # (R39) a struct member ``g.s.x`` / ``g.b[2]`` is a modeled object of its own name
     m = re.fullmatch(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?", str(name).strip())
     if not m:
@@ -2744,9 +3018,10 @@ def _object_prefixes(base):
     return [".".join(parts[:i]) for i in range(1, len(parts))]
 
 
-def _written(state, name):
+def _written(state, name, interp=None):
     key = str(name).strip()
-    return key in state.store
+    pointee = _pointee_key(interp, key) if interp is not None else None
+    return (pointee[0] if pointee is not None else key) in state.store
 
 
 def _scope_assumptions(unit: dict[str, Any]) -> list[str]:
@@ -2840,7 +3115,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                 else:
                     # ``assigned``: some path wrote it; ``unchanged_input``: no path wrote it and the value is the one the
                     # sequence set (both are code-consistent expectations; the split keeps the second from inflating).
-                    assigned = name == "return" or any(_written(s, name) for s in finals)
+                    assigned = name == "return" or any(_written(s, name, interp) for s in finals)
                     values[name] = {"value": seen[0], "basis": "assigned" if assigned else "unchanged_input"}
             possible = sorted({k for s in finals for k in s.possible_ub})
             if interp.stubs_used:

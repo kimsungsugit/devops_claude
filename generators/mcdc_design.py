@@ -977,16 +977,198 @@ _FIELD_REASON = "unsupported_scalar:field_expression"
 _MEMBER_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 
 
-def _fields_modeled(node, raw, scope):
+# (R40) a pointer parameter's pointee (``p->a`` · ``*p`` · ``p[0]``) reaches the search the same way — a refusal of
+#   ``*x`` / ``x[0]`` only when the decision reads such a pointee (`_reads_pointee`)
+_POINTEE_REASONS = ("unsupported_scalar:pointer_expression", "unsupported_scalar:subscript_expression")
+_MEMBER_REASONS = (_FIELD_REASON, *_POINTEE_REASONS)
+
+
+def _pointee_path(x, raw):
+    """(R40) ``(p, path)`` of ``p->a`` · ``(*p).a`` · ``p[0].a`` · ``p->s.x`` · ``*p`` · ``p[0]``; None otherwise."""
+    parts, n = [], x
+    while True:
+        while n is not None and n.type == "parenthesized_expression" and len(n.named_children) == 1:
+            n = n.named_children[0]
+        if n is None:
+            return None
+        if n.type == "field_expression":
+            field = n.child_by_field_name("field")
+            if field is None:
+                return None
+            parts.append(_text(field, raw))
+            arrow = any(c.type == "->" for c in n.children)
+            n = n.child_by_field_name("argument")
+            if arrow:
+                break
+            continue
+        if n.type == "pointer_expression" and _text(n, raw).lstrip().startswith("*"):
+            n = n.child_by_field_name("argument")
+            break
+        if n.type == "subscript_expression":
+            index = n.child_by_field_name("index")
+            if index is None or index.type != "number_literal" or _text(index, raw).strip().rstrip("uUlL") != "0":
+                return None
+            n = n.child_by_field_name("argument")
+            break
+        return None
+    while n is not None and n.type == "parenthesized_expression" and len(n.named_children) == 1:
+        n = n.named_children[0]
+    if n is None or n.type != "identifier":
+        return None
+    return _text(n, raw), "".join("." + p for p in reversed(parts))
+
+
+_POINTEE_INPUT_RE = re.compile(r"([A-Za-z_]\w*)\[0\]((?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?")
+
+
+def _pointer_params(scope, fn_name):
+    """(R40) ``{p: pointee type text}`` of function ``fn_name``'s ``T *p`` parameters (`c_project_context`)."""
+    return {p.get("name"): p.get("type") for p in (((scope or {}).get("pointer_params") or {}).get(fn_name) or [])}
+
+
+def _pointee_core(text):
+    return " ".join(w for w in str(text or "").split() if w not in {"const", "volatile"})
+
+
+def _pointee_input(scope, fn_name, name):
+    """(R40) ``(type, typename, volatile)`` of a row input naming a pointer parameter's pointee (``p[0]`` · ``p[0].a`` ·
+    ``p[0].b[2]``) of function ``fn_name``, from the unit's pointee layout; None otherwise. Volatile: the member, or the
+    parameter's pointee type (``volatile Q *p`` — review R40 I3)."""
+    m = _POINTEE_INPUT_RE.fullmatch(str(name).strip())
+    if not m:
+        return None
+    params = _pointer_params(scope, fn_name)
+    if m.group(1) not in params:
+        return None
+    core = _pointee_core(params[m.group(1)])
+    layout = ((scope or {}).get("pointee_types") or {}).get(core) or {}
+    table = layout.get("arrays" if m.group(3) else "members")
+    rec = table.get(m.group(2)) if isinstance(table, dict) else None
+    if not isinstance(rec, dict) or not isinstance(rec.get("type"), dict):
+        return None
+    if m.group(3) is not None and not 0 <= int(m.group(3)) < int(rec.get("length") or 0):
+        return None
+    return rec["type"], str(rec.get("typename") or ""), bool(rec.get("volatile")) or "volatile" in str(
+        params[m.group(1)] or "").split()
+
+
+def _reads_pointee(node, raw, scope, fn_name):
+    """(R40) Whether the decision reads through one of ``fn_name``'s pointer parameters (``p->a`` · ``*p`` · ``p[0]``)."""
+    params = _pointer_params(scope, fn_name)
+    return bool(params) and any(
+        x.type in {"field_expression", "pointer_expression", "subscript_expression"}
+        and (pt := _pointee_path(x, raw)) is not None and pt[0] in params for x in _walk(node))
+
+
+def _read_pointee_names(body, raw, scope, fn_name):
+    """(R40) The pointee inputs a body reads — ``p->a`` · ``*p`` · ``p[0]`` · ``p->b[1]`` as ``p[0].a`` · ``p[0]`` ·
+    ``p[0].b[1]`` — for the pointer parameters the unit lays out, in order."""
+    out = []
+    for x in _walk(body):
+        if x.type not in {"field_expression", "pointer_expression", "subscript_expression"}:
+            continue
+        pt = _pointee_path(x, raw)
+        if pt is None:
+            continue
+        name = f"{pt[0]}[0]{pt[1]}"
+        parent = x.parent
+        if parent is not None and parent.type == "subscript_expression" and parent.child_by_field_name("argument") == x:
+            index = parent.child_by_field_name("index")
+            if index is None or index.type != "number_literal":
+                continue
+            name += f"[{_text(index, raw).strip().rstrip('uUlL')}]"
+        if _pointee_input(scope, fn_name, name) is not None:
+            out.append(name)
+    return list(dict.fromkeys(out))
+
+
+def _pointees_set_up(node, raw, scope, unit, row_names):
+    """(R40) The run sees a pointer parameter's pointee only where the row sets it up: every pointee the decision reads
+    (and, for ``p != NULL``, some value of ``p``'s pointee) is a row input — the inventory adds what the body reads."""
+    if unit.get("mcdc_free_globals"):
+        return True
+    fn_name = str(unit.get("name") or "")
+    names = set(row_names or ())
+    params = set(_pointer_params(scope, fn_name))
+    for name in _read_pointee_names(node, raw, scope, fn_name):
+        if name not in names:
+            return False
+    for x in _walk(node):
+        if x.type == "identifier" and _text(x, raw) in params:
+            prefix = _text(x, raw) + "[0]"
+            if not any(n == prefix or n.startswith(prefix + ".") for n in names):
+                return False
+    return True
+
+
+def _pointer_param_reason(reason, scope, fn_name):
+    """(R40) ``parameter_domain_unresolved:p:…`` where ``p`` is a pointer parameter whose pointee the unit lays out: a
+    ``p != NULL`` beside the pointee's members — the run reads it once the row sets the pointee up."""
+    parts = str(reason).split(":")
+    if len(parts) < 2 or parts[0] != "parameter_domain_unresolved":
+        return False
+    params = _pointer_params(scope, fn_name)
+    if parts[1] not in params:
+        return False
+    layout = ((scope or {}).get("pointee_types") or {}).get(_pointee_core(params[parts[1]])) or {}
+    return bool(layout.get("members") or layout.get("arrays"))
+
+
+def _fields_modeled(node, raw, scope, fn_name=None):
     """(R39) Every member access in the decision is ``g.a`` / ``g.s.x`` / ``g.b[i]`` on a struct object whose members
-    are modeled (`c_project_context._scope_struct`): the oracle reads it as an object of its own. ``->``, an array of
-    structs or a struct the unit does not flatten keep the expression engine's refusal."""
+    are modeled (`c_project_context._scope_struct`): the oracle reads it as an object of its own. (R40) or the pointee
+    of a pointer parameter of this function (``p->a`` · ``*p`` · ``p[0]`` — `c_project_context._pointee_layout`), which
+    the oracle reads when the row sets it up. ``->`` through anything else, an array of structs or a struct the unit
+    does not flatten keep the expression engine's refusal."""
     scope = scope or {}
     structs = scope.get("struct_globals") or {}
     objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
+    params = _pointer_params(scope, fn_name)
+    layouts = scope.get("pointee_types") or {}
+
+    def pointee_modeled(x):
+        pt = _pointee_path(x, raw)
+        if pt is None or pt[0] not in params:
+            return None
+        layout = layouts.get(_pointee_core(params[pt[0]])) or {}
+        parent = x.parent
+        indexed = parent is not None and parent.type == "subscript_expression" and parent.child_by_field_name("argument") == x
+        table = layout.get("arrays" if indexed else "members")
+        return isinstance(table, dict) and pt[1] in table
+
     found = False
     for x in _walk(node):
-        if x.type != "field_expression" or (x.parent is not None and x.parent.type == "field_expression"):
+        parent = x.parent
+        nested = parent is not None and (parent.type == "field_expression"
+                                         or (parent.type == "subscript_expression" and x.type == "subscript_expression"))
+        if x.type == "pointer_expression" and _text(x, raw).lstrip().startswith("*"):
+            outer = parent
+            while outer is not None and outer.type == "parenthesized_expression":
+                outer = outer.parent
+            if outer is not None and outer.type == "field_expression":
+                continue   # ``(*p).a``: judged at the member access
+            ok = pointee_modeled(x)
+            if ok is None:
+                continue   # (review R40 I2) not through a pointer parameter: the run judges it, as before R40
+            if not ok:
+                return False
+            found = True
+            continue
+        if x.type == "subscript_expression" and not nested:
+            ok = pointee_modeled(x)
+            if ok is None:
+                continue   # an array element: the run reads it
+            if not ok:
+                return False
+            found = True
+            continue
+        if x.type != "field_expression" or nested:
+            continue
+        ok = pointee_modeled(x)
+        if ok is not None:
+            if not ok:
+                return False
+            found = True
             continue
         text = "".join(_text(x, raw).split())
         if not _MEMBER_RE.fullmatch(text) or text.split(".", 1)[0] not in structs or text not in objects:
@@ -1234,7 +1416,8 @@ def _stub_return_domain(name, scope, own):
 
 
 def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                 max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False, inert_calls=None):
+                 max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False, inert_calls=None,
+                 pointee_inputs=False):
     """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
 
     Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
@@ -1251,7 +1434,9 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     ``skip_unobservable``: a decision the run cannot observe on any vector (``effectful_condition``,
     ``decision_node_not_found``) is not searched around (R37 — the call-in-condition decisions' own search);
     ``inert_calls``: the runs may judge a stubbed call in a condition inert (`observe_decisions` ``inert_stub_calls``) —
-    by default what ``skip_unobservable`` says (R37's call group); R39's member-access group skips without it."""
+    by default what ``skip_unobservable`` says (R37's call group); R39's member-access group skips without it.
+    ``pointee_inputs``: the row's pointer-parameter pointees (``p[0].a``) join the search with their declared types —
+    R40's own group only (review R40 W3: elsewhere they would change the other groups' rows and budget)."""
     from generators import c_source_oracle as cso
     inert = skip_unobservable if inert_calls is None else inert_calls
     if not cso.scope_matches(unit):
@@ -1292,6 +1477,10 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     globals_ = scope.get("globals") or {}
     if unit.get("mcdc_free_globals"):
         names += [n for n in _read_names(fn.child_by_field_name("body"), raw) if n in globals_ and n not in names]
+        if pointee_inputs:
+            # (R40) and the pointees of its pointer parameters it reads (``p->a`` → ``p[0].a``)
+            names += [n for n in _read_pointee_names(fn.child_by_field_name("body"), raw, scope,
+                                                     str(unit.get("name") or "")) if n not in names]
     inputs = []
     for name in names:
         if name in globals_ and (globals_[name].get("volatile") or globals_[name].get("const")):
@@ -1304,6 +1493,18 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             except cpc.Unresolved:
                 continue
             _apply_design_range(unit, name, domains[name])
+        if name not in domains and pointee_inputs:
+            # (R40) a pointer parameter's pointee the row sets (``p[0].a``): its declared member type
+            pointee = _pointee_input(scope, str(unit.get("name") or ""), name)
+            if pointee is not None:
+                if pointee[2]:
+                    continue   # volatile: the run never reads an input value for it
+                try:
+                    domains[name] = _scope_domain(pointee[0], pointee[1], scope, "pointee_declaration",
+                                                  origin="parameter")
+                except cpc.Unresolved:
+                    continue
+                _apply_design_range(unit, name, domains[name])
         if name not in domains and name in (extra_domains or {}):
             domains[name] = extra_domains[name]   # (R36) a stub return value — the second search only
         if name in domains:
@@ -1469,7 +1670,7 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
 
 
 def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                    max_steps, skip_unobservable=False, inert_calls=None):
+                    max_steps, skip_unobservable=False, inert_calls=None, pointee_inputs=False):
     """(R36) A second search for the decisions the first did not design, where a value a call returned may be what it
     lacked (``r = F(); if ((r == 3U) && …)``): the row inputs ``F() return`` — the values the SUTS row injects into
     F's stub (R14, `_stub_return_domain`) — join the search. Merged condition by condition: every decision keeps the
@@ -1497,7 +1698,7 @@ def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selecte
     try:
         _path_design(unit, {"domains": {}}, retry, row_names, dict(domains), scope, {}, max_conditions=max_conditions,
                      max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True,
-                     skip_unobservable=skip_unobservable, inert_calls=inert_calls)
+                     skip_unobservable=skip_unobservable, inert_calls=inert_calls, pointee_inputs=pointee_inputs)
     except Exception as exc:  # noqa: BLE001 — the first search's result stands (review round 2 I1); the reason is kept
         for d, _n, _r in retry:
             d.clear()
@@ -1835,31 +2036,52 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 decision["reason"] = "no_pair_in_candidate_domain" if decision["search_complete"] else "candidate_budget_exhausted"
         except (Unsupported, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
             decision["reason"] = str(exc)
-            if extra and node is not None and index < max_decisions and (
-                    str(exc).startswith(_PATH_FAMILY)
-                    or (str(exc).startswith(_FIELD_REASON) and _fields_modeled(node, raw, scope))):
+            fn_name = str(unit.get("name") or "")
+            group = None
+            if extra and node is not None and index < max_decisions:
+                if str(exc).startswith(_PATH_FAMILY):
+                    group = "call_in_condition" if str(exc).startswith("unsupported_scalar:call_expression") else ""
+                elif _pointer_param_reason(str(exc), scope, fn_name) or (
+                        str(exc).startswith(_MEMBER_REASONS) and _reads_pointee(node, raw, scope, fn_name)):
+                    group = "pointee"    # (R40) through a pointer parameter
+                elif str(exc).startswith(_FIELD_REASON):
+                    group = "struct_member"    # (R39)
+                if group == "pointee" and not (_fields_modeled(node, raw, scope, fn_name)
+                                               and _pointees_set_up(node, raw, scope, unit, row_names)):
+                    # (review R40 round 3 W-A2) what the pointee search cannot take (the row does not set the pointee
+                    #   up — only the pointee group's runs set pointees — or its layout is unknown) goes where R39 sent
+                    #   it: without a function `_fields_modeled` sees no pointer parameter, so ``*p`` / ``p[0]`` are the
+                    #   run's to judge and ``p->a`` fails the member form — R39's judgment exactly
+                    group = "struct_member" if str(exc).startswith(_FIELD_REASON) and _fields_modeled(node, raw, scope) \
+                        else None
+                elif group == "struct_member" and not _fields_modeled(node, raw, scope):
+                    group = None
+            if group is not None:
+                if group:
+                    # (review R40 W6) which own search it had — the summary counts by this, not by the refusal text
+                    decision["search_group"] = group
                 path_candidates.append((decision, node, raw))
     if path_candidates:
         try:
             # (R37 review R3-C1) the decisions that reach the path search only since R37 — a call in a condition —
             # are searched on their own, with a budget of their own: observing them on every run of the others' search
             # cost steps, and the budget those decisions had in R36 is theirs unchanged
-            calls = [c for c in path_candidates
-                     if str(c[0].get("reason") or "").startswith("unsupported_scalar:call_expression")]
-            # (R39) a condition on a struct member (``g.a``) reaches the path search only since R39: its own group too
-            fields = [c for c in path_candidates if str(c[0].get("reason") or "").startswith(_FIELD_REASON)]
-            late_ids = {id(c[0]) for c in calls + fields}
-            groups = (([c for c in path_candidates if id(c[0]) not in late_ids], False, False), (calls, True, True),
-                      (fields, True, False))
-            for group, late, inert in groups:
+            def of(label):
+                return [c for c in path_candidates if c[0].get("search_group", "") == label]
+            # (R39) a condition on a struct member (``g.a``) reaches the path search only since R39: its own group too;
+            # (R40) one read through a pointer parameter (``p->a``) only since R40 — its own group, the only one whose
+            # runs set the pointees (review R40 W3: the others' rows and budget stay what they were)
+            groups = ((of(""), False, False, False), (of("call_in_condition"), True, True, False),
+                      (of("struct_member"), True, False, False), (of("pointee"), True, False, True))
+            for group, late, inert, pointees in groups:
                 if not group:
                     continue
                 _path_design(unit, report, group, row_names, domains, scope, selected, max_conditions=max_conditions,
                              max_runs=max_path_runs, max_steps=max_path_steps, skip_unobservable=late,
-                             inert_calls=inert)
+                             inert_calls=inert, pointee_inputs=pointees)
                 _stub_path_pass(unit, report, group, row_names, domains, scope, selected,
                                 max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
-                                skip_unobservable=late, inert_calls=inert)
+                                skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees)
         except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":

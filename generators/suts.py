@@ -2143,10 +2143,12 @@ def is_extended_strategy(strategy: Any) -> bool:
 
 
 def _boundary_domains(unit: Dict[str, Any], input_vars: List[str], var_types: Dict[str, str],
-                      var_bounds: Dict[str, Dict[str, Any]], unknown_vars: set) -> Dict[str, Any]:
+                      var_bounds: Dict[str, Dict[str, Any]], unknown_vars: set,
+                      enum_sets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """입력마다 움직일 수 있는 정수 도메인 — `(lo, hi)` 범위 또는 enum 열거자 목록(R15 경계 행·R19 MC/DC 채움 행 공용).
-    모르는 타입·부동소수·경계 미상은 싣지 않는다(값을 지어내지 않는다)."""
-    enum_sets = unit.get("value_domains") or {}
+    모르는 타입·부동소수·경계 미상은 싣지 않는다(값을 지어내지 않는다). `enum_sets`: 시퀀스 생성이 쓴 값 집합(R40 — 포인터
+    대상의 열거자까지; 없으면 `unit["value_domains"]`)."""
+    enum_sets = enum_sets if enum_sets is not None else (unit.get("value_domains") or {})
     domains: Dict[str, Any] = {}
     for v in input_vars:
         if v in unknown_vars or var_types.get(v) == "float":
@@ -2175,7 +2177,7 @@ def _boundary_domains(unit: Dict[str, Any], input_vars: List[str], var_types: Di
 
 def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
                           output_vars: List[str], var_types: Dict[str, str], var_bounds: Dict[str, Dict[str, Any]],
-                          unknown_vars: set) -> None:
+                          unknown_vars: set, enum_sets: Optional[Dict[str, Any]] = None) -> None:
     """(R15) 행동 경계 행 — `generators.boundary_rows.find_boundaries` 가 소스 oracle 로 찾은 인접 입력 쌍을 시퀀스 뒤에 붙인다.
 
     움직일 수 있는 입력은 정수 경계가 정해진 것만(모르는 타입·부동소수·경계 미상 제외 — 값을 지어내지 않는다). enum 은
@@ -2185,7 +2187,7 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     같은 oracle(`apply_sequence_evidence`)이 모든 행과 똑같이 도출한다. 탐색 요약은 `unit["boundary_search"]` 에 남는다.
     탐색이 실패해도 문서는 만든다 — 그 unit 만 경계 행 없이 두고 사유를 남긴다(리뷰 C1).
     """
-    domains = _boundary_domains(unit, input_vars, var_types, var_bounds, unknown_vars)
+    domains = _boundary_domains(unit, input_vars, var_types, var_bounds, unknown_vars, enum_sets)
     outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
 
     order = sorted(sequences, key=_base_rank)
@@ -2564,9 +2566,17 @@ def generate_sequences(
     # (R19) 소스가 읽어 더한 입력의 **선언** 타입(번역 단위 범위에서) — 전역 표가 이미 아는 이름이면 그 표가 이긴다.
     _src_types = {k: v for k, v in (unit.get("source_input_types") or {}).items()
                   if _normalize_type(str(_base_cache.get(k) or "")) in ("", _UNKNOWN_TYPE)}
-    type_cache = {**_base_cache, **_src_types, **_ptypes} if (_ptypes or _src_types) else _base_cache
+    # (R40) 포인터 매개변수가 가리키는 대상 입력(`p[0]` · `p[0].a`)의 **소스 선언** 타입 — 행이 이미 싣고 있다
+    #   (R19 소스 읽기 분류와 섞지 않는다 — 카탈로그 구조를 정하는 `_r19_typed` 밖)
+    _pointee_keys, _pointee_domains = pointee_input_types(unit, list(input_vars))
+    _pointee_types = {k: v for k, v in _pointee_keys.items()
+                      if _normalize_type(str(_base_cache.get(k) or "")) in ("", _UNKNOWN_TYPE)}
+    type_cache = {**_base_cache, **_src_types, **_pointee_types, **_ptypes} \
+        if (_ptypes or _src_types or _pointee_types) else _base_cache
     # (R73 N92) enum 값 집합이 있는 변수는 타입 `enum` — 경계값은 열거자의 최소/가운데/최대, 범위 밖은 ±1.
-    _domains = unit.get("value_domains") or {}
+    #   (R40 리뷰 W5) 포인터 대상의 열거자 값 집합은 다른 출처가 없을 때만
+    _domains = {**_pointee_domains, **(unit.get("value_domains") or {})} if _pointee_domains \
+        else (unit.get("value_domains") or {})
     # (R74) 경계값의 출처 순서: **설계서 범위**(SwUDS Value Range) > enum 값 집합 > HSIS SW 값 범위 > 타입 전폭.
     #   위로 갈수록 이 변수에 대해 구체적으로 말한 문서다. 어느 출처가 정했는지는 `unit["bounds_source"]` 에 남긴다.
     _uds_info = unit.get("uds_param_info") or {}
@@ -2875,7 +2885,7 @@ def generate_sequences(
     if extended:
         from generators.boundary_rows import blank_fill
         _fill_domains = {v: d for v, d in _boundary_domains(unit, input_vars, var_types, var_bounds,
-                                                            set(_unknown_vars)).items()
+                                                            set(_unknown_vars), _domains).items()
                          if var_types.get(v) == _ENUM_TYPE or _declared(v)}
         _fill_all = blank_fill(_fill_domains, {v: m for v in _fill_domains
                                                if isinstance(m := (var_bounds.get(v) or {}).get("mid"), int)
@@ -3114,7 +3124,9 @@ def generate_sequences(
     ctx = {"input_vars": list(input_vars), "output_vars": list(output_vars), "var_types": dict(var_types),
            "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars),
            # (R31 review W5) 타입이 선언에서 온 입력 — 추측 타입의 폭으로 "타입 안" 을 판정하지 않는다
-           "declared": sorted(v for v in input_vars if _declared(v) and not _is_pointer_decl(v))}
+           "declared": sorted(v for v in input_vars if _declared(v) and not _is_pointer_decl(v)),
+           # (R40 리뷰 2차 I-d) 포인터 대상의 열거자 값 집합까지 — 경계 행도 BV·MC/DC 행과 같은 도메인으로
+           "enum_sets": dict(_domains) if _pointee_domains else None}
     if boundary_rows:
         return append_boundary_rows(unit, sequences, ctx)
     unit["_boundary_ctx"] = ctx
@@ -3132,7 +3144,7 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         return sequences
     n = len(sequences)
     _append_boundary_rows(unit, sequences, ctx["input_vars"], ctx["output_vars"], ctx["var_types"], ctx["var_bounds"],
-                          set(ctx["unknown"]))
+                          set(ctx["unknown"]), ctx.get("enum_sets"))
     # (R31) 설계 범위 밖 강건성 행 — 경계 행 뒤에. 선택 확장이라 실패해도 문서는 만든다(그 unit 만 사유를 남긴다).
     m = len(sequences)
     try:
@@ -3246,6 +3258,39 @@ def _source_object_decl(scope: Dict[str, Any], name: str) -> Tuple[Optional[str]
     if not typename:
         return None, "no_declared_type"
     return typename, ""
+
+
+def pointee_input_types(unit: Dict[str, Any], names: List[str]
+                        ) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+    """(R40) 포인터 매개변수가 가리키는 대상 입력(`p[0]` · `p[0].a` · `p[0].b[2]`)의 (경계값 표의 타입 키, enum 값 집합) —
+    소스의 함수 정의(`project_scope.pointer_params`)와 대상 배치(`pointee_types`)에서. 설계서 문자열이 아니라 소스가 정한다.
+    키는 `scope_input_types` 처럼 **해석된** 타입의 폭·부호로 정한다(리뷰 R40 W5: 표가 모르는 typedef 이름 `tU8` 을 그대로
+    넘기면 타입 미상이 돼 칸이 빈다). enum 은 그 번역 단위의 열거자 값 집합. 모르면 싣지 않는다."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    types: Dict[str, str] = {}
+    domains: Dict[str, Dict[str, Any]] = {}
+    if not scope:
+        return types, domains
+    from generators import c_project_context as cpc
+    from generators.mcdc_design import _pointee_input, _scope_domain
+    for v in names:
+        found = _pointee_input(scope, str(unit.get("name") or ""), v)
+        if found is None:
+            continue
+        t, typename, _volatile = found
+        if cpc.is_float(t):
+            continue
+        if t.get("enum"):
+            try:
+                dom = _scope_domain(t, typename, scope, "enum_declaration")
+            except (cpc.Unresolved, KeyError, TypeError):
+                continue
+            domains[v] = {"values": list(dom["values"]), "source": "pointee_declaration"}
+            continue
+        key = "bool" if t.get("kind") == "_Bool" else _SCOPE_TYPE_KEYS.get((t.get("bits"), bool(t.get("signed"))), "")
+        if key:
+            types[v] = key
+    return types, domains
 
 
 def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
@@ -3530,6 +3575,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "call_condition_decisions": 0, "call_condition_designed": 0,
                            # (R39) 구조체 멤버(`g.a`)를 읽는 조건의 결정 — 따로(별도 예산) 탐색한 결정 · 그중 설계
                            "member_condition_decisions": 0, "member_condition_designed": 0,
+                           # (R40) 포인터 매개변수가 가리키는 대상(`p->a`)을 읽거나 그 널 검사가 있는 결정 — 따로(별도 예산)
+                           "pointee_condition_decisions": 0, "pointee_condition_designed": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     for unit in units:
@@ -3559,14 +3606,13 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["conditions"] += len(d.get("conditions") or [])
             status = d.get("status", "unsupported")
             out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
-            if d.get("evaluation") == "source_path" and \
-                    str(d.get("static_reason") or "").startswith("unsupported_scalar:call_expression"):
-                out["call_condition_decisions"] += 1
-                out["call_condition_designed"] += status == "designed"
-            if d.get("evaluation") == "source_path" and \
-                    str(d.get("static_reason") or "").startswith("unsupported_scalar:field_expression"):
-                out["member_condition_decisions"] += 1
-                out["member_condition_designed"] += status == "designed"
+            # (R40 리뷰 W6) 어느 별도 탐색을 받았는지는 거부 사유 문자열이 아니라 설계기가 붙인 표식으로 센다 —
+            #   널 검사(`parameter_domain_unresolved:p`)로 들어온 결정도 빠지지 않는다
+            group = {"call_in_condition": "call", "struct_member": "member", "pointee": "pointee"}.get(
+                str(d.get("search_group") or "")) if d.get("evaluation") == "source_path" else None
+            if group:
+                out[f"{group}_condition_decisions"] += 1
+                out[f"{group}_condition_designed"] += status == "designed"
             if d.get("stub_inputs"):
                 out["stub_input_decisions"] += 1
             for pair in d.get("pairs") or []:

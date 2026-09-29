@@ -1464,7 +1464,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R39) v41: project_context 스키마 13(구조체 멤버 목록 — 구조체 전역의 스칼라 멤버를 `g.a` 객체로 평탄화).
 # (R39 review round 2) v42: project_context 스키마 14(파스 오류·비트필드 멤버가 있는 구조체 본문은 멤버를 저장하지 않음 —
 #   v41 캐시는 1차 코드 모양이라 거부).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v42"
+# (R40) v43: project_context 스키마 15(함수의 포인터 매개변수 — 가리키는 대상 타입을 `p[0].a` 로 평탄화).
+# (R40 리뷰 1차) v44: project_context 스키마 16(전처리 공백이 있는 unit 의 구조체 대상은 배치하지 않는다).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v44"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

@@ -282,6 +282,26 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
         t = types.get(name)
         if isinstance(t, dict) and name not in status:
             lines.append(f"typedef {_base_type(t, enum_base)} {kw_typedef_renamed(name, kw)};")
+    # (R40) a pointer parameter whose pointee the unit lays out: a struct pointee's type is declared with the members
+    #   the oracle models (code using any other does not compile → unchecked); the claim sets ``p[0]`` / ``p[0].a``
+    pointee_layouts = scope.get("pointee_types") or {}
+    pointees: dict[str, tuple] = {}
+    for pname, _decl, scalar, typ in params:
+        if scalar:
+            continue
+        core = " ".join(w for w in str(typ).split() if w not in {"const", "volatile"})
+        layout = pointee_layouts.get(core) or {}
+        p_members = {m: r for m, r in (layout.get("members") or {}).items()}
+        p_arrays = {m: r for m, r in (layout.get("arrays") or {}).items()}
+        if not p_members and not p_arrays:
+            continue
+        pointees[pname] = (core, p_members, p_arrays)
+        if "" in p_members or any(x[0] == core for q, x in pointees.items() if q != pname):
+            continue   # a scalar pointee (its typedef is above) or a struct type already declared
+        paths = sorted([m[1:] for m in p_members] + [m[1:] for m in p_arrays])
+        text = _struct_text("__p", paths, {"__p" + m: r for m, r in p_members.items()},
+                            {"__p" + m: r for m, r in p_arrays.items()}, enum_base)
+        lines.append(f"{core} {text[len('struct '):]};" if core.startswith("struct ") else f"typedef {text} {core};")
     for name in macros:
         if name in fbodies:
             lines.append(f"#define {name}({', '.join(fparams.get(name) or [])}) "
@@ -364,10 +384,28 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                         return None, {}, "parameter_type_unresolved:" + name, {}
                     value = inputs.get(name)
                     args.append(str(value if _fits(value, t) else _fill_for(t, fill)))
+                elif name in pointees and "" not in pointees[name][1]:
+                    # (R40) a struct pointee: element 0 holds what the claim set, the rest of it the fill
+                    _core, p_members, p_arrays = pointees[name]
+                    lines.append(f"  {_core} __oracle_buf_{i}[64] = {{}};")
+                    for m, r in sorted(p_members.items()):
+                        value = inputs.get(f"{name}[0]{m}")
+                        lines.append(f"  __oracle_buf_{i}[0]{m} = {value if _fits(value, r['type']) else _fill_for(r['type'], fill)};")
+                    for m, r in sorted(p_arrays.items()):
+                        for k in range(r["length"]):
+                            value = inputs.get(f"{name}[0]{m}[{k}]")
+                            lines.append(f"  __oracle_buf_{i}[0]{m}[{k}] = "
+                                         f"{value if _fits(value, r['type']) else _fill_for(r['type'], fill)};")
+                    args.append(f"__oracle_buf_{i}")
                 else:
                     # the pointee varies with the fill too: what the claim does not depend on must not matter
                     lines.append(f"  {typ} __oracle_buf_{i}[64] = {{}};")
                     lines.append(f"  for (int __oracle_k = 0; __oracle_k < 64; ++__oracle_k) __oracle_buf_{i}[__oracle_k] = {fill};")
+                    if name in pointees:   # (R40) a scalar pointee the claim set: ``p[0]``
+                        rec = pointees[name][1][""]
+                        value = inputs.get(f"{name}[0]")
+                        if _fits(value, rec["type"]):
+                            lines.append(f"  __oracle_buf_{i}[0] = {value};")
                     args.append(f"__oracle_buf_{i}")
             # (R14) a callee the claim's sequence stubs (``F() return``) returns that value, in F's declared type — a
             #   local lambda shadows the namespace stub for this run only (the oracle takes the same value)
@@ -416,8 +454,12 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
             else:
                 lines.append(f"  long long __oracle_ret = (long long)__oracle_fn({', '.join(args)});")
             lines.append("  switch (__oracle_which) {")
+            buffers = {pn: j for j, (pn, _d, sc, _t) in enumerate(params) if not sc and pn in pointees}
             for k, name in enumerate(claim["outputs"]):
                 expr = "__oracle_ret" if name == "return" else name
+                m = re.fullmatch(r"([A-Za-z_]\w*)(\[0\].*)", str(name))
+                if m and m.group(1) in buffers:
+                    expr = f"__oracle_buf_{buffers[m.group(1)]}{m.group(2)}"   # (R40) a pointee output
                 lines.append(f"    case {k}: return (long long)({expr});")
             lines.append("  }")
             lines.append("  return -999999999LL;")

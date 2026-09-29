@@ -567,9 +567,16 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             # (R39) conditions on struct members: the members are inputs of their own name (``g.a``)
             + (f" 구조체 멤버(`g.a` — 정본 표기와 같은 입력 이름)를 읽는 조건의 결정 "
                f"{_show(_int(mc, 'member_condition_decisions'))} 도 따로, 별도 예산으로 탐색했다(설계 "
-               f"{_show(_int(mc, 'member_condition_designed'))} — 포인터를 거친 멤버(`p->a`)·구조체 배열·공용체·"
-               "비트필드 멤버는 모델링하지 않는다)."
+               f"{_show(_int(mc, 'member_condition_designed'))} — 포인터 매개변수가 아닌 포인터를 거친 멤버(`p->a`)·"
+               "구조체 배열·공용체·비트필드 멤버는 모델링하지 않는다)."
                if _int(mc, "member_condition_decisions") else "")
+            # (R40) conditions through a pointer parameter: its pointee is an input of its own name (``p[0].a``)
+            + (f" 포인터 매개변수가 가리키는 대상(`p[0].a` · `p[0]` — 정본 표기와 같은 입력 이름)을 읽는 조건의 결정 "
+               f"{_show(_int(mc, 'pointee_condition_decisions'))} 도 따로, 별도 예산으로 탐색했다(설계 "
+               f"{_show(_int(mc, 'pointee_condition_designed'))} — 대상은 행이 그 값을 설정할 때만 하네스가 따로 할당한 "
+               "널 아닌 객체로 본다: 그래서 널 검사(`p != NULL`)는 모든 행에서 한쪽이라 짝이 없다. 식 엔진이 다른 이유"
+               "(지역 변수·조건 안 호출)로 먼저 거부한 결정은 그 이유의 탐색으로 가며 대상 입력을 설정하지 않는다)."
+               if _int(mc, "pointee_condition_decisions") else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
             tone=_tone(bool(_int(mc, "invalidated_pairs")))))
 

@@ -26,7 +26,7 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 14  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 16  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -49,6 +49,10 @@ SCHEMA_VERSION = 14  # 3: per-file `prototypes`; closure `macros` (tree union)
 #    Paired with `_SOURCE_SECTIONS_SCHEMA_VERSION` v41.
 # 14 (R39 review round 2): a struct body with a parse error in a member, or with bit-fields, keeps no members (``hidden`` /
 #    ``bit_fields``) — a context cached by 13 lacks them. Paired with v42.
+# 15 (R40): a function's `pointer_params` (``T *p`` — name and pointee type text); a scope lays out those pointee types
+#    (`pointee_types`). Paired with v43.
+# 16 (R40 review round 1): a struct pointee of a unit with preprocessing gaps keeps no layout (as a struct global —
+#    a member may sit under an #if the unit cannot decide) — a context cached by 15 lays it out. Paired with v44.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -551,6 +555,7 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
             name, _ = _function_name(node, raw)
             if name:
                 rec["functions"].setdefault(name, []).append({**_function_effects(node, raw), "line": line, "pos": pos,
+                                                              "pointer_params": _pointer_params(node, raw),
                                                               "conditional": conditional})
     return rec
 
@@ -1539,6 +1544,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                              "enum_types": {}, "globals": {}, "unresolved_globals": {}, "function_like_macros": [],
                              "function_like_macro_bodies": {}, "function_like_macro_params": {}, "arrays": {},
                              "struct_globals": {},   # (R39) struct objects whose members are modeled (`_scope_struct`)
+                             "pointee_types": {},   # (R40) pointer parameters' pointee layouts (`_pointee_layout`)
+                             "pointer_params": {},   # (R40) function → its ``T *p`` parameters (one definition only)
                              # (R39 review C3) the objects this unit does not model (a struct it cannot flatten among
                              # them) → internal linkage: another unit's modeled member of the same root may not be it
                              "unmodeled_object_linkage": {},
@@ -1877,24 +1884,27 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         except Unresolved as exc:
             scope["unresolved_globals"][name] = str(exc)
             scope["unmodeled_object_linkage"][name] = is_static
+    # (R40) what the pointer parameters of this unit's functions point to — a test sequence sets the pointee by
+    # ``p[0]`` / ``p[0].a`` (the reference writes ``pProfile[0].s32_SOP``). Only the types the unit's own functions take:
+    # a layout per struct type in every unit would hold every register block of every header
+    for fn_name, fn_defs in (files[path].get("functions") or {}).items():
+        if len(fn_defs) == 1:
+            scope["pointer_params"][fn_name] = list(fn_defs[0].get("pointer_params") or [])
+        for fd in fn_defs:
+            for pp_ in fd.get("pointer_params") or []:
+                core = " ".join(w for w in str(pp_.get("type") or "").split() if w not in {"const", "volatile"})
+                if not core or core in scope["pointee_types"]:
+                    continue
+                scope["pointee_types"][core] = _pointee_layout(core, raw_structs, type_of, agreeing, every_macro_name,
+                                                               gaps=bool(pp["gaps"]))
     scope["status"] = "resolved" if not scope["missing_includes"] else "partial"
     return scope
 
 
-def _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing, macro_names=()):
-    """(R39) A global of a struct type the unit sees the body of: each scalar member — nested structs flattened, one-
-    dimensional member arrays — becomes an object of its own, ``g.a`` in ``globals`` and ``g.b`` in ``arrays``: the
-    name a test sequence sets it by (the reference writes ``lin_tl_rx_queue.queue_header``). The struct object itself
-    stays unresolved (a whole-struct read or write is not modeled). Not modeled at all: a union (members alias), a
-    bit-field member, a ``const`` object, an array of structs, a body seen more than once or under an undecided #if,
-    an unreadable include. A pointer member, a member of an unresolved type or shape is left out and flags the struct
-    ``opaque_members`` (a write to the object may go through something no member names)."""
-    d = defs[0]
-    words = [w for w in str(d["type"]).split() if w not in {"const", "volatile"}]
-    key = d.get("struct_key") if d["type"] == "struct" else " ".join(words)
-    if not key or key not in raw_structs or pp["gaps"] or any(x.get("const") for x in defs) \
-            or any(x.get("dims") for x in defs):
-        return
+def _flatten_struct(key, raw_structs, type_of, agreeing, macro_names=(), volatile=False):
+    """(R39, R40) The scalar members of the struct ``key`` → ({path: (kind, record)}, [unmodeled member paths]).
+    Unresolved when the body cannot be flattened (see `_scope_struct` — the rules a struct object and a pointer
+    parameter's pointee share)."""
     unmodeled: list[str] = []
 
     def walk(k, prefix, volatile, depth):
@@ -1959,8 +1969,73 @@ def _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing, macro_n
             out[path] = ("array", {"type": t, "typename": core, "volatile": vol, "length": length})
         return out
 
+    return walk(key, "", volatile, 0), unmodeled
+
+
+def _pointer_params(fn, raw):
+    """(R40) ``{"name", "type"}`` of each parameter declared ``T *name`` — one level, a plain name (``T **pp``,
+    ``T *a[]``, a function pointer are not); ``type`` is the pointee type with the declaration's own qualifiers
+    (``const T *p`` → ``const T``; a qualifier after the ``*`` is the pointer's, not kept)."""
+    _, fdecl = _function_name(fn, raw)
+    plist = fdecl.child_by_field_name("parameters") if fdecl is not None else None
+    out = []
+    for prm in plist.named_children if plist is not None else []:
+        if prm.type != "parameter_declaration":
+            continue
+        d = prm.child_by_field_name("declarator")
+        if d is None or d.type != "pointer_declarator":
+            continue
+        inner = d.child_by_field_name("declarator")
+        typ = prm.child_by_field_name("type")
+        if inner is None or inner.type != "identifier" or typ is None:
+            continue
+        quals = [_text(c, raw) for c in prm.named_children if c.type == "type_qualifier"]
+        out.append({"name": _text(inner, raw), "type": " ".join(quals + [" ".join(_text(typ, raw).split())])})
+    return out
+
+
+def _pointee_layout(core, raw_structs, type_of, agreeing, macro_names, gaps=False):
+    """(R40) What a ``core *`` parameter points to: ``{"members": {path: rec}, "arrays": {path: rec}, "opaque": bool}``
+    — a scalar type is the one member ``""`` (``p[0]``), a struct its flattened members (``.a`` → ``p[0].a``, the rules
+    of `_flatten_struct`); ``{"reason": …}`` when neither. ``gaps``: the unit's preprocessing left gaps (an unreadable
+    include, an undecided #if) — a struct body may hold members it cannot see (review R40 I4, as `_scope_struct`)."""
+    if core in raw_structs:
+        if gaps:
+            return {"reason": "preprocessing_gaps"}
+        try:
+            leaves, unmodeled = _flatten_struct(core, raw_structs, type_of, agreeing, macro_names)
+        except Unresolved as exc:
+            return {"reason": str(exc)}
+        members = {"." + path: r for path, (kind, r) in leaves.items() if kind == "scalar"}
+        arrays = {"." + path: r for path, (kind, r) in leaves.items() if kind == "array"}
+        return {"members": members, "arrays": arrays, "opaque": bool(unmodeled)}
     try:
-        leaves = walk(key, "", any(x.get("volatile") for x in defs), 0)
+        t = type_of(core)
+    except Unresolved as exc:
+        return {"reason": str(exc)}
+    if not isinstance(t, dict):
+        return {"reason": "pointee_type_unresolved"}
+    return {"members": {"": {"type": t, "typename": core, "volatile": "volatile" in (t.get("qualifiers") or [])}},
+            "arrays": {}, "opaque": False}
+
+
+def _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing, macro_names=()):
+    """(R39) A global of a struct type the unit sees the body of: each scalar member — nested structs flattened, one-
+    dimensional member arrays — becomes an object of its own, ``g.a`` in ``globals`` and ``g.b`` in ``arrays``: the
+    name a test sequence sets it by (the reference writes ``lin_tl_rx_queue.queue_header``). The struct object itself
+    stays unresolved (a whole-struct read or write is not modeled). Not modeled at all: a union (members alias), a
+    bit-field member, a ``const`` object, an array of structs, a body seen more than once or under an undecided #if,
+    an unreadable include. A pointer member, a member of an unresolved type or shape is left out and flags the struct
+    ``opaque_members`` (a write to the object may go through something no member names)."""
+    d = defs[0]
+    words = [w for w in str(d["type"]).split() if w not in {"const", "volatile"}]
+    key = d.get("struct_key") if d["type"] == "struct" else " ".join(words)
+    if not key or key not in raw_structs or pp["gaps"] or any(x.get("const") for x in defs) \
+            or any(x.get("dims") for x in defs):
+        return
+    try:
+        leaves, unmodeled = _flatten_struct(key, raw_structs, type_of, agreeing, macro_names,
+                                            any(x.get("volatile") for x in defs))
     except Unresolved:
         return
     if not leaves:
