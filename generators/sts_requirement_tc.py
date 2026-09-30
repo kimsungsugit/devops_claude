@@ -47,6 +47,15 @@ hysteresis, not read), and two names that split one unit at one value (``Manual 
 was read so is listed to confirm; a fact still held back for a reason a reader can settle (a missing subject, a range's
 inclusion, an unwritten join …) is listed with what to decide — the 'Requirement Review' sheet and the generation
 disclosure — never filled by a guess.
+
+**Evidence and what filling would improve (R46)**: for each held-back fact, the other sentences of the given documents
+(every SRS requirement, every SyRS / SyDS block — also a SyDS element's ``Input Information``) that state **the same
+value in the same unit in a form this module steps** are quoted as candidates (``BAT 전압(9V 이상 16.0V 이하)`` for a
+``Range`` cell's ``9 ~ 16V``) — never used: the same number may be another quantity. Each item also says what writing
+the missing part into the requirement would produce, **tried in that very sentence** (`fill_guidance`: the fill is
+written in, the sentence read again; the value must step under the written name and nothing stepped before may stop —
+else the text says what still holds it back); what only a rewrite can settle (a negation, a deadline, a label) gets an
+example that keeps the sentence's meaning.
 """
 from __future__ import annotations
 
@@ -91,7 +100,9 @@ REVIEW_TEXT = {
     # (R45 review W1) a value-only field (a block's ``Range``) names its quantity in the block name, not in the cell —
     #   the document did not leave it out; the generator does not read the name as a subject
     "no_subject_in_value_field": ("값 전용 칸(Range)이라 주어가 이 칸에 없음 — 블록 이름이 이 값의 주어일 수 있음",
-                                  "블록 이름(Name)이 이 값과 비교하는 신호인지 확인하면 경계 TC 가 된다"),
+                                  # (R46 review I7) the generator never reads the Name: no promise here — the 'If
+                                  #   Filled' column says what writing the name into the cell produces
+                                  "블록 이름(Name)이 이 값과 비교하는 신호인지 확인"),
 }
     # (R45 review r2 W-R2-2) ``20ms 이내에 … 되지 않으면`` / ``500ms 이내에 9V 이상으로 복귀할 경우``: the extractor reads
     #   every ``이내`` as a deadline, but in a conditional clause it may be the condition's time window
@@ -152,6 +163,10 @@ def _field_key(name: str) -> str:
 
 
 _FIELD_BY_KEY = {_field_key(f): f for f in SYSTEM_TEXT_FIELDS}
+# (R46) a SyDS element block's inputs with their ranges (``BAT 전압(9V 이상 16.0V 이하), 5V, …``) — the only other field
+#   of the HDPDM01 / KJPDS02 SyRS / SyDS that states comparisons (11 facts each); evidence for review items, not stepped
+EVIDENCE_EXTRA_FIELDS = ("Input Information",)
+_EVIDENCE_BY_KEY = {_field_key(f): f for f in EVIDENCE_EXTRA_FIELDS}
 
 
 def parse_system_requirement_docx(path: str, label: str) -> tuple[dict[str, dict[str, Any]], int]:
@@ -185,7 +200,9 @@ def parse_system_requirement_docx(path: str, label: str) -> tuple[dict[str, dict
             continue
         out[rid] = {"doc": label, "fields": {_FIELD_BY_KEY[k]: v for k, v in cells_map.items() if k in _FIELD_BY_KEY},
                     # (R45 review W1) not read for facts — a ``Range`` value's subject is often the block's name
-                    "name": cells_map.get("name", "")}
+                    "name": cells_map.get("name", ""),
+                    # (R46) read only as evidence for review items, never stepped
+                    "evidence_fields": {_EVIDENCE_BY_KEY[k]: v for k, v in cells_map.items() if k in _EVIDENCE_BY_KEY}}
     return out, duplicates
 
 
@@ -235,10 +252,16 @@ def traced_system_facts(req: dict[str, Any], system: dict[str, dict[str, Any]],
             if not text:
                 continue
             source = {"doc": block["doc"], "id": sid, "field": field}
-            head = "<Output>\n" if field in SYSTEM_OUTCOME_FIELDS else ""
-            for b in extract(f"ID\t{req.get('id', '')}\n{head}{text}\n"):
-                out += [(line, fact, source) for line in b["lines"] for fact in line["facts"]]
+            out += [(line, fact, source) for line in _field_lines(str(req.get("id", "")), field, text)
+                    for fact in line["facts"]]
     return out
+
+
+def _field_lines(anchor: str, field: str, text: str) -> list[dict[str, Any]]:
+    """The fact lines of one system block field, read under the SRS ID ``anchor`` (`extract` opens a block at an SRS
+    ID line — the ID names nothing else here). An outcome field is read under an ``<Output>`` heading."""
+    head = "<Output>\n" if field in SYSTEM_OUTCOME_FIELDS else ""
+    return [line for b in extract(f"ID\t{anchor}\n{head}{text}\n") for line in b["lines"]]
 
 
 _TYPED = re.compile(r"^([us])(8|16|32)[a-z]*_", re.IGNORECASE)
@@ -396,10 +419,35 @@ def _review_reason(line: dict, fact: dict, why: str, source: dict | None) -> str
 
 def _review_item(req: dict, line: dict, fact: dict, source: dict | None, reason: str, kind: str,
                  block_name: str = "") -> dict[str, Any]:
-    return {"srs_id": req.get("id", ""), "source": source_label(source), "reason": reason, "kind": kind,
+    item = {"srs_id": req.get("id", ""), "source": source_label(source), "reason": reason, "kind": kind,
             "line": line["text"], "line_sha256": line["sha256"], "fact": str(fact.get("raw") or ""),
             "fact_kind": fact.get("kind", ""), "line_span": list(fact.get("line_span") or []),
-            "block_name": block_name}
+            "block_name": block_name, **_numeric_identity(fact)}
+    if kind == "held_back":
+        # (R46 review W1) what filling would do, tried in this very sentence
+        try:
+            item["if_filled"], item["fill_check"] = fill_guidance(line, fact, reason)
+        except Exception as exc:  # noqa: BLE001 — guidance never costs the review item or the boundary TCs
+            item["if_filled"], item["fill_check"] = f"— (채우기 안내를 만들지 못함: {type(exc).__name__})", "unchecked"
+    return item
+
+
+def _numeric_identity(fact: dict) -> dict[str, Any]:
+    """(R46) What a review item's value is, exactly and JSON-safe — ``{"unit", "op", "value"}`` for a comparison,
+    ``{"unit", "lo", "hi"}`` for a range (``0x1000 ~ 0x2000`` → ``4096`` / ``8192``); ``{}`` for anything else. The
+    evidence search matches other sentences on it."""
+    unit = fact.get("unit") or ""
+    value = fact.get("value")
+    if fact.get("kind") == "range" and isinstance(value, list) and len(value) == 2:
+        texts = fact.get("value_text") or [None, None]
+        try:
+            lo, hi = (exact_value({"value_text": t, "value": v}) for t, v in zip(texts, value, strict=True))
+        except (ArithmeticError, ValueError, TypeError):
+            return {}
+        return {"unit": unit, "lo": str(lo), "hi": str(hi)}
+    if fact.get("kind") in {"threshold", "duration"} and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return {"unit": unit, "op": fact.get("op"), "value": str(exact_value(fact))}
+    return {}
 
 
 def _subject_text(fact: dict) -> str:
@@ -716,6 +764,499 @@ def _doc_of(group: dict) -> str:
     return source["doc"] if source else "SRS"
 
 
+# ── (R46) evidence for review items, and what filling the gap would improve ──────────────────────────────────────────
+# 2026-09-30 user direction: what is missing is first looked for in the other documents; what is still missing is shown
+#   with what filling it would improve. A candidate is quoted, never used — the same number may be another quantity.
+MAX_EVIDENCE = 3          # candidates quoted per item (all are counted)
+_EVIDENCE_ANCHOR = "SwEvidence_0"   # `extract` opens a block at an SRS ID line; a system block is read under this one
+_DOC_ORDER = {"SRS": 0, "SyRS": 1, "SyDS": 2}
+
+
+def _steppable(line: dict, fact: dict) -> bool:
+    """A fact this module would turn into boundary steps (`_skip_reason` empty) — the form a candidate must have."""
+    return fact["kind"] in {"threshold", "duration"} and not _skip_reason(line, fact)
+
+
+# (R46 review I1) one quantity written in two units is one value: ``3초`` = ``3s`` = ``3000ms``
+_UNIT_SCALE = {"ms": ("s", Decimal("0.001")), "s": ("s", Decimal(1)), "초": ("s", Decimal(1)), "분": ("s", Decimal(60)),
+               "mV": ("V", Decimal("0.001")), "mA": ("A", Decimal("0.001")), "℃": ("°C", Decimal(1)),
+               "KPH": ("km/h", Decimal(1))}
+
+
+def _match_key(unit: str, value: Decimal) -> tuple[str, Decimal]:
+    base, scale = _UNIT_SCALE.get(unit, (unit, Decimal(1)))
+    return base, value * scale
+
+
+def review_evidence_corpus(requirements: list[dict], system: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """Every steppable fact of the given documents, by value: all SRS requirements (description and verification
+    criteria) and all SyRS / SyDS blocks — not only the cited ones — with a SyDS element's ``Input Information``.
+    ``singles[(unit, value)]`` — one comparison; ``ranges[(unit, lo, hi)]`` — a line's lower and upper bound of one
+    subject (``BAT 전압(9V 이상 16.0V 이하)``); units normalised (`_match_key`). Each candidate: where (``SRS
+    SwTR_0605`` / ``SyDS SyEL_05 · Input Information``), the condition as the steps would write it, its operator,
+    whether it names its subject (an unnamed hold time does not) and how weakly (a noun before a parenthesis), the line
+    and its hash, and the SRS requirement or system block it belongs to (a related sentence or not)."""
+    singles: dict[tuple, list] = {}
+    ranges: dict[tuple, list] = {}
+    documents: list[str] = ["SRS"]
+
+    def add(line: dict, where: str, owner: str) -> None:
+        ok = [f for f in line["facts"] if _steppable(line, f)]
+        for f in ok:
+            singles.setdefault(_match_key(f.get("unit") or "", exact_value(f)), []).append(
+                {"where": where, "owner": owner, "condition": _condition_text(line, f), "op": f["op"],
+                 # an unnamed hold time (``특정시간(300ms) 이상 유지``) names no subject to borrow
+                 "named": _subject_text(f) != "조건" + DURATION_SUFFIX,
+                 "weak": f.get("signal_kind") == "paren_owner",     # (review I12, as R32 I4)
+                 "line": _clip(line["text"], 160), "line_sha256": line["sha256"]})
+        for lo in ok:
+            for hi in ok:
+                if lo is hi or lo["op"] not in {">", ">="} or hi["op"] not in {"<", "<="} or not same_subject(lo, hi) \
+                        or not exact_value(lo) < exact_value(hi):
+                    continue
+                unit = lo.get("unit") or ""
+                ranges.setdefault(_match_key(unit, exact_value(lo)) + _match_key(unit, exact_value(hi))[1:], []).append(
+                    {"where": where, "owner": owner, "condition": _condition_text(line, lo), "op": "range",
+                     "named": True, "weak": lo.get("signal_kind") == "paren_owner",
+                     "line": _clip(line["text"], 160), "line_sha256": line["sha256"]})
+
+    for req in requirements:
+        seen: set[int] = set()
+        for line, _ in requirement_facts(req):
+            if id(line) not in seen:
+                seen.add(id(line))
+                add(line, f"SRS {req.get('id', '')}", str(req.get("id", "")))
+    for sid, block in (system or {}).items():
+        if block["doc"] not in documents:
+            documents.append(block["doc"])
+        fields = [(f, block["fields"].get(f)) for f in SYSTEM_TEXT_FIELDS] + \
+                 [(f, (block.get("evidence_fields") or {}).get(f)) for f in EVIDENCE_EXTRA_FIELDS]
+        for field, text in fields:
+            if text:
+                for line in _field_lines(_EVIDENCE_ANCHOR, field, text):
+                    add(line, source_label({"doc": block["doc"], "id": sid, "field": field}), sid)
+    return {"singles": singles, "ranges": ranges, "documents": documents}
+
+
+def _relation(item_op: str | None, cand_op: str) -> str:
+    """(R46 review W3) how a candidate's comparison stands to the item's: ``same``; ``flip`` — the other boundary
+    inclusion (``이상`` ↔ ``초과``, the R33 "경계 포함 불일치" of the same sheet); ``opposite`` — the other side
+    (``이하`` ↔ ``초과``: the complement or another condition); ``range`` — a range item has no written inclusion."""
+    if cand_op == "range":
+        return "range"
+    if cand_op == item_op:
+        return "same"
+    return "flip" if _INCLUSION_FLIP.get(str(item_op)) == cand_op else "opposite"
+
+
+_RELATION_ORDER = {"range": 0, "same": 0, "flip": 1, "opposite": 2}
+
+
+def _evidence_for(item: dict[str, Any], corpus: dict[str, Any], cited: dict[str, list[str]]) -> list[dict[str, Any]] | None:
+    """The candidates for one held-back item — ``None`` when the item has no unit (a bare ``3`` — or ``0 ~ 65535``, the
+    domain of every 16-bit variable — matches everywhere: review I2). The item's own fact is never a candidate (it is
+    not steppable); another comparison of its sentence can be (review W4: ``u16g_A 가 4.85V 미만 시 경고, 4.85V 미만
+    유지 시 정지``). An unnamed hold time counts only in a related requirement (it names no subject, and the value alone
+    is no link). Related sentences (the item's requirements and the blocks they cite) first, then the same comparison,
+    the other inclusion, the other side; then SRS · SyRS · SyDS."""
+    unit = item.get("unit") or ""
+    if not unit:
+        return None
+    if item.get("lo") is not None:
+        pool = corpus["ranges"].get(_match_key(unit, Decimal(item["lo"])) + _match_key(unit, Decimal(item["hi"]))[1:], [])
+    elif item.get("value") is not None:
+        pool = corpus["singles"].get(_match_key(unit, Decimal(item["value"])), [])
+    else:
+        return None
+    ids = [str(x) for x in item.get("srs_ids") or [item.get("srs_id")] if x]
+    related = set(ids) | {sid for rid in ids for sid in cited.get(rid, [])}
+    out: list[dict[str, Any]] = []
+    keys: set[tuple] = set()
+    for c in pool:
+        key = (c["where"], c["condition"])
+        if key in keys or not (c["named"] or c["owner"] in related):
+            continue
+        keys.add(key)
+        out.append({"where": c["where"], "condition": c["condition"], "line": c["line"],
+                    "line_sha256": c["line_sha256"], "related": c["owner"] in related, "weak_subject": c["weak"],
+                    "inclusion": _relation(item.get("op"), c["op"])})
+    out.sort(key=lambda c: (not c["related"], _RELATION_ORDER[c["inclusion"]],
+                            _DOC_ORDER.get(c["where"].split(" ", 1)[0], len(_DOC_ORDER))))
+    return out
+
+
+# ── what filling the gap would do — tried in the item's own sentence (review W1) ─────────────────────────────────────
+# The fill is written into the sentence, the sentence read again alone, and the item's value must then step under the
+# written name while no value of the sentence that stepped before stops (``Pull-Up 전원 : 2.25V 이상 ~ Pull-Up 전원
+# 2.75V 이하`` — the name written twice makes both unstated, and 2.25 V lost its step). What cannot be written in
+# (a negation, a deadline, a label, a join whose meaning the shape does not tell) is a rewrite: its example keeps the
+# sentence's meaning, and its form is exercised by tests.
+# (review r2 I-b) placeholders a document does not use; (r2 W7) the Korean one is two words — a one-word name is read
+#   together with an unparticled word before it (``따라 대상신호``), as a reader's own two-word name (``도어 각도``) is not
+_FILL_NAME = "채움 신호"
+_FILL_IDENT = "u16g_FillSignal"    # a C identifier — a noun after the value can take a Korean name's place
+_FILL_MONITORED = "채움량"
+_SEPARATOR_GAP = re.compile(r"[\s,~∼/]*")
+_FILL_STEPS = "이 값의 경계 스텝(값−분해능·값·값+분해능)이 생긴다"
+_VERIFIED = " — 이 문장에 넣어 확인"
+_REWRITE = " — 예시 형태는 시험으로 확인, 원문 뜻대로 다시 쓸 것"
+_SUBJECT_REASONS = frozenset({"no_subject_for_value", "subject_unclear", "no_subject_in_value_field"})
+
+
+def _alone(raw: str) -> dict[str, Any] | None:
+    """The line read again on its own (no heading, no neighbour) — both sides of a fill are read this way. (review r2)
+    Whether a fact of a review item's line steps depends on the line alone: its section only says "outcome", and an
+    outcome line makes no review item."""
+    got = [ln for b in extract(f"ID\t{_EVIDENCE_ANCHOR}\n{raw}\n") for ln in b["lines"]]
+    return got[0] if len(got) == 1 else None
+
+
+def _value_key(f: dict) -> tuple:
+    return (f.get("unit") or "", exact_value(f), f.get("op"))
+
+
+def _stepped_by_key(line: dict | None) -> dict[tuple, list[dict]]:
+    out: dict[tuple, list[dict]] = {}
+    if line is None:
+        return out
+    for f in line["facts"]:
+        if isinstance(f.get("value"), (int, float)) and not isinstance(f.get("value"), bool) and _steppable(line, f):
+            out.setdefault(_value_key(f), []).append(f)
+    return out
+
+
+def _baseline(raw: str) -> Counter:
+    """How many facts of each (unit, value, operator) step in the line as written (review r2 I-c: counted, so one of two
+    equal comparisons lost is seen)."""
+    return Counter({k: len(v) for k, v in _stepped_by_key(_alone(raw)).items()})
+
+
+# (review r3 I-h) the other reasons a filled sentence may still not step, in words
+_SKIP_TEXT = {"value_outside_subject_type": "값이 신호 이름이 선언한 폭 밖", "output_requirement": "의무문(출력)으로 읽힘",
+              "outcome_section": "결과 절로 읽힘", "reference_label": "기준 이름표로 읽힘",
+              "response_constraint": "응답 기한('이내')으로 읽힘", "not_an_order_comparison": "크기 비교가 아님",
+              "kind_range": REVIEW_TEXT["kind_range"][0], "kind_symbolic": "값이 아니라 이름과 비교"}
+
+
+def _try_fill(raw: str, targets: list[tuple[tuple, str | None]], baseline: Counter) -> str:
+    """``""`` when every target value steps under its name (``None``: under any name) and every value that stepped
+    before still steps as often; otherwise why not, in the review's own words."""
+    line = _alone(raw)
+    if line is None:
+        return "다시 읽지 못함"
+    stepped = _stepped_by_key(line)
+    for key, name in targets:
+        hits = stepped.get(key, [])
+        if not hits:
+            held = [f for f in line["facts"] if isinstance(f.get("value"), (int, float))
+                    and not isinstance(f.get("value"), bool) and _value_key(f) == key]
+            why = _skip_reason(line, held[0]) if held else ""
+            if not why:
+                return "그 값을 다시 읽지 못함"
+            return REVIEW_TEXT[why][0] if why in REVIEW_TEXT else _SKIP_TEXT.get(why, f"스텝 조건이 아님({why})")
+        if name is not None and not any(name in {subject_of(f), f.get("signal")} for f in hits):
+            return f"적은 이름이 주어로 읽히지 않음(주어로 '{_subject_text(hits[0])}' 를 읽음)"
+    lost = sorted(k for k, n in baseline.items() if len(stepped.get(k, [])) < n)
+    if lost:
+        return "같은 줄의 " + ", ".join(f"{k[1]}{k[0]} {_OP_TEXT.get(k[2], k[2])}" for k in lost) + " 스텝이 사라짐"
+    return ""
+
+
+def _placeholders(text: str) -> str:
+    return text.replace(_FILL_IDENT, "u16g_<신호>").replace(_FILL_NAME, "<신호>").replace(_FILL_MONITORED, "<감시량>")
+
+
+def _excerpt(raw: str, start: int, end: int) -> str:
+    """The changed part of a filled sentence with a little context, placeholders shown as such."""
+    a, b = max(0, start - 30), min(len(raw), end + 12)
+    return _placeholders(("…" if a else "") + raw[a:b].strip() + ("…" if b < len(raw) else ""))
+
+
+def _bounds(a: dict, b: dict) -> str:
+    """How two comparisons of one quantity stand: ``range`` — a lower bound below an upper one (only *and* means
+    anything, R45); ``apart`` — the lower above the upper: outside a band (*or* — ``4.85V 미만/5.15V 초과``) or an entry
+    and a return (a hysteresis — ``8.5V 이하, 9.0V 이상 복귀``), which the shape does not tell (review r2 W8, as R45 C1);
+    ``one_side`` — two bounds on one side (either join means something); ``empty`` — both sides of one value or an
+    empty range on the written grid (``9V 미만 9V 이상`` · ``10 초과 11 미만``: *and* never holds, *or* always does —
+    review r3 I-g, as R45 I1)."""
+    lower = [f for f in (a, b) if f["op"] in {">", ">="}]
+    upper = [f for f in (a, b) if f["op"] in {"<", "<="}]
+    if len(lower) != 1 or len(upper) != 1:
+        return "one_side"
+    lo_f, hi_f = lower[0], upper[0]
+    grid = min(written_step(lo_f), written_step(hi_f))
+    lo = exact_value(lo_f) + (grid if lo_f["op"] == ">" else 0)
+    hi = exact_value(hi_f) - (grid if hi_f["op"] == "<" else 0)
+    if lo <= hi:
+        return "range"
+    return "apart" if exact_value(lo_f) > exact_value(hi_f) else "empty"
+
+
+_APART = ("대역 밖(이거나)인지, 진입·복귀 같은 두 조건(히스테리시스 — 두 문장으로 나눠 적기)인지 원문 뜻으로 정해야 한다 — 모양으로는 "
+          "가를 수 없다")
+_EMPTY = ("같은 값의 양쪽이거나 빈 범위라 '이고' 면 늘 거짓, '이거나' 면 늘 참이다 — 원문 뜻을 정해 다시 써야 한다(결합어만으로는 뜻이 "
+          "생기지 않는다)")
+
+
+def _previous_in_unit(line: dict, fact: dict) -> dict | None:
+    """The comparison right before ``fact`` in its unit, joined to it by nothing but a separator (``/`` ``~`` ``,``)."""
+    raw = line.get("raw") or line["text"]
+    s = fact["line_span"][0]
+    before = [f for f in line["facts"] if f is not fact and f["kind"] in {"threshold", "duration"}
+              and f.get("op") in _ORDER and (f.get("unit") or "") == (fact.get("unit") or "")
+              and f["line_span"][1] <= s]
+    if not before:
+        return None
+    prev = max(before, key=lambda f: f["line_span"][1])
+    return prev if _SEPARATOR_GAP.fullmatch(raw[prev["line_span"][1]:s]) else None
+
+
+def _joined(line: dict, prev: dict, fact: dict, conn: str, name: str | None) -> tuple[str, int, int]:
+    """``prev`` and ``fact`` joined by ``conn`` (the separator between them replaced), with ``name`` written once before
+    ``prev`` — the filled line and the span of the change."""
+    raw = line.get("raw") or line["text"]
+    s, e = fact["line_span"]
+    p0, p1 = prev["line_span"]
+    head = (name + " ") if name else ""
+    filled = raw[:p0] + head + raw[p0:p1] + conn + " " + raw[s:]
+    return filled, p0, p1 + len(head) + len(conn) + 1 + (e - s)
+
+
+def _fill_subject(line: dict, fact: dict, baseline: Counter) -> tuple[str, str]:
+    raw = line.get("raw") or line["text"]
+    s, e = fact["line_span"]
+    key = _value_key(fact)
+    prev = _previous_in_unit(line, fact)
+    if prev is not None:
+        prev_name = subject_of(prev)
+        name = None if prev_name else _FILL_NAME
+        shape = _bounds(prev, fact)
+        if shape == "range":
+            # one quantity's lower and upper bound: join them (``2.25V 이상이고 2.75V 이하``) — naming the value again
+            #   makes both an unstated join (review W1)
+            filled, a, b = _joined(line, prev, fact, "이고", name)
+            if not _try_fill(filled, [(key, prev_name or _FILL_NAME), (_value_key(prev), prev_name or _FILL_NAME)],
+                             baseline):
+                how = "결합어로 이어" if prev_name else "신호 이름을 한 번 적고 결합어로 이어"
+                return (f"앞 값과 같은 신호면 {how} 적으면(예: '{_excerpt(filled, a, b)}') {_FILL_STEPS}{_VERIFIED}"
+                        + ("(신호 이름만 다시 적으면 결합 미기재로 두 값이 모두 보류된다)" if prev_name else ""), "verified")
+        elif shape == "apart":
+            filled, a, b = _joined(line, prev, fact, "이거나", name)
+            example = "" if _try_fill(filled, [(key, prev_name or _FILL_NAME)], baseline) else \
+                f" 대역 밖이면 예: '{_excerpt(filled, a, b)}'(이 문장에 넣어 스텝 확인)."
+            return f"앞 값과 한 신호면 {_APART}.{example}", "rewrite"
+        elif shape == "empty":
+            return f"앞 값과 한 신호면 {_EMPTY}. 다른 신호면 비교하는 신호 이름을 값 앞에 적는다", "rewrite"
+    whys = []
+    attempts = ((raw[:s] + _FILL_NAME + " " + raw[s:], _FILL_NAME, "비교하는 신호 이름을 값 앞에"),
+                (raw[:s] + _FILL_IDENT + " " + raw[s:], _FILL_IDENT, "비교하는 변수 이름(C 식별자)을 값 앞에"))
+    for filled, name, how in attempts:
+        why = _try_fill(filled, [(key, name)], baseline)
+        if not why:
+            start = filled.index(name)
+            note = f" — 한국어 이름은 이 문장에서 주어로 읽히지 않는다: {whys[0]}" if name == _FILL_IDENT else ""
+            return (f"{how} 적으면(예: '{_excerpt(filled, start, start + len(name) + 1 + e - s)}') {_FILL_STEPS}"
+                    f"{_VERIFIED}{note}", "verified")
+        whys.append(why)
+    return f"이 문장에서는 신호 이름을 적어도 스텝되지 않는다 — {whys[-1]}. 그것까지 원문에서 풀어야 한다", "needs_more"
+
+
+def _fill_range(line: dict, fact: dict, baseline: Counter) -> tuple[str, str]:
+    raw = line.get("raw") or line["text"]
+    s, e = fact["line_span"]
+    lo_t, hi_t = (str(t) for t in fact["value_text"])
+    unit = fact.get("unit") or ""
+    named = fact.get("signal") and not _UNCLEAR_SUBJECT.search(str(fact.get("signal")).strip())
+    insert = "" if named else _FILL_NAME + " "
+    written = raw[s:e]
+    # (review r2 I-a) the range's match ends in the space before what follows (``0 ~ 5000 RPM``): keep it
+    body = f"{lo_t}{unit} 이상이고 {hi_t}{unit} 이하" + written[len(written.rstrip()):]
+    filled = raw[:s] + insert + body + raw[e:]
+    lo = {"value_text": lo_t, "value": fact["value"][0]}
+    hi = {"value_text": hi_t, "value": fact["value"][1]}
+    name = None if named else _FILL_NAME
+    why = _try_fill(filled, [((unit, exact_value(lo), ">="), name), ((unit, exact_value(hi), "<="), name)], baseline)
+    if why:
+        return f"이 문장에서는 두 비교로 적어도 스텝되지 않는다 — {why}. 그것까지 원문에서 풀어야 한다", "needs_more"
+    return (f"하한·상한의 포함과 주어를 정해 두 비교로 적으면(예: '{_excerpt(filled, s, s + len(insert) + len(body))}' — "
+            f"포함은 정한 대로) 하한·상한의 경계 스텝이 생긴다{_VERIFIED}(`~` 범위로는 주어가 있어도 스텝하지 않는다)", "verified")
+
+
+def _fill_join(line: dict, fact: dict, baseline: Counter) -> tuple[str, str]:
+    raw = line.get("raw") or line["text"]
+    siblings = [g for g in line["facts"] if same_subject(fact, g) and joint(line, fact, g) == "unstated"]
+    if not siblings:
+        return "같은 주어의 두 조건 사이에 '이고'(그리고) 또는 '이거나'(또는)를 원문 뜻대로 적는다", "rewrite"
+    other = min(siblings, key=lambda g: abs(g["line_span"][0] - fact["line_span"][0]))
+    first, second = sorted((fact, other), key=lambda f: f["line_span"][0])
+    shape = _bounds(first, second)
+    if shape == "apart":
+        return f"두 조건이 {_APART}", "rewrite"          # (review r2 W8) ``8.5V 이하, 9.0V 이상 복귀``
+    if shape == "empty":
+        return f"두 조건이 {_EMPTY}", "rewrite"          # (review r3 I-g) ``9V 미만 9V 이상``
+    if not _SEPARATOR_GAP.fullmatch(raw[first["line_span"][1]:second["line_span"][0]]):
+        return ("같은 주어의 두 조건 사이에 '이고'(그리고) 또는 '이거나'(또는)를 원문 뜻대로 적는다(사이의 말까지 다시 써야 해 이 "
+                "문장에 넣어 보지는 못했다)", "rewrite")
+    works = []
+    for conn in ("이고",) if shape == "range" else ("이고", "이거나"):
+        filled, a, b = _joined(line, first, second, conn, None)
+        if not _try_fill(filled, [(_value_key(fact), subject_of(fact))], baseline):
+            works.append((filled, a, b))
+    if not works:
+        return "이 문장에서는 결합어를 적어도 스텝되지 않는다 — 원문을 다시 써야 한다", "needs_more"
+    filled, a, b = works[0]
+    which = "이고·이거나 어느 쪽이든 스텝된다" if len(works) == 2 else "하한·상한이라 뜻 있는 결합은 이고뿐"
+    return f"두 조건 사이에 원문 뜻대로 결합어를 적으면(예: '{_excerpt(filled, a, b)}' — {which}) {_FILL_STEPS}{_VERIFIED}", \
+        "verified"
+
+
+def _fill_monitored(line: dict, fact: dict, baseline: Counter) -> tuple[str, str]:
+    raw = line.get("raw") or line["text"]
+    e = fact["line_span"][1]
+    filled = raw[:e] + "인 " + _FILL_MONITORED + raw[e:]
+    why = _try_fill(filled, [(_value_key(fact), _FILL_MONITORED)], baseline)
+    if why:
+        return f"이 문장에서는 감시량을 적어도 스텝되지 않는다 — {why}", "needs_more"
+    return (f"기준 상수 뒤에 비교하는 감시량을 적으면(예: '{_excerpt(filled, fact['line_span'][0], e + 2 + len(_FILL_MONITORED))}'"
+            f") {_FILL_STEPS}{_VERIFIED}", "verified")
+
+
+# (review r2 W5) a negation on the comparison itself: ``… 미만이 아닌/아니면/아닐/아님``, ``… 이상을 벗어나면``, ``… 이하 제외``,
+#   ``… 이하가 되지 않으면`` — its example is the complement
+#   (review r3 W9) and a hold time's own verb negated: ``300ms 이상 유지하지 않으면`` / ``… 지속되지 않으면`` — held less long
+_NEGATED_COMPARISON = re.compile(r"\s*(?:이|가|을|를|은|는)?\s*(?:아(?:닌|니|닐|님)|벗어나|제외|(?:(?:유지|지속)\s*)?(?:하|되)지\s*않)")
+# (review r3 W9 · r4 W10) a negated clause — every ending of ``않`` / ``못`` / ``아니`` / ``없`` (``되지 않은 경우``, ``받지
+#   못하는``, ``아닐 경우``), but not the adverb ``없이`` (``이상 없이 복귀할 경우`` is a positive clause)
+_NEGATIVE_WINDOW = re.compile(r"않|못|아(?:니|닌|닐|님)|없(?!이)")
+
+
+def _fill_rewrite(line: dict, fact: dict, reason: str) -> str:
+    """(review W2 · r2 W5 · W6) An example that keeps the sentence's meaning: a negated comparison is the complement
+    (``8.5V 미만이 아닌`` → ``8.5V 이상``); a hold time with a negated predicate names the negation (``300ms 이상 수신되지
+    않는`` → ``미수신 300ms 이상``); any other negation gets no example with a comparison word in it. ``이내`` is read as
+    ``이하``: in a negative clause the non-event outlasts it (``20ms 이내에 … 되지 않으면`` → ``20ms 초과 유지되면``), in a
+    positive one the condition lasts at most that long (``500ms 이내에 9V 이상으로 복귀`` → ``500ms 이하 유지 후``)."""
+    raw = line.get("raw") or line["text"]
+    e = fact["line_span"][1]
+    value = f"{fact.get('value_text') or fact.get('value')}{fact.get('unit') or ''}"
+    if reason == "negated_condition":
+        if _NEGATED_COMPARISON.match(raw[e:]) and fact.get("op") in _COMPLEMENT:
+            return (f"비교에 걸린 부정은 반대 비교로 적으면(예: '<신호> {value} {_OP_TEXT[_COMPLEMENT[fact['op']]]}') "
+                    f"{_FILL_STEPS}{_REWRITE}")
+        if (fact.get("unit") or "") in _TIME_UNIT_NAMES:
+            return (f"부정을 조건 이름에 담아 부정 없이 적으면(예: '<신호> 미수신 {fact.get('raw')}' — '수신되지 않는' → '미수신' "
+                    f"처럼) {_FILL_STEPS}{_REWRITE}")
+        return ("부정이 비교에 걸리는지(반대 비교로) 서술어에 걸리는지(부정을 조건 이름에) 정해 부정 없이 적으면 이 값의 경계 스텝이 "
+                "생긴다 — 원문 뜻대로 다시 쓸 것")
+    if reason == "deadline_or_window":
+        if _NEGATIVE_WINDOW.search(raw[e:e + 60]):
+            example = f"'<조건> 이 {value} 초과 유지되면'"
+        else:
+            example = f"'<조건> 이 {value} 이하 유지 후'"
+        return (f"조건의 시간 창이면 {example} 처럼 유지 시간으로 적으면 경계 스텝이 생기고(원문 '이내' 를 이하로 읽음 — 문서의 "
+                f"다른 곳이 '미만'이면 경계 포함 불일치), 응답 기한이면 지금대로(측정 항목) 둔다{_REWRITE}")
+    if reason == "parenthesis_labels_may_share_a_quantity":
+        return ("괄호 앞 이름 대신 비교하는 신호 이름을 적는다 — 두 조건이 한 신호면 같은 이름과 결합어로, 다른 신호면 각자의 이름으로"
+                f"(예: 'u16s_Speed 가 0.8m/s 미만 또는 u16s_Speed 가 2.0m/s 이상'){_REWRITE}")
+    return "—"
+
+
+_TIME_UNIT_NAMES = frozenset({"ms", "s", "초", "분"})
+
+
+def fill_guidance(line: dict, fact: dict, reason: str) -> tuple[str, str]:
+    """(R46) What writing the gap into the requirement would produce, and how that was checked: ``verified`` — written
+    into this sentence and read again, the value steps and nothing stepped before stops; ``needs_more`` — tried here
+    and not enough (the text says what else holds it back); ``rewrite`` — the sentence has to be rewritten or its
+    meaning decided first (a negation, a deadline, a label, a lower bound above an upper one), the example's form is
+    exercised by tests."""
+    raw = line.get("raw") or line["text"]
+    baseline = _baseline(raw)
+    if fact["kind"] == "range" and isinstance(fact.get("value_text"), list) and len(fact["value_text"]) == 2:
+        return _fill_range(line, fact, baseline)
+    if fact["kind"] not in {"threshold", "duration"} or not isinstance(fact.get("value"), (int, float)) \
+            or isinstance(fact.get("value"), bool):
+        return "—", "rewrite"
+    if reason in _SUBJECT_REASONS:
+        return _fill_subject(line, fact, baseline)
+    if reason == "same_subject_combination_unstated":
+        return _fill_join(line, fact, baseline)
+    if reason == "monitored_quantity_unknown":
+        return _fill_monitored(line, fact, baseline)
+    return _fill_rewrite(line, fact, reason), "rewrite"
+
+
+_FILL_READ = "확인만 — 이미 스텝했다. 원문에 연결어나 한 신호 이름을 적으면 이 확인 항목이 사라진다"
+_FILL_CONFLICT = "한쪽 포함으로 통일하면 이 후보가 사라진다(경계 스텝은 지금도 각 문장대로 판정한다)"
+
+
+def if_filled(item: dict[str, Any]) -> str:
+    """(R46) The item's 'If Filled' text: a held-back item carries its own (`fill_guidance`, made where the sentence
+    is at hand); a reading is to confirm; a conflict disappears when one inclusion is chosen."""
+    if item.get("if_filled"):
+        return str(item["if_filled"])
+    if item.get("kind") == "inclusion_conflict":
+        return _FILL_CONFLICT
+    if item.get("kind") == "read":
+        return _FILL_READ
+    return "—"
+
+
+def attach_review_evidence(items: list[dict[str, Any]], requirements: list[dict],
+                           system: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """(R46) Give every held-back item with a value its ``evidence`` (the first `MAX_EVIDENCE` candidates) and
+    ``evidence_total`` — ``None`` when not searched. Returns the counts for the quality report: items searched, items
+    with a candidate (and with a related one), the documents searched, and how each 'If Filled' was checked."""
+    held = [it for it in items if it.get("kind") == "held_back"]
+    fill_checks = dict(sorted(Counter(str(it.get("fill_check") or "unchecked") for it in held).items()))
+    if not held:
+        return {"review_evidence_searched": 0, "review_evidence_found": 0, "review_evidence_related": 0,
+                "review_evidence_documents": [], "review_fill_checks": fill_checks}
+    corpus = review_evidence_corpus(requirements, system)
+    cited = {str(r.get("id", "")): cited_system_ids(r) for r in requirements}
+    # everything is computed before any item changes — a failure leaves every item as it was (the caller discloses it)
+    updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    searched = found = related = 0
+    for it in held:
+        cands = _evidence_for(it, corpus, cited)
+        if cands is None:
+            updates.append((it, {"evidence": None}))    # not searched: no unit — the same number is everywhere
+            continue
+        searched += 1
+        found += bool(cands)
+        related += any(c["related"] for c in cands)
+        updates.append((it, {"evidence": cands[:MAX_EVIDENCE], "evidence_total": len(cands)}))
+    for it, update in updates:
+        it.update(update)
+    return {"review_evidence_searched": searched, "review_evidence_found": found,
+            "review_evidence_related": related, "review_evidence_documents": corpus["documents"],
+            "review_fill_checks": fill_checks}
+
+
+_INCLUSION_TAG = {"flip": " [포함 다름]", "opposite": " [방향 반대]"}
+
+
+def _evidence_text(item: dict[str, Any]) -> str:
+    """The sheet's evidence cell: the candidates, or that none was found in the documents searched, why none was
+    searched, or that the search failed — ``—`` for an item that is no gap (a reading, a conflict) or an output from
+    before R46."""
+    if item.get("evidence_error"):
+        return f"근거 탐색 실패 — {item['evidence_error']}"
+    if "evidence" not in item:
+        return "—"
+    cands = item["evidence"]
+    if cands is None:
+        return "탐색 안 함 — 단위 없는 값(같은 수가 흔해 짝짓지 않는다)"
+    if not cands:
+        return "준 문서의 다른 문장에 같은 값·단위를 스텝할 수 있게 적은 곳 없음 — 적을 말부터 요구 문서에서 정해야 한다"
+    parts = [f"{c['where']}: {c['condition']}" + (" [괄호 앞 명사]" if c.get("weak_subject") else "")
+             + (" [같은 요구·인용]" if c.get("related") else "") + _INCLUSION_TAG.get(str(c.get("inclusion")), "")
+             + f" — {c['line']}" for c in cands]
+    more = int(item.get("evidence_total") or len(cands)) - len(cands)
+    return ("; ".join(parts) + (f" 외 {more}건" if more > 0 else "")
+            + " (같은 값을 스텝할 수 있게 적은 다른 문장 — 같은 양인지 확인 후 옮길 것)")
+
+
 def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[dict], build_tc, make_tc_id,
                                     classify, max_steps: int = 12,
                                     system: dict[str, dict[str, Any]] | None = None,
@@ -802,6 +1343,15 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     out["review_item_count"] = len(review_items)
     out["review_read_count"] = sum(1 for r in review_items if r["kind"] == "read")
     out["review_by_reason"] = dict(sorted(Counter(r["reason"] for r in review_items).items()))
+    try:
+        # (R46) the other sentences of the given documents that state an item's value steppably, and what filling
+        #   the gap would improve
+        out.update(attach_review_evidence(review_items, requirements, system))
+    except Exception as exc:  # noqa: BLE001 — an optional finding never costs the boundary TCs (as review I8)
+        out["review_evidence_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        for r in review_items:
+            if r["kind"] == "held_back":
+                r["evidence_error"] = out["review_evidence_error"]   # (review I4) the sheet says so, not "—"
     out["review_items"] = review_items[:MAX_REVIEW_ITEMS]
     if review_out is not None:
         review_out.extend(review_items)
@@ -874,8 +1424,10 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
     return len(rows)
 
 
-REQUIREMENT_REVIEW_HEADERS = ["Kind", "SRS ID", "Source Document", "Fact", "Reason", "To Decide", "Source Line",
-                              "Line SHA-256"]
+REQUIREMENT_REVIEW_HEADERS = ["Kind", "SRS ID", "Source Document", "Fact", "Reason", "To Decide",
+                              # (R46) what writing the gap into the requirement produces · other sentences of the given
+                              #   documents that state the value steppably (quoted, never used)
+                              "If Filled", "Evidence (Other Sentences)", "Source Line", "Line SHA-256"]
 REQUIREMENT_REVIEW_SHEET = "Requirement Review"
 _CONFLICT_ROLE_TEXT = {"condition": "조건끼리", "outcome": "결과 기준끼리", "stimulus": "시험 입력(검증 기준) ↔ 요구 조건"}
 
@@ -903,6 +1455,7 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
                        f"같은 값·단위를 경계 포함만 달리 적음({_CONFLICT_ROLE_TEXT.get(str(it.get('role')), it.get('role'))})"
                        + flag,
                        "어느 쪽이 맞는지 문서 검토로 정한다(경계 TC 는 각 문장대로 판정)",
+                       if_filled(it), "—",
                        _clip(f"{a.get('line')} ↔ {b.get('line')}", 300), "—"])
             continue
         reason = str(it.get("reason"))
@@ -913,5 +1466,6 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
             why += f" (블록 이름 '{_clip(str(it['block_name']), 80)}')"
         ws.append(["읽은 결합 — 확인" if it.get("kind") == "read" else "검토 필요 조건",
                    ", ".join(it.get("srs_ids") or []), it.get("source", ""), it.get("fact") or "—",
-                   why, decide, _clip(str(it.get("line") or ""), 300), it.get("line_sha256") or "—"])
+                   why, decide, if_filled(it), _clip(_evidence_text(it), 1000),
+                   _clip(str(it.get("line") or ""), 300), it.get("line_sha256") or "—"])
     return len(items)

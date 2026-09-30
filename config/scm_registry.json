@@ -27,8 +27,8 @@
         "hsis": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/02.시스템 아키텍처 설계/03.HSIS/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
         "stp": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/02.Test Plan/01.STP/(HDPDM01_STP) Software Test Plan_v1.01_20230113_B.docx",
         "syrs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/01.시스템 요구사항/01.SyRS/(HDPDM01_SyRS) System Requirements Specification_v6.01_221221.docx",
-        "syts": "",
-        "syits": "",
+        "syts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/03.시스템 테스트/03.Test Specification/01.SyTS/(HDPDM01_SyTS) System Test Specification_v1.01_230613_B.xlsm",
+        "syits": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/04.시스템 통합테스트/02.Test Specification/01.SyITS/(HDPDM01_SyITS) System Integration Test Specification_v1.01_230613_R.xlsm",
         "vectorcast": [],
         "uds_template": "",
         "sts_template": "",
@@ -54,7 +54,7 @@
         ]
       },
       "created_at": "2026-03-23T14:10:41",
-      "updated_at": "2026-09-26T14:17:45",
+      "updated_at": "2026-09-30T14:43:31",
       "last_triggered": "",
       "last_revision": ""
     },

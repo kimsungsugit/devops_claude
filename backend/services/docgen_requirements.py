@@ -338,8 +338,11 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             IN_STP: "시험 전략 문맥이 빠집니다",
             # (R29, G4(b)) SRS 블록의 Related ID 가 직접 가리키는 시스템 블록의 임계 — 없으면 SRS 가 직접 적은 값만 경계
             #   TC 가 된다(실측 HDPDM01: 정본 STS 자극 임계 중 SRS 밖 값의 변이 판별 0)
-            IN_SYRS: "SRS 가 적지 않은 시스템 요구 임계의 경계 TC 가 빠집니다",
-            IN_SYDS: "SRS 가 적지 않은 시스템 설계(인터페이스·범위) 임계의 경계 TC 가 빠집니다",
+            # (R46) 채우면 무엇이 좋아지는지 — 요구 원문 검토 항목의 근거 후보도 이 문서에서 찾는다
+            IN_SYRS: "SRS 가 적지 않은 시스템 요구 임계의 경계 TC 가 빠지고, 요구 원문 검토 항목의 근거 후보를 SyRS 에서 찾지 "
+                     "않습니다",
+            IN_SYDS: "SRS 가 적지 않은 시스템 설계(인터페이스·범위) 임계의 경계 TC 가 빠지고, 요구 원문 검토 항목의 근거 후보를 "
+                     "SyDS(요소 블록의 Input Information 포함)에서 찾지 않습니다",
             IN_TEMPLATE: "기본 양식으로 만듭니다(회사 표준 서식이 아닐 수 있습니다)",
         },
         fields=["related"],

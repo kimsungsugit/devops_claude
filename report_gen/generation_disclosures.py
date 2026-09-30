@@ -385,14 +385,56 @@ def _requirement_review_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> L
              + ("(요구 문서 경계 포함 불일치 후보도 같은 시트)" if "inclusion_conflicts" in rb else ""))
     return [_item(
         "sts_requirement_review", "요구 원문 검토 항목",
-        f"{n}건" + (f" · 그중 읽은 결합 {read_n}" if read_n else ""),
+        f"{n}건" + (f" · 그중 읽은 결합 {read_n}" if read_n else "") + _evidence_value(rb),
         ", ".join(f"{why_text.get(k, k)} {v}" for k, v in by.items()) + ". "
         + " / ".join(shown)
         + (f" 외 {n - len(shown)}건(품질 리포트 `review_items` 에 {len(items)}건까지)." if n > len(shown) else ".")
         + " — 요구 문서가 정하지 않아 경계 TC 로 만들지 못한 조건과, 원문에 적혀 있지 않은 결합을 생성기가 읽어 스텝한 곳"
-          "('읽은 결합 — 확인')이다. " + where + ". 한 블록을 여러 요구가 인용하면 한 행에 요구를 모두 적는다.",
+          "('읽은 결합 — 확인')이다. " + where + ". 한 블록을 여러 요구가 인용하면 한 행에 요구를 모두 적는다."
+        + _evidence_note(rb),
         tone="warning")]
 
+
+def _evidence_value(rb: Dict[str, Any]) -> str:
+    """(R46) 근거 후보를 찾은 항목 수 — R46 이전 산출물엔 키가 없어 붙이지 않는다(없음 ≠ 0). 찾을 항목이 0 이면 "0/0" 대신
+    아무것도 붙이지 않는다(리뷰 I3 — 탐색하지 않은 것을 탐색한 것처럼 적지 않는다)."""
+    searched = _int(rb, "review_evidence_searched")
+    if not searched:
+        return ""
+    return f" · 다른 문장에 근거 후보 {_int(rb, 'review_evidence_found') or 0}/{searched}"
+
+
+_FILL_CHECK_TEXT = (("verified", "이 문장에 넣어 확인"), ("needs_more", "더 풀 것이 남음"), ("rewrite", "다시 쓰기 예시"),
+                    ("unchecked", "안내 실패"))
+
+
+def _evidence_note(rb: Dict[str, Any]) -> str:
+    """(R46) 사용자 방향 2026-09-30 "부족한 것은 찾아보고, 그래도 없으면 표시하고 채우면 개선된다고 안내" — 어느 문서를
+    찾았는지, 'If Filled' 를 어떻게 확인했는지, 무엇을 적으면 무엇이 생기는지. 검토 목록은 끝 120 자를 남기므로 안내를
+    끝에 둔다(리뷰 I13 — 끝 문장이 120 자 안에서 온전하도록)."""
+    if "review_evidence_searched" not in rb and "review_evidence_error" not in rb:
+        return ""
+    parts = []
+    checks = rb.get("review_fill_checks") if isinstance(rb.get("review_fill_checks"), dict) else {}
+    shown = [f"{label} {checks[k]}" for k, label in _FILL_CHECK_TEXT if checks.get(k)]
+    if shown:
+        parts.append("'If Filled'(원문에 무엇을 적으면 스텝이 생기는지): " + " · ".join(shown) + ".")
+    err = str(rb.get("review_evidence_error") or "")
+    searched = _int(rb, "review_evidence_searched") or 0
+    found = _int(rb, "review_evidence_found") or 0
+    if err:
+        parts.append(f"근거 후보 탐색은 실패했다 — {err[:120]}.")
+    elif not searched:
+        parts.append("근거 후보: 단위 있는 값의 보류 항목이 없어 찾지 않았다.")
+    else:
+        related = _int(rb, "review_evidence_related") or 0
+        docs = "·".join(str(d) for d in (rb.get("review_evidence_documents") or []))
+        parts.append(f"근거 후보: 단위 있는 값 {searched}건 중 {found}건은 준 문서({docs})의 다른 문장이 같은 값·단위를 스텝할 수 "
+                     f"있게 적었다(그중 같은 요구·인용 블록 {related}건 — 옮길 문장의 예일 뿐, 같은 양인지 확인할 것. 생성기는 "
+                     f"쓰지 않는다). 후보 없는 {searched - found}건은 적을 말부터 요구 문서에서 정해야 한다.")
+    parts.append("채우면: 'If Filled' 칸대로 요구 문서에 적고 다시 생성하면 그 값의 경계 스텝이 생긴다(더 풀 것이 남은 항목은 "
+                 "그것까지).")
+    return " " + " ".join(parts)
 
 _CONFLICT_TAG = {"outcome": " [결과]", "stimulus": " [시험 입력]"}
 

@@ -107,6 +107,13 @@ _RULE_ACTION: Dict[str, str] = {
                                     "ID·SwUDS 설계 ID 로 근거를 보강한다.",
     "disclosure:sts_unlinked_functions": "어느 요구에도 붙지 못한 함수다 — 요구 누락인지 요구 밖 함수인지 정하고, 필요하면 SwDS Related "
                                          "ID 를 보강한다.",
+    # (R46) 요구 원문 검토 항목 — 결손 입력이 아니라 요구 문서가 정하지 않은 조건이다(재생성으로 사라지지 않는다)
+    "disclosure:sts_requirement_review": "요구 문서가 정하지 않은 조건(주어·범위 포함·결합·부정 등)이다 — STS "
+                                         "'Requirement Review' 시트의 'If Filled' 칸(그 문장에 무엇을 적으면 경계 스텝이 "
+                                         "생기는지 — '이 문장에 넣어 확인' 이 아닌 행은 더 풀 것이나 다시 쓸 형태)대로 요구 "
+                                         "문서(SRS·SyRS·SyDS)에 적고 다시 생성한다. 'Evidence' 칸의 다른 문장이 같은 양이면 "
+                                         "그 표현을 옮긴다(생성기는 후보를 쓰지 않는다). '읽은 결합 — 확인' 행은 이미 "
+                                         "스텝했으니 읽기가 맞는지만 확인한다.",
     # (R33) 요구 문서 간 경계 포함 불일치 — 재생성으로 사라지지 않는 문서 결함 후보
     #   (R43) '한 출처 안' 쌍(한 문서의 두 줄)을 닫는 기준을 함께 안내한다
     "disclosure:sts_requirement_inclusion_conflicts": "요구 문서(SRS·SyRS·SyDS) 두 곳이 같은 값의 경계 포함을 달리 적었거나"
