@@ -66,8 +66,8 @@ void tagged(void) { b_set_e(E_C); g_out = (g_e == E_C) ? 1U : 0U; }
 """
 B = """#include "common.h"
 #define SCALE 3U
-struct S { U8 a; };
-static struct S s_obj;
+union S { U8 a; U16 w; };
+static union S s_obj;
 static U8 s_b;
 static U8 helper(void) { return 1U; }
 U8 b_scale(U8 x) { return (U8)(x * SCALE); }

@@ -12,7 +12,8 @@ behaviour (signed overflow, division by zero, out-of-bounds indexing, reads of i
 
 Shared with the model (a wrong verdict there would be agreed with, as in `source_oracle_clang_check`): which definition
 a call binds to (the project's `CalleeProvider`), which macros are active with which bodies (the project context,
-including R17's build-configuration assumptions), typedef widths, enumerator and ``const`` values. Objects the claim
+including R17's build-configuration assumptions), typedef widths, enumerator and ``const`` values, and (R42) which
+struct members exist with which types and array lengths (R39's flattening). Objects the claim
 leaves unset and the values of functions the harness does not run take three fill values (0/90/201): a claim holds only
 if all three runs give the claimed value — a sample, not a proof of independence. An enumeration is compiled once per
 permitted underlying type; a claim must hold for each.
@@ -23,7 +24,8 @@ Functions the harness does not run are of two kinds, and the struct counts, per 
   as unknown code (its write closure), so no claimed value may rest on its effects. It returns the fill value and
   writes nothing. A run that reached one and agreed is ``agree_with_stubbed_callees`` (as in the unit check); a
   mismatch is still a contradiction — the value then depends on what the unknown call returns;
-* **cut** — the model ran it but the harness cannot compile it (a struct object, vendor syntax, an undecided macro):
+* **cut** — the model ran it but the harness cannot compile it (a union or a struct the model does not flatten,
+  a member it does not model, vendor syntax, an undecided macro):
   its writes are missing here, so a mismatch proves nothing (``unchecked:cut_callee_reached``) and an agreement is
   only ``agree_with_cut_callees``.
 
@@ -39,7 +41,15 @@ Limits (carried over from the unit check, and this harness's own):
   kept: a run that reaches a function it flags is ``unchecked:unsequenced_function_reached`` (listed in the report);
 * ``static`` locals become struct members (entry value: the fills, as the model reads them unknown); same-named
   ``static`` objects and helpers of different units get one member each, named per unit;
-* struct and union objects are not modelled — a function using one is cut, an entry using one fails its group;
+* (R42) a struct object the model flattens (R39: scalar members and member arrays as ``g.a`` objects) is a struct member
+  of the world holding exactly those members — code using any other member (an unmodeled one) does not compile, so a
+  function using it is cut and an entry using it fails its group; its members are inputs and observables by the
+  model's names (``g.a``, ``g.b[2]``). Union objects and structs the model does not flatten are not modelled — a function
+  using one is cut, an entry using one fails its group. A name its own unit does not model never compiles against
+  another unit's world member of that name when it has internal linkage or the world holds a flattened struct under
+  it (R42 review W1). The harness
+  struct's ``sizeof`` is not the program's (only modeled members, no layout) — the model refuses ``sizeof`` of it, so
+  no claim rests on it; a member named like a C++ keyword fails the group (conservative);
 * only the entry unit's text is checked against the hash the claim recorded: a changed callee unit or header is not
   detected (the harness would compile newer code than the claim was derived from);
 * every compilation carries a canary assertion with a per-compilation nonce that must fail: a run that does not report
@@ -70,6 +80,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# (R42) `_untagged` — one ``enum TAG`` renaming for both harnesses (it was a copy; R41 review I1)
 from scripts.source_oracle_clang_check import (  # noqa: E402
     _CHECK_RANK,
     _ENUM_BASES,
@@ -83,8 +94,10 @@ from scripts.source_oracle_clang_check import (  # noqa: E402
     _fits,
     _input_int,
     _one_line,
+    _struct_text,
     _text,
     _text_hashes,
+    _untagged,
 )
 
 _CUT_ROUNDS = 8                     # compile → cut the functions clang rejects → compile again
@@ -290,6 +303,16 @@ def _compiled(name, path, raw, fn, scope, known_functions=frozenset()):
             consts[t] = c
     objects = {t: ("array", arrays[t]) if t in arrays else ("global", globals_[t])
                for t in sorted(tokens) if (t in globals_ or t in arrays) and t not in status}
+    for t in sorted(tokens):
+        # (R42) a struct object the model flattens: a world member of its modeled members
+        rec = _struct_record(scope, t) if t not in status and t not in objects else None
+        if rec is not None:
+            objects[t] = ("struct", rec)
+    # (R42 review W1) objects this unit declares but does not model (a struct it cannot flatten, a union, an unresolved
+    #   type) → internal linkage? `_build` keeps such a name from compiling against another unit's object
+    unresolved, linkage = scope.get("unresolved_globals") or {}, scope.get("unmodeled_object_linkage") or {}
+    unmodeled = {t: bool(linkage.get(t)) for t in sorted(tokens)
+                 if t in unresolved and t not in objects and t not in status and t not in consts}
     typedefs = {t: types[t] for t in sorted(tokens) if isinstance(types.get(t), dict) and t not in status}
     # ``enum TAG`` written without a typedef (``enum en_g_DoorState g_DoorState;``): C++ would see an undefined enum —
     # the harness names it by a typedef of the underlying type, which the enum-base loop varies like any enum typedef
@@ -315,20 +338,12 @@ def _compiled(name, path, raw, fn, scope, known_functions=frozenset()):
                    if c not in status and c not in _KEYWORDS and c not in _NOT_A_MEMBER and c not in types
                    and c not in globals_ and c not in arrays and c not in param_names
                    and not c.startswith(("__oracle", "__builtin_")))
-    enum = any(t.get("enum") for t in typedefs.values()) or any(rec.get("type", {}).get("enum")
-                                                               for _k, rec in objects.values())
+    enum = any(t.get("enum") for t in typedefs.values()) or any(r.get("type", {}).get("enum")
+                                                               for _k, rec in objects.values() for r in _leaves(rec))
     return {"name": name, "path": path, "scope": scope, "rtype": rtype, "params": params, "body": body,
             "enum_tags": enum_tags, "statics": statics, "macros": macros, "consts": consts, "objects": objects,
+            "unmodeled": unmodeled,
             "typedefs": typedefs, "kw_typedefs": kw_typedefs, "calls": calls, "enum": enum}
-
-
-def _untagged(text, enum_tags):
-    """``enum TAG`` (not a definition ``enum TAG {``) → the harness typedef ``__oracle_enum_TAG``."""
-    if not enum_tags:
-        return text
-    pattern = re.compile(r"\benum\s+(" + "|".join(re.escape(t) for t in sorted(enum_tags, key=len, reverse=True))
-                         + r")\b(?!\s*\{)")
-    return pattern.sub(lambda m: "__oracle_enum_" + m.group(1), text)
 
 
 def _closure(entry_name, entry_path, files, scopes, provider, parser):
@@ -407,9 +422,45 @@ def _renamed(text, renames):
     return pattern.sub(lambda m: renames[m.group(1)], text)
 
 
+def _struct_record(scope, name):
+    """(R42) The struct object ``name`` as the scope flattens it (R39 `_scope_struct`): ``{"typename", "static",
+    "fields": {member path: (kind, record)}}`` — its scalar members are ``globals["name.a"]``, its member arrays
+    ``arrays["name.b"]`` — or None (not a flattened struct, or a member the tables do not hold)."""
+    s = (scope.get("struct_globals") or {}).get(name)
+    if s is None:
+        return None
+    globals_, arrays = scope.get("globals") or {}, scope.get("arrays") or {}
+    fields = {}
+    for path in s.get("members") or []:
+        full = f"{name}.{path}"
+        if full in globals_:
+            fields[path] = ("global", globals_[full])
+        elif full in arrays:
+            fields[path] = ("array", arrays[full])
+        else:
+            return None
+    return {"typename": s.get("typename"), "static": bool(s.get("static")), "fields": fields} if fields else None
+
+
+def _leaves(rec):
+    """The scalar/array records an object record stands for: itself, or a struct's fields."""
+    return [r for _k, r in rec["fields"].values()] if "fields" in rec else [rec]
+
+
 def _merge_record(kind, a, b, name):
     """One program object seen through two declarations (``extern const U8 tab[4];`` here, ``… = {1,2,3,4}`` there):
-    the known length and the initializer values win; a real disagreement is not one object (review R1 C3)."""
+    the known length and the initializer values win; a real disagreement is not one object (review R1 C3). (R42) A
+    struct object is one object when both units flatten the same type into the same members."""
+    if kind == "struct":
+        if a["typename"] != b["typename"] or set(a["fields"]) != set(b["fields"]):
+            raise _Failure("object_name_denotes_two_objects:" + name)
+        fields = {}
+        for path, (fk, fa) in a["fields"].items():
+            fk_b, fb = b["fields"][path]
+            if fk != fk_b:
+                raise _Failure("object_name_denotes_two_objects:" + name)
+            fields[path] = (fk, _merge_record(fk, fa, fb, f"{name}.{path}"))
+        return {**a, "fields": fields}
     if _base_type(a["type"]) != _base_type(b["type"]):
         raise _Failure("object_name_denotes_two_objects:" + name)
     la, lb = a.get("length"), b.get("length")
@@ -464,16 +515,28 @@ def _base_name(n: str) -> str:
     return el.group(1) if el else n
 
 
+# (R42) a struct member by the model's name: ``g.a`` · ``g.s.x`` · ``g.b[2]`` → (object, member path, index)
+_MEMBER_NAME = re.compile(r"^([A-Za-z_]\w*)\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?$")
+
+
+def _object_name(n: str) -> str:
+    """The program object an input / observable name is about: ``g`` for ``g.a`` (R42), else as `_base_name`."""
+    dotted = _MEMBER_NAME.match(n)
+    return dotted.group(1) if dotted else _base_name(n)
+
+
 def _declared(scope, name):
     """``(kind, record)`` of the object ``name`` denotes in this unit's scope, or None."""
     if name in (scope.get("macro_status") or {}) or "." in name:
-        # (R39 review W1) a struct member (``g_t.a``) is no member this harness can declare: its claim is not checked
+        # (R39 review W1) a struct member (``g_t.a``) is placed through its struct object (R42 `place`), never as an
+        # object of its own
         return None
     for kind, table in (("global", scope.get("globals") or {}), ("array", scope.get("arrays") or {})):
         rec = table.get(name)
         if rec is not None:
             return kind, rec
-    return None
+    rec = _struct_record(scope, name)
+    return ("struct", rec) if rec is not None else None
 
 
 def _fresh_member(objects, name):
@@ -490,8 +553,13 @@ def _place_names(wanted, objects, members, entry_path, bound_scopes):
     whichever unit happens to use the name); else the one object of that name the compiled functions use; else the one
     a bound unit declares. Several candidates and none the entry's → not placed (the claim cannot be checked)."""
     names = {}
+    entry_unmodeled = bound_scopes[entry_path].get("unresolved_globals") or {}
     for name in wanted:
         mine = _declared(bound_scopes[entry_path], name)
+        if mine is None and name in entry_unmodeled:
+            # (R42 review I-r2-2) the entry's unit declares the name but does not model it (a union, an unresolved
+            #   type): another unit's object of that name is not what the claim observes — not placed
+            continue
         if mine is not None:
             kind, rec = mine
             owner = entry_path if rec.get("static") else ""
@@ -603,21 +671,39 @@ def _build(entry_member, entry_path, funcs, unbound, cut, cnames, bound_scopes, 
     from generators.mcdc_design import _scope_type
     entry = funcs[entry_member]
     objects, aliases, members = _world(funcs)
-    wanted = {_base_name(n) for n in outputs if n != "return"} | {_base_name(k) for c in claims for k in c["inputs"]}
+    wanted = {_object_name(n) for n in outputs if n != "return"} | {_object_name(k) for c in claims for k in c["inputs"]}
     names = _place_names(sorted(wanted), objects, members, entry_path, bound_scopes)
+
+    def leaf(n):
+        """``(kind, record, struct expression)`` of the scalar or array element an observable / input name denotes, or
+        None. (R42) ``g.a`` / ``g.b[2]`` name a member of the struct object ``g``."""
+        dotted = _MEMBER_NAME.match(n)
+        if dotted:
+            member = names.get(dotted.group(1))
+            if member is None or objects[member][0] != "struct":
+                return None
+            field = objects[member][1]["fields"].get(dotted.group(2))
+            if field is None:
+                return None
+            kind, rec = field
+            base, index = f"{member}.{dotted.group(2)}", dotted.group(3)
+        else:
+            el = _ELEMENT.match(n)
+            member = names.get(el.group(1) if el else n)
+            if member is None:
+                return None
+            kind, rec = objects[member]
+            base, index = member, el.group(2) if el else None
+        if index is not None:
+            if kind != "array" or rec.get("length") is None or int(index) >= rec["length"]:
+                return None
+            return kind, rec, f"{base}[{index}]"
+        return (kind, rec, base) if kind == "global" else None
 
     def place(n):
         """The struct expression an observable / input name denotes, or None."""
-        el = _ELEMENT.match(n)
-        member = names.get(el.group(1) if el else n)
-        if member is None:
-            return None
-        kind, rec = objects[member]
-        if el:
-            if kind != "array" or rec.get("length") is None or int(el.group(2)) >= rec["length"]:
-                return None
-            return f"{member}[{el.group(2)}]"
-        return member if kind == "global" else None
+        found = leaf(n)
+        return found[2] if found else None
 
     placed = {n: ("__oracle_ret" if n == "return" and entry["rtype"].strip() != "void" else
                   None if n == "return" else place(n)) for n in outputs}
@@ -654,7 +740,22 @@ def _build(entry_member, entry_path, funcs, unbound, cut, cnames, bound_scopes, 
         out.emit(f"namespace __oracle_v{variant} {{")
         out.emit(f"constexpr int __oracle_stub = {fill};")
         out.emit("struct __oracle_world {")
+        ctor: list[str] = []
         for member, (kind, rec) in sorted(objects.items()):
+            if kind == "struct":
+                # (R42) the modeled members only (`_struct_text`, as the unit check declares R39 objects); each takes
+                #   the fill like any unset object
+                fields = rec["fields"]
+                if any(fk == "array" and r.get("length") is None for fk, r in fields.values()):
+                    raise _Failure("array_length_unresolved:" + member)
+                text = _struct_text(member, sorted(fields),
+                                    {f"{member}.{p}": r for p, (fk, r) in fields.items() if fk == "global"},
+                                    {f"{member}.{p}": r for p, (fk, r) in fields.items() if fk == "array"}, enum_base)
+                out.emit(f"  {text} {member} = {{}};")
+                for p, (fk, r) in sorted(fields.items()):
+                    ctor.append(f"{member}.{p} = {_fill_for(r['type'], fill)};" if fk == "global" else
+                                f"for (auto &__oracle_x : {member}.{p}) __oracle_x = {_fill_for(r['type'], fill)};")
+                continue
             t = rec["type"]
             if kind == "global":
                 out.emit(f"  {_base_type(t, enum_base)} {member} = {_fill_for(t, fill)};")
@@ -681,13 +782,21 @@ def _build(entry_member, entry_path, funcs, unbound, cut, cnames, bound_scopes, 
                 ret = "return;" if rt == "void" else f"return ({rt})__oracle_stub;"
                 out.emit(f"  template<class... __oracle_A> constexpr {rt} {name}(__oracle_A...) "
                          f"{{ {given}++{kind}_calls; {ret} }}")
-        ctor: list[str] = []
         for name in order:
             f = funcs[name]
             block_start = out.line + 1
-            defined = list(f["macros"]) + list(f["consts"]) + list(aliases.get(name, {})) + list(f["kw_typedefs"])
+            # (R42 review W1) an object this function's unit declares but does not model must not compile against
+            #   another unit's world member of that name: an internal-linkage one is never that object, and one the
+            #   world holds as a flattened struct is a layout this unit could not flatten. (An unresolved extern the
+            #   world models otherwise is the same C object — left to compile as before R42.)
+            foreign = [t for t, internal in sorted((f.get("unmodeled") or {}).items())
+                       if internal or any(objects[m][0] == "struct" for m in members.get(t, {}).values() if m in objects)]
+            defined = list(f["macros"]) + list(f["consts"]) + list(aliases.get(name, {})) + list(f["kw_typedefs"]) \
+                + foreign
             for m in defined:
                 out.emit(f"#undef {m}")
+            for t in foreign:
+                out.emit(f"#define {t} __oracle_unmodeled_{t}")
             fb = f["scope"].get("function_like_macro_bodies") or {}
             fp = f["scope"].get("function_like_macro_params") or {}
             mb = f["scope"].get("macro_bodies") or {}
@@ -759,11 +868,10 @@ def _build(entry_member, entry_path, funcs, unbound, cut, cnames, bound_scopes, 
                     if v is not None and m.group(1) in stub_values:
                         body.append(f"  __w.__oracle_son_{m.group(1)} = true; __w.__oracle_sval_{m.group(1)} = {v}LL;")
                     continue
-                target = place(key)
-                if target is None:
+                found = leaf(key)
+                if found is None:
                     continue
-                el = _ELEMENT.match(key)
-                kind, rec = objects[names[el.group(1) if el else key]]
+                kind, rec, target = found
                 if v is None or not _fits(v, rec["type"]) or (kind == "array" and rec.get("const")):
                     continue
                 body.append(f"  __w.{target} = {v};")
@@ -1012,9 +1120,9 @@ def _compile_base(bi, base, entry_member, entry_path, funcs, unbound, cut, cname
             funcs[b]["unsequenced"] = True   # compiled, but a run that reaches it is set aside
         if res["block"]:
             if entry_member in res["block"]:
-                raise _Failure("entry_does_not_compile:" + res["block"][entry_member][0][:160])
+                raise _Failure("entry_does_not_compile:" + _stable(res["block"][entry_member][0])[:160])
             for name, msgs in res["block"].items():
-                cut[name], cnames[name] = "harness_compile_error:" + msgs[0][:120], funcs[name]["name"]
+                cut[name], cnames[name] = "harness_compile_error:" + _stable(msgs[0])[:120], funcs[name]["name"]
                 del funcs[name]
             continue
         if not fresh:
@@ -1078,6 +1186,12 @@ def _project(source_root):
     return texts, scopes, CalleeProvider(context, texts, scopes, parser), parser
 
 
+def _stable(message: str) -> str:
+    """(R42 review I2) A diagnostic without the run's temporary path: clang names an unnamed struct by where it is
+    (``(unnamed struct at C:/…/oracle_world_x/g000.cpp:12:3)``) — one cause would be a new key in every run."""
+    return re.sub(r"\(unnamed struct at [^)]*\)", "(unnamed struct)", message or "")
+
+
 def _shape(message: str) -> str:
     """A diagnostic without its names and numbers — what kind of limit it is (``read of volatile …``)."""
     return re.sub(r"\d+", "N", re.sub(r"'[^']*'", "'…'", message or ""))[:120]
@@ -1136,7 +1250,7 @@ def main(argv=None) -> int:
                 canary_failures += reason in {"canary_not_reported", "clang_failed"}
                 report["verdicts"]["unchecked"] += n
                 report["unchecked_reasons"]["group:" + reason] += n
-                report["group_failures"][notes["failure"][:160]] += n
+                report["group_failures"][notes["failure"][:160]] += n   # (review W-r2-1) normalized where it is cut short
             else:
                 groups_checked += 1
                 for (index, name), (v, d) in final.items():
