@@ -546,6 +546,11 @@ def _traced_system_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[D
         f"시트의 Source Document). 시험 결과(Output 줄·Action·출력 의무)는 자극으로 쓰지 않는다. 문서: {files}"
         + (f" · 받지 않은 문서: {', '.join(absent)}" if absent else "")
         + f". 인용 {_n('cited')} 회 중 문서에 없는 ID {_n('cited_not_in_documents')}."
+        # (R47 review I4) SyDS 요소의 입력 칸(Input Information)은 R47 부터 — 따로 세어 R47 전후 비율을 읽게 한다
+        + (f" 추적 TC {_n('tcs')} 중 요소 입력 칸(Input Information) TC {_n('input_range_tcs')} · 스텝 "
+           f"{_n('input_range_steps')} · 사실 "
+           f"{_n('input_range_facts_used')} — 입력이 그 칸이 적은 범위 안인지 밖인지만 적고, 요소의 반응(이상 판정·리셋)은 "
+           "같은 요구의 다른 문장 판정을 따른다." if _n("input_range_facts_used") else "")
         + (" 사실을 가장 많이 낸 블록: " + ", ".join(f"{k} {v}" for k, v in list(by_block.items())[:5])
            + f" (블록 {_int(rb, 'traced_blocks_used') or len(by_block)} 개 — 여러 요구가 같은 블록을 인용하면 요구마다 "
              "다시 시험한다)." if by_block else "")

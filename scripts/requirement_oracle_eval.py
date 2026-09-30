@@ -83,7 +83,8 @@ from generators.requirement_oracle import (  # noqa: E402
 )
 
 # longest first (``5step`` is not s); ``8v 이하``/``Km/h`` as the documents write them (R18 review W5)
-_UNIT = r"(?:[Kk]m/h|KM/H|KPH|m/s|step|sec|ms|deg|℃|°C|mV|mv|mA|uA|µA|Hz|V|v|s|초|분|도|%|A)"
+# (R47 review I2) ``RPM`` — the generator reads it as a unit now (a SyDS input cell's ``5000RPM 초과``)
+_UNIT = r"(?:[Kk]m/h|KM/H|KPH|RPM|rpm|m/s|step|sec|ms|deg|℃|°C|mV|mv|mA|uA|µA|Hz|V|v|s|초|분|도|%|A)"
 _NUM = r"\d+(?:\.\d+)?"
 # a written threshold: its own number — not the tail of ``0x1FF0``, with its sign (``-4도``) and without its thousands
 # separators (``1,000ms``) — R18 review W5
@@ -107,10 +108,16 @@ _BOUNDARY_STEP = re.compile(rf"^입력 설정 \(요구 경계\):\s*(?P<sig>.+?)\
 _DURATION_SUFFIX = " 지속 시간"
 # (R29) a step the generator traced to a system block names it after the basis mark:
 #   ``… — 근거: 500ms 초과 [SyDS SyII_06 · Range — SwTR_0601 Related ID]`` (``generators/sts_requirement_tc``)
-_TRACED = re.compile(r"\[(?P<doc>Sy[A-Za-z]+) (?P<id>Sy[A-Za-z]+_[0-9_]+) · [^\]]*? — \S+ Related ID\]\s*$")
+_TRACED = re.compile(r"\[(?P<doc>Sy[A-Za-z]+) (?P<id>Sy[A-Za-z]+_[0-9_]+) · (?P<field>[^\]]*?) — \S+ Related ID\]\s*$")
 # (R32 review C2) the verdict a generated boundary step expects at its point, from its expected result (column L):
 #   ``조건 [저전압 8.5V 이하] 성립 → …`` / ``조건 [...] 불성립 → …`` (``generators/sts_requirement_tc.boundary_steps``)
 _VERDICT = re.compile(r"^조건 \[.*?\] (성립|불성립) →", re.S)
+
+
+def _input_cell_fields() -> frozenset:
+    """(R47) the system fields whose steps state an input's place, not a behaviour — the generator's own set."""
+    from generators.sts_requirement_tc import SYSTEM_INPUT_FIELDS
+    return SYSTEM_INPUT_FIELDS
 
 
 def _num(text: str) -> float:
@@ -122,7 +129,7 @@ _SRS_ID = re.compile(r"Sw[A-Za-z]+_[A-Za-z0-9_]+")
 def _unit(u: str | None) -> str:
     u = (u or "").strip()
     return {"sec": "s", "초": "s", "deg": "도", "°C": "℃", "KPH": "km/h", "Km/h": "km/h", "KM/H": "km/h", "v": "V",
-            "mv": "mV", "µA": "uA"}.get(u, u)
+            "mv": "mV", "µA": "uA", "rpm": "RPM"}.get(u, u)
 
 
 _TIME = {"ms": 0.001, "s": 1.0, "분": 60.0}
@@ -178,6 +185,10 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
                 if role == "action" and (b := _BOUNDARY_STEP.match(text)):
                     traced = _TRACED.search(str(cells[col] or ""))
                     verdict = _VERDICT.match(str(cells[11] or ""))
+                    if traced and traced.group("field") in _input_cell_fields():
+                        # (R47 review W2) an input cell's 성립 says the input is inside what the cell writes (a normal
+                        #   range or a trigger), not the requirement's reaction: no verdict to hold a mutant against
+                        verdict = None
                     slot["points"].append({"value": _num(b.group("num")), "unit": _unit(b.group("unit")),
                                            "signal": b.group("sig").strip(), "raw": b.group(0),
                                            "traced": f"{traced.group('doc')} {traced.group('id')}" if traced else None,

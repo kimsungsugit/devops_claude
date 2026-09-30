@@ -341,8 +341,9 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             # (R46) 채우면 무엇이 좋아지는지 — 요구 원문 검토 항목의 근거 후보도 이 문서에서 찾는다
             IN_SYRS: "SRS 가 적지 않은 시스템 요구 임계의 경계 TC 가 빠지고, 요구 원문 검토 항목의 근거 후보를 SyRS 에서 찾지 "
                      "않습니다",
-            IN_SYDS: "SRS 가 적지 않은 시스템 설계(인터페이스·범위) 임계의 경계 TC 가 빠지고, 요구 원문 검토 항목의 근거 후보를 "
-                     "SyDS(요소 블록의 Input Information 포함)에서 찾지 않습니다",
+            # (R47) 요소 블록의 Input Information(입력 범위)도 경계 TC 가 된다
+            IN_SYDS: "SRS 가 적지 않은 시스템 설계(인터페이스·범위·요소 입력 범위 Input Information) 임계의 경계 TC 가 빠지고, "
+                     "요구 원문 검토 항목의 근거 후보를 SyDS 에서 찾지 않습니다",
             IN_TEMPLATE: "기본 양식으로 만듭니다(회사 표준 서식이 아닐 수 있습니다)",
         },
         fields=["related"],

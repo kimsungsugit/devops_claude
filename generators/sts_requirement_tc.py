@@ -56,6 +56,12 @@ the missing part into the requirement would produce, **tried in that very senten
 written in, the sentence read again; the value must step under the written name and nothing stepped before may stop —
 else the text says what still holds it back); what only a rewrite can settle (a negation, a deadline, a label) gets an
 example that keeps the sentence's meaning.
+
+**Input cells (R47)**: a SyDS element's ``Input Information`` (``BAT 전압(9V 이상 16.0V 이하)`` · ``Watchdog Input(Pulse
+주기 5ms 이하)`` · ``Motor Rotation : …, 5000RPM 초과``) is read as the other text fields are — its bounds step under the
+SRS requirement that cites the block, in TCs of their own after every other traced fact. A cell writes a normal range
+and a trigger alike, so a step says only whether the input is inside or outside what the cell writes; the element's
+reaction is the requirement's other sentences' to decide.
 """
 from __future__ import annotations
 
@@ -149,9 +155,15 @@ def requirement_facts(req: dict[str, Any]) -> list[tuple[dict, dict]]:
 # ── (R29) system requirements the SRS block cites ────────────────────────────────────────────────────────────────
 SYSTEM_ID = re.compile(r"\bSy[A-Za-z]{1,6}_\d+(?:_\d+)?\b")
 # the fields of a SyRS / SyDS block that state behaviour or conditions (measured over HDPDM01 and KJPDS02: the rest —
-#   Name, Type, ASIL, Priority, Rationale, pin allocation, element names, failure rates — carry no stimulus)
+#   Name, Type, ASIL, Priority, Rationale, pin allocation, element names, failure rates — carry no stimulus).
+#   (R47) a SyDS element's ``Input Information`` (``BAT 전압(9V 이상 16.0V 이하), 5V, …`` · ``Watchdog Input(Pulse 주기
+#   5ms 이하)`` · ``5000RPM 초과``) states where the element's input is — R46 read it as evidence only
 SYSTEM_TEXT_FIELDS = ("Description", "Functional Behavior", "System Behavior", "Condition", "Action", "Range",
-                      "Time Constraint", "Verification criteria")
+                      "Time Constraint", "Verification criteria", "Input Information")
+# (R47) what a step on an input cell says: the input is inside or outside what the cell writes (a normal range or a
+#   trigger — the cell does not say which), never the element's reaction. ⚠ a field stating what the element puts out
+#   (an "Output Information") belongs to `SYSTEM_OUTCOME_FIELDS`, not here (review X5)
+SYSTEM_INPUT_FIELDS = frozenset({"Input Information"})
 # (R29 review C2) what the system does — a state table's ``Action`` and a block's ``System Behavior`` — is read as an
 #   outcome: its values are counted (``outcome_section``) and never stepped
 SYSTEM_OUTCOME_FIELDS = frozenset({"Action", "System Behavior"})
@@ -163,10 +175,6 @@ def _field_key(name: str) -> str:
 
 
 _FIELD_BY_KEY = {_field_key(f): f for f in SYSTEM_TEXT_FIELDS}
-# (R46) a SyDS element block's inputs with their ranges (``BAT 전압(9V 이상 16.0V 이하), 5V, …``) — the only other field
-#   of the HDPDM01 / KJPDS02 SyRS / SyDS that states comparisons (11 facts each); evidence for review items, not stepped
-EVIDENCE_EXTRA_FIELDS = ("Input Information",)
-_EVIDENCE_BY_KEY = {_field_key(f): f for f in EVIDENCE_EXTRA_FIELDS}
 
 
 def parse_system_requirement_docx(path: str, label: str) -> tuple[dict[str, dict[str, Any]], int]:
@@ -200,9 +208,7 @@ def parse_system_requirement_docx(path: str, label: str) -> tuple[dict[str, dict
             continue
         out[rid] = {"doc": label, "fields": {_FIELD_BY_KEY[k]: v for k, v in cells_map.items() if k in _FIELD_BY_KEY},
                     # (R45 review W1) not read for facts — a ``Range`` value's subject is often the block's name
-                    "name": cells_map.get("name", ""),
-                    # (R46) read only as evidence for review items, never stepped
-                    "evidence_fields": {_EVIDENCE_BY_KEY[k]: v for k, v in cells_map.items() if k in _EVIDENCE_BY_KEY}}
+                    "name": cells_map.get("name", "")}
     return out, duplicates
 
 
@@ -238,9 +244,10 @@ def cited_system_ids(req: dict[str, Any]) -> list[str]:
 def traced_system_facts(req: dict[str, Any], system: dict[str, dict[str, Any]],
                         stats: Counter | None = None) -> list[tuple[dict, dict, dict]]:
     """(line, fact, source) of every text field of each system block the requirement cites. Each field is read as
-    its own text (a heading in one never makes the next an outcome), under the SRS requirement's ID."""
+    its own text (a heading in one never makes the next an outcome), under the SRS requirement's ID. (R47) The input
+    ranges come after every other traced fact, so a TC numbered before R47 keeps its number."""
     stats = stats if stats is not None else Counter()
-    out = []
+    out, inputs = [], []
     for sid in cited_system_ids(req):
         stats["traced:cited"] += 1
         block = system.get(sid)
@@ -252,9 +259,10 @@ def traced_system_facts(req: dict[str, Any], system: dict[str, dict[str, Any]],
             if not text:
                 continue
             source = {"doc": block["doc"], "id": sid, "field": field}
-            out += [(line, fact, source) for line in _field_lines(str(req.get("id", "")), field, text)
-                    for fact in line["facts"]]
-    return out
+            (inputs if field in SYSTEM_INPUT_FIELDS else out).extend(
+                (line, fact, source) for line in _field_lines(str(req.get("id", "")), field, text)
+                for fact in line["facts"])
+    return out + inputs
 
 
 def _field_lines(anchor: str, field: str, text: str) -> list[dict[str, Any]]:
@@ -591,6 +599,7 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
         whose = f"시스템 요구 {source['id']} 의 " if source else ""
         steps, used = [], []
         bounds = subject_type_bounds(fact)
+        input_cell = bool(source) and source["field"] in SYSTEM_INPUT_FIELDS   # (R47)
         # (R45) the other region(s) of one quantity split at a value: one fact per name — its verdict is the line's
         heads: dict[str, dict] = {}
         for g in _partition_partners(line, fact):
@@ -611,11 +620,20 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
                       f"{BASIS_MARK}{fact['raw']}{origin}")
             # (review r3 C-1) the verdict is the sentence's, not the whole requirement's: outside its condition the
             #   sentence claims nothing (another sentence may describe what happens there)
-            if partner_heads:
+            partner_verdicts = [(g, line_holds(p, g, line)) for g in partner_heads]
+            other = " · ".join(f"[{_condition_text(line, g)}] {_VERDICT_TEXT[v]}" for g, v in partner_verdicts)
+            if input_cell:
+                # (R47 review W1 · W4) an input cell states where the input is, not what the element does: a normal range
+                #   (SySM_04 ``BAT 전압(9V 이상 16.0V 이하)`` — inside it a power monitor reports *no* fault) and a
+                #   trigger (SyFN_10 ``5000RPM 초과``) read alike, so neither side claims a reaction — the requirement's
+                #   other sentences decide it. First, also over a split of one quantity (which would claim an action)
+                expected = (f"조건 [{condition}] {'성립' if verdict else '불성립'} → {whose}입력 칸이 적은 범위 "
+                            f"{'안' if verdict else '밖'}" + (f"(같은 양을 나눈 조건 {other})" if partner_heads else "")
+                            + f" — 요소의 반응(이상 판정·리셋 등)은 같은 요구의 다른 문장 판정을 따른다: "
+                            f"{_clip(line['text'], 160)}")
+            elif partner_heads:
                 # (R45) the stepped condition's verdict stays first (``조건 […] 성립 →`` is what a reader — and the
                 #   cross scorer — takes as the step's verdict); the other region's follows, at the same point
-                partner_verdicts = [(g, line_holds(p, g, line)) for g in partner_heads]
-                other = " · ".join(f"[{_condition_text(line, g)}] {_VERDICT_TEXT[v]}" for g, v in partner_verdicts)
                 if verdict:
                     expected = (f"조건 [{condition}] 성립 → {whose}이 문장이 이 조건에 기술한 동작 수행 확인"
                                 f"(같은 양을 나눈 조건 {other}): {_clip(line['text'], 160)}")
@@ -636,6 +654,10 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
             used.append({"point": _fmt(p, fact), "holds": verdict})
         stats[prefix + "facts_used"] += 1
         stats[prefix + "steps"] += len(steps)
+        if input_cell:
+            # (R47 review I4) the disclosure tells the input ranges apart — the traced counts grew with them
+            stats["traced:input_range_facts_used"] += 1
+            stats["traced:input_range_steps"] += len(steps)
         groups.append({"steps": steps, "evidence": {
             "srs_id": req.get("id", ""), "line": line["text"], "line_sha256": line["sha256"], "span": fact["span"],
             "kind": fact["kind"], "signal": _subject_text(fact),
@@ -764,6 +786,12 @@ def _doc_of(group: dict) -> str:
     return source["doc"] if source else "SRS"
 
 
+def _is_input(group: dict) -> bool:
+    """(R47) A group stepped from a SyDS element's input range (`SYSTEM_INPUT_FIELDS`)."""
+    source = group["evidence"]["source"]
+    return bool(source) and source["field"] in SYSTEM_INPUT_FIELDS
+
+
 # ── (R46) evidence for review items, and what filling the gap would improve ──────────────────────────────────────────
 # 2026-09-30 user direction: what is missing is first looked for in the other documents; what is still missing is shown
 #   with what filling it would improve. A candidate is quoted, never used — the same number may be another quantity.
@@ -780,7 +808,7 @@ def _steppable(line: dict, fact: dict) -> bool:
 # (R46 review I1) one quantity written in two units is one value: ``3초`` = ``3s`` = ``3000ms``
 _UNIT_SCALE = {"ms": ("s", Decimal("0.001")), "s": ("s", Decimal(1)), "초": ("s", Decimal(1)), "분": ("s", Decimal(60)),
                "mV": ("V", Decimal("0.001")), "mA": ("A", Decimal("0.001")), "℃": ("°C", Decimal(1)),
-               "KPH": ("km/h", Decimal(1))}
+               "KPH": ("km/h", Decimal(1)), "rpm": ("RPM", Decimal(1))}   # (R47 review I2)
 
 
 def _match_key(unit: str, value: Decimal) -> tuple[str, Decimal]:
@@ -790,8 +818,8 @@ def _match_key(unit: str, value: Decimal) -> tuple[str, Decimal]:
 
 def review_evidence_corpus(requirements: list[dict], system: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
     """Every steppable fact of the given documents, by value: all SRS requirements (description and verification
-    criteria) and all SyRS / SyDS blocks — not only the cited ones — with a SyDS element's ``Input Information``.
-    ``singles[(unit, value)]`` — one comparison; ``ranges[(unit, lo, hi)]`` — a line's lower and upper bound of one
+    criteria) and all SyRS / SyDS blocks — not only the cited ones — every text field (a SyDS element's ``Input
+    Information`` too). ``singles[(unit, value)]`` — one comparison; ``ranges[(unit, lo, hi)]`` — a line's lower and upper bound of one
     subject (``BAT 전압(9V 이상 16.0V 이하)``); units normalised (`_match_key`). Each candidate: where (``SRS
     SwTR_0605`` / ``SyDS SyEL_05 · Input Information``), the condition as the steps would write it, its operator,
     whether it names its subject (an unnamed hold time does not) and how weakly (a noun before a parenthesis), the line
@@ -829,9 +857,7 @@ def review_evidence_corpus(requirements: list[dict], system: dict[str, dict[str,
     for sid, block in (system or {}).items():
         if block["doc"] not in documents:
             documents.append(block["doc"])
-        fields = [(f, block["fields"].get(f)) for f in SYSTEM_TEXT_FIELDS] + \
-                 [(f, (block.get("evidence_fields") or {}).get(f)) for f in EVIDENCE_EXTRA_FIELDS]
-        for field, text in fields:
+        for field, text in ((f, block["fields"].get(f)) for f in SYSTEM_TEXT_FIELDS):
             if text:
                 for line in _field_lines(_EVIDENCE_ANCHOR, field, text):
                     add(line, source_label({"doc": block["doc"], "id": sid, "field": field}), sid)
@@ -1293,8 +1319,10 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
             # a fact with conditions to hold is its own TC: its precondition must not contradict another fact's steps
             #   (review r3 W2); facts without such notes share TCs up to ``max_steps``
             alone = bool(g["evidence"]["combination_note"])
+            # (R47 review W3) an input range never joins a behaviour sentence's TC: a TC numbered before R47 keeps
+            #   its steps (it did only by the data's luck — a note or a full last TC), and one TC says one kind of thing
             if not alone and chunks and not chunks[-1][0]["evidence"]["combination_note"] and \
-                    _doc_of(chunks[-1][0]) == _doc_of(g) and \
+                    _doc_of(chunks[-1][0]) == _doc_of(g) and _is_input(chunks[-1][0]) == _is_input(g) and \
                     sum(len(x["steps"]) for x in chunks[-1]) + len(g["steps"]) <= max(max_steps, 1):
                 chunks[-1].append(g)
             else:
@@ -1314,6 +1342,8 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
             tc["requirement_boundary"] = True
             added.append(tc)
             stats["traced:tcs" if chunk[0]["evidence"]["source"] else "tcs"] += 1
+            if _is_input(chunk[0]):
+                stats["traced:input_range_tcs"] += 1
             for g in chunk:
                 if g["evidence"]["source"]:
                     fanout[g["evidence"]["source"]["id"]] += 1

@@ -36,7 +36,9 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 _REQ_ID = re.compile(r"\b(Sw(?:TR|TSR|EI|NF|ST|STR|SR|FR|FN|IF|RS)_[A-Za-z0-9_]+?\d+)\b")
-_UNIT = r"(?:km/h|m/s|step|deg|KPH|℃|°C|mV|mA|ms|Hz|V|s|초|분|도|%|A)"  # longest first: ``step`` is not ``s``
+# longest first: ``step`` is not ``s``. (R47) ``RPM`` — a SyDS element's ``Input Information`` (``0~5000RPM`` ·
+#   ``5000RPM 초과``): without it the range lost its unit and the threshold was not read at all
+_UNIT = r"(?:km/h|m/s|step|deg|KPH|RPM|rpm|℃|°C|mV|mA|ms|Hz|V|s|초|분|도|%|A)"
 _NUM = r"0[xX][0-9A-Fa-f]+|-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?"
 _KOREAN_OP = {"이상": ">=", "이하": "<=", "미만": "<", "초과": ">", "이내": "<="}
 _C_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -57,6 +59,9 @@ _DURATION = re.compile(
 _OR = re.compile(r"또는|이거나|\bOR\b|\|\|")
 _AND = re.compile(r"이고|그리고|\bAND\b|&&")
 _TIME_UNITS = {"ms": 0.001, "s": 1.0, "초": 1.0, "분": 60.0}
+# (R47) a name that is itself a time quantity — ``Watchdog Input(Pulse 주기 5ms 이하)`` compares the period, not how
+#   long a condition lasts (a hold time would have stepped "Pulse 주기 지속 시간")
+_PERIOD_NAME = re.compile(r"주기$")
 _C_KEYWORDS = frozenset({"if", "else", "while", "for", "return", "define", "U8", "U16", "U32", "S8", "S16", "S32", "F32"})
 
 
@@ -310,7 +315,7 @@ def _line_facts(line: str, offset: int) -> list[dict[str, Any]]:
         fact = {"kind": "threshold", "signal": signal, "signal_kind": how, "op": _KOREAN_OP[m.group("op")],
                 "value": value, "unit": unit, "value_text": m.group("num"),
                 "span": [offset + m.start(), offset + m.end()], "raw": m.group(0)}
-        if unit in _TIME_UNITS and how != "identifier" and signal:
+        if unit in _TIME_UNITS and how != "identifier" and signal and not _PERIOD_NAME.search(signal.strip()):
             # ``LIN 통신이 15초이상 끊길 경우`` — how long a condition lasts, not a value to set (review W5); the verb
             # says what lasts (``끊길``) — without it the step would read "keep the communication" (review r2 W6)
             fact.update(kind="duration", seconds=round(value * _TIME_UNITS[unit], 6))

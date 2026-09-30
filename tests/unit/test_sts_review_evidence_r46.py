@@ -66,8 +66,10 @@ def _stepped_values(sentence):
 # ── evidence ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 BATTERY = {"SyEI_01": {"doc": "SyDS", "name": "Battery Power", "fields": {"Range": "9 ~ 16V"}},
-           "SyEL_05": {"doc": "SyDS", "name": "Power Supply", "fields": {"Description": "전원 공급 블록"},
-                       "evidence_fields": {"Input Information": "BAT 전압(9V 이상 16.0V 이하), 5V, Buzzer chk"}}}
+           # (R47) Input Information is a text field now — read as evidence as before, and stepped under a citing SRS
+           "SyEL_05": {"doc": "SyDS", "name": "Power Supply",
+                       "fields": {"Description": "전원 공급 블록",
+                                  "Input Information": "BAT 전압(9V 이상 16.0V 이하), 5V, Buzzer chk"}}}
 
 
 def test_a_range_cell_finds_the_same_range_written_as_two_comparisons_elsewhere():
@@ -86,24 +88,8 @@ def test_a_range_cell_finds_the_same_range_written_as_two_comparisons_elsewhere(
             stats["review_evidence_documents"]) == (1, 1, 0, ["SRS", "SyDS"])
 
 
-def test_input_information_is_evidence_only_never_a_step():
-    stats = Counter()
-    groups = boundary_steps(_req("- 동작", related="SyEL_05"), stats, BATTERY, [])
-    assert groups == [] and stats["traced:facts"] == 0
-    assert traced_system_facts(_req("- 동작", related="SyEL_05"), BATTERY) == []
-
-
-def test_parsing_keeps_input_information_apart_from_the_stepped_fields(tmp_path):
-    d = docx.Document()
-    t = d.add_table(rows=4, cols=2)
-    for row, (k, v) in zip(t.rows, [("ID", "SyEL_05"), ("Name", "Power Supply"), ("Description", "전원 공급"),
-                                    ("Input Information", "BAT 전압(9V 이상 16.0V 이하), 5V")], strict=True):
-        row.cells[0].text, row.cells[1].text = k, v
-    path = tmp_path / "syds.docx"
-    d.save(path)
-    blocks, _ = parse_system_requirement_docx(str(path), "SyDS")
-    assert blocks["SyEL_05"]["fields"] == {"Description": "전원 공급"}
-    assert blocks["SyEL_05"]["evidence_fields"] == {"Input Information": "BAT 전압(9V 이상 16.0V 이하), 5V"}
+# (R47) Input Information is no longer evidence only: it is stepped under a citing SRS requirement — the two R46
+#   tests that fixed it apart (never a step · parsed apart) moved to tests/unit/test_sts_input_information_r47.py
 
 
 def test_a_value_without_subject_finds_the_named_sentence_of_its_own_requirement_first():
@@ -213,7 +199,9 @@ _IN_SENTENCE = [
     ("- Param_X( 3도 ) 초과 시 반전", "Param_X( 3도 ) 초과", ["3"]),
     ("- 정상 작동 전압: 9.00V ~ 16.00V", "9.00V ~ 16.00V", ["16.00", "9.00"]),
     ("- 입력전원 9~16V 범위", "9~16V", ["16", "9"]),
-    ("- 회전수 0 ~ 5000 RPM", "0 ~ 5000 ", ["0", "5000"]),
+    # (R47) ``RPM`` is a unit now; a word the extractor does not know as one (``Nm``) still follows the range
+    ("- 회전수 0 ~ 5000 RPM", "0 ~ 5000 RPM", ["0", "5000"]),
+    ("- 토크 0 ~ 50 Nm", "0 ~ 50 ", ["0", "50"]),
 ]
 
 
@@ -228,9 +216,10 @@ def test_the_fill_is_written_into_the_sentence_and_then_steps(sentence, fact, va
 
 
 def test_a_range_example_keeps_the_space_before_what_follows():
-    """(review r2 I-a) ``0 ~ 5000 RPM``: the range's match ends in the space — copied, the example must keep it."""
-    (item,) = _review("- 회전수 0 ~ 5000 RPM")
-    assert "0 이상이고 5000 이하 RPM" in item["if_filled"]
+    """(review r2 I-a) ``0 ~ 50 Nm`` (R47: was ``RPM``, a unit now): the range's match ends in the space — copied, the
+    example must keep it."""
+    (item,) = _review("- 토크 0 ~ 50 Nm")
+    assert "0 이상이고 50 이하 Nm" in item["if_filled"]
 
 def test_naming_the_value_again_would_have_cost_the_other_its_step():
     """(review W1) the tempting fill — the label's name written in front of 2.75 V — makes both values an unstated
