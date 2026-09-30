@@ -77,7 +77,9 @@ def test_conditions_that_cannot_be_stepped_are_counted_with_their_reason():
                                  "( u16g_ApiIn_Vsup < u16s_BATT_ERR_LOWER_LIMIT )\n"
                                  "- 전압이 8.5V 미만이 아닌 경우 정상\n"          # (review C2) negated
                                  "- Application 안정화 시간 : 100ms 이내\n"      # (review C3) a response constraint
-                                 "- u16s_V 가 9V 이상 16V 이하\n"), stats)       # one subject, joining unstated
+                                 # one subject, joining unstated — two lower bounds read both ways (R45: ``9V 이상
+                                 #   16V 이하`` is a range now, the only meaningful reading)
+                                 "- u16s_V 가 9V 이상 16V 이상\n"), stats)
     assert groups == []
     assert stats["skipped:kind_range"] == 1 and stats["skipped:kind_symbolic"] == 1
     assert stats["skipped:negated_condition"] == 1 and stats["skipped:response_constraint"] == 1

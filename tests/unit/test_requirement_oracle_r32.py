@@ -186,25 +186,34 @@ def test_a_hold_time_in_another_sentence_qualifies_nothing_here():
     assert joint(line, hold, volt) != "and"
 
 
-def test_parenthesis_labels_over_one_unit_are_not_stepped():
+def test_parenthesis_labels_that_split_one_unit_at_one_value_are_one_quantity():
     # (review C1) Manual Assist조건 / Tip-To-Run 조건 name one door speed: a step on one said 불성립 at 0.8 m/s, where the
-    #   line judges Tip-To-Run — neither is stepped (their hold times of different conditions are unaffected)
+    #   line judges Tip-To-Run — both were held back. (R45) the two names split the unit **at one value** (0.8 미만 /
+    #   0.8 이상, joined by 또는): one quantity in two regions — each is stepped and every step writes the other region's
+    #   verdict at that point (never "hold it false"); ``0.8m/s 이상 1.3m/s 이하`` is a range (the only meaningful reading)
     from collections import Counter
     stats = Counter()
     req = {"id": "SwTR_0102", "name": "n", "asil": "B", "verification": "",
            "description": "- Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 1.3m/s 이하) 인지를 판단한다"}
-    assert boundary_steps(req, stats) == []
-    # the two labels joined by 또는; ``1.3m/s 이하`` joins ``0.8m/s 이상`` of its own label without a connective
-    assert stats["skipped:parenthesis_labels_may_share_a_quantity"] == 2
-    assert stats["skipped:same_subject_combination_unstated"] == 1
+    groups = boundary_steps(req, stats)
+    assert [(g["evidence"]["signal"], g["evidence"]["op"]) for g in groups] == [
+        ("Manual Assist조건", "<"), ("Tip-To-Run 조건", ">="), ("Tip-To-Run 조건", "<=")]
+    assert not any("불성립 상태로 둔다" in g["evidence"]["combination_note"] for g in groups)
+    assert stats["skipped:parenthesis_labels_may_share_a_quantity"] == 0
+    assert stats["skipped:same_subject_combination_unstated"] == 0
     one = {**req, "description": "- 도어 속도가 Tip-To-Run 조건(0.8m/s 이상) 인지를 판단한다"}
     assert [g["evidence"]["signal"] for g in boundary_steps(one)] == ["Tip-To-Run 조건"]
 
 
 @pytest.mark.parametrize("desc, stepped", [
-    # (review r2 W2) a range as the other label's value, and a plain subject joined to a label: both sides are held back
+    # (review r2 W2) a range as the other label's value: both sides are held back (a range states no inclusion to split at)
     ("- Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8~1.3m/s) 인지를 판단한다", []),
-    ("- 도어 속도가 0.8m/s 미만이거나 Tip-To-Run 조건(0.8m/s 이상) 인지를 판단한다", []),
+    # (R45) a plain subject and a label that split the unit at one value, joined by *or*: one quantity — both stepped
+    ("- 도어 속도가 0.8m/s 미만이거나 Tip-To-Run 조건(0.8m/s 이상) 인지를 판단한다", ["도어 속도", "Tip-To-Run 조건"]),
+    # (R45) not a split: joined by *and*, at two values, or the same side — still held back
+    ("- A조건(0.8m/s 미만) 그리고 B조건(0.8m/s 이상) 인지를 판단한다", []),
+    ("- A조건(0.7m/s 미만) 또는 B조건(0.8m/s 이상) 인지를 판단한다", []),
+    ("- A조건(0.8m/s 이상) 또는 B조건(0.8m/s 초과) 인지를 판단한다", []),
     # two labels over different units are two quantities; a label and another quantity of the unit with no stated
     #   join stay (the note says the join is to be checked)
     ("- 과전류 조건(10A 이상) 이고 차속 입력(10km/h 이상) 이면 정지한다", ["과전류 조건", "차속 입력"]),

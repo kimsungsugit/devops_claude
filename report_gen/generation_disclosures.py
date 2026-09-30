@@ -331,7 +331,11 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "monitored_quantity_unknown": "감시량 미상", "duplicate_fact": "중복", "outcome_section": "출력·완료 조건",
                 "reference_label": "기준값 라벨", "value_outside_subject_type": "변수 폭 밖의 값",
                 "output_requirement": "출력 의무(…이하여야 한다)", "subject_unclear": "주어 불명확",
-                "parenthesis_labels_may_share_a_quantity": "괄호 앞 이름이 같은 단위의 다른 조건과 결합(한 양일 수 있음)"}
+                "parenthesis_labels_may_share_a_quantity": "괄호 앞 이름이 같은 단위의 다른 조건과 결합(한 양일 수 있음)",
+                # (R45) review reasons that are not skip reasons
+                "no_subject_in_value_field": "값 칸의 주어(블록 이름 확인)", "read_as_range": "범위로 읽음(확인)",
+                "deadline_or_window": "조건 절의 '이내'(기한인지 시간 창인지 확인)",
+                "read_as_one_quantity": "한 양의 두 구간으로 읽음(확인)"}
 
         def _n(key):   # the producer's Counter keeps only non-zero keys: in a present block, absent is 0 (review W8)
             return _int(rb, key) or 0
@@ -350,7 +354,44 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             tone=_tone(bool(rb.get("evidence_sheet_error")))))
         out.extend(_traced_system_items(rb, _why))
         out.extend(_inclusion_conflict_items(rb))
+        out.extend(_requirement_review_items(rb, _why))
     return out + _sts_tail_items(qr)
+
+
+def _requirement_review_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[Dict[str, Any]]:
+    """(R45) 요구 문서가 정하지 않아 경계 TC 로 만들지 못한 조건 — 채울 근거가 없어도 항목으로 보인다(사용자 방향
+    2026-09-30 "잘못되거나 충돌되는 것은 문서나 웹에 표시"). R45 이전 산출물엔 키가 없어 항목을 만들지 않는다(없음 ≠ 0)."""
+    n = _int(rb, "review_item_count")
+    if n is None:
+        return []
+    if not n:
+        return [_item("sts_requirement_review", "요구 원문 검토 항목", "0건",
+                      "경계 TC 로 만들지 못한 조건 중 사람이 정해 채울 것(주어 없음·결합 미기재·범위의 경계 포함 등)이 없다.")]
+    by = rb.get("review_by_reason") if isinstance(rb.get("review_by_reason"), dict) else {}
+    items = [i for i in (rb.get("review_items") or []) if isinstance(i, dict)]
+
+    def _who(i):
+        ids = [str(x) for x in (i.get("srs_ids") or [])]
+        return ids[0] + (f" 외 {len(ids) - 1}" if len(ids) > 1 else "") if ids else "—"
+    shown = [f"{_who(i)} {i.get('source')}: `{str(i.get('fact') or '')[:40]}` — {why_text.get(str(i.get('reason')), i.get('reason'))}"
+             for i in items[:5]]
+    read_n = _int(rb, "review_read_count") or 0
+    # (R45 review W5) the sheet may have failed on its own: then it is not "written there"
+    sheet_err = str(rb.get("review_sheet_error") or "")
+    where = (f"'Requirement Review' 시트를 쓰지 못했다 — {sheet_err[:160]} (항목은 품질 리포트 `review_items` 에만 있다)"
+             if sheet_err else
+             "값을 지어내지 않고 원문·사유·정할 것을 STS 의 'Requirement Review' 시트에 전부 적었다"
+             # (R45 review I7) the conflicts are compared only when system documents were read
+             + ("(요구 문서 경계 포함 불일치 후보도 같은 시트)" if "inclusion_conflicts" in rb else ""))
+    return [_item(
+        "sts_requirement_review", "요구 원문 검토 항목",
+        f"{n}건" + (f" · 그중 읽은 결합 {read_n}" if read_n else ""),
+        ", ".join(f"{why_text.get(k, k)} {v}" for k, v in by.items()) + ". "
+        + " / ".join(shown)
+        + (f" 외 {n - len(shown)}건(품질 리포트 `review_items` 에 {len(items)}건까지)." if n > len(shown) else ".")
+        + " — 요구 문서가 정하지 않아 경계 TC 로 만들지 못한 조건과, 원문에 적혀 있지 않은 결합을 생성기가 읽어 스텝한 곳"
+          "('읽은 결합 — 확인')이다. " + where + ". 한 블록을 여러 요구가 인용하면 한 행에 요구를 모두 적는다.",
+        tone="warning")]
 
 
 _CONFLICT_TAG = {"outcome": " [결과]", "stimulus": " [시험 입력]"}

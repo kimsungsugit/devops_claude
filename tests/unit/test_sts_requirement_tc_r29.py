@@ -73,7 +73,8 @@ def test_system_tables_are_read_by_id_with_merged_key_cells_and_duplicates_count
     ])
     blocks, duplicates = parse_system_requirement_docx(path, "SyDS")
     assert set(blocks) == {"SyII_06", "SyOS_01", "SyTR_0101"} and duplicates == 1
-    assert blocks["SyII_06"] == {"doc": "SyDS", "fields": {"Range": "저전압 : 8.5V 이하"}}   # first table wins
+    # first table wins; (R45 review W1) the block's name is kept apart — never read for facts
+    assert blocks["SyII_06"] == {"doc": "SyDS", "fields": {"Range": "저전압 : 8.5V 이하"}, "name": "Power Diag"}
     assert blocks["SyOS_01"]["fields"] == {"Description": "Latch Open 수신 시 정지"}
     assert blocks["SyTR_0101"]["fields"] == {"Verification criteria": "5V 이상"}
 

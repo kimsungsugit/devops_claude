@@ -146,7 +146,10 @@ def test_a_line_is_judged_over_every_condition_on_the_subject():
     assert line_holds(Decimal("5"), low, or_line) is True           # the other condition holds
     assert line_holds(Decimal("4.5"), low, or_line) is False
     assert line_holds(Decimal("4.00"), low, or_line, ("<", Decimal("4.00"))) is False   # a mutant of 4.00 이하
-    assert line_holds(Decimal("12"), unstated["facts"][0], unstated) is None           # joining not stated
+    # (R45) no connective, but a lower and an upper bound side by side have one meaningful reading: a range
+    #   (*or* would hold for every voltage) — before R45 this was None (joining not stated)
+    assert [line_holds(Decimal(v), unstated["facts"][0], unstated) for v in ("8", "9", "12", "16", "17")] == \
+        [False, True, True, True, False]
 
 
 def test_negations_ending_in_other_forms_are_marked():

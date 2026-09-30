@@ -39,6 +39,14 @@ requirement already stepped is not repeated (only the same subject wording count
 guessed); facts of different documents (the SRS, the SyRS, the SyDS) never share a TC, so every TC comes from one
 document. What a system block states as an outcome is not stepped: a verification case's ``Output :`` line, the
 ``Action`` / ``System Behavior`` fields, and an obligation (``암전류는 0.3mA 이하여야 한다``).
+
+**What the text leaves unwritten (R45)**: a lower bound below an upper bound of one subject side by side with no
+connective has one meaningful reading, a range (`requirement_oracle.joint`; a lower bound above the upper one is a
+hysteresis, not read), and two names that split one unit at one value (``Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run
+조건(0.8m/s 이상 …)``) are one quantity in two regions — each step writes the other region's verdict at its point. What
+was read so is listed to confirm; a fact still held back for a reason a reader can settle (a missing subject, a range's
+inclusion, an unwritten join …) is listed with what to decide — the 'Requirement Review' sheet and the generation
+disclosure — never filled by a guess.
 """
 from __future__ import annotations
 
@@ -49,9 +57,11 @@ from typing import Any
 
 from generators.requirement_oracle import (
     condition_part_join,
+    condition_units,
     exact_value,
     extract,
     is_outcome_section,
+    join_is_inferred,
     joint,
     line_holds,
     same_subject,
@@ -64,6 +74,45 @@ _OP_TEXT = {"<": "미만", "<=": "이하", ">": "초과", ">=": "이상", "==": 
 ACTION_PREFIX = "입력 설정 (요구 경계): "   # the STS step classifier reads this as boundary value analysis (BAA)
 BASIS_MARK = " — 근거: "                   # the requirement text quoted after it is not a stimulus
 DURATION_SUFFIX = " 지속 시간"
+_VERDICT_TEXT = {True: "성립", False: "불성립", None: "판정 미상(결합 미기재)"}
+
+# (R45) held-back facts a reader can settle — 2026-09-30 user direction: what is wrong or undecided is shown in the
+#   document and on the web even when there is no basis to fill it. The rest (an outcome, a response constraint, a
+#   symbolic or equality comparison, a repeat) is no condition to step at all. Each: why it is held back, what to decide.
+REVIEW_TEXT = {
+    "no_subject_for_value": ("값이 무엇의 값인지(주어) 원문에 없음", "이 값과 비교하는 신호·변수를 정하면 경계 TC 가 된다"),
+    "subject_unclear": ("주어로 읽힌 말이 신호 이름이 아님", "비교하는 신호·변수 확인"),
+    "kind_range": ("범위(~)의 경계 포함 여부가 적혀 있지 않음", "하한·상한의 포함(이상/초과, 이하/미만) 확인"),
+    "parenthesis_labels_may_share_a_quantity": ("괄호 앞 이름 둘이 같은 단위 — 같은 양인지 원문에 없음",
+                                                "두 조건이 한 신호의 구간인지, 다른 신호인지 확인"),
+    "same_subject_combination_unstated": ("같은 주어의 조건 결합(그리고/또는)이 적혀 있지 않음", "결합 확인"),
+    "negated_condition": ("부정 절 — 부정이 조건 전체에 걸리는지 서술어에 걸리는지 원문으로 가려야 함", "부정의 범위 확인"),
+    "monitored_quantity_unknown": ("기준 상수가 비교하는 감시량이 적혀 있지 않음", "감시하는 신호 확인"),
+    # (R45 review W1) a value-only field (a block's ``Range``) names its quantity in the block name, not in the cell —
+    #   the document did not leave it out; the generator does not read the name as a subject
+    "no_subject_in_value_field": ("값 전용 칸(Range)이라 주어가 이 칸에 없음 — 블록 이름이 이 값의 주어일 수 있음",
+                                  "블록 이름(Name)이 이 값과 비교하는 신호인지 확인하면 경계 TC 가 된다"),
+}
+    # (R45 review r2 W-R2-2) ``20ms 이내에 … 되지 않으면`` / ``500ms 이내에 9V 이상으로 복귀할 경우``: the extractor reads
+    #   every ``이내`` as a deadline, but in a conditional clause it may be the condition's time window
+REVIEW_TEXT["deadline_or_window"] = ("'이내' 가 조건 절 안에 있음 — 응답 기한인지 조건의 시간 창인지 원문에 가려야 함",
+                                     "응답 기한이면 측정 대상(스텝 아님), 조건의 시간 창이면 경계 TC 대상 — 어느 쪽인지 확인")
+# (review r2 W-R2-1) a range never becomes a boundary step here, even with a subject: no promise of one
+RANGE_DECIDE = {
+    "no_subject_for_value": "이 범위와 비교하는 신호, 그리고 하한·상한의 포함(이상/초과, 이하/미만) 확인",
+    "no_subject_in_value_field": "블록 이름(Name)이 이 범위의 주어인지, 그리고 하한·상한의 포함(이상/초과, 이하/미만) 확인",
+}
+REVIEW_REASONS = frozenset(REVIEW_TEXT) - {"no_subject_in_value_field", "deadline_or_window"}   # skip → review
+_VALUE_FIELDS = frozenset({"Range"})
+_WINDOW_CLAUSE = re.compile(r"않으면|하면|되면|이면|경우|(?<=[가-힣])면(?=\s|$|,)|\s시(?=\s|$|,)|때")
+# (R45 review I3) what the generator **read** where the words are silent — stepped, and shown so a reader can confirm it
+READ_TEXT = {
+    "read_as_range": ("연결어 없이 붙은 하한·상한을 범위(그리고)로 읽어 스텝함",
+                      "범위가 맞는지 확인(다른 뜻이면 이 경계 TC 의 판정이 바뀐다)"),
+    "read_as_one_quantity": ("같은 단위를 한 값에서 나누는 두 이름을 한 양의 두 구간으로 읽어 스텝함",
+                             "두 이름이 한 신호의 구간인지 확인(다른 신호면 상대 구간의 판정은 근거가 없다)"),
+}
+MAX_REVIEW_ITEMS = 30     # items kept for the quality report (all counted; the document lists all)
 
 
 def _fmt(value: Decimal, fact: dict[str, Any]) -> str:
@@ -134,7 +183,9 @@ def parse_system_requirement_docx(path: str, label: str) -> tuple[dict[str, dict
         if rid in out:
             duplicates += 1
             continue
-        out[rid] = {"doc": label, "fields": {_FIELD_BY_KEY[k]: v for k, v in cells_map.items() if k in _FIELD_BY_KEY}}
+        out[rid] = {"doc": label, "fields": {_FIELD_BY_KEY[k]: v for k, v in cells_map.items() if k in _FIELD_BY_KEY},
+                    # (R45 review W1) not read for facts — a ``Range`` value's subject is often the block's name
+                    "name": cells_map.get("name", "")}
     return out, duplicates
 
 
@@ -223,20 +274,58 @@ _UNCLEAR_SUBJECT = re.compile(r"[/·,:;~\-]$|(?:^|\s)(?:따라|의해|대해|위
 _VERB_PHRASE = re.compile(r"\S(?:을|를)\s+\S")
 
 
-def _label_shares_a_quantity(line: dict, fact: dict) -> bool:
+# (R45) the comparison that holds exactly where the other does not, at the same value
+_COMPLEMENT = {">=": "<", "<": ">=", ">": "<=", "<=": ">"}
+
+
+def _condition_fact(f: dict) -> bool:
+    return f["kind"] == "threshold" and f.get("op") in _COMPLEMENT and not f.get("negated") \
+        and isinstance(f.get("value"), (int, float)) and not isinstance(f.get("value"), bool)
+
+
+def _partition_partners(line: dict, fact: dict) -> list[dict]:
+    """(R45) ``Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 1.3m/s 이하)``: two names, one unit, joined
+    by *or*, that **split the unit at one value** — one of them ``< v`` (``<= v``), the other ``>= v`` (``> v``), one name
+    a parenthesis owner — are one quantity in two regions, not two quantities to hold apart. R32 review C1 held both back
+    because a step on one told the tester to hold the other false where it holds; with the split written that way, each
+    point's verdict of the other name is known, and the step writes it. The other names' facts of that unit on the line
+    are returned (empty: not such a split)."""
+    unit = fact.get("unit") or ""
+    name = subject_of(fact)
+    if not unit or not name or not _condition_fact(fact):
+        return []
+    in_unit = [f for f in line["facts"] if _condition_fact(f) and (f.get("unit") or "") == unit and subject_of(f)]
+    mine = [f for f in in_unit if subject_of(f) == name]
+    others = [f for f in in_unit if subject_of(f) != name]
+    split = {subject_of(g) for f in mine for g in others
+             if g["op"] == _COMPLEMENT[f["op"]] and exact_value(g) == exact_value(f)
+             and "paren_owner" in (f.get("signal_kind"), g.get("signal_kind")) and joint(line, f, g) == "or"}
+    partners = [g for g in others if subject_of(g) in split]
+    heads: dict[str, dict] = {}
+    for g in partners:
+        heads.setdefault(str(subject_of(g)), g)
+    # (R45 review W4) a region whose own conditions do not join as written (``B조건(0.8m/s 이상, 2.0m/s 이상)``) has no
+    #   verdict at a point: no split — back to the R32 C1 hold
+    if any(line_holds(exact_value(g), g, line) is None for g in heads.values()):
+        return []
+    return partners
+
+
+def _label_shares_a_quantity(line: dict, fact: dict, partners: list[dict] | None = None) -> bool:
     """(R32 review C1 · r2 W2) ``Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 …)`` / ``도어 속도가
     0.8m/s 미만이거나 Tip-To-Run 조건(0.8m/s 이상)``: a label before a parenthesis names a condition, not a quantity —
     with another condition (a threshold or a range, not negated, not an obligation) in the same non-empty unit under
     another name, joined to it by a **stated** *or* / *and*, the two may be one quantity (the door speed). Then the
     stated join would make the step hold the other "false" / "true" at a point where it is not the step's to say (a step
     said 불성립 at 0.8 m/s and told the tester to hold Tip-To-Run false there). An unstated join already tells the tester
-    to check it and stays."""
+    to check it and stays. (R45) A partner of a split at one value (`_partition_partners`) is no longer a doubt."""
     unit = fact.get("unit") or ""
     if not unit:
         return False
     raw = line.get("raw") or line["text"]
     for other in line["facts"]:
-        if other is fact or other["kind"] not in {"threshold", "range"} or other.get("status") != "parsed" \
+        if other is fact or any(other is p for p in partners or ()) \
+                or other["kind"] not in {"threshold", "range"} or other.get("status") != "parsed" \
                 or other.get("negated") or (other.get("unit") or "") != unit \
                 or "paren_owner" not in (fact.get("signal_kind"), other.get("signal_kind")) \
                 or (subject_of(other) if other["kind"] == "threshold" else other.get("signal")) == subject_of(fact) \
@@ -265,7 +354,7 @@ def _skip_reason(line: dict, fact: dict) -> str:
         return "reference_label"            # ``기준 전압: 8.50V 이하`` names the threshold, not what to set (r3 W1)
     if fact["kind"] == "threshold" and fact.get("signal_kind") == "parameter" and not fact.get("monitored"):
         return "monitored_quantity_unknown"
-    if fact["kind"] == "threshold" and _label_shares_a_quantity(line, fact):
+    if fact["kind"] == "threshold" and _label_shares_a_quantity(line, fact, _partition_partners(line, fact)):
         return "parenthesis_labels_may_share_a_quantity"
     if _OBLIGATION.match((line.get("raw") or line["text"])[fact["line_span"][1]:]):
         # (R29 review C2) ``암전류는 0.3mA 이하여야 한다`` / ``최소 전류는 0.3mA 이하로 유지한다``: what the system must
@@ -284,6 +373,35 @@ def _skip_reason(line: dict, fact: dict) -> str:
     return ""
 
 
+def _not_a_condition(line: dict, fact: dict) -> bool:
+    """A deadline (``100ms 이내``), an outcome line (``<Output>`` / ``Output :`` / a system Action) or an obligation
+    (``…이하여야 한다``) — what the requirement produces or bounds, never a stimulus (`_conflict_role`)."""
+    return fact.get("role") == "response_constraint" or _conflict_role(line, fact, False) == "outcome"
+
+
+def _review_reason(line: dict, fact: dict, why: str, source: dict | None) -> str:
+    """(R45) Why a held-back fact is a review item — ``""`` when it is not one. (review W2) A response constraint, an
+    outcome line or an obligation is no condition to decide (a subject would not make it a step) — except (r2 W-R2-2)
+    an ``이내`` inside a conditional clause (``… 이내에 … 되지 않으면``), which may be the condition's time window."""
+    raw = line.get("raw") or line["text"]
+    if fact.get("role") == "response_constraint" and _conflict_role(line, fact, False) != "outcome" \
+            and _WINDOW_CLAUSE.search(raw[fact["line_span"][1]:fact["line_span"][1] + 60]):
+        return "deadline_or_window"
+    if why not in REVIEW_REASONS or _not_a_condition(line, fact):
+        return ""
+    if why == "no_subject_for_value" and source and source["field"] in _VALUE_FIELDS:
+        return "no_subject_in_value_field"
+    return why
+
+
+def _review_item(req: dict, line: dict, fact: dict, source: dict | None, reason: str, kind: str,
+                 block_name: str = "") -> dict[str, Any]:
+    return {"srs_id": req.get("id", ""), "source": source_label(source), "reason": reason, "kind": kind,
+            "line": line["text"], "line_sha256": line["sha256"], "fact": str(fact.get("raw") or ""),
+            "fact_kind": fact.get("kind", ""), "line_span": list(fact.get("line_span") or []),
+            "block_name": block_name}
+
+
 def _subject_text(fact: dict) -> str:
     if fact["kind"] == "duration":
         named = fact.get("signal") if fact.get("signal_kind") not in {"parameter", "identifier"} else None
@@ -292,11 +410,20 @@ def _subject_text(fact: dict) -> str:
 
 
 def _condition_text(line: dict, fact: dict) -> str:
+    def one(f):
+        return f"{f.get('value_text') or f['value']}{f.get('unit') or ''} {_OP_TEXT[f['op']]}"
+    units, join = condition_units(line, fact)
+    if any(len(u) > 1 for u in units):
+        # (R45 review W3) a range read from meaning is one unit, as `line_holds` judges it: ``4V 이하 또는 (5V 이상
+        #   그리고 6V 이하)`` — in written order
+        joiner = " 또는 " if join == "or" else " 그리고 "
+        return _subject_text(fact) + " " + joiner.join(
+            ("(" if len(units) > 1 and len(u) > 1 else "") + " 그리고 ".join(one(f) for f in u)
+            + (")" if len(units) > 1 and len(u) > 1 else "") for u in units)
     parts = [fact] + [f for f in line["facts"] if same_subject(fact, f)]
     joins = {joint(line, fact, f) for f in parts[1:]}
     joiner = " 또는 " if joins == {"or"} else " 그리고 "
-    return _subject_text(fact) + " " + joiner.join(
-        f"{f.get('value_text') or f['value']}{f.get('unit') or ''} {_OP_TEXT[f['op']]}" for f in parts)
+    return _subject_text(fact) + " " + joiner.join(one(f) for f in parts)
 
 
 def _fact_text(f: dict) -> str:
@@ -311,6 +438,12 @@ def _other_conditions(line: dict, fact: dict, joined_prev: str = "") -> str:
     """How to hold the line's conditions on other subjects while this one is stepped — one entry per subject (its
     conditions joined as the line joins them, review r3 W2), plus a join with a neighbouring line (r3 W6)."""
     notes, done = [], []
+    partners = _partition_partners(line, fact)
+    siblings = [g for g in line["facts"] if same_subject(fact, g)]
+    if any(join_is_inferred(line, a, b) for a in [fact] + siblings for b in [fact] + siblings if a is not b):
+        # (R45) the words give no connective between the subject's bounds; the one meaningful reading was taken
+        notes.append(f"같은 주어의 결합 [{_condition_text(line, fact)}]: 원문에 연결어 없음 — 항상 참·항상 거짓이 아닌 "
+                     "유일한 읽기로 판정")
     for f in line["facts"]:
         if f is fact or same_subject(fact, f) or f["kind"] not in {"threshold", "duration", "symbolic", "range"}:
             continue
@@ -320,6 +453,12 @@ def _other_conditions(line: dict, fact: dict, joined_prev: str = "") -> str:
         group = [f] + [g for g in line["facts"] if g is not fact and same_subject(f, g)]
         inner = {joint(line, f, g) for g in group[1:]}
         text = (" 또는 " if inner == {"or"} else " 그리고 ").join(_fact_text(g) for g in group)
+        if any(f is p for p in partners):
+            # (R45) one quantity in two regions: the other name is neither held true nor false — its verdict at each
+            #   point is written in the step (R32 review C1 said "불성립 상태로 둔다" where it held)
+            notes.append(f"같은 양을 나눈 조건 [{_condition_text(line, f)}]: 원문의 두 이름이 같은 단위를 한 값에서 "
+                         "나눈다 — 한 양의 두 구간으로 읽어 각 점에서의 판정을 스텝 기대 결과에 적는다")
+            continue
         how = joint(line, fact, f)
         if f.get("status") != "parsed":
             # (R29 review r2 W-1) a condition without a subject cannot be held "true" or "false" by the words between:
@@ -356,10 +495,13 @@ def _fact_key(fact: dict) -> tuple:
 
 
 def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
-                   system: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                   system: dict[str, dict[str, Any]] | None = None,
+                   review: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """One group of steps per fact used: ``[{"steps": [...], "evidence": {...}}]``. With ``system`` (parsed SyRS /
     SyDS blocks), the facts of the system blocks the requirement cites follow its own (``evidence["source"]`` names
-    the block; counters prefixed ``traced:``)."""
+    the block; counters prefixed ``traced:``). (R45) ``review`` receives every fact held back for a reason a reader can
+    settle (`REVIEW_REASONS` — a missing subject, an unwritten join, a range's inclusion …): the requirement ID, the
+    source, the sentence, the fact and the reason — shown in the document and on the web, never filled by a guess."""
     stats = stats if stats is not None else Counter()
     groups: list[dict[str, Any]] = []
     seen: set[tuple] = set()
@@ -380,6 +522,11 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
             why = "already_stepped"  # the SRS (or another cited block) already steps this subject at this value
         if why:
             stats[prefix + "skipped:" + why] += 1
+            reason = _review_reason(line, fact, why, source) if review is not None else ""
+            if reason:
+                block_name = str(((system or {}).get(source["id"]) or {}).get("name") or "") \
+                    if reason == "no_subject_in_value_field" and source else ""
+                review.append(_review_item(req, line, fact, source, reason, "held_back", block_name))
             continue
         seen.add(key)
         stepped.add(_fact_key(fact))
@@ -396,6 +543,17 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
         whose = f"시스템 요구 {source['id']} 의 " if source else ""
         steps, used = [], []
         bounds = subject_type_bounds(fact)
+        # (R45) the other region(s) of one quantity split at a value: one fact per name — its verdict is the line's
+        heads: dict[str, dict] = {}
+        for g in _partition_partners(line, fact):
+            heads.setdefault(str(subject_of(g)), g)  # the name's first fact: its conditions read in written order
+        partner_heads = list(heads.values())
+        if review is not None:
+            # (R45 review I3) what was read, not written — stepped, and listed for a reader to confirm
+            if partner_heads:
+                review.append(_review_item(req, line, fact, source, "read_as_one_quantity", "read"))
+            if any(join_is_inferred(line, fact, g) for g in line["facts"] if same_subject(fact, g)):
+                review.append(_review_item(req, line, fact, source, "read_as_range", "read"))
         for p in (value - delta, value, value + delta):
             if bounds and not bounds[0] <= p <= bounds[1]:
                 stats[prefix + "points_outside_subject_type"] += 1   # ``u16g_X 0 초과`` has no −1 (review r4 I-2)
@@ -405,10 +563,27 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
                       f"{BASIS_MARK}{fact['raw']}{origin}")
             # (review r3 C-1) the verdict is the sentence's, not the whole requirement's: outside its condition the
             #   sentence claims nothing (another sentence may describe what happens there)
-            expected = (f"조건 [{condition}] 성립 → {whose}이 문장이 기술한 동작 수행 확인: {_clip(line['text'], 160)}"
-                        if verdict else
-                        f"조건 [{condition}] 불성립 → {whose}이 문장의 동작 대상 아님(같은 요구의 다른 문장 판정을 따른다): "
-                        f"{_clip(line['text'], 160)}")
+            if partner_heads:
+                # (R45) the stepped condition's verdict stays first (``조건 […] 성립 →`` is what a reader — and the
+                #   cross scorer — takes as the step's verdict); the other region's follows, at the same point
+                partner_verdicts = [(g, line_holds(p, g, line)) for g in partner_heads]
+                other = " · ".join(f"[{_condition_text(line, g)}] {_VERDICT_TEXT[v]}" for g, v in partner_verdicts)
+                if verdict:
+                    expected = (f"조건 [{condition}] 성립 → {whose}이 문장이 이 조건에 기술한 동작 수행 확인"
+                                f"(같은 양을 나눈 조건 {other}): {_clip(line['text'], 160)}")
+                elif any(v for _g, v in partner_verdicts):
+                    expected = (f"조건 [{condition}] 불성립 → {whose}이 조건의 구간 아님(같은 양을 나눈 조건 {other} — "
+                                f"그 조건의 판정을 따른다): {_clip(line['text'], 160)}")
+                else:
+                    # outside every region the line names (``1.4m/s`` past Tip-To-Run's 1.3 and Manual Assist's 0.8):
+                    #   the sentence claims nothing there — or, when a region's verdict is unknown, says so
+                    expected = (f"조건 [{condition}] 불성립 → {whose}이 문장의 동작 대상 아님(같은 양을 나눈 조건 {other} — "
+                                f"같은 요구의 다른 문장 판정을 따른다): {_clip(line['text'], 160)}")
+            else:
+                expected = (f"조건 [{condition}] 성립 → {whose}이 문장이 기술한 동작 수행 확인: {_clip(line['text'], 160)}"
+                            if verdict else
+                            f"조건 [{condition}] 불성립 → {whose}이 문장의 동작 대상 아님(같은 요구의 다른 문장 판정을 "
+                            f"따른다): {_clip(line['text'], 160)}")
             steps.append({"action": action, "expected": expected})
             used.append({"point": _fmt(p, fact), "holds": verdict})
         stats[prefix + "facts_used"] += 1
@@ -543,12 +718,17 @@ def _doc_of(group: dict) -> str:
 
 def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[dict], build_tc, make_tc_id,
                                     classify, max_steps: int = 12,
-                                    system: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                                    system: dict[str, dict[str, Any]] | None = None,
+                                    review_out: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Append requirement-boundary TCs after each requirement's existing TCs, numbering on from them. A fact's points
     never split across TCs; a TC holds as many whole facts as fit in ``max_steps`` (at least one), all from the same
-    document (the SRS, or the system requirements it cites — R29). Returns the counts for the quality report."""
+    document (the SRS, or the system requirements it cites — R29). Returns the counts for the quality report.
+    (R45) ``review_out`` receives **every** review item for the document's 'Requirement Review' sheet — the held-back
+    facts a reader can settle (one row per sentence and fact, however many requirements cite that block) and the
+    requirement-document inclusion conflicts; the report keeps the first `MAX_REVIEW_ITEMS` and the counts."""
     stats: Counter = Counter()
     fanout: Counter = Counter()
+    review: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
     conflict_errors: list[str] = []
     compared_blocks = 0
@@ -560,7 +740,7 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
             last[rid] = max(last.get(rid, 0), int(tail))
     added: list[dict] = []
     for req in requirements:
-        groups = boundary_steps(req, stats, system)
+        groups = boundary_steps(req, stats, system, review)
         if system is not None:
             compared_blocks += sum(1 for sid in cited_system_ids(req) if sid in system)
             try:
@@ -601,6 +781,30 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         test_cases.extend(added)
         test_cases.sort(key=lambda tc: order.get(str(tc.get("srs_id") or ""), len(order)))  # stable
     out: dict[str, Any] = {k: v for k, v in sorted(stats.items())}
+    # (R45) one row per held-back sentence and fact: a block cited by several requirements names them all
+    merged: dict[tuple, dict[str, Any]] = {}
+    for item in review:
+        # a held-back fact is its own row; a reading is one row per sentence (its facts listed)
+        span = tuple(item["line_span"]) if item["kind"] == "held_back" else None
+        key = (item["source"], item["line_sha256"], span, item["reason"])
+        row = merged.setdefault(key, {**item, "srs_ids": [], "facts": []})
+        if item["srs_id"] not in row["srs_ids"]:
+            row["srs_ids"].append(item["srs_id"])
+        if item["fact"] not in row["facts"]:
+            row["facts"].append(item["fact"])
+            row["fact"] = " · ".join(row["facts"])
+    for row in merged.values():
+        del row["facts"]
+    review_items = [{k: v for k, v in r.items() if k != "srs_id"} for r in merged.values()]
+    review_items.sort(key=lambda r: (not str(r["srs_ids"][0]).startswith("SwTSR"), str(r["srs_ids"][0]), r["source"]))
+    # held back first (what the documents leave undecided), then what was read (to confirm)
+    review_items.sort(key=lambda r: r["kind"] != "held_back")
+    out["review_item_count"] = len(review_items)
+    out["review_read_count"] = sum(1 for r in review_items if r["kind"] == "read")
+    out["review_by_reason"] = dict(sorted(Counter(r["reason"] for r in review_items).items()))
+    out["review_items"] = review_items[:MAX_REVIEW_ITEMS]
+    if review_out is not None:
+        review_out.extend(review_items)
     if fanout:
         # (review W5) one system block cited by many SRS requirements is stepped under each: say which blocks carry the
         #   traced facts (the most first, ties by ID) — HDPDM01 ``SySM_04`` alone carried 35 of 74
@@ -626,6 +830,8 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
                 block_pairs.add(bkey)
             kept.append(c)
         conflicts = kept
+        if review_out is not None:
+            review_out.extend({**c, "kind": "inclusion_conflict"} for c in conflicts)   # the document lists them all
         out["inclusion_conflicts"] = len(conflicts)
         # (R43) of them, two lines of one source — read both first: they may be two conditions or actions on purpose
         out["inclusion_conflicts_within_source"] = sum(1 for c in conflicts if c.get("within_source"))
@@ -666,3 +872,46 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
                    e["value"], e["unit"] or "—", e["step"], e["step_basis"], points, e["combination_note"] or "—",
                    _clip(e["line"], 300), e["line_sha256"], source_label(e.get("source"))])
     return len(rows)
+
+
+REQUIREMENT_REVIEW_HEADERS = ["Kind", "SRS ID", "Source Document", "Fact", "Reason", "To Decide", "Source Line",
+                              "Line SHA-256"]
+REQUIREMENT_REVIEW_SHEET = "Requirement Review"
+_CONFLICT_ROLE_TEXT = {"condition": "조건끼리", "outcome": "결과 기준끼리", "stimulus": "시험 입력(검증 기준) ↔ 요구 조건"}
+
+
+def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> int:
+    """(R45) 'Requirement Review' sheet: what the requirement documents leave undecided or state two ways — the facts
+    held back from boundary steps for a reason a reader can settle (`REVIEW_TEXT`), what the generator read where the
+    words are silent (`READ_TEXT`, stepped — to confirm) and the inclusion conflicts (R33/R43).
+    Nothing here is filled by the generator: each row says what to decide. A sheet of that name from a template made of
+    an earlier output is removed first; no item — no sheet (the quality report's counts say whether it was looked at).
+    Returns rows written."""
+    if REQUIREMENT_REVIEW_SHEET in wb.sheetnames:
+        del wb[REQUIREMENT_REVIEW_SHEET]
+    if not items:
+        return 0
+    ws = wb.create_sheet(REQUIREMENT_REVIEW_SHEET)
+    ws.append(REQUIREMENT_REVIEW_HEADERS)
+    for it in items:
+        if it.get("kind") == "inclusion_conflict":
+            a, b = it.get("a") or {}, it.get("b") or {}
+            flag = (" · 한 출처 안의 두 줄(다른 조건·동작일 수 있음)" if it.get("within_source") else "") + (
+                "" if it.get("same_subject") else " · 한쪽 주어 없음" if it.get("subject_missing") else " · 주어 이름이 다름")
+            ws.append(["요구 문서 경계 포함 불일치", it.get("srs_id", ""), f"{a.get('source')} ↔ {b.get('source')}",
+                       f"{a.get('subject')} {a.get('text')} ↔ {b.get('subject')} {b.get('text')}",
+                       f"같은 값·단위를 경계 포함만 달리 적음({_CONFLICT_ROLE_TEXT.get(str(it.get('role')), it.get('role'))})"
+                       + flag,
+                       "어느 쪽이 맞는지 문서 검토로 정한다(경계 TC 는 각 문장대로 판정)",
+                       _clip(f"{a.get('line')} ↔ {b.get('line')}", 300), "—"])
+            continue
+        reason = str(it.get("reason"))
+        why, decide = {**REVIEW_TEXT, **READ_TEXT}.get(reason, (reason, "원문 확인"))
+        if it.get("fact_kind") == "range" and reason in RANGE_DECIDE:
+            decide = RANGE_DECIDE[reason]      # (review r2 W-R2-1) a range makes no boundary step, subject or not
+        if it.get("block_name"):
+            why += f" (블록 이름 '{_clip(str(it['block_name']), 80)}')"
+        ws.append(["읽은 결합 — 확인" if it.get("kind") == "read" else "검토 필요 조건",
+                   ", ".join(it.get("srs_ids") or []), it.get("source", ""), it.get("fact") or "—",
+                   why, decide, _clip(str(it.get("line") or ""), 300), it.get("line_sha256") or "—"])
+    return len(items)

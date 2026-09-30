@@ -137,6 +137,7 @@ _REVIEW_ONLY_METHODS = {"RVW"}
 _DEFAULT_TEST_ENV = "SwTE_01"
 _MAX_TC_PER_REQ = 5
 _MAX_STEPS_PER_TC = 15
+_REVIEW_SHEET_ERROR = "Requirement Review: "   # (R45) marks the review sheet's error among ``sheet_errors``
 
 _HEADER_ROW = 6
 
@@ -2770,8 +2771,11 @@ def generate_sts_xlsm(
     output_path: str,
     project_config: Optional[Dict[str, Any]] = None,
     sheet_errors: Optional[List[str]] = None,
+    requirement_review: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Generate STS XLSM file. ``sheet_errors`` collects why an optional evidence sheet was left out."""
+    """Generate STS XLSM file. ``sheet_errors`` collects why an optional evidence sheet was left out.
+    ``requirement_review`` (R45): what the requirement documents leave undecided or state two ways — the
+    'Requirement Review' sheet (none given: no sheet, and one left by a template is removed)."""
     try:
         import openpyxl
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -2940,6 +2944,14 @@ def generate_sts_xlsm(
         _logger.warning("Requirement Evidence sheet skipped: %s", exc, exc_info=True)
         if sheet_errors is not None:
             sheet_errors.append(f"{type(exc).__name__}: {exc}")
+    # (R45) 요구 문서가 정하지 않았거나 두 가지로 적은 것 — 근거가 없어 채우지 못해도 문서에 보인다(사용자 방향 2026-09-30)
+    try:
+        from generators.sts_requirement_tc import write_requirement_review_sheet
+        write_requirement_review_sheet(wb, requirement_review)
+    except Exception as exc:  # noqa: BLE001 — disclosed through ``sheet_errors`` (generation_stats)
+        _logger.warning("Requirement Review sheet skipped: %s", exc, exc_info=True)
+        if sheet_errors is not None:
+            sheet_errors.append(f"{_REVIEW_SHEET_ERROR}{type(exc).__name__}: {exc}")
 
     # --- Traceability sheet ---
     _write_traceability_sheet(wb, trace, thin_border, header_fill, header_font, data_font)
@@ -3621,6 +3633,7 @@ def generate_sts(
     # (R6, P3/G4) 요구 문장이 직접 적은 임계값·유지시간의 경계 TC — 함수 흐름 TC 와 달리 판정이 **요구 원문**에서 온다.
     #   AI 보강 **뒤**에 붙인다(보강이 스텝을 갈아 끼우면 원문 판정이 사라진다). 요구당 상한(max_tc_per_req)은 함수 TC 의
     #   것이라 여기엔 걸지 않고, 덧붙인 수·못 쓴 사실의 사유를 generation_stats 에 싣는다.
+    _review: List[Dict[str, Any]] = []   # (R45) the 'Requirement Review' sheet's rows
     if (project_config or {}).get("requirement_boundary_tcs", True):
         _test_env = (project_config or {}).get("default_test_env", _DEFAULT_TEST_ENV)
 
@@ -3639,12 +3652,13 @@ def generate_sts(
             gen_stats["requirement_boundary"] = append_requirement_boundary_tcs(
                 test_cases, reqs, _build, _make_tc_id, _classify_steps,
                 max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
-                system=_system if any("blocks" in r for r in _sy_records) else None)
+                system=_system if any("blocks" in r for r in _sy_records) else None, review_out=_review)
             gen_stats["requirement_boundary"]["system_documents"] = _sy_records
             if system_input_skips:
                 gen_stats["requirement_boundary"]["system_input_skips"] = [str(s)[:200] for s in system_input_skips]
         except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below
             test_cases[:] = _before_rb   # nothing half-added
+            _review.clear()
             _logger.warning("requirement boundary TCs skipped: %s", exc, exc_info=True)
             gen_stats["requirement_boundary"] = {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -3656,9 +3670,18 @@ def generate_sts(
 
     _progress(85, "XLSM 파일 생성 중")
     _sheet_errors: List[str] = []
-    out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config, sheet_errors=_sheet_errors)
+    out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config, sheet_errors=_sheet_errors,
+                            requirement_review=_review)
     if _sheet_errors and isinstance(gen_stats.get("requirement_boundary"), dict):
-        gen_stats["requirement_boundary"]["evidence_sheet_error"] = _sheet_errors[0]   # quality 가 같은 dict 를 든다
+        # quality 가 같은 dict 를 든다. (R45 review W5) 두 부가 시트의 오류는 따로 — 한 칸이면 검토 시트 실패가
+        #   'Requirement Evidence' 의 이름으로 보이거나 둘 다 실패할 때 사라진다
+        _rb = gen_stats["requirement_boundary"]
+        _rev = [e for e in _sheet_errors if e.startswith(_REVIEW_SHEET_ERROR)]
+        _ev = [e for e in _sheet_errors if not e.startswith(_REVIEW_SHEET_ERROR)]
+        if _ev:
+            _rb["evidence_sheet_error"] = _ev[0]
+        if _rev:
+            _rb["review_sheet_error"] = _rev[0][len(_REVIEW_SHEET_ERROR):]
 
     _progress(92, "생성 문서 자동 검증 중")
     try:

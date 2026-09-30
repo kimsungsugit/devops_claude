@@ -96,20 +96,26 @@ def test_a_cited_fact_the_generator_does_not_count_as_a_condition_is_not_cited()
 
 
 def test_a_cited_condition_the_generator_does_not_step_says_why():
-    """(r2 I1) HDPDM01 SyFN_02: the generator reads the 0.8 m/s condition and holds it back (R32 C1) — the gap shows
-    in ``where`` without reading the generator."""
+    """(r2 I1) the generator reads the 0.8 m/s condition and holds it back — the gap shows in ``where`` without reading
+    the generator. (R45) HDPDM01 SyFN_02 as written (``0.8m/s 이상 1.3m/s 이하``) is stepped now: a range as the other
+    label keeps both held back (a range states no inclusion to split at)."""
     block = {"SwTR_0102": "ID\tSwTR_0102\n- Assist Close\nRelated ID\tSyFN_02\n"}
     system = {"SyFN_02": {"doc": "SyDS", "fields": {"Description": (
-        "Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 1.3m/s 이하) 인지를 판단한다")}}}
+        "Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8~1.3m/s) 인지를 판단한다")}}}
     assert ev.provenance("SwTR_0102", 0.8, "m/s", block, system, None) == (
-        "cited_system", ["SyDS SyFN_02 · Description (생성기 제외: parenthesis_labels_may_share_a_quantity)"])
+        "cited_system", ["SyDS SyFN_02 · Description (생성기 제외: kind_range)",
+                         "SyDS SyFN_02 · Description (생성기 제외: parenthesis_labels_may_share_a_quantity)"])
+    stepped = {"SyFN_02": {"doc": "SyDS", "fields": {"Description": (
+        "Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 1.3m/s 이하) 인지를 판단한다")}}}
+    assert ev.provenance("SwTR_0102", 0.8, "m/s", block, stepped, None) == (
+        "cited_system", ["SyDS SyFN_02 · Description"])
 
 
 def test_the_held_back_cited_mutants_are_counted_per_class(tmp_path):
     """(r3 I1) the cited class's headline splits without opening the rows: 0.8 m/s is read and held back."""
     block = "ID\tSwTR_0102\n- Assist Close\nRelated ID\tSyFN_02\n"
     system = {"SyFN_02": {"doc": "SyDS", "fields": {"Description": (
-        "Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8m/s 이상 1.3m/s 이하) 인지를 판단한다")}}}
+        "Manual Assist조건(0.8m/s 미만) 또는 Tip-To-Run 조건(0.8~1.3m/s) 인지를 판단한다")}}}
     ref = ev.read_sts(_sts(tmp_path / "ref.xlsx", [("SwTC_1", "도어를 0.8m/s 이상으로 닫음", "Tip-To-Run", "SwTR_0102")]))
     ms, _ = ev.reference_mutants(ref, {"SwTR_0102": block}, None, system, None)
     split = ev.cross_discrimination(ms, ref, self_sourced=True)["by_provenance"]

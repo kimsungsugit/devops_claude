@@ -20,7 +20,9 @@ compared kept as ``monitored`` (``열림각``) when the sentence names it.
 
 How two facts of a line join is read from the words **between them** (``joint``): ``또는``/``||`` → or, ``이고``/
 ``&&`` → and, a hold time → and (it qualifies the condition), anything else — a comma, nothing, two different
-connectives — unstated. ``holds``/``line_holds`` give the verdict of a point for one fact or for a line's conditions on
+connectives — unstated; except (R45) a lower bound below an upper bound of one subject written side by side, which has
+one meaningful reading (``0.8m/s 이상 1.3m/s 이하`` — a range; `join_is_inferred` says the words did not write it).
+``holds``/``line_holds`` give the verdict of a point for one fact or for a line's conditions on
 one subject (the single definition the STS generator and the evaluator share); ``written_step`` is one unit of the
 precision a value is written with.
 """
@@ -512,8 +514,57 @@ def joint(line: dict[str, Any], a: dict[str, Any], b: dict[str, Any]) -> str:
             return "and"
     ordered = sorted(line["facts"], key=lambda f: f["line_span"][0])
     i, j = sorted((ordered.index(a), ordered.index(b)))
-    seps = {_separator(raw[ordered[k]["line_span"][1]:ordered[k + 1]["line_span"][0]]) for k in range(i, j)}
+    seps = set()
+    for k in range(i, j):
+        sep = _separator(raw[ordered[k]["line_span"][1]:ordered[k + 1]["line_span"][0]])
+        if sep == "unstated":
+            # (R45) a range written without a connective binds its two bounds tighter than a written connective binds
+            #   anything else: ``A(0.8 미만) 또는 B(0.8 이상 1.3 이하)`` — ``1.3 이하`` joins A by *or*
+            sep = _only_meaningful_join(raw, ordered[k], ordered[k + 1])
+            if sep == "and" and j > i + 1:
+                continue
+        seps.add(sep)
+    if not seps:
+        return "and"      # every step between them is one range: its bounds
     return seps.pop() if len(seps) == 1 else "unstated"
+
+
+_LOWER_BOUND, _UPPER_BOUND = {">=", ">"}, {"<=", "<"}
+_RANGE_GAP = re.compile(r"[\s,~∼]*")   # nothing but a space, a comma, a tilde between the two comparisons
+
+
+def _only_meaningful_join(raw: str, first: dict[str, Any], second: dict[str, Any]) -> str:
+    """(R45) Two comparisons of one subject written next to each other with no connective, read only where one reading
+    means anything: a lower bound below an upper bound (``0.8m/s 이상 1.3m/s 이하``) — *or* would hold for every
+    speed, so *and* (a range). Everything else stays ``unstated``: two lower (or two upper) bounds read both ways
+    (``9V 이상 16V 이상``); a lower bound **above** the upper one is not "either side" — it is how an entry/exit
+    hysteresis is written (``8.5V 이하, 9.0V 이상 복귀``, a table row ``8.5V 이하 | 9.0V 이상``: review R45 C1 — *or*
+    made 9 V a low-voltage point) or a misread sign (``9V이상-16V이하``); and a range empty on the written grid
+    (``10 초과 11 미만`` of integers — review I1: judged on the finest written step, a strict bound is the next grid
+    point). Only a lower and an upper bound of one named subject in one unit, with nothing but a space / comma /
+    tilde between them (`join_is_inferred` tells the caller the words did not say it)."""
+    if not (same_subject(first, second) and first.get("kind") == "threshold" == second.get("kind")) \
+            or not _RANGE_GAP.fullmatch(raw[first["line_span"][1]:second["line_span"][0]]):
+        return "unstated"
+    if first["op"] in _LOWER_BOUND and second["op"] in _UPPER_BOUND:
+        low, high = first, second
+    elif first["op"] in _UPPER_BOUND and second["op"] in _LOWER_BOUND:
+        low, high = second, first
+    else:
+        return "unstated"
+    grid = min(written_step(low), written_step(high))
+    lo = exact_value(low) + (grid if low["op"] == ">" else 0)       # the first grid point the bound admits
+    hi = exact_value(high) - (grid if high["op"] == "<" else 0)
+    return "and" if lo <= hi else "unstated"
+
+
+def join_is_inferred(line: dict[str, Any], a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """(R45) ``joint`` read the join from what the two comparisons mean, not from a written connective."""
+    ordered = sorted(line["facts"], key=lambda f: f["line_span"][0])
+    i, j = sorted((ordered.index(a), ordered.index(b)))
+    raw = line.get("raw") or line["text"]
+    return j == i + 1 and _separator(raw[ordered[i]["line_span"][1]:ordered[j]["line_span"][0]]) == "unstated" \
+        and _only_meaningful_join(raw, ordered[i], ordered[j]) != "unstated"
 
 
 def condition_part_join(line: dict[str, Any], fact: dict[str, Any]) -> str:
@@ -540,11 +591,41 @@ def line_holds(point, fact: dict[str, Any], line: dict[str, Any], override: tupl
     own = holds(point, fact, *(override or ()))
     if not siblings:
         return own
-    joins = {joint(line, fact, f) for f in siblings}
-    if len(joins) != 1 or "unstated" in joins:
+    units, join = condition_units(line, fact)
+    verdicts = [all(own if f is fact else holds(point, f) for f in unit) for unit in units]
+    if len(units) == 1:
+        return verdicts[0]
+    if join not in {"or", "and"}:
         return None
-    verdicts = [own] + [holds(point, f) for f in siblings]
-    return any(verdicts) if joins == {"or"} else all(verdicts)
+    return any(verdicts) if join == "or" else all(verdicts)
+
+
+def condition_units(line: dict[str, Any], fact: dict[str, Any]) -> tuple[list[list[dict[str, Any]]], str]:
+    """(R45) The conditions of the line on the fact's subject, in written order, as units — a range written without a
+    connective (``5V 이상 6V 이하``) is one unit — and how the units join (``or`` / ``and`` / ``unstated``; ``""`` for one
+    unit): ``4V 이하 또는 5V 이상 6V 이하`` is 4V 이하 *or* (5V..6V), not any of three. `line_holds` judges by it and the
+    STS step writes its condition from it (review R45 W3: the two disagreed)."""
+    ordered = sorted(line["facts"], key=lambda f: f["line_span"][0])
+    units: list[list[dict[str, Any]]] = []
+    for f in sorted([fact] + [f for f in line["facts"] if same_subject(fact, f)], key=lambda f: f["line_span"][0]):
+        if units and _range_pair(line, ordered, units[-1][-1], f):
+            units[-1].append(f)
+        else:
+            units.append([f])
+    if len(units) == 1:
+        return units, ""
+    joins = {joint(line, units[k][-1], units[k + 1][0]) for k in range(len(units) - 1)}
+    return units, joins.pop() if len(joins) == 1 else "unstated"
+
+
+def _range_pair(line: dict[str, Any], ordered: list[dict[str, Any]], a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """``a`` and ``b`` are next to each other on the line and read as one range (`_only_meaningful_join` → and)."""
+    i, j = ordered.index(a), ordered.index(b)
+    if j != i + 1:
+        return False
+    raw = line.get("raw") or line["text"]
+    return _separator(raw[a["line_span"][1]:b["line_span"][0]]) == "unstated" \
+        and _only_meaningful_join(raw, a, b) == "and"
 
 
 def written_step(fact: dict[str, Any]) -> Decimal:
