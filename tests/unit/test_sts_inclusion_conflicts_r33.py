@@ -53,11 +53,12 @@ def test_a_response_time_a_negation_and_one_sources_own_fields_are_no_candidates
     assert _pairs(_req("- 저전압 500ms 미만 유지 후 복귀"), {"SySM_04": _block("500ms 이내에 복귀해야 한다")}) == []
     # a negated condition says the opposite already
     assert _pairs(_req("- 전압 8.5V 이하가 아닌 경우 정상"), {"SySM_04": _block("전압 8.5V 미만 시 DTC")}) == []
-    # two fields of one block, or the SRS's description and verification, are one source
+    # (R43) two fields of one block, or the SRS's description and verification, ARE candidates now — marked
+    #   ``within_source`` (tests/unit/test_sts_inclusion_within_source_r43.py); R33 examined only pairs across sources
     one_block = {"SySM_04": _block("전압 8.5V 미만 시 DTC", Range="전압 8.5V 이하 시 경고")}
-    assert _pairs(_req("- 모터 동작"), one_block) == []
+    assert [c["within_source"] for c in inclusion_conflicts(_req("- 모터 동작"), one_block)] == [True]
     srs_only = {**_req("- 전압 8.5V 미만 시 고장", related=""), "verification": "전압 8.5V 이하 입력"}
-    assert inclusion_conflicts(srs_only, {}) == []
+    assert [c["within_source"] for c in inclusion_conflicts(srs_only, {})] == [True]
 
 
 def test_two_cited_blocks_can_disagree_too():

@@ -367,16 +367,26 @@ def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
     errors = [str(e) for e in (rb.get("inclusion_conflict_errors") or [])]
     n_err = _int(rb, "inclusion_conflict_error_count") or len(errors)
     err_note = (f" 비교 중 오류로 건너뛴 요구 {n_err}개(예: {errors[0][:80]})." if errors else "")
-    if compared == 0:
-        return [_item("sts_requirement_inclusion_conflicts", "요구 문서 간 경계 포함 불일치", "—",
+    # (R43 review W1) an output from before R43 never looked within one source: it keeps the R33 wording
+    has_within = "inclusion_conflicts_within_source" in rb
+    if compared == 0 and not n:
+        return [_item("sts_requirement_inclusion_conflicts", "요구 문서 경계 포함 불일치", "—",
                       "요구가 인용한 시스템 블록 중 읽은 문서에 있는 것이 없어 비교하지 못했다(0 건이 아니라 미측정)."
                       + err_note, tone=_tone(bool(errors)))]
-    scope = f"블록 {compared} 곳(요구 × 블록)" if compared is not None else "블록"
+    if compared == 0:
+        # (R43 review C1) no cited block to compare with, yet one source's own lines disagree: the candidates are shown,
+        #   and only the comparison across documents is said to be unmeasured
+        scope = "블록 0 곳(문서 간 비교는 미측정 — 앞의 쌍은 전부 한 출처 안)"
+    else:
+        scope = f"블록 {compared} 곳(요구 × 블록)" if compared is not None else "블록"
     if not n:
-        return [_item("sts_requirement_inclusion_conflicts", "요구 문서 간 경계 포함 불일치",
+        where = (f"SRS 와 그 요구가 Related ID 로 인용한 {scope}에서, 그리고 한 출처(SRS 원문 또는 한 블록)의 두 줄 "
+                 "사이에서" if has_within else
+                 f"SRS 와 그 요구가 Related ID 로 인용한 {scope}에서")
+        return [_item("sts_requirement_inclusion_conflicts", "요구 문서 경계 포함 불일치",
                       "0건" + (f" · 오류 {n_err}" if errors else ""),
-                      f"SRS 와 그 요구가 Related ID 로 인용한 {scope}에서 같은 값·같은 단위를 경계 포함만 다르게 적은 쌍을 "
-                      "찾지 못했다(한 출처 — SRS 원문 또는 한 블록 — 안의 쌍은 보지 않는다)." + err_note,
+                      where + " 같은 값·같은 단위를 경계 포함만 다르게 적은 쌍을 찾지 못했다"
+                      + ("." if has_within else "(한 출처 — SRS 원문 또는 한 블록 — 안의 쌍은 보지 않는다).") + err_note,
                       tone=_tone(bool(errors)))]
     items = [i for i in (rb.get("inclusion_conflict_items") or []) if isinstance(i, dict)]
 
@@ -385,27 +395,34 @@ def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
         return f"{x.get('source')} `{x.get('subject')} {x.get('text')}{ref}`"
 
     def _flag(i):
+        # (R43) two lines of one source: they may be two conditions or two actions on purpose — read both first
+        within = " (한 출처 안의 두 줄 — 다른 조건·다른 동작일 수 있으니 원문 확인)" if i.get("within_source") else ""
         if i.get("same_subject"):
-            return ""
-        return " (한쪽 주어 없음 — 원문으로 같은 조건인지 확인)" if i.get("subject_missing") else \
-            " (주어 이름이 다름 — 같은 신호인지 먼저 확인)"
+            return within
+        return within + (" (한쪽 주어 없음 — 원문으로 같은 조건인지 확인)" if i.get("subject_missing") else
+                         " (주어 이름이 다름 — 같은 신호인지 먼저 확인)")
     shown = [f"{i.get('srs_id')}{_CONFLICT_TAG.get(str(i.get('role')), '')}: {_side(i.get('a') or {})} ↔ "
              f"{_side(i.get('b') or {})}{_flag(i)}" for i in items[:5]]
     reqs, vals = _int(rb, "inclusion_conflict_requirements"), _int(rb, "inclusion_conflict_values")
+    within_n = _int(rb, "inclusion_conflicts_within_source")
     return [_item(
-        "sts_requirement_inclusion_conflicts", "요구 문서 간 경계 포함 불일치 후보",
+        "sts_requirement_inclusion_conflicts", "요구 문서 경계 포함 불일치 후보",
         f"{n}건" + (f" (요구 {reqs} · 값 {vals})" if reqs is not None and vals is not None else "")
+        + (f" · 그중 한 출처 안 {within_n}" if within_n else "")
         + (f" · 오류 {n_err}" if errors else ""),
         " / ".join(shown)
         + (f" 외 {n - len(shown)}건(품질 리포트 `inclusion_conflict_items` 에 {len(items)}건까지)." if n > len(shown) else ".")
         + err_note
-        + f" — SRS 와 그 요구가 Related ID 로 인용한 SyRS·SyDS 블록(또는 두 블록)이 같은 값·같은 단위를 경계 포함만 "
-          "달리 적은 곳이다(이상 ↔ 초과, 이하 ↔ 미만): 조건끼리는 그 값이 한 문서의 조건에는 들고 다른 문서의 조건에는 들지 "
-          "않는다, [결과] 는 결과 기준끼리, [시험 입력] 은 검증 기준(시험 기술)의 입력이 요구 조건이 제외한 값을 포함한다"
-          "(그 값에서 반응을 기대하는 긍정 시험이면 요구가 반응하지 않는 입력에서 반응을 기대한다 — 부정 시험이면 판정은 "
-          "갈리지 않으니 원문으로 확인; 시험 입력이 더 엄격한 쪽은 후보가 아니다). 어느 쪽이 맞는지는 생성기가 정하지 않는다(경계 TC 는 각 문장대로 판정) — 문서 "
-          f"검토로 정할 결함 후보다. 값과 단위로만 짝지었으니 주어 표시를 먼저 볼 것. 범위: 인용 {scope}, 한 출처(SRS "
-          "원문 또는 한 블록) 안의 쌍은 보지 않는다.",
+        + " — SRS 와 그 요구가 Related ID 로 인용한 SyRS·SyDS 블록(또는 두 블록)"
+        + (", 그리고 한 출처(SRS 원문 또는 한 블록)의 서로 다른 두 줄" if has_within else "")
+        + "이 같은 값·같은 단위를 경계 포함만 달리 적은 곳이다(이상 ↔ 초과, 이하 ↔ 미만): 조건끼리는 그 값이 한 문장의 "
+          "조건에는 들고 다른 문장의 조건에는 들지 않는다, [결과] 는 결과 기준끼리, [시험 입력] 은 검증 기준(시험 기술)의 입력이 "
+          "요구 조건이 제외한 값을 포함한다(그 값에서 반응을 기대하는 긍정 시험이면 요구가 반응하지 않는 입력에서 반응을 "
+          "기대한다 — 부정 시험이면 판정은 갈리지 않으니 원문으로 확인; 시험 입력이 더 엄격한 쪽은 후보가 아니다). 어느 쪽이 "
+          "맞는지는 생성기가 정하지 않는다(경계 TC 는 각 문장대로 판정) — 문서 검토로 정할 결함 후보다. 값과 단위로만 "
+          f"짝지었으니 주어 표시를 먼저 볼 것. 범위: 인용 {scope}"
+        + (", 그리고 한 출처(SRS 원문 또는 한 블록)의 서로 다른 두 줄(표시 '한 출처 안' — 한 문서가 의도로 두 조건·두 동작을 "
+           "달리 적었을 수 있다)." if has_within else ", 한 출처(SRS 원문 또는 한 블록) 안의 쌍은 보지 않는다."),
         tone="warning")]
 
 

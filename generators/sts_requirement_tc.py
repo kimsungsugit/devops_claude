@@ -470,8 +470,13 @@ def inclusion_conflicts(req: dict[str, Any], system: dict[str, dict[str, Any]]) 
     and unit only, so ``same_subject`` is true only when both facts name the same subject (`subject_of`) — otherwise the
     reviewer first checks they are one quantity. Which document is right is not decided here; the boundary TCs judge
     each sentence as written. Not candidates: a negated condition, a response time (``500ms 이내``), a hold time that
-    writes no inclusion (``500ms 동안 유지``), a pair within one source (the SRS text, or the fields of one block —
-    those are not examined). Pairs are formed within (unit, value) buckets."""
+    writes no inclusion (``500ms 동안 유지``). Pairs are formed within (unit, value) buckets.
+
+    (R43) Two different lines of **one source** (the SRS text, or the fields of one block) are candidates too, marked
+    ``within_source`` — HDPDM01 ``SwTSR_0104``'s own text: ``저 전압 고장 검출 기준 전압: 8.50V 이하`` against ``8.50V
+    미만인 전압으로 … 유지하는 경우``. Within one source two sentences may also be two conditions or two actions on
+    purpose (a warning at ``이하`` and a DTC at ``미만``; items 1·2·3 of one block with their own hold times), so the
+    mark tells the reviewer to read both first."""
     items = []
     for key in ("description", "verification"):          # `requirement_facts`, keeping which field a fact is in
         for b in extract(f"ID\t{req.get('id', '')}\n{req.get(key) or ''}\n"):
@@ -488,7 +493,7 @@ def inclusion_conflicts(req: dict[str, Any], system: dict[str, dict[str, Any]]) 
         buckets.setdefault((fact.get("unit") or "", exact_value(fact)), []).append(
             (line, fact, source, _conflict_role(line, fact, verification)))
     out: list[dict[str, Any]] = []
-    seen: set = set()
+    seen: dict[tuple, int] = {}   # key → index in ``out``
 
     def side(line, fact, source):
         subject = _subject_text(fact) if fact.get("signal_kind") == "parameter" else subject_of(fact)
@@ -500,20 +505,28 @@ def inclusion_conflicts(req: dict[str, Any], system: dict[str, dict[str, Any]]) 
     for (unit, value), group in buckets.items():
         for i, (la, a, sa, ra) in enumerate(group):
             for lb, b, sb, rb in group[i + 1:]:
-                if ((sa or {}).get("doc"), (sa or {}).get("id")) == ((sb or {}).get("doc"), (sb or {}).get("id")):
-                    continue        # one source (the SRS text, or one block's fields) — not two documents
+                within = ((sa or {}).get("doc"), (sa or {}).get("id")) == ((sb or {}).get("doc"), (sb or {}).get("id"))
+                if within and _dedupe_text(la["text"]) == _dedupe_text(lb["text"]):
+                    # (R43) one line says one thing: a pair within one source is two of its lines — and ``1) X`` in
+                    #   the description is the same sentence as ``- X`` in the verification (review I3)
+                    continue
                 if _INCLUSION_FLIP[a["op"]] != b["op"] or not _joins(ra, a, rb, b):
                     continue
                 role = "stimulus" if "stimulus" in (ra, rb) else ra
                 key = (unit, value, role, frozenset({((sa or {}).get("doc"), (sa or {}).get("id"), a["op"]),
                                                    ((sb or {}).get("doc"), (sb or {}).get("id"), b["op"])}))
-                if key in seen:
-                    continue
-                seen.add(key)
                 named = subject_of(a) is not None and subject_of(b) is not None
+                same = bool(named and subject_of(a) == subject_of(b))
+                if key in seen:
+                    # (R43 review I2) one finding per key — but a pair naming one subject says more than the first seen
+                    k = seen[key]
+                    if same and not out[k]["same_subject"]:
+                        out[k].update(same_subject=True, subject_missing=False, a=side(la, a, sa), b=side(lb, b, sb))
+                    continue
+                seen[key] = len(out)
                 out.append({"srs_id": req.get("id", ""), "value": str(exact_value(a)), "unit": unit, "role": role,
-                            "same_subject": bool(named and subject_of(a) == subject_of(b)),
-                            "subject_missing": not named, "a": side(la, a, sa), "b": side(lb, b, sb)})
+                            "same_subject": same, "subject_missing": not named, "within_source": within,
+                            "a": side(la, a, sa), "b": side(lb, b, sb)})
     return out
 
 
@@ -596,8 +609,26 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     if system is not None:
         # (R33) requirement-document inconsistencies found on the way — counted in full, the first ones itemised: safety
         #   requirements first (review I7: SwTSR_0104 fell behind "외 5건"), then by requirement ID
-        conflicts.sort(key=lambda c: (not str(c["srs_id"]).startswith("SwTSR"), str(c["srs_id"])))
+        # (R43 review W2) within a requirement, pairs across documents first — the disclosure shows five
+        conflicts.sort(key=lambda c: (not str(c["srs_id"]).startswith("SwTSR"), str(c["srs_id"]),
+                                      bool(c.get("within_source"))))
+        # (R43 review W3) one block's own two lines are one finding, however many requirements cite that block (the hub
+        #   block SySM_04 carries 35 of HDPDM01's 74 traced facts) — kept under the first requirement in the SORTED list
+        #   (round 2 W3), so a safety requirement citing the block keeps it in front
+        block_pairs: set = set()
+        kept: list[dict[str, Any]] = []
+        for c in conflicts:
+            if c.get("within_source") and c["a"]["source"] != "SRS":
+                bkey = (c["a"]["source"].split(" · ")[0], c["unit"], Decimal(c["value"]), c["role"],
+                        frozenset((c["a"]["op"], c["b"]["op"])))
+                if bkey in block_pairs:
+                    continue
+                block_pairs.add(bkey)
+            kept.append(c)
+        conflicts = kept
         out["inclusion_conflicts"] = len(conflicts)
+        # (R43) of them, two lines of one source — read both first: they may be two conditions or actions on purpose
+        out["inclusion_conflicts_within_source"] = sum(1 for c in conflicts if c.get("within_source"))
         out["inclusion_conflict_items"] = conflicts[:MAX_INCLUSION_CONFLICTS]
         out["inclusion_conflict_requirements"] = len({c["srs_id"] for c in conflicts})
         out["inclusion_conflict_values"] = len({(c["srs_id"], Decimal(c["value"]), c["unit"]) for c in conflicts})
