@@ -64,6 +64,7 @@ IN_SPEC_DOC = "spec_doc"        # SUTR↔SwUTS / SITR↔SwITS 대응 규격서
 IN_LEVEL_ARTIFACTS = "level_artifacts"   # 통합 Summary 의 레벨별 산출물
 IN_SYRS = "syrs"                # (R29) 시스템 요구사항 — STS 요구 경계의 추적 입력
 IN_SYDS = "syds"                # (R29) 시스템 설계서 — 같은 용도
+IN_HWRS = "hwrs"                # (R49) HW 요구사항서 — 경계 TC 옆의 HW 측정 허용오차
 
 INPUT_LABELS: Dict[str, str] = {
     IN_SOURCE_ROOT: "소스 코드 루트",
@@ -78,6 +79,7 @@ INPUT_LABELS: Dict[str, str] = {
     IN_LEVEL_ARTIFACTS: "레벨별 산출물",
     IN_SYRS: "SyRS(시스템 요구)",
     IN_SYDS: "SyDS(시스템 설계)",
+    IN_HWRS: "HwRS(HW 요구)",
 }
 
 
@@ -344,6 +346,9 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             # (R47) 요소 블록의 Input Information(입력 범위)도 경계 TC 가 된다
             IN_SYDS: "SRS 가 적지 않은 시스템 설계(인터페이스·범위·요소 입력 범위 Input Information) 임계의 경계 TC 가 빠지고, "
                      "요구 원문 검토 항목의 근거 후보를 SyDS 에서 찾지 않습니다",
+            # (R49) 채우면 무엇이 좋아지는지 — HW 블록의 `허용 오차` 로 HIL 에서 판정이 갈리는 경계를 알린다
+            IN_HWRS: "경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록의 '허용 오차')를 붙이지 않아, 한 눈금이 "
+                     "측정 오차 안이라 HIL 에서 판정이 갈리는 경계를 알리지 않습니다",
             IN_TEMPLATE: "기본 양식으로 만듭니다(회사 표준 서식이 아닐 수 있습니다)",
         },
         fields=["related"],

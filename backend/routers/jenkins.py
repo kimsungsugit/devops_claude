@@ -3297,6 +3297,8 @@ async def jenkins_sts_generate_async(
     # (R29, G4(b)) 시스템 요구·설계서 — SRS Related ID 가 직접 가리키는 블록의 임계로 요구 경계 TC 를 더한다.
     syrs_path: str = Form(""),
     syds_path: str = Form(""),
+    # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
+    hwrs_path: str = Form(""),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     from sts_generator import generate_sts
@@ -3378,7 +3380,7 @@ async def jenkins_sts_generate_async(
         _logger.warning("STS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
     from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs = resolve_system_requirement_docs(syrs_path, syds_path)
+    system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
 
     # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
     # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과

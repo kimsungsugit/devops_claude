@@ -353,6 +353,7 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if rb.get("evidence_sheet_error") else ""),
             tone=_tone(bool(rb.get("evidence_sheet_error")))))
         out.extend(_traced_system_items(rb, _why))
+        out.extend(_hw_tolerance_items(rb))
         out.extend(_inclusion_conflict_items(rb))
         out.extend(_value_difference_items(rb))
         out.extend(_requirement_review_items(rb, _why))
@@ -572,6 +573,54 @@ def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
         + (", 그리고 한 출처(SRS 원문 또는 한 블록)의 서로 다른 두 줄(표시 '한 출처 안' — 한 문서가 의도로 두 조건·두 동작을 "
            "달리 적었을 수 있다)." if has_within else ", 한 출처(SRS 원문 또는 한 블록) 안의 쌍은 보지 않는다."),
         tone="warning")]
+
+
+def _hw_tolerance_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R49) HW 측정 허용오차 — HW 요구사항서를 준 생성엔 연결된 경계 사실 수와 그중 한 눈금이 허용오차 안인 수, 안 줬으면
+    '미입력' 과 주면 무엇이 생기는지(사용자 방향 2026-09-30 "없으면 표시하고 채우면 개선된다고 안내"). 키가 없으면 R49 이전
+    산출물이라 항목 없음(없음 ≠ 미입력)."""
+    doc = rb.get("hw_document")
+    if not isinstance(doc, dict):
+        return []
+    if doc.get("given") is False:
+        return [_item("sts_hw_tolerance", "HW 측정 허용오차", "미입력",
+                      "HW 요구사항서(HwRS·HRS)를 주지 않아 경계 TC 의 HW 측정 허용오차를 보지 않았다 — 주면 SRS 가 인용한 "
+                      "시스템 블록을 같이 인용하는 HW 블록의 '허용 오차'(예: 배터리 전압 감시 ±3%)를 경계 TC 옆에 적고, 경계 점 "
+                      "간격이 그 안이라 HIL 에서 이상/초과를 가를 수 없는 TC 에는 판정 방법(SW 변수 직접 주입 · 허용오차 밖 점)을 "
+                      "사전조건에 적는다.")]
+    if doc.get("error"):
+        return [_item("sts_hw_tolerance", "HW 측정 허용오차", "읽기 실패",
+                      f"HW 요구사항서를 읽지 못해 경계 TC 는 허용오차 없이 만들었다 — {str(doc.get('error'))[:160]}"
+                      + (f" ({doc.get('file')})" if doc.get("file") else "") + ".", tone="warning")]
+    source = (f"({doc.get('file') or ''} — HW 블록 {doc.get('blocks')} 중 '허용 오차' 를 적은 것 "
+              f"{doc.get('blocks_with_tolerance')})")
+    if not doc.get("blocks"):
+        # (R49 review W3) read but no HW requirement table: another document (or another layout), not "none linked"
+        return [_item("sts_hw_tolerance", "HW 측정 허용오차", "HW 요구 표 없음",
+                      "HW 요구사항서에서 HW 요구 표(ID `Hw…`)를 하나도 찾지 못했다 — 다른 문서를 등록했거나 양식이 다르다 "
+                      + source + ".", tone="warning")]
+    groups = _int(rb, "hw_tolerance_groups") or 0
+    inside = _int(rb, "hw_tolerance_inside_step") or 0
+    undecided = _int(rb, "hw_tolerance_path_undecided") or 0
+    unknown = _int(rb, "hw_tolerance_scale_unknown") or 0
+    if not groups:
+        return [_item("sts_hw_tolerance", "HW 측정 허용오차", "0",
+                      "경계 TC 의 요구가 인용한 시스템 블록을 같이 인용하는(Related ID) HW 블록의 허용오차가 그 값의 단위로 "
+                      "이어지는 곳이 없었다 " + source + ".")]
+    # (R49 review I3) what to do first — the gate board keeps the first 230 and the last 120 characters
+    return [_item(
+        "sts_hw_tolerance", "HW 측정 허용오차", f"경계 사실 {groups} · 한 눈금이 허용오차 안 {inside}",
+        f"한 눈금이 HW 측정 허용오차 안인 경계 {inside} 개는 HIL 에서 경계 포함(이상/초과·이하/미만)을 가를 수 없다 — 그 TC 의 "
+        "사전조건에 판정 방법을 적었다: SW 변수 직접 주입(SIL·디버거)으로 판정하거나, 허용오차 밖 점(값 ± (가장 큰 후보 "
+        f"허용오차 + 한 눈금))에서 방향만 확인. 경계 사실 {groups} 개가 Related ID 로 HW 블록의 측정 허용오차와 이어졌다 "
+        + source + "."
+        + (f" 그중 {undecided} 개는 여러 요구가 인용하는 허브 블록 때문에 감시 경로가 하나로 정해지지 않는다(후보를 모두 적고 "
+           "가장 큰 허용오차로 밖 점을 정했다)." if undecided else "")
+        + (f" {unknown} 개는 HW 블록이 적은 값과 척도가 달라(예: 감시 노드 2.5V) 수치를 쓰지 않았다 — 분압비를 HW 문서로 "
+           "확인." if unknown else "")
+        + " 허용오차는 HW 문서 원문 그대로다. 'Requirement Evidence' 시트의 HW Tolerance 열에 후보를 최대 3 개 적었다. 점은 "
+          "옮기지 않았다.",
+        tone=_tone(bool(inside)))]
 
 
 def _traced_system_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[Dict[str, Any]]:

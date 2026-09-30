@@ -3463,6 +3463,7 @@ def generate_sts(
     syrs_path: Optional[str] = None,
     syds_path: Optional[str] = None,
     system_input_skips: Optional[List[str]] = None,
+    hwrs_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -3487,8 +3488,11 @@ def generate_sts(
         syrs_path / syds_path: (R29, G4(b)) 시스템 요구·설계서 DOCX. 주면 요구 경계 TC 가 SRS 블록의
             Related ID 가 **직접** 가리키는 시스템 블록의 문장도 같은 규칙으로 읽는다(1 홉 — 값으로 찾아 붙이지
             않는다). 못 읽은 문서는 품질 리포트에 사유로 남는다.
-        system_input_skips: 호출자가 위 두 경로를 로컬화하지 못한 사유(worker 경유 실패 등) — 생성기는 그
+        system_input_skips: 호출자가 위 경로들을 로컬화하지 못한 사유(worker 경유 실패 등) — 생성기는 그
             문서를 받지 못했으므로 공시만 한다.
+        hwrs_path: (R49) HW 요구사항서 DOCX. 주면 요구 경계 TC 옆에 Related ID 로 이어지는 HW 블록의 측정
+            허용오차(``허용 오차: ±3%``)를 인용하고, 한 눈금이 그 안이면 TC 사전조건에 HIL 판정 방법을 적는다(점은
+            옮기지 않는다). 못 읽으면 품질 리포트에 사유.
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage
@@ -3642,18 +3646,31 @@ def generate_sts(
                                   is_safety=is_safety_asil(str(kw["req"].get("asil") or "").strip()), **kw)
         _before_rb = list(test_cases)
         try:
-            from generators.sts_requirement_tc import append_requirement_boundary_tcs, load_system_requirements
+            from generators.sts_requirement_tc import (
+                append_requirement_boundary_tcs,
+                load_hw_requirements,
+                load_system_requirements,
+            )
             # (R29) 시스템 요구 문서 — 준 것만 읽는다. 하나도 안 줬으면 추적 자체를 하지 않고(`system=None`)
             #   그 사실을 `system_documents: []` 로 남긴다(0 과 미입력을 구분).
             _sy_docs = [("SyRS", syrs_path), ("SyDS", syds_path)]
             _system, _sy_records = load_system_requirements(_sy_docs)
+            _hw, _hw_record = load_hw_requirements(hwrs_path)     # (R49) (None, None) when not given
+            # (R49 review W2) a HwRS the caller could not localise was given — its reason is the HW record's, not the
+            #   system documents' (SyRS · SyDS would read "읽지 못함" and the unread-system-document metric would count it)
+            _hw_skips = [str(s) for s in (system_input_skips or []) if str(s).startswith("HwRS")]
+            system_input_skips = [s for s in (system_input_skips or []) if not str(s).startswith("HwRS")]
+            if _hw_record is None and _hw_skips:
+                _hw_record = {"file": "", "error": _hw_skips[0][:200]}
             if _sy_records:
                 _progress(76, f"시스템 요구 블록 {len(_system)}개 로드")
             gen_stats["requirement_boundary"] = append_requirement_boundary_tcs(
                 test_cases, reqs, _build, _make_tc_id, _classify_steps,
                 max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
-                system=_system if any("blocks" in r for r in _sy_records) else None, review_out=_review)
+                system=_system if any("blocks" in r for r in _sy_records) else None, review_out=_review, hw=_hw)
             gen_stats["requirement_boundary"]["system_documents"] = _sy_records
+            # (R49) not given ≠ read and none linked ≠ an output from before R49 (no key)
+            gen_stats["requirement_boundary"]["hw_document"] = _hw_record or {"given": False}
             if system_input_skips:
                 gen_stats["requirement_boundary"]["system_input_skips"] = [str(s)[:200] for s in system_input_skips]
         except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below

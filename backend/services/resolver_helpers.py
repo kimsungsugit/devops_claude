@@ -289,16 +289,18 @@ def resolve_builder_input(
     return str(out)
 
 
-def resolve_system_requirement_docs(syrs_path: str, syds_path: str) -> dict:
+def resolve_system_requirement_docs(syrs_path: str, syds_path: str, hwrs_path: str = "") -> dict:
     """(R29, G4(b)) STS 요구 경계 TC 의 시스템 요구 추적 입력(SyRS · SyDS)을 다른 선택 입력과 같은 경로로 로컬화한다.
 
     STS 핸들러 4 곳(`/api/jenkins/sts/generate-async` · `/api/local/sts/generate{,-stream,-async}`)이 **이 함수 하나**를
     부른다 — 판정이 핸들러마다 복제되면 한쪽만 고쳐진다(`resolve_builder_input` 이 생긴 이유와 같다).
     지정했는데 못 연 문서는 빠지고 그 사유가 ``system_input_skips`` 로 생성기에 넘어가 품질 리포트에 남는다 — 선택
-    입력이 조용히 사라지지 않게 한다. 반환은 `generate_sts` 키워드 인자 그대로다."""
+    입력이 조용히 사라지지 않게 한다. 반환은 `generate_sts` 키워드 인자 그대로다. (R49) HW 요구사항서(``hwrs_path``)도
+    같은 길이다 — 경계 TC 옆에 HW 측정 허용오차를 인용한다."""
     skips: list[str] = []
     return {"syrs_path": resolve_builder_input(syrs_path, label="SyRS", reasons=skips),
             "syds_path": resolve_builder_input(syds_path, label="SyDS", reasons=skips),
+            "hwrs_path": resolve_builder_input(hwrs_path, label="HwRS", reasons=skips),
             "system_input_skips": skips}
 
 

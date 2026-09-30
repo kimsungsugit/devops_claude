@@ -94,6 +94,7 @@ _DOC_KEY_TO_INPUT = {
     "template": _req.IN_TEMPLATE,
     "syrs": _req.IN_SYRS,     # (R29) STS 요구 경계의 시스템 추적 입력
     "syds": _req.IN_SYDS,
+    "hwrs": _req.IN_HWRS,     # (R49) STS 경계 TC 의 HW 측정 허용오차
 }
 _INPUT_TO_DOC_KEY = {v: k for k, v in _DOC_KEY_TO_INPUT.items()}
 
@@ -648,7 +649,7 @@ _FILE_INPUT_KEYS = frozenset({
     _req.IN_SWRS, _req.IN_SWDS, _req.IN_UDS_DOC, _req.IN_HSIS, _req.IN_STP,
     _req.IN_TEMPLATE, _req.IN_SPEC_DOC,
     # (R29 리뷰 W1) 생성기는 `is_file()` 로 거른다 — 폴더를 등록하면 게이트 ✓ · 생성 탈락이 되지 않게 파일로 잰다
-    _req.IN_SYRS, _req.IN_SYDS,
+    _req.IN_SYRS, _req.IN_SYDS, _req.IN_HWRS,
 })
 
 

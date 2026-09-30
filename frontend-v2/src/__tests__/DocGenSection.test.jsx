@@ -670,6 +670,21 @@ describe('DocGenSection — 게이트에서 정한 상한이 요청에 실린다
     expect(new URLSearchParams(String(body)).get('max_flows')).toBe('200');
   }, 20000);
 
+  // ── (R49) HW 요구사항서 — STS 요구 경계 TC 옆에 HW 측정 허용오차를 붙이는 선택 입력 ─────────────────────
+  //
+  // SyRS·SyDS 와 같은 길이다: 설정 경로 > SCM 등록 문서, STS 에만 보낸다(다른 핸들러는 선언하지 않아 FastAPI 가 버린다).
+  it('STS: HW 요구사항서 경로가 실린다 — 다른 문서 요청엔 없다', async () => {
+    localStorage.setItem('devops_v2_doc_paths', JSON.stringify({ hwrs: 'D:/hw/HRS.docx' }));
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('hwrs_path')).toBe('D:/hw/HRS.docx');
+  }, 20000);
+
+  it('SUTS 요청엔 HW 요구사항서 경로를 보내지 않는다', async () => {
+    localStorage.setItem('devops_v2_doc_paths', JSON.stringify({ hwrs: 'D:/hw/HRS.docx' }));
+    const body = await clickDoc(/SUTS 생성/);
+    expect(body.get('hwrs_path')).toBeNull();
+  }, 20000);
+
   // ── 이번 라운드에 배선된 값들 (2026-08-31) ────────────────────────────────
   //
   // 셋 다 "게이트에는 있는데 요청에는 없던" 것들이다. FastAPI 는 미선언 Form 필드를

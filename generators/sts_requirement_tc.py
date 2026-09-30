@@ -67,6 +67,13 @@ reaction is the requirement's other sentences' to decide.
 condition on the same side in the same unit that is likely the same threshold — within 5%, the same subject, one written
 step, or the only value each side writes; a hold time, the hold time of the same condition — ``5.14V 이상`` ↔ ``5.15V
 초과`` · ``500ms`` ↔ ``300ms`` of ``8.5V 미만`` — is listed with R33's inclusion conflicts, never decided, never used.
+
+**HW measurement tolerance (R49)**: given the HW requirements specification, a boundary group whose requirement cites
+a system block that a HW block cites too gets that HW block's monitor accuracy (``허용 오차: ±3%`` — a percentage only
+for the units the block measures; an absolute one only on the scale the block writes) quoted next to it; where the
+step spacing lies inside it, the TC's precondition says a HIL run cannot tell the inclusion — decide by injecting the
+SW variable, or check the direction outside the largest candidate (the monitor path is undecided when a hub block
+links several). Quoted, never used to move a point.
 """
 from __future__ import annotations
 
@@ -937,6 +944,219 @@ def value_differences(req: dict[str, Any], system: dict[str, dict[str, Any]]) ->
     return out
 
 
+# ── (R49) HW measurement tolerance — quoted next to the boundary steps it concerns ───────────────────────────────────
+# A boundary step's spacing is the written precision (``8.50`` → 0.01 V); a HW requirement writes how precisely the
+#   monitor path measures the quantity the SW compares (HDPDM01 ``HwTSR_0204`` Battery Voltage Monitor ``허용 오차:
+#   ±3%``). Where the spacing is inside that tolerance, a HIL run cannot tell the boundary's inclusion: the points are
+#   decided by the injection path (the SW variable directly), or checked for direction only outside the tolerance.
+#   Linked only through the Related IDs — a HW block citing a system ID the SRS requirement cites; never by value.
+HW_ID = re.compile(r"\bHw[A-Za-z]{1,6}_\d+(?:_\d+)?\b")
+# ``허용 오차: ±3%`` / ``허용 오차: ± 1A`` / ``허용 오차: ±0.15V`` — the accuracy of a monitor path. A value's own spec
+#   (``5V(±0.15)`` — what a HW output must produce) and a test's measuring error (``측정오차±0.1``) are not it
+_TOLERANCE = re.compile(r"허용\s*오차\s*[:：]?\s*±\s*(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>%|mV|V|mA|A|ms|s)?(?![A-Za-z])")
+_HW_FIELDS = ("Description", "Range")
+# what a block measures, as its text writes it: a range (``Battery Voltage Range: 9 ~16V`` · ``전류(0~20A)``) — its
+#   unit is what a ``%`` applies to — and a nominal node value (``Monitor전압: 2.5V(±0.15V)`` · ``2.5(±0.15)V``)
+_HW_RANGE = re.compile(r"(?P<lo>\d+(?:\.\d+)?)\s*~\s*(?P<hi>\d+(?:\.\d+)?)\s*(?P<unit>mV|V|mA|A|ms|s)(?![A-Za-z])")
+_HW_NOMINAL = re.compile(r"(?P<v>\d+(?:\.\d+)?)\s*(?:(?P<u1>mV|V|mA|A)\s*\(\s*±|\(\s*±\s*\d+(?:\.\d+)?\s*\)\s*(?P<u2>mV|V|mA|A))")
+_HW_SCALE_MARGIN = Decimal("0.2")     # a value within 20% of what the block writes is on the block's scale
+MAX_HW_TOLERANCES = 3
+
+
+def parse_hw_requirement_docx(path: str) -> dict[str, dict[str, Any]]:
+    """``{HW ID: {"name", "related": [system IDs], "tolerances": [...], "ranges": [...], "nominals": [...]}}`` from the
+    attribute tables of a HW requirements specification (the SyRS layout: ``ID | HwTSR_0204``, ``Description | …``,
+    ``Related ID | …``). Each tolerance: the words (``허용 오차: ±3%``), the number, its unit (``%`` — relative) and the
+    units the block measures (a ``%`` applies only to them). ``ranges`` / ``nominals``: what the block writes it
+    measures — an absolute tolerance is on that scale (``2.5V(±0.15V)`` is a monitor node, not the 5 V the SW compares).
+    The first table of an ID wins. Raises if the file cannot be read: the caller discloses it."""
+    from docx import Document
+    out: dict[str, dict[str, Any]] = {}
+    for table in Document(path).tables:
+        parts: dict[str, list[str]] = {}
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if len(cells) < 2 or not cells[0]:
+                continue
+            values = [c for c in cells[1:] if c and c != cells[0]]
+            bucket = parts.setdefault(_field_key(cells[0]), [])
+            if values and values[-1] not in bucket:
+                bucket.append(values[-1])
+        cells_map = {k: "\n".join(v) for k, v in parts.items()}
+        hid = cells_map.get("id", "")
+        if not HW_ID.fullmatch(hid) or hid in out:
+            continue
+        text = "\n".join(cells_map.get(_field_key(f), "") for f in _HW_FIELDS).strip()
+        ranges = [{"lo": m.group("lo"), "hi": m.group("hi"), "unit": m.group("unit")} for m in _HW_RANGE.finditer(text)]
+        measured = sorted({r["unit"] for r in ranges})
+        out[hid] = {"name": cells_map.get("name", ""),
+                    "related": list(dict.fromkeys(SYSTEM_ID.findall(cells_map.get("related id", "")))),
+                    "tolerances": [{"text": m.group(0).strip(), "value": m.group("num"), "unit": m.group("unit") or "",
+                                    "measured_units": measured} for m in _TOLERANCE.finditer(text)],
+                    "ranges": ranges,
+                    "nominals": [{"value": m.group("v"), "unit": m.group("u1") or m.group("u2")}
+                                 for m in _HW_NOMINAL.finditer(text)]}
+    return out
+
+
+def load_hw_requirements(path: str | None) -> tuple[dict[str, dict[str, Any]] | None, dict[str, Any] | None]:
+    """The HW requirement blocks of ``path`` and a record for the quality report — ``(None, None)`` when not given,
+    ``(None, {"file", "error"})`` when unreadable (never raised: the STS is still generated, the report says why)."""
+    if not path:
+        return None, None
+    name = re.split(r"[\\/]", str(path))[-1]
+    try:
+        blocks = parse_hw_requirement_docx(str(path))
+    except Exception as exc:  # noqa: BLE001 — an unreadable optional input is disclosed, not fatal
+        return None, {"file": name, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return blocks, {"file": name, "blocks": len(blocks),
+                    "blocks_with_tolerance": sum(1 for b in blocks.values() if b["tolerances"])}
+
+
+def _decimal(text: Any) -> Decimal | None:
+    try:
+        return Decimal(str(text))
+    except (ArithmeticError, ValueError):
+        return None
+
+
+def _on_scale(block: dict[str, Any], base: str, value: Decimal) -> bool:
+    """(R49 review W1) Does the block write a range or a nominal value on the scale of ``value`` (base unit)? A tolerance
+    the block writes for a 2.5 V monitor node is not one of a 4.85 V threshold (the divider is not written)."""
+    for r in block.get("ranges") or []:
+        u_base, u_scale = _UNIT_SCALE.get(r["unit"], (r["unit"], Decimal(1)))
+        lo, hi = Decimal(r["lo"]) * u_scale, Decimal(r["hi"]) * u_scale
+        margin = _HW_SCALE_MARGIN * max(hi - lo, abs(hi))
+        if u_base == base and lo - margin <= value <= hi + margin:
+            return True
+    for n in block.get("nominals") or []:
+        u_base, u_scale = _UNIT_SCALE.get(n["unit"], (n["unit"], Decimal(1)))
+        nominal = Decimal(n["value"]) * u_scale
+        if u_base == base and abs(value - nominal) <= _HW_SCALE_MARGIN * abs(nominal):
+            return True
+    return False
+
+
+def hw_tolerances_for(req: dict[str, Any], evidence: dict[str, Any],
+                      hw: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """(R49) The HW tolerances that may bound how a boundary group's value is measured: blocks citing a system ID the
+    requirement cites, a tolerance in the value's unit (``±0.15V`` for ``4.85V``, ``mV`` too) or a relative one
+    (``±3%``) of a block that measures that unit. Each: the block, the words, the size at the value (in the value's unit;
+    ``None`` when an absolute tolerance is written on another scale — ``scale_known`` false), the shared IDs, whether
+    the block cites the system block the group's fact comes from (``direct``) and whether the step spacing lies inside.
+    Direct first, then the most shared IDs — a hub block (cited by every power requirement) links several; the caller
+    says the monitor path is undecided when more than one block remains (`hw_tolerance_summary`)."""
+    unit = str(evidence.get("unit") or "")
+    cited = set(cited_system_ids(req))
+    value, step = _decimal(evidence.get("value")), _decimal(evidence.get("step"))
+    if not unit or not cited or value is None or step is None:
+        return []
+    base, scale = _UNIT_SCALE.get(unit, (unit, Decimal(1)))
+    source_id = ((evidence.get("source") or {}).get("id"))
+    out = []
+    for hid, block in hw.items():
+        shared = [s for s in block["related"] if s in cited]
+        if not shared:
+            continue
+        for tol in block["tolerances"]:
+            if tol["unit"] == "%":
+                if base not in {_UNIT_SCALE.get(u, (u, Decimal(1)))[0] for u in tol["measured_units"]}:
+                    continue            # the Battery monitor's ±3% is not a hold time's
+                size = written = abs(value) * Decimal(tol["value"]) / 100   # relative: the same on any node's scale
+            else:
+                t_base, t_scale = _UNIT_SCALE.get(tol["unit"], (tol["unit"], Decimal(1)))
+                if not tol["unit"] or t_base != base:
+                    continue
+                written = Decimal(tol["value"]) * t_scale / scale
+                size = written if _on_scale(block, base, value * scale) else None
+            out.append({"hw_id": hid, "name": block["name"], "text": tol["text"], "shared": shared,
+                        "direct": bool(source_id) and source_id in block["related"],
+                        "scale_known": size is not None, "size": _plain(size) if size is not None else None,
+                        # on an unknown scale, the number as written (in the value's unit) — never a point
+                        "written_size": _plain(written) if size is None else None,
+                        "unit": unit, "inside": step < size if size is not None else None})
+    out.sort(key=lambda t: (not t["direct"], -len(t["shared"]), t["hw_id"]))
+    return out
+
+
+def hw_tolerance_summary(evidence: dict[str, Any], tolerances: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """(R49 review C2) One reading of a group's candidates (all of them — ``tolerances`` or the evidence's, before the
+    sheet's cut, review r2 I1): the relevant ones (those citing the fact's own system block, else all), whether one
+    monitor path remains (``certain``), the largest size on a known scale — ``None`` when there is none, or when a
+    candidate on an unknown scale writes as much or more (review r2 W1: the points would not be outside it) — and whether
+    the step spacing is, or may be, inside any candidate (an unknown scale compared with its written number: a divider
+    to a larger input scale only widens it — r2 I2)."""
+    tolerances = tolerances if tolerances is not None else (evidence.get("hw_tolerance") or [])
+    if not tolerances:
+        return None
+    relevant = [t for t in tolerances if t["direct"]] or tolerances
+    known = [Decimal(t["size"]) for t in relevant if t["scale_known"]]
+    written = [Decimal(t["written_size"]) for t in relevant if not t["scale_known"] and t.get("written_size")]
+    step = Decimal(str(evidence["step"]))
+    largest = max(known) if known else None
+    inside = (largest is not None and step < largest) or any(step < w for w in written)
+    bounded = largest is not None and not any(w >= largest for w in written)
+    return {"blocks": list(dict.fromkeys(t["hw_id"] for t in relevant)),
+            "certain": len({t["hw_id"] for t in relevant}) == 1,
+            "largest": _plain(largest) if bounded else None, "inside": inside}
+
+
+def _plain(d: Decimal) -> str:
+    text = format(d.normalize(), "f")
+    return text if text != "-0" else "0"
+
+
+def _tolerance_note(evidence: dict[str, Any]) -> str:
+    """(R49) The TC precondition line — short; the candidates are in the 'Requirement Evidence' HW Tolerance column
+    (review I5: a long text in a merged cell is cut when printed)."""
+    summary = evidence.get("hw_tolerance_summary") or hw_tolerance_summary(evidence)
+    if not summary or not summary["inside"]:
+        return ""
+    unit = str(evidence.get("unit") or "")
+    tolerances = [t for t in evidence["hw_tolerance"] if t["hw_id"] in summary["blocks"]]
+    if summary["certain"] and summary["largest"] is not None:
+        # (review r2 I3) one block with two tolerances: cite the one the points use
+        tolerances = sorted(tolerances, key=lambda t: t["size"] != summary["largest"])
+
+    def said(t: dict) -> str:
+        return f"{t['hw_id']} ±{t['size']}{unit}" if t["scale_known"] else f"{t['hw_id']} {t['text'].split(':')[-1].strip()}(척도 불명)"
+    who = said(tolerances[0]) if summary["certain"] else \
+        "감시 경로 미정 — 후보 " + " · ".join(dict.fromkeys(said(t) for t in tolerances))
+    head = (f"HW 측정 허용오차({who})가 경계 점 간격 {evidence['step']}{unit} 보다 큼 — HIL 에서는 경계 포함(이상/초과·이하/미만)을 "
+            "가를 수 없다: SW 변수를 직접 주입해 판정하거나")
+    if summary["largest"] is None:
+        return (head + " 척도(분압비)를 HW 문서로 확인한 뒤 허용오차 밖에서 방향만 확인 ('Requirement Evidence' HW Tolerance 열)")
+    value, step, largest = Decimal(str(evidence["value"])), Decimal(str(evidence["step"])), Decimal(summary["largest"])
+    where = "" if summary["certain"] else "가장 큰 후보의 "
+    # (review r2 I4) on the written step, outward — a point a HIL bench can set
+    grid = Decimal(1).scaleb(step.as_tuple().exponent) if step.as_tuple().exponent < 0 else Decimal(1)
+    low = (value - largest - step).quantize(grid, rounding="ROUND_FLOOR")
+    high = (value + largest + step).quantize(grid, rounding="ROUND_CEILING")
+    # a candidate on an unknown scale may be larger still: the points are outside the known ones only — said so
+    unknown = list(dict.fromkeys(t["hw_id"] for t in tolerances if not t["scale_known"]))
+    caveat = f" — 척도 불명 후보 {', '.join(unknown)} 는 분압비 확인 전이라 이 밖 점에 넣지 않았다" if unknown else ""
+    return (head + f" {where}허용오차 밖 {_plain(low)}{unit} · {_plain(high)}{unit} 에서 "
+            f"방향만 확인{caveat} ('Requirement Evidence' HW Tolerance 열)")
+
+
+def _tolerance_text(evidence: dict[str, Any]) -> str:
+    """(R49) The 'Requirement Evidence' cell: the linked tolerances — or why there are none (review I1: not given,
+    none linked)."""
+    if "hw_tolerance" not in evidence:
+        return "— (HW 요구사항서 없음 — 미입력 또는 읽기 실패, 생성 공시 참조)"   # (review r2 I5)
+    summary = evidence.get("hw_tolerance_summary") or hw_tolerance_summary(evidence)
+    if not summary:
+        return "— (Related ID 로 이어진 HW 허용오차 없음)"
+    unit = str(evidence.get("unit") or "")
+
+    def one(t: dict) -> str:
+        size = (f"±{t['size']}{unit}" + (f" [한 눈금 {evidence['step']}{unit} 가 그 안]" if t["inside"] else "")
+                if t["scale_known"] else "척도 불명(블록이 적은 값의 척도와 다름 — 분압비 확인)")
+        return (f"{t['hw_id']} {t['name']}: {t['text']} → {size} [공유 {', '.join(t['shared'])}]"
+                + (" [이 문장의 시스템 블록 인용]" if t["direct"] else ""))
+    return ("" if summary["certain"] else "감시 경로 미정 — ") + "; ".join(one(t) for t in evidence["hw_tolerance"])
+
+
 def source_label(source: dict | None) -> str:
     """``SyDS SyII_06 · Range`` — or ``SRS`` for the requirement's own text."""
     return f"{source['doc']} {source['id']} · {source['field']}" if source else "SRS"
@@ -1453,13 +1673,16 @@ def _evidence_text(item: dict[str, Any]) -> str:
 def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[dict], build_tc, make_tc_id,
                                     classify, max_steps: int = 12,
                                     system: dict[str, dict[str, Any]] | None = None,
-                                    review_out: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                                    review_out: list[dict[str, Any]] | None = None,
+                                    hw: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Append requirement-boundary TCs after each requirement's existing TCs, numbering on from them. A fact's points
     never split across TCs; a TC holds as many whole facts as fit in ``max_steps`` (at least one), all from the same
     document (the SRS, or the system requirements it cites — R29). Returns the counts for the quality report.
     (R45) ``review_out`` receives **every** review item for the document's 'Requirement Review' sheet — the held-back
     facts a reader can settle (one row per sentence and fact, however many requirements cite that block) and the
-    requirement-document inclusion conflicts; the report keeps the first `MAX_REVIEW_ITEMS` and the counts."""
+    requirement-document inclusion conflicts; the report keeps the first `MAX_REVIEW_ITEMS` and the counts.
+    (R49) ``hw`` — the parsed HW requirement blocks (`load_hw_requirements`): each group gets its linked tolerances
+    (`hw_tolerances_for`), and a TC whose step spacing lies inside one says so in its precondition."""
     stats: Counter = Counter()
     fanout: Counter = Counter()
     review: list[dict[str, Any]] = []
@@ -1477,6 +1700,17 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     added: list[dict] = []
     for req in requirements:
         groups = boundary_steps(req, stats, system, review)
+        if hw is not None:
+            for g in groups:
+                tolerances = hw_tolerances_for(req, g["evidence"], hw)
+                summary = hw_tolerance_summary(g["evidence"], tolerances)       # (review r2 I1) before the cut
+                g["evidence"]["hw_tolerance"] = tolerances[:MAX_HW_TOLERANCES]
+                if summary:
+                    g["evidence"]["hw_tolerance_summary"] = summary
+                    stats["hw_tolerance_groups"] += 1
+                    stats["hw_tolerance_inside_step"] += summary["inside"]
+                    stats["hw_tolerance_path_undecided"] += not summary["certain"]      # (review C2)
+                    stats["hw_tolerance_scale_unknown"] += summary["largest"] is None  # (review W1)
         if system is not None:
             compared_blocks += sum(1 for sid in cited_system_ids(req) if sid in system)
             try:
@@ -1510,6 +1744,7 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
             tc["requirement_evidence"] = [g["evidence"] for g in chunk]
             notes = list(dict.fromkeys(g["evidence"]["combination_note"] for g in chunk
                                        if g["evidence"]["combination_note"]))
+            notes += list(dict.fromkeys(n for g in chunk if (n := _tolerance_note(g["evidence"]))))   # (R49)
             if notes:
                 tc["precondition"] = "\n".join([p for p in [tc.get("precondition") or ""] if p] + notes)
             tc["requirement_boundary"] = True
@@ -1524,6 +1759,10 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         order = {r["id"]: i for i, r in enumerate(requirements)}
         test_cases.extend(added)
         test_cases.sort(key=lambda tc: order.get(str(tc.get("srs_id") or ""), len(order)))  # stable
+    if hw is not None:     # (R49) 0 is "looked, none linked" — absent is "not given"
+        for k in ("hw_tolerance_groups", "hw_tolerance_inside_step", "hw_tolerance_path_undecided",
+                  "hw_tolerance_scale_unknown"):
+            stats[k] += 0
     out: dict[str, Any] = {k: v for k, v in sorted(stats.items())}
     # (R45) one row per held-back sentence and fact: a block cited by several requirements names them all
     merged: dict[tuple, dict[str, Any]] = {}
@@ -1613,7 +1852,9 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
 
 REQUIREMENT_EVIDENCE_HEADERS = ["Test Case ID", "SRS ID", "Kind", "Subject", "Reference Constant", "Operator", "Value",
                                 "Unit", "Step", "Step Basis", "Stimulus Points (holds)", "Other Conditions",
-                                "Source Line", "Line SHA-256", "Source Document"]
+                                "Source Line", "Line SHA-256", "Source Document",
+                                # (R49) the HW monitor accuracy linked through the Related IDs — quoted, never used
+                                "HW Tolerance (Quoted)"]
 REQUIREMENT_EVIDENCE_SHEET = "Requirement Evidence"
 
 
@@ -1635,7 +1876,7 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
             subject += " (괄호 앞 명사)"   # (R32 review I4) a weaker subject than a signal name: the reviewer sees it
         ws.append([tc_id, e["srs_id"], e["kind"], subject, e.get("reference_constant") or "—", e["op"],
                    e["value"], e["unit"] or "—", e["step"], e["step_basis"], points, e["combination_note"] or "—",
-                   _clip(e["line"], 300), e["line_sha256"], source_label(e.get("source"))])
+                   _clip(e["line"], 300), e["line_sha256"], source_label(e.get("source")), _tolerance_text(e)])
     return len(rows)
 
 

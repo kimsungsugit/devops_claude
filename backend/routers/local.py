@@ -1975,6 +1975,8 @@ async def local_sts_generate(
     # (R29, G4(b)) 시스템 요구·설계서 — 주 핸들러(`/api/jenkins/sts/generate-async`)와 같은 인자.
     syrs_path: str = Form(""),
     syds_path: str = Form(""),
+    # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
+    hwrs_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2083,7 +2085,7 @@ async def local_sts_generate(
     hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
                               _no_discovery, label="HSIS")
     from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs = resolve_system_requirement_docs(syrs_path, syds_path)
+    system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
     if opt_skips:
         _logger.warning("STS(sync): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
@@ -2186,6 +2188,8 @@ async def local_sts_generate_stream(
     # (R29, G4(b)) 시스템 요구·설계서 — 주 핸들러(`/api/jenkins/sts/generate-async`)와 같은 인자.
     syrs_path: str = Form(""),
     syds_path: str = Form(""),
+    # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
+    hwrs_path: str = Form(""),
 ):
     """Generate STS with SSE progress streaming."""
     import json as _json
@@ -2280,7 +2284,7 @@ async def local_sts_generate_stream(
     hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
                               _no_discovery, label="HSIS")
     from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs2 = resolve_system_requirement_docs(syrs_path, syds_path)
+    system_docs2 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
     if opt_skips2:
         _logger.warning("STS(stream): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips2), "; ".join(opt_skips2)[:400])
@@ -2396,6 +2400,8 @@ async def local_sts_generate_async(
     # (R29, G4(b)) 시스템 요구·설계서 — 주 핸들러(`/api/jenkins/sts/generate-async`)와 같은 인자.
     syrs_path: str = Form(""),
     syds_path: str = Form(""),
+    # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
+    hwrs_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2482,7 +2488,7 @@ async def local_sts_generate_async(
     hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
                               _no_discovery, label="HSIS")
     from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs3 = resolve_system_requirement_docs(syrs_path, syds_path)
+    system_docs3 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
     if opt_skips3:
         _logger.warning("STS(async): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips3), "; ".join(opt_skips3)[:400])

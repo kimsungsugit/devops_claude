@@ -158,8 +158,10 @@ def test_the_evidence_sheet_names_the_source_document_of_every_row():
     wb = openpyxl.Workbook()
     assert write_requirement_evidence_sheet(wb, tcs) == 2
     rows = list(wb["Requirement Evidence"].iter_rows(values_only=True))
-    assert list(rows[0]) == REQUIREMENT_EVIDENCE_HEADERS and rows[0][-1] == "Source Document"
-    assert [r[-1] for r in rows[1:]] == ["SRS", "SyRS SyTR_0602 · Description"]
+    # (R49) read by header name — a column was added after it (HW Tolerance)
+    col = REQUIREMENT_EVIDENCE_HEADERS.index("Source Document")
+    assert list(rows[0]) == REQUIREMENT_EVIDENCE_HEADERS
+    assert [r[col] for r in rows[1:]] == ["SRS", "SyRS SyTR_0602 · Description"]
 
 
 # ── review round 1: what a system block states as an outcome is never a stimulus ──────────────────────────────────
@@ -314,7 +316,8 @@ def test_generate_sts_reads_the_given_system_documents_and_discloses_them(tmp_pa
     assert "SyDS (P_SyDS) System Design.docx 블록 1" in item["note"]
     wb = openpyxl.load_workbook(res["output_path"], read_only=True)
     try:
-        sources = [r[-1] for r in wb["Requirement Evidence"].iter_rows(min_row=2, values_only=True)]
+        col = REQUIREMENT_EVIDENCE_HEADERS.index("Source Document")      # (R49) by name, not position
+        sources = [r[col] for r in wb["Requirement Evidence"].iter_rows(min_row=2, values_only=True)]
     finally:
         wb.close()
     assert "SyDS SyII_06 · Range" in sources
@@ -446,7 +449,8 @@ def test_the_resolver_leaves_out_a_missing_document_with_its_reason(tmp_path, mo
     got = rh.resolve_system_requirement_docs(ok, str(tmp_path / "gone.docx"))
     assert got["syrs_path"] == str(Path(ok).resolve()) and got["syds_path"] is None
     assert len(got["system_input_skips"]) == 1 and got["system_input_skips"][0].startswith("SyDS: 파일 없음")
-    assert rh.resolve_system_requirement_docs("", "") == {"syrs_path": None, "syds_path": None,
+    # (R49) the HW requirements specification goes the same way
+    assert rh.resolve_system_requirement_docs("", "") == {"syrs_path": None, "syds_path": None, "hwrs_path": None,
                                                           "system_input_skips": []}
 
 
@@ -491,7 +495,8 @@ def test_every_sts_handler_passes_the_system_inputs_to_the_generator(path, tmp_p
     srs.write_text("x", encoding="utf-8")
     syrs = _docx(tmp_path / "sy.docx", [[("ID", "SyTR_0101")]])
     body = {"source_root": str(src), "srs_path": str(srs), "syrs_path": syrs,
-            "syds_path": str(tmp_path / "gone_SyDS.docx")}
+            "syds_path": str(tmp_path / "gone_SyDS.docx"),
+            "hwrs_path": syrs}                                # (R49) any readable docx reaches the generator
     if "jenkins" in path:
         (tmp_path / "cache").mkdir()
         body.update(job_url="http://ci/job/x/", cache_root=str(tmp_path / "cache"))
@@ -500,6 +505,7 @@ def test_every_sts_handler_passes_the_system_inputs_to_the_generator(path, tmp_p
         _ = r.text                                           # a stream is read to its end
     assert done.wait(30), f"{path}: generate_sts was not called ({r.status_code} {r.text[:300]})"
     assert seen["syrs_path"] == str(Path(syrs).resolve()) and seen["syds_path"] is None
+    assert seen["hwrs_path"] == str(Path(syrs).resolve())
     assert [s.split(":")[0] for s in seen["system_input_skips"]] == ["SyDS"]
 
 

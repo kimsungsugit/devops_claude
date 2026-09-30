@@ -200,6 +200,9 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub, onGe
         const sydsPath = docPaths.syds || linkedDocs.syds || '';
         if (syrsPath) formData.append('syrs_path', syrsPath);
         if (sydsPath) formData.append('syds_path', sydsPath);
+        // (R49) HW 요구사항서 — 경계 TC 옆의 HW 측정 허용오차. 같은 우선순위(설정 경로 > SCM 등록 문서).
+        const hwrsPath = docPaths.hwrs || linkedDocs.hwrs || '';
+        if (hwrsPath) formData.append('hwrs_path', hwrsPath);
       }
       // 생성 상한 — **설정된 것만** 보낸다. 안 보내면 생성기 기본값이 쓰이고, 그게
       // 단일 출처다(여기서 숫자를 복제하면 생성기 상수와 갈라진다).
