@@ -354,6 +354,7 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             tone=_tone(bool(rb.get("evidence_sheet_error")))))
         out.extend(_traced_system_items(rb, _why))
         out.extend(_inclusion_conflict_items(rb))
+        out.extend(_value_difference_items(rb))
         out.extend(_requirement_review_items(rb, _why))
     return out + _sts_tail_items(qr)
 
@@ -382,7 +383,8 @@ def _requirement_review_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> L
              if sheet_err else
              "값을 지어내지 않고 원문·사유·정할 것을 STS 의 'Requirement Review' 시트에 전부 적었다"
              # (R45 review I7) the conflicts are compared only when system documents were read
-             + ("(요구 문서 경계 포함 불일치 후보도 같은 시트)" if "inclusion_conflicts" in rb else ""))
+             + ("(요구 문서 경계 포함 불일치" + (" · 값 차이" if "value_differences" in rb else "") + " 후보도 같은 시트)"
+                if "inclusion_conflicts" in rb else ""))
     return [_item(
         "sts_requirement_review", "요구 원문 검토 항목",
         f"{n}건" + (f" · 그중 읽은 결합 {read_n}" if read_n else "") + _evidence_value(rb),
@@ -435,6 +437,69 @@ def _evidence_note(rb: Dict[str, Any]) -> str:
     parts.append("채우면: 'If Filled' 칸대로 요구 문서에 적고 다시 생성하면 그 값의 경계 스텝이 생긴다(더 풀 것이 남은 항목은 "
                  "그것까지).")
     return " " + " ".join(parts)
+
+_DIFF_TIER_TEXT = {"same_subject": "같은 주어", "same_condition": "같은 조건의 유지시간", "within_step": "한 눈금 안",
+                   "only_pair": "유일한 짝"}
+
+
+def _value_difference_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R48) 요구 문서 값 차이 후보 — SRS 가 적은 조건 값을 인용 블록이 적지 않고, 인용 블록이 같은 단위·같은 쪽(하한/상한)에
+    **다른 값**을 적은 곳 중 한 임계로 볼 근거(5% 안에서 같은 주어 · 한 눈금 안 · 그 단위·쪽의 유일한 짝, 유지시간은 같은
+    조건의 유지시간)가 있는 것. 시스템 문서를 읽은
+    생성에만 있다(키가 없으면 항목 없음 — R48 이전 산출물). 비교할 인용 블록이 없었으면 0 이 아니라 '—'."""
+    n = _int(rb, "value_differences")
+    if n is None:
+        return []
+    compared = _int(rb, "inclusion_blocks_compared")
+    errors = [str(e) for e in (rb.get("value_difference_errors") or [])]
+    n_err = _int(rb, "value_difference_error_count") or len(errors)
+    err_note = (f" 비교 중 오류로 건너뛴 요구 {n_err}개(예: {errors[0][:80]})." if errors else "")
+    if compared == 0:
+        return [_item("sts_requirement_value_differences", "요구 문서 값 차이", "—",
+                      "요구가 인용한 시스템 블록 중 읽은 문서에 있는 것이 없어 비교하지 못했다(0 건이 아니라 미측정)." + err_note,
+                      tone=_tone(bool(errors)))]
+    if not n:
+        return [_item("sts_requirement_value_differences", "요구 문서 값 차이", "0건" + (f" · 오류 {n_err}" if errors else ""),
+                      "SRS 조건 값과 그 요구가 Related ID 로 인용한 SyRS·SyDS 블록의 같은 단위·같은 쪽 조건 값이 한 임계로 볼 "
+                      "근거(5% 안에서 같은 주어 · 한 눈금 안 · 유일한 짝, 또는 같은 조건의 유지시간)가 있으면서 다르게 적힌 곳을 "
+                      "찾지 못했다(결과 칸·출력 의무·검증 기준·요소 입력 칸·범위(~)·단위 없는 값은 비교하지 않는다)." + err_note,
+                      tone=_tone(bool(errors)))]
+    items = [i for i in (rb.get("value_difference_items") or []) if isinstance(i, dict)]
+
+    def _st(x):
+        ref = f" (기준 {x.get('reference')})" if x.get("reference") else ""
+        return f"`{x.get('subject')} {x.get('text')}{ref}`"
+
+    def _one(i):
+        others = [o for o in (i.get("others") or []) if isinstance(o, dict)]
+        first = others[0] if others else {}
+        tiers = "·".join(_DIFF_TIER_TEXT.get(str(t), str(t)) for t in (first.get("tiers") or []))
+        more = int(i.get("other_count") or len(others)) - 1
+        return (f"{i.get('srs_id')}: SRS {_st(i.get('srs') or {})} ↔ {first.get('source')} {_st(first)} [{tiers}]"
+                + (f" 외 {more}" if more > 0 else ""))
+    shown = [_one(i) for i in items[:5]]
+    reqs = _int(rb, "value_difference_requirements")
+    by = rb.get("value_difference_by_tier") if isinstance(rb.get("value_difference_by_tier"), dict) else {}
+    # (review W5) the sheet may have failed on its own: then the items are not "there"
+    sheet_err = str(rb.get("review_sheet_error") or "")
+    where = (f"'Requirement Review' 시트를 쓰지 못했다 — {sheet_err[:120]} (항목은 품질 리포트 `value_difference_items` 에만 "
+             "있다)." if sheet_err else "전부 STS 'Requirement Review' 시트에 있다.")
+    return [_item(
+        "sts_requirement_value_differences", "요구 문서 값 차이 후보",
+        f"{n}건" + (f" (요구 {reqs})" if reqs is not None else "") + (f" · 오류 {n_err}" if errors else ""),
+        " / ".join(shown)
+        + (f" 외 {n - len(shown)}건(품질 리포트 `value_difference_items` 에 {len(items)}건까지)." if n > len(shown) else ".")
+        + err_note
+        + " — SRS 가 적은 조건 값을 그 요구가 Related ID 로 인용한 SyRS·SyDS 블록은 적지 않고, 같은 단위·같은 쪽(하한끼리 · "
+          "상한끼리)에 다른 값을 적은 곳이다. 한 임계로 볼 근거가 있는 쌍만 짝지었다(한 후보가 여러 근거일 수 있음): "
+        + ", ".join(f"{_DIFF_TIER_TEXT.get(k, k)} {v}" for k, v in by.items())
+        + "(두 값이 5% 안에서 — 같은 주어 · 한 눈금 안(성긴 쪽 표기) · 그 요구와 인용 블록이 그 단위·쪽에 값을 하나씩만 적음; "
+          "유지시간은 값이 멀어도 두 문장이 같은 조건을 유지할 때 — SRS 가 더 길면 시스템 요구 시간 안에 판정하지 못할 수 "
+          "있다). 반대쪽(진입 미만 ↔ 해제 이상)은 짝짓지 않지만 같은 쪽의 두 단계 임계(경고·고장)는 짝지어질 수 있다. 어느 값이 "
+          "맞는지는 생성기가 정하지 않는다(경계 TC 는 각 문장대로 판정) — 같은 임계인지부터 확인하고, 같으면 문서 검토로 한 "
+          "값에 맞추고 다른 임계면 결함 아님으로 닫는다. " + where,
+        tone="warning")]
+
 
 _CONFLICT_TAG = {"outcome": " [결과]", "stimulus": " [시험 입력]"}
 

@@ -62,6 +62,11 @@ example that keeps the sentence's meaning.
 SRS requirement that cites the block, in TCs of their own after every other traced fact. A cell writes a normal range
 and a trigger alike, so a step says only whether the input is inside or outside what the cell writes; the element's
 reaction is the requirement's other sentences' to decide.
+
+**Value differences (R48)**: an SRS condition value that no cited system block states, where a cited block states a
+condition on the same side in the same unit that is likely the same threshold — within 5%, the same subject, one written
+step, or the only value each side writes; a hold time, the hold time of the same condition — ``5.14V 이상`` ↔ ``5.15V
+초과`` · ``500ms`` ↔ ``300ms`` of ``8.5V 미만`` — is listed with R33's inclusion conflicts, never decided, never used.
 """
 from __future__ import annotations
 
@@ -679,6 +684,14 @@ MAX_INCLUSION_CONFLICTS = 30     # items kept for the report (all are counted)
 _WRITTEN_INCLUSION = re.compile(r"이상|초과|이하|미만|이내|[<>]")
 
 
+def _comparable_fact(fact: dict) -> bool:
+    """(R48 review I6) An order comparison of a number, not negated, not a response time — what two documents can state
+    two ways (R33 inclusion conflicts, R48 value differences): one predicate, so the two never drift apart."""
+    return fact["kind"] in {"threshold", "duration"} and fact.get("op") in _INCLUSION_FLIP \
+        and isinstance(fact.get("value"), (int, float)) and not isinstance(fact.get("value"), bool) \
+        and not fact.get("negated") and fact.get("role") != "response_constraint"
+
+
 def _conflict_role(line: dict, fact: dict, verification: bool) -> str:
     """``condition`` — or ``outcome`` for what the requirement produces (an ``<Output>``/``Output :`` section, a system
     block's Action / System Behavior, an obligation ``…이하여야 한다``) — the split `_skip_reason` makes for stepping
@@ -730,22 +743,13 @@ def inclusion_conflicts(req: dict[str, Any], system: dict[str, dict[str, Any]]) 
               for line, fact, source in traced_system_facts(req, system, Counter())]
     buckets: dict[tuple, list] = {}
     for line, fact, source, verification in items:
-        if fact["kind"] not in {"threshold", "duration"} or fact.get("op") not in _INCLUSION_FLIP \
-                or not isinstance(fact.get("value"), (int, float)) or isinstance(fact.get("value"), bool) \
-                or fact.get("negated") or fact.get("role") == "response_constraint" \
-                or not _WRITTEN_INCLUSION.search(str(fact.get("raw") or "")):
+        if not _comparable_fact(fact) or not _WRITTEN_INCLUSION.search(str(fact.get("raw") or "")):
             continue            # a response time (``500ms 이내``) is measured, not a condition — not the same statement
         buckets.setdefault((fact.get("unit") or "", exact_value(fact)), []).append(
             (line, fact, source, _conflict_role(line, fact, verification)))
     out: list[dict[str, Any]] = []
     seen: dict[tuple, int] = {}   # key → index in ``out``
-
-    def side(line, fact, source):
-        subject = _subject_text(fact) if fact.get("signal_kind") == "parameter" else subject_of(fact)
-        return {"source": source_label(source), "subject": subject or "주어 없음", "op": fact["op"],
-                "reference": fact["signal"] if fact.get("signal_kind") == "parameter" else None,
-                "text": f"{fact.get('value_text') or fact['value']}{fact.get('unit') or ''} {_OP_TEXT[fact['op']]}",
-                "line": _clip(line["text"], 160)}
+    side = _statement
 
     for (unit, value), group in buckets.items():
         for i, (la, a, sa, ra) in enumerate(group):
@@ -772,6 +776,164 @@ def inclusion_conflicts(req: dict[str, Any], system: dict[str, dict[str, Any]]) 
                 out.append({"srs_id": req.get("id", ""), "value": str(exact_value(a)), "unit": unit, "role": role,
                             "same_subject": same, "subject_missing": not named, "within_source": within,
                             "a": side(la, a, sa), "b": side(lb, b, sb)})
+    return out
+
+
+def _statement(line: dict, fact: dict, source: dict | None) -> dict[str, Any]:
+    """One side of a finding (R33 conflict · R48 difference): where, the subject (a hold time's reference constant
+    apart), the comparison as written and the line."""
+    subject = _subject_text(fact) if fact.get("signal_kind") == "parameter" else subject_of(fact)
+    return {"source": source_label(source), "subject": subject or "주어 없음", "op": fact["op"],
+            "reference": fact["signal"] if fact.get("signal_kind") == "parameter" else None,
+            "text": f"{fact.get('value_text') or fact['value']}{fact.get('unit') or ''} {_OP_TEXT[fact['op']]}",
+            "line": _clip(line["text"], 160)}
+
+
+# ── (R48) requirement-document value differences ─────────────────────────────────────────────────────────────────
+# 2026-09-30 user direction: what the documents state two ways is shown, even without a basis to decide it. R33 pairs
+#   the same value written with the other inclusion; this pairs a value one document states with **another value** on
+#   the same side that the other document states — only where the two are likely one threshold (`_DIFF_TIERS`).
+_SIDE = {">": "lower", ">=": "lower", "<": "upper", "<=": "upper"}
+# the strongest first. (review W1 · W2) every tier but a hold time's is within `_DIFF_MAX_RATIO` of the SRS value:
+#   ``배터리 전압 9V 이상 구동`` ↔ ``16V 초과 정지`` (one quantity, two thresholds) and ``100ms`` ↔ ``1초`` (one step of an
+#   integer second) were paired without it
+_DIFF_TIERS = ("same_subject", "same_condition", "within_step", "only_pair")
+_DIFF_MAX_RATIO = Decimal("0.05")
+MAX_VALUE_DIFFERENCES = 30      # items kept for the report (all are counted; the document lists all)
+MAX_DIFFERENCE_COUNTERPARTS = 3
+
+
+def _difference_fact(fact: dict) -> bool:
+    """A comparison with a unit that can differ in value (`_comparable_fact` — the R33 filter's own — with a unit)."""
+    return _comparable_fact(fact) and bool(fact.get("unit"))
+
+
+def _near(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= _DIFF_MAX_RATIO * max(abs(a), abs(b))
+
+
+# a line that ends its sentence (or its clause) — the next line starts anew; (review r2 I2) so does a list item
+_SENTENCE_END = re.compile(r"(?:[.。]|다|시|때|경우|면)\s*$")
+_LIST_MARK = re.compile(r"^\s*(?:\(?\d+[.)]|[-·•*]|[①-⑳])")
+
+
+def _held_conditions(line: dict, above: dict | None = None) -> list[tuple[str, str, Decimal, str | None]]:
+    """The (unit, side, value, subject) of a line's conditions that are not times — what its hold times hold. A line
+    with none of its own continues the line right above it when that one does not end its sentence and it opens no list
+    item (SyRS ``SyTSR_0116``: ``… BAT 범위 8.5V미만의 BAT`` / ``전압으로 특정시간(300ms) 이상 유지하는 경우.``)."""
+    def conditions(ln: dict) -> list[tuple[str, str, Decimal, str | None]]:
+        return [(k[0], _SIDE[c["op"]], k[1], subject_of(c)) for c in ln["facts"]
+                if c["kind"] == "threshold" and _difference_fact(c)
+                and (k := _match_key(c["unit"], exact_value(c)))[0] != "s"]
+    own = conditions(line)
+    if own or above is None or above["span"][1] + 1 != line["span"][0] or _SENTENCE_END.search(above["text"]) \
+            or _LIST_MARK.match(line["text"]):
+        return own
+    return conditions(above)
+
+
+def _lines_above(rows: list[tuple]) -> dict[int, dict]:
+    """``{id(line): the fact line before it in the same text}`` for (line, fact[, source]) rows in written order — one
+    position space per text (the SRS description; each block field). `_held_conditions` checks it is the line right
+    above (its span)."""
+    by_text: dict[tuple, list[dict]] = {}
+    for row in rows:
+        source = (row[2] if len(row) > 2 else None) or {}
+        lines = by_text.setdefault((source.get("doc"), source.get("id"), source.get("field")), [])
+        if not lines or lines[-1] is not row[0]:
+            lines.append(row[0])
+    return {id(b): a for lines in by_text.values() for a, b in zip(lines, lines[1:], strict=False)}
+
+
+def value_differences(req: dict[str, Any], system: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """(R48) Where the requirement's own text states a condition value that **no** condition of the system blocks it
+    cites states (in any comparison — a value both state is one statement or an R33 inclusion conflict), and a cited
+    block states a condition on the **same side** (both lower or both upper bounds) in the same unit that is likely the
+    same threshold written differently. Likely means, within `_DIFF_MAX_RATIO` of each other, one of:
+
+    * ``same_subject`` — both name the same subject: KJPDS02 ``SwTR_0605`` SRS ``저전압 8.6V 이하`` ↔ SyRS ``SyTR_1305``
+      ``저전압 8.5V 이하``;
+    * ``within_step`` — within one written step of the coarser writing: HDPDM01 ``SwTSR_0102`` SRS
+      ``u16g_ApiIn_HallSnsrLevel 5.14V 이상`` ↔ SyRS ``SyTSR_0114`` ``5.15V 초과``, ``SwTR_0605`` ``16.04V`` ↔ ``16.1V``;
+    * ``only_pair`` — the requirement's text and its cited blocks each state exactly one value in that unit and side;
+
+    and, for hold times at any distance, ``same_condition`` — the two lines hold conditions on the same side at near
+    values (HDPDM01 ``SwTSR_0104`` SRS ``8.50V 미만 … 500ms 이상 유지`` ↔ SyRS ``SyTSR_0116`` ``BAT 8.5V미만 … 300ms 이상
+    유지``: the SW decides later than the system requirement). The opposite side (an entry ``미만`` and its recovery
+    ``이상``) is never paired; two thresholds of one quantity on the same side (a warning and a fault) may be — the
+    guidance says to check it is one threshold first. Conditions only on both sides — the SRS description (its
+    verification text describes tests), a cited block's condition text (not its Verification criteria, an outcome, an
+    obligation or an input cell, the element's design domain — R47). Which value is right is not decided here; each
+    sentence's boundary TCs judge it as written."""
+    own_all = [(line, f) for b in extract(f"ID\t{req.get('id', '')}\n{req.get('description') or ''}\n")
+               for line in b["lines"] for f in line["facts"]]
+    cited_all = traced_system_facts(req, system, Counter())
+    above = {**_lines_above(own_all), **_lines_above(cited_all)}
+    own = [(line, f) for line, f in own_all if _difference_fact(f) and _conflict_role(line, f, False) == "condition"]
+    cited = [(line, f, s) for line, f, s in cited_all
+             if s["field"] not in SYSTEM_INPUT_FIELDS and _difference_fact(f)
+             and _conflict_role(line, f, s["field"] == "Verification criteria") == "condition"]
+    if not own or not cited:
+        return []
+
+    def key(f: dict) -> tuple[str, Decimal]:
+        return _match_key(f["unit"], exact_value(f))
+
+    def step(f: dict) -> Decimal:
+        return _match_key(f["unit"], written_step(f))[1]
+
+    stated = {key(f) for _line, f, _s in cited}
+    own_values: dict[tuple, set] = {}
+    cited_values: dict[tuple, set] = {}
+    for _line, f in own:
+        own_values.setdefault((key(f)[0], _SIDE[f["op"]]), set()).add(key(f)[1])
+    for _line, f, _s in cited:
+        cited_values.setdefault((key(f)[0], _SIDE[f["op"]]), set()).add(key(f)[1])
+    out: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for line, f in own:
+        (unit, value), side = key(f), _SIDE[f["op"]]
+        if (unit, value) in stated or (unit, value, f["op"], subject_of(f)) in seen:
+            continue
+        seen.add((unit, value, f["op"], subject_of(f)))
+        hold = f["kind"] == "duration"
+        only = len(own_values[(unit, side)]) == 1 and len(cited_values.get((unit, side), ())) == 1
+        held = _held_conditions(line, above.get(id(line))) if hold else []
+        others: dict[tuple, dict[str, Any]] = {}
+        for cline, g, source in cited:
+            g_unit, g_value = key(g)
+            if g_unit != unit or _SIDE[g["op"]] != side:
+                continue
+            near = _near(value, g_value)
+            held_pair = next(((hs, cs) for u, sd, v, hs in held
+                              for cu, csd, cv, cs in _held_conditions(cline, above.get(id(cline)))
+                              if u == cu and sd == csd and _near(v, cv)), None) \
+                if hold and g["kind"] == "duration" else None
+            same_condition = held_pair is not None
+            tiers = [t for t, ok in (("same_subject", near and subject_of(f) is not None and subject_of(f) == subject_of(g)),
+                                     ("same_condition", same_condition),
+                                     ("within_step", near and abs(g_value - value) <= max(step(f), step(g))),
+                                     ("only_pair", near and only)) if ok]
+            okey = (source_label(source), g["op"], g_value, subject_of(g))
+            if tiers and okey not in others:   # a block repeating the sentence is one counterpart
+                # (a hold time) the SRS larger: it decides later than the system requirement allows; smaller: it
+                #   may be the system time shared out (a decomposition) — the reviewer reads which
+                others[okey] = {**_statement(cline, g, source), "tiers": tiers, "srs_is": "larger" if value > g_value
+                                else "smaller", "_gap": abs(g_value - value), "_named": subject_of(g) is not None,
+                                # (review r2 I1) the subjects of the two held conditions — different names are shown
+                                "held_subjects": list(held_pair) if held_pair else None}
+        if not others:
+            continue
+        ranked = sorted(others.values(), key=lambda o: (min(_DIFF_TIERS.index(t) for t in o["tiers"]), o["_gap"]))
+        # (review I2) the flags describe the first counterpart — the one the row leads with
+        named = subject_of(f) is not None and ranked[0]["_named"]
+        for o in ranked:
+            del o["_gap"], o["_named"]
+        out.append({"srs_id": req.get("id", ""), "unit": f["unit"], "value": str(exact_value(f)), "side": side,
+                    "time": hold,     # (review W4) a hold time — a period (R47) is a threshold like any other
+                    "tiers": [t for t in _DIFF_TIERS if any(t in o["tiers"] for o in ranked)],
+                    "subject_missing": not named, "srs": _statement(line, f, None),
+                    "others": ranked[:MAX_DIFFERENCE_COUNTERPARTS], "other_count": len(ranked)})
     return out
 
 
@@ -1214,6 +1376,9 @@ def fill_guidance(line: dict, fact: dict, reason: str) -> tuple[str, str]:
 
 _FILL_READ = "확인만 — 이미 스텝했다. 원문에 연결어나 한 신호 이름을 적으면 이 확인 항목이 사라진다"
 _FILL_CONFLICT = "한쪽 포함으로 통일하면 이 후보가 사라진다(경계 스텝은 지금도 각 문장대로 판정한다)"
+_FILL_DIFFERENCE = ("같은 임계(한 조건)면 맞는 값으로 한쪽을 고친다 — 그러면 이 후보가 사라지고 두 문서의 경계 TC 가 같은 점을 "
+                    "시험한다(지금은 각 문장의 값대로 스텝한다). 같은 양의 다른 임계(경고·고장 두 단계, 동작 하한·차단 등)면 "
+                    "고치지 않고 결함 아님으로 검토 기록에 닫는다")
 
 
 def if_filled(item: dict[str, Any]) -> str:
@@ -1223,6 +1388,8 @@ def if_filled(item: dict[str, Any]) -> str:
         return str(item["if_filled"])
     if item.get("kind") == "inclusion_conflict":
         return _FILL_CONFLICT
+    if item.get("kind") == "value_difference":
+        return _FILL_DIFFERENCE
     if item.get("kind") == "read":
         return _FILL_READ
     return "—"
@@ -1298,6 +1465,8 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     review: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
     conflict_errors: list[str] = []
+    differences: list[dict[str, Any]] = []
+    difference_errors: list[str] = []
     compared_blocks = 0
     last: dict[str, int] = {}
     for tc in test_cases:
@@ -1314,6 +1483,10 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
                 conflicts += inclusion_conflicts(req, system)
             except Exception as exc:  # noqa: BLE001 — an optional finding never costs the boundary TCs (review I8)
                 conflict_errors.append(f"{req.get('id', '')}: {type(exc).__name__}: {exc}"[:200])
+            try:
+                differences += value_differences(req, system)      # (R48)
+            except Exception as exc:  # noqa: BLE001 — as the conflicts
+                difference_errors.append(f"{req.get('id', '')}: {type(exc).__name__}: {exc}"[:200])
         chunks: list[list[dict]] = []
         for g in groups:
             # a fact with conditions to hold is its own TC: its precondition must not contradict another fact's steps
@@ -1423,6 +1596,18 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         if conflict_errors:
             out["inclusion_conflict_errors"] = conflict_errors[:5]
             out["inclusion_conflict_error_count"] = len(conflict_errors)
+        # (R48) value differences — safety requirements first, as the conflicts; the document lists them all
+        differences.sort(key=lambda d: (not str(d["srs_id"]).startswith("SwTSR"), str(d["srs_id"])))
+        if review_out is not None:
+            review_out.extend({**d, "kind": "value_difference"} for d in differences)
+        out["value_differences"] = len(differences)
+        out["value_difference_items"] = differences[:MAX_VALUE_DIFFERENCES]
+        out["value_difference_requirements"] = len({d["srs_id"] for d in differences})
+        out["value_difference_by_tier"] = {t: n for t in _DIFF_TIERS
+                                           if (n := sum(1 for d in differences if t in d["tiers"]))}
+        if difference_errors:
+            out["value_difference_errors"] = difference_errors[:5]
+            out["value_difference_error_count"] = len(difference_errors)
     return out
 
 
@@ -1460,12 +1645,15 @@ REQUIREMENT_REVIEW_HEADERS = ["Kind", "SRS ID", "Source Document", "Fact", "Reas
                               "If Filled", "Evidence (Other Sentences)", "Source Line", "Line SHA-256"]
 REQUIREMENT_REVIEW_SHEET = "Requirement Review"
 _CONFLICT_ROLE_TEXT = {"condition": "조건끼리", "outcome": "결과 기준끼리", "stimulus": "시험 입력(검증 기준) ↔ 요구 조건"}
+_DIFF_TIER_TEXT = {"same_subject": "같은 주어", "same_condition": "같은 조건의 유지시간", "within_step": "한 눈금 안",
+                   "only_pair": "그 단위·쪽의 유일한 짝"}
 
 
 def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> int:
     """(R45) 'Requirement Review' sheet: what the requirement documents leave undecided or state two ways — the facts
     held back from boundary steps for a reason a reader can settle (`REVIEW_TEXT`), what the generator read where the
-    words are silent (`READ_TEXT`, stepped — to confirm) and the inclusion conflicts (R33/R43).
+    words are silent (`READ_TEXT`, stepped — to confirm), the inclusion conflicts (R33/R43) and the value differences
+    (R48).
     Nothing here is filled by the generator: each row says what to decide. A sheet of that name from a template made of
     an earlier output is removed first; no item — no sheet (the quality report's counts say whether it was looked at).
     Returns rows written."""
@@ -1476,6 +1664,38 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
     ws = wb.create_sheet(REQUIREMENT_REVIEW_SHEET)
     ws.append(REQUIREMENT_REVIEW_HEADERS)
     for it in items:
+        if it.get("kind") == "value_difference":
+            srs = it.get("srs") or {}
+            others = [o for o in (it.get("others") or []) if isinstance(o, dict)]
+
+            def said(x):
+                ref = f" (기준 {x.get('reference')})" if x.get("reference") else ""
+                return f"{x.get('subject')} {x.get('text')}{ref}"
+            more = int(it.get("other_count") or len(others)) - len(others)
+            first = others[0] if others else {}
+            tiers = " · ".join(_DIFF_TIER_TEXT[t] for t in (first.get("tiers") or []) if t in _DIFF_TIER_TEXT)
+            # (review I2) the first counterpart's: the one the row leads with
+            flag = (" · 한쪽 주어 없음" if it.get("subject_missing") else
+                    "" if "same_subject" in (first.get("tiers") or []) else " · 주어 이름이 다름(같은 신호인지 먼저 확인)")
+            held = first.get("held_subjects") or [None, None]
+            if "same_condition" in (first.get("tiers") or []) and all(held) and held[0] != held[1]:
+                flag += f" · 유지하는 조건의 주어 이름이 다름({held[0]} ↔ {held[1]} — 같은 조건인지 먼저 확인)"
+            if others and it.get("time"):
+                # (R48) a hold time: the direction says which reading to check first
+                flag += (" · 유지시간: SRS 가 더 김 — 시스템 요구 시간 안에 판정하지 못할 수 있음"
+                         if others[0].get("srs_is") == "larger" else
+                         " · 유지시간: SRS 가 더 짧음 — 시스템 시간을 나눠 가진 것(분해)일 수 있음")
+            ws.append(["요구 문서 값 차이 후보", it.get("srs_id", ""),
+                       "SRS ↔ " + ", ".join(dict.fromkeys(str(o.get("source")) for o in others)),
+                       f"{said(srs)} ↔ " + "; ".join(said(o) for o in others) + (f" 외 {more}" if more > 0 else ""),
+                       f"같은 단위·같은 쪽({'하한' if it.get('side') == 'lower' else '상한'})의 조건을 다른 값으로 적음 — "
+                       f"짝지은 근거: {tiers}" + flag,
+                       "같은 임계(한 조건)인지 먼저 확인 — 같으면 어느 값이 맞는지 문서 검토로 정하고, 같은 양의 다른 임계(두 "
+                       "단계 등)면 결함 아님으로 닫는다(경계 TC 는 각 문장대로 판정)",
+                       if_filled(it), "—",
+                       _clip(" ↔ ".join([str(srs.get("line") or "")] + [str(o.get("line") or "") for o in others]), 300),
+                       "—"])
+            continue
         if it.get("kind") == "inclusion_conflict":
             a, b = it.get("a") or {}, it.get("b") or {}
             flag = (" · 한 출처 안의 두 줄(다른 조건·동작일 수 있음)" if it.get("within_source") else "") + (
