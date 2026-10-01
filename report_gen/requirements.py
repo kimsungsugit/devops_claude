@@ -1960,7 +1960,9 @@ def _extract_requirements_from_doc(text: str) -> List[str]:
             if related_val:
                 current["related_id"] = related_val
             continue
-        if any(line.startswith(k) for k in stop_keys):
+        # a field label ends the description whatever its case — ``Verification Criteria`` (the EI table's capital C,
+        #   HDPDM01 · KJPDS02) was read into it (R51 follow-up: the STS table parser had the same exact match)
+        if line.casefold().startswith(tuple(k.casefold() for k in stop_keys)):
             collecting_desc = False
             continue
         if collecting_desc:
@@ -2114,7 +2116,9 @@ def _extract_requirement_blocks(text: str) -> List[Dict[str, Any]]:
         if line.startswith("Related ID"):
             current["related_ids"] = line.split(None, 1)[-1].strip()
             continue
-        if any(line.startswith(k) for k in stop_keys):
+        # a field label ends the description whatever its case — ``Verification Criteria`` (the EI table's capital C,
+        #   HDPDM01 · KJPDS02) was read into it (R51 follow-up: the STS table parser had the same exact match)
+        if line.casefold().startswith(tuple(k.casefold() for k in stop_keys)):
             collecting_desc = False
             continue
         if collecting_desc:
