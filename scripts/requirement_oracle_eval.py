@@ -114,6 +114,14 @@ _TRACED = re.compile(r"\[(?P<doc>Sy[A-Za-z]+) (?P<id>Sy[A-Za-z]+_[0-9_]+) · (?P
 _VERDICT = re.compile(r"^조건 \[.*?\] (성립|불성립) →", re.S)
 
 
+def _non_threshold_prefixes() -> tuple:
+    """(R51) the generator's measurement (``입력 설정 (요구 측정): 입력 전원 = 9V``) and pass-criterion (``측정 (요구 판정
+    기준): …``) steps: an output reporting its input, a limit measured — neither judges a threshold, so they separate no
+    threshold mutant (their ``= 9V`` read as a named point credited 'optimistic' kills: HD 103 → 121)."""
+    from generators.sts_requirement_tc import ACCEPT_PREFIX, MEASURE_PREFIX
+    return (MEASURE_PREFIX, ACCEPT_PREFIX)
+
+
 def _input_cell_fields() -> frozenset:
     """(R47) the system fields whose steps state an input's place, not a behaviour — the generator's own set."""
     from generators.sts_requirement_tc import SYSTEM_INPUT_FIELDS
@@ -166,6 +174,8 @@ def read_sts(path: str) -> dict[str, dict[str, list]]:
             if srs is None:
                 continue
             slot = out.setdefault(srs, {"thresholds": [], "tolerances": [], "points": [], "regions": []})
+            if str(cells[10] or "").startswith(_non_threshold_prefixes()):
+                continue                                  # (R51) no threshold judged: no point, no region
             for col, role in ((10, "action"), (11, "expected")):
                 text = str(cells[col] or "").split(_BASIS_MARK)[0]
                 taken = []

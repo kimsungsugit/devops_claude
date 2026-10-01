@@ -324,7 +324,9 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                          f"요구 원문 경계 TC 를 만들지 못해 넣지 않았다 — {str(rb['error'])[:160]}. 나머지 STS 는 그대로다.",
                          tone="warning"))
     elif rb is not None:
-        skipped = {k.split(":", 1)[1]: v for k, v in rb.items() if k.startswith("skipped:") and v}
+        # (R51 review r2 W-D) the pass criteria and the measurement's conversion are used — by their own TCs
+        skipped = {k.split(":", 1)[1]: v for k, v in rb.items() if k.startswith("skipped:") and v
+                   and k not in ("skipped:acceptance_criterion", "skipped:measurement_conversion")}
         _why = {"kind_symbolic": "기호 비교(값 미상)", "kind_range": "범위", "not_an_order_comparison": "순서 비교 아님",
                 "no_subject_for_value": "주어 없음", "response_constraint": "응답 제약(측정 대상)",
                 "negated_condition": "부정 절", "same_subject_combination_unstated": "결합 미기재",
@@ -335,7 +337,13 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # (R45) review reasons that are not skip reasons
                 "no_subject_in_value_field": "값 칸의 주어(블록 이름 확인)", "read_as_range": "범위로 읽음(확인)",
                 "deadline_or_window": "조건 절의 '이내'(기한인지 시간 창인지 확인)",
-                "read_as_one_quantity": "한 양의 두 구간으로 읽음(확인)"}
+                "read_as_one_quantity": "한 양의 두 구간으로 읽음(확인)",
+                # (R51 review W3) the measurement requirement and the pass criteria
+                "measurement_resolution_written_otherwise": "분해능 표기 불일치(측정)",
+                "measurement_tolerance_unlinked": "HW 측정 정확도 미연결(측정)",
+                "measurement_path_undecided": "측정 경로 미정(측정)",
+                "measurement_hw_not_given": "HW 요구사항서 미입력(측정)",
+                "measurement_scale_unknown": "HW 정확도 척도 불명(측정)"}
 
         def _n(key):   # the producer's Counter keeps only non-zero keys: in a present block, absent is 0 (review W8)
             return _int(rb, key) or 0
@@ -354,6 +362,7 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             tone=_tone(bool(rb.get("evidence_sheet_error")))))
         out.extend(_traced_system_items(rb, _why))
         out.extend(_hw_tolerance_items(rb))
+        out.extend(_measurement_items(rb))
         out.extend(_inclusion_conflict_items(rb))
         out.extend(_value_difference_items(rb))
         out.extend(_requirement_review_items(rb, _why))
@@ -408,7 +417,7 @@ def _evidence_value(rb: Dict[str, Any]) -> str:
 
 
 _FILL_CHECK_TEXT = (("verified", "이 문장에 넣어 확인"), ("needs_more", "더 풀 것이 남음"), ("rewrite", "다시 쓰기 예시"),
-                    ("unchecked", "안내 실패"))
+                    ("not_applicable", "해당 없음(측정 요구 · 판정 기준)"), ("unchecked", "안내 실패"))
 
 
 def _evidence_note(rb: Dict[str, Any]) -> str:
@@ -428,7 +437,9 @@ def _evidence_note(rb: Dict[str, Any]) -> str:
     if err:
         parts.append(f"근거 후보 탐색은 실패했다 — {err[:120]}.")
     elif not searched:
-        parts.append("근거 후보: 단위 있는 값의 보류 항목이 없어 찾지 않았다.")
+        # (R51 review r5 I-2) a measured criterion has a unit but is no gap — not "no item with a unit"
+        parts.append("근거 후보: 다른 문장에서 찾을 보류 항목이 없어 찾지 않았다(측정 요구 · 판정 기준 항목은 탐색 대상 아님)."
+                     if checks.get("not_applicable") else "근거 후보: 단위 있는 값의 보류 항목이 없어 찾지 않았다.")
     else:
         related = _int(rb, "review_evidence_related") or 0
         docs = "·".join(str(d) for d in (rb.get("review_evidence_documents") or []))
@@ -436,7 +447,8 @@ def _evidence_note(rb: Dict[str, Any]) -> str:
                      f"있게 적었다(그중 같은 요구·인용 블록 {related}건 — 옮길 문장의 예일 뿐, 같은 양인지 확인할 것. 생성기는 "
                      f"쓰지 않는다). 후보 없는 {searched - found}건은 적을 말부터 요구 문서에서 정해야 한다.")
     parts.append("채우면: 'If Filled' 칸대로 요구 문서에 적고 다시 생성하면 그 값의 경계 스텝이 생긴다(더 풀 것이 남은 항목은 "
-                 "그것까지).")
+                 "그것까지" + ("; 측정 요구 · 판정 기준 항목은 경계 스텝이 아니라 측정으로 확인" if checks.get("not_applicable") else "")
+                 + ").")
     return " " + " ".join(parts)
 
 _DIFF_TIER_TEXT = {"same_subject": "같은 주어", "same_condition": "같은 조건의 유지시간", "within_step": "한 눈금 안",
@@ -573,6 +585,51 @@ def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
         + (", 그리고 한 출처(SRS 원문 또는 한 블록)의 서로 다른 두 줄(표시 '한 출처 안' — 한 문서가 의도로 두 조건·두 동작을 "
            "달리 적었을 수 있다)." if has_within else ", 한 출처(SRS 원문 또는 한 블록) 안의 쌍은 보지 않는다."),
         tone="warning")]
+
+
+def _measurement_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R51) 측정 요구 TC — 요구가 나열한 입력 값마다 출력이 보고할 값·코드와 판정 범위(HW 측정 정확도 + 분해능 한 칸) —
+    와 판정 기준 TC(비기능 요구의 검증 기준이 적은 상·하한: 측정해 확인, 입력으로 설정하지 않음 — 경계 점 없음). 키가
+    없으면 해당 요구가 없거나 R51 이전 산출물이라 항목 없음. HW 정확도가 이어지지 않은 판정 범위는 분해능만이라 실측(HIL)이
+    벗어날 수 있다 — 그 사실과 채우면 생기는 것을 적는다."""
+    tcs = _int(rb, "measurement_tcs") or 0
+    accept = _int(rb, "acceptance_tcs") or 0
+    if not tcs and not accept:
+        return []
+    linked = _int(rb, "measurement_hw_linked") or 0
+    undecided = _int(rb, "measurement_path_undecided") or 0
+    not_given = _int(rb, "measurement_hw_not_given") or 0          # (review W4)
+    scale_unknown = _int(rb, "measurement_scale_unknown") or 0     # (review W6)
+    unlinked = tcs - linked
+    parts = []
+    if tcs:
+        parts.append(f"요구가 입력 값을 나열하고 출력의 변환식(코드 범위 · offset · 분해능)을 적은 측정 요구 {tcs} 개를 입력 값마다 "
+                     "기대 코드와 판정 범위로 스텝했다(분해능은 범위와 코드 폭으로 계산 — 표기가 다르면 'Requirement Review' "
+                     "시트에 적음, 반올림 방식은 미기재라 한 칸을 더함).")
+        if linked:
+            parts.append(f"그중 {linked} 개는 Related ID 로 이어진 HW 블록의 측정 정확도를 판정 범위에 넣었다"
+                         + (f"(감시 경로 미정 {undecided} — 가장 큰 값)" if undecided else "") + ".")
+    if accept:
+        parts.append(f"비기능 요구의 검증 기준이 적은 상·하한 {_int(rb, 'acceptance_criteria') or 0} 개(CPU 부하 · 메모리 "
+                     f"점유율 등)는 판정 기준 TC {accept} 개의 '측정' 스텝으로 적었다 — 측정해 확인하는 값이라 입력으로 설정하는 "
+                     "경계 점을 만들지 않는다(변이 판별을 주장하지 않음).")
+    if not_given:
+        parts.append(f"측정 요구 {not_given} 개는 HW 요구사항서를 주지 않아 판정 범위가 분해능뿐이다 — 실측(HIL)이 벗어날 수 "
+                     "있다: HW 요구사항서(HwRS·HRS)를 주면 그 입력을 감시하는 HW 블록의 허용 오차가 들어간다.")
+    if scale_unknown:
+        parts.append(f"측정 요구 {scale_unknown} 개는 이어진 HW 블록의 허용오차가 감시 노드 척도라 분해능뿐이다 — 그 분압비를 "
+                     "HW 설계서에 적으면 환산해 넣는다.")
+    if unlinked - not_given - scale_unknown > 0:
+        parts.append(f"측정 요구 {unlinked - not_given - scale_unknown} 개는 이어진 HW 측정 정확도가 없어 판정 범위가 "
+                     "분해능뿐이다 — 실측(HIL)이 벗어날 수 있다: 그 입력을 감시하는 HW 블록이 인용하는 시스템 ID 를 요구의 "
+                     "Related ID 에 적으면 판정 범위에 들어간다.")
+    conversion = _int(rb, "skipped:measurement_conversion") or 0
+    if conversion:
+        parts.append(f"측정 요구의 변환식에서 읽힌 값 {conversion} 개(코드 범위 · 변환 범위)는 측정 TC 가 썼다 — 경계 TC 의 "
+                     "'못 쓴 사실' 에 넣지 않는다.")
+    value = " · ".join(([f"측정 TC {tcs} · 스텝 {_int(rb, 'measurement_steps') or 0}"] if tcs else [])
+                       + ([f"판정 기준 TC {accept}"] if accept else []))
+    return [_item("sts_measurement", "측정 요구 · 판정 기준 TC", value, " ".join(parts), tone=_tone(unlinked > 0))]
 
 
 def _hw_tolerance_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -737,7 +794,9 @@ def _traced_system_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[D
              "요구의 임계(정본 STS 가 자극으로 쓰는 값 중 SRS 밖의 것)는 시험하지 않았다."
              + (" " + " / ".join(problems) if problems else "")),
             tone=_tone(bool(problems)))]
-    skipped = {k.split(":", 2)[2]: v for k, v in rb.items() if k.startswith("traced:skipped:") and v}
+    # (R51 review r3 W-3) the pass criteria of a cited block are used by the criteria TC — no unused fact
+    skipped = {k.split(":", 2)[2]: v for k, v in rb.items() if k.startswith("traced:skipped:") and v
+               and k != "traced:skipped:acceptance_criterion"}
     labels = {**why_text, "already_stepped": "SRS·다른 블록에서 이미 시험(같은 주어 표기일 때만)"}
     files = ", ".join(f"{d.get('doc')} {d.get('file') or ''} 블록 {d.get('blocks')}" for d in read)
     by_block = rb.get("traced_facts_by_block") if isinstance(rb.get("traced_facts_by_block"), dict) else {}

@@ -135,6 +135,12 @@ _RULE_ACTION: Dict[str, str] = {
                                    "가리키는(감시 블록이 후보 밖이거나 문서가 서로 다름) 곳, 그리고 분압식이 그 신호의 HSIS "
                                    "행과 다른 노드이거나 문서마다 분압비가 다른(척도 환산 안 함) 곳이다. 재생성으로는 사라지지 "
                                    "않는다.",
+    # (R51) 측정 요구 TC 의 판정 범위가 분해능뿐 — HW 측정 정확도가 요구와 이어지지 않음
+    # (R51 review r2 W-A) three causes, three actions — the HSIS is no link by itself
+    "disclosure:sts_measurement": "측정 요구 TC 의 판정 범위에 HW 측정 정확도가 들어가지 않은 곳이다(분해능 한 칸뿐 — HIL 실측이 "
+                                  "벗어날 수 있다). HW 요구사항서 미입력이면 등록하고, 이어진 블록의 허용오차가 감시 노드 척도면 "
+                                  "그 분압비를 HW 설계서에 적고, 이어진 블록이 없으면 감시 HW 블록이 인용하는 시스템 ID 를 요구의 "
+                                  "Related ID 에 적은 뒤 다시 생성한다. 그 전에는 시험 기록에 판정 허용오차를 따로 적는다.",
     "disclosure:sts_requirement_value_differences": "SRS 가 적은 조건 값을 인용한 SyRS·SyDS 가 적지 않고 같은 단위·같은 쪽에 "
                                                     "가까운 다른 값을 적은 후보다 — 같은 임계(한 조건)면 맞는 값으로 한쪽을 "
                                                     "고치고(유지시간은 SRS 가 더 길면 시스템 요구 시간을 넘는지부터 본다), "

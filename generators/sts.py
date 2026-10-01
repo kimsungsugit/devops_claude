@@ -1034,7 +1034,16 @@ def parse_srs_docx_tables(srs_path: str) -> List[Dict[str, Any]]:
                 if key and val:
                     cells_map[key] = val
 
-        rid = cells_map.get("ID", "")
+        # (R51) a label by any capitals — the EI tables write ``Verification Criteria`` (HDPDM01 · KJPDS02: SwEI_01~05 and
+        #   SwNTR_0301, 6 each): the exact key dropped the whole field, ``SwEI_01``'s measurement criteria included
+        by_lower: Dict[str, str] = {}
+        for _k, _v in cells_map.items():
+            by_lower.setdefault(_k.lower(), _v)
+
+        def _field(label: str) -> str:
+            return cells_map.get(label) or by_lower.get(label.lower(), "")
+
+        rid = _field("ID")
         if not _REQ_ID_PAT.match(rid):
             continue
         if rid in seen_ids:
@@ -1043,13 +1052,13 @@ def parse_srs_docx_tables(srs_path: str) -> List[Dict[str, Any]]:
 
         results.append({
             "id": rid,
-            "name": cells_map.get("Name", ""),
-            "description": cells_map.get("Description", ""),
-            "asil": cells_map.get("ASIL", ""),
-            "related_id": cells_map.get("Related ID", ""),
-            "software_state": cells_map.get("Software State", ""),
-            "verification": cells_map.get("Verification criteria", ""),
-            "priority": cells_map.get("Priority", ""),
+            "name": _field("Name"),
+            "description": _field("Description"),
+            "asil": _field("ASIL"),
+            "related_id": _field("Related ID"),
+            "software_state": _field("Software State"),
+            "verification": _field("Verification criteria"),
+            "priority": _field("Priority"),
             "req_type": _classify_req_type(rid),
         })
 

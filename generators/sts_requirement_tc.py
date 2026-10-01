@@ -83,6 +83,7 @@ only where the value is off the node's scale and on the converted one.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 from decimal import Decimal
@@ -160,14 +161,86 @@ def _fmt(value: Decimal, fact: dict[str, Any]) -> str:
     return f"{value:.{decimals}f}"
 
 
+# (R51) a verification line that only states a limit — ``- Load(Average)는 70% 이하.`` · ``- DDM, ADM : 88% 이하.``
+#   (HDPDM01 / KJPDS02 ``SwNTR_0301``, read since the parser takes ``Verification Criteria`` by any capitals) — is a pass
+#   criterion: what a test measures and judges, not the range a test sets its input from (R33's reading of verification
+#   lines — right for ``Input : 입력전원 8.5V 이하``). CPU load cannot be set: stepping 69.99 % / 70 % / 70.01 % claimed
+#   discrimination no test can deliver. The line's last comparison ends the sentence and no test-input label precedes it.
+ACCEPT_PREFIX = "측정 (요구 판정 기준): "
+_ACCEPT_TAIL = re.compile(r"\s*[.。]?\s*$")
+_SETTABLE_NAME = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+(?![A-Za-z0-9_])")
+_TEST_INPUT_LABEL = re.compile(r"input|precondition|입력|사전\s*조건|설정|setting|인가", re.IGNORECASE)
+
+
+# (R51 review W2) a pass criterion whose subject the line leaves to the line above (``2) Slack Time`` / ``- Task 할당
+#   시간의 10% 이상.``) is still a criterion — measured, so its subject is no stimulus to name
+_CRITERION_MAY_SKIP = frozenset({"", "no_subject_for_value", "subject_unclear", "same_subject_combination_unstated",
+                                 "parenthesis_labels_may_share_a_quantity", "monitored_quantity_unknown"})
+
+
+def _acceptance_line(line: dict, req: dict[str, Any]) -> bool:
+    """(R51) A verification line of limits only (`ACCEPT_PREFIX`) — read on the line, so ``그 외 : Proto 60% 이하,
+    Master 80% 이하.`` is one criterion line, not a stimulus and a criterion. Only of a non-functional requirement
+    (``SwNTR`` · ``SwNTSR`` — resources, timing) and only where no SW variable is named: ``- u16s_C: 30 초과`` is a test
+    input a SIL run sets, ``- 차속 3km/h 이하`` of a functional requirement is one a HIL bench sets."""
+    if not str(req.get("id") or "").startswith("SwNT"):
+        return False
+    facts = [f for f in line.get("facts") or [] if f.get("line_span")]
+    if not facts or _SETTABLE_NAME.search(line.get("raw") or line["text"]):
+        return False            # a variable or a net (``u16s_C`` · ``VCC_BAT``): something a test sets
+    raw = line.get("raw") or line["text"]
+    last = max(facts, key=lambda f: f["line_span"][1])
+    first = min(facts, key=lambda f: f["line_span"][0])
+    return bool(_ACCEPT_TAIL.match(raw[last["line_span"][1]:])) and \
+        not _TEST_INPUT_LABEL.search(raw[:first["line_span"][0]])
+
+
+# a sub-line for the heading search — ``-5% 이상.`` too (bullet or minus sign, it names no subject: the heading does)
+_BULLET = re.compile(r"^\s*[-•·*ㆍ–]")
+# (R51 review r3 W-1) what is cut off a quoted criterion: a hyphen only with a space after it — ``- -5% 이상.`` keeps
+#   its sign, ``-5% 이상.`` is left whole
+_LEAD_BULLET = re.compile(r"^\s*(?:[•·*ㆍ–]\s*|-\s+)")
+_NUMBERING = re.compile(r"^\s*(?:\d+[.)]|[①-⑳]|[a-zA-Z][.)])\s*")
+
+
+def _extract_head(anchor: str, field: str | None = None) -> str:
+    """What `extract` reads before a field's text — ``ID<TAB>anchor`` and, for an outcome field, ``<Output>``. A line's
+    ``span`` (absolute in that text) minus its length is the line's place in the field (R51 review r4 W-A)."""
+    return f"ID\t{anchor}\n" + ("<Output>\n" if field in SYSTEM_OUTCOME_FIELDS else "")
+
+
+def _criterion_heading(text: str, at: int) -> str:
+    """(R51 review W-B) What a criterion line measures when the line itself does not say it: the nearest line above it
+    that is no bullet (``2) Slack Time`` · ``3) 메모리 점유율``), numbering removed — ``""`` when the line is no bullet
+    (it names its own subject) or ``at`` is outside ``text``. (review r4 W-A) ``at`` is the line's place in the field
+    (`_extract_head`) — matching the sentence's text took the first of two ``- 70% 이하.`` under ``RAM 사용률`` and
+    ``ROM 사용률`` (r3 W-2), and with another spacing or a longer row holding it, still the wrong one."""
+    text = str(text or "")
+    if not 0 <= at <= len(text):
+        return ""
+    start = text.rfind("\n", 0, at) + 1
+    if not _BULLET.match(text[start:].split("\n", 1)[0]):
+        return ""
+    for above in reversed(text[:start].split("\n")):
+        if above.strip() and not _BULLET.match(above):
+            return _NUMBERING.sub("", above).strip()
+    return ""
+
+
+def _requirement_facts_by_field(req: dict[str, Any]) -> list[tuple[dict, dict, str]]:
+    """``(line, fact, field)`` — `requirement_facts` with the field each fact is in (R51: a sentence repeated in both
+    fields is two lines here, told apart by identity, never by its text)."""
+    out = []
+    for key in ("description", "verification"):
+        blocks = extract(f"{_extract_head(str(req.get('id', '')))}{req.get(key) or ''}\n")
+        out += [(line, fact, key) for block in blocks for line in block["lines"] for fact in line["facts"]]
+    return out
+
+
 def requirement_facts(req: dict[str, Any]) -> list[tuple[dict, dict]]:
     """(line, fact) pairs of a requirement's description and verification criteria — read as two texts, so an
     ``<Output>`` heading at the end of the description never makes the criteria an outcome (review r4 W-4)."""
-    pairs = []
-    for key in ("description", "verification"):
-        blocks = extract(f"ID\t{req.get('id', '')}\n{req.get(key) or ''}\n")
-        pairs += [(line, fact) for block in blocks for line in block["lines"] for fact in line["facts"]]
-    return pairs
+    return [(line, fact) for line, fact, _key in _requirement_facts_by_field(req)]
 
 
 # ── (R29) system requirements the SRS block cites ────────────────────────────────────────────────────────────────
@@ -286,8 +359,7 @@ def traced_system_facts(req: dict[str, Any], system: dict[str, dict[str, Any]],
 def _field_lines(anchor: str, field: str, text: str) -> list[dict[str, Any]]:
     """The fact lines of one system block field, read under the SRS ID ``anchor`` (`extract` opens a block at an SRS
     ID line — the ID names nothing else here). An outcome field is read under an ``<Output>`` heading."""
-    head = "<Output>\n" if field in SYSTEM_OUTCOME_FIELDS else ""
-    return [line for b in extract(f"ID\t{anchor}\n{head}{text}\n") for line in b["lines"]]
+    return [line for b in extract(f"{_extract_head(anchor, field)}{text}\n") for line in b["lines"]]
 
 
 _TYPED = re.compile(r"^([us])(8|16|32)[a-z]*_", re.IGNORECASE)
@@ -444,12 +516,17 @@ def _review_reason(line: dict, fact: dict, why: str, source: dict | None) -> str
 
 
 def _review_item(req: dict, line: dict, fact: dict, source: dict | None, reason: str, kind: str,
-                 block_name: str = "") -> dict[str, Any]:
+                 block_name: str = "", criterion: bool = False) -> dict[str, Any]:
     item = {"srs_id": req.get("id", ""), "source": source_label(source), "reason": reason, "kind": kind,
             "line": line["text"], "line_sha256": line["sha256"], "fact": str(fact.get("raw") or ""),
             "fact_kind": fact.get("kind", ""), "line_span": list(fact.get("line_span") or []),
             "block_name": block_name, **_numeric_identity(fact)}
-    if kind == "held_back":
+    if kind == "held_back" and criterion:
+        # (R51 review r2 W-F) a criterion line (measured, not set): written out, it is a criterion again — never a step
+        item["if_filled"] = ("판정 기준(측정해 확인하는 상·하한) 줄이다 — 원문대로 고쳐 적으면 '측정' 스텝의 판정 기준이 되고, "
+                             "입력으로 설정하는 경계 스텝은 만들지 않는다")
+        item["fill_check"] = "not_applicable"
+    elif kind == "held_back":
         # (R46 review W1) what filling would do, tried in this very sentence
         try:
             item["if_filled"], item["fill_check"] = fill_guidance(line, fact, reason)
@@ -580,9 +657,13 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
     groups: list[dict[str, Any]] = []
     seen: set[tuple] = set()
     stepped: set[tuple] = set()
-    items = [(line, fact, None) for line, fact in requirement_facts(req)]
+    own = _requirement_facts_by_field(req)
+    items = [(line, fact, None) for line, fact, _key in own]
+    measuring = measurement_spec(req)                           # (R51 review W1)
+    verification_lines = {id(line) for line, _fact, key in own if key == "verification"}     # (R51)
     if system is not None:
         items += traced_system_facts(req, system, stats)
+    accept: dict[tuple, list[tuple]] = {}
     for line, fact, source in items:
         prefix = "traced:" if source else ""
         stats[prefix + "facts"] += 1
@@ -594,13 +675,31 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
         #   conditions are not one quantity (`same_subject`, review r4 C-2): SySM_04's over-voltage hold was dropped
         if not why and source and subject_of(fact) is not None and _fact_key(fact) in stepped:
             why = "already_stepped"  # the SRS (or another cited block) already steps this subject at this value
+        conversion = _CONVERSION.search(line.get("raw") or line["text"]) if not source and measuring else None
+        if conversion and conversion.group(0).strip() == measuring["lines"][2] and fact.get("line_span") and \
+                conversion.start() <= fact["line_span"][0] < conversion.end():
+            # (review r2 W-E) a fact of that sentence outside the conversion is read as any other
+            # (R51 review W1) ``(0x0~0xFF, offset : 4V, …, 4V ~ 16.75V)`` is the measurement TC's conversion: its ranges
+            #   are no subjectless review items (writing a subject in, as they advised, broke the measurement spec)
+            why = "measurement_conversion"
+        in_verification = source["field"] == "Verification criteria" if source else id(line) in verification_lines
+        if why in _CRITERION_MAY_SKIP and in_verification and _acceptance_line(line, req):
+            # (R51) a pass criterion: a '측정' step in the requirement's criteria TC (`acceptance_groups`) — no points
+            field_text = req.get("verification") if not source else \
+                (((system or {}).get(source["id"]) or {}).get("fields") or {}).get(source["field"])
+            # (review r3 W-2 · r4 W-A) one step per line object, headed by the heading above its own place
+            at = line["span"][0] - len(_extract_head(str(req.get("id", "")), source["field"] if source else None))
+            accept.setdefault((source_label(source), id(line)), []).append(
+                (line, fact, source, _criterion_heading(str(field_text or ""), at)))
+            why = "acceptance_criterion"
         if why:
             stats[prefix + "skipped:" + why] += 1
             reason = _review_reason(line, fact, why, source) if review is not None else ""
             if reason:
                 block_name = str(((system or {}).get(source["id"]) or {}).get("name") or "") \
                     if reason == "no_subject_in_value_field" and source else ""
-                review.append(_review_item(req, line, fact, source, reason, "held_back", block_name))
+                review.append(_review_item(req, line, fact, source, reason, "held_back", block_name,
+                                           criterion=in_verification and _acceptance_line(line, req)))
             continue
         seen.add(key)
         stepped.add(_fact_key(fact))
@@ -684,7 +783,33 @@ def boundary_steps(req: dict[str, Any], stats: Counter | None = None,
             "value": fact.get("value_text") or fact["value"], "unit": unit, "step": format(delta, "f"),
             "step_basis": "written_precision", "combination_note": others, "points": used,
             "source": dict(source) if source else None}})
+    groups += acceptance_groups(req, accept, stats)
     return groups
+
+
+def acceptance_groups(req: dict[str, Any], accept: dict[tuple, list], stats: Counter) -> list[dict[str, Any]]:
+    """(R51) One group per pass-criterion line of the requirement (`_acceptance_line`, review r4 I-3): a '측정' step —
+    measure what the line names and judge it against the limits as written (inclusion kept: ``이하`` includes the
+    limit). No boundary points: a measured quantity is not set, so no discrimination is claimed."""
+    out = []
+    for facts in accept.values():
+        line, fact, source, heading = facts[0]
+        text = line["text"]
+        # (R51 review W5) the clause as written — the bare comparisons dropped what they apply to (``SCM : 90%
+        #   이하`` for ``BCM, SMK, IBU, SJB, PSM, SCM``); (r2 W-B) under the heading it sits under — what is measured
+        clause = _clip(_LEAD_BULLET.sub("", text.strip()).strip(), 200)
+        said = f"{heading} — {clause}" if heading else clause
+        stats["acceptance_criteria"] += len(facts)
+        stats["acceptance_steps"] += 1
+        out.append({"steps": [{"action": f"{ACCEPT_PREFIX}{_clip(said, 200)}",
+                               "expected": f"측정값이 원문 판정 기준을 만족 — '{_clip(said, 220)}'(대상·경계 포함은 원문대로, "
+                                           "입력으로 설정하지 않고 측정해 확인)"}],
+                    "evidence": {
+            "srs_id": req.get("id", ""), "line": line["text"], "line_sha256": line["sha256"], "span": fact["span"],
+            "kind": "acceptance", "signal": heading or "—", "reference_constant": None, "signal_kind": "acceptance",
+            "op": "judged", "value": clause, "unit": "", "step": "—", "step_basis": "pass criterion (measured)",
+            "combination_note": "", "points": [], "source": dict(source) if source else None, "hw_tolerance": []}})
+    return out
 
 
 # (R33) ``이상`` ↔ ``초과`` and ``이하`` ↔ ``미만``: the same value with the other boundary inclusion
@@ -1469,6 +1594,8 @@ def _refusal_text(r: dict[str, Any]) -> str:
 def _tolerance_text(evidence: dict[str, Any]) -> str:
     """(R49) The 'Requirement Evidence' cell: the linked tolerances — or why there are none (review I1: not given,
     none linked)."""
+    if evidence.get("kind") == "acceptance":
+        return "— (판정 기준 측정 — 해당 없음)"                       # (R51 review r2 I-4)
     if "hw_tolerance" not in evidence:
         return "— (HW 요구사항서 없음 — 미입력 또는 읽기 실패, 생성 공시 참조)"   # (review r2 I5)
     summary = evidence.get("hw_tolerance_summary") or hw_tolerance_summary(evidence)
@@ -1478,7 +1605,8 @@ def _tolerance_text(evidence: dict[str, Any]) -> str:
 
     def one(t: dict) -> str:
         if t["scale_known"]:
-            size = f"±{t['size']}{unit}" + (f" [한 눈금 {evidence['step']}{unit} 가 그 안]" if t["inside"] else "")
+            size = f"±{t['size']}{unit}" + (f" [한 눈금 {evidence['step']}{unit} 가 그 안]" if t["inside"]
+                                            and evidence.get("kind") != "measurement" else "")
         elif t.get("scale_conflict"):
             size = "척도 불명 — 분압비 충돌: " + " ↔ ".join(t["scale_conflict"])         # (R50 review W6)
         else:
@@ -1495,12 +1623,20 @@ def _tolerance_text(evidence: dict[str, Any]) -> str:
                    f"{_SCALE_CHECK_TEXT[scaled['check']]}]" if scaled else "")
                 + (f" [분압식 {mismatch['formula']} 은 HSIS {mismatch['row']}({mismatch['name']}) 와 다른 노드 — 환산 "
                    "안 함]" if mismatch else ""))
-    return ("" if summary["certain"] else "감시 경로 미정 — ") + "; ".join(one(t) for t in evidence["hw_tolerance"])
+    first = (f"첫 입력값 {str(evidence.get('value')).split(',')[0].strip()}{unit} 기준 — "
+             if evidence.get("kind") == "measurement" else "")    # (R51 review r2 I-5) each step's band is in its text
+    return first + ("" if summary["certain"] else "감시 경로 미정 — ") + "; ".join(one(t) for t in evidence["hw_tolerance"])
 
 
 def source_label(source: dict | None) -> str:
     """``SyDS SyII_06 · Range`` — or ``SRS`` for the requirement's own text."""
     return f"{source['doc']} {source['id']} · {source['field']}" if source else "SRS"
+
+
+def _tc_class(group: dict) -> str:
+    """(R51) what a TC of this group says: a boundary, a measurement, or pass criteria — one kind per TC."""
+    kind = group["evidence"]["kind"]
+    return kind if kind in ("measurement", "acceptance") else "boundary"
 
 
 def _doc_of(group: dict) -> str:
@@ -1972,7 +2108,9 @@ def attach_review_evidence(items: list[dict[str, Any]], requirements: list[dict]
     updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
     searched = found = related = 0
     for it in held:
-        cands = _evidence_for(it, corpus, cited)
+        # (R51 review r4 W-B) a measured criterion is no gap another sentence fills — not searched, so the board's
+        #   count and the sheet's cell ('탐색 대상 아님') say the same
+        cands = None if it.get("fill_check") == "not_applicable" else _evidence_for(it, corpus, cited)
         if cands is None:
             updates.append((it, {"evidence": None}))    # not searched: no unit — the same number is everywhere
             continue
@@ -1996,6 +2134,8 @@ def _evidence_text(item: dict[str, Any]) -> str:
     before R46."""
     if item.get("evidence_error"):
         return f"근거 탐색 실패 — {item['evidence_error']}"
+    if item.get("fill_check") == "not_applicable":
+        return "— (측정 요구 · 판정 기준 항목 — 다른 문장의 같은 값 탐색 대상 아님)"
     if "evidence" not in item:
         return "—"
     cands = item["evidence"]
@@ -2009,6 +2149,190 @@ def _evidence_text(item: dict[str, Any]) -> str:
     more = int(item.get("evidence_total") or len(cands)) - len(cands)
     return ("; ".join(parts) + (f" 외 {more}건" if more > 0 else "")
             + " (같은 값을 스텝할 수 있게 적은 다른 문장 — 같은 양인지 확인 후 옮길 것)")
+
+
+# ── (R51) measurement requirements: listed inputs, the output that reports them, its conversion, a judgment tolerance ──
+# HDPDM01 / KJPDS02 ``SwEI_01`` verification criteria: "입력 전원 인가 (9.0, 12.0, 16.0)" · "Canoe로 Output_Battery
+#   Voltage(9.0, 12.0, 16.0)값 확인" · "(0x0~0xFF, offset : 4V, Resolution : 0x05V, 4V ~ 16.75V)". The output reports the
+#   input: at each listed value the expected code is (v − offset) / resolution, judged within the HW measurement accuracy
+#   of the path that measures the input (R49/R50 — `hw_tolerances_for` / `hw_tolerance_summary`, reused, not redone)
+#   plus one step of the resolution (the rounding is not written). Nothing past the conversion range is stepped: the
+#   document does not say what the output is there.
+MEASURE_PREFIX = "입력 설정 (요구 측정): "     # not a boundary (BAA): the requirement's own listed values — AOR
+_MEASURE_VALUES = r"-?\d+(?:\.\d+)?\s*(?:mV|mA|V|A)?(?:\s*,\s*-?\d+(?:\.\d+)?\s*(?:mV|mA|V|A)?)+"
+_MEASURE_INPUT = re.compile(r"(?P<name>[가-힣A-Za-z][가-힣A-Za-z0-9_ ]{0,30}?)\s*인가\s*\((?P<vals>" + _MEASURE_VALUES
+                            + r")\)")
+_MEASURE_OUTPUT = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9_ ]{0,40}?)\s*\((?P<vals>" + _MEASURE_VALUES
+                             + r")\)\s*값\s*확인")
+_CONVERSION = re.compile(
+    r"\(\s*(?P<rlo>0[xX][0-9A-Fa-f]+)\s*~\s*(?P<rhi>0[xX][0-9A-Fa-f]+)\s*,\s*(?i:offset)\s*:\s*(?P<off>-?\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>mV|mA|V|A)\s*,\s*(?i:resolution)\s*:\s*(?P<res>[0-9A-Fa-fx.]+?)\s*(?P<runit>mV|mA|V|A)\s*,\s*"
+    r"(?P<lo>-?\d+(?:\.\d+)?)\s*(?P<lunit>mV|mA|V|A)?\s*~\s*(?P<hi>-?\d+(?:\.\d+)?)\s*(?P<hunit>mV|mA|V|A)\s*\)")
+_MEASURE_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+# what the measurement review items say: why, what to decide (the 'Requirement Review' sheet — kind held_back)
+MEASURE_TEXT = {
+    "measurement_resolution_written_otherwise": (
+        "분해능 표기가 범위·코드와 맞지 않음 — 범위(하한~상한)를 코드 폭으로 나눈 값으로 판정함",
+        "분해능 값 확인(범위·코드로 계산한 값이 맞는지)"),
+    "measurement_tolerance_unlinked": (
+        "측정 판정 범위에 넣을 HW 측정 정확도가 이어지지 않음(Related ID 가 감시 HW 블록과 시스템 ID 를 공유하지 않음) — "
+        "분해능만으로 판정함",
+        "이 입력을 감시하는 HW 블록(허용 오차)과 이 요구가 같은 시스템 ID 를 인용하는지 확인"),
+    "measurement_path_undecided": (
+        "측정 경로 HW 블록이 하나로 정해지지 않음 — 후보 중 가장 큰 허용오차로 판정함",
+        "이 입력을 감시하는 HW 블록 확인(HSIS 신호 행 · Related ID)"),
+    "measurement_hw_not_given": (
+        "HW 요구사항서를 주지 않아 판정 범위에 HW 측정 정확도가 없음 — 분해능만으로 판정함",
+        "HW 요구사항서(HwRS·HRS) 등록"),
+    "measurement_scale_unknown": (
+        "이어진 HW 블록의 허용오차가 다른 척도(감시 노드) — 분압비를 몰라 분해능만으로 판정함",
+        "그 블록의 감시 노드 분압비 확인"),
+}
+
+
+def measurement_spec(req: dict[str, Any]) -> dict[str, Any] | None:
+    """(R51) A requirement whose text lists input values, an output checked at those same values and the output's
+    linear conversion — ``None`` otherwise (also when the output is checked at other values, or the conversion is not
+    read whole). The resolution is what the range and the codes give, ``(hi − lo) / (code span)``; a written one that
+    reads otherwise (``0x05V`` for 0.05 V) is kept (``resolution_written``). The offset must be the range's low end, every
+    unit one and the listed values inside the range — else the conversion is not clear: no spec."""
+    text = f"{req.get('verification') or ''}\n{req.get('description') or ''}"
+    inp, out, conv = _MEASURE_INPUT.search(text), _MEASURE_OUTPUT.search(text), _CONVERSION.search(text)
+    if not (inp and out and conv):
+        return None
+    values = [Decimal(v) for v in _MEASURE_NUMBER.findall(inp.group("vals"))]
+    if [Decimal(v) for v in _MEASURE_NUMBER.findall(out.group("vals"))] != values:
+        return None
+    unit = conv.group("unit")
+    units = {unit, conv.group("runit"), conv.group("hunit"), conv.group("lunit") or unit}
+    units |= set(re.findall(r"mV|mA|V|A", inp.group("vals") + out.group("vals")))
+    if len(units) != 1:
+        return None
+    rlo, rhi = int(conv.group("rlo"), 16), int(conv.group("rhi"), 16)
+    lo, hi, off = Decimal(conv.group("lo")), Decimal(conv.group("hi")), Decimal(conv.group("off"))
+    if rhi <= rlo or hi <= lo or off != lo or not all(lo <= v <= hi for v in values):
+        return None
+    resolution = (hi - lo) / (rhi - rlo)       # (R51 review I1) exact for the codes; rounded for display only
+    written = conv.group("res")
+    written_value = None if written.lower().startswith("0x") else _decimal(written)
+    if written_value is not None and resolution and abs(written_value - resolution) <= resolution / 100:
+        written_value = resolution            # ``0.004888V`` for 5/1023: written within 1 % — no review item
+    return {"input": inp.group("name").strip(), "output": out.group("name").strip(), "unit": unit,
+            "values": [_plain(v) for v in values], "code_low": rlo, "code_high": rhi, "low": _plain(lo),
+            "high": _plain(hi), "resolution": _plain(_tidy(resolution)), "resolution_exact": str(resolution),
+            "resolution_written": None if written_value == resolution else f"{written}{conv.group('runit')}",
+            "lines": [inp.group(0).strip(), out.group(0).strip(), conv.group(0).strip()]}
+
+
+def _measure_code(value: Decimal, spec: dict[str, Any], rounding: str) -> int:
+    """The code of ``value`` rounded ``rounding`` and clamped to the code range — ``ROUND_CEILING`` for a band's low
+    end, ``ROUND_FLOOR`` for its high end: a code is inside the band only when its value is."""
+    code = (value - Decimal(spec["low"])) / Decimal(spec["resolution_exact"]) + spec["code_low"]
+    return int(min(max(code.to_integral_value(rounding=rounding), spec["code_low"]), spec["code_high"]))
+
+
+def _outward(d: Decimal, up: bool) -> str:
+    """(R51 review I1) A band end shown to six decimals at most, rounded outward — the exact quotient is in the codes."""
+    exponent = d.as_tuple().exponent
+    if isinstance(exponent, int) and exponent < -6:
+        d = d.quantize(Decimal("0.000001"), rounding="ROUND_CEILING" if up else "ROUND_FLOOR")
+    return _plain(d)
+
+
+def _review_base(req: dict[str, Any], line: str) -> dict[str, Any]:
+    return {"srs_id": req.get("id", ""), "source": "SRS", "kind": "held_back", "line": line,
+            "line_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(), "fact_kind": "measurement",
+            "line_span": [], "block_name": "", "fill_check": "not_applicable"}
+
+
+def measurement_groups(req: dict[str, Any], stats: Counter, hw: dict[str, dict[str, Any]] | None = None,
+                       hsis_rows: list[dict[str, Any]] | None = None,
+                       review: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """(R51) One group per measurement requirement: a step per listed input value — the output's expected value and
+    code, and the judgment band (HW measurement accuracy of the input's path + one resolution step) in value and code.
+    The accuracy is R49/R50's reading of the HW blocks the requirement's system IDs link (the SW variable its text names
+    marks the HSIS row); none linked or several left — the review sheet says so and the band says what it holds."""
+    spec = measurement_spec(req)
+    if not spec:
+        return []
+    unit = spec["unit"]
+    step = Decimal(spec["resolution_exact"])
+    signal = next(iter(_SW_VAR.findall(f"{req.get('description') or ''}\n{req.get('verification') or ''}")), "")
+    basis = f"{BASIS_MARK}{' · '.join(spec['lines'])}"
+    steps, points, summaries, first = [], [], [], []
+    for v in (Decimal(x) for x in spec["values"]):
+        probe = {"unit": unit, "value": _plain(v), "step": spec["resolution"], "source": None, "signal": signal}
+        cands = hw_tolerances_for(req, probe, hw, hsis_rows) if hw is not None else []
+        summary = hw_tolerance_summary(probe, cands)
+        accuracy = Decimal(summary["largest"]) if summary and summary["largest"] is not None else None
+        band = (accuracy or Decimal(0)) + step
+        lo, hi = v - band, v + band
+        if hw is None:
+            source = "HW 측정 정확도 없음(HW 요구사항서 미입력)"            # (R51 review W4)
+        elif summary and accuracy is None:
+            # (R51 review W6) a block is linked, its tolerance on another scale (a divider unknown): no number
+            source = f"HW 측정 정확도 척도 불명({' · '.join(summary['blocks'])} — 분압비 확인)"
+        elif accuracy is None:
+            source = "HW 측정 정확도 없음(이어진 HW 블록 없음)"
+        else:
+            blocks = " · ".join(summary["blocks"])
+            source = (f"HW 측정 ±{_plain(accuracy)}{unit}({blocks}"
+                      + ("" if summary["certain"] else " — 감시 경로 미정, 가장 큰 값") + ")")
+        steps.append({"action": f"{MEASURE_PREFIX}{spec['input']} = {_plain(v)}{unit}{basis}",
+                      "expected": (f"{spec['output']} = {_plain(v)}{unit}(코드 "
+                                   f"0x{_measure_code(v, spec, 'ROUND_HALF_UP'):02X}) — 판정 범위 {_outward(lo, False)}{unit} ~ "
+                                   f"{_outward(hi, True)}{unit}(코드 0x{_measure_code(lo, spec, 'ROUND_CEILING'):02X} ~ "
+                                   f"0x{_measure_code(hi, spec, 'ROUND_FLOOR'):02X}): {source} + 분해능 "
+                                   f"{spec['resolution']}{unit}(반올림 방식 미기재)")})
+        points.append({"point": _plain(v), "holds": None})
+        summaries.append(summary)
+        if not first:
+            first = cands[:MAX_HW_TOLERANCES]
+    linked = [s for s in summaries if s and s["largest"] is not None]
+    scale_unknown = not linked and any(s and s["largest"] is None for s in summaries)
+    stats["measurement_tcs"] += 1
+    stats["measurement_steps"] += len(steps)
+    stats["measurement_hw_linked"] += bool(linked)
+    stats["measurement_path_undecided"] += any(not s["certain"] for s in linked)
+    stats["measurement_hw_not_given"] += hw is None                   # (R51 review W4)
+    stats["measurement_scale_unknown"] += scale_unknown               # (R51 review W6)
+    if review is not None:
+        base = _review_base(req, spec["lines"][2])
+        if spec["resolution_written"]:
+            review.append({**base, "reason": "measurement_resolution_written_otherwise",
+                           "fact": f"Resolution : {spec['resolution_written']} → {spec['resolution']}{unit}",
+                           "if_filled": f"분해능을 '{spec['resolution']}{unit}' 로 적으면 표기가 범위·코드와 맞는다(지금도 "
+                                        "그 값으로 판정 — 문서 표기만 바뀐다)"})
+        if hw is None:
+            review.append({**base, "reason": "measurement_hw_not_given", "fact": spec["output"],
+                           "if_filled": "HW 요구사항서(HwRS·HRS)를 주면 이 입력을 감시하는 HW 블록의 허용 오차가 판정 범위에 "
+                                        "들어간다(지금은 분해능만 — 실측이 벗어날 수 있다)"})
+        elif scale_unknown:
+            review.append({**base, "reason": "measurement_scale_unknown", "fact": spec["output"],
+                           "if_filled": "그 HW 블록의 감시 노드 분압비를 HW 설계서(HwDS)나 HW 요구 블록에 적으면(노드 = 입력 × "
+                                        "k) 허용오차가 입력 척도로 환산돼 판정 범위에 들어간다"})
+        elif not linked:
+            review.append({**base, "reason": "measurement_tolerance_unlinked", "fact": spec["output"],
+                           # (review r2 W-A) the HSIS only picks among blocks the Related IDs already link — no
+                           #   promise of it here (tried: a HSIS row with the monitor's ID and net linked nothing)
+                           "if_filled": "이 입력을 감시하는 HW 요구 블록이 인용하는 시스템 ID 를 이 요구의 Related ID 에 "
+                                        "적으면(또는 그 HW 블록이 이 요구의 시스템 ID 를 인용하면) 판정 범위에 HW 측정 정확도가 "
+                                        "들어간다(지금은 분해능만 — 실측이 벗어날 수 있다)"})
+        elif any(not s["certain"] for s in linked):
+            review.append({**base, "reason": "measurement_path_undecided", "fact": spec["output"],
+                           "if_filled": "이 입력의 HSIS 신호 행이 감시 HW 블록 하나를 가리키면(시스템 ID 또는 네트) 판정 "
+                                        "범위가 그 블록의 허용오차로 좁혀진다"})
+    line = spec["lines"][2]
+    return [{"steps": steps, "evidence": {
+        "srs_id": req.get("id", ""), "line": line, "line_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+        "span": [], "kind": "measurement", "signal": signal or spec["input"], "reference_constant": None,
+        "signal_kind": "measurement", "op": "reports", "value": ", ".join(spec["values"]), "unit": unit,
+        "step": spec["resolution"],
+        "step_basis": f"변환 0x{spec['code_low']:02X}~0x{spec['code_high']:02X} = {spec['low']}~{spec['high']}{unit}",
+        "combination_note": "", "points": points, "source": None,
+        # (R51 review W4) no HW requirements given: no key — the cell says 'not given', not 'none linked'
+        **({"hw_tolerance": first} if hw is not None else {}),
+        "measurement": {k: v for k, v in spec.items() if k != "lines"}}}]
 
 
 def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[dict], build_tc, make_tc_id,
@@ -2045,6 +2369,8 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         groups = boundary_steps(req, stats, system, review)
         if hw is not None:
             for g in groups:
+                if g["evidence"]["kind"] == "acceptance":
+                    continue                     # (R51) a pass criterion has no point a HW tolerance could hide
                 tolerances = hw_tolerances_for(req, g["evidence"], hw, hsis_rows)
                 summary = hw_tolerance_summary(g["evidence"], tolerances)       # (review r2 I1) before the cut
                 g["evidence"]["hw_tolerance"] = tolerances[:MAX_HW_TOLERANCES]
@@ -2081,6 +2407,9 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
                             stats["hw_tolerance_undecided_no_row"] += 1
                         else:   # the row names no ID or net only one candidate has
                             stats["hw_tolerance_undecided_row_silent"] += 1
+        # (R51) a measurement requirement's group — after the loop above: it reads the HW accuracy itself (its value is a
+        #   list of inputs, not one point)
+        groups += measurement_groups(req, stats, hw, hsis_rows, review)
         if system is not None:
             compared_blocks += sum(1 for sid in cited_system_ids(req) if sid in system)
             try:
@@ -2095,10 +2424,11 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         for g in groups:
             # a fact with conditions to hold is its own TC: its precondition must not contradict another fact's steps
             #   (review r3 W2); facts without such notes share TCs up to ``max_steps``
-            alone = bool(g["evidence"]["combination_note"])
+            alone = bool(g["evidence"]["combination_note"]) or g["evidence"]["kind"] == "measurement"
             # (R47 review W3) an input range never joins a behaviour sentence's TC: a TC numbered before R47 keeps
             #   its steps (it did only by the data's luck — a note or a full last TC), and one TC says one kind of thing
             if not alone and chunks and not chunks[-1][0]["evidence"]["combination_note"] and \
+                    _tc_class(chunks[-1][0]) == _tc_class(g) and chunks[-1][0]["evidence"]["kind"] != "measurement" and \
                     _doc_of(chunks[-1][0]) == _doc_of(g) and _is_input(chunks[-1][0]) == _is_input(g) and \
                     sum(len(x["steps"]) for x in chunks[-1]) + len(g["steps"]) <= max(max_steps, 1):
                 chunks[-1].append(g)
@@ -2114,16 +2444,21 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
             tc["requirement_evidence"] = [g["evidence"] for g in chunk]
             notes = list(dict.fromkeys(g["evidence"]["combination_note"] for g in chunk
                                        if g["evidence"]["combination_note"]))
-            notes += list(dict.fromkeys(n for g in chunk if (n := _tolerance_note(g["evidence"]))))   # (R49)
+            # (R49) — (R51) a measurement group's band is in its expected results; its value is a list, not one point
+            notes += list(dict.fromkeys(n for g in chunk if g["evidence"]["kind"] not in ("measurement", "acceptance")
+                                        and (n := _tolerance_note(g["evidence"]))))
             if notes:
                 tc["precondition"] = "\n".join([p for p in [tc.get("precondition") or ""] if p] + notes)
             tc["requirement_boundary"] = True
             added.append(tc)
-            stats["traced:tcs" if chunk[0]["evidence"]["source"] else "tcs"] += 1
+            if _tc_class(chunk[0]) == "acceptance":
+                stats["acceptance_tcs"] += 1       # (review r2 W-D) not a boundary TC — counted apart
+            elif _tc_class(chunk[0]) == "boundary":
+                stats["traced:tcs" if chunk[0]["evidence"]["source"] else "tcs"] += 1
             if _is_input(chunk[0]):
                 stats["traced:input_range_tcs"] += 1
             for g in chunk:
-                if g["evidence"]["source"]:
+                if g["evidence"]["source"] and _tc_class(g) == "boundary":
                     fanout[g["evidence"]["source"]["id"]] += 1
     if added:   # nothing added: the TC order is left exactly as it was (review r4 I-4)
         order = {r["id"]: i for i, r in enumerate(requirements)}
@@ -2247,7 +2582,9 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
     ws = wb.create_sheet(REQUIREMENT_EVIDENCE_SHEET)
     ws.append(REQUIREMENT_EVIDENCE_HEADERS)
     for tc_id, e in rows:
-        points = ", ".join(f"{p['point']}({'T' if p['holds'] else 'F'})" for p in e["points"])
+        # (R51) a point with no verdict (a measurement's listed value) is no 'F'
+        points = ", ".join(f"{p['point']}({'T' if p['holds'] else '—' if p['holds'] is None else 'F'})"
+                           for p in e["points"])
         subject = e.get("signal") or "—"
         if e.get("signal_kind") == "paren_owner":
             subject += " (괄호 앞 명사)"   # (R32 review I4) a weaker subject than a signal name: the reviewer sees it
@@ -2327,7 +2664,7 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
                        _clip(f"{a.get('line')} ↔ {b.get('line')}", 300), "—"])
             continue
         reason = str(it.get("reason"))
-        why, decide = {**REVIEW_TEXT, **READ_TEXT}.get(reason, (reason, "원문 확인"))
+        why, decide = {**REVIEW_TEXT, **READ_TEXT, **MEASURE_TEXT}.get(reason, (reason, "원문 확인"))
         if it.get("fact_kind") == "range" and reason in RANGE_DECIDE:
             decide = RANGE_DECIDE[reason]      # (review r2 W-R2-1) a range makes no boundary step, subject or not
         if it.get("block_name"):
