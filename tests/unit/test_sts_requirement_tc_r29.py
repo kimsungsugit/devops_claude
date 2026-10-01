@@ -450,7 +450,9 @@ def test_the_resolver_leaves_out_a_missing_document_with_its_reason(tmp_path, mo
     assert got["syrs_path"] == str(Path(ok).resolve()) and got["syds_path"] is None
     assert len(got["system_input_skips"]) == 1 and got["system_input_skips"][0].startswith("SyDS: 파일 없음")
     # (R49) the HW requirements specification goes the same way
+    # (R50) and the HW design specification
     assert rh.resolve_system_requirement_docs("", "") == {"syrs_path": None, "syds_path": None, "hwrs_path": None,
+                                                          "hwds_path": None,
                                                           "system_input_skips": []}
 
 
@@ -496,7 +498,7 @@ def test_every_sts_handler_passes_the_system_inputs_to_the_generator(path, tmp_p
     syrs = _docx(tmp_path / "sy.docx", [[("ID", "SyTR_0101")]])
     body = {"source_root": str(src), "srs_path": str(srs), "syrs_path": syrs,
             "syds_path": str(tmp_path / "gone_SyDS.docx"),
-            "hwrs_path": syrs}                                # (R49) any readable docx reaches the generator
+            "hwrs_path": syrs, "hwds_path": syrs}             # (R49 · R50) any readable docx reaches the generator
     if "jenkins" in path:
         (tmp_path / "cache").mkdir()
         body.update(job_url="http://ci/job/x/", cache_root=str(tmp_path / "cache"))
@@ -505,7 +507,7 @@ def test_every_sts_handler_passes_the_system_inputs_to_the_generator(path, tmp_p
         _ = r.text                                           # a stream is read to its end
     assert done.wait(30), f"{path}: generate_sts was not called ({r.status_code} {r.text[:300]})"
     assert seen["syrs_path"] == str(Path(syrs).resolve()) and seen["syds_path"] is None
-    assert seen["hwrs_path"] == str(Path(syrs).resolve())
+    assert seen["hwrs_path"] == str(Path(syrs).resolve()) and seen["hwds_path"] == str(Path(syrs).resolve())
     assert [s.split(":")[0] for s in seen["system_input_skips"]] == ["SyDS"]
 
 

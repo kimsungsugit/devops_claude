@@ -176,6 +176,8 @@ function ScmSection() {
         syds: '', problem_list: '',
         // (R49) HW 요구사항서 — STS 경계 TC 옆에 HW 측정 허용오차를 인용한다(백엔드 `ScmLinkedDocs.hwrs`).
         hwrs: '',
+        // (R50) HW 설계서 — 감시 노드 분압식(백엔드 `ScmLinkedDocs.hwds`).
+        hwds: '',
         release_notes: [], ut_log_history: [], fault_injection: [],
       },
     };
@@ -463,7 +465,7 @@ function ScmSection() {
           <div className="field-group cols-3">
             {/* 템플릿은 **문서마다 형식이 다르다**(UDS .docx / 시험 규격서 .xlsm).
                 예전엔 필드가 없어 설정의 공용 `template` 하나가 양쪽에 갔다. */}
-            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syds', 'hwrs', 'syts', 'syits',
+            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syds', 'hwrs', 'hwds', 'syts', 'syits',
               'problem_list', 'uds_template', 'sts_template', 'suts_template', 'sits_template'].map(k => (
               <div className="field" key={k}>
                 <label>{LINKED_DOC_LABELS[k] || k.toUpperCase()} 경로</label>
@@ -1361,7 +1363,7 @@ function SourceRootEditor({ value, onChange }) {
 }
 
 // 연결 문서 단일 경로 칸의 표시 이름 — 없으면 키를 대문자로(`SRS 경로`). 새 칸만 사람이 읽는 이름을 준다.
-const LINKED_DOC_LABELS = { syds: 'SyDS', hwrs: 'HwRS(HW 요구)', problem_list: '문제관리 대장' };
+const LINKED_DOC_LABELS = { syds: 'SyDS', hwrs: 'HwRS(HW 요구)', hwds: 'HwDS(HW 설계)', problem_list: '문제관리 대장' };
 
 // 결함 판별 근거 자료의 복수 경로 칸(백엔드 `ScmLinkedDocs` 의 list 필드와 같은 키). 시험 명세 생성이 아니라
 // 판별 측정·추적에 쓰는 자료라 VectorCAST·정적분석 칸과 구획을 나눈다.

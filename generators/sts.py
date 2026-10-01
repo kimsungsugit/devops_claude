@@ -3464,6 +3464,7 @@ def generate_sts(
     syds_path: Optional[str] = None,
     system_input_skips: Optional[List[str]] = None,
     hwrs_path: Optional[str] = None,
+    hwds_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -3493,6 +3494,9 @@ def generate_sts(
         hwrs_path: (R49) HW 요구사항서 DOCX. 주면 요구 경계 TC 옆에 Related ID 로 이어지는 HW 블록의 측정
             허용오차(``허용 오차: ±3%``)를 인용하고, 한 눈금이 그 안이면 TC 사전조건에 HIL 판정 방법을 적는다(점은
             옮기지 않는다). 못 읽으면 품질 리포트에 사유.
+        hwds_path: (R50) HW 설계서 DOCX. 그 블록이 적은 감시 노드 분압식(``Sensor Power Monitor = Sensor Power *0.5``)으로
+            HW 요구사항서의 노드 허용오차를 값의 척도로 환산한다. HSIS(``hsis_path``)의 SW 신호 행은 허브 블록 때문에
+            미정인 감시 경로를 좁힌다.
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage
@@ -3648,6 +3652,9 @@ def generate_sts(
         try:
             from generators.sts_requirement_tc import (
                 append_requirement_boundary_tcs,
+                apply_hw_design,
+                hsis_rows_from_signals,
+                load_hw_design,
                 load_hw_requirements,
                 load_system_requirements,
             )
@@ -3662,15 +3669,45 @@ def generate_sts(
             system_input_skips = [s for s in (system_input_skips or []) if not str(s).startswith("HwRS")]
             if _hw_record is None and _hw_skips:
                 _hw_record = {"file": "", "error": _hw_skips[0][:200]}
+            # (R50) the HW design specification's monitor-node ratios scale a node tolerance; the HSIS rows of the SW
+            #   signals narrow a hub to one monitor path — both only when the HW requirements were read
+            _hwd, _hwd_record = load_hw_design(hwds_path)
+            _hwd_skips = [str(s) for s in (system_input_skips or []) if str(s).startswith("HwDS")]
+            system_input_skips = [s for s in (system_input_skips or []) if not str(s).startswith("HwDS")]
+            if _hwd_record is None and _hwd_skips:
+                _hwd_record = {"file": "", "error": _hwd_skips[0][:200]}
+            # (R50 review I3) the HSIS rows are the signals read above (`_load_hsis_signals` — one reader, header-based)
+            _hsis_rows: Optional[List[Dict[str, Any]]] = None
+            # (R50 review r2 W1) a HSIS the caller could not localise was given — its reason is the HSIS record's, so the
+            #   disclosure says '읽지 못함 — 사유' and never '미입력 — 주면 …' (`attach_sts_hsis`)
+            _hsis_skips = [str(s) for s in (system_input_skips or []) if str(s).startswith("HSIS")]
+            system_input_skips = [s for s in (system_input_skips or []) if not str(s).startswith("HSIS")]
+            _hsis_record: Dict[str, Any] = {"given": bool(hsis_path) or bool(_hsis_skips)}
+            if _hsis_skips and not hsis_path:
+                _hsis_record["error"] = _hsis_skips[0][:200]
+            if _hw is not None:
+                _ratios = apply_hw_design(_hw, _hwd)
+                _hwd_record = dict(_hwd_record or {"given": False}, ratios=sum(_ratios.values()),
+                                   ratios_by_source=_ratios)
+                if hsis_path:
+                    _hsis_rows = hsis_rows_from_signals((hsis_signals or {}).get("signals"))
+                    _hsis_record.update(rows=len(_hsis_rows), signals=len((hsis_signals or {}).get("signals") or []))
             if _sy_records:
                 _progress(76, f"시스템 요구 블록 {len(_system)}개 로드")
             gen_stats["requirement_boundary"] = append_requirement_boundary_tcs(
                 test_cases, reqs, _build, _make_tc_id, _classify_steps,
                 max_steps=(project_config or {}).get("max_steps_per_tc") or _MAX_STEPS_PER_TC,
-                system=_system if any("blocks" in r for r in _sy_records) else None, review_out=_review, hw=_hw)
+                system=_system if any("blocks" in r for r in _sy_records) else None, review_out=_review, hw=_hw,
+                hsis_rows=_hsis_rows)
             gen_stats["requirement_boundary"]["system_documents"] = _sy_records
             # (R49) not given ≠ read and none linked ≠ an output from before R49 (no key)
             gen_stats["requirement_boundary"]["hw_document"] = _hw_record or {"given": False}
+            if _hw is not None:     # (R50) what narrowed and scaled the tolerances — only when they were linked at all
+                gen_stats["requirement_boundary"]["hw_design_document"] = _hwd_record
+                gen_stats["requirement_boundary"]["hw_hsis"] = _hsis_record
+            elif _hwd_record is not None:
+                # (R50 review I5) a HW design given without the HW requirements it scales: said, not dropped
+                gen_stats["requirement_boundary"]["hw_design_document"] = dict(_hwd_record, unused="no_hwrs")
             if system_input_skips:
                 gen_stats["requirement_boundary"]["system_input_skips"] = [str(s)[:200] for s in system_input_skips]
         except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below

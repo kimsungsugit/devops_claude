@@ -679,10 +679,18 @@ describe('DocGenSection — 게이트에서 정한 상한이 요청에 실린다
     expect(body.get('hwrs_path')).toBe('D:/hw/HRS.docx');
   }, 20000);
 
+  // (R50) HW 설계서 — 감시 노드 분압식. 같은 길(설정 경로 > SCM 등록 문서), STS 에만.
+  it('STS: HW 설계서 경로가 실린다', async () => {
+    localStorage.setItem('devops_v2_doc_paths', JSON.stringify({ hwds: 'D:/hw/HDS.docx' }));
+    const body = await clickDoc(/STS 생성/);
+    expect(body.get('hwds_path')).toBe('D:/hw/HDS.docx');
+  }, 20000);
+
   it('SUTS 요청엔 HW 요구사항서 경로를 보내지 않는다', async () => {
     localStorage.setItem('devops_v2_doc_paths', JSON.stringify({ hwrs: 'D:/hw/HRS.docx' }));
     const body = await clickDoc(/SUTS 생성/);
     expect(body.get('hwrs_path')).toBeNull();
+    expect(body.get('hwds_path')).toBeNull();
   }, 20000);
 
   // ── 이번 라운드에 배선된 값들 (2026-08-31) ────────────────────────────────

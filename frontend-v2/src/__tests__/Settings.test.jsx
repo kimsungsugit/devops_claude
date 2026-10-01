@@ -195,6 +195,7 @@ describe('Settings', () => {
     expect(screen.getByText('SyDS 경로')).toBeInTheDocument();
     // (R49) HW 요구사항서 — STS 경계 TC 옆의 HW 측정 허용오차
     expect(screen.getByText('HwRS(HW 요구) 경로')).toBeInTheDocument();
+    expect(screen.getByText('HwDS(HW 설계) 경로')).toBeInTheDocument();     // (R50)
     expect(screen.getByText('문제관리 대장 경로')).toBeInTheDocument();
     expect(screen.getByText(/FW 배포 기록/)).toBeInTheDocument();
     expect(screen.getByText(/단위시험 로그 이력/)).toBeInTheDocument();

@@ -3299,6 +3299,11 @@ async def jenkins_sts_generate_async(
     syds_path: str = Form(""),
     # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
     hwrs_path: str = Form(""),
+    # (R50) HW 설계서 — HW 요구사항서의 감시 노드 허용오차를 그 분압식으로 환산한다.
+    hwds_path: str = Form(""),
+    # (R50 review W1) HSIS — 화면은 처음부터 보냈는데 이 핸들러만 선언하지 않아 FastAPI 가 조용히 버렸다(로컬 STS 핸들러
+    #   3 곳은 받는다). HW 허용오차의 감시 경로를 SW 신호의 HSIS 행으로 좁히고, 생성기의 HSIS 신호 보강에도 쓴다.
+    hsis_path: str = Form(""),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
     from sts_generator import generate_sts
@@ -3376,11 +3381,13 @@ async def jenkins_sts_generate_async(
     sds_docx_path = resolve_builder_input(sds_path, label="SDS", reasons=opt_skips)
     uds_file_path = resolve_builder_input(uds_path, label="UDS", reasons=opt_skips)
     stp_docx_path = resolve_builder_input(stp_path, label="STP", reasons=opt_skips)
+    from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
+    system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
+    # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다(로그만이면 산출물에 '미입력' 으로 적힌다)
+    hsis_file_path = attach_sts_hsis(system_docs, hsis_path, opt_skips)
     if opt_skips:
         _logger.warning("STS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
-    from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
 
     # 템플릿 선택은 **백엔드 단일 규칙**이다(`docgen_template_source`).
     # 정본이 있으면 정본을 쓴다 — 표지·이력·Introduction(표기 규약 표)이 납품본과
@@ -3431,6 +3438,7 @@ async def jenkins_sts_generate_async(
                 sds_docx_path=sds_docx_path,
                 uds_path=uds_file_path,
                 stp_path=stp_docx_path,
+                hsis_path=hsis_file_path,
                 on_progress=_on_progress,
                 source_root=str(source_root_path) if source_root_path else None,  # 품질 DB project_root
                 **system_docs,

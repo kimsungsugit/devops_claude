@@ -51,7 +51,8 @@ sys.path.insert(0, str(REPO))
 
 # the fields R24–R27 read; any other ``ScmLinkedDocs`` field can be named with --fields
 DEFAULT_FIELDS = ("ut_log_history", "release_notes", "problem_list", "syrs", "syds", "fault_injection",
-                  "hwrs")   # (R49) HW 요구사항서 — STS 경계 TC 의 HW 측정 허용오차
+                  "hwrs",   # (R49) HW 요구사항서 — STS 경계 TC 의 HW 측정 허용오차
+                  "hwds")   # (R50) HW 설계서 — 그 허용오차의 감시 노드 분압식
 # a unit-test log folder holds more than the aggregate coverage reports the replay reads
 FIELD_PATTERNS = {"ut_log_history": "*.htm*"}
 MARKER = ".fetch_linked_docs"

@@ -1977,6 +1977,8 @@ async def local_sts_generate(
     syds_path: str = Form(""),
     # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
     hwrs_path: str = Form(""),
+    # (R50) HW 설계서 — HW 요구사항서의 감시 노드 허용오차를 그 분압식으로 환산한다.
+    hwds_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2082,10 +2084,10 @@ async def local_sts_generate(
                                        label="SDS", tag=f"[STS_GENERATE][{req_id}] ")
     uds_file_path = _resolve_opt(uds_path)
     stp_docx_path = _resolve_opt(stp_path)
-    hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
-                              _no_discovery, label="HSIS")
-    from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
+    from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
+    system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
+    # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다 — 자동 탐색은 하지 않는다(R77 N111)
+    hsis_file_path = attach_sts_hsis(system_docs, hsis_path, opt_skips)
     if opt_skips:
         _logger.warning("STS(sync): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips), "; ".join(opt_skips)[:400])
@@ -2190,6 +2192,8 @@ async def local_sts_generate_stream(
     syds_path: str = Form(""),
     # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
     hwrs_path: str = Form(""),
+    # (R50) HW 설계서 — HW 요구사항서의 감시 노드 허용오차를 그 분압식으로 환산한다.
+    hwds_path: str = Form(""),
 ):
     """Generate STS with SSE progress streaming."""
     import json as _json
@@ -2281,10 +2285,10 @@ async def local_sts_generate_stream(
     sds_docx_path = _resolve_opt2(sds_path)
     uds_file_path = _resolve_opt2(uds_path)
     stp_docx_path = _resolve_opt2(stp_path)
-    hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
-                              _no_discovery, label="HSIS")
-    from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs2 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
+    from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
+    system_docs2 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
+    # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다 — 자동 탐색은 하지 않는다(R77 N111)
+    hsis_file_path2 = attach_sts_hsis(system_docs2, hsis_path, opt_skips2)
     if opt_skips2:
         _logger.warning("STS(stream): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips2), "; ".join(opt_skips2)[:400])
@@ -2402,6 +2406,8 @@ async def local_sts_generate_async(
     syds_path: str = Form(""),
     # (R49) HW 요구사항서 — 요구 경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록)를 인용한다.
     hwrs_path: str = Form(""),
+    # (R50) HW 설계서 — HW 요구사항서의 감시 노드 허용오차를 그 분압식으로 환산한다.
+    hwds_path: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
     from backend.services.resolver_helpers import reject_upload_in_cloudium
@@ -2485,10 +2491,10 @@ async def local_sts_generate_async(
                                        label="SDS", tag="[STS_GENERATE_ASYNC] ")
     uds_file_path = _resolve_opt3(uds_path)
     stp_docx_path = _resolve_opt3(stp_path)
-    hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
-                              _no_discovery, label="HSIS")
-    from backend.services.resolver_helpers import resolve_system_requirement_docs
-    system_docs3 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path)
+    from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
+    system_docs3 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
+    # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다 — 자동 탐색은 하지 않는다(R77 N111)
+    hsis_file_path3 = attach_sts_hsis(system_docs3, hsis_path, opt_skips3)
     if opt_skips3:
         _logger.warning("STS(async): 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(opt_skips3), "; ".join(opt_skips3)[:400])

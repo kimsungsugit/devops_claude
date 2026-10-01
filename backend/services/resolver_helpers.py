@@ -289,7 +289,7 @@ def resolve_builder_input(
     return str(out)
 
 
-def resolve_system_requirement_docs(syrs_path: str, syds_path: str, hwrs_path: str = "") -> dict:
+def resolve_system_requirement_docs(syrs_path: str, syds_path: str, hwrs_path: str = "", hwds_path: str = "") -> dict:
     """(R29, G4(b)) STS 요구 경계 TC 의 시스템 요구 추적 입력(SyRS · SyDS)을 다른 선택 입력과 같은 경로로 로컬화한다.
 
     STS 핸들러 4 곳(`/api/jenkins/sts/generate-async` · `/api/local/sts/generate{,-stream,-async}`)이 **이 함수 하나**를
@@ -301,7 +301,23 @@ def resolve_system_requirement_docs(syrs_path: str, syds_path: str, hwrs_path: s
     return {"syrs_path": resolve_builder_input(syrs_path, label="SyRS", reasons=skips),
             "syds_path": resolve_builder_input(syds_path, label="SyDS", reasons=skips),
             "hwrs_path": resolve_builder_input(hwrs_path, label="HwRS", reasons=skips),
+            # (R50) HW 설계서 — 감시 노드 분압식
+            "hwds_path": resolve_builder_input(hwds_path, label="HwDS", reasons=skips),
             "system_input_skips": skips}
+
+
+def attach_sts_hsis(system_docs: dict, hsis_path: str, reasons: list[str] | None = None) -> str | None:
+    """(R50 review r2 W1) STS 의 HSIS 를 다른 선택 입력과 같은 길로 로컬화하고, 지정했는데 못 쓴 사유를
+    ``system_docs["system_input_skips"]`` 에 붙인다 — 생성기가 그 사유를 HW 허용오차 공시(`hw_hsis.error`)로 옮긴다.
+
+    예전엔 사유가 핸들러 로그에만 남아, HSIS 를 준 사용자의 산출물에 'HSIS 미입력 — 주면 …' 이 적혔다(경로 이동·권한·
+    양식 — 원인은 파일인데 안내는 '주라'). STS 핸들러 4 곳이 **이 함수 하나**를 부른다. 반환: 로컬 경로 또는 ``None``."""
+    skips: list[str] = []
+    path = resolve_builder_input(hsis_path, label="HSIS", reasons=skips)
+    system_docs.setdefault("system_input_skips", []).extend(skips)
+    if reasons is not None:
+        reasons.extend(skips)
+    return path
 
 
 def parser_unreadable_reason(path_str: str) -> str:

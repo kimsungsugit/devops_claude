@@ -583,15 +583,17 @@ def _hw_tolerance_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(doc, dict):
         return []
     if doc.get("given") is False:
+        unused = _design_unused_note(rb, "없어")
         return [_item("sts_hw_tolerance", "HW 측정 허용오차", "미입력",
-                      "HW 요구사항서(HwRS·HRS)를 주지 않아 경계 TC 의 HW 측정 허용오차를 보지 않았다 — 주면 SRS 가 인용한 "
-                      "시스템 블록을 같이 인용하는 HW 블록의 '허용 오차'(예: 배터리 전압 감시 ±3%)를 경계 TC 옆에 적고, 경계 점 "
-                      "간격이 그 안이라 HIL 에서 이상/초과를 가를 수 없는 TC 에는 판정 방법(SW 변수 직접 주입 · 허용오차 밖 점)을 "
-                      "사전조건에 적는다.")]
+                      "HW 요구사항서(HwRS·HRS)를 주지 않아 경계 TC 의 HW 측정 허용오차를 보지 않았다." + unused + " 주면 SRS 가 "
+                      "인용한 시스템 블록을 같이 인용하는 HW 블록의 '허용 오차'(예: 배터리 전압 감시 ±3%)를 경계 TC 옆에 적고, "
+                      "경계 점 간격이 그 안이라 HIL 에서 이상/초과를 가를 수 없는 TC 에는 판정 방법(SW 변수 직접 주입 · 허용오차 "
+                      "밖 점)을 사전조건에 적는다.")]
     if doc.get("error"):
         return [_item("sts_hw_tolerance", "HW 측정 허용오차", "읽기 실패",
                       f"HW 요구사항서를 읽지 못해 경계 TC 는 허용오차 없이 만들었다 — {str(doc.get('error'))[:160]}"
-                      + (f" ({doc.get('file')})" if doc.get("file") else "") + ".", tone="warning")]
+                      + (f" ({doc.get('file')})" if doc.get("file") else "") + "."
+                      + _design_unused_note(rb, "읽지 못해"), tone="warning")]
     source = (f"({doc.get('file') or ''} — HW 블록 {doc.get('blocks')} 중 '허용 오차' 를 적은 것 "
               f"{doc.get('blocks_with_tolerance')})")
     if not doc.get("blocks"):
@@ -609,7 +611,10 @@ def _hw_tolerance_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
                       "이어지는 곳이 없었다 " + source + ".")]
     # (R49 review I3) what to do first — the gate board keeps the first 230 and the last 120 characters
     return [_item(
-        "sts_hw_tolerance", "HW 측정 허용오차", f"경계 사실 {groups} · 한 눈금이 허용오차 안 {inside}",
+        # (R50 review r2 I4) the value is never clipped on the board: what a reader must settle is counted there
+        # (r3 W1) one count per boundary — a boundary refused and not scaled is one to settle, not two
+        "sts_hw_tolerance", "HW 측정 허용오차", f"경계 사실 {groups} · 한 눈금이 허용오차 안 {inside}" + (
+            f" · 문서 확인 {settle}" if (settle := _int(rb, "hw_tolerance_to_settle") or 0) else ""),
         f"한 눈금이 HW 측정 허용오차 안인 경계 {inside} 개는 HIL 에서 경계 포함(이상/초과·이하/미만)을 가를 수 없다 — 그 TC 의 "
         "사전조건에 판정 방법을 적었다: SW 변수 직접 주입(SIL·디버거)으로 판정하거나, 허용오차 밖 점(값 ± (가장 큰 후보 "
         f"허용오차 + 한 눈금))에서 방향만 확인. 경계 사실 {groups} 개가 Related ID 로 HW 블록의 측정 허용오차와 이어졌다 "
@@ -618,9 +623,93 @@ def _hw_tolerance_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
            "가장 큰 허용오차로 밖 점을 정했다)." if undecided else "")
         + (f" {unknown} 개는 HW 블록이 적은 값과 척도가 달라(예: 감시 노드 2.5V) 수치를 쓰지 않았다 — 분압비를 HW 문서로 "
            "확인." if unknown else "")
-        + " 허용오차는 HW 문서 원문 그대로다. 'Requirement Evidence' 시트의 HW Tolerance 열에 후보를 최대 3 개 적었다. 점은 "
-          "옮기지 않았다.",
+        # (R50 review I6) the fixed sentence before the narrowing — its guidance ('주면 …') is what the board's tail keeps
+        + " 허용오차는 HW 문서 원문 그대로다('Requirement Evidence' HW Tolerance 열, 후보 최대 3 개 · 점은 옮기지 않음)."
+        + _hw_narrowing_note(rb),
         tone=_tone(bool(inside)))]
+
+
+def _design_unused_note(rb: Dict[str, Any], why: str) -> str:
+    """(R50 review I5, r4 I-B) A HW design given while the HW requirements it scales were not given or not read: said,
+    never dropped — and its own read failure is not hidden behind 'not used'."""
+    design = rb.get("hw_design_document")
+    if not isinstance(design, dict) or design.get("unused") != "no_hwrs":
+        return ""
+    if design.get("error"):
+        return f" HW 설계서도 읽지 못했다({str(design['error'])[:80]})."
+    return f" HW 설계서는 줬지만 그것이 환산할 HW 요구사항서가 {why} 쓰지 않았다."
+
+
+def _hw_narrowing_note(rb: Dict[str, Any]) -> str:
+    """(R50) HSIS 로 감시 경로를 정한 수·HW 설계서 분압식으로 척도를 환산한 수, 그리고 그 입력이 없거나 못 읽었으면 주면
+    무엇이 생기는지. R50 이전 산출물엔 키가 없어 아무것도 붙이지 않는다."""
+    design = rb.get("hw_design_document")
+    hsis = rb.get("hw_hsis")
+    if not isinstance(design, dict) and not isinstance(hsis, dict):
+        return ""
+    parts = []
+    n = {k: _int(rb, f"hw_tolerance_{k}") or 0
+         for k in ("path_by_hsis", "scaled", "path_refused", "path_outside", "scale_unconfirmed", "scale_net_mismatch",
+                   "scale_conflict", "undecided_no_row", "undecided_not_sw", "undecided_row_silent",
+                   "undecided_row_ambiguous", "undecided_direct_hub")}
+    # (R50 review W2 · W6) what a reader must settle — first
+    if n["path_outside"]:
+        parts.append(f"HSIS 행의 시스템 ID 를 후보가 아닌 다른 HW 블록도 인용해 경로를 정하지 않은 경계 {n['path_outside']} 개"
+                     "(감시 블록이 후보 밖일 수 있음 — 그 블록의 허용오차 확인).")
+    if n["path_refused"]:
+        parts.append(f"HSIS 행이 가리키는 HW 블록의 이름이 다른 신호라 경로로 쓰지 않은 경계 {n['path_refused']} 개(감시 블록이 "
+                     "후보 밖이거나 문서가 서로 다름 — HSIS 와 HW 요구 Related ID 확인).")
+    if n["scale_net_mismatch"]:
+        parts.append(f"분압식이 HSIS 의 다른 노드라 척도 환산하지 않은 경계 {n['scale_net_mismatch']} 개.")
+    if n["scale_conflict"]:
+        parts.append(f"문서마다 분압비가 달라 척도 불명인 경계 {n['scale_conflict']} 개.")
+    if isinstance(design, dict):
+        by = design.get("ratios_by_source") or {}
+        # (review W4) a ratio from the HW requirement's own text is not the design's; (r2 I5) a HW design not given or
+        #   unread is no "HW 설계서 0" — the requirement's own formulas may still have scaled
+        given = design.get("given") is not False and not design.get("error")
+        where = (" · ".join(([f"HW 설계서 {by.get('design', 0)}"] if given else []) + [f"HW 요구 자체 식 {by.get('own', 0)}"])
+                 if by else f"{design.get('ratios', 0)}")
+        if n["scaled"] or any((by or {}).values()):
+            parts.append(f"분압식이 있는 감시 노드 블록 {where} 개, 척도를 환산한 경계 {n['scaled']} 개"
+                         + (f"(그중 HSIS 네트로 확인 못 한 {n['scale_unconfirmed']} 개)" if n["scale_unconfirmed"] else "")
+                         + ".")
+    if isinstance(hsis, dict) and hsis.get("given") and not hsis.get("error") and not hsis.get("rows"):
+        # (review r2 W1, r3 Info 7) read but no signal, or signals with no SW-variable row: the file or its layout —
+        #   never "fix the variable names"
+        parts.append(f"HSIS 신호 {hsis.get('signals')} 개를 읽었지만 SW 변수 이름을 적은 행이 없어 감시 경로를 좁히지 "
+                     "못했다(SW 변수 열·양식 확인)." if hsis.get("signals") else
+                     "HSIS 에서 SW 신호를 하나도 읽지 못해 감시 경로를 좁히지 못했다(파일·양식 확인).")
+    elif isinstance(hsis, dict) and hsis.get("given") and not hsis.get("error"):
+        why = [f"이 문장의 시스템 블록을 HW 블록 여럿이 인용(허브 — HSIS 를 쓰지 않음) {n['undecided_direct_hub']}"
+               if n["undecided_direct_hub"] else "",
+               f"주어가 SW 변수가 아님 {n['undecided_not_sw']}" if n["undecided_not_sw"] else "",
+               f"SW 변수의 HSIS 행 없음 {n['undecided_no_row']}(이름 확인)" if n["undecided_no_row"] else "",
+               f"HSIS 행이 둘 이상 {n['undecided_row_ambiguous']}" if n["undecided_row_ambiguous"] else "",
+               f"HSIS 행이 후보 하나만 가진 시스템 ID·네트를 적지 않음 {n['undecided_row_silent']}"
+               if n["undecided_row_silent"] else "",
+               # (review r4 I-C) the refusals are told above — counted here so the reasons add up to the undecided
+               f"후보 밖 블록도 같은 ID 인용 {n['path_outside']}(위)" if n["path_outside"] else "",
+               f"HSIS 행과 블록 이름이 다른 신호 {n['path_refused']}(위)" if n["path_refused"] else ""]
+        why = [w for w in why if w]
+        parts.append(f"HSIS 로 감시 경로를 정한 경계 {n['path_by_hsis']} 개(SW 변수 행 {hsis.get('rows', 0)} 개)"
+                     + (" — 경로 미정의 사유: " + " · ".join(why) if why else "") + ".")
+    # what to give — last: the gate board keeps the tail (review I6)
+    if isinstance(design, dict):
+        if design.get("error"):
+            parts.append(f"HW 설계서를 읽지 못했다({str(design['error'])[:80]}).")
+        elif design.get("given") is False:
+            parts.append("HW 설계서(HwDS)를 주면 감시 노드 척도로 적힌 허용오차를 그 분압식으로 환산한다.")
+        elif design.get("blocks") == 0:
+            # (review r3 Info 5) read, but no HW design table — another document or layout, not "no formula"
+            parts.append("HW 설계서에서 설계 표(ID `Hw…`)를 하나도 찾지 못했다 — 다른 문서를 등록했거나 양식이 다르다.")
+    if isinstance(hsis, dict):
+        if hsis.get("error"):
+            parts.append(f"HSIS 를 읽지 못해 SW 신호로 감시 경로를 좁히지 못했다({str(hsis['error'])[:80]}).")
+        elif not hsis.get("given"):
+            parts.append("HSIS 를 주면 SW 신호의 HSIS 행(시스템 ID·네트 이름)으로 허브의 감시 경로를 좁히고 분압식의 노드를 "
+                         "확인한다.")
+    return (" " + " ".join(parts)) if parts else ""
 
 
 def _traced_system_items(rb: Dict[str, Any], why_text: Dict[str, str]) -> List[Dict[str, Any]]:

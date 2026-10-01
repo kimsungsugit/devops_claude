@@ -65,6 +65,7 @@ IN_LEVEL_ARTIFACTS = "level_artifacts"   # 통합 Summary 의 레벨별 산출�
 IN_SYRS = "syrs"                # (R29) 시스템 요구사항 — STS 요구 경계의 추적 입력
 IN_SYDS = "syds"                # (R29) 시스템 설계서 — 같은 용도
 IN_HWRS = "hwrs"                # (R49) HW 요구사항서 — 경계 TC 옆의 HW 측정 허용오차
+IN_HWDS = "hwds"                # (R50) HW 설계서 — 감시 노드 분압식
 
 INPUT_LABELS: Dict[str, str] = {
     IN_SOURCE_ROOT: "소스 코드 루트",
@@ -80,6 +81,7 @@ INPUT_LABELS: Dict[str, str] = {
     IN_SYRS: "SyRS(시스템 요구)",
     IN_SYDS: "SyDS(시스템 설계)",
     IN_HWRS: "HwRS(HW 요구)",
+    IN_HWDS: "HwDS(HW 설계)",
 }
 
 
@@ -349,6 +351,14 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
             # (R49) 채우면 무엇이 좋아지는지 — HW 블록의 `허용 오차` 로 HIL 에서 판정이 갈리는 경계를 알린다
             IN_HWRS: "경계 TC 옆에 HW 측정 허용오차(Related ID 로 이어지는 HW 블록의 '허용 오차')를 붙이지 않아, 한 눈금이 "
                      "측정 오차 안이라 HIL 에서 판정이 갈리는 경계를 알리지 않습니다",
+            # (R50) 채우면 무엇이 좋아지는지 — 감시 노드 척도(2.5V 등)로 적힌 허용오차를 분압식으로 환산한다
+            IN_HWDS: "HW 요구사항서가 감시 노드 척도(예: 2.5V 감시 전압)로 적은 허용오차를 분압식으로 환산하지 않아, 그 경계의 "
+                     "허용오차 밖 점을 수치로 적지 않고 '척도 불명' 으로 둡니다",
+            # (R50 review r2 W3) STS 핸들러 4 곳이 받고 공시가 안내하는 입력 — 게이트에만 없어서 웹 STS 가 HSIS 를 조용히
+            #   버리던 것(r1 W1)이 오래 드러나지 않았다
+            # (r3 Info 6) its older uses too — the signal enrichment of the TCs and the AI context
+            IN_HSIS: "TC 의 HW 신호 보강·AI 문맥이 빠지고, HW 요구사항서를 줬을 때 그 허용오차의 감시 경로를 SW 신호의 HSIS "
+                     "행(시스템 ID·네트)으로 좁히거나 분압식이 그 신호의 노드인지 대조하지 않습니다",
             IN_TEMPLATE: "기본 양식으로 만듭니다(회사 표준 서식이 아닐 수 있습니다)",
         },
         fields=["related"],

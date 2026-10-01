@@ -103,6 +103,8 @@ _CLOUDIUM_PATH_KEYS = frozenset({
     "syds_path",
     # (R49) HW 요구사항서 — 같은 4 개 STS 핸들러가 받는다(R49 리뷰 C1: 빠지면 방어심층 1단을 건너뛴다)
     "hwrs_path",
+    # (R50) HW 설계서 — 같은 4 개 STS 핸들러
+    "hwds_path",
     "template_path", "ai_example_path", "ai_examples_path",
     "source_root", "source_dir", "report_dir", "cache_root",
     "folder", "root", "status_path",

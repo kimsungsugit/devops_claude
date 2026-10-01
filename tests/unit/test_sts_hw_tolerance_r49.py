@@ -80,7 +80,10 @@ def test_parsing_reads_the_monitor_accuracy_and_what_the_block_measures(tmp_path
     ])
     blocks = parse_hw_requirement_docx(path)
     assert set(blocks) == {"HwTSR_0204", "HwTSR_0203", "HwTR_0605"}
-    assert blocks["HwTSR_0204"] == {"name": "Battery Voltage Monitor", "related": ["SyTR_0703", "SyTSR_0116", "SySM_04"],
+    # (R50) the full text and the block's own formula ratios are in the block too — compared in the R50 tests
+    assert blocks["HwTSR_0204"]["scales"] == [] and "허용 오차: ±3%" in blocks["HwTSR_0204"]["full_text"]
+    r49_keys = {k: v for k, v in blocks["HwTSR_0204"].items() if k not in ("full_text", "scales", "monitor_node")}
+    assert r49_keys == {"name": "Battery Voltage Monitor", "related": ["SyTR_0703", "SyTSR_0116", "SySM_04"],
                                     "tolerances": [{"text": "허용 오차: ±3%", "value": "3", "unit": "%",
                                                     "measured_units": ["V"]}],
                                     "ranges": [{"lo": "9", "hi": "16", "unit": "V"}], "nominals": []}
@@ -291,7 +294,8 @@ def test_the_resolver_the_registry_and_the_middleware_carry_the_input(monkeypatc
     assert ScmLinkedDocs().hwrs == "" and "hwrs_path" in _CLOUDIUM_PATH_KEYS     # (review C1)
     monkeypatch.setattr(resolver_helpers, "resolve_builder_input", lambda p, label, reasons: p or None)
     got = resolver_helpers.resolve_system_requirement_docs("a.docx", "", "hw.docx")
-    assert got == {"syrs_path": "a.docx", "syds_path": None, "hwrs_path": "hw.docx", "system_input_skips": []}
+    assert got == {"syrs_path": "a.docx", "syds_path": None, "hwrs_path": "hw.docx", "hwds_path": None,
+                   "system_input_skips": []}
     assert resolver_helpers.resolve_system_requirement_docs("", "")["hwrs_path"] is None
 
 

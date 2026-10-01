@@ -74,6 +74,12 @@ for the units the block measures; an absolute one only on the scale the block wr
 step spacing lies inside it, the TC's precondition says a HIL run cannot tell the inclusion — decide by injecting the
 SW variable, or check the direction outside the largest candidate (the monitor path is undecided when a hub block
 links several). Quoted, never used to move a point.
+
+**Monitor path and scale (R50)**: the HSIS row of a fact's SW signal (the same name, or the same name under another
+layer — ``u16g_ApiIn_Vsup`` / ``u16g_DrvIn_Vsup``) narrows a hub to the one HW block that alone cites one of the row's
+system IDs, or whose text names the row's net (``V-BAT``); the HW design specification's ``Sensor Power Monitor =
+Sensor Power *0.5`` (a block citing the HW requirement) puts a monitor node's ``±0.3V`` on the 5 V scale (``±0.6V``) —
+only where the value is off the node's scale and on the converted one.
 """
 from __future__ import annotations
 
@@ -960,7 +966,37 @@ _HW_FIELDS = ("Description", "Range")
 _HW_RANGE = re.compile(r"(?P<lo>\d+(?:\.\d+)?)\s*~\s*(?P<hi>\d+(?:\.\d+)?)\s*(?P<unit>mV|V|mA|A|ms|s)(?![A-Za-z])")
 _HW_NOMINAL = re.compile(r"(?P<v>\d+(?:\.\d+)?)\s*(?:(?P<u1>mV|V|mA|A)\s*\(\s*±|\(\s*±\s*\d+(?:\.\d+)?\s*\)\s*(?P<u2>mV|V|mA|A))")
 _HW_SCALE_MARGIN = Decimal("0.2")     # a value within 20% of what the block writes is on the block's scale
+# (R50) ``Sensor Power Monitor = Sensor Power *0.5`` · ``Battery Voltage = Monitor Voltage * 9`` — one side a monitor node.
+#   (review I4) an offset after the factor (``* 0.2 + 0.1``) is no ratio: not read
+_HW_FORMULA = re.compile(r"(?P<lhs>[A-Za-z가-힣][A-Za-z가-힣 ()]{1,60}?)\s*=\s*(?P<rhs>[A-Za-z가-힣][A-Za-z가-힣 ()]{1,60}?)"
+                         r"\s*\*\s*(?P<k>\d+(?:\.\d+)?)(?![\d.])(?!\s*[A-Za-z]*\s*[+\-]\s*\d)(?!\s*/)(?![eE]\d)")
+_MONITOR_WORD = re.compile(r"monitor|모니터", re.IGNORECASE)
+# (review W3a / I4) a formula between two quantities (``전류(A) = 모니터 전압((V)*6``) or of a time (``Monitoring Period =
+#   … * 10``) is no divider ratio
+_FORMULA_UNIT = re.compile(r"\((m?[VA])\)")
+_CURRENT_WORD = re.compile(r"전류|current", re.IGNORECASE)
+_VOLTAGE_WORD = re.compile(r"전압|voltage", re.IGNORECASE)
+_NOT_A_NODE = re.compile(r"period|주기|time|시간|freq|주파수", re.IGNORECASE)
+# (review W3b) a block that writes a monitor node: a nominal with its ± next to a monitor word (``Monitor전압: 2.5V(±0.15V)``)
+_MONITOR_NODE = re.compile(r"(?:monitor|모니터)[^\n]{0,30}?\d+(?:\.\d+)?\s*(?:mV|V|mA|A)?\s*\(\s*±", re.IGNORECASE)
+# a HSIS row's SW variables and net names (``VCC_BAT`` · ``VCC_HALL_MON``); a layer prefix (``u16g_ApiIn_`` / ``u16g_DrvIn_``)
+#   — (review I2) the direction stays: ``ApiIn_X`` is not ``ApiOut_X``
+_SW_VAR = re.compile(r"\b[us]\d+[gs]?_[A-Za-z]+_[A-Za-z0-9_]+\b")
+_SW_LAYER = re.compile(r"^[us]\d+[gs]?_(?:[A-Z][a-z]+)?(?=(?:In|Out)_)")
+_NET = re.compile(r"\b[A-Z][A-Z0-9]*(?:[_-][A-Z0-9]+)+\b")
+# (review W2) words that name no particular signal — what is left names what a block, a formula or a HSIS row is about
+_GENERIC_WORDS = frozenset({
+    "block", "블록", "전원", "monitor", "모니터", "monitoring", "power", "voltage", "전압", "signal", "신호", "output", "출력",
+    "input", "입력", "interface", "level", "mon", "vcc", "api", "drv", "srv", "in", "out", "adc", "analog", "switch",
+    "supply", "control", "controller", "drive", "range"})
+_NAME_TOKEN = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[가-힣]+")
 MAX_HW_TOLERANCES = 3
+# (R50 review W4) where a ratio came from, and (W2) what checked it against the fact's signal
+_SCALE_SOURCE_TEXT = {"design": "HW 설계서 분압식", "own": "HW 요구 블록의 식"}
+_SCALE_CHECK_TEXT = {"confirmed": "HSIS 행과 이름 일치", "unchecked": "이름 대조 불가",
+                     "no_row": "HSIS 에 이 신호 행 없음 — 네트 미확인", "no_hsis": "HSIS 없음(미입력 또는 읽기 실패 — 생성 공시 참조) — 네트 미확인",
+                     "not_sw": "주어가 SW 변수가 아님 — 네트 미확인",
+                     "row_ambiguous": "HSIS 에 이 신호 행이 둘 이상 — 네트 미확인"}
 
 
 def parse_hw_requirement_docx(path: str) -> dict[str, dict[str, Any]]:
@@ -970,19 +1006,8 @@ def parse_hw_requirement_docx(path: str) -> dict[str, dict[str, Any]]:
     units the block measures (a ``%`` applies only to them). ``ranges`` / ``nominals``: what the block writes it
     measures — an absolute tolerance is on that scale (``2.5V(±0.15V)`` is a monitor node, not the 5 V the SW compares).
     The first table of an ID wins. Raises if the file cannot be read: the caller discloses it."""
-    from docx import Document
     out: dict[str, dict[str, Any]] = {}
-    for table in Document(path).tables:
-        parts: dict[str, list[str]] = {}
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells]
-            if len(cells) < 2 or not cells[0]:
-                continue
-            values = [c for c in cells[1:] if c and c != cells[0]]
-            bucket = parts.setdefault(_field_key(cells[0]), [])
-            if values and values[-1] not in bucket:
-                bucket.append(values[-1])
-        cells_map = {k: "\n".join(v) for k, v in parts.items()}
+    for cells_map in _attribute_maps(path):
         hid = cells_map.get("id", "")
         if not HW_ID.fullmatch(hid) or hid in out:
             continue
@@ -995,8 +1020,188 @@ def parse_hw_requirement_docx(path: str) -> dict[str, dict[str, Any]]:
                                     "measured_units": measured} for m in _TOLERANCE.finditer(text)],
                     "ranges": ranges,
                     "nominals": [{"value": m.group("v"), "unit": m.group("u1") or m.group("u2")}
-                                 for m in _HW_NOMINAL.finditer(text)]}
+                                 for m in _HW_NOMINAL.finditer(text)],
+                    # (R50) every field — a HSIS net name is matched here (``V-BAT`` in a verification criteria)
+                    "full_text": "\n".join(cells_map.values()),
+                    # (review W3b) only a block that writes a monitor node takes a divider ratio
+                    "monitor_node": bool(_MONITOR_NODE.search(text)),
+                    "scales": [dict(s, via=f"{hid}: {s['via']}", source="own") for s in _formula_scales(text)]}
     return out
+
+
+def _attribute_maps(path: str):
+    """(R50 review r2 I8) The attribute tables of a HW specification, each as ``{field key: text}`` — a field written
+    over several rows joined (each distinct value once, the last value cell of a row). One reader for the HW requirement
+    and the HW design parsers: two copies drifted on empty values. Raises if the file cannot be read."""
+    from docx import Document
+    for table in Document(path).tables:
+        parts: dict[str, list[str]] = {}
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if len(cells) < 2 or not cells[0]:
+                continue
+            values = [c for c in cells[1:] if c and c != cells[0]]
+            bucket = parts.setdefault(_field_key(cells[0]), [])
+            if values and values[-1] not in bucket:
+                bucket.append(values[-1])
+        yield {k: "\n".join(v) for k, v in parts.items()}
+
+
+def _formula_scales(text: str) -> list[dict[str, str]]:
+    """(R50) The monitor-node ratios a text writes: ``k`` and the side the monitor is on — ``to_source`` (display) is what
+    a node value is multiplied by on the quantity's own scale (``Sensor Power Monitor = Sensor Power *0.5`` → 2;
+    ``Battery Voltage = Monitor Voltage * 9`` → 9). A formula whose both or neither side is a monitor says nothing about
+    which is the node; (review W3a / I4) one between a current and a voltage, of a time, or with an offset is no ratio."""
+    out = []
+    for m in _HW_FORMULA.finditer(text):
+        k = _decimal(m.group("k"))
+        lhs, rhs = m.group("lhs"), m.group("rhs")
+        lhs_monitor, rhs_monitor = bool(_MONITOR_WORD.search(lhs)), bool(_MONITOR_WORD.search(rhs))
+        if not k or lhs_monitor == rhs_monitor or _NOT_A_NODE.search(lhs) or _NOT_A_NODE.search(rhs):
+            continue
+        units = {u.upper().lstrip("M") for side in (lhs, rhs) for u in _FORMULA_UNIT.findall(side)}
+        mixed = (_CURRENT_WORD.search(lhs) and _VOLTAGE_WORD.search(rhs)) or (_VOLTAGE_WORD.search(lhs)
+                                                                               and _CURRENT_WORD.search(rhs))
+        if len(units) > 1 or mixed:
+            continue
+        side = "lhs" if lhs_monitor else "rhs"
+        out.append({"k": _plain(k), "side": side, "to_source": _plain(_tidy(_to_source(Decimal(1), k, side))),
+                    "via": m.group(0).strip(), "formula": m.group(0).strip()})
+    return out
+
+
+def _to_source(x: Decimal, k: Decimal, side: str) -> Decimal:
+    """A node value ``x`` on the quantity's own scale: ``monitor = source * k`` → ``x / k``; ``source = monitor * k`` →
+    ``x * k`` (exact division — ``0.15 / 0.3`` is ``0.5``, never ``0.4999…``)."""
+    return x / k if side == "lhs" else x * k
+
+
+def _to_node(x: Decimal, k: Decimal, side: str) -> Decimal:
+    return x * k if side == "lhs" else x / k
+
+
+def _tidy(d: Decimal) -> Decimal:
+    """(review I4) A non-terminating quotient (``1 / 0.3``) rounded up to six decimals — a tolerance only grows."""
+    exponent = d.as_tuple().exponent
+    return d.quantize(Decimal("0.000001"), rounding="ROUND_CEILING") if isinstance(exponent, int) and exponent < -6 else d
+
+
+def parse_hw_design_docx(path: str) -> dict[str, dict[str, Any]]:
+    """(R50) ``{HW design ID: {"name", "related": [HW requirement IDs], "scales": [...]}}`` from a HW architecture design
+    specification (``ID | HwC_07``, ``Description | … Sensor Power Monitor = Sensor Power *0.5``, ``Related ID |
+    HwTR_0701, HwTSR_0203``). A field written over several rows is read whole, as the HW requirements (review I4).
+    Raises if the file cannot be read: the caller discloses it."""
+    out: dict[str, dict[str, Any]] = {}
+    for cells_map in _attribute_maps(path):
+        did = cells_map.get("id", "")
+        if not HW_ID.fullmatch(did) or did in out:
+            continue
+        out[did] = {"name": cells_map.get("name", ""),
+                    "related": list(dict.fromkeys(HW_ID.findall(cells_map.get("related id", "")))),
+                    "scales": [dict(s, via=f"{did} {cells_map.get('name', '')}: {s['via']}".strip(), source="design")
+                               for s in _formula_scales("\n".join(cells_map.get(_field_key(f), "")
+                                                                  for f in ("Description", "Range")))]}
+    return out
+
+
+def load_hw_design(path: str | None) -> tuple[dict[str, dict[str, Any]] | None, dict[str, Any] | None]:
+    """(R50) As `load_hw_requirements`, for the HW design specification."""
+    if not path:
+        return None, None
+    name = re.split(r"[\\/]", str(path))[-1]
+    try:
+        blocks = parse_hw_design_docx(str(path))
+    except Exception as exc:  # noqa: BLE001 — an unreadable optional input is disclosed, not fatal
+        return None, {"file": name, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return blocks, {"file": name, "blocks": len(blocks),
+                    "blocks_with_formula": sum(1 for b in blocks.values() if b["scales"])}
+
+
+def apply_hw_design(hw: dict[str, dict[str, Any]], design: dict[str, dict[str, Any]] | None) -> dict[str, int]:
+    """(R50) Give each HW requirement block that writes a monitor node (review W3b — ``Monitor전압: 2.5V(±0.15V)``; a
+    power switch's 5 V output is the source, not a node) the one ratio its own text or the design blocks citing it write
+    (``scale`` — with its ``source``, own or design: review W4); two different ratios are a conflict, not a choice
+    (``scale_conflict`` — shown, review W6). Returns the blocks given one, by source."""
+    given = {"design": 0, "own": 0}
+    for hid, block in hw.items():
+        if not block.get("monitor_node"):
+            continue
+        scales = list(block.get("scales") or [])
+        scales += [s for d in (design or {}).values() if hid in d["related"] for s in d["scales"]]
+        ratios = {Decimal(s["to_source"]) for s in scales}
+        if len(ratios) == 1:
+            block["scale"] = scales[0]
+            block["to_source"], block["scale_via"] = scales[0]["to_source"], scales[0]["via"]
+            given[scales[0]["source"]] += 1
+        elif len(ratios) > 1:
+            block["scale_conflict"] = [s["via"] for s in scales]
+    return given
+
+
+def hsis_rows_from_signals(signals: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """(R50 review I3) The HSIS signals the STS generator already reads (`generators.sts._load_hsis_signals` — header-based,
+    cached, both layouts) as rows: ``{"id", "vars", "ids" (the Related ID column's system IDs), "nets" (the signal name
+    when it is a net, ``VCC_HALL_MON``), "name"}``. A signal with no SW variable is no row."""
+    rows = []
+    for s in signals or []:
+        sw_vars = list(dict.fromkeys(_SW_VAR.findall(str(s.get("sw_var_name") or ""))))
+        if not sw_vars:
+            continue
+        name = str(s.get("signal_name") or "").strip()
+        rows.append({"id": str(s.get("id") or ""), "vars": sw_vars,
+                     "ids": sorted(set(SYSTEM_ID.findall(str(s.get("related_id") or "")))),
+                     "nets": [name] if _NET.fullmatch(name) else [], "name": name})
+    return rows
+
+
+def _bare(var: str) -> str:
+    return _SW_LAYER.sub("", var).lower()
+
+
+def _hsis_row(subject: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """(R50) The one HSIS row of a SW variable — the same name, else the same name under another layer prefix (the
+    direction kept — review I2). The row is returned with the variable it matched (``matched`` — review I1)."""
+    same = _hsis_matches(subject, rows)
+    if len({id(r) for r, _v in same}) != 1:
+        return None
+    row, var = same[0]
+    return {**row, "matched": var}
+
+
+def _hsis_matches(subject: str, rows: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
+    """Every ``(row, variable)`` a SW variable matches — the same name, else under another layer prefix."""
+    if not subject or not _SW_VAR.fullmatch(subject):
+        return []
+    same = [(r, subject) for r in rows if subject in r["vars"]]
+    return same or [(r, v) for r in rows for v in r["vars"] if _bare(v) == _bare(subject)]
+
+
+def _name_words(*texts: str) -> set[str]:
+    """(review W2) The words of a name that say which signal it is — ``Hall Sensor Block 전원 Monitor`` → {hall, sensor},
+    ``u16g_ApiIn_MagnetLevel`` · ``V_MAGNET_MON`` → {magnet}; generic words (power, monitor, 전원 …) dropped."""
+    words = set()
+    for text in texts:
+        for part in re.split(r"[^A-Za-z0-9가-힣]+", str(text or "")):     # ``u16g`` · ``ApiIn`` · ``MagnetLevel``
+            if not re.fullmatch(r"[us]\d+[gs]?", part):
+                words |= {w.lower() for w in _NAME_TOKEN.findall(part)}
+    return {w for w in words if len(w) > 1 and w not in _GENERIC_WORDS}
+
+
+def _names_agree(a: set[str], b: set[str]) -> bool | None:
+    """``True`` when two names share a word (``bat`` · ``battery`` — one the other's start, 3 letters at least),
+    ``False`` when both name something and nothing is shared, ``None`` when either names nothing particular."""
+    if not a or not b:
+        return None
+    if all(re.fullmatch(r"[가-힣]+", w) for w in a) != all(re.fullmatch(r"[가-힣]+", w) for w in b) and \
+            (all(re.fullmatch(r"[가-힣]+", w) for w in a) or all(re.fullmatch(r"[가-힣]+", w) for w in b)):
+        return None         # (review r2 I1) ``배터리 전압 모니터`` vs ``Battery Power``: not comparable, not "different"
+    return any(x == y or (min(len(x), len(y)) >= 3 and (x.startswith(y) or y.startswith(x))) for x in a for y in b)
+
+
+def _row_words(row: dict[str, Any]) -> set[str]:
+    """(review r2 I1) The row's name, nets and the variable the fact matched — not every variable of the row (HD's LIN
+    row lists 32: its words agreed with any block name)."""
+    return _name_words(row.get("name") or "", *row.get("nets", []), row.get("matched") or "")
 
 
 def load_hw_requirements(path: str | None) -> tuple[dict[str, dict[str, Any]] | None, dict[str, Any] | None]:
@@ -1037,15 +1242,20 @@ def _on_scale(block: dict[str, Any], base: str, value: Decimal) -> bool:
     return False
 
 
-def hw_tolerances_for(req: dict[str, Any], evidence: dict[str, Any],
-                      hw: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def hw_tolerances_for(req: dict[str, Any], evidence: dict[str, Any], hw: dict[str, dict[str, Any]],
+                      hsis_rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """(R49) The HW tolerances that may bound how a boundary group's value is measured: blocks citing a system ID the
     requirement cites, a tolerance in the value's unit (``±0.15V`` for ``4.85V``, ``mV`` too) or a relative one
     (``±3%``) of a block that measures that unit. Each: the block, the words, the size at the value (in the value's unit;
     ``None`` when an absolute tolerance is written on another scale — ``scale_known`` false), the shared IDs, whether
     the block cites the system block the group's fact comes from (``direct``) and whether the step spacing lies inside.
-    Direct first, then the most shared IDs — a hub block (cited by every power requirement) links several; the caller
-    says the monitor path is undecided when more than one block remains (`hw_tolerance_summary`)."""
+    Direct first, then the HSIS row's block, then the most shared IDs — a hub block (cited by every power requirement)
+    links several; the caller says the monitor path is undecided when more than one block remains
+    (`hw_tolerance_summary`). (R50) An absolute tolerance off the value's scale is put on it by the block's one
+    monitor-node ratio (`apply_hw_design`) when the value then is on the node's scale (``scaled_by``) — unless the HSIS
+    row of the fact's SW signal names another node than the formula (review W2: ``scale_net_mismatch``, not scaled);
+    the HSIS row marks the one block it points to (``hsis`` — `_hsis_pick`), or the block it points to whose name is
+    another signal's (``hsis_mismatch`` — no path). ``hsis_rows`` ``None``: HSIS not given."""
     unit = str(evidence.get("unit") or "")
     cited = set(cited_system_ids(req))
     value, step = _decimal(evidence.get("value")), _decimal(evidence.get("step"))
@@ -1053,12 +1263,14 @@ def hw_tolerances_for(req: dict[str, Any], evidence: dict[str, Any],
         return []
     base, scale = _UNIT_SCALE.get(unit, (unit, Decimal(1)))
     source_id = ((evidence.get("source") or {}).get("id"))
+    row = _hsis_row(str(evidence.get("signal") or ""), hsis_rows or [])
     out = []
     for hid, block in hw.items():
         shared = [s for s in block["related"] if s in cited]
         if not shared:
             continue
         for tol in block["tolerances"]:
+            scaled = mismatch = None
             if tol["unit"] == "%":
                 if base not in {_UNIT_SCALE.get(u, (u, Decimal(1)))[0] for u in tol["measured_units"]}:
                     continue            # the Battery monitor's ±3% is not a hold time's
@@ -1069,14 +1281,92 @@ def hw_tolerances_for(req: dict[str, Any], evidence: dict[str, Any],
                     continue
                 written = Decimal(tol["value"]) * t_scale / scale
                 size = written if _on_scale(block, base, value * scale) else None
+                ratio = block.get("scale")
+                if size is None and ratio and _on_scale(block, base, _to_node(value * scale, Decimal(ratio["k"]),
+                                                                                ratio["side"])):
+                    agree = _names_agree(_name_words(ratio["formula"]), _row_words(row)) if row else None
+                    if row and agree is False:
+                        mismatch = {"formula": ratio["via"], "row": row["id"] or row["matched"],
+                                    "name": row.get("name") or row["matched"]}
+                    else:
+                        # the tolerance is the node's; on the value's scale through the ratio
+                        size = _tidy(_to_source(written, Decimal(ratio["k"]), ratio["side"]))
+                        signal = str(evidence.get("signal") or "")
+                        scaled = {"via": ratio["via"], "source": ratio["source"],
+                                  "check": ("confirmed" if agree else "unchecked" if row else
+                                            "no_hsis" if hsis_rows is None else
+                                            "not_sw" if not _SW_VAR.fullmatch(signal) else
+                                            "row_ambiguous" if _hsis_matches(signal, hsis_rows) else "no_row")}
             out.append({"hw_id": hid, "name": block["name"], "text": tol["text"], "shared": shared,
+                        "scaled_by": scaled["via"] if scaled else None, "scale": scaled,
+                        "scale_net_mismatch": mismatch,
+                        # (review W6) two ratios for the block: shown, never chosen
+                        "scale_conflict": (block.get("scale_conflict") if size is None and tol["unit"] != "%"
+                                           else None),
                         "direct": bool(source_id) and source_id in block["related"],
                         "scale_known": size is not None, "size": _plain(size) if size is not None else None,
                         # on an unknown scale, the number as written (in the value's unit) — never a point
                         "written_size": _plain(written) if size is None else None,
                         "unit": unit, "inside": step < size if size is not None else None})
     out.sort(key=lambda t: (not t["direct"], -len(t["shared"]), t["hw_id"]))
+    # (review r2 I3) the fact's own system block cited decides first — HSIS picks nothing then (its mark would sit on a
+    #   candidate the summary does not use)
+    pick, refused = _hsis_pick(row, out, hw) if not any(t["direct"] for t in out) else (None, None)
+    for t in out:
+        t["hsis"] = pick if pick and t["hw_id"] == pick["hw_id"] else None
+        t["hsis_mismatch"] = refused if refused and t["hw_id"] == refused["hw_id"] else None
+    # (review C1) the HSIS block ahead of the other indirect ones: the evidence keeps the first `MAX_HW_TOLERANCES`, and
+    #   the note cites from what is kept
+    out.sort(key=lambda t: (not t["direct"], not t["hsis"], -len(t["shared"]), t["hw_id"]))
     return out
+
+
+def _net_in(net: str, text: str) -> bool:
+    """(review W5) A net as a whole token — ``VCC_BAT`` is not in ``VCC_BAT_MON``."""
+    return bool(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(net)}(?![A-Za-z0-9_-])", text))
+
+
+def _hsis_pick(row: dict[str, Any] | None, candidates: list[dict[str, Any]],
+               hw: dict[str, dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(R50) The one candidate block the HSIS row of the fact's SW signal points to: the row names a system ID only that
+    block cites among the candidates (a hub ID every candidate cites decides nothing), else a net the row names appears
+    whole in that block's text alone — among the blocks the IDs left when they left several (review W5). ``(pick, None)``;
+    ``(None, refused)`` when the pointed block's name names another signal than the row (review W2: ``Hall Sensor Block
+    전원 Monitor`` for ``V_MAGNET_MON`` — the documents disagree; no path is decided); ``(None, None)`` when no row, no one
+    block, or one candidate only. The pick carries the row's variable that matched (review I1)."""
+    blocks = list(dict.fromkeys(t["hw_id"] for t in candidates))
+    if not row or len(blocks) < 2:
+        return None, None
+    related = {b: set(hw[b]["related"]) for b in blocks}
+    own = {b: {i for i in related[b] if sum(i in related[o] for o in blocks) == 1} for b in blocks}
+    by_id = [b for b in blocks if own[b] & set(row["ids"])]
+    if len(by_id) == 1:
+        anchors = sorted(own[by_id[0]] & set(row["ids"]))
+        # (review r2 W2) HD ``SyTSR_0114``: HwTSR_0203 and HwTSR_0202 'Position Sensor 전원 Monitor' (no tolerance, so no
+        #   candidate) both cite it — unique among the candidates is not unique: the monitor block may be outside them.
+        #   (r3 Info 1) any anchor no other block cites decides; refused only when every anchor is shared outside
+        outside = {a: [o for o in hw if o not in related and a in hw[o]["related"]] for a in anchors}
+        clean = [a for a in anchors if not outside[a]]
+        if not clean:
+            anchor = anchors[0]
+            return None, {"hw_id": by_id[0], "row": row["id"], "var": row["matched"], "by": "system_id", "anchor": anchor,
+                          "kind": "outside", "outside": [f"{o} {hw[o]['name']}".strip() for o in outside[anchor][:3]],
+                          # (r3 W4) "no tolerance" only when none of them writes one — else "not a candidate"
+                          "outside_without_tolerance": not any(hw[o]["tolerances"] for o in outside[anchor]),
+                          "block_name": hw[by_id[0]]["name"], "row_name": row.get("name") or row["matched"]}
+        found = {"hw_id": by_id[0], "row": row["id"], "var": row["matched"], "by": "system_id", "anchor": clean[0]}
+    else:
+        pool = by_id or blocks
+        by_net = [b for b in pool if any(_net_in(n, hw[b].get("full_text") or "") for n in row["nets"])]
+        if len(by_net) != 1:
+            return None, None
+        found = {"hw_id": by_net[0], "row": row["id"], "var": row["matched"], "by": "net",
+                 "anchor": next(n for n in row["nets"] if _net_in(n, hw[by_net[0]].get("full_text") or ""))}
+    agree = _names_agree(_name_words(hw[found["hw_id"]]["name"]), _row_words(row))
+    if agree is False:
+        return None, dict(found, kind="name", block_name=hw[found["hw_id"]]["name"],
+                          row_name=row.get("name") or row["matched"])
+    return dict(found, names_checked=bool(agree)), None
 
 
 def hw_tolerance_summary(evidence: dict[str, Any], tolerances: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
@@ -1085,19 +1375,30 @@ def hw_tolerance_summary(evidence: dict[str, Any], tolerances: list[dict[str, An
     monitor path remains (``certain``), the largest size on a known scale — ``None`` when there is none, or when a
     candidate on an unknown scale writes as much or more (review r2 W1: the points would not be outside it) — and whether
     the step spacing is, or may be, inside any candidate (an unknown scale compared with its written number: a divider
-    to a larger input scale only widens it — r2 I2)."""
+    to a larger input scale only widens it — r2 I2). (R50 review) What the HSIS and the ratios could not settle:
+    ``path_refused`` (the row points to a block named for another signal), ``scale_unconfirmed`` (scaled without the
+    row's net to check the formula against), ``net_mismatch`` (the formula is another node's — not scaled),
+    ``scale_conflict`` (two ratios)."""
     tolerances = tolerances if tolerances is not None else (evidence.get("hw_tolerance") or [])
     if not tolerances:
         return None
-    relevant = [t for t in tolerances if t["direct"]] or tolerances
+    # the fact's own system block cited, else (R50) the HSIS row's block, else every candidate
+    relevant = [t for t in tolerances if t["direct"]] or [t for t in tolerances if t.get("hsis")] or tolerances
     known = [Decimal(t["size"]) for t in relevant if t["scale_known"]]
     written = [Decimal(t["written_size"]) for t in relevant if not t["scale_known"] and t.get("written_size")]
     step = Decimal(str(evidence["step"]))
     largest = max(known) if known else None
     inside = (largest is not None and step < largest) or any(step < w for w in written)
     bounded = largest is not None and not any(w >= largest for w in written)
-    return {"blocks": list(dict.fromkeys(t["hw_id"] for t in relevant)),
-            "certain": len({t["hw_id"] for t in relevant}) == 1,
+    certain = len({t["hw_id"] for t in relevant}) == 1
+    return {"blocks": list(dict.fromkeys(t["hw_id"] for t in relevant)), "certain": certain,
+            "by_hsis": certain and not any(t["direct"] for t in relevant) and any(t.get("hsis") for t in relevant),
+            "scaled": any(t.get("scaled_by") for t in relevant),
+            "scale_unconfirmed": any((t.get("scale") or {}).get("check") not in (None, "confirmed") for t in relevant),
+            "net_mismatch": any(t.get("scale_net_mismatch") for t in relevant),
+            "scale_conflict": any(t.get("scale_conflict") for t in relevant),
+            "path_refused": next((t["hsis_mismatch"] for t in tolerances if t.get("hsis_mismatch")), None),
+            "scale": next((t["scale"] for t in relevant if t.get("scale")), None),
             "largest": _plain(largest) if bounded else None, "inside": inside}
 
 
@@ -1122,6 +1423,19 @@ def _tolerance_note(evidence: dict[str, Any]) -> str:
         return f"{t['hw_id']} ±{t['size']}{unit}" if t["scale_known"] else f"{t['hw_id']} {t['text'].split(':')[-1].strip()}(척도 불명)"
     who = said(tolerances[0]) if summary["certain"] else \
         "감시 경로 미정 — 후보 " + " · ".join(dict.fromkeys(said(t) for t in tolerances))
+    if summary.get("by_hsis"):
+        h = tolerances[0]["hsis"]
+        who += f", HSIS {h['row'] or h['var']} 로 경로 " + ("확정" if h.get("names_checked") else "정함(이름 대조 불가)")
+    refused = summary.get("path_refused")
+    if refused:
+        who += ", " + _refusal_text(refused)
+    scaled = summary.get("scale")
+    if scaled:
+        who += f", {_SCALE_SOURCE_TEXT[scaled['source']]}으로 척도 환산({_SCALE_CHECK_TEXT[scaled['check']]})"
+    if summary.get("net_mismatch"):
+        who += ", 분압식이 HSIS 의 다른 노드라 척도 환산 안 함(문서 확인)"
+    if summary.get("scale_conflict"):
+        who += ", 분압비 충돌(문서마다 다른 비율) — 척도 불명"
     head = (f"HW 측정 허용오차({who})가 경계 점 간격 {evidence['step']}{unit} 보다 큼 — HIL 에서는 경계 포함(이상/초과·이하/미만)을 "
             "가를 수 없다: SW 변수를 직접 주입해 판정하거나")
     if summary["largest"] is None:
@@ -1139,6 +1453,19 @@ def _tolerance_note(evidence: dict[str, Any]) -> str:
             f"방향만 확인{caveat} ('Requirement Evidence' HW Tolerance 열)")
 
 
+def _refusal_text(r: dict[str, Any]) -> str:
+    """(R50 review W2, r2 W2) Why the HSIS row did not settle the path — the ID it names is cited by a HW block without a
+    tolerance too (the monitor block may be outside the candidates), or the block it points to is named for another
+    signal (the monitor block is outside the candidates, or the documents disagree). Shown, never decided."""
+    row = r["row"] or r["var"]
+    if r.get("kind") == "outside":
+        which = "허용오차 없는 HW 블록" if r.get("outside_without_tolerance", True) else "후보가 아닌 HW 블록"
+        return (f"HSIS {row} 의 시스템 ID {r['anchor']} 를 {which} {' · '.join(r['outside'])} 도 인용 — "
+                "감시 블록이 후보 밖일 수 있어 경로 미정(확인)")
+    return (f"HSIS {row}({r['row_name']}) 가 가리키는 {r['hw_id']}({r['block_name']}) 는 이름이 다른 신호 — 감시 블록이 "
+            "후보 밖이거나 문서가 서로 다름, 경로로 쓰지 않음(확인)")
+
+
 def _tolerance_text(evidence: dict[str, Any]) -> str:
     """(R49) The 'Requirement Evidence' cell: the linked tolerances — or why there are none (review I1: not given,
     none linked)."""
@@ -1150,10 +1477,24 @@ def _tolerance_text(evidence: dict[str, Any]) -> str:
     unit = str(evidence.get("unit") or "")
 
     def one(t: dict) -> str:
-        size = (f"±{t['size']}{unit}" + (f" [한 눈금 {evidence['step']}{unit} 가 그 안]" if t["inside"] else "")
-                if t["scale_known"] else "척도 불명(블록이 적은 값의 척도와 다름 — 분압비 확인)")
+        if t["scale_known"]:
+            size = f"±{t['size']}{unit}" + (f" [한 눈금 {evidence['step']}{unit} 가 그 안]" if t["inside"] else "")
+        elif t.get("scale_conflict"):
+            size = "척도 불명 — 분압비 충돌: " + " ↔ ".join(t["scale_conflict"])         # (R50 review W6)
+        else:
+            size = "척도 불명(블록이 적은 값의 척도와 다름 — 분압비 확인)"
+        hsis, refused, mismatch, scaled = t.get("hsis"), t.get("hsis_mismatch"), t.get("scale_net_mismatch"), t.get("scale")
+        how = {"system_id": "시스템 ID ", "net": "네트 "}
         return (f"{t['hw_id']} {t['name']}: {t['text']} → {size} [공유 {', '.join(t['shared'])}]"
-                + (" [이 문장의 시스템 블록 인용]" if t["direct"] else ""))
+                + (" [이 문장의 시스템 블록 인용]" if t["direct"] else "")
+                # (R50) how the path and the scale were decided — and (review W2) where the documents disagree
+                + (f" [HSIS {hsis['row'] or '—'} {hsis['var']} → {how[hsis['by']]}{hsis['anchor']}"
+                   + ("" if hsis.get("names_checked") else " · 이름 대조 불가") + "]" if hsis else "")
+                + (f" [{_refusal_text(refused)}]" if refused else "")
+                + (f" [척도 환산 — {scaled['via']} · {_SCALE_SOURCE_TEXT[scaled['source']]} · "
+                   f"{_SCALE_CHECK_TEXT[scaled['check']]}]" if scaled else "")
+                + (f" [분압식 {mismatch['formula']} 은 HSIS {mismatch['row']}({mismatch['name']}) 와 다른 노드 — 환산 "
+                   "안 함]" if mismatch else ""))
     return ("" if summary["certain"] else "감시 경로 미정 — ") + "; ".join(one(t) for t in evidence["hw_tolerance"])
 
 
@@ -1674,7 +2015,8 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
                                     classify, max_steps: int = 12,
                                     system: dict[str, dict[str, Any]] | None = None,
                                     review_out: list[dict[str, Any]] | None = None,
-                                    hw: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                                    hw: dict[str, dict[str, Any]] | None = None,
+                                    hsis_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Append requirement-boundary TCs after each requirement's existing TCs, numbering on from them. A fact's points
     never split across TCs; a TC holds as many whole facts as fit in ``max_steps`` (at least one), all from the same
     document (the SRS, or the system requirements it cites — R29). Returns the counts for the quality report.
@@ -1682,7 +2024,8 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
     facts a reader can settle (one row per sentence and fact, however many requirements cite that block) and the
     requirement-document inclusion conflicts; the report keeps the first `MAX_REVIEW_ITEMS` and the counts.
     (R49) ``hw`` — the parsed HW requirement blocks (`load_hw_requirements`): each group gets its linked tolerances
-    (`hw_tolerances_for`), and a TC whose step spacing lies inside one says so in its precondition."""
+    (`hw_tolerances_for`), and a TC whose step spacing lies inside one says so in its precondition. (R50) ``hsis_rows``
+    — `hsis_rows_from_signals`; ``None`` when HSIS was not given (``[]``: given, no SW-variable row)."""
     stats: Counter = Counter()
     fanout: Counter = Counter()
     review: list[dict[str, Any]] = []
@@ -1702,7 +2045,7 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         groups = boundary_steps(req, stats, system, review)
         if hw is not None:
             for g in groups:
-                tolerances = hw_tolerances_for(req, g["evidence"], hw)
+                tolerances = hw_tolerances_for(req, g["evidence"], hw, hsis_rows)
                 summary = hw_tolerance_summary(g["evidence"], tolerances)       # (review r2 I1) before the cut
                 g["evidence"]["hw_tolerance"] = tolerances[:MAX_HW_TOLERANCES]
                 if summary:
@@ -1711,6 +2054,33 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
                     stats["hw_tolerance_inside_step"] += summary["inside"]
                     stats["hw_tolerance_path_undecided"] += not summary["certain"]      # (review C2)
                     stats["hw_tolerance_scale_unknown"] += summary["largest"] is None  # (review W1)
+                    stats["hw_tolerance_path_by_hsis"] += bool(summary["by_hsis"])     # (R50)
+                    stats["hw_tolerance_scaled"] += bool(summary["scaled"])
+                    # (R50 review) what the HSIS and the ratios could not settle — shown, not decided
+                    refused = summary["path_refused"] or {}
+                    stats["hw_tolerance_path_refused"] += refused.get("kind") == "name"
+                    stats["hw_tolerance_path_outside"] += refused.get("kind") == "outside"     # (review r2 W2)
+                    # (review r3 W1) a group with several of these is one boundary to settle, never two
+                    stats["hw_tolerance_to_settle"] += bool(refused or summary["net_mismatch"]
+                                                            or summary["scale_conflict"])
+                    if not summary["certain"] and any(t["direct"] for t in tolerances):
+                        # (review r3 W3) the fact's own system block is cited by several HW blocks: HSIS is not applied
+                        stats["hw_tolerance_undecided_direct_hub"] += 1
+                    stats["hw_tolerance_scale_unconfirmed"] += bool(summary["scale_unconfirmed"])
+                    stats["hw_tolerance_scale_net_mismatch"] += bool(summary["net_mismatch"])
+                    stats["hw_tolerance_scale_conflict"] += bool(summary["scale_conflict"])
+                    if hsis_rows is not None and not summary["certain"] and not summary["path_refused"] and \
+                            not any(t["direct"] for t in tolerances):       # (review r2 I3) HSIS does not decide there
+                        # (review I8) why HSIS did not narrow: the subject is no SW variable, or its row is not there
+                        signal = str(g["evidence"].get("signal") or "")
+                        if not _SW_VAR.fullmatch(signal):
+                            stats["hw_tolerance_undecided_not_sw"] += 1
+                        elif len({id(r) for r, _v in _hsis_matches(signal, hsis_rows)}) > 1:
+                            stats["hw_tolerance_undecided_row_ambiguous"] += 1           # (review r2 I7)
+                        elif _hsis_row(signal, hsis_rows) is None:
+                            stats["hw_tolerance_undecided_no_row"] += 1
+                        else:   # the row names no ID or net only one candidate has
+                            stats["hw_tolerance_undecided_row_silent"] += 1
         if system is not None:
             compared_blocks += sum(1 for sid in cited_system_ids(req) if sid in system)
             try:
@@ -1761,8 +2131,15 @@ def append_requirement_boundary_tcs(test_cases: list[dict], requirements: list[d
         test_cases.sort(key=lambda tc: order.get(str(tc.get("srs_id") or ""), len(order)))  # stable
     if hw is not None:     # (R49) 0 is "looked, none linked" — absent is "not given"
         for k in ("hw_tolerance_groups", "hw_tolerance_inside_step", "hw_tolerance_path_undecided",
-                  "hw_tolerance_scale_unknown"):
+                  "hw_tolerance_scale_unknown", "hw_tolerance_path_by_hsis", "hw_tolerance_scaled",
+                  "hw_tolerance_path_refused", "hw_tolerance_path_outside", "hw_tolerance_scale_unconfirmed",
+                  "hw_tolerance_scale_net_mismatch", "hw_tolerance_scale_conflict", "hw_tolerance_to_settle",
+                  "hw_tolerance_undecided_direct_hub"):
             stats[k] += 0
+        if hsis_rows is not None:
+            for k in ("hw_tolerance_undecided_not_sw", "hw_tolerance_undecided_no_row",
+                      "hw_tolerance_undecided_row_silent", "hw_tolerance_undecided_row_ambiguous"):
+                stats[k] += 0
     out: dict[str, Any] = {k: v for k, v in sorted(stats.items())}
     # (R45) one row per held-back sentence and fact: a block cited by several requirements names them all
     merged: dict[tuple, dict[str, Any]] = {}

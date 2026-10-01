@@ -135,7 +135,21 @@ class TestNoForeignHsis:
         from backend.routers import local
         from tests.unit._source_probe import source_of
 
-        assert source_of(getattr(local, name)).count('_no_discovery, label="HSIS")') == 1, name
+        src = source_of(getattr(local, name))
+        if name.startswith("local_sts_"):
+            # (R50 review r2 W1) the STS handlers localise HSIS through `attach_sts_hsis` — the reason a given one could not
+            #   be used reaches the disclosure; still no discovery (the helper is pinned below)
+            assert src.count("attach_sts_hsis(") == 1 and '_no_discovery, label="HSIS")' not in src, name
+        else:
+            assert src.count('_no_discovery, label="HSIS")') == 1, name
+
+    def test_the_sts_hsis_helper_never_discovers(self):
+        """(R50 review r3 I8) `attach_sts_hsis` localises what was given and nothing else."""
+        from backend.services import resolver_helpers
+        from tests.unit._source_probe import source_of
+
+        src = source_of(resolver_helpers.attach_sts_hsis)
+        assert "resolve_builder_input(hsis_path" in src and "_discover" not in src and "glob" not in src
 
     def test_the_discovery_function_is_gone(self):
         from backend.routers import local

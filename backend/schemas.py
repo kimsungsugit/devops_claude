@@ -155,6 +155,9 @@ class ScmLinkedDocs(BaseModel):
     # (R49) HW 요구사항서(HRS·HwRS) — HW 블록의 Related ID 가 시스템 ID 를 가리킨다. STS 경계 TC 옆에 그 블록의 측정
     #   허용오차(``허용 오차: ±3%``)를 인용한다(2026-09-30 Cloudium 스캔에서 찾은 문서).
     hwrs: str = ""
+    # (R50) HW 설계서(HDS·HwDS) — 부품·인터페이스 블록이 적은 감시 노드 분압식(``Monitor = Power *0.5``)으로 HW 요구사항서의
+    #   노드 허용오차를 값의 척도로 환산한다(2026-09-30 Cloudium 스캔에서 찾은 문서).
+    hwds: str = ""
     # 문제관리 대장(Test Defect List·Project Issue List) — 코드 변경이 **문서로 확인된 결함 수정**인지의 근거.
     problem_list: str = ""
     # FW 배포 기록(Software Release Sheet 등) — 파일 또는 폴더, 복수. 배포별 변경 설명.
