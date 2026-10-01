@@ -533,6 +533,12 @@ KB_CATEGORIES = [
     "uds_globals",
     "uds_requirements",
 ]
+# (R53) STS generation's requirement-document findings (`scripts/sts_findings_to_kb.py`) — their own category,
+#   asked by the chat's requirement-findings block (`workflow/retrieval/hybrid.requirement_findings_hits`) for the IDs a
+#   question names and kept out of its report hits; never a stage's below, so the local UDS AI does not put another
+#   project's review items in its prompts. Reserved: an upload cannot use it (`/api/local/rag/ingest-files`). An
+#   uncategorised search still sees them (`/api/local/rag/query`, the opt-in UDS description enrichment fallback)
+RAG_STS_FINDINGS_CATEGORY = "sts_findings"
 RAG_CATEGORY_BY_STAGE = {
     "build_fix": "build",
     "syntax_fix": "syntax",

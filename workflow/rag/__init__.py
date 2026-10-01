@@ -1285,6 +1285,27 @@ class KnowledgeBase:
                     pass
         self._delete_db_rows(remove_ids)
 
+    def remove_documents(self, ids: Iterable[Optional[str]]) -> int:
+        """주어진 id 의 엔트리를 지운다 — 메모리(`self.data`)·엔트리 JSON 파일(`{id}.json`)·DB 행 모두.
+
+        (R53) 같은 출처를 다시 적재할 때 **사라진 발견 사항**을 지우는 용도다(STS 요구 검토 항목은 문서가 고쳐지면 없어진다
+        — 남기면 채팅 근거로 낡은 결함이 계속 인용된다). 파일 이름은 `_append_new_entry` 가 쓰는 `{id}.json` 이다 —
+        `source_file` 은 `add_document` 에선 원문 출처라 그걸로 지우면 남는다(`_enforce_max_entries` 는 그 필드를 쓴다). sqlite 가 켜져 있으면 다음 로드는 DB 에서 오므로 DB 행 삭제가 본체다.
+        반환: 메모리에서 지운 수."""
+        id_set = {str(i) for i in ids if i}
+        if not id_set:
+            return 0
+        with self._lock:
+            removed = [e for e in self.data if str(e.get("id")) in id_set]
+            self.data = [e for e in self.data if str(e.get("id")) not in id_set]
+        for entry_id in id_set:
+            try:
+                (self.base_dir / f"{entry_id}.json").unlink(missing_ok=True)
+            except OSError:
+                _rag_logger.warning("KB 엔트리 파일 삭제 실패: %s", entry_id, exc_info=True)
+        self._delete_db_rows(id_set)
+        return len(removed)
+
     def stats(self) -> Dict[str, Any]:
         by_category: Dict[str, int] = {}
         by_source: Dict[str, int] = {}

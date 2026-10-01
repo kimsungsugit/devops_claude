@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1294,8 +1294,71 @@ def _build_context(
         sources.extend(retrieval_sources)
         citations.extend(retrieval_citations)
 
+    # (R53) STS generation's findings about the requirement / HW IDs the question names — a block of its own, outside
+    #   the KB policy gate (general questions never reached the retrieval above) and outside its slots (the docs search
+    #   fills them); first in the evidence list (it keeps six), the most specific evidence for a question naming an ID
+    if not _cancelled():
+        f_text, f_sources, f_citations = _requirement_findings_hints(question, notes_out=notes_out,
+                                                                     budget=FINDINGS_BLOCK_CHARS)
+        if f_text:
+            blocks.append(_format_block("requirement_findings", _trim_text(f_text, max_chars=FINDINGS_BLOCK_CHARS)))
+            sources[:0] = f_sources
+            citations[:0] = f_citations
+
     context = "\n".join([b for b in blocks if b])
     return context.strip(), sources, citations
+
+
+FINDINGS_BLOCK_CHARS = 2400
+_MIN_FINDING_CHARS = 300      # (review r5 I-1) below this a finding is its title only — fewer findings, each readable
+
+
+def _requirement_findings_hints(question: str, notes_out: Optional[List[str]] = None,
+                                budget: int = FINDINGS_BLOCK_CHARS) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """(R53) ``(text, sources, citations)`` of `workflow.retrieval.hybrid.requirement_findings_hits` — empty when the
+    question names no requirement / HW ID or nothing about it was found.
+
+    (review r4 W1) Each hit gets an equal share of ``budget`` — the block's trim cut the third and fourth hit off while
+    the evidence list still cited all four (the model answered from two, the user saw four). The title is said once:
+    the label is the chunk's first line; the ingest's preamble line (``프로젝트 … 검토 항목.``, for the embedding) is left
+    out (review r5 I-2). No more hits than ``budget`` holds at `_MIN_FINDING_CHARS` each (r5 I-1).
+
+    (review r5 W-B · r6 W-1) Two findings with one title keep both in the evidence list — it folds equal labels: each
+    names its source document, and if that is one too (two source lines of one block), its REQ number. The citation's
+    snippet is the body, not the title again (r6 I-2 — the title and the preamble took 190 of its 240 characters). (r5 I-7) A failed or impossible search is said
+    to the model too, not only to the user's notes — "none found" and "could not look" are no longer the same."""
+    from workflow.retrieval.hybrid import requirement_findings_hits
+    before = len(notes_out) if notes_out is not None else 0
+    local_notes: List[str] = notes_out if notes_out is not None else []
+    hits = requirement_findings_hits(question, notes_out=local_notes)
+    if not hits:
+        failed = [n for n in local_notes[before:] if n.startswith("요구 문서 발견 사항")]
+        return ("\n".join(f"- (근거 없음 — 찾지 못한 게 아니라 볼 수 없었다) {n}" for n in failed), [], [])
+    hits = hits[:max(1, budget // _MIN_FINDING_CHARS)]
+    lines, sources, citations = [], [], []
+    share = (budget - 8 * len(hits)) // len(hits)
+    rows = []
+    for idx, hit in enumerate(hits, start=1):
+        snippet = str(hit.get("chunk_text") or "").strip()
+        label = str(hit.get("label") or f"finding-{idx}")
+        first, _sep, rest = snippet.partition("\n")
+        body = rest.strip() if label and first.strip().startswith(label) else snippet
+        if body.startswith("프로젝트 "):
+            body = body.partition("\n")[2].strip() or body
+        rows.append([idx, label, body, hit])
+    for step in ("source", "number"):
+        counts = Counter(r[1] for r in rows)
+        for r in rows:
+            if counts[r[1]] > 1:
+                where = re.search(r"(?m)^Source Document: *(.+)$", r[2]) if step == "source" else None
+                r[1] = f"{r[1]} · {where.group(1).strip()[:60]}" if where else f"{r[1]} (REQ#{r[0]})"
+    for idx, label, body, hit in rows:
+        line = f"- REQ#{idx} ({label}): {body}"
+        lines.append(line if len(line) <= share else line[:share - 1] + "…")
+        sources.append(f"requirement_findings:{label}")
+        citations.append({"source_type": "kb", "label": label, "uri": str(hit.get("uri") or ""), "path": "",
+                          "snippet": body[:240], "score": float(hit.get("score") or 0.0)})
+    return "\n".join(lines), sources, citations
 
 
 def _resolve_report_dir(report_dir: Optional[str], session_id: Optional[str]) -> Optional[Path]:

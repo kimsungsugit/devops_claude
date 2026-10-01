@@ -4242,6 +4242,10 @@ async def local_rag_ingest_files(
     max_chunks: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    # (R53 review r5 I-5) the STS findings' category is the chat's "STS 생성 결과" — an upload under it would be cited as
+    #   generated evidence, first in the answer
+    if str(category or "").strip().casefold() == str(getattr(config, "RAG_STS_FINDINGS_CATEGORY", "sts_findings")).casefold():
+        raise HTTPException(status_code=400, detail="reserved category: written by scripts/sts_findings_to_kb.py only")
     reject_upload_in_cloudium(*(files or []))
     report_dir = str(report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
     report_path = (repo_root / report_dir).resolve()
