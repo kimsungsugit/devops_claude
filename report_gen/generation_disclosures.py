@@ -1197,7 +1197,12 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "입력 열에 더하고 행을 다시 만들었다 — 설계서 입력 표와 다른 열이다. 기본 카탈로그 행의 자리·순서·설계 열 값은 정본 규모 "
             "문서와 같고 그 행에서 더한 입력은 고정값이다. 더한 입력의 범위(선언 타입 전폭, enum 은 그 번역 단위의 열거자 — 설계서·"
             "HSIS 는 이 이름을 적지 않았다)는 단독 경계(OAT)·행동 경계 행이 움직인다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 "
-            f"회차에 더한다(최대 {_show(_int(sr, 'max_rounds'))}회차 사용). 지역·매개변수·멤버 경로·const·volatile·부동소수 "
+            f"회차에 더한다(최대 {_show(_int(sr, 'max_rounds'))}회차 사용"
+            + (f" · 상한 {_show(_int(sr, 'round_cap'))}회차" if _int(sr, "round_cap") else "")
+            + (f" · 상한에서 멈춰 다음 회차가 더했을 이름 {_show(_int(sr, 'names_beyond_cap'))}"
+               f"(unit {_show(_int(sr, 'units_round_cap_reached'))}) — 그 이름을 읽는 칸은 [검증 필요]로 남는다"
+               if _int(sr, "units_round_cap_reached") else "")
+            + "). 지역·매개변수·멤버 경로·const·volatile·부동소수 "
             "객체와 경계값 표가 없는 타입(64비트 등)은 더하지 않는다"
             + (f"(더하지 않은 사유: {_dist(not_added)})" if not_added else "") + ". "
             + (f"입력 열 상한에 막힌 unit {_show(_int(sr, 'units_input_columns_full'))}. "
@@ -1209,7 +1214,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "'Input Scope' 열)."
             + (f" 입력 보완 중 오류로 설계 입력 목록 그대로 둔 unit {_show(_int(sr, 'errors'))} — 로그에 traceback 이 있다."
                if _int(sr, "errors") else ""),
-            tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors")))))
+            tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors"))
+                       or bool(_int(sr, "units_round_cap_reached")))))
     # (R19) MC/DC 채움 행 — 확장 프로파일에서만 기록된다
     mf = qr.get("mcdc_fill")
     if isinstance(mf, dict):

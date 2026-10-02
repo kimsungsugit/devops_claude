@@ -432,6 +432,7 @@ def test_the_summary_counts_units_names_reasons_and_what_remains():
     assert summarize_source_read_inputs(units) == {
         "units": 2, "units_with_added": 1, "names_added": 2, "slots_first_seen": 4,
         "not_added": {"float_object": 2, "input_columns_full": 1}, "units_input_columns_full": 1, "max_rounds": 2,
+        "round_cap": suts._SOURCE_READ_ROUNDS, "units_round_cap_reached": 0, "names_beyond_cap": 0,   # (R59)
         "units_with_remaining": 1, "names_remaining": 1, "errors": 0}
 
 
@@ -449,6 +450,7 @@ def test_the_disclosures_say_what_was_added_what_was_not_and_what_remains():
                  "고정값", "MC/DC"):
         assert text in add["note"], text
     assert "enum 값 집합 > HSIS" not in add["note"]   # review R1 W5: added names get no HSIS range
+    assert "상한" not in add["note"].replace("입력 열 상한", "")   # (R59 review I3) a report without the R59 keys
     assert add["tone"] == "warning"
     gap = items["suts_input_list_gaps"]
     assert gap["value"] == "함수 4 · 객체 7" and gap["tone"] == "warning"

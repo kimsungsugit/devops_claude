@@ -3203,7 +3203,10 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
 # `s_MoveStartClose_GainMeasure` 의 입력으로 **Open** gain 을 적었고 소스는 **Close** gain 을 읽는다(정본 SUTS 는 소스를 따랐다).
 # (R39) a struct member (``g.a`` · ``g.s.x`` · ``g.b[2]``) is a name too — the reference sets it by that name
 _SOURCE_READ_RE = re.compile(r"initial_value_not_in_inputs:([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?)(?![\w.\[])")
-_SOURCE_READ_ROUNDS = 3
+# (R59) 3 → 8: 더한 입력이 연 경로에서 보이는 이름은 분기 깊이만큼 회차가 든다 — 3 회차로는 KJPDS02_PV
+#   `s_MotorSpeedModeSelection_RearSet` 의 `u8g_DoorPreCtrl_CompensateLvl`(넷째 분기)이 남아 그 함수의 기대값이 1 칸뿐이었다
+#   (실험: 8 회차 34 칸). 새 이름이 없는 회차에서 멈추므로 상한은 그런 함수에만 든다.
+_SOURCE_READ_ROUNDS = 8
 
 
 def source_read_names(sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -3382,6 +3385,21 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         unit["input_vars"] = inputs + new
         record["rounds"] = _round + 1
         sequences = regenerate()
+    else:
+        # (R59) 상한 회차까지 이름을 더했다 — 상한이 탐색을 **잘랐는지**는 마지막 행들을 한 번 더 보고(다시 만들지 않고)
+        #   다음 회차가 더했을 이름이 있는지로 가린다(리뷰 R59 W1: 필요한 회차가 정확히 상한이면 자른 것이 아니다)
+        inputs = set(unit.get("input_vars") or [])
+        beyond = []
+        for name in source_read_names(sequences):
+            if name in inputs or name in record["added"] or name in record["not_added"]:
+                continue
+            typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
+            if not why:
+                why = scope_input_types(unit, [name])[2].get(name, "")
+            if not why:
+                beyond.append(name)
+        record["round_cap_reached"] = bool(beyond)
+        record["names_beyond_cap"] = beyond
     _record_remaining(unit, sequences)
     return sequences
 
@@ -3518,6 +3536,10 @@ def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             "not_added": dict(sorted(not_added.items())),
             "units_input_columns_full": sum(1 for r in recs if "input_columns_full" in (r.get("not_added") or {}).values()),
             "max_rounds": max((int(r.get("rounds") or 0) for r in recs), default=0),
+            # (R59) 회차 상한과, 상한이 탐색을 자른 unit(다음 회차가 더했을 이름이 있었다) · 그 이름 수
+            "round_cap": _SOURCE_READ_ROUNDS,
+            "units_round_cap_reached": sum(1 for r in recs if r.get("round_cap_reached")),
+            "names_beyond_cap": sum(len(r.get("names_beyond_cap") or []) for r in recs),
             "units_with_remaining": sum(1 for r in recs if r.get("remaining")),
             "names_remaining": sum(len(r.get("remaining") or {}) for r in recs),
             "errors": sum(1 for r in recs if r.get("error"))}
