@@ -119,7 +119,7 @@ from backend.services.local_service import (
     search_in_files,
     write_file_text,
 )
-from backend.services.paths import confine, is_under_any, safe_resolve_under, trusted_roots
+from backend.services.paths import confine, is_unc_path, is_under_any, safe_resolve_under, trusted_roots
 from backend.user_context import wrap_with_user
 from report_gen.atomic_io import atomic_write_text
 from report_gen.provenance import has_evidence_value, is_weak_source
@@ -4176,11 +4176,44 @@ def local_project_setup_status() -> Dict[str, Any]:
     }
 
 
+# (SEC 2026-10-02) the KB folder a request names stays under the reports folder — `repo_root / report_dir` let an
+#   absolute path or ``..`` replace the root, and the endpoints created it (``mkdir``) wherever it pointed
+_RAG_PATH_KEYS = ("vc_reports_paths", "uds_spec_paths", "req_docs_paths", "codebase_paths")
+
+
+def _rag_report_path(report_dir: str) -> Path:
+    base_raw = str(getattr(config, "DEFAULT_REPORT_DIR", "reports"))
+    # (SEC review W1) a UNC path is refused from its text — resolving it would first open an SMB connection
+    if is_unc_path(report_dir) and not is_unc_path(base_raw):
+        raise HTTPException(status_code=403, detail="report_dir not allowed")
+    base = (repo_root / base_raw).resolve()
+    try:
+        candidate = (repo_root / str(report_dir or "")).resolve()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid report_dir") from exc
+    if not is_under_any(candidate, [base]):
+        _logger.warning("RAG report_dir 봉인 거부: %s", candidate)
+        raise HTTPException(status_code=403, detail="report_dir not allowed")   # no path echoed
+    return candidate
+
+
+def _confined_ingest_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """(SEC) The source folders a request names are confined like every other `/api/local/*` path (`confine` — the
+    repository and the user's cache): the ingest read any server path into the KB, which `rag/query` then served and
+    the embedding API received."""
+    from workflow.rag.ingestor import _split_paths
+    out = dict(cfg)
+    for key in _RAG_PATH_KEYS:
+        if cfg.get(key):
+            out[key] = [str(confine(p, what=key)) for p in _split_paths(cfg[key])]
+    return out
+
+
 @router.post("/api/local/rag/status")
 def local_rag_status(req: RagStatusRequest) -> Dict[str, Any]:
     cfg = req.config or {}
     report_dir = str(req.report_dir or cfg.get("report_dir") or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
-    report_path = (repo_root / report_dir).resolve()
+    report_path = _rag_report_path(report_dir)
     report_path.mkdir(parents=True, exist_ok=True)
     force_pg = bool(getattr(config, "FORCE_PGVECTOR", False))
     force_pg_strict = bool(getattr(config, "FORCE_PGVECTOR_STRICT", False))
@@ -4220,14 +4253,14 @@ def local_rag_status(req: RagStatusRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/api/local/rag/ingest")
+@router.post("/api/local/rag/ingest", dependencies=[Depends(require_admin)])
 def local_rag_ingest(req: RagIngestRequest) -> Dict[str, Any]:
-    cfg = req.config or {}
+    cfg = _confined_ingest_cfg(req.config or {})
     report_dir = str(req.report_dir or cfg.get("report_dir") or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
-    report_path = (repo_root / report_dir).resolve()
+    report_path = _rag_report_path(report_dir)
     report_path.mkdir(parents=True, exist_ok=True)
     kb = get_kb(report_path)
-    result = ingest_external_sources(kb, cfg=cfg)
+    result = ingest_external_sources(kb, cfg=cfg)   # the confined paths — (SEC) never the request's raw ones
     return {"ok": True, "result": result}
 
 
@@ -4248,7 +4281,7 @@ async def local_rag_ingest_files(
         raise HTTPException(status_code=400, detail="reserved category: written by scripts/sts_findings_to_kb.py only")
     reject_upload_in_cloudium(*(files or []))
     report_dir = str(report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
-    report_path = (repo_root / report_dir).resolve()
+    report_path = _rag_report_path(report_dir)
     report_path.mkdir(parents=True, exist_ok=True)
     kb = get_kb(report_path)
     tag_list = [t.strip() for t in re.split(r"[,\n;]+", str(tags or "")) if t.strip()]
@@ -4290,12 +4323,15 @@ async def local_rag_ingest_files(
     return {"ok": True, "added": added, "skipped": skipped, "category": category}
 
 
-@router.post("/api/local/rag/use-pgvector")
+# (SEC) switches the whole backend's KB storage and DSN — an operator's act, never any signed-in user's
+@router.post("/api/local/rag/use-pgvector", dependencies=[Depends(require_admin)])
 def local_rag_use_pgvector(req: RagStorageRequest) -> Dict[str, Any]:
     dsn = str(req.pgvector_dsn or "").strip()
     url = str(req.pgvector_url or "").strip()
     if not dsn and not url:
         raise HTTPException(status_code=400, detail="pgvector dsn or url required")
+    # (SEC) the folder is checked before the process-wide switch — a refused request must change nothing
+    report_path = _rag_report_path(str(req.report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports")))
     os.environ["KB_STORAGE"] = "pgvector"
     os.environ["PGVECTOR_DSN"] = dsn
     os.environ["PGVECTOR_URL"] = url
@@ -4309,8 +4345,6 @@ def local_rag_use_pgvector(req: RagStorageRequest) -> Dict[str, Any]:
     # pgvector 전환이 silent no-op 된다. config 변이 후 무효화.
     from workflow.rag import _clear_kb_cache
     _clear_kb_cache()
-    report_dir = str(req.report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
-    report_path = (repo_root / report_dir).resolve()
     report_path.mkdir(parents=True, exist_ok=True)
     try:
         kb = get_kb(report_path)
@@ -4337,7 +4371,7 @@ def local_rag_query(req: RagQueryRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="query required")
     cfg = req.config or {}
     report_dir = str(req.report_dir or cfg.get("report_dir") or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
-    report_path = (repo_root / report_dir).resolve()
+    report_path = _rag_report_path(report_dir)
     report_path.mkdir(parents=True, exist_ok=True)
     kb = get_kb(report_path)
     top_k = max(1, int(req.top_k or 5))

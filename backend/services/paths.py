@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable, List, Optional
 
 _logger = logging.getLogger("devops_api")
@@ -108,6 +108,14 @@ def trusted_roots() -> List[Path]:
     return [_repo_root(), (Path.home() / ".devops_pro_cache").resolve()]
 
 
+def is_unc_path(raw: object) -> bool:
+    """A UNC path (two slashes or two backslashes, then a host and a share — also the device forms) told from
+    the text alone: resolving one opens an SMB connection to that host (and offers the service account's NTLM
+    hash) before any check can refuse it (2026-10-02 security review W1)."""
+    s = str(raw or "").strip()
+    return s.startswith(("\\", "//")) or PureWindowsPath(s).drive.startswith(("\\", "//"))
+
+
 def confine(raw: object, *, extra_roots: Optional[Iterable[Path]] = None,
             what: str = "path") -> Path:
     """클라이언트가 준 경로를 신뢰 루트 하위로 확정한다. 벗어나면 **403**.
@@ -123,6 +131,10 @@ def confine(raw: object, *, extra_roots: Optional[Iterable[Path]] = None,
     s = str(raw or "").strip()
     if not s:
         raise HTTPException(status_code=400, detail=f"{what} required")
+    # (SEC review W1) a UNC path is refused before it is touched — unless a root the caller named is one itself
+    if is_unc_path(s) and not any(is_unc_path(r) for r in (extra_roots or [])):
+        _logger.warning("경로 봉인 거부(%s): UNC", what)
+        raise HTTPException(status_code=403, detail=f"{what} not allowed")
     try:
         p = Path(s).expanduser().resolve()
     except (OSError, ValueError) as exc:
