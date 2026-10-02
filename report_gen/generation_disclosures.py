@@ -1018,8 +1018,15 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             # (리뷰 R58 W2 · 3차 W-1) 실패만 있어도 말하고, 숫자는 부분마다 따로 — 빈 부분은 쓰지 않는다
             + (_source_read_pass_text(mc)
                if (_int(mc, "source_read_pass_decisions") or _int(mc, "source_read_pass_errors")) else "")
+            # (R60) whether the two rows of a retained pair differ in an output the function wrote (Observable MC/DC, measured)
+            + (_observable_text(mc) if any(_int(mc, k) for k in (
+                "observable_pairs", "observable_searched", "observable_masked", "observable_underived",
+                "observable_recheck_refused", "observable_no_candidate", "observable_copy_only",
+                "observable_budget_exhausted", "observable_not_checked",
+                "observable_evidence_mismatch", "observable_errors")) else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
-            tone=_tone(bool(_int(mc, "invalidated_pairs")) or bool(_int(mc, "source_read_pass_errors")))))
+            tone=_tone(bool(_int(mc, "invalidated_pairs")) or bool(_int(mc, "source_read_pass_errors"))
+                       or bool(_int(mc, "observable_evidence_mismatch")) or bool(_int(mc, "observable_errors")))))
 
     # 비운 칸 — **결함이 아니다**(info). 예전엔 이 칸을 전부 uint8 로 지어낸 0/127/255 로 채웠다.
     unk = _int(qr, "unknown_type_var_slots")
@@ -1516,6 +1523,42 @@ _BY_DOC_TYPE = {"sts": _sts_items, "suts": _suts_items, "sits": _sits_items}
 #: 손으로 든 목록을 라우터에 또 적으면 문서 종류를 늘릴 때 화면이 "이 문서 종류는 공시를
 #: 만들지 않는다" 는 거짓을 적게 된다(같은 결함을 `VALIDATION_SIDECAR_WRITERS` 에서 겪었다).
 DISCLOSURE_DOC_TYPES = frozenset(_BY_DOC_TYPE)
+
+
+MAX_OBSERVABLE_EVALUATIONS = 2000   # generators.observable_mcdc.MAX_EVALUATIONS (공시 문구 — 테스트가 같은지 본다)
+MAX_OBSERVABLE_CANDIDATES = 48      # generators.observable_mcdc.MAX_CANDIDATES
+
+
+def _observable_text(mc: dict) -> str:
+    """(R60) 출력 관측 MC/DC 쌍 문장 — 상태마다 그 수, 0 인 상태는 생략. 원인(결정 뒤 논리가 가림 · 미도달 · 같은 실행 안의 쌍)은
+    가르지 않고, 어느 상태의 차이도 결정 탓으로 돌리지 않는다(리뷰 R60 W3 · 2차 W1·W2 · 3차 W1·W2·W5)."""
+    own = mc.get("observable_searched_own_rows") if isinstance(mc.get("observable_searched_own_rows"), dict) else {}
+    own_text = " · ".join(f"{label} {own[k]}" for k, label in (
+        ("equal", "두 행 출력 같음"), ("underived", "두 행 도출 없음"), ("copy_only", "입력 복사만 갈림"),
+        ("unreached", "두 행의 판정이 함수 실행 모델로 확인되지 않음")) if own.get(k))
+    parts = [f"이미 확인됨 {_show(_int(mc, 'observable_pairs'))}"]
+    for key, label in (("observable_searched", "두 조건이 확인되지 않아 탐색으로 찾은 쌍"),
+                       ("observable_copy_only", "갈린 쓴 출력이 모두 움직인 입력의 복사와 같은 값(래치인지 0/1 플래그인지 가르지 못함)"),
+                       ("observable_masked", "갈리는 쓴 출력을 못 찾음"),
+                       ("observable_underived", "후보에서 두 행 모두 도출된 출력 없음"),
+                       ("observable_recheck_refused", "행은 갈렸으나 함수 실행 모델이 쌍의 판정을 확인하지 못함(다르게 평가 · 판단 불가)"),
+                       ("observable_no_candidate", "바꿀 다른 행 값이 없음"),
+                       ("observable_not_checked", "확인 못 함(같은 실행 안의 쌍 · 행 값 미상 · 판정 확인 좌표 없음 · 출력 없음 · 소스 범위 없음)"),
+                       ("observable_budget_exhausted", "평가 예산 소진"), ("observable_evidence_mismatch", "근거 불일치"),
+                       ("observable_errors", "탐색 · 확인 실패 함수")):
+        if _int(mc, key):
+            parts.append(f"{label} {_show(_int(mc, key))}"
+                         + (f"({own_text})" if key == "observable_searched" and own_text else ""))
+    rows = _int(mc, "observable_rows")
+    return (" 확장 프로파일: 유지 쌍의 두 행이 (1) 함수 실행 모델에서 쌍이 주장한 판정을 내고 (2) '쓴 출력' 에서 갈리는지 봤다 — 쓴 "
+            "출력은 적어도 한 행의 실행이 썼고 두 행이 다르게 둔 입력을 그대로 옮긴 값이 아닌 출력이다(입력을 되돌려주기만 하는 출력 · "
+            "래치처럼 입력을 복사한 출력은 세지 않는다; 움직인 입력에서 계산되는 출력(`cnt + 1` 등)은 센다) — " + " · ".join(parts)
+            + (f" · 더한 행 {_show(rows)}" if rows else "")
+            + ". 어느 상태든 그 차이를 이 결정 탓으로 돌리지 않는다(경로 증명 없음 — 조건의 연산자 결함이 드러날 필요조건이지 "
+            "충분조건이 아니다). 갈리지 않는 원인은 가르지 않는다. 탐색은 결정이 의존하는 입력(식 설계: 결정식이 읽는 입력 · 함수 "
+            "실행 모델 설계: 쌍의 두 행이 다른 입력)을 쌍의 값 그대로 두고 나머지를 같은 TC 의 다른 행 값으로 바꾼다(함수당 oracle "
+            f"실행 {MAX_OBSERVABLE_EVALUATIONS} — 판정 확인 포함 · 쌍당 후보 {MAX_OBSERVABLE_CANDIDATES}). 실행·도달성은 대상 "
+            "실행으로 검증하지 않았다. 기존 행·쌍은 바뀌지 않는다('Observable' · 'Observable Sequences' 열 — 확인 못 함은 사유를 붙인다).")
 
 
 def _source_read_pass_text(mc: dict) -> str:

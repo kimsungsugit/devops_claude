@@ -1978,6 +1978,20 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 raise Unsupported("decision_variable_not_in_unit_inputs:" + missing[0])
             if index >= max_decisions or len(atoms) > max_conditions:
                 raise Unsupported("decision_or_condition_budget")
+            # (R60) the inputs the decision expression reads — the observable-pair search keeps exactly these (set only
+            #   once the binding checks passed: a refused decision goes to the path search, which keeps its own set) —
+            #   and the decision's node coordinates, so that search can check on the modeled run that a row reaches the
+            #   decision as the pair claims (review R60 round 3 W2: the expression design does not check reaching)
+            decision["variables"] = list(variables)
+            try:
+                reach_atoms: list = []
+                reach_ir = _path_ir(node, raw, reach_atoms)
+                if len(reach_atoms) == len(atoms):
+                    decision["reach_spec"] = {"key": [node.start_byte, node.end_byte, node.type],
+                                              "atoms": [[x.start_byte, x.end_byte, x.type] for x in reach_atoms],
+                                              "ir": reach_ir}
+            except Unsupported:
+                pass
             values = []
             for name in variables:
                 lo, hi = domains[name]["min"], domains[name]["max"]

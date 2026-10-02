@@ -2134,7 +2134,7 @@ def is_extended_strategy(strategy: Any) -> bool:
     """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19)·설계 범위 밖 강건성 행(R31) 전부, 그리고 기본
     자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
-    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX)):
+    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX, OBS_MCDC_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2507,7 +2507,8 @@ def resolve_seq_test_method(strategy: Any) -> str:
 def resolve_seq_gen_method(strategy: Any) -> str:
     """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
     s = str(strategy or "").strip()
-    if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX):
+    if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX) \
+            or s.startswith(OBS_MCDC_PREFIX):
         return _GEN_EQUIV
     return _GEN_BOUNDARY
 
@@ -3191,9 +3192,131 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         _logger.warning("SUTS 강건성 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
         del sequences[m:]
         unit["robustness_rows"] = {"error": type(exc).__name__, "rows": 0}
+    # (R60) 출력으로 드러나는 MC/DC 쌍 — 강건성 행 뒤에. 선택 확장이라 실패해도 문서는 만든다.
+    k = len(sequences)
+    try:
+        _append_observable_mcdc_rows(unit, sequences, ctx)
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 출력 관측 MC/DC 쌍 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        del sequences[k:]
+        unit["observable_mcdc"] = {"error": type(exc).__name__, "rows": 0}
+        for decision in (unit.get("mcdc_design") or {}).get("decisions") or []:
+            for pair in decision.get("pairs") or []:
+                pair.pop("observable", None)
     if len(sequences) > n:
         sequences[n:] = apply_sequence_evidence(unit, sequences[n:])
+    if (unit.get("observable_mcdc") or {}).get("searched"):
+        try:
+            _confirm_observable_rows(unit, sequences)
+        except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+            _logger.warning("SUTS 출력 관측 MC/DC 쌍 확인 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            unit["observable_mcdc"]["confirm_error"] = type(exc).__name__
     return sequences
+
+
+# (R60) 출력 관측 MC/DC 쌍 — `generators.observable_mcdc`. 행 이름은 `MCDC_` 로 시작하지 않는다(그 접두는 MC/DC 설계 벡터
+#   행만 — finalize · 채움 행 · 기준 순위가 그 이름으로 벡터 행을 찾는다).
+OBS_MCDC_PREFIX = "OBS_MCDC_"
+
+
+def _append_observable_mcdc_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], ctx: Dict[str, Any]) -> None:
+    """(R60, 확장 프로파일) 유지된 MC/DC 쌍의 두 행이 (1) 함수 실행 모델에서 쌍이 주장한 판정을 내고 (2) 쓴 출력에서 갈리는지
+    보고, 아니면 — 결정이 의존하는 입력은 쌍의 값 그대로 두고 나머지를 같은 TC 의 다른 행 값으로 바꿔 두 조건을 다 채우는 쌍을
+    찾아 행으로 더한다(`find_observable_pairs`). 기존 행 · 쌍은 바꾸지 않는다. 쌍마다 `pair["observable"]`(상태 · 행),
+    unit 요약 `unit["observable_mcdc"]`."""
+    from generators.observable_mcdc import find_observable_pairs, vector_key
+    if not (unit.get("mcdc_design") or {}).get("decisions"):
+        unit["observable_mcdc"] = {"status": "no_mcdc_design", "rows": 0}
+        return
+    var_types = ctx["var_types"]
+    domains = _boundary_domains(unit, ctx["input_vars"], var_types, ctx["var_bounds"], set(ctx["unknown"]),
+                                ctx.get("enum_sets"))
+    outputs = list(dict.fromkeys([*ctx["output_vars"], *(k for s in sequences for k in (s.get("expected") or {}))]))
+    # an existing row a candidate equals becomes that row — only its stated outputs can count (리뷰 R60 2차 W4); the
+    #   search and the reuse below use the same key and the same (first) row (3차 W3: 정수 대 서식 JSON 이 갈렸다)
+    existing: Dict[tuple, Any] = {}
+    stated_of: Dict[tuple, set] = {}
+    for s_ in sequences:
+        k_ = vector_key(s_.get("inputs") or {})
+        if k_ is not None and k_ not in existing:
+            existing[k_] = s_.get("seq_num")
+            stated_of[k_] = set(s_.get("expected") or {})
+    found = find_observable_pairs(unit, sequences, outputs, domains, sorted(sequences, key=_base_rank),
+                                  stated_of=stated_of)
+    placed: List[Dict[str, Any]] = []
+    for row in found["rows"]:
+        inputs = {k: _format_test_value(v, var_types.get(k, "uint8_t")) for k, v in row["inputs"].items()}
+        key = vector_key(row["inputs"])
+        if key in existing:
+            row["seq_num"] = existing[key]   # 같은 입력의 행이 이미 있다 — 그 행이 쌍의 구성원이다(근거는 뒤에서 다시 본다)
+            continue
+        seq = {"seq_num": len(sequences) + 1, "inputs": inputs,
+               "expected": {o: f"{VERIFY_PREFIX} observable_mcdc" for o in outputs},
+               "strategy": f"{OBS_MCDC_PREFIX}{len(placed)}", "tc_profile": TC_PROFILE_EXTENDED, "description": "",
+               "mcdc_observable": {"decision_id": row["decision"]["decision_id"],
+                                   "condition_id": row["pair"]["condition_id"], "pair_id": row["pair"]["pair_id"],
+                                   "role": row["role"]}}
+        sequences.append(seq)
+        existing[key] = seq["seq_num"]
+        row["seq_num"] = seq["seq_num"]
+        placed.append(row)
+    by_pair: Dict[int, Dict[str, Any]] = {}
+    for row in found["rows"]:
+        by_pair.setdefault(id(row["pair"]), {})[row["role"]] = row["seq_num"]
+    by_num = {s.get("seq_num"): s for s in sequences}
+    for row in placed:
+        other = by_pair[id(row["pair"])]["b" if row["role"] == "a" else "a"]
+        by_num[row["seq_num"]]["description"] = _observable_row_label(row, other)
+    for pair, mark in found["marks"]:
+        if mark.get("status") == "searched":
+            mark["seq_a"], mark["seq_b"] = by_pair[id(pair)]["a"], by_pair[id(pair)]["b"]
+        pair["observable"] = mark
+    unit["observable_mcdc"] = {**found["report"], "rows": len(placed)}
+
+
+def _observable_row_label(row: Dict[str, Any], other: Any) -> str:
+    """(R60) 더한 행의 첫 줄 — 무엇을 바꿨고 무엇이 갈리는지, 주장하지 않는 것까지(리뷰 R60 W2: 경로 설계 결정은 결정이 읽는
+    입력도 움직일 수 있다 — 쌍의 두 행이 같은 값을 둔 입력만 바꾸고 판정을 함수 실행 모델로 다시 확인한다)."""
+    mark = row["mark"]
+    changed, moved = mark["outputs_changed"], mark["overlay_inputs"]
+    kept = "결정식이 읽지 않는 입력" if mark.get("evaluation") != "source_path" else "쌍의 두 행이 같은 값을 둔 입력"
+    return (f"출력 관측 MC/DC 쌍: {row['pair']['pair_id']}({row['role'].upper()}) — {kept}("
+            + ", ".join(moved[:3]) + (f" 외 {len(moved) - 3}" if len(moved) > 3 else "")
+            + f")을 시퀀스 {row['base']} 의 값으로 두면 두 행이 쌍이 주장한 판정을 내고(함수 실행 모델로 확인) 짝(시퀀스 "
+            + f"{other})과, 적어도 한 행의 실행이 쓴 출력("
+            + ", ".join(changed[:3]) + (f" 외 {len(changed) - 3}" if len(changed) > 3 else "")
+            + ")이 갈린다 (소스 oracle · 미실행 · 그 차이가 이 결정을 거친다는 경로 주장 아님)")
+
+
+def _confirm_observable_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
+    """(R60) 근거를 붙인 뒤 다시 본다 — 탐색으로 찾은 쌍(새 행이든 이미 있던 행이든)의 두 행이, 두 행 모두 적고 둘 다 도출되며
+    적어도 한 행의 실행이 쓴(`basis=assigned`) 출력에서 갈리지 않으면 `evidence_mismatch` 로 내리고 새 행의 첫 줄을 고친다
+    (리뷰 R60 W6). 탐색과 근거는 같은 oracle 이라 0 이어야 한다."""
+    from generators.observable_mcdc import rows_differ
+    report = unit.get("observable_mcdc") or {}
+    rows = {s.get("seq_num"): s for s in sequences}
+    for decision in (unit.get("mcdc_design") or {}).get("decisions") or []:
+        for pair in decision.get("pairs") or []:
+            mark = pair.get("observable") or {}
+            if mark.get("status") != "searched":
+                continue
+            a, b = rows.get(mark.get("seq_a")), rows.get(mark.get("seq_b"))
+            if a is not None and b is not None and rows_differ(a, b):
+                for seq in (a, b):
+                    if isinstance(seq.get("mcdc_observable"), dict):
+                        seq["mcdc_observable"]["confirmed"] = True   # (리뷰 R60 3차 I6)
+                continue
+            mark["status"] = "evidence_mismatch"
+            report["searched"] = max(0, int(report.get("searched") or 0) - 1)
+            report["evidence_mismatch"] = int(report.get("evidence_mismatch") or 0) + 1
+            for seq in (a, b):
+                if seq is not None and str(seq.get("strategy") or "").startswith(OBS_MCDC_PREFIX):
+                    if isinstance(seq.get("mcdc_observable"), dict):
+                        seq["mcdc_observable"]["confirmed"] = False   # (리뷰 R60 2차 I6)
+                    lines = str(seq.get("description") or "").split("\n")
+                    lines[0] = (f"출력 관측 MC/DC 쌍 후보 {pair['pair_id']} — 근거를 붙이고 보니 두 행의 쓴 출력이 갈리지 않는다"
+                                "(탐색과 근거 불일치 · 쌍 주장 없음)")
+                    seq["description"] = "\n".join(lines)
 
 
 # ── (R19) 소스가 읽는 입력 ──────────────────────────────────────────────────────────────────────────────────────
@@ -3641,6 +3764,14 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "source_read_pass_decisions": 0, "source_read_pass_adopted": 0,
                            "source_read_pass_designed": 0, "source_read_pass_errors": 0,
                            "source_read_pass_designed_refused_for_added": 0,
+                           # (R60, 확장) 유지 쌍의 두 행이 출력으로 갈리는가 — 이미 갈림 · 탐색으로 찾은 쌍(행 더함) · 못 찾음
+                           #   (도출 출력은 있으나 같음 / 도출 출력 없음) · 예산 · 확인 못 함 · 근거 불일치 · 실패한 함수
+                           "observable_pairs": 0, "observable_searched": 0, "observable_masked": 0,
+                           "observable_underived": 0, "observable_recheck_refused": 0, "observable_no_candidate": 0,
+                           "observable_copy_only": 0, "observable_searched_own_rows": {},
+                           "observable_budget_exhausted": 0, "observable_not_checked": 0,
+                           "observable_evidence_mismatch": 0, "observable_rows": 0, "observable_errors": 0,
+                           "observable_evaluations": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     # (R56 리뷰 I1) 함수 실행 모델 탐색 예산 — 문서가 어느 예산으로 설계됐는지(같은 소스라도 예산이 다르면 쌍이 다르다)
@@ -3655,6 +3786,11 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
         b = report.get("budgets") or {}
         if b.get("max_path_runs") is not None:
             budgets.add((int(b["max_path_runs"]), int(b.get("max_path_steps") or 0)))
+        obs = unit.get("observable_mcdc") or {}
+        out["observable_rows"] += int(obs.get("rows") or 0)
+        out["observable_errors"] += bool(obs.get("error") or obs.get("confirm_error"))   # (리뷰 R60 3차 W4)
+
+        out["observable_evaluations"] += int(obs.get("evaluations") or 0)
         srp = report.get("source_read_pass") or {}
         out["source_read_pass_decisions"] += int(srp.get("decisions_searched") or 0)
         out["source_read_pass_adopted"] += int(srp.get("decisions_adopted") or 0)
@@ -3708,6 +3844,14 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                 reason = ":".join(parts[:2]) if parts[0] in ("path_evaluation", "path_refused") else parts[0]
                 out["unsupported_reasons"][reason] = out["unsupported_reasons"].get(reason, 0) + 1
             for pair in d.get("pairs") or []:
+                ob = (pair.get("observable") or {}).get("status")
+                if ob == "searched":
+                    # (리뷰 R60 4차 W1) 내역도 쌍 표시에서 센다 — 확인에서 강등된 쌍은 빠진다(상태 수와 같은 출처)
+                    own = str((pair.get("observable") or {}).get("own_rows") or "unknown")
+                    out["observable_searched_own_rows"][own] = out["observable_searched_own_rows"].get(own, 0) + 1
+                if ob:
+                    key = {"observable": "observable_pairs", "searched": "observable_searched"}.get(ob, f"observable_{ob}")
+                    out[key] = out.get(key, 0) + 1
                 out["conditions_paired"] += 1
                 key = {"retained": "retained_pairs", "invalidated": "invalidated_pairs"}.get(
                     pair.get("retained_status"), "truncated_pairs")
@@ -4597,7 +4741,9 @@ _MCDC_HEADERS = ["Test Case ID", "Function", "Decision ID", "Condition ID", "Pai
                  "Decision Expression", "Decision Status", "Reason", "Source Kind", "Source SHA256",
                  "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB", "Stub Inputs",
                  # (R58) 설계한 행 입력 목록 — design_inputs(설계서 입력 표) · with_source_read_inputs(소스가 읽어 더한 입력까지)
-                 "Input Scope"]
+                 "Input Scope",
+                 # (R60, 확장) 쌍의 두 행이 소스 oracle 출력으로 갈리는가 · 갈리는 두 행(탐색으로 더한 행이면 그 번호)
+                 "Observable", "Observable Sequences"]
 
 
 def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, hdr_fill, hdr_font, data_font):
@@ -4636,7 +4782,7 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
             if not pairs:
                 # 쌍 없는 결정도 한 행 — 빠지면 "MC/DC 설계 완료" 로 오독된다(분모에서 사라진다).
                 ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), "", "", "", "", "", "", "",
-                           "", "", "", "", *common, "", stubs, scope])
+                           "", "", "", "", *common, "", stubs, scope, "", ""])
             for pair in pairs:
                 retained = pair.get("retained_status", "")
                 inputs = []
@@ -4653,7 +4799,8 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                            inputs[0], inputs[1], _mcdc_truth_text(pair.get("truth_a"), pair.get("observed_a")),
                            _mcdc_truth_text(pair.get("truth_b"), pair.get("observed_b")),
                            "T" if pair.get("decision_a") else "F", "T" if pair.get("decision_b") else "F", retained,
-                           *common, "+".join(ub), ", ".join(pair.get("stub_inputs") or []), scope])
+                           *common, "+".join(ub), ", ".join(pair.get("stub_inputs") or []), scope,
+                           *_observable_cells(pair.get("observable"))])
     # 한 번에 서식 — 결정마다 ``ws.max_row``(= 전 셀 ``max``)를 부르면 결정 수 × 셀 수로 커진다
     for row_cells in ws.iter_rows(min_row=2):
         for cell in row_cells:
@@ -4663,6 +4810,19 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
     ws.auto_filter.ref = ws.dimensions
     for idx, _ in enumerate(_MCDC_HEADERS, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = 40 if idx in (8, 9, 15, 17, 19) else 16
+
+
+def _observable_cells(mark: Optional[Dict[str, Any]]) -> List[str]:
+    """(R60) 'Observable' · 'Observable Sequences' 칸 — 확장 프로파일만 상태가 있다(정본 규모 문서는 빈칸)."""
+    if not mark:
+        return ["", ""]
+    seqs = f"{mark.get('seq_a')},{mark.get('seq_b')}" if mark.get("seq_a") is not None else ""
+    status = str(mark.get("status") or "")
+    if mark.get("reason"):
+        status += ":" + str(mark["reason"])   # (리뷰 R60 3차 I2) not_checked:<사유>
+    elif mark.get("own_rows"):
+        status += f" [own:{mark['own_rows']}]"   # (리뷰 R60 4차 I5) 쌍 자신의 두 행이 왜 모자랐는지
+    return [status, seqs]
 
 
 def _write_suts_traceability_sheet(wb, units, border, hdr_fill, hdr_font, data_font):
