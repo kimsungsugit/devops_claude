@@ -3579,6 +3579,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "pointee_condition_decisions": 0, "pointee_condition_designed": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
+    # (R56 리뷰 I1) 함수 실행 모델 탐색 예산 — 문서가 어느 예산으로 설계됐는지(같은 소스라도 예산이 다르면 쌍이 다르다)
+    budgets = set()
     for unit in units:
         report = unit.get("mcdc_design")
         if not report:
@@ -3586,6 +3588,9 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["units_not_analyzed"] += 1
             continue
         out["units"] += 1
+        b = report.get("budgets") or {}
+        if b.get("max_path_runs") is not None:
+            budgets.add((int(b["max_path_runs"]), int(b.get("max_path_steps") or 0)))
         stub_search = report.get("stub_search") or {}
         out["stub_search_decisions"] += int(stub_search.get("decisions_searched") or 0)
         out["stub_search_improved"] += int(stub_search.get("decisions_improved") or 0)
@@ -3637,6 +3642,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                 key = {"retained": "retained_pairs", "invalidated": "invalidated_pairs"}.get(
                     pair.get("retained_status"), "truncated_pairs")
                 out[key] += 1
+    # 탐색 그룹·탐색(1차 · stub 값)마다의 한도. 한 생성 안에서는 하나 — 여럿이면(호출부가 따로 준 예산) 전부 적는다
+    out["path_search_budget"] = [{"max_path_runs": r, "max_path_steps": s} for r, s in sorted(budgets)] or None
     return out
 
 

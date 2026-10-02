@@ -977,6 +977,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "행 상한에 잘린 쌍은 '절단', 재검증에서 떨어진 쌍은 '무효' 로 따로 센다"
             + (f"(절단 {_show(_int(mc, 'truncated_pairs'))} · 무효 {_show(_int(mc, 'invalidated_pairs'))})."
                if _int(mc, "truncated_pairs") is not None else ".")
+            # (R56 리뷰 I1) 어느 예산으로 설계했는지 — 같은 소스라도 예산이 다르면 쌍이 다르다
+            + _mcdc_budget_text(mc.get("path_search_budget"))
             + (f" 결정을 나열하지 못한 함수 {_show(_int(mc, 'unenumerated_functions'))} · 분석하지 못한 unit "
                f"{_show(_int(mc, 'units_not_analyzed'))} 는 위 분모 밖이다."
                if (_int(mc, "unenumerated_functions") or _int(mc, "units_not_analyzed")) else "")
@@ -1503,6 +1505,22 @@ _BY_DOC_TYPE = {"sts": _sts_items, "suts": _suts_items, "sits": _sits_items}
 #: 손으로 든 목록을 라우터에 또 적으면 문서 종류를 늘릴 때 화면이 "이 문서 종류는 공시를
 #: 만들지 않는다" 는 거짓을 적게 된다(같은 결함을 `VALIDATION_SIDECAR_WRITERS` 에서 겪었다).
 DISCLOSURE_DOC_TYPES = frozenset(_BY_DOC_TYPE)
+
+
+def _mcdc_budget_text(budgets: Any) -> str:
+    """(R56) The MC/DC path search budget the document was designed with, or nothing when the summary has none."""
+    if not isinstance(budgets, list) or not budgets:
+        return ""
+    parts = []
+    for b in budgets:
+        runs, steps = (b or {}).get("max_path_runs"), (b or {}).get("max_path_steps")
+        if isinstance(runs, int) and isinstance(steps, int):
+            parts.append(f"벡터 {runs:,} · 인터프리터 단계 {steps:,}")
+    if not parts:
+        return ""
+    return (" 함수 실행 모델 탐색 예산은 함수의 탐색 그룹·탐색(1차 · stub 값)마다 " + " / ".join(parts)
+            + " 이다 — 결정론적 비용 상한이라 같은 소스·같은 예산은 같은 설계를 내고, 예산 안에서 못 찾은 쌍은 불가 "
+            "증명이 아니다.")
 
 
 def build_disclosures(doc_type: str, quality_report: Dict[str, Any]) -> List[Dict[str, Any]]:

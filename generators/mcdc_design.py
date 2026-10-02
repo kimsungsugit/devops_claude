@@ -1810,8 +1810,21 @@ def _path_revalidation(decision, lookup, unit, normalized):
     return out
 
 
+# (R56) The path search budget — ×4 the R2c budget (1,536 runs · 30,000 interpreter steps), for each search group of a
+#   function (plain · call-in-condition · struct member · pointee) and each of its two passes (first search, stub-value
+#   search). Measured on KJPDS02_PV (same inputs, reference profile): ×1 793 · ×2 808 · ×4 824 · ×16 834 designed of 1,469
+#   decisions, no designed decision lost and no expected value changed, at about twice the generation time (×16: ×4.4
+#   for 10 more). The reference profile keeps 7 MC/DC rows per function (`suts._BASE_MCDC_SLOTS`) in decision order, so
+#   a newly designed earlier decision can push a later one's pair out of them (PV: 31 new pairs retained, 7 retained
+#   pairs became truncated — counted, not hidden; the extended profile keeps every pair). Still a deterministic cost
+#   bound (a run costs what it executes); a failed search stays no proof of infeasibility.
+PATH_SEARCH_RUNS = 6144
+PATH_SEARCH_STEPS = 120_000
+
+
 def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_conditions: int = 12,
-                      max_decisions: int = 64, max_path_runs: int = 1536, max_path_steps: int = 30_000,
+                      max_decisions: int = 64, max_path_runs: int = PATH_SEARCH_RUNS,
+                      max_path_steps: int = PATH_SEARCH_STEPS,
                       declared_domains: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Find real-input unique-cause pairs within explicit search budgets.
 
