@@ -33,12 +33,12 @@ import re
 from decimal import Decimal
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2 (R57): ``N 동안`` before a condition ending in its clause is ``>=`` (was ``==``)
 
 _REQ_ID = re.compile(r"\b(Sw(?:TR|TSR|EI|NF|ST|STR|SR|FR|FN|IF|RS)_[A-Za-z0-9_]+?\d+)\b")
 # longest first: ``step`` is not ``s``. (R47) ``RPM`` — a SyDS element's ``Input Information`` (``0~5000RPM`` ·
 #   ``5000RPM 초과``): without it the range lost its unit and the threshold was not read at all
-_UNIT = r"(?:km/h|m/s|step|deg|KPH|RPM|rpm|℃|°C|mV|mA|ms|Hz|V|s|초|분|도|%|A)"
+_UNIT = r"(?:km/h|mm/s|m/s|step|deg|KPH|RPM|rpm|℃|°C|mV|mA|ms|Hz|V|s|초|분|도|%|A)"
 _NUM = r"0[xX][0-9A-Fa-f]+|-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?"
 _KOREAN_OP = {"이상": ">=", "이하": "<=", "미만": "<", "초과": ">", "이내": "<="}
 _C_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -51,12 +51,28 @@ _KOREAN_FACT = re.compile(rf"(?P<num>{_NUM})\s*(?P<unit>{_UNIT})?\s*(?P<op>이�
 _C_FACT = re.compile(rf"(?P<lhs>{_C_IDENT})\s*(?P<op>>=|<=|==|!=|>|<)\s*(?P<rhs>{_NUM}|{_C_IDENT})")
 # ``Param_AntipinchReverseActAngle( 3도 ) 초과`` — the value in parentheses right after the signal it sets
 _PAREN_FACT = re.compile(rf"(?P<sig>{_C_IDENT})\s*\(\s*(?P<num>{_NUM})\s*(?P<unit>{_UNIT})?\s*\)\s*(?P<op>이상|이하|미만|초과)")
-_COLON_FACT = re.compile(rf"(?P<sig>{_C_IDENT})\s*:\s*(?P<num>{_NUM})\s*(?P<unit>{_UNIT})?\s*(?P<op>이상|이하|미만|초과)")
+# (R57 review W4) not the tail of a number — ``-0x000~0x1FE: 510KPH 이하`` read ``x1FE`` as the subject
+_COLON_FACT = re.compile(rf"(?<![0-9A-Za-z_])(?P<sig>{_C_IDENT})\s*:\s*(?P<num>{_NUM})\s*(?P<unit>{_UNIT})?\s*(?P<op>이상|이하|미만|초과)")
 _RANGE_FACT = re.compile(rf"(?P<lo>{_NUM})\s*(?P<unit1>{_UNIT})?\s*~\s*(?P<hi>{_NUM})\s*(?P<unit>{_UNIT})?")
 _DURATION = re.compile(
     rf"(?:(?P<sym>{_C_IDENT})\s*:\s*)?(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>ms|초|s|분)\s*\)?\s*"
     rf"(?P<op>이상|초과|이내)?\s*(?:하여|해서|하여서)?\s*(?:동안|을|를)?\s*(?:유지|지속|동안|경과)")
 _OR = re.compile(r"또는|이거나|\bOR\b|\|\|")
+# (R57) ``Verification criteria<TAB><Sleep Mode 진입 확인1>`` — a title in angle brackets is no ``criteria < Sleep``
+#   comparison (AI fact review, both projects). Only where a title starts — the line's start, after a tab or a ``- ``
+#   bullet (review W1: ``u16g_Vsup<850 이면 Low, u16g_Vsup>1604 이면 High`` is two comparisons) — and with no operator
+#   or parenthesis inside
+_ANGLE_TITLE = re.compile(r"(?:^|(?<=\t)|(?<=-\s))\s*<(?=\S)[^<>&|=()\n]*>")
+# (R57) ``15초 동안 LIN 통신이 비활성화 된 경우`` · ``200ms 동안 … 넘어설 때`` · ``300ms동안 수신되지 않으면`` ·
+#   ``15초 동안 비활성화시``: a time ``동안`` that a condition ending follows **in its own clause** is how long that
+#   condition lasts (>=); without one (``측정 시간: 10분 동안 / 총 3회`` · ``5초 동안 구동하고, 전류가 … 이상이면`` — an
+#   output's time before the condition, review W2) it is no condition and stays unordered. The clause ends at ``,`` ·
+#   ``(`` · a sentence mark · ``~고`` · ``~다``. Endings: 경우 · 때 · ``~면`` (not a noun ``화면`` · ``측면`` …) ·
+#   ``~ 시`` / ``~화시`` · ``발생시`` · ``유지시`` … (not ``표시`` · ``즉시``)
+_CONDITION_ENDING = (r"(?:경우|때|(?<![화측전후표정단양평곡장])(?<=[가-힣])면(?![가-힣])|\s시(?![가-힣])"
+                     r"|(?<=[화생료착될할])시(?![가-힣])|유지시(?![가-힣]))")
+_HOLD_CONDITION_AFTER = re.compile(r"^(?:(?![가-힣]고[\s,])(?![가-힣]다(?:[\s.(]|$))[^,.;。(\n])*?"
+                                   + _CONDITION_ENDING)
 _AND = re.compile(r"이고|그리고|\bAND\b|&&")
 _TIME_UNITS = {"ms": 0.001, "s": 1.0, "초": 1.0, "분": 60.0}
 # (R47) a name that is itself a time quantity — ``Watchdog Input(Pulse 주기 5ms 이하)`` compares the period, not how
@@ -144,6 +160,9 @@ def _paren_owner(line: str, paren: int) -> str | None:
     return " ".join(words) or None
 
 
+_NUMBER_RANGE_LABEL = re.compile(rf"-?(?:{_NUM})(?:\s*~\s*-?(?:{_NUM}))?")
+
+
 def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
     """The subject of a number at ``pos``: the last C identifier / CamelCase name before it in its clause, else the
     one or two words right before it with the particle removed (``Battery 전압이`` → ``Battery 전압``).
@@ -186,6 +205,13 @@ def _signal_before(line: str, pos: int) -> tuple[str | None, str]:
             # ``s16g_ApiIn_MotorPosition 입력: 0 이하`` — the label names a signal: that is the subject (review r2 W5)
             return idents[-1], "identifier"
         name = label.group(1).strip(" -·•")
+        if _NUMBER_RANGE_LABEL.fullmatch(name):
+            # (R57) ``- [u16g_X]<TAB>-0x000~0x1FE: 0~510KPH`` — the raw range before ``:`` is the other scale of the same
+            #   value, not its subject (``x`` made it look like a word): the identifier written before it names it
+            #   (``8) Vehicle Speed - [u16g_X]<TAB>…`` too — review W4: a system document's line has no table row); none
+            #   — no subject (a value-only ``Range`` cell: the review asks)
+            before = [m.group(0) for m in _SIGNAL_IDENT.finditer(line[:label.start(1)]) if m.group(0) not in _C_KEYWORDS]
+            return (before[-1], "identifier") if before else (None, "")
         if "기준" in name:
             # ``저 전압 고장 검출 기준 전압: 8.50V 이하`` names the threshold itself, not a quantity to set (r3 W1)
             return name, "reference_label"
@@ -236,7 +262,10 @@ def _line_facts(line: str, offset: int) -> list[dict[str, Any]]:
         if not free(m.start("num"), m.end()):
             continue
         taken.append((m.start("num"), m.end()))
-        op = _KOREAN_OP.get(m.group("op") or "", ">=" if "유지" in m.group(0) or "지속" in m.group(0) else "==")
+        held = not m.group("op") and "유지" not in m.group(0) and "지속" not in m.group(0) \
+            and "동안" in m.group(0) and bool(_HOLD_CONDITION_AFTER.match(line[m.end():]))
+        op = _KOREAN_OP.get(m.group("op") or "",
+                            ">=" if "유지" in m.group(0) or "지속" in m.group(0) or held else "==")
         value = _number(m.group("num"))
         facts.append({"kind": "duration", "signal": m.group("sym"), "op": op, "value": value, "unit": m.group("unit"),
                       # (review r2 C-B) ``u16s_MAGNET_ERR_TM : 100ms`` names the reference time, not what is held
@@ -270,9 +299,12 @@ def _line_facts(line: str, offset: int) -> list[dict[str, Any]]:
         facts.append({"kind": "threshold", "signal": m.group("sig"), "signal_kind": "identifier",
                       "op": _KOREAN_OP[m.group("op")], "value": _number(m.group("num")), "unit": m.group("unit") or "",
                       "value_text": m.group("num"), "span": [offset + m.start(), offset + m.end()], "raw": m.group(0)})
+    titles = [(t.start(), t.end()) for t in _ANGLE_TITLE.finditer(line)]
     for m in _C_FACT.finditer(line):
         if not free(m.start(), m.end()) or m.group("lhs") in _C_KEYWORDS:
             continue
+        if any(a <= m.start("op") < b for a, b in titles):
+            continue                        # (R57) ``criteria<TAB><Sleep Mode …>`` — a title, not ``criteria < Sleep``
         taken.append((m.start(), m.end()))
         rhs = m.group("rhs")
         numeric = re.fullmatch(_NUM, rhs) is not None

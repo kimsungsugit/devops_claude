@@ -617,6 +617,21 @@ def _other_conditions(line: dict, fact: dict, joined_prev: str = "") -> str:
             #   which asserted both ``8.5V 이하`` and ``9V 이상`` hold. Say the join is for the tester to settle
             how = "unstated"
         state = {"or": "불성립 상태로 둔다", "and": "성립 상태로 둔다"}.get(how, "결합이 원문에 명시되지 않음 — 결합 조건 확인 필요")
+        negated = {bool(g.get("negated")) for g in group}
+        raw = line.get("raw") or line["text"]
+        if negated == {True} and how in ("or", "and") \
+                and all(_NEGATED_COMPARISON.match(raw[g["line_span"][1]:]) for g in group):
+            # (R57 review W3) ``전압이 9V 이상이 아닌 상태로 5초 이상 유지``: the line asks the comparison NOT to hold — keep
+            #   it the other way round (it said "성립 상태로 둔다" — the opposite precondition)
+            state = {"or": "성립 상태로 둔다", "and": "불성립 상태로 둔다"}[how]
+            text += " (원문이 부정)"
+        elif negated == {True} and how in ("or", "and"):
+            # (R57 review r2 W1) ``300ms동안 수신되지 않고 전압이 9V 이상인 경우``: the negation may sit on the predicate
+            #   (what lasts is the non-reception — "성립" is then right) or on the comparison — the words do not say
+            state = "부정의 범위 확인 필요 — 원문이 부정한 것이 이 비교인지(불성립으로 둠) 서술어인지(성립으로 둠) 정해야 한다"
+            text += " (원문이 부정)"
+        elif negated == {True, False}:
+            state = "결합이 원문에 명시되지 않음 — 결합 조건 확인 필요"   # a negated and a plain one on one subject
         notes.append(f"다른 조건 [{text}]: {state}")
     hold = {"or": "불성립 상태로 둔다", "and": "성립 상태로 둔다"}
     if not notes and len([f for f in line["facts"] if f["kind"] in {"threshold", "symbolic", "range", "duration"}]) == 1:
