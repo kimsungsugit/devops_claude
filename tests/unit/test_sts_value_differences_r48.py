@@ -223,7 +223,8 @@ def test_the_report_the_sheet_and_the_tcs():
     write_requirement_review_sheet(wb, out)
     sheet = [r for r in wb[REQUIREMENT_REVIEW_SHEET].iter_rows(values_only=True) if r[0] == "요구 문서 값 차이 후보"]
     assert len(sheet) == 2
-    kind, rid, where, fact, reason, decide, filled, evidence, line, _sha = sheet[0]
+    kind, rid, where, fact, reason, decide, filled, evidence, line, _sha, ai = sheet[0]    # (R52) + the AI column
+    assert ai == "—"             # a value difference is no subject question
     assert (rid, where) == ("SwTSR_0104", "SRS ↔ SyRS SyTR_1305 · Description")
     assert fact == "고전압 16.4V 이상 ↔ 고전압 16.5V 이상"
     assert "같은 주어" in reason and "한 눈금 안" in reason and "같은 임계(한 조건)인지" in decide and evidence == "—"

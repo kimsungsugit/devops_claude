@@ -589,6 +589,10 @@ def _load_stp_context(stp_path: str) -> str:
     return "\n".join(lines)
 
 
+# (R52) the AI proposals' answers, by sentence · fact · candidates (gitignored cache root of the repository)
+_AI_REVIEW_CACHE = Path(__file__).resolve().parents[1] / ".devops_pro_cache" / "sts_ai_review.json"
+
+
 def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     """Parse HSIS xlsx and return structured signal data for test generation.
 
@@ -3719,6 +3723,22 @@ def generate_sts(
                 gen_stats["requirement_boundary"]["hw_design_document"] = dict(_hwd_record, unused="no_hwrs")
             if system_input_skips:
                 gen_stats["requirement_boundary"]["system_input_skips"] = [str(s)[:200] for s in system_input_skips]
+            # (R52) AI 제안 — the review items' missing subjects, chosen by the LLM among real names and checked against a
+            #   quote that writes the name and the value together; never used for a step. Called only with an AI config
+            #   (as the AI enhancement); without one the cache is read. Its own try: a failure never costs the TCs.
+            try:
+                from generators.sts_ai_review import propose_subjects
+                # (review W8) the HSIS names are candidates whether or not a HwRS was given (the boundary TCs read the
+                #   rows only to narrow a HW tolerance path)
+                _ai_rows = _hsis_rows if _hsis_rows is not None else (
+                    hsis_rows_from_signals((hsis_signals or {}).get("signals")) if hsis_path else None)
+                gen_stats["requirement_boundary"]["ai_review"] = propose_subjects(
+                    _review, reqs, _system if _sy_records else None, _ai_rows, ai_config=ai_config,
+                    cache_path=(project_config or {}).get("ai_review_cache") or _AI_REVIEW_CACHE,
+                    on_progress=lambda msg: _progress(77, msg))
+            except Exception as exc:  # noqa: BLE001 — optional; disclosed
+                _logger.warning("AI review proposals skipped: %s", exc, exc_info=True)
+                gen_stats["requirement_boundary"]["ai_review"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
         except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below
             test_cases[:] = _before_rb   # nothing half-added
             _review.clear()

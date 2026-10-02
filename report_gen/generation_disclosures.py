@@ -363,6 +363,7 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.extend(_traced_system_items(rb, _why))
         out.extend(_hw_tolerance_items(rb))
         out.extend(_measurement_items(rb))
+        out.extend(_ai_review_items(rb))
         out.extend(_inclusion_conflict_items(rb))
         out.extend(_value_difference_items(rb))
         out.extend(_requirement_review_items(rb, _why))
@@ -585,6 +586,41 @@ def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
         + (", 그리고 한 출처(SRS 원문 또는 한 블록)의 서로 다른 두 줄(표시 '한 출처 안' — 한 문서가 의도로 두 조건·두 동작을 "
            "달리 적었을 수 있다)." if has_within else ", 한 출처(SRS 원문 또는 한 블록) 안의 쌍은 보지 않는다."),
         tone="warning")]
+
+
+def _ai_review_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R52) AI 제안 — 검토 항목의 빠진 주어를 LLM 이 실제 이름 중에서 고르고 그 이름과 값을 함께 적은 원문 인용을 댄 것.
+    확인한 것은 '이름이 실재하고 인용이 원문에 있다' 까지 — 대응은 사람이 확인한다(스텝·판정에 쓰지 않음). 키가 없으면 대상
+    항목이 없거나 R52 이전 산출물."""
+    ai = rb.get("ai_review")
+    if not isinstance(ai, dict):
+        return []
+    if ai.get("error"):
+        return [_item("sts_ai_review", "AI 제안(검토 항목 주어)", "실패",
+                      f"AI 제안을 만들지 못했다 — {str(ai['error'])[:160]}. 검토 항목과 TC 는 그대로다.", tone="warning")]
+    eligible = int(ai.get("eligible") or 0)
+    if not eligible:
+        return []
+    by_quote, by_block = int(ai.get("verified_by_quote") or 0), int(ai.get("verified_by_block_name") or 0)
+    by_words = int(ai.get("verified_by_words") or 0)
+    failed, cache_error = int(ai.get("call_failed") or 0), str(ai.get("cache_error") or "")
+    # (review W7) a generation path that calls no AI is no "AI 설정 없음" (the Jenkins STS handler never passes one)
+    how = (f"모델 {ai.get('model')}, 새로 물은 {ai.get('asked', 0)} 개, {ai.get('elapsed_s', 0)} 초" if ai.get("called")
+           else "이번 생성은 AI 를 부르지 않음 — 캐시만 읽음")
+    note = (f"주어가 없는 검토 항목 {eligible} 개 중 AI 가 원문으로 이름과 값을 함께 적은 곳을 댄 것 {by_quote} 개"
+            + (f"(이름 그대로는 아니고 이름의 단어를 모두 적은 것 {by_words} 개 따로)" if by_words else "")
+            + f", 값만 적는 칸의 블록 이름 {by_block} 개, 검증에서 버린 것 {ai.get('rejected', 0)} 개, 원문으로 정하지 못함 {ai.get('unknown', 0)} 개"
+            + (f", 묻지 않음 {ai.get('not_asked')} 개" if ai.get("not_asked") else "")
+            + (f", 호출 실패 · 응답 해석 실패 {failed} 개(캐시하지 않음 — 다음 생성에서 다시 묻는다)" if failed else "")
+            + f"({how}, 캐시 {ai.get('cached', 0)})."
+            + (f" 후보 이름이 상한에서 잘린 항목 {ai['candidates_cut']} 개." if ai.get("candidates_cut") else "")
+            + (f" {cache_error[:120]} — 이번 답은 다음 생성에 남지 않는다." if cache_error else "")
+            + " 'Requirement Review' 시트의 'AI Proposal (Checked)' 열 — 확인한 것은 이름이 실재하고 인용이 원문에 있으며 다른 "
+            "후보를 가리키지 않는다는 것까지다(후보로 뽑히지 않는 이름 — 밑줄 없는 `EN1` 같은 — 은 보지 못한다). 대응은 사람이 "
+            "확인하고, 스텝·판정에는 쓰지 않는다.")
+    return [_item("sts_ai_review", "AI 제안(검토 항목 주어)",
+                  f"인용 확인 {by_quote}" + (f" · 단어 {by_words}" if by_words else "") + f" · 블록 이름 {by_block} / {eligible}", note,
+                  tone=_tone(failed > 0 or bool(cache_error)))]
 
 
 def _measurement_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:

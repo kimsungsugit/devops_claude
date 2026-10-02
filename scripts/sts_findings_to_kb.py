@@ -43,6 +43,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 REVIEW_SHEET = "Requirement Review"
+_NOT_INGESTED = frozenset({"Line SHA-256", "AI Proposal (Checked)"})
 EVIDENCE_SHEET = "Requirement Evidence"
 # (review W1) its own — read by the chat's requirement-findings domain only (one spelling: `config`)
 CATEGORY = str(getattr(__import__("config"), "RAG_STS_FINDINGS_CATEGORY", "sts_findings"))
@@ -109,9 +110,11 @@ def build_documents(sts_path: str, project: str, *, allow_empty: bool = False) -
         cell = dict(zip(head, ("" if c is None else str(c) for c in r), strict=False))
         kind = cell.get("Kind", "")
         srs = [s.strip() for s in cell.get("SRS ID", "").split(",") if s.strip()]
-        # (review I2) the sentence hash is no reading matter — kept out of the embedded text
+        # (review I2) the sentence hash is no reading matter — kept out of the embedded text. (R52) Nor the AI column:
+        #   the KB holds what the generator read from the documents, never a model's answer (cited back as evidence it
+        #   would be AI on AI), and its '묻지 않음' would change every key with the AI setting
         content = "\n".join(f"{h}: {cell.get(h, '')}" for h in head
-                            if h != "Line SHA-256" and cell.get(h, "") not in ("", "—"))
+                            if h not in _NOT_INGESTED and cell.get(h, "") not in ("", "—"))
         group = _KIND_TAG.get(kind, "review_other")
         docs.append(_doc(project, group,
                          f"[STS 요구 검토] {project} {', '.join(srs[:3])} — {kind}: {cell.get('Fact', '')}",

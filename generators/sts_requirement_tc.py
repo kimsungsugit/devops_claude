@@ -2597,11 +2597,22 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
 REQUIREMENT_REVIEW_HEADERS = ["Kind", "SRS ID", "Source Document", "Fact", "Reason", "To Decide",
                               # (R46) what writing the gap into the requirement produces · other sentences of the given
                               #   documents that state the value steppably (quoted, never used)
-                              "If Filled", "Evidence (Other Sentences)", "Source Line", "Line SHA-256"]
+                              "If Filled", "Evidence (Other Sentences)", "Source Line", "Line SHA-256",
+                              # (R52) an LLM's subject among real names, with a quote writing the name and the value —
+                              #   checked, never used
+                              "AI Proposal (Checked)"]
 REQUIREMENT_REVIEW_SHEET = "Requirement Review"
 _CONFLICT_ROLE_TEXT = {"condition": "조건끼리", "outcome": "결과 기준끼리", "stimulus": "시험 입력(검증 기준) ↔ 요구 조건"}
 _DIFF_TIER_TEXT = {"same_subject": "같은 주어", "same_condition": "같은 조건의 유지시간", "within_step": "한 눈금 안",
                    "only_pair": "그 단위·쪽의 유일한 짝"}
+
+
+def _ai_proposal_text(item: dict[str, Any]) -> str:
+    """(R52) The 'AI Proposal (Checked)' cell — ``—`` when the item was not a subject question."""
+    if not item.get("ai_proposal"):
+        return "—"
+    from generators.sts_ai_review import proposal_text
+    return _clip(proposal_text(item), 600)
 
 
 def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> int:
@@ -2649,7 +2660,7 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
                        "단계 등)면 결함 아님으로 닫는다(경계 TC 는 각 문장대로 판정)",
                        if_filled(it), "—",
                        _clip(" ↔ ".join([str(srs.get("line") or "")] + [str(o.get("line") or "") for o in others]), 300),
-                       "—"])
+                       "—", "—"])
             continue
         if it.get("kind") == "inclusion_conflict":
             a, b = it.get("a") or {}, it.get("b") or {}
@@ -2661,7 +2672,7 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
                        + flag,
                        "어느 쪽이 맞는지 문서 검토로 정한다(경계 TC 는 각 문장대로 판정)",
                        if_filled(it), "—",
-                       _clip(f"{a.get('line')} ↔ {b.get('line')}", 300), "—"])
+                       _clip(f"{a.get('line')} ↔ {b.get('line')}", 300), "—", "—"])
             continue
         reason = str(it.get("reason"))
         why, decide = {**REVIEW_TEXT, **READ_TEXT, **MEASURE_TEXT}.get(reason, (reason, "원문 확인"))
@@ -2672,5 +2683,5 @@ def write_requirement_review_sheet(wb, items: list[dict[str, Any]] | None) -> in
         ws.append(["읽은 결합 — 확인" if it.get("kind") == "read" else "검토 필요 조건",
                    ", ".join(it.get("srs_ids") or []), it.get("source", ""), it.get("fact") or "—",
                    why, decide, if_filled(it), _clip(_evidence_text(it), 1000),
-                   _clip(str(it.get("line") or ""), 300), it.get("line_sha256") or "—"])
+                   _clip(str(it.get("line") or ""), 300), it.get("line_sha256") or "—", _ai_proposal_text(it)])
     return len(items)
