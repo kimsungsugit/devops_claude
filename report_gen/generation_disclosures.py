@@ -364,6 +364,7 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.extend(_hw_tolerance_items(rb))
         out.extend(_measurement_items(rb))
         out.extend(_ai_review_items(rb))
+        out.extend(_ai_path_items(rb))
         out.extend(_inclusion_conflict_items(rb))
         out.extend(_value_difference_items(rb))
         out.extend(_requirement_review_items(rb, _why))
@@ -586,6 +587,37 @@ def _inclusion_conflict_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
         + (", 그리고 한 출처(SRS 원문 또는 한 블록)의 서로 다른 두 줄(표시 '한 출처 안' — 한 문서가 의도로 두 조건·두 동작을 "
            "달리 적었을 수 있다)." if has_within else ", 한 출처(SRS 원문 또는 한 블록) 안의 쌍은 보지 않는다."),
         tone="warning")]
+
+
+def _ai_path_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """(R54) AI 제안 감시 경로 — 문서가 정하지 않은(허브) 경계의 HW 감시 블록을 LLM 이 후보 중에서 고르고 그 블록 원문으로
+    무엇을 감시하는지 인용한 것. 확인한 것은 '그 블록 원문에 있고 경계 주어의 이름이 그 블록에만 맞으며 값이 그 척도 위' 까지 —
+    경로는 정하지 않는다(사람이 확인해 HW 문서나 SRS Related ID 에 적으면 그때)."""
+    ai = rb.get("ai_path")
+    if not isinstance(ai, dict):
+        return []
+    if ai.get("error"):
+        return [_item("sts_ai_path", "AI 제안(감시 경로)", "실패",
+                      f"감시 경로 AI 제안을 만들지 못했다 — {str(ai['error'])[:160]}. 경계 TC 는 그대로다.", tone="warning")]
+    eligible = int(ai.get("eligible") or 0)
+    if not eligible:
+        return []
+    failed, cache_error = int(ai.get("call_failed") or 0), str(ai.get("cache_error") or "")
+    how = (f"모델 {ai.get('model')}, 새로 물은 {ai.get('asked', 0)} 개, {ai.get('elapsed_s', 0)} 초" if ai.get("called")
+           else "이번 생성은 AI 를 부르지 않음 — 캐시만 읽음")
+    note = (f"감시 경로가 정해지지 않은 경계 {eligible} 개(서로 다른 경계 {ai.get('distinct', 0)} 개) 중 AI 가 후보 HW 블록의 원문으로 "
+            f"경계 주어를 그 블록에만 묶은 것 {ai.get('verified', 0)} 개, 검증에서 버린 것 {ai.get('rejected', 0)} 개, 원문으로 정하지 "
+            f"못함 {ai.get('unknown', 0)} 개"
+            + (f", 묻지 않음 {ai.get('not_asked')} 개" if ai.get("not_asked") else "")
+            + (f", 호출 실패 · 응답 해석 실패 {failed} 개(캐시하지 않음 — 다음 생성에서 다시 묻는다)" if failed else "")
+            + f"({how}, 캐시 {ai.get('cached', 0)})."
+            + (f" {cache_error[:120]} — 이번 답은 다음 생성에 남지 않는다." if cache_error else "")
+            + " 'Requirement Evidence' 시트의 'AI Path Proposal (Checked)' 열 — 확인한 것은 인용이 그 블록 원문에 있고 경계 주어의 "
+            "이름이 인용 · 그 블록 이름과 맞으며 다른 후보 블록과는 안 맞는다는 것, 절대 허용오차면 값이 그 척도 위라는 것까지다"
+            "(상대 허용오차는 척도를 확인하지 않는다 — 칸에 적음). 경로는 정하지 않는다: 맞으면 HW 요구사항서나 SRS 의 Related ID "
+            "에 적고 다시 생성하면 경로가 정해진다.")
+    return [_item("sts_ai_path", "AI 제안(감시 경로)", f"인용 확인 {ai.get('verified', 0)} / {eligible}", note,
+                  tone=_tone(failed > 0 or bool(cache_error)))]
 
 
 def _ai_review_items(rb: Dict[str, Any]) -> List[Dict[str, Any]]:

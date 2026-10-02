@@ -43,7 +43,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 REVIEW_SHEET = "Requirement Review"
-_NOT_INGESTED = frozenset({"Line SHA-256", "AI Proposal (Checked)"})
+_NOT_INGESTED = frozenset({"Line SHA-256", "AI Proposal (Checked)", "AI Path Proposal (Checked)"})
 EVIDENCE_SHEET = "Requirement Evidence"
 # (review W1) its own — read by the chat's requirement-findings domain only (one spelling: `config`)
 CATEGORY = str(getattr(__import__("config"), "RAG_STS_FINDINGS_CATEGORY", "sts_findings"))
@@ -129,7 +129,8 @@ def build_documents(sts_path: str, project: str, *, allow_empty: bool = False) -
         if not srs:
             continue
         lines = [" | ".join(f"{h}: {c[h]}" for h in head
-                            if h not in ("SRS ID", "Line SHA-256") and c.get(h) not in ("", "—", None)) for c in cells]
+                            if h not in _NOT_INGESTED and h != "SRS ID" and c.get(h) not in ("", "—", None))
+                 for c in cells]
         parts = _chunks(lines, MAX_DOC_CHARS - 200)
         for i, part in enumerate(parts, start=1):
             suffix = f" ({i}/{len(parts)})" if len(parts) > 1 else ""

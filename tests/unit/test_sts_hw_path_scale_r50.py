@@ -24,6 +24,7 @@ import pytest
 from generators.sts import _build_tc_dict, _classify_steps, _make_tc_id
 from generators.sts_requirement_tc import (
     MAX_HW_TOLERANCES,
+    REQUIREMENT_EVIDENCE_HEADERS,
     _formula_scales,
     _hsis_pick,
     _hsis_row,
@@ -57,6 +58,9 @@ ROWS = [{"id": "HSI_30", "vars": ["u16g_DrvIn_Vsup"], "ids": ["SyEI_01", "SySM_0
         {"id": "HSI_23", "vars": ["u16g_ApiIn_HallSnsrLevel"], "ids": ["SyTSR_0109"], "nets": ["VCC_HALL_MON"],
          "name": "VCC_HALL_MON"}]
 
+
+# (R54) the HW tolerance column by name — an AI column follows it
+_HW_COL = REQUIREMENT_EVIDENCE_HEADERS.index("HW Tolerance (Quoted)")
 
 def _req(desc, related, rid="SwTSR_0101"):
     return {"id": rid, "name": "n", "description": desc, "verification": "", "asil": "B", "related_id": related}
@@ -178,7 +182,7 @@ def test_a_formula_of_another_node_is_not_applied():
     e["hw_tolerance"] = [t]
     wb = openpyxl.Workbook()
     write_requirement_evidence_sheet(wb, [{"id": "T", "srs_id": "SwTSR_0101", "requirement_evidence": [e]}])
-    cell = list(wb["Requirement Evidence"].iter_rows(values_only=True))[1][-1]
+    cell = list(wb["Requirement Evidence"].iter_rows(values_only=True))[1][_HW_COL]
     assert "HSIS HSI_24(V_MAGNET_MON) 와 다른 노드 — 환산 안 함" in cell
 
 
@@ -192,7 +196,7 @@ def test_two_ratios_are_shown_not_chosen():
     wb = openpyxl.Workbook()
     write_requirement_evidence_sheet(wb, [{"id": "T", "srs_id": "SwTSR_0101", "requirement_evidence": [e]}])
     assert "척도 불명 — 분압비 충돌: HwC_07: a *0.5 ↔ HwC_01: b *3" in \
-        list(wb["Requirement Evidence"].iter_rows(values_only=True))[1][-1]
+        list(wb["Requirement Evidence"].iter_rows(values_only=True))[1][_HW_COL]
 
 
 def test_the_hsis_row_of_a_sw_signal():
@@ -319,7 +323,7 @@ def test_the_summary_the_note_and_the_cell():
         (1, 0, 0)
     wb = openpyxl.Workbook()
     write_requirement_evidence_sheet(wb, tcs)
-    cell = list(wb["Requirement Evidence"].iter_rows(values_only=True))[1][-1]
+    cell = list(wb["Requirement Evidence"].iter_rows(values_only=True))[1][_HW_COL]
     assert "[HSIS HSI_30 u16g_DrvIn_Vsup → 네트 V-BAT]" in cell and not cell.startswith("감시 경로 미정")
     # the fact's own system block still comes first: a direct candidate is never overridden by HSIS
     direct = [dict(t, direct=t["hw_id"] == "HwTSR_0203") for t in e["hw_tolerance"]]

@@ -3739,6 +3739,20 @@ def generate_sts(
             except Exception as exc:  # noqa: BLE001 — optional; disclosed
                 _logger.warning("AI review proposals skipped: %s", exc, exc_info=True)
                 gen_stats["requirement_boundary"]["ai_review"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            # (R54) AI 제안 — the HW monitor block of a boundary whose path the documents leave undecided (a hub), with a
+            #   quote of that block naming the boundary's subject; never decides the path. Its own try.
+            if _hw is not None:
+                try:
+                    from generators.sts_ai_review import propose_paths
+                    _path_rows = _hsis_rows if _hsis_rows is not None else (
+                        hsis_rows_from_signals((hsis_signals or {}).get("signals")) if hsis_path else None)
+                    gen_stats["requirement_boundary"]["ai_path"] = propose_paths(
+                        test_cases, _hw, _path_rows, ai_config=ai_config,
+                        cache_path=(project_config or {}).get("ai_review_cache") or _AI_REVIEW_CACHE,
+                        on_progress=lambda msg: _progress(77, msg))
+                except Exception as exc:  # noqa: BLE001 — optional; disclosed
+                    _logger.warning("AI monitor path proposals skipped: %s", exc, exc_info=True)
+                    gen_stats["requirement_boundary"]["ai_path"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
         except Exception as exc:  # noqa: BLE001 — a default-on addition never stops STS generation; disclosed below
             test_cases[:] = _before_rb   # nothing half-added
             _review.clear()

@@ -275,7 +275,9 @@ def test_each_criterion_row_says_its_heading_and_clause():
     rows = list(wb["Requirement Evidence"].iter_rows(values_only=True))[1:]
     assert [(r[3], r[6]) for r in rows] == [("Slack Time", "Task 할당 시간의 10% 이상."),
                                             ("메모리 점유율", "그 외 : Proto 60% 이하, Master 80% 이하.")]
-    assert rows[0][-1] == "— (판정 기준 측정 — 해당 없음)"                     # (review r2 I-4)
+    from generators.sts_requirement_tc import REQUIREMENT_EVIDENCE_HEADERS
+    hw_col = REQUIREMENT_EVIDENCE_HEADERS.index("HW Tolerance (Quoted)")
+    assert rows[0][hw_col] == "— (판정 기준 측정 — 해당 없음)" and rows[0][-1] == "—"   # (review r2 I-4) · (R54) AI 열
     # (review r2 W-D) the criteria TC is not a boundary TC
     assert (stats.get("tcs", 0), stats["acceptance_tcs"]) == (0, 1)
 

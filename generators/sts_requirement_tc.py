@@ -1429,6 +1429,9 @@ def hw_tolerances_for(req: dict[str, Any], evidence: dict[str, Any], hw: dict[st
                         "scale_conflict": (block.get("scale_conflict") if size is None and tol["unit"] != "%"
                                            else None),
                         "direct": bool(source_id) and source_id in block["related"],
+                        # (R54 review W2) a relative tolerance is 'known' on any scale — no check that the block reads
+                        #   this value
+                        "relative": tol["unit"] == "%",
                         "scale_known": size is not None, "size": _plain(size) if size is not None else None,
                         # on an unknown scale, the number as written (in the value's unit) — never a point
                         "written_size": _plain(written) if size is None else None,
@@ -1516,7 +1519,20 @@ def hw_tolerance_summary(evidence: dict[str, Any], tolerances: list[dict[str, An
     inside = (largest is not None and step < largest) or any(step < w for w in written)
     bounded = largest is not None and not any(w >= largest for w in written)
     certain = len({t["hw_id"] for t in relevant}) == 1
+    # (R54 review W2) per block, from every candidate (before the sheet's cut): 'known' — an absolute tolerance on the
+    #   value's scale; 'relative' — only a relative one (on any scale, so no check); 'unknown' — off its scale
+    #   — (R54 review r2 I4) 'scaled_unconfirmed' when it is known only through a monitor ratio the HSIS did not confirm
+    order = ("known", "scaled_unconfirmed", "relative", "unknown")
+    scale_by_block: dict[str, str] = {}
+    for t in relevant:
+        if t["scale_known"] and not t.get("relative"):
+            state = "scaled_unconfirmed" if (t.get("scale") or {}).get("check") not in (None, "confirmed") else "known"
+        else:
+            state = "relative" if t.get("relative") else "unknown"
+        prev = scale_by_block.get(t["hw_id"])
+        scale_by_block[t["hw_id"]] = state if prev is None else min(prev, state, key=order.index)
     return {"blocks": list(dict.fromkeys(t["hw_id"] for t in relevant)), "certain": certain,
+            "scale_by_block": scale_by_block,
             "by_hsis": certain and not any(t["direct"] for t in relevant) and any(t.get("hsis") for t in relevant),
             "scaled": any(t.get("scaled_by") for t in relevant),
             "scale_unconfirmed": any((t.get("scale") or {}).get("check") not in (None, "confirmed") for t in relevant),
@@ -2566,7 +2582,10 @@ REQUIREMENT_EVIDENCE_HEADERS = ["Test Case ID", "SRS ID", "Kind", "Subject", "Re
                                 "Unit", "Step", "Step Basis", "Stimulus Points (holds)", "Other Conditions",
                                 "Source Line", "Line SHA-256", "Source Document",
                                 # (R49) the HW monitor accuracy linked through the Related IDs — quoted, never used
-                                "HW Tolerance (Quoted)"]
+                                "HW Tolerance (Quoted)",
+                                # (R54) where the path is undecided: an LLM's block, with a quote of that block naming
+                                #   the subject — checked, never used
+                                "AI Path Proposal (Checked)"]
 REQUIREMENT_EVIDENCE_SHEET = "Requirement Evidence"
 
 
@@ -2590,7 +2609,8 @@ def write_requirement_evidence_sheet(wb, test_cases: list[dict]) -> int:
             subject += " (괄호 앞 명사)"   # (R32 review I4) a weaker subject than a signal name: the reviewer sees it
         ws.append([tc_id, e["srs_id"], e["kind"], subject, e.get("reference_constant") or "—", e["op"],
                    e["value"], e["unit"] or "—", e["step"], e["step_basis"], points, e["combination_note"] or "—",
-                   _clip(e["line"], 300), e["line_sha256"], source_label(e.get("source")), _tolerance_text(e)])
+                   _clip(e["line"], 300), e["line_sha256"], source_label(e.get("source")), _tolerance_text(e),
+                   _path_proposal_text(e)])
     return len(rows)
 
 
@@ -2605,6 +2625,14 @@ REQUIREMENT_REVIEW_SHEET = "Requirement Review"
 _CONFLICT_ROLE_TEXT = {"condition": "조건끼리", "outcome": "결과 기준끼리", "stimulus": "시험 입력(검증 기준) ↔ 요구 조건"}
 _DIFF_TIER_TEXT = {"same_subject": "같은 주어", "same_condition": "같은 조건의 유지시간", "within_step": "한 눈금 안",
                    "only_pair": "그 단위·쪽의 유일한 짝"}
+
+
+def _path_proposal_text(evidence: dict[str, Any]) -> str:
+    """(R54) The 'AI Path Proposal (Checked)' cell — ``—`` when the path was decided or not asked about."""
+    if not evidence.get("ai_path"):
+        return "—"
+    from generators.sts_ai_review import path_proposal_text
+    return _clip(path_proposal_text(evidence), 600)
 
 
 def _ai_proposal_text(item: dict[str, Any]) -> str:

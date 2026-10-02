@@ -495,3 +495,260 @@ def proposal_text(item: dict[str, Any]) -> str:
     if p["status"] == "unknown":
         return head + (f" AI 설명: {p['reason']}" if p.get("reason") else "")
     return head + (f" {p['reason']}" if p.get("reason") else "")
+
+
+# ── (R54) AI 제안: 감시 경로가 정해지지 않은 경계의 HW 감시 블록 ─────────────────────────────────────────────────────────
+#
+# 경계 값의 시스템 블록을 HW 요구 블록 여럿이 인용(허브)하면 생성기는 감시 경로를 정하지 않는다(R49/R50 — 이름 대조는
+# 추측이라 하지 않는다). LLM 은 그 후보 블록 중 하나를 고르고 **그 블록 원문**에서 무엇을 감시하는지 적은 문장을 인용한다.
+# 통과 조건: 후보 안의 블록 · 인용이 그 블록 원문에 있음 · 경계 주어(또는 그 SW 변수의 HSIS 행 이름)의 이름 단어가 인용과
+# 맞고 다른 후보 블록의 이름과는 맞지 않음 · 경계 값이 그 블록이 재는 척도 위. 통과해도 경로를 정하지 않는다 — 'Requirement
+# Evidence' 시트의 열과 공시에만, 사람이 확인해 HW 문서(또는 SRS Related ID)에 적으면 그때 경로가 된다.
+
+PATH_PROMPT_VERSION = "path-2"   # (review I3) a domain prefix: never one of R52's keys
+PATH_SYSTEM_PROMPT = (
+    "You help review automotive HW/SW test specifications (ISO 26262). For each item, a requirement boundary value "
+    "(subject, value, sentence) is linked to several candidate HW monitor blocks. Choose the ONE candidate block that "
+    "monitors that subject, and support it with ONE quote copied EXACTLY (character for character) from THAT block's "
+    "text which says what the block monitors. The subject may also be known by its aliases (its HSIS signal name and "
+    "nets). If no candidate's text says it monitors this subject, answer hw_id null. "
+    "Never invent IDs or quotes.\n"
+    "Return JSON only: {\"answers\": [{\"id\": <item id>, \"hw_id\": <candidate id or null>, \"quote\": <exact substring "
+    "of that block's text or null>, \"reason\": <one short Korean sentence>}]}")
+_PATH_REJECT_TEXT = {"block_not_in_candidates": "후보 밖 블록(지어낸 ID)",
+                     "quote_not_in_block": "인용이 고른 블록의 원문에 없음",
+                     "quote_does_not_name_subject": "인용이 경계 주어(또는 그 HSIS 이름)를 적지 않음",
+                     "subject_not_comparable": "주어와 인용을 단어로 대조할 수 없음(한글 주어 ↔ 영문 · 혼용 원문)",
+                     "block_name_does_not_fit": "고른 블록의 이름이 경계 주어와 맞지 않음",
+                     "subject_fits_another_block": "경계 주어가 다른 후보 블록과도 맞음",
+                     "subject_has_no_name": "경계 주어에 대조할 이름이 없음(B+ 같은 기호 · 일반어뿐)",
+                     "value_off_block_scale": "경계 값을 그 블록 척도로 확인할 수 없음(분압비 미기재 · 척도 밖)"}
+
+
+def _path_items(test_cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The boundary evidences whose monitor path is undecided (``hw_tolerance_summary`` not ``certain``, two blocks or
+    more) — in the order of the TCs."""
+    out = []
+    for tc in test_cases:
+        for e in tc.get("requirement_evidence") or []:
+            summary = e.get("hw_tolerance_summary") or {}
+            # two blocks or more is an undecided path (`certain` means one block — the same test, once); (review I5) a
+            #   path the HSIS refused (it points to a block named for another signal) is a document conflict to settle
+            if summary and len(summary.get("blocks") or []) > 1 and not summary.get("path_refused"):
+                out.append(e)
+    return out
+
+
+def _aliases(evidence: dict[str, Any], hsis_rows: list[dict[str, Any]] | None) -> list[str]:
+    """(review I4) The HSIS row's name and nets of a SW-variable subject — what the verifier also reads, told to the
+    model too."""
+    from generators.sts_requirement_tc import _hsis_row
+    row = _hsis_row(str(evidence.get("signal") or ""), hsis_rows or [])
+    return list(dict.fromkeys(x for x in [row.get("name") or "", *row.get("nets", [])] if x)) if row else []
+
+
+def _subject_words(evidence: dict[str, Any], hsis_rows: list[dict[str, Any]] | None) -> set[str]:
+    """The name words of the boundary's subject — and, for a SW variable, of its HSIS row's name and nets (the row says
+    which signal it is: ``u16g_ApiIn_Vsup`` → its net's ``BAT``)."""
+    from generators.sts_requirement_tc import _hsis_row, _name_words
+    signal = str(evidence.get("signal") or "")
+    words = set(_name_words(signal))
+    row = _hsis_row(signal, hsis_rows or [])
+    if row:
+        words |= _name_words(row.get("name") or "", *row.get("nets", []))
+    return words
+
+
+def _path_key(evidence: dict[str, Any], blocks: list[str], hw: dict[str, dict[str, Any]], words: set[str]) -> str:
+    return hashlib.sha256("\x1f".join([PATH_PROMPT_VERSION, str(evidence.get("signal")), str(evidence.get("value")),
+                                       str(evidence.get("unit")), str(evidence.get("line_sha256")), *blocks, "\x1e",
+                                       *(str((hw.get(b) or {}).get("full_text") or "") for b in blocks), "\x1e",
+                                       *sorted(words)]).encode("utf-8")).hexdigest()
+
+
+def _verify_path(answer: dict[str, Any], evidence: dict[str, Any], blocks: list[str], hw: dict[str, dict[str, Any]],
+                 words: set[str]) -> dict[str, Any]:
+    """(R54) The proposed block passes only when it is a candidate, the quote is in its own text, the quote names the
+    boundary's subject (a word of it, or of its HSIS row), no other candidate block's name does, and the value is on
+    the block's scale (its tolerance is known at the value, directly or through a monitor ratio)."""
+    from generators.sts_requirement_tc import _name_words
+    hw_id, quote = answer.get("hw_id"), answer.get("quote")
+    reason = _norm(answer.get("reason") or "")[:200]
+    if not hw_id:
+        return {"status": "unknown", "hw_id": None, "quote": None, "reason": reason}
+    hw_id = str(hw_id)
+    if hw_id not in blocks:
+        return {"status": "rejected", "hw_id": hw_id[:40], "quote": None, "reason": "block_not_in_candidates"}
+    q = _norm(quote or "")
+    if len(q) < 4 or q not in _norm((hw.get(hw_id) or {}).get("full_text") or ""):
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120] or None, "reason": "quote_not_in_block"}
+    if not words:
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120], "reason": "subject_has_no_name"}
+    agree = _agree_script(words, _name_words(q))
+    if agree is None:       # (review W3) nothing in the same script to compare: no reading, no "not written"
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120], "reason": "subject_not_comparable"}
+    if not agree:
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120], "reason": "quote_does_not_name_subject"}
+    # (review W1) the chosen block's own name must not say another signal (a quote 'Hall Sensor 전원은 Battery 전압으로
+    #   부터' tied BAT to the Hall block), and no other candidate may fit — by its name, or by its text when its name is
+    #   generic words only (``Power Supply Monitor`` names nothing to compare)
+    # (review r2 W1) the same script on both sides for all three readings; what cannot be compared is said in the cell
+    own = _agree_script(words, _name_words((hw.get(hw_id) or {}).get("name") or ""))
+    if own is False:
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120], "reason": "block_name_does_not_fit"}
+    others = []
+    for b in blocks:
+        if b == hw_id:
+            continue
+        other = _name_words((hw.get(b) or {}).get("name") or "") or _name_words((hw.get(b) or {}).get("full_text") or "")
+        others.append(_agree_script(words, other))
+    if any(others):
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120], "reason": "subject_fits_another_block"}
+    # (review W2) the block's scale from every candidate before the sheet's cut; a relative tolerance checks no scale
+    scale = ((evidence.get("hw_tolerance_summary") or {}).get("scale_by_block") or {}).get(hw_id, "unchecked")
+    if scale == "unknown":
+        return {"status": "rejected", "hw_id": hw_id, "quote": q[:120], "reason": "value_off_block_scale"}
+    return {"status": "verified", "hw_id": hw_id, "name": str((hw.get(hw_id) or {}).get("name") or ""),
+            "quote": q[:200], "reason": reason, "scale": scale,
+            "name_check": "agrees" if own else "not_comparable",
+            "others_check": "not_comparable" if any(o is None for o in others) else "differ"}
+
+
+def _agree_script(a: set[str], b: set[str]) -> bool | None:
+    """`_names_agree`, and where it cannot compare (one side Korean only — review r2 W1) the Korean words of both sides
+    and the other words of both sides compared apart: ``True`` when either agrees, ``False`` when one could be compared
+    and none agrees, ``None`` when nothing in the same script is on both sides."""
+    from generators.sts_requirement_tc import _names_agree
+    got = _names_agree(a, b)
+    if got is not None:
+        return got
+    ka = {w for w in a if re.fullmatch(r"[가-힣]+", w)}
+    kb = {w for w in b if re.fullmatch(r"[가-힣]+", w)}
+    parts = [_names_agree(x, y) for x, y in ((ka, kb), (a - ka, b - kb)) if x and y]
+    parts = [p for p in parts if p is not None]
+    return any(parts) if parts else None
+
+
+def propose_paths(test_cases: list[dict[str, Any]], hw: dict[str, dict[str, Any]] | None,
+                  hsis_rows: list[dict[str, Any]] | None = None, *, ai_config: dict[str, Any] | None = None,
+                  cache_path: str | Path | None = None, llm: Callable[..., str | None] | None = None,
+                  on_progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """Give every boundary evidence with an undecided monitor path an ``ai_path`` (``{"status", "hw_id", "quote",
+    "reason", "model", "cached"}``) and return the counts. One question per distinct boundary (the same subject, value,
+    sentence and candidates share the answer). The cache holds the raw answer; a failed call stops the asking."""
+    started = time.monotonic()
+    items = _path_items(test_cases) if hw else []
+    model = str((ai_config or {}).get("model_override") or (ai_config or {}).get("model") or "")
+    cache_file = Path(cache_path) if cache_path else None
+    with _CACHE_LOCK:
+        cache, cache_error = _load_cache(cache_file)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    meta_of: dict[str, tuple[list[str], set[str]]] = {}
+    for e in items:
+        blocks = list((e.get("hw_tolerance_summary") or {}).get("blocks") or [])
+        words = _subject_words(e, hsis_rows)
+        key = _path_key(e, blocks, hw or {}, words)
+        groups.setdefault(key, []).append(e)
+        meta_of[key] = (blocks, words)
+    stats: dict[str, Any] = {"eligible": len(items), "distinct": len(groups), "verified": 0, "unknown": 0,
+                             "rejected": 0, "not_asked": 0, "call_failed": 0, "cached": 0, "asked": 0,
+                             "model": model or None, "called": bool(ai_config)}
+    proposals: dict[str, dict[str, Any]] = {}
+    todo: list[str] = []
+    for key, members in groups.items():
+        blocks, words = meta_of[key]
+        hit = cache.get(key)
+        if isinstance(hit, dict) and isinstance(hit.get("answer"), dict):
+            proposals[key] = {**_verify_path(hit["answer"], members[0], blocks, hw or {}, words),
+                              "model": hit.get("model"), "cached": True}
+            stats["cached"] += 1
+        elif not ai_config or len(todo) >= MAX_ASK:
+            proposals[key] = {"status": "not_asked", "hw_id": None, "quote": None, "reason": "", "model": None,
+                              "cached": False}
+        else:
+            todo.append(key)
+    if todo:
+        if llm is None:
+            from workflow.ai import llm_call as llm
+        cfg = dict(ai_config or {}, temperature=0,
+                   retries=max(1, min(_int_or((ai_config or {}).get("retries"), 2), 2)),
+                   read_timeout=max(10, min(_int_or((ai_config or {}).get("read_timeout"), 120), 120)))
+        updates: dict[str, Any] = {}
+        stopped = ""
+        for start in range(0, len(todo), BATCH):
+            batch = todo[start:start + BATCH]
+            if on_progress:
+                on_progress(f"AI 감시 경로 제안 {min(start + BATCH, len(todo))}/{len(todo)}")
+            answers: dict[int | None, dict[str, Any]] = {}
+            failure, answered = stopped, model
+            if not stopped:
+                payload = []
+                for i, key in enumerate(batch):
+                    e, (blocks, _w) = groups[key][0], meta_of[key]
+                    payload.append({"id": i, "subject": e.get("signal"), "subject_aliases": _aliases(e, hsis_rows),
+                                    "value": f"{e.get('value')}{e.get('unit') or ''}", "sentence": e.get("line"),
+                                    "candidates": [{"hw_id": b, "name": (hw or {}).get(b, {}).get("name"),
+                                                    "text": str((hw or {}).get(b, {}).get("full_text") or "")[:1500]}
+                                                   for b in blocks]})
+                stats["asked"] += len(batch)
+                meta: dict[str, Any] = {}
+                try:
+                    reply = llm(cfg, [{"role": "system", "content": PATH_SYSTEM_PROMPT},
+                                      {"role": "user", "content": json.dumps({"items": payload}, ensure_ascii=False)}],
+                                meta_out=meta, stage="sts_review_monitor_path")
+                except Exception as exc:  # noqa: BLE001 — a proposal never costs the STS; the count says it failed
+                    _logger.warning("AI 감시 경로 제안 호출 실패: %s", exc, exc_info=True)
+                    reply = None
+                answered = str(meta.get("model") or model)
+                parsed = _parse(reply)
+                if reply is None:
+                    failure = stopped = "호출 실패 — 남은 항목은 묻지 않음"
+                elif meta.get("truncated"):
+                    failure = "응답이 잘림"
+                elif not parsed:
+                    failure = "응답을 해석하지 못함"
+                answers = {_answer_id(a): a for a in parsed}
+            for i, key in enumerate(batch):
+                answer = answers.get(i)
+                if failure or answer is None:
+                    proposals[key] = {"status": "call_failed", "hw_id": None, "quote": None,
+                                      "reason": failure or "응답에 이 항목이 없음", "model": answered, "cached": False}
+                    continue
+                blocks, words = meta_of[key]
+                proposals[key] = {**_verify_path(answer, groups[key][0], blocks, hw or {}, words), "model": answered,
+                                  "cached": False}
+                updates[key] = {"model": answered, "answer": {k: answer.get(k) for k in ("hw_id", "quote", "reason")}}
+        cache_error = _save_cache(cache_file, updates) or cache_error
+    for key, members in groups.items():
+        for e in members:
+            e["ai_path"] = proposals[key]
+        stats[proposals[key]["status"]] += len(members)
+    stats["verified_distinct"] = sum(1 for p in proposals.values() if p["status"] == "verified")
+    stats["elapsed_s"] = round(time.monotonic() - started, 1)
+    if cache_error:
+        stats["cache_error"] = cache_error
+    return stats
+
+
+def path_proposal_text(evidence: dict[str, Any]) -> str:
+    """The 'AI Path Proposal (Checked)' cell — ``—`` when the path was decided (or no HW tolerance)."""
+    p = evidence.get("ai_path")
+    if not p:
+        return "—"
+    head = f"[{STATUS_TEXT.get(p['status'], p['status'])}]"
+    if p["status"] == "verified":
+        scale = {"known": "값이 그 블록의 절대 허용오차 척도 위",
+                 "scaled_unconfirmed": "값이 분압식 환산 척도 위(HSIS 로 확인 안 됨)",
+                 "relative": "상대 허용오차라 척도는 확인 안 됨"}.get(p.get("scale"), "척도 확인 안 됨")
+        name = "블록 이름과 맞음" if p.get("name_check") == "agrees" else "블록 이름과는 대조 불가"
+        others = ("다른 후보 블록과는 이름 대조 불가" if p.get("others_check") == "not_comparable"
+                  else "다른 후보 블록과는 안 맞음")
+        return (f"AI 제안 감시 경로: {p['hw_id']} {p.get('name') or ''} — 그 블록 원문 인용 '{p['quote']}'(경계 주어의 이름이 "
+                f"인용과 맞음 · {name} · {others} · {scale}) {head} (모델 {p.get('model') or '—'}"
+                + (", 캐시" if p.get("cached") else "") + "). 경로 확정 · 판정에 쓰지 않음")
+    if p["status"] == "rejected":
+        return (f"{head} AI 가 낸 '{p.get('hw_id') or '—'}' — "
+                f"{_PATH_REJECT_TEXT.get(p.get('reason'), p.get('reason'))}")
+    if p["status"] == "unknown":
+        return head + (f" AI 설명: {p['reason']}" if p.get("reason") else "")
+    return head + (f" {p['reason']}" if p.get("reason") else "")
