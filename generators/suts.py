@@ -23,7 +23,7 @@ from generators._artifact_check import apply_write_back_check
 from generators._artifact_check import sheet_base_name as _sheet_base_name
 from generators._xlsx_merge import merge_fresh
 from generators.boundary_rows import BOUNDARY_PREFIX, find_boundaries
-from generators.mcdc_design import build_mcdc_design, finalize_mcdc_design
+from generators.mcdc_design import build_mcdc_design, finalize_mcdc_design, mcdc_report_summary
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
@@ -2830,16 +2830,36 @@ def generate_sequences(
     # ⚠ 예전 경로(regex `_extract_mcdc_conditions`)는 "전부 참 + 하나만 거짓(나머지 중간값)" 을 만들어 OR 식에서
     #   독립 영향이 0 이었다(`a>10 || b>20` 에서 a 를 뒤집어도 b 가 참이라 결과가 안 바뀐다) — 기법 주장만 있고 쌍이 없었다.
     #   도메인은 **선언**에서 온 것만 쓴다(이름 패턴 추측 금지). 못 푸는 결정은 쌍 없이 사유를 남기고 분모에 남는다.
-    # (R19) 설계 입력 목록 위에서 — 기본 자리(`_BASE_MCDC_SLOTS`)의 벡터가 정본 규모 문서와 같다. 더한 입력만 읽는 결정은
-    #   예전처럼 `decision_variable_not_in_unit_inputs` 로 남는다(확장 MC/DC 설계는 후속).
+    # (R19) 설계 입력 목록 위에서 — 기본 자리(`_BASE_MCDC_SLOTS`)의 벡터가 정본 규모 문서와 같다.
+    # (R58) 확장 프로파일은 그 설계가 쌍을 하나도 못 만든 결정만 소스가 읽어 더한 입력까지 써서 다시 설계하고
+    #   (`_mcdc_source_read_pass`), 새 벡터는 기본 설계 벡터 **뒤** 확장 자리에만 붙인다 — 기본 자리 · 기본 설계 결정은 그대로.
     _mcdc_unit = dict(unit, input_vars=list(_design_inputs)) if _added_inputs else unit
     _mcdc_report = build_mcdc_design(_mcdc_unit, declared_domains=_mcdc_declared_domains(
         _design_inputs, _type_of, _domains, _declared, _is_pointer_decl, set(_ptypes)))
     unit["mcdc_design"] = _mcdc_report
     _mcdc_vectors: List[Dict[str, int]] = list(_mcdc_report.get("selected_inputs") or [])
     _mcdc_roles = _mcdc_vector_roles(_mcdc_report)
-    for mc_idx in range(min(len(_mcdc_vectors), _BASE_MCDC_SLOTS)):
+    _mcdc_base_n = len(_mcdc_vectors)
+    for mc_idx in range(min(_mcdc_base_n, _BASE_MCDC_SLOTS)):
         strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
+    _mcdc_ext: Optional[Dict[str, Any]] = None
+    if extended and _added_inputs:
+        try:
+            # (리뷰 R58 3차 I-1) 도메인은 패스 안에서, 기록을 만든 뒤에 구한다 — 여기서 실패하면 무엇을 다시 탐색하려 했는지가 사라졌다
+            _mcdc_ext = _mcdc_source_read_pass(unit, _mcdc_report, lambda: _mcdc_declared_domains(
+                list(input_vars), _type_of, _domains, _declared, _is_pointer_decl, set(_ptypes)), _added_inputs)
+        except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+            _logger.warning("SUTS MC/DC 2차 설계(소스가 읽는 입력) 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            # (리뷰 R58 W2) 무엇을 다시 설계하려 했는지(`decisions_searched`)는 남기고 실패를 더한다 — 통째로 바꾸면 공시가 말을 잃는다
+            _mcdc_report["source_read_pass"] = {**(_mcdc_report.get("source_read_pass") or {}), "error": type(exc).__name__}
+            _mcdc_ext = None
+        if _mcdc_ext:
+            # (리뷰 R58 W1) 기본 자리 이름(`MCDC_0`~`MCDC_6`)은 기본 설계 몫 — 기본 벡터가 자리보다 적어도 2차 벡터는 `MCDC_7`
+            #   부터다(R75 이름 규칙 `is_extended_strategy`: 이름만 보고 확장 행을 가른다). 빈 자리는 행을 만들지 않는다.
+            _mcdc_vectors.extend([{}] * max(0, _BASE_MCDC_SLOTS - _mcdc_base_n))
+            _mcdc_vectors.extend(_mcdc_ext["vectors"])
+            _mcdc_report["selected_inputs"] = _mcdc_vectors[:_mcdc_base_n] + list(_mcdc_ext["vectors"])
+    _mcdc_roles_ext = _mcdc_vector_roles({"decisions": _mcdc_ext["decisions"]}) if _mcdc_ext else {}
 
     # (R75) 확장 — 위까지가 기본 카탈로그(최대 30)다. 확장은 그 **뒤에만** 붙는다(기본 문서와 포함 관계).
     _base_strategy_count = len(strategies)
@@ -3086,10 +3106,22 @@ def generate_sequences(
     sequences = _drop_duplicate_rows(unit, sequences, extended)
     _mcdc_rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
     # (R2c) 함수 실행 모델로 설계한 결정(`evaluation=source_path`)은 행 입력으로 oracle 을 다시 돌려 검증한다 — unit 필요.
-    finalize_mcdc_design(_mcdc_report, _mcdc_rows, _mcdc_unit)
+    if _mcdc_ext:
+        # (R58) 각 설계를 자기 벡터 행으로만 검증한다 — finalize 는 받은 행의 `mcdc_design` 기록을 비우고 다시 쓰므로 두 호출이
+        #   같은 행을 받으면 뒤 호출이 앞 호출의 기록을 지운다(리뷰 R58 W3 변이 M1: 기본 행이 쌍 기록을 잃었다). 경로 설계
+        #   결정의 재실행은 그 설계의 unit 으로.
+        _ext_ids = {id(d) for d in _mcdc_ext["decisions"]}
+        finalize_mcdc_design(dict(_mcdc_report, decisions=[d for d in _mcdc_report["decisions"] if id(d) not in _ext_ids]),
+                             [s for s in _mcdc_rows if _mcdc_slot(s) < _mcdc_base_n], _mcdc_unit)
+        finalize_mcdc_design(dict(_mcdc_ext["report"], decisions=_mcdc_ext["decisions"]),
+                             [s for s in _mcdc_rows if _mcdc_slot(s) >= _mcdc_base_n], _mcdc_ext["unit"])
+        _mcdc_report["summary"] = mcdc_report_summary(_mcdc_report)
+    else:
+        finalize_mcdc_design(_mcdc_report, _mcdc_rows, _mcdc_unit)
     if _added_inputs:
         # (리뷰 R2 W3') 설계 입력 목록 위의 MC/DC 라 더한 입력을 읽는 결정은 거절된다 — 확장 문서엔 그 열이 있으니 "입력 목록 밖"
-        #   이라 쓰면 거짓이다. 사유를 바꿔 적는다(확장 MC/DC 설계는 후속).
+        #   이라 쓰면 거짓이다. 사유를 바꿔 적는다. (R58) 2차 설계가 그 결정을 맡으면 사유는 2차 설계의 것이고, 이 문구는 2차
+        #   설계가 실패했을 때만 남는다.
         _added_set = set(_added_inputs)
         for _d in _mcdc_report.get("decisions") or []:
             _r = str(_d.get("reason") or "")
@@ -3098,10 +3130,15 @@ def generate_sequences(
     for _row in _mcdc_rows:
         # (리뷰 C1) "독립 영향 쌍" 은 **두 행이 모두 남아 재검증을 통과한** 쌍(`seq["mcdc_design"]`)에만 쓴다. 짝 행이 잘렸거나
         # 무효가 된 벡터는 그 사실을 라벨에 적는다 — 예전엔 절단 전 라벨이 남아 MCDC Design 시트(truncated)와 모순됐다.
-        _roles = _mcdc_roles.get(_mcdc_vector_key({k: _row["inputs"].get(k) for k in _row["inputs"]}), [])
+        _is_ext = _mcdc_slot(_row) >= _mcdc_base_n
+        _roles = (_mcdc_roles_ext if _is_ext else _mcdc_roles).get(
+            _mcdc_vector_key({k: _row["inputs"].get(k) for k in _row["inputs"]}), [])
         _lines = str(_row.get("description") or "").split("\n")
         _lines[0] = _mcdc_vector_label(_row.get("mcdc_design") or [],
                                        [r["pair"].get("retained_status", "") for r in _roles])
+        if _is_ext:
+            # (R58) 설계서 입력 표 밖 입력(소스가 읽는 전역)까지 움직여 찾은 쌍 — 정본 규모 문서엔 없는 행이다
+            _lines[0] += " · 소스가 읽어 더한 입력까지 쓴 설계(확장)"
         _blank = [v for v in input_vars if v not in _row["inputs"]]
         if _blank:
             # (R81) 결정이 읽지 않고 도메인도 모르는 입력은 비운 칸이다 — 값이 없다는 것을 행에서 말한다.
@@ -3577,6 +3614,11 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "member_condition_decisions": 0, "member_condition_designed": 0,
                            # (R40) 포인터 매개변수가 가리키는 대상(`p->a`)을 읽거나 그 널 검사가 있는 결정 — 따로(별도 예산)
                            "pointee_condition_decisions": 0, "pointee_condition_designed": 0,
+                           # (R58, 확장) 기본 설계가 쌍을 못 만든 결정을 소스가 읽어 더한 입력까지 써서 다시 설계 — 대상 ·
+                           #   채택(2차 설계의 결과로 바꾼 결정) · 그중 설계 · 2차 설계가 실패해 기본 설계를 유지한 함수
+                           "source_read_pass_decisions": 0, "source_read_pass_adopted": 0,
+                           "source_read_pass_designed": 0, "source_read_pass_errors": 0,
+                           "source_read_pass_designed_refused_for_added": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     # (R56 리뷰 I1) 함수 실행 모델 탐색 예산 — 문서가 어느 예산으로 설계됐는지(같은 소스라도 예산이 다르면 쌍이 다르다)
@@ -3591,6 +3633,12 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
         b = report.get("budgets") or {}
         if b.get("max_path_runs") is not None:
             budgets.add((int(b["max_path_runs"]), int(b.get("max_path_steps") or 0)))
+        srp = report.get("source_read_pass") or {}
+        out["source_read_pass_decisions"] += int(srp.get("decisions_searched") or 0)
+        out["source_read_pass_adopted"] += int(srp.get("decisions_adopted") or 0)
+        out["source_read_pass_designed"] += int(srp.get("decisions_designed") or 0)
+        out["source_read_pass_errors"] += bool(srp.get("error"))
+        out["source_read_pass_designed_refused_for_added"] += int(srp.get("designed_refused_for_added") or 0)
         stub_search = report.get("stub_search") or {}
         out["stub_search_decisions"] += int(stub_search.get("decisions_searched") or 0)
         out["stub_search_improved"] += int(stub_search.get("decisions_improved") or 0)
@@ -3663,6 +3711,77 @@ def _input_list_gaps(units: List[Dict[str, Any]], all_sequences: Dict[str, List[
 
 def _mcdc_vector_key(inputs: Dict[str, Any]) -> str:
     return json.dumps(inputs, sort_keys=True)
+
+
+def _mcdc_slot(seq: Dict[str, Any]) -> int:
+    """MC/DC 벡터 행(`MCDC_<n>`)이 쓰는 벡터의 번호 — 기본 설계 벡터 뒤가 2차 설계(R58) 벡터다. 숫자가 아닌 이름은 -1."""
+    m = re.fullmatch(r"MCDC_(\d+)", str(seq.get("strategy") or ""))
+    return int(m.group(1)) if m else -1
+
+
+def _mcdc_source_read_pass(unit: Dict[str, Any], base_report: Dict[str, Any],
+                           declared_domains: Callable[[], Dict[str, Dict[str, Any]]], added_inputs: List[str]
+                           ) -> Optional[Dict[str, Any]]:
+    """(R58, 확장 프로파일) 소스가 읽어 더한 입력(R19)까지 행 입력으로 써서, 기본 설계(설계 입력 목록 위)가 쌍을 **하나도**
+    못 만든 결정만 다시 설계한다.
+
+    기본 설계의 결정 · 벡터 · 자리는 그대로다(정본 규모 문서와 포함 관계, R75) — 새 쌍의 벡터는 확장 자리에만 붙고, 쌍이
+    있던 결정(부분 설계 포함)은 바꾸지 않는다(기본 행의 라벨이 정본 규모 문서와 갈린다). 채택하는 결정: 2차 설계가 쌍을
+    찾았거나, 기본 설계가 더한 입력을 읽는다는 이유로 거절한 결정(그 결정의 사유는 모든 입력으로 본 2차 설계의 것이 맞다).
+    `base_report` 의 결정 자리를 채택한 결정으로 바꾸고 `source_read_pass` 기록을 남긴다. 반환: 2차 보고서 · 그 unit · 채택한
+    결정 · 새 벡터(결정 순서), 채택이 없으면 None."""
+    wanted = {d["occurrence_id"] for d in base_report.get("decisions") or []
+              if d.get("status") in ("unsupported", "no_pair_found") and not d.get("pairs")}
+    record: Dict[str, Any] = {"decisions_searched": len(wanted), "decisions_adopted": 0, "decisions_designed": 0,
+                              "vectors": 0}
+    base_report["source_read_pass"] = record
+    if not wanted:
+        return None
+    ext_unit = dict(unit)
+    ext = build_mcdc_design(ext_unit, declared_domains=declared_domains(), only_occurrences=wanted)
+    by_occurrence = {d["occurrence_id"]: d for d in ext.get("decisions") or []}
+    added = set(added_inputs)
+    adopted: List[Any] = []
+    vectors: List[Dict[str, Any]] = []
+    seen: set = set()
+    for i, base in enumerate(base_report["decisions"]):
+        if base.get("occurrence_id") not in wanted:
+            continue
+        new = by_occurrence.get(base["occurrence_id"])
+        if new is None or new.get("status") == "not_requested":
+            continue
+        reason = str(base.get("reason") or "")
+        reads_added = reason.startswith("decision_variable_not_in_unit_inputs:") and reason.split(":", 1)[1] in added
+        if not new.get("pairs") and not reads_added:
+            continue
+        new["input_scope"] = "with_source_read_inputs"
+        new["design_input_reason"] = reason   # 기본 설계(설계 입력 목록 위)가 쌍을 못 만든 사유
+        # (리뷰 R58 I1) 쌍의 두 행에서 값이 다른 더한 입력(사실 기록 — 비어도 더한 입력에 **값이 있어서** 생긴 쌍일 수 있다:
+        #   `g_b < g_a` 는 g_b 를 고정한 채 g_a 만 움직인다. 리뷰 R58 W-A)
+        new["source_read_inputs_moved"] = sorted({k for pr in new.get("pairs") or [] for k in added
+                                                  if (pr.get("inputs_a") or {}).get(k) != (pr.get("inputs_b") or {}).get(k)})
+        new["design_refused_for_added_input"] = reads_added
+        adopted.append((i, new))
+        for pair in new.get("pairs") or []:
+            for side in ("a", "b"):
+                key = _mcdc_vector_key(pair[f"inputs_{side}"])
+                if key not in seen:
+                    seen.add(key)
+                    vectors.append(pair[f"inputs_{side}"])
+    # 다 고른 뒤에 한 번에 바꾼다 — 도중 실패가 기본 보고서를 반쯤 바꾼 채 남기지 않게
+    for i, new in adopted:
+        base_report["decisions"][i] = new
+    record.update(decisions_adopted=len(adopted),
+                  decisions_designed=sum(d.get("status") == "designed" for _, d in adopted), vectors=len(vectors),
+                  # (리뷰 R58 W-A) 기본 설계가 '더한 입력을 읽는다' 로 거절한 결정 — 그 입력이 행에 있어 설계됐다. 나머지(다른
+                  #   사유로 쌍이 없던 경로 설계 결정)는 더한 입력에 값이 생긴 실행과 2차 탐색의 새 예산 중 무엇 덕인지 가르지 않는다
+                  designed_refused_for_added=sum(d.get("status") == "designed" and bool(d.get("design_refused_for_added_input"))
+                                                 for _, d in adopted),
+                  # (리뷰 R58 I2) 2차 설계의 stub 값 탐색 기록 — 집계(`stub_search_*`)는 기본 설계 것만 센다
+                  stub_search=ext.get("stub_search"))
+    if not adopted:
+        return None
+    return {"report": ext, "unit": ext_unit, "decisions": [d for _, d in adopted], "vectors": vectors}
 
 
 def _mcdc_vector_roles(report: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -4454,7 +4573,9 @@ _MCDC_SHEET = "MCDC Design"
 _MCDC_HEADERS = ["Test Case ID", "Function", "Decision ID", "Condition ID", "Pair ID", "Sequence A", "Sequence B",
                  "Inputs A JSON", "Inputs B JSON", "Truth A", "Truth B", "Decision A", "Decision B", "Retained",
                  "Decision Expression", "Decision Status", "Reason", "Source Kind", "Source SHA256",
-                 "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB", "Stub Inputs"]
+                 "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB", "Stub Inputs",
+                 # (R58) 설계한 행 입력 목록 — design_inputs(설계서 입력 표) · with_source_read_inputs(소스가 읽어 더한 입력까지)
+                 "Input Scope"]
 
 
 def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, hdr_fill, hdr_font, data_font):
@@ -4489,10 +4610,11 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
             # (R36) 쌍의 행이 설정하는 피호출 stub 반환값(쌍 단위 — 1차 탐색 쌍은 비어 있다) — 실행 환경에서 그 함수가
             #   stub 이어야 그 쌍이 성립한다. 쌍 없는 결정 행은 결정 단위(2차 탐색 쌍이 없으면 비어 있다)
             stubs = ", ".join(decision.get("stub_inputs") or [])
+            scope = decision.get("input_scope") or "design_inputs"
             if not pairs:
                 # 쌍 없는 결정도 한 행 — 빠지면 "MC/DC 설계 완료" 로 오독된다(분모에서 사라진다).
                 ws.append([tc_id, unit.get("name", ""), decision.get("decision_id", ""), "", "", "", "", "", "", "",
-                           "", "", "", "", *common, "", stubs])
+                           "", "", "", "", *common, "", stubs, scope])
             for pair in pairs:
                 retained = pair.get("retained_status", "")
                 inputs = []
@@ -4509,7 +4631,7 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
                            inputs[0], inputs[1], _mcdc_truth_text(pair.get("truth_a"), pair.get("observed_a")),
                            _mcdc_truth_text(pair.get("truth_b"), pair.get("observed_b")),
                            "T" if pair.get("decision_a") else "F", "T" if pair.get("decision_b") else "F", retained,
-                           *common, "+".join(ub), ", ".join(pair.get("stub_inputs") or [])])
+                           *common, "+".join(ub), ", ".join(pair.get("stub_inputs") or []), scope])
     # 한 번에 서식 — 결정마다 ``ws.max_row``(= 전 셀 ``max``)를 부르면 결정 수 × 셀 수로 커진다
     for row_cells in ws.iter_rows(min_row=2):
         for cell in row_cells:

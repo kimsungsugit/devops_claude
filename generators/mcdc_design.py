@@ -1825,7 +1825,8 @@ PATH_SEARCH_STEPS = 120_000
 def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_conditions: int = 12,
                       max_decisions: int = 64, max_path_runs: int = PATH_SEARCH_RUNS,
                       max_path_steps: int = PATH_SEARCH_STEPS,
-                      declared_domains: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                      declared_domains: dict[str, dict[str, Any]] | None = None,
+                      only_occurrences: set[str] | None = None) -> dict[str, Any]:
     """Find real-input unique-cause pairs within explicit search budgets.
 
     Failed search is not infeasibility proof. Unsupported and budget-limited
@@ -1834,6 +1835,10 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     ``declared_domains`` maps input names to integer domains the caller resolved
     from a *declaration* (project typedef, enum declaration) — never from a
     naming convention. It only fills names the source/metadata left unresolved.
+
+    ``only_occurrences`` (R58) searches only the decisions with these ``occurrence_id`` — the others are listed with
+    status ``not_requested`` and no search (a caller's second pass over the decisions its first pass left without a
+    pair; the search budgets are then theirs alone).
     """
     report = {"schema_version": 3, "function": unit.get("name", ""), "decisions": [],
               "selected_inputs": [], "execution_status": "not_run", "reachability": "unverified",
@@ -1899,6 +1904,9 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                     "reason": context_issue, "conditions": [], "pairs": [],
                     "candidate_count": 0, "search_complete": False, "execution_status": "not_run", "reachability": "unverified"}
         report["decisions"].append(decision)
+        if only_occurrences is not None and kind != "unenumerated" and decision["occurrence_id"] not in only_occurrences:
+            decision["status"], decision["reason"] = "not_requested", "not_requested"
+            continue
         try:
             if node is None:
                 raise Unsupported(context_issue or "decision_parse_missing")
@@ -2126,7 +2134,6 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
     for seq in sequences:
         seq["mcdc_design"] = []
         lookup.setdefault(json.dumps(normalized(seq.get("inputs") or {}), sort_keys=True), seq)
-    retained = 0
     for decision in report["decisions"]:
         path_checks = _path_revalidation(decision, lookup, unit, normalized) \
             if decision.get("evaluation") == "source_path" and decision["pairs"] else {}
@@ -2158,7 +2165,6 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
                 pair["retained_status"] = "invalidated"
                 continue
             pair["retained_status"] = "retained"
-            retained += 1
             for role, seq, ev in (("a", a, va), ("b", b, vb)):
                 seq["mcdc_design"].append({"decision_id": decision["decision_id"], "pair_id": pair["pair_id"],
                     "condition_id": pair["condition_id"], "role": role, "truth": ev["truth"], "observed": ev["observed"],
@@ -2167,12 +2173,19 @@ def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]]
                     # (R2c review round 1 W7) undefined behaviour the run may have after the decision — disclosed
                     "possible_ub": list(pair.get(f"possible_ub_{role}") or []),
                     "execution_status": "not_run", "reachability": "unverified"})
-    # Same definition as the SUTS quality report: an unenumerated function is not a decision.
-    report["summary"] = {"total_decisions": sum(d["status"] != "unenumerated" for d in report["decisions"]),
-        "unenumerated": sum(d["status"] == "unenumerated" for d in report["decisions"]),
-        "total_conditions": sum(len(d["conditions"]) for d in report["decisions"]),
-        "unknown_condition_decisions": sum(not d["conditions"] for d in report["decisions"]),
-        "unsupported_decisions": sum(d["status"] == "unsupported" for d in report["decisions"]),
-        "designed_pairs": sum(len(d["pairs"]) for d in report["decisions"]), "retained_pairs": retained,
-        "execution_status": "not_run"}
+    report["summary"] = mcdc_report_summary(report)
     return report
+
+
+def mcdc_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """The report's counts after finalize (R58: also for a report whose decisions two finalize calls bound)."""
+    # Same definition as the SUTS quality report: an unenumerated function is not a decision.
+    decisions = report["decisions"]
+    return {"total_decisions": sum(d["status"] != "unenumerated" for d in decisions),
+            "unenumerated": sum(d["status"] == "unenumerated" for d in decisions),
+            "total_conditions": sum(len(d["conditions"]) for d in decisions),
+            "unknown_condition_decisions": sum(not d["conditions"] for d in decisions),
+            "unsupported_decisions": sum(d["status"] == "unsupported" for d in decisions),
+            "designed_pairs": sum(len(d["pairs"]) for d in decisions),
+            "retained_pairs": sum(p.get("retained_status") == "retained" for d in decisions for p in d["pairs"]),
+            "execution_status": "not_run"}

@@ -1014,8 +1014,12 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                "널 아닌 객체로 본다: 그래서 널 검사(`p != NULL`)는 모든 행에서 한쪽이라 짝이 없다. 식 엔진이 다른 이유"
                "(지역 변수·조건 안 호출)로 먼저 거부한 결정은 그 이유의 탐색으로 가며 대상 입력을 설정하지 않는다)."
                if _int(mc, "pointee_condition_decisions") else "")
+            # (R58) the extended profile's second design over the inputs the source reads
+            # (리뷰 R58 W2 · 3차 W-1) 실패만 있어도 말하고, 숫자는 부분마다 따로 — 빈 부분은 쓰지 않는다
+            + (_source_read_pass_text(mc)
+               if (_int(mc, "source_read_pass_decisions") or _int(mc, "source_read_pass_errors")) else "")
             + " 결정별 근거는 'MCDC Design' 시트에 있다.",
-            tone=_tone(bool(_int(mc, "invalidated_pairs")))))
+            tone=_tone(bool(_int(mc, "invalidated_pairs")) or bool(_int(mc, "source_read_pass_errors")))))
 
     # 비운 칸 — **결함이 아니다**(info). 예전엔 이 칸을 전부 uint8 로 지어낸 0/127/255 로 채웠다.
     unk = _int(qr, "unknown_type_var_slots")
@@ -1200,8 +1204,9 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(sr, "units_input_columns_full") else "")
             + (f"마지막 회차에도 남은 이름 {_show(_int(sr, 'names_remaining'))}(unit {_show(_int(sr, 'units_with_remaining'))})"
                " 은 그 칸을 [검증 필요] 로 둔다. " if _int(sr, "names_remaining") else "")
-            + "MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(그 결정의 MC/DC 는 "
-            "설계 입력 목록 위에서만 설계한다 — 더한 입력을 읽는 결정은 `decision_reads_source_read_input_not_designed`)."
+            + "MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(기본 MC/DC 설계는 "
+            "설계 입력 목록 위에서 하고, 그 설계가 쌍을 못 만든 결정만 더한 입력까지 써서 다시 설계한다 — 'MC/DC 설계' 항목·"
+            "'Input Scope' 열)."
             + (f" 입력 보완 중 오류로 설계 입력 목록 그대로 둔 unit {_show(_int(sr, 'errors'))} — 로그에 traceback 이 있다."
                if _int(sr, "errors") else ""),
             tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors")))))
@@ -1505,6 +1510,36 @@ _BY_DOC_TYPE = {"sts": _sts_items, "suts": _suts_items, "sits": _sits_items}
 #: 손으로 든 목록을 라우터에 또 적으면 문서 종류를 늘릴 때 화면이 "이 문서 종류는 공시를
 #: 만들지 않는다" 는 거짓을 적게 된다(같은 결함을 `VALIDATION_SIDECAR_WRITERS` 에서 겪었다).
 DISCLOSURE_DOC_TYPES = frozenset(_BY_DOC_TYPE)
+
+
+def _source_read_pass_text(mc: dict) -> str:
+    """(R58) MC/DC 2차 설계(소스가 읽는 입력까지) 문장 — 채택 A · 그중 설계 D(더한 입력 거절 Dr · 그 밖 D−Dr) · 설계 못 간 채택 A−D ·
+    실패 함수. 0 인 부분은 쓰지 않는다(리뷰 R58 3차 W-1: 채택했지만 설계 못 간 결정을 '거절했던 결정 0' 이라 적었다)."""
+    a = _int(mc, "source_read_pass_adopted") or 0
+    d = _int(mc, "source_read_pass_designed") or 0
+    dr = _int(mc, "source_read_pass_designed_refused_for_added") or 0
+    err = _int(mc, "source_read_pass_errors") or 0
+    parts = [f"결과로 바꾼 결정 {a}"]
+    if a:
+        inner = []
+        if dr:
+            inner.append(f"기본 설계가 '더한 입력을 읽는다' 로 거절했던 결정 {dr}")
+        if d - dr > 0:
+            inner.append(f"다른 사유로 쌍이 없던 함수 실행 모델 결정 {d - dr}(더한 입력에 값이 생긴 실행과 2차 탐색의 새 예산 중 "
+                         "무엇 덕인지는 가르지 않는다)")
+        parts.append(f"그중 설계 {d}" + (": " + " · ".join(inner) if inner else ""))
+        if a - d > 0:
+            parts.append(f"설계까지 못 간 채택 {a - d}(부분 설계이거나 2차 설계의 사유로 바뀐 결정)")
+    if err:
+        parts.append(f"2차 설계 실패로 기본 설계를 유지한 함수 {err}")
+    text = (f" 확장 프로파일: 소스가 읽는 입력을 더한 함수에서 기본 설계(설계서 입력 표 위)가 쌍을 하나도 못 만든 결정 "
+            f"{_show(_int(mc, 'source_read_pass_decisions'))} 을 더한 입력까지 행 입력으로 써서 다시 탐색했다("
+            + " · ".join(parts) + ").")
+    if a:
+        text += (" 그 쌍의 행은 기본 MC/DC 행 뒤에 붙고('Input Scope' = with_source_read_inputs), 기본 MC/DC 행 · 기본 설계 "
+                 "결정은 바뀌지 않는다 — 다만 2차 설계 행이 새 경로를 열어 소스가 읽는 입력이 더 보이면 다음 회차에 그 함수의 "
+                 "입력 열이 더해질 수 있고, 경계 · 강건성 행의 기준 행 후보가 달라질 수 있다.")
+    return text + " 쌍이 하나라도 있던 결정(부분 설계)은 다시 설계하지 않는다."
 
 
 def _mcdc_budget_text(budgets: Any) -> str:

@@ -512,8 +512,13 @@ def test_one_design_input_gets_no_one_at_a_time_rows_that_repeat_the_boundary_ro
     assert len(vectors) == len(set(vectors))
 
 
-def test_a_decision_on_an_added_input_says_why_it_has_no_mcdc_design_and_the_reference_slots_stay():
-    # review R2 W3' / W4' N3: the design runs on the design input list; the refusal names the added input as such
+def test_a_decision_on_an_added_input_says_why_it_has_no_mcdc_design_and_the_reference_slots_stay(monkeypatch):
+    # review R2 W3' / W4' N3: the design runs on the design input list; the refusal names the added input as such.
+    # (R58) the extended profile designs such a decision again over every input — this is the wording left when that
+    #   second design fails (forced here); `test_mcdc_source_read_pass_r58.py` covers the design itself
+    def fail(*_a, **_k):
+        raise RuntimeError("second design down")
+    monkeypatch.setattr(suts, "_mcdc_source_read_pass", fail)
     ref_unit = _unit("two", ["g_a"])
     generate_sequences(ref_unit, None, type_cache={})
     unit = _unit("two", ["g_a"])
@@ -523,6 +528,7 @@ def test_a_decision_on_an_added_input_says_why_it_has_no_mcdc_design_and_the_ref
     reasons = [d["reason"] for d in unit["mcdc_design"]["decisions"]]
     assert "decision_reads_source_read_input_not_designed:g_b" in reasons
     assert not any(r.startswith("decision_variable_not_in_unit_inputs:") for r in reasons)
+    assert unit["mcdc_design"]["source_read_pass"] == {"error": "RuntimeError"}
 
 
 def test_a_second_round_keeps_the_design_list_of_the_first():
