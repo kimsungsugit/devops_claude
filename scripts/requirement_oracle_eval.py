@@ -330,6 +330,74 @@ def provenance(req: str, value: float, unit: str, blocks: dict[str, str], system
     return "not_in_given_documents", []
 
 
+_DIRECTION = {">=": "lower", ">": "lower", "<=": "upper", "<": "upper"}
+# (R55) a comparison as a requirement document writes it: the unit required, and a closing parenthesis may stand before
+#   the word (HDPDM01 SwTSR_0207 ``특정시간(300ms)초과하여``, SwTR_0202 ``Param_…( 3도 ) 초과한``)
+_WRITTEN = re.compile(rf"(?P<num>{_CMP_NUM})\s*(?P<unit>{_UNIT})\s*(?:\(\s*0x[0-9A-Fa-f]+\s*\))?\s*\)?\s*"
+                      rf"(?P<op>이상|이하|미만|초과)")
+# (R55) what the given documents write at the value where the generated step's verdict is the mutant's
+AGAINST_VERDICT_CLASSES = ("documents_write_the_steps_inclusion", "documents_write_the_references_inclusion",
+                           "documents_disagree", "not_written", "off_the_threshold")
+AGAINST_VERDICT_NOTE = (
+    "a killable mutant separated only against the step's verdict, by what the requirement's own SRS block and the "
+    "SyRS/SyDS blocks its Related ID names write at the reference threshold's value (the number, a compatible unit and "
+    "이상/이하/미만/초과, the comparison of the reference's direction — a lower bound for 이상/초과, an upper one for "
+    "이하/미만). documents_write_the_steps_inclusion: every such comparison judges the point as the step does — the "
+    "reference's inclusion differs from the documents (HDPDM01 ``1.3m/s 초과`` everywhere, the reference ``1.3m/s "
+    "이상``). documents_write_the_references_inclusion: every one judges it as the reference does — read the step: "
+    "another subject's complementary condition, or our error. documents_disagree: both are written (a conflict the "
+    "documents carry). not_written: no comparison of that direction at that value (another value — ``16.1V 이상`` for "
+    "the reference's ``16V 이상`` — or another unit). off_the_threshold: the separating point is not the threshold "
+    "itself, so it says nothing of its inclusion. Not checked (an upper bound of what the documents say): which "
+    "quantity a comparison is about — every comparison at that value in those blocks counts, so a block that writes "
+    "``300ms 초과`` for one condition and ``300ms 이상`` for another reads documents_disagree; a cited ID the system "
+    "documents do not hold is not read, so not_written can mean the block was not given (see "
+    "cited_ids_not_in_system_documents). Only an 이상/이하 reference can land on its own threshold: a killable mutant "
+    "of 초과/미만 never separates at the threshold itself. Other SRS blocks and project documents are not read here: "
+    "no link to the requirement is checked there. Rows: every row in separated_against_verdict (killable or not) "
+    "carries a class; the classes count only the killable ones")
+
+
+def written_at_value(req: str, value: float, unit: str, blocks: dict[str, str],
+                     system: dict[str, dict] | None) -> list[dict]:
+    """(R55) Every order comparison at the reference threshold's value (the number with a compatible unit, then
+    ``이상/이하/미만/초과``) in the requirement's own SRS block and in the fields of the SyRS/SyDS blocks its Related ID
+    names — the inclusion the documents give that value. A number without its unit is not the quantity."""
+    block = blocks.get(req) or ""
+    texts = [("SRS", block)]
+    for sid in _cited_ids(block):
+        rec = (system or {}).get(sid)
+        if rec:
+            texts += [(f"{rec.get('doc', '')} {sid} · {field}", str(text or ""))
+                      for field, text in (rec.get("fields") or {}).items()]
+    out, seen = [], set()
+    for where, text in texts:
+        for m in _WRITTEN.finditer(text):
+            if not _same_quantity(float(m.group("num").replace(",", "")), m.group("unit"), value, unit):
+                continue
+            key = (_OPS[m.group("op")], where, m.group(0))
+            if key not in seen:
+                seen.add(key)
+                out.append({"op": key[0], "where": where, "raw": m.group(0)})
+    return out
+
+
+def _against_class(m: dict, x: Decimal) -> str:
+    """(R55) The class of a separation against the step's verdict at ``x`` — see `AGAINST_VERDICT_NOTE`."""
+    if x != m["value"]:
+        return "off_the_threshold"
+    same = [w for w in m.get("written_at_value") or [] if _DIRECTION[w["op"]] == _DIRECTION[m["op"]]]
+    if not same:
+        return "not_written"
+    reference = _COMPARE[m["op"]](x, m["value"])
+    says = {_COMPARE[w["op"]](x, m["value"]) for w in same}
+    if says == {not reference}:
+        return "documents_write_the_steps_inclusion"
+    if says == {reference}:
+        return "documents_write_the_references_inclusion"
+    return "documents_disagree"
+
+
 # a test specification or report by its acronym as a whole token, any case (``HDPDM01_STS_v1`` · ``hdpdm01_sts`` ·
 #   ``STSv1`` · ``(KJPDS02_SwTS)`` · ``SUTR``) — not ``sts`` inside a word (``Lists``), and not the requirement ID
 #   prefixes ``SwTR`` · ``SwTSR`` · ``SyTR`` · ``SyTSR`` (``SyTS`` + ``R`` is not ``SyTS``); ``TC`` alone, not a part
@@ -585,7 +653,10 @@ def reference_mutants(reference: dict, blocks: dict[str, str] | None = None,
             prov, where = provenance(req, float(value), unit, blocks or {}, system, documents)
             base = {"req_id": req, "unit": unit, "op": op, "value": value, "raw": g["raw"], "stated_in_srs": stated,
                     "srs_block_found": block is not None, "recalled_by_extractor": bool(same),
-                    "provenance": prov, "provenance_where": where}
+                    "provenance": prov, "provenance_where": where,
+                    # (R55) the comparisons the requirement's own and cited blocks write at this value
+                    "written_at_value": written_at_value(req, float(value), unit, blocks or {}, system),
+                    "written_scope": "srs_and_cited_system" if system is not None else "srs_only"}
             for mutant, m_op, m_value in (("boundary_inclusion", _FLIP[op], value), ("value_shift", op, value - step),
                                           ("value_shift", op, value + step)):
                 out.append({**base, "mutant": mutant, "m_op": m_op, "m_value": m_value,
@@ -625,6 +696,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
     and ``killed_unnamed_subject`` (an unnamed point: any quantity of that unit — R2 W-E)."""
     killed = either = optimistic = with_points = killable = single = multi = unnamed = via_trace = 0
     against_verdict = verdict_unknown = 0
+    against_by_documents = Counter()
+    scopes = set()
     by_stated = Counter()
     by_provenance: dict[str | None, Counter] = {}
     recall = Counter()
@@ -638,6 +711,7 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
         #   here (its 0 would read as a score)
         with_points += any(p.get("holds") is not None for p in points)
         hit = side = against = unknown = None
+        against_x = None
         for p in points:
             x = Decimal(str(p["value"])) * _scale(p["unit"], m["unit"])
             a, b = _COMPARE[m["op"]](x, m["value"]), _COMPARE[m["m_op"]](x, m["m_value"])
@@ -648,7 +722,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
                 unknown = unknown or p          # the step states no verdict here: nothing is asserted
                 continue
             if verdict != a:
-                against = against or p          # the step expects the mutant's verdict: the documents disagree
+                if against is None:             # the step expects the mutant's verdict: the documents disagree
+                    against, against_x = p, x
                 continue
             if a and not b and hit is None:
                 hit = p
@@ -663,6 +738,12 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
         killed += hit is not None
         against_verdict += side is None and against is not None
         verdict_unknown += side is None and against is None and unknown is not None
+        # (R55) which side the documents take where the step's verdict is the mutant's
+        # (review W1) only a row the separation decides — no point on the original's side (a kill is one) — is classed
+        against_class = None if against is None or side is not None else _against_class(m, against_x)
+        if m["killable"] and side is None and against is not None:
+            against_by_documents[against_class] += 1
+            scopes.add(m.get("written_scope") or "srs_only")
         via_trace += hit is not None and bool(hit.get("traced"))
         either += hit is not None or side is not None
         optimistic += hit is not None or region is not None
@@ -692,6 +773,8 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
                      "killed_by_trace": None if hit is None else hit.get("traced"),
                      "killed_by_signal": None if hit is None else (hit.get("signal") or ""),
                      "separated_against_verdict": None if against is None else against["value"],
+                     "against_verdict_documents": against_class,
+                     "written_at_value": [f"{w['raw']} ({w['where']})" for w in m.get("written_at_value") or []],
                      "separated_verdict_unknown": None if unknown is None else unknown["value"],
                      "subjects_in_unit": subjects, "boundary_region": None if self_sourced else region})
     n = len(mutants)
@@ -712,6 +795,11 @@ def cross_discrimination(mutants: list[dict], sts: dict, self_sourced: bool = Fa
             "killed_single_subject": single, "killed_multi_subject": multi, "killed_unnamed_subject": unnamed,
             # (R32 review C2) separations that are no kill — see the docstring
             "separated_against_verdict": against_verdict, "separated_verdict_unknown": verdict_unknown,
+            # (R55) the killable ones only — the same mutants as by_provenance's killable_against_verdict
+            #   None when the suite is not measured (no step states a verdict: its 0 would read as a count)
+            "killable_against_verdict_by_documents": None if not measurable else {
+                "classes": {c: against_by_documents[c] for c in AGAINST_VERDICT_CLASSES},
+                "scope": sorted(scopes), "note": AGAINST_VERDICT_NOTE},
             # (R29) kills only a point traced to a system block made (the requirement's own points kill none of them)
             "killed_via_traced_system": via_trace,
             "mutants_with_a_point_in_unit": with_points,
@@ -866,7 +954,12 @@ def main(argv=None) -> int:
                       **{f"cross_{k}": (v["killed"] if v["measurable"] else None, v["killed_optimistic"], v["mutants"])
                          for k, v in report["cross_source"].items() if isinstance(v, dict) and "killed" in v},
                       **{f"cross_{k}_by_provenance": v.get("by_provenance")
-                         for k, v in report["cross_source"].items() if isinstance(v, dict) and v.get("by_provenance")}},
+                         for k, v in report["cross_source"].items() if isinstance(v, dict) and v.get("by_provenance")},
+                      # (R55 review r2 I2) with its scope: an ``srs_only`` run (no system documents) is a smaller look
+                      **{f"cross_{k}_against_verdict_by_documents":
+                         {f: x[f] for f in ("classes", "scope")} if (x := v["killable_against_verdict_by_documents"]) else None
+                         for k, v in report["cross_source"].items()
+                         if isinstance(v, dict) and "killable_against_verdict_by_documents" in v}},
                      ensure_ascii=False))
     return 0
 
