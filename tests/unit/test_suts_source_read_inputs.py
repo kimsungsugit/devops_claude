@@ -116,8 +116,9 @@ def test_names_come_from_the_reasons_including_nested_ones():
                                                  "g_s": {"reason": "undefined_behavior:signed_overflow"}}}]
     got = source_read_names(seqs)
     # (R39) a struct member path is a name (the reference sets ``lin_tl_rx_queue.queue_header``); a 2-D subscript is not
-    assert got == {"g_x": {"slots": 2, "sequences": [1, 2]}, "g_buf[3]": {"slots": 1, "sequences": [1]},
-                   "s.member": {"slots": 1, "sequences": [2]}}
+    assert got == {"g_x": {"slots": 2, "sequences": [1, 2], "read": True},
+                   "g_buf[3]": {"slots": 1, "sequences": [1], "read": True},
+                   "s.member": {"slots": 1, "sequences": [2], "read": True}}
 
 
 def test_only_program_objects_of_the_unit_are_inputs():
@@ -432,6 +433,7 @@ def test_the_summary_counts_units_names_reasons_and_what_remains():
     assert summarize_source_read_inputs(units) == {
         "units": 2, "units_with_added": 1, "names_added": 2, "slots_first_seen": 4,
         "not_added": {"float_object": 2, "input_columns_full": 1}, "units_input_columns_full": 1, "max_rounds": 2,
+        "names_added_for_unwritten_outputs": 0,   # (backlog 2-c)
         "round_cap": suts._SOURCE_READ_ROUNDS, "units_round_cap_reached": 0, "names_beyond_cap": 0,   # (R59)
         "units_with_remaining": 1, "names_remaining": 1, "errors": 0}
 

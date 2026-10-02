@@ -59,10 +59,10 @@ def test_five_nested_branches_take_five_rounds_and_nothing_is_left():
     unit = _unit()
     seqs = _ext(unit)
     rec = unit["source_read_inputs"]
-    # round 1: g_o (left unchanged on the arms not taken — plan backlog 2-c: when the oracle tells "needed for the final
-    #   value" from "read by the function", g_o stops being added and the rounds below shift by one); then one branch
-    #   deeper per round
+    # round 1: g_o (left unchanged on the arms not taken — its cells need the initial value; backlog 2-c marks it
+    #   `read_on_model: False`, so the input-list gap finding leaves it out); then one branch deeper per round
     assert {n: r["round"] for n, r in rec["added"].items()} == {"g_o": 1, "g_b": 2, "g_c": 3, "g_d": 4, "g_e": 5}
+    assert [n for n, r in rec["added"].items() if not r["read_on_model"]] == ["g_o"]
     assert rec["rounds"] == 5 and rec["remaining"] == {} and not rec.get("round_cap_reached")
     assert any(s["expected"]["g_o"] == 1 for s in _derived(seqs))
 

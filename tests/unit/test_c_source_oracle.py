@@ -179,7 +179,9 @@ def test_an_output_no_path_writes_is_its_input_and_is_marked_unchanged():
     text = H + "U8 g_a; U8 g_b;\nvoid f(U8 x) { if (x == 1U) { g_a = 9U; } }\n"
     result = _run(text, "f", {"x": 0, "g_a": 4}, ["g_a", "g_b"])
     assert result["outputs"]["g_a"] == {"value": 4, "basis": "unchanged_input"}
-    assert result["outputs"]["g_b"]["reason"] == "initial_value_not_in_inputs:g_b"
+    # (backlog 2-c) no path writes g_b: its final value is its initial value — the observation needs it, the function
+    #   does not read it
+    assert result["outputs"]["g_b"]["reason"] == "unwritten_output_initial_not_in_inputs:g_b"
 
 
 def test_an_input_outside_its_declared_type_is_not_executable():

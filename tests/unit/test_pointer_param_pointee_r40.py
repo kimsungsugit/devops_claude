@@ -149,9 +149,15 @@ def test_without_the_pointee_the_pointer_stays_unknown():
 def test_pointee_members_are_written_and_observed():
     out = _run("f2", {"pq[0].cnt": 5}, ["pq[0].cnt", "pq[0].buf[1]", "pq[0].buf[2]"])["outputs"]
     assert out["pq[0].cnt"] == {"value": 0, "basis": "assigned"} and out["pq[0].buf[1]"]["value"] == 7
-    assert out["pq[0].buf[2]"]["reason"].startswith("initial_value_not_in_inputs:pq[0].buf[2]")
+    assert out["pq[0].buf[2]"]["reason"].startswith("unwritten_output_initial_not_in_inputs:pq[0].buf[2]")   # (2-c)
     low = _run("f2", {"pq[0].cnt": 1, "pq[0].buf[1]": 4}, ["pq[0].cnt", "pq[0].buf[1]"])["outputs"]
     assert low["pq[0].cnt"] == {"value": 1, "basis": "unchanged_input"} and low["pq[0].buf[1]"]["value"] == 4
+
+
+def test_a_pointee_read_in_a_condition_and_left_unwritten_keeps_the_read_reason():
+    # (backlog 2-c) d3 reads pq[0].buf[1] in its condition and never writes it — the function read it
+    out = _run("d3", {"pq[0].in.x": 2}, ["pq[0].buf[1]"])["outputs"]
+    assert out["pq[0].buf[1]"]["reason"] == "initial_value_not_in_inputs:pq[0].buf[1]"
 
 
 def test_a_scalar_pointee():

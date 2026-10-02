@@ -28,8 +28,13 @@ from typing import Any
 
 from generators import c_project_context as cpc
 
-SCHEMA_VERSION = 3   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
+SCHEMA_VERSION = 4   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
 #                      3 (R38): a sequence stub writes no global or static (VectorCAST replaces the body — `stubbed_call`)
+#                      4 (backlog 2-c): an output no final path read nor wrote gives `UNWRITTEN_OUTPUT_PREFIX`, not
+#                        `INITIAL_VALUE_PREFIX` (the function did not read it — the observation needs its initial value)
+# (backlog 2-c) the two reasons an unset initial value gives — one vocabulary for the oracle and its readers
+INITIAL_VALUE_PREFIX = "initial_value_not_in_inputs:"
+UNWRITTEN_OUTPUT_PREFIX = "unwritten_output_initial_not_in_inputs:"
 _UB_REASONS = frozenset({"signed_overflow", "division_by_zero", "shift_count_out_of_range", "signed_left_shift_overflow",
                          "float_to_int_out_of_range"})
 _EXECUTION_BUDGET = 200_000
@@ -130,7 +135,7 @@ def _loaded(value, t):
 
 class _State:
     __slots__ = ("store", "mode", "ret", "havoc_all", "havoc_pointer", "havoc_bases", "escaped", "forks", "possible_ub",
-                 "decisions")
+                 "decisions", "initial_reads")
 
     def __init__(self):
         self.store: dict[str, Any] = {}
@@ -144,6 +149,9 @@ class _State:
         self.possible_ub: set[str] = set()
         # (R2c) decisions this path evaluated, in order: ``(key, observation)`` — see `_Interp.record_decision`
         self.decisions: list[tuple] = []
+        # (backlog 2-c) keys this path read while their initial value was not in the inputs — a read is not stored, so
+        #   the store alone cannot tell 'read in a condition, never written' from 'never touched'
+        self.initial_reads: set[str] = set()
 
     def copy(self):
         s = _State()
@@ -152,6 +160,7 @@ class _State:
         s.possible_ub = set(self.possible_ub)
         s.decisions = list(self.decisions)
         s.havoc_pointer = self.havoc_pointer
+        s.initial_reads = set(self.initial_reads)
         return s
 
 
@@ -458,7 +467,8 @@ class _Interp:
                 return Unknown(state.havoc_bases[prefix])
         if key in self.inputs:
             return self.check_input(key, t, self.inputs[key])
-        return Unknown("initial_value_not_in_inputs:" + key)
+        state.initial_reads.add(key)   # (backlog 2-c)
+        return Unknown(INITIAL_VALUE_PREFIX + key)
 
     def read_key(self, state, key, base, t, volatile=False):
         if volatile:
@@ -486,6 +496,8 @@ class _Interp:
             if base.startswith("@"):
                 state.havoc_bases[base] = reason
         self.havoc_statics(state, reason)  # unknown code may call back into this function
+        # (backlog 2-c review round 3 W1) unknown code may read anything too: no output is unread after it
+        state.initial_reads.add(_UNPLACED_READ)
         if not state.havoc_all:
             state.havoc_all = reason
         if self.world is not None:
@@ -1526,6 +1538,11 @@ class _Interp:
             if path is not None and path in self.arrays:
                 return _Val(Unknown("array_value:" + path), None)   # decays to a pointer, as a named array does
             base = self.expression_base_effects(state, n, raw, depth)
+            # (backlog 2-c review W1) ``p->a`` through an unknown pointer, ``s.a`` of an unmodeled object: a read
+            if "->" in _text(n, raw):
+                state.initial_reads.add(_ANY_POINTER_READ)
+            else:
+                self.record_unplaced_read(state, base)
             return _Val(Unknown("field_unmodeled:" + base), None)
         if k == "pointer_expression":
             op = _text(n, raw).lstrip()[:1]
@@ -1536,6 +1553,7 @@ class _Interp:
             if pt is not None:
                 return self.read_pointee_access(state, *pt)
             self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
+            state.initial_reads.add(_ANY_POINTER_READ)   # (backlog 2-c review W1) ``*p``, p unknown
             return _Val(Unknown("pointer_dereference"), None)
         if k == "call_expression":
             return self.call(state, n, raw, depth)
@@ -1637,6 +1655,7 @@ class _Interp:
             return _loaded(self.read_pointee(state, obj[1], obj[2], obj[3]), obj[2])
         if obj[0] == "array":
             return _Val(Unknown("array_value:" + obj[1][len("@pointee:"):]), None)
+        state.initial_reads.add(_BASE_READ + str(obj[1]))   # (backlog 2-c review W1) an unmodeled part of it
         return _Val(Unknown("pointee_member_unmodeled:" + obj[1][len("@pointee:"):]), None)
 
     def read_pointee(self, state, key, t, volatile=False):
@@ -1654,7 +1673,8 @@ class _Interp:
         name = key[len("@pointee:"):]
         if name in self.inputs:
             return self.check_input(name, t, self.inputs[name])
-        return Unknown("initial_value_not_in_inputs:" + name)
+        state.initial_reads.add(key)   # (backlog 2-c)
+        return Unknown(INITIAL_VALUE_PREFIX + name)
 
     def pointer_compare(self, op, left, right):
         """(R40) ``p == NULL`` · ``p != q``: known pointers compare by what they point to (each pointer parameter's
@@ -1739,7 +1759,68 @@ class _Interp:
             return _loaded(self.read_key(state, name, name, g["type"], g.get("volatile")), g["type"])
         if name in self.arrays:
             return _Val(Unknown("array_value:" + name), None)
+        # (backlog 2-c review round 2 W1) a whole struct object (``t = g_s``), an unmodeled global, a name the model
+        #   cannot resolve: a read — of that object, or of what the name may stand for
+        self.record_unplaced_read(state, name)
         return _Val(Unknown(self.unresolved_reason(name)), None)
+
+    def record_unplaced_read(self, state, text):
+        """(backlog 2-c review round 2 W1) A read of what ``text`` names that the model does not evaluate: the object it
+        names (a global, an array, a struct, a local — read as a whole), what a macro it names may read, or — anything
+        else — a read nothing can be reported as unread after."""
+        m = _OBJECT_PATH_RE.match(str(text or "").strip())
+        word = m.group(0) if m else ""
+        root = word.split(".", 1)[0]
+        if root and root in self.macro_status and self.lookup(root) is None:
+            self.record_macro_reads(state, root)
+        elif root and (self.lookup(root) is not None or root in self.globals or root in self.arrays
+                       or root in (self.scope.get("unresolved_globals") or {}) or root in self.struct_globals):
+            state.initial_reads.add(_BASE_READ + word)
+        else:
+            state.initial_reads.add(_UNPLACED_READ)
+
+    def record_macro_reads(self, state, name):
+        """(backlog 2-c review round 2 W1) What a macro the model does not evaluate may read (`macro_read_marks`). A
+        decision observation run observes no output, so it records nothing (review round 3 W2 — the MC/DC search
+        evaluates the same macros on thousands of vectors)."""
+        if self.watch is not None:
+            return
+        memo = self.shared.setdefault("macro_read_marks", {})
+        marks = memo.get(name)
+        if marks is None:
+            marks = memo[name] = self.macro_read_marks(name)
+        state.initial_reads |= marks
+
+    def macro_read_marks(self, name):
+        """Every name the macro's definition mentions and, through the macros those name, theirs (an undecided macro:
+        every definition the tree has — `cpc.undecided_macro_view`) as part-read marks; an unplaced read when that is
+        not the whole story (no body, token pasting, opaque text, a missing include, a build ``-D``). Iterative, once
+        per macro and function (memoised in ``shared`` — the unit's macro table does not change between vectors)."""
+        marks: set[str] = set()
+        seen: set[str] = set()
+        stack = [name]
+        while stack:
+            m = stack.pop()
+            if m in seen:
+                continue
+            seen.add(m)
+            if self.macro_status.get(m) == "active":
+                body = self.macro_bodies.get(m)
+                if body is None:
+                    body = self.fmacro_bodies.get(m)
+                if body is None or "#" in body:
+                    return frozenset({_UNPLACED_READ})
+                names = re.findall(r"\b[A-Za-z_]\w*\b", body)
+            else:
+                view = cpc.undecided_macro_view(self.scope, m)
+                if view is None or "names" not in view:
+                    return frozenset({_UNPLACED_READ})
+                names = list(view["names"])
+            for t in names:
+                marks.add(_BASE_READ + t)
+                if t in self.macro_status and t not in seen:
+                    stack.append(t)
+        return frozenset(marks)
 
     def unresolved_reason(self, name):
         if name in (self.scope.get("unresolved_globals") or {}):
@@ -1777,6 +1858,7 @@ class _Interp:
             if self.macro_effectful(name):
                 # What we cannot evaluate may still write: its effects must not vanish (R2b review round 2 A).
                 self.havoc_everything(state, reason, locals_too=True)
+            self.record_macro_reads(state, name)   # (backlog 2-c review round 2 W1) and it may read
             return _Val(Unknown(reason), None)
         self.check_sequencing(state, node, eraw)  # the expansion's own order (``g_x + g_x++``; round 2 B)
         return self.expression(state, node, eraw, depth + 1)
@@ -1966,9 +2048,13 @@ class _Interp:
                 raise
             state.possible_ub.add("operand_under_unknown_condition")
             self.maybe_decisions(state, probe)
+            state.initial_reads |= probe.initial_reads   # (backlog 2-c review C2) it runs on some executions
             return _Val(Unknown(str(exc)), None)
         if runs_maybe:
             self.maybe_decisions(state, probe)
+            # (backlog 2-c review C2) what it reads, it reads on the executions where it runs: ``(a > 1U) && (g_s > 1U)``
+            #   reads g_s whenever a > 1 — the decided ``?:`` arm (``runs_maybe`` false) does not run and reads nothing
+            state.initial_reads |= probe.initial_reads
             changed = (probe.havoc_all != state.havoc_all or probe.havoc_pointer != state.havoc_pointer
                        or probe.havoc_bases != state.havoc_bases or probe.store.keys() != state.store.keys()
                        or any(probe.store[k] is not v for k, v in state.store.items()))
@@ -2223,6 +2309,10 @@ class _Interp:
 
     def read_target(self, state, target):
         if target[0] != "key":
+            # (backlog 2-c review W1) a read the model cannot place: through an unknown pointer (any object a pointer
+            #   may reach) or of an unknown part of one object (index unknown, an aggregate) — recorded, so no output it
+            #   may have read is reported as unread
+            state.initial_reads.add(_ANY_POINTER_READ if target[0] in ("all", "ptr") else _BASE_READ + str(target[1]))
             return _Val(Unknown(target[-1] if target[0] in ("all", "ptr") else target[2]), None)
         _, key, t, volatile = target
         if key.startswith("@pointee:"):
@@ -2378,6 +2468,9 @@ class _Interp:
                 self.havoc_statics(state, f"callee_not_interpreted:{name}")
         elif self.function_name and self.function_name in (info.get("reaches") or ()):
             self.havoc_statics(state, f"recursion_through:{name}")  # the callee may re-enter this function
+        # (backlog 2-c review round 2) run as its effects only: it may read what its closure names, and through a pointer
+        state.initial_reads.add(_CALLEE_READS + name)
+        state.initial_reads.add(_ANY_POINTER_READ)
         writes = sorted(info.get("writes") or ())
         opaque = self.opaque_writes(info)
         if info.get("unknown_callees"):
@@ -2778,6 +2871,7 @@ class _World:
                     merged.havoc_bases.setdefault(base, reason)
                 merged.escaped |= s.escaped
                 merged.possible_ub |= s.possible_ub
+                merged.initial_reads |= s.initial_reads   # (backlog 2-c) a read on any callee path is a read
                 merged.forks.extend(f for f in s.forks if f not in merged.forks)
             if "callee_paths:" + name not in merged.forks:   # a loop joins the same callee many times: once is the fact
                 merged.forks.append("callee_paths:" + name)
@@ -2948,9 +3042,10 @@ def _find_function(root, raw, name, scope):
     return matches[0]
 
 
-def _observe(interp, state, name):
-    """Value an output name holds in a final state: an int, or Unknown."""
-    value = _observe_value(interp, state, name)
+def _observe(interp, state, name, reads=None, escaped=None):
+    """Value an output name holds in a final state: an int, or Unknown. ``reads`` / ``escaped``: what any final path
+    read / let escape (2-c)."""
+    value = _observe_value(interp, state, name, reads, escaped)
     return Unknown("pointer_value") if isinstance(value, _Pointer) else value   # (R40) an address is no expected value
 
 
@@ -2970,14 +3065,90 @@ def _pointee_key(interp, name):
     return None
 
 
-def _observe_value(interp, state, name):
+# (backlog 2-c) An output the path did not write holds its initial value. When the sequence did not set it, the oracle
+#   cannot give the final value — and when no final path read it either (`_State.initial_reads`), it is the observation
+#   that needs it, not the function. The old reason (`INITIAL_VALUE_PREFIX`) made R19 add X and the source findings call
+#   it 'read before written, missing from the input list' — false for an output written only on some paths (`g_o` set
+#   only inside an `if`). Read on any path — in a condition, in an operand that runs on some executions, as an unknown
+#   part of its object, through a pointer the model cannot place when one may reach it, by a callee run as its effects
+#   only (what its body and macros name), through a macro or a name the model does not evaluate — keeps the old reason.
+#   Fail-closed (review round 2): a read the model cannot attribute (`_UNPLACED_READ`) leaves nothing unread.
+
+
+_ANY_POINTER_READ = "@read_through_unknown_pointer"
+_BASE_READ = "@read_part_of:"
+_CALLEE_READS = "@read_by_callee:"     # + name: a callee run as its effects only — reads what its closure names
+_UNPLACED_READ = "@read_unplaced"      # a read the model cannot attribute at all — nothing is reported as unread
+_OBJECT_PATH_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+def _containers(key):
+    """``g_t.t[3]`` → ``g_t``, ``g_t.t``, ``g_t.t[3]``: the objects a key lies in, outermost first, itself last."""
+    key = str(key)
+    return [key[:i] for i in range(1, len(key)) if key[i] in ".["] + [key]
+
+
+def _key_root(key):
+    """The object a store key belongs to: ``g_buf[2]`` → ``g_buf``, ``g.s.x`` → ``g``, ``@pointee:p[0].a`` → ``@pointee:p``."""
+    return str(key).split("[", 1)[0].split(".", 1)[0]
+
+
+def _pointer_reachable(interp, escaped, key):
+    """May a pointer reach this object (`havoc_pointer_targets`' judgment): a parameter's pointee, an array (arrays
+    decay), an object whose address left this function on some final path (``escaped`` — review I-c) or was taken
+    anywhere in the project."""
+    base, root = str(key).split("[", 1)[0], _key_root(key)
+    world = interp.world
+    return root.startswith("@pointee:") or root in escaped or base in escaped or base in interp.arrays \
+        or root in interp.arrays or (world is not None and (base in world.array_names or root in world.array_names)) \
+        or base in interp.address_taken or root in interp.address_taken
+
+
+def _read_on_some_path(interp, key, reads, escaped):
+    """(backlog 2-c) Did some final path read ``key`` while unset — itself, the object it lies in (an unknown part of
+    it), through a pointer the model cannot place (when one may reach it), in a callee run as its effects only (a name
+    its closure mentions — or anything, when the closure cannot say), or anything at all (a read the model cannot
+    attribute). Fail-closed: only what no recorded read may reach is unread."""
+    if _UNPLACED_READ in reads or key in reads or any(_BASE_READ + c in reads for c in _containers(key)):
+        return True
+    if _ANY_POINTER_READ in reads and _pointer_reachable(interp, escaped, key):
+        return True
+    root = _key_root(key)
+    for r in reads:
+        if r.startswith(_CALLEE_READS):
+            info = interp.closure.get(r[len(_CALLEE_READS):]) or {}
+            if not info.get("reads_complete") or root in (info.get("reads") or ()):
+                return True
+    return False
+
+
+def _unwritten(read, key, name, state, interp, reads=None, escaped=None):
+    """The observed value of ``key``; when no final path read it (``reads``: the union of their reads — review C1: the
+    first path's verdict alone depended on the order of the arms) and its initial value is not in the inputs, the reason
+    says so (a written value can carry the initial-value reason of ``key`` only through a read of ``key``, which that
+    path recorded). The observation's own read is not the function's: it is taken back, so observing an output twice on
+    one state gives the same answer."""
+    reads = state.initial_reads if reads is None else reads
+    escaped = state.escaped if escaped is None else escaped
+    read_before = _read_on_some_path(interp, key, reads, escaped)
+    recorded = key in state.initial_reads
+    value = read()
+    if not recorded:
+        state.initial_reads.discard(key)
+    if not read_before and isinstance(value, Unknown) and value.reason == INITIAL_VALUE_PREFIX + name:
+        return Unknown(UNWRITTEN_OUTPUT_PREFIX + name)
+    return value
+
+
+def _observe_value(interp, state, name, reads=None, escaped=None):
     if name == "return":
         if state.mode != "return" or state.ret is None:
             return Unknown("no_return_value_on_path")
         return state.ret.v
     pointee = _pointee_key(interp, name)
     if pointee is not None:
-        return interp.read_pointee(state, *pointee)
+        return _unwritten(lambda: interp.read_pointee(state, *pointee), pointee[0], pointee[0][len("@pointee:"):],
+                          state, interp, reads, escaped)
     # (R39) a struct member ``g.s.x`` / ``g.b[2]`` is a modeled object of its own name
     m = re.fullmatch(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?", str(name).strip())
     if not m:
@@ -2995,13 +3166,15 @@ def _observe_value(interp, state, name):
         globals_, arrays = ({base: rec}, {}) if kind == "global" else ({}, {base: rec})
     if index is None and base in globals_:
         g = globals_[base]
-        return interp.read_key(state, base, base, g["type"], g.get("volatile"))
+        return _unwritten(lambda: interp.read_key(state, base, base, g["type"], g.get("volatile")), base, base, state,
+                          interp, reads, escaped)
     if index is not None and base in arrays:
         a = arrays[base]
         if a["length"] is None or not 0 <= int(index) < a["length"]:
             return Unknown("observable_index_outside_array")
-        v = interp.read_target(state, ("key", f"{base}[{int(index)}]", a["type"], a.get("volatile", False)))
-        return v.v
+        key = f"{base}[{int(index)}]"
+        return _unwritten(lambda: interp.read_target(state, ("key", key, a["type"], a.get("volatile", False))).v, key, key,
+                          state, interp, reads, escaped)
     if base in (interp.scope.get("unresolved_globals") or {}):
         return Unknown(f"global_unmodeled:{base}:{interp.scope['unresolved_globals'][base]}")
     return Unknown("observable_not_a_modeled_object:" + base)
@@ -3104,8 +3277,10 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             if any(s.mode in {"break", "continue"} for s in finals):
                 raise Unsupported("jump_outside_loop")
             values = {}
+            reads = set().union(*(s.initial_reads for s in finals))   # (backlog 2-c review C1) any path's read
+            escaped = set().union(*(s.escaped for s in finals))       # (review round 2 I-c) any path's escape
             for name in outs:
-                seen = [_observe(interp, s, name) for s in finals]
+                seen = [_observe(interp, s, name, reads, escaped) for s in finals]
                 unknown = next((v for v in seen if isinstance(v, Unknown)), None)
                 if unknown is not None:
                     values[name] = {"reason": unknown.reason}

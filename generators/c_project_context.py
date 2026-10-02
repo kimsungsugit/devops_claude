@@ -2433,7 +2433,19 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                         (x in macro_fx and re.search(r"\b" + re.escape(name) + r"\b", " ".join(macro_text.get(x, ()))))
                         for x in seen)  # through a macro too: ``#define AGAIN() f(0U)`` (round 3 C1)
         rtypes = direct[name]["return_types"]
+        # (backlog 2-c) every name the function and what it reaches mention — what a caller that does not interpret it
+        #   must assume it may read (identifiers of the bodies — locals and calls excluded — and of the macros reached);
+        #   complete unless a macro reached hides its text (``##``, `macro_body_opaque`)
+        reads: set[str] = set()
+        reads_complete = not unknown
+        for x in seen:
+            if x in direct:
+                reads |= direct[x]["idents"]
+            if x in macro_fx:
+                reads |= macro_fx[x]["names"]
+                reads_complete = reads_complete and not macro_fx[x]["opaque"]
         closure[name] = {"writes": writes, "unknown_callees": unknown, "pointer_write": pointer_write,
+                         "reads": frozenset(reads), "reads_complete": reads_complete,
                          "reaches": (seen - {name}) | ({name} if recursive else set()),
                          # (R14) one declared type when every definition says the same; "" when they differ / unknown
                          "return_type": next(iter(rtypes)) if len(rtypes) == 1 else ""}

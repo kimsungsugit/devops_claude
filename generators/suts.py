@@ -23,6 +23,7 @@ from generators._artifact_check import apply_write_back_check
 from generators._artifact_check import sheet_base_name as _sheet_base_name
 from generators._xlsx_merge import merge_fresh
 from generators.boundary_rows import BOUNDARY_PREFIX, find_boundaries
+from generators.c_source_oracle import INITIAL_VALUE_PREFIX, UNWRITTEN_OUTPUT_PREFIX
 from generators.mcdc_design import build_mcdc_design, finalize_mcdc_design, mcdc_report_summary
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
@@ -3325,7 +3326,10 @@ def _confirm_observable_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
 # 정본만 판별한 변이 HDPDM01 347 중 244 · KJPDS02_PV 257 중 124 가 이런 함수에 있다 — 예: HDPDM01 SwUDS v1.07 이
 # `s_MoveStartClose_GainMeasure` 의 입력으로 **Open** gain 을 적었고 소스는 **Close** gain 을 읽는다(정본 SUTS 는 소스를 따랐다).
 # (R39) a struct member (``g.a`` · ``g.s.x`` · ``g.b[2]``) is a name too — the reference sets it by that name
-_SOURCE_READ_RE = re.compile(r"initial_value_not_in_inputs:([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?)(?![\w.\[])")
+# (백로그 2-c) 쓰지 않은 출력의 최종값 관측에 필요한 초기값(`unwritten_output_initial_not_in_inputs:X`)도 입력으로 더한다 — 그래야
+#   그 칸이 도출된다. 다만 함수가 읽은 것이 아니므로 입력 목록 결손 소견(`input_list_gaps`)은 읽은 이름만 센다.
+_SOURCE_READ_RE = re.compile("(" + "|".join(re.escape(p[:-1]) for p in (INITIAL_VALUE_PREFIX, UNWRITTEN_OUTPUT_PREFIX))
+                             + r"):([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?)(?![\w.\[])")
 # (R59) 3 → 8: 더한 입력이 연 경로에서 보이는 이름은 분기 깊이만큼 회차가 든다 — 3 회차로는 KJPDS02_PV
 #   `s_MotorSpeedModeSelection_RearSet` 의 `u8g_DoorPreCtrl_CompensateLvl`(넷째 분기)이 남아 그 함수의 기대값이 1 칸뿐이었다
 #   (실험: 8 회차 34 칸). 새 이름이 없는 회차에서 멈추므로 상한은 그런 함수에만 든다.
@@ -3333,16 +3337,20 @@ _SOURCE_READ_ROUNDS = 8
 
 
 def source_read_names(sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """행이 값을 주지 않았는데 함수가 초기값을 읽은 이름 → {"slots": 칸 수, "sequences": [행 번호…]}(기대값 근거의 사유에서).
+    """행이 값을 주지 않았는데 칸이 초기값을 필요로 한 이름 → {"slots": 칸 수, "sequences": [행 번호…], "read": bool}(기대값 근거의
+    사유에서). (백로그 2-c) ``read`` 는 한 칸이라도 함수 실행 모델이 그 초기값을 읽어 막혔는지 — 아니면 쓰지 않은 출력의
+    최종값(=초기값) 관측에만 필요했다(`UNWRITTEN_OUTPUT_PREFIX`).
 
     2차원 첨자는 이름으로 싣지 않는다(시험 입력 한 칸으로 줄 수 있는 모양이 아니다). 구조체 멤버 경로(`g.a`)는 R39 부터
     싣는다 — 정본이 `lin_tl_rx_queue.queue_header` 처럼 입력 한 칸으로 쓰고, oracle 이 멤버를 제 이름의 객체로 읽는다."""
     out: Dict[str, Dict[str, Any]] = {}
     for seq in sequences:
         for ev in (seq.get("expected_evidence") or {}).values():
-            for name in _SOURCE_READ_RE.findall(str((ev or {}).get("reason") or "")):
-                rec = out.setdefault(name, {"slots": 0, "sequences": []})
+            for kind, name in _SOURCE_READ_RE.findall(str((ev or {}).get("reason") or "")):
+                rec = out.setdefault(name, {"slots": 0, "sequences": [], "read": False})
                 rec["slots"] += 1
+                # (백로그 2-c) 한 칸이라도 함수 실행 모델이 읽어서 막혔으면 '읽음' — 쓰지 않은 출력의 관측만이면 아님
+                rec["read"] = rec["read"] or kind + ":" == INITIAL_VALUE_PREFIX
                 if seq.get("seq_num") not in rec["sequences"]:
                     rec["sequences"].append(seq.get("seq_num"))
     return out
@@ -3465,7 +3473,8 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
     선언 타입(enum 은 그 번역 단위의 열거자) 범위를 움직인다. 더한 입력이 새 경로를 열어 또 다른 이름이 보이면 다음 회차(최대
     `_SOURCE_READ_ROUNDS`)에서 더한다. `regenerate()` 는 경계 행 없이 다시 만든다 — 경계 행은 호출자가 마지막에 한 번 붙인다.
     입출력이 없는 unit(전략 목록 대신 호출 시퀀스를 쓰는 경로)은 건드리지 않는다. 기록은 `unit["source_read_inputs"]`:
-    더한 이름(처음 본 칸 수·회차·타입) · 더하지 않은 이름과 사유 · 마지막 행들에서도 값이 없는 이름(`remaining`)."""
+    더한 이름(처음 본 칸 수·회차·타입 · 함수 실행 모델이 읽었는지 `read_on_model` — 백로그 2-c) · 더하지 않은 이름과 사유 ·
+    마지막 행들에서도 값이 없는 이름(`remaining`)."""
     record: Dict[str, Any] = {"added": {}, "not_added": {}, "rounds": 0, "remaining": {}}
     unit["source_read_inputs"] = record
     if not (unit.get("input_vars") or unit.get("output_vars")):
@@ -3492,7 +3501,10 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
                 continue
             new.append(name)
             record["added"][name] = {"slots": rec["slots"], "round": _round + 1, "type": typename,
-                                     "value_type": key.get(name) or "enum"}
+                                     "value_type": key.get(name) or "enum",
+                                     # (백로그 2-c) 함수 실행 모델이 읽어서 막혔는지, 쓰지 않은 출력의 최종값을 보려고인지 —
+                                     #   False 는 '모델에서 읽힌 근거 없음'(쓰기 요약만 있는 callee 안의 읽기는 모델에 없다)
+                                     "read_on_model": bool(rec.get("read", True))}
             if name in key:
                 unit["source_input_types"] = {**(unit.get("source_input_types") or {}), name: key[name]}
             else:
@@ -3577,12 +3589,19 @@ def input_list_gaps(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Di
     scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
     objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
     rec = unit.get("source_read_inputs") if isinstance(unit.get("source_read_inputs"), dict) else {}
-    gaps: Dict[str, Dict[str, Any]] = {n: {"slots": 0, "sequences": [], "added": True} for n in (rec.get("added") or {})}
+    # (백로그 2-c) 함수 실행 모델에서 읽힌 근거 없이, 쓰지 않은 출력의 관측에만 필요했던 이름은 결손 소견이 아니다(소견은 근거가
+    #   있는 이름만)
+    final = source_read_names(sequences)
+    # (리뷰 2차 I-e) 더한 회차엔 읽힌 근거가 없었어도 마지막 행(MC/DC 벡터가 비운 칸 등)이 읽어 막혔으면 결손이다
+    gaps: Dict[str, Dict[str, Any]] = {n: {"slots": 0, "sequences": [], "added": True}
+                                       for n, a in (rec.get("added") or {}).items()
+                                       if not isinstance(a, dict) or a.get("read_on_model", True)
+                                       or (final.get(n) or {}).get("read")}
     # (R21 리뷰 W1) 한 행(GLOBAL)이 설정해 열로 보인 이름도, 다른 행이 값 없이 읽으면 입력 목록의 결손이다
     shown = set(((unit.get("row_io_columns") or {}).get("inputs_shown")) or [])
     inputs = set(unit.get("input_vars") or []) - shown
-    for name, r in source_read_names(sequences).items():
-        if name not in inputs and name not in gaps and name.partition("[")[0] in objects:
+    for name, r in final.items():
+        if r.get("read") and name not in inputs and name not in gaps and name.partition("[")[0] in objects:
             gaps[name] = {**r, "added": False}
     return gaps
 
@@ -3655,6 +3674,9 @@ def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
     not_added = Counter(why for r in recs for why in (r.get("not_added") or {}).values())
     return {"units": len(recs), "units_with_added": sum(1 for r in recs if r.get("added")),
             "names_added": sum(len(r.get("added") or {}) for r in recs),
+            # (백로그 2-c) 그중 함수 실행 모델에서 읽힌 근거 없이, 쓰지 않은 출력의 최종값 관측에만 필요했던 이름
+            "names_added_for_unwritten_outputs": sum(1 for r in recs for a in (r.get("added") or {}).values()
+                                                     if isinstance(a, dict) and a.get("read_on_model") is False),
             "slots_first_seen": sum(int(a.get("slots") or 0) for r in recs for a in (r.get("added") or {}).values()),
             "not_added": dict(sorted(not_added.items())),
             "units_input_columns_full": sum(1 for r in recs if "input_columns_full" in (r.get("not_added") or {}).values()),

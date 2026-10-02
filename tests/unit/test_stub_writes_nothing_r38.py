@@ -81,7 +81,7 @@ def test_what_the_stubbed_callee_writes_keeps_the_sequence_value(units):
     r = _run(units["f"], {"cal() return": 5, "g_side": 4}, ["g_o", "g_s"])
     assert r["outputs"]["g_o"] == {"value": 6, "basis": "assigned"}
     assert r["outputs"]["g_s"] == {"value": 4, "basis": "assigned"}   # not cal's 1: the stub does not run it
-    assert r["schema_version"] == 3
+    assert r["schema_version"] == 4   # 3 (R38); 4 (backlog 2-c)
     assert any("a stub writes no global or static" in a for a in r["assumptions"])
     # (review W2) the base line no longer says what a stub may write is unknown
     (base,) = [a for a in r["assumptions"] if a.startswith("callee effects are")]
