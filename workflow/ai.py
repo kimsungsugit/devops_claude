@@ -350,7 +350,8 @@ def load_oai_config(path: Optional[str]) -> Optional[Dict[str, Any]]:
 
             # 선호 모델 힌트(기본: config.DEFAULT_LLM_MODEL)
             preferred = str(getattr(config, "DEFAULT_LLM_MODEL", "") or "").lower()
-            preferred_sub = str(getattr(config, "LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite").lower()
+            preferred_sub = str(getattr(config, "LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.5-flash-lite")
+                                or "gemini-3.5-flash-lite").lower()
 
             def _is_gemini_cfg(item: Any) -> bool:
                 try:

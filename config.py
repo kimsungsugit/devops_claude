@@ -213,8 +213,9 @@ UDS_JUDGE_ENABLED = (
     not in ("0", "false", "off", "no")
 )
 UDS_JUDGE_THRESHOLD = _safe_float("UDS_JUDGE_THRESHOLD", 0.7)
+# 표준 모델(gemini-3.5-flash-lite — https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite, 2026-10-02 확인)
 UDS_JUDGE_MODEL_SUBSTRING = os.environ.get(
-    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-3.1-flash-lite"
+    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-3.5-flash-lite"
 )
 
 # ---------------- UDS DOCX retry 타임아웃 (초) ----------------
