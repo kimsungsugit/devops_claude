@@ -3691,7 +3691,8 @@ def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict[str, str]],
-                        project_context: Optional[Dict[str, Any]] = None) -> int:
+                        project_context: Optional[Dict[str, Any]] = None,
+                        stats: Optional[Dict[str, Any]] = None) -> int:
     """unit 에 정의 파일의 원문을 붙인다(`source_files` = 소스 단계의 파일당 1회 맵). 붙인 unit 수를 돌려준다.
 
     원문은 소스 oracle(`apply_sequence_evidence`)과 MC/DC 소스 경로의 입력이다. 맵에 없으면(잘려 읽힘·원격 미확보)
@@ -3699,6 +3700,10 @@ def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict
 
     (R81) `project_context`(소스 단계 `project_context`)가 있으면 unit 마다 정의 파일의 번역 단위 범위(`project_scope` —
     typedef·매크로·열거자·전역·`#if` 상태)를 붙인다. 같은 파일의 unit 은 한 범위 객체를 공유한다(복사 없음).
+
+    (R62) 범위가 붙은 파일은 `apply_body_projection` 으로 읽는다 — 식 가운데를 가르는 `#if` 때문에 트리가 깨진 함수를
+    컴파일러처럼 판정된 팔만 남겨 다시 읽은 원문(같은 파일의 unit 은 그 원문 하나를 공유). ``stats`` 에 집계를 담는다
+    (`summarize_body_projection`).
     """
     attached = 0
     files = source_files or {}
@@ -3719,13 +3724,41 @@ def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict
             for unit in units:
                 unit.setdefault("project_context_status", f"schema_mismatch:{project_context.get('schema_version')}")
             return attached
+        from generators.c_project_context import apply_body_projection
         paths = [str(u.get("source_path") or "") for u in units if u.get("source_text")]
         scopes = build_scopes(project_context, [p for p in paths if p in project_context["files"]])
+        # (리뷰 전 자체 점검) 경로가 아니라 (경로, 원문) 마다 — unit 이 미리 가진 원문이 파일 원문과 다르면 그 원문 그대로
+        # 둔다(범위와 해시가 안 맞는 원문은 `apply_body_projection` 이 바꾸지 않는다). 같은 원문은 한 번만 투영한다.
+        texts: Dict[tuple, str] = {}
         for unit in units:
-            scope = scopes.get(str(unit.get("source_path") or ""))
+            path = str(unit.get("source_path") or "")
+            scope = scopes.get(path)
             if scope is not None and unit.get("source_text"):
+                key = (path, unit["source_text"])
+                if key not in texts:
+                    texts[key] = apply_body_projection(scope, unit["source_text"])
+                unit["source_text"] = texts[key]
                 unit["project_scope"] = scope
+        if stats is not None:
+            # (리뷰 W5a) 문서에 행이 있는 함수(이 unit 들)만 센다 — 같은 파일의 다른 함수는 `outside_document` 로
+            from generators.c_project_context import summarize_body_projection
+            stats.update(summarize_body_projection(
+                scopes.values(), only={(str(u.get("source_path") or ""), str(u.get("name") or "")) for u in units
+                                       if u.get("project_scope") is not None}))
     return attached
+
+
+def summarize_document_body_projection(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R62) 본문 #if 투영 집계 — 문서 함수는 **최종 unit 목록**(시험 범위 `apply_scope` 로 좁힌 뒤)이다. 범위를 붙일 때의
+    목록(`attach_unit_sources` 의 ``stats``)으로 세면 문서에 행이 없는 함수(HDPDM01 LIN 스택)의 투영을 이 문서의 것으로
+    공시한다. 범위가 붙은 unit 이 없으면 빈 dict."""
+    from generators.c_project_context import summarize_body_projection
+    scopes = {id(u["project_scope"]): u["project_scope"] for u in units if u.get("project_scope") is not None}
+    if not scopes:
+        return {}
+    return summarize_body_projection(
+        scopes.values(), only={(str(u.get("source_path") or ""), str(u.get("name") or "")) for u in units
+                               if u.get("project_scope") is not None})
 
 
 def _mcdc_declared_domains(input_vars: List[str], type_of: Any, value_domains: Dict[str, Any],
@@ -4791,7 +4824,9 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
         by_seq = {s.get("seq_num"): s for s in all_sequences.get(unit["fid"], [])}
         tc_id = rendered_tc_ids.get(unit["fid"], "")
         for decision in report.get("decisions") or []:
-            common = [decision.get("expression", ""), decision.get("status", ""), decision.get("reason", ""),
+            # (R62 리뷰 I8) 투영한 함수의 결정식은 지운 지시문 · 팔이 공백 줄로 남는다 — 공백뿐인 줄만 걷어 보인다
+            common = [re.sub(r"\n[ \t]*(?=\n)", "", str(decision.get("expression") or "")),
+                      decision.get("status", ""), decision.get("reason", ""),
                       decision.get("source_kind", ""), decision.get("source_hash", ""),
                       "yes" if decision.get("search_complete") else "no", "not_run", "unverified",
                       # (R2c) expression = 결정식만 평가 · source_path = 함수 실행 모델(지역변수·결정 전 갱신 포함)
@@ -5988,6 +6023,10 @@ def generate_suts(
     # (R17) #if verdicts on build-configuration evidence — units, reasons, names taken as undefined
     from generators.c_project_context import summarize_build_assumptions
     quality["build_assumptions"] = summarize_build_assumptions(u.get("project_scope") for u in units)
+    # (R62) 식 가운데를 가르는 #if 로 트리가 깨졌던 함수 — 투영한 것과, 오류가 남은 것의 사유(두 프로파일).
+    #   ⚠ 문서 함수는 **최종 unit 목록**(설계 ID 범위로 좁힌 뒤)으로 센다 — 범위를 붙일 때의 목록에는 문서에 행이 없는
+    #   함수(HDPDM01 LIN 스택)가 있어, 그 함수의 투영을 "이 문서의 투영" 으로 공시했다(R62 확인)
+    quality["body_projection"] = summarize_document_body_projection(units)
     # (R21) 행이 설정해 열로 보인 입력·기대값(두 프로파일)
     quality["row_io_columns"] = summarize_row_io(units)
     # (R23) 입력이 앞 행과 같은 행 — 정본 규모 행은 남기고 세며, 확장 전략 행은 뺀 수

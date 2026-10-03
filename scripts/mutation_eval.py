@@ -191,6 +191,8 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
     excluded = sorted(n for n in targets if n in duplicates)
     targets = {n: p for n, p in targets.items() if p and n in ref_suite and n in gen_suite and n not in duplicates}
     scopes = build_scopes(context, sorted(set(targets.values())))
+    # (R62) the text the generator reads: functions an #if splits mid-expression projected as the compiler reads them
+    texts = cpc.projected_texts(scopes, texts)
     functions, totals = [], Counter()
     by_operator: dict[str, Counter] = {}
     cells = {"reference": Counter(), "generated": Counter()}   # (R26) how each suite's expected cells were read

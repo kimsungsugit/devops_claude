@@ -228,7 +228,7 @@ def _guard_output(out: Path, reference: str, roots: list[Path], inputs: tuple[st
 
 
 def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str = "clang") -> dict:
-    from generators.c_project_context import build_scopes
+    from generators.c_project_context import build_scopes, projected_texts
     from generators.c_source_oracle import evaluate_outputs, read_reference_cell
     from tools.export_suts_vectorcast import bare_fn_name, build_vectorcast_model
     model = build_vectorcast_model(reference)
@@ -236,12 +236,13 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
     definitions = {name: sorted(set(paths)) for name, paths in _definitions(texts).items()}
     needed = sorted({path for u in model["units"] for path in definitions.get(bare_fn_name(u["unit_name"]), [])})
     scopes = build_scopes(context, needed)
+    projected = projected_texts(scopes, texts)   # (R62) what the generator reads; hashes below stay the file's
     functions, claims, slot_counts = [], [], Counter()
 
     def compare(ref_unit, name, path):
         """Evaluate the reference sequences on one definition."""
-        unit = {"name": name, "source_text": texts[path], "source_path": path, "source_text_complete": True,
-                "project_scope": scopes[path]}
+        unit = {"name": name, "source_text": projected[path], "source_text_original": texts[path], "source_path": path,
+                "source_text_complete": True, "project_scope": scopes[path]}
         params = _param_types(unit)
         constants = scopes[path].get("constants") if scopes[path].get("constants") is not None else {}
         function_like = scopes[path].get("function_like_macros") or ()

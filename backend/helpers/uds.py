@@ -1466,7 +1466,13 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   v41 캐시는 1차 코드 모양이라 거부).
 # (R40) v43: project_context 스키마 15(함수의 포인터 매개변수 — 가리키는 대상 타입을 `p[0].a` 로 평탄화).
 # (R40 리뷰 1차) v44: project_context 스키마 16(전처리 공백이 있는 unit 의 구조체 대상은 배치하지 않는다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v44"
+# (R62) v45: project_context 스키마 17(함수 본문 안 #define · #undef · #include — 그 이름은 단위 안에서 바뀌는 것으로,
+#   파일 수준 `#  ifndef`(# 뒤 공백)를 #ifndef 로 — v44 캐시는 앞의 것이 없고 뒤의 것을 #ifdef 로 읽었다).
+# (R62 리뷰 4차) v46: project_context 스키마 18(파일 수준 걷기가 못 읽는 #define · #undef · #include 전부 — 함수 본문 · 인식 못 한
+#   구문 · 헤더의 inline 함수 — 를 `stray_directives` 로; v45 의 `body_directives` 는 함수 정의 안만 봤다).
+# (R62 리뷰 5차) v47: project_context 스키마 19(값 없는 `#define NAME ` 뒤 공백이 다음 줄을 값으로 삼키던 tree-sitter 오독을
+#   같은 길이로 바로잡아 읽고, `#  undef` 를 #undef 로, 걷기 밖 지시문은 줄마다 종류까지 대조).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v47"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

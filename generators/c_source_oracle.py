@@ -283,8 +283,10 @@ class _Interp:
             head, sep, _rest = str(key).partition("() ")
             if sep and head:
                 self.stub_keys.setdefault(head, []).append(key)
-        # (R17) names a function-body #if took as undefined on build-configuration evidence (see `_scope_assumptions`)
-        self.assumed_undefined: set[str] = set()
+        # (R17) names a function-body #if took as undefined on build-configuration evidence (see `_scope_assumptions`) —
+        # (R62) from the start, those the projection of this function's split conditionals took (no directive is left
+        # in its text to record them during the run)
+        self.assumed_undefined: set[str] = cpc.projected_assumptions(scope, fn.start_byte)
         self.shared = shared if shared is not None else {}
         self.widths = (scope.get("target") or {}).get("widths") or {}
         if not self.widths.get("int"):
@@ -1329,8 +1331,8 @@ class _Interp:
             self.prescan_nodes([body], self.raw, 0)
 
     def defined_after_function(self, name):
-        d = (self.scope.get("pp_bodies") or {}).get(name)
-        return bool(d) and d.get("file") == self.scope.get("path") and int(d.get("pos") or 0) > self.fn.start_byte
+        # (R62 review W1) a header included after the function changes the table there too, not only the unit's own text
+        return cpc.macro_changed_after(self.scope, name, self.fn.start_byte)
 
     def prescan_nodes(self, roots, raw, depth):
         if depth > 8:
@@ -3217,9 +3219,10 @@ def _scope_assumptions(unit: dict[str, Any]) -> list[str]:
 
 
 def scope_matches(unit: dict[str, Any]) -> bool:
+    """Is the unit's text the one its scope was built from — as read, or with its body conditionals projected (R62)?"""
     scope = unit.get("project_scope") or {}
     return bool(scope) and scope.get("schema_version") == cpc.SCHEMA_VERSION and \
-        scope.get("main_file_sha256") == hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest()
+        cpc.scope_text_matches(scope, hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest())
 
 
 def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]], outputs: list[list[str]]) -> list[dict[str, Any]]:

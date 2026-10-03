@@ -1297,6 +1297,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(rr, "errors") else ""),
             tone=_tone(bool(_int(rr, "errors")) or bool(_int(rr, "cut")))))
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
+    out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
     return out
 
 
@@ -1492,6 +1493,8 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     out.extend(_build_assumption_item((qr.get("integration_oracle") or {}).get("build_assumptions"),
                                       "sits_build_assumptions"))
+    out.extend(_body_projection_item((qr.get("integration_oracle") or {}).get("body_projection"),
+                                     "sits_body_projection", doc="sits"))   # (R62)
 
     # sub-case 물량 — 흐름당 몇 갈래를 시험했나.
     sub = _int(qr, "total_sub_cases")
@@ -1522,6 +1525,90 @@ def _build_assumption_item(block: Any, key: str) -> List[Dict[str, Any]]:
         + (" 빌드 설정을 증거로 쓰지 못한 unit 의 사유: " + _dist(reasons) + " — 이 unit 들은 이전처럼 미결로 둔다."
            if reasons else ""),
         tone="info")]
+
+
+# (R62 review W5d) 사유마다 무엇이 채워지면 풀리는지 — 풀리지 않는 사유에 "채우면 된다" 를 붙이지 않는다
+_PROJECTION_REASONS = {
+    "undecided": ("판정 못 하는 #if 조건", "그 조건의 매크로 정의나 빌드 설정(-D)이 채워지면 다음 생성에서 투영된다"),
+    "undecided_defined_after": ("함수보다 뒤에서(그 파일이나 뒤에 include 한 헤더에서) 정의 · 해제되는 매크로의 #if 조건",
+                                "그 함수 위치의 매크로 표를 알 수 없어 투영하지 않는다 — 입력을 채워서는 풀리지 않는다"
+                                "(뒤의 변경이 판정 못 하는 #if 팔 안에 있으면 그 조건이 판정될 때 다시 본다)"),
+    "body_table_unknown": ("파일 수준 걷기가 따라가지 못한 매크로 표 변경이 있는 단위(걷기 밖 #define · #undef · #include, 파서가 "
+                           "놓친 정의에 기대는 파일 수준 #if, 찾지 못한 include)", "그 단위의 함수 본문 #if 는 판정하지 않는다 — "
+                           "입력을 채워서는 풀리지 않는다(단위별 사유는 품질 요약 table_unknown_reasons)"),
+    "undecided_missed_definition": ("파서가 파일 수준에서 읽지 못한 #define(구조체 선언 안 · 인식 못 한 구문 안)에 기대는 #if 조건",
+                                    "매크로 표가 그 정의를 모르므로 투영하지 않는다 — 입력을 채워서는 풀리지 않는다(파서 개선 과제)"),
+    "undecided_varied": ("번역 단위 안에서 값이 바뀌는 매크로(재정의 · #undef · 함수 안 #define)의 #if 조건",
+                         "그 함수 위치의 값을 알 수 없어 투영하지 않는다 — 입력을 채워서는 풀리지 않는다"),
+    "undecided_reserved": ("컴파일러가 미리 정의할 수 있는 이름(밑줄로 시작 등)의 #if 조건",
+                           "프로젝트 파일 · -D 만으로는 판정하지 않는다 — 대상 컴파일러가 그 이름을 정의하는지 확인이 필요하다"),
+    "no_conditional_directive": ("#if 가 아닌 구문(벤더 확장 __far · __interrupt · 인라인 어셈블리 등)",
+                                 "모델 밖 문법이라 투영으로 풀리지 않는다"),
+    "conditional_compilation_unresolved": ("함수 자체가 판정 못 하는 #if 아래",
+                                           "그 #if 가 판정되면(매크로 정의 · -D) 다시 본다"),
+    "macro_table_changed_in_function": ("함수 안의 #define · #undef · #include", "함수 안에서 매크로 표가 바뀌어 투영하지 않는다"),
+    "unbalanced": ("함수 안에서 짝이 맞지 않는 #if", "투영하지 않는다"),
+    "still_error": ("투영 뒤에도 남는 다른 구문 오류", "투영으로 풀리지 않는다"),
+    "function_set_changed": ("투영하면 다른 함수가 생기거나 사라짐", "투영하지 않는다"),
+    "error_moved_to_another_function": ("투영하면 다른 함수에 오류가 생김", "투영하지 않는다"),
+    "conflicts_with_another_projection": ("다른 함수의 투영과 함께 하면 깨짐", "투영하지 않는다"),
+}
+
+
+def _body_projection_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:
+    """(R62) 식 가운데를 가르는 #if 로 트리가 깨졌던 함수 — 판정된 팔만 남겨 다시 읽은 것과, 오류가 남아 읽지 못한 함수(이름 · 사유 ·
+    무엇이 채워지면 풀리는지). 오류가 있던 함수가 하나도 없으면(문서 밖 함수 · 투영 예외도 없으면) 말하지 않는다."""
+    if not isinstance(block, dict):
+        return []
+    outside = block.get("outside_document") if isinstance(block.get("outside_document"), dict) else {}
+    errors = _int(block, "projection_errors") or 0
+    if not _int(block, "functions_with_tree_error") and not errors and not any(outside.values()):
+        return []
+    projected = _int(block, "functions_projected")
+    total = _int(block, "functions_with_tree_error")
+    left = None if projected is None or total is None else total - projected
+    reasons = block.get("not_projected") or {}
+    names = [str(x) for x in (block.get("projected_functions") or [])]
+    remaining = [str(x) for x in (block.get("not_projected_functions") or [])]
+    remaining_total = _int(block, "not_projected_total") or len(remaining)
+    assumed = [str(x) for x in (block.get("assumed_undefined") or [])]
+    what_is_lost = ("그 함수의 MC/DC 결정 · 기대값은 비어 있다(칸 사유 source_parse_error, 함수 자체가 미결 #if 아래면 "
+                    "conditional_compilation_unresolved)" if doc == "suts"
+                    else "그 함수를 지나는 통합 기대값은 미상이다(칸 사유 source_parse_error, 함수 자체가 미결 #if 아래면 "
+                    "conditional_compilation_unresolved)")
+    hash_note = ("투영한 파일의 근거 해시(Test Evidence · MCDC Design · Source Findings 의 Source SHA256)는 파일이 아니라 "
+                 "투영한 원문의 해시다 — "
+                 "Test Evidence 의 해시 범위 열이 'captured_decoded_utf8_text_body_conditionals_projected' 로 말한다."
+                 if doc == "suts" else
+                 "투영한 파일의 근거 해시(Test Evidence 의 Source SHA256)는 파일이 아니라 투영한 원문의 해시다.")
+    return [_item(
+        key, "본문 #if 투영 · 남은 파싱 오류",
+        f"투영 {_show(projected)} · 남은 파싱 오류 {_show(left)} / 트리 오류 함수 {_show(total)}",
+        "식 · 초기화 목록 · if 머리 한가운데의 #if/#ifdef/#else 는 C 문법 트리를 깨뜨려 그 함수 전체를 읽지 못했다(파싱 오류). "
+        "그런 함수는 컴파일러가 읽는 대로 — 그 번역 단위의 매크로 표로 판정된 팔만 남기고 지시문 줄과 거짓인 팔을 같은 길이의 "
+        "공백으로 지워(줄 번호 · 위치 그대로) — 다시 읽는다. 함수가 만나는 조건이 하나라도 판정되지 않거나, 함수 안에서 매크로 표가 "
+        "바뀌거나, 다시 읽은 함수에 오류가 남거나, 다른 함수의 위치가 달라지면 투영하지 않고 파싱 오류로 둔다. 매크로 표는 그 단위 "
+        "끝의 것이라, 단위 안에서 값이 바뀐 매크로와 함수보다 뒤에서(그 파일에서든 뒤에 include 한 헤더에서든) 정의 · 해제되는 "
+        "매크로는 판정하지 않는다. " + hash_note
+        + (f" 투영한 함수: {', '.join(names[:12])}" + (f" 외 {len(names) - 12}개" if len(names) > 12 else "") + "."
+           if names else "")
+        + (f" 판정한 조건 {_show(_int(block, 'conditions_decided'))}개." if projected else "")
+        + (" 투영에서 빌드 설정 증거로 정의 없음으로 본 이름: " + ", ".join(assumed[:12]) + "." if assumed else "")
+        + (" 남은 파싱 오류 — " + " · ".join(
+            f"{_PROJECTION_REASONS.get(k, (k, ''))[0]} {v}"
+            + (f"({_PROJECTION_REASONS[k][1]})" if k in _PROJECTION_REASONS else "") for k, v in reasons.items())
+           + f". {what_is_lost}." if reasons else "")
+        + (" 남은 함수: " + ", ".join(remaining[:12])
+           + (f" 외 {remaining_total - 12}개" if remaining_total > 12 else "") + "." if remaining else "")
+        + (f" 같은 파일의 문서에 행이 없는 함수: 투영 {outside.get('projected', 0)} · 남은 오류 "
+           f"{outside.get('not_projected', 0)}(이 문서의 칸에는 영향 없음)." if any(outside.values()) else "")
+        + (f" 투영 단계 예외로 원문 그대로 읽은 파일 {errors}개 — 로그를 확인할 것." if errors else "")
+        + (f" 파서가 파일 수준에서 읽지 못한 #define 이 있는 단위 {_int(block, 'units_with_missed_definitions')}개(단위당 "
+           f"최대 {_int(block, 'missed_definitions')}개 — 예: 구조체 선언 안의 레지스터 매크로): 매크로 표에 없어 그 이름에 기대는 "
+           "#if 는 판정하지 않는다." if _int(block, "units_with_missed_definitions") else "")
+        + (f" 함수 본문 등 걷기 밖의 지시문이 아는 이름을 바꿔 본문 #if 를 판정하지 않은 단위 {_int(block, 'units_table_unknown')}개."
+           if _int(block, "units_table_unknown") else ""),
+        tone=_tone(bool(reasons) or bool(errors)))]
 
 
 _BY_DOC_TYPE = {"sts": _sts_items, "suts": _suts_items, "sits": _sits_items}

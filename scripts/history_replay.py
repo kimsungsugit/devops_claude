@@ -387,13 +387,15 @@ def replay_function(texts: dict[str, str], context: dict, path: str, name: str, 
         ctx = build_project_context(files, context.get("build"), roots=context.get("roots"))
         for key, value in context.items():   # what the loader added after building (unread files) — same context
             ctx.setdefault(key, value)
-        spliced = {"name": name, "source_text": text, "source_path": path, "source_text_complete": True,
-                   "project_scope": build_scopes(ctx, [path])[path]}
+        spliced_scope = build_scopes(ctx, [path])[path]
+        # (R62) the spliced body read as the generator reads it (an #if splitting an expression projected)
+        spliced = {"name": name, "source_text": cpc.apply_body_projection(spliced_scope, text), "source_path": path,
+                   "source_text_complete": True, "project_scope": spliced_scope}
         return evaluate_outputs(spliced, vectors, [all_slots] * len(vectors))
 
     try:
         scope = build_scopes(context, [path])[path]
-        current = texts[path]
+        current = cpc.apply_body_projection(scope, texts[path])   # (R62) the text the generator reads
         raw = current.encode()
         _root, fn, _shared = _parsed_function(cpc.shared_parser(), raw, name, scope)
         unit = {"name": name, "source_text": current, "source_path": path, "source_text_complete": True,

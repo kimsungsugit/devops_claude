@@ -346,7 +346,7 @@ def _compiled(name, path, raw, fn, scope, known_functions=frozenset()):
             "typedefs": typedefs, "kw_typedefs": kw_typedefs, "calls": calls, "enum": enum}
 
 
-def _closure(entry_name, entry_path, files, scopes, provider, parser):
+def _closure(entry_name, entry_path, files, scopes, provider, parser, originals=None):
     """The entry and every project function it reaches that the harness compiles (member name → record), the entry's
     member name, the calls it stubs by kind (member → reason), the C name of each stub, and the unit scopes seen.
 
@@ -355,12 +355,23 @@ def _closure(entry_name, entry_path, files, scopes, provider, parser):
     renamed to the member its own call binds to — as the model binds per caller unit."""
     from generators.c_source_oracle import Unsupported, _find_function
     known = frozenset(getattr(provider, "defs", {}) or {}) | frozenset(getattr(provider, "header_defs", {}) or {})
+
+    def compiled_text(path, raw):
+        # (R62) ``files`` are the texts the generator read (functions an #if splits projected); the harness compiles the
+        # original text at the same positions, so clang's own preprocessor decides those #if again
+        original = (originals or {}).get(path)
+        if original is None:
+            return raw
+        if len(original.encode()) != len(raw):
+            # (review round 2 I-e) not the projection of this text: positions would not hold — say so, compile nothing
+            raise _Failure("original_text_length_mismatch:" + os.path.basename(path))
+        return original.encode()
     raw = files[entry_path].encode()
     try:
         fn = _find_function(parser.parse(raw).root_node, raw, entry_name, scopes[entry_path])
     except Unsupported as exc:
         raise _Failure("entry:" + str(exc)) from None
-    entry = _compiled(entry_name, entry_path, raw, fn, scopes[entry_path], known)
+    entry = _compiled(entry_name, entry_path, compiled_text(entry_path, raw), fn, scopes[entry_path], known)
     if isinstance(entry, str):
         raise _Failure("entry_not_compilable:" + entry)
     unbound_mark = "\0unbound"
@@ -386,7 +397,7 @@ def _closure(entry_name, entry_path, files, scopes, provider, parser):
             if target in nodes or target in cut_reason:
                 continue
             bound_scopes.setdefault(path_c, scope_c)
-            rec = _compiled(name, path_c, raw_c, fn_c, scope_c, known)
+            rec = _compiled(name, path_c, compiled_text(path_c, raw_c), fn_c, scope_c, known)
             if isinstance(rec, str):
                 cut_reason[target] = rec
                 continue
@@ -1053,7 +1064,7 @@ def _classify(claims, verdict, unobservable, claim_unchecked, cut, unbound, unse
 
 
 def check_group(entry_name, entry_path, claims, files, scopes, provider, parser, clang="clang", target="msp430",
-                work_dir=None, timeout=600):
+                work_dir=None, timeout=600, originals=None):
     """Verdicts for the claims of one entry function: ``{(claim index, output): (verdict, detail)}``, and group notes.
     ``work_dir`` must be this group's own directory (two groups sharing a file would read each other's result)."""
     notes: dict = {"cut": {}, "unbound": {}, "unsequenced": [], "functions": 0, "rounds": 0}
@@ -1061,7 +1072,7 @@ def check_group(entry_name, entry_path, claims, files, scopes, provider, parser,
     try:
         with _PY_LOCK:
             funcs, entry_member, unbound, cut, cnames, bound_scopes = _closure(entry_name, entry_path, files, scopes,
-                                                                               provider, parser)
+                                                                               provider, parser, originals)
         work = work_dir or tempfile.mkdtemp(prefix="oracle_world_")
         os.makedirs(work, exist_ok=True)
         final: dict[tuple, tuple[str, str]] = {}
@@ -1165,7 +1176,13 @@ def _read_claims(xlsm):
 
 
 def _project(source_root):
-    from generators.c_project_context import build_project_context, build_scopes, detect_build_config, shared_parser
+    from generators.c_project_context import (
+        build_project_context,
+        build_scopes,
+        detect_build_config,
+        projected_texts,
+        shared_parser,
+    )
     from generators.integration_oracle import CalleeProvider
     roots = [r.strip() for r in re.split(r"[,;]", source_root) if r.strip()]
     texts, unread = {}, []
@@ -1183,7 +1200,9 @@ def _project(source_root):
     units = [p for p in context["files"] if p.lower().endswith(".c") and p in texts]
     scopes = build_scopes(context, units)
     parser = shared_parser()
-    return texts, scopes, CalleeProvider(context, texts, scopes, parser), parser
+    # (R62) the texts the generator read — `integration_oracle.attach_integration_evidence` projects the same way
+    projected = projected_texts(scopes, texts)
+    return texts, projected, scopes, CalleeProvider(context, projected, scopes, parser), parser
 
 
 def _stable(message: str) -> str:
@@ -1209,7 +1228,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     t0 = time.time()
     grouped, unreadable = _read_claims(args.xlsm)
-    texts, scopes, provider, parser = _project(args.source_root)
+    texts, projected, scopes, provider, parser = _project(args.source_root)
     by_norm = {os.path.normcase(os.path.abspath(p)): p for p in scopes}   # the sheet's path as the OS names it (I8)
     by_entry: dict[tuple, list] = {}
     skipped = Counter(unreadable)
@@ -1218,7 +1237,8 @@ def main(argv=None) -> int:
         if real is None:
             skipped["source_missing"] += len(g["outputs"])
             continue
-        if g["source_hash"] and g["source_hash"] not in _text_hashes(texts[real]):
+        # (R62) a row's hash is of the text the generator read: as read, or with split #if groups projected
+        if g["source_hash"] and g["source_hash"] not in _text_hashes(texts[real]) | _text_hashes(projected[real]):
             skipped["source_changed"] += len(g["outputs"])
             continue
         by_entry.setdefault((real, entry), []).append({**g, "key": (tc, case)})
@@ -1232,8 +1252,9 @@ def main(argv=None) -> int:
         # one directory per group, never shared: names that differ only in case (``Init``/``init``) or share a long
         # prefix would otherwise compile each other's source (review R1 C1)
         folder = os.path.join(work, f"g{index:04d}_" + re.sub(r"\W", "_", entry)[:32])
-        return (path, entry), claims, check_group(entry, path, claims, texts, scopes, provider, parser, clang=args.clang,
-                                                  target=args.target, work_dir=folder, timeout=args.timeout)
+        return (path, entry), claims, check_group(entry, path, claims, projected, scopes, provider, parser,
+                                                  clang=args.clang, target=args.target, work_dir=folder,
+                                                  timeout=args.timeout, originals=texts)
 
     report = {"xlsm": args.xlsm, "source_root": args.source_root, "target": args.target, "fills": list(_FILLS),
               "claims": 0, "verdicts": Counter(), "unchecked_reasons": Counter(), "group_failures": Counter(),

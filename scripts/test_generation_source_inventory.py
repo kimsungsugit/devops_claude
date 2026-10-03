@@ -55,7 +55,7 @@ def _oracle_probe(unit: dict, fn, raw: bytes) -> dict:
 
 
 def inventory(source_root: Path, project_context: bool = True) -> dict:
-    from generators.c_project_context import build_project_context, build_scopes
+    from generators.c_project_context import apply_body_projection, build_project_context, build_scopes
     from generators.mcdc_design import build_mcdc_design
     from workflow.code_parser.c_parser import _make_parser
 
@@ -121,6 +121,8 @@ def inventory(source_root: Path, project_context: bool = True) -> dict:
                             "source_text_reason": "" if complete else "non_utf8_source"}
                     if str(path.resolve()) in scopes:
                         unit["project_scope"] = scopes[str(path.resolve())]
+                        # (R62) as the generator reads it: a function an #if splits mid-expression projected
+                        unit["source_text"] = apply_body_projection(unit["project_scope"], source)
                     report = build_mcdc_design(unit)
                     record = {"path": str(path.resolve()), "function": unit["name"],
                               "line": node.start_point[0] + 1, "design": report}

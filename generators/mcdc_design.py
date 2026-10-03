@@ -503,7 +503,8 @@ def _scoped_source_decisions(unit, scope, declared_domains):
                 matches.append(n)
             continue
         stack.extend(n.named_children)
-    states = scope.get("main_file_states") if scope.get("main_file_sha256") == digest else None
+    # (R62) a projected text keeps every byte position — the same states hold for it
+    states = scope.get("main_file_states") if cpc.scope_text_matches(scope, digest) else None
     if states is not None and matches:
         # Definitions the configuration does not compile (inactive ``#if`` arm) are not this function.
         compiled = [n for n in matches if _compile_state(n, states) is not None]
@@ -1848,8 +1849,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                           "max_candidates_scope": "per_component_and_combination"}}
     extra: dict[str, Any] = {}
     try:
-        scope_text_matches = bool(unit.get("project_scope")) and unit["project_scope"].get("main_file_sha256") == \
-            hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest()
+        scope_text_matches = bool(unit.get("project_scope")) and cpc.scope_text_matches(
+            unit["project_scope"], hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest())
         if unit.get("project_scope") and not scope_text_matches:
             # The scope describes another text of this file: none of its facts may be used (review I5).
             report["project_context_status"] = "source_text_mismatch"

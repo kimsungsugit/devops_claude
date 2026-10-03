@@ -717,6 +717,8 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
         unit = group[0]["unit"]
         n_outputs = sum(len(c["outputs"]) for c in group)
         raw = str(unit.get("source_text") or "").encode()
+        # (R62) same length as ``raw`` — the projected tree's positions index it
+        original = str(unit.get("source_text_original") or unit.get("source_text") or "").encode()
         verdict: dict[tuple, str] = {}
         detail: dict[tuple, str] = {}
         failure = ""
@@ -724,7 +726,7 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
         for bi, base in enumerate(_ENUM_BASES):
             try:
                 fn = _find_function(parser.parse(raw).root_node, raw, unit["name"], unit["project_scope"])
-                source, checks, reason, meta = _harness(unit, group, fn, raw, enum_base=base,
+                source, checks, reason, meta = _harness(unit, group, fn, original, enum_base=base,
                                                         instrument=group[0].get("instrument"))
             except Exception as exc:  # noqa: BLE001 — any harness failure is an unchecked unit, reported by name
                 source, checks, reason = None, {}, f"harness_exception:{type(exc).__name__}"
@@ -848,6 +850,11 @@ def _claims_from_xlsm(xlsm: str, source_root: str) -> tuple[list[dict], dict]:
     context["incomplete_files"] = unread
     paths = sorted({k[0] for k in grouped if k[0] in texts})
     scopes = build_scopes(context, paths)
+    # (R62) the generator reads a function an #if splits mid-expression projected (`apply_body_projection`): the unit is
+    #   that text (its hash is the row's), and the harness compiles the *original* body at the same positions — clang's
+    #   own preprocessor then decides the #if again, under the macros the harness defines from the unit's table
+    from generators.c_project_context import apply_body_projection
+    projected = {p: apply_body_projection(scopes[p], texts[p]) for p in paths}
     units: dict[tuple, dict] = {}
     claims = []
     skipped: dict[tuple, str] = {}
@@ -856,11 +863,11 @@ def _claims_from_xlsm(xlsm: str, source_root: str) -> tuple[list[dict], dict]:
             skipped[(path, fn, _tc, _seq)] = "source_missing"
             continue
         # (review R11 W4) the row was derived from the text its hash names: a changed file is not what it claims about
-        if g["source_hash"] and g["source_hash"] not in _text_hashes(texts[path]):
+        if g["source_hash"] and g["source_hash"] not in _text_hashes(texts[path]) | _text_hashes(projected[path]):
             skipped[(path, fn, _tc, _seq)] = "source_changed"
             continue
-        unit = units.setdefault((path, fn), {"name": fn, "source_text": texts[path], "source_path": path,
-                                             "project_scope": scopes[path]})
+        unit = units.setdefault((path, fn), {"name": fn, "source_text": projected[path], "source_path": path,
+                                             "source_text_original": texts[path], "project_scope": scopes[path]})
         claims.append({"unit": unit, "key": (path, fn, _tc, _seq), **g})
     meta = {"xlsm": xlsm, "source_root": source_root, "derived_sequences": len(grouped),
             "sequences_with_source": len(claims), "skipped_sequences": skipped,

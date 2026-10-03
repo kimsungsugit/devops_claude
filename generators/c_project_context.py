@@ -15,6 +15,7 @@ The result is JSON-serializable (it rides in the source-sections cache).
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import os
 import re
@@ -26,7 +27,7 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 16  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 19  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -53,6 +54,16 @@ SCHEMA_VERSION = 16  # 3: per-file `prototypes`; closure `macros` (tree union)
 #    (`pointee_types`). Paired with v43.
 # 16 (R40 review round 1): a struct pointee of a unit with preprocessing gaps keeps no layout (as a struct global —
 #    a member may sit under an #if the unit cannot decide) — a context cached by 15 lays it out. Paired with v44.
+# 17 (R62): per-file `body_directives` (#define / #undef / #include inside function bodies — those names vary in the unit,
+#    an in-body #include is a gap), and a file-level ``#  ifndef`` (blank after ``#``) read as ``#ifndef`` in `events` and
+#    the include guard (`_directive_keyword`) — a context cached by 16 lacks the first and read the second as ``#ifdef``.
+#    Paired with v45.
+# 18 (R62 review round 4): per-file `stray_directives` replaces `body_directives` — every #define / #undef / #include
+#    line the file-level walk does not read (bodies, unrecognized constructs, headers' inline functions), keyword read
+#    after splices and comments. Paired with v46.
+# 19 (R62 review round 5): facts read from `_parse_safe` text (a value-less ``#define NAME `` keeps its own line — the
+#    next line was its value), ``#  undef`` read as ``#undef``, `stray_directives` compare the directive kind per row
+#    and record the conditional lines met (`conditionals`). Paired with v47.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -358,6 +369,12 @@ def _defines_guard(node, guard, raw):
         and _text(node.child_by_field_name("name"), raw) == _text(guard, raw)
 
 
+def _directive_keyword(node, raw) -> str:
+    """``ifndef`` for ``#ifndef X`` and for ``#  ifndef X`` alike (C allows blanks after ``#``; R62)."""
+    m = re.match(r"\s*#\s*(\w+)", _text(node, raw))
+    return m.group(1) if m else ""
+
+
 def _guard_body(root, raw):
     """Children of a translation unit, looking through an include guard. Two forms are guards (their body is
     unconditional for the first inclusion, which is the one that defines anything):
@@ -372,7 +389,7 @@ def _guard_body(root, raw):
     inner = [c for c in items[0].named_children if c.type != "comment" and c != guard]
     if guard is None or not inner:
         return root.named_children
-    if _text(items[0], raw).lstrip().startswith("#ifndef"):
+    if _directive_keyword(items[0], raw) == "ifndef":   # ``#  ifndef`` too (R62 review I4)
         if _defines_guard(inner[0], guard, raw) and not any(
                 c.type in {"preproc_else", "preproc_elif", "preproc_elifdef"} for c in inner):
             return inner[1:]
@@ -431,15 +448,32 @@ def _declarators(decl):
             yield child
 
 
+_BARE_DEFINE_RE = re.compile(rb"(?m)^([ \t]*#[ \t]*define[ \t]+[A-Za-z_]\w*(?:\([^)\n]*\))?)([ \t]+)(\r?\n)")
+
+
+def _parse_safe(raw: bytes) -> bytes:
+    """``raw`` with each value-less ``#define NAME`` + trailing blanks written as ``#define NAME`` + newline + those
+    blanks at the start of the next line — same length, the same bytes everywhere else. tree-sitter-c reads the blanks
+    as extras and then takes the *next line* as the macro's value (KJPDS02_PV / HDPDM01 ``lin_cfg.h``:
+    ``#define _LIN_CFG_H_ `` swallowed ``#include "lin_hw_cfg.h"``, so the walk included that header late — R62 review
+    round 5 C-4)."""
+    return _BARE_DEFINE_RE.sub(rb"\1\3\2", raw)
+
+
 def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
-    raw = text.encode("utf-8")
+    raw = _parse_safe(text.encode("utf-8"))
     root = parser.parse(raw).root_node
     rec: dict[str, Any] = {"path": path, "includes": [], "system_includes": [], "typedefs": {}, "macros": {}, "undefs": [],
                            "enums": {}, "enumerators": {}, "globals": {}, "functions": {}, "parse_error": root.has_error,
                            "structs": {},   # (R39) struct/union bodies by key and typedef name (`_collect_struct`)
-                           "sha256": hashlib.sha256(raw).hexdigest(), "events": _events(root.named_children, raw),
+                           "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                           "events": _events(root.named_children, raw),
                            # (R17) identifiers of #if/#ifdef/#elif inside function bodies (pp_condition decides them)
                            "body_condition_names": _body_condition_names(root, raw),
+                           # (R62 review rounds 2-4) #define / #undef / #include lines the file-level walk (`_events`)
+                           # never sees — in function bodies, in constructs the parser did not recognize — yet the
+                           # compiler applies them where they stand
+                           "stray_directives": _stray_directives(root, raw),
                            # ``&x`` anywhere in the file — file-scope initializers (``{&g_cnt}``) included (review C3d).
                            "address_taken": sorted(_address_taken(root, raw))}
     for node, conditional in _items(_guard_body(root, raw), raw):
@@ -459,7 +493,7 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
                 entry["params"] = ([_text(c, raw) for c in plist.children if c.type in {"identifier", "..."}]
                                    if plist is not None else [])
             rec["macros"].setdefault(name, []).append(entry)
-        elif node.type == "preproc_call" and _text(node.child_by_field_name("directive"), raw).strip() == "#undef":
+        elif node.type == "preproc_call" and _call_keyword(node, raw) == "undef":
             arg = node.child_by_field_name("argument")
             if arg is not None:
                 rec["undefs"].append(_text(arg, raw).strip())
@@ -584,6 +618,171 @@ def _body_condition_names(root, raw) -> list[str]:
     return sorted(names)
 
 
+def _call_keyword(node, raw) -> str:
+    """The keyword of a ``preproc_call`` (``undef`` for ``#undef`` and ``#  undef`` alike)."""
+    return "".join(_text(node.child_by_field_name("directive"), raw).split()).lstrip("#")
+
+
+def _event_directive_lines(nodes, raw, out: dict[int, str] | None = None) -> dict[int, str]:
+    """Row → keyword of each directive `_events` reads (the same traversal: top level, #if arms, recovery
+    containers). A row the lexer reads as another directive (``#un\\<NL>def``) is not one the walk read."""
+    out = {} if out is None else out
+    for n in nodes:
+        t = n.type
+        if t == "preproc_include":
+            out[n.start_point[0]] = "include"
+        elif t in ("preproc_def", "preproc_function_def"):
+            out[n.start_point[0]] = "define"
+        elif t == "preproc_call":
+            out[n.start_point[0]] = _call_keyword(n, raw)
+        elif t in _IF_NODES:
+            out[n.start_point[0]] = "if"
+            cond, name, alt = n.child_by_field_name("condition"), n.child_by_field_name("name"), n.child_by_field_name("alternative")
+            _event_directive_lines([c for c in n.named_children if c not in (cond, name, alt)], raw, out)
+            if alt is not None:
+                _event_directive_lines(alt.named_children if alt.type == "preproc_else" else [alt], raw, out)
+        elif t in ("ERROR", "compound_statement"):
+            _event_directive_lines(n.named_children, raw, out)
+    return out
+
+
+def _stray_directives(root, raw) -> dict[str, Any]:
+    """``#define`` / ``#undef`` / ``#include`` lines of the file that the file-level walk does not read (`_events`):
+    inside a function body, a construct the parser did not recognize (an ``#else`` arm repeating an ``if (`` head), a
+    header's inline function. ``{"directives": [{"op", "name", "pos", "fn", "conditionals"}]}`` — ``fn`` is the start
+    of the function definition it sits in (-1: none), ``conditionals`` the conditional directive lines of the file
+    before it. A define / undef with no readable name is ``op: "unreadable"`` — never "nothing there"."""
+    lines = _directive_lines(raw, 0, len(raw))
+    seen = _event_directive_lines(root.named_children, raw)
+    newlines = [m.start() for m in re.finditer(rb"\n", raw)]
+    functions = sorted((n.start_byte, n.end_byte) for n in _walk(root) if n.type == "function_definition")
+    starts = [a for a, _b in functions]
+    out: list[dict[str, Any]] = []
+    conditionals = 0   # (round 5 F-D) conditional directive lines met so far: a local macro has none between
+    for start, _end, keyword, argument in lines:
+        if keyword in _GROUP_DIRECTIVES:
+            conditionals += 1
+            continue
+        if keyword not in ("define", "undef", "include"):
+            continue
+        hash_pos = raw.index(b"#", start)
+        if seen.get(bisect.bisect_left(newlines, hash_pos)) == keyword:
+            continue
+        k = bisect.bisect_right(starts, hash_pos) - 1
+        fn = functions[k][0] if k >= 0 and hash_pos < functions[k][1] else -1
+        rec = {"pos": hash_pos, "fn": fn, "conditionals": conditionals}
+        if keyword == "include":
+            out.append({"op": "include", "name": argument.strip().strip('"<>'), **rec})
+            continue
+        m = re.match(r"([A-Za-z_]\w*)", argument)
+        out.append({"op": keyword if m else "unreadable", "name": m.group(1) if m else "", **rec})
+    return {"directives": out}
+
+
+def _effective_strays(strays: list[dict[str, Any]], defined: set[str], states: dict,
+                      declared: dict[str, set[int]]) -> list[dict[str, Any]]:
+    """The stray directives that change the unit's table. Left out: those in a function this configuration does not
+    compile (a declaration event with no state — review round 3 I-3), and a local macro — a function body that defines
+    a name the project defines nowhere else and #undefs it again before its end (KJPDS02_PV ``linuds.c``
+    ``LINUDS_ECU_RESET_RESPONSE_DLC``): the table after the function is the one before it."""
+    kept = [d for d in strays if not (d["fn"] >= 0 and d["fn"] in declared.get(d["file"], set())
+                                       and states.get((d["file"], d["fn"])) is None)]
+    by_fn: dict[tuple, list[dict[str, Any]]] = {}
+    for d in kept:
+        if d["fn"] >= 0:
+            by_fn.setdefault((d["file"], d["fn"]), []).append(d)
+    local: set[tuple] = set()
+    for key, ds in by_fn.items():
+        ds = sorted(ds, key=lambda x: x["pos"])
+        for name in {d["name"] for d in ds if d["op"] in ("define", "undef") and d["name"]}:
+            mine = [d for d in ds if d.get("name") == name and d["op"] in ("define", "undef")]
+            # (round 5 F-D) an #undef under an in-body #if may not run: no conditional line between the two
+            if mine[0]["op"] == "define" and mine[-1]["op"] == "undef" and name not in defined \
+                    and mine[0].get("conditionals") == mine[-1].get("conditionals"):
+                local.add((key, name))
+    return [d for d in kept if not (d["fn"] >= 0 and ((d["file"], d["fn"]), d.get("name")) in local)]
+
+
+def _file_if_on(files: dict[str, Any], unit_files: list[str], names: set[str], bodies: dict) -> str:
+    """The first name of ``names`` a file-level #if of the unit's files tests — directly or through any definition's
+    body (an alias ``#define ALIAS M_X``), else "". The walk chose that #if without the name: what it defined, which
+    declarations it kept (`main_file_states`) and what stood under it may all be wrong (R62 review round 5 F-A)."""
+    if not names:
+        return ""
+    by_name: dict[str, list[str]] = {}
+    for d in bodies.values():
+        by_name.setdefault(d.get("name") or "", []).append(str(d.get("body") or ""))
+    for f in unit_files:
+        stack = list((files.get(f) or {}).get("events") or [])
+        while stack:
+            ev = stack.pop()
+            if ev["op"] != "if":
+                continue
+            stack.extend(ev["then"])
+            stack.extend(ev["else"])
+            seen: set[str] = set()
+            pending = [ev.get("defined") or ""] + re.findall(r"[A-Za-z_]\w*", str(ev.get("expr") or ""))
+            while pending and len(seen) < 4096:
+                n = pending.pop()
+                if n in seen:
+                    continue
+                seen.add(n)
+                if n in names:
+                    return n
+                for body in by_name.get(n, ()):
+                    pending.extend(re.findall(r"[A-Za-z_]\w*", body))
+    return ""
+
+
+def _declared_positions(rec: dict[str, Any]) -> set[int]:
+    """Positions of every declaration event of a file, in any #if arm."""
+    declared: set[int] = set()
+    stack = list(rec.get("events") or [])
+    while stack:
+        ev = stack.pop()
+        if ev["op"] == "decl":
+            declared.add(int(ev["pos"]))
+        elif ev["op"] == "if":
+            stack.extend(ev["then"])
+            stack.extend(ev["else"])
+    return declared
+
+
+def _names_a_file_changes(files: dict[str, Any], context: dict[str, Any], path: str) -> tuple[set[str], bool]:
+    """Every name ``path`` (and what it includes, transitively) #defines or #undefines, in any arm or function body —
+    and whether that walk was complete (a cap of 512 files, an include it could not resolve: review round 4 I-1)."""
+    names: set[str] = set()
+    seen: set[str] = set()
+    pending = [path]
+    complete = True
+    while pending:
+        if len(seen) >= 512:
+            return names, False
+        p = pending.pop()
+        if p in seen or p not in files:
+            continue
+        seen.add(p)
+        stack = list(files[p].get("events") or [])
+        while stack:
+            ev = stack.pop()
+            if ev["op"] in ("define", "undef"):
+                names.add(ev["name"])
+            elif ev["op"] == "if":
+                stack.extend(ev["then"])
+                stack.extend(ev["else"])
+            elif ev["op"] == "include" and not ev.get("system"):
+                found = _resolve_include(context, p, ev["name"])
+                if found:
+                    pending.append(found)
+                elif not _toolchain_header(context, ev["name"]):
+                    complete = False
+        stray = files[p].get("stray_directives") or {}
+        names |= {d["name"] for d in stray.get("directives") or () if d.get("name") and d["op"] != "include"}
+        if any(d["op"] in ("include", "unreadable") for d in stray.get("directives") or ()):
+            complete = False
+    return names, complete
+
+
 def _address_taken(root, raw):
     names = set()
     for n in _walk(root):
@@ -673,8 +872,11 @@ def undecided_macro_view(scope: dict[str, Any], name: str) -> dict[str, Any] | N
     text hides what it does, itself or through a macro it mentions (`macro_body_opaque`, `_macro_closure`), or a word
     read as a cast that is not an unconditional typedef of this unit (``scope["typedef_names"]``). One judgment for the source oracle and the MC/DC design (review R35 round 1 W3). Headers outside the
     tree (``<...>``, toolchain) are not read: the scope's disclosed assumption that they define no project name. A
-    ``#define`` inside a function body is in neither the union nor the unit's macro table (a gap older than R35)."""
+    ``#define`` inside a function body is in neither the union nor the unit's macro table: since R62 such a name is
+    "varied" in the unit, and its view is None (the union of the file-level definitions is not the whole story)."""
     effects = scope.get("effects") or {}
+    if name in set(scope.get("body_directive_names") or ()) or scope.get("body_table_unknown"):
+        return None
     if name not in (effects.get("macros") or {}) or scope.get("missing_includes") \
             or name in ((scope.get("build_defines") or {}).get("defines") or {}):
         return None
@@ -1186,7 +1388,7 @@ def _events(nodes, raw):
         elif t in {"preproc_def", "preproc_function_def"}:
             out.append({"op": "define", "name": _text(n.child_by_field_name("name"), raw), "pos": n.start_byte})
         elif t == "preproc_call":
-            directive = _text(n.child_by_field_name("directive"), raw).strip()
+            directive = "#" + _call_keyword(n, raw)   # ``#  undef`` too (R62 review round 5 C-2)
             arg = n.child_by_field_name("argument")
             if directive == "#undef" and arg is not None:
                 out.append({"op": "undef", "name": _text(arg, raw).strip()})
@@ -1207,9 +1409,9 @@ def _if_event(n, raw):
     body = [c for c in n.named_children if c != cond and c != name and c != alt]
     ev: dict[str, Any] = {"op": "if", "then": _events(body, raw), "else": [], "line": n.start_point[0] + 1}
     if n.type in {"preproc_ifdef", "preproc_elifdef"}:
-        head = _text(n, raw).lstrip()
+        # (R62) the directive's own spelling — ``#  ifndef`` too (``startswith("#ifndef")`` read it as ``#ifdef``)
         ev["defined"] = _text(name, raw) if name is not None else ""
-        ev["negate"] = head.startswith("#ifndef") or head.startswith("#elifndef")
+        ev["negate"] = _directive_keyword(n, raw) in ("ifndef", "elifndef")
     else:
         ev["expr"] = strip_comments(_text(cond, raw)) if cond is not None else ""
     if alt is not None:
@@ -1380,30 +1582,495 @@ def shared_parser():
     return parser
 
 
-def pp_condition(scope: dict[str, Any], node, raw: bytes, assumed: set | None = None) -> bool | None:
-    """Verdict of an ``#if``/``#ifdef``/``#elif`` node inside a function of this unit (None = undecided).
+def macro_changed_after(scope: dict[str, Any], name: str, position: int) -> bool:
+    """Is ``name`` #defined or #undefined after ``position`` of the unit's own text — in that text, or in a header it
+    includes there (R62 review W1)? At ``position`` the compiler has not met that change; the end-of-unit table has.
+    Only real changes count (`_changes_table`): the same definition met again after the function is the one it saw —
+    the final definition's position alone (``pp_bodies``) would say "after" for it (review round 2 W-A)."""
+    return int((scope.get("pp_changed_at") or {}).get(name, -1)) >= position
 
-    The table is the one at the end of the unit, so a macro whose value changed during the unit decides
-    nothing here (R81 review W1 — the function may sit before or after the change).
+
+def _defined_after(scope: dict[str, Any], text: str, position: int | None) -> bool:
+    """(R62) Does ``text`` rest — directly or through a macro body — on a macro the unit changes only after ``position``
+    (the function; `macro_changed_after`)? The end-of-unit table has it; the compiler has not seen it there yet.
+    Memoized per scope; a name set too large to follow counts as resting on one (fail closed)."""
+    if position is None:
+        return False
+    memo = scope.setdefault("_defined_after_memo", {})
+    key = (text, position)
+    if key in memo:
+        return memo[key]
+    bodies = scope.get("pp_bodies") or {}
+    seen: set[str] = set()
+    pending = re.findall(r"\b[A-Za-z_]\w*\b", text)
+    found = False
+    while pending:
+        if len(seen) >= 4096:
+            found = True   # (review I1) not followed to the end: undecided, never "nothing changed"
+            break
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if macro_changed_after(scope, name, position):
+            found = True
+            break
+        d = bodies.get(name)
+        if d:
+            pending.extend(re.findall(r"\b[A-Za-z_]\w*\b", str(d.get("body") or "")))
+    memo[key] = found
+    return found
+
+
+def _rests_on_missed(scope: dict[str, Any], text: str) -> bool:
+    """(R62 review round 4) Does ``text`` name — directly or through a macro body — a name the walk never met though a
+    file of the unit #defines it (`missed_definition_names`)? Memoized per scope."""
+    missed = scope.get("missed_definition_names")
+    if not missed:
+        return False
+    memo = scope.setdefault("_missed_memo", {})
+    if text in memo:
+        return memo[text]
+    missed_set = scope.setdefault("_missed_set", set(missed))
+    bodies = scope.get("pp_bodies") or {}
+    seen: set[str] = set()
+    pending = re.findall(r"\b[A-Za-z_]\w*\b", text)
+    found = False
+    while pending:
+        if len(seen) >= 4096:
+            found = True
+            break
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in missed_set:
+            found = True
+            break
+        d = bodies.get(name)
+        if d:
+            pending.extend(re.findall(r"\b[A-Za-z_]\w*\b", str(d.get("body") or "")))
+    memo[text] = found
+    return found
+
+
+def body_verdict(scope: dict[str, Any], keyword: str, argument: str, assumed: set | None = None,
+                 position: int | None = None) -> bool | None:
+    """Verdict of a conditional directive inside a function of this unit — ``keyword`` is ``if`` / ``ifdef`` /
+    ``ifndef`` / ``elif`` / ``elifdef`` / ``elifndef``, ``argument`` its text — or None (undecided).
+
+    The table is the one at the end of the unit, so a macro whose value changed during the unit decides nothing here
+    (R81 review W1 — the function may sit before or after the change), nor does one the unit's file defines only after
+    ``position`` (R62). Names taken as undefined on build evidence go to ``assumed`` (R17 review W1).
     """
     parser = shared_parser()
-    if parser is None:
+    if parser is None or scope.get("body_table_unknown"):
+        return None   # (round 3) a body directive could not be read / an in-body include could not be resolved
+    text = strip_comments(argument).strip()
+    if _defined_after(scope, text, position) or _rests_on_missed(scope, text):
         return None
-    name, cond = node.child_by_field_name("name"), node.child_by_field_name("condition")
-    if node.type in {"preproc_ifdef", "preproc_elifdef"}:
-        head = _text(node, raw).lstrip()
-        ev = {"defined": _text(name, raw) if name is not None else "",
-              "negate": head.startswith("#ifndef") or head.startswith("#elifndef")}
+    if keyword in ("ifdef", "ifndef", "elifdef", "elifndef"):
+        m = re.match(r"[A-Za-z_]\w*", text)
+        if m is None:
+            return None
+        ev: dict[str, Any] = {"defined": m.group(0), "negate": keyword in ("ifndef", "elifndef")}
+    elif keyword in ("if", "elif"):
+        ev = {"expr": text}
     else:
-        ev = {"expr": strip_comments(_text(cond, raw)) if cond is not None else ""}
+        return None
     env = {"macros": scope.get("pp_macros") or {}, "bodies": scope.get("pp_bodies") or {}, "parser": parser,
-           "defined_anywhere": scope.get("pp_defined_anywhere") or set(), "gap": bool(scope.get("missing_includes")),
+           "defined_anywhere": scope.get("pp_defined_anywhere") or set(),
+           # an #include inside a function body (review round 2 W-B) may define any name, as a missing header may
+           "gap": bool(scope.get("missing_includes")) or bool(scope.get("body_includes")),
            "varied": set(scope.get("pp_varied") or ()),
-           # (R17 review W1) the unit's build evidence decides a name inside a function body as it does at file scope;
-           # names taken as undefined here go to ``assumed`` (the caller's record of what its values rest on)
            "build_defines_complete": bool((scope.get("build_defines") or {}).get("complete")),
            "assumed_undefined": assumed if assumed is not None else set()}
     return _pp_condition(ev, env)
+
+
+def pp_condition(scope: dict[str, Any], node, raw: bytes, assumed: set | None = None) -> bool | None:
+    """Verdict of an ``#if``/``#ifdef``/``#elif`` node inside a function of this unit (None = undecided) — see
+    `body_verdict`. The directive's own spelling says ``ifdef`` or ``ifndef`` (``#  ifndef`` too, R62)."""
+    name, cond = node.child_by_field_name("name"), node.child_by_field_name("condition")
+    if node.type in {"preproc_ifdef", "preproc_elifdef"}:
+        keyword = _directive_keyword(node, raw)
+        argument = _text(name, raw) if name is not None else ""
+    else:
+        keyword = "elif" if node.type == "preproc_elif" else "if"
+        argument = _text(cond, raw) if cond is not None else ""
+    fn = node.parent
+    while fn is not None and fn.type != "function_definition":
+        fn = fn.parent
+    return body_verdict(scope, keyword, argument, assumed, fn.start_byte if fn is not None else None)
+
+
+# ── (R62) Conditional groups that split an expression inside a function ──────────────────────────────
+
+_GROUP_DIRECTIVES = frozenset({"if", "ifdef", "ifndef", "elif", "elifdef", "elifndef", "else", "endif"})
+
+
+def _directive_lines(raw: bytes, start: int, end: int) -> list[tuple[int, int, str, str]]:
+    """Preprocessor directive lines in ``raw[start:end]`` outside comments and literals: ``(line_start, line_end,
+    keyword, argument)``, ``line_end`` being the newline that ends the logical line (a backslash-newline continues it;
+    a block comment is one blank, so a directive line running into a comment that spans lines goes on after it)."""
+    out: list[tuple[int, int, str, str]] = []
+    i, state, only_space, line_start = start, "code", True, start
+    head: int | None = None
+    hash_at = start
+    while i < end:
+        c = raw[i:i + 1]
+        if c == b"\\" and raw[i + 1:i + 2] == b"\n":
+            i += 2
+            continue
+        if c == b"\\" and raw[i + 1:i + 3] == b"\r\n":
+            i += 3
+            continue
+        if state == "block":
+            # a comment is one blank (translation phase 3): a directive line running into a comment that spans lines
+            # goes on after it (R62 review round 5 W-1 — it was "unreadable", stopping every unit including the file)
+            if raw[i:i + 2] == b"*/":
+                state, i = "code", i + 2
+                continue
+            i += 1
+            continue
+        if state in ("string", "char"):
+            if c == b"\\":
+                i += 2
+                continue
+            if c == b"\n":
+                state = "code"   # an unterminated literal ends with its line; the newline is handled below
+                continue
+            if c == (b'"' if state == "string" else b"'"):
+                state = "code"
+            i += 1
+            continue
+        if c == b"\n":
+            if head is not None:
+                out.append((head, i, *_directive_head(raw[hash_at + 1:i])))
+            state, only_space, line_start, head = "code", True, i + 1, None
+            i += 1
+            continue
+        if state == "line":
+            i += 1
+            continue
+        if raw[i:i + 2] == b"/*":
+            state, i = "block", i + 2
+            continue
+        if raw[i:i + 2] == b"//":
+            state, i = "line", i + 2
+            continue
+        if c in (b" ", b"\t", b"\r", b"\f", b"\v"):
+            i += 1
+            continue
+        if c == b"#" and only_space and head is None:
+            # the keyword is read at the line's end, after splices and comments (``#/**/undef``, ``#un\<NL>def`` —
+            # translation phases 2-3; R62 review round 4 W-3)
+            head, hash_at, only_space = line_start, i, False
+            i += 1
+            continue
+        only_space = False
+        if c == b'"':
+            state = "string"
+        elif c == b"'":
+            state = "char"
+        i += 1
+    if head is not None:
+        out.append((head, end, *_directive_head(raw[hash_at + 1:end])))
+    return out
+
+
+def _directive_head(rest: bytes) -> tuple[str, str]:
+    """``(keyword, argument)`` of a directive line after its ``#``: splices removed, comments as spaces."""
+    text = strip_comments(_spliced(rest))
+    m = re.match(r"([A-Za-z_]\w*)\s*(.*)", text, re.S)
+    return (m.group(1), m.group(2)) if m else ("", text)
+
+
+def _spliced(argument: bytes) -> str:
+    """A directive's argument with its line splices removed (translation phase 2 joins the lines without a space)."""
+    return argument.replace(b"\\\r\n", b"").replace(b"\\\n", b"").decode("utf-8", errors="replace")
+
+
+def _group_blanks(raw: bytes, start: int, end: int, verdict) -> tuple[list[tuple[int, int]] | None, str, int]:
+    """Byte ranges to blank so that only the arms this configuration compiles stay in ``raw[start:end]``: every
+    conditional directive line, and every group whose condition is false (C11 6.10.1p6). An arm inside a skipped group
+    is never judged — the compiler does not evaluate it either. ``(ranges, "", decided)`` or ``(None, reason, 0)``;
+    ``verdict(keyword, argument)`` is True / False / None (undecided)."""
+    lines = _directive_lines(raw, start, end)
+    if any(x[2] in ("define", "undef", "include") for x in lines):
+        # (R62 review W2) the table changes inside the function: the end-of-unit table is not the one these groups see
+        return None, "macro_table_changed_in_function", 0
+    lines = [x for x in lines if x[2] in _GROUP_DIRECTIVES]
+    if not lines:
+        return None, "no_conditional_directive", 0
+    blanks: list[tuple[int, int]] = []
+    stack: list[dict[str, bool]] = []
+    active, after, decided = True, start, 0
+    for line_start, line_end, keyword, argument in lines:
+        if not active:
+            blanks.append((after, line_start))
+        blanks.append((line_start, line_end))
+        after = line_end
+        if keyword in ("if", "ifdef", "ifndef"):
+            stack.append({"outer": active, "taken": False})
+        elif not stack:
+            return None, "unbalanced", 0
+        top = stack[-1]
+        if keyword in ("if", "ifdef", "ifndef", "elif", "elifdef", "elifndef"):
+            if keyword.startswith("el") and (not top["outer"] or top["taken"]):
+                active = False
+                continue
+            if not top["outer"]:
+                active = False
+                continue
+            v = verdict(keyword, argument)
+            if v is None:
+                return None, "undecided:" + " ".join(argument.split()), 0
+            decided += 1
+            active = top["taken"] = bool(v)
+        elif keyword == "else":
+            active = top["outer"] and not top["taken"]
+            top["taken"] = True
+        else:  # endif
+            active = stack.pop()["outer"]
+    if stack:
+        return None, "unbalanced", 0
+    return blanks, "", decided
+
+
+def _blanked(raw: bytes, ranges) -> bytes:
+    buf = bytearray(raw)
+    for a, b in ranges:
+        for k in range(a, b):
+            if buf[k] not in (0x0A, 0x0D):
+                buf[k] = 0x20
+    return bytes(buf)
+
+
+def _tree_has_error(node) -> bool:
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == "ERROR" or n.is_missing:
+            return True
+        stack.extend(n.children)
+    return False
+
+
+def _function_nodes(root, raw) -> dict[tuple[int, str], Any]:
+    """Every function definition the tree shows — through parse-recovery containers, as `mcdc_design` finds them."""
+    out, stack = {}, [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "function_definition":
+            out[(n.start_byte, _function_name(n, raw)[0])] = n
+            continue
+        stack.extend(n.named_children)
+    return out
+
+
+def project_body_conditionals(text: str, scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """(R62) ``text`` as the compiler reads each function that an ``#if`` splits mid-expression.
+
+    tree-sitter reads a conditional directive only between statements; one inside an expression, an initializer or an
+    ``if`` head (``if( a == 1 ⏎ #ifdef X ⏎ && b == 0 ⏎ #endif ⏎ )``, an ``#else`` arm that repeats the ``if (`` head)
+    leaves an error in the function and the whole function was unread (`source_parse_error`). For each function of
+    this configuration ("active" in ``main_file_states``) whose tree has an error, every conditional directive line and
+    every group the unit's macro table judges false become blanks — same length, newlines kept, so byte positions and
+    line numbers stay — and the file is parsed again. A function is projected only when every condition it meets in a
+    compiled arm is decided (`body_verdict`), the re-parsed function has no error at the same position, and no other
+    function of the file moves, appears or disappears. Returns the text to read and the report
+    ``{"functions": [{"name", "line", "status", "conditions", "assumed_undefined"}], "projected": n}`` — ``status``
+    ``projected`` or why not.
+    """
+    report: dict[str, Any] = {"functions": [], "projected": 0}
+    parser = shared_parser()
+    if parser is None or not text:
+        return text, report
+    raw = text.encode()
+    if scope.get("main_file_sha256") != hashlib.sha256(raw).hexdigest():
+        return text, report
+    root = parser.parse(raw).root_node
+    if not root.has_error:
+        return text, report
+    states = scope.get("main_file_states") or {}
+    before = _function_nodes(root, raw)
+    shape = {key: _tree_has_error(n) for key, n in before.items()}
+    accepted: list[tuple[tuple[int, str], dict[str, Any], list[tuple[int, int]]]] = []
+    for key, fn in sorted(before.items()):
+        state = states.get(key[0])
+        if not shape[key] or state is None:
+            continue   # no error, or not compiled in this configuration (no function of the document)
+        rec: dict[str, Any] = {"name": key[1], "line": fn.start_point[0] + 1, "start": key[0], "conditions": 0,
+                               "assumed_undefined": []}
+        report["functions"].append(rec)
+        if state != "active":
+            # (review W5b) whether the configuration compiles it at all is undecided: counted, never projected
+            rec["status"] = "conditional_compilation_unresolved"
+            continue
+        assumed: set[str] = set()
+        ranges, why, decided = _group_blanks(
+            raw, fn.start_byte, fn.end_byte, lambda k, a, _s=key[0]: body_verdict(scope, k, a, assumed, _s))
+        if ranges is None:
+            rec["status"] = _undecided_kind(scope, why, key[0])[:200]   # classified on the whole condition
+            continue
+        rec.update(conditions=decided, assumed_undefined=sorted(assumed))
+        rec["status"] = _projection_check(parser, _blanked(raw, ranges), shape, key)
+        if rec["status"] == "projected":
+            accepted.append((key, rec, ranges))
+    while accepted:
+        new = _blanked(raw, [r for _key, _rec, ranges in accepted for r in ranges])
+        failed = [rec for key, rec, _r in accepted if _projection_check(parser, new, shape, key) != "projected"]
+        if not failed:
+            report["projected"] = len(accepted)
+            return new.decode("utf-8"), report
+        for rec in failed:   # projections that disturb each other: the rest are tried together again
+            rec["status"] = "conflicts_with_another_projection"
+        accepted = [x for x in accepted if x[1] not in failed]
+    return text, report
+
+
+def _undecided_kind(scope: dict[str, Any], why: str, position: int | None = None) -> str:
+    """(review W5d · round 2 W-C) Why an ``undecided:`` condition is undecided, as far as filling an input can help:
+    ``undecided_defined_after:`` (a macro the unit changes only after the function — `macro_changed_after`),
+    ``undecided_varied:`` (its value changes inside the unit), ``undecided_reserved:`` (a name the implementation may
+    define and the tree does not — no project file or -D settles it); plain ``undecided:`` otherwise (a name defined
+    nowhere, or under an undecided #if: a definition or -D settles it). Other reasons as they are."""
+    if not why.startswith("undecided:"):
+        return why
+    condition = why.split(":", 1)[1]
+    if scope.get("body_table_unknown"):
+        # (round 3) an unreadable body directive / unresolved in-body include stopped every body verdict of the unit
+        return "body_table_unknown:" + ",".join(scope["body_table_unknown"])[:120]
+    if _rests_on_missed(scope, condition):
+        return "undecided_missed_definition:" + condition
+    if position is not None and _defined_after(scope, condition, position):
+        return "undecided_defined_after:" + condition
+    names = set(re.findall(r"[A-Za-z_]\w*", condition)) - {"defined"}
+    if names & set(scope.get("pp_varied") or ()):
+        return "undecided_varied:" + condition
+    defined = scope.get("pp_defined_anywhere") or set()
+    if any(_implementation_may_define(n) and n not in defined for n in names):
+        return "undecided_reserved:" + condition
+    return why
+
+
+def _projection_check(parser, new: bytes, shape: dict[tuple[int, str], bool], key: tuple[int, str]) -> str:
+    """``projected`` when ``key``'s function parses without an error in ``new`` and every other function stays where it
+    was with no new error; else why not."""
+    after = _function_nodes(parser.parse(new).root_node, new)
+    if set(after) != set(shape):
+        return "function_set_changed"
+    if _tree_has_error(after[key]):
+        return "still_error"
+    if any(_tree_has_error(n) and not shape[k] for k, n in after.items() if k != key):
+        return "error_moved_to_another_function"
+    return "projected"
+
+
+def apply_body_projection(scope: dict[str, Any] | None, text: str) -> str:
+    """(R62) The text a unit's consumers read: `project_body_conditionals` of ``text``, recorded in the scope —
+    ``body_projection`` (the report), ``projected_sha256`` (so `scope_text_matches` accepts the projected text) and the
+    names projected arms took as undefined (``assumed_undefined_body``, and per function ``assumed_at`` by start byte for
+    the oracle's run record). Unchanged text when nothing was projected or the scope is of another text."""
+    if not scope or not text:
+        return text
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    if digest == scope.get("projected_sha256"):
+        return text
+    if digest != scope.get("main_file_sha256"):
+        return text
+    try:
+        new, report = project_body_conditionals(text, scope)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError, RecursionError, UnicodeError) as exc:
+        # (review I6) a defect here leaves this file as it was read — counted, never stopping the document
+        scope["body_projection"] = {"functions": [], "projected": 0, "error": f"projection_exception:{type(exc).__name__}"}
+        return text
+    scope["body_projection"] = report
+    if new == text:
+        return text
+    scope["projected_sha256"] = hashlib.sha256(new.encode()).hexdigest()
+    assumed_at: dict[int, list[str]] = {}
+    names: set[str] = set(scope.get("assumed_undefined_body") or ())
+    for rec in report["functions"]:
+        if rec["status"] == "projected" and rec["assumed_undefined"]:
+            assumed_at[rec["start"]] = list(rec["assumed_undefined"])   # positions are kept by the projection
+            names |= set(rec["assumed_undefined"])
+    report["assumed_at"] = assumed_at
+    scope["assumed_undefined_body"] = sorted(names)
+    return new
+
+
+def projected_texts(scopes: dict[str, dict[str, Any]], texts: dict[str, str]) -> dict[str, str]:
+    """(R62 review W3) A new map: ``texts`` with each scoped unit as the generators read it (`apply_body_projection`).
+    Every tool that builds scopes from texts and then reads or hashes a unit's text goes through this — a tool on the
+    raw text sees the projected functions as ``source_parse_error`` and a generated row's hash as "changed"."""
+    return {**texts, **{p: apply_body_projection(s, texts[p]) for p, s in scopes.items() if p in texts}}
+
+
+def scope_text_matches(scope: dict[str, Any] | None, digest: str) -> bool:
+    """Is ``digest`` the scope's own text — as read, or as `apply_body_projection` projected it?"""
+    return bool(scope) and bool(digest) and digest in {scope.get("main_file_sha256"), scope.get("projected_sha256")}
+
+
+def projected_assumptions(scope: dict[str, Any] | None, start: int) -> set[str]:
+    """(R62) Names a projected arm of the function at ``start`` took as undefined (`apply_body_projection`)."""
+    return set((((scope or {}).get("body_projection") or {}).get("assumed_at") or {}).get(start) or ())
+
+
+def summarize_body_projection(scopes, only: set | None = None) -> dict[str, Any]:
+    """(R62) The scopes' `body_projection` reports, totalled for a generator's summary: what was projected, and every
+    compiled function whose tree still has an error, by reason — a parse failure is counted, never dropped.
+
+    ``functions_with_tree_error`` counts the functions whose tree had an error and that the configuration compiles or
+    may compile (projected ones included). ``only`` — ``{(scope path, function name)}`` of the functions the document
+    has rows for (SUTS units): the others go to ``outside_document`` only (review W5a). ``not_projected_functions``
+    lists at most 40 (``not_projected_total`` says how many)."""
+    out: dict[str, Any] = {"files_projected": 0, "functions_with_tree_error": 0, "functions_projected": 0,
+                           "conditions_decided": 0, "not_projected": {}, "projected_functions": [],
+                           "not_projected_functions": [], "not_projected_total": 0, "assumed_undefined": [],
+                           "outside_document": {"projected": 0, "not_projected": 0}, "projection_errors": 0,
+                           "units_table_unknown": 0, "table_unknown_reasons": [],
+                           "units_with_missed_definitions": 0, "missed_definitions": 0}
+    assumed: set[str] = set()
+    unknown_reasons: set[str] = set()
+    for scope in scopes:
+        if (scope or {}).get("body_table_unknown"):
+            out["units_table_unknown"] += 1
+            unknown_reasons.update(scope["body_table_unknown"])
+        if (scope or {}).get("missed_definition_names"):
+            out["units_with_missed_definitions"] += 1
+            out["missed_definitions"] = max(out["missed_definitions"], len(scope["missed_definition_names"]))
+        report = (scope or {}).get("body_projection") or {}
+        if report.get("error"):
+            out["projection_errors"] += 1
+        path = (scope or {}).get("path")
+        files_counted = False
+        for rec in report.get("functions") or []:
+            projected = rec.get("status") == "projected"
+            if only is not None and (path, rec.get("name")) not in only:
+                out["outside_document"]["projected" if projected else "not_projected"] += 1
+                continue
+            out["functions_with_tree_error"] += 1
+            if projected:
+                if not files_counted:
+                    out["files_projected"] += 1
+                    files_counted = True
+                out["functions_projected"] += 1
+                out["conditions_decided"] += int(rec.get("conditions") or 0)
+                out["projected_functions"].append(rec.get("name") or "")
+                assumed.update(rec.get("assumed_undefined") or ())
+            else:
+                reason = str(rec.get("status") or "")
+                kind = reason.split(":", 1)[0]
+                out["not_projected"][kind] = out["not_projected"].get(kind, 0) + 1
+                out["not_projected_functions"].append(f"{rec.get('name') or '(이름 없음)'} ({reason[:60]})")
+    out["projected_functions"] = sorted(out["projected_functions"])
+    out["not_projected_total"] = len(out["not_projected_functions"])
+    out["not_projected_functions"] = sorted(out["not_projected_functions"])[:40]
+    out["assumed_undefined"] = sorted(assumed)
+    out["table_unknown_reasons"] = sorted(unknown_reasons)[:20]
+    return out
 
 
 def macro_bodies(context: dict[str, Any]) -> dict[tuple[str, int], dict]:
@@ -1430,6 +2097,24 @@ def defined_names(context: dict[str, Any]) -> set[str]:
     return names
 
 
+def _changes_table(ev: dict[str, Any], path: str, mode: str, macros: dict[str, Any], bodies: dict) -> bool:
+    """Does this ``#define``/``#undef`` event change the macro table (before it is applied)? In an undecided region it
+    may — yes. A definition with the same body, function-likeness and parameters as the one in force does not; nor an
+    ``#undef`` of a name that is not defined."""
+    if mode != "active":
+        return True
+    prev = macros.get(ev["name"])
+    if ev["op"] == "undef":
+        return prev is not None
+    if prev is None or prev == _UNKNOWN:
+        return True
+    old, new = bodies.get(prev) or {}, bodies.get((path, ev["pos"])) or {}
+
+    def shape(d):
+        return d.get("body"), bool(d.get("function_like")), tuple(d.get("params") or ())
+    return shape(old) != shape(new)
+
+
 def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = None,
                     defines: dict[str, str] | None = None, known_names: set[str] | None = None,
                     build_defines_complete: bool = False) -> dict[str, Any]:
@@ -1450,7 +2135,12 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
         macros[name] = ("<build>", name)
     out: dict[str, Any] = {"states": {}, "macros": macros, "varied": set(), "missing_includes": [], "system_includes": [],
                            "toolchain_includes": [], "files": [], "errors": [], "unknown_conditions": 0, "gaps": 0,
-                           "defined_after_gaps": {}}
+                           "defined_after_gaps": {},
+                           # (R62 review W1) name → the latest position in ``main`` (its last declaration or #define seen so
+                           # far) at which a #define/#undef of the name — in any file — was met: a header included after a
+                           # function changes the table after that function, though its definition sits in another file
+                           "changed_at_main": {}}
+    last_main = [-1]
     env = {"macros": macros, "bodies": bodies, "parser": parser, "gap": False, "varied": set(),
            "defined_anywhere": (known_names if known_names is not None else defined_names(context)) | set(defines or ()),
            "build_defines_complete": build_defines_complete, "assumed_undefined": set()}
@@ -1461,6 +2151,13 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
     def run(path, events, mode, depth):
         for ev in events:
             op = ev["op"]
+            if path == main and op in ("decl", "define"):
+                last_main[0] = max(last_main[0], int(ev["pos"]))
+            if op in ("define", "undef") and _changes_table(ev, path, mode, macros, bodies):
+                # (review round 2 W-A) only a real change: the same definition again (an unguarded header included
+                # twice, ``#pragma once``) or ``#undef`` of an undefined name leaves the table as the function saw it
+                changed = out["changed_at_main"]
+                changed[ev["name"]] = max(changed.get(ev["name"], -1), last_main[0])
             if op == "decl":
                 key = (path, ev["pos"])
                 if mode == "active" or out["states"].get(key) != "active":
@@ -1556,6 +2253,59 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     build = _unit_build_defines(context, path)
     pp = preprocess_unit(context, path, bodies, defines=build["defines"], known_names=known_names,
                          build_defines_complete=build["complete"])
+    # (R62 review round 2 W-B) a #define / #undef inside a function body of this unit changes the table for the code
+    #   after it, where the file-level walk does not look: those names vary in the unit (undecided everywhere, never
+    #   "undefined" on build evidence); an #include there may define anything (`body_includes` — a gap for body #if)
+    # (R62 review rounds 2-4) a #define / #undef / #include the file-level walk does not read — in a function body (this
+    #   file's or a header's inline function), in a construct the parser did not recognize, inside a struct / union
+    #   declaration (Processor Expert ``IO_Map.h``: 1,057 #defines among the register struct members) — still acts where
+    #   it stands. Judged by its effect on the table the walk built (local macros and functions the configuration leaves
+    #   out aside, `_effective_strays`):
+    #   · it changes a name the walk knows (#undef / #define of a known name), an #include, or a line not read → the
+    #     walk's later choices may be wrong (round 4 G1): no body #if of the unit is decided (`body_table_unknown`), and
+    #     the changed names vary on the value path;
+    #   · it defines a name the walk never met → the table lacks that name: a condition resting on it is not decided
+    #     (`missed_definition_names`), and a file-level #if testing it makes the table unknown (`_file_if_on`) — the
+    #     walk chose that #if without it; values stay as before R62.
+    strays = []
+    for f in pp["files"]:
+        stray = (files.get(f) or {}).get("stray_directives") or {}
+        strays += [{**d, "file": f} for d in stray.get("directives") or ()]
+    known = set(pp["defined_anywhere"])
+    strays = _effective_strays(strays, known, pp["states"],
+                               {f: _declared_positions(files.get(f) or {}) for f in {d["file"] for d in strays}})
+    unknown: set[str] = set()
+    changed: set[str] = set()
+    missed: set[str] = set()
+    includes: set[str] = set()
+    for d in strays:
+        where = os.path.basename(d["file"])
+        if d["op"] == "unreadable":
+            unknown.add("unreadable_directive:" + where)
+        elif d["op"] == "include":
+            found = _resolve_include(context, d["file"], d["name"])
+            includes.add(d["name"])
+            unknown.add(f"stray_directive:{where}:#include {d['name']}"[:120])
+            names, complete = _names_a_file_changes(files, context, found) if found else (set(), False)
+            changed |= names
+            if not complete:
+                unknown.add("unresolved_include:" + d["name"])
+        elif d["name"] in known:
+            unknown.add(f"stray_directive:{where}:#{d['op']} {d['name']}"[:120])
+            changed.add(d["name"])
+        else:
+            missed.add(d["name"])
+    on_missed = _file_if_on(files, pp["files"], missed, bodies)
+    if on_missed:
+        unknown.add("file_if_on_missed_definition:" + on_missed)
+    scope["body_includes"] = sorted(includes)
+    scope["missed_definition_names"] = sorted(missed)
+    scope["body_directive_names"] = sorted(changed | missed)
+    if changed:
+        pp["varied"] |= changed
+    if changed | missed:
+        pp["defined_anywhere"] = set(pp["defined_anywhere"]) | changed | missed
+    scope["body_table_unknown"] = sorted(unknown)
     scope["build_defines"] = {"evidence": build["evidence"], "complete": build["complete"], "reason": build["reason"],
                               "defines": dict(build["defines"])}
     scope["assumed_undefined"] = sorted(pp["assumed_undefined"])
@@ -1695,6 +2445,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     scope["pp_bodies"] = {name: d[0] for name, d in macro_defs.items() if pp["macros"].get(name) != _UNKNOWN}
     scope["pp_varied"] = sorted(pp["varied"])
     scope["pp_defined_anywhere"] = pp["defined_anywhere"]
+    # (R62 review W1) where in this unit's own text each macro last changed — see `macro_changed_after`
+    scope["pp_changed_at"] = dict(pp["changed_at_main"])
     # Every active macro body (object-like too): what a macro *statement* or invocation does (callee checks).
     scope["macro_bodies"] = {name: d[0]["body"] for name, d in macro_defs.items()
                              if pp["macros"].get(name) != _UNKNOWN and name not in pp["varied"]}

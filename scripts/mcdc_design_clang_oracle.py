@@ -69,6 +69,9 @@ def _decisions(source_root: Path, stub_returns: bool = False):
         {str(cproject): cproject.read_text(encoding="utf-8", errors="replace")} if cproject.is_file() else {}))
     units = [p for p in texts if p.lower().endswith(".c")]
     scopes = build_scopes(context, units)
+    # (R62) the texts the generator designs on: functions an #if splits mid-expression projected
+    from generators.c_project_context import projected_texts
+    texts = projected_texts(scopes, texts)
     parser = _make_parser()
     for path in units:
         raw = texts[path].encode("utf-8")

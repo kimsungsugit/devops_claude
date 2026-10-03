@@ -16,6 +16,7 @@ clang stops on undefined behaviour of that kind).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import Counter
@@ -88,7 +89,9 @@ def collect_input_gap_findings(units: list[dict[str, Any]], gaps: dict[str, dict
                     "observables": sorted(names, key=lambda n: (-int(names[n].get("slots") or 0), n)),
                     "example_tc": rendered_tc_ids.get(unit["fid"], ""), "example_sequence": seqs[0] if seqs else None,
                     "example_inputs": {}, "source_path": unit.get("source_path", ""),
-                    "source_hash": str((unit.get("project_scope") or {}).get("main_file_sha256") or "")})
+                    # (R62 review W4) the text the oracle read — as the oracle-kind rows say (a projected text's hash)
+                    "source_hash": hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest()
+                    if unit.get("source_text") else ""})
     return sorted(out, key=lambda f: f["function"])
 
 

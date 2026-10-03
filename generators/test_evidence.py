@@ -1,6 +1,7 @@
 """Expected-result provenance shared by unit and integration generators."""
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from generators.c_source_oracle import evaluate_outputs, scope_matches
@@ -31,6 +32,11 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
     else:
         results = [{"status": "unsupported", "reason": unit.get("source_unavailable_reason") or "authoritative_source_missing"}
                    for _ in sequences]
+    # (R62) the text read is the file with this function's split #if groups projected (`apply_body_projection`): its hash
+    # is not the file's — say which text was hashed
+    projected = scoped and (unit.get("project_scope") or {}).get("projected_sha256") == \
+        hashlib.sha256(source.encode()).hexdigest()
+    hash_scope = "captured_decoded_utf8_text_body_conditionals_projected" if projected else "captured_decoded_utf8_text"
     for seq, evaluated, outputs in zip(sequences, results, output_lists, strict=True):
         old = seq.get("expected") or {}
         candidates = seq.setdefault("expected_candidates", {})
@@ -52,7 +58,7 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                     "oracle_kind": "source" if derived else ("ai" if ai is not None else "none"),
                     "reason": reason, "execution_status": "not_run",
                     "source_hash": evaluated.get("source_hash", ""),
-                    "source_hash_scope": "captured_decoded_utf8_text",
+                    "source_hash_scope": hash_scope,
                     "source_path": str(unit.get("source_path") or ""),
                     "function_name": str(unit.get("name") or ""),
                     "requirement_verified": False}

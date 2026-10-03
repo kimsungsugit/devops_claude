@@ -77,16 +77,20 @@ def read_findings(xlsm: str) -> list[dict[str, Any]]:
 def _units(findings: list[dict], roots: list[Path]) -> dict[tuple, dict]:
     from reference_alignment import _load_source
 
-    from generators.c_project_context import build_scopes
+    from generators.c_project_context import build_scopes, projected_texts
     texts, context, _unread = _load_source(roots)
     by_resolved = {str(Path(p).resolve()): p for p in texts}
     paths = sorted({by_resolved.get(str(Path(f["source_path"]).resolve()), "") for f in findings} - {""})
     scopes = build_scopes(context, paths)
+    # (R62) the text the generator read (split #if projected); the clang harness compiles the original at the same
+    #   positions (`source_text_original`, see `source_oracle_clang_check`)
+    projected = projected_texts(scopes, texts)
     units = {}
     for f in findings:
         path = by_resolved.get(str(Path(f["source_path"]).resolve()))
         if path and path in scopes:
-            units[(f["source_path"], f["function"])] = {"name": f["function"], "source_text": texts[path],
+            units[(f["source_path"], f["function"])] = {"name": f["function"], "source_text": projected[path],
+                                                        "source_text_original": texts[path],
                                                         "source_path": path, "project_scope": scopes[path]}
     return units
 

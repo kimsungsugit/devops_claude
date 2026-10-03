@@ -114,19 +114,34 @@ def impact(rows: list[dict[str, Any]], roots: list[Path], files: dict[str, dict[
            ) -> dict[str, Any]:
     from reference_alignment import _definitions, _load_source
 
-    from generators.c_project_context import build_scopes
+    from generators.c_project_context import build_scopes, projected_texts
     from generators.c_source_oracle import evaluate_outputs
     texts, context, unread = _load_source(roots)
     by_norm = {_norm(p): p for p in texts}
     unreadable = {_norm(p) for p in unread}
     defined = _definitions(texts)   # every definition now: a function may have moved to another file
+    # (R62 review W3) the generator reads a function an #if splits mid-expression projected, and its rows carry that
+    #   text's hash: the files involved are scoped first, so a row's hash is compared with both texts and re-derived on
+    #   the projected one (on the raw text such a function is ``source_parse_error`` — a false "impact")
+    involved = {by_norm[_norm(r["source_path"])] for r in rows if _norm(r["source_path"]) in by_norm}
+    involved |= {p for r in rows for p in defined.get(r["function"], [])}
+    involved |= {by_norm[_norm(k)] for k in (files or {}) if _norm(k) in by_norm}
+    scopes = build_scopes(context, sorted(involved)) if involved else {}
+    projected = projected_texts(scopes, texts)
+
+    seen_memo: dict[str, set[str]] = {}
+
+    def seen(path):
+        if path not in seen_memo:   # (review round 2 I-d) four SHA-256 per file, not per row
+            seen_memo[path] = _hashes(texts[path]) | _hashes(projected[path])
+        return seen_memo[path]
     targets: dict[tuple[str, str], list[dict]] = defaultdict(list)
     status: Counter = Counter()
     for r in rows:
         path = by_norm.get(_norm(r["source_path"]))
         where = defined.get(r["function"], [])
         if path is not None:
-            r["source_text_changed"] = r["source_hash"] not in _hashes(texts[path])
+            r["source_text_changed"] = r["source_hash"] not in seen(path)
         if path is not None and path in where:
             targets[(path, r["function"])].append(r)
         elif _norm(r["source_path"]) in unreadable:
@@ -142,9 +157,8 @@ def impact(rows: list[dict[str, Any]], roots: list[Path], files: dict[str, dict[
         else:
             r["impact"] = "function_removed" if path is not None else "source_missing"
             status[r["impact"]] += 1
-    scopes = build_scopes(context, sorted({p for p, _fn in targets})) if targets else {}
     for (path, fn), members in targets.items():
-        unit = {"name": fn, "source_text": texts[path], "source_path": path, "source_text_complete": True,
+        unit = {"name": fn, "source_text": projected[path], "source_path": path, "source_text_complete": True,
                 "project_scope": scopes[path]}
         by_vector: dict[str, list[dict]] = defaultdict(list)
         for r in members:
@@ -178,7 +192,7 @@ def impact(rows: list[dict[str, Any]], roots: list[Path], files: dict[str, dict[
         if not f["hashes"]:
             not_compared.append(recorded)   # no hash recorded: nothing to compare its text against (round 3 W-a)
             continue
-        if not f["hashes"] & _hashes(texts[path]):
+        if not f["hashes"] & seen(path):
             changed.add(recorded)
             if not f["derived"]:
                 unrederived.append(recorded)

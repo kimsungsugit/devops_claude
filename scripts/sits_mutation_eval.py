@@ -243,6 +243,11 @@ def _setup(roots: list[Path]) -> dict[str, Any]:
     from backend.helpers import _get_source_sections_cached
     report_data = _get_source_sections_cached(",".join(str(r) for r in roots))
     context, files = report_data["project_context"], dict(report_data["source_files"])
+    units = [p for p in files if p.lower().endswith(".c") and p in context["files"]]
+    scopes = cpc.build_scopes(context, units)
+    # (R62) the texts SITS read: a function an #if splits mid-expression projected (`integration_oracle`); faults are
+    #   made on them — a fault inside a group this configuration does not compile has no text left to edit
+    files = cpc.projected_texts(scopes, files)
     staged = {os.path.normcase(os.path.abspath(p)): t for p, t in files.items()}
     texts: dict[str, str] = {}
     for root in roots:
@@ -260,9 +265,8 @@ def _setup(roots: list[Path]) -> dict[str, Any]:
     parser = cpc.shared_parser()
     index = SourceIndex(texts, parser)
     graph = call_graph(index)
-    units = [p for p in files if p.lower().endswith(".c") and p in context["files"]]
     return {"index": index, "graph": graph, "faults": faults(index, graph, file_scope_globals(texts, parser)),
-            "base": Project(context, files, cpc.build_scopes(context, units), parser),
+            "base": Project(context, files, scopes, parser),
             "key_of": {os.path.normcase(os.path.abspath(p)): p for p in files}}
 
 
