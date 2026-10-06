@@ -470,7 +470,8 @@ def _scope_type(scope, text):
 
 def _compile_state(fn, states):
     """Preprocessor state of a function definition (``None`` = not compiled in this build). Definitions inside a
-    file-level parse-recovery container are events of their own (`cpc._events`), so the lookup is direct."""
+    file-level parse-recovery container are events of their own (`cpc._decl_positions` in `cpc._file_walk`), so the
+    lookup is direct."""
     return states.get(fn.start_byte)
 
 

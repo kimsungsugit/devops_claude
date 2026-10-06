@@ -1472,7 +1472,10 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   구문 · 헤더의 inline 함수 — 를 `stray_directives` 로; v45 의 `body_directives` 는 함수 정의 안만 봤다).
 # (R62 리뷰 5차) v47: project_context 스키마 19(값 없는 `#define NAME ` 뒤 공백이 다음 줄을 값으로 삼키던 tree-sitter 오독을
 #   같은 길이로 바로잡아 읽고, `#  undef` 를 #undef 로, 걷기 밖 지시문은 줄마다 종류까지 대조).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v47"
+# (R63) v48: project_context 스키마 20(파일 수준 지시문을 렉서로 읽는다 — 구조체 선언 안 · ERROR 안 · `extern "C"` 안의
+#   #define 과 여러 줄 매크로 본문의 줄 이음; 벤더 구문 `@주소` · `__attribute__` · `__interrupt` · `__far` 를 공백으로 읽고 파일별
+#   `reading` 사실을 둔다 — v47 캐시는 그 정의가 없고 본문에 역슬래시가 남아 있다).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v48"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

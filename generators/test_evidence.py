@@ -33,10 +33,12 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
         results = [{"status": "unsupported", "reason": unit.get("source_unavailable_reason") or "authoritative_source_missing"}
                    for _ in sequences]
     # (R62) the text read is the file with this function's split #if groups projected (`apply_body_projection`): its hash
-    # is not the file's — say which text was hashed
+    # is not the file's — say which text was hashed. (R63) and with the vendor syntax read as blanks / a bare #define's
+    # trailing blanks moved (`reading_text`): the scope lists what made the difference (``read_text_changes``)
     projected = scoped and (unit.get("project_scope") or {}).get("projected_sha256") == \
         hashlib.sha256(source.encode()).hexdigest()
-    hash_scope = "captured_decoded_utf8_text_body_conditionals_projected" if projected else "captured_decoded_utf8_text"
+    changes = (unit.get("project_scope") or {}).get("read_text_changes") or ["as_read"]
+    hash_scope = "captured_decoded_utf8_text_" + "_".join(changes) if projected else "captured_decoded_utf8_text"
     for seq, evaluated, outputs in zip(sequences, results, output_lists, strict=True):
         old = seq.get("expected") or {}
         candidates = seq.setdefault("expected_candidates", {})

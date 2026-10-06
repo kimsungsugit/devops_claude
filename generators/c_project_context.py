@@ -27,7 +27,7 @@ from typing import Any
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 19  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 20  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -64,6 +64,9 @@ SCHEMA_VERSION = 19  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 19 (R62 review round 5): facts read from `_parse_safe` text (a value-less ``#define NAME `` keeps its own line — the
 #    next line was its value), ``#  undef`` read as ``#undef``, `stray_directives` compare the directive kind per row
 #    and record the conditional lines met (`conditionals`). Paired with v47.
+# 20 (R63): file-level directives read from the lexer (`_file_walk`) — #defines among struct members, in ERROR nodes and
+#    in ``extern "C" { }``, macro bodies without line splices — from `reading_text` (vendor syntax as blanks); per-file
+#    `reading` facts. Paired with v48.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -437,6 +440,9 @@ def _items(nodes, raw, conditional=False):
             yield from _items(n.named_children, raw, True)
         elif n.type in {"ERROR", "compound_statement"}:
             yield from _items(n.named_children, raw, conditional)
+        elif n.type == "linkage_specification" and (n.child_by_field_name("body") or n).type == "declaration_list":
+            # (R63) ``extern "C" { … }`` (under ``#ifdef __cplusplus``): to a C compiler, file-level declarations
+            yield from _items(n.child_by_field_name("body").named_children, raw, conditional)
         else:
             yield n, conditional
 
@@ -460,43 +466,137 @@ def _parse_safe(raw: bytes) -> bytes:
     return _BARE_DEFINE_RE.sub(rb"\1\3\2", raw)
 
 
+# (R63) comments, literals and directive lines of a file, to be masked before looking for vendor syntax in its code
+_LEXEME_RE = re.compile(rb'//(?:[^\n\\]|\\\r?\n|\\.)*|/\*.*?(?:\*/|\Z)|"(?:\\\r?\n|\\.|[^"\\\n])*"?'
+                        rb"|'(?:\\\r?\n|\\.|[^'\\\n])*'?", re.S)
+_DIRECTIVE_LINE_RE = re.compile(rb"(?m)^[ \t]*#(?:[^\n]*\\\r?\n)*[^\n]*")
+_VENDOR_RE = re.compile(rb"@[ \t]*(?:0[xX][0-9A-Fa-f]+|[0-9]+)[uUlL]*|\b__attribute__\b|\b__interrupt\b|\b__far\b|\b__near\b")
+
+
+def _code_mask(raw: bytes) -> bytes:
+    """``raw`` with comments, string / character literals and directive lines as blanks (newlines kept)."""
+    def blank(m):
+        return re.sub(rb"[^\r\n]", b" ", m.group(0))
+    return _DIRECTIVE_LINE_RE.sub(blank, _LEXEME_RE.sub(blank, raw))
+
+
+# (R63 review round 1 W3) GCC attributes that place, keep or annotate an object or function without changing a value the
+#   model computes — ``mode(QI)`` · ``vector_size`` · ``packed`` (a width, a layout) are not among them and stay unread
+#   — nor ``weak``: a strong definition elsewhere replaces it at link time (review round 2 I1)
+_NEUTRAL_ATTRIBUTES = frozenset({"aligned", "section", "used", "unused", "noreturn", "noinline", "always_inline",
+                                 "deprecated", "visibility", "cold", "hot", "nonnull", "warn_unused_result", "interrupt"})
+
+
+def _attributes_value_neutral(inner: str) -> bool:
+    """Is every attribute of an ``__attribute__((…))`` list (its inner text) one of `_NEUTRAL_ATTRIBUTES`?"""
+    depth, start, names = 0, 0, []
+    for i, ch in enumerate(inner + ","):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            names.append(inner[start:i].strip())
+            start = i + 1
+    for item in names:
+        m = re.match(r"([A-Za-z_]\w*)", item)
+        if not m or m.group(1).strip("_") not in _NEUTRAL_ATTRIBUTES:
+            return False
+    return bool(names)
+
+
+def _reading_blanks(raw: bytes) -> list[tuple[int, int, str]]:
+    """(R63) ``(start, end, kind)`` of the target compiler's syntax that tree-sitter-c does not know and that changes no
+    value the model computes — read as blanks, so the declaration or function around it parses:
+
+    * ``address_placement`` — ``@0x000002C0`` after a declarator (CodeWarrior: ``extern volatile PTPSTR _PTP @0x2C0;``;
+      every register of ``IO_Map.h`` was an ERROR, KJPDS02_PV 719 · HDPDM01 359);
+    * ``attribute`` — GCC ``__attribute__ ((aligned (4)))`` (balanced parentheses);
+    * ``interrupt`` — the ``__interrupt`` function specifier (``__interrupt void SCI0_ISR(void)`` was unread);
+    * ``far_near`` — the ``__far`` / ``__near`` pointer qualifiers (memory model, not value).
+
+    Outside comments, literals and directive lines. ``asm`` is never blanked: what it does is not value-neutral."""
+    mask = _code_mask(raw)
+    out: list[tuple[int, int, str]] = []
+    for m in _VENDOR_RE.finditer(mask):
+        word = m.group(0)
+        if word.startswith(b"@"):
+            out.append((m.start(), m.end(), "address_placement"))
+        elif word == b"__attribute__":
+            i = m.end()
+            while i < len(mask) and mask[i:i + 1] in (b" ", b"\t", b"\r", b"\n"):
+                i += 1
+            if mask[i:i + 2] != b"((":
+                continue
+            depth, j = 0, i
+            while j < len(mask):
+                ch = mask[j:j + 1]
+                depth += 1 if ch == b"(" else -1 if ch == b")" else 0
+                j += 1
+                if depth == 0:
+                    break
+            if depth == 0 and _attributes_value_neutral(mask[i + 2:j - 2].decode("utf-8", "replace")):
+                out.append((m.start(), j, "attribute"))
+        elif word == b"__interrupt":
+            out.append((m.start(), m.end(), "interrupt"))
+        else:
+            out.append((m.start(), m.end(), "far_near"))
+    return out
+
+
+def reading_text(raw: bytes) -> tuple[bytes, dict[str, int]]:
+    """(R63) The bytes every reader of a C file parses — the project context (`_scan_file`) and every consumer of a unit
+    (`project_body_conditionals`) alike, so a declaration's position means the same thing to both: `_parse_safe`, then
+    the vendor syntax of `_reading_blanks` as blanks. Same length, same newlines. Returns the bytes and the blanks per
+    kind."""
+    raw = _parse_safe(raw)
+    blanks = _reading_blanks(raw)
+    if not blanks:
+        return raw, {}
+    counts: dict[str, int] = {}
+    for _a, _b, kind in blanks:
+        counts[kind] = counts.get(kind, 0) + 1
+    return _blanked(raw, [(a, b) for a, b, _k in blanks]), counts
+
+
 def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
-    raw = _parse_safe(text.encode("utf-8"))
+    raw, blanked = reading_text(text.encode("utf-8"))
     root = parser.parse(raw).root_node
-    rec: dict[str, Any] = {"path": path, "includes": [], "system_includes": [], "typedefs": {}, "macros": {}, "undefs": [],
+    walk = _file_walk(root, raw)
+    rec: dict[str, Any] = {"path": path, "includes": walk["includes"], "system_includes": walk["system_includes"],
+                           "typedefs": {}, "macros": {}, "undefs": walk["undefs"],
                            "enums": {}, "enumerators": {}, "globals": {}, "functions": {}, "parse_error": root.has_error,
                            "structs": {},   # (R39) struct/union bodies by key and typedef name (`_collect_struct`)
                            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                           "events": _events(root.named_children, raw),
+                           # (R63) read from the directive lines, not the parser's directive nodes (`_file_walk`)
+                           "events": walk["events"],
                            # (R17) identifiers of #if/#ifdef/#elif inside function bodies (pp_condition decides them)
                            "body_condition_names": _body_condition_names(root, raw),
-                           # (R62 review rounds 2-4) #define / #undef / #include lines the file-level walk (`_events`)
-                           # never sees — in function bodies, in constructs the parser did not recognize — yet the
-                           # compiler applies them where they stand
-                           "stray_directives": _stray_directives(root, raw),
+                           # (R62 review rounds 2-4) #define / #undef / #include lines the file-level walk never reads —
+                           # in function bodies — yet the compiler applies them where they stand
+                           "stray_directives": {"directives": walk["strays"]},
+                           # (R63) how the file was read: vendor syntax read as blanks (`reading_text`), the parse errors
+                           # left (`_parse_error_leaves`), file-level directive lines the parser's tree did not show
+                           # (read from the lexer all the same) and unbalanced conditional lines
+                           "reading": {"blanked": blanked, "errors": _parse_error_leaves(root, raw, walk["spans"]),
+                                       "directives_beyond_tree": walk["beyond_tree"],
+                                       "spliced_defines": walk["spliced_defines"],
+                                       "unbalanced_brace_macros": walk["unbalanced_brace_macros"][:20],
+                                       "unbalanced_directives": walk["problems"]},
                            # ``&x`` anywhere in the file — file-scope initializers (``{&g_cnt}``) included (review C3d).
                            "address_taken": sorted(_address_taken(root, raw))}
+    for d in walk["defines"]:
+        entry = {"body": d["body"], "line": d["line"], "pos": d["pos"], "conditional": d["conditional"],
+                 "function_like": d["function_like"]}
+        if d["function_like"]:
+            # Parameter names let a consumer expand an invocation (R2b source oracle); ``...`` is kept as a token.
+            entry["params"] = d["params"]
+        rec["macros"].setdefault(d["name"], []).append(entry)
     for node, conditional in _items(_guard_body(root, raw), raw):
         line = node.start_point[0] + 1
         pos = node.start_byte
-        if node.type == "preproc_include":
-            target = _text(node.child_by_field_name("path"), raw).strip()
-            (rec["includes"] if target.startswith('"') else rec["system_includes"]).append(target.strip('"<>'))
-        elif node.type in {"preproc_def", "preproc_function_def"}:
-            name = _text(node.child_by_field_name("name"), raw)
-            value = node.child_by_field_name("value")
-            entry = {"body": strip_comments(_text(value, raw)) if value is not None else "", "line": line, "pos": pos,
-                     "conditional": conditional, "function_like": node.type == "preproc_function_def"}
-            if entry["function_like"]:
-                # Parameter names let a consumer expand an invocation (R2b source oracle); ``...`` is kept as a token.
-                plist = node.child_by_field_name("parameters")
-                entry["params"] = ([_text(c, raw) for c in plist.children if c.type in {"identifier", "..."}]
-                                   if plist is not None else [])
-            rec["macros"].setdefault(name, []).append(entry)
-        elif node.type == "preproc_call" and _call_keyword(node, raw) == "undef":
-            arg = node.child_by_field_name("argument")
-            if arg is not None:
-                rec["undefs"].append(_text(arg, raw).strip())
+        if node.type in _PREPROC_LINE_NODES:
+            continue   # (R63) directives come from `_file_walk`
         elif node.type == "type_definition":
             typ = node.child_by_field_name("type")
             base = " ".join(_text(c, raw) for c in node.named_children if c.type == "type_qualifier" or c == typ)
@@ -624,8 +724,9 @@ def _call_keyword(node, raw) -> str:
 
 
 def _event_directive_lines(nodes, raw, out: dict[int, str] | None = None) -> dict[int, str]:
-    """Row → keyword of each directive `_events` reads (the same traversal: top level, #if arms, recovery
-    containers). A row the lexer reads as another directive (``#un\\<NL>def``) is not one the walk read."""
+    """Row → keyword of each directive the parser's tree shows at file level (top level, #if arms, recovery containers)
+    — what the walk read before R63; `_file_walk` counts the file-level lines beyond it (``directives_beyond_tree``).
+    A row the lexer reads as another directive (``#un\\<NL>def``) is not one the tree showed."""
     out = {} if out is None else out
     for n in nodes:
         t = n.type
@@ -647,36 +748,344 @@ def _event_directive_lines(nodes, raw, out: dict[int, str] | None = None) -> dic
 
 
 def _stray_directives(root, raw) -> dict[str, Any]:
-    """``#define`` / ``#undef`` / ``#include`` lines of the file that the file-level walk does not read (`_events`):
-    inside a function body, a construct the parser did not recognize (an ``#else`` arm repeating an ``if (`` head), a
-    header's inline function. ``{"directives": [{"op", "name", "pos", "fn", "conditionals"}]}`` — ``fn`` is the start
-    of the function definition it sits in (-1: none), ``conditionals`` the conditional directive lines of the file
-    before it. A define / undef with no readable name is ``op: "unreadable"`` — never "nothing there"."""
-    lines = _directive_lines(raw, 0, len(raw))
-    seen = _event_directive_lines(root.named_children, raw)
-    newlines = [m.start() for m in re.finditer(rb"\n", raw)]
-    functions = sorted((n.start_byte, n.end_byte) for n in _walk(root) if n.type == "function_definition")
-    starts = [a for a, _b in functions]
-    out: list[dict[str, Any]] = []
-    conditionals = 0   # (round 5 F-D) conditional directive lines met so far: a local macro has none between
-    for start, _end, keyword, argument in lines:
-        if keyword in _GROUP_DIRECTIVES:
-            conditionals += 1
+    """``#define`` / ``#undef`` / ``#include`` lines of the file that the file-level walk (`_file_walk`) does not read:
+    those inside a function body (this file's or a header's inline function), and a define / undef with no readable
+    name (``op: "unreadable"`` — never "nothing there"). ``{"directives": [{"op", "name", "pos", "fn",
+    "conditionals"}]}`` — ``fn`` is the start of the function definition it sits in, ``conditionals`` the conditional
+    directive lines of the file before it. (R63: a file-level line the parser did not recognize — inside a struct
+    declaration, in an ERROR — is no longer a stray: the walk reads every file-level line from the lexer.)"""
+    return {"directives": _file_walk(root, raw)["strays"]}
+
+
+def _function_spans(root) -> list[tuple[int, int]]:
+    """The outermost function definitions of a tree as ``(start, end)``, sorted (a definition the parser nested in
+    another's recovery counts as the outer one's)."""
+    spans: list[tuple[int, int]] = []
+    for a, b in sorted((n.start_byte, n.end_byte) for n in _walk(root) if n.type == "function_definition"):
+        if spans and a < spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], b))
+        else:
+            spans.append((a, b))
+    return spans
+
+
+_PREPROC_LINE_NODES = frozenset({"preproc_include", "preproc_def", "preproc_function_def", "preproc_call"})
+
+
+def _decl_positions(nodes, out: list[int]) -> list[int]:
+    """Start of every file-level item that is not a directive: through #if arms, parse-recovery containers (`_items`)
+    and ``extern "C" { … }`` bodies (R63: ``#ifdef __cplusplus`` around ``extern "C" {`` — the C compiler sees the
+    declarations inside as file-level ones; KJPDS02_PV ``HKMC_SecureFlash.h``)."""
+    for n in nodes:
+        t = n.type
+        if t == "comment" or t in _PREPROC_LINE_NODES:
             continue
-        if keyword not in ("define", "undef", "include"):
-            continue
-        hash_pos = raw.index(b"#", start)
-        if seen.get(bisect.bisect_left(newlines, hash_pos)) == keyword:
-            continue
-        k = bisect.bisect_right(starts, hash_pos) - 1
-        fn = functions[k][0] if k >= 0 and hash_pos < functions[k][1] else -1
-        rec = {"pos": hash_pos, "fn": fn, "conditionals": conditionals}
-        if keyword == "include":
-            out.append({"op": "include", "name": argument.strip().strip('"<>'), **rec})
-            continue
+        if t in _IF_NODES or t == "preproc_else":
+            cond, name, alt = n.child_by_field_name("condition"), n.child_by_field_name("name"), n.child_by_field_name("alternative")
+            _decl_positions([c for c in n.named_children if c not in (cond, name, alt)], out)
+            if alt is not None:
+                _decl_positions([alt], out)
+        elif t in ("ERROR", "compound_statement"):
+            _decl_positions(n.named_children, out)
+        elif t == "linkage_specification" and (n.child_by_field_name("body") or n).type == "declaration_list":
+            _decl_positions(n.child_by_field_name("body").named_children, out)
+        else:
+            out.append(n.start_byte)
+    return out
+
+
+def _lexed_if(keyword: str, argument: str, line: int) -> dict[str, Any]:
+    ev: dict[str, Any] = {"op": "if", "then": [], "else": [], "line": line}
+    if keyword in ("ifdef", "ifndef", "elifdef", "elifndef"):
         m = re.match(r"([A-Za-z_]\w*)", argument)
-        out.append({"op": keyword if m else "unreadable", "name": m.group(1) if m else "", **rec})
-    return {"directives": out}
+        ev["defined"] = m.group(1) if m else ""
+        ev["negate"] = keyword in ("ifndef", "elifndef")
+    else:
+        ev["expr"] = argument
+    return ev
+
+
+def _lexed_define(argument: str) -> dict[str, Any] | None:
+    """``#define`` argument (splices removed, comments as blanks) → name, body, function-likeness and parameters.
+    Function-like only when ``(`` follows the name with nothing between (C11 6.10.3p3 — a comment is a blank)."""
+    m = re.match(r"([A-Za-z_]\w*)\(([^)]*)\)\s*(.*)", argument, re.S)
+    if m:
+        params = [p.strip() for p in m.group(2).split(",")]
+        return {"name": m.group(1), "body": m.group(3).strip(), "function_like": True,
+                "params": [p for p in params if re.fullmatch(r"[A-Za-z_]\w*|\.\.\.", p)]}
+    m = re.match(r"([A-Za-z_]\w*)\s*(.*)", argument, re.S)
+    if m and not argument[len(m.group(1)):].startswith("("):
+        return {"name": m.group(1), "body": m.group(2).strip(), "function_like": False}
+    return None
+
+
+def _file_walk(root, raw) -> dict[str, Any]:
+    """(R63) The preprocessor's view of a file, read from its directive lines (`_directive_lines` — splices, comments and
+    literals known) instead of the parser's directive nodes. tree-sitter shows a directive only where its grammar puts
+    one: a ``#define`` among the members of a register struct (Processor Expert ``IO_Map.h`` — KJPDS02_PV 2,114 ·
+    HDPDM01 1,057), a multi-line macro with a comment before a line splice (pin macros ``X_GetVal()``) or one inside
+    ``extern "C" {`` never reached the macro table, and a multi-line body kept its backslashes (``l_u8_rd_…()`` LIN
+    signal readers: unparseable, 576 · 201 definitions). Every file-level line is read here, in order; declarations come
+    from the tree (`_decl_positions`) and go into the group open at their start.
+
+    A line inside a function body is not file-level: a conditional group wholly inside one function is the function's
+    own (`pp_condition` / `project_body_conditionals`), its #define / #undef / #include are ``strays`` (`_effective_strays`).
+    A group a function does not close (``#if`` choosing between two function heads) is read at file level, so the file's
+    groups stay balanced.
+
+    Returns ``events`` (as `preprocess_unit` walks them), ``defines`` (macro entries with ``pos`` / ``line`` /
+    ``conditional``), ``undefs``, ``includes`` · ``system_includes``, ``strays`` and ``problems`` (unbalanced lines)."""
+    hashes: list[int] = []
+    lines = _directive_lines(raw, 0, len(raw), hashes)
+    newlines = [m.start() for m in re.finditer(rb"\n", raw)]
+    spans = _function_spans(root)
+    span_starts = [a for a, _b in spans]
+
+    def function_of(pos: int) -> int:
+        k = bisect.bisect_right(span_starts, pos) - 1
+        return spans[k][0] if k >= 0 and pos < spans[k][1] else -1
+
+    recs = [{"pos": h, "end": end, "keyword": kw, "argument": arg, "fn": function_of(h),
+             "line": bisect.bisect_left(newlines, h) + 1} for (_s, end, kw, arg), h in zip(lines, hashes, strict=True)]
+    # groups a function body does not balance on its own are read at file level
+    open_in: dict[int, int] = {}
+    unbalanced: set[int] = set()
+    for r in recs:
+        fn, kw = r["fn"], r["keyword"]
+        if fn < 0 or kw not in _GROUP_DIRECTIVES:
+            continue
+        depth = open_in.get(fn, 0)
+        if kw in ("if", "ifdef", "ifndef"):
+            depth += 1
+        elif kw == "endif":
+            depth -= 1
+        elif depth == 0:
+            unbalanced.add(fn)
+        if depth < 0:
+            unbalanced.add(fn)
+        open_in[fn] = depth
+    unbalanced |= {fn for fn, depth in open_in.items() if depth}
+    strays: list[dict[str, Any]] = []
+    file_level: list[dict[str, Any]] = []
+    conditionals = 0   # (R62 round 5 F-D) conditional directive lines met so far: a local macro has none between
+    for r in recs:
+        kw = r["keyword"]
+        if kw in _GROUP_DIRECTIVES:
+            conditionals += 1
+            if r["fn"] < 0 or r["fn"] in unbalanced:
+                file_level.append(r)
+            continue
+        if kw not in ("define", "undef", "include", "error"):
+            continue
+        named = re.match(r"([A-Za-z_]\w*)", r["argument"])
+        if kw in ("define", "undef") and (not named or (kw == "define" and _lexed_define(r["argument"]) is None)):
+            strays.append({"op": "unreadable", "name": "", "pos": r["pos"], "fn": r["fn"], "conditionals": conditionals})
+            continue
+        if r["fn"] >= 0:
+            if kw != "error":
+                strays.append({"op": kw, "name": (r["argument"].strip().strip('"<>') if kw == "include"
+                                                  else named.group(1)),
+                               "pos": r["pos"], "fn": r["fn"], "conditionals": conditionals})
+            continue
+        file_level.append(r)
+    # declarations, minus anything the parser made of a directive line's text (a pin macro it could not read)
+    spans_d = sorted((r["pos"], r["end"]) for r in recs)
+    d_starts = [a for a, _b in spans_d]
+    # file-level #define / #undef / #include lines the parser's own directive nodes did not show (read all the same)
+    seen = _event_directive_lines(root.named_children, raw)
+    beyond: dict[str, int] = {}
+    for r in file_level:
+        if r["keyword"] in ("define", "undef", "include") and seen.get(r["line"] - 1) != r["keyword"]:
+            beyond[r["keyword"]] = beyond.get(r["keyword"], 0) + 1
+    decls = []
+    for pos in _decl_positions(root.named_children, []):
+        k = bisect.bisect_right(d_starts, pos) - 1
+        if k >= 0 and pos < spans_d[k][1]:
+            continue
+        decls.append(pos)
+    items = sorted([(p, 0, None) for p in decls] + [(r["pos"], 1, r) for r in file_level], key=lambda x: (x[0], x[1]))
+    events: list[dict[str, Any]] = []
+    cur = events
+    stack: list[dict[str, Any]] = []
+    out: dict[str, Any] = {"events": events, "defines": [], "undefs": [], "includes": [], "system_includes": [],
+                           "strays": strays, "problems": {}, "spans": spans_d, "beyond_tree": beyond,
+                           "spliced_defines": 0, "unbalanced_brace_macros": []}
+
+    def problem(kind):
+        out["problems"][kind] = out["problems"].get(kind, 0) + 1
+
+    for pos, _kind, r in items:
+        if r is None:
+            cur.append({"op": "decl", "pos": pos})
+            continue
+        kw, arg = r["keyword"], r["argument"]
+        if kw in ("if", "ifdef", "ifndef"):
+            ev = _lexed_if(kw, arg, r["line"])
+            cur.append(ev)
+            stack.append({"link": ev, "parent": cur, "in_else": False})
+            cur = ev["then"]
+        elif kw in ("elif", "elifdef", "elifndef"):
+            if not stack or stack[-1]["in_else"]:
+                problem("misplaced_" + kw)
+                continue
+            ev = _lexed_if(kw, arg, r["line"])
+            stack[-1]["link"]["else"] = [ev]
+            stack[-1]["link"] = ev
+            cur = ev["then"]
+        elif kw == "else":
+            if not stack or stack[-1]["in_else"]:
+                problem("misplaced_else")
+                continue
+            stack[-1]["in_else"] = True
+            cur = stack[-1]["link"]["else"]
+        elif kw == "endif":
+            if not stack:
+                problem("misplaced_endif")
+                continue
+            cur = stack.pop()["parent"]
+        elif kw == "define":
+            d = _lexed_define(arg)
+            cur.append({"op": "define", "name": d["name"], "pos": pos})
+            if b"\\\n" in raw[pos:r["end"]] or b"\\\r\n" in raw[pos:r["end"] + 1]:
+                out["spliced_defines"] += 1
+            braces = re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', "", d["body"])   # not in literals (round 3 I5)
+            if braces.count("{") != braces.count("}"):
+                # (review round 2 W1) a macro that opens or closes a brace for its user: the parser reads the code it
+                #   is used in with the brace missing — a function cut short, the rest of a file something else
+                out["unbalanced_brace_macros"].append(d["name"])
+            out["defines"].append({**d, "pos": pos, "line": r["line"], "depth": len(stack),
+                                   "outer": (id(stack[0]["link"]), stack[0]["in_else"]) if stack else None})
+        elif kw == "undef":
+            name = re.match(r"([A-Za-z_]\w*)", arg).group(1)
+            cur.append({"op": "undef", "name": name})
+            out["undefs"].append(name)
+        elif kw == "include":
+            target = arg.strip()
+            system = not target.startswith('"')
+            if target.startswith('"') and '"' in target[1:]:
+                target = target[1:target.index('"', 1)]
+            elif target.startswith("<") and ">" in target:
+                target = target[1:target.index(">")]
+            cur.append({"op": "include", "name": target.strip('"<>'), "system": system})
+            (out["system_includes"] if system else out["includes"]).append(target.strip('"<>'))
+        else:   # error
+            cur.append({"op": "error", "text": arg.strip()[:120]})
+    if stack:
+        problem("unterminated_group")
+    # the include guard's group is no condition (`_guard_body`): the first inclusion is the one that defines anything
+    guard, guard_define = None, -1
+    if len(events) == 1 and events[0]["op"] == "if" and events[0].get("defined"):
+        ev, g = events[0], events[0]["defined"]
+        bodies = {d["pos"]: d for d in out["defines"]}
+
+        def bare(e):
+            d = bodies.get(e.get("pos")) if e.get("op") == "define" else None
+            return d is not None and d["name"] == g and not d["body"] and not d["function_like"]
+        if ev.get("negate") and ev["then"] and bare(ev["then"][0]) and not ev["else"]:
+            guard, guard_define = (id(ev), False), ev["then"][0]["pos"]
+        elif not ev.get("negate") and [e["op"] for e in ev["then"]] == ["error"] and ev["else"] and bare(ev["else"][0]):
+            guard, guard_define = (id(ev), True), ev["else"][0]["pos"]
+    for d in out["defines"]:
+        depth = d.pop("depth") - (1 if guard is not None and d["outer"] == guard else 0)
+        d.pop("outer")
+        d["conditional"] = depth > 0
+    if guard is not None:
+        # the guard's own #define is an event, not a macro body (as `_guard_body` left it)
+        out["defines"] = [d for d in out["defines"] if d["pos"] != guard_define]
+    return out
+
+
+_ASM_RE = re.compile(r"\b(?:__asm__|__asm|asm)\b")
+_ASM_BLOCK_RE = re.compile(rb"\b(?:__asm__|__asm|asm)\b\s*\{")
+
+
+def _asm_spans(raw: bytes) -> list[tuple[int, int]]:
+    """(R63 review round 1 W1) ``asm { … }`` blocks of a file — their lines need not say ``asm`` (``DBNE D6, loop``)."""
+    mask = _code_mask(raw)
+    out = []
+    for m in _ASM_BLOCK_RE.finditer(mask):
+        depth, j = 0, m.end() - 1
+        while j < len(mask):
+            depth += {123: 1, 125: -1}.get(mask[j], 0)
+            j += 1
+            if depth == 0:
+                break
+        out.append((m.start(), j))
+    return out
+
+
+def _parse_error_leaves(root, raw, spans: list[tuple[int, int]]) -> dict[str, Any]:
+    """(R63) The parse errors left after `reading_text` — innermost ERROR and MISSING nodes, by kind — and up to three
+    ``(line, kind, text)`` samples. Kinds: ``directive`` (on a directive line — the walk reads it from the lexer),
+    ``unnamed_bitfield`` (``U8 :1;`` — the grammar lacks unnamed bit-fields; a struct with bit-fields is never
+    flattened, so nothing is lost), ``asm`` (inline assembly — its function stays unread), ``in_function`` (a function's
+    own: `project_body_conditionals` reports it) and ``declaration`` (a file-level construct the reader does not know:
+    the declarations it covers may be missing)."""
+    if not root.has_error:
+        return {}
+    starts = [a for a, _b in spans]
+    fn_spans = _function_spans(root)
+    fn_starts = [a for a, _b in fn_spans]
+    counts: dict[str, int] = {}
+    samples: list[list[Any]] = []
+    asm: list[tuple[int, int]] | None = None
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if not (n.has_error or n.is_missing):
+            continue
+        inner = [c for c in n.children if c.has_error or c.type == "ERROR" or c.is_missing]
+        if n.type != "ERROR" and not n.is_missing:
+            stack.extend(inner)
+            continue
+        if n.type == "ERROR" and any(c.type == "ERROR" for c in inner):
+            stack.extend(inner)
+            continue
+        pos = n.start_byte
+        line_start = raw.rfind(b"\n", 0, pos) + 1
+        line_end = raw.find(b"\n", pos)
+        line = raw[line_start:line_end if line_end >= 0 else len(raw)].decode("utf-8", "replace")
+        k = bisect.bisect_right(starts, pos) - 1
+        f = bisect.bisect_right(fn_starts, pos) - 1
+        if asm is None:
+            asm = _asm_spans(raw)
+        a = bisect.bisect_right([s for s, _e in asm], pos) - 1
+        text = _text(n, raw).strip()
+        if k >= 0 and pos < spans[k][1]:
+            kind = "directive"
+        elif n.is_missing and n.type == "field_identifier" and n.parent is not None \
+                and any(c.type == "bitfield_clause" for c in n.parent.children):
+            kind = "unnamed_bitfield"
+        elif _ASM_RE.search(line) or (a >= 0 and pos < asm[a][1]):
+            kind = "asm"
+        elif f >= 0 and pos < fn_spans[f][1]:
+            kind = "in_function"
+        elif n.is_missing and n.type in ("}", ")", "]"):
+            # (review round 2 W1) a closing bracket the parser supplied: the structure was cut (a macro that hides a
+            #   brace — ``#define CRIT_END() }`` — makes the rest of the file something else)
+            kind = "lost_structure"
+        elif n.is_missing:
+            # (review round 1 W1) a name or ``;`` the parser supplied — ``typedef enum { … };`` with no name: the
+            # construct around it was read
+            kind = "missing_token"
+        elif text in ("{", "}"):
+            # the ``}`` closing ``extern "C" {`` under ``#ifdef __cplusplus`` is no brace a C compiler sees; any other is
+            # lost structure (``#define IF_READY if (g_ready) {`` cuts the function it is used in — review round 2 W1)
+            # (round 3 I2) only between a line opening a ``__cplusplus`` group and the ``#endif`` that closes it
+            k2 = bisect.bisect_right(starts, pos) - 1
+            prev = raw[spans[k2][0]:spans[k2][1]] if k2 >= 0 else b""
+            after = raw[spans[k2 + 1][0]:spans[k2 + 1][1]] if k2 + 1 < len(spans) else b""
+            opens = re.match(rb"\s*#\s*(?:ifdef\s+__cplusplus\b|if\s+defined\s*\(?\s*__cplusplus\b)", prev)
+            kind = "cplusplus_brace" if opens and re.match(rb"\s*#\s*endif\b", after) else "unmatched_brace"
+        else:
+            kind = "declaration"
+        counts[kind] = counts.get(kind, 0) + 1
+        # up to three samples of each kind that may cost something (round 3 I3: an asm-heavy file hid its one
+        #   unknown-declaration sample)
+        if kind not in ("directive", "unnamed_bitfield", "cplusplus_brace") and \
+                sum(1 for s in samples if s[1] == kind) < 3:
+            samples.append([raw.count(b"\n", 0, pos) + 1, kind, " ".join(line.split())[:100]])
+    return {"kinds": counts, "samples": samples}
 
 
 def _effective_strays(strays: list[dict[str, Any]], defined: set[str], states: dict,
@@ -1304,7 +1713,20 @@ def _build_defines(text: str) -> dict[str, Any]:
         sets.append(defines)
     if any(d != sets[0] for d in sets[1:]):
         return incomplete("configurations_disagree")
-    return {"defines": sets[0], "complete": True, "reason": ""}
+    # (R63 review round 2 I2) a compiler option that may compile C as C++ (CodeWarrior ``-C++f`` · a "C++" switch set):
+    #   then ``__cplusplus`` is not decided undefined (`_pp_undefined`)
+    cplusplus = False
+    for config in configs:
+        for tool in config.iter("tool"):
+            if "compiler" not in (tool.get("superClass") or "").lower():
+                continue
+            for opt in tool.iter("option"):
+                kind = ((opt.get("superClass") or "") + " " + (opt.get("name") or "")).lower()
+                values = [opt.get("value") or ""] + [v.get("value") or "" for v in opt.iter("listOptionValue")]
+                if any(re.search(r"(?:^|\s)-C\+\+", v) for v in values) or (
+                        re.search(r"c\+\+|cplusplus", kind) and any(v.strip().lower() not in ("", "false") for v in values)):
+                    cplusplus = True
+    return {"defines": sets[0], "complete": True, "reason": "", "cplusplus_mode": cplusplus}
 
 
 # (R17) Names an implementation may define: reserved identifiers (C11 7.1.3 — any leading underscore, conservatively),
@@ -1375,50 +1797,6 @@ _IF_NODES = frozenset({"preproc_if", "preproc_ifdef", "preproc_elif", "preproc_e
 _UNKNOWN = "unknown"
 
 
-def _events(nodes, raw):
-    """Preprocessor-relevant structure of a file, in order: includes, (un)defines, conditionals, declarations."""
-    out = []
-    for n in nodes:
-        t = n.type
-        if t == "comment":
-            continue
-        if t == "preproc_include":
-            target = _text(n.child_by_field_name("path"), raw).strip()
-            out.append({"op": "include", "name": target.strip('"<>'), "system": not target.startswith('"')})
-        elif t in {"preproc_def", "preproc_function_def"}:
-            out.append({"op": "define", "name": _text(n.child_by_field_name("name"), raw), "pos": n.start_byte})
-        elif t == "preproc_call":
-            directive = "#" + _call_keyword(n, raw)   # ``#  undef`` too (R62 review round 5 C-2)
-            arg = n.child_by_field_name("argument")
-            if directive == "#undef" and arg is not None:
-                out.append({"op": "undef", "name": _text(arg, raw).strip()})
-            elif directive == "#error":
-                out.append({"op": "error", "text": _text(arg, raw).strip()[:120] if arg is not None else ""})
-        elif t in _IF_NODES:
-            out.append(_if_event(n, raw))
-        elif t in {"ERROR", "compound_statement"}:
-            # Parse-recovery container at file level (see `_items`): its contents are ordinary top-level items.
-            out.extend(_events(n.named_children, raw))
-        else:
-            out.append({"op": "decl", "pos": n.start_byte})
-    return out
-
-
-def _if_event(n, raw):
-    cond, name, alt = n.child_by_field_name("condition"), n.child_by_field_name("name"), n.child_by_field_name("alternative")
-    body = [c for c in n.named_children if c != cond and c != name and c != alt]
-    ev: dict[str, Any] = {"op": "if", "then": _events(body, raw), "else": [], "line": n.start_point[0] + 1}
-    if n.type in {"preproc_ifdef", "preproc_elifdef"}:
-        # (R62) the directive's own spelling — ``#  ifndef`` too (``startswith("#ifndef")`` read it as ``#ifdef``)
-        ev["defined"] = _text(name, raw) if name is not None else ""
-        ev["negate"] = _directive_keyword(n, raw) in ("ifndef", "elifndef")
-    else:
-        ev["expr"] = strip_comments(_text(cond, raw)) if cond is not None else ""
-    if alt is not None:
-        ev["else"] = _events(alt.named_children, raw) if alt.type == "preproc_else" else [_if_event(alt, raw)]
-    return ev
-
-
 class _PPUnknown(Exception):
     """The condition depends on something the preprocessor state does not determine."""
 
@@ -1462,7 +1840,10 @@ def _pp_undefined(name, env):
     if env["gap"]:
         raise _PPUnknown("undefined_outside_tree:" + name)
     if name not in env["defined_anywhere"]:
-        if env.get("build_defines_complete") and not _implementation_may_define(name):
+        # (R63 review round 1 I3) a C implementation shall not predefine ``__cplusplus`` (C11 6.10.8p3): reserved as it
+        #   is, with the -D set read it is undefined — ``#ifdef __cplusplus`` around ``extern "C" {`` is decided
+        if env.get("build_defines_complete") and ((name == "__cplusplus" and env.get("c_language"))
+                                                  or not _implementation_may_define(name)):
             # (R17) the build configuration lists every -D (none for this name) and the name is not the
             # implementation's to define: undefined, 0 (C11 6.10.1p4) — recorded as an assumption of the unit
             env["assumed_undefined"].add(name)
@@ -1684,6 +2065,7 @@ def body_verdict(scope: dict[str, Any], keyword: str, argument: str, assumed: se
            "gap": bool(scope.get("missing_includes")) or bool(scope.get("body_includes")),
            "varied": set(scope.get("pp_varied") or ()),
            "build_defines_complete": bool((scope.get("build_defines") or {}).get("complete")),
+           "c_language": (scope.get("build_defines") or {}).get("cplusplus_mode") is False,
            "assumed_undefined": assumed if assumed is not None else set()}
     return _pp_condition(ev, env)
 
@@ -1709,10 +2091,11 @@ def pp_condition(scope: dict[str, Any], node, raw: bytes, assumed: set | None = 
 _GROUP_DIRECTIVES = frozenset({"if", "ifdef", "ifndef", "elif", "elifdef", "elifndef", "else", "endif"})
 
 
-def _directive_lines(raw: bytes, start: int, end: int) -> list[tuple[int, int, str, str]]:
+def _directive_lines(raw: bytes, start: int, end: int, hashes: list[int] | None = None) -> list[tuple[int, int, str, str]]:
     """Preprocessor directive lines in ``raw[start:end]`` outside comments and literals: ``(line_start, line_end,
     keyword, argument)``, ``line_end`` being the newline that ends the logical line (a backslash-newline continues it;
-    a block comment is one blank, so a directive line running into a comment that spans lines goes on after it)."""
+    a block comment is one blank, so a directive line running into a comment that spans lines goes on after it).
+    ``hashes`` (R63), when given, receives each line's ``#`` position (a comment before it on the line is a blank)."""
     out: list[tuple[int, int, str, str]] = []
     i, state, only_space, line_start = start, "code", True, start
     head: int | None = None
@@ -1747,6 +2130,8 @@ def _directive_lines(raw: bytes, start: int, end: int) -> list[tuple[int, int, s
         if c == b"\n":
             if head is not None:
                 out.append((head, i, *_directive_head(raw[hash_at + 1:i])))
+                if hashes is not None:
+                    hashes.append(hash_at)
             state, only_space, line_start, head = "code", True, i + 1, None
             i += 1
             continue
@@ -1776,6 +2161,8 @@ def _directive_lines(raw: bytes, start: int, end: int) -> list[tuple[int, int, s
         i += 1
     if head is not None:
         out.append((head, end, *_directive_head(raw[hash_at + 1:end])))
+        if hashes is not None:
+            hashes.append(hash_at)
     return out
 
 
@@ -1890,9 +2277,13 @@ def project_body_conditionals(text: str, scope: dict[str, Any]) -> tuple[str, di
     raw = text.encode()
     if scope.get("main_file_sha256") != hashlib.sha256(raw).hexdigest():
         return text, report
+    # (R63) from the bytes the project context read (`reading_text`): vendor syntax as blanks — a function the context saw
+    #   (``__interrupt void SCI0_ISR(void)``) is the function its consumers parse, at the same position
+    raw, blanked = reading_text(raw)
+    report["blanked"] = blanked
     root = parser.parse(raw).root_node
     if not root.has_error:
-        return text, report
+        return (raw.decode("utf-8") if blanked or raw != text.encode() else text), report
     states = scope.get("main_file_states") or {}
     before = _function_nodes(root, raw)
     shape = {key: _tree_has_error(n) for key, n in before.items()}
@@ -1927,7 +2318,7 @@ def project_body_conditionals(text: str, scope: dict[str, Any]) -> tuple[str, di
         for rec in failed:   # projections that disturb each other: the rest are tried together again
             rec["status"] = "conflicts_with_another_projection"
         accepted = [x for x in accepted if x[1] not in failed]
-    return text, report
+    return (raw.decode("utf-8") if raw != text.encode() else text), report
 
 
 def _undecided_kind(scope: dict[str, Any], why: str, position: int | None = None) -> str:
@@ -1990,6 +2381,11 @@ def apply_body_projection(scope: dict[str, Any] | None, text: str) -> str:
     if new == text:
         return text
     scope["projected_sha256"] = hashlib.sha256(new.encode()).hexdigest()
+    # (R63) what makes the text read differ from the file — the evidence's hash scope says it (`test_evidence`)
+    scope["read_text_changes"] = [name for name, changed in (
+        ("vendor_syntax_blanked", bool(report.get("blanked"))),
+        ("bare_define_blanks_moved", _parse_safe(text.encode()) != text.encode()),
+        ("body_conditionals_projected", bool(report.get("projected")))) if changed]
     assumed_at: dict[int, list[str]] = {}
     names: set[str] = set(scope.get("assumed_undefined_body") or ())
     for rec in report["functions"]:
@@ -2073,6 +2469,76 @@ def summarize_body_projection(scopes, only: set | None = None) -> dict[str, Any]
     return out
 
 
+def summarize_source_reading(context: dict[str, Any] | None, scopes) -> dict[str, Any]:
+    """(R63) How the C files a document's units read were read (each unit's scope ``files`` — its own file and every
+    header it includes): vendor syntax read as blanks (`reading_text`), file-level directives read from the lexer that the
+    parser's tree did not show (`_file_walk`), multi-line macros read without their line splices, the parse errors left
+    by kind (`_parse_error_leaves`, with samples of the file-level ones the reader does not know) and the files the project
+    context could not read at all (``incomplete_files`` · ``file_cap_reached`` of the source stage). {} when no unit has a
+    scope."""
+    files = (context or {}).get("files") or {}
+    scopes = [s for s in scopes if s]
+    reached = sorted({f for s in scopes for f in (s.get("files") or ()) if f in files})
+    if not reached:
+        return {}
+    unread = list((context or {}).get("incomplete_files") or [])
+    missing = {os.path.basename(m).lower() for s in scopes for m in (s.get("missing_includes") or ())}
+    changed: dict[str, list[str]] = {}
+    for s in scopes:
+        if s.get("read_text_changes"):
+            changed[s.get("path") or ""] = list(s["read_text_changes"])
+    out: dict[str, Any] = {"files_read": len(reached), "vendor_blanks": {}, "files_with_vendor_syntax": 0,
+                           "directives_beyond_tree": {}, "files_with_directives_beyond_tree": 0,
+                           "spliced_macro_definitions": 0, "parse_errors": {}, "files_with_unknown_declarations": 0,
+                           "unknown_declaration_samples": [], "files_with_asm": 0, "unbalanced_directives": {},
+                           # (review round 1 I7) unread files of the whole tree, and those a unit of the document
+                           # includes (a missing include of a reached scope names it)
+                           "context_unread_files": len(unread),
+                           "context_unread_sample": [os.path.basename(p) for p in unread[:8]],
+                           "context_unread_included": sorted({os.path.basename(p) for p in unread
+                                                              if os.path.basename(p).lower() in missing})[:8],
+                           "context_file_cap_reached": bool((context or {}).get("file_cap_reached")),
+                           # (review round 1 W2) units whose text read differs from the file — their evidence hash is of
+                           # the text read (`apply_body_projection` · `read_text_changes`)
+                           # (review round 4 I1) when a macro alias write is not resolved to its object anywhere
+                           "alias_writes_unresolved": designator_gap(context) or (
+                               "unreadable_directive" if any(d.get("op") == "unreadable" for rec in files.values()
+                                                             for d in (rec.get("stray_directives") or {}).get("directives")
+                                                             or ()) else ""),
+                           "unit_files_text_changed": len(changed),
+                           "text_change_kinds": {k: sum(1 for v in changed.values() if k in v)
+                                                 for k in sorted({k for v in changed.values() for k in v})}}
+
+    def add(into, counts):
+        for k, v in (counts or {}).items():
+            into[k] = into.get(k, 0) + int(v)
+    for f in reached:
+        reading = files[f].get("reading") or {}
+        if reading.get("blanked"):
+            out["files_with_vendor_syntax"] += 1
+            add(out["vendor_blanks"], reading["blanked"])
+        if reading.get("directives_beyond_tree"):
+            out["files_with_directives_beyond_tree"] += 1
+            add(out["directives_beyond_tree"], reading["directives_beyond_tree"])
+        out["spliced_macro_definitions"] += int(reading.get("spliced_defines") or 0)
+        for name in reading.get("unbalanced_brace_macros") or ():
+            out.setdefault("unbalanced_brace_macros", [])
+            if len(out["unbalanced_brace_macros"]) < 10:
+                out["unbalanced_brace_macros"].append(f"{os.path.basename(f)}:{name}")
+        errors = reading.get("errors") or {}
+        kinds = errors.get("kinds") or {}
+        add(out["parse_errors"], kinds)
+        if kinds.get("declaration"):
+            out["files_with_unknown_declarations"] += 1
+            for line, kind, text in errors.get("samples") or []:
+                if kind == "declaration" and len(out["unknown_declaration_samples"]) < 10:
+                    out["unknown_declaration_samples"].append(f"{os.path.basename(f)}:{line} {text}")
+        if kinds.get("asm"):
+            out["files_with_asm"] += 1
+        add(out["unbalanced_directives"], reading.get("unbalanced_directives"))
+    return out
+
+
 def macro_bodies(context: dict[str, Any]) -> dict[tuple[str, int], dict]:
     """Every ``#define`` of the project keyed by (file, position) — built once, shared by all units."""
     bodies: dict[tuple[str, int], dict] = {}
@@ -2117,7 +2583,7 @@ def _changes_table(ev: dict[str, Any], path: str, mode: str, macros: dict[str, A
 
 def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = None,
                     defines: dict[str, str] | None = None, known_names: set[str] | None = None,
-                    build_defines_complete: bool = False) -> dict[str, Any]:
+                    build_defines_complete: bool = False, c_language: bool = False) -> dict[str, Any]:
     """Walk ``main`` and its quoted includes in order, tracking the macro table like the compiler would.
 
     Returns declaration states ``{(file, pos): "active" | "unknown"}`` (absent = not compiled in this
@@ -2143,7 +2609,9 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
     last_main = [-1]
     env = {"macros": macros, "bodies": bodies, "parser": parser, "gap": False, "varied": set(),
            "defined_anywhere": (known_names if known_names is not None else defined_names(context)) | set(defines or ()),
-           "build_defines_complete": build_defines_complete, "assumed_undefined": set()}
+           "build_defines_complete": build_defines_complete, "assumed_undefined": set(),
+           # (R63) no option compiles this C unit as C++: ``__cplusplus`` is no name the implementation defines
+           "c_language": c_language}
     out["defined_anywhere"] = env["defined_anywhere"]
     out["assumed_undefined"] = env["assumed_undefined"]
     stack: list[str] = []
@@ -2252,7 +2720,7 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         return scope
     build = _unit_build_defines(context, path)
     pp = preprocess_unit(context, path, bodies, defines=build["defines"], known_names=known_names,
-                         build_defines_complete=build["complete"])
+                         build_defines_complete=build["complete"], c_language=not build.get("cplusplus_mode", True))
     # (R62 review round 2 W-B) a #define / #undef inside a function body of this unit changes the table for the code
     #   after it, where the file-level walk does not look: those names vary in the unit (undecided everywhere, never
     #   "undefined" on build evidence); an #include there may define anything (`body_includes` — a gap for body #if)
@@ -2307,7 +2775,7 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         pp["defined_anywhere"] = set(pp["defined_anywhere"]) | changed | missed
     scope["body_table_unknown"] = sorted(unknown)
     scope["build_defines"] = {"evidence": build["evidence"], "complete": build["complete"], "reason": build["reason"],
-                              "defines": dict(build["defines"])}
+                              "defines": dict(build["defines"]), "cplusplus_mode": build.get("cplusplus_mode", True)}
     scope["assumed_undefined"] = sorted(pp["assumed_undefined"])
     # (R17 review R2 W1) names a function-body #if of this unit takes as undefined on the same evidence (every body
     # condition's names — the MC/DC design and the disclosures read this; one oracle run records only what it met)
@@ -2462,7 +2930,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         *(["the build configuration " + os.path.basename(os.path.dirname(scope["build_defines"]["evidence"])) + "/.cproject "
            "defines only the macros its compiler options list (" + (", ".join(sorted(scope["build_defines"]["defines"]))
                                                                     or "none") + "); a name that neither the tree nor "
-           "the build defines and that is not the implementation's (no leading underscore, no standard name) is undefined "
+           "the build defines and that is not the implementation's (no leading underscore, no standard name — or is "
+           "__cplusplus, which no C implementation predefines, C11 6.10.8p3) is undefined "
            "in #if — assuming the toolchain plugin's default options add no -D (the file stores only non-default values), "
            "the compiler predefines only reserved names, headers outside the tree (toolchain hidef.h/stdtypes.h, <...>) "
            "and the build environment (COMPOPTIONS, DEFAULT.ENV) define none of these: "
@@ -2946,7 +3415,7 @@ def _unit_build_defines(context, path):
         return {"evidence": "", "complete": False, "reason": "no_build_configuration_for_unit", "defines": {}}
     rec = configs[chosen]
     return {"evidence": chosen, "complete": bool(rec.get("complete")), "reason": rec.get("reason", ""),
-            "defines": dict(rec.get("defines") or {})}
+            "defines": dict(rec.get("defines") or {}), "cplusplus_mode": bool(rec.get("cplusplus_mode", True))}
 
 
 def _root_of(context, path):
@@ -3102,6 +3571,55 @@ def build_scopes(context: dict[str, Any], paths) -> dict[str, dict[str, Any]]:
     return {path: scopes[path] for path in wanted}
 
 
+_DESIGNATOR_RE = re.compile(r"\(*\s*([A-Za-z_]\w*)(?:\s*\.\s*[A-Za-z_]\w*|\s*\[\s*(?:0[xX][0-9A-Fa-f]+|\d+)[uUlL]*\s*\])*\s*\)*")
+
+
+def _designator_targets(name: str, macro_text: dict[str, list[str]], unsettled: set[str] | None,
+                        objects: frozenset[str] | set[str] = frozenset(), depth: int = 0) -> set[str] | None:
+    """(R63) What a write through the macro ``name`` may write, when every definition of it — and of every macro its
+    root names, in any file — is a plain designator: an identifier with ``.member`` / ``[constant]`` steps in balanced
+    parentheses (``#define PTADL _PTAD.Overlap_STR.PTADLSTR.Byte``). Every name on the chain is in the set (review round 1
+    C1: ``#define ALIAS g_c`` is ``g_c`` in a unit where ``g_c`` is an object even when another file makes ``g_c`` a
+    macro). None — not something the closure can name — for a call, a pointer step or an operator, a chain deeper than 8
+    or through itself, and for a name ``unsettled`` lists (a #define / #undef inside a function body: the walk does not
+    follow the table there; None as ``unsettled`` — a body directive the lexer could not read — refuses every macro).
+    Every chain end must be an object some read file declares (``objects``, review round 2 C1': a name defined nowhere the
+    context read — an unread header's macro, a -D — may be anything)."""
+    if unsettled is None or name in unsettled:
+        return None
+    out: set[str] = set()
+    for body in macro_text.get(name) or [""]:
+        m = _DESIGNATOR_RE.fullmatch(body.strip())
+        if not m or body.count("(") != body.count(")"):
+            return None
+        root = m.group(1)
+        out.add(root)
+        if root in macro_text:
+            if depth >= 8 or root == name:
+                return None
+            more = _designator_targets(root, macro_text, unsettled, objects, depth + 1)
+            if more is None:
+                return None
+            out |= more
+        elif root not in objects:
+            return None
+    return out
+
+
+def designator_gap(context: dict[str, Any] | None) -> str:
+    """(R63 review rounds 3-4) Why a write through a macro alias is not resolved to its object anywhere in the tree
+    (`_designator_targets`): a file the source stage could not read, or a quoted include found nowhere that is no
+    toolchain header — a name defined there may be another unit's object here. "" when the context read everything."""
+    files = (context or {}).get("files") or {}
+    if (context or {}).get("incomplete_files"):
+        return "unread_files:" + ", ".join(os.path.basename(p) for p in context["incomplete_files"][:3])
+    for path, rec in files.items():
+        for inc in rec.get("includes") or ():
+            if not _resolve_include(context, path, inc) and not _toolchain_header(context, inc):
+                return f"include_not_found:{os.path.basename(path)}:{inc}"
+    return ""
+
+
 def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
     """Per function name: globals it may write (directly or through callees), whether it calls unknown code,
     and the project-wide address-taken set. Same-named static functions in different files are merged
@@ -3145,6 +3663,26 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
     for rec in (context.get("files") or {}).values():
         for mname, defs in rec["macros"].items():
             macro_text.setdefault(mname, []).extend(d.get("body") or "" for d in defs)
+    # (R63 review round 1 C1) names a function body #defines or #undefs somewhere: the table there is not the walk's, so a
+    #   write through such a macro is not resolved to an object (`_designator_targets`) — and a write through such a name
+    #   itself is no write the closure can name (round 2 W3 — checked even when designators are refused, round 3 I1)
+    body_names: set[str] = set()
+    unreadable = False
+    files_ = context.get("files") or {}
+    for rec in files_.values():
+        for d in (rec.get("stray_directives") or {}).get("directives") or ():
+            if d.get("op") == "unreadable":
+                unreadable = True
+            elif d.get("op") in ("define", "undef"):
+                body_names.add(d.get("name") or "")
+    # (round 3 C1'') a name may be defined where the context did not read — a file it could not read, a quoted include
+    #   found nowhere (a toolchain header aside), a build -D: then no designator chain is resolved (an object of one file
+    #   may be another unit's macro from that header); a -D name on a chain is refused too
+    gappy = unreadable or bool(designator_gap(context))
+    build_names = {n for cfg in ((context.get("build") or {}).get("configurations") or {}).values()
+                   for n in (cfg.get("defines") or {})}
+    unsettled: set[str] | None = None if gappy else body_names | build_names
+    objects = frozenset(n for rec in files_.values() for n in rec.get("globals") or ())
     # A macro that *mentions* another macro expands it (``#define WRAP INNER``, ``#define AGAIN() CALL_F``): follow it
     # like a call, so its writes and its calls count (R2b review round 3 C1/C2 — only ``NAME(`` was followed).
     for mname, texts in macro_text.items():
@@ -3173,8 +3711,19 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 continue
             writes |= entry["writes"]
             # A write through a macro name (``G_ALIAS = 0U`` with ``#define G_ALIAS g_cnt``) targets whatever the
-            # macro expands to — not something the closure can name (review round 2 C1).
-            unknown.update("macro_write:" + w for w in entry["writes"] if w in macro_fx)
+            # macro expands to — not something the closure can name (review round 2 C1) — unless every definition is a
+            # plain designator of one object (R63: ``#define PTADL _PTAD.Overlap_STR.PTADLSTR.Byte`` writes ``_PTAD``)
+            for w in entry["writes"]:
+                if w in macro_fx:
+                    targets = _designator_targets(w, macro_text, unsettled, objects)
+                    if targets is not None:
+                        writes |= targets
+                    else:
+                        unknown.add("macro_write:" + w)
+                elif w in body_names or w in build_names:
+                    # (review round 2 W3) a name only a function body #defines (a local macro), or (round 4, as HEAD) only
+                    #   a build -D: what a write through it reaches is not the walk's to say
+                    unknown.add("macro_write:" + w)
             pointer_write = pointer_write or entry["pointer_write"]
             stack.extend(entry["calls"])
             stack.extend(i for i in entry["idents"] if i in macro_fx and i not in direct)

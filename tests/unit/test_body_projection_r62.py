@@ -501,7 +501,7 @@ def test_the_disclosure_counts_projected_and_unread_functions_by_reason():
              "assumed_undefined": ["FEAT_ON"]}
     item = {i["key"]: i for i in build_disclosures("suts", {"body_projection": block})}["suts_body_projection"]
     assert item["value"] == "투영 1 · 남은 파싱 오류 2 / 트리 오류 함수 3" and item["tone"] == "warning"
-    for part in ("판정 못 하는 #if 조건 1", "벤더 확장", "FEAT_ON", "투영한 함수: f", "판정한 조건 2개", "채워지면 다음 생성에서 투영된다"):
+    for part in ("판정 못 하는 #if 조건 1", "인라인 어셈블리", "FEAT_ON", "투영한 함수: f", "판정한 조건 2개", "채워지면 다음 생성에서 투영된다"):
         assert part in item["note"], part
     assert "모델 밖 문법이라 투영으로 풀리지 않는다" in item["note"]          # no "fill it in" for what filling cannot fix
     assert "남은 함수: g (undecided:X), h (no_conditional_directive)" in item["note"]
@@ -619,13 +619,14 @@ def test_a_header_s_inline_function_body_change_counts_for_the_unit():
 
 def test_a_directive_in_a_construct_the_parser_did_not_recognize_is_still_read():
     # (round 4 S11) d's #else arm repeats the ``if (`` head; its body's #undef sits under an ERROR node — no function
-    # definition, no file-level event — and is still a change of the table
+    # definition — and is still a change of the table. (R63) The walk reads it from the lexer where it stands: FEAT_ON
+    # varies in the unit (no longer an unknown table), and f's ``#ifdef FEAT_ON`` is not decided
     d = ("void d(void)\n{\n#if NOPE_X\n    if (g_a) {\n#else\n    if (g_b) {\n#endif\n        g_o = 1U;\n#undef FEAT_ON\n"
          "    }\n}\n")
     text = GLOBALS + d + SPLIT[len(GLOBALS):]
     scope = _scope(text, build=True)
-    assert any("#undef FEAT_ON" in r for r in scope["body_table_unknown"])
-    assert cpc.apply_body_projection(scope, text) == text or _status(scope) != "projected"
+    assert "FEAT_ON" in scope["pp_varied"] and scope["body_table_unknown"] == []
+    assert cpc.apply_body_projection(scope, text) == text and _status(scope) == "undecided_varied:FEAT_ON"
 
 
 @pytest.mark.parametrize("spelling", ["#/**/undef FEAT_ON", "# /*c*/ undef FEAT_ON", "#\\\nundef FEAT_ON",
@@ -679,7 +680,7 @@ def test_the_scan_records_stray_directives_and_the_cache_versions_move_together(
     assert [(d["op"], d["name"]) for d in cpc._stray_directives(cpc.shared_parser().parse(long).root_node, long)[
         "directives"]] == [("undef", "B")]
     from backend.helpers.uds import _SOURCE_SECTIONS_SCHEMA_VERSION
-    assert (cpc.SCHEMA_VERSION, _SOURCE_SECTIONS_SCHEMA_VERSION) == (19, "v47")
+    assert (cpc.SCHEMA_VERSION, _SOURCE_SECTIONS_SCHEMA_VERSION) == (20, "v48")
 
 
 def test_undecided_reasons_say_whether_an_input_can_settle_them():
@@ -758,20 +759,21 @@ def test_the_suts_summary_counts_the_units_left_after_the_test_scope():
 # ── review round 4 ──────────────────────────────────────────────────────────────────────────────
 
 def test_a_directive_the_walk_reads_in_a_recovery_container_is_no_stray():
-    # a top-level compound_statement (parse recovery) holds a #define the walk reads (`_events` looks into it)
+    # a top-level compound_statement (parse recovery) holds a #define the walk reads (R63: every file-level line, from
+    # the lexer)
     raw = b"x = {\n#define IN_ERR 1\n1};\nvoid f(void) { }\n"
     root = cpc.shared_parser().parse(raw).root_node
-    assert [e["name"] for e in cpc._events(root.named_children, raw) if e["op"] == "define"] == ["IN_ERR"]
+    assert [e["name"] for e in cpc._file_walk(root, raw)["events"] if e["op"] == "define"] == ["IN_ERR"]
     assert cpc._stray_directives(root, raw)["directives"] == []
 
 
 
 def test_a_definition_the_walk_never_met_stops_the_conditions_resting_on_it():
-    # (round 4) Processor Expert ``IO_Map.h`` puts #defines among a register struct's members: the walk never reads
-    # them — a condition naming one, or a name a file-level #if testing one chose, is not decided
-    regs = ("typedef union {\n  unsigned char Byte;\n  struct {\n    unsigned char B0 :1;\n#define REG_B0_MASK 1U\n"
-            "  } Bits;\n} REGSTR;\n")
-    hdr = HDR.replace("#define FEAT_LEVEL 2\n", "") + regs.replace("REGSTR;", "REGSTR;\n")
+    # (round 4) a #define the walk does not read (R63: one in a header's inline function body — a body directive) of a
+    # name the project defines nowhere else: a condition naming it, or a name a file-level #if testing it chose, is not
+    # decided
+    regs = "static inline void reg_init(void) {\n#define REG_B0_MASK 1U\n}\n"
+    hdr = HDR.replace("#define FEAT_LEVEL 2\n", "") + regs
     text = (GLOBALS + "#ifdef REG_B0_MASK\n#define LVL 1\n#else\n#define LVL 3\n#endif\n"
             + SPLIT[len(GLOBALS):].replace("#ifdef FEAT_ON", "#if LVL > 2"))
     scope = _scope(text, hdr, build=True)
@@ -875,13 +877,13 @@ def test_a_spaced_undef_at_file_level_is_an_undef(spelling):
     assert rec["undefs"] == ["FEAT_ON"] and [e["op"] for e in rec["events"]] == ["undef"]
 
 
-def test_a_directive_the_lexer_reads_as_another_kind_is_a_stray():
-    # (round 5 C-2 N2) ``#un\<NL>def FEAT_ON``: tree-sitter reads ``#un``, the compiler ``#undef`` — the row is not one
-    # the walk read as an #undef: a stray change of a known name
+def test_a_directive_the_lexer_reads_as_another_kind_is_read_by_the_walk():
+    # (round 5 C-2 N2) ``#un\<NL>def FEAT_ON``: tree-sitter reads ``#un``, the compiler ``#undef``. (R63) The walk reads
+    # file-level lines from the lexer: an #undef of a defined name — FEAT_ON varies in the unit, f is not decided
     text = GLOBALS + "#un\\\ndef FEAT_ON\n" + SPLIT[len(GLOBALS):]
     scope = _scope(text, build=True)
-    assert "stray_directive:a.c:#undef FEAT_ON" in scope["body_table_unknown"]
-    assert cpc.apply_body_projection(scope, text) == text
+    assert scope["body_table_unknown"] == [] and "FEAT_ON" in scope["pp_varied"]
+    assert cpc.apply_body_projection(scope, text) == text and _status(scope) == "undecided_varied:FEAT_ON"
 
 
 def test_a_header_whose_directive_runs_into_a_long_comment_is_read():

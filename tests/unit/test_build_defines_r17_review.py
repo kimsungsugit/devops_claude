@@ -67,7 +67,8 @@ def test_what_it_can_read_is_the_define_set():
                                            + _list("Defined Symbols", "x.asm.definedSymbols", "definedSymbols", "ASM")
                                            + "</tool>"))
     # the assembler's symbols are not the C compiler's; ``-double_size`` is no ``-D``; ``-DD=`` is an empty body
-    assert ok == {"defines": {"A": "1", "B": "2", "C": "1", "D": ""}, "complete": True, "reason": ""}
+    assert ok == {"defines": {"A": "1", "B": "2", "C": "1", "D": ""}, "complete": True, "reason": "",
+                  "cplusplus_mode": False}   # (R63) no option compiles C as C++
 
 
 def test_configurations_that_disagree_are_not_evidence():
@@ -244,7 +245,8 @@ def test_round3_other_spellings_are_not_evidence(flags):
 
 def test_round3_cpp_tool_defines_do_not_reach_c_and_c_tools_must_agree():
     cpp = '<tool id="x" superClass="com.freescale.s12z.toolchain.cpp.compiler">' + _flags("-DCPP_ONLY") + "</tool>"
-    assert cpc._build_defines(_cp(tool_extra=cpp)) == {"defines": {}, "complete": True, "reason": ""}
+    assert cpc._build_defines(_cp(tool_extra=cpp)) == {"defines": {}, "complete": True, "reason": "",
+                                                       "cplusplus_mode": False}   # (R63) a C++ tool is no C++ mode for .c
     other_c = '<tool id="y" superClass="x.c.compiler.second">' + _flags("-DSECOND") + "</tool>"
     assert cpc._build_defines(_cp(tool_extra=other_c))["reason"] == "compiler_tools_disagree"
 

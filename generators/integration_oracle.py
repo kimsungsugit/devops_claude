@@ -212,9 +212,10 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
     stats["units_scoped"] = len(scopes)
     # (R62) each unit read as the compiler reads a function an #if splits mid-expression (a new map: the source stage's
     # map is shared with the other generators)
-    from generators.c_project_context import projected_texts, summarize_body_projection
+    from generators.c_project_context import projected_texts, summarize_body_projection, summarize_source_reading
     files = projected_texts(scopes, files)
     stats["body_projection"] = summarize_body_projection(scopes.values())
+    stats["source_reading"] = summarize_source_reading(context, scopes.values())   # (R63)
     from generators.c_project_context import summarize_build_assumptions
     stats["build_assumptions"] = summarize_build_assumptions(scopes.values())   # (R17)
     provider = CalleeProvider(context, files, scopes, parser)

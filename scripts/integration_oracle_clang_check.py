@@ -365,7 +365,10 @@ def _closure(entry_name, entry_path, files, scopes, provider, parser, originals=
         if len(original.encode()) != len(raw):
             # (review round 2 I-e) not the projection of this text: positions would not hold — say so, compile nothing
             raise _Failure("original_text_length_mismatch:" + os.path.basename(path))
-        return original.encode()
+        # (R63) with the vendor syntax clang does not know (``__interrupt`` · ``__far`` · ``@0x…``) read as blanks, as the
+        # generator read it — same length; the #if lines stay for clang's preprocessor
+        from generators.c_project_context import reading_text
+        return reading_text(original.encode())[0]
     raw = files[entry_path].encode()
     try:
         fn = _find_function(parser.parse(raw).root_node, raw, entry_name, scopes[entry_path])

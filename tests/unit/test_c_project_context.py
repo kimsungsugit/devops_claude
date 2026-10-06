@@ -532,8 +532,14 @@ def test_round2_macro_mediated_writes_rebind_the_input(macros, stmt, target):
 
 
 def test_round2_alias_write_in_a_callee_is_an_unknown_callee():
+    # (R63) a plain designator alias writes the object it names (`_designator_root`): the callee writes g_cnt — no longer
+    # an unknown callee; an alias the closure cannot pin to one object still is
     text = ('#include "common.h"\nU8 g_cnt;\n#define G_ALIAS g_cnt\nvoid reset(void) { G_ALIAS = 0U; }\n'
             "void f(void) { reset(); if (g_cnt == 1U) { } }\n")
+    _ctx, scope = _scope(text)
+    decision = build_mcdc_design(_unit(text, "f", scope))["decisions"][0]
+    assert _why(decision) == "global_modified_by_callee:reset:g_cnt"
+    text = text.replace("#define G_ALIAS g_cnt", "U8 *g_p;\n#define G_ALIAS (*g_p)")
     _ctx, scope = _scope(text)
     decision = build_mcdc_design(_unit(text, "f", scope))["decisions"][0]
     assert _why(decision) == "global_binding_unverified:unknown_callee:macro_write:G_ALIAS"

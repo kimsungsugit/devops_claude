@@ -35,6 +35,14 @@ from typing import Any
 
 from report_gen.c_return import returns_value
 
+
+def _read(text: str) -> bytes:
+    """(R63) A source file's bytes as the generators read them — vendor syntax (``@0x…`` · ``__interrupt`` · ``__far`` ·
+    ``__attribute__``) as blanks of the same length (`c_project_context.reading_text`), so its declarations parse."""
+    from generators.c_project_context import reading_text
+    return reading_text(text.encode("utf-8"))[0]
+
+
 _COMPARE = {"==", "!=", "<", "<=", ">", ">="}
 _LITERAL = re.compile(r"[-+]?(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*")
 _C_KEYWORDS = frozenset({"if", "else", "while", "for", "do", "switch", "case", "default", "return", "sizeof", "goto",
@@ -200,8 +208,8 @@ class SourceIndex:
             is_c = path.lower().endswith(".c")
             if not is_c and not path.lower().endswith(".h"):
                 continue
-            raw = text.encode("utf-8")
-            for n in _walk(parser.parse(raw).root_node):
+            raw = text.encode("utf-8")   # (R63) texts from the file; the tree from the bytes as read
+            for n in _walk(parser.parse(_read(text)).root_node):
                 if n.type == "type_definition":
                     for d in n.children_by_field_name("declarator"):
                         while d is not None and d.type not in {"type_identifier", "identifier"}:
@@ -343,7 +351,7 @@ def enumerators(texts: dict[str, str], parser) -> dict[str, tuple[int, tuple[str
     conflicting: set[str] = set()
     for path, text in texts.items():
         raw = text.encode("utf-8")
-        for n in _walk(parser.parse(raw).root_node):
+        for n in _walk(parser.parse(_read(text)).root_node):
             if n.type != "enumerator_list":
                 continue
             names, values, nxt = [], [], 0
@@ -421,7 +429,7 @@ def file_scope_globals(texts: dict[str, str], parser) -> set[str]:
         if not path.lower().endswith(".c"):
             continue
         raw = text.encode("utf-8")
-        for n in parser.parse(raw).root_node.named_children:
+        for n in parser.parse(_read(text)).root_node.named_children:
             if n.type != "declaration":
                 continue
             for d in n.children_by_field_name("declarator"):

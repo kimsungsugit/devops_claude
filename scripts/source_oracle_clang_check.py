@@ -169,6 +169,31 @@ def _struct_text(root, members, globals_, arrays, enum_base="int"):
     return f"struct {{ {render(tree)} }}"
 
 
+def _register_struct_text(paths):
+    """(R63) A stand-in for an object the scope declares but does not model — a volatile register union of the target's
+    header (``REG_PTP.Bits.PTP3`` through ``#define PTP_PTP3 REG_PTP.Bits.PTP3``, readable since R63): a plain struct of
+    just the member paths the code names, wide unsigned leaves. The oracle reads such an object as unknown, so no claim
+    rests on its value; the stand-in lets the rest of the function compile and be checked. What it does not reproduce —
+    union aliasing (``Byte`` / ``Bits``), the placement address — no claim depends on. None when a path is used both as a
+    member and as a whole."""
+    tree: dict = {}
+    for path in paths:
+        node = tree
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                return None
+        if isinstance(node.get(parts[-1]), dict):
+            return None
+        node.setdefault(parts[-1], "leaf")
+
+    def render(node):
+        return " ".join(f"struct {{ {render(sub)} }} {name};" if isinstance(sub, dict) else f"unsigned long long {name};"
+                        for name, sub in node.items())
+    return f"struct {{ {render(tree)} }}"
+
+
 _COMMENT_OR_LITERAL = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
 
 
@@ -423,6 +448,21 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
             continue
         unnamed_outputs.add(out_name)
     used_globals, used_structs = list(dict.fromkeys(used_globals)), list(dict.fromkeys(used_structs))
+    # (R63) register objects the code reaches only through member paths (`_register_struct_text`) — every use a member
+    #   path, the object declared in the unit but not modeled (``unresolved_globals``)
+    unresolved_g = scope.get("unresolved_globals") or {}
+    reach_text = _code_text(body) + " " + " ".join(f"{macro_bodies.get(m, '')} {fbodies.get(m, '')}" for m in macros)
+    registers: dict[str, str] = {}
+    for root in sorted(code_tokens):
+        if (root in status or root in globals_ or root in arrays or root in struct_globals or root in param_names
+                or root in types or root not in unresolved_g):
+            continue
+        uses = re.findall(rf"\b{re.escape(root)}\b((?:\s*\.\s*[A-Za-z_]\w*)*)", reach_text)
+        if not uses or any(not u.strip() for u in uses):
+            continue   # used as a whole (an address, a copy): no stand-in
+        text = _register_struct_text(sorted({re.sub(r"\s+", "", u)[1:] for u in uses}))
+        if text is not None:
+            registers[root] = text
     checks: dict[int, tuple] = {}
     closure = (scope.get("effects") or {}).get("functions") or {}
 
@@ -460,6 +500,8 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                         elems = [inputs.get(f"{g}[{k}]") if _fits(inputs.get(f"{g}[{k}]"), a["type"]) else _fill_for(a["type"], fill)
                                  for k in range(a["length"])]
                     lines.append(f"  {_base_type(a['type'], enum_base)} {g}[{a['length']}] = {{{', '.join(str(v) for v in elems)}}};")
+            for root, text in registers.items():
+                lines.append(f"  {text} {root} = {{}};")
             for g in used_structs:
                 members = struct_globals[g].get("members") or []
                 lines.append(f"  {_struct_text(g, members, globals_, arrays, enum_base)} {g} = {{}};")
@@ -717,8 +759,9 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
         unit = group[0]["unit"]
         n_outputs = sum(len(c["outputs"]) for c in group)
         raw = str(unit.get("source_text") or "").encode()
-        # (R62) same length as ``raw`` — the projected tree's positions index it
-        original = str(unit.get("source_text_original") or unit.get("source_text") or "").encode()
+        # (R62) same length as ``raw`` — the projected tree's positions index it. (R63) vendor syntax clang does not know
+        #   (``__interrupt`` · ``__far`` · ``@0x…``) read as blanks, as the generator read it; the #if lines stay for clang
+        original = cpc.reading_text(str(unit.get("source_text_original") or unit.get("source_text") or "").encode())[0]
         verdict: dict[tuple, str] = {}
         detail: dict[tuple, str] = {}
         failure = ""

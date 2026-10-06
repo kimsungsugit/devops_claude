@@ -1298,6 +1298,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             tone=_tone(bool(_int(rr, "errors")) or bool(_int(rr, "cut")))))
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
+    out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
     return out
 
 
@@ -1495,6 +1496,8 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                                       "sits_build_assumptions"))
     out.extend(_body_projection_item((qr.get("integration_oracle") or {}).get("body_projection"),
                                      "sits_body_projection", doc="sits"))   # (R62)
+    out.extend(_source_reading_item((qr.get("integration_oracle") or {}).get("source_reading"),
+                                    "sits_source_reading", doc="sits"))   # (R63)
 
     # sub-case 물량 — 흐름당 몇 갈래를 시험했나.
     sub = _int(qr, "total_sub_cases")
@@ -1536,13 +1539,14 @@ _PROJECTION_REASONS = {
     "body_table_unknown": ("파일 수준 걷기가 따라가지 못한 매크로 표 변경이 있는 단위(걷기 밖 #define · #undef · #include, 파서가 "
                            "놓친 정의에 기대는 파일 수준 #if, 찾지 못한 include)", "그 단위의 함수 본문 #if 는 판정하지 않는다 — "
                            "입력을 채워서는 풀리지 않는다(단위별 사유는 품질 요약 table_unknown_reasons)"),
-    "undecided_missed_definition": ("파서가 파일 수준에서 읽지 못한 #define(구조체 선언 안 · 인식 못 한 구문 안)에 기대는 #if 조건",
-                                    "매크로 표가 그 정의를 모르므로 투영하지 않는다 — 입력을 채워서는 풀리지 않는다(파서 개선 과제)"),
+    "undecided_missed_definition": ("파일 수준 걷기가 따라가지 않는 함수 본문 안 #define(다른 곳에 정의가 없는 이름)에 기대는 #if 조건",
+                                    "매크로 표가 그 정의를 모르므로 투영하지 않는다 — 입력을 채워서는 풀리지 않는다"),
     "undecided_varied": ("번역 단위 안에서 값이 바뀌는 매크로(재정의 · #undef · 함수 안 #define)의 #if 조건",
                          "그 함수 위치의 값을 알 수 없어 투영하지 않는다 — 입력을 채워서는 풀리지 않는다"),
     "undecided_reserved": ("컴파일러가 미리 정의할 수 있는 이름(밑줄로 시작 등)의 #if 조건",
                            "프로젝트 파일 · -D 만으로는 판정하지 않는다 — 대상 컴파일러가 그 이름을 정의하는지 확인이 필요하다"),
-    "no_conditional_directive": ("#if 가 아닌 구문(벤더 확장 __far · __interrupt · 인라인 어셈블리 등)",
+    "no_conditional_directive": ("#if 가 아닌 구문(인라인 어셈블리 · 파서가 모르는 벤더 문법 등 — @주소 · __attribute__ · "
+                                 "__interrupt · __far 는 R63 부터 공백으로 읽는다)",
                                  "모델 밖 문법이라 투영으로 풀리지 않는다"),
     "conditional_compilation_unresolved": ("함수 자체가 판정 못 하는 #if 아래",
                                            "그 #if 가 판정되면(매크로 정의 · -D) 다시 본다"),
@@ -1578,7 +1582,9 @@ def _body_projection_item(block: Any, key: str, doc: str = "suts") -> List[Dict[
                     "conditional_compilation_unresolved)")
     hash_note = ("투영한 파일의 근거 해시(Test Evidence · MCDC Design · Source Findings 의 Source SHA256)는 파일이 아니라 "
                  "투영한 원문의 해시다 — "
-                 "Test Evidence 의 해시 범위 열이 'captured_decoded_utf8_text_body_conditionals_projected' 로 말한다."
+                 "Test Evidence 의 해시 범위 열이 'captured_decoded_utf8_text_body_conditionals_projected' 로 말한다(R63: 벤더 "
+                 "구문을 공백으로 읽은 파일은 '…_vendor_syntax_blanked', 값 없는 #define 뒤 공백을 옮긴 파일은 "
+                 "'…_bare_define_blanks_moved' 가 함께 붙는다)."
                  if doc == "suts" else
                  "투영한 파일의 근거 해시(Test Evidence 의 Source SHA256)는 파일이 아니라 투영한 원문의 해시다.")
     return [_item(
@@ -1603,12 +1609,94 @@ def _body_projection_item(block: Any, key: str, doc: str = "suts") -> List[Dict[
         + (f" 같은 파일의 문서에 행이 없는 함수: 투영 {outside.get('projected', 0)} · 남은 오류 "
            f"{outside.get('not_projected', 0)}(이 문서의 칸에는 영향 없음)." if any(outside.values()) else "")
         + (f" 투영 단계 예외로 원문 그대로 읽은 파일 {errors}개 — 로그를 확인할 것." if errors else "")
-        + (f" 파서가 파일 수준에서 읽지 못한 #define 이 있는 단위 {_int(block, 'units_with_missed_definitions')}개(단위당 "
-           f"최대 {_int(block, 'missed_definitions')}개 — 예: 구조체 선언 안의 레지스터 매크로): 매크로 표에 없어 그 이름에 기대는 "
-           "#if 는 판정하지 않는다." if _int(block, "units_with_missed_definitions") else "")
+        + (f" 함수 본문 안에만 정의가 있어 매크로 표가 모르는 이름이 있는 단위 {_int(block, 'units_with_missed_definitions')}개(단위당 "
+           f"최대 {_int(block, 'missed_definitions')}개): 그 이름에 기대는 #if 는 판정하지 않는다."
+           if _int(block, "units_with_missed_definitions") else "")
         + (f" 함수 본문 등 걷기 밖의 지시문이 아는 이름을 바꿔 본문 #if 를 판정하지 않은 단위 {_int(block, 'units_table_unknown')}개."
            if _int(block, "units_table_unknown") else ""),
         tone=_tone(bool(reasons) or bool(errors)))]
+
+
+_VENDOR_BLANK_LABELS = {"address_placement": "@주소 배치", "attribute": "__attribute__", "interrupt": "__interrupt",
+                        "far_near": "__far · __near"}
+_TEXT_CHANGE_LABELS = {"vendor_syntax_blanked": "벤더 구문 공백", "bare_define_blanks_moved": "값 없는 #define 뒤 공백 옮김",
+                       "body_conditionals_projected": "본문 #if 투영"}
+_PARSE_ERROR_LABELS = {
+    "asm": "인라인 어셈블리(그 함수는 읽지 못한다)",
+    "in_function": "함수 안(본문 #if 투영 항목이 함수별 사유를 적는다)",
+    "declaration": "파일 수준의 모르는 구문(그 범위의 선언을 읽지 못했을 수 있다)",
+    "missing_token": "파서가 빠진 토큰(이름 · `;` · `#endif` 등)을 채운 곳(이름 없는 `typedef enum {…};` 등 — 둘레의 구문은 읽었다)",
+    "lost_structure": "파서가 닫는 괄호를 채운 곳(구조가 잘렸을 수 있다 — 매크로가 중괄호를 숨기면 그 뒤가 다른 구문으로 읽힌다)",
+    "unmatched_brace": "짝 없는 중괄호(매크로가 여는 중괄호를 숨기면 그 함수가 잘려 읽힌다)",
+    "cplusplus_brace": "`#ifdef __cplusplus` 안의 `extern \"C\" {` 중괄호(C 컴파일러는 보지 않는다 — 잃은 것 없음)",
+    "directive": "지시문 줄(지시문은 렉서로 직접 읽어 잃은 것 없음)",
+    "unnamed_bitfield": "이름 없는 비트필드 `U8 :1;`(파서 문법의 빈칸 — 비트필드 구조체는 평탄화하지 않아 잃은 것 없음)",
+}
+
+
+def _source_reading_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:
+    """(R63) 문서 함수가 읽는 C 파일(정의 파일 · include 한 헤더)을 어떻게 읽었나 — 벤더 구문을 공백으로 읽은 곳, 파서 트리가 보여
+    주지 않던 파일 수준 지시문, 줄 이음을 걷고 읽은 여러 줄 매크로, 남은 구문 오류(종류별 · 모르는 선언 구문 표본), 소스 단계가
+    못 읽은 파일. 범위가 붙은 unit 이 없으면(빈 블록) 말하지 않는다."""
+    if not isinstance(block, dict) or not _int(block, "files_read"):
+        return []
+    blanks = block.get("vendor_blanks") if isinstance(block.get("vendor_blanks"), dict) else {}
+    beyond = block.get("directives_beyond_tree") if isinstance(block.get("directives_beyond_tree"), dict) else {}
+    errors = block.get("parse_errors") if isinstance(block.get("parse_errors"), dict) else {}
+    unbalanced = block.get("unbalanced_directives") if isinstance(block.get("unbalanced_directives"), dict) else {}
+    samples = [str(x) for x in (block.get("unknown_declaration_samples") or [])]
+    unread = _int(block, "context_unread_files") or 0
+    included = [str(x) for x in (block.get("context_unread_included") or [])]
+    changes = block.get("text_change_kinds") if isinstance(block.get("text_change_kinds"), dict) else {}
+    unknown_decl = _int(block, "files_with_unknown_declarations") or 0
+    brace_macros = [str(x) for x in (block.get("unbalanced_brace_macros") or [])]
+    lost_structure = bool(errors.get("lost_structure") or errors.get("unmatched_brace") or brace_macros)
+    asm = _int(block, "files_with_asm") or 0
+    lost = "그 함수의 기대값 · MC/DC 결정" if doc == "suts" else "그 함수를 지나는 통합 기대값"
+    return [_item(
+        key, "소스 판독(C 파일을 어떻게 읽었나)",
+        f"읽은 파일 {_show(_int(block, 'files_read'))} · 벤더 구문 공백 {sum(int(v) for v in blanks.values())} · "
+        f"파서 밖 지시문 {sum(int(v) for v in beyond.values())} · 모르는 선언 구문 파일 {unknown_decl}",
+        "문서 함수가 읽는 C 파일(정의 파일과 include 한 헤더)을 컴파일러처럼 읽은 기록이다."
+        + (" 대상 컴파일러의 문법 중 값에 영향이 없는 것은 같은 길이의 공백으로 읽어(줄 번호 · 위치 그대로) 그 선언과 함수가 읽히게 "
+           "했다: " + " · ".join(f"{_VENDOR_BLANK_LABELS.get(k, k)} {v}" for k, v in blanks.items())
+           + f"(파일 {_show(_int(block, 'files_with_vendor_syntax'))}개). 인라인 어셈블리는 동작이 값에 영향을 주므로 공백으로 "
+           "읽지 않는다." if blanks else "")
+        + (" 파서 트리가 보여 주지 않던 파일 수준 지시문(구조체 선언 안 · 인식 못 한 구문 안 · extern \"C\" 안)도 지시문 줄을 직접 "
+           "읽어 매크로 표에 넣었다: " + " · ".join(f"#{k} {v}" for k, v in beyond.items())
+           + f"(파일 {_show(_int(block, 'files_with_directives_beyond_tree'))}개)." if beyond else "")
+        + (f" 여러 줄 매크로 {_show(_int(block, 'spliced_macro_definitions'))}개는 줄 이음(역슬래시-줄바꿈)을 걷고 읽었다."
+           if _int(block, "spliced_macro_definitions") else "")
+        + (" 남은 구문 오류 위치: " + " · ".join(f"{_PARSE_ERROR_LABELS.get(k, k)} {v}" for k, v in errors.items()) + "."
+           if errors else " 남은 구문 오류 없음.")
+        + (f" 인라인 어셈블리가 있는 파일 {asm}개 — {lost}은 비어 있을 수 있다." if asm else "")
+        + (f" 모르는 파일 수준 구문이 있는 파일 {unknown_decl}개 — 예: " + " / ".join(samples[:5])
+           + ". 그 범위의 선언(전역 · 타입 · 매크로가 아닌 것)은 읽지 못했을 수 있다 — 그 이름에 기대는 칸은 미상으로 남는다."
+           if unknown_decl else "")
+        + (" 짝이 맞지 않는 조건부 지시문: " + " · ".join(f"{k} {v}" for k, v in unbalanced.items())
+           + " — 그 파일의 #if 구조는 읽은 순서대로 닫았다." if unbalanced else "")
+        + (f" 소스 단계가 읽지 못한 파일(트리 전체) {unread}개(예: "
+           f"{', '.join(str(x) for x in (block.get('context_unread_sample') or [])[:5])})"
+           + (" — 이 문서의 함수가 include 하는 것: " + ", ".join(str(x) for x in included)
+              + ". 그 파일의 선언이 필요한 식별자는 값을 확정하지 않는다(파일 접근 · 인코딩을 확인할 것)." if included
+              else " — 이 문서의 함수가 include 하는 것은 없다.") if unread else "")
+        + (" 소스 단계의 파일 상한(4,000)에 닿아 그 뒤 파일은 문맥에 없다." if block.get("context_file_cap_reached") else "")
+        + (" @주소 배치는 지우고 읽으므로 같은 주소에 놓인 두 객체를 서로 다른 객체로 본다 — 휘발성이 아닌 객체가 주소를 "
+           "공유하면 그 별칭은 모델 밖이다." if blanks.get("address_placement") else "")
+        + (f" 소스 문맥에 읽지 못한 곳이 있어({block.get('alias_writes_unresolved')}) 매크로 별칭을 통한 쓰기"
+           "(`#define PTADL _PTAD.…` 에 대입)를 그 객체로 풀지 않았다 — 그런 쓰기를 하는 callee 는 효과를 모르는 것으로 둔다(칸 "
+           "사유 `macro_write:…`; 그 파일을 읽게 하면 풀린다)." if block.get("alias_writes_unresolved") else "")
+        + (" 중괄호 짝이 맞지 않는 매크로: " + ", ".join(brace_macros[:6])
+           + " — 그 매크로를 쓰는 코드는 구문 트리가 잘려 읽힐 수 있다(그 함수의 칸은 미상이거나 틀릴 수 있다)."
+           if brace_macros else "")
+        + (f" 읽은 원문이 파일과 달라진 정의 파일 {_show(_int(block, 'unit_files_text_changed'))}개("
+           + " · ".join(f"{_TEXT_CHANGE_LABELS.get(k, k)} {v}" for k, v in changes.items())
+           + ")의 근거 해시(" + ("Test Evidence · MCDC Design · Source Findings" if doc == "suts" else "Test Evidence")
+           + " 의 Source SHA256)는 파일이 아니라 읽은 원문의 해시다 "
+           "— 같은 길이 · 같은 줄이라 위치와 줄 번호는 파일 그대로다(Test Evidence 의 해시 범위 열이 무엇이 달라졌는지 말한다)."
+           if changes else ""),
+        tone=_tone(bool(unknown_decl or asm or included or unbalanced or lost_structure
+                        or block.get("context_file_cap_reached"))))]
 
 
 _BY_DOC_TYPE = {"sts": _sts_items, "suts": _suts_items, "sits": _sits_items}

@@ -33,9 +33,51 @@
 
 | # | 위치 | 기전 → 잃는 것 | 드러남 |
 |---|---|---|---|
-| 102 | `c_project_context._events` · `_items` | Processor Expert 레지스터 헤더(PV `IO_Map.h` · `mc9s12zvl64.h`, HD `MC9S12ZVL64MLF_it_PDS.h`)는 `#define` 을 **구조체 · 공용체 선언 안**(멤버 사이)에 둔다 — 파일 수준 걷기는 선언 안을 보지 않아 1,057 개씩(PV 2,114 · HD 1,057)이 매크로 표에 없다. 그 이름은 oracle 에서 미해결 식별자 | R62 부터 공시(`suts_body_projection`: 파서가 읽지 못한 정의가 있는 단위 수) · 그 이름에 기대는 본문 `#if` 는 판정하지 않음. 값은 HEAD 와 같음 |
-| 103 | 같은 곳 | 여러 줄 본문(`\` 이음 + 주석)의 핀 매크로 `X_GetVal()` · `X_SetVal()` 이 ERROR 노드 안 — PV 42 · HD 1 개가 표에 없다 | 위와 같음 |
+| 102 | `c_project_context._events` · `_items` | Processor Expert 레지스터 헤더(PV `IO_Map.h` · `mc9s12zvl64.h`, HD `MC9S12ZVL64MLF_it_PDS.h`)는 `#define` 을 **구조체 · 공용체 선언 안**(멤버 사이)에 둔다 — 파일 수준 걷기는 선언 안을 보지 않아 1,057 개씩(PV 2,114 · HD 1,057)이 매크로 표에 없다. 그 이름은 oracle 에서 미해결 식별자 | **R63 에서 해소**: 파일 수준 지시문을 렉서로 읽는다(`_file_walk`) |
+| 103 | 같은 곳 | 여러 줄 본문(`\` 이음 + 주석)의 핀 매크로 `X_GetVal()` · `X_SetVal()` 이 ERROR 노드 안 — PV 42 · HD 1 개가 표에 없다 | **R63 에서 해소**(같은 렉서) |
 | 104 | tree-sitter-c | `#define _LIN_CFG_H_ `(이름 뒤 공백) 다음 줄 `#include "lin_hw_cfg.h"` 를 그 매크로 본문으로 읽는다 — 걷기가 그 include 를 제 순서에 보지 못했다(같은 헤더가 뒤에 다른 경로로 포함됨; 제 순서로 다시 걸어도 실데이터 결과는 같았다 — 리뷰 5차) | **R62 에서 해소**: `_parse_safe` 가 같은 길이로 공백을 다음 줄 앞으로 옮겨 include 를 제 순서에 읽는다 |
+
+## R63 입력 판독 실측 (2026-10-06, 사용자 지시 "입력문서를 제대로 읽지 못하거나 코드를 읽지 못하거나 코드를 가지고 작업할 때 문제가 있으면 아무것도 진행할 수가 없어")
+
+생성기가 실제로 읽은 것을 같은 파일의 독립 판독과 맞대어 셌다(scratchpad `r63_doc_census.py` · `r63_code_census.py` · `r63_error_census.py`, 결과 `.codex_tmp/r63/*.json`). 문서 판독은 lxml 로 모든 표(중첩 · 병합 칸 · gridSpan · vMerge)를 다시 읽고, 코드 판독은 원본 바이트 · tree-sitter 트리 · 지시문 렉서를 비교했다.
+
+### 문서 판독 — 대체로 손실 없음
+
+| 문서 | HDPDM01 | KJPDS02_PV | 판단 |
+|---|---|---|---|
+| SRS 요구(표의 `ID` 행) | 63 / 독립 63 · 필드(이름 · 설명 · ASIL · Related ID · 검증 기준) 차이 0 | 68 / 68 · 차이 0 | #25 · #26 실데이터 미발화 |
+| SwUDS 함수 표 | 390 함수(표 406, 동명이인 8 제외). 설계 ID 문단 415 중 표가 없는 9 개는 대부분 '(삭제)' 표기 | 969(표 989, 동명이인 10) | 구조 손실 없음 |
+| SwUDS 파라미터 행 | **첫 칸이 빈(세로 병합) 행 10 개를 잃음 — 7 함수**(`u8s_HighSlopeCheck` 의 `s16g_DoorPreCtrl_DoorRoll` 등). 문서 오타로 이름이 숫자로 시작하는 행 1 | 0 | **#21 HD 실발화** — 다음 문서 판독 라운드 |
+| Value Range 미해석 → 타입 폭 | 42(이산 값 목록 `0x00, 0x01` · `0, 5, 15` 30 · 기타) | 142(단일 값 65 · 부호 16진 비전폭 `0xFF10 ~ 0x00F0` · 괄호 십진 `(-240~240)` · 내림차순 · `array 0x00 ~ 0xFF`) | #19 실발화(침묵) — 다음 문서 판독 라운드 |
+| HSIS | 21 신호(시트 55 행 — 101 행 상한 미도달) | 25 신호(54 행) | #30 미발화 |
+| SDS 파티션 | 763 | 871(지정 SDS 를 씀 — #62 폴백 미발화) | 파티션 키에 참조 문서 표 항목이 섞임(무해 추정) |
+
+### 코드 판독 — 체계적 손실, R63 에서 해소
+
+| 항목 | KJPDS02_PV | HDPDM01 | 처리 |
+|---|---|---|---|
+| 인코딩 · 2 MB 캡 | 178 파일 전부 UTF-8 · 캡 초과 0 | 99 · 0 | #16 · #17 · #73 미발화 |
+| 구문 오류가 있는 파일 | 55 / 178 | 18 / 99 | 아래 원인별 |
+| `@0x…` 주소 배치(레지스터 선언) | ERROR 719 | 359 | **R63** 같은 길이 공백으로 읽음 — 레지스터 전역이 선언으로 보인다 |
+| `__far` · `__interrupt` · `__attribute__((aligned))` | 파싱 오류 함수 6(`s_sha256_update` · `s_sha256_final` · `g_Lib_Sha256_Nb_Process` · `g_Lib_Sha256_Nb_Reset` · `TIM0_Ch0_ISR` · `SCI0_ISR`) | `Cpu.h` 원형 · `Monitor_ADC.c` | **R63** 공백으로 읽음(값 중립 허용 목록만) |
+| 파서 트리 밖 파일 수준 `#define` | 2,156(구조체 선언 안 2,114 · ERROR 33 · `extern "C"` 8 · 기타 1) | 1,058 | **R63** 렉서로 읽음(#102 · #103) |
+| 여러 줄 매크로 본문의 줄 이음(`\`) | 576 정의(LIN 신호 읽기 `l_u8_rd_…()` 등 — .c 에서 66 이름 120 회) | 201 | **R63** 줄 이음을 걷고 읽음 — 전에는 본문을 해석하지 못해 `macro_call_not_an_expression` |
+| `#if` 식 안의 줄 이음 | 2 | 1 | **R63** |
+| `extern "C" {` 안 선언(`HKMC_SecureFlash.h` typedef) | 5 typedef · 1 struct · 1 enum | — | **R63** |
+| 남은 것 | asm 블록(`_EntryPoint` · `starts12z.c`) · `__CSURF__` 조건 3 함수 · 이름 없는 비트필드 `U8 :1;`(파서 문법 빈칸 — 비트필드 구조체는 평탄화하지 않아 손실 없음) · CodeWarrior `interrupt N` · `@far` · 이중 문자 `%:` | 같음 | 공시(`suts_source_reading` · `sits_source_reading`) |
+
+### 코드로 일하기 — 미상 칸의 사유(R62 KJPDS02_PV 확장: 확정 34,182 · 미상 281,458)
+
+| 사유 | 칸 | 기전 | 다음 |
+|---|---|---|---|
+| `callee_pointer_write` | 161,687 — 그중 `ld_send_message` 149,941(UDS 응답 함수 30 개) | 포인터로 쓰는 callee 를 효과로만 돌리면 '주소가 노출된 객체와 **모든 배열**' 을 미상으로 만든다(`havoc_pointer_targets`) — 응답 버퍼만 쓰는데 rx 큐 배열까지 지움 | 포인터 대상 분석(상수 초기화 · 단일 대입으로 정해지는 포인터) |
+| `stub_pointer_argument` | 57,391 — `u8g_SysEepromCtrl_Read*` 8 개 | stub 의 출력 포인터 인자 → 같은 havoc | 인자가 가리키는 객체만 |
+| `observable_form_unmodeled` | 20,366 | 관측 이름이 모델 밖 형태 | |
+| `callee_effects_unknown` | 12,674 | 쓰기 요약에 모르는 callee | |
+| `observable_not_a_modeled_object` | 11,221 | 레지스터 비트필드 · 공용체 | |
+| `subscript_write_through_pointer_or_aggregate` | 6,562 | 포인터 · 집합체 첨자 쓰기 | |
+| `path_budget` · `path_dependent` · `undefined_behavior` | 1,414 · 1,250 · 1,100 | 예산 · 미상 분기 · UB | |
+| `source_parse_error` | 833 | R63 에서 6 함수 해소 | |
 
 ## 전체 목록
 
@@ -48,12 +90,12 @@
 | 13 | `c_parser.py:1387-1421` · `uds_generator.py:1044-1053` | Cloudium 전용 루트를 로컬 `Path` 로 읽어 AST 패스가 빈다(루트마다 `except: pass`) → 정규식 폴백만 | 침묵 |
 | 14 | `uds_generator.py:601-606` · `helpers/uds.py:1534-1551` · `routers/local.py:191-195` | 없는 루트를 기록 없이 뺀다(BOOT 등) | 침묵 |
 | 15 | `uds_generator.py:1093-1109` | 같은 (이름, 파일) 정의는 첫 것만 — `#if`/`#else` 양쪽 본문을 다 파싱하므로 활성 아닌 쪽이 이길 수 있다 | 침묵 |
-| 16 | `source_parser.py:322-325` · `uds_generator.py:586-595 · 1637-1641` | 읽기 예외 → `""`, 잘림으로 안 셈 → 사유 오기 | 침묵 · 오기 |
+| 16 | `source_parser.py:322-325` · `uds_generator.py:586-595 · 1637-1641` | 읽기 예외 → `""`, 잘림으로 안 셈 → 사유 오기 | 침묵 · 오기 (R63: 문맥이 읽지 못한 파일 수와 문서 함수가 include 하는 것을 `*_source_reading` 공시에) |
 | 17 | `source_parser.py:340` · `uds_generator.py:589`(ignore) vs `593`(replace) | CP949 해독 없음 — 한글 주석 손실, 로컬과 Cloudium 결과가 다름 | 침묵 |
 | 45 | `c_project_context.py:552-553 · 2385-2389` | const 표 초기화 20,000 자 초과 · 지정 · 2 차원 → 값 None → 거짓 소견 | 침묵 · 오기 |
 | 46 | `c_project_context.py:547 · 1867-1879` | 스칼라 초기화 `[:400]` 평가 — 잘린 것이 파싱되면 틀린 값 위험 | 침묵 |
 | 48 | `c_project_context.py:1507` | include 깊이 32 초과를 `missing_includes` · gap 없이 건너뜀 → 이름이 미결이 아니라 미정의(0)로 | 침묵 |
-| 49 | `c_project_context.py:438 · 1519-1524 · 1566` | 파일별 `parse_error` · `unknown_conditions` 를 저장만 하고 안 읽는다 | 침묵 |
+| 49 | `c_project_context.py:438 · 1519-1524 · 1566` | 파일별 `parse_error` · `unknown_conditions` 를 저장만 하고 안 읽는다 | **R63**: 파일별 `reading`(남은 구문 오류 종류 · 표본)을 `*_source_reading` 으로 공시 |
 | 50 | `c_parser.py:1404-1406` | 루트당 1,200 파일 | 침묵 |
 | 51 | `helpers/uds.py:1472-1587` | 소스 캐시 서명이 앞 1,200 파일만 · component JSON 무시 · Cloudium 은 서명 None 으로 30 분 미검증 재사용 | 침묵(낡음) |
 | 58 | `file_resolver.py:583 · 623 · 646` | worker IPC 60 초(4 MB 조각) · `list_dir` 30 초 → PermissionError → #16 로 삼켜지거나 전체 파싱이 경량 파싱으로 | 로그만 |

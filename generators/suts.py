@@ -6027,6 +6027,11 @@ def generate_suts(
     #   ⚠ 문서 함수는 **최종 unit 목록**(설계 ID 범위로 좁힌 뒤)으로 센다 — 범위를 붙일 때의 목록에는 문서에 행이 없는
     #   함수(HDPDM01 LIN 스택)가 있어, 그 함수의 투영을 "이 문서의 투영" 으로 공시했다(R62 확인)
     quality["body_projection"] = summarize_document_body_projection(units)
+    # (R63) 문서 함수가 읽는 C 파일(정의 파일 · include 한 헤더)을 어떻게 읽었나 — 벤더 구문을 공백으로 읽은 곳, 파서 트리가 못 본
+    #   파일 수준 지시문(구조체 선언 안 #define 등), 줄 이음을 걷고 읽은 여러 줄 매크로, 남은 구문 오류, 문맥이 못 읽은 파일
+    from generators.c_project_context import summarize_source_reading
+    quality["source_reading"] = summarize_source_reading(report_data.get("project_context"),
+                                                         [u.get("project_scope") for u in units])
     # (R21) 행이 설정해 열로 보인 입력·기대값(두 프로파일)
     quality["row_io_columns"] = summarize_row_io(units)
     # (R23) 입력이 앞 행과 같은 행 — 정본 규모 행은 남기고 세며, 확장 전략 행은 뺀 수
