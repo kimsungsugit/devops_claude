@@ -30,6 +30,7 @@ U8 getw(void) { g_en = 0U; return g_x; }
 U8 getp(U8 *p) { *p = 1U; return g_x; }
 U8 *g_ptr;
 U8 getq(void) { *g_ptr = 1U; return g_x; }
+U8 getpq(U8 *p) { *p = 1U; return g_x; }
 #define EN (g_en)
 U8 g_a;
 U8 g_c;
@@ -40,9 +41,10 @@ void rec(void);
 U8 getr(void) { rec(); return g_x; }
 void starve(void) {
     U8 l = g_a;
-    if ((getq() == 3U) && (g_en == 1U)) { g_o = 1U; }
+    if ((getpq(g_ptr) == 3U) && (g_en == 1U)) { g_o = 1U; }
     if (g_d == 5U) { if (g_e == 6U) { if ((l == 7U) && (g_c == 9U)) { g_o = 2U; } else { g_o = 3U; } } }
 }
+void quiet(void) { if ((getq() == 3U) && (g_en == 1U)) { g_o = 1U; } else { g_o = 2U; } }
 void shadow(U8 (*get)(void)) { if ((get() == 3U) && (g_en == 1U)) { g_o = 1U; } else { g_o = 2U; } }
 void rec(void) { static U8 s; s = g_in; if ((getr() == 3U) && (s == 1U)) { g_o = 1U; } else { g_o = 2U; } }
 void before(void) { if ((g_en == 1U) && (getw() == 3U)) { g_o = 1U; } else { g_o = 2U; } }
@@ -97,10 +99,11 @@ def test_a_stub_writes_nothing_the_decision_reads():
 
 
 def test_an_unobservable_decision_does_not_starve_the_ones_after_it():
-    # (review C1) the getq() decision stays effectful (the stub may write through a pointer) on every vector: it was
-    # searched "around" as if reached and took the function's whole budget — the guarded ``(l == 7U) && (g_c == 9U)``
-    # after it lost its pairs
-    inputs = ["g_a", "g_c", "g_d", "g_e", "g_en", "getq() return"]
+    # (review C1) the getpq() decision stays effectful (the stub may write through its pointer parameter) on every
+    # vector: it was searched "around" as if reached and took the function's whole budget — the guarded
+    # ``(l == 7U) && (g_c == 9U)`` after it lost its pairs. (R64) It was getq(void) writing ``*g_ptr``: a stub has no
+    # body, so one without a pointer parameter writes through nothing (`test_a_stub_without_a_pointer_parameter_…`)
+    inputs = ["g_a", "g_c", "g_d", "g_e", "g_en", "getpq() return"]
     decisions = build_mcdc_design(_unit("starve", inputs))["decisions"]
     first = decisions[0]
     (second,) = [d for d in decisions if "l == 7U" in d["expression"]]
@@ -139,6 +142,7 @@ LATER = """#include "common.h"
 U8 g_k; U8 g_a; U8 g_b; U8 g_c; U8 g_d; U8 g_e; U8 g_f; U8 g_en; U8 g_o; U8 g_p0; U8 *g_ptr;
 U8 get(void) { return g_b; }
 U8 getq(void) { *g_ptr = 1U; return g_b; }
+U8 getpq(U8 *p) { *p = 1U; return g_b; }
 U8 getw(void) { g_en = 0U; return g_b; }
 U8 get2(void) { return g_a; }
 void base_unsupported(void) {
@@ -158,7 +162,7 @@ void budget(void) {
     if (g_d == 5U) { if ((l == 7U) && (g_c == 9U)) { g_o = 2U; } else { g_o = 3U; } }
 }
 void late_pair(void) {
-    if ((getq() == 3U) && (g_en == 1U)) { g_o = 1U; }
+    if ((getpq(g_ptr) == 3U) && (g_en == 1U)) { g_o = 1U; }
     if (g_d == 5U) { if ((get() == 7U) && (g_c == 9U)) { g_o = 2U; } else { g_o = 3U; } }
 }
 void second_search(void) {
@@ -204,9 +208,10 @@ def test_the_decisions_of_r36_keep_their_own_budget():
 
 
 def test_an_unobservable_call_decision_leaves_the_budget_to_the_next_one():
-    # two call decisions searched together: the getq() stub may write through a pointer — effectful on every vector;
-    # searching "around" it (it counts as reached) would take the budget the get() decision under the guard needs
-    decisions = _later_decisions("late_pair", "get", ["g_c", "g_d", "g_en", "getq() return", "get() return"])
+    # two call decisions searched together: the getpq() stub may write through its pointer parameter — effectful on
+    # every vector; searching "around" it (it counts as reached) would take the budget the get() decision under the
+    # guard needs
+    decisions = _later_decisions("late_pair", "get", ["g_c", "g_d", "g_en", "getpq() return", "get() return"])
     first, last = decisions[0], decisions[-1]
     assert first["reason"] == "path_evaluation:effectful_condition", first["reason"]
     assert last["status"] == "designed" and last["stub_inputs"], (last["reason"], last.get("stub_search"))
@@ -254,3 +259,11 @@ def test_the_decisions_of_r36_see_the_oracle_judge_as_in_r36():
     first, last = decisions[0], decisions[-1]
     assert first["reason"] == "path_evaluation:effectful_condition", first["reason"]
     assert last["status"] == "designed" and "get2() return" in last["stub_inputs"], last["reason"]
+
+
+def test_a_stub_without_a_pointer_parameter_writes_through_nothing():
+    # (R64, backlog 4-a) getq()'s body writes ``*g_ptr`` — but a stub has no body: with no parameter that can hold a
+    # pointer it puts nothing anywhere, so the condition beside it is observed and the decision designed (it was
+    # refused as effectful on every vector)
+    (decision,) = build_mcdc_design(_unit("quiet", ["g_en", "getq() return"]))["decisions"]
+    assert decision["status"] == "designed" and decision["stub_inputs"] == ["getq() return"], decision["reason"]

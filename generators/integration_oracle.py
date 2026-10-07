@@ -216,6 +216,9 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
     files = projected_texts(scopes, files)
     stats["body_projection"] = summarize_body_projection(scopes.values())
     stats["source_reading"] = summarize_source_reading(context, scopes.values())   # (R63)
+    from generators.pointer_flow import summarize_pointer_targets
+    stats["pointer_targets"] = summarize_pointer_targets(next(
+        (s.get("effects") for s in scopes.values() if s.get("effects")), None))   # (R64)
     from generators.c_project_context import summarize_build_assumptions
     stats["build_assumptions"] = summarize_build_assumptions(scopes.values())   # (R17)
     provider = CalleeProvider(context, files, scopes, parser)

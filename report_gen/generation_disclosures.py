@@ -1299,6 +1299,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
     out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
+    out.extend(_pointer_targets_item(qr.get("pointer_targets"), "suts_pointer_targets"))       # (R64)
     return out
 
 
@@ -1498,6 +1499,8 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                                      "sits_body_projection", doc="sits"))   # (R62)
     out.extend(_source_reading_item((qr.get("integration_oracle") or {}).get("source_reading"),
                                     "sits_source_reading", doc="sits"))   # (R63)
+    out.extend(_pointer_targets_item((qr.get("integration_oracle") or {}).get("pointer_targets"),
+                                     "sits_pointer_targets", doc="sits"))   # (R64)
 
     # sub-case 물량 — 흐름당 몇 갈래를 시험했나.
     sub = _int(qr, "total_sub_cases")
@@ -1632,6 +1635,60 @@ _PARSE_ERROR_LABELS = {
     "directive": "지시문 줄(지시문은 렉서로 직접 읽어 잃은 것 없음)",
     "unnamed_bitfield": "이름 없는 비트필드 `U8 :1;`(파서 문법의 빈칸 — 비트필드 구조체는 평탄화하지 않아 잃은 것 없음)",
 }
+
+
+_POINTER_CAUSE_LABELS = {
+    "call": "정의 없는 함수 호출(라이브러리 · 함수 포인터 변수)", "indirect_call": "주소가 넘겨진 함수(간접 호출로 무엇이든 받음)",
+    "parse_error": "구문 오류가 남은 함수", "parameters_unreadable": "매개변수를 읽지 못한 정의(K&R 등)",
+    "body_macro": "함수 본문이 #define 하는 이름", "opaque_macro": "본문을 읽을 수 없는 매크로(## · # · 짝 없는 괄호)",
+    "macro_call": "본문이 너무 긴 매크로 호출", "macro_recursion": "되부르는 매크로", "inline_assembly": "인라인 어셈블리",
+    "extra_argument": "가변 인자", "facts_missing": "흐름 사실이 없는 정의", "file_parse_error": "파일 수준 구문 오류 영역",
+    "refused": "분석 거절(문맥이 읽지 못한 파일 · include · 따라갈 수 없는 저장 위치)",
+    "statement_expression": "문장식 `({ … })`", "compound_literal": "복합 리터럴", "unmodeled": "모델하지 않은 식 형태",
+    "lvalue": "따라갈 수 없는 대입 대상", "call_value_unmodeled": "값을 따라갈 수 없는 호출",
+    "no_caller": "프로젝트 안에서 아무도 부르지 않는 함수(밖에서 무엇이든 받음)", "facts_depth": "너무 깊어 읽지 못한 식",
+    "model": "따라갈 수 없는 대입 대상", "unknown_callee": "쓰기 요약이 모르는 코드에 닿음(전부 모름으로 둠)",
+    "integer_write": "포인터를 담을 수 있는 객체를 바이트로 덮어씀(바이트 복사 · 다른 형식으로 겹쳐 쓰기 · 공용체)",
+    "integer_to_pointer": "상수가 아닌 정수를 포인터로 바꿈", "integer_reinterpreted": "정수 저장소에서 포인터로 읽음",
+    "hardware": "고정 주소 메모리에서 포인터로 읽음"}
+
+
+def _pointer_targets_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:
+    """(R64) 포인터로 쓰는 callee(쓰기 요약만 쓰는 호출)와 시퀀스 stub 이 무엇을 지울 수 있나 — 프로젝트 포인터 흐름 분석으로
+    대상을 특정한 함수 수와 못 한 원인. 블록이 없으면 말하지 않는다."""
+    if not isinstance(block, dict) or "pointer_writers" not in block:
+        return []
+    writers, known = _int(block, "pointer_writers") or 0, _int(block, "known_targets") or 0
+    causes = block.get("unknown_causes") if isinstance(block.get("unknown_causes"), dict) else {}
+    samples = block.get("unknown_samples") if isinstance(block.get("unknown_samples"), dict) else {}
+    refused = str(block.get("refused") or "")
+    where = "기대값" if doc == "suts" else "통합 기대값"
+    return [_item(
+        key, "포인터 쓰기 대상(포인터 흐름 분석)",
+        ("분석 거절 — " + refused) if refused else f"포인터로 쓰는 함수 {writers} 중 대상 특정 {known}",
+        "실행 모델이 본문을 돌리지 않고 쓰기 요약으로만 다루는 callee 가 포인터로 쓰면, 이전에는 주소가 취득된 모든 객체 · 모든 "
+        "배열 · 탈출한 지역 변수를 모름으로 두었다. 이제 프로젝트 전체의 포인터 흐름(읽은 모든 정의와 초기화식)으로 그 포인터가 "
+        "가리킬 수 있는 객체만 모름으로 둔다 — 매개변수를 통해 쓰면 그 호출의 실인자로 푼다. 시퀀스 stub 은 본문이 없으므로 포인터를 "
+        "담을 수 있는 매개변수의 실인자가 가리키는 것(과 거기서 닿는 것)만 쓸 수 있다."
+        + (f" 분석이 거절되어({refused}) 이전처럼 포인터가 닿을 수 있는 모든 객체를 모름으로 둔다 — 그 파일 · include 를 읽게 하면 "
+           "풀린다." if refused else
+           f" 포인터로 쓰는 함수 {writers} 중 {known}개는 대상을 특정했다(그중 매개변수로 쓰는 것 "
+           f"{_show(_int(block, 'through_parameters'))}개)."
+           + (" 나머지는 이전처럼 모든 대상을 모름으로 둔다 — 원인: "
+              + " · ".join(f"{_POINTER_CAUSE_LABELS.get(k, k)} {v}" for k, v in causes.items())
+              + " (예: " + " / ".join(str(x) for k in list(causes)[:3] for x in (samples.get(k) or [])[:1]) + ")."
+              if causes else ""))
+        + " 가정(값이 이 가정에 기댄다): 정수 형식의 객체 · 값은 포인터를 담지 않는다(정수를 포인터로 바꾸면 하드웨어 주소 — "
+          "상수(리터럴 · 열거자 · 그 매크로와 산술)를 포인터로 바꾼 것만 하드웨어로 보고, 그 밖의 정수를 포인터로 바꾼 것(캐스트 "
+          "없는 변환 포함) · 정수 저장소나 고정 주소 메모리에서 포인터로 읽은 것은 어디든 가리킬 수 있다(모름) — 정수가 된 포인터가 "
+          "가리키던 객체는 그런 포인터를 통해 무엇이든 저장됐을 수 있어 그 객체가 담은 포인터도 모름; 포인터를 담을 수 있는 객체를 바이트로 덮어쓰면(바이트 복사 · "
+          "다른 형식으로 겹쳐 쓰기 · 공용체) 그 객체가 담은 포인터는 모름; 정수 저장소에 포인터를 넣으면(직접 · 라이브러리 복사) 그 "
+          "저장소가 포인터를 담는다) · "
+          "프로젝트 밖 코드는 프로젝트가 넘긴 것으로만 프로젝트 객체에 닿고, 프로젝트 함수는 넘겨진 주소나 아무도 부르지 않는 진입점으로만 "
+          "부른다 · 인라인 어셈블리는 피연산자와 본문이 이름 부르는 것에만 닿는다 · 포인터 산술은 그 객체 안에 머문다."
+          f" 이 분석 자체는 clang 대조가 확인하지 않는다(하네스는 오라클과 같은 대상에만 채움값을 쓴다) — {where}이 늘어난 칸은 "
+          "callee 의 실제 쓰기 집합 대조로 따로 확인했다(계획서 R64 기록).",
+        tone=_tone(bool(refused) or bool(causes)))]
 
 
 def _source_reading_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:

@@ -475,6 +475,12 @@ def _compile_state(fn, states):
     return states.get(fn.start_byte)
 
 
+def _cast_call(n, raw, scope) -> bool:
+    """(R64) The interpreter's judgment of ``(T)(x)`` (`c_source_oracle.cast_call_operand`) for the call walk here."""
+    from generators.c_source_oracle import cast_call_operand
+    return cast_call_operand(n, raw, scope) is not None
+
+
 def _scoped_source_decisions(unit, scope, declared_domains):
     """Source path with the translation unit's resolved project scope (typedefs, macros, enumerators, globals).
 
@@ -619,7 +625,9 @@ def _scoped_source_decisions(unit, scope, declared_domains):
                     extra["locals"].add(name)
         if n.type in {"goto_statement", "labeled_statement"}:
             extra["has_goto"] = True
-        if n.type == "call_expression":
+        if n.type == "call_expression" and _cast_call(n, raw, scope):
+            pass   # (R64) ``(T)(x)``: a cast, no callee — it was an indirect call that left globals unverified
+        elif n.type == "call_expression":
             f = n.child_by_field_name("function")
             callee = _text(f, raw) if f is not None and f.type == "identifier" else "<indirect>"
             extra["calls"].append((n.start_byte, callee, n))

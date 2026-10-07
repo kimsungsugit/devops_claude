@@ -27,6 +27,7 @@ from collections import OrderedDict
 from typing import Any
 
 from generators import c_project_context as cpc
+from generators import pointer_flow
 
 SCHEMA_VERSION = 4   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
 #                      3 (R38): a sequence stub writes no global or static (VectorCAST replaces the body — `stubbed_call`)
@@ -49,6 +50,15 @@ ASSUMPTIONS = (
     "fixed-address register objects are distinct objects (writes to one do not change another)",
     "an integer converted to a pointer addresses hardware, not a C object: a write through a pointer reaches only "
     "address-taken objects, arrays and locals whose address escaped",
+    "(R64) a write a callee or a stub makes through a pointer reaches what the project-wide points-to analysis says "
+    "that pointer may hold (every definition and initializer the context read, an object of integer type holding no "
+    "pointer — an object that may hold pointers written as bytes holds unknown ones, an integer object a pointer "
+    "is stored into holds it, an integer that is not a constant converted to a pointer (with a cast or without) and a "
+    "pointer read from integer storage or fixed-address memory may point anywhere — the objects pointers that became "
+    "integers pointed to, and what they reach, may then hold any pointer); code outside the project reaches a project object only through what the project hands it and calls a "
+    "project function only through an address handed out or as an entry point no project code calls; inline assembly "
+    "reaches C objects only through its operands and the names its text mentions; pointer arithmetic stays inside its "
+    "object — where the analysis cannot follow, every address-taken object, array and escaped local",
     "a write through a struct member array stays inside that member (beyond it is undefined behaviour)",
     "a pointer parameter whose pointee the sequence sets (p[0] / p[0].a) points to a harness object of its own — "
     "not null, not a program object, not another parameter's pointee",
@@ -191,11 +201,41 @@ def cast_call_operand(c, raw, scope):
     if len(inner) != 1 or inner[0].type not in {"identifier", "type_identifier"} or len(args) != 1:
         return None
     from generators.mcdc_design import _scope_type
+    name = " ".join(_text(inner[0], raw).split())
     try:
-        is_type = isinstance(_scope_type(scope, " ".join(_text(inner[0], raw).split())), dict)
+        is_type = isinstance(_scope_type(scope, name), dict)
     except cpc.Unresolved:
         is_type = False
-    return args[0] if is_type else None
+    # (review R64 W-3) a parameter or local of the function hides a typedef of its name: a call through it
+    return args[0] if is_type and not _declared_in_function(c, name, raw) else None
+
+
+_DECLARED_NAMES: dict[tuple, tuple] = {}
+
+
+def _declared_in_function(node, name, raw) -> bool:
+    """Whether the function around ``node`` declares a parameter or local ``name`` anywhere — a declaration hides a
+    typedef of that name in its scope (C11 6.2.1p4); reading a cast as a call only loses a value."""
+    fn = node
+    while fn is not None and fn.type != "function_definition":
+        fn = fn.parent
+    if fn is None:
+        return False
+    key = (id(raw), fn.start_byte, fn.end_byte)
+    hit = _DECLARED_NAMES.get(key)
+    if hit is None or hit[0] is not raw:
+        names = set()
+        for n in _walk(fn):
+            if n.type in ("parameter_declaration", "declaration"):
+                for d in n.children_by_field_name("declarator"):
+                    if d.type == "init_declarator":
+                        d = d.child_by_field_name("declarator")
+                    if d is not None:
+                        names.add(pointer_flow.declarator_kind(d, raw)[0])
+        if len(_DECLARED_NAMES) > 4096:
+            _DECLARED_NAMES.clear()
+        hit = _DECLARED_NAMES[key] = (raw, frozenset(names))
+    return name in hit[1]
 
 
 def _walk(node):
@@ -2115,7 +2155,24 @@ class _Interp:
         if info is None:
             return None
         out_params = any(k != prefix + "return" for k in keys)
-        return {"pointer": bool(out_params or info.get("pointer_write") or info.get("unknown_callees"))}
+        hedge = bool(info.get("pointer_write") or info.get("unknown_callees"))
+        # (R64, backlog 4-a) the body does not run: a stub can put something only through a parameter that can hold a
+        #   pointer (or a variadic argument) — without one it writes through nothing, whatever F's closure does; with
+        #   one, the hedge stands and what it may reach is the arguments' (`stub_targets`)
+        flow = self.pointer_flow()
+        params = flow.params(name) if flow is not None else None
+        if params is not None:
+            carries = flow.variadic(name) or any(_maybe_pointer(flow, p) for p in params)
+            return {"pointer": bool(out_params or (carries and hedge))}
+        defs = (flow.functions.get(name) or []) if flow is not None else []
+        if defs:
+            # (review R64 round 3 K1) parameters the flow cannot read (K&R) may carry anything; definitions that differ
+            #   carry what any of them does
+            if any(not d or d.get("params_unreadable") for d in defs):
+                return {"pointer": True}
+            carries = any(d.get("variadic") or any(_maybe_pointer(flow, p) for p in d.get("params") or ()) for d in defs)
+            return {"pointer": bool(out_params or (carries and hedge))}
+        return {"pointer": bool(out_params or hedge)}
 
     def record_decision(self, state, spec):
         """(R2c) Observe one evaluation of a watched decision on this path: each condition's truth in the state the
@@ -2453,7 +2510,7 @@ class _Interp:
             return _Val(Unknown("call_return_value:" + name), None)
         view = self.stub_view(name)
         if view is not None:
-            return self.stubbed_call(state, name, info, view)
+            return self.stubbed_call(state, name, info, view, arg_nodes, raw)
         if self.world is not None and values is not None and f"{name}() return" not in self.inputs \
                 and not self.no_inline_depth and (id(raw), n.start_byte, n.end_byte) not in self.no_inline:
             # (R16) a callee with one definition in the project runs for real on this state; when it cannot (no
@@ -2483,18 +2540,167 @@ class _Interp:
                 self.havoc_base(state, w, f"written_by_callee:{name}:{w}")
             if info.get("pointer_write") or opaque:
                 why = "pointer_write" if info.get("pointer_write") else "writes_through:" + opaque[0]
-                self.havoc_pointer_targets(state, f"callee_pointer_write:{name}:{why}")
+                self.havoc_objects(state, self.callee_targets(name, info, arg_nodes, raw),
+                                   f"callee_pointer_write:{name}:{why}")
+            else:
+                # (review R64 I-4) a callee it calls that this run stubs may write through what it is passed, whatever
+                #   that callee's body does — named by the flow, or (round 2 W-2) when the flow did not run or could not
+                #   name the targets, any function it reaches this run stubs with pointer parameters
+                summary = info.get("pointer_targets") or {}
+                if summary.get("abs") is None:
+                    stubbed = sorted(g for g in info.get("reaches") or ()
+                                     if (v := self.stub_view(g)) is not None and v["pointer"])
+                    if stubbed:
+                        self.havoc_pointer_targets(state, f"callee_stub_write:{name}:{stubbed[0]}")
+                else:
+                    stub_writes = {t for t in summary["abs"] if t.startswith("?SW:")}
+                    if stub_writes:
+                        self.havoc_objects(state, stub_writes, f"callee_stub_write:{name}")
         return self.stub_return(name, info)
 
-    def stubbed_call(self, state, name, info, view):
+    def stubbed_call(self, state, name, info, view, arg_nodes=(), raw=b""):
         """(R38) The sequence stubs F (`stub_view`): R14 — the harness replaces F's body, as VectorCAST does and the
         clang check's stubs do. The body does not run, so nothing F would write to a global or a static happens and
         nothing it calls runs (no re-entry). A stub may still put a test-case value through a pointer argument (the
-        reference sets ``F() p[0]`` — R23): then what pointer arguments may reach stays unknown."""
+        reference sets ``F() p[0]`` — R23): (R64) then what those arguments may point to — and what that reaches — is
+        unknown (`stub_targets`); everything a pointer may reach when the arguments cannot be followed."""
         self.stubs_used.add(name)   # the record rests on the stub even when its value is not usable
         if view["pointer"]:
-            self.havoc_pointer_targets(state, f"stub_pointer_argument:{name}")
+            self.havoc_objects(state, self.stub_targets(name, arg_nodes, raw), f"stub_pointer_argument:{name}")
         return self.stub_return(name, info)
+
+    # ── (R64) where a write through a pointer lands ─────────────────────────────────────────────────
+    def pointer_flow(self):
+        return (self.scope.get("effects") or {}).get("pointer_flow")
+
+    def entry_interp(self):
+        """The activation of the function under test (the harness calls it; its parameters are the harness's)."""
+        return self.world.stack[0] if self.world is not None and self.world.stack else self
+
+    def argument_objects(self, node, raw):
+        """Objects an argument's value may point to by the project points-to analysis (`pointer_flow`), or None."""
+        flow = self.pointer_flow()
+        if flow is None or node is None:
+            return None
+        entry = self.entry_interp().function_name
+        # the answer depends on the argument's text, the names local where it stands and the run's entry — the vectors
+        # of one function share it (keyed by text: an expansion buffer's id is no stable name)
+        cache = self.shared.setdefault("argument_objects", {})
+        key = (raw[node.start_byte:node.end_byte], self.function_name, entry,
+               tuple(sorted(n for frame in self.lexical for n, i in frame.items() if not i.get("extern"))))
+        if key in cache:
+            return cache[key]
+
+        def is_local(name):
+            info = self.lookup(name)
+            return info is not None and not info.get("extern")
+        tree, records = pointer_flow.expression_tree(node, raw, is_local)
+        cache[key] = flow.question(self.function_name, tree, records, entry, self.fn_names, as_pointer=True)
+        return cache[key]
+
+    def callee_targets(self, name, info, arg_nodes, raw):
+        """(R64) The objects a callee run as its write closure may write through a pointer: its summary's ``abs`` and
+        what this call's arguments for the parameters it writes through directly point to — None when the analysis
+        cannot say (refused, unknown code reached, an argument it cannot follow)."""
+        summary = info.get("pointer_targets")
+        if not summary or summary.get("abs") is None:
+            return None
+        out = set(summary["abs"])
+        for i in summary.get("params") or ():
+            if i >= len(arg_nodes):
+                return None
+            objs = self.argument_objects(arg_nodes[i], raw)
+            if objs is None:
+                return None
+            out |= objs
+        return out
+
+    def stub_targets(self, name, arg_nodes, raw):
+        """(R64) What a sequence stub of ``name`` may write: the objects each argument for a parameter that can hold a
+        pointer points to, and what those reach — None when the analysis cannot say."""
+        flow = self.pointer_flow()
+        params = flow.params(name) if flow is not None else None
+        if params is None:
+            return None
+        out: set = set()
+        for i, node in enumerate(arg_nodes):
+            if i < len(params) and not _maybe_pointer(flow, params[i]):
+                continue
+            objs = self.argument_objects(node, raw)
+            if objs is None:
+                return None
+            out |= flow.reach(objs, self.token_in_run)
+        return out
+
+    def token_in_run(self, obj) -> bool:
+        """(R64 review round 2) Whether an object of the flow stands for one in this run: what a stub of G hands out
+        (``?S:G``) only where this run stubs G, the harness's pointers (``?P:F:p``, ``?T:F``) only for the function
+        under test — elsewhere the objects the pointer also holds are the real ones."""
+        if obj.startswith("?S:"):
+            return self.stub_view(obj[3:]) is not None
+        if obj.startswith("?P:"):
+            return obj.split(":", 2)[1] == self.entry_interp().function_name
+        if obj.startswith("?T:"):
+            return obj[3:] == self.entry_interp().function_name
+        return True
+
+    def havoc_objects(self, state, targets, reason):
+        """(R64) Make the objects a write through a pointer may reach unknown — or, when they are not known (None, an
+        unknown token, a harness pointer of this run), everything a pointer may reach (`havoc_pointer_targets`).
+        Objects are ``G:name`` (a global), ``L:fn:name`` (a parameter or local — of an activation this evaluation runs),
+        ``?P:F:p`` (the pointee the harness passes the function under test), ``?T:F`` (a pointer the harness hands it),
+        ``?S:G`` (what a stub of G hands out — meaningful only where this run stubs G); ``F:``/``R:`` name no object."""
+        if targets is None:
+            self.havoc_pointer_targets(state, reason)
+            return
+        entry = self.entry_interp()
+        active = {self.function_name} | ({it.function_name for it in self.world.stack} | set(self.world.inlined)
+                                         if self.world is not None else set())
+        locals_, pointees, globals_ = set(), set(), set()
+        for t in targets:
+            if t.startswith("G:"):
+                globals_.add(t[2:])
+            elif t.startswith("L:"):
+                _l, fn, local = t.split(":", 2)
+                if fn in active:
+                    locals_.add(local)
+            elif t.startswith("?P:"):
+                _p, fn, param = t.split(":", 2)
+                if fn != entry.function_name:
+                    continue
+                if param not in entry.pointees:
+                    self.havoc_pointer_targets(state, reason)   # a harness pointer this run does not set up
+                    return
+                pointees.add("@pointee:" + param)
+            elif t.startswith("?T:"):
+                if t[3:] == entry.function_name:
+                    self.havoc_pointer_targets(state, reason)
+                    return
+            elif t.startswith("?S:"):
+                if self.stub_view(t[3:]) is not None:
+                    self.havoc_pointer_targets(state, reason)
+                    return
+            elif t.startswith("?SW:"):
+                # (review R64 I-4) a callee this run stubs, called inside, may write through what it is passed
+                view = self.stub_view(t[4:])
+                if view is not None and view["pointer"]:
+                    self.havoc_pointer_targets(state, reason)
+                    return
+            elif t.startswith("?"):
+                self.havoc_pointer_targets(state, reason)
+                return
+        for g in sorted(globals_):
+            self.havoc_base(state, g, reason)
+        if locals_ or pointees:
+            for key in list(state.store):
+                base = key.split("[", 1)[0]
+                if _local_name(base) in locals_ or base.split(".", 1)[0] in pointees:
+                    state.store[key] = _havocked(state.store[key], reason)
+            for base in list(state.escaped) + sorted(pointees):
+                if _local_name(base) in locals_ or base in pointees:
+                    state.havoc_bases.setdefault(base, reason)
+        if self.world is not None:
+            self.world.pointer_havocs += 1
 
     def stub_return(self, name, info):
         """(R14) A sequence that sets ``F() return`` declares F a stub for this run (the unit-test convention the
@@ -3180,6 +3386,24 @@ def _observe_value(interp, state, name, reads=None, escaped=None):
     if base in (interp.scope.get("unresolved_globals") or {}):
         return Unknown(f"global_unmodeled:{base}:{interp.scope['unresolved_globals'][base]}")
     return Unknown("observable_not_a_modeled_object:" + base)
+
+
+def _local_name(base):
+    """(R64) The name of the parameter or local a store base belongs to (``@local:buf@u:…:12`` → ``buf``,
+    ``@param2:p`` → ``p``), or None."""
+    if base.startswith("@local:"):
+        return base[len("@local:"):].split("@", 1)[0]
+    m = re.match(r"@param\d*:(.+)$", base)
+    return m.group(1) if m else None
+
+
+def _maybe_pointer(flow, param):
+    """(R64) Whether a parameter ``[name, base, kind]`` can hold a pointer a stub may write through: a pointer or an
+    array parameter, a struct passed by value (its members may), a type the analysis cannot follow."""
+    t = flow.norm((param[1], param[2]))
+    if t is None:
+        return True
+    return t[1][:1] in ("p", "a") or (t[1] == "" and t[0].startswith("struct:"))
 
 
 def _root_object(base):

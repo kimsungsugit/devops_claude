@@ -16,7 +16,10 @@ Independence and its limits:
 * callees are stubs that return the fill value; one the project write closure says may write through a pointer
   (``pointer_write``, or unknown code) writes the fill value through each non-const scalar pointer argument (R36 — the
   oracle holds such a pointee as any value; before, the constexpr run stopped at the uninitialized local — and a
-  missing havoc of a scalar pointee was agreed with). Only ``*p`` is written: the other elements of an array, a
+  missing havoc of a scalar pointee was agreed with). (R64) Where the project points-to analysis names the callee's
+  targets, only the arguments of the parameters it writes through directly (``pointer_targets.params``) get the fill:
+  the oracle havocs what those point to and keeps an object the callee cannot reach — the analysis itself is not
+  checked here (an object it wrongly leaves out keeps the same value in both). Only ``*p`` is written: the other elements of an array, a
   struct's members and an enum pointee are not, so a missing havoc there is still not caught. The rest write nothing:
   the oracle's claim that a callee cannot change an output (project write closure) is **not** checked here;
 * enumerator, ``const`` object and ``const`` array element values are the engine's (as in
@@ -40,6 +43,10 @@ Independence and its limits:
   never names is declared with the claim's input value (else the fill) so the unit compiles and its other outputs are
   checked — that output itself is ``unchecked:output_not_named_by_body`` (clang would only hand back the harness's own
   value; a mismatch there stays a mismatch) and listed in ``outputs_not_named_by_body`` for review;
+* stand-ins (R63, R64): a register object the scope does not model is a struct of the member paths the code names, and
+  a struct object's member the oracle does not model (a pointer member read as ``q.tl_pdu[h][3]``) is an object that
+  gives the fill value however it is indexed (`_member_stand_ins`) — the oracle reads both as unknown, so no claim
+  may rest on them, and the fill varies by run so a claim that does is caught;
 * the fill values are a sample (0/90/201), not a proof of independence from unset state;
 * C++ sequences some things C leaves unsequenced (``=`` operands since C++17, list-initialization items): the
   oracle refuses those in C, so no claim rests on the difference — but clang cannot catch that refusal missing;
@@ -142,8 +149,9 @@ def _input_int(value, constants, function_like=()):
     return value if type(value) is int else None
 
 
-def _struct_text(root, members, globals_, arrays, enum_base="int"):
-    """(R39) ``struct { U8 a; U16 b[4]; struct { U8 x; } s; }`` from the members of a flattened struct object."""
+def _struct_text(root, members, globals_, arrays, enum_base="int", extra=None):
+    """(R39) ``struct { U8 a; U16 b[4]; struct { U8 x; } s; }`` from the members of a flattened struct object. (R64)
+    ``extra``: member name → declaration of a stand-in for a member the oracle does not model (`_member_stand_ins`)."""
     tree: dict = {}
     for path in members:
         node = tree
@@ -166,7 +174,49 @@ def _struct_text(root, members, globals_, arrays, enum_base="int"):
                 out.append(f"{_base_type(a['type'], enum_base)} {name}[{a['length']}];")
         return " ".join(out)
 
-    return f"struct {{ {render(tree)} }}"
+    return f"struct {{ {render(tree)} {' '.join((extra or {}).values())} }}"
+
+
+# (R64) a stand-in for a member read through ``k`` subscripts: indexing it ``k`` times gives the fill value, any index
+_STAND_IN_TEMPLATE = ("template<int __D> struct __oracle_pm { int __f; constexpr auto operator[](long long) const "
+                      "{ if constexpr (__D > 1) return __oracle_pm<__D - 1>{__f}; else return (unsigned char)__f; } "
+                      "constexpr auto operator*() const { return (*this)[0]; } };")
+
+
+def _member_stand_ins(root, unmodeled, text):
+    """(R64) Stand-ins for the unmodeled members of struct object ``root`` the code reads (``lin_tl_rx_queue.tl_pdu[h][3]``
+    — a pointer member the oracle reads as unknown): name → (declaration, depth). A member used without a subscript is
+    a wide unsigned scalar; one used with ``k`` subscripts an object that gives the fill value when indexed ``k`` times
+    (`_STAND_IN_TEMPLATE` — any index). The oracle claims nothing that rests on what such a member holds — the fill
+    varies by run, so a claim that does is caught. A use the stand-in cannot take (the member assigned to a typed
+    pointer, written through) does not compile and the unit stays unchecked; no stand-in when a member is used with
+    different depths."""
+    out = {}
+    for m in unmodeled:
+        if "." in m:
+            continue
+        depths = set()
+        for hit in re.finditer(rf"\b{re.escape(root)}\s*\.\s*{re.escape(m)}\b", text):
+            i, depth = hit.end(), 0
+            while True:
+                j = i
+                while j < len(text) and text[j].isspace():
+                    j += 1
+                if j >= len(text) or text[j] != "[":
+                    break
+                k, level = j + 1, 1
+                while k < len(text) and level:
+                    level += {"[": 1, "]": -1}.get(text[k], 0)
+                    k += 1
+                depth, i = depth + 1, k
+            depths.add(depth)
+        if len(depths) != 1:
+            continue
+        depth = depths.pop()
+        if depth > 3:
+            continue
+        out[m] = (f"unsigned long long {m};", 0) if depth == 0 else (f"__oracle_pm<{depth}> {m};", depth)
+    return out
 
 
 def _register_struct_text(paths):
@@ -470,6 +520,22 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
         info = closure.get(callee)
         return info is None or bool(info.get("pointer_write") or info.get("unknown_callees"))
 
+    def put_text(callee):
+        """(R64) The fill put through a callee's arguments: every one, none, or the parameters it writes through
+        directly (the oracle's `callee_targets`)."""
+        if not writes_through_pointer(callee):
+            return ""
+        info = closure.get(callee) or {}
+        targets = info.get("pointer_targets")
+        if info.get("unknown_callees") or not targets or targets.get("abs") is None:
+            return "(__oracle_put(__a), ...); "
+        mask = sum(1 << i for i in targets.get("params") or () if i < 64)
+        if not mask:
+            return ""
+        return (f"int __oracle_i = 0; ((((({mask}ULL >> __oracle_i++) & 1ULL) != 0ULL) ? __oracle_put(__a) : void()), "
+                "...); ")
+
+    lines.append(_STAND_IN_TEMPLATE)   # (R64) used only by `_member_stand_ins` members
     for variant, fill in enumerate(_FILLS):
         lines.append(f"namespace __oracle_v{variant} {{")
         lines.append(f"constexpr int __oracle_stub = {fill};")
@@ -478,7 +544,7 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
         lines.append("template<class __oracle_T> constexpr void __oracle_put(__oracle_T* __p) { if constexpr "
                      "(__is_arithmetic(__oracle_T) && !__is_const(__oracle_T)) { if (__p) *__p = (__oracle_T)__oracle_stub; } }")
         for c in callees:
-            put = "(__oracle_put(__a), ...); " if writes_through_pointer(c) else ""
+            put = put_text(c)
             lines.append(f"template<class... __oracle_A> constexpr int {c}([[maybe_unused]] __oracle_A... __a) "
                          f"{{ {put}return __oracle_stub; }}")
         for index, claim in enumerate(claims):
@@ -504,7 +570,12 @@ def _harness(unit, claims, fn, raw, enum_base="int", instrument=None):
                 lines.append(f"  {text} {root} = {{}};")
             for g in used_structs:
                 members = struct_globals[g].get("members") or []
-                lines.append(f"  {_struct_text(g, members, globals_, arrays, enum_base)} {g} = {{}};")
+                stands = _member_stand_ins(g, struct_globals[g].get("unmodeled_members") or [], reach_text)
+                lines.append(f"  {_struct_text(g, members, globals_, arrays, enum_base, {m: d for m, (d, _x) in stands.items()})} "
+                             f"{g} = {{}};")
+                for m, (_decl, depth) in stands.items():
+                    lines.append(f"  {g}.{m} = (unsigned long long){fill};" if not depth else
+                                 f"  {g}.{m} = __oracle_pm<{depth}>{{{fill}}};")
                 for path in members:
                     full = f"{g}.{path}"
                     if full in globals_:

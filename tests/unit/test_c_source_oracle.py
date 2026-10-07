@@ -232,15 +232,16 @@ def test_a_callee_that_only_reads_through_a_pointer_leaves_the_passed_array_know
     assert _run(text, "f", {}, ["g_buf[0]"])["outputs"]["g_buf[0]"] == {"value": 4, "basis": "assigned"}
 
 
-def test_a_callee_writing_through_a_pointer_reaches_arrays_and_address_taken_objects_only():
+def test_a_callee_writing_through_a_pointer_reaches_what_the_pointer_may_hold():
     # ``p[0] = 0U`` writes through the pointer — the closure used to drop it with the shadowed parameter name.
-    # A pointer can only point at an array, an object whose address was taken somewhere, or an escaped local.
+    # (R64) clr writes through its parameter, and this call passes g_p — which only ever holds ``&g_t`` (keep()): g_t
+    # may change, g_buf cannot (before R64 every array and address-taken object was made unknown)
     text = H + ("U8 g_a; U8 g_t; U8 g_buf[2]; U8 *g_p;\nstatic void clr(U8 *p) { p[0] = 0U; }\n"
                 "void keep(void) { g_p = &g_t; }\nvoid f(void) { g_a = 1U; g_t = 1U; g_buf[1] = 1U; clr(g_p); }\n")
     result = _run(text, "f", {}, ["g_a", "g_t", "g_buf[1]"])
     assert result["outputs"]["g_a"]["value"] == 1
     assert result["outputs"]["g_t"]["reason"] == "callee_pointer_write:clr:pointer_write"
-    assert result["outputs"]["g_buf[1]"]["reason"] == "callee_pointer_write:clr:pointer_write"
+    assert result["outputs"]["g_buf[1]"]["value"] == 1
 
 
 def test_a_direct_write_through_a_pointer_parameter_reaches_the_same_objects():

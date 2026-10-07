@@ -70,8 +70,8 @@
 
 | 사유 | 칸 | 기전 | 다음 |
 |---|---|---|---|
-| `callee_pointer_write` | 161,687 — 그중 `ld_send_message` 149,941(UDS 응답 함수 30 개) | 포인터로 쓰는 callee 를 효과로만 돌리면 '주소가 노출된 객체와 **모든 배열**' 을 미상으로 만든다(`havoc_pointer_targets`) — 응답 버퍼만 쓰는데 rx 큐 배열까지 지움 | 포인터 대상 분석(상수 초기화 · 단일 대입으로 정해지는 포인터) |
-| `stub_pointer_argument` | 57,391 — `u8g_SysEepromCtrl_Read*` 8 개 | stub 의 출력 포인터 인자 → 같은 havoc | 인자가 가리키는 객체만 |
+| `callee_pointer_write` | 161,687 — 그중 `ld_send_message` 149,941(UDS 응답 함수 30 개) | 포인터로 쓰는 callee 를 효과로만 돌리면 '주소가 노출된 객체와 **모든 배열**' 을 미상으로 만든다(`havoc_pointer_targets`) — 응답 버퍼만 쓰는데 rx 큐 배열까지 지움 | **R64** 포인터 대상 분석 — PV 161,695 → 12,278(`ld_send_message` 0) · HD 17,946 → 4,250 |
+| `stub_pointer_argument` | 57,391 — `u8g_SysEepromCtrl_Read*` 8 개 | stub 의 출력 포인터 인자 → 같은 havoc | **R64** 인자가 가리키는 객체만 — PV 57,391 → 132 · HD 6,342 → 14 |
 | `observable_form_unmodeled` | 20,366 | 관측 이름이 모델 밖 형태 | |
 | `callee_effects_unknown` | 12,674 | 쓰기 요약에 모르는 callee | |
 | `observable_not_a_modeled_object` | 11,221 | 레지스터 비트필드 · 공용체 | |

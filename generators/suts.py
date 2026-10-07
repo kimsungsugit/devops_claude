@@ -6032,6 +6032,11 @@ def generate_suts(
     from generators.c_project_context import summarize_source_reading
     quality["source_reading"] = summarize_source_reading(report_data.get("project_context"),
                                                          [u.get("project_scope") for u in units])
+    # (R64) 포인터로 쓰는 callee · stub 이 실제로 가리킬 수 있는 객체만 지우는가 — 분석이 대상을 특정한 함수와 못 한 원인
+    from generators.pointer_flow import summarize_pointer_targets
+    quality["pointer_targets"] = summarize_pointer_targets(next(
+        ((u.get("project_scope") or {}).get("effects") for u in units if (u.get("project_scope") or {}).get("effects")),
+        None))
     # (R21) 행이 설정해 열로 보인 입력·기대값(두 프로파일)
     quality["row_io_columns"] = summarize_row_io(units)
     # (R23) 입력이 앞 행과 같은 행 — 정본 규모 행은 남기고 세며, 확장 전략 행은 뺀 수

@@ -63,7 +63,7 @@ void f10(void) { wr(); g_o = g_taken.a; }
 void f11(void) { g_taken.a = 5U; g.a = 6U; *g_ptr = 1U; g_o = (U8)(g.a + g_taken.a); }
 void d1(void) { if ((g.a == 3U) && (g.s.x == 4U)) { g_o = 1U; } else { g_o = 2U; } }
 void d3(TP *p) { if ((p->v == 3U) && (g_en == 1U)) { g_o = 1U; } }
-U8 *keep(void) { return &g_taken.a; }
+U8 *keep(void) { gp.p = &g_taken.a; return &g_taken.a; }
 """
 L = """#include "h.h"
 extern T g;
@@ -286,7 +286,7 @@ U8 g_o;
 U8 g_x;
 void wr_c(void);
 void wr_h(void);
-U8 *keep(void) { return &g_x; }
+U8 *keep(void) { gc.p = &g_x; gh.c.p = &g_x; return &g_x; }
 void r1(void) { g_o = g_isr.a; }
 void r2(void) { g_x = 3U; wr_c(); g_o = g_x; }
 void r3(void) { g_x = 3U; wr_h(); g_o = g_x; }
@@ -420,7 +420,7 @@ def test_a_member_named_by_a_macro_hides_the_members():
     # (W2) ``U8 MEMBERS;`` with ``#define MEMBERS a; U8 *hp`` is a pointer member the text does not show
     h = "typedef unsigned char U8;\ntypedef unsigned int U16;\ntypedef signed int S16;\n" \
         "#define MEMBERS a; U8 *hp\ntypedef struct { U8 MEMBERS; U8 v; } TM;\n"
-    c = '#include "h4.h"\nTM gmac;\nU8 g_x;\nU8 g_o;\nvoid wr_mac(void);\nU8 *keep(void) { return &g_x; }\n' \
+    c = '#include "h4.h"\nTM gmac;\nU8 g_x;\nU8 g_o;\nvoid wr_mac(void);\nU8 *keep(void) { gmac.hp = &g_x; return &g_x; }\n' \
         "void m1(void) { g_x = 3U; wr_mac(); g_o = g_x; }\n"
     lib = '#include "h4.h"\nextern TM gmac;\nvoid wr_mac(void) { gmac.hp[0] = 9U; }\n'
     files = {os.path.join(ROOT, "h4.h"): h, os.path.join(ROOT, "c4.c"): c, os.path.join(ROOT, "l4.c"): lib}

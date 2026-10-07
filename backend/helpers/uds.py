@@ -1475,7 +1475,12 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R63) v48: project_context 스키마 20(파일 수준 지시문을 렉서로 읽는다 — 구조체 선언 안 · ERROR 안 · `extern "C"` 안의
 #   #define 과 여러 줄 매크로 본문의 줄 이음; 벤더 구문 `@주소` · `__attribute__` · `__interrupt` · `__far` 를 공백으로 읽고 파일별
 #   `reading` 사실을 둔다 — v47 캐시는 그 정의가 없고 본문에 역슬래시가 남아 있다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v48"
+# (R64) v49: project_context 스키마 21(함수 · 파일별 포인터 흐름 사실 `flow` — 포인터로 쓰는 callee · stub 이 실제로 가리킬 수 있는 객체만 지우는 points-to 분석의 입력). 20 으로 캐시된 문맥에는 없다.
+# (R64 리뷰) v50: project_context 스키마 22(구조체 흐름 사실이 이름 없는 멤버 — 익명 공용체 · 비트필드 — 를 기록한다. 정수 멤버뿐인 구조체는
+#   포인터를 담지 않는다고 읽으므로, 익명 공용체의 포인터를 빠뜨린 21 의 사실은 쓰지 않는다).
+# (R64 리뷰 3차) v51: project_context 스키마 23(함수 안 typedef 이름 · K&R 정의 · 본문 #define 본문 — 22 의 사실에는 없다).
+# (R64 리뷰 4차) v52: project_context 스키마 24(파일별 `paren_amp` — 문법이 비트 and 로 읽는 `(T)&x` — 23 의 사실에는 없다).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v52"
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:

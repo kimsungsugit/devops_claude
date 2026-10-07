@@ -24,10 +24,11 @@ import threading
 from fractions import Fraction
 from typing import Any
 
+from generators import pointer_flow
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 20  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 24  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -67,6 +68,14 @@ SCHEMA_VERSION = 20  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 20 (R63): file-level directives read from the lexer (`_file_walk`) — #defines among struct members, in ERROR nodes and
 #    in ``extern "C" { }``, macro bodies without line splices — from `reading_text` (vendor syntax as blanks); per-file
 #    `reading` facts. Paired with v48.
+# 21 (R64): per-function `flow` and per-file `flow` — the pointer-flow facts (`pointer_flow.function_facts` /
+#    `file_facts`: stores, calls, returns, declared kinds, what the facts cannot hold) a context cached by 20 lacks; the
+#    closure's `pointer_targets` rest on them. Paired with v49.
+# 22 (R64 review): the flow facts of a struct record its unnamed members (an anonymous union's pointer counts when an
+#    object of it may hold one) — 21 lacks them. Paired with v50.
+# 23 (R64 review round 3): flow facts carry function-local typedef names (`local_types`) and K&R definitions
+#    (`params_unreadable`); a body `#define` stray carries its text (`body`) — 22 lacks them. Paired with v51.
+# 24 (R64 review round 4): per-file `paren_amp` — ``(T)&x`` read as a bitwise and — 23 lacks it. Paired with v52.
 _ARRAY_INIT_BUDGET = 20000
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
@@ -584,7 +593,12 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
                                        "unbalanced_brace_macros": walk["unbalanced_brace_macros"][:20],
                                        "unbalanced_directives": walk["problems"]},
                            # ``&x`` anywhere in the file — file-scope initializers (``{&g_cnt}``) included (review C3d).
-                           "address_taken": sorted(_address_taken(root, raw))}
+                           "address_taken": sorted(_address_taken(root, raw)),
+                           # (R64 review round 4 W-1) ``(T)&x`` — the grammar reads a bitwise and; the closure decides
+                           #   with the tree's type names whether ``T`` is a type
+                           "paren_amp": _paren_amp(root, raw),
+                           # (R64) file-scope objects' declared kinds and initializers, unread regions (`pointer_flow`)
+                           "flow": pointer_flow.file_facts(root, raw, path)}
     for d in walk["defines"]:
         entry = {"body": d["body"], "line": d["line"], "pos": d["pos"], "conditional": d["conditional"],
                  "function_like": d["function_like"]}
@@ -690,7 +704,9 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
             if name:
                 rec["functions"].setdefault(name, []).append({**_function_effects(node, raw), "line": line, "pos": pos,
                                                               "pointer_params": _pointer_params(node, raw),
-                                                              "conditional": conditional})
+                                                              "conditional": conditional,
+                                                              # (R64) stores · calls · returns for the points-to analysis
+                                                              "flow": pointer_flow.function_facts(node, raw, path)})
     return rec
 
 
@@ -886,6 +902,8 @@ def _file_walk(root, raw) -> dict[str, Any]:
                 strays.append({"op": kw, "name": (r["argument"].strip().strip('"<>') if kw == "include"
                                                   else named.group(1)),
                                "pos": r["pos"], "fn": r["fn"], "conditionals": conditionals})
+                if kw == "define":   # (R64 review round 3 W3) what a use of it does — the pointer flow reads it
+                    strays[-1]["body"] = ((_lexed_define(r["argument"]) or {}).get("body") or "")[:2000]
             continue
         file_level.append(r)
     # declarations, minus anything the parser made of a directive line's text (a pin macro it could not read)
@@ -1203,6 +1221,23 @@ def _address_taken(root, raw):
     return names
 
 
+def _paren_amp(root, raw) -> list[list[str]]:
+    """``(T)&x`` read by the grammar as ``(T) & x``: ``[T, x]`` for each — x's address is taken when T is a type."""
+    out = set()
+    for n in _walk(root):
+        if n.type != "binary_expression" or n.child_by_field_name("operator") is None \
+                or _text(n.child_by_field_name("operator"), raw) != "&":
+            continue
+        left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+        inner = [c for c in left.named_children if c.type != "comment"] if left is not None and \
+            left.type == "parenthesized_expression" else []
+        if len(inner) == 1 and inner[0].type in ("identifier", "type_identifier") and right is not None:
+            base = _base_identifier(right, raw)
+            if base:
+                out.add((_text(inner[0], raw), base))
+    return [list(x) for x in sorted(out)]
+
+
 _ASSIGN_RE = re.compile(r"\+\+|--|<<=|>>=|[-+*/%&|^]=|(?<![=!<>])=(?!=)")
 _ADDRESS_OF_RE = re.compile(r"(?:^|[(,=!~?:;{}]|&&|\|\||\breturn\b)\s*&(?!&)")
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
@@ -1332,6 +1367,11 @@ def _macro_closure(effects: dict[str, Any], name: str) -> dict[str, Any]:
     return view
 
 
+def _paren_param_call(body: str, params) -> bool:
+    """``(param)(`` in a macro body: a call through what the macro is given (review R64 W-3)."""
+    return any(re.search(r"[(]\s*" + re.escape(p) + r"\s*[)]\s*[(]", body) for p in params)
+
+
 def macro_side_effects(body: str) -> dict[str, Any]:
     """What expanding a macro body may do: write (assignment of any kind, ``++``/``--``, ``&`` escaping an
     operand) and which names it invokes. Text-level, so it over-approximates — it is used only to *refuse*."""
@@ -1446,6 +1486,9 @@ def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
 def _function_effects(fn, raw):
     """Direct writes, address-taken identifiers, pointer writes and callees of one function body."""
     writes, taken, calls, locals_, idents = set(), set(), set(), set(), set()
+    block_externs: set[str] = set()   # (review R64 round 3 C4) block-scope ``extern`` names: no locals, but no typedef
+    # (R64) ``(T)(x)``: a cast when T names a type, a call otherwise — decided over the tree (`function_write_closure`)
+    paren_calls: set[str] = set()
     local_arrays, indirect, top_locals = set(), set(), set()
     call_args: dict[str, set[str]] = {}
     pointer_write = False
@@ -1481,13 +1524,22 @@ def _function_effects(fn, raw):
                 # address of what the call passes (R2b review round 2 F).
                 call_args.setdefault(_text(f, raw), set()).update(
                     b for a in (args.named_children if args is not None else []) for b in [_base_identifier(a, raw)] if b)
+            elif _paren_callee(n, raw):
+                paren_calls.add(_paren_callee(n, raw))
             else:
                 calls.add("<indirect>")
         elif n.type == "declaration":
-            # A block-scope ``extern`` names the global itself, not a local (review C3f).
-            if not any(c.type == "storage_class_specifier" and _text(c, raw) == "extern" for c in n.named_children):
+            # A block-scope ``extern`` names the global itself, not a local (review C3f) — it still hides a typedef of
+            #   its name: ``(handler)(x)`` calls through it (review R64 round 3 C4)
+            if any(c.type == "storage_class_specifier" and _text(c, raw) == "extern" for c in n.named_children):
                 for d in _declarators(n):
-                    name = _declared_name(d, raw)
+                    block_externs.add(_declared_name(d, raw) or pointer_flow.declarator_kind(
+                        d.child_by_field_name("declarator") if d.type == "init_declarator" else d, raw)[0])
+            else:
+                for d in _declarators(n):
+                    # (R64) ``void (*cb)(U8)``: through the parenthesized declarator too
+                    name = _declared_name(d, raw) or pointer_flow.declarator_kind(
+                        d.child_by_field_name("declarator") if d.type == "init_declarator" else d, raw)[0]
                     if name:
                         locals_.add(name)
                         if n.parent is not None and n.parent == body:
@@ -1518,10 +1570,21 @@ def _function_effects(fn, raw):
     _, fdecl = _function_name(fn, raw)
     plist = fdecl.child_by_field_name("parameters") if fdecl is not None else None
     for p in plist.named_children if plist is not None else []:
-        name = _declared_name(p.child_by_field_name("declarator"), raw) if p.child_by_field_name("declarator") is not None else ""
+        if p.type == "identifier":
+            # (review R64 round 3 K1) a K&R parameter list: the parameters are declared where this walk reads them as
+            #   names of nothing — a write through one is a write through a pointer the closure cannot name
+            pointer_write = True
+            continue
+        d = p.child_by_field_name("declarator")
+        # (R64 review C-7) ``void (*handler)(U8)``: through the parenthesized declarator too
+        name = (_declared_name(d, raw) or pointer_flow.declarator_kind(d, raw)[0]) if d is not None else ""
         if name:
             params.add(name)
     every_local = locals_ | params
+    # (R64) ``(cb)(x)`` on a parameter or local is a call through it — a typedef of that name elsewhere is no cast here
+    if paren_calls & (every_local | block_externs):
+        calls.add("<indirect>")
+        paren_calls -= every_local | block_externs
     # A subscript/member write on a parameter or a non-array local writes *through* it (``void clr(U8 *p) { p[0] = 0U; }``)
     # — to an object the closure cannot name. It used to vanish with the shadowed name (R2b source oracle).
     pointer_write = pointer_write or any(b in every_local and not (b in local_arrays and single) for b, single in indirect)
@@ -1537,7 +1600,26 @@ def _function_effects(fn, raw):
     return {"writes": sorted(writes - shadow), "address_taken": sorted(taken - shadow), "calls": sorted(calls),
             "pointer_write": pointer_write, "idents": sorted(idents - every_local - calls),
             "call_args": {k: sorted(v - shadow) for k, v in call_args.items() if v - shadow},
-            "return_type": return_type}
+            "return_type": return_type, "paren_calls": sorted(paren_calls)}
+
+
+def _paren_callee(n, raw) -> str:
+    """``T`` of a call ``(T)(x)`` — one parenthesized name, one argument: tree-sitter's parse of a cast to a typedef
+    name (``(U8)(a + 1U)``) and of a call through a parenthesized name alike — else ""."""
+    f = n.child_by_field_name("function")
+    if f is None or f.type != "parenthesized_expression":
+        return ""
+    inner = [c for c in f.named_children if c.type != "comment"]
+    args = n.child_by_field_name("arguments")
+    operands = [c for c in args.named_children if c.type != "comment"] if args is not None else []
+    if len(inner) != 1 or inner[0].type not in ("identifier", "type_identifier") or len(operands) != 1:
+        return ""
+    return _text(inner[0], raw)
+
+
+def paren_call_is_cast(name: str, type_names, functions, objects, macro_text) -> bool:
+    """(R64) ``(name)(x)`` is a cast — the pointer flow's rule (`pointer_flow.paren_is_cast`, one operand)."""
+    return pointer_flow.paren_is_cast(name, 1, functions, objects, macro_text, type_names)
 
 
 def _base_identifier(node, raw):
@@ -3635,6 +3717,10 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
     type_names = frozenset(n for rec in (context.get("files") or {}).values() for n in rec.get("typedefs") or ())
     for rec in (context.get("files") or {}).values():
         taken.update(rec.get("address_taken") or ())
+        # (review R64 round 3 W3) ``&x`` in a function body's #define: the tree walk does not read its text
+        for d in (rec.get("stray_directives") or {}).get("directives") or ():
+            if d.get("op") == "define":
+                taken.update(macro_addresses(d.get("body") or "", type_names))
         for name, defs in rec["macros"].items():
             fx = macro_fx.setdefault(name, {"writes": False, "calls": set(), "names": set(), "function_like": False,
                                             "opaque": False, "conditional_ops": False, "cast_words": set()})
@@ -3651,11 +3737,12 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 fx["conditional_ops"] = fx["conditional_ops"] or bool(re.search(r"&&|\|\||\?", body))
         for name, defs in rec["functions"].items():
             entry = direct.setdefault(name, {"writes": set(), "calls": set(), "idents": set(), "pointer_write": False,
-                                             "return_types": set()})
+                                             "return_types": set(), "paren_calls": set()})
             for d in defs:
                 entry["return_types"].add(d.get("return_type") or "")
                 entry["writes"].update(d["writes"])
                 entry["calls"].update(d["calls"])
+                entry["paren_calls"].update(d.get("paren_calls") or ())
                 entry["idents"].update(d.get("idents") or ())
                 entry["pointer_write"] = entry["pointer_write"] or d["pointer_write"]
                 taken.update(d["address_taken"])
@@ -3663,6 +3750,28 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
     for rec in (context.get("files") or {}).values():
         for mname, defs in rec["macros"].items():
             macro_text.setdefault(mname, []).extend(d.get("body") or "" for d in defs)
+    # (R64 review round 4 W-1) ``(T)&x``: x's address is taken when T names a type (a typedef, type words, a macro of
+    #   type words) — the fallback havoc reaches it
+    for rec in (context.get("files") or {}).values():
+        for tname, base in rec.get("paren_amp") or ():
+            if tname in type_names or tname in _TYPE_WORDS or (
+                    tname in macro_text and all(pointer_flow.type_words_only(t, type_names) for t in macro_text[tname])):
+                taken.add(base)
+    # (R64) ``(T)(x)`` read as a call by the parser: a cast to a type — no callee — or a call to what T names (a
+    #   function, a macro), or through a function pointer (unknown code). Before R64 every one was unknown code: 174
+    #   KJPDS02_PV and 38 HDPDM01 functions whose only "indirect call" was ``(U8)(…)``
+    prototypes = {n for rec in (context.get("files") or {}).values() for n in rec.get("prototypes") or ()}
+    object_names = {n for rec in (context.get("files") or {}).values() for n in rec.get("globals") or ()}
+    # (review R64 round 6 C6) a name some function body #defines is no type there: ``(T)(x)`` calls what it names
+    body_defined = {d.get("name") or "" for rec in (context.get("files") or {}).values()
+                    for d in (rec.get("stray_directives") or {}).get("directives") or ()
+                    if d.get("op") in ("define", "undef")} - {""}
+    for entry in direct.values():
+        for t in sorted(entry.pop("paren_calls", ())):
+            if t not in body_defined and paren_call_is_cast(t, type_names, set(direct) | prototypes, object_names,
+                                                             macro_text):
+                continue
+            entry["calls"].add(t if t in direct or t in macro_fx or t in prototypes else "<indirect>")
     # (R63 review round 1 C1) names a function body #defines or #undefs somewhere: the table there is not the walk's, so a
     #   write through such a macro is not resolved to an object (`_designator_targets`) — and a write through such a name
     #   itself is no write the closure can name (round 2 W3 — checked even when designators are refused, round 3 I1)
@@ -3689,6 +3798,22 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
         macro_fx[mname]["calls"].update(t for text in texts for t in re.findall(r"\b[A-Za-z_]\w*\b", text)
                                         if t in macro_fx and t != mname)
     closure: dict[str, dict[str, Any]] = {}
+    # (R64) where a write through a pointer can land — refused whole when the context is not complete (`pointer_flow`)
+    flow, flow_refused = pointer_flow.analyze(context)
+    # (review R64 W-3, W-4) unknown code the flow found a function calling — in a macro's expansion (``(cb)(v)``
+    #   through the argument it is given), through an object a macro elsewhere shares a name with — is an unknown
+    #   callee of it; without the flow, a macro that calls through a parenthesized parameter calls unknown code
+    flow_unknown: dict[str, set[str]] = {}
+    if flow is not None:
+        for name in direct:
+            found = {c[5:] for c in flow.unknown_calls.get(name, ()) if c.startswith("call:") and c[5:] not in direct}
+            if found:
+                flow_unknown[name] = found
+    else:
+        for mname, fx in macro_fx.items():
+            if any(_paren_param_call(d.get("body") or "", d.get("params") or ())
+                   for rec in files_.values() for d in rec["macros"].get(mname, ())):
+                fx["calls"].add("<indirect>")
     for name in direct:
         writes, unknown, pointer_write, seen, stack = set(), set(), False, set(), [name]
         while stack:
@@ -3705,11 +3830,13 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                     unknown.add("macro:" + current)
                 else:
                     stack.extend(fx["calls"])
+                    unknown.update(c for c in fx["calls"] if c in macro_fx and c in objects and c not in direct)
             if entry is None:
                 if fx is None:
                     unknown.add(current)
                 continue
             writes |= entry["writes"]
+            unknown |= flow_unknown.get(current, set())
             # A write through a macro name (``G_ALIAS = 0U`` with ``#define G_ALIAS g_cnt``) targets whatever the
             # macro expands to — not something the closure can name (review round 2 C1) — unless every definition is a
             # plain designator of one object (R63: ``#define PTADL _PTAD.Overlap_STR.PTADLSTR.Byte`` writes ``_PTAD``)
@@ -3726,6 +3853,9 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                     unknown.add("macro_write:" + w)
             pointer_write = pointer_write or entry["pointer_write"]
             stack.extend(entry["calls"])
+            # (review R64 W-4) a call to a name that is a macro somewhere and an object (a function pointer) too: a
+            #   unit that does not see the macro calls through the object — unknown code
+            unknown.update(c for c in entry["calls"] if c in macro_fx and c in objects and c not in direct)
             stack.extend(i for i in entry["idents"] if i in macro_fx and i not in direct)
         # ``reaches``: every function this one may (transitively) call — itself included when some path calls it
         # again (recursion, direct or through others): the caller's static locals may change (R2b review W1, round 2 A).
@@ -3746,6 +3876,9 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 reads |= macro_fx[x]["names"]
                 reads_complete = reads_complete and not macro_fx[x]["opaque"]
         closure[name] = {"writes": writes, "unknown_callees": unknown, "pointer_write": pointer_write,
+                         # (R64) where its writes through a pointer may land (`pointer_flow`): ``{"abs", "params", "why"}``
+                         # — ``abs`` None when unknown; None as a whole when the analysis is refused
+                         "pointer_targets": flow.summary(name) if flow is not None else None,
                          "reads": frozenset(reads), "reads_complete": reads_complete,
                          "reaches": (seen - {name}) | ({name} if recursive else set()),
                          # (R14) one declared type when every definition says the same; "" when they differ / unknown
@@ -3807,4 +3940,6 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                      "function_like": fx["function_like"], "opaque": fx["opaque"],
                      "conditional_ops": fx["conditional_ops"], "cast_words": sorted(fx["cast_words"])}
               for name, fx in macro_fx.items()}
-    return {"functions": closure, "address_taken": taken, "macros": macros}
+    return {"functions": closure, "address_taken": taken, "macros": macros,
+            # (R64) the solved points-to graph (questions at a call site: a stub's arguments, a callee's parameters)
+            "pointer_flow": flow, "pointer_flow_refused": flow_refused}
