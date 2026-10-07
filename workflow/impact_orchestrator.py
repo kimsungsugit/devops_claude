@@ -1655,7 +1655,9 @@ def _build_doc_proposal(
         _uds_swcom = load_uds_swcom_map(_u) if _u else None
         _uds_asil = load_uds_asil_map(_u) if _u else None
         _uds_related = load_uds_related_map(_u) if _u else None
-        _design_ids = load_uds_design_ids(_u) if _u else None
+        # (R65) 표 Name 행 별칭은 소스 함수 목록으로 확인한 것만 — 생성기(SITS)와 같은 TC ID
+        _design_ids = load_uds_design_ids(_u, source_functions=[
+            str((v or {}).get("name") or "") for v in fdmap.values() if isinstance(v, dict)]) if _u else None
         if _sds_map is None and not _u and warn_sink is not None:
             warn_sink.append(
                 "문서 생성 초안: SITS 가 SwDS/SwUDS 없이 합성됐습니다 — TC ID 가 순번이라 "

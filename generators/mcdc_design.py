@@ -945,12 +945,29 @@ def _source_decisions(unit, declared_domains=None):
 
 def _apply_design_range(unit, name, domain):
     """Narrow a declared domain to the unit's SwUDS design range (or explicit enumerated values) — never widen it."""
-    from generators.suts import enum_bounds, range_bounds
+    from generators.suts import _uds_value_bounds, enum_bounds, range_bounds
     domain["type_min"], domain["type_max"] = domain["min"], domain["max"]
-    ranged = range_bounds(((unit.get("uds_param_info") or {}).get(name) or {}).get("range"))
+    _info = (unit.get("uds_param_info") or {}).get(name) or {}
+    ranged = range_bounds(_info.get("range"))
+    # (R65) 설계서 값 목록(`0, 5, 15`)은 범위처럼 좁히되 값 집합을 그대로 쓴다 — 목록 사이 정수는 설계 값이 아니다
+    listed = {} if ranged else _uds_value_bounds(_info)
     enumerated = enum_bounds((unit.get("value_domains") or {}).get(name))
-    constraint = ranged or enumerated
+    constraint = ranged or listed or enumerated
     if not constraint:
+        return
+    if listed:
+        lo, hi = listed["min"], listed["max"]
+        design = sorted(int(v) for v in _info["values"])
+        current = domain.get("values")
+        # 목록 값 하나라도 선언이 담을 수 없거나(열거자면 열거자가 아니거나) 하면 문서 오류다 — 부분집합만 조용히 쓰지 않고
+        #   선언 도메인을 지킨다(SUTS `_fits_type` 와 같은 판정 — 리뷰 R65 W5)
+        if any(not domain["min"] <= v <= domain["max"] or (current and v not in current) for v in design):
+            domain["design_range_conflict"] = {"min": lo, "max": hi, "source": "uds_values",
+                                               "reason": "values_outside_declaration"}
+            return
+        domain["min"], domain["max"] = design[0], design[-1]
+        domain["constraint_source"] = "uds_values"
+        domain["values"] = design
         return
     lo, hi = constraint.get("min"), constraint.get("max")
     if type(lo) is not int or type(hi) is not int or not domain["min"] <= lo <= hi <= domain["max"]:

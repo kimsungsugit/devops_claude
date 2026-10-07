@@ -3804,7 +3804,10 @@ def generate_sits(
     stp_envs = stp_context.get("environments") or []
     # TC ID 는 **SwUDS 설계 ID** 를 쓴다(`generate_itc_list` docstring — 정본 실측).
     # 못 얻으면 순번으로 내려가되 그 사실이 로그·리포트에 남는다.
-    _design_ids = load_uds_design_ids(uds_path) if uds_path else None
+    # (R65) 표 Name 행 별칭은 소스 함수 목록으로 확인한 것만 쓴다(한 설계 ID 가 두 흐름의 TC ID 가 되지 않게 —
+    #   `restrict_aliases`)
+    _design_ids = load_uds_design_ids(uds_path, source_functions=[
+        str((v or {}).get("name") or "") for v in function_details.values() if isinstance(v, dict)]) if uds_path else None
     # ── 전용 FI TC 의 대상 흐름 ────────────────────────────────────────
     # 지정된 설계 ID 를 SwUDS Related 맵으로 역인덱스해 그 설계 요소를 실현하는
     # 함수들의 흐름을 찾는다. 못 찾은 ID 는 **조용히 버리지 않고** 센다

@@ -148,7 +148,9 @@ class TestMeasureParity:
         monkeypatch.setattr(tm, "_measure_sts_mapping", lambda *a, **k: {})
         monkeypatch.setattr(tm, "_measure_suts_types", lambda *a, **k: {})
         monkeypatch.setattr(rh, "resolve_builder_input", lambda p, **k: "local-copy" if p else None)
-        monkeypatch.setattr(uio, "load_uds_unit_io", lambda p: uds_map)
+        # (R65) 측정도 생성기처럼 소스 함수 목록을 넘긴다(표 Name 행 별칭 확인)
+        self.uds_kwargs = {}
+        monkeypatch.setattr(uio, "load_uds_unit_io", lambda p, **k: (self.uds_kwargs.update(k) or uds_map))
         tm.clear_cache()
         try:
             return tm.measure("C:/src", uds_path=uds_path)
@@ -177,6 +179,7 @@ class TestMeasureParity:
         res = self._run(monkeypatch, uds_path="U:/x/SwUDS.docx", uds_map=m)
         a = res["suts_asil"]
         assert a["uds_map"] is True
+        assert self.uds_kwargs.get("source_functions") == ["Fn_Under_Test"]
         # 소스 함수 1개는 uds+override(표가 결정) → 약함으로 세지 않는다. 남는 override 는 등급 있는 스냅샷 전용 unit 뿐.
         assert a["override"] == a["override_only_units"] - n_null
         assert without["override"] == a["override"] + 1, "표 없이 재면 같은 소스 함수가 override(약함)로 한 건 더 잡힌다"

@@ -1042,19 +1042,20 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(qr.get("bounds_source_distribution"), dict):
         out.append(_item(
             "suts_bounds_source", "경계값 출처 분포", _dist(qr["bounds_source_distribution"]) or "(0칸)",
-            "uds_range=설계서가 적은 값 범위 · enum=열거자 값 집합 · hsis=HSIS 범위 · type=선언 타입의 전폭 · "
+            "uds_range=설계서가 적은 값 범위 · uds_values=설계서가 적은 값 목록(R65) · enum=열거자 값 집합 · "
+            "hsis=HSIS 범위 · type=선언 타입의 전폭 · "
             "unknown=비운 칸. type 비중이 크면 값은 유효하지만 설계 의도가 아니라 타입이 정한 경계다."))
 
     # 설계서 범위와 선언 타입이 어긋난 변수 — 문서 쪽 오류일 수 있어 사람이 봐야 한다.
     conflicts = _int(qr, "range_conflict_count")
     if conflicts is not None:
-        note = "설계서가 적은 값 범위가 선언 타입의 폭을 벗어난 변수다."
+        note = "설계서가 적은 값 범위 · 값 목록이 선언(타입 폭 · 열거자)과 맞지 않는 변수다."
         if conflicts:
             head = _head(qr.get("range_conflicts"))
             note += f" 예: {head}" if head else ""
-            note += " — 설계서와 소스 중 한쪽이 틀렸다는 뜻이라 값을 고르지 않고 타입 폭으로 시험했다."
+            note += " — 설계서와 소스 중 한쪽이 틀렸다는 뜻이라 값을 고르지 않고 선언(타입 폭 · 열거자)으로 시험했다."
         else:
-            note += " 어긋난 변수가 없다 — 설계서 범위와 선언 타입이 서로 맞는다."
+            note += " 어긋난 변수가 없다 — 설계서 범위와 선언이 서로 맞는다."
         out.append(_item("suts_range_conflicts", "범위 충돌", f"{conflicts}건", note, tone=_tone(conflicts > 0)))
 
     # 포인터 주소 범위 — 위 충돌과 **다른 축**이라 따로 센다(문서 오류가 아니다).
@@ -1298,6 +1299,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             tone=_tone(bool(_int(rr, "errors")) or bool(_int(rr, "cut")))))
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
+    out.extend(_uds_reading_item(qr.get("uds_reading")))                                         # (R65)
     out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
     out.extend(_pointer_targets_item(qr.get("pointer_targets"), "suts_pointer_targets"))       # (R64)
     return out
@@ -1689,6 +1691,99 @@ def _pointer_targets_item(block: Any, key: str, doc: str = "suts") -> List[Dict[
           f" 이 분석 자체는 clang 대조가 확인하지 않는다(하네스는 오라클과 같은 대상에만 채움값을 쓴다) — {where}이 늘어난 칸은 "
           "callee 의 실제 쓰기 집합 대조로 따로 확인했다(계획서 R64 기록).",
         tone=_tone(bool(refused) or bool(causes)))]
+
+
+_UDS_RANGE_UNREAD_LABELS = {
+    "single_value": "값 하나(범위인지 기본값인지 문서가 말하지 않음)",
+    "multiple_intervals": "여러 구간",
+    "descending": "내림차순(타입 전체가 아님)",
+    "signed_hex_out_of_order": "2의 보수로 읽으면 순서가 뒤집힘(다른 부호 표기 후보)",
+    "signed_notation_unsigned_type": "부호 전폭 표기인데 같은 행 Type 은 부호 없음",
+    "signed_notation_width_differs": "부호 전폭 표기의 폭이 같은 행 Type 과 다름",
+    "ambiguous_comma": "천 단위 쉼표와 목록 쉼표가 섞임",
+    "digit_count_differs": "자릿수가 다른 16진(오타 후보)",
+    "outside_document_type": "같은 행 Type 이 담을 수 없는 값(오타 후보)",
+    "not_a_number": "숫자가 아님",
+    "hex_without_prefix": "0x 없는 16진(짝이 두 자리 이상 십진)",
+    "type_in_range_column": "범위 칸에 타입 이름",
+    "excludes_inner_value": "가운데 값 제외",
+    "excludes_unreadable": "제외 표기를 못 읽음",
+    "annotation_disagrees": "괄호 주석과 다름",
+    "unread_annotation": "괄호 주석을 못 읽음",
+    "no_value": "값 없음",
+}
+_UDS_NOTATION_LABELS = {
+    "signed_hex": "부호 있는 16진(2의 보수)", "descending_full_width": "타입 전체를 `최대 ~ 최소` 로 적음",
+    "array_elements": "배열 원소 범위(`array …`)", "decimal_annotation_agrees": "괄호 십진 주석으로 확인",
+    "excluded_endpoint": "끝값 제외", "value_list_contiguous": "연속 값 목록(= 범위)", "trailing_comma": "끝 쉼표",
+    "two_value_list": "값 둘 목록(범위가 아니라 두 값으로 읽음)",
+    "hex_without_prefix": "0x 없는 16진",
+}
+
+
+def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:
+    """(R65) SwUDS 를 어떻게 읽었나 — 표시 붙은 머리말 · 표 Name 별칭 · 삭제 표시 · 세로 병합으로 이어진 행 · 이름으로 못 읽은 행 ·
+    Value Range 판독(범위 · 값 목록 · 사유별 못 읽은 칸과 '고치면' 안내). SwUDS 를 주지 않았으면 말하지 않는다."""
+    if not isinstance(block, dict) or not block.get("given"):
+        return []
+    if block.get("read_error") or not block.get("read"):
+        return [_item(
+            "suts_uds_reading", "SwUDS 판독(설계서를 어떻게 읽었나)", "읽지 못함",
+            f"지정한 SwUDS 를 읽지 못했다({block.get('read_error') or '함수 표 0개'}) — 입력/출력 이름 · Value Range · ASIL 은 "
+            "소스와 다른 문서에서 왔다. 파일 형식(.docx) · 접근을 확인할 것.", tone="warning")]
+    why = block.get("range_unread_by_reason") if isinstance(block.get("range_unread_by_reason"), dict) else {}
+    unit_why = block.get("unit_vars_range_unread") if isinstance(block.get("unit_vars_range_unread"), dict) else {}
+    notation = block.get("range_notation") if isinstance(block.get("range_notation"), dict) else {}
+    aliases = [str(x) for x in (block.get("name_row_aliases") or [])]
+    marked_units = [str(x) for x in (block.get("units_via_marked_heading") or [])]
+    alias_units = [str(x) for x in (block.get("units_via_name_row_alias") or [])]
+    deleted = [str(x) for x in (block.get("deleted_headings") or [])]
+    dropped = [str(x) for x in (block.get("alias_dropped_source") or [])]
+    superseded = [str(x) for x in (block.get("superseded_headings") or [])]
+    deleted_src = [str(x) for x in (block.get("deleted_in_source") or [])]
+    rows_unread = [r for r in (block.get("rows_unread_samples") or []) if isinstance(r, dict)]
+    unread_total = sum(int(v) for v in why.values())
+    unit_unread = sum(int(v) for v in unit_why.values())
+    samples = block.get("range_unread_samples") if isinstance(block.get("range_unread_samples"), dict) else {}
+    return [_item(
+        "suts_uds_reading", "SwUDS 판독(설계서를 어떻게 읽었나)",
+        f"함수 표 {_show(_int(block, 'functions'))} · 파라미터 행 {_show(_int(block, 'param_rows'))}"
+        f"(세로 병합으로 이어진 행 {_show(_int(block, 'rows_continued'))}) · Value Range 범위 {_show(_int(block, 'range_read'))}"
+        f" · 값 목록 {_show(_int(block, 'values_read'))} · 못 읽음 {unread_total}",
+        "SwUDS 의 설계 ID 머리말과 함수 표(입출력 파라미터 · Type · Value Range)를 한 판독기로 읽은 기록이다."
+        + (f" 이름 뒤에 표시가 붙은 머리말 {_show(_int(block, 'marked_headings'))}개(예: "
+           + ", ".join(f"`{x}`" for x in (block.get("marked_heading_samples") or [])[:_HEAD_N])
+           + ")는 표시를 떼고 이름을 읽었다"
+           + (f" — 이 문서의 unit {len(marked_units)}개가 그 표의 입출력 · 범위 · 설계 ID 를 쓴다." if marked_units else ".")
+           if _int(block, "marked_headings") else "")
+        + (" 머리말과 함수 표 Name 행이 다른 함수: " + "; ".join(aliases[:_HEAD_N])
+           + " — 표 Name 행 이름으로도 찾는다(문서 안 불일치이므로 한쪽을 고칠 것)"
+           + (f"; 그렇게 찾은 unit {len(alias_units)}개." if alias_units else ".") if aliases else "")
+        + (" 표 Name 행 별칭 중 머리말 이름도 소스 함수라 쓰지 않은 것: " + ", ".join(dropped[:_HEAD_N])
+           + " — 그 표가 어느 함수의 것인지 문서만으로 못 정한다." if dropped else "")
+        + (f" 삭제 표시(`(삭제)`) 머리말 {len(deleted)}개는 함수의 설계로 쓰지 않았다(예: {_head(deleted)})." if deleted else "")
+        + (" 같은 이름의 머리말 중 삭제 낱말이 든 것은 쓰지 않고 살아 있는 쪽을 썼다: " + "; ".join(superseded[:_HEAD_N])
+           + "." if superseded else "")
+        + (" 그중 소스에는 함수가 있는 것: " + ", ".join(deleted_src[:_HEAD_N])
+           + " — 설계서가 지웠다고 적었으므로 SwUDS 기반 시험 범위에서 빠진다(소스와 설계서 중 한쪽을 고칠 것)."
+           if deleted_src else "")
+        + (f" 이름 칸을 이름으로 읽지 못한 파라미터 행 {_show(_int(block, 'rows_unread'))}개 — 예: "
+           + "; ".join(f"{r.get('function')} {('입력' if r.get('section') == 'in' else '출력')} `{r.get('text')}`"
+                       for r in rows_unread[:_HEAD_N])
+           + ". 그 행은 입출력 목록에 없다 — 숫자로 시작하는 이름은 오타 후보라 고치면 들어가고, 식이나 문장이 든 칸은 "
+           "파라미터 행이 아닐 수 있다(표 양식을 확인할 것)."
+           if _int(block, "rows_unread") else "")
+        + (" Value Range 를 읽지 못한 칸: " + " · ".join(
+            f"{_UDS_RANGE_UNREAD_LABELS.get(k, k)} {v}" for k, v in sorted(why.items(), key=lambda kv: (-int(kv[1]), kv[0])))
+           + " (예: " + "; ".join(str(s) for k in sorted(samples)[:3] for s in (samples.get(k) or [])[:1]) + ")."
+           + (f" 이 문서 unit 의 변수 {unit_unread}개가 그런 칸이라 다음 출처(열거자 · HSIS · 선언 타입 폭)로 시험했다 — "
+              "`lo ~ hi` 꼴로 고치면 설계 범위로 시험한다." if unit_unread else "")
+           if unread_total else " Value Range 를 못 읽은 칸 없음.")
+        + (f" 값 목록(`0, 5, 15`)은 열거자처럼 그 값들로 시험한다(목록 사이 정수는 쓰지 않는다) — unit 변수 "
+           f"{_show(_int(block, 'unit_vars_uds_values'))}개." if _int(block, "values_read") else "")
+        + (" 읽은 표기: " + " · ".join(f"{_UDS_NOTATION_LABELS.get(k, k)} {v}" for k, v in sorted(notation.items()))
+           + "." if notation else ""),
+        tone=_tone(bool(_int(block, "rows_unread") or aliases or unit_unread or dropped or deleted_src)))]
 
 
 def _source_reading_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:

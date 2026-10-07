@@ -232,8 +232,11 @@ class TestRangeConflictShowsTheDocumentText:
             + _row("1", "s32s_DecelPos", "S32", "0x7FFFFFF~   0x80000000", "0", "d")
             + _row("2", "u8_Ok", "U8", "N/A", "0", "d"))
         rec = resolve_unit_io(load_uds_unit_io(_docx(_para("SwUFn_0001: f") + body, tmp_path)), "f")["param_info"]
-        assert rec["s32s_DecelPos"] == {"type": "S32", "range": [134217727, 2147483648], "range_text": "0x7FFFFFF~ 0x80000000"}
-        assert rec["u8_Ok"] == {"type": "U8"}                     # 범위를 못 읽은 칸엔 원문도 싣지 않는다
+        # (R65) 같은 행의 타입(S32)으로 읽으면 0x80000000 은 -2147483648 이라 `최대 ~ 최소` 인데 자릿수가 달라(F 일곱) 타입
+        #   전체가 아니다 — 범위를 지어내지 않고 사유와 원문을 남긴다(예전엔 134217727 ~ 2147483648 로 읽어 '범위 충돌')
+        assert rec["s32s_DecelPos"] == {"type": "S32", "range_unread": "digit_count_differs",
+                                        "range_text": "0x7FFFFFF~ 0x80000000"}
+        assert rec["u8_Ok"] == {"type": "U8"}                     # 아무것도 안 적은 칸(N/A)엔 원문도 싣지 않는다
 
     def test_conflict_message_carries_the_raw_text(self):
         from generators.suts import generate_sequences

@@ -755,7 +755,9 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
             from generators.uds_unit_io import load_uds_unit_io
             _local_uds_io = resolve_builder_input(uds_path, label="SwUDS(입출력)")
             if _local_uds_io:
-                _uds_io = load_uds_unit_io(_local_uds_io) or None
+                # (R65) 표 Name 행 별칭은 소스 함수 목록으로 확인한 것만 — 생성기(SUTS)와 같은 표
+                _uds_io = load_uds_unit_io(_local_uds_io, source_functions=[
+                    str((v or {}).get("name") or "") for v in fd.values() if isinstance(v, dict)]) or None
         except Exception as exc:  # noqa: BLE001 — docx/IPC 계열이 광범위. 없이 잰 사실은 `uds_map` 으로 남는다
             _logger.warning("test_materials: SwUDS 입출력 표 읽기 실패 — 표 없이 잰다: %s", exc)
     # ⚠ unit 수집은 이 측정에서 가장 비싼 단계다. 입력 축과 ASIL 근거 축이 **같은

@@ -2052,6 +2052,11 @@ def _unit_uds_param_info(uds_rec: Optional[Dict[str, Any]], names: List[str]) ->
     if not info:
         return {}
     lowered = {str(k).lower(): v for k, v in info.items()}
+    # (R65, 감사 #18) 설계서는 포인터 멤버를 `p->m` 으로 적고 unit 이름은 정본 표기 `p[0].m` 이다 — 둘 다 `->` 를 `.` 로,
+    #   첨자를 뗀 같은 열쇠로 맞춘다(KJPDS02_PV 301 · HDPDM01 49 행이 예전엔 한 번도 조회되지 않았다)
+    canon: Dict[str, Dict[str, Any]] = {}
+    for k, v in info.items():
+        canon.setdefault(_uds_param_key(str(k)), v)
     out: Dict[str, Dict[str, Any]] = {}
     for v in names:
         for key in (v, re.sub(r"\[[^\]]*\]", "", v)):
@@ -2059,6 +2064,79 @@ def _unit_uds_param_info(uds_rec: Optional[Dict[str, Any]], names: List[str]) ->
             if isinstance(rec, dict) and rec:
                 out[v] = rec
                 break
+        else:
+            rec = canon.get(_uds_param_key(v))
+            if isinstance(rec, dict) and rec:
+                out[v] = rec
+    return out
+
+
+def _source_function_names(function_details: Dict[str, Any]) -> List[str]:
+    """소스에서 찾은 함수 이름(SwUDS 표 Name 행 별칭을 거르는 데 쓴다 — `restrict_aliases`)."""
+    return [str((v or {}).get("name") or "") for v in (function_details or {}).values() if isinstance(v, dict)]
+
+
+def _uds_param_key(name: str) -> str:
+    """(R65) 설계서 파라미터 이름과 unit 이름이 같은 객체인지 보는 열쇠 — `p->m` · `p[0].m` · `p.m` 이 같다."""
+    return re.sub(r"\[[^\]]*\]", "", name.replace("->", ".")).replace(" ", "").lower()
+
+
+def summarize_uds_reading(io_map: Optional[Dict[str, Any]], units: List[Dict[str, Any]], given: bool,
+                          source_functions: Any = None) -> Dict[str, Any]:
+    """(R65) SwUDS 를 어떻게 읽었나(품질 보고서 `uds_reading` — 공시 `suts_uds_reading` 이 읽는다).
+
+    문서 수준(`load_uds_unit_io` 의 `reading`: 머리말 · 표 · 표시 붙은 머리말 · 삭제 표시 · 표 `Name` 별칭 · 파라미터 행 ·
+    세로 병합으로 이어진 행 · 이름으로 못 읽은 행 · Value Range 판독) + 이 문서의 unit 에 닿은 것(표시 붙은 머리말 · 별칭으로
+    찾은 unit, 값 목록을 쓴 변수, 설계서가 적었지만 읽지 못한 범위의 변수 — 사유별).
+    """
+    if not given:
+        return {"given": False}
+    from generators.uds_design_ids import read_design_heading
+
+    r = dict((io_map or {}).get("reading") or {})
+    out: Dict[str, Any] = {"given": True, "read": bool((io_map or {}).get("by_name"))}
+    for k in ("read_error", "headings", "tables", "functions", "ambiguous", "param_rows", "rows_continued", "range_read",
+              "values_read", "range_unread_by_reason", "range_unread_samples", "range_notation", "deleted_headings",
+              "alias_conflicts", "unread_headings", "superseded_headings"):
+        if k in r:
+            out[k] = r[k]
+    # 별칭은 **쓴 것**만 적는다(리뷰 R65 2차 N3 — 소스에 둘 다 있어 뺀 별칭을 '찾는다' 고 공시했다)
+    from generators.uds_design_ids import checked_aliases
+
+    out["name_row_aliases"] = [f"{h} ← 표 Name `{a}`" for a, h in sorted(checked_aliases(io_map).items())]
+    out["alias_dropped_source"] = list((io_map or {}).get("alias_dropped_source") or [])
+    # 문서는 삭제했는데 소스에는 있는 함수 — 시험 범위(SwUDS 기반)에서 빠진다. 같은 이름의 살아 있는 머리말이 매핑됐으면
+    #   (`(삭제)` + `(New)` 짝) 빠지지 않는다 — 그 이름은 빼고 센다(리뷰 R65 3차 V1)
+    _src = {str(x).lower() for x in (source_functions or ()) if x}
+    _mapped = {str(k).lower() for k in ((io_map or {}).get("by_name") or {})} \
+        | {str(a).lower() for a in checked_aliases(io_map)} \
+        | {str(n).lower() for n in (r.get("live_heading_names") or [])}
+    out["deleted_in_source"] = sorted({h["name"] for t in (r.get("deleted_headings") or [])
+                                       for h in [read_design_heading(t)]
+                                       if h and h["name"].lower() in _src and h["name"].lower() not in _mapped})
+    out["marked_headings"] = len(r.get("marked_headings") or [])
+    out["marked_heading_samples"] = list((r.get("marked_headings") or [])[:5])
+    out["rows_unread"] = len(r.get("rows_unread") or [])
+    out["rows_unread_samples"] = list((r.get("rows_unread") or [])[:8])
+    names = {str(u.get("name") or "") for u in units}
+    # 표시 붙은 머리말 중 이 문서의 unit 이 **실제로 그 표를 받은** 것만(동명이인 · 표 없는 머리말은 뺀다 — 리뷰 R65 I6)
+    _tabled = set((io_map or {}).get("by_name") or {})
+    marked = [h["name"] for t in (r.get("marked_headings") or []) for h in [read_design_heading(t)] if h]
+    out["units_via_marked_heading"] = sorted(n for n in marked if n in names and n in _tabled)
+    out["units_via_name_row_alias"] = sorted(a for a in checked_aliases(io_map) if a in names)
+    why: Dict[str, int] = {}
+    samples: List[str] = []
+    values_vars = 0
+    for u in units:
+        for v, reason in (u.get("uds_range_unread") or {}).items():
+            why[str(reason)] = why.get(str(reason), 0) + 1
+            if len(samples) < 8:
+                _txt = ((u.get("uds_param_info") or {}).get(v) or {}).get("range_text") or ""
+                samples.append(f"{u.get('name')}.{v} `{_txt}`")
+        values_vars += sum(1 for s in (u.get("bounds_source") or {}).values() if s == "uds_values")
+    out["unit_vars_range_unread"] = why
+    out["unit_vars_range_unread_samples"] = samples
+    out["unit_vars_uds_values"] = values_vars
     return out
 
 
@@ -2071,6 +2149,15 @@ def range_bounds(rng: Any) -> Dict[str, Any]:
     if lo > hi:
         return {}
     return {"min_inv": lo - 1, "min": lo, "mid": (lo + hi) // 2, "max": hi, "max_inv": hi + 1}
+
+
+def _uds_value_bounds(rec: Any) -> Dict[str, Any]:
+    """(R65) 설계서 Value Range 의 **값 목록**(`0, 5, 15` — 연속이 아닌 집합) → 열거자와 같은 경계값 dict(최소 · 가운데 ·
+    최대는 목록의 값 그대로, 범위 밖 ±1). 두 값 이상일 때만 — 값 하나는 범위로 읽지 않는다(`read_value_range`)."""
+    vals = (rec or {}).get("values") if isinstance(rec, dict) else None
+    if not isinstance(vals, list) or len(vals) < 2:
+        return {}
+    return enum_bounds({"values": vals})
 
 
 def _param_decl_types(*raw_groups: List[str]) -> Dict[str, str]:
@@ -2165,6 +2252,18 @@ def _boundary_domains(unit: Dict[str, Any], input_vars: List[str], var_types: Di
             if (unit.get("bounds_source") or {}).get(v) in ("uds_range", "hsis_range") and \
                     isinstance(b.get("min"), int) and isinstance(b.get("max"), int):
                 vals = [x for x in vals if b["min"] <= x <= b["max"]]
+            elif (unit.get("bounds_source") or {}).get(v) == "uds_values":
+                _design = set(((unit.get("uds_param_info") or {}).get(v) or {}).get("values") or [])
+                vals = [x for x in vals if x in _design]
+            if len(vals) >= 2:
+                domains[v] = vals
+            continue
+        if (unit.get("bounds_source") or {}).get(v) == "uds_values":
+            # (R65) 설계서가 적은 값 목록 — 목록 사이의 정수는 설계가 정한 값이 아니다(열거자와 같은 규칙, 리뷰 C2)
+            try:
+                vals = sorted({int(x) for x in (((unit.get("uds_param_info") or {}).get(v) or {}).get("values") or [])})
+            except (TypeError, ValueError):
+                vals = []
             if len(vals) >= 2:
                 domains[v] = vals
             continue
@@ -2277,8 +2376,10 @@ def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
     from generators.boundary_rows import _as_int, compared_constants, comparison_is_live, derives_any
     src = unit.get("bounds_source") or {}
     declared = set(declared or ())
+    # (R65) 설계서 값 목록(`uds_values`)도 설계 범위다 — 목록의 최소 ~ 최대 밖 상수가 강건성 점이다
     ranged = [v for v in input_vars
-              if src.get(v) in ("uds_range", "hsis_range") and v not in unknown_vars and var_types.get(v) != "float"
+              if src.get(v) in ("uds_range", "hsis_range", "uds_values") and v not in unknown_vars
+              and var_types.get(v) != "float"
               and isinstance((var_bounds.get(v) or {}).get("min"), int)
               and isinstance((var_bounds.get(v) or {}).get("max"), int)]
     designed = [v for v in ranged if v in declared]
@@ -2603,11 +2704,14 @@ def generate_sequences(
             ut = _normalize_type(str((_uds_info.get(v) or {}).get("type") or ""))
             if ut and ut != _UNKNOWN_TYPE:
                 return ut
-            if range_bounds((_uds_info.get(v) or {}).get("range")) or range_bounds(_hsis_rng.get(v)):
+            if range_bounds((_uds_info.get(v) or {}).get("range")) or range_bounds(_hsis_rng.get(v)) \
+                    or _uds_value_bounds(_uds_info.get(v)):
                 return _RANGE_TYPE
         return t
 
     _range_conflicts: List[str] = []
+    # (R65) 설계서가 적었지만 읽지 못한 Value Range — 변수 → 사유(`read_value_range`). 값은 다음 출처로 간다.
+    _uds_unread: Dict[str, str] = {}
     _pointer_ranges: List[str] = []
 
     def _is_pointer_decl(v: str) -> bool:
@@ -2645,7 +2749,35 @@ def generate_sequences(
         rb = range_bounds((_uds_info.get(v) or {}).get("range"))
         if rb and _fits_type(rb, t, v, "SwUDS"):
             _bsrc[v] = "uds_range"
+            # (R65) 설계 범위가 선언 타입의 전폭과 같으면 설계가 타입 밖의 정보를 주지 않는다 — 타입 표의 경계값을 그대로
+            #   쓴다(가운데 값: 타입 표 0 · `(lo+hi)//2` 는 -1). HDPDM01 이 부호 전폭을 `0x7FFF ~ 0x8000` 으로 적은 323 행이
+            #   R65 에서 범위로 읽히며 가운데 값만 0 → -1 로 바뀌어 기준 행 · 경계 탐색이 흔들렸다(변이 판별이 준 함수 3)
+            tb = _TYPE_BOUNDARIES.get(t) if t in _TYPE_BOUNDARIES and t != "float" else None
+            if tb and (rb["min"], rb["max"]) == (tb["min"], tb["max"]):
+                return dict(tb)
             return rb
+        # (R65) 설계서가 적은 값 목록(`0, 5, 15`) — 범위 다음, 열거자보다 먼저(이 변수에 대해 더 구체적으로 말한 문서다)
+        vb = _uds_value_bounds(_uds_info.get(v))
+        if vb and t == _ENUM_TYPE:
+            # 열거형 변수의 설계 값 목록은 열거자여야 한다 — 아니면 두 문서가 어긋난 것이라 열거자로 내려가고 센다(MC/DC
+            #   `_apply_design_range` 와 같은 판정 — 리뷰 R65 2차 N4)
+            _enums = set((enum_bounds(_domains.get(v)) and (_domains.get(v) or {}).get("values")) or [])
+            _vals = list(((_uds_info.get(v) or {}).get("values")) or [])
+            if _enums and not set(_vals) <= set(int(x) for x in _enums):
+                _msg = f"{v}(SwUDS 값 목록 {','.join(str(x) for x in _vals)} ⊄ 열거자)"
+                _raw_text = str((_uds_info.get(v) or {}).get("range_text") or "")
+                if _raw_text:
+                    _msg += f" ← 원문 `{_raw_text}`"
+                if _msg not in _range_conflicts:
+                    _range_conflicts.append(_msg)
+                vb = {}
+        if vb and _fits_type(vb, t, v, "SwUDS"):
+            _bsrc[v] = "uds_values"
+            return vb
+        _unread = (_uds_info.get(v) or {}).get("range_unread")
+        if _unread and v not in _uds_unread:
+            # 설계서가 무언가 적었지만 읽지 못한 칸 — 값은 아래 출처(타입 폭 등)로 가고 사유는 센다(공시 `suts_uds_reading`)
+            _uds_unread[v] = str(_unread)
         if t == _ENUM_TYPE:
             _bsrc[v] = "enum"
             return enum_bounds(_domains.get(v))
@@ -2708,6 +2840,7 @@ def generate_sequences(
         unit["unknown_type_vars"] = [_iv for _iv, _t in _ind_types.items() if _t == _UNKNOWN_TYPE]
         unit["bounds_source"] = _bsrc
         unit["range_conflicts"] = _range_conflicts
+        unit["uds_range_unread"] = _uds_unread
         if indirect_vars:
             for _iv in indirect_vars[:4]:
                 _vtype = _ind_types[_iv]
@@ -2756,6 +2889,7 @@ def generate_sequences(
     unit["bounds_source"] = _bsrc
     unit["range_conflicts"] = _range_conflicts
     unit["pointer_address_ranges"] = _pointer_ranges
+    unit["uds_range_unread"] = _uds_unread
 
     logic_flow = unit.get("logic_flow") or []
 
@@ -5706,7 +5840,8 @@ def generate_suts(
         if _uds_io_local:
             try:
                 from generators.uds_unit_io import load_uds_unit_io
-                _uds_io = load_uds_unit_io(_uds_io_local)
+                # (R65) 표 Name 행 별칭은 소스 함수 목록으로 확인한 것만 쓴다(`restrict_aliases`)
+                _uds_io = load_uds_unit_io(_uds_io_local, source_functions=_source_function_names(function_details))
             except Exception as _e:  # noqa: BLE001 — 실패하면 소스 파싱으로 간다
                 _logger.warning("SwUDS 입출력 읽기 실패 — 소스 파싱 이름을 쓴다: %s", _e)
     units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map,
@@ -5796,7 +5931,7 @@ def generate_suts(
             #   모양만 맞고 다른 설계 요소를 가리켰다(정본과 교집합 178/251).
             try:
                 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
-                _design = load_uds_design_ids(_uds_local)
+                _design = load_uds_design_ids(_uds_local, source_functions=_source_function_names(function_details))
                 if _design.get("by_name"):
                     _hit = 0
                     for unit in units:
@@ -6027,6 +6162,9 @@ def generate_suts(
     #   ⚠ 문서 함수는 **최종 unit 목록**(설계 ID 범위로 좁힌 뒤)으로 센다 — 범위를 붙일 때의 목록에는 문서에 행이 없는
     #   함수(HDPDM01 LIN 스택)가 있어, 그 함수의 투영을 "이 문서의 투영" 으로 공시했다(R62 확인)
     quality["body_projection"] = summarize_document_body_projection(units)
+    # (R65) SwUDS 를 어떻게 읽었나 — 머리말 이름 · 표 Name 별칭 · 세로 병합 행 · 이름으로 못 읽은 행 · Value Range 판독
+    quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(str(uds_path or "").strip()),
+                                                   _source_function_names(function_details))
     # (R63) 문서 함수가 읽는 C 파일(정의 파일 · include 한 헤더)을 어떻게 읽었나 — 벤더 구문을 공백으로 읽은 곳, 파서 트리가 못 본
     #   파일 수준 지시문(구조체 선언 안 #define 등), 줄 이음을 걷고 읽은 여러 줄 매크로, 남은 구문 오류, 문맥이 못 읽은 파일
     from generators.c_project_context import summarize_source_reading

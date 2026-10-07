@@ -655,7 +655,10 @@ def test_doc_proposal_sits_uses_the_registered_project_documents(monkeypatch, tm
     monkeypatch.setattr(gsits, "load_uds_swcom_map", lambda p: {"s_foo": ["SwCom_01"]})
     monkeypatch.setattr(gsits, "load_uds_asil_map", lambda p: {"s_foo": "B"})
     monkeypatch.setattr(gsits, "load_uds_related_map", lambda p: {"s_foo": ["SwCom_01"]})
-    monkeypatch.setattr(gsits, "load_uds_design_ids", lambda p: {"by_name": {"s_foo": "SwUFn_0101"}})
+    # (R65) 표 Name 행 별칭은 소스 함수 목록으로 확인한 맵에서만 쓰인다 — 카드도 생성기처럼 그 목록을 넘긴다
+    monkeypatch.setattr(gsits, "load_uds_design_ids",
+                        lambda p, **k: (seen.update({"design_ids_source_functions": k.get("source_functions")})
+                                        or {"by_name": {"s_foo": "SwUFn_0101"}}))
 
     uds = tmp_path / "swuds.docx"
     uds.write_bytes(b"x")
@@ -666,6 +669,7 @@ def test_doc_proposal_sits_uses_the_registered_project_documents(monkeypatch, tm
     assert seen.get("uds_related_map"), "SwUDS Related 맵이 생성기에 안 갔다"
     assert seen.get("uds_asil_map"), "SwUDS ASIL 맵이 안 갔다 — Safety 칸이 소스 주석만 본다"
     assert seen.get("design_ids"), "설계 ID 가 안 갔다 — TC ID 가 순번이 된다"
+    assert seen.get("design_ids_source_functions") == ["s_foo"], "카드가 소스 함수 목록 없이 설계 ID 를 읽었다(R65)"
     assert out["sits"]["s_foo"]["tc_id"] == "SwITC_SwUFn_0101", out["sits"]
 
 
