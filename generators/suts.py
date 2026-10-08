@@ -292,13 +292,17 @@ def input_skip_reason(input_skips: Any, label: str) -> str:
 
 
 def input_document_usable(doc: str, rec: Any) -> bool:
-    """(R66 리뷰 W3) 입력 문서 기록이 '쓸 수 있었다' 인가 — SDS 는 파티션을 읽었을 때, SRS 는 열었고 요구 표가 0 이 아닐 때(요구 수를
-    셌으면), 그 밖은 열었을 때. 공시 · 검증 경고 · '보강 실패 0건' 문구가 같은 판정을 쓴다."""
+    """(R66 리뷰 W3 · R69) 입력 문서 기록이 '쓸 수 있었다' 인가 — SDS 는 파티션을 읽었을 때, 그 밖은 열었고 생성기가 센 양이 0 이
+    아닐 때: SRS 요구 수(`requirements`), SITS 의 SwUDS 함수 중 소스와 맞은 수(`functions`), SITS 의 STP 글자 수(`read_chars`).
+    세지 않았으면(키 없음) 연 것으로 본다. 공시 · 검증 경고 · '보강 실패 0건' 문구가 같은 판정을 쓴다.
+
+    ⚠ 이 세 키는 '이 문서에서 생성기가 쓴 양' 이라는 계약이다 — 다른 뜻의 수를 같은 이름으로 기록에 넣으면 판정이 조용히 바뀐다."""
     if not isinstance(rec, dict):
         return False
     if doc == "SDS":
         return bool(rec.get("read"))
-    return bool(rec.get("opened")) and rec.get("requirements") != 0
+    # (R69) 읽은 것을 센 문서(SRS 요구 · SwUDS 함수 · STP 글자)는 그 수가 0 이면 쓸 수 없었다 — 세지 않았으면(None) 연 것으로 본다
+    return bool(rec.get("opened")) and all(rec.get(k) != 0 for k in ("requirements", "functions", "read_chars"))
 
 
 def note_input_document(docs: Dict[str, Dict[str, Any]], doc: str, path: Optional[str], block: str,
@@ -339,7 +343,7 @@ def input_documents_record(paths: Dict[str, Optional[str]], input_skips: Any = N
     """(R66) SITS · STS 처럼 라우트가 로컬화한 경로를 생성기가 그대로 여는 입력의 기록(`note_input_document` 와 같은 꼴).
 
     경로가 있으면 로컬 파일로 열 수 있는지, 없으면 라우트가 넘긴 그 라벨의 사유를 본다. 문서를 읽은 내용(요구 수 · 파티션
-    수)은 호출자가 덧붙인다."""
+    수)은 호출자가 덧붙인다 — `requirements` · `functions` · `read_chars` 는 `input_document_usable` 이 판정에 쓰는 키다(그 뜻으로만)."""
     docs: Dict[str, Dict[str, Any]] = {}
     for doc, path in paths.items():
         raw = str(path or "").strip()

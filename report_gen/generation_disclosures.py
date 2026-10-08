@@ -149,11 +149,19 @@ def _input_documents_item(block: Any, doc: str, override_units: int = 0,
                 absent.append(f"{name}({gives[k]})")
             continue
         n_req = _int(rec, "requirements")
+        n_fn = _int(rec, "functions")
+        n_chars = _int(rec, "read_chars")
         if input_document_usable(k, rec):
-            # (리뷰 W4) 내용을 잰 문서만 수(SDS 파티션 · SRS 요구)로 말하고, 나머지는 '열림' — 열었다는 것이지 그 문서가
-            #   채울 값을 다 읽었다는 뜻이 아니다(SwUDS 판독은 SUTS 의 'SwUDS 판독' 항목)
+            # (리뷰 W4 · R69) 내용을 잰 문서만 수(SDS 파티션 · SRS 요구 · SITS 의 SwUDS 함수 · STP 글자)로 말하고, 나머지는
+            #   '열림' — 열었다는 것이지 그 문서가 채울 값을 다 읽었다는 뜻이 아니다(SwUDS 판독은 SUTS 의 'SwUDS 판독' 항목)
             parts.append(f"SDS 파티션 {_show(_int(rec, 'entries'))}" if k == "SDS"
-                         else f"{name} 요구 {n_req}" if n_req is not None else f"{name} 열림{tag}")
+                         else f"{name} 요구 {n_req}" if n_req is not None
+                         # (R69) SwUDS 함수 표 중 소스와 맞은 수(표의 수)
+                         else f"{name} 함수 {n_fn}" + (f" (표 {_int(rec, 'functions_listed')} 중 소스와 맞음)"
+                                                      if _int(rec, "functions_listed") is not None else "")
+                         if n_fn is not None
+                         else f"{name} 글 {_show(n_chars)}자" if n_chars is not None   # (R69) SITS 가 읽은 STP 글
+                         else f"{name} 열림{tag}")
             continue
         parts.append(f"{name} 못 읽음{tag}")
         line = (f"{name}" + (f" `{rec['name']}`" if rec.get("name") else "") + f" — {rec.get('reason') or '사유 미상'}"

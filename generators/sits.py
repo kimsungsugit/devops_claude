@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import time
+import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
-from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
+from generators.uds_design_ids import checked_aliases, load_uds_design_ids, resolve_design_id
 from report_gen.source_roots import first_source_root
 
 _logger = logging.getLogger(__name__)
@@ -3533,7 +3534,7 @@ def generate_sits(
         on_progress: Optional callback(pct: int, message: str)
         srs_docx_path: Optional SRS DOCX for requirement ID enrichment
         sds_docx_path: Optional SDS DOCX for component context
-        uds_path: Optional UDS DOCX/XLSM for function descriptions
+        uds_path: Optional SwUDS DOCX/XLSM — SwCom · ASIL · Related tables and design IDs (R69: no descriptions)
         hsis_path: Optional HSIS XLSX for hardware signal context
         max_flows: 통합 흐름 상한(default _DEFAULT_MAX_FLOWS = 120). 걸리면 안전등급
             높은 흐름부터 남기고, 잘린 내역이 로그 + quality_report
@@ -3575,24 +3576,9 @@ def generate_sits(
     if sds_docx_path:
         _progress(7, "SDS 설계 컨텍스트 로드 중")
     _project_sds_map, _sds_reading = read_sds_input(sds_docx_path, skipped=input_skip_reason(input_skips, "SDS"))
-    if sds_docx_path:
-        try:
-            from generators.sts import _load_sds_summary
-            sds_summary = _load_sds_summary(sds_docx_path)
-            if sds_summary:
-                _logger.info("SITS: SDS summary loaded (%d chars)", len(sds_summary))
-        except Exception as e:
-            _logger.debug("SITS: SDS load skipped: %s", e)
-
-    if uds_path:
-        _progress(8, "UDS 함수 설명 로드 중")
-        try:
-            from generators.sts import _load_uds_descriptions
-            _uds_descs = _load_uds_descriptions(uds_path)
-            if _uds_descs:
-                _logger.info("SITS: UDS descriptions loaded (%d entries)", len(_uds_descs))
-        except Exception as e:
-            _logger.debug("SITS: UDS load skipped: %s", e)
+    # (R69, 감사 #8) SDS 요약 · SwUDS 설명(두 번) · HSIS 신호는 읽고 로그만 남기거나 함수 레코드의 `description` 에 넣었을 뿐 SITS 의
+    #   어느 칸도 그것을 읽지 않았다(SITS 가 읽는 설명은 SRS 요구의 것뿐, TC 설명은 `Verify integration: …`) — 쓰지 않는 읽기는
+    #   하지 않는다. HSIS 는 입력 문서 기록에 '쓰지 않음' 으로만 남는다.
 
     stp_context: Dict[str, Any] = {}
     if stp_path:
@@ -3601,16 +3587,6 @@ def generate_sits(
             stp_context = _parse_stp_document(stp_path)
         except Exception as e:
             _logger.debug("SITS: STP load skipped: %s", e)
-
-    if hsis_path:
-        _progress(10, "HSIS 신호 로드 중")
-        try:
-            from generators.sts import _load_hsis_signals
-            _hsis = _load_hsis_signals(hsis_path)
-            if _hsis:
-                _logger.info("SITS: HSIS signals loaded")
-        except Exception as e:
-            _logger.debug("SITS: HSIS load skipped: %s", e)
 
     # ── Stage 5: source parsing ──────────────────────────────────────────────
     _progress(15, "소스 코드 파싱 시작")
@@ -3721,16 +3697,6 @@ def generate_sits(
             if _srs_reqs_n is None:    # (R66 리뷰 3차 I-d) 판독 자체가 실패 — '열림' 이 아니라 사유
                 _srs_reqs_n = 0
                 _srs_parse_error = f"요구 표 판독 실패 ({type(e).__name__})"
-
-    # UDS description enrichment
-    if uds_path:
-        try:
-            from generators.sts import _load_uds_descriptions, _merge_uds_into_function_details
-            uds_descs = _load_uds_descriptions(uds_path)
-            if uds_descs:
-                _merge_uds_into_function_details(function_details, uds_descs)
-        except Exception as e:
-            _logger.debug("SITS: UDS enrichment skipped: %s", e)
 
     # ── Stage 6: collect integration flows ───────────────────────────────────
     _progress(40, "통합 흐름 수집 중")
@@ -3874,6 +3840,36 @@ def generate_sits(
         input_documents_record({"SRS": srs_docx_path, "UDS": uds_path, "HSIS": hsis_path, "STP": stp_path}, input_skips),
         SDS=dict(_sds_reading, blocks_unopened=[] if _sds_reading.get("read") or not _sds_reading.get("given")
                  else ["sds_partitions"]))
+    # (R69, 감사 #8) SwUDS · STP 는 '열림' 이 아니라 읽어 쓴 것으로. SwUDS 는 함수 표(SwCom · ASIL · Related 맵 · 설계 ID)의 함수
+    #   중 **소스 함수 이름과 맞은 수**(`functions`) — SITS 가 그 값을 찾는 열쇠가 소스 함수 이름이다(TC ID · SwCom · ASIL ·
+    #   Related · FI 색인 — 설계 ID 는 확인된 표 Name 별칭으로도 찾는다). 표의 함수 수는 `functions_listed`. SwUDS 설명은 SITS 가
+    #   쓰지 않으므로 세지 않는다(리뷰 C1 · 2차 W4: 설명 로더의 키는 절 제목 · 변수 이름이 섞여 실문서 HD 829 · PV 1,540 개 중 함수
+    #   이름 0 — 제목만 있는 회의록도 '함수 2' 였다). STP 는 SITS 가 읽은 글자 수(`read_chars` — .docx 는 시험 전략 · 환경 키워드
+    #   절만). 열었는데 0 이면 이 문서에서 쓴 값이 없다.
+    _docs_rec = quality_report["input_documents"]
+    if _docs_rec["UDS"].get("opened"):
+        _src_fns = {str((v or {}).get("name") or "").lower() for v in function_details.values() if isinstance(v, dict)} - {""}
+        _listed = ({str(k).lower() for k in (_uds_swcom_map or {})} | {str(k).lower() for k in (_uds_asil_map or {})}
+                   | {str(k).lower() for k in (_uds_related_map or {})}
+                   | {str(k).lower() for k in ((_design_ids or {}).get("by_name") or {})}
+                   | {str(k).lower() for k in checked_aliases(_design_ids)})
+        _matched = _listed & _src_fns
+        _docs_rec["UDS"]["functions"] = len(_matched)
+        _docs_rec["UDS"]["functions_listed"] = len(_listed)
+        if not _matched:
+            _docs_rec["UDS"]["reason"] = (
+                (_design_ids or {}).get("read_error")
+                or (f"SwUDS 함수 표 {len(_listed)} 개 중 소스 함수와 맞는 것 0 개(다른 프로젝트 · 버전의 SwUDS 인지 확인)"
+                    if _listed else "SwUDS 에서 읽은 함수 0 개(양식이 다르거나 SwUDS 가 아닌 문서)"))
+    if _docs_rec["STP"].get("opened"):
+        _docs_rec["STP"]["read_chars"] = len(str((stp_context or {}).get("raw") or ""))
+        if not _docs_rec["STP"]["read_chars"]:
+            # (리뷰 W2) .docx 는 시험 전략 · 환경 키워드 제목의 절만 읽는다 — 그 절이 없으면 0 이다(빈 문서와 다르다)
+            _is_docx = str(stp_path or "").lower().endswith(".docx")
+            _docs_rec["STP"]["reason"] = (
+                "STP 가 docx 가 아니다(열 수 없는 파일)" if _is_docx and not zipfile.is_zipfile(str(stp_path))   # (리뷰 2차 I-b)
+                else "STP 에서 시험 전략 · 환경 절(키워드 제목)을 찾지 못함 — 그 절의 제목을 확인할 것" if _is_docx
+                else "STP 에서 읽은 글 0(빈 문서이거나 글을 뽑지 못한 형식)")
     if _srs_reqs_n is not None:
         quality_report["input_documents"]["SRS"]["requirements"] = _srs_reqs_n
         if not _srs_reqs_n and quality_report["input_documents"]["SRS"].get("opened"):
@@ -3891,7 +3887,9 @@ def generate_sits(
         "calls_map": _calls_map_all,
         "file_of": _file_of,
         "depth_of": _absolute_depth_map(_calls_map_all, _STRATEGY_ROOTS),
-        "uds_related_map": _uds_related_map,
+        # (R69 리뷰 2차 W3) 소스 함수와 하나도 맞지 않은 SwUDS(다른 프로젝트 · 버전, SwUDS 가 아닌 문서)의 표를 SwUDS 함수 색인으로
+        #   옮겨 적지 않는다 — 참조하지 않았다고 적은 문서의 내용이 산출물에 실린다
+        "uds_related_map": _uds_related_map if _docs_rec["UDS"].get("functions") else {},
         "design_ids": _design_ids,
         "stats_out": flow_stats,
     }
@@ -3901,11 +3899,13 @@ def generate_sits(
         #   File Name 열이 통째로 비어 있고 Note 는 "HW 요구사항 명세서" 였다.
         #   ⚠ 못 읽은 문서의 줄은 **비워 둔다** — 참조했다고 적으면 문서가 거짓말한다.
         _refs: List[Tuple[str, str]] = []
+        from generators.suts import input_document_usable
         for _p, _note in ((srs_docx_path if _srs_reqs_n else None, "SW 요구사항 명세서"),   # (R66) 요구를 읽은 SRS 만
                           # (R66) 파티션을 하나도 못 읽은 SDS 는 참조하지 않은 것이다
                           (sds_docx_path if _sds_reading.get("read") else None, "SW 아키텍처 설계서"),
-                          (uds_path, "SW 상세 설계서"),
-                          (stp_path, "SW 테스트 계획서")):
+                          # (R69, 감사 #8) 함수 하나라도 읽은 SwUDS · 글을 읽은 STP 만 — 경로만 받은 문서를 참조했다고 적지 않는다
+                          (uds_path if input_document_usable("UDS", _docs_rec.get("UDS")) else None, "SW 상세 설계서"),
+                          (stp_path if input_document_usable("STP", _docs_rec.get("STP")) else None, "SW 테스트 계획서")):
             if _p:
                 _refs.append((Path(str(_p)).name, _note))
         _front = {
