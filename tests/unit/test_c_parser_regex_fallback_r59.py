@@ -83,12 +83,14 @@ def _vector_table(n_lines: int) -> str:
     )
 
 
+# (R67) CPU 시간으로 잰다 — 지키는 것은 정규식의 제곱 폭주(옛 규칙 1MB 에 2.25 초 이상)다. 벽시계는 병렬 커밋 게이트
+#   (`-n auto`)의 순간 부하로 같은 경우가 0.3 → 2.9 초까지 흔들려 게이트를 두 번 막았다(그때 CPU 시간 ≈ 1 초).
 class TestLinearInPathologicalTable:
     def test_vector_table_finishes_in_bounded_time_and_finds_nothing(self):
         text = cp.blank_c_comments(_vector_table(3000))   # 실물(123줄)의 24배 — 옛 정규식으론 시간 단위
-        st = time.perf_counter()
+        st = time.process_time()
         fns = cp._extract_function_defs_regex_fallback(text, "Vectors.c", set())
-        assert time.perf_counter() - st < 2.0
+        assert time.process_time() - st < 2.0
         assert fns == []
 
     def test_table_candidates_never_reach_the_prefix_walk(self, scan_meter):
@@ -101,9 +103,9 @@ class TestLinearInPathologicalTable:
 
     def test_macro_only_header_is_cheap(self, scan_meter):
         text = "\n".join(f"#define REG_{i}(x)  ((x) + {i}U)" for i in range(20000))
-        st = time.perf_counter()
+        st = time.process_time()
         assert _new(text) == []
-        assert time.perf_counter() - st < 1.0
+        assert time.process_time() - st < 1.0
         assert scan_meter.prefix_span == 0 and scan_meter.param_span <= 4 * len(text)
 
     def test_long_line_above_each_function_stays_linear(self, scan_meter):

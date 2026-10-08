@@ -65,8 +65,11 @@ def _display_expression(node, raw):
 _ARITH_OPS = frozenset({"+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"})
 
 
-def _compile(node, raw, domains, constants=None, widths=None, types=None):
+def _compile(node, raw, domains, constants=None, widths=None, types=None, paren_cast=None):
     """Decision → IR over atoms.
+
+    (R67) ``paren_cast(node)`` is the oracle's judgment of ``(T)-x`` (`c_source_oracle.cast_unary_operand`) when the
+    design has a scope; without one (re-evaluation from a report) a name the design recorded among ``types`` is the type.
 
     ``constants`` maps names to ``{"value", "type"}`` resolved from declarations (object-like macros,
     enumerators). ``widths`` (target integer widths from typedef testimony) switches comparisons to exact
@@ -83,7 +86,31 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
         except cpc.Unresolved as exc:
             raise Unsupported(str(exc)) from exc
     def cast_type(type_node):
-        text = " ".join(_text(type_node, raw).split())
+        return cast_type_text(" ".join(_text(type_node, raw).split()))
+    def cast_to(inner, t):
+        if cpc.is_float(t) or cpc.is_float(inner[2]):
+            raise Unsupported("floating_operand")
+        if isinstance(t, dict) and t.get("enum"):
+            # (R67 review W-2) the enumeration's type is implementation-defined (C11 6.7.2.2p4): ``(ETYPE)-1`` is UINT_MAX
+            #   under an unsigned choice. Every permitted type holds 0..127 alike (the oracle's `enum_dual` keeps a value
+            #   all of them agree on) — a constant or an input whose declared range stays there is cast the same anywhere
+            if inner[0] == "constant":
+                lo = hi = inner[1]
+            elif inner[0] == "var" and inner[1] in domains:
+                d = domains[inner[1]]
+                lo, hi = d.get("type_min", d["min"]), d.get("type_max", d["max"])
+            else:
+                lo = hi = None
+            if lo is None or not 0 <= lo <= hi <= 127:
+                raise Unsupported("enum_underlying_type_implementation_defined")
+        if inner[0] == "constant" and isinstance(t, dict):
+            # (review round 3 I-6) the search samples around the value the comparison sees — ``(U16)-2`` is 65534
+            try:
+                values_seen.add(cpc.convert(inner[1], t))
+            except cpc.Unresolved:
+                pass
+        return ("cast", inner, t)
+    def cast_type_text(text):
         if callable(types):
             return lift(types, text)
         if isinstance(types, dict) and text in types:
@@ -115,9 +142,37 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
                 raise Unsupported("literal_target_type_unresolved")
             values_seen.add(value)
             return ("constant", value, None)
+        if n.type == "binary_expression" and widths:
+            if callable(paren_cast):
+                shape = paren_cast(n)
+            else:
+                shape = cpc.paren_cast_unary(n, raw)
+                if shape is not None and not (isinstance(types, dict) and shape[0] in types
+                                              and shape[0] not in domains and shape[0] not in constants):
+                    shape = None
+            if shape is not None:
+                # (R67) ``s16t_Angle < ( S16 )-1800`` — the grammar's subtraction is the cast of ``-1800``
+                if shape[2] is None:
+                    raise Unsupported("cast_operand_grouping_unread:" + shape[0])
+                arg = term(shape[2])
+                if cpc.is_float(arg[2]):
+                    raise Unsupported("floating_operand")
+                if _contains_enum(arg):
+                    raise Unsupported("enum_underlying_type_implementation_defined")   # (review W-R4-2)
+                if arg[0] == "constant":
+                    value, at = lift(cpc.arith, shape[1], None, (arg[1], arg[2]), widths)
+                    values_seen.add(value)
+                    inner = ("constant", value, at)
+                else:
+                    inner = ("expr", (shape[1], (arg,), widths), lift(cpc.promote, arg[2], widths))
+                return cast_to(inner, cast_type_text(shape[0]))
         op = _text(n.child_by_field_name("operator"), raw) if n.type in {"unary_expression", "binary_expression"} else ""
         if n.type == "unary_expression" and op in {"+", "-", "~"}:
             arg = term(n.child_by_field_name("argument"))
+            if _contains_enum(arg):
+                # (R67 review W-R4-2) as for binary arithmetic: the result rests on the enumeration's type — refused
+                #   here, not reported later as 'undefined behavior candidates'
+                raise Unsupported("enum_underlying_type_implementation_defined")
             if arg[0] == "constant" and op != "~":
                 if widths:
                     value, t = lift(cpc.arith, op, None, (arg[1], arg[2]), widths)
@@ -145,10 +200,7 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
             return ("expr", (op, (left, right), widths), t)
         if n.type == "cast_expression":
             t = cast_type(n.child_by_field_name("type"))
-            inner = term(n.child_by_field_name("value"))
-            if cpc.is_float(t) or cpc.is_float(inner[2]):
-                raise Unsupported("floating_operand")
-            return ("cast", inner, t)
+            return cast_to(term(n.child_by_field_name("value")), t)
         if n.type == "call_expression":
             f, args = n.child_by_field_name("function"), n.child_by_field_name("arguments")
             inner_names = [c for c in f.named_children if c.type != "comment"] if f is not None and f.type == "parenthesized_expression" else []
@@ -156,10 +208,7 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
             if len(inner_names) == 1 and inner_names[0].type in {"identifier", "type_identifier"} and len(arg_nodes) == 1:
                 # ``(T)(x)`` is a cast exactly when ``T`` names a type.
                 t = cast_type(inner_names[0])
-                inner = term(arg_nodes[0])
-                if cpc.is_float(t) or cpc.is_float(inner[2]):
-                    raise Unsupported("floating_operand")
-                return ("cast", inner, t)
+                return cast_to(term(arg_nodes[0]), t)
         raise Unsupported("unsupported_scalar:" + n.type)
     def bounds(t):
         if t[0] == "constant":
@@ -182,7 +231,11 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
                         # An enumeration object's type is implementation-defined (C11 6.7.2.2p4): compilers pick
                         # unsigned int when no enumerator is negative, and then -1 compares as UINT_MAX (review W3).
                         raise Unsupported("enum_underlying_type_implementation_defined")
-                    atom = (op, left, right, lift(cpc.usual_conversion, left[2], right[2], widths))
+                    # (R67 review W-R3-1) the comparison type, never the enumeration itself — an enum operand against
+                    #   one that may be negative is refused just above, and `usual_conversion` hands back the left
+                    #   operand's dict (with its tag) so the order of the operands decided which candidates raised
+                    ut = lift(cpc.usual_conversion, left[2], right[2], widths)
+                    atom = (op, left, right, {k: v for k, v in ut.items() if k != "enum"})
                 else:
                     lb, rb = bounds(left), bounds(right)
                     if (lb[0] == 0 and lb[1] > 32767 and rb[0] < 0) or (rb[0] == 0 and rb[1] > 32767 and lb[0] < 0):
@@ -204,8 +257,10 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None):
 
 
 def _contains_enum(term):
+    if isinstance(term[2], dict) and term[2].get("enum"):
+        return True                          # (R67 review W-A) a cast to, or a constant of, an enumeration type too
     if term[0] == "var":
-        return bool((term[2] or {}).get("enum"))
+        return False
     if term[0] == "cast":
         return _contains_enum(term[1])
     if term[0] == "expr":
@@ -214,7 +269,9 @@ def _contains_enum(term):
 
 
 def _enum_object(term):
-    return term[0] == "var" and bool((term[2] or {}).get("enum"))
+    """An operand whose type is an enumeration — an object, and (R67 review W-A) a cast to one or a constant of one
+    (``(ETYPE)0`` · ``#define E_ZERO ((ETYPE)0)``): its type is implementation-defined either way."""
+    return isinstance(term[2], dict) and bool(term[2].get("enum"))
 
 
 def _may_be_negative(term, domains):
@@ -1899,6 +1956,7 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
         t = _scope_type(scope, text)
         report["types"][text] = t
         return t
+    from generators.c_source_oracle import cast_unary_operand
     if widths:
         # Exact C conversions below rest on this testimony; re-validation (finalize) uses the same widths.
         report["target"] = {"widths": widths, "basis": "typedef_name_testimony"}
@@ -1963,8 +2021,9 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 # by the compiler — not decisions of the run (R2c review rounds 2 N-W3 / 3 W1 W2 I1)
                 raise Unsupported(not_run)
             try:
-                ir, atoms, variables, constants = _compile(node, raw, domains, constants_map, widths,
-                                                           cast_type if scope else None)
+                ir, atoms, variables, constants = _compile(
+                    node, raw, domains, constants_map, widths, cast_type if scope else None,
+                    paren_cast=(lambda x: cast_unary_operand(x, raw, scope)) if scope else None)
             except Unsupported as exc:
                 if extra and str(exc).startswith("missing_declared_domain:"):
                     raise Unsupported(_identifier_reason(str(exc).split(":", 1)[1], extra)) from exc

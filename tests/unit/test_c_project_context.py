@@ -638,7 +638,8 @@ def test_a_const_lookup_table_keeps_its_values_and_c_zero_fill():
     _ctx, scope = _scope(text)
     assert scope["arrays"]["k_tab"]["values"] == [10, 20, 30, 0]
     assert scope["arrays"]["k_reg"]["values"] is None      # volatile: the value is the hardware's
-    assert scope["arrays"]["k_desig"]["values"] is None    # designated initializers are not modeled
+    assert "values_unread" not in scope["arrays"]["k_reg"]   # (R67) not a table whose values are missing
+    assert scope["arrays"]["k_desig"]["values"] == [0, 3]  # (R67) index designators read (C11 6.7.9p17)
 
 
 def test_function_like_macro_parameters_are_recorded():

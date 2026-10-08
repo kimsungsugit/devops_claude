@@ -22,7 +22,7 @@
 | 25 · 26 | SRS docx | `sts.py:1033-1039 · 1050-1052` | 키 칸이 두 열에 병합되면 요구 전체가 빠진다(합성 탐침 `ID / ID / SwTR_0201`), 같은 키 두 줄이면 앞 줄을 버린다 | 침묵 | STS · SUTS · SITS 공유. 형제 파서(`sts_requirement_tc.py:285-293`)는 처리한다 |
 | 3 | SUTS oracle 범위 | `suts.py:3715-3727` · `test_evidence.py:27-30` | 범위가 없으면(스키마 불일치 · 문맥 없음 · 파일이 문맥 밖) 그 unit 의 기대값이 사실상 전부 미상 | 집계 침묵(칸 사유만) | |
 | 16 | 소스 읽기 오류 | `source_parser.py:322-325` · `uds_generator.py:586-595` | 읽기 예외가 `""` 이 되고 잘림으로도 안 센다 → SUTS 가 `source_file_not_in_source_stage` 로 **틀리게** 적는다 | 침묵 · 사유 오기 | IPC 타임아웃(#58)이 여기로 |
-| 45 | const 표 | `c_project_context.py:552-553 · 2385-2389` | 초기화 20,000 자 초과 · 지정 초기화 · 2 차원이면 값이 None → 읽기가 `initial_value_not_in_inputs:TBL[i]` 가 되어 거짓 소견 | 침묵 · 사유 오기 | |
+| 45 | const 표 | `c_project_context.py:552-553 · 2385-2389` | 초기화 20,000 자 초과 · 지정 초기화 · 2 차원이면 값이 None → 읽기가 `initial_value_not_in_inputs:TBL[i]` 가 되어 거짓 소견 | 침묵 · 사유 오기 | **R67 에서 해소** — 실측(HEAD)으로는 그 거짓 소견 칸이 두 프로젝트 모두 0 이었다(읽는 칸은 다른 사유로 미상). 지정 초기화 · extern 표의 정의 연결 · `(S16)-x` 원소(#105)를 읽어 모든 단위에서 값을 쥔 const 표 이름 HD 0 → 2 / 4 · PV 20 → 27 / 27, 못 읽는 표는 `const_values_unread:<표>:<사유>` 로 적고 입력 결손으로 세지 않는다. 설계서가 입력으로 적은 const 객체는 행에서 빼고 공시(`suts_uds_const_inputs`) |
 | 6 · 7 | SITS 진입 함수 전역 | `sits.py:1453-1460 · 1484 · 1407 · 1369` | 진입 함수가 직접 쓰는 전역은 기대값 후보가 안 되고(BFS 가 진입을 건너뜀), 입력은 예산 전에 `[:15]` 로 잘린다 | 침묵 | 모든 흐름에 무조건 |
 | 8 | SITS 안 쓰는 입력 | `sits.py:3610-3644 · 3750-3758 · 3905-3915` | HSIS · SDS 요약 · UDS 설명을 읽고 로그만 남긴다 — 1.4 Reference 시트는 쓴 것처럼 적는다 | 침묵 · 오기 | |
 | 11 · 12 | 소스 텍스트 순회 | `uds_generator.py:967-973 · 768-774` | 항목 120 에 닿으면 파일 순회를 끊고, 저장소 `component_map.json` 의 verify=X 49 개(모든 프로젝트에 적용)를 건너뛴다 — 그 파일의 매크로 · typedef · enum · 헤더 주석이 빠진다 | 침묵(`file_scan.scanned` 가 처리한 파일이 아니라 모은 파일 수) | oracle 문맥은 따로 훑어 영향 없음 |
@@ -80,6 +80,16 @@
 | `path_budget` · `path_dependent` · `undefined_behavior` | 1,414 · 1,250 · 1,100 | 예산 · 미상 분기 · UB | |
 | `source_parse_error` | 833 | R63 에서 6 함수 해소 | |
 
+## R67 측정 중 드러난 것 (2026-10-08, 메인 세션 실측)
+
+#45 를 고치기 전에 HEAD 코드로 const 표가 범위에 값을 쥐는지 셌다(scratchpad `r67_const_probe.py` · `r67_const_after.py`). 번역 단위 범위의 const 표 중 모든 단위에서 값을 쥔 것은 HDPDM01 4 이름 중 0, KJPDS02_PV 27 이름 중 20. Test Evidence 의 `initial_value_not_in_inputs:<표>` 칸은 두 프로젝트 모두 0 이었다 — 감사가 걱정한 거짓 소견은 실데이터에서 일어나지 않았고, 대신 아래가 드러났다.
+
+| # | 위치 | 기전 → 잃는 것 | 드러남 |
+|---|---|---|---|
+| 105 | tree-sitter-c(문법이 `T` 가 타입인지 모름) | `(S16)-1800` · `(S16)+x` 를 뺄셈 · 덧셈으로 파싱 → 괄호 속 타입 이름이 '선언되지 않은 이름'. KJPDS02_PV 23 곳(`Ap_MotorCtrl_PDS.c` 15 · `Ap_DoorPreCtrl_PDS.c` 8 — 비교 한계 · 클램프 · 매크로 `SLOPE_MIN_DEG ((S16)-20)` · const 표 `s16_*_CloseOffsetLut` 5 개), HDPDM01 0 | **R67 에서 해소**: 모양(`paren_cast_unary`)은 하나, 타입 판정은 읽는 쪽(상수 평가 · oracle · MC/DC · 경계 행)이 제 범위로. 문법이 오른쪽을 오독 안에 묶은 것은 `cast_operand_grouping_unread`, 둘째 캐스트가 갈라진 것은 `cast_operand_split_by_grammar` 사유 |
+| 45 (실측) | `c_project_context._array_values` · `_scope_array` | 값을 못 쥔 const 표: extern 선언만 있는 `lin_configuration_ROM`(정의는 `lin_cfg.c` 하나) · `lin_max_frame_res_timeout_val` · HD `RSA_Exponent_E` · `RSA_Modulus_N` · PV `s16_*_CloseOffsetLut` 5 개(#105) | **R67**: 모든 단위에서 값을 쥔 이름 HD 0 → 2 / 4 · PV 20 → 27 / 27. 남은 것 — HD `RSA_Exponent_E` · `RSA_Modulus_N` 은 `const volatile` 고정 주소 플래시라 값이 아닌 것이 맞다(의도) |
+| 106 | `generators/suts.py` 설계서 입력 | 설계서가 const 객체를 입력으로 적으면 행이 그 값을 '설정' 했다 — PV `g_DrvIn_MotorSpeed` 의 ROM 표 `u8s_ShiftBitLut[9]`(Test Evidence 입력 JSON 6,156 곳) · `s_NTCLookupTable` 멤버. 시험이 설정할 수 없는 값이다 | **R67 에서 해소**: 행에서 빼고 공시 `suts_uds_const_inputs` |
+
 ## 전체 목록
 
 ### 소스 · 프로젝트 C 문맥
@@ -93,7 +103,8 @@
 | 15 | `uds_generator.py:1093-1109` | 같은 (이름, 파일) 정의는 첫 것만 — `#if`/`#else` 양쪽 본문을 다 파싱하므로 활성 아닌 쪽이 이길 수 있다 | 침묵 |
 | 16 | `source_parser.py:322-325` · `uds_generator.py:586-595 · 1637-1641` | 읽기 예외 → `""`, 잘림으로 안 셈 → 사유 오기 | 침묵 · 오기 (R63: 문맥이 읽지 못한 파일 수와 문서 함수가 include 하는 것을 `*_source_reading` 공시에) |
 | 17 | `source_parser.py:340` · `uds_generator.py:589`(ignore) vs `593`(replace) | CP949 해독 없음 — 한글 주석 손실, 로컬과 Cloudium 결과가 다름 | 침묵 |
-| 45 | `c_project_context.py:552-553 · 2385-2389` | const 표 초기화 20,000 자 초과 · 지정 · 2 차원 → 값 None → 거짓 소견 | 침묵 · 오기 |
+| 45 | `c_project_context.py:552-553 · 2385-2389` | const 표 초기화 20,000 자 초과 · 지정 · 2 차원 → 값 None → 거짓 소견 | **R67 에서 해소**: 지정 초기화 · extern 정의 연결, 못 읽으면 사유(`values_unread` → `const_values_unread`) — 2 차원 · 구조체 원소는 사유만(`nested_initializer_list`) |
+| 105 | tree-sitter-c · `c_project_context._eval` · `c_source_oracle` · `mcdc_design` · `boundary_rows` | `(S16)-1800` 을 `S16 - 1800` 으로 파싱 → 타입 이름이 '선언되지 않은 이름' 이 되어 그 식 · const 표 · 결정이 미상 | **R67 에서 해소**(위 'R67 측정 중 드러난 것') |
 | 46 | `c_project_context.py:547 · 1867-1879` | 스칼라 초기화 `[:400]` 평가 — 잘린 것이 파싱되면 틀린 값 위험 | 침묵 |
 | 48 | `c_project_context.py:1507` | include 깊이 32 초과를 `missing_includes` · gap 없이 건너뜀 → 이름이 미결이 아니라 미정의(0)로 | 침묵 |
 | 49 | `c_project_context.py:438 · 1519-1524 · 1566` | 파일별 `parse_error` · `unknown_conditions` 를 저장만 하고 안 읽는다 | **R63**: 파일별 `reading`(남은 구문 오류 종류 · 표본)을 `*_source_reading` 으로 공시 |
@@ -173,7 +184,7 @@
 
 ## 처리 원칙
 
-- 고칠 때 순서: **대체 · 오도**(~~#62 · #1~~ R66 · #8 · #16 · #45) → **SUTS 결정적 손실**(~~#18~~ R65 · #3 · #4 · #5) → SITS(#6 · #7 · #9) → STS(#25 · #2 · #29).
+- 고칠 때 순서: **대체 · 오도**(~~#62 · #1~~ R66 · #8 · #16 · ~~#45~~ R67) → **SUTS 결정적 손실**(~~#18~~ R65 · #3 · #4 · #5) → SITS(#6 · #7 · #9) → STS(#25 · #2 · #29).
 - (R66 추가) 같은 '대체' 계열로 남은 것: 저장소 `docs/uds_function_swcom_override.json`(override 스냅샷 251 함수)이 프로젝트 확인 없이 모든 생성에 적용된다 — HDPDM01 소스 함수 218 개가 그 등급을 `asil_source=override` 로 받고 스냅샷 전용 자리표시 unit 31 개가 SwUDS 범위에 남는다(KJPDS02_PV 228 · 0). R70 이 표지(`override`)는 붙였다. 계획서 백로그 13.
 - 상한 자체를 없애는 것이 목표가 아니다 — 걸리면 **몇 개가 걸렸는지 · 무엇이 빠졌는지** 를 산출물과 공시에 남기고, 채울 수 있는 것(입력 문서 · 빌드 설정)이 있으면 안내한다.
 - 규칙 파서가 못 읽는 표 · 문장은 LLM 으로 읽어도 된다 — 원문 인용 대조로 검증하고 'AI 제안' 라벨, 기대값 · 스텝 확정에는 쓰지 않는다.

@@ -77,6 +77,9 @@ SCHEMA_VERSION = 24  # 3: per-file `prototypes`; closure `macros` (tree union)
 #    (`params_unreadable`); a body `#define` stray carries its text (`body`) — 22 lacks them. Paired with v51.
 # 24 (R64 review round 4): per-file `paren_amp` — ``(T)&x`` read as a bitwise and — 23 lacks it. Paired with v52.
 _ARRAY_INIT_BUDGET = 20000
+#: (R67 review I-1) element values a const table may hold in the scope — a designator index or a declared length past it
+#   (``{ [2000000] = 1U }``) is no lookup table; its values stay unread
+_ARRAY_VALUES_BUDGET = 65536
 
 _RANKS = {"_Bool": 0, "char": 1, "short": 2, "int": 3, "long": 4, "long long": 5}
 _WIDTH_NAME_RE = re.compile(r"^[vl]?_?(?P<sign>u|s|uint|sint|int)(?P<bits>8|16|32|64)(?:_t)?$", re.I)
@@ -216,9 +219,17 @@ def convert(value: int | float, t: dict[str, Any], mode: str = "f64") -> int | f
             return int(value != 0)
         if not lo <= truncated <= hi:
             raise Unresolved("float_to_int_out_of_range")  # undefined behavior (C11 6.3.1.4)
+        if t.get("enum") and not 0 <= truncated <= 127:
+            # (R67 review round 5) the enumeration's type is implementation-defined — as for an integer below
+            raise Unresolved("enum_underlying_type_implementation_defined")
         return truncated
     if t["kind"] == "_Bool":
         return int(bool(value))
+    if t.get("enum") and not 0 <= value <= 127:
+        # (R67 review C-1) an enumeration's type is implementation-defined (C11 6.7.2.2p4) — char or int, signed or
+        #   unsigned: only 0..127 converts alike under every choice (the oracle's `enum_candidates`). ``((ETYPE)-1)`` is
+        #   UINT_MAX under gcc's unsigned choice, 255 under -fshort-enums — no one value
+        raise Unresolved("enum_underlying_type_implementation_defined")
     if not t["signed"]:
         return value % (1 << t["bits"])
     lo, hi = type_range(t)
@@ -268,6 +279,8 @@ def arith(op: str, left: tuple[Any, dict] | None, right: tuple[Any, dict], width
     """
     if is_float(right[1]) or (left is not None and is_float(left[1])):
         return _float_arith(op, left, right, widths, mode)
+    if right[1].get("enum") or (left is not None and left[1].get("enum")):
+        return _enum_arith(op, left, right, widths, mode)
     if left is None:  # unary
         v, t = right
         t = promote(t, widths)
@@ -312,6 +325,35 @@ def arith(op: str, left: tuple[Any, dict] | None, right: tuple[Any, dict], width
     if result is None:
         raise Unresolved("unsupported_operator:" + op)
     return _fit(result, t), t
+
+
+def enum_candidates(widths: dict[str, int]) -> list[dict[str, Any]]:
+    """The types an implementation may give an enumeration (C11 6.7.2.2p4: ``char``, a signed or an unsigned integer
+    type able to hold every member) as this model enumerates them — the oracle's `_Interp.enum_candidates`."""
+    return [ctype(k, s, widths) for k, s in (("int", True), ("int", False), ("char", True), ("char", False))]
+
+
+def _enum_arith(op, left, right, widths, mode):
+    """(R67 review W-R3-2) An operation on an enumeration-typed operand (``E_ONE - 2`` with ``#define E_ONE ((ETYPE)1)``):
+    its value is the program's only if every permitted type gives the same value and signedness — 1 - 2 is -1 for int
+    and UINT_MAX for unsigned int. The oracle's `enum_dual` judgment, for constant expressions."""
+    results = set()
+    refusals = set()
+    got = None
+    for c in enum_candidates(widths):
+        lhs = None if left is None else (left[0], c if left[1].get("enum") else left[1])
+        rhs = (right[0], c if right[1].get("enum") else right[1])
+        try:
+            got = arith(op, lhs, rhs, widths, mode)
+        except Unresolved as exc:
+            refusals.add(str(exc))
+            continue
+        results.add((got[0], got[1]["kind"], got[1]["signed"]))
+    if refusals and not results and len(refusals) == 1:
+        raise Unresolved(next(iter(refusals)))       # (review round 4 I-2) every choice refuses alike: ``E_ONE / 0``
+    if refusals or len(results) != 1:
+        raise Unresolved("enum_underlying_type_implementation_defined")
+    return got
 
 
 def _f32_bits(x: float) -> int:
@@ -1219,6 +1261,40 @@ def _address_taken(root, raw):
             if base:
                 names.add(base)
     return names
+
+
+#: (R67) a unary ``-`` / ``+`` after a cast to a typedef name: the grammar does not know ``T`` is a type and reads
+#   ``(S16)-1800`` as ``S16 - 1800``. KJPDS02_PV writes 23 (comparison limits ``s16t_Angle < ( S16 )-1800`` in motor
+#   control, clamps, a macro ``((S16)-20)``, const lookup tables ``{ (S16)-4000, … }``) and each read as an undeclared name.
+_CAST_UNARY_OPS = frozenset({"-", "+"})
+#: a right operand the grammar grouped *under* the misparse: the cast's operand is then no subtree of it, so the text stays
+#   unread — never regrouped by guess. (R67 review I-6) tree-sitter already parses ``(T)-a * b`` · ``/`` · ``%`` as a cast
+#   (a multiplicative right side is never grouped under it); of these only ``(T)-a = b`` is reachable — the rest guard
+#   a grammar change
+_GROUPED_OPERANDS = frozenset({"binary_expression", "conditional_expression", "assignment_expression", "comma_expression"})
+
+
+def paren_cast_unary(node, raw):
+    """(R67) ``(T)-x`` / ``(T)+x`` as the grammar parses it — a binary ``-``/``+`` whose left operand is one parenthesized
+    name: ``(name, sign, operand)`` (operand None when the right side is a grouped expression, `_GROUPED_OPERANDS`), else
+    None. Whether ``T`` is a type — so whether this is a cast (C11 6.5.4) — is each reader's own judgment against its
+    scope, like ``(T)(x)`` (`c_source_oracle.cast_call_operand`). Other shapes of the same ambiguity (``a - (T)-b`` parses
+    as ``(a - (T)) - b``) keep the parenthesized name as an operand and stay unknown."""
+    if node is None or node.type != "binary_expression":
+        return None
+    left = node.child_by_field_name("left")      # (review I-c) on every binary evaluation — the cheap test first
+    if left is None or left.type != "parenthesized_expression":
+        return None
+    op, right = node.child_by_field_name("operator"), node.child_by_field_name("right")
+    if op is None or right is None:
+        return None
+    sign = _text(op, raw)
+    if sign not in _CAST_UNARY_OPS:
+        return None
+    inner = [c for c in left.named_children if c.type != "comment"]
+    if len(inner) != 1 or inner[0].type not in ("identifier", "type_identifier"):
+        return None
+    return " ".join(_text(inner[0], raw).split()), sign, (None if right.type in _GROUPED_OPERANDS else right)
 
 
 def _paren_amp(root, raw) -> list[list[str]]:
@@ -3180,10 +3256,20 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                     continue
                 except Unresolved as exc:
                     scope["unresolved_constants"][name] = "const_initializer_unresolved:" + str(exc)
+            if const and not volatile and not inits and any(x.get("static") for x in defs) \
+                    and not any(x.get("initialized") for x in defs) and not all(x.get("extern") for x in defs):
+                # (R67 review W-1) ``static const U8 k;`` — a tentative definition with internal linkage is 0 at the end
+                #   of the unit (C11 6.9.2p2): a constant, never another unit's definition of the name
+                scope["constants"][name] = {"value": 0, "type": t, "kind": "const_object", "file": d["file"],
+                                            "line": d["line"], "static": True, "typename": d["type"],
+                                            "text": "tentative_definition"}
+                continue
             # ``static``: internal linkage — the object belongs to this translation unit (R16: an interpreted callee of
             # another unit must not read it by the same name)
             scope["globals"][name] = {"type": t, "typename": d["type"], "file": d["file"], "line": d["line"],
-                                      "volatile": volatile, "const": const, "static": any(x.get("static") for x in defs)}
+                                      "volatile": volatile, "const": const, "static": any(x.get("static") for x in defs),
+                                      # (R67 review W-1) only a unit that merely declares it takes another unit's value
+                                      "declared_only": all(x.get("extern") for x in defs)}
         except Unresolved as exc:
             scope["unresolved_globals"][name] = str(exc)
             scope["unmodeled_object_linkage"][name] = is_static
@@ -3379,42 +3465,89 @@ def _scope_array(scope, name, defs, pp, type_of, agreeing, parser):
                   "static": any(x.get("static") for x in defs)}
         inits = [x for x in defs if x.get("array_init") or x.get("array_init_truncated")]
         if const and not volatile and len(inits) == 1 and inits[0].get("array_init"):
-            record["values"] = _array_values(inits[0]["array_init"], elem, length, agreeing, parser)
+            record["values"], unread = _array_values(inits[0]["array_init"], elem, length, agreeing, parser)
             if record["values"] is not None and length is None:
                 record["length"] = len(record["values"])
+            if unread:
+                record["values_unread"] = unread
+        elif const and not volatile:
+            # (R67, audit #45) why a const table's values are not held — the reader then says so instead of asking the
+            #   test for an initial value it cannot set (a definition in another unit is linked in `build_scopes`)
+            if inits:
+                record["values_unread"] = ("initializer_over_budget" if any(x.get("array_init_truncated") for x in inits)
+                                           else "initialized_in_several_definitions")
+            elif any(x.get("initialized") for x in defs):
+                # (review round 3 I-4) ``typedef const U8 CU8; static CU8 t[3] = {…};`` — the declaration does not say
+                #   const, so its initializer was not kept
+                record["values_unread"] = "const_by_typedef_initializer_not_kept"
+            elif all(x.get("extern") for x in defs):
+                record["values_unread"] = "no_initializer_in_unit"        # declared only: `_link_const_arrays`
+            elif any(x.get("static") for x in defs) and not any(x.get("initialized") for x in defs) \
+                    and length is not None and length <= _ARRAY_VALUES_BUDGET:
+                # (R67 review W-1) ``static const U8 t[3];`` — a tentative definition with internal linkage: zero at the
+                #   end of the unit (C11 6.9.2p2), never another unit's table
+                record["values"], record["values_source"] = [0] * length, "tentative_definition"
+            else:
+                record["values_unread"] = "tentative_definition"          # an external one: no other unit's table either
         scope["arrays"][name] = record
     except Unresolved:
         return
 
 
 def _array_values(text, elem, length, agreeing, parser):
-    """Element values of ``{a, b, c}`` (positional only; trailing elements are 0 as in C). None when any
-    element is not an integer constant expression, a designator is used, or the list overruns the length."""
+    """Element values of a const array's initializer → ``(values, "")``, or ``(None, reason)``.
+
+    Positional items and (R67) index designators ``[k] = v`` (C11 6.7.9p17: a designator moves the position, the next
+    item continues after it, a later initializer of the same element overrides it); elements no initializer names are 0
+    (6.7.9p10), and with no declared length the largest index sets it (6.7.9p22). Not read (reason): a nested list (a 2-D
+    table, struct elements), a member designator, an item that is no integer constant expression, a float, an index past
+    the declared length."""
     raw = ("int __probe[] = " + text + ";").encode("utf-8")
     root = parser.parse(raw).root_node
     init = next((x for x in _walk(root) if x.type == "initializer_list"), None)
     if root.has_error or init is None or _text(init, raw) != text.strip():
-        return None
-    items = [c for c in init.named_children if c.type != "comment"]
-    if any(c.type in {"initializer_pair", "initializer_list"} for c in items):
-        return None
-    if length is not None and len(items) > length:
-        return None
-    values = []
-    for c in items:
+        return None, "initializer_unparsed"
+    if is_float(elem):
+        return None, "floating_elements"
+    if length is not None and length > _ARRAY_VALUES_BUDGET:
+        return None, "length_over_budget"
+    values: dict[int, int] = {}
+    position = 0
+    for c in (x for x in init.named_children if x.type != "comment"):
+        node = c
+        if c.type == "initializer_pair":
+            designators = c.children_by_field_name("designator")
+            node = c.child_by_field_name("value")
+            index_nodes = [x for x in designators[0].named_children if x.type != "comment"] \
+                if len(designators) == 1 and designators[0].type == "subscript_designator" else []
+            if len(index_nodes) != 1 or node is None:
+                return None, "designator_unsupported"
+            try:
+                index, it, _extra = agreeing(_text(index_nodes[0], raw), macro_body=False)
+            except Unresolved as exc:
+                return None, "designator_index_unresolved:" + str(exc)
+            if is_float(it) or type(index) is not int or index < 0:
+                return None, "designator_index_not_an_index"
+            if index >= _ARRAY_VALUES_BUDGET:
+                return None, "length_over_budget"
+            position = index
+        if node.type == "initializer_list":
+            return None, "nested_initializer_list"
+        if length is not None and position >= length:
+            return None, "initializer_past_length"
         try:
-            value, t, _extra = agreeing(_text(c, raw), macro_body=False)
-        except Unresolved:
-            return None
-        if is_float(t) or is_float(elem):
-            return None
+            value, t, _extra = agreeing(_text(node, raw), macro_body=False)
+        except Unresolved as exc:
+            return None, "element_unresolved:" + str(exc)
+        if is_float(t):
+            return None, "floating_element"
         try:
-            values.append(convert(value, elem))
-        except Unresolved:
-            return None
-    if length is not None:
-        values.extend([0] * (length - len(values)))
-    return values
+            values[position] = convert(value, elem)
+        except Unresolved as exc:
+            return None, "element_unresolved:" + str(exc)
+        position += 1
+    size = length if length is not None else (max(values) + 1 if values else 0)
+    return [values.get(i, 0) for i in range(size)], ""
 
 
 class _LazyConstants(dict):
@@ -3500,6 +3633,15 @@ def _unit_build_defines(context, path):
             "defines": dict(rec.get("defines") or {}), "cplusplus_mode": bool(rec.get("cplusplus_mode", True))}
 
 
+def _same_build(context, a, b) -> bool:
+    """(R67) Two files of one build: the same source root (APP and BOOT are separate builds). Without roots there is one
+    build; a file outside every root belongs to none (review round 3 I-5 — ``"" == ""`` linked them)."""
+    if not context.get("roots"):
+        return True
+    root = _root_of(context, a)
+    return bool(root) and root == _root_of(context, b)
+
+
 def _root_of(context, path):
     p = os.path.normcase(os.path.normpath(path))
     for r in context.get("roots") or ():
@@ -3538,10 +3680,30 @@ def _walk(node):
 
 
 def _cast(env, type_node, operand):
-    t = env["type_of"](" ".join(_text(type_node, env["raw"]).split()))
+    return _cast_to(env, " ".join(_text(type_node, env["raw"]).split()), operand)
+
+
+def _cast_to(env, type_text, operand):
+    t = env["type_of"](type_text)
     if is_float(t):
         env["flags"]["float"] = True
     return convert(operand[0], t, env["mode"]), t
+
+
+def _names_type(env, name) -> bool:
+    """(R67) Whether a parenthesized name in a constant expression is a type: not an object, a macro or an enumerator of
+    that name (the preprocessor runs first; objects and typedef names share C's one ordinary namespace), and the scope
+    resolves it as a type (an object's name is no typedef there, so ``(g)-1`` stays a subtraction)."""
+    try:
+        env["constant"](name, env["mode"])
+        return False                       # a macro / enumerator value — the subtraction it reads as
+    except Unresolved as exc:
+        if str(exc) != "identifier_undeclared":
+            return False                   # a macro, enumerator or object that does not evaluate: no type read into it
+    try:
+        return isinstance(env["type_of"](name), dict)
+    except Unresolved:
+        return False
 
 
 def _eval(n, env, depth):
@@ -3584,6 +3746,12 @@ def _eval(n, env, depth):
         op = _text(n.child_by_field_name("operator"), raw)
         return arith(op, None, _eval(n.child_by_field_name("argument"), env, depth + 1), widths, mode)
     if kind == "binary_expression":
+        shape = paren_cast_unary(n, raw)
+        if shape is not None and _names_type(env, shape[0]):
+            # (R67) ``(S16)-4000`` is a cast of ``-4000``
+            if shape[2] is None:
+                raise Unresolved("cast_operand_grouping_unread:" + shape[0])
+            return _cast_to(env, shape[0], arith(shape[1], None, _eval(shape[2], env, depth + 1), widths, mode))
         op = _text(n.child_by_field_name("operator"), raw)
         left = _eval(n.child_by_field_name("left"), env, depth + 1)
         if op == "&&" and not left[0]:
@@ -3598,6 +3766,10 @@ def _eval(n, env, depth):
         b = _eval(n.child_by_field_name("alternative"), env, depth + 1)
         if is_float(a[1]) or is_float(b[1]):
             raise Unresolved("float_conditional_unsupported")
+        if a[1].get("enum") or b[1].get("enum"):
+            # (R67 review W-R4-1) the result type rests on the enumeration's implementation-defined type — the oracle
+            #   refuses the same (`conditional_type`); `usual_conversion` would hand back whichever arm came first
+            raise Unresolved("enum_underlying_type_implementation_defined")
         t = usual_conversion(a[1], b[1], widths)
         return convert(a[0] if cond else b[0], t), t
     if kind == "field_expression":
@@ -3642,15 +3814,62 @@ def build_scopes(context: dict[str, Any], paths) -> dict[str, dict[str, Any]]:
         scope = scopes[path]
         for name in list(scope["globals"]):
             g = scope["globals"][name]
-            defs = external.get(name) or []
-            if g.get("const") and not g.get("volatile") and len(defs) == 1 and defs[0].get("typename") == g.get("typename"):
+            # (R67 review I-d) as for tables: APP and BOOT are separate builds — the definition in this unit's root
+            defs = [d for d in external.get(name) or [] if _same_build(context, str(d.get("file") or ""), path)]
+            if g.get("const") and not g.get("volatile") and g.get("declared_only") and len(defs) == 1 \
+                    and defs[0].get("typename") == g.get("typename"):
                 scope["constants"][name] = {**defs[0], "kind": "const_object_linked"}
                 del scope["globals"][name]
                 # (R17 review R2 W2) the value was decided in the defining unit, under that unit's #if verdicts
                 owner = scopes.get(defs[0].get("file")) if defs[0].get("file") in scopes else None
                 if owner is not None and owner.get("assumed_undefined"):
                     scope["assumed_undefined"] = sorted(set(scope["assumed_undefined"]) | set(owner["assumed_undefined"]))
+    _link_const_arrays(context, scopes, wanted, scope_of)
     return {path: scopes[path] for path in wanted}
+
+
+def _link_const_arrays(context, scopes, wanted, scope_of) -> None:
+    """(R67, audit #45) An ``extern const`` table a unit only declares takes the values of its one external definition:
+    a non-static, initialized const definition in a ``.c`` of the same source root (APP and BOOT are separate builds)
+    whose unit reads the values, with the same element type and length. ``lin_configuration_ROM`` is declared in every
+    LIN-including unit of HDPDM01 (46) and KJPDS02_PV (35) and defined once in ``lin_cfg.c``. Anything else keeps
+    ``values_unread`` (several or no definitions, a definition that disagrees)."""
+    files = context.get("files") or {}
+    needed = {name for path in wanted for name, a in scopes[path]["arrays"].items()
+              if a.get("values_unread") == "no_initializer_in_unit" and not a.get("member_of")}
+    if not needed:
+        return
+    defined: dict[str, list[tuple[str, dict]]] = {}
+    for path, rec in files.items():
+        if not path.lower().endswith(".c"):
+            continue
+        for name in needed & set(rec.get("globals") or {}):
+            if any(d.get("array_init") and d.get("const") and not d.get("static") and not d.get("extern")
+                   for d in rec["globals"][name]):
+                defined.setdefault(name, []).append((path, scope_of(path)["arrays"].get(name)))
+    for path in wanted:
+        scope = scopes[path]
+        for name, a in scope["arrays"].items():
+            if name not in needed or a.get("values_unread") != "no_initializer_in_unit" or a.get("member_of"):
+                continue
+            mine = [(p, d) for p, d in defined.get(name, []) if _same_build(context, p, path)]
+            if len(mine) != 1:
+                if mine:
+                    a["values_unread"] = "defined_in_several_units"
+                continue
+            p, d = mine[0]
+            if not isinstance(d, dict) or d.get("values") is None:
+                a["values_unread"] = "linked_definition_unread:" + str((d or {}).get("values_unread") or "unmodeled")
+                continue
+            if d.get("typename") != a.get("typename") or a.get("length") not in (None, d.get("length")):
+                a["values_unread"] = "linked_definition_disagrees"
+                continue
+            a.update(values=list(d["values"]), length=d["length"], values_source="linked:" + p)
+            a.pop("values_unread", None)
+            # (as for a linked const object) the values were decided under the defining unit's #if verdicts
+            owner = scopes.get(p)
+            if owner is not None and owner.get("assumed_undefined"):
+                scope["assumed_undefined"] = sorted(set(scope["assumed_undefined"]) | set(owner["assumed_undefined"]))
 
 
 _DESIGNATOR_RE = re.compile(r"\(*\s*([A-Za-z_]\w*)(?:\s*\.\s*[A-Za-z_]\w*|\s*\[\s*(?:0[xX][0-9A-Fa-f]+|\d+)[uUlL]*\s*\])*\s*\)*")

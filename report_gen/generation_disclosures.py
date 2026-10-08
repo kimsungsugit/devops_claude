@@ -1415,6 +1415,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
     out.extend(_uds_reading_item(qr.get("uds_reading")))                                         # (R65)
+    out.extend(_uds_const_inputs_item(qr.get("uds_const_inputs")))                               # (R67)
     out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
     out.extend(_pointer_targets_item(qr.get("pointer_targets"), "suts_pointer_targets"))       # (R64)
     return out
@@ -1835,6 +1836,20 @@ _UDS_NOTATION_LABELS = {
     "two_value_list": "값 둘 목록(범위가 아니라 두 값으로 읽음)",
     "hex_without_prefix": "0x 없는 16진",
 }
+
+
+def _uds_const_inputs_item(block: Any) -> List[Dict[str, Any]]:
+    """(R67, audit #45) 설계서가 입력으로 적었지만 소스가 const 로 선언한 객체 — 행이 설정하지 않았다는 것과 그 이유. 없으면 말하지
+    않는다(구판 산출물 · 해당 0)."""
+    if not isinstance(block, dict) or not _int(block, "units"):
+        return []
+    return [_item(
+        "suts_uds_const_inputs", "설계서 입력 중 const 객체", f"unit {_int(block, 'units')} · 이름 {_show(_int(block, 'names'))}",
+        "SwUDS 가 입력으로 적었지만 소스가 `const` 로 선언한 객체다(예: " + "; ".join(str(x) for x in (block.get("samples") or [])[:_HEAD_N])
+        + "). 시험이 설정할 수 없는 값(ROM)이라 어느 행도 그 값을 적지 않는다 — 정본 SUTS 도 const 전역을 입력에 적지 않는다. "
+        "기대값은 oracle 이 선언의 초기값을 읽을 수 있으면 그 값으로 계산하고, 못 읽으면(2 차원 표 · 풀리지 않는 원소 · 정의가 "
+        "다른 빌드에 있음 · 이 단위가 크기를 모르는 extern 표 등) 그 칸을 미상으로 비우고 사유를 적는다(`const_values_unread` · "
+        "`array_length_unresolved` 등).")]
 
 
 def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:

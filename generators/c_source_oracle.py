@@ -21,6 +21,7 @@ enumerators, const objects, scalar globals and one-dimensional arrays. Nothing i
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import threading
 from collections import OrderedDict
@@ -210,6 +211,23 @@ def cast_call_operand(c, raw, scope):
     return args[0] if is_type and not _declared_in_function(c, name, raw) else None
 
 
+def cast_unary_operand(n, raw, scope):
+    """(R67) ``(T)-x`` / ``(T)+x`` — the grammar's subtraction / addition with a parenthesized name (`cpc.paren_cast_unary`)
+    — read as the cast it is when ``T`` is a type here: ``(T, sign, operand)``, else None. The judgment is
+    `cast_call_operand`'s (the scope resolves ``T``, no parameter or local hides it) plus no macro of that name in the unit
+    (the preprocessor replaces it first). ``operand`` is None when the grammar grouped the right side under the misparse —
+    the reader leaves that unknown (`cast_operand_grouping_unread`)."""
+    shape = cpc.paren_cast_unary(n, raw)
+    if shape is None or not isinstance(scope, dict) or shape[0] in (scope.get("macro_status") or {}):
+        return None
+    from generators.mcdc_design import _scope_type
+    try:
+        is_type = isinstance(_scope_type(scope, shape[0]), dict)
+    except cpc.Unresolved:
+        is_type = False
+    return shape if is_type and not _declared_in_function(n, shape[0], raw) else None
+
+
 _DECLARED_NAMES: dict[tuple, tuple] = {}
 
 
@@ -317,6 +335,9 @@ class _Interp:
         the node lists `check_sequencing` walks (R2c: per-vector re-walking was 40% of a path search)."""
         self.fn, self.raw, self.scope, self.inputs, self.parser = fn, raw, scope, inputs, parser
         self.stubs_used: set[str] = set()   # (R14, R38) callees the sequence stubs (``F() return`` / ``F() p[0]``)
+        # (R67 review I-2) const objects / tables whose value came from their definition in another unit — the record's
+        #   source hash covers the function's own file only, so the value's footing is named in its assumptions
+        self.linked_reads: set[str] = set()
         # (R38) the sequence's stub inputs by callee name (``F() return`` / ``F() p[0]``) — `stub_view` asks per call
         self.stub_keys: dict[str, list[str]] = {}
         for key in inputs or ():
@@ -507,6 +528,13 @@ class _Interp:
         for prefix in _object_prefixes(base):   # ``g.s = h`` made every ``g.s.*`` unknown
             if prefix in state.havoc_bases:
                 return Unknown(state.havoc_bases[prefix])
+        g = self.globals.get(base)
+        if g is not None and g.get("const"):
+            # (R67 review W-B) a const object the scope does not hold the value of (its initializer did not evaluate, or
+            #   it is defined in no unit this one links to): the program's value, not an input — as for tables
+            why = (self.scope.get("unresolved_constants") or {}).get(base) or (
+                "definition_not_linked" if g.get("declared_only") else "no_initializer_value")
+            return Unknown("const_values_unread:" + base + ":" + str(why))
         if key in self.inputs:
             return self.check_input(key, t, self.inputs[key])
         state.initial_reads.add(key)   # (backlog 2-c)
@@ -610,7 +638,7 @@ class _Interp:
         return self.lift(cpc.convert, val.v, t)
 
     def enum_candidates(self):
-        return [cpc.ctype(k, s, self.widths) for k, s in (("int", True), ("int", False), ("char", True), ("char", False))]
+        return cpc.enum_candidates(self.widths)   # (R67) one list for the oracle and constant expressions
 
     # ── function entry ───────────────────────────────────────────────────────────────────────────
     def bind_parameters(self, state, args=None):
@@ -897,19 +925,33 @@ class _Interp:
             if s.mode != "normal":
                 continue
             val = self.full_expression_value(s, n.child_by_field_name("condition"), raw)
+            reason = ""
             if isinstance(val.v, Unknown) or not isinstance(val.t, dict):
                 reason = "branch_on_unknown:" + (val.v.reason if isinstance(val.v, Unknown) else "switch_type")
+            else:
+                # (R67 review W-R4-3) an enumeration promotes to int or unsigned int — for its values (0..127 here)
+                #   either converts every label alike, so the labels convert to the plain promoted type
+                ct = {k: v for k, v in cpc.promote(val.t, self.widths).items() if k != "enum"}
+                cv = self.lift(cpc.convert, val.v, ct)
+                lvs = [None if lab is None else self.lift(cpc.convert, lab.v, ct) for lab in labels]
+                if isinstance(cv, Unknown):
+                    reason = "branch_on_unknown:" + cv.reason
+                elif not any(lv is not None and not isinstance(lv, Unknown) and lv == cv for lv in lvs):
+                    # (R67 review C-R3-1 · W-R4-3) converted labels are distinct (C11 6.8.4.2p3), so an exact match is
+                    #   certain; with none, a label that did not convert may be the one — no default by accident
+                    bad = next((lv for lv in lvs if isinstance(lv, Unknown)), None)
+                    if bad is not None:
+                        reason = "branch_on_unknown:" + bad.reason
+            if reason:
                 targets = sorted(set(range(len(cases))) if None in labels else set(range(len(cases))) | {-1})
                 for i, target in enumerate(targets):
                     t = s if i == 0 else s.copy()
                     t.forks.append(reason)
                     (ended if target == -1 else entering.setdefault(target, [])).append(t)
                 continue
-            ct = cpc.promote(val.t, self.widths)
-            cv = self.lift(cpc.convert, val.v, ct)
             chosen = None
-            for i, lab in enumerate(labels):
-                if lab is not None and self.lift(cpc.convert, lab.v, ct) == cv:
+            for i, lv in enumerate(lvs):
+                if lv is not None and not isinstance(lv, Unknown) and lv == cv:
                     chosen = i
                     break
             if chosen is None and None in labels:
@@ -1795,6 +1837,8 @@ class _Interp:
             c = constants[name]
             if cpc.is_float(c["type"]):
                 return _Val(Unknown("floating_point_unmodeled"), c["type"])
+            if c.get("kind") == "const_object_linked":
+                self.linked_reads.add(f"{name} ({os.path.basename(str(c.get('file') or ''))})")
             return _Val(c["value"], c["type"])
         if name in self.globals:
             g = self.globals[name]
@@ -1869,6 +1913,16 @@ class _Interp:
             return f"global_unmodeled:{name}:{self.scope['unresolved_globals'][name]}"
         if name in (self.scope.get("unresolved_constants") or {}):
             return f"constant_unresolved:{name}:{self.scope['unresolved_constants'][name]}"
+        if name in (self.scope.get("typedef_names") or ()) and name not in (self.scope.get("macro_status") or {}):
+            # (R67) a type name read as a value: the grammar split a cast ``(T)`` from its operand (``(U16)-1 + (U16)+2``
+            #   parses as ``((U16) - 1 + (U16)) + 2``) — not an undeclared identifier. (review I-7) a typedef the model
+            #   cannot use as a scalar (a pointer, a struct) is said so
+            from generators.mcdc_design import _scope_type
+            try:
+                scalar = isinstance(_scope_type(self.scope, name), dict)
+            except cpc.Unresolved:
+                scalar = False
+            return ("cast_operand_split_by_grammar:" if scalar else "cast_type_unmodeled:") + name
         return "identifier_unresolved:" + name
 
     def macro_node(self, text):
@@ -2003,6 +2057,14 @@ class _Interp:
         return _Val(Unknown("enum_object_type_implementation_defined"), rt)
 
     def binary(self, state, n, raw, depth):
+        shape = cast_unary_operand(n, raw, self.scope)
+        if shape is not None:
+            # (R67) ``(S16)-1800`` is a cast of ``-1800``; a right side the grammar grouped under the misparse is refused
+            #   like the other parenthesized-cast misparse (``(Inc()) + 1U``) — its grouping is not the program's
+            if shape[2] is None:
+                raise Unsupported("cast_operand_grouping_unread:" + shape[0])
+            arg = self.expression(state, shape[2], raw, depth + 1)
+            return self.cast(self.unary(shape[1], arg, state), self.type_of(shape[0]))
         op = _op(n, raw)
         left = self.expression(state, n.child_by_field_name("left"), raw, depth + 1)
         right_node = n.child_by_field_name("right")
@@ -2385,7 +2447,14 @@ class _Interp:
             a = self.arrays[base]
             if a.get("values") is not None and a.get("const"):
                 index = int(key[len(base) + 1:-1])
+                if str(a.get("values_source") or "").startswith("linked:"):
+                    self.linked_reads.add(f"{base} ({os.path.basename(a['values_source'][len('linked:'):])})")
                 return _Val(a["values"][index], t)
+            if a.get("const") and not a.get("volatile"):
+                # (R67, audit #45) a const table whose values this unit does not hold: the program's values are its
+                #   initializer, not an input the test could set — say why they are not held, and do not count it as a
+                #   read the inputs lack (`initial_value_not_in_inputs` made a false source finding of it)
+                return _Val(Unknown("const_values_unread:" + base + ":" + str(a.get("values_unread") or "unknown")), t)
         if base.startswith("@"):
             return _Val(Unknown(state.havoc_bases.get(base, "uninitialized_local")), t)
         return _Val(self.initial(state, key, base, t), t)
@@ -3025,6 +3094,7 @@ class _World:
             self.kept.extend(sub.kept_raws)   # their ids are in local keys (review I2)
         caller.steps = sub.steps
         caller.stubs_used |= sub.stubs_used
+        caller.linked_reads |= sub.linked_reads
         # (R17 review W2) the callee's unit text rests on its own #if verdicts too
         caller.assumed_undefined |= sub.assumed_undefined | set(scope.get("assumed_undefined") or ())
         caller.assumed_undefined |= set((getattr(self.provider, "binding_assumptions", None) or {}).get(
@@ -3528,6 +3598,11 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                         for n in sorted(interp.stubs_used))
                     + " (a stub writes no global or static; what it may put through a pointer argument stays unknown)"]
                 record["stubs"] = sorted(interp.stubs_used)
+            if interp.linked_reads:
+                record["assumptions"] = list(record["assumptions"]) + [
+                    "const values taken from the one definition in another unit (the source hash covers this function's "
+                    "file only): " + ", ".join(sorted(interp.linked_reads)[:12])
+                    + (f" (+{len(interp.linked_reads) - 12})" if len(interp.linked_reads) > 12 else "")]
             own = set((unit.get("project_scope") or {}).get("assumed_undefined") or ())
             if interp.assumed_undefined - own:
                 # (R17) #if verdicts this run rested on beyond the unit's file-level ones: function bodies, callee units

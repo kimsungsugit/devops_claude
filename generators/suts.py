@@ -694,6 +694,16 @@ def _is_const_global(name: str, gim: Optional[Dict[str, Dict[str, str]]]) -> boo
     return is_const_type(((gim or {}).get(name) or {}).get("type"))
 
 
+def _object_is_const(name: str, gim: Optional[Dict[str, Dict[str, str]]]) -> bool:
+    """(R67) 객체 **자체**가 `const` 인가 — `const U8 tab[9]` · `U8 * const p` 는 그렇고, `const U8 *p` 는 아니다(포인터는 시험이
+    설정하는 입력이고 const 는 가리키는 곳의 것). `_is_const_global` 은 `const` 낱말만 봐서 둘을 가르지 않는다 — 소스 루프의 그
+    판정은 그대로 두고, 설계서가 적은 입력을 빼는 자리(아래 `_const_in`)는 이 판정을 쓴다(정당한 포인터 입력을 지우지 않게)."""
+    t = str(((gim or {}).get(name) or {}).get("type") or "")
+    if "*" in t:
+        return bool(re.search(r"\*[^*]*\bconst\b[^*]*$", t))
+    return is_const_type(t)
+
+
 def collect_unit_functions(
     function_details: Dict[str, Dict[str, Any]],
     globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
@@ -934,6 +944,7 @@ def collect_unit_functions(
         # ⚠ 정본이 쓰는 VectorCAST 표기(`return` · `f() p[0]() m`)는 UDS 에 없다 —
         #   기대 축에서 그것만 남긴다(이게 기대 재현율 83.6→94.1%p 의 정체다).
         _uds_rec = resolve_unit_io(uds_io_map, name)
+        _uds_const_in: List[str] = []
         if _uds_rec is not None:
             # ⚠ UDS 는 반환값을 `Return` 으로, 정본 SUTS 는 `return` 으로 적는다.
             #   대소문자만 다른 같은 것이라 그대로 두면 **한 행에 반환값이 두 번**
@@ -944,6 +955,8 @@ def collect_unit_functions(
                 return _RETURN_VAR if y.strip().lower() == _RETURN_VAR else y
 
             _u_in = [_norm_uds(x) for x in (_uds_rec.get("inputs") or []) if x]
+            # (R67) the design's own spelling of each input — ``->`` (a path through a pointer) is gone after `_norm_uds`
+            _u_in_raw = {_norm_uds(x): str(x) for x in reversed(_uds_rec.get("inputs") or []) if x}
             _u_out = [_norm_uds(x) for x in (_uds_rec.get("outputs") or []) if x]
             if _u_in:
                 input_vars = list(dict.fromkeys(_u_in))
@@ -973,6 +986,22 @@ def collect_unit_functions(
                     inp_set = set(input_vars)
                     _param_restored += len(_restore)
                     _param_restored_units += 1
+                # (R67, audit #45) a const object the design lists as an input — KJPDS02_PV `g_DrvIn_MotorSpeed` lists the
+                #   lookup table `static const U8 u8s_ShiftBitLut[9]`: its rows set nine ROM elements no test can set (the
+                #   oracle reads the declaration's values anyway), the same thing the source loop above leaves out
+                #   (`_is_const_global` — the reference SUTS writes no const global). A parameter of the name is no global;
+                #   a pointer to const (`const U8 *p`) is a settable pointer — `_object_is_const`.
+                _const_in = [x for x in input_vars if (_r := re.split(r"[\[.]", x, maxsplit=1)[0]) not in _param_roots
+                             and _object_is_const(_r, gim)
+                             # (review round 3 I-3) ``U8 * const p``: ``p[0]`` is what p points to — writable
+                             and (x == _r if "*" in str((gim.get(_r) or {}).get("type") or "")
+                                  # a member or element of the const object is the object (``s_NTCLookupTable.u16_AdcValue``,
+                                  #   KJPDS02_PV); a path the design wrote through ``->`` reaches writable data
+                                  else "->" not in _u_in_raw.get(x, x))]
+                if _const_in:
+                    input_vars = [x for x in input_vars if x not in _const_in]
+                    inp_set = set(input_vars)
+                    _uds_const_in = _const_in
             if _u_out:
                 _keep_vc = [v for v in output_vars if v == _RETURN_VAR or "()" in v]
                 output_vars = list(dict.fromkeys(_u_out + _keep_vc))
@@ -1161,6 +1190,8 @@ def collect_unit_functions(
             },
             "srs_req_ids": srs_req_ids,
             "precondition": info.get("precondition", ""),
+            # (R67) inputs the design lists that the source declares const — not set by any row (`summarize_uds_const_inputs`)
+            "uds_const_inputs": _uds_const_in,
         })
 
     units.sort(key=lambda u: u["fid"])
@@ -2145,6 +2176,15 @@ def _source_function_names(function_details: Dict[str, Any]) -> List[str]:
 def _uds_param_key(name: str) -> str:
     """(R65) 설계서 파라미터 이름과 unit 이름이 같은 객체인지 보는 열쇠 — `p->m` · `p[0].m` · `p.m` 이 같다."""
     return re.sub(r"\[[^\]]*\]", "", name.replace("->", ".")).replace(" ", "").lower()
+
+
+def summarize_uds_const_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R67, audit #45) 설계서가 입력으로 적었지만 소스가 `const` 로 선언한 객체 — 어느 행도 그 값을 설정하지 않는다(시험이 설정할
+    수 없는 ROM 이고 oracle 은 선언의 값을 쓴다). 품질 리포트 `uds_const_inputs`."""
+    hit = [(str(u.get("name") or ""), [str(x) for x in (u.get("uds_const_inputs") or [])])
+           for u in units if u.get("uds_const_inputs")]
+    return {"units": len(hit), "names": sum(len(n) for _u, n in hit),
+            "samples": [f"{u}: {', '.join(n[:3])}" for u, n in hit[:5]]}
 
 
 def summarize_uds_reading(io_map: Optional[Dict[str, Any]], units: List[Dict[str, Any]], given: bool,
@@ -6270,6 +6310,7 @@ def generate_suts(
     # (R65) SwUDS 를 어떻게 읽었나 — 머리말 이름 · 표 Name 별칭 · 세로 병합 행 · 이름으로 못 읽은 행 · Value Range 판독
     quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(_input_docs["UDS"].get("given")),
                                                    _source_function_names(function_details))
+    quality["uds_const_inputs"] = summarize_uds_const_inputs(units)     # (R67)
     if (_input_docs["UDS"].get("given") and "uds_unit_io" in (_input_docs["UDS"].get("blocks_unopened") or [])
             and not quality["uds_reading"].get("read_error")):
         # (R66) 입출력 표를 읽을 SwUDS 를 열지 못했으면 '함수 표 0 개' 로 적지 않는다 — 원인은 파일 접근이다.

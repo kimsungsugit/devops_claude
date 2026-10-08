@@ -195,6 +195,8 @@ class _HeadMeter:
         return self._pat.match(text, pos)
 
 
+# (R67) CPU 시간으로 잰다 — 지키는 것은 정규식의 제곱 폭주(옛 규칙 1MB 에 2.25 초 이상)다. 벽시계는 병렬 커밋 게이트
+#   (`-n auto`)의 순간 부하로 같은 경우가 0.3 → 2.9 초까지 흔들려 게이트를 두 번 막았다(그때 CPU 시간 ≈ 1 초).
 class TestLinearOnRegisterHeaders:
     @staticmethod
     def _register_header(n: int) -> str:
@@ -212,16 +214,16 @@ class TestLinearOnRegisterHeaders:
 
     def test_register_header_finishes_in_bounded_time(self):
         text = self._register_header(20000)      # ≈1.6MB — 실물(670KB, 옛 정규식 3.6초)의 2.4배
-        st = time.perf_counter()
+        st = time.process_time()
         assert sp._extract_doxygen_asil_tags(text) == {}
-        assert time.perf_counter() - st < 2.0
+        assert time.process_time() - st < 2.0
 
     def test_long_blank_run_after_a_type_word_is_capped(self):
         # 접두 상한이 없으면 lazy 확장 × `\s+` 되물림으로 공백 길이의 제곱.
         text = "/** c */ x" + " " * 50000 + ";\n"
-        st = time.perf_counter()
+        st = time.process_time()
         assert sp._extract_doxygen_asil_tags(text) == {}
-        assert time.perf_counter() - st < 2.0
+        assert time.process_time() - st < 2.0
 
     def test_blank_runs_are_capped_at_every_position(self):
         # 리뷰 I3 — 접두만 묶으면 `\s+`·`\s*` 가 lazy 위치마다 공백 런 전체를 먹었다 되물린다(1MB 에 2.25초).
@@ -229,9 +231,9 @@ class TestLinearOnRegisterHeaders:
         # 이름 뒤 공백은 런마다 한 번만 되물린다(상한 없이도 선형) — 그래도 시간 상한 안인지는 본다.
         after_name = "".join("/** c */ " + "a " * 100 + " " * 5000 + ";\n" for _ in range(400))
         for text in (after_type, after_name):
-            st = time.perf_counter()
+            st = time.process_time()
             assert sp._extract_doxygen_asil_tags(text) == {}
-            assert time.perf_counter() - st < 2.0
+            assert time.process_time() - st < 2.0
 
     def test_contiguous_tagless_comments_are_walked_once(self, monkeypatch):
         # 머리가 안 맞았을 때 주석 하나씩 다시 시작하면, 건너뛰기가 매번 끝까지 가므로 잇닿은 주석 N 개에 N².
@@ -278,9 +280,9 @@ class TestFunctionBodies:
     @pytest.mark.parametrize("mod", _BODY_MODULES)
     def test_vector_table_finishes_in_bounded_time(self, mod):
         text = _vector_table(1500)       # 실물(123줄, 옛 정규식 1.6초)의 12배 — 옛 규칙으론 시간 단위
-        st = time.perf_counter()
+        st = time.process_time()
         assert mod._extract_c_function_bodies(text) == {}
-        assert time.perf_counter() - st < 2.0
+        assert time.process_time() - st < 2.0
 
     @pytest.mark.parametrize("mod", _BODY_MODULES)
     def test_call_inside_if_does_not_replace_the_real_body(self, mod):
@@ -301,9 +303,9 @@ class TestFunctionBodies:
 
 class TestTwinDefinitions:
     def test_vector_table_finishes_in_bounded_time(self):
-        st = time.perf_counter()
+        st = time.process_time()
         assert twin._extract_c_definitions(_vector_table(1500)) == []
-        assert time.perf_counter() - st < 2.0
+        assert time.process_time() - st < 2.0
 
     def test_three_tuple_shape_static_flag_and_flattened_params(self):
         text = "static U8 f(U8 a,\n      U8 b)\n{\n}\nvoid g ( void ) {\n}\nstaticky_t h(void) {\n}\n"
@@ -413,9 +415,9 @@ class TestLightweightFallbackUsesTheFixedTwin:
 
         (tmp_path / "Vectors.c").write_text(_vector_table(1500), encoding="utf-8")
         (tmp_path / "door.c").write_text(_CALL_IN_IF, encoding="utf-8")
-        st = time.perf_counter()
+        st = time.process_time()
         details = _lightweight_parse(str(tmp_path))
-        assert time.perf_counter() - st < 5.0
+        assert time.process_time() - st < 5.0
         # 옛 규칙은 `if( s_IsDoorClosed(…) … ) {` 를 세 번째 함수로 냈다.
         assert sorted(v["name"] for v in details.values()) == ["g_Task", "s_IsDoorClosed"]
         by_name = {v["name"]: v for v in details.values()}

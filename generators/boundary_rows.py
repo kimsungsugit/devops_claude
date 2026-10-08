@@ -171,6 +171,15 @@ def _macro_argument_kind(scope: dict[str, Any], name: str, index: int, count: in
     return "direct"
 
 
+def _cast_keeps(value: int, t: dict) -> bool:
+    """Does the cast to ``t`` keep ``value``? (R67 review round 3 I-1) an enumeration type keeps only 0..127 under every
+    type the implementation may give it."""
+    lo, hi = cpc.type_range(t)
+    if t.get("enum"):
+        lo, hi = max(lo, 0), min(hi, 127)
+    return lo <= value <= hi
+
+
 def compared_constants(unit: dict[str, Any], names: list[str], stats: dict | None = None) -> dict[str, set[int]]:
     """(R31) For each name: the integer constants the function body compares it with **directly** (``x < K``,
     ``K >= x``, ``(U16)x == K``, ``(U16)(x) != K``) — a literal (``0xFFFF``, ``-5``, ``(-300)``) or an identifier the
@@ -194,7 +203,7 @@ def compared_constants(unit: dict[str, Any], names: list[str], stats: dict | Non
     the caller). A cast on the **input's** side is stripped (``(U8)x == 200`` is read as ``x`` against 200 — the rows sit
     where that comparison turns for the untruncated values). Empty, and ``stats["body_unread"] = 1``, when the body cannot
     be read."""
-    from generators.c_source_oracle import cast_call_operand
+    from generators.c_source_oracle import cast_call_operand, cast_unary_operand
     from generators.mcdc_design import _scope_type
     stats = stats if stats is not None else {}
     scope = unit.get("project_scope")
@@ -265,8 +274,7 @@ def compared_constants(unit: dict[str, Any], names: list[str], stats: dict | Non
             t = cast_type(cast)
             if got is None or t is None:
                 return None
-            lo, hi = cpc.type_range(t)
-            if not lo <= got[0] <= hi:
+            if not _cast_keeps(got[0], t):
                 return None             # a converting cast: C compares with another value — miss rather than invent
             got = (got[0], t)
         return got
@@ -283,6 +291,15 @@ def compared_constants(unit: dict[str, Any], names: list[str], stats: dict | Non
                 arg = node.child_by_field_name("argument")
                 inner = typed(arg) if arg is not None and op is not None and text(op) in ("-", "+") else None
                 return cpc.arith(text(op), None, inner, widths) if inner is not None else None
+            shape = cast_unary_operand(node, raw, scope)
+            if shape is not None:
+                # (R67) ``( S16 )-1800`` — the grammar's subtraction is the cast of ``-1800`` (the oracle's judgment)
+                inner = typed(shape[2]) if shape[2] is not None else None
+                t = cast_type(shape[0])
+                if inner is None or t is None:
+                    return None
+                value, _t = cpc.arith(shape[1], None, inner, widths)
+                return (value, t) if _cast_keeps(value, t) else None    # a converting cast: miss rather than invent
             if cpc.is_name_node(node):  # (R35) ``TRUE``/``FALSE`` too
                 entry = constants.get(text(node))
                 if isinstance(entry, dict) and isinstance(entry.get("value"), int) and not isinstance(entry["value"], bool) \
