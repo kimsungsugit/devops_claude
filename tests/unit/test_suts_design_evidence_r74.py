@@ -218,7 +218,9 @@ class TestSrsLinkUsesTheStsMapping:
         body = src[src.index("def generate_suts("):]
         assert "map_requirements_to_functions(" in body and "_pds|_init|_main" not in body
         assert "_link_units_to_requirements(units, _fid_to_reqs)" in body
-        assert "sds_map=_sds_map or {}" in body, "`sds_map=None` 은 저장소 docs/ 글롭(프로젝트 무관)을 부른다"
+        # (R66) SDS 는 `read_sds_input` 하나 — 없거나 못 읽으면 빈 맵(예전 `sds_map=None` 은 저장소 docs/ 글롭이었다)
+        assert "read_sds_input(sds_docx_path" in body
+        assert "srs_reqs, function_details, sds_map=_sds_map, uds_design_ids" in body   # (리뷰 2차 I10) 요구 매핑 호출 그 자리
         assert "ids[:4]" not in src, "(리뷰 W2) 요구 ID 를 앞 4개로 자르던 절단이 남아 있다"
 
 

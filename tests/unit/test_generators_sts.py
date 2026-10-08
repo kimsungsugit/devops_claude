@@ -154,18 +154,14 @@ class TestRequirementMapping:
             }
         }
 
-        monkeypatch.setattr(
-            "generators.sts._load_default_sds_map",
-            lambda: {
-                "motor control": {
-                    "related": "SwTR_0101",
-                    "asil": "A",
-                    "description": "Motor control logic",
-                }
-            },
-        )
-
-        result = map_requirements_to_functions(requirements, function_details)
+        # (R66) SDS 는 호출자가 준 맵만 — 저장소 docs/ 폴백은 없다
+        result = map_requirements_to_functions(requirements, function_details, sds_map={
+            "motor control": {
+                "related": "SwTR_0101",
+                "asil": "A",
+                "description": "Motor control logic",
+            }
+        })
 
         assert result["SwTR_0101"] == ["SwUFn_001"]
 
@@ -554,42 +550,43 @@ class TestCoverageSeparatesVerificationMethod:
 
 
 class TestReqFunctionMappingSdsSource:
-    r"""요구-함수 매핑의 SDS 폴백은 프로젝트에 종속돼야 한다.
+    r"""요구-함수 매핑의 SDS 는 프로젝트에 종속돼야 한다.
 
     회귀 대상: `map_requirements_to_functions`가 `_load_default_sds_map()`(저장소 docs/
     글롭)만 봤다. 실측(HDPDM01): 요구-함수 링크 5,992건이 **100%** 이 폴백에서 나왔고
     (끄면 0/63), 요구 ID는 프로젝트 간 네임스페이스가 겹쳐 오매핑이 걸러지지도 않는다.
+    (R66) 폴백 자체를 지웠다 — KJPDS02_PV 를 SDS 없이 만들면 링크 8,049 개가 HDPDM01 파티션에서 나왔다.
     """
 
     _REQS = [{"id": "SwTR_0001"}, {"id": "SwTR_0002"}]
     _FD = {"SwUFn_001": {"id": "SwUFn_001", "name": "S_Motor_Init",
                          "module_name": "MotorCtrl", "related": ""}}
 
-    def test_injected_map_wins_over_repo_docs_fallback(self, monkeypatch):
+    def test_injected_map_is_the_mapping_source(self):
         from generators import sts as gsts
-        monkeypatch.setattr(gsts, "_load_default_sds_map",
-                            lambda: {"motorctrl": {"related": "SwTR_0002", "asil": "", "description": ""}})
         got = gsts.map_requirements_to_functions(
             self._REQS, self._FD,
             sds_map={"motorctrl": {"related": "SwTR_0001", "asil": "", "description": ""}},
         )
         assert got["SwTR_0001"] == ["SwUFn_001"], "주입한 SDS 맵이 무시됐다"
-        assert got["SwTR_0002"] == [], "저장소 폴백이 주입을 덮었다"
+        assert got["SwTR_0002"] == []
 
-    def test_none_still_uses_fallback(self, monkeypatch):
-        """대조군: 안 주면 기존 폴백 동작 유지(후방 호환)."""
+    def test_none_means_no_sds_links(self, monkeypatch):
+        """(R66) 안 주면 SDS 경로의 링크가 없다 — 예전엔 저장소 docs/ 의 다른 프로젝트 SDS 였다.
+
+        뮤테이션: 폴백이 되살아나 파티션 추출기를 부르면 실패."""
+        import report_gen.requirements as rr
         from generators import sts as gsts
-        monkeypatch.setattr(gsts, "_load_default_sds_map",
-                            lambda: {"motorctrl": {"related": "SwTR_0002", "asil": "", "description": ""}})
+
+        def _boom(*a, **k):
+            raise AssertionError("SDS 를 주지 않았는데 파티션 추출기를 불렀다(저장소 폴백 재발)")
+        monkeypatch.setattr(rr, "_extract_sds_partition_map", _boom)
         got = gsts.map_requirements_to_functions(self._REQS, self._FD)
-        assert got["SwTR_0002"] == ["SwUFn_001"]
+        assert got["SwTR_0001"] == [] and got["SwTR_0002"] == []
+        assert not hasattr(gsts, "_load_default_sds_map") and not hasattr(gsts, "_SDS_MAP_CACHE")
 
-    def test_empty_injected_map_does_not_silently_fall_back(self, monkeypatch):
-        """빈 dict를 명시로 주면 폴백을 쓰지 않는다(None과 구분)."""
-        from generators import sts as gsts
-        monkeypatch.setattr(gsts, "_load_default_sds_map",
-                            lambda: {"motorctrl": {"related": "SwTR_0002", "asil": "", "description": ""}})
-        got = gsts.map_requirements_to_functions(self._REQS, self._FD, sds_map={})
+    def test_empty_injected_map_has_no_links(self):
+        got = __import__("generators.sts", fromlist=["x"]).map_requirements_to_functions(self._REQS, self._FD, sds_map={})
         assert got["SwTR_0001"] == [] and got["SwTR_0002"] == []
 
 

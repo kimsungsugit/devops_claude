@@ -99,6 +99,101 @@ def _tone(warn: bool) -> str:
     return "warning" if warn else "info"
 
 
+# ── (R66) 입력 문서 — 세 생성기 공용 ─────────────────────────────────────────────
+_INPUT_DOC_NAMES = {"SRS": "SRS", "SDS": "SDS", "UDS": "SwUDS", "HSIS": "HSIS", "STP": "STP"}
+#: 문서 종류마다 그 문서가 채우는 것 — 못 읽었거나 주지 않았을 때 '무엇이 없는가' 를 말한다(생성기별).
+_INPUT_DOC_GIVES = {
+    "suts": {"SRS": "unit 의 요구 ID", "SDS": "ASIL(SwUDS · 소스 주석이 정하지 않은 unit) · 요구 연결의 설계서 경로",
+             "UDS": "입출력 이름 · Value Range · 설계 ID · 설명 · ASIL", "HSIS": "HW 신호 값 범위 · 요구 ID"},
+    "sts": {"SRS": "요구(표)", "SDS": "요구-함수 연결(설계서 파티션 · 설계 ID 브리지) · 함수 ASIL",
+            "UDS": "설계 ID 브리지 · 함수 설명", "STP": "시험 전략 문맥"},
+    "sits": {"SRS": "요구 ID", "SDS": "SwCom 의 ASIL 상속", "UDS": "SwCom · ASIL · Related · 설계 ID(TC ID)",
+             "STP": "시험 환경 ID"},
+}
+#: 생성기가 읽기만 하고 칸에 쓰지 않는 문서(감사 #8) — 못 읽어도 사람이 할 일이 없어 warning 이 아니다.
+_INPUT_DOC_UNUSED = {"sits": {"HSIS"}}
+
+
+def _input_documents_item(block: Any, doc: str, override_units: int = 0,
+                          override_decided: Optional[int] = None) -> List[Dict[str, Any]]:
+    """(R66, 감사 #1 · #62 · #63 · #83) 입력 문서를 무엇을 읽었나 — 문서마다 지정했나 · 열었나(SDS 는 파티션 수, SRS 는 요구 수) ·
+    못 쓴 사유와 그 때문에 이 문서에 없는 것. 주지 않은 문서는 '주면 무엇이 채워지는가' 를 말하고, 어떤 경우에도 저장소
+    `docs/` 의 다른 프로젝트 문서로 대체하지 않았다는 사실을 적는다. 기록이 없는 구판 산출물이면 항목을 만들지 않는다."""
+    if not isinstance(block, dict) or not block:
+        return []
+    from generators.suts import input_document_usable
+
+    gives = _INPUT_DOC_GIVES.get(doc, {})
+    unused = _INPUT_DOC_UNUSED.get(doc, set())
+    parts: List[str] = []
+    missing: List[str] = []
+    unused_missing: List[str] = []
+    substituted: List[str] = []
+    absent: List[str] = []
+    warn = False
+    content_unread = False
+    for k in ("SRS", "SDS", "UDS", "HSIS", "STP"):
+        rec = block.get(k)
+        if not isinstance(rec, dict):
+            continue
+        name = _INPUT_DOC_NAMES[k]
+        tag = " (쓰지 않음)" if k in unused else ""
+        if rec.get("specified_unopened"):
+            # (리뷰 3차 W-E) 지정하지 않은 문서로 만들었다 — 사람이 볼 일이라 warning
+            warn = True
+            substituted.append(f"{name} — 지정한 문서를 열지 못해({rec['specified_unopened']}) 요구 문서 목록(또는 업로드)의 "
+                               f"`{rec.get('name') or '?'}` 를 썼다 — 지정한 문서가 맞는지 확인할 것")
+        if not rec.get("given"):
+            parts.append(f"{name} 없음{tag}")
+            if gives.get(k):
+                absent.append(f"{name}({gives[k]})")
+            continue
+        n_req = _int(rec, "requirements")
+        if input_document_usable(k, rec):
+            # (리뷰 W4) 내용을 잰 문서만 수(SDS 파티션 · SRS 요구)로 말하고, 나머지는 '열림' — 열었다는 것이지 그 문서가
+            #   채울 값을 다 읽었다는 뜻이 아니다(SwUDS 판독은 SUTS 의 'SwUDS 판독' 항목)
+            parts.append(f"SDS 파티션 {_show(_int(rec, 'entries'))}" if k == "SDS"
+                         else f"{name} 요구 {n_req}" if n_req is not None else f"{name} 열림{tag}")
+            continue
+        parts.append(f"{name} 못 읽음{tag}")
+        line = (f"{name}" + (f" `{rec['name']}`" if rec.get("name") else "") + f" — {rec.get('reason') or '사유 미상'}"
+                + (f" (이 문서에 없는 것: {gives[k]})" if gives.get(k) else ""))
+        if k in unused:
+            unused_missing.append(line)
+            continue
+        warn = True
+        missing.append(line)
+        content_unread = content_unread or bool(rec.get("opened"))
+    srs = block.get("SRS") if isinstance(block.get("SRS"), dict) else {}
+    n_text = _int(srs, "requirements_from_text")
+    # (리뷰 2차 I3) 안내는 사유에 맞게 — 못 연 문서는 위치 · 권한, 열었지만 내용을 못 읽은 문서는 양식
+    advice = ("파일 위치 · 권한을 확인할 것" if any(not (block.get(k) or {}).get("opened") for k in block
+                                               if isinstance(block.get(k), dict) and k not in unused
+                                               and block[k].get("given") and not input_document_usable(k, block[k]))
+              else "")
+    advice = " · ".join(x for x in (advice, "열었지만 내용을 못 읽은 문서는 양식을 확인할 것" if content_unread else "") if x)
+    return [_item(
+        f"{doc}_input_documents", "입력 문서(무엇을 읽었나)", " · ".join(parts) or "—",
+        (("지정했지만 쓰지 못한 문서: " + "; ".join(missing) + (f". {advice}. " if advice else ". ") if missing else "")
+        + ("; ".join(substituted) + ". " if substituted else "")
+        + ("읽기만 하는 문서라 이 문서 칸에는 영향이 없다: " + "; ".join(unused_missing) + ". " if unused_missing else "")
+        + ((f"SRS 의 요구 표를 못 읽어 요구 문서 본문 글에서 요구 {n_text}개를 읽었다" if srs.get("given")
+            else f"SRS 문서 없이 요구 문서 본문 글에서 요구 {n_text}개를 읽었다")
+           + "(표의 ASIL · Related 칸은 없다). " if n_text else "")
+        + ("주지 않은 문서: " + "; ".join(absent) + " — 주면 채워진다. " if absent else "")
+        # (리뷰 2차 I9 · 3차 W-E) 다 읽었으면 대체 이야기는 잡음이다 — 없거나 못 읽은 문서가 있을 때만(목록 문서 사용은 위 문장)
+        + ("없거나 못 읽은 문서는 저장소 docs/ 의 다른 프로젝트 문서로 대체하지 않는다 — 그 값은 비우거나 TBD 로 둔다. "
+           if (no_substitute := bool(missing or absent or unused_missing)) else "")
+        # (리뷰 W5 · 2차 W-B) 저장소 override 스냅샷은 아직 프로젝트 확인 없이 쓰인다(백로그 13) — 숨기지 않는다.
+        #   `uds+override` 도 센다(SwUDS 와 함께 있어도 더 높으면 스냅샷 등급이 이긴다). '예외:' 는 위 문장이 있을 때만(3차 I-b)
+        + ((("예외: " if no_substitute else "")
+            + f"저장소 override 스냅샷(`docs/uds_function_swcom_override.json`, 프로젝트 확인 없음)이 unit {override_units}개의 "
+            "ASIL 근거에 들었다" + (f"(그중 {override_decided}개는 SwUDS 가 없거나 더 낮아 그 스냅샷 등급이 최종 등급이다)"
+                                 if override_decided is not None else "")
+            + " — 'ASIL 근거 분포' 항목의 override.") if override_units else "")).strip(),
+        tone=_tone(warn))]
+
+
 # ── 공통 ───────────────────────────────────────────────────────────────────
 def _common_items(qr: Dict[str, Any], alt: Dict[str, Any]) -> List[Dict[str, Any]]:
     """공통 축(프로파일·상한·생성 방법).
@@ -185,6 +280,8 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     if not isinstance(gs, dict):
         gs = {}
+    # (R66) 입력 문서 — SDS 가 없으면 요구-함수 연결의 설계서 경로가 꺼진다(다른 프로젝트 SDS 로 잇지 않는다)
+    out.extend(_input_documents_item(gs.get("input_documents"), "sts"))
 
     # STS 는 공통 `caps_effective` 를 쓰지 않는다 — 상한을 `max_tc_per_req` 한 값으로 적는다(생산자 차이).
     #   이 값이 없으면 아래 "상한에 걸린 요구 50건" 이 무슨 상한인지 화면에서 알 수 없다.
@@ -1105,6 +1202,12 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 예: {_head(qr.get('override_only_units'))}" if qr.get("override_only_units") else ""),
             tone="warning"))
 
+    # (R66) 입력 문서를 무엇을 읽었나 — 보강 블록은 문서를 못 열면 예외 없이 건너뛰어 아래 '보강 실패' 가 세지 못한다
+    _ev = qr.get("asil_evidence_distribution") if isinstance(qr.get("asil_evidence_distribution"), dict) else {}
+    _ovr_units = sum(v for k, v in _ev.items() if "override" in str(k) and isinstance(v, int) and not isinstance(v, bool))
+    out.extend(_input_documents_item(qr.get("input_documents"), "suts", override_units=_ovr_units,
+                                     override_decided=_int(qr, "asil_decided_by_override")))
+
     # 설계 근거 보강 단계 실패 — 있으면 그 단계의 값이 통째로 빠진 채 문서가 나갔다는 뜻이다.
     errs = qr.get("enrichment_errors")
     if isinstance(errs, list):
@@ -1116,9 +1219,21 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "그 단계가 채웠을 값(설계서 범위·요구 ID 등)이 이 문서에 없다.",
                 tone="warning"))
         else:
+            # (R66, 감사 #1) 예전 문구 "전부 끝까지 돌았다 — 빈 칸은 근거가 없어서" 는 문서를 못 열어 건너뛴 블록도 덮었다
+            from generators.suts import input_document_usable
+
+            _docs = qr.get("input_documents") if isinstance(qr.get("input_documents"), dict) else None
+            # (리뷰 W3) 입력 문서 항목과 같은 판정 — 요구 표 0 개인 SRS 도 '쓰지 못함'
+            _unread = [k for k in _INPUT_DOC_NAMES if isinstance((_docs or {}).get(k), dict) and _docs[k].get("given")
+                       and not input_document_usable(k, _docs[k])]
             out.append(_item(
                 "suts_enrichment_errors", "설계 근거 보강 실패", "0건",
-                "설계서·HSIS 보강 단계가 전부 끝까지 돌았다 — 빈 칸이 있다면 근거가 없어서지 실패 때문이 아니다."))
+                "연 문서의 보강 단계는 예외 없이 끝났다"
+                + (" — 단 지정한 문서 중 쓰지 못한 것이 있어(" + ", ".join(_INPUT_DOC_NAMES.get(k, k) for k in _unread)
+                   + ") 그 문서가 채울 값은 실패가 아니라 입력이 없어 비었다('입력 문서' 항목)." if _unread else
+                   " — 빈 칸은 근거가 없어서지 실패 때문이 아니다"
+                   + ("(어느 문서를 읽었는지는 '입력 문서' 항목)." if _docs is not None else ".")),
+                tone=_tone(bool(_unread))))
 
     # 확장 증분 — 기본 프로파일이면 0 이 정상이라 감춘다.
     ext_seq = _int(qr, "extended_sequences")
@@ -1308,6 +1423,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ── SITS ───────────────────────────────────────────────────────────────────
 def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
+    out.extend(_input_documents_item(qr.get("input_documents"), "sits"))      # (R66)
     fc = qr.get("integration_flow_coverage")
     if not isinstance(fc, dict):
         fc = {}

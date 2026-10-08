@@ -574,7 +574,8 @@ def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=N
     import generators.suts as gsuts
     monkeypatch.setattr(
         gsuts, "collect_unit_functions",
-        lambda fdmap, gim=None: [{"name": info["name"]} for info in fdmap.values() if isinstance(info, dict)],
+        # (R66 리뷰 W6) 카드가 등록 SDS 맵을 넘긴다 — `**k` 를 안 받으면 TypeError 가 best-effort except 에 먹혀 카드가 사라진다
+        lambda fdmap, gim=None, **k: [{"name": info["name"]} for info in fdmap.values() if isinstance(info, dict)],
     )
     monkeypatch.setattr(
         gsuts, "generate_sequences",
@@ -1050,7 +1051,7 @@ def test_build_doc_proposal_restores_suts_document_columns(monkeypatch):
         {"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d", "seq_num": 1},
         {"strategy": "BV_MAX", "inputs": {"x": 255}, "expected": {"ret": 1}, "description": "d2", "seq_num": 2},
     ])
-    monkeypatch.setattr(gsuts, "collect_unit_functions", lambda fdmap, gim=None: [{
+    monkeypatch.setattr(gsuts, "collect_unit_functions", lambda fdmap, gim=None, **k: [{
         "name": "s_foo", "component": "SwCom_07\n(diag)", "asil": "C",
         "srs_req_ids": ["SwRS_0101"], "precondition": "system initialized",
         "prototype": "void s_foo(U16 x)", "input_vars": ["x"], "output_vars": ["ret"],
@@ -1184,7 +1185,7 @@ def test_build_doc_proposal_var_types_omit_unknown(monkeypatch):
          "expected": {"g_sys_error_his[0]": 0}, "description": "d"},
     ])
     monkeypatch.setattr(gsuts, "collect_unit_functions",
-                        lambda fdmap, gim=None: [{"name": "s_foo", "input_vars": [], "output_vars": []}])
+                        lambda fdmap, gim=None, **k: [{"name": "s_foo", "input_vars": [], "output_vars": []}])
 
     sections = _proposal_sections({"f1": {"name": "s_foo"}})
     sections["globals_info_map"] = {"g_sys_error_his": {"type": "U16"}}

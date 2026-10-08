@@ -489,7 +489,7 @@ def test_every_sts_handler_passes_the_system_inputs_to_the_generator(path, tmp_p
     import backend.helpers.session as session_helpers
     import backend.routers.local as local_router
     monkeypatch.setattr(session_helpers, "_resolve_base_dir", lambda _x: tmp_path)   # outputs stay in tmp
-    monkeypatch.setattr(local_router, "_discover_sds_docx", lambda *a, **k: None)   # no repo docs/ discovery
+    # (R66) no repo docs/ discovery exists any more (`_discover_sds_docx` is gone)
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.c").write_text("int f(void){return 0;}", encoding="utf-8")

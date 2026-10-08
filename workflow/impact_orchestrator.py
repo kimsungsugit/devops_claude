@@ -104,6 +104,17 @@ def _resolve_existing(path_text: str) -> str | None:
     return str(path.resolve()) if path.exists() and path.is_file() else None
 
 
+def _linked_doc_input(path_text: Any, label: str, skips: List[str]) -> str | None:
+    """(R66) 재생성 입력은 **등록된 문서만** — 저장소 `docs/` 의 다른 프로젝트 문서로 대체하지 않는다.
+
+    예전엔 등록 문서가 없거나 로컬에서 안 보이면 `_discover_doc` 이 저장소 `docs/` 에서 이름에 `srs` · `sds` · `hsis` ·
+    `stp` 가 든 파일을 집었다(이 저장소의 HDPDM01 문서) — 대상 프로젝트가 무엇이든 그 문서의 ASIL · 요구 ID · HW 신호로
+    SUTS · SITS 를 다시 만들었다. worker 경유(`resolve_builder_input`)라 cloudium 등록 경로도 열고, 등록했는데 못 연 사유는
+    ``skips`` 로 생성기 공시(`input_skips`)에 간다. `_discover_doc` 은 템플릿(서식)에만 남는다."""
+    from backend.services.resolver_helpers import resolve_builder_input
+    return resolve_builder_input(str(path_text or ""), label=label, reasons=skips)
+
+
 def _discover_doc(name_token: str, suffixes: Set[str]) -> str | None:
     docs_dir = REPO_ROOT / "docs"
     if not docs_dir.exists():
@@ -1455,8 +1466,8 @@ def _build_doc_proposal(
     step_cap: int = 6,
     kv_cap: int = 12,
     # ⚠ 신규 인자는 **맨 끝**에 붙인다(위치 인자 호출부가 조용히 다른 값에 바인딩된다).
-    #   SwDS/SwUDS 경로 — 안 주면 SITS 초안이 저장소 `docs/` 글롭(**프로젝트 무관**)을
-    #   읽고 TC ID 가 순번이 된다. 아래 SITS 블록 주석 참조.
+    #   SwDS/SwUDS 경로 — 안 주면 SUTS · SITS 초안의 SDS 근거(ASIL)가 비고(R66: 저장소 `docs/` 의 다른 프로젝트 SDS 로
+    #   대체하지 않는다) TC ID 가 순번이 된다. 아래 SITS 블록 주석 참조.
     sds_path: str = "",
     uds_path: str = "",
 ) -> Dict[str, Any]:
@@ -1523,6 +1534,18 @@ def _build_doc_proposal(
         # "생성기 산출"이라 표기하는데 산출물이 없다(빈 근거에 출처를 붙이지 않는다).
         return out
     out["source"] = "generator"
+    # (R66 리뷰 W6) 등록 SDS 를 **한 번** 읽어 SUTS · SITS 두 초안이 함께 쓴다 — 실제 문서 생성과 같은 ASIL 근거.
+    #   예전 SUTS 초안은 맵 없이 불러 저장소 `docs/` 의 HDPDM01 SDS 등급이었고, R66 뒤엔 조용히 TBD 가 될 뻔했다.
+    #   없거나 못 읽으면 빈 맵(다른 프로젝트 SDS 로 대체하지 않는다) + 사유.
+    _proposal_sds: Dict[str, Any] = {}
+    if str(sds_path or "").strip():
+        try:
+            from generators.suts import read_sds_input
+            _proposal_sds, _sds_reading = read_sds_input(sds_path)
+            if not _proposal_sds and warn_sink is not None:
+                warn_sink.append(f"문서 생성 초안: 지정한 SDS 를 쓰지 못했습니다 — {_sds_reading.get('reason')}")
+        except Exception as _e:  # noqa: BLE001 — 없으면 빈 맵(다른 프로젝트 SDS 로 대체하지 않는다)
+            logger.debug("doc_proposal sds_map 해석 실패: %s", _e)
 
     # ── SUTS: 대상 함수만 collect_unit_functions → generate_sequences(문서 생성과 동일 경로) ──
     # 타입 해상도(핵심): gim에서 {var: raw_type} 로컬 타입맵(_gim_to_type_map — set_globals_type_cache와
@@ -1550,7 +1573,7 @@ def _build_doc_proposal(
         _td_resolved = _gim_typedef_resolved(gim)   # (R76 N94) typedef 를 풀어서 안 타입은 라벨이 그 사실을 말한다
         _local_tc = _gim_to_type_map(gim)   # try 안 — 손상 gim이어도 아래 except가 우아하게 흡수(reviewer W1)
         _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
-        _sub_units = collect_unit_functions(_sub_fd, gim) or []
+        _sub_units = collect_unit_functions(_sub_fd, gim, sds_map=_proposal_sds) or []
         # (R80) 문서 생성과 같은 원문 입력 — 소스 단계의 파일당 원문 맵(`source_files`)에서 붙인다.
         attach_unit_sources(_sub_units, sections.get("source_files"), sections.get("project_context"))
         for _unit in _sub_units:
@@ -1638,19 +1661,13 @@ def _build_doc_proposal(
 
         # ⚠ 이 카드는 "문서를 직접 생성하는 것처럼" 보여주는 게 목적이다. 그런데
         #   맵을 안 넘기면 라이브 산출물과 **다른 값**이 나온다:
-        #     · `sds_map=None`  → `_load_default_sds_map()` = 저장소 `docs/` 글롭.
-        #       대상이 KJPDS02 인데 HDPDM01 문서를 읽는다(`sits.py` 가 명시 경고).
+        #     · SDS 맵 없음 → SwCom ASIL 상속이 꺼진다(R66 부터 생성기도 저장소 `docs/` 의 다른 프로젝트 SDS 로
+        #       대체하지 않는다 — 예전엔 `sds_map=None` 이 HDPDM01 문서를 읽었다).
         #     · `design_ids` 없음 → TC ID 가 전부 순번 `SwITC_NN` 이라, 카드에서 본
         #       TC 를 실제 문서(`SwITC_SwUFn_0101`)에서 **찾을 수 없다**.
         #     · SwUDS 맵 없음 → Related 는 합성 SwCom 만, Safety 는 소스 주석만.
         #   전부 best-effort 라 실패해도 카드가 없어지지 않는다(아래 except).
-        _sds_map = None
-        if str(sds_path or "").strip():
-            try:
-                from generators.suts import _resolve_sds_map
-                _sds_map = _resolve_sds_map(sds_path)
-            except Exception as _e:  # noqa: BLE001 — 없으면 폴백하되 사유는 남긴다
-                logger.debug("doc_proposal SITS sds_map 해석 실패: %s", _e)
+        _sds_map: Dict[str, Any] = _proposal_sds      # 위에서 한 번 읽은 등록 SDS(R66 리뷰 W6)
         _u = str(uds_path or "").strip()
         _uds_swcom = load_uds_swcom_map(_u) if _u else None
         _uds_asil = load_uds_asil_map(_u) if _u else None
@@ -1658,7 +1675,7 @@ def _build_doc_proposal(
         # (R65) 표 Name 행 별칭은 소스 함수 목록으로 확인한 것만 — 생성기(SITS)와 같은 TC ID
         _design_ids = load_uds_design_ids(_u, source_functions=[
             str((v or {}).get("name") or "") for v in fdmap.values() if isinstance(v, dict)]) if _u else None
-        if _sds_map is None and not _u and warn_sink is not None:
+        if not _sds_map and not _u and warn_sink is not None:
             warn_sink.append(
                 "문서 생성 초안: SITS 가 SwDS/SwUDS 없이 합성됐습니다 — TC ID 가 순번이라 "
                 "실제 문서에서 같은 ID 를 찾을 수 없습니다")
@@ -2249,10 +2266,11 @@ def _run_suts_generation(entry: Any, target_functions: List[str] | None = None) 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"suts_impact_{_ts()}.xlsm"
     template_path = _resolve_existing(entry.linked_docs.suts) or _discover_doc("suts", {".xlsm", ".xlsx"})
-    srs_path = _resolve_existing(entry.linked_docs.srs) or _discover_doc("srs", {".docx"})
-    sds_path = _resolve_existing(entry.linked_docs.sds) or _discover_doc("sds", {".docx"})
-    uds_path = _resolve_existing(entry.linked_docs.uds)
-    hsis_path = _resolve_existing(entry.linked_docs.hsis) or _discover_doc("hsis", {".xlsx", ".xlsm"})
+    _skips: List[str] = []
+    srs_path = _linked_doc_input(entry.linked_docs.srs, "SRS", _skips)
+    sds_path = _linked_doc_input(entry.linked_docs.sds, "SDS", _skips)
+    uds_path = _linked_doc_input(entry.linked_docs.uds, "UDS", _skips)
+    hsis_path = _linked_doc_input(entry.linked_docs.hsis, "HSIS", _skips)
 
     result = generate_suts(
         source_root=source_root,
@@ -2269,6 +2287,7 @@ def _run_suts_generation(entry: Any, target_functions: List[str] | None = None) 
         uds_path=uds_path,
         hsis_path=hsis_path,
         target_function_names=list(target_functions or []),
+        input_skips=_skips,
     )
     return {
         "output_path": str(out_path),
@@ -2298,11 +2317,12 @@ def _run_sits_generation(entry: Any) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"sits_impact_{_ts()}.xlsm"
     template_path = _resolve_existing(entry.linked_docs.sits) or _discover_doc("sits", {".xlsm", ".xlsx"})
-    srs_path = _resolve_existing(entry.linked_docs.srs) or _discover_doc("srs", {".docx"})
-    sds_path = _resolve_existing(entry.linked_docs.sds) or _discover_doc("sds", {".docx"})
-    uds_path = _resolve_existing(entry.linked_docs.uds)
-    hsis_path = _resolve_existing(entry.linked_docs.hsis) or _discover_doc("hsis", {".xlsx", ".xlsm"})
-    stp_path = _discover_doc("stp", {".docx", ".pdf", ".txt"})
+    _skips: List[str] = []
+    srs_path = _linked_doc_input(entry.linked_docs.srs, "SRS", _skips)
+    sds_path = _linked_doc_input(entry.linked_docs.sds, "SDS", _skips)
+    uds_path = _linked_doc_input(entry.linked_docs.uds, "UDS", _skips)
+    hsis_path = _linked_doc_input(entry.linked_docs.hsis, "HSIS", _skips)
+    stp_path = _linked_doc_input(getattr(entry.linked_docs, "stp", ""), "STP", _skips)
 
     result = generate_sits(
         source_root=source_root,
@@ -2324,6 +2344,7 @@ def _run_sits_generation(entry: Any) -> Dict[str, Any]:
         #   갈리지 않게 맞춘다(옛 판에서는 이 차이가 Test Method 를 전 TC FI 로
         #   뒤집기까지 했다 — `_sits_test_method` 주석).
         max_subcases=_SITS_DEFAULT_SUBCASES,
+        input_skips=_skips,
     )
     return {
         "output_path": str(out_path),
@@ -3310,8 +3331,9 @@ def run_impact_update(
         doc_proposal = _build_doc_proposal(
             sections, _changed_set, warn_sink=warnings,
             doc_content=doc_content, change_details=change_details,
-            # 등록 SCM 의 실제 문서 — 없으면 SITS 초안이 저장소 `docs/` 글롭을 읽는다.
-            sds_path=str(_resolve_existing(getattr(_lk, "sds", "") or "") or ""),
+            # 등록 SCM 의 실제 문서 — 없으면 초안의 SDS 근거가 빈다(R66: 저장소 `docs/` 로 대체하지 않는다).
+            #   SDS 는 `read_sds_input` 이 워커 경유로 연다(클라우디움 등록 경로 — 로컬 판정만 하면 빠졌다).
+            sds_path=str(getattr(_lk, "sds", "") or ""),
             uds_path=str(_resolve_existing(getattr(_lk, "uds", "") or "") or ""))
         # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap
         # + 직전 스냅샷 대비 delta(회귀). vectorcast 미연결/RAG metrics 없음 → available=False(분석 계속).

@@ -65,18 +65,14 @@ class TestCollectUnitFunctions:
             }
         }
 
-        monkeypatch.setattr(
-            "generators.suts._load_default_sds_map",
-            lambda: {
-                "motor control": {
-                    "asil": "A",
-                    "related": "SwTR_0101",
-                    "description": "Motor control logic",
-                }
-            },
-        )
-
-        units = collect_unit_functions(details)
+        # (R66) SDS 는 호출자가 준 맵만 — 저장소 docs/ 폴백은 없다
+        units = collect_unit_functions(details, sds_map={
+            "motor control": {
+                "asil": "A",
+                "related": "SwTR_0101",
+                "description": "Motor control logic",
+            }
+        })
 
         assert units[0]["asil"] == "A"
 
@@ -787,33 +783,32 @@ class TestSdsMapIsProjectScoped:
         }
     }
 
-    def test_injected_map_wins_over_repo_docs_fallback(self, monkeypatch):
+    def test_injected_map_is_the_asil_source(self):
         from generators import suts as gsuts
-
-        called = {"default": 0}
-        monkeypatch.setattr(gsuts, "_load_default_sds_map",
-                            lambda: called.__setitem__("default", called["default"] + 1) or {
-                                "motor control": {"asil": "D", "related": "", "description": ""}})
 
         units = gsuts.collect_unit_functions(
             self._DETAILS, None,
             sds_map={"motor control": {"asil": "A", "related": "SwTR_0101", "description": ""}},
         )
-        assert units[0]["asil"] == "A", "주입한 SDS 맵이 무시되고 폴백이 쓰였다"
-        assert called["default"] == 0, "sds_map을 줬는데도 저장소 docs/ 폴백을 읽었다"
+        assert units[0]["asil"] == "A", "주입한 SDS 맵이 무시됐다"
 
-    def test_no_map_still_uses_fallback(self, monkeypatch):
-        """대조군: 맵을 안 주면 기존 폴백 동작이 그대로여야 한다."""
+    def test_no_map_means_no_sds_asil(self, monkeypatch):
+        """(R66) 맵을 안 주면 SDS 등급이 없다 — 예전엔 저장소 docs/ 의 다른 프로젝트 SDS 등급이었다(`TBD` 가 남는다).
+
+        뮤테이션: 저장소 폴백이 되살아나면(파티션 추출기를 부르면) 실패."""
         from generators import suts as gsuts
-        monkeypatch.setattr(gsuts, "_load_default_sds_map",
-                            lambda: {"motor control": {"asil": "D", "related": "", "description": ""}})
-        units = gsuts.collect_unit_functions(self._DETAILS, None)
-        assert units[0]["asil"] == "D"
 
-    def test_resolve_returns_none_and_warns_when_path_unusable(self, monkeypatch, caplog):
-        """지정했는데 못 쓰면 폴백이 조용히 대신하면 안 된다 — 경고가 남아야 한다."""
+        def _boom(*a, **k):
+            raise AssertionError("SDS 를 주지 않았는데 파티션 추출기를 불렀다(저장소 폴백 재발)")
+        monkeypatch.setattr(gsuts, "_extract_sds_partition_map", _boom)
+        units = gsuts.collect_unit_functions(self._DETAILS, None)
+        assert units[0]["asil"] == "TBD" and units[0]["asil_evidence"] == ""
+        assert not hasattr(gsuts, "_load_default_sds_map") and not hasattr(gsuts, "_SDS_MAP_CACHE")
+
+    def test_read_reports_unusable_path(self, monkeypatch, caplog):
+        """지정했는데 못 쓰면 빈 맵 + 사유(파일 이름만) — 경고가 남는다."""
         import backend.services.file_resolver as fr
-        from generators.suts import _resolve_sds_map
+        from generators.suts import read_sds_input
 
         class _Empty:
             mode = "cloudium"
@@ -824,38 +819,59 @@ class TestSdsMapIsProjectScoped:
 
         monkeypatch.setattr(fr, "get_resolver", lambda: _Empty())
         with caplog.at_level("WARNING", logger="generators.suts"):
-            assert _resolve_sds_map("U:/nope/SDS.docx") is None
-        assert "SDS" in caplog.text and "폴백" in caplog.text, caplog.text
+            m, r = read_sds_input("U:/nope/KJ_SwDS.docx")
+        assert m == {}
+        assert r["given"] is True and r["read"] is False and r["entries"] == 0
+        assert r["name"] == "KJ_SwDS.docx" and "파일 없음" in r["reason"] and "U:/nope" not in r["reason"]
+        assert "대체하지 않는다" in caplog.text, caplog.text
 
-    def test_resolve_returns_none_and_warns_when_map_is_empty(self, monkeypatch, caplog, tmp_path):
-        from generators import suts as gsuts
+    def test_read_reports_not_a_docx(self, tmp_path):
+        from generators.suts import read_sds_input
         src = tmp_path / "SDS.docx"
         src.write_bytes(b"x")
-        monkeypatch.setattr(gsuts, "load_sds_map_from", lambda p: {})
-        with caplog.at_level("WARNING", logger="generators.suts"):
-            assert gsuts._resolve_sds_map(str(src)) is None
-        assert "파티션 0건" in caplog.text, caplog.text
+        m, r = read_sds_input(str(src))
+        assert m == {} and r["read"] is False and "zip 아님" in r["reason"]
 
-    def test_resolve_passes_map_through(self, monkeypatch, tmp_path):
+    def test_read_reports_zero_partitions(self, tmp_path, monkeypatch):
+        from generators import suts as gsuts
+        src = tmp_path / "SDS.docx"
+        import zipfile
+        with zipfile.ZipFile(src, "w") as z:
+            z.writestr("word/document.xml", "<x/>")
+        monkeypatch.setattr(gsuts, "_extract_sds_partition_map", lambda p: {})
+        m, r = gsuts.read_sds_input(str(src))
+        assert m == {} and "파티션 표 0 개" in r["reason"]
+
+    def test_read_passes_map_through(self, monkeypatch, tmp_path):
         from generators import suts as gsuts
         src = tmp_path / "SDS.docx"
         src.write_bytes(b"x")
         expected = {"motor control": {"asil": "B", "related": "", "description": ""}}
-        monkeypatch.setattr(gsuts, "load_sds_map_from", lambda p: expected)
-        assert gsuts._resolve_sds_map(str(src)) == expected
+        monkeypatch.setattr(gsuts, "_extract_sds_partition_map", lambda p: dict(expected))
+        m, r = gsuts.read_sds_input(str(src))
+        assert m == expected and r == {"given": True, "opened": True, "read": True, "entries": 1, "name": "SDS.docx", "reason": ""}
 
-    def test_blank_path_is_not_an_error(self):
-        from generators.suts import _resolve_sds_map
-        assert _resolve_sds_map(None) is None
-        assert _resolve_sds_map("") is None
+    def test_blank_path_is_not_given(self):
+        from generators.suts import read_sds_input
+        assert read_sds_input(None) == ({}, {"given": False, "opened": False, "read": False, "entries": 0, "name": "", "reason": ""})
+        assert read_sds_input("")[1]["given"] is False
 
-    def test_load_sds_map_from_survives_parse_failure(self, monkeypatch, caplog):
+    def test_route_skip_reason_means_given(self):
+        """경로가 없어도 라우트가 사유를 넘기면 '지정했지만 열지 못함' 이다(R50 HSIS 와 같은 규칙)."""
+        from generators.suts import read_sds_input
+        m, r = read_sds_input(None, skipped="파일 없음 — 경로가 바뀌었다")
+        assert m == {} and r["given"] is True and r["read"] is False and r["reason"].startswith("파일 없음")
+
+    def test_read_survives_parse_failure(self, monkeypatch, caplog, tmp_path):
         from generators import suts as gsuts
+        src = tmp_path / "SDS.docx"
+        src.write_bytes(b"x")
 
         def _boom(_p):
             raise ValueError("깨진 docx")
 
         monkeypatch.setattr(gsuts, "_extract_sds_partition_map", _boom)
         with caplog.at_level("WARNING", logger="generators.suts"):
-            assert gsuts.load_sds_map_from("x.docx") == {}
-        assert "파싱 실패" in caplog.text
+            m, r = gsuts.read_sds_input(str(src))
+        assert m == {} and "판독 실패 (ValueError)" in r["reason"]
+        assert "판독 실패" in caplog.text

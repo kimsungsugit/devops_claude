@@ -644,7 +644,7 @@ def _measure_sts_mapping(fd: Dict[str, Any], sds_map: Dict[str, Any],
             bridge = {"on": False,
                       "reason": f"SwUDS 파싱 실패 ({type(exc).__name__}: {str(exc)[:120]})"}
 
-    # ⚠ `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)을 쓴다. 게이트가 그걸
+    # ⚠ 예전 `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)이었다(R66 에서 생성기 쪽도 지웠다). 게이트가 그걸
     #   쓰면 남의 프로젝트 요구 ID 로 잰 숫자를 보여 준다 — 명시적으로 `{}` 를 준다.
     req_to_fids = map_requirements_to_functions(
         reqs, fd, sds_map=sds_map or {}, uds_design_ids=uds_design_ids or None)

@@ -30,7 +30,6 @@ from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_unit_io import resolve_unit_io
 from report_gen.c_return import returns_value
-from report_gen.doc_kind import is_sds_filename
 from report_gen.function_analyzer import split_param_annotations
 from report_gen.requirements import (
     _asil_max_of,
@@ -213,81 +212,146 @@ _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
 _DEFAULT_GEN_METHOD = "AEC, ABV"
 _DEFAULT_TEST_ENV = "SwTE_01"
 
-_SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
-
 # (R52 N39) `_merge_sds_partition_map` 은 `report_gen.requirements` 단일 출처 — UDS 세 경로와 같은 first-wins 규칙.
 
 
-def load_sds_map_from(sds_docx_path: str) -> Dict[str, Dict[str, str]]:
-    """사용자가 지정한 SDS 문서 하나에서 파티션 맵(ASIL/related/description)을 읽는다.
+def read_sds_input(sds_docx_path: Optional[str], *,
+                   skipped: str = "") -> Tuple[Dict[str, Dict[str, str]], Dict[str, Any]]:
+    """(R66) 지정한 SDS 문서의 파티션 맵(ASIL · Related · 설명)과 그 **판독 기록** — SUTS · SITS · STS · 영향도 카드가 이 하나를 부른다.
 
-    `_load_default_sds_map`(저장소 `docs/` 글롭)과 달리 **경로를 그대로 존중**한다.
-    SUTS 생성기는 오래도록 `sds_docx_path` 인자를 받고도 본문에서 쓰지 않아,
-    프로젝트가 무엇이든 저장소 `docs/`에 들어있는 SDS(현재 HDPDM01)로 ASIL을 채웠다
-    — 다른 프로젝트의 안전 등급이 조용히 섞이는 경로였다.
+    ## 저장소 `docs/` 로 대체하지 않는다 (감사 #62 · #63 · #83)
+
+    예전엔 SDS 를 주지 않았거나 못 읽거나 파티션이 0 이면 세 생성기가 저장소 `docs/` 의 SDS(`_load_default_sds_map` — 이
+    저장소에 든 HDPDM01 문서)로 넘어갔다. KJPDS02_PV 를 SRS · SwUDS 만 주고 만들면(R66 실측) SUTS unit 113 개가 HDPDM01
+    SDS 의 ASIL 을 받았고(그중 17 개는 PV 자기 SDS 와 등급이 다르다) STS 요구-함수 링크 8,049 개가 HDPDM01 파티션에서
+    나왔다 — 요구 ID(`SwTR_0101`)는 프로젝트끼리 겹쳐 걸러지지도 않는다(114 개는 PV SDS 로는 생기지 않는 링크). 다른
+    프로젝트 문서로 안전 등급과 추적성을 채우는 것은 'ASIL 지어내기 금지'(사용자 결정 2026-08-01) 위반이다. 없거나 못
+    읽으면 빈 맵이고, 판독 기록이 품질 리포트 → 공시로 간다.
+
+    입력은 resolver 경유(`_resolved_doc_input`)라 cloudium worker 전용 경로도 연다.
+
+    Args:
+        skipped: 호출자(라우트)가 지정된 경로를 로컬화하지 못한 사유(`input_skips` 의 ``SDS: …``). 경로가 없는데 이 값이
+            있으면 '지정했지만 열지 못함' 이다 — '주지 않음' 으로 적으면 원인은 파일인데 안내가 '주라' 가 된다(R50 HSIS 와
+            같은 규칙).
+
+    Returns:
+        ``(map, reading)`` — reading 은 ``{"given", "opened", "read", "entries", "name", "reason"}``(이름은 파일 이름만).
     """
-    if not sds_docx_path:
-        return {}
+    raw = str(sds_docx_path or "").strip()
+    reading: Dict[str, Any] = {"given": bool(raw or skipped), "opened": False, "read": False, "entries": 0,
+                               "name": Path(raw).name if raw else "", "reason": ""}
+    if not raw:
+        reading["reason"] = str(skipped or "")[:200]
+        return {}, reading
     merged: Dict[str, Dict[str, str]] = {}
-    try:
-        _merge_sds_partition_map(merged, _extract_sds_partition_map(sds_docx_path))
-    except Exception as exc:
-        _logger.warning("SDS 파티션 맵 파싱 실패 — ASIL 보강 생략: %s (%s)", sds_docx_path, exc)
-        return {}
-    return merged
-
-
-def _resolve_sds_map(sds_docx_path: Optional[str]) -> Optional[Dict[str, Dict[str, str]]]:
-    """SUTS ASIL 보강에 쓸 SDS 맵을 확보한다. None이면 호출자가 폴백을 쓴다.
-
-    입력은 resolver 경유(`_resolved_doc_input`)라 cloudium worker-only 경로도 잡는다.
-    지정했는데 못 쓰게 된 경우는 **반드시 경고를 남긴다** — 폴백(저장소 `docs/` 글롭)이
-    조용히 대신하면, 다른 프로젝트의 ASIL로 채워진 산출물을 정상으로 오인한다.
-    """
-    if not sds_docx_path:
-        return None
-    with _resolved_doc_input(sds_docx_path, "SDS") as local:
+    opened: Dict[str, Any] = {}
+    with _resolved_doc_input(raw, "SDS", report=opened) as local:
         if not local:
-            _logger.warning(
-                "SUTS: SDS 입력을 확보하지 못해 ASIL 보강이 저장소 docs/ 폴백(프로젝트 무관)으로 "
-                "넘어간다: %s", sds_docx_path)
-            return None
-        sds_map = load_sds_map_from(local)
-    if not sds_map:
-        _logger.warning(
-            "SUTS: SDS를 지정했으나 파티션 0건 — ASIL 보강이 저장소 docs/ 폴백(프로젝트 무관)으로 "
-            "넘어간다: %s", sds_docx_path)
-        return None
-    _logger.info("SUTS: SDS 파티션 %d건 로드 — ASIL 출처=%s", len(sds_map), sds_docx_path)
-    return sds_map
-
-
-def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
-    """저장소 `docs/`의 SDS 글롭 폴백.
-
-    ⚠ 프로젝트 무관이다 — 호출자가 SDS 경로를 알고 있으면 `load_sds_map_from`을 쓸 것.
-    """
-    global _SDS_MAP_CACHE
-    if _SDS_MAP_CACHE is not None:
-        return _SDS_MAP_CACHE
-    docs_dir = Path(__file__).resolve().parents[1] / "docs"
-    merged: Dict[str, Dict[str, str]] = {}
-    picked: List[str] = []
-    if docs_dir.exists():
-        for path in docs_dir.glob("*.docx"):
-            # `"sds" in name` 은 `SwDS` 표기를 놓친다("swds" 에 "sds" 없음) — 단일 출처 사용.
-            if not is_sds_filename(path.name):
-                continue
-            picked.append(path.name)
-            _merge_sds_partition_map(merged, _extract_sds_partition_map(str(path)))
+            reading["reason"] = str(opened.get("reason") or "열지 못함")
+        else:
+            reading["opened"] = True      # (리뷰 2차) 열었지만 파티션 0 과 못 연 것을 공시 안내가 가른다
+            try:
+                _merge_sds_partition_map(merged, _extract_sds_partition_map(local))
+            except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 기록 · 공시한다
+                _logger.warning("SDS 파티션 맵 판독 실패 — ASIL · 요구 연결 보강 없음: %s (%s)", raw, exc)
+                reading["reason"] = f"파티션 표 판독 실패 ({type(exc).__name__})"
+                merged = {}
+            if not merged and not reading["reason"]:
+                import zipfile
+                reading["reason"] = ("docx 로 열 수 없음(zip 아님)" if not zipfile.is_zipfile(local)
+                                     else "파티션 표 0 개 — SDS 양식이 다르거나 SDS 가 아닌 문서")
+    reading["entries"] = len(merged)
+    reading["read"] = bool(merged)
     if merged:
-        # ⚠ 침묵 금지 — 이 맵으로 단위 ASIL 을 채우는데 출처가 **다른 프로젝트**일 수 있다.
-        _logger.warning(
-            "SDS 미지정 — 저장소 docs/ 글롭 폴백 사용(**프로젝트 무관**): %s (%d 엔트리). "
-            "대상 프로젝트의 SDS 를 `load_sds_map_from` 으로 넘기면 이 폴백은 쓰이지 않는다",
-            ", ".join(picked) or "(없음)", len(merged))
-    _SDS_MAP_CACHE = merged
-    return merged
+        _logger.info("SDS 파티션 %d건 로드 — 출처=%s", len(merged), reading["name"])
+    else:
+        _logger.warning("SDS 를 지정했으나 쓰지 못함(%s) — 저장소 docs/ 로 대체하지 않는다: %s", reading["reason"], raw)
+    return merged, reading
+
+
+#: 사유 속 경로(드라이브 · UNC) — 문서 확장자까지(공백 든 폴더 · 파일 이름 포함), 없으면 공백 전까지
+#   (리뷰 2차 I1) 드라이브 앞이 글자면 경로가 아니다(`http://h:8765/…`), 지연 부분은 `:` 를 넘지 않는다(다음 경로까지 먹지
+#   않게), 확장자 뒤가 영숫자면 확장자가 아니다(`b.docx와` 는 끝, `b.docxy` 는 아님)
+_PATH_IN_REASON = re.compile(
+    r"(?<![A-Za-z])(?:[A-Za-z]:[\\/]|\\\\)(?:[^\n:]*?\.(?:docx|doc|xlsx|xlsm|xls|pdf|txt)(?![A-Za-z0-9_])|[^\s,;()]*)",
+    re.IGNORECASE)
+
+
+def input_skip_reason(input_skips: Any, label: str) -> str:
+    """(R66) 라우트가 넘긴 ``"<라벨>: <사유>"`` 목록에서 그 라벨의 사유(없으면 ``""``) — 라벨은 대소문자 무시, 첫 것.
+
+    (리뷰 Info) 라우트 사유는 접근 검사 · 워커 예외 문자열을 그대로 담아 전체 경로가 들 수 있다 — 공시까지 가므로 경로는
+    파일 이름만 남긴다(`_resolved_doc_input` 의 사유 규칙과 같게)."""
+    want = str(label or "").strip().lower()
+    for s in input_skips or ():
+        head, sep, tail = str(s).partition(":")
+        if sep and head.strip().lower() == want:
+            return _PATH_IN_REASON.sub(lambda m: Path(m.group(0).rstrip("\\/")).name or "…", tail.strip())[:200]
+    return ""
+
+
+def input_document_usable(doc: str, rec: Any) -> bool:
+    """(R66 리뷰 W3) 입력 문서 기록이 '쓸 수 있었다' 인가 — SDS 는 파티션을 읽었을 때, SRS 는 열었고 요구 표가 0 이 아닐 때(요구 수를
+    셌으면), 그 밖은 열었을 때. 공시 · 검증 경고 · '보강 실패 0건' 문구가 같은 판정을 쓴다."""
+    if not isinstance(rec, dict):
+        return False
+    if doc == "SDS":
+        return bool(rec.get("read"))
+    return bool(rec.get("opened")) and rec.get("requirements") != 0
+
+
+def note_input_document(docs: Dict[str, Dict[str, Any]], doc: str, path: Optional[str], block: str,
+                        opened: Dict[str, Any], input_skips: Any = None) -> Dict[str, Any]:
+    """(R66, 감사 #1) 입력 문서 하나의 열기 기록을 ``docs[doc]`` 에 모은다 — ``{"given", "opened", "name", "reason",
+    "blocks_unopened"}``.
+
+    같은 문서를 여러 블록이 열면(SUTS 는 SwUDS 를 입출력 · 설명/설계 ID · 설계 ID 브리지로 세 번) 하나라도 못 열었으면
+    ``opened`` 는 거짓이고 그 블록 이름이 남는다 — 그 블록이 채웠을 값(설계서 범위 · 요구 ID 등)이 이 문서에 없다. 경로가
+    없는데 라우트가 그 라벨의 사유를 넘겼으면(`input_skips`) '지정했지만 열지 못함' 이다. ``opened`` 는 블록마다
+    `_resolved_doc_input(report=…)` 가 적은 dict."""
+    raw = str(path or "").strip()
+    rec = docs.setdefault(doc, {"given": False, "opened": False, "name": "", "reason": "", "blocks_unopened": []})
+    skip = input_skip_reason(input_skips, doc)
+    if raw and skip:
+        # (리뷰 2차 I5) 라우트가 지정 문서를 못 열고 다른 파일(요구 문서 목록의 SRS 등)을 넘겼다 — 그 사실을 남긴다
+        rec["specified_unopened"] = skip
+    if raw:
+        first = not rec["given"]
+        rec["given"] = True
+        rec["name"] = rec["name"] or Path(raw).name
+        ok = bool(opened.get("opened"))
+        rec["opened"] = ok if first else (rec["opened"] and ok)
+        if not ok:
+            rec["blocks_unopened"].append(block)
+            rec["reason"] = rec["reason"] or str(opened.get("reason") or "열지 못함")
+        return rec
+    if skip:
+        rec["given"] = True
+        rec["opened"] = False
+        rec["reason"] = rec["reason"] or skip
+        if block not in rec["blocks_unopened"]:
+            rec["blocks_unopened"].append(block)
+    return rec
+
+
+def input_documents_record(paths: Dict[str, Optional[str]], input_skips: Any = None) -> Dict[str, Dict[str, Any]]:
+    """(R66) SITS · STS 처럼 라우트가 로컬화한 경로를 생성기가 그대로 여는 입력의 기록(`note_input_document` 와 같은 꼴).
+
+    경로가 있으면 로컬 파일로 열 수 있는지, 없으면 라우트가 넘긴 그 라벨의 사유를 본다. 문서를 읽은 내용(요구 수 · 파티션
+    수)은 호출자가 덧붙인다."""
+    docs: Dict[str, Dict[str, Any]] = {}
+    for doc, path in paths.items():
+        raw = str(path or "").strip()
+        ok = False
+        if raw:
+            try:
+                ok = Path(raw).is_file()
+            except OSError:
+                ok = False
+        note_input_document(docs, doc, path, "generator_input",
+                            {"opened": ok, "reason": "" if ok else "파일 없음 — 넘겨받은 경로를 열 수 없다"}, input_skips)
+    return docs
 
 
 def _resolve_unit_asil(info: Dict[str, Any],
@@ -644,9 +708,8 @@ def collect_unit_functions(
     vars are placed in output. Caps at reasonable counts per function.
 
     Args:
-        sds_map: ASIL/related 보강에 쓸 SDS 파티션 맵. None이면 저장소 `docs/` 글롭
-            폴백(`_load_default_sds_map`)을 쓴다 — **프로젝트 무관**이므로 호출자가
-            대상 프로젝트의 SDS를 알고 있으면 `load_sds_map_from`으로 만들어 넘길 것.
+        sds_map: ASIL 보강에 쓸 SDS 파티션 맵(`read_sds_input`). None 이면 빈 맵이다 — (R66) 저장소 `docs/` 의 다른
+            프로젝트 SDS 로 대체하지 않는다. SwUDS · 소스 `@asil` · SDS 어디에도 근거가 없는 unit 의 ASIL 은 `TBD`.
     """
     gim = globals_info_map or {}
     # 시험 범위 판정용. 실패해도 산출물은 그대로 나가야 하므로 빈 맵으로 떨어진다
@@ -687,8 +750,7 @@ def collect_unit_functions(
     # 선언이 아니라 **관찰 첨자**로 폭을 정한 이름 수. 근거가 약한 경로이므로
     # 선언 크기 확장과 합쳐 세지 않는다 — 합치면 "선언으로 펼쳤다" 로 읽힌다.
     _obs_expanded = 0
-    if sds_map is None:
-        sds_map = _load_default_sds_map()
+    sds_map = sds_map or {}
     units: List[Dict[str, Any]] = []
     _const_skipped = 0
     # SwUDS 대체가 **몇 unit 에 걸렸나**. 0 이면 UDS 를 못 읽었다는 뜻이고 산출물이
@@ -1023,6 +1085,9 @@ def collect_unit_functions(
         asil = _asil_max_of([_src_asil, _uds_asil])
         _asil_evidence = (f"uds+{_src_kind}" if _src_grade and _uds_grade
                           else "uds" if _uds_grade else _src_kind if _src_grade else "")
+        # (R66 리뷰 2차 W-B) 저장소 override 스냅샷(프로젝트 확인 없음)의 등급이 **최종 등급을 정한** unit — SwUDS 가 없거나 더
+        #   낮을 때. 근거 라벨 `uds+override` 만으로는 스냅샷이 등급을 올렸는지 구별되지 않는다(공시가 이 수를 말한다)
+        _asil_by_override = bool(_src_kind == "override" and _src_grade and asil == _src_grade and _src_grade != _uds_grade)
         if not asil:
             # SDS 파티션 폴백 — 값은 예전과 같다. 다만 그 값이 **모듈명 부분문자열
             # 매칭의 첫 일치**라는 사실과, 후보 등급이 갈렸는지를 함께 받는다.
@@ -1085,6 +1150,7 @@ def collect_unit_functions(
             # 그 등급이 **어디서 왔나**. `sds-fuzzy-conflict` 는 "모듈명 부분문자열
             # 매칭에서 후보 등급이 갈렸고 그중 하나를 집었다" 는 뜻이다.
             "asil_evidence": _asil_evidence,
+            "asil_by_override": _asil_by_override,
             # (R70 N83) 소스에 없고 override 스냅샷에만 있는 함수 — 시험 대상인지는 사람이 정한다(P7). 세어서 보고한다.
             "override_only": bool(info.get("override_only")),
             # (R71 N77) 파라미터 선언 타입 — 시퀀스 생성이 전역 타입 캐시 위에 얹어 쓴다(`bool`·`U16*`·구조체 포인터).
@@ -5316,6 +5382,8 @@ def generate_suts_quality_report(
 
     return {
         "asil_evidence_distribution": asil_evidence,
+        # (R66 리뷰 2차 W-B) override 스냅샷 등급이 최종 등급을 정한 unit 수(SwUDS 가 없거나 더 낮음)
+        "asil_decided_by_override": sum(1 for u in units if u.get("asil_by_override")),
         "override_only_unit_count": len(override_only),
         "override_only_units": override_only[:20],
         "var_type_distribution": var_type_dist,
@@ -5499,7 +5567,7 @@ def validate_suts_xlsm(
 
 
 @contextmanager
-def _resolved_doc_input(path: Optional[str], label: str):
+def _resolved_doc_input(path: Optional[str], label: str, report: Optional[Dict[str, Any]] = None):
     """문서 입력(SRS/UDS/HSIS)을 **로컬에서 열 수 있는 경로**로 확보한다.
 
     과거엔 `Path(p).is_file()`만 봤다. cloudium 모드에서 U:\\ 같은 경로는 backend 프로세스에
@@ -5510,14 +5578,21 @@ def _resolved_doc_input(path: Optional[str], label: str):
     bytes를 읽어 임시 파일로 materialize한 뒤 종료 시 지운다. 어느 쪽도 아니면 None을
     yield하되 **사유를 warning으로 남긴다**.
 
+    (R66, 감사 #1) ``report`` 를 주면 그 dict 에 ``opened`` · ``reason`` 을 적는다 — 로그만 남기면 공시가 "보강 실패 0건 —
+    전부 끝까지 돌았다" 를 말했다(보강 블록이 문서를 못 열면 예외 없이 건너뛰므로 `enrichment_errors` 에 안 든다).
+    사유에는 파일 이름만 쓴다(경로는 로그에만).
+
     Yields: 열 수 있는 로컬 경로(str) 또는 None.
     """
     raw = str(path or "").strip()
+    rec = report if report is not None else {}
+    rec["opened"] = False
     if not raw:
         yield None
         return
     try:
         if Path(raw).is_file():
+            rec["opened"] = True
             yield raw
             return
     except OSError as exc:      # 권한 거부(U:\ 등) — 로컬 판정 불가일 뿐 부재는 아니다
@@ -5529,6 +5604,7 @@ def _resolved_doc_input(path: Optional[str], label: str):
         resolver = get_resolver()
     except Exception as exc:    # standalone 실행 등 backend 미가용
         _logger.warning("%s 입력을 건너뜀 — 로컬에 없고 resolver도 불가: %s (%s)", label, raw, exc)
+        rec["reason"] = f"로컬에 없고 파일 접근기(resolver)도 쓸 수 없음 ({type(exc).__name__})"
         yield None
         return
 
@@ -5536,13 +5612,17 @@ def _resolved_doc_input(path: Optional[str], label: str):
         if not resolver.is_file(raw):
             _logger.warning("%s 입력을 건너뜀 — resolver(mode=%s)에도 없음: %s",
                             label, getattr(resolver, "mode", "?"), raw)
+            rec["reason"] = (f"파일 없음(접근 방식 {getattr(resolver, 'mode', '?')}) — 경로가 바뀌었거나 "
+                             "문서가 이동/개정됐을 수 있다")
             yield None
             return
         data = resolver.read_bytes(raw)
     except Exception as exc:
         _logger.warning("%s 입력 읽기 실패 — 보강 생략: %s (%s)", label, raw, exc)
+        rec["reason"] = f"읽기 실패 ({type(exc).__name__})"
         yield None
         return
+    rec["opened"] = True
 
     tmp_path = None
     try:
@@ -5725,10 +5805,13 @@ def generate_suts(
     target_function_names: Optional[List[str]] = None,
     scope: str = "suds",
     tc_profile: str = "",
+    input_skips: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Top-level SUTS generation pipeline.
 
     Args (추가):
+        input_skips: (R66) 호출자(라우트)가 지정된 입력 문서를 로컬화하지 못한 사유 ``"<라벨>: <사유>"``(라벨 SRS · SDS ·
+            UDS · HSIS). 그 문서는 경로가 None 으로 오지만 '주지 않음' 이 아니라 '지정했지만 열지 못함' 으로 공시한다.
         tc_profile: `""`/`"reference"`(기본) = 정본 규모. `"extended"` = 시퀀스 상한 없이 + 확장 전략
             (`generate_sequences(extended=True)`). 단일 정의는 `generators/tc_profile.py`.
         scope: `"suds"`(기본) = SwUDS 설계 ID 가 있는 함수만 — **정본과 같은 범위**.
@@ -5828,7 +5911,12 @@ def generate_suts(
 
     if sds_docx_path:
         _progress(29, "SDS 설계 컨텍스트 로드 중")
-    _sds_map = _resolve_sds_map(sds_docx_path)
+    # (R66) 없거나 못 읽으면 빈 맵 — 저장소 docs/ 의 다른 프로젝트 SDS 로 대체하지 않는다(`read_sds_input`)
+    _sds_map, _sds_reading = read_sds_input(sds_docx_path, skipped=input_skip_reason(input_skips, "SDS"))
+    # (R66, 감사 #1) 입력 문서를 열었나 — 문서마다 한 기록(`note_input_document`). 보강 블록은 문서를 못 열면 예외 없이
+    #   건너뛰므로 `enrichment_errors` 에 안 들고, 예전 공시는 "보강 실패 0건 — 전부 끝까지 돌았다" 를 말했다.
+    _input_docs: Dict[str, Dict[str, Any]] = {"SDS": dict(_sds_reading, blocks_unopened=[] if _sds_reading.get("read")
+                                                           or not _sds_reading.get("given") else ["sds_partitions"])}
 
     _progress(30, "유닛 함수 수집 중")
     # ── SwUDS 입출력 표 — 시험 변수 이름의 **정본 출처** ──────────────────────
@@ -5836,7 +5924,9 @@ def generate_suts(
     #   **뒤**라 늦다 — 이름 대체는 배열 원소 확장보다 앞서야 하고, 확장은 collect
     #   안에서 일어난다. 문서를 두 번 materialize 하는 비용(cloudium 경유)은 감수한다.
     _uds_io: Optional[Dict[str, Any]] = None
-    with _resolved_doc_input(uds_path, "UDS(입출력)") as _uds_io_local:
+    _open_rec: Dict[str, Any] = {}
+    with _resolved_doc_input(uds_path, "UDS(입출력)", report=_open_rec) as _uds_io_local:
+        note_input_document(_input_docs, "UDS", uds_path, "uds_unit_io", _open_rec, input_skips)
         if _uds_io_local:
             try:
                 from generators.uds_unit_io import load_uds_unit_io
@@ -5876,21 +5966,29 @@ def generate_suts(
     def _enrich_failed(stage: str, exc: BaseException) -> None:
         _enrich_errors.append({"stage": stage, "error": f"{type(exc).__name__}: {exc}"[:300]})
 
-    with _resolved_doc_input(srs_docx_path, "SRS") as _srs_local:
+    _open_rec = {}
+    with _resolved_doc_input(srs_docx_path, "SRS", report=_open_rec) as _srs_local:
+        _srs_rec = note_input_document(_input_docs, "SRS", srs_docx_path, "srs_req_ids", _open_rec, input_skips)
         if _srs_local:
             _progress(36, "SRS 요구사항 ID 보강 중")
             try:
                 from generators.sts import load_uds_design_ids as _sts_design_ids
                 from generators.sts import map_requirements_to_functions, parse_srs_docx_tables
                 srs_reqs = parse_srs_docx_tables(_srs_local)
+                # (R66, 감사 #41) 요구 표를 하나도 못 읽은 SRS 는 '열었다' 로 끝나지 않는다 — 요구 ID 가 없는 이유가 그것이다
+                _srs_rec["requirements"] = len(srs_reqs or [])
+                if not srs_reqs:
+                    _srs_rec["reason"] = _srs_rec.get("reason") or "요구 표 0 개(SRS 양식이 다르거나 SRS 가 아닌 문서)"
                 if srs_reqs:
                     _design_ids: Dict[str, Any] = {}
-                    with _resolved_doc_input(uds_path, "UDS(설계 ID 브리지)") as _uds_bridge:
+                    _open_bridge: Dict[str, Any] = {}
+                    with _resolved_doc_input(uds_path, "UDS(설계 ID 브리지)", report=_open_bridge) as _uds_bridge:
+                        note_input_document(_input_docs, "UDS", uds_path, "uds_design_id_bridge", _open_bridge, input_skips)
                         if _uds_bridge:
                             _design_ids = _sts_design_ids(_uds_bridge) or {}
-                    # ⚠ `sds_map=None` 은 저장소 `docs/` 글롭(프로젝트 무관)이다 — 없으면 빈 맵을 명시한다.
+                    # (R66) SDS 가 없으면 빈 맵 — 설계서 파티션 · 설계 ID 브리지 경로가 꺼진다(다른 프로젝트 SDS 로 잇지 않는다)
                     _req_to_fids = map_requirements_to_functions(
-                        srs_reqs, function_details, sds_map=_sds_map or {}, uds_design_ids=_design_ids or None)
+                        srs_reqs, function_details, sds_map=_sds_map, uds_design_ids=_design_ids or None)
                     _fid_to_reqs: Dict[str, List[str]] = {}
                     for _rid, _fids in _req_to_fids.items():
                         for _f in _fids:
@@ -5906,7 +6004,9 @@ def generate_suts(
                 _enrich_failed("srs_req_ids", _e)
 
     # ── UDS function description enrichment ──────────────────────────────
-    with _resolved_doc_input(uds_path, "UDS") as _uds_local:
+    _open_rec = {}
+    with _resolved_doc_input(uds_path, "UDS", report=_open_rec) as _uds_local:
+        note_input_document(_input_docs, "UDS", uds_path, "uds_description_design_ids", _open_rec, input_skips)
         if _uds_local:
             _progress(37, "UDS 함수 설명 보강 중")
             try:
@@ -5970,7 +6070,9 @@ def generate_suts(
     # for units that read/write HSIS signal SW variables.
     # 파일 접근만 with 안에서 끝낸다 — 아래 가공은 메모리 데이터라 임시 파일이 필요 없다.
     _hsis_data: Optional[Dict[str, Any]] = None
-    with _resolved_doc_input(hsis_path, "HSIS") as _hsis_local:
+    _open_rec = {}
+    with _resolved_doc_input(hsis_path, "HSIS", report=_open_rec) as _hsis_local:
+        note_input_document(_input_docs, "HSIS", hsis_path, "hsis_signals", _open_rec, input_skips)
         if _hsis_local:
             _progress(38, "HSIS 신호 보강 중")
             try:
@@ -6153,6 +6255,9 @@ def generate_suts(
     quality["caps_requested"] = {"max_sequences": max_sequences}
     quality["caps_effective"] = {"max_sequences": None if _extended else max_sequences}
     quality["enrichment_errors"] = _enrich_errors
+    # (R66, 감사 #1 · #62) 입력 문서마다 지정했나 · 열었나 · 못 연 사유 · 그 때문에 건너뛴 블록(SDS 는 파티션 수까지).
+    #   주지 않은 문서도 적는다(given False — 블록마다 부르므로 네 문서가 늘 있다) — 공시가 '주면 무엇이 채워지는가' 를 말한다.
+    quality["input_documents"] = _input_docs
     quality["extended_sequences"] = sum(
         1 for _s in all_sequences.values() for _q in _s if _q.get("tc_profile") == TC_PROFILE_EXTENDED)
     # (R17) #if verdicts on build-configuration evidence — units, reasons, names taken as undefined
@@ -6163,8 +6268,13 @@ def generate_suts(
     #   함수(HDPDM01 LIN 스택)가 있어, 그 함수의 투영을 "이 문서의 투영" 으로 공시했다(R62 확인)
     quality["body_projection"] = summarize_document_body_projection(units)
     # (R65) SwUDS 를 어떻게 읽었나 — 머리말 이름 · 표 Name 별칭 · 세로 병합 행 · 이름으로 못 읽은 행 · Value Range 판독
-    quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(str(uds_path or "").strip()),
+    quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(_input_docs["UDS"].get("given")),
                                                    _source_function_names(function_details))
+    if (_input_docs["UDS"].get("given") and "uds_unit_io" in (_input_docs["UDS"].get("blocks_unopened") or [])
+            and not quality["uds_reading"].get("read_error")):
+        # (R66) 입출력 표를 읽을 SwUDS 를 열지 못했으면 '함수 표 0 개' 로 적지 않는다 — 원인은 파일 접근이다.
+        #   (리뷰 W2) 뒤 블록(설명 · 설계 ID 브리지)만 못 연 것이면 입출력 표는 읽었다 — 그건 입력 문서 항목이 말한다
+        quality["uds_reading"]["read_error"] = f"열지 못함 — {_input_docs['UDS'].get('reason') or '사유 미상'}"
     # (R63) 문서 함수가 읽는 C 파일(정의 파일 · include 한 헤더)을 어떻게 읽었나 — 벤더 구문을 공백으로 읽은 곳, 파서 트리가 못 본
     #   파일 수준 지시문(구조체 선언 안 #define 등), 줄 이음을 걷고 읽은 여러 줄 매크로, 남은 구문 오류, 문맥이 못 읽은 파일
     from generators.c_project_context import summarize_source_reading
@@ -6233,6 +6343,10 @@ def generate_suts(
     for _err in _enrich_errors:
         validation.setdefault("warnings", []).append(
             f"설계 근거 보강 단계 `{_err['stage']}` 가 실패해 건너뛰었다 — {_err['error']}")
+    for _doc, _rec in _input_docs.items():
+        if _rec.get("given") and not input_document_usable(_doc, _rec):
+            validation.setdefault("warnings", []).append(
+                f"지정한 {_doc} 를 쓰지 못했다 — {_rec.get('reason') or '사유 미상'} (그 문서가 채울 값이 이 문서에 없다)")
     if validation.get("issues"):
         _logger.warning("SUTS validation issues: %s", validation["issues"])
 

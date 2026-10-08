@@ -352,20 +352,6 @@ def _write_uds_payload_sidecar(out_path: Path, uds_payload: Dict[str, Any]) -> O
         return None
 
 
-def _discover_default_req_docs() -> Dict[str, List[str]]:
-    docs_dir = repo_root / "docs"
-    result: Dict[str, List[str]] = {"req": [], "sds": []}
-    if not docs_dir.exists():
-        return result
-    for path in docs_dir.glob("*.docx"):
-        lower = path.name.lower()
-        if is_srs_filename(lower) or is_sds_filename(lower):
-            result["req"].append(str(path))
-        if is_sds_filename(lower):
-            result["sds"].append(str(path))
-    return result
-
-
 def _dedupe_paths(paths: Optional[List[str]]) -> List[str]:
     items: List[str] = []
     seen = set()
@@ -419,7 +405,7 @@ def _resolve_req_doc_sets(
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[str]]:
-    """요구/SDS 문서 경로 확정 — 저장소 `docs/` 글롭은 **아무것도 안 준 경우에만**.
+    """요구/SDS 문서 경로 확정 — 사용자가 준 것만(R66: 저장소 `docs/` 글롭은 아무것도 안 준 경우에도 쓰지 않는다).
 
     예전엔 사용자가 준 경로에 저장소 글롭을 **무조건 이어붙였다**(`user + defaults`).
     그러면 어느 프로젝트를 돌리든 저장소 동봉 HDPDM01 SDS 가 항상 섞인다.
@@ -432,7 +418,7 @@ def _resolve_req_doc_sets(
     예: `adc0_stop_current_workaround` ← HDPDM01 의 `SwTR_0107, SwNTR_0103`.
 
     같은 규율이 이 파일의 `_doc_or_discovered`(SRS)와 `generators/suts.py`
-    `load_sds_map_from`(커밋 `1bfdee9` "프로젝트 간 오염 3건")에 이미 있다 —
+    `load_sds_map_from`(커밋 `1bfdee9` "프로젝트 간 오염 3건" — R66 부터 `read_sds_input`)에 이미 있다 —
     여기만 빠져 있었다. 그쪽은 "해석 실패 시 대체 금지"였는데 여기는 조건조차 없었다.
     """
     user_req = _dedupe_paths([p for p in (req_doc_paths or []) if str(p or "").strip()])
@@ -441,21 +427,16 @@ def _resolve_req_doc_sets(
     # (`jenkins.py` `sds_doc_paths` 구성)와 동일 규칙이라 모드 간 결과가 갈리지 않는다.
     if not user_sds and user_req:
         user_sds = _dedupe_paths([p for p in user_req if is_sds_filename(p)])
-    if user_req or user_sds:
-        if not user_sds:
-            # 침묵 금지 — SDS 없이 진행하면 ASIL/요구 보강이 비는데, 그게 저장소 문서로
-            # 채워지는 것보다는 낫다. 다만 왜 비었는지는 남긴다.
-            _logger.warning(
-                "SDS 미지정 — 저장소 docs/ 문서로 대체하지 않는다(다른 프로젝트 오염 방지). "
-                "함수별 ASIL/요구 보강은 생략된다")
-        return user_req, user_sds
-    defaults = _discover_default_req_docs()
-    req_paths = _dedupe_paths(list(defaults.get("req") or []))
-    sds_paths = _dedupe_paths(list(defaults.get("sds") or []))
-    if req_paths or sds_paths:
-        _logger.info("요구/SDS 문서 미지정 — 저장소 docs/ 에서 자동 탐색(프로젝트 무관): "
-                     "req %d · sds %d", len(req_paths), len(sds_paths))
-    return req_paths, sds_paths
+    if not user_sds:
+        # 침묵 금지 — SDS 없이 진행하면 ASIL/요구 보강이 비는데, 그게 저장소 문서로
+        # 채워지는 것보다는 낫다. 다만 왜 비었는지는 남긴다.
+        # (R66) 아무것도 주지 않았을 때도 같다 — 예전엔 그때만 저장소 `docs/` 글롭(이 저장소의 HDPDM01 SRS · SDS)을
+        #   썼는데, 대상 프로젝트가 무엇이든 그 문서의 ASIL · 요구 ID 가 함수 상세에 들어갔다(R76/R77 이 HSIS 를 같은
+        #   이유로 지웠다).
+        _logger.warning(
+            "SDS 미지정 — 저장소 docs/ 문서로 대체하지 않는다(다른 프로젝트 오염 방지). "
+            "함수별 ASIL/요구 보강은 생략된다")
+    return user_req, user_sds
 
 
 def _load_sts_ai_config() -> Optional[Dict[str, Any]]:
@@ -469,21 +450,6 @@ def _load_sts_ai_config() -> Optional[Dict[str, Any]]:
             return cfg
     except Exception as _e:
         _logger.debug("STS ai_config load skipped: %s", _e)
-    return None
-
-
-def _discover_srs_docx() -> Optional[str]:
-    """저장소 `docs/` 에서 SRS docx 하나를 고른다(프로젝트 무관)."""
-    for p in _discover_default_req_docs().get("req", []):
-        if is_srs_filename(p) and p.endswith(".docx"):
-            return p
-    return None
-
-
-def _discover_sds_docx() -> Optional[str]:
-    """저장소 `docs/` 에서 SDS docx 하나를 고른다(프로젝트 무관)."""
-    for p in _discover_default_req_docs().get("sds", []):
-        return p
     return None
 
 
@@ -510,6 +476,10 @@ def _doc_or_discovered(
     tag: str = "",
 ) -> Optional[str]:
     """해석된 경로가 없을 때 자동 탐색을 쓸지 결정한다.
+
+    (R66) 이제 모든 호출이 `_no_discovery` 다 — SRS · SDS 탐색(`_discover_srs_docx` · `_discover_sds_docx`)도 지웠다:
+    아무것도 주지 않았을 때 저장소 `docs/` 의 HDPDM01 SRS · SDS 를 집어, 다른 프로젝트의 요구 ID · ASIL 로 SUTS · STS 를
+    만들었다(SDS 폴백 실측은 `generators.suts.read_sds_input`). 아래는 예전 규칙의 기록이다.
 
     자동 탐색(저장소 `docs/` 글롭)은 사용자가 **아무것도 안 준 경우에만** 쓴다.
     사용자가 경로를 줬는데 해석에 실패했다면(대표 사례: cloudium worker-only `U:\\…` —
@@ -1992,8 +1962,10 @@ async def local_sts_generate(
     srs_docx_path: Optional[str] = None
     # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
     from backend.services.resolver_helpers import resolve_builder_input as _rbi
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    sts_in_skips: List[str] = []
     if srs_path:
-        srs_docx_path = _rbi(srs_path, label="SRS") or ""
+        srs_docx_path = _rbi(srs_path, label="SRS", reasons=sts_in_skips) or ""
 
     # Collect requirement text from paths/uploads
     req_paths_list = _parse_path_list(req_paths)
@@ -2040,13 +2012,12 @@ async def local_sts_generate(
         except Exception:
             pass
 
-    # Fallback: auto-discover SRS from docs/ if not yet resolved
-    srs_docx_path = _doc_or_discovered(
-        srs_docx_path, bool(req_paths_list or req_files), _discover_srs_docx,
-        label="SRS", tag=f"[STS_GENERATE][{req_id}] ")
+    # (R66) SRS 를 저장소 docs/ 에서 찾지 않는다 — 주지 않았거나 못 열었으면 아래 400(사유 포함)
 
     if not req_texts and not srs_docx_path:
-        raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
+        raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요."
+                            + (f" (지정한 SRS 를 열지 못함 — {sts_in_skips[0].partition(':')[2].strip()})"
+                               if sts_in_skips else ""))
 
     # Get function_details from source root
     function_details: Dict[str, Any] = {}
@@ -2075,15 +2046,13 @@ async def local_sts_generate(
     from backend.services.resolver_helpers import resolve_builder_input
     opt_skips: List[str] = []
 
-    def _resolve_opt(val: str) -> Optional[str]:
-        return resolve_builder_input(val, reasons=opt_skips)
+    def _resolve_opt(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=opt_skips)
 
-    sds_docx_path = _resolve_opt(sds_path)
-    # Fallback: auto-discover SDS from docs/ if not provided
-    sds_docx_path = _doc_or_discovered(sds_docx_path, sds_path, _discover_sds_docx,
-                                       label="SDS", tag=f"[STS_GENERATE][{req_id}] ")
-    uds_file_path = _resolve_opt(uds_path)
-    stp_docx_path = _resolve_opt(stp_path)
+    # (R66) SDS 를 저장소 docs/ 에서 찾지 않는다 — 다른 프로젝트 SDS 로 요구-함수를 잇던 경로
+    sds_docx_path = _resolve_opt(sds_path, "SDS")
+    uds_file_path = _resolve_opt(uds_path, "UDS")
+    stp_docx_path = _resolve_opt(stp_path, "STP")
     from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
     system_docs = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
     # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다 — 자동 탐색은 하지 않는다(R77 N111)
@@ -2132,6 +2101,7 @@ async def local_sts_generate(
             stp_path=stp_docx_path,
             hsis_path=hsis_file_path,
             **system_docs,
+            input_skips=sts_in_skips + opt_skips,
             ai_config=_sts_ai_cfg,
             source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
         )
@@ -2207,8 +2177,10 @@ async def local_sts_generate_stream(
     srs_docx_path: Optional[str] = None
     # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
     from backend.services.resolver_helpers import resolve_builder_input as _rbi
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    sts_in_skips: List[str] = []
     if srs_path:
-        srs_docx_path = _rbi(srs_path, label="SRS") or ""
+        srs_docx_path = _rbi(srs_path, label="SRS", reasons=sts_in_skips) or ""
 
     req_paths_list = _parse_path_list(req_paths)
     req_texts: List[str] = []
@@ -2254,7 +2226,9 @@ async def local_sts_generate_stream(
             pass
 
     if not req_texts and not srs_docx_path:
-        raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
+        raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요."
+                            + (f" (지정한 SRS 를 열지 못함 — {sts_in_skips[0].partition(':')[2].strip()})"
+                               if sts_in_skips else ""))
 
     function_details: Dict[str, Any] = {}
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
@@ -2279,12 +2253,12 @@ async def local_sts_generate_stream(
     from backend.services.resolver_helpers import resolve_builder_input
     opt_skips2: List[str] = []
 
-    def _resolve_opt2(val: str) -> Optional[str]:
-        return resolve_builder_input(val, reasons=opt_skips2)
+    def _resolve_opt2(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=opt_skips2)
 
-    sds_docx_path = _resolve_opt2(sds_path)
-    uds_file_path = _resolve_opt2(uds_path)
-    stp_docx_path = _resolve_opt2(stp_path)
+    sds_docx_path = _resolve_opt2(sds_path, "SDS")
+    uds_file_path = _resolve_opt2(uds_path, "UDS")
+    stp_docx_path = _resolve_opt2(stp_path, "STP")
     from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
     system_docs2 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
     # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다 — 자동 탐색은 하지 않는다(R77 N111)
@@ -2334,6 +2308,7 @@ async def local_sts_generate_stream(
                 stp_path=stp_docx_path,
                 hsis_path=hsis_file_path2,
                 **system_docs2,
+                input_skips=sts_in_skips + opt_skips2,
                 ai_config=_sts_ai_cfg2,
                 on_progress=_on_progress,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
@@ -2417,8 +2392,10 @@ async def local_sts_generate_async(
     srs_docx_path: Optional[str] = None
     # ⚠ 직독은 cloudium `U:` 에서 PermissionError → 500. worker 경유로 로컬화한다.
     from backend.services.resolver_helpers import resolve_builder_input as _rbi
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    sts_in_skips: List[str] = []
     if srs_path:
-        srs_docx_path = _rbi(srs_path, label="SRS") or ""
+        srs_docx_path = _rbi(srs_path, label="SRS", reasons=sts_in_skips) or ""
 
     req_paths_list = _parse_path_list(req_paths)
     req_texts: List[str] = []
@@ -2463,13 +2440,12 @@ async def local_sts_generate_async(
         except Exception:
             pass
 
-    # Fallback: auto-discover SRS from docs/ if not yet resolved
-    srs_docx_path = _doc_or_discovered(
-        srs_docx_path, bool(req_paths_list or req_files), _discover_srs_docx,
-        label="SRS", tag="[STS_GENERATE_ASYNC] ")
+    # (R66) SRS 를 저장소 docs/ 에서 찾지 않는다 — 주지 않았거나 못 열었으면 아래 400(사유 포함)
 
     if not req_texts and not srs_docx_path:
-        raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
+        raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요."
+                            + (f" (지정한 SRS 를 열지 못함 — {sts_in_skips[0].partition(':')[2].strip()})"
+                               if sts_in_skips else ""))
 
     job_id = uuid.uuid4().hex
     _set_progress(
@@ -2482,15 +2458,13 @@ async def local_sts_generate_async(
     from backend.services.resolver_helpers import resolve_builder_input
     opt_skips3: List[str] = []
 
-    def _resolve_opt3(val: str) -> Optional[str]:
-        return resolve_builder_input(val, reasons=opt_skips3)
+    def _resolve_opt3(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=opt_skips3)
 
-    sds_docx_path = _resolve_opt3(sds_path)
-    # Fallback: auto-discover SDS from docs/ if not provided
-    sds_docx_path = _doc_or_discovered(sds_docx_path, sds_path, _discover_sds_docx,
-                                       label="SDS", tag="[STS_GENERATE_ASYNC] ")
-    uds_file_path = _resolve_opt3(uds_path)
-    stp_docx_path = _resolve_opt3(stp_path)
+    # (R66) SDS 를 저장소 docs/ 에서 찾지 않는다
+    sds_docx_path = _resolve_opt3(sds_path, "SDS")
+    uds_file_path = _resolve_opt3(uds_path, "UDS")
+    stp_docx_path = _resolve_opt3(stp_path, "STP")
     from backend.services.resolver_helpers import attach_sts_hsis, resolve_system_requirement_docs
     system_docs3 = resolve_system_requirement_docs(syrs_path, syds_path, hwrs_path, hwds_path)
     # (R50 review r2 W1) 못 쓴 HSIS 의 사유는 생성기 공시까지 간다 — 자동 탐색은 하지 않는다(R77 N111)
@@ -2579,6 +2553,7 @@ async def local_sts_generate_async(
                 stp_path=stp_docx_path,
                 hsis_path=hsis_file_path3,
                 **system_docs3,
+                input_skips=sts_in_skips + opt_skips3,
                 ai_config=_load_sts_ai_config(),
                 on_progress=_sts_on_progress,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
@@ -2738,19 +2713,18 @@ def local_suts_generate(
 
     from backend.services.resolver_helpers import resolve_builder_input
 
-    def _resolve_doc_path(val: str) -> Optional[str]:
-        # worker 경유 — 직독은 cloudium `U:` 를 못 읽어 선택 문서가 조용히 빠졌다.
-        return resolve_builder_input(val)
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    suts_in_skips: List[str] = []
 
-    srs_docx = _resolve_doc_path(srs_path)
-    sds_docx = _resolve_doc_path(sds_path)
-    uds_file = _resolve_doc_path(uds_path)
-    # Fallback: auto-discover SRS/SDS/HSIS from docs/ if not provided
-    srs_docx = _doc_or_discovered(srs_docx, srs_path, _discover_srs_docx,
-                                  label="SRS", tag="[SUTS_GENERATE] ")
-    sds_docx = _doc_or_discovered(sds_docx, sds_path, _discover_sds_docx,
-                                  label="SDS", tag="[SUTS_GENERATE] ")
-    hsis_suts = _doc_or_discovered(_resolve_doc_path(hsis_path), hsis_path,
+    def _resolve_doc_path(val: str, label: str) -> Optional[str]:
+        # worker 경유 — 직독은 cloudium `U:` 를 못 읽어 선택 문서가 조용히 빠졌다.
+        return resolve_builder_input(val, label=label, reasons=suts_in_skips)
+
+    # (R66) SRS · SDS 를 저장소 docs/ 에서 찾지 않는다(다른 프로젝트 문서였다)
+    srs_docx = _resolve_doc_path(srs_path, "SRS")
+    sds_docx = _resolve_doc_path(sds_path, "SDS")
+    uds_file = _resolve_doc_path(uds_path, "UDS")
+    hsis_suts = _doc_or_discovered(_resolve_doc_path(hsis_path, "HSIS"), hsis_path,
                               _no_discovery, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
@@ -2776,6 +2750,7 @@ def local_suts_generate(
             sds_docx_path=sds_docx,
             uds_path=uds_file,
             hsis_path=hsis_suts,
+            input_skips=suts_in_skips,
             ai_config=_load_sts_ai_config(),
         )
     except Exception as e:
@@ -2854,18 +2829,17 @@ def local_suts_generate_stream(
 
     from backend.services.resolver_helpers import resolve_builder_input
 
-    def _res_doc(val: str) -> Optional[str]:
-        return resolve_builder_input(val)
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    suts_in_skips: List[str] = []
 
-    srs_docx_stream = _res_doc(srs_path)
-    sds_docx_stream = _res_doc(sds_path)
-    uds_file_stream = _res_doc(uds_path)
-    # Fallback: auto-discover SRS/SDS/HSIS from docs/ if not provided
-    srs_docx_stream = _doc_or_discovered(srs_docx_stream, srs_path, _discover_srs_docx,
-                                         label="SRS", tag="[SUTS_STREAM] ")
-    sds_docx_stream = _doc_or_discovered(sds_docx_stream, sds_path, _discover_sds_docx,
-                                         label="SDS", tag="[SUTS_STREAM] ")
-    hsis_suts_stream = _doc_or_discovered(_res_doc(hsis_path), hsis_path,
+    def _res_doc(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=suts_in_skips)
+
+    # (R66) SRS · SDS 를 저장소 docs/ 에서 찾지 않는다(다른 프로젝트 문서였다)
+    srs_docx_stream = _res_doc(srs_path, "SRS")
+    sds_docx_stream = _res_doc(sds_path, "SDS")
+    uds_file_stream = _res_doc(uds_path, "UDS")
+    hsis_suts_stream = _doc_or_discovered(_res_doc(hsis_path, "HSIS"), hsis_path,
                               _no_discovery, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
@@ -2898,6 +2872,7 @@ def local_suts_generate_stream(
                 sds_docx_path=sds_docx_stream,
                 uds_path=uds_file_stream,
                 hsis_path=hsis_suts_stream,
+                input_skips=suts_in_skips,
                 ai_config=_load_sts_ai_config(),
             )
             download_url = f"/api/local/suts/download/{out_filename}"
@@ -2990,13 +2965,16 @@ def local_suts_generate_async(
 
     from backend.services.resolver_helpers import resolve_builder_input
 
-    def _res_async(val: str) -> Optional[str]:
-        return resolve_builder_input(val)
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    suts_in_skips: List[str] = []
 
-    srs_docx_async = _res_async(srs_path)
-    sds_docx_async = _res_async(sds_path)
-    uds_file_async = _res_async(uds_path)
-    hsis_suts_async = _doc_or_discovered(_res_async(hsis_path), hsis_path,
+    def _res_async(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=suts_in_skips)
+
+    srs_docx_async = _res_async(srs_path, "SRS")
+    sds_docx_async = _res_async(sds_path, "SDS")
+    uds_file_async = _res_async(uds_path, "UDS")
+    hsis_suts_async = _doc_or_discovered(_res_async(hsis_path, "HSIS"), hsis_path,
                               _no_discovery, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
@@ -3038,6 +3016,7 @@ def local_suts_generate_async(
                 sds_docx_path=sds_docx_async,
                 uds_path=uds_file_async,
                 hsis_path=hsis_suts_async,
+                input_skips=suts_in_skips,
                 ai_config=_load_sts_ai_config(),
             )
             _logger.info("[SUTS_ASYNC][%s] generate_suts returned, setting done", job_id)
@@ -3221,15 +3200,18 @@ def local_sits_generate(
 
     from backend.services.resolver_helpers import resolve_builder_input
 
-    def _resolve_doc_path_sits(val: str) -> Optional[str]:
-        return resolve_builder_input(val)
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    sits_in_skips: List[str] = []
 
-    srs_docx = _resolve_doc_path_sits(srs_path)
-    sds_docx = _resolve_doc_path_sits(sds_path)
-    uds_file = _resolve_doc_path_sits(uds_path)
-    hsis_file = _doc_or_discovered(_resolve_doc_path_sits(hsis_path), hsis_path,
+    def _resolve_doc_path_sits(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=sits_in_skips)
+
+    srs_docx = _resolve_doc_path_sits(srs_path, "SRS")
+    sds_docx = _resolve_doc_path_sits(sds_path, "SDS")
+    uds_file = _resolve_doc_path_sits(uds_path, "UDS")
+    hsis_file = _doc_or_discovered(_resolve_doc_path_sits(hsis_path, "HSIS"), hsis_path,
                               _no_discovery, label="HSIS")
-    stp_file = _resolve_doc_path_sits(stp_path)
+    stp_file = _resolve_doc_path_sits(stp_path, "STP")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sits", "sits_local", tpl_path)
@@ -3256,6 +3238,7 @@ def local_sits_generate(
             uds_path=uds_file,
             hsis_path=hsis_file,
             stp_path=stp_file,
+            input_skips=sits_in_skips,
             fi_design_ids=_split_fi_design_ids(fi_design_ids),
             ai_config=_load_sts_ai_config(),
         )
@@ -3343,15 +3326,18 @@ def local_sits_generate_stream(
 
     from backend.services.resolver_helpers import resolve_builder_input
 
-    def _res_doc_sits(val: str) -> Optional[str]:
-        return resolve_builder_input(val)
+    # (R66) 지정했는데 못 연 입력의 사유 — 생성기가 '주지 않음' 이 아니라 '열지 못함' 으로 공시한다(`input_skips`)
+    sits_in_skips: List[str] = []
 
-    srs_docx_stream = _res_doc_sits(srs_path)
-    sds_docx_stream = _res_doc_sits(sds_path)
-    uds_file_stream = _res_doc_sits(uds_path)
-    hsis_stream = _doc_or_discovered(_res_doc_sits(hsis_path), hsis_path,
+    def _res_doc_sits(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=sits_in_skips)
+
+    srs_docx_stream = _res_doc_sits(srs_path, "SRS")
+    sds_docx_stream = _res_doc_sits(sds_path, "SDS")
+    uds_file_stream = _res_doc_sits(uds_path, "UDS")
+    hsis_stream = _doc_or_discovered(_res_doc_sits(hsis_path, "HSIS"), hsis_path,
                               _no_discovery, label="HSIS")
-    stp_stream = _res_doc_sits(stp_path)
+    stp_stream = _res_doc_sits(stp_path, "STP")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "sits", "sits_local", tpl_path)
@@ -3384,6 +3370,7 @@ def local_sits_generate_stream(
                 uds_path=uds_file_stream,
                 hsis_path=hsis_stream,
                 stp_path=stp_stream,
+                input_skips=sits_in_skips,
                 ai_config=_load_sts_ai_config(),
             )
             download_url = f"/api/local/sits/download/{out_filename}"
@@ -3488,15 +3475,15 @@ def local_sits_generate_async(
     from backend.services.resolver_helpers import resolve_builder_input
     sits_opt_skips: List[str] = []
 
-    def _res_async_sits(val: str) -> Optional[str]:
-        return resolve_builder_input(val, reasons=sits_opt_skips)
+    def _res_async_sits(val: str, label: str) -> Optional[str]:
+        return resolve_builder_input(val, label=label, reasons=sits_opt_skips)
 
-    srs_docx_async = _res_async_sits(srs_path)
-    sds_docx_async = _res_async_sits(sds_path)
-    uds_file_async = _res_async_sits(uds_path)
-    hsis_async = _doc_or_discovered(_res_async_sits(hsis_path), hsis_path,
+    srs_docx_async = _res_async_sits(srs_path, "SRS")
+    sds_docx_async = _res_async_sits(sds_path, "SDS")
+    uds_file_async = _res_async_sits(uds_path, "UDS")
+    hsis_async = _doc_or_discovered(_res_async_sits(hsis_path, "HSIS"), hsis_path,
                               _no_discovery, label="HSIS")
-    stp_async = _res_async_sits(stp_path)
+    stp_async = _res_async_sits(stp_path, "STP")
     if sits_opt_skips:
         _logger.warning("SITS: 선택 입력 %d건이 빠진 채 생성한다 — %s",
                         len(sits_opt_skips), "; ".join(sits_opt_skips)[:400])
@@ -3541,6 +3528,7 @@ def local_sits_generate_async(
                 uds_path=uds_file_async,
                 hsis_path=hsis_async,
                 stp_path=stp_async,
+                input_skips=sits_opt_skips,
                 ai_config=_load_sts_ai_config(),
             )
             _logger.info("[SITS_ASYNC][%s] generate_sits returned, setting done", job_id)

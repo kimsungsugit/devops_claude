@@ -3324,8 +3324,10 @@ async def jenkins_sts_generate_async(
     #   500 이 났다(사용자 보고). 다른 선택 문서는 이미 worker 경유인데 SRS 만 별도
     #   블록이라 빠져 있었다 — 같은 판정이 두 벌이면 한쪽만 고쳐진다.
     from backend.services.resolver_helpers import resolve_builder_input as _rbi
+    # (R66 리뷰 W1) 지정했는데 못 연 SRS 의 사유 — 400 과 생성기 공시(`input_skips`)에 간다. 빠지면 '원인은 파일인데 안내는 주라'
+    srs_skips: List[str] = []
     if srs_path:
-        srs_docx_path = _rbi(srs_path, label="SRS") or ""
+        srs_docx_path = _rbi(srs_path, label="SRS", reasons=srs_skips) or ""
     # 탈락한 요구사항 문서의 **사유**를 모은다 — 예전엔 `except Exception: continue`
     # 라 경로 오타·권한 없음·본문 0자가 전부 같은 침묵이었고, 마지막에 나오는
     # "SRS document is required" 가 원인과 무관한 안내가 됐다(실측: cloudium 모드에서
@@ -3368,6 +3370,8 @@ async def jenkins_sts_generate_async(
         # 왜 하나도 못 읽었는지 함께 말한다. "문서를 달라" 는 안내는 문서를 준
         # 사용자에게 아무 정보도 주지 않는다.
         detail = "SRS document is required"
+        if srs_skips:
+            detail += " — 지정한 SRS 를 열지 못함: " + srs_skips[0].partition(":")[2].strip()
         if doc_skips:
             detail += " — 지정한 문서가 전부 읽히지 않았다: " + " / ".join(doc_skips[:5])
             if len(doc_skips) > 5:
@@ -3442,6 +3446,8 @@ async def jenkins_sts_generate_async(
                 on_progress=_on_progress,
                 source_root=str(source_root_path) if source_root_path else None,  # 품질 DB project_root
                 **system_docs,
+                # (R66) 지정했는데 못 연 SRS · SDS · UDS · STP — '주지 않음' 이 아니라 '열지 못함' 으로 공시
+                input_skips=srs_skips + opt_skips,
             )
             download_url = f"/api/jenkins/sts/download?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
             preview_url = f"/api/jenkins/sts/preview?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
@@ -3563,8 +3569,8 @@ def jenkins_suts_generate_async(
     #   조용히 버렸고(UDS `reference_doc_path` 와 같은 결함 — `test_docgen_cap_activation.py` 의 그 사례), SUTS 는
     #   SwUDS 없이 만들어졌다: 범위 `suds` 가 좁혀지지 않고(정본 1,014 vs 생성 1,025), 설계 ID·SwUDS ASIL·SRS 요구
     #   ID·HSIS 경계가 전부 비었다. 로컬 라우터(`local.py`)는 같은 네 필드를 받아 넘긴다 — 여기만 빠져 있었다.
-    #   ⚠ 로컬과 같아지는 것은 이 네 문서 한정이다 — 로컬의 HSIS 자동 탐색(저장소 `docs/` 글롭, 프로젝트 무관)과
-    #   `ai_config` 는 여기 없다(리뷰 I2).
+    #   ⚠ 로컬과 같아지는 것은 이 네 문서 한정이다 — `ai_config` 는 여기 없다(리뷰 I2). 로컬의 저장소 `docs/` 자동
+    #   탐색(HSIS — R77, SRS · SDS — R66)은 이제 어디에도 없다.
     srs_path: str = Form(""),
     sds_path: str = Form(""),
     uds_path: str = Form(""),
@@ -3633,6 +3639,8 @@ def jenkins_suts_generate_async(
                 sds_docx_path=_sds_doc,
                 uds_path=_uds_doc,
                 hsis_path=_hsis_doc,
+                # (R66) 지정했는데 못 연 SRS · SDS · UDS · HSIS — '주지 않음' 이 아니라 '열지 못함' 으로 공시
+                input_skips=_doc_reasons,
             )
             download_url = f"/api/jenkins/suts/download?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
             preview_url = f"/api/jenkins/suts/preview?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"

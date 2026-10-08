@@ -30,7 +30,6 @@ from generators.safety_marks import resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_design_ids import load_uds_design_ids, resolve_design_id
-from report_gen.doc_kind import is_sds_filename
 from report_gen.source_roots import first_source_root
 
 _logger = logging.getLogger(__name__)
@@ -398,8 +397,6 @@ _BOUNDARY_SETS: Dict[str, List[Any]] = {
     "default": [-1,   0,    63,    127,   191,   255,   256],
 }
 
-_SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
-_SDS_MAP_CACHE_MTIME: float = 0.0
 
 # ---------------------------------------------------------------------------
 # STP document parsing
@@ -592,33 +589,6 @@ def _load_uds_maps(p: Path, sig: Tuple[int, int]) -> Dict[str, Any]:
     return out
 
 
-def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
-    global _SDS_MAP_CACHE, _SDS_MAP_CACHE_MTIME
-    docs_dir = Path(__file__).resolve().parents[1] / "docs"
-    try:
-        # `*SDS*` 글롭은 `SwDS` 표기를 놓친다("swds" 에 "sds" 없음) — 전량 글롭 후 단일 출처로 거른다.
-        sds_files = sorted(p for p in docs_dir.glob("*.docx") if is_sds_filename(p.name))
-        if sds_files:
-            current_mtime = sds_files[0].stat().st_mtime
-            # Return cached copy if file hasn't changed
-            if _SDS_MAP_CACHE is not None and current_mtime == _SDS_MAP_CACHE_MTIME:
-                return _SDS_MAP_CACHE
-            from report_gen.requirements import _extract_sds_partition_map
-            for f in sds_files:
-                m = _extract_sds_partition_map(str(f))
-                if m:
-                    _SDS_MAP_CACHE = m
-                    _SDS_MAP_CACHE_MTIME = f.stat().st_mtime
-                    _logger.info("SITS: SDS map loaded from %s (%d entries)", f.name, len(m))
-                    return _SDS_MAP_CACHE
-    except Exception as e:
-        _logger.debug("SITS: SDS map load failed: %s", e)
-    # No SDS file or load failed — cache empty dict to avoid re-attempting every call
-    if _SDS_MAP_CACHE is None:
-        _SDS_MAP_CACHE = {}
-    return _SDS_MAP_CACHE
-
-
 def _infer_boundary_values(var_name: str) -> List[Any]:
     """Infer boundary values from annotated variable string or variable name.
 
@@ -684,7 +654,7 @@ def _clean_var_name(raw: str) -> str:
 
     SUTS 가 다섯 라운드에 걸쳐 정본과 맞춰 놓은 규칙(`return` 슬롯 · 포인터 `[0].` ·
     타입 한정자 제거 · 주석 제거)을 그대로 **호출**한다. 여기에 같은 로직을 다시 쓰면
-    한쪽만 고쳐지는 이 저장소의 반복 실패 모드가 된다(`_resolve_sds_map` 을 같은 이유로
+    한쪽만 고쳐지는 이 저장소의 반복 실패 모드가 된다(SDS 판독 `suts.read_sds_input` 을 같은 이유로
     이미 재사용하고 있다).
 
     ⚠ 이름을 뽑지 못하면 **빈 문자열**이다(예전엔 `raw[:40]` 으로 원문 조각을 흘렸다).
@@ -1147,10 +1117,9 @@ def collect_integration_flows(
     `chain_dropped` 가 0 이 아니면 그 경로는 상한에 걸려 잘린 것이다.
 
     Args:
-        sds_map: Related ID 보강용 SDS 파티션 맵. None 이면 저장소 `docs/` 글롭
-            (`_load_default_sds_map`)으로 폴백하는데 이는 **프로젝트 무관**이다
-            — `sts.py`/`suts.py` 는 이미 같은 파라미터를 갖고 있었고 여기만 없어서
-            **호출자가 대상 프로젝트의 SDS 를 줄 방법 자체가 없었다.**
+        sds_map: Related ID · SwCom ASIL 상속용 SDS 파티션 맵(`suts.read_sds_input`). None 이면 빈 맵이다 — (R66) 예전엔
+            저장소 `docs/` 글롭(이 저장소의 HDPDM01 SDS, 프로젝트 무관)이었다. SwCom ID(`SwCom_03`)는 프로젝트끼리 겹쳐
+            남의 컴포넌트 등급을 상속할 수 있었다.
         uds_swcom_map: `{함수명(소문자): [SwCom_NN]}` — Related 칸 SwCom 의 **유일한
             문서 근거**(`load_uds_swcom_map`). 주지 않으면 순번 합성 ID 로 내려간다.
         globals_info_map / struct_members: 배열 **선언 크기**의 출처
@@ -1164,7 +1133,7 @@ def collect_integration_flows(
     """
     # ── SDS 보강 계측 ──────────────────────────────────────────────────────
     # ⚠ 실측(2026-07-31): 이 보강은 **한 건도 산출한 적이 없다.**
-    #   `_load_default_sds_map()` 이 주는 맵의 값 스키마는
+    #   SDS 파티션 맵(`_extract_sds_partition_map`)의 값 스키마는
     #   `{kind, description, related, asil, component_description, canonical}` 인데
     #   여기서는 `entry.get("swcom") or entry.get("component")` 를 읽었다 — **없는
     #   필드**라 항상 None 이고, 그 사실이 `except Exception: pass` 에 묻혀 있었다.
@@ -1214,9 +1183,10 @@ def collect_integration_flows(
             _rd = _decl_dims_from_array_field(str((_ri or {}).get("array") or ""))
             if _rd and _dim_product(_rd) > 1:
                 _root_sizes[str(_rn)] = _rd
-    _sds_source = "argument" if sds_map is not None else "repo_docs_glob"
-    if sds_map is None:
-        sds_map = _load_default_sds_map()
+    # (R66) 맵이 없으면 빈 맵 — 저장소 docs/ 의 다른 프로젝트 SDS 로 대체하지 않는다. 출처 라벨은 '받은 맵'(빈 맵 포함) ·
+    #   '없음' 둘이다(예전 '없음' 은 `repo_docs_glob` 이었다).
+    _sds_source = "argument" if sds_map is not None else "none"
+    sds_map = sds_map or {}
     # Build name → info lookup
     name_to_info: Dict[str, Dict[str, Any]] = {}
     for fid, info in function_details.items():
@@ -3245,7 +3215,7 @@ def generate_sits_quality_report(
         _lk = int(fs.get("sds_lookups") or 0)
         _hit = int(fs.get("sds_swcom_hits") or 0)
         sds_enrich = {
-            "source": fs.get("sds_source"),            # argument | repo_docs_glob
+            "source": fs.get("sds_source"),            # argument | none (R66 — 예전 none 자리는 repo_docs_glob)
             "map_entries": int(fs.get("sds_map_entries") or 0),
             "lookups": _lk,
             "key_hits": int(fs.get("sds_key_hits") or 0),
@@ -3546,6 +3516,9 @@ def generate_sits(
     # (R75) `""`/`"reference"`(기본) = 위 두 상한 그대로. `"extended"` = 찾은 흐름 전부 + sub-case 후보 전부.
     #   단일 정의는 `generators/tc_profile.py`. 확장은 상한을 **낮추지 않는다**(사용자가 더 크게 줬으면 그 값).
     tc_profile: str = "",
+    # (R66) 호출자(라우트)가 SRS · SDS · UDS · HSIS · STP 를 로컬화하지 못한 사유 ``"<라벨>: <사유>"`` — 그 문서는 '주지 않음' 이
+    #   아니라 '지정했지만 열지 못함' 으로 공시한다.
+    input_skips: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Top-level SITS generation pipeline.
 
@@ -3595,18 +3568,14 @@ def generate_sits(
 
     # ── Stage 1-4: document context loading ─────────────────────────────────
     # ⚠ SITS 는 `sds_docx_path` 를 받고도 **Related ID 보강에는 쓰지 않았다** — 흐름
-    #   수집이 저장소 `docs/` 글롭(프로젝트 무관, 현재 HDPDM01)만 봤다. SUTS 가 정확히
-    #   같은 결함을 이미 고쳐 뒀고(`suts._resolve_sds_map` docstring 참조) 그 헬퍼를
+    #   수집이 저장소 `docs/` 글롭(프로젝트 무관, 현재 HDPDM01)만 봤다. SUTS 의 SDS 판독을
     #   **재사용**한다 — 복제하면 한쪽만 고쳐지는 이 저장소의 반복 실패 모드가 된다.
-    _project_sds_map: Optional[Dict[str, Dict[str, str]]] = None
+    # (R66) 없거나 못 읽으면 빈 맵 — 예전엔 저장소 docs/ 글롭(다른 프로젝트 SDS)으로 넘어갔다(감사 #83)
+    from generators.suts import input_documents_record, input_skip_reason, read_sds_input
     if sds_docx_path:
         _progress(7, "SDS 설계 컨텍스트 로드 중")
-        try:
-            from generators.suts import _resolve_sds_map
-            _project_sds_map = _resolve_sds_map(sds_docx_path)
-        except Exception as e:  # noqa: BLE001 - 확보 실패는 폴백 사유로 보고만 한다
-            _logger.warning("SITS: 프로젝트 SDS 맵 확보 실패(%s) — 저장소 docs/ 폴백으로 "
-                            "넘어간다(프로젝트 무관): %s", type(e).__name__, e)
+    _project_sds_map, _sds_reading = read_sds_input(sds_docx_path, skipped=input_skip_reason(input_skips, "SDS"))
+    if sds_docx_path:
         try:
             from generators.sts import _load_sds_summary
             sds_summary = _load_sds_summary(sds_docx_path)
@@ -3704,11 +3673,14 @@ def generate_sits(
     _progress(30, f"소스 파싱 완료 — {total_source_functions}개 함수 발견")
 
     # SRS requirement ID enrichment — per-function mapping
+    _srs_reqs_n: Optional[int] = None     # (R66 리뷰 2차 I11) 요구 표에서 읽은 요구 수 — 0 이면 '열림' 이 아니라 '못 읽음'
+    _srs_parse_error = ""
     if srs_docx_path:
         _progress(32, "SRS 요구사항 ID 매핑 중")
         try:
             from generators.sts import parse_srs_docx_tables
             reqs = parse_srs_docx_tables(srs_docx_path)
+            _srs_reqs_n = len(reqs or [])
             if reqs:
                 _logger.info("SITS: SRS reqs loaded (%d)", len(reqs))
 
@@ -3746,6 +3718,9 @@ def generate_sits(
                 _logger.info("SITS: SRS enrichment: %d functions matched", matched)
         except Exception as e:
             _logger.debug("SITS: SRS enrichment skipped: %s", e)
+            if _srs_reqs_n is None:    # (R66 리뷰 3차 I-d) 판독 자체가 실패 — '열림' 이 아니라 사유
+                _srs_reqs_n = 0
+                _srs_parse_error = f"요구 표 판독 실패 ({type(e).__name__})"
 
     # UDS description enrichment
     if uds_path:
@@ -3770,7 +3745,8 @@ def generate_sits(
     flow_stats: Dict[str, Any] = {}
     flows = collect_integration_flows(
         function_details, max_flows=max_flows, stats_out=flow_stats,
-        sds_map=_project_sds_map, uds_swcom_map=_uds_swcom_map,
+        # (R66) 읽은 SDS 가 없으면 None — 품질 리포트의 출처 라벨이 'none'(빈 맵을 '받은 맵' 으로 적지 않는다)
+        sds_map=_project_sds_map or None, uds_swcom_map=_uds_swcom_map,
         uds_asil_map=_uds_asil_map, uds_related_map=_uds_related_map,
         globals_info_map=_globals_info_map, struct_members=_struct_members)
 
@@ -3888,6 +3864,16 @@ def generate_sits(
     quality_report["tc_profile_unknown_value"] = _profile_bad
     quality_report["caps_requested"] = _caps_requested
     quality_report["caps_effective"] = {"max_subcases": max_subcases, "max_flows": max_flows}
+    # (R66, 감사 #83 · #1) 입력 문서마다 지정했나 · 열었나 · 사유(SDS 는 파티션 수) — 공시 `sits_input_documents`
+    quality_report["input_documents"] = dict(
+        input_documents_record({"SRS": srs_docx_path, "UDS": uds_path, "HSIS": hsis_path, "STP": stp_path}, input_skips),
+        SDS=dict(_sds_reading, blocks_unopened=[] if _sds_reading.get("read") or not _sds_reading.get("given")
+                 else ["sds_partitions"]))
+    if _srs_reqs_n is not None:
+        quality_report["input_documents"]["SRS"]["requirements"] = _srs_reqs_n
+        if not _srs_reqs_n and quality_report["input_documents"]["SRS"].get("opened"):
+            quality_report["input_documents"]["SRS"]["reason"] = (_srs_parse_error
+                                                                   or "요구 표 0 개(SRS 양식이 다르거나 SRS 가 아닌 문서)")
 
     # ── Stage 9: XLSM generation ─────────────────────────────────────────────
     _progress(80, "XLSM 파일 생성 중")
@@ -3910,8 +3896,9 @@ def generate_sits(
         #   File Name 열이 통째로 비어 있고 Note 는 "HW 요구사항 명세서" 였다.
         #   ⚠ 못 읽은 문서의 줄은 **비워 둔다** — 참조했다고 적으면 문서가 거짓말한다.
         _refs: List[Tuple[str, str]] = []
-        for _p, _note in ((srs_docx_path, "SW 요구사항 명세서"),
-                          (sds_docx_path, "SW 아키텍처 설계서"),
+        for _p, _note in ((srs_docx_path if _srs_reqs_n else None, "SW 요구사항 명세서"),   # (R66) 요구를 읽은 SRS 만
+                          # (R66) 파티션을 하나도 못 읽은 SDS 는 참조하지 않은 것이다
+                          (sds_docx_path if _sds_reading.get("read") else None, "SW 아키텍처 설계서"),
                           (uds_path, "SW 상세 설계서"),
                           (stp_path, "SW 테스트 계획서")):
             if _p:

@@ -16,6 +16,10 @@ HDPDM01 엔트리가 통째로 들어온다.
 
 같은 규율이 `_doc_or_discovered`(SRS)와 `generators/suts.py` `load_sds_map_from`
 (커밋 `1bfdee9`)에 이미 있었다 — 여기만 빠져 있었다.
+
+(R66) 아무것도 주지 않았을 때 쓰던 저장소 글롭(`_discover_default_req_docs`)도 지웠다 — 대상 프로젝트가 무엇이든 HDPDM01
+문서의 ASIL · 요구 ID 가 함수 상세에 들어갔다. 아래 fixture 는 그 함수가 되살아나도 결과에 안 섞이는지 보려고 같은 이름을
+심는다(`raising=False`).
 """
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ REPO_SRS = r"D:\repo\docs\(HDPDM01_SRS) Software Requirements Specification.docx
 def repo_defaults(monkeypatch):
     """저장소 docs/ 글롭이 항상 HDPDM01 을 내놓는 상태를 고정."""
     monkeypatch.setattr(local_mod, "_discover_default_req_docs",
-                        lambda: {"req": [REPO_SRS, REPO_SDS], "sds": [REPO_SDS]})
+                        lambda: {"req": [REPO_SRS, REPO_SDS], "sds": [REPO_SDS]}, raising=False)
 
 
 def test_user_sds_is_not_polluted_by_repo_docs(repo_defaults):
@@ -63,20 +67,22 @@ def test_no_repo_sds_when_user_gave_req_only(repo_defaults, caplog):
         "SDS 가 비었는데 아무 기록도 남기지 않았다"
 
 
-def test_defaults_still_used_when_nothing_supplied(repo_defaults):
-    """폴백은 유지 — 아무것도 안 주면 저장소 docs/ 를 쓴다(동봉 샘플 데모 경로)."""
-    req, sds = local_mod._resolve_req_doc_sets()
-    assert sds == [REPO_SDS]
-    assert req == [REPO_SRS, REPO_SDS]
+def test_nothing_supplied_means_no_documents(repo_defaults, caplog):
+    """(R66) 아무것도 안 주면 **아무 문서도 없다** — 예전엔 저장소 docs/ 의 HDPDM01 SRS · SDS 였다. 침묵하지는 않는다."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        req, sds = local_mod._resolve_req_doc_sets()
+    assert (req, sds) == ([], [])
+    assert any("대체하지 않는다" in r.message for r in caplog.records)
 
 
 @pytest.mark.parametrize("req_arg,sds_arg", [
     ([""], None), (None, [""]), ([" "], [""]), ([], []),
 ])
 def test_blank_entries_do_not_count_as_user_supplied(repo_defaults, req_arg, sds_arg):
-    """공백 문자열은 '사용자가 줬다'로 세지 않는다 — 안 그러면 폴백이 죽는다."""
+    """공백 문자열은 '사용자가 줬다'로 세지 않는다 — 그리고 (R66) 아무것도 안 준 것은 아무 문서도 없는 것이다."""
     req, sds = local_mod._resolve_req_doc_sets(req_doc_paths=req_arg, sds_doc_paths=sds_arg)
-    assert sds == [REPO_SDS]
+    assert (req, sds) == ([], [])
 
 
 def test_structure_guard_no_unconditional_append():

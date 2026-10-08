@@ -83,7 +83,8 @@ class TestAllSitesUseTheHelper:
 
     def test_every_discovery_helper_is_reached_through_the_gate(self):
         """`_discover_srs_docx`/`_discover_sds_docx` 는 `_doc_or_discovered` 인자로만
-        넘겨져야 한다(직접 호출하면 게이트를 우회한다).
+        넘겨져야 한다(직접 호출하면 게이트를 우회한다). (R66) 이제 둘 다 없다 — 저장소 `docs/` 탐색은 아무것도 주지
+        않았을 때도 하지 않는다(다른 프로젝트 문서였다). 모든 게이트 호출은 `_no_discovery` 다.
 
         (R77 N111) 예전엔 `_enrich_function_details_map` 의 `_discover_hsis_path()` 직접 호출을
         "사용자 입력 자리가 없어 대체가 아니다" 라며 허용했다. 그 문서는 다른 프로젝트(HDPDM01)의
@@ -107,3 +108,13 @@ class TestAllSitesUseTheHelper:
         assert not hasattr(mod, "_discover_hsis_path")
         assert "_discover_srs_docx" not in direct_calls
         assert "_discover_sds_docx" not in direct_calls
+        # (R66) 탐색 함수 자체가 없다 — 남은 게이트 호출의 탐색 인자는 전부 `_no_discovery`
+        for gone in ("_discover_srs_docx", "_discover_sds_docx", "_discover_default_req_docs"):
+            assert not hasattr(mod, gone), gone
+        gate_args = [
+            ast.unparse(node.args[2])
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "_doc_or_discovered" and len(node.args) >= 3
+        ]
+        assert gate_args and set(gate_args) == {"_no_discovery"}, gate_args

@@ -631,20 +631,20 @@ def test_sts_unmapped_splits_our_defect_from_design_gap(monkeypatch) -> None:
 
 
 def test_sts_mapping_does_not_fall_back_to_repo_docs(monkeypatch) -> None:
-    """⚠ `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)을 쓴다.
+    """⚠ 예전 `sds_map=None` 은 저장소 `docs/` 글롭(**프로젝트 무관**)을 썼다(R66 에서 생성기 쪽도 지웠다).
 
     게이트가 그걸 쓰면 남의 프로젝트 요구 ID 로 잰 숫자를 보여 준다. 맵이 비면
-    "매핑 0" 이 정답이다.
+    "매핑 0" 이 정답이다. 뮤테이션: 어디서든 SDS 파티션 추출기를 부르면(저장소 폴백 재발) 실패.
     """
-    import generators.sts as _gsts
+    import report_gen.requirements as _rr
     srs = _sts_env(monkeypatch, [{"id": "SwTR_0001"}])
     called = {"n": 0}
 
-    def _boom():
+    def _boom(*_a, **_k):
         called["n"] += 1
         return {"motorctrl": {"related": "SwTR_0001", "asil": "", "description": ""}}
 
-    monkeypatch.setattr(_gsts, "_load_default_sds_map", _boom)
+    monkeypatch.setattr(_rr, "_extract_sds_partition_map", _boom)
     fd = {"f1": {"id": "f1", "name": "S_Motor_Init", "module_name": "MotorCtrl", "related": ""}}
     res = tm._measure_sts_mapping(fd, {}, "SwDS 경로가 지정되지 않았습니다", srs)
     assert called["n"] == 0, "저장소 docs/ 폴백을 탔다 — 남의 프로젝트로 잰 숫자다"

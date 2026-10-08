@@ -83,11 +83,21 @@ class TestCallerCanSupplySds:
         assert stats["sds_swcom_hits"] == 1
         assert "SwCom_07" in flows[0]["related_ids"]
 
-    def test_fallback_is_labelled_not_silent(self):
-        """폴백은 **저장소 docs/ 글롭(프로젝트 무관)** 이라는 사실이 남아야 한다."""
+    def test_absent_map_is_empty_not_repo_glob(self, monkeypatch):
+        """(R66) 맵을 안 주면 **빈 맵** — 예전엔 저장소 docs/ 글롭(HDPDM01 SDS, 프로젝트 무관)이었다.
+
+        뮤테이션: 저장소 문서를 읽는 폴백이 되살아나면(파티션 추출기를 부르면) 실패.
+        """
+        import report_gen.requirements as rr
+
+        def _boom(*a, **k):
+            raise AssertionError("SDS 를 주지 않았는데 SDS 파티션 추출기를 불렀다(저장소 폴백 재발)")
+        monkeypatch.setattr(rr, "_extract_sds_partition_map", _boom)
         stats = {}
         sits.collect_integration_flows(_flow_payload(), max_flows=10, stats_out=stats)
-        assert stats["sds_source"] == "repo_docs_glob"
+        assert stats["sds_source"] == "none"
+        assert stats["sds_map_entries"] == 0
+        assert not hasattr(sits, "_load_default_sds_map")
 
     def test_empty_map_is_honoured_not_replaced_by_repo_glob(self):
         """빈 맵을 **명시**한 것과 안 준 것은 다르다 — 빈 맵을 저장소 문서로 바꾸지 않는다."""
@@ -115,9 +125,9 @@ class TestCallerCanSupplySds:
         assert wired, "generate_sits 가 sds_map 을 흐름 수집으로 전달하지 않는다"
 
     def test_reuses_suts_resolver_instead_of_duplicating(self):
-        """SUTS 가 이미 고친 판정을 **재사용**한다 — 복제하면 한쪽만 고쳐진다."""
+        """SUTS 가 이미 고친 판정을 **재사용**한다 — 복제하면 한쪽만 고쳐진다. (R66) 판독 기록까지 주는 `read_sds_input`."""
         src = _SITS_SRC.read_text(encoding="utf-8")
-        assert "from generators.suts import _resolve_sds_map" in src
+        assert "read_sds_input" in src and "from generators.suts import" in src
 
 
 # --------------------------------------------------------------
@@ -215,7 +225,14 @@ class TestMeasuredSchemaGap:
         대체 필드는 **추측하지 않았다**(틀린 SwCom 은 0건보다 나쁘다).
         스키마가 바뀌어 필드가 생기면 여기서 실패하므로, 그때 보강을 되살리면 된다.
         """
-        m = sits._load_default_sds_map()
+        # (R66) 생성기의 저장소 폴백은 지웠다 — 측정만 저장소 docs/ 의 HDPDM01 SDS 를 직접 읽는다(시험 코드)
+        from report_gen.doc_kind import is_sds_filename
+        from report_gen.requirements import _extract_sds_partition_map
+        docs = Path(__file__).resolve().parents[2] / "docs"
+        m = {}
+        for f in sorted(docs.glob("*.docx")) if docs.is_dir() else []:
+            if is_sds_filename(f.name):
+                m.update(_extract_sds_partition_map(str(f)) or {})
         if not m:
             pytest.skip("저장소 docs/ 에 SDS 문서가 없다 — 이 환경에선 대조 불가")
         with_swcom = sum(1 for v in m.values()

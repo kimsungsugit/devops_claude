@@ -120,13 +120,16 @@ class TestSingleSource:
     def test_suts_and_sts_use_the_shared_helper(self):
         from generators import sts, suts
         assert suts._merge_sds_partition_map is _merge_sds_partition_map
-        assert sts._merge_sds_partition_map is _merge_sds_partition_map
+        # (R66) STS 는 SDS 를 직접 읽지 않는다 — SUTS 의 `read_sds_input` 하나(저장소 폴백 루프와 함께 병합 사본이 사라졌다)
+        assert not hasattr(sts, "_merge_sds_partition_map") or sts._merge_sds_partition_map is _merge_sds_partition_map
 
     @pytest.mark.parametrize("rel,loop_calls", [
         ("backend/helpers/uds.py", 1),
         ("backend/routers/local.py", 2),
-        ("generators/suts.py", 1),        # + 루프 밖 1(`load_sds_map_from`, 단일 문서 — 그래도 헬퍼 경유)
-        ("generators/sts.py", 1),         # + 루프 밖 1(단일 문서를 그대로 쓰는 자리 — 병합 아님)
+        # (R66) 두 생성기의 루프는 저장소 docs/ 글롭 폴백이었다(지웠다) — SUTS 는 루프 밖 1(`read_sds_input`, 단일 문서 —
+        #   그래도 헬퍼 경유), STS · SITS 는 그것을 부른다
+        ("generators/suts.py", 0),
+        ("generators/sts.py", 0),
         ("report_gen/requirements.py", 1),
         ("report_gen/docx_builder.py", 1),
     ])

@@ -24,10 +24,7 @@ from generators.tc_profile import (
     is_evidence_enriched,
     normalize_tc_profile,
 )
-from report_gen.doc_kind import is_sds_filename
 from report_gen.requirements import (
-    _extract_sds_partition_map,
-    _merge_sds_partition_map,
     contains_at_token_start,
     is_sds_placeholder_key,
     normalize_sds_key,
@@ -173,7 +170,6 @@ _MERGE_COLS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12]  # 0-indexed → cols A,B,C,D,E
 # Columns that get center alignment (not wrap)
 _CENTER_COLS = {1, 4, 5, 6, 7, 13}  # #, Safety, TestEnv, TestMethod, GenMethod, SRS
 
-_SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
 
 # ── HSIS 파서 캐시 ───────────────────────────────────────────────────────────
 # 키는 **파일 정체성**(정규화 경로, mtime_ns, size)이다. 과거엔 경로를 무시하는 단일
@@ -233,31 +229,6 @@ def _hsis_cache_put(key: Optional[Tuple[str, int, int]], value: Dict[str, Any]) 
         _HSIS_SIGNALS_CACHE.move_to_end(key)
         while len(_HSIS_SIGNALS_CACHE) > _HSIS_CACHE_MAX:
             _HSIS_SIGNALS_CACHE.popitem(last=False)
-
-
-def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
-    global _SDS_MAP_CACHE
-    if _SDS_MAP_CACHE is not None:
-        return _SDS_MAP_CACHE
-    docs_dir = Path(__file__).resolve().parents[1] / "docs"
-    merged: Dict[str, Dict[str, str]] = {}
-    picked: List[str] = []
-    if docs_dir.exists():
-        for path in docs_dir.glob("*.docx"):
-            # `"sds" in name` 은 `SwDS` 표기를 놓친다("swds" 에 "sds" 없음) — 단일 출처 사용.
-            if not is_sds_filename(path.name):
-                continue
-            picked.append(path.name)
-            _merge_sds_partition_map(merged, _extract_sds_partition_map(str(path)))   # (R52 리뷰 W3) 손복제 루프 → 단일 출처
-    if merged:
-        # ⚠ 침묵 금지 — 이 맵은 **프로젝트 무관**인데 실측상 요구-함수 링크 전량을
-        #   좌우한다(HDPDM01 기준 5,992건 100%). 어느 문서가 쓰였는지 남긴다.
-        _logger.warning(
-            "SDS 미지정 — 저장소 docs/ 글롭 폴백 사용(**프로젝트 무관**): %s (%d 엔트리). "
-            "대상 프로젝트의 SDS 를 넘기면 이 폴백은 쓰이지 않는다",
-            ", ".join(picked) or "(없음)", len(merged))
-    _SDS_MAP_CACHE = merged
-    return merged
 
 
 def _function_sds_candidates(info: Dict[str, Any]) -> List[str]:
@@ -1241,19 +1212,17 @@ def map_requirements_to_functions(
     Uses the `related` field in function_details to find reverse mapping.
 
     Args:
-        sds_map: `related` 필드로 못 잇는 함수를 요구에 잇는 **폴백 매핑 출처**.
-            None이면 저장소 `docs/` 글롭(`_load_default_sds_map`)을 쓰는데 이는
-            **프로젝트 무관**이다 — 실측(HDPDM01): 요구-함수 링크 5,992건이 100%
-            이 폴백에서 나왔다(폴백을 끄면 0/63). 요구 ID(`SwTR_0101` 등)는
-            프로젝트 간 네임스페이스가 겹쳐 오매핑이 걸러지지도 않으므로,
-            호출자가 대상 프로젝트의 SDS를 알고 있으면 반드시 넘길 것.
+        sds_map: `related` 필드로 못 잇는 함수를 요구에 잇는 SDS 파티션 맵(`suts.read_sds_input`). None 이면 빈 맵 —
+            (R66) 예전엔 저장소 `docs/` 글롭(이 저장소의 HDPDM01 SDS)이었다. 요구 ID(`SwTR_0101` 등)는 프로젝트 간
+            네임스페이스가 겹쳐 오매핑이 걸러지지도 않아, KJPDS02_PV 를 SDS 없이 만들면 링크 8,049 개가 HDPDM01 파티션에서
+            나왔다(114 개는 PV SDS 로는 생기지 않는 링크). SDS 가 없으면 이 경로와 설계 ID 브리지가 꺼지고 함수 자신의
+            `related` 만 남는다 — 요구가 함수에 안 붙는 사실은 매핑 통계 · 공시가 말한다.
         uds_design_ids: `함수 이름(lower) → [설계 ID]` (`load_uds_design_ids`).
             이름으로 SwDS 를 못 찾는 요구를 **설계 ID 경유**로 잇는 3티어.
             None/빈 dict 면 그 티어는 **꺼진다** — 없는 것을 있는 척하지 않는다.
     """
     req_to_fids: Dict[str, List[str]] = {r["id"]: [] for r in requirements}
-    if sds_map is None:
-        sds_map = _load_default_sds_map()
+    sds_map = sds_map or {}
 
     by_comment = by_sds = by_fuzzy = linkless = 0
     _sds_paths: Dict[str, int] = {}
@@ -3478,6 +3447,7 @@ def generate_sts(
     system_input_skips: Optional[List[str]] = None,
     hwrs_path: Optional[str] = None,
     hwds_path: Optional[str] = None,
+    input_skips: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -3510,6 +3480,8 @@ def generate_sts(
         hwds_path: (R50) HW 설계서 DOCX. 그 블록이 적은 감시 노드 분압식(``Sensor Power Monitor = Sensor Power *0.5``)으로
             HW 요구사항서의 노드 허용오차를 값의 척도로 환산한다. HSIS(``hsis_path``)의 SW 신호 행은 허브 블록 때문에
             미정인 감시 경로를 좁힌다.
+        input_skips: (R66) 호출자가 SRS · SDS · UDS · STP 를 로컬화하지 못한 사유 ``"<라벨>: <사유>"`` — 그 문서는 '주지
+            않음' 이 아니라 '지정했지만 열지 못함' 으로 공시한다(시스템 문서 · HSIS 는 ``system_input_skips``).
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage
@@ -3529,10 +3501,10 @@ def generate_sts(
     sds_summary = ""
     stp_ctx = ""
 
-    # 이 맵은 function_details 보강뿐 아니라 **요구-함수 매핑의 폴백 출처**로도 쓰인다
-    # (`map_requirements_to_functions`). None으로 두면 저장소 `docs/` 글롭(프로젝트 무관)이
-    # 대신하는데, 실측상 요구-함수 링크 전량이 그 폴백에서 나온다.
-    sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None
+    # 이 맵은 function_details 보강뿐 아니라 **요구-함수 매핑의 출처**다(`map_requirements_to_functions`).
+    # (R66) 없거나 못 읽으면 빈 맵 — 예전엔 None 이 저장소 `docs/` 글롭(다른 프로젝트 SDS)으로 넘어갔다(`read_sds_input`).
+    from generators.suts import input_documents_record, input_skip_reason, read_sds_input
+    sds_partition_map, _sds_reading = read_sds_input(sds_docx_path, skipped=input_skip_reason(input_skips, "SDS"))
 
     if sds_docx_path:
         _progress(7, "SDS 설계 컨텍스트 로드 중")
@@ -3540,16 +3512,8 @@ def generate_sts(
         if sds_summary:
             _logger.info("SDS summary loaded (%d chars)", len(sds_summary))
         # ⚠ 파티션 맵 추출을 summary 유무에 종속시키지 않는다 — 과거엔 `if sds_summary:`
-        # 안에 있어서, 요약 절이 안 잡히는 SDS면 파티션 표가 멀쩡해도 맵을 아예 안 만들고
-        # 조용히 저장소 폴백으로 넘어갔다.
-        try:
-            from report_gen.requirements import _extract_sds_partition_map
-            sds_partition_map = _extract_sds_partition_map(sds_docx_path) or None
-        except Exception as _e:
-            _logger.warning("SDS 파티션 맵 추출 실패 — 요구-함수 매핑이 저장소 docs/ "
-                            "폴백(프로젝트 무관)으로 넘어간다: %s (%s)", sds_docx_path, _e)
+        # 안에 있어서, 요약 절이 안 잡히는 SDS면 파티션 표가 멀쩡해도 맵을 아예 안 만들었다.
         if sds_partition_map:
-            _logger.info("SDS 파티션 %d건 로드 — 출처=%s", len(sds_partition_map), sds_docx_path)
             for fid, info in function_details.items():
                 if not isinstance(info, dict):
                     continue
@@ -3561,9 +3525,6 @@ def generate_sts(
                         if entry.get("description") and not info.get("sds_description"):
                             info["sds_description"] = entry["description"]
                         break
-        else:
-            _logger.warning("SDS를 지정했으나 파티션 0건 — 요구-함수 매핑이 저장소 docs/ "
-                            "폴백(프로젝트 무관)으로 넘어간다: %s", sds_docx_path)
 
     # 설계-ID 브리지의 좌측 끝. SwUDS 를 안 주면 **꺼진다** — 실측상 그 상태에서
     # 요구 매핑은 48/68 이고, 브리지가 켜지면 64/68 이다(`load_uds_design_ids` 참조).
@@ -3605,6 +3566,7 @@ def generate_sts(
     _progress(10, "요구사항 파싱 중")
     if srs_docx_path and Path(srs_docx_path).is_file():
         reqs = parse_srs_docx_tables(srs_docx_path)
+    _srs_table_n = len(reqs)    # (R66) 표에서 읽은 요구 수 — 0 이면 아래 본문 글 폴백이 대신한다(공시가 그 사실을 말한다)
 
     if not reqs and requirements_text:
         reqs = parse_requirements_structured(requirements_text)
@@ -3614,7 +3576,7 @@ def generate_sts(
     _progress(30, "요구사항-함수 매핑 중")
     _map_stats: Dict[str, Any] = {}
     req_to_fids = map_requirements_to_functions(reqs, function_details,
-                                                sds_map=sds_partition_map,
+                                                sds_map=sds_partition_map,   # (R66) 없으면 {} — 다른 프로젝트 SDS 로 잇지 않는다
                                                 uds_design_ids=uds_design_ids,
                                                 stats_out=_map_stats)
     mapped = sum(1 for v in req_to_fids.values() if v)
@@ -3628,6 +3590,18 @@ def generate_sts(
         stats_out=gen_stats,
     )
     gen_stats.update(_map_stats)
+    # (R66, 감사 #63 · #1) 입력 문서마다 지정했나 · 열었나 · 사유(SDS 는 파티션 수) — 공시 `sts_input_documents`
+    gen_stats["input_documents"] = dict(
+        input_documents_record({"SRS": srs_docx_path, "UDS": uds_path, "STP": stp_path}, input_skips),
+        SDS=dict(_sds_reading, blocks_unopened=[] if _sds_reading.get("read") or not _sds_reading.get("given")
+                 else ["sds_partitions"]))
+    _srs_doc = gen_stats["input_documents"]["SRS"]
+    if srs_docx_path:
+        _srs_doc["requirements"] = _srs_table_n
+        if not _srs_table_n and _srs_doc.get("opened"):
+            _srs_doc["reason"] = "요구 표 0 개(SRS 양식이 다르거나 SRS 가 아닌 문서)"
+    if reqs and not _srs_table_n:
+        _srs_doc["requirements_from_text"] = len(reqs)    # 표가 아니라 요구 문서 본문 글에서 읽은 요구
     _progress(60, f"테스트 케이스 {len(test_cases)}개 생성 완료")
     if gen_stats.get("functions_without_tc"):
         _logger.warning(

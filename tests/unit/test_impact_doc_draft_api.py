@@ -81,7 +81,7 @@ def test_doc_draft_full_expansion_uses_generator_defaults(client, monkeypatch):
         "globals_info_map": {},
     })
     monkeypatch.setattr(gsuts, "collect_unit_functions",
-                        lambda fdmap, gim=None: [{"name": "s_updateerrorcode",
+                        lambda fdmap, gim=None, **k: [{"name": "s_updateerrorcode",
                                                   "input_vars": [], "output_vars": []}])
     seen: dict = {}
 
