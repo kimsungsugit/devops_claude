@@ -680,7 +680,7 @@ def test_the_scan_records_stray_directives_and_the_cache_versions_move_together(
     assert [(d["op"], d["name"]) for d in cpc._stray_directives(cpc.shared_parser().parse(long).root_node, long)[
         "directives"]] == [("undef", "B")]
     from backend.helpers.uds import _SOURCE_SECTIONS_SCHEMA_VERSION
-    assert (cpc.SCHEMA_VERSION, _SOURCE_SECTIONS_SCHEMA_VERSION) == (24, "v52")
+    assert (cpc.SCHEMA_VERSION, _SOURCE_SECTIONS_SCHEMA_VERSION) == (24, "v53")
 
 
 def test_undecided_reasons_say_whether_an_input_can_settle_them():

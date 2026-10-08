@@ -278,15 +278,28 @@ def _parse_c_declaration_statement(stmt: str) -> List[Dict[str, str]]:
 
 def _read_bytes_resolver_aware(path: Path) -> bytes:
     """cloudium 모드면 worker IPC resolver로 read, 그 외(local/standalone)는 직접 read.
-    backend 미가용(standalone report_gen)이면 조용히 로컬 경로로 폴백 → 회귀 0."""
+    backend 미가용(standalone report_gen)이면 조용히 로컬 경로로 폴백 → 회귀 0.
+
+    (R68, 감사 #16) 워커 읽기가 실패하고 로컬 폴백도 실패하면 **워커의 예외**를 올린다 — 로컬 경로에 그 파일이 없다는
+    `FileNotFoundError` 가 워커 타임아웃 · 접근 거부를 가려, 호출자가 '없는 파일' 로 굳혔다(`utils._infer_type_from_file` 은
+    `FileNotFoundError` 만 캐시한다)."""
+    remote_exc: Optional[BaseException] = None
     try:
         from backend.services.file_resolver import get_resolver
         r = get_resolver()
         if getattr(r, "mode", "local") != "local":
-            return r.read_bytes(str(path))
+            try:
+                return r.read_bytes(str(path))
+            except Exception as exc:  # noqa: BLE001 — 로컬 폴백도 실패하면 아래에서 다시 올린다
+                remote_exc = exc
     except Exception:
         pass
-    return Path(path).read_bytes()
+    try:
+        return Path(path).read_bytes()
+    except OSError:
+        if remote_exc is not None:
+            raise remote_exc from None
+        raise
 
 
 # C 원문 읽기 상한.
@@ -319,11 +332,18 @@ def _read_source_text(
     `_read_text_limited` 는 절단을 조용히 한다. 호출자가 "잘렸다" 를 셀 수 있어야
     "이 프로젝트엔 그 매크로가 원래 없다" 와 구분된다.
     """
+    return _read_source_text_checked(path, max_bytes)[:3]
+
+
+def _read_source_text_checked(path: Path, max_bytes: int = _SRC_READ_MAX_BYTES) -> Tuple[str, int, bool, str]:
+    """(R68, 감사 #16) `_read_source_text` + 읽기 실패의 종류(예외 클래스 이름 — 경로 · 메시지는 싣지 않는다, 성공이면 "").
+    빈 원문만으로는 '빈 파일' 과 '못 읽은 파일' 이 같아, 소스 단계가 못 읽은 파일의 함수를 '소스 단계에 없는 파일' 로 적었다."""
     try:
         data = _read_bytes_resolver_aware(path)
-    except Exception:
-        return "", 0, False
-    return _cap_and_decode(data, max_bytes)
+    except Exception as exc:  # noqa: BLE001 — 종류를 돌려준다(호출자가 기록 · 공시)
+        return "", 0, False, type(exc).__name__
+    text, raw_len, truncated = _cap_and_decode(data, max_bytes)
+    return text, raw_len, truncated, ""
 
 
 def _cap_and_decode(data: bytes, max_bytes: int = _SRC_READ_MAX_BYTES) -> Tuple[str, int, bool]:

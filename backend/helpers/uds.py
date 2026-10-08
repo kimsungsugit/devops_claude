@@ -443,6 +443,21 @@ def _note_source_caps(issues: IssueCollector, source_sections: Dict[str, Any]) -
         issues.add("source_cap_reached", "warning", "actual",
                    f"파일 상한({fs.get('cap')})에 닿아 나머지 소스 파일은 읽지 않았다 — max_source_files 로 조정",
                    stage="source", facts={"cap": fs.get("cap"), "axis": "files"})
+    rf = source_sections.get("source_read_failures") or {}
+    if isinstance(rf, dict) and rf.get("files"):
+        # (R68, 감사 #16) 못 읽은 파일 — 그 파일의 함수 · 선언이 빠졌다(빈 파일과 다르다)
+        kinds = rf.get("kinds") if isinstance(rf.get("kinds"), dict) else {}
+        issues.add("source_read_failed", "warning", "actual",
+                   f"소스 파일 {rf.get('files')}개를 읽지 못했다({', '.join(f'{k} {v}' for k, v in kinds.items())})"
+                   # (리뷰 4차 W2) Reset 0 을 비우는 것은 주 스캔이 파일을 놓쳤을 때뿐이다(`.cproject` 만 못 읽은 것 등은 아니다)
+                   + (" — 주 스캔이 놓친 파일에서만 모으는 선언(매크로 · typedef · enum · 구조체 멤버) · 주석의 요구 ID · Reset 함수 "
+                      "대입이 빠졌을 수 있어 Reset Value 는 정적 저장기간 0 을 대신 쓰지 않고 비웠다(구문 분석도 못 읽었다면 그 파일의 "
+                      "함수가 목록에 없다)" if (rf.get("lost") or {}).get("scan") else
+                      " — 그 파일의 원문 · 선언이 필요한 칸은 미상일 수 있다")
+                   + (" (PermissionError 에는 워커 타임아웃 · 연결 실패도 포함된다)" if "PermissionError" in kinds else "")
+                   + ". 다시 생성하면 다시 읽는다",
+                   stage="source", facts={"files": rf.get("files"), "kinds": kinds, "lost": rf.get("lost") or {},
+                                          "detail": (rf.get("detail") or [])[:3]})
     gs = source_sections.get("globals_scan") or {}
     if isinstance(gs, dict) and gs.get("measured"):
         if (gs.get("c_total") or 0) > (gs.get("c_cap") or 0) or (gs.get("h_total") or 0) > (gs.get("h_cap") or 0):
@@ -1480,7 +1495,12 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   포인터를 담지 않는다고 읽으므로, 익명 공용체의 포인터를 빠뜨린 21 의 사실은 쓰지 않는다).
 # (R64 리뷰 3차) v51: project_context 스키마 23(함수 안 typedef 이름 · K&R 정의 · 본문 #define 본문 — 22 의 사실에는 없다).
 # (R64 리뷰 4차) v52: project_context 스키마 24(파일별 `paren_amp` — 문법이 비트 and 로 읽는 `(T)&x` — 23 의 사실에는 없다).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v52"
+# (R68, 감사 #16) v53: `source_read_failures`(끝내 읽지 못한 파일) · 함수 레코드 `source_unavailable_reason=source_read_failed:<종류>`.
+#   52 로 캐시된 결과는 읽기 실패를 빈 원문으로 담았을 수 있다 — 다시 읽는다. 읽기 실패가 있는 결과는 캐시하지 않는다(아래).
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v53"
+#: (R68 리뷰 W3) 읽기 실패가 든 결과는 디스크에 두지 않고 메모리에만 이만큼 — 한 묶음(STS · SUTS · SITS 연속 생성)은 파싱 한 번을
+#   나눠 쓰고, 사용자의 다음 생성은 다시 읽는다. 0 이면 담지 않는다.
+_FAILED_SECTIONS_TTL = 90.0
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -1579,7 +1599,7 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
         # Lightweight TTL cache to avoid repeated heavy parsing.
         _cache_ttl = getattr(config, "UDS_SOURCE_SECTIONS_CACHE_TTL", 1800)
         _sig_ok = (not _sig) or (item or {}).get("signature") == _sig
-        if item and _sig_ok and (now - float(item.get("cached_at") or 0.0) <= _cache_ttl):
+        if item and _sig_ok and (now - float(item.get("cached_at") or 0.0) <= float(item.get("ttl", _cache_ttl))):
             payload = item.get("payload")
             if isinstance(payload, dict):
                 return deepcopy(payload)
@@ -1607,6 +1627,21 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
         source_root, preprocess=preprocess, max_files=max_files, max_items=max_items)
     elapsed = time() - t0
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
+    _failures = (sections.get("source_read_failures") or {}) if isinstance(sections, dict) else {}
+    if isinstance(_failures, dict) and _failures.get("files"):
+        # (R68, 감사 #16) 읽기 실패(워커 타임아웃 · 접근 거부)가 든 결과를 30 분 · 디스크로 담으면 그동안 그 파일의 함수 ·
+        #   선언이 계속 빠진다 — 메모리에만 짧게(리뷰 W3: 아예 안 담으면 실패가 계속되는 동안 모든 생성이 전체 재파싱을 하고
+        #   Cloudium 에선 파일마다 워커 타임아웃을 다시 기다린다).
+        _log.warning("[source_sections] %s 개 파일을 읽지 못해 %.0f 초만 메모리에 둔다 (%s)", _failures.get("files"),
+                     _FAILED_SECTIONS_TTL, ", ".join(f"{k} {v}" for k, v in (_failures.get("kinds") or {}).items()))
+        # (리뷰 2차 W-B) 파싱이 **끝난 뒤** 부터 센다 — Cloudium 파싱은 분 단위라 시작부터 세면 담는 순간 이미 지났다. 설정한
+        #   보통 TTL 보다 오래 두지 않는다(캐시를 끈 설정 0 이 실패 결과만 붙잡지 않게).
+        _ttl_failed = min(_FAILED_SECTIONS_TTL, float(_cache_ttl))
+        if _ttl_failed > 0:
+            with _source_sections_cache_lock:
+                _source_sections_cache[key] = {"payload": sections, "cached_at": time(), "signature": _sig,
+                                               "ttl": _ttl_failed}
+        return deepcopy(sections)
     with _source_sections_cache_lock:
         _source_sections_cache[key] = {"payload": sections, "cached_at": now, "signature": _sig}
     if _sig:

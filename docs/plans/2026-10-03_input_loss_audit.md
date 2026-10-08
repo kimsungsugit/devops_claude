@@ -21,7 +21,7 @@
 | 18 | SwUDS 범위 → 경계 | `suts.py:2051-2061` vs `880-885 · 1274-1277` | `param_info` 키는 `p->m` 인데 이름은 `p[0].m` 이고 조회는 `p.m` — 포인터 멤버 파라미터의 설계 범위가 늘 어긋나 타입 폭으로 떨어진다 | 침묵(`bounds_source=type`) | 결정적 불일치 |
 | 25 · 26 | SRS docx | `sts.py:1033-1039 · 1050-1052` | 키 칸이 두 열에 병합되면 요구 전체가 빠진다(합성 탐침 `ID / ID / SwTR_0201`), 같은 키 두 줄이면 앞 줄을 버린다 | 침묵 | STS · SUTS · SITS 공유. 형제 파서(`sts_requirement_tc.py:285-293`)는 처리한다 |
 | 3 | SUTS oracle 범위 | `suts.py:3715-3727` · `test_evidence.py:27-30` | 범위가 없으면(스키마 불일치 · 문맥 없음 · 파일이 문맥 밖) 그 unit 의 기대값이 사실상 전부 미상 | 집계 침묵(칸 사유만) | |
-| 16 | 소스 읽기 오류 | `source_parser.py:322-325` · `uds_generator.py:586-595` | 읽기 예외가 `""` 이 되고 잘림으로도 안 센다 → SUTS 가 `source_file_not_in_source_stage` 로 **틀리게** 적는다 | 침묵 · 사유 오기 | IPC 타임아웃(#58)이 여기로 |
+| 16 | 소스 읽기 오류 | `source_parser.py:322-325` · `uds_generator.py:586-595` | 읽기 예외가 `""` 이 되고 잘림으로도 안 센다 → SUTS 가 `source_file_not_in_source_stage` 로 **틀리게** 적는다 | 침묵 · 사유 오기 | IPC 타임아웃(#58)이 여기로 — **R68 에서 해소**: 실패 종류와 잃은 것을 기록해 사유 `source_read_failed:<종류>` · 문제 목록 `source_read_failed` · 공시 `{suts,sits}_source_read_failures`, 실패는 늦게 한 번 더 읽고 원래 순서로 수집, 다시 읽기 실패가 원문을 덮지 않고, 주 스캔이 놓친 파일이 있으면 Reset Value 0 을 비우고, 실패 결과는 메모리에만 잠깐 |
 | 45 | const 표 | `c_project_context.py:552-553 · 2385-2389` | 초기화 20,000 자 초과 · 지정 초기화 · 2 차원이면 값이 None → 읽기가 `initial_value_not_in_inputs:TBL[i]` 가 되어 거짓 소견 | 침묵 · 사유 오기 | **R67 에서 해소** — 실측(HEAD)으로는 그 거짓 소견 칸이 두 프로젝트 모두 0 이었다(읽는 칸은 다른 사유로 미상). 지정 초기화 · extern 표의 정의 연결 · `(S16)-x` 원소(#105)를 읽어 모든 단위에서 값을 쥔 const 표 이름 HD 0 → 2 / 4 · PV 20 → 27 / 27, 못 읽는 표는 `const_values_unread:<표>:<사유>` 로 적고 입력 결손으로 세지 않는다. 설계서가 입력으로 적은 const 객체는 행에서 빼고 공시(`suts_uds_const_inputs`) |
 | 6 · 7 | SITS 진입 함수 전역 | `sits.py:1453-1460 · 1484 · 1407 · 1369` | 진입 함수가 직접 쓰는 전역은 기대값 후보가 안 되고(BFS 가 진입을 건너뜀), 입력은 예산 전에 `[:15]` 로 잘린다 | 침묵 | 모든 흐름에 무조건 |
 | 8 | SITS 안 쓰는 입력 | `sits.py:3610-3644 · 3750-3758 · 3905-3915` | HSIS · SDS 요약 · UDS 설명을 읽고 로그만 남긴다 — 1.4 Reference 시트는 쓴 것처럼 적는다 | 침묵 · 오기 | |
@@ -101,7 +101,7 @@
 | 13 | `c_parser.py:1387-1421` · `uds_generator.py:1044-1053` | Cloudium 전용 루트를 로컬 `Path` 로 읽어 AST 패스가 빈다(루트마다 `except: pass`) → 정규식 폴백만 | 침묵 |
 | 14 | `uds_generator.py:601-606` · `helpers/uds.py:1534-1551` · `routers/local.py:191-195` | 없는 루트를 기록 없이 뺀다(BOOT 등) | 침묵 |
 | 15 | `uds_generator.py:1093-1109` | 같은 (이름, 파일) 정의는 첫 것만 — `#if`/`#else` 양쪽 본문을 다 파싱하므로 활성 아닌 쪽이 이길 수 있다 | 침묵 |
-| 16 | `source_parser.py:322-325` · `uds_generator.py:586-595 · 1637-1641` | 읽기 예외 → `""`, 잘림으로 안 셈 → 사유 오기 | 침묵 · 오기 (R63: 문맥이 읽지 못한 파일 수와 문서 함수가 include 하는 것을 `*_source_reading` 공시에) |
+| 16 | `source_parser.py:322-325` · `uds_generator.py:586-595 · 1637-1641` | 읽기 예외 → `""`, 잘림으로 안 셈 → 사유 오기 | **R68 에서 해소**(R63: 문맥이 읽지 못한 파일 수와 문서 함수가 include 하는 것을 `*_source_reading` 공시에) |
 | 17 | `source_parser.py:340` · `uds_generator.py:589`(ignore) vs `593`(replace) | CP949 해독 없음 — 한글 주석 손실, 로컬과 Cloudium 결과가 다름 | 침묵 |
 | 45 | `c_project_context.py:552-553 · 2385-2389` | const 표 초기화 20,000 자 초과 · 지정 · 2 차원 → 값 None → 거짓 소견 | **R67 에서 해소**: 지정 초기화 · extern 정의 연결, 못 읽으면 사유(`values_unread` → `const_values_unread`) — 2 차원 · 구조체 원소는 사유만(`nested_initializer_list`) |
 | 105 | tree-sitter-c · `c_project_context._eval` · `c_source_oracle` · `mcdc_design` · `boundary_rows` | `(S16)-1800` 을 `S16 - 1800` 으로 파싱 → 타입 이름이 '선언되지 않은 이름' 이 되어 그 식 · const 표 · 결정이 미상 | **R67 에서 해소**(위 'R67 측정 중 드러난 것') |
@@ -110,7 +110,7 @@
 | 49 | `c_project_context.py:438 · 1519-1524 · 1566` | 파일별 `parse_error` · `unknown_conditions` 를 저장만 하고 안 읽는다 | **R63**: 파일별 `reading`(남은 구문 오류 종류 · 표본)을 `*_source_reading` 으로 공시 |
 | 50 | `c_parser.py:1404-1406` | 루트당 1,200 파일 | 침묵 |
 | 51 | `helpers/uds.py:1472-1587` | 소스 캐시 서명이 앞 1,200 파일만 · component JSON 무시 · Cloudium 은 서명 None 으로 30 분 미검증 재사용 | 침묵(낡음) |
-| 58 | `file_resolver.py:583 · 623 · 646` | worker IPC 60 초(4 MB 조각) · `list_dir` 30 초 → PermissionError → #16 로 삼켜지거나 전체 파싱이 경량 파싱으로 | 로그만 |
+| 58 | `file_resolver.py:583 · 623 · 646` | worker IPC 60 초(4 MB 조각) · `list_dir` 30 초 → PermissionError → #16 로 삼켜지거나 전체 파싱이 경량 파싱으로 | 로그만 — R68: 소스 단계의 읽기 타임아웃은 실패로 기록 · 공시(`list_dir` · 경량 파싱 폴백은 그대로) |
 | 59 · 60 | `suts.py:6098-6148` · `sits.py:3682-3692` | 경량 파싱 폴백: 다중 루트 0 함수 · 반환형 void 강제 · 전역 없음 / 첫 루트만 | 로그만 |
 | 73 | `source_parser.py:311 · 336-338` | 파일당 2 MB 캡(문맥은 캡 없이 다시 읽음) | 부분 |
 | 74 · 75 | `uds_generator.py:487-536` · `c_project_context.py:1494-1506` | 문맥 4,000 파일 캡 · 읽지 못한 파일 · include 는 같은 폴더 또는 유일 basename(-I 없음) | 부분(`:partial_context`) |
@@ -184,7 +184,7 @@
 
 ## 처리 원칙
 
-- 고칠 때 순서: **대체 · 오도**(~~#62 · #1~~ R66 · #8 · #16 · ~~#45~~ R67) → **SUTS 결정적 손실**(~~#18~~ R65 · #3 · #4 · #5) → SITS(#6 · #7 · #9) → STS(#25 · #2 · #29).
+- 고칠 때 순서: **대체 · 오도**(~~#62 · #1~~ R66 · #8 · ~~#16~~ R68 · ~~#45~~ R67) → **SUTS 결정적 손실**(~~#18~~ R65 · #3 · #4 · #5) → SITS(#6 · #7 · #9) → STS(#25 · #2 · #29).
 - (R66 추가) 같은 '대체' 계열로 남은 것: 저장소 `docs/uds_function_swcom_override.json`(override 스냅샷 251 함수)이 프로젝트 확인 없이 모든 생성에 적용된다 — HDPDM01 소스 함수 218 개가 그 등급을 `asil_source=override` 로 받고 스냅샷 전용 자리표시 unit 31 개가 SwUDS 범위에 남는다(KJPDS02_PV 228 · 0). R70 이 표지(`override`)는 붙였다. 계획서 백로그 13.
 - 상한 자체를 없애는 것이 목표가 아니다 — 걸리면 **몇 개가 걸렸는지 · 무엇이 빠졌는지** 를 산출물과 공시에 남기고, 채울 수 있는 것(입력 문서 · 빌드 설정)이 있으면 안내한다.
 - 규칙 파서가 못 읽는 표 · 문장은 LLM 으로 읽어도 된다 — 원문 인용 대조로 검증하고 'AI 제안' 라벨, 기대값 · 스텝 확정에는 쓰지 않는다.

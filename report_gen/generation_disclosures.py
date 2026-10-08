@@ -1417,6 +1417,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out.extend(_uds_reading_item(qr.get("uds_reading")))                                         # (R65)
     out.extend(_uds_const_inputs_item(qr.get("uds_const_inputs")))                               # (R67)
     out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
+    out.extend(_source_read_failures_item(qr.get("source_read_failures"), "suts_source_read_failures"))   # (R68)
     out.extend(_pointer_targets_item(qr.get("pointer_targets"), "suts_pointer_targets"))       # (R64)
     return out
 
@@ -1618,6 +1619,8 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                                      "sits_body_projection", doc="sits"))   # (R62)
     out.extend(_source_reading_item((qr.get("integration_oracle") or {}).get("source_reading"),
                                     "sits_source_reading", doc="sits"))   # (R63)
+    out.extend(_source_read_failures_item(qr.get("source_read_failures"), "sits_source_read_failures",
+                                          doc="sits"))   # (R68 리뷰 W4)
     out.extend(_pointer_targets_item((qr.get("integration_oracle") or {}).get("pointer_targets"),
                                      "sits_pointer_targets", doc="sits"))   # (R64)
 
@@ -1836,6 +1839,40 @@ _UDS_NOTATION_LABELS = {
     "two_value_list": "값 둘 목록(범위가 아니라 두 값으로 읽음)",
     "hex_without_prefix": "0x 없는 16진",
 }
+
+
+def _source_read_failures_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:
+    """(R68, 감사 #16) 소스 단계가 읽지 못해 무엇을 잃은 파일 — 빈 파일이 아니라 읽기 실패(워커 타임아웃 · 접근 거부 등)다.
+    파일도 원문 없는 함수도 없으면 말하지 않는다(구판 산출물 · 해당 0 — 리뷰 W1: 함수만 있어도 말한다)."""
+    if not isinstance(block, dict) or not (_int(block, "files") or _int(block, "units")):
+        return []
+    kinds = block.get("kinds") if isinstance(block.get("kinds"), dict) else {}
+    losses = block.get("lost") if isinstance(block.get("lost"), dict) else {}
+    files = [f"{d.get('file')}({d.get('error')})" for d in (block.get("detail") or []) if isinstance(d, dict)]
+    units = _int(block, "units") or 0
+    who = "unit" if doc == "suts" else "함수"
+    lost_what = "기대값" if doc == "suts" else "그 함수를 지나는 통합 기대값"   # (리뷰 2차 I-b) MC/DC 는 원문 없이도 logic_flow 로 설계한다
+    headers = [str(x) for x in (block.get("headers_scan_missed") or [])]
+    return [_item(
+        key, "소스 파일 읽기 실패", f"파일 {_show(_int(block, 'files'))} · 원문 없는 {who} {units}",
+        "소스 단계가 읽지 못한 파일이다(" + " · ".join(f"{k} {v}" for k, v in kinds.items())
+        + (" — PermissionError 에는 워커 타임아웃 · 연결 실패도 포함된다" if "PermissionError" in kinds else "") + "): "
+        + ", ".join(files[:_HEAD_N]) + (" …" if len(files) > _HEAD_N else "")
+        + ". 빈 파일이 아니라 읽기 실패다."
+        + (f" 주 스캔이 다시 읽어도 못 읽은 파일 {losses.get('scan')}개는 그 파일에서만 모으는 것 — 주석의 요구 ID · 파일 머리 "
+           "ASIL · 매크로 · typedef · enum · 구조체 멤버 · Reset 함수 대입 · @주소 배치 — 이 빠졌다(뒤의 읽기가 원문을 얻었어도 이 "
+           "수집은 빠진 채다). 구문 분석이 그 파일을 읽었다면 함수와 그 함수 주석의 ASIL · 설명은 있고, 못 읽었다면 그 파일의 함수가 "
+           "목록에 없다. 그래서 UDS 의 Reset Value 는 정적 저장기간 0 을 대신 쓰지 않고 비운다(사유 `소스 스캔 불완전`)."
+           if losses.get("scan") else "")
+        + (" 주 스캔이 못 읽은 헤더(" + ", ".join(headers[:_HEAD_N]) + ")의 주석에서 오는 **다른 파일** 함수의 ASIL · 설명은 "
+           f"TBD · 빈칸일 수 있다 — 원문 없는 {who} 수에는 들지 않는다." if headers else "")
+        + (f" 그 파일에 정의된 {who} {units}개(예: " + ", ".join(str(x) for x in (block.get("unit_samples") or [])[:_HEAD_N])
+           + f")는 원문 없이 남아 {lost_what}이 미상이고 칸 사유가 `source_read_failed:<종류>` 다." if units else "")
+        + (f" 끝내 원문을 얻지 못한 파일 {losses.get('text')}개의 선언(매크로 · 타입 · 전역)이 필요한 칸은 미상이다."
+           if losses.get("text") else "")
+        + " 워커 · 접근 권한을 확인하고 다시 생성하면 다시 읽는다(읽기 실패가 든 소스 분석 결과는 디스크에 두지 않고 메모리에만 "
+          "잠깐 — 파싱이 끝난 뒤 최대 90 초 — 둔다).",
+        tone=_tone(True))]
 
 
 def _uds_const_inputs_item(block: Any) -> List[Dict[str, Any]]:

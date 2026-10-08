@@ -62,6 +62,8 @@ SKIP_DECL_NONNUMERIC = "선언값 비수치"
 SKIP_CONFLICT = "리셋 대입 상충"
 SKIP_RUNTIME = "리셋이 런타임 값"
 SKIP_PLACED = "배치 주소(데이터시트)"
+#: (R68) 소스 스캔이 읽지 못한 파일이 있다 — 그 파일의 Reset 함수 대입 · 배치 주소를 모르므로 0 을 근거로 삼지 않는다
+SKIP_SCAN_INCOMPLETE = "소스 스캔 불완전"
 
 #: 함수 이름에 `reset`/`init` 이 **한 마디로** 들어간 것만. 부분 문자열로 보면
 #: `initiate_transfer` 같은 이름이 걸린다.
@@ -209,6 +211,7 @@ def resolve_reset(
     macro_values: Optional[Dict[str, Any]] = None,
     *,
     placed: bool = False,
+    scan_incomplete: bool = False,
 ) -> Tuple[str, str]:
     """`(셀에 적을 문자열, 출처)`. 못 정하면 `("", 사유)`.
 
@@ -243,6 +246,10 @@ def resolve_reset(
         return "", SKIP_RUNTIME
     if placed:
         return "", SKIP_PLACED
+    if scan_incomplete:
+        # (R68) 정적 저장기간 0 은 '어느 리셋 함수도 값을 넣지 않고 배치 주소도 아니다' 일 때만 근거다 — 소스 스캔이 못 읽은 파일이
+        #   있으면 그걸 확인하지 못했다(그 파일의 Reset 함수가 값을 넣을 수 있다)
+        return "", SKIP_SCAN_INCOMPLETE
     return f"{format_reset(0, ctype)} ({RESET_SRC_ZERO})", RESET_SRC_ZERO
 
 

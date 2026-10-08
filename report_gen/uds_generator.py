@@ -93,7 +93,7 @@ from report_gen.source_parser import (  # noqa: E402
     _extract_local_static_candidates,
     _extract_macro_call_names,
     _norm_def_axis,
-    _read_source_text,
+    _read_source_text_checked,
     _read_text_limited,
     _scan_source_comment_patterns,
     _short_def_path,
@@ -484,8 +484,58 @@ def _did_pattern_hits(fn_body: str, patterns: List["re.Pattern[str]"]) -> Tuple[
 
 
 
+#: (R68) 읽기 실패로 잃은 것의 종류 — 공시 · 문제 목록의 낱말
+READ_FAILURE_LOSSES = ("scan", "function_text", "text")
+
+
+def summarize_read_failures(failed: Dict[str, str], texts: Dict[str, str], *, scan_missed: Optional[Dict[str, str]] = None,
+                            record_failed: Optional[Dict[str, str]] = None, roots=()) -> Dict[str, Any]:
+    """(R68, 감사 #16) 읽지 못해 무엇을 잃은 소스 파일 — 세 사실의 합집합(파일마다 잃은 것 `lost`):
+
+    - ``scan``: 주 텍스트 루프가 다시 읽어도 못 읽었다 — 그 루프만 모으는 주석 · @asil · 매크로 · typedef · enum · 대체 함수
+      레코드가 빠졌다. 뒤의 읽기가 원문을 얻어도 센다(리뷰 C1 — 지우면 ASIL D 가 TBD 로 떨어진 결과가 '실패 0' 으로 캐시됐다).
+    - ``function_text``: 함수 레코드에 `source_read_failed` 사유를 줬다 — 뒤에 문맥 걷기가 읽어도 그 레코드는 원문이 없다(W1).
+    - ``text``: 마지막 읽기가 실패했고 원문을 끝내 얻지 못했다(``failed`` 는 마지막 읽기의 기록).
+
+    공시 · 문제 목록으로 나가므로 파일은 `r<루트>:<상위폴더>/<파일>`(APP · BOOT 쌍둥이를 가른다)과 예외 클래스 이름만 싣고, 전체
+    경로는 서버 로그에만 남긴다."""
+    lost: Dict[str, Dict[str, Any]] = {}
+
+    def add(path: str, kind: str, what: str) -> None:
+        rec = lost.setdefault(path, {"error": kind, "lost": []})
+        if what not in rec["lost"]:
+            rec["lost"].append(what)
+
+    for p, k in (scan_missed or {}).items():
+        add(p, k, "scan")
+    for p, k in (record_failed or {}).items():
+        add(p, k, "function_text")
+    for p, k in (failed or {}).items():
+        # (리뷰 2차 I-e) 원문을 끝내 못 얻어 잃는 것은 문맥이 읽는 파일 — `.c` · `.h` 와 툴체인을 정하는 `.cproject`(있는데 못
+        #   읽은 것만 여기 남는다 — `_src_read_optional`)
+        if not (texts or {}).get(p) and (str(p).lower().endswith((".c", ".h")) or Path(str(p)).name == ".cproject"):
+            add(p, k, "text")
+    kinds: Dict[str, int] = {}
+    losses: Dict[str, int] = {}
+    # (리뷰 3차 I3) 주 스캔이 놓친 헤더는 `detail[:10]` 과 따로 — 다른 파일 함수의 ASIL · 설명이 그 헤더 주석에서 온다
+    headers = sorted(_short_def_path(p, [str(r) for r in roots or ()]) for p, r in lost.items()
+                     if str(p).lower().endswith(".h") and "scan" in r["lost"])
+    for rec in lost.values():
+        kinds[rec["error"]] = kinds.get(rec["error"], 0) + 1
+        for what in rec["lost"]:
+            losses[what] = losses.get(what, 0) + 1
+    if lost:
+        _logger.warning("소스 파일 %d개를 읽지 못했다: %s", len(lost),
+                        "; ".join(f"{p} ({r['error']}, {'+'.join(r['lost'])})" for p, r in sorted(lost.items())[:20]))
+    roots = [str(r) for r in roots or ()]
+    return {"files": len(lost), "kinds": kinds, "lost": losses, "headers_scan_missed": headers[:10],
+            "detail": [{"file": _short_def_path(p, roots), "error": r["error"], "lost": list(r["lost"])}
+                       for p, r in sorted(lost.items())[:10]]}
+
+
 def _build_project_context(source_text_cache: Dict[str, str], read_truncated: List[Tuple[str, int]],
-                           roots=(), walk=None, read=None, max_files: int = 4000) -> Dict[str, Any]:
+                           roots=(), walk=None, read=None, max_files: int = 4000,
+                           read_optional=None) -> Dict[str, Any]:
     """루트 아래 **모든** `.c`/`.h` 원문으로 프로젝트 C 문맥을 만든다(`generators.c_project_context`). 실패는 사유로 남긴다.
 
     ⚠ 문서 범위와 컴파일 문맥은 다르다: 소스 단계는 component_map `verify=X` 파일(LIN 드라이버·`Include_File_Management.h`)을
@@ -519,7 +569,8 @@ def _build_project_context(source_text_cache: Dict[str, str], read_truncated: Li
     if read is not None:
         for root in roots or ():
             try:
-                text = read(Path(root) / ".cproject")
+                # (R68) `.cproject` 는 있을 수도 없을 수도 있다 — 없는 것은 읽기 실패가 아니다(`read_optional`)
+                text = (read_optional or read)(Path(root) / ".cproject")
             except (OSError, ValueError, PermissionError):
                 text = ""
             if text:
@@ -583,16 +634,35 @@ def generate_uds_source_sections(
                 for _n in _fns:
                     yield Path(_dp) / _n
 
+    # (R68, 감사 #16) 읽지 못한 파일 → 실패 종류(예외 클래스 이름). 빈 원문만 남기면 '빈 파일' 과 갈리지 않아, 그 파일의
+    #   함수가 SUTS 에서 '소스 단계에 없는 파일' 로 적혔다. 이 표는 **그 경로의 마지막 읽기** 다 — 나중 읽기가 원문을 얻으면
+    #   지운다. 무엇을 잃었는지는 지우지 않는 두 표가 따로 적는다(리뷰 C1 · W1 — '나중 읽기가 실패를 지운다' 로는 주 루프가
+    #   놓친 수집 · 이미 사유를 받은 함수 레코드가 사라진 채 결과가 '실패 0' 으로 캐시됐다):
+    #   `_scan_missed` — 주 텍스트 루프가 다시 읽어도 못 읽은 파일(그 루프만 모으는 주석 · @asil · 매크로 · typedef · enum ·
+    #   대체 함수 레코드를 잃는다), `_record_failed` — 함수 레코드에 `source_read_failed` 사유를 준 파일.
+    _read_failed: Dict[str, str] = {}
+    _scan_missed: Dict[str, str] = {}
+    _record_failed: Dict[str, str] = {}
+
     def _src_read(p) -> str:
-        if _src_resolver is not None:
-            try:
-                return _src_resolver.read_bytes(str(p)).decode("utf-8", errors="ignore")
-            except Exception:
-                return ""
         try:
-            return Path(p).read_text(encoding="utf-8", errors="replace")
-        except Exception:
+            if _src_resolver is not None:
+                text = _src_resolver.read_bytes(str(p)).decode("utf-8", errors="ignore")
+            else:
+                text = Path(p).read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001 — 빈 원문(옛 계약) + 실패 기록
+            _read_failed.setdefault(str(p), type(exc).__name__)
             return ""
+        _read_failed.pop(str(p), None)
+        return text
+
+    def _src_read_optional(p) -> str:
+        """있을 수도 없을 수도 있는 파일(`.cproject`) — 없으면(`FileNotFoundError`) 읽기 실패로 세지 않는다. 있는데 못 읽은
+        것(워커 타임아웃 · 접근 거부)은 센다 — 툴체인 매크로를 잃는다."""
+        text = _src_read(p)
+        if _read_failed.get(str(p)) == "FileNotFoundError":
+            del _read_failed[str(p)]
+        return text
 
     def _src_relbase(p):
         # 모듈명 계산용. cloudium은 로컬 resolve 금지(원격경로 그대로), local은 기존 resolve.
@@ -800,8 +870,53 @@ def generate_uds_source_sections(
     # 않으면 "이 프로젝트엔 그 선언이 원래 없다" 와 구분되지 않는다
     # (실측: 200KB 캡이 IO_Map.h 의 매크로 69% 를 지웠는데 로그가 한 줄도 없었다).
     _read_truncated: List[Tuple[str, int]] = []
-    for p in files:
-        raw, _raw_len, _cut = _read_source_text(p)
+
+    def _source_unavailable(file_path) -> str:
+        """함수 레코드의 `source_unavailable_reason` — 잘려 읽힘 · (R68) 끝내 못 읽음(종류) · 없음."""
+        if any(p == file_path for p, _ in _read_truncated):
+            return "source_read_truncated"
+        if file_path and not source_text_cache.get(file_path) and file_path in _read_failed:
+            _record_failed.setdefault(file_path, _read_failed[file_path])
+            return "source_read_failed:" + _read_failed[file_path]
+        return ""
+
+    _reread: Set[str] = set()
+
+    def _needs_read(file_path) -> bool:
+        """함수 정의 파일을 (다시) 읽어야 하나 — 아직 안 읽었거나, (R68) 읽기에 실패해 빈 원문으로 남은 파일. 실패한 파일은
+        **한 번만** 더 읽는다 — 함수마다 다시 읽으면 워커 타임아웃(60 초)이 그 파일의 함수 수만큼 쌓인다."""
+        if file_path not in source_text_cache:
+            return True
+        if not source_text_cache[file_path] and file_path in _read_failed and file_path not in _reread:
+            _reread.add(file_path)
+            return True
+        return False
+
+    # (리뷰 C1 · 2차 W-C · 3차 W1) 이 루프가 모으는 것(주석의 요구 ID · 파일 머리 ASIL · 매크로 · typedef · enum · 구조체 멤버 ·
+    #   Reset 함수 대입 · @주소 배치 · 대체 함수 레코드)은 뒤에서 다시 오지 않는다 — **읽기를 먼저 끝내고**, 못 읽은 파일은 나머지를
+    #   다 읽은 뒤 한 번 더 읽는다(일시 실패가 풀릴 시간). 수집은 원래 순서로 한다: 늦게 읽은 파일을 끝으로 돌리면 먼저 · 나중 값을
+    #   남기는 수집기(매크로 · 구조체 멤버 타입 — PV 에 APP/BOOT 매크로 충돌 15)의 결과가 바뀐 채 '실패 0' 으로 캐시됐다.
+    #   그래도 못 읽으면 지우지 않는 기록에 남긴다(뒤의 읽기가 원문을 얻어도 이 수집은 빠져 있다).
+    _reads = [_read_source_text_checked(p) for p in files]
+    for _i, _r in enumerate(_reads):
+        if _r[3]:
+            _again = _read_source_text_checked(files[_i])
+            if not _again[3]:
+                _reads[_i] = _again
+    _collected: Set[str] = set()
+    for p, (raw, _raw_len, _cut, _read_err) in zip(files, _reads, strict=True):
+        _norm = os.path.normcase(os.path.normpath(str(p)))
+        if _read_err:
+            if _norm in _collected:
+                # (리뷰 3차 I1) 루트가 겹쳐 같은 파일이 다시 나왔다 — 앞의 철자가 이미 모았다(빈 원문으로 덮지 않는다)
+                continue
+            _scan_missed[str(p)] = _read_err
+            _read_failed[str(p)] = _read_err
+        else:
+            _collected.add(_norm)
+            # (리뷰 2차 I-d) 같은 파일의 다른 철자를 앞에서 못 읽었어도 여기서 모았다
+            for _k in [k for k in _scan_missed if os.path.normcase(os.path.normpath(k)) == _norm]:
+                del _scan_missed[_k]
         if _cut:
             _read_truncated.append((str(p), _raw_len))
         # (R63 N70) 죽은 `#if 0` 분기는 **이 루프의 모든 수집기**에서 가린다 — R62 는 함수 정의만 가려, 죽은 구간에만 있는
@@ -1309,7 +1424,9 @@ def generate_uds_source_sections(
         for _gname, _ginfo in globals_info_map.items():
             _cell, _src = resolve_reset(
                 _ginfo, _reset_assigns.get(_gname), macro_value_map,
-                placed=_gname in _placed_globals)
+                placed=_gname in _placed_globals,
+                # (R68 리뷰 3차 W2) 주 스캔이 놓친 파일의 Reset 함수 대입 · @주소 배치는 모른다 — 정적 저장기간 0 을 지어내지 않는다
+                scan_incomplete=bool(_scan_missed))
             _ginfo["reset"] = _cell
             _ginfo["reset_source"] = _src
             _reset_stats[_src] = _reset_stats.get(_src, 0) + 1
@@ -1336,7 +1453,11 @@ def generate_uds_source_sections(
         for src_file in _c_files[:200]:
             try:
                 src_text = _src_read(src_file)
-                source_text_cache[str(src_file)] = src_text
+                if src_text or not source_text_cache.get(str(src_file)):
+                    source_text_cache[str(src_file)] = src_text
+                else:
+                    # (R68, 감사 #16) 다시 읽다 실패한 빈 원문이 위 루프가 읽은 원문을 덮지 않는다
+                    src_text = source_text_cache[str(src_file)]
             except Exception:
                 continue
             # (R63 N70) 죽은 분기의 `static` 선언이 산 전역을 static 으로 만들지 않게 — 위 텍스트 루프와 같은 판정.
@@ -1380,7 +1501,12 @@ def generate_uds_source_sections(
         for hdr_file in _h_files[:300]:
             try:
                 hdr_text = _src_read(hdr_file)
-                source_text_cache[str(hdr_file)] = hdr_text
+                if hdr_text or not source_text_cache.get(str(hdr_file)):
+                    source_text_cache[str(hdr_file)] = hdr_text
+                else:
+                    # (R68) 위와 같음 — 주 루프는 헤더 원문을 담지 않으므로 여기 닿는 것은 루트가 겹쳐 같은 헤더가 두 번
+                    #   나올 때뿐이다(리뷰 I1)
+                    hdr_text = source_text_cache[str(hdr_file)]
             except Exception:
                 continue
             for item in _extract_c_global_candidates(blank_dead_code(hdr_text)):
@@ -1634,7 +1760,7 @@ def generate_uds_source_sections(
                         comment_precond = str(_hdr_doc["precondition"]).strip()
                     if _filled:
                         comment_origin = _header_origin_label(_hdr_doc)
-            if file_path and file_path not in source_text_cache:
+            if file_path and _needs_read(file_path):
                 try:
                     source_text_cache[file_path] = _src_read(file_path)
                 except Exception:
@@ -1899,7 +2025,7 @@ def generate_uds_source_sections(
                 "outputs": outputs_list,
                 "precondition": inferred_precond,
                 "file": str(file_path) if file_path else "",
-                "source_unavailable_reason": "source_read_truncated" if any(p == file_path for p, _ in _read_truncated) else "",
+                "source_unavailable_reason": _source_unavailable(file_path),
                 "source_text_complete": bool(source_text_cache.get(file_path)) and not any(p == file_path for p, _ in _read_truncated),
                 "source_path": str(file_path) if file_path else "",
                 "module_name": Path(file_path).stem if file_path else "",
@@ -1938,7 +2064,7 @@ def generate_uds_source_sections(
                 calls = fn.get("calls") or []
                 if not name:
                     continue
-                if file_path and file_path not in source_text_cache:
+                if file_path and _needs_read(file_path):
                     try:
                         source_text_cache[file_path] = _src_read(file_path)
                     except Exception:
@@ -2100,7 +2226,7 @@ def generate_uds_source_sections(
                     "outputs": outputs_list,
                     "precondition": m_precond or "N/A",
                     "file": str(file_path) if file_path else "",
-                    "source_unavailable_reason": "source_read_truncated" if any(p == file_path for p, _ in _read_truncated) else "",
+                    "source_unavailable_reason": _source_unavailable(file_path),
                     "source_text_complete": bool(source_text_cache.get(file_path)) and not any(p == file_path for p, _ in _read_truncated),
                     "source_path": str(file_path) if file_path else "",
                     "module_name": Path(file_path).stem if file_path else "",
@@ -2791,6 +2917,16 @@ def generate_uds_source_sections(
     _td_stats["alias_conflicts"] = sorted(_typedef_conflicts)
     _td_stats["enum_conflicts"] = sorted(_enum_conflicts)
 
+    # (R68 리뷰 2차 W-A) 레코드는 만들 때 사유를 받는다 — 같은 파일의 뒤 함수가 다시 읽어 원문을 얻었으면 앞 레코드도 원문이
+    #   있다(그 원문은 레코드가 아니라 `source_text_cache` → `source_files` 로 간다). 끝에서 다시 매겨 '원문 없음' 을 거짓으로
+    #   말하지 않는다(by_name 은 같은 dict 를 공유한다).
+    for _d in function_details.values():
+        _fp = str(_d.get("source_path") or "")
+        if (str(_d.get("source_unavailable_reason") or "").startswith("source_read_failed:") and source_text_cache.get(_fp)
+                and not any(p == _fp for p, _ in _read_truncated)):
+            _d["source_unavailable_reason"], _d["source_text_complete"] = "", True
+            _record_failed.pop(_fp, None)
+
     return {
         "typedef_aliases": typedef_aliases,
         "enum_domains": enum_domains,
@@ -2829,7 +2965,8 @@ def generate_uds_source_sections(
         # (R81) 프로젝트 C 문맥 — 대상 정수 폭(typedef 증언)·전처리 이벤트·매크로·열거자·전역·함수 쓰기 효과. MC/DC 설계가
         #   프로젝트 헤더(`U16`, `((U16)(5000U / u8g_T_MAIN))`, 헤더 전역)를 **선언에서** 해석하는 입력이다. 잘려 읽힌 파일은
         #   넣지 않는다(뒷부분의 `#undef`·재정의를 못 본 채 값을 확정하면 안 된다) — 빠진 파일은 `incomplete_files` 에 남긴다.
-        "project_context": _build_project_context(source_text_cache, _read_truncated, _roots, _src_walk, _src_read),
+        "project_context": _build_project_context(source_text_cache, _read_truncated, _roots, _src_walk, _src_read,
+                                                  read_optional=_src_read_optional),
         # {fid: body 앞 400자}. detail 밖에 두어 by_name 중복 직렬화를 피한다(위 선언부 주석).
         "function_body_snippets": function_body_snippets,
         # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이
@@ -2838,6 +2975,9 @@ def generate_uds_source_sections(
         # 전역 인식에서 **잃은 것**. 스캔 캡·미사용 판정·접두사 필터·타입없음 네 지점이
         # 전부 조용히 자르므로, 이 값이 없으면 "이 프로젝트엔 원래 전역이 없다" 로 오독한다.
         "globals_scan": _globals_loss,
+        # (R68, 감사 #16) 끝내 읽지 못한 소스 파일(실패 종류별) — 이 값이 있으면 `_get_source_sections_cached` 가 캐시하지 않는다
+        "source_read_failures": summarize_read_failures(_read_failed, source_text_cache, scan_missed=_scan_missed,
+                                                        record_failed=_record_failed, roots=_root_strs),
         # (R65 N74) Prototype 의 출처 — 헤더를 쓴 함수 수와 **정의를 지킨 이유별 함수 이름**. 같은 이름의 헤더가 다른 트리에만
         #   있거나(other_root) 인자 수가 다르거나(arity) 같은 트리 후보끼리 다르면(conflict) 헤더를 고르지 않았다는 기록이다.
         "prototype_scan": {"counts": _proto_scan, "definition_kept": _proto_kept},

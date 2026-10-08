@@ -76,6 +76,8 @@ _RULE_ACTION: Dict[str, str] = {
     "source_root_none": "소스 루트를 하나도 못 찾았다 — 함수 0개 문서다. 소스 루트 설정을 고친다.",
     "source_cap_reached": "파일/항목 상한에 닿아 나머지는 인식되지 않았다 — 준비 게이트의 상한(cap_*)을 늘린다.",
     "source_read_truncated": "파일 내부 읽기 상한에 닿았다 — 큰 헤더(매크로)가 잘렸다. 상한 정책을 확인한다.",
+    "source_read_failed": "소스 파일을 읽지 못했다(워커 타임아웃 · 접근 거부 등) — 그 파일에서만 모으는 선언 · 주석 · Reset "
+                          "함수 대입이 빠졌을 수 있다. 워커 · 권한을 확인하고 다시 생성한다.",
     "requirements_missing": "요구사항 문서를 읽지 못했다 — SwRS/SwDS 경로·형식을 확인한다.",
     "requirement_doc_skipped": "그 문서만 읽지 못했다 — 경로·권한(cloudium 워커)·양식을 확인한다. 나머지 문서로만 만든 문서다.",
     "ai_disabled": "AI 설명이 꺼져 있다 — description 은 소스 주석/참조에서만 온다. 필요하면 AI 를 켜고 재생성한다.",

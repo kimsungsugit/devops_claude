@@ -2178,6 +2178,21 @@ def _uds_param_key(name: str) -> str:
     return re.sub(r"\[[^\]]*\]", "", name.replace("->", ".")).replace(" ", "").lower()
 
 
+def summarize_source_read_failures(block: Any, units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R68, 감사 #16) 소스 단계가 끝내 읽지 못한 파일(`generate_uds_source_sections` 의 `source_read_failures` — 파일 이름 ·
+    실패 종류)과 그 때문에 원문 없이 남은 unit(`source_unavailable_reason = source_read_failed:<종류>`). 품질 리포트
+    `source_read_failures`."""
+    block = block if isinstance(block, dict) else {}
+    hit = [str(u.get("name") or "") for u in units
+           if str(u.get("source_unavailable_reason") or "").startswith("source_read_failed:")]
+    return {"files": int(block.get("files") or 0), "kinds": dict(block.get("kinds") or {}),
+            "lost": dict(block.get("lost") or {}),
+            # (리뷰 4차 W1) 주 스캔이 놓친 헤더 — 그 주석에서 오는 다른 파일 함수의 ASIL · 설명이 TBD 일 수 있다(공시가 이름을 댄다)
+            "headers_scan_missed": [str(x) for x in (block.get("headers_scan_missed") or [])][:10],
+            "detail": [d for d in (block.get("detail") or []) if isinstance(d, dict)][:10],
+            "units": len(hit), "unit_samples": hit[:8]}
+
+
 def summarize_uds_const_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
     """(R67, audit #45) 설계서가 입력으로 적었지만 소스가 `const` 로 선언한 객체 — 어느 행도 그 값을 설정하지 않는다(시험이 설정할
     수 없는 ROM 이고 oracle 은 선언의 값을 쓴다). 품질 리포트 `uds_const_inputs`."""
@@ -6311,6 +6326,8 @@ def generate_suts(
     quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(_input_docs["UDS"].get("given")),
                                                    _source_function_names(function_details))
     quality["uds_const_inputs"] = summarize_uds_const_inputs(units)     # (R67)
+    # (R68, 감사 #16) 소스 단계가 끝내 읽지 못한 파일과, 그 파일에 정의가 있어 원문 없이 남은 unit
+    quality["source_read_failures"] = summarize_source_read_failures(report_data.get("source_read_failures"), units)
     if (_input_docs["UDS"].get("given") and "uds_unit_io" in (_input_docs["UDS"].get("blocks_unopened") or [])
             and not quality["uds_reading"].get("read_error")):
         # (R66) 입출력 표를 읽을 SwUDS 를 열지 못했으면 '함수 표 0 개' 로 적지 않는다 — 원인은 파일 접근이다.

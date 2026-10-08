@@ -3864,6 +3864,11 @@ def generate_sits(
     quality_report["tc_profile_unknown_value"] = _profile_bad
     quality_report["caps_requested"] = _caps_requested
     quality_report["caps_effective"] = {"max_subcases": max_subcases, "max_flows": max_flows}
+    # (R68 리뷰 W4, 감사 #16) 소스 단계가 읽지 못한 파일과 원문 없이 남은 함수 — SUTS 와 같은 기록 · 공시
+    from generators.suts import summarize_source_read_failures
+    quality_report["source_read_failures"] = summarize_source_read_failures(
+        (_oracle_source or {}).get("source_read_failures"),
+        [v for v in (function_details or {}).values() if isinstance(v, dict)])
     # (R66, 감사 #83 · #1) 입력 문서마다 지정했나 · 열었나 · 사유(SDS 는 파티션 수) — 공시 `sits_input_documents`
     quality_report["input_documents"] = dict(
         input_documents_record({"SRS": srs_docx_path, "UDS": uds_path, "HSIS": hsis_path, "STP": stp_path}, input_skips),
