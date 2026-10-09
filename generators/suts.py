@@ -3105,6 +3105,14 @@ def generate_sequences(
         _design_inputs, _type_of, _domains, _declared, _is_pointer_decl, set(_ptypes)))
     unit["mcdc_design"] = _mcdc_report
     _mcdc_vectors: List[Dict[str, int]] = list(_mcdc_report.get("selected_inputs") or [])
+    # (R72 리뷰 W2) 조건이 많아 조건마다 짝지은 결정의 벡터(설계가 맨 뒤에 둔 `wide_vector_count` 개)는 기본 자리(7)가 남을
+    #   때만 기본 자리에 들고, 나머지는 확장 자리의 맨 뒤(2차 설계 벡터 뒤)로 간다 — 2차 설계 행(`MCDC_7`~)의 이름이 R72 전과 같다
+    _wide_n = min(int(_mcdc_report.get("wide_vector_count") or 0), len(_mcdc_vectors))
+    _mcdc_wide = _mcdc_vectors[len(_mcdc_vectors) - _wide_n:]
+    _mcdc_vectors = _mcdc_vectors[:len(_mcdc_vectors) - _wide_n]
+    _wide_room = max(0, _BASE_MCDC_SLOTS - len(_mcdc_vectors))
+    _mcdc_vectors.extend(_mcdc_wide[:_wide_room])
+    _mcdc_late_wide = _mcdc_wide[_wide_room:]
     _mcdc_roles = _mcdc_vector_roles(_mcdc_report)
     _mcdc_base_n = len(_mcdc_vectors)
     for mc_idx in range(min(_mcdc_base_n, _BASE_MCDC_SLOTS)):
@@ -3125,7 +3133,17 @@ def generate_sequences(
             #   부터다(R75 이름 규칙 `is_extended_strategy`: 이름만 보고 확장 행을 가른다). 빈 자리는 행을 만들지 않는다.
             _mcdc_vectors.extend([{}] * max(0, _BASE_MCDC_SLOTS - _mcdc_base_n))
             _mcdc_vectors.extend(_mcdc_ext["vectors"])
-            _mcdc_report["selected_inputs"] = _mcdc_vectors[:_mcdc_base_n] + list(_mcdc_ext["vectors"])
+    # (R72 리뷰 C1) 2차 설계 행은 `_mcdc_base_n` 부터 이 번호 앞까지 — 그 뒤는 기본 설계의 남은 넓은 벡터다(finalize 를 기본
+    #   설계로 하고 라벨에 2차 설계 출처를 붙이지 않는다)
+    _mcdc_late_start = len(_mcdc_vectors)
+
+    def _mcdc_second(seq: Dict[str, Any]) -> bool:
+        return _mcdc_base_n <= _mcdc_slot(seq) < _mcdc_late_start
+    if _mcdc_ext or _mcdc_late_wide:
+        # 남은 넓은 벡터가 있으면 기본 자리는 이미 찼다(`_wide_room` 이 0 이 될 때까지 채웠다) — 빈 자리 채움이 필요 없다
+        _mcdc_vectors.extend(_mcdc_late_wide)
+        _mcdc_report["selected_inputs"] = (_mcdc_vectors[:_mcdc_base_n] + list((_mcdc_ext or {}).get("vectors") or [])
+                                           + _mcdc_late_wide)
     _mcdc_roles_ext = _mcdc_vector_roles({"decisions": _mcdc_ext["decisions"]}) if _mcdc_ext else {}
 
     # (R75) 확장 — 위까지가 기본 카탈로그(최대 30)다. 확장은 그 **뒤에만** 붙는다(기본 문서와 포함 관계).
@@ -3379,9 +3397,9 @@ def generate_sequences(
         #   결정의 재실행은 그 설계의 unit 으로.
         _ext_ids = {id(d) for d in _mcdc_ext["decisions"]}
         finalize_mcdc_design(dict(_mcdc_report, decisions=[d for d in _mcdc_report["decisions"] if id(d) not in _ext_ids]),
-                             [s for s in _mcdc_rows if _mcdc_slot(s) < _mcdc_base_n], _mcdc_unit)
+                             [s for s in _mcdc_rows if not _mcdc_second(s)], _mcdc_unit)
         finalize_mcdc_design(dict(_mcdc_ext["report"], decisions=_mcdc_ext["decisions"]),
-                             [s for s in _mcdc_rows if _mcdc_slot(s) >= _mcdc_base_n], _mcdc_ext["unit"])
+                             [s for s in _mcdc_rows if _mcdc_second(s)], _mcdc_ext["unit"])
         _mcdc_report["summary"] = mcdc_report_summary(_mcdc_report)
     else:
         finalize_mcdc_design(_mcdc_report, _mcdc_rows, _mcdc_unit)
@@ -3397,7 +3415,7 @@ def generate_sequences(
     for _row in _mcdc_rows:
         # (리뷰 C1) "독립 영향 쌍" 은 **두 행이 모두 남아 재검증을 통과한** 쌍(`seq["mcdc_design"]`)에만 쓴다. 짝 행이 잘렸거나
         # 무효가 된 벡터는 그 사실을 라벨에 적는다 — 예전엔 절단 전 라벨이 남아 MCDC Design 시트(truncated)와 모순됐다.
-        _is_ext = _mcdc_slot(_row) >= _mcdc_base_n
+        _is_ext = _mcdc_second(_row)
         _roles = (_mcdc_roles_ext if _is_ext else _mcdc_roles).get(
             _mcdc_vector_key({k: _row["inputs"].get(k) for k in _row["inputs"]}), [])
         _lines = str(_row.get("description") or "").split("\n")
@@ -4101,6 +4119,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "search_limited_by_status": {"partial": 0, "no_pair_found": 0, "unsupported": 0},
                            # (R71) 쌍당 후보 상한에서 멈춘 Observable 쌍 — 상태(masked 등)는 그 후보까지만 본 결과
                            "observable_candidates_capped": 0,
+                           # (R72) 진리값 곱 상한(조건 12)보다 조건이 많아 조건마다 짝지은 결정(식 엔진) · 그중 설계
+                           "wide_decisions": 0, "wide_designed": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     # (R56 리뷰 I1) 함수 실행 모델 탐색 예산 — 문서가 어느 예산으로 설계됐는지(같은 소스라도 예산이 다르면 쌍이 다르다)
@@ -4161,6 +4181,9 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             if group:
                 out[f"{group}_condition_decisions"] += 1
                 out[f"{group}_condition_designed"] += status == "designed"
+            if d.get("pair_search") == "per_condition":
+                out["wide_decisions"] += 1
+                out["wide_designed"] += status == "designed"
             if d.get("stub_inputs"):
                 out["stub_input_decisions"] += 1
             for pair in d.get("pairs") or []:
@@ -4247,6 +4270,7 @@ def _mcdc_source_read_pass(unit: Dict[str, Any], base_report: Dict[str, Any],
     added = set(added_inputs)
     adopted: List[Any] = []
     vectors: List[Dict[str, Any]] = []
+    wide_vectors: List[Dict[str, Any]] = []   # (R72 리뷰 W2) 조건마다 짝지은 결정의 벡터 — 다른 결정의 2차 벡터 뒤로
     seen: set = set()
     for i, base in enumerate(base_report["decisions"]):
         if base.get("occurrence_id") not in wanted:
@@ -4268,12 +4292,17 @@ def _mcdc_source_read_pass(unit: Dict[str, Any], base_report: Dict[str, Any],
                                                   if (pr.get("inputs_a") or {}).get(k) != (pr.get("inputs_b") or {}).get(k)})
         new["design_refused_for_added_input"] = reads_added
         adopted.append((i, new))
-        for pair in new.get("pairs") or []:
-            for side in ("a", "b"):
-                key = _mcdc_vector_key(pair[f"inputs_{side}"])
-                if key not in seen:
-                    seen.add(key)
-                    vectors.append(pair[f"inputs_{side}"])
+    for wide in (False, True):
+        for _i, new in adopted:
+            if (new.get("pair_search") == "per_condition") is not wide:
+                continue
+            for pair in new.get("pairs") or []:
+                for side in ("a", "b"):
+                    key = _mcdc_vector_key(pair[f"inputs_{side}"])
+                    if key not in seen:
+                        seen.add(key)
+                        (wide_vectors if wide else vectors).append(pair[f"inputs_{side}"])
+    vectors.extend(wide_vectors)
     # 다 고른 뒤에 한 번에 바꾼다 — 도중 실패가 기본 보고서를 반쯤 바꾼 채 남기지 않게
     for i, new in adopted:
         base_report["decisions"][i] = new

@@ -1084,6 +1084,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(mc, "truncated_pairs") is not None else ".")
             # (R56 리뷰 I1) 어느 예산으로 설계했는지 — 같은 소스라도 예산이 다르면 쌍이 다르다
             + _mcdc_budget_text(mc.get("path_search_budget"))
+            # (R72) 조건이 많아 조건마다 짝지은 결정
+            + _mcdc_wide_text(mc)
             # (R71) 그 예산 · 상한에 닿은 결정 — 결정별로는 'Search Limit' 열
             + _mcdc_search_limit_text(mc)
             + (f" 결정을 나열하지 못한 함수 {_show(_int(mc, 'unenumerated_functions'))} · 분석하지 못한 unit "
@@ -2040,7 +2042,10 @@ DISCLOSURE_DOC_TYPES = frozenset(_BY_DOC_TYPE)
 MAX_OBSERVABLE_EVALUATIONS = 2000   # generators.observable_mcdc.MAX_EVALUATIONS (공시 문구 — 테스트가 같은지 본다)
 MAX_OBSERVABLE_CANDIDATES = 48      # generators.observable_mcdc.MAX_CANDIDATES
 MAX_MCDC_PATH_SAMPLES = 12          # generators.mcdc_design._PATH_SAMPLES
-MAX_MCDC_CONDITIONS = 12            # generators.mcdc_design.build_mcdc_design(max_conditions=)
+MAX_MCDC_CONDITIONS = 12            # generators.mcdc_design.build_mcdc_design(max_conditions=) — 진리값 곱 · 함수 실행 모델
+MAX_MCDC_WIDE_CONDITIONS = 64       # generators.mcdc_design.build_mcdc_design(max_wide_conditions=) — 식 엔진 조건별 (R72)
+MAX_MCDC_CANDIDATES = 4096          # generators.mcdc_design.build_mcdc_design(max_candidates=) — 조건별 짝짓기의 조건당 단계
+MAX_MCDC_WIDE_STEP_FACTOR = 16      # generators.mcdc_design._WIDE_STEP_FACTOR — 결정당 총 단계 = 조건당 단계 × 이 값
 MAX_MCDC_DECISIONS = 64             # generators.mcdc_design.build_mcdc_design(max_decisions=)
 
 _SEARCH_LIMIT_LABELS = (
@@ -2049,7 +2054,8 @@ _SEARCH_LIMIT_LABELS = (
     ("path_samples_capped", f"입력 값 목록을 {MAX_MCDC_PATH_SAMPLES} 개로 자른 탐색"),
     ("candidate_budget", "식 엔진 후보 상한"),
     ("sampled_values", "도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · 양 끝)만 본 탐색"),   # (R71 리뷰 N2) 첫머리 밖
-    ("condition_cap", f"조건 수 상한({MAX_MCDC_CONDITIONS} 초과 — 탐색하지 않음)"),
+    # (R72) 식 엔진은 조건 수 상한까지 조건마다 짝짓고, 함수 실행 모델 탐색은 아직 진리값 곱 상한 그대로다
+    ("condition_cap", f"조건 수 상한(식 엔진 {MAX_MCDC_WIDE_CONDITIONS} · 함수 실행 모델 {MAX_MCDC_CONDITIONS} 초과 — 탐색하지 않음)"),
     ("decision_cap", f"함수당 결정 수 상한({MAX_MCDC_DECISIONS} 번째 뒤 — 탐색하지 않음)"),
 )
 
@@ -2058,6 +2064,22 @@ _SAMPLED_LABEL = "도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · �
 # (R71 리뷰 Q1 · Q3) 단일 상태 규칙의 한계 — 표본이 고른 경로만 보고 판정한다
 _VALUE_RULE_LIMIT = ("그 거절 · 미상 값이 입력이 고르는 분기 안에만 있는데 표본이 다른 쪽을 한 번도 타지 않았으면 이 판정이 값 상한을 "
                      "놓친다.")
+
+
+def _mcdc_wide_text(mc: dict) -> str:
+    """(R72) 진리값 곱 상한보다 조건이 많은 결정을 조건마다 짝지은 수 — 키가 없거나(옛 요약) 0 이면 아무것도 쓰지 않는다."""
+    n = _int(mc, "wide_decisions") or 0
+    if not n:
+        return ""
+    return (f" 조건이 {MAX_MCDC_CONDITIONS} 개보다 많은 결정 {_show(n)} 은 진리값 조합 전체(2^조건 수) 대신 조건마다 짝지었다 — 그 "
+            "조건의 연결 성분 안에서 그 조건만 다른 두 값 조합을 고르고, 나머지 성분은 결정이 그 조건을 따르는 조합을 깊이 우선으로 "
+            f"찾는다(식 엔진, 조건 {MAX_MCDC_WIDE_CONDITIONS} 개까지 · 조건마다 탐색 {MAX_MCDC_CANDIDATES} 단계 · 결정마다 그 "
+            f"{MAX_MCDC_WIDE_STEP_FACTOR} 배 — 넘으면 그 결정의 'Search Limit' 에 `candidate_budget`(미정의 동작 후보가 함께 있으면 그 "
+            f"사유가 앞선다); 설계 {_show(_int(mc, 'wide_designed'))}). 쌍은 모두 그 입력으로 결정식을 다시 평가한 "
+            "것이다. 그 행은 함수의 다른 MC/DC 행 뒤에 붙어 기존 행의 자리 · 이름은 그대로다 — 함수의 기본 MC/DC 자리(7)가 남으면 "
+            "새 행이 그 자리에 들어가 정본 규모 문서에도 더해지고, 남지 않으면 확장 프로파일에만(소스가 읽는 입력으로 다시 설계한 행 "
+            "뒤) 붙는다. 다만 확장 프로파일의 경계 · 강건성 · 출력 관측 탐색은 같은 TC 의 행을 기준 · 후보로 쓰므로 새 행이 "
+            "더해지면 그 탐색이 고른 행이 바뀔 수 있다.")
 
 
 def _mcdc_search_limit_text(mc: dict) -> str:

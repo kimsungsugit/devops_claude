@@ -337,6 +337,177 @@ def _evaluate(ir, atoms, inputs):
     return truth, bool(visit(ir)), observed
 
 
+# (R72) A decision of more conditions than the product engine takes (``max_conditions``: its 2^n truth combinations) is
+#   paired condition by condition up to this many conditions — `_wide_pairs`. ``evaluate_decision`` re-evaluates pairs of
+#   up to 64 conditions.
+MAX_WIDE_CONDITIONS = 64
+
+
+# (R72 review W5) the decision's steps over all its conditions: this many times the per-condition budget
+_WIDE_STEP_FACTOR = 16
+
+
+class _WideCut(Exception):
+    """The constructive search spent its step budget."""
+
+
+def _kleene(ir, known):
+    """The decision's value from the conditions known so far (``{atom index: truth}``) — ``None`` where an unknown
+    condition can still change it (three-valued ``&&`` · ``||`` · ``!``; the value of C's short circuit is the same)."""
+    kind = ir[0]
+    if kind == "atom":
+        return known.get(ir[1])
+    if kind == "!":
+        v = _kleene(ir[1], known)
+        return None if v is None else not v
+    left = _kleene(ir[1], known)
+    stop = kind == "||"   # the controlling value: false for ``&&``, true for ``||``
+    if left is stop:
+        return stop
+    right = _kleene(ir[2], known)
+    if right is stop:
+        return stop
+    return (not stop) if left is (not stop) and right is (not stop) else None
+
+
+def _sibling_paths(ir, path=(), out=None):
+    """``{atom index: [(operator, sibling subtree), …]}`` — the ``&&`` / ``||`` nodes from the root down to each
+    condition, with the subtree beside it (``!`` changes no sibling). A condition decides the outcome exactly when every
+    sibling on its path has the non-controlling value (``&&``: true, ``||``: false)."""
+    out = {} if out is None else out
+    kind = ir[0]
+    if kind == "atom":
+        out[ir[1]] = list(path)
+    elif kind == "!":
+        _sibling_paths(ir[1], path, out)
+    else:
+        _sibling_paths(ir[1], (*path, (kind, ir[2])), out)
+        _sibling_paths(ir[2], (*path, (kind, ir[1])), out)
+    return out
+
+
+def _wide_pairs(did, ir, atoms, variables, values, defaults, budget, ub_skipped):
+    """(R72) Unique-cause pairs of a decision of more conditions than the product engine takes, condition by condition.
+
+    The realizable truth tuples of every variable-connected component are found as for the product engine
+    (`_realizable_truths`, ``budget`` vectors per component). For condition i: two tuples of its component that differ
+    in i alone (the component's other conditions keep their truth — unique cause), then one tuple for every other
+    component, chosen depth first while the three-valued decision (`_kleene`) can still tell i true from i false — a
+    branch where both are known and equal is dropped, and so is one where a sibling on i's path to the root is already
+    known at its controlling value (i is masked there whatever the rest is — `_sibling_paths`; R72 measurement: without
+    it a masked branch was searched over every other component before the root said so). Every pair is then evaluated
+    on its concrete inputs (`_evaluate`, as the product engine's candidates are): what is emitted is the evaluation,
+    never the search's claim.
+
+    ``budget`` search steps per condition (R72 review W4: shared by the decision, the first conditions spent it and an
+    independent ``&&`` chain lost its last conditions from 46 on), ``_WIDE_STEP_FACTOR`` times that for the decision (R72
+    review W5: per condition alone, 64 conditions could take 64 × ``budget`` steps — ten seconds for one decision). A
+    condition with one truth in every realized tuple of its component (``k != k``) is known before the search: the
+    branches that only knowing it prunes have no pair, so the first pair found is the same, sooner. Returns
+    ``(pairs, complete, evaluated)``:
+    ``complete`` — no condition's step budget cut, every component's list complete, and every condition left without a
+    pair searched to the end over those lists (the candidate values, not the whole domain); ``evaluated`` — vectors
+    evaluated, the components' and the pairs' together (the product engine counts its components apart)."""
+    realized_out: list = []
+    _components, complete, evaluated = _realizable_truths(atoms, variables, values, defaults, budget, ub_skipped,
+                                                          realized_out=realized_out)
+    if any(not realized for _members, realized in realized_out):
+        # a component no candidate vector could evaluate (every one undefined): no row exists at all
+        return {}, complete, evaluated
+    comp_of = {i: c for c, (members, _r) in enumerate(realized_out) for i in members}
+    fixed = {}
+    for i, condition in enumerate(atoms):
+        if i not in comp_of:
+            # reads no input: one truth on every vector (it never flips — and no other condition's pair can move it)
+            try:
+                fixed[i] = _atom_truth(condition["_atom"], defaults)
+            except cpc.Unresolved:
+                # (R72 review W1) undefined on every vector: no pair can be evaluated through it — an undefined candidate,
+                #   as the product engine reports it (not a complete search that found nothing)
+                ub_skipped[0] += 1
+    # (R72 review W5) a condition whose truth no realized tuple of its component changes — known on every vector
+    constant = {m: tuples[0][k] for members, realized in realized_out
+                for tuples in [list(realized)] for k, m in enumerate(members) if len({t[k] for t in tuples}) == 1}
+    order = sorted(range(len(realized_out)), key=lambda c: min(realized_out[c][0]))
+    paths = _sibling_paths(ir)
+    pairs: dict = {}
+    steps, total = [0], [0]
+
+    def choices(i, others, k, known, chosen):
+        """Tuples for ``others[k:]`` (``{component: truth tuple}``) under which the decision follows condition i."""
+        if steps[0] >= budget or total[0] >= _WIDE_STEP_FACTOR * budget:
+            raise _WideCut
+        steps[0] += 1
+        total[0] += 1
+        if any(_kleene(sibling, known) is (op == "||") for op, sibling in paths[i]):
+            return   # masked: a sibling already holds the value that decides its node without i
+        when_true, when_false = _kleene(ir, {**known, i: True}), _kleene(ir, {**known, i: False})
+        if when_true is not None and when_false is not None:
+            # (R72 review I4) "both known and equal" cannot happen past the masking check: the root is known apart from
+            #   i only through a sibling at its controlling value — kept as a guard, not a path the search takes
+            if when_true != when_false:
+                # the rest cannot change it: their first tuple each
+                yield {**chosen, **{c: next(iter(realized_out[c][1])) for c in others[k:]}}
+            return
+        if k == len(others):
+            return   # a condition the decision needs is fixed and could not be evaluated
+        c = others[k]
+        members, realized = realized_out[c]
+        for truths in realized:
+            yield from choices(i, others, k + 1, {**known, **dict(zip(members, truths, strict=True))},
+                               {**chosen, c: truths})
+
+    for i in range(len(atoms)):
+        if i not in comp_of:
+            continue
+        ci = comp_of[i]
+        members, realized = realized_out[ci]
+        pos = members.index(i)
+        others = [c for c in order if c != ci]
+        steps[0] = 0
+        try:
+            for truths, assignment in list(realized.items()):
+                flipped = truths[:pos] + (False,) + truths[pos + 1:]
+                if not truths[pos] or flipped not in realized:
+                    continue
+                known = {**fixed, **{m: t for m, t in constant.items() if m not in members},
+                         **{m: t for m, t in zip(members, truths, strict=True) if m != i}}
+                for chosen in choices(i, others, 0, known, {}):
+                    rows = []
+                    for own in (assignment, realized[flipped]):
+                        inputs = dict(defaults)
+                        for c, t in chosen.items():
+                            inputs.update(realized_out[c][1][t])
+                        inputs.update(own)
+                        evaluated += 1
+                        try:
+                            truth, outcome, observed = _evaluate(ir, atoms, inputs)
+                        except cpc.Unresolved:
+                            ub_skipped[0] += 1
+                            break
+                        rows.append({"inputs": inputs, "truth": truth, "decision": outcome, "observed": observed})
+                    if len(rows) < 2:
+                        continue
+                    a, b = rows
+                    # (R72 review I4) the other conditions' truths are equal by construction (shared tuples) and i is
+                    #   observed wherever the outcomes differ — the checks state the unique-cause definition the pair is
+                    #   held to (the product engine's), not a case the search produces
+                    if (a["truth"][i] != b["truth"][i] and a["decision"] != b["decision"] and a["observed"][i]
+                            and b["observed"][i]
+                            and all(a["truth"][j] == b["truth"][j] for j in range(len(atoms)) if j != i)):
+                        pair = {"pair_id": f"{did}:C{i + 1}:P1", "condition_id": f"C{i + 1}", "retained_status": "pending"}
+                        for suffix, member in (("a", a), ("b", b)):
+                            for key, value in member.items():
+                                pair[f"{key}_{suffix}"] = value
+                        pairs[i] = pair
+                        break
+                if i in pairs:
+                    break
+        except _WideCut:
+            complete = False   # this condition's budget: the next one starts its own
+    return pairs, complete, evaluated
+
+
 def evaluate_decision(expression: str, inputs: dict[str, int], domains: dict[str, dict[str, Any]],
                       constants: dict[str, dict[str, Any]] | None = None,
                       widths: dict[str, int] | None = None,
@@ -360,7 +531,7 @@ def evaluate_decision(expression: str, inputs: dict[str, int], domains: dict[str
         if _text(condition, raw) != "(" + expression + ")":
             raise Unsupported("expression_not_consumed_completely")
         ir, atoms, variables, _ = _compile(condition, raw, domains, constants, widths, types)
-        if len(atoms) > 64:
+        if len(atoms) > MAX_WIDE_CONDITIONS:   # (R72 review I1) the design's cap — a designed pair re-evaluates
             raise Unsupported("condition_budget")
         for name in variables:
             if type(inputs.get(name)) is not int or not domains[name]["min"] <= inputs[name] <= domains[name]["max"]:
@@ -380,12 +551,15 @@ def _default_value(domain):
     return max(domain["min"], min(0, domain["max"]))
 
 
-def _realizable_truths(atoms, variables, values, defaults, budget, skipped=None):
+def _realizable_truths(atoms, variables, values, defaults, budget, skipped=None, realized_out=None):
     """Per variable-connected component, the atom truth tuples real inputs can realize.
 
     Atoms sharing a variable are searched together, so shared-variable
     constraints (``a > 10 && a < 20``) stay exact; independent components are
     combined afterwards instead of enumerating their full cartesian product.
+
+    ``realized_out`` (R72, a list) receives per component ``(member atom indexes, {truth tuple: assignment})`` — the
+    first assignment that realized each tuple, in enumeration order.
     """
     parent = {name: name for name in variables}
     def root(name):
@@ -423,6 +597,8 @@ def _realizable_truths(atoms, variables, values, defaults, budget, skipped=None)
         else:
             complete = complete and space <= max(0, budget)
         components.append(list(realized.values()))
+        if realized_out is not None:
+            realized_out.append((member_atoms, realized))
     return components, complete, evaluated
 
 
@@ -1997,6 +2173,7 @@ PATH_SEARCH_STEPS = 120_000
 
 
 def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_conditions: int = 12,
+                      max_wide_conditions: int = MAX_WIDE_CONDITIONS,
                       max_decisions: int = 64, max_path_runs: int = PATH_SEARCH_RUNS,
                       max_path_steps: int = PATH_SEARCH_STEPS,
                       declared_domains: dict[str, dict[str, Any]] | None = None,
@@ -2013,10 +2190,18 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     ``only_occurrences`` (R58) searches only the decisions with these ``occurrence_id`` — the others are listed with
     status ``not_requested`` and no search (a caller's second pass over the decisions its first pass left without a
     pair; the search budgets are then theirs alone).
+
+    ``max_wide_conditions`` (R72): the expression engine pairs a decision of more than ``max_conditions`` conditions
+    (its truth-product cap) and up to this many condition by condition (`_wide_pairs`, ``max_candidates`` search steps
+    per condition); their vectors follow every other vector of the function (``report["wide_vector_count"]`` of them, at
+    the end of ``selected_inputs``), so the earlier vectors keep their places. Capped at `MAX_WIDE_CONDITIONS` — what
+    `evaluate_decision` re-evaluates.
     """
+    max_wide_conditions = min(max_wide_conditions, MAX_WIDE_CONDITIONS)
     report = {"schema_version": 3, "function": unit.get("name", ""), "decisions": [],
               "selected_inputs": [], "execution_status": "not_run", "reachability": "unverified",
-              "budgets": {"max_candidates": max_candidates, "max_conditions": max_conditions, "max_decisions": max_decisions,
+              "budgets": {"max_candidates": max_candidates, "max_conditions": max_conditions,
+                          "max_wide_conditions": max_wide_conditions, "max_decisions": max_decisions,
                           "max_path_runs": max_path_runs, "max_path_steps": max_path_steps,
                           # per variable-connected component, and again for the combination of components
                           "max_candidates_scope": "per_component_and_combination"}}
@@ -2067,6 +2252,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     # an input list (inventory scripts) take the resolved domains as the row.
     row_names = list(unit["input_vars"] or []) if "input_vars" in unit else list(domains)
     selected = {}
+    # (R72) the constructively paired decisions' vectors — appended after every other vector (rows · slots unchanged)
+    wide_selected: dict = {}
     path_candidates = []
     for index, (node, raw, context_issue, mutated, kind) in enumerate(found):
         identity = f"{unit.get('source_path', '')}:{unit.get('name', '')}:{node.start_byte if node else index}"
@@ -2152,12 +2339,14 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 # The row cannot set this variable (not a unit input — cap or I/O renaming): a pair designed on it
                 # would be emitted without its deciding value and then misreported as truncated (R80 review W5).
                 raise Unsupported("decision_variable_not_in_unit_inputs:" + missing[0])
-            if index >= max_decisions or len(atoms) > max_conditions:
+            if index >= max_decisions or len(atoms) > max_wide_conditions:
                 # (R71) which cap — the reason names both
                 decision["search_cap"] = ({"decision_index": index, "max_decisions": max_decisions}
                                           if index >= max_decisions else
-                                          {"conditions": len(atoms), "max_conditions": max_conditions})
+                                          {"conditions": len(atoms), "max_conditions": max_wide_conditions})
                 raise Unsupported("decision_or_condition_budget")
+            # (R72) more conditions than the truth product takes: paired condition by condition (`_wide_pairs`)
+            wide = len(atoms) > max_conditions
             # (R60) the inputs the decision expression reads — the observable-pair search keeps exactly these (set only
             #   once the binding checks passed: a refused decision goes to the path search, which keeps its own set) —
             #   and the decision's node coordinates, so that search can check on the modeled run that a row reaches the
@@ -2192,10 +2381,19 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             by_signature, pairs = {}, {}
             defaults = {name: _default_value(domains[name]) for name in [*row_names, *engine_globals] if name in domains}
             ub_skipped = [0]
-            components, components_complete, decision["component_candidate_count"] = _realizable_truths(
-                atoms, variables, values, defaults, max_candidates, ub_skipped)
-            combined_size = math.prod(len(c) for c in components)
-            for parts in itertools.islice(itertools.product(*components), max(0, max_candidates)):
+            if wide:
+                pairs, decision["search_complete"], decision["candidate_count"] = _wide_pairs(
+                    did, ir, atoms, variables, values, defaults, max_candidates, ub_skipped)
+                decision["pair_search"] = "per_condition"
+                for pair in pairs.values():
+                    for side in ("a", "b"):
+                        wide_selected.setdefault(json.dumps(pair[f"inputs_{side}"], sort_keys=True), pair[f"inputs_{side}"])
+                components, combined_size, components_complete = [], 0, True   # (the product below does not run)
+            else:
+                components, components_complete, decision["component_candidate_count"] = _realizable_truths(
+                    atoms, variables, values, defaults, max_candidates, ub_skipped)
+                combined_size = math.prod(len(c) for c in components)
+            for parts in itertools.islice(itertools.product(*components), max(0, max_candidates) if not wide else 0):
                 inputs = dict(defaults)
                 for part in parts:
                     inputs.update(part)
@@ -2224,7 +2422,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 if len(pairs) == len(atoms):
                     break
             decision["pairs"] = [pairs[i] for i in sorted(pairs)]
-            decision["search_complete"] = components_complete and decision["candidate_count"] == combined_size
+            if not wide:
+                decision["search_complete"] = components_complete and decision["candidate_count"] == combined_size
             decision["status"] = "designed" if len(pairs) == len(atoms) else ("partial" if pairs else "no_pair_found")
             # A condition identical to another one (same compiled atom) always has the same truth value as its twin:
             # it can never flip alone, so no unique-cause pair exists for it — a proof, not a failed search
@@ -2310,6 +2509,14 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":
                     _refuse_path(decision, f"path_design_exception:{type(exc).__name__}")
+    wide_vectors = 0
+    for key, vector in wide_selected.items():
+        if key not in selected:   # (R72) after every other vector
+            selected[key] = vector
+            wide_vectors += 1
+    # (R72 review W2) how many vectors at the end are the wide decisions' alone — the SUTS puts them after the second
+    #   pass's (R58) vectors so those keep their row names
+    report["wide_vector_count"] = wide_vectors
     report["selected_inputs"] = list(selected.values())
     names = set((scope or {}).get("assumed_undefined") or ()) | set((scope or {}).get("assumed_undefined_body") or ())
     if names:

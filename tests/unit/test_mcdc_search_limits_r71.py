@@ -44,6 +44,9 @@ EXPR = H + ("U8 g_o;\nvoid h(U8 a, U8 b, U8 c) { if ((a + b) == 300U) { g_o = 1U
             "if (((a == 1U) && (b == 2U)) || ((a == 1U) && (c == 3U))) { g_o = 3U; } }\n")
 WIDE = H + ("U8 g_o;\nvoid w(" + ", ".join(f"U8 a{i}" for i in range(13)) + ") { if ("
             + " && ".join(f"(a{i} == {i}U)" for i in range(13)) + ") { g_o = 1U; } }\n")
+# (R72) the expression engine pairs up to 64 conditions condition by condition — its cap is past that
+WIDER = H + ("U8 g_o;\nvoid w(" + ", ".join(f"U8 a{i}" for i in range(65)) + ") { if ("
+             + " && ".join(f"(a{i} == {i}U)" for i in range(65)) + ") { g_o = 1U; } }\n")
 WIDE_LOCAL = H + ("U8 g_o;\nvoid wl(U8 a) { U8 t = (U8)(a + 1U); if ("
                   + " && ".join(f"(t == {i}U)" for i in range(13)) + ") { g_o = 1U; } }\n")
 
@@ -226,8 +229,11 @@ def test_an_enumeration_tried_whole_is_no_sample():
 
 
 def test_a_decision_over_the_caps_was_not_searched_and_says_which_cap():
+    (d,) = build_mcdc_design(_unit(WIDER, "w", [f"a{i}" for i in range(65)]))["decisions"]
+    assert d["reason"] == "decision_or_condition_budget" and search_limits(d) == [("condition_cap", "65>64")]
+    # (R72) 13 conditions: the expression engine pairs them one by one — the path search keeps the cap of 12 (below)
     (d,) = build_mcdc_design(_unit(WIDE, "w", [f"a{i}" for i in range(13)]))["decisions"]
-    assert d["reason"] == "decision_or_condition_budget" and search_limits(d) == [("condition_cap", "13>12")]
+    assert d["status"] == "designed" and d["pair_search"] == "per_condition" and search_limits(d) == []
     (d,) = build_mcdc_design(_unit(WIDE_LOCAL, "wl", ["a"]))["decisions"]
     assert d["reason"] == "path_refused:decision_or_condition_budget"
     assert search_limits(d) == [("condition_cap", "13>12")]
@@ -280,7 +286,7 @@ def test_a_decision_the_run_cannot_observe_tried_no_values(monkeypatch):
 
 def test_summary_disclosure_and_sheet(two):
     units = [{"fid": "F1", "name": "f", "mcdc_design": two},
-             {"fid": "F2", "name": "w", "mcdc_design": build_mcdc_design(_unit(WIDE, "w", [f"a{i}" for i in range(13)]))}]
+             {"fid": "F2", "name": "w", "mcdc_design": build_mcdc_design(_unit(WIDER, "w", [f"a{i}" for i in range(65)]))}]
     s = summarize_mcdc_design(units)
     # D1 sampled_values only · D2 path_samples_capped · D3 path_budget + path_samples_capped · w condition_cap
     assert (s["search_limited_decisions"], s["sampled_only_decisions"]) == (3, 1)
@@ -291,7 +297,8 @@ def test_summary_disclosure_and_sheet(two):
     for text in ("탐색이 상한에 닿은 결정 3(쌍 못 찾음 1 · 미지원 2)", "함수 실행 모델 탐색이 예산에 잘림 1",
                  "입력 값 목록을 12 개로 자른 탐색 2",
                  "그 밖에 상한에는 닿지 않았지만 도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · 양 끝)만 본 결정 1",
-                 "조건 수 상한(12 초과 — 탐색하지 않음) 1", "끝까지 찾아본 결과가 아니다", "상한이 원인이라는 뜻은 아니다",
+                 "조건 수 상한(식 엔진 64 · 함수 실행 모델 12 초과 — 탐색하지 않음) 1", "끝까지 찾아본 결과가 아니다",
+                 "상한이 원인이라는 뜻은 아니다",
                  "'Search Limit' 열", "path_evaluation:unsupported:path_budget", "'Search Complete = yes'"):
         assert text in item["note"], text
     assert "stub 값 탐색이 예산에 잘림" not in item["note"]          # a kind with no decision is not written
@@ -319,7 +326,7 @@ def test_summary_disclosure_and_sheet(two):
     cells = {(r[1], r[2]): r[header.index("Search Limit")] for r in rows[1:] if not r[3]}
     assert cells[("f", "D1")] == "sampled_values"
     assert cells[("f", "D3")] == "path_budget · path_samples_capped:a(14),b(14),c(14),d(14),e(14)"
-    assert cells[("w", "D1")] == "condition_cap:13>12"
+    assert cells[("w", "D1")] == "condition_cap:65>64"
 
 
 def test_the_observable_search_says_where_it_stopped_at_its_candidate_cap():
@@ -373,4 +380,8 @@ def test_the_disclosed_caps_are_the_generator_caps():
     defaults = inspect.signature(build_mcdc_design).parameters
     assert (gd.MAX_MCDC_PATH_SAMPLES, gd.MAX_MCDC_CONDITIONS, gd.MAX_MCDC_DECISIONS) == (
         md._PATH_SAMPLES, defaults["max_conditions"].default, defaults["max_decisions"].default)
+    assert gd.MAX_MCDC_WIDE_CONDITIONS == defaults["max_wide_conditions"].default == md.MAX_WIDE_CONDITIONS
+    # (R72 review I10) the per-condition steps and the decision's factor the disclosure names
+    assert gd.MAX_MCDC_CANDIDATES == defaults["max_candidates"].default
+    assert gd.MAX_MCDC_WIDE_STEP_FACTOR == md._WIDE_STEP_FACTOR
     assert [k for k, _label in gd._SEARCH_LIMIT_LABELS] == list(md.SEARCH_LIMITS)
