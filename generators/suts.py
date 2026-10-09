@@ -4121,6 +4121,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "observable_candidates_capped": 0,
                            # (R72) 진리값 곱 상한(조건 12)보다 조건이 많아 조건마다 짝지은 결정(식 엔진) · 그중 설계
                            "wide_decisions": 0, "wide_designed": 0,
+                           # (R73) 같은 결정을 함수 실행 모델이 조건마다 표적 탐색한 결정(별도 그룹 · 예산) · 그중 설계
+                           "wide_path_decisions": 0, "wide_path_designed": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     # (R56 리뷰 I1) 함수 실행 모델 탐색 예산 — 문서가 어느 예산으로 설계됐는지(같은 소스라도 예산이 다르면 쌍이 다르다)
@@ -4184,6 +4186,9 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             if d.get("pair_search") == "per_condition":
                 out["wide_decisions"] += 1
                 out["wide_designed"] += status == "designed"
+            elif d.get("pair_search") == "path_targeted":
+                out["wide_path_decisions"] += 1
+                out["wide_path_designed"] += status == "designed"
             if d.get("stub_inputs"):
                 out["stub_input_decisions"] += 1
             for pair in d.get("pairs") or []:
@@ -4294,7 +4299,7 @@ def _mcdc_source_read_pass(unit: Dict[str, Any], base_report: Dict[str, Any],
         adopted.append((i, new))
     for wide in (False, True):
         for _i, new in adopted:
-            if (new.get("pair_search") == "per_condition") is not wide:
+            if (new.get("pair_search") in ("per_condition", "path_targeted")) is not wide:   # (R73) both engines
                 continue
             for pair in new.get("pairs") or []:
                 for side in ("a", "b"):

@@ -44,11 +44,12 @@ EXPR = H + ("U8 g_o;\nvoid h(U8 a, U8 b, U8 c) { if ((a + b) == 300U) { g_o = 1U
             "if (((a == 1U) && (b == 2U)) || ((a == 1U) && (c == 3U))) { g_o = 3U; } }\n")
 WIDE = H + ("U8 g_o;\nvoid w(" + ", ".join(f"U8 a{i}" for i in range(13)) + ") { if ("
             + " && ".join(f"(a{i} == {i}U)" for i in range(13)) + ") { g_o = 1U; } }\n")
+# (R73) a local: the modeled run's cap
+WIDE_LOCAL_65 = H + ("U8 g_o;\nvoid wl(U8 a) { U8 t = (U8)(a + 1U); if ("
+                     + " && ".join(f"(t == {i}U)" for i in range(65)) + ") { g_o = 1U; } }\n")
 # (R72) the expression engine pairs up to 64 conditions condition by condition — its cap is past that
 WIDER = H + ("U8 g_o;\nvoid w(" + ", ".join(f"U8 a{i}" for i in range(65)) + ") { if ("
              + " && ".join(f"(a{i} == {i}U)" for i in range(65)) + ") { g_o = 1U; } }\n")
-WIDE_LOCAL = H + ("U8 g_o;\nvoid wl(U8 a) { U8 t = (U8)(a + 1U); if ("
-                  + " && ".join(f"(t == {i}U)" for i in range(13)) + ") { g_o = 1U; } }\n")
 
 
 def _kinds(decision):
@@ -234,9 +235,10 @@ def test_a_decision_over_the_caps_was_not_searched_and_says_which_cap():
     # (R72) 13 conditions: the expression engine pairs them one by one — the path search keeps the cap of 12 (below)
     (d,) = build_mcdc_design(_unit(WIDE, "w", [f"a{i}" for i in range(13)]))["decisions"]
     assert d["status"] == "designed" and d["pair_search"] == "per_condition" and search_limits(d) == []
-    (d,) = build_mcdc_design(_unit(WIDE_LOCAL, "wl", ["a"]))["decisions"]
+    # (R73) the modeled run pairs up to 64 conditions too — its cap is past that
+    (d,) = build_mcdc_design(_unit(WIDE_LOCAL_65, "wl", ["a"]))["decisions"]
     assert d["reason"] == "path_refused:decision_or_condition_budget"
-    assert search_limits(d) == [("condition_cap", "13>12")]
+    assert search_limits(d) == [("condition_cap", "65>64")]
     first, second, _third = build_mcdc_design(_unit(EXPR, "h", ["a", "b", "c"]), max_decisions=1)["decisions"]
     assert "decision_cap" not in _kinds(first)
     assert second["reason"] == "decision_or_condition_budget" and search_limits(second) == [("decision_cap", "#2>1")]
@@ -297,7 +299,7 @@ def test_summary_disclosure_and_sheet(two):
     for text in ("탐색이 상한에 닿은 결정 3(쌍 못 찾음 1 · 미지원 2)", "함수 실행 모델 탐색이 예산에 잘림 1",
                  "입력 값 목록을 12 개로 자른 탐색 2",
                  "그 밖에 상한에는 닿지 않았지만 도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · 양 끝)만 본 결정 1",
-                 "조건 수 상한(식 엔진 64 · 함수 실행 모델 12 초과 — 탐색하지 않음) 1", "끝까지 찾아본 결과가 아니다",
+                 "조건 수 상한(64 초과 — 탐색하지 않음) 1", "끝까지 찾아본 결과가 아니다",
                  "상한이 원인이라는 뜻은 아니다",
                  "'Search Limit' 열", "path_evaluation:unsupported:path_budget", "'Search Complete = yes'"):
         assert text in item["note"], text

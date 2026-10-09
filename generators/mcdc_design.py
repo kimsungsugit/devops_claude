@@ -386,6 +386,75 @@ def _sibling_paths(ir, path=(), out=None):
     return out
 
 
+# (R73 review W3) a condition whose climb stops at a local best starts again from the next best reaching vector, this
+#   many starts at most
+_TARGETED_STARTS = 3
+
+
+def _value_reads(node, raw):
+    """Names a value reads, and a call's value as its ``F() return`` row input (R36)."""
+    names = list(_read_names(node, raw))
+    for c in _walk(node):
+        if c.type == "call_expression":
+            f = c.child_by_field_name("function")
+            if f is not None and f.type == "identifier":
+                names.append(f"{_text(f, raw)}() return")
+    return names
+
+
+def _local_sources(body, raw):
+    """(R73 review W3 · I4) ``{name: names its assignments in the body read}`` — ``T x = e;`` · ``x = e;`` · ``x op= e;``
+    (which reads x too); a call's value as ``F() return``. Every assignment, wherever it is: the climb only takes these
+    as the inputs worth moving first, the run decides what they do."""
+    out = {}
+    for x in _walk(body):
+        if x.type == "init_declarator":
+            d, v = x.child_by_field_name("declarator"), x.child_by_field_name("value")
+            if d is not None and d.type == "identifier" and v is not None:
+                out.setdefault(_text(d, raw), set()).update(_value_reads(v, raw))
+        elif x.type == "assignment_expression":
+            left, right = x.child_by_field_name("left"), x.child_by_field_name("right")
+            if left is not None and left.type == "identifier" and right is not None:
+                names = _value_reads(right, raw)
+                if _text(x.child_by_field_name("operator"), raw) != "=":
+                    names.append(_text(left, raw))
+                out.setdefault(_text(left, raw), set()).update(names)
+    return out
+
+
+def _condition_inputs(atom, raw, sources, input_set):
+    """(R73 review W3 · I4) The search inputs a condition depends on: the inputs it reads, and through every name it reads
+    that the body assigns (a local, an input written before), the inputs those assignments read — transitively."""
+    out, seen, todo = [], set(), list(dict.fromkeys(_value_reads(atom, raw)))
+    while todo:
+        name = todo.pop(0)
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in input_set:
+            out.append(name)
+        todo.extend(sorted(sources.get(name, ())))
+    return out
+
+
+def _leaves(ir):
+    """(R73) The condition indexes under an IR subtree, left to right."""
+    return [ir[1]] if ir[0] == "atom" else [k for child in ir[1:] for k in _leaves(child)]
+
+
+def _distance(ir, want, known):
+    """(R73) How many conditions would have to change for this subtree to take ``want`` — an unknown condition (not
+    evaluated on the run) counts as one; ``&&`` / ``||`` take the cheaper side where one side decides."""
+    kind = ir[0]
+    if kind == "atom":
+        return 0 if known.get(ir[1]) is want else 1
+    if kind == "!":
+        return _distance(ir[1], not want, known)
+    left, right = _distance(ir[1], want, known), _distance(ir[2], want, known)
+    decides_alone = (kind == "&&") is not want   # && false · || true: one side is enough
+    return min(left, right) if decides_alone else left + right
+
+
 def _wide_pairs(did, ir, atoms, variables, values, defaults, budget, ub_skipped):
     """(R72) Unique-cause pairs of a decision of more conditions than the product engine takes, condition by condition.
 
@@ -1693,7 +1762,7 @@ def _stub_return_domain(name, scope, own):
 
 def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
                  max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False, inert_calls=None,
-                 pointee_inputs=False):
+                 pointee_inputs=False, wide=False):
     """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
 
     Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
@@ -1712,7 +1781,12 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     ``inert_calls``: the runs may judge a stubbed call in a condition inert (`observe_decisions` ``inert_stub_calls``) —
     by default what ``skip_unobservable`` says (R37's call group); R39's member-access group skips without it.
     ``pointee_inputs``: the row's pointer-parameter pointees (``p[0].a``) join the search with their declared types —
-    R40's own group only (review R40 W3: elsewhere they would change the other groups' rows and budget)."""
+    R40's own group only (review R40 W3: elsewhere they would change the other groups' rows and budget).
+    ``wide`` (R73): the decisions of more conditions than the truth product takes — searched on their own (the caller
+    gives them their own group and budget, after the others), with a targeted climb per condition (`targeted`) instead
+    of the breadth-first frontier: one condition flips the outcome only where every sibling on its path to the root
+    holds the non-controlling value, which a frontier of single changes from the base vector does not reach for a chain
+    of a dozen conditions within the budget."""
     from generators import c_source_oracle as cso
     inert = skip_unobservable if inert_calls is None else inert_calls
     if not cso.scope_matches(unit):
@@ -1888,6 +1962,114 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     def neighbours(v):
         return [{**v, name: value} for name in inputs for value in samples[name] if value != v[name]]
 
+    # (R73) per decision: each condition's siblings on its path to the root, and the inputs each condition depends on
+    #   (R73 review W3 · I4: through the locals and call values it reads — none known: its climb moves every input)
+    input_set = set(inputs)
+    sibling_paths = [_sibling_paths(spec["ir"]) for _d, spec, _a, _n in specs] if wide else []
+    sources = _local_sources(fn.child_by_field_name("body"), raw) if wide else {}
+    atom_inputs = [[_condition_inputs(a, raw, sources, input_set) for a in spec_atoms]
+                   for _d, _s, spec_atoms, _n in specs] if wide else []
+    stops: dict = {}   # (R73 review W3) decision index → conditions every climb left at a local best
+    climb_ends: dict = {}   # (R73 review W3) decision index → the vectors its climbs ended at (the frontier starts there)
+
+    def best_instance(v, index, i):
+        """``(score, known)`` of the decision's evaluation in run ``v`` that best lets condition i decide — score =
+        (siblings known to mask i — fewer, conditions still to change on the path — fewer, path conditions the run
+        evaluated — more, i evaluated); below every evaluation where the run does not evaluate the decision. The
+        climb's target is read from the same evaluation (R73 review I3)."""
+        paths = sibling_paths[index][i]
+        s = observation(cache[vkey(v)][1], index)
+        best = ((-len(paths) - 1, -10 ** 6, -1, 0), {})
+        if s["state"] != "evaluated":
+            return best
+        for inst in s["instances"]:
+            known = {j: bool(t) for j, (t, o) in enumerate(zip(inst["truth"], inst["observed"], strict=True)) if o}
+            masking = sum(_kleene(sib, known) is (op == "||") for op, sib in paths)
+            distance = sum(_distance(sib, op == "&&", known) for op, sib in paths)
+            seen = sum(k in known for _op, sib in paths for k in _leaves(sib))
+            score = (-masking, -distance, seen, int(bool(inst["observed"][i])))
+            if score > best[0]:
+                best = (score, known)
+        return best
+
+    def climb(index, i, start, own):
+        """One climb for condition i from ``start`` (see `targeted`): True if it got the pair, None if the budget ran
+        out, False at a local best."""
+        paths = sibling_paths[index][i]
+        cur, flipped = start, set()
+        ends = climb_ends.setdefault(index, [])
+        while i not in pairers[index].pairs:
+            if exhausted():
+                left_out[0] = True
+                return None
+            score, known = best_instance(cur, index, i)
+            if score[0] == 0 and vkey(cur) not in flipped:
+                flipped.add(vkey(cur))
+                run([{**cur, n: value} for n in own for value in samples[n] if value != cur[n]])
+                if i in pairers[index].pairs:
+                    return True
+            # in evaluation order (C's left to right — the conditions are numbered in text order): a sibling after
+            #   an unsatisfied one is not evaluated yet, so moving its inputs shows nothing
+            target = next((sib for op, sib in sorted(paths, key=lambda p: min(_leaves(p[1])))
+                           if _kleene(sib, known) is not (op == "&&")), None)
+            if target is None:
+                return False
+            names = list(dict.fromkeys(n for k in _leaves(target) for n in atom_inputs[index][k]))
+            if any(not atom_inputs[index][k] for k in _leaves(target)):
+                # (review R2-I3) a condition whose inputs are not known (a write through a pointer · member · element)
+                names = list(dict.fromkeys([*names, *inputs]))
+            cands = [{**cur, n: value} for n in names for value in samples[n] if value != cur[n]]
+            run(cands)
+            pool = [cur] + [c for c in cands if vkey(c) in cache and reaches(c, index)]
+            best = max(pool, key=lambda v: best_instance(v, index, i)[0])
+            if best_instance(best, index, i)[0] <= score:
+                ends.append(cur)
+                return False   # a local best: no single move of these inputs improves it
+            cur = best
+        return True
+
+    def targeted(index):
+        """(R73) For each condition the search has not paired: from the reaching vector that best lets it decide, move
+        the inputs of the first sibling on its path (in evaluation order) that does not yet hold its non-controlling
+        value — the inputs its conditions read, through the locals they read (`_condition_inputs`); every input where
+        one of them reads none known — keep the best vector (`best_instance`), until no sibling is known to mask the
+        condition, and
+        there move the condition's own inputs: every evaluation goes to the pairer, which takes the pair when one flips
+        the condition alone (short-circuit don't-care, `_short_circuit_unique_cause`). A climb that stops at a local
+        best starts again from the next best reaching vector, up to `_TARGETED_STARTS` starts (R73 review W3) — after
+        every condition had its first climb (review R2-W1); a condition all its climbs left at a local best is recorded
+        (``targeted_local_best`` — no pair found there, not a proof)."""
+        # (R73 review R2-W1) round r climbs every condition still unpaired from its r-th best start: each condition has
+        #   one climb before any has a second — restarting at once spent the budget on the first failing conditions and
+        #   the last ones (which pair many others on their way) got none
+        fails: dict = {}
+
+        def stopped():
+            # (review R2-I1) a local best only where a run evaluated the condition: where none did, the modeled run
+            #   could not evaluate it — no search method's limit
+            return [k for k, c in fails.items() if c >= _TARGETED_STARTS and k not in pairers[index].pairs
+                    and any(observation(r, index)["state"] == "evaluated"
+                            and any(inst["observed"][k] for inst in observation(r, index)["instances"])
+                            for _v, r in cache.values())]
+        for rnd in range(_TARGETED_STARTS):
+            for i in range(len(specs[index][2])):
+                if i in pairers[index].pairs or fails.get(i, 0) < rnd:
+                    continue
+                reach = [v for v in order if reaches(v, index)]
+                if not reach:
+                    stops[index] = stopped()
+                    return
+                starts = sorted(reach, key=lambda v: best_instance(v, index, i)[0], reverse=True)[:_TARGETED_STARTS]
+                if rnd >= len(starts):
+                    continue
+                got = climb(index, i, starts[rnd], atom_inputs[index][i] or inputs)
+                if got is None:
+                    stops[index] = stopped()
+                    return
+                if not got:
+                    fails[i] = fails.get(i, 0) + 1
+        stops[index] = stopped()
+
     run([base])
     blind = {}
     # (R71) decision index → its own search stopped on the budget (or had none left when its turn came): the budget is
@@ -1922,10 +2104,21 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             if progress(candidate, index) <= progress(best, index):
                 break
             best = candidate
+        product_cut = False
+        if wide:
+            # (R73) 2'. condition by condition, a climb towards the vector where the outcome follows it (`targeted`),
+            #   then (review W3, measured: the climb alone missed pairs a broader search found) the frontier below with
+            #   what is left of this decision's own budget (each wide decision is searched alone)
+            targeted(index)
         # 2. around the vectors that reach it, breadth first: one input at a time from each (a vector a neighbour found
         #    joins the frontier — ``A && B`` needs A true before B's input matters), then the product of the inputs
         #    that changed its observation
         frontier = [v for v in order if reaches(v, index)]
+        if wide:
+            # (R73 review W3) the climbs' ends first: most siblings right, so one input change flips a condition alone
+            ends = list({vkey(v): v for v in climb_ends.get(index, []) if reaches(v, index)}.values())
+            keys = {vkey(v) for v in ends}
+            frontier = ends + [v for v in frontier if vkey(v) not in keys]
         on_frontier = {vkey(v) for v in frontier}
         expanded = 0
         while expanded < len(frontier) and not pairers[index].complete():
@@ -1937,8 +2130,7 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                     frontier.append(v)
                     on_frontier.add(vkey(v))
             expanded += 1
-        product_cut = False
-        if frontier and not pairers[index].complete():
+        if frontier and not pairers[index].complete() and not wide:   # (R73) no product for a wide decision
             anchor = frontier[0]
             here = observation(cache[vkey(anchor)][1], index)
             influence = [name for name in inputs
@@ -1992,6 +2184,10 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                                      "inputs": inputs, "guards": len(chains[index]),
                                      "observations": dict(states.most_common())},
                         candidate_count=len(cache), search_complete=False)
+        if wide:
+            decision["pair_search"] = "path_targeted"   # (R73) the targeted climb per condition, its own group
+            # (R73 review W3) conditions every climb left at a local best — not a proof; `search_limits` names them
+            decision["path_search"]["targeted_local_best"] = [f"C{i + 1}" for i in stops.get(index, [])]
         for pair in pairs.values():
             for side in ("a", "b"):
                 # same key form as the expression path's vectors: one vector, one row
@@ -2014,7 +2210,7 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
 
 
 def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                    max_steps, skip_unobservable=False, inert_calls=None, pointee_inputs=False):
+                    max_steps, skip_unobservable=False, inert_calls=None, pointee_inputs=False, wide=False):
     """(R36) A second search for the decisions the first did not design, where a value a call returned may be what it
     lacked (``r = F(); if ((r == 3U) && …)``): the row inputs ``F() return`` — the values the SUTS row injects into
     F's stub (R14, `_stub_return_domain`) — join the search. Merged condition by condition: every decision keeps the
@@ -2036,13 +2232,17 @@ def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selecte
     if not retry:
         return
     first = {id(d): copy.deepcopy(d) for d, _n, _r in retry}   # every decision goes back to this, then merges
+    # (R73 review R2-W2) a wide decision's second search climbs the conditions the first one paired too: its cache is
+    #   empty, and those climbs rebuild cheaply the near-true vectors the unpaired conditions need (skipping them cost
+    #   pairs and runs)
     record = report.setdefault("stub_search", {"max_runs": max_runs, "max_steps": max_steps, "decisions_searched": 0,
                                                 "decisions_improved": 0, "conditions_added": 0})
     record["decisions_searched"] += len(retry)
     try:
         _path_design(unit, {"domains": {}}, retry, row_names, dict(domains), scope, {}, max_conditions=max_conditions,
                      max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True,
-                     skip_unobservable=skip_unobservable, inert_calls=inert_calls, pointee_inputs=pointee_inputs)
+                     skip_unobservable=skip_unobservable, inert_calls=inert_calls, pointee_inputs=pointee_inputs,
+                     wide=wide)
     except Exception as exc:  # noqa: BLE001 — the first search's result stands (review round 2 I1); the reason is kept
         for d, _n, _r in retry:
             d.clear()
@@ -2489,8 +2689,24 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             # (R37 review R3-C1) the decisions that reach the path search only since R37 — a call in a condition —
             # are searched on their own, with a budget of their own: observing them on every run of the others' search
             # cost steps, and the budget those decisions had in R36 is theirs unchanged
-            def of(label):
-                return [c for c in path_candidates if c[0].get("search_group", "") == label]
+            # (R73) a decision of more conditions than the truth product takes goes to its own group (same flags,
+            #   own budget) after every other group — the others' rows, order and budgets stay what they were
+            wide_ids = set()
+            for decision, node, raw in path_candidates:
+                atoms = []
+                try:
+                    _path_ir(node, raw, atoms)
+                except Unsupported:
+                    continue
+                if len(atoms) > max_conditions:   # past the wide cap too: refused there, naming that cap
+                    wide_ids.add(id(decision))
+
+            def of(label, wide=False):
+                return [c for c in path_candidates if c[0].get("search_group", "") == label
+                        and (id(c[0]) in wide_ids) == wide]
+            # (R73 review W1) the narrow groups add their own search inputs to `domains` (the pointee group its
+            #   pointees): each wide group starts from the domains as they were before them, with its group's flags
+            wide_domains = dict(domains)
             # (R39) a condition on a struct member (``g.a``) reaches the path search only since R39: its own group too;
             # (R40) one read through a pointer parameter (``p->a``) only since R40 — its own group, the only one whose
             # runs set the pointees (review R40 W3: the others' rows and budget stay what they were)
@@ -2505,6 +2721,19 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 _stub_path_pass(unit, report, group, row_names, domains, scope, selected,
                                 max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
                                 skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees)
+            # (R73) the wide decisions of each group, each on its own — its own run · step budget and cache (measured:
+            #   sharing one, a never-pairing decision's climbs spent the step budget of the next); their vectors join the
+            #   wide ones at the end
+            for label, late, inert, pointees in (("", False, False, False), ("call_in_condition", True, True, False),
+                                                 ("struct_member", True, False, False), ("pointee", True, False, True)):
+                for one in of(label, wide=True):
+                    group_domains = dict(wide_domains)
+                    _path_design(unit, report, [one], row_names, group_domains, scope, wide_selected,
+                                 max_conditions=max_wide_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
+                                 skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees, wide=True)
+                    _stub_path_pass(unit, report, [one], row_names, group_domains, scope, wide_selected,
+                                    max_conditions=max_wide_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
+                                    skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees, wide=True)
         except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":
@@ -2526,8 +2755,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     return report
 
 
-SEARCH_LIMITS = ("path_budget", "stub_path_budget", "path_samples_capped", "candidate_budget", "sampled_values",
-                 "condition_cap", "decision_cap")
+SEARCH_LIMITS = ("path_budget", "stub_path_budget", "targeted_local_best", "path_samples_capped", "candidate_budget",
+                 "sampled_values", "condition_cap", "decision_cap")
 
 
 def search_limits(decision: dict[str, Any]) -> list[tuple[str, str]]:
@@ -2541,7 +2770,9 @@ def search_limits(decision: dict[str, Any]) -> list[tuple[str, str]]:
     searches cut it). ``candidate_budget``: the expression engine's candidate cap. ``sampled_values``: the search looked at
     sample values (``0 · ±1 · constants ±1 · ends``) of a domain wider than them — the whole list, but not the whole
     domain. ``condition_cap`` / ``decision_cap``: the decision was not searched — more conditions than the cap, or past
-    the function's decision cap. Value limits are recorded only where some run could tell values apart."""
+    the function's decision cap. ``targeted_local_best`` (R73): conditions of a wide decision every targeted climb left
+    at a local best (detail: their ids) — the climb is a heuristic. Value limits are recorded only where some run could
+    tell values apart."""
     if decision.get("status") == "designed":
         return []
     out = []
@@ -2552,6 +2783,11 @@ def search_limits(decision: dict[str, Any]) -> list[tuple[str, str]]:
         out.append(("path_budget", ""))
     if stub.get("budget_exhausted"):
         out.append(("stub_path_budget", ""))
+    # (R73 review W3) conditions the targeted climb left at a local best and no later search paired
+    paired = {p.get("condition_id") for p in decision.get("pairs") or []}
+    stopped = [c for c in path.get("targeted_local_best") or [] if c not in paired]
+    if stopped:
+        out.append(("targeted_local_best", ",".join(stopped)))
     capped = {**(stub.get("samples_capped") or {}), **(path.get("samples_capped") or {})}
     if capped:
         out.append(("path_samples_capped", ",".join(f"{k}({capped[k]})" for k in sorted(capped))))

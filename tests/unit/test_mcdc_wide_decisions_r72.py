@@ -148,12 +148,12 @@ def test_past_the_wide_cap_the_decision_is_not_searched():
     assert search_limits(d) == [("condition_cap", "13>12")]
 
 
-def test_the_path_search_keeps_the_cap_of_twelve():
-    # a local in the decision sends it to the modeled run — not paired condition by condition (R73)
+def test_a_decision_with_a_local_goes_to_the_modeled_run_not_the_expression_engine():
+    # a local in the decision sends it to the modeled run — its own condition-by-condition search there (R73)
     text = H + ("U8 g_o;\nvoid wl(U8 a) { U8 t = (U8)(a + 1U); if ("
                 + " && ".join(f"(t == {i}U)" for i in range(13)) + ") { g_o = 1U; } }\n")
     (d,) = build_mcdc_design(_unit(text, "wl", ["a"]))["decisions"]
-    assert d["reason"] == "path_refused:decision_or_condition_budget" and "pair_search" not in d
+    assert d["evaluation"] == "source_path" and d["pair_search"] == "path_targeted"
 
 
 # (R72 measurement) HD ``s_BuzzerStateStop`` D1, globals as parameters: ``PP != PP`` is never true (the source compares

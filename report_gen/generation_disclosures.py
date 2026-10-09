@@ -2042,8 +2042,8 @@ DISCLOSURE_DOC_TYPES = frozenset(_BY_DOC_TYPE)
 MAX_OBSERVABLE_EVALUATIONS = 2000   # generators.observable_mcdc.MAX_EVALUATIONS (공시 문구 — 테스트가 같은지 본다)
 MAX_OBSERVABLE_CANDIDATES = 48      # generators.observable_mcdc.MAX_CANDIDATES
 MAX_MCDC_PATH_SAMPLES = 12          # generators.mcdc_design._PATH_SAMPLES
-MAX_MCDC_CONDITIONS = 12            # generators.mcdc_design.build_mcdc_design(max_conditions=) — 진리값 곱 · 함수 실행 모델
-MAX_MCDC_WIDE_CONDITIONS = 64       # generators.mcdc_design.build_mcdc_design(max_wide_conditions=) — 식 엔진 조건별 (R72)
+MAX_MCDC_CONDITIONS = 12            # generators.mcdc_design.build_mcdc_design(max_conditions=) — 진리값 곱 상한
+MAX_MCDC_WIDE_CONDITIONS = 64       # generators.mcdc_design.build_mcdc_design(max_wide_conditions=) — 두 엔진의 조건별 (R72 · R73)
 MAX_MCDC_CANDIDATES = 4096          # generators.mcdc_design.build_mcdc_design(max_candidates=) — 조건별 짝짓기의 조건당 단계
 MAX_MCDC_WIDE_STEP_FACTOR = 16      # generators.mcdc_design._WIDE_STEP_FACTOR — 결정당 총 단계 = 조건당 단계 × 이 값
 MAX_MCDC_DECISIONS = 64             # generators.mcdc_design.build_mcdc_design(max_decisions=)
@@ -2051,11 +2051,12 @@ MAX_MCDC_DECISIONS = 64             # generators.mcdc_design.build_mcdc_design(m
 _SEARCH_LIMIT_LABELS = (
     ("path_budget", "함수 실행 모델 탐색이 예산에 잘림"),
     ("stub_path_budget", "stub 값 탐색이 예산에 잘림"),
+    ("targeted_local_best", "조건이 많은 결정의 표적 탐색이 국소 최선에서 멈춤(출발점을 바꿔 다시 올라도)"),
     ("path_samples_capped", f"입력 값 목록을 {MAX_MCDC_PATH_SAMPLES} 개로 자른 탐색"),
     ("candidate_budget", "식 엔진 후보 상한"),
     ("sampled_values", "도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · 양 끝)만 본 탐색"),   # (R71 리뷰 N2) 첫머리 밖
-    # (R72) 식 엔진은 조건 수 상한까지 조건마다 짝짓고, 함수 실행 모델 탐색은 아직 진리값 곱 상한 그대로다
-    ("condition_cap", f"조건 수 상한(식 엔진 {MAX_MCDC_WIDE_CONDITIONS} · 함수 실행 모델 {MAX_MCDC_CONDITIONS} 초과 — 탐색하지 않음)"),
+    # (R72 · R73) 두 엔진 모두 조건 수 상한까지 조건마다 짝짓는다
+    ("condition_cap", f"조건 수 상한({MAX_MCDC_WIDE_CONDITIONS} 초과 — 탐색하지 않음)"),
     ("decision_cap", f"함수당 결정 수 상한({MAX_MCDC_DECISIONS} 번째 뒤 — 탐색하지 않음)"),
 )
 
@@ -2067,19 +2068,30 @@ _VALUE_RULE_LIMIT = ("그 거절 · 미상 값이 입력이 고르는 분기 안
 
 
 def _mcdc_wide_text(mc: dict) -> str:
-    """(R72) 진리값 곱 상한보다 조건이 많은 결정을 조건마다 짝지은 수 — 키가 없거나(옛 요약) 0 이면 아무것도 쓰지 않는다."""
+    """(R72 · R73) 진리값 곱 상한보다 조건이 많은 결정을 조건마다 짝지은 수 — 식 엔진 · 함수 실행 모델. 키가 없거나(옛 요약) 0
+    이면 아무것도 쓰지 않는다."""
     n = _int(mc, "wide_decisions") or 0
-    if not n:
+    p = _int(mc, "wide_path_decisions") or 0
+    if not (n or p):
         return ""
-    return (f" 조건이 {MAX_MCDC_CONDITIONS} 개보다 많은 결정 {_show(n)} 은 진리값 조합 전체(2^조건 수) 대신 조건마다 짝지었다 — 그 "
+    path, tail = "", (" 그 행은 함수의 다른 MC/DC 행 뒤에 붙어 기존 행의 자리 · 이름은 그대로다 — 함수의 기본 MC/DC 자리(7)가 "
+                      "남으면 새 행이 그 자리에 들어가 정본 규모 문서에도 더해지고, 남지 않으면 확장 프로파일에만(소스가 읽는 "
+                      "입력으로 다시 설계한 행 뒤) 붙는다. 다만 확장 프로파일의 경계 · 강건성 · 출력 관측 탐색은 같은 TC 의 행을 "
+                      "기준 · 후보로 쓰므로 새 행이 더해지면 그 탐색이 고른 행이 바뀔 수 있다.")
+    if p:
+        # (R73) 지역 변수 · 바뀐 입력을 읽어 식 엔진이 넘긴 결정 — 함수 실행 모델의 별도 그룹 · 별도 예산
+        path = (f" 함수 실행 모델로 탐색한 조건 {MAX_MCDC_CONDITIONS} 개 초과 결정 {_show(p)} 은 같은 탐색 그룹 안에서도 따로 · 자기 "
+                f"예산으로, 조건마다 그 조건이 결과를 정하도록 경로의 다른 조건을 맞추는 입력을 하나씩 움직이는 표적 탐색으로 짝지었다"
+                f"(설계 {_show(_int(mc, 'wide_path_designed'))}) — 다른 결정의 탐색 · 예산은 그대로이고, 쌍을 못 찾은 조건은 "
+                "출발점을 바꿔 다시 올라도 멈춘 국소 최선일 뿐 불가 증명이 아니다('Search Limit' `targeted_local_best`).")
+    if not n:
+        return path + tail
+    return path + (f" 조건이 {MAX_MCDC_CONDITIONS} 개보다 많은 결정 {_show(n)} 은 진리값 조합 전체(2^조건 수) 대신 조건마다 짝지었다 — 그 "
             "조건의 연결 성분 안에서 그 조건만 다른 두 값 조합을 고르고, 나머지 성분은 결정이 그 조건을 따르는 조합을 깊이 우선으로 "
             f"찾는다(식 엔진, 조건 {MAX_MCDC_WIDE_CONDITIONS} 개까지 · 조건마다 탐색 {MAX_MCDC_CANDIDATES} 단계 · 결정마다 그 "
             f"{MAX_MCDC_WIDE_STEP_FACTOR} 배 — 넘으면 그 결정의 'Search Limit' 에 `candidate_budget`(미정의 동작 후보가 함께 있으면 그 "
             f"사유가 앞선다); 설계 {_show(_int(mc, 'wide_designed'))}). 쌍은 모두 그 입력으로 결정식을 다시 평가한 "
-            "것이다. 그 행은 함수의 다른 MC/DC 행 뒤에 붙어 기존 행의 자리 · 이름은 그대로다 — 함수의 기본 MC/DC 자리(7)가 남으면 "
-            "새 행이 그 자리에 들어가 정본 규모 문서에도 더해지고, 남지 않으면 확장 프로파일에만(소스가 읽는 입력으로 다시 설계한 행 "
-            "뒤) 붙는다. 다만 확장 프로파일의 경계 · 강건성 · 출력 관측 탐색은 같은 TC 의 행을 기준 · 후보로 쓰므로 새 행이 "
-            "더해지면 그 탐색이 고른 행이 바뀔 수 있다.")
+            "것이다." + tail)
 
 
 def _mcdc_search_limit_text(mc: dict) -> str:
@@ -2108,7 +2120,9 @@ def _mcdc_search_limit_text(mc: dict) -> str:
     return (head + sampled
             + " — 그 결정의 '쌍 못 찾음' · '부분' · '미지원' 은 끝까지 찾아본 결과가 아니다. 상한이 원인이라는 뜻은 아니다: 조건 수 · "
             "결정 수 상한은 결정을 아예 탐색하지 않은 것이고, 예산 · 값 목록 상한은 탐색이 도중에 멈추거나 값을 덜 본 것이며(미지원 "
-            "결정은 함수 실행 모델이 결정을 평가하지 못한 상태가 함께 있다), 표본 값은 값 목록 전체를 봤지만 도메인 전체는 아니다. "
+            "결정은 함수 실행 모델이 결정을 평가하지 못한 상태가 함께 있다), 표본 값은 값 목록 전체를 봤지만 도메인 전체는 아니다"
+            + ("; 조건이 많은 결정의 표적 탐색이 국소 최선에서 멈춘 것(`targeted_local_best`)은 상한이 아니라 탐색 방법의 한계라 "
+               "올릴 상한이 없다" if _int(kinds, "targeted_local_best") else "") + ". "
             "값 상한은 값이 결과를 가를 수 있었던 결정에만 적는다(표본 실행이 모두 같은 모델 거절 · 같은 미상 값으로 끝나면 "
             "적지 않음 — 미정의 동작 · 실행 단위 예산 거절은 값에 따라 달라 적는다). " + _VALUE_RULE_LIMIT + " 상한 없이 끝난 탐색도 "
             "불가 증명은 아니다. 상한을 올리면 더 설계될 수 있지만, 값 목록 상한을 올리면 같은 예산을 나눠 써 오히려 줄 수 있다. 실행 "
