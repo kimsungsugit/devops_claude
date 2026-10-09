@@ -133,7 +133,7 @@ def find_observable_pairs(unit: dict[str, Any], sequences: list[dict[str, Any]],
     ``stated_of``: an existing row's outputs by `vector_key` — a candidate equal to that row becomes that row, so only
     what it states can count (review R60 round 2 W4). The pair's own rows are judged from their attached evidence.
     """
-    report = {"pairs": 0, "evaluations": 0, "evaluation_budget_exhausted": False, "rows": 0,
+    report = {"pairs": 0, "evaluations": 0, "evaluation_budget_exhausted": False, "rows": 0, "candidates_capped": 0,
               **{s: 0 for s in STATUSES}, "searched_own_rows": {k: 0 for k in OWN_ROWS}}
     design = unit.get("mcdc_design") or {}
     retained = [(d, p) for d in design.get("decisions") or [] for p in d.get("pairs") or []
@@ -244,16 +244,25 @@ def find_observable_pairs(unit: dict[str, Any], sequences: list[dict[str, Any]],
             seen: set[tuple] = set()
             found = None
             tried = 0
-            for src, values in overlays_src:
-                if tried >= max_candidates:
-                    break
+            capped = False
+
+            def overlay_of(src, values):
                 if values is None or src in (pair["seq_a"], pair["seq_b"]):
-                    continue
+                    return None
                 # (review R60 I3) a blank cell of the pair's rows may be filled from the base row
                 overlay = {k: v for k, v in values.items() if k not in fixed and inside(k, v) and a.get(k) != v}
-                okey = tuple(sorted(overlay.items()))
-                if not overlay or okey in seen:
+                return overlay if overlay and tuple(sorted(overlay.items())) not in seen else None
+
+            for position, (src, values) in enumerate(overlays_src):
+                if tried >= max_candidates:
+                    # (R71, audit #47) a candidate left untried: what the pair is marked is what the first
+                    #   `max_candidates` showed, not the whole search
+                    capped = any(overlay_of(s, v) is not None for s, v in overlays_src[position:])
+                    break
+                overlay = overlay_of(src, values)
+                if overlay is None:
                     continue
+                okey = tuple(sorted(overlay.items()))
                 seen.add(okey)
                 tried += 1
                 a2, b2 = {**a, **overlay}, {**b, **overlay}
@@ -277,7 +286,11 @@ def find_observable_pairs(unit: dict[str, Any], sequences: list[dict[str, Any]],
         if found is None:
             status = ("recheck_refused" if refused else "copy_only" if copy_seen else "no_candidate" if not tried
                       else "masked" if derived else "underived")
-            marks.append((pair, {"status": status, "own_rows": own, "candidates_tried": tried}))
+            mark = {"status": status, "own_rows": own, "candidates_tried": tried}
+            if capped:
+                mark["candidates_capped"] = True
+                report["candidates_capped"] += 1
+            marks.append((pair, mark))
             report[status] += 1
             continue
         a2, b2, changed2, src, moved = found

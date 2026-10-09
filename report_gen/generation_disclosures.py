@@ -1084,6 +1084,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(mc, "truncated_pairs") is not None else ".")
             # (R56 리뷰 I1) 어느 예산으로 설계했는지 — 같은 소스라도 예산이 다르면 쌍이 다르다
             + _mcdc_budget_text(mc.get("path_search_budget"))
+            # (R71) 그 예산 · 상한에 닿은 결정 — 결정별로는 'Search Limit' 열
+            + _mcdc_search_limit_text(mc)
             + (f" 결정을 나열하지 못한 함수 {_show(_int(mc, 'unenumerated_functions'))} · 분석하지 못한 unit "
                f"{_show(_int(mc, 'units_not_analyzed'))} 는 위 분모 밖이다."
                if (_int(mc, "unenumerated_functions") or _int(mc, "units_not_analyzed")) else "")
@@ -2037,6 +2039,60 @@ DISCLOSURE_DOC_TYPES = frozenset(_BY_DOC_TYPE)
 
 MAX_OBSERVABLE_EVALUATIONS = 2000   # generators.observable_mcdc.MAX_EVALUATIONS (공시 문구 — 테스트가 같은지 본다)
 MAX_OBSERVABLE_CANDIDATES = 48      # generators.observable_mcdc.MAX_CANDIDATES
+MAX_MCDC_PATH_SAMPLES = 12          # generators.mcdc_design._PATH_SAMPLES
+MAX_MCDC_CONDITIONS = 12            # generators.mcdc_design.build_mcdc_design(max_conditions=)
+MAX_MCDC_DECISIONS = 64             # generators.mcdc_design.build_mcdc_design(max_decisions=)
+
+_SEARCH_LIMIT_LABELS = (
+    ("path_budget", "함수 실행 모델 탐색이 예산에 잘림"),
+    ("stub_path_budget", "stub 값 탐색이 예산에 잘림"),
+    ("path_samples_capped", f"입력 값 목록을 {MAX_MCDC_PATH_SAMPLES} 개로 자른 탐색"),
+    ("candidate_budget", "식 엔진 후보 상한"),
+    ("sampled_values", "도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · 양 끝)만 본 탐색"),   # (R71 리뷰 N2) 첫머리 밖
+    ("condition_cap", f"조건 수 상한({MAX_MCDC_CONDITIONS} 초과 — 탐색하지 않음)"),
+    ("decision_cap", f"함수당 결정 수 상한({MAX_MCDC_DECISIONS} 번째 뒤 — 탐색하지 않음)"),
+)
+
+
+_SAMPLED_LABEL = "도메인보다 좁은 표본 값(0 · ±1 · 상수 ±1 · 양 끝)만 본"
+# (R71 리뷰 Q1 · Q3) 단일 상태 규칙의 한계 — 표본이 고른 경로만 보고 판정한다
+_VALUE_RULE_LIMIT = ("그 거절 · 미상 값이 입력이 고르는 분기 안에만 있는데 표본이 다른 쪽을 한 번도 타지 않았으면 이 판정이 값 상한을 "
+                     "놓친다.")
+
+
+def _mcdc_search_limit_text(mc: dict) -> str:
+    """(R71, 감사 #4 · #5) 쌍을 다 못 만든 결정 중 탐색이 상한에 닿은 결정 — 종류별(한 결정이 여러 종류) · 상태별. 상한이 원인이라고
+    말하지 않는다: 상한 없이 끝난 탐색도 불가 증명이 아니고(경로 탐색은 휴리스틱), 상한에 닿은 미지원 결정은 모델이 결정을
+    평가하지 못한 상태가 함께 있다. 키가 없으면(옛 요약) · 0 이면 아무것도 쓰지 않는다."""
+    n = _int(mc, "search_limited_decisions") or 0
+    m = _int(mc, "sampled_only_decisions") or 0
+    if not (n or m):
+        return ""
+    if not n:
+        # (R71 리뷰 P2) 상한에 닿은 결정이 없으면 상한 설명 · '올리면' 안내는 해당이 없다
+        return (f" 쌍을 다 못 만든 결정 중 탐색이 상한에 닿은 결정은 없다. 다만 그중 {_show(m)} 개는 {_SAMPLED_LABEL} 결정이다 — "
+                "값 목록은 다 봤지만 도메인 전체는 아니라 그 '쌍 못 찾음' · '부분' · '미지원' 도 불가 증명이 아니다. " + _VALUE_RULE_LIMIT
+                + " 결정별로는 'Search Limit' 열(`sampled_values`).")
+    kinds = mc.get("search_limits") if isinstance(mc.get("search_limits"), dict) else {}
+    by = mc.get("search_limited_by_status") if isinstance(mc.get("search_limited_by_status"), dict) else {}
+    # (R71 리뷰 N2) 표본 값은 상한이 아니라 거의 모든 탐색의 성질이라 따로 센다 — 상한에 닿은 결정의 종류 목록에서도 뺀다
+    parts = [f"{label} {_show(_int(kinds, key))}" for key, label in _SEARCH_LIMIT_LABELS
+             if key != "sampled_values" and _int(kinds, key)]
+    status = " · ".join(f"{label} {_show(_int(by, key))}" for key, label in (
+        ("partial", "부분"), ("no_pair_found", "쌍 못 찾음"), ("unsupported", "미지원")) if _int(by, key))
+    head = (f" 쌍을 다 못 만든 결정 중 탐색이 상한에 닿은 결정 {_show(n)}" + (f"({status})" if status else "")
+            + (": " + " · ".join(parts) if parts else ""))
+    sampled = (f"; 그 밖에 상한에는 닿지 않았지만 {_SAMPLED_LABEL} 결정 {_show(m)}" if m else "")
+    return (head + sampled
+            + " — 그 결정의 '쌍 못 찾음' · '부분' · '미지원' 은 끝까지 찾아본 결과가 아니다. 상한이 원인이라는 뜻은 아니다: 조건 수 · "
+            "결정 수 상한은 결정을 아예 탐색하지 않은 것이고, 예산 · 값 목록 상한은 탐색이 도중에 멈추거나 값을 덜 본 것이며(미지원 "
+            "결정은 함수 실행 모델이 결정을 평가하지 못한 상태가 함께 있다), 표본 값은 값 목록 전체를 봤지만 도메인 전체는 아니다. "
+            "값 상한은 값이 결과를 가를 수 있었던 결정에만 적는다(표본 실행이 모두 같은 모델 거절 · 같은 미상 값으로 끝나면 "
+            "적지 않음 — 미정의 동작 · 실행 단위 예산 거절은 값에 따라 달라 적는다). " + _VALUE_RULE_LIMIT + " 상한 없이 끝난 탐색도 "
+            "불가 증명은 아니다. 상한을 올리면 더 설계될 수 있지만, 값 목록 상한을 올리면 같은 예산을 나눠 써 오히려 줄 수 있다. 실행 "
+            "한 번의 모델 예산(경로 · 실행 · 반복 상한)은 여기 세지 않고 사유(`path_evaluation:unsupported:path_budget` 등)에 따로 "
+            "있다. 결정별로는 'Search Limit' 열 — 식 엔진의 'Search Complete = yes' 는 후보 목록을 다 돌았다는 뜻이라 "
+            "'sampled_values'(그 목록이 도메인 전체가 아님)와 함께 설 수 있다.")
 
 
 def _observable_text(mc: dict) -> str:
@@ -2060,6 +2116,17 @@ def _observable_text(mc: dict) -> str:
             parts.append(f"{label} {_show(_int(mc, key))}"
                          + (f"({own_text})" if key == "observable_searched" and own_text else ""))
     rows = _int(mc, "observable_rows")
+    capped = _int(mc, "observable_candidates_capped")
+    if capped:
+        # (R71, 감사 #47) 후보 상한에서 멈춘 쌍 — 그 상태는 앞 후보까지만 본 판정이다. 표지는 후보를 하나 이상 돌리고도
+        #   찾지 못한 네 상태(`observable_mcdc` — copy_only · masked · underived · recheck_refused)에만 붙는다: 바로 앞 항목의
+        #   일부로 읽히지 않게 그 상태를 이름 댄다(R71 측정 — HD 53 이 '확인 못 함 44' 의 일부처럼 읽혔다). 0 인 상태는 위
+        #   목록에 없으니 이름 대지 않고, '못 찾음' 은 첫 문장의 '쌍 못 찾음' 과 겹쳐 '출력을 못 찾음' 으로(R71 리뷰 R1 · R2)
+        within = [label for key, label in (("observable_copy_only", "복사와 같은 값"), ("observable_masked", "출력을 못 찾음"),
+                                           ("observable_underived", "도출된 출력 없음"),
+                                           ("observable_recheck_refused", "판정을 확인하지 못함")) if _int(mc, key)]
+        parts.append(("앞의 " + " · ".join(f"'{label}'" for label in within) + " 중 " if within else "")
+                     + f"쌍당 후보 {MAX_OBSERVABLE_CANDIDATES} 에서 멈춰 남은 후보를 보지 않은 쌍 {_show(capped)}")
     return (" 확장 프로파일: 유지 쌍의 두 행이 (1) 함수 실행 모델에서 쌍이 주장한 판정을 내고 (2) '쓴 출력' 에서 갈리는지 봤다 — 쓴 "
             "출력은 적어도 한 행의 실행이 썼고 두 행이 다르게 둔 입력을 그대로 옮긴 값이 아닌 출력이다(입력을 되돌려주기만 하는 출력 · "
             "래치처럼 입력을 복사한 출력은 세지 않는다; 움직인 입력에서 계산되는 출력(`cnt + 1` 등)은 센다) — " + " · ".join(parts)
@@ -2068,7 +2135,8 @@ def _observable_text(mc: dict) -> str:
             "충분조건이 아니다). 갈리지 않는 원인은 가르지 않는다. 탐색은 결정이 의존하는 입력(식 설계: 결정식이 읽는 입력 · 함수 "
             "실행 모델 설계: 쌍의 두 행이 다른 입력)을 쌍의 값 그대로 두고 나머지를 같은 TC 의 다른 행 값으로 바꾼다(함수당 oracle "
             f"실행 {MAX_OBSERVABLE_EVALUATIONS} — 판정 확인 포함 · 쌍당 후보 {MAX_OBSERVABLE_CANDIDATES}). 실행·도달성은 대상 "
-            "실행으로 검증하지 않았다. 기존 행·쌍은 바뀌지 않는다('Observable' · 'Observable Sequences' 열 — 확인 못 함은 사유를 붙인다).")
+            "실행으로 검증하지 않았다. 기존 행·쌍은 바뀌지 않는다('Observable' · 'Observable Sequences' 열 — 확인 못 함은 사유를, 후보 "
+            "상한에서 멈춘 쌍은 `candidates_capped` 를 붙인다).")
 
 
 def _source_read_pass_text(mc: dict) -> str:

@@ -1298,14 +1298,30 @@ def _body_constants(nodes, raw, constants_map, widths):
     return list(dict.fromkeys(v for v in out if type(v) is int))
 
 
-def _path_samples(domain, constants):
+# (R71 review N1 · N5) a decision's observation that is the same static judgment on every run, and run refusals that
+#   depend on the input values — `_path_design`'s ``values_matter``. (review P4) The list is meant to hold every
+#   `c_source_oracle.observe_decisions` refusal whose occurrence depends on the input values; a refusal not listed
+#   counts as value-independent when it is the only state every run gave (``oracle_exception:*``, a new reason) — add
+#   a new value-dependent refusal here. ``constant_condition_loop_unfinished`` / ``non_terminating_loop`` come from
+#   `evaluate_outputs` only (a world), not from this path
+_STATIC_STATES = frozenset({"effectful_condition", "decision_node_not_found"})
+_VALUE_DEPENDENT_REFUSALS = frozenset({"undefined_behavior", "path_budget", "execution_budget", "loop_iteration_budget",
+                                       "search_step_budget"})
+
+
+def _path_samples(domain, constants, capped=None):
+    """The path search's values for one input. A wide domain gets ``0 · 1 · -1 · ends`` and each constant ±1, the first
+    `_PATH_SAMPLES` of them — ``capped`` (a list) receives how many candidates there were when that cut some (R71)."""
     if domain.get("values"):
         return list(domain["values"])
     lo, hi = domain["min"], domain["max"]
     if hi - lo <= 15:
         return list(range(lo, hi + 1))
     candidates = [0, 1, -1, lo, hi] + [c + d for c in constants for d in (0, -1, 1)]
-    return list(dict.fromkeys(v for v in candidates if lo <= v <= hi))[:_PATH_SAMPLES]
+    values = list(dict.fromkeys(v for v in candidates if lo <= v <= hi))
+    if len(values) > _PATH_SAMPLES and capped is not None:
+        capped.append(len(values))
+    return values[:_PATH_SAMPLES]
 
 
 def _exits(stmt):
@@ -1538,6 +1554,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             _refuse_path(decision, str(exc))
             continue
         if len(atoms) > max_conditions:
+            # (R71) the cap, not the decision, is why: a decision of 13+ conditions is not searched at all
+            decision["search_cap"] = {"conditions": len(atoms), "max_conditions": max_conditions}
             _refuse_path(decision, "decision_or_condition_budget")
             continue
         hidden = next((h for a in atoms if (h := _macro_hides_conditions(a, raw, scope))), "")
@@ -1602,7 +1620,12 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                                          constants_map, widths)
     body_constants = _body_constants([fn.child_by_field_name("body")], raw, constants_map, widths)
     constants = list(dict.fromkeys(decision_constants + body_constants))
-    samples = {name: _path_samples(domains[name], constants) for name in inputs}
+    samples, samples_capped = {}, {}
+    for name in inputs:
+        cut: list[int] = []
+        samples[name] = _path_samples(domains[name], constants, cut)
+        if cut:
+            samples_capped[name] = cut[0]   # (R71) the candidates it had — the search tried `_PATH_SAMPLES` of them
     base = {name: _default_value(domains[name]) for name in inputs}
     cache: dict[tuple, tuple] = {}
     order: list[dict] = []  # vectors in the order they ran — every scan below is deterministic
@@ -1611,6 +1634,13 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     pairers = [_Pairer(decision["decision_id"], len(atoms)) for decision, _s, atoms, _n in specs]
     tallies = [Counter() for _ in specs]
     spent = [0]
+    # (R71 review W1) the decision being searched left a vector unrun for the budget — set by `run` (a vector it was
+    #   given and did not run, or one the oracle refused for the step budget) and by the search steps below that stop
+    #   on `exhausted()`; reset per decision. Overshooting the step budget in the last chunk of a search that left
+    #   nothing out is no cut
+    # (R71 review M29) once set the budget is spent for good: a later unfinished decision sets it again in its climb or
+    #   frontier — the reset per decision states the contract, it changes no result
+    left_out = [False]
 
     def vkey(v):
         return tuple(sorted(v.items()))
@@ -1644,12 +1674,17 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                 order.append(v)
                 added.append(v)
                 spent[0] += int(r.get("steps") or 0)
+                if r.get("reason") == "search_step_budget":
+                    left_out[0] = True   # (R71 review W1) cached, but never run: the strict step budget was spent
                 for index in range(len(specs)):
                     s = observation(r, index)
                     tallies[index][s["state"] + (":" + s["reason"].split(":", 1)[0] if s.get("reason") else "")] += 1
                     if s["state"] == "evaluated":
                         for inst in s["instances"]:
                             pairers[index].add(v, inst, r.get("possible_undefined_behavior") or [])
+        if len(added) < len(todo):
+            # (R71 review W1) the budget stopped this call before every vector ran (todo: distinct, none cached)
+            left_out[0] = True
         return added
 
     def reaches(v, index):
@@ -1679,8 +1714,15 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
 
     run([base])
     blind = {}
+    # (R71) decision index → its own search stopped on the budget (or had none left when its turn came): the budget is
+    #   the function's, spent in decision order — a decision searched after it ran out was not searched at all, and its
+    #   "no pair" / "unreached" says nothing about the decision (audit #4). An earlier decision whose own search ended
+    #   on its own is not marked when a later one spends the rest.
+    budget_cut = {}
     for index in range(len(specs)):
         if pairers[index].complete() or not order:
+            if not order:
+                budget_cut[index] = exhausted()
             continue
         state = ((cache[vkey(order[0])][1].get("decisions") or {}).get(index) or {}).get("state")
         if skip_unobservable and state in ("effectful_condition", "decision_node_not_found"):
@@ -1690,9 +1732,13 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             # (R37 review C1) the run cannot observe this decision — the same on every vector of this search: searching
             # "around" it only spends the function's budget on the decisions after it
             continue
+        left_out[0] = False
         # 1. climb towards the decision along its guard chain
         best = max(order, key=lambda v: progress(v, index))
-        while not progress(best, index)[0] and not exhausted():
+        while not progress(best, index)[0]:
+            if exhausted():
+                left_out[0] = True   # (R71 review W1) the climb would have gone on
+                break
             added = run(neighbours(best))
             if not added:
                 break
@@ -1706,13 +1752,17 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
         frontier = [v for v in order if reaches(v, index)]
         on_frontier = {vkey(v) for v in frontier}
         expanded = 0
-        while expanded < len(frontier) and not exhausted() and not pairers[index].complete():
+        while expanded < len(frontier) and not pairers[index].complete():
+            if exhausted():
+                left_out[0] = True   # (R71 review W1) frontier vectors left unexpanded
+                break
             for v in run(neighbours(frontier[expanded])):
                 if reaches(v, index) and vkey(v) not in on_frontier:
                     frontier.append(v)
                     on_frontier.add(vkey(v))
             expanded += 1
-        if frontier and not pairers[index].complete() and not exhausted():
+        product_cut = False
+        if frontier and not pairers[index].complete():
             anchor = frontier[0]
             here = observation(cache[vkey(anchor)][1], index)
             influence = [name for name in inputs
@@ -1720,15 +1770,49 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                                 and observation(cache[vkey({**anchor, name: value})][1], index) != here
                                 for value in samples[name])]
             if influence:
-                combos = itertools.islice(itertools.product(*(samples[name] for name in influence)),
-                                          max(0, max_runs - len(cache)))
-                run([{**anchor, **dict(zip(influence, combo, strict=True))} for combo in combos])
+                # (R71 review W1) with the budget spent the product does not run at all (as before) — what of it never
+                #   ran is the cut, as below
+                room = 0 if exhausted() else max(0, max_runs - len(cache))
+                if room:
+                    combos = itertools.islice(itertools.product(*(samples[name] for name in influence)), room)
+                    run([{**anchor, **dict(zip(influence, combo, strict=True))} for combo in combos])
+                # (R71) the run budget cut the product short only where what it left out never ran — the part it kept
+                #   may hold vectors that ran before, so the cache need not be full afterwards. At most ``len(cache) + 1``
+                #   of the rest are looked at: one past every cached vector is a vector that never ran
+                if not left_out[0]:   # (R71 review N4) already a cut: no need to look
+                    rest = itertools.islice(itertools.product(*(samples[name] for name in influence)), room, None)
+                    product_cut = any(vkey({**anchor, **dict(zip(influence, combo, strict=True))}) not in cache
+                                      for combo in rest)
+        budget_cut[index] = (left_out[0] or product_cut) and not pairers[index].complete()
+    # (R71 review W5) an input whose domain is wider than its value list — the path search looks at samples
+    #   (``0 · ±1 · ends · constants ±1``) like the expression engine, whether or not the list was cut
+    sampled_inputs = [name for name in inputs if not domains[name].get("values")
+                      and domains[name]["max"] - domains[name]["min"] > 15]
     for index, (decision, spec, atoms, _node) in enumerate(specs):
         pairs = pairers[index].pairs
         states = tallies[index]
+        # (R71 review W4 · N1 · N5 · P1 · P3) values could matter where some run got past the model (evaluated,
+        #   unreached, missing …), where the runs ended in more than one model state (the values steered them apart), or
+        #   where the one state depends on the values (undefined behaviour, a run-unit budget). Not where every run ends
+        #   in the same refusal or undetermined value (``unsupported:goto_unmodeled``, ``undetermined:volatile_object``),
+        #   where a static state shows (``effectful_condition`` — the same on every supported run), or where the run
+        #   cannot observe the decision (blind): no value would have changed what the search saw
+        model = {k for k in states if k.startswith(("unsupported", "undetermined"))}
+        values_matter = index not in blind and not (states.keys() & _STATIC_STATES) and (
+            any(not k.startswith(("unsupported", "undetermined")) for k in states)
+            or len(model) > 1
+            or any(k.split(":", 1)[1] in _VALUE_DEPENDENT_REFUSALS for k in model if ":" in k))
         decision.update(evaluation="source_path", static_reason=decision["reason"], path_spec=spec,
                         conditions=[{"condition_id": f"C{i + 1}", "expression": _text(a, raw)} for i, a in enumerate(atoms)],
-                        path_search={"runs": len(cache), "steps": spent[0], "budget_exhausted": exhausted(),
+                        # (R71) ``budget_exhausted``: this decision's own search left vectors unrun for the budget
+                        #   (`budget_cut`); the function's whole search is ``function_budget_exhausted``.
+                        #   ``samples_capped``: the inputs whose value list was cut to `_PATH_SAMPLES` (how many candidates
+                        #   each had) — the search never tried the rest; ``values_sampled``: some input's domain is wider
+                        #   than its values. Both only where values could matter (`values_matter`)
+                        path_search={"runs": len(cache), "steps": spent[0], "budget_exhausted": budget_cut.get(index, False),
+                                     "function_budget_exhausted": exhausted(),
+                                     "samples_capped": dict(samples_capped) if values_matter else {},
+                                     "values_sampled": values_matter and bool(sampled_inputs),
                                      "inputs": inputs, "guards": len(chains[index]),
                                      "observations": dict(states.most_common())},
                         candidate_count=len(cache), search_complete=False)
@@ -1795,6 +1879,12 @@ def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selecte
         second_record = d.get("path_search")
         d.clear()
         d.update(first[id(d)])
+        # (R71) what stopped the second search short — kept whether or not it added a pair (a decision it could not
+        #   improve keeps the first search's record otherwise unchanged, R36)
+        limit = {k: v for k, v in (("budget_exhausted", (second_record or {}).get("budget_exhausted")),
+                                   ("samples_capped", (second_record or {}).get("samples_capped"))) if v}
+        if limit:
+            d["stub_search_limit"] = limit
         have = {p["condition_id"] for p in d.get("pairs") or []}
         added = [second[c] for c in sorted(second, key=lambda c: int(c[1:])) if c not in have]
         if not added:
@@ -2063,6 +2153,10 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 # would be emitted without its deciding value and then misreported as truncated (R80 review W5).
                 raise Unsupported("decision_variable_not_in_unit_inputs:" + missing[0])
             if index >= max_decisions or len(atoms) > max_conditions:
+                # (R71) which cap — the reason names both
+                decision["search_cap"] = ({"decision_index": index, "max_decisions": max_decisions}
+                                          if index >= max_decisions else
+                                          {"conditions": len(atoms), "max_conditions": max_conditions})
                 raise Unsupported("decision_or_condition_budget")
             # (R60) the inputs the decision expression reads — the observable-pair search keeps exactly these (set only
             #   once the binding checks passed: a refused decision goes to the path search, which keeps its own set) —
@@ -2079,6 +2173,9 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             except Unsupported:
                 pass
             values = []
+            # (R71 review W3) a wide domain gets sample values; an enumeration or a design value list is tried whole
+            #   (``domain_exhaustive`` compares with ``max - min + 1`` and is false for those)
+            decision["values_sampled"] = False
             for name in variables:
                 lo, hi = domains[name]["min"], domains[name]["max"]
                 if domain_values := domains[name].get("values"):
@@ -2087,6 +2184,7 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                     sample = list(range(lo, hi + 1))
                 else:
                     sample = list(dict.fromkeys(v for v in [0, 1, -1, *(v + d for v in sorted(constants) for d in (-1, 0, 1)), lo, hi] if lo <= v <= hi))
+                    decision["values_sampled"] = True
                 values.append(sample)
             size = math.prod(len(v) for v in values)
             decision["candidate_space_size"] = size
@@ -2159,7 +2257,7 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             decision["reason"] = str(exc)
             fn_name = str(unit.get("name") or "")
             group = None
-            if extra and node is not None and index < max_decisions:
+            if extra and node is not None:
                 if str(exc).startswith(_PATH_FAMILY):
                     group = "call_in_condition" if str(exc).startswith("unsupported_scalar:call_expression") else ""
                 elif _pointer_param_reason(str(exc), scope, fn_name) or (
@@ -2177,6 +2275,11 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                         else None
                 elif group == "struct_member" and not _fields_modeled(node, raw, scope):
                     group = None
+            if group is not None and index >= max_decisions:
+                # (R71 review W2) the path search takes the first `max_decisions` decisions only: this one would have
+                #   gone there — its reason is the static refusal, the cap is why it stayed
+                decision["search_cap"] = {"decision_index": index, "max_decisions": max_decisions}
+                group = None
             if group is not None:
                 if group:
                     # (review R40 W6) which own search it had — the summary counts by this, not by the refusal text
@@ -2214,6 +2317,51 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
         report["assumed_undefined"] = sorted(names)
     finalize_mcdc_design(report, [])
     return report
+
+
+SEARCH_LIMITS = ("path_budget", "stub_path_budget", "path_samples_capped", "candidate_budget", "sampled_values",
+                 "condition_cap", "decision_cap")
+
+
+def search_limits(decision: dict[str, Any]) -> list[tuple[str, str]]:
+    """(R71, audit #4 · #5) What stopped the search for a decision it did not design — ``[(kind, detail)]`` in
+    `SEARCH_LIMITS` order, empty for a designed decision or one no limit touched (a search that ended on its own is no
+    proof either: the path search is a heuristic, and the expression engine looks at sample values).
+
+    ``path_budget`` / ``stub_path_budget``: the run · step budget left vectors of this decision's own first / stub-value
+    search unrun (it may cut a search before the cache is full: a slice of a product). ``path_samples_capped``: inputs
+    whose value list the search cut to `_PATH_SAMPLES` (detail ``name(candidates)``; the first search's count where both
+    searches cut it). ``candidate_budget``: the expression engine's candidate cap. ``sampled_values``: the search looked at
+    sample values (``0 · ±1 · constants ±1 · ends``) of a domain wider than them — the whole list, but not the whole
+    domain. ``condition_cap`` / ``decision_cap``: the decision was not searched — more conditions than the cap, or past
+    the function's decision cap. Value limits are recorded only where some run could tell values apart."""
+    if decision.get("status") == "designed":
+        return []
+    out = []
+    cap = decision.get("search_cap") or {}
+    path = (decision.get("path_search") or {}) if decision.get("evaluation") == "source_path" else {}
+    stub = decision.get("stub_search_limit") or {}
+    if path.get("budget_exhausted"):
+        out.append(("path_budget", ""))
+    if stub.get("budget_exhausted"):
+        out.append(("stub_path_budget", ""))
+    capped = {**(stub.get("samples_capped") or {}), **(path.get("samples_capped") or {})}
+    if capped:
+        out.append(("path_samples_capped", ",".join(f"{k}({capped[k]})" for k in sorted(capped))))
+    elif path.get("values_sampled"):
+        out.append(("sampled_values", ""))
+    if decision.get("evaluation") != "source_path" and not decision.get("path_refusal"):
+        if decision.get("reason") == "candidate_budget_exhausted":
+            out.append(("candidate_budget", ""))
+        elif decision.get("status") in ("partial", "no_pair_found") and decision.get("values_sampled") \
+                and not str(decision.get("reason") or "").startswith("unique_cause_infeasible:"):
+            # (an infeasible condition is proven on the compiled atoms — no value would pair it)
+            out.append(("sampled_values", ""))
+    if "conditions" in cap:
+        out.append(("condition_cap", f"{cap['conditions']}>{cap['max_conditions']}"))
+    elif "decision_index" in cap:
+        out.append(("decision_cap", f"#{cap['decision_index'] + 1}>{cap['max_decisions']}"))
+    return out
 
 
 def finalize_mcdc_design(report: dict[str, Any], sequences: list[dict[str, Any]],

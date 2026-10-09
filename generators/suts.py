@@ -24,7 +24,13 @@ from generators._artifact_check import sheet_base_name as _sheet_base_name
 from generators._xlsx_merge import merge_fresh
 from generators.boundary_rows import BOUNDARY_PREFIX, find_boundaries
 from generators.c_source_oracle import INITIAL_VALUE_PREFIX, UNWRITTEN_OUTPUT_PREFIX
-from generators.mcdc_design import build_mcdc_design, finalize_mcdc_design, mcdc_report_summary
+from generators.mcdc_design import (
+    SEARCH_LIMITS,
+    build_mcdc_design,
+    finalize_mcdc_design,
+    mcdc_report_summary,
+    search_limits,
+)
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
@@ -4086,6 +4092,15 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "observable_budget_exhausted": 0, "observable_not_checked": 0,
                            "observable_evidence_mismatch": 0, "observable_rows": 0, "observable_errors": 0,
                            "observable_evaluations": 0,
+                           # (R71) 쌍을 다 못 만든 결정 중 탐색이 상한에 닿은 결정 — 종류별(한 결정이 여러 종류) · 상태별
+                           #   (`mcdc_design.search_limits` — 'MCDC Design' 시트 'Search Limit' 열과 같은 판정)
+                           "search_limited_decisions": 0, "search_limits": dict.fromkeys(SEARCH_LIMITS, 0),
+                           # (R71 리뷰 N2) 상한에는 닿지 않고 표본 값(도메인보다 좁음)만 본 결정 — 거의 모든 탐색의 성질이라
+                           #   '상한에 닿은 결정' 에서 뺀다(종류별 `search_limits.sampled_values` 는 둘을 합친 수)
+                           "sampled_only_decisions": 0,
+                           "search_limited_by_status": {"partial": 0, "no_pair_found": 0, "unsupported": 0},
+                           # (R71) 쌍당 후보 상한에서 멈춘 Observable 쌍 — 상태(masked 등)는 그 후보까지만 본 결과
+                           "observable_candidates_capped": 0,
                            "execution_status": "not_run", "reachability": "unverified"}
     out["units_not_analyzed"] = 0
     # (R56 리뷰 I1) 함수 실행 모델 탐색 예산 — 문서가 어느 예산으로 설계됐는지(같은 소스라도 예산이 다르면 쌍이 다르다)
@@ -4131,6 +4146,14 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["conditions"] += len(d.get("conditions") or [])
             status = d.get("status", "unsupported")
             out[status if status in ("designed", "partial", "no_pair_found") else "unsupported"] += 1
+            limits = search_limits(d)
+            if limits and all(kind == "sampled_values" for kind, _detail in limits):
+                out["sampled_only_decisions"] += 1
+            elif limits:
+                out["search_limited_decisions"] += 1
+                out["search_limited_by_status"][status if status in ("partial", "no_pair_found") else "unsupported"] += 1
+            for kind, _detail in limits:
+                out["search_limits"][kind] += 1
             # (R40 리뷰 W6) 어느 별도 탐색을 받았는지는 거부 사유 문자열이 아니라 설계기가 붙인 표식으로 센다 —
             #   널 검사(`parameter_domain_unresolved:p`)로 들어온 결정도 빠지지 않는다
             group = {"call_in_condition": "call", "struct_member": "member", "pointee": "pointee"}.get(
@@ -4166,6 +4189,7 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if ob:
                     key = {"observable": "observable_pairs", "searched": "observable_searched"}.get(ob, f"observable_{ob}")
                     out[key] = out.get(key, 0) + 1
+                    out["observable_candidates_capped"] += bool((pair.get("observable") or {}).get("candidates_capped"))
                 out["conditions_paired"] += 1
                 key = {"retained": "retained_pairs", "invalidated": "invalidated_pairs"}.get(
                     pair.get("retained_status"), "truncated_pairs")
@@ -4233,6 +4257,8 @@ def _mcdc_source_read_pass(unit: Dict[str, Any], base_report: Dict[str, Any],
         reason = str(base.get("reason") or "")
         reads_added = reason.startswith("decision_variable_not_in_unit_inputs:") and reason.split(":", 1)[1] in added
         if not new.get("pairs") and not reads_added:
+            # (R71 리뷰 I3) 채택하지 않은 결정은 기본 설계의 상태 · 사유 · 탐색 상한을 그대로 보인다 — 2차 설계의 상한(예산 ·
+            #   값 목록)은 보이는 결과의 것이 아니라 적지 않는다(채택한 결정은 2차 설계의 기록을 가진다)
             continue
         new["input_scope"] = "with_source_read_inputs"
         new["design_input_reason"] = reason   # 기본 설계(설계 입력 목록 위)가 쌍을 못 만든 사유
@@ -5053,7 +5079,10 @@ _MCDC_SHEET = "MCDC Design"
 _MCDC_HEADERS = ["Test Case ID", "Function", "Decision ID", "Condition ID", "Pair ID", "Sequence A", "Sequence B",
                  "Inputs A JSON", "Inputs B JSON", "Truth A", "Truth B", "Decision A", "Decision B", "Retained",
                  "Decision Expression", "Decision Status", "Reason", "Source Kind", "Source SHA256",
-                 "Search Complete", "Execution", "Reachability", "Evaluation", "Possible UB", "Stub Inputs",
+                 "Search Complete",
+                 # (R71) 쌍을 다 못 만든 결정의 탐색이 닿은 상한(`mcdc_design.search_limits`) — 빈칸은 상한 없이 끝난 탐색
+                 "Search Limit",
+                 "Execution", "Reachability", "Evaluation", "Possible UB", "Stub Inputs",
                  # (R58) 설계한 행 입력 목록 — design_inputs(설계서 입력 표) · with_source_read_inputs(소스가 읽어 더한 입력까지)
                  "Input Scope",
                  # (R60, 확장) 쌍의 두 행이 소스 oracle 출력으로 갈리는가 · 갈리는 두 행(탐색으로 더한 행이면 그 번호)
@@ -5087,7 +5116,9 @@ def _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, border, 
             common = [re.sub(r"\n[ \t]*(?=\n)", "", str(decision.get("expression") or "")),
                       decision.get("status", ""), decision.get("reason", ""),
                       decision.get("source_kind", ""), decision.get("source_hash", ""),
-                      "yes" if decision.get("search_complete") else "no", "not_run", "unverified",
+                      "yes" if decision.get("search_complete") else "no",
+                      " · ".join(f"{kind}:{detail}" if detail else kind for kind, detail in search_limits(decision)),
+                      "not_run", "unverified",
                       # (R2c) expression = 결정식만 평가 · source_path = 함수 실행 모델(지역변수·결정 전 갱신 포함)
                       decision.get("evaluation") or "expression"]
             pairs = decision.get("pairs") or []
@@ -5138,6 +5169,8 @@ def _observable_cells(mark: Optional[Dict[str, Any]]) -> List[str]:
         status += ":" + str(mark["reason"])   # (리뷰 R60 3차 I2) not_checked:<사유>
     elif mark.get("own_rows"):
         status += f" [own:{mark['own_rows']}]"   # (리뷰 R60 4차 I5) 쌍 자신의 두 행이 왜 모자랐는지
+    if mark.get("candidates_capped"):
+        status += f" [candidates_capped:{mark.get('candidates_tried')}]"   # (R71) 남은 후보를 보지 않은 판정
     return [status, seqs]
 
 
