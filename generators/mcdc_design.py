@@ -2704,9 +2704,12 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             def of(label, wide=False):
                 return [c for c in path_candidates if c[0].get("search_group", "") == label
                         and (id(c[0]) in wide_ids) == wide]
-            # (R73 review W1) the narrow groups add their own search inputs to `domains` (the pointee group its
-            #   pointees): each wide group starts from the domains as they were before them, with its group's flags
-            wide_domains = dict(domains)
+            # (R74) every group — narrow and wide — starts from the domains as they were before any group: a group
+            #   adds its own search inputs to the report's domains (the pointee group its pointees, R73 review W1; a
+            #   stub search the stub return values its pairs set), and the next group's first search took them as plain
+            #   inputs — its pairs then held only where the callee runs as a stub but named no ``stub_inputs``, and its
+            #   design depended on whether an earlier group's decision had needed that stub
+            group_base = dict(domains)
             # (R39) a condition on a struct member (``g.a``) reaches the path search only since R39: its own group too;
             # (R40) one read through a pointer parameter (``p->a``) only since R40 — its own group, the only one whose
             # runs set the pointees (review R40 W3: the others' rows and budget stay what they were)
@@ -2715,10 +2718,11 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             for group, late, inert, pointees in groups:
                 if not group:
                     continue
-                _path_design(unit, report, group, row_names, domains, scope, selected, max_conditions=max_conditions,
-                             max_runs=max_path_runs, max_steps=max_path_steps, skip_unobservable=late,
-                             inert_calls=inert, pointee_inputs=pointees)
-                _stub_path_pass(unit, report, group, row_names, domains, scope, selected,
+                group_domains = dict(group_base)
+                _path_design(unit, report, group, row_names, group_domains, scope, selected,
+                             max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
+                             skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees)
+                _stub_path_pass(unit, report, group, row_names, group_domains, scope, selected,
                                 max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
                                 skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees)
             # (R73) the wide decisions of each group, each on its own — its own run · step budget and cache (measured:
@@ -2727,7 +2731,7 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             for label, late, inert, pointees in (("", False, False, False), ("call_in_condition", True, True, False),
                                                  ("struct_member", True, False, False), ("pointee", True, False, True)):
                 for one in of(label, wide=True):
-                    group_domains = dict(wide_domains)
+                    group_domains = dict(group_base)
                     _path_design(unit, report, [one], row_names, group_domains, scope, wide_selected,
                                  max_conditions=max_wide_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
                                  skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees, wide=True)
