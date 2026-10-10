@@ -1123,6 +1123,16 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                "널 아닌 객체로 본다: 그래서 널 검사(`p != NULL`)는 모든 행에서 한쪽이라 짝이 없다. 식 엔진이 다른 이유"
                "(지역 변수·조건 안 호출)로 먼저 거부한 결정은 그 이유의 탐색으로 가며 대상 입력을 설정하지 않는다)."
                if _int(mc, "pointee_condition_decisions") else "")
+            # (R76) conditions on array elements: a global array's element is an input of its own name (``g_a[1]``)
+            + (f" 배열 원소(`g_a[1]` — 정본 표기와 같은 입력 이름)를 읽는 조건의 결정 "
+               f"{_show(_int(mc, 'element_condition_decisions'))} 도 따로, 별도 예산으로 탐색했다(설계 "
+               f"{_show(_int(mc, 'element_condition_designed'))} — 전역 배열의 원소는 행이 설정한 값, const 표의 원소는 그 "
+               "표의 값, 첨자는 실행이 정한 값으로 읽는다: 매개변수를 거친 원소 · 다차원 배열 · 길이를 모르는 배열 · 포인터 "
+               "변수(지역 포인터 포함) · 매크로 이름으로 쓴 배열의 첨자와, 멤버 접근(`g.a` · `p->a`)이나 `*p` 가 함께 있는 "
+               "결정은 이 탐색에 넣지 않고, 표 밖 첨자는 실행이 "
+               "판정하지 않는다. 식 엔진이 다른 이유(지역 변수 · 조건 안 호출 · 멤버)로 먼저 거부한 결정은 그 이유의 탐색으로 "
+               "가며 원소 입력을 설정하지 않는다 — 같은 결정도 조건 순서에 따라 갈린다)."
+               if _int(mc, "element_condition_decisions") else "")
             # (R58) the extended profile's second design over the inputs the source reads
             # (리뷰 R58 W2 · 3차 W-1) 실패만 있어도 말하고, 숫자는 부분마다 따로 — 빈 부분은 쓰지 않는다
             + (_source_read_pass_text(mc)

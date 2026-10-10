@@ -4097,6 +4097,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "member_condition_decisions": 0, "member_condition_designed": 0,
                            # (R40) 포인터 매개변수가 가리키는 대상(`p->a`)을 읽거나 그 널 검사가 있는 결정 — 따로(별도 예산)
                            "pointee_condition_decisions": 0, "pointee_condition_designed": 0,
+                           # (R76) 배열 원소(`g_a[1]` · 상수 표 · 첨자)를 읽는 조건의 결정 — 따로(별도 예산) 탐색한 결정 · 그중 설계
+                           "element_condition_decisions": 0, "element_condition_designed": 0,
                            # (R58, 확장) 기본 설계가 쌍을 못 만든 결정을 소스가 읽어 더한 입력까지 써서 다시 설계 — 대상 ·
                            #   채택(2차 설계의 결과로 바꾼 결정) · 그중 설계 · 2차 설계가 실패해 기본 설계를 유지한 함수
                            "source_read_pass_decisions": 0, "source_read_pass_adopted": 0,
@@ -4178,7 +4180,8 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                 out["search_limits"][kind] += 1
             # (R40 리뷰 W6) 어느 별도 탐색을 받았는지는 거부 사유 문자열이 아니라 설계기가 붙인 표식으로 센다 —
             #   널 검사(`parameter_domain_unresolved:p`)로 들어온 결정도 빠지지 않는다
-            group = {"call_in_condition": "call", "struct_member": "member", "pointee": "pointee"}.get(
+            group = {"call_in_condition": "call", "struct_member": "member", "pointee": "pointee",
+                     "array_element": "element"}.get(
                 str(d.get("search_group") or "")) if d.get("evaluation") == "source_path" else None
             if group:
                 out[f"{group}_condition_decisions"] += 1

@@ -391,18 +391,23 @@ def _sibling_paths(ir, path=(), out=None):
 _TARGETED_STARTS = 3
 
 
-def _value_reads(node, raw):
-    """Names a value reads, and a call's value as its ``F() return`` row input (R36)."""
+def _value_reads(node, raw, index_of=None):
+    """Names a value reads, and a call's value as its ``F() return`` row input (R36). (R76 review I6) With ``index_of``
+    (the element group's): an array element read at a constant index as its row input name (``g_a[2]``), at any other
+    index as ``g_a[*]`` — every element of the array."""
     names = list(_read_names(node, raw))
     for c in _walk(node):
         if c.type == "call_expression":
             f = c.child_by_field_name("function")
             if f is not None and f.type == "identifier":
                 names.append(f"{_text(f, raw)}() return")
+        elif index_of is not None and c.type == "subscript_expression" and (arg := _array_name_node(c)) is not None:
+            k = index_of(c.child_by_field_name("index"))
+            names.append(f"{_text(arg, raw)}[{'*' if k is None else k}]")
     return names
 
 
-def _local_sources(body, raw):
+def _local_sources(body, raw, index_of=None):
     """(R73 review W3 · I4) ``{name: names its assignments in the body read}`` — ``T x = e;`` · ``x = e;`` · ``x op= e;``
     (which reads x too); a call's value as ``F() return``. Every assignment, wherever it is: the climb only takes these
     as the inputs worth moving first, the run decides what they do."""
@@ -411,27 +416,30 @@ def _local_sources(body, raw):
         if x.type == "init_declarator":
             d, v = x.child_by_field_name("declarator"), x.child_by_field_name("value")
             if d is not None and d.type == "identifier" and v is not None:
-                out.setdefault(_text(d, raw), set()).update(_value_reads(v, raw))
+                out.setdefault(_text(d, raw), set()).update(_value_reads(v, raw, index_of))
         elif x.type == "assignment_expression":
             left, right = x.child_by_field_name("left"), x.child_by_field_name("right")
             if left is not None and left.type == "identifier" and right is not None:
-                names = _value_reads(right, raw)
+                names = _value_reads(right, raw, index_of)
                 if _text(x.child_by_field_name("operator"), raw) != "=":
                     names.append(_text(left, raw))
                 out.setdefault(_text(left, raw), set()).update(names)
     return out
 
 
-def _condition_inputs(atom, raw, sources, input_set):
+def _condition_inputs(atom, raw, sources, input_set, index_of=None):
     """(R73 review W3 · I4) The search inputs a condition depends on: the inputs it reads, and through every name it reads
-    that the body assigns (a local, an input written before), the inputs those assignments read — transitively."""
-    out, seen, todo = [], set(), list(dict.fromkeys(_value_reads(atom, raw)))
+    that the body assigns (a local, an input written before), the inputs those assignments read — transitively. (R76)
+    ``index_of``: element reads as their inputs (`_value_reads`)."""
+    out, seen, todo = [], set(), list(dict.fromkeys(_value_reads(atom, raw, index_of)))
     while todo:
         name = todo.pop(0)
         if name in seen:
             continue
         seen.add(name)
-        if name in input_set:
+        if name.endswith("[*]"):
+            out.extend(n for n in sorted(input_set) if n.startswith(name[:-2]) and n not in out)
+        elif name in input_set:
             out.append(name)
         todo.extend(sorted(sources.get(name, ())))
     return out
@@ -1506,6 +1514,128 @@ def _fields_modeled(node, raw, scope, fn_name=None):
     return found
 
 
+# (R76) a condition on an array element (``g_a[1] == 3U`` · ``tbl[POS] == K`` · ``lut[i]``): the modeled run reads it — a
+#   global array's element is a row input of its own name (``g_a[1]``, the reference's notation), a const table's element
+#   its value, an index the run's value. Its own search group (`_PATH_GROUPS`), like R39's members
+_SUBSCRIPT_REASON = "unsupported_scalar:subscript_expression"
+_ELEMENT_INPUT_RE = re.compile(r"([A-Za-z_]\w*)\[(\d+)\]")
+
+
+def _element_input(scope, name):
+    """(R76) ``(type, typename, volatile, record)`` of a row input naming an element (``g_a[1]``) of a global array the
+    unit models (`c_project_context._scope_array` — one dimension, a resolved integer element type, a known length), the
+    index inside it; None otherwise — and for a const table, whose values are the program's, not the row's."""
+    m = _ELEMENT_INPUT_RE.fullmatch(str(name).strip())
+    if not m:
+        return None
+    rec = ((scope or {}).get("arrays") or {}).get(m.group(1))
+    if not isinstance(rec, dict) or not isinstance(rec.get("type"), dict) or rec.get("const"):
+        return None
+    if cpc.is_float(rec["type"]):
+        return None
+    if rec.get("length") is None or not 0 <= int(m.group(2)) < int(rec["length"]):
+        return None
+    return rec["type"], str(rec.get("typename") or ""), bool(rec.get("volatile")), rec
+
+
+def _elements_read_by_run(node, raw, scope, fn_name, params=(), locals_=()):
+    """(R76) Whether every array read of the decision is the modeled run's to judge: each ``a[i]`` indexes an array — a
+    local of the function, or an object the unit models as an array of known length (`c_project_context._scope_array`;
+    review I3: a pointer object or ``extern U8 a[];`` has no element the run can name) — that is no parameter of the
+    function (a pointer parameter's ``p[0]`` is R40's pointee, its other indexes are not modeled; an array parameter is
+    a pointer), not a nested ``a[i][j]``, and the decision has no member access or ``*p`` (R39 · R40)."""
+    params = set(params or ()) | set(_pointer_params(scope, fn_name))
+    arrays = (scope or {}).get("arrays") or {}
+    locals_ = set(locals_ or ())
+    # (review R2 W-R2-1) a local is the run's array only where it is declared one (``U8 t[2];``) — a local pointer
+    #   (``U8 *q = g_a; q[1]``) or a local that hides a global array of its name has no element the run can name
+    fn = _enclosing_function(node)
+    local_arrays = _local_array_names(fn.child_by_field_name("body"), raw) if fn is not None else set()
+    found = False
+    for x in _walk(node):
+        if x.type == "field_expression" or (x.type == "pointer_expression" and _text(x, raw).lstrip().startswith("*")):
+            return False
+        if x.type != "subscript_expression":
+            continue
+        arg = _array_name_node(x)
+        if arg is None or _text(arg, raw) in params:
+            return False
+        name = _text(arg, raw)
+        rec = arrays.get(name)
+        if name in local_arrays:
+            found = True
+            continue
+        if name in locals_ or not (isinstance(rec, dict) and rec.get("length") is not None):
+            return False
+        found = True
+    return found
+
+
+def _local_array_names(body, raw):
+    """(R76 review R2 W-R2-1) Names a function body declares as arrays (``U8 t[2];`` · ``U8 t[2] = {…};``)."""
+    out = set()
+    for x in _walk(body):
+        if x.type != "declaration":
+            continue
+        for child in x.named_children:
+            d = child.child_by_field_name("declarator") if child.type == "init_declarator" else child
+            if d is not None and d.type == "array_declarator":
+                inner = d.child_by_field_name("declarator")
+                if inner is not None and inner.type == "identifier":
+                    out.add(_text(inner, raw))
+    return out
+
+
+def _array_name_node(subscript):
+    """(R76) The identifier an ``a[i]`` / ``(a)[i]`` indexes; None for anything else (``a[i][j]``, ``p->b[i]``, ``f()[i]``)."""
+    arg = subscript.child_by_field_name("argument")
+    while arg is not None and arg.type == "parenthesized_expression" and len(arg.named_children) == 1:
+        arg = arg.named_children[0]
+    return arg if arg is not None and arg.type == "identifier" else None
+
+
+def _index_value(index, raw, constants, widths):
+    """(R76) The value of an array index written as an integer literal (`c_project_context.literal` — the one reader,
+    review I4) or an integer constant of the unit (macro · enumerator · const object); None otherwise."""
+    while index is not None and index.type == "parenthesized_expression" and len(index.named_children) == 1:
+        index = index.named_children[0]
+    if index is None:
+        return None
+    text = _text(index, raw).strip()
+    try:
+        if index.type == "number_literal" and widths:
+            value, t = cpc.literal(text, widths)
+            return value if not cpc.is_float(t) and type(value) is int else None
+        if cpc.is_name_node(index) and constants is not None and text in constants:
+            c = constants[text]
+            return c["value"] if not cpc.is_float(c.get("type")) and type(c.get("value")) is int else None
+    except (cpc.Unresolved, KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _read_element_names(body, raw, scope):
+    """(R76) The global array elements a body reads at a constant index (``g_a[1]`` · ``g_a[POS]``) as row input names,
+    in order — the inventory's inputs for the element group (a SUTS row lists the array's elements already)."""
+    out = []
+    constants = (scope or {}).get("constants")
+    widths = ((scope or {}).get("target") or {}).get("widths") or None
+    for x in _walk(body):
+        if x.type != "subscript_expression" or (arg := _array_name_node(x)) is None:
+            continue
+        parent = x.parent
+        if parent is not None and parent.type == "assignment_expression" and parent.child_by_field_name("left") == x \
+                and _text(parent.child_by_field_name("operator"), raw) == "=":
+            continue   # (review I4) written only: no value the row sets is read there
+        k = _index_value(x.child_by_field_name("index"), raw, constants, widths)
+        if k is None:
+            continue
+        name = f"{_text(arg, raw)}[{k}]"
+        if _element_input(scope, name) is not None:
+            out.append(name)
+    return list(dict.fromkeys(out))
+
+
 def _path_ir(node, raw, atoms):
     """The ``&&``/``||``/``!`` structure of a decision with its conditions as leaves (same order as the inventory)."""
     n = _unwrap(node)
@@ -1524,8 +1654,10 @@ def _enclosing_function(node):
     return node
 
 
-def _body_constants(nodes, raw, constants_map, widths):
-    """Integer values the text names (literals, integer macros, enumerators) — in order of first appearance."""
+def _body_constants(nodes, raw, constants_map, widths, arrays=None):
+    """Integer values the text names (literals, integer macros, enumerators) — in order of first appearance. (R76)
+    ``arrays`` (the element group's): also the elements of the const tables the text reads at a constant index
+    (``lut[0]`` of ``static const U8 lut[3] = {10U, …}`` → 10) — the values a condition on the table compares with."""
     out = []
     for root in nodes:
         for x in _walk(root):
@@ -1538,6 +1670,13 @@ def _body_constants(nodes, raw, constants_map, widths):
                     c = constants_map[_text(x, raw)]
                     if not cpc.is_float(c["type"]):
                         out.append(c["value"])
+                elif arrays is not None and x.type == "subscript_expression":
+                    arg = _array_name_node(x)
+                    rec = arrays.get(_text(arg, raw)) if arg is not None else None
+                    values = rec.get("values") if isinstance(rec, dict) and rec.get("const") else None
+                    k = _index_value(x.child_by_field_name("index"), raw, constants_map, widths)
+                    if values and k is not None and 0 <= k < len(values):
+                        out.append(values[k])
             except (cpc.Unresolved, KeyError, TypeError, ValueError):
                 continue
     return list(dict.fromkeys(v for v in out if type(v) is int))
@@ -1762,7 +1901,7 @@ def _stub_return_domain(name, scope, own):
 
 def _path_design(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
                  max_steps, extra_domains=None, strict_steps=False, skip_unobservable=False, inert_calls=None,
-                 pointee_inputs=False, wide=False):
+                 pointee_inputs=False, element_inputs=False, wide=False):
     """(R2c) Unique-cause pairs for decisions the expression engine could not bind, found on the modeled function run.
 
     Inputs are the unit's row inputs with a declared domain (inventory mode: plus every scalar global the function
@@ -1782,6 +1921,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     by default what ``skip_unobservable`` says (R37's call group); R39's member-access group skips without it.
     ``pointee_inputs``: the row's pointer-parameter pointees (``p[0].a``) join the search with their declared types —
     R40's own group only (review R40 W3: elsewhere they would change the other groups' rows and budget).
+    ``element_inputs`` (R76): the row's global array elements (``g_a[1]``) join the search with their declared element
+    type — the element group's only, for the same reason.
     ``wide`` (R73): the decisions of more conditions than the truth product takes — searched on their own (the caller
     gives them their own group and budget, after the others), with a targeted climb per condition (`targeted`) instead
     of the breadth-first frontier: one condition flips the outcome only where every sibling on its path to the root
@@ -1833,6 +1974,9 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
             # (R40) and the pointees of its pointer parameters it reads (``p->a`` → ``p[0].a``)
             names += [n for n in _read_pointee_names(fn.child_by_field_name("body"), raw, scope,
                                                      str(unit.get("name") or "")) if n not in names]
+        if element_inputs:
+            # (R76) and the global array elements it reads at a constant index (``g_a[POS]`` → ``g_a[2]``)
+            names += [n for n in _read_element_names(fn.child_by_field_name("body"), raw, scope) if n not in names]
     inputs = []
     for name in names:
         if name in globals_ and (globals_[name].get("volatile") or globals_[name].get("const")):
@@ -1857,6 +2001,17 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                 except cpc.Unresolved:
                     continue
                 _apply_design_range(unit, name, domains[name])
+        if name not in domains and element_inputs and (element := _element_input(scope, name)) is not None:
+            # (R76) a global array's element the row sets (``g_a[1]``): its declared element type
+            if element[2]:
+                continue   # volatile: the run never reads an input value for it
+            try:
+                domains[name] = _scope_domain(element[0], element[1], scope, "array_element_declaration", origin="global",
+                                              declared_at=f"{os.path.basename(str(element[3].get('file') or ''))}:"
+                                                          f"{element[3].get('line', '')}")
+            except cpc.Unresolved:
+                continue
+            _apply_design_range(unit, name, domains[name])
         if name not in domains and name in (extra_domains or {}):
             domains[name] = extra_domains[name]   # (R36) a stub return value — the second search only
         if name in domains:
@@ -1866,9 +2021,11 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     chains = [_guard_chain(node) for _d, _s, _a, node in specs]
     guard_nodes = list({(g.start_byte, g.end_byte, g.type): g for chain in chains for g, _o in chain}.values())
     guard_index = {(g.start_byte, g.end_byte, g.type): i for i, g in enumerate(guard_nodes)}
+    # (R76) the element group also samples around the const table elements its decisions compare with
+    tables = (scope.get("arrays") or {}) if element_inputs else None
     decision_constants = _body_constants([a for _d, _s, atoms, _n in specs for a in atoms] + guard_nodes, raw,
-                                         constants_map, widths)
-    body_constants = _body_constants([fn.child_by_field_name("body")], raw, constants_map, widths)
+                                         constants_map, widths, tables)
+    body_constants = _body_constants([fn.child_by_field_name("body")], raw, constants_map, widths, tables)
     constants = list(dict.fromkeys(decision_constants + body_constants))
     samples, samples_capped = {}, {}
     for name in inputs:
@@ -1966,8 +2123,10 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
     #   (R73 review W3 · I4: through the locals and call values it reads — none known: its climb moves every input)
     input_set = set(inputs)
     sibling_paths = [_sibling_paths(spec["ir"]) for _d, spec, _a, _n in specs] if wide else []
-    sources = _local_sources(fn.child_by_field_name("body"), raw) if wide else {}
-    atom_inputs = [[_condition_inputs(a, raw, sources, input_set) for a in spec_atoms]
+    # (R76 review I6) the element group links an element read to its input (``g_a[2] == 3U`` moves ``g_a[2]``)
+    index_of = (lambda n: _index_value(n, raw, constants_map, widths)) if element_inputs else None
+    sources = _local_sources(fn.child_by_field_name("body"), raw, index_of) if wide else {}
+    atom_inputs = [[_condition_inputs(a, raw, sources, input_set, index_of) for a in spec_atoms]
                    for _d, _s, spec_atoms, _n in specs] if wide else []
     stops: dict = {}   # (R73 review W3) decision index → conditions every climb left at a local best
     climb_ends: dict = {}   # (R73 review W3) decision index → the vectors its climbs ended at (the frontier starts there)
@@ -2210,7 +2369,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
 
 
 def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selected, *, max_conditions, max_runs,
-                    max_steps, skip_unobservable=False, inert_calls=None, pointee_inputs=False, wide=False):
+                    max_steps, skip_unobservable=False, inert_calls=None, pointee_inputs=False, element_inputs=False,
+                    wide=False):
     """(R36) A second search for the decisions the first did not design, where a value a call returned may be what it
     lacked (``r = F(); if ((r == 3U) && …)``): the row inputs ``F() return`` — the values the SUTS row injects into
     F's stub (R14, `_stub_return_domain`) — join the search. Merged condition by condition: every decision keeps the
@@ -2242,7 +2402,7 @@ def _stub_path_pass(unit, report, candidates, row_names, domains, scope, selecte
         _path_design(unit, {"domains": {}}, retry, row_names, dict(domains), scope, {}, max_conditions=max_conditions,
                      max_runs=max_runs, max_steps=max_steps, extra_domains=stubs, strict_steps=True,
                      skip_unobservable=skip_unobservable, inert_calls=inert_calls, pointee_inputs=pointee_inputs,
-                     wide=wide)
+                     element_inputs=element_inputs, wide=wide)
     except Exception as exc:  # noqa: BLE001 — the first search's result stands (review round 2 I1); the reason is kept
         for d, _n, _r in retry:
             d.clear()
@@ -2664,6 +2824,9 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                     group = "pointee"    # (R40) through a pointer parameter
                 elif str(exc).startswith(_FIELD_REASON):
                     group = "struct_member"    # (R39)
+                elif str(exc).startswith(_SUBSCRIPT_REASON) and _elements_read_by_run(
+                        node, raw, scope, fn_name, extra.get("params") or (), extra.get("locals") or ()):
+                    group = "array_element"    # (R76)
                 if group == "pointee" and not (_fields_modeled(node, raw, scope, fn_name)
                                                and _pointees_set_up(node, raw, scope, unit, row_names)):
                     # (review R40 round 3 W-A2) what the pointee search cannot take (the row does not set the pointee
@@ -2712,32 +2875,34 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             group_base = dict(domains)
             # (R39) a condition on a struct member (``g.a``) reaches the path search only since R39: its own group too;
             # (R40) one read through a pointer parameter (``p->a``) only since R40 — its own group, the only one whose
-            # runs set the pointees (review R40 W3: the others' rows and budget stay what they were)
-            groups = ((of(""), False, False, False), (of("call_in_condition"), True, True, False),
-                      (of("struct_member"), True, False, False), (of("pointee"), True, False, True))
-            for group, late, inert, pointees in groups:
+            # runs set the pointees (review R40 W3: the others' rows and budget stay what they were); (R76) one on an
+            # array element — its own group, the only one whose runs set the global arrays' elements
+            for label, late, inert, pointees, elements in _PATH_GROUPS:
+                group = of(label)
                 if not group:
                     continue
                 group_domains = dict(group_base)
                 _path_design(unit, report, group, row_names, group_domains, scope, selected,
                              max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
-                             skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees)
+                             skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees, element_inputs=elements)
                 _stub_path_pass(unit, report, group, row_names, group_domains, scope, selected,
                                 max_conditions=max_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
-                                skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees)
+                                skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees,
+                                element_inputs=elements)
             # (R73) the wide decisions of each group, each on its own — its own run · step budget and cache (measured:
             #   sharing one, a never-pairing decision's climbs spent the step budget of the next); their vectors join the
             #   wide ones at the end
-            for label, late, inert, pointees in (("", False, False, False), ("call_in_condition", True, True, False),
-                                                 ("struct_member", True, False, False), ("pointee", True, False, True)):
+            for label, late, inert, pointees, elements in _PATH_GROUPS:
                 for one in of(label, wide=True):
                     group_domains = dict(group_base)
                     _path_design(unit, report, [one], row_names, group_domains, scope, wide_selected,
                                  max_conditions=max_wide_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
-                                 skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees, wide=True)
+                                 skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees,
+                                 element_inputs=elements, wide=True)
                     _stub_path_pass(unit, report, [one], row_names, group_domains, scope, wide_selected,
                                     max_conditions=max_wide_conditions, max_runs=max_path_runs, max_steps=max_path_steps,
-                                    skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees, wide=True)
+                                    skip_unobservable=late, inert_calls=inert, pointee_inputs=pointees,
+                                    element_inputs=elements, wide=True)
         except Exception as exc:  # noqa: BLE001 — a defect here must not stop the SUTS document (review round 1 W4)
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":
@@ -2757,6 +2922,14 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
         report["assumed_undefined"] = sorted(names)
     finalize_mcdc_design(report, [])
     return report
+
+
+# The modeled-run search groups, in order — ``(search_group, skip_unobservable, inert_calls, pointee_inputs,
+#   element_inputs)``: each has its own budget, so a later group never changes an earlier one's rows (R37 · R39 · R40 ·
+#   R76); the narrow and the wide (R73) searches walk the same table (R74 review X5)
+_PATH_GROUPS = (("", False, False, False, False), ("call_in_condition", True, True, False, False),
+                ("struct_member", True, False, False, False), ("pointee", True, False, True, False),
+                ("array_element", True, False, False, True))
 
 
 SEARCH_LIMITS = ("path_budget", "stub_path_budget", "targeted_local_best", "path_samples_capped", "candidate_budget",
