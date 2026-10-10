@@ -1,7 +1,5 @@
 """report_gen.docx_builder - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
 #   KEY_FN_GLOBALS = "globals_global"  — global vars used by the function
@@ -9,57 +7,111 @@ import re
 # Module-level (top-level payload, List[List[str]] 5-column table):
 #   KEY_MOD_GLOBALS = "global_vars"    — global var definitions table
 #   KEY_MOD_STATICS = "static_vars"    — static var definitions table
-import os
 import json
-import csv
 import logging
-import time
+import os
+import re
+import time as _time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
-from io import BytesIO
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from report.constants import (
     GLOBALS_FORMAT_ORDER,
     GLOBALS_FORMAT_SEP,
     GLOBALS_FORMAT_WITH_LABELS,
-    LOGIC_MAX_DEPTH_DEFAULT,
     LOGIC_MAX_CHILDREN_DEFAULT,
+    LOGIC_MAX_DEPTH_DEFAULT,
     LOGIC_MAX_GRANDCHILDREN_DEFAULT,
 )
+from report_gen.atomic_io import normalize_zip_member_times
 from report_gen.function_analyzer import (
-    _parse_signature_outputs,
-    _fallback_function_description,
-    _parse_signature_params,
-    _normalize_symbol_name,
-    _enhance_function_description,
-    _is_generic_description,
+    FN_ROW_FULL,
+    FN_ROW_GRID,
+    FN_ROW_PAIR,
+    PARAM_GRID_COLS,
+    _build_function_info_layout,
     _enhance_description_text,
+    _enhance_function_description,
+    _fallback_function_description,
     _finalize_function_fields,
-    _build_function_info_rows,
+    _is_generic_description,
+    _normalize_symbol_name,
+    _parse_signature_outputs,
+    _parse_signature_params,
+    is_logic_diagram_header,
+    is_logic_diagram_label,
+    resolve_param_grid_entries,
+)
+from report_gen.provenance import (
+    canonical_source,
+    is_weak_source,
+    reference_suds_may_override,
+    unrecorded_source,
 )
 from report_gen.requirements import (
     _extract_doc_section,
     _extract_function_info_from_docx,
     _extract_sds_partition_map,
+    _merge_sds_partition_map,
 )
 from report_gen.uds_text import (
-    _merge_logic_ai_items,
-    _apply_uds_rules,
-    _merge_section_text,
     _ai_document_text,
     _ai_evidence_lines,
     _ai_quality_warnings,
+    _apply_uds_rules,
+    _merge_logic_ai_items,
+    _merge_section_text,
 )
 from report_gen.utils import (
     _build_global_rows,
-    _table_rows_from_texts,
-    _normalize_swufn_id,
     _extract_call_names,
+    _normalize_swufn_id,
     _safe_dict,
+    _table_rows_from_texts,
+    function_name_key,
+    normalize_prototype_text,
 )
 
 _logger = logging.getLogger("report_generator")
+
+
+def _count_duplicate_drawing_ids(doc: Any) -> Optional[int]:
+    """문서 안 `wp:docPr/@id` 중복 건수(전체 − 서로 다른 값). 셀 수 없으면 None(미측정 — 0 과 구분)."""
+    try:
+        ids = [str(v) for v in doc.element.xpath(".//wp:docPr/@id")]
+    except Exception:  # noqa: BLE001 — 공시 실패가 저장을 막아선 안 된다(None = 미측정)
+        return None
+    return len(ids) - len(set(ids))
+
+
+def _save_docx(doc: Any, out: Path, output_path: str, stats: Dict[str, Any]) -> bool:
+    """UDS DOCX 의 **유일한** 저장 경로 — `generate_uds_docx` 의 세 종결 분기(토큰 템플릿·구조 복제·무템플릿)가 다 여길 지난다.
+
+    (R47-k N27-e) 저장 뒤 zip 멤버 시각을 고정한다. python-docx 는 멤버마다 저장 시각을 박아 같은 문서도
+    저장할 때마다 바이트가 달랐다 — 검토 기록의 `output_sha256` 은 산출물 바이트이므로 "같은 입력 → 같은 문서"
+    를 해시로 말하려면 여기서 지워야 한다. 정규화 실패는 warning 뿐, 산출물은 그대로 남는다.
+    결과는 `stats["zip_time_normalized"]` 에 실어 gen_stats 사이드카로 남긴다(리뷰 W3) — 빌더는 로깅 설정이 없는
+    서브프로세스에서 돌아 INFO 는 영영 안 찍히고 WARNING 도 성공 경로에선 버려진다. 문서 **안**에는 적을 수 없다
+    (자기 해시를 바꾼다). 사이드카는 저장 뒤에 (다시) 쓴다.
+    ⚠ 바이트 동일은 **구조 복제 분기**에서만 성립한다(리뷰 W2): 토큰 템플릿 분기(`{{generated_at}}`)와 무템플릿 분기
+      (`Generated at:` 문단)는 payload 에 `generated_at` 이 없으면 벽시계를 본문에 박는다.
+    """
+    # (R53 리뷰 W3) 그림 id 유일성 공시 — `wp:docPr/@id` 는 문서 안에서 유일해야 한다(ECMA-376; 겹치면 Word 가 복구를 묻는다).
+    #   `_PictureSink` 는 id 를 추적하므로 싱크를 거치지 않은 그림 삽입이 생기면 여기서 드러난다(문서 전체 xpath 1회 ≈ 2ms).
+    #   막지 않고 적는다 — 저장을 막으면 문서 대신 아무것도 안 남고, 중복 자체는 Word 가 고칠 수 있다.
+    stats["drawing_id_duplicates"] = _count_duplicate_drawing_ids(doc)
+    if stats["drawing_id_duplicates"]:
+        _logger.warning("그림 id(wp:docPr/@id) 중복 %d건 — 싱크를 거치지 않은 그림 삽입이 있다", stats["drawing_id_duplicates"])
+    doc.save(str(out))
+    t0 = _time.perf_counter()
+    ok = normalize_zip_member_times(out)
+    stats["zip_time_normalized"] = bool(ok)
+    stats["zip_time_normalize_sec"] = round(_time.perf_counter() - t0, 2)
+    _write_gen_stats(output_path, stats)
+    return bool(ok)
+
+
 
 def _add_docx_text_block(doc, text: str, max_lines: int = 8000) -> None:
     if not text:
@@ -177,7 +229,20 @@ def _replace_reference_table_paragraph(doc, lines: List[str]) -> bool:
 
 
 def _replace_docx_text(doc, replacements: Dict[str, str]) -> None:
+    from docx.oxml.ns import qn  # type: ignore
+
+    # (R53 N27-c) 원문 노드 선검사 — `paragraph.text` 는 run 마다 xpath 를 돌려 정본(셀 17만 개)에서 이 함수 하나가 21초였다.
+    #   키의 첫 글자가 문단의 어느 `w:t` 에도 없으면 치환할 게 없다: python-docx 의 문단 텍스트는 `w:t` 의 부분집합에
+    #   탭/개행/하이픈 문자(`w:tab`·`w:ptab`·`w:br`·`w:cr`·`w:noBreakHyphen` 요소)를 더한 것뿐이라(1.2.0 `CT_R.text` 원문 —
+    #   리뷰 I3 대조: `w:sym`·`w:softHyphen`·`w:delText`·필드는 안 들어온다), 그 셋으로 시작하는 키가 있으면 선검사를 끈다.
+    #   결과는 같고(선검사는 "확실히 없음" 만 거른다) 읽는 문단만 준다.
+    _first = {k[:1] for k in replacements if k}
+    _prescan = bool(_first) and all(not ch.isspace() and ch != "-" for ch in _first)
+    _w_t = qn("w:t")
+
     def _replace_in_paragraph(paragraph):
+        if _prescan and not any(ch in (t.text or "") for t in paragraph._p.iter(_w_t) for ch in _first):
+            return
         full = paragraph.text
         if not full:
             return
@@ -1223,19 +1288,370 @@ def _render_swcom_overview_image(swcoms: List[str], out_path: Path) -> Optional[
     return str(out_path)
 
 
-def _merge_function_info_table(table, cols: int) -> None:
+# ── 정본에만 있는 남의 함수 heading 을 어떻게 할 것인가 ──────────────────────
+#
+# 정본을 템플릿으로 쓰면 heading 이 그 문서 전체(실측 KJPDS02 정본 1,035개)만큼 오는데
+# 이번 분석의 payload 는 그 부분집합이다(실측 57개). 나머지는 빈 `[ Function Information ]`
+# 서식으로 남는다 — 문서 행의 23%. 그게 옳은지는 **사람이 정한다**:
+#
+#   · 남기면(`keep`) 무엇이 분석되지 않았는지 문서에 드러난다.
+#   · 지우면(`drop`) 분석한 함수만 담긴 문서가 된다 — 정본을 부분집합으로 쓰는 경우.
+#
+# 기본은 `keep`(= 종전 동작)이라 **고르기 전까지 산출물은 바뀌지 않는다**.
+UNMATCHED_HEADINGS_KEEP = "keep"
+UNMATCHED_HEADINGS_DROP = "drop"
+UNMATCHED_HEADINGS_CHOICES = (UNMATCHED_HEADINGS_KEEP, UNMATCHED_HEADINGS_DROP)
+
+# 함수 절의 heading 인가. ⚠ **한 곳에만** 둔다 — 세는 쪽과 지우는 쪽이 각자 리터럴을
+# 들고 있으면 `\b` 하나 빠진 것만으로 두 집합이 갈린다(이 라운드에서 실제로 겪었다).
+_SWUFN_HEADING_RE = re.compile(r"\bswufn_\d+\b", re.I)
+
+
+def normalize_unmatched_headings(value: Any) -> "Tuple[str, str]":
+    """``(정규화된 값, 알 수 없었던 원본 or "")``.
+
+    ⚠ 모르는 값은 **안 지우는 쪽**(`keep`)으로 떨어진다. 반대로 두면 오타 하나에
+      문서가 조용히 얇아지고, 그건 되돌릴 수 없는 방향의 실수다.
+      `generators.suts.normalize_scope` 와 **같은 계약**이다 — 게이트가 이 함수를
+      import 해서 쓰므로 규칙이 두 곳에 갈리지 않는다.
+    """
+    raw = str(value or "").strip()
+    low = raw.lower()
+    if not low:
+        return UNMATCHED_HEADINGS_KEEP, ""
+    if low in UNMATCHED_HEADINGS_CHOICES:
+        return low, ""
+    return UNMATCHED_HEADINGS_KEEP, raw
+
+
+def _distinct_cells(row) -> List[Any]:
+    """`row.cells` 에서 같은 `<w:tc>` 를 **한 번만** 낸다(첫 등장 순).
+
+    (R53 N27-c) python-docx 는 병합 칸을 gridSpan 만큼 같은 `_Cell` 로 반복해 낸다 — 6열 라벨|값 행이면 6개 중 다른 칸은 2개뿐인데
+    `c.text` 는 부를 때마다 run 마다 xpath 를 돌린다(라이브: 이 읽기가 로직 이미지 행 찾기·행 종류 되짚기·머리글 판정에서 표당
+    수십 회). 판정이 `any(...)`/집합/첫 칸이거나 쓰기가 같은 값의 멱등 대입인 자리에서만 쓴다 — 그런 자리는 중복 칸이 결과를
+    바꾸지 않는다. 세로 병합 이어짐 칸도 위 칸의 `_tc` 를 내므로 같은 규칙으로 접힌다.
+    """
+    out: List[Any] = []
+    seen: Set[int] = set()
+    for c in row.cells:
+        key = id(c._tc)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+def _grid_cells(table) -> List[Any]:
+    """표의 그리드 셀 목록을 **한 번만** 만든다 — 그 시점의 `table.cell(r, c)` 와 같은 `_Cell` 객체다.
+
+    (R47-j N27-b) python-docx 의 `Table.cell(r, c)` 는 `self._cells[c + r * col_count]` 인데 `_cells` 가 **프로퍼티**라
+    부를 때마다 표 전체 `<w:tc>` 를 훑어 셀 객체를 새로 만든다(1.2.0 실측). 셀마다 한 번씩 부르면 셀 수의 제곱이다 —
+    라이브 프로파일(kjpds02_pv · 1,157함수 · DOCX 단계 1,486초 단독): 이 API 아래가 DOCX 시간의 **55%**
+    (`_add_blank_table` 38.6% · `_merge_function_info_table` 12.7% · 로직 이미지 삽입 경로 일부).
+    `_fill_function_info_table` 은 같은 함정을 이미 고쳐 두었는데(docstring 의 81,510회 프로파일) 형제 셋은 그대로였다 —
+    이 저장소 단골인 "쌍둥이 한쪽만 수정".
+
+    스냅샷 `[c + r * col_count]` 는 gridSpan 반복·vMerge 위 셀 참조까지 `_cells` 와 같은 규칙으로 만들어진 **같은 목록**이다.
+    ⚠ 병합은 표 모양을 바꾸므로 스냅샷은 **병합 전에 집은 같은 행의 셀**에만 유효하다 — 가로 병합은 그 행의 `<w:tc>` 만
+    지우고 다른 행의 요소는 살아 있으니 행 단위로 쓰면 된다(`_merge_function_info_table` 의 사용 방식).
+    ⚠ (R47-j 리뷰 W1) 위 단언은 **직사각 표**(모든 행의 gridSpan 합 == `tblGrid` 열 수, gridBefore/After 없음) 전제다.
+      행 폭이 다른(ragged) 표에선 평면 인덱스가 다른 행의 셀을 집어 가로 병합이 **세로 병합을 만들고**, vMerge 는 `_cells`
+      의 개수가 아니라 엔트리를 바꿔 스냅샷이 그 순간 낡는다. 병합하는 호출자는 `_is_uniform_grid` 로 먼저 가른다.
+    """
+    return list(table._cells)
+
+
+def _is_uniform_grid(table, stride: int) -> bool:
+    """모든 행이 `tblGrid` 폭을 정확히 채우는가(gridBefore/After 없음) — 스냅샷 병합이 옛 `table.cell()` 경로와 같아지는 조건."""
+    try:
+        for tr in table._tbl.tr_lst:
+            if int(getattr(tr, "grid_before", 0) or 0) or int(getattr(tr, "grid_after", 0) or 0):
+                return False
+            if sum(int(tc.grid_span) for tc in tr.tc_lst) != stride:
+                return False
+        return True
+    except Exception:  # noqa: BLE001 — 판단 불가면 느린(안전한) 경로
+        return False
+
+
+# ── (R53 N27-c) 그림 삽입 싱크 · 같은 행 가로 병합 빠른 경로 ─────────────────────────────────────
+
+class _PictureSink:
+    """한 문서 생성 동안의 그림 삽입 — python-docx `Run.add_picture` 와 **같은 XML·같은 파트·같은 rId·같은 id** 를 내되
+    그림마다 문서 크기에 비례해 돌던 두 비용을 걷어낸다.
+
+    (R53 N27-c) python-docx 1.2.0 `Run.add_picture` 는 그림 한 장마다:
+      ① `ImageParts._get_by_sha1` — 기존 이미지 파트 **전부**의 blob 을 다시 sha1 한다(`ImagePart.sha1` 은 캐시가 없다).
+         정본 템플릿 + 함수 1,157장이면 파트 해시가 수백만 번이다.
+      ② `StoryPart.next_id` — 문서 전체에 `//@id` xpath 를 돌려 "숫자 id 최대값 + 1" 을 잡는다(14MB document.xml).
+    라이브 프로파일(R47-j 수정 후 572초)에서 `add_picture` 아래가 26.3%(`next_id` 14.8% · `sha1` 7%) 였다.
+
+    등가 근거(1.2.0 소스 — 같은 API 를 같은 순서로 부른다):
+      `Run.add_picture(path, w, h)` = `part.new_pic_inline` → `get_or_add_image`(`package.image_parts.get_or_add_image_part`
+      뒤 `relate_to(part, RT.IMAGE)`) → `image_part.image.scaled_dimensions(w, h)` → `next_id` → `CT_Inline.new_pic_inline`
+      → `run._r.add_drawing(inline)`.
+      · sha1 색인: `_get_by_sha1` 는 `_image_parts` **목록 순서**로 첫 일치를 돌려준다 → 목록 순서대로 `setdefault` 하면 같은
+        파트다. 다른 경로(`Document.add_picture` 등)가 목록에 파트를 붙였을 수 있으니 조회 전마다 **꼬리만** 마저 색인한다.
+      · 파일명·크기는 원판처럼 **매칭된 파트의** `image` 에서 읽는다(중복이면 기존 파트의 이름이 docPr/cNvPr 에 실린다).
+      · id: `next_id` = "문서 안 숫자 `@id` 최대값 + 1". 본문은 `_clear_docx_body` 뒤로 **자라기만** 하므로 최대값은 우리가 넣는
+        그림(docPr id = 배정값 · cNvPr id = 0)과 원본 블록 되붙임(`note_appended`)으로만 오른다. 첫 배정 때 원판과 같은 xpath 로
+        한 번 재고 그 뒤로는 추적한다. 다른 경로가 그림을 넣을 수 있는 자리에선 `invalidate()` — 추적이 틀릴 수 있는 순간엔
+        항상 원판의 계산으로 돌아간다.
+    ⚠ `image_parts._image_parts`·`PackURI.idx`·`ImagePart.from_image` 는 비공개/내부 API(1.2.0 고정 — R47-j I4 와 같은 축).
+    """
+
+    def __init__(self, doc) -> None:
+        self._doc = doc
+        self._part = doc.part
+        self._package = self._part.package
+        self._by_sha1: Dict[str, Any] = {}
+        self._indexed = 0
+        self._used_idx: Set[Any] = set()     # 파트 이름 번호(`partname.idx`) — 원판 `_next_image_partname` 의 used_numbers
+        self._next_free = 1                   # 최소 빈 번호 커서 — 번호는 늘기만 하므로 단조
+        self._max_id: Optional[int] = None
+        self.pictures = 0            # 계측용 — 이 싱크로 넣은 그림 수
+        self.full_id_scans = 0       # 계측용 — `//@id` 전체 스캔 횟수(첫 배정 + invalidate 뒤)
+
+    def _parts(self) -> List[Any]:
+        return self._package.image_parts._image_parts      # `_get_by_sha1` 가 도는 바로 그 목록·그 순서
+
+    def _index_tail(self) -> None:
+        parts = self._parts()
+        for part in parts[self._indexed:]:
+            self._by_sha1.setdefault(part.sha1, part)     # 같은 해시가 둘이면 원판처럼 **앞의 것**
+            self._used_idx.add(part.partname.idx)
+        self._indexed = len(parts)
+
+    def _new_part(self, image):
+        """`ImageParts._add_image_part` 와 같은 파트(같은 이름) — 원판은 그림마다 파트 전부를 훑어 "빈 번호 중 최소" 를 찾는다
+        (`_next_image_partname`, 파트 수 제곱). 번호는 늘기만 하므로 최소 빈 번호는 단조 — 커서 하나로 같은 번호를 낸다."""
+        from docx.opc.packuri import PackURI  # type: ignore
+        from docx.parts.image import ImagePart  # type: ignore
+
+        n = self._next_free
+        while n in self._used_idx:
+            n += 1
+        self._next_free = n
+        part = ImagePart.from_image(image, PackURI("/word/media/image%d.%s" % (n, image.ext)))
+        self._package.image_parts.append(part)
+        self._used_idx.add(n)
+        return part
+
+    def invalidate(self) -> None:
+        """다른 경로가 숫자 `@id` 를 가진 요소를 넣었을 수 있다 — 다음 배정은 원판처럼 문서 전체를 다시 잰다."""
+        self._max_id = None
+
+    def note_appended(self, el) -> None:
+        """원본 블록(표지 sdt·보존 표)을 되붙인 뒤 부른다 — 그 안의 숫자 `@id` 가 최대값을 올릴 수 있다."""
+        if self._max_id is None:
+            return
+        for raw in el.xpath(".//@id"):
+            text = str(raw)
+            if text.isdigit():
+                self._max_id = max(self._max_id, int(text))
+
+    def _alloc_id(self) -> int:
+        if self._max_id is None:
+            used = [int(str(s)) for s in self._part._element.xpath("//@id") if str(s).isdigit()]   # 원판 `next_id` 그대로
+            self._max_id = max(used) if used else 0
+            self.full_id_scans += 1
+        return self._max_id + 1
+
+    def add_picture(self, run, image_path: str, width=None, height=None):
+        """`run.add_picture(image_path, width, height)` 와 같은 결과."""
+        from docx.image.image import Image  # type: ignore
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT  # type: ignore
+        from docx.oxml.shape import CT_Inline  # type: ignore
+        from docx.shape import InlineShape  # type: ignore
+
+        image = Image.from_file(image_path)               # 원판과 같은 순서 — 파일 오류는 여기서 나고 문서는 그대로다
+        self._index_tail()
+        sha1 = image.sha1
+        part = self._by_sha1.get(sha1)
+        if part is None:
+            part = self._new_part(image)
+            self._by_sha1[sha1] = part
+            self._indexed = len(self._parts())
+        rId = self._part.relate_to(part, RT.IMAGE)
+        part_image = part.image                           # 중복이면 **기존 파트**의 이름·크기(원판과 같다)
+        cx, cy = part_image.scaled_dimensions(width, height)
+        shape_id = self._alloc_id()
+        inline = CT_Inline.new_pic_inline(shape_id, rId, part_image.filename, cx, cy)
+        run._r.add_drawing(inline)
+        self._max_id = shape_id                           # 방금 넣은 docPr id 가 새 최대값(cNvPr id 는 0)
+        self.pictures += 1
+        return InlineShape(inline)
+
+    def add_picture_paragraph(self, image_path: str, width=None, height=None):
+        """`Document.add_picture(image_path, width, height)` 와 같다 — 새 문단의 새 run 에 넣는다."""
+        run = self._doc.add_paragraph().add_run()
+        return self.add_picture(run, image_path, width, height)
+
+
+def _hmerge_fast(tc_a, tc_b) -> bool:
+    """같은 행 안의 가로 병합을 python-docx `CT_Tc.merge` 와 **같은 XML** 로, 항법 xpath 없이 수행한다.
+
+    전제가 하나라도 어긋나면 아무것도 바꾸지 않고 False — 호출자는 원판 `merge` 로 간다(원판이 던질 예외도 그쪽에서 그대로).
+
+    (R53 N27-c) 원판은 병합 한 번에 `_tbl`·`_tr`·`preceding-sibling`·`following-sibling` xpath 를 셀마다 다시 돌린다 —
+    함수 정보 표 1,157개 × 행마다 1~2회 병합이면 xpath 수백만 번이고, 라이브 프로파일에서 `merge` 아래가 24.7% 였다.
+
+    등가 근거(1.2.0 `CT_Tc.merge`): 두 tc 가 같은 `w:tr` 의 직속 자식이고 둘 다 vMerge 가 없으면 `_span_dimensions` 는
+    (top=행, left=a.grid_offset, height=1, width=b.right−a.left) 이고 `top_tc` 는 a 자신이다. `_grow_to(width, 1)` 는
+    `_span_to_width(width, a, None)`: `a._move_content_to(a)` 는 no-op, `grid_span < width` 인 동안 `_swallow_next_tc` —
+    다음 tc 가 **비어 있으면** `_move_content_to` 도 no-op 이라 `_add_width_of` · `grid_span +=` · `_remove()` 만 남는다.
+    셀은 행을 빈틈없이 덮으므로 삼키는 tc 는 정확히 a 다음부터 b 까지다. 끝으로 `vMerge = None`. 여기서는 항법만 걷어내고
+    **변이는 원판과 같은 setter 를 같은 순서로** 부른다. 삼킬 셀에 내용이 있으면(원판은 옮긴다) 원판에 맡긴다.
+    예외까지 등가인 범위는 행이 `w:tbl` **직속**일 때다 — `w:sdt` 로 감싼 행은 원판이 ValueError 를 던지므로 그쪽으로 보낸다(리뷰 W2).
+    """
+    from docx.oxml.ns import qn  # type: ignore
+
+    tr = tc_a.getparent()
+    if tr is None or tr is not tc_b.getparent() or tr.tag != qn("w:tr"):
+        return False
+    tbl = tr.getparent()
+    if tbl is None or tbl.tag != qn("w:tbl"):                  # (리뷰 W2) `w:sdt` 로 감싼 행 — 원판은 `tr_lst.index` 에서 ValueError 를 던진다 → 원판에
+        return False
+    if tc_a.vMerge is not None or tc_b.vMerge is not None:      # top/bottom 이 행 밖으로 나간다 → 원판에
+        return False
+    tcs = tr.tc_lst
+    a_i = b_i = -1
+    for i, tc in enumerate(tcs):
+        if tc is tc_a:
+            a_i = i
+        if tc is tc_b:
+            b_i = i
+    if a_i < 0 or b_i < 0 or a_i > b_i:                          # b 가 왼쪽이면 원판이 b 를 키운다 → 원판에
+        return False
+    swallow = tcs[a_i + 1:b_i + 1]
+    for tc in swallow:
+        if not tc._is_empty:
+            return False
+    for tc in swallow:                                           # `_swallow_next_tc` 와 같은 순서·같은 setter
+        tc_a._add_width_of(tc)
+        tc_a.grid_span += tc.grid_span
+        tr.remove(tc)
+    tc_a.vMerge = None                                           # `_span_to_width` 마지막 줄(높이 1 → None)
+    return True
+
+
+def _merge_cells(cell_a, cell_b) -> None:
+    """`cell_a.merge(cell_b)` — 같은 행의 빈 셀 가로 병합이면 빠른 경로, 아니면 python-docx 원판(예외도 원판 것)."""
+    if not _hmerge_fast(cell_a._tc, cell_b._tc):
+        cell_a.merge(cell_b)
+
+
+def _merge_function_info_table(table, cols: int, layout=None) -> None:
+    """함수 정보 표의 셀을 행 종류에 맞게 병합한다.
+
+    `layout` 이 있으면 행마다 종류(`full`/`pair`/`grid`)를 보고 병합한다. 없으면
+    P2-3 이전과 같은 균일 병합(행0 전체 + 나머지 라벨/값)이라, 문서에서 읽어 온
+    표를 다시 정규화하는 경로는 그대로 동작한다.
+
+    ⚠ **`grid` 행은 병합하지 않는다.** 정본의 `No|Name|Type|Value Range|Reset
+    Value|Description` 은 6칸이 각각 독립이고, 여길 라벨/값으로 병합하면 파라미터가
+    통째로 사라진다. 표가 6열보다 넓으면(실측 템플릿 415개 중 124개가 7열) 남는
+    꼬리만 마지막 칸에 합쳐 정본과 같은 6칸으로 보이게 한다.
+    """
     if not table or cols < 4:
         return
     try:
-        if len(table.rows) >= 1:
-            table.cell(0, 0).merge(table.cell(0, cols - 1))
-        for r_idx in range(1, len(table.rows)):
+        kinds = [str(k) for k, _ in (layout or [])]
+        n_rows = len(table.rows)
+        # 표당 그리드 1회 — 행 안의 두 병합은 서로 다른 `<w:tc>` 를 건드리고, 다른 행의 요소는 살아 있다(`_grid_cells`).
+        #   (R53 N27-c) 병합 자체는 `_merge_cells` — 같은 행의 빈 셀이면 xpath 없는 빠른 경로, 아니면 python-docx 원판.
+        #   단 **직사각 표**에서만이다(리뷰 W1) — 행 폭이 다른 표는 옛 경로대로 호출마다 재계산한다(느리지만 같은 결과).
+        stride = table._column_count
+        if _is_uniform_grid(table, stride):
+            grid = _grid_cells(table)
+
+            def _c(r: int, c: int):
+                return grid[c + r * stride]
+        else:
+            _logger.warning("함수 정보 표의 행 폭이 tblGrid(%d열)와 달라 셀 접근을 호출마다 재계산한다(느린 경로)", stride)
+
+            def _c(r: int, c: int):
+                return table.cell(r, c)
+
+        for r_idx in range(n_rows):
+            if r_idx < len(kinds):
+                kind = kinds[r_idx]
+            else:
+                kind = FN_ROW_FULL if r_idx == 0 else FN_ROW_PAIR
+            if kind == FN_ROW_GRID:
+                if cols > PARAM_GRID_COLS:
+                    _merge_cells(_c(r_idx, PARAM_GRID_COLS - 1), _c(r_idx, cols - 1))
+                continue
+            if kind == FN_ROW_FULL:
+                _merge_cells(_c(r_idx, 0), _c(r_idx, cols - 1))
+                continue
             if cols >= 2:
-                table.cell(r_idx, 0).merge(table.cell(r_idx, 1))
+                _merge_cells(_c(r_idx, 0), _c(r_idx, 1))
             if cols >= 4:
-                table.cell(r_idx, 2).merge(table.cell(r_idx, cols - 1))
-    except Exception:
-        pass
+                _merge_cells(_c(r_idx, 2), _c(r_idx, cols - 1))
+    except Exception as exc:  # noqa: BLE001 — 병합 실패가 문서 생성을 막아선 안 된다
+        # (R47-j 리뷰 I5/X8) 예전엔 여기가 완전 침묵이라 "일부 행만 병합된 표" 와 정상을 산출물에서 구분할 수 없었다.
+        _logger.warning("함수 정보 표 병합 중단(%s: %s) — 남은 행은 병합되지 않은 채 남는다", type(exc).__name__, str(exc)[:120])
+
+
+def _infer_function_info_layout(table):
+    """이미 만들어진 표에서 행 종류를 되짚는다 — 문서 후처리 정규화용.
+
+    ⚠ 왜 필요한가: `_normalize_function_info_tables` 는 완성된 문서를 훑어 표를 다시
+    병합하는데, P2-3 이 넣은 파라미터 그리드는 병합 대상이 **아니다**. 종류를 모르고
+    균일 병합하면 방금 쓴 파라미터 행이 라벨/값 두 칸으로 접혀 통째로 사라진다.
+
+    ⚠ **셀 개수로 판정하면 안 된다.** 처음엔 "칸이 3개 이상이면 그리드" 로 썼는데,
+    아직 한 번도 병합되지 않은 라벨/값 표도 6칸이라 **정규화가 통째로 죽었다**
+    (음성 대조군이 잡았다). 그래서 정본 배치의 **내용**으로 판정한다 —
+    `report_gen.requirements._extract_function_info_from_docx` 가 같은 문서를 되읽을 때
+    쓰는 것과 같은 상태기계다(섹션 머리 → 그리드 헤더 → 번호로 시작하는 데이터 행).
+    (R54 N49) `[ Logic Diagram ]` 머리행과 그 다음 그림행은 full — 그림행은 글이 없어 내용이 아니라 **머리행 뒤라는 위치**로 판정한다.
+    """
+    layout = []
+    try:
+        in_params = False
+        logic_body_next = False
+        for r_idx, row in enumerate(list(table.rows)):
+            cells = [str(c.text or "").strip() for c in _distinct_cells(row)]   # (R53) 판정은 첫 칸·집합·any 뿐 — 중복 칸 불필요
+            first = cells[0] if cells else ""
+            norm = re.sub(r"[\[\]\s]+", " ", first).strip().lower()
+            if r_idx == 0:
+                layout.append((FN_ROW_FULL, []))
+                continue
+            if logic_body_next:
+                logic_body_next = False
+                if len(cells) == 1 or all(not c for c in cells):     # (R54 N49) 머리행 다음 = 전폭 그림행 — 전폭 한 칸이거나 전부 빈 칸일 때만(리뷰 W2)
+                    layout.append((FN_ROW_FULL, []))
+                    continue
+                # 모양이 다르면(라벨|값 행이 바로 온 표) 보통 행으로 — 아래 판정으로 흘린다
+            if is_logic_diagram_label(first) and (is_logic_diagram_header(first) or len(cells) == 1):
+                # (R54 N49) 정본 배치의 머리행(대괄호 표기, 또는 이미 전폭 한 칸). 옛 라벨|값 한 행(대괄호 없음·두 칸)은 아래 pair 로.
+                in_params = False
+                logic_body_next = True
+                layout.append((FN_ROW_FULL, []))
+                continue
+            if norm in ("input parameters", "output parameters", "input paramters"):
+                in_params = True
+                layout.append((FN_ROW_FULL, []))
+                continue
+            if in_params:
+                lowered = {c.lower() for c in cells}
+                if "no" in lowered and ("name" in lowered or "type" in lowered):
+                    layout.append((FN_ROW_GRID, []))
+                    continue
+                if first[:1].isdigit():
+                    layout.append((FN_ROW_GRID, []))
+                    continue
+                in_params = False
+            layout.append((FN_ROW_PAIR, []))
+    except Exception as exc:   # noqa: BLE001 - 되짚기 실패가 문서 생성을 막아선 안 된다
+        _logger.warning("함수 정보 표 행 종류 추론 실패(%s) — 균일 병합으로 되돌린다: %s",
+                        type(exc).__name__, exc)
+        return None
+    return layout
 
 
 def _normalize_function_info_tables(doc) -> None:
@@ -1245,40 +1661,98 @@ def _normalize_function_info_tables(doc) -> None:
         for table in doc.tables:
             if not table.rows:
                 continue
-            header_cells = [c.text.strip() for c in table.rows[0].cells]
+            _row0 = table.rows[0]                                    # (R53) `rows[0]` 은 부를 때마다 전 행을 다시 만든다 — 한 번만
+            header_cells = [c.text.strip() for c in _distinct_cells(_row0)]
             if not any("Function Information" in c for c in header_cells):
                 continue
             cols = len(table.columns)
-            for cell in table.rows[0].cells:
-                cell.text = "[ Function Information ]"
-            _merge_function_info_table(table, cols)
+            for cell in _distinct_cells(_row0):
+                cell.text = "[ Function Information ]"             # 같은 칸에 같은 값 — 멱등이라 한 번이면 같다
+            _merge_function_info_table(table, cols, _infer_function_info_layout(table))
     except Exception:
         pass
 
 
-def _fill_function_info_table(table, data_rows: List[List[str]]) -> None:
-    if not table or not data_rows:
+def _fill_function_info_table(table, layout) -> None:
+    """함수 정보 표를 채운다.
+
+    ⚠ **`table.cell(r, c)` 를 쓰지 말 것.** python-docx 의 그 API 는 호출할 때마다
+    그리드를 처음부터 훑는다. 예전 구현은 바로 윗줄에서 `table.rows[r].cells` 로 행을
+    이미 해석해 놓고 다음 줄에서 `table.cell(r, 0)` 으로 되돌아가, 행 수에 대해 축이
+    하나 더 붙었다(프로파일: `table.cell()` 81,510회 → `get_child_element` 4,390만 회).
+    `table.rows[r]` 도 마찬가지다 — `_Rows.__getitem__` 은 구현이 `list(self)[idx]` 라
+    **인덱싱할 때마다 전 행을 새로 materialize** 한다(`rows` 자체는 lazyproperty 라
+    캐시되지만 그건 도움이 안 된다). 그래서 `list(table.rows)` 로 한 번만 펼친다.
+
+    ⚠ **병합 셀이 있어도 등가다** — 이 표는 `_merge_function_info_table` 로 행0 전체와
+    행1+ 의 `[0-1]`·`[2..cols-1]` 이 병합돼 있다. 실측(19행 6열, 실제 병합 모양 재현):
+    114칸 전부 `table.cell(r,c)._tc is table.rows[r].cells[c]._tc`, 결과 XML 바이트
+    동일, 소요 **1,918ms → 791ms (2.42배)**.
+    """
+    if not table or not layout:
         return
     try:
-        for r_idx, row in enumerate(data_rows):
-            if r_idx >= len(table.rows):
+        trows = list(table.rows)          # `table.rows` 재해석 방지
+        for r_idx, (kind, cells_text) in enumerate(layout):
+            if r_idx >= len(trows):
                 break
-            label = row[0] if len(row) > 0 else ""
-            value = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else "")
-            # clear row first
-            for c in table.rows[r_idx].cells:
-                c.text = ""
-            if r_idx == 0:
-                for c_idx in range(len(table.rows[r_idx].cells)):
-                    table.cell(0, c_idx).text = label
+            cells = trows[r_idx].cells    # 행당 한 번만 해석
+            # (R53 N27-c) 같은 `<w:tc>` 에 여러 번 쓰지 않는다 — python-docx 는 병합 칸을 gridSpan 만큼 반복해 내므로 "전부 비우고
+            #   다시 쓰기" 가 라벨|값 행에서 setter 8회, 머리글 행에서 12회였다(칸은 2개·1개). 대입은 마지막 값이 이기고 setter 는
+            #   멱등이라, 예전과 같은 순서로 **계획**만 세운 뒤 칸마다 한 번 쓴다(XML 동일 — `test_docx_function_info_fill` 이 옛 구현과 대조).
+            plan: Dict[int, Tuple[Any, str]] = {}
+
+            def _put(c, text: str) -> None:
+                plan[id(c._tc)] = (c, text)
+
+            for c in cells:
+                _put(c, "")
+            if kind == FN_ROW_GRID:
+                for c_idx, val in enumerate(cells_text[:len(cells)]):
+                    _put(cells[c_idx], str(val))
+                for c, text in plan.values():
+                    c.text = text
+                continue
+            if kind == FN_ROW_FULL:
+                head = str(cells_text[0]) if cells_text else ""
+                for c in cells:
+                    _put(c, head)
+                for c, text in plan.values():
+                    c.text = text
+                continue
+            # ⚠ 값 칸 선택은 P2-3 이전과 **글자 그대로 같게** 둔다. 좁은 표(6열 미만)는
+            #   라벨/값 쌍을 한 행에 여러 개 접어 넣으므로(`_pack_pairs_into_rows`)
+            #   `cells_text[-1]` 을 쓰면 첫 쌍의 라벨에 마지막 쌍의 값이 붙는다.
+            label = str(cells_text[0]) if len(cells_text) > 0 else ""
+            if len(cells_text) > 2:
+                value = str(cells_text[2])
+            elif len(cells_text) > 1:
+                value = str(cells_text[1])
             else:
-                table.cell(r_idx, 0).text = label
-                table.cell(r_idx, 2).text = value
-    except Exception:
-        pass
+                value = ""
+            if len(cells) > 0:
+                _put(cells[0], label)
+            if len(cells) > 2:
+                _put(cells[2], value)
+            for c, text in plan.values():
+                c.text = text
+    except Exception as exc:   # noqa: BLE001 - 표 채우기 실패가 문서 생성을 막아선 안 된다
+        # 예전엔 `pass` 라 표가 통째로 비어도 흔적이 없었다.
+        _logger.warning("함수 정보 표 채우기 실패(%s) — 그 표는 빈 채로 남는다: %s",
+                        type(exc).__name__, exc)
 
 
-def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
+def _insert_logic_image_in_table(table, cols: int, logic_img: str, picture_sink=None) -> bool:
+    """함수 정보 표의 Logic Diagram 그림 칸에 그림을 넣는다.
+
+    그림 칸은 배치에 따라 둘 중 하나다(R54 N49):
+    · 정본 배치 — `[ Logic Diagram ]` 전폭 머리행(대괄호 표기, 또는 이미 전폭 한 칸) 다음의 **전폭 그림행**(KJPDS02 정본 989/989).
+    · 옛 배치 — `Logic Diagram` 라벨|값 한 행의 값 칸(`min(2, cols-1)` 열). 좁은 표(6열 미만) 폴백은 아직 이 배치다.
+    머리행 뒤에 행이 없으면 False(호출부가 표 뒤 문단으로 폴백한다) — 조용히 머리행에 덮어쓰지 않는다.
+
+    `picture_sink`(`_PictureSink`)가 있으면 그 싱크로 넣는다(R53 N27-c — 결과 XML 은 `run.add_picture` 와 같고 그림마다
+    문서 전체를 훑지 않는다). 없으면 python-docx 원판.
+    """
     if not table or not logic_img:
         return False
     try:
@@ -1286,16 +1760,17 @@ def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
     except Exception:
         Inches = None  # type: ignore
     def _clear_cell(cell) -> None:
-        try:
-            from docx.oxml import OxmlElement  # type: ignore
-        except Exception:
-            OxmlElement = None  # type: ignore
+        """값 칸의 **내용만** 비운다 — `w:tcPr`(gridSpan·tcW)는 남긴다.
+
+        (R53 N48) 예전엔 `tc` 의 자식을 **전부** 지워 셀 속성까지 사라졌다. 이 칸은 `_merge_function_info_table` 이 `cols-2` 열로
+        병합한 값 칸이라 gridSpan 이 사라지면 그 행만 좁은 칸이 되고(ragged), ① Word 에서 Logic Diagram 행이 다른 행과 폭이 다르며
+        ② 정규화가 그 표를 비직사각으로 판정해 표마다 느린 경로(셀마다 그리드 재구성 — 셀 수의 제곱) + IndexError 경고를 냈다 — 라이브 실측
+        989/989 표(Initial commit 이래). python-docx `_Cell.text` setter 와 같은 규약(`clear_content` = tcPr 만 남김)으로 비운다.
+        """
         try:
             tc = cell._tc
-            for child in list(tc):
-                tc.remove(child)
-            if OxmlElement:
-                tc.append(OxmlElement("w:p"))
+            tc.clear_content()            # `w:tcPr` 를 제외한 자식 제거(python-docx)
+            tc.add_p()
         except Exception as e:
             _logger.debug("Cell XML clear failed: %s", e)
             try:
@@ -1303,17 +1778,35 @@ def _insert_logic_image_in_table(table, cols: int, logic_img: str) -> bool:
             except Exception:
                 pass
     try:
-        for r_idx, row in enumerate(table.rows):
-            cells = [c.text.strip() for c in row.cells]
-            if any(c.replace(" ", "") == "LogicDiagram" for c in cells):
-                target_cell = table.cell(r_idx, min(2, cols - 1))
+        stride = table._column_count
+        grid = _grid_cells(table)             # 표당 1회 — `Table.cell` 은 호출마다 그리드를 다시 만든다
+        rows_l = list(table.rows)
+        for r_idx, row in enumerate(rows_l):
+            cells = [c.text.strip() for c in _distinct_cells(row)]     # (R53) 병합 칸은 한 번만 읽는다 — any() 판정은 같다
+            hit = next((c for c in cells if is_logic_diagram_label(c)), None)
+            if hit is not None:
+                if is_logic_diagram_header(hit) or len(cells) == 1:
+                    # (R54 N49) 정본 배치 — 그림은 다음 전폭 행. 머리행이 한 칸뿐이면 "값 칸" 이 곧 라벨 칸이라 거기 넣으면 라벨이 지워진다.
+                    #   다음 행은 **행 단위**로 잡고(그리드 평면 인덱스는 비직사각 표에서 어긋난다 — 리뷰 W3) 전폭 한 칸이거나 전부 빈 칸일
+                    #   때만 지운다 — 라벨|값 행이 바로 오면 그 라벨을 지우는 대신 False(표 뒤 문단 폴백 — 검증기는 그 표를 '그림 없음' 으로 센다).
+                    if r_idx + 1 >= len(rows_l):
+                        _logger.warning("Logic Diagram 머리행 뒤에 그림행이 없다 — 표 뒤 문단으로 폴백한다")
+                        return False
+                    nxt = _distinct_cells(rows_l[r_idx + 1])
+                    if not nxt or not (len(nxt) == 1 or all(not c.text.strip() for c in nxt)):
+                        _logger.warning("Logic Diagram 머리행 다음 행이 그림행 모양(전폭 한 칸·빈 칸)이 아니다 — 표 뒤 문단으로 폴백한다")
+                        return False
+                    target_cell = nxt[0]
+                else:
+                    target_cell = grid[min(2, cols - 1) + r_idx * stride]      # 옛 배치(라벨|값 한 행) — 좁은 표 폴백이 아직 쓴다
                 _clear_cell(target_cell)
                 p = target_cell.paragraphs[0] if target_cell.paragraphs else target_cell.add_paragraph()
                 run = p.add_run()
-                if Inches:
-                    run.add_picture(str(logic_img), width=Inches(5.2))
+                _width = Inches(5.2) if Inches else None
+                if picture_sink is not None:
+                    picture_sink.add_picture(run, str(logic_img), width=_width)
                 else:
-                    run.add_picture(str(logic_img))
+                    run.add_picture(str(logic_img), width=_width)
                 return True
     except Exception as e:
         _logger.warning("Failed to insert logic image in table: %s", e)
@@ -1393,7 +1886,126 @@ def _template_has_placeholders(doc) -> bool:
     return False
 
 
+def _para_text(p_el) -> str:
+    """문단 텍스트 — python-docx `Paragraph.text` **＋ 콘텐츠 컨트롤(`w:sdt`) 안의 런**.
+
+    `p.text` 는 `w:p` **직속** `w:r` 만 이어붙인다. 그래서 값이 `w:sdt` 로 감싸인 자리를
+    통째로 놓쳤고, 재작성 경로가 그 문단을 다시 쓰면서 **문장 한복판이 비었다**
+    (실측: 템플릿 `이 문서는 [Project Name] 프로젝트를 위한…` → 산출물
+    `이 문서는  프로젝트를 위한…`). 구멍은 오타로 읽혀 검토에서 넘어간다.
+
+    ⚠ 텍스트박스(`w:txbxContent`)와 하이퍼링크(`w:hyperlink`)는 **제외한다**:
+      - 텍스트박스에는 표준 템플릿의 "■ 작성 내용" **작성 지침 상자**가 들어 있다.
+        본문으로 끌어오면 납품 문서에 지침이 실린다.
+      - 하이퍼링크에는 템플릿의 **옛 목차 항목**이 산다. 포함하면 생성기가 새로 넣는
+        목차와 별개로 평문 목차가 한 벌 더 복제된다.
+      둘 다 `p.text` 도 읽지 않으므로 이 제외는 **현행 동작 그대로**다.
+    """
+    try:
+        nodes = p_el.xpath(
+            ".//w:t[not(ancestor::w:txbxContent) and not(ancestor::w:hyperlink)]")
+    except Exception:   # noqa: BLE001 - XPath 미지원 요소는 텍스트 없음으로
+        return ""
+    return "".join(n.text or "" for n in nodes)
+
+
+def _append_body_block(doc, el, picture_sink=None) -> None:
+    """원본 요소를 본문 끝(단, `w:sectPr` **앞**)에 되붙인다.
+
+    ⚠ `body.append(el)` 을 쓰면 `w:sectPr` **뒤**로 간다. python-docx 의
+      `add_paragraph`/`add_table` 은 스키마 순서를 지켜 `sectPr` 앞에 넣으므로,
+      두 방식을 섞으면 되살린 블록만 문서 맨 끝으로 밀린다 — 실측으로 표지와
+      이력·참조 표가 그렇게 문서 끝(구역 속성 뒤)으로 갔다.
+    """
+    from docx.oxml.ns import qn  # type: ignore
+    body = doc._body._element  # type: ignore[attr-defined]
+    sect = body.find(qn("w:sectPr"))
+    if sect is not None:
+        sect.addprevious(el)
+    else:
+        body.append(el)
+    if picture_sink is not None:
+        picture_sink.note_appended(el)      # (R53 N27-c) 되붙인 요소 안의 숫자 `@id` 가 그림 id 최대값을 올릴 수 있다
+
+
+def _fill_bracket_project_name(doc, project: str) -> int:
+    """템플릿의 `[Project Name]` 표식을 실제 프로젝트명으로 채운다.
+
+    표준 템플릿은 표지·Introduction 의 프로젝트명 자리에 이 표식을 두고, 콘텐츠
+    컨트롤(`w:sdt`)로 `dc:subject` 에 바인딩해 둔다(실측 8곳). 표식을 **지우기만**
+    하면 `이 문서는  프로젝트를 위한…` 처럼 문장에 구멍이 남고, 구멍은 오타로 읽혀
+    검토에서 그냥 넘어간다.
+
+    ⚠ 값이 없거나 폴백 기본값(`UDS Spec`)이면 **표식을 그대로 둔다** — 없는 이름을
+      지어내지 않는다(`[Project Name]` 이 그대로 보이면 채워야 할 자리임이 드러난다).
+    ⚠ 토큰 치환 경로와 재작성 경로 **둘 다** 이 함수를 지난다. 재작성 경로만 고치면
+      토큰 템플릿을 쓰는 프로젝트에서 같은 구멍이 남는다.
+
+    Returns:
+        치환한 `w:t` 노드 수.
+    """
+    from docx.oxml.ns import qn  # type: ignore
+    name = str(project or "").strip()
+    if not name or name.lower() == "uds spec":
+        return 0
+    try:
+        body = doc._body._element  # type: ignore[attr-defined]
+    except Exception:   # noqa: BLE001 - 채우기 실패가 생성을 막지는 않는다
+        return 0
+    n = 0
+    for t in body.iter(qn("w:t")):
+        if t.text and "[Project Name]" in t.text:
+            t.text = t.text.replace("[Project Name]", name)
+            n += 1
+    if n:
+        try:
+            # 표지 sdt 가 `dc:subject` 에 바인딩돼 있어, 문서 속성도 맞춰 두면
+            # Word 가 필드를 갱신해도 같은 값이 나온다.
+            doc.core_properties.subject = name
+        except Exception:   # noqa: BLE001 - 보너스라 실패해도 무방
+            pass
+    return n
+
+
+def _is_toc_sdt(sdt_el) -> bool:
+    """목차 빌딩블록인가 — `docPartGallery` 가 Word 의 표준 표식이다.
+
+    표지는 `"Cover Pages"`, 목차는 `"Table of Contents"`. 목차 sdt 를 보존하면
+    생성기가 새로 넣는 목차와 **두 벌**이 된다.
+    """
+    from docx.oxml.ns import qn  # type: ignore
+    try:
+        vals = [str(g.get(qn("w:val")) or "").strip().lower()
+                for g in sdt_el.iter(qn("w:docPartGallery"))]
+    except Exception:   # noqa: BLE001 - 표식을 못 읽으면 목차로 단정하지 않는다
+        return False
+    return any("table of contents" in v for v in vals)
+
+
 def _iter_template_blocks(doc):
+    """(하위호환) body 직속 `w:p`/`w:tbl` **래퍼 객체**만 문서 순서대로.
+
+    ⚠ 이 이름의 계약은 **객체 리스트**다. `report_gen/validation.py` 두 곳이
+      duck typing(`hasattr(block, "text")` / `hasattr(block, "rows")`)으로 소비하므로
+      `(kind, obj)` 튜플로 바꾸면 **전부 조용히 건너뛴다** — 실제로 그렇게 바꿨다가
+      SwCom 정본 diff 가 통째로 빈 리포트를 냈다(가드 9건이 잡았다).
+      새 축(표지 등 raw 블록)은 아래 `_iter_body_blocks` 로 낸다.
+    """
+    return [obj for kind, obj in _iter_body_blocks(doc) if kind != "raw"]
+
+
+def _iter_body_blocks(doc):
+    """body 직속 자식을 **문서 순서대로** `(kind, obj)` 로 낸다.
+
+    kind: `"para"`(Paragraph) · `"table"`(Table) · `"raw"`(그 밖의 블록 요소).
+
+    ⚠ 오래 `w:p`/`w:tbl` 만 냈다. Word 는 **표지를 body 직속 `w:sdt`** 로 넣기 때문에
+      (`docPartGallery="Cover Pages"`) 그 표지가 여기서 통째로 사라졌고, 재작성 경로는
+      "정본을 쓰면 표지가 납품본과 같아진다" 고 공시하면서 실제로는 표지를 **잃었다**.
+      실측: 표준 템플릿·정본 **둘 다 body[0] 이 표지 sdt**(정본은 `KJPDS02 / v2.08`).
+      `w:sectPr`·북마크처럼 보이는 내용이 없는 자식은 계속 무시한다.
+    """
+    from docx.oxml.ns import qn  # type: ignore
     try:
         from docx.oxml.table import CT_Tbl  # type: ignore
         from docx.oxml.text.paragraph import CT_P  # type: ignore
@@ -1405,36 +2017,72 @@ def _iter_template_blocks(doc):
     blocks = []
     for child in parent.iterchildren():
         if isinstance(child, CT_P):
-            blocks.append(Paragraph(child, doc))
+            blocks.append(("para", Paragraph(child, doc)))
         elif isinstance(child, CT_Tbl):
-            blocks.append(Table(child, doc))
+            blocks.append(("table", Table(child, doc)))
+        elif child.tag == qn("w:sdt") and not _is_toc_sdt(child):
+            blocks.append(("raw", child))
     return blocks
+
+
+_HEADER_KEYWORDS = frozenset({
+    "file name",
+    "version",
+    "date",
+    "note",
+    "macro",
+    "type",
+    "define",
+    "description",
+    "parameter",
+    "component",
+    "function",
+    "comment",
+    "data name",
+    "data type",
+    "value range",
+    "reset",
+})
+
+
+def _looks_like_header_row(cells: List[str]) -> bool:
+    """1행이 헤더처럼 보이는가 — **관대하게** 본다(부분문자열).
+
+    배너 셀(`[ Function Information ]`)처럼 라벨과 정확히 같지 않은 헤더가 실제로
+    있어서, 여기서 엄격하게 보면 정상 표 1,035개가 판정을 잃는다(실측).
+    """
+    joined = " ".join(c.lower() for c in cells if c).strip()
+    return any(k in joined for k in _HEADER_KEYWORDS)
+
+
+def _is_header_label_row(cells: List[str]) -> bool:
+    """2행이 **헤더의 둘째 줄**인가 — 엄격하게 본다(셀 완전일치).
+
+    ⚠ 여기가 부분문자열이면 템플릿의 **예시 데이터 행**이 헤더로 굳는다. 데이터 행은
+      긴 설명을 달고 다녀서 `type`·`version`·`reset` 같은 낱말이 값 안에 우연히 들어
+      있기 때문이다 — 실측으로 `VERSION1`·`CPU_POWER_ON_RESET`·`APP_FIRMWARE_VERSION_ADDR`
+      같은 **남의 값 6행이 산출물에 그대로 실렸다**. 헤더의 둘째 줄은 순수 라벨
+      (`ID`/`Name`/`Type`)이므로 셀 하나라도 라벨과 **정확히** 같을 것을 요구한다.
+      정본·표준 템플릿 1,194표 전수 대조: 의도한 7건만 바뀌고 회귀 0건.
+    """
+    for c in cells:
+        if re.sub(r"\s+", " ", str(c or "")).strip().lower() in _HEADER_KEYWORDS:
+            return True
+    return False
 
 
 def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
     blocks: List[Tuple[str, Any]] = []
     stack: List[str] = []
-    header_keywords = {
-        "file name",
-        "version",
-        "date",
-        "note",
-        "macro",
-        "type",
-        "define",
-        "description",
-        "parameter",
-        "component",
-        "function",
-        "comment",
-        "data name",
-        "data type",
-        "value range",
-        "reset",
-    }
-    for item in _iter_template_blocks(doc):
-        if hasattr(item, "style") and hasattr(item, "text"):
-            text = (item.text or "").strip()
+    for kind_in, item in _iter_body_blocks(doc):
+        if kind_in == "raw":
+            # 표지 같은 구조 블록은 **원본 요소 그대로** 들고 간다. 텍스트로 풀면
+            # 그림·서식·바인딩이 다 날아간다. 참조만 잡으므로 복사 비용은 없다
+            # (`_clear_docx_body` 가 detach 해도 이 참조가 요소를 살려 둔다).
+            blocks.append(("raw", item))
+            continue
+        if kind_in == "para":
+            text = _para_text(item._element).strip()
             if not text or not item.style:
                 continue
             name = str(getattr(item.style, "name", "") or "")
@@ -1452,7 +2100,7 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
                 stack = stack[: level - 1]
             stack.append(text)
             blocks.append(("heading", (level, text)))
-        elif hasattr(item, "rows") and hasattr(item, "columns"):
+        elif kind_in == "table":
             try:
                 rows = len(item.rows)
                 cols = len(item.columns)
@@ -1461,13 +2109,14 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
                 for r in item.rows[:2]:
                     header_rows.append([c.text.strip() for c in r.cells])
                 if len(header_rows) == 2:
-                    first = " ".join([c.lower() for c in header_rows[0] if c]).strip()
-                    second = " ".join([c.lower() for c in header_rows[1] if c]).strip()
-                    def _is_header(row_text: str) -> bool:
-                        return any(k in row_text for k in header_keywords)
-                    if _is_header(first) and not _is_header(second):
+                    if (_looks_like_header_row(header_rows[0])
+                            and not _is_header_label_row(header_rows[1])):
                         header_rows = header_rows[:1]
-                blocks.append(("table", (rows, cols, style, header_rows, list(stack))))
+                # 6번째로 **원본 표 요소**를 들고 간다. 생성기가 채우지 않는 표
+                # (이력·참조 등)는 모양만 복제하면 데이터 행이 빈칸으로 나가는데,
+                # 빈칸은 "이력 없음" 으로 읽힌다(실측: 정본 이력 29행이 헤더만 남음).
+                blocks.append(("table",
+                               (rows, cols, style, header_rows, list(stack), item._element)))
             except Exception:
                 continue
     return blocks
@@ -1484,7 +2133,7 @@ def _extract_template_section_block_map(doc) -> Dict[str, List[Dict[str, str]]]:
     current_title = ""
     current_entries: List[Dict[str, str]] = []
     for p in doc.paragraphs:
-        text = (p.text or "").strip()
+        text = _para_text(p._element).strip()
         style_name = str(getattr(p.style, "name", "") or "")
         level = 0
         if text and style_name.startswith("Heading"):
@@ -1547,7 +2196,7 @@ def _extract_template_section_map(doc) -> Dict[str, str]:
     current_title = ""
     current_lines: List[str] = []
     for p in doc.paragraphs:
-        text = (p.text or "").strip()
+        text = _para_text(p._element).strip()
         if not text:
             continue
         style = str(getattr(p.style, "name", "") or "")
@@ -1589,24 +2238,447 @@ def _add_blank_table(
             table.style = style
     except Exception:
         pass
+    # 새 표는 병합 없는 균일 격자라 `[c + r * cols]` 가 곧 `table.cell(r, c)` 다 — 단, 그리드는 **한 번만** 만든다.
+    #   예전엔 셀마다 `table.cell()` 을 불러 1,000행 표에서 셀 수의 제곱으로 돌았다(라이브 프로파일 DOCX 시간의 38.6%).
+    grid = _grid_cells(table)
     row_offset = 0
     if header_rows:
         for r_idx, row in enumerate(header_rows):
             if r_idx >= rows:
                 break
             for c_idx, val in enumerate(row[:cols]):
-                table.cell(r_idx, c_idx).text = val or ""
+                grid[c_idx + r_idx * cols].text = val or ""
         row_offset = min(len(header_rows), rows)
     if data_rows:
         max_rows = rows - row_offset
+        if len(data_rows) > max_rows:
+            # ⚠ 여기서 잘린 행은 **아무 데도 안 남는다**. 실측(표준 템플릿 v0.10):
+            #   호출부가 템플릿 행수를 넘기는 바람에 6개 표에서 1,144행이 사라졌고
+            #   `Software Unit Tables` 는 함수 57개 중 15개만 실렸는데, 경고가 없어
+            #   문서만 보면 "함수가 15개뿐인 프로젝트" 로 읽혔다. 호출부는 전부
+            #   데이터에 맞춰 잡도록 고쳤지만, 새 호출부가 다시 그러면 보이게 한다.
+            _logger.warning(
+                "표 행수 부족으로 데이터 %d행 중 %d행만 기록한다(-%d행) — "
+                "표 크기를 데이터에 맞춰 잡을 것",
+                len(data_rows), max(max_rows, 0), len(data_rows) - max(max_rows, 0),
+            )
         for r_idx, row in enumerate(data_rows[:max_rows]):
             for c_idx, val in enumerate(row[:cols]):
-                table.cell(row_offset + r_idx, c_idx).text = str(val) if val is not None else ""
-    for r_idx in range(row_offset, rows):
-        for c in table.rows[r_idx].cells:
-            if c.text is None:
-                c.text = ""
+                grid[c_idx + (row_offset + r_idx) * cols].text = str(val) if val is not None else ""
+    # (R47-j) 예전의 뒷정리 루프(`if c.text is None: c.text = ""`)는 지웠다 — `_Cell.text` 는 None 을 내지 않아 한 번도
+    #   쓰지 않는 루프였고, `table.rows[r]` 인덱싱이 행마다 전 행을 다시 만들어 비용만 냈다(XML 동일 — 가드가 대조한다).
     return table
+
+
+# 참조 SUDS 신원 판정용 — 문서 종류/일반 명사는 프로젝트 식별자가 아니다.
+# ⚠ 2026-08-07: 정의가 `report_gen/doc_kind.py` 로 **승격**됐다(SCM 연결 문서 신원 검사도
+#   같은 판정을 쓴다 — 사본을 두면 이 저장소 단골인 "한쪽만 수정"이 된다).
+#   아래 두 이름은 기존 참조를 위한 별칭일 뿐이다.
+from report_gen.doc_kind import (  # noqa: E402 — 별칭 바인딩 지점에 두어 출처를 명시
+    PROJECT_TOKEN_STOPWORDS,
+    project_tokens,
+)
+
+_REF_TOKEN_STOPWORDS = PROJECT_TOKEN_STOPWORDS
+# ISO 26262 등급 어휘. 참조 문서 파싱이 어긋나면 프로토타입 문자열 같은 게 ASIL 로 들어온다
+# — 실측: 참조 SUDS 416 블록 중 1건이 `asil='void s_Init_SystemManagementFunc( void )'`.
+_VALID_ASIL = frozenset({"A", "B", "C", "D", "QM"})
+
+
+# 토큰 추출도 doc_kind 단일 구현을 그대로 쓴다(별칭).
+_project_tokens = project_tokens
+
+
+def _reference_identity_verdict(uds_payload: Any, ref_path: Path) -> Dict[str, Any]:
+    """참조 SUDS 가 **이 프로젝트의** 문서인지 판정한다.
+
+    ⚠ 왜 필요한가 — 실측(2026-07-31):
+    `config.UDS_REF_SUDS_PATH` 의 기본값은 저장소 `docs/` 의 **HDPDM01 SUDS**(40.7MB)다.
+    그런데 생성 시 이 문서를 무조건 읽어 **함수명만으로** 매칭해 대상 프로젝트의 함수에
+    `asil`·`related`·`description`·`logic` 등을 덧씌웠다. 참조 문서는 416 블록 전부가
+    `asil` 을 갖고 있고(**A 280 / QM 135**), 다른 프로젝트에서 이름이 겹치기만 하면
+    그 등급이 들어간다. ASIL 하향은 ISO 26262 에서 가장 위험한 방향의 오류다.
+
+    같은 패턴을 이 저장소가 이미 두 번 고쳤다 — `backend/routers/local.py::_pick_doc_path`
+    ("지정 문서를 못 읽으면 저장소 docs/ 로 바꿔치기") 와 SUTS ASIL 이 HDPDM01 로 채워지던
+    건. 여기가 남은 사이트다.
+
+    Returns:
+        `same_project` — `True`(확인됨) / `False`(다름) / `None`(판정 불가).
+        판정 불가는 **확인됨이 아니다** — 안전 필드는 fail-closed 로 막는다.
+    """
+    ref_tokens = _project_tokens(ref_path.stem)
+    payload_tokens: Set[str] = set()
+    if isinstance(uds_payload, dict):
+        for key in ("project_name", "module_name"):
+            payload_tokens |= _project_tokens(uds_payload.get(key))
+        for p in (uds_payload.get("source_docs") or [])[:50]:
+            payload_tokens |= _project_tokens(Path(str(p)).stem)
+        summary = uds_payload.get("summary")
+        if isinstance(summary, dict):
+            payload_tokens |= _project_tokens(summary.get("project"))
+        # (R47-e 리뷰 W1) 부모가 레지스트리 항목 id 를 **전용 키**로 준다 — 표지 문자열과 분리된 신원 입력.
+        payload_tokens |= _project_tokens(uds_payload.get("reference_identity_hint"))
+
+    if not ref_tokens:
+        return {"same_project": None, "reason": "ref_no_token",
+                "ref_tokens": sorted(ref_tokens), "payload_tokens": sorted(payload_tokens)}
+    if not payload_tokens:
+        return {"same_project": None, "reason": "payload_no_token",
+                "ref_tokens": sorted(ref_tokens), "payload_tokens": sorted(payload_tokens)}
+    shared = ref_tokens & payload_tokens
+    return {
+        "same_project": bool(shared),
+        "reason": "token_match" if shared else "token_mismatch",
+        "ref_tokens": sorted(ref_tokens),
+        "payload_tokens": sorted(payload_tokens),
+        "shared_tokens": sorted(shared),
+    }
+
+
+def gen_stats_path(output_path: str) -> Path:
+    """생성 통계 sidecar 경로 — `<out>.gen_stats.json`.
+
+    ⚠ **파일로 남겨야 하는 이유**: 프로덕션 경로는 `backend/helpers/uds.py:1194` 의
+    exec 문자열을 **서브프로세스**로 돌리고 반환값을 버린다. 성공 판정도
+    `returncode == 0 and out_path.exists() and size > 0` 뿐이다. 그래서 in-process
+    `stats_out` 만으로는 호출자에게 아무것도 못 전달한다.
+    """
+    return Path(str(output_path) + ".gen_stats.json")
+
+
+def enriched_function_details_path(output_path: str) -> Path:
+    """빌더가 **참조 보강까지 끝낸** `function_details` 를 남기는 사이드카 — `<out>.docx.function_details.json`. (R47 N27)
+
+    ⚠ 왜 필요한가: 참조 SwUDS 보강(ASIL·Related·서술·구조 축)은 **이 서브프로세스 안의** `function_details`
+      에 일어나는데, 게이트가 읽는 `<out>.payload.json` 은 **부모 프로세스가 보강 전 객체**로 쓴다. 그래서 R47
+      라이브에서 문서는 ASIL 82.8% 인데 게이트는 23.8% 였다 — 게이트가 문서가 아니라 파서 출력을 재고 있었다.
+      부모는 이 파일을 payload 에 병합한 뒤 사이드카를 쓴다(`backend.helpers.uds.merge_enriched_function_details`).
+    """
+    return Path(str(output_path) + ".function_details.json")
+
+
+def _write_enriched_function_details(output_path: str, function_details: Dict[str, Any],
+                                     ref_stats: Dict[str, Any]) -> None:
+    """실패해도 문서 생성을 깨지 않는다 — 대신 부모가 "보강본 없음" 을 payload 에 적는다."""
+    try:
+        enriched_function_details_path(output_path).write_text(
+            json.dumps({
+                "source": "docx_builder",
+                "reference_suds": ref_stats,
+                "function_details": function_details,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:   # noqa: BLE001 - 사이드카 실패가 산출물을 막아선 안 된다
+        _logger.warning("보강 function_details 사이드카 기록 실패 %s: %s", output_path, e)
+
+
+_STAT_SAMPLE_CAP = 50
+
+
+def _safety_value_key(value: Any, field: str = "related") -> str:
+    """(R50 N38) ASIL·Related 값의 **비교 키** — 표기가 달라도 같은 값이면 같다.
+
+    정본이 이미 있던 값을 덮을 때 "같은 값(출처만 승격)" 과 "다른 값(충돌)" 을 가르는 데만 쓴다 — 결과값이 아니라
+    **충돌 계수**가 걸린 판정이라, 표기 변형을 충돌로 세면 "설계 문서와 정본이 어긋난 함수 N건" 이 거짓 주장이 된다.
+    - `asil`: `ASIL B`·`asil-b`·`B` 는 같다(리뷰 W5 — `cur` 는 SwDS 파싱 원문이라 접두어가 흔하다).
+    - `related`: 구분자·나열 순서·중복을 무시한 토큰 **집합**(`SwFn_25, SwCom_03` ≡ `SwCom_03 / SwFn_25`).
+    """
+    raw = str(value or "").strip().upper()
+    if field == "asil":
+        return re.sub(r"[^A-Z0-9]", "", re.sub(r"^\s*ASIL[\s_-]*", "", raw))
+    toks = {t for t in re.split(r"[\s,;/]+", raw) if t}
+    return ",".join(sorted(toks))
+
+
+_REF_AXES = ("asil", "related", "description", "precondition", "logic",
+             "inputs", "outputs", "globals_static", "globals_global", "called", "calling")
+_REF_NO_OPINION = frozenset({"", "TBD", "NA", "N/A", "-", "NONE"})
+
+
+def _reference_opinion(value: Any, axis: str) -> str:
+    """정본 블록 한 축의 **의견** 정규화 키 — 자리표시자(빈칸·TBD·N/A·-)는 의견 없음(`""`). (R51 리뷰 W2)
+
+    같은 이름 블록끼리 "다른 값을 말하는가" 를 잴 때, 적용 경로가 버리는 값(`asil` 은 `_VALID_ASIL` 밖, 빈칸류)을
+    판정 경로만 "의견" 으로 세면 사본 절의 `TBD` 가 유효한 등급을 막고 검토자에게 "정본을 고쳐라" 까지 올린다.
+    """
+    whole = " ".join(str(value or "").split()).upper() if not isinstance(value, (list, tuple)) else None
+    if whole is not None and whole in _REF_NO_OPINION:
+        return ""      # `N/A` 는 토큰으로 쪼개면 `A`·`N` 이 된다 — 통째로 먼저 본다
+    if axis == "asil":
+        k = _safety_value_key(value, "asil")
+        return k if k in _VALID_ASIL else ""
+    if axis == "related":
+        toks = [t for t in _safety_value_key(value, "related").split(",") if t and t not in _REF_NO_OPINION]
+        return ",".join(toks)
+    if isinstance(value, (list, tuple)):
+        return "\n".join(" ".join(str(v).split()) for v in value if str(v).strip())
+    return " ".join(str(value or "").split())
+
+
+def _sibling_axis_conflicts(siblings: List[str], ref_map: Dict[str, Any]) -> Set[str]:
+    """같은 이름 정본 블록들이 서로 **다른 의견**을 내는 축. (R51 리뷰 W3 — 갈린 축만 막고 같은 축은 싣는다)"""
+    out: Set[str] = set()
+    for axis in _REF_AXES:
+        opinions = {_reference_opinion((ref_map.get(s) or {}).get(axis), axis) for s in siblings} - {""}
+        if len(opinions) > 1:
+            out.add(axis)
+    return out
+
+
+def _resolve_reference_target(
+    fid: str,
+    block: Any,
+    function_details: Dict[str, Any],
+    function_details_by_name: Any,
+    ref_blocks_by_name: Dict[str, List[str]],
+    ref_map: Dict[str, Any],
+    stats: Dict[str, Any],
+    seen_names: Set[str],
+    candidates_by_name: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    consumed: Optional[Set[int]] = None,
+    twin_pairing: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Set[str]]:
+    """정본 SwUDS 블록 하나가 payload 의 어느 함수인가 — **이름**으로 찾는다. (R51 N40)
+
+    (R57 N54) 같은 이름의 정의가 둘 이상(`candidates_by_name`)이면 이 블록의 정의를 고른다(`stats["twin_definition_blocks"]`).
+    `twin_pairing`(이름 → {정본 ID: 정의})이 오면 같은 이름의 블록 전부를 `_pair_twin_blocks` 로 **한 번에** 짝지어 거기 두고
+    heading 채움도 같은 표를 본다. 짝이 실제로 서로 다른 정의에 1:1 로 붙었을 때만(`_twin_pairing_is_split`) 그 블록들은 한 함수에
+    대한 두 의견이 아니라 **다른 함수**이므로 축 충돌(`blocked_axes`)을 보지 않는다 — 짝 표 없이 `consumed` 만 오면 distinct 를
+    알 수 없으므로 종전대로(보수적으로) 충돌을 본다.
+
+    ⚠ 왜 ID 가 아닌가: 생성 ID(`SwUFn_{모듈}{일련}`)는 소스 스캔 순서로 붙고, 정본 ID 는 그 문서의 것이다. 두 번호는
+      서로 무관하다. 실측(kjpds02_pv 정본 v3.03 × run 2080, 2026-09-15): 옛 "ID 먼저, 없으면 이름" 규칙으로 ID 가
+      맞은 819 블록 중 **773 이 이름이 다른 함수**였다(정본 SwUFn_0101 = main, 생성본 SwUFn_0101 = ADC_MONITOR_Enable).
+      그 엉뚱한 블록의 ASIL 763 · Related 762 · precondition 729 · inputs 368 · outputs 372 · called 339 건이
+      다른 함수에 실려 있었다(Initial commit 이래). "정본 자기 충돌 77건" 은 뒤에 온 **올바른(이름) 블록**이 막힌 수였다.
+      ID 는 판정에 쓰지 않는다 — 우연히 같은 번호를 안전값 충돌의 결정 근거로 삼는 것은 같은 오류다(리뷰 W1). 이름과
+      ID 가 함께 맞은 건수(`by_name_and_id`)는 계수로만 남긴다.
+
+    같은 이름 블록이 여럿이면(정본이 한 함수를 두 절에 실은 경우) **축별**로 본다: 서로 같은 의견인 축은 싣고, 갈린 축만
+    막는다(`blocked_axes`). ASIL·Related 가 갈리면 `ambiguous_names` + 표본으로 공시 — 첫 블록을 고르면 침묵 판정이다
+    (ASIL 지어내기 금지와 같은 축). 자리표시자(TBD·N/A)는 의견이 아니다(`_reference_opinion`).
+
+    반환: `(대상 함수 dict 또는 None, 막힌 축 집합)`. None 이면 사유는 `stats` 계수에 남는다.
+    """
+    raw_name = str((block or {}).get("name") or "")
+    name = _normalize_symbol_name(raw_name).lower()
+    if not name:
+        stats["unnamed_blocks"] += 1
+        return None, set()
+    target = None
+    if isinstance(function_details_by_name, dict):
+        target = function_details_by_name.get(name)
+        if not isinstance(target, dict):
+            target = function_details_by_name.get(raw_name.strip().lower())
+    if not isinstance(target, dict):
+        stats["unmatched_blocks"] += 1
+        return None, set()
+    _cands = (candidates_by_name or {}).get(name) or []
+    _twin_split = False
+    if len(_cands) > 1:
+        _pm: Optional[Dict[str, Dict[str, Any]]] = None
+        if twin_pairing is not None:
+            _pm = twin_pairing.get(name)
+            if _pm is None:
+                _pm = _pair_twin_blocks(ref_blocks_by_name.get(name) or [fid], ref_map, _cands)
+                twin_pairing[name] = _pm
+        if _pm is not None and fid in _pm:
+            target = _pm[fid]
+        else:
+            target = _pick_function_candidate(_cands, block, consumed)
+        stats["twin_definition_blocks"] = int(stats.get("twin_definition_blocks", 0)) + 1
+        _twin_split = _twin_pairing_is_split(_pm)
+    _by_id = function_details.get(fid) if isinstance(function_details, dict) else None
+    if isinstance(_by_id, dict) and _by_id is not target \
+            and _normalize_symbol_name(str(_by_id.get("name") or "")).lower() != name:
+        # 정본 ID 가 payload 의 **다른** 함수를 가리킨다 — 옛 ID 우선 매칭이 오염을 만들던 바로 그 경우.
+        stats["id_collision_blocks"] += 1
+    tid = str(target.get("id") or "")
+    blocked: Set[str] = set()
+    siblings = ref_blocks_by_name.get(name) or [fid]
+    if len(siblings) > 1 and not _twin_split:
+        blocked = _sibling_axis_conflicts(siblings, ref_map)
+        if blocked and name not in seen_names:
+            seen_names.add(name)
+            _bx = stats["blocked_axes"]
+            for _ax in blocked:
+                _bx[_ax] = int(_bx.get(_ax, 0)) + 1
+            if blocked & {"asil", "related"}:
+                stats["ambiguous_names"] += 1
+                if len(stats["ambiguous_sample"]) < _STAT_SAMPLE_CAP:
+                    stats["ambiguous_sample"].append({
+                        "name": str(target.get("name") or raw_name), "id": tid, "conflicting": sorted(blocked),
+                        "blocks": [{"id": s, "asil": str((ref_map.get(s) or {}).get("asil") or ""),
+                                    "related": str((ref_map.get(s) or {}).get("related") or "")[:80]} for s in siblings],
+                    })
+    if fid == tid:
+        stats["by_name_and_id"] += 1
+    else:
+        stats["by_name"] += 1
+    return target, blocked
+
+
+
+def _write_gen_stats(output_path: str, stats: Dict[str, Any]) -> None:
+    """생성 통계를 sidecar 로 남긴다. 실패해도 문서 생성을 깨지 않는다."""
+    try:
+        gen_stats_path(output_path).write_text(
+            json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+    except Exception as e:   # noqa: BLE001 - 통계 기록 실패가 산출물을 막아선 안 된다
+        _logger.warning("생성 통계 sidecar 기록 실패(%s) — 문서 자체는 정상", e)
+
+
+def rejoin_function_maps(
+    function_details: Any,
+    function_details_by_name: Any,
+) -> int:
+    """`function_details_by_name` 값을 `function_details` 값과 **같은 객체로** 되돌린다.
+
+    ## 왜 필요한가
+
+    payload 는 두 맵을 **둘 다** 싣는다(`jenkins.py:2529` · `local.py:967`·`:1457` ·
+    `backend/helpers/uds.py:1711` — 4개 빌더 전부). 라우터 시점에는 같은 dict 를 가리키지만,
+    docx 생성은 `_run_docx_in_subprocess`(`backend/helpers/uds.py:1277`)가 payload 를
+    **JSON 파일로 써서 서브프로세스에 넘기므로** 역직렬화 시점에 갈라진다.
+
+    갈라진 뒤가 문제다. 해석 루프(주석-ASIL 승격 · SDS 주입 · `req_map` · 모듈 ASIL 상속)는
+    `function_details` **전용**인데 렌더러 `_resolve_function_info` 는
+    `function_details_by_name` 을 **먼저** 조회한다(키는 양쪽 다 소문자라 적중한다).
+    즉 렌더러가 **enrich 되지 않은 사본**을 그린다 — 예외도 경고도 없다.
+
+    ## 규칙
+
+    - 이름(소문자)으로 이어 붙인다. 이후 모든 변경이 두 맵에 동시에 보인다.
+    - `by_name` 에만 있는 항목(orphan)은 **버리지 않는다** — 지우면 렌더러가 찾던 함수가
+      사라져 결함을 반대 방향으로 만든다.
+    - 사본에만 있던 값은 잃지 않는다. 정본이 **비어 있는** 키만 옮긴다(덮어쓰지 않는다).
+
+    Returns:
+        재결합한 항목 수(0 이면 원래 같은 객체였다는 뜻 — 로컬 동기 경로 등).
+    """
+    if not isinstance(function_details, dict) or not isinstance(function_details_by_name, dict):
+        return 0
+    canonical: Dict[str, Dict[str, Any]] = {}
+    for info in function_details.values():
+        if isinstance(info, dict):
+            nm = function_name_key(info.get("name"))
+            if nm:
+                canonical.setdefault(nm, info)
+    rejoined = 0
+    for nm, cur in list(function_details_by_name.items()):
+        tgt = canonical.get(function_name_key(nm))
+        if tgt is None or tgt is cur:
+            continue
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if v not in (None, "", [], {}) and tgt.get(k) in (None, "", [], {}):
+                    tgt[k] = v
+        function_details_by_name[nm] = tgt
+        rejoined += 1
+    return rejoined
+
+
+# ── 같은 이름의 정의가 둘 이상일 때(APP/FBL 쌍둥이) 어느 정의인가 ──────────────────────
+#
+# (R57 N54) 정본 KJPDS02 는 main·WriteBlock·EEPROM_SetByte … 9개 함수를 APP 절(SwCom_21 EEPROM 등)과
+# Bootloader 절(SwCom_35)에 **따로** 싣고 내용도 다르다. 분석이 두 정의를 다 넘겨도 이름 키 하나로 고르면
+# 두 표가 같은 내용이 된다. 그래서 heading 하나가 어느 정의인지는 **정본 블록의 피호출자와 겹치는 정도**로
+# 고르고, 겹침이 같으면(피호출자가 둘 다 없는 BackupSector 같은 경우) **아직 안 쓴 정의**를 문서 순서대로 준다.
+# heading 채움(`_resolve_function_info`)과 정본 병합(`_resolve_reference_target`)이 같은 함수를 쓰므로 두 경로가
+# 같은 정의를 고른다 — 갈리면 정본 ASIL 이 APP 표에, 피호출자가 FBL 표에 실리는 식으로 엇갈린다.
+UNMATCHED_HEADING_NOTE = "분석 대상 소스에서 이 함수의 정의를 찾지 못했다 — 템플릿(정본) heading 만 있어 내용을 만들지 않았다."
+
+
+def _candidates_by_name(function_details: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """이름(정규화·소문자) → 그 이름의 정의 목록(payload 순서). 하나뿐인 이름도 담는다(호출자는 `len > 1` 로 가른다)."""
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    if not isinstance(function_details, dict):
+        return out
+    for info in function_details.values():
+        if not isinstance(info, dict):
+            continue
+        nm = _normalize_symbol_name(str(info.get("name") or "")).lower()
+        if nm:
+            out.setdefault(nm, []).append(info)
+    return out
+
+
+def _candidate_callees(info: Dict[str, Any]) -> Set[str]:
+    vals = info.get("calls_list")
+    if not isinstance(vals, list):
+        vals = _extract_call_names(str(info.get("called") or ""))
+    return {str(v).strip().lower() for v in vals if str(v).strip() and str(v).strip().upper() != "N/A"}
+
+
+def _prototype_key(text: Any) -> str:
+    """프로토타입 동일성 비교 키 — 주석 제거·공백 전부 제거·소문자(정본은 `( byte sector )` 처럼 괄호 안에 공백을 둔다)."""
+    return re.sub(r"\s+", "", normalize_prototype_text(str(text or ""))).lower()
+
+
+def _pick_function_candidate(
+    candidates: List[Dict[str, Any]],
+    ref_block: Optional[Dict[str, Any]],
+    consumed: Optional[Set[int]] = None,
+) -> Dict[str, Any]:
+    """같은 이름의 정의들 중 이 heading/블록의 것을 고른다. 판정 순서: 정본 블록 피호출자 겹침(많을수록) →
+    프로토타입 일치 → 아직 안 쓴 정의 → payload 순서. `consumed` 에 고른 정의의 `id()` 를 기록한다."""
+    if not candidates:
+        raise ValueError("no candidates")
+    ref_callees: Set[str] = set()
+    ref_proto = ""
+    if isinstance(ref_block, dict):
+        ref_callees = {n.lower() for n in _extract_call_names(str(ref_block.get("called") or "")) if n.upper() != "N/A"}
+        ref_proto = _prototype_key(ref_block.get("prototype"))
+    best = candidates[0]
+    best_key = None
+    for idx, cand in enumerate(candidates):
+        overlap = len(ref_callees & _candidate_callees(cand)) if ref_callees else 0
+        proto_hit = 1 if (ref_proto and _prototype_key(cand.get("prototype")) == ref_proto) else 0
+        fresh = 0 if (consumed is not None and id(cand) in consumed) else 1
+        key = (overlap, proto_hit, fresh, -idx)
+        if best_key is None or key > best_key:
+            best, best_key = cand, key
+    if consumed is not None:
+        consumed.add(id(best))
+    return best
+
+
+def _pair_twin_blocks(
+    siblings: List[str],
+    ref_map: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """같은 이름의 정본 블록들(`siblings`, 문서 순서) ↔ 같은 이름의 정의들 — **한 번** 짝지어 `{정본 ID: 정의}` 로 돌려준다.
+
+    (R57 리뷰 W2/W3) 정본 병합과 heading 채움이 각자 고르면 피호출자 겹침이 없는 tie(BackupSector)에서 두 경로의 문서 순서가
+    다를 때 서로 다른 정의를 고를 수 있다 — 정본 ASIL 은 APP 표에, 피호출자는 FBL 표에. 그래서 짝은 여기서 한 번만 만들고
+    두 경로가 같은 표를 본다. 블록은 `ref_blocks_by_name` 에서 온 것이라 이름이 같음이 보장된다(리뷰 W1 — 정본 ID 만 같은
+    남의 함수 블록은 여기 못 들어온다).
+    """
+    consumed: Set[int] = set()
+    out: Dict[str, Dict[str, Any]] = {}
+    for fid in siblings:
+        blk = ref_map.get(fid)
+        out[fid] = _pick_function_candidate(candidates, blk if isinstance(blk, dict) else None, consumed)
+    return out
+
+
+def _twin_pairing_is_split(pairing: Optional[Dict[str, Dict[str, Any]]]) -> bool:
+    """짝이 **실제로** 서로 다른 정의에 1:1 로 붙었는가(리뷰 W3 — 개수 비교가 아니라 고른 대상의 distinct 로 판정)."""
+    if not pairing or len(pairing) < 2:
+        return False
+    return len({id(t) for t in pairing.values()}) == len(pairing)
+
+
+def _analysis_display_name(nm: Any, function_details_by_name: Any) -> str:
+    """호출 관계 맵의 이름은 소문자 정규화돼 있다 — 분석(`function_details_by_name`)의 원래 표기로 되돌린다. (R56 N52)
+    예전엔 칸에 프로토타입을 실으며 표기가 돌아왔는데, 이름만 싣게 되면서 소문자가 그대로 나갈 뻔했다."""
+    key = str(nm or "").strip()
+    _ci = function_details_by_name.get(key.lower()) if isinstance(function_details_by_name, dict) else None
+    return str(_ci.get("name") or key).strip() if isinstance(_ci, dict) else key
 
 
 def generate_uds_docx(
@@ -1614,7 +2686,24 @@ def generate_uds_docx(
     uds_payload: Dict[str, Any],
     output_path: str,
     ai_config: Optional[Dict[str, Any]] = None,
+    *,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """UDS DOCX 생성.
+
+    Args:
+        stats_out: 주면 생성 통계를 넣는다(additive). **같은 내용이 항상
+            `<output_path>.gen_stats.json` 으로도 기록된다** — 프로덕션은 서브프로세스라
+            반환값·in-process dict 가 호출자에게 닿지 않는다(`gen_stats_path` 참조).
+
+    ⚠ 이 라이터는 **템플릿 주도**다: SwUFn 표는 템플릿의 heading 을 순회하며 payload 함수를
+    찾아 채운다. 따라서 **템플릿에 heading 이 없는 payload 함수는 문서에 안 들어가고**,
+    payload 에 없는 heading 은 빈 껍데기로 남는다. 둘 다 예전엔 **어디에도 보고되지 않았다.**
+
+    실측(HDPDM01 실 템플릿 + 실 payload): payload 함수 432개 중 템플릿과 겹치는 337개만
+    반영되고 **95개(22.0%)가 미반영**, 빈 heading **74개**. 그런데 프로덕션 성공 판정은
+    "파일이 있고 0바이트가 아님" 뿐이라 이 상태가 `status: "success"` 로 기록됐다.
+    """
     try:
         import docx  # type: ignore
     except Exception as exc:
@@ -1660,8 +2749,11 @@ def generate_uds_docx(
     notes = _apply_uds_rules(notes_text, "notes")
     software_unit_design = payload.get("software_unit_design", "") or ""
     detailed_doc = _ai_document_text(ai_sections)
-    unit_structure = payload.get("unit_structure", "") or ""
-    global_data = payload.get("global_data", "") or ""
+    # NOTE: payload["unit_structure"] / payload["global_data"] (파서가 만드는 **텍스트**)는
+    # 여기서 의도적으로 쓰지 않는다 — 두 섹션은 텍스트가 아니라 구조화 데이터로 렌더된다:
+    #   "unit structure" → _render_unit_structure_image(interface/internal functions) 다이어그램
+    #   "global data"    → payload["global_vars"] 5열 테이블 (위 KEY_MOD_GLOBALS 주석 참조)
+    # 그래서 아래 섹션 분기가 `pass` 다. 텍스트를 다시 배선하면 같은 내용이 중복 출력된다.
     interface_functions = payload.get("interface_functions", "") or ""
     internal_functions = payload.get("internal_functions", "") or ""
     function_table_rows = payload.get("function_table_rows", []) or []
@@ -1672,6 +2764,10 @@ def generate_uds_docx(
     generation_warnings: List[str] = []
     function_details = payload.get("function_details", {}) or {}
     function_details_by_name = payload.get("function_details_by_name", {}) or {}
+    # 소스루트 폴백이 파싱해 온 call_map 을 담아 둔다. 실제 call_map 확정은 아래
+    # payload 우선 순서에서 한 번만 한다 (폴백 블록이 call_map 을 직접 건드리면
+    # 아직 바인딩 전이라 UnboundLocalError 였고, 설령 됐어도 뒤에서 덮어썼다).
+    _fallback_call_map: Dict[str, Any] = {}
     if (not function_details_by_name) and isinstance(function_details, dict):
         rebuilt: Dict[str, Dict[str, Any]] = {}
         for info in function_details.values():
@@ -1691,8 +2787,7 @@ def generate_uds_docx(
                 if fb_details:
                     function_details_by_name = fb_details
                     function_details = fallback_src.get("function_details", {})
-                    if not call_map:
-                        call_map = fallback_src.get("call_map", {}) or {}
+                    _fallback_call_map = fallback_src.get("call_map", {}) or {}
                     generation_warnings.append(f"Source root fallback used: {source_root}, found {len(fb_details)} functions")
             except Exception as e:
                 generation_warnings.append(f"Source root fallback failed: {e}")
@@ -1725,7 +2820,16 @@ def generate_uds_docx(
             }
         if rebuilt:
             function_details_by_name = rebuilt
-    call_map = payload.get("call_map", {}) or {}
+
+    _rejoined = rejoin_function_maps(function_details, function_details_by_name)
+    if _rejoined:
+        generation_warnings.append(
+            f"function_details_by_name {_rejoined}건을 function_details 와 재결합했다"
+            " (JSON 왕복으로 갈라진 사본 — 해석 루프 결과가 렌더러에 반영되지 않던 경로)"
+        )
+
+    # payload 우선, 없으면 소스루트 폴백이 파싱한 것 사용.
+    call_map = payload.get("call_map", {}) or _fallback_call_map or {}
     if isinstance(call_map, dict) and call_map:
         normalized_call_map: Dict[str, List[str]] = {}
         for k, vals in call_map.items():
@@ -1773,6 +2877,9 @@ def generate_uds_docx(
         call_relation_mode = "code"
     module_map = payload.get("module_map", {}) or {}
     globals_info_map = payload.get("globals_info_map", {}) or {}
+    # 구조체/공용체 멤버의 타입·비트폭·자기 주석. 없으면 멤버 경로 행은 N/A 로 남는다
+    # (베이스의 값을 물려주지 않는다 — `function_analyzer._member_grid_info`).
+    struct_member_types = payload.get("struct_member_types", {}) or {}
     globals_format_order = payload.get("globals_format_order") or GLOBALS_FORMAT_ORDER
     globals_format_sep = payload.get("globals_format_sep") or GLOBALS_FORMAT_SEP
     globals_format_with_labels = payload.get("globals_format_with_labels", GLOBALS_FORMAT_WITH_LABELS)
@@ -1788,17 +2895,10 @@ def generate_uds_docx(
     sds_doc_paths = payload.get("sds_doc_paths") or []
     for sds_path in sds_doc_paths:
         try:
-            docx_map = _extract_sds_partition_map(sds_path)
-            if docx_map:
-                for k, v in docx_map.items():
-                    if k not in sds_partition_map:
-                        sds_partition_map[k] = v
-                    else:
-                        for field in ("asil", "related", "description"):
-                            if v.get(field) and not sds_partition_map[k].get(field):
-                                sds_partition_map[k][field] = v[field]
-        except Exception:
-            pass
+            # (R52 리뷰 W3) 손복제 루프 → 단일 출처. 옛 루프는 새 키를 **별칭**으로 넣었다(입력 맵을 건드리면 같이 바뀜) — 헬퍼는 사본.
+            _merge_sds_partition_map(sds_partition_map, _extract_sds_partition_map(sds_path))
+        except Exception as exc:  # noqa: BLE001 — docx 파서 예외가 광범위. 사유는 로그로(옛 판은 침묵)
+            _logger.warning("SwDS 파티션 맵 추출 실패 %s: %s", Path(str(sds_path)).name, type(exc).__name__)
     _sds_name_labels = {"partition name", "component name", "module name", "name"}
     _sds_asil_labels = {"asil"}
     _sds_desc_labels = {"description", "desc"}
@@ -1868,19 +2968,32 @@ def generate_uds_docx(
                 if not info.get("related"):
                     info["related"] = req.get("related") or ""
 
+    # (R50 리뷰 C1) 모듈 상속의 **씨앗 우선순위** — 예전엔 dict 순서상 첫 non-TBD 값이 씨앗이라, SwDS 가 먼저 채운 QM 이
+    #   정본 A 를 가진 형제보다 앞에 오면 모듈 전체가 QM 을 물려받았다(run 2079: module_inherit 1→672). 정본 채움 규칙과
+    #   같은 순서로 씨앗을 고른다: 소스 주석 > 정본 > 설계·요구 문서 > 나머지. 같은 등급 안에서는 첫 함수.
+    # (R68) `override`(저장소 역추출 스냅샷) 는 `inference` 와 같은 급(3) — 명시해 둔다. 미등록 기본값 3 과 같지만 의도를 코드로 남긴다.
+    _SEED_RANK = {"comment": 0, "reference": 1, "uds": 1, "sds": 2, "srs": 2, "override": 3}
+
     def _inherit_module_asil(
         func_details: Dict[str, Any],
         module_map: Dict[str, str],
-    ) -> None:
-        module_asil: Dict[str, str] = {}
+    ) -> Dict[str, int]:
+        """빈칸(""/TBD) 함수에 같은 모듈의 씨앗 ASIL 을 물려준다. 반환 = 씨앗 출처별 상속 건수(gen_stats 공시용)."""
+        module_seed: Dict[str, tuple] = {}     # mod -> (rank, asil, seed_source)
         for fid, finfo in func_details.items():
             if not isinstance(finfo, dict):
                 continue
             asil = str(finfo.get("asil") or "").strip()
             if asil and asil not in {"TBD", ""}:
                 mod = module_map.get(fid, "")
-                if mod and mod not in module_asil:
-                    module_asil[mod] = asil
+                if not mod:
+                    continue
+                src = canonical_source(finfo.get("asil_source"))
+                rank = _SEED_RANK.get(src, 3)
+                cur = module_seed.get(mod)
+                if cur is None or rank < cur[0]:
+                    module_seed[mod] = (rank, asil, src)
+        by_seed: Dict[str, int] = {}
         for fid, finfo in func_details.items():
             if not isinstance(finfo, dict):
                 continue
@@ -1888,44 +3001,62 @@ def generate_uds_docx(
             if asil and asil not in {"TBD", ""}:
                 continue
             mod = module_map.get(fid, "")
-            inherited = module_asil.get(mod, "")
-            if inherited:
-                finfo["asil"] = inherited
+            seed = module_seed.get(mod)
+            if seed:
+                finfo["asil"] = seed[1]
                 finfo["asil_source"] = "module_inherit"
-            else:
-                finfo["asil"] = "QM"
-                finfo["asil_source"] = "default"
+                by_seed[seed[2]] = by_seed.get(seed[2], 0) + 1
+            # ⚠ 예전엔 여기 `else: asil="QM"; asil_source="default"` 가 있었다. 지웠다.
+            #   모듈 상속조차 못 찾았다는 건 **아무 근거도 없다**는 뜻이다. 그 상태를
+            #   `QM`(안전 관련 아님)으로 적으면 근거의 부재가 등급 주장으로 둔갑한다.
+            #   값을 지어내지 않는다 — 없으면 없는 대로, `TBD` 면 `TBD` 로 둔다.
+            #   ⚠ 이 else 를 되살리면 상류(`requirements.py`)에서 같은 이유로 지운
+            #   지어내기가 **여기서 다시 채워져** 상류 수정이 통째로 no-op 이 된다.
+            #   네 사이트(`requirements.py`·여기·`function_analyzer.py`·`helpers/uds.py`)는
+            #   한 세트다.
+        return by_seed
 
     def _resolve_related_asil_desc(
         info: Dict[str, Any],
         sds_info: Optional[Dict[str, str]],
     ) -> None:
+        # ⚠ 예전엔 세 축 모두 무조건 `"inference"` 였다. 실측(2026-07-31): 사람이 쓴 설명,
+        #   실제 등급 `C`, 실제 `SwFn_07` 을 넣고 생성했더니 **셋 다 `inference`** 로 찍혔다
+        #   — 아무것도 추론하지 않았는데 보고서 표에는 "추론" 이라고 나오고 점수는 0.60 이다.
+        #   생산자(`report_gen/function_analyzer.py`)는 **자기가 한 행위에 묶어서** 라벨한다
+        #   (합성했을 때만 `inference`, QM 을 채웠을 때만 `default`). 여기도 그 규약을 따른다.
+        _d = str(info.get("description") or "")
+        info.setdefault("description_source", "")
         if not str(info.get("description_source") or "").strip():
-            info["description_source"] = "inference"
+            info["description_source"] = unrecorded_source(
+                _d, generic=bool(_d) and _is_generic_description(_d))
         if not str(info.get("asil_source") or "").strip():
-            info["asil_source"] = "inference"
+            info["asil_source"] = unrecorded_source(info.get("asil"))
         if not str(info.get("related_source") or "").strip():
-            info["related_source"] = "inference"
-        _weak_sources = {"", "inference", "default", "module_inherit"}
+            info["related_source"] = unrecorded_source(info.get("related"))
+        # `unknown` 도 약한 출처다 — 빠뜨리면 뒤따르는 주석·SDS·SRS 근거가 덮어쓰지 못해
+        # "출처를 모른다" 가 "출처가 확정됐다" 처럼 굳는다(업그레이드 경로 차단).
+        # 약한 출처 판정은 `report_gen/provenance.py` 단일 출처를 쓴다 —
+        # 집합 리터럴을 여기 다시 적으면 새 라벨이 생길 때 한쪽만 갱신된다.
         c_asil = str(info.get("comment_asil") or "").strip()
         c_rel = str(info.get("comment_related") or "").strip()
         cur_asil_src = str(info.get("asil_source") or "").strip()
         cur_rel_src = str(info.get("related_source") or "").strip()
-        if c_asil and cur_asil_src in _weak_sources:
+        if c_asil and is_weak_source(cur_asil_src):
             info["asil"] = c_asil
             info["asil_source"] = "comment"
-        if c_rel and cur_rel_src in _weak_sources:
+        if c_rel and is_weak_source(cur_rel_src):
             info["related"] = c_rel
             info["related_source"] = "comment"
         if sds_info:
             cur_asil_src = str(info.get("asil_source") or "").strip()
-            if cur_asil_src in _weak_sources:
+            if is_weak_source(cur_asil_src):
                 sds_asil = sds_info.get("asil")
                 if sds_asil:
                     info["asil"] = sds_asil
                     info["asil_source"] = "sds"
             cur_rel_src = str(info.get("related_source") or "").strip()
-            if cur_rel_src in _weak_sources:
+            if is_weak_source(cur_rel_src):
                 sds_related = sds_info.get("related")
                 if sds_related:
                     info["related"] = sds_related
@@ -1974,14 +3105,24 @@ def generate_uds_docx(
                         seen_sw.append(sid_norm)
                 info["related"] = ", ".join(seen_sw)
                 info["related_source"] = "inference"
+        # 값을 **비우면서** 출처를 "추론" 이라고 적으면, 아무것도 없는 칸이 근거 0.60 을
+        # 받는다. 근거가 없어서 비운 것이므로 `default`(근거 없음, 0.30)가 사실이다.
+        # ⚠ 예전엔 여기서 `info["asil"] = ""` 로 **TBD 를 지웠다**. 값 대입을 뺐다.
+        #   "미정"(TBD)과 "아예 없음"(빈칸)은 다른 상태다. 게다가 이 blanking 은
+        #   같은 함수 끝(`:2505`)의 `UDS TBD residual` 경고가 세는 바로 그 값을
+        #   **세기 전에 지워서**, `asil_tbd` 가 구조적으로 항상 0 이었다 —
+        #   경고가 발화할 수 없는 잔량 카운터였다.
+        #   출처 라벨은 유지한다: 값이 없으면 근거도 없으므로 `default`(0.30, 최약체)가
+        #   사실이다(`inference` 0.60 을 주면 빈 칸이 추론 대접을 받는다).
         if (not info.get("asil")) or str(info.get("asil")).strip() in {"", "TBD"}:
-            info["asil"] = ""
-            info["asil_source"] = "inference"
+            info["asil"] = str(info.get("asil") or "").strip()
+            info["asil_source"] = "default"
         if (not info.get("related")) or str(info.get("related")).strip() in {"", "TBD"}:
             info["related"] = ""
-            info["related_source"] = "inference"
+            info["related_source"] = "default"
 
-    _inherit_module_asil(function_details, fn_module_map)
+    # (R50 리뷰 C1) 모듈 상속 호출은 정본 채움 **뒤**로 옮겼다(아래 참조 블록 끝) — 여기 두면 SwDS 값이 씨앗이 되어 정본이
+    #   못 닿는 형제 함수에 굳는다.
 
     for info in list(function_details.values()):
         if not isinstance(info, dict):
@@ -2048,29 +3189,67 @@ def generate_uds_docx(
         info["description"] = desc
 
     # ── RAG 기반 Description 보강 (inference인 함수에 대해 유사 함수 설명 참조) ──
+    # 기본 off: 이 보강은 ASIL 문서(UDS)의 함수 설명 출력을 바꾸므로, opt-in
+    # (UDS_RAG_DESC_ENRICH=1)일 때만 동작한다. 과거 존재하지 않는 KB load 메서드 호출로
+    # AttributeError 가 나며 영구 dead 였다 — KnowledgeBase.__init__ 이 _load_all 로 로드한다.
     _rag_desc_applied = 0
     try:
-        from workflow.rag import KnowledgeBase
-        _kb_dir = Path(os.environ.get("KB_STORE_DIR", "")) if os.environ.get("KB_STORE_DIR") else Path("kb_store")
-        if _kb_dir.exists():
-            _kb = KnowledgeBase(_kb_dir)
-            _kb.load()
+        import config as _cfg
+        _rag_enrich_on = bool(getattr(_cfg, "UDS_RAG_DESC_ENRICH", False))
+        # 절대경로화(CWD 의존 제거, #14) + KB_GLOBAL_DIR 설정 시 get_kb 프로세스 캐시 재사용.
+        _kb_store_env = str(os.environ.get("KB_STORE_DIR") or "").strip()
+        _kb_global = str(getattr(_cfg, "KB_GLOBAL_DIR", "") or "").strip()
+        if _kb_store_env:
+            _kb_dir, _use_cache = Path(_kb_store_env).expanduser().resolve(), False
+        elif _kb_global:
+            _kb_dir, _use_cache = Path(_kb_global).expanduser().resolve(), True
+        else:
+            _kb_dir, _use_cache = Path("kb_store").expanduser().resolve(), False
+        if _rag_enrich_on and _kb_dir.exists():
+            if _use_cache:
+                from workflow.rag import get_kb
+                # 주(W2): KB_GLOBAL_DIR 설정 시 get_kb 는 인자를 무시하고 KB_GLOBAL_DIR 을
+                # re-resolve(_kb_resolve_base_dir)하므로 같은 캐시 키로 프로세스 캐시 인스턴스를
+                # 재사용한다(_kb_dir == KB_GLOBAL_DIR resolved 라 일치). 문서 간 _load_all 1회.
+                _kb = get_kb(_kb_dir)
+            else:
+                from workflow.rag import KnowledgeBase
+                _kb = KnowledgeBase(_kb_dir)
+            # N× 비용 상한: inference 함수 cap(기본 300) + 동일 query search 메모이즈.
+            _enrich_max = int(getattr(_cfg, "UDS_RAG_ENRICH_MAX_FUNCS", 300) or 300)
+            _search_memo = {}
+            _scanned = 0
             if _kb.data:
                 for fid, info in function_details.items():
                     if not isinstance(info, dict):
                         continue
-                    if str(info.get("description_source") or "").strip() != "inference":
+                    # 약한 출처면 RAG 로 보강한다(예전엔 `!= "inference"` 라 `unknown`·
+                    # `default` 인 함수가 보강 대상에서 통째로 빠졌다).
+                    if not is_weak_source(info.get("description_source")):
                         continue
+                    if _scanned >= _enrich_max:
+                        _logger.info("RAG enrich cap reached (%d funcs) — 나머지 skip", _enrich_max)
+                        break
                     fname = str(info.get("name") or "").strip()
                     proto = str(info.get("prototype") or "").strip()
                     query = f"{fname} {proto}".strip()
                     if not query:
                         continue
-                    results = _kb.search(query, top_k=3, tags=["uds_description", "code"])
-                    if not results:
-                        results = _kb.search(query, top_k=3)
+                    _scanned += 1
+                    if query in _search_memo:
+                        results = _search_memo[query]
+                    else:
+                        results = _kb.search(query, top_k=3, tags=["uds_description", "code"])
+                        if not results:
+                            results = _kb.search(query, top_k=3)
+                        _search_memo[query] = results
                     for r in results:
-                        chunk_text = str(r.get("text") or r.get("content") or "").strip()
+                        # KB 엔트리는 텍스트를 context/fix/error_clean 에 저장한다
+                        # (add_document/_ensure_shape). 과거 text/content 키는 항상 빈값이라
+                        # opt-in 시에도 보강이 inert 였다 — 올바른 키로 교정.
+                        chunk_text = str(
+                            r.get("context") or r.get("fix") or r.get("error_clean") or "",
+                        ).strip()
                         if not chunk_text or len(chunk_text) < 10:
                             continue
                         lines = chunk_text.split("\n")
@@ -2094,29 +3273,124 @@ def generate_uds_docx(
     ref_related_by_name: Dict[str, str] = {}
     from config import UDS_REF_SUDS_PATH
     ref_doc_path = Path(UDS_REF_SUDS_PATH)
-    if ref_doc_path.exists():
+    _ref_identity = _reference_identity_verdict(uds_payload, ref_doc_path)
+    _ref_safety_ok = _ref_identity["same_project"] is True
+    # (R47 N26) 어느 문서를 열었는지도 남긴다 — 신원 토큰만으론 검토자가 "어떤 파일이었나" 를 못 본다.
+    #   `configured` 는 부모가 경로를 넘겼는가(빈 값 = 미지정/접근 실패), `document` 는 실제로 연 파일명
+    #   (Cloudium 로컬화 사본도 원래 이름을 유지하므로 이름이 곧 정본 식별자다).
+    _ref_configured = bool(str(UDS_REF_SUDS_PATH or "").strip())
+    _ref_stats: Dict[str, Any] = {
+        "identity": _ref_identity,
+        "configured": _ref_configured,
+        "document": ref_doc_path.name if (_ref_configured and ref_doc_path.is_file()) else None,
+        # (R47-d 리뷰 I3) 누가 이 문서를 골랐나 — 부모가 payload 에 남긴 출처("form" / "registry:<id>")를 그대로 베낀다.
+        #   없으면 None(구 호출부·jenkins 경로). 로그에만 있던 출처가 사이드카→근거 화면까지 간다.
+        "origin": (str(uds_payload.get("reference_suds_origin")).strip() or None)
+        if isinstance(uds_payload, dict) and uds_payload.get("reference_suds_origin") else None,
+        # (R47-e N30) 폼↔레지스트리 대조 상태 "same"/"differs"/"unavailable:<사유>"(폼 없으면 None) — null 하나로 접지 않는다(리뷰 W2).
+        "registry_compare": (str(uds_payload.get("reference_suds_registry_compare")).strip() or None)
+        if isinstance(uds_payload, dict) and uds_payload.get("reference_suds_registry_compare") else None,
+        # (R47-e N30) 지정 경로가 레지스트리 정본과 다른 파일이었나 — `{"scm_id","form","registry"}`(파일명) 또는 None.
+        "registry_mismatch": dict(uds_payload["reference_suds_registry_mismatch"])
+        if isinstance(uds_payload, dict) and isinstance(uds_payload.get("reference_suds_registry_mismatch"), dict) else None,
+        "safety_fields_applied": 0,
+        "safety_fields_blocked": 0,
+        # (R50 N38) 정본이 **이미 있던 값을 덮은** 안전축 — 빈칸 채움과 다른 사실이다. `overridden` 은 이전 출처별
+        #   건수(`{"sds": 327, "module_inherit": …}`), `agreed` 는 값이 같아 출처만 정본으로 올린 건수, `sample` 은
+        #   충돌 표본(캡). 라이브 run 2079 의 ASIL 변경 327건(A→QM 45·QM→A 40·TBD→A 215·TBD→QM 27)이 이 칸에 보였어야 했다.
+        "safety_fields_agreed": 0,
+        "safety_fields_overridden": {},
+        "safety_conflicts_sample": [],
+        # (리뷰 I1) `safety_fields_applied` 는 빈칸 채움 + 동의 승격 + 덮어쓰기의 합이 됐다 — 빈칸 채움만 따로 센다(구판 비교용).
+        "safety_fields_blank_filled": 0,
+        # (리뷰 W1) 정본과 값이 다른데 지켜진 출처(comment/uds)별 건수 — 정본을 막은 쪽의 충돌.
+        "safety_fields_kept_conflict": {},
+        # (R51 N40) 정본 블록→함수 매칭 계수. 매칭 키는 **이름**이다(`_resolve_reference_target` docstring 의 실측 — ID 로 맞은
+        #   819 중 773 이 다른 함수). `id_collision_blocks` = 정본 ID 가 payload 의 다른 함수를 가리킨 블록(정본 번호 ≠ 생성 번호의
+        #   증거), `ambiguous_names` = 같은 이름 블록이 서로 다른 값을 말해 **적용하지 않은** 함수(정본 문서 품질).
+        "matching": {
+            "by_name": 0, "by_name_and_id": 0, "id_collision_blocks": 0, "unmatched_blocks": 0, "unnamed_blocks": 0,
+            "blocked_axes": {}, "ambiguous_names": 0, "ambiguous_sample": [],
+            # (R57 N54) 같은 이름의 정의가 둘 이상이라 정본 블록 피호출자로 정의를 고른 블록 수(APP/FBL 쌍둥이).
+            "twin_definition_blocks": 0,
+        },
+        "descriptive_fields_applied": 0,
+        "invalid_asil_rejected": 0,
+        # ⚠ 아래 6축은 예전엔 **계수에서 통째로 빠져** 있었다. `descriptive_fields_applied`
+        #    는 description/precondition/logic 만 세는데, 실제로 참조 문서가 덧씌우는 축은
+        #    11개다. 즉 sidecar 의 `reference_suds` 는 "무엇이 적용됐나" 를 묻는 기록인데
+        #    절반 이상이 안 보였다 — 남의 프로젝트 문서에서 온 입출력·전역·호출관계가
+        #    무기록으로 들어간다. 이 상태로는 "신원 불일치면 아예 안 읽어도 되는가"(성능)
+        #    조차 판정할 수 없다: 적용량이 0인지 아닌지를 모르기 때문이다.
+        "structural_fields_applied": {
+            "inputs": 0, "outputs": 0, "globals_static": 0,
+            "globals_global": 0, "called": 0, "calling": 0,
+        },
+        # 신원 미확인이라 **적용하지 않은** 구조 축. 0 이 아닌데 기록이 없으면 산출물
+        # 검토자는 "적용할 게 없었다" 와 "막았다" 를 구분할 수 없다.
+        "structural_fields_blocked": {
+            "inputs": 0, "outputs": 0, "globals_static": 0,
+            "globals_global": 0, "called": 0, "calling": 0,
+        },
+    }
+    # (R57 N54) 같은 이름의 정의 목록 — heading 채움과 정본 병합이 같은 표·같은 규칙으로 정의를 고른다.
+    #   소비 집합은 경로별로 따로(둘 다 문서 순서로 돌므로 같은 heading 에 같은 정의가 붙는다).
+    _fn_candidates_by_name = _candidates_by_name(function_details)
+    _twin_consumed_merge: Set[int] = set()
+    _twin_consumed_headings: Set[int] = set()
+    _twin_pairing: Dict[str, Dict[str, Dict[str, Any]]] = {}     # 이름 → {정본 ID: 정의} — 병합이 만들고 heading 채움이 같은 표를 본다
+    ref_map: Dict[str, Any] = {}      # 정본이 없어도 heading 채움이 참조한다(빈 dict = 정본 의견 없음)
+    # (R47 리뷰 W1) `Path("")` 는 `.` 이라 `.exists()` 가 True 다 — 빈 값·비파일은 "참조 없음".
+    if str(UDS_REF_SUDS_PATH or "").strip() and ref_doc_path.is_file():
+        if not _ref_safety_ok:
+            # 침묵 금지 — 이 문서는 **다른 프로젝트의 설계서**일 수 있다.
+            _logger.warning(
+                "참조 SUDS 의 프로젝트 신원을 확인하지 못했다(%s: ref=%s vs payload=%s) — "
+                "ASIL·Related 는 적용하지 않는다. 서술 필드만 보강한다. "
+                "이 프로젝트의 SUDS 를 쓰려면 UDS_REF_SUDS_PATH 를 지정할 것.",
+                _ref_identity["reason"], _ref_identity["ref_tokens"], _ref_identity["payload_tokens"],
+            )
+        ref_doc = None
         try:
             ref_doc = docx.Document(str(ref_doc_path))
             ref_map = _extract_function_info_from_docx(ref_doc)
         except Exception:
             ref_map = {}
+        finally:
+            # (R47-j N27-b) 여기서 쓰는 건 `ref_map` 뿐이다. 이 지역변수는 함수 끝까지 살아 정본(실측 50MB docx)의
+            #   DOM 을 빌드 내내 붙들었다 — 아래에서 같은 파일을 템플릿으로 한 번 더 여니 두 벌이 상주한다.
+            #   (리뷰 I3) 추출이 던져도 놓아야 하므로 finally 다.
+            del ref_doc
         if ref_map:
             patched_called = 0
             patched_calling = 0
             patched_limit = 9999
+            # (R51 N40) 매칭은 이름으로 — 옛 "ID 먼저" 는 정본 번호와 생성 번호가 무관해 773 블록을 엉뚱한 함수에 실었다
+            #   (`_resolve_reference_target` docstring). 같은 이름 블록 목록을 먼저 만들어 중복(정본이 한 함수를 두 절에)을 가른다.
+            _ref_blocks_by_name: Dict[str, List[str]] = {}
+            for _rfid, _rblk in ref_map.items():
+                _rn = _normalize_symbol_name(str(_rblk.get("name") or "")).lower() if isinstance(_rblk, dict) else ""
+                if _rn:
+                    _ref_blocks_by_name.setdefault(_rn, []).append(_rfid)
+            _seen_dup_names: Set[str] = set()
             for fid, block in ref_map.items():
-                target = function_details.get(fid)
-                if target is None:
-                    name = _normalize_symbol_name(str(block.get("name") or ""))
-                    if name:
-                        target = function_details_by_name.get(name.lower())
+                if not isinstance(block, dict):
+                    continue
+                target, _blocked_axes = _resolve_reference_target(
+                    fid, block, function_details, function_details_by_name, _ref_blocks_by_name, ref_map,
+                    _ref_stats["matching"], _seen_dup_names,
+                    candidates_by_name=_fn_candidates_by_name, consumed=_twin_consumed_merge, twin_pairing=_twin_pairing,
+                )
                 if not isinstance(target, dict):
                     continue
                 bname = _normalize_symbol_name(str(block.get("name") or "")).lower()
                 brel = str(block.get("related") or "").strip()
-                if bname and brel:
+                # ref_related_by_name 도 안전축(Related ID)이다 — 신원 미확인이면 채우지 않는다.
+                if bname and brel and _ref_safety_ok and "related" not in _blocked_axes:
                     ref_related_by_name[bname] = brel
                 for key in ["description", "asil", "related", "precondition", "logic"]:
+                    if key in _blocked_axes:
+                        continue      # (R51 리뷰 W3) 같은 이름 블록끼리 갈린 축 — 이 축만 싣지 않는다
                     cur = str(target.get(key) or "").strip()
                     incoming = str(block.get(key) or "").strip()
                     if not incoming:
@@ -2125,31 +3399,121 @@ def generate_uds_docx(
                         if (not cur) or cur.startswith("Auto-generated from"):
                             target[key] = incoming
                             target["description_source"] = "reference"
+                            _ref_stats["descriptive_fields_applied"] += 1
                     elif key in {"asil", "related"}:
-                        if (not cur) or cur in {"TBD", "N/A", "-"}:
-                            target[key] = incoming
-                            target[f"{key}_source"] = "reference"
+                        # ── 안전·추적성 축 ──
+                        # ASIL 과 Related ID 는 ISO 26262 판정의 권위 필드다. 다른 프로젝트
+                        # 문서에서 이름만 겹쳐 흘러들면 남의 요구 ID 추적이나 등급 오염이
+                        # 된다. 신원이 확인된 경우에만 적용한다.
+                        #
+                        # ⚠ 판정 **순서**가 중요하다. 예전 초안은 신원 게이트를 맨 앞에 뒀는데,
+                        #   그러면 어차피 적용되지 않았을 시도까지 "차단" 으로 세어 막은 양을
+                        #   부풀린다. 실측: `asil` 은 이 지점 이전에 이미 `QM`(source=default)
+                        #   으로 채워져 있어 애초에 적용 대상이 아니었는데도 차단 1건으로
+                        #   집계됐다. 적용 자격 → 값 유효성 → 신원 순으로 본다.
+                        #
+                        # (R50 N38) 여기는 **빈칸만** 채우던 자리였다. 그런데 이 앞에서 SwDS 파티션 맵(`sds`)과
+                        #   모듈 상속이 먼저 채우면 정본이 채울 빈칸이 없다 — 라이브 run 2079 실측: 정본 ASIL
+                        #   657→35, 함수 ASIL 변경 327건(A→QM 45). 사용자 결정(2026-09-15) "정본 SwUDS 먼저, SwDS 는 빈칸만" 에 따라
+                        #   소스 주석(`comment`, c_source 권위)·정본 직독(`uds`)·자기 자신만 남기고 **덮는다**.
+                        #   판정은 `provenance.reference_suds_may_override` 단일 출처. 값이 달랐으면 충돌로 센다
+                        #   (설계 문서와 정본이 어긋난 함수 — 침묵하면 "정본이 곧 SwDS" 로 읽힌다).
+                        _blank = (not cur) or cur in {"TBD", "N/A", "-"}
+                        _prev_src = canonical_source(target.get(f"{key}_source"))
+                        if not _blank and not reference_suds_may_override(_prev_src):
+                            # (R50 리뷰 W1) 지켜진 출처(소스 주석 등)와 정본이 **다른 값**이면 그 사실도 센다 — "정본을 막은 건" 도
+                            #   "정본이 덮은 건" 만큼 검토 가치가 있다(주석 @asil D ↔ 정본 A). 신원 확인된 정본만.
+                            if _ref_safety_ok and _safety_value_key(cur, key) != _safety_value_key(incoming, key):
+                                _kept = _ref_stats["safety_fields_kept_conflict"]
+                                _kept[_prev_src] = int(_kept.get(_prev_src, 0)) + 1
+                            continue
+                        if key == "asil" and incoming.upper() not in _VALID_ASIL:
+                            # 참조 파싱이 어긋나 프로토타입 문자열 등이 ASIL 로 들어오는 경우.
+                            _ref_stats["invalid_asil_rejected"] += 1
+                            continue
+                        if not _ref_safety_ok:
+                            _ref_stats["safety_fields_blocked"] += 1
+                            continue
+                        if _blank:
+                            _ref_stats["safety_fields_blank_filled"] += 1
+                        elif _safety_value_key(cur, key) == _safety_value_key(incoming, key):
+                            _ref_stats["safety_fields_agreed"] += 1
+                        else:
+                            _ovr = _ref_stats["safety_fields_overridden"]
+                            _ovr[_prev_src] = int(_ovr.get(_prev_src, 0)) + 1
+                            if len(_ref_stats["safety_conflicts_sample"]) < _STAT_SAMPLE_CAP:
+                                _ref_stats["safety_conflicts_sample"].append({
+                                    # (리뷰 I4) 이름 폴백 매칭이면 `fid` 는 정본 쪽 키라 payload 함수 id 가 아니다 — 이름을 같이 싣는다.
+                                    "id": str(target.get("id") or fid), "name": str(target.get("name") or ""), "field": key,
+                                    "prev": cur[:80], "prev_source": _prev_src, "reference": incoming[:80],
+                                })
+                        target[key] = incoming
+                        target[f"{key}_source"] = "reference"
+                        _ref_stats["safety_fields_applied"] += 1
                     else:
                         if (not cur) or (key == "precondition" and cur.upper() in {"N/A", "TBD", "-"}):
                             target[key] = incoming
-                if block.get("inputs") and not target.get("inputs"):
-                    target["inputs"] = block.get("inputs")
-                if block.get("outputs") and not target.get("outputs"):
-                    target["outputs"] = block.get("outputs")
-                if block.get("globals_static") and not target.get("globals_static"):
-                    target["globals_static"] = block.get("globals_static")
-                if block.get("globals_global") and not target.get("globals_global"):
-                    target["globals_global"] = block.get("globals_global")
-                if block.get("called"):
-                    cur_called = str(target.get("called") or "").strip()
-                    if ((not cur_called) or cur_called.upper() in {"N/A", "TBD", "-"}) and patched_called < patched_limit:
-                        target["called"] = block.get("called")
-                        patched_called += 1
-                if block.get("calling"):
-                    cur_calling = str(target.get("calling") or "").strip()
-                    if ((not cur_calling) or cur_calling.upper() in {"N/A", "TBD", "-"}) and patched_calling < patched_limit:
-                        target["calling"] = block.get("calling")
-                        patched_calling += 1
+                            _ref_stats["descriptive_fields_applied"] += 1
+                # ── 구조 축 (인터페이스 정의) ──
+                # 입출력 파라미터·사용 전역·호출관계는 서술이 아니라 **시험 대상 인터페이스
+                # 정의**다. UDS 의 이 칸이 그대로 SUTS 시험 케이스의 대상이 되므로, 다른
+                # 프로젝트 문서에서 이름만 겹쳐 흘러들면 존재하지 않는 인터페이스를 시험하는
+                # 문서가 나온다. ISO 26262 추적성(UDS↔Source)이 끊긴다.
+                #
+                # ⚠ 그래서 안전축과 같은 신원 게이트를 건다(2026-08-04, §6 후보 12 정책).
+                #   예전엔 이 6축만 게이트 밖이었다 — `_ref_safety_ok` 가 False 여도 그대로
+                #   적용됐고, 심지어 2026-08-03 까지는 **계수조차 없어** 적용량을 몰랐다.
+                #
+                # ⚠ 판정 순서는 위 안전축과 같다: **적용 자격 → 신원**. 신원을 먼저 보면
+                #   어차피 적용되지 않았을 시도까지 "차단" 으로 세어 막은 양을 부풀린다.
+                #
+                # ⚠ 2026-08-04 의 "이름 조인(초안 A2) 기각" 은 **다른 프로젝트 문서**(HDPDM01 SUDS)를 참조로 두던 때의 측정이다
+                #   (이름이 같은 354건 중 244건이 prototype 이 다름 = 교차 프로젝트 오염). 그 레버는 신원 게이트가 맞다.
+                #   그러나 그 결론이 "ID 조인이 옳다" 는 뜻은 아니었다 — 같은 프로젝트 정본에서도 ID 는 문서 번호라 생성 번호와
+                #   무관하고, 이름이 다른 함수 773 블록의 구조축이 여기로 실렸다(R51 N40, `_resolve_reference_target`).
+                #   지금 매칭 키는 이름 + 신원 게이트다.
+                _struct = _ref_stats["structural_fields_applied"]
+                _blocked = _ref_stats["structural_fields_blocked"]
+
+                def _apply_struct(axis: str, *, eligible: bool, value: Any) -> bool:
+                    """구조 축 1개 적용. 자격이 있는데 신원이 없으면 **차단으로 계수**."""
+                    if not eligible:
+                        return False
+                    if not _ref_safety_ok:
+                        _blocked[axis] += 1
+                        return False
+                    target[axis] = value
+                    _struct[axis] += 1
+                    return True
+
+                for _axis in ("inputs", "outputs", "globals_static", "globals_global"):
+                    _apply_struct(
+                        _axis,
+                        eligible=bool(block.get(_axis)) and not target.get(_axis) and _axis not in _blocked_axes,
+                        value=block.get(_axis),
+                    )
+                _cur_called = str(target.get("called") or "").strip()
+                if _apply_struct(
+                    "called",
+                    eligible=bool(block.get("called")) and "called" not in _blocked_axes
+                    and ((not _cur_called) or _cur_called.upper() in {"N/A", "TBD", "-"})
+                    and patched_called < patched_limit,
+                    value=block.get("called"),
+                ):
+                    patched_called += 1
+                _cur_calling = str(target.get("calling") or "").strip()
+                if _apply_struct(
+                    "calling",
+                    eligible=bool(block.get("calling")) and "calling" not in _blocked_axes
+                    and ((not _cur_calling) or _cur_calling.upper() in {"N/A", "TBD", "-"})
+                    and patched_calling < patched_limit,
+                    value=block.get("calling"),
+                ):
+                    patched_calling += 1
+
+    # (R50 리뷰 C1) 모듈 상속은 정본 채움 **뒤** — 정본이 고친 값이 씨앗이 되고, 씨앗 출처별 건수를 남긴다(정본이 못 닿는
+    #   형제 함수가 어떤 근거의 등급을 물려받았는지 검토자가 볼 수 있게).
+    _ref_stats["module_inherit_by_seed_source"] = _inherit_module_asil(function_details, fn_module_map)
 
     if isinstance(function_details, dict) and isinstance(function_details_by_name, dict):
         for fid, info in function_details.items():
@@ -2162,7 +3526,8 @@ def generate_uds_docx(
             for src_key in ("asil", "asil_source", "related", "related_source",
                             "description", "description_source"):
                 val = info.get(src_key)
-                if val and (not target.get(src_key) or (src_key.endswith("_source") and target.get(src_key) == "inference")):
+                if val and (not target.get(src_key)
+                            or (src_key.endswith("_source") and is_weak_source(target.get(src_key)))):
                     target[src_key] = val
             for g_key in ("globals_global", "globals_static"):
                 src_g = info.get(g_key)
@@ -2243,13 +3608,20 @@ def generate_uds_docx(
     if ai_func_desc_enable and isinstance(function_details, dict):
         inference_count = sum(
             1 for v in function_details.values()
-            if isinstance(v, dict) and str(v.get("description_source") or "").strip().lower() in {"inference", "rule", ""}
+            if isinstance(v, dict) and is_weak_source(v.get("description_source"))
         )
         if inference_count > 0:
             _logger.info("AI function description: %d inference-sourced functions, starting AI generation", inference_count)
             try:
                 from workflow.uds_ai import generate_ai_function_descriptions
-                ai_descs = generate_ai_function_descriptions(function_details, module_map if isinstance(module_map, dict) else None)
+                # body는 detail dict에 없다 — 파서가 별도 맵으로 싣는다(uds_generator
+                # function_body_snippets). 안 넘기면 2차 refinement가 조용히 no-op다.
+                _body_snips = payload.get("function_body_snippets")
+                ai_descs = generate_ai_function_descriptions(
+                    function_details,
+                    module_map if isinstance(module_map, dict) else None,
+                    body_snippets=_body_snips if isinstance(_body_snips, dict) else None,
+                )
                 if ai_descs:
                     applied = 0
                     for fid, info in function_details.items():
@@ -2291,6 +3663,10 @@ def generate_uds_docx(
     if tbd_asil > 0 or tbd_related > 0:
         _logger.warning("UDS TBD residual: asil_tbd=%d/%d, related_tbd=%d/%d", tbd_asil, total_fn, tbd_related, total_fn)
 
+    # 호출자가 준 것인지 config 기본값인지 구분해 통계에 남긴다 — 둘 다 `mode="template"`
+    # 이라 예전엔 "이 템플릿을 누가 골랐나" 를 사후에 알 수 없었다. 반영률이 낮을 때
+    # 원인이 프로젝트 템플릿 미지정인지 템플릿 자체인지 갈리는 지점이다.
+    template_source = "argument" if template_path else "none"
     if not template_path:
         # Delegate to config.resolve_uds_template_path() so the admin API
         # and the generator always agree on the effective template path.
@@ -2299,6 +3675,7 @@ def generate_uds_docx(
             resolved = resolve_uds_template_path()
             if resolved:
                 template_path = resolved
+                template_source = "config_fallback"
         except Exception as exc:
             _logger.debug("UDS template fallback resolution failed: %s", exc)
 
@@ -2329,6 +3706,7 @@ def generate_uds_docx(
             "{{notes}}": notes,
         }
         doc = docx.Document(template_path)
+        _pics = _PictureSink(doc)     # (R53 N27-c) 이 문서의 모든 그림 삽입·원본 블록 되붙임은 이 싱크를 지난다
         # 1) First, expand the reference-table token into a paragraph with
         #    real soft line breaks (w:br) so Word renders each entry on its
         #    own line. Consumes the token in-place.
@@ -2337,21 +3715,57 @@ def generate_uds_docx(
         #    single-line tokens (and as a fallback for any stray
         #    {{REFERENCE_TABLE}} paragraph we didn't catch above).
         _replace_docx_text(doc, replacements)
+        # 3) 대괄호 표식(`[Project Name]`)은 `{{토큰}}` 이 아니라 위 치환이 못 잡는다.
+        #    표지·Introduction 이 이 자리를 쓴다 — 두 경로 모두에 적용해야 한다.
+        _n_proj = _fill_bracket_project_name(doc, str(project))
+        if _n_proj:
+            _logger.info("템플릿 `[Project Name]` %d곳을 %r 로 채웠다", _n_proj, str(project))
         if _template_has_placeholders(doc):
-            doc.save(str(out))
+            # 토큰 치환 전용 템플릿 — SwUFn 표를 순회하지 않으므로 함수 반영률 개념이 없다.
+            # 통계를 **안 남기면** 소비처가 "통계 부재 = 문제 없음" 으로 읽으므로 mode 를
+            # 명시해서 남긴다(미측정과 정상을 구분).
+            _ph_stats = {
+                "mode": "placeholder_substitution",
+                "template_path": str(template_path or ""),
+                "template_source": template_source,
+                "payload_functions": None,
+                "matched_functions": None,
+                "match_pct": None,
+                "note": "토큰 치환 템플릿이라 SwUFn 함수 반영률이 적용되지 않는다(미측정).",
+                # (R50 리뷰 W3) 이 모드는 본문 절을 싣는 자리 자체가 없다 — 있는 절은 전부 미배치다(템플릿 분기와 같은 키).
+                "text_sections_unplaced": {
+                    k: len(str(v)) for k, v in (
+                        ("overview", overview), ("requirements", requirements), ("interfaces", interfaces),
+                        ("uds_frames", uds_frames), ("notes", notes),
+                    ) if str(v or "").strip()
+                },
+                # (R47-c 리뷰 W4) 참조 보강 루프는 이 분기보다 **위**에서 이미 돌았다 — 세 종결 경로 중 여기만
+                #   기록을 버려 보드가 "참조 통계를 남기기 전 빌더" 라는 틀린 사유를 말했다.
+                "reference_suds": _ref_stats,
+            }
+            _save_docx(doc, out, output_path, _ph_stats)
             return str(out)
         # 템플릿에 치환 키가 없으면, 구조만 복제하고 콘텐츠는 새로 작성
         blocks = _extract_template_blocks(doc)
         template_section_map = _extract_template_section_map(doc)
         template_section_block_map = _extract_template_section_block_map(doc)
         _clear_docx_body(doc)
-        first_heading = ""
-        for kind, payload_block in blocks:
-            if kind == "heading":
-                first_heading = str(payload_block[1]).strip()
-                break
-        if False:
-            pass
+        # 표지 같은 **선행 구조 블록**은 자동 목차보다 먼저 나가야 한다. 루프에만
+        # 맡기면 아래 "목차 마커가 없으면 목차를 넣는다" 가 먼저 실행돼 목차 다음에
+        # 표지가 오는 문서가 된다.
+        _restored_blocks = 0      # 표지 등 원본 그대로 되살린 구조 블록
+        _preserved_tables = 0     # 생성기가 채우지 않아 원본을 유지한 표
+        _rows_recovered = 0       # 템플릿 행수였다면 잘렸을 데이터 행
+        _rows_trimmed = 0         # 템플릿 행수였다면 남았을 빈 행
+        _unattributed_swcoms: Set[str] = set()   # 전역변수를 귀속시키지 못한 컴포넌트
+        _lead_raw = 0
+        while _lead_raw < len(blocks) and blocks[_lead_raw][0] == "raw":
+            try:
+                _append_body_block(doc, blocks[_lead_raw][1], picture_sink=_pics)
+                _restored_blocks += 1
+            except Exception:   # noqa: BLE001 - 표지 복원 실패가 생성을 막지는 않는다
+                _logger.warning("표지 블록 복원 실패 — 표지 없이 계속한다", exc_info=True)
+            _lead_raw += 1
         has_contents_marker = False
         skip_table_idx = -1
         for kind, block in blocks:
@@ -2366,7 +3780,6 @@ def generate_uds_docx(
             doc.add_heading("Contents", level=2)
             _add_docx_toc(doc)
             toc_inserted = True
-        skip_next_table = False
         heading_stack: List[str] = []
         module_funcs: Dict[str, Dict[str, List[str]]] = {}
         interface_queue: List[Dict[str, Any]] = []
@@ -2375,38 +3788,20 @@ def generate_uds_docx(
         for kind_t, payload_t in blocks:
             if kind_t != "table":
                 continue
-            rows_t, cols_t, style_t, header_rows_t, _ctx_titles_t = payload_t
+            rows_t, cols_t, style_t, header_rows_t, _ctx_titles_t, _el_t = payload_t
             if header_rows_t:
                 header_texts = [str(c or "").strip() for row in header_rows_t for c in row]
                 if any("Function Information" in c for c in header_texts):
                     function_info_template = (rows_t, cols_t, style_t, header_rows_t)
                     break
-        swufn_table_spec: Dict[str, Tuple[int, int, Any]] = {}
-        for idx_t, (kind_t, payload_t) in enumerate(blocks):
-            if kind_t != "heading":
-                continue
-            level_t, title_t = payload_t
-            m = re.search(r"(swufn_\\d+)", str(title_t), re.I)
-            if not m:
-                continue
-            swufn_id = m.group(1).upper()
-            for look_ahead in range(idx_t + 1, len(blocks)):
-                kind_la, payload_la = blocks[look_ahead]
-                if kind_la == "heading":
-                    try:
-                        level_la = int(payload_la[0])
-                    except Exception:
-                        level_la = level_t
-                    if level_la <= level_t:
-                        break
-                    continue
-                if kind_la == "table":
-                    rows_la, cols_la, style_la, header_rows_la, _ctx_titles_la = payload_la
-                    if header_rows_la:
-                        header_texts = [str(c or "").strip() for row in header_rows_la for c in row]
-                        if any("Function Information" in c for c in header_texts):
-                            swufn_table_spec[swufn_id] = (rows_la, cols_la, style_la)
-                            break
+        # ⚠ 여기 있던 `swufn_table_spec` 은 **도달 불가 중복**이라 지웠다.
+        #   빌드 정규식이 `r"(swufn_\\d+)"` — raw string 안의 `\\` 는 리터럴 백슬래시라
+        #   heading 제목에 결코 매치되지 않아 dict 는 항상 비었고, 조회부(아래
+        #   `target_idx` 분기 바로 위)도 같은 죽은 정규식을 써서 한 번도 적중하지 못했다.
+        #   살아 있는 경로는 `target_idx` 전방탐색이고, **같은 표를 같은 방식으로 찾는다**.
+        #   실측(tokenized 템플릿·정본 SUDS 양쪽, gate 통과 heading 429개):
+        #   두 경로의 (rows, cols, style) 이 **429/429 동일**했다.
+        #   → 고쳐서 되살리면 한 번도 돈 적 없는 코드를 켜는 것이고 얻는 게 없다.
         for row in function_table_rows:
             if len(row) < 5:
                 continue
@@ -2528,7 +3923,21 @@ def generate_uds_docx(
                 return list(dict.fromkeys(selected))
             file_names = swcom_function_files.get(swcom_id, set())
             if not file_names:
-                return names
+                # ⚠ 여기서 `names`(**전체**)를 돌려주면 귀속에 실패한 컴포넌트 표에
+                #   이 프로젝트 전역변수가 통째로 실린다. `swcom_function_files` 는
+                #   **payload 의** function_table_rows 로만 만들어지므로, 템플릿이
+                #   payload 보다 넓으면(정본이 늘 그렇다) 대부분의 컴포넌트가 여기로
+                #   온다. 실측(KJPDS02_PV 정본, payload 는 SwCom_01 뿐): 컴포넌트별
+                #   전역/정적 표 64개 중 43개가 366개를 통째로 받았고, 그게 템플릿
+                #   행수(2~5행)에 잘려 **1~4개만** 남는 바람에 "그 컴포넌트의 전역
+                #   변수" 처럼 보였다. 표 크기를 데이터에 맞추자 8,562행으로 드러났다.
+                # ⚠ 문서 레벨 표(`swcom_id` 없음)는 전체가 맞다 — 실측: 표준 템플릿의
+                #   전역/정적 표 4개는 **전부** 문서 레벨, 정본의 64개는 **전부**
+                #   SwCom 아래다. 그래서 두 경우를 갈라야 한다.
+                if not swcom_id:
+                    return names
+                _unattributed_swcoms.add(swcom_id)
+                return []
             file_stems = {_norm_stem(Path(x).stem) for x in file_names}
             for n in names:
                 info_g = globals_info_map.get(n, {}) if isinstance(globals_info_map, dict) else {}
@@ -2585,6 +3994,9 @@ def generate_uds_docx(
         def _next_block_kind(blocks_list, start_idx: int) -> str:
             for j in range(start_idx + 1, len(blocks_list)):
                 kind_j, payload_j = blocks_list[j]
+                if kind_j == "raw":
+                    # 표지 같은 구조 블록은 "다음에 오는 것" 판정 대상이 아니다.
+                    continue
                 if kind_j == "para":
                     text_j = str(payload_j.get("text") or "").strip()
                     if not text_j:
@@ -2617,6 +4029,118 @@ def generate_uds_docx(
         }
         note_added: set[str] = set()
 
+        # ── 생성 충실도 계측 ───────────────────────────────────────────────────
+        # 이 라이터는 템플릿 heading 을 순회하므로 **payload 함수 ↔ 문서 반영**이 1:1 이
+        # 아니다. 예전엔 그 격차가 어디에도 안 남아, 22.0% 가 미반영인 문서가
+        # "성공" 으로 기록됐다. resolver 는 heading 만으로 빈 껍데기를 합성하는 폴백이
+        # 여럿이라 **호출 결과를 실제로 분류**해야 한다(선언적 집합 차집합은 퍼지 매칭을
+        # 과소 계상해 거짓 경고를 낸다).
+        # 템플릿이 **삭제된 함수**로 표시한 heading 은 비어 있는 게 정상이다 — 갭으로 세면
+        # 오탐이 된다.
+        #
+        # ⚠ 이 마커는 이제 **계측만이 아니라 산출**을 가른다. `unmatched_headings=drop`
+        #   에서 `deleted` 는 남고 `empty` 는 지워지므로, 어휘를 놓치면 **의도해서 비운
+        #   자리가 문서에서 사라진다**. 그래서 어휘를 짐작하지 않고 전수 조사했다
+        #   (2026-09-01, 실문서 4종 · SwUFn heading **2,505개**):
+        #
+        #     HDPDM01 정본 v1.07   429개 → (New) 47 · (NEW) 10 · (삭제) 9 ·
+        #                                  (Interface -> Internal 이동) 4 ·
+        #                                  (Internal -> Interface 이동) 2 · (New, 삭제) 1
+        #     HDPDM01 템플릿        429개 → 〃 (정본과 동일)
+        #     KJPDS02 dv_SwUDS      631개 → (New) 1 · (삭제) 1
+        #     swuds_v2.08         1,016개 → (new) 1
+        #
+        #   괄호 주석 자체가 드물고(2,505 중 147), 삭제 계열은 **11건 전부** 이 정규식에
+        #   걸린다. `이동` 은 삭제가 아니다 — 함수는 다른 절에 살아 있으므로 payload 에
+        #   있으면 그쪽에서 반영되고, 없으면 다른 미반영 heading 과 같은 처지다.
+        #   → 어휘를 넓히지 않는다. 넓히면 실측 근거 없이 `drop` 의 예외만 늘어난다.
+        #   다른 어휘를 쓰는 정본이 나오면 **그 문서를 세어 보고** 여기 추가할 것.
+        _deleted_marker = re.compile(r"\([^)]*(?:삭제|제거|delete[d]?)[^)]*\)", re.I)
+
+        _payload_fn_names: Set[str] = set()
+        for _src in (function_details, function_details_by_name):
+            if isinstance(_src, dict):
+                for _v in _src.values():
+                    if isinstance(_v, dict) and _v.get("name"):
+                        _payload_fn_names.add(
+                            _normalize_symbol_name(str(_v.get("name"))).lower())
+        _matched_fn_names: Set[str] = set()
+        # (R50 N38) 본문 절(overview/requirements/interfaces/uds_frames/notes)이 템플릿 heading 에 **실린** 키.
+        #   정본 레이아웃엔 `Requirements` 가 없어 SwRS 79,572자가 조용히 빠졌다(run 2078) — 어디에도 계수가 없었다.
+        _text_sections_placed: Set[str] = set()
+        _empty_headings: List[str] = []
+        _deleted_headings: List[str] = []
+        _boilerplate_headings: List[str] = []
+        # 지운 것과 비워 둔 것은 **다른 사실**이다 — 한 칸에 합치면 산출물을 설명 못 한다.
+        _dropped_headings: List[str] = []
+        _unmatched_mode, _unmatched_bad = normalize_unmatched_headings(
+            payload.get("unmatched_headings"))
+        if _unmatched_bad:
+            _logger.warning(
+                "unmatched_headings=%r 를 알 수 없어 기본값(%s)으로 진행한다",
+                _unmatched_bad, UNMATCHED_HEADINGS_KEEP)
+        _drop_unmatched = _unmatched_mode == UNMATCHED_HEADINGS_DROP
+        # >0 이면 그 레벨 이하의 heading 을 만날 때까지 **절 전체**를 버린다.
+        # heading 만 지우고 본문을 남기면 내용이 엉뚱한 절에 붙는다.
+        _drop_until_level = 0
+
+        def _fn_match_kind(title_text: str, info: Any) -> str:
+            """heading 하나의 분류 — ``matched`` | ``deleted`` | ``boilerplate`` | ``empty``.
+
+            ⚠ 판정을 **여기 하나에만** 둔다. 아래 `_note_fn_match`(계측)와 본문 루프의
+              "지울 것인가"(산출)가 같은 규칙을 봐야 한다 — 규칙이 갈리면 세는 것과
+              지우는 것이 서로 다른 집합이 되고, 그러면 수치가 산출물을 설명하지 못한다.
+            """
+            name = ""
+            if isinstance(info, dict):
+                name = _normalize_symbol_name(str(info.get("name") or "")).lower()
+            # `_finalize_function_fields` 가 만들지 **않는** 필드들 — 있으면 진짜 내용이다.
+            has_hard_content = isinstance(info, dict) and any(
+                info.get(k) for k in ("prototype", "inputs", "outputs", "logic")
+            )
+            known = bool(name) and name in _payload_fn_names
+            if known and has_hard_content:
+                return "matched"
+            if _deleted_marker.search(str(title_text)):
+                return "deleted"
+            if known:
+                return "boilerplate"
+            return "empty"
+
+        def _note_fn_match(title_text: str, info: Any) -> None:
+            """heading 하나가 payload 로 채워졌는지 vs 빈 껍데기인지 분류.
+
+            세 축으로 나눈다 — 섞으면 수치가 부풀거나 경고가 오탐이 된다:
+              · **반영**      : payload 의 실제 내용이 표에 들어갔다
+              · **합성만**    : 이름만 맞고 내용은 생성기가 만든 보일러플레이트다
+              · **의도된 빈칸**: 템플릿이 "삭제" 로 표기한 heading
+              · 나머지        : 실제 갭
+
+            ⚠ 합성을 분리하는 이유(실측): `_finalize_function_fields` 는 내용이 **완전히 빈**
+            함수에도 `description="alpha은(는) alpha 관련 연산을 수행하고…"`, `asil="QM"`,
+            `related="TBD"` 를 채운다. 그걸 "반영" 으로 세면 내용 0인 함수가 반영률을 올린다.
+
+            ⚠ **description 축은 이 지표에서 제외한다.** 합성 여부를 판별할 수단이 둘 다 못
+            쓴다: ①`description_source` 는 `_resolve_related_asil_desc` 가 **출처 미기록을 전부
+            `"inference"` 로 확정**해 사람이 쓴 설명까지 그 값이 된다(실측 확인 — 별도 결함)
+            ②`_is_generic_description` 은 합성기 자신의 출력(`…관련 연산을 수행하고…`)을
+            generic 으로 보지 않는다. 고장난 판정을 지표에서 흉내내면 결함이 복제되므로
+            **생성기가 만들지 않는 필드만** 근거로 삼는다. 그 결과 설명만 있고
+            prototype/inputs/outputs/logic 이 전무한 함수는 갭으로 잡히는데, 단위 상세 설계
+            문서 기준으로는 그게 맞다.
+            """
+            kind = _fn_match_kind(title_text, info)
+            if kind == "matched":
+                _matched_fn_names.add(
+                    _normalize_symbol_name(str((info or {}).get("name") or "")).lower())
+            elif kind == "deleted":
+                _deleted_headings.append(str(title_text)[:200])
+            elif kind == "boilerplate":
+                # 이름은 payload 에 있는데 내용이 전부 합성이다 — 갭이지만 원인이 다르다.
+                _boilerplate_headings.append(str(title_text)[:200])
+            else:
+                _empty_headings.append(str(title_text)[:200])
+
         def _resolve_function_info(title_text: str, key_text: str) -> Dict[str, Any]:
             info: Optional[Dict[str, Any]] = None
             heading_fn_name = ""
@@ -2628,6 +4152,25 @@ def generate_uds_docx(
                 fn_name = heading_fn_name
                 if isinstance(function_details_by_name, dict):
                     info = function_details_by_name.get(fn_name)
+                _cands = _fn_candidates_by_name.get(fn_name) or []
+                if len(_cands) > 1:
+                    # (R57 N54) 같은 이름의 정의가 둘 이상 — 정본 병합이 만든 짝 표(`_twin_pairing`, 이름 → {정본 ID: 정의})에서
+                    #   이 heading 의 정본 ID 로 찾는다(두 경로가 같은 표를 본다 — 리뷰 W2). 짝 표는 **이름이 같은** 정본 블록만으로
+                    #   만들어지므로 정본 ID 만 같은 남의 함수 블록이 선택을 조종하지 못한다(리뷰 W1). 짝 표에 없으면(정본 없음·템플릿과
+                    #   정본이 다른 문서) 정본 의견 없이 고르되, 짝 표가 다른 heading 에 이미 준 정의는 뒤로 민다(같은 정의가 두 표에
+                    #   실리지 않게). 여기서 `ref_map` 을 직접 뒤지지 않는다 — 같은 이름 블록은 전부 짝 표에 있어 그 조회는 도달하지 않는다.
+                    _fid_m = re.search(r"(swufn_\d+)", str(key_text), re.I)
+                    _want = _fid_m.group(1).lower() if _fid_m else ""
+                    _hit = None
+                    if _want:
+                        _hit = next((t for k, t in (_twin_pairing.get(fn_name) or {}).items() if str(k).lower() == _want), None)
+                    if isinstance(_hit, dict):
+                        info = _hit
+                        _twin_consumed_headings.add(id(_hit))
+                    else:
+                        _taken = set(_twin_consumed_headings) | {id(t) for t in (_twin_pairing.get(fn_name) or {}).values()}
+                        info = _pick_function_candidate(_cands, None, _taken)
+                        _twin_consumed_headings.add(id(info))
             if not isinstance(info, dict) and ":" in str(title_text):
                 fn_name = heading_fn_name
                 if isinstance(function_details, dict) and fn_name:
@@ -2712,11 +4255,15 @@ def generate_uds_docx(
                             continue
                         called_text = ", ".join([str(v) for v in (vals or []) if v])
                         break
+                # (R57 N54) payload 에 없는 함수의 heading(정본에만 있는 함수 — run 2088 에 36개). 예전엔 이름의 낱말로
+                #   동작 문장을 지어 실었다("s_Ap_Diagnostic: … 상태를 점검하고 진단 결과를 갱신한다") — 분석하지 않은
+                #   함수를 분석한 것처럼 적는 것이라 ISO 26262 설계 문서에선 지어내기다. 사실만 적는다(개수는 `empty_heading_count`).
+                #   출처 라벨은 붙이지 않는다 — 껍데기는 payload 가 아니라 사이드카·게이트가 읽지 않는 죽은 값이 된다.
                 info = {
                     "id": _normalize_swufn_id(str(fn_id.group(1)) if fn_id else ""),
                     "name": heading_fn_name,
                     "prototype": "",
-                    "description": _fallback_function_description(heading_fn_name, called_text),
+                    "description": UNMATCHED_HEADING_NOTE,
                     "asil": "",
                     "related": "",
                     "inputs": [],
@@ -2730,44 +4277,35 @@ def generate_uds_docx(
             if isinstance(info, dict) and heading_fn_name:
                 if fn_id:
                     info["id"] = _normalize_swufn_id(str(fn_id.group(1)))
-                if not str(info.get("prototype") or "").strip() and heading_fn_name == "main":
-                    info["prototype"] = "void main( void )"
+                # (R57 N54) `main` 의 `void main( void )` 리터럴을 지웠다 — 분석에 없는 main 에 프로토타입을 지어 싣던 특례
+                #   (R52 N39 의 Related 리터럴과 같은 갈래). 쌍둥이 main 은 이제 각자의 정의를 받는다.
                 if not str(info.get("description") or "").strip():
                     info["description"] = _fallback_function_description(
                         heading_fn_name,
                         info.get("called") or info.get("calls_list") or [],
                     )
                 if not str(info.get("calling") or "").strip():
-                    callers = callers_map.get(heading_fn_name, [])
-                    lines: List[str] = []
-                    for c in callers:
-                        sig = ""
-                        if isinstance(function_details_by_name, dict):
-                            cinfo = function_details_by_name.get(str(c).lower())
-                            if isinstance(cinfo, dict):
-                                sig = str(cinfo.get("prototype") or "").strip()
-                        lines.append(sig or str(c))
-                    info["calling"] = "\n".join([ln for ln in lines if ln])
+                    # (R56 N52) 이름만 — 정본 관례. 프로토타입은 Prototype 행에만.
+                    info["calling"] = "\n".join(
+                        _analysis_display_name(c, function_details_by_name) for c in callers_map.get(heading_fn_name, []) if str(c).strip()
+                    )
                 ref_rel = ref_related_by_name.get(heading_fn_name)
-                if heading_fn_name == "main" and ref_rel:
+                # (R52 N39) `main` 특례를 지웠다 — 다른 함수와 같은 규칙. 예전엔 정본에 main 이 없으면 프로젝트 ID 리터럴
+                #   ("SwST_01, SwCom_01, SwSTR_…")을 `rule` 로 실었다: 그 값은 KJPDS02 정본 main 의 Related 이자
+                #   `docs/uds_function_swcom_override.json` 의 main 항목과 같은 값이라 코드에 둘 이유가 없고, 다른
+                #   프로젝트에선 지어내기다(같은 리터럴이 이 파일 3곳 + `function_analyzer.py` 2곳에 있었다).
+                cur_related = str(info.get("related") or "").strip()
+                if cur_related in {"", "TBD", "SwCom_01"} and ref_rel:
                     info["related"] = ref_rel
                     info["related_source"] = "reference"
-                elif heading_fn_name == "main":
-                    info["related"] = "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
-                    info["related_source"] = "rule"
-                else:
-                    cur_related = str(info.get("related") or "").strip()
-                    if cur_related in {"", "TBD", "SwCom_01"} and ref_rel:
-                        info["related"] = ref_rel
-                        info["related_source"] = "reference"
             return info
 
-        def _build_function_info_table(info: Dict[str, Any], rows: int, cols: int, style: Any):
-            if str(info.get("name") or "").strip().lower() == "main":
-                info["related"] = "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
+        def _build_function_info_table(info: Dict[str, Any], cols: int, style: Any):
             fn_key = str(info.get("name") or "").strip().lower()
             callee_names = [str(c).strip() for c in (info.get("calls_list") or []) if str(c).strip()]
-            if (not callee_names) and call_relation_mode == "code" and isinstance(call_map, dict):
+            # (R57 리뷰 I1) `call_map` 은 이름 키(쌍둥이면 두 정의의 합집합) — 정의가 둘 이상인 이름은 복구하지 않는다.
+            _is_twin = len(_fn_candidates_by_name.get(_normalize_symbol_name(str(info.get("name") or "")).lower()) or []) > 1
+            if (not callee_names) and (not _is_twin) and call_relation_mode == "code" and isinstance(call_map, dict):
                 fn_norm = _normalize_symbol_name(str(info.get("name") or "")).lower()
                 if fn_norm:
                     recovered: List[str] = []
@@ -2783,64 +4321,16 @@ def generate_uds_docx(
             # corrupt directionality for leaf functions.
             callee_names = list(dict.fromkeys(callee_names))
             caller_names = list(dict.fromkeys(callers_map.get(fn_key, [])))
-
-            def _sig_lines(names: List[str]) -> List[str]:
-                out: List[str] = []
-                for nm in names:
-                    sig = ""
-                    cinfo = function_details_by_name.get(str(nm).lower()) if isinstance(function_details_by_name, dict) else None
-                    if isinstance(cinfo, dict):
-                        sig = str(cinfo.get("prototype") or "").strip()
-                    out.append(sig or str(nm))
-                return [x for x in out if x]
-
-            callee_lines = _sig_lines(callee_names)
-            caller_lines = _sig_lines(caller_names)
-            if fn_key == "wake_up_setting":
-                callee_name_set = {
-                    str(x).strip().lower()
-                    for x in _extract_call_names("\n".join(callee_lines))
-                    if str(x).strip()
-                }
-                if (
-                    "l_ifc_init" not in callee_name_set
-                    and {"l_sys_init", "monitor_adc_enable", "monitor_adc_init"} & callee_name_set
-                ):
-                    l_ifc_sig = ""
-                    cinfo = function_details_by_name.get("l_ifc_init") if isinstance(function_details_by_name, dict) else None
-                    if isinstance(cinfo, dict):
-                        l_ifc_sig = str(cinfo.get("prototype") or "").strip()
-                    callee_lines = ([l_ifc_sig or "l_ifc_init"] + callee_lines)
-                    dedup_lines: List[str] = []
-                    for ln in callee_lines:
-                        if ln and ln not in dedup_lines:
-                            dedup_lines.append(ln)
-                    callee_lines = dedup_lines
-            if fn_key == "main" and not caller_lines:
-                caller_lines = ["void _Startup(void)"]
+            # (R56 N52) Called/Calling 칸은 **이름만**(정본 951 함수 중 914). 옛 `_sig_lines` 는 피호출자·호출자의 프로토타입을
+            #   그대로 실어 여러 줄 원문·주석이 칸에 들어갔고(LIN 드라이버 50건) 되읽기 파서가 이름을 잃었다.
+            #   `wake_up_setting` 에 `l_ifc_init` 을 끼워 넣고 `main` 의 호출자를 `_Startup` 으로 적던 **함수명 리터럴 특례**도
+            #   지웠다 — 정본 Wake_Up_Setting 의 피호출자에 l_ifc_init 은 없고 정본 main 의 호출자는 N/A 다(R52 N39 와 같은 부류).
+            callee_lines = [_analysis_display_name(x, function_details_by_name) for x in callee_names if str(x).strip()]
+            caller_lines = [_analysis_display_name(x, function_details_by_name) for x in caller_names if str(x).strip()]
             # Keep canonical relation direction in persisted fields:
-            # called = callees, calling = callers.
+            # called = callees, calling = callers (행 라벨 배치는 `_function_info_pairs` 가 대응표로 정한다).
             info["called"] = "\n".join(callee_lines) if callee_lines else "N/A"
             info["calling"] = "\n".join(caller_lines) if caller_lines else "N/A"
-            if fn_key == "wake_up_setting":
-                current_calling = str(info.get("calling") or "")
-                parsed_names = {
-                    str(x).strip().lower()
-                    for x in _extract_call_names(current_calling)
-                    if str(x).strip()
-                }
-                if (
-                    "l_ifc_init" not in parsed_names
-                    and {"l_sys_init", "monitor_adc_enable", "monitor_adc_init"} & parsed_names
-                ):
-                    lines_now = [ln for ln in current_calling.splitlines() if ln.strip()]
-                    lines_now.insert(0, "l_ifc_init")
-                    dedup_lines: List[str] = []
-                    for ln in lines_now:
-                        clean = str(ln).strip()
-                        if clean and clean not in dedup_lines:
-                            dedup_lines.append(clean)
-                    info["calling"] = "\n".join(dedup_lines) if dedup_lines else current_calling
 
             def _format_globals(items: List[str]) -> List[str]:
                 out: List[str] = []
@@ -2874,12 +4364,19 @@ def generate_uds_docx(
                         parts = [mapping.get(k, "") for k in globals_format_order]
                         out.append(globals_format_sep.join([p for p in parts if p]))
                 return out
+            # ⚠ 파라미터 그리드는 전역이 **표시 문자열로 납작해지기 전에** 뽑는다.
+            #   `_format_globals` 가 지나가면 `Name=… | Type=… | Range=…` 한 줄이 되어
+            #   타입·범위·초기값이 구조로는 사라진다.
+            _grid_in, _grid_out = resolve_param_grid_entries(
+                info, globals_info_map, struct_member_types)
             info["globals_global"] = _format_globals(info.get("globals_global") or [])
             info["globals_static"] = _format_globals(info.get("globals_static") or [])
             info_for_rows = dict(info)
+            info_for_rows["_param_grid_inputs"] = _grid_in
+            info_for_rows["_param_grid_outputs"] = _grid_out
             if payload.get("show_mapping_evidence"):
                 info_for_rows["show_mapping_evidence"] = True
-            data_rows = _build_function_info_rows(info_for_rows, cols)
+            data_rows = _build_function_info_layout(info_for_rows, cols)
             calls_list = list(dict.fromkeys(callee_names))
             if not calls_list:
                 calls_list = _extract_call_names(str(info.get("called") or ""))
@@ -2919,17 +4416,20 @@ def generate_uds_docx(
                     return_path_text=str(info.get("logic_return_path") or ""),
                     error_path_text=str(info.get("logic_error_path") or ""),
                 )
-            if logic_img:
-                for r in data_rows:
-                    if r and "Logic Diagram" in r[0]:
-                        r[1] = Path(logic_img).name
-                        break
-            data_rows = [["[ Function Information ]"] * cols] + data_rows
-            func_table = _add_blank_table(doc, rows, cols, style, None, None)
-            _merge_function_info_table(func_table, cols)
+            # ⚠ 예전엔 여기서 Logic Diagram 행의 값 칸에 이미지 **파일명**을 넣었다.
+            #   6·7열(실측상 유일하게 도달하는 폭)에선 라벨 사본 칸에 써서 화면에 나온
+            #   적이 없는 죽은 쓰기였고, 새 배치에선 살아나 `logic` 본문을 덮는다.
+            #   이미지는 아래 `_insert_logic_image_in_table` 이 그 칸에 직접 넣으므로
+            #   파일명은 어차피 필요 없다 — 죽은 쓰기를 되살리는 대신 지운다.
+            data_rows = [(FN_ROW_FULL, ["[ Function Information ]"])] + data_rows
+            # ⚠ 표의 행 수는 **데이터가 정한다**(R54 N50). 예전엔 템플릿 표의 행 수(= 정본 그 함수의 파라미터 개수)를 하한으로
+            #   두어(`max(len, 템플릿 행 수)`) 우리 행이 더 적은 함수마다 빈 라벨|값 행이 꼬리에 남았다 — 라이브 실측 516/989 표.
+            #   그 전엔 그 값으로 **고정**이라 늘어난 파라미터가 조용히 잘렸다(무템플릿 경로는 하한 18). 둘 다 아니다.
+            func_table = _add_blank_table(doc, len(data_rows), cols, style, None, None)
+            _merge_function_info_table(func_table, cols, data_rows)
             _fill_function_info_table(func_table, data_rows)
             if logic_img:
-                inserted = _insert_logic_image_in_table(func_table, cols, str(logic_img))
+                inserted = _insert_logic_image_in_table(func_table, cols, str(logic_img), picture_sink=_pics)
                 if not inserted:
                     try:
                         from docx.shared import Inches  # type: ignore
@@ -2937,19 +4437,47 @@ def generate_uds_docx(
                         Inches = None  # type: ignore
                     try:
                         doc.add_paragraph("Logic Diagram")
-                        if Inches:
-                            doc.add_picture(str(logic_img), width=Inches(5))
-                        else:
-                            doc.add_picture(str(logic_img))
+                        _pics.add_picture_paragraph(str(logic_img), width=Inches(5) if Inches else None)
                     except Exception as e:
                         _logger.warning("Failed to insert logic diagram: %s", e)
                         doc.add_paragraph("[Logic Diagram not available]")
             return func_table
 
+        def _block_level(payload_la: Any, fallback: int) -> int:
+            # heading payload 는 `(level, title)` 이지만 레벨이 문자열로 오는 템플릿이
+            # 있다. 못 읽으면 호출부가 준 fallback 이 맞다(같은 파일의 기존 전방탐색도
+            # 같은 처리를 한다). 판정은 바뀌지 않는다.
+            try:
+                return int(payload_la[0])
+            except Exception:  # silent-ok — 레벨 파싱 실패는 fallback 이 정답이다
+                return fallback
+
         for idx, block in enumerate(blocks):
             kind, payload_block = block
+            # 버리는 중이면 **다음 형제/상위 heading 까지** 전부 버린다(본문·표 포함).
+            # heading 만 지우고 아래를 남기면 그 내용이 엉뚱한 절에 붙는다.
+            if _drop_until_level:
+                if kind == "heading" and _block_level(payload_block,
+                                                      _drop_until_level) <= _drop_until_level:
+                    _drop_until_level = 0
+                else:
+                    continue
             if kind == "heading":
                 level, title = payload_block
+                # ── payload 에 없는 남의 함수 절 — 지울 것인가 ────────────────
+                # 판정은 계측(`_note_fn_match`)과 **같은 함수**를 쓴다. 규칙이 갈리면
+                # 세는 집합과 지우는 집합이 달라져 수치가 산출물을 설명하지 못한다.
+                # `(삭제)` 표기 heading 은 `empty` 가 아니라 `deleted` 라 여기 안 걸린다 —
+                # 템플릿이 의도해서 비운 자리이므로 그대로 둔다.
+                if _drop_unmatched:
+                    _key_peek = str(title).strip().lower()
+                    if (_SWUFN_HEADING_RE.search(_key_peek)
+                            and _fn_match_kind(
+                                str(title),
+                                _resolve_function_info(str(title), _key_peek)) == "empty"):
+                        _dropped_headings.append(str(title)[:200])
+                        _drop_until_level = _block_level(payload_block, 1)
+                        continue
                 if len(heading_stack) >= level:
                     heading_stack = heading_stack[: level - 1]
                 heading_stack.append(str(title))
@@ -2958,6 +4486,7 @@ def generate_uds_docx(
                 next_kind = _next_block_kind(blocks, idx)
                 has_table = _section_has_table(blocks, idx, level)
                 if key == "overview":
+                    _text_sections_placed.add("overview")
                     _add_docx_bullets(doc, overview)
                 elif key in {
                     "introduction",
@@ -2977,16 +4506,20 @@ def generate_uds_docx(
                         if template_text:
                             _add_docx_lines(doc, template_text)
                 elif key == "requirements":
+                    _text_sections_placed.add("requirements")
                     _add_docx_bullets(doc, requirements)
                 elif key == "interfaces":
+                    _text_sections_placed.add("interfaces")
                     _add_docx_bullets(doc, interfaces)
                 elif key == "uds frames":
+                    _text_sections_placed.add("uds_frames")
                     _add_docx_bullets(doc, uds_frames)
                 elif key == "contents":
                     if not toc_inserted:
                         _add_docx_toc(doc)
                         toc_inserted = True
                 elif key == "notes":
+                    _text_sections_placed.add("notes")
                     _add_docx_bullets(doc, notes)
                 elif key == "software unit design":
                     if next_kind != "table" and not has_table:
@@ -3034,13 +4567,15 @@ def generate_uds_docx(
                             Inches = None  # type: ignore
                         try:
                             doc.add_paragraph("Structure Diagram")
-                            if Inches:
-                                doc.add_picture(str(structure_img), width=Inches(5))
-                            else:
-                                doc.add_picture(str(structure_img))
+                            _pics.add_picture_paragraph(str(structure_img), width=Inches(5) if Inches else None)
                         except Exception as e:
                             _logger.warning("Failed to insert structure diagram: %s", e)
                             doc.add_paragraph("[Structure Diagram not available]")
+                # 아래 3개는 **의도적 no-op**. 헤딩 아래 본문은 텍스트가 아니라
+                # 구조화 데이터로 렌더되므로 여기서 또 쓰면 중복 출력된다:
+                #   global data        → payload["global_vars"] 5열 테이블
+                #   interface/internal → "unit structure" 다이어그램 + 함수 정보 테이블
+                # (payload["global_data"] / ["unit_structure"] 텍스트를 여기 배선하지 말 것)
                 elif key == "global data":
                     pass
                 elif key == "interface functions":
@@ -3056,7 +4591,7 @@ def generate_uds_docx(
                     else:
                         doc.add_paragraph("N/A")
 
-                if re.search(r"\bswufn_\d+\b", key, flags=re.I):
+                if _SWUFN_HEADING_RE.search(key):
                     target_idx = None
                     for look_ahead in range(idx + 1, len(blocks)):
                         kind_la, payload_la = blocks[look_ahead]
@@ -3069,30 +4604,33 @@ def generate_uds_docx(
                                 break
                             continue
                         if kind_la == "table":
-                            rows_la, cols_la, style_la, header_rows_la, _ctx_titles_la = payload_la
+                            (rows_la, cols_la, style_la, header_rows_la,
+                             _ctx_titles_la, _el_la) = payload_la
                             if header_rows_la:
                                 header_texts = [str(c or "").strip() for row in header_rows_la for c in row]
                                 if any("Function Information" in c for c in header_texts):
                                     target_idx = look_ahead
                                     break
-                    swufn_match = re.search(r"(swufn_\\d+)", key, re.I)
-                    if swufn_match and swufn_match.group(1).upper() in swufn_table_spec:
-                        rows, cols, style = swufn_table_spec[swufn_match.group(1).upper()]
-                    elif target_idx is not None:
-                        rows, cols, style, _header_rows, _ctx_titles = blocks[target_idx][1]
+                    # (`swufn_table_spec` 조회는 제거 — 위 2829 주석 참조. 이 전방탐색이
+                    #  같은 표를 찾아내며 실측 429/429 동일했다.)
+                    # 템플릿 표에서는 열 수·스타일만 가져온다 — 행 수는 데이터가 정한다(R54 N50)
+                    if target_idx is not None:
+                        (_rows, cols, style, _header_rows,
+                         _ctx_titles, _el_ti) = blocks[target_idx][1]
                     elif function_info_template:
-                        rows, cols, style, _header_rows = function_info_template
+                        _rows, cols, style, _header_rows = function_info_template
                     else:
-                        rows, cols, style = 18, 6, None
+                        cols, style = PARAM_GRID_COLS, None                  # 정본 그리드 폭(6)
                     info = _resolve_function_info(str(title), key)
-                    _build_function_info_table(info, rows, cols, style)
+                    _note_fn_match(str(title), info)
+                    _build_function_info_table(info, cols, style)
                     if target_idx is not None:
                         skip_table_idx = target_idx
             elif kind == "table":
                 if skip_table_idx == idx:
                     skip_table_idx = -1
                     continue
-                rows, cols, style, header_rows, ctx_titles = payload_block
+                rows, cols, style, header_rows, ctx_titles, tbl_el = payload_block
                 ctx_text = " > ".join(ctx_titles).lower() if ctx_titles else ""
                 current_swcom = _current_swcom_id()
                 current_swcom_label = _current_swcom_label()
@@ -3188,7 +4726,41 @@ def generate_uds_docx(
                     data_rows = _filter_rows_by_swcom(data_rows, current_swcom, current_swcom_label)
                     if not data_rows and cols >= 4:
                         data_rows = [["N/A", "N/A", "N/A", "N/A"]]
-                _add_blank_table(doc, rows, cols, style, header_rows, data_rows)
+                if data_rows is None and tbl_el is not None:
+                    # 위 사슬이 하나도 안 걸렸다 = **생성기가 소유하지 않는 표**(이력·
+                    # 참조 등)다. 모양만 복제하면 데이터 행이 빈칸으로 나가고, 빈칸은
+                    # "이력 없음" 으로 읽힌다 — 실측으로 정본 이력 29행이 헤더만 남았다.
+                    # ⚠ `data_rows == []` 는 다르다: 생성기가 소유하는데 **채울 게
+                    #   없다**는 뜻이라 빈 표가 정답이다. `None` 과 접지 말 것.
+                    # ⚠ 새로 만들지 않으므로 오히려 빠르다(정본은 표 1,165개).
+                    try:
+                        _append_body_block(doc, tbl_el, picture_sink=_pics)
+                        _preserved_tables += 1
+                    except Exception:   # noqa: BLE001 - 실패하면 종전대로 빈 표
+                        _logger.warning("원본 표 복원 실패 — 빈 표로 대체", exc_info=True)
+                        _add_blank_table(doc, rows, cols, style, header_rows, None)
+                else:
+                    # 표 크기는 **데이터**가 정한다. 템플릿 행수를 그대로 쓰면 두
+                    # 방향으로 조용히 틀린다:
+                    #  · 데이터가 많으면 잘린다 — 실측(표준 템플릿) 6개 표에서 1,144행
+                    #    소실, `Software Unit Tables` 는 함수 57개 중 15개만 실렸다.
+                    #  · 데이터가 적으면 빈 행이 남는다 — 실측(정본) 문서 전체 행의
+                    #    28.2%가 완전 빈 행, `Software Unit Tables` 1,037행 중 978행.
+                    # 같은 파일의 비-템플릿 경로 11곳은 이미 `max(len(rows) + 1, 2)` 로
+                    # 데이터에 맞춰 잡는다 — 이 경로만 예외였다.
+                    _n_hdr = min(len(header_rows or []), rows)
+                    _want = _n_hdr + len(data_rows)
+                    _rows_recovered += max(0, len(data_rows) - max(rows - _n_hdr, 0))
+                    _rows_trimmed += max(0, rows - _want)
+                    _add_blank_table(doc, max(_want, 1), cols, style, header_rows, data_rows)
+            elif kind == "raw":
+                # 선행 블록은 위에서 이미 붙였다(자동 목차보다 앞서야 해서).
+                if idx >= _lead_raw:
+                    try:
+                        _append_body_block(doc, payload_block, picture_sink=_pics)
+                        _restored_blocks += 1
+                    except Exception:   # noqa: BLE001
+                        _logger.warning("구조 블록 복원 실패", exc_info=True)
             elif kind == "para":
                 text = str(payload_block.get("text") or "").strip()
                 if not text:
@@ -3212,11 +4784,128 @@ def generate_uds_docx(
                     toc_inserted = True
         _normalize_function_info_tables(doc)
         _remove_docx_paragraphs(doc, ["N/A"])
-        doc.save(str(out))
+        _unmatched = sorted(_payload_fn_names - _matched_fn_names)
+        # ⚠ **템플릿의 프로젝트 신원** (§6 후보 9). 참조 SUDS 와 **같은 판정 함수**를
+        #    쓴다 — 새로 만들면 같은 질문에 답하는 판정이 둘이 되고, 이 저장소가 네 번
+        #    겪은 "한쪽만 고쳐짐" 이 된다.
+        #
+        #    왜 필요한가: 템플릿은 heading 집합이 곧 문서의 함수 목록이다. 남의 프로젝트
+        #    템플릿을 쓰면 ①이 프로젝트 함수가 heading 에 없어 **누락**되고 ②템플릿에만
+        #    있는 남의 함수 heading 이 `_fallback_function_description` 으로 **합성 설명이
+        #    붙은 섹션**으로 출력된다(:3088-3092). 실측(HDPDM01 템플릿 × KJPDS02 payload):
+        #    payload 432개 중 95개(22.0%) 미반영 + 빈 heading 74개인데 판정은 `success`.
+        #
+        #    ⚠ 여기서 `ok`/`success` 판정을 뒤집지 않는다 — 템플릿이 의도된 부분집합인
+        #      경우(회사 양식)가 실제로 있고, 그걸 실패로 만들면 정상 산출이 막힌다.
+        #      **수치와 신원을 표면화**하고 판단은 사람에게 남긴다.
+        _template_identity = _reference_identity_verdict(uds_payload, Path(str(template_path or "")))
+        _stats = {
+            "mode": "template",
+            "template_path": str(template_path or ""),
+            "template_source": template_source,
+            "template_identity": _template_identity,
+            "payload_functions": len(_payload_fn_names),
+            "matched_functions": len(_matched_fn_names),
+            # ⚠ 총량은 캡 **전**에 센다. 아래 sample 은 잘린 예시이므로 그 길이로 총량을
+            #    되짚으면 안 된다(이 저장소가 반복해 겪은 함정).
+            "unmatched_payload_count": len(_unmatched),
+            "unmatched_payload_sample": _unmatched[:_STAT_SAMPLE_CAP],
+            # 실제 갭 — 삭제 표기 heading 은 여기서 제외한다(아래 별도 축).
+            "empty_heading_count": len(_empty_headings),
+            "empty_heading_sample": _empty_headings[:_STAT_SAMPLE_CAP],
+            # **지운** heading — 비워 둔 것과 다른 사실이다. `keep` 이면 0 이고, `drop` 이면
+            # 그만큼이 위 `empty_heading_count` 에서 이리로 옮겨 온다(합은 보존된다).
+            "dropped_heading_count": len(_dropped_headings),
+            "dropped_heading_sample": _dropped_headings[:_STAT_SAMPLE_CAP],
+            "unmatched_headings_mode": _unmatched_mode,
+            # 의도된 빈 heading(템플릿이 "삭제" 로 표기) — 갭 아님. 섞으면 경고가 오탐이 된다.
+            "deleted_heading_count": len(_deleted_headings),
+            "deleted_heading_sample": _deleted_headings[:_STAT_SAMPLE_CAP],
+            # 이름은 payload 에 있는데 내용이 전부 생성기 합성 — "반영" 으로 세면 부풀림.
+            "boilerplate_only_count": len(_boilerplate_headings),
+            "boilerplate_only_sample": _boilerplate_headings[:_STAT_SAMPLE_CAP],
+            "match_pct": (
+                round(100.0 * len(_matched_fn_names) / len(_payload_fn_names), 2)
+                if _payload_fn_names else None      # 분모 0 = 미측정(0% 아님)
+            ),
+            # 템플릿에서 **그대로 가져온** 것. 보존은 옳지만(표지·이력이 그래야 한다)
+            # 템플릿이 남의 프로젝트 문서면 그 값이 그대로 실리므로 침묵하면 안 된다.
+            # 신원 판정(`template_identity`)과 짝으로 읽으라고 같이 낸다.
+            "restored_template_blocks": _restored_blocks,
+            "preserved_template_tables": _preserved_tables,
+            "table_rows_recovered": _rows_recovered,
+            "table_rows_blank_trimmed": _rows_trimmed,
+            "swcom_globals_unattributed": len(_unattributed_swcoms),
+            # (R50 N38) 본문이 있는데 템플릿(정본) 레이아웃에 자리가 없어 **실리지 않은 절** — 글자수. 정본 SwUDS 의
+            #   1레벨 heading 엔 `Requirements` 가 없어 SwRS 요구 절이 매 run 침묵으로 빠졌다. 판정은 바꾸지 않는다
+            #   (정본 레이아웃이 곧 회사 양식) — 사실만 낸다.
+            "text_sections_unplaced": {
+                k: len(str(v)) for k, v in (
+                    ("overview", overview), ("requirements", requirements), ("interfaces", interfaces),
+                    ("uds_frames", uds_frames), ("notes", notes),
+                ) if str(v or "").strip() and k not in _text_sections_placed
+            },
+            # 참조 SUDS 를 얼마나·왜 적용했는지. 로그에만 남기면 산출물 검토자가 못 본다.
+            "reference_suds": _ref_stats,
+        }
+        if _unattributed_swcoms:
+            # 빈 표는 "이 컴포넌트엔 전역변수가 없다" 로 읽힌다 — 실제로는 **모른다** 다.
+            # 침묵하면 그 오독을 못 막으므로 어느 컴포넌트인지까지 남긴다.
+            _logger.warning(
+                "전역/정적 변수를 귀속시키지 못한 컴포넌트 %d개 — 해당 표를 비웠다"
+                "(전체를 싣던 종전 동작은 남의 컴포넌트에 이 프로젝트 전역변수를 전부 "
+                "실었다). 대상: %s. payload 에 그 컴포넌트의 함수가 없으면 이렇게 된다 — "
+                "템플릿이 payload 보다 넓은지 확인할 것.",
+                len(_unattributed_swcoms), ", ".join(sorted(_unattributed_swcoms)[:12]),
+            )
+        if _ref_stats["safety_fields_blocked"]:
+            _logger.warning(
+                "참조 SUDS 의 ASIL·Related %d건을 적용하지 않았다 — 프로젝트 신원 미확인(%s). "
+                "이 프로젝트의 SUDS 를 UDS_REF_SUDS_PATH 로 지정하면 적용된다.",
+                _ref_stats["safety_fields_blocked"], _ref_stats["identity"]["reason"],
+            )
+        if _template_identity.get("same_project") is not True:
+            _logger.warning(
+                "템플릿의 프로젝트 신원을 확인하지 못했다(%s: template=%s vs payload=%s) — "
+                "payload %d개 중 %d개 미반영, 빈 heading %d개. 템플릿 heading 집합이 곧 "
+                "문서의 함수 목록이라, 남의 프로젝트 템플릿이면 이 프로젝트 함수가 누락되고 "
+                "템플릿에만 있는 함수가 합성 설명과 함께 실린다. "
+                "이 프로젝트의 템플릿을 지정할 것(생성 자체는 막지 않는다 — 의도된 부분집합일 수 있다).",
+                _template_identity.get("reason"),
+                _template_identity.get("ref_tokens"), _template_identity.get("payload_tokens"),
+                len(_payload_fn_names), len(_unmatched), len(_empty_headings),
+            )
+        _struct_blocked_total = sum(_ref_stats["structural_fields_blocked"].values())
+        if _struct_blocked_total:
+            _logger.warning(
+                "참조 SUDS 의 구조 축(입출력·전역·호출관계) %d건을 적용하지 않았다 — "
+                "프로젝트 신원 미확인(%s). 축별: %s. "
+                "이 칸은 SUTS 시험 대상 인터페이스 정의라 남의 프로젝트 값이 들어가면 "
+                "존재하지 않는 인터페이스를 시험하는 문서가 된다.",
+                _struct_blocked_total, _ref_stats["identity"]["reason"],
+                _ref_stats["structural_fields_blocked"],
+            )
+        if _unmatched or _empty_headings or _boilerplate_headings:
+            _logger.warning(
+                "UDS DOCX 생성 충실도: payload 함수 %d개 중 %d개 반영(%.1f%%). "
+                "템플릿에 대응 heading 이 없어 **문서에 반영되지 않은 함수 %d개**, "
+                "내용이 전부 생성기 합성인 heading %d개, 내용 없이 남은 heading %d개 "
+                "(삭제 표기 %d개는 갭에서 제외). 템플릿이 의도된 부분집합이 아니면 "
+                "템플릿/프로젝트 설정을 확인할 것. 상세: %s",
+                len(_payload_fn_names), len(_matched_fn_names),
+                100.0 * len(_matched_fn_names) / max(len(_payload_fn_names), 1),
+                len(_unmatched), len(_boilerplate_headings), len(_empty_headings),
+                len(_deleted_headings), gen_stats_path(output_path).name,
+            )
+        if stats_out is not None:
+            stats_out.update(_stats)
+        _write_enriched_function_details(output_path, function_details, _ref_stats)
+        _save_docx(doc, out, output_path, _stats)
         return str(out)
 
     # ── No-template fallback: SUDS-compatible 4-level structure ──
     doc = docx.Document()
+    _pics = _PictureSink(doc)         # (R53 N27-c) 템플릿 분기와 같은 싱크(쌍둥이 한쪽만 고치지 않는다)
     cols = 6  # Function info table column count
 
     # ── Helper functions needed in fallback (template path has these in its scope) ──
@@ -3382,7 +5071,8 @@ def generate_uds_docx(
             f"호출 함수: {calls or 'N/A'}\n"
             "위 정보를 바탕으로 기술적 함수 설명을 JSON으로 반환하세요."
         )
-        import threading, json as _json
+        import json as _json
+        import threading
         result_holder: Dict[str, str] = {}
         def _call():
             try:
@@ -3407,7 +5097,7 @@ def generate_uds_docx(
         t.join(timeout=20)
         return result_holder.get("desc", "")
 
-    def _build_function_info_table(info: Dict[str, Any], rows: int, _cols: int, style: Any) -> None:
+    def _build_function_info_table(info: Dict[str, Any], _cols: int, style: Any) -> None:
         """Build and append a function info table to doc."""
         _fn_key = str(info.get("name") or "").strip().lower()
         # Resolve called/calling
@@ -3423,24 +5113,11 @@ def generate_uds_docx(
                     break
         _caller_names = list(dict.fromkeys(_fb_callers_map.get(_fn_key, [])))
 
-        def _sig_lines(names: List[str]) -> List[str]:
-            out: List[str] = []
-            for nm in names:
-                sig = ""
-                _ci = function_details_by_name.get(str(nm).lower()) if isinstance(function_details_by_name, dict) else None
-                if isinstance(_ci, dict):
-                    sig = str(_ci.get("prototype") or "").strip()
-                out.append(sig or str(nm))
-            return [x for x in out if x]
-
+        # (R56 N52) 이름만(원래 표기) · 함수명 리터럴 특례(main→_Startup) 제거 — 위 `_build_function_info_table` 과 같은 규칙.
         _inf2 = dict(info)
-        _inf2["called"] = "\n".join(_sig_lines(_callee_names)) if _callee_names else "N/A"
+        _inf2["called"] = "\n".join(_analysis_display_name(x, function_details_by_name) for x in _callee_names) if _callee_names else "N/A"
         if not str(_inf2.get("calling") or "").strip():
-            _inf2["calling"] = "\n".join(_sig_lines(_caller_names)) if _caller_names else "N/A"
-        if _fn_key == "main" and not str(_inf2.get("calling") or "").strip().replace("N/A", ""):
-            _inf2["calling"] = "void _Startup(void)"
-        if _fn_key == "main":
-            _inf2["related"] = _inf2.get("related") or "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
+            _inf2["calling"] = "\n".join(_analysis_display_name(x, function_details_by_name) for x in _caller_names) if _caller_names else "N/A"
 
         # AI-enhance description if it's short
         _existing_desc = str(_inf2.get("description") or _inf2.get("desc") or "").strip()
@@ -3449,7 +5126,11 @@ def generate_uds_docx(
             if _ai_desc and len(_ai_desc) > len(_existing_desc):
                 _inf2["description"] = _ai_desc
 
-        _data_rows = _build_function_info_rows(_inf2, _cols)
+        _g_in, _g_out = resolve_param_grid_entries(
+            _inf2, globals_info_map, struct_member_types)
+        _inf2["_param_grid_inputs"] = _g_in
+        _inf2["_param_grid_outputs"] = _g_out
+        _data_rows = _build_function_info_layout(_inf2, _cols)
         # Attempt logic diagram
         _logic_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(_inf2.get("id") or _fn_key or "fn")).strip("_")
         _logic_img_path = Path(out).parent / "logic" / f"{_logic_key}.png"
@@ -3467,22 +5148,16 @@ def generate_uds_docx(
                 max_depth=int(payload.get("logic_max_depth") or LOGIC_MAX_DEPTH_DEFAULT),
                 module_map=module_map if isinstance(module_map, dict) else None,
             )
-        if _logic_img:
-            for _r in _data_rows:
-                if _r and "Logic Diagram" in _r[0]:
-                    _r[1] = Path(_logic_img).name
-                    break
-        _data_rows = [["[ Function Information ]"] * _cols] + _data_rows
-        _rows_per_fn = max(len(_data_rows), rows)
-        _ft = _add_blank_table(doc, _rows_per_fn, _cols, style, None, None)
-        _merge_function_info_table(_ft, _cols)
+        _data_rows = [(FN_ROW_FULL, ["[ Function Information ]"])] + _data_rows
+        _ft = _add_blank_table(doc, len(_data_rows), _cols, style, None, None)   # (R54 N50) 행 수는 데이터가 정한다 — 하한 18 은 빈 꼬리 행이었다
+        _merge_function_info_table(_ft, _cols, _data_rows)
         _fill_function_info_table(_ft, _data_rows)
         if _logic_img:
-            if not _insert_logic_image_in_table(_ft, _cols, str(_logic_img)):
+            if not _insert_logic_image_in_table(_ft, _cols, str(_logic_img), picture_sink=_pics):
                 try:
                     from docx.shared import Inches as _I  # type: ignore
                     doc.add_paragraph("Logic Diagram")
-                    doc.add_picture(str(_logic_img), width=_I(5))
+                    _pics.add_picture_paragraph(str(_logic_img), width=_I(5))
                 except Exception:
                     doc.add_paragraph("[Logic Diagram not available]")
 
@@ -3615,7 +5290,7 @@ def generate_uds_docx(
         if _struct_img:
             try:
                 from docx.shared import Inches as _Inches  # type: ignore
-                doc.add_picture(str(_struct_img), width=_Inches(5))
+                _pics.add_picture_paragraph(str(_struct_img), width=_Inches(5))
             except Exception:
                 doc.add_paragraph(f"[Unit Structure: {_swcom_id}]")
         else:
@@ -3676,7 +5351,7 @@ def generate_uds_docx(
                 )
                 if not isinstance(_inf, dict):
                     _inf = {"id": _fid2, "name": _fname2}
-                _build_function_info_table(_inf, 18, cols, None)
+                _build_function_info_table(_inf, cols, None)
                 fn_added += 1
 
         _write_fn_section(_swcom_func_map[_swcom_id]["interfaces"], "Interface Functions", 3)
@@ -3701,16 +5376,42 @@ def generate_uds_docx(
                 doc.add_paragraph(str(title))
             if path:
                 try:
-                    if Inches:
-                        doc.add_picture(str(path), width=Inches(5))
-                    else:
-                        doc.add_picture(str(path))
+                    _pics.add_picture_paragraph(str(path), width=Inches(5) if Inches else None)
                 except Exception:
                     continue
             if desc:
                 doc.add_paragraph(str(desc))
 
-    doc.save(str(out))
+    # 비템플릿 폴백 — 문서를 payload 로부터 새로 쓰므로 반영 누락이 원리적으로 없다.
+    # 그래도 mode 를 남긴다(통계 부재를 "정상"으로 오독하지 않게).
+    _nt_fn_names = {
+        _normalize_symbol_name(str(v.get("name"))).lower()
+        for src in (payload.get("function_details"), payload.get("function_details_by_name"))
+        if isinstance(src, dict)
+        for v in src.values()
+        if isinstance(v, dict) and v.get("name")
+    }
+    _nt_stats = {
+        "mode": "no_template",
+        "template_path": "",
+        "template_source": "none",
+        "payload_functions": len(_nt_fn_names),
+        "matched_functions": len(_nt_fn_names),
+        "unmatched_payload_count": 0,
+        "unmatched_payload_sample": [],
+        "empty_heading_count": 0,
+        "empty_heading_sample": [],
+        "match_pct": 100.0 if _nt_fn_names else None,
+        # ⚠ 이 키가 **없었다**. 참조 SUDS 병합 루프는 템플릿/폴백 분기보다 **위**에서
+        #    항상 돌기 때문에, 폴백 모드에서도 남의 프로젝트 문서 값이 들어간다. 그런데
+        #    사이드카에는 흔적이 하나도 안 남아 검토자가 "참조를 안 썼다" 로 읽었다.
+        #    템플릿 경로에만 기록을 넣은 전형적인 "한쪽만 고침" 이라 여기서 닫는다.
+        "reference_suds": _ref_stats,
+    }
+    if stats_out is not None:
+        stats_out.update(_nt_stats)
+    _write_enriched_function_details(output_path, function_details, _ref_stats)
+    _save_docx(doc, out, output_path, _nt_stats)
     return str(out)
 
 

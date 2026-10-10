@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from workflow.rag.ingestor import (
-    _split_paths,
     _collect_files_from_paths,
     _infer_vectorcast_tags,
+    _split_paths,
 )
 
 

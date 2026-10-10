@@ -19,7 +19,7 @@ function loadBookmarks() {
     const raw = localStorage.getItem(BOOKMARK_KEY);
     const arr = JSON.parse(raw || '[]');
     return Array.isArray(arr) ? arr.filter(p => typeof p === 'string') : [];
-  } catch (e) {
+  } catch (_e) {
     return [];
   }
 }
@@ -98,7 +98,7 @@ export default function PathPickerDialog({
           const j = await res.json();
           msg = j?.error?.message || j?.detail || j?.message || msg;
           code = j?.error?.code || j?.code || '';
-        } catch (e) { /* non-JSON */ }
+        } catch (_e) { /* non-JSON */ }
         setError(msg);
         // 39차: 403 CLOUDIUM_BLOCKED 시 자동 add 제안
         if (res.status === 403 && (code === 'CLOUDIUM_BLOCKED' || /Cloudium/i.test(msg))) {
@@ -149,7 +149,7 @@ export default function PathPickerDialog({
         try {
           const j = await res.json();
           msg = j?.error?.message || j?.detail || msg;
-        } catch (e) { /* non-JSON */ }
+        } catch (_e) { /* non-JSON */ }
         setError(`Worker 다이얼로그 실패: ${msg}`);
         return;
       }
@@ -192,7 +192,7 @@ export default function PathPickerDialog({
         try {
           const j = await res.json();
           msg = j?.error?.message || j?.detail || msg;
-        } catch (e) { /* non-JSON */ }
+        } catch (_e) { /* non-JSON */ }
         setError(`경로 등록 실패: ${msg}`);
         return;
       }
@@ -232,7 +232,7 @@ export default function PathPickerDialog({
         try {
           const j = await res.json();
           msg = j?.error?.message || j?.detail || msg;
-        } catch (e) { /* non-JSON */ }
+        } catch (_e) { /* non-JSON */ }
         setError(`prefix 추가 실패: ${msg}`);
         return;
       }
@@ -283,7 +283,7 @@ export default function PathPickerDialog({
       const parentDir = filePath.replace(/[\\/][^\\/]+$/, '') || filePath;
       saveBookmark(parentDir);
       setBookmarks(loadBookmarks());
-    } catch (e) { /* ignore */ }
+    } catch (_e) { /* ignore */ }
     if (onSelect) onSelect(filePath);
     if (onClose) onClose();
   };

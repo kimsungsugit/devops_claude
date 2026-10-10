@@ -1,15 +1,53 @@
 """Report Parser 단위 테스트"""
 from pathlib import Path
+
 import pytest
 
 from backend.services.report_parsers import (
     _clean_text,
+    _first_present,
+    _is_worstrules_header,
     _parse_number,
+    build_report_summary,
     parse_html_report,
+    parse_prqa_rcr_details,
+    parse_prqa_rcr_summary,
+    parse_vectorcast_aggregate_summary,
     read_text_safe,
+    resolve_code_metrics,
+    resolve_scm_vcast_metrics,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+# Helix QAC 포맷 RCR — PRQA와 라벨이 다르다("... (including CMA)", "... (including headers)").
+# KJPDS02_* 등이 이 포맷. 파일수/LOC 라벨 변형 + 공통 위반 라벨을 담는다.
+_HELIX_RCR_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+<table>
+<tr><td>Number of Files (including CMA)</td><td>126</td></tr>
+<tr><td>Lines of Code (including headers)</td><td>67464</td></tr>
+<tr><td>Total preprocessed code lines (STTLN)</td><td>21194</td></tr>
+<tr><td>Diagnostic Count</td><td>496</td></tr>
+<tr><td>Rule Violation Count</td><td>558</td></tr>
+<tr><td>Violated Rules</td><td>18</td></tr>
+<tr><td>Compliant Rules</td><td>211</td></tr>
+<tr><td>File Compliance Index</td><td>99</td></tr>
+<tr><td>Project Compliance Index</td><td>92</td></tr>
+</table></body></html>"""
+
+
+def _write_report_dir(tmp_path, *, analysis_summary, rcr_html=None):
+    """build_report_summary가 읽는 최소 report_dir 픽스처(analysis_summary.json[+RCR html])를 만든다."""
+    import json
+    rdir = tmp_path / "report"
+    rdir.mkdir()
+    (rdir / "analysis_summary.json").write_text(
+        json.dumps(analysis_summary), encoding="utf-8")
+    if rcr_html is not None:
+        # RCR을 report_dir 부모(빌드 루트)에 둔다 — KJPDS02_* 실제 레이아웃과 동일.
+        (tmp_path / "PROJ_RCR_01012026.html").write_text(rcr_html, encoding="utf-8")
+    return rdir
 
 
 class TestCleanText:
@@ -80,3 +118,660 @@ class TestParseHtmlReport:
         result = parse_html_report(path)
         assert result["title"] is not None
         assert len(result["tables"]) > 0
+
+
+# ── PRQA/Helix QAC RCR 위반 상세 (파일 × 규칙 매트릭스) ──────────────────────
+# 신형(숫자 앵커 WorstRules1 + M3CM/Secure C 다중 그룹 테이블) 리포트 형태를 재현.
+# DiagsPerParents(‘Total Violations’ 열)·FileStatus는 매트릭스에서 제외돼야 한다.
+_RCR_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="worstrules">
+  <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+  <div class="subsec"><h5>M3CM</h5></div>
+  <table border="1">
+   <tr><th>Files</th><th>Rule-2.1</th><th>Rule-8.6</th></tr>
+   <tr><td align="left"><a href="..\\src\\foo.c" title="..\\src\\foo.c">foo.c</a></td><td>3</td><td>5</td></tr>
+   <tr><td align="left"><a href="..\\src\\bar.c" title="..\\src\\bar.c">bar.c</a></td><td>0</td><td>10</td></tr>
+   <tr><td align="left"><a>RCMA</a></td><td>0</td><td>7</td></tr>
+   <tr><td align="left"><a href="..\\src\\zero.h" title="..\\src\\zero.h">zero.h</a></td><td>0</td><td>0</td></tr>
+  </table>
+  <div class="subsec"><h5>Secure C</h5></div>
+  <table border="1">
+   <tr><th>Files</th><th>C-INT-002</th></tr>
+   <tr><td align="left"><a href="..\\src\\foo.c" title="..\\src\\foo.c">foo.c</a></td><td>2</td></tr>
+  </table>
+ </div>
+ <div class="diags">
+  <div class="sec"><h3><a name="DiagsPerParents1">Diagnostics Per Parent Rules</a></h3></div>
+  <table border="1">
+   <tr><th>Files</th><th>Rule 1</th><td><b>Total Violations</b></td></tr>
+   <tr><td align="left"><a href="..\\src\\ghost.c" title="..\\src\\ghost.c">ghost.c</a></td><td>99</td><td><b>99</b></td></tr>
+  </table>
+ </div>
+ <div class="analstat">
+  <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+  <table border="1" id="filestat">
+   <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+   <tr><td align="left"><a href="..\\src\\bar.c" title="..\\src\\bar.c">bar.c</a></td><td>10</td><td>1</td><td>10</td><td>95.00%</td></tr>
+   <tr><td align="left"><a href="..\\src\\foo.c" title="..\\src\\foo.c">foo.c</a></td><td>8</td><td>3</td><td>10</td><td>98.00%</td></tr>
+   <tr><td align="left">Total</td><td>18</td><td>4</td><td>9999</td><td>99.00%</td></tr>
+  </table>
+ </div>
+</body></html>"""
+
+
+class TestWorstRulesHeader:
+    def test_worstrules_signature(self):
+        assert _is_worstrules_header(["Files", "Rule-2.1", "Rule-8.6"]) is True
+        assert _is_worstrules_header(["Files", "C-INT-002"]) is True
+
+    def test_diagsperparents_excluded(self):
+        # ‘Total Violations’ 열 보유 → 배제
+        assert _is_worstrules_header(["Files", "Rule 1", "Total Violations"]) is False
+
+    def test_filestatus_excluded(self):
+        assert _is_worstrules_header(
+            ["Files", "Active Diagnostics", "Violated Rules", "Violation Count", "Compliance Index"]
+        ) is False
+
+    def test_non_file_table_excluded(self):
+        assert _is_worstrules_header(["Group", "Rule", "Status"]) is False
+        assert _is_worstrules_header([]) is False
+
+
+class TestPrqaRcrDetails:
+    def _parse(self, tmp_path):
+        p = tmp_path / "PROJ_RCR_01012026.html"
+        p.write_text(_RCR_HTML, encoding="utf-8")
+        return parse_prqa_rcr_details(p)
+
+    def test_violations_by_file_matrix(self, tmp_path):
+        res = self._parse(tmp_path)
+        vbf = {f["file"]: f for f in res["violations_by_file"]}
+        # foo.c 는 M3CM(Rule-2.1=3, Rule-8.6=5) + Secure C(C-INT-002=2) 병합 → total 10
+        assert vbf["foo.c"]["total"] == 10
+        foo_rules = {r["rule"]: r["count"] for r in vbf["foo.c"]["rules"]}
+        assert foo_rules == {"Rule-8.6": 5, "Rule-2.1": 3, "C-INT-002": 2}
+        # 규칙은 건수 내림차순 정렬
+        assert [r["rule"] for r in vbf["foo.c"]["rules"]] == ["Rule-8.6", "Rule-2.1", "C-INT-002"]
+        # bar.c = Rule-8.6 10
+        assert vbf["bar.c"]["total"] == 10
+        # RCMA(앵커 href 없음)도 위반 있으면 포함, path 는 빈 문자열
+        assert vbf["RCMA"]["total"] == 7
+        assert vbf["RCMA"]["path"] == ""
+
+    def test_zero_row_and_diags_excluded(self, tmp_path):
+        res = self._parse(tmp_path)
+        files = {f["file"] for f in res["violations_by_file"]}
+        assert "zero.h" not in files          # 전부 0 → 제외
+        assert "ghost.c" not in files          # DiagsPerParents 테이블 → 매트릭스 제외
+
+    def test_counts_are_int(self, tmp_path):
+        res = self._parse(tmp_path)
+        for f in res["violations_by_file"]:
+            assert isinstance(f["total"], int)
+            for r in f["rules"]:
+                assert isinstance(r["count"], int)
+
+    def test_sorted_by_total_desc_then_name(self, tmp_path):
+        res = self._parse(tmp_path)
+        order = [f["file"] for f in res["violations_by_file"]]
+        # bar.c(10)·foo.c(10) 동점 → 파일명 오름차순, 이어서 RCMA(7)
+        assert order == ["bar.c", "foo.c", "RCMA"]
+
+    def test_top_rules_merged_from_all_groups(self, tmp_path):
+        res = self._parse(tmp_path)
+        totals = {r["rule"]: r["count"] for r in res["top_rules"]}
+        assert totals["Rule-8.6"] == 22        # 5 + 10 + 7 (foo/bar/RCMA)
+        assert totals["Rule-2.1"] == 3
+        assert totals["C-INT-002"] == 2
+        # 내림차순
+        assert res["top_rules"][0]["rule"] == "Rule-8.6"
+
+    def test_top_files_enriched(self, tmp_path):
+        res = self._parse(tmp_path)
+        tf = {f["file"]: f for f in res["top_files"]}
+        assert tf["foo.c"]["violated_rules"] == 3
+        assert tf["foo.c"]["compliance_index"] == "98.00%"
+        assert tf["bar.c"]["violated_rules"] == 1
+        assert tf["bar.c"]["path"] == "../src/bar.c"   # 역슬래시 정규화
+        # FileStatus 말미 'Total' 집계 행은 파일이 아니므로 top_files에서 제외
+        assert "Total" not in tf
+
+    def test_missing_file_graceful(self, tmp_path):
+        res = parse_prqa_rcr_details(tmp_path / "nope.html")
+        assert "error" in res
+
+    def test_build_summary_finds_rcr_in_parent(self, tmp_path):
+        """RCR HTML이 report/ 하위가 아니라 빌드 루트(부모)에 있어도 심층 상세를 복원한다.
+
+        KJPDS02_* Jenkins 잡은 RCR을 빌드 루트에 두는데 _detect_reports_dir는 report/를
+        반환해, report_dir 스캔이 RCR을 놓쳐 top_rules/top_files/violations_by_file이
+        전부 비던 회귀. build_report_summary의 부모 디렉토리 폴백을 고정한다.
+        """
+        build_root = tmp_path / "build_99"
+        report_dir = build_root / "report"
+        report_dir.mkdir(parents=True)
+        (build_root / "PROJ_RCR_01012026.html").write_text(_RCR_HTML, encoding="utf-8")
+        prqa = build_report_summary(report_dir)["kpis"]["prqa"]
+        assert len(prqa["violations_by_file"]) > 0   # 부모 폴백으로 RCR 발견
+        assert len(prqa["top_rules"]) > 0
+        assert len(prqa["top_files"]) > 0
+
+    def test_build_summary_picks_newest_rcr_across_locations(self, tmp_path):
+        """report/의 오래된 RCR보다 빌드 루트의 최신 RCR을 mtime 기준으로 선택한다.
+
+        파일명 사전순(DDMMYYYY)이나 report/ stale RCR에 오도되지 않도록 위치 무관
+        mtime 최신 선택을 고정. (사전순이면 'NEW' < 'OLD'라 stale을 골라 빈 상세가 됨.)
+        """
+        import os
+        build_root = tmp_path / "build_1"
+        report_dir = build_root / "report"
+        report_dir.mkdir(parents=True)
+        stale = report_dir / "NEW_RCR_01012020.html"   # 이름은 사전순 앞이나 mtime은 과거
+        stale.write_text("<html><body>empty</body></html>", encoding="utf-8")
+        fresh = build_root / "OLD_RCR_01012026.html"    # 이름은 사전순 뒤지만 mtime은 최신
+        fresh.write_text(_RCR_HTML, encoding="utf-8")
+        os.utime(stale, (1_000_000, 1_000_000))
+        os.utime(fresh, (2_000_000, 2_000_000))
+        prqa = build_report_summary(report_dir)["kpis"]["prqa"]
+        assert len(prqa["violations_by_file"]) > 0     # 최신(fresh) RCR 선택 → 상세 채워짐
+
+    def test_same_basename_different_path_not_merged(self, tmp_path):
+        # 동일 basename(config.c)이 APP/BOOT 두 경로에 존재 → full path 키로 분리돼야 함
+        html = (
+            '<html><body><div class="sec"><h3><a name="WorstRules1">x</a></h3></div>'
+            '<table border="1"><tr><th>Files</th><th>Rule-2.1</th></tr>'
+            '<tr><td><a href="..\\APP\\config.c" title="..\\APP\\config.c">config.c</a></td><td>3</td></tr>'
+            '<tr><td><a href="..\\BOOT\\config.c" title="..\\BOOT\\config.c">config.c</a></td><td>5</td></tr>'
+            "</table></body></html>"
+        )
+        p = tmp_path / "PROJ_RCR.html"
+        p.write_text(html, encoding="utf-8")
+        res = parse_prqa_rcr_details(p)
+        vbf = res["violations_by_file"]
+        assert len(vbf) == 2                       # 오병합 없이 2건
+        paths = sorted(f["path"] for f in vbf)
+        assert paths == ["../APP/config.c", "../BOOT/config.c"]
+        totals = sorted(f["total"] for f in vbf)
+        assert totals == [3, 5]                    # 합산(8) 아님
+
+
+# FileStatus(권위 위반수) 주도 재조립 — WorstRules 부분집합을 잔차로 채우고 FS-only 파일도 복원(F1).
+_RCR_RECON_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th><th>Rule-10.4</th></tr>
+  <tr><td align="left"><a href="..\\src\\alpha.c" title="..\\src\\alpha.c">alpha.c</a></td><td>5</td><td>0</td></tr>
+ </table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1" id="filestat">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  <tr><td align="left"><a href="..\\src\\alpha.c" title="..\\src\\alpha.c">alpha.c</a></td><td>8</td><td>2</td><td>8</td><td>96.00%</td></tr>
+  <tr><td align="left"><a href="..\\src\\beta.c" title="..\\src\\beta.c">beta.c</a></td><td>4</td><td>1</td><td>4</td><td>98.00%</td></tr>
+  <tr><td align="left">Total</td><td>12</td><td>3</td><td>12</td><td>97.00%</td></tr>
+ </table>
+</body></html>"""
+
+
+# Enabled/Disabled Rule Groups — disabled 하위 WorstRules는 병합에서 제외돼야 한다(F3).
+_RCR_DISABLED_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <h2>Diagnostics in Enabled Rule Groups</h2>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th></tr>
+  <tr><td align="left"><a href="..\\src\\en.c" title="..\\src\\en.c">en.c</a></td><td>7</td></tr>
+ </table>
+ <h2>Diagnostics in Disabled Rule Groups</h2>
+ <div class="sec"><h3><a name="WorstRules2">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-99.9</th></tr>
+  <tr><td align="left"><a href="..\\src\\dis.c" title="..\\src\\dis.c">dis.c</a></td><td>50</td></tr>
+ </table>
+</body></html>"""
+
+
+# 집계행 'Total' VC가 개별 파일 합을 초과 — 표 자립 총계 포착 + 미귀속 위반(W1/F1-b).
+_RCR_UNATTRIB_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th></tr>
+  <tr><td align="left"><a href="..\\src\\a.c" title="..\\src\\a.c">a.c</a></td><td>8</td></tr>
+ </table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  <tr><td align="left"><a href="..\\src\\a.c" title="..\\src\\a.c">a.c</a></td><td>8</td><td>1</td><td>8</td><td>96.00%</td></tr>
+  <tr><td align="left"><a href="..\\src\\b.c" title="..\\src\\b.c">b.c</a></td><td>4</td><td>1</td><td>4</td><td>98.00%</td></tr>
+  <tr><td align="left">Total</td><td>25</td><td>2</td><td>20</td><td>95.00%</td></tr>
+ </table>
+</body></html>"""
+
+
+# WorstRules 합(10)이 FileStatus VC(6)를 초과하는 소스 불일치 — badge 합 ≤ total 보장(W2).
+_RCR_WR_EXCEEDS_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th></tr>
+  <tr><td align="left"><a href="..\\src\\z.c" title="..\\src\\z.c">z.c</a></td><td>10</td></tr>
+ </table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  <tr><td align="left"><a href="..\\src\\z.c" title="..\\src\\z.c">z.c</a></td><td>6</td><td>1</td><td>6</td><td>96.00%</td></tr>
+  <tr><td align="left"><a href="..\\src\\clean.c" title="..\\src\\clean.c">clean.c</a></td><td>0</td><td>0</td><td>0</td><td>100.00%</td></tr>
+  <tr><td align="left">Total</td><td>6</td><td>1</td><td>6</td><td>96.00%</td></tr>
+ </table>
+</body></html>"""
+
+
+class TestRcrFileStatusReconciliation:
+    """F1: violations_by_file를 FileStatus(권위 total)로 재조립 — 잔차 '기타 규칙' + FS-only 복원."""
+
+    def _details(self, tmp_path, html):
+        p = tmp_path / "PROJ_RCR_01012026.html"
+        p.write_text(html, encoding="utf-8")
+        return parse_prqa_rcr_details(p)
+
+    def test_total_matches_filestatus_not_worstrules_sum(self, tmp_path):
+        res = self._details(tmp_path, _RCR_RECON_HTML)
+        vbf = {f["file"]: f for f in res["violations_by_file"]}
+        # alpha.c: FileStatus VC=8이 total(WorstRules 합 5가 아님) → 잔차 3을 '기타 규칙'으로.
+        assert vbf["alpha.c"]["total"] == 8
+        rules = {r["rule"]: r["count"] for r in vbf["alpha.c"]["rules"]}
+        assert rules["Rule-8.6"] == 5
+        assert rules["기타 규칙 (비상위)"] == 3
+        residual = next(r for r in vbf["alpha.c"]["rules"] if r.get("residual"))
+        assert residual["count"] == 3 and residual["residual"] is True
+
+    def test_filestatus_only_file_recovered(self, tmp_path):
+        # beta.c는 WorstRules에 전혀 없지만 FileStatus VC=4 → 전량 잔차로 복원(과거엔 통째 누락).
+        res = self._details(tmp_path, _RCR_RECON_HTML)
+        vbf = {f["file"]: f for f in res["violations_by_file"]}
+        assert "beta.c" in vbf
+        assert vbf["beta.c"]["total"] == 4
+        assert vbf["beta.c"]["rules"] == [{"rule": "기타 규칙 (비상위)", "count": 4, "residual": True}]
+
+    def test_sum_equals_attributed_total_and_top_files(self, tmp_path):
+        res = self._details(tmp_path, _RCR_RECON_HTML)
+        sum_vbf = sum(f["total"] for f in res["violations_by_file"])
+        assert sum_vbf == 12
+        assert res["violations_attributed_total"] == 12
+        # 파일별 total이 top_files 위반수와 정합(같은 파일 이중 위반수 제거).
+        tf = {f["file"]: int(f["count"]) for f in res["top_files"]}
+        for f in res["violations_by_file"]:
+            assert tf[f["file"]] == f["total"]
+
+    def test_attributed_total_none_without_filestatus(self, tmp_path):
+        # FileStatus 부재(구 변형) → WorstRules-only graceful, 귀속합 None(각주 미표시).
+        res = self._details(tmp_path, _RCR_DISABLED_HTML)  # 이 픽스처엔 FileStatus 없음
+        assert res["violations_attributed_total"] is None
+
+    def test_disabled_rule_group_excluded(self, tmp_path):
+        # F3: 'Disabled Rule Groups' 하위 WorstRules(dis.c/Rule-99.9)는 병합 제외.
+        res = self._details(tmp_path, _RCR_DISABLED_HTML)
+        rule_names = {r["rule"] for r in res["top_rules"]}
+        assert "Rule-8.6" in rule_names
+        assert "Rule-99.9" not in rule_names          # 비활성 규칙 오합산 차단
+        files = {f["file"] for f in res["violations_by_file"]}
+        assert "en.c" in files and "dis.c" not in files
+
+    def test_enabled_worstrules_not_wrongly_excluded(self, tmp_path):
+        # enabled 그룹(또는 h2 부재 구형)은 'disabled' 미포함이라 제외되면 안 된다(회귀 방지).
+        res = self._details(tmp_path, _RCR_RECON_HTML)   # h2 없음 → skip 로직 무영향
+        assert any(r["rule"] == "Rule-8.6" for r in res["top_rules"])
+
+    def test_filestatus_total_vc_and_unattributed(self, tmp_path):
+        # W1: 집계행 'Total' VC(20)를 표 자립 근거로 포착. 미귀속 = 20 − Σ개별(12) = 8.
+        res = self._details(tmp_path, _RCR_UNATTRIB_HTML)
+        assert res["filestatus_total_vc"] == 20
+        assert res["violations_attributed_total"] == 12
+        assert res["filestatus_total_vc"] - res["violations_attributed_total"] == 8
+
+    def test_filestatus_total_vc_none_without_filestatus(self, tmp_path):
+        # 집계행/FileStatus 부재 → None(프론트가 헤드라인으로 폴백).
+        res = self._details(tmp_path, _RCR_DISABLED_HTML)
+        assert res["filestatus_total_vc"] is None
+
+    def test_worstrules_exceeds_filestatus_no_badge_over_total(self, tmp_path):
+        # W2: 소스 불일치(WorstRules 합 10 > FileStatus VC 6)에도 badge 합이 total을 넘지 않는다.
+        res = self._details(tmp_path, _RCR_WR_EXCEEDS_HTML)
+        z = next(f for f in res["violations_by_file"] if f["file"] == "z.c")
+        assert z["total"] == 10                                    # max(6, 10)
+        assert sum(r["count"] for r in z["rules"]) == z["total"]   # 정합(초과 표시 없음)
+        assert not any(r.get("residual") for r in z["rules"])      # residual 음수 → 잔차 미추가
+
+    def test_zero_count_file_excluded_from_top_files(self, tmp_path):
+        # I4: VC=0 파일(clean.c)은 '위반 상위 파일'에서 제외.
+        res = self._details(tmp_path, _RCR_WR_EXCEEDS_HTML)
+        tf_files = {f["file"] for f in res["top_files"]}
+        assert "z.c" in tf_files
+        assert "clean.c" not in tf_files
+
+
+class TestFirstPresent:
+    def test_returns_first_non_none(self):
+        d = {"a": None, "b": 5, "c": 9}
+        assert _first_present(d, "a", "b", "c") == 5
+
+    def test_all_missing_or_none(self):
+        assert _first_present({"a": None}, "a", "x") is None
+
+
+class TestHelixRcrLabels:
+    """Helix QAC 변형 라벨(파일수/LOC)이 PRQA 라벨과 함께 추출되는지(A1)."""
+
+    def test_helix_file_and_loc_labels_extracted(self, tmp_path):
+        p = tmp_path / "PROJ_RCR_01012026.html"
+        p.write_text(_HELIX_RCR_HTML, encoding="utf-8")
+        m = parse_prqa_rcr_summary(p)["metrics"]
+        # Helix 변형 라벨로도 파일수/LOC가 회수돼야 한다(과거엔 누락 → number_of_files=0).
+        assert m.get("Number of Files (including CMA)") == 126
+        assert m.get("Lines of Code (including headers)") == 67464
+        # 공통 위반 라벨은 여전히 정상.
+        assert m.get("Rule Violation Count") == 558
+        assert m.get("Diagnostic Count") == 496
+
+
+class TestCodeMetricsQacFallback:
+    """code_metrics: lizard(complexity.csv) 부재 시 QAC 폴백 + source/reason 표식(A2)."""
+
+    def test_qac_fallback_when_lizard_absent(self, tmp_path):
+        # KJPDS02_PV 형태: analysis_summary.code_metrics=all None + QAC RCR/HMR 존재.
+        rdir = _write_report_dir(
+            tmp_path,
+            analysis_summary={
+                "code_metrics": {"code_files": None, "functions": None, "nloc": None},
+                "prqa": {
+                    "rcr": {"ok": True, "summary": {"Rule Violation Count": 558}},
+                    "hmr": {"ok": True, "stats": {"functions_total": 881}},
+                },
+            },
+            rcr_html=_HELIX_RCR_HTML,
+        )
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] == "qac"
+        assert cm["code_files"] == 126        # Helix RCR "Number of Files (including CMA)"
+        assert cm["functions"] == 881         # HMR functions_total
+        assert cm["nloc"] == 67464            # Helix RCR "Lines of Code (including headers)"
+
+    def test_lizard_kept_when_present_no_regression(self, tmp_path):
+        # HDPDM01 형태: complexity.csv 유래 code_metrics 존재 → 그대로 유지 + source='lizard'.
+        rdir = _write_report_dir(
+            tmp_path,
+            analysis_summary={
+                "code_metrics": {"code_files": 30, "functions": 349, "nloc": 4429},
+                "prqa": {"rcr": {"ok": True, "summary": {"Rule Violation Count": 577}}},
+            },
+            rcr_html=_HELIX_RCR_HTML,   # QAC가 있어도 lizard가 우선(폴백 미발동)
+        )
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] == "lizard"
+        assert (cm["code_files"], cm["functions"], cm["nloc"]) == (30, 349, 4429)
+
+    def test_absent_marks_reason_when_no_lizard_no_qac(self, tmp_path):
+        # 완전 부재: lizard 없음 + QAC 리포트도 없음 → source=None + reason(침묵 제거).
+        rdir = _write_report_dir(
+            tmp_path,
+            analysis_summary={"code_metrics": {"code_files": None, "functions": None, "nloc": None}},
+        )
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] is None
+        assert cm["reason"] == "no_complexity_csv_and_no_qac"
+        assert cm["code_files"] is None and cm["functions"] is None and cm["nloc"] is None
+
+    def test_code_metrics_json_null_does_not_crash(self, tmp_path):
+        # analysis_summary.code_metrics가 JSON null(None)이어도 dict(None) 크래시 없이 처리(방어).
+        rdir = _write_report_dir(tmp_path, analysis_summary={"code_metrics": None})
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] is None and cm["reason"] == "no_complexity_csv_and_no_qac"
+
+
+class TestResolveCodeMetrics:
+    """resolve_code_metrics 공용 헬퍼 — 상세탭(build_report_summary)·대시보드(aggregate_stats) 단일 출처."""
+
+    def test_aggregate_path_reads_cached_prqa_summary(self):
+        # aggregate는 live 인자 없이 analysis_summary.prqa(캐시)에서 QAC 폴백을 해석한다.
+        summary = {
+            "code_metrics": {"code_files": None, "functions": None, "nloc": None},
+            "prqa": {
+                "rcr": {"summary": {"Number of Files (including CMA)": 126,
+                                    "Lines of Code (including headers)": 67464}},
+                "hmr": {"stats": {"functions_total": 881}},
+            },
+        }
+        cm = resolve_code_metrics(summary)
+        assert cm == {"code_files": 126, "functions": 881, "nloc": 67464, "source": "qac"}
+
+    def test_lizard_present_keeps_values_and_labels_source(self):
+        cm = resolve_code_metrics({"code_metrics": {"code_files": 30, "functions": 349, "nloc": 4429}})
+        assert cm["source"] == "lizard"
+        assert (cm["code_files"], cm["functions"], cm["nloc"]) == (30, 349, 4429)
+
+    def test_live_override_takes_precedence_over_cached(self):
+        # build_report_summary 경로: live RCR 파싱값(prqa_metrics)/HMR stats가 캐시보다 우선.
+        summary = {
+            "code_metrics": {"code_files": None, "functions": None, "nloc": None},
+            "prqa": {"rcr": {"summary": {"Lines of Code (source files only)": 99999}}},
+        }
+        cm = resolve_code_metrics(
+            summary,
+            prqa_metrics={"Number of Files": 126, "Lines of Code (source files only)": 67464},
+            hmr_stats={"functions_total": 881},
+        )
+        assert cm["nloc"] == 67464 and cm["code_files"] == 126 and cm["functions"] == 881
+        assert cm["source"] == "qac"
+
+    def test_absent_everywhere_marks_reason(self):
+        cm = resolve_code_metrics({"code_metrics": {}})
+        assert cm["source"] is None and cm["reason"] == "no_complexity_csv_and_no_qac"
+
+    def test_non_dict_input_is_safe(self):
+        # None/비-dict analysis_summary도 크래시 없이 부재로 처리.
+        assert resolve_code_metrics(None)["source"] is None
+        assert resolve_code_metrics({"code_metrics": None})["source"] is None
+
+
+class TestResolveScmVcastMetrics:
+    """resolve_scm_vcast_metrics — SCM 로드 이력 payload → 대시보드 경량 지표(상세탭 effVcast 미러)."""
+
+    def test_merged_payload_prefers_ut_coverage_over_combined(self):
+        # 대시보드 '구문 커버리지'는 UT 기준 — coverage_ut(UT 전용)를 top-level coverage(UT+IT 합산)보다
+        # 우선. 실측 KJPDS02: UT 99.5% vs 합산 70.7%(IT 희석). 합산을 쓰면 이 assert가 깨진다(뮤테이션 가드).
+        payload = {
+            "coverage": {  # UT+IT 합산(IT가 낮아 희석)
+                "statement": {"covered": 12428, "total": 17572, "rate": 0.7073},
+                "branch": {"covered": 5842, "total": 8610, "rate": 0.6785},
+                "mcdc": {"covered": 0, "total": 0, "rate": None},
+            },
+            "coverage_ut": {  # UT 전용 — 대시보드 기준값
+                "statement": {"covered": 8579, "total": 8622, "rate": 0.995},
+                "branch": {"covered": 4044, "total": 4097, "rate": 0.9871},
+                "mcdc": {"covered": 0, "total": 0, "rate": None},
+            },
+            "coverage_it": {"statement": {"covered": 3849, "total": 8950, "rate": 0.43}},
+            "test_rows_count_ut": 120, "test_rows_count_it": 45,
+            "summary_ut": {"total": 120, "passed": 118, "failed": 2, "pass_rate": 0.9833},
+            "summary_it": {"total": 45, "passed": 45, "failed": 0, "pass_rate": 1.0},
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert m["line_rate"] == 0.995          # coverage_ut.statement (합산 0.7073 아님)
+        assert m["branch_rate"] == 0.9871        # coverage_ut.branch
+        assert m["coverage_basis"] == "ut_statement"
+        assert m["line_rate_combined"] == 0.7073  # 원 합산(투명성)
+        assert (m["ut_total"], m["it_total"]) == (120, 45)
+        assert (m["ut_passed"], m["it_passed"]) == (118, 45)
+
+    def test_merged_legacy_splits_by_test_rows_source(self):
+        # 병합 payload는 vcast_kind가 없고(단일폴더만 보유) split 카운트도 없다(구 payload).
+        # test_rows의 행별 source로 분리해야 IT가 UT로 오귀속되지 않는다(reviewer Critical 재현: NE1AW).
+        payload = {
+            "coverage": {"statement": {"covered": 70, "total": 100, "rate": 0.7},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count": 5,
+            "test_rows": [{"source": "UT"}, {"source": "UT"}, {"source": "UT"},
+                          {"source": "IT"}, {"source": "IT"}],
+            "summary": {"total": 5, "passed": 4, "failed": 1, "pass_rate": 0.8},
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert (m["ut_total"], m["it_total"]) == (3, 2)   # kind 추정이었으면 (5, 0)로 오귀속됐음
+        # 병합엔 vcast_kind 없어 결합 summary를 어느 쪽에도 안 몰아줌(합격 집계 보류).
+        assert m["ut_passed"] is None and m["it_passed"] is None
+        # coverage_ut 없는 legacy 병합 → 합산 폴백 + '기준 상이' 플래그(프론트 각주 대상).
+        assert m["line_rate"] == 0.7 and m["coverage_basis"] == "combined_statement"
+
+    def test_single_folder_ut_with_split_injected(self):
+        # 단일폴더도 multi 래퍼가 test_rows_count_ut/it·summary_ut/it를 주입한다(jenkins.py:1527-1532).
+        payload = {
+            "vcast_kind": "UT",
+            "coverage": {"statement": {"covered": 90, "total": 100, "rate": 0.9},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count": 10, "test_rows_count_ut": 10, "test_rows_count_it": 0,
+            "summary_ut": {"total": 10, "passed": 9, "failed": 1, "pass_rate": 0.9},
+            "summary_it": None,
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert m["line_rate"] == 0.9
+        assert m["coverage_basis"] == "ut_statement"  # 단일 UT 폴더: top-level coverage=UT
+        assert (m["ut_total"], m["it_total"]) == (10, 0)
+        assert m["ut_passed"] == 9
+
+    def test_old_payload_without_split_routes_by_kind(self):
+        # 2026-07-06 split 이전 payload: test_rows_count_ut/it 부재 → vcast_kind로 결합 카운트 귀속.
+        payload_it = {
+            "vcast_kind": "IT",
+            "coverage": {"statement": {"covered": 7, "total": 10, "rate": 0.7},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count": 33,
+            "summary": {"total": 33, "passed": 30, "failed": 3, "pass_rate": 0.9091},
+        }
+        m = resolve_scm_vcast_metrics(payload_it)
+        assert m is not None
+        assert (m["ut_total"], m["it_total"]) == (0, 33)   # IT로 귀속
+        assert m["it_passed"] == 30 and m["ut_passed"] is None
+        assert m["line_rate"] == 0.7 and m["coverage_basis"] == "it_statement"  # IT-only → 비-UT 플래그
+
+    def test_mcdc_total_zero_keeps_rate_none_not_zero(self):
+        # 대시보드는 statement를 line_rate로 쓰지만, total=0→rate=None 계약을 payload가 지켜야 함.
+        payload = {"coverage": {"statement": {"covered": 0, "total": 0, "rate": None}},
+                   "test_rows_count_ut": 5, "test_rows_count_it": 0}
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert m["line_rate"] is None       # 0% 미커버 위장 아님
+        assert m["ut_total"] == 5           # TC는 있으니 이력은 유효
+
+    def test_no_coverage_no_tests_returns_none(self):
+        assert resolve_scm_vcast_metrics(
+            {"coverage": {}, "test_rows_count_ut": 0, "test_rows_count_it": 0}) is None
+        assert resolve_scm_vcast_metrics({}) is None
+        assert resolve_scm_vcast_metrics(None) is None
+
+    def test_combined_passfail_surfaced_for_card(self):
+        # 빌드요약 카드용 — top-level summary의 결합 passed/failed/skipped/pass_rate/total 노출.
+        # (집계 차트는 UT/IT split만 쓰지만, 카드는 결합 합부를 여기서 읽는다.)
+        payload = {
+            "coverage": {"statement": {"covered": 70, "total": 100, "rate": 0.7}},
+            "test_rows_count_ut": 6, "test_rows_count_it": 4,
+            "summary": {"total": 10, "passed": 8, "failed": 1, "skipped": 1,
+                        "unknown": 0, "pass_rate": 0.8},
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert (m["passed"], m["failed"], m["skipped"], m["unknown"]) == (8, 1, 1, 0)
+        assert m["pass_rate"] == 0.8
+        assert m["total"] == 10
+
+    def test_combined_absent_summary_keeps_none_not_zero(self):
+        # summary가 없으면 결합 합부는 None(0% 통과 위장 금지) — TC만으로 이력은 유효.
+        m = resolve_scm_vcast_metrics({"test_rows_count_ut": 5, "test_rows_count_it": 0})
+        assert m is not None
+        assert m["ut_total"] == 5
+        assert m["passed"] is None and m["failed"] is None and m["pass_rate"] is None
+
+
+class TestVcastAggregateNoSilentCap:
+    """parse_vectorcast_aggregate_summary — 모듈 침묵 절단(과거 top_n=6) 제거."""
+
+    def _write(self, tmp_path, n):
+        parts = [f"Code Coverage for mod{i}.c\n{i} of 100 Lines Covered\n{i} of 50 Branches Covered\n"
+                 for i in range(1, n + 1)]
+        p = tmp_path / "agg.html"
+        p.write_text("".join(parts), encoding="utf-8")
+        return p
+
+    def test_all_modules_returned_no_default_cap(self, tmp_path):
+        # 회귀: 과거 기본 top_n=6이 line_rate 낮은 6개만 남겨 침묵 절단(실측 30→6)했다. 기본은 전체.
+        s = parse_vectorcast_aggregate_summary(self._write(tmp_path, 8))
+        assert len(s["modules"]) == 8               # 6으로 잘리지 않음
+        assert s["line_covered"] == sum(range(1, 9)) and s["line_total"] == 800  # 헤드라인은 전체 합산
+
+    def test_explicit_top_n_still_caps(self, tmp_path):
+        # 명시 상한은 여전히 동작(호출측이 원하면 절단 가능).
+        s = parse_vectorcast_aggregate_summary(self._write(tmp_path, 8), top_n=3)
+        assert len(s["modules"]) == 3
+
+
+# ── RCFInfo 규칙 설명 추출 (J1) ──────────────────────────────────────────────
+# 실물 구조(KJPDS02_PV build_125 RCR): 들여쓰기용 빈 <td> 0~N개 + <td title="설명">규칙ID</td>
+# + <td>enabled|disabled</td>. 셀 수는 계층 깊이에 따라 3~7 가변 — 셀 수로 판정하면 최상위
+# 행(3셀)을 놓친다. 판정은 "마지막 셀=enabled/disabled AND 직전 셀 title 보유"여야 한다.
+_RCR_RCFINFO_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-2.1</th></tr>
+  <tr><td align="left"><a href="a.c" title="a.c">a.c</a></td><td>3</td></tr>
+ </table>
+ <div class="sec"><h3><a name="RCFInfo">Rule Configuration Status</a></h3></div>
+ <div class="subsec"><h5>M3CM</h5></div>
+ <table border="0">
+<tr><td></td><td title="MISRA Mandatory">M3CM-1</td><td>enabled</td></tr>
+<tr><td></td><td></td><td></td><td title="A project shall not contain unreachable code">Rule-2.1</td><td>enabled</td></tr>
+<tr><td></td><td></td><td></td><td title="Trigraphs should not be used">Rule-4.2</td><td>disabled</td></tr>
+<tr><td></td><td></td><td></td><td title="가중치">0.6</td><td>enabled</td></tr>
+<tr><td></td><td></td><td></td><td>Rule-NoTitle</td><td>enabled</td></tr>
+ </table>
+ <div class="subsec"><h5>Secure C</h5></div>
+ <table border="0">
+<tr><td></td><td title="함수 포인터 변환을 금지한다">C-POS-012</td><td>enabled</td></tr>
+ </table>
+ <div class="sec"><h3><a name="StatCalc">Calculation Information</a></h3></div>
+ <table border="0">
+<tr><td></td><td title="not a rule">Rule-9.9</td><td>enabled</td></tr>
+ </table>
+</body></html>"""
+
+
+class TestRcrRuleDescriptions:
+    """J1: RCFInfo <td title> → rule_descriptions — 행 판정·그룹 귀속·관할 경계."""
+
+    def _details(self, tmp_path, html):
+        p = tmp_path / "r.html"
+        p.write_text(html, encoding="utf-8")
+        return parse_prqa_rcr_details(p)
+
+    def test_extracts_rules_with_group_and_enabled(self, tmp_path):
+        d = self._details(tmp_path, _RCR_RCFINFO_HTML)["rule_descriptions"]
+        assert d["Rule-2.1"] == {
+            "title": "A project shall not contain unreachable code",
+            "enabled": True, "group": "M3CM",
+        }
+        assert d["Rule-4.2"]["enabled"] is False           # disabled도 담는다(설정 상태 정보)
+        assert d["M3CM-1"]["title"] == "MISRA Mandatory"   # 3셀 최상위 행 — 중간 노드도 WorstRules 열 키
+        assert d["C-POS-012"]["group"] == "Secure C"       # h5 그룹 전환 추적
+        assert "함수 포인터" in d["C-POS-012"]["title"]     # 한국어 title 보존
+
+    def test_excludes_numeric_untitled_and_next_section(self, tmp_path):
+        d = self._details(tmp_path, _RCR_RCFINFO_HTML)["rule_descriptions"]
+        assert "0.6" not in d            # 수치 행(가중치) 배제
+        assert "Rule-NoTitle" not in d   # title 없는 행 — 설명 가치 없음
+        assert "Rule-9.9" not in d       # 다음 섹션(StatCalc) 표 — RCFInfo 관할 밖에서 종료
+
+    def test_absent_rcfinfo_returns_empty_dict(self, tmp_path):
+        # 구형 리포트(RCFInfo 없음) — 빈 dict이지 에러가 아니다(설명은 부가 정보).
+        d = self._details(tmp_path, _HELIX_RCR_HTML)
+        assert d["rule_descriptions"] == {}

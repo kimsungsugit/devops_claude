@@ -9,7 +9,10 @@ def test_diff_source_snapshot_first_run_marks_all_changed(tmp_path, monkeypatch)
     (src / "a.c").write_text("int a(void){return 0;}\n", encoding="utf-8")
     (src / "b.h").write_text("#define B 1\n", encoding="utf-8")
 
-    monkeypatch.setattr(scm_fallback, "AUDIT_DIR", tmp_path / "audit")
+    # (R38 D-1) 감사 디렉터리는 `impact_audit.AUDIT_DIR` **단일 출처**다 — `scm_fallback` 이 갖고 있던
+    # 같은 이름의 복제 상수를 없앴다. 복제가 있으면 한 곳만 격리해도 나머지가 사용자 트리에 쓴다.
+    from workflow import impact_audit
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
 
     diff = scm_fallback.diff_source_snapshot("hdpdm01", str(src))
 
@@ -26,7 +29,10 @@ def test_diff_source_snapshot_detects_modified_and_removed(tmp_path, monkeypatch
     (src / "a.c").write_text("int a(void){return 0;}\n", encoding="utf-8")
     (src / "b.h").write_text("#define B 1\n", encoding="utf-8")
 
-    monkeypatch.setattr(scm_fallback, "AUDIT_DIR", tmp_path / "audit")
+    # (R38 D-1) 감사 디렉터리는 `impact_audit.AUDIT_DIR` **단일 출처**다 — `scm_fallback` 이 갖고 있던
+    # 같은 이름의 복제 상수를 없앴다. 복제가 있으면 한 곳만 격리해도 나머지가 사용자 트리에 쓴다.
+    from workflow import impact_audit
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
 
     first = scm_fallback.diff_source_snapshot("hdpdm01", str(src))
     scm_fallback.save_source_snapshot("hdpdm01", first["current_snapshot"])
@@ -51,7 +57,10 @@ def test_diff_source_snapshot_respects_watch_and_ignore(tmp_path, monkeypatch):
     (src / "skip" / "b.c").write_text("int b(void){return 0;}\n", encoding="utf-8")
     (src / "keep" / "note.txt").write_text("ignore me\n", encoding="utf-8")
 
-    monkeypatch.setattr(scm_fallback, "AUDIT_DIR", tmp_path / "audit")
+    # (R38 D-1) 감사 디렉터리는 `impact_audit.AUDIT_DIR` **단일 출처**다 — `scm_fallback` 이 갖고 있던
+    # 같은 이름의 복제 상수를 없앴다. 복제가 있으면 한 곳만 격리해도 나머지가 사용자 트리에 쓴다.
+    from workflow import impact_audit
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
 
     snap = scm_fallback.collect_source_snapshot(
         str(src),

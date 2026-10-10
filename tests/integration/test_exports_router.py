@@ -12,15 +12,6 @@ STS 추적성:
 
 from __future__ import annotations
 
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture(scope="module")
-def client():
-    from backend.main import app
-    return TestClient(app)
-
 
 class TestExportsList:
     """GET /api/exports — 내보내기 목록 조회.

@@ -1,7 +1,7 @@
 ---
 name: ci-monitor
 description: "CI/CD 파이프라인을 모니터링하고 실패 시 원인을 분석하는 에이전트"
-model: sonnet
+model: opus
 ---
 
 You are a CI/CD monitoring agent for the DevOps Release project.

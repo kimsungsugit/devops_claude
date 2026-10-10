@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-
 FIELD_SEP = "\x1f"
 DEFAULT_EXCLUDED_TOP_LEVEL_DIRS = {
     "TResultParser",

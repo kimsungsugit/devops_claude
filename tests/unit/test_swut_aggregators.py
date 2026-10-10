@@ -21,15 +21,14 @@ from backend.services.swut_coverage_aggregator import (  # noqa: E402
 from backend.services.swut_input_adapter import (  # noqa: E402
     CoverageStats,
     EnvironmentData,
+    ExecutionRow,
     FunctionCoverage,
     SwUTSession,
-    ExecutionRow,
 )
 from backend.services.swut_sutr_aggregator import (  # noqa: E402
     SutrBuildMeta,
     build_sutr,
 )
-
 
 # ---------------------------------------------------------------------------
 # Minimal template xlsx (memory)
@@ -278,7 +277,10 @@ class TestBuildCoverageReport:
     def test_consistency_fails_for_missing_test_results(self):
         """15차: TC가 test_results에 없으면 'TC 실행 결과 완전성' FAIL."""
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
         )
         # 환경: test_cases는 2개 TC지만 test_results는 1개만 → 누락
         env = EnvironmentData(
@@ -352,6 +354,7 @@ class TestBuildCoverageReport:
         import io as _io
 
         import openpyxl
+
         from backend.services.swut_input_adapter import (
             EnvironmentData,
             ExecutionRow,
@@ -484,12 +487,20 @@ class TestBuildCoverageReport:
             swuts_map=swuts_map,
         )
         out_wb = openpyxl.load_workbook(_io.BytesIO(result.xlsx_bytes), data_only=False)
+        # 라운드 107 — 수식 캐시 미저장 대비 fullCalcOnLoad 보장 (회귀 가드).
+        assert out_wb.calculation.fullCalcOnLoad is True
         out_cov = out_wb["3. Coverage"]
 
         assert out_cov.cell(10, 4).value == "SwUFn_0121"
         assert out_cov.cell(11, 4).value == "SwUFn_0101"
-        assert out_cov.cell(10, 3).value == '="SwCom_" & MID(D10, FIND("_", D10) + 1, 2)'
-        assert out_cov.cell(11, 3).value == '="SwCom_" & MID(D11, FIND("_", D11) + 1, 2)'
+        # 라운드 102 (2026-06-24) — Component(C)는 VectorCAST 환경명 대문자
+        # (회사 감사본 직접 비교 확인). 두 함수가 동일 env(SWTE_LIB) → 환경별
+        # 세로병합 C10:C11 (anchor만 값, slave None). 구 SwCom_NN 수식(라운드 96)
+        # 폐기 — 레퍼런스 SwUTCV는 env_name.upper()를 병합.
+        assert out_cov.cell(10, 3).value == "SWTE_LIB"
+        assert out_cov.cell(11, 3).value is None
+        assert "C10:C11" in {str(r) for r in out_cov.merged_cells.ranges}
+        # 템플릿 잔존 병합(C10:C14)은 해제 후 data 범위(C10:C11)로 재병합
         assert "C10:C14" not in {str(r) for r in out_cov.merged_cells.ranges}
         assert "N10:N14" not in {str(r) for r in out_cov.merged_cells.ranges}
         assert result.summary["swuts_name_to_swufn_used"] == 2
@@ -591,22 +602,45 @@ class TestBuildCoverageReport:
             buf.getvalue(),
         )
         out_wb = openpyxl.load_workbook(_io.BytesIO(result.xlsx_bytes), data_only=False)
+        # 라운드 107 — 템플릿/기입 수식(O/X·Coverage)이 뷰어 재계산 전 공백이 되지
+        # 않도록 fullCalcOnLoad=True 보장 (SwITCV 라운드 102 정합, silent 회귀 가드).
+        assert out_wb.calculation.fullCalcOnLoad is True
         out_cov = out_wb["3. Coverage"]
 
         assert out_cov.cell(10, 4).value == "SwUFn_0121"
         assert out_cov.cell(11, 4).value == "SwUFn_0101"
-        assert out_cov.cell(10, 3).value == '="SwCom_" & MID(D10, FIND("_", D10) + 1, 2)'
+        # 라운드 102 — Component = VectorCAST 환경명 대문자 (SWTE_LIB). 동일 env
+        # 2함수 → 세로병합 C10:C11 (회사 감사본 일치, 구 SwCom_NN 수식 폐기).
+        assert out_cov.cell(10, 3).value == "SWTE_LIB"
+        assert out_cov.cell(11, 3).value is None
+        assert "C10:C11" in {str(r) for r in out_cov.merged_cells.ranges}
         assert out_cov.cell(10, 6).value == 36
         assert out_cov.cell(10, 7).value == 38
-        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "Pass", "Fail")'
-        assert out_cov.cell(10, 9).value == "UT-CVG-PV-1"
+        # 라운드 103 — 회사 감사본 v0.10 정합: Pass 열(H/L)은 O/X (Pass/Fail 아님),
+        # Exception 열(I/M)은 실패행 'O' literal (UT-CVG 시퀀스 폐기), File 열(N) 공란.
+        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "O", "X")'
+        assert out_cov.cell(10, 9).value == "O"  # s_safe_rotr stmt FAIL → Exception O
         assert out_cov.cell(10, 10).value == 17
         assert out_cov.cell(10, 11).value == 18
-        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "Pass", "Fail")'
-        assert out_cov.cell(10, 13).value == "UT-CVG-PV-2"
-        assert out_cov.cell(10, 14).value == "(KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result"
+        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "O", "X")'
+        assert out_cov.cell(10, 13).value == "O"  # s_safe_rotr branch FAIL → Exception O
+        assert out_cov.cell(10, 14).value is None  # File 열 공란 (note 미기재)
+        # main(r11)은 합격 → Exception 공란
+        assert out_cov.cell(11, 9).value is None
+        assert out_cov.cell(11, 13).value is None
+        # 라운드 103 — 단일 TOTALS 행 r12 (3행 Fail/Pass/Total 폐기). literal 값.
         assert out_cov.cell(12, 4).value == "Total"
-        assert out_cov.cell(12, 8).value == '=COUNTIF(H10:H11,"Fail")'
+        assert out_cov.cell(12, 5).value == 2       # E = COUNTA(name) = 함수수
+        assert out_cov.cell(12, 6).value == 41      # F = SUM stmt covered (36+5)
+        assert out_cov.cell(12, 7).value == 43      # G = SUM stmt total (38+5)
+        assert out_cov.cell(12, 8).value == 1       # H = stmt fail (s_safe_rotr)
+        assert out_cov.cell(12, 9).value == 1       # I = stmt exception
+        assert out_cov.cell(12, 12).value == 1      # L = branch fail
+        assert out_cov.cell(12, 13).value == 1      # M = branch exception
+        # 상단 요약 r5(Statement)/r6(Branch) — Exception 상쇄로 Coverage 100%.
+        assert out_cov.cell(5, 5).value == 2 and out_cov.cell(5, 6).value == 1
+        assert out_cov.cell(5, 7).value == 1 and out_cov.cell(5, 8).value == 1.0
+        assert out_cov.cell(6, 8).value == 1.0
         assert any("[template-order]" in warning for warning in result.warnings)
 
     def test_spec_based_coverage_reports_template_mapping_drift(self):
@@ -863,6 +897,7 @@ class TestSutrTestLogAsil31:
         exec_r 없음 → Total/Unit 모두 "N/A".
         """
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -883,6 +918,7 @@ class TestSutrTestLogAsil31:
     def test_test_log_log_data_col_al_v202(self):
         """라운드 90: Log Data는 AL(col 38) anchor row에 env_name/fn_id.log stamp."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -904,6 +940,7 @@ class TestSutrTestLogAsil31:
     def test_test_log_no_asil_col_overwrite_v202(self):
         """57차 T319: function_asil_map이 col+5에 'ASIL D'를 stamp하지 않음 (v2.02 F열은 Input Params)."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -923,6 +960,7 @@ class TestSutrTestLogAsil31:
     def test_test_log_col4_5_non_empty_emits_warning_to_session(self):
         """31-fix D10: col+4/5 영역에 기존 데이터 있으면 out_warnings 누적."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -949,6 +987,7 @@ class TestSutrTestLogAsil31:
     def test_test_log_col4_5_empty_no_warning(self):
         """31-fix D10: col+4/5 빈 영역이면 warning 0."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -1609,8 +1648,8 @@ class TestCoverageMetricKindF4C:
 
         CoverageStats signature: CoverageStats(covered, total, coverage_pct).
         """
-        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
         from backend.services.excel_layout_resolver import SwitLayout
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
 
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -1636,8 +1675,8 @@ class TestCoverageMetricKindF4C:
 
     def test_single_metric_no_function_calls_stamp(self):
         """v2.02/v3.01 layout (single) → function_calls_coverage skip."""
-        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
         from backend.services.excel_layout_resolver import SwitLayout
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
 
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -1687,8 +1726,8 @@ class TestTraceabilityMatrixKindF4C:
         60차 F6-B 갱신 — 메시지가 'SwITS docx parser 미구현' → 'matrix 시트 자체가
         부재'로 정확화 (라이브 분석 T411 결과: Strategy 시트는 call graph 양식).
         """
-        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
         from backend.services.excel_layout_resolver import SwitLayout
+        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
 
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -1711,8 +1750,8 @@ class TestTraceabilityMatrixKindF4C:
 
     def test_swufn_x_env_matrix_writes_as_before(self):
         """layout.traceability_matrix_kind='swufn_x_env' (default) → 기존 동작 유지."""
-        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
         from backend.services.excel_layout_resolver import SwitLayout
+        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
 
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -1737,6 +1776,7 @@ class TestSutrTestLogSwUTSStampF6A:
     def test_swuts_map_overrides_tc_id_and_description_and_method(self):
         """KJPDS02 SwUTS pattern: SwUFn_0101.001 → swuts_map['SwUTC_0101'] 매칭."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         from backend.services.swuts_excel_parser import SwUTSEntry
 
@@ -1773,6 +1813,7 @@ class TestSutrTestLogSwUTSStampF6A:
     def test_no_swuts_map_keeps_legacy_hardcoded_method(self):
         """swuts_map=None (backward-compat) → 기존 'AEC, ABV' 하드코딩 유지."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
 
         wb = openpyxl.Workbook()
@@ -1792,6 +1833,7 @@ class TestSutrTestLogSwUTSStampF6A:
         VectorCAST는 SwUFn_0103.001 형식으로 TC 이름 사용. fallback chain으로 매칭.
         """
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         from backend.services.swuts_excel_parser import SwUTSEntry
 
@@ -1821,12 +1863,15 @@ class TestSutrTestLogSwUTSStampF6A:
 
         W2 fix가 session caching 도입 시 silent regression 방지 확인.
         """
+        import io as _io
+
+        import openpyxl as _opx
+
         from backend.services.swut_coverage_aggregator import (
-            build_coverage_report, CoverageBuildMeta,
+            CoverageBuildMeta,
+            build_coverage_report,
         )
         from backend.services.swut_input_adapter import CoverageStats
-        import openpyxl as _opx
-        import io as _io
 
         # HMR HTML
         hmr_html = (
@@ -1889,12 +1934,15 @@ class TestSutrTestLogSwUTSStampF6A:
         첫번째 호출의 stamped 값을 보면 안 됨. 향후 session caching 도입 시 silent
         regression 방지.
         """
+        import io as _io
+
+        import openpyxl as _opx
+
         from backend.services.swut_coverage_aggregator import (
-            build_coverage_report, CoverageBuildMeta,
+            CoverageBuildMeta,
+            build_coverage_report,
         )
         from backend.services.swut_input_adapter import CoverageStats
-        import openpyxl as _opx
-        import io as _io
 
         # HMR HTML — main 함수 매칭
         hmr_html = (
@@ -1946,11 +1994,14 @@ class TestSutrTestLogSwUTSStampF6A:
         같은 함수명 (`main`) 다른 unit_file 2건 시 aggregator는 stamp skip하고
         warnings에 ambiguous 명시. 이전 코드는 첫 매칭 metric을 wrong unit_file row에 stamp.
         """
-        from backend.services.swut_coverage_aggregator import (
-            build_coverage_report, CoverageBuildMeta,
-        )
-        import openpyxl as _opx
         import io as _io
+
+        import openpyxl as _opx
+
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta,
+            build_coverage_report,
+        )
 
         # 합성 HMR HTML — main 함수가 2개 unit_file에 존재
         hmr_html = (
@@ -2006,12 +2057,16 @@ class TestSutrTestLogSwUTSStampF6A:
         SwUT/SwIT TC name 모두 매칭. 34차 deep-reviewer C1과 동일 회귀.
         """
         import openpyxl
+
+        from backend.services.swut_input_adapter import (
+            CoverageStats,
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
+        )
         from backend.services.swut_sutr_aggregator import _write_test_log
         from backend.services.swuts_excel_parser import SwUTSEntry
-        from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, FunctionCoverage,
-            CoverageStats, SwUTSession,
-        )
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -2061,6 +2116,7 @@ class TestSutrTestLogSwUTSStampF6A:
     def test_precondition_stamps_when_layout_provides_col(self):
         """layout.test_log_precondition_col 제공 + swuts_entry.precondition → stamp."""
         import openpyxl
+
         from backend.services.swut_sutr_aggregator import _write_test_log
         from backend.services.swuts_excel_parser import SwUTSEntry
 
@@ -2383,8 +2439,9 @@ class TestRound74PhaseADeviationFallback:
         """layout.deviation_sheet_present=False → '[양식정상]' prefix INFO 톤."""
         # build_swit_sitr_report은 router 동작이라 직접 호출 부담 — warning 메시지 로직만 검증
         import io
-        from backend.services.swit_sitr_aggregator import build_swit_sitr_report
+
         from backend.services.swit_meta import SwitSitrBuildMeta
+        from backend.services.swit_sitr_aggregator import build_swit_sitr_report
         # minimal xlsm template (no Deviation sheet)
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -2448,7 +2505,9 @@ class TestRound74PhaseBCParserMerge:
 
     def test_merge_adds_c_parser_only_with_synthetic_unit_id(self):
         from backend.services.swut_input_adapter import (
-            merge_function_rows_with_c_parser, FunctionCoverage, CoverageStats,
+            CoverageStats,
+            FunctionCoverage,
+            merge_function_rows_with_c_parser,
         )
         agg = {
             "function_rows": [
@@ -2478,7 +2537,8 @@ class TestRound74PhaseBCParserMerge:
 
     def test_merge_with_none_returns_existing(self):
         from backend.services.swut_input_adapter import (
-            merge_function_rows_with_c_parser, FunctionCoverage,
+            FunctionCoverage,
+            merge_function_rows_with_c_parser,
         )
         agg = {"function_rows": [FunctionCoverage(unit_id="SwUFn_0101", name="main")]}
         merged = merge_function_rows_with_c_parser(agg, None)
@@ -2553,7 +2613,8 @@ class TestRound74PhaseCDynamicSubfolder:
         # 가벼운 mock으로 has_metrics_folder = False 케이스만 검증.
         # (전체 통합은 build_real_vcast_v3.py로 검증)
         from backend.services.swut_input_adapter import (
-            merge_function_rows_with_c_parser, FunctionCoverage,
+            FunctionCoverage,
+            merge_function_rows_with_c_parser,
         )
         # 본 회귀는 merge logic 자체만 검증 (04.MetricsReport 통합은 라이브 PoC)
         agg = {"function_rows": [FunctionCoverage(unit_id="x", name="y")]}
@@ -3100,6 +3161,7 @@ class TestRound86UnmappedFunctionList:
     def test_audit_log_section_3_1_unmapped_stamped(self):
         """라운드 86 T2002: AuditLog section 3-1 — UNKNOWN 함수 list stamp + top 20 cut."""
         import openpyxl
+
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         from backend.services.swut_input_adapter import SwUTSession
         from backend.services.swut_sutr_aggregator import SutrBuildMeta
@@ -3133,7 +3195,7 @@ class TestRound83AuditLogSheet:
 
     def _make_session_and_meta(self):
         """공통 session/meta/agg/summary fixture."""
-        from backend.services.swut_input_adapter import SwUTSession, EnvironmentData
+        from backend.services.swut_input_adapter import EnvironmentData, SwUTSession
         from backend.services.swut_sutr_aggregator import SutrBuildMeta
         env = EnvironmentData(env_name="SWTE_01", component_name="SwCom_01")
         session = SwUTSession(
@@ -3178,6 +3240,7 @@ class TestRound83AuditLogSheet:
     def test_audit_log_sheet_writes_6_sections(self):
         """6 섹션 모두 stamp — 1.빌드환경 / 2.ASIL source / 3.ASIL 분포 / 4.통계 / 5.warnings / 6.qualification."""
         import openpyxl
+
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         session, meta, agg, summary = self._make_session_and_meta()
         wb = openpyxl.Workbook()
@@ -3202,6 +3265,7 @@ class TestRound83AuditLogSheet:
     def test_audit_log_stamps_build_env_from_meta(self):
         """1. 빌드 환경 — project_id / version / engineer / author 정확 stamp."""
         import openpyxl
+
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         session, meta, agg, summary = self._make_session_and_meta()
         wb = openpyxl.Workbook()
@@ -3222,6 +3286,7 @@ class TestRound83AuditLogSheet:
         라운드 84 fix: _compute_asil_distribution key 'ASIL_A'/'ASIL_QM' 형식 호환.
         """
         import openpyxl
+
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         session, meta, agg, summary = self._make_session_and_meta()
         # 라운드 84: 실제 _compute_asil_distribution 출력 형식 (ASIL_X) 시뮬레이션
@@ -3243,6 +3308,7 @@ class TestRound83AuditLogSheet:
     def test_audit_log_warnings_top_20_with_truncation(self):
         """5. parse_warnings — top 20 stamp + 초과 시 '외 N건 생략' 명시."""
         import openpyxl
+
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         session, meta, agg, summary = self._make_session_and_meta()
         # 25 builder warnings (top 20 + 5 truncated)
@@ -3264,6 +3330,7 @@ class TestRound83AuditLogSheet:
     def test_audit_log_tool_qualification_metadata(self):
         """6. Tool Qualification — evidence_class / ASIL usage / round 명시."""
         import openpyxl
+
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         session, meta, agg, summary = self._make_session_and_meta()
         wb = openpyxl.Workbook()
@@ -3309,7 +3376,8 @@ class TestCoverSignatureLayout96Final:
 
     def test_cover_writer_kjpds02_v101_layout(self):
         from backend.services.swut_coverage_aggregator import (
-            CoverageBuildMeta, _write_cover_sheet,
+            CoverageBuildMeta,
+            _write_cover_sheet,
         )
         ws = self._kjpds02_cover_ws()
         meta = CoverageBuildMeta(
@@ -3334,7 +3402,8 @@ class TestCoverSignatureLayout96Final:
     def test_cover_writer_isolated_labels_backward_compat(self):
         """v3.01류 (단독 kv 라벨) — 기존 라벨-우측 기입 경로 유지."""
         from backend.services.swut_coverage_aggregator import (
-            CoverageBuildMeta, _write_cover_sheet,
+            CoverageBuildMeta,
+            _write_cover_sheet,
         )
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -3411,12 +3480,12 @@ class TestFinalTestResultKeepFormula96Final:
         assert ws["C1"].value == "KJPDS02"      # 다른 라벨은 정상 기입
 
 
-class TestSpecExceptionPhaseDynamic96Final:
-    """라운드 96-final W-8 — exception note ID 'UT-CVG-{phase}-N' phase 동적화.
+class TestSpecCoverageExceptionAndTotals103:
+    """라운드 103 — spec_based 4.Coverage Exception 'O' + 단일 TOTALS (회사 v0.10).
 
-    config ``projects.<id>.swutcr_metadata.phase``를 ID prefix에 반영하고,
-    config 비등재/키 부재 시 기존 'DV' 유지 (HDPDM01/SwIT backward-compat).
-    실 config 의존 차단을 위해 load_meta_from_config monkeypatch 격리.
+    기존(라운드 92~96) UT-CVG-{phase}-N 시퀀스 ID + 3행(Fail/Pass/Total) totals를
+    회사 감사본 형식으로 교체: 실패행 Exception 'O' literal, 단일 TOTALS 행
+    (COUNTA/SUM/COUNTIF 집계), Exception 상쇄로 Coverage 100%.
     """
 
     @staticmethod
@@ -3471,21 +3540,8 @@ class TestSpecExceptionPhaseDynamic96Final:
             function_name_to_swufn_from_suds={"s_safe_rotr": "SwUFn_0121"},
         )
 
-    @pytest.mark.parametrize(
-        ("cfg", "expected_prefix"),
-        [
-            ({"swutcr_metadata": {"phase": "SOP"}}, "UT-CVG-SOP"),
-            ({"swutcr_metadata": {}}, "UT-CVG-DV"),  # phase 키 부재 — DV 유지
-            ({}, "UT-CVG-DV"),                        # config 비등재 — DV 유지
-        ],
-    )
-    def test_exception_note_id_follows_config_phase(
-        self, monkeypatch, cfg, expected_prefix,
-    ):
-        import backend.services.swut_meta_resolver as _meta_resolver
-        monkeypatch.setattr(
-            _meta_resolver, "load_meta_from_config", lambda pid: cfg,
-        )
+    def test_failing_function_marks_exception_o_and_single_totals(self):
+        """실패 함수: Exception 'O' (stmt I열·branch M열) + 단일 TOTALS + 100% 상쇄."""
         result = build_coverage_report(
             self._failing_session(),
             CoverageBuildMeta(
@@ -3498,9 +3554,22 @@ class TestSpecExceptionPhaseDynamic96Final:
         out_cov = openpyxl.load_workbook(
             io.BytesIO(result.xlsx_bytes), data_only=False,
         )["3. Coverage"]
-        # 단일 함수 stmt/branch 동시 미달 — stmt ID -1, branch ID -(base 1 + 1)=2.
-        assert out_cov.cell(10, 9).value == f"{expected_prefix}-1"
-        assert out_cov.cell(10, 13).value == f"{expected_prefix}-2"
+        # 데이터행 r10 (s_safe_rotr 36/38·17/18 동시 미달) — Pass O/X 수식 + Exception 'O'.
+        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "O", "X")'
+        assert out_cov.cell(10, 9).value == "O"   # stmt Exception
+        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "O", "X")'
+        assert out_cov.cell(10, 13).value == "O"  # branch Exception
+        assert out_cov.cell(10, 14).value is None  # File 열 공란
+        # 단일 TOTALS 행 r11 (last_data_row=10 → +1). literal 집계.
+        assert out_cov.cell(11, 4).value == "Total"
+        assert out_cov.cell(11, 5).value == 1    # 함수수
+        assert out_cov.cell(11, 8).value == 1    # stmt fail
+        assert out_cov.cell(11, 9).value == 1    # stmt exception
+        assert out_cov.cell(11, 12).value == 1   # branch fail
+        assert out_cov.cell(11, 13).value == 1   # branch exception
+        # 요약 — Exception 상쇄로 Coverage 100%.
+        assert out_cov.cell(5, 8).value == 1.0
+        assert out_cov.cell(6, 8).value == 1.0
 
 
 class TestSutrCoverPlaceholder96Final:

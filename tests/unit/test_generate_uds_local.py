@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_resolve_source_root_prefers_env_override(tmp_path, monkeypatch):
     from tools import generate_uds_local

@@ -11,7 +11,8 @@ import hashlib
 import io
 import re
 from copy import copy
-from dataclasses import dataclass, field, replace as dc_replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any
 
@@ -494,6 +495,14 @@ def _write_ut101(
     function_rows = agg.get("function_rows") or []
     function_count = _swutcr_function_count(agg)
     failed_tcs = agg.get("failed", 0) or 0
+    # ⚠ 76행만 세는 대상이 **TC** 다. 양식 72행 헤더가 F열='총 TC 수' 인데, 76행 라벨은
+    #   'Test Case(P/F)' — 즉 시험 케이스 합격/불합격 집계다. 73/74행(CVG Statement/
+    #   Branch)과 77/78행(요구사항 추적성/정합성 커버리지)은 단위레벨이라 분모가 함수
+    #   수(SwUFn)인 게 맞지만, 76행에 함수 수를 쓰면 KJPDS02 실측 기준 TC 6,882건이
+    #   1,014건으로 **5.8배 과소 보고**된다. ISO 26262 근거로 쓰이는 절대 수치라
+    #   비율(=G/F)이 우연히 같아도 넘어갈 문제가 아니다.
+    total_tcs = int(agg.get("total_tcs") or 0)
+    tested_tcs = int(agg.get("tested") or 0)
     failures = _coverage_failures(function_rows, agg.get("c_function_map") or None)
     statement_fail = sum(1 for f in failures if f["kind"] == "Statement")
     branch_fail = sum(1 for f in failures if f["kind"] == "Branch")
@@ -510,13 +519,28 @@ def _write_ut101(
     safe_write(ws, 74, 12, branch_fail)
     for col in range(6, 14):
         safe_write(ws, 75, col, "-")
-    safe_write(ws, 76, 6, function_count)
+    safe_write(ws, 76, 6, total_tcs)
     safe_write(ws, 76, 8, failed_tcs)
-    safe_write(ws, 76, 9, "=G76/F76")
+    # 형제 행(73/74/77/78)과 같은 IFERROR 로 맞춘다 — F76 이 0 이면 #DIV/0! 이 뜨는데,
+    # 그건 "못 구했다" 가 아니라 "엑셀이 깨졌다" 로 읽힌다.
+    safe_write(ws, 76, 9, '=IFERROR(G76/F76, "")')
     safe_write(ws, 76, 10, 0)
     safe_write(ws, 76, 11, 0)
     safe_write(ws, 76, 12, failed_tcs)
     safe_write(ws, 76, 13, failed_tcs)
+    if warnings is not None:
+        if total_tcs <= 0:
+            warnings.append(
+                "[swutcr] UT101 Test Case(P/F): 총 TC 수를 못 구했다(agg.total_tcs 부재) — "
+                "0 으로 남긴다. 함수 수로 대체하지 않는다(그게 5.8배 과소 보고의 원인이었다)."
+            )
+        elif tested_tcs and tested_tcs != total_tcs:
+            warnings.append(
+                f"[swutcr] UT101 Test Case(P/F): 미실행 TC {total_tcs - tested_tcs}건 — "
+                f"양식의 Pass 수식(=F76-H76)은 미실행을 Pass 로 센다"
+                f"(총 {total_tcs} / 실행 {tested_tcs})."
+            )
+
     for row in (77, 78):
         safe_write(ws, row, 6, function_count)
         safe_write(ws, row, 8, 0)
@@ -947,6 +971,7 @@ def build_swutcr_report(
     swuts_map: dict[str, Any] | None = None,
     hmr_html_bytes: bytes | None = None,
     spec_fi: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> SwutcrBuildResult:
     """Build a SwUTCR xlsm from template and SwUT evidence data.
 
@@ -1011,8 +1036,8 @@ def build_swutcr_report(
         _compute_asil_distribution,
         _write_audit_log_sheet,
         _write_consistency_sheet,
-        _write_coverage_sheet,
         _write_cover_sheet,
+        _write_coverage_sheet,
         _write_history_sheet,
         _write_test_summary_sheet,
         _write_traceability_sheet,
@@ -1132,6 +1157,7 @@ def build_swutcr_report(
                 swuds_function_ids=swuds_function_ids,
                 out_warnings=warnings,
                 agg=agg,
+                swuds_skip_reason=swuds_skip_reason,
             )
             summary["consistency_self_check_rows"] = count
             summary["consistency_swuds_compared"] = swuds_function_ids is not None
@@ -1212,6 +1238,14 @@ def build_swutcr_report(
         summary["swutcr_specific_written"] = _write_swutcr_specific_sheets(
             wb, meta, agg, cfg, warnings, spec_fi_auto,
         )
+
+    # 라운드 107 — 템플릿/기입 수식을 openpyxl이 캐시 미저장(cached=None) → 재계산
+    # 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때 자동 재계산(SwITCV 라운드 102 정합).
+    # 캐시 미저장은 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     out = io.BytesIO()
     wb.save(out)

@@ -329,8 +329,11 @@ def test_unmapped_vcast_sds_reqs_populated_for_out_of_matrix_req():
 
 
 def test_unmapped_vcast_sds_reqs_empty_when_absent_from_sds():
-    """SDS 어디에도 명세 안 된 미추적 함수 → sds_reqs 빈 배열(프론트 '미명세' 표기).
-    모든 미추적 항목이 sds_reqs 키를 갖는 스키마 일관성도 확인."""
+    """SDS 어디에도 명세 안 된 미추적 함수 → sds_reqs 빈 배열.
+
+    ⚠ sds_reqs 가 비었다는 것이 'SDS에 없다'를 뜻하지는 않는다(라운드113 정정) — 브리지 두 맵이
+    같은 키공간을 공유해 표기 규약이 어긋나면 동시에 미스한다. 이름 존재 여부는 sds_name_hits 가
+    별도로 답한다. 모든 미추적 항목이 sds_reqs 키를 갖는 스키마 일관성도 확인."""
     items = [{"id": "SwTR_0101"}]
     sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
     vcast = [{"subprogram": "ghost_func", "testcase": "v1", "result": "pass", "source": "VectorCAST"}]
@@ -339,6 +342,168 @@ def test_unmapped_vcast_sds_reqs_empty_when_absent_from_sds():
     assert by_sub["ghost_func"]["sds_reqs"] == []
     assert all("sds_reqs" in u for u in mx["unmapped_vcast"])
     assert mx["summary"]["unmapped_sds_linked"] == 0
+
+
+# ── 원시 SDS '이름' 대조 (라운드113) — unmapped_sds_linked 의 구조적 침묵 보완 ──────
+# sds_reqs 는 sds_all_func_to_reqs 를, traced 판정은 sds_func_to_reqs 를 조회하는데 두 맵은
+# 같은 루프·같은 키·같은 소스라 키가 어긋나면 **동시에** 미스한다. 즉 'SDS에 명세됐는데
+# 브리지만 끊긴' 실패 모드에 눈이 멀어 있다. 아래는 그 사각을 양변 대칭 정규화로 덮는다.
+
+
+def _drift_matrix(sds_component_ids, unit_name):
+    """SDS엔 있으나 표기 규약이 어긋난 시험 함수 1건짜리 매트릭스 헬퍼."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": list(sds_component_ids)}]
+    suts = [{"requirement_id": "SwUFn_0200", "unit": unit_name, "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0200", "testcase": "v1", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    return mx, {u["subprogram"]: u for u in mx["unmapped_vcast"]}["SwUFn_0200"]
+
+
+def test_sds_name_hit_when_alias_blocked_by_prefix_collision():
+    """T1: 접두사형이 2개 이상이면 _alias_safe 가 alias 를 포기해(over-trace 보수 처리)
+    브리지가 끊긴다. 그때도 이름 대조는 SDS 명세 사실을 보존해야 한다."""
+    mx, entry = _drift_matrix(
+        ["u8g_DoorCtrl_SlipChkSpd", "s8g_DoorCtrl_SlipChkSpd"], "g_DoorCtrl_SlipChkSpd")
+    assert entry["sds_reqs"] == []                      # 브리지는 여전히 끊김(판정 불변)
+    assert entry["sds_name_match"] == "ret_prefix"      # 이름은 SDS에 있다
+    assert len(entry["sds_name_hits"]) == 2
+    assert entry["sds_name_ambiguous"] is True          # 후보 여럿 → 모호 표시
+    assert mx["summary"]["unmapped_sds_name_variant"] == 1
+    assert mx["summary"]["unmapped_sds_linked"] == 0    # 기존 지표는 여전히 0(침묵 재현)
+
+
+def test_sds_name_hit_reverse_direction_test_side_prefixed():
+    """T2: 역방향 — SDS가 bare, 시험 쪽이 반환형 접두사를 단 경우.
+    기존 alias 보정은 SDS 키 쪽에만 걸려 이 방향을 못 잡는다."""
+    mx, entry = _drift_matrix(["s_AntiPinch_Detect"], "u16s_AntiPinch_Detect")
+    assert entry["sds_reqs"] == []
+    assert entry["sds_name_match"] == "ret_prefix"
+    assert entry["sds_name_hits"] == ["s_antipinch_detect"]
+    assert entry["sds_name_ambiguous"] is False
+    assert mx["summary"]["unmapped_sds_name_variant"] == 1
+
+
+def test_sds_name_core_tier_only_when_weaker_match_needed():
+    """T3: 저장클래스까지 다른 경우(s_X ↔ g_X)는 가장 약한 core 티어로만 잡힌다.
+    별개 함수일 수 있으므로 티어 값이 반드시 노출돼야 한다(UI가 힌트로만 쓰게)."""
+    mx, entry = _drift_matrix(["s_Foo_Bar"], "g_Foo_Bar")
+    assert entry["sds_reqs"] == []
+    assert entry["sds_name_match"] == "core"
+    assert entry["sds_name_hits"] == ["s_foo_bar"]
+    assert mx["summary"]["unmapped_sds_name_variant"] == 1
+
+
+def test_sds_name_no_hit_when_truly_absent():
+    """T4: SDS 어디에도 없는 함수는 빈 값. 전 항목 스키마 일관성도 고정."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    vcast = [{"subprogram": "ghost_func", "testcase": "v1", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=vcast, sds_pairs=sds_pairs)
+    entry = {u["subprogram"]: u for u in mx["unmapped_vcast"]}["ghost_func"]
+    assert entry["sds_name_hits"] == []
+    assert entry["sds_name_match"] == ""
+    assert entry["sds_name_ambiguous"] is False
+    assert all("sds_name_hits" in u and "sds_name_match" in u for u in mx["unmapped_vcast"])
+    assert mx["summary"]["unmapped_sds_name_hit"] == 0
+    assert mx["summary"]["unmapped_sds_name_variant"] == 0
+
+
+def test_sds_name_hit_is_superset_of_sds_linked_identity():
+    """T5 (canary): 항등식 variant == hit − linked 와 단조성 hit >= linked 고정.
+    exact 티어가 sds_reqs 와 같은 키공간을 보므로 sds_reqs 비공백 ⟹ 반드시 name_hit."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [
+        {"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]},
+        {"requirement_id": "SwST_08", "component_ids": ["bar_func"]},        # 매트릭스 밖 → linked
+        # 접두사형 2개 → _alias_safe 가 alias 를 포기 → 브리지 끊김 → 이름 대조만 잡는다.
+        # (단일 접두사형이면 alias 가 정상 생성돼 traced 되므로 variant 케이스가 안 된다.)
+        {"requirement_id": "SwTR_0101", "component_ids": ["u8g_Drift_Fn", "s8g_Drift_Fn"]},
+    ]
+    suts = [
+        {"requirement_id": "SwUFn_0200", "unit": "bar_func", "source": "SUTS", "testcase": "u1"},
+        {"requirement_id": "SwUFn_0201", "unit": "g_Drift_Fn", "source": "SUTS", "testcase": "u2"},
+    ]
+    vcast = [
+        {"subprogram": "SwUFn_0200", "testcase": "v1", "result": "pass", "source": "VectorCAST"},
+        {"subprogram": "SwUFn_0201", "testcase": "v2", "result": "pass", "source": "VectorCAST"},
+    ]
+    s = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)["summary"]
+    assert s["unmapped_sds_name_hit"] >= s["unmapped_sds_linked"]
+    assert s["unmapped_sds_name_variant"] == s["unmapped_sds_name_hit"] - s["unmapped_sds_linked"]
+    assert s["unmapped_sds_linked"] == 1        # bar_func (매트릭스 밖 req)
+    assert s["unmapped_sds_name_variant"] == 1  # g_Drift_Fn (이름만 일치)
+
+
+def test_sds_name_signal_is_purely_additive():
+    """T6: 신규 신호가 기존 판정·집계를 일절 바꾸지 않음을 고정.
+    6버킷 합 == unmapped_vcast_count 불변식과 design축 집계가 그대로여야 한다."""
+    mx, entry = _drift_matrix(["s_AntiPinch_Detect"], "u16s_AntiPinch_Detect")
+    s = mx["summary"]
+    bucket_sum = (s["unmapped_layer_app_leaf"] + s["unmapped_layer_bsw_driver"]
+                  + s["unmapped_layer_boot_reprog"] + s["unmapped_layer_lib_util"]
+                  + s["unmapped_layer_test_artifact"] + s["unmapped_layer_unresolved"])
+    assert bucket_sum == s["unmapped_vcast_count"] == len(mx["unmapped_vcast"])
+    # 이름 히트가 붙어도 design축(in_uds) 판정과 traced 집계는 불변
+    assert entry["in_uds"] is False
+    assert s["unmapped_design_gap"] == 1
+    assert s["vcast_traced_rows"] == 0
+    assert not mx["rows"][0]["source_ids"]   # 요구사항 행은 여전히 미추적(판정 불변)
+
+
+def test_sds_name_hits_capped_with_total_and_deterministic_order():
+    """T8: 표시 캡(8) 초과 시 총량을 함께 싣고, 순서가 프로세스 해시에 의존하지 않아야 한다.
+
+    `_all_sds_keys` 는 set 이라 sorted() 없이 순회하면 인덱스 리스트 순서가 재기동마다 바뀌어
+    캡이 '임의의 8개'를 조용히 고른다 → CSV 감사 증빙·영속 매트릭스에 유령 변경(deep-review C1).
+    """
+    # core 티어로 9건이 모이게: 접두사만 다른 동일 core('big'). 시험 함수는 l_big(SDS엔 없음).
+    names = ["s_big", "g_big", "u8s_big", "u16s_big", "u32s_big",
+             "s8s_big", "s16s_big", "s32s_big", "u8g_big"]
+    mx, entry = _drift_matrix(names, "l_big")
+    assert entry["sds_reqs"] == []
+    assert entry["sds_name_match"] == "core"
+    assert entry["sds_name_hits_total"] == 9          # 캡 전 총량이 보존됨
+    assert len(entry["sds_name_hits"]) == 8           # 표시분은 캡
+    # 결정적 정렬 — sorted(_all_sds_keys) 순서의 앞 8개여야 한다(해시 순서 의존 금지)
+    assert entry["sds_name_hits"] == sorted(n.lower() for n in names)[:8]
+    assert entry["sds_name_ambiguous"] is True
+    assert mx["summary"]["unmapped_sds_name_variant"] == 1
+
+
+def test_exact_tier_always_implies_sds_reqs_populated():
+    """T9 (canary): exact 히트 ⟹ sds_reqs 비공백.
+
+    프론트 3분기와 티어 라벨이 이 불변식에 의존한다(exact 는 첫 분기로 가므로 '≈' 표기에 도달
+    불가). `sds_all_func_to_reqs` 빌드에 필터가 추가되면 즉시 깨지므로 고정한다.
+    """
+    cases = [
+        (["bar_func"], "bar_func"),                       # bare 정확 일치
+        (["u16s_Foo"], "u16s_Foo"),                       # 접두사 포함 정확 일치
+        (["SwUFn_0200"], None),                           # SDS에 시험 ID 가 섞인 경우
+    ]
+    for comps, unit in cases:
+        items = [{"id": "SwTR_0101"}]
+        sds_pairs = [{"requirement_id": "SwST_08", "component_ids": comps}]  # 매트릭스 밖 req
+        rows = [{"subprogram": "SwUFn_0200", "testcase": "v1", "result": "pass",
+                 "source": "VectorCAST"}]
+        if unit:
+            rows.insert(0, {"requirement_id": "SwUFn_0200", "unit": unit,
+                            "source": "SUTS", "testcase": "u1"})
+        mx = generate_uds_traceability_matrix(items, vcast_rows=rows, sds_pairs=sds_pairs)
+        for u in mx["unmapped_vcast"]:
+            assert not (u["sds_name_match"] == "exact" and not u["sds_reqs"]), (
+                f"exact 히트인데 sds_reqs 가 비었다 — 프론트 3분기 가정 붕괴: {u['subprogram']}")
+
+
+def test_sds_name_hit_never_leaks_into_traceability():
+    """T7: over-trace 방어 — 이름 일치는 보고용이므로 요구사항 행의 추적 결과에 새면 안 된다."""
+    mx, _ = _drift_matrix(["u8g_DoorCtrl_SlipChkSpd", "s8g_DoorCtrl_SlipChkSpd"],
+                          "g_DoorCtrl_SlipChkSpd")
+    row = mx["rows"][0]
+    assert "g_doorctrl_slipchkspd" not in [str(x).lower() for x in (row["source_ids"] or [])]
+    assert row["test_count"] == 0
+    assert mx["summary"]["vcast_traced_rows"] == 0
 
 
 # ── UDS(단위설계) 연동 신호 — SRS 미추적이어도 함수가 단위설계엔 존재하는지 ──────────
@@ -387,6 +552,28 @@ def test_unmapped_vcast_design_gap_when_not_in_uds():
     assert all("in_uds" in u and "uds_funcs" in u for u in mx["unmapped_vcast"])
     assert mx["summary"]["unmapped_design_gap"] == 1
     assert mx["summary"]["unmapped_uds_linked"] == 0
+
+
+def test_unmapped_app_design_gap_is_app_leaf_and_not_in_uds():
+    """진짜 '실 finding' = APP_LEAF ∩ 미설계(in_uds=False) — layer축(app_leaf 전체)이 아니라 design축.
+    design_gap(전 계층 미설계)과 구별: LIB 계층의 미설계 함수는 design_gap엔 잡히나 app_design_gap엔 안 잡힌다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    # (a) 앱 leaf(도메인명), UDS에도 없음 → 진짜 앱 갭(app_design_gap)
+    suts_a = [{"requirement_id": "SwUFn_0400", "unit": "s_appleaf_ctrl", "source": "SUTS", "testcase": "u1"}]
+    vc_a = [{"subprogram": "SwUFn_0400", "testcase": "SwUFn_0400", "result": "pass", "source": "VectorCAST"}]
+    # (b) LIB(crc32) 계층, UDS에도 없음 → design_gap이나 app_design_gap 아님(정당한 범위경계)
+    suts_b = [{"requirement_id": "SwUFn_0401", "unit": "s_crc32_calc", "source": "SUTS", "testcase": "u2"}]
+    vc_b = [{"subprogram": "SwUFn_0401", "testcase": "SwUFn_0401", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, vcast_rows=suts_a + vc_a + suts_b + vc_b, sds_pairs=sds_pairs,
+        uds_function_ids=["unrelated_func"],  # 둘 다 UDS 인벤토리에 없음
+    )
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0400"]["layer"] == "APP_LEAF" and by_sub["SwUFn_0400"]["in_uds"] is False
+    assert by_sub["SwUFn_0401"]["layer"] == "LIB_UTIL" and by_sub["SwUFn_0401"]["in_uds"] is False
+    assert mx["summary"]["unmapped_design_gap"] == 2       # 둘 다 미설계(전 계층)
+    assert mx["summary"]["unmapped_app_design_gap"] == 1   # 진짜 앱 갭은 (a)만 — 라벨축 정직화의 핵심
 
 
 def test_unmapped_vcast_swufn_id_echo_not_counted_as_uds():
@@ -691,6 +878,7 @@ def test_unmapped_layer_field_and_summary_counts():
         + s["unmapped_layer_boot_reprog"]
         + s["unmapped_layer_lib_util"]
         + s["unmapped_layer_test_artifact"]
+        + s["unmapped_layer_unresolved"]   # §H: 분류불가 6번째 버킷(정합식 유지)
     )
     assert layer_sum == s["unmapped_vcast_count"]
     assert s["unmapped_layer_app_leaf"] >= 1
@@ -758,3 +946,123 @@ def test_leading_underscore_func_bridges_to_matrix():
     row = mx["rows"][0]
     assert row["requirement_id"] == "SwTR_0106"
     assert row["test_count"] >= 1  # _entrypoint 시험이 SRS 행에 연결됨
+
+
+# ── 설계-ID bridge(SRS→SDS→UDS, SwFn/SwSTR/SwST/SwTK; SwCom 제외) ──
+# UDS 함수의 Related ID 설계ID를 SDS의 설계ID→SRS요구 매핑으로 이어 UDS 밴드에 부착.
+# 여기 함수명(foo_func 등)은 SDS component_ids에 없으므로 name-bridge로는 안 붙고,
+# 오직 설계ID bridge로만 붙는다 → 이 경로를 단독 고정한다.
+
+def test_design_id_bridge_swfn_attaches_but_swcom_does_not():
+    """load-bearing: SwFn(tight)은 브리지되고 SwCom(loose)은 제외된다."""
+    items = [{"id": "SwTR_0101"}]
+    # SDS: SwTR_0101을 설계ID SwFn_05·SwCom_03에 귀속
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05", "SwCom_03"]}]
+    # UDS Related ID: SwFn_05는 foo_func가, SwCom_03은 comp_only_func가 참조
+    mapping_pairs = [
+        {"requirement_id": "SwFn_05", "source_ids": ["foo_func"]},
+        {"requirement_id": "SwCom_03", "source_ids": ["comp_only_func"]},
+    ]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    row = mx["rows"][0]
+    # SwFn bridge → foo_func 부착 (mutation A: 2c 주입 제거 시 실패)
+    assert "foo_func" in row["source_ids"]
+    # SwCom 제외 → comp_only_func 미부착 (mutation B: 정규식에 COM 추가 시 실패)
+    assert "comp_only_func" not in row["source_ids"]
+    # SDS 경유 '추정'이라 direct엔 안 들어감 (over-trace 안전판)
+    assert row.get("source_ids_direct") == []
+
+
+def test_design_id_bridge_swstr_swst_swtk():
+    """SwSTR/SwST/SwTK 세 tight namespace 모두 브리지된다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101",
+                  "component_ids": ["SwSTR_02", "SwST_03", "SwTK_04"]}]
+    mapping_pairs = [
+        {"requirement_id": "SwSTR_02", "source_ids": ["str_func"]},
+        {"requirement_id": "SwST_03", "source_ids": ["st_func"]},
+        {"requirement_id": "SwTK_04", "source_ids": ["tk_func"]},
+    ]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    sids = mx["rows"][0]["source_ids"]
+    assert "str_func" in sids and "st_func" in sids and "tk_func" in sids
+
+
+def test_design_id_bridge_ignores_non_matrix_req():
+    """설계ID가 매트릭스 밖 요구(SwTR_9999)에만 귀속되면 브리지 안 함(req_id_set 게이트)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_9999", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    assert "foo_func" not in (mx["rows"][0]["source_ids"] or [])
+
+
+def test_design_id_bridge_excludes_swufn_id_value():
+    """source_ids의 자기 SwUFn ID 값은 밴드에서 제외(함수명만 부착)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    # 파서는 source_ids에 함수명 + 자기 SwUFn ID를 함께 넣는다
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func", "SwUFn_0203"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    sids = mx["rows"][0]["source_ids"]
+    assert "foo_func" in sids
+    assert "SwUFn_0203" not in sids
+
+
+def test_design_id_bridge_excludes_junk_field_labels():
+    """source_ids에 필드라벨 junk('Name'/'ID')가 있어도 요구에 부착되지 않는다 (deep-review C1 방어심층).
+
+    파서 echo 가드가 1차 차단하나, 문서군 편차로 junk가 mapping_pairs에 새어도 bridge가
+    막는지 고정. mutation: _UDS_FUNC_JUNK를 비우면 이 테스트 실패.
+    """
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["real_fn", "Name", "ID"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    sids = mx["rows"][0]["source_ids"]
+    assert "real_fn" in sids
+    assert "Name" not in sids and "ID" not in sids
+
+
+# ── SUTS/VectorCAST test-row 설계-ID 브리지 (UDS 브리지의 test-arm 확장) ──
+# 시험 함수가 SDS에 이름은 없지만 UDS Related ID 설계ID(SwFn 등)로 SRS에 닿는 경우를
+# name-bridge가 놓치던 것을 보완. SUTS/VectorCAST 밴드 43→64.
+
+def test_suts_design_id_bridge():
+    """SUTS unit 함수가 UDS 설계ID(SwFn)로 SRS에 연결(SDS에 이름 없어 name-bridge는 미스)."""
+    items = [{"id": "SwTR_0101"}]
+    # SDS는 설계ID SwFn_05로만 귀속(함수명 foo_func는 SDS에 없음)
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_01", "unit": "foo_func", "source": "SUTS", "testcase": "t1"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs, vcast_rows=suts)
+    row = mx["rows"][0]
+    assert row["suts_count"] >= 1            # 설계ID 브리지로만 도달 (mutation: 미배선→0)
+    assert any(t.get("trace_type") == "indirect" for t in row["suts_tests"])
+
+
+def test_vcast_design_id_bridge():
+    """VectorCAST subprogram(SwUFn)→(SUTS)함수명→(UDS 설계ID)→SRS 로 연결."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_01", "unit": "foo_func", "source": "SUTS", "testcase": "s1"}]
+    vcast = [{"subprogram": "SwUFn_01", "testcase": "SwUFn_01 (2 TC)",
+              "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs, vcast_rows=suts + vcast)
+    assert mx["rows"][0]["vcast_count"] >= 1
+    assert mx["summary"]["vcast_traced_rows"] == 1
+    assert mx["summary"]["vcast_untraced_rows"] == 0
+
+
+def test_suts_vcast_design_bridge_swcom_excluded():
+    """test-row 설계-ID 브리지도 SwCom은 제외한다(UDS와 동일 안전판 상속)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwCom_03"]}]
+    mapping_pairs = [{"requirement_id": "SwCom_03", "source_ids": ["comp_fn"]}]
+    suts = [{"requirement_id": "SwUFn_01", "unit": "comp_fn", "source": "SUTS", "testcase": "t1"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs, vcast_rows=suts)
+    assert mx["rows"][0]["suts_count"] == 0   # SwCom 제외 → 브리지 안 됨

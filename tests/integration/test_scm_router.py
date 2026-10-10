@@ -14,13 +14,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture(scope="module")
-def client():
-    from backend.main import app
-    return TestClient(app)
 
 
 @pytest.fixture()

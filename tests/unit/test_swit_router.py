@@ -5,8 +5,9 @@ StreamingResponse 헤더 검증.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import pathlib
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.main import app  # noqa: E402
-
 
 client = TestClient(app)
 
@@ -254,10 +254,10 @@ class TestSwitSitrEndpointRegistration:
 
     def test_sitr_shares_coverage_semaphore(self):
         """Semaphore(2) — Coverage와 SITR 동일 인스턴스 공유."""
-        from backend.routers.swit import _BUILD_SEMAPHORE
         # 모듈 단일 instance — Coverage build_swit_coverage / SITR build_swit_sitr
         # 모두 `_BUILD_SEMAPHORE` 사용 (소스 검사로 충분).
         import backend.routers.swit as swit_mod
+        from backend.routers.swit import _BUILD_SEMAPHORE
         src = swit_mod.__file__
         with open(src, encoding="utf-8") as f:
             content = f.read()
@@ -492,8 +492,9 @@ class TestSwitConfigFallback50:
 
     def test_read_template_bytes_empty_both_returns_400(self, tmp_path, monkeypatch):
         """req.template_path 빈 + config의 swit_coverage_template 빈 슬롯 → 400 raise (사용자가 swut_meta.json 미설정 시 명시 에러)."""
-        from backend.routers.swit import _read_template_bytes
         from fastapi import HTTPException
+
+        from backend.routers.swit import _read_template_bytes
         self._setup_cfg(tmp_path, monkeypatch, {
             "projects": {"HDPDM01": {"template_paths": {"swit_coverage_template": ""}}}
         })
@@ -504,8 +505,9 @@ class TestSwitConfigFallback50:
 
     def test_read_template_bytes_sitr_kind_uses_swit_sitr_key(self, tmp_path, monkeypatch):
         """kind='sitr' → swit_sitr_template config 키 사용."""
-        from backend.routers.swit import _read_template_bytes
         from fastapi import HTTPException
+
+        from backend.routers.swit import _read_template_bytes
         self._setup_cfg(tmp_path, monkeypatch, {
             "projects": {"HDPDM01": {"template_paths": {"swit_sitr_template": ""}}}
         })
@@ -516,8 +518,9 @@ class TestSwitConfigFallback50:
 
     def test_read_template_bytes_switcr_kind_uses_switcr_key(self, tmp_path, monkeypatch):
         """kind='switcr' uses switcr_template config key."""
-        from backend.routers.swit import _read_template_bytes
         from fastapi import HTTPException
+
+        from backend.routers.swit import _read_template_bytes
         self._setup_cfg(tmp_path, monkeypatch, {
             "projects": {"HDPDM01": {"template_paths": {"switcr_template": ""}}}
         })
@@ -674,6 +677,7 @@ class TestSwitConfigFallback50:
     def test_coverage_build_passes_swits_map_to_builder(self, monkeypatch):
         """SwITCV도 SwITS spec parse 결과를 Traceability writer로 전달."""
         import io
+
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITBuildRequest
         from backend.services.swit_coverage_aggregator import SwitCoverageBuildResult
@@ -685,7 +689,10 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "collect_swit_session", lambda *_args, **_kwargs: object())
         monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
-        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: {"SwUFn_0001"})
+        # 2026-08-04: `out_warnings` kwarg 추가(SwUDS 읽기 실패 침묵 차단) — 스텁도
+        # kwargs 를 흡수해야 한다. `lambda _req:` 로 두면 TypeError 로 죽는다.
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids",
+                            lambda _req, **_kwargs: {"SwUFn_0001"})
         monkeypatch.setattr(
             swit_mod, "_resolver_resolve_hmr_html_bytes",
             lambda *_args, **_kwargs: None,
@@ -724,6 +731,7 @@ class TestSwitConfigFallback50:
         (list kwarg)로 collector에 전달한다.
         """
         import io
+
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITBuildRequest
         from backend.services.swit_coverage_aggregator import SwitCoverageBuildResult
@@ -744,7 +752,8 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
         monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
-        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: set())
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids",
+                            lambda _req, **_kwargs: set())  # out_warnings kwarg 흡수(2026-08-04)
         monkeypatch.setattr(swit_mod, "_resolver_resolve_hmr_html_bytes", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_resolver_resolve_swuts_test_specs", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
@@ -774,6 +783,7 @@ class TestSwitConfigFallback50:
         B2 대칭 이후 — 단일 config 폴더도 ``log_folders=[folder]`` list kwarg로 전달.
         """
         import io
+
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITSitrBuildRequest
         from backend.services.swit_sitr_aggregator import SwitSitrBuildResult
@@ -794,7 +804,8 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
         monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
-        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: set())
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids",
+                            lambda _req, **_kwargs: set())  # out_warnings kwarg 흡수(2026-08-04)
         monkeypatch.setattr(swit_mod, "_resolver_resolve_swuts_test_specs", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
             swit_mod,
@@ -904,8 +915,8 @@ class TestSheetNameSubstring53fix:
     def test_swit_coverage_aggregator_matches_swit_v202_sheet_names(self):
         """SwIT v2.02 양식의 '1.Test Summary' 시트가 substring 매칭으로 발견됨."""
         from backend.services import swit_coverage_aggregator as mod
-        import inspect
-        src = inspect.getsource(mod)
+        from tests.unit._source_probe import source_of
+        src = source_of(mod)
         assert '"test summary" in n.lower()' in src or "'test summary' in n.lower()" in src, (
             "swit_coverage_aggregator가 'test summary' substring 매칭 안 함 — 53차 fix 누락"
         )
@@ -913,8 +924,8 @@ class TestSheetNameSubstring53fix:
     def test_swit_sitr_aggregator_matches_swit_v202_sheet_names(self):
         """SITR도 동일 — Test Summary + Deviation + Test Log substring 매칭."""
         from backend.services import swit_sitr_aggregator as mod
-        import inspect
-        src = inspect.getsource(mod)
+        from tests.unit._source_probe import source_of
+        src = source_of(mod)
         for keyword in ("test summary", "deviation", "test log"):
             assert (f'"{keyword}" in n.lower()' in src
                     or f"'{keyword}' in n.lower()" in src), (
@@ -1141,3 +1152,282 @@ def test_collect_swit_session_passes_log_folders_through(monkeypatch):
     )
     assert captured["log_folders"] == ["U:/app", "U:/boot"]
     assert captured["env_prefix"] == "SwITC"
+
+
+# ── 시험 결과 3종의 Quality 기록 배선 (2026-08-21) ────────────────────────────
+#
+# 여기서 깨지는 방식은 **조용하다**. 빌드는 성공하고 파일도 받아지는데 Quality DB 에
+# 행이 안 남아, 생성 현황 보드가 방금 만든 문서를 영영 "미생성" 으로 표시한다. 실제로
+# SwIT Coverage 에만 기록이 있어 SITR 가 그 상태였고(커밋 이력), 고친 뒤에도
+# **SWITCR 은 여전히 그 상태였다** — 같은 결함이 한 칸 옆에서 반복됐다.
+#
+# 그래서 헬퍼 단독 테스트로는 부족하다(호출부가 빠진 게 결함이므로). 아래는 **호출부를
+# AST 로** 확인한다: 각 빌드 함수가 `_record_test_quality` 를 부르는가, 그리고 doc_type
+# 을 무엇으로 넘기는가. doc_type 이 틀리면 종합결과서가 SITR 행을 덮어쓴다.
+
+
+class TestQualityRecordingWiring:
+    EXPECTED = {
+        "_do_swit_sitr_build": "sitr",
+        "_do_swit_sitr_build_spec_based": "sitr",
+        "_do_switcr_build": "switcr",
+    }
+
+    @staticmethod
+    def _record_calls(func_name: str):
+        import ast
+        src = pathlib.Path("backend/routers/swit.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func_name),
+            None,
+        )
+        assert fn is not None, f"{func_name} 가 사라졌다 — 테스트가 겨눌 대상이 없다"
+        out = []
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_record_test_quality"):
+                kw = {k.arg: k.value for k in node.keywords}
+                doc = kw.get("doc_type")
+                out.append(doc.value if isinstance(doc, ast.Constant) else None)
+        return out
+
+    @pytest.mark.parametrize("func_name", sorted(EXPECTED))
+    def test_build_path_records_quality_with_its_own_doc_type(self, func_name):
+        calls = self._record_calls(func_name)
+        assert calls == [self.EXPECTED[func_name]], (
+            f"{func_name} 의 quality 기록 호출: {calls} "
+            f"(기대: [{self.EXPECTED[func_name]!r}])"
+        )
+
+    def test_doc_type_has_no_default(self):
+        """기본값을 두면 **빠뜨린 호출이 조용히 SITR 로 기록**된다 — 종합결과서가
+        SITR 행을 덮어쓰고, 보드는 둘을 구분하지 못한다."""
+        import inspect
+
+        from backend.routers import swit as mod
+        sig = inspect.signature(mod._record_test_quality)
+        param = sig.parameters["doc_type"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+    def test_helper_passes_doc_type_through(self, monkeypatch):
+        """헬퍼가 받은 doc_type 을 그대로 recorder 에 넘기는가."""
+        import workflow.quality.recorder as rec
+        from backend.routers import swit as mod
+        seen = {}
+
+        def _fake(doc_type, summary, **kw):
+            seen["doc_type"] = doc_type
+            seen["summary"] = summary
+            seen.update(kw)
+            return 1
+
+        monkeypatch.setattr(rec, "record_test_result_run", _fake)
+
+        class _Req:
+            project_id = "HDPDM01"
+            release_sw_version = "1.02"
+
+        class _Meta:
+            asil_level = "ASIL B"
+
+        mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="switcr")
+        assert seen["doc_type"] == "switcr"
+        assert seen["release_sw_version"] == "1.02"
+        assert seen["project_id"] == "HDPDM01"
+
+    def test_recording_failure_is_logged_not_silent(self, monkeypatch, caplog):
+        """non-fatal 은 유지하되 **침묵은 금지** — 같은 블록이 NameError 를 삼킨 전례가 있다."""
+        import logging
+
+        import workflow.quality.recorder as rec
+        from backend.routers import swit as mod
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(rec, "record_test_result_run", _boom)
+
+        class _X:
+            project_id = ""
+            release_sw_version = ""
+            asil_level = ""
+
+        with caplog.at_level(logging.ERROR):
+            mod._record_test_quality(_X(), _X(), {}, doc_type="switcr")   # 예외가 새면 안 된다
+        assert any("SWITCR" in r.getMessage() for r in caplog.records), (
+            "기록 실패가 로그에 남지 않았다 — 조용한 실패는 이 파일이 겨누는 결함 그 자체다"
+        )
+
+    def test_scm_id_is_passed_through_not_guessed(self, monkeypatch):
+        """프로젝트 축을 **추측에 맡기지 않는다**(2026-08-24 라이브 실측).
+
+        비우면 recorder 가 `project_id` 에서 `resolve_scm_id` 로 추측하는데, 문자열
+        "KJPDS02" 가 SCM entry `kjpds02` 의 id 이면서 `kjpds02_pv` 의 builder_project_id
+        라 추측이 빗나갔다 → 생성 현황 보드(`kjpds02_pv` 로 조회)가 방금 만든 문서를
+        영영 "미생성" 으로 표시했다. 빌드도 기록도 정상인데 화면만 침묵하는 형태다.
+        """
+        import workflow.quality.recorder as rec
+        from backend.routers import swit as mod
+        seen = {}
+        monkeypatch.setattr(
+            rec, "record_test_result_run",
+            lambda doc_type, summary, **kw: (seen.update(kw), 1)[1],
+        )
+
+        class _Req:
+            project_id = "KJPDS02"
+            release_sw_version = "1.02"
+            scm_id = "kjpds02_pv"
+
+        class _Meta:
+            asil_level = "ASIL A"
+
+        mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="switcr")
+        assert seen["scm_id"] == "kjpds02_pv"
+
+    def test_absent_scm_id_stays_none_not_empty_string(self, monkeypatch):
+        """빈 문자열을 넘기면 recorder 의 `if not scm_id` 추측 분기가 **살아 있어야** 한다
+        — `""` 를 그대로 저장하면 '축을 아는데 빈 값' 처럼 보여 더 나쁘다."""
+        import workflow.quality.recorder as rec
+        from backend.routers import swit as mod
+        seen = {}
+        monkeypatch.setattr(
+            rec, "record_test_result_run",
+            lambda doc_type, summary, **kw: (seen.update(kw), 1)[1],
+        )
+
+        class _Req:
+            project_id = "KJPDS02"
+            release_sw_version = "1.02"
+            scm_id = ""
+
+        class _Meta:
+            asil_level = "ASIL A"
+
+        mod._record_test_quality(_Req(), _Meta(), {"total_tcs": 5}, doc_type="switcr")
+        assert seen["scm_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# SwITCR 선택 증빙 — 등록만 돼 있고 파일이 없어도 빌드는 계속돼야 한다
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRes:
+    """`read_bytes` 가 경로별로 정해진 결과를 낸다(값 / 예외)."""
+
+    mode = "local"
+
+    def __init__(self, table):
+        self.table = dict(table)
+        self.reads = []
+
+    def read_bytes(self, path):
+        self.reads.append(path)
+        out = self.table.get(path)
+        if isinstance(out, Exception):
+            raise out
+        if out is None:
+            raise FileNotFoundError(f"no such file: {path}")
+        return out
+
+
+class TestOptionalSwitcrEvidenceIsActuallyOptional:
+    """`_read_optional_config_file` 이 optional 이 아니었다.
+
+    2026-08-25 실측: KJPDS02 SwITCR 이 **404 로 아예 안 만들어졌다.** config 에 등록된
+    `fault_injection_result`(DV 세대 산출물이 PV v2.01 로 교체되며 소멸)와
+    `switcr_reference`(클라우드 동기화로 파일명 뭉개짐)가 둘 다 실재하지 않는데
+    `resolver.read_bytes` 예외가 그대로 404 로 나갔다. 준비 게이트는 "준비 완료"라
+    했으므로, 게이트와 빌드가 **다른 조건으로 재고 있었다**.
+    """
+
+    KEY = "fault_injection_result"
+    CFG = {"template_paths": {KEY: "U:/x/gone.xlsx"}}
+
+    def _mod(self, monkeypatch, res):
+        from backend.routers import swit as mod
+        monkeypatch.setattr(mod, "get_resolver", lambda: res)
+        monkeypatch.setattr(mod, "_load_meta_from_config", lambda _pid: dict(self.CFG))
+        return mod
+
+    def test_missing_configured_file_does_not_kill_the_build(self, monkeypatch):
+        mod = self._mod(monkeypatch, _FakeRes({}))
+        assert mod._read_optional_config_file("", "KJPDS02", self.KEY) is None
+
+    def test_missing_configured_file_is_warned(self, monkeypatch):
+        """조용히 넘기면 증빙이 얇아진 걸 아무도 모른다."""
+        mod = self._mod(monkeypatch, _FakeRes({}))
+        warns = []
+        mod._read_optional_config_file("", "KJPDS02", self.KEY, out_warnings=warns)
+        assert len(warns) == 1, warns
+        assert self.KEY in warns[0] and "gone.xlsx" in warns[0], warns[0]
+
+    def test_unconfigured_path_is_silent(self, monkeypatch):
+        """등록조차 안 된 건 결손이 아니다 — 경고로 시끄럽게 하지 않는다."""
+        from backend.routers import swit as mod
+        monkeypatch.setattr(mod, "get_resolver", lambda: _FakeRes({}))
+        monkeypatch.setattr(mod, "_load_meta_from_config", lambda _pid: {"template_paths": {}})
+        warns = []
+        assert mod._read_optional_config_file("", "KJPDS02", self.KEY, out_warnings=warns) is None
+        assert warns == []
+
+    def test_permission_error_still_propagates(self, monkeypatch):
+        """허용목록/워커 문제는 '파일이 없다' 와 조치가 다르다 — 부재로 접지 않는다."""
+        res = _FakeRes({"U:/x/gone.xlsx": PermissionError("허용되지 않은 경로")})
+        mod = self._mod(monkeypatch, res)
+        warns = []
+        with pytest.raises(PermissionError):
+            mod._read_optional_config_file("", "KJPDS02", self.KEY, out_warnings=warns)
+        assert warns == [], "권한 오류를 경고로 강등하면 조용히 넘어간다"
+
+    def test_present_file_returns_bytes(self, monkeypatch):
+        res = _FakeRes({"U:/x/gone.xlsx": b"PK\x03\x04data"})
+        mod = self._mod(monkeypatch, res)
+        warns = []
+        assert mod._read_optional_config_file(
+            "", "KJPDS02", self.KEY, out_warnings=warns) == b"PK\x03\x04data"
+        assert warns == []
+
+    def test_request_path_wins_over_config(self, monkeypatch):
+        res = _FakeRes({"C:/req/given.xlsx": b"REQ"})
+        mod = self._mod(monkeypatch, res)
+        assert mod._read_optional_config_file(
+            "C:/req/given.xlsx", "KJPDS02", self.KEY) == b"REQ"
+        assert res.reads == ["C:/req/given.xlsx"]
+
+
+class TestSwitcrCallSitesCollectTheWarnings:
+    """⚠ 헬퍼가 경고를 **낼 수 있는 것**과 호출부가 **받아서 응답에 싣는 것**은 별개다.
+
+    이 저장소는 인자만 달고 호출부가 안 넘긴 전례가 있다(`swut.py` 의 `_swuds_warnings`
+    — 주석이 "AST 호출부 검사가 잡아냈다"고 남겨 뒀다).
+    """
+
+    def _src(self):
+        from backend.routers import swit as mod
+        from tests.unit._source_probe import source_of
+
+        return source_of(mod._do_switcr_build)
+
+    def test_every_optional_read_passes_out_warnings(self):
+        import ast
+
+        tree = ast.parse(self._src())
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_read_optional_config_file"
+        ]
+        assert len(calls) == 4, f"선택 입력 호출부를 {len(calls)}개만 찾았다 — 앵커가 깨졌다"
+        bare = [ast.unparse(c)[:60] for c in calls
+                if not any(k.arg == "out_warnings" for k in c.keywords)]
+        assert bare == [], f"경고를 안 받는 호출부가 남았다: {bare}"
+
+    def test_collected_warnings_reach_the_result(self):
+        src = self._src()
+        assert "result.warnings.extend(_optional_warnings)" in src, (
+            "모아만 두고 응답에 안 실으면 화면에는 아무것도 안 뜬다")

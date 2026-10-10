@@ -1,17 +1,27 @@
 """Auto-generated router: exports"""
-from fastapi import APIRouter, HTTPException, Request, Query
-from backend.error_handler import APIError
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
-import json
-import traceback
 import logging
+import traceback
 import uuid
-from pathlib import Path
 from datetime import datetime
-from backend.helpers import _exports_dir, _invalidate_session_cache, _load_session_meta, _resolve_base_dir, _resolve_export_path, _safe_extract_zip, _save_session_meta, _session_dir
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from backend.error_handler import APIError
+from backend.helpers import (
+    _exports_dir,
+    _invalidate_session_cache,
+    _load_session_meta,
+    _resolve_base_dir,
+    _resolve_export_path,
+    _safe_extract_zip,
+    _save_session_meta,
+    _session_dir,
+)
+from backend.services.paths import confine
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
@@ -45,8 +55,13 @@ def convert_to_pdf(req: PdfConvertRequest) -> Dict[str, Any]:
     """
     from backend.services.pdf_converter import docx_to_pdf, xlsx_to_pdf
 
+    # ⚠ `source_path` 는 **봉인하지 않는다**. 요구문서·산출물은 저장소 밖에 사는 것이
+    #   이 앱의 설계다(`_is_allowed_req_doc` 이 확장자만 보는 이유). 읽기를 여기서만
+    #   좁히면 정상 사용이 깨지고 다른 읽기 경로와도 어긋난다.
+    #   **쓰기는 다르다** — 산출물을 임의 위치에 떨궈도 되는 근거가 이 저장소엔 없고,
+    #   `local_editor_write` 는 이미 같은 루트로 잠겨 있다. `output_path` 만 봉인한다.
     source = Path(req.source_path)
-    output = Path(req.output_path) if req.output_path else None
+    output = confine(req.output_path, what="output_path") if req.output_path else None
     ext = source.suffix.lower()
 
     try:
@@ -84,11 +99,16 @@ def generate_pdf_report(req: PdfReportRequest) -> Dict[str, Any]:
 
     sections = [s.model_dump() for s in req.sections]
 
+    # ⚠ 여기는 **경로도 내용도** 클라이언트가 정한다(`output_path` + `title`/`sections`).
+    #   봉인이 없으면 임의 위치에 임의 내용의 파일을 만들 수 있다. 봉인은 try 밖에서 —
+    #   안에 두면 아래 `except Exception` 이 403 을 500 으로 바꾼다.
+    pdf_path = confine(req.output_path, what="output_path")
+
     try:
         result = generate_report_pdf(
             title=req.title,
             sections=sections,
-            pdf_path=Path(req.output_path),
+            pdf_path=pdf_path,
             subtitle=req.subtitle,
         )
     except Exception:

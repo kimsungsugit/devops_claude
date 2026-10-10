@@ -1,6 +1,10 @@
 flake8>=7.0,<8.0
 pytest>=8.0,<9.0
 pytest-cov>=5.0,<6.0
+# pre-commit 훅이 `-n auto` 로 쓴다. 없으면 직렬(실측 590s)로 돌아 900s 예산까지
+# 여유가 310초뿐이고, 예산을 넘기면 훅이 **커밋을 중단**한다(fail-closed).
+# 실측(18코어): 590s → 179s, 결과는 직렬과 완전 일치.
+pytest-xdist>=3.5,<4.0
 autopep8>=2.0,<3.0
 radon>=6.0,<7.0
 tree-sitter>=0.21,<1.0
@@ -9,3 +13,7 @@ clang>=18.0,<19.0
 libclang>=18.0,<19.0
 jsonschema>=4.20,<5.0
 networkx>=3.2,<4.0
+psutil>=5.9,<8.0   # (R38) backend/routers/_safety.py 의 메모리 가드 — 부재 시 그 경로가 테스트에서 조용히 건너뛰어졌다
+# (R46) `tests/unit/test_uds_multi_source_root.py` 가 F821 전 파일 검사를 ruff 로 한다 — GitLab test job 은 lint job 과
+# 별도 컨테이너라 여기 없으면 그 테스트가 무관한 red 가 된다. 훅·pre-commit 도 같은 venv 의 ruff 를 쓴다.
+ruff>=0.4,<1.0

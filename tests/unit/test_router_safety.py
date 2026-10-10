@@ -25,7 +25,6 @@ from backend.routers._safety import (  # noqa: E402
     run_consistency_safely,
 )
 
-
 _LOGGER = logging.getLogger("test_router_safety")
 
 

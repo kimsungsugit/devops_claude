@@ -72,7 +72,7 @@ export function AuthProvider({ children }) {
         username: data.username || null,
         mustChangePassword: !!data.must_change_password,
       });
-    } catch (e) {
+    } catch (_e) {
       if (!isMountedRef.current) return;
       clearTokens();
       setState({ authenticated: false, loading: false, username: null, mustChangePassword: false });

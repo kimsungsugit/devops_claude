@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-
 _PREFIXES = ("ap_", "g_", "s_", "v_")
 _SUFFIXES = ("_pds", "_func", "_on", "_off", "_run", "_reset", "_ctrl")
 _CAMEL_TOKEN_RE = re.compile(r"[A-Z][a-z0-9]+")

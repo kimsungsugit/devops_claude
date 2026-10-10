@@ -2,21 +2,16 @@
 """Extended tests for workflow.impact_orchestrator pure functions."""
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from workflow.impact_orchestrator import (
-    _module_name,
-    _build_neighbors,
-    _hop_limited_impact,
-    _selected_targets,
-    _fallback_changed_types_from_files,
-    _resolve_changed_types_to_functions,
     _action_for_target,
+    _build_neighbors,
     _extract_req_ids,
+    _fallback_changed_types_from_files,
+    _hop_limited_impact,
     _load_json,
-    ACTION_MATRIX,
+    _module_name,
+    _resolve_changed_types_to_functions,
+    _selected_targets,
 )
 
 

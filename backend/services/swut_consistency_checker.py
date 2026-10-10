@@ -49,7 +49,6 @@ except ImportError:  # pragma: no cover - hook fail-safe
 
 from backend.services.excel_template_utils import sheet_is_blank_placeholder
 
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -298,7 +297,82 @@ def _extract_coverage_summary(
     return summary
 
 
-def _extract_sutr_summary(wb: Any, *, tc_prefix: str = "SwUTC") -> dict[str, Any]:
+# Test Summary 의 TC 통계 라벨 → summary 키. 회사 v2.02 양식은 'Deviated' 열이
+# **없어서 5열**이고, 구 양식/SITR 은 6열이다. 위치로 읽으면 5열 문서에서
+# not_executed 값이 deviated 자리로 한 칸 밀린다 → 라벨로 열을 찾는다.
+_TC_STAT_LABEL_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("total_tcs", ("total number of tcs",)),
+    ("tested", ("number of tcs tested",)),
+    ("passed", ("number of tcs passed",)),
+    ("failed", ("number of tcs failed",)),
+    ("deviated", ("number of deviated tcs", "number of tcs deviated")),
+    ("not_executed", ("number of tcs not executed", "number of tcs notexecuted")),
+)
+
+
+def _tc_stat_key(label: str) -> str | None:
+    norm = " ".join((label or "").strip().lower().split())
+    for key, variants in _TC_STAT_LABEL_KEYS:
+        if norm in variants:
+            return key
+    return None
+
+
+def _fill_tc_stats(
+    summary: dict[str, Any],
+    header_pairs: list[tuple[int, str]],
+    value_pairs: list[tuple[int, str]],
+    out_warnings: list[str] | None,
+) -> None:
+    """헤더 라벨의 **열 인덱스**로 값을 집는다.
+
+    ⚠ 이전 판은 ``zip(keys, nxt_pairs[:6])`` 위치 매핑이었다. 이 저장소가 직접
+      찍어내는 회사 v2.02 양식(``swut_coverage_aggregator`` 가 stamp 하는 라벨은
+      **5개** — Deviated 없음)에서는 미실행 수가 ``deviated`` 에 들어가고
+      ``not_executed`` 는 대입조차 되지 않아 0 으로 남았다. 경고도 없었다.
+      그 결과 정합한 산출물 쌍에 "Total TC 불일치" Warning 이 뜨고, 프론트는
+      미실행 N 건을 Deviation N 건으로 표시했다.
+
+    ``_compact_row`` 가 빈 셀을 버리므로 **위치는 어긋나도 열 인덱스는 보존**된다 —
+    그래서 열로 맞추는 것이 위치보다 강하다.
+    """
+    by_col = dict(value_pairs)
+    resolved: dict[str, int] = {}
+    for col, label in header_pairs:
+        key = _tc_stat_key(label)
+        if key is None or key in resolved:
+            continue
+        raw = by_col.get(col)
+        if raw is None:
+            continue
+        try:
+            resolved[key] = int(raw) if raw else 0
+        except (ValueError, TypeError):
+            continue
+    if resolved:
+        summary.update(resolved)
+        return
+
+    # 라벨을 하나도 못 읽었다 — 구형 양식일 수 있다. 열 수가 정확히 맞을 때만
+    # 위치 폴백을 허용하고, 아니면 **채우지 않는다**(0 으로 위장하지 않는다).
+    keys = tuple(k for k, _ in _TC_STAT_LABEL_KEYS)
+    if len(value_pairs) == len(keys):
+        for k, (_, val) in zip(keys, value_pairs):
+            try:
+                summary[k] = int(val) if val else 0
+            except (ValueError, TypeError):
+                pass
+        return
+    if out_warnings is not None:
+        out_warnings.append(
+            f"Test Summary TC 통계: 라벨을 못 읽었고 열 수도 {len(value_pairs)}"
+            f"(기대 {len(keys)}) 라 매핑 불가 — deviated/not_executed 를 채우지 않았다"
+        )
+
+
+def _extract_sutr_summary(
+    wb: Any, *, tc_prefix: str = "SwUTC", out_warnings: list[str] | None = None,
+) -> dict[str, Any]:
     """SUTR 워크북에서 핵심 지표 추출."""
     summary: dict[str, Any] = {
         "total_tcs": 0,
@@ -358,13 +432,7 @@ def _extract_sutr_summary(wb: Any, *, tc_prefix: str = "SwUTC") -> dict[str, Any
             # Total Number of TCs 헤더 행 발견 시 다음 행에서 값 추출
             if _row_has_label(pairs, "Total Number of TCs"):
                 if idx + 1 < len(rows):
-                    nxt_pairs = _compact_row(rows[idx + 1])
-                    keys = ("total_tcs", "tested", "passed", "failed", "deviated", "not_executed")
-                    for k, (_, val) in zip(keys, nxt_pairs[:6]):
-                        try:
-                            summary[k] = int(val) if val else 0
-                        except (ValueError, TypeError):
-                            pass
+                    _fill_tc_stats(summary, pairs, _compact_row(rows[idx + 1]), out_warnings)
 
             # Section content: TC ID로 시작하는 행
             # 35차: SwUT는 "SwUTC_" prefix, SwIT는 "SwITC_" — 위 루프 진입 전 한 번 compile.
@@ -401,6 +469,94 @@ def _load_workbook(source: Any) -> Any:
         return openpyxl.load_workbook(source, read_only=True, data_only=True)
     # assume already a Workbook
     return source
+
+
+def summarize_coverage_report(
+    coverage_source: Any, *, tc_prefix: str = "SwUTC",
+) -> dict[str, Any]:
+    """단일 Coverage Report(.xlsx)만 파싱해 coverage_summary를 반환(정합성 비교 없이).
+
+    check_swut_consistency가 내부적으로 쓰는 `_extract_coverage_summary`를 단독 호출 —
+    빌더 산출물 하나만 있어도 미커버 함수·Exception·Total TC·Final Result를 바로 본다.
+    SwIT는 thin wrapper(swit_consistency_checker)에서 tc_prefix="SwITC"로 호출.
+
+    Returns: {coverage_summary: dict, parse_warnings: list[str]}. 파싱 실패는
+    parse_warnings에 누적되며 coverage_summary는 부분/빈 dict일 수 있다(예외 안 던짐).
+    """
+    parse_warnings: list[str] = []
+    # 손상/암호화/비-xlsx는 openpyxl이 BadZipFile/InvalidFileException 등을 던진다 —
+    # docstring 계약(예외 안 던짐)대로 잡아 빈 요약+사유로 환원(500 대신 200+warning).
+    try:
+        wb = _load_workbook(coverage_source)
+    except Exception as e:  # noqa: BLE001 — 로드 실패 전체를 계약대로 흡수
+        parse_warnings.append(
+            f"Coverage Report 로드 실패 — 손상/암호화/비-xlsx 의심 ({type(e).__name__})"
+        )
+        return {"coverage_summary": {}, "parse_warnings": parse_warnings}
+    _owns_wb = wb is not coverage_source  # passthrough Workbook(호출자 소유)은 닫지 않음
+    try:
+        names = [n.lower() for n in wb.sheetnames]
+        if not any("traceability" in n for n in names):
+            parse_warnings.append(
+                "Coverage Report에 'Traceability' 시트 없음 — Hyundai/Mobis 포맷 가정 검증 필요"
+            )
+        if not any(
+            "coverage" in n and "traceability" not in n and "consistency" not in n
+            for n in names
+        ):
+            parse_warnings.append("Coverage Report에 'Coverage' 시트(3.Coverage 등) 없음")
+        cov = _extract_coverage_summary(
+            wb, out_warnings=parse_warnings, tc_prefix=tc_prefix,
+        )
+    finally:
+        if _owns_wb and hasattr(wb, "close"):
+            wb.close()   # read_only 워크북의 ZipFile/파일핸들 해제
+    return {"coverage_summary": cov, "parse_warnings": parse_warnings}
+
+
+def summarize_test_report(
+    sutr_source: Any, *, tc_prefix: str = "SwUTC",
+) -> dict[str, Any]:
+    """단일 SUTR/SITR(.xlsm)만 파싱해 sutr_summary를 반환(정합성 비교 없이).
+
+    `_extract_sutr_summary` 단독 호출. not_executed는 빌더가 Test Summary 행에
+    숫자로 stamp하지 않는 알려진 결함이 있어(노란 hint 셀) 추출 시 0으로 남는다 —
+    여기서만 not_executed_tcs 목록 길이로 read-side 보정한다(공유 추출기/정합성 경로는
+    불변, 단일 문서 표시값만 정확화). Returns {sutr_summary, parse_warnings}.
+    """
+    parse_warnings: list[str] = []
+    try:
+        wb = _load_workbook(sutr_source)
+    except Exception as e:  # noqa: BLE001 — 손상/암호화/비-xlsx를 계약대로 흡수
+        parse_warnings.append(
+            f"Test Report 로드 실패 — 손상/암호화/비-xlsx 의심 ({type(e).__name__})"
+        )
+        return {"sutr_summary": {}, "parse_warnings": parse_warnings}
+    _owns_wb = wb is not sutr_source
+    try:
+        names = [n.lower() for n in wb.sheetnames]
+        if not any(
+            "test summary" == n or ("summary" in n and "test" in n) for n in names
+        ):
+            parse_warnings.append("Test Report에 'Test Summary' 시트 없음")
+        sutr = _extract_sutr_summary(wb, tc_prefix=tc_prefix, out_warnings=parse_warnings)
+    finally:
+        if _owns_wb and hasattr(wb, "close"):
+            wb.close()
+    # not_executed read-side 보정 — 목록은 있는데 카운트가 0이면 목록 길이로 채움.
+    # 상한 clamp: 섹션 파싱 드리프트로 목록이 Total TC를 넘으면 total로 보정 + 경고
+    # (표시 전용 — 공유 _extract_sutr_summary/정합성 verdict는 raw 값 그대로 사용).
+    ne_tcs = sutr.get("not_executed_tcs") or []
+    if not sutr.get("not_executed") and ne_tcs:
+        total = sutr.get("total_tcs") or 0
+        n = len(ne_tcs)
+        if total and n > total:
+            parse_warnings.append(
+                f"미실행 TC 목록 {n}건이 Total TC {total} 초과 — 섹션 파싱 드리프트 의심, {total}로 보정"
+            )
+            n = total
+        sutr["not_executed"] = n
+    return {"sutr_summary": sutr, "parse_warnings": parse_warnings}
 
 
 def check_swut_consistency(
@@ -447,7 +603,7 @@ def check_swut_consistency(
     cov = _extract_coverage_summary(
         cov_wb, out_warnings=parse_warnings, tc_prefix=tc_prefix,
     )
-    sutr = _extract_sutr_summary(sutr_wb, tc_prefix=tc_prefix)
+    sutr = _extract_sutr_summary(sutr_wb, tc_prefix=tc_prefix, out_warnings=parse_warnings)
 
     issues: list[ConsistencyIssue] = []
 

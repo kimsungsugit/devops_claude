@@ -2,30 +2,26 @@
 """Unit tests for workflow.ai pure helper functions (no LLM calls)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from workflow.ai import (
+    _alt_buffer,
     _extract_gemini_text,
     _extract_json_from_reply,
+    _extract_test_body,
     _format_rag_context,
     _has_test_main,
-    _extract_test_body,
+    _is_simple_signature,
     _looks_like_c_family_code,
+    _make_unified_diff,
     _param_placeholder,
-    _parse_param_name,
-    _alt_buffer,
     _parse_list_str,
+    _parse_param_name,
     _parse_review_decision,
     _parse_search_replace_blocks,
-    _make_unified_diff,
-    _is_simple_signature,
     _role_system_prompt,
-    _plan_has_requirement_id,
     _validate_plan_obj,
 )
 
@@ -140,6 +136,15 @@ class TestParseParamName:
 
     def test_empty(self):
         assert _parse_param_name("") == ""
+
+    @pytest.mark.parametrize("raw,name", [("U8 buf[10U]", "buf"), ("U16 a[0x1FUL]", "a")])
+    def test_integer_suffix_is_not_the_parameter_name(self, raw, name):
+        """⚠ `[A-Za-z_]\\w*` 는 `10U` 에서 `U` 를 내놓고, 그게 **마지막 토큰**이라 이름이 된다.
+
+        `workflow/test_helpers.py` · `workflow/pipeline.py` 에 같은 복제본이 있다 —
+        셋 다 같은 가드를 갖는다(한쪽만 고치면 드리프트한다).
+        """
+        assert _parse_param_name(raw) == name
 
 
 class TestAltBuffer:

@@ -1,15 +1,35 @@
 """C code parsing utilities for extracting prototypes, definitions, macros, and globals.
 
-Canonical low-level C parsing lives here.  ``report_gen.source_parser``
-re-uses these functions via its own copies (kept in sync); higher-level
-modules (e.g. report_gen.uds_generator) should import from
-``report_gen.source_parser`` to avoid circular dependencies.
+⚠ **이 판은 canonical 이 아니고, `report_gen.source_parser` 와 동기화돼 있지도 않다.**
+
+정본은 ``report_gen.source_parser`` 다. 프로덕션(`uds_generator` 등)은 전부 그쪽을
+쓰고, 여기는 ``report_generator`` 하위호환 shim 의 재수출 대상으로만 남아 있다
+(2026-08-26 엔 "프로덕션 호출부 0건" 이라 적었지만 **틀렸다** — `generators.suts._lightweight_parse` 가 함수 안에서
+지연 import 해 `_extract_c_definitions`·`_extract_c_function_bodies`·`_extract_simple_call_names`·`_strip_c_comments`
+넷을 쓴다: 전체 소스 분석이 실패했을 때의 SUTS/SITS 경량 폴백이다. R61 이 그 둘을 선형 스캐너로 바꿨다.
+`_extract_c_prototypes`·`_extract_doxygen_asil_tags` 는 옛 백트래킹 정규식 그대로이고 프로덕션 호출자가 없다 —
+`tests/unit/test_doc_comment_and_body_scanners_r61.py` 가 그 상태를 지킨다. 쓰게 되면 먼저 고칠 것).
+
+실측 차이(PDS64_RD 헤더 51개):
+
+* 함수 **이름** 집합은 같다 — 189 vs 189, 차집합 0.
+* ``_extract_c_prototypes`` / ``_extract_c_definitions`` 의 **튜플 폭이 다르다**:
+  여기는 3-tuple ``(name, params, is_extern)``, 정본은 4-tuple 로 **반환 타입**을
+  하나 더 낸다. 그래서 여기 판으로는 ``__interrupt void`` 든 ``U8`` 이든 **반환
+  타입을 알 수 없다**.
+
+⚠ 이 어긋남은 이미 사고를 냈다 — 커밋 43a2f99 가 정본을 3→4 tuple 로 넓혔을 때
+  ``_scan_source_function_names`` 소비처만 3-tuple 로 남아 **C 파일이 하나라도
+  있으면 100% ValueError** 였고, 침묵 표면이 그것을 4개월간 감췄다
+  (``tests/unit/test_static_analysis_round_fixes.py`` §2 참조).
+
+→ 새 코드는 여기서 import 하지 말고 ``report_gen.source_parser`` 를 쓸 것.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 
 def _strip_c_comments(text: str) -> str:
@@ -46,22 +66,34 @@ def _extract_c_prototypes(text: str) -> List[Tuple[str, str, bool]]:
     return results
 
 
+_STATIC_PREFIX_RE = re.compile(r"static\s+[A-Za-z_]")
+
+
+def _iter_def_heads(text: str):
+    """정의 머리 — `c_parser._iter_regex_def_heads`(R59 선형 스캐너).
+
+    ⚠ R61(N63): 여기 있던 두 정규식(`_extract_c_definitions`·`_extract_c_function_bodies`)은 R59 가 `c_parser` 에서
+      걷어낸 O(n³) 패턴의 **사본**이었다 — 실측 `Generated_Code/Vectors.c`(17.9KB) 한 파일에 2.05초·1.59초 동안 GIL 을
+      쥔다. 이 모듈은 SUTS/SITS 의 경량 폴백(`generators.suts._lightweight_parse`)으로 **프로덕션에서 닿는다**.
+    ⚠ 지연 import — `report` 패키지는 `report_generator` shim 이 맨 먼저 읽는다. `workflow` 패키지 초기화(ai·pipeline,
+      cold 0.39초 실측)를 그 시점에 끌어오지 않으려는 것뿐이다. 폴백의 견고성과는 무관하다 — 이 폴백을 부르는
+      `generators/suts.py` 가 모듈 머리에서 이미 `workflow.code_parser.c_parser` 를 import 한다(리뷰 I4).
+    """
+    from workflow.code_parser.c_parser import _iter_regex_def_heads
+
+    return _iter_regex_def_heads(text)
+
+
 def _extract_c_definitions(text: str) -> List[Tuple[str, str, bool]]:
     if not text:
         return []
     keywords = {"if", "for", "while", "switch", "return", "sizeof"}
     results: List[Tuple[str, str, bool]] = []
-    for match in re.finditer(
-        r"^[\t ]*(static\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
-        text,
-        flags=re.M,
-    ):
-        is_static = bool(match.group(1))
-        name = match.group(2)
+    for _head_start, prefix, name, raw_params, _head_end in _iter_def_heads(text):
         if name in keywords:
             continue
-        params = " ".join(match.group(3).replace("\n", " ").split())
-        results.append((name, params, is_static))
+        params = " ".join(raw_params.split())
+        results.append((name, params, bool(_STATIC_PREFIX_RE.match(prefix))))
     return results
 
 
@@ -69,15 +101,8 @@ def _extract_c_function_bodies(text: str) -> Dict[str, str]:
     if not text:
         return {}
     out: Dict[str, str] = {}
-    pat = re.compile(
-        r"^[\t ]*(?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\([^;]*?\)\s*\{",
-        flags=re.M,
-    )
-    for m in pat.finditer(text):
-        name = str(m.group(1) or "").strip()
-        if not name:
-            continue
-        start = m.end() - 1
+    for _head_start, _prefix, name, _params, head_end in _iter_def_heads(text):
+        start = head_end - 1
         depth = 0
         end = start
         for i in range(start, len(text)):

@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 class TestCmakeQuote:
     def test_backslash_to_forward(self):
@@ -83,6 +81,7 @@ class TestWriteText:
 class TestWriteJson:
     def test_writes_json(self, tmp_path):
         import json
+
         from workflow.pipeline import _write_json
         p = tmp_path / "data.json"
         _write_json(p, {"key": "value"})

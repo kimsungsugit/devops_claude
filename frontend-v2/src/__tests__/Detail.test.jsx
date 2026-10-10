@@ -11,19 +11,38 @@
  * - useJob: App.jsx mock
  * - 모든 Section 컴포넌트: mock (단위 격리)
  */
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Context mock ──────────────────────────────────────────────────────
 let mockSelectedJob = null;
 let mockAnalysisResult = null;
+let mockCfg = {};
+let mockJobsResponse = [];
+const mockLoadProject = vi.fn(() =>
+  Promise.resolve({ reportData: { build_number: 1 }, artifacts: [], scmList: [], matchedScm: null, _offline: true }),
+);
 
 vi.mock('../App.jsx', () => ({
   useJob: () => ({
     selectedJob: mockSelectedJob,
     analysisResult: mockAnalysisResult,
+    setSelectedJob: () => {},
+    setAnalysisResult: () => {},
   }),
+  // Detail이 브레드크럼 프로젝트 선택기용으로 추가 소비 — creds 없는 cfg면 job fetch effect가 early return.
+  useJenkinsCfg: () => ({ cfg: mockCfg }),
+  useToast: () => () => {},
+}));
+// 브레드크럼 선택기: job 목록 fetch(post) + 전환 로드(loadProjectFromCache) mock.
+vi.mock('../api.js', () => ({
+  post: vi.fn((url) => (url === '/api/jenkins/jobs' ? Promise.resolve(mockJobsResponse) : Promise.resolve({}))),
+  api: vi.fn(() => Promise.resolve([])),
+  defaultCacheRoot: () => '',
+}));
+vi.mock('../projectLoader.js', () => ({
+  loadProjectFromCache: (...a) => mockLoadProject(...a),
 }));
 
 // ── Section 컴포넌트 일괄 mock ─────────────────────────────────────
@@ -62,6 +81,18 @@ vi.mock('../components/sections/ImpactGuideSection.jsx', () => ({
 vi.mock('../components/sections/ProjectSetupSection.jsx', () => ({
   default: () => <div data-testid="section-setup">ProjectSetup</div>,
 }));
+// 프로젝트 분석도 서브탭을 갖게 되면서 docgen과 같은 (onSubChange, initialSub) 규약을 쓴다.
+vi.mock('../components/sections/ProjectSummarySection.jsx', () => ({
+  default: ({ onSubChange, initialSub }) => {
+    mockCapturedInitialSubs.push(initialSub);
+    return (
+      <div data-testid="section-summary">
+        ProjectSummary
+        <button onClick={() => onSubChange?.('source', '소스코드')}>__setsummarysub</button>
+      </div>
+    );
+  },
+}));
 
 const { default: Detail } = await import('../views/Detail.jsx');
 
@@ -71,6 +102,8 @@ describe('Detail', () => {
     mockSelectedJob = null;
     mockAnalysisResult = null;
     mockCapturedInitialSubs = [];
+    mockCfg = {};
+    mockJobsResponse = [];
   });
 
   // ── selectedJob 없을 때 빈 상태 ────────────────────────────────
@@ -108,10 +141,11 @@ describe('Detail', () => {
     // Act
     render(<Detail />);
 
-    // Assert — "빌드 정보"는 브레드크럼과 accordion 레이블에 중복 존재하므로 getAllByText 사용
-    expect(screen.getAllByText('빌드 정보').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('SCM')).toBeInTheDocument();
+    // Assert — 통합 탭 레이블 "빌드 & 입력 데이터 정보"(브레드크럼+accordion 중복) + 다른 탭.
+    // SCM은 더 이상 별도 탭이 아니라 빌드 탭에 통합됨.
+    expect(screen.getAllByText(/빌드 & 입력 데이터 정보/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('문서 생성')).toBeInTheDocument();
+    expect(screen.getByText('테스트 결과')).toBeInTheDocument();
   });
 
   it('selectedJob이 있으면 브레드크럼에 Job 이름을 표시한다', () => {
@@ -125,29 +159,44 @@ describe('Detail', () => {
     expect(screen.getByText('my-job')).toBeInTheDocument();
   });
 
-  it('기본 활성 섹션은 "빌드 정보"이다', () => {
+  it('기본 활성 섹션은 "빌드 & 입력 데이터 정보"다', () => {
     // Arrange
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
 
     // Act
     render(<Detail />);
 
-    // Assert
+    // Assert — build가 기본 진입 탭. summary(프로젝트 분석)는 미방문이라 아직 마운트 안 됨(keep-alive lazy).
     expect(screen.getByTestId('section-build')).toBeInTheDocument();
+    expect(screen.queryByTestId('section-summary')).toBeNull();
   });
 
-  // ── 섹션 탭 네비게이션 ─────────────────────────────────────────
-
-  it('SCM 섹션 탭 클릭 시 SCM 컴포넌트를 표시한다', async () => {
-    // Arrange
+  it('프로젝트 분석 탭은 라벨만 바뀌고 id는 summary 유지(딥링크 호환)', async () => {
+    // Arrange — window.__detailSection('summary')는 Dashboard 딥링크 계약이라 깨지면 안 된다.
     const user = userEvent.setup();
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
 
     // Act
     render(<Detail />);
-    await user.click(screen.getByText('SCM'));
+    await user.click(screen.getByText('프로젝트 분석'));
 
     // Assert
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+    act(() => { window.__detailSection('summary'); });
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+  });
+
+  // ── 섹션 탭 네비게이션 ─────────────────────────────────────────
+
+  it('빌드 정보 탭에 SCM 섹션이 통합되어 함께 표시된다', async () => {
+    // Arrange — 통합 래퍼(BuildInfoWithScmSection)가 BuildInfo + SCM을 함께 렌더.
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+
+    // Act — build가 기본 진입 탭이라 렌더만으로 활성.
+    render(<Detail />);
+
+    // Assert — 별도 SCM 탭 없이 build 탭 안에서 section-build와 section-scm이 공존(빌드 로그 아래 배치)
+    expect(screen.getByTestId('section-build')).toBeInTheDocument();
     expect(screen.getByTestId('section-scm')).toBeInTheDocument();
   });
 
@@ -180,6 +229,54 @@ describe('Detail', () => {
     expect(screen.getByText('SwIT')).toBeInTheDocument();
   });
 
+  it('프로젝트 분석의 서브탭도 breadcrumb에 표시된다', async () => {
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('__setsummarysub'));
+    expect(screen.getByText('소스코드')).toBeInTheDocument();
+  });
+
+  it('섹션을 벗어나면 다른 섹션의 서브 라벨이 남지 않고, 돌아오면 복원된다', async () => {
+    // ⚠ 벗어날 때 지우면 복귀 시 라벨을 잃는다 — keep-alive 라 자식이 언마운트되지 않아
+    //   재보고(onSubChange)가 없기 때문이다. 렌더 시 activeSection 으로 조회해야 한다.
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('__setsummarysub'));
+    expect(screen.getByText('소스코드')).toBeInTheDocument();
+
+    await user.click(screen.getByText('테스트 결과'));
+    expect(screen.queryByText('소스코드')).toBeNull();
+
+    await user.click(screen.getByText('프로젝트 분석'));
+    expect(screen.getByText('소스코드')).toBeInTheDocument();
+  });
+
+  it('__detailSection(section, sub)가 서브탭까지 착지시킨다', async () => {
+    // 서브탭이 생긴 뒤로 섹션만 지정하면 항상 첫 서브(개요)에 떨어져,
+    // "아키텍처를 보라"는 링크가 사용자를 다시 헤매게 만든다.
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    act(() => { window.__detailSection('summary', 'arch'); });
+
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+    await waitFor(() => expect(mockCapturedInitialSubs).toContain('arch'));
+  });
+
+  it('sub 없이 부르면 initialSub를 강제하지 않는다(구 딥링크 계약 유지)', async () => {
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    act(() => { window.__detailSection('summary'); });
+
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+    expect(mockCapturedInitialSubs.filter(Boolean)).toHaveLength(0);
+  });
+
   it('레거시 생성 탭 id로 외부 네비게이션 시 docgen 허브로 라우팅 + initialSub 전달', async () => {
     // Arrange
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
@@ -193,6 +290,26 @@ describe('Detail', () => {
     await waitFor(() => expect(mockCapturedInitialSubs).toContain('swut'));
   });
 
+  it('keep-alive: 탭을 전환해도 이전 방문 섹션이 마운트 유지된다(결과 보존)', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    // Act — 기본 진입이 build(BuildInfo+SCM 통합 탭). 프로젝트 분석 → 테스트 결과 순 방문
+    expect(screen.getByTestId('section-scm')).toBeInTheDocument(); // 통합 탭에 SCM 포함
+    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('테스트 결과'));
+
+    // Assert — 활성(analysis) + 이전 방문(build 통합=build/scm, summary)이 모두 DOM에 유지(언마운트 X)
+    expect(screen.getByTestId('section-analysis')).toBeInTheDocument();
+    expect(screen.getByTestId('section-scm')).toBeInTheDocument();
+    expect(screen.getByTestId('section-build')).toBeInTheDocument();
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+    // 미방문 섹션은 아직 마운트되지 않음(불필요 초기 요청 회피)
+    expect(screen.queryByTestId('section-ai')).toBeNull();
+  });
+
   it('탭 클릭 시 브레드크럼 섹션 레이블이 업데이트된다', async () => {
     // Arrange
     const user = userEvent.setup();
@@ -200,10 +317,60 @@ describe('Detail', () => {
 
     // Act
     render(<Detail />);
-    await user.click(screen.getByText('SCM'));
+    await user.click(screen.getByText('테스트 결과'));
 
-    // Assert — 브레드크럼에서도 SCM 텍스트가 나타남
-    // 네비게이션 라벨 + 브레드크럼 합쳐서 2번 이상 등장
-    expect(screen.getAllByText('SCM').length).toBeGreaterThanOrEqual(1);
+    // Assert — 브레드크럼에서도 활성 섹션 라벨이 나타남(네비 라벨 + 브레드크럼 = 2회 이상)
+    expect(screen.getAllByText('테스트 결과').length).toBeGreaterThanOrEqual(2);
+  });
+
+  // ── 브레드크럼 프로젝트 선택기 ─────────────────────────────────────
+
+  it('Jenkins creds가 없으면 선택기 대신 프로젝트 이름만 표시한다', () => {
+    // Arrange — cfg에 creds 없음(기본)
+    mockSelectedJob = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+
+    // Act
+    render(<Detail />);
+
+    // Assert — select(combobox) 없음, 이름 span만
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.getByText('job-a')).toBeInTheDocument();
+  });
+
+  it('creds가 있으면 브레드크럼에 프로젝트 선택기(select)를 렌더한다', async () => {
+    // Arrange
+    mockSelectedJob = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+    mockCfg = { baseUrl: 'http://jenkins', username: 'u', token: 't' };
+    mockJobsResponse = [
+      { name: 'job-a', url: 'http://jenkins/job/job-a/' },
+      { name: 'job-b', url: 'http://jenkins/job/job-b/' },
+    ];
+
+    // Act
+    render(<Detail />);
+
+    // Assert — 비동기 job fetch 완료 후 select 등장(옵션 2개)
+    const select = await screen.findByRole('combobox');
+    const options = within(select).getAllByRole('option');
+    expect(options.length).toBe(2);
+  });
+
+  it('선택기에서 다른 프로젝트를 고르면 loadProjectFromCache로 캐시 로드한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+    mockCfg = { baseUrl: 'http://jenkins', username: 'u', token: 't' };
+    mockJobsResponse = [
+      { name: 'job-a', url: 'http://jenkins/job/job-a/' },
+      { name: 'job-b', url: 'http://jenkins/job/job-b/' },
+    ];
+    render(<Detail />);
+    const select = await screen.findByRole('combobox');
+
+    // Act — job-b 선택
+    await user.selectOptions(select, 'http://jenkins/job/job-b/');
+
+    // Assert — 캐시 로더가 선택 URL로 호출됨
+    expect(mockLoadProject).toHaveBeenCalledWith('http://jenkins/job/job-b/', expect.any(Object));
   });
 });

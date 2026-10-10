@@ -351,7 +351,8 @@ class TestVisualMarkers23:
 
     def test_mark_user_input_required_writes_placeholder_and_fill(self):
         from backend.services.excel_template_utils import (
-            mark_user_input_required, USER_INPUT_PLACEHOLDER,
+            USER_INPUT_PLACEHOLDER,
+            mark_user_input_required,
         )
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -1085,6 +1086,7 @@ class TestSignatureBlockAndDocId96Final:
 
     def test_signature_block_isolated_label_returns_none(self):
         import openpyxl
+
         from backend.services.excel_template_utils import write_signature_block
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -1093,6 +1095,7 @@ class TestSignatureBlockAndDocId96Final:
 
     def test_stamp_document_id_phase_token_fix(self):
         import openpyxl
+
         from backend.services.excel_template_utils import stamp_cover_document_id
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -1111,6 +1114,7 @@ class TestSignatureBlockAndDocId96Final:
 
     def test_stamp_document_id_pname_placeholder(self):
         import openpyxl
+
         from backend.services.excel_template_utils import stamp_cover_document_id
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -1125,6 +1129,7 @@ class TestSignatureBlockAndDocId96Final:
 
     def test_stamp_document_id_no_pattern_noop(self):
         import openpyxl
+
         from backend.services.excel_template_utils import stamp_cover_document_id
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -1135,6 +1140,7 @@ class TestSignatureBlockAndDocId96Final:
 
     def test_dot_date_and_find_kv_min_row(self):
         import openpyxl
+
         from backend.services.excel_template_utils import dot_date, find_kv_row
         assert dot_date("2026-06-04") == "2026.06.04"
         assert dot_date("2026/06/04") == "2026.06.04"

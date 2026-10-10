@@ -2,12 +2,26 @@
   "prefixes": [
     "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어",
     "D:\\Project\\devops\\Release_claude",
-    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/03.Test Result/01.Log",
-    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/03.Test Result",
-    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/03.Test Result",
-    "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV",
-    "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트",
-    "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어"
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/03.Test Result/01.Log",
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/03.Test Result",
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/03.Test Result",
+    "U:\\연구소\\1000 프로젝트\\1200 자동차\\1220 진행\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV",
+    "U:\\연구소\\1000 프로젝트\\1200 자동차\\1220 진행\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트",
+    "U:\\연구소\\1000 프로젝트\\1200 자동차\\1220 진행\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어",
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/09.정적분석/01.Static Aanlysis",
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/09.정적분석",
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software",
+    "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/03 NE_GN7",
+    "U:\\연구소\\1000 프로젝트\\1500 연구운영_개발품질\\1000 Application Part\\10. Programs\\0100 시스템\\0104 ARIA\\doc",
+    "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\04.SW 단위 설계\\04.Released\\v2.01",
+    "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\04.SW 단위설계\\01.SUDS",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/02.Result Report",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/02.Result Report",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/11.SW 테스트/02.Test Result/02.Result Report",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/01.Test Specification/01.SwUTS",
+    "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS"
   ],
   "schema_version": 1
 }

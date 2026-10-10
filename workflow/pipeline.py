@@ -2,29 +2,21 @@
 # -*- coding: utf-8 -*-
 # Integrated DevOps Pipeline
 # v31.0: Step 踰덊샇 ?뺣━, Fuzz/QEMU strict ?듭뀡, AI 濡쒓렇 而⑦뀓?ㅽ듃/triage 諛섏쁺
+import glob
 import json
 import os
-import glob
+import re
 import shutil
 import subprocess
-import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Callable, Dict, Any, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
-import config
 import analysis_tools as tools
+import config
 from utils.log import get_logger
-from workflow.test_helpers import (
-    strip_c_comments as _strip_c_comments_shared,
-    param_placeholder as _param_placeholder_shared,
-    parse_param_name as _parse_param_name_shared,
-    alt_buffer as _alt_buffer_shared,
-    build_call_variants as _build_call_variants_shared,
-    is_simple_signature as _is_simple_signature_shared,
-)
 
 _logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
@@ -199,7 +191,9 @@ def _param_placeholder(param: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_param_name(raw: str) -> str:
-    ids = re.findall(r"[A-Za-z_]\w*", raw or "")
+    # ⚠ `\b` 필수 — 없으면 `U8 buf[10U]` 의 이름이 `U` 가 된다.
+    #   근거는 `workflow/code_parser/c_parser.py::c_identifiers` (정규식 정본).
+    ids = re.findall(r"\b[A-Za-z_]\w*", raw or "")
     if not ids:
         return ""
     return ids[-1]
@@ -928,7 +922,7 @@ def _generate_auto_generated_cmakelists(
         lines.append(f"  target_include_directories({tgt} PRIVATE ${{_AI_AUTOGEN_TEST_INCLUDES}})")
         lines.append(f"  target_compile_definitions({tgt} PRIVATE ${{_AI_AUTOGEN_TEST_DEFS}})")
         if not _includes_all_sources(p):
-            lines.append(f"  if(TARGET lin_gateway_lib)")
+            lines.append("  if(TARGET lin_gateway_lib)")
             lines.append(f"    target_link_libraries({tgt} PRIVATE lin_gateway_lib)")
             lines.append("  endif()")
         lines.append(f"  add_test(NAME {tgt} COMMAND {tgt})")
@@ -1105,13 +1099,18 @@ def _detect_clang_info() -> Dict[str, str]:
 #   imports may fail. Keep a small absolute-import fallback for developer UX.
 
 try:
-    from . import common, static, build, ai, rag
-    from .domain_test_panel import run_domain_test_panel, DomainTestConfig
+    from . import ai, build, common, rag, static
+    from .domain_test_panel import DomainTestConfig, run_domain_test_panel
 except ImportError:  # pragma: no cover
     if __package__:
         raise
-    import common, static, build, ai, rag  # type: ignore
-    from domain_test_panel import run_domain_test_panel, DomainTestConfig  # type: ignore
+    import ai
+    import common
+    import rag  # type: ignore
+    import static
+    from domain_test_panel import DomainTestConfig, run_domain_test_panel  # type: ignore
+
+    import build
 
 
 def _csv_list(v: Any) -> List[str]:
@@ -2382,7 +2381,7 @@ def run_cli(
         if not build_ok:
             common.log_msg(log_callback, f"??[Step 3] Build failed: reason={reason}")
             if reason == "config_fail":
-                common.log_msg(log_callback, f"   ??CMake configure failed. Check CMakeLists.txt and build logs.")
+                common.log_msg(log_callback, "   ??CMake configure failed. Check CMakeLists.txt and build logs.")
             elif reason == "build_fail":
                 # 鍮뚮뱶 濡쒓렇?먯꽌 ASan 愿???먮윭 ?뺤씤
                 build_log = b_data.get("log", "")
@@ -2392,16 +2391,16 @@ def run_cli(
                     ("-fsanitize=address" in build_log and "error" in build_log.lower())
                 )
                 if is_asan_error:
-                    common.log_msg(log_callback, f"   ??ASan library not found. On Windows/MinGW, UBSan is used as fallback.")
-                    common.log_msg(log_callback, f"   ??UBSan detects: signed overflow, shift errors, null deref, type mismatches.")
+                    common.log_msg(log_callback, "   ??ASan library not found. On Windows/MinGW, UBSan is used as fallback.")
+                    common.log_msg(log_callback, "   ??UBSan detects: signed overflow, shift errors, null deref, type mismatches.")
                 else:
-                    common.log_msg(log_callback, f"   ??Compilation failed. Check build errors above.")
+                    common.log_msg(log_callback, "   ??Compilation failed. Check build errors above.")
             elif reason == "test_fail":
-                common.log_msg(log_callback, f"   ??Tests failed (but build succeeded).")
+                common.log_msg(log_callback, "   ??Tests failed (but build succeeded).")
         elif not tests_ok:
-            common.log_msg(log_callback, f"?좑툘 [Step 3] Build succeeded but tests failed")
+            common.log_msg(log_callback, "?좑툘 [Step 3] Build succeeded but tests failed")
         else:
-            common.log_msg(log_callback, f"??[Step 3] Build and tests succeeded")
+            common.log_msg(log_callback, "??[Step 3] Build and tests succeeded")
 
         # Attach CTest execution summary to tests section.
         try:
@@ -2435,8 +2434,8 @@ def run_cli(
                 cov_res = {"ok": False, "reason": "build_dir_invalid"}
             else:
                 if not tests_ok:
-                    common.log_msg(log_callback, f"?좑툘 [Step 4] Tests failed, but generating coverage report anyway (build succeeded)")
-                common.log_msg(log_callback, f"?뱢 [Step 4] Generating Coverage Report (gcovr)...")
+                    common.log_msg(log_callback, "?좑툘 [Step 4] Tests failed, but generating coverage report anyway (build succeeded)")
+                common.log_msg(log_callback, "?뱢 [Step 4] Generating Coverage Report (gcovr)...")
                 common.log_msg(log_callback, f"   Build directory: {build_dir_path}")
                 
                 # CMake ?ㅼ젙 ?뺤씤
@@ -2445,15 +2444,15 @@ def run_cli(
                     try:
                         cache_content = cmake_cache.read_text(encoding="utf-8", errors="ignore")
                         if "DEVOPS_COVERAGE:BOOL=ON" in cache_content:
-                            common.log_msg(log_callback, f"   ??CMake configuration: DEVOPS_COVERAGE=ON")
+                            common.log_msg(log_callback, "   ??CMake configuration: DEVOPS_COVERAGE=ON")
                         elif "DEVOPS_COVERAGE:BOOL=OFF" in cache_content:
-                            common.log_msg(log_callback, f"   ?좑툘 CMake configuration: DEVOPS_COVERAGE=OFF (coverage disabled in CMake)")
+                            common.log_msg(log_callback, "   ?좑툘 CMake configuration: DEVOPS_COVERAGE=OFF (coverage disabled in CMake)")
                         else:
-                            common.log_msg(log_callback, f"   ?좑툘 CMake configuration: DEVOPS_COVERAGE not found in CMakeCache.txt")
+                            common.log_msg(log_callback, "   ?좑툘 CMake configuration: DEVOPS_COVERAGE not found in CMakeCache.txt")
                     except Exception as e:
                         common.log_msg(log_callback, f"   ?좑툘 Could not read CMakeCache.txt: {e}")
                 else:
-                    common.log_msg(log_callback, f"   ?좑툘 CMakeCache.txt not found (CMake may not have been configured)")
+                    common.log_msg(log_callback, "   ?좑툘 CMakeCache.txt not found (CMake may not have been configured)")
                 
                 try:
                     cov_res = tools.generate_coverage_report(
@@ -2465,16 +2464,16 @@ def run_cli(
                         if gcda_files:
                             common.log_msg(log_callback, f"   Found {len(gcda_files)} .gcda files")
                         else:
-                            common.log_msg(log_callback, f"   ?좑툘 No .gcda files found in build directory")
+                            common.log_msg(log_callback, "   ?좑툘 No .gcda files found in build directory")
                             build_log = b_data.get("log", "")
                             if "No tests were found" in build_log or "No tests discovered" in build_log:
-                                common.log_msg(log_callback, f"   CTest found no tests. Ensure add_subdirectory(reports/auto_generated) in CMakeLists and valid test_*.c exist.")
-                            common.log_msg(log_callback, f"   Possible causes:")
-                            common.log_msg(log_callback, f"     - Tests were not executed (check CTest output, 'No tests were found')")
-                            common.log_msg(log_callback, f"     - Coverage flags were not set correctly in CMake (apply CMakeLists.txt.fixed)")
-                            common.log_msg(log_callback, f"     - Compiler flags (-fprofile-arcs -ftest-coverage) not applied")
+                                common.log_msg(log_callback, "   CTest found no tests. Ensure add_subdirectory(reports/auto_generated) in CMakeLists and valid test_*.c exist.")
+                            common.log_msg(log_callback, "   Possible causes:")
+                            common.log_msg(log_callback, "     - Tests were not executed (check CTest output, 'No tests were found')")
+                            common.log_msg(log_callback, "     - Coverage flags were not set correctly in CMake (apply CMakeLists.txt.fixed)")
+                            common.log_msg(log_callback, "     - Compiler flags (-fprofile-arcs -ftest-coverage) not applied")
                     elif cov_res.get("reason") == "gcovr_not_found":
-                        common.log_msg(log_callback, f"   ??gcovr not found. Please install: pip install gcovr")
+                        common.log_msg(log_callback, "   ??gcovr not found. Please install: pip install gcovr")
                     elif cov_res.get("ok"):
                         gcda_count = len(cov_res.get("gcda_files", []))
                         common.log_msg(log_callback, f"   ??Coverage report generated successfully ({gcda_count} .gcda files processed)")
@@ -2846,7 +2845,7 @@ def run_cli(
                 error_msg = docs_result.get("message") or docs_result.get("error") or str(reason)
                 docs_res.update({"enabled": True, "ok": False, "reason": reason, "error": error_msg})
                 if reason == "doxyfile_not_found":
-                    common.log_msg(log_callback, f"   ?좑툘 Doxyfile not found. Creating default configuration...")
+                    common.log_msg(log_callback, "   ?좑툘 Doxyfile not found. Creating default configuration...")
                 elif reason == "doxygen_not_found":
                     common.log_msg(log_callback, f"   ?좑툘 Doxygen not found: {error_msg}")
                 else:

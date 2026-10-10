@@ -2,16 +2,10 @@
 """Extended tests for workflow.uds_ai helpers not covered by test_uds_ai.py."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
-
-import pytest
-
 from workflow.uds_ai import (
+    _extract_json_payload,
     _extract_style_excerpt,
     _validate_sections,
-    _extract_json_payload,
 )
 
 

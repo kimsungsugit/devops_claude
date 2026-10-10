@@ -100,7 +100,7 @@ function _dispatchLogout() {
  */
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__) || import.meta.env?.VITE_API_BASE_URL || '';
 
-function buildUrl(path) {
+export function buildUrl(path) {
   if (!API_BASE) return path;
   if (path.startsWith('http://') || path.startsWith('https://')) return path;
   return API_BASE.replace(/\/$/, '') + path;
@@ -118,12 +118,19 @@ async function _toError(res) {
       code = j.error.code || code;
     } else if (typeof j.detail === 'string') {
       msg = j.detail;
+    } else if (j?.detail && typeof j.detail === 'object') {
+      // 방어선. 이 앱의 자체 HTTPException 은 `http_exception_handler`
+      // (`backend/error_handler.py:84`)가 dict `detail` 을 `error.{code,message}` 로
+      // 바꿔 주므로 **위 첫 분기**가 잡는다. 여기까지 오는 건 그 핸들러를 안 타는
+      // 경로(starlette 기본 처리 등)뿐이고, 그때 원시 JSON 이 뜨는 걸 막는다.
+      if (typeof j.detail.message === 'string') msg = j.detail.message;
+      if (typeof j.detail.code === 'string') code = j.detail.code;
     } else if (typeof j.message === 'string') {
       msg = j.message;
     } else if (j?.error?.code) {
       code = j.error.code;
     }
-  } catch (_) {}
+  } catch (_) { /* 본문이 JSON 이 아니다 → msg 는 원문 텍스트 그대로 쓴다 */ }
   const err = new Error(msg);
   err.status = res.status;
   err.code = code;
@@ -211,7 +218,8 @@ async function _postSseInternal(path, body, { onEvent, signal } = {}, _retried =
     }
     if (!evData) return;
     let parsed = evData;
-    try { parsed = JSON.parse(evData); } catch (_) {}
+    // SSE 이벤트가 JSON 이 아닐 수 있다 → 파싱 실패면 원문 문자열을 그대로 넘긴다.
+    try { parsed = JSON.parse(evData); } catch (_) { /* 원문 유지 */ }
     onEvent(evType, parsed);
   };
 
@@ -322,7 +330,8 @@ export async function uploadServerUdsTemplate(file) {
   if (!res.ok) {
     const text = await res.text();
     let msg = text || `HTTP ${res.status}`;
-    try { const j = JSON.parse(text); if (j?.detail) msg = j.detail; } catch (_) {}
+    // 서버가 JSON 이 아닌 오류 본문을 줄 수 있다 → 그땐 원문을 메시지로 쓴다.
+    try { const j = JSON.parse(text); if (j?.detail) msg = j.detail; } catch (_) { /* 원문 유지 */ }
     throw new Error(msg);
   }
   return res.json();
@@ -337,6 +346,28 @@ export function defaultCacheRoot(jobUrl) {
   const user = getUsername() || 'default';
   const safeUser = user.replace(/[^\w-]/g, '_');
   return `.devops_pro_cache/${safeUser}`;
+}
+
+/**
+ * 화면이 쓰는 캐시 루트 — **모든 소비처가 같은 폴백 사슬을 타야 한다.**
+ *
+ * ⚠ 빈 문자열을 보내면 백엔드가 `~/.devops_pro_cache` 로 떨어진다
+ * (`backend/helpers/jenkins.py:_normalize_jenkins_cache_root`) — 화면이 쓰는
+ * `.devops_pro_cache/<user>` 와 **완전히 다른 폴더**다. 그래서 한 곳만 폴백을 덜 타면
+ * 그 화면만 조용히 딴 디렉터리를 본다.
+ *
+ * 실제로 그랬다: 준비 게이트는 `analysisResult?.cacheRoot || ''` 만 썼는데 생성 요청은
+ * 세 단계를 다 탔다. `analysisResult` 가 부분적으로만 채워진 상태(영향 탭이 `null` 에서
+ * 만드는 경로)에서 게이트는 UDS 빌드 캐시를 "없음" 으로 보고 **막힌 것처럼** 그리고,
+ * 정작 생성은 성공한다. 게이트가 생성과 반대말을 하는 형태라 신뢰를 통째로 잃는다.
+ *
+ * @param {object|null} analysisResult 대시보드 분석 결과(있으면 그 안의 값이 정답)
+ * @param {object|null} job            현재 Jenkins job (`{url}`)
+ * @param {object|null} cfg            Jenkins 설정(`{cacheRoot}`)
+ * @returns {string} 캐시 루트(전부 비면 빈 문자열)
+ */
+export function resolveCacheRoot(analysisResult, job, cfg) {
+  return analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg?.cacheRoot || '';
 }
 
 /** Build status → pill tone */

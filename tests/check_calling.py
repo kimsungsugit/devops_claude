@@ -1,7 +1,12 @@
-import sys, io, docx
+import io
+import sys
+
+import docx
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.path.insert(0, r'D:\Project\devops\260105')
-from report_generator import _extract_function_info_from_docx
+from report_generator import _extract_function_info_from_docx  # noqa: E402
+
 doc = docx.Document(r'D:\Project\devops\260105\docs\(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx')
 fn_map = _extract_function_info_from_docx(doc)
 na_count = 0

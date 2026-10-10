@@ -16,11 +16,10 @@ import sys
 import types
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # workflow.__init__ 실행 방지 및 외부 의존성 stub 처리

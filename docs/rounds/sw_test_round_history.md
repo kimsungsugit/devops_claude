@@ -147,7 +147,7 @@
   - `frontend-v2/src/api.js` — `getAccessToken`/`getRefreshToken`/`setTokens`/`clearTokens` + `_authHeaders()` helper. `api()`/`postSse()`/`uploadServerUdsTemplate()` 모두 Authorization 자동 부착.
   - `frontend-v2/src/main.jsx` — AuthProvider > AdminProvider > AuthGate > App 순서.
 - **Backward compat**:
-  - `DEV_MODE_X_USER_FALLBACK=1`: 개발 (`uvicorn --reload`) 환경에서 X-User 헤더만으로 호출 허용. 100+ 기존 회귀가 X-User 신뢰 모델 사용 — 깨지지 않도록 `tests/unit/conftest.py`에 autouse fixture로 자동 enable.
+  - `DEV_MODE_X_USER_FALLBACK=1`: 개발 (`uvicorn --reload`) 환경에서 X-User 헤더만으로 호출 허용. 100+ 기존 회귀가 X-User 신뢰 모델 사용 — 깨지지 않도록 autouse fixture로 자동 enable (2026-08-21 `tests/unit/conftest.py` → **`tests/conftest.py`** 로 이동).
   - 프로덕션 (`DEV_MODE_X_USER_FALLBACK=0` 또는 미설정): JWT 강제. X-User 헤더 무시. X-User spoofing 차단.
 - **회귀**:
   - 신규 backend: +51 (auth_service 13 + users_service 19 + auth_login_router 13 + auth_router 기존 6 무회귀)

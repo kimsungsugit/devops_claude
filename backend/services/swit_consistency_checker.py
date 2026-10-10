@@ -24,6 +24,8 @@ from backend.services.swut_consistency_checker import (
     ConsistencyIssue,
     ConsistencyReport,
     check_swut_consistency,
+    summarize_coverage_report,
+    summarize_test_report,
 )
 
 
@@ -46,8 +48,26 @@ def check_swit_consistency(
     return check_swut_consistency(coverage_source, sitr_source, tc_prefix="SwITC")
 
 
+def summarize_swit_coverage_report(coverage_source: Any) -> dict[str, Any]:
+    """단일 SwITCV Coverage Report(.xlsx) 직접 파싱 — 정합성 비교 없이 coverage_summary만.
+
+    `summarize_coverage_report` thin wrapper (tc_prefix="SwITC").
+    """
+    return summarize_coverage_report(coverage_source, tc_prefix="SwITC")
+
+
+def summarize_swit_test_report(sitr_source: Any) -> dict[str, Any]:
+    """단일 SITR(.xlsm) 직접 파싱 — 정합성 비교 없이 sutr_summary만(SITR 결과).
+
+    `summarize_test_report` thin wrapper (tc_prefix="SwITC").
+    """
+    return summarize_test_report(sitr_source, tc_prefix="SwITC")
+
+
 __all__ = [
     "ConsistencyIssue",
     "ConsistencyReport",
     "check_swit_consistency",
+    "summarize_swit_coverage_report",
+    "summarize_swit_test_report",
 ]

@@ -21,7 +21,6 @@ from backend.services.swut_consistency_checker import (  # noqa: E402
     check_swut_consistency,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

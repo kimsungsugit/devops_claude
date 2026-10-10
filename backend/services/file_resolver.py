@@ -28,10 +28,10 @@ from __future__ import annotations
 import base64
 import contextvars
 import json
-import os
-import sys
-import socket
 import logging
+import os
+import socket
+import sys
 import time
 import unicodedata
 import uuid
@@ -122,14 +122,91 @@ _gate_cache: "tuple[str, bool, float]" = ("", False, 0.0)
 
 
 def _gate_process_name() -> str:
-    return os.getenv("CLOUDIUM_GATE_PROCESS", DEFAULT_GATE_PROCESS).strip() or DEFAULT_GATE_PROCESS
+    # `_cloudium_setting` 경유 — 아래 §CLOUDIUM_* 설정 경계 참조. 포트만 `.env` 를 보고
+    # 이건 안 보면 "어떤 키는 되고 어떤 키는 안 된다" 는 **예측 불가능한 상태**가 된다.
+    return _cloudium_setting("CLOUDIUM_GATE_PROCESS", DEFAULT_GATE_PROCESS)
+
+
+# `.env` 폴백 캐시 — (해석했나, {키: 값}). 파일을 매 호출마다 읽지 않기 위함이며
+# 백엔드의 load_dotenv 와 같은 수명 계약이다(기동 시 1회 읽고 재기동까지 유지).
+# 동시성: 위 `_gate_cache` 와 같은 **atomic tuple snapshot** 관례를 따른다. 두 스레드가
+# 동시에 miss 해도 같은 파일을 두 번 읽을 뿐 결과가 같고, 튜플 재바인딩은 원자적이라
+# 찢어진 상태가 관측되지 않는다. lock 을 걸 만큼의 이득이 없다.
+_env_file_cache: "tuple[bool, Dict[str, str]]" = (False, {})
+
+
+def _env_file_values() -> Dict[str, str]:
+    """저장소 `.env` 의 CLOUDIUM_* 값. **os.environ 은 건드리지 않는다.**
+
+    왜 여기 있나 — 워커 접속 설정을 **진입점마다** 읽으면 한쪽만 고쳐진다.
+    실제로 그랬다(2026-08-19): `.env` 로 포트를 8766 으로 옮겼더니 `backend/main.py`
+    의 load_dotenv 를 타는 백엔드만 새 포트를 보고, uvicorn 을 안 거치는 **독립
+    스크립트는 전부 기본 8765** 를 봐서 "worker 미응답" 으로 죽었다. 진입점마다
+    load_dotenv 를 복제하는 건 같은 결함을 진입점 수만큼 만드는 것이다.
+
+    포트가 무엇인지 정의하는 모듈이 여기이므로, 폴백도 여기 둔다. 계약:
+      · `os.environ` 이 이기고(명시 설정 우선), 없을 때만 파일을 본다
+      · 파일 내용을 환경에 주입하지 않는다 — 다른 모듈의 동작을 몰래 바꾸지 않기 위해
+      · import 시점 부작용 없음(첫 호출 때 lazy)
+    """
+    global _env_file_cache
+    if _env_file_cache[0]:
+        return _env_file_cache[1]
+    vals: Dict[str, str] = {}
+    try:
+        raw = (_PROJECT_ROOT / ".env").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raw = ""          # .env 없음/못 읽음 = 폴백 없음. 기본값으로 간다
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        if k.startswith("CLOUDIUM_"):
+            vals[k] = v.strip().strip('"').strip("'")
+    _env_file_cache = (True, vals)
+    return vals
+
+
+def _cloudium_setting(key: str, default: str) -> str:
+    """CLOUDIUM_* 설정 하나 — **환경변수 > `.env` > 기본값**.
+
+    ── 이 폴백의 경계 (일부러 좁다) ─────────────────────────────────────────
+    적용: `CLOUDIUM_WORKER_PORT` · `CLOUDIUM_WORKER_HOST` ·
+          `CLOUDIUM_GATE_PROCESS` · `CLOUDIUM_ALLOWED_PREFIXES`
+          → 전부 **워커 접속/권한 경로** 설정이라 독립 스크립트도 백엔드와 같은 값을
+            봐야 한다. 한둘만 적용하면 "어떤 키는 되고 어떤 키는 안 된다" 는
+            예측 불가능한 상태가 되므로 이 가족은 통째로 넣는다.
+
+    ⛔ **`DEVOPS_FILE_MODE` 는 일부러 뺐다.** 두 가지 이유가 있다:
+       ① 파일 모드는 `config/file_mode.json` **영속값이 이미 우선**한다
+          (영속 > env > local). env 폴백을 더해도 대개 안 읽힌다.
+       ② 테스트 격리를 깬다 — 이 저장소는 `file_resolver._resolver` 전역 누설로
+          단독 실행 16건이 깨진 전례가 있고(커밋 584833e), conftest 가 머신 상태
+          (`config/file_mode.json`)로부터 테스트를 **격리**한다. 저장소 `.env` 를
+          모드 결정에 끌어들이면 그 격리가 조용히 뚫린다.
+
+    ⛔ `CLOUDIUM_AUTO_START_WORKER` · `CLOUDIUM_WORKER_READY_TIMEOUT` 도 안 넣는다 —
+       `cloudium_worker_launcher` 는 **백엔드 프로세스에서만** 쓰이고 거기선 이미
+       `main.py` 의 load_dotenv 가 돌았다. 넣어도 바뀌는 게 없다.
+    """
+    v = (os.getenv(key) or "").strip()
+    if v:
+        return v
+    return (_env_file_values().get(key) or "").strip() or default
 
 
 def _worker_endpoint() -> "tuple[str, int]":
-    host = os.getenv("CLOUDIUM_WORKER_HOST", DEFAULT_WORKER_HOST).strip() or DEFAULT_WORKER_HOST
+    host = _cloudium_setting("CLOUDIUM_WORKER_HOST", DEFAULT_WORKER_HOST)
     try:
-        port = int(os.getenv("CLOUDIUM_WORKER_PORT", str(DEFAULT_WORKER_PORT)))
+        port = int(_cloudium_setting("CLOUDIUM_WORKER_PORT", str(DEFAULT_WORKER_PORT)))
     except ValueError:
+        # 숫자가 아니면 조용히 기본값으로 가되 **한 번은 알린다** — 설정이 무시되는
+        # 걸 모르면 "포트를 바꿨는데 왜 안 되지" 로 진단이 헛돈다.
+        _logger.warning(
+            "CLOUDIUM_WORKER_PORT 를 숫자로 못 읽었다 — 기본 %d 로 간다", DEFAULT_WORKER_PORT
+        )
         port = DEFAULT_WORKER_PORT
     return host, port
 
@@ -140,8 +217,19 @@ def invalidate_gate_cache() -> None:
     _gate_cache = ("", False, 0.0)
 
 
-def _ping_worker(host: str, port: int, timeout: float = _PING_TIMEOUT) -> bool:
-    """worker TCP server에 ping op 전송 → pong 수신 시 True."""
+def _ping_worker(host: str, port: int, timeout: Optional[float] = None) -> bool:
+    """worker TCP server에 ping op 전송 → pong 수신 시 True.
+
+    ⚠ `timeout` 기본값을 `_PING_TIMEOUT` 으로 **직접 쓰면 안 된다**. 기본 인자는 `def`
+    시점에 한 번 평가돼 상수에 얼어붙으므로, 이후 `_PING_TIMEOUT` 을 바꿔도(설정 튜닝·
+    테스트 monkeypatch) **아무 효과가 없다** — 바꾼 쪽은 바꿨다고 믿는데 값은 그대로다.
+    실제로 이 함정이 조사를 한 번 헛돌렸다: 병렬 실행에서 나던 flake 를 "ping timeout
+    가설" 로 보고 `_PING_TIMEOUT` 을 0.0001 로 낮춰 반증했다고 기록했는데, 그 실험
+    자체가 no-op 이라 아무것도 검증하지 않았다. 부하를 준 채 제대로 재현하니 60회 중
+    13회 실패했다(무부하 0회) — 가설은 맞았고 반증이 틀렸다.
+    """
+    if timeout is None:
+        timeout = _PING_TIMEOUT
     req = json.dumps({"id": "ping", "op": "ping", "args": {}}).encode("utf-8") + b"\n"
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -270,7 +358,7 @@ class CloudiumFileResolver(LocalFileResolver):
         port: Optional[int] = None,
         **_kwargs,
     ):
-        raw = allowed_prefixes or os.getenv("CLOUDIUM_ALLOWED_PREFIXES", "")
+        raw = allowed_prefixes or _cloudium_setting("CLOUDIUM_ALLOWED_PREFIXES", "")
         self.allowed_prefixes = [p.strip() for p in raw.split(",") if p.strip()]
         self.gate_process = (gate_process or _gate_process_name()).strip() or DEFAULT_GATE_PROCESS
         env_host, env_port = _worker_endpoint()
@@ -385,13 +473,38 @@ class CloudiumFileResolver(LocalFileResolver):
             if (normalized_path == normalized_prefix
                     or normalized_path.startswith(normalized_prefix + "/")):
                 return
+        # 2026-08-04: 옛 판은 차단마다 `allowed=%s` 로 허용목록 **전체**를 찍었다.
+        # 실측 54항목 ≈ 5KB/건 — 폴더 스캔 한 번에 로그가 수백 KB로 불어나 정작
+        # 중요한 줄을 덮는다. 대신 **가장 가까운 허용 항목**을 하나만 보여 준다:
+        # 실무에서 이 차단은 거의 항상 "형제 폴더라 한 단계가 안 맞는다" 이고,
+        # 그때 필요한 정보는 목록 전체가 아니라 "무엇과 어디까지 같았나" 다.
+        nearest = self._nearest_allowed_prefix(normalized_path)
         _logger.warning(
-            "[cloudium-check] BLOCKED (no prefix match) path=%s normalized=%s allowed=%s",
-            path, normalized_path, self.allowed_prefixes,
+            "[cloudium-check] BLOCKED (no prefix match) path=%s | 허용목록 %d건 중 "
+            "최근접=%s",
+            path, len(self.allowed_prefixes), nearest or "(공통 접두 없음)",
         )
         raise PermissionError(
             f"Cloudium 모드: 허용되지 않은 경로 접근 차단됨: {path}"
         )
+
+    def _nearest_allowed_prefix(self, normalized_path: str) -> str:
+        """정규화 경로와 **공통 접두가 가장 긴** 허용 항목을 돌려준다(진단용).
+
+        경계 판정에는 절대 쓰지 않는다 — `_check_allowed` 가 이미 거부를 확정한
+        뒤에 사람이 읽을 힌트를 만드는 용도다.
+        """
+        best, best_len = "", 0
+        for prefix in self.allowed_prefixes:
+            np = self._normalize_for_compare(prefix).rstrip("/")
+            common = 0
+            for a, b in zip(normalized_path.split("/"), np.split("/")):
+                if a != b:
+                    break
+                common += 1
+            if common > best_len:
+                best, best_len = prefix, common
+        return best
 
     @staticmethod
     def _normalize_for_compare(p: str) -> str:
@@ -508,7 +621,16 @@ class CloudiumFileResolver(LocalFileResolver):
         # 라운드 96-fix — list_dir와 동일 사유 (U: latency spike, HMR html 수백 KB)
         result = self._ipc_call("read_text", {"path": path, "encoding": encoding},
                                 timeout=60.0)
-        return result if isinstance(result, str) else ""
+        # 2026-08-04: 형식 불일치를 `""` 로 접지 않는다 — `read_bytes` 의 W5 수정과
+        # **같은 계약**이다. 옛 판은 worker 가 result 를 안 주거나(구버전/미지원 op)
+        # 이상한 형을 줘도 "빈 파일" 로 보였다 = 읽기 실패와 빈 파일이 구분 불가.
+        # 형제 셋 중 read_bytes 만 고쳐 두고 둘을 남긴, 이 저장소의 재발 패턴이었다.
+        if not isinstance(result, str):
+            raise PermissionError(
+                f"Cloudium worker read_text 응답 형식 비정상 (type={type(result).__name__}) "
+                f"path={path}. 최신 worker로 재빌드/재시작하세요."
+            )
+        return result
 
     def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
                  include_dirs: bool = False) -> List[str]:
@@ -522,7 +644,16 @@ class CloudiumFileResolver(LocalFileResolver):
                                 {"path": path, "pattern": pattern,
                                  "recursive": recursive, "include_dirs": include_dirs},
                                 timeout=30.0)
-        return list(result) if isinstance(result, list) else []
+        # 2026-08-04: `read_text` 와 같은 이유로 `[]` 강제변환 제거.
+        # ⚠ 이건 **형식 불일치**만 막는다. worker 가 정상적으로 빈 list 를 주는 경우
+        #   (= 빈 폴더 / **없는 폴더**)는 그대로 `[]` 다 — 그 둘의 구분은 별건이고
+        #   `LocalFileResolver` 도 똑같이 못 하므로 한쪽만 바꾸면 모드 간 계약이 갈린다.
+        if not isinstance(result, list):
+            raise PermissionError(
+                f"Cloudium worker list_dir 응답 형식 비정상 (type={type(result).__name__}) "
+                f"path={path}. 최신 worker로 재빌드/재시작하세요."
+            )
+        return list(result)
 
     # X5: read-only invariant — 명시적 write 차단 메서드.
     # 시그너처는 LocalFileResolver의 미래 write 메서드 후보와 일치시켜 정적
@@ -552,13 +683,27 @@ class CloudiumFileResolver(LocalFileResolver):
         result = self._ipc_call("browse_file",
                                 {"title": title, "initialdir": initialdir},
                                 timeout=600.0)
-        return result if isinstance(result, str) else ""
+        # ⚠ 빈 문자열은 **취소** 라는 뜻이다(호출처 health.py 가 error="cancelled" 로
+        #   읽는다). 비정상 응답을 `""` 로 접으면 "worker 가 이 op 을 모른다" 가
+        #   "사용자가 취소했다" 로 둔갑한다 — read_bytes/read_text/list_dir 과 같은
+        #   계약으로 맞춘다(그 셋은 고쳤는데 browse 둘이 남아 있었다).
+        if not isinstance(result, str):
+            raise PermissionError(
+                f"Cloudium worker browse_file 응답 형식 비정상 (type={type(result).__name__}). "
+                "최신 worker로 재빌드/재시작하세요."
+            )
+        return result
 
     def browse_directory(self, title: str = "", initialdir: str = "") -> str:
         result = self._ipc_call("browse_directory",
                                 {"title": title, "initialdir": initialdir},
                                 timeout=600.0)
-        return result if isinstance(result, str) else ""
+        if not isinstance(result, str):
+            raise PermissionError(
+                f"Cloudium worker browse_directory 응답 형식 비정상 "
+                f"(type={type(result).__name__}). 최신 worker로 재빌드/재시작하세요."
+            )
+        return result
 
     @property
     def mode(self) -> str:

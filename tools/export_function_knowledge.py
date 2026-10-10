@@ -5,8 +5,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-
+from typing import Any, Dict, List
 
 _FUNC_ID_PAT = re.compile(r"(?:SwUFn_|KJPDS\d+_DV_)?0*(\d{3,5})\b", re.IGNORECASE)
 

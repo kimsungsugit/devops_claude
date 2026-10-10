@@ -1,6 +1,6 @@
 ---
 name: tester
-model: sonnet
+model: opus
 description: 빌드 확인, 테스트 작성/실행, 결과 분석, 실패 재현을 담당하는 QA 에이전트
 tools:
   - Read

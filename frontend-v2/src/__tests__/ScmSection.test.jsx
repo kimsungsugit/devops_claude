@@ -62,6 +62,9 @@ const makeScm = (overrides = {}) => ({
 
 const makeAnalysisResult = (overrides = {}) => ({
   cacheRoot: '.cache',
+  // 실제 생산자는 jobUrl 을 항상 싣는다. 빠뜨리면 impactGuard 의 형제 필드 축이
+  // vacuous 해져 그 축의 회귀를 테스트가 못 잡는다.
+  jobUrl: makeJob().url,
   scmList: [makeScm()],
   impactData: null,
   reportData: {},
@@ -160,7 +163,7 @@ describe('ScmSection', () => {
     expect(screen.getByText('연결 문서')).toBeInTheDocument();
   });
 
-  it('연결 문서 경로를 표시한다', () => {
+  it('연결 문서를 파일명만 표시하고 전체 경로는 title로 노출한다', () => {
     // Arrange
     const result = makeAnalysisResult({
       scmList: [makeScm({
@@ -171,8 +174,27 @@ describe('ScmSection', () => {
     // Act
     render(<ScmSection job={makeJob()} analysisResult={result} />);
 
+    // Assert — 파일명만 표시(전체 경로 텍스트 아님)
+    expect(screen.getByText('srs.xlsx')).toBeInTheDocument();
+    expect(screen.queryByText('D:/docs/srs.xlsx')).not.toBeInTheDocument();
+    // 전체 경로는 칩의 title(hover) 속성으로 보존
+    expect(screen.getByTitle('D:/docs/srs.xlsx')).toBeInTheDocument();
+  });
+
+  it('연결 문서 값이 배열(복수 경로)이면 각 파일명을 개별 칩으로 표시한다', () => {
+    // Arrange — vectorcast 등 list 값
+    const result = makeAnalysisResult({
+      scmList: [makeScm({
+        linked_docs: { vectorcast: ['U:/vc/APP_IT.html', 'U:/vc/BOOT_IT.html'] },
+      })],
+    });
+
+    // Act
+    render(<ScmSection job={makeJob()} analysisResult={result} />);
+
     // Assert
-    expect(screen.getByText('D:/docs/srs.xlsx')).toBeInTheDocument();
+    expect(screen.getByText('APP_IT.html')).toBeInTheDocument();
+    expect(screen.getByText('BOOT_IT.html')).toBeInTheDocument();
   });
 
   // ── 변경 파일 목록 ────────────────────────────────────────────────
@@ -205,6 +227,80 @@ describe('ScmSection', () => {
 
     // Assert
     expect(screen.getByText('src/module_a.c')).toBeInTheDocument();
+  });
+
+  // ── 오귀속 차단 (impactGuard 배선) ──────────────────────────────────
+  // Dashboard.runAnalysis는 여러 개가 겹쳐 돌 수 있고 서버측 취소가 없어 구 실행이 완주한다.
+  // 그래서 Context의 impactData가 지금 보고 있는 Job/SCM의 것이 아닐 수 있다. 대조 없이
+  // 그리면 다른 프로젝트의 변경 파일을 이 프로젝트 것으로 표시하게 된다(ISO 26262 오보고).
+
+  it('안전: 다른 SCM의 분석 결과면 변경 파일을 표시하지 않고 사유를 밝힌다', () => {
+    // Arrange — 화면은 scm-1을 보고 있는데 결과는 other-scm의 것
+    const result = makeAnalysisResult({
+      impactData: {
+        trigger: { scm_id: 'other-scm' },
+        changed_files: ['src/module_a.c'],
+      },
+    });
+
+    // Act
+    render(<ScmSection job={makeJob()} analysisResult={result} />);
+
+    // Assert
+    expect(screen.queryByText('src/module_a.c')).not.toBeInTheDocument();
+    expect(screen.getByText(/다른 SCM의 것입니다/)).toBeInTheDocument();
+  });
+
+  it('안전: 다른 Job의 분석 결과면 변경 파일을 표시하지 않고 사유를 밝힌다', () => {
+    // Arrange
+    const result = makeAnalysisResult({
+      impactData: {
+        trigger: { scm_id: 'scm-1', metadata: { job_url: 'http://jenkins/job/other-job/' } },
+        changed_files: ['src/module_a.c'],
+      },
+    });
+
+    // Act
+    render(<ScmSection job={makeJob()} analysisResult={result} />);
+
+    // Assert
+    expect(screen.queryByText('src/module_a.c')).not.toBeInTheDocument();
+    expect(screen.getByText(/다른 Job의 빌드로 실행됐습니다/)).toBeInTheDocument();
+  });
+
+  it('안전: 결과 뭉치가 다른 Job의 것이면 (나머지 축이 vacuous여도) 차단한다', () => {
+    // 로컬 트리거 결과는 trigger.metadata.job_url 이 없어 축 2가 vacuous하고,
+    // selectedId 는 같은 analysisResult 에서 seed 되므로 축 3도 vacuous하다.
+    // 형제 필드 축이 유일 방어인 상황.
+    const result = makeAnalysisResult({
+      jobUrl: 'http://jenkins/job/project-a/',
+      impactData: {
+        trigger: { scm_id: 'scm-1', metadata: {} },
+        changed_files: ['src/module_a.c'],
+      },
+    });
+
+    render(<ScmSection job={makeJob()} analysisResult={result} />);
+
+    expect(screen.queryByText('src/module_a.c')).not.toBeInTheDocument();
+    expect(screen.getByText(/다른 Job의 것입니다/)).toBeInTheDocument();
+  });
+
+  it('같은 SCM·같은 Job의 결과는 정상 표시한다 (과차단 방지)', () => {
+    // Arrange
+    const result = makeAnalysisResult({
+      impactData: {
+        trigger: { scm_id: 'scm-1', metadata: { job_url: makeJob().url } },
+        changed_files: ['src/module_a.c'],
+      },
+    });
+
+    // Act
+    render(<ScmSection job={makeJob()} analysisResult={result} />);
+
+    // Assert
+    expect(screen.getByText('src/module_a.c')).toBeInTheDocument();
+    expect(screen.queryByText(/표시하지 않았습니다/)).not.toBeInTheDocument();
   });
 
   // ── 경계값: analysisResult null 처리 ─────────────────────────────

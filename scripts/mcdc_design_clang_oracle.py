@@ -1,0 +1,317 @@
+"""Independent check of MC/DC design pairs with a real C front end (clang, 16-bit-int target).
+
+The engine evaluates decisions itself (``generators/mcdc_design.py`` + ``generators/c_project_context.py``).
+This script asks clang to evaluate the *same source text* instead: for every designed pair it emits the
+project's scalar typedefs and the unit's object-like macro definitions verbatim, binds each input as
+``#define name ((Type)(value))`` and checks, as ``_Static_assert``, the decision outcome and every condition's
+truth the engine claims. Nothing runs on a target — clang folds the constant expressions with the target's
+integer model (``--target``; msp430 has the S12Z widths: char 8, short 16, int 16, long 32).
+
+It is a check of expression semantics only (promotions, conversions, macro values, short-circuit truth), not
+of reachability or execution. What is *not* independent here: enumerator and const-object values and the scalar
+typedefs are emitted from the engine's resolution; enum-typed inputs are bound as ``int`` (the engine's model);
+the preprocessor configuration (which ``#if`` arm is active) and input binding (writes before the decision) are
+the engine's claims and are not checked by this oracle.
+
+(R2c) A decision designed on the modeled function run (``evaluation == "source_path"``: it reads a local or an input
+rewritten before it) cannot be checked as a lone expression. Its pairs go to the whole-function constexpr harness of
+``scripts/source_oracle_clang_check.py`` instead: the body is compiled verbatim with each such decision and its
+conditions wrapped in recorders, and clang must find, in the run of each pair member, an evaluation with exactly the
+claimed evaluated conditions, values and outcome — for all three fill values of the state the vector leaves unset.
+Callees are stubs there (they write nothing and return the fill value).
+
+(R36) ``--stub-returns``: the unit's inputs also hold ``F() return`` for every function its body calls (the SUTS rows
+carry these for non-void callees — `generators/suts._stub_return_names`), so the MC/DC design's second search runs on
+the stub values and those pairs reach the whole-function harness, which returns the pair's value from F's stub.
+
+(R77) An expression pair on array elements (``g_a[POS] == K`` with the input ``g_a[2]``): a ``#define`` cannot bind
+``g_a[2]``, so each element read the design took as an input is replaced, in the decision's and the conditions' text, by
+a name bound like any input (``__mcdc_elem_g_a_2``), and clang checks that the index text the source wrote is that
+element's (``_Static_assert((POS) == 2, …)``, once per decision) — independently for a macro index (its text is the
+source's), not for an enumerator or const-object index (the prelude writes the engine's value, as for any of those).
+Not independent either: the element's type (the engine's resolution of the array's declaration) and which subscripts are
+element reads (the engine's `_array_name_node`).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _called_names(node, raw):
+    """Names of the functions this definition calls directly (``name(...)``), in order of first call."""
+    names, stack = [], [node]
+    while stack:
+        n = stack.pop()
+        stack.extend(reversed(n.named_children))
+        if n.type == "call_expression":
+            f = n.child_by_field_name("function")
+            if f is not None and f.type == "identifier":
+                names.append(raw[f.start_byte:f.end_byte].decode())
+    return list(dict.fromkeys(names))
+
+
+def _decisions(source_root: Path, stub_returns: bool = False):
+    from generators.c_project_context import build_project_context, build_scopes
+    from generators.mcdc_design import build_mcdc_design
+    from workflow.code_parser.c_parser import _make_parser
+
+    texts = {}
+    for path in sorted(source_root.rglob("*")):
+        if path.suffix.lower() in (".c", ".h") and path.is_file():
+            try:
+                texts[str(path.resolve())] = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+    # the same build configuration the inventory and the generator use (toolchain headers from ``.cproject``)
+    from generators.c_project_context import detect_build_config
+    cproject = source_root / ".cproject"
+    context = build_project_context(texts, detect_build_config(
+        {str(cproject): cproject.read_text(encoding="utf-8", errors="replace")} if cproject.is_file() else {}))
+    units = [p for p in texts if p.lower().endswith(".c")]
+    scopes = build_scopes(context, units)
+    # (R62) the texts the generator designs on: functions an #if splits mid-expression projected
+    from generators.c_project_context import projected_texts
+    texts = projected_texts(scopes, texts)
+    parser = _make_parser()
+    for path in units:
+        raw = texts[path].encode("utf-8")
+        stack = [parser.parse(raw).root_node]
+        while stack:
+            node = stack.pop()
+            stack.extend(node.named_children)
+            if node.type != "function_definition":
+                continue
+            decl = node.child_by_field_name("declarator")
+            while decl is not None and decl.type != "function_declarator":
+                decl = decl.child_by_field_name("declarator")
+            name_node = decl.child_by_field_name("declarator") if decl is not None else None
+            if name_node is None or name_node.type != "identifier":
+                continue
+            params = []
+            plist = decl.child_by_field_name("parameters")
+            for p in plist.named_children if plist is not None else []:
+                d = p.child_by_field_name("declarator")
+                if d is not None and d.type == "identifier":
+                    params.append(raw[d.start_byte:d.end_byte].decode())
+            own = raw[name_node.start_byte:name_node.end_byte].decode()
+            if stub_returns:
+                params += [f"{c}() return" for c in _called_names(node.child_by_field_name("body") or node, raw)
+                           if c != own]
+            unit = {"name": own, "input_vars": params,
+                    "source_text": texts[path], "source_path": path, "source_text_complete": True, "mcdc_free_globals": True,
+                    "project_scope": scopes[path]}
+            yield path, unit, build_mcdc_design(unit), context, scopes[path]
+
+
+def _prelude(context, scope):
+    """Scalar typedefs of the unit and its macros, as written in the source."""
+    lines = ["/* generated: independent evaluation of engine MC/DC claims */"]
+    typedef_lines = []
+    for name, t in scope["types"].items():
+        if " " in name or name.startswith("enum ") or t.get("enum"):
+            continue
+        base = {"char": "char", "short": "short", "int": "int", "long": "long", "_Bool": "_Bool",
+                "float": "float", "double": "double"}[t["kind"]]
+        if t["kind"] not in ("_Bool", "float", "double"):
+            base = ("signed " if t["signed"] else "unsigned ") + base
+        typedef_lines.append(f"typedef {base} {name};")
+    lines += sorted(typedef_lines)
+    for name, c in scope["constants"].items():
+        if c.get("kind") == "macro":
+            body = None
+            for defs in (context["files"].get(c["file"]) or {}).get("macros", {}).get(name, []):
+                if defs.get("line") == c.get("line"):
+                    body = defs["body"]
+            if body is not None:
+                lines.append(f"#define {name} {body}")
+        else:  # enumerators / const objects: engine values (not an independent check of those)
+            lines.append(f"#define {name} ({c['value']})")
+    return lines
+
+
+def _path_claims(unit, report):
+    """(R2c) Whole-function harness claims for the path-designed pairs of one function (one instrument per function)."""
+    from source_oracle_clang_check import decision_claim
+    path = [d for d in report["decisions"] if d.get("evaluation") == "source_path" and d.get("pairs")]
+    if not path:
+        return []
+    instrument = {"decisions": [{"span": tuple(d["path_spec"]["key"][:2]),
+                                 "atoms": [tuple(a[:2]) for a in d["path_spec"]["atoms"]]} for d in path]}
+    claims = []
+    for index, decision in enumerate(path):
+        for pair in decision["pairs"]:
+            for side in ("a", "b"):
+                expr = decision_claim(index, pair[f"truth_{side}"], pair[f"observed_{side}"], pair[f"decision_{side}"])
+                claims.append({"unit": unit, "inputs": pair[f"inputs_{side}"], "outputs": {expr: 1},
+                               "possible_ub": pair.get(f"possible_ub_{side}") or [],
+                               "instrument": instrument, "label": f"{report['function']}:{pair['pair_id']}:{side}",
+                               "stub": bool(pair.get("stub_inputs"))})
+    return claims
+
+
+def _element_name(name):
+    """(R77) The name an element input ``g_a[2]`` is bound under in the harness."""
+    return "__mcdc_elem_" + name.replace("[", "_").replace("]", "")
+
+
+def _element_texts(text, report, elements, parser):
+    """(R77) ``text`` with every read of an element in ``elements`` (``g_a[POS]`` → ``g_a[2]``) replaced by its bound name,
+    and the ``(index text, index)`` of each — the design's own reading of the subscripts (`generators.mcdc_design`)."""
+    from generators.mcdc_design import _array_name_node, _index_value, _walk
+    prefix = b"int probe(void) { if ("
+    raw = prefix + text.encode() + b") return 1; return 0; }"
+    widths = (report.get("target") or {}).get("widths")
+    edits, indexes = [], []
+    for x in _walk(parser.parse(raw).root_node):
+        if x.type != "subscript_expression" or (arg := _array_name_node(x)) is None:
+            continue
+        index = x.child_by_field_name("index")
+        k = _index_value(index, raw, report.get("constants") or {}, widths)
+        name = f"{raw[arg.start_byte:arg.end_byte].decode()}[{k}]"
+        if k is not None and name in elements:
+            edits.append((x.start_byte, x.end_byte, _element_name(name)))
+            indexes.append((raw[index.start_byte:index.end_byte].decode(), k))
+    out = raw
+    for start, end, new in sorted(edits, reverse=True):
+        out = out[:start] + new.encode() + out[end:]
+    return out[len(prefix):-len(b") return 1; return 0; }")].decode(), indexes
+
+
+def _checks(path, report):
+    """(label, expression text, expected int) for every retained design claim of a decision."""
+    domains = report["domains"]
+    for decision in report["decisions"]:
+        if decision.get("evaluation") == "source_path":
+            continue  # reads a local / a rewritten input: checked by the function harness (`_path_claims`)
+        elements = set(decision.get("expression_elements") or ())
+        texts = [("decision", decision["expression"])] + [(c["condition_id"], c["expression"])
+                                                        for c in decision["conditions"]]
+        rewritten, index_claims = {}, []
+        parser = None
+        if elements:
+            from workflow.code_parser.c_parser import _make_parser
+            parser = _make_parser()
+        for cid, text in texts:
+            rewritten[cid], found = _element_texts(text, report, elements, parser) if elements else (text, [])
+            if cid == "decision":
+                index_claims = [(f"index:{t}", f"({t}) == {k}", 1) for t, k in dict.fromkeys(found)]
+        for pair in decision.get("pairs") or []:
+            for side in ("a", "b"):
+                inputs = pair[f"inputs_{side}"]
+                # An enum-typed input is bound as ``int`` (the engine's model of an enumeration object). (R77) An element
+                #   input is bound under its harness name where the decision reads it; the others have no name to bind.
+                bound = {(_element_name(n) if n in elements else n): (n, v) for n, v in sorted(inputs.items())
+                         if n in domains and ("[" not in n or n in elements)}
+                binds = [f"#define {b} (({'int' if (domains[n].get('ctype') or {}).get('enum') else domains[n]['type']})({v}))"
+                         for b, (n, v) in bound.items()]
+                label = f"{Path(path).name}:{report['function']}:{pair['pair_id']}:{side}"
+                exprs = [("decision", rewritten["decision"], int(pair[f"decision_{side}"]))]
+                for cond, truth in zip(decision["conditions"], pair[f"truth_{side}"], strict=True):
+                    exprs.append((cond["condition_id"], rewritten[cond["condition_id"]], int(truth)))
+                yield label, binds, exprs + index_claims, list(bound)
+                index_claims = []   # (review I2) the index is the decision's: claimed once
+
+
+def check_unit(path, context, scope, entries, clang, target, tmp):
+    """One unit's claims under clang: ``(mismatches, compile errors, claims checked)`` — a mismatch is a claim clang
+    refutes; a missing sentinel (the failure parsing is broken) is a compile error."""
+    lines = _prelude(context, scope)
+    index, claims = {}, 0
+    for label, binds, exprs, names in entries:
+        lines += binds
+        for cid, expr, expected in exprs:
+            claims += 1
+            tag = f"C{len(index)}"
+            index[tag] = {"claim": f"{label}:{cid}", "expected": expected, "expression": " ".join(expr.split())}
+            lines += ["_Static_assert((", expr, f") == {expected}, \"{tag}\");"]
+        lines += [f"#undef {n}" for n in names]
+    # Self-check: one deliberately false claim per file. If the run does not report it, the failure
+    # parsing is broken and a real mismatch would pass silently — the unit counts as an oracle error.
+    lines += ["_Static_assert((", "1 + 1", ') == 3, "SENTINEL");']
+    src = Path(tmp) / (Path(path).stem + "_oracle.c")
+    src.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    proc = subprocess.run([clang, f"--target={target}", "-std=c11", "-fsyntax-only",
+                           "-ferror-limit=0", "-Wno-everything", str(src)],
+                          capture_output=True, text=True, timeout=300)
+    # clang: "error: static assertion failed due to requirement '...': C12" (message unquoted)
+    failed = set(re.findall(r"static assertion failed.*?:\s*(C\d+|SENTINEL)\s*$", proc.stderr, re.M))
+    errors = []
+    if "SENTINEL" not in failed:
+        errors.append({"unit": Path(path).name, "errors": ["sentinel_not_reported"], "count": 1})
+    failed.discard("SENTINEL")
+    mismatches = [index[t] for t in sorted(failed, key=lambda x: int(x[1:]))]
+    other = [ln for ln in proc.stderr.splitlines() if "error:" in ln and "static assertion failed" not in ln]
+    if other:
+        errors.append({"unit": Path(path).name, "errors": other[:5], "count": len(other)})
+    return mismatches, errors, claims
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("source_root", type=Path)
+    ap.add_argument("--target", default="msp430", help="clang target with the ECU's integer widths")
+    ap.add_argument("--clang", default="clang")
+    ap.add_argument("--output", type=Path)
+    ap.add_argument("--stub-returns", action="store_true",
+                    help="(R36) add the called functions' 'F() return' to the inputs — checks the stub-value pairs")
+    args = ap.parse_args()
+    results = {"target": args.target, "units": 0, "pairs_checked": 0, "claims_checked": 0, "mismatches": [],
+               "compile_errors": [], "scope": "expression semantics only; not execution, not reachability"}
+    by_unit: dict[str, list] = {}
+    path_claims = []
+    results["stub_returns"] = bool(args.stub_returns)
+    results["stub_input_decisions"] = results["stub_input_pairs"] = 0
+    for path, unit, report, context, scope in _decisions(args.source_root, args.stub_returns):
+        stubbed = [d for d in report["decisions"] if d.get("stub_inputs")]
+        results["stub_input_decisions"] += len(stubbed)
+        results["stub_input_pairs"] += sum(len(d.get("pairs") or []) for d in stubbed)
+        path_claims.extend(_path_claims(unit, report))
+        entries = list(_checks(path, report))
+        if not entries:
+            continue
+        by_unit.setdefault(path, [context, scope, []])[2].extend(entries)
+    with tempfile.TemporaryDirectory() as tmp:
+        for path, (context, scope, entries) in by_unit.items():
+            results["units"] += 1
+            results["pairs_checked"] += len(entries)
+            mismatches, errors, claims = check_unit(path, context, scope, entries, args.clang, args.target, tmp)
+            results["claims_checked"] += claims
+            results["mismatches"] += mismatches
+            results["compile_errors"] += errors
+    if path_claims:
+        from source_oracle_clang_check import check_claims
+        keys = ("claims", "checked", "agree", "agree_with_stubbed_callees", "mismatch", "eval_error", "unchecked")
+        results["path_pairs"] = {**dict.fromkeys(keys, 0), "unchecked_reasons": {}}
+        results["path_eval_errors"] = []
+        # (R36) the pairs the stub-value search found are checked (and reported) on their own as well
+        for part, claims in (("stub_path_pairs", [c for c in path_claims if c.get("stub")]),
+                             ("", [c for c in path_claims if not c.get("stub")])):
+            if not claims:
+                continue
+            checked = check_claims(claims, clang=args.clang, target=args.target)
+            for k in keys:
+                results["path_pairs"][k] += checked[k]
+            for why, n in (checked.get("unchecked_reasons") or {}).items():
+                results["path_pairs"]["unchecked_reasons"][why] = results["path_pairs"]["unchecked_reasons"].get(why, 0) + n
+            if part:
+                results[part] = {k: checked[k] for k in (*keys, "unchecked_reasons")}
+            results["mismatches"] += [{"claim": m["function"] + ":path", **m} for m in checked["mismatches"]]
+            results["path_eval_errors"] += checked["eval_errors"]
+    summary = {k: (len(v) if isinstance(v, list) else v) for k, v in results.items()}
+    print(json.dumps(summary))
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 1 if results["mismatches"] or results["compile_errors"] or results.get("path_eval_errors") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

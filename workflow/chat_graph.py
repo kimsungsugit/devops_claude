@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
 from typing_extensions import TypedDict
 
 try:  # pragma: no cover
@@ -124,6 +125,7 @@ def run_chat_graph(
     initial_state: ChatGraphState,
     nodes: Iterable[tuple[str, GraphNodeFn]],
     event_callback: Optional[GraphEventCallback] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> ChatGraphState:
     if LANGGRAPH_AVAILABLE and StateGraph is not None:
         graph = StateGraph(LangGraphState)
@@ -131,6 +133,10 @@ def run_chat_graph(
 
         def _make_wrapped(node_name: str, node_fn: GraphNodeFn):
             def _wrapped(state_dict: LangGraphState) -> Dict[str, Any]:
+                # W5: 협조 취소 — LangGraph 는 토폴로지상 후속 노드를 계속 호출하므로
+                # soft-cancel(빈 updates 반환)이다. 노드 본문 실행만 건너뛴다.
+                if cancel_check and cancel_check():
+                    return {}
                 state_obj = ChatGraphState(**{k: v for k, v in state_dict.items() if k in ChatGraphState.__dataclass_fields__})
                 emit_graph_event(
                     event_callback,
@@ -139,8 +145,12 @@ def run_chat_graph(
                     payload={"node": node_name},
                 )
                 started = time.perf_counter()
-                updates = node_fn(state_obj) or {}
+                try:
+                    updates = node_fn(state_obj) or {}
+                except Exception as exc:  # D3: 노드 예외를 errors 로 흡수 (전체 500 방지)
+                    updates = {"errors": [{"code": "node_error", "node": node_name, "message": str(exc)}]}
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
+                skipped = bool(updates.pop("_skipped", False))  # 노드가 본문 없이 건너뜀
                 metrics = dict(state_dict.get("metrics") or {})
                 node_metrics = dict(metrics.get("nodes") or {})
                 node_metrics[node_name] = {"elapsed_ms": round(elapsed_ms, 1)}
@@ -150,7 +160,7 @@ def run_chat_graph(
                     event_callback,
                     event_type="graph_node_finished",
                     state=state_obj,
-                    payload={"node": node_name, "elapsed_ms": round(elapsed_ms, 1)},
+                    payload={"node": node_name, "elapsed_ms": round(elapsed_ms, 1), "skipped": skipped},
                 )
                 return updates
             return _wrapped
@@ -177,6 +187,9 @@ def run_chat_graph(
     state = initial_state
     total_started = time.perf_counter()
     for node_name, node_fn in nodes:
+        if cancel_check and cancel_check():
+            state.metrics["cancelled"] = True
+            break
         emit_graph_event(
             event_callback,
             event_type="graph_node_started",
@@ -184,8 +197,12 @@ def run_chat_graph(
             payload={"node": node_name},
         )
         started = time.perf_counter()
-        updates: Dict[str, Any] = node_fn(state) or {}
+        try:
+            updates: Dict[str, Any] = node_fn(state) or {}
+        except Exception as exc:  # D3: 노드 예외를 errors 로 흡수 (전체 500 방지)
+            updates = {"errors": [*(state.errors or []), {"code": "node_error", "node": node_name, "message": str(exc)}]}
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        skipped = bool(updates.pop("_skipped", False))  # 노드가 본문 없이 건너뜀(flash 방지)
         for key, value in updates.items():
             if hasattr(state, key):
                 setattr(state, key, value)
@@ -201,6 +218,7 @@ def run_chat_graph(
             payload={
                 "node": node_name,
                 "elapsed_ms": round(elapsed_ms, 1),
+                "skipped": skipped,
             },
         )
     state.metrics["graph_total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 1)

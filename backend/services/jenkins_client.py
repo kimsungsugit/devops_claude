@@ -4,8 +4,8 @@ import base64
 import fnmatch
 import json
 import os
-import time
 import ssl
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET

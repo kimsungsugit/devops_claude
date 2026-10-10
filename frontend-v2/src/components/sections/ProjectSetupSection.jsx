@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api, getUsername } from '../../api.js';
+import { api, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 
 // FormData(multipart) POST — api() 헬퍼는 JSON 전용이라 raw fetch 유지하되
-// X-User 헤더는 명시 추가 (UserContextMiddleware 401 silent failure 차단).
+// auth 헤더는 authHeaders()(Bearer + X-User)로 붙인다. X-User 만 보내면 커밋 1b6bb99
+// (2026-08-04) 이후 UserContextMiddleware 가 401 로 막는다.
 const post = async (url, body) => {
-  const user = getUsername();
   const res = await fetch(url, {
     method: 'POST',
     body,
-    headers: user ? { 'X-User': user } : {},
+    headers: authHeaders(),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();

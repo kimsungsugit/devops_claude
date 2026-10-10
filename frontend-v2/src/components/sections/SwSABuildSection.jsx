@@ -1,8 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { QUALITY_RUN_HEADER, qualityRunNote } from '../../gateVerdict';
 import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
+import { isAbortError } from '../../impactPoll.js';
 import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -51,7 +53,7 @@ function loadSavedForm() {
     // 입력 일원화: touched가 아닌(prefill) 매핑 필드만 공유 기본값으로 채움(사용자 입력·빈값 보존).
     const touched = resolveTouched('swsa', STORAGE_KEY, saved);
     return applySharedDefaults(base, touched, sharedDefaultsFor('swsa', loadSharedInputs()));
-  } catch (e) {
+  } catch (_e) {
     const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
     return applySharedDefaults(base, new Set(), sharedDefaultsFor('swsa', loadSharedInputs()));
   }
@@ -95,7 +97,7 @@ export default function SwSABuildSection() {
       if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
         clearTimeout(timerId);
-        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       });
       downloadCleanupRef.current = [];
     };
@@ -125,7 +127,7 @@ export default function SwSABuildSection() {
     a.click();
     document.body.removeChild(a);
     const timerId = setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (_e) { /* ignore */ }
       downloadCleanupRef.current = downloadCleanupRef.current.filter(item => item.timerId !== timerId);
     }, 5000);
     downloadCleanupRef.current.push({ timerId, url });
@@ -163,7 +165,7 @@ export default function SwSABuildSection() {
           if (Array.isArray(j?.detail)) msg = formatDetailMessage(j.detail);
           else if (typeof j?.detail === 'string') msg = j.detail;
           else if (j?.message) msg = j.message;
-        } catch (e) { /* non-JSON body */ }
+        } catch (_e) { /* non-JSON body */ }
         if (mountedRef.current) toast('error', `SwSA 빌드 실패: ${msg}`);
         return;
       }
@@ -176,6 +178,10 @@ export default function SwSABuildSection() {
       } catch (e) {
         console.warn('X-SwSA-* header parse failed:', e?.message || e);
       }
+      // (R40 N1) "이 파일이 어느 품질 run 인가" — 검토 기록은 run 단위인데, 방금 받은 파일과
+      // 그 run 을 이을 단서가 없었다. 기록 실패(`unrecorded`)도 **말한다** — 침묵하면
+      // 사용자는 나중에 "왜 생성 현황에 없지" 를 겪는다.
+      const _runNote = qualityRunNote(res.headers.get(QUALITY_RUN_HEADER));
 
       const blob = await res.blob();
       const cd = res.headers.get('Content-Disposition') || '';
@@ -184,9 +190,13 @@ export default function SwSABuildSection() {
 
       if (!mountedRef.current) return;
       triggerDownload(blob, filename);
-      toast('success', `SwSA ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
+      toast('success', `SwSA ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료${_runNote ? ` · ${_runNote.text}` : ''}`);
+      if (_runNote && _runNote.runId == null) {
+        // 빌드는 됐고 파일도 줬지만 이력에는 안 남았다 — 다른 사실이므로 다른 토스트로.
+        toast('warning', _runNote.text);
+      }
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) toast('error', `SwSA 빌드 실패: ${e?.message || e}`);
     } finally {
       if (mountedRef.current) setBuilding(false);

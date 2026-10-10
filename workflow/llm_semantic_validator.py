@@ -1,9 +1,12 @@
 """LLM 응답의 semantic 검증 (라운드 C 신규).
 
 UDS LLM 파이프라인의 evidence가 실제 source와 일치하는지 구조적으로 검증.
-기존 ``workflow/ai_validator.py::_check_hallucination`` (URL/version regex만)의
-약점을 보완 — evidence dict의 ``source_file`` 실제 존재 / 함수명이 c_parser
-function set에 존재 / line range 유효성 / excerpt non-empty 검사.
+evidence dict의 ``source_file`` 실제 존재 / 함수명이 c_parser function set에 존재 /
+line range 유효성 / excerpt non-empty 검사.
+
+(옛 docstring 은 *"기존 ``workflow/ai_validator.py::_check_hallucination`` (URL/version
+regex만)의 약점을 보완"* 이라 적었다. 그 모듈은 프로덕션 호출자가 0이라 보완할 기존
+동작 자체가 없었고, 2026-08-04 에 삭제했다 — §6 후보 10.)
 
 audit reviewer가 LLM 응답을 manual review할 때 false confidence를 줄이는 게
 목적. SemanticReport.score를 confidence 계산에 weighted contribution.
@@ -24,7 +27,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Set
-
 
 # evidence excerpt에서 함수명 추출 — 라인 (uds_ai.py:91-92 source_file와 동일 정규식 패턴 활용)
 _FUNCTION_NAME_RE = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")

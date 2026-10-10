@@ -321,6 +321,7 @@ class TestResolveSwudsMapsOutWarnings:
 
     def test_out_warnings_on_permission_error(self, monkeypatch):
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(
@@ -345,6 +346,7 @@ class TestResolveSwudsMapsOutWarnings:
     def test_out_warnings_default_none_backward_compat(self, monkeypatch):
         """out_warnings 미전달 (기존 호출자) — 예외 없이 빈 맵 반환 계약 유지."""
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(
@@ -360,6 +362,7 @@ class TestResolveSwudsMapsOutWarnings:
 
     def test_out_warnings_on_parse_not_ok(self, monkeypatch):
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(
@@ -376,6 +379,7 @@ class TestResolveSwudsMapsOutWarnings:
     def test_apply_function_asil_map_propagates_swuds_failure(self, monkeypatch):
         """apply_function_asil_map 경유 시 session.parse_warnings에 사유 누적."""
         from types import SimpleNamespace
+
         from backend.services import swut_meta_resolver as mod
 
         monkeypatch.setattr(mod, "resolve_c_source_root", lambda req, pid: "")
@@ -394,3 +398,98 @@ class TestResolveSwudsMapsOutWarnings:
         )
         mod.apply_function_asil_map(req, session, "KJPDS02")
         assert any("[swuds] ASIL read 실패" in w for w in session.parse_warnings)
+
+
+class TestReadTemplateFromKeys:
+    """양식 후보를 **읽힐 때까지** 순회한다 — "값이 있다" 는 "읽힌다" 가 아니다.
+
+    2026-08-26 실측: KJPDS02 `es95411_template` 이 v1.02 파일을 가리키는데 그 세대가
+    v2.01_260629_R 로 교체되며 사라졌다. 예전 코드는 값이 있는 첫 키에서 곧장
+    `read_bytes` 를 불러 raw `FileNotFoundError` 가 500 으로 나갔고, 뒤 후보는
+    **시도조차 되지 않았다.**
+    """
+
+    class _R:
+        """지정한 경로만 읽히는 가짜 resolver."""
+
+        def __init__(self, readable: dict, listing=None, raises=None):
+            self.readable = readable
+            self.listing = listing or {}
+            self.raises = raises or {}
+            self.reads: list[str] = []
+
+        def read_bytes(self, path):
+            self.reads.append(path)
+            if path in self.readable:
+                return self.readable[path]
+            raise FileNotFoundError(path)
+
+        def list_dir(self, path, pattern="*", recursive=False, include_dirs=False):
+            if path in self.raises:
+                raise self.raises[path]
+            return self.listing.get(path, [])
+
+    def _call(self, r, tmpl, keys):
+        from backend.services.swut_meta_resolver import read_template_from_keys
+        return read_template_from_keys(r, tmpl, keys, project_id="P", label="L")
+
+    def test_dead_first_key_falls_through_to_the_next(self):
+        r = self._R({"B.xlsm": b"OK"})
+        out = self._call(r, {"k1": "A.xlsm", "k2": "B.xlsm"}, ("k1", "k2"))
+        assert out == b"OK"
+        assert r.reads == ["A.xlsm", "B.xlsm"]      # 첫 키를 **시도했다**
+
+    def test_first_readable_wins(self):
+        r = self._R({"A.xlsm": b"first", "B.xlsm": b"second"})
+        assert self._call(r, {"k1": "A.xlsm", "k2": "B.xlsm"}, ("k1", "k2")) == b"first"
+        assert r.reads == ["A.xlsm"]                # 뒤 후보는 안 건드린다
+
+    def test_all_dead_reports_every_candidate(self):
+        from backend.services.swut_meta_resolver import TemplateNotResolved
+        # ⚠ 파일명만 주면 부모가 "." 라 힌트가 **의도적으로** 생략된다
+        #   (`folder_contents_hint` 첫 분기). 폴더가 있는 경로로 준다.
+        r = self._R({}, listing={"dir": ["dir/real_v2.xlsm", "dir/other.xlsx"]})
+        with pytest.raises(TemplateNotResolved) as ei:
+            self._call(r, {"k1": "dir/A.xlsm", "k2": "", "k3": "dir/C.xlsm"},
+                       ("k1", "k2", "k3"))
+        d = str(ei.value)
+        assert "'k1'=FileNotFoundError" in d
+        assert "'k2'=미등록" in d                    # 조용히 건너뛰지 않는다
+        assert "'k3'=FileNotFoundError" in d
+        assert "real_v2.xlsm" in d                  # 그 폴더에 뭐가 있는지 함께
+
+    def test_key_is_quoted_for_the_parity_guard(self):
+        """`test_docgen_preflight.TestReportTemplateKeyParity` 가 `'<key>'` 로 읽는다.
+
+        따옴표를 빼면 그 cross-module 가드가 **조용히** 죽는다.
+        """
+        from backend.services.swut_meta_resolver import TemplateNotResolved
+        r = self._R({})
+        with pytest.raises(TemplateNotResolved) as ei:
+            self._call(r, {}, ("swutcr_template",))
+        assert "'swutcr_template'" in str(ei.value)
+
+
+class TestFolderContentsHint:
+    """부재 사유는 **증거**로 낸다 — 판정하지 않는다."""
+
+    def _hint(self, r, path):
+        from backend.services.swut_meta_resolver import folder_contents_hint
+        return folder_contents_hint(r, path)
+
+    def test_lists_actual_files_in_the_folder(self):
+        r = TestReadTemplateFromKeys._R({}, listing={"dir": ["dir/a.xlsx", "dir/b.xlsm"]})
+        h = self._hint(r, "dir/missing.xlsm")
+        assert "a.xlsx" in h and "b.xlsm" in h
+
+    def test_empty_is_not_asserted_as_absent(self):
+        """resolver 는 빈 폴더와 없는 폴더를 구분 못 한다 — 단정하면 거짓말이 된다."""
+        r = TestReadTemplateFromKeys._R({}, listing={})
+        h = self._hint(r, "dir/missing.xlsm")
+        assert "비어 있거나" in h and "폴더 자체가 없" in h
+
+    def test_listing_failure_is_not_silent(self):
+        """'폴더도 못 봤다' 와 '폴더가 비었다' 는 다른 사실이다."""
+        r = TestReadTemplateFromKeys._R({}, raises={"dir": PermissionError("no")})
+        h = self._hint(r, "dir/missing.xlsm")
+        assert "확인하지 못했습니다" in h and "PermissionError" in h

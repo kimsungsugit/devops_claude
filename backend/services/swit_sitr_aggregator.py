@@ -811,6 +811,7 @@ def build_swit_sitr_report(
     deviation_cases: list[Any] | None = None,
     swuds_function_ids: set[str] | None = None,
     swuts_map: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> SwitSitrBuildResult:
     """SwIT SITR v2.02 xlsm 생성.
 
@@ -995,6 +996,7 @@ def build_swit_sitr_report(
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
             test_kind="SwIT",
+            swuds_skip_reason=swuds_skip_reason,
         )
         summary["consistency_self_check_rows"] = n_cons
         if swuds_function_ids is not None:
@@ -1017,6 +1019,14 @@ def build_swit_sitr_report(
         warnings.append(
             f"AuditLog 시트 작성 실패 (산출물 영향 0): {type(_e).__name__}: {str(_e)[:80]}"
         )
+
+    # 라운드 107 — 템플릿/기입 수식을 openpyxl이 캐시 미저장(cached=None) → 재계산
+    # 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때 자동 재계산(SwITCV 라운드 102 정합).
+    # 캐시 미저장은 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     # 14차 W1: BytesIO 그대로 result에 저장.
     out = io.BytesIO()

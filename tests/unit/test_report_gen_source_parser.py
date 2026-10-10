@@ -1,8 +1,6 @@
 """Unit tests for report_gen.source_parser — C parsing helpers."""
 from __future__ import annotations
 
-import pytest
-
 
 class TestStripCComments:
     def test_block_comment(self):

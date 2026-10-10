@@ -16,15 +16,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture(scope="module")
-def client():
-    from backend.main import app
-    return TestClient(app)
-
 
 class TestVcastReportsList:
     """GET /api/vcast/reports — 리포트 목록 조회.

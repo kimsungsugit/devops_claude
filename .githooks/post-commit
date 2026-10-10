@@ -1,0 +1,38 @@
+#!/bin/sh
+# --- 대량 삭제 조기 경보 (인덱스 교체 사고 가드) -------------------------------
+# 2026-07-23~08-25 사이 이 저장소에서 **6회** 발생한 사고: 커밋 진행 중 인덱스가
+# 다른 내용으로 갈아끼워지면, git 은 그 순간의 인덱스를 **아무 경고 없이** 커밋한다.
+# 결과는 "추적 파일 1,208개 삭제" 커밋이고, 화면에는 오류가 한 줄도 안 나온다.
+#
+# ⚠ pre-commit 으로는 못 잡는다 — 훅이 끝난 **뒤** 인덱스가 바뀌어도 그대로 커밋된다.
+#   실측으로 확인했다: pathspec 유무와 무관하게 동일하게 깨진다(대조군 C/D).
+#   그래서 사후(post-commit) 검증이 유일하게 믿을 수 있는 지점이다.
+_guard_del=$(git show --name-status --format="" HEAD 2>/dev/null | grep -c '^D')
+_guard_left=$(git ls-tree -r HEAD --name-only 2>/dev/null | wc -l)
+_guard_del=${_guard_del:-0}; _guard_left=${_guard_left:-0}
+# 판정: 삭제 50건 이상 **AND** 트리가 직전의 1/4 미만으로 쪼그라듦.
+# 사고의 특징은 "많이 지워짐" 이 아니라 **"거의 아무것도 안 남음"** 이다(실측 1,211 → 3).
+# "삭제가 남은 트리보다 많으면" 같은 느슨한 규칙은 정상 리팩터를 오탐한다 —
+# 121개 중 55개 삭제(45%)에 경보가 떴다(가드 테스트의 음성 대조군이 잡아냈다).
+_guard_parent=$((_guard_del + _guard_left))
+if [ "$_guard_del" -ge 50 ] && [ "$((_guard_left * 4))" -lt "$_guard_parent" ]; then
+  _guard_sha=$(git rev-parse --short HEAD 2>/dev/null)
+  {
+    printf '\n'
+    printf '  ############################################################\n'
+    printf '  ##  경고: 방금 커밋이 추적 파일 %s개를 삭제했습니다\n' "$_guard_del"
+    printf '  ##  커밋 %s · 남은 파일 %s개\n' "$_guard_sha" "$_guard_left"
+    printf '  ##\n'
+    printf '  ##  이것이 의도한 삭제가 아니면 인덱스 교체 사고입니다.\n'
+    printf '  ##  푸시하지 말고 확인 후 되돌리십시오:\n'
+    printf '  ##    git show --name-status HEAD | head\n'
+    printf '  ##    git branch -r --contains HEAD    # 비어야 미푸시\n'
+    printf '  ##    git reset --soft HEAD~1          # 인덱스/워킹트리 보존\n'
+    printf '  ############################################################\n\n'
+  } >&2
+  printf '%s deleted=%s left=%s\n' "$_guard_sha" "$_guard_del" "$_guard_left" \
+    >> "$(git rev-parse --git-dir)/mass-deletion-alarm.log" 2>/dev/null
+fi
+# ------------------------------------------------------------------------------
+# AutoReport chained post-commit hook
+exec "D:/Project/Program/AutoReport/.githooks/post-commit"
