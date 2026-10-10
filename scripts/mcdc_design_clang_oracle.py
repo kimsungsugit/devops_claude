@@ -26,9 +26,11 @@ the stub values and those pairs reach the whole-function harness, which returns 
 
 (R77) An expression pair on array elements (``g_a[POS] == K`` with the input ``g_a[2]``): a ``#define`` cannot bind
 ``g_a[2]``, so each element read the design took as an input is replaced, in the decision's and the conditions' text, by
-a name bound like any input (``__mcdc_elem_g_a_2``), and clang checks on its own that the index text the source wrote is
-that element's (``_Static_assert((POS) == 2, …)``) — what is not independent: the element's type (the engine's
-resolution of the array's declaration) and which subscripts are element reads (the engine's `_array_name_node`).
+a name bound like any input (``__mcdc_elem_g_a_2``), and clang checks that the index text the source wrote is that
+element's (``_Static_assert((POS) == 2, …)``, once per decision) — independently for a macro index (its text is the
+source's), not for an enumerator or const-object index (the prelude writes the engine's value, as for any of those).
+Not independent either: the element's type (the engine's resolution of the array's declaration) and which subscripts are
+element reads (the engine's `_array_name_node`).
 """
 from __future__ import annotations
 
@@ -160,16 +162,15 @@ def _element_name(name):
     return "__mcdc_elem_" + name.replace("[", "_").replace("]", "")
 
 
-def _element_texts(text, report, elements):
+def _element_texts(text, report, elements, parser):
     """(R77) ``text`` with every read of an element in ``elements`` (``g_a[POS]`` → ``g_a[2]``) replaced by its bound name,
     and the ``(index text, index)`` of each — the design's own reading of the subscripts (`generators.mcdc_design`)."""
     from generators.mcdc_design import _array_name_node, _index_value, _walk
-    from workflow.code_parser.c_parser import _make_parser
     prefix = b"int probe(void) { if ("
     raw = prefix + text.encode() + b") return 1; return 0; }"
     widths = (report.get("target") or {}).get("widths")
     edits, indexes = [], []
-    for x in _walk(_make_parser().parse(raw).root_node):
+    for x in _walk(parser.parse(raw).root_node):
         if x.type != "subscript_expression" or (arg := _array_name_node(x)) is None:
             continue
         index = x.child_by_field_name("index")
@@ -194,8 +195,12 @@ def _checks(path, report):
         texts = [("decision", decision["expression"])] + [(c["condition_id"], c["expression"])
                                                         for c in decision["conditions"]]
         rewritten, index_claims = {}, []
+        parser = None
+        if elements:
+            from workflow.code_parser.c_parser import _make_parser
+            parser = _make_parser()
         for cid, text in texts:
-            rewritten[cid], found = _element_texts(text, report, elements) if elements else (text, [])
+            rewritten[cid], found = _element_texts(text, report, elements, parser) if elements else (text, [])
             if cid == "decision":
                 index_claims = [(f"index:{t}", f"({t}) == {k}", 1) for t, k in dict.fromkeys(found)]
         for pair in decision.get("pairs") or []:
@@ -212,6 +217,41 @@ def _checks(path, report):
                 for cond, truth in zip(decision["conditions"], pair[f"truth_{side}"], strict=True):
                     exprs.append((cond["condition_id"], rewritten[cond["condition_id"]], int(truth)))
                 yield label, binds, exprs + index_claims, list(bound)
+                index_claims = []   # (review I2) the index is the decision's: claimed once
+
+
+def check_unit(path, context, scope, entries, clang, target, tmp):
+    """One unit's claims under clang: ``(mismatches, compile errors, claims checked)`` — a mismatch is a claim clang
+    refutes; a missing sentinel (the failure parsing is broken) is a compile error."""
+    lines = _prelude(context, scope)
+    index, claims = {}, 0
+    for label, binds, exprs, names in entries:
+        lines += binds
+        for cid, expr, expected in exprs:
+            claims += 1
+            tag = f"C{len(index)}"
+            index[tag] = {"claim": f"{label}:{cid}", "expected": expected, "expression": " ".join(expr.split())}
+            lines += ["_Static_assert((", expr, f") == {expected}, \"{tag}\");"]
+        lines += [f"#undef {n}" for n in names]
+    # Self-check: one deliberately false claim per file. If the run does not report it, the failure
+    # parsing is broken and a real mismatch would pass silently — the unit counts as an oracle error.
+    lines += ["_Static_assert((", "1 + 1", ') == 3, "SENTINEL");']
+    src = Path(tmp) / (Path(path).stem + "_oracle.c")
+    src.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    proc = subprocess.run([clang, f"--target={target}", "-std=c11", "-fsyntax-only",
+                           "-ferror-limit=0", "-Wno-everything", str(src)],
+                          capture_output=True, text=True, timeout=300)
+    # clang: "error: static assertion failed due to requirement '...': C12" (message unquoted)
+    failed = set(re.findall(r"static assertion failed.*?:\s*(C\d+|SENTINEL)\s*$", proc.stderr, re.M))
+    errors = []
+    if "SENTINEL" not in failed:
+        errors.append({"unit": Path(path).name, "errors": ["sentinel_not_reported"], "count": 1})
+    failed.discard("SENTINEL")
+    mismatches = [index[t] for t in sorted(failed, key=lambda x: int(x[1:]))]
+    other = [ln for ln in proc.stderr.splitlines() if "error:" in ln and "static assertion failed" not in ln]
+    if other:
+        errors.append({"unit": Path(path).name, "errors": other[:5], "count": len(other)})
+    return mismatches, errors, claims
 
 
 def main():

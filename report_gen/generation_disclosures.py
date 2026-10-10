@@ -1124,16 +1124,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                "(지역 변수·조건 안 호출)로 먼저 거부한 결정은 그 이유의 탐색으로 가며 대상 입력을 설정하지 않는다)."
                if _int(mc, "pointee_condition_decisions") else "")
             # (R77) the expression engine reads a constant-index element of a modeled global array as an input itself
-            + (f" 상수 첨자로 읽는 전역 배열 원소(`g_a[POS]` — 입력 이름은 정본 표기 `g_a[2]`)의 조건이 있는 결정 "
-               f"{_show(_int(mc, 'element_expression_decisions'))} 은 식 엔진이 원소를 입력으로 읽어 설계했다(설계 "
-               f"{_show(_int(mc, 'element_expression_designed'))} — 길이를 아는 1 차원 정수 배열 · 길이 안 상수 첨자만, "
-               "첨자 값은 비교 값이 아니다. 결합은 스칼라 전역과 같이 보되(결정 앞의 쓰기 · `&` · 피호출의 쓰기 · 알 수 없는 "
-               "코드) 배열 이름은 값으로 쓰이면 포인터라, 결정 앞에서 실행될 수 있는 포인터를 거친 쓰기 · 포인터 쓰기가 있는 "
-               "피호출 · 포인터일 수 있는 인자를 넘기는 호출(행이 그 피호출을 stub 하면 그 인자로 값을 써 넣을 수 있다) · "
-               "쓰는 매크로가 하나라도 있으면, 또 그 배열의 어느 원소든 결정 앞에서 쓰이면 증명하지 못한 것으로 본다"
-               + (f": 그렇게 식 엔진이 받지 못한 결정 {_show(_int(mc, 'element_expression_refused'))} 은 R76 과 같은 사유 · "
-                  "같은 탐색으로 갔다" if _int(mc, "element_expression_refused") else "")
-               + ")."
+            + (_element_expression_text(mc)
                if (_int(mc, "element_expression_decisions") or _int(mc, "element_expression_refused")) else "")
             # (R76) conditions on array elements: a global array's element is an input of its own name (``g_a[1]``)
             + (f" 배열 원소(`g_a[1]` — 정본 표기와 같은 입력 이름)를 읽는 조건의 결정 중 식 엔진이 받지 않은 "
@@ -2241,6 +2232,38 @@ def _mcdc_budget_text(budgets: Any) -> str:
     return (" 함수 실행 모델 탐색 예산은 함수의 탐색 그룹·탐색(1차 · stub 값)마다 " + " / ".join(parts)
             + " 이다 — 결정론적 비용 상한이라 같은 소스·같은 예산은 같은 설계를 내고, 예산 안에서 못 찾은 쌍은 불가 "
             "증명이 아니다.")
+
+
+def _element_expression_text(mc: Dict[str, Any]) -> str:
+    """(R77) 식 엔진이 상수 첨자 배열 원소를 입력으로 읽은 결정 — 상태별 수, 결합 판정, 실행 모델 재확인, 받지 못한 결정과 사유."""
+    refusals = mc.get("element_expression_refusals") if isinstance(mc.get("element_expression_refusals"), dict) else {}
+    top = sorted(refusals.items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))[:3]
+    text = ""
+    if _int(mc, "element_expression_decisions"):
+        text += (f" 상수 첨자로 읽는 전역 배열 원소(`g_a[POS]` — 입력 이름은 정본 표기 `g_a[2]`)를 식 엔진이 입력으로 읽은 결정 "
+                 f"{_show(_int(mc, 'element_expression_decisions'))}(설계 {_show(_int(mc, 'element_expression_designed'))} · "
+                 f"일부 {_show(_int(mc, 'element_expression_partial'))} · 쌍 없음 "
+                 f"{_show(_int(mc, 'element_expression_no_pair'))} — 길이를 아는 1 차원 정수 배열 · 길이 안 상수 첨자만, 첨자 "
+                 "값은 비교 값이 아니다). 결합은 스칼라 전역과 같이 보고(결정 앞의 쓰기 — 그 배열의 어느 원소든 · `&` · 피호출의 "
+                 "쓰기 · 알 수 없는 코드), 배열 이름은 값으로 쓰이면 포인터라 결정 앞에서 실행될 수 있는 포인터를 거친 저장 · "
+                 "매크로 이름이나 알 수 없는 확장을 거친 쓰기 · 그 배열을 가리킬 수 있는 인자를 넘기는 호출(행이 피호출을 "
+                 "stub 하면 그 인자로 값을 써 넣을 수 있다) · 프로젝트 포인터 분석으로 포인터 쓰기가 그 배열에 닿을 수 있거나 "
+                 "닿는 곳을 모르는(또는 stub 될 수 있는 피호출에 포인터를 넘기는) 피호출 · 그런 매크로가 있으면 증명하지 "
+                 "못한 것으로 본다. 결정이 읽지 않는 입력은 그 결정을 감싼 결정 중 식 엔진이 설계한 결정마다 그 결정이 읽는 "
+                 "입력을 그리로 이끄는 결과의 벡터에서 가져와 시작한다(없으면 기본값). 쌍의 두 행을 함수 실행 모델로 다시 돌린 "
+                 f"{_show(_int(mc, 'element_run_members'))} 행 중 주장과 같음 {_show(_int(mc, 'element_run_agrees'))} · 결정에 "
+                 f"닿지 않음 {_show(_int(mc, 'element_run_unreached'))} · 닿는지 판단 불가 "
+                 f"{_show(_int(mc, 'element_run_not_checked'))} — 닿은 행이 주장과 다르거나 그 값을 정하지 못하면 결합을 확인하지 "
+                 "못한 것으로 보고 그 결정을 아래처럼 R76 탐색으로 보냈고, 결정에 닿지 않는 행의 쌍 "
+                 f"{_show(_int(mc, 'element_pairs_withdrawn'))} 은 거둬들여 설계에 세지 않았다(남은 쌍이 없으면 그 결정도 R76 "
+                 "탐색으로). 이 확인은 정적 판정과 같은 쓰기 분석(프로젝트 포인터 분석)에 기대므로 포인터를 거친 쓰기에는 "
+                 "독립 근거가 아니다.")
+    if _int(mc, "element_expression_refused"):
+        text += (f" 원소를 읽는 결정 중 식 엔진이 받지 못한 {_show(_int(mc, 'element_expression_refused'))} 은 R76 과 같은 "
+                 "사유 · 같은 탐색으로 갔다(식 엔진 사유: "
+                 + " · ".join(f"`{k}` {_show(int(v or 0))}" for k, v in top)
+                 + (" 외" if len(refusals) > 3 else "") + ").")
+    return text
 
 
 def build_disclosures(doc_type: str, quality_report: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -4099,10 +4099,14 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                            "pointee_condition_decisions": 0, "pointee_condition_designed": 0,
                            # (R76) 배열 원소(`g_a[1]` · 상수 표 · 첨자)를 읽는 조건의 결정 — 따로(별도 예산) 탐색한 결정 · 그중 설계
                            "element_condition_decisions": 0, "element_condition_designed": 0,
-                           # (R77) 상수 첨자 원소(`g_a[POS]`)를 식 엔진이 입력으로 읽어 설계한 결정 · 그중 설계 · 원소를 읽고도
-                           #   결합을 증명 못 해 R76 경로(같은 사유 · 같은 탐색)로 보낸 결정과 그 사유(앞부분)
+                           # (R77) 상수 첨자 원소(`g_a[POS]`)를 식 엔진이 입력으로 읽은 결정 · 상태별 · 원소를 읽고도 받지 못해
+                           #   R76 경로(같은 사유 · 같은 탐색)로 보낸 결정과 그 사유(앞부분) · 쌍의 행을 함수 실행 모델로
+                           #   다시 돌린 결과(주장과 같음 / 결정에 닿지 않음 / 판단 불가 — 다르면 그 결정은 R76 경로로 갔다)
                            "element_expression_decisions": 0, "element_expression_designed": 0,
+                           "element_expression_partial": 0, "element_expression_no_pair": 0,
                            "element_expression_refused": 0, "element_expression_refusals": {},
+                           "element_run_members": 0, "element_run_agrees": 0, "element_run_unreached": 0,
+                           "element_run_not_checked": 0, "element_pairs_withdrawn": 0,
                            # (R58, 확장) 기본 설계가 쌍을 못 만든 결정을 소스가 읽어 더한 입력까지 써서 다시 설계 — 대상 ·
                            #   채택(2차 설계의 결과로 바꾼 결정) · 그중 설계 · 2차 설계가 실패해 기본 설계를 유지한 함수
                            "source_read_pass_decisions": 0, "source_read_pass_adopted": 0,
@@ -4193,6 +4197,12 @@ def summarize_mcdc_design(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             if d.get("expression_elements"):
                 out["element_expression_decisions"] += 1
                 out["element_expression_designed"] += status == "designed"
+                out["element_expression_partial"] += status == "partial"
+                out["element_expression_no_pair"] += status == "no_pair_found"
+                run = d.get("element_run_check") or {}
+                for key in ("members", "agrees", "unreached", "not_checked"):
+                    out[f"element_run_{key}"] += int(run.get(key) or 0)
+                out["element_pairs_withdrawn"] += len(d.get("unreached_pairs") or [])
             elif d.get("element_expression_reason"):
                 out["element_expression_refused"] += 1
                 why = str(d["element_expression_reason"]).split(":")
