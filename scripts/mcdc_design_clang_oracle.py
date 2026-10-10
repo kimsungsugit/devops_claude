@@ -23,6 +23,12 @@ Callees are stubs there (they write nothing and return the fill value).
 (R36) ``--stub-returns``: the unit's inputs also hold ``F() return`` for every function its body calls (the SUTS rows
 carry these for non-void callees — `generators/suts._stub_return_names`), so the MC/DC design's second search runs on
 the stub values and those pairs reach the whole-function harness, which returns the pair's value from F's stub.
+
+(R77) An expression pair on array elements (``g_a[POS] == K`` with the input ``g_a[2]``): a ``#define`` cannot bind
+``g_a[2]``, so each element read the design took as an input is replaced, in the decision's and the conditions' text, by
+a name bound like any input (``__mcdc_elem_g_a_2``), and clang checks on its own that the index text the source wrote is
+that element's (``_Static_assert((POS) == 2, …)``) — what is not independent: the element's type (the engine's
+resolution of the array's declaration) and which subscripts are element reads (the engine's `_array_name_node`).
 """
 from __future__ import annotations
 
@@ -149,23 +155,63 @@ def _path_claims(unit, report):
     return claims
 
 
+def _element_name(name):
+    """(R77) The name an element input ``g_a[2]`` is bound under in the harness."""
+    return "__mcdc_elem_" + name.replace("[", "_").replace("]", "")
+
+
+def _element_texts(text, report, elements):
+    """(R77) ``text`` with every read of an element in ``elements`` (``g_a[POS]`` → ``g_a[2]``) replaced by its bound name,
+    and the ``(index text, index)`` of each — the design's own reading of the subscripts (`generators.mcdc_design`)."""
+    from generators.mcdc_design import _array_name_node, _index_value, _walk
+    from workflow.code_parser.c_parser import _make_parser
+    prefix = b"int probe(void) { if ("
+    raw = prefix + text.encode() + b") return 1; return 0; }"
+    widths = (report.get("target") or {}).get("widths")
+    edits, indexes = [], []
+    for x in _walk(_make_parser().parse(raw).root_node):
+        if x.type != "subscript_expression" or (arg := _array_name_node(x)) is None:
+            continue
+        index = x.child_by_field_name("index")
+        k = _index_value(index, raw, report.get("constants") or {}, widths)
+        name = f"{raw[arg.start_byte:arg.end_byte].decode()}[{k}]"
+        if k is not None and name in elements:
+            edits.append((x.start_byte, x.end_byte, _element_name(name)))
+            indexes.append((raw[index.start_byte:index.end_byte].decode(), k))
+    out = raw
+    for start, end, new in sorted(edits, reverse=True):
+        out = out[:start] + new.encode() + out[end:]
+    return out[len(prefix):-len(b") return 1; return 0; }")].decode(), indexes
+
+
 def _checks(path, report):
     """(label, expression text, expected int) for every retained design claim of a decision."""
     domains = report["domains"]
     for decision in report["decisions"]:
         if decision.get("evaluation") == "source_path":
             continue  # reads a local / a rewritten input: checked by the function harness (`_path_claims`)
+        elements = set(decision.get("expression_elements") or ())
+        texts = [("decision", decision["expression"])] + [(c["condition_id"], c["expression"])
+                                                        for c in decision["conditions"]]
+        rewritten, index_claims = {}, []
+        for cid, text in texts:
+            rewritten[cid], found = _element_texts(text, report, elements) if elements else (text, [])
+            if cid == "decision":
+                index_claims = [(f"index:{t}", f"({t}) == {k}", 1) for t, k in dict.fromkeys(found)]
         for pair in decision.get("pairs") or []:
             for side in ("a", "b"):
                 inputs = pair[f"inputs_{side}"]
-                # An enum-typed input is bound as ``int`` (the engine's model of an enumeration object).
-                binds = [f"#define {n} (({'int' if (domains[n].get('ctype') or {}).get('enum') else domains[n]['type']})({v}))"
-                         for n, v in sorted(inputs.items()) if n in domains]
+                # An enum-typed input is bound as ``int`` (the engine's model of an enumeration object). (R77) An element
+                #   input is bound under its harness name where the decision reads it; the others have no name to bind.
+                bound = {(_element_name(n) if n in elements else n): (n, v) for n, v in sorted(inputs.items())
+                         if n in domains and ("[" not in n or n in elements)}
+                binds = [f"#define {b} (({'int' if (domains[n].get('ctype') or {}).get('enum') else domains[n]['type']})({v}))"
+                         for b, (n, v) in bound.items()]
                 label = f"{Path(path).name}:{report['function']}:{pair['pair_id']}:{side}"
-                exprs = [("decision", decision["expression"], int(pair[f"decision_{side}"]))]
+                exprs = [("decision", rewritten["decision"], int(pair[f"decision_{side}"]))]
                 for cond, truth in zip(decision["conditions"], pair[f"truth_{side}"], strict=True):
-                    exprs.append((cond["condition_id"], cond["expression"], int(truth)))
-                yield label, binds, exprs, list(inputs)
+                    exprs.append((cond["condition_id"], rewritten[cond["condition_id"]], int(truth)))
+                yield label, binds, exprs + index_claims, list(bound)
 
 
 def main():
@@ -195,34 +241,11 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         for path, (context, scope, entries) in by_unit.items():
             results["units"] += 1
-            lines = _prelude(context, scope)
-            index = {}
-            for label, binds, exprs, names in entries:
-                results["pairs_checked"] += 1
-                lines += binds
-                for cid, expr, expected in exprs:
-                    results["claims_checked"] += 1
-                    tag = f"C{len(index)}"
-                    index[tag] = {"claim": f"{label}:{cid}", "expected": expected, "expression": " ".join(expr.split())}
-                    lines += ["_Static_assert((", expr, f") == {expected}, \"{tag}\");"]
-                lines += [f"#undef {n}" for n in names]
-            # Self-check: one deliberately false claim per file. If the run does not report it, the failure
-            # parsing is broken and a real mismatch would pass silently — the unit counts as an oracle error.
-            lines += ["_Static_assert((", "1 + 1", ') == 3, "SENTINEL");']
-            src = Path(tmp) / (Path(path).stem + "_oracle.c")
-            src.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            proc = subprocess.run([args.clang, f"--target={args.target}", "-std=c11", "-fsyntax-only",
-                                   "-ferror-limit=0", "-Wno-everything", str(src)],
-                                  capture_output=True, text=True, timeout=300)
-            # clang: "error: static assertion failed due to requirement '...': C12" (message unquoted)
-            failed = set(re.findall(r"static assertion failed.*?:\s*(C\d+|SENTINEL)\s*$", proc.stderr, re.M))
-            if "SENTINEL" not in failed:
-                results["compile_errors"].append({"unit": Path(path).name, "errors": ["sentinel_not_reported"], "count": 1})
-            failed.discard("SENTINEL")
-            results["mismatches"] += [index[t] for t in sorted(failed, key=lambda x: int(x[1:]))]
-            other = [ln for ln in proc.stderr.splitlines() if "error:" in ln and "static assertion failed" not in ln]
-            if other:
-                results["compile_errors"].append({"unit": Path(path).name, "errors": other[:5], "count": len(other)})
+            results["pairs_checked"] += len(entries)
+            mismatches, errors, claims = check_unit(path, context, scope, entries, args.clang, args.target, tmp)
+            results["claims_checked"] += claims
+            results["mismatches"] += mismatches
+            results["compile_errors"] += errors
     if path_claims:
         from source_oracle_clang_check import check_claims
         keys = ("claims", "checked", "agree", "agree_with_stubbed_callees", "mismatch", "eval_error", "unchecked")

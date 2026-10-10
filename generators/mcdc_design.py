@@ -132,6 +132,19 @@ def _compile(node, raw, domains, constants=None, widths=None, types=None, paren_
                 values_seen.add(value)
                 return ("constant", value, constants[text]["type"] if widths else None)
             raise Unsupported("missing_declared_domain:" + text)
+        if n.type == "subscript_expression" and widths and (arg := _array_name_node(n)) is not None:
+            # (R77) an element at a constant index (``g_a[POS] == K``) is an input of its own name (``g_a[2]``) — when the
+            #   design gave that name a domain (`_element_domains`: a global array the unit models, bound at the decision —
+            #   `_element_binding_issue`); the index is no compared value
+            k = _index_value(n.child_by_field_name("index"), raw, constants, widths)
+            name = f"{_text(arg, raw)}[{k}]" if k is not None else ""
+            if name in domains:
+                variables.add(name)
+                t = domains[name].get("ctype")
+                if t is None:
+                    raise Unsupported("operand_c_type_unresolved:" + name)
+                return ("var", name, t)
+            raise Unsupported("unsupported_scalar:" + n.type)
         if n.type == "number_literal" and widths:
             value, t = lift(cpc.literal, text, widths)
             values_seen.add(value)
@@ -918,8 +931,11 @@ def _scoped_source_decisions(unit, scope, declared_domains):
     # Writes are kept with their position: only a write that can execute before an evaluation rebinds the input
     # (see `_rebinding_write`). The scope-less path keeps the whole-body set.
     mutated: set[str] = set()
+    stores = []   # (R77) every assignment / ``++`` · ``--`` with its target — judged once the locals are known
     for n in nodes:
         operand = n.child_by_field_name("left") if n.type == "assignment_expression" else n.child_by_field_name("argument")
+        if n.type in {"assignment_expression", "update_expression"} and operand is not None:
+            stores.append((n, operand))
         if n.type in {"assignment_expression", "update_expression"} or (n.type in {"unary_expression", "pointer_expression"} and _text(n, raw).lstrip().startswith("&")):
             if operand is not None:
                 for x in _walk(operand):
@@ -964,6 +980,12 @@ def _scoped_source_decisions(unit, scope, declared_domains):
                     record_writes(n.start_byte, n, macro_targets(name), cause="macro:" + name)
         if n.type in _LOOPS:
             extra["loops"].append((n.start_byte, n.end_byte))
+    # (R77) the stores that go through a pointer (``*p = …`` · ``p->a = …`` · ``p[i] = …`` on anything but an array object):
+    #   one may land in a global array — an array decays to a pointer wherever its name is a value (``f(g_a)``), which
+    #   ``&`` (`global_address_taken`) does not see
+    local_arrays = _local_array_names(body, raw)
+    named_arrays = (set(scope.get("arrays") or {}) - set(extra["params"]) - extra["locals"]) | local_arrays
+    extra["pointer_writes"] = [n for n, operand in stores if _store_through_pointer(operand, raw, named_arrays)]
     def decision_issue(n):
         return issue or ("conditional_compilation_unresolved" if (n.start_byte, n.end_byte, n.type) in undecided else "")
     found, seen = [], set()
@@ -1634,6 +1656,147 @@ def _read_element_names(body, raw, scope):
         if _element_input(scope, name) is not None:
             out.append(name)
     return list(dict.fromkeys(out))
+
+
+# (R77) the expression engine reads an element at a constant index of a global array the unit models as an input of its
+#   own name (``g_a[2]``) — R76's path group searched it with samples cut at the function's first 12 constants, so a
+#   chain of element comparisons (``g_a[POS0] == P0 && …``) never saw the constants it compares with. Off: R76 alone
+#   (tests of the path group set it)
+EXPRESSION_ELEMENTS = True
+
+
+def _element_domains(names, scope, unit):
+    """(R77) ``{name: domain}`` of the element inputs among ``names`` (``g_a[2]`` — `_element_input`: a global array of
+    known length, integer elements, not const, the index inside it); a volatile one is none (no input value is read)."""
+    out = {}
+    for name in names:
+        element = _element_input(scope, name)
+        if element is None or element[2]:
+            continue
+        try:
+            domain = _scope_domain(element[0], element[1], scope, "array_element_declaration", origin="global",
+                                   declared_at=f"{os.path.basename(str(element[3].get('file') or ''))}:"
+                                               f"{element[3].get('line', '')}")
+        except cpc.Unresolved:
+            continue
+        _apply_design_range(unit, name, domain)
+        out[name] = domain
+    return out
+
+
+def _decision_element_names(node, raw, scope, shadowed):
+    """(R77) The constant-index element reads of a decision (``g_a[POS]`` → ``g_a[2]``) on arrays no parameter or local
+    hides, in order."""
+    constants = (scope or {}).get("constants")
+    widths = ((scope or {}).get("target") or {}).get("widths") or None
+    out = []
+    for x in _walk(node):
+        if x.type != "subscript_expression" or (arg := _array_name_node(x)) is None or _text(arg, raw) in shadowed:
+            continue
+        k = _index_value(x.child_by_field_name("index"), raw, constants, widths)
+        if k is not None:
+            out.append(f"{_text(arg, raw)}[{k}]")
+    return list(dict.fromkeys(out))
+
+
+def _store_through_pointer(target, raw, named_arrays):
+    """(R77) Whether a store's target goes through a pointer — ``*p`` · ``p->a`` · ``p[i]`` where ``p`` is no array
+    object (``named_arrays``: the global arrays no parameter or local hides, the local arrays) · anything not a named
+    object (a cast, a call's value); ``a[i]`` · ``a[i][j]`` · ``s.b[i]`` · ``x`` store into a named object."""
+    n = target
+    while n is not None:
+        while n.type == "parenthesized_expression" and len(n.named_children) == 1:
+            n = n.named_children[0]
+        if n.type == "identifier":
+            return False
+        if n.type == "field_expression":
+            if any(c.type == "->" for c in n.children):
+                return True
+            n = n.child_by_field_name("argument")
+            continue
+        if n.type == "subscript_expression":
+            arg = n.child_by_field_name("argument")
+            while arg is not None and arg.type == "parenthesized_expression" and len(arg.named_children) == 1:
+                arg = arg.named_children[0]
+            if arg is not None and arg.type == "identifier":
+                return _text(arg, raw) not in named_arrays
+            n = arg
+            continue
+        return True
+    return True
+
+
+_INTEGER_ARGUMENT_NODES = frozenset({"number_literal", "char_literal", "binary_expression", "unary_expression",
+                                     "parenthesized_expression", "conditional_expression", "comment", "true", "false"})
+
+
+def _pointer_free_arguments(call, raw, domains, constants, arrays):
+    """(R77) Whether every argument of a call is an integer value no pointer can come from — literals, the unit's
+    constants, inputs with an integer domain, elements of integer arrays (``b[i]``), their arithmetic and casts to
+    non-pointer types. A stub of the callee (the row may stub it) may write through an argument that is a pointer."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return True
+    stack = [c for c in args.named_children]
+    while stack:
+        x = stack.pop()
+        if x.type == "sizeof_expression":
+            continue   # (C11 6.5.3.4p2) not evaluated: an integer
+        if x.type == "unary_expression" and _text(x.child_by_field_name("operator"), raw) in {"&", "*"}:
+            return False
+        if x.type == "identifier" or cpc.is_name_node(x):
+            name = _text(x, raw)
+            if name not in constants and name not in domains:
+                return False
+            continue
+        if x.type == "subscript_expression":
+            arg = _array_name_node(x)
+            rec = arrays.get(_text(arg, raw)) if arg is not None else None
+            if not (isinstance(rec, dict) and isinstance(rec.get("type"), dict)):
+                return False
+            stack.append(x.child_by_field_name("index"))
+            continue
+        if x.type == "cast_expression":
+            t = x.child_by_field_name("type")
+            if t is None or any(c.type == "abstract_pointer_declarator" for c in _walk(t)):
+                return False
+            stack.append(x.child_by_field_name("value"))
+            continue
+        if x.type not in _INTEGER_ARGUMENT_NODES:
+            return False
+        stack.extend(c for c in x.named_children if c.type != "comment")
+    return True
+
+
+def _element_binding_issue(array, decision, raw, extra, domains, constants):
+    """(R77) Reason the elements of global ``array`` the decision reads may hold, there, other values than the row set at
+    function entry, or ``""`` — what binds a scalar global (`_rebinding_write` · `_global_binding_issue`: a write in the
+    body, ``&`` anywhere, a callee's write, unknown code) and, since an array's name is a pointer wherever it is a value:
+    a store through a pointer, a callee whose closure writes through one, a call passing an argument that may be a
+    pointer (a stub of it may write there), a macro or unknown expansion that writes — any of these that can run
+    before the evaluation (`_may_precede`). Conservative: which object such a write reaches is not asked."""
+    if reason := _rebinding_write(array, decision, extra):
+        return reason
+    if reason := _global_binding_issue(array, decision, extra):
+        return reason
+    why = "array_element_binding_unverified:" + array + ":"
+    for node in extra.get("pointer_writes") or ():
+        if _may_precede(node, decision, extra):
+            return why + "pointer_store"
+    for _pos, _target, node, cause in extra.get("writes") or ():
+        if cause and _may_precede(node, decision, extra):
+            return why + cause
+    scope = extra.get("scope") or {}
+    functions = (extra.get("effects") or {}).get("functions") or {}
+    arrays = scope.get("arrays") or {}
+    for _pos, callee, call in extra.get("calls") or ():
+        if not _may_precede(call, decision, extra):
+            continue
+        if (functions.get(callee) or {}).get("pointer_write"):
+            return why + "callee_pointer_write:" + callee
+        if call.type == "call_expression" and not _pointer_free_arguments(call, raw, domains, constants, arrays):
+            return why + "call_argument:" + callee
+    return ""
 
 
 def _path_ir(node, raw, atoms):
@@ -2611,6 +2774,20 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
     # the domains emitted identical `{}` rows and misreported every pair as truncated). Only direct callers without
     # an input list (inventory scripts) take the resolved domains as the row.
     row_names = list(unit["input_vars"] or []) if "input_vars" in unit else list(domains)
+    # (R77) the element inputs the expression engine may read — the row's element columns (``g_a[2]``) and, without a
+    #   row (inventory · oracle), the constant-index elements the decisions read: a domain each, kept apart from
+    #   ``domains`` (the path groups start from those — an element there joined every group's search, R74), on arrays no
+    #   parameter or local of the function hides
+    shadowed = set(extra.get("params") or ()) | set(extra.get("locals") or ())
+    element_pool: dict = {}
+    if EXPRESSION_ELEMENTS and widths and scope:
+        pool = [n for n in row_names if _ELEMENT_INPUT_RE.fullmatch(str(n).strip())]
+        if unit.get("mcdc_free_globals"):
+            pool += [n for f_node, f_raw, *_rest in found if f_node is not None
+                     for n in _decision_element_names(f_node, f_raw, scope, shadowed)]
+        element_pool = _element_domains([n for n in dict.fromkeys(pool) if n.split("[", 1)[0] not in shadowed],
+                                        scope, unit)
+    element_used: dict = {}   # the element domains the expression designs' vectors set — into the report's domains
     selected = {}
     # (R72) the constructively paired decisions' vectors — appended after every other vector (rows · slots unchanged)
     wide_selected: dict = {}
@@ -2626,6 +2803,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                     "reason": context_issue, "conditions": [], "pairs": [],
                     "candidate_count": 0, "search_complete": False, "execution_status": "not_run", "reachability": "unverified"}
         report["decisions"].append(decision)
+        elements: set = set()   # (R77) set where the decision compiles — a refusal before that is R76's as it was
+        before = None
         if only_occurrences is not None and kind != "unenumerated" and decision["occurrence_id"] not in only_occurrences:
             decision["status"], decision["reason"] = "not_requested", "not_requested"
             continue
@@ -2657,9 +2836,15 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 # ``sizeof((a > 3U) && (b == 1U))`` is never evaluated (C11 6.5.3.4p2), ``case (A && B):`` is folded
                 # by the compiler — not decisions of the run (R2c review rounds 2 N-W3 / 3 W1 W2 I1)
                 raise Unsupported(not_run)
+            # (R77) a decision reading a pooled element compiles with the element inputs; refused, it is restored to
+            #   what it was here and refused with R76's reason (`elements` below)
+            elements = {n for n in _decision_element_names(node, raw, scope, shadowed) if n in element_pool} \
+                if element_pool else set()
+            dom = {**domains, **element_pool} if elements else domains
+            before = (dict(decision), dict(report["constants"]), dict(report["types"]))
             try:
                 ir, atoms, variables, constants = _compile(
-                    node, raw, domains, constants_map, widths, cast_type if scope else None,
+                    node, raw, dom, constants_map, widths, cast_type if scope else None,
                     paren_cast=(lambda x: cast_unary_operand(x, raw, scope)) if scope else None)
             except Unsupported as exc:
                 if extra and str(exc).startswith("missing_declared_domain:"):
@@ -2670,13 +2855,15 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 # (R35) the same names ``_compile`` read: ``TRUE``/``FALSE`` are ``true``/``false`` nodes, and
                 #   ``finalize_mcdc_design`` re-evaluates the pairs with exactly these constants
                 name = _text(x, raw) if cpc.is_name_node(x) else ""
-                if name in constants_map and name not in domains:
+                if name in constants_map and name not in dom:
                     c = constants_map[name]
                     report["constants"][name] = {"value": c["value"], "type": c["type"], "kind": c.get("kind", ""),
                                                  "declared_at": f"{os.path.basename(c.get('file', ''))}:{c.get('line', '')}"}
             if set(variables) & mutated:
                 raise Unsupported("input_binding_modified_or_shadowed")
             for name in variables if extra else []:
+                if name in elements:
+                    continue   # (R77) judged by its array below
                 if name in extra["params"] and name in extra["locals"]:
                     # A block-scope declaration reuses the parameter's name: which object the decision reads depends
                     # on scopes this engine does not track (review C3g, MISRA 5.3).
@@ -2685,16 +2872,19 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                     raise Unsupported(reason)
                 if name not in extra["params"] and (reason := _global_binding_issue(name, node, extra)):
                     raise Unsupported(reason)
+            for array in dict.fromkeys(v.split("[", 1)[0] for v in variables if v in elements):
+                if reason := _element_binding_issue(array, node, raw, extra, dom, constants_map):
+                    raise Unsupported(reason)
             # An input the decision does not read cannot change its outcome: a missing domain for it (pointer, array,
             # struct) no longer blocks the decision (R80 carry-over — one pointer parameter blocked every decision of
             # the function). The vector leaves it unset and says so; the row shows a blank cell, never a guess.
-            if not_designed := sorted(set(row_names) - set(domains)):
+            if not_designed := sorted(set(row_names) - set(dom)):
                 decision["inputs_not_designed"] = not_designed
             # Globals resolved from their declaration may join the vector only where no fixed row exists (inventory /
             # oracle). A SUTS row renders the unit's input columns only: a global outside them would be a hidden input
             # (R80 review W5; the exporter reports it as `stale_mcdc_pair_input`) — the UDS input list omits it.
             engine_globals = [v for v in variables if v not in row_names and unit.get("mcdc_free_globals")
-                              and domains[v].get("source") == "global_declaration"]
+                              and dom[v].get("source") in ("global_declaration", "array_element_declaration")]
             if missing := sorted(set(variables) - set(row_names) - set(engine_globals)):
                 # The row cannot set this variable (not a unit input — cap or I/O renaming): a pair designed on it
                 # would be emitted without its deciding value and then misreported as truncated (R80 review W5).
@@ -2726,8 +2916,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             #   (``domain_exhaustive`` compares with ``max - min + 1`` and is false for those)
             decision["values_sampled"] = False
             for name in variables:
-                lo, hi = domains[name]["min"], domains[name]["max"]
-                if domain_values := domains[name].get("values"):
+                lo, hi = dom[name]["min"], dom[name]["max"]
+                if domain_values := dom[name].get("values"):
                     sample = list(domain_values)
                 elif hi - lo <= 15:
                     sample = list(range(lo, hi + 1))
@@ -2737,9 +2927,14 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
                 values.append(sample)
             size = math.prod(len(v) for v in values)
             decision["candidate_space_size"] = size
-            decision["domain_exhaustive"] = all(len(values[i]) == domains[name]["max"] - domains[name]["min"] + 1 for i, name in enumerate(variables))
+            decision["domain_exhaustive"] = all(len(values[i]) == dom[name]["max"] - dom[name]["min"] + 1 for i, name in enumerate(variables))
             by_signature, pairs = {}, {}
-            defaults = {name: _default_value(domains[name]) for name in [*row_names, *engine_globals] if name in domains}
+            defaults = {name: _default_value(dom[name]) for name in [*row_names, *engine_globals] if name in dom}
+            if elements:
+                # (R77) the expression design reads these elements as inputs — the report keeps their domains (finalize
+                #   re-evaluates with them) and the summary counts the decision
+                decision["expression_elements"] = sorted(v for v in variables if v in elements)
+                element_used.update((n, dom[n]) for n in defaults if n in element_pool)
             ub_skipped = [0]
             if wide:
                 pairs, decision["search_complete"], decision["candidate_count"] = _wide_pairs(
@@ -2813,6 +3008,26 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             else:
                 decision["reason"] = "no_pair_in_candidate_domain" if decision["search_complete"] else "candidate_budget_exhausted"
         except (Unsupported, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
+            if node is not None and elements and before is not None:
+                # (R77) the expression engine took the decision's elements and still refused it: it goes where R76 sent
+                #   it, with R76's reason — the first refusal without element inputs (a subscript, or a name before it) —
+                #   so the path groups' decisions, rows and budgets stay what they were; the expression engine's own
+                #   reason is kept beside it
+                decision.clear()
+                decision.update(before[0])
+                report["constants"].clear()
+                report["constants"].update(before[1])
+                report["types"].clear()
+                report["types"].update(before[2])
+                decision["element_expression_reason"] = str(exc)
+                try:
+                    _compile(node, raw, domains, constants_map, widths, cast_type if scope else None,
+                             paren_cast=(lambda x: cast_unary_operand(x, raw, scope)) if scope else None)
+                except Unsupported as r76:
+                    exc = Unsupported(_identifier_reason(str(r76).split(":", 1)[1], extra)
+                                      if extra and str(r76).startswith("missing_declared_domain:") else str(r76))
+                except (ValueError, KeyError, TypeError, AttributeError, RecursionError) as r76:
+                    exc = r76
             decision["reason"] = str(exc)
             fn_name = str(unit.get("name") or "")
             group = None
@@ -2907,6 +3122,8 @@ def build_mcdc_design(unit: dict[str, Any], *, max_candidates: int = 4096, max_c
             for decision, _node, _raw in path_candidates:
                 if decision.get("evaluation") != "source_path":
                     _refuse_path(decision, f"path_design_exception:{type(exc).__name__}")
+    for name, domain in element_used.items():
+        report["domains"].setdefault(name, domain)   # (R77) after the path groups: none of them starts from these
     wide_vectors = 0
     for key, vector in wide_selected.items():
         if key not in selected:   # (R72) after every other vector

@@ -1123,9 +1123,21 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                "널 아닌 객체로 본다: 그래서 널 검사(`p != NULL`)는 모든 행에서 한쪽이라 짝이 없다. 식 엔진이 다른 이유"
                "(지역 변수·조건 안 호출)로 먼저 거부한 결정은 그 이유의 탐색으로 가며 대상 입력을 설정하지 않는다)."
                if _int(mc, "pointee_condition_decisions") else "")
+            # (R77) the expression engine reads a constant-index element of a modeled global array as an input itself
+            + (f" 상수 첨자로 읽는 전역 배열 원소(`g_a[POS]` — 입력 이름은 정본 표기 `g_a[2]`)의 조건이 있는 결정 "
+               f"{_show(_int(mc, 'element_expression_decisions'))} 은 식 엔진이 원소를 입력으로 읽어 설계했다(설계 "
+               f"{_show(_int(mc, 'element_expression_designed'))} — 길이를 아는 1 차원 정수 배열 · 길이 안 상수 첨자만, "
+               "첨자 값은 비교 값이 아니다. 결합은 스칼라 전역과 같이 보되(결정 앞의 쓰기 · `&` · 피호출의 쓰기 · 알 수 없는 "
+               "코드) 배열 이름은 값으로 쓰이면 포인터라, 결정 앞에서 실행될 수 있는 포인터를 거친 쓰기 · 포인터 쓰기가 있는 "
+               "피호출 · 포인터일 수 있는 인자를 넘기는 호출(행이 그 피호출을 stub 하면 그 인자로 값을 써 넣을 수 있다) · "
+               "쓰는 매크로가 하나라도 있으면, 또 그 배열의 어느 원소든 결정 앞에서 쓰이면 증명하지 못한 것으로 본다"
+               + (f": 그렇게 식 엔진이 받지 못한 결정 {_show(_int(mc, 'element_expression_refused'))} 은 R76 과 같은 사유 · "
+                  "같은 탐색으로 갔다" if _int(mc, "element_expression_refused") else "")
+               + ")."
+               if (_int(mc, "element_expression_decisions") or _int(mc, "element_expression_refused")) else "")
             # (R76) conditions on array elements: a global array's element is an input of its own name (``g_a[1]``)
-            + (f" 배열 원소(`g_a[1]` — 정본 표기와 같은 입력 이름)를 읽는 조건의 결정 "
-               f"{_show(_int(mc, 'element_condition_decisions'))} 도 따로, 별도 예산으로 탐색했다(설계 "
+            + (f" 배열 원소(`g_a[1]` — 정본 표기와 같은 입력 이름)를 읽는 조건의 결정 중 식 엔진이 받지 않은 "
+               f"{_show(_int(mc, 'element_condition_decisions'))} 은 따로, 별도 예산으로 탐색했다(설계 "
                f"{_show(_int(mc, 'element_condition_designed'))} — 전역 배열의 원소는 행이 설정한 값, const 표의 원소는 그 "
                "표의 값, 첨자는 실행이 정한 값으로 읽는다: 매개변수를 거친 원소 · 다차원 배열 · 길이를 모르는 배열 · 포인터 "
                "변수(지역 포인터 포함) · 매크로 이름으로 쓴 배열의 첨자와, 멤버 접근(`g.a` · `p->a`)이나 `*p` 가 함께 있는 "

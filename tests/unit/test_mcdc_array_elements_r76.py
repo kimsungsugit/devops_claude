@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from generators import c_project_context as cpc
 from generators import c_source_oracle as cso
 from generators import mcdc_design as md
@@ -89,6 +91,14 @@ void big(void) {
 """
 PART = [f"g_part[{k}]" for k in range(4)]
 HIS = [f"g_his[{k}]" for k in range(3)]
+
+
+@pytest.fixture(autouse=True)
+def _path_group_only(monkeypatch):
+    """(R77) The expression engine now reads a constant-index element of a modeled global array itself
+    (`test_mcdc_expression_elements_r77`); these tests are about the path group, which keeps the decisions the expression
+    engine cannot bind — R76's behaviour exactly, with the expression engine's element reading off."""
+    monkeypatch.setattr(md, "EXPRESSION_ELEMENTS", False)
 
 
 def _unit(name, inputs, free_globals=False):
