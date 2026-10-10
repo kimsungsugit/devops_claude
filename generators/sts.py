@@ -397,7 +397,25 @@ def _load_uds_descriptions(uds_path: str) -> Dict[str, str]:
     p = Path(uds_path)
     if not p.exists():
         return {}
+    if p.suffix.lower() == ".docx":
+        # (R75) python-docx 문서 그래프는 순환 참조라 반환해도 남는다(KJPDS02_PV SwUDS 1.2 GB) — 읽은 프레임이 끝난 뒤 거둔다
+        from report_gen.uds_related import collect_docx_garbage
+        try:
+            return _uds_descriptions(p)
+        except Exception as exc:
+            # (R75 리뷰 I1) 올라가는 예외의 traceback 이 판독 프레임(문서)을 쥐면 수집이 헛돈다 — 프레임 지역만 비운다
+            #   (줄 정보는 남는다). python-docx 는 병합이 어긋난 표의 `row.cells` 에서 ValueError 를 낸다. 처리기 안에서
+            #   다시 올린 연쇄 예외(`__context__`)의 더 깊은 프레임은 범위 밖 — python-docx 의 알려진 raise 는 일반 raise 다
+            import traceback
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            collect_docx_garbage()
+    return _uds_descriptions(p)
 
+
+def _uds_descriptions(p: Path) -> Dict[str, str]:
+    """`_load_uds_descriptions` 의 판독 — python-docx 객체는 이 프레임의 지역으로만 둔다(반환하면 거둘 수 있다)."""
     result: Dict[str, str] = {}
     suffix = p.suffix.lower()
 
