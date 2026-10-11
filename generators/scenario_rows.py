@@ -22,19 +22,42 @@ the type's ends; it stops at a local best (counted, never a proof). No mutant is
 sequences whose expected values the same oracle derives afterwards (`test_evidence.apply_sequence_evidence`); the SUTS
 boundary (R15) and robustness (R31) searches take them as **added** bases after their own.
 
+(R79) Reaching a statement is not yet seeing a fault in it. Of the 22 mutants only the reference still killed after
+R78 (HDPDM01), 18 sat where a generated row ran — on values where the fault changes nothing: a comparison never
+evaluated with its two sides equal (``Tm > TIME`` after ``Tm++`` met with 0 and 32767, the reference has TIME - 1), an
+assignment that writes the value already there (a timer cleared while 0, two stubs both returning 127), an arithmetic
+operator on an operand that hides it (``x * 5 / 100`` with x = 10 is 0; ``145 / -50`` and ``145 / -51`` are both -2).
+After the reach targets, each function also gets *fault-exposing* targets, searched the same way on their own budget
+and row cap: a relational condition evaluated with equal sides while it decides its decision's outcome (boundary
+values at the point of use); an assignment executed replacing a different value; an arithmetic operator with a
+non-zero right operand (``+`` ``-``), no zero operand (``*``), a dividend at a non-zero multiple of the divisor (``/``
+``%`` — the quotient's step). The model records the operands and the replaced values as it runs
+(`observe_decisions(operands=, writes=)`); the climb adds a secant step — the value of one input that brings the watched
+quantity to what the target needs, from its change over one probe move (``Tm`` 0 → 19, ``x`` 10 → 20, 145 → 150).
+These are test-design criteria (boundary values, data-flow writes, operand values), not mutants: no mutant is
+generated or consulted.
+
 Budgets per function (runs · interpreter steps · rows · candidates per input · climb moves · climb starts) are counted
 in the report when they cut.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from generators import c_project_context as cpc
 from generators import mcdc_design as md
 from generators.boundary_rows import _as_int
-from generators.c_source_oracle import Unsupported, _parsed_function, observe_decisions, scope_matches
+from generators.c_source_oracle import (
+    Unsupported,
+    _parsed_function,
+    cast_unary_operand,
+    observe_decisions,
+    scope_matches,
+)
 
+_log = logging.getLogger(__name__)
 SCENARIO_PREFIX = "SCN_"
 SCENARIO_FI_PREFIX = "SCNR_"   # a scenario only values outside the design range reach (FI — the SUTS caller's second search)
 MAX_ROWS = 16            # scenario rows per function and search
@@ -44,7 +67,14 @@ MAX_POOL = 12            # candidate values per input
 MAX_STARTS = 24          # existing rows tried as climb starts
 MAX_CLIMB = 24           # moves per climb
 MAX_ATOMS = 16           # conditions of a control condition read as sub-conditions (more: outcome only)
+MAX_EXPOSE_ROWS = 16     # (R79) fault-exposing rows per function and search
+MAX_EXPOSE_RUNS = 800    # (R79) their own oracle runs per function and search, after the reach targets'
+MAX_EXPOSE_STEPS = 1_500_000
 _FREE_SPAN = 80
+_RELATIONAL = {"<", "<=", ">", ">="}
+_ARITH = {"+", "-", "*", "/", "%"}
+EXPOSE_KINDS = ("boundary", "write", "arith")
+_FAR = 10 ** 9
 
 
 def _free_value(i: int) -> int:
@@ -257,6 +287,87 @@ def _key(node) -> tuple:
     return (node.start_byte, node.end_byte, node.type)
 
 
+def _operator(node, raw) -> str:
+    op = node.child_by_field_name("operator")
+    return md._text(op, raw) if op is not None else ""
+
+
+def _reads_a_variable(node, raw, constants) -> bool:
+    """(R79 review I5) The expression reads something a row can set: a name that is no integer macro / enumerator
+    (``NUM_CH > 2U`` and ``MAX * 10U`` are fixed), or a call's value (a stub input)."""
+    for x in md._walk(node):
+        if x.type != "identifier":
+            continue
+        parent = x.parent
+        if parent is not None and parent.type == "call_expression" and parent.child_by_field_name("function") == x:
+            return True
+        if md._text(x, raw) not in constants:
+            return True
+    return False
+
+
+def _nondegenerate(op, rec) -> bool:
+    """(R79) Operands on which a fault in the operator shows: a non-zero right operand of ``+`` ``-`` (``x - 0`` is
+    ``x + 0``), no zero operand of ``*``, a dividend at a non-zero multiple of the divisor of ``/`` ``%`` (``100 / 50``
+    is not ``100 / 51``; ``145 / 50`` is ``145 / 51``)."""
+    left, right = rec
+    if left is None or right is None:
+        return False
+    if op in ("/", "%"):
+        return right != 0 and left != 0 and left % right == 0
+    if op == "*":
+        return left != 0 and right != 0
+    return right != 0
+
+
+def _arith_gap(op, rec) -> int:
+    """(R79) How far one evaluation is from `_nondegenerate` — for ``/`` ``%`` the distance to the nearest non-zero
+    multiple of the divisor."""
+    left, right = rec
+    if left is None or right is None:
+        return _FAR
+    if op in ("/", "%"):
+        if right == 0:
+            return _FAR
+        d, a = abs(right), abs(left)
+        if a < d:
+            return d - a
+        m = a % d
+        return min(m, d - m)
+    if op == "*":
+        return int(left == 0) + int(right == 0)
+    return int(right == 0)
+
+
+def _multiple_near(left, right):
+    """(R79) The non-zero multiple of ``right`` nearest ``left`` (on the side of ``left``)."""
+    d = abs(right)
+    k = max(1, round(abs(left) / d))
+    return k * d if left >= 0 else -k * d
+
+
+def _conditionally_evaluated(x, holder, raw) -> bool:
+    """(R79 review W-R3-1) ``x`` sits under a part its statement evaluates on some runs only — a ``?:`` arm, the right
+    side of ``&&`` / ``||``: no record yet is no proof the model cannot record it."""
+    child, node = x, x.parent
+    while node is not None and node != holder:
+        if node.type == "conditional_expression" and child != node.child_by_field_name("condition"):
+            return True
+        if node.type == "binary_expression" and _operator(node, raw) in ("&&", "||") and \
+                child == node.child_by_field_name("right"):
+            return True
+        child, node = node, node.parent
+    return False
+
+
+def _records(r, field, index, path=None, size=2) -> list:
+    """(R79) The watched evaluations of one operator / assignment on a run (one path, or all): pairs, or for
+    ``decides`` the ``(left, right, decides)`` triples."""
+    seq = (r.get(field) or {}).get(index) or []
+    paths = [seq[path]] if path is not None and path < len(seq) else ([] if path is not None else seq)
+    return [x for p in paths for x in (p or ()) if isinstance(x, (tuple, list)) and len(x) == size]
+
+
 def _line_text(node, raw) -> str:
     return " ".join(md._text(node, raw).split())[:80]
 
@@ -264,7 +375,7 @@ def _line_text(node, raw) -> str:
 def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[str],
                    existing: list[dict[str, Any]] | None = None,
                    covered: list[dict[str, Any]] | None = None,
-                   home: dict[str, tuple] | None = None) -> dict[str, Any]:
+                   home: dict[str, tuple] | None = None, expose: bool = True) -> dict[str, Any]:
     """``{"rows": [{"inputs", "target_kind", "target_line", "target_text", "target_outcome", "targets_reached",
     "outputs_derived"}], "reached_vectors": [...], "report": {...}}``.
 
@@ -285,7 +396,13 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
               "reached_unclean_only": 0, "not_reached": 0, "local_best": 0, "climb_cap": 0, "budget_cut": 0,
               "runs": 0, "steps": 0, "rows": 0, "cut": 0, "duplicates": 0, "budget_exhausted": False,
               "pools_capped": 0, "inputs": 0, "covered_before": 0, "starts_capped": 0, "conditions_outcome_only": 0,
-              "needed_inputs": {}, "inputs_needed": 0}
+              "needed_inputs": {}, "inputs_needed": 0,
+              # (R79) fault-exposing targets: counted apart (their own budget · rows)
+              "expose_targets": 0, "expose_boundary": 0, "expose_write": 0, "expose_arith": 0,
+              "expose_covered_before": 0, "expose_reached": 0, "expose_rows": 0, "expose_not_reached": 0,
+              "expose_cut": 0, "expose_unmodeled": 0, "expose_local_best": 0, "expose_budget_cut": 0,
+              "expose_budget_exhausted": False, "expose_runs": 0, "expose_steps": 0, "expose_duplicates": 0,
+              "reached_by_exposing_rows": 0, "expose_refused": 0, "expose_error_cut": 0, "expose_met_by_reach_rows": 0}
     empty: dict[str, Any] = {"rows": [], "reached_vectors": []}
     if not unit.get("source_text") or not scope_matches(unit):
         return {**empty, "report": {**report, "status": "no_project_scope"}}
@@ -320,7 +437,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     watch = list({_key(n): n for n in statements + entries}.values())
     watch_index = {_key(n): i for i, n in enumerate(watch)}
     cond_index = {_key(c): i for i, c in enumerate(conds)}
-    specs, spec_of = [], {}
+    specs, spec_of, spec_atoms = [], {}, []
     for c in conds:
         atoms: list = []
         try:
@@ -333,6 +450,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             continue
         spec_of[_key(c)] = (len(specs), ir)
         specs.append({"key": list(_key(c)), "atoms": [list(_key(a)) for a in atoms], "ir": ir})
+        spec_atoms.append(atoms)
     targets = []   # (kind, node, chain, final) — final: ("reach", watch i) or ("guard", cond i, outcome)
     for s in statements:
         targets.append(("statement", s, md.control_steps(s, cases=True), ("reach", watch_index[_key(s)])))
@@ -343,6 +461,48 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     report.update(targets=len(targets), statements=len(statements), branches=2 * len(conds))
     if not targets:
         return {**empty, "report": {**report, "status": "no_targets"}}
+    # (R79) fault-exposing targets — searched after every reach target, on their own budget and row cap; ``expose``
+    #   False leaves them out (the SUTS second search over widened domains — review R79 W3: its rows are FI rows)
+    n_reach = len(targets)
+    constants = scope.get("constants") if isinstance(scope.get("constants"), dict) else {}
+    operand_nodes: list = []
+    write_nodes: list = []
+    spec_cond = {}
+    for c in conds if expose else ():
+        got = spec_of.get(_key(c))
+        if got is None:
+            continue
+        spec_cond[got[0]] = c
+        for ai, a in enumerate(spec_atoms[got[0]]):
+            if a.type == "binary_expression" and _operator(a, raw) in _RELATIONAL and \
+                    _reads_a_variable(a, raw, constants):
+                targets.append(("boundary", a, md.control_steps(c.parent, cases=True),
+                                ("bound", len(operand_nodes), got[0], ai)))
+                operand_nodes.append(a)
+    for s in statements if expose else ():
+        e = next((x for x in s.named_children if x.type != "comment"), None)
+        if s.type == "expression_statement" and e is not None and e.type == "assignment_expression" and \
+                _operator(e, raw) == "=":
+            targets.append(("write", s, md.control_steps(s, cases=True), ("write", len(write_nodes))))
+            write_nodes.append(e)
+    seen_ops: set = set()
+    holder_of: dict = {}   # arith operand index → the watched statement holding it (None in a condition)
+    for holder, at in ([(s, s) for s in statements] + [(c, c.parent) for c in conds]) if expose else ():
+        for x in md._walk(holder):
+            if x.type == "binary_expression" and _key(x) not in seen_ops and \
+                    (op := _operator(x, raw)) in _ARITH and _reads_a_variable(x, raw, constants) and \
+                    cast_unary_operand(x, raw, scope) is None:   # (review R79 I-R3-2) ``(S16)-1800`` is a cast
+                seen_ops.add(_key(x))
+                holder_of[len(operand_nodes)] = None if _conditionally_evaluated(x, holder, raw) else \
+                    watch_index.get(_key(holder))
+                targets.append(("arith", x, md.control_steps(at, cases=True), ("arith", len(operand_nodes), op)))
+                operand_nodes.append(x)
+    report.update(expose_targets=len(targets) - n_reach,
+                  expose_boundary=sum(1 for t in targets[n_reach:] if t[0] == "boundary"),
+                  expose_write=sum(1 for t in targets[n_reach:] if t[0] == "write"),
+                  expose_arith=sum(1 for t in targets[n_reach:] if t[0] == "arith"))
+    operand_keys = [list(_key(n)) for n in operand_nodes]
+    write_keys = [list(_key(n)) for n in write_nodes]
 
     inputs = list(doms)
     report["inputs"] = len(inputs)
@@ -368,25 +528,28 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         return tuple(sorted(v.items()))
 
     run_budget: list = [(0, 0)]   # runs · steps that do not count (the covered rows' check); None while it runs
+    limits = [MAX_RUNS, MAX_STEPS]   # (R79) the phase's: the reach targets', then the fault-exposing targets'
+    flag = ["budget_exhausted"]
 
     def exhausted() -> bool:
         if run_budget[0] is None:
             return False
-        return len(cache) - run_budget[0][0] >= MAX_RUNS or spent[0] - run_budget[0][1] >= MAX_STEPS
+        return len(cache) - run_budget[0][0] >= limits[0] or spent[0] - run_budget[0][1] >= limits[1]
 
     def run(vectors: list[dict[str, int]]) -> None:
         todo = list({vkey(v): v for v in vectors if vkey(v) not in cache}.values())
         try:
             for start in range(0, len(todo), 16):
                 if exhausted():
-                    report["budget_exhausted"] = True
+                    report[flag[0]] = True
                     return
                 runs_left, steps_left = ((16, None) if run_budget[0] is None else
-                                         (MAX_RUNS - (len(cache) - run_budget[0][0]),
-                                          max(0, MAX_STEPS - (spent[0] - run_budget[0][1]))))
+                                         (limits[0] - (len(cache) - run_budget[0][0]),
+                                          max(0, limits[1] - (spent[0] - run_budget[0][1]))))
                 chunk = todo[start:start + min(16, runs_left)]
                 results = observe_decisions(unit, chunk, specs, guards, step_limit=steps_left,
-                                            reach=reach_keys, outputs=list(outputs))
+                                            reach=reach_keys, outputs=list(outputs), operands=operand_keys,
+                                            writes=write_keys)
                 for v, r in zip(chunk, results, strict=True):
                     cache[vkey(v)] = r
                     spent[0] += int(r.get("steps") or 0)
@@ -399,6 +562,13 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     def event(r, step, path) -> bool:
         """Does path ``path`` of run ``r`` satisfy one control step / final event?"""
         kind = step[0]
+        if kind == "bound":
+            # (R79 review W1) on one evaluation: the two sides equal and the condition deciding the outcome
+            return any(a is not None and a == b and d for a, b, d in _records(r, "decides", step[1], path, 3))
+        if kind == "arith":
+            return any(_nondegenerate(step[2], x) for x in _records(r, "operands", step[1], path))
+        if kind == "write":
+            return any(a is not None and b is not None and a != b for a, b in _records(r, "writes", step[1], path))
         if kind == "guard":
             i = cond_index.get(_key(step[1])) if not isinstance(step[1], int) else step[1]
             seq = (r.get("guards") or {}).get(i) or []
@@ -419,6 +589,12 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         final = target[3]
         if r.get("status") != "supported":
             return False
+        if final[0] == "bound":
+            return bool(_records(r, "decides", final[1], size=3)) or bool(_records(r, "operands", final[1]))
+        if final[0] == "arith":
+            return bool(_records(r, "operands", final[1]))
+        if final[0] == "write":
+            return bool(_records(r, "writes", final[1]))
         if final[0] == "reach":
             return any(p for p in ((r.get("reach") or {}).get(final[1]) or []))
         return any(final[2] in p or None in p for p in ((r.get("guards") or {}).get(final[1]) or []))
@@ -476,17 +652,98 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                                                            if o}) for inst in obs["instances"])
             elif got:
                 distance = len(specs[got[0]]["atoms"]) + 1
+        elif blocking is not None and blocking[0] in ("bound", "arith", "write"):
+            distance = exposure_gap(r, blocking)
         return (False, depth, -distance)
+
+    def exposure_gap(r, final) -> int:
+        """(R79) How far a run that gets to a fault-exposing target is from it: the sides' difference, the operands'
+        distance from non-degenerate, a write of the same value (1) or of an unknown one (2)."""
+        if final[0] == "write":
+            recs = _records(r, "writes", final[1])
+            if any(a is not None and b is not None for a, b in recs):
+                return 1
+            return 2 if recs else _FAR
+        if final[0] == "arith":
+            return min((_arith_gap(final[2], x) for x in _records(r, "operands", final[1])), default=_FAR)
+        # the sides' difference on an evaluation where the condition decides; 1 more where it does not (yet)
+        gaps = [abs(a - b) + (0 if d else 1) for a, b, d in _records(r, "decides", final[1], size=3)
+                if a is not None and b is not None]
+        return min(gaps, default=_FAR)
+
+    def exposure_known(r, target) -> bool:
+        """(R79) The run evaluated the target's site with what its judgment needs: both operands, or both the replaced
+        and the written value."""
+        if target[0] == "boundary":
+            return any(a is not None and b is not None for a, b, _d in _records(r, "decides", target[3][1], size=3))
+        field = "writes" if target[0] == "write" else "operands"
+        return any(a is not None and b is not None for a, b in _records(r, field, target[3][1]))
+
+    def exposure_inputs(target) -> list[str]:
+        """(R79) The inputs to move at a fault-exposing target: those its statement / expression reads (through locals
+        — every input when it reads none it can set), and for a comparison the decision's other conditions (that make
+        it decide)."""
+        kind, node, _chain, final = target
+        names = list(inputs_of(node))
+        if kind == "boundary" and final[2] in spec_cond:
+            names = list(dict.fromkeys(names + list(inputs_of(spec_cond[final[2]]))))
+        return names
+
+    def measure(r, target):
+        """(R79) ``(quantity, wanted)`` for the secant step: the sides' difference and 0, or the dividend and the
+        nearest non-zero multiple of the divisor — None where the target has no such quantity on this run."""
+        if target[0] == "boundary":
+            recs = [(a, b) for a, b, _d in _records(r, "decides", target[3][1], size=3) if a is not None and b is not None]
+            return (recs[0][0] - recs[0][1], 0) if recs else None
+        recs = [(a, b) for a, b in _records(r, "operands", target[3][1]) if a is not None and b is not None]
+        if not recs:
+            return None
+        left, right = recs[0]
+        if target[3][2] in ("/", "%") and right != 0:
+            return left, _multiple_near(left, right)
+        return None
+
+    def secant(cur: dict[str, int], r, target, names: list[str]) -> list[dict[str, int]]:
+        """(R79) For each of the first inputs: one probe move (+1, else +16) measures how the watched quantity moves
+        with it; the value that brings it to what the target needs (and its neighbours) are candidates."""
+        m0 = measure(r, target)
+        if m0 is None:
+            return []
+        e0, want = m0
+        out: list[dict[str, int]] = []
+        todo = list(names[:4])
+        for delta in (1, 16):
+            # (review R79 I6) one batch of probes per step size
+            probes = {}
+            for n in todo:
+                x1 = cur[n] + delta if _inside(doms[n], cur[n] + delta) else cur[n] - delta
+                if _inside(doms[n], x1):
+                    probes[n] = {**cur, n: x1}
+            run(list(probes.values()))
+            for n, probe in probes.items():
+                rr = cache.get(vkey(probe))
+                m1 = measure(rr, target) if rr is not None and clean(rr) else None
+                if m1 is None or m1[0] == e0:
+                    continue
+                slope = (m1[0] - e0) / (probe[n] - cur[n])
+                x = cur[n] + round((want - e0) / slope)
+                out += [{**cur, n: v} for v in (x, x - 1, x + 1) if v != cur[n] and _inside(doms[n], v)]
+                todo.remove(n)
+        return out
 
     def blocking_inputs(r, target) -> list[str]:
         """The inputs to move next: those of the first control step the best path does not satisfy (through the locals
         it reads) — every input when the run itself is the obstacle (undefined behaviour, a branch on an unknown value,
         an overflow it may hit): what causes that need not be on the target's control chain."""
-        if r.get("status") != "supported" or touched(r, target):
+        exposing = target[0] in EXPOSE_KINDS
+        if r.get("status") != "supported" or (not exposing and touched(r, target)):
             return list(inputs)
         _depth, step = best_path(r, target)
         if step is None:
             return list(inputs)
+        if exposing and step is target[3]:
+            # (R79) the target's site runs: its own inputs — every input when the run itself is the obstacle
+            return exposure_inputs(target) if clean(r) else list(inputs)
         if step[0] == "guard":
             node = step[1] if not isinstance(step[1], int) else conds[step[1]]
             return inputs_of(node)
@@ -520,10 +777,17 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             if standing(r, target)[0]:
                 return cur, "done"
             if exhausted():
-                report["budget_exhausted"] = True
+                report[flag[0]] = True
                 return None, "budget"
             names = blocking_inputs(r, target)
             cands = [{**cur, n: x} for n in names for x in pools[n] if x != cur[n]]
+            if target[0] in ("boundary", "arith") and clean(r) and best_path(r, target)[1] is target[3]:
+                cands += secant(cur, r, target, names)
+            elif target[0] == "write" and clean(r) and best_path(r, target)[1] is target[3]:
+                # (R79) a write of the value already there: a small step of an input it reads moves the written value
+                #   off it (`475 - 30 * v / 100` is 100 at v = 1251, 99 at 1255) — nearer than any other candidate
+                cands += [{**cur, n: cur[n] + s * d} for n in names[:4] for d in (1, 4, 16, 64) for s in (1, -1)
+                          if _inside(doms[n], cur[n] + s * d)]
             run(cands)
             pool = [cur] + [c for c in cands if vkey(c) in cache]
             best = max(pool, key=lambda v: score(v, target))
@@ -613,11 +877,39 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     for v in prior:
         if vkey(v) in cache:
             mark(v)
-    report["covered_before"] = sum(done)
+    report["covered_before"] = sum(done[:n_reach])
+    report["expose_covered_before"] = sum(done[n_reach:])
 
     why_of: dict[int, str] = {}
     cut_targets: set = set()
-    for i, target in enumerate(targets):
+    duplicate_key = ["duplicates"]
+
+    def search(i, target, row_cap) -> None:
+        """One target: climbs from the best starts, then its row — or a duplicate, or cut by the row cap."""
+        # (review R79 I1) only the starts that ran: one the budget never ran has no standing to rank by
+        ranked = sorted((v for v in starts + [row["vector"] for row in rows] if vkey(v) in cache),
+                        key=lambda v: score(v, target), reverse=True)
+        found, why = None, ("local_best" if ranked else "budget")
+        for s in ranked[:3]:
+            found, why = climb(s, target)
+            if found is not None or why == "budget":
+                break
+        if found is None:
+            why_of[i] = why
+            return
+        found = polish(found, target)
+        if vkey(found) in existing_keys:
+            report[duplicate_key[0]] += 1
+            mark(found)
+            held.append(found)
+            return
+        if sum(1 for row in rows if (row["target"] >= n_reach) == (i >= n_reach)) >= row_cap:
+            cut_targets.add(i)   # found, but the row cap is full: the row is not added and the target stays unreached
+            return
+        rows.append({"vector": found, "target": i, "hit": mark(found)})
+        held.append(found)
+
+    for i, target in enumerate(targets[:n_reach]):
         if done[i]:
             continue
         if exhausted():
@@ -625,37 +917,72 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             break
         # the row cap does not end the search: a target an existing row reaches costs no row, and the objects the runs
         #   towards the others read are still what the input completion needs (review R78 R3 W-R3-2)
-        ranked = sorted(starts + [row["vector"] for row in rows], key=lambda v: score(v, target), reverse=True)
-        found, why = None, "local_best"
-        for s in ranked[:3]:
-            found, why = climb(s, target)
-            if found is not None or why == "budget":
-                break
-        if found is None:
-            why_of[i] = why
-            continue
-        found = polish(found, target)
-        if vkey(found) in existing_keys:
-            report["duplicates"] += 1
-            mark(found)
-            held.append(found)
-            continue
-        if len(rows) >= cap:
-            cut_targets.add(i)   # found, but the row cap is full: the row is not added and the target stays unreached
-            continue
-        rows.append({"vector": found, "target": i, "hit": mark(found)})
-        held.append(found)
+        search(i, target, cap)
+    reach_cut = [len(cache), spent[0]]
+    reach_done = list(done)
+    reach_runs = list(cache.values())
+    refused = bool(reach_runs) and all(r.get("status") != "supported" for r in reach_runs)
+    report["expose_met_by_reach_rows"] = sum(reach_done[n_reach:]) - report["expose_covered_before"]
+
+    def never_recorded(target) -> bool:
+        """(R79 review I-R2-1) An operator the model never records — in a macro's argument (its expansion is other
+        text), on pointers: its statement runs on a clean path, its operands never come."""
+        final = target[3]
+        w = holder_of.get(final[1]) if final[0] == "arith" else None
+        return w is not None and not any(_records(r, "operands", final[1]) for r in cache.values()) and any(
+            clean(r) and any(True in p for p in ((r.get("reach") or {}).get(w) or [])) for r in cache.values())
+
+    if len(targets) > n_reach and refused:
+        # (R79 review W-R2-2) the oracle refused every reach run: the exposing targets are not searched either —
+        #   counted as such (the unit's status says why)
+        report["expose_refused"] = len(targets) - n_reach - sum(done[n_reach:])
+    elif len(targets) > n_reach:
+        # (R79) the fault-exposing targets: their own runs · steps · rows and duplicates, after every reach target. A
+        #   reach target a row of this phase reaches is reached (the suite holds the row) and counted as such
+        #   (`reached_by_exposing_rows` — review R79 W2b); the reach phase's classification below reads its own runs
+        run_budget[0] = (len(cache), spent[0])
+        limits[:] = [MAX_EXPOSE_RUNS, MAX_EXPOSE_STEPS]
+        flag[0] = "expose_budget_exhausted"
+        duplicate_key[0] = "expose_duplicates"
+        n_rows, n_held = len(rows), len(held)
+        try:
+            for i in range(n_reach, len(targets)):
+                target = targets[i]
+                if done[i]:
+                    continue
+                if exhausted():
+                    report["expose_budget_exhausted"] = True
+                    break
+                if (any(touched(r, target) for r in cache.values()) and not any(
+                        exposure_known(r, target) for r in cache.values() if r.get("status") == "supported")) \
+                        or never_recorded(target):
+                    # its site runs, never with known operands / a known replaced value (an object no input sets — an
+                    #   output only written; an operator the model does not record): no move tells, so no search
+                    why_of[i] = "unmodeled"
+                    continue
+                search(i, target, MAX_EXPOSE_ROWS)
+        except Exception as exc:  # noqa: BLE001 — the exposing phase never costs the reach phase's rows (review R79 I1)
+            _log.warning("fault-exposing search failed (%s): %s", unit.get("name"), exc, exc_info=True)
+            report["expose_error"] = type(exc).__name__
+            del rows[n_rows:]
+            del held[n_held:]
+            done[:] = reach_done
+            report["expose_duplicates"] = 0
+            cut_targets.difference_update(range(n_reach, len(targets)))   # (review R79 I-R3-1) their rows are gone
+            for j in range(n_reach, len(targets)):
+                if not done[j] and why_of.get(j) != "unmodeled":
+                    why_of[j] = "error"   # (review R79 I-R2-2) cut off by the error, not by a budget
+    report["reached_by_exposing_rows"] = sum(1 for i in range(n_reach) if done[i] and not reach_done[i])
     # what is still unreached at the end, by why — once, after every row is in (review R78 R2 W-R2-5: a target a later
     #   row reached kept the reason counted when its own search failed). A target whose row the cap cut is `cut` first
-    #   (its vector touched it — it is no unclean reach)
-    refused = bool(cache) and all(r.get("status") != "supported" for r in cache.values())
+    #   (its vector touched it — it is no unclean reach). The reach phase's runs only (review R79 W2b)
     unclean = 0
-    for i, target in enumerate(targets):
+    for i, target in enumerate(targets[:n_reach]):
         if done[i]:
             continue
         if i in cut_targets:
             report["cut"] += 1
-        elif any(touched(r, target) for r in cache.values()):
+        elif any(touched(r, target) for r in reach_runs):
             unclean += 1   # reached, but never on one path without undefined behaviour
         elif refused:
             continue       # the status says why (review R78 R2 W-R2-6)
@@ -663,24 +990,47 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             report["budget_cut" if why_of[i] == "budget" else why_of[i]] += 1
         else:
             report["budget_cut"] += 1   # never searched: the budget ran out before its turn
-    report["reached_clean"] = sum(done)
+    report["reached_clean"] = sum(done[:n_reach])
     report["reached_unclean_only"] = unclean
-    report["not_reached"] = len(targets) - sum(done) - unclean
-    report["rows"] = len(rows)
-    report["runs"] = sum(1 for r in cache.values() if r.get("reason") != "search_step_budget")   # (review R78 R2 I-R2-4)
+    report["not_reached"] = n_reach - sum(done[:n_reach]) - unclean
+    report["rows"] = sum(1 for row in rows if row["target"] < n_reach)
+    runs = list(cache.values())
+    report["runs"] = sum(1 for r in runs[:reach_cut[0]] if r.get("reason") != "search_step_budget")   # (review R78 R2 I-R2-4)
+    report["steps"] = reach_cut[1]
+    # (R79) the fault-exposing targets
+    report["expose_reached"] = sum(done[n_reach:])
+    report["expose_rows"] = sum(1 for row in rows if row["target"] >= n_reach)
+    report["expose_runs"] = sum(1 for r in runs[reach_cut[0]:] if r.get("reason") != "search_step_budget")
+    report["expose_steps"] = spent[0] - reach_cut[1]
+    for i in range(n_reach, len(targets)):
+        if done[i]:
+            continue
+        report["expose_not_reached"] += 1
+        if refused:
+            continue                            # `expose_refused`
+        if i in cut_targets:
+            report["expose_cut"] += 1
+        elif why_of.get(i) == "error":
+            report["expose_error_cut"] += 1
+        elif why_of.get(i) == "unmodeled":
+            report["expose_unmodeled"] += 1
+        elif why_of.get(i) in ("local_best", "climb_cap"):
+            report["expose_local_best"] += 1   # a local best or the climb's move cap
+        else:
+            report["expose_budget_cut"] += 1
     if refused:
         # every run was refused — the first refusal names why (as the boundary search's `oracle_underived`); a refusal
         #   may be a per-run budget too (`execution_budget`), so this says "refused", not "cannot be searched"
-        first = next(iter(cache.values()))
+        first = reach_runs[0]
         report["status"] = "oracle_unsupported:" + str(first.get("reason") or "")[:60]
     # objects the runs that got to a target not reached cleanly read with no value from the vector — the inputs the
     #   search would need (an object the input list leaves out: HDPDM01 `s_MoveStartClose_GainMeasure` reads the rear
     #   Close gain the SwUDS input table does not list); the SUTS input completion (R19) adds them and searches again
     needed: dict[str, int] = {}
-    for i, target in enumerate(targets):
+    for i, target in enumerate(targets[:n_reach]):
         if done[i]:
             continue
-        names = {n for r in cache.values() if touched(r, target) for n in (r.get("initial_reads") or ())
+        names = {n for r in reach_runs if touched(r, target) for n in (r.get("initial_reads") or ())
                  if _NAME.fullmatch(str(n)) and n not in doms}
         for n in names:
             needed[n] = needed.get(n, 0) + 1
@@ -689,9 +1039,23 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     out = []
     for row in rows:
         kind, node, _steps, final = targets[row["target"]]
-        out.append({"inputs": dict(row["vector"]), "target_kind": kind, "target_line": node.start_point[0] + 1,
-                    "target_text": _line_text(node, raw), "target_outcome": final[2] if kind == "branch" else None,
-                    "targets_reached": len(row["hit"]),
-                    "outputs_derived": sum(1 for o in (cache[vkey(row["vector"])].get("outputs") or {}).values()
-                                           if "value" in o)})
+        r = cache[vkey(row["vector"])]
+        entry = {"inputs": dict(row["vector"]), "target_kind": kind, "target_line": node.start_point[0] + 1,
+                 "target_text": _line_text(node, raw), "target_outcome": final[2] if kind == "branch" else None,
+                 # (review R79 W2a) the statements · branch outcomes it reached first; the exposing targets apart
+                 "targets_reached": sum(1 for i in row["hit"] if i < n_reach),
+                 "exposures_met": sum(1 for i in row["hit"] if i >= n_reach),
+                 "outputs_derived": sum(1 for o in (r.get("outputs") or {}).values() if "value" in o)}
+        if kind in EXPOSE_KINDS:
+            # (R79) the values that show it: the equal sides, the operands, the replaced and written values
+            if kind == "boundary":
+                ok = [x[:2] for x in _records(r, "decides", final[1], size=3) if x[0] is not None and x[0] == x[1] and x[2]]
+            else:
+                recs = _records(r, "writes" if kind == "write" else "operands", final[1])
+                ok = [x for x in recs if (kind == "write" and x[0] is not None and x[1] is not None and x[0] != x[1])
+                      or (kind == "arith" and _nondegenerate(final[2], x))]
+            entry["exposure"] = list(ok[0]) if ok else None
+            if kind == "arith":
+                entry["operator"] = final[2]
+        out.append(entry)
     return {"rows": out, "reached_vectors": [dict(v) for v in held], "report": report}

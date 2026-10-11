@@ -99,6 +99,15 @@ def _tone(warn: bool) -> str:
     return "warning" if warn else "info"
 
 
+def _found_by_exposing(sc: Dict[str, Any]) -> int | None:
+    """(R79 review W-R3-2) Exposing targets met in the exposing phase itself (by its rows and duplicates) — targets,
+    not rows: one row meets several."""
+    parts = [_int(sc, k) for k in ("expose_reached", "expose_covered_before", "expose_met_by_reach_rows")]
+    if any(p is None for p in parts):
+        return None
+    return max(0, parts[0] - parts[1] - parts[2])
+
+
 def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
     """(R78) 동작 시나리오 행 공시 — 분모(문장 · 분기 결과)와 닿은 것 · 못 닿은 것(사유별) · 상한에 잘린 것, 설계 범위 밖
     2차 탐색까지(리뷰 R78 W2: 2차 탐색의 실행 · 상한 · 중복이 빠졌다). 요약의 모든 카운터가 값이나 설명에 나온다."""
@@ -132,6 +141,31 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
                                         "cut"))
            else "")
         + (f"기존 행과 입력이 같아 더하지 않은 시나리오 {_show(_int(sc, 'duplicates'))}. " if _int(sc, "duplicates") else "")
+        # (R79) 결함이 드러나는 값 목표 — 닿는 것만으로는 그 자리의 결함이 결과를 바꾸지 않는 값일 수 있다
+        + (f"닿은 자리에서 결함이 드러나는 값 목표 {_show(_int(sc, 'expose_targets'))}(경계 "
+           f"{_show(_int(sc, 'expose_boundary'))} — 비교의 두 값이 같을 때 평가되고 그 조건이 결정을 가름 · 쓰기 "
+           f"{_show(_int(sc, 'expose_write'))} — 이전과 다른 값을 씀 · 연산 {_show(_int(sc, 'expose_arith'))} — `+` `-` 의 "
+           "오른쪽 · `*` 의 피연산자가 0 아님(1 은 가리지 않는다), `/` `%` 의 나뉠 수가 나눗수의 0 아닌 배수 — `/` 는 "
+           "나눗수의 크기가 커지는 쪽만 갈리는 값) 중 "
+           f"만족 {_show(_int(sc, 'expose_reached'))} — 덮인 행으로 받은 기존 행이 만족한 것 "
+           f"{_show(_int(sc, 'expose_covered_before'))} · 이 탐색의 닿기 행 · 기존 행이 만족한 것 "
+           f"{_show(_int(sc, 'expose_met_by_reach_rows'))} · 이 단계가 찾은 것 "
+           f"{_show(_found_by_exposing(sc))}(목표 수 — 그 값으로 더한 행 {_show(_int(sc, 'expose_rows'))}(위 행 수에 넣지 "
+           f"않음) · 기존 행과 같아 더하지 않은 것 {_show(_int(sc, 'expose_duplicates'))}, 한 행이 목표 여럿을 만족한다), 못 만족한 것 "
+           f"{_show(_int(sc, 'expose_not_reached'))}(그 자리 값을 모델이 모름 — 출력으로만 쓰는 객체를 덮는 쓰기 · 효과 있는 "
+           f"조건 등 {_show(_int(sc, 'expose_unmodeled'))} · 국소 최선 · 오르기 상한 {_show(_int(sc, 'expose_local_best'))} · "
+           f"예산 {_show(_int(sc, 'expose_budget_cut'))} · 행 상한 {_show(_int(sc, 'expose_cut'))} · oracle 이 모든 실행을 "
+           f"거절한 unit 의 것 {_show(_int(sc, 'expose_refused'))} · 오류로 끊긴 것 {_show(_int(sc, 'expose_error_cut'))}), 모델 실행 "
+           f"{_show(_int(sc, 'expose_runs'))}회(인터프리터 {_show(_int(sc, 'expose_steps'))}걸음 — 닿기 목표와 따로 센 예산, "
+           f"실행 예산을 다 쓴 unit {_show(_int(sc, 'expose_budget_exhausted'))} · 오류로 이 단계만 버린 unit "
+           f"{_show(_int(sc, 'expose_errors'))}). 이 행들이 닿기 목표도 닿아 '닿음' 에 더해진 문장 · 분기 결과 "
+           f"{_show(_int(sc, 'reached_by_exposing_rows'))}. 대상은 if · while · for 조건과 `=` 대입 · 식 문장 · return 의 "
+           "연산이다(do-while 조건 · 선언 초기값 · for 증감 · switch 조건 · 복합 대입은 아니다). 만족은 그 자리의 값(조건의 "
+           "참 · 거짓 · 연산 결과 · 저장 값)이 달라지는 값이라는 뜻이고, 출력까지 드러나는지는 이 탐색이 보장하지 않는다(실제 "
+           "실행이 가른다). 비교 · 연산 값은 그 연산이 쓰는 타입으로 바꾼 값이다. 이 행들은 경계 · 강건성 · 출력 관측 쌍 탐색의 "
+           "후보 행도 된다. oracle 거절은 닿기 단계가 실행한 벡터 기준이다. 시험 설계 기준(경계값 · 쓰기 · 연산 값)이지 "
+           "변이를 만들거나 보지 않는다. " if any(_int(sc, k) for k in sc if str(k).startswith("expose_")
+                                         or k == "reached_by_exposing_rows") else "")
         + (f"설계 범위가 선언 타입보다 좁은 입력 {_show(_int(sc, 'outside_design_inputs'))}. "
            if _int(sc, "outside_design_inputs") and not outside_any else "")
         + (f"설계 범위가 선언 타입보다 좁아(입력 {_show(_int(sc, 'outside_design_inputs'))}) 첫 탐색이 닿지 못한 목표 "
@@ -163,7 +197,8 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
         + (f"탐색하지 않은 unit: {_dist(skipped)}. " if skipped else "")
         + (f"탐색 중 오류로 시나리오 행 없이 둔 unit {_show(_int(sc, 'errors'))} — 로그에 traceback 이 있다."
            if _int(sc, "errors") else ""),
-        tone=_tone(bool(_int(sc, "errors")) or bool(_int(sc, "budget_exhausted"))))
+        tone=_tone(bool(_int(sc, "errors")) or bool(_int(sc, "budget_exhausted"))
+                   or bool(_int(sc, "expose_budget_exhausted")) or bool(_int(sc, "expose_errors"))))
 
 
 # ── (R66) 입력 문서 — 세 생성기 공용 ─────────────────────────────────────────────

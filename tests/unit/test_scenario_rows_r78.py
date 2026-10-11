@@ -427,7 +427,8 @@ def test_a_stub_return_value_is_an_input_like_any_other():
 def test_an_arithmetic_threshold_is_crossed_with_a_value_from_the_comparison():
     unit = _unit("ratio")
     found = sr.find_scenarios(unit, {"g_v": U16}, ["return"])
-    rows = _reaching(unit, found, "r = (U16)(475U - (30U * g_v / 100U));")
+    rows = [r for r in _reaching(unit, found, "r = (U16)(475U - (30U * g_v / 100U));")
+            if r["target_kind"] not in sr.EXPOSE_KINDS]    # (R79) a write-exposing row moves g_v off 1251 on purpose
     assert rows and all(r["inputs"]["g_v"] in (1251,) for r in rows)
 
 
@@ -446,6 +447,7 @@ def test_the_search_is_deterministic():
 
 def test_budgets_cut_and_say_so(monkeypatch):
     monkeypatch.setattr(sr, "MAX_RUNS", 3)
+    monkeypatch.setattr(sr, "MAX_EXPOSE_RUNS", 0)    # (R79) the exposing phase's rows would reach the cut targets
     rep = sr.find_scenarios(_unit("diag"), DIAG, DIAG_OUT)["report"]
     assert rep["budget_exhausted"] and rep["runs"] == 3          # what ran, also when the budget stops a batch
     assert rep["budget_cut"] == rep["not_reached"] > 0
@@ -1048,7 +1050,7 @@ def test_the_second_search_labels_each_row_by_what_it_carries(monkeypatch):
     unit = _seq_unit(uds_param_info={"g_tm": {"range": [0, 20]}})
     seqs = generate_sequences(unit, None, type_cache={}, extended=True)
     rep = unit["scenario_rows"]
-    first = [s["strategy"] for s in seqs if s["strategy"].startswith(sr.SCENARIO_PREFIX)][:rep["rows"]]
+    first = [s["strategy"] for s in seqs if s["strategy"].startswith(sr.SCENARIO_PREFIX)][:rep["rows"] + rep["expose_rows"]]
     tail = [(s["strategy"], s["inputs"]["g_tm"]) for s in seqs[-3:]]
     assert tail == [("SCNR_0", 31), (f"SCN_{len(first)}", 12), ("SCNR_1", 40)]
     assert rep["outside_design_rows"] == 2 and rep["outside_design_in_range_rows"] == 1
@@ -1208,9 +1210,10 @@ def test_the_second_search_counts_the_first_search_rows_as_covered():
     rep = unit["scenario_rows"]
     assert rep["outside_design_runs"] > 0
     first = [s["scenario"] for s in seqs if s["strategy"].startswith(sr.SCENARIO_PREFIX)
-             and int(s["strategy"][len(sr.SCENARIO_PREFIX):]) < rep["rows"]]
+             and int(s["strategy"][len(sr.SCENARIO_PREFIX):]) < rep["rows"] + rep["expose_rows"]]
     second = [s["scenario"] for s in seqs if s["strategy"].startswith(sr.SCENARIO_FI_PREFIX)
-              or (s["strategy"].startswith(sr.SCENARIO_PREFIX) and int(s["strategy"][len(sr.SCENARIO_PREFIX):]) >= rep["rows"])]
+              or (s["strategy"].startswith(sr.SCENARIO_PREFIX)
+                  and int(s["strategy"][len(sr.SCENARIO_PREFIX):]) >= rep["rows"] + rep["expose_rows"])]
     key = lambda sc: (sc["target_kind"], sc["target_line"], sc["target_outcome"])  # noqa: E731
     assert first and not {key(sc) for sc in first} & {key(sc) for sc in second}
     assert rep["outside_design_searched"] < rep["targets"] - rep["covered_before"]
@@ -1229,7 +1232,8 @@ def test_the_second_search_starts_from_the_first_search_rows(monkeypatch):
     monkeypatch.setattr(suts_mod, "find_scenarios", spy)
     unit = _seq_unit(uds_param_info={"g_tm": {"range": [0, 20]}})
     seqs = generate_sequences(unit, None, type_cache={}, extended=True)
-    first = [s["inputs"] for s in seqs if s["strategy"].startswith(sr.SCENARIO_PREFIX)][:unit["scenario_rows"]["rows"]]
+    rep = unit["scenario_rows"]
+    first = [s["inputs"] for s in seqs if s["strategy"].startswith(sr.SCENARIO_PREFIX)][:rep["rows"] + rep["expose_rows"]]
     second = [c for c in calls if c[2]]
     assert first and second
     existing, covered, _home = second[-1]

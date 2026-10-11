@@ -2513,7 +2513,12 @@ SCENARIO_REPORT_KEYS = ("targets", "statements", "branches", "reached_clean", "r
                         "outside_design_rows", "outside_design_in_range_rows", "outside_design_runs",
                         "outside_design_steps", "outside_design_cut", "outside_design_duplicates",
                         "outside_design_not_reached", "outside_design_pools_capped", "outside_design_starts_capped",
-                        "outside_design_value_sets")
+                        "outside_design_value_sets",
+                        # (R79) 결함이 드러나는 값 목표(경계 · 쓰기 · 연산) — 따로 센다(자기 예산 · 행 상한)
+                        "expose_targets", "expose_boundary", "expose_write", "expose_arith", "expose_covered_before",
+                        "expose_reached", "expose_rows", "expose_not_reached", "expose_cut", "expose_unmodeled",
+                        "expose_local_best", "expose_budget_cut", "expose_runs", "expose_steps", "expose_duplicates",
+                        "reached_by_exposing_rows", "expose_refused", "expose_error_cut", "expose_met_by_reach_rows")
 
 
 def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2523,10 +2528,12 @@ def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {k: sum(int(r.get(k) or 0) for r in reports) for k in SCENARIO_REPORT_KEYS}
     out.update(units=len(units), searched=sum(1 for r in reports if r.get("status") == "searched"),
                units_with_rows=sum(1 for r in reports if r.get("rows") or r.get("outside_design_rows")
-                                   or r.get("outside_design_in_range_rows")),
+                                   or r.get("outside_design_in_range_rows") or r.get("expose_rows")),
                budget_exhausted=sum(1 for r in reports if r.get("budget_exhausted")
                                     or r.get("outside_design_budget_exhausted")),
+               expose_budget_exhausted=sum(1 for r in reports if r.get("expose_budget_exhausted")),
                errors=sum(1 for r in reports if r.get("error") or r.get("outside_design_error")),
+               expose_errors=sum(1 for r in reports if r.get("expose_error")),
                not_searched=dict(Counter(str(r.get("status")).split(":", 1)[0] for r in reports
                                          if r.get("status") not in ("searched", None) and not r.get("error"))),
                cap_per_unit=_SCENARIO_MAX_ROWS)
@@ -2585,13 +2592,32 @@ def _scenario_outputs(ctx: Dict[str, Any], sequences: List[Dict[str, Any]]) -> L
 def _scenario_row(sequences: List[Dict[str, Any]], row: Dict[str, Any], strategy: str, outputs: List[str],
                   var_types: Dict[str, str], outside: Dict[str, int], span: Dict[str, tuple]) -> None:
     inputs = {k: _format_test_value(v, var_types.get(k, "uint8_t")) for k, v in row["inputs"].items()}
-    what = (f"분기 {row['target_line']}행 `{row['target_text']}` → {'참' if row['target_outcome'] else '거짓'}"
-            if row["target_kind"] == "branch" else f"문장 {row['target_line']}행 `{row['target_text']}`")
+    kind = row["target_kind"]
+    seen = row.get("exposure") or [None, None]
+    if kind == "branch":
+        what = f"분기 {row['target_line']}행 `{row['target_text']}` → {'참' if row['target_outcome'] else '거짓'}"
+    elif kind == "boundary":
+        # (R79) 결함이 드러나는 값 — 경계: 두 값이 같을 때 평가되고 그 조건이 결정을 가른다(`>` · `>=` 가 갈림)
+        what = (f"경계 {row['target_line']}행 `{row['target_text']}` 를 두 값이 같을 때(비교하는 타입으로 바꾼 값 "
+                f"{seen[0]} = {seen[1]}) 평가하고 이 조건이 결정을 가른다")
+    elif kind == "write":
+        what = f"쓰기 {row['target_line']}행 `{row['target_text']}` 가 이전 값 {seen[0]} 을 다른 값 {seen[1]} 로 바꾼다"
+    elif kind == "arith":
+        what = (f"연산 {row['target_line']}행 `{row['target_text']}` 의 `{row.get('operator') or ''}` 를 결과가 연산자에 "
+                f"민감한 피연산자(연산하는 타입으로 바꾼 값 {seen[0]}, {seen[1]} — 0 아닌 피연산자 · 나눗수의 0 아닌 배수)로 "
+                "계산한다")
+    else:
+        what = f"문장 {row['target_line']}행 `{row['target_text']}`"
     if outside:
         shown = ", ".join(f"{k}={x}(설계 {span[k][0]}~{span[k][1]} 밖)" for k, x in list(outside.items())[:3])
         head = (f"설계 범위 밖 동작 시나리오: {what} 에 닿는 행 — 설계 범위 안 값의 탐색이 닿지 못한 목표를 그 입력의 선언 타입 "
                 f"범위로 넓혀 찾았고, 목표가 계속 닿는 한 설계 범위 안으로 되돌린 뒤 남은 값: {shown}. 원본 코드 모델 실행에서 "
                 "한 경로로(미정 분기 · 미정의 동작 없이) 닿는다(FI · ")
+    elif kind in ("boundary", "write", "arith"):
+        head = (f"결함이 드러나는 값 시나리오: {what} — 원본 코드 모델 실행에서 한 경로로(미정 분기 · 미정의 동작 없이) "
+                "그 값에 닿는다. 그 자리의 값(조건의 참 · 거짓 · 연산 결과 · 저장 값)이 그 자리의 결함으로 달라지는 값이다 — "
+                "출력까지 드러나는지는 이 탐색이 보장하지 않는다(실제 실행이 가른다; 경계 · 쓰기 · 연산 값 — 변이는 만들지도 "
+                "보지도 않는다 · ")
     else:
         head = (f"동작 시나리오: {what} 에 닿는 행 — 원본 코드 모델 실행에서 한 경로로(미정 분기 · 미정의 동작 없이) "
                 "닿는다. 값은 코드가 비교하는 상수와 그 이웃 · switch 라벨 · 설계 범위 · 작은 0 아닌 값에서 골랐다(")
@@ -2599,9 +2625,13 @@ def _scenario_row(sequences: List[Dict[str, Any]], row: Dict[str, Any], strategy
         "seq_num": len(sequences) + 1, "inputs": inputs,
         "expected": {o: f"{VERIFY_PREFIX} scenario" for o in outputs},
         "strategy": strategy, "tc_profile": TC_PROFILE_EXTENDED,
-        "description": head + f"이 행으로 처음 닿은 문장 · 분기 결과 {row['targets_reached']}개 · 소스 oracle 탐색 · 미실행)",
+        "description": head + (f"이 행으로 처음 만족한 결함 노출 목표 {row.get('exposures_met', 0)}개 · "
+                               if kind in ("boundary", "write", "arith") else "")
+        + f"이 행으로 처음 닿은 문장 · 분기 결과 {row['targets_reached']}개 · 소스 oracle 탐색 · 미실행)",
         "scenario": {**{k: row[k] for k in ("target_kind", "target_line", "target_text", "target_outcome",
-                                            "targets_reached")}, "outside_design": dict(outside)},
+                                            "targets_reached")}, "outside_design": dict(outside),
+                     **({"exposure": row.get("exposure"), "operator": row.get("operator")}
+                        if row["target_kind"] in ("boundary", "write", "arith") else {})},
     })
 
 
@@ -2665,8 +2695,10 @@ def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
     #   in document order the first scenario row sat past them)
     existing = [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
         [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
+    # (review R79 W3) no fault-exposing targets here — a row found over the widened domains is an FI row by what it
+    #   carries; the exposing targets are the first search's
     again = find_scenarios(unit, {**domains, **wide}, outputs, existing,
-                           covered=existing, home=span)
+                           covered=existing, home=span, expose=False)
     rep = again["report"]
     report.update(outside_design_searched=int(rep.get("targets") or 0) - int(rep.get("covered_before") or 0),
                   outside_design_reached=int(rep.get("reached_clean") or 0) - int(rep.get("covered_before") or 0),

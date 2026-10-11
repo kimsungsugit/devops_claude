@@ -139,6 +139,30 @@ class _Pointer:
         return f"_Pointer({self.target!r})"
 
 
+def _ir_outcome(ir, truths):
+    """(R79) A decision's outcome from its conditions' truths with C's short circuit (tuple IR) — None when it reads an
+    undetermined one."""
+    kind = ir[0]
+    if kind == "atom":
+        return truths[ir[1]]
+    if kind == "!":
+        inner = _ir_outcome(ir[1], truths)
+        return None if inner is None else not inner
+    left = _ir_outcome(ir[1], truths)
+    if left is None:
+        return None
+    if (kind == "&&" and not left) or (kind == "||" and left):
+        return left
+    return _ir_outcome(ir[2], truths)
+
+
+def _known_int(val):
+    """(R79) An evaluated integer value, or None (unknown, pointer, floating point, no type)."""
+    v = getattr(val, "v", None)
+    return v if isinstance(v, int) and not isinstance(v, bool) and isinstance(getattr(val, "t", None), dict) \
+        and not cpc.is_float(val.t) else None
+
+
 def _loaded(value, t):
     """The value of an object read from the store: a stored unknown's interval comes back with it."""
     return _Val(value, t, value.range if isinstance(value, Unknown) else None)
@@ -164,12 +188,14 @@ class _State:
         #   the store alone cannot tell 'read in a condition, never written' from 'never touched'
         self.initial_reads: set[str] = set()
 
-    def copy(self):
+    def copy(self, records=True):
+        """A copy of the path — (R79 review I-R2-3) without its records (``records=False``) for a probe that reads only
+        what its own evaluation records."""
         s = _State()
         s.store, s.mode, s.ret = dict(self.store), self.mode, self.ret
         s.havoc_all, s.havoc_bases, s.escaped, s.forks = self.havoc_all, dict(self.havoc_bases), set(self.escaped), list(self.forks)
         s.possible_ub = set(self.possible_ub)
-        s.decisions = list(self.decisions)
+        s.decisions = list(self.decisions) if records else []
         s.havoc_pointer = self.havoc_pointer
         s.initial_reads = set(self.initial_reads)
         return s
@@ -384,6 +410,10 @@ class _Interp:
         self.guards: dict = {}
         # (R78) statements whose execution to record — ``{(start, end, type): ("reach", index)}`` (see `run`)
         self.statement_marks: dict = {}
+        # (R79) operators whose operands to record (``{(start, end, type): ("operand", index)}`` — `binary`) and
+        #   assignments whose replaced value to record (``("write", index)`` — `assign`): where a fault would show
+        self.operand_marks: dict = {}
+        self.write_marks: dict = {}
         # (R40) pointer parameter → the layout of the pointee the sequence set up for it (`pointee_binding`)
         self.pointees: dict[str, dict] = {}
         self.function_name = ""
@@ -2096,6 +2126,12 @@ class _Interp:
         right = self.expression(state, right_node, raw, depth + 1)
         if isinstance(left.v, _Pointer) or isinstance(right.v, _Pointer):
             return self.pointer_compare(op, left, right)
+        if self.operand_marks and raw is self.fn_raw:
+            mark = self.operand_marks.get((n.start_byte, n.end_byte, n.type))
+            if mark is not None:
+                # (R79) what this evaluation of a watched operator saw — a fault there changes the result only for
+                #   some operand values (equal sides of a comparison, a non-zero addend, a multiple of the divisor)
+                state.decisions.append((mark, ("outcome", self.watched_pair(left, right))))
         return self.arith_values(op, left, right, state)
 
     def operand_effectful(self, node, raw):
@@ -2255,11 +2291,14 @@ class _Interp:
             # how the decision is reached is then not determined.
             state.decisions.append((spec["key"], ("undetermined", "possible_undefined_behavior_before_decision")))
             return
-        truths, reasons = [], []
+        truths, reasons, sides = [], [], []
         saved, self.watch = self.watch, None
         try:
             for atom in spec["atoms"]:
-                probe = state.copy()
+                probe = state.copy(records=False)   # its records are discarded; only this evaluation's are read
+                mark = self.operand_marks.get((atom.start_byte, atom.end_byte, atom.type)) if self.operand_marks \
+                    else None
+                before = len(probe.decisions)
                 try:
                     v = self.expression(probe, atom, self.fn_raw)
                     truths.append(self.truth(v))
@@ -2267,6 +2306,9 @@ class _Interp:
                 except Unsupported as exc:
                     truths.append(None)
                     reasons.append(str(exc))
+                # (R79) a watched comparison's operands on this very evaluation (its `binary` record on the probe)
+                sides.append(next(((mark, obs[1]) for k, obs in reversed(probe.decisions[before:])
+                                   if k == mark and obs[0] == "outcome"), None) if mark is not None else None)
         finally:
             self.watch = saved
         observed = [False] * len(truths)
@@ -2290,6 +2332,16 @@ class _Interp:
             state.decisions.append((spec["key"], ("undetermined", why)))
             return
         state.decisions.append((spec["key"], ("evaluated", tuple(truths), tuple(observed), bool(outcome))))
+        for i, side in enumerate(sides):
+            if side is None or not observed[i] or truths[i] is None:
+                continue
+            # (R79 review W1) the operands and whether this condition decides, on the same evaluation — in a loop the
+            #   sides may be equal on one pass and the condition decide on another
+            flipped = list(truths)
+            flipped[i] = not truths[i]
+            other = _ir_outcome(spec["ir"], flipped)
+            state.decisions.append((("decide", side[0][1]), ("outcome", (*side[1], other is not None
+                                                                          and other != bool(outcome)))))
 
     def conditional_type(self, a, b):
         if a.t is None or b.t is None or cpc.is_float(a.t) or cpc.is_float(b.t):
@@ -2485,6 +2537,9 @@ class _Interp:
         left_node, right_node = n.child_by_field_name("left"), n.child_by_field_name("right")
         target = self.lvalue(state, left_node, raw, depth + 1)
         right = self.expression(state, right_node, raw, depth + 1)
+        mark = self.write_marks.get((n.start_byte, n.end_byte, n.type)) if self.write_marks and raw is self.fn_raw \
+            else None
+        old = self.peek_target(state, target) if mark is not None else None
         if op == "=":
             value = right
         else:
@@ -2493,9 +2548,42 @@ class _Interp:
         if target[0] == "key":
             self.store(state, target, value)
             stored = state.store[target[1]]
-            return _loaded(stored, target[2])
+            loaded = _loaded(stored, target[2])
+            if mark is not None:
+                # (R79) the value replaced and the value written: deleting the assignment shows only where they differ
+                state.decisions.append((mark, ("outcome", (old, _known_int(loaded)))))
+            return loaded
         self.store(state, target, value)
+        if mark is not None:
+            state.decisions.append((mark, ("outcome", (old, None))))
         return _Val(Unknown(target[-1] if target[0] in ("all", "ptr") else target[2]), None)
+
+    def peek_target(self, state, target):
+        """(R79) The integer an object holds before a watched assignment, or None. `read_target` takes no step and
+        writes nothing to the store; the read it would record is kept apart, so `initial_reads` stays what it was
+        without the watch (review R79 I2: no copy of the path — that grew with the path's records in a loop)."""
+        if target[0] != "key":
+            return None
+        kept, state.initial_reads = state.initial_reads, set()
+        try:
+            return _known_int(self.read_target(state, target))
+        except Exception:  # noqa: BLE001  # silent-ok — a watch never fails its run: the value is then unknown
+            return None
+        finally:
+            state.initial_reads = kept
+
+    def watched_pair(self, left, right):
+        """(R79 review I3) A watched operator's operands as it uses them — after the usual arithmetic conversions
+        (``S16 -1`` against ``U16 65535`` compares equals; ``-100 / 50U`` divides 65436) — or as evaluated where the
+        two have no common integer type (an enumeration, an unknown type)."""
+        a, b = _known_int(left), _known_int(right)
+        if a is None or b is None or left.t.get("enum") or right.t.get("enum"):
+            return a, b
+        try:
+            t = cpc.usual_conversion(left.t, right.t, self.widths)
+            return int(cpc.convert(a, t)), int(cpc.convert(b, t))
+        except Exception:  # noqa: BLE001  # silent-ok — no common integer type: the values as evaluated
+            return a, b
 
     def arith_values(self, op, left, right, state):
         """One binary operator on evaluated operands (arithmetic, bitwise, shift, comparison)."""
@@ -3704,10 +3792,22 @@ def _guard_paths(finals, key):
     return [[obs[1] if obs[0] == "outcome" else None for k, obs in s.decisions if k == key] for s in finals]
 
 
+def _paths_by_key(finals, tag, count):
+    """(R79 review I-R2-3) `_guard_paths` for every index of one tag (``("reach", i)``, ``("operand", i)`` …) in one
+    pass over each path's records — per index, per path, the outcomes in order."""
+    out = {i: [[] for _ in finals] for i in range(count)}
+    for p, s in enumerate(finals):
+        for k, obs in s.decisions:
+            if type(k) is tuple and len(k) == 2 and k[0] == tag and k[1] in out:
+                out[k[1]][p].append(obs[1] if obs[0] == "outcome" else None)
+    return out
+
+
 def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
                       decisions: list[dict[str, Any]], guards: list[list] | tuple = (),
                       step_limit: int | None = None, inert_stub_calls: bool = False, reach: list[list] | tuple = (),
-                      outputs: list[str] | None = None) -> list[dict[str, Any]]:
+                      outputs: list[str] | None = None, operands: list[list] | tuple = (),
+                      writes: list[list] | tuple = ()) -> list[dict[str, Any]]:
     """(R2c) Per input vector: how each decision of the function evaluates on the modeled run.
 
     ``decisions``: ``[{"key": [start, end, type], "atoms": [[start, end, type], ...], "ir": nested list}]`` over the
@@ -3722,6 +3822,13 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
     (R78) ``reach``: statements (``[start, end, type]``) — per path, one flag per execution under ``"reach"`` (True: no
     branch on an unknown value before it on that path). ``outputs``: names read after the run as `evaluate_outputs` reads
     them, under ``"outputs"``. Every supported run also says whether it branched on an unknown value (``"forked"``).
+
+    (R79) ``operands``: binary operators (``[start, end, type]``) — per path, the ``(left, right)`` integers of each
+    evaluation under ``"operands"`` (None where a side is not a known integer). ``writes``: assignment expressions — per
+    path, ``(replaced, written)`` of each execution under ``"writes"``. Operands are recorded as the operator uses them
+    (after the usual arithmetic conversions). A watched comparison that is a condition of a watched decision also gets
+    ``(left, right, decides)`` per evaluation under ``"decides"`` (one evaluation: in a loop the sides may be equal on
+    one pass and the condition decide on another). Watching adds no step to a run and no read to ``initial_reads``.
 
     Like `evaluate_outputs` this is a model of the source, not an execution: reachability here is modeled, callee
     effects are the project write closure, and undefined behaviour proven on a run makes that vector unsupported.
@@ -3744,6 +3851,8 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
         for index, g in enumerate(guards):
             guard_keys[tuple(g)] = ("guard", index)
         reach_keys = {tuple(k): ("reach", index) for index, k in enumerate(reach)}
+        operand_keys = {tuple(k): ("operand", index) for index, k in enumerate(operands)}
+        write_keys = {tuple(k): ("write", index) for index, k in enumerate(writes)}
         specs, broken = {}, {}
         for index, d in enumerate(decisions):
             node = _node_at(fn, tuple(d["key"]))
@@ -3797,6 +3906,8 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
             interp.watch = specs
             interp.guards = guard_keys
             interp.statement_marks = reach_keys
+            interp.operand_marks = operand_keys
+            interp.write_marks = write_keys
             state = _State()
             interp.bind_parameters(state)
             finals = interp.run([state], fn.child_by_field_name("body"))
@@ -3806,11 +3917,18 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
             for spec in specs.values():
                 record["decisions"][spec["key"]] = _summarize(finals, spec["key"])
             if guard_keys:
-                record["guards"] = {index: _guard_paths(finals, ("guard", index)) for index in range(len(guards))}
+                record["guards"] = _paths_by_key(finals, "guard", len(guards))
             if reach_keys:
-                record["reach"] = {index: _guard_paths(finals, ("reach", index)) for index in range(len(reach))}
+                record["reach"] = _paths_by_key(finals, "reach", len(reach))
                 # (R78) objects a path read whose initial value the vector does not give — what a search must set too
                 record["initial_reads"] = sorted(set().union(*(s.initial_reads for s in finals)))
+            if operand_keys:
+                record["operands"] = _paths_by_key(finals, "operand", len(operands))
+                # (R79 review W1) a watched comparison that is a condition of a watched decision: per evaluation
+                #   ``(left, right, decides)`` — the operands and whether flipping it flips the decision, together
+                record["decides"] = _paths_by_key(finals, "decide", len(operands))
+            if write_keys:
+                record["writes"] = _paths_by_key(finals, "write", len(writes))
             if outputs is not None:
                 record["outputs"] = _final_outputs(interp, finals, outputs)
             record["forked"] = any(s.forks for s in finals)
