@@ -32,6 +32,8 @@ from generators.mcdc_design import (
     search_limits,
 )
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
+from generators.scenario_rows import MAX_ROWS as _SCENARIO_MAX_ROWS
+from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, find_scenarios
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_unit_io import resolve_unit_io
@@ -2350,10 +2352,11 @@ resolve_safety_related = _resolve_safety_related
 
 
 def is_extended_strategy(strategy: Any) -> bool:
-    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19)·설계 범위 밖 강건성 행(R31) 전부, 그리고 기본
-    자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
+    """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19)·설계 범위 밖 강건성 행(R31)·동작 시나리오
+    행(R78) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
-    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX, OBS_MCDC_PREFIX)):
+    if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX, OBS_MCDC_PREFIX, SCENARIO_PREFIX,
+                     SCENARIO_FI_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2421,14 +2424,18 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     domains = _boundary_domains(unit, input_vars, var_types, var_bounds, unknown_vars, enum_sets)
     outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
 
-    order = sorted(sequences, key=_base_rank)
+    # (R78) 동작 시나리오 행은 기준 행 순위에 끼지 않고 **더한** 기준이다(`extra_bases`) — 기존 기준 행의 탐색은 그 행들이 없을
+    #   때와 같다(첫 판에서 순위 맨 앞에 두자 기존 기준이 밀려 경계 6개를 잃었다 — R4b 와 같은 교훈: 옮기지 말고 더한다)
+    order = sorted((s for s in sequences if not _is_scenario(s)), key=_base_rank)
+    scenarios = [s for s in sequences if _is_scenario(s)]
     # 행이 비운 입력의 채움 값 — BV_MID 와 같은 중간값에서 출발한다(넓은 범위면 입력마다 위치만큼 옮겨 서로 다르게, enum 은 열거자).
     mids = {v: (var_bounds.get(v) or {}).get("mid") for v in domains}
     try:
         found = find_boundaries(
             unit, [{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in order], domains, outputs,
             [s.get("inputs") or {} for s in sequences],
-            defaults={v: m for v, m in mids.items() if isinstance(m, int) and not isinstance(m, bool)})
+            defaults={v: m for v, m in mids.items() if isinstance(m, int) and not isinstance(m, bool)},
+            extra_bases=[{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in scenarios])
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
         _logger.warning("SUTS 경계 행 탐색 실패(%s): %s", unit.get("name"), exc, exc_info=True)
         unit["boundary_search"] = {"status": f"error:{type(exc).__name__}", "rows": 0}
@@ -2463,6 +2470,7 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
 ROBUST_PREFIX = "ROBUST_"
 MAX_ROBUST_ROWS = 12          # unit 당 — 넘으면 자르고 센다
 MAX_ROBUST_BASES = 6          # 비교가 살아 있는 기준 행을 찾을 후보 수(비교마다 후보 × 4 점 평가)
+MAX_ROBUST_SCENARIO_BASES = 6  # (R78) 그 뒤에 더하는 동작 시나리오 행 후보 수
 # unit 보고서와 품질 집계가 같은 키를 쓴다(리뷰 2라운드 W2-D: 집계 튜플에서 키 하나가 빠지면 공시 문장이 조용히 사라진다)
 ROBUSTNESS_REPORT_KEYS = (
     "inputs_with_design_range", "inputs_type_unconfirmed", "inputs_no_type_width", "inputs_shadowed", "body_unread",
@@ -2481,9 +2489,208 @@ def summarize_robustness_rows(units: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def _base_rank(s: Dict[str, Any]) -> int:
-    """기준 행 후보 순서 — 전 입력 중간값(BV_MID) → MC/DC 설계 벡터 → 조건 조합 → 나머지(R15 경계 행·R31 강건성 행 공용)."""
+    """기준 행 후보 순서 — 전 입력 중간값(BV_MID) → MC/DC 설계 벡터 → 조건 조합 → 나머지 → 동작 시나리오(R78, 맨 뒤)(R15 경계
+    행·R31 강건성 행·R60 출력 관측 쌍 공용). (R78) 동작 시나리오 행은 기존 기준의 순위를 밀지 않는다 — 경계 탐색 · 강건성 행은
+    그 행들을 기존 기준 **뒤에 더한** 기준으로 쓴다(`extra_bases` · `MAX_ROBUST_SCENARIO_BASES`)."""
     name = str(s.get("strategy") or "")
+    if _is_scenario(s):
+        return 5
     return 0 if name == "BV_MID" else 1 if name.startswith("MCDC_") else 2 if name.startswith("COND_COMB_") else 3
+
+
+def _is_scenario(s: Dict[str, Any]) -> bool:
+    """(R78) 동작 시나리오 행 — 설계 범위 안(`SCN_`)과 설계 범위 밖 FI(`SCNR_`) 둘 다."""
+    return str(s.get("strategy") or "").startswith((SCENARIO_PREFIX, SCENARIO_FI_PREFIX))
+
+
+# (R78) 동작 시나리오 행 — unit 보고서와 품질 집계가 같은 키를 쓴다(R31 W2-D 와 같은 이유: 집계에서 키 하나가 빠지면 공시가 조용히 준다).
+#   `outside_design_*` 는 설계 범위 밖 2차 탐색(`_append_scenario_fi_rows`)의 몫이다(리뷰 R78 W2: 2차 탐색의 실행 · 상한 · 중복이
+#   집계에서 빠졌다)
+SCENARIO_REPORT_KEYS = ("targets", "statements", "branches", "reached_clean", "reached_unclean_only", "not_reached",
+                        "local_best", "climb_cap", "budget_cut", "runs", "steps", "rows", "cut", "duplicates",
+                        "pools_capped", "inputs", "inputs_needed", "starts_capped", "conditions_outcome_only",
+                        "outside_design_inputs", "outside_design_searched", "outside_design_reached",
+                        "outside_design_rows", "outside_design_in_range_rows", "outside_design_runs",
+                        "outside_design_steps", "outside_design_cut", "outside_design_duplicates",
+                        "outside_design_not_reached", "outside_design_pools_capped", "outside_design_starts_capped",
+                        "outside_design_value_sets")
+
+
+def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R78) unit 보고서 합계 + 탐색한 unit · 행이 생긴 unit(두 탐색 중 하나라도) · 예산 소진(두 탐색) · 실패 · 탐색하지 않은
+    사유 분포 — 품질 보고서 `scenario_rows`(생성 공시가 읽는다)."""
+    reports = [u.get("scenario_rows") for u in units if isinstance(u.get("scenario_rows"), dict)]
+    out: Dict[str, Any] = {k: sum(int(r.get(k) or 0) for r in reports) for k in SCENARIO_REPORT_KEYS}
+    out.update(units=len(units), searched=sum(1 for r in reports if r.get("status") == "searched"),
+               units_with_rows=sum(1 for r in reports if r.get("rows") or r.get("outside_design_rows")
+                                   or r.get("outside_design_in_range_rows")),
+               budget_exhausted=sum(1 for r in reports if r.get("budget_exhausted")
+                                    or r.get("outside_design_budget_exhausted")),
+               errors=sum(1 for r in reports if r.get("error") or r.get("outside_design_error")),
+               not_searched=dict(Counter(str(r.get("status")).split(":", 1)[0] for r in reports
+                                         if r.get("status") not in ("searched", None) and not r.get("error"))),
+               cap_per_unit=_SCENARIO_MAX_ROWS)
+    return out
+
+
+def _scenario_domains(unit: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """(R78) 동작 시나리오 탐색이 움직일 입력 — 경계 행과 같은 도메인(`_boundary_domains`, 선언 타입 · 열거자만 — 추측 타입
+    금지) + 피호출 stub 반환값(`F() return`, MC/DC 와 같은 `_stub_return_domain`) + 전역 배열 원소(`g_a[1]`) · 포인터 매개변수
+    대상(`p[0].a`)(MC/DC 원소 · 대상 그룹과 같은 판정: 선언 원소 · 멤버 타입, volatile 은 입력 아님, 설계 범위 적용). 나머지
+    입력은 비운다."""
+    from generators import c_project_context as _cpc
+    from generators.mcdc_design import (
+        _apply_design_range,
+        _element_input,
+        _pointee_input,
+        _scope_domain,
+        _stub_return_domain,
+    )
+    var_types = ctx["var_types"]
+    declared = set(ctx.get("declared") or ())
+    domains: Dict[str, Any] = {
+        v: d for v, d in _boundary_domains(unit, ctx["input_vars"], var_types, ctx["var_bounds"], set(ctx["unknown"]),
+                                           ctx.get("enum_sets")).items()
+        if var_types.get(v) == _ENUM_TYPE or v in declared}
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    own = str(unit.get("name") or "")
+    for v in ctx["input_vars"] if scope else ():
+        if v in domains:
+            continue
+        if str(v).endswith(f"() {_RETURN_VAR}"):
+            d = _stub_return_domain(v, scope, own)
+            if d:
+                domains[v] = d
+            continue
+        found = _element_input(scope, v)
+        kind = ("array_element_declaration", "global") if found is not None else None
+        if found is None:
+            found = _pointee_input(scope, own, v)
+            kind = ("pointee_declaration", "parameter") if found is not None else None
+        if found is None or kind is None or found[2]:
+            continue
+        try:
+            d = _scope_domain(found[0], found[1], scope, kind[0], origin=kind[1])
+        except _cpc.Unresolved:
+            continue
+        _apply_design_range(unit, v, d)
+        domains[v] = d
+    return domains
+
+
+def _scenario_outputs(ctx: Dict[str, Any], sequences: List[Dict[str, Any]]) -> List[str]:
+    return list(dict.fromkeys([*ctx["output_vars"], *(k for s in sequences for k in (s.get("expected") or {}))]))
+
+
+def _scenario_row(sequences: List[Dict[str, Any]], row: Dict[str, Any], strategy: str, outputs: List[str],
+                  var_types: Dict[str, str], outside: Dict[str, int], span: Dict[str, tuple]) -> None:
+    inputs = {k: _format_test_value(v, var_types.get(k, "uint8_t")) for k, v in row["inputs"].items()}
+    what = (f"분기 {row['target_line']}행 `{row['target_text']}` → {'참' if row['target_outcome'] else '거짓'}"
+            if row["target_kind"] == "branch" else f"문장 {row['target_line']}행 `{row['target_text']}`")
+    if outside:
+        shown = ", ".join(f"{k}={x}(설계 {span[k][0]}~{span[k][1]} 밖)" for k, x in list(outside.items())[:3])
+        head = (f"설계 범위 밖 동작 시나리오: {what} 에 닿는 행 — 설계 범위 안 값의 탐색이 닿지 못한 목표를 그 입력의 선언 타입 "
+                f"범위로 넓혀 찾았고, 목표가 계속 닿는 한 설계 범위 안으로 되돌린 뒤 남은 값: {shown}. 원본 코드 모델 실행에서 "
+                "한 경로로(미정 분기 · 미정의 동작 없이) 닿는다(FI · ")
+    else:
+        head = (f"동작 시나리오: {what} 에 닿는 행 — 원본 코드 모델 실행에서 한 경로로(미정 분기 · 미정의 동작 없이) "
+                "닿는다. 값은 코드가 비교하는 상수와 그 이웃 · switch 라벨 · 설계 범위 · 작은 0 아닌 값에서 골랐다(")
+    sequences.append({
+        "seq_num": len(sequences) + 1, "inputs": inputs,
+        "expected": {o: f"{VERIFY_PREFIX} scenario" for o in outputs},
+        "strategy": strategy, "tc_profile": TC_PROFILE_EXTENDED,
+        "description": head + f"이 행으로 처음 닿은 문장 · 분기 결과 {row['targets_reached']}개 · 소스 oracle 탐색 · 미실행)",
+        "scenario": {**{k: row[k] for k in ("target_kind", "target_line", "target_text", "target_outcome",
+                                            "targets_reached")}, "outside_design": dict(outside)},
+    })
+
+
+def _append_scenario_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], ctx: Dict[str, Any]) -> None:
+    """(R78, 확장 프로파일) 동작 시나리오 행 — `generators.scenario_rows.find_scenarios` 가 원본 코드 모델 실행에서 본문의 문장과
+    분기 결과마다 **한 경로로**(미정 분기 없이) · 미정의 동작 없이 닿는 입력을 설계 범위 안에서 찾아 시퀀스 뒤에 더한다. 값은
+    코드가 비교하는 상수와 그 이웃 · switch 라벨 · 설계 범위 · 작은 0 아닌 값에서 고르고 타입 끝값은 마지막이다(HD 정본만 판별
+    200 의 원인: 생성 행이 0 · 타입 가운데 · 끝값 기준이라 경로가 닫히거나 산술이 넘치거나 0 이 변화를 가렸다). 입력은
+    `_scenario_domains`. 기대값은 여기서 적지 않는다 — 붙인 뒤 같은 oracle 이 도출한다. 기존 행과 입력이 같으면 더하지 않는다.
+    '닿음' 은 문서에 남는 행(더한 행 · 입력이 같은 기존 행)이 닿는 것만이다 — 상한에 잘린 행의 목표는 닿지 않은 것으로 남고, 설계
+    범위 밖 2차 탐색은 그 행들을 포함한 시퀀스 전체가 닿는 목표를 다시 찾지 않는다(리뷰 R78 W1). 요약은 `unit["scenario_rows"]`
+    (키 `SCENARIO_REPORT_KEYS`)."""
+    var_types = ctx["var_types"]
+    domains = _scenario_domains(unit, ctx)
+    outputs = _scenario_outputs(ctx, sequences)
+    found = find_scenarios(unit, domains, outputs, [s.get("inputs") or {} for s in sequences])
+    # the second search's keys are there from the start — a unit it skips reports 0, not nothing
+    unit["scenario_rows"] = {**found["report"], **dict.fromkeys(
+        [k for k in SCENARIO_REPORT_KEYS if k.startswith("outside_design_")], 0)}
+    for i, row in enumerate(found["rows"]):
+        _scenario_row(sequences, row, f"{SCENARIO_PREFIX}{i}", outputs, var_types, {}, {})
+
+
+def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], ctx: Dict[str, Any]) -> None:
+    """(R78) 설계 범위 밖 동작 시나리오 — 설계 범위가 선언 타입보다 좁은 입력이 있고 1차 탐색(`_append_scenario_rows`)이 닿지 못한
+    문장 · 분기가 남았으면, 그 입력을 선언 타입 범위로 넓혀 한 번 더 찾는다. 코드는 설계 범위 밖 값을 다룬다(HDPDM01
+    `u16s_Direction_Check`: 타이머 설계 0~20, 코드 임계 30 — 정본은 30 으로 ERROR 상태의 복귀 경로를 시험했다;
+    `s_PlayProtectChk`: 단계 설계 0~3, 코드의 ACTIVATED 는 4). 넓힌 입력은 설계 범위 값부터 쓰고(`home`), 찾은 벡터의 설계 범위
+    밖 값은 목표가 계속 닿는 한 범위 안으로 되돌린다 — 남은 밖 값이 그 목표에 필요한 값이다(리뷰 R78 W1). 그런 행은 설계 범위
+    밖 값을 싣는 FI 행(`SCNR_`)이고, 밖 값이 남지 않은 행은 1차 탐색이 놓친 설계 범위 안 시나리오(`SCN_`)다. 1차 탐색이 이미
+    닿은 목표(그 행 · 입력이 같은 기존 행 — 상한에 잘린 것은 아님)와 다른 행이 닿는 목표는 찾지 않는다. **모든 확장 행 뒤**(경계 · 강건성 · 출력 관측
+    쌍 다음)에 붙는다 — 그 탐색들은 이 행들 없이 돈다(리뷰 R78 C1: 강건성 행의 점을 이 행이 먼저 가져갔다 · W6: 경계 기준 행이
+    될 수 있었다). 요약은 `unit["scenario_rows"]` 의 `outside_design_*`."""
+    report = unit.get("scenario_rows")
+    if not isinstance(report, dict) or report.get("error") or report.get("status") != "searched":
+        return
+    var_types = ctx["var_types"]
+    domains = _scenario_domains(unit, ctx)
+    wide: Dict[str, Any] = {}
+    src = unit.get("bounds_source") or {}
+    for v, d in domains.items():
+        if isinstance(d, tuple) and src.get(v) in ("uds_range", "hsis_range", "uds_values"):
+            tb = get_boundary_values(var_types.get(v, ""))
+            lo, hi = (tb or {}).get("min"), (tb or {}).get("max")
+            if isinstance(lo, int) and isinstance(hi, int) and lo <= d[0] <= d[1] <= hi and (lo, hi) != d:
+                wide[v] = (lo, hi)
+        elif isinstance(d, dict) and d.get("constraint_source") and not d.get("values") and \
+                isinstance(d.get("type_min"), int) and isinstance(d.get("type_max"), int) and \
+                (d["type_min"], d["type_max"]) != (d.get("min"), d.get("max")):
+            wide[v] = (d["type_min"], d["type_max"])
+    # (review R78 R2 I-R2-6) a design value list (an enum the design restricts, `uds_values`) is not widened — counted
+    report.update(outside_design_inputs=len(wide),
+                  outside_design_value_sets=sum(1 for v, d in domains.items()
+                                                if src.get(v) in ("uds_range", "hsis_range", "uds_values")
+                                                and (isinstance(d, list) or (isinstance(d, dict) and d.get("values")))))
+    if not wide or int(report.get("reached_clean") or 0) >= int(report.get("targets") or 0):
+        return
+    span = {k: (d if isinstance(d, tuple) else (d["min"], d["max"])) for k, d in domains.items() if k in wide}
+    outputs = _scenario_outputs(ctx, sequences)
+    # the first search's operating vectors first — the climb starts are the first `MAX_STARTS` (review R78 R3 I-R3-1:
+    #   in document order the first scenario row sat past them)
+    existing = [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
+        [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
+    again = find_scenarios(unit, {**domains, **wide}, outputs, existing,
+                           covered=existing, home=span)
+    rep = again["report"]
+    report.update(outside_design_searched=int(rep.get("targets") or 0) - int(rep.get("covered_before") or 0),
+                  outside_design_reached=int(rep.get("reached_clean") or 0) - int(rep.get("covered_before") or 0),
+                  outside_design_not_reached=int(rep.get("not_reached") or 0)
+                  + int(rep.get("reached_unclean_only") or 0),
+                  outside_design_runs=int(rep.get("runs") or 0), outside_design_steps=int(rep.get("steps") or 0),
+                  outside_design_cut=int(rep.get("cut") or 0), outside_design_duplicates=int(rep.get("duplicates") or 0),
+                  outside_design_budget_exhausted=bool(rep.get("budget_exhausted")),
+                  outside_design_status=str(rep.get("status") or ""),
+                  outside_design_pools_capped=int(rep.get("pools_capped") or 0),
+                  outside_design_starts_capped=int(rep.get("starts_capped") or 0))
+    n_in = sum(1 for s in sequences if str(s.get("strategy") or "").startswith(SCENARIO_PREFIX))
+    n_fi = 0
+    for row in again["rows"]:
+        outside = {k: x for k, x in row["inputs"].items() if k in span and not span[k][0] <= x <= span[k][1]}
+        if outside:
+            strategy = f"{SCENARIO_FI_PREFIX}{n_fi}"
+            n_fi += 1
+        else:
+            strategy = f"{SCENARIO_PREFIX}{n_in}"
+            n_in += 1
+        _scenario_row(sequences, row, strategy, outputs, var_types, outside, span)
+    report["outside_design_rows"] = n_fi
+    report["outside_design_in_range_rows"] = len(again["rows"]) - n_fi
 
 
 def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
@@ -2527,7 +2734,14 @@ def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
     seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in sequences}
     outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
     bases: List[tuple] = []
+    # (R78) 동작 시나리오 행은 기존 후보(`MAX_ROBUST_BASES`) **뒤에 더한** 후보다 — 기존 후보 중 비교가 살아 있는 행이 있으면 그
+    #   행이 그대로 기준이고, 없을 때만 시나리오 행이 기준이 된다(옮기지 않고 더한다)
+    limits = {False: MAX_ROBUST_BASES, True: MAX_ROBUST_SCENARIO_BASES}
+    taken = {False: 0, True: 0}
     for s in sorted(sequences, key=_base_rank):
+        scenario = _is_scenario(s)
+        if taken[scenario] >= limits[scenario]:
+            continue
         if resolve_seq_test_method(s.get("strategy")) == _METHOD_FI:
             continue                        # a base holds valid values only (the FI rows carry out-of-range ones)
         ints = {k: _as_int(x) for k, x in (s.get("inputs") or {}).items()}
@@ -2536,8 +2750,7 @@ def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
         if any(u in ints and not var_bounds[u]["min"] <= ints[u] <= var_bounds[u]["max"] for u in ranged):
             continue                        # (review I3) a REQ row may carry a case value outside the design range
         bases.append((ints, s))
-        if len(bases) >= MAX_ROBUST_BASES:
-            break
+        taken[scenario] += 1
     live_points: List[tuple] = []
     other_points: List[tuple] = []
     live_keys: set = set()
@@ -2734,14 +2947,14 @@ def _prune_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]])
 def resolve_seq_test_method(strategy: Any) -> str:
     """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다. (R31) 설계 범위 밖 강건성 행도 FI."""
     s = str(strategy or "").strip()
-    return _METHOD_FI if s in _FI_STRATEGIES or s.startswith(ROBUST_PREFIX) else _METHOD_REQ
+    return _METHOD_FI if s in _FI_STRATEGIES or s.startswith((ROBUST_PREFIX, SCENARIO_FI_PREFIX)) else _METHOD_REQ
 
 
 def resolve_seq_gen_method(strategy: Any) -> str:
     """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
     s = str(strategy or "").strip()
     if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX) \
-            or s.startswith(OBS_MCDC_PREFIX):
+            or s.startswith(OBS_MCDC_PREFIX) or s.startswith(SCENARIO_PREFIX):
         return _GEN_EQUIV
     return _GEN_BOUNDARY
 
@@ -3437,18 +3650,30 @@ def generate_sequences(
             _logger.warning("SUTS MC/DC 채움 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
             sequences[:] = [s for s in sequences if not str(s.get("strategy") or "").startswith(MCDC_FILL_PREFIX)]
             unit["mcdc_fill"] = {"error": type(exc).__name__}
-    sequences = apply_sequence_evidence(unit, sequences)
-    if not extended:
-        return sequences
-    sequences = _prune_mcdc_fill_rows(unit, sequences)
-    # (R15) 경계 행 — 확장 프로파일에만. 출력이 바뀌는 인접 입력 두 값을 행으로 **더한다**(기존 행은 옮기지 않는다, R4b 교훈).
-    #   `boundary_rows=False` 면 탐색에 쓸 문맥만 남기고 호출자가 마지막에 한 번 붙인다(`append_boundary_rows`, R19 리뷰 W6).
+    # 확장 행들의 탐색 문맥 — 동작 시나리오(R78) · 경계(R15) · 강건성(R31) · 출력 관측 쌍(R60)이 같은 도메인을 본다
     ctx = {"input_vars": list(input_vars), "output_vars": list(output_vars), "var_types": dict(var_types),
            "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars),
            # (R31 review W5) 타입이 선언에서 온 입력 — 추측 타입의 폭으로 "타입 안" 을 판정하지 않는다
            "declared": sorted(v for v in input_vars if _declared(v) and not _is_pointer_decl(v)),
            # (R40 리뷰 2차 I-d) 포인터 대상의 열거자 값 집합까지 — 경계 행도 BV·MC/DC 행과 같은 도메인으로
            "enum_sets": dict(_domains) if _pointee_domains else None}
+    if extended:
+        # (R78) 동작 시나리오 행 — 근거를 붙이기 **전**(다른 행과 한 번에 도출)이고 R19 회차마다 다시 찾는다: 탐색이 닿으려다
+        #   입력 목록 밖 객체를 읽었으면(`needed_inputs`) 입력 보완(`complete_source_read_inputs`)이 그 이름을 더하고 다음
+        #   회차의 탐색이 그 입력까지 움직인다. 선택 확장이라 실패해도 문서는 만든다(그 unit 만 사유를 남긴다).
+        _n_before = len(sequences)
+        try:
+            _append_scenario_rows(unit, sequences, ctx)
+        except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+            _logger.warning("SUTS 동작 시나리오 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            del sequences[_n_before:]
+            unit["scenario_rows"] = {"error": type(exc).__name__, "rows": 0}
+    sequences = apply_sequence_evidence(unit, sequences)
+    if not extended:
+        return sequences
+    sequences = _prune_mcdc_fill_rows(unit, sequences)
+    # (R15) 경계 행 — 확장 프로파일에만. 출력이 바뀌는 인접 입력 두 값을 행으로 **더한다**(기존 행은 옮기지 않는다, R4b 교훈).
+    #   `boundary_rows=False` 면 탐색에 쓸 문맥만 남기고 호출자가 마지막에 한 번 붙인다(`append_boundary_rows`, R19 리뷰 W6).
     if boundary_rows:
         return append_boundary_rows(unit, sequences, ctx)
     unit["_boundary_ctx"] = ctx
@@ -3487,6 +3712,16 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         for decision in (unit.get("mcdc_design") or {}).get("decisions") or []:
             for pair in decision.get("pairs") or []:
                 pair.pop("observable", None)
+    # (R78) 설계 범위 밖 동작 시나리오 — **마지막**에(경계 · 강건성 · 출력 관측 쌍은 이 행들 없이 돈다 — 리뷰 R78 C1 · W6).
+    #   선택 확장이라 실패해도 문서는 만든다(그 unit 만 사유를 남긴다).
+    j = len(sequences)
+    try:
+        _append_scenario_fi_rows(unit, sequences, ctx)
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 설계 범위 밖 동작 시나리오 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        del sequences[j:]
+        if isinstance(unit.get("scenario_rows"), dict):
+            unit["scenario_rows"]["outside_design_error"] = type(exc).__name__
     if len(sequences) > n:
         sequences[n:] = apply_sequence_evidence(unit, sequences[n:])
     if (unit.get("observable_mcdc") or {}).get("searched"):
@@ -3766,7 +4001,7 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
     scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
     max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
     for _round in range(_SOURCE_READ_ROUNDS):
-        found = source_read_names(sequences)
+        found = {**_scenario_needed_names(unit), **source_read_names(sequences)}
         inputs = list(unit.get("input_vars") or [])
         new: List[str] = []
         for name, rec in sorted(found.items(), key=lambda kv: (-kv[1]["slots"], kv[0])):
@@ -3788,6 +4023,9 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
                                      # (백로그 2-c) 함수 실행 모델이 읽어서 막혔는지, 쓰지 않은 출력의 최종값을 보려고인지 —
                                      #   False 는 '모델에서 읽힌 근거 없음'(쓰기 요약만 있는 callee 안의 읽기는 모델에 없다)
                                      "read_on_model": bool(rec.get("read", True))}
+            if rec.get("scenario_targets"):
+                # (R78) 행이 아니라 동작 시나리오 탐색이 그 경로에 닿으려다 읽은 이름 — 처음 본 칸은 없다(행이 아직 없다)
+                record["added"][name]["scenario_targets"] = rec["scenario_targets"]
             if name in key:
                 unit["source_input_types"] = {**(unit.get("source_input_types") or {}), name: key[name]}
             else:
@@ -3808,7 +4046,7 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         #   다음 회차가 더했을 이름이 있는지로 가린다(리뷰 R59 W1: 필요한 회차가 정확히 상한이면 자른 것이 아니다)
         inputs = set(unit.get("input_vars") or [])
         beyond = []
-        for name in source_read_names(sequences):
+        for name in {**_scenario_needed_names(unit), **source_read_names(sequences)}:
             if name in inputs or name in record["added"] or name in record["not_added"]:
                 continue
             typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
@@ -3820,6 +4058,15 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         record["names_beyond_cap"] = beyond
     _record_remaining(unit, sequences)
     return sequences
+
+
+def _scenario_needed_names(unit: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """(R78) 동작 시나리오 탐색이 깨끗하게 닿지 못한 문장 · 분기에 가는 실행이 값 없이 읽은 프로그램 객체 — `source_read_names` 와
+    같은 모양(행이 없어 칸 수 0)에 그 이름이 막은 목표 수(`scenario_targets`). 행의 근거만 보면 어떤 행도 닿지 않은 경로가 읽는
+    이름은 영영 안 보인다(HDPDM01 `s_MoveStartClose_GainMeasure` 의 뒷문 Close 이득 — SwUDS 입력 표는 Open 이득을 적었다)."""
+    rep = unit.get("scenario_rows") if isinstance(unit.get("scenario_rows"), dict) else {}
+    return {n: {"slots": 0, "sequences": [], "read": True, "scenario_targets": int(k)}
+            for n, k in (rep.get("needed_inputs") or {}).items()}
 
 
 def _record_remaining(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
@@ -3960,6 +4207,9 @@ def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             # (백로그 2-c) 그중 함수 실행 모델에서 읽힌 근거 없이, 쓰지 않은 출력의 최종값 관측에만 필요했던 이름
             "names_added_for_unwritten_outputs": sum(1 for r in recs for a in (r.get("added") or {}).values()
                                                      if isinstance(a, dict) and a.get("read_on_model") is False),
+            # (R78) 그중 어떤 행도 아니라 동작 시나리오 탐색이 닿지 못한 경로에서 읽은 이름 — 행의 칸 수는 0 이다(리뷰 R78 W5)
+            "names_added_by_scenario_search": sum(1 for r in recs for a in (r.get("added") or {}).values()
+                                                  if isinstance(a, dict) and a.get("scenario_targets")),
             "slots_first_seen": sum(int(a.get("slots") or 0) for r in recs for a in (r.get("added") or {}).values()),
             "not_added": dict(sorted(not_added.items())),
             "units_input_columns_full": sum(1 for r in recs if "input_columns_full" in (r.get("not_added") or {}).values()),
@@ -6461,6 +6711,12 @@ def generate_suts(
             "constants_capped": sum(1 for b in _bsearch if int(b.get("constants_capped_inputs") or 0) > 0),
             "value_sets_capped": sum(int(b.get("value_sets_capped") or 0) for b in _bsearch),
             "evaluations": sum(int(b.get("evaluations") or 0) for b in _bsearch),
+            # (R78) 동작 시나리오 행을 더한 기준으로 쓴 탐색 — 따로 정한 예산 · 상한이라 따로 센다
+            "extra_bases_units": sum(1 for b in _bsearch if b.get("extra_bases")),
+            "extra_boundaries": sum(int(b.get("extra_boundaries") or 0) for b in _bsearch),
+            "extra_evaluations": sum(int(b.get("extra_evaluations") or 0) for b in _bsearch),
+            "extra_budget_exhausted": sum(1 for b in _bsearch if b.get("extra_evaluation_budget_exhausted")
+                                          or b.get("extra_boundary_cap_reached")),
             # 상태의 사유 꼬리(`oracle_underived:<reason>`)는 분포에서 떼어 종류로 센다
             "not_searched": dict(Counter(str(b.get("status")).split(":", 1)[0] for b in _bsearch
                                          if b.get("status") != "searched")),
@@ -6475,6 +6731,8 @@ def generate_suts(
         quality["mcdc_fill"]["errors"] = sum(1 for f in _fills if f.get("error"))
         # (R31) 설계 범위 밖 강건성 행 — 직접 비교 상수가 설계 범위 밖·타입 안인 입력, 상한에 잘린 점, 실패 unit
         quality["robustness_rows"] = summarize_robustness_rows(units)
+        # (R78) 동작 시나리오 행 — 닿은 문장 · 분기 결과의 분모, 못 닿은 것, 예산 · 상한에 잘린 것
+        quality["scenario_rows"] = summarize_scenario_rows(units)
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
     #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
     quality["sequences_beyond_reference_cap"] = (sum(

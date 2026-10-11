@@ -269,7 +269,12 @@ def _seq_unit(name="gt", **kw):
     return unit
 
 
-def test_the_extended_profile_adds_boundary_rows_with_oracle_expectations():
+def test_the_extended_profile_adds_boundary_rows_with_oracle_expectations(monkeypatch):
+    # (R78) the scenario rows already hold both sides of ``g_a > 10`` (10 and 11) and a boundary side equal to a row is
+    #   not added again — this test is about the boundary rows themselves, so the scenario search finds nothing here
+    #   (`test_scenario_rows_r78` covers the two together)
+    monkeypatch.setattr("generators.suts.find_scenarios",
+                        lambda *_a, **_k: {"rows": [], "report": {"status": "searched", "rows": 0}})
     seqs = generate_sequences(_seq_unit(), None, type_cache={}, extended=True)
     rows = [s for s in seqs if s["strategy"].startswith(br.BOUNDARY_PREFIX)]
     assert rows and all(is_extended_strategy(s["strategy"]) and s["tc_profile"] == "extended" for s in rows)

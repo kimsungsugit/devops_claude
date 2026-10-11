@@ -2038,6 +2038,13 @@ def _guard_chain(node):
     (true / false), a loop body (true, at least once), a ``?:`` arm, and an earlier ``if`` in an enclosing block whose one
     arm always leaves the block (``if (x != 3U) { return; }`` — the other outcome leads on). ``switch`` and ``do``
     impose none we can read."""
+    return [(step[1], step[2]) for step in control_steps(node)]
+
+
+def control_steps(node, cases=False):
+    """`_guard_chain` as steps ``("guard", condition, outcome)``, outermost first — the one walk (R78: the scenario search
+    reads the same chain). ``cases``: also ``("case", case_statement)`` where the statement sits under a ``switch`` label
+    (the label it needs the controlling value to select; a fall-through from the label before reaches it too)."""
     chain = []
     child, parent = node, node.parent
     while parent is not None and parent.type != "function_definition":
@@ -2049,20 +2056,22 @@ def _guard_chain(node):
                 if sibling.type == "if_statement" and sibling.child_by_field_name("condition") is not None:
                     cons, alt = sibling.child_by_field_name("consequence"), sibling.child_by_field_name("alternative")
                     if _exits(cons) and not _exits(alt):
-                        early.append((sibling.child_by_field_name("condition"), False))
+                        early.append(("guard", sibling.child_by_field_name("condition"), False))
                     elif alt is not None and _exits(alt) and not _exits(cons):
-                        early.append((sibling.child_by_field_name("condition"), True))
+                        early.append(("guard", sibling.child_by_field_name("condition"), True))
             chain.extend(reversed(early))
         cond = parent.child_by_field_name("condition")
         if parent.type in {"if_statement", "conditional_expression"} and cond is not None and cond != child:
             arms = [(parent.child_by_field_name("consequence"), True), (parent.child_by_field_name("alternative"), False)]
             for arm, outcome in arms:
                 if arm is not None and arm.start_byte <= node.start_byte < arm.end_byte:
-                    chain.append((cond, outcome))
+                    chain.append(("guard", cond, outcome))
         elif parent.type in {"while_statement", "for_statement"} and cond is not None:
             body = parent.child_by_field_name("body")
             if body is not None and body.start_byte <= node.start_byte < body.end_byte:
-                chain.append((cond, True))
+                chain.append(("guard", cond, True))
+        elif cases and parent.type == "case_statement":
+            chain.append(("case", parent))
         child, parent = parent, parent.parent
     return list(reversed(chain))
 

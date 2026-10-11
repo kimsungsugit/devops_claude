@@ -36,6 +36,13 @@ MAX_BASES = 6
 MAX_CONSTANTS = 48
 MAX_VALUE_SET = 64
 MAX_BOUNDARIES = 32
+# (R78) the operating-scenario bases (`find_boundaries` ``extra_bases``): searched after the others, with their own
+#   budget and boundary cap — the first search's result stays what it was without them
+MAX_EXTRA_BASES = 12
+MAX_EXTRA_EVALUATIONS = 1500
+MAX_EXTRA_BOUNDARIES = 32
+# the search's own counters, kept per search when extra bases run (``extra_<name>`` for theirs)
+_PHASE_COUNTERS = ("linear_segments_skipped", "slope_steps_rejected", "bisect_underived", "constants_capped_inputs")
 
 _COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 # (review C1) string and character literals hold digits that are not constants (``"08:05"``, ``'\012'``)
@@ -473,7 +480,8 @@ def blank_fill(domains: dict[str, Any], defaults: dict[str, int] | None) -> dict
 
 def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: dict[str, Any],
                     outputs: list[str], existing: list[dict[str, Any]] | None = None,
-                    defaults: dict[str, int] | None = None) -> dict[str, Any]:
+                    defaults: dict[str, int] | None = None,
+                    extra_bases: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """``{"rows": [{"inputs", "variable", "side", "lo", "hi", "base", "outputs_changed", "filled"}], "report": {...}}``.
 
     ``bases``: input vectors (``{"inputs": {var: value}, "strategy": name}``) in priority order. A base with a value
@@ -488,11 +496,20 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
     reads — with the rest unset, most outputs are underived and no boundary can show). The caller's mid value; in a
     range wide enough each blank input is moved by its position so two inputs a branch switches between differ
     (``gain = T < 11 ? G_M30 : G_M10`` shows no step when both hold the same value). Rows name what was filled.
+    ``extra_bases`` (R78): further bases — the operating-scenario rows — searched **after** the ``bases`` search, which
+    runs exactly as without them (its ranking, budget and cap untouched: a boundary it finds is found the same way), with
+    a budget and a boundary cap of their own (``MAX_EXTRA_*``), up to ``MAX_EXTRA_BASES`` of them in order; a boundary or a
+    vector the first search found is not added again. Their counts are the report's ``extra_*`` keys (bases, evaluations,
+    boundaries, budget and cap flags, and the per-search counters `_PHASE_COUNTERS`); ``status`` and
+    ``oracle_unsupported_reason`` describe the two searches together (the oracle's memo is shared).
     """
     report = {"status": "searched", "evaluations": 0, "bases": 0, "bases_available": 0, "boundaries": 0, "rows": 0,
               "budget_exhausted": False, "evaluation_budget_exhausted": False, "boundary_cap_reached": False,
               "constants": 0, "constants_total": 0, "value_sets_capped": 0, "linear_segments_skipped": 0,
-              "slope_steps_rejected": 0, "bisect_underived": 0}
+              "slope_steps_rejected": 0, "bisect_underived": 0, "extra_bases": 0, "extra_bases_available": 0,
+              "extra_evaluations": 0, "extra_boundaries": 0, "extra_evaluation_budget_exhausted": False,
+              "extra_boundary_cap_reached": False, **{"extra_" + k: 0 for k in _PHASE_COUNTERS}}
+    phase = [0]   # 0: the bases · 1: the extra bases (R78)
     if not unit.get("source_text") or not scope_matches(unit):
         return {"rows": [], "report": {**report, "status": "no_project_scope"}}
     if not outputs or not domains:
@@ -517,11 +534,14 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
         keys = [tuple(sorted(v.items())) for v in vectors]
         todo = list({k: v for v, k in zip(vectors, keys, strict=True) if k not in memo}.items())
         if budget[0] < len(todo):
-            report["budget_exhausted"] = report["evaluation_budget_exhausted"] = True
+            if phase[0]:
+                report["extra_evaluation_budget_exhausted"] = True
+            else:
+                report["budget_exhausted"] = report["evaluation_budget_exhausted"] = True
             raise _Stop
         if todo:
             budget[0] -= len(todo)
-            report["evaluations"] += len(todo)
+            report["extra_evaluations" if phase[0] else "evaluations"] += len(todo)
             results = evaluate_outputs(unit, [v for _k, v in todo], [outputs] * len(todo))
             for (k, _v), r in zip(todo, results, strict=True):
                 memo[k] = _signature(r, outputs)
@@ -530,17 +550,23 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
         return [memo[k] for k in keys]
 
     fill = _fill_values(axes, defaults)
-    usable: list[tuple[dict[str, int], str, list[str]]] = []
-    for base in bases:
-        values = {k: _as_int(v) for k, v in (base.get("inputs") or {}).items()}
-        if any(v is None for v in values.values()) or any(k in axes and not axes[k].contains(v)
-                                                           for k, v in values.items()):
-            continue
-        filled = [k for k in fill if k not in values]
-        values = {**{k: fill[k] for k in filled}, **values}
-        if not any(k in axes for k in values) or values in [u[0] for u in usable]:
-            continue
-        usable.append((values, str(base.get("strategy") or ""), filled))
+
+    def prepare(candidates, taken):
+        """The usable bases among ``candidates`` (values inside the domains, filled), none equal to one in ``taken``."""
+        out: list[tuple[dict[str, int], str, list[str]]] = []
+        for base in candidates or ():
+            values = {k: _as_int(v) for k, v in (base.get("inputs") or {}).items()}
+            if any(v is None for v in values.values()) or any(k in axes and not axes[k].contains(v)
+                                                               for k, v in values.items()):
+                continue
+            filled = [k for k in fill if k not in values]
+            values = {**{k: fill[k] for k in filled}, **values}
+            if not any(k in axes for k in values) or values in [u[0] for u in out] or values in taken:
+                continue
+            out.append((values, str(base.get("strategy") or ""), filled))
+        return out
+
+    usable = prepare(bases, [])
     report["bases_available"] = len(usable)
     if len(usable) > MAX_BASES:
         # A base that reaches no derived output hides every boundary behind it (``DeviceType`` at its mid value is no
@@ -559,7 +585,11 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
         usable = [head[i] for i in first + repeats] + usable[len(head):]
     usable = usable[:MAX_BASES]
     report["bases"] = len(usable)
-    if not usable:
+    extra = prepare(extra_bases, [u[0] for u in usable])
+    report["extra_bases_available"] = len(extra)
+    extra = extra[:MAX_EXTRA_BASES]
+    report["extra_bases"] = len(extra)
+    if not usable and not extra:
         return {"rows": [], "report": {**report, "status": "no_usable_base"}}
 
     def one(vector: dict[str, int]) -> tuple:
@@ -618,8 +648,8 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
         again = (far - right_v) if right_v is not None else (left_v - far)
         return again != step
 
-    try:
-        for values, strategy, filled in usable:
+    def search(group, cap):
+        for values, strategy, filled in group:
             for var in [k for k in values if k in axes]:
                 axis = axes[var]
                 if axis.values is not None:
@@ -664,12 +694,31 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
                             rows.append({"inputs": vector, "variable": var, "side": side, "lo": lo, "hi": hi,
                                          "base": strategy, "outputs_changed": [outputs[j] for j in changed],
                                          "filled": {f: vector[f] for f in filled if f != var}})
-                        report["boundaries"] += 1
-                        if report["boundaries"] >= MAX_BOUNDARIES:
-                            report["budget_exhausted"] = report["boundary_cap_reached"] = True
+                        report["extra_boundaries" if phase[0] else "boundaries"] += 1
+                        if report["extra_boundaries" if phase[0] else "boundaries"] >= cap:
+                            if phase[0]:
+                                report["extra_boundary_cap_reached"] = True
+                            else:
+                                report["budget_exhausted"] = report["boundary_cap_reached"] = True
                             raise _Stop
+
+    try:
+        search(usable, MAX_BOUNDARIES)
     except _Stop:
         pass
+    if extra:
+        # (R78) the extra bases: after the first search, which ran as without them — a budget and a cap of their own; the
+        #   first search's counters stay its own (review R78 W3: they rose with the second search)
+        phase[0] = 1
+        budget[0] = MAX_EXTRA_EVALUATIONS
+        first = {k: report[k] for k in _PHASE_COUNTERS}
+        try:
+            search(extra, MAX_EXTRA_BOUNDARIES)
+        except _Stop:
+            pass
+        for k in _PHASE_COUNTERS:
+            report["extra_" + k] = report[k] - first[k]
+            report[k] = first[k]
     if not memo and report["evaluation_budget_exhausted"]:
         report["status"] = "budget_exhausted_before_search"   # (review round 3 I1) nothing was asked, nothing is known
     elif not memo or all(all(v is None for v in sig) for sig in memo.values()):

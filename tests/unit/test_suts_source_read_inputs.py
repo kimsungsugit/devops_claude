@@ -202,7 +202,11 @@ def test_an_added_input_in_a_reference_row_does_not_turn_a_derived_slot_into_und
     assert "undefined_behavior" in oat_max["expected_evidence"]["g_o"]["reason"]   # the extreme is still exercised
 
 
-def test_a_read_behind_a_newly_opened_path_is_added_in_the_next_round():
+def test_a_read_behind_a_newly_opened_path_is_added_in_the_next_round(monkeypatch):
+    # (R78) the scenario search sees `g_step` behind `s_state` in the first round already (`needed_inputs`) — this test
+    #   is about the rounds the rows alone need, so the search finds nothing here (`test_scenario_rows_r78` has both)
+    monkeypatch.setattr("generators.suts.find_scenarios",
+                        lambda *_a, **_k: {"rows": [], "report": {"status": "searched", "rows": 0}})
     unit = _unit("chain", ["g_a"])
     seqs = _complete(unit)
     rec = unit["source_read_inputs"]
@@ -434,6 +438,7 @@ def test_the_summary_counts_units_names_reasons_and_what_remains():
         "units": 2, "units_with_added": 1, "names_added": 2, "slots_first_seen": 4,
         "not_added": {"float_object": 2, "input_columns_full": 1}, "units_input_columns_full": 1, "max_rounds": 2,
         "names_added_for_unwritten_outputs": 0,   # (backlog 2-c)
+        "names_added_by_scenario_search": 0,      # (R78)
         "round_cap": suts._SOURCE_READ_ROUNDS, "units_round_cap_reached": 0, "names_beyond_cap": 0,   # (R59)
         "units_with_remaining": 1, "names_remaining": 1, "errors": 0}
 
@@ -535,8 +540,11 @@ def test_a_decision_on_an_added_input_says_why_it_has_no_mcdc_design_and_the_ref
     assert unit["mcdc_design"]["source_read_pass"] == {"error": "RuntimeError"}
 
 
-def test_a_second_round_keeps_the_design_list_of_the_first():
+def test_a_second_round_keeps_the_design_list_of_the_first(monkeypatch):
     # review R2 W4' N6: overwriting `design_input_vars` in round 2 would bring round-1 inputs into the catalog
+    # (R78) without the scenario search — it names `g_step` in round 1 already, and this test needs a second round
+    monkeypatch.setattr("generators.suts.find_scenarios",
+                        lambda *_a, **_k: {"rows": [], "report": {"status": "searched", "rows": 0}})
     ref_unit = _unit("chain", ["g_a"])
     ref = generate_sequences(ref_unit, None, type_cache={})
     unit = _unit("chain", ["g_a"])

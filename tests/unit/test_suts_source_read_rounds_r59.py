@@ -9,9 +9,20 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from generators import c_project_context as cpc
 from generators import suts
 from generators.suts import complete_source_read_inputs, generate_sequences, summarize_source_read_inputs
+
+
+@pytest.fixture(autouse=True)
+def _rows_alone(monkeypatch):
+    """(R78) The scenario search names every object behind the branch chain in the first round (`needed_inputs` — the
+    runs that fork on `g_b` read `g_c` … `g_e` too); these tests are about the rounds the rows alone need, so the search
+    finds nothing here. `test_scenario_rows_r78` has the search's own round."""
+    monkeypatch.setattr(suts, "find_scenarios",
+                        lambda *_a, **_k: {"rows": [], "reached_vectors": [], "report": {"status": "searched", "rows": 0}})
 
 ROOT = os.path.join(os.sep, "proj")
 COMMON = """#ifndef COMMON_H

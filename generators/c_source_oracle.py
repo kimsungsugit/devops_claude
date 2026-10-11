@@ -382,6 +382,8 @@ class _Interp:
         self.watch: dict | None = None
         # (R2c) control conditions whose outcome to record (``if``/loop/``?:`` conditions guarding a watched decision)
         self.guards: dict = {}
+        # (R78) statements whose execution to record — ``{(start, end, type): ("reach", index)}`` (see `run`)
+        self.statement_marks: dict = {}
         # (R40) pointer parameter → the layout of the pointee the sequence set up for it (`pointee_binding`)
         self.pointees: dict[str, dict] = {}
         self.function_name = ""
@@ -704,6 +706,13 @@ class _Interp:
         if not active:
             return states
         self.tick()
+        if self.statement_marks and self.raw is self.fn_raw:
+            # (R78) a watched statement this path executes: True when no branch on an unknown value came before it
+            #   (the path is the run's only one so far — the statement is certainly executed), False when it is one fork
+            mark = self.statement_marks.get((node.start_byte, node.end_byte, node.type))
+            if mark is not None:
+                for s in active:
+                    s.decisions.append((mark, ("outcome", not s.forks)))
         out = self.statement(active, node)
         if len(out) + len(rest) > _PATH_BUDGET:
             raise Unsupported("path_budget")
@@ -3573,22 +3582,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             finals = interp.run([state], fn.child_by_field_name("body"))
             if any(s.mode in {"break", "continue"} for s in finals):
                 raise Unsupported("jump_outside_loop")
-            values = {}
-            reads = set().union(*(s.initial_reads for s in finals))   # (backlog 2-c review C1) any path's read
-            escaped = set().union(*(s.escaped for s in finals))       # (review round 2 I-c) any path's escape
-            for name in outs:
-                seen = [_observe(interp, s, name, reads, escaped) for s in finals]
-                unknown = next((v for v in seen if isinstance(v, Unknown)), None)
-                if unknown is not None:
-                    values[name] = {"reason": unknown.reason}
-                elif len(set(seen)) != 1:
-                    forks = next((f for s in finals for f in s.forks), "branch_on_unknown")
-                    values[name] = {"reason": "path_dependent:" + forks}
-                else:
-                    # ``assigned``: some path wrote it; ``unchanged_input``: no path wrote it and the value is the one the
-                    # sequence set (both are code-consistent expectations; the split keeps the second from inflating).
-                    assigned = name == "return" or any(_written(s, name, interp) for s in finals)
-                    values[name] = {"value": seen[0], "basis": "assigned" if assigned else "unchanged_input"}
+            values = _final_outputs(interp, finals, outs)
             possible = sorted({k for s in finals for k in s.possible_ub})
             if interp.stubs_used:
                 record["assumptions"] = list(record["assumptions"]) + [
@@ -3629,6 +3623,29 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             record.update(status="unsupported", reason=reason, outputs={o: {"reason": reason} for o in outs})
         results.append(record)
     return results
+
+
+def _final_outputs(interp, finals, outs):
+    """``{name: {"value", "basis"} | {"reason"}}`` for the outputs ``outs`` after a run ending in the paths ``finals`` —
+    one reading for `evaluate_outputs` and `observe_decisions` (R78: a search that ranks runs by their derived outputs
+    reads them as the evidence will)."""
+    values = {}
+    reads = set().union(*(s.initial_reads for s in finals))   # (backlog 2-c review C1) any path's read
+    escaped = set().union(*(s.escaped for s in finals))       # (review round 2 I-c) any path's escape
+    for name in outs:
+        seen = [_observe(interp, s, name, reads, escaped) for s in finals]
+        unknown = next((v for v in seen if isinstance(v, Unknown)), None)
+        if unknown is not None:
+            values[name] = {"reason": unknown.reason}
+        elif len(set(seen)) != 1:
+            forks = next((f for s in finals for f in s.forks), "branch_on_unknown")
+            values[name] = {"reason": "path_dependent:" + forks}
+        else:
+            # ``assigned``: some path wrote it; ``unchanged_input``: no path wrote it and the value is the one the
+            # sequence set (both are code-consistent expectations; the split keeps the second from inflating).
+            assigned = name == "return" or any(_written(s, name, interp) for s in finals)
+            values[name] = {"value": seen[0], "basis": "assigned" if assigned else "unchanged_input"}
+    return values
 
 
 def _prescan_once(interp, shared):
@@ -3689,7 +3706,8 @@ def _guard_paths(finals, key):
 
 def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
                       decisions: list[dict[str, Any]], guards: list[list] | tuple = (),
-                      step_limit: int | None = None, inert_stub_calls: bool = False) -> list[dict[str, Any]]:
+                      step_limit: int | None = None, inert_stub_calls: bool = False, reach: list[list] | tuple = (),
+                      outputs: list[str] | None = None) -> list[dict[str, Any]]:
     """(R2c) Per input vector: how each decision of the function evaluates on the modeled run.
 
     ``decisions``: ``[{"key": [start, end, type], "atoms": [[start, end, type], ...], "ir": nested list}]`` over the
@@ -3700,6 +3718,10 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
     calls is ``effectful_condition`` for every vector (see `_Interp.atom_effectful`). ``guards``: control conditions
     (``[start, end, type]`` of an ``if``/loop/``?:`` condition) whose outcomes per path are returned under ``"guards"``
     — how far a vector gets towards a decision it does not reach. Never raises.
+
+    (R78) ``reach``: statements (``[start, end, type]``) — per path, one flag per execution under ``"reach"`` (True: no
+    branch on an unknown value before it on that path). ``outputs``: names read after the run as `evaluate_outputs` reads
+    them, under ``"outputs"``. Every supported run also says whether it branched on an unknown value (``"forked"``).
 
     Like `evaluate_outputs` this is a model of the source, not an execution: reachability here is modeled, callee
     effects are the project write closure, and undefined behaviour proven on a run makes that vector unsupported.
@@ -3721,6 +3743,7 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
         guard_keys = {}
         for index, g in enumerate(guards):
             guard_keys[tuple(g)] = ("guard", index)
+        reach_keys = {tuple(k): ("reach", index) for index, k in enumerate(reach)}
         specs, broken = {}, {}
         for index, d in enumerate(decisions):
             node = _node_at(fn, tuple(d["key"]))
@@ -3773,6 +3796,7 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
             interp.function_name = str(unit.get("name") or "")
             interp.watch = specs
             interp.guards = guard_keys
+            interp.statement_marks = reach_keys
             state = _State()
             interp.bind_parameters(state)
             finals = interp.run([state], fn.child_by_field_name("body"))
@@ -3783,6 +3807,13 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
                 record["decisions"][spec["key"]] = _summarize(finals, spec["key"])
             if guard_keys:
                 record["guards"] = {index: _guard_paths(finals, ("guard", index)) for index in range(len(guards))}
+            if reach_keys:
+                record["reach"] = {index: _guard_paths(finals, ("reach", index)) for index in range(len(reach))}
+                # (R78) objects a path read whose initial value the vector does not give — what a search must set too
+                record["initial_reads"] = sorted(set().union(*(s.initial_reads for s in finals)))
+            if outputs is not None:
+                record["outputs"] = _final_outputs(interp, finals, outputs)
+            record["forked"] = any(s.forks for s in finals)
             possible = sorted({k for s in finals for k in s.possible_ub})
             if possible:
                 # Undefined behaviour that depends on an unknown value may happen on this run *after* the decision (an
