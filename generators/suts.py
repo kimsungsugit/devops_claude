@@ -3400,6 +3400,7 @@ def generate_sequences(
         return t
 
     _range_conflicts: List[str] = []
+    _renamed_pointees = set((((unit.get("pointer_parameters") or {}).get("renamed")) or {}).values())
     # (R65) 설계서가 적었지만 읽지 못한 Value Range — 변수 → 사유(`read_value_range`). 값은 다음 출처로 간다.
     _uds_unread: Dict[str, str] = {}
     _pointer_ranges: List[str] = []
@@ -3429,7 +3430,8 @@ def generate_sequences(
             # (R76 N98) 포인터 파라미터에 문서가 적은 범위는 **주소 범위**다(`0 ~ 0xFFFFFFFF`) — 가리키는 타입(`U16`)에
             #   안 들어가는 게 당연하고 문서 오류가 아니다. 값은 예전과 같이 타입 전폭으로 가고(주소로 경계값을 만들지
             #   않는다), 계수만 "문서 오류 후보" 에서 떼어 따로 센다. 가리키는 타입에 **들어가는** 범위는 위에서 이미 쓰였다.
-            _bucket = _pointer_ranges if _is_pointer_decl(v) else _range_conflicts
+            # (R81) a parameter renamed to its pointee (`p` → `p[0]`) carries the design's row of the pointer itself
+            _bucket = _pointer_ranges if _is_pointer_decl(v) or v in _renamed_pointees else _range_conflicts
             if _msg not in _bucket:
                 _bucket.append(_msg)
             return False
@@ -4200,30 +4202,69 @@ def _confirm_observable_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
 #   그 칸이 도출된다. 다만 함수가 읽은 것이 아니므로 입력 목록 결손 소견(`input_list_gaps`)은 읽은 이름만 센다.
 _SOURCE_READ_RE = re.compile("(" + "|".join(re.escape(p[:-1]) for p in (INITIAL_VALUE_PREFIX, UNWRITTEN_OUTPUT_PREFIX))
                              + r"):([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?)(?![\w.\[])")
+# (R81) a pointer parameter's pointee as the reference writes it (`ctx[0].bitcount` · `p[0].b[2]`) — `source_read_names(unit=)`
+_POINTEE_READ_RE = re.compile("(" + "|".join(re.escape(p[:-1]) for p in (INITIAL_VALUE_PREFIX, UNWRITTEN_OUTPUT_PREFIX))
+                              + r"):([A-Za-z_]\w*\[0\](?:\.[A-Za-z_]\w*)*(?:\[\d+\])?)(?![\w.\[])")
 # (R59) 3 → 8: 더한 입력이 연 경로에서 보이는 이름은 분기 깊이만큼 회차가 든다 — 3 회차로는 KJPDS02_PV
 #   `s_MotorSpeedModeSelection_RearSet` 의 `u8g_DoorPreCtrl_CompensateLvl`(넷째 분기)이 남아 그 함수의 기대값이 1 칸뿐이었다
 #   (실험: 8 회차 34 칸). 새 이름이 없는 회차에서 멈추므로 상한은 그런 함수에만 든다.
 _SOURCE_READ_ROUNDS = 8
 
 
-def source_read_names(sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def source_read_names(sequences: List[Dict[str, Any]], unit: Optional[Dict[str, Any]] = None
+                      ) -> Dict[str, Dict[str, Any]]:
     """행이 값을 주지 않았는데 칸이 초기값을 필요로 한 이름 → {"slots": 칸 수, "sequences": [행 번호…], "read": bool}(기대값 근거의
     사유에서). (백로그 2-c) ``read`` 는 한 칸이라도 함수 실행 모델이 그 초기값을 읽어 막혔는지 — 아니면 쓰지 않은 출력의
     최종값(=초기값) 관측에만 필요했다(`UNWRITTEN_OUTPUT_PREFIX`).
 
     2차원 첨자는 이름으로 싣지 않는다(시험 입력 한 칸으로 줄 수 있는 모양이 아니다). 구조체 멤버 경로(`g.a`)는 R39 부터
-    싣는다 — 정본이 `lin_tl_rx_queue.queue_header` 처럼 입력 한 칸으로 쓰고, oracle 이 멤버를 제 이름의 객체로 읽는다."""
+    싣는다 — 정본이 `lin_tl_rx_queue.queue_header` 처럼 입력 한 칸으로 쓰고, oracle 이 멤버를 제 이름의 객체로 읽는다.
+    (R81) ``unit`` 을 주면 그 함수의 포인터 매개변수 대상(`ctx[0].bitcount` · `p[0].b[2]` — 정본이 입력 한 칸으로 쓰는 표기)도
+    싣는다. 주지 않으면 예전 그대로(소견 · 남은 이름은 프로그램 객체만 본다)."""
+    scope = (unit or {}).get("project_scope") if isinstance((unit or {}).get("project_scope"), dict) else {}
     out: Dict[str, Dict[str, Any]] = {}
+    late: Dict[str, Dict[str, Any]] = {}
     for seq in sequences:
         for ev in (seq.get("expected_evidence") or {}).values():
-            for kind, name in _SOURCE_READ_RE.findall(str((ev or {}).get("reason") or "")):
+            for kind, name in _read_names_in(str((ev or {}).get("reason") or ""), unit, scope):
                 rec = out.setdefault(name, {"slots": 0, "sequences": [], "read": False})
                 rec["slots"] += 1
                 # (백로그 2-c) 한 칸이라도 함수 실행 모델이 읽어서 막혔으면 '읽음' — 쓰지 않은 출력의 관측만이면 아님
                 rec["read"] = rec["read"] or kind + ":" == INITIAL_VALUE_PREFIX
                 if seq.get("seq_num") not in rec["sequences"]:
                     rec["sequences"].append(seq.get("seq_num"))
+        if unit is None:
+            continue
+        # (R81) why an object the run wrote stays unknown (`seq["source_written_unknown"]`) — a counter written from its
+        #   own initial value (`s_cnt++`, `ctx->bitcount += n`) is no column yet, so no expected value names that read.
+        #   Only a read the model made (not the initial value an unwritten path leaves for the observation — that one is
+        #   the next round's, once the object is a column: R80), only of an object the output axis may add, only of one
+        #   that is no column yet, and only names no expected value names — with no cells (`slots` 0, as R78's scenario
+        #   names): the names the rows already show keep their counts and order (review R81 C1: counted twice, they
+        #   reordered the added inputs of units with no pointer at all)
+        columns = set(unit.get("output_vars") or ()) | set(seq.get("expected_evidence") or {})
+        for obj, reason in (seq.get("source_written_unknown") or {}).items():
+            if obj in columns or not str(reason).startswith(INITIAL_VALUE_PREFIX) or not scope \
+                    or _unit_object_decl(unit, scope, obj)[1]:
+                continue
+            for _kind, name in _read_names_in(str(reason), unit, scope):
+                rec = late.setdefault(name, {"slots": 0, "sequences": [], "read": True, "written_unknown": 0})
+                rec["written_unknown"] += 1
+                if seq.get("seq_num") not in rec["sequences"]:
+                    rec["sequences"].append(seq.get("seq_num"))
+    out.update({n: r for n, r in late.items() if n not in out})
     return out
+
+
+def _read_names_in(reason: str, unit: Optional[Dict[str, Any]], scope: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """(kind, name) a reason names — program objects (`_SOURCE_READ_RE`) and, with ``unit``, its pointer parameters'
+    pointees (`_POINTEE_READ_RE`, R81)."""
+    found = _SOURCE_READ_RE.findall(reason)
+    if unit is not None and "[0]" in reason:
+        seen = {n for _k, n in found}
+        found += [(k, n) for k, n in _POINTEE_READ_RE.findall(reason)
+                  if n not in seen and _pointee_object_decl(unit, scope, n) is not None]
+    return found
 
 
 _SCOPE_TYPE_KEYS = {(8, False): "uint8_t", (8, True): "int8_t", (16, False): "uint16_t", (16, True): "int16_t",
@@ -4301,6 +4342,51 @@ def _source_object_decl(scope: Dict[str, Any], name: str) -> Tuple[Optional[str]
     return typename, ""
 
 
+def _pointee_object_decl(unit: Dict[str, Any], scope: Dict[str, Any], name: str
+                         ) -> Optional[Tuple[Optional[str], str]]:
+    """(R81) 이 unit 함수의 포인터 매개변수가 가리키는 대상(`p[0]` · `p[0].a` · `p[0].b[2]` — 정본 표기)이면 (선언 타입 이름, "")
+    또는 (None, 더하지 않는 사유), 그 매개변수의 대상 표기가 아니면 None. 타입은 소스의 대상 배치(R40 `_pointee_input`) —
+    대상 멤버를 모델이 모르면 `pointee_member_unmodeled`, volatile · 부동소수는 프로그램 객체와 같은 사유."""
+    from generators.mcdc_design import _POINTEE_INPUT_RE, _pointee_input, _pointer_params
+    m = _POINTEE_INPUT_RE.fullmatch(str(name).strip())
+    fn = str(unit.get("name") or "")
+    if not m or not scope or m.group(1) not in _pointer_params(scope, fn):
+        return None
+    found = _pointee_input(scope, fn, name)
+    if found is None:
+        return None, "pointee_member_unmodeled"
+    t, typename, volatile = found
+    if volatile:
+        return None, "volatile_object"
+    from generators.c_project_context import is_float
+    if is_float(t):
+        return None, "float_object"
+    typename = str(typename or "").strip()
+    return (typename, "") if typename else (None, "no_declared_type")
+
+
+def _unit_object_decl(unit: Dict[str, Any], scope: Dict[str, Any], name: str) -> Tuple[Optional[str], str]:
+    """(R81) 입력 · 출력 보완이 더할 수 있는 객체 — 번역 단위의 프로그램 객체(`_source_object_decl`)와 이 unit 함수의 포인터
+    매개변수 대상(`_pointee_object_decl`). KJPDS02_PV 설계서는 출력 전용 매개변수를 포인터 이름으로만 적었다(`s_sha256_init`
+    의 `ctx`, `s_ApplyTemperatureCompensation` 의 `u16p_Peak`) — 정본은 `ctx[0].state[1]` · `u16p_Peak[0]` 을 관측했다."""
+    pointee = _pointee_object_decl(unit, scope, name)
+    return pointee if pointee is not None else _source_object_decl(scope, name)
+
+
+def _unit_input_types(unit: Dict[str, Any], names: List[str]
+                      ) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]], Dict[str, str]]:
+    """(R81) `scope_input_types` 에 포인터 매개변수 대상을 더한 것 — 대상은 R40 `pointee_input_types`(소스 대상 배치)."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    pointee = [n for n in names if _pointee_object_decl(unit, scope, n) is not None]
+    types, domains, reasons = scope_input_types(unit, [n for n in names if n not in pointee])
+    if pointee:
+        ptypes, pdomains = pointee_input_types(unit, pointee)
+        types.update(ptypes)
+        domains.update(pdomains)
+        reasons.update({n: "type_not_resolved" for n in pointee if n not in ptypes and n not in pdomains})
+    return types, domains, reasons
+
+
 def pointee_input_types(unit: Dict[str, Any], names: List[str]
                         ) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
     """(R40) 포인터 매개변수가 가리키는 대상 입력(`p[0]` · `p[0].a` · `p[0].b[2]`)의 (경계값 표의 타입 키, enum 값 집합) —
@@ -4365,15 +4451,17 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
             except Exception as exc:  # noqa: BLE001 — (review R80 I2) the output axis alone stops; the inputs go on
                 _logger.warning("SUTS 소스가 쓰는 출력 실패(%s): %s", unit.get("name"), exc, exc_info=True)
                 written["error"] = type(exc).__name__
-        found = {**_scenario_needed_names(unit), **source_read_names(sequences)}
+        # (R81) pointees too. A name the rows also read stays the rows' (R78 — `scenario_targets` marks the names only the
+        #   scenario search needed: `names_added_by_scenario_search`; review R81 I-R2-5 reverted for that reason)
+        found = {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}
         inputs = list(unit.get("input_vars") or [])
         new: List[str] = []
         for name, rec in sorted(found.items(), key=lambda kv: (-kv[1]["slots"], kv[0])):
             if name in inputs or name in record["added"] or name in record["not_added"]:
                 continue   # 열은 있는데 그 행이 비운 칸(MC/DC 벡터) — 채움 행의 몫
-            typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
+            typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
             if not why:
-                key, enum, reasons = scope_input_types(unit, [name])
+                key, enum, reasons = _unit_input_types(unit, [name])
                 why = reasons.get(name, "")
             if why:
                 record["not_added"][name] = why
@@ -4413,12 +4501,12 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         #   다음 회차가 더했을 이름이 있는지로 가린다(리뷰 R59 W1: 필요한 회차가 정확히 상한이면 자른 것이 아니다)
         inputs = set(unit.get("input_vars") or [])
         beyond = []
-        for name in {**_scenario_needed_names(unit), **source_read_names(sequences)}:
+        for name in {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}:
             if name in inputs or name in record["added"] or name in record["not_added"]:
                 continue
-            typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
+            typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
             if not why:
-                why = scope_input_types(unit, [name])[2].get(name, "")
+                why = _unit_input_types(unit, [name])[2].get(name, "")
             if not why:
                 beyond.append(name)
         record["round_cap_reached"] = bool(beyond)
@@ -4508,7 +4596,7 @@ def _written_output_candidates(unit: Dict[str, Any], sequences: List[Dict[str, A
     for name, rec in sorted(source_written_names(sequences).items(), key=lambda kv: (-kv[1]["known"], -kv[1]["rows"], kv[0])):
         if name in outputs or name in seen or not rec["known"]:
             continue
-        _typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
+        _typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
         if not why and len(new) >= room:
             why = "output_columns_full"
         if why:
@@ -4529,7 +4617,7 @@ def _add_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]], 
     counts = source_written_names(sequences)
     for name in new:
         record["added"][name] = {"rows": counts[name]["rows"], "rows_known": counts[name]["known"], "round": round_label,
-                                 "type": _source_object_decl(scope, name)[0]}
+                                 "type": _unit_object_decl(unit, scope, name)[0]}
     unit.setdefault("design_output_vars", list(unit.get("output_vars") or []))
     unit["output_vars"] = list(unit.get("output_vars") or []) + new
     return new
@@ -4545,7 +4633,7 @@ def _rewrite_expected_line(seq: Dict[str, Any]) -> None:
     seq["description"] = "\n".join(desc)
 
 
-def _drop_underived_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
+def _drop_underived_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> List[str]:
     """(R80) 더한 출력 중 어느 행도 값을 내지 못한 이름은 다시 뺀다(출력 목록 · 행의 기대값 · 근거 · 설명에서). 그 이름의 쓰지
     않은 경로 초기값으로 입력 보완이 더한 입력(모델에서 읽힌 근거 없이 더한 것)은 남는다 — `input_kept` 로 센다(R59 W3)."""
     record = unit.get("source_written_outputs") or {}
@@ -4554,7 +4642,7 @@ def _drop_underived_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
                if n in added and (ev or {}).get("status") == "derived"}
     drop = [n for n in added if n not in derived]
     if not drop:
-        return
+        return []
     inputs_added = (unit.get("source_read_inputs") or {}).get("added") or {}
     for seq in sequences:
         if any(n in (seq.get("expected") or {}) or n in (seq.get("expected_evidence") or {}) for n in drop):
@@ -4567,6 +4655,7 @@ def _drop_underived_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
         rec["input_kept"] = n in inputs_added and not (inputs_added[n] or {}).get("read_on_model", True)
         record["dropped"][n] = rec
     unit["output_vars"] = [v for v in unit.get("output_vars") or [] if v not in drop]
+    return drop
 
 
 def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4596,7 +4685,24 @@ def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
             record["final_initial_not_in_inputs"] = sorted(n for n in late if any(
                 str((ev or {}).get("reason") or "").startswith(UNWRITTEN_OUTPUT_PREFIX)
                 for s in sequences for k, ev in (s.get("expected_evidence") or {}).items() if k == n))
-        _drop_underived_written_outputs(unit, sequences)
+        dropped = _drop_underived_written_outputs(unit, sequences)
+        scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+        for _again in range(2):
+            if not any(_pointee_object_decl(unit, scope, n) is not None for n in dropped):
+                break
+            # (R81, review I5 · I-R2-1) an observed pointee column set its parameter's pointee up for every row: gone,
+            #   the rows run again as the document now observes them — no value may rest on a harness object no column
+            #   names; a run that drops another parameter's pointee column runs once more
+            sequences = apply_sequence_evidence(unit, sequences, written=True)
+            dropped = _drop_underived_written_outputs(unit, sequences)
+            # (review R81 I-R3-3) the counts of the rows as they now stand
+            record["rows_written_error"] = sum(1 for s in sequences if s.get("source_written_error"))
+            if "final_initial_not_in_inputs" in record:
+                record["final_initial_not_in_inputs"] = sorted(n for n in record["final_initial_not_in_inputs"] if any(
+                    str((ev or {}).get("reason") or "").startswith(UNWRITTEN_OUTPUT_PREFIX)
+                    for s in sequences for k, ev in (s.get("expected_evidence") or {}).items() if k == n))
+        else:
+            record["pointee_rerun_cap_reached"] = any(_pointee_object_decl(unit, scope, n) is not None for n in dropped)
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
         _logger.warning("SUTS 소스가 쓰는 출력 마지막 보완 실패(%s): %s", unit.get("name"), exc, exc_info=True)
         # (review R80 I3) take back what this pass added — by name, not by the list before it (a drop may have run)
@@ -4621,7 +4727,7 @@ def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
     outputs = set(unit.get("output_vars") or [])
     record["never_known"] = sorted(n for n, r in source_written_names(sequences).items()
                                    if not r["known"] and n not in outputs and n not in record["not_added"]
-                                   and scope and not _source_object_decl(scope, n)[1])
+                                   and scope and not _unit_object_decl(unit, scope, n)[1])
     return sequences
 
 
@@ -4752,6 +4858,8 @@ def summarize_source_written_outputs(units: List[Dict[str, Any]]) -> Dict[str, A
             "units_output_columns_full": sum(1 for r in recs if "output_columns_full" in (r.get("not_added") or {}).values()),
             "max_rounds": max((int(r.get("rounds") or 0) for r in recs), default=0),
             "units_round_cap_reached": sum(1 for r in recs if r.get("round_cap_reached")),
+            # (R81 review I-R3-3) the pointee-column drop still dropping after its re-applies
+            "units_pointee_rerun_cap_reached": sum(1 for r in recs if r.get("pointee_rerun_cap_reached")),
             "errors": sum(1 for r in recs if r.get("error") or r.get("final_error"))}
 
 
@@ -4796,10 +4904,15 @@ def input_list_gaps(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Di
     #   있는 이름만)
     final = source_read_names(sequences)
     # (리뷰 2차 I-e) 더한 회차엔 읽힌 근거가 없었어도 마지막 행(MC/DC 벡터가 비운 칸 등)이 읽어 막혔으면 결손이다
+    # (review R81 W6) a pointer parameter's pointee R19 added (`ctx[0].bitcount`) is no program object the input list
+    #   lacks — the design names the parameter; its notation is the pointer-parameter record's (`pointer_parameters`).
+    #   The rule of the loop below (review R81 C-R2-1: cutting at `.` too dropped R39 struct members `g.a`, which are
+    #   objects of their own name)
     gaps: Dict[str, Dict[str, Any]] = {n: {"slots": 0, "sequences": [], "added": True}
                                        for n, a in (rec.get("added") or {}).items()
-                                       if not isinstance(a, dict) or a.get("read_on_model", True)
-                                       or (final.get(n) or {}).get("read")}
+                                       if n.partition("[")[0] in objects
+                                       and (not isinstance(a, dict) or a.get("read_on_model", True)
+                                            or (final.get(n) or {}).get("read"))}
     # (R21 리뷰 W1) 한 행(GLOBAL)이 설정해 열로 보인 이름도, 다른 행이 값 없이 읽으면 입력 목록의 결손이다
     shown = set(((unit.get("row_io_columns") or {}).get("inputs_shown")) or [])
     inputs = set(unit.get("input_vars") or []) - shown
@@ -4844,7 +4957,8 @@ def render_row_io(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict
         for var, ev in (seq.get("expected_evidence") or {}).items():
             if (ev or {}).get("status") == "derived":
                 # (리뷰 I1) 확정의 근거(계산 근거·가정·stub·해석한 callee)는 떼어 낸다 — 미상 칸이 근거를 말하면 안 된다
-                for k in ("basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only"):
+                for k in ("basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only",
+                          "observed_only_pointees"):   # (review R81 I-R3-2)
                     ev.pop(k, None)
                 ev.update(status="unknown", oracle_kind="none", reason=reason)
                 seq.setdefault("expected", {})[var] = f"{VERIFY_PREFIX} {reason}"
@@ -4947,6 +5061,131 @@ def attach_unit_sources(units: List[Dict[str, Any]], source_files: Optional[Dict
                 scopes.values(), only={(str(u.get("source_path") or ""), str(u.get("name") or "")) for u in units
                                        if u.get("project_scope") is not None}))
     return attached
+
+
+def normalize_pointer_parameters(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R81) 설계서가 포인터 매개변수를 **포인터 이름으로만** 적은 입출력(`u16p_Peak` · `ctx`)을 가리키는 대상 표기(정본 표기)로.
+
+    생성기는 그 칸의 값을 가리키는 대상의 값으로 써 왔지만(`_mcdc_declared_domains`), 소스 oracle 은 포인터 자리의 값을 주소로
+    읽어(R40 리뷰 W4 — 행이 적은 `NULL` · 주소) 대상을 만들지 않았다 — KJPDS02_PV 확장(R80 코드)에서 정본만 판별한 변이 137 중
+    ≈92 가 생성 문서에 확정 칸이 하나도 없는 포인터 매개변수 함수(`s_sha256_init` 38 · `s_AutoClose_ApplyTip2Run_Normal` 14 ·
+    `s_ApplyTemperatureCompensation` 12 …)에 있었고, 정본은 `u16p_Peak[0]` · `s32p_speed[0]` · `ctx[0].state[1]` 을 입력 ·
+    기대값으로 적었다.
+
+    - 스칼라 대상(`U16 *u16p_Peak`): `u16p_Peak` → `u16p_Peak[0]`(입력 · 출력 · 설계 범위 · 값 집합의 열쇠). 행의 값은 예전 그대로
+      대상의 값이고, oracle 은 그 값으로 하네스 객체를 만든다.
+    - 구조체 대상 입력(`SHA256_CTX *ctx`): 값 하나로 설정할 수 없다 — 함수 본문이 닿는 대상 멤버(`ctx[0].bitcount` ·
+      `ctx[0].state[0]` …, R40 `_read_pointee_names`)로 바꾸고(입력 열 상한 안 — 설계의 뒤 입력 자리는 남긴다), 닿는 멤버가
+      없으면 뺀다. 함수를 읽지 못해 닿는 멤버를 **모르면** 손대지 않는다(리뷰 R81 W2 — '없음' 과 가른다).
+    - 구조체 대상 출력은 그대로 둔다 — 행이 그 매개변수를 관측하면 oracle 이 대상을 만들고(`_Interp.observes_pointee`), 확장
+      프로파일이 실행이 쓴 멤버를 기대값 열로 더한다(R80 출력 축).
+    대상 배치를 소스가 모르면(void · 미해석 타입 · 전처리 공백) 손대지 않고 사유를 센다. unit 마다 따로 — 한 unit 의 실패는 그
+    unit 만 설계서 이름 그대로 두고 사유를 남긴다(리뷰 R81 W5). 기록 `unit["pointer_parameters"]`, 집계를 돌려준다(품질 리포트
+    · 공시 `pointer_parameters`)."""
+    max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
+    totals: Dict[str, Any] = {"units": 0, "renamed": 0, "struct_inputs_replaced": 0, "struct_inputs_dropped": 0,
+                              "member_inputs_added": 0, "members_over_cap": 0, "struct_outputs_observed": 0,
+                              "unmodeled": Counter(), "errors": 0, "samples": [], "dropped_inputs": []}
+    for unit in units:
+        try:
+            rec = _normalize_unit_pointers(unit, max_inp)
+        except Exception as exc:  # noqa: BLE001 — this unit keeps the design's names; the record says why
+            _logger.warning("SUTS 포인터 매개변수 표기 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            unit["pointer_parameters"] = {"error": type(exc).__name__}
+            totals["errors"] += 1
+            continue
+        if rec is None:
+            continue
+        totals["units"] += 1
+        totals["renamed"] += len(rec["renamed"])
+        totals["struct_inputs_replaced"] += sum(1 for v in rec["replaced"].values() if v)
+        totals["struct_inputs_dropped"] += sum(1 for v in rec["replaced"].values() if not v)
+        totals["dropped_inputs"] += [f"{unit.get('name')}.{p}" for p, v in rec["replaced"].items() if not v]
+        totals["member_inputs_added"] += len(rec["members_added"])
+        totals["members_over_cap"] += len(rec["over_cap"])
+        totals["struct_outputs_observed"] += len(rec["outputs_observed"])
+        totals["unmodeled"].update(v.split(":", 1)[0] for v in rec["unmodeled"].values())
+        if (rec["renamed"] or rec["replaced"]) and len(totals["samples"]) < 6:
+            changes = [f"{p}→{q}" for p, q in rec["renamed"].items()] + \
+                [f"{p}→{'·'.join(v[:2]) + ('…' if len(v) > 2 else '') if v else '(뺌)'}" for p, v in rec["replaced"].items()]
+            totals["samples"].append(f"{unit.get('name')}: {', '.join(changes[:3])}")
+    totals["unmodeled"] = dict(totals["unmodeled"])
+    return totals
+
+
+def _normalize_unit_pointers(unit: Dict[str, Any], max_inp: int) -> Optional[Dict[str, Any]]:
+    """(R81) 한 unit — 바꾼 것의 기록(`unit["pointer_parameters"]`), 포인터 매개변수 이름이 목록에 없으면 None."""
+    from generators.c_source_oracle import Unsupported, _parsed_function
+    from generators.mcdc_design import _pointee_core, _pointer_params, _read_pointee_names
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else None
+    if not scope:
+        return None
+    fn = str(unit.get("name") or "")
+    params = _pointer_params(scope, fn)
+    ins, outs = list(unit.get("input_vars") or []), list(unit.get("output_vars") or [])
+    hit = [n for n in dict.fromkeys(ins + outs) if n in params]
+    if not hit:
+        return None
+    layouts = scope.get("pointee_types") or {}
+    renamed: Dict[str, str] = {}
+    replaced: Dict[str, List[str]] = {}
+    unmodeled: Dict[str, str] = {}
+    accessed: Optional[List[str]] = None
+    unread = ""
+    for p in hit:
+        layout = layouts.get(_pointee_core(params[p])) or {}
+        if not layout or layout.get("reason"):
+            unmodeled[p] = str(layout.get("reason") or "pointee_layout_unknown")
+            continue
+        if set(layout.get("members") or {}) == {""} and not layout.get("arrays"):
+            renamed[p] = p + "[0]"
+            continue
+        if p not in ins:
+            continue
+        if accessed is None and not unread:
+            parser = cpc_shared_parser()
+            if parser is None or not unit.get("source_text"):
+                unread = "function_unread:" + ("tree_sitter_unavailable" if parser is None else "no_source_text")
+            else:
+                raw = str(unit["source_text"]).encode()
+                try:
+                    _root, node, _shared = _parsed_function(parser, raw, fn, scope)
+                    accessed = _read_pointee_names(node.child_by_field_name("body"), raw, scope, fn)
+                except Unsupported as exc:
+                    unread = "function_unread:" + str(exc)
+        if accessed is None:
+            unmodeled[p] = unread   # (review R81 W2) the members it reaches are unknown — the design's name stays
+            continue
+        replaced[p] = [n for n in accessed if n.startswith(p + "[0].")]
+    new_ins: List[str] = []
+    cut: List[str] = []
+    for i, n in enumerate(ins):
+        for m in ([renamed[n]] if n in renamed else replaced[n] if n in replaced else [n]):
+            if m in new_ins:
+                continue
+            if n in replaced and len(new_ins) + (len(ins) - i - 1) >= max_inp:
+                cut.append(m)   # the design's later inputs keep their columns
+                continue
+            new_ins.append(m)
+    if renamed or replaced:
+        unit["input_vars"] = new_ins
+        unit["output_vars"] = list(dict.fromkeys(renamed.get(n, n) for n in outs))
+        # the design's range · value set of the parameter is its pointee's (the cell held the pointee's value); the
+        #   pointee's type comes from the source layout (`pointee_input_types`) — `param_types` keeps the pointer's own
+        #   declaration (`U16 *`) for the readers that ask what the parameter is
+        for key in ("uds_param_info", "value_domains"):
+            table = unit.get(key)
+            if isinstance(table, dict):
+                for p, q in renamed.items():
+                    if p in table and q not in table:
+                        table[q] = table.pop(p)
+    members = {m for v in replaced.values() for m in v}
+    rec = {"design_inputs": ins, "design_outputs": outs, "renamed": renamed, "replaced": replaced, "over_cap": cut,
+           "members_added": [m for m in new_ins if m in members and m not in ins],
+           "outputs_observed": [p for p in outs if p in params and p not in renamed and p not in unmodeled],
+           "unmodeled": unmodeled}
+    unit["pointer_parameters"] = rec
+    return rec
 
 
 def summarize_document_body_projection(units: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -7043,6 +7282,12 @@ def generate_suts(
                                    uds_io_map=_uds_io,
                                    struct_members=report_data.get("struct_member_arrays") or {})
     attach_unit_sources(units, report_data.get("source_files"), report_data.get("project_context"))
+    # (R81) 포인터 이름만 적힌 매개변수 → 가리키는 대상 표기(정본 표기) — 범위(대상 배치)가 붙은 뒤, 행을 만들기 전
+    try:
+        _pointer_parameters = normalize_pointer_parameters(units)
+    except Exception as exc:  # noqa: BLE001 — the names stay as the design wrote them; the report says why
+        _logger.warning("SUTS 포인터 매개변수 표기 실패: %s", exc, exc_info=True)
+        _pointer_parameters = {"error": type(exc).__name__}
 
     if not units:
         _logger.warning("No unit functions found!")
@@ -7376,6 +7621,7 @@ def generate_suts(
     quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(_input_docs["UDS"].get("given")),
                                                    _source_function_names(function_details))
     quality["uds_const_inputs"] = summarize_uds_const_inputs(units)     # (R67)
+    quality["pointer_parameters"] = _pointer_parameters                  # (R81)
     # (R68, 감사 #16) 소스 단계가 끝내 읽지 못한 파일과, 그 파일에 정의가 있어 원문 없이 남은 unit
     quality["source_read_failures"] = summarize_source_read_failures(report_data.get("source_read_failures"), units)
     if (_input_docs["UDS"].get("given") and "uds_unit_io" in (_input_docs["UDS"].get("blocks_unopened") or [])

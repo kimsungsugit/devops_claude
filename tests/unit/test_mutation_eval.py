@@ -127,3 +127,53 @@ def test_the_report_may_not_overwrite_the_generated_suite(tmp_path, tree):
     with pytest.raises(SystemExit, match="input of this run"):
         mutation_eval.main(["--reference", str(ref), "--generated", str(gen), "--source-root", str(tree),
                             "--out", str(gen)])
+
+
+def test_a_suite_does_not_borrow_the_pointee_the_other_suite_observes(tmp_path):
+    # (R81 review W1) observing `p[0]` sets the pointee up (`_Interp.observes_pointee`): each suite's rows observe their
+    #   own columns — the generated rows state `g` only, so `p != 0` stays undecided for them and `g` (a + 1 or a) is no
+    #   value they reproduce; with the union of both suites' columns they ran allocated and took kills on `g`
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "common.h").write_text(COMMON, encoding="utf-8", newline="\n")
+    (root / "unit.c").write_text('#include "common.h"\nU8 g;\n'
+                                 "void f(U16 *p, U8 a) { if (p != 0) { *p = 1U; g = (U8)(a + 1U); } else { g = a; } }\n",
+                                 encoding="utf-8", newline="\n")
+    ref, gen = tmp_path / "ref.xlsm", tmp_path / "gen.xlsm"
+    _reference(ref, [("SwUTC_1", "void f( U16 *p, U8 a )", ["a"], ["p[0]"], [(1, {"a": 5}, {"p[0]": 1})])])
+    _reference(gen, [("SwUTC_1", "void f( U16 *p, U8 a )", ["a"], ["g"], [(1, {"a": 5}, {"g": 6})])])
+    (rec,) = evaluate(str(ref), str(gen), [root], None, derived_only=False)["functions"]
+    assert rec["suite_slots"] == {"reference": 1, "generated": 0}
+    assert not rec["results"].get("killed_by_generated")
+
+
+def test_a_column_no_suite_states_does_not_decide_equivalence(tmp_path):
+    # (R81 review W-R2-1) a row computes every column it has (to set its harness up) — a mutant that changes only a
+    #   column no suite states a value for (`h`: the reference wrote a text) is not "distinguished"
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "common.h").write_text(COMMON, encoding="utf-8", newline="\n")
+    (root / "unit.c").write_text('#include "common.h"\nU8 g;\nU8 h;\nvoid f(U8 a) { g = a; h = (U8)(a + 3U); }\n',
+                                 encoding="utf-8", newline="\n")
+    ref, gen = tmp_path / "ref.xlsm", tmp_path / "gen.xlsm"
+    _reference(ref, [("SwUTC_1", "void f( U8 a )", ["a"], ["g", "h"], [(1, {"a": 5}, {"g": 5, "h": "변화"})])])
+    _reference(gen, [("SwUTC_1", "void f( U8 a )", ["a"], ["g"], [(1, {"a": 5}, {"g": 5})])])
+    (rec,) = evaluate(str(ref), str(gen), [root], None, derived_only=False, sample=0)["functions"]
+    assert not rec["results"].get("distinguished")
+
+
+def test_a_row_observing_its_pointer_output_cell_runs_with_the_pointee(tmp_path):
+    # (R81 review W-R3-1) the generated row's `[검증 필요] pointer_value` cell for `p` is an observation: the row runs
+    #   with `p`'s pointee set up, as the generator derived `g` — so `g` reproduces and counts
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "common.h").write_text(COMMON, encoding="utf-8", newline="\n")
+    (root / "unit.c").write_text('#include "common.h"\nU8 g;\n'
+                                 "void f(U16 *p, U8 a) { if (p != 0) { *p = 1U; g = a; } }\n",
+                                 encoding="utf-8", newline="\n")
+    ref, gen = tmp_path / "ref.xlsm", tmp_path / "gen.xlsm"
+    _reference(ref, [("SwUTC_1", "void f( U16 *p, U8 a )", ["a"], ["p[0]"], [(1, {"a": 5}, {"p[0]": 1})])])
+    _reference(gen, [("SwUTC_1", "void f( U16 *p, U8 a )", ["a"], ["p", "g"],
+                      [(1, {"a": 5}, {"p": "[검증 필요] pointer_value", "g": 5})])])
+    (rec,) = evaluate(str(ref), str(gen), [root], None, derived_only=False, sample=0)["functions"]
+    assert rec["suite_slots"]["generated"] == 1

@@ -1173,7 +1173,11 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             # (R17) 빌드 설정 증거로 #if 를 판정한 unit 의 칸 — 그 unit 의 가정 이름을 모두 싣는다(상한)
             + (f" {_int(ev, 'derived_on_assumed_undefined')}칸은 빌드 설정 증거로 '정의 없음'이라 본 이름에 기댄 #if 판정이 있는 "
                "unit 의 값이다 — unit 단위로 센 상한이라 그 판정이 값에 닿지 않은 칸도 포함한다(아래 '빌드 설정 매크로 판정')."
-               if _int(ev, "derived_on_assumed_undefined") else "")))
+               if _int(ev, "derived_on_assumed_undefined") else "")
+            # (R81) 행이 값을 주지 않고 관측만 해서 할당된 포인터 매개변수 대상에 기댄 행의 칸
+            + (f" {_int(ev, 'derived_on_observed_only_pointee')}칸은 행이 포인터 매개변수의 대상에 값을 주지 않고 관측만 하는 "
+               "행의 값이다 — 시험 하네스가 그 대상을 할당해야 성립한다(행 단위로 센 상한, '포인터 매개변수 표기')."
+               if _int(ev, "derived_on_observed_only_pointee") else "")))
 
     # (R10) 소스 소견 — 기대값을 내다가 증명한 미정의 동작. 결함 **후보**다(입력이 호출 측에서 가능한지는 사람 판단).
     sf = qr.get("source_findings")
@@ -1565,15 +1569,19 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f"(그 출력 때문에 더한 입력이 남은 것 {_show(_int(sw, 'inputs_kept_for_dropped'))})"
                if _int(sw, "inputs_kept_for_dropped") else "")
             + f" · 쓰지만 값이 한 번도 서지 않아 더하지 않은 이름 {_show(_int(sw, 'names_never_known'))}. 함수 실행 모델이 쓴 것만 "
-            "센다 — 행이 닿지 않은 경로의 쓰기, 피호출 함수가 쓰는 객체(단위시험에서 stub), 포인터를 거친 쓰기는 들지 않는다. "
-            "지역·매개변수·const·volatile·부동소수 객체는 더하지 않는다"
+            "센다 — 행이 닿지 않은 경로의 쓰기, 피호출 함수가 쓰는 객체(단위시험에서 stub), 포인터를 거친 쓰기는 들지 않는다(단 "
+            "행이 관측하는 포인터 매개변수가 가리키는 대상 — `p[0]` · `p[0].a` — 은 하네스 객체라 든다: '포인터 매개변수 표기' 항목). "
+            "지역·매개변수 자신·const·volatile·부동소수 객체는 더하지 않는다"
             + (f"(더하지 않은 사유: {_dist(sw_not)})" if sw_not else "") + "."
             + (f" 기대값 열 상한에 막힌 unit {_show(_int(sw, 'units_output_columns_full'))}."
                if _int(sw, "units_output_columns_full") else "")
             + (f" 오류로 더하지 못한 unit {_show(_int(sw, 'errors'))} — 로그에 traceback 이 있다(입력 보완은 계속했다)."
                if _int(sw, "errors") else "")
             + (f" 쓴 객체 기록이 실패한 행 {_show(_int(sw, 'rows_written_error'))} — 그 행의 쓰기는 위 수에 들지 않는다(기대값은 "
-               "그대로)." if _int(sw, "rows_written_error") else ""),
+               "그대로)." if _int(sw, "rows_written_error") else "")
+            + (f" 값이 서지 않아 뺀 포인터 대상 열 때문에 근거를 다시 계산했는데 상한(2 회)에서도 대상 열이 더 빠진 unit "
+               f"{_show(_int(sw, 'units_pointee_rerun_cap_reached'))} — 그 unit 의 일부 값은 빠진 열의 관측이 만든 대상 할당에 "
+               "기댈 수 있다." if _int(sw, "units_pointee_rerun_cap_reached") else ""),
             tone=_tone(bool(_int(sw, "units_output_columns_full")) or bool(_int(sw, "errors"))
                        or bool(_int(sw, "rows_written_error")))))
     # (R19) MC/DC 채움 행 — 확장 프로파일에서만 기록된다
@@ -1646,6 +1654,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
     out.extend(_uds_reading_item(qr.get("uds_reading")))                                         # (R65)
     out.extend(_uds_const_inputs_item(qr.get("uds_const_inputs")))                               # (R67)
+    out.extend(_pointer_parameters_item(qr.get("pointer_parameters")))                          # (R81)
     out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
     out.extend(_source_read_failures_item(qr.get("source_read_failures"), "suts_source_read_failures"))   # (R68)
     out.extend(_pointer_targets_item(qr.get("pointer_targets"), "suts_pointer_targets"))       # (R64)
@@ -2117,6 +2126,38 @@ def _uds_const_inputs_item(block: Any) -> List[Dict[str, Any]]:
         "기대값은 oracle 이 선언의 초기값을 읽을 수 있으면 그 값으로 계산하고, 못 읽으면(2 차원 표 · 풀리지 않는 원소 · 정의가 "
         "다른 빌드에 있음 · 이 단위가 크기를 모르는 extern 표 등) 그 칸을 미상으로 비우고 사유를 적는다(`const_values_unread` · "
         "`array_length_unresolved` 등).")]
+
+
+def _pointer_parameters_item(block: Any) -> List[Dict[str, Any]]:
+    """(R81) 설계서가 포인터 매개변수를 포인터 이름으로만 적은 입출력을 가리키는 대상 표기로 바꾼 것 — 설계서 입력 이름이 바뀌거나
+    빠졌으므로 늘 말한다(리뷰 R81 W5). 해당 unit 이 없고 오류도 없으면 말하지 않는다."""
+    if not isinstance(block, dict) or not (_int(block, "units") or _int(block, "errors") or block.get("error")):
+        return []
+    unmodeled = block.get("unmodeled") if isinstance(block.get("unmodeled"), dict) else {}
+    dropped, over = _int(block, "struct_inputs_dropped"), _int(block, "members_over_cap")
+    errors = _int(block, "errors") or (1 if block.get("error") else 0)
+    samples = [str(x) for x in (block.get("samples") or [])][:_HEAD_N]
+    return [_item(
+        "suts_pointer_parameters", "포인터 매개변수 표기",
+        f"unit {_show(_int(block, 'units'))} · 이름 바꿈 {_show(_int(block, 'renamed'))}",
+        "설계서(SwUDS)는 포인터 매개변수를 포인터 이름으로만 적었다(`u16p_Peak` · `ctx`). 행이 그 칸에 적는 값은 가리키는 대상의 "
+        "값인데 포인터 자리의 값은 주소로 읽혀, 원본 코드 모델이 대상을 만들지 못하면 그 대상에 닿는 기대값이 서지 않는다(KJPDS02_PV "
+        "에서는 그런 함수 여럿의 확정 칸이 0 이었다). 정본처럼 "
+        "가리키는 대상 표기로 적는다: 스칼라 대상은 이름을 바꾸고(`p` → `p[0]` — 설계 범위 · 값 목록도 따라간다) "
+        f"{_show(_int(block, 'renamed'))}, 구조체 대상 입력은 값 하나로 설정할 수 없어 함수 본문이 닿는 대상 멤버(`ctx[0].bitcount` "
+        f"…)로 바꿨다 {_show(_int(block, 'struct_inputs_replaced'))}(더한 멤버 {_show(_int(block, 'member_inputs_added'))}"
+        + (f" · 입력 열 상한에 막힌 멤버 {_show(over)}" if over else "") + ")"
+        + (f", 본문이 대상 멤버에 닿지 않아 뺀 설계 입력 {_show(dropped)}"
+           + (f"({', '.join(str(x) for x in block.get('dropped_inputs') or [])})"
+              if 0 < len(block.get("dropped_inputs") or []) <= 6 else "") if dropped else "")
+        + f". 구조체 대상 출력 {_show(_int(block, 'struct_outputs_observed'))} 은 그대로 두고 그 매개변수를 관측한다 — 확장 "
+        "프로파일은 실행이 쓴 대상 멤버를 기대값 열로 더한다('소스가 써서 더한 기대값'). 행이 대상을 입력이나 기대값으로 적으면 그 "
+        "매개변수는 하네스가 할당한 자기 객체(널 아님)를 가리킨다 — 그 매개변수의 NULL 분기는 이 문서의 행이 시험하지 않는다. 값을 "
+        "주지 않고 관측만으로 할당된 행은 그 사실을 근거(Test Evidence 가정)에 적는다."
+        + (f" 대상 배치를 소스가 모르거나 함수를 읽지 못해 설계서 이름 그대로 둔 매개변수: {_dist(unmodeled)}." if unmodeled else "")
+        + (f" 예: {'; '.join(samples)}." if samples else "")
+        + (f" 오류로 설계서 이름 그대로 둔 unit {_show(errors)} — 로그에 traceback 이 있다." if errors else ""),
+        tone=_tone(bool(dropped) or bool(over) or bool(errors)))]
 
 
 def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:

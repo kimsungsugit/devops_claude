@@ -766,7 +766,7 @@ def test_a_failing_written_record_keeps_the_derived_values(monkeypatch):
     # (review R80 W1) a side record: its failure is counted and the run's values stand
     from generators import c_source_oracle as oracle
 
-    def boom(interp, finals):
+    def boom(interp, finals, *a, **k):   # (R81) `_written_objects` also takes the reasons dict
         raise RuntimeError("probe")
     monkeypatch.setattr(oracle, "_written_objects", boom)
     unit = _unit("tmout2", ["d", "g_tm2"], ["g_t", "return"])
@@ -795,7 +795,7 @@ def test_a_failed_written_record_reaches_the_findings_summary(monkeypatch):
     # (review R80 W-R2-4) both profiles: the rows whose writes are in no finding are counted
     from generators import c_source_oracle as oracle
 
-    def boom(interp, finals):
+    def boom(interp, finals, *a, **k):   # (R81) `_written_objects` also takes the reasons dict
         raise RuntimeError("probe")
     monkeypatch.setattr(oracle, "_written_objects", boom)
     monkeypatch.setattr(suts, "_globals_type_cache", dict(TYPES))

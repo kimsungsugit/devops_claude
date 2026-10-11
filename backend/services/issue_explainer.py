@@ -107,6 +107,10 @@ _RULE_ACTION: Dict[str, str] = {
     "disclosure:suts_output_list_gaps": "함수가 쓰는데 설계서 출력 목록에 없는 객체, 또는 설계서가 적었는데 함수가 쓰지 않는 객체다 — "
                                         "SwUDS 출력 표를 고친다(다른 함수의 출력을 옮겨 적었는지, 읽기만 하는 입력 · 반환값을 "
                                         "출력으로 적었는지 확인). 재생성으로 사라지지 않는다.",
+    # (R81) the design table's notation of pointer parameters — a fact of the design, not a generation deficit
+    "disclosure:suts_pointer_parameters": "설계서가 포인터 매개변수를 포인터 이름으로만 적어 가리키는 대상 표기(`p[0]` · 멤버)로 "
+                                          "바꾸거나 뺐다 — SwUDS 입출력 표에 대상 표기(정본처럼 `p[0]` · `ctx[0].a`)로 적으면 "
+                                          "설계서 이름 그대로 쓴다. 뺀 입력은 함수가 그 대상을 읽지 않는지 확인한다.",
     "disclosure:suts_range_conflicts": "설계서의 값 범위가 선언 타입 폭을 벗어난다 — 설계서와 소스 중 틀린 쪽을 고친다(시험은 타입 폭으로 했다).",
     "disclosure:suts_asil_evidence": "근거 없는 ASIL 이 있다 — 등급을 지어내지 않았으니 SwUDS·SwDS 에서 정하거나 소스에 @asil 을 단다.",
     "disclosure:sts_mapping_basis": "약한 근거(부분 문자열·추측 매칭)로 요구에 붙은 함수가 있다 — 추적성 판정 때 따로 보고, SwDS Related "

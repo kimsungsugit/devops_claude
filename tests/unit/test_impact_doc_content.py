@@ -1472,3 +1472,16 @@ def test_sits_sub_cap_matches_generator_default(monkeypatch):
     assert sub_cap >= _DEFAULT_SUBCASES, (
         f"sub_cap={sub_cap} < 생성기 기본 {_DEFAULT_SUBCASES} — docPartial 상시 참"
     )
+
+
+def test_doc_proposal_names_pointer_parameters_as_the_generated_suts(monkeypatch):
+    # (R81 review W4) the card's SUTS draft runs the same pointer-parameter notation as the document (`p` → `p[0]`,
+    #   struct inputs → members) — else the draft and the document disagree on the column names
+    import generators.suts as gsuts
+    from workflow.impact_orchestrator import _build_doc_proposal
+    _stub_generators(monkeypatch)
+    seen = []
+    monkeypatch.setattr(gsuts, "normalize_pointer_parameters", lambda units: seen.append([u["name"] for u in units]))
+    fd = {"f1": {"name": "s_foo", "prototype": "U16 s_foo(U16 x)", "logic_flow": [], "calls_list": []}}
+    _build_doc_proposal(_proposal_sections(fd), {"s_foo"})
+    assert seen == [["s_foo"]]

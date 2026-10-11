@@ -64,8 +64,9 @@ ASSUMPTIONS = (
     "reaches C objects only through its operands and the names its text mentions; pointer arithmetic stays inside its "
     "object — where the analysis cannot follow, every address-taken object, array and escaped local",
     "a write through a struct member array stays inside that member (beyond it is undefined behaviour)",
-    "a pointer parameter whose pointee the sequence sets (p[0] / p[0].a) points to a harness object of its own — "
-    "not null, not a program object, not another parameter's pointee",
+    "a pointer parameter whose pointee the sequence sets or observes (p[0] / p[0].a as an input or an expected value, "
+    "or the parameter itself as an output) points to a harness object of its own — not null, not a program object, "
+    "not another parameter's pointee",
 )
 
 
@@ -419,6 +420,9 @@ class _Interp:
         self.write_marks: dict = {}
         # (R40) pointer parameter → the layout of the pointee the sequence set up for it (`pointee_binding`)
         self.pointees: dict[str, dict] = {}
+        # (R81) the names the run is observed by (the row's outputs): a pointee the row observes is set up too
+        self.observed: frozenset = frozenset()
+        self.observed_only_pointees: set[str] = set()   # set up because observed, though the row sets none of it
         self.function_name = ""
         # (R16) interprocedural: the evaluation's `_World` (None = callees are effects only, as before), this
         # activation's parameter keys (a callee's ``@param:x`` must not be the caller's) and its step ceiling.
@@ -1699,7 +1703,8 @@ class _Interp:
 
     def pointee_binding(self, ident, typ, quals, name):
         """(R40) The pointee layout of pointer parameter ``name`` (``T *name``, one level) when the sequence sets one of
-        its values (``name[0]`` / ``name[0].a`` — a harness allocates it); None otherwise: the pointer stays unknown."""
+        its values (``name[0]`` / ``name[0].a`` — a harness allocates it) or (R81) observes it (`observes_pointee`);
+        None otherwise: the pointer stays unknown."""
         if ident.type != "pointer_declarator":
             return None
         inner = ident.child_by_field_name("declarator")
@@ -1708,14 +1713,27 @@ class _Interp:
         prefix = name + "[0]"
         if name in self.inputs and not self.row_no_value(self.inputs[name]):
             return None   # (review R40 W4) the row states the pointer itself (``NULL``, an address): not a harness object
-        if not any((k == prefix or str(k).startswith(prefix + ".") or str(k).startswith(prefix + "["))
-                   and self.row_integer(self.inputs[k]) for k in self.inputs):
+        sets = any((k == prefix or str(k).startswith(prefix + ".") or str(k).startswith(prefix + "["))
+                   and self.row_integer(self.inputs[k]) for k in self.inputs)
+        if not sets and not self.observes_pointee(name):
             return None   # (review R40 W4) only a value the row really sets (not ``-``) implies the harness allocated it
         core = " ".join(w for w in _text(typ, self.raw).split() if w not in {"const", "volatile"})
         layout = (self.scope.get("pointee_types") or {}).get(core)
         if not layout or layout.get("reason"):
             return None
+        if not sets:
+            self.observed_only_pointees.add(name)   # (review R81 W3) said in the record's assumptions
         return {**layout, "const": "const" in quals, "volatile": "volatile" in quals}
+
+    def observes_pointee(self, name):
+        """(R81) Whether the row observes what pointer parameter ``name`` points to — an output naming its pointee
+        (``p[0]`` · ``p[0].a`` · ``p[0].b[2]``) or the parameter itself (a design's output table names the out-parameter,
+        not its pointee): a test that states what the function leaves there allocates the object (an expected value on
+        ``p[0].a`` needs one). An out-parameter the function only writes is otherwise never set up — its writes land
+        nowhere the model can place and the observation is unknown (R40 left `out[0]` to this round)."""
+        prefix = name + "[0]"
+        return any(o == name or o == prefix or o.startswith(prefix + ".") or o.startswith(prefix + "[")
+                   for o in self.observed)
 
     def pointee_target(self, state, n, raw):
         """(R40) ``(target, path)`` of an access to a known pointer's pointee — ``*p`` · ``p[0]`` · ``p->a`` ·
@@ -3527,6 +3545,9 @@ def _observe_value(interp, state, name, reads=None, escaped=None):
     if pointee is not None:
         return _unwritten(lambda: interp.read_pointee(state, *pointee), pointee[0], pointee[0][len("@pointee:"):],
                           state, interp, reads, escaped)
+    if str(name).strip() in getattr(interp, "pointees", {}):
+        # (R81) the out-parameter itself, observed: its pointee was set up and is observed by its own names
+        return Unknown("pointer_value")
     # (R39) a struct member ``g.s.x`` / ``g.b[2]`` is a modeled object of its own name
     m = re.fullmatch(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?", str(name).strip())
     if not m:
@@ -3666,6 +3687,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
         try:
             interp = _Interp(fn, raw, scope, dict(inputs or {}), parser, shared)
             interp.function_name = str(unit.get("name") or "")
+            interp.observed = _observed_names(unit, outs)   # (R81) before the parameters bind
             world = None
             if provider is not None:
                 interp.world = world = _World(provider, interp, str(unit.get("source_path") or ""))
@@ -3685,6 +3707,14 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                         for n in sorted(interp.stubs_used))
                     + " (a stub writes no global or static; what it may put through a pointer argument stays unknown)"]
                 record["stubs"] = sorted(interp.stubs_used)
+            if interp.observed_only_pointees:
+                # (review R81 W3) the row sets none of these pointees' values: the harness object rests on what the row
+                #   observes (its expected values name them) — say so on this row's values
+                names = sorted(interp.observed_only_pointees)
+                record["assumptions"] = list(record["assumptions"]) + [
+                    "pointer parameter(s) " + ", ".join(names) + " point to a harness object because the row observes "
+                    "what the function leaves there (its expected values name the pointee); the row sets no value in it"]
+                record["observed_only_pointees"] = names
             if interp.linked_reads:
                 record["assumptions"] = list(record["assumptions"]) + [
                     "const values taken from the one definition in another unit (the source hash covers this function's "
@@ -3711,7 +3741,10 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                           outputs=values, paths=len(finals), possible_undefined_behavior=possible)
             if written:
                 try:
-                    record["written"] = _written_objects(interp, finals)
+                    why: dict[str, str] = {}
+                    record["written"] = _written_objects(interp, finals, why)
+                    if why:
+                        record["written_unknown"] = why   # (R81)
                 except Exception as exc:  # noqa: BLE001 — (review R80 W1) a side record; the derived values stand
                     record["written_error"] = f"oracle_exception:{type(exc).__name__}"
         except Unsupported as exc:
@@ -3746,24 +3779,43 @@ def _final_outputs(interp, finals, outs):
     return values
 
 
-def _written_objects(interp, finals):
+def _observed_names(unit, outs):
+    """(R81) The names a run is observed by: the row's outputs and the unit's (``output_vars`` — every row of a SUTS unit
+    states its output columns, so its searches see the pointees its evidence sets up)."""
+    return frozenset(str(o) for o in outs) | frozenset(str(o) for o in (unit.get("output_vars") or ()))
+
+
+def _written_objects(interp, finals, why=None):
     """(R80) ``{name: known}`` — the program objects of this translation unit some final path of the run *wrote* (a store
-    key: a read is not stored; a parameter, local or pointee is an ``@`` key), ``known`` when the value after the run is
-    one integer on every path (as `_final_outputs` reads an output). An object only a callee's write closure or a pointer
+    key: a read is not stored; a parameter or local is an ``@`` key), ``known`` when the value after the run is one
+    integer on every path (as `_final_outputs` reads an output). An object only a callee's write closure or a pointer
     write may change is havocked where it was stored and never stored otherwise — no value to expect, not here. Only this
-    unit's objects (an interpreted callee of another unit stores its own — R16)."""
-    keys = sorted({k for s in finals for k in s.store if not k.startswith("@")})
+    unit's objects (an interpreted callee of another unit stores its own — R16). (R81) A pointer parameter's pointee the
+    row set up (`pointee_binding`) is the harness object an out-parameter writes: its written members and elements are
+    named as the reference writes them (``p[0]`` · ``p[0].a`` · ``p[0].b[2]``); a whole pointee or nested struct is not.
+    ``why`` (R81): filled with the reason of each one not known — a counter written from its own initial value
+    (``s_cnt++``) names the input it lacks, which no expected value names while the object is no column yet."""
+    keys = sorted({k for s in finals for k in s.store if not k.startswith("@") or k.startswith("@pointee:")})
     if not keys:
         return {}
     reads = set().union(*(s.initial_reads for s in finals))
     escaped = set().union(*(s.escaped for s in finals))
     out = {}
     for key in keys:
-        base = key.split("[", 1)[0]
-        if ("[" in key and base not in interp.arrays) or ("[" not in key and base not in interp.globals):
-            continue
-        seen = [_observe(interp, s, key, reads, escaped) for s in finals]
-        out[key] = not any(isinstance(v, Unknown) for v in seen) and len(set(seen)) == 1
+        if key.startswith("@pointee:"):
+            name = key[len("@pointee:"):]
+            found = _pointee_key(interp, name)
+            if found is None or found[0] != key:
+                continue
+        else:
+            name, base = key, key.split("[", 1)[0]
+            if ("[" in key and base not in interp.arrays) or ("[" not in key and base not in interp.globals):
+                continue
+        seen = [_observe(interp, s, name, reads, escaped) for s in finals]
+        out[name] = not any(isinstance(v, Unknown) for v in seen) and len(set(seen)) == 1
+        if not out[name] and why is not None:
+            unknown = next((v for v in seen if isinstance(v, Unknown)), None)
+            why[name] = unknown.reason if unknown is not None else "path_dependent"
     return out
 
 
@@ -3934,6 +3986,8 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
             if remaining is not None:
                 interp.limit = min(interp.limit, max(remaining // 4, min(remaining, 2_000)))
             interp.function_name = str(unit.get("name") or "")
+            # (R81) a search sees the pointees its rows' evidence will set up — the unit's outputs (and the asked ones)
+            interp.observed = _observed_names(unit, outputs or ())
             interp.watch = specs
             interp.guards = guard_keys
             interp.statement_marks = reach_keys

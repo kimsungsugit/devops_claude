@@ -140,7 +140,9 @@ def _suite_from_workbook(path: str, generated: bool) -> tuple[dict[str, list[dic
                     continue
                 if value is not None and str(value).strip() != "":
                     expected[slot] = value
+            # (R81 review W1) every expected column the row has, stated or not — what the row observes
             suites.setdefault(name, []).append({"inputs": dict(case.get("inputs") or {}), "expected": expected,
+                                                "observed": [str(s) for s in (case.get("expected") or {})],
                                                 "sequence": case.get("sequence_no")})
     return suites, sorted(n for n, k in units_per_name.items() if k > 1)
 
@@ -221,13 +223,21 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
                     cells[label][kind] += 1
                     if v is not None:
                         expected[s] = v
-                cases.append({"inputs": inputs, "expected": expected})
+                cases.append({"inputs": inputs, "expected": expected,
+                              "observed": sorted(set(case.get("observed") or ()) | set(expected))})
             suites[label] = cases
         slots = sorted({s for cases in suites.values() for c in cases for s in c["expected"]})
         names = sorted({k for cases in suites.values() for c in cases for k in c["inputs"]} | set(params))
         vectors = [c["inputs"] for cases in suites.values() for c in cases] + \
             _sample_vectors(names, scope, params, sample, f"{path}:{name}")
-        original = evaluate_outputs(unit, vectors, [slots] * len(vectors))
+        # (R81 review W1) a row runs as its own document's harness: what a row observes sets up a pointer parameter's
+        #   pointee (`_Interp.observes_pointee`) — its own expected columns (a `[검증 필요]` one too: the generator derived
+        #   the row's values observing it), not the other suite's (a kill resting on a pointee only the other suite
+        #   names is not this suite's); the sample vectors observe every stated slot
+        rows_outs = [c["observed"] for cases in suites.values() for c in cases]
+        outs = rows_outs + [slots] * (len(vectors) - len(rows_outs))
+        stated_slots = set(slots)
+        original = evaluate_outputs(unit, vectors, outs)
         base = [{s: o["value"] for s, o in r["outputs"].items() if "value" in o} for r in original]
         # a suite slot counts only where the unmutated function reproduces the stated value (the suite passes)
         passing = {label: [{s: e for s, e in c["expected"].items() if base_row.get(s) == e}
@@ -246,9 +256,12 @@ def evaluate(reference: str, generated: str, roots: list[Path], alignment: dict 
             edited = _apply(raw, mutant)
             munit = dict(unit, source_text=edited.decode("utf-8"),
                          project_scope=dict(scope, main_file_sha256=hashlib.sha256(edited).hexdigest()))
-            got = evaluate_outputs(munit, vectors, [slots] * len(vectors))
+            got = evaluate_outputs(munit, vectors, outs)
             rows = [{s: o["value"] for s, o in r["outputs"].items() if "value" in o} for r in got]
-            distinguished = any(s in b and s in m and b[s] != m[s] for b, m in zip(base, rows, strict=True) for s in m)
+            # (R81 review W-R2-1) judged on the slots a suite states, as before R81 — a row now also computes the columns
+            #   it only observes (text, `[검증 필요]`): those set its harness up but do not decide equivalence
+            distinguished = any(s in b and s in m and b[s] != m[s] for b, m in zip(base, rows, strict=True) for s in m
+                                if s in stated_slots)
             killed, by_slot = {}, {}
             for label, offset in (("reference", 0), ("generated", len(suites["reference"]))):
                 by_slot[label] = sorted({s for i, stated in enumerate(passing[label]) for s, e in stated.items()

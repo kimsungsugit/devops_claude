@@ -131,6 +131,7 @@ def _extreme(domain, v: int) -> bool:
 _COMPARISONS = frozenset({"<", "<=", ">", ">=", "==", "!="})
 # a program object a run read (``g`` · ``g.a.b`` · ``g[2]``) — the oracle's other read marks (``@…``) are not names
 _NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?")
+_POINTEE_NAME = re.compile(r"[A-Za-z_]\w*\[0\](?:\.[A-Za-z_]\w*)*(?:\[\d+\])?")   # (R81) `p[0]` · `p[0].a` · `p[0].b[2]`
 
 
 def _strip(node):
@@ -1063,8 +1064,12 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     for i, target in enumerate(targets[:n_reach]):
         if done[i]:
             continue
-        names = {n for r in reach_runs if touched(r, target) for n in (r.get("initial_reads") or ())
-                 if _NAME.fullmatch(str(n)) and n not in doms}
+        # (R81, review I4) a pointer parameter's pointee the run read (`@pointee:ctx[0].bitcount`) by the reference's name
+        #   — the input completion keeps it only for this unit's pointer parameters (`_unit_object_decl`)
+        names = {m for r in reach_runs if touched(r, target) for n in (r.get("initial_reads") or ())
+                 for m in [str(n)[len("@pointee:"):] if str(n).startswith("@pointee:") else str(n)]
+                 if (_NAME.fullmatch(m) or (str(n).startswith("@pointee:") and _POINTEE_NAME.fullmatch(m)))
+                 and m not in doms}
         for n in names:
             needed[n] = needed.get(n, 0) + 1
     report["needed_inputs"] = dict(sorted(needed.items()))

@@ -1567,6 +1567,7 @@ def _build_doc_proposal(
             determine_gen_method,
             determine_test_method,
             generate_sequences,
+            normalize_pointer_parameters,
         )
         from workflow.impact_doc_draft import build_var_types
 
@@ -1576,6 +1577,8 @@ def _build_doc_proposal(
         _sub_units = collect_unit_functions(_sub_fd, gim, sds_map=_proposal_sds) or []
         # (R80) 문서 생성과 같은 원문 입력 — 소스 단계의 파일당 원문 맵(`source_files`)에서 붙인다.
         attach_unit_sources(_sub_units, sections.get("source_files"), sections.get("project_context"))
+        # (R81, review W4) the same pointer-parameter names as the generated SUTS (`p` → `p[0]`, struct inputs → members)
+        normalize_pointer_parameters(_sub_units)
         for _unit in _sub_units:
             _nm = str(_unit.get("name") or "").strip().lower()
             if _nm not in changed_set or _nm in out["suts"]:
