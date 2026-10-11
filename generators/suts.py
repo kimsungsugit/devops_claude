@@ -33,7 +33,7 @@ from generators.mcdc_design import (
 )
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.scenario_rows import MAX_ROWS as _SCENARIO_MAX_ROWS
-from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, find_scenarios
+from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, _at_home, find_scenarios
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_unit_io import resolve_unit_io
@@ -2513,7 +2513,13 @@ SCENARIO_REPORT_KEYS = ("targets", "statements", "branches", "reached_clean", "r
                         "outside_design_rows", "outside_design_in_range_rows", "outside_design_runs",
                         "outside_design_steps", "outside_design_cut", "outside_design_duplicates",
                         "outside_design_not_reached", "outside_design_pools_capped", "outside_design_starts_capped",
-                        "outside_design_value_sets",
+                        "outside_design_value_sets", "outside_design_enum_inputs", "outside_design_enum_rows",
+                        "outside_design_enum_searched", "outside_design_enum_at_range_end",
+                        "outside_design_enum_type_unresolved", "outside_design_enum_reached",
+                        "outside_design_enum_not_reached", "outside_design_enum_in_range_rows", "outside_design_enum_runs",
+                        "outside_design_enum_steps", "outside_design_enum_cut", "outside_design_enum_duplicates",
+                        "outside_design_enum_pools_capped", "outside_design_enum_starts_capped",
+                        "outside_design_enum_single_value",
                         # (R79) 결함이 드러나는 값 목표(경계 · 쓰기 · 연산) — 따로 센다(자기 예산 · 행 상한)
                         "expose_targets", "expose_boundary", "expose_write", "expose_arith", "expose_covered_before",
                         "expose_reached", "expose_rows", "expose_not_reached", "expose_cut", "expose_unmodeled",
@@ -2528,14 +2534,22 @@ def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {k: sum(int(r.get(k) or 0) for r in reports) for k in SCENARIO_REPORT_KEYS}
     out.update(units=len(units), searched=sum(1 for r in reports if r.get("status") == "searched"),
                units_with_rows=sum(1 for r in reports if r.get("rows") or r.get("outside_design_rows")
-                                   or r.get("outside_design_in_range_rows") or r.get("expose_rows")),
+                                   or r.get("outside_design_in_range_rows") or r.get("expose_rows")
+                                   or r.get("outside_design_enum_rows") or r.get("outside_design_enum_in_range_rows")),
                budget_exhausted=sum(1 for r in reports if r.get("budget_exhausted")
-                                    or r.get("outside_design_budget_exhausted")),
+                                    or r.get("outside_design_budget_exhausted")
+                                    or r.get("outside_design_enum_budget_exhausted")),
                expose_budget_exhausted=sum(1 for r in reports if r.get("expose_budget_exhausted")),
                errors=sum(1 for r in reports if r.get("error") or r.get("outside_design_error")),
+               # (review R80 W-R4-1) the enum search failed alone — the unit keeps the other searches' rows
+               enum_errors=sum(1 for r in reports if r.get("outside_design_enum_error")),
                expose_errors=sum(1 for r in reports if r.get("expose_error")),
+               # (review R80 I-R5-2) a first search without inputs, then the enum search over a one-value design input
+               enum_only_searched=sum(1 for r in reports if r.get("status") != "searched"
+                                      and r.get("outside_design_enum_status") == "searched"),
                not_searched=dict(Counter(str(r.get("status")).split(":", 1)[0] for r in reports
-                                         if r.get("status") not in ("searched", None) and not r.get("error"))),
+                                         if r.get("status") not in ("searched", None) and not r.get("error")
+                                         and r.get("outside_design_enum_status") != "searched")),
                cap_per_unit=_SCENARIO_MAX_ROWS)
     return out
 
@@ -2590,7 +2604,9 @@ def _scenario_outputs(ctx: Dict[str, Any], sequences: List[Dict[str, Any]]) -> L
 
 
 def _scenario_row(sequences: List[Dict[str, Any]], row: Dict[str, Any], strategy: str, outputs: List[str],
-                  var_types: Dict[str, str], outside: Dict[str, int], span: Dict[str, tuple]) -> None:
+                  var_types: Dict[str, str], outside: Dict[str, int], span: Dict[str, tuple],
+                  enums: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+    enums = enums or {}
     inputs = {k: _format_test_value(v, var_types.get(k, "uint8_t")) for k, v in row["inputs"].items()}
     kind = row["target_kind"]
     seen = row.get("exposure") or [None, None]
@@ -2608,7 +2624,16 @@ def _scenario_row(sequences: List[Dict[str, Any]], row: Dict[str, Any], strategy
                 "계산한다")
     else:
         what = f"문장 {row['target_line']}행 `{row['target_text']}`"
-    if outside:
+    if outside and set(outside) & set(enums):
+        # (R80) 열거자 범위 밖 값 — 이름 붙은 열거자가 아닌 값(깨진 · 초기화 안 된 상태)
+        # every outside key is a value-set input here — the enum search widens nothing else (review R80 I-R4-6)
+        shown = ", ".join(f"{k}={x}({_outside_label(enums[k], x)})" for k, x in list(outside.items())[:3] if k in enums)
+        head = (f"열거자 밖 값 동작 시나리오: {what} 에 닿는 행 — 앞의 탐색이 닿지 못한 목표를 값 목록 입력(enum · 상태값)만 그 "
+                "열거자 전부(설계가 범위 · 값 목록을 정했으면 설계 밖 열거자도)와 열거자 범위 ±1(이름 붙은 열거자가 아닌 값 — "
+                "깨진 · 초기화 안 된 상태)로 넓혀 찾았고(설계 범위 입력은 설계 범위 안에서만 움직였다), 목표가 계속 닿는 한 home"
+                f"(설계가 둔 값 · 열거자)으로 되돌린 뒤 남은 값: {shown}. 원본 코드 모델 실행에서 한 경로로(미정 분기 · 미정의 "
+                "동작 없이) 닿는다(FI · ")
+    elif outside:
         shown = ", ".join(f"{k}={x}(설계 {span[k][0]}~{span[k][1]} 밖)" for k, x in list(outside.items())[:3])
         head = (f"설계 범위 밖 동작 시나리오: {what} 에 닿는 행 — 설계 범위 안 값의 탐색이 닿지 못한 목표를 그 입력의 선언 타입 "
                 f"범위로 넓혀 찾았고, 목표가 계속 닿는 한 설계 범위 안으로 되돌린 뒤 남은 값: {shown}. 원본 코드 모델 실행에서 "
@@ -2666,7 +2691,9 @@ def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
     쌍 다음)에 붙는다 — 그 탐색들은 이 행들 없이 돈다(리뷰 R78 C1: 강건성 행의 점을 이 행이 먼저 가져갔다 · W6: 경계 기준 행이
     될 수 있었다). 요약은 `unit["scenario_rows"]` 의 `outside_design_*`."""
     report = unit.get("scenario_rows")
-    if not isinstance(report, dict) or report.get("error") or report.get("status") != "searched":
+    # (review R80 I-R4-7) a first search without inputs (``no_integer_inputs``) may still have a one-value design input —
+    #   the enum search alone, below
+    if not isinstance(report, dict) or report.get("error") or report.get("status") not in ("searched", "no_integer_inputs"):
         return
     var_types = ctx["var_types"]
     domains = _scenario_domains(unit, ctx)
@@ -2682,47 +2709,334 @@ def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
                 isinstance(d.get("type_min"), int) and isinstance(d.get("type_max"), int) and \
                 (d["type_min"], d["type_max"]) != (d.get("min"), d.get("max")):
             wide[v] = (d["type_min"], d["type_max"])
+    # (R80) a value-set input (enum · state values) over its unit's enumerators: the object can hold a value no
+    #   enumerator names — a corrupted or uninitialised state the code's `default:` / last `else` handles (HDPDM01
+    #   `s_BuzzerStateCtrl`: the reference reached its default with 0 and 4 around the enumerators 1 ~ 3) — and, when the
+    #   design narrows it, the enumerators outside the design. Searched by its own search after the design-range one
+    #   (`_append_enum_fi_rows`); such a row is FI like a design-range one (`outside`)
+    enum_why: Dict[str, str] = {}
+    enum_homes: Dict[str, Tuple[List[int], List[int]]] = {}
+    try:
+        # (review R80 I-R4-7) a value-set input the design narrows to ONE value has no first-search domain (one value is
+        #   no domain) — "always X" is where a value outside it matters most: its home is that value
+        singles = _single_value_enum_domains(unit, ctx, domains)
+        enum_wide = _outside_enumerator_domains(unit, {**domains, **singles}, var_types, enum_why,
+                                                ctx.get("enum_sets"), enum_homes)
+    except Exception as exc:  # noqa: BLE001 — (review R80 I-R4-4) the enum search alone is lost, not the design-range one
+        _logger.warning("SUTS 열거자 밖 값 준비 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        report["outside_design_enum_error"] = type(exc).__name__
+        singles, enum_wide = {}, {}
+    report["outside_design_enum_single_value"] = sum(1 for k in singles if k in enum_wide)
     # (review R78 R2 I-R2-6) a design value list (an enum the design restricts, `uds_values`) is not widened — counted
-    report.update(outside_design_inputs=len(wide),
+    report.update(outside_design_inputs=len(wide), outside_design_enum_inputs=len(enum_wide),
+                  # (review R80 W4 · W-R2-2) value-set inputs not widened: nothing left to widen to (every enumerator in
+                  #   the domain, ±1 outside the range) · no declaration gives the type
+                  outside_design_enum_at_range_end=sum(1 for w in enum_why.values() if w == "nothing_to_widen"),
+                  outside_design_enum_type_unresolved=sum(1 for w in enum_why.values() if w == "type_unresolved"),
+                  # (R80) integer design value lists — an enum one is widened above
                   outside_design_value_sets=sum(1 for v, d in domains.items()
                                                 if src.get(v) in ("uds_range", "hsis_range", "uds_values")
+                                                and var_types.get(v) != _ENUM_TYPE
+                                                # (review R80 I-R5-1) an enum element / pointer target the enum
+                                                #   search takes is not counted here too
+                                                and v not in enum_wide and v not in enum_why
                                                 and (isinstance(d, list) or (isinstance(d, dict) and d.get("values")))))
-    if not wide or int(report.get("reached_clean") or 0) >= int(report.get("targets") or 0):
+    first_ran = report.get("status") == "searched"
+    if not (wide or enum_wide) or (first_ran and int(report.get("reached_clean") or 0) >= int(report.get("targets") or 0)):
         return
-    span = {k: (d if isinstance(d, tuple) else (d["min"], d["max"])) for k, d in domains.items() if k in wide}
+    if not first_ran:
+        wide = {}   # no first search: only the enum search (over its one-value inputs) runs
     outputs = _scenario_outputs(ctx, sequences)
-    # the first search's operating vectors first — the climb starts are the first `MAX_STARTS` (review R78 R3 I-R3-1:
-    #   in document order the first scenario row sat past them)
-    existing = [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
-        [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
-    # (review R79 W3) no fault-exposing targets here — a row found over the widened domains is an FI row by what it
-    #   carries; the exposing targets are the first search's
-    again = find_scenarios(unit, {**domains, **wide}, outputs, existing,
-                           covered=existing, home=span, expose=False)
-    rep = again["report"]
-    report.update(outside_design_searched=int(rep.get("targets") or 0) - int(rep.get("covered_before") or 0),
-                  outside_design_reached=int(rep.get("reached_clean") or 0) - int(rep.get("covered_before") or 0),
-                  outside_design_not_reached=int(rep.get("not_reached") or 0)
-                  + int(rep.get("reached_unclean_only") or 0),
-                  outside_design_runs=int(rep.get("runs") or 0), outside_design_steps=int(rep.get("steps") or 0),
-                  outside_design_cut=int(rep.get("cut") or 0), outside_design_duplicates=int(rep.get("duplicates") or 0),
-                  outside_design_budget_exhausted=bool(rep.get("budget_exhausted")),
-                  outside_design_status=str(rep.get("status") or ""),
-                  outside_design_pools_capped=int(rep.get("pools_capped") or 0),
-                  outside_design_starts_capped=int(rep.get("starts_capped") or 0))
-    n_in = sum(1 for s in sequences if str(s.get("strategy") or "").startswith(SCENARIO_PREFIX))
-    n_fi = 0
-    for row in again["rows"]:
-        outside = {k: x for k, x in row["inputs"].items() if k in span and not span[k][0] <= x <= span[k][1]}
-        if outside:
-            strategy = f"{SCENARIO_FI_PREFIX}{n_fi}"
-            n_fi += 1
-        else:
-            strategy = f"{SCENARIO_PREFIX}{n_in}"
-            n_in += 1
-        _scenario_row(sequences, row, strategy, outputs, var_types, outside, span)
-    report["outside_design_rows"] = n_fi
-    report["outside_design_in_range_rows"] = len(again["rows"]) - n_fi
+
+    def existing_rows() -> List[Dict[str, Any]]:
+        # the first search's operating vectors first — the climb starts are the first `MAX_STARTS` (review R78 R3
+        #   I-R3-1: in document order the first scenario row sat past them)
+        return [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
+            [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
+
+    def add_rows(found: List[Dict[str, Any]], span: Dict[str, Any], enums: Dict[str, Dict[str, Any]]) -> int:
+        """The rows a search found — FI (`SCNR_`) when a value outside its home range stays, else in-range (`SCN_`);
+        numbered after the rows already there. The number of FI rows."""
+        n_in = sum(1 for s in sequences if str(s.get("strategy") or "").startswith(SCENARIO_PREFIX))
+        n_fi = sum(1 for s in sequences if str(s.get("strategy") or "").startswith(SCENARIO_FI_PREFIX))
+        fi = 0
+        for row in found:
+            outside = {k: x for k, x in row["inputs"].items() if k in span and not _at_home(span[k], x)}
+            if outside:
+                strategy = f"{SCENARIO_FI_PREFIX}{n_fi + fi}"
+                fi += 1
+            else:
+                strategy = f"{SCENARIO_PREFIX}{n_in}"
+                n_in += 1
+            _scenario_row(sequences, row, strategy, outputs, var_types, outside, span, enums)
+        return fi
+
+    if wide:
+        # (R78) the declared types over the design ranges — this search is as R79 left it; (R80) the enum search is its
+        #   own, after it
+        span = {k: (d if isinstance(d, tuple) else (d["min"], d["max"])) for k, d in domains.items() if k in wide}
+        existing = existing_rows()
+        # (review R79 W3) no fault-exposing targets here — a row found over the widened domains is an FI row by what it
+        #   carries; the exposing targets are the first search's
+        again = find_scenarios(unit, {**domains, **wide}, outputs, existing,
+                               covered=existing, home=span, expose=False)
+        rep = again["report"]
+        report.update(outside_design_searched=int(rep.get("targets") or 0) - int(rep.get("covered_before") or 0),
+                      outside_design_reached=int(rep.get("reached_clean") or 0) - int(rep.get("covered_before") or 0),
+                      outside_design_not_reached=int(rep.get("not_reached") or 0)
+                      + int(rep.get("reached_unclean_only") or 0),
+                      outside_design_runs=int(rep.get("runs") or 0), outside_design_steps=int(rep.get("steps") or 0),
+                      outside_design_cut=int(rep.get("cut") or 0),
+                      outside_design_duplicates=int(rep.get("duplicates") or 0),
+                      outside_design_budget_exhausted=bool(rep.get("budget_exhausted")),
+                      outside_design_status=str(rep.get("status") or ""),
+                      outside_design_pools_capped=int(rep.get("pools_capped") or 0),
+                      outside_design_starts_capped=int(rep.get("starts_capped") or 0))
+        n_fi = add_rows(again["rows"], span, {})
+        report["outside_design_rows"] = n_fi
+        report["outside_design_in_range_rows"] = len(again["rows"]) - n_fi
+    if enum_wide:
+        _append_enum_fi_rows(unit, sequences, report, domains, wide, enum_wide, outputs, existing_rows, add_rows, src,
+                             enum_homes, ctx.get("var_bounds") or {})
+
+
+# (R80) the enum search's own counters — reset together when it fails (review R80 I-R4-5)
+_ENUM_SEARCH_KEYS = ("outside_design_enum_searched", "outside_design_enum_reached", "outside_design_enum_not_reached",
+                     "outside_design_enum_rows", "outside_design_enum_in_range_rows", "outside_design_enum_runs",
+                     "outside_design_enum_steps", "outside_design_enum_cut", "outside_design_enum_duplicates",
+                     "outside_design_enum_pools_capped", "outside_design_enum_starts_capped")
+
+
+def _append_enum_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], report: Dict[str, Any],
+                         domains: Dict[str, Any], wide: Dict[str, Any], enum_wide: Dict[str, List[int]],
+                         outputs: List[str], existing_rows: Callable[[], List[Dict[str, Any]]],
+                         add_rows: Callable[..., int], src: Dict[str, Any],
+                         homes: Dict[str, Tuple[List[int], List[int]]], var_bounds: Dict[str, Any]) -> None:
+    """(R80) 열거자 밖 값 탐색 — 1 · 2차 탐색이 닿지 못한 목표를, 값 목록 입력(enum · 상태값)만 넓힌 값 목록
+    (`_outside_enumerator_domains`)으로 넓혀 한 번 더 찾는다(리뷰 R80 I-R4-6: 설계 범위 입력까지 넓히면 2차 탐색이 예산을 다 쓴
+    목표를 또 찾고, 설계 범위 밖 값만 실은 행을 이 탐색의 행으로 셌다 — 두 축이 함께 필요한 목표는 찾지 않는다). 자기 예산 ·
+    카운터(`outside_design_enum_*`) · 오류(그 행과 카운터만 버림).
+    **2차(설계 범위 밖) 탐색 뒤**에 따로 돈다(R80 측정 r80c: enum 값을 2차 탐색에 섞자 그 탐색의 오르기가 다른 데서 끝나 HDPDM01
+    `s_IsDoorStop` 이 행 하나와 생성 kill 하나를 잃었다 — 기존 탐색은 그대로 두고 더한다, R78 경계 기준과 같은 규칙). 그 앞까지의
+    행이 덮은 목표는 찾지 않는다."""
+    start = len(sequences)
+    try:
+        # (review R80 W-R3-1) an enum's home is the value set the design keeps (or its enumerators) — a design list with a
+        #   gap leaves the enumerator in it outside, a value between enumerators is never at home
+        span: Dict[str, Any] = {k: list(homes[k][0]) for k in enum_wide}
+        existing = existing_rows()
+        found = find_scenarios(unit, {**domains, **enum_wide}, outputs, existing,
+                               covered=existing, home=span, expose=False)
+        rep = found["report"]
+        report.update(
+            outside_design_enum_searched=int(rep.get("targets") or 0) - int(rep.get("covered_before") or 0),
+            outside_design_enum_reached=int(rep.get("reached_clean") or 0) - int(rep.get("covered_before") or 0),
+            outside_design_enum_not_reached=int(rep.get("not_reached") or 0) + int(rep.get("reached_unclean_only") or 0),
+            outside_design_enum_runs=int(rep.get("runs") or 0), outside_design_enum_steps=int(rep.get("steps") or 0),
+            outside_design_enum_cut=int(rep.get("cut") or 0),
+            outside_design_enum_duplicates=int(rep.get("duplicates") or 0),
+            outside_design_enum_budget_exhausted=bool(rep.get("budget_exhausted")),
+            # (review R80 W-R4-2) where the list caps cut — this search
+            outside_design_enum_pools_capped=int(rep.get("pools_capped") or 0),
+            outside_design_enum_starts_capped=int(rep.get("starts_capped") or 0),
+            outside_design_enum_status=str(rep.get("status") or ""))
+        # (review R80 W-R3-2) the label says what the value is outside of: the design range (or value list) when the
+        #   design gave one and the value leaves it, else the enumerators — "inside the design" said when it is
+        info: Dict[str, Dict[str, Any]] = {}
+        for k in enum_wide:
+            b = var_bounds.get(k) or {}
+            design: Any = None
+            if src.get(k) in ("uds_range", "hsis_range") and isinstance(b.get("min"), int) and isinstance(b.get("max"), int):
+                design = (b["min"], b["max"])
+            elif src.get(k) == "uds_values":
+                design = list(homes[k][0])
+            info[k] = {"design": design, "enumerators": (homes[k][1][0], homes[k][1][-1])}
+        fi = add_rows(found["rows"], span, info)
+        report["outside_design_enum_rows"] = fi
+        report["outside_design_enum_in_range_rows"] = len(found["rows"]) - fi
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document or the other searches' rows
+        _logger.warning("SUTS 열거자 밖 동작 시나리오 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        del sequences[start:]
+        # (review R80 I-R4-5) nothing of the dropped search stays — counters, budget, caps
+        for k in _ENUM_SEARCH_KEYS:
+            report[k] = 0
+        report["outside_design_enum_budget_exhausted"] = False
+        report["outside_design_enum_status"] = ""
+        report["outside_design_enum_error"] = type(exc).__name__
+
+
+def _single_value_enum_domains(unit: Dict[str, Any], ctx: Dict[str, Any], domains: Dict[str, Any]
+                               ) -> Dict[str, List[int]]:
+    """(review R80 I-R4-7) Value-set inputs (enum type) without a search domain because the design keeps one value —
+    `_boundary_domains` reads a one-value list as no domain. The same design filter: the design range's enumerators, or
+    the design value list's."""
+    var_types, var_bounds = ctx.get("var_types") or {}, ctx.get("var_bounds") or {}
+    sets = ctx.get("enum_sets") if ctx.get("enum_sets") is not None else (unit.get("value_domains") or {})
+    src = unit.get("bounds_source") or {}
+    out: Dict[str, List[int]] = {}
+    for v in ctx.get("input_vars") or []:
+        if v in domains or var_types.get(v) != _ENUM_TYPE or v in set(ctx.get("unknown") or ()):
+            continue
+        try:
+            vals = sorted({int(x) for x in ((sets.get(v) or {}).get("values") or [])})
+        except (TypeError, ValueError, AttributeError):
+            continue
+        b = var_bounds.get(v) or {}
+        if src.get(v) in ("uds_range", "hsis_range") and isinstance(b.get("min"), int) and isinstance(b.get("max"), int):
+            vals = [x for x in vals if b["min"] <= x <= b["max"]]
+        elif src.get(v) == "uds_values":
+            design = set(((unit.get("uds_param_info") or {}).get(v) or {}).get("values") or [])
+            vals = [x for x in vals if x in design]
+        if len(vals) == 1:
+            out[v] = vals
+    return out
+
+
+def _outside_label(info: Dict[str, Any], x: int) -> str:
+    """(R80 review W-R3-2) What a value-set input's FI value is outside of: the design range or value list when the
+    design gave one and the value leaves it; else the enumerators (with "inside the design" when it is)."""
+    a, b = info["enumerators"]
+    design = info.get("design")
+    if isinstance(design, tuple):
+        if not design[0] <= x <= design[1]:
+            return f"설계 {design[0]}~{design[1]} 밖"
+        return f"열거자 {a}~{b} 밖 · 설계 {design[0]}~{design[1]} 안"
+    if isinstance(design, list):
+        return "설계 값 " + ", ".join(str(v) for v in design) + " 밖"
+    return f"열거자 {a}~{b} 밖"
+
+
+def _outside_enumerator_domains(unit: Dict[str, Any], domains: Dict[str, Any], var_types: Dict[str, str],
+                                why: Optional[Dict[str, str]] = None, enum_sets: Optional[Dict[str, Any]] = None,
+                                homes: Optional[Dict[str, Tuple[List[int], List[int]]]] = None) -> Dict[str, List[int]]:
+    """(R80) 열거자 밖 값 탐색(`_append_enum_fi_rows`)이 넓힐 값 목록 입력 → 넓힌 값 목록: 그 번역 단위의 모든 열거자(`value_domains` — 설계서 범위 · 값 목록이
+    좁힌 입력이면 설계 밖 열거자도, 설계 밖 값이라 FI) ∪ 열거자 범위 ±1(선언 타입 · enum 입력 범위 안). 넓힐 값이 없으면 넣지
+    않는다. (R80 측정) HDPDM01 `s_BuzzerState` 는 SwUDS 범위 0x01~0x03 을 받아(`uds_range`) 설계가 좁힌 목록으로 빠졌다 — enum 의
+    설계 범위는 FI 가 무엇인지 바꾸지 않는다. 정수 입력의 설계 값 목록은 넓히지 않고 센다(R78 I-R2-6, `outside_design_value_sets`)."""
+    out: Dict[str, List[int]] = {}
+    sets = enum_sets if enum_sets is not None else (unit.get("value_domains") or {})
+    types: Dict[str, Dict[str, Any]] = {}
+    for v, d in domains.items():
+        try:
+            if isinstance(d, dict) and d.get("values"):
+                # (review R80 I-R3-2) an element's / a pointer target's / a stub return's enum domain (`_scope_domain`):
+                #   the values inside its min ~ max are home; (I-R4-2) every enumerator comes from the enum type (a design
+                #   range has already overwritten ``values``); (I-R4-3) an integer value list is no enum — counted, as R78
+                ctype = d.get("ctype")
+                if not (isinstance(ctype, dict) and ctype.get("enum")):
+                    continue
+                lo_d, hi_d = int(d.get("min")), int(d.get("max"))
+                home = sorted({int(x) for x in d["values"] if lo_d <= int(x) <= hi_d})
+                every = _enumerator_values(unit, ctype) or [int(x) for x in d["values"]]
+                types[v] = ctype
+            elif var_types.get(v) == _ENUM_TYPE and isinstance(d, list) and d:
+                home = sorted({int(x) for x in d})
+                # (review R80 I-R3-3) the generation's value sets (pointer targets too), else the unit's value domains
+                every = [int(x) for x in (((sets.get(v) or (unit.get("value_domains") or {}).get(v)) or {})
+                                          .get("values") or [])]
+            else:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if not home:
+            continue
+        full = sorted(set(every) | set(home))
+        widened, reason = _value_set_widening(unit, v, full, types.get(v))
+        widened = widened or full
+        if widened != home:
+            out[v] = widened
+            if homes is not None:
+                homes[v] = (home, full)
+        elif why is not None:
+            # (review R80 W-R2-2 · I-R3-1) not widened — no declaration gives a usable type, or nothing is left
+            why[v] = reason or "nothing_to_widen"
+    return out
+
+
+def _parameter_ctype(unit: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    """(review R80 W-R2-2) The resolved type of the function's parameter ``name`` (its declaration), or None."""
+    from generators import c_project_context as _cpc
+    from generators.c_source_oracle import Unsupported, _parsed_function
+    from generators.mcdc_design import _function_name, _scope_type, _text
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    parser = _cpc.shared_parser()
+    if not scope or parser is None or not unit.get("source_text"):
+        return None
+    raw = str(unit["source_text"]).encode()
+    try:
+        _root, fn, _shared = _parsed_function(parser, raw, str(unit.get("name") or ""), scope)
+        _, fdecl = _function_name(fn, raw)
+    except (Unsupported, AttributeError, TypeError, ValueError):
+        return None
+    params = fdecl.child_by_field_name("parameters") if fdecl is not None else None
+    for p in params.named_children if params is not None else []:
+        ident, typ = p.child_by_field_name("declarator"), p.child_by_field_name("type")
+        if p.type != "parameter_declaration" or ident is None or ident.type != "identifier" or typ is None:
+            continue
+        if _cpc._declared_name(ident, raw) == name:
+            try:
+                return _scope_type(scope, _text(typ, raw))
+            except _cpc.Unresolved:
+                return None
+    return None
+
+
+def _value_set_ctype(unit: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    """(R80) The declared type of a value-set input — the unit's global, 1-D element, pointer-parameter target or
+    (review R80 W-R2-2) parameter; None when none declares it."""
+    from generators.mcdc_design import _pointee_input
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    base, _, rest = str(name).partition("[")
+    # (review R80 I-R3-6) the function's parameter first — a global of the same name is hidden in the body
+    t = _parameter_ctype(unit, name) if not rest else None
+    if not isinstance(t, dict):
+        rec = ((scope.get("arrays") if rest else scope.get("globals")) or {}).get(base)
+        t = rec.get("type") if isinstance(rec, dict) else None
+    if not isinstance(t, dict) and scope:
+        found = _pointee_input(scope, str(unit.get("name") or ""), name)
+        t = found[0] if found else None
+    return t if isinstance(t, dict) else None
+
+
+def _enum_outside_values(unit: Dict[str, Any], name: str, values: List[int]) -> List[int]:
+    return _value_set_widening(unit, name, values)[0]
+
+
+def _enumerator_values(unit: Dict[str, Any], ctype: Dict[str, Any]) -> List[int]:
+    """(review R80 I-R4-2) Every enumerator of an enum type — the translation unit's declaration (as `_scope_domain`)."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    enum = (scope.get("enum_types") or {}).get(ctype.get("enum")) or {}
+    # the constants table is lazy — its len is 0 until read, so ``or {}`` would drop it
+    consts = scope.get("constants")
+    if consts is None:
+        return []
+    try:
+        return sorted({int(consts[m["name"]]["value"]) for m in enum.get("members") or [] if m.get("name") in consts})
+    except (TypeError, ValueError, KeyError):
+        return []
+
+
+def _value_set_widening(unit: Dict[str, Any], name: str, values: List[int],
+                        ctype: Optional[Dict[str, Any]] = None) -> Tuple[List[int], str]:
+    """(R80) 값 목록 ``values``(열거자 · `#define` 상태값)와 그 범위 ±1(선언 타입 범위 안 — C enum 이면 enum 입력이 가질 수
+    있는 0 ~ 127 안, oracle 의 입력 판정과 같은 `ENUM_INPUT_RANGE`) — 넓힐 값이 없으면 빈 목록. 타입은 선언(전역 · 1차원 원소 ·
+    포인터 매개변수 대상 · 매개변수 — `_value_set_ctype`)에서 — 모르면 넓히지 않는다."""
+    from generators import c_project_context as _cpc
+    # (review R80 I-R4-1) a domain that carries its type (a stub return, an element) is read by it
+    t = ctype if isinstance(ctype, dict) else _value_set_ctype(unit, name)
+    if t is None or _cpc.is_float(t):
+        return [], "type_unresolved"
+    try:
+        lo, hi = _cpc.type_range(t)
+    except (_cpc.Unresolved, KeyError, TypeError, ValueError):
+        return [], "type_unresolved"
+    if t.get("enum"):
+        # (review R80 W4) and inside what an enum input can be — the oracle refuses the rest (`ENUM_INPUT_RANGE`); a
+        #   value set over an integer type (`#define` states — review R80 W-R2-2) has its type's range
+        from generators.c_source_oracle import ENUM_INPUT_RANGE
+        lo, hi = max(lo, ENUM_INPUT_RANGE[0]), min(hi, ENUM_INPUT_RANGE[1])
+    extra = [x for x in (values[0] - 1, values[-1] + 1) if isinstance(lo, int) and isinstance(hi, int) and lo <= x <= hi]
+    return (sorted(set(values) | set(extra)), "") if extra else ([], "nothing_to_widen")
 
 
 def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], input_vars: List[str],
@@ -3247,7 +3561,8 @@ def generate_sequences(
             seqs.append({"seq_num": 4, "inputs": {}, "expected": {},
                          "strategy": "RETURN_CHECK",
                          "description": f"{fn_name}() 반환값 검증: 반환값이 정의된 범위 내 유효한 값임을 확인"})
-        return apply_sequence_evidence(unit, seqs[:max_seq])
+        # (R80) 입출력 없는 unit 도 실행이 쓴 객체를 받는다 — 출력 목록 밖 쓰기 소견(기대 열 보완은 하지 않는다)
+        return apply_sequence_evidence(unit, seqs[:max_seq], written=True)
 
     var_types = {v: _type_of(v) for v in input_vars}
     var_bounds = {v: _bounds_of(v, t) for v, t in var_types.items()}
@@ -3287,6 +3602,10 @@ def generate_sequences(
     #   MC/DC 자리를 밀었다). 그 행에서 더한 입력은 고정값(`_fill_all`)이고 극값은 확장 행(OAT·경계)에서만 움직인다.
     _design_inputs = ([v for v in unit["design_input_vars"] if v in input_vars]
                       if isinstance(unit.get("design_input_vars"), list) else list(input_vars))
+    # (R80 review C1) and the design output list — outputs the source writes (R80) are columns, not structure: a design
+    #   with no outputs keeps its VOID_SIDE_EFFECT row and the BV_*_INV labels' clamp/guard reading
+    _design_out_list = ([v for v in unit["design_output_vars"] if v in output_vars]
+                        if isinstance(unit.get("design_output_vars"), list) else list(output_vars))
     _added_inputs = [v for v in input_vars if v not in set(_design_inputs)]
     _design_toggles = [v for v in _design_inputs if var_types.get(v) != _UNKNOWN_TYPE]
     _toggle_vars = _design_toggles + [v for v in _added_inputs if var_types.get(v) != _UNKNOWN_TYPE]
@@ -3335,7 +3654,7 @@ def generate_sequences(
 
     # GAP 5: Void side-effect — for functions with inputs but no outputs,
     # add sequence using indirect_vars as expected outputs
-    if _design_inputs and not output_vars and indirect_vars:
+    if _design_inputs and not _design_out_list and indirect_vars:
         strategies.append(("VOID_SIDE_EFFECT", "_void_se"))
 
     # GAP 6: MC/DC — 결정식을 **실제로 평가해** 찾은 unique-cause 독립 영향 쌍의 입력 벡터(`generators.mcdc_design`).
@@ -3413,7 +3732,7 @@ def generate_sequences(
                     strategies.append((f"OAT_{t_idx}_{side.upper()}", f"_oat_{t_idx}_{side}"))
 
     # Pre-compute clamp/guard analysis once (avoid repeated DFS per strategy)
-    check_vars = output_vars or input_vars
+    check_vars = _design_out_list or input_vars
     _has_any_clamp = any(_flow_has_clamp_pattern(logic_flow, v) for v in check_vars)
     _has_any_guard = any(_flow_has_guard_clause(logic_flow, v) for v in check_vars)
 
@@ -3700,7 +4019,8 @@ def generate_sequences(
             _logger.warning("SUTS 동작 시나리오 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
             del sequences[_n_before:]
             unit["scenario_rows"] = {"error": type(exc).__name__, "rows": 0}
-    sequences = apply_sequence_evidence(unit, sequences)
+    # (R80) 행의 실행이 쓴 객체도 받는다(`seq["source_written"]`) — 출력 목록 밖 쓰기 소견(두 프로파일) · 확장의 기대 열 보완
+    sequences = apply_sequence_evidence(unit, sequences, written=True)
     if not extended:
         return sequences
     sequences = _prune_mcdc_fill_rows(unit, sequences)
@@ -3755,7 +4075,7 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         if isinstance(unit.get("scenario_rows"), dict):
             unit["scenario_rows"]["outside_design_error"] = type(exc).__name__
     if len(sequences) > n:
-        sequences[n:] = apply_sequence_evidence(unit, sequences[n:])
+        sequences[n:] = apply_sequence_evidence(unit, sequences[n:], written=True)
     if (unit.get("observable_mcdc") or {}).get("searched"):
         try:
             _confirm_observable_rows(unit, sequences)
@@ -4027,12 +4347,24 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
     마지막 행들에서도 값이 없는 이름(`remaining`)."""
     record: Dict[str, Any] = {"added": {}, "not_added": {}, "rounds": 0, "remaining": {}}
     unit["source_read_inputs"] = record
+    # (R80) 소스가 쓰는 출력 — 같은 회차에 더한다(더한 출력을 쓰지 않는 경로의 최종값은 초기값이라 다음 회차의 입력이 된다 —
+    #   백로그 2-c 사유 `unwritten_output_initial_not_in_inputs`)
+    written = _new_written_record()
+    unit["source_written_outputs"] = written
     if not (unit.get("input_vars") or unit.get("output_vars")):
         record["not_added"] = {n: "unit_without_inputs_or_outputs" for n in source_read_names(sequences)}
+        written["not_added"] = {n: "unit_without_inputs_or_outputs" for n in source_written_names(sequences)}
         return sequences
     scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
     max_inp = _INPUT_COL_END - _INPUT_COL_START + 1
     for _round in range(_SOURCE_READ_ROUNDS):
+        new_out: List[str] = []
+        if not written.get("error"):
+            try:
+                new_out = _add_written_outputs(unit, sequences, written, _round + 1)
+            except Exception as exc:  # noqa: BLE001 — (review R80 I2) the output axis alone stops; the inputs go on
+                _logger.warning("SUTS 소스가 쓰는 출력 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+                written["error"] = type(exc).__name__
         found = {**_scenario_needed_names(unit), **source_read_names(sequences)}
         inputs = list(unit.get("input_vars") or [])
         new: List[str] = []
@@ -4067,11 +4399,14 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
                 if prev:
                     unit["design_value_domains"] = {**(unit.get("design_value_domains") or {}), name: prev}
                 unit["value_domains"] = {**(unit.get("value_domains") or {}), name: enum[name]}
-        if not new:
+        if not new and not new_out:
             break
-        unit.setdefault("design_input_vars", list(inputs))
-        unit["input_vars"] = inputs + new
-        record["rounds"] = _round + 1
+        if new:
+            unit.setdefault("design_input_vars", list(inputs))
+            unit["input_vars"] = inputs + new
+            record["rounds"] = _round + 1
+        if new_out:
+            written["rounds"] = _round + 1
         sequences = regenerate()
     else:
         # (R59) 상한 회차까지 이름을 더했다 — 상한이 탐색을 **잘랐는지**는 마지막 행들을 한 번 더 보고(다시 만들지 않고)
@@ -4088,6 +4423,13 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
                 beyond.append(name)
         record["round_cap_reached"] = bool(beyond)
         record["names_beyond_cap"] = beyond
+        # (R80) 출력 축도 같은 질문 — 다음 회차가 더했을 이름(기록은 바꾸지 않는다; 남은 것은 마지막 보완이 더한다)
+        try:
+            written["round_cap_reached"] = (not written.get("error")
+                                            and bool(_written_output_candidates(unit, sequences, written)[0]))
+        except Exception as exc:  # noqa: BLE001 — (review R80 I-R2-7) the output axis alone, as in the rounds
+            _logger.warning("SUTS 소스가 쓰는 출력 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            written["error"] = type(exc).__name__
     _record_remaining(unit, sequences)
     return sequences
 
@@ -4111,11 +4453,306 @@ def _record_remaining(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> 
     objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
     now = set(unit.get("input_vars") or [])
     final = source_read_names(sequences)
-    record["remaining"] = {n: r["slots"] for n, r in final.items() if n not in now and n.partition("[")[0] in objects}
+    # (review R80 W7) a column the last written-output pass added needs its initial value only to observe the paths that
+    #   leave it unwritten — counted there (`final_initial_not_in_inputs`), not as a name the rows read
+    late = {n for n, a in (((unit.get("source_written_outputs") or {}).get("added")) or {}).items()
+            if (a or {}).get("round") == "final"}
+    record["remaining"] = {n: r["slots"] for n, r in final.items() if n not in now and n.partition("[")[0] in objects
+                           and not (n in late and not r.get("read"))}
     for n, added in (record.get("added") or {}).items():
         if not any(n in (q.get("inputs") or {}) for q in sequences):
             record["remaining"][n] = final.get(n, {}).get("slots", 0)
             added["no_value_in_any_row"] = True
+
+
+# ── (R80) 소스가 쓰는 출력 ───────────────────────────────────────────────────────────────────────────────────────────
+# 백로그 2-b(R59 에서 뺀 것)를 함수 실행 모델 위에서 다시 한다: 행의 실행이 실제로 쓴 번역 단위 객체(`apply_sequence_evidence(
+# written=True)` → `seq["source_written"]`) 중 시험 기대 목록에 없는 것. R59 초안은 본문을 걸어 대입을 셌고 비활성 `#if` 팔 ·
+# 버려지는 매크로 인자 안의 대입까지 셌다(리뷰 W1) — 실행 모델은 그 빌드에서 그 경로가 실제로 저장한 객체만 남긴다. 실측(HDPDM01,
+# R79 정본만 판별한 변이): `u8s_SbcmMsg2_LinTmOutCheck` 는 `u8s_SbcmMsg2LinFailTimer` · `u16s_SbcmMsg2LinFailTm` 을 쓰는데
+# SwUDS 출력 표는 형제 함수의 `u8s_SbcmMsgLinFailTimer` · `u16s_SbcmMsgLinFailTm` 을 적었다 — 생성 SUTS 는 함수가 쓰지 않는
+# 변수만 관측해 그 함수의 쓰기 삭제 변이 둘을 정본만 판별했다.
+SOURCE_WRITTEN_PLACEHOLDER = "source_written_output"
+
+
+def _new_written_record() -> Dict[str, Any]:
+    return {"added": {}, "not_added": {}, "dropped": {}, "rounds": 0, "never_known": []}
+
+
+def source_written_names(sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """(R80) 행의 실행이 쓴 프로그램 객체 → {"rows": 쓴 행 수, "known": 그 뒤 값이 하나로 도출된 행 수, "sequences": [행 번호…]}
+    (`seq["source_written"]` — `apply_sequence_evidence(written=True)` 가 단다)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for seq in sequences:
+        for name, known in (seq.get("source_written") or {}).items():
+            rec = out.setdefault(name, {"rows": 0, "known": 0, "sequences": []})
+            rec["rows"] += 1
+            rec["known"] += 1 if known else 0
+            if seq.get("seq_num") not in rec["sequences"]:
+                rec["sequences"].append(seq.get("seq_num"))
+    return out
+
+
+def _written_output_candidates(unit: Dict[str, Any], sequences: List[Dict[str, Any]], record: Dict[str, Any]
+                               ) -> Tuple[List[str], Dict[str, str]]:
+    """(R80) (더할 이름, 더하지 않는 이름 → 사유) — 기록은 바꾸지 않는다. 후보: 출력 목록 밖에서 어느 행의 실행이 쓰고 그 뒤 값이
+    도출된 객체(한 번도 값이 서지 않는 열은 빈칸만 는다 — 다음 회차에 서면 그때), 입력 보완과 같은 규칙(`_source_object_decl` —
+    번역 단위의 스칼라 · 길이 안 1차원 원소, const · volatile · 부동소수 · 선언 타입 없음 제외), 기대값 열 상한 안(R59 W4).
+    값이 선 행이 많은 이름부터."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    outputs = set(unit.get("output_vars") or [])
+    room = _OUTPUT_COL_END - _OUTPUT_COL_START + 1 - len(outputs)
+    seen = set(record["added"]) | set(record["not_added"]) | set(record["dropped"])
+    new: List[str] = []
+    skipped: Dict[str, str] = {}
+    for name, rec in sorted(source_written_names(sequences).items(), key=lambda kv: (-kv[1]["known"], -kv[1]["rows"], kv[0])):
+        if name in outputs or name in seen or not rec["known"]:
+            continue
+        _typename, why = _source_object_decl(scope, name) if scope else (None, "no_project_scope")
+        if not why and len(new) >= room:
+            why = "output_columns_full"
+        if why:
+            skipped[name] = why
+        else:
+            new.append(name)
+    return new, skipped
+
+
+def _add_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]], record: Dict[str, Any],
+                         round_label: Any) -> List[str]:
+    """(R80) 후보를 출력 목록 뒤에 더하고(설계 목록은 `design_output_vars` 에 한 번 남긴다) 기록한다 — 더한 이름."""
+    new, skipped = _written_output_candidates(unit, sequences, record)
+    record["not_added"].update(skipped)
+    if not new:
+        return []
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    counts = source_written_names(sequences)
+    for name in new:
+        record["added"][name] = {"rows": counts[name]["rows"], "rows_known": counts[name]["known"], "round": round_label,
+                                 "type": _source_object_decl(scope, name)[0]}
+    unit.setdefault("design_output_vars", list(unit.get("output_vars") or []))
+    unit["output_vars"] = list(unit.get("output_vars") or []) + new
+    return new
+
+
+def _rewrite_expected_line(seq: Dict[str, Any]) -> None:
+    """설명의 `Expected:` · `근거: 소스 계산` 줄을 지금의 기대값으로 다시 쓴다(`render_row_io` 와 같은 규칙)."""
+    desc = [ln for ln in str(seq.get("description") or "").splitlines() if not ln.startswith(("Expected:", "근거: 소스 계산"))]
+    if seq.get("expected"):
+        desc.append("Expected: " + ", ".join(f"{v}={x}" for v, x in seq["expected"].items()))
+    if any((e or {}).get("status") == "derived" for e in (seq.get("expected_evidence") or {}).values()):
+        desc.append("근거: 소스 계산 (요구 적합성 미검증, 실행 미실시)")
+    seq["description"] = "\n".join(desc)
+
+
+def _drop_underived_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
+    """(R80) 더한 출력 중 어느 행도 값을 내지 못한 이름은 다시 뺀다(출력 목록 · 행의 기대값 · 근거 · 설명에서). 그 이름의 쓰지
+    않은 경로 초기값으로 입력 보완이 더한 입력(모델에서 읽힌 근거 없이 더한 것)은 남는다 — `input_kept` 로 센다(R59 W3)."""
+    record = unit.get("source_written_outputs") or {}
+    added = record.get("added") or {}
+    derived = {n for s in sequences for n, ev in (s.get("expected_evidence") or {}).items()
+               if n in added and (ev or {}).get("status") == "derived"}
+    drop = [n for n in added if n not in derived]
+    if not drop:
+        return
+    inputs_added = (unit.get("source_read_inputs") or {}).get("added") or {}
+    for seq in sequences:
+        if any(n in (seq.get("expected") or {}) or n in (seq.get("expected_evidence") or {}) for n in drop):
+            for n in drop:
+                (seq.get("expected") or {}).pop(n, None)
+                (seq.get("expected_evidence") or {}).pop(n, None)
+            _rewrite_expected_line(seq)
+    for n in drop:
+        rec = added.pop(n)
+        rec["input_kept"] = n in inputs_added and not (inputs_added[n] or {}).get("read_on_model", True)
+        record["dropped"][n] = rec
+    unit["output_vars"] = [v for v in unit.get("output_vars") or [] if v not in drop]
+
+
+def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """(R80, 확장 프로파일) 회차가 끝난 뒤 붙은 행(경계 · 강건성 · 출력 관측 쌍 · 설계 범위 밖 시나리오)의 실행이 쓴 객체까지 —
+    남은 후보를 더하고 모든 행의 근거를 다시 붙인다(새 열의 값; 기존 칸은 같은 입력 · 같은 oracle 이라 그대로). 그 뒤 어느
+    행도 값을 내지 못한 더한 이름은 뺀다. 값이 한 번도 서지 않아 더하지 않은 이름은 `never_known` 으로 센다."""
+    record = unit.get("source_written_outputs")
+    if not isinstance(record, dict) or "added" not in record:
+        return sequences
+    # (review R80 W1 · W-R2-4) rows whose written record failed — counted even when the axis stopped
+    record["rows_written_error"] = sum(1 for s in sequences if s.get("source_written_error"))
+    before = list(unit.get("output_vars") or [])
+    had_design = "design_output_vars" in unit
+    try:
+        # (review R80 I-R2-8) after an error in the rounds: add nothing, but drop what no row derives and count
+        late = [] if record.get("error") else _add_written_outputs(unit, sequences, record, "final")
+        if late:
+            # (review R80 W7) a slot in every row, as the round-added columns have — a row the oracle derives nothing for
+            #   says why (`[검증 필요] <reason>`) instead of a blank
+            for seq in sequences:
+                exp = seq.setdefault("expected", {})
+                for n in late:
+                    exp.setdefault(n, f"{VERIFY_PREFIX} {SOURCE_WRITTEN_PLACEHOLDER}")
+            sequences = apply_sequence_evidence(unit, sequences, written=True)
+            # the paths that leave a late column unwritten need its initial value — no round is left to add it as an
+            #   input: counted here (not as a source-read name left over — review R80 W7)
+            record["final_initial_not_in_inputs"] = sorted(n for n in late if any(
+                str((ev or {}).get("reason") or "").startswith(UNWRITTEN_OUTPUT_PREFIX)
+                for s in sequences for k, ev in (s.get("expected_evidence") or {}).items() if k == n))
+        _drop_underived_written_outputs(unit, sequences)
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 소스가 쓰는 출력 마지막 보완 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        # (review R80 I3) take back what this pass added — by name, not by the list before it (a drop may have run)
+        late = [n for n in unit.get("output_vars") or [] if n not in before] + \
+            [n for n, a in list(record["added"].items()) if a.get("round") == "final"]
+        late = list(dict.fromkeys(late))
+        unit["output_vars"] = [v for v in unit.get("output_vars") or [] if v not in late]
+        if not had_design and not record["added"].keys() - set(late):
+            unit.pop("design_output_vars", None)
+        for n in late:
+            record["added"].pop(n, None)
+            record["dropped"].pop(n, None)
+        record.pop("final_initial_not_in_inputs", None)
+        for seq in sequences:
+            if any(n in (seq.get("expected") or {}) or n in (seq.get("expected_evidence") or {}) for n in late):
+                for n in late:
+                    (seq.get("expected") or {}).pop(n, None)
+                    (seq.get("expected_evidence") or {}).pop(n, None)
+                _rewrite_expected_line(seq)
+        record["final_error"] = type(exc).__name__
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    outputs = set(unit.get("output_vars") or [])
+    record["never_known"] = sorted(n for n, r in source_written_names(sequences).items()
+                                   if not r["known"] and n not in outputs and n not in record["not_added"]
+                                   and scope and not _source_object_decl(scope, n)[1])
+    return sequences
+
+
+def _design_outputs(unit: Dict[str, Any]) -> List[str]:
+    """(R80) 시험 기대 목록의 설계 쪽 — 확장이 더하기 전 목록(`design_output_vars`), 없으면 출력 목록에서 행이 적어 열로 보인
+    이름(R21 `render_row_io`)을 뺀 것."""
+    if unit.get("design_output_vars") is not None:
+        return list(unit["design_output_vars"])
+    shown = set(((unit.get("row_io_columns") or {}).get("outputs_shown")) or [])
+    return [v for v in unit.get("output_vars") or [] if v not in shown]
+
+
+def _containers(name: str) -> List[str]:
+    """The objects ``name`` is part of — ``g.s.a[2]`` → ``g``, ``g.s``, ``g.s.a``; ``g.a[1].b`` → ``g``, ``g.a``,
+    ``g.a[1]`` (review R80 W6 · I-R2-6)."""
+    steps = re.findall(r"\.?[A-Za-z_]\w*|\[\d+\]", name)
+    return ["".join(steps[:i]) for i in range(1, len(steps))]
+
+
+# (review R80 I8) written objects a finding names though no column can take them (no expected value: volatile, float)
+_FINDING_ONLY = frozenset({"volatile_object", "float_object"})
+
+
+def output_list_gaps(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """(R80) 행의 실행이 쓰는데 시험 기대 목록(설계서 출력 표 · 소스 분석)에 없는 프로그램 객체 → {"rows", "known",
+    "sequences", "added", "settable"}(소스 소견의 한 종류, 두 프로파일). 입력 보완과 같은 객체 규칙(`_source_object_decl`) —
+    volatile · 부동소수 객체도 소견에는 든다(`settable` False — 기대 열로는 더하지 않는다, 리뷰 R80 I8). 목록이 그 객체를 담은
+    객체(구조체 · 펼치지 않은 배열)를 적었으면 적은 것이다(리뷰 R80 W6)."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    if not scope:
+        return {}
+    design = set(_design_outputs(unit))
+    added = ((unit.get("source_written_outputs") or {}).get("added")) or {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for n, r in source_written_names(sequences).items():
+        why = _source_object_decl(scope, n)[1]
+        if n in design or any(c in design for c in _containers(n)) or (why and why not in _FINDING_ONLY):
+            continue
+        out[n] = {"rows": r["rows"], "known": r["known"], "sequences": r["sequences"], "added": n in added,
+                  "settable": not why}
+    return out
+
+
+def _function_local_names(unit: Dict[str, Any]) -> Optional[set]:
+    """Names the unit's function declares — parameters and block-scope locals at any depth (`boundary_rows.
+    _declared_locals`); None when the function does not parse."""
+    from generators.boundary_rows import _declared_locals
+    from generators.c_source_oracle import Unsupported, _parsed_function
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    parser = cpc_shared_parser()
+    if parser is None or not unit.get("source_text") or not scope:
+        return None
+    raw = str(unit["source_text"]).encode()
+    try:
+        _root, fn, _shared = _parsed_function(parser, raw, str(unit.get("name") or ""), scope)
+    except Unsupported:
+        return None
+    names = set(_declared_locals(fn.child_by_field_name("body"), raw))
+    stack = [fn.child_by_field_name("declarator")]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        if node.type == "parameter_declaration":
+            d = node.child_by_field_name("declarator")
+            while d is not None and d.type != "identifier":
+                d = d.child_by_field_name("declarator")
+            if d is not None:
+                names.add(raw[d.start_byte:d.end_byte].decode())
+            continue
+        stack.extend(node.named_children)
+    return names
+
+
+def cpc_shared_parser():
+    from generators import c_project_context as _cpc
+    return _cpc.shared_parser()
+
+
+def listed_outputs_not_written(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Tuple[List[str], str]:
+    """(R80) (기대 목록이 적은 이 번역 단위의 객체인데 함수도, 함수가 부르는 함수도 쓰지 않는 것, 판정하지 않은 사유) — 프로젝트
+    쓰기 closure(`scope["effects"]`)로 판정한다. 사유가 있으면 목록은 비고 판정하지 않은 것이다(리뷰 R80 W5 — '없음' 과
+    가른다): closure 없음 · 모르는 피호출 · 포인터 쓰기 · 함수가 지역도 모델 객체도 아닌 이름에 쓴다(그것을 거쳐 쓸 수 있다) ·
+    함수를 읽지 못함. 함수가 선언한 지역 · 매개변수는 쓰기 대상이 아니다(closure 가 블록 안 지역을 쓰기로 셀 수 있다).
+    어느 행의 실행이 쓴 이름도 아니다. 반환값 · stub 표기 · 매개변수 대상은 대상 밖."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    closure = (((scope.get("effects") or {}).get("functions")) or {}).get(str(unit.get("name") or ""))
+    if not isinstance(closure, dict):
+        return [], "no_write_closure"
+    if closure.get("unknown_callees"):
+        return [], "unknown_callees"
+    if closure.get("pointer_write"):
+        return [], "pointer_write"
+    objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {}) | set(scope.get("struct_globals") or {})
+    roots = {re.split(r"[\[.]", str(w), maxsplit=1)[0] for w in closure.get("writes") or ()}
+    if any(w not in objects for w in roots):
+        local = _function_local_names(unit)
+        if local is None:
+            return [], "function_unparsed"
+        if any(w not in objects and w not in local for w in roots):
+            return [], "writes_unmodeled_name"
+    writes = {w for w in roots if w in objects}
+    written = set(source_written_names(sequences))
+    out: List[str] = []
+    for name in _design_outputs(unit):
+        root = re.split(r"[\[.]", name, maxsplit=1)[0]
+        if name == _RETURN_VAR or "()" in name or root not in objects or name in written or root in writes:
+            continue
+        out.append(name)
+    return out, ""
+
+
+def summarize_source_written_outputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """품질 리포트 `source_written_outputs`(확장 프로파일) — 더한 unit · 이름(회차 · 마지막 보완), 값이 안 서 다시 뺀 이름(그 출력
+    때문에 더한 입력이 남은 것 포함), 값이 한 번도 서지 않아 더하지 않은 이름, 더하지 않은 사유, 상한 · 오류."""
+    recs = [u.get("source_written_outputs") for u in units if isinstance(u.get("source_written_outputs"), dict)]
+    not_added = Counter(why for r in recs for why in (r.get("not_added") or {}).values())
+    return {"units": len(recs), "units_with_added": sum(1 for r in recs if r.get("added")),
+            "names_added": sum(len(r.get("added") or {}) for r in recs),
+            "names_added_final": sum(1 for r in recs for a in (r.get("added") or {}).values() if a.get("round") == "final"),
+            "names_dropped_underived": sum(len(r.get("dropped") or {}) for r in recs),
+            "inputs_kept_for_dropped": sum(1 for r in recs for d in (r.get("dropped") or {}).values() if d.get("input_kept")),
+            "names_never_known": sum(len(r.get("never_known") or []) for r in recs),
+            # (review R80 W7) late columns whose unwritten paths need an initial value no round could add
+            "names_final_initial_not_in_inputs": sum(len(r.get("final_initial_not_in_inputs") or []) for r in recs),
+            "rows_written_error": sum(int(r.get("rows_written_error") or 0) for r in recs),
+            "not_added": dict(not_added),
+            "units_output_columns_full": sum(1 for r in recs if "output_columns_full" in (r.get("not_added") or {}).values()),
+            "max_rounds": max((int(r.get("rounds") or 0) for r in recs), default=0),
+            "units_round_cap_reached": sum(1 for r in recs if r.get("round_cap_reached")),
+            "errors": sum(1 for r in recs if r.get("error") or r.get("final_error"))}
 
 
 def extended_unit_sequences(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -4123,21 +4760,25 @@ def extended_unit_sequences(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
     (리뷰 R1 W6: 첫 판은 경계 탐색을 두 번 했다). 입력 보완이 실패하면 그 unit 은 설계 입력 목록 그대로 만든다(선택 확장이 문서를
     잃게 하지 않는다 — R15 규칙)."""
     seqs = generate_sequences(unit, None, extended=True, boundary_rows=False)
+    _keys = ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains",
+             "output_vars", "design_output_vars")   # (R80) the output axis too
     snapshot = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
-                for k in ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains")
-                if (v := unit.get(k)) is not None}
+                for k in _keys if (v := unit.get(k)) is not None}
     try:
         seqs = complete_source_read_inputs(
             unit, seqs, lambda: generate_sequences(unit, None, extended=True, boundary_rows=False))
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
         _logger.warning("SUTS 소스 읽기 입력 보완 실패(%s): %s", unit.get("name"), exc, exc_info=True)
-        for k in ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains"):
+        for k in _keys:
             unit.pop(k, None)
         unit.update(snapshot)
         unit["source_read_inputs"] = {"error": type(exc).__name__, "added": {}, "not_added": {}, "rounds": 0,
                                       "remaining": {}}
+        unit["source_written_outputs"] = {**_new_written_record(), "error": type(exc).__name__}
         seqs = generate_sequences(unit, None, extended=True, boundary_rows=False)
     seqs = append_boundary_rows(unit, seqs)
+    # (R80) 회차 뒤에 붙은 행이 쓴 객체까지 — 경계 · 설계 범위 밖 시나리오 행만 닿는 경로(enum default 등)
+    seqs = complete_source_written_outputs(unit, seqs)
     _record_remaining(unit, seqs)
     return seqs
 
@@ -4208,12 +4849,7 @@ def render_row_io(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict
                 ev.update(status="unknown", oracle_kind="none", reason=reason)
                 seq.setdefault("expected", {})[var] = f"{VERIFY_PREFIX} {reason}"
                 record["downgraded_slots"] += 1
-        desc = [ln for ln in str(seq.get("description") or "").splitlines() if not ln.startswith(("Expected:", "근거: 소스 계산"))]
-        if seq.get("expected"):
-            desc.append("Expected: " + ", ".join(f"{v}={x}" for v, x in seq["expected"].items()))
-        if any((e or {}).get("status") == "derived" for e in (seq.get("expected_evidence") or {}).values()):
-            desc.append("근거: 소스 계산 (요구 적합성 미검증, 실행 미실시)")
-        seq["description"] = "\n".join(desc)
+        _rewrite_expected_line(seq)
     unit["row_io_columns"] = record
     return record
 
@@ -4541,7 +5177,35 @@ def _summarize_source_findings(units: List[Dict[str, Any]], all_sequences: Dict[
     # (R19) 입력 목록 밖 읽기는 미정의 동작 소견과 따로 센다(`findings` 는 그대로 UB 소견 수)
     gaps = sf.collect_input_gap_findings(units, _input_list_gaps(units, all_sequences), {})
     out["input_list_gaps"] = sf.summarize_input_gaps(gaps)
+    # (R80) 출력 목록 밖 쓰기 · 함수가 쓰지 않는 설계 출력 — 같은 시트의 다른 종류
+    gaps, listed, undecided = _output_list_findings(units, all_sequences)
+    out["output_list_gaps"] = sf.summarize_output_gaps(
+        sf.collect_output_gap_findings(units, gaps, listed, {}), undecided,
+        # (review R80 W-R2-4) rows whose written record failed: their writes are in no finding
+        rows_written_error=sum(1 for u in units for s in all_sequences.get(u["fid"]) or []
+                               if s.get("source_written_error")))
     return out
+
+
+def _judgeable_design_outputs(unit: Dict[str, Any]) -> List[str]:
+    """(review R80 I-R2-4) Design outputs `listed_outputs_not_written` would judge — this unit's program objects (no
+    return value, stub notation or parameter target)."""
+    scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
+    objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {}) | set(scope.get("struct_globals") or {})
+    return [n for n in _design_outputs(unit) if n != _RETURN_VAR and "()" not in n
+            and re.split(r"[\[.]", n, maxsplit=1)[0] in objects]
+
+
+def _output_list_findings(units: List[Dict[str, Any]], all_sequences: Dict[str, List[Dict[str, Any]]]):
+    """(R80) unit 마다 (출력 목록 밖 쓰기, 함수가 쓰지 않는 설계 출력, 그것을 판정하지 않은 사유 — 설계 출력이 있는 unit 만)."""
+    gaps = {u["fid"]: output_list_gaps(u, all_sequences.get(u["fid"]) or []) for u in units}
+    listed, undecided = {}, {}
+    for u in units:
+        names, why = listed_outputs_not_written(u, all_sequences.get(u["fid"]) or [])
+        listed[u["fid"]] = names
+        if why and _judgeable_design_outputs(u):
+            undecided[u["fid"]] = why
+    return gaps, listed, undecided
 
 
 def _input_list_gaps(units: List[Dict[str, Any]], all_sequences: Dict[str, List[Dict[str, Any]]]
@@ -5077,7 +5741,7 @@ def enhance_sequences_with_ai(
         if applied:
             _logger.info("AI enhanced %d/%d sequences for %s", applied, len(payload), unit.get("name"))
 
-    return apply_sequence_evidence(unit, sequences)
+    return apply_sequence_evidence(unit, sequences, written=True)   # (review R80 W2) the writes, as the first pass
 
 
 # ---------------------------------------------------------------------------
@@ -5400,10 +6064,17 @@ def generate_suts_xlsm(
     _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, thin, hdr_fill, hdr_font, data_font)
     # (R10) 소스 소견 — oracle 이 기대값을 내다가 증명한 미정의 동작(함수·종류별, 예시 벡터, 재현 여부 공시)
     # (R19) + 입력 목록 밖 읽기(함수가 초기값을 읽는데 시험 입력 목록에 없는 객체) — unit 마다 한 행
-    from generators.source_findings import collect_findings, collect_input_gap_findings, write_source_findings_sheet
+    # (R80) + 출력 목록 밖 쓰기 · 함수가 쓰지 않는 설계 출력
+    from generators.source_findings import (
+        collect_findings,
+        collect_input_gap_findings,
+        collect_output_gap_findings,
+        write_source_findings_sheet,
+    )
     write_source_findings_sheet(
         wb, collect_findings(units, all_sequences, rendered_tc_ids)
-        + collect_input_gap_findings(units, _input_list_gaps(units, all_sequences), rendered_tc_ids),
+        + collect_input_gap_findings(units, _input_list_gaps(units, all_sequences), rendered_tc_ids)
+        + collect_output_gap_findings(units, *_output_list_findings(units, all_sequences)[:2], rendered_tc_ids),
         hdr_font, hdr_fill, thin)
 
     # --- Remove default sheet if we created new workbook ---
@@ -6755,6 +7426,8 @@ def generate_suts(
             "units_without_search": len(units) - len(_bsearch)}
         # (R19) 소스가 읽어 더한 입력 — 설계서 입력 목록과 달라지는 열이라 분모와 사유를 함께 공시한다.
         quality["source_read_inputs"] = summarize_source_read_inputs(units)
+        # (R80) 소스가 써서 더한 기대값 — 설계서 출력 목록과 달라지는 열
+        quality["source_written_outputs"] = summarize_source_written_outputs(units)
         # (R19) MC/DC 채움 행 — 벡터가 비운 결정 무관 입력을 채운 동반 행(쌍 주장 없음)
         _fills = [u.get("mcdc_fill") for u in units if isinstance(u.get("mcdc_fill"), dict)]
         quality["mcdc_fill"] = {k: sum(int(f.get(k) or 0) for f in _fills)

@@ -103,6 +103,10 @@ _RULE_ACTION: Dict[str, str] = {
     "disclosure:suts_source_findings": "소스 결함 후보(C 미정의 동작)다 — 재생성으로 사라지지 않는다. 'Source Findings' 시트의 예시 "
                                        "입력이 호출 측에서 가능한지 확인해 소스를 고치거나, 불가능한 이유를 기록한다.",
     "disclosure:suts_input_list_gaps": "함수가 읽는데 설계서 입력 목록에 없는 객체다 — SwUDS 입력 표를 보강하거나 내부 상태로 정리한다.",
+    # (R80 review W8) a fact of the design table, not a generation deficit — regenerating does not change it
+    "disclosure:suts_output_list_gaps": "함수가 쓰는데 설계서 출력 목록에 없는 객체, 또는 설계서가 적었는데 함수가 쓰지 않는 객체다 — "
+                                        "SwUDS 출력 표를 고친다(다른 함수의 출력을 옮겨 적었는지, 읽기만 하는 입력 · 반환값을 "
+                                        "출력으로 적었는지 확인). 재생성으로 사라지지 않는다.",
     "disclosure:suts_range_conflicts": "설계서의 값 범위가 선언 타입 폭을 벗어난다 — 설계서와 소스 중 틀린 쪽을 고친다(시험은 타입 폭으로 했다).",
     "disclosure:suts_asil_evidence": "근거 없는 ASIL 이 있다 — 등급을 지어내지 않았으니 SwUDS·SwDS 에서 정하거나 소스에 @asil 을 단다.",
     "disclosure:sts_mapping_basis": "약한 근거(부분 문자열·추측 매칭)로 요구에 붙은 함수가 있다 — 추적성 판정 때 따로 보고, SwDS Related "

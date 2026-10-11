@@ -1312,7 +1312,7 @@ def test_every_counter_reaches_the_disclosure():
     def item(**kw):
         return {i["key"]: i for i in build_disclosures("suts", {"scenario_rows": {**base, **kw}})}["suts_scenario_rows"]
     first = item()
-    assert first["value"] == ("3행(두 탐색) · 문장 · 분기 결과 17/20 에 설계 범위 안 값으로 한 경로로 닿음 · 탐색한 unit 3/4 "
+    assert first["value"] == ("3행(세 탐색) · 문장 · 분기 결과 17/20 에 설계 범위 안 값으로 한 경로로 닿음 · 탐색한 unit 3/4 "
                               "(행이 붙은 unit 2)")
     shown_in_value = {"rows", "targets", "reached_clean"}
     silent = [k for k in SCENARIO_REPORT_KEYS if k not in shown_in_value

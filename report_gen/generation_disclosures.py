@@ -113,7 +113,9 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
     2차 탐색까지(리뷰 R78 W2: 2차 탐색의 실행 · 상한 · 중복이 빠졌다). 요약의 모든 카운터가 값이나 설명에 나온다."""
     skipped = sc.get("not_searched") if isinstance(sc.get("not_searched"), dict) else {}
     targets, clean = _int(sc, "targets"), _int(sc, "reached_clean")
-    total = sum(_int(sc, k) or 0 for k in ("rows", "outside_design_rows", "outside_design_in_range_rows"))
+    # (review R80 W-R4-1) the enum search's rows are rows of the document too
+    total = sum(_int(sc, k) or 0 for k in ("rows", "outside_design_rows", "outside_design_in_range_rows",
+                                           "outside_design_enum_rows", "outside_design_enum_in_range_rows"))
     outside_any = any(_int(sc, k) for k in ("outside_design_searched", "outside_design_reached", "outside_design_rows",
                                              "outside_design_in_range_rows", "outside_design_runs",
                                              "outside_design_steps", "outside_design_cut", "outside_design_duplicates",
@@ -121,7 +123,7 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
                                              "outside_design_starts_capped"))
     return _item(
         "suts_scenario_rows", "동작 시나리오 행",
-        f"{_show(total)}행(두 탐색) · 문장 · 분기 결과 {_show(clean)}/{_show(targets)} 에 설계 범위 안 값으로 한 경로로 닿음 · 탐색한 unit "
+        f"{_show(total)}행(세 탐색) · 문장 · 분기 결과 {_show(clean)}/{_show(targets)} 에 설계 범위 안 값으로 한 경로로 닿음 · 탐색한 unit "
         f"{_show(_int(sc, 'searched'))}/{_show(_int(sc, 'units'))} (행이 붙은 unit {_show(_int(sc, 'units_with_rows'))})",
         "함수 본문의 문장과 분기 결과마다, 원본 코드 모델 실행에서 **한 경로로**(값을 모르는 분기 없이) · 미정의 동작 없이 닿는 "
         "입력을 찾아 행으로 **더한** 것이다(기존 행은 그대로). 값은 코드가 그 입력과 비교하는 상수와 그 이웃 · switch 라벨 · "
@@ -180,13 +182,38 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
            f"{_show(_int(sc, 'outside_design_pools_capped'))} · 출발점 상한에 잘린 기존 행 "
            f"{_show(_int(sc, 'outside_design_starts_capped'))}. 이 행들은 경계 · 강건성 · 출력 관측 쌍 탐색 "
            "뒤에 붙어 그 탐색들의 기준이 되지 않는다. " if outside_any else "")
-        + (f"설계가 값 목록(설계 범위 안 열거자 · 설계서 값 목록)으로 정한 입력 {_show(_int(sc, 'outside_design_value_sets'))} "
+        + (f"설계가 값 목록(설계서 값 목록 — 정수 입력)으로 정한 입력 {_show(_int(sc, 'outside_design_value_sets'))} "
            "은 넓혀 다시 찾지 않는다 — 목록 밖 값으로만 닿는 경로는 이 탐색이 찾지 않는다. "
            if _int(sc, "outside_design_value_sets") else "")
+        # (R80) 열거자만 받는 enum 입력은 이 탐색에서 열거자 범위 ±1 까지
+        + (f"값 목록 입력(enum · `#define` 상태값) {_show(_int(sc, 'outside_design_enum_inputs'))} 은 그 열거자 전부(설계서가 범위 · "
+           "값 목록을 정했으면 설계 밖 열거자도 — 설계 밖 값이라 FI)와 열거자 범위 ±1(이름 붙은 열거자가 아닌 값 — 깨진 · 초기화 "
+           "안 된 상태, 선언 타입 범위 안이고 C enum 이면 enum 입력이 가질 수 있는 0 ~ 127 안)까지 넓힐 대상이다 — 설계 범위 밖 "
+           "탐색 **뒤에 따로**(자기 예산 · 그 앞의 행이 닿은 목표는 찾지 않음 — 그 탐색에 섞으면 그 탐색의 결과가 바뀐다) 아직 닿지 "
+           f"않은 목표 {_show(_int(sc, 'outside_design_enum_searched'))} 를 다시 찾아 닿은 것 "
+           f"{_show(_int(sc, 'outside_design_enum_reached'))}(못 닿은 것 {_show(_int(sc, 'outside_design_enum_not_reached'))}): 넓힌 값을 "
+           f"싣는 FI 행 {_show(_int(sc, 'outside_design_enum_rows'))}(열거자가 아닌 값은 코드의 default · 마지막 else 가, 설계 밖 "
+           "열거자는 그 case 가 다루는 값; 목표가 계속 닿는 한 설계가 허용한 값으로 되돌린 뒤 남은 값 — 행이 설계 범위 · 값 목록 · "
+           "열거자 중 무엇의 밖인지 적는다) · 범위 안 값으로 닿은 행 "
+           f"{_show(_int(sc, 'outside_design_enum_in_range_rows'))}, 모델 실행 {_show(_int(sc, 'outside_design_enum_runs'))}회(인터프리터 "
+           f"{_show(_int(sc, 'outside_design_enum_steps'))}걸음), 행 상한이 차 더하지 않은 목표 "
+           f"{_show(_int(sc, 'outside_design_enum_cut'))} · 기존 행과 같아 더하지 않은 것 "
+           f"{_show(_int(sc, 'outside_design_enum_duplicates'))}, 후보 값 상한에 잘린 입력 "
+           f"{_show(_int(sc, 'outside_design_enum_pools_capped'))} · 출발점 상한에 잘린 기존 행 "
+           f"{_show(_int(sc, 'outside_design_enum_starts_capped'))}"
+           + (f", 설계가 값 하나만 둔 입력 {_show(_int(sc, 'outside_design_enum_single_value'))}(그 값이 home)"
+              if _int(sc, "outside_design_enum_single_value") else "")
+           + ". 이 탐색은 값 목록 입력만 넓힌다(설계 범위 밖 값과 함께 필요한 목표는 찾지 않는다). 열거자 사이의 빈 값은 찾지 않는다"
+           + (f"; 넓힐 값이 없는 입력(열거자를 다 쓰고 ±1 이 그 범위 밖) {_show(_int(sc, 'outside_design_enum_at_range_end'))}"
+              if _int(sc, "outside_design_enum_at_range_end") else "")
+           + (f"; 선언이 타입을 주지 않아 넓히지 않은 입력 {_show(_int(sc, 'outside_design_enum_type_unresolved'))}"
+              if _int(sc, "outside_design_enum_type_unresolved") else "") + ". "
+           if any(_int(sc, k) for k in sc if str(k).startswith("outside_design_enum_")) else "")
         + (f"탐색이 닿으려다 입력 목록 밖 객체를 읽은 이름 {_show(_int(sc, 'inputs_needed'))} — 입력 보완(소스가 읽는 입력)이 "
            "다음 회차에 더한다. " if _int(sc, "inputs_needed") else "")
-        + (f"행 상한은 탐색마다(설계 범위 안 · 밖) unit 당 {_show(_int(sc, 'cap_per_unit'))} — 상한이 찬 뒤에도 탐색은 이어져 "
+        + (f"행 상한은 탐색마다(설계 범위 안 · 밖 · 열거자 밖) unit 당 {_show(_int(sc, 'cap_per_unit'))} — 상한이 찬 뒤에도 탐색은 이어져 "
            "기존 행과 같은 시나리오 · 입력 목록 밖 이름은 계속 센다. " if _int(sc, "cut") or _int(sc, "outside_design_cut")
+           or _int(sc, "outside_design_enum_cut")
            else "")
         + (f"실행 예산을 다 쓴 unit {_show(_int(sc, 'budget_exhausted'))} 은 더 닿을 수 있다. "
            if _int(sc, "budget_exhausted") else "")
@@ -195,9 +222,13 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
         + (f"하위 조건을 읽지 못해 결과로만 따라간 조건 {_show(_int(sc, 'conditions_outcome_only'))}. "
            if _int(sc, "conditions_outcome_only") else "")
         + (f"탐색하지 않은 unit: {_dist(skipped)}. " if skipped else "")
+        + (f"첫 탐색에 입력이 없어 열거자 밖 값 탐색만 한 unit {_show(_int(sc, 'enum_only_searched'))}(설계가 값 하나만 둔 입력). "
+           if _int(sc, "enum_only_searched") else "")
         + (f"탐색 중 오류로 시나리오 행 없이 둔 unit {_show(_int(sc, 'errors'))} — 로그에 traceback 이 있다."
-           if _int(sc, "errors") else ""),
-        tone=_tone(bool(_int(sc, "errors")) or bool(_int(sc, "budget_exhausted"))
+           if _int(sc, "errors") else "")
+        + (f" 열거자 밖 값 탐색만 오류로 버린 unit {_show(_int(sc, 'enum_errors'))}(다른 탐색의 행은 남는다)."
+           if _int(sc, "enum_errors") else ""),
+        tone=_tone(bool(_int(sc, "errors")) or bool(_int(sc, "enum_errors")) or bool(_int(sc, "budget_exhausted"))
                    or bool(_int(sc, "expose_budget_exhausted")) or bool(_int(sc, "expose_errors"))))
 
 
@@ -1168,6 +1199,31 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "`read_not_in_unit_inputs` 행에 함수별 이름이 있다. 확장 프로파일은 이 객체를 입력 열로 더했다('소스가 읽어 더한 "
                 "입력').",
                 tone=_tone(bool(_int(gaps, "functions")))))
+        # (R80) 출력 목록 쪽 — 같은 시트의 다른 두 종류
+        og = sf.get("output_list_gaps")
+        if isinstance(og, dict) and _int(og, "functions") is not None:
+            out.append(_item(
+                "suts_output_list_gaps", "출력 목록 밖 쓰기",
+                f"함수 {_show(_int(og, 'functions'))} · 객체 {_show(_int(og, 'names'))} · 쓰지 않는 설계 출력 함수 "
+                f"{_show(_int(og, 'listed_not_written_functions'))} · 객체 {_show(_int(og, 'listed_not_written_names'))}"
+                + (f" · 판정하지 않은 함수 {_show(_int(og, 'listed_not_written_undecided'))}"
+                   if _int(og, "listed_not_written_undecided") else ""),
+                "이 문서의 행으로 함수(원본 코드 모델)를 돌리면 쓰는데 시험 기대 목록(설계서 출력 표·소스 분석)에 없는 프로그램 "
+                "객체다(실행이 실제로 저장한 것 — 비활성 #if 팔 · 버려지는 매크로 인자의 대입은 세지 않고, 행이 닿지 않은 경로의 "
+                "쓰기는 보이지 않는다) — 설계서 출력 누락 후보. 'Source Findings' 시트의 `written_not_in_unit_outputs` 행. 반대로 "
+                "기대 목록이 적었는데 함수도 그 피호출도 쓰지 않는 객체(프로젝트 쓰기 closure — 모르는 피호출 · 포인터 쓰기가 있는 "
+                "함수는 판정하지 않는다)는 `listed_output_not_written` 행이다 — 그 칸은 함수의 결함을 보지 못한다(다른 함수의 출력을 "
+                "옮겨 적은 것일 수 있다 — 그 칸은 그 객체에 쓰는 값의 결함을 보지 못한다). 기대 목록이 그 객체를 담은 구조체 · 배열을 "
+                "적었으면 적은 것으로 본다. 확장 프로파일은 앞의 객체 중 값이 도출되는 것을 기대 열로 더했다('소스가 써서 더한 "
+                "기대값' — 적힌 구조체 · 배열의 멤버 · 원소도 값이 서면 열로 더하지만 소견에는 들지 않는다). volatile · 부동소수 "
+                "객체는 소견에는 들고 기대 열로는 더하지 않으며, const 객체는 세지 않는다. 첨자를 모르는 원소 쓰기 · 집합체 통째 "
+                "쓰기 · 모델이 배치하지 못한 배열(2 차원 · 구조체 배열)에 쓰는 것은 저장소가 이름으로 기록하지 않아 들지 않는다."
+                + (f" 쓴 객체 기록이 실패한 행 {_show(_int(og, 'rows_written_error'))} — 그 행의 쓰기는 소견에 들지 않는다."
+                   if _int(og, "rows_written_error") else "")
+                + (f" 쓰지 않는 설계 출력은 판정하지 않은 함수가 있다(사유: {_dist(og.get('listed_not_written_undecided_reasons'))})"
+                   " — '없음' 이 아니다." if _int(og, "listed_not_written_undecided") else ""),
+                tone=_tone(bool(_int(og, "functions")) or bool(_int(og, "listed_not_written_functions"))
+                           or bool(_int(og, "rows_written_error")))))
 
     # (R9) MC/DC 설계 — 결정식을 실제로 평가해 찾은 unique-cause 쌍. 못 푼 결정은 분모에 남는다.
     mc = qr.get("mcdc_design_summary")
@@ -1487,6 +1543,39 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if _int(sr, "errors") else ""),
             tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors"))
                        or bool(_int(sr, "units_round_cap_reached")))))
+    # (R80) 소스가 써서 더한 기대값 — 확장 프로파일에서만 기록된다. 설계서 출력 목록과 열이 달라지므로 늘 공시한다.
+    sw = qr.get("source_written_outputs")
+    if isinstance(sw, dict):
+        sw_not = sw.get("not_added") if isinstance(sw.get("not_added"), dict) else {}
+        out.append(_item(
+            "suts_source_written_outputs", "소스가 써서 더한 기대값",
+            f"unit {_show(_int(sw, 'units_with_added'))}/{_show(_int(sw, 'units'))} · 이름 {_show(_int(sw, 'names_added'))}",
+            "이 문서의 행으로 함수(원본 코드 모델)를 돌렸을 때 실행이 쓰고 그 뒤 값이 도출되는 번역 단위 객체 중 시험 기대 목록"
+            "(설계서 출력 표·소스 분석)에 없는 것을 기대값 열로 더했다 — 설계서 출력 표와 다른 열이다. 입력 보완(소스가 읽어 더한 "
+            "입력)과 같은 회차에 더하고, 더한 출력을 쓰지 않는 경로의 최종값(=초기값)은 다음 회차의 입력이 된다"
+            + (f"(최대 {_show(_int(sw, 'max_rounds'))}회차" + (f" · 회차 상한에 남은 후보가 있던 unit "
+                                                              f"{_show(_int(sw, 'units_round_cap_reached'))}"
+                                                              if _int(sw, "units_round_cap_reached") else "") + ")"
+               if _int(sw, "max_rounds") else "")
+            + f". 회차 뒤에 붙는 행(경계 · 강건성 · 출력 관측 쌍 · 설계 범위 밖 시나리오)이 쓴 객체는 마지막에 더하고 모든 행의 "
+            f"근거를 다시 붙였다(그 이름 {_show(_int(sw, 'names_added_final'))} — 그 열을 쓰지 않는 경로의 초기값은 입력으로 더할 "
+            f"회차가 없어 그 칸은 [검증 필요] 로 남는다: 그런 이름 {_show(_int(sw, 'names_final_initial_not_in_inputs'))}). "
+            "어느 행도 값을 내지 못해 다시 뺀 이름 "
+            f"{_show(_int(sw, 'names_dropped_underived'))}"
+            + (f"(그 출력 때문에 더한 입력이 남은 것 {_show(_int(sw, 'inputs_kept_for_dropped'))})"
+               if _int(sw, "inputs_kept_for_dropped") else "")
+            + f" · 쓰지만 값이 한 번도 서지 않아 더하지 않은 이름 {_show(_int(sw, 'names_never_known'))}. 함수 실행 모델이 쓴 것만 "
+            "센다 — 행이 닿지 않은 경로의 쓰기, 피호출 함수가 쓰는 객체(단위시험에서 stub), 포인터를 거친 쓰기는 들지 않는다. "
+            "지역·매개변수·const·volatile·부동소수 객체는 더하지 않는다"
+            + (f"(더하지 않은 사유: {_dist(sw_not)})" if sw_not else "") + "."
+            + (f" 기대값 열 상한에 막힌 unit {_show(_int(sw, 'units_output_columns_full'))}."
+               if _int(sw, "units_output_columns_full") else "")
+            + (f" 오류로 더하지 못한 unit {_show(_int(sw, 'errors'))} — 로그에 traceback 이 있다(입력 보완은 계속했다)."
+               if _int(sw, "errors") else "")
+            + (f" 쓴 객체 기록이 실패한 행 {_show(_int(sw, 'rows_written_error'))} — 그 행의 쓰기는 위 수에 들지 않는다(기대값은 "
+               "그대로)." if _int(sw, "rows_written_error") else ""),
+            tone=_tone(bool(_int(sw, "units_output_columns_full")) or bool(_int(sw, "errors"))
+                       or bool(_int(sw, "rows_written_error")))))
     # (R19) MC/DC 채움 행 — 확장 프로파일에서만 기록된다
     mf = qr.get("mcdc_fill")
     if isinstance(mf, dict):

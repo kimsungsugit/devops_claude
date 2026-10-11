@@ -297,8 +297,8 @@ def test_evidence_that_does_not_confirm_downgrades_the_pair_in_the_pipeline(monk
     #   rows no longer claim a pair
     real = suts.apply_sequence_evidence
 
-    def flatten(unit, seqs):
-        out = real(unit, seqs)
+    def flatten(unit, seqs, **kw):   # (R80) ``written=`` passes through
+        out = real(unit, seqs, **kw)
         for s in out:
             if str(s.get("strategy") or "").startswith(suts.OBS_MCDC_PREFIX):
                 s["expected"]["g_out"] = 0

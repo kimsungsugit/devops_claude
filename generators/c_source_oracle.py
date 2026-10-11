@@ -37,6 +37,9 @@ SCHEMA_VERSION = 4   # 2 (R14): a record may rest on sequence stubs (``stubs``) 
 # (backlog 2-c) the two reasons an unset initial value gives — one vocabulary for the oracle and its readers
 INITIAL_VALUE_PREFIX = "initial_value_not_in_inputs:"
 UNWRITTEN_OUTPUT_PREFIX = "unwritten_output_initial_not_in_inputs:"
+# an enum-typed input: the values every permitted underlying type holds unchanged (C11 6.7.2.2p4) — one range for the
+#   oracle's input check and the SUTS widening over the enumerators (review R80 W4)
+ENUM_INPUT_RANGE = (0, 127)
 _UB_REASONS = frozenset({"signed_overflow", "division_by_zero", "shift_count_out_of_range", "signed_left_shift_overflow",
                          "float_to_int_out_of_range"})
 _EXECUTION_BUDGET = 200_000
@@ -517,7 +520,7 @@ class _Interp:
             return Unknown("input_type_unmodeled:" + name)
         lo, hi = (0, 1) if t["kind"] == "_Bool" else cpc.type_range(t)
         if t.get("enum"):
-            lo, hi = 0, 127  # held unchanged by every permitted underlying type (C11 6.7.2.2p4)
+            lo, hi = ENUM_INPUT_RANGE
         if not lo <= value <= hi:
             return Unknown("input_outside_declared_type:" + name)
         return value
@@ -3616,11 +3619,13 @@ def scope_matches(unit: dict[str, Any]) -> bool:
         cpc.scope_text_matches(scope, hashlib.sha256(str(unit.get("source_text") or "").encode()).hexdigest())
 
 
-def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]], outputs: list[list[str]]) -> list[dict[str, Any]]:
+def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]], outputs: list[list[str]],
+                     written: bool = False) -> list[dict[str, Any]]:
     """Per sequence: ``{"status", "outputs": {name: {"value": int} | {"reason": str}}, ...}``.
 
     ``unit`` carries ``source_text``, ``name`` and a matching ``project_scope``. The function is parsed once;
-    each sequence runs on a fresh state. Never raises.
+    each sequence runs on a fresh state. Never raises. ``written`` (R80): a supported record also carries
+    ``"written"`` — the program objects of this translation unit the run wrote (`_written_objects`).
     """
     source = str(unit.get("source_text") or "")
     digest = hashlib.sha256(source.encode()).hexdigest()
@@ -3704,6 +3709,11 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             record.update(status="supported", reason="project_context_source_evaluation" +
                           (":possible_ub=" + "+".join(possible) if possible else ""),
                           outputs=values, paths=len(finals), possible_undefined_behavior=possible)
+            if written:
+                try:
+                    record["written"] = _written_objects(interp, finals)
+                except Exception as exc:  # noqa: BLE001 — (review R80 W1) a side record; the derived values stand
+                    record["written_error"] = f"oracle_exception:{type(exc).__name__}"
         except Unsupported as exc:
             record.update(status="unsupported", reason=str(exc), outputs={o: {"reason": str(exc)} for o in outs})
         except Exception as exc:  # noqa: BLE001 — never raise into the generator; recorded as the reason below
@@ -3734,6 +3744,27 @@ def _final_outputs(interp, finals, outs):
             assigned = name == "return" or any(_written(s, name, interp) for s in finals)
             values[name] = {"value": seen[0], "basis": "assigned" if assigned else "unchanged_input"}
     return values
+
+
+def _written_objects(interp, finals):
+    """(R80) ``{name: known}`` — the program objects of this translation unit some final path of the run *wrote* (a store
+    key: a read is not stored; a parameter, local or pointee is an ``@`` key), ``known`` when the value after the run is
+    one integer on every path (as `_final_outputs` reads an output). An object only a callee's write closure or a pointer
+    write may change is havocked where it was stored and never stored otherwise — no value to expect, not here. Only this
+    unit's objects (an interpreted callee of another unit stores its own — R16)."""
+    keys = sorted({k for s in finals for k in s.store if not k.startswith("@")})
+    if not keys:
+        return {}
+    reads = set().union(*(s.initial_reads for s in finals))
+    escaped = set().union(*(s.escaped for s in finals))
+    out = {}
+    for key in keys:
+        base = key.split("[", 1)[0]
+        if ("[" in key and base not in interp.arrays) or ("[" not in key and base not in interp.globals):
+            continue
+        seen = [_observe(interp, s, key, reads, escaped) for s in finals]
+        out[key] = not any(isinstance(v, Unknown) for v in seen) and len(set(seen)) == 1
+    return out
 
 
 def _prescan_once(interp, shared):

@@ -10,11 +10,14 @@ from generators.c_test_semantics import evaluate_function_inputs
 VERIFY_PREFIX = "[검증 필요]"
 
 
-def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]],
+                            written: bool = False) -> list[dict[str, Any]]:
     """Replace speculative expectations and attach explicit oracle provenance.
 
     Source evaluation is a code-consistency oracle only. It does not establish
     requirement correctness, target execution or structural coverage.
+    ``written`` (R80): each sequence the project-context oracle ran also gets ``seq["source_written"]`` — the program
+    objects that run wrote, ``{name: value known}`` (the SUTS reads it for the outputs a design table omits).
     """
     source = str(unit.get("source_text") or "")
     if not unit.get("source_text_complete", True):
@@ -26,7 +29,7 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
     scope_note = "project_scope_mismatch" if source and unit.get("project_scope") and not scoped else ""
     if scoped:
         # (R2b) Project-context oracle: every output — globals, array elements, return — for the whole function.
-        results = evaluate_outputs(unit, [s.get("inputs") or {} for s in sequences], output_lists)
+        results = evaluate_outputs(unit, [s.get("inputs") or {} for s in sequences], output_lists, written=written)
     elif source:
         results = evaluate_function_inputs(source, str(unit.get("name") or ""), [s.get("inputs") or {} for s in sequences])
     else:
@@ -91,6 +94,14 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
             evidence[var] = item
         seq["expected"], seq["expected_evidence"] = expected, evidence
         seq["execution_status"] = "not_run"
+        if written and "written" in evaluated:
+            seq["source_written"] = dict(evaluated["written"])
+        else:
+            seq.pop("source_written", None)   # an earlier run's record is not this one's
+        if written and evaluated.get("written_error"):
+            seq["source_written_error"] = evaluated["written_error"]   # (review R80 W1) counted, not silent
+        else:
+            seq.pop("source_written_error", None)
         if evaluated.get("interprocedural") is not None:
             seq["interprocedural"] = evaluated["interprocedural"]
         # Remove earlier prose containing invented expectations as well.

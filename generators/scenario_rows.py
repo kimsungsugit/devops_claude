@@ -114,6 +114,12 @@ def _inside(domain, v: int) -> bool:
     return v in domain if isinstance(domain, list) else domain[0] <= v <= domain[1]
 
 
+def _at_home(home, v: int) -> bool:
+    """(R80 review W-R3-1) A value at home: inside a range's bounds, or a member of a value set (a design value list,
+    the enumerators a design keeps) — a value between a set's members is not at home."""
+    return v in home if isinstance(home, list) else home[0] <= v <= home[1]
+
+
 def _extreme(domain, v: int) -> bool:
     """A type end / far value of a wide range — the values the search takes last and polishes away."""
     if isinstance(domain, list):
@@ -226,6 +232,22 @@ def operating_pools(unit: dict[str, Any], domains: dict[str, Any], fn, raw, scop
         if isinstance(dom, list):
             head = [v for v in lab + ks if v in dom]
             order = list(dict.fromkeys(head + [dom[len(dom) // 2]] + dom))
+            if name in home:
+                # (review R80 W3) the home values first; (W-R2-1) the values outside them are what the widened search is
+                #   for — they keep slots (at most half a pool) after every home value the cap allows; (W-R3-3) the
+                #   widened list's ends first among them — the ±1 no enumerator names
+                inside = [v for v in order if _at_home(home[name], v)]
+                outside = [v for v in order if not _at_home(home[name], v)]
+                ends = [v for v in (dom[0], dom[-1]) if v in outside]
+                outside = ends + [v for v in outside if v not in ends]
+                keep = outside[:MAX_POOL // 2]
+                if len(inside) > MAX_POOL or len(outside) > len(keep):
+                    stats["pools_capped"] = int(stats.get("pools_capped") or 0) + 1
+                pools[name] = inside[:MAX_POOL] + keep
+                defaults[name] = pools[name][0]
+                continue
+            if len(order) > MAX_POOL:
+                stats["pools_capped"] = int(stats.get("pools_capped") or 0) + 1   # (review R80 W-R2-1) a list too
             pools[name] = order[:MAX_POOL]
             defaults[name] = order[0]
             continue
@@ -410,7 +432,9 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     if not doms:
         return {**empty, "report": {**report, "status": "no_integer_inputs"}}
     cap = MAX_ROWS
-    home = {k: tuple(v) for k, v in (home or {}).items() if k in doms and isinstance(doms[k], tuple)}
+    # (review R80 W3) an enumerator list widened by ±1 has its home range too (the enumerators' ends)
+    home = {k: (sorted(v) if isinstance(v, list) else tuple(v)) for k, v in (home or {}).items()
+            if k in doms and isinstance(doms[k], (tuple, list))}
     scope = unit["project_scope"]
     raw = str(unit["source_text"]).encode()
     try:
@@ -754,7 +778,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         return list(inputs)
 
     def outside(v) -> int:
-        return sum(1 for k, x in v.items() if k in home and not home[k][0] <= x <= home[k][1])
+        return sum(1 for k, x in v.items() if k in home and not _at_home(home[k], x))
 
     def quality(v, r) -> tuple:
         """Among vectors of equal standing: clean, more derived outputs, fewer values outside the home range, fewer
@@ -805,16 +829,25 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         for name in inputs:
             if exhausted():
                 break
-            away = name in home and not home[name][0] <= cur[name] <= home[name][1]
+            away = name in home and not _at_home(home[name], cur[name])
             if not away and not _extreme(doms[name], cur[name]):
                 continue
             if away:
                 # the home range's own points first, then the pool's home values — not only what the capped pool kept
                 #   (review R78 R3 I-R3-5: with many outside comparisons the pool keeps one home value)
-                lo, hi = home[name]
-                pick = list(dict.fromkeys([(lo + hi) // 2, lo, hi, lo + 1, hi - 1,
-                                           *(x for x in pools[name] if lo <= x <= hi)]))[:6]
-                pick = [x for x in pick if lo <= x <= hi]
+                h = home[name]
+                if isinstance(h, list):
+                    # (review R80 W-R3-1) a value set's own members — its middle first, then the others
+                    # (review R80 I-R4-8) the pool's home members first (labels, compared constants), then the rest
+                    pick = [x for x in dict.fromkeys([*(x for x in pools[name] if x in h), h[len(h) // 2], *h])
+                            if _inside(doms[name], x)][:6]
+                else:
+                    lo, hi = h
+                    # (review R80 W3) a list domain's own values only — an enumerator, not a value between them;
+                    #   (W-R2-3) filtered before the cut, so a gap's middle does not take an enumerator's place
+                    pick = [x for x in dict.fromkeys([(lo + hi) // 2, lo, hi, lo + 1, hi - 1,
+                                                      *(x for x in pools[name] if lo <= x <= hi)])
+                            if lo <= x <= hi and _inside(doms[name], x)][:6]
             else:
                 pick = [x for x in pools[name][:4] if not _extreme(doms[name], x)]
             cands = [{**cur, name: x} for x in pick if x != cur[name]]
