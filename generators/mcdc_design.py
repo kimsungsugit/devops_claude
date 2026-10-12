@@ -1390,13 +1390,27 @@ def _pointee_core(text):
     return " ".join(w for w in str(text or "").split() if w not in {"const", "volatile"})
 
 
-def _pointee_input(scope, fn_name, name):
+def _pointee_input(scope, fn_name, name, buffers=True):
     """(R40) ``(type, typename, volatile)`` of a row input naming a pointer parameter's pointee (``p[0]`` · ``p[0].a`` ·
     ``p[0].b[2]``) of function ``fn_name``, from the unit's pointee layout; None otherwise. Volatile: the member, or the
-    parameter's pointee type (``volatile Q *p`` — review R40 I3)."""
+    parameter's pointee type (``volatile Q *p`` — review R40 I3). ``buffers`` (R82): also an element of a harness buffer —
+    ``p[k]`` of a scalar pointee, ``p[0].m[k]`` of a one-level pointer member."""
     m = _POINTEE_INPUT_RE.fullmatch(str(name).strip())
     if not m:
-        return None
+        if not buffers:
+            return None
+        # (R82) `p[k]` — an element of a scalar pointee the harness holds as a buffer (`pData[1]`)
+        b = re.fullmatch(r"([A-Za-z_]\w*)\[(\d+)\]", str(name).strip())
+        params = _pointer_params(scope, fn_name) if b else {}
+        if not b or b.group(1) not in params:
+            return None
+        layout = ((scope or {}).get("pointee_types") or {}).get(_pointee_core(params[b.group(1)])) or {}
+        rec = (layout.get("members") or {}).get("")
+        if set(layout.get("members") or {}) != {""} or layout.get("arrays") or not isinstance(rec, dict) \
+                or not isinstance(rec.get("type"), dict):
+            return None
+        return rec["type"], str(rec.get("typename") or ""), bool(rec.get("volatile")) or "volatile" in str(
+            params[b.group(1)] or "").split()
     params = _pointer_params(scope, fn_name)
     if m.group(1) not in params:
         return None
@@ -1404,9 +1418,14 @@ def _pointee_input(scope, fn_name, name):
     layout = ((scope or {}).get("pointee_types") or {}).get(core) or {}
     table = layout.get("arrays" if m.group(3) else "members")
     rec = table.get(m.group(2)) if isinstance(table, dict) else None
+    length = int((rec or {}).get("length") or 0) if isinstance(rec, dict) else 0
+    if rec is None and m.group(3) is not None and buffers:
+        # (R82) an element of a pointer member's harness buffer (`RespMsg[0].data[0]`)
+        rec = (layout.get("pointers") or {}).get(m.group(2))
+        length = 1 << 16
     if not isinstance(rec, dict) or not isinstance(rec.get("type"), dict):
         return None
-    if m.group(3) is not None and not 0 <= int(m.group(3)) < int(rec.get("length") or 0):
+    if m.group(3) is not None and not 0 <= int(m.group(3)) < length:
         return None
     return rec["type"], str(rec.get("typename") or ""), bool(rec.get("volatile")) or "volatile" in str(
         params[m.group(1)] or "").split()
@@ -1437,7 +1456,9 @@ def _read_pointee_names(body, raw, scope, fn_name):
             if index is None or index.type != "number_literal":
                 continue
             name += f"[{_text(index, raw).strip().rstrip('uUlL')}]"
-        if _pointee_input(scope, fn_name, name) is not None:
+        # (review R82 W2) not a harness buffer's element: the normalization (both profiles) and the MC/DC inventory name
+        #   what they did before R82 — the extended profile's input completion adds the elements a run reads
+        if _pointee_input(scope, fn_name, name, buffers=False) is not None:
             out.append(name)
     return list(dict.fromkeys(out))
 

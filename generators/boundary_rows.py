@@ -470,18 +470,29 @@ def _fill_values(axes: dict[str, "_Axis"], defaults: dict[str, int] | None) -> d
     return fill
 
 
-def blank_fill(domains: dict[str, Any], defaults: dict[str, int] | None) -> dict[str, int]:
+def _with_overrides(fill: dict[str, int], axes: dict[str, "_Axis"], overrides: dict[str, int] | None) -> dict[str, int]:
+    """(R82) The caller's values for some filled inputs (a write's prior value kept off the value the function writes
+    there) — only an input the rule fills, only a value inside its domain."""
+    for k, v in (overrides or {}).items():
+        if k in fill and axes[k].contains(v):
+            fill[k] = v
+    return fill
+
+
+def blank_fill(domains: dict[str, Any], defaults: dict[str, int] | None,
+               overrides: dict[str, int] | None = None) -> dict[str, int]:
     """(R19) The fill `find_boundaries` gives a base row's blank inputs, for callers that fill a row themselves (the
-    extended SUTS fills MC/DC vectors). Same domains, same rule — one definition."""
+    extended SUTS fills MC/DC vectors). Same domains, same rule — one definition (``overrides``: `_with_overrides`)."""
     axes = {var: _Axis(dom) for var, dom in domains.items()
             if dom and not (isinstance(dom, (list, frozenset, set)) and len(dom) > MAX_VALUE_SET)}
-    return _fill_values(axes, defaults)
+    return _with_overrides(_fill_values(axes, defaults), axes, overrides)
 
 
 def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: dict[str, Any],
                     outputs: list[str], existing: list[dict[str, Any]] | None = None,
                     defaults: dict[str, int] | None = None,
-                    extra_bases: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                    extra_bases: list[dict[str, Any]] | None = None,
+                    fill_overrides: dict[str, int] | None = None) -> dict[str, Any]:
     """``{"rows": [{"inputs", "variable", "side", "lo", "hi", "base", "outputs_changed", "filled"}], "report": {...}}``.
 
     ``bases``: input vectors (``{"inputs": {var: value}, "strategy": name}``) in priority order. A base with a value
@@ -549,7 +560,8 @@ def find_boundaries(unit: dict[str, Any], bases: list[dict[str, Any]], domains: 
                     report.setdefault("oracle_unsupported_reason", str(r.get("reason") or "")[:80])
         return [memo[k] for k in keys]
 
-    fill = _fill_values(axes, defaults)
+    # (R82) ``fill_overrides``: the caller's values for some filled inputs, inside their domains (`_with_overrides`)
+    fill = _with_overrides(_fill_values(axes, defaults), axes, fill_overrides)
 
     def prepare(candidates, taken):
         """The usable bases among ``candidates`` (values inside the domains, filled), none equal to one in ``taken``."""

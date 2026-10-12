@@ -155,7 +155,11 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
            f"{_show(_found_by_exposing(sc))}(목표 수 — 그 값으로 더한 행 {_show(_int(sc, 'expose_rows'))}(위 행 수에 넣지 "
            f"않음) · 기존 행과 같아 더하지 않은 것 {_show(_int(sc, 'expose_duplicates'))}, 한 행이 목표 여럿을 만족한다), 못 만족한 것 "
            f"{_show(_int(sc, 'expose_not_reached'))}(그 자리 값을 모델이 모름 — 출력으로만 쓰는 객체를 덮는 쓰기 · 효과 있는 "
-           f"조건 등 {_show(_int(sc, 'expose_unmodeled'))} · 국소 최선 · 오르기 상한 {_show(_int(sc, 'expose_local_best'))} · "
+           f"조건 등 {_show(_int(sc, 'expose_unmodeled'))}"
+           + (f"(그중 덮는 값만 몰라 쓰기 전 값을 입력으로 청한 쓰기 {_show(_int(sc, 'expose_prior_value_needed'))} · 그 객체를 "
+              f"이름으로 적을 수 없는 쓰기 {_show(_int(sc, 'expose_prior_value_unnamed'))} — 상수 아닌 첨자 · 캐스트 등)"
+              if _int(sc, "expose_prior_value_needed") or _int(sc, "expose_prior_value_unnamed") else "")
+           + f" · 국소 최선 · 오르기 상한 {_show(_int(sc, 'expose_local_best'))} · "
            f"예산 {_show(_int(sc, 'expose_budget_cut'))} · 행 상한 {_show(_int(sc, 'expose_cut'))} · oracle 이 모든 실행을 "
            f"거절한 unit 의 것 {_show(_int(sc, 'expose_refused'))} · 오류로 끊긴 것 {_show(_int(sc, 'expose_error_cut'))}), 모델 실행 "
            f"{_show(_int(sc, 'expose_runs'))}회(인터프리터 {_show(_int(sc, 'expose_steps'))}걸음 — 닿기 목표와 따로 센 예산, "
@@ -1525,9 +1529,24 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 그중 {_show(_int(sr, 'names_added_by_scenario_search'))} 이름은 어떤 행도 아니라 동작 시나리오 탐색이 닿으려던 "
                "경로의 실행이 값 없이 읽은 객체다(행이 닿지 못한 경로라 처음 본 칸 수는 0 — 'Source Findings' 의 입력 목록 결손 "
                "소견에도 든다: 함수가 그 경로에서 읽는다)." if _int(sr, "names_added_by_scenario_search") else "")
+            + (f" 그중 {_show(_int(sr, 'names_added_for_write_prior_value'))} 이름은 함수가 쓰는 객체의 쓰기 전 값이다 — 이전 값을 "
+               "모르면 그 쓰기를 지운 결함과 정상을 가를 행이 없어(쓰기 삭제는 이전 값을 남긴다) 행이 호출 전 값을 정하게 했다. "
+               "함수가 그 쓰기 전 값을 읽지 않으므로 입력 목록 결손 소견에는 넣지 않고, 읽는 이름이 더 나오지 않는 회차에만 더하며 "
+               "단독 경계 행으로 움직이지 않는다. 행이 두는 고정값은 함수가 그 객체에 쓰는 값과 다르게 고른다(입력의 범위 · 값 집합 "
+               "안에서 — enum 은 열거자)." if _int(sr, "names_added_for_write_prior_value") else "")
+            + (f" 빈칸 채움 규칙의 값이 함수가 쓰는 값과 같아 고정값을 옮긴 이름 {_show(_int(sr, 'prior_fixed_values_moved'))}."
+               if _int(sr, "prior_fixed_values_moved") else "")
+            + (f" 범위 · 값 집합의 모든 후보를 함수가 써서 고정값을 옮기지 못한 이름 "
+               f"{_show(_int(sr, 'prior_fixed_values_collide'))} — 그 쓰기의 삭제는 기본 행이 가르지 못한다."
+               if _int(sr, "prior_fixed_values_collide") else "")
+            + (f" 쓰기 전 값으로 더하지 못한 이름: {_dist(sr.get('prior_value_not_added'))}."
+               if isinstance(sr.get("prior_value_not_added"), dict) and sr.get("prior_value_not_added") else "")
+            + (f" 회차 상한에서 쓰기 전 값으로 더하지 못하고 남은 이름 {_show(_int(sr, 'prior_values_beyond_cap'))} — 그 쓰기의 삭제는 "
+               "이 문서가 가르지 못할 수 있다." if _int(sr, "prior_values_beyond_cap") else "")
             + " 기본 카탈로그 행의 자리·순서·설계 열 값은 정본 규모 "
             "문서와 같고 그 행에서 더한 입력은 고정값이다. 더한 입력의 범위(선언 타입 전폭, enum 은 그 번역 단위의 열거자 — 설계서·"
-            "HSIS 는 이 이름을 적지 않았다)는 단독 경계(OAT)·행동 경계 행이 움직인다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 "
+            "HSIS 의 입력 표는 이 이름을 적지 않았다; 쓰기 전 값 입력이 설계 출력이면 설계서 출력 행의 범위)는 단독 경계(OAT)·행동 "
+            "경계 행이 움직인다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 "
             f"회차에 더한다(최대 {_show(_int(sr, 'max_rounds'))}회차 사용"
             + (f" · 상한 {_show(_int(sr, 'round_cap'))}회차" if _int(sr, "round_cap") else "")
             + (f" · 상한에서 멈춰 다음 회차가 더했을 이름 {_show(_int(sr, 'names_beyond_cap'))}"
@@ -1538,6 +1557,9 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f"(더하지 않은 사유: {_dist(not_added)})" if not_added else "") + ". "
             + (f"입력 열 상한에 막힌 unit {_show(_int(sr, 'units_input_columns_full'))}. "
                if _int(sr, "units_input_columns_full") else "")
+            + (f"포인터 매개변수 버퍼(`pData[k]` · `p[0].data[k]`)의 원소 열 상한(버퍼 하나에 앞 원소부터 "
+               f"{_show(_int(sr, 'buffer_elements_max'))}개)에 막힌 unit {_show(_int(sr, 'units_buffer_elements_full'))} — 그 뒤 원소를 "
+               "읽는 칸은 [검증 필요]로 남는다. " if _int(sr, "units_buffer_elements_full") else "")
             + (f"마지막 회차에도 남은 이름 {_show(_int(sr, 'names_remaining'))}(unit {_show(_int(sr, 'units_with_remaining'))})"
                " 은 그 칸을 [검증 필요] 로 둔다. " if _int(sr, "names_remaining") else "")
             + "MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(기본 MC/DC 설계는 "
@@ -1546,7 +1568,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 입력 보완 중 오류로 설계 입력 목록 그대로 둔 unit {_show(_int(sr, 'errors'))} — 로그에 traceback 이 있다."
                if _int(sr, "errors") else ""),
             tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors"))
-                       or bool(_int(sr, "units_round_cap_reached")))))
+                       or bool(_int(sr, "units_round_cap_reached")) or bool(_int(sr, "units_buffer_elements_full")))))
     # (R80) 소스가 써서 더한 기대값 — 확장 프로파일에서만 기록된다. 설계서 출력 목록과 열이 달라지므로 늘 공시한다.
     sw = qr.get("source_written_outputs")
     if isinstance(sw, dict):
@@ -1575,6 +1597,12 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f"(더하지 않은 사유: {_dist(sw_not)})" if sw_not else "") + "."
             + (f" 기대값 열 상한에 막힌 unit {_show(_int(sw, 'units_output_columns_full'))}."
                if _int(sw, "units_output_columns_full") else "")
+            + (f" 포인터 매개변수 버퍼의 원소 열 상한(버퍼 하나에 앞 원소부터 {_show(_int(sw, 'buffer_elements_max'))}개)에 막힌 unit "
+               f"{_show(_int(sw, 'units_buffer_elements_full'))} — 그 뒤 원소의 쓰기는 기대값 열이 없다."
+               if _int(sw, "units_buffer_elements_full") else "")
+            + (f" 행이 적은 원소 밖(하네스가 할당하지 않은 곳)에 쓴 버퍼 원소 {_show(_int(sw, 'names_written_past_allocation'))} — "
+               "기대값 열이 없고, 그 행은 '미정의 동작 가능' 으로 그 뒤 포인터로 닿는 값을 주장하지 않는다."
+               if _int(sw, "names_written_past_allocation") else "")
             + (f" 오류로 더하지 못한 unit {_show(_int(sw, 'errors'))} — 로그에 traceback 이 있다(입력 보완은 계속했다)."
                if _int(sw, "errors") else "")
             + (f" 쓴 객체 기록이 실패한 행 {_show(_int(sw, 'rows_written_error'))} — 그 행의 쓰기는 위 수에 들지 않는다(기대값은 "
@@ -1583,7 +1611,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                f"{_show(_int(sw, 'units_pointee_rerun_cap_reached'))} — 그 unit 의 일부 값은 빠진 열의 관측이 만든 대상 할당에 "
                "기댈 수 있다." if _int(sw, "units_pointee_rerun_cap_reached") else ""),
             tone=_tone(bool(_int(sw, "units_output_columns_full")) or bool(_int(sw, "errors"))
-                       or bool(_int(sw, "rows_written_error")))))
+                       or bool(_int(sw, "rows_written_error")) or bool(_int(sw, "units_buffer_elements_full")))))
     # (R19) MC/DC 채움 행 — 확장 프로파일에서만 기록된다
     mf = qr.get("mcdc_fill")
     if isinstance(mf, dict):
@@ -1592,8 +1620,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"{_show(_int(mf, 'rows'))}행 (공란이 있는 MC/DC 벡터 {_show(_int(mf, 'rows_with_blanks'))}/"
             f"{_show(_int(mf, 'mcdc_rows'))})",
             "MC/DC 설계 벡터는 결정이 읽는 입력만 적어 나머지 칸이 비고, 함수가 그 입력을 읽으면 기대값이 서지 않는다. 벡터 행은 "
-            "그대로 두고 비운 입력을 행동 경계 행과 같은 규칙(선언 타입 범위의 중간값에서 입력 위치만큼 옮긴 값, enum 은 열거자 — "
-            "이름 패턴으로 추측한 타입은 채우지 않는다)으로 채운 행을 더했다 — MC/DC 쌍의 구성원이 아니며(쌍 주장은 원래 행에만 "
+            "그대로 두고 비운 입력을 행동 경계 행과 같은 규칙(선언 타입 범위의 중간값에서 입력 위치만큼 옮긴 값, enum 은 열거자, "
+            "쓰기 전 값 입력은 함수가 그 객체에 쓰는 값과 다른 값 — 이름 패턴으로 추측한 타입은 채우지 않는다)으로 채운 행을 더했다 — MC/DC 쌍의 구성원이 아니며(쌍 주장은 원래 행에만 "
             "있다) 기대값은 다른 행과 같은 oracle 이 도출한다. 원래 벡터보다 더 도출하는 칸이 없는 채움 행은 뺐다."
             + (f" 더 도출하는 칸이 없어 뺀 행 {_show(_int(mf, 'pruned'))}." if _int(mf, "pruned") else "")
             + (f" 선언 타입이 없어 채우지 못한 벡터 {_show(_int(mf, 'not_fillable'))}." if _int(mf, "not_fillable") else "")
@@ -2153,7 +2181,12 @@ def _pointer_parameters_item(block: Any) -> List[Dict[str, Any]]:
         + f". 구조체 대상 출력 {_show(_int(block, 'struct_outputs_observed'))} 은 그대로 두고 그 매개변수를 관측한다 — 확장 "
         "프로파일은 실행이 쓴 대상 멤버를 기대값 열로 더한다('소스가 써서 더한 기대값'). 행이 대상을 입력이나 기대값으로 적으면 그 "
         "매개변수는 하네스가 할당한 자기 객체(널 아님)를 가리킨다 — 그 매개변수의 NULL 분기는 이 문서의 행이 시험하지 않는다. 값을 "
-        "주지 않고 관측만으로 할당된 행은 그 사실을 근거(Test Evidence 가정)에 적는다."
+        "주지 않고 관측만으로 할당된 행은 그 사실을 근거(Test Evidence 가정)에 적는다. 스칼라 대상(`pData`)과 행이 적은 대상의 "
+        "한 겹 포인터 멤버(`RespMsg[0].data`)는 하네스 버퍼다: 원소는 `pData[1]` · `RespMsg[0].data[0]` 열이 정하고, 버퍼는 행이 "
+        "적은 마지막 원소까지(멤버 자체를 적은 행은 원소 열을 함께 적어도 함수가 닿는 만큼 — 근거에 닿은 마지막 첨자를 적는다) "
+        "할당된 것으로 본다 — 포인터 멤버 열 자체의 값은 포인터 값으로 쓰지 "
+        "않는다(VectorCAST 로 옮길 때 그 칸은 버퍼 할당이지 0 · NULL 이 아니다). 할당 밖 쓰기는 '미정의 동작 가능' 으로 적고 그 뒤 "
+        "포인터로 닿는 값은 주장하지 않는다; 그런 행은 근거(Test Evidence 가정)에 버퍼와 할당 길이를 적는다."
         + (f" 대상 배치를 소스가 모르거나 함수를 읽지 못해 설계서 이름 그대로 둔 매개변수: {_dist(unmodeled)}." if unmodeled else "")
         + (f" 예: {'; '.join(samples)}." if samples else "")
         + (f" 오류로 설계서 이름 그대로 둔 unit {_show(errors)} — 로그에 traceback 이 있다." if errors else ""),

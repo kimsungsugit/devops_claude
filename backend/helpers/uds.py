@@ -1497,7 +1497,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 # (R64 리뷰 4차) v52: project_context 스키마 24(파일별 `paren_amp` — 문법이 비트 and 로 읽는 `(T)&x` — 23 의 사실에는 없다).
 # (R68, 감사 #16) v53: `source_read_failures`(끝내 읽지 못한 파일) · 함수 레코드 `source_unavailable_reason=source_read_failed:<종류>`.
 #   52 로 캐시된 결과는 읽기 실패를 빈 원문으로 담았을 수 있다 — 다시 읽는다. 읽기 실패가 있는 결과는 캐시하지 않는다(아래).
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v53"
+# (R82) v54: project_context 스키마 25(구조체 멤버의 포인터 겹 수 `pointer_depth` — 포인터 매개변수 대상의 한 겹 포인터 멤버를 하네스
+#   버퍼로 읽는다). 24 로 캐시된 문맥의 멤버에는 없다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v54"
 #: (R68 리뷰 W3) 읽기 실패가 든 결과는 디스크에 두지 않고 메모리에만 이만큼 — 한 묶음(STS · SUTS · SITS 연속 생성)은 파싱 한 번을
 #   나눠 쓰고, 사용자의 다음 생성은 다시 읽는다. 0 이면 담지 않는다.
 _FAILED_SECTIONS_TTL = 90.0

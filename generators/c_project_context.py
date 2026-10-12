@@ -28,7 +28,7 @@ from generators import pointer_flow
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 24  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 25  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -76,6 +76,8 @@ SCHEMA_VERSION = 24  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 23 (R64 review round 3): flow facts carry function-local typedef names (`local_types`) and K&R definitions
 #    (`params_unreadable`); a body `#define` stray carries its text (`body`) — 22 lacks them. Paired with v51.
 # 24 (R64 review round 4): per-file `paren_amp` — ``(T)&x`` read as a bitwise and — 23 lacks it. Paired with v52.
+# 25 (R82): struct members carry `pointer_depth` (``UINT8 *data`` 1) — a pointee's one-level pointer member is a harness
+#    buffer (`pointee_types[...]["pointers"]`); 24 lacks it. Paired with v54.
 _ARRAY_INIT_BUDGET = 20000
 #: (R67 review I-1) element values a const table may hold in the scope — a designator index or a declared length past it
 #   (``{ [2000000] = 1U }``) is no lookup table; its values stay unread
@@ -1550,8 +1552,15 @@ def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
                 shape = "array" if dims else "scalar"
             else:
                 shape = inner.type.replace("_declarator", "") if inner is not None else "unknown"
+            # (R82) how many `*` a pointer member has (`UINT8 *data` 1 · `UINT8 **pp` 2) — one level points to a buffer
+            #   of the base type; 0 when the innermost declarator is not a plain name (a function pointer, an array of
+            #   pointers)
+            depth, p = 0, inner
+            while p is not None and p.type == "pointer_declarator":
+                depth, p = depth + 1, p.child_by_field_name("declarator")
             members.append({"name": _field_name(d, raw), "type": typename, "dims": list(reversed(dims)), "shape": shape,
-                            "bitfield": bitfield, "volatile": "volatile" in fquals, "const": "const" in fquals})
+                            "bitfield": bitfield, "volatile": "volatile" in fquals, "const": "const" in fquals,
+                            "pointer_depth": depth if p is not None and p.type == "field_identifier" else 0})
     bit_fields = any(m["bitfield"] for m in members)   # never flattened: the members are not kept (review I-e)
     structs.setdefault(key, []).append({"union": kind == "union", "hidden": hidden, "bit_fields": bit_fields,
                                         "members": [] if kind == "union" or bit_fields else members,
@@ -3290,10 +3299,11 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     return scope
 
 
-def _flatten_struct(key, raw_structs, type_of, agreeing, macro_names=(), volatile=False):
+def _flatten_struct(key, raw_structs, type_of, agreeing, macro_names=(), volatile=False, pointers=None):
     """(R39, R40) The scalar members of the struct ``key`` → ({path: (kind, record)}, [unmodeled member paths]).
     Unresolved when the body cannot be flattened (see `_scope_struct` — the rules a struct object and a pointer
-    parameter's pointee share)."""
+    parameter's pointee share). ``pointers`` (R82): filled with each one-level pointer member to an integer
+    ``{path: {"type", "typename", "volatile"}}`` (``UINT8 *data``) — still an unmodeled member of the struct."""
     unmodeled: list[str] = []
 
     def walk(k, prefix, volatile, depth):
@@ -3324,6 +3334,15 @@ def _flatten_struct(key, raw_structs, type_of, agreeing, macro_names=(), volatil
             core = " ".join(w for w in str(m.get("type") or "").split() if w not in {"const", "volatile"})
             if m.get("const") or m.get("shape") not in {"scalar", "array"}:
                 unmodeled.append(path)   # a const or pointer / function-pointer member: no input slot
+                if (pointers is not None and m.get("shape") == "pointer" and m.get("pointer_depth") == 1
+                        and not m.get("dims") and core not in raw_structs):
+                    try:
+                        pt = type_of(m["type"])
+                    except Unresolved:
+                        continue
+                    if isinstance(pt, dict) and not is_float(pt) and pt.get("kind") != "_Bool":
+                        pointers[path] = {"type": pt, "typename": core,
+                                          "volatile": vol or "volatile" in (pt.get("qualifiers") or [])}
                 continue
             if core in raw_structs:
                 if m.get("dims"):
@@ -3391,13 +3410,16 @@ def _pointee_layout(core, raw_structs, type_of, agreeing, macro_names, gaps=Fals
     if core in raw_structs:
         if gaps:
             return {"reason": "preprocessing_gaps"}
+        pointers: dict = {}
         try:
-            leaves, unmodeled = _flatten_struct(core, raw_structs, type_of, agreeing, macro_names)
+            leaves, unmodeled = _flatten_struct(core, raw_structs, type_of, agreeing, macro_names, pointers=pointers)
         except Unresolved as exc:
             return {"reason": str(exc)}
         members = {"." + path: r for path, (kind, r) in leaves.items() if kind == "scalar"}
         arrays = {"." + path: r for path, (kind, r) in leaves.items() if kind == "array"}
-        return {"members": members, "arrays": arrays, "opaque": bool(unmodeled)}
+        # (R82) a one-level pointer member to an integer (`UINT8 *data`): the harness points it to a buffer of its own
+        return {"members": members, "arrays": arrays, "opaque": bool(unmodeled),
+                "pointers": {"." + path: r for path, r in pointers.items()}}
     try:
         t = type_of(core)
     except Unresolved as exc:

@@ -174,7 +174,7 @@ def _loaded(value, t):
 
 class _State:
     __slots__ = ("store", "mode", "ret", "havoc_all", "havoc_pointer", "havoc_bases", "escaped", "forks", "possible_ub",
-                 "decisions", "initial_reads")
+                 "decisions", "initial_reads", "rebound")
 
     def __init__(self):
         self.store: dict[str, Any] = {}
@@ -191,6 +191,9 @@ class _State:
         # (backlog 2-c) keys this path read while their initial value was not in the inputs — a read is not stored, so
         #   the store alone cannot tell 'read in a condition, never written' from 'never touched'
         self.initial_reads: set[str] = set()
+        # (review R82 C1) pointer members of a harness object (`@pointee:msg[0].data`) the path wrote or may have written
+        #   — they no longer point to the harness buffer: an access through them is through an unknown pointer again
+        self.rebound: set[str] = set()
 
     def copy(self, records=True):
         """A copy of the path — (R79 review I-R2-3) without its records (``records=False``) for a probe that reads only
@@ -202,6 +205,7 @@ class _State:
         s.decisions = list(self.decisions) if records else []
         s.havoc_pointer = self.havoc_pointer
         s.initial_reads = set(self.initial_reads)
+        s.rebound = set(self.rebound)
         return s
 
 
@@ -423,6 +427,17 @@ class _Interp:
         # (R81) the names the run is observed by (the row's outputs): a pointee the row observes is set up too
         self.observed: frozenset = frozenset()
         self.observed_only_pointees: set[str] = set()   # set up because observed, though the row sets none of it
+        # (R82) harness buffers met so far: base key (`@pointee:p` · `@pointee:msg[0].data`) → the elements the row names
+        #   (inputs ∪ observed — the harness allocates what the test names: a write past them is past the buffer), None
+        #   for a member the row names by itself (as long as the function reaches)
+        self.harness_buffers: dict[str, int | None] = {}
+        # (review R82 I-R4-3) the last element index the run reached in each — the size a harness needs for an unbounded one
+        self.buffer_reach: dict[str, int] = {}
+        # (review R82 I-R5-7) buffers the run indexed by a value it does not know — the reach above may be short of them
+        self.buffer_reach_unknown: set[str] = set()
+        # (review R82 C1) every one-level pointer member of a set-up pointee (`@pointee:msg[0].data`) — a write that may
+        #   reach it rebinds it (`rebind_under`)
+        self.pointer_member_keys: set[str] = set()
         self.function_name = ""
         # (R16) interprocedural: the evaluation's `_World` (None = callees are effects only, as before), this
         # activation's parameter keys (a callee's ``@param:x`` must not be the caller's) and its step ceiling.
@@ -592,6 +607,18 @@ class _Interp:
                 state.store[key] = Unknown(reason)
         state.havoc_bases[base] = reason
 
+    def rebind_under(self, state, base):
+        """(review R82 C1) A write that may reach the pointer members of a harness object under ``base`` (the member
+        itself — ``msg->data = g_buf`` —, the whole object — ``*msg = tmpl`` —, or a write through a pointer that may reach
+        it): from here those members point who knows where. What the harness buffer held is no longer what an access
+        through them reads (it stays unknown for an observation of it), and an access through them is through an unknown
+        pointer, as before R82."""
+        # the members are the function under test's (a callee activation writing through a pointer may rebind them too)
+        for key in sorted(self.entry_interp().pointer_member_keys):
+            if (key == base or key.startswith(base + ".") or key.startswith(base + "[")) and key not in state.rebound:
+                state.rebound.add(key)
+                self.havoc_base(state, key, "pointer_member_rebound:" + key[len("@pointee:"):])
+
     def havoc_everything(self, state, reason, locals_too=False):
         """``locals_too``: text that expands *in* this function (a macro we cannot model, inline assembly operands, a
         write through a macro name) can name a parameter or local directly — ``#define ZERO(n) n##_v = 0U`` writes
@@ -604,6 +631,10 @@ class _Interp:
         for base in state.escaped:
             if base.startswith("@"):
                 state.havoc_bases[base] = reason
+        for base in (state.escaped if not locals_too else {k.split("[", 1)[0]
+                                                           for k in self.entry_interp().pointer_member_keys}):
+            if base.startswith("@pointee:"):
+                self.rebind_under(state, base)   # (review R82 C1) the unknown code may rebind its pointer members
         self.havoc_statics(state, reason)  # unknown code may call back into this function
         # (backlog 2-c review round 3 W1) unknown code may read anything too: no output is unread after it
         state.initial_reads.add(_UNPLACED_READ)
@@ -640,6 +671,8 @@ class _Interp:
                 state.store[key] = _havocked(state.store[key], reason)
         for base in state.escaped:
             state.havoc_bases.setdefault(base, reason)
+            if base.startswith("@pointee:"):
+                self.rebind_under(state, base)   # (review R82 C1) a write through a pointer may rebind its pointer members
         if not state.havoc_pointer:
             state.havoc_pointer = reason
         if world is not None:
@@ -649,12 +682,30 @@ class _Interp:
         kind = target[0]
         if kind == "key":
             _, key, t, volatile = target
+            if key.startswith("@pointee:") and key.endswith("]"):
+                base, _, index = key[:-1].rpartition("[")
+                extent = self.harness_buffers.get(base)
+                if extent is not None and index.isdigit() and int(index) >= extent:
+                    # (review R82 W1 · W-R2-1) past the elements the row names: past the buffer the harness allocated —
+                    #   the write may land on any object a pointer reaches (as a write through an unknown pointer), and
+                    #   what it wrote is no element of the buffer either
+                    state.possible_ub.add("harness_buffer_write_beyond_row")
+                    self.havoc_pointer_targets(state, "harness_buffer_write_beyond_row:" + base[len("@pointee:"):])
+                    state.store[key] = Unknown("harness_buffer_write_beyond_row:" + base[len("@pointee:"):])
+                    return
             if t is None or isinstance(t, Unknown):
                 state.store[key] = Unknown("object_type_unresolved")
                 return
             state.store[key] = self.convert_to(val, t)
         elif kind == "base":
             self.havoc_base(state, target[1], target[2])
+            if str(target[2]).startswith("pointee_write:"):
+                self.rebind_under(state, target[1])   # (review R82 C1) `msg->data = …` · `*msg = …`
+            elif str(target[2]).startswith("index_unknown") and self.harness_buffers.get(target[1]) is not None:
+                # (review R82 W-R3-2) `p[g_idx] = …` on a buffer of the elements the row names: the index may be past
+                #   them — as a write past the allocation
+                state.possible_ub.add("harness_buffer_write_beyond_row")
+                self.havoc_pointer_targets(state, "harness_buffer_write_beyond_row:" + target[1][len("@pointee:"):])
         elif kind == "ptr":
             self.havoc_pointer_targets(state, target[1])
         elif kind == "all":
@@ -729,6 +780,7 @@ class _Interp:
                     self.pointees[name] = pointee
                     state.store[key] = _Pointer(name)
                     state.escaped.add("@pointee:" + name)
+                    self.pointer_member_keys |= {f"@pointee:{name}[0]{p}" for p in (pointee.get("pointers") or {})}
             frame[name] = info
             self.params[name] = info
         if args is not None and position != len(args):
@@ -1655,6 +1707,17 @@ class _Interp:
         if k == "update_expression":
             return self.update(state, n, raw, depth)
         if k == "subscript_expression":
+            arg = n.child_by_field_name("argument")
+            if arg is not None and arg.type == "call_expression" and self.is_cast_call(arg, raw) \
+                    and len(_named(arg.child_by_field_name("arguments"))) == 1:
+                # (R82) ``(T)(d)[k]`` — tree-sitter takes the cast-call ``(T)(d)`` as what is subscripted; C binds the
+                #   subscript first: ``(T)((d)[k])`` (`LINTP_MF_GET_LEN(d)` reads both length bytes of a LIN frame so).
+                #   ``(T)(a, b)[k]`` (a comma expression, two named arguments) stays as it was
+                inner = _named(arg.child_by_field_name("arguments"))[0]
+                node, eraw = self.macro_node("(" + _text(inner, raw) + ")[" + _text(n.child_by_field_name("index"), raw) + "]")
+                if node is not None:
+                    return self.cast(self.expression(state, node, eraw, depth + 1),
+                                     self.type_of(_text(_named(arg.child_by_field_name("function"))[0], raw)))
             target = self.lvalue(state, n, raw, depth)
             return self.read_target(state, target)
         if k == "field_expression":
@@ -1713,8 +1776,8 @@ class _Interp:
         prefix = name + "[0]"
         if name in self.inputs and not self.row_no_value(self.inputs[name]):
             return None   # (review R40 W4) the row states the pointer itself (``NULL``, an address): not a harness object
-        sets = any((k == prefix or str(k).startswith(prefix + ".") or str(k).startswith(prefix + "["))
-                   and self.row_integer(self.inputs[k]) for k in self.inputs)
+        sets = any((k == prefix or str(k).startswith(prefix + ".") or str(k).startswith(prefix + "[")
+                    or _is_buffer_element(k, name)) and self.row_integer(self.inputs[k]) for k in self.inputs)
         if not sets and not self.observes_pointee(name):
             return None   # (review R40 W4) only a value the row really sets (not ``-``) implies the harness allocated it
         core = " ".join(w for w in _text(typ, self.raw).split() if w not in {"const", "volatile"})
@@ -1723,7 +1786,10 @@ class _Interp:
             return None
         if not sets:
             self.observed_only_pointees.add(name)   # (review R81 W3) said in the record's assumptions
-        return {**layout, "const": "const" in quals, "volatile": "volatile" in quals}
+        # (R82) a scalar pointee is a harness buffer: `p[k]` is an element of its own (`pData[1]` — the reference sets
+        #   both bytes a frame parser reads); `*p` / `p[0]` is its first
+        buffer = set(layout.get("members") or {}) == {""} and not layout.get("arrays")
+        return {**layout, "const": "const" in quals, "volatile": "volatile" in quals, "buffer": buffer}
 
     def observes_pointee(self, name):
         """(R81) Whether the row observes what pointer parameter ``name`` points to — an output naming its pointee
@@ -1733,7 +1799,7 @@ class _Interp:
         nowhere the model can place and the observation is unknown (R40 left `out[0]` to this round)."""
         prefix = name + "[0]"
         return any(o == name or o == prefix or o.startswith(prefix + ".") or o.startswith(prefix + "[")
-                   for o in self.observed)
+                   or _is_buffer_element(o, name) for o in self.observed)
 
     def pointee_target(self, state, n, raw):
         """(R40) ``(target, path)`` of an access to a known pointer's pointee — ``*p`` · ``p[0]`` · ``p->a`` ·
@@ -1779,7 +1845,7 @@ class _Interp:
             raise Unsupported("undefined_behavior:null_pointer_dereference")
         return value.target, "".join("." + x for x in reversed(parts))
 
-    def pointee_object(self, target, path):
+    def pointee_object(self, target, path, state=None):
         """(R40) What ``target[0]<path>`` is: ``("leaf", key, type, volatile)``, ``("array", key, type, length,
         volatile)`` or ``("other", key)`` (the whole pointee, a nested struct, an unmodeled member)."""
         layout = self.pointees.get(target) or {}
@@ -1791,10 +1857,40 @@ class _Interp:
         rec = (layout.get("arrays") or {}).get(path)
         if rec is not None:
             return ("array", key, rec["type"], rec["length"], volatile or bool(rec.get("volatile")))
+        rec = (layout.get("pointers") or {}).get(path)
+        name = f"{target}[0]{path}"
+        if rec is not None and not (state is not None and key in state.rebound) and self.names_buffer(name, member=True):
+            # (R82) a one-level pointer member of the harness object (`RespMsg->data`) the row names (the member itself —
+            #   the SwUDS lists `RespMsg->data` — or an element `p[0].data[k]`; review R82 W1: else the harness leaves it
+            #   unset): the harness points it to a buffer of its own (the reference sets `RespMsg[0].data` to a
+            #   VectorCAST buffer). Not once a write may have rebound it (review R82 C1). Recorded when the run reaches it
+            #   (review R82 W-R3-3: an observation alone puts no buffer in the row's assumptions); a member the row names
+            #   by itself stays as long as the function reaches though the extended profile adds element columns too
+            #   (review R82 W-R3-1: R80 · the prior-value pass name `data[0]` — the design still names `data`)
+            if state is not None:
+                self.harness_buffers.setdefault(
+                    key, None if any(str(k).strip() == name for k in (*self.inputs, *self.observed))
+                    else self.buffer_extent(name))
+            return ("array", key, rec["type"], HARNESS_BUFFER_LENGTH, volatile or bool(rec.get("volatile")))
         return ("other", key)
 
+    def names_buffer(self, name, member=False):
+        """(R82) Whether the row names harness buffer ``name`` (``msg[0].data`` · ``p``): an element ``name[k]`` it sets
+        or observes, or — a pointer member — the member itself."""
+        return any((member and str(k).strip() == name) or _element_index(k, name) is not None
+                   for k in (*self.inputs, *self.observed))
+
+    def buffer_extent(self, name):
+        """(review R82 W1) How many elements of harness buffer ``name`` the harness allocated: up to the last one the row
+        sets or observes (``pData[1]`` → 2; a pointer member the row names itself is as long as the function reaches —
+        `pointee_object`, review R82 W-R2-1 · W-R3-1). The model
+        reads past them (an element the row does not set is unknown); a write past them is a write past the buffer
+        (`store`)."""
+        return max((i + 1 for k in (*self.inputs, *self.observed) for i in [_element_index(k, name)] if i is not None),
+                   default=0)
+
     def read_pointee_access(self, state, target, path):
-        obj = self.pointee_object(target, path)
+        obj = self.pointee_object(target, path, state)
         if obj[0] == "leaf":
             return _loaded(self.read_pointee(state, obj[1], obj[2], obj[3]), obj[2])
         if obj[0] == "array":
@@ -2403,7 +2499,7 @@ class _Interp:
         if k == "subscript_expression":
             pt = self.pointee_target(state, n, raw)
             if pt is not None:
-                return self.pointee_lvalue(*pt)
+                return self.pointee_lvalue(*pt, state)
             arg, index = n.child_by_field_name("argument"), n.child_by_field_name("index")
             array = self.array_object(arg, raw, depth, state)
             iv = self.expression(state, index, raw, depth + 1)
@@ -2418,16 +2514,23 @@ class _Interp:
             key, t, length, volatile = array
             if isinstance(iv.v, Unknown) or iv.t is None:
                 state.possible_ub.add("index_unknown")
+                if key in self.harness_buffers:
+                    self.buffer_reach_unknown.add(key)   # (review R82 I-R5-7)
                 return ("base", key, "index_unknown:" + (iv.v.reason if isinstance(iv.v, Unknown) else "type"))
             if length is None:
                 return ("base", key, "array_length_unresolved")
             if not 0 <= iv.v < length:
+                if key in self.harness_buffers and iv.v >= 0:
+                    # (review R82 I6) past the length the model gives a harness buffer — a limit of the model, not C's
+                    raise Unsupported("harness_buffer_index_beyond_model:" + str(iv.v))
                 raise Unsupported("undefined_behavior:array_index_out_of_bounds")
+            if key in self.harness_buffers:
+                self.buffer_reach[key] = max(self.buffer_reach.get(key, -1), int(iv.v))
             return ("key", f"{key}[{iv.v}]", t, volatile)
         if k == "field_expression":
             pt = self.pointee_target(state, n, raw)
             if pt is not None:
-                return self.pointee_lvalue(*pt)
+                return self.pointee_lvalue(*pt, state)
             is_arrow = any(c.type == "->" for c in n.children)
             if is_arrow:
                 self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
@@ -2448,17 +2551,17 @@ class _Interp:
         if k == "pointer_expression":
             pt = self.pointee_target(state, n, raw)
             if pt is not None:
-                return self.pointee_lvalue(*pt)
+                return self.pointee_lvalue(*pt, state)
             self.expression(state, n.child_by_field_name("argument"), raw, depth + 1)
             return ("ptr", "write_through_pointer")
         if k == "cast_expression":
             return ("ptr", "write_through_cast")
         return ("all", "unsupported_lvalue:" + k)
 
-    def pointee_lvalue(self, target, path):
+    def pointee_lvalue(self, target, path, state=None):
         """(R40) Where a write through a known pointer lands: a pointee member (``p->a``), or everything under a
         non-leaf path (``*p = s`` · ``p->in = h``)."""
-        obj = self.pointee_object(target, path)
+        obj = self.pointee_object(target, path, state)
         if obj[0] == "leaf":
             return ("key", obj[1], obj[2], obj[3])
         return ("base", obj[1], "pointee_write:" + obj[1][len("@pointee:"):])
@@ -2483,7 +2586,7 @@ class _Interp:
             # (R40) a member array of a known pointer's pointee: ``p->b[i]``
             pt = self.pointee_target(state, arg, raw)
             if pt is not None:
-                obj = self.pointee_object(*pt)
+                obj = self.pointee_object(*pt, state)
                 return (obj[1], obj[2], obj[3], obj[4]) if obj[0] == "array" else None
         if arg.type == "field_expression":
             # (R39) a member array of a modeled struct object: ``g.b[i]``
@@ -2504,6 +2607,16 @@ class _Interp:
         if info is not None and not info.get("extern"):
             if info.get("array"):
                 return info["key"], info["type"], info["length"], info.get("volatile", False)
+            pointee = info.get("pointee")
+            value = state.store.get(info.get("key")) if state is not None else None
+            if isinstance(pointee, dict) and pointee.get("buffer") and isinstance(value, _Pointer) \
+                    and value.target == name:
+                # (R82) `p[i]` of a pointer parameter whose scalar pointee the row set up: an element of the harness
+                #   buffer (`@pointee:p[i]` — `p[0]` / `*p` is the same object as before)
+                rec = pointee["members"][""]
+                self.harness_buffers.setdefault(f"@pointee:{name}", max(1, self.buffer_extent(name)))
+                return (f"@pointee:{name}", rec["type"], HARNESS_BUFFER_LENGTH,
+                        bool(pointee.get("volatile") or rec.get("volatile")))
             return None
         if name in self.arrays:
             a = self.arrays[name]
@@ -2727,7 +2840,7 @@ class _Interp:
                 self.havoc_base(state, w, f"written_by_callee:{name}:{w}")
             if info.get("pointer_write") or opaque:
                 why = "pointer_write" if info.get("pointer_write") else "writes_through:" + opaque[0]
-                self.havoc_objects(state, self.callee_targets(name, info, arg_nodes, raw),
+                self.havoc_objects(state, self.callee_targets(name, info, arg_nodes, raw, state),
                                    f"callee_pointer_write:{name}:{why}")
             else:
                 # (review R64 I-4) a callee it calls that this run stubs may write through what it is passed, whatever
@@ -2753,7 +2866,7 @@ class _Interp:
         unknown (`stub_targets`); everything a pointer may reach when the arguments cannot be followed."""
         self.stubs_used.add(name)   # the record rests on the stub even when its value is not usable
         if view["pointer"]:
-            self.havoc_objects(state, self.stub_targets(name, arg_nodes, raw), f"stub_pointer_argument:{name}")
+            self.havoc_objects(state, self.stub_targets(name, arg_nodes, raw, state), f"stub_pointer_argument:{name}")
         return self.stub_return(name, info)
 
     # ── (R64) where a write through a pointer lands ─────────────────────────────────────────────────
@@ -2785,10 +2898,31 @@ class _Interp:
         cache[key] = flow.question(self.function_name, tree, records, entry, self.fn_names, as_pointer=True)
         return cache[key]
 
-    def callee_targets(self, name, info, arg_nodes, raw):
+    def harness_buffer_key(self, state, node, raw):
+        """(R82) The harness buffer an argument points into — a pointer parameter's scalar pointee (``p``, ``&p[k]``) or
+        a pointer member's buffer (``p->data``, ``&p->data[k]``) — as its base key (`@pointee:p` · `@pointee:p[0].data`),
+        else None. A callee writing through it stays inside it (beyond the buffer is undefined in the harness the
+        record assumes): the project points-to analysis cannot follow a pointer the harness loaded into its object."""
+        while node is not None and node.type == "parenthesized_expression" and len(_named(node)) == 1:
+            node = _named(node)[0]
+        if node is not None and node.type == "pointer_expression" and _text(node, raw).lstrip().startswith("&"):
+            inner = node.child_by_field_name("argument")
+            while inner is not None and inner.type == "parenthesized_expression" and len(_named(inner)) == 1:
+                inner = _named(inner)[0]
+            node = inner.child_by_field_name("argument") if inner is not None and \
+                inner.type == "subscript_expression" else None
+        if state is None or node is None or node.type not in ("identifier", "field_expression"):
+            return None
+        array = self.array_object(node, raw, 0, state)
+        if array is None or array[0] not in self.harness_buffers:   # (review R82 I6) the buffer by name, not by length
+            return None
+        return array[0]
+
+    def callee_targets(self, name, info, arg_nodes, raw, state=None):
         """(R64) The objects a callee run as its write closure may write through a pointer: its summary's ``abs`` and
         what this call's arguments for the parameters it writes through directly point to — None when the analysis
-        cannot say (refused, unknown code reached, an argument it cannot follow)."""
+        cannot say (refused, unknown code reached, an argument it cannot follow). (R82) An argument into a harness
+        buffer names that buffer (``@B:`` + its base key)."""
         summary = info.get("pointer_targets")
         if not summary or summary.get("abs") is None:
             return None
@@ -2796,15 +2930,20 @@ class _Interp:
         for i in summary.get("params") or ():
             if i >= len(arg_nodes):
                 return None
+            buffer = self.harness_buffer_key(state, arg_nodes[i], raw)
+            if buffer is not None:
+                out.add("@B:" + buffer)
+                continue
             objs = self.argument_objects(arg_nodes[i], raw)
             if objs is None:
                 return None
             out |= objs
         return out
 
-    def stub_targets(self, name, arg_nodes, raw):
+    def stub_targets(self, name, arg_nodes, raw, state=None):
         """(R64) What a sequence stub of ``name`` may write: the objects each argument for a parameter that can hold a
-        pointer points to, and what those reach — None when the analysis cannot say."""
+        pointer points to, and what those reach — None when the analysis cannot say. (R82) An argument into a harness
+        buffer of integers names that buffer only (it holds no pointer to reach further)."""
         flow = self.pointer_flow()
         params = flow.params(name) if flow is not None else None
         if params is None:
@@ -2812,6 +2951,10 @@ class _Interp:
         out: set = set()
         for i, node in enumerate(arg_nodes):
             if i < len(params) and not _maybe_pointer(flow, params[i]):
+                continue
+            buffer = self.harness_buffer_key(state, node, raw)
+            if buffer is not None:
+                out.add("@B:" + buffer)
                 continue
             objs = self.argument_objects(node, raw)
             if objs is None:
@@ -2843,9 +2986,11 @@ class _Interp:
         entry = self.entry_interp()
         active = {self.function_name} | ({it.function_name for it in self.world.stack} | set(self.world.inlined)
                                          if self.world is not None else set())
-        locals_, pointees, globals_ = set(), set(), set()
+        locals_, pointees, globals_, buffers = set(), set(), set(), set()
         for t in targets:
-            if t.startswith("G:"):
+            if t.startswith("@B:"):
+                buffers.add(t[3:])   # (R82) a harness buffer the argument points into (`harness_buffer_key`)
+            elif t.startswith("G:"):
                 globals_.add(t[2:])
             elif t.startswith("L:"):
                 _l, fn, local = t.split(":", 2)
@@ -2878,6 +3023,8 @@ class _Interp:
                 return
         for g in sorted(globals_):
             self.havoc_base(state, g, reason)
+        for b in sorted(buffers):
+            self.havoc_base(state, b, reason)   # (R82) its elements only — the struct holding the pointer stays
         if locals_ or pointees:
             for key in list(state.store):
                 base = key.split("[", 1)[0]
@@ -2886,6 +3033,8 @@ class _Interp:
             for base in list(state.escaped) + sorted(pointees):
                 if _local_name(base) in locals_ or base in pointees:
                     state.havoc_bases.setdefault(base, reason)
+            for base in sorted(pointees):
+                entry.rebind_under(state, base)   # (review R82 C1) the callee may rebind the harness object's members
         if self.world is not None:
             self.world.pointer_havocs += 1
 
@@ -3267,6 +3416,7 @@ class _World:
                     merged.havoc_bases.setdefault(base, reason)
                 merged.escaped |= s.escaped
                 merged.possible_ub |= s.possible_ub
+                merged.rebound |= s.rebound               # (review R82 C1) rebound on any callee path
                 merged.initial_reads |= s.initial_reads   # (backlog 2-c) a read on any callee path is a read
                 merged.forks.extend(f for f in s.forks if f not in merged.forks)
             if "callee_paths:" + name not in merged.forks:   # a loop joins the same callee many times: once is the fact
@@ -3446,12 +3596,24 @@ def _observe(interp, state, name, reads=None, escaped=None):
 
 
 _POINTEE_NAME_RE = re.compile(r"([A-Za-z_]\w*)\[0\]((?:\.[A-Za-z_]\w*)*)(?:\[(\d+)\])?")
+# (R82) an element of a pointer parameter's scalar pointee taken as a harness buffer (`pData[1]` — the reference's name)
+_BUFFER_ELEMENT_RE = re.compile(r"([A-Za-z_]\w*)\[(\d+)\]")
+HARNESS_BUFFER_LENGTH = 1 << 16   # (R82) a buffer as long as the function reaches; beyond any index a 16-bit count gives
 
 
 def _pointee_key(interp, name):
-    """(R40) ``p[0].a`` / ``p[0]`` / ``p[0].b[2]`` → ``(key, type, volatile)`` of a pointee the run set up, else None."""
+    """(R40) ``p[0].a`` / ``p[0]`` / ``p[0].b[2]`` → ``(key, type, volatile)`` of a pointee the run set up, else None.
+    (R82) ``p[k]`` — an element of a scalar pointee the harness holds as a buffer."""
     m = _POINTEE_NAME_RE.fullmatch(str(name).strip())
-    if not m or m.group(1) not in getattr(interp, "pointees", {}):
+    if not m:
+        b = _BUFFER_ELEMENT_RE.fullmatch(str(name).strip())
+        layout = getattr(interp, "pointees", {}).get(b.group(1)) if b else None
+        if not layout or not layout.get("buffer") or not 0 <= int(b.group(2)) < HARNESS_BUFFER_LENGTH:
+            return None
+        rec = layout["members"][""]
+        return (f"@pointee:{b.group(1)}[{int(b.group(2))}]", rec["type"],
+                bool(layout.get("volatile") or rec.get("volatile")))
+    if m.group(1) not in getattr(interp, "pointees", {}):
         return None
     obj = interp.pointee_object(m.group(1), m.group(2))
     if obj[0] == "leaf" and m.group(3) is None:
@@ -3715,6 +3877,28 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                     "pointer parameter(s) " + ", ".join(names) + " point to a harness object because the row observes "
                     "what the function leaves there (its expected values name the pointee); the row sets no value in it"]
                 record["observed_only_pointees"] = names
+            if interp.harness_buffers:
+                # (review R82 W-R2-3) the harness buffers this row's values rest on — said on this row only (a function
+                #   with no buffer keeps its assumptions as they were)
+                bufs = {k[len("@pointee:"):]: (v if v is not None else "unbounded")
+                        for k, v in sorted(interp.harness_buffers.items())}
+                reach = {k[len("@pointee:"):]: v for k, v in sorted(interp.buffer_reach.items())}
+                unknown = sorted(k[len("@pointee:"):] for k in interp.buffer_reach_unknown)
+                record["assumptions"] = list(record["assumptions"]) + [
+                    "harness buffers: a pointer parameter's scalar pointee and a pointer member the row names (p[k], "
+                    "p[0].m[k]) are buffers of their own — not null, no alias with another object; allocated up to the last "
+                    "element the row names (a member the row names itself, element columns or not: as far as the function "
+                    "reaches); an element the row does not set is unknown; a write past the allocation may reach any object "
+                    "(possible UB); a callee writing through a buffer argument writes inside it; the value in a pointer "
+                    "member's own column is not used as a pointer (" + ", ".join(
+                        f"{n} {e}" + (f" — reached [{reach[n]}]" if n in reach else "")
+                        + (" — also at an index the run does not know" if n in unknown else "")
+                        for n, e in bufs.items()) + ")"]
+                record["harness_buffers"] = bufs
+                if reach:
+                    record["harness_buffer_reach"] = reach
+                if unknown:
+                    record["harness_buffer_reach_unknown"] = unknown
             if interp.linked_reads:
                 record["assumptions"] = list(record["assumptions"]) + [
                     "const values taken from the one definition in another unit (the source hash covers this function's "
@@ -3777,6 +3961,22 @@ def _final_outputs(interp, finals, outs):
             assigned = name == "return" or any(_written(s, name, interp) for s in finals)
             values[name] = {"value": seen[0], "basis": "assigned" if assigned else "unchanged_input"}
     return values
+
+
+def _is_buffer_element(name, param):
+    """(R82) Whether ``name`` is ``param[k]`` — an element of the parameter's pointee taken as a harness buffer."""
+    m = _BUFFER_ELEMENT_RE.fullmatch(str(name).strip())
+    return bool(m) and m.group(1) == param
+
+
+def _element_index(name, base):
+    """(R82) ``k`` when ``name`` is ``base[k]`` (``pData[1]`` of ``pData`` · ``msg[0].data[3]`` of ``msg[0].data``), else
+    None."""
+    text = str(name).strip()
+    if not text.startswith(base + "[") or not text.endswith("]"):
+        return None
+    index = text[len(base) + 1:-1]
+    return int(index) if index.isdigit() else None
 
 
 def _observed_names(unit, outs):

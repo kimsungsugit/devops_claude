@@ -153,12 +153,17 @@ def test_a_read_the_input_list_missed_becomes_a_typed_input_and_the_rows_derive(
     before = _gen(dict(unit))
     assert any("initial_value_not_in_inputs:g_gain_close" in str(e.get("reason")) for e in _slots(before))
     seqs = _complete(unit)
-    assert unit["input_vars"] == ["g_a", "g_gain_open", "g_gain_close"]
+    # (R82) `g_o` is written on both paths: its prior value is an input too — after the read, and no read
+    assert unit["input_vars"] == ["g_a", "g_gain_open", "g_gain_close", "g_o"]
     assert unit["design_input_vars"] == ["g_a", "g_gain_open"]
     rec = unit["source_read_inputs"]
-    assert list(rec["added"]) == ["g_gain_close"] and rec["added"]["g_gain_close"]["type"] == "U8"
+    assert list(rec["added"]) == ["g_gain_close", "g_o"] and rec["added"]["g_gain_close"]["type"] == "U8"
+    assert rec["added"]["g_o"]["prior_value_for_write"] >= 1 and rec["added"]["g_o"]["read_on_model"] is False
+    assert "prior_value_for_write" not in rec["added"]["g_gain_close"]
     assert rec["added"]["g_gain_close"]["value_type"] == "uint8_t"
-    assert rec["rounds"] == 1 and rec["remaining"] == {}
+    # (review R82 W5) the read in round 1, the prior value in round 2 — the first round with no new read name
+    assert rec["added"]["g_gain_close"]["round"] == 1 and rec["added"]["g_o"]["round"] == 2
+    assert rec["rounds"] == 2 and rec["remaining"] == {}
     assert unit["var_types"]["g_gain_close"] == "uint8_t"
     rows = _stated(seqs, "g_a", "g_gain_close")
     assert rows
@@ -180,7 +185,9 @@ def test_the_reference_rows_keep_their_places_and_design_values_after_inputs_are
     n = unit["base_strategy_count"]
     assert n == ref_unit["base_strategy_count"] == len(ref)
     assert [s["strategy"] for s in ext[:n]] == [s["strategy"] for s in ref]
-    assert [{k: v for k, v in s["inputs"].items() if k != "g_gain_close"} for s in ext[:n]] == [s["inputs"] for s in ref]
+    # (R82) `g_o`'s prior value is an added input too (fixed there)
+    assert ([{k: v for k, v in s["inputs"].items() if k not in ("g_gain_close", "g_o")} for s in ext[:n]]
+            == [s["inputs"] for s in ref])
     assert not any(s.get("tc_profile") for s in ext[:n]) and all(s.get("tc_profile") == "extended" for s in ext[n:])
     assert unit["mcdc_design"]["selected_inputs"] == ref_unit["mcdc_design"]["selected_inputs"]
     fixed = {s["inputs"]["g_gain_close"] for s in ext[:n] if "g_gain_close" in s["inputs"]}
@@ -286,11 +293,19 @@ def test_a_full_input_list_is_not_widened_and_says_so(monkeypatch):
     unit = _unit("close_gain", ["g_a", "g_gain_open"])
     _complete(unit)
     assert unit["input_vars"] == ["g_a", "g_gain_open"]
+    # (review R82 W8) a write's prior value the cap left out is recorded apart from the reads
     assert unit["source_read_inputs"]["not_added"] == {"g_gain_close": "input_columns_full"}
+    assert unit["source_read_inputs"]["prior_value_not_added"] == {"g_o": "input_columns_full"}
+    assert summarize_source_read_inputs([unit])["units_input_columns_full"] == 1
     monkeypatch.setattr(suts, "_INPUT_COL_END", suts._INPUT_COL_START + 2)   # exactly one free column: taken
     unit = _unit("close_gain", ["g_a", "g_gain_open"])
     _complete(unit)
+    # (R82) by the read — a write's prior value (`g_o`, written on both paths) comes after every read name
     assert unit["input_vars"] == ["g_a", "g_gain_open", "g_gain_close"]
+    assert unit["source_read_inputs"]["not_added"] == {}
+    assert unit["source_read_inputs"]["prior_value_not_added"] == {"g_o": "input_columns_full"}
+    sr = summarize_source_read_inputs([unit])
+    assert sr["units_input_columns_full"] == 0 and sr["prior_value_not_added"] == {"input_columns_full": 1}
 
 
 # ── the production path ─────────────────────────────────────────────────────────────────────────────────────────
@@ -307,7 +322,7 @@ def test_the_extended_path_searches_boundaries_once_after_the_inputs_are_complet
     monkeypatch.setattr(suts, "find_boundaries", counting)
     unit = _unit("close_gain", ["g_a", "g_gain_open"])
     seqs = extended_unit_sequences(unit)
-    assert calls == [["g_a", "g_gain_open", "g_gain_close"]]
+    assert calls == [["g_a", "g_gain_open", "g_gain_close", "g_o"]]   # (R82) `g_o`: a write's prior value
     assert "_boundary_ctx" not in unit
     rows = [s for s in seqs if s["strategy"].startswith(br.BOUNDARY_PREFIX)]
     assert rows and all(s["expected_evidence"]["g_o"]["status"] == "derived" for s in rows)
@@ -439,7 +454,10 @@ def test_the_summary_counts_units_names_reasons_and_what_remains():
         "not_added": {"float_object": 2, "input_columns_full": 1}, "units_input_columns_full": 1, "max_rounds": 2,
         "names_added_for_unwritten_outputs": 0,   # (backlog 2-c)
         "names_added_by_scenario_search": 0,      # (R78)
+        "names_added_for_write_prior_value": 0, "prior_value_not_added": {}, "prior_values_beyond_cap": 0,   # (R82)
+        "prior_fixed_values_moved": 0, "prior_fixed_values_collide": 0,                                     # (R82 I-R5-4)
         "round_cap": suts._SOURCE_READ_ROUNDS, "units_round_cap_reached": 0, "names_beyond_cap": 0,   # (R59)
+        "units_buffer_elements_full": 0, "buffer_elements_max": suts._BUFFER_ELEMENTS_MAX,           # (R82)
         "units_with_remaining": 1, "names_remaining": 1, "errors": 0}
 
 
@@ -494,8 +512,12 @@ def test_a_global_row_keeps_moving_its_global_when_the_completion_added_it_as_an
     assert [s["strategy"] for s in ext[:n]] == [s["strategy"] for s in ref]
     g_ref = next(s for s in ref if s["strategy"] == "GLOBAL_0")
     g_ext = next(s for s in ext if s["strategy"] == "GLOBAL_0")
-    assert g_ext["inputs"] == g_ref["inputs"] and g_ext["inputs"]["g_gain_close"] == 0
-    assert "고정값" not in g_ext["description"]
+    # (R82) `g_o`'s prior value is an added input too (fixed in the reference region)
+    assert {k: v for k, v in g_ext["inputs"].items() if k != "g_o"} == g_ref["inputs"]
+    assert g_ext["inputs"]["g_gain_close"] == 0
+    # the row moves `g_gain_close` — only `g_o` (R82, a write's prior value) is fixed there
+    fixed = [ln for ln in g_ext["description"].splitlines() if "고정값" in ln]
+    assert fixed and all("g_gain_close" not in ln and "g_o=" in ln for ln in fixed)
 
 
 def test_a_global_the_completion_types_does_not_add_a_global_row_to_the_reference_region():

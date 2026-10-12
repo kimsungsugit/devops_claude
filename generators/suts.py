@@ -2430,11 +2430,15 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     scenarios = [s for s in sequences if _is_scenario(s)]
     # 행이 비운 입력의 채움 값 — BV_MID 와 같은 중간값에서 출발한다(넓은 범위면 입력마다 위치만큼 옮겨 서로 다르게, enum 은 열거자).
     mids = {v: (var_bounds.get(v) or {}).get("mid") for v in domains}
+    defaults = {v: m for v, m in mids.items() if isinstance(m, int) and not isinstance(m, bool)}
     try:
+        from generators.boundary_rows import blank_fill
+        # (review R82 I-R5-2) a write's prior value keeps off the value the function writes there in these rows too
+        overrides = _prior_fill_overrides(unit, blank_fill(domains, defaults), domains, var_bounds)[0]
         found = find_boundaries(
             unit, [{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in order], domains, outputs,
             [s.get("inputs") or {} for s in sequences],
-            defaults={v: m for v, m in mids.items() if isinstance(m, int) and not isinstance(m, bool)},
+            defaults=defaults, fill_overrides=overrides,
             extra_bases=[{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in scenarios])
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
         _logger.warning("SUTS 경계 행 탐색 실패(%s): %s", unit.get("name"), exc, exc_info=True)
@@ -2524,7 +2528,9 @@ SCENARIO_REPORT_KEYS = ("targets", "statements", "branches", "reached_clean", "r
                         "expose_targets", "expose_boundary", "expose_write", "expose_arith", "expose_covered_before",
                         "expose_reached", "expose_rows", "expose_not_reached", "expose_cut", "expose_unmodeled",
                         "expose_local_best", "expose_budget_cut", "expose_runs", "expose_steps", "expose_duplicates",
-                        "reached_by_exposing_rows", "expose_refused", "expose_error_cut", "expose_met_by_reach_rows")
+                        "reached_by_exposing_rows", "expose_refused", "expose_error_cut", "expose_met_by_reach_rows",
+                        # (R82) writes whose replaced value alone was unknown: named as a prior value · not namable
+                        "expose_prior_value_needed", "expose_prior_value_unnamed")
 
 
 def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3609,6 +3615,8 @@ def generate_sequences(
     _design_out_list = ([v for v in unit["design_output_vars"] if v in output_vars]
                         if isinstance(unit.get("design_output_vars"), list) else list(output_vars))
     _added_inputs = [v for v in input_vars if v not in set(_design_inputs)]
+    # (R82) inputs added only as a write's prior value — the function writes them, it does not read them
+    _prior_inputs = _prior_input_names(unit)
     _design_toggles = [v for v in _design_inputs if var_types.get(v) != _UNKNOWN_TYPE]
     _toggle_vars = _design_toggles + [v for v in _added_inputs if var_types.get(v) != _UNKNOWN_TYPE]
     _cond_count = min(4, len(_design_toggles)) if len(_design_inputs) >= 2 else 0
@@ -3723,10 +3731,15 @@ def generate_sequences(
         for mc_idx in range(_BASE_MCDC_SLOTS, len(_mcdc_vectors)):
             strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
         # 단독 경계(OAT): 입력 하나만 경계로, 나머지는 중간값. 입력이 하나뿐이면 BV_MIN/BV_MAX 가 이미 그것이다.
-        if len(input_vars) >= 2:
+        # (R82) 쓰기 전 값으로만 더한 입력(함수가 읽지 않고 쓴다)은 단독 경계로 움직이지 않는다 — 덮이는 값이라 극값이 가르는 것이
+        #   없다. 쓰기를 드러내는 값은 동작 시나리오 탐색(쓰기 노출)이 고른다
+        # (review R82 W4) and they do not make a unit 'two inputs or more': BV_MIN / BV_MAX already move a lone read input
+        if len([v for v in input_vars if v not in _prior_inputs]) >= 2:
             for t_idx in range(len(_toggle_vars)):
                 if t_idx < len(_design_toggles) and len(_design_inputs) < 2:
                     continue   # (R19 리뷰 R2 W2') 설계 입력이 하나면 BV_MIN/BV_MAX 가 이미 그 단독 변경이다
+                if _toggle_vars[t_idx] in _prior_inputs:
+                    continue
                 for side in ("min", "max"):
                     # 조건 조합(앞 4개)이 이미 만든 (변수, 방향): 짝수 번째=min, 홀수 번째=max.
                     if t_idx < _cond_count and side == ("min" if t_idx % 2 == 0 else "max"):
@@ -3761,6 +3774,19 @@ def generate_sequences(
         _fill_all = blank_fill(_fill_domains, {v: m for v in _fill_domains
                                                if isinstance(m := (var_bounds.get(v) or {}).get("mid"), int)
                                                and not isinstance(m, bool)})
+        # (R82) a write's prior value only: its fixed value differs from every value the function writes there
+        #   (`_prior_fill_overrides` — the boundary rows' fill takes the same values, review R82 I-R5-2)
+        _moved, _collide = _prior_fill_overrides(unit, _fill_all, _fill_domains, var_bounds)
+        _sri = unit.get("source_read_inputs")
+        if isinstance(_sri, dict):
+            # (review R82 I-R5-3 · I-R5-4) what the rows' fixed value is and why — the latest generation's, not a book
+            _sri.pop("prior_fixed_values", None)
+            _sri.pop("prior_fixed_values_collide", None)
+            if _moved:
+                _sri["prior_fixed_values"] = {v: {"from": _fill_all[v], "to": x} for v, x in sorted(_moved.items())}
+            if _collide:
+                _sri["prior_fixed_values_collide"] = sorted(_collide)
+        _fill_all.update(_moved)
 
     sequences: List[Dict[str, Any]] = []
     for idx, (strat_name, bound_key) in enumerate(strategies if max_seq is None else strategies[:max_seq]):
@@ -3928,9 +3954,15 @@ def generate_sequences(
             if v not in output_vars:
                 exp_parts.append(f"{v}={exp_vals[v]}")
         desc_lines = [label]
-        if _fixed:
+        _fixed_read = [v for v in _fixed if v not in _prior_inputs]
+        _fixed_prior = [v for v in _fixed if v in _prior_inputs]
+        if _fixed_read:
             desc_lines.append("소스가 읽어 더한 입력(설계서 입력 표 밖 · 이 행에선 고정값): "
-                              + ", ".join(f"{v}={inp_vals[v]}" for v in _fixed))
+                              + ", ".join(f"{v}={inp_vals[v]}" for v in _fixed_read))
+        if _fixed_prior:
+            # (review R82 I-R5-5) the function writes these, it does not read them — the call's prior value
+            desc_lines.append("쓰기 전 값(함수가 쓰는 객체의 호출 전 값 · 이 행에선 고정값): "
+                              + ", ".join(f"{v}={inp_vals[v]}" for v in _fixed_prior))
         if inp_parts:
             desc_lines.append("Input: " + ", ".join(inp_parts))
         if exp_parts:
@@ -4348,7 +4380,8 @@ def _pointee_object_decl(unit: Dict[str, Any], scope: Dict[str, Any], name: str
     또는 (None, 더하지 않는 사유), 그 매개변수의 대상 표기가 아니면 None. 타입은 소스의 대상 배치(R40 `_pointee_input`) —
     대상 멤버를 모델이 모르면 `pointee_member_unmodeled`, volatile · 부동소수는 프로그램 객체와 같은 사유."""
     from generators.mcdc_design import _POINTEE_INPUT_RE, _pointee_input, _pointer_params
-    m = _POINTEE_INPUT_RE.fullmatch(str(name).strip())
+    # (R82) or `p[k]` — an element of a scalar pointee the harness holds as a buffer (`pData[1]`)
+    m = _POINTEE_INPUT_RE.fullmatch(str(name).strip()) or re.fullmatch(r"([A-Za-z_]\w*)\[(\d+)\]", str(name).strip())
     fn = str(unit.get("name") or "")
     if not m or not scope or m.group(1) not in _pointer_params(scope, fn):
         return None
@@ -4371,6 +4404,50 @@ def _unit_object_decl(unit: Dict[str, Any], scope: Dict[str, Any], name: str) ->
     의 `ctx`, `s_ApplyTemperatureCompensation` 의 `u16p_Peak`) — 정본은 `ctx[0].state[1]` · `u16p_Peak[0]` 을 관측했다."""
     pointee = _pointee_object_decl(unit, scope, name)
     return pointee if pointee is not None else _source_object_decl(scope, name)
+
+
+#: (R82) elements of one pointer parameter's buffer (`pData[k]`, `RespMsg[0].data[k]`) the completion adds as columns — a loop that
+#   clears a buffer writes every element it reaches (`g_Lib_u8bit_ArrayClear`: 84 output and 86 input columns, 255 rows)
+_BUFFER_ELEMENTS_MAX = 8   # a LIN frame, a UDS response: 8 bytes (KJPDS02_PV `RespMsg[0].data[4]` and `[5]`)
+
+
+_HARNESS_ELEMENT_RE = re.compile(r"([A-Za-z_]\w*)((?:\[0\](?:\.[A-Za-z_]\w*)+)?)\[(\d+)\]")
+
+
+def _harness_buffer_base(unit: Dict[str, Any], scope: Dict[str, Any], name: str) -> Optional[Tuple[str, int]]:
+    """(R82, review C2) ``(buffer, index)`` when ``name`` is an element of a harness buffer — ``p[k]`` of a pointer parameter
+    whose pointee is a scalar, ``p[0].m[k]`` of a one-level pointer member of its pointee (`pointee_types[…]["pointers"]`)
+    — else None: a fixed-length member array ``p[0].b[k]`` (R40/R81 — `ctx[0].data[63]`) is no harness buffer."""
+    m = _HARNESS_ELEMENT_RE.fullmatch(str(name).strip())
+    if not m or not scope:
+        return None
+    from generators.mcdc_design import _pointee_core, _pointer_params
+    params = _pointer_params(scope, str(unit.get("name") or ""))
+    if m.group(1) not in params:
+        return None
+    layout = ((scope.get("pointee_types") or {}).get(_pointee_core(params[m.group(1)]))) or {}
+    if not m.group(2):
+        scalar = set(layout.get("members") or {}) == {""} and not layout.get("arrays")
+        return (m.group(1), int(m.group(3))) if scalar else None
+    path = m.group(2)[len("[0]"):]
+    return (m.group(1) + m.group(2), int(m.group(3))) if path in (layout.get("pointers") or {}) else None
+
+
+def _column_order(unit: Dict[str, Any], scope: Dict[str, Any], name: str) -> Tuple[str, int]:
+    """(R82) A candidate's tie-break: its name — a harness buffer element by its buffer and index (`p[2]` before `p[10]`,
+    so the cap keeps the first elements)."""
+    found = _harness_buffer_base(unit, scope, name)
+    return found if found is not None else (name, -1)
+
+
+def _buffer_elements_full(unit: Dict[str, Any], scope: Dict[str, Any], name: str, columns: List[str]) -> bool:
+    """(R82) Whether ``name`` is an element of a harness buffer (`_harness_buffer_base`) whose `_BUFFER_ELEMENTS_MAX`
+    elements already are columns."""
+    found = _harness_buffer_base(unit, scope, name)
+    if found is None:
+        return False
+    return sum(1 for c in columns if c != name and (_harness_buffer_base(unit, scope, c) or ("",))[0] == found[0]
+               ) >= _BUFFER_ELEMENTS_MAX
 
 
 def _unit_input_types(unit: Dict[str, Any], names: List[str]
@@ -4432,6 +4509,10 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
     더한 이름(처음 본 칸 수·회차·타입 · 함수 실행 모델이 읽었는지 `read_on_model` — 백로그 2-c) · 더하지 않은 이름과 사유 ·
     마지막 행들에서도 값이 없는 이름(`remaining`)."""
     record: Dict[str, Any] = {"added": {}, "not_added": {}, "rounds": 0, "remaining": {}}
+    # (review R82 W8) a write's prior value the completion did not add, and why — apart from the names the source reads
+    #   (`not_added` · the input column cap the disclosure warns about are theirs)
+    prior_not_added: Dict[str, str] = {}
+    last_unobserved: Dict[str, str] = {}   # (review R82 W-R4-1) of the last round whose prior pass ran
     unit["source_read_inputs"] = record
     # (R80) 소스가 쓰는 출력 — 같은 회차에 더한다(더한 출력을 쓰지 않는 경로의 최종값은 초기값이라 다음 회차의 입력이 된다 —
     #   백로그 2-c 사유 `unwritten_output_initial_not_in_inputs`)
@@ -4456,37 +4537,37 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         found = {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}
         inputs = list(unit.get("input_vars") or [])
         new: List[str] = []
-        for name, rec in sorted(found.items(), key=lambda kv: (-kv[1]["slots"], kv[0])):
-            if name in inputs or name in record["added"] or name in record["not_added"]:
-                continue   # 열은 있는데 그 행이 비운 칸(MC/DC 벡터) — 채움 행의 몫
-            typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
-            if not why:
-                key, enum, reasons = _unit_input_types(unit, [name])
-                why = reasons.get(name, "")
-            if why:
-                record["not_added"][name] = why
-                continue
-            if len(inputs) + len(new) >= max_inp:
-                record["not_added"][name] = "input_columns_full"
-                continue
-            new.append(name)
-            record["added"][name] = {"slots": rec["slots"], "round": _round + 1, "type": typename,
-                                     "value_type": key.get(name) or "enum",
-                                     # (백로그 2-c) 함수 실행 모델이 읽어서 막혔는지, 쓰지 않은 출력의 최종값을 보려고인지 —
-                                     #   False 는 '모델에서 읽힌 근거 없음'(쓰기 요약만 있는 callee 안의 읽기는 모델에 없다)
-                                     "read_on_model": bool(rec.get("read", True))}
-            if rec.get("scenario_targets"):
-                # (R78) 행이 아니라 동작 시나리오 탐색이 그 경로에 닿으려다 읽은 이름 — 처음 본 칸은 없다(행이 아직 없다)
-                record["added"][name]["scenario_targets"] = rec["scenario_targets"]
-            if name in key:
-                unit["source_input_types"] = {**(unit.get("source_input_types") or {}), name: key[name]}
-            else:
-                # (리뷰 R1 I5) 그 번역 단위의 열거자 — 전역 표는 이름으로 묶여 같은 이름의 다른 static 것일 수 있다.
-                #   덮기 전 값 집합은 카탈로그 구조 판정용으로 남긴다(리뷰 R3 W1: GLOBAL 행이 기본 영역에서 사라졌다).
-                prev = (unit.get("value_domains") or {}).get(name)
-                if prev:
-                    unit["design_value_domains"] = {**(unit.get("design_value_domains") or {}), name: prev}
-                unit["value_domains"] = {**(unit.get("value_domains") or {}), name: enum[name]}
+        ordered = sorted(found.items(), key=lambda kv: (-kv[1]["slots"], _column_order(unit, scope, kv[0])))
+        # (R82, review R82 W5) a write's prior value only (`prior_value_for_write` — read by no row and no search) waits
+        #   for a round that adds no name the source reads: a column it took would be one a later round's read lacks
+        reads = [(n, r) for n, r in ordered if not _prior_only(r)]
+        unobserved: Dict[str, str] = {}   # (review R82 I-R3-1) this round's verdict — a later round's R80 may add the column
+        for pass_ in ("read", "prior"):
+            candidates = reads if pass_ == "read" else [(n, r) for n, r in ordered if _prior_only(r)]
+            if pass_ == "prior" and new:
+                break
+            if pass_ == "prior":
+                last_unobserved = unobserved
+            for name, rec in candidates:
+                book = record["not_added"] if pass_ == "read" else prior_not_added
+                if name in inputs or name in record["added"] or name in book:
+                    continue   # 열은 있는데 그 행이 비운 칸(MC/DC 벡터) — 채움 행의 몫
+                if pass_ == "prior" and name not in (unit.get("output_vars") or []):
+                    unobserved[name] = "not_observed"   # (review R82 I-R2-1) no expected column sees the write's deletion
+                    continue
+                typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
+                if not why:
+                    key, enum, reasons = _unit_input_types(unit, [name])
+                    why = reasons.get(name, "")
+                if not why and _buffer_elements_full(unit, scope, name, inputs + new):
+                    why = "buffer_elements_full"
+                if not why and len(inputs) + len(new) >= max_inp:
+                    why = "input_columns_full"
+                if why:
+                    book[name] = why
+                    continue
+                new.append(name)
+                _record_added_input(unit, record, name, rec, _round + 1, typename, key, enum)
         if not new and not new_out:
             break
         if new:
@@ -4500,17 +4581,22 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         # (R59) 상한 회차까지 이름을 더했다 — 상한이 탐색을 **잘랐는지**는 마지막 행들을 한 번 더 보고(다시 만들지 않고)
         #   다음 회차가 더했을 이름이 있는지로 가린다(리뷰 R59 W1: 필요한 회차가 정확히 상한이면 자른 것이 아니다)
         inputs = set(unit.get("input_vars") or [])
-        beyond = []
-        for name in {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}:
-            if name in inputs or name in record["added"] or name in record["not_added"]:
+        beyond, prior_beyond = [], []
+        for name, rec in {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}.items():
+            if name in inputs or name in record["added"] or name in record["not_added"] or name in prior_not_added:
                 continue
             typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
             if not why:
                 why = _unit_input_types(unit, [name])[2].get(name, "")
-            if not why:
-                beyond.append(name)
-        record["round_cap_reached"] = bool(beyond)
+            if not why and _prior_only(rec) and name not in (unit.get("output_vars") or []):
+                last_unobserved[name] = "not_observed"   # (review R82 I-R4-1) unobserved — not a name the cap left
+            elif not why:
+                (prior_beyond if _prior_only(rec) else beyond).append(name)
+        record["round_cap_reached"] = bool(beyond or prior_beyond)
         record["names_beyond_cap"] = beyond
+        if prior_beyond:
+            # (review R82 W5) prior values wait for the reads: at the cap they are left — no row reads them
+            record["prior_values_beyond_cap"] = prior_beyond
         # (R80) 출력 축도 같은 질문 — 다음 회차가 더했을 이름(기록은 바꾸지 않는다; 남은 것은 마지막 보완이 더한다)
         try:
             written["round_cap_reached"] = (not written.get("error")
@@ -4518,8 +4604,87 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         except Exception as exc:  # noqa: BLE001 — (review R80 I-R2-7) the output axis alone, as in the rounds
             _logger.warning("SUTS 소스가 쓰는 출력 실패(%s): %s", unit.get("name"), exc, exc_info=True)
             written["error"] = type(exc).__name__
+    # (review R82 W-R4-1) once, at the end: a name a later round added is no longer 'not added'
+    left = {n: why for n, why in {**last_unobserved, **prior_not_added}.items() if n not in record["added"]}
+    if left:
+        record["prior_value_not_added"] = left
     _record_remaining(unit, sequences)
     return sequences
+
+
+def _prior_input_names(unit: Dict[str, Any]) -> set:
+    """(R82) Inputs the completion added only as a write's prior value (no row and no search reads them)."""
+    return {n for n, a in (((unit.get("source_read_inputs") or {}).get("added")) or {}).items()
+            if isinstance(a, dict) and a.get("prior_value_for_write") and not a.get("read_on_model", True)}
+
+
+def _prior_fill_overrides(unit: Dict[str, Any], fill: Dict[str, int], domains: Dict[str, Any],
+                          var_bounds: Dict[str, Dict[str, Any]]) -> Tuple[Dict[str, int], List[str]]:
+    """(R82) A write's prior value only: the value a row leaves it at (``fill``, the blank-fill rule) must differ from every
+    value the function writes there, else the rows keeping it fixed — most of them, when the exposing search runs out of
+    budget — cannot tell the write's deletion (PV `g_UDS_LinComp_Reset`: `u8g_SysUds_UsDoorCtrl = u8g_CLR` over a fixed 0).
+    The new value lies in the input's domain: a range keeps ``lo..hi`` (its mid first), a value set — an enum's
+    enumerators, a design value list — keeps one of its values (review R82 W-R5-1: the midpoint 1 of a design range 0~3
+    is no enumerator of {0, 2, 3}). Returns the moved values and the names whose every candidate is written (left as
+    they were — the rows cannot tell that write's deletion)."""
+    moved: Dict[str, int] = {}
+    collide: List[str] = []
+    for v in sorted(_prior_input_names(unit)):
+        rec = unit["source_read_inputs"]["added"][v]
+        written = {x for x in rec.get("written_values") or () if isinstance(x, int) and not isinstance(x, bool)}
+        if v not in fill or fill[v] not in written:
+            continue
+        dom = domains.get(v)
+        mid = (var_bounds.get(v) or {}).get("mid")
+        mid = mid if isinstance(mid, int) and not isinstance(mid, bool) else None
+        if isinstance(dom, tuple) and len(dom) == 2:
+            lo, hi = dom
+            cands = [x for x in (mid, (lo + hi) // 2, (lo + hi) // 2 + 1, lo + 1, hi, lo)
+                     if x is not None and lo <= x <= hi]
+        elif isinstance(dom, (list, set, frozenset)):
+            values = sorted(dom)
+            cands = ([mid] if mid in values else []) + values
+        else:
+            cands = []
+        pick = next((x for x in cands if x not in written), None)
+        if pick is None:
+            collide.append(v)
+        else:
+            moved[v] = pick
+    return moved, collide
+
+
+def _prior_only(rec: Dict[str, Any]) -> bool:
+    """(R82) A name found only as a write's prior value: no row and no search reads it (`_scenario_needed_names`)."""
+    return bool(rec.get("prior_value_for_write")) and not rec.get("read", True)
+
+
+def _record_added_input(unit: Dict[str, Any], record: Dict[str, Any], name: str, rec: Dict[str, Any], round_: int,
+                        typename: Any, key: Dict[str, str], enum: Dict[str, Any]) -> None:
+    """(R19) The completion's record of an input it added, and its type in the unit (`complete_source_read_inputs`)."""
+    record["added"][name] = {"slots": rec["slots"], "round": round_, "type": typename,
+                             "value_type": key.get(name) or "enum",
+                             # (백로그 2-c) 함수 실행 모델이 읽어서 막혔는지, 쓰지 않은 출력의 최종값을 보려고인지 —
+                             #   False 는 '모델에서 읽힌 근거 없음'(쓰기 요약만 있는 callee 안의 읽기는 모델에 없다)
+                             "read_on_model": bool(rec.get("read", True))}
+    if rec.get("scenario_targets"):
+        # (R78) 행이 아니라 동작 시나리오 탐색이 그 경로에 닿으려다 읽은 이름 — 처음 본 칸은 없다(행이 아직 없다)
+        record["added"][name]["scenario_targets"] = rec["scenario_targets"]
+    if rec.get("prior_value_for_write"):
+        # (R82) 탐색이 노출하지 못한 쓰기(그 객체의 이전 값을 모른다)의 수 — 행이 쓰기 전 값을 정해야 쓰기 삭제가 드러난다.
+        #   함수가 거기 쓰는 값(`written_values`) — 행의 고정값은 그와 달라야 삭제가 보인다(`generate_sequences`)
+        record["added"][name]["prior_value_for_write"] = rec["prior_value_for_write"]
+        if rec.get("written_values"):
+            record["added"][name]["written_values"] = list(rec["written_values"])
+    if name in key:
+        unit["source_input_types"] = {**(unit.get("source_input_types") or {}), name: key[name]}
+    else:
+        # (리뷰 R1 I5) 그 번역 단위의 열거자 — 전역 표는 이름으로 묶여 같은 이름의 다른 static 것일 수 있다.
+        #   덮기 전 값 집합은 카탈로그 구조 판정용으로 남긴다(리뷰 R3 W1: GLOBAL 행이 기본 영역에서 사라졌다).
+        prev = (unit.get("value_domains") or {}).get(name)
+        if prev:
+            unit["design_value_domains"] = {**(unit.get("design_value_domains") or {}), name: prev}
+        unit["value_domains"] = {**(unit.get("value_domains") or {}), name: enum[name]}
 
 
 def _scenario_needed_names(unit: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -4527,8 +4692,16 @@ def _scenario_needed_names(unit: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     같은 모양(행이 없어 칸 수 0)에 그 이름이 막은 목표 수(`scenario_targets`). 행의 근거만 보면 어떤 행도 닿지 않은 경로가 읽는
     이름은 영영 안 보인다(HDPDM01 `s_MoveStartClose_GainMeasure` 의 뒷문 Close 이득 — SwUDS 입력 표는 Open 이득을 적었다)."""
     rep = unit.get("scenario_rows") if isinstance(unit.get("scenario_rows"), dict) else {}
-    return {n: {"slots": 0, "sequences": [], "read": True, "scenario_targets": int(k)}
-            for n, k in (rep.get("needed_inputs") or {}).items()}
+    # (R82) 쓰기 전 값 — 탐색이 노출하지 못한 쓰기가 덮는 값을 알 수 없는 객체(입력이 아님). 함수는 거기서 그 객체를 쓰지 읽지 않는다:
+    #   모델에서 읽힌 근거가 아니고(`read` False — 입력 목록 결손 소견 아님) 읽힌 이름보다 뒤에 선다(열 상한). 탐색이 번역 단위
+    #   객체와 포인터 매개변수 대상만 청한다(`scenario_rows` — 초기화하지 않은 지역은 시험이 정할 객체가 아니다)
+    written = rep.get("prior_value_written") if isinstance(rep.get("prior_value_written"), dict) else {}
+    out = {n: {"slots": 0, "sequences": [], "read": False, "prior_value_for_write": int(k),
+               "written_values": list(written.get(n) or [])}
+           for n, k in (rep.get("prior_value_needed") or {}).items()}
+    for n, k in (rep.get("needed_inputs") or {}).items():
+        out[n] = {**out.get(n, {}), "slots": 0, "sequences": [], "read": True, "scenario_targets": int(k)}
+    return out
 
 
 def _record_remaining(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
@@ -4593,10 +4766,13 @@ def _written_output_candidates(unit: Dict[str, Any], sequences: List[Dict[str, A
     seen = set(record["added"]) | set(record["not_added"]) | set(record["dropped"])
     new: List[str] = []
     skipped: Dict[str, str] = {}
-    for name, rec in sorted(source_written_names(sequences).items(), key=lambda kv: (-kv[1]["known"], -kv[1]["rows"], kv[0])):
+    for name, rec in sorted(source_written_names(sequences).items(),
+                            key=lambda kv: (-kv[1]["known"], -kv[1]["rows"], _column_order(unit, scope, kv[0]))):
         if name in outputs or name in seen or not rec["known"]:
             continue
         _typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
+        if not why and _buffer_elements_full(unit, scope, name, list(outputs) + new):
+            why = "buffer_elements_full"
         if not why and len(new) >= room:
             why = "output_columns_full"
         if why:
@@ -4672,6 +4848,10 @@ def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
     try:
         # (review R80 I-R2-8) after an error in the rounds: add nothing, but drop what no row derives and count
         late = [] if record.get("error") else _add_written_outputs(unit, sequences, record, "final")
+        prior = (unit.get("source_read_inputs") or {}).get("prior_value_not_added")
+        for n in late if isinstance(prior, dict) else ():
+            if prior.get(n) == "not_observed":
+                prior[n] = "observed_only_in_final"   # (review R82 I-R3-1) a column now — no round is left to add its prior
         if late:
             # (review R80 W7) a slot in every row, as the round-added columns have — a row the oracle derives nothing for
             #   says why (`[검증 필요] <reason>`) instead of a blank
@@ -4725,10 +4905,27 @@ def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
         record["final_error"] = type(exc).__name__
     scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
     outputs = set(unit.get("output_vars") or [])
+    # (review R82 I-R3-2) a harness buffer element written past what the row names is past the allocation — no object
+    #   whose value never settled: counted apart (a clearing loop wrote 254 of them)
+    #   — the buffer's own elements: the objects that write may have reached carry the same reason (review R82 W-R4-2)
+    past = {n for s in sequences for n, why in (s.get("source_written_unknown") or {}).items()
+            if str(why).startswith("harness_buffer_write_beyond_row:")
+            and _harness_element_of(n, str(why).split(":", 1)[1])}
     record["never_known"] = sorted(n for n, r in source_written_names(sequences).items()
                                    if not r["known"] and n not in outputs and n not in record["not_added"]
-                                   and scope and not _unit_object_decl(unit, scope, n)[1])
+                                   and n not in past and scope and not _unit_object_decl(unit, scope, n)[1])
+    if past - outputs:
+        record["written_past_allocation"] = sorted(past - outputs)
+    prior = (unit.get("source_read_inputs") or {}).get("prior_value_not_added")
+    for n, why in list((prior if isinstance(prior, dict) else {}).items()):
+        if why == "observed_only_in_final" and n not in outputs:
+            prior[n] = "not_observed"   # (review R82 I-R4-2) the late column was dropped again
     return sequences
+
+
+def _harness_element_of(name: str, buffer: str) -> bool:
+    """(review R82 W-R4-2) Whether ``name`` is ``buffer[k]``."""
+    return name.startswith(buffer + "[") and name.endswith("]") and name[len(buffer) + 1:-1].isdigit()
 
 
 def _design_outputs(unit: Dict[str, Any]) -> List[str]:
@@ -4851,11 +5048,17 @@ def summarize_source_written_outputs(units: List[Dict[str, Any]]) -> Dict[str, A
             "names_dropped_underived": sum(len(r.get("dropped") or {}) for r in recs),
             "inputs_kept_for_dropped": sum(1 for r in recs for d in (r.get("dropped") or {}).values() if d.get("input_kept")),
             "names_never_known": sum(len(r.get("never_known") or []) for r in recs),
+            # (review R82 I-R3-2) harness buffer elements written past what the row names (no column)
+            "names_written_past_allocation": sum(len(r.get("written_past_allocation") or []) for r in recs),
             # (review R80 W7) late columns whose unwritten paths need an initial value no round could add
             "names_final_initial_not_in_inputs": sum(len(r.get("final_initial_not_in_inputs") or []) for r in recs),
             "rows_written_error": sum(int(r.get("rows_written_error") or 0) for r in recs),
             "not_added": dict(not_added),
             "units_output_columns_full": sum(1 for r in recs if "output_columns_full" in (r.get("not_added") or {}).values()),
+            # (R82) a pointer parameter's buffer whose first `_BUFFER_ELEMENTS_MAX` elements already were columns
+            "units_buffer_elements_full": sum(1 for r in recs
+                                              if "buffer_elements_full" in (r.get("not_added") or {}).values()),
+            "buffer_elements_max": _BUFFER_ELEMENTS_MAX,
             "max_rounds": max((int(r.get("rounds") or 0) for r in recs), default=0),
             "units_round_cap_reached": sum(1 for r in recs if r.get("round_cap_reached")),
             # (R81 review I-R3-3) the pointee-column drop still dropping after its re-applies
@@ -4988,13 +5191,30 @@ def summarize_source_read_inputs(units: List[Dict[str, Any]]) -> Dict[str, Any]:
             "names_added": sum(len(r.get("added") or {}) for r in recs),
             # (백로그 2-c) 그중 함수 실행 모델에서 읽힌 근거 없이, 쓰지 않은 출력의 최종값 관측에만 필요했던 이름
             "names_added_for_unwritten_outputs": sum(1 for r in recs for a in (r.get("added") or {}).values()
-                                                     if isinstance(a, dict) and a.get("read_on_model") is False),
+                                                     if isinstance(a, dict) and a.get("read_on_model") is False
+                                                     and not a.get("prior_value_for_write")),
+            # (R82) 그중 쓰기 삭제가 드러나게 쓰기 전 값을 정하려고 더한 이름(함수는 그 객체를 쓴다 — 읽지 않는다)
+            # (review R82 I1) only those no row or search reads (a name the search also needed is counted there)
+            "names_added_for_write_prior_value": sum(1 for r in recs for a in (r.get("added") or {}).values()
+                                                     if isinstance(a, dict) and a.get("prior_value_for_write")
+                                                     and a.get("read_on_model") is False),
+            # (review R82 W5 · W8) prior values not added (by why) and left at the round cap — apart from the reads
+            "prior_value_not_added": dict(sorted(Counter(why for r in recs for why in (
+                r.get("prior_value_not_added") or {}).values()).items())),
+            "prior_values_beyond_cap": sum(len(r.get("prior_values_beyond_cap") or []) for r in recs),
+            # (review R82 I-R5-4) fixed values moved off the value the function writes · names every candidate collides
+            "prior_fixed_values_moved": sum(len(r.get("prior_fixed_values") or {}) for r in recs),
+            "prior_fixed_values_collide": sum(len(r.get("prior_fixed_values_collide") or []) for r in recs),
             # (R78) 그중 어떤 행도 아니라 동작 시나리오 탐색이 닿지 못한 경로에서 읽은 이름 — 행의 칸 수는 0 이다(리뷰 R78 W5)
             "names_added_by_scenario_search": sum(1 for r in recs for a in (r.get("added") or {}).values()
                                                   if isinstance(a, dict) and a.get("scenario_targets")),
             "slots_first_seen": sum(int(a.get("slots") or 0) for r in recs for a in (r.get("added") or {}).values()),
             "not_added": dict(sorted(not_added.items())),
             "units_input_columns_full": sum(1 for r in recs if "input_columns_full" in (r.get("not_added") or {}).values()),
+            # (R82) a pointer parameter's buffer whose first `_BUFFER_ELEMENTS_MAX` elements already were columns
+            "units_buffer_elements_full": sum(1 for r in recs
+                                              if "buffer_elements_full" in (r.get("not_added") or {}).values()),
+            "buffer_elements_max": _BUFFER_ELEMENTS_MAX,
             "max_rounds": max((int(r.get("rounds") or 0) for r in recs), default=0),
             # (R59) 회차 상한과, 상한이 탐색을 자른 unit(다음 회차가 더했을 이름이 있었다) · 그 이름 수
             "round_cap": _SOURCE_READ_ROUNDS,

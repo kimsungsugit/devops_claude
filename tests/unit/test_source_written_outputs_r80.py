@@ -420,7 +420,8 @@ def test_an_error_in_the_last_pass_takes_back_its_columns(monkeypatch):
     assert rec["final_error"] == "RuntimeError" and not rec["added"] and "final_initial_not_in_inputs" not in rec
     assert unit["output_vars"] == ["g_misc"] and "design_output_vars" not in unit
     assert not any("g_buz_out" in s["expected"] or "g_buz_out" in (s.get("expected_evidence") or {}) for s in seqs)
-    assert not any("g_buz_out=" in s["description"] for s in seqs)
+    # (R82) `g_buz_out` stays an input (a write's prior value) — the description's expected line no longer states it
+    assert not any("g_buz_out=" in ln for s in seqs for ln in s["description"].splitlines() if ln.startswith("Expected:"))
 
 
 def test_an_added_name_no_row_derives_is_dropped_with_its_cells():
@@ -755,10 +756,12 @@ def test_the_ai_path_keeps_the_written_record(monkeypatch):
 def test_an_output_round_then_its_initial_value_round(monkeypatch):
     # (review R80 I1) round 1 adds the column only (``g_w`` written above 3); round 2 adds its initial value as an input
     #   for the rows that leave it unwritten (backlog 2-c) — then every row states it
+    # (R82) the exposure search already named ``g_w`` in round 1: ``g_w = 1U`` replaces a value no row knew (a write's
+    #   prior value) — the same input the initial-value round would add in round 2, now there one round earlier
     unit, seqs = _ext(monkeypatch, "cond_w", ["d"], ["return"])
     assert unit["source_written_outputs"]["rounds"] == 1 and list(unit["source_written_outputs"]["added"]) == ["g_w"]
     got = unit["source_read_inputs"]["added"]["g_w"]
-    assert got["round"] == 2 and got["read_on_model"] is False
+    assert got["round"] == 1 and got["read_on_model"] is False and got["prior_value_for_write"] >= 1
     assert all(_derived(s, "g_w") is not None for s in seqs if "g_w" in s["inputs"] and 0 <= s["inputs"].get("d", -1) <= 255)
 
 

@@ -279,7 +279,9 @@ def test_a_unit_without_pointers_adds_its_inputs_as_before(monkeypatch):
     unit = _unit("plain", ["d"], ["g_o1", "g_o2"], {"d": "U8"})
     extended_unit_sequences(unit)
     added = unit["source_read_inputs"]["added"]
-    assert unit["input_vars"] == ["d", "s_a", "s_b"] and added["s_a"]["slots"] == added["s_b"]["slots"]
+    # (R82) then the outputs' prior values (written on every path), after the reads
+    assert unit["input_vars"] == ["d", "s_a", "s_b", "g_o1", "g_o2"] and added["s_a"]["slots"] == added["s_b"]["slots"]
+    assert all(added[n].get("prior_value_for_write") for n in ("g_o1", "g_o2"))
 
 
 def test_a_name_only_a_written_record_names_has_no_cells():

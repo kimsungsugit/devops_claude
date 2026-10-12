@@ -52,6 +52,7 @@ from generators.boundary_rows import _as_int
 from generators.c_source_oracle import (
     Unsupported,
     _parsed_function,
+    _substitute,
     cast_unary_operand,
     observe_decisions,
     scope_matches,
@@ -134,6 +135,25 @@ _NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\d+\])?")
 _POINTEE_NAME = re.compile(r"[A-Za-z_]\w*\[0\](?:\.[A-Za-z_]\w*)*(?:\[\d+\])?")   # (R81) `p[0]` · `p[0].a` · `p[0].b[2]`
 
 
+#: (review R82 I4) how deep the candidate reader follows function-like macros a macro expansion invokes
+_MACRO_CANDIDATE_DEPTH = 4
+
+
+def _written_name(assignment, raw: bytes) -> str:
+    """(R82) The object an assignment writes, by the name a row sets it by — `g` · `g.a` · `a[3]` · `p->a` as `p[0].a` ·
+    `*p` as `p[0]` — or "" (an index that is no constant, a cast, a call …). The input completion decides whether it is
+    an object a test may set (`suts._unit_object_decl`)."""
+    left = assignment.child_by_field_name("left")
+    if left is None:
+        return ""
+    text = "".join(md._text(left, raw).split())
+    if text.startswith("*") and re.fullmatch(r"\*\(?[A-Za-z_]\w*\)?", text):
+        return text.strip("*()") + "[0]"
+    text = re.sub(r"^([A-Za-z_]\w*)->", r"\1[0].", text)
+    text = re.sub(r"\[(\d+)[uUlL]*\]", r"[\1]", text)   # (review R82 W3) MISRA `g_arr[0U]` as the column `g_arr[0]`
+    return text if _NAME.fullmatch(text) or _POINTEE_NAME.fullmatch(text) else ""
+
+
 def _strip(node):
     """``(x)`` · ``(U8)x`` → x."""
     while node is not None and node.type in ("parenthesized_expression", "cast_expression"):
@@ -163,20 +183,61 @@ def _element_comparisons(fn, raw, scope, inputs: set[str]) -> dict[str, set[int]
     constants = scope["constants"] if scope.get("constants") is not None else {}
     widths = (scope.get("target") or {}).get("widths") or {}
     out: dict[str, set[int]] = {}
-    for n in md._walk(fn.child_by_field_name("body")):
-        op = n.child_by_field_name("operator") if n.type == "binary_expression" else None
-        if op is None or md._text(op, raw) not in _COMPARISONS:
-            continue
-        left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
-        for a, b in ((left, right), (right, left)):
-            x = _strip(a)
-            if x is None or x.type != "subscript_expression" or (arg := md._array_name_node(x)) is None:
+    if not any("[" in str(n) for n in inputs):
+        return out   # (review R82 I4) no element input: nothing to read, no macro to expand
+
+    def read(top, text):
+        for n in md._walk(top):
+            op = n.child_by_field_name("operator") if n.type == "binary_expression" else None
+            if op is None or md._text(op, text) not in _COMPARISONS:
                 continue
-            k = md._index_value(x.child_by_field_name("index"), raw, constants, widths)
-            name = f"{md._text(arg, raw)}[{k}]"
-            value = _constant(b, raw, constants, widths) if k is not None and name in inputs else None
-            if value is not None:
-                out.setdefault(name, set()).add(value)
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            for a, b in ((left, right), (right, left)):
+                x = _strip(a)
+                if x is not None and x.type == "binary_expression" and md._text(x.child_by_field_name("operator"), text) == "&":
+                    # (R82) a masked comparison `(E & M) == C` or `(M & E) == C` (review R82 I7): C (with the mask's
+                    #   bits) is a value E takes there
+                    sides = [_strip(x.child_by_field_name("left")), _strip(x.child_by_field_name("right"))]
+                    x = next((s for s in sides if s is not None and s.type == "subscript_expression"), None)
+                if x is None or x.type != "subscript_expression" or (arg := md._array_name_node(x)) is None:
+                    continue
+                k = md._index_value(x.child_by_field_name("index"), text, constants, widths)
+                name = f"{md._text(arg, text)}[{k}]"
+                value = _constant(b, text, constants, widths) if k is not None and name in inputs else None
+                if value is not None:
+                    out.setdefault(name, set()).add(value)
+
+    # (R82) and the comparisons a function-like macro the body invokes holds (`LINTP_IS_CF(pData)` →
+    #   `(((pData)[0] & 0xF0u) == LINTP_CF)` — a LIN frame parser compares its buffer's bytes only through macros), and the
+    #   macros that expansion invokes (review R82 I4: `IS_CF` → `GET_PCI`), each invocation once
+    bodies = scope.get("function_like_macro_bodies") or {}
+    params = scope.get("function_like_macro_params") or {}
+    parser = cpc.shared_parser()
+    seen: set[tuple] = set()
+
+    def expand(top, text, depth):
+        for n in md._walk(top) if bodies and parser is not None and depth <= _MACRO_CANDIDATE_DEPTH else ():
+            f = n.child_by_field_name("function") if n.type == "call_expression" else None
+            name = md._text(f, text) if f is not None and f.type == "identifier" else ""
+            if name not in bodies or name not in params:
+                continue
+            args = n.child_by_field_name("arguments")
+            argv = [md._text(a, text) for a in (args.named_children if args is not None else []) if a.type != "comment"]
+            if len(argv) != len(params[name] or ()) or (name, tuple(argv)) in seen:
+                continue
+            seen.add((name, tuple(argv)))
+            try:
+                node, eraw = cpc._parse_body(_substitute(bodies[name], params[name], argv), parser)
+            except Exception as exc:  # noqa: BLE001 — a candidate value only: an expansion it cannot read gives none
+                _log.debug("macro expansion unread for candidates (%s): %s", name, exc)
+                continue
+            if node is not None:
+                read(node, eraw)
+                expand(node, eraw, depth + 1)
+
+    body = fn.child_by_field_name("body")
+    read(body, raw)
+    expand(body, raw, 1)
     return out
 
 
@@ -544,6 +605,25 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             cond_inputs[k] = md._condition_inputs(node, raw, sources, input_set) or list(inputs)
         return cond_inputs[k]
 
+    # (R82 measurement, HD `g_ApiIn_LinRx_ReadData`: reached targets 41 → 21) an input the completion added only as a
+    #   write's prior value — the model never read its initial value: a guard naming it reads what the function wrote
+    #   over it (`u8s_SbcmMsg_F = l_flg_tst_…(); if (u8s_SbcmMsg_F == u8g_ON)`), so moving it decides nothing and the
+    #   climb stopped there (before R82 the name was no input and the climb moved every input). A climb to a guard, a
+    #   case or a comparison moves the others first (`control_inputs_of`); at a local best it tries the written-only
+    #   names that step names once more (`prior_named` — review R82 W-R6-1: the classification is the round's that
+    #   added the name, a wider domain may open a path reading its initial value)
+    added = ((unit.get("source_read_inputs") or {}).get("added")) or {}
+    written_only = {n for n, a in added.items() if isinstance(a, dict) and a.get("prior_value_for_write")
+                    and not a.get("read_on_model", True)} & input_set
+    movable = [n for n in inputs if n not in written_only] or list(inputs)
+    control_inputs: dict = {}
+
+    def control_inputs_of(node) -> list[str]:
+        k = _key(node)
+        if k not in control_inputs:
+            control_inputs[k] = md._condition_inputs(node, raw, sources, input_set - written_only) or movable
+        return control_inputs[k]
+
     guards = [list(_key(c)) for c in conds]
     reach_keys = [list(_key(n)) for n in watch]
     cache: dict[tuple, dict] = {}
@@ -623,6 +703,32 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         if final[0] == "reach":
             return any(p for p in ((r.get("reach") or {}).get(final[1]) or []))
         return any(final[2] in p or None in p for p in ((r.get("guards") or {}).get(final[1]) or []))
+
+    blocked_memo: dict[tuple, tuple] = {}
+
+    def blocked_reads(r, target) -> set:
+        """(R82) Objects the run read with no value from the vector that the guard its best path stops at names — what
+        the climb needs to go on, though no path gets to the target. PV `s_DoorState_AutoStop_Check`: the 5th of 8
+        ANDed conditions reads `u8g_DoorPreCtrl_PlayProtectLvl`, which no input list names; with it unknown the decision
+        is false while a later condition is, and undetermined (ranked further) once that one holds — every climb stopped
+        there ('local best') and no path reached the statement, so the search never named it. Only the objects the guard
+        names itself (review R82 W6: every read of a run whose guard is undetermined changed no PV function's rows)."""
+        if r.get("status") != "supported":
+            return set()
+        memo = (id(r), id(target))   # (review R82 I5) once per run and target — the runs stay in the cache
+        if memo not in blocked_memo:
+            blocked_memo[memo] = best_path(r, target)
+        _depth, step = blocked_memo[memo]
+        if step is None or step[0] != "guard":
+            return set()
+        node = step[1] if not isinstance(step[1], int) else conds[step[1]]
+        words = set(re.findall(r"[A-Za-z_]\w*", raw[node.start_byte:node.end_byte].decode("utf-8", "replace")))
+        out = set()
+        for n in r.get("initial_reads") or ():
+            name = str(n)[len("@pointee:"):] if str(n).startswith("@pointee:") else str(n)
+            if re.split(r"[\[.]", name, maxsplit=1)[0] in words:
+                out.add(n)
+        return out
 
     def paths_of(r) -> int:
         lists = list((r.get("guards") or {}).values()) + list((r.get("reach") or {}).values())
@@ -709,9 +815,15 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         — every input when it reads none it can set), and for a comparison the decision's other conditions (that make
         it decide)."""
         kind, node, _chain, final = target
-        names = list(inputs_of(node))
+        if kind == "write":
+            # (R82, review W-R6-2) the right side's reads but a written-only input (the function wrote over it first),
+            #   else every input — the write's own prior value among them (its left side is no read of the statement)
+            names = md._condition_inputs(node, raw, sources, input_set - written_only) or list(inputs)
+        else:
+            # (R82) a comparison or an operation never reads a written-only input — they move the others
+            names = list(control_inputs_of(node))
         if kind == "boundary" and final[2] in spec_cond:
-            names = list(dict.fromkeys(names + list(inputs_of(spec_cond[final[2]]))))
+            names = list(dict.fromkeys(names + list(control_inputs_of(spec_cond[final[2]]))))
         return names
 
     def measure(r, target):
@@ -771,12 +883,28 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             return exposure_inputs(target) if clean(r) else list(inputs)
         if step[0] == "guard":
             node = step[1] if not isinstance(step[1], int) else conds[step[1]]
-            return inputs_of(node)
+            return control_inputs_of(node)
         if step[0] == "case":
             sw = step[1].parent.parent if step[1].parent is not None else None
             c = sw.child_by_field_name("condition") if sw is not None and sw.type == "switch_statement" else None
-            return inputs_of(c) if c is not None else list(inputs)
+            return control_inputs_of(c) if c is not None else list(inputs)
         return list(inputs)
+
+    def prior_named(r, target) -> list:
+        """(review R82 W-R6-1) The written-only inputs the step a climb is blocked at names — its guard, its switch, or
+        the target's own comparison / operation."""
+        if not written_only or r.get("status") != "supported":
+            return []
+        _depth, step = best_path(r, target)
+        node = None
+        if step is not None and step[0] == "guard":
+            node = step[1] if not isinstance(step[1], int) else conds[step[1]]
+        elif step is not None and step[0] == "case":
+            sw = step[1].parent.parent if step[1].parent is not None else None
+            node = sw.child_by_field_name("condition") if sw is not None and sw.type == "switch_statement" else None
+        elif step is not None and target[0] in ("boundary", "arith") and step is target[3]:
+            node = target[1]
+        return [n for n in inputs_of(node) if n in written_only] if node is not None else []
 
     def outside(v) -> int:
         return sum(1 for k, x in v.items() if k in home and not _at_home(home[k], x))
@@ -816,6 +944,14 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             run(cands)
             pool = [cur] + [c for c in cands if vkey(c) in cache]
             best = max(pool, key=lambda v: score(v, target))
+            if score(best, target) <= score(cur, target):
+                # (review R82 W-R6-1) the written-only names the blocking step names, once — before giving up
+                late = [n for n in prior_named(r, target) if n not in names]
+                if late:
+                    more = [{**cur, n: x} for n in late for x in pools[n] if x != cur[n]]
+                    run(more)
+                    pool += [c for c in more if vkey(c) in cache]
+                    best = max(pool, key=lambda v: score(v, target))
             if score(best, target) <= score(cur, target):
                 return None, ("budget" if exhausted() else "local_best")
             cur = best
@@ -1066,12 +1202,49 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             continue
         # (R81, review I4) a pointer parameter's pointee the run read (`@pointee:ctx[0].bitcount`) by the reference's name
         #   — the input completion keeps it only for this unit's pointer parameters (`_unit_object_decl`)
-        names = {m for r in reach_runs if touched(r, target) for n in (r.get("initial_reads") or ())
+        # (R82) and what the guard a climb stopped at read with no value
+        names = {m for r in reach_runs
+                 for n in ((r.get("initial_reads") or ()) if touched(r, target) else blocked_reads(r, target))
                  for m in [str(n)[len("@pointee:"):] if str(n).startswith("@pointee:") else str(n)]
                  if (_NAME.fullmatch(m) or (str(n).startswith("@pointee:") and _POINTEE_NAME.fullmatch(m)))
                  and m not in doms}
         for n in names:
             needed[n] = needed.get(n, 0) + 1
+    # (R82) a write no move can expose: it runs, but the value it replaces is never known — the object is no input (an
+    #   output the function writes on every path). Deleting that write leaves the old value, which the suite then cannot
+    #   tell from the new one (PV `s_MotorSpeedModeSelection_RearSet`: `s32s_StartSpeed = …` — the reference sets the
+    #   object's value before the call). The object is what the search needs: the input completion adds it and the next
+    #   round's exposing search picks a value the write changes. Kept apart from `needed_inputs`: the function writes the
+    #   object there, it does not read it — no gap in the input list (`source_findings`), no read on the model
+    prior_values: dict[str, int] = {}
+    written_values: dict[str, set] = {}   # the values those writes put there — the prior value a row needs differs
+    unnamed = 0
+    # (review R82 I-R2-2) objects a test sets: the translation unit's (`g` · `g.a` · `a[k]`) and this function's pointer
+    #   parameters' pointees (`p[0]…`) — an uninitialized local written is no prior value to ask for
+    settable = set(scope.get("globals") or {}) | set(scope.get("arrays") or {}) | set(md._pointer_params(
+        scope, str(unit.get("name") or "")))
+    for i in range(n_reach, len(targets)):
+        if done[i] or why_of.get(i) != "unmodeled" or targets[i][0] != "write":
+            continue
+        # (review R82 W8) only where the replaced value alone is missing: some run wrote a known value (a write whose new
+        #   value is unknown too — `g_y = (U8)g_flt` — is not exposed by a prior value either)
+        if not any(a is None and b is not None for r in cache.values() if r.get("status") == "supported"
+                   for a, b in _records(r, "writes", targets[i][3][1])):
+            continue
+        name = _written_name(write_nodes[targets[i][3][1]], raw)
+        if not name:
+            unnamed += 1   # (review R82 W3) an index no constant names, a cast, a call … — counted, not silent
+        elif name not in doms and (name in settable or re.split(r"[\[.]", name, maxsplit=1)[0] in settable):
+            prior_values[name] = prior_values.get(name, 0) + 1
+            written_values.setdefault(name, set()).update(
+                b for r in cache.values() if r.get("status") == "supported"
+                for a, b in _records(r, "writes", targets[i][3][1]) if a is None and b is not None)
+    report["expose_prior_value_needed"] = sum(prior_values.values())
+    report["expose_prior_value_unnamed"] = unnamed
+    report["prior_value_needed"] = dict(sorted(prior_values.items()))
+    # (R82 measurement: PV `g_UDS_LinComp_Reset` — its exposing search ran out of budget; the rows' fixed prior value 0
+    #   was the value `u8g_SysUds_UsDoorCtrl = u8g_CLR` writes, so deleting that write showed nowhere)
+    report["prior_value_written"] = {n: sorted(v) for n, v in sorted(written_values.items())}
     report["needed_inputs"] = dict(sorted(needed.items()))
     report["inputs_needed"] = len(needed)
     out = []
