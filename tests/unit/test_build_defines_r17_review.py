@@ -132,7 +132,9 @@ def test_the_assumption_is_disclosed_for_suts_and_sits():
         {"build_defines": {"complete": False, "reason": "unmanaged_build"}, "assumed_undefined": []}])
     assert block == {"units": 2, "units_with_complete_build_evidence": 1, "incomplete_reasons": {"unmanaged_build": 1},
                      "units_with_assumed_undefined": 1, "assumed_undefined_names": ["S12ZVL64_MCU", "TESTCODE_FOR_VEHICLE"],
-                     "assumed_undefined_total": 2}
+                     "assumed_undefined_total": 2,
+                     # (R83) exact-width typedefs read past an undecided `#ifndef` guard — none here
+                     "units_with_exact_width_guards": 0, "exact_width_guard_names": []}
     suts = {i["key"]: i for i in build_disclosures("suts", {"build_assumptions": block})}["suts_build_assumptions"]
     assert suts["value"] == "완전한 빌드 설정 1/2 unit · 정의 없음으로 본 이름 2개"
     assert "TESTCODE_FOR_VEHICLE" in suts["note"] and "unmanaged_build 1" in suts["note"] and "C11 6.10.1p4" in suts["note"]

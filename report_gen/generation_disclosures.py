@@ -223,8 +223,13 @@ def _scenario_rows_item(sc: Dict[str, Any]) -> Dict[str, Any]:
            if _int(sc, "budget_exhausted") else "")
         + (f"후보 값 상한에 잘린 입력 {_show(_int(sc, 'pools_capped'))}. " if _int(sc, "pools_capped") else "")
         + (f"오르기 출발점 상한에 잘린 기존 행 {_show(_int(sc, 'starts_capped'))}. " if _int(sc, "starts_capped") else "")
-        + (f"하위 조건을 읽지 못해 결과로만 따라간 조건 {_show(_int(sc, 'conditions_outcome_only'))}. "
+        + (f"하위 조건을 읽지 못해(또는 하위 조건이 {_show(_int(sc, 'atoms_cap'))} 개를 넘어) 결과로만 따라간 조건 "
+           f"{_show(_int(sc, 'conditions_outcome_only'))} — 그 조건의 결함이 드러나는 경계 목표도 없다. "
            if _int(sc, "conditions_outcome_only") else "")
+        + (f"행이 이름으로 적은 포인터 멤버(하네스가 버퍼를 주는 `p[0].data`) {_show(_int(sc, 'harness_member_inputs'))} 는 "
+           "탐색 실행에도 전 입력 중간값 행(BV_MID)이 그 칸에 두는 값 하나로 두었다(그 칸의 값은 포인터 값이 아니라 버퍼 할당 표시) — "
+           "그 칸이 없으면 그 멤버를 거친 접근이 모르는 포인터라 가능한 미정의 동작이 되어 그 경로의 목표가 깨끗하게 닿지 않는다. "
+           if _int(sc, "harness_member_inputs") else "")
         + (f"탐색하지 않은 unit: {_dist(skipped)}. " if skipped else "")
         + (f"첫 탐색에 입력이 없어 열거자 밖 값 탐색만 한 unit {_show(_int(sc, 'enum_only_searched'))}(설계가 값 하나만 둔 입력). "
            if _int(sc, "enum_only_searched") else "")
@@ -1178,6 +1183,15 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" {_int(ev, 'derived_on_assumed_undefined')}칸은 빌드 설정 증거로 '정의 없음'이라 본 이름에 기댄 #if 판정이 있는 "
                "unit 의 값이다 — unit 단위로 센 상한이라 그 판정이 값에 닿지 않은 칸도 포함한다(아래 '빌드 설정 매크로 판정')."
                if _int(ev, "derived_on_assumed_undefined") else "")
+            # (R83) 트리의 정확폭 typedef 를 `#ifndef` 가드 너머로 읽은 함수의 칸
+            + (f" {_int(ev, 'derived_on_exact_width_guard')}칸은 `#ifndef int16_t` 처럼 판정하지 못한 가드 안의 정확폭 typedef "
+               "(int16_t · uint32_t …)를 그 이름의 폭 · 부호로 읽은 함수의 값이다 — 가드 밖 헤더가 그 이름을 매크로로 만들었어도 "
+               "구현의 정확폭 타입(C11 7.20.1.1)이라 같게 계산된다고 본다. 함수 본문이 그 이름 · 그 별칭(TPE_ErrCode 등) · 그 "
+               "타입으로 선언된 전역(구조체는 이름으로 — 다른 멤버만 써도 셈) · 배열 · 본문이 부르는 포인터 매개변수의 대상을 "
+               "쓰는지, 함수의 반환 타입 · 본문이 부르는 매개변수의 타입이 그 이름인지로 센다 — 매크로 본문 · 피호출 안에서만 쓰거나 "
+               "const 스칼라 · stub 반환 타입으로만 쓰면 세지 않는다(아래 "
+               "'빌드 설정 매크로 판정' 이 그 typedef 를 읽은 unit 을 모두 센다)."
+               if _int(ev, "derived_on_exact_width_guard") else "")
             # (R81) 행이 값을 주지 않고 관측만 해서 할당된 포인터 매개변수 대상에 기댄 행의 칸
             + (f" {_int(ev, 'derived_on_observed_only_pointee')}칸은 행이 포인터 매개변수의 대상에 값을 주지 않고 관측만 하는 "
                "행의 값이다 — 시험 하네스가 그 대상을 할당해야 성립한다(행 단위로 센 상한, '포인터 매개변수 표기')."
@@ -1630,6 +1644,30 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 채움 단계 오류로 채움 행 없이 둔 unit {_show(_int(mf, 'errors'))} — 로그에 traceback 이 있다."
                if _int(mf, "errors") else ""),
             tone=_tone(bool(_int(mf, "errors")))))
+    # (R83) 피호출 값 구별 행 — 확장 프로파일에만 있다
+    sa = qr.get("stub_apart")
+    if isinstance(sa, dict) and (_int(sa, "units_with_two_stubs") or _int(sa, "errors")):
+        out.append(_item(
+            "suts_stub_apart_rows", "피호출 값 구별 행",
+            f"{_show(_int(sa, 'rows'))}행 (unit {_show(_int(sa, 'units_with_rows'))} · 피호출 stub 이 둘 이상인 unit "
+            f"{_show(_int(sa, 'units_with_two_stubs'))})",
+            "두 피호출 stub 이 같은 값을 돌려주는 행은 그 값을 받은 출력에서 어느 피호출의 값이 갔는지 · 어느 갈래를 탔는지 가르지 "
+            "못한다(정본은 stub 마다 다른 값을 둔다). 기존 행은 그대로 두고 — 확장 문서는 기본 문서의 행을 같은 값으로 담는다 — "
+            "같은 값이던 stub 을 서로 다른 값(경계 행 도메인 안, 설계 값 목록이면 그 목록의 값; enum · 타입을 모르는 stub 은 옮기지 "
+            "않음, FI · 설계 범위 밖 값을 가진 행은 출처가 아님)으로 옮긴 동반 행을 더했다: 원본 코드 모델에서 같은 경로(부르는 "
+            "피호출 · 쓰는 객체와 그 값을 아는지 — 반환값은 넣지 않음)이고 그 경로가 실제로 서로 다른 값이 된 stub 을 둘 이상 "
+            "부르거나 하나를 부르고 다른 하나를 다른 행의 경로가 부를 때만, "
+            f"경로마다 하나(unit 당 {_show(_int(sa, 'cap_per_unit'))}행 · 출처 후보 {_show(_int(sa, 'sources_per_unit'))} 상한). "
+            f"출처 후보 {_show(_int(sa, 'sources'))} = 행 {_show(_int(sa, 'rows'))} + 갈라도 알려 주는 것 없음 "
+            f"{_show(_int(sa, 'uninformative'))} + 옮긴 값이 경로를 바꿈 {_show(_int(sa, 'path_changed'))} + 도출 못 함 "
+            f"{_show(_int(sa, 'underived'))} + 같은 경로에 이미 있음 {_show(_int(sa, 'same_path'))} + 행 상한 "
+            f"{_show(_int(sa, 'cut_rows'))}. 후보가 되기 전에 뺀 것: 기존 행과 같음 {_show(_int(sa, 'duplicates'))} · 출처 후보 상한 "
+            f"{_show(_int(sa, 'cut_sources'))} · 옮길 값이 없던 (행, stub) {_show(_int(sa, 'no_value_stubs'))}. 실행이 갈라지거나 "
+            "도출한 출력이 없거나 옮긴 행이 출력을 잃는 출처는 '도출 못 함' 이다. 기대값은 다른 행과 같은 oracle 이 도출한다"
+            "(미실행)."
+            + (f" 이 단계 오류로 동반 행 없이 둔 unit {_show(_int(sa, 'errors'))} — 로그에 traceback 이 있다."
+               if _int(sa, "errors") else ""),
+            tone=_tone(bool(_int(sa, "errors")))))
     # (R31) 설계 범위 밖 강건성 행 — 확장 프로파일에만 있다
     rr = qr.get("robustness_rows")
     if isinstance(rr, dict):
@@ -1918,7 +1956,14 @@ def _build_assumption_item(block: Any, key: str) -> List[Dict[str, Any]]:
         "트리 밖 헤더(툴체인 hidef.h·stdtypes.h, <...>)와 빌드 환경(COMPOPTIONS, DEFAULT.ENV)이 이 이름들을 정의하지 않는다."
         + (" 0 으로 본 이름: " + ", ".join(names[:12]) + (f" 외 {total - 12}개" if total > 12 else "") + "." if names else "")
         + (" 빌드 설정을 증거로 쓰지 못한 unit 의 사유: " + _dist(reasons) + " — 이 unit 들은 이전처럼 미결로 둔다."
-           if reasons else ""),
+           if reasons else "")
+        # (R83) the exact-width typedefs read past their undecided `#ifndef` guard — another argument than R17's
+        + (f" 판정하지 못한 `#ifndef` 가드 안의 정확폭 typedef 를 그 이름의 폭 · 부호로 읽은 unit "
+           f"{_show(_int(block, 'units_with_exact_width_guards'))}: "
+           + ", ".join(str(x) for x in (block.get("exact_width_guard_names") or [])[:12])
+           + " — 가드 밖 헤더가 그 이름을 매크로로 만들었어도 구현의 정확폭 타입(C11 7.20.1.1, 같은 폭 · 부호)이라 같게 "
+             "계산된다고 본다. 가드 안의 다른 선언 · 다른 #if 는 이전처럼 미결이다."
+           if _int(block, "units_with_exact_width_guards") else ""),
         tone="info")]
 
 

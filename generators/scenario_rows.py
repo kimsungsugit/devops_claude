@@ -67,7 +67,11 @@ MAX_STEPS = 1_500_000    # interpreter steps per function and search (summed ove
 MAX_POOL = 12            # candidate values per input
 MAX_STARTS = 24          # existing rows tried as climb starts
 MAX_CLIMB = 24           # moves per climb
-MAX_ATOMS = 16           # conditions of a control condition read as sub-conditions (more: outcome only)
+# conditions of a control condition read as sub-conditions (more: outcome only). (R83) 16 → 64: a decision of more had no
+#   sub-condition record, so no fault-exposing boundary of its conditions either (HDPDM01 `s_DoorState_AutoStop_Detection`:
+#   ``u8g_ApiIn_MotorCountSpeed >= u16s_ASSIST_START_SPEED1`` in a 26-condition `else if` never met at 8 — `>` survived).
+#   A record costs one evaluation of the condition's tree per sub-condition (the outcome with that one flipped)
+MAX_ATOMS = 64
 MAX_EXPOSE_ROWS = 16     # (R79) fault-exposing rows per function and search
 MAX_EXPOSE_RUNS = 800    # (R79) their own oracle runs per function and search, after the reach targets'
 MAX_EXPOSE_STEPS = 1_500_000

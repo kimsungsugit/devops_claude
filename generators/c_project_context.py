@@ -1915,6 +1915,20 @@ def _implementation_may_define(name: str) -> bool:
     return name.startswith("_") or bool(_STANDARD_NAME_RE.match(name))
 
 
+# (R83) The <stdint.h> exact-width names. The tree's own typedef of one sits under ``#ifndef int16_t`` (PE_Types.h: in case a
+#   header made the name a macro) and stayed undecided — a standard name a header outside the tree (the toolchain's hidef.h)
+#   may define, R17 — so the type was unresolved and every cast to it untyped (KJPDS02_PV `s_MotorSpeedMeasure`:
+#   ``(int32_t)a - (int32_t)b`` a possible signed overflow on every path through it). Whichever way that guard goes, the
+#   name is the exact-width type: the tree's typedef, or — had a header made it a macro — the implementation's, which has
+#   exactly that width, two's complement or unsigned (C11 7.20.1.1); two integer types of one width and signedness compute
+#   alike. So that one typedef is read (`_EXACT_GUARD` mode of `preprocess_unit`) when it has the name's width and
+#   signedness (`build_scopes` checks; else the type stays unresolved) — with the build's -D set known (no ``-Dint16_t=…``),
+#   no missing include before it and no definition of the name in the tree. Everything else under the guard, and every
+#   other ``#if`` on the name (``#ifdef int8_t`` as a feature test), stays undecided. Said in `pp_assumptions`.
+_EXACT_WIDTH_RE = re.compile(r"(u?)int(8|16|32|64)_t")
+_EXACT_GUARD = "exact_width_guard:"
+
+
 def build_project_context(files: dict[str, str], build: dict[str, Any] | None = None,
                           roots: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
     """Scan every complete ``.c``/``.h`` text once. ``files`` maps path → complete source text.
@@ -2769,6 +2783,8 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
     out: dict[str, Any] = {"states": {}, "macros": macros, "varied": set(), "missing_includes": [], "system_includes": [],
                            "toolchain_includes": [], "files": [], "errors": [], "unknown_conditions": 0, "gaps": 0,
                            "defined_after_gaps": {},
+                           # (R83) exact-width names whose `#ifndef` guard's typedef is read (`_EXACT_GUARD`)
+                           "exact_width_guards": set(),
                            # (R62 review W1) name → the latest position in ``main`` (its last declaration or #define seen so
                            # far) at which a #define/#undef of the name — in any file — was met: a header included after a
                            # function changes the table after that function, though its definition sits in another file
@@ -2849,7 +2865,17 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
                 # when it was included again under an undecided ``#if`` — every macro it defines became unknown
                 # (KJPDS02_PV: 5,923 of 5,933 macros, ``#ifndef COMMON_IT_H`` already defined; R2b).
                 verdict = None if parser is None else _pp_condition(ev, env)
-                if verdict is None:
+                guard = ev.get("defined") if ev.get("negate") else None
+                if verdict is None and mode == "active" and guard and _EXACT_WIDTH_RE.fullmatch(guard) \
+                        and env.get("build_defines_complete") and not env["gap"] and guard not in env["macros"] \
+                        and guard not in env["varied"] and guard not in env["defined_anywhere"]:
+                    # (R83) ``#ifndef int16_t`` around the tree's typedef: the typedef of that name is read (`visible`);
+                    #   the rest of the group is as undecided as before
+                    out["unknown_conditions"] += 1
+                    out["exact_width_guards"].add(guard)
+                    run(path, ev["then"], _EXACT_GUARD + guard, depth)
+                    run(path, ev["else"], _UNKNOWN, depth)
+                elif verdict is None:
                     if mode == "active":
                         out["unknown_conditions"] += 1
                     run(path, ev["then"], _UNKNOWN, depth)
@@ -2875,6 +2901,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                              "types": {}, "unresolved_types": {}, "constants": {}, "unresolved_constants": {},
                              "enum_types": {}, "globals": {}, "unresolved_globals": {}, "function_like_macros": [],
                              "function_like_macro_bodies": {}, "function_like_macro_params": {}, "arrays": {},
+                             # (R83) multi-dimensional array objects' dimensions (`_scope_array_shape`)
+                             "array_shapes": {},
                              "struct_globals": {},   # (R39) struct objects whose members are modeled (`_scope_struct`)
                              "pointee_types": {},   # (R40) pointer parameters' pointee layouts (`_pointee_layout`)
                              "pointer_params": {},   # (R40) function → its ``T *p`` parameters (one definition only)
@@ -2953,21 +2981,29 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     states = pp["states"]
     # Declarations this configuration compiles: "active", or "unknown" (under a condition the macro state does not
     # decide — kept, flagged conditional). Anything else is not compiled here and is not visible at all.
-    scope["main_file_states"] = {pos: state for (p, pos), state in states.items() if p == path}
+    # (review R83 W1) the exact-width guard mode is `_UNKNOWN` to every reader but `visible` — a function defined in
+    #   such a group is as undecided as before (its consumers test `== "unknown"`)
+    scope["main_file_states"] = {pos: (_UNKNOWN if str(state).startswith(_EXACT_GUARD) else state)
+                                 for (p, pos), state in states.items() if p == path}
     scope["main_file_sha256"] = files[path]["sha256"]
     recs = [(p, files[p]) for p in pp["files"]]
 
-    def visible(p, defs):
+    def visible(p, defs, typedef_name=None):
         for d in defs:
             state = states.get((p, d.get("pos")))
             if state is not None:
-                yield {**d, "file": p, "conditional": state == _UNKNOWN}
+                # (R83) a declaration under ``#ifndef int16_t`` (`_EXACT_GUARD`) is undecided — but the typedef of that
+                #   very name, which is the exact-width type either way
+                guard = state[len(_EXACT_GUARD):] if str(state).startswith(_EXACT_GUARD) else None
+                taken = guard is not None and guard == typedef_name
+                yield {**d, "file": p, "conditional": state == _UNKNOWN or (guard is not None and not taken),
+                       **({"exact_width_guard": guard} if taken else {})}
 
     # typedefs
     raw_typedefs: dict[str, list[dict]] = {}
     for p, rec in recs:
         for name, defs in rec["typedefs"].items():
-            raw_typedefs.setdefault(name, []).extend(visible(p, defs))
+            raw_typedefs.setdefault(name, []).extend(visible(p, defs, typedef_name=name))
     raw_typedefs = {k: v for k, v in raw_typedefs.items() if v}
     # (R39) struct/union bodies this unit sees (by ``struct tag``, anonymous body key and typedef name)
     raw_structs: dict[str, list[dict]] = {}
@@ -3010,6 +3046,13 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             if d.get("shape") not in {"scalar", "enum"} or not d.get("base"):
                 raise Unresolved("typedef_not_scalar:" + core)
             t = dict(resolve_type(d["base"], depth + 1))
+            exact = _EXACT_WIDTH_RE.fullmatch(core)
+            if exact and any(x.get("exact_width_guard") for x in defs) and (
+                    t.get("bits") != int(exact.group(2)) or bool(t.get("signed")) != (exact.group(1) == "")):
+                # (R83) read past its `#ifndef` guard — sound only for the width and signedness the name has
+                raise Unresolved("exact_width_typedef_mismatch:" + core)
+            if exact and any(x.get("exact_width_guard") for x in defs):
+                t["exact_width_guard"] = core   # (review R83 W-R2-3) carried by every alias of it (TPE_ErrCode)
             t["typedef"] = core
             if d.get("volatile"):
                 qualifiers.add("volatile")
@@ -3040,6 +3083,11 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             type_of(name)
         except Unresolved:
             pass  # recorded in unresolved_types
+    # (R83, review I7) the guards whose typedef was read past them — a guard with no typedef of its name, or one refused
+    #   for its width, is no assumption of the unit
+    scope["exact_width_guards"] = sorted(
+        n for n in pp.get("exact_width_guards") or () if n in scope["types"]
+        and any(d.get("exact_width_guard") for d in raw_typedefs.get(n) or ()))
     for key, defs in enums.items():
         if len(defs) == 1 and not defs[0]["conditional"]:
             scope["enum_types"][key] = defs[0]
@@ -3091,6 +3139,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                              for name, key in pp["macros"].items()}
     scope["macro_status"].update({name: "varied" for name in pp["varied"] if name not in scope["macro_status"]})
     scope["prototypes"] = sorted({n for p, rec in recs for n in rec.get("prototypes") or ()})
+    plain_assumed = list(scope["assumed_undefined"])
+    exact_assumed = list(scope["exact_width_guards"])
     scope["pp_assumptions"] = [
         "a name some project file #defines is not also a build -D (a name the tree never defines is undecided unless "
         "the build configuration's -D set is known — see below)",
@@ -3102,9 +3152,17 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
            "in #if — assuming the toolchain plugin's default options add no -D (the file stores only non-default values), "
            "the compiler predefines only reserved names, headers outside the tree (toolchain hidef.h/stdtypes.h, <...>) "
            "and the build environment (COMPOPTIONS, DEFAULT.ENV) define none of these: "
-           + ", ".join(scope["assumed_undefined"][:12])
-           + (f" (+{len(scope['assumed_undefined']) - 12})" if len(scope["assumed_undefined"]) > 12 else "")]
-          if scope["assumed_undefined"] else []),
+           + ", ".join(plain_assumed[:12])
+           + (f" (+{len(plain_assumed) - 12})" if len(plain_assumed) > 12 else "")]
+          if plain_assumed else []),
+        # (R83) the <stdint.h> exact-width names `#ifndef` asks about — the argument is not R17's
+        *(["the tree's typedef of the <stdint.h> exact-width names " + ", ".join(exact_assumed) + " under `#ifndef` of "
+           "that name is read though the guard is undecided: had a header outside the tree made the name a macro, it "
+           "would name the implementation's exact-width type — that width, two's complement or unsigned (C11 7.20.1.1) — "
+           "and two integer types of one width and signedness compute alike; read only where the typedef has the name's "
+           "width and signedness, with the build's -D set known and no missing include before it (the rest of that "
+           "group stays undecided)"]
+          if exact_assumed else []),
         "system headers (<...>) do not define names the project defines",
         "a quoted include found nowhere in the source tree, in a build whose configuration lists toolchain include "
         "directories, is a toolchain header (C11 6.10.2p3) and, like <...> headers, does not define project names",
@@ -3239,6 +3297,7 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             d = defs[0]
             if d["shape"] == "array" and d["type"] != "struct":
                 _scope_array(scope, name, defs, pp, type_of, agreeing, parser)
+                _scope_array_shape(scope, name, defs, pp, agreeing, type_of)
             if d["shape"] == "scalar":
                 _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing,   # (R39) no-op unless a struct
                               macro_names=every_macro_name)
@@ -3464,6 +3523,38 @@ def _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing, macro_n
                                      "opaque_members": bool(unmodeled)}
 
 
+def _scope_array_shape(scope, name, defs, pp, agreeing, type_of):
+    """(R83) The dimensions of a multi-dimensional array object (``S16 t[5][7][7]``), outermost first — no object the run
+    models (`_scope_array` takes one dimension), but an element access it can bound: each index inside its own dimension
+    reaches that object and no other (C11 6.5.2.1; J.2 — an index past an inner dimension is undefined even where the
+    whole object lies beyond it). The outermost may be unknown (``extern S16 t[][7];``) — then, as for a one-dimensional
+    array of unknown length, only its sign is checked. Every declaration must agree; anything unresolved records nothing
+    (the access stays pointer arithmetic, as before)."""
+    shapes = {tuple(x.get("dims") or ()) for x in defs}
+    if pp["gaps"] or any(len(s) < 2 for s in shapes) or len({len(s) for s in shapes}) != 1:
+        return
+    try:
+        # (review R83 I4) a scalar element — ``ROW g_m[2][4]`` with ``typedef U8 ROW[3]`` has three dimensions, not two
+        type_of(defs[0]["type"])
+        dims: list = []
+        for i in range(len(next(iter(shapes)))):
+            texts = {s[i].strip() for s in shapes if s[i].strip()}
+            if i > 0 and (len(texts) != 1 or any(not s[i].strip() for s in shapes)):
+                return
+            values = set()
+            for t in texts:
+                value, vt, _extra = agreeing(t, macro_body=False)
+                if is_float(vt) or type(value) is not int or value <= 0:
+                    return
+                values.add(value)
+            if len(values) > 1:
+                return
+            dims.append(next(iter(values)) if values else None)
+    except Unresolved:
+        return
+    scope["array_shapes"][name] = {"dims": dims, "file": defs[0]["file"], "line": defs[0]["line"]}
+
+
 def _scope_array(scope, name, defs, pp, type_of, agreeing, parser):
     """A one-dimensional array of a resolved scalar element type: element type, length and — for a ``const``
     object with one visible initialized definition — its element values. Anything else stays unrecorded (the
@@ -3619,6 +3710,7 @@ def summarize_build_assumptions(scopes) -> dict[str, Any]:
     build-configuration evidence, why the others did not, and which names were taken as undefined on it."""
     from collections import Counter
     seen, reasons, names, units, complete, with_names = set(), Counter(), set(), 0, 0, 0
+    exact_names, with_exact = set(), 0
     for scope in scopes:
         if not isinstance(scope, dict) or id(scope) in seen:
             continue
@@ -3633,9 +3725,14 @@ def summarize_build_assumptions(scopes) -> dict[str, Any]:
         if assumed:
             with_names += 1
             names.update(assumed)
+        if scope.get("exact_width_guards"):
+            with_exact += 1
+            exact_names.update(scope["exact_width_guards"])
     return {"units": units, "units_with_complete_build_evidence": complete, "incomplete_reasons": dict(reasons),
             "units_with_assumed_undefined": with_names, "assumed_undefined_names": sorted(names)[:40],
-            "assumed_undefined_total": len(names)}
+            "assumed_undefined_total": len(names),
+            # (R83) exact-width typedefs read past their undecided `#ifndef` guard
+            "units_with_exact_width_guards": with_exact, "exact_width_guard_names": sorted(exact_names)}
 
 
 def _unit_build_defines(context, path):

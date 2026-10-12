@@ -77,6 +77,9 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                 if evaluated.get("assumed_undefined"):
                     # (R17) #if verdicts this value rests on: names undefined on build-configuration evidence
                     item["assumed_undefined"] = list(evaluated["assumed_undefined"])
+                if evaluated.get("exact_width_guards"):
+                    # (R83) exact-width typedefs read past an undecided `#ifndef` guard that the function names
+                    item["exact_width_guards"] = list(evaluated["exact_width_guards"])
                 if evaluated.get("observed_only_pointees"):
                     # (R81 review I-R2-3) pointees set up only because the row observes them (it sets no value there)
                     item["observed_only_pointees"] = list(evaluated["observed_only_pointees"])
@@ -135,7 +138,9 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
               # (R17) derived where the text's #if verdicts rest on build-configuration evidence (names taken as undefined)
               "derived_on_assumed_undefined": 0,
               # (R81) derived in a row whose pointer parameter's pointee is set up only because the row observes it
-              "derived_on_observed_only_pointee": 0}
+              "derived_on_observed_only_pointee": 0,
+              # (R83) derived in a function that names an exact-width typedef read past its `#ifndef` guard
+              "derived_on_exact_width_guard": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
             item = seq.get("expected_evidence", {}).get(var) or {}
@@ -150,6 +155,8 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
                 counts["derived_in_stubbed_sequence"] += 1
             if status == "derived" and item.get("assumed_undefined"):
                 counts["derived_on_assumed_undefined"] += 1
+            if status == "derived" and item.get("exact_width_guards"):
+                counts["derived_on_exact_width_guard"] += 1
             if status == "derived" and item.get("observed_only_pointees"):
                 counts["derived_on_observed_only_pointee"] += 1
     return counts

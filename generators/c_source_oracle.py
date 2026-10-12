@@ -393,6 +393,8 @@ class _Interp:
         self.constants = scope["constants"] if scope.get("constants") is not None else {}
         self.globals = scope.get("globals") or {}
         self.arrays = scope.get("arrays") or {}
+        # (R83) multi-dimensional array objects' dimensions — an element access is bounded, not pointer arithmetic
+        self.array_shapes = scope.get("array_shapes") or {}
         # (R39) struct objects whose scalar members are objects of their own (``g.a`` in globals, ``g.b`` in arrays)
         self.struct_globals = scope.get("struct_globals") or {}
         self.macro_status = scope.get("macro_status") or {}
@@ -2504,6 +2506,9 @@ class _Interp:
             array = self.array_object(arg, raw, depth, state)
             iv = self.expression(state, index, raw, depth + 1)
             if array is None:
+                shaped = self.shaped_element(state, n, raw, depth, iv)
+                if shaped is not None:
+                    return shaped
                 # Not a directly named array object: a pointer, an array member or an array of aggregates — the
                 # element written may be any object reachable through it.
                 self.expression_base_effects_for_lvalue(state, arg, raw, depth)
@@ -2577,6 +2582,40 @@ class _Interp:
         if name in self.globals or name in self.arrays or name in (self.scope.get("unresolved_globals") or {}):
             return name
         return ""
+
+    def shaped_element(self, state, n, raw, depth, last):
+        """(R83) ``t[i][j][k]`` — an element of a multi-dimensional array object the unit declares (`array_shapes`), one
+        index per dimension: that object and no other when every index lies inside its dimension. The object is no
+        modeled one (a read is unknown, a write leaves it unknown — ``base``), but the access is no pointer arithmetic
+        that may leave it (KJPDS02_PV `s_SetPWMTableValue`: ``s16g_…Table[roll][pitch][pos] = v`` on every table path was a
+        possible UB, so the scenario search reached those paths only uncleanly and no row took table 1 or 2). A known
+        index outside its dimension is undefined (C11 J.2), an unknown one may be (``index_unknown``, as for one
+        dimension). None — as before — for a sub-array (``t[i]`` decays to a pointer), a local or parameter of the name,
+        a macro. ``last``: the last index's value — the caller evaluated it."""
+        indices = []
+        node = n
+        while node is not None and node.type == "subscript_expression":
+            indices.append(node.child_by_field_name("index"))
+            node = node.child_by_field_name("argument")
+            while node is not None and node.type == "parenthesized_expression" and len(_named(node)) == 1:
+                node = _named(node)[0]
+        if node is None or node.type != "identifier" or None in indices:
+            return None
+        name = _text(node, raw)
+        shape = self.array_shapes.get(name)
+        info = self.lookup(name)
+        if shape is None or name in self.macro_status or (info is not None and not info.get("extern")) \
+                or len(indices) != len(shape["dims"]):
+            return None
+        values = [self.expression(state, x, raw, depth + 1) for x in reversed(indices[1:])] + [last]   # outermost first
+        known = [None if isinstance(v.v, Unknown) or v.t is None else int(v.v) for v in values]
+        if any(k is not None and (k < 0 or (d is not None and k >= d)) for k, d in zip(known, shape["dims"], strict=True)):
+            raise Unsupported("undefined_behavior:array_index_out_of_bounds")
+        if None in known:
+            state.possible_ub.add("index_unknown")
+            v = values[known.index(None)]
+            return ("base", name, "index_unknown:" + (v.v.reason if isinstance(v.v, Unknown) else "type"))
+        return ("base", name, "array_element_unmodeled:" + name)
 
     def array_object(self, arg, raw, depth, state=None):
         """(key base, element type, length, volatile) of a directly named array; None otherwise."""
@@ -3776,6 +3815,67 @@ def _written(state, name, interp=None):
     return (pointee[0] if pointee is not None else key) in state.store
 
 
+def _signature_types(fn, raw: bytes, body: bytes) -> bytes:
+    """(review R83 W-R5-1) The type text of a function definition's return and of each parameter its body names (by the
+    parameter's identifier) — the names only, never the parameters' own names."""
+    words = set(re.findall(rb"[A-Za-z_]\w*", body))
+    out = []
+    t = fn.child_by_field_name("type")
+    if t is not None:
+        out.append(raw[t.start_byte:t.end_byte])
+    decl = fn.child_by_field_name("declarator")
+    while decl is not None and decl.type != "function_declarator":
+        decl = decl.child_by_field_name("declarator")
+    plist = decl.child_by_field_name("parameters") if decl is not None else None
+    for prm in plist.named_children if plist is not None else ():
+        if prm.type != "parameter_declaration":
+            continue
+        d = prm.child_by_field_name("declarator")
+        while d is not None and d.type != "identifier":
+            d = d.child_by_field_name("declarator")
+        pt = prm.child_by_field_name("type")
+        if d is not None and pt is not None and raw[d.start_byte:d.end_byte] in words:
+            out.append(raw[pt.start_byte:pt.end_byte])
+    return b" ".join(out)
+
+
+def _exact_width_uses(scope: dict[str, Any], body: bytes, fn_name: str, signature: bytes = b"") -> set[str]:
+    """(R83, review W3 · W-R2-3 · W-R3-4) The exact-width typedefs read past their `#ifndef` guard that a function's text
+    body uses — or its return type, or the declared type of a parameter the body names (``signature``, review W-R5-1):
+    the name, an alias of it (TPE_ErrCode), or an object of a type that rests on it — a global (a struct's
+    member ``g.a`` by the struct's name, so any member counts: generous), an array (const tables too), the pointee of a
+    pointer parameter the body names (any member). Not seen: a use only inside a macro body or a callee, a const scalar
+    (a lookup would resolve every word of the body as a constant and record the failures in the shared scope), a stub's
+    declared return type — the build-assumption summary counts every unit that read such a typedef."""
+    if not scope.get("exact_width_guards"):
+        return set()
+    words = {w.decode() for w in re.findall(rb"[A-Za-z_]\w*", body)}
+    # the signature's type names (return type, used parameters' types) — types only, so no parameter's name enters
+    type_words = words | {w.decode() for w in re.findall(rb"[A-Za-z_]\w*", signature)}
+
+    def mark(t: Any) -> str | None:
+        return t.get("exact_width_guard") if isinstance(t, dict) else None
+
+    out: set[str] = set()
+    types = scope.get("types") or {}
+    for table in (scope.get("globals") or {}, scope.get("arrays") or {}):
+        for n, rec in table.items():
+            if n.split(".", 1)[0] in words and isinstance(rec, dict) and (m := mark(rec.get("type"))):
+                out.add(m)
+    for w in type_words:
+        if (m := mark(types.get(w))):
+            out.add(m)
+    for p in ((scope.get("pointer_params") or {}).get(fn_name) or []):
+        layout = (scope.get("pointee_types") or {}).get(" ".join(
+            w for w in str(p.get("type") or "").split() if w not in {"const", "volatile"})) or {}
+        if p.get("name") in words:
+            for part in ("members", "arrays", "pointers"):
+                for rec in (layout.get(part) or {}).values():
+                    if isinstance(rec, dict) and (m := mark(rec.get("type"))):
+                        out.add(m)
+    return out
+
+
 def _scope_assumptions(unit: dict[str, Any]) -> list[str]:
     """What the project preprocessing assumed for this unit — carried into every derived value (review round 5 W-a):
     toolchain headers taken as compiler-supplied, the typedef testimony the integer widths rest on."""
@@ -3830,6 +3930,21 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             raise Unsupported("tree_sitter_unavailable")
         raw = source.encode()
         _root, fn, shared = _parsed_function(parser, raw, str(unit.get("name") or ""), scope)
+        # (R83, review W3 · W-R2-3) the exact-width typedefs read past their `#ifndef` guard that this function's text
+        #   uses — by the name, an alias of it (TPE_ErrCode) or a global declared with it; a use only inside a macro body
+        #   or a callee is not seen (the build-assumption summary counts every unit that read such a typedef)
+        # (review R83 I-R4-2a · W-R5-1) the body, the return type, and the declared types of the parameters the body
+        #   names — the declarator names every parameter whether the body uses it or not
+        _body = fn.child_by_field_name("body") or fn
+        _text_body = raw[_body.start_byte:_body.end_byte]
+        exact = sorted(_exact_width_uses(scope, _text_body, str(unit.get("name") or ""),
+                                         _signature_types(fn, raw, _text_body)))
+        if exact:
+            base["assumptions"] = list(base["assumptions"]) + [
+                "the tree's typedef of " + ", ".join(exact) + " is read past its undecided `#ifndef` guard: a header "
+                "outside the tree that made the name a macro would name the implementation's exact-width type of the "
+                "same width and signedness (C11 7.20.1.1), which computes alike"]
+            base["exact_width_guards"] = exact
     except Exception as exc:  # noqa: BLE001 — never raise into the generator; the reason is the record
         reason = str(exc) if isinstance(exc, Unsupported) else f"oracle_exception:{type(exc).__name__}"
         return [{**base, "status": "unsupported", "reason": reason,

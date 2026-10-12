@@ -1390,6 +1390,20 @@ def _pointee_core(text):
     return " ".join(w for w in str(text or "").split() if w not in {"const", "volatile"})
 
 
+def _pointer_member_input(scope, fn_name, name):
+    """(R83) Whether row input ``name`` names a one-level pointer member of a pointer parameter's pointee by itself
+    (``ReqMsg[0].data`` — the SwUDS lists ``ReqMsg->data``): its column says the harness allocated that member a buffer
+    (R82 — the value is no pointer value), so a run without it has no buffer there."""
+    m = _POINTEE_INPUT_RE.fullmatch(str(name).strip())
+    if not m or m.group(3) is not None or not m.group(2):
+        return False
+    params = _pointer_params(scope, fn_name)
+    if m.group(1) not in params:
+        return False
+    layout = ((scope or {}).get("pointee_types") or {}).get(_pointee_core(params[m.group(1)])) or {}
+    return isinstance((layout.get("pointers") or {}).get(m.group(2)), dict)
+
+
 def _pointee_input(scope, fn_name, name, buffers=True):
     """(R40) ``(type, typename, volatile)`` of a row input naming a pointer parameter's pointee (``p[0]`` · ``p[0].a`` ·
     ``p[0].b[2]``) of function ``fn_name``, from the unit's pointee layout; None otherwise. Volatile: the member, or the

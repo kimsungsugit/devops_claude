@@ -32,6 +32,7 @@ from generators.mcdc_design import (
     search_limits,
 )
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
+from generators.scenario_rows import MAX_ATOMS as _SCENARIO_MAX_ATOMS
 from generators.scenario_rows import MAX_ROWS as _SCENARIO_MAX_ROWS
 from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, _at_home, find_scenarios
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
@@ -2356,7 +2357,7 @@ def is_extended_strategy(strategy: Any) -> bool:
     행(R78) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
     if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX, OBS_MCDC_PREFIX, SCENARIO_PREFIX,
-                     SCENARIO_FI_PREFIX)):
+                     SCENARIO_FI_PREFIX, STUB_APART_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2530,7 +2531,9 @@ SCENARIO_REPORT_KEYS = ("targets", "statements", "branches", "reached_clean", "r
                         "expose_local_best", "expose_budget_cut", "expose_runs", "expose_steps", "expose_duplicates",
                         "reached_by_exposing_rows", "expose_refused", "expose_error_cut", "expose_met_by_reach_rows",
                         # (R82) writes whose replaced value alone was unknown: named as a prior value · not namable
-                        "expose_prior_value_needed", "expose_prior_value_unnamed")
+                        "expose_prior_value_needed", "expose_prior_value_unnamed",
+                        # (R83) pointer members the rows name by themselves, held at one value in the search
+                        "harness_member_inputs")
 
 
 def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2556,7 +2559,7 @@ def summarize_scenario_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                not_searched=dict(Counter(str(r.get("status")).split(":", 1)[0] for r in reports
                                          if r.get("status") not in ("searched", None) and not r.get("error")
                                          and r.get("outside_design_enum_status") != "searched")),
-               cap_per_unit=_SCENARIO_MAX_ROWS)
+               cap_per_unit=_SCENARIO_MAX_ROWS, atoms_cap=_SCENARIO_MAX_ATOMS)
     return out
 
 
@@ -2570,6 +2573,7 @@ def _scenario_domains(unit: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, An
         _apply_design_range,
         _element_input,
         _pointee_input,
+        _pointer_member_input,
         _scope_domain,
         _stub_return_domain,
     )
@@ -2588,6 +2592,16 @@ def _scenario_domains(unit: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, An
             d = _stub_return_domain(v, scope, own)
             if d:
                 domains[v] = d
+            continue
+        if _pointer_member_input(scope, own, v):
+            # (R83) a pointer member the rows name by itself (`ReqMsg[0].data`): a row that sets it has the harness give
+            #   that member a buffer (R82), so the search runs with it too — one value, the design middle the other rows
+            #   put there (KJPDS02_PV `sf_LinUdsSecurityAccess`: without it `&ReqMsg->data[2]` was through an unknown
+            #   pointer — a possible UB on every SendKey path — and the search reached them only uncleanly, so no row)
+            #   (review R83 I5) only where the rows put a value — a member of unknown type stays blank there and here
+            mid = (ctx.get("var_bounds", {}).get(v) or {}).get("mid")
+            if isinstance(mid, int) and not isinstance(mid, bool) and v not in set(ctx.get("unknown") or ()):
+                domains[v] = {"values": [mid], "harness_member": True}
             continue
         found = _element_input(scope, v)
         kind = ("array_element_declaration", "global") if found is not None else None
@@ -2681,7 +2695,8 @@ def _append_scenario_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     found = find_scenarios(unit, domains, outputs, [s.get("inputs") or {} for s in sequences])
     # the second search's keys are there from the start — a unit it skips reports 0, not nothing
     unit["scenario_rows"] = {**found["report"], **dict.fromkeys(
-        [k for k in SCENARIO_REPORT_KEYS if k.startswith("outside_design_")], 0)}
+        [k for k in SCENARIO_REPORT_KEYS if k.startswith("outside_design_")], 0),
+        "harness_member_inputs": sum(1 for d in domains.values() if isinstance(d, dict) and d.get("harness_member"))}
     for i, row in enumerate(found["rows"]):
         _scenario_row(sequences, row, f"{SCENARIO_PREFIX}{i}", outputs, var_types, {}, {})
 
@@ -2746,7 +2761,8 @@ def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
                                                 # (review R80 I-R5-1) an enum element / pointer target the enum
                                                 #   search takes is not counted here too
                                                 and v not in enum_wide and v not in enum_why
-                                                and (isinstance(d, list) or (isinstance(d, dict) and d.get("values")))))
+                                                and (isinstance(d, list) or (isinstance(d, dict) and d.get("values")
+                                                                             and not d.get("harness_member")))))
     first_ran = report.get("status") == "searched"
     if not (wide or enum_wide) or (first_ran and int(report.get("reached_clean") or 0) >= int(report.get("targets") or 0)):
         return
@@ -3306,7 +3322,7 @@ def resolve_seq_gen_method(strategy: Any) -> str:
     """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
     s = str(strategy or "").strip()
     if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX) \
-            or s.startswith(OBS_MCDC_PREFIX) or s.startswith(SCENARIO_PREFIX):
+            or s.startswith(OBS_MCDC_PREFIX) or s.startswith(SCENARIO_PREFIX) or s.startswith(STUB_APART_PREFIX):
         return _GEN_EQUIV
     return _GEN_BOUNDARY
 
@@ -4108,6 +4124,15 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         del sequences[j:]
         if isinstance(unit.get("scenario_rows"), dict):
             unit["scenario_rows"]["outside_design_error"] = type(exc).__name__
+    # (R83) 피호출 값 구별 행 — 맨 끝에(다른 탐색은 이 행들 없이 돈다; 어느 행이든 출처가 될 수 있다). 선택 확장이라 실패해도
+    #   문서는 만든다(그 unit 만 사유를 남긴다).
+    h = len(sequences)
+    try:
+        _append_stub_apart_rows(unit, sequences, ctx)
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 피호출 값 구별 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        del sequences[h:]
+        unit["stub_apart"] = {"error": type(exc).__name__, "rows": 0}
     if len(sequences) > n:
         sequences[n:] = apply_sequence_evidence(unit, sequences[n:], written=True)
     if (unit.get("observable_mcdc") or {}).get("searched"):
@@ -4117,6 +4142,230 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
             _logger.warning("SUTS 출력 관측 MC/DC 쌍 확인 실패(%s): %s", unit.get("name"), exc, exc_info=True)
             unit["observable_mcdc"]["confirm_error"] = type(exc).__name__
     return sequences
+
+
+# (R83) 피호출 값 구별 행 — 두 피호출 stub 이 같은 값을 돌려주는 행은 그 값을 받은 출력에서 어느 피호출의 값이 갔는지 · 어느
+#   갈래를 탔는지 가르지 못한다(KJPDS02_PV `s_FanRecircurationCheck`: 창 닫힘 · 열림 보정 단계를 돌려주는 두 stub 이 모든 행에서
+#   같은 값(0 · 127)이라 `u8t_WindowsClosed == u8g_ON` 을 `!=` 로 바꿔도 출력이 같았다; HDPDM01 `s_ApiOut_u8bit_DataUpdate_A`:
+#   두 변환 stub 이 같은 값이라 `u8t_Temp = u8s_ApiOut_Vsup_Conv();` 가 빠져도 같았다). 정본은 stub 마다 다른 값을 둔다. 기존 행의
+#   값은 바꾸지 않는다(리뷰 R83 C1 — 확장 문서는 기본 문서의 행을 같은 값으로 담는다, R75): 같은 값을 받은 stub 을 서로 다른 값으로
+#   옮긴 **동반 행**을 더한다 — 같은 피호출들이 불리는(같은 경로의) 행이고 갈라 놓은 stub 을 그 경로가 부를 때만, 불리는 피호출
+#   묶음마다 하나.
+STUB_APART_PREFIX = "STUB_APART_"
+MAX_STUB_APART_ROWS = 8        # companion rows per function
+MAX_STUB_APART_SOURCES = 64    # source rows tried per function (two oracle runs each)
+
+
+def _apart_value(domain: Any, value: int, step: int, taken: set) -> Optional[int]:
+    """(R83) A value of ``domain`` other than ``value`` and every value in ``taken``: in a range the nearest by ``step``
+    (``value+step``, ``value-step``, then a step wider); in a value list the next members after ``value`` — the design's
+    values only, never one outside the list (review R83 W2); None when the domain is unknown or has none left. ``step``
+    0: ``value`` itself when the domain holds it (a membership test)."""
+    if isinstance(domain, tuple) and len(domain) == 2 and all(isinstance(x, int) for x in domain):
+        lo, hi = domain
+        if step == 0:
+            return value if lo <= value <= hi and value not in taken else None
+        for d in range(step, step + 8):
+            for x in (value + d, value - d):
+                if lo <= x <= hi and x not in taken:
+                    return x
+        return None
+    if isinstance(domain, (list, set, frozenset)):
+        vals = sorted({int(v) for v in domain if isinstance(v, int) and not isinstance(v, bool)})
+        if step == 0:
+            return value if value in vals and value not in taken else None
+        order = vals[vals.index(value) + 1:] + vals[:vals.index(value)] if value in vals else vals
+        return next((x for x in order if x not in taken), None)
+    return None
+
+
+def _run_path(r: Dict[str, Any]) -> Tuple[tuple, tuple]:
+    """(R83) The path of a modeled run as far as a row shows it: the callees it calls (stubs) and the objects it writes
+    (HDPDM01 `s_ApiOut_u8bit_DataUpdate_A` calls the same three stubs on every row — the valid arm writes the outputs, the
+    invalid one the error count) — with whether each written value is known (review R83 I-R4-3: a move that flips a
+    decision between two arms writing the same object turns the value known or unknown)."""
+    return (tuple(sorted(r.get("stubs") or ())),
+            tuple(sorted((str(k), bool(v)) for k, v in (r.get("written") or {}).items())))
+
+
+def _append_stub_apart_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], ctx: Dict[str, Any]) -> None:
+    """(R83, 확장 프로파일) 피호출 값 구별 행. 행 중(기준 행 순서 — FI 행 · 설계 범위 밖 값을 가진 행은 출처가 아니다, R31 기준 행과
+    같은 규칙) 피호출 stub 반환값 둘 이상이 같은 값(각자 경계 행 도메인 안)인 행마다, 그 묶음의 첫 stub 은 두고 나머지를 서로 다른
+    값으로 옮긴 벡터(`_apart_value` — 도메인 안, 값 목록이면 목록의 값)를 원래 행과 함께 원본 코드 모델로 돌려, (1) 같은 경로
+    (`_run_path` — 부르는 피호출 · 쓰는 객체)이고 (2) 갈라 놓은 묶음이 알려 주는 것이 있으면 — 이 경로가 그 묶음의 stub 을 둘
+    이상 부르거나, 하나를 부르고 다른 stub 을 다른 행의 경로가 부른다(갈래가 바뀌면 그 값이 나온다) — 동반 행으로 더한다. 경로마다
+    하나(`MAX_STUB_APART_ROWS` 상한, 출처 후보 `MAX_STUB_APART_SOURCES` 상한, 16 개씩 돌리고 행 상한이 차면 멈춘다). enum · 타입을
+    모르는 stub 은 옮기지 않는다. 기존 행은 바꾸지 않는다. 기대값은 뒤의 oracle 이 모든 행과 똑같이 도출한다. 요약은
+    `unit["stub_apart"]` — 출처 후보는 행 · 갈라도 알려 주는 것 없음 · 경로가 바뀜 · 도출 못 함 · 같은 경로에 이미 있음 · 행 상한
+    중 하나로 끝난다(합이 출처 수)."""
+    from generators.boundary_rows import _as_int
+    from generators.c_source_oracle import evaluate_outputs
+    var_types = ctx["var_types"]
+    unknown = set(ctx.get("unknown") or ())
+    stubs = [v for v in ctx["input_vars"] if str(v).endswith(f"() {_RETURN_VAR}")
+             and var_types.get(v) != _ENUM_TYPE and v not in unknown]
+    report: Dict[str, Any] = {"stubs": len(stubs), "sources": 0, "rows": 0, "uninformative": 0, "path_changed": 0,
+                              "underived": 0, "same_path": 0, "cut_rows": 0, "cut_sources": 0, "duplicates": 0,
+                              "no_value_stubs": 0}
+    unit["stub_apart"] = report
+    if len(stubs) < 2:
+        report["status"] = "fewer_than_two_stubs"
+        return
+    var_bounds = ctx["var_bounds"]
+    domains = _boundary_domains(unit, ctx["input_vars"], var_types, var_bounds, unknown, ctx.get("enum_sets"))
+    outputs = _scenario_outputs(ctx, sequences)
+    src = unit.get("bounds_source") or {}
+    # (review R83 W-R2-1) the design ranges a source row stays inside — R31's base rule (`_append_robustness_rows`)
+    ranged = [v for v in ctx["input_vars"]
+              if src.get(v) in ("uds_range", "hsis_range", "uds_values") and v not in unknown
+              and isinstance((var_bounds.get(v) or {}).get("min"), int)
+              and isinstance((var_bounds.get(v) or {}).get("max"), int)]
+
+    def ints(inputs: Dict[str, Any]) -> Optional[Dict[str, int]]:
+        out: Dict[str, int] = {}
+        for k, v in inputs.items():
+            n = _as_int(v)
+            if n is None:
+                return None
+            out[k] = n
+        return out
+
+    existing = {tuple(sorted(x.items())) for s in sequences if (x := ints(s.get("inputs") or {})) is not None}
+    cands: List[Tuple[Dict[str, Any], Dict[str, int], Dict[str, int], Dict[str, Tuple[int, int]], List[set]]] = []
+    for s in sorted(sequences, key=_base_rank):
+        if resolve_seq_test_method(s.get("strategy")) == _METHOD_FI:
+            continue                        # a robustness / FI row's point is its out-of-range value
+        vec = ints(s.get("inputs") or {})
+        if vec is None or any(u in vec and not var_bounds[u]["min"] <= vec[u] <= var_bounds[u]["max"] for u in ranged):
+            continue
+        groups: Dict[int, List[str]] = {}
+        for k in stubs:
+            # (a stub value outside its domain — a `BV_*_INV` row — is no value to tell apart)
+            if k in vec and _apart_value(domains.get(k), vec[k], 0, set()) == vec[k]:
+                groups.setdefault(vec[k], []).append(k)
+        if all(len(g) < 2 for g in groups.values()):
+            continue
+        if len(cands) >= MAX_STUB_APART_SOURCES:
+            report["cut_sources"] += 1
+            continue
+        new, taken, moved = dict(vec), {vec[k] for k in stubs if k in vec}, {}
+        apart: List[set] = []   # the colliding groups, each told apart on its own (review R83 W-R3-2)
+        for value, members in groups.items():
+            if len(members) > 1:
+                apart.append(set(members))
+            for step, k in enumerate(members[1:], 1):
+                x = _apart_value(domains.get(k), value, step, taken)
+                if x is None:
+                    report["no_value_stubs"] += 1
+                    continue
+                new[k] = x
+                taken.add(x)
+                moved[k] = (value, x)
+        if not moved:
+            continue
+        key = tuple(sorted(new.items()))
+        if key in existing:
+            report["duplicates"] += 1
+            continue
+        existing.add(key)
+        cands.append((s, vec, new, moved, apart))
+    report["sources"] = len(cands)
+    if not cands:
+        return
+    # the source rows run first (review R83 I-R3-1): which stubs the rows' runs call — the arm a changed decision may
+    #   take — is known before any move is judged, whatever the order; a move's own (virtual) run is no row's
+    sources = evaluate_outputs(unit, [c[1] for c in cands], [list(outputs)] * len(cands), written=True)
+    called_by_rows: set = {str(x) for r in sources for x in r.get("stubs") or ()}
+    for s in sequences:   # rows that already have evidence say which stubs their runs called (R14 `stubs`)
+        for ev in (s.get("expected_evidence") or {}).values():
+            if isinstance(ev, dict):
+                called_by_rows.update(str(x) for x in ev.get("stubs") or ())
+    paths: set = set()
+    suffix = f"() {_RETURN_VAR}"
+
+    def derived(r: Dict[str, Any]) -> set:
+        return {o for o, x in (r.get("outputs") or {}).items() if "value" in (x or {})}
+
+    for start in range(0, len(cands), 16):
+        chunk = cands[start:start + 16]
+        if report["rows"] >= MAX_STUB_APART_ROWS:
+            report["cut_rows"] += len(chunk)
+            continue
+        moves = evaluate_outputs(unit, [c[2] for c in chunk], [list(outputs)] * len(chunk), written=True)
+        for i, (s, _vec, new, moved, apart) in enumerate(chunk):
+            ra, rb = sources[start + i], moves[i]
+            # (review R83 W-R3-1) a source that forks (its path is a union, its stubs too) or derives nothing, or a move
+            #   that loses an output the source derived, makes no companion — its expectation would not stand
+            # (review R83 I-R4-5) a failed record of the written objects leaves no path to compare — not a weaker key
+            if ra.get("status") != "supported" or rb.get("status") != "supported" or int(ra.get("paths") or 1) > 1 \
+                    or ra.get("written_error") or rb.get("written_error") \
+                    or not derived(ra) or not derived(ra) <= derived(rb):
+                report["underived"] += 1
+                continue
+            path = _run_path(ra)
+            if path != _run_path(rb):
+                report["path_changed"] += 1   # a moved stub decided the path — no longer the same row told apart
+                continue
+            # (review R83 I-R2-1 · W-R3-2) what telling a group apart shows, group by group: two of its stubs this path
+            #   calls, or one it calls and another a row's path calls (the arm a changed decision takes — `doors() ==
+            #   ON` → the closed level, the open level apart); a group no path calls but one stub of shows nothing
+            def informative(group: set) -> bool:
+                # (review R83 W-R4-1) by the values the move left: a stub with no value to move stays equal to the one
+                #   it collided with — telling those two apart did not happen
+                here = {k for k in group if k[:-len(suffix)] in path[0]}
+                there = {k for k in group - here if k[:-len(suffix)] in called_by_rows}
+                return any(new[a] != new[b] for a in here for b in here | there if a != b)
+
+            if not any(informative(g) for g in apart):
+                report["uninformative"] += 1
+                continue
+            if path in paths:
+                report["same_path"] += 1
+                continue
+            if report["rows"] >= MAX_STUB_APART_ROWS:
+                report["cut_rows"] += 1
+                continue
+            paths.add(path)
+            oa, ob = ra.get("outputs") or {}, rb.get("outputs") or {}
+            # (review R83 I-R4-3) an output only the move derives changed too
+            changed = [o for o in outputs if "value" in (ob.get(o) or {})
+                       and ("value" not in (oa.get(o) or {}) or oa[o]["value"] != ob[o]["value"])]
+            blank = [v for v in ctx["input_vars"] if v not in (s.get("inputs") or {})]
+            shown = ", ".join(f"{k}={a}→{x}" for k, (a, x) in list(moved.items())[:4]) + (
+                f" 외 {len(moved) - 4}" if len(moved) > 4 else "")
+            sequences.append({
+                "seq_num": len(sequences) + 1,
+                "inputs": {k: (_format_test_value(new[k], var_types.get(k, "uint8_t")) if k in moved else v)
+                           for k, v in (s.get("inputs") or {}).items()},
+                "expected": {o: f"{VERIFY_PREFIX} stub_apart" for o in outputs},
+                "strategy": f"{STUB_APART_PREFIX}{report['rows']}", "tc_profile": TC_PROFILE_EXTENDED,
+                "description": (f"피호출 값 구별 행: 시퀀스 {s.get('seq_num')}({s.get('strategy')})에서 같은 값이던 피호출 stub "
+                                f"반환값을 서로 다른 값으로 옮긴 행 — {shown}. 같은 경로(부르는 피호출 · 쓰는 객체와 그 값을 아는지가 "
+                            "같다 — 반환값은 경로에 넣지 않는다)에서 "
+                                + (f"출력 {', '.join(changed[:4])} 이 원래 행과 달라진다" if changed else
+                                   "쓴 출력은 원래 행과 같고, 이 경로가 부르는 stub 의 값이 다른 갈래가 부르는 stub 과 갈린다")
+                                + ": 원래 행으로는 그 출력에 어느 피호출의 값이 갔는지 · 어느 갈래를 탔는지 가를 수 없었다(정본도 "
+                                "stub 마다 다른 값을 둔다). 원래 행은 그대로다"
+                                + (f" · 원래 행이 비운 칸은 그대로 비움: {', '.join(blank[:4])}"
+                                   + (f" 외 {len(blank) - 4}" if len(blank) > 4 else "") if blank else "")
+                                + " — 기대값은 소스 oracle 도출 · 미실행"),
+                "stub_apart": {"from_sequence": s.get("seq_num"), "moved": {k: [a, x] for k, (a, x) in moved.items()},
+                               "outputs_changed": changed[:8]},
+            })
+            report["rows"] += 1
+
+
+def summarize_stub_apart(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R83) unit 보고서 합계 — 품질 보고서 `stub_apart`(생성 공시가 읽는다)."""
+    reports = [u.get("stub_apart") for u in units if isinstance(u.get("stub_apart"), dict)]
+    out: Dict[str, Any] = {k: sum(int(r.get(k) or 0) for r in reports)
+                           for k in ("sources", "rows", "uninformative", "path_changed", "underived", "same_path",
+                                     "cut_rows", "cut_sources", "duplicates", "no_value_stubs")}
+    out.update(units_with_rows=sum(1 for r in reports if r.get("rows")),
+               units_with_two_stubs=sum(1 for r in reports if int(r.get("stubs") or 0) >= 2),
+               errors=sum(1 for r in reports if r.get("error")), cap_per_unit=MAX_STUB_APART_ROWS,
+               sources_per_unit=MAX_STUB_APART_SOURCES)
+    return out
 
 
 # (R60) 출력 관측 MC/DC 쌍 — `generators.observable_mcdc`. 행 이름은 `MCDC_` 로 시작하지 않는다(그 접두는 MC/DC 설계 벡터
@@ -5161,7 +5410,7 @@ def render_row_io(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict
             if (ev or {}).get("status") == "derived":
                 # (리뷰 I1) 확정의 근거(계산 근거·가정·stub·해석한 callee)는 떼어 낸다 — 미상 칸이 근거를 말하면 안 된다
                 for k in ("basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only",
-                          "observed_only_pointees"):   # (review R81 I-R3-2)
+                          "observed_only_pointees", "exact_width_guards"):   # (review R81 I-R3-2 · R83 I-R2-4)
                     ev.pop(k, None)
                 ev.update(status="unknown", oracle_kind="none", reason=reason)
                 seq.setdefault("expected", {})[var] = f"{VERIFY_PREFIX} {reason}"
@@ -7900,6 +8149,8 @@ def generate_suts(
                                 for k in ("mcdc_rows", "rows_with_blanks", "rows", "not_fillable", "duplicates", "pruned")}
         quality["mcdc_fill"]["units_with_rows"] = sum(1 for f in _fills if f.get("rows"))
         quality["mcdc_fill"]["errors"] = sum(1 for f in _fills if f.get("error"))
+        # (R83) 피호출 값 구별 행 — 같은 값을 돌려주던 stub 을 서로 다른 값으로 옮긴 동반 행
+        quality["stub_apart"] = summarize_stub_apart(units)
         # (R31) 설계 범위 밖 강건성 행 — 직접 비교 상수가 설계 범위 밖·타입 안인 입력, 상한에 잘린 점, 실패 unit
         quality["robustness_rows"] = summarize_robustness_rows(units)
         # (R78) 동작 시나리오 행 — 닿은 문장 · 분기 결과의 분모, 못 닿은 것, 예산 · 상한에 잘린 것
