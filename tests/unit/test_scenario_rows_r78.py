@@ -445,6 +445,15 @@ def test_the_search_is_deterministic():
     assert sr.find_scenarios(unit, DIAG, DIAG_OUT) == sr.find_scenarios(_unit("diag"), DIAG, DIAG_OUT)
 
 
+def test_the_exposing_phase_spends_what_it_did_before_r84(monkeypatch):
+    # (review R84 C1) only R84's propagating search ranks each start once; the searches before it keep a start equal to
+    #   a row twice (its second climb a cached no-op) — dropping it here took a third start: 179 runs, not 110
+    monkeypatch.setattr(sr, "MAX_RUNS", 5)
+    covered = [{"g_st": 9, "g_sts": i, "g_brk": 9, "g_spd": 0, "g_tm": 0} for i in range(10)]
+    rep = sr.find_scenarios(_unit("diag"), DIAG, DIAG_OUT, covered=covered)["report"]
+    assert (rep["expose_runs"], rep["expose_steps"]) == (110, 1818)   # ecffd058
+
+
 def test_budgets_cut_and_say_so(monkeypatch):
     monkeypatch.setattr(sr, "MAX_RUNS", 3)
     monkeypatch.setattr(sr, "MAX_EXPOSE_RUNS", 0)    # (R79) the exposing phase's rows would reach the cut targets
@@ -1034,7 +1043,7 @@ def test_the_second_search_labels_each_row_by_what_it_carries(monkeypatch):
     real = suts_mod.find_scenarios
 
     def second(unit, domains, outputs, existing=None, **kw):
-        if "home" not in kw:
+        if "home" not in kw or kw.get("propagate"):   # (R84) the propagating search's own calls go through
             return real(unit, domains, outputs, existing, **kw)
         row = {"target_kind": "statement", "target_line": 1, "target_text": "x;", "target_outcome": None,
                "targets_reached": 1, "outputs_derived": 1}

@@ -1668,6 +1668,48 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 이 단계 오류로 동반 행 없이 둔 unit {_show(_int(sa, 'errors'))} — 로그에 traceback 이 있다."
                if _int(sa, "errors") else ""),
             tone=_tone(bool(_int(sa, "errors")))))
+    # (R84) 결함 전파 행 — 확장 프로파일에만 있다
+    pr = qr.get("propagation_rows")
+    if isinstance(pr, dict) and (_int(pr, "searched") or _int(pr, "errors")):
+        out.append(_item(
+            "suts_propagation_rows", "결함 전파 행",
+            f"{_show(_int(pr, 'rows'))}행 + 설계 범위 밖 FI {_show(_int(pr, 'fi_rows'))}행 (전파 목표 "
+            f"{_show(_int(pr, 'targets'))} · unit {_show(_int(pr, 'units_with_rows'))}/{_show(_int(pr, 'searched'))})",
+            "결함이 드러나는 값으로 그 자리를 실행해도 바뀐 값이 출력까지 가지 않으면 그 결함은 보이지 않는다(다른 갈래가 쓰는 값을 "
+            "행이 이미 가짐 · 0 이나 같은 두 입력의 차로 곱해짐 · 두 갈래가 같은 값을 넘김). 자리마다 — 결함이 드러나는 값 목표(경계 · "
+            f"쓰기 · 연산)와 결정(조건 {_show(_int(pr, 'atoms_cap'))}개 이하로 읽힌 것)의 변수를 읽는 비교(그 조건이 결정을 "
+            "가를 때 반대 결과 — 관측 가능 "
+            "MC/DC; 포인터 비교처럼 모델이 피연산자를 기록하지 않는 비교는 '모름') — 원본 코드 모델 실행을 그 자리의 "
+            "값만 바꿔 한 번 더 돌려(데이터 상태 섭동: 비교 뒤집기, 경계 목표는 두 값이 같을 때만 · 쓰기 빼기 · `+` `-` `*` 오른쪽 "
+            "피연산자를 항등원 · `/` `%` 한 칸) 두 실행이 함께 도출한 출력이 달라지는 행을 찾았다. 측정 도구의 변이 목록은 쓰지 "
+            "않지만 같은 종류의 결함을 겨냥하므로, 이 행으로 늘어난 변이 판별은 겨냥하지 않은 상수 변이로 따로 본다. 이미 있던 행이 "
+            f"만족한 목표는 행을 더하지 않는다(목표마다 행 {_show(_int(pr, 'check_per_target'))}개 · 탐색마다 섭동 실행 "
+            f"{_show(_int(pr, 'check_runs_cap'))} · 단계 {_show(_int(pr, 'check_steps_cap'))} 까지 확인 — 상한에 끊긴 확인(설계 범위 안 탐색 "
+            f"{_show(_int(pr, 'check_capped'))} · 밖 탐색 {_show(_int(pr, 'outside_design_check_capped'))})은 그 목표의 탐색에서 "
+            "남은 행부터 탐색 예산으로 이어 확인했다(그렇게 만족: 안 탐색 "
+            f"{_show(_int(pr, 'check_late'))} — '이미 있던 행이 만족' 에 든다 · 밖 탐색 "
+            f"{_show(_int(pr, 'outside_design_check_late'))} — 첫 탐색이 이미 확인한 목표면 '이미 있던 행이 만족', 아니면 '이 단계의 "
+            "행이 만족' 에 든다); 확인한 행 "
+            f"{_show(_int(pr, 'checked_rows'))} · 그 섭동 실행 단계 {_show(_int(pr, 'check_steps'))} — 탐색 예산 밖이다). 설계 범위 "
+            "안에서 먼저 찾고(그 행을 다음 탐색의 확인에서 맨 앞에 둔다), 못 찾은 목표만 설계 범위가 선언 타입보다 "
+            "좁은 입력 · 값 목록 입력의 열거자 밖 값으로 넓혀 다시 찾았다(설계 범위 밖 값이 남은 행은 FI — 그 값을 적는다; 넓힌 "
+            f"입력 {_show(_int(pr, 'outside_design_inputs'))} · 그 탐색이 만족한 목표 {_show(_int(pr, 'outside_design_met'))}). "
+            f"목표 {_show(_int(pr, 'targets'))} = 이미 있던 행이 만족 {_show(_int(pr, 'covered_before'))} + 이 단계의 행이 만족 "
+            f"{_show(_int(pr, 'met_by_rows'))} + 못 만족 {_show(_int(pr, 'not_met'))}(국소 최적 {_show(_int(pr, 'local_best'))} · "
+            f"예산 {_show(_int(pr, 'budget_cut'))} · 모델이 그 자리 값을 모름 {_show(_int(pr, 'unmodeled'))} · 행 상한 "
+            f"{_show(_int(pr, 'cut'))} · 오류 {_show(_int(pr, 'error_cut'))} · 실행 거부 {_show(_int(pr, 'refused'))}; 그중 자리는 "
+            f"드러났는데 어떤 한 입력 이동으로도 출력이 바뀌지 않은 것 {_show(_int(pr, 'infected_only'))} — 두 입력을 함께 옮겨야 "
+            "하거나 출력에 닿지 않는 자리). "
+            f"탐색 실행 {_show(_int(pr, 'runs'))} · 섭동 실행 {_show(_int(pr, 'perturbed_runs'))}(확인 포함; 깨끗한 실행이 아니라 "
+            f"아무것도 보여 주지 않은 것 {_show(_int(pr, 'perturbed_refused'))} · 단계 예산에 멈춘 것(확인에서 멈춘 것은 탐색에서 "
+            "다시 돈다) "
+            f"{_show(_int(pr, 'perturbed_budget'))}) · unit 당 {_show(_int(pr, 'cap_per_unit'))}행 상한 · 예산 소진 unit "
+            f"{_show(_int(pr, 'budget_exhausted'))}. 기대값은 바꾸지 않은 실행으로 다른 행과 같은 oracle 이 도출한다(미실행)."
+            + (f" 이 단계 오류로 전파 행 없이 둔 unit {_show(_int(pr, 'errors'))} — 로그에 traceback 이 있다."
+               if _int(pr, "errors") else "")
+            + (f" 열거자 밖 값 넓힘이 실패해 설계 범위 밖 탐색을 범위 입력만으로 한 unit {_show(_int(pr, 'enum_errors'))} — "
+               "로그에 traceback 이 있다(설계 범위 안 행은 그대로)." if _int(pr, "enum_errors") else ""),
+            tone=_tone(bool(_int(pr, "errors")) or bool(_int(pr, "budget_exhausted")) or bool(_int(pr, "enum_errors")))))
     # (R31) 설계 범위 밖 강건성 행 — 확장 프로파일에만 있다
     rr = qr.get("robustness_rows")
     if isinstance(rr, dict):

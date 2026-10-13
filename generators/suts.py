@@ -33,6 +33,10 @@ from generators.mcdc_design import (
 )
 from generators.safety_marks import resolve_safety_related as _resolve_safety_related
 from generators.scenario_rows import MAX_ATOMS as _SCENARIO_MAX_ATOMS
+from generators.scenario_rows import MAX_PROPAGATE_CHECK as _PROPAGATE_MAX_CHECK
+from generators.scenario_rows import MAX_PROPAGATE_CHECK_RUNS as _PROPAGATE_MAX_CHECK_RUNS
+from generators.scenario_rows import MAX_PROPAGATE_CHECK_STEPS as _PROPAGATE_MAX_CHECK_STEPS
+from generators.scenario_rows import MAX_PROPAGATE_ROWS as _PROPAGATE_MAX_ROWS
 from generators.scenario_rows import MAX_ROWS as _SCENARIO_MAX_ROWS
 from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, _at_home, find_scenarios
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
@@ -2357,7 +2361,7 @@ def is_extended_strategy(strategy: Any) -> bool:
     행(R78) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
     s = str(strategy or "").strip()
     if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX, OBS_MCDC_PREFIX, SCENARIO_PREFIX,
-                     SCENARIO_FI_PREFIX, STUB_APART_PREFIX)):
+                     SCENARIO_FI_PREFIX, STUB_APART_PREFIX, PROPAGATE_PREFIX, PROPAGATE_FI_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2701,6 +2705,24 @@ def _append_scenario_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         _scenario_row(sequences, row, f"{SCENARIO_PREFIX}{i}", outputs, var_types, {}, {})
 
 
+def _design_widened(unit: Dict[str, Any], domains: Dict[str, Any], var_types: Dict[str, str]) -> Dict[str, Any]:
+    """(R78) Inputs whose design range (설계서 · HSIS 범위 · 값 목록, or a scope domain the design narrowed) is narrower
+    than the declared type → the declared type's range — what the searches over values outside the design widen."""
+    wide: Dict[str, Any] = {}
+    src = unit.get("bounds_source") or {}
+    for v, d in domains.items():
+        if isinstance(d, tuple) and src.get(v) in ("uds_range", "hsis_range", "uds_values"):
+            tb = get_boundary_values(var_types.get(v, ""))
+            lo, hi = (tb or {}).get("min"), (tb or {}).get("max")
+            if isinstance(lo, int) and isinstance(hi, int) and lo <= d[0] <= d[1] <= hi and (lo, hi) != d:
+                wide[v] = (lo, hi)
+        elif isinstance(d, dict) and d.get("constraint_source") and not d.get("values") and \
+                isinstance(d.get("type_min"), int) and isinstance(d.get("type_max"), int) and \
+                (d["type_min"], d["type_max"]) != (d.get("min"), d.get("max")):
+            wide[v] = (d["type_min"], d["type_max"])
+    return wide
+
+
 def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], ctx: Dict[str, Any]) -> None:
     """(R78) 설계 범위 밖 동작 시나리오 — 설계 범위가 선언 타입보다 좁은 입력이 있고 1차 탐색(`_append_scenario_rows`)이 닿지 못한
     문장 · 분기가 남았으면, 그 입력을 선언 타입 범위로 넓혀 한 번 더 찾는다. 코드는 설계 범위 밖 값을 다룬다(HDPDM01
@@ -2718,18 +2740,8 @@ def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
         return
     var_types = ctx["var_types"]
     domains = _scenario_domains(unit, ctx)
-    wide: Dict[str, Any] = {}
+    wide = _design_widened(unit, domains, var_types)
     src = unit.get("bounds_source") or {}
-    for v, d in domains.items():
-        if isinstance(d, tuple) and src.get(v) in ("uds_range", "hsis_range", "uds_values"):
-            tb = get_boundary_values(var_types.get(v, ""))
-            lo, hi = (tb or {}).get("min"), (tb or {}).get("max")
-            if isinstance(lo, int) and isinstance(hi, int) and lo <= d[0] <= d[1] <= hi and (lo, hi) != d:
-                wide[v] = (lo, hi)
-        elif isinstance(d, dict) and d.get("constraint_source") and not d.get("values") and \
-                isinstance(d.get("type_min"), int) and isinstance(d.get("type_max"), int) and \
-                (d["type_min"], d["type_max"]) != (d.get("min"), d.get("max")):
-            wide[v] = (d["type_min"], d["type_max"])
     # (R80) a value-set input (enum · state values) over its unit's enumerators: the object can hold a value no
     #   enumerator names — a corrupted or uninitialised state the code's `default:` / last `else` handles (HDPDM01
     #   `s_BuzzerStateCtrl`: the reference reached its default with 0 and 4 around the enumerators 1 ~ 3) — and, when the
@@ -3315,14 +3327,16 @@ def _prune_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]])
 def resolve_seq_test_method(strategy: Any) -> str:
     """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다. (R31) 설계 범위 밖 강건성 행도 FI."""
     s = str(strategy or "").strip()
-    return _METHOD_FI if s in _FI_STRATEGIES or s.startswith((ROBUST_PREFIX, SCENARIO_FI_PREFIX)) else _METHOD_REQ
+    return _METHOD_FI if s in _FI_STRATEGIES or s.startswith((ROBUST_PREFIX, SCENARIO_FI_PREFIX, PROPAGATE_FI_PREFIX)) \
+        else _METHOD_REQ
 
 
 def resolve_seq_gen_method(strategy: Any) -> str:
     """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
     s = str(strategy or "").strip()
     if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX) \
-            or s.startswith(OBS_MCDC_PREFIX) or s.startswith(SCENARIO_PREFIX) or s.startswith(STUB_APART_PREFIX):
+            or s.startswith(OBS_MCDC_PREFIX) or s.startswith(SCENARIO_PREFIX) or s.startswith(STUB_APART_PREFIX) \
+            or s.startswith(PROPAGATE_PREFIX) or s.startswith(PROPAGATE_FI_PREFIX):
         return _GEN_EQUIV
     return _GEN_BOUNDARY
 
@@ -4133,6 +4147,15 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         _logger.warning("SUTS 피호출 값 구별 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
         del sequences[h:]
         unit["stub_apart"] = {"error": type(exc).__name__, "rows": 0}
+    # (R84) 결함 전파 행 — 맨 끝에(다른 탐색 · 동반 행은 이 행들 없이 돈다; 모든 행이 이미 있는 행이다). 선택 확장이라 실패해도
+    #   문서는 만든다(그 unit 만 사유를 남긴다).
+    g = len(sequences)
+    try:
+        _append_propagation_rows(unit, sequences, ctx)
+    except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
+        _logger.warning("SUTS 결함 전파 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        del sequences[g:]
+        unit["propagation_rows"] = {"error": type(exc).__name__, "rows": 0, "fi_rows": 0}
     if len(sequences) > n:
         sequences[n:] = apply_sequence_evidence(unit, sequences[n:], written=True)
     if (unit.get("observable_mcdc") or {}).get("searched"):
@@ -4365,6 +4388,190 @@ def summarize_stub_apart(units: List[Dict[str, Any]]) -> Dict[str, Any]:
                units_with_two_stubs=sum(1 for r in reports if int(r.get("stubs") or 0) >= 2),
                errors=sum(1 for r in reports if r.get("error")), cap_per_unit=MAX_STUB_APART_ROWS,
                sources_per_unit=MAX_STUB_APART_SOURCES)
+    return out
+
+
+# (R84) 결함 전파 행 — 결함이 드러나는 값(R79)으로 그 자리를 실행해도 바뀐 값이 출력까지 가지 않으면 그 결함은 보이지 않는다
+#   (KJPDS02_PV, R83 뒤 정본도 생성도 죽이지 못한 변이 20: `ErrTm < u16g_MAX` 를 65535 로 실행했지만 다른 갈래가 쓰는 상태를
+#   행이 이미 갖고 있었다 · `y = 0` 클램프가 `Diff = Assist - Start` 로 곱해지는데 둘이 같았다 · 경사/평상 전류 임계 입력을
+#   행이 같은 값으로 두었다 · `EndStep < 0` 이어야 다른 팔이 다른 값 · 음수 나눗수 팔은 설계 범위 밖 값이어야 닿는데 그 탐색엔
+#   노출 목표가 없었다(R79 리뷰 W3)). `scenario_rows.find_scenarios(propagate=True)` — 자리마다 그 값을 바꾼 실행(데이터 상태
+#   섭동: 비교 뒤집기(경계 목표는 두 값이 같을 때만) · 쓰기 빼기 · `+` `-` `*` 오른쪽을 항등원 · `/` `%` 한 칸)과 원래 실행의
+#   관측 출력이 달라지는 행. 설계 범위 안에서 먼저 찾고, 못 찾은 목표만 설계 범위 밖(선언 타입 · 열거자 밖)으로 넓혀 다시 —
+#   설계 범위 밖 값이 남은 행은 FI(`PROPR_`). **맨 끝에** 더한다(기존 행 · 탐색은 그대로 — R75 · R80 교훈).
+PROPAGATE_PREFIX = "PROP_"
+PROPAGATE_FI_PREFIX = "PROPR_"
+PROPAGATION_REPORT_KEYS = ("targets", "boundary", "flip", "write", "arith", "covered_before", "met_by_rows", "not_met",
+                           "rows", "fi_rows", "duplicates", "local_best", "budget_cut", "unmodeled", "cut", "error_cut",
+                           "refused", "infected_only", "runs", "perturbed_runs", "perturbed_refused",
+                           "perturbed_budget", "steps", "checked_rows", "check_capped", "check_late", "check_steps",
+                           "outside_design_check_capped", "outside_design_check_late",
+                           "outside_design_inputs", "outside_design_searched", "outside_design_met")
+
+
+def _propagation_row(sequences: List[Dict[str, Any]], row: Dict[str, Any], strategy: str, outputs: List[str],
+                     var_types: Dict[str, str], outside: Dict[str, int], span: Dict[str, Any],
+                     enums: Dict[str, Dict[str, Any]]) -> None:
+    """(R84) 결함 전파 행 하나 — 무엇을 바꾸면 어느 출력이 달라지는지, 설계 범위 밖 값이 남았으면 그 값까지 적는다."""
+    inputs = {k: _format_test_value(v, var_types.get(k, "uint8_t")) for k, v in row["inputs"].items()}
+    kind, seen = row["target_kind"], row.get("exposure") or [None, None]
+    at = f"{row['target_line']}행 `{row['target_text']}`"
+    if kind == "boundary":
+        what = f"경계 {at} 을 두 값이 같을 때({seen[0]} = {seen[1]}) 평가하고 그 조건이 결정을 가르는데, 그 비교 결과를 뒤집으면"
+    elif kind == "flip":
+        what = f"조건 {at} 이 결정을 가를 때(비교한 값 {seen[0]}, {seen[1]}) 그 조건을 뒤집으면"
+    elif kind == "write":
+        what = f"쓰기 {at} 가 이전 값 {seen[0]} 을 {seen[1]} 로 바꾸는데, 그 쓰기를 빼면"
+    else:
+        op = row.get("operator") or ""
+        what = (f"연산 {at} 의 `{op}` 를 피연산자 {seen[0]}, {seen[1]} 로 계산하는데, "
+                + ("오른쪽 피연산자를 항등원으로 두면(항 · 인수 누락)" if op in ("+", "-", "*") else "결과를 한 칸 옮기면"))
+    changed = ", ".join(row.get("propagated") or [])
+    body = (f"{what} 관측 출력 {changed} 이 달라진다 — 원본 코드 모델 실행을 그 자리의 값만 바꿔 한 번 더 돌려 비교했다(데이터 "
+            "상태 섭동 · 측정 도구의 변이 목록은 쓰지 않는다; 같은 종류의 결함을 겨냥하므로 이 행으로 늘어난 변이 판별은 상수 "
+            "변이로 따로 본다). 두 실행 모두 한 경로로(미정 분기 · 미정의 동작 없이) 돈다")
+    if outside:
+        # (review R84 W3) the search widens range and value-set inputs together: each value says what it is outside of
+        def label(k: str, x: int) -> str:
+            if k in enums:
+                return _outside_label(enums[k], x)
+            if isinstance(span.get(k), tuple):
+                return f"설계 {span[k][0]}~{span[k][1]} 밖"
+            return "설계 밖"
+        shown = ", ".join(f"{k}={x}({label(k, x)})" for k, x in outside.items())
+        kind_of = "열거자 밖 값" if set(outside) <= set(enums) else "설계 범위 밖"
+        head = f"{kind_of} 결함 전파 시나리오: {body}. 설계 범위 안에서 먼저 찾은 뒤 넓혀 찾았고 남은 값: {shown}(FI · "
+    else:
+        head = f"결함 전파 시나리오: {body}("
+    sequences.append({
+        "seq_num": len(sequences) + 1, "inputs": inputs,
+        "expected": {o: f"{VERIFY_PREFIX} propagation" for o in outputs},
+        "strategy": strategy, "tc_profile": TC_PROFILE_EXTENDED,
+        "description": head + f"이 행으로 처음 만족한 전파 목표 {row.get('exposures_met', 0)}개 · 소스 oracle 탐색 · 미실행)",
+        "propagation": {**{k: row.get(k) for k in ("target_kind", "target_line", "target_text", "exposure", "operator",
+                                                    "propagated")}, "outside_design": dict(outside)},
+    })
+
+
+def _append_propagation_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], ctx: Dict[str, Any]) -> None:
+    """(R84, 확장 프로파일) 결함 전파 행 — 위 주석. 설계 범위 안 탐색(`PROP_`) 뒤, 남은 목표가 있고 설계 범위가 선언 타입보다
+    좁은 입력 · 열거자 밖 값을 가질 수 있는 값 목록 입력이 있으면 둘을 함께 넓혀 한 번 더(남은 밖 값이 있으면 `PROPR_` FI).
+    요약 `unit["propagation_rows"]`(키 `PROPAGATION_REPORT_KEYS`) — 목표 = 이미 있던 행이 만족 + 이 단계의 행이 만족 + 못 만족
+    (그 사유는 마지막 탐색의 것)."""
+    report: Dict[str, Any] = {**dict.fromkeys(PROPAGATION_REPORT_KEYS, 0), "status": "", "budget_exhausted": False}
+    unit["propagation_rows"] = report
+    var_types = ctx["var_types"]
+    domains = _scenario_domains(unit, ctx)
+    outputs = _scenario_outputs(ctx, sequences)
+
+    def existing_rows() -> List[Dict[str, Any]]:
+        # the scenario rows first — distinct operating values make the better climb starts (`MAX_STARTS`)
+        return [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
+            [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
+
+    def take(rep: Dict[str, Any], first: bool) -> None:
+        for k in ("runs", "steps"):
+            report[k] += int(rep.get("expose_" + k) or 0)
+        for k in ("perturbed_runs", "perturbed_refused", "perturbed_budget", "checked_rows", "check_steps"):
+            report[k] += int(rep.get("propagate_" + k) or 0)
+        # (review R84 I-R3-2) the suite check's cuts and late confirmations per search — the first's late ones are in
+        #   `covered_before`; the second's (rare: a row the first search's budget left unchecked) in `met_by_rows`
+        for k in ("check_capped", "check_late"):
+            report[k if first else "outside_design_" + k] += int(rep.get("propagate_" + k) or 0)
+        report["duplicates"] += int(rep.get("expose_duplicates") or 0)
+        report["budget_exhausted"] = report["budget_exhausted"] or bool(rep.get("expose_budget_exhausted"))
+        if first:
+            report.update(targets=int(rep.get("expose_targets") or 0), boundary=int(rep.get("expose_boundary") or 0),
+                          flip=int(rep.get("expose_flip") or 0), write=int(rep.get("expose_write") or 0),
+                          arith=int(rep.get("expose_arith") or 0),
+                          covered_before=int(rep.get("expose_covered_before") or 0))
+        # the not-met targets and why — the last search's (it saw every row before it)
+        report.update(not_met=int(rep.get("expose_not_reached") or 0),
+                      local_best=int(rep.get("expose_local_best") or 0),
+                      budget_cut=int(rep.get("expose_budget_cut") or 0),
+                      unmodeled=int(rep.get("expose_unmodeled") or 0), cut=int(rep.get("expose_cut") or 0),
+                      error_cut=int(rep.get("expose_error_cut") or 0), refused=int(rep.get("expose_refused") or 0),
+                      infected_only=int(rep.get("propagate_infected_only") or 0))
+        report["met_by_rows"] = report["targets"] - report["covered_before"] - report["not_met"]
+
+    start = len(sequences)
+    existing = existing_rows()
+    found = find_scenarios(unit, domains, outputs, existing, covered=existing, propagate=True)
+    rep = found["report"]
+    report["status"] = str(rep.get("status") or "")
+    if report["status"] != "searched":
+        return
+    take(rep, True)
+    for row in found["rows"]:
+        _propagation_row(sequences, row, f"{PROPAGATE_PREFIX}{report['rows']}", outputs, var_types, {}, {}, {})
+        report["rows"] += 1
+    if not report["not_met"]:
+        return
+    # 설계 범위 밖 — 설계 범위가 선언 타입보다 좁은 입력 · 값 목록 입력의 열거자 밖 값(R78 · R80 과 같은 넓힘)
+    wide = _design_widened(unit, domains, var_types)
+    homes: Dict[str, Tuple[List[int], List[int]]] = {}
+    try:
+        singles = _single_value_enum_domains(unit, ctx, domains)
+        enum_wide = _outside_enumerator_domains(unit, {**domains, **singles}, var_types, {}, ctx.get("enum_sets"), homes)
+    except Exception as exc:  # noqa: BLE001 — (review R84 I1) the enum widening alone is lost, as in R80
+        _logger.warning("SUTS 결함 전파 열거자 밖 값 준비 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        report["outside_design_enum_error"] = type(exc).__name__
+        enum_wide = {}
+    report["outside_design_inputs"] = len(set(wide) | set(enum_wide))
+    if not (wide or enum_wide):
+        return
+    span: Dict[str, Any] = {k: (d if isinstance(d, tuple) else (d["min"], d["max"])) for k, d in domains.items() if k in wide}
+    span.update({k: list(homes[k][0]) for k in enum_wide})
+    var_bounds, src = ctx.get("var_bounds") or {}, unit.get("bounds_source") or {}
+    info: Dict[str, Dict[str, Any]] = {}
+    for k in enum_wide:
+        b = var_bounds.get(k) or {}
+        design: Any = None
+        if src.get(k) in ("uds_range", "hsis_range") and isinstance(b.get("min"), int) and isinstance(b.get("max"), int):
+            design = (b["min"], b["max"])
+        elif src.get(k) == "uds_values":
+            design = list(homes[k][0])
+        info[k] = {"design": design, "enumerators": (homes[k][1][0], homes[k][1][-1])}
+    # (review R84 W2) this step's own rows first — the suite check stops at a cap per target, and a target the first
+    #   search met by a row listed last was searched again (a needless FI row, and wrong counts)
+    before = sequences[:start]
+    checked = [s.get("inputs") or {} for s in sequences[start:]] + \
+        [s.get("inputs") or {} for s in before if _is_scenario(s)] + \
+        [s.get("inputs") or {} for s in before if not _is_scenario(s)]
+    # (review R84 I-R2-4) the climb starts keep the scenario rows first (`existing_rows`)
+    again = find_scenarios(unit, {**domains, **wide, **enum_wide}, outputs, existing_rows(), covered=checked,
+                           home=span, propagate=True)
+    rep2 = again["report"]
+    if str(rep2.get("status") or "") != "searched":
+        return
+    report["outside_design_searched"] = int(rep2.get("expose_targets") or 0) - int(rep2.get("expose_covered_before") or 0)
+    report["outside_design_met"] = int(rep2.get("expose_reached") or 0) - int(rep2.get("expose_covered_before") or 0)
+    take(rep2, False)
+    for row in again["rows"]:
+        outside = {k: x for k, x in row["inputs"].items() if k in span and not _at_home(span[k], x)}
+        if outside:
+            _propagation_row(sequences, row, f"{PROPAGATE_FI_PREFIX}{report['fi_rows']}", outputs, var_types, outside,
+                             span, info)
+            report["fi_rows"] += 1
+        else:
+            _propagation_row(sequences, row, f"{PROPAGATE_PREFIX}{report['rows']}", outputs, var_types, {}, {}, {})
+            report["rows"] += 1
+
+
+def summarize_propagation_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R84) unit 보고서 합계 — 품질 보고서 `propagation_rows`(생성 공시가 읽는다)."""
+    reports = [u.get("propagation_rows") for u in units if isinstance(u.get("propagation_rows"), dict)]
+    out: Dict[str, Any] = {k: sum(int(r.get(k) or 0) for r in reports) for k in PROPAGATION_REPORT_KEYS}
+    out.update(units=len(units), searched=sum(1 for r in reports if r.get("status") == "searched"),
+               units_with_rows=sum(1 for r in reports if r.get("rows") or r.get("fi_rows")),
+               budget_exhausted=sum(1 for r in reports if r.get("budget_exhausted")),
+               errors=sum(1 for r in reports if r.get("error")),
+               # (review R84 W-R2-1) the enum widening failed alone — the unit kept its in-design rows
+               enum_errors=sum(1 for r in reports if r.get("outside_design_enum_error")),
+               not_searched=dict(Counter(str(r.get("status")).split(":", 1)[0] for r in reports
+                                         if r.get("status") not in ("searched", None, "") and not r.get("error"))),
+               cap_per_unit=_PROPAGATE_MAX_ROWS, check_per_target=_PROPAGATE_MAX_CHECK, atoms_cap=_SCENARIO_MAX_ATOMS,
+               check_runs_cap=_PROPAGATE_MAX_CHECK_RUNS, check_steps_cap=_PROPAGATE_MAX_CHECK_STEPS)
     return out
 
 
@@ -8151,6 +8358,8 @@ def generate_suts(
         quality["mcdc_fill"]["errors"] = sum(1 for f in _fills if f.get("error"))
         # (R83) 피호출 값 구별 행 — 같은 값을 돌려주던 stub 을 서로 다른 값으로 옮긴 동반 행
         quality["stub_apart"] = summarize_stub_apart(units)
+        # (R84) 결함 전파 행 — 그 자리의 값을 바꾸면 관측 출력이 달라지는 행(설계 범위 안, 못 찾은 것만 설계 범위 밖 FI)
+        quality["propagation_rows"] = summarize_propagation_rows(units)
         # (R31) 설계 범위 밖 강건성 행 — 직접 비교 상수가 설계 범위 밖·타입 안인 입력, 상한에 잘린 점, 실패 unit
         quality["robustness_rows"] = summarize_robustness_rows(units)
         # (R78) 동작 시나리오 행 — 닿은 문장 · 분기 결과의 분모, 못 닿은 것, 예산 · 상한에 잘린 것

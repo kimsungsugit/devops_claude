@@ -37,6 +37,24 @@ quantity to what the target needs, from its change over one probe move (``Tm`` 0
 These are test-design criteria (boundary values, data-flow writes, operand values), not mutants: no mutant is
 generated or consulted.
 
+(R84) Exposing a fault at its site is not yet seeing it in an output. Of the 20 KJPDS02_PV mutants neither the reference
+nor the generated rows killed after R83, the rows ran the site with the exposing values but the changed value died on
+the way: a timer at its limit (`ErrTm < u16g_MAX` with ErrTm 65535) whose other branch writes the state the row already
+held; a clamp `y = 0` multiplied by `Diff = Assist - Start` with the two equal; a threshold chosen from two inputs the
+rows held equal (slope and normal current); a clamp whose other arm is the same value unless `EndStep < 0` — and the
+first two rounds left out the search over values outside the design (R79 review W3), where `den <= -2` and
+`num != 0` were what `s32_DivRound`'s negative-divisor arm needed. With ``propagate`` the search has one kind of
+target per site — the fault-exposing ones (boundary · write · arithmetic) and every comparison of a decision (a
+condition taking the other outcome, observable MC/DC — Whalen et al., ICSE 2013) — met only where the site's value,
+changed, changes an observed output: the run is repeated with that one value changed (a data-state perturbation, as
+in Voas' PIE: the comparison negated — at its boundary point for a boundary target —, the write left out, the right
+operand of ``+`` ``-`` ``*`` as the identity, ``/`` ``%`` one step off; `observe_decisions(perturb=)`), and an output
+both runs derive must differ. No mutant of the measuring tool is generated or consulted; the perturbations are of the
+same kinds of faults, so the literal mutants (a constant changed — no target here) are the held-out check. A row that
+meets the infection but not the propagation is one step from its target: the climb then tries one other input at a
+time and stops at the first move that propagates. Rows already in the suite that meet a target are checked first
+(at most `MAX_PROPAGATE_CHECK` per target, the rest counted).
+
 Budgets per function (runs · interpreter steps · rows · candidates per input · climb moves · climb starts) are counted
 in the report when they cut.
 """
@@ -75,6 +93,13 @@ MAX_ATOMS = 64
 MAX_EXPOSE_ROWS = 16     # (R79) fault-exposing rows per function and search
 MAX_EXPOSE_RUNS = 800    # (R79) their own oracle runs per function and search, after the reach targets'
 MAX_EXPOSE_STEPS = 1_500_000
+MAX_PROPAGATE_ROWS = 16      # (R84) fault-propagating rows per function and search
+MAX_PROPAGATE_RUNS = 800     # (R84) their oracle runs (plain and perturbed) per function and search
+MAX_PROPAGATE_STEPS = 1_500_000
+MAX_PROPAGATE_CHECK = 48     # (R84) suite rows checked per target before the search (perturbed runs each)
+MAX_PROPAGATE_CHECK_RUNS = 2_000   # (R84) and those checks' perturbed runs per function and search
+MAX_PROPAGATE_CHECK_STEPS = 1_500_000   # (R84) and their interpreter steps
+PROPAGATE_KINDS = ("boundary", "flip", "write", "arith")
 _FREE_SPAN = 80
 _RELATIONAL = {"<", "<=", ">", ">="}
 _ARITH = {"+", "-", "*", "/", "%"}
@@ -463,7 +488,8 @@ def _line_text(node, raw) -> str:
 def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[str],
                    existing: list[dict[str, Any]] | None = None,
                    covered: list[dict[str, Any]] | None = None,
-                   home: dict[str, tuple] | None = None, expose: bool = True) -> dict[str, Any]:
+                   home: dict[str, tuple] | None = None, expose: bool = True,
+                   propagate: bool = False) -> dict[str, Any]:
     """``{"rows": [{"inputs", "target_kind", "target_line", "target_text", "target_outcome", "targets_reached",
     "outputs_derived"}], "reached_vectors": [...], "report": {...}}``.
 
@@ -479,7 +505,13 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     duplicate; once `MAX_ROWS` rows are added the search goes on (a duplicate costs no row; `needed_inputs` keeps
     growing) but a new row is not added — its target is ``cut`` and stays unreached. ``reached_vectors``: the vectors
     that reached targets (rows and duplicates) — what a caller may pass as ``covered`` (the SUTS caller passes every row
-    of the suite instead)."""
+    of the suite instead).
+
+    (R84) ``propagate``: no reach targets — the fault-propagating ones only (`PROPAGATE_KINDS`, see the module text), on
+    their own budget (`MAX_PROPAGATE_RUNS` · `MAX_PROPAGATE_STEPS`, perturbed runs included) and row cap
+    (`MAX_PROPAGATE_ROWS`); the report's ``expose_*`` keys count them, ``propagate_*`` the perturbed runs, the suite rows
+    checked and the targets whose best was a met infection that no move propagated. A row says which outputs changed
+    (``propagated``)."""
     report = {"status": "searched", "targets": 0, "statements": 0, "branches": 0, "reached_clean": 0,
               "reached_unclean_only": 0, "not_reached": 0, "local_best": 0, "climb_cap": 0, "budget_cut": 0,
               "runs": 0, "steps": 0, "rows": 0, "cut": 0, "duplicates": 0, "budget_exhausted": False,
@@ -491,6 +523,12 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
               "expose_cut": 0, "expose_unmodeled": 0, "expose_local_best": 0, "expose_budget_cut": 0,
               "expose_budget_exhausted": False, "expose_runs": 0, "expose_steps": 0, "expose_duplicates": 0,
               "reached_by_exposing_rows": 0, "expose_refused": 0, "expose_error_cut": 0, "expose_met_by_reach_rows": 0}
+    if propagate:
+        # (R84) the propagating search's own counts — flip targets, perturbed runs, suite rows checked, and the targets
+        #   whose site the rows / climbs did expose without any output changing
+        report.update(expose_flip=0, propagate_perturbed_runs=0, propagate_perturbed_refused=0,
+                      propagate_perturbed_budget=0, propagate_checked_rows=0, propagate_check_capped=0,
+                      propagate_check_late=0, propagate_check_steps=0, propagate_infected_only=0)
     empty: dict[str, Any] = {"rows": [], "reached_vectors": []}
     if not unit.get("source_text") or not scope_matches(unit):
         return {**empty, "report": {**report, "status": "no_project_scope"}}
@@ -542,14 +580,15 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         specs.append({"key": list(_key(c)), "atoms": [list(_key(a)) for a in atoms], "ir": ir})
         spec_atoms.append(atoms)
     targets = []   # (kind, node, chain, final) — final: ("reach", watch i) or ("guard", cond i, outcome)
-    for s in statements:
+    for s in statements if not propagate else ():
         targets.append(("statement", s, md.control_steps(s, cases=True), ("reach", watch_index[_key(s)])))
-    for c in conds:
+    for c in conds if not propagate else ():
         for outcome in (True, False):
             targets.append(("branch", c, md.control_steps(c.parent, cases=True) + [("guard", c, outcome)],
                             ("guard", cond_index[_key(c)], outcome)))
-    report.update(targets=len(targets), statements=len(statements), branches=2 * len(conds))
-    if not targets:
+    report.update(targets=len(targets), statements=len(statements) if not propagate else 0,
+                  branches=2 * len(conds) if not propagate else 0)
+    if not targets and not propagate:
         return {**empty, "report": {**report, "status": "no_targets"}}
     # (R79) fault-exposing targets — searched after every reach target, on their own budget and row cap; ``expose``
     #   False leaves them out (the SUTS second search over widened domains — review R79 W3: its rows are FI rows)
@@ -558,18 +597,26 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     operand_nodes: list = []
     write_nodes: list = []
     spec_cond = {}
-    for c in conds if expose else ():
+    for c in conds if expose or propagate else ():
         got = spec_of.get(_key(c))
         if got is None:
             continue
         spec_cond[got[0]] = c
         for ai, a in enumerate(spec_atoms[got[0]]):
-            if a.type == "binary_expression" and _operator(a, raw) in _RELATIONAL and \
-                    _reads_a_variable(a, raw, constants):
+            if a.type != "binary_expression" or not _reads_a_variable(a, raw, constants):
+                continue
+            op = _operator(a, raw)
+            if op in _RELATIONAL:
                 targets.append(("boundary", a, md.control_steps(c.parent, cases=True),
                                 ("bound", len(operand_nodes), got[0], ai)))
+            if propagate and op in _COMPARISONS:
+                # (R84) the condition taking the other outcome where it decides the decision (observable MC/DC) — a
+                #   relational one has its boundary target too (its boundary point may be where no fault shows)
+                targets.append(("flip", a, md.control_steps(c.parent, cases=True),
+                                ("flip", len(operand_nodes), got[0], ai)))
+            if op in _RELATIONAL or (propagate and op in _COMPARISONS):
                 operand_nodes.append(a)
-    for s in statements if expose else ():
+    for s in statements if expose or propagate else ():
         e = next((x for x in s.named_children if x.type != "comment"), None)
         if s.type == "expression_statement" and e is not None and e.type == "assignment_expression" and \
                 _operator(e, raw) == "=":
@@ -577,7 +624,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             write_nodes.append(e)
     seen_ops: set = set()
     holder_of: dict = {}   # arith operand index → the watched statement holding it (None in a condition)
-    for holder, at in ([(s, s) for s in statements] + [(c, c.parent) for c in conds]) if expose else ():
+    for holder, at in ([(s, s) for s in statements] + [(c, c.parent) for c in conds]) if expose or propagate else ():
         for x in md._walk(holder):
             if x.type == "binary_expression" and _key(x) not in seen_ops and \
                     (op := _operator(x, raw)) in _ARITH and _reads_a_variable(x, raw, constants) and \
@@ -593,6 +640,19 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                   expose_arith=sum(1 for t in targets[n_reach:] if t[0] == "arith"))
     operand_keys = [list(_key(n)) for n in operand_nodes]
     write_keys = [list(_key(n)) for n in write_nodes]
+    perturb_of: dict[int, list] = {}   # (R84) target index → the perturbation its propagation check runs
+    if propagate:
+        report["expose_flip"] = sum(1 for t in targets if t[0] == "flip")
+        if not targets:
+            return {**empty, "report": {**report, "status": "no_targets"}}
+        for i, t in enumerate(targets):
+            kind, final = t[0], t[3]
+            if kind in ("boundary", "flip"):
+                perturb_of[i] = ["flip_equal" if kind == "boundary" else "flip", operand_keys[final[1]]]
+            elif kind == "write":
+                perturb_of[i] = ["skip_write", write_keys[final[1]]]
+            else:
+                perturb_of[i] = ["drop_right" if final[2] in ("+", "-", "*") else "step", operand_keys[final[1]]]
 
     inputs = list(doms)
     report["inputs"] = len(inputs)
@@ -639,11 +699,16 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     run_budget: list = [(0, 0)]   # runs · steps that do not count (the covered rows' check); None while it runs
     limits = [MAX_RUNS, MAX_STEPS]   # (R79) the phase's: the reach targets', then the fault-exposing targets'
     flag = ["budget_exhausted"]
+    perturbed = [0]   # (R84) perturbed runs so far — runs of the budget like the plain ones
+    psteps = [0]      # (R84) and their interpreter steps
+
+    def nruns() -> int:
+        return len(cache) + perturbed[0]
 
     def exhausted() -> bool:
         if run_budget[0] is None:
             return False
-        return len(cache) - run_budget[0][0] >= limits[0] or spent[0] - run_budget[0][1] >= limits[1]
+        return nruns() - run_budget[0][0] >= limits[0] or spent[0] - run_budget[0][1] >= limits[1]
 
     def run(vectors: list[dict[str, int]]) -> None:
         todo = list({vkey(v): v for v in vectors if vkey(v) not in cache}.values())
@@ -653,7 +718,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                     report[flag[0]] = True
                     return
                 runs_left, steps_left = ((16, None) if run_budget[0] is None else
-                                         (limits[0] - (len(cache) - run_budget[0][0]),
+                                         (limits[0] - (nruns() - run_budget[0][0]),
                                           max(0, limits[1] - (spent[0] - run_budget[0][1]))))
                 chunk = todo[start:start + min(16, runs_left)]
                 results = observe_decisions(unit, chunk, specs, guards, step_limit=steps_left,
@@ -661,6 +726,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                                             writes=write_keys)
                 for v, r in zip(chunk, results, strict=True):
                     cache[vkey(v)] = r
+                    vec_of[id(r)] = v
                     spent[0] += int(r.get("steps") or 0)
         finally:
             report["runs"], report["steps"] = len(cache), spent[0]
@@ -668,12 +734,80 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
     def clean(r) -> bool:
         return r.get("status") == "supported" and not r.get("forked") and not r.get("possible_undefined_behavior")
 
+    vec_of: dict[int, dict[str, int]] = {}   # (R84) id(run) → its vector (runs stay in the cache: ids are stable)
+    pcache: dict[tuple, tuple | None] = {}   # (R84) (vector, target i) → outputs the perturbed run changed; None: no run
+    index_of = {id(t): i for i, t in enumerate(targets)}
+
+    def prun(vectors: list[dict[str, int]], ti: int) -> None:
+        """(R84) The perturbed runs of target ``ti`` for those vectors (already run plainly): the outputs both runs
+        derive and the perturbation changed — () when none changed, None when the perturbed run is no clean run (it
+        refuses, branches on an unknown value, may hit undefined behaviour): a change there is not shown."""
+        todo = []
+        for v in {vkey(v): v for v in vectors if (vkey(v), ti) not in pcache and vkey(v) in cache}.values():
+            if any("value" in (o or {}) for o in (cache[vkey(v)].get("outputs") or {}).values()):
+                todo.append(v)
+            else:
+                pcache[(vkey(v), ti)] = ()   # no output the plain run derives — no change can show; no run
+        for start in range(0, len(todo), 16):
+            if exhausted():
+                report[flag[0]] = True
+                return
+            # (review R84 I3) the suite rows' check (no search budget) keeps to its own step cap
+            runs_left, steps_left = ((16, max(0, MAX_PROPAGATE_CHECK_STEPS - psteps[0])) if run_budget[0] is None else
+                                     (limits[0] - (nruns() - run_budget[0][0]),
+                                      max(0, limits[1] - (spent[0] - run_budget[0][1]))))
+            chunk = todo[start:start + min(16, runs_left)]
+            results = observe_decisions(unit, chunk, [], [], step_limit=steps_left, outputs=list(outputs),
+                                        perturb=perturb_of[ti])
+            for v, pr in zip(chunk, results, strict=True):
+                perturbed[0] += 1
+                report["propagate_perturbed_runs"] += 1
+                spent[0] += int(pr.get("steps") or 0)
+                psteps[0] += int(pr.get("steps") or 0)
+                if run_budget[0] is None:
+                    report["propagate_check_steps"] += int(pr.get("steps") or 0)
+                if not clean(pr):
+                    # (review R84 I3 · I-R2-3) a run a step budget stopped — never started, or cut by its share of what
+                    #   was left — is counted apart from one the model refuses; one the suite check stopped is not kept
+                    #   (the search phase has its own budget and runs it again)
+                    stopped = pr.get("reason") in ("search_step_budget", "execution_budget")
+                    report["propagate_perturbed_budget" if stopped else "propagate_perturbed_refused"] += 1
+                    if not (stopped and run_budget[0] is None):
+                        pcache[(vkey(v), ti)] = None
+                    continue
+                base = cache[vkey(v)].get("outputs") or {}
+                got = pr.get("outputs") or {}
+                pcache[(vkey(v), ti)] = tuple(sorted(
+                    o for o in base if "value" in (base.get(o) or {}) and "value" in (got.get(o) or {})
+                    and base[o]["value"] != got[o]["value"]))
+
+    def propagated(r, target) -> bool:
+        """(R84) The perturbation of ``target``'s site changes an output of run ``r`` (one perturbed run, cached)."""
+        v = vec_of.get(id(r))
+        ti = index_of.get(id(target))
+        if v is None or ti is None:
+            return False
+        if (vkey(v), ti) not in pcache:
+            prun([v], ti)
+        return bool(pcache.get((vkey(v), ti)))
+
+    def prepare(vectors: list[dict[str, int]], target) -> None:
+        """(R84) The perturbed runs a ranking of those vectors for ``target`` needs, in batches: those whose plain run
+        meets the target's infection."""
+        if not propagate:
+            return
+        ti = index_of[id(target)]
+        prun([v for v in vectors if vkey(v) in cache and infected(cache[vkey(v)], target)], ti)
+
     def event(r, step, path) -> bool:
         """Does path ``path`` of run ``r`` satisfy one control step / final event?"""
         kind = step[0]
         if kind == "bound":
             # (R79 review W1) on one evaluation: the two sides equal and the condition deciding the outcome
             return any(a is not None and a == b and d for a, b, d in _records(r, "decides", step[1], path, 3))
+        if kind == "flip":
+            # (R84) an evaluation where the condition decides the decision's outcome
+            return any(d for _a, _b, d in _records(r, "decides", step[1], path, 3))
         if kind == "arith":
             return any(_nondegenerate(step[2], x) for x in _records(r, "operands", step[1], path))
         if kind == "write":
@@ -698,7 +832,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         final = target[3]
         if r.get("status") != "supported":
             return False
-        if final[0] == "bound":
+        if final[0] in ("bound", "flip"):
             return bool(_records(r, "decides", final[1], size=3)) or bool(_records(r, "operands", final[1]))
         if final[0] == "arith":
             return bool(_records(r, "operands", final[1]))
@@ -752,13 +886,17 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                 best_depth, step = depth, (chain[depth] if depth < len(chain) else final)
         return best_depth, step
 
-    def reached(r, target) -> bool:
+    def infected(r, target) -> bool:
         """The target's final event on a path whose control chain holds, in a clean run."""
         if not clean(r):
             return False
         chain, final = target[2], target[3]
         return any(len(chain) == sum(1 for _ in _prefix(r, chain, p)) and event(r, final, p)
                    for p in range(max(paths_of(r), 1)))
+
+    def reached(r, target) -> bool:
+        """`infected` — and (R84, ``propagate``) the perturbation of the site changes an output of the run."""
+        return infected(r, target) and (not propagate or propagated(r, target))
 
     def _prefix(r, chain, p):
         for s in chain:
@@ -774,6 +912,8 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             return (False, -1, 0)
         if reached(r, target):
             return (True, len(target[2]) + 1, 0)
+        if propagate and infected(r, target):
+            return (False, len(target[2]) + 1, 0)   # (R84) the site exposed, no output changed: one step from done
         depth, blocking = best_path(r, target)
         distance = 0
         if blocking is not None and blocking[0] == "guard":
@@ -787,7 +927,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                                                            if o}) for inst in obs["instances"])
             elif got:
                 distance = len(specs[got[0]]["atoms"]) + 1
-        elif blocking is not None and blocking[0] in ("bound", "arith", "write"):
+        elif blocking is not None and blocking[0] in ("bound", "arith", "write", "flip"):
             distance = exposure_gap(r, blocking)
         return (False, depth, -distance)
 
@@ -801,6 +941,11 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             return 2 if recs else _FAR
         if final[0] == "arith":
             return min((_arith_gap(final[2], x) for x in _records(r, "operands", final[1])), default=_FAR)
+        if final[0] == "flip":
+            # (R84) evaluated with a known outcome but not deciding (1), evaluated otherwise (2)
+            if _records(r, "decides", final[1], size=3):
+                return 1
+            return 2 if _records(r, "operands", final[1]) else _FAR
         # the sides' difference on an evaluation where the condition decides; 1 more where it does not (yet)
         gaps = [abs(a - b) + (0 if d else 1) for a, b, d in _records(r, "decides", final[1], size=3)
                 if a is not None and b is not None]
@@ -811,6 +956,8 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         and the written value."""
         if target[0] == "boundary":
             return any(a is not None and b is not None for a, b, _d in _records(r, "decides", target[3][1], size=3))
+        if target[0] == "flip":
+            return bool(_records(r, "decides", target[3][1], size=3))   # (R84) its outcome known on an evaluation
         field = "writes" if target[0] == "write" else "operands"
         return any(a is not None and b is not None for a, b in _records(r, field, target[3][1]))
 
@@ -826,7 +973,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         else:
             # (R82) a comparison or an operation never reads a written-only input — they move the others
             names = list(control_inputs_of(node))
-        if kind == "boundary" and final[2] in spec_cond:
+        if kind in ("boundary", "flip") and final[2] in spec_cond:
             names = list(dict.fromkeys(names + list(control_inputs_of(spec_cond[final[2]]))))
         return names
 
@@ -876,7 +1023,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         """The inputs to move next: those of the first control step the best path does not satisfy (through the locals
         it reads) — every input when the run itself is the obstacle (undefined behaviour, a branch on an unknown value,
         an overflow it may hit): what causes that need not be on the target's control chain."""
-        exposing = target[0] in EXPOSE_KINDS
+        exposing = target[0] in EXPOSE_KINDS or target[0] == "flip"
         if r.get("status") != "supported" or (not exposing and touched(r, target)):
             return list(inputs)
         _depth, step = best_path(r, target)
@@ -906,7 +1053,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         elif step is not None and step[0] == "case":
             sw = step[1].parent.parent if step[1].parent is not None else None
             node = sw.child_by_field_name("condition") if sw is not None and sw.type == "switch_statement" else None
-        elif step is not None and target[0] in ("boundary", "arith") and step is target[3]:
+        elif step is not None and target[0] in ("boundary", "arith", "flip") and step is target[3]:
             node = target[1]
         return [n for n in inputs_of(node) if n in written_only] if node is not None else []
 
@@ -925,6 +1072,34 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         r = cache[vkey(v)]
         return standing(r, target) + quality(v, r)
 
+    def propagate_step(cur: dict[str, int], target) -> tuple[dict[str, int] | None, str]:
+        """(R84) A vector whose site is exposed while no output changes: one input at a time — the others before the
+        site's own (moving those may lose the exposure) —, all its candidates, the first input with a move that keeps
+        the exposure and changes an output (of those, the best by `quality`). A masking value (`Diff = Assist - Start`
+        with the two equal, a state already holding what the other branch writes) is one input away; two at once are
+        not tried (``local_best``)."""
+        own = set(exposure_inputs(target))
+        order = [x for x in inputs if x not in own] + [x for x in inputs if x in own]
+        # (review R84 I-R2-5) every input's moves that stay at home first, then those that leave it (the widened search
+        #   — an FI row only where no in-design move propagates)
+        for at_home in (True, False):
+            for n in order:
+                if exhausted():
+                    report[flag[0]] = True
+                    return None, "budget"
+                # its candidates and small steps from where it is (`s32_DivRound`: `den` -1 → -2 makes `den / 2L` count)
+                steps = [cur[n] + s * d for d in (1, 16) for s in (1, -1)]
+                cands = [{**cur, n: x} for x in dict.fromkeys(pools[n] + [x for x in steps if _inside(doms[n], x)])
+                         if x != cur[n] and (n not in home or _at_home(home[n], x)) == at_home]
+                if not cands:
+                    continue
+                run(cands)
+                prepare(cands, target)
+                ok = [c for c in cands if vkey(c) in cache and reached(cache[vkey(c)], target)]
+                if ok:
+                    return max(ok, key=lambda v: quality(v, cache[vkey(v)])), "done"
+        return None, ("budget" if exhausted() else "local_best")
+
     def climb(start: dict[str, int], target) -> tuple[dict[str, int] | None, str]:
         """``(vector, "done")`` or ``(None, why)`` — why: ``local_best`` (no single move of the inputs gets nearer),
         ``climb_cap`` (`MAX_CLIMB` moves), ``budget`` (the function's runs or steps are spent)."""
@@ -936,16 +1111,24 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             if exhausted():
                 report[flag[0]] = True
                 return None, "budget"
+            if propagate and infected(r, target):
+                return propagate_step(cur, target)
             names = blocking_inputs(r, target)
             cands = [{**cur, n: x} for n in names for x in pools[n] if x != cur[n]]
             if target[0] in ("boundary", "arith") and clean(r) and best_path(r, target)[1] is target[3]:
                 cands += secant(cur, r, target, names)
+                if propagate and target[0] == "arith":
+                    # (R84) an operand at the identity (`den / 2L` is 0 for den -1): small steps of what it reads, as a
+                    #   write of the value already there takes below — the search before R84 is left as it was
+                    cands += [{**cur, n: cur[n] + s * d} for n in names[:4] for d in (1, 4, 16, 64) for s in (1, -1)
+                              if _inside(doms[n], cur[n] + s * d)]
             elif target[0] == "write" and clean(r) and best_path(r, target)[1] is target[3]:
                 # (R79) a write of the value already there: a small step of an input it reads moves the written value
                 #   off it (`475 - 30 * v / 100` is 100 at v = 1251, 99 at 1255) — nearer than any other candidate
                 cands += [{**cur, n: cur[n] + s * d} for n in names[:4] for d in (1, 4, 16, 64) for s in (1, -1)
                           if _inside(doms[n], cur[n] + s * d)]
             run(cands)
+            prepare(cands, target)
             pool = [cur] + [c for c in cands if vkey(c) in cache]
             best = max(pool, key=lambda v: score(v, target))
             if score(best, target) <= score(cur, target):
@@ -954,6 +1137,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                 if late:
                     more = [{**cur, n: x} for n in late for x in pools[n] if x != cur[n]]
                     run(more)
+                    prepare(more, target)
                     pool += [c for c in more if vkey(c) in cache]
                     best = max(pool, key=lambda v: score(v, target))
             if score(best, target) <= score(cur, target):
@@ -993,6 +1177,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                 pick = [x for x in pools[name][:4] if not _extreme(doms[name], x)]
             cands = [{**cur, name: x} for x in pick if x != cur[name]]
             run(cands)
+            prepare(cands, target)
             ok = [c for c in cands if vkey(c) in cache and standing(cache[vkey(c)], target)[0]
                   and (away or quality(c, cache[vkey(c)]) >= quality(cur, cache[vkey(cur)]))]
             if ok:
@@ -1044,13 +1229,42 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             prior.append(v)
     # the covered rows' runs check what the suite already reaches — they are no part of the search's budget (review
     #   R78 R2 I-R2-1: a unit of hundreds of rows spent it on them)
-    before = len(cache), spent[0]
+    before = nruns(), spent[0]
     run_budget[0] = None
     run(prior)
-    run_budget[0] = (len(cache) - before[0], spent[0] - before[1])
-    for v in prior:
-        if vkey(v) in cache:
-            mark(v)
+    masked_rows: dict[int, list] = {}   # (R84) target i → suite rows that expose its site without changing an output
+    check_rest: dict[int, list] = {}    # (review R84 I-R2-1) target i → the exposing suite rows a capped check left
+    late_met: set = set()               # (review R84 W-R3-1) targets a suite row met in that late check
+    if not propagate:
+        for v in prior:
+            if vkey(v) in cache:
+                mark(v)
+    else:
+        # (R84) per target: the suite rows that expose the site, in batches, until one changes an output — at most
+        #   `MAX_PROPAGATE_CHECK` (the rest counted: the target is then searched though a later row might have met it)
+        for i, t in enumerate(targets):
+            cand = [v for v in prior if vkey(v) in cache and infected(cache[vkey(v)], t)]
+            checked, capped = 0, False
+            for start in range(0, len(cand), 16):
+                if checked >= MAX_PROPAGATE_CHECK or perturbed[0] >= MAX_PROPAGATE_CHECK_RUNS or \
+                        psteps[0] >= MAX_PROPAGATE_CHECK_STEPS:
+                    capped = True
+                    break
+                chunk = cand[start:start + 16]
+                prun(chunk, i)
+                checked += len(chunk)
+                if any(pcache.get((vkey(v), i)) for v in chunk):
+                    done[i] = True
+                    break
+            # the rest — and (review R84 I-R3-1) the rows whose run the step cap stopped (not cached) — in the target's
+            #   own search, first (its budget)
+            stopped = [v for v in cand[:checked] if (vkey(v), i) not in pcache] if not done[i] else []
+            if not done[i] and (capped or stopped):
+                report["propagate_check_capped"] += 1
+                check_rest[i] = stopped + cand[checked:]
+            report["propagate_checked_rows"] += checked
+            masked_rows[i] = [v for v in cand[:checked] if pcache.get((vkey(v), i)) == ()][:4]
+    run_budget[0] = (nruns() - before[0], spent[0] - before[1])
     report["covered_before"] = sum(done[:n_reach])
     report["expose_covered_before"] = sum(done[n_reach:])
 
@@ -1060,9 +1274,30 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
 
     def search(i, target, row_cap) -> None:
         """One target: climbs from the best starts, then its row — or a duplicate, or cut by the row cap."""
+        if propagate and check_rest.get(i):
+            # (review R84 I-R2-1) the suite rows its capped check left, before any climb: a target a suite row meets is
+            #   covered (no row — a re-search found such a row again and spent a row of the cap on it)
+            rest = check_rest.pop(i)
+            for start in range(0, len(rest), 16):
+                if exhausted():
+                    report[flag[0]] = True   # (review R84 I-R3-3)
+                    break
+                prun(rest[start:start + 16], i)
+                if any(pcache.get((vkey(v), i)) for v in rest[start:start + 16]):
+                    done[i] = True
+                    late_met.add(i)
+                    report["expose_covered_before"] += 1
+                    report["propagate_check_late"] += 1
+                    return
+            masked_rows[i] = (masked_rows.get(i, []) + [v for v in rest if pcache.get((vkey(v), i)) == ()])[:4]
         # (review R79 I1) only the starts that ran: one the budget never ran has no standing to rank by
-        ranked = sorted((v for v in starts + [row["vector"] for row in rows] if vkey(v) in cache),
-                        key=lambda v: score(v, target), reverse=True)
+        # (R84) and the suite rows that already expose the site — one move from changing an output
+        pool = [v for v in starts + [row["vector"] for row in rows] + masked_rows.get(i, []) if vkey(v) in cache]
+        prepare(pool, target)
+        # (review R84 C1) one vector once — in the propagating search only: before R84 a start equal to a row was climbed
+        #   twice (the second a cached no-op), and taking a third start instead changed which targets a spent budget left
+        ranked = sorted(({vkey(v): v for v in pool}.values() if propagate else pool), key=lambda v: score(v, target),
+                        reverse=True)
         found, why = None, ("local_best" if ranked else "budget")
         for s in ranked[:3]:
             found, why = climb(s, target)
@@ -1102,6 +1337,13 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         """(R79 review I-R2-1) An operator the model never records — in a macro's argument (its expansion is other
         text), on pointers: its statement runs on a clean path, its operands never come."""
         final = target[3]
+        if propagate and final[0] in ("bound", "flip"):
+            # (review R84 I2) a comparison evaluated on a clean run (its decision's instance observed it) whose operands
+            #   never came — a pointer comparison (`p != NULL`): no perturbation of it is ever seen
+            return not any(_records(r, "operands", final[1]) for r in cache.values()) and any(
+                clean(r) and any(len(inst.get("observed") or ()) > final[3] and inst["observed"][final[3]]
+                                 for inst in (((r.get("decisions") or {}).get(final[2]) or {}).get("instances") or ()))
+                for r in cache.values())
         w = holder_of.get(final[1]) if final[0] == "arith" else None
         return w is not None and not any(_records(r, "operands", final[1]) for r in cache.values()) and any(
             clean(r) and any(True in p for p in ((r.get("reach") or {}).get(w) or [])) for r in cache.values())
@@ -1114,8 +1356,8 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
         # (R79) the fault-exposing targets: their own runs · steps · rows and duplicates, after every reach target. A
         #   reach target a row of this phase reaches is reached (the suite holds the row) and counted as such
         #   (`reached_by_exposing_rows` — review R79 W2b); the reach phase's classification below reads its own runs
-        run_budget[0] = (len(cache), spent[0])
-        limits[:] = [MAX_EXPOSE_RUNS, MAX_EXPOSE_STEPS]
+        run_budget[0] = (nruns(), spent[0])
+        limits[:] = [MAX_PROPAGATE_RUNS, MAX_PROPAGATE_STEPS] if propagate else [MAX_EXPOSE_RUNS, MAX_EXPOSE_STEPS]
         flag[0] = "expose_budget_exhausted"
         duplicate_key[0] = "expose_duplicates"
         n_rows, n_held = len(rows), len(held)
@@ -1134,13 +1376,15 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                     #   output only written; an operator the model does not record): no move tells, so no search
                     why_of[i] = "unmodeled"
                     continue
-                search(i, target, MAX_EXPOSE_ROWS)
+                search(i, target, MAX_PROPAGATE_ROWS if propagate else MAX_EXPOSE_ROWS)
         except Exception as exc:  # noqa: BLE001 — the exposing phase never costs the reach phase's rows (review R79 I1)
             _log.warning("fault-exposing search failed (%s): %s", unit.get("name"), exc, exc_info=True)
             report["expose_error"] = type(exc).__name__
             del rows[n_rows:]
             del held[n_held:]
             done[:] = reach_done
+            for j in late_met:
+                done[j] = True   # (review R84 W-R3-1) a suite row met it — no row of this phase, nothing to undo
             report["expose_duplicates"] = 0
             cut_targets.difference_update(range(n_reach, len(targets)))   # (review R79 I-R3-1) their rows are gone
             for j in range(n_reach, len(targets)):
@@ -1190,6 +1434,10 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
             report["expose_unmodeled"] += 1
         elif why_of.get(i) in ("local_best", "climb_cap"):
             report["expose_local_best"] += 1   # a local best or the climb's move cap
+            if propagate and any(infected(r, targets[i]) for r in cache.values()):
+                # (R84; review W1) of those: some run exposed the site and no single move changed an output — not a
+                #   target the row cap, the budget or an error cut
+                report["propagate_infected_only"] += 1
         else:
             report["expose_budget_cut"] += 1
     if refused:
@@ -1261,10 +1509,15 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                  "targets_reached": sum(1 for i in row["hit"] if i < n_reach),
                  "exposures_met": sum(1 for i in row["hit"] if i >= n_reach),
                  "outputs_derived": sum(1 for o in (r.get("outputs") or {}).values() if "value" in o)}
-        if kind in EXPOSE_KINDS:
+        if propagate:
+            # (R84) the outputs the perturbed run changed — what a fault at the site changes on this row
+            entry["propagated"] = list(pcache.get((vkey(row["vector"]), row["target"])) or ())
+        if kind in EXPOSE_KINDS or kind == "flip":
             # (R79) the values that show it: the equal sides, the operands, the replaced and written values
             if kind == "boundary":
                 ok = [x[:2] for x in _records(r, "decides", final[1], size=3) if x[0] is not None and x[0] == x[1] and x[2]]
+            elif kind == "flip":
+                ok = [x[:2] for x in _records(r, "decides", final[1], size=3) if x[2]]   # (R84) where it decides
             else:
                 recs = _records(r, "writes" if kind == "write" else "operands", final[1])
                 ok = [x for x in recs if (kind == "write" and x[0] is not None and x[1] is not None and x[0] != x[1])

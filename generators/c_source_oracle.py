@@ -424,6 +424,9 @@ class _Interp:
         #   assignments whose replaced value to record (``("write", index)`` — `assign`): where a fault would show
         self.operand_marks: dict = {}
         self.write_marks: dict = {}
+        # (R84) one site whose value a propagation check changes — ``(kind, (start, end, type))`` over the function's own
+        #   text (`perturbed_binary` · `assign`); None on every other run
+        self.perturb: tuple | None = None
         # (R40) pointer parameter → the layout of the pointee the sequence set up for it (`pointee_binding`)
         self.pointees: dict[str, dict] = {}
         # (R81) the names the run is observed by (the row's outputs): a pointee the row observes is set up too
@@ -2251,7 +2254,37 @@ class _Interp:
                 # (R79) what this evaluation of a watched operator saw — a fault there changes the result only for
                 #   some operand values (equal sides of a comparison, a non-zero addend, a multiple of the divisor)
                 state.decisions.append((mark, ("outcome", self.watched_pair(left, right))))
+        if self.perturb is not None and raw is self.fn_raw and self.perturb[1] == (n.start_byte, n.end_byte, n.type):
+            return self.perturbed_binary(op, left, right, state)
         return self.arith_values(op, left, right, state)
+
+    def perturbed_binary(self, op, left, right, state):
+        """(R84) The watched operator's result changed the way a propagation check asks (``self.perturb``): a data-state
+        perturbation at that site (Voas, PIE) — not a mutant of the measuring tool. ``flip``: a comparison's result negated
+        on every evaluation (a condition taking the other outcome); ``flip_equal``: negated only where its two sides are
+        equal (the comparison's boundary point — what an off-by-one there changes); ``drop_right``: ``+`` ``-`` ``*`` as if
+        the right operand were the identity (a missing term or factor); ``step``: ``/`` ``%`` one unit off (the quotient's
+        step). A result the model does not know, or an operator the kind does not fit, stays as it is."""
+        kind = self.perturb[0]
+        value = self.arith_values(op, left, right, state)
+        if kind in ("flip", "flip_equal") and op in {"<", "<=", ">", ">=", "==", "!="}:
+            v = _known_int(value)
+            if v is None:
+                return value
+            if kind == "flip_equal":
+                a, b = self.watched_pair(left, right)
+                if a is None or b is None or a != b:
+                    return value
+            return _Val(0 if v else 1, value.t)
+        if kind == "drop_right" and op in {"+", "-", "*"} and isinstance(right.t, dict) and not cpc.is_float(right.t):
+            return self.arith_values(op, left, _Val(0 if op in {"+", "-"} else 1, right.t), state)
+        if kind == "step" and op in {"/", "%"}:
+            v = _known_int(value)
+            if v is None:
+                return value
+            lo, hi = cpc.type_range(value.t) if value.t["kind"] != "_Bool" else (0, 1)
+            return _Val(v + 1 if v + 1 <= hi else v - 1, value.t) if lo <= v - 1 or v + 1 <= hi else value
+        return value
 
     def operand_effectful(self, node, raw):
         """Can evaluating this operand change state — asked of the right operand of ``&&``/``||`` under an unknown left
@@ -2710,6 +2743,10 @@ class _Interp:
         left_node, right_node = n.child_by_field_name("left"), n.child_by_field_name("right")
         target = self.lvalue(state, left_node, raw, depth + 1)
         right = self.expression(state, right_node, raw, depth + 1)
+        if self.perturb is not None and self.perturb[0] == "skip_write" and op == "=" and raw is self.fn_raw and \
+                self.perturb[1] == (n.start_byte, n.end_byte, n.type):
+            # (R84) the write left out — the object keeps the value it held (its target and right side still evaluated)
+            return right
         mark = self.write_marks.get((n.start_byte, n.end_byte, n.type)) if self.write_marks and raw is self.fn_raw \
             else None
         old = self.peek_target(state, target) if mark is not None else None
@@ -4205,7 +4242,7 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
                       decisions: list[dict[str, Any]], guards: list[list] | tuple = (),
                       step_limit: int | None = None, inert_stub_calls: bool = False, reach: list[list] | tuple = (),
                       outputs: list[str] | None = None, operands: list[list] | tuple = (),
-                      writes: list[list] | tuple = ()) -> list[dict[str, Any]]:
+                      writes: list[list] | tuple = (), perturb: list | tuple | None = None) -> list[dict[str, Any]]:
     """(R2c) Per input vector: how each decision of the function evaluates on the modeled run.
 
     ``decisions``: ``[{"key": [start, end, type], "atoms": [[start, end, type], ...], "ir": nested list}]`` over the
@@ -4227,6 +4264,9 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
     (after the usual arithmetic conversions). A watched comparison that is a condition of a watched decision also gets
     ``(left, right, decides)`` per evaluation under ``"decides"`` (one evaluation: in a loop the sides may be equal on
     one pass and the condition decide on another). Watching adds no step to a run and no read to ``initial_reads``.
+
+    (R84) ``perturb``: ``[kind, [start, end, type]]`` — every run of this call changes that one site's value
+    (`_Interp.perturbed_binary` · a ``skip_write`` assignment): what a propagation check compares with the plain run.
 
     Like `evaluate_outputs` this is a model of the source, not an execution: reachability here is modeled, callee
     effects are the project write closure, and undefined behaviour proven on a run makes that vector unsupported.
@@ -4308,6 +4348,7 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
             interp.statement_marks = reach_keys
             interp.operand_marks = operand_keys
             interp.write_marks = write_keys
+            interp.perturb = (str(perturb[0]), tuple(perturb[1])) if perturb else None
             state = _State()
             interp.bind_parameters(state)
             finals = interp.run([state], fn.child_by_field_name("body"))

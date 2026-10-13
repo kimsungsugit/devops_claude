@@ -499,7 +499,9 @@ def test_the_second_search_has_no_exposing_targets(monkeypatch):
     unit.update({"fid": "F1", "input_vars": ["g_tmr"], "output_vars": ["g_flag", "g_tmr"],
                  "param_types": {"g_tmr": "U16", "g_flag": "U8"}, "uds_param_info": {"g_tmr": {"range": [0, 10]}}})
     generate_sequences(unit, None, type_cache={}, extended=True)
-    second = [kw for kw in calls if "home" in kw]
+    # (R84) the propagating search (`propagate=True`) is apart: over values outside the design it has exposing targets
+    #   on purpose — its rows are FI rows by what they carry (`PROPR_`), which is what R79 review W3 asked of such rows
+    second = [kw for kw in calls if "home" in kw and not kw.get("propagate")]
     assert second and all(kw.get("expose") is False for kw in second)
     assert all(kw.get("expose", True) for kw in calls if "home" not in kw)
 
