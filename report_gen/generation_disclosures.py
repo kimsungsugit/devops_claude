@@ -1986,6 +1986,14 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "sits_strategy_error", "전략 시트 생성 실패", "실패",
             f"통합 전략 근거 시트를 만들지 못했다 — {err[:160]}", tone="warning"))
 
+    # (R88) 템플릿(정본)에 있던 명세 · 전략 시트를 지웠다 — 이 문서에 정본의 옛 시험이 남지 않았다는 것
+    dropped = qr.get("template_sheets_dropped")
+    if isinstance(dropped, list) and dropped:
+        out.append(_item(
+            "sits_template_sheets_dropped", "템플릿의 정본 시트 제거", f"{len(dropped)}개",
+            "템플릿으로 쓴 정본의 통합시험 명세 · 통합 전략 시트를 지우고 이 문서의 시트로 다시 썼다(정본마다 시트 번호가 "
+            "달라 이름이 다른 시트가 남아 있었다): " + ", ".join(str(x) for x in dropped[:8]) + "."))
+
     # (R7/R9) 인터페이스 계약 — 근거로만 싣는다(시험 내용은 바꾸지 않는다). 못 읽은 파일·모호한 함수는 계약에서 빠진다.
     ic = qr.get("interface_contract")
     if isinstance(ic, dict):

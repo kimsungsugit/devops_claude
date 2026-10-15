@@ -2508,6 +2508,29 @@ def _norm_sheet_key(name: Any) -> str:
     return re.sub(r"\s+", "", str(name or "")).lower()
 
 
+# (R88) the reference SITS's own spec / strategy sheets under any numbering — the two references number them differently
+#   (KJPDS02 `3.SW Integration Test Spec` · `2.SW Integration Strategy`; HDPDM01 `4.SW Integration Test Spec` ·
+#   `3-1-1. / 3-1-2. SW Integration Strategy` · `3-2. Sw Integration Strategy`)
+_TEMPLATE_SPEC_RX = re.compile(r"^\d+(?:-\d+)*\.?sw(?:integrationtestspec|integrationstrategy)$")
+
+
+def _drop_template_spec_sheets(wb) -> List[str]:
+    """(R88) 템플릿(정본)에 있던 통합시험 명세 · 통합 전략 시트 중 이 생성기가 쓰는 이름(`_SPEC_SHEET_NAME` ·
+    `_STRATEGY_SHEET_NAME`)이 아닌 것을 지운다 — 남기면 생성 문서에 정본의 옛 시험이 그대로 실린다(HDPDM01 정본을
+    템플릿으로 쓰면 `4.SW Integration Test Spec` 의 정본 TC 77 개가 우리 `3.SW…` 옆에 남았다). 이 생성기의 이름과 같은
+    시트는 아래에서 지우고 다시 쓰거나(명세) 채운다(전략). 지운 시트 이름을 돌려준다."""
+    ours = {_norm_sheet_key(_SPEC_SHEET_NAME), _norm_sheet_key(_STRATEGY_SHEET_NAME)}
+    dropped = [sn for sn in wb.sheetnames
+               if _TEMPLATE_SPEC_RX.match(_norm_sheet_key(sn)) and _norm_sheet_key(sn) not in ours]
+    active_dropped = wb.active is not None and wb.active.title in dropped
+    for sn in dropped:
+        del wb[sn]
+    if active_dropped and wb.sheetnames:
+        # (리뷰 R88 I1) HDPDM01 정본은 지운 `4.SW…` 가 활성 시트였다 — 인덱스가 남아 엉뚱한 시트로 열렸다
+        wb.active = 0
+    return dropped
+
+
 def _find_sheet(wb, name: str):
     """정규화 이름이 같은 시트를 돌려준다(없으면 None). 표기 흔들림 흡수."""
     want = _norm_sheet_key(name)
@@ -2640,6 +2663,14 @@ def _write_strategy_sheet(
     from openpyxl.styles import Alignment, Font
 
     ws = _find_sheet(wb, _STRATEGY_SHEET_NAME)
+    if ws is not None:
+        # (리뷰 R88 W2) 템플릿(정본)이 이 이름의 시트를 갖고 있으면 그 블록이 남는다 — 트리는 6 행부터 덮어쓰기만 해서,
+        #   우리 트리 밖 정본 행 · 열이 섞였다(KJPDS02 정본: `SwIT_` 블록 51 개 · 2,766 칸). 머리(1~5 행) 아래를 비운다.
+        for rng in [r for r in ws.merged_cells.ranges if r.max_row >= 6]:  # scan-ok: CellRange bounds, not a sheet
+            ws.unmerge_cells(str(rng))
+        for row in ws.iter_rows(min_row=6, max_row=max(6, int(ws.max_row or 6))):
+            for c in row:
+                c.value = None
     if ws is None:
         ws = wb.create_sheet(_STRATEGY_SHEET_NAME)
         ws.cell(row=1, column=1, value="Software Integration Strategy").font = Font(
@@ -2843,7 +2874,8 @@ def generate_sits_xlsm(
     `strategy_context` 를 주면 근거 시트 두 벌(`2.SW Integration Strategy`,
     `Related_ID 확인`/`정리`)을 함께 채운다:
     `{calls_map, file_of, depth_of, uds_related_map, design_ids, stats_out}`.
-    안 주면 그 시트들은 템플릿 상태 그대로 나간다 — 조용히 빈 시트를 만들지는 않는다.
+    안 주면 그 시트들은 템플릿 상태 그대로 나간다 — 조용히 빈 시트를 만들지는 않는다. (R88) 단 템플릿(정본)의 명세 ·
+    전략 시트 중 이 생성기의 이름이 아닌 것(HDPDM01 `4.SW…` · `3-x.`)은 늘 지운다(`_drop_template_spec_sheets`).
     """
     try:
         import openpyxl
@@ -2859,9 +2891,15 @@ def generate_sits_xlsm(
     version = cfg.get("version", "v1.00")
     asil_level = cfg.get("asil_level", "")
 
+    _template_dropped: List[str] = []
     if template_path and Path(template_path).is_file():
         wb = openpyxl.load_workbook(template_path, keep_vba=True)
         _logger.info("Loaded SITS template: %s", template_path)
+        _template_dropped = _drop_template_spec_sheets(wb)
+        if _template_dropped:
+            _logger.info("SITS: 템플릿의 정본 명세 · 전략 시트를 지웠다 — %s", ", ".join(_template_dropped))
+        if strategy_context is not None and strategy_context.get("stats_out") is not None:
+            strategy_context["stats_out"]["template_sheets_dropped"] = list(_template_dropped)
     else:
         wb = openpyxl.Workbook()
         _create_sits_cover(wb, project_id, doc_id, version, asil_level, stp_context=stp_context)
@@ -3514,7 +3552,7 @@ def generate_sits(
     # `generate_itc_list` 의 FI 블록 주석 참조. 주지 않으면 전용 FI TC 는 0건이고
     # 그 사실이 로그와 `fi_requested`(=0)로 남는다.
     fi_design_ids: Optional[Sequence[str]] = None,
-    # (R75) `""`/`"reference"`(기본) = 위 두 상한 그대로. `"extended"` = 찾은 흐름 전부 + sub-case 후보 전부.
+    # (R75) `"reference"` = 위 두 상한 그대로. `""`/`"extended"`(기본, R87) = 찾은 흐름 전부 + sub-case 후보 전부.
     #   단일 정의는 `generators/tc_profile.py`. 확장은 상한을 **낮추지 않는다**(사용자가 더 크게 줬으면 그 값).
     tc_profile: str = "",
     # (R66) 호출자(라우트)가 SRS · SDS · UDS · HSIS · STP 를 로컬화하지 못한 사유 ``"<라벨>: <사유>"`` — 그 문서는 '주지 않음' 이
@@ -3946,6 +3984,9 @@ def generate_sits(
         quality_report.setdefault("integration_flow_coverage", {}).update(_late)
     if flow_stats.get("strategy_error"):
         quality_report["strategy_sheet_error"] = flow_stats["strategy_error"]
+    if flow_stats.get("template_sheets_dropped"):
+        # (리뷰 R88 W1) 흐름 축이 아니라 문서 구성 — 리포트에 따로 싣는다
+        quality_report["template_sheets_dropped"] = list(flow_stats["template_sheets_dropped"])
 
     # ── Stage 9.5: save intermediate JSON for VectorCAST export ─────────────
     try:
