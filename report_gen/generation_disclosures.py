@@ -1218,8 +1218,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"함수 {_show(_int(gaps, 'functions'))} · 객체 {_show(_int(gaps, 'names'))}",
                 "함수가 초기값을 읽는데(이 입력으로 돌리면 쓰기 전에 읽는다) 시험 입력 목록(설계서 입력 표·소스 분석)에 없는 "
                 "프로그램 객체다 — 설계서 입력 누락 또는 입력으로 적지 않은 내부 상태 후보. 'Source Findings' 시트의 "
-                "`read_not_in_unit_inputs` 행에 함수별 이름이 있다. 확장 프로파일은 이 객체를 입력 열로 더했다('소스가 읽어 더한 "
-                "입력').",
+                "`read_not_in_unit_inputs` 행에 함수별 이름이 있다. 두 프로파일 모두 이 객체를 입력 열로 더했다('소스가 읽어 더한 "
+                "입력' — 정본 규모 문서는 R86 부터, 그 행에선 고정값).",
                 tone=_tone(bool(_int(gaps, "functions")))))
         # (R80) 출력 목록 쪽 — 같은 시트의 다른 두 종류
         og = sf.get("output_list_gaps")
@@ -1236,7 +1236,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "기대 목록이 적었는데 함수도 그 피호출도 쓰지 않는 객체(프로젝트 쓰기 closure — 모르는 피호출 · 포인터 쓰기가 있는 "
                 "함수는 판정하지 않는다)는 `listed_output_not_written` 행이다 — 그 칸은 함수의 결함을 보지 못한다(다른 함수의 출력을 "
                 "옮겨 적은 것일 수 있다 — 그 칸은 그 객체에 쓰는 값의 결함을 보지 못한다). 기대 목록이 그 객체를 담은 구조체 · 배열을 "
-                "적었으면 적은 것으로 본다. 확장 프로파일은 앞의 객체 중 값이 도출되는 것을 기대 열로 더했다('소스가 써서 더한 "
+                "적었으면 적은 것으로 본다. 두 프로파일 모두(정본 규모는 R86 부터) 앞의 객체 중 값이 도출되는 것을 기대 열로 더했다('소스가 써서 더한 "
                 "기대값' — 적힌 구조체 · 배열의 멤버 · 원소도 값이 서면 열로 더하지만 소견에는 들지 않는다). volatile · 부동소수 "
                 "객체는 소견에는 들고 기대 열로는 더하지 않으며, const 객체는 세지 않는다. 첨자를 모르는 원소 쓰기 · 집합체 통째 "
                 "쓰기 · 모델이 배치하지 못한 배열(2 차원 · 구조체 배열)에 쓰는 것은 저장소가 이름으로 기록하지 않아 들지 않는다."
@@ -1450,6 +1450,36 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "확장 전략이 새로 만든 시퀀스와, 기본 카탈로그 안에 있었지만 정본 규모 문서의 행 수(상한)에 들지 못했거나 코드 기준 "
             "행에 자리를 내준 카탈로그 행(확장 문서에선 `CATALOG_<이름>`)이다. 둘을 합치면 기본 문서 대비 증분이다."))
 
+    # (R86) 정본 규모 문서의 열 — 확장 생성이 정한 열(소스가 읽는 입력 · 쓰는 출력) 위의 정본 규모 블록
+    rcol = qr.get("reference_columns")
+    if isinstance(rcol, dict) and _int(rcol, "units"):
+        _rerr = rcol.get("errors") if isinstance(rcol.get("errors"), dict) else {}
+        out.append(_item(
+            "suts_reference_columns", "정본 규모 문서의 열",
+            f"더한 입력 {_show(_int(rcol, 'inputs_added'))} (unit {_show(_int(rcol, 'units_with_added_inputs'))}) · 더한 출력 "
+            f"{_show(_int(rcol, 'outputs_added'))} (unit {_show(_int(rcol, 'units_with_added_outputs'))}) / unit "
+            f"{_show(_int(rcol, 'units'))}",
+            "정본 규모 문서의 행은 정본 규모 블록(행 수 그대로)이고, 열은 확장 생성이 정한 것이다 — 설계서 입출력 표에 더해 함수가 "
+            "읽는 입력(이 문서의 행에선 고정값 — '소스가 읽어 더한 입력' 항목)과 함수가 쓰는 출력('소스가 써서 더한 기대값' 항목). "
+            "설계서 표의 열만 쓰면 함수가 읽는 입력을 몰라 출력 값을 정하지 못하는 행이 많았다. 그 열을 정하려고 함수마다 확장 생성을 "
+            "한 번 돌리므로 생성 시간이 확장 프로파일만큼 든다. 이 문서의 행이 값을 내지 못한 더한 출력은 뺐다."
+            + (" 확장 생성(또는 그 열 위의 정본 규모 생성 — `reference_pass:`)이 실패해 설계서 열로만 만든 unit: " + ", ".join(f"{k} {v}" for k, v in sorted(_rerr.items())) + "."
+               if _rerr else "")
+            + (f" 확장 생성 안에서 입력 보완이 실패해 그 열을 설계서 열로 둔 unit "
+               f"{_show(_int(rcol, 'units_extension_round_errors'))} — 로그에 traceback 이 있다."
+               if _int(rcol, "units_extension_round_errors") else "")
+            + (f" 출력 보완이 회차 중 멈춰 그 뒤 출력 열을 더하지 못한 unit {_show(_int(rcol, 'units_extension_output_errors'))}"
+               "(입력 열 · 앞 회차의 출력 열은 남았다)." if _int(rcol, "units_extension_output_errors") else "")
+            + (f" 확장 생성의 마지막 출력 보완만 실패해 그 단계가 더한 출력 열을 되돌린 unit "
+               f"{_show(_int(rcol, 'units_extension_final_errors'))}(회차가 더한 입력 · 출력 열은 남았다)."
+               if _int(rcol, "units_extension_final_errors") else "")
+            + (f" 행이 같은 입력으로 만든 확장 문서의 앞 블록과 다른 unit {_show(_int(rcol, 'units_block_mismatch'))}("
+               + ", ".join(f"{k} {v}" for k, v in sorted((rcol.get("block_mismatch") or {}).items()))
+               + ") — 두 문서의 포함 관계(확장 문서가 이 문서로 시작한다)가 그 unit 에선 깨졌다."
+               if _int(rcol, "units_block_mismatch") else ""),
+            tone=_tone(bool(_rerr) or bool(_int(rcol, "units_extension_errors"))
+                       or bool(_int(rcol, "units_block_mismatch")))))
+
     # (R85) 정본 규모 문서의 코드 기준 행 — 두 프로파일(확장 문서의 정본 규모 블록에도 같은 행이 있다)
     rc = qr.get("reference_code_rows")
     if isinstance(rc, dict) and _int(rc, "units"):
@@ -1574,7 +1604,9 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" 기대값 열 상한 때문에 보이지 못한 기대값 {_show(_int(ri, 'outputs_over_cap'))}(단언하지 않음)."
                if _int(ri, "outputs_over_cap") else ""),
             tone=_tone(bool(_int(ri, "inputs_over_cap")))))
-    # (R19) 소스가 읽어 더한 입력 — 확장 프로파일에서만 기록된다. 설계서 입력 목록과 열이 달라지므로 늘 공시한다.
+    # (R19) 소스가 읽어 더한 입력 — 설계서 입력 목록과 열이 달라지므로 늘 공시한다. (R86) 두 프로파일: 정본 규모 문서도 확장
+    #   생성이 정한 열을 쓴다 — 그 문서엔 더한 입력을 움직이는 행 · 2 차 MC/DC 설계 · 회차 뒤 행이 없어 문구가 다르다(리뷰 R86 C1)
+    _refdoc = "tc_profile" in qr and qr.get("tc_profile") != "extended"
     sr = qr.get("source_read_inputs")
     if isinstance(sr, dict):
         not_added = sr.get("not_added") if isinstance(sr.get("not_added"), dict) else {}
@@ -1608,11 +1640,15 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                if isinstance(sr.get("prior_value_not_added"), dict) and sr.get("prior_value_not_added") else "")
             + (f" 회차 상한에서 쓰기 전 값으로 더하지 못하고 남은 이름 {_show(_int(sr, 'prior_values_beyond_cap'))} — 그 쓰기의 삭제는 "
                "이 문서가 가르지 못할 수 있다." if _int(sr, "prior_values_beyond_cap") else "")
-            + " 기본 카탈로그 행의 자리·순서·설계 열 값은 정본 규모 "
-            "문서와 같고 그 행에서 더한 입력은 고정값이다. 더한 입력의 범위(선언 타입 전폭, enum 은 그 번역 단위의 열거자 — 설계서·"
-            "HSIS 의 입력 표는 이 이름을 적지 않았다; 쓰기 전 값 입력이 설계 출력이면 설계서 출력 행의 범위)는 단독 경계(OAT)·행동 "
-            "경계 행이 움직인다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 "
-            f"회차에 더한다(최대 {_show(_int(sr, 'max_rounds'))}회차 사용"
+            + ((" 이 문서(정본 규모)의 열은 같은 입력으로 돌린 확장 생성이 정했고('정본 규모 문서의 열' 항목) 행은 정본 규모 블록이라, "
+                "더한 입력은 모든 행에서 한 고정값이다 — 그 범위(선언 타입 전폭, enum 은 그 번역 단위의 열거자)를 움직이는 단독 경계"
+                "(OAT)·행동 경계 행은 확장 문서에만 있다. 아래 회차 · 처음 본 칸 수는 확장 생성의 것이고, 남은 이름은 이 문서의 "
+                "행으로 다시 센 것이다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 ") if _refdoc else
+               (" 기본 카탈로그 행의 자리·순서·설계 열 값은 정본 규모 "
+                "문서와 같고 그 행에서 더한 입력은 고정값이다. 더한 입력의 범위(선언 타입 전폭, enum 은 그 번역 단위의 열거자 — 설계서·"
+                "HSIS 의 입력 표는 이 이름을 적지 않았다; 쓰기 전 값 입력이 설계 출력이면 설계서 출력 행의 범위)는 단독 경계(OAT)·행동 "
+                "경계 행이 움직인다. 더한 입력이 연 경로에서 새로 보인 이름은 다음 "))
+            + f"회차에 더한다(최대 {_show(_int(sr, 'max_rounds'))}회차 사용"
             + (f" · 상한 {_show(_int(sr, 'round_cap'))}회차" if _int(sr, "round_cap") else "")
             + (f" · 상한에서 멈춰 다음 회차가 더했을 이름 {_show(_int(sr, 'names_beyond_cap'))}"
                f"(unit {_show(_int(sr, 'units_round_cap_reached'))}) — 그 이름을 읽는 칸은 [검증 필요]로 남는다"
@@ -1627,32 +1663,38 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                "읽는 칸은 [검증 필요]로 남는다. " if _int(sr, "units_buffer_elements_full") else "")
             + (f"마지막 회차에도 남은 이름 {_show(_int(sr, 'names_remaining'))}(unit {_show(_int(sr, 'units_with_remaining'))})"
                " 은 그 칸을 [검증 필요] 로 둔다. " if _int(sr, "names_remaining") else "")
-            + "MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(기본 MC/DC 설계는 "
-            "설계 입력 목록 위에서 하고, 그 설계가 쌍을 못 만든 결정만 더한 입력까지 써서 다시 설계한다 — 'MC/DC 설계' 항목·"
-            "'Input Scope' 열)."
+            + ("MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(MC/DC 설계는 설계 입력 "
+               "목록 위에서 한다 — 더한 입력까지 써서 다시 설계한 쌍과 빈칸을 채운 동반 행은 확장 문서에만 있다)." if _refdoc else
+               "MC/DC 설계 벡터는 결정이 읽는 입력만 적으므로 더한 열이라도 그 행에선 비어 있을 수 있다(기본 MC/DC 설계는 "
+               "설계 입력 목록 위에서 하고, 그 설계가 쌍을 못 만든 결정만 더한 입력까지 써서 다시 설계한다 — 'MC/DC 설계' 항목·"
+               "'Input Scope' 열).")
             + (f" 입력 보완 중 오류로 설계 입력 목록 그대로 둔 unit {_show(_int(sr, 'errors'))} — 로그에 traceback 이 있다."
                if _int(sr, "errors") else ""),
             tone=_tone(bool(_int(sr, "units_input_columns_full")) or bool(_int(sr, "errors"))
                        or bool(_int(sr, "units_round_cap_reached")) or bool(_int(sr, "units_buffer_elements_full")))))
-    # (R80) 소스가 써서 더한 기대값 — 확장 프로파일에서만 기록된다. 설계서 출력 목록과 열이 달라지므로 늘 공시한다.
+    # (R80) 소스가 써서 더한 기대값 — 설계서 출력 목록과 열이 달라지므로 늘 공시한다(R86 두 프로파일)
     sw = qr.get("source_written_outputs")
     if isinstance(sw, dict):
         sw_not = sw.get("not_added") if isinstance(sw.get("not_added"), dict) else {}
         out.append(_item(
             "suts_source_written_outputs", "소스가 써서 더한 기대값",
             f"unit {_show(_int(sw, 'units_with_added'))}/{_show(_int(sw, 'units'))} · 이름 {_show(_int(sw, 'names_added'))}",
-            "이 문서의 행으로 함수(원본 코드 모델)를 돌렸을 때 실행이 쓰고 그 뒤 값이 도출되는 번역 단위 객체 중 시험 기대 목록"
+            ("같은 입력으로 돌린 확장 생성의 행으로" if _refdoc else "이 문서의 행으로")
+            + " 함수(원본 코드 모델)를 돌렸을 때 실행이 쓰고 그 뒤 값이 도출되는 번역 단위 객체 중 시험 기대 목록"
             "(설계서 출력 표·소스 분석)에 없는 것을 기대값 열로 더했다 — 설계서 출력 표와 다른 열이다. 입력 보완(소스가 읽어 더한 "
             "입력)과 같은 회차에 더하고, 더한 출력을 쓰지 않는 경로의 최종값(=초기값)은 다음 회차의 입력이 된다"
             + (f"(최대 {_show(_int(sw, 'max_rounds'))}회차" + (f" · 회차 상한에 남은 후보가 있던 unit "
                                                               f"{_show(_int(sw, 'units_round_cap_reached'))}"
                                                               if _int(sw, "units_round_cap_reached") else "") + ")"
                if _int(sw, "max_rounds") else "")
-            + f". 회차 뒤에 붙는 행(경계 · 강건성 · 출력 관측 쌍 · 설계 범위 밖 시나리오)이 쓴 객체는 마지막에 더하고 모든 행의 "
-            f"근거를 다시 붙였다(그 이름 {_show(_int(sw, 'names_added_final'))} — 그 열을 쓰지 않는 경로의 초기값은 입력으로 더할 "
+            + (". 확장 문서에서 회차 뒤에 붙는 행(경계 · 강건성 · 출력 관측 쌍 · 설계 범위 밖 시나리오)이 쓴 객체도 마지막에 더했고, "
+               "이 문서(정본 규모 블록)의 행으로 근거를 다시 붙였다(그 이름" if _refdoc else
+               ". 회차 뒤에 붙는 행(경계 · 강건성 · 출력 관측 쌍 · 설계 범위 밖 시나리오)이 쓴 객체는 마지막에 더하고 모든 행의 "
+               "근거를 다시 붙였다(그 이름")
+            + f" {_show(_int(sw, 'names_added_final'))} — 그 열을 쓰지 않는 경로의 초기값은 입력으로 더할 "
             f"회차가 없어 그 칸은 [검증 필요] 로 남는다: 그런 이름 {_show(_int(sw, 'names_final_initial_not_in_inputs'))}). "
-            "어느 행도 값을 내지 못해 다시 뺀 이름 "
-            f"{_show(_int(sw, 'names_dropped_underived'))}"
+            + ("이 문서의 행이 값을 내지 못해 다시 뺀 이름(확장 생성에서 뺀 것 포함) " if _refdoc else "어느 행도 값을 내지 못해 다시 뺀 이름 ")
+            + f"{_show(_int(sw, 'names_dropped_underived'))}"
             + (f"(그 출력 때문에 더한 입력이 남은 것 {_show(_int(sw, 'inputs_kept_for_dropped'))})"
                if _int(sw, "inputs_kept_for_dropped") else "")
             + f" · 쓰지만 값이 한 번도 서지 않아 더하지 않은 이름 {_show(_int(sw, 'names_never_known'))}. 함수 실행 모델이 쓴 것만 "

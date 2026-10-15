@@ -1547,9 +1547,11 @@ def _build_doc_proposal(
         except Exception as _e:  # noqa: BLE001 — 없으면 빈 맵(다른 프로젝트 SDS 로 대체하지 않는다)
             logger.debug("doc_proposal sds_map 해석 실패: %s", _e)
 
-    # ── SUTS: 대상 함수만 collect_unit_functions → generate_sequences(문서 생성과 동일 경로) ──
+    # ── SUTS: 대상 함수만 collect_unit_functions → reference_unit_sequences(문서 생성과 동일 경로 — R86: 정본 규모 문서도 확장
+    #   생성이 정한 열(소스가 읽는 입력 · 쓰는 출력)을 쓴다. 설계서 열만 쓰던 generate_sequences 로는 초안과 문서의 행이 갈린다 —
+    #   리뷰 R86 W3. 함수마다 확장 생성을 한 번 돌리므로 초안도 그만큼 든다) ──
     # 타입 해상도(핵심): gim에서 {var: raw_type} 로컬 타입맵(_gim_to_type_map — set_globals_type_cache와
-    #   동일 단일출처)을 만들어 generate_sequences(type_cache=)로 **명시 주입**한다. 이러면 실 문서생성
+    #   동일 단일출처)을 만들어 reference_unit_sequences(type_cache=)로 **명시 주입**한다(안쪽 generate_sequences 까지). 이러면 실 문서생성
     #   (set_globals_type_cache→프로세스 전역)과 동일한 타입으로 경계값을 산출하면서도 전역을 일절 변이
     #   시키지 않아, 동시 문서생성과의 write-race/타 프로젝트 오염을 원천 차단한다(파라미터 격리). 과거엔
     #   set_globals_type_cache 미호출→빈/stale 전역→uint8 폴백이라 U32/UINT16/bool 변수의 경계 max 를
@@ -1566,8 +1568,8 @@ def _build_doc_proposal(
             collect_unit_functions,
             determine_gen_method,
             determine_test_method,
-            generate_sequences,
             normalize_pointer_parameters,
+            reference_unit_sequences,
         )
         from workflow.impact_doc_draft import build_var_types
 
@@ -1587,8 +1589,8 @@ def _build_doc_proposal(
             #   seq_cap을 그대로 넘기면 반환 길이가 항상 ≤seq_cap이라 "총 몇 개를 만들 수 있는지"를
             #   알 수 없고, len>cap이 성립할 수 없어 truncated가 영구 False(dead code)가 된다.
             #   생성기 기본값(_DEFAULT_SEQ_COUNT)까지 만들어 **진짜 총량**을 재고, 표시분만 잘라 싣는다.
-            _all_seq = [s for s in (generate_sequences(_unit, max_seq=max(seq_cap, _DEFAULT_SEQ_COUNT),
-                                                       type_cache=_local_tc) or [])
+            _all_seq = [s for s in (reference_unit_sequences(_unit, max(seq_cap, _DEFAULT_SEQ_COUNT),
+                                                             type_cache=_local_tc) or [])
                         if isinstance(s, dict)]
             # ⚠ inputs/expected를 `dict(...)` 그대로 실으면 시퀀스마다 SUTS 입력 49 + 출력 86개를
             #   통째로 싣는다(실측: doc_proposal의 64%가 이 노드). doc_content 쪽과 같은 캡을 적용하고,
@@ -3331,6 +3333,11 @@ def run_impact_update(
         # function_details 없으면 _build_doc_proposal이 graceful 빈 dict를 돌려준다.
         # doc_content/change_details도 넘긴다 — 소스 미해결(cloudium)이면 그걸 근거로 폴백 합성한다
         # (소스가 안 잡히는 환경이 곧 문서는 읽히는 환경이라, 없으면 화면에 골격만 남는다).
+        if callable(on_progress) and _changed_set and sections.get("function_details"):
+            # (review R86 W-R2-1 · I-R3-3: only when the source is there — a document fallback runs no generator) the SUTS draft runs the document's reference-profile path — one extended generation per
+            #   function (seconds each) — the long stretch after the impact step is this one
+            on_progress("doc_proposal", "문서 생성 초안을 합성 중입니다(SUTS 는 함수마다 확장 생성 포함).",
+                        {"changed_functions": len(_changed_set)})
         doc_proposal = _build_doc_proposal(
             sections, _changed_set, warn_sink=warnings,
             doc_content=doc_content, change_details=change_details,

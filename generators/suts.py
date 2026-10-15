@@ -3642,6 +3642,30 @@ def _drop_duplicate_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], 
     return kept
 
 
+def summarize_reference_columns(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R86) 정본 규모 문서의 열 — 확장 생성이 정한 열을 쓴 unit · 더한 입력 · 출력 열 수 · 확장 생성이 실패해 설계서 열로 만든 unit."""
+    recs = [u.get("reference_columns") for u in units if isinstance(u.get("reference_columns"), dict)]
+    return {"units": len(recs), "units_with_added_inputs": sum(1 for r in recs if r.get("inputs_added")),
+            "units_with_added_outputs": sum(1 for r in recs if r.get("outputs_added")),
+            "inputs_added": sum(int(r.get("inputs_added") or 0) for r in recs),
+            "outputs_added": sum(int(r.get("outputs_added") or 0) for r in recs),
+            "errors": dict(Counter(str(r["error"]) for r in recs if r.get("error"))),
+            # (review R86 I2) the extended generation fell back to the design columns inside — the columns it kept
+            "units_extension_errors": sum(1 for r in recs if r.get("extension_errors")),
+            # (review R86 W-R3-2 · W-R4-1) three kinds — the input completion failed (both records carry the error and
+            #   the columns went back to the design's); only the written-output axis stopped in a round (the input
+            #   columns and the earlier rounds' outputs stay); only the final step failed (its late outputs went back)
+            "units_extension_round_errors": sum(1 for r in recs if "source_read_inputs" in (r.get("extension_errors") or {})),
+            "units_extension_output_errors": sum(1 for r in recs if "source_written_outputs" in (r.get("extension_errors") or {})
+                                                 and "source_read_inputs" not in (r.get("extension_errors") or {})),
+            # (review R86 I-R5-1) only when it is the sole error — a unit that also failed earlier is said there once
+            "units_extension_final_errors": sum(1 for r in recs if set(r.get("extension_errors") or {})
+                                                == {"source_written_outputs.final"}),
+            # (review R86 W2) the reference-scale rows differ from the extended document's block — R75 inclusion broken
+            "units_block_mismatch": sum(1 for r in recs if r.get("block_mismatch")),
+            "block_mismatch": dict(Counter(str(r["block_mismatch"]) for r in recs if r.get("block_mismatch")))}
+
+
 def summarize_duplicate_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
     recs = [u.get("duplicate_rows") for u in units if isinstance(u.get("duplicate_rows"), dict)]
     return {"units": len(recs),
@@ -4007,6 +4031,7 @@ def generate_sequences(
     _design_out_list = ([v for v in unit["design_output_vars"] if v in output_vars]
                         if isinstance(unit.get("design_output_vars"), list) else list(output_vars))
     _added_inputs = [v for v in input_vars if v not in set(_design_inputs)]
+    _added_set_all = frozenset(_added_inputs)
     # (R82) inputs added only as a write's prior value — the function writes them, it does not read them
     _prior_inputs = _prior_input_names(unit)
     _design_toggles = [v for v in _design_inputs if var_types.get(v) != _UNKNOWN_TYPE]
@@ -4158,7 +4183,9 @@ def generate_sequences(
             return f"유효 {direction}: 방어 처리 확인 (포화 추정)"
 
     _fill_all: Dict[str, int] = {}
-    if extended:
+    # (R86) also when the unit has added inputs: the reference-scale document on the extension's columns holds them at the
+    #   extended block's fixed value (`reference_unit_sequences`) — before R86 a reference-scale unit had none
+    if extended or _added_inputs:
         from generators.boundary_rows import blank_fill
         _fill_domains = {v: d for v, d in _boundary_domains(unit, input_vars, var_types, var_bounds,
                                                             set(_unknown_vars), _domains).items()
@@ -4387,8 +4414,10 @@ def generate_sequences(
                  "var_types": dict(var_types), "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars),
                  "declared": sorted(v for v in _design_inputs if _declared(v) and not _is_pointer_decl(v)),
                  "enum_sets": dict(_domains) if _pointee_domains else None}
+    # (R86) the reference-scale document on the extension's columns (`reference_unit_sequences`) holds the added inputs
+    #   of its code rows at the same fixed value as the extended block — before R86 it had no added inputs (empty)
     _added_fill = {v: _format_test_value(_fill_all[v], var_types.get(v, "uint8_t"))
-                   for v in _added_inputs if v in _fill_all} if extended else {}
+                   for v in _added_inputs if v in _fill_all}
     _ref_cap = reference_cap if extended else max_seq
     sequences = _reference_scale_block(
         unit, sequences, _base_strategy_count,
@@ -4444,10 +4473,19 @@ def generate_sequences(
         if _is_ext:
             # (R58) 설계서 입력 표 밖 입력(소스가 읽는 전역)까지 움직여 찾은 쌍 — 정본 규모 문서엔 없는 행이다
             _lines[0] += " · 소스가 읽어 더한 입력까지 쓴 설계(확장)"
-        _blank = [v for v in input_vars if v not in _row["inputs"]]
+        _blank = [v for v in input_vars if v not in _row["inputs"] and v not in _added_set_all]
+        _blank_added = [v for v in input_vars if v not in _row["inputs"] and v in _added_set_all and v not in _prior_inputs]
+        _blank_prior = [v for v in input_vars if v not in _row["inputs"] and v in _added_set_all and v in _prior_inputs]
         if _blank:
             # (R81) 결정이 읽지 않고 도메인도 모르는 입력은 비운 칸이다 — 값이 없다는 것을 행에서 말한다.
             _lines[0] += f" · 설계 밖 입력(공란, 결정 무관·도메인 미상): {', '.join(_blank)}"
+        if _blank_added:
+            # (review R86 I-R2-7) a source-read input has a declared domain — blank because the vector names only the
+            #   inputs its decision reads (the extended document's fill rows give it the fixed value)
+            _lines[0] += f" · 소스가 읽어 더한 입력(공란, MC/DC 벡터는 결정이 읽는 입력만): {', '.join(_blank_added)}"
+        if _blank_prior:
+            # (review R86 I-R3-2) the function writes these — the call's prior value (R82 I-R5-5 wording)
+            _lines[0] += f" · 쓰기 전 값(공란, MC/DC 벡터는 결정이 읽는 입력만): {', '.join(_blank_prior)}"
         _row["description"] = "\n".join(_lines)
     if extended:
         # (R19) MC/DC 벡터가 비운 결정 무관 입력을 채운 동반 행(벡터 행·쌍 주장은 그대로). 선택 확장이라 실패해도 문서는 만든다.
@@ -5942,31 +5980,41 @@ def summarize_source_written_outputs(units: List[Dict[str, Any]]) -> Dict[str, A
             "errors": sum(1 for r in recs if r.get("error") or r.get("final_error"))}
 
 
-def extended_unit_sequences(unit: Dict[str, Any], reference_cap: Optional[int] = _DEFAULT_SEQ_COUNT
+# (R80) the unit keys the extended generation's rounds change — restored when the completion fails, and (R86) the
+#   columns the reference-scale document takes over (one tuple, so a key added here reaches both — review R86 I4)
+_EXTENDED_COLUMN_KEYS = ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains",
+                         "output_vars", "design_output_vars")
+
+
+def extended_unit_sequences(unit: Dict[str, Any], reference_cap: Optional[int] = _DEFAULT_SEQ_COUNT,
+                            type_cache: Optional[Dict[str, str]] = None, keep_code_rows: bool = False
                             ) -> List[Dict[str, Any]]:
     """(R19) 확장 프로파일의 unit 시퀀스 — 경계 행 없이 만들고 → 소스가 읽는 입력을 더해 다시 만들고 → 경계 행을 **한 번** 붙인다
     (리뷰 R1 W6: 첫 판은 경계 탐색을 두 번 했다). 입력 보완이 실패하면 그 unit 은 설계 입력 목록 그대로 만든다(선택 확장이 문서를
-    잃게 하지 않는다 — R15 규칙)."""
+    잃게 하지 않는다 — R15 규칙). ``type_cache``: `generate_sequences` 의 명시 타입 맵(영향도 초안 — 프로세스 전역을 쓰지 않는다).
+    ``keep_code_rows``(R86): 회차가 쓴 코드 기준 행 캐시를 `unit["_code_rows_kept"]` 로 남긴다(`reference_unit_sequences`)."""
     # (R85) `reference_cap`: 같은 SCM 의 정본 규모 문서가 쓴 상한 — 확장 문서의 앞부분이 그 문서다(리뷰 R85 C1)
-    seqs = generate_sequences(unit, None, extended=True, boundary_rows=False, reference_cap=reference_cap)
-    _keys = ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains",
-             "output_vars", "design_output_vars")   # (R80) the output axis too
+    def _gen() -> List[Dict[str, Any]]:
+        return generate_sequences(unit, None, extended=True, boundary_rows=False, reference_cap=reference_cap,
+                                  type_cache=type_cache)
+    seqs = _gen()
     snapshot = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
-                for k in _keys if (v := unit.get(k)) is not None}
+                for k in _EXTENDED_COLUMN_KEYS if (v := unit.get(k)) is not None}
     try:
-        seqs = complete_source_read_inputs(
-            unit, seqs, lambda: generate_sequences(unit, None, extended=True, boundary_rows=False,
-                                                   reference_cap=reference_cap))
+        seqs = complete_source_read_inputs(unit, seqs, _gen)
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
         _logger.warning("SUTS 소스 읽기 입력 보완 실패(%s): %s", unit.get("name"), exc, exc_info=True)
-        for k in _keys:
+        for k in _EXTENDED_COLUMN_KEYS:
             unit.pop(k, None)
         unit.update(snapshot)
         unit["source_read_inputs"] = {"error": type(exc).__name__, "added": {}, "not_added": {}, "rounds": 0,
                                       "remaining": {}}
         unit["source_written_outputs"] = {**_new_written_record(), "error": type(exc).__name__}
-        seqs = generate_sequences(unit, None, extended=True, boundary_rows=False, reference_cap=reference_cap)
-    unit.pop("_code_rows_cache", None)   # (R85) the reference-scale code rows of the rounds — the same search each round
+        seqs = _gen()
+    # (R85) the reference-scale code rows of the rounds — the same search each round
+    _cache = unit.pop("_code_rows_cache", None)
+    if keep_code_rows and _cache is not None:
+        unit["_code_rows_kept"] = _cache
     seqs = append_boundary_rows(unit, seqs)
     # (R80) 회차 뒤에 붙은 행이 쓴 객체까지 — 경계 · 설계 범위 밖 시나리오 행만 닿는 경로(enum default 등)
     seqs = complete_source_written_outputs(unit, seqs)
@@ -5974,12 +6022,130 @@ def extended_unit_sequences(unit: Dict[str, Any], reference_cap: Optional[int] =
     return seqs
 
 
+# (R86) what the reference-scale document takes from the extended generation: its columns, and the two records that say
+#   where they came from (`_prior_input_names` · `_added_inputs` read them while the block is built)
+_REFERENCE_COLUMN_KEYS = _EXTENDED_COLUMN_KEYS + ("source_read_inputs", "source_written_outputs")
+# (review R86 W1) what the written-output completion sets only when it has something to say — a value pass 1 left
+#   describes the extended rows, so the reference-scale pass counts afresh
+_WRITTEN_RECOUNT_KEYS = ("written_past_allocation", "final_initial_not_in_inputs", "pointee_rerun_cap_reached")
+
+
+def _block_view(seqs: List[Dict[str, Any]]) -> List[Tuple[str, str, str]]:
+    """(review R86 W2) a row as the reference-scale document states it — name, inputs, the derived expected values."""
+    out = []
+    for s in seqs:
+        ev = s.get("expected_evidence") or {}
+        stated = {k: v for k, v in (s.get("expected") or {}).items() if (ev.get(k) or {}).get("status") == "derived"}
+        out.append((str(s.get("strategy") or ""), json.dumps(s.get("inputs") or {}, sort_keys=True, default=str),
+                    json.dumps(stated, sort_keys=True, default=str)))
+    return out
+
+
+def reference_unit_sequences(unit: Dict[str, Any], max_seq: Optional[int] = _DEFAULT_SEQ_COUNT,
+                             type_cache: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """(R86) 정본 규모 문서 — 열은 확장 생성이 정한 것(소스가 읽는 입력 R19 · 소스가 쓰는 출력 R80 · 그 입력의 고정값), 행은
+    정본 규모 블록(R85, 행 수 그대로).
+
+    R85 뒤에도 정본만 잡는 변이(KJPDS02_PV 246 · HDPDM01 158)의 대부분은 정본 규모 문서의 **열**이 설계서 입출력 표뿐이라서였다:
+    함수가 읽는 입력이 열에 없어 출력 값을 정하지 못하거나(`s_MotorSpeedModeSelection_RearSet` 입력 2 개 — 확장은 12 개를 더해
+    출력 4 개를 정한다) 정본이 쓰는 입력이 생성 열에 없었다(`sf_LinUdsSecurityAccess` 의 응답 버퍼 원소). R19 · R80 이 그 열을
+    찾았지만 확장 프로파일에만 넣었다(R78 · R85 와 같은 '확장에만 고침'). 확장 문서의 앞 블록은 정본 규모 블록과 같은 행이므로
+    (R85 — 두 프로젝트 모든 함수에서 이름 · 순서 · 값 같음) 그 블록을 확장의 열로 적으면 정본 규모 문서가 잡던 것은 그대로 잡는다.
+
+    두 단계: ① 이 unit 으로 `extended_unit_sequences` 를 돌려 열을 정하고, 그 열 키(`_REFERENCE_COLUMN_KEYS`)만 남긴다 — 확장
+    생성이 unit 에 남긴 다른 기록(MC/DC 설계 · 경계 탐색 · 중복 행 · 관측 쌍 …)은 확장 행을 가리키므로 지운다(행만 걸러 내면
+    그 기록이 없는 행을 가리킨다) ② 그 열 위에서 정본 규모 생성(`generate_sequences(unit, max_seq)`) — MC/DC 쌍 확정 · 중복 행 ·
+    코드 기준 행 기록이 이 문서의 행만으로 서고, 더한 입력은 확장 블록과 같은 고정값이며, 코드 기준 행은 ①의 회차가 찾은 것을
+    쓴다(같은 탐색 문맥이면 — 리뷰 R86 W2: 회차 뒤 더한 출력이 oracle 의 관측 · 버퍼 할당을 바꿔 새로 찾으면 다를 수 있다). 그 뒤
+    이 문서의 행이 값을 내지 못한 더한 출력은 다시 빼고(`complete_source_written_outputs`) 남은 이름을 이 행으로 센다. ②의 행이
+    ①의 확장 문서 앞 블록과 다르면 `block_mismatch` 로 남긴다(R75 포함 관계의 상시 점검 — 공시). ① 이나 ② 가 실패하면 설계서
+    열로 만들고 사유를 남긴다(`reference_columns.error`). 시간은 확장 생성만큼 든다(공시)."""
+    before = set(unit)
+    snapshot = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+                for k in _REFERENCE_COLUMN_KEYS if (v := unit.get(k)) is not None}
+    design_in, design_out = list(unit.get("input_vars") or []), list(unit.get("output_vars") or [])
+
+    def _restore() -> None:
+        for k in set(unit) - before:
+            unit.pop(k, None)
+        for k in _REFERENCE_COLUMN_KEYS:
+            unit.pop(k, None)
+        unit.update(snapshot)
+
+    error, block, cache = None, None, None
+    try:
+        ext = extended_unit_sequences(unit, max_seq, type_cache=type_cache, keep_code_rows=True)
+        block = _block_view([s for s in ext if not is_extended_strategy(s.get("strategy"))])
+        del ext   # (review R86 I-R2-3) the extended rows and their evidence are not needed past this point
+        cache = unit.pop("_code_rows_kept", None)
+    except Exception as exc:  # noqa: BLE001 — the columns are an addition; the document keeps its design columns
+        _logger.warning("SUTS 정본 규모 열(확장 생성) 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        error = type(exc).__name__
+    # (review R86 I2) a completion error inside the extended generation keeps the design columns there — said here too
+    #   (review R86 I-R2-1) and the written-output completion's own final error
+    partial = {f"{k}{suffix}": rec.get(f) for k in ("source_read_inputs", "source_written_outputs")
+               for f, suffix in (("error", ""), ("final_error", ".final"))
+               if isinstance(rec := unit.get(k), dict) and rec.get(f)} if not error else {}
+    for k in set(unit) - before - set(_REFERENCE_COLUMN_KEYS):
+        unit.pop(k, None)
+    seqs: Optional[List[Dict[str, Any]]] = None
+    if not error:
+        if cache is not None:
+            unit["_code_rows_cache"] = cache   # the reference-scale generation pops it when done
+        rec = unit.get("source_written_outputs")
+        for k in (_WRITTEN_RECOUNT_KEYS + ("final_error",)) if isinstance(rec, dict) else ():
+            rec.pop(k, None)   # pass 1's final error is in `extension_errors`; pass 2 records its own
+        try:
+            seqs = generate_sequences(unit, max_seq, type_cache=type_cache)
+            seqs = complete_source_written_outputs(unit, seqs)
+            _recount_final_initial(unit, seqs)
+            _record_remaining(unit, seqs)
+        except Exception as exc:  # noqa: BLE001 — review R86 I1: the extended columns never cost the document
+            _logger.warning("SUTS 정본 규모 생성(확장 열) 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            error, seqs = f"reference_pass:{type(exc).__name__}", None
+        unit.pop("_code_rows_cache", None)
+    if error:
+        _restore()
+        seqs = generate_sequences(unit, max_seq, type_cache=type_cache)
+    mismatch = None
+    if not error and block is not None:
+        mine = _block_view(seqs)
+        if [m[0] for m in mine] != [b[0] for b in block]:
+            mismatch = "names"
+        elif [m[1] for m in mine] != [b[1] for b in block]:
+            mismatch = "inputs"
+        elif mine != block:
+            mismatch = "expected"
+    unit["reference_columns"] = {
+        # (review R86 I-R2-2) a unit that fell back reports its error only — not also the pass-1 partial errors
+        "error": error, "extension_errors": {} if error else partial, "block_mismatch": mismatch,
+        "inputs_added": 0 if error else len([v for v in unit.get("input_vars") or [] if v not in design_in]),
+        "outputs_added": 0 if error else len([v for v in unit.get("output_vars") or [] if v not in design_out])}
+    return seqs
+
+
+def _recount_final_initial(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
+    """(review R86 W1) the late (final-round) written outputs whose unwritten path needs an initial value no column gives —
+    counted over these rows (pass 1 counted the extended rows)."""
+    rec = unit.get("source_written_outputs")
+    if not isinstance(rec, dict):
+        return
+    finals = {n for n, a in (rec.get("added") or {}).items() if (a or {}).get("round") == "final"}
+    left = sorted(n for n in finals if any(
+        str((ev or {}).get("reason") or "").startswith(UNWRITTEN_OUTPUT_PREFIX)
+        for s in sequences for k, ev in (s.get("expected_evidence") or {}).items() if k == n))
+    if left:
+        rec["final_initial_not_in_inputs"] = left
+    else:
+        rec.pop("final_initial_not_in_inputs", None)
+
+
 def input_list_gaps(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """함수가 초기값을 읽는데 시험 입력 목록에 없던 **프로그램 객체** → {"slots", "sequences", "added"}(소스 소견의 한 종류).
 
-    확장 프로파일에선 R19 가 더한 이름 — 이 문서에선 막힌 칸이 아니므로 칸 수·행 번호는 0/빈 목록이다(처음 본 칸 수는 품질 리포트
-    `source_read_inputs.slots_first_seen`, 리뷰 R1 W5) — 과 여전히 값 없이 읽는 이름, 기본 프로파일에선 문서 행의 사유에서 본
-    이름이다. 지역·멤버 경로·모르는 이름은 입력 목록의 결손이 아니다."""
+    R19 가 더한 이름 — 이 문서에선 막힌 칸이 아니므로 칸 수·행 번호는 0/빈 목록이다(처음 본 칸 수는 품질 리포트
+    `source_read_inputs.slots_first_seen`, 리뷰 R1 W5) — 과 여전히 값 없이 읽는 이름이다(R86 부터 두 프로파일 — 정본 규모 문서도
+    확장 생성이 정한 열을 쓴다; 확장 생성이 실패한 unit 은 문서 행의 사유에서 본 이름). 지역·멤버 경로·모르는 이름은 입력 목록의 결손이 아니다."""
     scope = unit.get("project_scope") if isinstance(unit.get("project_scope"), dict) else {}
     objects = set(scope.get("globals") or {}) | set(scope.get("arrays") or {})
     rec = unit.get("source_read_inputs") if isinstance(unit.get("source_read_inputs"), dict) else {}
@@ -8679,8 +8845,9 @@ def generate_suts(
     all_sequences: Dict[str, List[Dict[str, Any]]] = {}
     ai_enhanced = 0
     for i, unit in enumerate(units):
-        # (R19) 확장: 소스가 읽는데 입력 목록에 없는 객체를 선언 타입으로 더해 다시 만든다 — 기본 프로파일은 정본 규모라 그대로.
-        seqs = extended_unit_sequences(unit, max_sequences) if _extended else generate_sequences(unit, max_sequences)
+        # (R19) 확장: 소스가 읽는데 입력 목록에 없는 객체를 선언 타입으로 더해 다시 만든다.
+        # (R86) 정본 규모도 확장 생성이 정한 열 위에서(소스가 읽는 입력 · 쓰는 출력) — 행은 정본 규모 블록 그대로
+        seqs = extended_unit_sequences(unit, max_sequences) if _extended else reference_unit_sequences(unit, max_sequences)
         if ai_config and unit["fid"] in _void_no_vars:
             seqs = enhance_sequences_with_ai(unit, seqs, ai_config)
             ai_enhanced += 1
@@ -8769,10 +8936,6 @@ def generate_suts(
             "not_searched": dict(Counter(str(b.get("status")).split(":", 1)[0] for b in _bsearch
                                          if b.get("status") != "searched")),
             "units_without_search": len(units) - len(_bsearch)}
-        # (R19) 소스가 읽어 더한 입력 — 설계서 입력 목록과 달라지는 열이라 분모와 사유를 함께 공시한다.
-        quality["source_read_inputs"] = summarize_source_read_inputs(units)
-        # (R80) 소스가 써서 더한 기대값 — 설계서 출력 목록과 달라지는 열
-        quality["source_written_outputs"] = summarize_source_written_outputs(units)
         # (R19) MC/DC 채움 행 — 벡터가 비운 결정 무관 입력을 채운 동반 행(쌍 주장 없음)
         _fills = [u.get("mcdc_fill") for u in units if isinstance(u.get("mcdc_fill"), dict)]
         quality["mcdc_fill"] = {k: sum(int(f.get(k) or 0) for f in _fills)
@@ -8790,6 +8953,12 @@ def generate_suts(
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
     #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
     quality["sequences_beyond_reference_cap"] = _beyond
+    # (R19) 소스가 읽어 더한 입력 — 설계서 입력 목록과 달라지는 열이라 분모와 사유를 함께 공시한다. (R80) 소스가 써서 더한
+    #   기대값 — 설계서 출력 목록과 달라지는 열. (R86) 두 프로파일 — 정본 규모 문서도 확장 생성이 정한 열을 쓴다
+    quality["source_read_inputs"] = summarize_source_read_inputs(units)
+    quality["source_written_outputs"] = summarize_source_written_outputs(units)
+    if not _extended:
+        quality["reference_columns"] = summarize_reference_columns(units)
     # (R85) 정본 규모 문서의 코드 기준 행(두 프로파일 — 확장 문서의 정본 규모 블록에도 같은 행이 있다)
     quality["reference_code_rows"] = summarize_reference_code_rows(units)
 

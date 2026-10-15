@@ -44,15 +44,15 @@ INPUT_GAP_KIND = "read_not_in_unit_inputs"
 MEANING[INPUT_GAP_KIND] = (
     "함수가 이 객체의 초기값을 읽는데(이 입력으로 돌리면 쓰기 전에 읽는다 — oracle 사유 `initial_value_not_in_inputs`) 시험 입력 "
     "목록(설계서 입력 표·소스 분석)에 없다. 설계서 입력 누락 또는 입력으로 적지 않은 내부 상태 후보 — 설계서의 입력 표를 확인할 것. "
-    "확장 프로파일은 이 객체들을 선언 타입으로 입력 열에 더했다")
+    "두 프로파일 모두(정본 규모는 R86 부터) 이 객체들을 선언 타입으로 입력 열에 더했다 — 정본 규모 문서의 행에선 고정값")
 INPUT_GAP_REPRODUCTION = "해당 없음 — 입력 목록 대조(clang 재현 대상 아님)"
 # (R80) 출력 목록 쪽 — 함수 실행이 쓰는데 기대 목록에 없는 객체 · 기대 목록이 적었는데 함수가 쓰지 않는 객체
 OUTPUT_GAP_KIND = "written_not_in_unit_outputs"
 MEANING[OUTPUT_GAP_KIND] = (
     "이 문서의 행으로 함수(원본 코드 모델)를 돌리면 이 객체에 쓴다(실행이 실제로 저장한 것 — 비활성 #if 팔 · 버려지는 매크로 "
     "인자의 대입은 세지 않는다)는데 시험 기대 목록(설계서 출력 표·소스 분석)에 없다(그 객체를 담은 구조체 · 배열을 적었으면 "
-    "적은 것으로 본다). 설계서 출력 누락 후보 — 그 쓰기가 틀려도 목록대로 관측하는 시험은 보지 못한다. 확장 프로파일은 값이 "
-    "도출되는 객체를 기대 열로 더했다(volatile · 부동소수 객체는 소견에만 든다)")
+    "적은 것으로 본다). 설계서 출력 누락 후보 — 그 쓰기가 틀려도 목록대로 관측하는 시험은 보지 못한다. 두 프로파일 모두(정본 "
+    "규모는 R86 부터) 값이 도출되는 객체를 기대 열로 더했다(volatile · 부동소수 객체는 소견에만 든다)")
 LISTED_UNWRITTEN_KIND = "listed_output_not_written"
 MEANING[LISTED_UNWRITTEN_KIND] = (
     "시험 기대 목록(설계서 출력 표·소스 분석)이 적은 이 객체를 함수도, 함수가 부르는 함수도 쓰지 않는다(프로젝트 쓰기 closure — "
@@ -93,7 +93,7 @@ def collect_findings(units: list[dict[str, Any]], all_sequences: dict[str, list[
 def collect_input_gap_findings(units: list[dict[str, Any]], gaps: dict[str, dict[str, dict[str, Any]]],
                                rendered_tc_ids: dict[str, str]) -> list[dict[str, Any]]:
     """(R19) unit 마다 한 행 — 함수가 초기값을 읽는데 시험 입력 목록에 없던 프로그램 객체(`gaps[fid]` = 이름 → {"slots",
-    "sequences"}; `generators.suts.input_list_gaps` 가 만든다). 확장 프로파일에선 그 이름들이 이미 입력 열로 더해져 있다."""
+    "sequences"}; `generators.suts.input_list_gaps` 가 만든다). 그 이름들은 이미 입력 열로 더해져 있다(R86 부터 두 프로파일)."""
     out = []
     for unit in units:
         names = gaps.get(unit["fid"]) or {}

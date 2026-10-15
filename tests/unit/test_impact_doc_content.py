@@ -578,7 +578,7 @@ def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=N
         lambda fdmap, gim=None, **k: [{"name": info["name"]} for info in fdmap.values() if isinstance(info, dict)],
     )
     monkeypatch.setattr(
-        gsuts, "generate_sequences",
+        gsuts, "reference_unit_sequences",   # (R86) the draft takes the document's path (`generate_suts` reference profile)
         lambda unit, max_seq=6, type_cache=None: (suts_seq if suts_seq is not None
                                                   else [{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}]),
     )

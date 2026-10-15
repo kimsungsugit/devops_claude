@@ -119,7 +119,7 @@ def test_base_rows_keep_their_label_when_the_function_has_both_designs():
     assert base and not any(_LABEL in s["description"] for s in base)
     ref_mcdc = [s for s in ref_rows if s["strategy"].startswith("MCDC_")]
     # (the extended label also names the blank added inputs — R81 — before which it is the reference label)
-    assert [s["description"].split("\n")[0].split(" · 설계 밖 입력")[0] for s in base[:len(ref_mcdc)]] == \
+    assert [s["description"].split("\n")[0].split(" · 설계 밖 입력")[0].split(" · 소스가 읽어 더한 입력")[0] for s in base[:len(ref_mcdc)]] == \
         [s["description"].split("\n")[0] for s in ref_mcdc]
     assert [s["inputs"] for s in base[:len(ref_mcdc)]] == [s["inputs"] for s in ref_mcdc]
     assert unit["mcdc_design"]["source_read_pass"]["decisions_searched"] == 0
@@ -140,7 +140,7 @@ def test_a_function_with_both_designs_keeps_the_base_rows_as_the_reference_has_t
     assert [s["strategy"] for s in base] == [s["strategy"] for s in ref_mcdc]
     assert [s["inputs"] for s in base] == [s["inputs"] for s in ref_mcdc]
     assert [s["mcdc_design"] for s in base] == [s["mcdc_design"] for s in ref_mcdc]
-    assert [_first_line(s).split(" · 설계 밖 입력")[0] for s in base] == [_first_line(s) for s in ref_mcdc]
+    assert [_first_line(s).split(" · 설계 밖 입력")[0].split(" · 소스가 읽어 더한 입력")[0] for s in base] == [_first_line(s) for s in ref_mcdc]
     new = [s for s in rows if s["strategy"].startswith("MCDC_") and suts.is_extended_strategy(s["strategy"])]
     assert new and all(s["mcdc_design"] and _LABEL in _first_line(s) for s in new)
     assert {r["decision_id"] for s in new for r in s["mcdc_design"]} == {d2["decision_id"]}

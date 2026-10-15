@@ -712,7 +712,9 @@ def test_generate_suts_reports_the_written_outputs_and_their_findings(tmp_path):
                              tc_profile="extended")["quality_report"]
     ref = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "r.xlsm"), scope="source")[
         "quality_report"]
-    assert ext["source_written_outputs"]["units"] >= 1 and "source_written_outputs" not in ref
+    # (R86) the reference-scale document takes the extension's columns too — both report the written outputs
+    assert ext["source_written_outputs"]["units"] >= 1 and ref["source_written_outputs"]["units"] >= 1
+    assert "reference_columns" in ref and "reference_columns" not in ext
     for q in (ext, ref):
         gaps = q["source_findings"]["output_list_gaps"]
         assert set(gaps) == {"functions", "names", "rows", "listed_not_written_functions", "listed_not_written_names",

@@ -90,7 +90,7 @@ def test_doc_draft_full_expansion_uses_generator_defaults(client, monkeypatch):
         return [{"strategy": f"S{i}", "inputs": {"x": i}, "expected": {"r": i}, "description": "d"}
                 for i in range(max_seq)]
 
-    monkeypatch.setattr(gsuts, "generate_sequences", _gen)
+    monkeypatch.setattr(gsuts, "reference_unit_sequences", _gen)   # (R86) the document's reference-profile path
     monkeypatch.setattr(router_mod, "_logger", router_mod._logger)  # no-op, 명시성
 
     r = client.post("/api/impact/doc-draft",
