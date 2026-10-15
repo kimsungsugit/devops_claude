@@ -478,7 +478,12 @@ def _tm_lookup_paths(inputs: Dict[str, str]) -> Dict[str, str]:
 _CAPS_LIFTED_BY_EXTENDED: Dict[str, str] = {
     "max_tc_per_req": "**확장 프로파일**에서는 이 값이 요구당 상한이 아니라 기본 TC 구간과 **함수당** 분기 TC 상한으로만 "
                       "작동합니다 — 시험 없는 함수는 요구당 상한과 무관하게 전부 TC 를 받습니다",
-    "max_sequences": "**확장 프로파일**은 시퀀스 상한을 두지 않습니다 — 기본 전략 전량 뒤에 확장 전략이 붙습니다",
+    # (리뷰 R85 W-R4-2) 상한은 확장 문서 앞의 정본 규모 블록(같은 상한의 정본 규모 문서)의 크기를 정한다 — 버리는 카탈로그 ·
+    #   확장 행은 없지만 블록 안 코드 기준 행 수는 상한을 따른다(그것까지 "풀린다" 고 말하면 거짓이다)
+    "max_sequences": "**확장 프로파일**은 이 상한으로 카탈로그 · 확장 행을 버리지 않습니다 — 상한은 앞쪽 정본 규모 블록(같은 "
+                     "상한의 기본 문서와 같은 행)의 크기만 정하고, 블록에 못 든 카탈로그 행(`CATALOG_`)과 확장 전략 행이 "
+                     "그 뒤에 모두 붙습니다. 블록 안 코드 기준 행 수는 상한을 따릅니다(상한이 작으면 줄고, 그 목표는 확장의 "
+                     "동작 시나리오 탐색이 전 입력으로 다시 찾습니다)",
     "max_subcases": "**확장 프로파일**은 sub-case 후보 전부를 담습니다(직접 더 크게 정했으면 그 값)",
     "max_flows": "**확장 프로파일**은 찾은 통합 흐름을 전부 담습니다",
 }
@@ -506,12 +511,25 @@ def _suts_normalize_scope(scope: Any) -> "tuple[str, str]":
         return ("source", "") if low == "source" else ("suds", raw)
 
 
-def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int],
-               full: Optional[int]) -> Optional[Dict[str, Any]]:
+def _suts_mcdc_slots(fallback: int = 7) -> int:
+    """함수 하나의 MC/DC 설계 행 자리(최대) — 숫자를 여기 복제하지 않는다(`generators.suts._BASE_MCDC_SLOTS`)."""
+    try:
+        from generators.suts import _BASE_MCDC_SLOTS
+        return int(_BASE_MCDC_SLOTS)
+    except Exception:  # silent-ok: 공시는 실패해도 화면이 떠야 한다
+        logging.getLogger("devops_api").debug(
+            "SUTS MC/DC 설계 행 자리를 생성기에서 못 읽었다 — 폴백 %s", fallback, exc_info=True)
+        return fallback
+
+
+def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int]) -> Optional[Dict[str, Any]]:
     """SUTS 시퀀스 상한이 **이 소스에서** MC/DC 를 자르는가.
 
-    `generators/suts` 는 MC/DC 전략을 목록 **맨 끝**에 붙이고 `strategies[:max_seq]` 로
-    앞에서 자른다. 그래서 상한이 후보 최대보다 작으면 MC/DC 가 가장 먼저 사라진다 —
+    (R85) 정본 규모 문서는 상한 안에 MC/DC 설계 행을 **먼저** 둔다(`generators.suts._REFERENCE_KEEP`) — 상한에 먼저 빠지는
+    것은 전 입력 경계값 · 조건 조합 · 전역 행이다. MC/DC 가 잘리는 것은 상한이 함수의 MC/DC 설계 행 수(최대
+    `_BASE_MCDC_SLOTS`)보다 작을 때뿐이다. R85 전에는 MC/DC 가 목록 맨 끝이라 `strategies[:max_seq]` 에 가장 먼저 잘렸고
+    (switch 가 있는 함수는 기본값 24 에서도), 이 함수는 그 규칙(`eff < 후보 최대`)으로 경고했다 — 생성기가 바뀐 뒤에도 그
+    규칙이 남으면 MC/DC 가 다 있는 문서에 "가장 먼저 잘립니다" 라는 거짓 경고가 붙는다(리뷰 R85 C-R4-1).
     ASIL D 는 MC/DC 가 필수(ISO 26262-6)라 그 프로젝트에선 규격 미달로 직결된다.
 
     지금까지 게이트는 이 사실을 **일반론**으로만 적었다: QM 전용 프로젝트에는 읽을
@@ -537,8 +555,10 @@ def _mcdc_risk(tm: Dict[str, Any], eff: Optional[int],
     #   "425개 unit 의 등급이 부분문자열 첫 일치로 정해졌다" 고 적고 있어 자기모순이었다.
     #   `mcdc_at_risk` 는 그대로 둔다(없는 경고를 만들지 않는다) — 바뀌는 건 **문구의 확신도**다.
     ungraded = int(a.get("ungraded") or 0)
-    cut = isinstance(eff, int) and isinstance(full, int) and eff < full
-    return {"asil_d": d, "asil_c": c, "asil_ungraded": ungraded, "mcdc_at_risk": bool(cut and d)}
+    slots = _suts_mcdc_slots()
+    cut = isinstance(eff, int) and eff < slots
+    return {"asil_d": d, "asil_c": c, "asil_ungraded": ungraded, "mcdc_slots": slots, "mcdc_cut": bool(cut),
+            "mcdc_at_risk": bool(cut and d)}
 
 
 def _permission_error_kind(message: str) -> str:
@@ -2206,34 +2226,47 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                         measured["over_suggested"] = True
                         reason = (f"{reason} — {eff} 로 정했지만 {_full} 이상은 "
                                   f"더 담을 것이 없습니다")
-                # ASIL 축은 이 상한에서만 실질이 있다 — MC/DC 가 맨 끝이라 먼저 잘린다.
-                # 일반론("ASIL D 는 MC/DC 필수")을 **이 소스의 수**로 바꾼다.
+                # ASIL 축은 이 상한에서만 실질이 있다 — (R85) MC/DC 설계 행은 상한 안에 먼저 들고, 상한이
+                # MC/DC 설계 행 자리보다 작을 때만 잘린다. 일반론("ASIL D 는 MC/DC 필수")을 **이 소스의 수**로 바꾼다.
                 if cap_name == "max_sequences":
-                    _risk = _mcdc_risk(_tm_cached, eff, _full)
+                    _risk = _mcdc_risk(_tm_cached, eff)
                     if _risk is not None:
                         measured.update(_risk)
                         if _risk["mcdc_at_risk"]:
+                            # (리뷰 R85 I-R5-3) 잘리는 것은 설계 벡터가 상한보다 많은 함수뿐이다 — 주장 강도를 맞춘다
                             reason += (f" ⚠ 이 소스에 **ASIL D 함수가 {_risk['asil_d']}개** "
-                                       f"있습니다 — MC/DC 는 전략 목록 맨 끝이라 이 상한에 "
-                                       f"가장 먼저 잘립니다(ISO 26262-6: ASIL D 는 MC/DC 필수)")
+                                       f"있습니다 — MC/DC 설계 행은 상한 안에 먼저 들지만 MC/DC 설계 벡터가 "
+                                       f"{eff}개보다 많은 함수(최대 {_risk['mcdc_slots']}개)에서는 MC/DC 행이 "
+                                       f"잘립니다(ISO 26262-6: ASIL D 는 MC/DC 필수)")
                         elif not _risk["asil_d"]:
                             # 없는 위험을 경고로 남겨 두면 진짜 경고가 묻힌다.
                             # ⚠ 다만 **등급을 못 읽은 함수가 있으면 "없습니다" 는 사실이 아니다**
                             #   (R38 D-5 ②). 미상이 곧 QM 은 아니므로 그 수를 그대로 말한다.
                             _ung = _risk.get("asil_ungraded") or 0
-                            if _ung:
+                            if _ung and _risk["mcdc_cut"]:
                                 reason += (f" (확인된 ASIL D 함수는 없지만 **{_ung}개 함수의 "
                                            f"안전 등급을 읽지 못했습니다** — 그 안에 ASIL D 가 "
-                                           f"있으면 MC/DC 가 이 상한에 먼저 잘립니다)")
+                                           f"있으면 MC/DC 가 이 상한에 잘립니다)")
+                            elif _ung:
+                                reason += (f" (확인된 ASIL D 함수는 없고 **{_ung}개 함수의 "
+                                           f"안전 등급을 읽지 못했습니다** — MC/DC 설계 행은 이 상한 "
+                                           f"안에 먼저 들어 등급과 무관하게 잘리지 않습니다)")
                             else:
                                 reason += " (측정 기준 이 소스에 ASIL D 함수는 없습니다)"
                         else:
-                            # ASIL D 는 있는데 상한이 후보 전량을 담는 경우. 앞의 정적
-                            # 문구("MC/DC 가 맨 끝이라 잘립니다")가 그대로 남으면 `ok`
-                            # 행에 살아 있는 경고가 붙어 **자기모순**이 된다 —
-                            # 그 문장은 기본값을 말한 것이지 지금 고른 값이 아니다.
-                            reason += (f" (상한이 후보 전량이라 ASIL D 함수 "
-                                       f"{_risk['asil_d']}개의 MC/DC 도 잘리지 않습니다)")
+                            # ASIL D 는 있는데 MC/DC 가 잘리지 않는 경우(상한 ≥ MC/DC 설계 행 자리). 무엇이
+                            # 빠지는지도 말한다 — "잘립니다" 만 지운 `ok` 행은 손실이 없다는 말로 읽힌다.
+                            # (리뷰 R85 W-R5-2) 상한이 후보 전량 이상이면 상한에 빠지는 행이 없다 — 그때 "먼저 빠지는
+                            #   것은" 을 말하면 같은 행이 두 말을 한다
+                            reason += (f" (MC/DC 설계 행은 상한 안에 먼저 들어 ASIL D 함수 "
+                                       f"{_risk['asil_d']}개의 MC/DC 도 잘리지 않습니다"
+                                       + (" — 상한에 먼저 빠지는 것은 전 입력 경계값 · 조건 조합 · 전역 행입니다)"
+                                          if isinstance(eff, int) and eff < _full else ")"))
+                    # (리뷰 R85 W-R5-2) 상한과 무관한 치환 — 정본 규모 문서는 행 수를 그대로 두고 코드 기준 행이 카탈로그
+                    #   행의 자리를 가져간다. 위 손실 문장(상한 때문에 빠지는 행 수)과 원인이 다르므로 따로 말한다
+                    reason += (" 상한과 별개로, 정본 규모 문서는 행 수를 그대로 두고 남은 자리에 코드 기준 행을 넣어 "
+                               "전 입력 경계값 · 조건 조합 · 전역 행의 자리를 가져갑니다 — 그렇게 빠진 카탈로그 행 수는 "
+                               "생성 공시 '정본 규모 문서의 코드 기준 행' 에 있습니다")
         # ⚠ `input_value` 액션을 붙이지 않는다. 조정 가능하면 입력칸이 그 행에 있고,
         #   조정 불가면 누를 이유가 없다. 예전엔 무조건 붙어서, 누르면 보드가
         #   "해당 빌더 탭에서 조정합니다"(`DocGenStatusBoard.jsx:668`)라며 **그런 탭이

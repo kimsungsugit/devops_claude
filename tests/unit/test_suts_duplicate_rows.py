@@ -9,13 +9,23 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from generators import c_project_context as cpc
+from generators import suts
 from generators.suts import (
     TC_PROFILE_EXTENDED,
     _drop_duplicate_rows,
     generate_sequences,
     summarize_duplicate_rows,
 )
+
+
+@pytest.fixture
+def no_code_rows(monkeypatch):
+    """(R85) 정본 규모 코드 기준 행 없이 — 이 시험은 카탈로그 행끼리의 중복(정본 규모 문서에 남기고 센다)을 고정한다. 코드 기준
+    행이 블록에 들면 그 자리를 내준 카탈로그 행(MIXED 등)이 정본 규모 문서에서 빠져 중복 쌍이 달라진다(리뷰 R85 I-R5-7)."""
+    monkeypatch.setattr(suts, "_code_rows", lambda *_a, **_k: ([], {"status": "isolated"}, []))
 
 ROOT = os.path.join(os.sep, "proj")
 COMMON = """#ifndef COMMON_H
@@ -56,6 +66,7 @@ def test_an_extended_row_equal_to_an_earlier_row_is_dropped_and_the_rest_renumbe
     assert [s["seq_num"] for s in seqs] == list(range(1, len(seqs) + 1))
 
 
+@pytest.mark.usefixtures("no_code_rows")
 def test_the_reference_profile_keeps_its_duplicates_and_counts_them():
     unit = _unit("flag", ["g_a"], param_types={"g_a": "U8", "g_o": "U8"})    # one input: MIXED equals BV_MIN
     seqs = generate_sequences(unit, 24, type_cache={})

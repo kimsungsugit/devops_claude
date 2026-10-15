@@ -1447,8 +1447,59 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.append(_item(
             "suts_extended", "확장으로 덧붙인 시퀀스",
             f"확장 전략 {_show(ext_seq)} · 상한 해제분 {_show(beyond)}",
-            "확장 전략이 새로 만든 시퀀스와, 기본 카탈로그 안에 있었지만 시퀀스 상한에 잘리던 자리다. "
-            "둘을 합치면 기본 문서 대비 증분이다."))
+            "확장 전략이 새로 만든 시퀀스와, 기본 카탈로그 안에 있었지만 정본 규모 문서의 행 수(상한)에 들지 못했거나 코드 기준 "
+            "행에 자리를 내준 카탈로그 행(확장 문서에선 `CATALOG_<이름>`)이다. 둘을 합치면 기본 문서 대비 증분이다."))
+
+    # (R85) 정본 규모 문서의 코드 기준 행 — 두 프로파일(확장 문서의 정본 규모 블록에도 같은 행이 있다)
+    rc = qr.get("reference_code_rows")
+    if isinstance(rc, dict) and _int(rc, "units"):
+        out.append(_item(
+            "suts_reference_code_rows", "정본 규모 문서의 코드 기준 행",
+            f"{_show(_int(rc, 'rows'))}행 (unit {_show(_int(rc, 'units_with_rows'))}/{_show(_int(rc, 'searched'))} · 자리를 "
+            f"내준 카탈로그 행 {_show(_int(rc, 'displaced'))})",
+            "정본 규모 문서는 함수마다 행 수를 예전 그대로(카탈로그 행 수와 상한 중 작은 값, 합 "
+            f"{_show(_int(rc, 'budget'))}) 두고 그 안을 ① MC/DC 설계 벡터 · switch case · 루프 횟수 · 부수효과 · 값이 선언 타입 "
+            f"안인 범위 밖 강건성(FI) 행({_show(_int(rc, 'kept'))}) ② 코드 기준 행 ③ 남은 자리에 전 입력 타입 경계 · 조건 조합 · 전역 "
+            "행 — 아직 어느 행도 값을 주지 않은 입력을 움직이는 행 → 다른 행과 입력이 다른 행 → 입력이 같은 행 · 선언 타입 밖 값의 "
+            f"FI 행 순, 각각 카탈로그 순서 — 으로 채운다(채운 카탈로그 행 {_show(_int(rc, 'fill'))}). 입력의 타입 밖 값이라 먼저 "
+            f"두지 않은 범위 밖 값 행(FI · 부수효과) {_show(_int(rc, 'fi_out_of_type'))} — 원본 코드 모델이 입력을 선언 타입 밖이라 "
+            "거부했거나 선언된 타입의 범위를 넘는 값(설계 범위가 없는 입력의 타입 경계 ±1 — U8 256 · U16 65536 —, 설계 하한이 0 인 "
+            "부호 없는 입력의 −1)이라 하네스에 실을 수 없고 기대값이 서지 않는다(추측한 타입으로는 거부하지 않는다). 코드 기준 행은 설계서 입력 표의 입력만 움직여, 원본 코드 모델 실행이 한 경로로(미정 분기 · 미정의 동작 "
+            "없이) 문장 · 분기 결과와 결함이 드러나는 값(비교의 두 값이 같고 그 조건이 결정을 가름 · 쓰기가 값을 바꿈 · 연산이 "
+            "피연산자에 민감함)에 닿는 입력을 찾은 행이다. 탐색은 확장의 동작 시나리오 탐색과 같고(값은 코드가 비교하는 상수와 그 "
+            "이웃 · switch 라벨 · 설계 범위 · 작은 0 아닌 값), 먼저 둔 행이 닿은 목표는 찾지 않는다(범위 밖 값 행 — FI · 부수효과 — "
+            "이 닿은 것은 빼고: 범위 밖 값으로만 닿은 목표도 설계 범위 안에서 닿는 행을 찾는다. 그래서 아래 목표 수는 설계 범위 안 "
+            "행 기준이다 — 문서의 범위 밖 값 행만 닿는 목표는 '닿지 못함' 이나 '넣지 못한 행만 처음 닿음' 에 든다). 설계서가 범위를 적지 않은 "
+            "입력에 타입 경계값(0 · 가운데 · 끝값)만 주던 행은 코드가 그 입력을 나누는 지점을 밟지 않았다 — 그 자리를 이 행에 "
+            f"준다. 목표 {_show(_int(rc, 'targets'))}(닿음 {_show(_int(rc, 'reached_clean'))} — 그중 먼저 둔 행이 닿은 것 "
+            f"{_show(_int(rc, 'covered_before'))} · 깨끗하지 않게만 닿음 {_show(_int(rc, 'reached_unclean_only'))} — 그 경로가 "
+            "설계 입력 밖 값(입력 표에 없는 전역 · 모르는 피호출 결과)에 기대어 정본 규모 행으로 만들 수 없음 · 닿지 못함 "
+            f"{_show(_int(rc, 'not_reached'))} · 넣지 못한 행만 처음 닿음 {_show(_int(rc, 'cut_reached'))}) · 결함 노출 목표 "
+            f"{_show(_int(rc, 'expose_targets'))}(만족 {_show(_int(rc, 'expose_reached'))} — 그중 먼저 둔 행이 만족 "
+            f"{_show(_int(rc, 'expose_covered_before'))} · 넣지 못한 행만 처음 만족 {_show(_int(rc, 'cut_exposed'))}) · 찾은 행 "
+            f"{_show(_int(rc, 'found'))} 중 자리가 없어 넣지 못한 행 {_show(_int(rc, 'cut'))}(그중 결함 노출 행 "
+            f"{_show(_int(rc, 'cut_expose'))} — 탐색은 문장 · 분기 행을 먼저 낸다; 탐색마다 행 상한 "
+            f"{_show(_int(rc, 'cap_per_search'))}) · 카탈로그 행과 입력이 "
+            f"같아 그 카탈로그 행에 자리를 준 행 {_show(_int(rc, 'same_as_catalogue'))}. 탐색 실행 "
+            f"{_show(_int(rc, 'runs'))} · 단계 {_show(_int(rc, 'steps'))}, 결함 노출 목표의 실행 {_show(_int(rc, 'expose_runs'))} · "
+            f"단계 {_show(_int(rc, 'expose_steps'))}(unit 마다 탐색 예산 안 — 생성 시간이 그만큼 는다). 확장 문서는 같은 상한으로 "
+            "만든 이 블록을 맨 앞에 두고 들지 못한 카탈로그 행을 `CATALOG_<이름>` 으로 그 뒤에 둔다(확장 문서의 앞부분이 정본 규모 "
+            "문서다). 기대값은 다른 행과 같은 oracle 이 도출한다(미실행)."
+            # (리뷰 R85 I-R5-4) the extended document only — a reference-scale run records no extended row
+            + (" 확장 탐색은 코드 기준 행이 없을 때처럼 돈다(R85 전과 같은 확장 행 — 섞으면 확장 행이 줄었다) — 그래서 코드 기준 "
+               f"행과 입력이 같은 확장 행이 {_show(_int(rc, 'extension_same_inputs'))} 있고, 빼지 않고(다른 행이 기준 · 출처로 "
+               "가리킨다) 행 설명에 그 코드 기준 행을 적는다." if _int(rc, "extension_same_inputs") else "")
+            + (f" 먼저 둔 행이 예산을 다 써 찾지 않은 unit {_show(_int(rc, 'no_room'))}." if _int(rc, "no_room") else "")
+            + (f" 설계 입력이 없어 찾지 않은 unit {_show(_int(rc, 'no_design_inputs'))}."
+               if _int(rc, "no_design_inputs") else "")
+            + (" 탐색하지 못한 unit(카탈로그 행으로 채움): "
+               + ", ".join(f"{k} {_show(int(v))}" for k, v in sorted((rc.get("not_searched") or {}).items())) + "."
+               if isinstance(rc.get("not_searched"), dict) and rc.get("not_searched") else "")
+            + (f" 탐색 예산을 다 쓴 unit {_show(_int(rc, 'budget_exhausted'))} — 그 unit 의 남은 목표는 닿지 않은 것으로 센다."
+               if _int(rc, "budget_exhausted") else "")
+            + (f" 이 단계 오류로 카탈로그 행만으로 채운 unit {_show(_int(rc, 'errors'))} — 로그에 traceback 이 있다."
+               if _int(rc, "errors") else ""),
+            tone=_tone(bool(_int(rc, "errors")))))
 
     # (R78) 동작 시나리오 행 — 확장 프로파일에서만 기록된다(경계 행 항목 앞: 경계 탐색이 이 행들을 더한 기준으로 쓴다).
     sc = qr.get("scenario_rows")

@@ -8,7 +8,7 @@ from itertools import combinations
 
 import pytest
 
-from generators.suts import generate_sequences
+from generators.suts import _REFERENCE_KEEP, generate_sequences
 
 
 def _integer(value):
@@ -324,10 +324,11 @@ def test_r80_truncated_pairs_are_disclosed_not_exported_as_conflict_or_coverage(
     unit = {"fid": "SwUFn_0003", "name": "h", "input_vars": names, "output_vars": [],
             "param_types": dict.fromkeys(names, "uint8_t"),
             "logic_flow": [{"type": "if", "condition": "(a > 10 && b > 20) || c == 3"}]}
-    rows = generate_sequences(unit, max_seq=7, type_cache={})
+    # (R85) 정본 규모 예산에서 MC/DC 행이 맨 먼저다 — 상한 2 면 MC/DC 두 행만 남아 일부 쌍이 잘린다
+    rows = generate_sequences(unit, max_seq=2, type_cache={})
     summary = summarize_mcdc_design([unit])
     assert summary["decisions"] == 1 and summary["conditions_paired"] == 3
-    assert summary["truncated_pairs"] >= 1, "상한 7 이면 BV 6 뒤 MC/DC 행 1개만 남아 쌍이 잘려야 한다"
+    assert summary["truncated_pairs"] >= 1, "상한 2 면 MC/DC 두 행만 남아 쌍이 잘려야 한다"
     assert summary["retained_pairs"] + summary["truncated_pairs"] + summary["invalidated_pairs"] == 3
     path = tmp_path / "trunc.xlsx"
     generate_suts_xlsm(None, [unit], {unit["fid"]: rows}, str(path), {"project_id": "QM"})
@@ -345,9 +346,10 @@ def test_r80_c1_row_label_never_claims_a_pair_whose_partner_row_was_cut():
     names = ["a", "b", "c"]
     unit = {"name": "h", "input_vars": names, "output_vars": [], "param_types": dict.fromkeys(names, "uint8_t"),
             "logic_flow": [{"type": "if", "condition": "(a > 10 && b > 20) || c == 3"}]}
-    full = generate_sequences(dict(unit), max_seq=None, type_cache={})
-    head = sum(1 for r in full if not r["strategy"].startswith("MCDC_"))
-    rows = generate_sequences(unit, max_seq=head + 2, type_cache={})   # MC/DC 두 행만 남긴다 → 일부 쌍은 짝을 잃는다
+    # (R85) 정본 규모 예산에서 MC/DC 행이 맨 먼저다(`_REFERENCE_KEEP` 순) — 상한 2 면 MC/DC 두 행만 남는다 → 일부 쌍은
+    #   짝을 잃는다
+    assert _REFERENCE_KEEP[0] == "MCDC_"
+    rows = generate_sequences(unit, max_seq=2, type_cache={})
     mcdc = [r for r in rows if r["strategy"].startswith("MCDC_")]
     assert len(mcdc) == 2
     assert any(not r["mcdc_design"] for r in mcdc) or all(r["mcdc_design"] for r in mcdc)

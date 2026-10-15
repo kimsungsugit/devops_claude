@@ -29,7 +29,7 @@ from __future__ import annotations
 import pytest
 
 from generators.sits import _DEFAULT_SUBCASES, _SUBCASE_CATALOG_MAX, _generate_sub_cases
-from generators.suts import _DEFAULT_SEQ_COUNT, _STRATEGY_CATALOG_MAX, generate_sequences
+from generators.suts import _BASE_MCDC_SLOTS, _DEFAULT_SEQ_COUNT, _STRATEGY_CATALOG_MAX, generate_sequences
 
 
 def _max_sits_flow() -> dict:
@@ -111,22 +111,29 @@ class TestSutsStrategyCatalog:
             f"산출: {[s.get('strategy') for s in got]}"
         )
 
-    def test_mcdc_is_last_and_falls_first(self):
-        """MC/DC 가 목록 **맨 끝**이라 상한에 가장 먼저 잘린다.
+    def test_mcdc_is_kept_first_and_falls_last(self):
+        """(R85) MC/DC 설계 행은 상한 안에 **먼저** 든다 — 잘리는 것은 상한이 MC/DC 설계 행 수보다 작을 때뿐이다.
 
-        게이트가 "ASIL D 는 MC/DC 필수" 를 근거로 상한을 경고하는 전제다. 순서가 바뀌면
-        그 경고가 근거를 잃는다(경고문은 그대로 남으므로 조용히 거짓이 된다).
+        게이트가 "ASIL D 는 MC/DC 필수" 를 근거로 상한을 경고하는 전제다(`docgen_preflight._mcdc_risk`:
+        `상한 < _BASE_MCDC_SLOTS`). R85 전에는 MC/DC 가 목록 맨 끝이라 기본 상한에서 **가장 먼저** 잘렸고 게이트도
+        그렇게 경고했다 — 순서가 바뀌면 경고문은 그대로 남아 조용히 거짓이 된다(리뷰 R85 C-R4-1: 생성 문서에 MC/DC 가
+        다 있는데 "가장 먼저 잘립니다").
         """
         full = generate_sequences(_max_suts_unit(), max_seq=_STRATEGY_CATALOG_MAX)
         names = [str(s.get("strategy") or "") for s in full]
-        mcdc_idx = [i for i, n in enumerate(names) if n.startswith("MCDC")]
-        assert mcdc_idx, "MC/DC 전략이 아예 안 나왔다"
-        assert max(mcdc_idx) == len(names) - 1, f"MC/DC 가 맨 끝이 아니다: {names}"
+        mcdc = {n for n in names if n.startswith("MCDC")}
+        assert len(mcdc) == _BASE_MCDC_SLOTS, f"MC/DC 설계 행이 자리 수만큼 안 나왔다: {names}"
 
         capped = generate_sequences(_max_suts_unit(), max_seq=_DEFAULT_SEQ_COUNT)
-        cut = set(names) - {str(s.get("strategy") or "") for s in capped}
-        assert cut and all(n.startswith("MCDC") for n in cut), (
-            f"기본 상한에서 잘린 것이 MC/DC 만이어야 한다 — 실제: {sorted(cut)}")
+        kept = {str(s.get("strategy") or "") for s in capped}
+        cut = set(names) - kept
+        assert cut and mcdc <= kept, f"기본 상한에서 MC/DC 가 잘렸다 — 잘린 것: {sorted(cut)}"
+        assert not any(n.startswith("MCDC") for n in cut)
+
+        # 상한이 MC/DC 설계 행 수보다 작으면 MC/DC 만 남고, 그래도 MC/DC 가 잘린다(게이트가 경고하는 경우)
+        small = generate_sequences(_max_suts_unit(), max_seq=_BASE_MCDC_SLOTS - 1)
+        small_names = [str(s.get("strategy") or "") for s in small]
+        assert len(small_names) == _BASE_MCDC_SLOTS - 1 and all(n.startswith("MCDC") for n in small_names)
 
     def test_generator_default_is_a_cap_not_the_catalog(self):
         assert _DEFAULT_SEQ_COUNT < _STRATEGY_CATALOG_MAX

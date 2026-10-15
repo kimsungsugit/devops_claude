@@ -164,7 +164,9 @@ class TestConsumers:
     def test_enum_variable_gets_enumerator_bounds_not_blank_not_uint8(self):
         dom = {"kind": "enum", "type": "E_STATE", "values": [16, 17, 18]}
         u = self._unit(input_vars=["st", "n"], param_types={"st": "E_STATE", "n": "U8"}, value_domains={"st": dom})
-        by = {s["strategy"]: s for s in generate_sequences(u, 6, type_cache={})}
+        # (R85) no cap: the robustness rows also carry `n` (U8) at 256 / −1, outside its declared type, so a 6-row
+        #   reference-scale block fills them last — this test is about the enum's values, not the block's composition
+        by = {s["strategy"]: s for s in generate_sequences(u, None, type_cache={})}
         assert (by["BV_MIN"]["inputs"]["st"], by["BV_MID"]["inputs"]["st"], by["BV_MAX"]["inputs"]["st"]) == (16, 17, 18)
         assert by["BV_MAX_INV"]["inputs"]["st"] == 19 and by["BV_MIN_INV"]["inputs"]["st"] == 15
         assert u["var_types"]["st"] == "enum" and u["unknown_type_vars"] == []

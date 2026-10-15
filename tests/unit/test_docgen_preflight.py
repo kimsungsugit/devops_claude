@@ -1559,9 +1559,10 @@ def test_router_uses_the_shared_spec_path_judgment() -> None:
 
 # ── SUTS 시퀀스 상한 ↔ ASIL (2026-08-30) ────────────────────────────────────
 #
-# `generators/suts` 는 MC/DC 전략을 목록 **맨 끝**에 붙이고 `strategies[:max_seq]` 로
-# 앞에서 자른다. 상한이 후보 최대보다 작으면 MC/DC 가 가장 먼저 사라지는데, ASIL D 는
-# MC/DC 가 필수(ISO 26262-6)라 그 프로젝트에선 규격 미달로 직결된다. 게이트는 이걸
+# R85 전 `generators/suts` 는 MC/DC 전략을 목록 **맨 끝**에 붙이고 `strategies[:max_seq]` 로
+# 앞에서 잘라, 상한이 후보 최대보다 작으면 MC/DC 가 가장 먼저 사라졌다. (R85) 이제 정본 규모 블록이
+# MC/DC 설계 행을 먼저 두므로 MC/DC 는 상한이 MC/DC 설계 행 자리(`_BASE_MCDC_SLOTS`)보다 작을 때만
+# 잘린다. ASIL D 는 MC/DC 가 필수(ISO 26262-6)라 그 프로젝트에선 규격 미달로 직결된다. 게이트는 이걸
 # 오래 **일반론**으로만 적었다 — QM 전용 프로젝트엔 소음이고 ASIL D 프로젝트에선
 # 몇 개가 걸리는지 말하지 못했다.
 
@@ -1575,11 +1576,38 @@ def _suts_with_grades(tmp_path: Path, monkeypatch, by_grade, caps=None, ungraded
 
 
 def test_sequence_cap_names_the_asil_d_functions_at_risk(tmp_path: Path, monkeypatch) -> None:
-    """ASIL D 가 있고 상한이 후보 최대보다 작으면 **그 수를 말한다**."""
-    s = _suts_with_grades(tmp_path, monkeypatch, {"D": 37, "B": 12, "QM": 51})
+    """ASIL D 가 있고 상한이 MC/DC 설계 행 자리보다 작으면 **그 수를 말한다**."""
+    s = _suts_with_grades(tmp_path, monkeypatch, {"D": 37, "B": 12, "QM": 51}, caps={"max_sequences": 5})
     assert s["measured"]["asil_d"] == 37
     assert s["measured"]["mcdc_at_risk"] is True
-    assert "37개" in s["reason"] and "MC/DC" in s["reason"], s["reason"]
+    assert "37개" in s["reason"] and "MC/DC" in s["reason"] and "잘립니다" in s["reason"], s["reason"]
+
+
+def test_sequence_cap_at_default_keeps_mcdc_and_says_what_falls(tmp_path: Path, monkeypatch) -> None:
+    """(R85 리뷰 C-R4-1) 기본 상한(24)에서는 MC/DC 설계 행이 먼저 들어 잘리지 않는다 — "가장 먼저 잘립니다" 는 거짓
+    경고다. 대신 무엇이 빠지는지 말한다(손실이 없다는 말로 읽히지 않게)."""
+    s = _suts_with_grades(tmp_path, monkeypatch, {"D": 37, "B": 12, "QM": 51})
+    assert s["measured"]["mcdc_at_risk"] is False and s["measured"]["mcdc_cut"] is False
+    assert "가장 먼저 잘립니다" not in s["reason"] and "잘리지 않습니다" in s["reason"], s["reason"]
+    assert "전 입력 경계값" in s["reason"], s["reason"]
+    # (리뷰 R85 W-R5-2) 상한과 무관한 치환(코드 기준 행)은 원인을 따로 말한다
+    assert "상한과 별개로" in s["reason"] and "코드 기준 행" in s["reason"], s["reason"]
+
+
+def test_sequence_cap_at_or_above_full_says_nothing_falls_to_the_cap(tmp_path: Path, monkeypatch) -> None:
+    """(리뷰 R85 W-R5-2) 상한이 후보 전량 이상이면 상한에 빠지는 행이 없다 — "상한에 먼저 빠지는 것은" 을 말하면 같은 행이
+    "더 담을 것이 없습니다" 와 두 말을 한다. 코드 기준 행의 치환은 상한과 별개라 그대로 말한다."""
+    for cap in (30, 40):
+        s = _suts_with_grades(tmp_path, monkeypatch, {"D": 37}, caps={"max_sequences": cap})
+        assert s["measured"]["mcdc_at_risk"] is False, s["measured"]
+        assert "상한에 먼저 빠지는" not in s["reason"] and "잘리지 않습니다" in s["reason"], s["reason"]
+        assert "상한과 별개로" in s["reason"], s["reason"]
+
+
+def test_sequence_cap_below_the_mcdc_slots_says_which_functions_lose_mcdc(tmp_path: Path, monkeypatch) -> None:
+    """(리뷰 R85 I-R5-3) 잘리는 것은 MC/DC 설계 벡터가 상한보다 많은 함수뿐이다 — 주장 강도를 맞춘다."""
+    s = _suts_with_grades(tmp_path, monkeypatch, {"D": 37}, caps={"max_sequences": 5})
+    assert "MC/DC 설계 벡터가 5개보다 많은 함수" in s["reason"], s["reason"]
 
 
 def test_sequence_cap_does_not_cry_wolf_without_asil_d(tmp_path: Path, monkeypatch) -> None:

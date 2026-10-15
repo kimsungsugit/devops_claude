@@ -134,9 +134,10 @@ _MAX_SEQUENCES = 10
 # ⚠ 그러므로 24 는 "카탈로그 전체" 가 아니라 **캡**이다. 예전 주석은 `6 MC/DC` 로 적어
 #   `MCDC_BASE` 를 빠뜨렸고 합도 29 였다 — 그 숫자가 화면 공시문까지 번져 사용자에게
 #   "24종 중 이 수만큼" 이라고 잘못 말했다.
-# ⚠ MC/DC 는 `strategies` 의 **맨 끝**(GAP 6)이고 `_cap`(:2043 `strategies[:max_seq]`)이
-#   앞에서 자르므로, **switch-case 가 있는 함수는 기본값 24 에서도 MC/DC 가 빠진다**
-#   (switch 6개면 MC/DC 7 → 1). ISO 26262 ASIL D 는 MC/DC 가 필수다.
+# (R85) MC/DC 는 카탈로그(`strategies`)의 맨 끝이지만 상한은 더 이상 카탈로그 앞에서 자르지 않는다 — 정본 규모 블록
+#   (`_reference_scale_block`)이 MC/DC 설계 행을 **먼저** 남긴다. MC/DC 가 잘리는 것은 상한이 그 함수의 MC/DC 설계 행 수
+#   (최대 `_BASE_MCDC_SLOTS`)보다 작을 때뿐이다(R85 전에는 switch 6 개면 기본값 24 에서도 MC/DC 7 → 1 이었다). ISO 26262 ASIL D 는
+#   MC/DC 가 필수다 — 준비 게이트가 이 규칙으로 경고한다(`docgen_preflight._mcdc_risk`).
 _DEFAULT_SEQ_COUNT = 24
 _STRATEGY_CATALOG_MAX = 30
 # 기본 카탈로그가 전략 종류별로 내는 **자리 수**. 생성부(`generate_sequences`)와 판별부(`is_extended_strategy`)가
@@ -144,6 +145,28 @@ _STRATEGY_CATALOG_MAX = 30
 _BASE_SWITCH_SLOTS = 6
 _BASE_GLOBAL_SLOTS = 3
 _BASE_MCDC_SLOTS = 7
+# (R85) 정본 규모 문서의 행 자리. 행 수는 그대로(`min(상한, 카탈로그 수)`)이고 그 안을 이 순서로 채운다 — ① 이 이름의 카탈로그
+#   행(MC/DC 설계 벡터 — 쌍 근거 · switch case · 루프 횟수 · 부수효과) ② 코드 기준 행(`CODE_` — 설계 입력만으로 원본 코드 모델이
+#   문장 · 분기 결과와 결함이 드러나는 값에 한 경로로 닿는 입력, R78 · R79 와 같은 탐색) ③ 남은 카탈로그 행(전 입력 타입 경계 ·
+#   조건 조합 · 전역)을 카탈로그 순서로. 실측(R85): 정본만 판별한 변이 HDPDM01 554 · KJPDS02_PV 487 중 80% · 51% 가 '정본이 쓰는
+#   입력값을 생성 행이 그 입력에 한 번도 주지 않음' 이었고 그 값의 88% · 65% 가 함수 본문의 비교 상수 K · K±1 이었다 — 설계가
+#   범위를 주지 않은 입력에 타입 경계값(0 · 가운데 · 끝값)만 주던 카탈로그가 코드가 그 입력을 나누는 지점을 밟지 않았다(R78 이
+#   찾은 같은 원인을 그때는 확장 프로파일에만 고쳤다). 자리를 내준 카탈로그 행은 확장 문서에서 정본 규모 블록 뒤에
+#   `CATALOG_<이름>` 으로 남는다(확장 행은 이름으로 가린다 — R75). 범위 밖 강건성(FI) 행 BV_MIN_INV · BV_MAX_INV 도 먼저 두는
+#   행이다 — 정본 체제의 시험 방법 범주(REQ/FI)이고 ISO 26262-6 의 결함 주입 · 강건성 시험이라, 코드 기준 행이 자리를 다 가져가
+#   함수에 FI 행이 하나도 남지 않으면 안 된다(실측: 그렇게 잃은 R84 정본 규모 kill 62 중 51 이 정본도 잡던 것). 상한이 좁으면
+#   이 순서(MC/DC → switch → 루프 → 부수효과 → FI)로 남긴다. (리뷰 R85 W-R4-3 · W-R5-1 · W-R5-3) 범위 밖 값을 싣는 행 — FI 두 행과
+#   부수효과 행(입력마다 경계+1) — 은 그 값이 입력의 타입 안일 때만 먼저 두는 행이다: 원본 코드 모델이 입력을 선언 타입 밖이라
+#   거부하거나(`input_outside_declared_type`) 선언된 타입의 표 밖 값이면(설계 범위가 없는 입력의 타입 경계 ±1 — U8 256 · U16
+#   65536 —, 설계 하한 0 인 부호 없는 입력의 −1) 하네스에 실을 수 없고 기대값도 서지 않는다; 그런 행은 채움 후보(입력이 같은 행과
+#   같은 마지막 단계)다. 추측한 타입으로는 거부하지 않는다(`_fits_type` 과 같은 규칙 — 거부권은 근거에만).
+CODE_PREFIX = "CODE_"
+CATALOG_PREFIX = "CATALOG_"
+_REFERENCE_KEEP = ("MCDC_", "SWITCH_", "LOOP_", "VOID_SIDE_EFFECT", "BV_MIN_INV", "BV_MAX_INV")
+# (리뷰 R85 W-R5-3) the kept rows that carry values outside the design — the FI rows and the side-effect row (every input at its
+#   boundary plus one): kept only when the values are inputs the harness can hold, and no covered rows of the code search
+_REFERENCE_KEEP_OUTSIDE = frozenset({"BV_MIN_INV", "BV_MAX_INV", "VOID_SIDE_EFFECT"})
+_REFUSED_INPUT = "input_outside_declared_type:"
 
 # 시험 범위의 **유일한 정의**. 준비 게이트(`docgen_preflight`)도 이걸 import 한다.
 SCOPE_REFERENCE = "suds"    # SwUDS 설계 ID 가 있는 함수만 — 정본과 같은 범위(기본)
@@ -2126,6 +2149,51 @@ def get_boundary_values(typename: str) -> Dict[str, Any]:
     return _TYPE_BOUNDARIES.get(normalized, _DEFAULT_BOUNDARY)
 
 
+def _holds_declared_types(inputs: Dict[str, Any], var_types: Dict[str, str], declared: Any) -> bool:
+    """(R85 리뷰 W-R4-3) 행의 값이 모두 그 입력의 선언 타입이 담는 값인가 — 카탈로그가 값을 만든 같은 타입 표(`get_boundary_values`)로
+    본다. 설계 범위가 없는 입력의 범위 밖 FI 값은 타입 경계 ±1(U8 256 · U16 65536)이라 하네스에 실을 수 없다. (리뷰 R85 W-R5-1)
+    타입이 **선언에서 온** 입력(`declared`)만 거부한다 — 추측한 타입(이름 패턴 · `uint8_t` 기본값)으로 거부하면 원본 코드 모델이
+    받는 행(선언 U16 의 1201)을 밀어낸다(`_fits_type` 과 같은 규칙). 정수 폭 타입은 표의 범위로, bit · bool 은 음수만(밑 타입이 더
+    넓을 수 있어 0x2 는 담을 수 있다 — `unsigned char`), enum · 설계 범위 타입 · 모르는 타입 · 실수 · 정수로 읽히지 않는 값은
+    담는다고 본다(지어내지 않는다 — 원본 코드 모델의 판정이 따로 본다, `_oracle_refused_inputs`)."""
+    declared = set(declared or ())
+    for v, x in inputs.items():
+        if v not in declared:
+            continue
+        t = str(var_types.get(v) or "")
+        if t == "float":
+            continue
+        if isinstance(x, str):
+            try:
+                x = int(x, 0)
+            except ValueError:
+                continue
+        if not isinstance(x, int) or isinstance(x, bool):
+            continue
+        if t in ("bit", "bool"):
+            if x < 0:
+                return False
+            continue
+        tb = get_boundary_values(t)
+        lo, hi = tb.get("min"), tb.get("max")
+        if isinstance(lo, int) and isinstance(hi, int) and not lo <= x <= hi:
+            return False
+    return True
+
+
+def _oracle_refused_inputs(unit: Dict[str, Any], rows: List[Dict[str, Any]], outputs: List[str]) -> List[bool]:
+    """(리뷰 R85 W-R5-1) 행마다 원본 코드 모델이 입력을 선언 타입 밖이라 거부했는가(`input_outside_declared_type`, 그 입력을 읽은
+    경로에서만 보인다) — 모델이 쓰는 선언 타입(scope)으로 본다: 설계 범위 타입(`T_Tmr`) · bool 의 −1 처럼 생성기의 타입 표가 모르는
+    것도. 모델을 돌릴 수 없으면(소스 · scope 없음, 관측할 출력 없음) 거부하지 않았다고 본다."""
+    if not rows or not outputs or not isinstance(unit.get("project_scope"), dict):
+        return [False] * len(rows)
+    from generators.c_source_oracle import evaluate_outputs
+    runs = evaluate_outputs(unit, rows, [list(outputs)] * len(rows))
+    return [_REFUSED_INPUT in str(run.get("reason") or "")
+            or any(_REFUSED_INPUT in str((o or {}).get("reason") or "") for o in (run.get("outputs") or {}).values())
+            for run in runs]
+
+
 _ENUM_TYPE = "enum"
 # (R74) 소스 선언은 모르는 타입이지만 설계서(SwUDS Value Range)나 HSIS 가 값 범위를 적어 둔 변수.
 _RANGE_TYPE = "range"
@@ -2358,10 +2426,11 @@ resolve_safety_related = _resolve_safety_related
 
 def is_extended_strategy(strategy: Any) -> bool:
     """확장 프로파일에서만 나오는 전략인가 — OAT·경계(BND)·MC/DC 채움 행(R19)·설계 범위 밖 강건성 행(R31)·동작 시나리오
-    행(R78) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+)."""
+    행(R78) 전부, 그리고 기본 자리 수를 넘는 SWITCH(6+)·GLOBAL(3+)·MCDC(7+). (R85) 정본 규모 문서에서 코드 기준 행에 자리를
+    내준 카탈로그 행(`CATALOG_<이름>`)도 — 코드 기준 행(`CODE_`)은 정본 규모 행이다."""
     s = str(strategy or "").strip()
     if s.startswith(("OAT_", BOUNDARY_PREFIX, MCDC_FILL_PREFIX, ROBUST_PREFIX, OBS_MCDC_PREFIX, SCENARIO_PREFIX,
-                     SCENARIO_FI_PREFIX, STUB_APART_PREFIX, PROPAGATE_PREFIX, PROPAGATE_FI_PREFIX)):
+                     SCENARIO_FI_PREFIX, STUB_APART_PREFIX, PROPAGATE_PREFIX, PROPAGATE_FI_PREFIX, CATALOG_PREFIX)):
         return True
     for prefix, base_n in (("SWITCH_", _BASE_SWITCH_SLOTS), ("GLOBAL_", _BASE_GLOBAL_SLOTS), ("MCDC_", _BASE_MCDC_SLOTS)):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -2427,12 +2496,12 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     탐색이 실패해도 문서는 만든다 — 그 unit 만 경계 행 없이 두고 사유를 남긴다(리뷰 C1).
     """
     domains = _boundary_domains(unit, input_vars, var_types, var_bounds, unknown_vars, enum_sets)
-    outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
+    outputs = list(dict.fromkeys([*output_vars, *(k for s in _search_rows(sequences) for k in (s.get("expected") or {}))]))
 
     # (R78) 동작 시나리오 행은 기준 행 순위에 끼지 않고 **더한** 기준이다(`extra_bases`) — 기존 기준 행의 탐색은 그 행들이 없을
     #   때와 같다(첫 판에서 순위 맨 앞에 두자 기존 기준이 밀려 경계 6개를 잃었다 — R4b 와 같은 교훈: 옮기지 말고 더한다)
-    order = sorted((s for s in sequences if not _is_scenario(s)), key=_base_rank)
-    scenarios = [s for s in sequences if _is_scenario(s)]
+    order = _base_order([s for s in _search_rows(sequences) if not _is_scenario(s)])
+    scenarios = _base_order([s for s in _search_rows(sequences) if _is_scenario(s)])
     # 행이 비운 입력의 채움 값 — BV_MID 와 같은 중간값에서 출발한다(넓은 범위면 입력마다 위치만큼 옮겨 서로 다르게, enum 은 열거자).
     mids = {v: (var_bounds.get(v) or {}).get("mid") for v in domains}
     defaults = {v: m for v, m in mids.items() if isinstance(m, int) and not isinstance(m, bool)}
@@ -2442,7 +2511,7 @@ def _append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         overrides = _prior_fill_overrides(unit, blank_fill(domains, defaults), domains, var_bounds)[0]
         found = find_boundaries(
             unit, [{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in order], domains, outputs,
-            [s.get("inputs") or {} for s in sequences],
+            [s.get("inputs") or {} for s in _search_rows(sequences)],
             defaults=defaults, fill_overrides=overrides,
             extra_bases=[{"inputs": s.get("inputs") or {}, "strategy": s.get("strategy")} for s in scenarios])
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
@@ -2497,14 +2566,52 @@ def summarize_robustness_rows(units: List[Dict[str, Any]]) -> Dict[str, int]:
     return out
 
 
+def _catalogue_position(seq: Dict[str, Any]) -> Optional[int]:
+    """(리뷰 R85 W1 · I-7) 정본 규모 카탈로그 자리의 번호 — `generate_sequences` 가 행을 만든 자리에서 단다
+    (`catalogue_slot`, 기본 자리만; 이름으로 되읽지 않는다 — R75 '표시는 만든 자리에서'). 확장 자리 · 카탈로그 밖 행은 None."""
+    slot = seq.get("catalogue_slot")
+    return slot if isinstance(slot, int) and not isinstance(slot, bool) else None
+
+
+def _base_order(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """기준 행 후보 순서(`_base_rank`) — 동률은 정본 규모 카탈로그 행이 카탈로그 순서로 먼저, 나머지는 문서 순서(R15 경계 ·
+    R31 강건성 · R60 출력 관측 쌍 공용)."""
+    def key(item: Tuple[int, Dict[str, Any]]) -> tuple:
+        pos, s = item
+        cat = _catalogue_position(s)
+        return (_base_rank(s), 0 if cat is not None else 1, cat if cat is not None else 0, pos)
+    return [s for _pos, s in sorted(enumerate(sequences), key=key)]
+
+
 def _base_rank(s: Dict[str, Any]) -> int:
     """기준 행 후보 순서 — 전 입력 중간값(BV_MID) → MC/DC 설계 벡터 → 조건 조합 → 나머지 → 동작 시나리오(R78, 맨 뒤)(R15 경계
     행·R31 강건성 행·R60 출력 관측 쌍 공용). (R78) 동작 시나리오 행은 기존 기준의 순위를 밀지 않는다 — 경계 탐색 · 강건성 행은
     그 행들을 기존 기준 **뒤에 더한** 기준으로 쓴다(`extra_bases` · `MAX_ROBUST_SCENARIO_BASES`)."""
-    name = str(s.get("strategy") or "")
+    name = _catalog_name(s.get("strategy"))
     if _is_scenario(s):
         return 5
     return 0 if name == "BV_MID" else 1 if name.startswith("MCDC_") else 2 if name.startswith("COND_COMB_") else 3
+
+
+def _search_rows(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """(R85) 확장 탐색이 보는 행 — 정본 규모 코드 기준 행(`CODE_`)을 빼고 R85 전의 순서로(카탈로그 행은 카탈로그 순서 ·
+    나머지는 문서 순서). 코드 기준 행은 정본 규모 문서의 행이다: 확장의 탐색(동작 시나리오 · 경계 · 강건성 · 출력 관측 쌍 · 설계
+    범위 밖 · 피호출 값 구별 · 결함 전파 · 소스가 읽는/쓰는 입출력 보완)은 그 행이 없을 때처럼 돌고, 코드 기준 행은 더해지기만
+    한다(R80 교훈 — 새 탐색을 기존 탐색에 섞자 kill 을 잃었다; R85 실측: 코드 기준 행을 이미 있는 · 덮인 행으로 보자 HDPDM01
+    확장 문서가 kill 34 를 잃었다 — 시나리오 행 · 경계 행이 줄었다)."""
+    rows = [(i, s) for i, s in enumerate(sequences) if not str(s.get("strategy") or "").startswith(CODE_PREFIX)]
+
+    def key(item: Tuple[int, Dict[str, Any]]) -> tuple:
+        slot = _catalogue_position(item[1])
+        return (0, slot) if slot is not None else (1, item[0])
+    return [s for _i, s in sorted(rows, key=key)]
+
+
+def _scenario_rows_first(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """탐색 출발 행 순서 — 동작 시나리오 행(`SCN_` · `SCNR_`, R78 I-R3-1 · R84 I-R2-4: 서로 다른 동작 값이 더 나은 출발점) →
+    나머지. 받는 행은 `_search_rows` 의 보기다 — 정본 규모 코드 기준 행은 확장 탐색에 들어오지 않는다(리뷰 R85 I-R4-2: 그래서
+    이 함수 · `_is_scenario` · `_base_rank` 는 코드 기준 행을 다루지 않는다)."""
+    return [s for s in sequences if _is_scenario(s)] + [s for s in sequences if not _is_scenario(s)]
 
 
 def _is_scenario(s: Dict[str, Any]) -> bool:
@@ -2695,14 +2802,253 @@ def _append_scenario_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
     (키 `SCENARIO_REPORT_KEYS`)."""
     var_types = ctx["var_types"]
     domains = _scenario_domains(unit, ctx)
-    outputs = _scenario_outputs(ctx, sequences)
-    found = find_scenarios(unit, domains, outputs, [s.get("inputs") or {} for s in sequences])
+    outputs = _scenario_outputs(ctx, _search_rows(sequences))
+    found = find_scenarios(unit, domains, outputs, [s.get("inputs") or {} for s in _search_rows(sequences)])
     # the second search's keys are there from the start — a unit it skips reports 0, not nothing
     unit["scenario_rows"] = {**found["report"], **dict.fromkeys(
         [k for k in SCENARIO_REPORT_KEYS if k.startswith("outside_design_")], 0),
         "harness_member_inputs": sum(1 for d in domains.values() if isinstance(d, dict) and d.get("harness_member"))}
     for i, row in enumerate(found["rows"]):
         _scenario_row(sequences, row, f"{SCENARIO_PREFIX}{i}", outputs, var_types, {}, {})
+
+
+# (R85) 정본 규모 문서의 코드 기준 행 — 보고서 키(unit 기록과 품질 집계가 같은 키를 쓴다; 키 하나가 빠지면 공시가 조용히 준다)
+REFERENCE_CODE_REPORT_KEYS = ("budget", "catalogue", "kept", "rows", "fill", "found", "cut", "cut_expose", "displaced",
+                              "same_as_catalogue", "reached_unclean_only", "cut_reached", "cut_exposed",
+                              "targets", "reached_clean", "not_reached", "covered_before", "expose_targets",
+                              "expose_reached", "expose_covered_before", "runs", "steps", "expose_runs", "expose_steps",
+                              # (리뷰 R85 W-R4-3) FI rows not kept first: a value past its declared type
+                              "fi_out_of_type",
+                              # (리뷰 R85 W-R4-1) extended rows whose inputs are a code row's (the extension searches as if
+                              #   the code rows were not there)
+                              "extension_same_inputs")
+_EXPOSE_KINDS = ("boundary", "write", "arith")
+
+
+def _code_rows(unit: Dict[str, Any], kept: List[Dict[str, Any]], ctx: Dict[str, Any], room: int,
+               added_fill: Dict[str, Any], prior: frozenset = frozenset()
+               ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+    """(R85) 코드 기준 행 — 설계 입력만으로(`ctx` 의 입력 · 출력이 설계 목록) 동작 시나리오 탐색(`find_scenarios`, R78 의 문장 ·
+    분기 결과 + R79 의 결함이 드러나는 값 — 경계 · 쓰기 · 연산)을 돌려, 먼저 둔 카탈로그 행(`kept`)이 이미 닿은 목표는 빼고
+    찾은 행을 앞에서부터 `room` 개 — `(행, 탐색 보고서, 자리가 없어 넣지 못한 탐색 행)`. 두 프로파일이 같은 행을 갖도록 입력 ·
+    도메인 · 출력 · 출발 행이 모두 설계 목록 위다(MC/DC 설계와 같은 규칙 — 확장 문서는 정본 규모 문서의 행을 같은 값으로 담는다,
+    R75). 확장의 회차(R19)마다 같은 탐색이므로 unit 에 결과를 둔다(`_code_rows_cache`). ``added_fill``: 확장에서 더한 입력의
+    고정값 — 다른 카탈로그 행과 같은 규칙(R19); ``prior``: 그중 쓰기 전 값으로만 더한 입력(R82 — 행 설명이 따로 적는다).
+    먼저 둔 범위 밖 값 행(FI · 부수효과 — `_REFERENCE_KEEP_OUTSIDE`)은 출발 행이지만 덮인 행은 아니다(리뷰 R85 I-R4-1 · W-R5-3) —
+    범위 밖 값으로만 닿은 목표도 설계 범위 안에서 닿는 행을 찾는다(요구 기반 REQ 행 — FI 행은 강건성 시험이지 그 목표의 정상
+    동작 시험이 아니다)."""
+    domains = _scenario_domains(unit, ctx)
+    outputs = list(ctx["output_vars"])
+    existing = [{k: v for k, v in (s.get("inputs") or {}).items() if k in domains} for s in kept]
+    covered = [view for s, view in zip(kept, existing, strict=True) if str(s.get("strategy") or "") not in _REFERENCE_KEEP_OUTSIDE]
+    key = (repr(sorted(domains.items(), key=lambda kv: kv[0])), repr(existing), repr(covered), tuple(outputs))
+    cache = unit.get("_code_rows_cache")
+    if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == key:
+        found = cache[1]
+    else:
+        found = find_scenarios(unit, domains, outputs, existing, covered=covered)
+        unit["_code_rows_cache"] = (key, found)
+    taken = found["rows"][:max(0, room)]
+    rows: List[Dict[str, Any]] = []
+    for i, row in enumerate(taken):
+        made: List[Dict[str, Any]] = []
+        _scenario_row(made, row, f"{CODE_PREFIX}{i}", outputs, ctx["var_types"], {}, {})
+        seq = made[0]
+        seq.pop("tc_profile", None)
+        seq["code_row"] = seq.pop("scenario")
+        seq["description"] = "코드 기준 행(정본 규모 · 설계 입력만): " + str(seq.get("description") or "")
+        fixed = {v: x for v, x in added_fill.items() if v not in seq["inputs"]}
+        if fixed:
+            seq["inputs"].update(fixed)
+            read = [f"{v}={x}" for v, x in fixed.items() if v not in prior]
+            wrote = [f"{v}={x}" for v, x in fixed.items() if v in prior]
+            if read:
+                seq["description"] += "\n소스가 읽어 더한 입력(설계서 입력 표 밖 · 이 행에선 고정값): " + ", ".join(read)
+            if wrote:
+                # (review R85 I4) the function writes these, it does not read them — as the catalogue rows say (R82)
+                seq["description"] += "\n쓰기 전 값(함수가 쓰는 객체의 호출 전 값 · 이 행에선 고정값): " + ", ".join(wrote)
+        rows.append(seq)
+    return rows, found["report"], list(found["rows"][len(taken):])
+
+
+_DISPLACED_NOTE = "정본 규모 문서에 들지 못한 카탈로그 행(행 수 상한 · 코드 기준 행에 자리를 내줌) — "
+
+
+def _reference_scale_block(unit: Dict[str, Any], sequences: List[Dict[str, Any]], base_n: int, budget: int,
+                           ctx: Dict[str, Any], extended: bool, added_fill: Dict[str, Any],
+                           cap: Optional[int] = None, prior: frozenset = frozenset(),
+                           fixed_of: Optional[Dict[int, frozenset]] = None) -> List[Dict[str, Any]]:
+    """(R85) 정본 규모 블록 — 카탈로그 행(`sequences[:base_n]`, 카탈로그 순서)에서 `_REFERENCE_KEEP` 이름의 행을 먼저(예산
+    안에서 — 고르는 것은 그 이름 순서(MC/DC → switch → 루프 → 부수효과 → 선언 타입 안 FI), 놓는 것은 카탈로그 순서), 남은
+    자리에 코드 기준 행(`_code_rows`), 그래도 남으면 나머지 카탈로그 행을 — 아직 어느 행도 값을 주지 않은 입력을 움직이는 행 →
+    다른 행과 입력이 다른 행 → 입력이 같은 행 · 선언 타입 밖 값의 FI 행 순으로, 각각 카탈로그 순서(리뷰 R85 W2: 간접 전역의
+    유일한 자극인 GLOBAL 행보다 중복 행이 남았다) — 둔다. 행 수는 `budget`(정본 규모 문서의 행 수)을 넘지 않는다. 정본 규모 문서는 이
+    블록이고, 확장 문서는 이 블록 뒤에 들지 못한 카탈로그 행(`CATALOG_<이름>`, 확장 표시) · 확장 카탈로그 행(`sequences[base_n:]`)을
+    둔다 — 확장 문서의 앞 `len(블록)` 행이 정본 규모 문서다(R75 포함 관계; 두 호출이 같은 `budget` 일 때 — 리뷰 R85 C1).
+    코드 기준 탐색이 실패하면 그 unit 은 예전처럼 카탈로그 행으로 채운다(사유를 남긴다). 행 번호는 여기서 다시 매긴다 — 번호를
+    적는 단계(중복 행 · MC/DC 쌍 확정)보다 앞이다. ``cap``: 확장 호출이 상한을 주면(`generate_sequences(..., max_seq,
+    extended=True)`) 예전처럼 카탈로그 부분을 앞에서 그 수만 둔다. ``prior``: 쓰기 전 값으로만 더한 입력(행 설명).
+    ``fixed_of``: 행(id) → 그 행에 확장이 고정값으로 붙인 더한 입력(R19) — 블록의 판정(같은 행인가 · 새 입력인가)은 그 입력을
+    뺀 **정본 규모 문서의 보기**로 한다: 두 프로파일이 같은 블록을 고르게(리뷰 R85 C-R2-1 — 고정값이 붙은 BV_MIN 은 고정값이
+    없는 MC/DC 행과 달라 보여 확장에서만 뽑혔다). 코드 기준 행은 `added_fill` 의 입력이 고정값이다."""
+    base_rows, ext_rows = sequences[:base_n], sequences[base_n:]
+    budget = max(0, budget)   # (리뷰 R85 I-9) a cap of 0 or below is no room, not a negative one
+    fixed_of = fixed_of or {}
+    added = frozenset(added_fill)
+
+    def view_key(s: Dict[str, Any], code_row: bool = False) -> str:
+        drop = added if code_row else fixed_of.get(id(s), frozenset())
+        return json.dumps({k: v for k, v in (s.get("inputs") or {}).items() if k not in drop}, sort_keys=True, default=str)
+
+    def view_inputs(s: Dict[str, Any], code_row: bool = False) -> set:
+        drop = added if code_row else fixed_of.get(id(s), frozenset())
+        return {k for k in (s.get("inputs") or {}) if k not in drop}
+    def keep_rank(i: int) -> Tuple[int, int]:
+        name = str(base_rows[i].get("strategy") or "")
+        return (next(r for r, fam in enumerate(_REFERENCE_KEEP) if name.startswith(fam)), i)
+    var_types = ctx.get("var_types") or {}
+    # (리뷰 R85 W-R4-3 · W-R5-1 · W-R5-3 · I-R5-5) a row with values outside the design is kept first only when they are
+    #   inputs the harness can hold: the oracle refused none and no declared type is exceeded — judged on the reference-scale
+    #   view (the extension's fixed added inputs dropped), so both profiles choose the same block
+    outside = [i for i, s in enumerate(base_rows) if str(s.get("strategy") or "") in _REFERENCE_KEEP_OUTSIDE]
+    views = [{k: v for k, v in (base_rows[i].get("inputs") or {}).items() if k in view_inputs(base_rows[i])}
+             for i in outside]
+    try:
+        refused = _oracle_refused_inputs(unit, views, list(ctx.get("output_vars") or []))
+    except Exception as exc:  # noqa: BLE001 — the oracle never raises; a failure here keeps the declared-type rule only
+        _logger.warning("SUTS 범위 밖 값 행 판정 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+        refused = [False] * len(outside)
+    out_of_type = {i for i, view, r in zip(outside, views, refused, strict=True)
+                   if r or not _holds_declared_types(view, var_types, ctx.get("declared"))}
+    keep = sorted(sorted((i for i, s in enumerate(base_rows)
+                          if str(s.get("strategy") or "").startswith(_REFERENCE_KEEP) and i not in out_of_type),
+                         key=keep_rank)[:budget])
+    room = max(0, budget - len(keep))
+    record: Dict[str, Any] = {**dict.fromkeys(REFERENCE_CODE_REPORT_KEYS, 0), "budget": budget,
+                              "catalogue": len(base_rows), "kept": len(keep), "status": "no_room", "error": "",
+                              "budget_exhausted": False, "fi_out_of_type": len(out_of_type)}
+    code: List[Dict[str, Any]] = []
+    if room and ctx["input_vars"]:
+        try:
+            code, rep, cut_rows = _code_rows(unit, [base_rows[i] for i in keep], ctx, room, added_fill, prior)
+            # (review R85 W3) the search's own status — a unit it could not search is not 'searched'
+            record["status"] = str(rep.get("status") or "unknown")   # (리뷰 R85 I-5) no status is not success
+            for k in ("targets", "reached_clean", "not_reached", "reached_unclean_only", "covered_before", "expose_targets",
+                      "expose_reached", "expose_covered_before", "runs", "steps", "expose_runs", "expose_steps"):
+                record[k] = int(rep.get(k) or 0)
+            record["found"] = len(code) + len(cut_rows)
+            record["cut"] = len(cut_rows)
+            record["cut_expose"] = sum(1 for r in cut_rows if r.get("target_kind") in _EXPOSE_KINDS)
+            # (review R85 W4) a target only a row left out first reached is not reached by the document (a later row
+            #   reaching it too is counted with the cut row — the count errs low)
+            # (review R85 W-R3-3) … and gets its own count, so that reached + unclean-only + not reached + cut-reached
+            #   is every target again
+            record["cut_reached"] = sum(int(r.get("targets_reached") or 0) for r in cut_rows)
+            record["cut_exposed"] = sum(int(r.get("exposures_met") or 0) for r in cut_rows)
+            record["reached_clean"] = max(0, record["reached_clean"] - record["cut_reached"])
+            record["expose_reached"] = max(0, record["expose_reached"] - record["cut_exposed"])
+            record["budget_exhausted"] = bool(rep.get("budget_exhausted") or rep.get("expose_budget_exhausted"))
+        except Exception as exc:  # noqa: BLE001 — the document keeps its catalogue rows; the unit records why
+            _logger.warning("SUTS 정본 규모 코드 기준 행 실패(%s): %s", unit.get("name"), exc, exc_info=True)
+            record["status"] = "error"
+            record["error"] = type(exc).__name__
+            code = []
+    elif room:
+        record["status"] = "no_design_inputs"
+    kept = set(keep)
+    # a code row equal to a catalogue row (the search found the catalogue's own vector — HDPDM01: `BV_MID` of two
+    #   design ranges) gives its place to that row: the same targets, and the catalogue row keeps its role (BV_MID is the
+    #   first base of the boundary · robustness rows) and its name
+    by_key: Dict[str, int] = {}
+    for i, s in enumerate(base_rows):
+        if i not in kept:
+            by_key.setdefault(view_key(s), i)
+    same: List[int] = []
+    distinct: List[Dict[str, Any]] = []
+    for row in code:
+        i = by_key.get(view_key(row, True))
+        if i is not None and i not in same:
+            same.append(i)
+        else:
+            distinct.append(row)
+    code = distinct
+    for j, row in enumerate(code):
+        row["strategy"] = f"{CODE_PREFIX}{j}"
+    kept |= set(same)
+    record["same_as_catalogue"] = len(same)
+    seen = {view_key(base_rows[i]) for i in kept} | {view_key(s, True) for s in code}
+    given = set().union(*(view_inputs(base_rows[i]) for i in kept), *(view_inputs(s, True) for s in code))
+    left = max(0, room - len(code) - len(same))
+    fill: List[int] = []
+    rest = [i for i in range(len(base_rows)) if i not in kept]
+    for stage in (0, 1, 2):
+        for i in rest:
+            if len(fill) >= left:
+                break
+            if i in fill:
+                continue
+            row_inputs = view_inputs(base_rows[i])
+            # (리뷰 R85 W-R4-3) an FI row past its types derives nothing — with the rows that repeat another row's inputs
+            if stage < 2 and (view_key(base_rows[i]) in seen or i in out_of_type):
+                continue
+            if stage == 0 and not row_inputs - given:
+                continue
+            fill.append(i)
+            seen.add(view_key(base_rows[i]))
+            given |= row_inputs
+    chosen = kept | set(fill)
+    block = [base_rows[i] for i in sorted(chosen)] + code
+    displaced = [base_rows[i] for i in range(len(base_rows)) if i not in chosen]
+    record["rows"] = len(code)
+    record["fill"] = len(fill)
+    record["displaced"] = len(displaced)
+    out = block
+    if extended:
+        for s in displaced:
+            s["strategy"] = CATALOG_PREFIX + str(s.get("strategy") or "")
+            s["tc_profile"] = TC_PROFILE_EXTENDED
+            s["description"] = _DISPLACED_NOTE + str(s.get("description") or "")
+        out = block + displaced + ext_rows
+    if cap is not None:
+        out = out[:cap]
+    for i, s in enumerate(out):
+        s["seq_num"] = i + 1
+    unit["reference_code_rows"] = record
+    return out
+
+
+def profile_increment(all_sequences: Dict[str, List[Dict[str, Any]]],
+                      extended: bool) -> Tuple[int, int]:
+    """(R85) 기본 문서 대비 확장 문서의 증분 `(확장 전략 행, 정본 규모 블록에 들지 못한 카탈로그 행)` — 두 수의 합이 증분이고
+    겹쳐 세지 않는다: 들지 못한 카탈로그 행(`CATALOG_`, 상한 · 코드 기준 행에 자리를 내줌)은 확장 표시가 있어도 앞 수에서 뺀다.
+    기본 프로파일은 `(0, 0)`."""
+    if not extended:
+        return 0, 0
+    rows = [q for s in all_sequences.values() for q in s if q.get("tc_profile") == TC_PROFILE_EXTENDED]
+    displaced = sum(1 for q in rows if str(q.get("strategy") or "").startswith(CATALOG_PREFIX))
+    return len(rows) - displaced, displaced
+
+
+def summarize_reference_code_rows(units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """(R85) 정본 규모 문서의 코드 기준 행 — unit 기록의 합(키는 `REFERENCE_CODE_REPORT_KEYS`) + 탐색한 · 행이 생긴 · 오류
+    · 설계 입력 없음 · 자리 없음 · 예산 소진 unit 수, 탐색하지 못한 unit 의 사유별 수(`not_searched`, 리뷰 R85 W3)와 탐색 상한."""
+    recs = [u.get("reference_code_rows") for u in units if isinstance(u.get("reference_code_rows"), dict)]
+    out: Dict[str, Any] = {k: sum(int(r.get(k) or 0) for r in recs) for k in REFERENCE_CODE_REPORT_KEYS}
+    skipped = {"searched", "error", "no_room", "no_design_inputs"}
+    not_searched: Dict[str, int] = {}
+    for r in recs:
+        status = str(r.get("status") or "")
+        if status not in skipped:
+            reason = status.split(":", 1)[0]
+            not_searched[reason] = not_searched.get(reason, 0) + 1
+    out.update(units=len(recs), searched=sum(1 for r in recs if r.get("status") == "searched"),
+               units_with_rows=sum(1 for r in recs if r.get("rows")),
+               errors=sum(1 for r in recs if r.get("status") == "error"),
+               no_design_inputs=sum(1 for r in recs if r.get("status") == "no_design_inputs"),
+               no_room=sum(1 for r in recs if r.get("status") == "no_room"),
+               budget_exhausted=sum(1 for r in recs if r.get("budget_exhausted")),
+               not_searched=dict(sorted(not_searched.items())), cap_per_search=_SCENARIO_MAX_ROWS)
+    return out
 
 
 def _design_widened(unit: Dict[str, Any], domains: Dict[str, Any], var_types: Dict[str, str]) -> Dict[str, Any]:
@@ -2780,13 +3126,12 @@ def _append_scenario_fi_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
         return
     if not first_ran:
         wide = {}   # no first search: only the enum search (over its one-value inputs) runs
-    outputs = _scenario_outputs(ctx, sequences)
+    outputs = _scenario_outputs(ctx, _search_rows(sequences))
 
     def existing_rows() -> List[Dict[str, Any]]:
         # the first search's operating vectors first — the climb starts are the first `MAX_STARTS` (review R78 R3
         #   I-R3-1: in document order the first scenario row sat past them)
-        return [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
-            [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
+        return [s.get("inputs") or {} for s in _scenario_rows_first(_search_rows(sequences))]
 
     def add_rows(found: List[Dict[str, Any]], span: Dict[str, Any], enums: Dict[str, Dict[str, Any]]) -> int:
         """The rows a search found — FI (`SCNR_`) when a value outside its home range stays, else in-range (`SCN_`);
@@ -3111,14 +3456,14 @@ def _append_robustness_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
     for key in ("undecided_preprocessor_blocks", "inputs_shadowed", "body_unread"):
         report[key] = int(stats.get(key) or 0)
     macro_only = stats.get("macro_argument_constants") or {}
-    seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in sequences}
-    outputs = list(dict.fromkeys([*output_vars, *(k for s in sequences for k in (s.get("expected") or {}))]))
+    seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in _search_rows(sequences)}
+    outputs = list(dict.fromkeys([*output_vars, *(k for s in _search_rows(sequences) for k in (s.get("expected") or {}))]))
     bases: List[tuple] = []
     # (R78) 동작 시나리오 행은 기존 후보(`MAX_ROBUST_BASES`) **뒤에 더한** 후보다 — 기존 후보 중 비교가 살아 있는 행이 있으면 그
     #   행이 그대로 기준이고, 없을 때만 시나리오 행이 기준이 된다(옮기지 않고 더한다)
     limits = {False: MAX_ROBUST_BASES, True: MAX_ROBUST_SCENARIO_BASES}
     taken = {False: 0, True: 0}
-    for s in sorted(sequences, key=_base_rank):
+    for s in _base_order(_search_rows(sequences)):
         scenario = _is_scenario(s)
         if taken[scenario] >= limits[scenario]:
             continue
@@ -3228,8 +3573,8 @@ def _append_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]]
     입력 위치만큼 옮긴 값, enum 은 열거자)으로 채운 행을 하나 더한다. 도메인을 모르는 입력은 여전히 비운다. 같은 입력의 행이
     이미 있으면 더하지 않는다. 기대값은 뒤의 oracle 이 모든 행과 똑같이 도출한다. 요약은 `unit["mcdc_fill"]`.
     `fill` 은 선언 타입·열거자가 있는 입력의 채움 값이다(이름 패턴 타입은 추측이라 채우지 않는다 — 리뷰 R1 W5)."""
-    seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in sequences}
-    rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
+    seen = {json.dumps(s.get("inputs") or {}, sort_keys=True, default=str) for s in _search_rows(sequences)}
+    rows = [s for s in sequences if _catalog_name(s.get("strategy")).startswith("MCDC_")]
     report = {"mcdc_rows": len(rows), "rows_with_blanks": 0, "rows": 0, "not_fillable": 0, "duplicates": 0,
               "pruned": 0}
     for row in rows:
@@ -3273,7 +3618,12 @@ def _drop_duplicate_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]], 
     for seq in sequences:
         key = json.dumps(seq.get("inputs") or {}, sort_keys=True, default=str)
         strategy = str(seq.get("strategy") or "")
+        if strategy.startswith(CODE_PREFIX):
+            kept.append(seq)   # (R85) a reference-scale code row — kept, and not the earlier row of an extended one
+            continue
         if key in seen:
+            # (리뷰 R85 I-2) 정본 규모 문서에 들지 못한 카탈로그 행(`CATALOG_`)은 빼지 않는다 — R85 전엔 그 행이 정본 규모
+            #   행이라 빠진 적이 없고, CATALOG_BV_MID 는 첫 기준 행이다(확장에서 남긴 중복으로 센다)
             droppable = extended and seq.get("tc_profile") == TC_PROFILE_EXTENDED and \
                 strategy.startswith(("OAT_", "SWITCH_", "GLOBAL_"))
             if droppable:
@@ -3324,19 +3674,26 @@ def _prune_mcdc_fill_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]])
     return kept
 
 
+def _catalog_name(strategy: Any) -> str:
+    """(R85) 전략 이름 — 정본 규모 문서에서 자리를 내준 카탈로그 행(`CATALOG_BV_MIN`)은 원래 이름(`BV_MIN`)으로 판정한다."""
+    s = str(strategy or "").strip()
+    return s[len(CATALOG_PREFIX):] if s.startswith(CATALOG_PREFIX) else s
+
+
 def resolve_seq_test_method(strategy: Any) -> str:
     """시퀀스 하나의 Test Method — 정본은 **시퀀스 그룹 단위**로 REQ/FI 를 나눈다. (R31) 설계 범위 밖 강건성 행도 FI."""
-    s = str(strategy or "").strip()
+    s = _catalog_name(strategy)
     return _METHOD_FI if s in _FI_STRATEGIES or s.startswith((ROBUST_PREFIX, SCENARIO_FI_PREFIX, PROPAGATE_FI_PREFIX)) \
         else _METHOD_REQ
 
 
 def resolve_seq_gen_method(strategy: Any) -> str:
-    """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`."""
-    s = str(strategy or "").strip()
+    """시퀀스 하나의 TC Generation Method — 경계값이면 `AOR/ABV`, 조건 조합이면 `AOR/AEC`. (R85) 코드 기준 행은 동작 시나리오
+    행과 같은 등가 분할(코드가 나누는 구간 · 분기 결과)이다."""
+    s = _catalog_name(strategy)
     if s.startswith("COND_COMB_") or s.startswith("SWITCH_") or s.startswith("MCDC") or s.startswith(MCDC_FILL_PREFIX) \
             or s.startswith(OBS_MCDC_PREFIX) or s.startswith(SCENARIO_PREFIX) or s.startswith(STUB_APART_PREFIX) \
-            or s.startswith(PROPAGATE_PREFIX) or s.startswith(PROPAGATE_FI_PREFIX):
+            or s.startswith(PROPAGATE_PREFIX) or s.startswith(PROPAGATE_FI_PREFIX) or s.startswith(CODE_PREFIX):
         return _GEN_EQUIV
     return _GEN_BOUNDARY
 
@@ -3365,8 +3722,13 @@ def generate_sequences(
     type_cache: Optional[Dict[str, str]] = None,
     extended: bool = False,
     boundary_rows: bool = True,
+    reference_cap: Optional[int] = _DEFAULT_SEQ_COUNT,
 ) -> List[Dict[str, Any]]:
     """Generate test sequences for a unit function.
+
+    (R85) 정본 규모 블록의 행 수 — 기본 프로파일은 `max_seq`(None 이면 카탈로그 전부), 확장은 `reference_cap`(같은 SCM 의 정본
+    규모 문서가 쓴 상한 — `generate_suts` 의 `max_sequences`; None 이면 카탈로그 전부): 두 문서가 같은 블록을 가져야 확장 문서의
+    앞부분이 정본 규모 문서다(리뷰 R85 C1).
 
     `extended`(R75 확장 프로파일): 기본 전략 목록은 **그대로 앞에** 두고(같은 이름·같은 값) 그 뒤에 덧붙인다 —
     7번째 이후의 switch case · 4번째 이후의 전역 · 8번째 이후의 MC/DC 설계 벡터 · 입력마다 최솟값/최댓값 **단독 변경**(OAT,
@@ -3819,7 +4181,9 @@ def generate_sequences(
         _fill_all.update(_moved)
 
     sequences: List[Dict[str, Any]] = []
-    for idx, (strat_name, bound_key) in enumerate(strategies if max_seq is None else strategies[:max_seq]):
+    _fixed_of: Dict[int, frozenset] = {}   # (R85 리뷰 C-R2-1) row id → the added inputs this row holds at a fixed value
+    # (R85) 카탈로그 행은 모두 만든다 — 정본 규모 문서의 행 수(`max_seq`)는 아래 정본 규모 블록이 지킨다
+    for idx, (strat_name, bound_key) in enumerate(strategies):
         seq_num = idx + 1
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
@@ -4009,6 +4373,31 @@ def generate_sequences(
         if idx >= _base_strategy_count:
             # 확장 전략의 표시는 **만든 자리에서** 단다 — 이름을 되읽어 추정하지 않는다(리뷰 W2·X5).
             sequences[-1]["tc_profile"] = TC_PROFILE_EXTENDED
+        else:
+            sequences[-1]["catalogue_slot"] = idx   # (R85 리뷰 I-7) 기준 행 후보의 동률 순서 — 만든 자리에서 단다
+        if _fixed:
+            _fixed_of[id(sequences[-1])] = frozenset(_fixed)
+
+    # (R85) 정본 규모 블록 — 행 수는 예전 정본 규모 문서 그대로(`min(상한, 카탈로그 수)`; 확장은 기본 상한으로 같은 블록을
+    #   만든다), 그 안을 MC/DC · switch · 루프 · 부수효과 행 → 코드 기준 행 → 나머지 카탈로그 행 순으로 채운다. 코드 기준 탐색은
+    #   설계 입력 · 설계 출력 목록 위에서 돈다(두 프로파일이 같은 행 — R75).
+    # (리뷰 R85 I5) 설계 출력이 없는 함수는 부수효과 행처럼 간접 전역을 관측한다 — 아니면 코드 기준 행이 아무것도 보지 않는다
+    _code_ctx = {"input_vars": list(_design_inputs),
+                 "output_vars": list(_design_out_list or (indirect_vars if _design_inputs else [])),
+                 "var_types": dict(var_types), "var_bounds": dict(var_bounds), "unknown": sorted(_unknown_vars),
+                 "declared": sorted(v for v in _design_inputs if _declared(v) and not _is_pointer_decl(v)),
+                 "enum_sets": dict(_domains) if _pointee_domains else None}
+    _added_fill = {v: _format_test_value(_fill_all[v], var_types.get(v, "uint8_t"))
+                   for v in _added_inputs if v in _fill_all} if extended else {}
+    _ref_cap = reference_cap if extended else max_seq
+    sequences = _reference_scale_block(
+        unit, sequences, _base_strategy_count,
+        _base_strategy_count if _ref_cap is None else min(_ref_cap, _base_strategy_count), _code_ctx, extended,
+        _added_fill, max_seq if extended else None, frozenset(_prior_inputs), _fixed_of)
+    if not extended or boundary_rows:
+        # the cache serves the rounds of one extended generation (`extended_unit_sequences` pops it at the end); a
+        #   reference-scale or a final extended call drops it here (리뷰 R85 I-8)
+        unit.pop("_code_rows_cache", None)
 
     # 행 상한(`strategies[:max_seq]`)을 **적용한 뒤** 쌍을 다시 검증한다 — 한쪽 행만 남은 쌍은 `truncated` 로 공시되고
     # 커버리지 주장에서 빠진다. MC/DC 행끼리만 묶는다(같은 입력의 BV 행을 쌍 구성원으로 잡으면 설계 근거가 섞인다).
@@ -4017,7 +4406,8 @@ def generate_sequences(
     #   행을 찾으므로, 경계·채움 행은 만들 때 이미 겹침을 피하므로 대상이 아니다. ⚠ finalize **앞**에서 한다 — finalize 가 쌍에
     #   행 번호(`seq_a`/`seq_b`)를 적어 두므로, 뒤에서 번호를 다시 매기면 MCDC Design 시트가 엉뚱한 행을 가리킨다(리뷰 R1 C1).
     sequences = _drop_duplicate_rows(unit, sequences, extended)
-    _mcdc_rows = [s for s in sequences if str(s.get("strategy") or "").startswith("MCDC_")]
+    # (리뷰 R85 C1) 정본 규모 예산이 작으면 확장 문서의 MC/DC 행이 `CATALOG_MCDC_<n>` 이다 — 여전히 그 벡터의 행이다
+    _mcdc_rows = [s for s in sequences if _catalog_name(s.get("strategy")).startswith("MCDC_")]
     # (R2c) 함수 실행 모델로 설계한 결정(`evaluation=source_path`)은 행 입력으로 oracle 을 다시 돌려 검증한다 — unit 필요.
     if _mcdc_ext:
         # (R58) 각 설계를 자기 벡터 행으로만 검증한다 — finalize 는 받은 행의 `mcdc_design` 기록을 비우고 다시 쓰므로 두 호출이
@@ -4049,6 +4439,8 @@ def generate_sequences(
         _lines = str(_row.get("description") or "").split("\n")
         _lines[0] = _mcdc_vector_label(_row.get("mcdc_design") or [],
                                        [r["pair"].get("retained_status", "") for r in _roles])
+        if str(_row.get("strategy") or "").startswith(CATALOG_PREFIX):
+            _lines[0] = _DISPLACED_NOTE + _lines[0]   # (R85 리뷰 I-R3-3) the label rewrite kept the displaced note
         if _is_ext:
             # (R58) 설계서 입력 표 밖 입력(소스가 읽는 전역)까지 움직여 찾은 쌍 — 정본 규모 문서엔 없는 행이다
             _lines[0] += " · 소스가 읽어 더한 입력까지 쓴 설계(확장)"
@@ -4164,7 +4556,37 @@ def append_boundary_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]],
         except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
             _logger.warning("SUTS 출력 관측 MC/DC 쌍 확인 실패(%s): %s", unit.get("name"), exc, exc_info=True)
             unit["observable_mcdc"]["confirm_error"] = type(exc).__name__
+    _note_rows_equal_to_code_rows(unit, sequences)
     return sequences
+
+
+_SAME_AS_CODE_NOTE = "정본 규모 코드 기준 행 {name} 와 입력이 같음 — 확장 탐색은 코드 기준 행 없이 돈다(R85 전과 같은 확장 행)"
+
+
+def _note_rows_equal_to_code_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> None:
+    """(리뷰 R85 W-R4-1) 확장 행 중 정본 규모 코드 기준 행과 입력이 같은 행 — 확장 탐색은 코드 기준 행이 없을 때처럼 돌기 때문에
+    (`_search_rows`, R85 측정: 섞자 kill 34 를 잃었다) 같은 벡터를 다시 찾을 수 있다. 빼지 않는다 — 경계 행 설명(기준 행) ·
+    피호출 값 구별 행의 출처 · 출력 관측 쌍이 그 행을 가리킨다; 행 설명에 그 코드 기준 행을 적고 unit 기록
+    (`reference_code_rows.extension_same_inputs`)이 센다(R23: 앞 행과 같은 행은 정보가 없다 — 침묵하지 않는다)."""
+    code: Dict[str, str] = {}
+    for s in sequences:
+        name = str(s.get("strategy") or "")
+        if name.startswith(CODE_PREFIX):
+            code.setdefault(json.dumps(s.get("inputs") or {}, sort_keys=True, default=str), name)
+    n = 0
+    for s in sequences:
+        if not code or s.get("tc_profile") != TC_PROFILE_EXTENDED:
+            continue
+        twin = code.get(json.dumps(s.get("inputs") or {}, sort_keys=True, default=str))
+        if not twin:
+            continue
+        n += 1
+        if s.get("same_inputs_as_code_row") != twin:
+            s["same_inputs_as_code_row"] = twin
+            s["description"] = (str(s.get("description") or "") + "\n" + _SAME_AS_CODE_NOTE.format(name=twin)).lstrip("\n")
+    rec = unit.get("reference_code_rows")
+    if isinstance(rec, dict):
+        rec["extension_same_inputs"] = n
 
 
 # (R83) 피호출 값 구별 행 — 두 피호출 stub 이 같은 값을 돌려주는 행은 그 값을 받은 출력에서 어느 피호출의 값이 갔는지 · 어느
@@ -4236,7 +4658,7 @@ def _append_stub_apart_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
         return
     var_bounds = ctx["var_bounds"]
     domains = _boundary_domains(unit, ctx["input_vars"], var_types, var_bounds, unknown, ctx.get("enum_sets"))
-    outputs = _scenario_outputs(ctx, sequences)
+    outputs = _scenario_outputs(ctx, _search_rows(sequences))
     src = unit.get("bounds_source") or {}
     # (review R83 W-R2-1) the design ranges a source row stays inside — R31's base rule (`_append_robustness_rows`)
     ranged = [v for v in ctx["input_vars"]
@@ -4253,9 +4675,9 @@ def _append_stub_apart_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
             out[k] = n
         return out
 
-    existing = {tuple(sorted(x.items())) for s in sequences if (x := ints(s.get("inputs") or {})) is not None}
+    existing = {tuple(sorted(x.items())) for s in _search_rows(sequences) if (x := ints(s.get("inputs") or {})) is not None}
     cands: List[Tuple[Dict[str, Any], Dict[str, int], Dict[str, int], Dict[str, Tuple[int, int]], List[set]]] = []
-    for s in sorted(sequences, key=_base_rank):
+    for s in _base_order(_search_rows(sequences)):
         if resolve_seq_test_method(s.get("strategy")) == _METHOD_FI:
             continue                        # a robustness / FI row's point is its out-of-range value
         vec = ints(s.get("inputs") or {})
@@ -4299,7 +4721,7 @@ def _append_stub_apart_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any]
     #   take — is known before any move is judged, whatever the order; a move's own (virtual) run is no row's
     sources = evaluate_outputs(unit, [c[1] for c in cands], [list(outputs)] * len(cands), written=True)
     called_by_rows: set = {str(x) for r in sources for x in r.get("stubs") or ()}
-    for s in sequences:   # rows that already have evidence say which stubs their runs called (R14 `stubs`)
+    for s in _search_rows(sequences):   # rows that already have evidence say which stubs their runs called (R14 `stubs`)
         for ev in (s.get("expected_evidence") or {}).values():
             if isinstance(ev, dict):
                 called_by_rows.update(str(x) for x in ev.get("stubs") or ())
@@ -4462,12 +4884,11 @@ def _append_propagation_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
     unit["propagation_rows"] = report
     var_types = ctx["var_types"]
     domains = _scenario_domains(unit, ctx)
-    outputs = _scenario_outputs(ctx, sequences)
+    outputs = _scenario_outputs(ctx, _search_rows(sequences))
 
     def existing_rows() -> List[Dict[str, Any]]:
         # the scenario rows first — distinct operating values make the better climb starts (`MAX_STARTS`)
-        return [s.get("inputs") or {} for s in sequences if _is_scenario(s)] + \
-            [s.get("inputs") or {} for s in sequences if not _is_scenario(s)]
+        return [s.get("inputs") or {} for s in _scenario_rows_first(_search_rows(sequences))]
 
     def take(rep: Dict[str, Any], first: bool) -> None:
         for k in ("runs", "steps"):
@@ -4536,8 +4957,7 @@ def _append_propagation_rows(unit: Dict[str, Any], sequences: List[Dict[str, Any
     #   search met by a row listed last was searched again (a needless FI row, and wrong counts)
     before = sequences[:start]
     checked = [s.get("inputs") or {} for s in sequences[start:]] + \
-        [s.get("inputs") or {} for s in before if _is_scenario(s)] + \
-        [s.get("inputs") or {} for s in before if not _is_scenario(s)]
+        [s.get("inputs") or {} for s in _scenario_rows_first(_search_rows(before))]
     # (review R84 I-R2-4) the climb starts keep the scenario rows first (`existing_rows`)
     again = find_scenarios(unit, {**domains, **wide, **enum_wide}, outputs, existing_rows(), covered=checked,
                            home=span, propagate=True)
@@ -4592,17 +5012,17 @@ def _append_observable_mcdc_rows(unit: Dict[str, Any], sequences: List[Dict[str,
     var_types = ctx["var_types"]
     domains = _boundary_domains(unit, ctx["input_vars"], var_types, ctx["var_bounds"], set(ctx["unknown"]),
                                 ctx.get("enum_sets"))
-    outputs = list(dict.fromkeys([*ctx["output_vars"], *(k for s in sequences for k in (s.get("expected") or {}))]))
+    outputs = list(dict.fromkeys([*ctx["output_vars"], *(k for s in _search_rows(sequences) for k in (s.get("expected") or {}))]))
     # an existing row a candidate equals becomes that row — only its stated outputs can count (리뷰 R60 2차 W4); the
     #   search and the reuse below use the same key and the same (first) row (3차 W3: 정수 대 서식 JSON 이 갈렸다)
     existing: Dict[tuple, Any] = {}
     stated_of: Dict[tuple, set] = {}
-    for s_ in sequences:
+    for s_ in _search_rows(sequences):
         k_ = vector_key(s_.get("inputs") or {})
         if k_ is not None and k_ not in existing:
             existing[k_] = s_.get("seq_num")
             stated_of[k_] = set(s_.get("expected") or {})
-    found = find_observable_pairs(unit, sequences, outputs, domains, sorted(sequences, key=_base_rank),
+    found = find_observable_pairs(unit, sequences, outputs, domains, _base_order(_search_rows(sequences)),
                                   stated_of=stated_of)
     placed: List[Dict[str, Any]] = []
     for row in found["rows"]:
@@ -4984,13 +5404,13 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         new_out: List[str] = []
         if not written.get("error"):
             try:
-                new_out = _add_written_outputs(unit, sequences, written, _round + 1)
+                new_out = _add_written_outputs(unit, _search_rows(sequences), written, _round + 1)
             except Exception as exc:  # noqa: BLE001 — (review R80 I2) the output axis alone stops; the inputs go on
                 _logger.warning("SUTS 소스가 쓰는 출력 실패(%s): %s", unit.get("name"), exc, exc_info=True)
                 written["error"] = type(exc).__name__
         # (R81) pointees too. A name the rows also read stays the rows' (R78 — `scenario_targets` marks the names only the
         #   scenario search needed: `names_added_by_scenario_search`; review R81 I-R2-5 reverted for that reason)
-        found = {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}
+        found = {**_scenario_needed_names(unit), **source_read_names(_search_rows(sequences), unit)}
         inputs = list(unit.get("input_vars") or [])
         new: List[str] = []
         ordered = sorted(found.items(), key=lambda kv: (-kv[1]["slots"], _column_order(unit, scope, kv[0])))
@@ -5038,7 +5458,7 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         #   다음 회차가 더했을 이름이 있는지로 가린다(리뷰 R59 W1: 필요한 회차가 정확히 상한이면 자른 것이 아니다)
         inputs = set(unit.get("input_vars") or [])
         beyond, prior_beyond = [], []
-        for name, rec in {**_scenario_needed_names(unit), **source_read_names(sequences, unit)}.items():
+        for name, rec in {**_scenario_needed_names(unit), **source_read_names(_search_rows(sequences), unit)}.items():
             if name in inputs or name in record["added"] or name in record["not_added"] or name in prior_not_added:
                 continue
             typename, why = _unit_object_decl(unit, scope, name) if scope else (None, "no_project_scope")
@@ -5056,7 +5476,7 @@ def complete_source_read_inputs(unit: Dict[str, Any], sequences: List[Dict[str, 
         # (R80) 출력 축도 같은 질문 — 다음 회차가 더했을 이름(기록은 바꾸지 않는다; 남은 것은 마지막 보완이 더한다)
         try:
             written["round_cap_reached"] = (not written.get("error")
-                                            and bool(_written_output_candidates(unit, sequences, written)[0]))
+                                            and bool(_written_output_candidates(unit, _search_rows(sequences), written)[0]))
         except Exception as exc:  # noqa: BLE001 — (review R80 I-R2-7) the output axis alone, as in the rounds
             _logger.warning("SUTS 소스가 쓰는 출력 실패(%s): %s", unit.get("name"), exc, exc_info=True)
             written["error"] = type(exc).__name__
@@ -5303,7 +5723,7 @@ def complete_source_written_outputs(unit: Dict[str, Any], sequences: List[Dict[s
     had_design = "design_output_vars" in unit
     try:
         # (review R80 I-R2-8) after an error in the rounds: add nothing, but drop what no row derives and count
-        late = [] if record.get("error") else _add_written_outputs(unit, sequences, record, "final")
+        late = [] if record.get("error") else _add_written_outputs(unit, _search_rows(sequences), record, "final")
         prior = (unit.get("source_read_inputs") or {}).get("prior_value_not_added")
         for n in late if isinstance(prior, dict) else ():
             if prior.get(n) == "not_observed":
@@ -5522,18 +5942,21 @@ def summarize_source_written_outputs(units: List[Dict[str, Any]]) -> Dict[str, A
             "errors": sum(1 for r in recs if r.get("error") or r.get("final_error"))}
 
 
-def extended_unit_sequences(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
+def extended_unit_sequences(unit: Dict[str, Any], reference_cap: Optional[int] = _DEFAULT_SEQ_COUNT
+                            ) -> List[Dict[str, Any]]:
     """(R19) 확장 프로파일의 unit 시퀀스 — 경계 행 없이 만들고 → 소스가 읽는 입력을 더해 다시 만들고 → 경계 행을 **한 번** 붙인다
     (리뷰 R1 W6: 첫 판은 경계 탐색을 두 번 했다). 입력 보완이 실패하면 그 unit 은 설계 입력 목록 그대로 만든다(선택 확장이 문서를
     잃게 하지 않는다 — R15 규칙)."""
-    seqs = generate_sequences(unit, None, extended=True, boundary_rows=False)
+    # (R85) `reference_cap`: 같은 SCM 의 정본 규모 문서가 쓴 상한 — 확장 문서의 앞부분이 그 문서다(리뷰 R85 C1)
+    seqs = generate_sequences(unit, None, extended=True, boundary_rows=False, reference_cap=reference_cap)
     _keys = ("input_vars", "source_input_types", "value_domains", "design_input_vars", "design_value_domains",
              "output_vars", "design_output_vars")   # (R80) the output axis too
     snapshot = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
                 for k in _keys if (v := unit.get(k)) is not None}
     try:
         seqs = complete_source_read_inputs(
-            unit, seqs, lambda: generate_sequences(unit, None, extended=True, boundary_rows=False))
+            unit, seqs, lambda: generate_sequences(unit, None, extended=True, boundary_rows=False,
+                                                   reference_cap=reference_cap))
     except Exception as exc:  # noqa: BLE001 — an optional extension never costs the document; the unit records why
         _logger.warning("SUTS 소스 읽기 입력 보완 실패(%s): %s", unit.get("name"), exc, exc_info=True)
         for k in _keys:
@@ -5542,7 +5965,8 @@ def extended_unit_sequences(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
         unit["source_read_inputs"] = {"error": type(exc).__name__, "added": {}, "not_added": {}, "rounds": 0,
                                       "remaining": {}}
         unit["source_written_outputs"] = {**_new_written_record(), "error": type(exc).__name__}
-        seqs = generate_sequences(unit, None, extended=True, boundary_rows=False)
+        seqs = generate_sequences(unit, None, extended=True, boundary_rows=False, reference_cap=reference_cap)
+    unit.pop("_code_rows_cache", None)   # (R85) the reference-scale code rows of the rounds — the same search each round
     seqs = append_boundary_rows(unit, seqs)
     # (R80) 회차 뒤에 붙은 행이 쓴 객체까지 — 경계 · 설계 범위 밖 시나리오 행만 닿는 경로(enum default 등)
     seqs = complete_source_written_outputs(unit, seqs)
@@ -6134,7 +6558,7 @@ def _mcdc_vector_key(inputs: Dict[str, Any]) -> str:
 
 def _mcdc_slot(seq: Dict[str, Any]) -> int:
     """MC/DC 벡터 행(`MCDC_<n>`)이 쓰는 벡터의 번호 — 기본 설계 벡터 뒤가 2차 설계(R58) 벡터다. 숫자가 아닌 이름은 -1."""
-    m = re.fullmatch(r"MCDC_(\d+)", str(seq.get("strategy") or ""))
+    m = re.fullmatch(r"MCDC_(\d+)", _catalog_name(seq.get("strategy")))
     return int(m.group(1)) if m else -1
 
 
@@ -8256,7 +8680,7 @@ def generate_suts(
     ai_enhanced = 0
     for i, unit in enumerate(units):
         # (R19) 확장: 소스가 읽는데 입력 목록에 없는 객체를 선언 타입으로 더해 다시 만든다 — 기본 프로파일은 정본 규모라 그대로.
-        seqs = extended_unit_sequences(unit) if _extended else generate_sequences(unit, max_sequences)
+        seqs = extended_unit_sequences(unit, max_sequences) if _extended else generate_sequences(unit, max_sequences)
         if ai_config and unit["fid"] in _void_no_vars:
             seqs = enhance_sequences_with_ai(unit, seqs, ai_config)
             ai_enhanced += 1
@@ -8284,8 +8708,7 @@ def generate_suts(
     # (R66, 감사 #1 · #62) 입력 문서마다 지정했나 · 열었나 · 못 연 사유 · 그 때문에 건너뛴 블록(SDS 는 파티션 수까지).
     #   주지 않은 문서도 적는다(given False — 블록마다 부르므로 네 문서가 늘 있다) — 공시가 '주면 무엇이 채워지는가' 를 말한다.
     quality["input_documents"] = _input_docs
-    quality["extended_sequences"] = sum(
-        1 for _s in all_sequences.values() for _q in _s if _q.get("tc_profile") == TC_PROFILE_EXTENDED)
+    quality["extended_sequences"], _beyond = profile_increment(all_sequences, _extended)
     # (R17) #if verdicts on build-configuration evidence — units, reasons, names taken as undefined
     from generators.c_project_context import summarize_build_assumptions
     quality["build_assumptions"] = summarize_build_assumptions(u.get("project_scope") for u in units)
@@ -8366,9 +8789,9 @@ def generate_suts(
         quality["scenario_rows"] = summarize_scenario_rows(units)
     # 확장은 시퀀스 상한도 푼다 — 기본 카탈로그 안에 있었지만 상한(`max_sequences`)에 잘리던 자리가 이제 나온다.
     #   위 수와 합치면 기본 문서 대비 증분이다(입출력 없는 unit 은 전략 목록을 쓰지 않아 0).
-    quality["sequences_beyond_reference_cap"] = (sum(
-        max(0, min(int(_u.get("base_strategy_count") or 0), len(all_sequences.get(_u["fid"]) or [])) - int(max_sequences))
-        for _u in units) if _extended else 0)
+    quality["sequences_beyond_reference_cap"] = _beyond
+    # (R85) 정본 규모 문서의 코드 기준 행(두 프로파일 — 확장 문서의 정본 규모 블록에도 같은 행이 있다)
+    quality["reference_code_rows"] = summarize_reference_code_rows(units)
 
     _progress(85, "XLSM 파일 생성 중")
     out = generate_suts_xlsm(template_path, units, all_sequences, output_path, project_config)

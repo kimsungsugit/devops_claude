@@ -486,11 +486,22 @@ def test_unknown_measured_cap_never_prints_none(tmp_path, monkeypatch) -> None:
 # ── P-6②: 등급 0건은 "ASIL D 없음" 이 아니다 ──────────────────────────────────
 
 def test_mcdc_risk_is_unknown_when_no_grade_was_read() -> None:
-    assert pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": {}}}, 24, 30) is None
-    assert pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": None}}, 24, 30) is None
-    assert pf._mcdc_risk({"suts_asil": {"measured": False}}, 24, 30) is None
-    got = pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": {"QM": 3}}}, 24, 30)
+    assert pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": {}}}, 24) is None
+    assert pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": None}}, 24) is None
+    assert pf._mcdc_risk({"suts_asil": {"measured": False}}, 24) is None
+    got = pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": {"QM": 3}}}, 24)
     assert got is not None and got["asil_d"] == 0
+
+
+def test_mcdc_risk_follows_the_generators_keep_rule() -> None:
+    """(R85 리뷰 C-R4-1) MC/DC 설계 행은 상한 안에 먼저 든다 — 잘리는 것은 상한 < MC/DC 설계 행 자리일 때뿐."""
+    from generators.suts import _BASE_MCDC_SLOTS
+    tm = {"suts_asil": {"measured": True, "by_grade": {"D": 4}}}
+    assert pf._mcdc_risk(tm, 24)["mcdc_at_risk"] is False
+    assert pf._mcdc_risk(tm, _BASE_MCDC_SLOTS)["mcdc_at_risk"] is False
+    got = pf._mcdc_risk(tm, _BASE_MCDC_SLOTS - 1)
+    assert got["mcdc_at_risk"] is True and got["mcdc_slots"] == _BASE_MCDC_SLOTS
+    assert pf._mcdc_risk({"suts_asil": {"measured": True, "by_grade": {"QM": 3}}}, 2)["mcdc_cut"] is True
 
 
 # ── P-6③: @asil 태그는 비율로 판정 ───────────────────────────────────────────

@@ -19,6 +19,7 @@ from generators.suts import (
     ROBUST_PREFIX,
     ROBUSTNESS_REPORT_KEYS,
     _append_robustness_rows,
+    _catalog_name,
     generate_sequences,
     is_extended_strategy,
     resolve_seq_gen_method,
@@ -383,10 +384,12 @@ def test_a_comparison_no_base_reaches_is_counted_and_placed_on_the_first_base():
                  uds_param_info={"g_b": {"range": [0, 5]}, "g_w": {"range": [0, 60]}})
     seqs = generate_sequences(unit, None, type_cache={}, extended=True)
     rows = _robust(seqs)
-    first = next(s for s in seqs if s.get("strategy") == "BV_MID")
+    # (R85) the first base: the BV_MID row, wherever the reference-scale block put it (`CATALOG_BV_MID` once a code
+    #   row took its place in the reference-scale document)
+    first = next(s for s in seqs if _catalog_name(s.get("strategy")) == "BV_MID")
     on_w = [s for s in rows if s["robustness"]["variable"] == "g_w"]
     assert sorted(s["inputs"]["g_w"] for s in on_w) == [0xFFFE, 0xFFFF]
-    assert all(s["inputs"]["g_b"] == first["inputs"]["g_b"] for s in on_w) and "기준 행 BV_MID" in on_w[0]["description"]
+    assert all(s["inputs"]["g_b"] == first["inputs"]["g_b"] for s in on_w) and f"기준 행 {first['strategy']}" in on_w[0]["description"]
     assert unit["robustness_rows"]["not_live"] == 1
     assert all(s["robustness"]["live"] is False and "확인하지 못했다" in s["description"] for s in on_w)
     assert sorted(s["inputs"]["g_b"] for s in rows if s["robustness"]["variable"] == "g_b") == [6, 7, 8]

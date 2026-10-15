@@ -653,7 +653,7 @@ def test_generate_suts_aggregates_fill_pruning_and_errors_into_the_quality_repor
 
     calls = []
 
-    def fake(unit):
+    def fake(unit, *_reference_cap):   # (R85) generate_suts passes its max_sequences as the reference budget
         calls.append(unit["fid"])
         seqs = generate_sequences(unit, None)
         unit["mcdc_fill"] = {"mcdc_rows": 2, "rows_with_blanks": 2, "rows": 0, "not_fillable": 0, "duplicates": 0,
@@ -667,7 +667,7 @@ def test_generate_suts_aggregates_fill_pruning_and_errors_into_the_quality_repor
     assert calls and q["mcdc_fill"]["pruned"] == 2 * len(calls) and q["mcdc_fill"]["errors"] == 0
     assert q["source_read_inputs"]["errors"] == len(calls)
     monkeypatch.setattr(suts, "extended_unit_sequences",
-                        lambda unit: (unit.update(mcdc_fill={"error": "KeyError"}), generate_sequences(unit, None))[1])
+                        lambda unit, *_r: (unit.update(mcdc_fill={"error": "KeyError"}), generate_sequences(unit, None))[1])
     q = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "v.xlsm"), scope="source",
                            tc_profile="extended")["quality_report"]
     assert q["mcdc_fill"]["errors"] == len(calls)

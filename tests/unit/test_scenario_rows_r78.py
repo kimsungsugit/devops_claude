@@ -12,6 +12,7 @@ import pytest
 
 from generators import c_project_context as cpc
 from generators import scenario_rows as sr
+from generators import suts
 from generators.c_source_oracle import evaluate_outputs, observe_decisions
 from generators.suts import (
     _base_rank,
@@ -20,6 +21,15 @@ from generators.suts import (
     resolve_seq_gen_method,
     summarize_scenario_rows,
 )
+
+
+@pytest.fixture
+def no_code_rows(monkeypatch):
+    """(R85) 정본 규모 코드 기준 행 없이 — 확장 탐색은 코드 기준 행이 없을 때처럼 돌지만(`suts._search_rows`), 이 시험은 확장
+    문서의 **행 이름 · 입력**까지 고정한다: 코드 기준 행이 블록에 들면 같은 입력의 카탈로그 행이 자리를 내주고(`CATALOG_`) 코드
+    기준 행과 같은 벡터를 확장 탐색이 다시 찾으면 둘 다 문서에 있어 중복 판정 · 덮인 행의 수가 달라진다. 그 수를 R78 의 규칙만으로
+    재려고 끈다(필요한 시험에만 — 리뷰 R85 I-R5-7: 나머지는 코드 기준 행이 있어도 그대로 통과한다)."""
+    monkeypatch.setattr(suts, "_code_rows", lambda *_a, **_k: ([], {"status": "isolated"}, []))
 
 ROOT = os.path.join(os.sep, "proj")
 COMMON = """#ifndef COMMON_H
@@ -911,6 +921,8 @@ def test_values_outside_the_home_range_are_moved_back_when_the_target_allows():
 
 
 def test_the_boundary_search_of_the_old_bases_is_the_same_with_scenario_rows(monkeypatch):
+    # (R85) the reference-scale code rows are scenario rows too (added bases — review R85 W1): the run without the
+    #   search has neither, the other both; the old bases are every catalogue row either way, in catalogue order
     def boundary(with_scenarios):
         if not with_scenarios:
             monkeypatch.setattr("generators.suts.find_scenarios",
@@ -950,6 +962,7 @@ def test_a_stub_return_input_of_the_unit_is_searched():
     assert any(s["inputs"].get("ext() return") == 3 and s["expected"].get("g_o") == 7 for s in seqs)
 
 
+@pytest.mark.usefixtures("no_code_rows")
 def test_a_bit_input_written_as_hex_is_one_value_for_duplicates_and_covered_rows():
     # a bool / bit input's rows hold "0x0" — the search reads them as the integers they are (review R78 R2 C-R2-1: the
     #   second search re-added existing rows, one as FI, and counted 10 targets as newly reached)
