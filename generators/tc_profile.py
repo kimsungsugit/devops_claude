@@ -3,13 +3,19 @@
 사용자 결정(2026-09-19): "정본과 비슷하게 하는 건 그대로 두고, 품질 좋고 그에 맞게 TC 도 작성되고
 개수도 늘어나는 **옵션**" — 기본은 그대로 정본 규모이고, 확장은 고를 때만 켜진다.
 
+⚠ 사용자 결정(2026-10-15, R87): **기본은 확장**이다 — "행 수를 넉넉하게 늘려버려 … 정본 변이를 다잡을 수 있으면 그렇게
+진행해야지 제한은 안둬도 된다" · "이제 디폴트는 정본 정도가 아니라 확장이야". 세 스위트 한 분모 판정(R86)에서 SUTS 정본
+규모 문서는 정본이 잡는 변이를 다 잡지 못하고(KJPDS02_PV 163 · HDPDM01 146 — 24 행 안에 들지 못한 탐색 행이 잡는 것) 확장
+문서는 다 잡는다(0 · 0). 세 문서(STS · SUTS · SITS) 모두 미설정이 확장이고, 정본 규모는 이름(`reference`)으로 고르는
+선택지로 남는다(`DOC_DEFAULT_PROFILE` — 문서마다 다르게 둘 자리는 남겨 둔다).
+
 두 프로파일의 관계는 **포함**이다: 확장 문서는 기본 문서의 시험을 전부 담고(같은 ID·같은 순서)
 그 뒤에 덧붙인다. 확장이 기본의 시험을 바꾸거나 밀어내면 두 문서를 나란히 놓고 볼 수 없다.
 
 확장이 늘리는 것은 **근거가 있는 시험**뿐이다 — 값은 같은 경계 출처(설계서 범위 > enum > HSIS >
 선언 타입)에서 오고, 모르는 타입은 확장에서도 비운다. 상한을 풀 뿐 값을 지어내지 않는다.
 
-| 문서 | 기본(정본 규모) | 확장 |
+| 문서 | 정본 규모(`reference` 를 고를 때) | 확장(기본, R87) |
 |---|---|---|
 | STS | 요구당 상한까지, 매핑된 함수를 앞에서부터 | + 시험이 하나도 없는 함수마다, 그 함수를 가장 좁게 가리키는 요구 밑에 분기·경계값 TC |
 | SUTS | 함수당 행 상한 24(카탈로그 수가 작으면 그 수) — MC/DC 설계·switch·루프·부수효과·범위 밖 강건성(FI — 값이 선언 타입 안) 행 → 코드 기준 행(R85, 설계 입력만) → 남은 자리에 전 입력 경계·조건 조합·전역 행; 열은 확장 생성이 정한 것(설계서 입출력 표 + 소스가 읽는 입력 · 쓰는 출력, R86) | 그 기본 블록으로 시작 + 블록에 못 든 카탈로그 행(`CATALOG_`) + 상한은 앞 블록 크기만 + 입력마다 최솟값/최댓값 단독 변경(OAT) + 모든 case·전역·조건 + 경계·시나리오·노출·전파 탐색 행 |
@@ -38,32 +44,42 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 
-TC_PROFILE_REFERENCE = "reference"       # 정본 규모(기본)
+TC_PROFILE_REFERENCE = "reference"       # 정본 규모(R87 전의 기본 — 이제 고를 때만)
 TC_PROFILE_RECOMMENDED = "recommended"   # 물량은 정본 규모, 시험 근거만 보강
 TC_PROFILE_EXTENDED = "extended"         # 근거 보강 + 상한 없이
 
 _KNOWN = (TC_PROFILE_REFERENCE, TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED)
 
+#: (R87) 미설정의 뜻 — 확장(사용자 결정 2026-10-15). 문서마다 다르게 둘 수 있게 표로 둔다; 표에 없는 문서도 확장.
+TC_PROFILE_DEFAULT = TC_PROFILE_EXTENDED
+DOC_DEFAULT_PROFILE = {"sts": TC_PROFILE_EXTENDED, "suts": TC_PROFILE_EXTENDED, "sits": TC_PROFILE_EXTENDED}
+
+
+def default_tc_profile(doc_type: str = "") -> str:
+    """(R87) 그 문서에서 프로파일을 정하지 않았을 때의 프로파일."""
+    return DOC_DEFAULT_PROFILE.get(str(doc_type or "").strip().lower(), TC_PROFILE_DEFAULT)
+
 #: 근거 보강이 켜지는 프로파일. `extended` 가 `recommended` 를 **포함**한다는 규약의 구현체다.
 _EVIDENCE_ON = (TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED)
 
 
-def normalize_tc_profile(value: Any) -> Tuple[str, str]:
-    """`(프로파일, 못 알아본 원래 값)`. 빈 값·모르는 값은 **기본(정본 규모)** 으로 간다.
+def normalize_tc_profile(value: Any, doc_type: str = "") -> Tuple[str, str]:
+    """`(프로파일, 못 알아본 원래 값)`. 빈 값·모르는 값은 **그 문서의 기본**(`default_tc_profile(doc_type)` — R87 부터 확장)으로
+    간다.
 
-    모르는 값을 확장으로 읽으면 오타 하나가 문서를 열 배로 키운다 — 안전한 쪽은 기본이다.
-    못 알아본 값은 버리지 않고 돌려줘서 호출자가 공시할 수 있게 한다(`_suts_normalize_scope` 와 같은 규약).
+    모르는 값을 기본 아닌 쪽으로 읽으면 오타 하나가 문서를 바꾼다 — 그 문서의 기본이 안전한 쪽이다(R87 전엔 모든 문서가
+    정본 규모였다). 못 알아본 값은 버리지 않고 돌려줘서 호출자가 공시할 수 있게 한다(`_suts_normalize_scope` 와 같은 규약).
     """
     raw = str(value or "").strip()
     low = raw.lower()
     if not low:
-        return TC_PROFILE_REFERENCE, ""
+        return default_tc_profile(doc_type), ""
     if low in _KNOWN:
         return low, ""
-    return TC_PROFILE_REFERENCE, raw
+    return default_tc_profile(doc_type), raw
 
 
-def is_extended(value: Any) -> bool:
+def is_extended(value: Any, doc_type: str = "") -> bool:
     """**물량** 상한을 푸는가 — `extended` 에서만 참.
 
     ⚠ `recommended` 가 생겨도 이 술어의 뜻은 바뀌지 않는다. 기존 호출부
@@ -71,10 +87,10 @@ def is_extended(value: Any) -> bool:
     이 값으로 **상한**을 풀기 때문에, 여기에 `recommended` 를 섞으면 "물량은 그대로"
     라는 약속이 깨진다.
     """
-    return normalize_tc_profile(value)[0] == TC_PROFILE_EXTENDED
+    return normalize_tc_profile(value, doc_type)[0] == TC_PROFILE_EXTENDED
 
 
-def is_evidence_enriched(value: Any) -> bool:
+def is_evidence_enriched(value: Any, doc_type: str = "") -> bool:
     """**시험 근거**를 보강하는가 — `recommended` 이상에서 참.
 
     보강이 늘리는 것은 문장의 **정확도**이지 TC 수가 아니다. 기대결과를 관측 가능한
@@ -92,4 +108,4 @@ def is_evidence_enriched(value: Any) -> bool:
       두 문서에도 이 값을 받아 두는 것은 프리셋이 문서 종류마다 갈리면 "확장인데 근거는
       기본" 같은 조합이 다시 생기기 때문이다 — 게이트 `effect` 가 문서별로 무엇이 바뀌는지 적는다.
     """
-    return normalize_tc_profile(value)[0] in _EVIDENCE_ON
+    return normalize_tc_profile(value, doc_type)[0] in _EVIDENCE_ON

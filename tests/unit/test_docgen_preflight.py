@@ -33,6 +33,10 @@ def _step(data: dict, step_id: str) -> dict | None:
     return next((s for s in data["steps"] if s["id"] == step_id), None)
 
 
+# (R87) 세 시험 규격서의 미설정 프로파일은 확장(상한 없음)이다 — 상한이 무엇을 자르는지 보는 시험은 정본 규모를 고른다
+_REF = {"tc_profile": "reference"}
+
+
 # ── 입력 요구 표 ────────────────────────────────────────────────────────────
 
 def test_every_doc_type_has_requirements() -> None:
@@ -245,22 +249,22 @@ def test_user_chosen_cap_becomes_decided(tmp_path: Path, monkeypatch) -> None:
     """
     _fake_cat_cache(monkeypatch, {"sts_mapping": {"max_functions_per_req": 12}})
     body = {"doc_type": "sts", "source_root": str(tmp_path)}
-    before = _step(_post(body), "cap_max_tc_per_req")
+    before = _step(_post({**body, "caps": _REF}), "cap_max_tc_per_req")
     assert before["state"] == "needed"
 
-    after = _step(_post({**body, "caps": {"max_tc_per_req": 12}}), "cap_max_tc_per_req")
+    after = _step(_post({**body, "caps": {**_REF, "max_tc_per_req": 12}}), "cap_max_tc_per_req")
     assert after["state"] == "ok"
     assert after["measured"]["user_value"] == 12
 
     # 0·음수는 프론트 스토어가 **키를 지우는** 값이라(`sharedInputs.js:53`) '정함' 이 아니다.
-    zero = _step(_post({**body, "caps": {"max_tc_per_req": 0}}), "cap_max_tc_per_req")
+    zero = _step(_post({**body, "caps": {**_REF, "max_tc_per_req": 0}}), "cap_max_tc_per_req")
     assert zero["state"] == "needed"
     assert "user_value" not in (zero["measured"] or {})
 
     # 같은 스토어에 문자열 선택지가 섞여 와도 죽지 않아야 한다 — `Dict[str, int]` 로
     # 받으면 `suts_scope` 하나 때문에 요청 전체가 422 가 된다.
     mixed = _step(
-        _post({**body, "caps": {"max_tc_per_req": 5, "suts_scope": "source"}}),
+        _post({**body, "caps": {**_REF, "max_tc_per_req": 5, "suts_scope": "source"}}),
         "cap_max_tc_per_req",
     )
     assert mixed["measured"]["user_value"] == 5
@@ -295,9 +299,9 @@ def test_setting_the_default_does_not_invent_a_loss(tmp_path: Path) -> None:
     게이트가 문서가 아니라 **사용자의 타이핑**을 재고 있었다는 뜻이다.
     """
     body = {"doc_type": "suts", "source_root": str(tmp_path)}
-    unset = _step(_post(body), "cap_max_sequences")
+    unset = _step(_post({**body, "caps": _REF}), "cap_max_sequences")
     api_default = unset["measured"]["api_default"]
-    typed = _step(_post({**body, "caps": {"max_sequences": api_default}}),
+    typed = _step(_post({**body, "caps": {**_REF, "max_sequences": api_default}}),
                   "cap_max_sequences")
 
     assert unset["measured"].get("below_full") == typed["measured"].get("below_full"), (
@@ -332,12 +336,12 @@ def test_catalog_and_measured_totals_speak_differently(tmp_path: Path, monkeypat
     """
     _fake_cat_cache(monkeypatch, {"sits": {"flows_total": 145}})
     meas = _step(_post({"doc_type": "sits", "source_root": str(tmp_path),
-                        "caps": {"max_flows": 50}}), "cap_max_flows")
+                        "caps": {**_REF, "max_flows": 50}}), "cap_max_flows")
     assert meas["measured"]["suggested_basis"] == "measured"
     assert meas["measured"]["below_full"] == 95
     assert "95개가 빠집니다" in meas["reason"], meas["reason"]
 
-    cat = _step(_post({"doc_type": "suts", "source_root": str(tmp_path)}),
+    cat = _step(_post({"doc_type": "suts", "source_root": str(tmp_path), "caps": _REF}),
                 "cap_max_sequences")
     assert cat["measured"]["suggested_basis"] == "catalog"
     # 카탈로그 축은 **단정하지 않는다** — 상한이지 측정치가 아니다.
@@ -348,7 +352,7 @@ def test_catalog_and_measured_totals_speak_differently(tmp_path: Path, monkeypat
 def test_adjustable_cap_without_measurement_is_not_a_demand(tmp_path: Path) -> None:
     """전량을 못 쟀으면 `needed` 가 아니다 — 결정에 필요한 수를 못 주면서 결정을
     요구하는 꼴이 된다. `unmeasured` + 재는 수단이 정직하다."""
-    s = _step(_post({"doc_type": "sits", "source_root": str(tmp_path)}), "cap_max_flows")
+    s = _step(_post({"doc_type": "sits", "source_root": str(tmp_path), "caps": _REF}), "cap_max_flows")
     assert s["state"] == "unmeasured", s
     assert "measure_source" in {a.get("kind") for a in (s.get("actions") or [])}
 
@@ -422,18 +426,18 @@ def test_material_rows_follow_the_user_cap(tmp_path: Path, monkeypatch) -> None:
         "flows_total": 145, "cap": 120, "headroom": -25, "at_cap_boundary": True}})
     body = {"doc_type": "sits", "source_root": str(tmp_path)}
 
-    lowered = _step(_post({**body, "caps": {"max_flows": 50}}), "sits_flows")
+    lowered = _step(_post({**body, "caps": {**_REF, "max_flows": 50}}), "sits_flows")
     assert lowered["measured"]["headroom"] == -95, lowered["measured"]
     assert "95" in lowered["reason"], lowered["reason"]
 
-    raised = _step(_post({**body, "caps": {"max_flows": 200}}), "sits_flows")
+    raised = _step(_post({**body, "caps": {**_REF, "max_flows": 200}}), "sits_flows")
     assert raised["measured"]["headroom"] == 55, raised["measured"]
     # 다 담기면 "빠집니다" 라고 하지 않는다.
     assert raised["state"] == "ok", raised
     assert not raised.get("reason")
 
     # 미설정이면 생성기 기본 캡 그대로다(없는 결정을 만들지 않는다).
-    default = _step(_post(body), "sits_flows")
+    default = _step(_post({**body, "caps": _REF}), "sits_flows")
     assert default["measured"]["headroom"] == -25
 
 
@@ -453,14 +457,14 @@ def test_sts_tc_cap_recounts_with_user_cap(tmp_path: Path, monkeypatch) -> None:
     }})
     body = {"doc_type": "sts", "source_root": str(tmp_path)}
 
-    base_row = _step(_post(body), "sts_tc_cap")
+    base_row = _step(_post({**body, "caps": _REF}), "sts_tc_cap")
     assert base_row["measured"]["beyond_cap"] == 1, base_row["measured"]
 
-    raised = _step(_post({**body, "caps": {"max_tc_per_req": 6}}), "sts_tc_cap")
+    raised = _step(_post({**body, "caps": {**_REF, "max_tc_per_req": 6}}), "sts_tc_cap")
     assert raised["measured"]["beyond_cap"] == 0, raised["measured"]
     assert raised["state"] == "ok"
 
-    lowered = _step(_post({**body, "caps": {"max_tc_per_req": 2}}), "sts_tc_cap")
+    lowered = _step(_post({**body, "caps": {**_REF, "max_tc_per_req": 2}}), "sts_tc_cap")
     assert lowered["measured"]["beyond_cap"] == 5, lowered["measured"]
     assert lowered["measured"]["cap"] == 2
 
@@ -512,7 +516,7 @@ def test_cap_over_suggestion_says_it_has_no_effect(tmp_path: Path, monkeypatch) 
     _fake_cat_cache(monkeypatch, {"ok": True, "sits": {"flows_total": 145}})
     step = _step(
         _post({"doc_type": "sits", "source_root": str(tmp_path),
-               "caps": {"max_flows": 9999}}),
+               "caps": {**_REF, "max_flows": 9999}}),
         "cap_max_flows",
     )
     assert step["state"] == "ok"          # 막지는 않는다 — 사용자 결정이다
@@ -528,7 +532,7 @@ def test_lowering_a_cap_says_what_drops(tmp_path: Path) -> None:
     """
     step = _step(
         _post({"doc_type": "suts", "source_root": str(tmp_path),
-               "caps": {"max_sequences": 6}}),
+               "caps": {**_REF, "max_sequences": 6}}),
         "cap_max_sequences",
     )
     # "정했다" 를 "충분하다" 로 읽게 두지 않는다(degraded 는 차단이 아니다).
@@ -544,11 +548,11 @@ def test_lowering_a_cap_says_what_drops(tmp_path: Path) -> None:
 def test_suggestion_comes_only_from_measurement(tmp_path: Path, monkeypatch) -> None:
     """권장값을 **지어내지 않는다** — 측정이 없으면 필드가 없다."""
     _fake_cat_cache(monkeypatch, None)
-    step = _step(_post({"doc_type": "sits", "source_root": str(tmp_path)}), "cap_max_flows")
+    step = _step(_post({"doc_type": "sits", "source_root": str(tmp_path), "caps": _REF}), "cap_max_flows")
     assert "suggested" not in (step["measured"] or {})
 
     _fake_cat_cache(monkeypatch, {"ok": True, "sits": {"flows_total": 145}})
-    step2 = _step(_post({"doc_type": "sits", "source_root": str(tmp_path)}), "cap_max_flows")
+    step2 = _step(_post({"doc_type": "sits", "source_root": str(tmp_path), "caps": _REF}), "cap_max_flows")
     assert step2["measured"]["suggested"] == 145
 
 
@@ -640,7 +644,7 @@ def test_flow_loss_is_present_tense_when_already_cut(
     # 실제 preflight 를 태운다 — 문구 생성 로직을 테스트가 복제하면 가드가 못 된다.
     tm._CACHE[tm._key(root)] = (_time.time(), fake)
     try:
-        data = _post({"doc_type": "sits", "source_root": root})
+        data = _post({"doc_type": "sits", "source_root": root, "caps": _REF})
     finally:
         tm.clear_cache()
     step = _step(data, "sits_flows")
@@ -1009,7 +1013,7 @@ def _sts_materials(**over) -> dict:
     return base
 
 
-def _with_materials(tmp_path: Path, materials: dict, doc_type: str = "sts") -> dict:
+def _with_materials(tmp_path: Path, materials: dict, doc_type: str = "sts", caps: dict | None = None) -> dict:
     import time as _time
 
     from backend.services import docgen_test_materials as tm
@@ -1017,7 +1021,7 @@ def _with_materials(tmp_path: Path, materials: dict, doc_type: str = "sts") -> d
     tm.clear_cache()
     tm._CACHE[tm._key(root)] = (_time.time(), materials)
     try:
-        return _post({"doc_type": doc_type, "source_root": root})
+        return _post({"doc_type": doc_type, "source_root": root, "caps": caps or {}})
     finally:
         tm.clear_cache()
 
@@ -1052,7 +1056,7 @@ def test_tc_cap_says_it_is_a_lower_bound_and_order_decides(tmp_path: Path) -> No
        실측 계산 715 vs `generate_test_cases` 실측 887).
     ② 남는 5개가 무엇인지는 관련성이 아니라 **함수 순서**가 정한다.
     """
-    step = _step(_with_materials(tmp_path, _sts_materials()), "sts_tc_cap")
+    step = _step(_with_materials(tmp_path, _sts_materials(), caps=_REF), "sts_tc_cap")
     assert step is not None and step["state"] == "degraded"
     assert "최소" in step["reason"], "하한이라는 사실이 안 적혔다"
     assert "순서" in step["reason"], "무엇이 남는지를 순서가 정한다는 사실이 안 적혔다"
@@ -1572,7 +1576,7 @@ def _suts_with_grades(tmp_path: Path, monkeypatch, by_grade, caps=None, ungraded
                       "fuzzy": 0, "fuzzy_conflict": 0, "by_grade": by_grade, "ungraded": ungraded},
     })
     return _step(_post({"doc_type": "suts", "source_root": str(tmp_path),
-                        "caps": caps or {}}), "cap_max_sequences")
+                        "caps": {**_REF, **(caps or {})}}), "cap_max_sequences")
 
 
 def test_sequence_cap_names_the_asil_d_functions_at_risk(tmp_path: Path, monkeypatch) -> None:
@@ -1905,7 +1909,7 @@ def test_sits_subcase_cap_measures_against_the_catalog_not_the_generator_default
         tmp_path: Path) -> None:
     """생성기 기본값(14)으로 맞춰도 **손실이 남아 있다고** 말해야 한다."""
     data = _post({"doc_type": "sits", "source_root": str(tmp_path),
-                  "caps": {"max_subcases": 14}})
+                  "caps": {**_REF, "max_subcases": 14}})
     step = _step(data, "cap_max_subcases")
     assert step is not None
     assert step["state"] != "ok", (
@@ -1917,12 +1921,12 @@ def test_sits_subcase_cap_measures_against_the_catalog_not_the_generator_default
 def test_sits_subcase_cap_is_ok_only_at_the_catalog_max(tmp_path: Path) -> None:
     """15 여야 비로소 손실이 없다 — 그 위는 '더 담을 것이 없다'."""
     ok = _step(_post({"doc_type": "sits", "source_root": str(tmp_path),
-                      "caps": {"max_subcases": 15}}), "cap_max_subcases")
+                      "caps": {**_REF, "max_subcases": 15}}), "cap_max_subcases")
     assert ok is not None and ok["state"] == "ok"
     assert not ok["measured"].get("over_suggested")
 
     over = _step(_post({"doc_type": "sits", "source_root": str(tmp_path),
-                        "caps": {"max_subcases": 16}}), "cap_max_subcases")
+                        "caps": {**_REF, "max_subcases": 16}}), "cap_max_subcases")
     assert over is not None and over["measured"].get("over_suggested") is True
 
 

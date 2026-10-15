@@ -2284,7 +2284,7 @@ def generate_test_cases(
     # 8,130행 중 관측 가능한 기대결과가 26%뿐이고 `기대 결과와 일치` 가 1,128행이었다.
     # ⚠ 근거가 없으면(반환 타입도 전역도 모름) **현행 문장을 그대로 둔다** — 지어내지 않고,
     #   그 수를 `expected_no_basis` 로 공시한다.
-    _evidence = is_evidence_enriched(config.get("tc_profile"))
+    _evidence = is_evidence_enriched(config.get("tc_profile"), "sts")   # (R87 리뷰 W2) 문서의 기본과 같은 규칙
     _estats: Dict[str, int] = {"expected_enriched": 0, "expected_no_basis": 0}
 
     # 캡 **전** 총량을 먼저 센다 — 소비처에서 결과 길이로 되짚으면 절단을 못 본다.
@@ -2372,7 +2372,7 @@ def generate_test_cases(
     # 못 푼다 — 요구 하나에 함수가 600개씩 매핑돼 (요구, 함수) 쌍이 9,434 이고, 같은 함수가 여러 요구 밑에 되풀이된다.
     # 확장은 **시험이 하나도 없는 함수마다 한 번씩**, 그 함수를 가장 좁게 가리키는 요구(매핑 함수 수 최소, 동률이면
     # 문서 순서) 밑에 분기·경계값 TC 를 덧붙인다. 기본 TC 는 ID·순서·내용이 그대로다(포함 관계).
-    _profile, _profile_bad = normalize_tc_profile(config.get("tc_profile"))
+    _profile, _profile_bad = normalize_tc_profile(config.get("tc_profile"), "sts")   # (R87) 미설정 = 확장
     _ext = {"functions": 0, "tcs": 0, "boundary_tcs": 0, "no_detail": 0, "no_steps": 0, "safety_preferred": 0}
     _xstats: Dict[str, Any] = {}
     if _profile == TC_PROFILE_EXTENDED:
@@ -2743,7 +2743,7 @@ def generate_quality_report(
             f"상한에 잘렸다(요구당 {int(gen_stats.get('boundary_tc_cut_by_req_cap') or 0)} · 함수당 "
             f"{int(gen_stats.get('boundary_tc_cut_by_function_cap') or 0)}, 남은 것 {int(gen_stats.get('boundary_tc_kept') or 0)}건). "
             "경계값 TC 는 분기 TC 를 밀어내지 않는다 — 더 넣으려면 max_tc_per_req 를 올릴 것"
-            + (" (확장 프로파일 — 이 수치는 **기본 구간**의 것이다. 기본 구간에서 TC 를 받은 함수는 확장이 되풀이하지 않으므로 "
+            + (" (확장 프로파일 — 이 수치는 **정본 규모 구간**의 것이다. 정본 규모 구간에서 TC 를 받은 함수는 확장이 되풀이하지 않으므로 "
                "거기서 잘린 경계값 TC 는 확장 문서에도 없다)" if _is_ext else "")
         )
 

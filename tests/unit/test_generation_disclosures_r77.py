@@ -247,18 +247,18 @@ class TestStsProfileLivesUnderGenerationStats:
 
     def test_reference_profile_is_read_from_generation_stats(self):
         it = _by_key(build_disclosures("sts", _STS_REFERENCE))["tc_profile"]
-        assert it["value"] == "정본 규모(기본)"
+        assert it["value"] == "정본 규모"   # (R87) 기본은 확장 — 정본 규모는 고른 프로파일
         assert "상한에 걸린 시험은 이 문서에 없다" in it["note"]
 
     def test_extended_profile_says_it_contains_the_reference_document(self):
         it = _by_key(build_disclosures("sts", _STS_EXTENDED))["tc_profile"]
-        assert it["value"] == "확장"
+        assert it["value"] == "확장(기본)"   # (R87) 기본은 확장
         assert "전부 담고" in it["note"]
 
     def test_top_level_profile_wins_over_generation_stats(self):
         """두 자리에 다 있으면 최상위가 이긴다 — alt 는 없을 때의 폴백일 뿐."""
         qr = {"tc_profile": "extended", "generation_stats": {"tc_profile": "reference"}}
-        assert _by_key(build_disclosures("sts", qr))["tc_profile"]["value"] == "확장"
+        assert _by_key(build_disclosures("sts", qr))["tc_profile"]["value"] == "확장(기본)"   # (R87) 기본은 확장
 
 
 class TestStsTruncationAxes:
@@ -587,7 +587,7 @@ class TestEndpointCarriesTheDisclosures:
         assert body["expected_sidecars"]["generation"] is True
         got = _by_key(body["generation"]["items"])
         assert got["suts_verify_needed"]["value"] == "82칸"
-        assert got["tc_profile"]["value"] == "정본 규모(기본)"
+        assert got["tc_profile"]["value"] == "정본 규모"   # (R87) 기본은 확장 — 정본 규모는 고른 프로파일
 
     def test_uds_run_says_not_applicable_rather_than_missing(self, api):
         client, make_run = api
@@ -760,5 +760,5 @@ class TestEmptyQualityReportIsNotAnOldGenerator:
         assert sec["present"] is True
         assert sec["doc_type_hint"] is None
         got = _by_key(sec["items"])
-        assert got["tc_profile"]["value"] == "정본 규모(기본)"
+        assert got["tc_profile"]["value"] == "정본 규모"   # (R87) 기본은 확장 — 문서 종류를 몰라도
         assert not [k for k in got if k.startswith("suts_")]   # 종류를 모르면 전용 축은 못 낸다

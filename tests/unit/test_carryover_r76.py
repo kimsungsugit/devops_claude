@@ -381,8 +381,11 @@ class TestSutsDisclosures:
         return suts_mod.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "u.xlsm"), scope="source", **kw)
 
     def test_caps_are_disclosed_like_sits(self, tmp_path, monkeypatch):
-        ref = self._run(tmp_path, monkeypatch, max_sequences=9)["quality_report"]
+        ref = self._run(tmp_path, monkeypatch, max_sequences=9, tc_profile="reference")["quality_report"]
         assert (ref["caps_requested"], ref["caps_effective"]) == ({"max_sequences": 9}, {"max_sequences": 9})
+        # (R87) SUTS 의 미설정은 확장 — 상한은 요청됐지만 걸지 않았다고 공시한다
+        dflt = self._run(tmp_path, monkeypatch, max_sequences=9)["quality_report"]
+        assert dflt["tc_profile"] == "extended" and dflt["caps_effective"] == {"max_sequences": None}
         ext = self._run(tmp_path, monkeypatch, max_sequences=9, tc_profile="extended")["quality_report"]
         assert (ext["caps_requested"], ext["caps_effective"]) == ({"max_sequences": 9}, {"max_sequences": None})
 

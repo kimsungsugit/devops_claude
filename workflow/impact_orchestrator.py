@@ -1460,8 +1460,8 @@ def _build_doc_proposal(
     doc_content: Optional[Dict[str, Any]] = None,
     change_details: Optional[Dict[str, Any]] = None,
     fn_cap: int = 50,
-    seq_cap: int = 10,
-    sub_cap: int = 6,
+    seq_cap: Optional[int] = 10,   # (R87 리뷰 W1) None = 전부 표시(전체 초안)
+    sub_cap: Optional[int] = 6,
     sts_tc_cap: int = 6,
     step_cap: int = 6,
     kv_cap: int = 12,
@@ -1547,11 +1547,11 @@ def _build_doc_proposal(
         except Exception as _e:  # noqa: BLE001 — 없으면 빈 맵(다른 프로젝트 SDS 로 대체하지 않는다)
             logger.debug("doc_proposal sds_map 해석 실패: %s", _e)
 
-    # ── SUTS: 대상 함수만 collect_unit_functions → reference_unit_sequences(문서 생성과 동일 경로 — R86: 정본 규모 문서도 확장
-    #   생성이 정한 열(소스가 읽는 입력 · 쓰는 출력)을 쓴다. 설계서 열만 쓰던 generate_sequences 로는 초안과 문서의 행이 갈린다 —
-    #   리뷰 R86 W3. 함수마다 확장 생성을 한 번 돌리므로 초안도 그만큼 든다) ──
+    # ── SUTS: 대상 함수만 collect_unit_functions → extended_unit_sequences(문서 생성의 기본 경로와 동일 — R87: SUTS 의 기본
+    #   프로파일은 확장이다. R86 은 정본 규모 경로(reference_unit_sequences)였다 — 설계서 열만 쓰던 generate_sequences 로는
+    #   초안과 문서의 행이 갈린다(리뷰 R86 W3). 함수마다 확장 생성을 한 번 돌리므로 초안도 그만큼 든다) ──
     # 타입 해상도(핵심): gim에서 {var: raw_type} 로컬 타입맵(_gim_to_type_map — set_globals_type_cache와
-    #   동일 단일출처)을 만들어 reference_unit_sequences(type_cache=)로 **명시 주입**한다(안쪽 generate_sequences 까지). 이러면 실 문서생성
+    #   동일 단일출처)을 만들어 extended_unit_sequences(type_cache=)로 **명시 주입**한다(안쪽 generate_sequences 까지). 이러면 실 문서생성
     #   (set_globals_type_cache→프로세스 전역)과 동일한 타입으로 경계값을 산출하면서도 전역을 일절 변이
     #   시키지 않아, 동시 문서생성과의 write-race/타 프로젝트 오염을 원천 차단한다(파라미터 격리). 과거엔
     #   set_globals_type_cache 미호출→빈/stale 전역→uint8 폴백이라 U32/UINT16/bool 변수의 경계 max 를
@@ -1568,9 +1568,11 @@ def _build_doc_proposal(
             collect_unit_functions,
             determine_gen_method,
             determine_test_method,
+            extended_unit_sequences,
             normalize_pointer_parameters,
             reference_unit_sequences,
         )
+        from generators.tc_profile import is_extended
         from workflow.impact_doc_draft import build_var_types
 
         _td_resolved = _gim_typedef_resolved(gim)   # (R76 N94) typedef 를 풀어서 안 타입은 라벨이 그 사실을 말한다
@@ -1589,14 +1591,17 @@ def _build_doc_proposal(
             #   seq_cap을 그대로 넘기면 반환 길이가 항상 ≤seq_cap이라 "총 몇 개를 만들 수 있는지"를
             #   알 수 없고, len>cap이 성립할 수 없어 truncated가 영구 False(dead code)가 된다.
             #   생성기 기본값(_DEFAULT_SEQ_COUNT)까지 만들어 **진짜 총량**을 재고, 표시분만 잘라 싣는다.
-            _all_seq = [s for s in (reference_unit_sequences(_unit, max(seq_cap, _DEFAULT_SEQ_COUNT),
-                                                             type_cache=_local_tc) or [])
+            #   (R87 리뷰 W1) 확장 생성의 상한은 앞 정본 규모 블록의 크기라 문서 기본값(24)으로 둔다 — 표시 상한(`seq_cap`)과
+            #   별개다(키우면 블록이 커져 문서와 다른 행이 된다). 확장은 행 수 상한이 없어 24 를 넘는다.
+            _suts_gen = extended_unit_sequences if is_extended("", "suts") else reference_unit_sequences
+            _all_seq = [s for s in (_suts_gen(_unit, _DEFAULT_SEQ_COUNT, type_cache=_local_tc) or [])
                         if isinstance(s, dict)]
+            _shown_seq = _all_seq if seq_cap is None else _all_seq[:seq_cap]
             # ⚠ inputs/expected를 `dict(...)` 그대로 실으면 시퀀스마다 SUTS 입력 49 + 출력 86개를
             #   통째로 싣는다(실측: doc_proposal의 64%가 이 노드). doc_content 쪽과 같은 캡을 적용하고,
             #   잘렸으면 프론트가 '유지'로 단정하지 않도록 `kv_truncated`를 함께 보낸다.
             _slim = []
-            for s in _all_seq[:seq_cap]:
+            for s in _shown_seq:
                 _sin = _as_dict(s.get("inputs"))
                 _sexp = _as_dict(s.get("expected"))
                 _row = {
@@ -1635,8 +1640,8 @@ def _build_doc_proposal(
                 #   그 자리에 들어가 존재하지 않는 원문 절단을 경고한다(실측 2건 문서에 "10건 중 2건").
                 #   두 수는 서로 다른 양이므로 슬롯을 분리한다.
                 "gen_total": len(_all_seq),
-                "gen_shown": min(len(_all_seq), seq_cap),
-                "gen_truncated": len(_all_seq) > seq_cap,
+                "gen_shown": len(_shown_seq),
+                "gen_truncated": len(_shown_seq) < len(_all_seq),
             }
             # 프론트 판정의 타입 근거. 미상은 **키 부재**(uint8_t 기본값 환각 차단 — impact_doc_draft 참조).
             _vars = list(_unit.get("input_vars") or []) + list(_unit.get("output_vars") or [])
@@ -1662,6 +1667,7 @@ def _build_doc_proposal(
             load_uds_design_ids,
             load_uds_related_map,
             load_uds_swcom_map,
+            resolve_profile_caps,
         )
 
         # ⚠ 이 카드는 "문서를 직접 생성하는 것처럼" 보여주는 게 목적이다. 그런데
@@ -1698,11 +1704,11 @@ def _build_doc_proposal(
         #   `caps.max_subcases.api` 전부 7). 실측(KJPDS02_PV 360 흐름): 14 → sub-case
         #   4,643 · 7 → 2,520. 카드의 `total`/`truncated` 가 그 수를 그대로 말하므로,
         #   안 맞추면 문서에 없는 절단("4,643건 중 6건")을 경고한다.
-        #   ⚠ 7은 **기본값**이다 — 사용자가 Form 으로 더 크게 주거나 `tc_profile=extended`
-        #     면 실제 문서는 7이 아니다(`sits.resolve_profile_caps`). 초안은 그 선택을
-        #     받지 못하므로(영향도 요청에 `tc_profile`·`max_subcases` 가 없다) 이 카드는
-        #     **기본 프로파일 기준**이고, 그 경우 카드가 문서보다 작게 말한다.
-        for _itc in (generate_itc_list(_tgt_flows, max_subcases=_SITS_DEFAULT_SUBCASES,
+        #   ⚠ 7은 요청 기본값이고, (R87) 기본 프로파일(확장)이 sub-case 를 후보 전량까지 올린다 — 초안은 문서와 같은
+        #     규칙(`sits.resolve_profile_caps`)으로 상한을 정한다. 초안은 사용자 선택(영향도 요청에 `tc_profile`·
+        #     `max_subcases` 가 없다)을 받지 못하므로 이 카드는 **기본 프로파일 기준**이다(정본 규모를 고른 문서보다 크게 말한다).
+        _draft_subcases = resolve_profile_caps("", _SITS_DEFAULT_SUBCASES, None)[2]
+        for _itc in (generate_itc_list(_tgt_flows, max_subcases=_draft_subcases,
                                        design_ids=_design_ids)
                      if _tgt_flows else []):
             _nm = str(_itc.get("entry_fn") or "").strip().lower()
@@ -1720,7 +1726,7 @@ def _build_doc_proposal(
                     "case_label": str(sc.get("case_label") or "")[:80],
                     "case_num": sc.get("case_num"),
                 }
-                for sc in _all_sub[:sub_cap]
+                for sc in (_all_sub if sub_cap is None else _all_sub[:sub_cap])
             ]
             out["sits"][_nm] = {
                 "call_chain": str(_itc.get("call_chain") or ""),
@@ -1738,7 +1744,7 @@ def _build_doc_proposal(
                 "asil": str(_itc.get("asil") or ""),
                 "module_name": str(_itc.get("module_name") or "")[:80],
                 "total": len(_all_sub),
-                "truncated": len(_all_sub) > sub_cap,
+                "truncated": sub_cap is not None and len(_all_sub) > sub_cap,
             }
     except Exception as exc:  # noqa: BLE001
         logger.debug("doc_proposal SITS synth failed: %s", exc)
@@ -1748,6 +1754,10 @@ def _build_doc_proposal(
     # ── STS: 함수별 _generate_steps_from_flow(logic_flow 없으면 내부에서 _generate_simple_steps 폴백) ──
     try:
         from generators.sts import _generate_steps_from_flow
+        from generators.tc_profile import is_evidence_enriched
+
+        # (R87 리뷰 W-R2-2) 기본 문서(확장)는 시험 근거 보강이 켜진다 — 초안도 같은 규칙(문서 기본 · 사용자 선택은 못 받는다)
+        _sts_enrich = is_evidence_enriched("", "sts")
 
         for fn in targets:
             _info = fdmap[name_lc_to_fid[fn]]
@@ -1761,7 +1771,7 @@ def _build_doc_proposal(
             #   를 보이는 자리라 `keep_boundary` 로 받고, 자를 땐 마지막 자리를 경계값 TC 에 남기며 그 위치를 알린다.
             _b_stats: Dict[str, Any] = {}
             _raw_tc = list(_generate_steps_from_flow(_info.get("logic_flow") or [], _info,
-                                                     stats=_b_stats, keep_boundary=True) or [])
+                                                     stats=_b_stats, keep_boundary=True, enrich=_sts_enrich) or [])
             # (리뷰 I4·I5) 경계값 TC 는 **생성기가 알려 준 자리**로 집는다 — "마지막" 이라 가정하면 flow 없는 함수(둘째 자리)를
             #   놓치고, 빈 TC 가 걸러질 때 옆 TC 에 표시가 간다. 아래 표시는 객체 동일성으로 따라간다.
             _bi = _b_stats.get("boundary_index")
@@ -2298,6 +2308,8 @@ def _run_suts_generation(entry: Any, target_functions: List[str] | None = None) 
         "output_path": str(out_path),
         "test_case_count": result.get("test_case_count", 0),
         "validation_report_path": result.get("validation_report_path", ""),
+        # (R87 리뷰 W-R2-1) 이번 문서의 프로파일 — 변경 기록이 이전 문서와 비교한다(기본이 확장으로 바뀌었다)
+        "tc_profile": str((result.get("quality_report") or {}).get("tc_profile") or ""),
     }
 
 
@@ -2356,6 +2368,7 @@ def _run_sits_generation(entry: Any) -> Dict[str, Any]:
         "test_case_count": result.get("test_case_count", 0),
         "total_sub_cases": result.get("total_sub_cases", 0),
         "validation_report_path": result.get("validation_report_path", ""),
+        "tc_profile": str((result.get("quality_report") or {}).get("tc_profile") or ""),   # (R87 리뷰 W-R2-1)
     }
 
 
@@ -3334,7 +3347,7 @@ def run_impact_update(
         # doc_content/change_details도 넘긴다 — 소스 미해결(cloudium)이면 그걸 근거로 폴백 합성한다
         # (소스가 안 잡히는 환경이 곧 문서는 읽히는 환경이라, 없으면 화면에 골격만 남는다).
         if callable(on_progress) and _changed_set and sections.get("function_details"):
-            # (review R86 W-R2-1 · I-R3-3: only when the source is there — a document fallback runs no generator) the SUTS draft runs the document's reference-profile path — one extended generation per
+            # (review R86 W-R2-1 · I-R3-3: only when the source is there — a document fallback runs no generator) the SUTS draft runs the default document's path (R87: extended) — one extended generation per
             #   function (seconds each) — the long stretch after the impact step is this one
             on_progress("doc_proposal", "문서 생성 초안을 합성 중입니다(SUTS 는 함수마다 확장 생성 포함).",
                         {"changed_functions": len(_changed_set)})

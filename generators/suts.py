@@ -8422,8 +8422,9 @@ def generate_suts(
     Args (추가):
         input_skips: (R66) 호출자(라우트)가 지정된 입력 문서를 로컬화하지 못한 사유 ``"<라벨>: <사유>"``(라벨 SRS · SDS ·
             UDS · HSIS). 그 문서는 경로가 None 으로 오지만 '주지 않음' 이 아니라 '지정했지만 열지 못함' 으로 공시한다.
-        tc_profile: `""`/`"reference"`(기본) = 정본 규모. `"extended"` = 시퀀스 상한 없이 + 확장 전략
-            (`generate_sequences(extended=True)`). 단일 정의는 `generators/tc_profile.py`.
+        tc_profile: `""`/`"extended"`(기본, R87) = 확장 — 시퀀스 상한 없이 + 확장 전략(`extended_unit_sequences`; 정본이 잡는
+            변이를 다 잡는 쪽). `"reference"`/`"recommended"` = 정본 규모(함수당 `max_sequences` 행, R85 블록 · R86 열).
+            단일 정의는 `generators/tc_profile.py`(`DOC_DEFAULT_PROFILE`).
         scope: `"suds"`(기본) = SwUDS 설계 ID 가 있는 함수만 — **정본과 같은 범위**.
             `"source"` = 소스에서 찾은 함수 전부. SwUDS 문서가 없으면 `"suds"` 여도
             좁히지 않고 그 사실을 보고한다.
@@ -8838,10 +8839,11 @@ def generate_suts(
     _logger.info("Units needing AI enhancement: %d", len(_void_no_vars))
 
     _progress(40, "테스트 시퀀스 생성 시작")
-    _profile, _profile_bad = normalize_tc_profile(tc_profile)
+    # (R87) 미설정 · 모르는 값은 기본(확장) — 정본이 잡는 변이를 다 잡는 쪽(사용자 결정 2026-10-15)
+    _profile, _profile_bad = normalize_tc_profile(tc_profile, "suts")
     _extended = _profile == TC_PROFILE_EXTENDED
     if _profile_bad:
-        _logger.warning("SUTS: 모르는 tc_profile %r — 기본(정본 규모)으로 만든다", _profile_bad)
+        _logger.warning("SUTS: 모르는 tc_profile %r — 기본(확장)으로 만든다", _profile_bad)
     all_sequences: Dict[str, List[Dict[str, Any]]] = {}
     ai_enhanced = 0
     for i, unit in enumerate(units):
@@ -8865,7 +8867,7 @@ def generate_suts(
     _progress(80, f"시퀀스 생성 완료 - {total_seq}개")
 
     quality = generate_suts_quality_report(units, all_sequences, _source_function_count(function_details))
-    # (R75) 어느 프로파일로 만들었나 · 확장 전략이 덧붙인 시퀀스 수(기본이면 0).
+    # (R75) 어느 프로파일로 만들었나 · 확장 전략이 덧붙인 시퀀스 수(정본 규모면 0).
     quality["tc_profile"] = _profile
     quality["tc_profile_unknown_value"] = _profile_bad
     # (R76 N104) 세 생성기가 같은 두 키로 "요청한 상한 / 실제로 건 상한" 을 말한다(SITS 가 먼저 썼다). `None` = 상한 없음.

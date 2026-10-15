@@ -3291,7 +3291,7 @@ async def jenkins_sts_generate_async(
     # TC 당 스텝 상한 — `None` = 미설정 = 생성기 상수(`generators/sts.py:_MAX_STEPS_PER_TC`).
     # 숫자를 여기 복제하지 않는다(`max_flows` 와 같은 규약).
     max_steps_per_tc: Optional[int] = Form(None),
-    # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
+    # (R75) 시험 물량 프로파일 — `""`=확장(R87 기본, 근거 있는 시험을 상한 없이), `"reference"`=정본 규모. 철자·의미의 단일
     #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
     tc_profile: str = Form(""),
     # (R29, G4(b)) 시스템 요구·설계서 — SRS Related ID 가 직접 가리키는 블록의 임계로 요구 경계 TC 를 더한다.
@@ -3575,7 +3575,7 @@ def jenkins_suts_generate_async(
     sds_path: str = Form(""),
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
-    # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
+    # (R75) 시험 물량 프로파일 — `""`=확장(R87 기본, 근거 있는 시험을 상한 없이), `"reference"`=정본 규모. 철자·의미의 단일
     #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
     tc_profile: str = Form(""),
 ) -> Dict[str, Any]:

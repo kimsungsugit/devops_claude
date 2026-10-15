@@ -145,7 +145,9 @@ class TestRequirementCap:
         mapping = {r["id"]: ids[(j * 7) % 300:(j * 7) % 300 + 12] for j, r in enumerate(reqs)}
         for max_tc in (3, 5, 9, 400):
             stats: dict = {}
-            tcs = generate_test_cases(reqs, fns, mapping, {"max_tc_per_req": max_tc}, stats_out=stats)
+            # (R87) 미설정은 확장(무시험 함수마다 BAA 를 덧붙임) — 상한 안 계수는 정본 규모 문서에서 본다
+            tcs = generate_test_cases(reqs, fns, mapping, {"max_tc_per_req": max_tc, "tc_profile": "reference"},
+                                      stats_out=stats)
             c, k, f, r = (stats[x] for x in ("boundary_tc_candidates", "boundary_tc_kept",
                                               "boundary_tc_cut_by_function_cap", "boundary_tc_cut_by_req_cap"))
             assert c == k + f + r, (max_tc, c, k, f, r)

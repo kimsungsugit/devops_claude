@@ -48,6 +48,7 @@ from backend.services.swut_meta_resolver import (
 from generators.tc_profile import TC_PROFILE_EXTENDED as _TC_PROFILE_EXTENDED
 from generators.tc_profile import TC_PROFILE_RECOMMENDED as _TC_PROFILE_RECOMMENDED
 from generators.tc_profile import TC_PROFILE_REFERENCE as _TC_PROFILE_REFERENCE
+from generators.tc_profile import default_tc_profile as _default_tc_profile
 from generators.tc_profile import normalize_tc_profile as _normalize_tc_profile
 from report_gen.source_roots import first_source_root
 
@@ -476,12 +477,12 @@ def _tm_lookup_paths(inputs: Dict[str, str]) -> Dict[str, str]:
 # (R75) 확장 프로파일이 **생성기 안에서** 푸는 상한과, 그 행이 대신 말할 문장. 생성기와 어긋나면 게이트가 거짓말을
 #   하므로 가드가 세 생성기의 실제 동작과 대조한다(`test_tc_profile_r75.py`).
 _CAPS_LIFTED_BY_EXTENDED: Dict[str, str] = {
-    "max_tc_per_req": "**확장 프로파일**에서는 이 값이 요구당 상한이 아니라 기본 TC 구간과 **함수당** 분기 TC 상한으로만 "
+    "max_tc_per_req": "**확장 프로파일**에서는 이 값이 요구당 상한이 아니라 정본 규모 TC 구간과 **함수당** 분기 TC 상한으로만 "
                       "작동합니다 — 시험 없는 함수는 요구당 상한과 무관하게 전부 TC 를 받습니다",
     # (리뷰 R85 W-R4-2) 상한은 확장 문서 앞의 정본 규모 블록(같은 상한의 정본 규모 문서)의 크기를 정한다 — 버리는 카탈로그 ·
     #   확장 행은 없지만 블록 안 코드 기준 행 수는 상한을 따른다(그것까지 "풀린다" 고 말하면 거짓이다)
     "max_sequences": "**확장 프로파일**은 이 상한으로 카탈로그 · 확장 행을 버리지 않습니다 — 상한은 앞쪽 정본 규모 블록(같은 "
-                     "상한의 기본 문서와 같은 행)의 크기만 정하고, 블록에 못 든 카탈로그 행(`CATALOG_`)과 확장 전략 행이 "
+                     "상한의 정본 규모 문서와 같은 행)의 크기만 정하고, 블록에 못 든 카탈로그 행(`CATALOG_`)과 확장 전략 행이 "
                      "그 뒤에 모두 붙습니다. 블록 안 코드 기준 행 수는 상한을 따릅니다(상한이 작으면 줄고, 그 목표는 확장의 "
                      "동작 시나리오 탐색이 전 입력으로 다시 찾습니다)",
     "max_subcases": "**확장 프로파일**은 sub-case 후보 전부를 담습니다(직접 더 크게 정했으면 그 값)",
@@ -1228,7 +1229,8 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     #   모두)이 기본값 기준으로 "N개가 빠집니다" 라고 하면 만들어질 문서와 반대말이 된다(게이트는 타이핑이 아니라
     #   문서를 잰다). 리뷰 C1: 처음엔 결정 행(`cap_*`)만 고쳐서 같은 패널의 측정 행 둘이 동시에 반대말을 했다.
     _tc_choice = (spec.get("choices") or {}).get("tc_profile") or {}
-    _tc_profile, _tc_profile_bad = (_normalize_tc_profile(req.caps.get("tc_profile"))
+    # (R87) 미설정은 확장이다(문서마다 둘 수 있게 생성기와 같은 규칙 `normalize_tc_profile(..., doc_type)`)
+    _tc_profile, _tc_profile_bad = (_normalize_tc_profile(req.caps.get("tc_profile"), req.doc_type)
                                     if _tc_choice else (_TC_PROFILE_REFERENCE, ""))
     _tc_extended = _tc_profile == _TC_PROFILE_EXTENDED
     resolver = get_resolver()
@@ -1886,7 +1888,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                                   "lifted_by_profile": _TC_PROFILE_EXTENDED if _tc_extended else None,
                                   "beyond_cap_in_reference": _beyond_ref if _tc_extended else None},
                         reason=(
-                            f"**확장 프로파일** — 기본 구간에서 요구당 상한({_eff_tc})에 걸리는 함수 {_beyond_ref}개도 "
+                            f"**확장 프로파일** — 정본 규모 구간에서 요구당 상한({_eff_tc})에 걸리는 함수 {_beyond_ref}개도 "
                             "그 뒤에 각자 TC 를 받습니다(함수마다 한 번, 안전 요구 → 가장 좁은 요구 순으로 고른 요구 밑에)"
                             if _tc_extended else
                             f"매핑된 함수 {m.get('mapped_functions')}개 중 **최소** "
@@ -2316,13 +2318,14 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
             ),
         ))
 
-    # ── 5-a2. 시험 물량 프로파일 — 정본 규모(기본)냐 확장이냐 ────────────────
+    # ── 5-a2. 시험 물량 프로파일 — 확장(기본, R87)이냐 정본 규모냐 ────────────────
     # 판정 규칙은 여기 복제하지 않는다 — `generators/tc_profile.normalize_tc_profile` 을 생성기와 같이 쓴다.
     if _tc_choice:
         _tc_reason = str(_tc_choice.get("effect") or "")
+        _tc_default = _default_tc_profile(req.doc_type)
         if _tc_extended:
-            _tc_now = ("현재 **확장**입니다 — 기본 문서의 시험을 전부 담고 그 뒤에 덧붙입니다. 문서가 커지고 생성이 "
-                       "오래 걸립니다. 시험 근거 보강도 함께 켜집니다.")
+            _tc_now = ("현재 **확장**" + ("(기본)" if _tc_default == _TC_PROFILE_EXTENDED else "") + "입니다 — 정본 규모 문서의 "
+                       "시험을 전부 담고 그 뒤에 덧붙입니다. 문서가 커지고 생성이 오래 걸립니다. 시험 근거 보강도 함께 켜집니다.")
         elif _tc_profile == _TC_PROFILE_RECOMMENDED:
             # 물량 축과 근거 축이 한 선택지에 묶여 있다 — "물량은 확장인데 근거는 기본" 은 고를 수 없다.
             # 그 제약을 여기서 말해 둔다(`generators/tc_profile.py` docstring 과 같은 내용).
@@ -2332,7 +2335,11 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                        "⚠ 지금 산출이 바뀌는 것은 **STS 뿐**입니다 — SUTS 는 값 칸이 이미 99% 차 있고, "
                        "SITS 는 경계 sub-case 수를 공시에만 적습니다(위 '적용 효과' 참조).")
         else:
-            _tc_now = "현재 **정본 규모**(기본)입니다."
+            _tc_now = ("현재 **정본 규모**" + ("(기본)" if _tc_default == _TC_PROFILE_REFERENCE else "") + "입니다."
+                       + ("" if _tc_default == _TC_PROFILE_REFERENCE else
+                          " 이 문서의 기본은 확장입니다"
+                          + (" — 정본 규모는 정본이 잡는 변이를 다 잡지 못합니다(R86 실측: KJPDS02_PV 163 · HDPDM01 146 남음)."
+                             if req.doc_type == "suts" else ".")))
         steps.append(_step(
             "tc_profile", "decision", S_OK if not _tc_profile_bad else S_DEGRADED, "시험 물량",
             measured={"value": _tc_profile, "stored": _tc_profile_bad or None,

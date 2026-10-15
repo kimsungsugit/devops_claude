@@ -34,6 +34,7 @@ from generators.tc_profile import (
     TC_PROFILE_EXTENDED,
     TC_PROFILE_RECOMMENDED,
     TC_PROFILE_REFERENCE,
+    default_tc_profile,
 )
 
 __all__ = ["build_disclosures", "DISCLOSURE_TONES", "DISCLOSURE_DOC_TYPES"]
@@ -345,7 +346,7 @@ def _input_documents_item(block: Any, doc: str, override_units: int = 0,
 
 
 # ── 공통 ───────────────────────────────────────────────────────────────────
-def _common_items(qr: Dict[str, Any], alt: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _common_items(qr: Dict[str, Any], alt: Dict[str, Any], doc_type: str = "") -> List[Dict[str, Any]]:
     """공통 축(프로파일·상한·생성 방법).
 
     ⚠ **STS 는 프로파일을 `generation_stats` 안에 적고 SUTS·SITS 는 최상위에 적는다.**
@@ -359,21 +360,27 @@ def _common_items(qr: Dict[str, Any], alt: Dict[str, Any]) -> List[Dict[str, Any
 
     # 프로파일 — 이 문서가 "정본 규모" 인지 "확장" 인지. 두 문서는 나란히 놓고 보는 관계라
     # (확장 ⊇ 기본) 어느 쪽인지 모르면 TC 수를 서로 비교해 버린다.
+    # (R87) 기본은 확장이다 — `default_tc_profile(doc_type)`(문서마다 둘 수 있는 자리)
+    _default = default_tc_profile(doc_type)
     if "tc_profile" in qr:
         prof = str(qr.get("tc_profile") or "")
         if prof == TC_PROFILE_EXTENDED:
-            label_v = "확장"
-            note = ("근거 있는 시험을 상한 없이 덧붙인 문서다 — 기본(정본 규모) 문서의 시험을 "
-                    "같은 ID·같은 순서로 전부 담고 그 뒤에 덧붙인다. 시험 근거 보강도 함께 켜진다.")
+            label_v = "확장(기본)" if _default == TC_PROFILE_EXTENDED else "확장"
+            note = ("근거 있는 시험을 상한 없이 덧붙인 문서다 — 정본 규모 문서의 시험을 "
+                    "같은 ID·같은 순서로 전부 담고 그 뒤에 덧붙인다. 시험 근거 보강도 함께 켜진다."
+                    + (" 이 문서의 기본 프로파일이다(정본 규모는 고를 수 있다)." if _default == TC_PROFILE_EXTENDED else ""))
         elif prof == TC_PROFILE_RECOMMENDED:
             label_v = "권장(물량은 정본 규모)"
-            note = ("TC 수는 기본과 같고 **시험 근거만** 올린 문서다 — 기대결과를 관측 대상이 "
+            note = ("TC 수는 정본 규모와 같고 **시험 근거만** 올린 문서다 — 기대결과를 관측 대상이 "
                     "드러나는 문장으로 바꾸고(반환값·**쓰기** 전역), 하한 위반 경계값을 덧붙인다. "
                     "근거가 없는 자리는 바꾸지 않고 아래 '근거 없어 둔 기대결과' 로 센다. "
                     "산출이 바뀌는 것은 STS 뿐이다 — SUTS·SITS 는 이 프로파일에서 내용이 같다.")
         elif prof == TC_PROFILE_REFERENCE:
-            label_v = "정본 규모(기본)"
-            note = "정본과 같은 규모로만 만든 문서다 — 아래 상한에 걸린 시험은 이 문서에 없다."
+            label_v = "정본 규모(기본)" if _default == TC_PROFILE_REFERENCE else "정본 규모"
+            note = ("정본과 같은 규모로만 만든 문서다 — 아래 상한에 걸린 시험은 이 문서에 없다."
+                    + ("" if _default == TC_PROFILE_REFERENCE else
+                       " 이 문서의 기본은 확장이다"
+                       + (" — 정본 규모는 정본이 잡는 변이를 다 잡지 못한다." if doc_type == "suts" else ".")))
         else:
             # 정규화를 거친 값이라 여기 오면 생산자 계약이 바뀐 것이다. 임의로 접지 않고 원문을 보인다.
             label_v = prof or "(미기록)"
@@ -384,9 +391,15 @@ def _common_items(qr: Dict[str, Any], alt: Dict[str, Any]) -> List[Dict[str, Any
     # 값이 있으면 오타 하나로 문서 규모가 바뀐 것이라 warning.
     bad = str(qr.get("tc_profile_unknown_value") or "").strip()
     if bad:
+        # (리뷰 R87 W-R3-1) 문서가 **기록한** 프로파일로 말한다 — 오늘의 기본으로 말하면 R87 전 문서(정본 규모로 만들어짐)에서
+        #   위 프로파일 줄과 서로 다른 말을 한다. 기록이 없으면 오늘의 기본.
+        _made = str(qr.get("tc_profile") or "") or _default
+        _made_ko = {TC_PROFILE_EXTENDED: "확장", TC_PROFILE_REFERENCE: "정본 규모",
+                    TC_PROFILE_RECOMMENDED: "권장"}.get(_made, _made)
+        _other_ko = "정본 규모를" if _made == TC_PROFILE_EXTENDED else "확장을"
         out.append(_item(
             "tc_profile_unknown_value", "모르는 프로파일 값", bad,
-            "요청에 실린 값을 알아보지 못해 기본(정본 규모)으로 만들었다 — 확장을 원했다면 다시 생성할 것.",
+            f"요청에 실린 값을 알아보지 못해 그 문서의 기본({_made_ko})으로 만들었다 — {_other_ko} 원했다면 다시 생성할 것.",
             tone="warning"))
 
     # 요청한 상한 / 실제로 건 상한. 다르면 그 사실 자체가 공시다(확장이 상한을 푼 경우가 대표).
@@ -520,7 +533,7 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.append(_item(
             "sts_extended", "확장으로 덧붙인 시험",
             f"함수 {ext_fn} · TC {ext_tc}" + (f" (경계값 {ext_b})" if ext_b else ""),
-            "기본 문서에서 시험이 하나도 없던 함수에 덧붙인 분이다."
+            "정본 규모 구간에서 시험이 하나도 없던 함수에 덧붙인 분이다."
             + (f" 그중 {safety}개는 안전 요구 밑에 놓였다." if safety else "")))
         no_detail = _int(gs, "extended_functions_without_detail")
         no_steps = _int(gs, "extended_functions_without_steps")
@@ -1448,7 +1461,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "suts_extended", "확장으로 덧붙인 시퀀스",
             f"확장 전략 {_show(ext_seq)} · 상한 해제분 {_show(beyond)}",
             "확장 전략이 새로 만든 시퀀스와, 기본 카탈로그 안에 있었지만 정본 규모 문서의 행 수(상한)에 들지 못했거나 코드 기준 "
-            "행에 자리를 내준 카탈로그 행(확장 문서에선 `CATALOG_<이름>`)이다. 둘을 합치면 기본 문서 대비 증분이다."))
+            "행에 자리를 내준 카탈로그 행(확장 문서에선 `CATALOG_<이름>`)이다. 둘을 합치면 정본 규모 문서 대비 증분이다."))
 
     # (R86) 정본 규모 문서의 열 — 확장 생성이 정한 열(소스가 읽는 입력 · 쓰는 출력) 위의 정본 규모 블록
     rcol = qr.get("reference_columns")
@@ -1596,7 +1609,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "멤버 경로 포함)를 TC 의 입력·기대값 열로 보였다 — 예전 문서는 이 값을 싣지 않아 기대값이 문서에 없는 자극에 기댔다. "
             "값은 그것을 설정한 행(GLOBAL 행, 확장 프로파일에선 그 행을 기준으로 한 경계 행)에만 있고 다른 행은 비어 있다(설정하지 "
             "않음 — 그 행들은 이 이름에 기댄 확정값이 없다). 호출 시퀀스의 오류 경로 행은 BV_*_INV 처럼 형 밖 값을 싣는다. "
-            "열이 늘어 TC 의 입출력 변수 수·'입출력 없는 TC' 수·생성 방법 표기가 예전 문서와 달라진다(기본 프로파일도 설계서 입력 "
+            "열이 늘어 TC 의 입출력 변수 수·'입출력 없는 TC' 수·생성 방법 표기가 예전 문서와 달라진다(정본 규모 프로파일도 설계서 입력 "
             "표보다 열이 많다). 같은 이름을 다른 행이 값 없이 읽으면 '입력 목록 밖 읽기' 소견에도 남는다."
             + (f" 입력 열 상한 때문에 보이지 못한 입력 {_show(_int(ri, 'inputs_over_cap'))} — 그 입력을 쓰는 행의 확정 칸 "
                f"{_show(_int(ri, 'downgraded_slots'))}을 [검증 필요](input_not_in_document)로 내렸다."
@@ -1745,7 +1758,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"{_show(_int(sa, 'rows'))}행 (unit {_show(_int(sa, 'units_with_rows'))} · 피호출 stub 이 둘 이상인 unit "
             f"{_show(_int(sa, 'units_with_two_stubs'))})",
             "두 피호출 stub 이 같은 값을 돌려주는 행은 그 값을 받은 출력에서 어느 피호출의 값이 갔는지 · 어느 갈래를 탔는지 가르지 "
-            "못한다(정본은 stub 마다 다른 값을 둔다). 기존 행은 그대로 두고 — 확장 문서는 기본 문서의 행을 같은 값으로 담는다 — "
+            "못한다(정본은 stub 마다 다른 값을 둔다). 기존 행은 그대로 두고 — 확장 문서는 정본 규모 문서의 행을 같은 값으로 담는다 — "
             "같은 값이던 stub 을 서로 다른 값(경계 행 도메인 안, 설계 값 목록이면 그 목록의 값; enum · 타입을 모르는 stub 은 옮기지 "
             "않음, FI · 설계 범위 밖 값을 가진 행은 출처가 아님)으로 옮긴 동반 행을 더했다: 원본 코드 모델에서 같은 경로(부르는 "
             "피호출 · 쓰는 객체와 그 값을 아는지 — 반환값은 넣지 않음)이고 그 경로가 실제로 서로 다른 값이 된 stub 을 둘 이상 "
@@ -2743,7 +2756,7 @@ def build_disclosures(doc_type: str, quality_report: Dict[str, Any]) -> List[Dic
         return []
     dt = str(doc_type or "").strip().lower()
     gs = quality_report.get("generation_stats")
-    items = _common_items(quality_report, gs if isinstance(gs, dict) else {})
+    items = _common_items(quality_report, gs if isinstance(gs, dict) else {}, dt)
     builder = _BY_DOC_TYPE.get(dt)
     if builder is not None:
         items.extend(builder(quality_report))

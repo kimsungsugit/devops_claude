@@ -235,3 +235,94 @@ def test_build_change_log_sits_before_unreadable_null_delta_no_crash(monkeypatch
     assert s["delta_cases"] is None
     assert cl["documents"]["sits"].get("before_unavailable") is True
     assert cl["summary"]["sits_delta_cases"] == 0  # int(None or 0) 크래시 방지
+
+
+def test_build_change_log_says_when_the_profile_changed_under_the_delta(monkeypatch, tmp_path):
+    """(R87 리뷰 W4 · W-R2-1) 기본 프로파일이 확장으로 바뀌어, 정본 규모로 만든 이전 문서와의 증감에 프로파일 변경분이 섞인다 —
+    말한다. 재생성 결과는 실제 자동 실행이 돌려주는 모양(`_run_sits_generation` 의 반환)으로 넣는다."""
+    from types import SimpleNamespace
+
+    import sits_generator
+    import workflow.impact_orchestrator as io
+    from backend.schemas import ScmLinkedDocs
+    from workflow import impact_changes
+
+    monkeypatch.setattr(sits_generator, "generate_sits", lambda **kw: {
+        "test_case_count": 360, "total_sub_cases": 4671, "quality_report": {"tc_profile": "extended"}})
+    monkeypatch.setattr(io, "SITS_REPORT_DIR", tmp_path / "out", raising=False)
+    entry = SimpleNamespace(source_root=str(tmp_path), id="kj", linked_docs=ScmLinkedDocs())
+    run = io._run_sits_generation(entry)
+    assert run["tc_profile"] == "extended", "the auto run carries the document's profile to the change log"
+
+    def _fake(path_text):
+        if path_text == "BEFORE_SITS":
+            return {"test_case_count": 120, "total_sub_cases": 840, "quality_report": {"tc_profile": "reference"}}, "loaded"
+        if path_text == "BEFORE_SITS_SAME":
+            return {"test_case_count": 350, "total_sub_cases": 4600, "tc_profile": "extended"}, "loaded"
+        return {}, "absent"
+
+    monkeypatch.setattr(impact_changes, "_load_payload_with_status", _fake)
+
+    def _log(before):
+        return impact_changes.build_change_log(
+            run_id="t", trigger={"scm_id": "kj"},
+            result={"actions": {"sits": {"status": "completed", "result": run, "function_count": 1}},
+                    "changed_function_types": {}, "impact": {}},
+            previous_linked_docs={"sits": before},
+        )["documents"]["sits"]
+    switched = _log("BEFORE_SITS")
+    assert switched["summary"]["delta_cases"] == 240 and switched["profile_changed"] is True
+    assert switched["summary"]["tc_profile"] == "extended" and switched["summary"]["before_tc_profile"] == "reference"
+    assert "프로파일 변경분이 섞였다" in switched["profile_note"]
+    same = _log("BEFORE_SITS_SAME")
+    assert "profile_changed" not in same and same["summary"]["before_tc_profile"] == "extended"
+    # no previous document (first generation · no sidecar): no ground to say the profile changed
+    first = _log("")
+    assert "profile_changed" not in first and first["summary"]["tc_profile"] == "extended"
+
+
+def test_the_suts_auto_run_carries_its_profile(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import suts_generator
+    import workflow.impact_orchestrator as io
+    from backend.schemas import ScmLinkedDocs
+
+    monkeypatch.setattr(suts_generator, "generate_suts", lambda **kw: {"quality_report": {"tc_profile": "extended"}})
+    monkeypatch.setattr(io, "SUTS_REPORT_DIR", tmp_path / "out")
+    entry = SimpleNamespace(source_root=str(tmp_path), id="kj", linked_docs=ScmLinkedDocs())
+    assert io._run_suts_generation(entry, ["Fn"])["tc_profile"] == "extended"
+
+
+def test_the_suts_change_log_says_when_the_profile_changed(monkeypatch, tmp_path):
+    """(리뷰 R87 I-R3-1) SUTS 쪽 같은 메모 — 이전 문서를 읽었을 때만."""
+    from types import SimpleNamespace
+
+    import suts_generator
+    import workflow.impact_orchestrator as io
+    from backend.schemas import ScmLinkedDocs
+    from workflow import impact_changes
+
+    monkeypatch.setattr(suts_generator, "generate_suts", lambda **kw: {"test_case_count": 3,
+                                                                        "quality_report": {"tc_profile": "extended"}})
+    monkeypatch.setattr(io, "SUTS_REPORT_DIR", tmp_path / "out")
+    run = io._run_suts_generation(SimpleNamespace(source_root=str(tmp_path), id="kj", linked_docs=ScmLinkedDocs()), ["Fn"])
+
+    def _fake(path_text):
+        if path_text == "BEFORE_SUTS":
+            return {"test_case_count": 3, "total_sequences": 40, "quality_report": {"tc_profile": "reference"}}, "loaded"
+        return {}, "absent"
+
+    monkeypatch.setattr(impact_changes, "_load_payload_with_status", _fake)
+
+    def _log(before):
+        return impact_changes.build_change_log(
+            run_id="t", trigger={"scm_id": "kj"},
+            result={"actions": {"suts": {"status": "completed", "output_path": run["output_path"], "result": run,
+                                         "functions": ["Fn"]}},
+                    "changed_function_types": {}, "impact": {}},
+            previous_linked_docs={"suts": before},
+        )["documents"]["suts"]
+    switched = _log("BEFORE_SUTS")
+    assert switched["profile_changed"] is True and switched["summary"]["before_tc_profile"] == "reference"
+    assert "profile_changed" not in _log("")

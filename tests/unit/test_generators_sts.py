@@ -612,7 +612,8 @@ class TestTcCapTruncationIsSurfaced:
         stats = {}
         tcs = generate_test_cases(
             [{"id": "SwTR_0001", "req_type": "TR"}], fd,
-            {"SwTR_0001": list(fd)}, {"max_tc_per_req": 5}, stats_out=stats,
+            # (R87) 미설정은 확장(무시험 함수마다 TC) — 상한이 남기는 함수는 정본 규모에서 본다
+            {"SwTR_0001": list(fd)}, {"max_tc_per_req": 5, "tc_profile": "reference"}, stats_out=stats,
         )
         assert len(tcs) == 5
         assert stats["max_tc_per_req"] == 5
@@ -650,8 +651,8 @@ class TestTcCapTruncationIsSurfaced:
         fd = self._fd(10)
         reqs = [{"id": "SwTR_0001", "req_type": "TR"}]
         stats = {}
-        tcs = generate_test_cases(reqs, fd, {"SwTR_0001": list(fd)},
-                                  {"max_tc_per_req": 5}, stats_out=stats)
+        tcs = generate_test_cases(reqs, fd, {"SwTR_0001": list(fd)},   # (R87) 정본 규모 — 미설정은 확장
+                                  {"max_tc_per_req": 5, "tc_profile": "reference"}, stats_out=stats)
         qr = generate_quality_report(tcs, generate_traceability_matrix(tcs, reqs),
                                      generation_stats=stats)
         hit = [w for w in qr["coverage_warnings"] if "max_tc_per_req" in w]

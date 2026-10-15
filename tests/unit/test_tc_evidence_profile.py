@@ -49,10 +49,10 @@ _PROFILES = ("", "reference", TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED)
 
 class TestProfileValue:
     @pytest.mark.parametrize("raw, prof", [
-        ("", TC_PROFILE_REFERENCE), ("reference", TC_PROFILE_REFERENCE),
+        ("", TC_PROFILE_EXTENDED), ("reference", TC_PROFILE_REFERENCE),   # (R87) 기본은 확장
         ("recommended", TC_PROFILE_RECOMMENDED), (" RECOMMENDED ", TC_PROFILE_RECOMMENDED),
         ("extended", TC_PROFILE_EXTENDED),
-        ("recommneded", TC_PROFILE_REFERENCE), (None, TC_PROFILE_REFERENCE),
+        ("recommneded", TC_PROFILE_EXTENDED), (None, TC_PROFILE_EXTENDED),
     ])
     def test_recommended_joins_the_same_normalizer(self, raw, prof):
         assert normalize_tc_profile(raw)[0] == prof
@@ -65,8 +65,9 @@ class TestProfileValue:
         기존 호출부 3곳(`sts.generate_test_cases`·`suts.generate_suts`·`sits.resolve_profile_caps`)이
         `is_extended` 로 상한을 푼다 — 그래서 이 술어의 뜻은 `recommended` 가 생겨도 바뀌면 안 된다.
         """
-        assert [is_extended(p) for p in _PROFILES] == [False, False, False, True]
-        assert [is_evidence_enriched(p) for p in _PROFILES] == [False, False, True, True]
+        # (R87) 기본은 확장 — 미설정("")은 두 축 다 켜진다; `recommended` 는 여전히 근거만
+        assert [is_extended(p) for p in _PROFILES] == [True, False, False, True]
+        assert [is_evidence_enriched(p) for p in _PROFILES] == [True, False, True, True]
 
     def test_recommended_is_inside_extended(self):
         """포함 관계 — 확장은 권장을 **담는다**. 둘 다 근거 보강이 켜져야 그 말이 참이다."""
@@ -201,7 +202,7 @@ class TestExpectedResultEvidence:
         assert st["expected_no_basis"] == 2 and not any("반환값:" in e for _, e in enr)
 
     def test_negative_control_default_profile_changes_nothing(self):
-        """음성 대조군 — 기본값에서는 스텝이 한 글자도 안 바뀐다."""
+        """음성 대조군 — 정본 규모에서는 스텝이 한 글자도 안 바뀐다((R87) 기본은 확장이라 이름으로 고른다)."""
         fd = {"F1": _fn("A", output="U16"), "F2": _fn("B", output="void", globals_=[{"name": "g_X"}])}
         reqs = [{"id": "SwTR_0001", "req_type": "TR"}]
         mapping = {"SwTR_0001": ["F1", "F2"]}
@@ -212,11 +213,12 @@ class TestExpectedResultEvidence:
                                       {"max_tc_per_req": 9, "tc_profile": profile}, stats_out=st)
             return [(t["id"], t["title"], [(s["action"], s["expected"]) for s in t["steps"]]) for t in tcs], st
 
-        base, st0 = _run("")
-        ref, _ = _run("reference")
+        base, st0 = _run("reference")
+        dflt, _ = _run("")
+        ext, _ = _run(TC_PROFILE_EXTENDED)
         rec, st1 = _run(TC_PROFILE_RECOMMENDED)
-        assert ref == base, "`reference` 는 미설정과 완전히 같다"
-        assert st0["expected_enriched"] == st0["expected_no_basis"] == 0, "기본은 보강도 미보강 계수도 0"
+        assert dflt == ext, "(R87) 미설정은 `extended` 와 완전히 같다"
+        assert st0["expected_enriched"] == st0["expected_no_basis"] == 0, "정본 규모는 보강도 미보강 계수도 0"
         assert rec != base, "전제: 이 입력에는 보강할 근거가 있다(없으면 이 시험이 아무것도 안 잰다)"
         assert st1["expected_enriched"] > 0
         assert not any("반환값:" in e for _, _, steps in base for _, e in steps)
@@ -237,7 +239,7 @@ class TestExpectedResultEvidence:
                                       {"max_tc_per_req": 2, "tc_profile": profile}, stats_out=st)
             return tcs, st
 
-        base, st0 = _run("")
+        base, st0 = _run("reference")   # (R87) 기본은 확장 — 물량 비교의 기준은 정본 규모
         rec, st1 = _run(TC_PROFILE_RECOMMENDED)
         ext, st2 = _run(TC_PROFILE_EXTENDED)
         assert len(rec) == len(base) > 0
@@ -270,7 +272,7 @@ class TestExpectedResultEvidence:
             return tcs, st
 
         for max_tc in (1, 2, 5, 9):
-            base, _ = _run("", max_tc)
+            base, _ = _run("reference", max_tc)   # (R87) 기본은 확장 — 보강 전 문서는 정본 규모
             rec, st = _run(TC_PROFILE_RECOMMENDED, max_tc)
             assert len(rec) == len(base), max_tc
             # 문서에서 **실제로 달라진 기대결과 줄** 수를 센다.
@@ -313,7 +315,7 @@ class TestLowerBoundStep:
 
     def test_lower_bound_violation_appears_only_when_enriched(self):
         """BVA 6점 중 이 문서는 min·max·max_inv 셋만 썼다. `min_inv` 는 `_TYPE_BOUNDARIES` 에 **이미 있다**."""
-        base = self._actions(self._tcs(""))
+        base = self._actions(self._tcs("reference"))   # (R87) 기본은 확장(근거 보강 켜짐) — 대조군은 정본 규모
         rec = self._actions(self._tcs(TC_PROFILE_RECOMMENDED))
         assert not any("유효 범위 미만" in a for a in base)
         assert any("유효 범위 미만" in a for a in rec)
@@ -484,7 +486,8 @@ class TestGateAndDisclosureWiring:
         for doc_type in ("sts", "suts", "sits"):
             ch = req.requirements_for(doc_type)["choices"]["tc_profile"]
             vals = [o["value"] for o in ch["options"]]
-            assert vals == ["", TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED], doc_type
+            # (R87) 기본은 확장 — 정본 규모를 이름으로 낸다; 권장(세 번째 선택지)은 세 문서 모두에 있다
+            assert vals == ["", "reference", TC_PROFILE_RECOMMENDED], doc_type
             assert all(o.get("label") for o in ch["options"]), "값만 있고 설명이 없으면 고를 수 없다"
 
     def test_sts_disclosure_reports_both_the_enriched_and_the_untouched(self):

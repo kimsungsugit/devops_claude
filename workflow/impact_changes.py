@@ -187,6 +187,30 @@ def diff_uds_payload(before_payload: Dict[str, Any], after_payload: Dict[str, An
     }
 
 
+def _profile_of(*records: Any) -> str:
+    """(R87 리뷰 W4) 산출물이 기록한 시험 물량 프로파일 — 생성 결과 · 사이드카 payload 의 어느 자리에 있든(`tc_profile`
+    최상위 · `quality_report` · `raw_result` · STS `generation_stats`). 못 찾으면 빈 문자열(기록 없음)."""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for node in (rec, rec.get("quality_report"), rec.get("raw_result"),
+                     (rec.get("raw_result") or {}).get("quality_report") if isinstance(rec.get("raw_result"), dict) else None,
+                     rec.get("generation_stats")):
+            if isinstance(node, dict) and str(node.get("tc_profile") or "").strip():
+                return str(node["tc_profile"]).strip()
+    return ""
+
+
+def _profile_note(before: str, after: str) -> Dict[str, Any]:
+    """(R87 리뷰 W4) 재생성 전후 프로파일이 다르면(또는 이전 문서가 기록하지 않았으면) TC · 시퀀스 증감에 소스 변경이 아닌
+    프로파일 변경분이 섞인다 — 기본 프로파일이 확장으로 바뀌었다(R87). 같으면 빈 dict."""
+    if not after or before == after:
+        return {}
+    return {"profile_changed": True,
+            "profile_note": (f"이전 문서의 시험 물량 프로파일({before or '기록 없음'})과 이번 생성({after})이 달라 TC · 시퀀스 "
+                             "증감에 프로파일 변경분이 섞였다 — 소스 변경만의 증감이 아니다(기본 프로파일은 확장, R87).")}
+
+
 def _payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_result = payload.get("raw_result") if isinstance(payload.get("raw_result"), dict) else {}
     # ⚠ `summary.primary`가 빈 리스트면 [0]이 IndexError, summary가 list면 .get이 AttributeError →
@@ -265,6 +289,11 @@ def build_change_log(
             "artifact_path": str(suts_info.get("output_path") or ""),
             "validation_report_path": str((suts_info.get("result") or {}).get("validation_report_path") or ""),
         }
+        _sp_after = _profile_of(suts_info.get("result"), after_payload)
+        _sp_before = _profile_of(before_payload) if _suts_before_ok else ""
+        docs["suts"]["summary"].update(tc_profile=_sp_after or None, before_tc_profile=_sp_before or None)
+        # (R87 리뷰 W-R2-1) 이전 문서를 실제로 읽었을 때만 — 없으면(첫 생성 · 사이드카 없음) "달라졌다" 고 말할 근거가 없다
+        docs["suts"].update(_profile_note(_sp_before, _sp_after) if _suts_before_status == "loaded" else {})
         if not _suts_before_ok:
             docs["suts"]["before_unavailable"] = True
 
@@ -294,6 +323,10 @@ def build_change_log(
             "artifact_path": str(sits_info.get("artifact_path") or sits_info.get("output_path") or ""),
             "validation_report_path": str(exec_result.get("validation_report_path") or ""),
         }
+        _ip_after = _profile_of(exec_result)
+        _ip_before = _profile_of(before_payload) if _sits_before_ok else ""
+        docs["sits"]["summary"].update(tc_profile=_ip_after or None, before_tc_profile=_ip_before or None)
+        docs["sits"].update(_profile_note(_ip_before, _ip_after) if _sits_before_status == "loaded" else {})
         if not _sits_before_ok:
             docs["sits"]["before_unavailable"] = True
 

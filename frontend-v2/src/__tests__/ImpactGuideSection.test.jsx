@@ -3625,7 +3625,7 @@ describe('ImpactGuideSection — 절단·생략 표기 정직성', () => {
     await waitFor(() => expect(within(dialog).getByText(/경계 최솟값/)).toBeInTheDocument());
     expect(within(dialog).getByText('TC 6 · 경계값')).toBeInTheDocument();
     expect(within(dialog).queryByText(/branch #3/)).toBeNull();          // 넷째 칸을 경계값 TC 에 내줬다
-    expect(within(dialog).getByText(/기본\(정본 규모\) 문서에는 실리지 않습니다/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/정본 규모.{0,8} 구간에는 실리지 않습니다 — 기본\(확장\) 문서는 정본 규모 구간에서 TC 가 없던 함수에만/)).toBeInTheDocument();
   });
 
   it('N93: 상한 안의 경계값 TC 엔 확장 전용 안내를 붙이지 않는다', async () => {

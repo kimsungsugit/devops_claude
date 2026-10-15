@@ -175,7 +175,7 @@ _DOC_DRAFT_KINDS = {"uds", "sds", "sts", "suts", "sits"}
 def impact_doc_draft(req: ImpactDocDraftRequest) -> Dict[str, Any]:
     """한 함수의 **전체** 문서 초안(온디맨드) — job에는 요약만, 여기선 생성기 기본값 전량.
 
-    job JSON에 24 시퀀스 × 50 함수를 전부 실으면 페이로드가 폭증하므로, 카드는 요약(10건)만
+    job JSON에 함수마다 전 시퀀스(R87 기본 = 확장 — 상한 없음) × 50 함수를 실으면 페이로드가 폭증하므로, 카드는 요약(10건)만
     받고 사용자가 '전체 보기'를 누를 때 이 엔드포인트가 나머지를 만든다.
     소스가 미해결(cloudium)이면 `_build_doc_proposal`이 문서 원문 기준으로 폴백하며,
     어느 근거로 만들었는지는 `source`('generator'|'document')로 정직하게 돌려준다.
@@ -233,11 +233,12 @@ def impact_doc_draft(req: ImpactDocDraftRequest) -> Dict[str, Any]:
             warnings.append("전체 초안: 소스 파싱 불가 — 문서 원문 기준으로 합성")
 
     from workflow.impact_orchestrator import _build_doc_proposal
-    # 생성기 기본값 전량(SUTS 24 시퀀스 / SITS 14 서브케이스). 함수 1개라 비용이 제한된다.
+    # 생성기 기본 문서의 전량 — (R87) 기본은 확장이라 SUTS 시퀀스 · SITS 서브케이스에 상한이 없다(`None` = 전부 표시;
+    #   리뷰 R87 W1: 24 · 14 로 자르면서 "전량" 이라 했다). 함수 1개라 비용이 제한된다.
     proposal = _build_doc_proposal(
         sections, {fn}, warn_sink=warnings,
         doc_content=doc_content, change_details=change_details,
-        fn_cap=1, seq_cap=24, sub_cap=14, sts_tc_cap=99, step_cap=12,
+        fn_cap=1, seq_cap=None, sub_cap=None, sts_tc_cap=99, step_cap=12,
     )
     node = proposal.get(doc)
     payload = node.get(fn) if isinstance(node, dict) else None

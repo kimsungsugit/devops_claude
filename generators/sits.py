@@ -3443,11 +3443,11 @@ def generate_sits_validation_report(
 def resolve_profile_caps(tc_profile: Any, max_subcases: Any, max_flows: Any) -> Tuple[str, str, int, Optional[int]]:
     """(R75) 시험 물량 프로파일이 두 상한을 어떻게 바꾸는가 — `(프로파일, 못 알아본 값, max_subcases, max_flows)`.
 
-    기본(정본 규모)은 요청값 그대로다. 확장은 sub-case 를 후보 전량(`_SUBCASE_CATALOG_MAX`)까지 올리고 흐름 상한을
+    정본 규모는 요청값 그대로다(R87 부터 고를 때만 — 기본은 확장). 확장은 sub-case 를 후보 전량(`_SUBCASE_CATALOG_MAX`)까지 올리고 흐름 상한을
     없앤다(`None` = `_select_flows_within_cap` 이 자르지 않는다). 확장은 상한을 **낮추지 않는다** — 더 크게 줬으면 그 값.
-    KJPDS02 실측: 기본은 찾은 흐름 360 중 240 을 빼고 그중 79 가 안전 관련이다.
+    KJPDS02 실측: 정본 규모는 찾은 흐름 360 중 240 을 빼고 그중 79 가 안전 관련이다.
     """
-    profile, bad = normalize_tc_profile(tc_profile)
+    profile, bad = normalize_tc_profile(tc_profile, "sits")   # (R87) 미설정 = 확장
     if profile != TC_PROFILE_EXTENDED:
         return profile, bad, max_subcases, max_flows
     return profile, bad, max(int(max_subcases or 0), _SUBCASE_CATALOG_MAX), None
@@ -3561,7 +3561,7 @@ def generate_sits(
     _profile, _profile_bad, max_subcases, max_flows = resolve_profile_caps(  # type: ignore[assignment]
         tc_profile, max_subcases, max_flows)
     if _profile_bad:
-        _logger.warning("SITS: 모르는 tc_profile %r — 기본(정본 규모)으로 만든다", _profile_bad)
+        _logger.warning("SITS: 모르는 tc_profile %r — 기본(확장)으로 만든다", _profile_bad)
     if _profile == TC_PROFILE_EXTENDED:
         _logger.info("SITS: 확장 프로파일 — 흐름 상한 없음 · sub-case 상한 %d(요청값 %s)", max_subcases, _caps_requested)
 

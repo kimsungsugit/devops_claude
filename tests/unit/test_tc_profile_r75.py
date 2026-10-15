@@ -26,12 +26,13 @@ from generators.tc_profile import (
 
 class TestProfileValue:
     @pytest.mark.parametrize("raw, expected", [
-        ("", (TC_PROFILE_REFERENCE, "")), (None, (TC_PROFILE_REFERENCE, "")), ("reference", (TC_PROFILE_REFERENCE, "")),
+        # (R87) 기본은 확장 — 미설정 · 모르는 값은 확장으로 간다(모르는 값은 원래 값을 돌려준다)
+        ("", (TC_PROFILE_EXTENDED, "")), (None, (TC_PROFILE_EXTENDED, "")), ("reference", (TC_PROFILE_REFERENCE, "")),
         ("extended", (TC_PROFILE_EXTENDED, "")), (" EXTENDED ", (TC_PROFILE_EXTENDED, "")),
-        ("extnded", (TC_PROFILE_REFERENCE, "extnded")), ("all", (TC_PROFILE_REFERENCE, "all")), (1, (TC_PROFILE_REFERENCE, "1")),
+        ("extnded", (TC_PROFILE_EXTENDED, "extnded")), ("all", (TC_PROFILE_EXTENDED, "all")), (1, (TC_PROFILE_EXTENDED, "1")),
     ])
-    def test_unknown_values_fall_back_to_reference_and_are_reported(self, raw, expected):
-        """오타 하나가 문서를 열 배로 키우면 안 된다 — 모르는 값은 기본으로 가고, 원래 값은 돌려줘서 공시한다."""
+    def test_unknown_values_fall_back_to_the_default_and_are_reported(self, raw, expected):
+        """오타 하나가 문서를 바꾸면 안 된다 — 모르는 값은 기본으로 가고, 원래 값은 돌려줘서 공시한다."""
         assert normalize_tc_profile(raw) == expected
         assert is_extended(raw) is (expected[0] == TC_PROFILE_EXTENDED)
 
@@ -134,14 +135,19 @@ def _key(tc):
 
 
 class TestStsProfile:
-    def test_reference_is_the_default_and_unchanged(self):
-        base, st0 = _sts(None)
-        for profile in ("", "reference", "extnded"):
-            tcs, st = _sts(profile)
-            assert [_key(t) for t in tcs] == [_key(t) for t in base], profile
-            assert st["extended_tcs"] == 0 and st["extended_functions"] == 0 and st["tc_profile"] == TC_PROFILE_REFERENCE
-        assert _sts("extnded")[1]["tc_profile_unknown_value"] == "extnded" and st0["tc_profile_unknown_value"] == ""
+    def test_reference_is_unchanged_and_the_default_is_extended(self):
+        # (R87) 기본은 확장 — 미설정 · 모르는 값은 `extended` 와 같은 문서이고, 정본 규모는 이름으로 고른다
+        base, st_ref = _sts("reference")
+        assert st_ref["extended_tcs"] == 0 and st_ref["extended_functions"] == 0
+        assert st_ref["tc_profile"] == TC_PROFILE_REFERENCE and st_ref["tc_profile_unknown_value"] == ""
         assert not any("tc_profile" in t for t in base)
+        ext, st_ext = _sts("extended")
+        dflt, st0 = _sts(None)
+        for profile in (None, "", "extnded"):
+            tcs, st = _sts(profile)
+            assert [(_key(t), t.get("tc_profile")) for t in tcs] == [(_key(t), t.get("tc_profile")) for t in ext], profile
+            assert st["extended_tcs"] == st_ext["extended_tcs"] > 0 and st["tc_profile"] == TC_PROFILE_EXTENDED, profile
+        assert _sts("extnded")[1]["tc_profile_unknown_value"] == "extnded" and st0["tc_profile_unknown_value"] == ""
 
     def test_extended_contains_the_reference_document_unchanged(self):
         """확장은 기본 문서의 시험을 **같은 ID·같은 순서·같은 요구 밑에** 담고 그 뒤에 덧붙인다.
@@ -153,7 +159,7 @@ class TestStsProfile:
           **권장본**이다 — 둘은 물량만 다르기 때문이다. 두 축을 한 단언에 섞으면
           "확장이 기본을 밀어냈다" 와 "확장이 근거를 올렸다" 가 구별되지 않는다.
         """
-        base, _ = _sts(None)
+        base, _ = _sts("reference")   # (R87) 기본은 확장 — 비교 대상은 이름으로 고른 정본 규모본
         rec, _ = _sts(TC_PROFILE_RECOMMENDED)
         ext, st = _sts("extended")
         kept = [t for t in ext if t.get("tc_profile") != TC_PROFILE_EXTENDED]
@@ -166,7 +172,7 @@ class TestStsProfile:
         assert len({t["id"] for t in ext}) == len(ext), "확장 TC 의 ID 는 기본 TC 뒤를 잇는다 — 겹치면 안 된다"
 
     def test_every_mapped_function_gets_a_tc_exactly_once_in_the_extension(self):
-        base, st0 = _sts(None)
+        base, st0 = _sts("reference")   # (R87) 기본은 확장 — 상한에 걸리는 쪽은 정본 규모
         ext, st = _sts("extended")
         assert st0["functions_with_tc"] < st0["mapped_functions"], "전제: 기본은 상한에 걸려 일부 함수만 시험한다"
         assert st["functions_with_tc"] == st["mapped_functions"] == 6 and st["functions_without_tc"] == 0
@@ -250,7 +256,8 @@ class TestStsProfile:
 
         fd = {"F1": _fn("A"), "F3": {}}
         reqs = [{"id": "SwTR_0001", "req_type": "TR"}]
-        for profile, blames_cap in (("", True), ("extended", False)):
+        # (R87) 기본은 확장 — 상한 탓을 하는 것은 정본 규모뿐이고, 미설정은 확장처럼 말한다
+        for profile, blames_cap in (("reference", True), ("extended", False), ("", False)):
             stats: dict = {}
             tcs = generate_test_cases([dict(r) for r in reqs], fd, {"SwTR_0001": ["F1", "F3"]},
                                       {"max_tc_per_req": 1, "tc_profile": profile}, stats_out=stats)
@@ -380,8 +387,11 @@ class TestSutsProfile:
 
 class TestSitsProfile:
     def test_reference_keeps_the_requested_caps(self):
-        assert sits_mod.resolve_profile_caps("", 7, 120) == (TC_PROFILE_REFERENCE, "", 7, 120)
-        assert sits_mod.resolve_profile_caps("extnded", 7, 120) == (TC_PROFILE_REFERENCE, "extnded", 7, 120)
+        assert sits_mod.resolve_profile_caps("reference", 7, 120) == (TC_PROFILE_REFERENCE, "", 7, 120)
+        # (R87) 기본은 확장 — 미설정 · 모르는 값은 두 상한을 푼다(모르는 값은 원래 값을 돌려준다)
+        cat = sits_mod._SUBCASE_CATALOG_MAX
+        assert sits_mod.resolve_profile_caps("", 7, 120) == (TC_PROFILE_EXTENDED, "", cat, None)
+        assert sits_mod.resolve_profile_caps("extnded", 7, 120) == (TC_PROFILE_EXTENDED, "extnded", cat, None)
 
     def test_extended_lifts_both_caps_and_never_lowers_a_larger_request(self):
         cat = sits_mod._SUBCASE_CATALOG_MAX
@@ -431,19 +441,37 @@ class TestGateRow:
 
     @pytest.mark.parametrize("doc_type", ["sts", "suts", "sits"])
     def test_row_shows_the_default_and_the_pick(self, doc_type, tmp_path):
+        # (R87) 기본은 확장 — 세 문서 모두. 정본 규모는 이름으로 고른다
         row = self._steps(doc_type, tmp_path)["tc_profile"]
-        assert row["measured"]["value"] == TC_PROFILE_REFERENCE and row["measured"]["choice"] == "tc_profile"
+        assert row["measured"]["value"] == TC_PROFILE_EXTENDED and row["measured"]["choice"] == "tc_profile"
         assert [o["value"] for o in row["measured"]["options"]] == [
-            "", TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED,
-        ], "선택지는 물량·근거 3단계다(R78 에서 recommended 추가)"
-        assert "정본 규모" in row["reason"] and "현재 **확장**" not in row["reason"]
-        picked = self._steps(doc_type, tmp_path, {"tc_profile": "extended"})["tc_profile"]
-        assert picked["measured"]["value"] == TC_PROFILE_EXTENDED and picked["measured"]["picked"] == "extended"
-        assert "현재 **확장**" in picked["reason"] and picked["state"] == "ok"
+            "", TC_PROFILE_REFERENCE, TC_PROFILE_RECOMMENDED,
+        ], "선택지는 물량·근거 3단계다(R78 에서 recommended 추가, R87 에서 미설정=확장 · 정본 규모는 이름으로)"
+        assert "현재 **확장**(기본)" in row["reason"] and "현재 **정본 규모**" not in row["reason"] and row["state"] == "ok"
+        picked = self._steps(doc_type, tmp_path, {"tc_profile": "reference"})["tc_profile"]
+        assert picked["measured"]["value"] == TC_PROFILE_REFERENCE and picked["measured"]["picked"] == "reference"
+        assert "현재 **정본 규모**입니다" in picked["reason"] and "이 문서의 기본은 확장" in picked["reason"]
+        assert "현재 **확장**" not in picked["reason"] and picked["state"] == "ok"
+        ext = self._steps(doc_type, tmp_path, {"tc_profile": "extended"})["tc_profile"]
+        assert ext["measured"]["value"] == TC_PROFILE_EXTENDED and ext["measured"]["picked"] == "extended"
+        assert "현재 **확장**" in ext["reason"] and ext["state"] == "ok"
+
+    def test_suts_row_shows_the_extended_default_and_the_reference_pick(self, tmp_path):
+        # (R87, 사용자 결정 2026-10-15) SUTS 의 미설정은 확장 — 정본 규모는 이름으로 고른다
+        row = self._steps("suts", tmp_path)["tc_profile"]
+        assert row["measured"]["value"] == TC_PROFILE_EXTENDED and row["state"] == "ok"
+        assert [o["value"] for o in row["measured"]["options"]] == ["", TC_PROFILE_REFERENCE, TC_PROFILE_RECOMMENDED]
+        assert "현재 **확장**(기본)" in row["reason"]
+        picked = self._steps("suts", tmp_path, {"tc_profile": "reference"})["tc_profile"]
+        assert picked["measured"]["value"] == TC_PROFILE_REFERENCE and picked["measured"]["picked"] == "reference"
+        assert "현재 **정본 규모**입니다" in picked["reason"] and "이 문서의 기본은 확장" in picked["reason"]
+        bad = self._steps("suts", tmp_path, {"tc_profile": "refrence"})["tc_profile"]
+        assert bad["measured"]["value"] == TC_PROFILE_EXTENDED and bad["state"] == "degraded"
 
     def test_unknown_stored_value_is_shown_not_silently_dropped(self, tmp_path):
         row = self._steps("sts", tmp_path, {"tc_profile": "extnded"})["tc_profile"]
-        assert row["measured"]["value"] == TC_PROFILE_REFERENCE and row["measured"]["stored"] == "extnded"
+        # (R87) 기본은 확장 — 모르는 값은 확장으로 되돌리고 저장된 값을 보인다
+        assert row["measured"]["value"] == TC_PROFILE_EXTENDED and row["measured"]["stored"] == "extnded"
         assert row["state"] == "degraded" and "extnded" in row["reason"]
 
     def test_uds_has_no_row(self, tmp_path):
@@ -453,7 +481,7 @@ class TestGateRow:
                                                 ("sits", ["max_subcases", "max_flows"])])
     def test_lifted_caps_stop_reporting_a_loss_under_the_extension(self, doc_type, caps, tmp_path):
         ext = self._steps(doc_type, tmp_path, {"tc_profile": "extended"})
-        ref = self._steps(doc_type, tmp_path)
+        ref = self._steps(doc_type, tmp_path, {"tc_profile": "reference"})   # (R87) SUTS 의 미설정은 확장
         for cap in caps:
             row = ext[f"cap_{cap}"]
             assert row["state"] == "ok" and row["measured"]["lifted_by_profile"] == TC_PROFILE_EXTENDED, row
@@ -473,13 +501,14 @@ class TestGateRow:
                             "bridge": {"on": True}, "cap": 5, "mapped_functions": 9, "functions_beyond_cap": 1,
                             "requirements_over_cap": 1, "max_functions_per_req": 6, "req_fid_lists": [[0, 1, 2, 3, 4, 5], [6, 7, 8]]}})
 
-        ref = self._steps("sits", tmp_path)["sits_flows"]
-        assert ref["state"] == "degraded" and "빠집니다" in ref["reason"], "전제: 기본에서는 이 행이 손실을 말한다"
+        # (R87) 기본은 확장 — 손실을 말하는 쪽은 이름으로 고른 정본 규모
+        ref = self._steps("sits", tmp_path, {"tc_profile": "reference"})["sits_flows"]
+        assert ref["state"] == "degraded" and "빠집니다" in ref["reason"], "전제: 정본 규모에서는 이 행이 손실을 말한다"
         ext = self._steps("sits", tmp_path, {"tc_profile": "extended"})["sits_flows"]
         assert ext["state"] == "ok" and "빠집니다" not in ext["reason"] and "145" in ext["reason"]
         assert ext["measured"].get("lifted_by_profile") == TC_PROFILE_EXTENDED and "headroom" not in ext["measured"]
 
-        ref = self._steps("sts", tmp_path)["sts_tc_cap"]
+        ref = self._steps("sts", tmp_path, {"tc_profile": "reference"})["sts_tc_cap"]
         assert ref["state"] == "degraded" and "시험되지" in ref["reason"] and ref["measured"]["beyond_cap"] == 1, "전제"
         ext = self._steps("sts", tmp_path, {"tc_profile": "extended"})["sts_tc_cap"]
         assert ext["state"] == "ok" and "시험되지" not in ext["reason"] and ext["measured"]["beyond_cap"] == 0
@@ -487,7 +516,7 @@ class TestGateRow:
 
     def test_step_cap_is_judged_as_before_under_the_extension(self, tmp_path):
         ext = self._steps("sts", tmp_path, {"tc_profile": "extended"})["cap_max_steps_per_tc"]
-        ref = self._steps("sts", tmp_path)["cap_max_steps_per_tc"]
+        ref = self._steps("sts", tmp_path, {"tc_profile": "reference"})["cap_max_steps_per_tc"]   # (R87) 기본은 확장
         assert ext == ref
 
 
@@ -513,7 +542,10 @@ class TestWiring:
             fn = next(r.endpoint for r in mod.router.routes if getattr(r, "path", "") == path)
         assert "tc_profile" in inspect.signature(fn).parameters, doc_type
 
-    @pytest.mark.parametrize("profile, want_flows, want_extended", [("", 120, False), ("extended", None, True)])
+    @pytest.mark.parametrize("profile, want_flows, want_extended", [
+        ("", None, True),   # (R87) 기본은 확장 — SITS · SUTS 모두
+        ("reference", 120, False),
+        ("extended", None, True)])
     def test_generators_act_on_the_profile(self, profile, want_flows, want_extended, tmp_path, monkeypatch):
         """핸들러가 넘겨도 생성기 진입점이 안 쓰면 아무 일도 안 일어난다 — 상한·전략 스위치가 실제 호출에 실리는지."""
         from generators import suts as suts_mod
@@ -561,10 +593,9 @@ class TestWiring:
 
         ch = req.requirements_for(doc_type)["choices"]["tc_profile"]
         assert ch["param"] == "tc_profile" and ch["api"] == "" and ch["adjustable"] is True
-        # 같은 뜻의 값 둘(""·"reference")을 다 내면 화면에 "정본 규모" 가 두 줄 선다(리뷰 I6) — 미설정 하나만 낸다.
-        assert [o["value"] for o in ch["options"]] == [
-            "", TC_PROFILE_RECOMMENDED, TC_PROFILE_EXTENDED,
-        ]
+        # 같은 뜻의 값 둘을 다 내면 화면에 같은 선택지가 두 줄 선다(리뷰 I6) — 미설정 하나만 낸다.
+        #   (R87) 기본은 확장 — 정본 규모를 이름으로 낸다(같은 뜻의 ""·"extended" 를 다 내지 않는다)
+        assert [o["value"] for o in ch["options"]] == ["", TC_PROFILE_REFERENCE, TC_PROFILE_RECOMMENDED]
         assert ch["effect"]
 
     def test_uds_has_no_such_choice(self):

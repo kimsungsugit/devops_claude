@@ -578,7 +578,7 @@ def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=N
         lambda fdmap, gim=None, **k: [{"name": info["name"]} for info in fdmap.values() if isinstance(info, dict)],
     )
     monkeypatch.setattr(
-        gsuts, "reference_unit_sequences",   # (R86) the draft takes the document's path (`generate_suts` reference profile)
+        gsuts, "extended_unit_sequences",   # (R87) the draft takes the default document's path (SUTS default = extended)
         lambda unit, max_seq=6, type_cache=None: (suts_seq if suts_seq is not None
                                                   else [{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}]),
     )
@@ -1170,9 +1170,12 @@ def test_doc_proposal_sits_uses_the_document_subcase_budget(monkeypatch):
     monkeypatch.setattr(gsits, "generate_itc_list", _spy)
     out = _build_doc_proposal(_proposal_sections({"f1": {"name": "s_foo"}}), {"s_foo"})
 
-    assert seen["max_subcases"] == _SITS_DEFAULT_SUBCASES == 7, seen
-    # 총량은 문서 예산으로 센다 — 기본값 14 를 쓰면 여기서 갈린다.
-    assert out["sits"]["s_foo"]["total"] == 7
+    # (R87) 기본은 확장 — 문서 경로(`resolve_profile_caps`)가 요청 기본값 7 을 후보 전량까지 올린다. 초안도 같은 규칙.
+    want = gsits.resolve_profile_caps("", _SITS_DEFAULT_SUBCASES, None)[2]
+    assert _SITS_DEFAULT_SUBCASES == 7 and want == gsits._SUBCASE_CATALOG_MAX == 15
+    assert seen["max_subcases"] == want, seen
+    # 총량은 문서 예산으로 센다 — 생성기 기본값 14 를 쓰면 여기서 갈린다.
+    assert out["sits"]["s_foo"]["total"] == want
 
 
 def test_build_doc_proposal_var_types_omit_unknown(monkeypatch):

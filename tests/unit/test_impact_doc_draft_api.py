@@ -69,7 +69,8 @@ def test_doc_draft_returns_document_grounded_payload(client, monkeypatch):
 
 
 def test_doc_draft_full_expansion_uses_generator_defaults(client, monkeypatch):
-    """소스가 잡히면 생성기 전량(캡 24)을 쓴다 — 카드 요약(10)보다 많이 돌려준다."""
+    """소스가 잡히면 생성기 기본 문서의 전량을 쓴다 — 카드 요약(10)보다 많이 돌려준다. (R87 리뷰 W1) 기본은 확장이라
+    행 수에 상한이 없다 — 24 는 앞 정본 규모 블록의 크기일 뿐이고 전체 초안은 그보다 많은 행을 다 싣는다."""
     import backend.routers.impact as router_mod
     import generators.suts as gsuts
     import workflow.impact_jobs as jobs
@@ -87,10 +88,11 @@ def test_doc_draft_full_expansion_uses_generator_defaults(client, monkeypatch):
 
     def _gen(unit, max_seq=6, type_cache=None):
         seen["max_seq"] = max_seq
+        # the extended generation: the reference-scale block (max_seq rows) and the extension rows after it
         return [{"strategy": f"S{i}", "inputs": {"x": i}, "expected": {"r": i}, "description": "d"}
-                for i in range(max_seq)]
+                for i in range(max_seq + 13)]
 
-    monkeypatch.setattr(gsuts, "reference_unit_sequences", _gen)   # (R86) the document's reference-profile path
+    monkeypatch.setattr(gsuts, "extended_unit_sequences", _gen)   # (R87) the default document's path (SUTS default = extended)
     monkeypatch.setattr(router_mod, "_logger", router_mod._logger)  # no-op, 명시성
 
     r = client.post("/api/impact/doc-draft",
@@ -98,8 +100,10 @@ def test_doc_draft_full_expansion_uses_generator_defaults(client, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["source"] == "generator"
-    assert seen["max_seq"] == 24, "온디맨드는 생성기 기본값 전량"
-    assert len(body["proposal"]) == 24
+    assert seen["max_seq"] == 24, "앞 블록은 문서의 기본 상한"
+    assert len(body["proposal"]) == 37, "온디맨드는 생성기 기본 문서의 전량(확장 — 24 를 넘는다)"
+    meta = body["meta"]
+    assert meta["gen_truncated"] is False and meta["gen_total"] == meta["gen_shown"] == 37   # (리뷰 R87 I4)
 
 
 def test_doc_draft_missing_job_404(client, monkeypatch):

@@ -146,8 +146,8 @@ def test_summary_and_disclosure():
 def test_generate_suts_reports_the_reference_columns(tmp_path):
     (tmp_path / "m.c").write_text("typedef unsigned char U8;\nU8 g_cnt;\nU8 g_lim;\nU8 Fn(U8 a)\n{\n"
                                   "    if (a > g_lim) { g_cnt = 5U; }\n    return a;\n}\n", encoding="utf-8")
-    ref = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "r.xlsm"), scope="source")[
-        "quality_report"]
+    ref = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "r.xlsm"), scope="source",
+                             tc_profile="reference")["quality_report"]   # (R87) SUTS 의 미설정은 확장
     ext = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "e.xlsm"), scope="source",
                              tc_profile="extended")["quality_report"]
     assert ref["reference_columns"]["units"] >= 1 and "reference_columns" not in ext

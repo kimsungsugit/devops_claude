@@ -710,8 +710,8 @@ def test_generate_suts_reports_the_written_outputs_and_their_findings(tmp_path):
                                   "    return a;\n}\n", encoding="utf-8")
     ext = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "e.xlsm"), scope="source",
                              tc_profile="extended")["quality_report"]
-    ref = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "r.xlsm"), scope="source")[
-        "quality_report"]
+    ref = suts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "r.xlsm"), scope="source",
+                             tc_profile="reference")["quality_report"]   # (R87) SUTS 의 미설정은 확장
     # (R86) the reference-scale document takes the extension's columns too — both report the written outputs
     assert ext["source_written_outputs"]["units"] >= 1 and ref["source_written_outputs"]["units"] >= 1
     assert "reference_columns" in ref and "reference_columns" not in ext

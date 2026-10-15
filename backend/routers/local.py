@@ -3438,7 +3438,7 @@ def local_sits_generate_async(
     uds_path: str = Form(""),
     hsis_path: str = Form(""),
     stp_path: str = Form(""),
-    # (R75) 시험 물량 프로파일 — `""`=정본 규모(기본), `"extended"`=근거 있는 시험을 상한 없이. 철자·의미의 단일
+    # (R75) 시험 물량 프로파일 — `""`=확장(R87 기본, 근거 있는 시험을 상한 없이), `"reference"`=정본 규모. 철자·의미의 단일
     #   출처는 `generators/tc_profile.py` 이고 해석도 생성기가 한다(여기서 판정을 복제하지 않는다).
     tc_profile: str = Form(""),
 ) -> Dict[str, Any]:
