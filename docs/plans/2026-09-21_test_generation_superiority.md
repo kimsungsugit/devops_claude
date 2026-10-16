@@ -2087,3 +2087,24 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
   - callee contract 로 정밀도 회복: 루프 없는 비해석 callee 는 자기가 쓰지 않는 레지스터를 보존한다(HD havoc callee 13 중 11).
   - 소스 섹션 캐시 서명이 `docs/component_map.json` 을 보지 않는다.
   - `component_map.json` 이 HDPDM01 전용인데 모든 프로젝트에 적용된다(Info).
+
+## R94 기록 — SITS 행이 쓰는데 열에 없던 입력 · 기대값을 열로, 목록 앞부분만 보던 절단을 센다 (2026-10-17, R166)
+
+- **왜**: 사용자 "다음은 callee summary contract → oracle의 실제 읽기 기반 입력 선정 순서로 진행해줘". 읽기 기반 입력 선정 설계(`readset_input_design`)의 S0 · S2 다.
+  - 설계 조사 중 전역 상태 행(GLOBAL)이 간접 전역을 입력으로 두고 기대값으로 적는데, 그 이름이 TC 열에 없는 것을 찾았다. 기대값이 문서에 없는 자극으로 도출된 것이다(SwITC_94/96/97 의 `u8g_SysUds_WriteData` 등).
+  - 함수의 매개변수 · 전역 · 출력 목록을 앞부분만 보는 자리 다섯 곳이 이름도 개수도 남기지 않고 잘랐다.
+- **무엇**:
+  - S0 숨은 입력: 행이 쓰는 이름이 열에 없으면 기존 열 뒤에 첫 사용 순서로 붙인다(기존 열 · 값 · TC ID 불변). 입력 열 상한(82)에 막힌 행은 확정 칸을 `input_not_in_document` 로 내리고 집계에서 뺀다. 붙인 열은 그 이름을 쓰는 행에만 값이 있고, 다른 행은 비워 둔다(그 행은 그 이름을 두지도 단언하지도 않는다). 공시 `sits_hidden_inputs`, 품질 리포트 `hidden_io_columns`.
+  - S0 조용한 절단: 진입 매개변수 20 · 진입 전역 15 · 진입 출력 10 · callee 매개변수 · callee 출력/전역 · 간접 전역 목록을 센다. 다른 경로로 열이 된 이름은 빼고 맞춘다. 공시 `sits_candidates_truncated`, 이름은 `candidate_cut_names`(TC · 축마다 앞 20개 + "외 N").
+  - S2: 입력 도메인 해석을 `_input_domain_resolver` 로 뽑았고, 골든 픽스처로 기존 열 결과가 같음을 고정했다. S3 가 쓸 순수 함수(`needed_inputs` · `exclude_needed` · `rank_needed` · `select_values`)는 새 모듈 `generators/sits_read_inputs.py` 에 둔다.
+- **측정(HDPDM01 SITS, R93 과 같은 측정기)**:
+  - 숨은 이름을 쓰는 TC 4개에 입력 열 4 · 기대 열 3 을 붙였다. 상한 초과 0, 내린 확정 칸 0.
+  - 확정 기대값 21,358 은 칸 단위로 R93 과 같다(잃음 0 · 값 바뀜 0). 인터페이스 결함 판별 497 도 같다(잃음 0).
+  - 새로 센 조용한 절단(어느 경로로도 후보가 되지 않은 이름): 진입 전역 167 · callee 출력/전역 101 · 간접 전역 166 · callee 매개변수 1. 진입 매개변수 · 진입 출력은 0 이다.
+  - 생성 시간은 캐시 상태가 R93 측정과 달라 비교하지 않는다.
+- **R93 위에 얹으며 찾은 결함(같은 커밋에서 수정)**: R94 의 가드 시험(`test_downgrade_drops_every_derivation_field_the_oracle_sets`)이 실패했다. R93 이 확정 칸에 단 근거 필드 셋(`polling_loops_assumed` · `storage_objects` · `storage_registers`)이 칸을 내릴 때 떼는 목록에 없었다. SUTS 의 같은 목록(`suts.render_row_io`)도 마찬가지로 빠져 있었다 — 두 사본이 따로 놀았다.
+  - 목록을 필드를 다는 모듈의 `test_evidence.DERIVATION_FIELDS` 하나로 모았다. SITS 내리기는 R93 통계(저장소 모델 · 레지스터 메모리 · 폴링 종료 가정)도 내린 칸만큼 뺀다.
+  - 출력 영향은 없다. SUTS 는 그 필드를 확정 칸에서만 읽고, HD SITS 는 내린 칸이 0 이다. 시험 2 개를 더했고 변이 5/5 kill.
+- **검증**: 시험 60 신규 + 기존 1,431 통과. 변이 20/20 · 8/8 · 10/10 kill.
+- **리뷰(deep)**: Critical 0. W1(보인 이름을 잘린 이름으로 이중 계상) · W2(시험 공백) 반영.
+- **남은 것**: S1(`reads=` 갈래) · S3(오라클 훅, 덧붙이기만, 행 단위 무손실 가드 — HD 최대 +1,435칸 추정) · S4~S7(S6 · S7 은 callee contract `read_set` 필요). 간접 전역 구조체 통째에 설계서 범위를 주는 기존 동작은 골든에 고정했다(후속 판단).

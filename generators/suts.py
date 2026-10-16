@@ -41,7 +41,12 @@ from generators.scenario_rows import MAX_ROWS as _SCENARIO_MAX_ROWS
 from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, _at_home, find_scenarios
 from generators.suts_design_check import DesignChecker, summarize_design_check, uds_output_rows
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
-from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
+from generators.test_evidence import (
+    DERIVATION_FIELDS,
+    VERIFY_PREFIX,
+    apply_sequence_evidence,
+    summarize_expected_evidence,
+)
 from generators.uds_unit_io import resolve_unit_io, uds_param_key
 from report_gen.c_return import returns_value
 from report_gen.function_analyzer import split_param_annotations
@@ -6216,10 +6221,9 @@ def render_row_io(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict
         reason = "input_not_in_document:" + ",".join(used[:3]) + (f"+{len(used) - 3}" if len(used) > 3 else "")
         for var, ev in (seq.get("expected_evidence") or {}).items():
             if (ev or {}).get("status") == "derived":
-                # (리뷰 I1) 확정의 근거(계산 근거·가정·stub·해석한 callee)는 떼어 낸다 — 미상 칸이 근거를 말하면 안 된다
-                for k in ("basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only",
-                          "observed_only_pointees", "exact_width_guards",   # (review R81 I-R3-2 · R83 I-R2-4)
-                          "possible_ub_on_forked_path"):                    # (R90 review W1)
+                # (리뷰 I1) 확정의 근거(계산 근거·가정·stub·해석한 callee)는 떼어 낸다 — 미상 칸이 근거를 말하면 안 된다.
+                #   목록은 필드를 다는 모듈의 단일 출처(R93 통합: 사본이 레지스터 모델 필드를 빠뜨렸다)
+                for k in DERIVATION_FIELDS:
                     ev.pop(k, None)
                 ev.update(status="unknown", oracle_kind="none", reason=reason)
                 seq.setdefault("expected", {})[var] = f"{VERIFY_PREFIX} {reason}"

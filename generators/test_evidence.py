@@ -9,6 +9,16 @@ from generators.c_test_semantics import evaluate_function_inputs
 
 VERIFY_PREFIX = "[검증 필요]"
 
+#: The derivation fields `apply_sequence_evidence` attaches to a derived cell only. A cell a later pass downgrades to
+#: unknown (a row whose stimulus is not in the document — `suts.render_row_io`, `sits_read_inputs`) drops all of them: an
+#: unknown cell must not state a basis. One list for every downgrade (R93 integration: two copies drifted — the register
+#: model's fields were missing from both). Guard: `tests/unit/test_sits_read_inputs.py`
+#: `::test_downgrade_drops_every_derivation_field_the_oracle_sets` reads this module's ``item["…"] =`` assignments.
+DERIVATION_FIELDS: tuple[str, ...] = (
+    "basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only",
+    "observed_only_pointees", "exact_width_guards", "possible_ub_on_forked_path",
+    "polling_loops_assumed", "storage_objects", "storage_registers")
+
 
 def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]],
                             written: bool = False) -> list[dict[str, Any]]:

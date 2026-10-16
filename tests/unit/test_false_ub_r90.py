@@ -446,6 +446,22 @@ def test_a_downgraded_cell_drops_the_forked_path_disclosure_too():
     assert ev["status"] == "unknown" and "possible_ub_on_forked_path" not in ev
 
 
+def test_a_downgraded_cell_drops_every_derivation_field():
+    # (R93 integration) the SUTS downgrade and the SITS one read one list — a cell carrying every derivation field the
+    #   evidence attaches (the register model's included) says no basis once downgraded
+    from generators import suts
+    from generators.test_evidence import DERIVATION_FIELDS
+
+    cap = suts._INPUT_COL_END - suts._INPUT_COL_START + 1
+    unit = {"input_vars": [f"i{k}" for k in range(cap)], "output_vars": ["o"]}
+    full = {k: ["x"] for k in DERIVATION_FIELDS}
+    seq = {"inputs": {"hidden": 1}, "expected": {"o": 3}, "expected_evidence": {"o": {"status": "derived", **full}}}
+    suts.render_row_io(unit, [seq])
+    ev = seq["expected_evidence"]["o"]
+    assert ev["status"] == "unknown" and not set(DERIVATION_FIELDS) & set(ev), ev
+    assert {"polling_loops_assumed", "storage_objects", "storage_registers"} <= set(DERIVATION_FIELDS)
+
+
 def test_the_decision_search_reads_the_same_paths_as_the_evidence():
     # (R78) a search that ranks runs by their derived outputs reads them as the evidence will — and sees the run unclean
     unit = _unit(DIV, "f")

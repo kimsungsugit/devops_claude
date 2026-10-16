@@ -23,12 +23,13 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from backend.services.iso26262_doc_asil_extractor import _RELATED_PREFIX_CANON
 from generators._artifact_check import apply_write_back_check
 from generators._xlsx_merge import merge_fresh
 from generators.safety_marks import resolve_safety_related
+from generators.sits_read_inputs import hidden_io_by_tc as _hidden_io_by_tc
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_design_ids import checked_aliases, load_uds_design_ids, resolve_design_id
@@ -999,6 +1000,55 @@ def _apply_documented_range(
              "source": "SwUDS"}, "documented_range", "")
 
 
+class ResolvedDomain(NamedTuple):
+    """입력 하나의 값 도메인 — `_input_domain_resolver` 가 돌려준다.
+
+    * ``domain`` — 행이 쓰는 도메인(선언 타입 ∩ 설계서 범위). 모르면 None(이전 값 — `_infer_boundary_values`).
+    * ``source`` — `documented_range` · `declared_type` · `unknown`.
+    * ``type_reason`` — 선언 타입을 몰랐으면 그 사유(`_declared_input_domain`), 알았으면 ``""``.
+    * ``documented_reason`` — 설계서 범위를 쓰지 않은 사유(`not_documented` 포함), 썼으면 ``""``.
+    """
+    domain: Optional[Dict[str, Any]]
+    source: str
+    type_reason: str
+    documented_reason: str
+
+
+def _input_domain_resolver(
+    function_details: Dict[str, Dict[str, Any]],
+    globals_info_map: Optional[Dict[str, Dict[str, Any]]],
+    struct_member_types: Optional[Dict[str, Dict[str, Dict[str, Any]]]],
+    uds_unit_io: Optional[Dict[str, Any]],
+) -> Callable[[Sequence[str], Sequence[str], Sequence[str]], List[ResolvedDomain]]:
+    """입력 이름 → 값 도메인 판정기. ``resolve(names, raws, functions)`` 가 이름마다 `ResolvedDomain` 을 낸다.
+
+    판정은 R90(선언 타입 — `_declared_input_domain`)과 R90 후속(체인 함수 ``functions`` 의 SwUDS 표 범위 —
+    `_uds_documented_ranges` · `_apply_documented_range`) 그대로다. 흐름 수집이 입력 열 · 간접 전역 두 곳에서 같은 판정을 쓰고,
+    입력 보완(S3 이후 — `generators/sits_read_inputs.py`)이 새로 열에 올릴 이름의 값도 **같은 판정**으로 고른다(복제하면 한쪽만
+    고쳐진다). 매개변수 typedef 해상 색인(`_param_decl_index`)은 함수 전체에서 한 번만 만든다(흐름마다 만들지 않는다).
+
+    포인터 객체(`pointer_object`)에는 설계서 범위를 대지 않는다 — 그 행의 `Value Range` 는 주소 범위다(사유
+    `pointer_address_range`). ``raws`` 가 ``""`` 면(간접 전역) 선언은 전역 선언표에서만 찾는다.
+    """
+    gim = globals_info_map or {}
+    smt = struct_member_types or {}
+    param_decls = _param_decl_index(function_details)
+
+    def resolve(names: Sequence[str], raws: Sequence[str], functions: Sequence[str]) -> List[ResolvedDomain]:
+        docs = _uds_documented_ranges(names, functions, uds_unit_io)
+        out: List[ResolvedDomain] = []
+        for name, raw in zip(names, raws, strict=True):
+            dom, why = _declared_input_domain(name, raw, gim, smt, param_decls)
+            doc = docs.get(name)
+            dom2, src, dwhy = _apply_documented_range(dom, None if why == "pointer_object" else doc)
+            if why == "pointer_object" and doc:
+                dwhy = "pointer_address_range"
+            out.append(ResolvedDomain(dom2, src, why if dom is None else "", dwhy))
+        return out
+
+    return resolve
+
+
 def _clean_var_name(raw: str) -> str:
     """`[IN] u8g_Speed` → `u8g_Speed`. 정본 표기 규칙은 SUTS 와 **같은 출처**를 쓴다.
 
@@ -1292,6 +1342,28 @@ _VAR_SCAN_NODES = 200
 #   우리는 정적 호출 그래프만 본다. 실행 데이터 없이 더 좁히면 회수가 먼저 무너진다.
 _VAR_SCAN_DEPTH = 2
 
+# 관측 대상 후보를 모을 때 **목록 앞부분만** 보는 자리의 상한(값은 예전 그대로 — 이름만 붙였다). 거리 순 훑기(`_bfs_call_order`)는
+#   진입 함수 자신을 다시 보지 않으므로, 진입의 매개변수 · 전역 · 출력이 이 상한에 잘리면 **어디서도 후보가 되지 않는다**
+#   (소스가 읽는 입력 설계 조사에서 찾았다 — 예전엔 개수조차 세지 않았다). 잘린 것 중 다른 경로로도 후보가 되지 않은 이름을 흐름별로 센다
+#   (`entry_*_truncated` · `callee_*_truncated`, 이름은 흐름의 `candidate_cuts`).
+_ENTRY_PARAMS_MAX = 20       # 진입 함수 매개변수
+_ENTRY_GLOBALS_MAX = 15      # 진입 함수 전역(간접 포함)
+_ENTRY_OUTPUTS_MAX = 10      # 진입 함수 출력
+_CALLEE_PARAM_FNS_MAX = 4    # 입력 없는 진입 — 매개변수를 모을 다른 모듈 callee 수
+_CALLEE_PARAMS_MAX = 6       #   그 callee 하나에서 모을 매개변수 수
+_CALLEE_OBS_FNS_MAX = 5      # 기대 — 출력 · 전역을 바로 모을 다른 모듈 callee 수
+_CALLEE_OUTPUTS_MAX = 5      #   그 callee 하나의 출력
+_CALLEE_GLOBALS_MAX = 4      #   그 callee 하나의 전역
+# 전역 상태 행(GLOBAL)의 후보(간접 전역) 목록 — 세는 축은 `indirect_vars_truncated`(값은 예전 그대로)
+_INDIRECT_CALLEE_FNS_MAX = 4      # 간접 전역을 모을 다른 모듈 callee 수
+_INDIRECT_CALLEE_GLOBALS_MAX = 5  #   그 callee 하나의 전역(`globals_global` 앞부분)
+_INDIRECT_VARS_MAX = 5            # 목록 길이(행은 그중 앞 `_SUBCASE_GLOBAL_MAX` 개만 쓴다)
+# 앞부분 상한 축 — 입력 축은 S0 가 입력 열로 보인 이름, 기대 축은 기대 열로 보인 이름과 맞춘다
+#   (`sits_read_inputs.reconcile_candidate_cuts`)
+_TRUNC_INPUT_AXES: Tuple[str, ...] = ("entry_params", "entry_globals", "callee_params")
+_TRUNC_EXPECTED_AXES: Tuple[str, ...] = ("entry_outputs", "callee_observables")
+_TRUNC_AXES: Tuple[str, ...] = _TRUNC_INPUT_AXES + _TRUNC_EXPECTED_AXES + ("indirect_vars",)
+
 # `collect_integration_flows` 가 `stats_out` 에 싣는 **흐름 축** 키.
 # ⚠ 생산자와 품질 리포트가 이 목록 **하나**를 본다. 예전엔 리포트가 자기 화이트리스트를
 #   따로 들고 있어 생산자에 키를 추가해도 조용히 버려졌다 — 같은 결함을 두 번 겪었다.
@@ -1318,6 +1390,13 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     "var_selection_basis", "var_scan_depth", "var_scan_nodes_max",
     "var_candidates_input", "var_candidates_expected",
     "var_budget_cut_input", "var_budget_cut_expected",
+    # (S0) 목록 앞부분만 보는 자리에 잘려 **어디서도 후보가 되지 않은** 이름 수(`_ENTRY_PARAMS_MAX` 블록)
+    "entry_params_truncated", "entry_globals_truncated", "entry_outputs_truncated",
+    "callee_params_truncated", "callee_observables_truncated", "indirect_vars_truncated",
+    # (S0) 행이 쓰는데 TC 열에 없던 입력 · 기대값을 열로 보였나, 열 상한에 막혀 그 행의 확정 칸을 내렸나
+    #   (`generators/sits_read_inputs.py::render_hidden_inputs` · `downgrade_hidden_input_rows`)
+    "hidden_io_tcs", "hidden_inputs_shown", "hidden_expected_shown", "hidden_inputs_over_cap",
+    "hidden_expected_over_cap", "hidden_input_rows_not_in_document", "hidden_input_cells_downgraded",
     # FI 축 — 0 이 "요청 없음"인지 "요청했는데 못 냄"인지 구분되게
     "fi_emitted", "fi_requested", "fi_unresolved",
     # (R90) 입력 값의 선언 타입 축 — 몇 입력이 타입에 맞춰졌고 몇 개가 모르는 타입(이전 값)인지, 강건성 값을 몇 번 옮겼는지
@@ -1348,6 +1427,10 @@ _FLOW_LOSS_KEYS: Tuple[str, ...] = (
     "chain_truncated_flows", "related_truncated_ids", "array_skipped_budget",
     "fi_unresolved", "strategy_nodes_dropped", "strategy_blocks_truncated",
     "var_budget_cut_input", "var_budget_cut_expected",
+    "entry_params_truncated", "entry_globals_truncated", "entry_outputs_truncated",
+    "callee_params_truncated", "callee_observables_truncated", "indirect_vars_truncated",
+    # 이름 규약 밖이지만 손실이다 — 행이 쓰는데 문서에 못 보인 입력 · 기대값과 그래서 내린 확정 칸
+    "hidden_inputs_over_cap", "hidden_expected_over_cap", "hidden_input_cells_downgraded",
 )
 # 위 규약을 검사할 때 쓰는 어휘 — 가드와 문서가 같은 목록을 본다.
 _FLOW_LOSS_NAME_MARKERS: Tuple[str, ...] = (
@@ -1550,13 +1633,15 @@ def collect_integration_flows(
     _var_cand_exp = 0
     _var_budget_cut_in = 0
     _var_budget_cut_exp = 0
+    # (S0) 목록 앞부분만 보는 자리에 잘려 어디서도 후보가 되지 않은 이름 수(`_ENTRY_PARAMS_MAX` 블록) — 축별 합계
+    _truncated: Dict[str, int] = {k: 0 for k in _TRUNC_AXES}
     # 배열 선언 크기는 흐름마다 안 바뀐다 — 루프 **밖에서** 한 번만 만든다
     # (SUTS 가 같은 이유로 unit 루프 밖에 둔다: 전역 1,525 × 흐름 367 헛돔 방지).
     _gim = globals_info_map or {}
     _smem = struct_members or {}
     # (R90) 입력의 선언 타입 — 멤버 타입 표와 매개변수의 typedef 해상(원문 → 원 선언)도 루프 밖에서 한 번.
-    _smt = struct_member_types or {}
-    _param_decls = _param_decl_index(function_details)
+    # (S2) 판정은 `_input_domain_resolver` 하나다(입력 열 · 간접 전역 · 입력 보완이 같은 판정을 쓴다).
+    _resolve_domains = _input_domain_resolver(function_details, _gim, struct_member_types, uds_unit_io)
     _type_reasons: Dict[str, int] = {}
     _typed_inputs = 0
     _domain_sources: Dict[str, int] = {}
@@ -1729,7 +1814,10 @@ def collect_integration_flows(
                         _pname = _pparts[-1].strip("*&;")
                         if _pname:
                             _ptr_params.add(_pname.lower())
-        for raw in inputs_raw[:20]:
+        # (S0) 앞부분 상한에 잘린 원문 — 흐름 끝에서 어디서도 후보가 되지 않은 이름만 센다(`_ENTRY_PARAMS_MAX` 블록)
+        _cut_raws: Dict[str, List[Tuple[str, Any]]] = {k: [] for k in _TRUNC_INPUT_AXES + _TRUNC_EXPECTED_AXES}
+        _cut_raws["entry_params"] = [(r, _clean_var_name) for r in inputs_raw[_ENTRY_PARAMS_MAX:]]
+        for raw in inputs_raw[:_ENTRY_PARAMS_MAX]:
             vn = _clean_var_name(raw)
             # ⚠ 빈 이름 가드. 예전 `_clean_var_name` 은 무엇을 받든 문자열을 냈기에
             #   (`raw[:40]` 폴백) 이 검사가 필요 없었다 — 이제는 못 뽑으면 빈 값이다.
@@ -1741,7 +1829,11 @@ def collect_integration_flows(
 
         # If entry has no inputs, aggregate callee inputs as integration-level inputs
         if not input_pairs:
-            for callee in cross_calls[:4]:
+            _cut_raws["callee_params"] = [
+                (r, _clean_var_name) for _ci, _c in enumerate(cross_calls)
+                for r in list((name_to_info.get(_c) or {}).get("inputs") or [])[
+                    (_CALLEE_PARAMS_MAX if _ci < _CALLEE_PARAM_FNS_MAX else 0):]]
+            for callee in cross_calls[:_CALLEE_PARAM_FNS_MAX]:
                 callee_info = name_to_info.get(callee)
                 if callee_info:
                     # Build pointer param set from callee prototype
@@ -1757,7 +1849,7 @@ def collect_integration_flows(
                                     _cpname = _cpparts[-1].strip("*&;")
                                     if _cpname:
                                         _c_ptr_params.add(_cpname.lower())
-                    for craw in (callee_info.get("inputs") or [])[:6]:
+                    for craw in (callee_info.get("inputs") or [])[:_CALLEE_PARAMS_MAX]:
                         cvn = _clean_var_name(craw)
                         if cvn and cvn.lower() not in _fn_name_set and cvn not in {p[0] for p in input_pairs}:
                             input_pairs.append((cvn, craw))
@@ -1767,7 +1859,8 @@ def collect_integration_flows(
                     break
 
         # Globals as additional observed inputs
-        for g in (globals_g + globals_s)[:15]:
+        _cut_raws["entry_globals"] = [(g, _clean_global_var_name) for g in (globals_g + globals_s)[_ENTRY_GLOBALS_MAX:]]
+        for g in (globals_g + globals_s)[:_ENTRY_GLOBALS_MAX]:
             gn = _clean_global_var_name(g)
             if gn and gn.lower() not in _fn_name_set and gn not in {p[0] for p in input_pairs}:
                 input_pairs.append((gn, g))
@@ -1789,6 +1882,7 @@ def collect_integration_flows(
         #   `break` 해 버려 "82칸을 채웠다" 와 "후보 400 중 82 만 담았다" 가 산출물에서
         #   같은 모양이었다.
         _cand_in: set = {p[0] for p in input_pairs}
+        _cand_in_order: List[str] = [p[0] for p in input_pairs]   # (S0) 후보를 만난 순서 — 예산에 잘린 이름을 순서대로 남긴다
         for _node in _var_nodes:
             _ni = name_to_info.get(_node)
             if not _ni or _node == fn_name:
@@ -1797,10 +1891,14 @@ def collect_integration_flows(
                 _gn = _clean_global_var_name(_g)
                 if _gn and _gn.lower() not in _fn_name_set and _gn not in _cand_in:
                     _cand_in.add(_gn)
+                    _cand_in_order.append(_gn)
                     if len(input_pairs) < _MAX_INPUT_PARAMS:
                         input_pairs.append((_gn, _g))
         _var_cand_in += len(_cand_in)
         _var_budget_cut_in += max(0, len(_cand_in) - len(input_pairs))
+        # (S0) 예산에 잘린 **이름** — 예전엔 수만 남았다(`var_budget_cut_input`). 흐름의 `candidate_cuts["budget_input"]`
+        _taken_in = {p[0] for p in input_pairs}
+        _budget_cut_in_names = [n for n in _cand_in_order if n not in _taken_in]
 
         input_vars: List[str] = [p[0] for p in input_pairs[:_MAX_INPUT_PARAMS]]
         # Keep annotated raws for type inference
@@ -1812,30 +1910,26 @@ def collect_integration_flows(
         _arr_elements += _n_el
         # (R90) 펼친 **뒤에** 정한다 — 원소(`a[3]`)는 원소 타입, 이름·원문 짝은 `_expand_arrays` 가 맞춰 둔다.
         # (R90 후속) 그다음 체인 함수들의 SwUDS 표가 적은 범위로 좁힌다(`_apply_documented_range`).
-        _docs = _uds_documented_ranges(input_vars, _chain_nodes, uds_unit_io)
+        # (S2) 판정은 `_input_domain_resolver` — 포인터 객체의 `Value Range` 는 주소 범위라 값 도메인으로 쓰지 않는다(사유는 센다)
         input_types: List[Optional[Dict[str, Any]]] = []
         input_domain_sources: List[str] = []
-        for _vn, _vr in zip(input_vars, input_raws, strict=True):
-            _dom, _why = _declared_input_domain(_vn, _vr, _gim, _smt, _param_decls)
-            if _dom is None:
-                _type_reasons[_why] = _type_reasons.get(_why, 0) + 1
+        for _rd in _resolve_domains(input_vars, input_raws, _chain_nodes):
+            if _rd.type_reason:
+                _type_reasons[_rd.type_reason] = _type_reasons.get(_rd.type_reason, 0) + 1
             else:
                 _typed_inputs += 1
-            # 포인터 객체의 `Value Range` 는 주소 범위다 — 값 도메인으로 쓰지 않는다(사유는 센다)
-            _dom, _src, _dwhy = _apply_documented_range(_dom, None if _why == "pointer_object" else _docs.get(_vn))
-            if _why == "pointer_object" and _docs.get(_vn):
-                _dwhy = "pointer_address_range"
-            input_types.append(_dom)
-            input_domain_sources.append(_src)
-            _domain_sources[_src] = _domain_sources.get(_src, 0) + 1
-            if _dwhy and _dwhy != "not_documented":
-                _doc_fallbacks[_dwhy] = _doc_fallbacks.get(_dwhy, 0) + 1
-            if _src == "documented_range" and not (_dom or {}).get("type_known", True):
+            input_types.append(_rd.domain)
+            input_domain_sources.append(_rd.source)
+            _domain_sources[_rd.source] = _domain_sources.get(_rd.source, 0) + 1
+            if _rd.documented_reason and _rd.documented_reason != "not_documented":
+                _doc_fallbacks[_rd.documented_reason] = _doc_fallbacks.get(_rd.documented_reason, 0) + 1
+            if _rd.source == "documented_range" and not (_rd.domain or {}).get("type_known", True):
                 _doc_untyped += 1
 
         # Expected: own outputs + pointer out-params + callee outputs + callee globals
         exp_pairs: List[Tuple[str, str]] = []
-        for raw in outputs_raw[:10]:
+        _cut_raws["entry_outputs"] = [(r, _clean_var_name) for r in outputs_raw[_ENTRY_OUTPUTS_MAX:]]
+        for raw in outputs_raw[:_ENTRY_OUTPUTS_MAX]:
             vn = _clean_var_name(raw)
             if vn and vn.lower() not in _fn_name_set:
                 exp_pairs.append((vn, raw))
@@ -1847,15 +1941,24 @@ def collect_integration_flows(
         #   않는다(정본 기대 1,172칸 중 괄호 접두 0건). 접두를 붙이면 같은 변수가 부르는
         #   함수마다 다른 이름이 되어, 정본과 대조할 때 **한 칸도 맞지 않는다**.
         #   어느 함수가 그 전역을 건드리는지는 Interface 체인이 이미 말해 준다.
-        for callee in cross_calls[:5]:
+        for _ci, _c in enumerate(cross_calls):
+            _cinfo = name_to_info.get(_c) or {}
+            _near = _ci < _CALLEE_OBS_FNS_MAX
+            _cut_raws["callee_observables"] += (
+                [(v, _clean_var_name) for v in list(_cinfo.get("outputs") or [])[(_CALLEE_OUTPUTS_MAX if _near else 0):]]
+                + [(g, _clean_global_var_name)
+                   for g in (list(_cinfo.get("globals_global") or []) + list(_cinfo.get("globals_static") or []))[
+                       (_CALLEE_GLOBALS_MAX if _near else 0):]])
+        for callee in cross_calls[:_CALLEE_OBS_FNS_MAX]:
             callee_info = name_to_info.get(callee)
             if callee_info:
-                for v in (callee_info.get("outputs") or [])[:5]:
+                for v in (callee_info.get("outputs") or [])[:_CALLEE_OUTPUTS_MAX]:
                     vn = _clean_var_name(v)
                     if vn and vn.lower() not in _fn_name_set and vn not in {p[0] for p in exp_pairs}:
                         exp_pairs.append((vn, v))
                 # Callee globals as observable side-effect outputs
-                for g in ((callee_info.get("globals_global") or []) + (callee_info.get("globals_static") or []))[:4]:
+                for g in ((callee_info.get("globals_global") or [])
+                          + (callee_info.get("globals_static") or []))[:_CALLEE_GLOBALS_MAX]:
                     gn = _clean_global_var_name(g)
                     if gn and gn.lower() not in _fn_name_set and gn not in {p[0] for p in exp_pairs}:
                         exp_pairs.append((gn, g))
@@ -1864,6 +1967,7 @@ def collect_integration_flows(
         # 회수: 기대 129 → 281 (정본 910 기준).
         # 입력과 같은 이유로 후보를 끝까지 센다(위 입력부 주석 참조).
         _cand_exp: set = {p[0] for p in exp_pairs}
+        _cand_exp_order: List[str] = list(dict.fromkeys(p[0] for p in exp_pairs))   # (S0) 만난 순서
         for _node in _var_nodes:
             _ni = name_to_info.get(_node)
             if not _ni or _node == fn_name:
@@ -1876,10 +1980,27 @@ def collect_integration_flows(
                 _nm = _cleaner(_raw)
                 if _nm and _nm.lower() not in _fn_name_set and _nm not in _cand_exp:
                     _cand_exp.add(_nm)
+                    _cand_exp_order.append(_nm)
                     if len(exp_pairs) < _MAX_EXP_PARAMS:
                         exp_pairs.append((_nm, _raw))
         _var_cand_exp += len(_cand_exp)
         _var_budget_cut_exp += max(0, len(_cand_exp) - len(exp_pairs))
+        _taken_exp = {p[0] for p in exp_pairs}
+        _budget_cut_exp_names = [n for n in _cand_exp_order if n not in _taken_exp]
+        # (S0) 앞부분 상한에 잘린 이름 중 **어디서도 후보가 되지 않은** 것 — 입력 축은 입력 후보, 기대 축은 기대 후보와 대조한다
+        _candidate_cuts: Dict[str, List[str]] = {"budget_input": _budget_cut_in_names,
+                                                 "budget_expected": _budget_cut_exp_names}
+        for _axis, _pairs in _cut_raws.items():
+            _seen_cands = _cand_exp if _axis in _TRUNC_EXPECTED_AXES else _cand_in
+            _lost: List[str] = []
+            _lost_set: set = set()
+            for _raw, _cleaner in _pairs:
+                _nm = _cleaner(_raw)
+                if _nm and _nm.lower() not in _fn_name_set and _nm not in _seen_cands and _nm not in _lost_set:
+                    _lost.append(_nm)
+                    _lost_set.add(_nm)
+            _candidate_cuts[_axis] = _lost
+            _truncated[_axis] += len(_lost)
 
         # If still no expected vars, mine global writes from logic_flow conditions
         if not exp_pairs:
@@ -2022,25 +2143,40 @@ def collect_integration_flows(
             tag = str(g).upper()
             gn = _clean_global_var_name(g)
             if gn and "[INDIRECT]" in tag and gn not in {p[0] for p in input_pairs}:
-                if gn not in indirect_vars_list and len(indirect_vars_list) < 5:
+                if gn not in indirect_vars_list and len(indirect_vars_list) < _INDIRECT_VARS_MAX:
                     indirect_vars_list.append(gn)
         # Also collect from callees
-        for callee in cross_calls[:4]:
+        for callee in cross_calls[:_INDIRECT_CALLEE_FNS_MAX]:
             callee_info = name_to_info.get(callee)
             if callee_info:
-                for g in (callee_info.get("globals_global") or [])[:5]:
+                for g in (callee_info.get("globals_global") or [])[:_INDIRECT_CALLEE_GLOBALS_MAX]:
                     tag = str(g).upper()
                     gn = _clean_global_var_name(g)
                     if gn and "[INDIRECT]" in tag and gn not in indirect_vars_list:
-                        if len(indirect_vars_list) < 5:
+                        if len(indirect_vars_list) < _INDIRECT_VARS_MAX:
                             indirect_vars_list.append(gn)
+        # (S0 리뷰 I6) 위 세 상한(callee 수 · callee 전역 수 · 목록 길이)에 잘린 간접 전역 후보 — 위 두 루프가 상한 없이 봤다면 넣었을
+        #   이름 중 목록에 없는 것. ⚠ GLOBAL 행은 이 목록의 앞 `_SUBCASE_GLOBAL_MAX`(2)개만 쓰므로 목록에 든 셋째부터도 행이 없다 —
+        #   이 수는 "상태 행 후보로 보지도 않은" 이름이지 "행이 없는" 이름 전부가 아니다.
+        _ind_taken = set(indirect_vars_list)
+        _ind_cut: List[str] = []
+        _ind_cut_set: set = set()
+        _ind_pairs = set(p[0] for p in input_pairs)
+        for _g, _from_entry in ([(g, True) for g in globals_g + globals_s]
+                                + [(g, False) for _c in cross_calls
+                                   for g in ((name_to_info.get(_c) or {}).get("globals_global") or [])]):
+            _gn = _clean_global_var_name(_g)
+            if not _gn or "[INDIRECT]" not in str(_g).upper() or (_from_entry and _gn in _ind_pairs):
+                continue
+            if _gn not in _ind_taken and _gn not in _ind_cut_set:
+                _ind_cut.append(_gn)
+                _ind_cut_set.add(_gn)
+        _candidate_cuts["indirect_vars"] = _ind_cut
+        _truncated["indirect_vars"] += len(_ind_cut)
 
-        _gdocs = _uds_documented_ranges(indirect_vars_list, _chain_nodes, uds_unit_io)
-        indirect_types = []
-        for _gv in indirect_vars_list:
-            _gdom, _gwhy = _declared_input_domain(_gv, "", _gim, _smt, _param_decls)
-            indirect_types.append(
-                _apply_documented_range(_gdom, None if _gwhy == "pointer_object" else _gdocs.get(_gv))[0])
+        # (S2) 같은 판정 — 간접 전역은 원문이 없어 선언을 전역 선언표에서만 찾는다
+        indirect_types = [_rd.domain for _rd in _resolve_domains(
+            indirect_vars_list, [""] * len(indirect_vars_list), _chain_nodes)]
 
         flows.append({
             "flow_id": fid,
@@ -2080,6 +2216,8 @@ def collect_integration_flows(
             # 칸이 아니라 데이터로 남겨 하류가 제대로 된 브리지를 만들 수 있게 한다.
             "req_ids": req_ids,
             "logic_flow": info.get("logic_flow") or [],
+            # (S0) 후보였는데 열에 못 올린 이름 — 축별(예산 · 앞부분 상한). 품질 리포트 `candidate_cut_names`(TC 별)
+            "candidate_cuts": _candidate_cuts,
         })
 
     # 보강 실적을 **반드시** 내보낸다. 0 을 침묵시키면 "보강이 동작한다" 로 읽힌다.
@@ -2132,6 +2270,14 @@ def collect_integration_flows(
             "var_candidates_expected": _var_cand_exp,
             "var_budget_cut_input": _var_budget_cut_in,
             "var_budget_cut_expected": _var_budget_cut_exp,
+            # (S0) 목록 앞부분 상한(`_ENTRY_PARAMS_MAX` 블록)에 잘려 어디서도 후보가 되지 않은 이름 수 — 예산 절단과 다른 축이다
+            #   (후보로 세지도 않았으므로 `var_candidates_*` 에도 없다). 이름은 흐름의 `candidate_cuts`.
+            # ⚠ (S0 리뷰 W1) 여기 값은 **렌더 전** 상한이다. 잘린 이름이 간접 전역 경로(상한 없는 진입 전역 · callee 전역 앞 5)로
+            #   GLOBAL 행에 들어가면 `render_hidden_inputs` 가 열로 보인다 — 그 이름은 잃은 게 아니다. `generate_sits` 는 렌더 뒤
+            #   `reconcile_candidate_cuts` 로 TC 의 `candidate_cuts` 에서 빼고 이 키들을 다시 센다(문서 · 리포트 · 공시 · 영향도 카드 ·
+            #   평가기가 보는 값). 렌더 없이 흐름만 모으는 경로(영향도 초안 `impact_orchestrator` · 준비 게이트
+            #   `docgen_test_materials`)는 이 키도 `candidate_cuts` 도 읽지 않는다 — 읽게 되면 렌더 · 맞춤을 같이 거칠 것.
+            **{f"{_k}_truncated": _v for _k, _v in _truncated.items()},
             # (R90) 입력 값을 선언 타입에 맞췄는가 — 모르는 입력은 이전 값(이름 패턴 표)이라 그 수를 사유별로 보인다.
             "input_type_resolution": {"typed": _typed_inputs, "unresolved": dict(sorted(_type_reasons.items()))},
             # (R90 후속) 입력 값 도메인의 출처 — 설계서 범위(SwUDS) · 선언 타입 · 모름(이전 값). 설계서가 적었는데 못 쓴 사유도 센다
@@ -2525,6 +2671,24 @@ def _generate_sub_case_candidates(
     return sub_cases
 
 
+def _effective_io_columns(input_vars: Sequence[str], expected_vars: Sequence[str],
+                          sub_cases: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    """TC 의 입력 · 기대 열. 입출력 없는 흐름은 서브케이스가 `Scenario` 입력 · `Result`(또는 첫 행의 기대 이름) 기대값을 적는다 —
+    그 가짜 이름을 열로 낸다(라이터가 헤더와 값을 쓴다). 일반 TC · 전용 FI TC 가 같은 규칙을 쓴다(S0 리뷰 I3)."""
+    eff_in = list(input_vars or [])
+    eff_exp = list(expected_vars or [])
+    # If scenario-based sub-cases were generated (no real IO), expose the "Scenario"
+    # pseudo-input so the XLSM writer renders the column header + values.
+    if not eff_in and sub_cases and "Scenario" in (sub_cases[0].get("inputs") or {}):
+        eff_in = ["Scenario"]
+    # If expected_vars is empty but sub-cases carry result, add "Result" header
+    if not eff_exp and sub_cases:
+        first_exp = sub_cases[0].get("expected") or {}
+        if first_exp:
+            eff_exp = list(first_exp.keys())[:_MAX_EXP_PARAMS]
+    return eff_in, eff_exp
+
+
 def generate_itc_list(
     flows: List[Dict[str, Any]],
     max_subcases: int = _DEFAULT_SUBCASES,
@@ -2577,17 +2741,8 @@ def generate_itc_list(
             stp_environments=stp_environments,
             gen_method=gen_method,
         )
-        # If scenario-based sub-cases were generated (no real IO), expose the "Scenario"
-        # pseudo-input so the XLSM writer renders the column header + values.
-        effective_input_vars = list(flow["input_vars"])
-        effective_expected_vars = list(flow["expected_vars"])
-        if not effective_input_vars and sub_cases and "Scenario" in (sub_cases[0].get("inputs") or {}):
-            effective_input_vars = ["Scenario"]
-        # If expected_vars is empty but sub-cases carry result, add "Result" header
-        if not effective_expected_vars and sub_cases:
-            first_exp = sub_cases[0].get("expected") or {}
-            if first_exp:
-                effective_expected_vars = list(first_exp.keys())[:_MAX_EXP_PARAMS]
+        effective_input_vars, effective_expected_vars = _effective_io_columns(
+            flow["input_vars"], flow["expected_vars"], sub_cases)
         itcs.append({
             "tc_id": tc_id,
             # Test Method 는 **여기서 확정**한다. 예전엔 라이터가 서브케이스 라벨을
@@ -2608,6 +2763,10 @@ def generate_itc_list(
             "req_ids": flow.get("req_ids") or [],
             "sub_cases": sub_cases,
             "asil": flow["asil"],
+            # (S2) 체인 함수 — 입력 값 도메인의 설계서 범위를 찾는 표(`_input_domain_resolver` 의 ``functions``)
+            "chain_functions": list(flow.get("functions") or []),
+            # (S0) 후보였는데 열에 못 올린 이름(`collect_integration_flows` 의 `candidate_cuts`)
+            "candidate_cuts": dict(flow.get("candidate_cuts") or {}),
         })
     # ── 전용 FI(고장 주입) TC ────────────────────────────────────────────
     # ⚠ **선별은 유도하지 않고 입력으로 받는다.** 정본의 FI 5건
@@ -2629,6 +2788,9 @@ def generate_itc_list(
             _ff, max_cases=max_subcases, stp_environments=stp_environments,
             gen_method=_SITS_GEN_BOUNDARY,
         )
+        # (S0 리뷰 I3) 입출력 없는 흐름의 `Scenario` · `Result` 열 — 일반 TC 와 같은 규칙. 없으면 그 행의 가짜 이름이 S0 의
+        #   '숨은 입력' 으로 세어져 열로 붙었다(값은 같지만 공시 수가 거짓이 된다).
+        _fi_in, _fi_exp = _effective_io_columns(_ff.get("input_vars") or [], _ff.get("expected_vars") or [], _fi_sub)
         itcs.append({
             # 정본 형태: `SwITC_FI_SwFn_07`. (`_integration_id` 는 `SwITC_`→`SwIT_`
             #  변환기라 여기 쓰면 접두가 통째로 빠진다.)
@@ -2641,13 +2803,17 @@ def generate_itc_list(
             "entry_source_path": _ff.get("entry_source_path", ""),  # (R89)
             "call_chain": _ff.get("call_chain", ""),
             "module_name": _ff.get("module_name", ""),
-            "input_vars": list(_ff.get("input_vars") or []),
-            "expected_vars": list(_ff.get("expected_vars") or []),
+            "input_vars": _fi_in,
+            "expected_vars": _fi_exp,
             "related_ids": list(_ff.get("related_ids") or []),
             "synthetic_related_ids": list(_ff.get("synthetic_related_ids") or []),
             "req_ids": list(_ff.get("req_ids") or []),
             "sub_cases": _fi_sub,
             "asil": _ff.get("asil", ""),
+            "chain_functions": list(_ff.get("functions") or []),        # (S2)
+            "candidate_cuts": dict(_ff.get("candidate_cuts") or {}),    # (S0)
+            # (S0 리뷰 W1) 같은 흐름의 일반 TC 가 이미 있다 — 흐름 단위 합계(`*_truncated`)는 이 TC 를 세지 않는다
+            "fi_design_id": _did,
         })
         _fi_emitted += 1
     if stats_out is not None:
@@ -3871,7 +4037,28 @@ def generate_sits_quality_report(
         "interface_contract": fs.get("interface_contract"),
         # (R16) 통합 기대값: 함수 간 oracle 이 도출한 칸·못 한 사유·해석 못 한 callee 사유(실패면 {"status": "error:…"})
         "integration_oracle": fs.get("integration_oracle"),
+        # (S0) TC 별 — 행이 쓰는데 열에 없어 붙인 이름 · 열 상한에 막힌 이름(합계는 `integration_flow_coverage.hidden_*`)
+        "hidden_io_columns": _hidden_io_by_tc(itcs),
+        # (S0) TC 별 — 후보였는데 열에 못 올린 이름: 예산(`budget_input` · `budget_expected` — 합계 `var_budget_cut_*`)과 목록 앞부분
+        #   상한(`entry_*` · `callee_*` · `indirect_vars` — 합계 `*_truncated`). 빈 축은 싣지 않는다.
+        #   (리뷰 I5) TC · 축마다 `_CUT_NAMES_SHOWN` 개까지 + 마지막 원소 `외 N`(합계는 수치 키에 있다) — 이 dict 는 payload
+        #   사이드카 · API 응답으로 나간다(HDPDM01 예산 절단만 이름 1,900개).
+        "candidate_cut_names": {str(t.get("tc_id") or ""): {k: _head_names(v) for k, v in (t.get("candidate_cuts") or {}).items()
+                                                            if v}
+                                for t in itcs if any((t.get("candidate_cuts") or {}).values())},
     }
+
+
+#: 품질 리포트 `candidate_cut_names` 에 TC · 축마다 싣는 이름 수(나머지는 `외 N`)
+_CUT_NAMES_SHOWN = 20
+
+
+def _head_names(names: Sequence[str]) -> List[str]:
+    """앞 `_CUT_NAMES_SHOWN` 개 + 넘치면 마지막 원소 ``"외 N"``(이름이 아니다 — 잘린 수)."""
+    names = list(names or [])
+    if len(names) <= _CUT_NAMES_SHOWN:
+        return names
+    return names[:_CUT_NAMES_SHOWN] + [f"외 {len(names) - _CUT_NAMES_SHOWN}"]
 
 
 # ---------------------------------------------------------------------------
@@ -4418,6 +4605,20 @@ def generate_sits(
             1 for _t in itcs if _has_boundary_subcases(_t.get("sub_cases")))
         flow_stats["boundary_subcase_min_distinct"] = _SITS_BV_MIN_DISTINCT
 
+    # (S0) 행이 쓰는데 TC 열에 없던 입력 · 기대값(GLOBAL 행의 간접 전역)을 기존 열 **뒤에** 보인다 — oracle **전에**. 열 상한에
+    #   막힌 입력을 쓰는 행은 표시해 두고 oracle 뒤에 그 행의 확정 칸을 내린다(`generators/sits_read_inputs.py`).
+    from generators.sits_read_inputs import (
+        downgrade_hidden_input_rows,
+        reconcile_candidate_cuts,
+        render_hidden_inputs,
+        summarize_hidden_io,
+    )
+    for _itc in itcs:
+        render_hidden_inputs(_itc, _MAX_INPUT_PARAMS, _MAX_EXP_PARAMS)
+    # (S0 리뷰 W1) 앞부분 상한에 잘렸다고 센 이름 중 GLOBAL 행을 거쳐 방금 열로 보인 것은 잃은 게 아니다 — TC 의 `candidate_cuts`
+    #   에서 빼고 흐름 축 합계(`*_truncated`)를 다시 센다(전용 FI TC 는 같은 흐름이라 합계에 넣지 않는다).
+    flow_stats.update(reconcile_candidate_cuts(itcs, _TRUNC_INPUT_AXES, _TRUNC_EXPECTED_AXES, _TRUNC_AXES))
+
     # (R16, 격차 ②) 통합 기대값 — 흐름의 진입 함수를 callee 본문까지 따라 해석해(stub 아님) 관측 변수의 값을 도출한다.
     #   도출 못 한 칸은 사유와 함께 `[검증 필요]` 로 남는다. 실행 결과가 아니다(하드웨어·인터럽트·다른 태스크는 모델 밖).
     if (project_config or {}).get("integration_oracle", True):
@@ -4431,6 +4632,12 @@ def generate_sits(
         except Exception as exc:  # noqa: BLE001 — 도출 실패가 규격을 못 죽인다(칸은 `[검증 필요]` 그대로, 사유는 남긴다)
             _logger.warning("SITS: 통합 기대값 도출 실패(%s)", type(exc).__name__, exc_info=True)
             flow_stats["integration_oracle"] = {"status": f"error:{type(exc).__name__}", "error": str(exc)[:200]}
+    # (S0) 후처리 — 문서에 없는 입력(열 상한)에 기댄 확정 칸을 `[검증 필요] input_not_in_document:…` 로 내리고, 통합 oracle 통계
+    #   (`derived` · 근거별 · `tc_with_derived` · `unknown_reasons`)를 같은 자리에서 맞춘다(oracle 은 이 후처리를 모른다 —
+    #   `downgrade_hidden_input_rows` docstring). oracle 을 끈 생성에도 돌린다(확정 칸이 없으면 바꿀 것이 없다).
+    _oracle_block = flow_stats.get("integration_oracle")
+    downgrade_hidden_input_rows(itcs, _oracle_block if isinstance(_oracle_block, dict) else None)
+    flow_stats.update(summarize_hidden_io(itcs))
 
     # (R7, P4/G5) 인터페이스 계약 — 경로상 모듈 경계 호출(반환 사용·비교 상수·인자 바인딩)과 전역 생산→소비를 소스에서
     #   읽어 **근거로만** 싣는다. 흐름의 callee 는 통합 대상이라 반환을 주입하면 통합 시험이 stub 시험이 된다(리뷰 W1) —

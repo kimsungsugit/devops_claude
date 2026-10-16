@@ -2020,6 +2020,44 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             "후보로 찾았지만 시트 열 예산에 걸려 관측 대상에서 뺀 변수다 — 열이 찬 것이지 후보가 없던 게 아니다.",
             tone="warning"))
 
+    # (S0) 목록 앞부분만 보는 자리(진입 매개변수 20 · 진입 전역 15 · 진입 출력 10 · callee 매개변수 · callee 출력/전역)에 잘려
+    #   어디서도 후보가 되지 않은 이름 — 위 예산 절단과 다른 축이다(후보로 세지도 않았다). 다섯 축 모두 0/미기록이면 감춘다.
+    _trunc = [("진입 매개변수", "entry_params_truncated"), ("진입 전역", "entry_globals_truncated"),
+              ("진입 출력", "entry_outputs_truncated"), ("callee 매개변수", "callee_params_truncated"),
+              ("callee 출력·전역", "callee_observables_truncated")]
+    _ind_cut = _int(fc, "indirect_vars_truncated")
+    if any(_int(fc, k) for _l, k in _trunc) or _ind_cut:
+        out.append(_item(
+            "sits_candidates_truncated", "목록 앞부분만 본 관측 후보",
+            " · ".join(f"{label} {_show(_int(fc, k))}" for label, k in _trunc)
+            + (f" · 전역 상태 행 후보 {_ind_cut}" if _ind_cut else ""),
+            "함수의 매개변수 · 전역 · 출력 목록을 앞부분만 보는 자리에서 잘려, 다른 어떤 경로로도 관측 후보가 되지 않았고 문서의 열로도 "
+            "보이지 않은 이름 수다(전역 상태 행을 거쳐 열로 보인 이름은 세지 않는다) — 열 예산 절단(위 항목)과 달리 후보로 세지도 "
+            "않았다. 이름은 품질 리포트 `candidate_cut_names`(TC · 축마다 앞 20개)."
+            + (" '전역 상태 행 후보' 는 전역 상태 행(GLOBAL)이 쓸 간접 전역 목록의 상한에 잘린 이름이다(행은 그 목록의 앞 2개만 쓴다)."
+               if _ind_cut else ""),
+            tone="warning"))
+
+    # (S0) 행이 쓰는데 TC 열에 없던 입력 · 기대값(GLOBAL 행의 간접 전역) — 기존 열 뒤에 붙였는가, 열 상한에 막혔는가. 키가 없으면
+    #   (구판 산출물) 감추고, 있어도 전부 0 이면 감춘다(숨은 이름이 없었다는 정상 상태).
+    _h = {k: _int(fc, k) for k in ("hidden_inputs_shown", "hidden_expected_shown", "hidden_inputs_over_cap",
+                                   "hidden_expected_over_cap", "hidden_input_cells_downgraded",
+                                   "hidden_input_rows_not_in_document", "hidden_io_tcs")}
+    if any(_h.values()):
+        _lost = bool(_h["hidden_inputs_over_cap"] or _h["hidden_input_cells_downgraded"] or _h["hidden_expected_over_cap"])
+        out.append(_item(
+            "sits_hidden_inputs", "행이 쓰는데 열에 없던 입력·기대값",
+            f"입력 {_show(_h['hidden_inputs_shown'])} · 기대 {_show(_h['hidden_expected_shown'])} 열 추가"
+            f" · 상한 초과 입력 {_show(_h['hidden_inputs_over_cap'])} · 기대 {_show(_h['hidden_expected_over_cap'])}"
+            f" · 내린 확정 칸 {_show(_h['hidden_input_cells_downgraded'])} (TC {_show(_h['hidden_io_tcs'])})",
+            "행이 입력으로 두거나 기대값으로 적는 이름이 TC 의 열에 없으면(지금은 전역 상태 행(GLOBAL)의 간접 전역) 기대값이 문서에 없는 "
+            "자극으로 도출된다 — 그런 이름을 기존 열 뒤에 첫 사용 순서로 붙였다(기존 열 · 값은 그대로). 붙인 열은 그 이름을 쓰는 행에만 "
+            "값이 있고 다른 행의 칸은 비워 둔다 — 그 행은 그 이름을 입력으로 두지도, 기대값으로 단언하지도 않는다. 입력 열 상한(82)에 막혀 붙이지 "
+            f"못한 입력을 쓰는 행 {_show(_h['hidden_input_rows_not_in_document'])}개는 그 행의 확정 칸을 "
+            "'[검증 필요] input_not_in_document' 로 내렸고 통합 기대값 집계에서도 뺐다. 기대값은 상한(113)을 넘으면 열로 보이지 않을 뿐 "
+            "단언하지 않는다. 이름은 품질 리포트 `hidden_io_columns`(TC 별).",
+            tone=_tone(_lost)))
+
     # 배열 원소 펼침 포기.
     arr_skip = _int(fc, "array_skipped_budget")
     if arr_skip:
