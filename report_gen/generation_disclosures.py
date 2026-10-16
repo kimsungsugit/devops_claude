@@ -2154,7 +2154,13 @@ def _build_assumption_item(block: Any, key: str) -> List[Dict[str, Any]]:
            + ", ".join(str(x) for x in (block.get("exact_width_guard_names") or [])[:12])
            + " — 가드 밖 헤더가 그 이름을 매크로로 만들었어도 구현의 정확폭 타입(C11 7.20.1.1, 같은 폭 · 부호)이라 같게 "
              "계산된다고 본다. 가드 안의 다른 선언 · 다른 #if 는 이전처럼 미결이다."
-           if _int(block, "units_with_exact_width_guards") else ""),
+           if _int(block, "units_with_exact_width_guards") else "")
+        # (R90) include guards of headers the unit did not read — another argument than R17's
+        + (f" 밑줄로 시작하는 이름이지만 `_X_H` 꼴의 include 가드는 지키는 헤더만 정의한다고 보고(컴파일러가 미리 정의하는 이름은 "
+           f"이 꼴이 아니다), 트리 어느 파일도 · 빌드 -D 도 정의하지 않고 그 #if 전에 트리 밖 헤더(<...> · 툴체인 · 찾지 못한 "
+           f"include)를 읽지 않은 unit 에서 0 으로 봤다 — unit {_show(_int(block, 'units_with_header_guards'))}: "
+           + ", ".join(str(x) for x in (block.get("header_guard_names") or [])[:12]) + "."
+           if _int(block, "units_with_header_guards") else ""),
         tone="info")]
 
 

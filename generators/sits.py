@@ -637,6 +637,368 @@ def _infer_boundary_values(var_name: str) -> List[Any]:
     return _BOUNDARY_SETS["default"]
 
 
+# ---------------------------------------------------------------------------
+# (R90) 입력 값은 그 입력의 **선언 타입이 담는 값**만 낸다
+# ---------------------------------------------------------------------------
+# 카탈로그(`_BOUNDARY_SETS`)는 서브케이스 행마다 같은 역할의 값(무효-하한 · 유효-하한 · … · 무효-상한)을 모든 입력에 넣는다.
+# 그런데 타입을 이름 패턴으로만 골라(`_infer_boundary_values`) 선언과 어긋났고, 맞더라도 무효-하한/상한은 타입 경계 ±1 이다
+# (U8 -1 · 256, U16 65536) — **그 타입의 객체가 담을 수 없는 값**이라 프로그램에 존재할 수 없는 입력이다. HDPDM01 실측(r89c):
+# 통합 oracle 이 `input_outside_declared_type` 으로 거부한 기대 칸 1,996 · 서브케이스 266(`ReProg_Opt`(UINT8) = -1,
+# `lin_configured_NAD`(l_u8) = 256, `g_DoorState`(enum) = 191 …). 이름 패턴은 엉뚱한 토큰도 타입으로 읽었다 —
+# `BackupArray[0]`(U16) 은 원문 꼬리 `(idx: ((U32)AddrIn) …)` 의 `U32` 때문에 2147483647 을 받았다. 문서가 실행할 수 없는
+# 시험을 적고 있었다. 같은 입력(RD+FBL · 흐름 캡 없음 · 서브케이스 15)에서 수정 후: 거부 칸 97 · 서브케이스 23 — 남은 것은
+# 소스 단계가 타입을 못 푼 LIN typedef enum 3개(`tl_tx_msg_status` 등, 아래 '모르는 타입' 규칙)뿐이다.
+#
+# 규칙 — 행 수 · 순서 · 역할(경계 / 강건성 / 정상)은 그대로, **값만** 선언 타입에 맞춘다:
+#   * 정수 폭 타입(U8 · S16 · `l_u8` · typedef 를 푼 `uint16_t` …): 유효 값(인덱스 1~5)은 `_BOUNDARY_SETS` 그대로(표는 불가침 —
+#     `workflow/c_type_bounds.py`), 강건성 값(인덱스 0 · 6)은 타입이 담을 수 없으면 **경계 바로 안쪽**(하한+1 · 상한-1)으로.
+#   * bool · 비트필드(`Bits.CCIF : 1`): 그 폭의 범위로 같은 규칙(1비트 → [1, 0, 0, 0, 0, 1, 0]).
+#   * enum(소스가 값 집합을 적은 타입): 유효 값은 **열거자**, 강건성 값은 열거자 밖 ±1 이 enum 객체가 담는 범위
+#     (`c_source_oracle.ENUM_INPUT_RANGE` — 원본 코드 모델의 입력 판정과 같은 상수)에 들면 그대로, 아니면 경계 바로 안쪽.
+#     열거자 값을 못 읽은 enum(익명 `static enum { … } x;`)은 그 범위 자체를 정수 범위처럼 쓴다.
+#   * 포인터: 칸이 **가리키는 대상**을 부르면(`pData[1]` · `p[0].m` — 원본 모델이 하네스 대상으로 세우는 표기) 가리키는 타입
+#     (`suts._normalize_type` 이 `*` 를 걷는 것과 같은 읽기). 칸이 포인터 **객체 자체**를 부르면(`pData` · 포인터 전역 · 포인터
+#     멤버 — 역참조 없음) 그 값은 주소다 — 원본 모델도 그 칸을 값으로 쓰지 않는다(`pointer_parameter:`). 가리키는 타입의 범위는
+#     엉뚱한 객체의 도메인이라 쓰지 않고 **모르는 타입**으로 둔다(사유 `pointer_object`, 이전 값 그대로). 설계서 범위도 대지
+#     않는다 — 포인터 행의 `Value Range` 는 주소 범위다(SUTS R76 N98).
+#   * 실수(float): 카탈로그 값이 전부 담긴다 — 그대로.
+#   * 타입을 모르는 입력(선언이 없는 이름 · 구조체 객체 통째 · `void *` · 못 푼 typedef · 멤버 타입 미상): **이전 동작 그대로**
+#     (`_infer_boundary_values`) — 지어내지 않는다. 대신 몇 개인지 사유별로 센다(`input_type_resolution`).
+_SITS_TYPED_SET_KEYS: Dict[str, str] = {
+    "uint8": "uint8", "uint16": "uint16", "uint32": "uint32", "int8": "int8", "int16": "int16", "int32": "int32",
+    "bool": "bool", "bit": "bool", "float": "float",
+}
+# 강건성 행의 값을 타입 안으로 옮겼을 때 라벨 · 사전조건 꼬리. **행의 모든 입력**이 옮겨졌을 때만 붙인다(한 입력이라도 범위
+#   바로 밖 값이 남으면 `EC1:무효-하한` 이 사실이라 붙이지 않는다). 옮긴 값은 두 가지다(`_role_values`):
+#   * `inside` — 경계 바로 안쪽 **유효 값**(정수 범위의 하한+1 · 연속 열거자의 다음 열거자). 그 행엔 무효 값이 없다 → 앞 꼬리.
+#   * `gap` — 열거자 · 설계 값 목록 **사이의 틈**(열거자 0 · 2 · 4 의 1). 타입은 담지만 열거자 · 설계 값이 아니라 여전히 무효다 →
+#     뒤 꼬리(무효인 이유가 '범위 밖' 이 아니라 '열거자 밖' 임을 적는다). 행에 하나라도 있으면 뒤 꼬리.
+_TYPE_BOUNDED_MARK = (" ※선언 타입 안 유효 값(하한 쪽)", " ※선언 타입 안 유효 값(상한 쪽)")
+_TYPE_GAP_MARK = (" ※열거자·설계 값 밖 · 타입 안(하한 쪽)", " ※열거자·설계 값 밖 · 타입 안(상한 쪽)")
+
+
+def _sits_type_key(suts_key: str) -> str:
+    """`suts._normalize_type` 의 키(`uint8_t` · `int16` · `bit` …) → `_BOUNDARY_SETS` 의 키. 표에 없으면 ``""``."""
+    k = str(suts_key or "")
+    return _SITS_TYPED_SET_KEYS.get(k[:-2] if k.endswith("_t") else k, "")
+
+
+def _raw_decl_and_root(raw: str) -> Tuple[str, str]:
+    """`[IN] UINT8 * pData (idx: 1)` → (`UINT8 *`, `pData`). 원문이 타입을 적지 않았으면 선언은 ``""``.
+
+    분해 규칙은 소스 단계(`uds_generator._annotate_typedef_bases`)와 같다 — 방향 태그 · 주석형 꼬리를 떼고 마지막 토큰이 이름.
+    """
+    from generators.suts import _DIR_TAG_PAT, _strip_param_annotations
+    s = _strip_param_annotations(_DIR_TAG_PAT.sub("", str(raw or "").strip(), count=1).strip())
+    if not s or re.match(r"^return\b", s, re.I):
+        return "", ""
+    parts = s.replace("*", " * ").split()
+    if not parts or parts[-1] == "*":
+        return "", ""
+    root = re.sub(r"(?:\[[^\]]*\])+$", "", re.split(r"->|\.", parts[-1].strip("*&;,"), maxsplit=1)[0])
+    return (" ".join(parts[:-1]).strip() if len(parts) >= 2 else ""), root
+
+
+def _param_decl_index(function_details: Dict[str, Dict[str, Any]]) -> Dict[str, Tuple[str, Optional[Tuple[int, ...]]]]:
+    """원문 엔트리 → (소스 단계가 typedef 를 푼 원 선언, enum 값 집합).
+
+    소스 단계는 그 값을 함수 레코드에 **매개변수 이름**으로 달아 둔다(`param_base_types` · `param_value_domains`). 흐름은 여러
+    함수의 엔트리를 섞으므로 이름으로는 못 찾고 원문으로 찾는다. 같은 원문이 함수마다 다른 답을 내면 **뺀다**(고르지 않는다).
+    """
+    out: Dict[str, Tuple[str, Optional[Tuple[int, ...]]]] = {}
+    conflict: set = set()
+    for info in (function_details or {}).values():
+        if not isinstance(info, dict):
+            continue
+        bases = info.get("param_base_types") or {}
+        doms = info.get("param_value_domains") or {}
+        if not bases and not doms:
+            continue
+        for raw in list(info.get("inputs") or []) + list(info.get("outputs") or []):
+            _decl, root = _raw_decl_and_root(raw)
+            if not root:
+                continue
+            vals = (doms.get(root) or {}).get("values") if isinstance(doms.get(root), dict) else None
+            enum = tuple(sorted({int(v) for v in vals if isinstance(v, int) and not isinstance(v, bool)})) if vals else None
+            got = (str(bases.get(root) or ""), enum or None)
+            if got == ("", None):
+                continue
+            key = str(raw)
+            if key in out and out[key] != got:
+                conflict.add(key)
+            out.setdefault(key, got)
+    for key in conflict:
+        out.pop(key, None)
+    return out
+
+
+def _declared_input_domain(
+    name: str,
+    raw: str,
+    globals_info: Dict[str, Dict[str, Any]],
+    member_types: Dict[str, Dict[str, Dict[str, Any]]],
+    param_decls: Dict[str, Tuple[str, Optional[Tuple[int, ...]]]],
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """입력 이름(`x` · `a[3]` · `s.Bits.F` · `p[0].m`) → (선언 타입 도메인, 사유). 모르면 (None, 사유).
+
+    선언 출처 순서는 `suts._root_type_hints` 와 같다 — **전역 선언이 이기고**(엔트리 접두는 호출 지점 표기), 전역이 아니면
+    원문이 적은 매개변수 선언. 원소(`a[3]`)는 원소 타입, 멤버는 구조체 멤버 표(`struct_member_types`)의 멤버 타입 · 비트 폭.
+    선언 문자열 → 타입 키는 SUTS 가 쓰는 같은 판정(`_prefer_known_decl` → `_normalize_type`)을 호출한다 — 복제하지 않는다.
+    """
+    from generators.suts import _CV_QUALIFIER_RE, _normalize_type, _prefer_known_decl
+    n = str(name or "").strip()
+    m = re.match(r"[A-Za-z_]\w*", n)
+    if not m:
+        return None, "no_declaration"
+    root = m.group(0)
+    member = re.sub(r"\[[^\]]*\]", "", n[m.end():]).replace("->", ".").strip(".")
+    g = (globals_info or {}).get(root)
+    if isinstance(g, dict) and str(g.get("type") or "").strip():
+        decl, base = str(g.get("type")), str(g.get("base_type") or "")
+        vd = g.get("value_domain")
+        enum = vd.get("values") if isinstance(vd, dict) else None
+        source = "global_declaration"
+        dims = str(g.get("array") or "")
+    else:
+        decl, _root = _raw_decl_and_root(raw)
+        if not decl or _root != root:
+            return None, "no_declaration"
+        base, enum = (param_decls or {}).get(str(raw), ("", None))
+        source = "parameter_declaration"
+        dims = ""
+    if not member and _names_pointer_object(decl, dims, n[m.end():]):
+        return None, "pointer_object"
+    bits = 0
+    if member:
+        toks = _CV_QUALIFIER_RE.sub(" ", decl).replace("*", " ").split()
+        rec = ((member_types or {}).get(toks[-1]) or {}).get(member) if toks else None
+        if not isinstance(rec, dict) or not str(rec.get("type") or "").strip():
+            return None, "member_type_unresolved"
+        decl, base, enum, source = str(rec["type"]), "", None, "member_declaration"
+        # 멤버 뒤에 붙은 첨자만 그 멤버의 것이다(`s.ptr[0]` 의 `[0]`)
+        if _names_pointer_object(decl, str(rec.get("array") or ""), re.search(r"(?:\[[^\]]*\])*$", n).group(0)):
+            return None, "pointer_object"
+        bits = int(str(rec.get("bits") or "0")) if str(rec.get("bits") or "").strip().isdigit() else 0
+    enum_vals = sorted({int(v) for v in (enum or ()) if isinstance(v, int) and not isinstance(v, bool)})
+    if enum_vals:
+        from generators.c_source_oracle import ENUM_INPUT_RANGE
+        return {"kind": "enum", "values": enum_vals, "lo": min(ENUM_INPUT_RANGE[0], enum_vals[0]),
+                "hi": max(ENUM_INPUT_RANGE[1], enum_vals[-1]), "source": source}, ""
+    if "enum" in _CV_QUALIFIER_RE.sub(" ", decl).split():
+        # 열거자 값을 못 읽은 enum(`static enum { … } s_BuzzerState;` — 소스 단계 타입이 맨 `enum`). 열거자는 모르지만 enum
+        #   객체가 담는 범위는 안다(C11 6.7.2.2p4 — 원본 모델의 `ENUM_INPUT_RANGE`). 그 범위를 정수 범위처럼 쓴다.
+        from generators.c_source_oracle import ENUM_INPUT_RANGE
+        return {"kind": "range", "lo": ENUM_INPUT_RANGE[0], "hi": ENUM_INPUT_RANGE[1], "enum_values_unknown": True,
+                "source": source}, ""
+    key = _sits_type_key(_normalize_type(_prefer_known_decl(decl, base)))
+    if not key:
+        toks = _CV_QUALIFIER_RE.sub(" ", decl).replace("*", " ").split()
+        return None, ("struct_object" if toks and toks[-1] in (member_types or {}) else "type_unresolved")
+    if bits and key not in ("float", "bool"):
+        lo, hi = _BOUNDARY_SETS[key][1], _BOUNDARY_SETS[key][5]
+        if bits < (hi - lo).bit_length():
+            # 비트필드 — 선언 폭(`: n`)이 밑 타입보다 좁다. 부호는 밑 타입을 따른다.
+            lo, hi = ((-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if lo < 0 else (0, (1 << bits) - 1))
+            return {"kind": "range", "lo": lo, "hi": hi, "bits": bits, "source": source}, ""
+    return {"kind": "table", "key": key, "source": source}, ""
+
+
+def _names_pointer_object(decl: str, dims: str, subscripts: str) -> bool:
+    """선언이 포인터이고 칸 이름의 첨자가 배열 차원을 넘지 않는다 = 칸이 **포인터 객체 자체**(주소)를 부른다.
+
+    `U8 *p` 의 `p` · `U8 *tbl[4]` 의 `tbl[2]` 는 포인터 객체, `p[0]` · `p[1]` · `tbl[2][0]` 은 가리키는 대상이다.
+    """
+    return "*" in str(decl or "") and str(subscripts or "").count("[") <= str(dims or "").count("[")
+
+
+_ROLE_SIDE_KEPT, _ROLE_SIDE_INSIDE, _ROLE_SIDE_GAP = "", "inside", "gap"
+
+
+def _role_values(lo: int, hi: int, vlo: int, vhi: int,
+                 inner: Optional[Tuple[Any, Any, Any]] = None,
+                 valid: Optional[Sequence[int]] = None,
+                 holds: Optional[Any] = None) -> Tuple[List[Any], Tuple[str, str]]:
+    """7 역할 값 `[무효-하한, 유효-하한, 정상-L, 중간, 정상-H, 유효-상한, 무효-상한]` 과 양쪽 강건성 값의 상태.
+
+    `lo..hi`(또는 `holds(v)`)는 객체가 **담는** 값, `vlo..vhi` 는 유효 범위, `valid` 는 이산 유효 값(열거자 · 설계 값 목록 —
+    없으면 `vlo..vhi` 전부가 유효). 강건성 값은 경계 바로 밖(vlo-1 · vhi+1)이 담기면 그대로(상태 `""`). 아니면:
+    * 이산 유효 값 사이에 담기는 **틈**이 있으면 그 값(`"gap"` — 타입 안 · 여전히 무효, 하한 쪽은 가장 낮은 틈 · 상한 쪽은 가장 높은 틈),
+    * 없으면 경계 바로 안쪽 **유효 값**(`"inside"` — 정수 범위는 vlo+1 · vhi-1, 이산 값은 다음 · 앞 값).
+    행 수와 역할은 그대로, 값이 서로 겹치지 않게(가능한 한) 한다.
+    """
+    def held(v: int) -> bool:
+        return bool(holds(v)) if holds is not None else lo <= v <= hi
+
+    q1, mid, q3 = inner if inner is not None else (
+        vlo + (vhi - vlo) // 4, vlo + (vhi - vlo) // 2, vlo + 3 * (vhi - vlo) // 4)
+    vals = sorted(set(valid)) if valid else None
+
+    def side(out: int, ascending: bool) -> Tuple[int, str]:
+        if held(out):
+            return out, _ROLE_SIDE_KEPT
+        if vals is not None:
+            vset = set(vals)
+            for gap in (range(vlo + 1, vhi) if ascending else range(vhi - 1, vlo, -1)):
+                if gap not in vset and held(gap):
+                    return gap, _ROLE_SIDE_GAP
+            if len(vals) > 1:
+                return (vals[1] if ascending else vals[-2]), _ROLE_SIDE_INSIDE
+            return vlo, _ROLE_SIDE_INSIDE
+        return (min(vlo + 1, vhi) if ascending else max(vhi - 1, vlo)), _ROLE_SIDE_INSIDE
+
+    first, low_state = side(vlo - 1, True)
+    last, high_state = side(vhi + 1, False)
+    return [first, vlo, q1, mid, q3, vhi, last], (low_state, high_state)
+
+
+def _typed_boundary_values(domain: Dict[str, Any]) -> Tuple[List[Any], Tuple[bool, bool]]:
+    """선언 타입 도메인(`_declared_input_domain`) → 7 역할 값 · 강건성 값을 옮겼는지. 값은 전부 그 타입이 담는다."""
+    kind = domain.get("kind")
+    if kind == "enum":
+        # enum 객체가 담는다고 원본 모델이 받는 값 = 모든 허용 밑 타입이 담는 0~127 ∪ 열거자(`ENUM_INPUT_RANGE`). 음수 열거자 사이
+        #   (`-5 … 0`)의 비열거자는 그 판정 밖이라 내지 않는다 — 구간(`lo..hi`)이 아니라 이 집합으로 본다.
+        from generators.c_source_oracle import ENUM_INPUT_RANGE
+        vals = list(domain["values"])
+        vset = set(vals)
+        k = len(vals)
+        return _role_values(int(domain["lo"]), int(domain["hi"]), vals[0], vals[-1],
+                            inner=(vals[k // 4], vals[k // 2], vals[min(k - 1, (3 * k) // 4)]), valid=vals,
+                            holds=lambda v: v in vset or ENUM_INPUT_RANGE[0] <= v <= ENUM_INPUT_RANGE[1])
+    if kind == "range":
+        lo, hi = int(domain["lo"]), int(domain["hi"])
+        return _role_values(lo, hi, lo, hi)
+    if kind == "documented":
+        # (R90 후속) 설계서가 적은 범위 — 정상 값은 그 안, 강건성 값은 그 바로 밖(타입이 담을 때만)
+        lo, hi = int(domain["lo"]), int(domain["hi"])
+        vals = list(domain.get("values") or [])
+        if len(vals) >= 2:
+            k = len(vals)
+            return _role_values(lo, hi, vals[0], vals[-1],
+                                inner=(vals[k // 4], vals[k // 2], vals[min(k - 1, (3 * k) // 4)]), valid=vals)
+        return _role_values(lo, hi, int(domain["vlo"]), int(domain["vhi"]))
+    row = list(_BOUNDARY_SETS[domain["key"]])
+    if domain["key"] == "float":
+        return row, (_ROLE_SIDE_KEPT, _ROLE_SIDE_KEPT)   # 카탈로그 값(-1.0 … 1.001)이 전부 float 에 담긴다
+    return _role_values(row[1], row[5], row[1], row[5], inner=(row[2], row[3], row[4]))
+
+
+# ── (R90 후속) 설계서가 적은 값 범위 ─────────────────────────────────────────────────────────────────
+# 선언 타입 전폭만 쓰면 정상 행이 코드가 다루지 않는 값으로 간다 — HDPDM01 `SwITC_SwUFn_0401/0403` 실측: S16 의 가운데 값 0 이
+# 나눗셈 분모(`s16g_ApiIn_OverPos`)가 되어 정상 행 전부 `division_by_zero`, 사분점(±16384)은 `* 10` 에서 `signed_overflow`
+# — 기대 칸이 하나도 도출되지 않아 인터페이스 결함 21건을 못 가렸다. 설계서(SwUDS 파라미터 표 `Value Range`)는 그 변수가 실제로
+# 갖는 값을 적어 둔다(`s16g_SysOptCtrl_OverPos` = `0, 2470, 2268` · `s16g_ApiIn_OverPos` = `0x08CD ~ 0x0A70`). 그래서:
+#   도메인 = 설계서 범위 ∩ 선언 타입. 정상 행(2~6 · 조건 조합 · 전역 상태)은 범위 안, 강건성 행(1 · 7 · 오류 전파)은 범위 바로 밖
+#   (타입이 담을 때만 — 담지 못하면 앞 규칙대로 경계 바로 안쪽).
+# 출처는 SUTS 와 같다 — 판독 `uds_unit_io.read_value_range`(로더가 이미 `param_info[이름].range/values/range_unread` 로 싣는다),
+#   변수 → 표 행 매칭 `suts._unit_uds_param_info`. 흐름의 **체인 함수들** 표에서 그 변수 행을 모아 교집합을 취한다 — 한 변수를
+#   여러 함수 표가 적는데(`u8g_SysUds_UsDoorCtrl` = 한 표는 `0x00 ~ 0xFF`, 다른 표는 `0x00 ~ 0x01`) 전폭 행은 양식 기본값이라
+#   좁은 쪽이 그 변수에 대해 더 말한 것이다. 교집합이 비면 문서끼리 어긋난 것이라 쓰지 않고 센다.
+# 실측(HDPDM01, RD+FBL · 흐름 캡 없음 · 서브케이스 15, 통합 oracle): 설계 범위를 받은 입력 743/5,570 · 도출 칸 15,126 → 16,177 ·
+#   `division_by_zero` 칸 1,474 → 96 · 0401/0403 도출 0 → 210/240(가운데 행 · 조건 조합 행) · 인터페이스 결함 판별(global_write_lost)
+#   460 → 483(R90 이전 480 — 잃었던 21건 전부 회복 + 3). 남은 한계: 설계서가 S16 **전폭**을 적은 변수는 사분점(±16384)이 그대로라
+#   `* 10` 에서 넘친다(행 3 · 5) — 문서가 허용한 값에서 코드가 넘치는 것이라 지어낸 좁은 범위로 가리지 않는다.
+# 쓰지 않는 출처(HDPDM01 실측): `globals_info_map[*].range` 는 소스 단계가 **타입 전폭 · 초기값**으로 채운 칸이다(읽히는 395칸 전부
+#   선언 타입 전폭과 같고 나머지 52칸은 초기값 · 식 — `0x75` · `( ( U8 )( 0x00U ) )`) — 문서가 아니다. 원문 꼬리 `(range: …)` 는
+#   포인터 주소 범위(`0x00000000 ~ 0xFFFFFFFF`, 188)와 반환 슬롯뿐이다(SUTS R76 N98 과 같은 판단 — 주소로 값을 만들지 않는다).
+def _uds_documented_ranges(
+    names: Sequence[str],
+    functions: Sequence[str],
+    uds_unit_io: Optional[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """변수 이름 → 체인 함수들의 SwUDS 표가 적은 `{"ranges": [(lo, hi)], "values": [[...]], "unread": [사유], "texts": [...]}`."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if not uds_unit_io or not names:
+        return out
+    from generators.suts import _unit_uds_param_info
+    from generators.uds_unit_io import resolve_unit_io
+    for fn in dict.fromkeys(str(f or "") for f in functions or ()):
+        rec = resolve_unit_io(uds_unit_io, fn) if fn else None
+        if not rec:
+            continue
+        for name, info in _unit_uds_param_info(rec, list(names)).items():
+            d = out.setdefault(name, {"ranges": [], "values": [], "unread": [], "texts": []})
+            rng, vals = info.get("range"), info.get("values")
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                d["ranges"].append((int(rng[0]), int(rng[1])))
+            elif isinstance(vals, list) and vals:
+                d["values"].append(sorted({int(v) for v in vals}))
+            elif info.get("range_unread"):
+                d["unread"].append(str(info["range_unread"]))
+            else:
+                continue
+            if info.get("range_text"):
+                d["texts"].append(f"{fn}: {info['range_text']}")
+    return out
+
+
+def _documented_interval(doc: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """`_uds_documented_ranges` 한 변수 → (`{"vlo", "vhi", "values"}`, "") 또는 (None, 사유). 여러 표의 교집합이다."""
+    if not doc:
+        return None, "not_documented"
+    ranges, value_sets = doc.get("ranges") or [], doc.get("values") or []
+    if not ranges and not value_sets:
+        unread = doc.get("unread") or []
+        return None, ("documented_range_unread:" + unread[0]) if unread else "not_documented"
+    vlo = max([r[0] for r in ranges] + [min(v) for v in value_sets])
+    vhi = min([r[1] for r in ranges] + [max(v) for v in value_sets])
+    if vlo > vhi:
+        return None, "documented_ranges_disagree"
+    values: Optional[List[int]] = None
+    if value_sets:
+        common = set(value_sets[0]).intersection(*map(set, value_sets[1:]))
+        values = sorted(v for v in common if vlo <= v <= vhi)
+        if not values:
+            return None, "documented_ranges_disagree"
+        vlo, vhi = values[0], values[-1]
+    return {"vlo": vlo, "vhi": vhi, "values": values}, ""
+
+
+def _domain_representable(dom: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """선언 타입 도메인이 **담는** 정수 범위. 실수는 None(설계 범위를 대지 않는다)."""
+    if dom.get("kind") == "table":
+        if dom["key"] == "float":
+            return None
+        return _BOUNDARY_SETS[dom["key"]][1], _BOUNDARY_SETS[dom["key"]][5]
+    return int(dom["lo"]), int(dom["hi"])
+
+
+def _apply_documented_range(
+    dom: Optional[Dict[str, Any]],
+    doc: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], str, str]:
+    """(도메인, 출처, 설계 범위를 못 쓴 사유). 출처는 `documented_range` · `declared_type` · `unknown`.
+
+    설계 범위가 선언 타입 전폭과 같으면 타입 밖의 정보를 주지 않는다 — 선언 타입 그대로(SUTS R65 와 같은 판정: HDPDM01 이 S16
+    전폭을 `0x7FFF ~ 0x8000` 으로 적은 행이 수백이다). 선언 타입을 모르는 입력에 설계 범위가 있으면 그 범위를 쓰되 **강건성 값도 그
+    안에 둔다** — 범위 밖 값을 객체가 담는지 알 수 없다(문서가 적은 값은 프로그램에 있는 값이다).
+    """
+    iv, why = _documented_interval(doc)
+    if dom is None:
+        if iv is None:
+            return None, "unknown", why
+        lo, hi = iv["vlo"], iv["vhi"]
+        return ({"kind": "documented", "lo": lo, "hi": hi, "vlo": lo, "vhi": hi, "values": iv["values"],
+                 "type_known": False, "source": "SwUDS"}, "documented_range", "")
+    rep = _domain_representable(dom)
+    if iv is None or rep is None:
+        return dom, "declared_type", (why if rep is not None else "float_not_ranged")
+    lo, hi = rep
+    vlo, vhi, values = iv["vlo"], iv["vhi"], iv["values"]
+    if vlo < lo or vhi > hi:
+        return dom, "declared_type", "documented_outside_type"
+    if dom.get("kind") == "enum":
+        keep = [v for v in dom["values"] if vlo <= v <= vhi and (values is None or v in values)]
+        if not keep:
+            return dom, "declared_type", "documented_excludes_enumerators"
+        if keep == list(dom["values"]):
+            return dom, "declared_type", ""
+        return {**dom, "values": keep, "source": "SwUDS"}, "documented_range", ""
+    if values is None and (vlo, vhi) == (lo, hi):
+        return dom, "declared_type", ""
+    return ({"kind": "documented", "lo": lo, "hi": hi, "vlo": vlo, "vhi": vhi, "values": values, "type_known": True,
+             "source": "SwUDS"}, "documented_range", "")
+
+
 def _clean_var_name(raw: str) -> str:
     """`[IN] u8g_Speed` → `u8g_Speed`. 정본 표기 규칙은 SUTS 와 **같은 출처**를 쓴다.
 
@@ -958,6 +1320,10 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     "var_budget_cut_input", "var_budget_cut_expected",
     # FI 축 — 0 이 "요청 없음"인지 "요청했는데 못 냄"인지 구분되게
     "fi_emitted", "fi_requested", "fi_unresolved",
+    # (R90) 입력 값의 선언 타입 축 — 몇 입력이 타입에 맞춰졌고 몇 개가 모르는 타입(이전 값)인지, 강건성 값을 몇 번 옮겼는지
+    "input_type_resolution", "input_type_bounded_values",
+    # (R90 후속) 입력 값 도메인의 출처(설계서 범위 · 선언 타입 · 모름)와 설계서 범위를 못 쓴 사유
+    "input_domain_source", "input_documented_range_unused", "input_documented_range_type_unknown",
     # 근거 시트(전략 / Related_ID) 산출 실적 — 시트가 비어도 **왜 비었는지** 보이게
     "strategy_blocks", "strategy_nodes", "strategy_nodes_dropped",
     "strategy_blocks_truncated",
@@ -1105,6 +1471,8 @@ def collect_integration_flows(
     # (R89) 소스 루트 목록 — 둘 이상이면 루트마다 **별개 빌드**다(HDPDM01: APP `PDS64_RD` · BOOT `PDS64_FBL`). 함수 이름 ·
     #   호출 그래프 · 모듈은 진입 함수가 속한 빌드 안에서만 본다(`_build_views`).
     source_roots: Optional[Sequence[str]] = None,
+    struct_member_types: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+    uds_unit_io: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -1129,6 +1497,11 @@ def collect_integration_flows(
             문서 근거**(`load_uds_swcom_map`). 주지 않으면 순번 합성 ID 로 내려간다.
         globals_info_map / struct_members: 배열 **선언 크기**의 출처
             (`generate_uds_source_sections` 의 `globals_info_map`/`struct_member_arrays`).
+        struct_member_types: (R90) 구조체 멤버의 **선언 타입 · 비트 폭**(`struct_member_types`). 입력마다 선언 타입 도메인
+            (`input_types` · `indirect_types`)을 정해 서브케이스 값이 그 타입이 담는 값만 되게 한다(`_declared_input_domain`).
+            안 주면 멤버 입력(`s.Bits.F`)은 타입 미상 — 이전 값 그대로다.
+        uds_unit_io: (R90 후속) SwUDS 함수 표(`uds_unit_io.load_uds_unit_io`) — 체인 함수 표의 `Value Range` 가 입력 값 도메인을
+            좁힌다(`_apply_documented_range`). 출처는 입력마다 `input_domain_sources` · 통계 `input_domain_source` 에 남는다.
             정본은 배열을 `g_sys_error_his[0]`…`[15]` 처럼 **원소 단위**로 적는다 —
             안 주면 base 한 칸으로 나가 정본 열과 입도가 어긋난다.
 
@@ -1181,6 +1554,14 @@ def collect_integration_flows(
     # (SUTS 가 같은 이유로 unit 루프 밖에 둔다: 전역 1,525 × 흐름 367 헛돔 방지).
     _gim = globals_info_map or {}
     _smem = struct_members or {}
+    # (R90) 입력의 선언 타입 — 멤버 타입 표와 매개변수의 typedef 해상(원문 → 원 선언)도 루프 밖에서 한 번.
+    _smt = struct_member_types or {}
+    _param_decls = _param_decl_index(function_details)
+    _type_reasons: Dict[str, int] = {}
+    _typed_inputs = 0
+    _domain_sources: Dict[str, int] = {}
+    _doc_fallbacks: Dict[str, int] = {}
+    _doc_untyped = 0
     _root_sizes: Dict[str, Tuple[int, ...]] = {}
     if _gim:
         from generators.suts import _decl_dims_from_array_field, _dim_product
@@ -1429,6 +1810,28 @@ def collect_integration_flows(
         _arr_expanded_in += _n_in
         _arr_skipped += _n_skip
         _arr_elements += _n_el
+        # (R90) 펼친 **뒤에** 정한다 — 원소(`a[3]`)는 원소 타입, 이름·원문 짝은 `_expand_arrays` 가 맞춰 둔다.
+        # (R90 후속) 그다음 체인 함수들의 SwUDS 표가 적은 범위로 좁힌다(`_apply_documented_range`).
+        _docs = _uds_documented_ranges(input_vars, _chain_nodes, uds_unit_io)
+        input_types: List[Optional[Dict[str, Any]]] = []
+        input_domain_sources: List[str] = []
+        for _vn, _vr in zip(input_vars, input_raws, strict=True):
+            _dom, _why = _declared_input_domain(_vn, _vr, _gim, _smt, _param_decls)
+            if _dom is None:
+                _type_reasons[_why] = _type_reasons.get(_why, 0) + 1
+            else:
+                _typed_inputs += 1
+            # 포인터 객체의 `Value Range` 는 주소 범위다 — 값 도메인으로 쓰지 않는다(사유는 센다)
+            _dom, _src, _dwhy = _apply_documented_range(_dom, None if _why == "pointer_object" else _docs.get(_vn))
+            if _why == "pointer_object" and _docs.get(_vn):
+                _dwhy = "pointer_address_range"
+            input_types.append(_dom)
+            input_domain_sources.append(_src)
+            _domain_sources[_src] = _domain_sources.get(_src, 0) + 1
+            if _dwhy and _dwhy != "not_documented":
+                _doc_fallbacks[_dwhy] = _doc_fallbacks.get(_dwhy, 0) + 1
+            if _src == "documented_range" and not (_dom or {}).get("type_known", True):
+                _doc_untyped += 1
 
         # Expected: own outputs + pointer out-params + callee outputs + callee globals
         exp_pairs: List[Tuple[str, str]] = []
@@ -1632,6 +2035,13 @@ def collect_integration_flows(
                         if len(indirect_vars_list) < 5:
                             indirect_vars_list.append(gn)
 
+        _gdocs = _uds_documented_ranges(indirect_vars_list, _chain_nodes, uds_unit_io)
+        indirect_types = []
+        for _gv in indirect_vars_list:
+            _gdom, _gwhy = _declared_input_domain(_gv, "", _gim, _smt, _param_decls)
+            indirect_types.append(
+                _apply_documented_range(_gdom, None if _gwhy == "pointer_object" else _gdocs.get(_gv))[0])
+
         flows.append({
             "flow_id": fid,
             "entry_fn": fn_name,
@@ -1656,6 +2066,10 @@ def collect_integration_flows(
             "expected_vars": expected_vars,
             "expected_raws": expected_raws,
             "indirect_vars": indirect_vars_list,
+            # (R90) 입력 · 전역 상태 변수의 선언 타입 도메인(이름과 같은 순서, 모르면 None — 이전 값 그대로)
+            "input_types": input_types,
+            "input_domain_sources": input_domain_sources,
+            "indirect_types": indirect_types,
             "asil": asil,
             "related_ids": deduped_related,
             # related_ids 중 순번 기반 합성분(요구 추적성 분자에서 제외 — 위 삽입부 주석)
@@ -1718,6 +2132,15 @@ def collect_integration_flows(
             "var_candidates_expected": _var_cand_exp,
             "var_budget_cut_input": _var_budget_cut_in,
             "var_budget_cut_expected": _var_budget_cut_exp,
+            # (R90) 입력 값을 선언 타입에 맞췄는가 — 모르는 입력은 이전 값(이름 패턴 표)이라 그 수를 사유별로 보인다.
+            "input_type_resolution": {"typed": _typed_inputs, "unresolved": dict(sorted(_type_reasons.items()))},
+            # (R90 후속) 입력 값 도메인의 출처 — 설계서 범위(SwUDS) · 선언 타입 · 모름(이전 값). 설계서가 적었는데 못 쓴 사유도 센다
+            #   (`documented_outside_type` · `documented_ranges_disagree` · `documented_range_unread:*` …). `type_unknown` 은
+            #   선언 타입을 모르는 채 설계 범위만으로 값을 낸 입력 수(강건성 값도 범위 안에 둔다).
+            "input_domain_source": {k: _domain_sources.get(k, 0)
+                                    for k in ("documented_range", "declared_type", "unknown")},
+            "input_documented_range_unused": dict(sorted(_doc_fallbacks.items())),
+            "input_documented_range_type_unknown": _doc_untyped,
         })
     if _sds_lookups and not _sds_swcom_hits:
         # ⚠ 이 맵으로는 **구조적으로 0** 이다(값 스키마에 swcom/component 필드가 없고
@@ -1937,10 +2360,40 @@ def _generate_sub_case_candidates(
             })
         return result_cases
 
-    # Determine boundary value sets using annotated raws first (type-token priority),
-    # then fall back to name-prefix heuristic for plain variable names.
-    bv_sets = [_infer_boundary_values(r) for r in input_raws]
+    # (R90) 선언 타입을 아는 입력은 그 타입이 담는 값만(`_typed_boundary_values`), 모르는 입력은 이전 그대로 — 원문의 타입
+    #   토큰, 없으면 이름 패턴(`_infer_boundary_values`). `bounded[i]` = 그 입력의 (하한, 상한) 강건성 값을 타입 안으로 옮겼나.
+    input_types = flow.get("input_types")
+    if not isinstance(input_types, list):
+        input_types = []
+    bv_sets: List[List[Any]] = []
+    bounded: List[Tuple[str, str]] = []
+    for _ri, _raw in enumerate(input_raws):
+        _dom = input_types[_ri] if _ri < len(input_types) else None
+        if isinstance(_dom, dict):
+            _vals, _bnd = _typed_boundary_values(_dom)
+        else:
+            _vals, _bnd = _infer_boundary_values(_raw), (_ROLE_SIDE_KEPT, _ROLE_SIDE_KEPT)
+        bv_sets.append(_vals)
+        bounded.append(_bnd)
     n_cases = min(max_cases, len(bv_sets[0]))
+
+    def _bounded_names(side: int, state: str = "") -> List[str]:
+        # 강건성 값을 선언 타입 안으로 옮긴 입력(`state` 를 주면 그 상태만 — `gap` = 열거자 · 설계 값 밖이라 여전히 무효)
+        return [v for v, b in zip(input_vars, bounded, strict=True) if b[side] and (not state or b[side] == state)]
+
+    def _mark(side: int) -> str:
+        # 행의 **모든** 입력이 옮겨졌을 때만(범위 바로 밖 값이 하나라도 남으면 `무효` 라는 라벨이 사실이다). 옮긴 값이 전부 유효
+        #   값이면 '무효 값 없음', 틈(열거자 밖 · 타입 안)이 하나라도 있으면 '무효이되 이유가 다름' 을 적는다.
+        if not bounded or not all(b[side] for b in bounded):
+            return ""
+        return _TYPE_GAP_MARK[side] if any(b[side] == _ROLE_SIDE_GAP for b in bounded) else _TYPE_BOUNDED_MARK[side]
+
+    def _record_bounded(sub: Dict[str, Any], side: int) -> None:
+        if _bounded_names(side):
+            sub["type_bounded"] = _bounded_names(side)
+        if _bounded_names(side, _ROLE_SIDE_GAP):
+            # 그중 옮긴 값이 열거자 · 설계 값 목록 사이의 틈인 입력 — 타입은 담지만 여전히 무효 값이다
+            sub["type_bounded_gap"] = _bounded_names(side, _ROLE_SIDE_GAP)
 
     sub_cases: List[Dict[str, Any]] = []
     for case_idx in range(n_cases):
@@ -1961,14 +2414,20 @@ def _generate_sub_case_candidates(
             else:
                 expected[ev] = bv_exp[case_idx] if case_idx < len(bv_exp) else bv_exp[-1]
 
+        _label = _case_label(case_idx)
+        _side = 0 if case_idx == 0 else (1 if case_idx == len(_AEC_LABELS) - 1 else -1)
+        if _side >= 0 and use_aec and case_idx < len(_AEC_LABELS):
+            _label += _mark(_side)     # `EC1:무효-하한` · `EC7:무효-상한` 만 무효를 주장한다
         sub_cases.append({
             "case_num": case_idx + 1,
-            "case_label": _case_label(case_idx),
+            "case_label": _label,
             "call_chain": call_chain if case_idx == 0 else "",
             "precondition": _precondition(case_idx),
             "inputs": inputs,
             "expected": expected,
         })
+        if _side >= 0:
+            _record_bounded(sub_cases[-1], _side)
 
     # ── Additional strategies for branch coverage ──
     next_num = len(sub_cases) + 1
@@ -2017,18 +2476,23 @@ def _generate_sub_case_candidates(
                 bv_exp = _infer_boundary_values(ev_raw)
                 err_expected[ev] = bv_exp[1] if err_key == "min_inv" else bv_exp[5]
             direction = "하한 초과" if err_key == "min_inv" else "상한 초과"
+            _side = 0 if err_key == "min_inv" else 1
             sub_cases.append({
                 "case_num": next_num,
-                "case_label": f"ERR_PROP_{err_idx+1} [{direction}]",
+                "case_label": f"ERR_PROP_{err_idx+1} [{direction}]{_mark(_side)}",
                 "call_chain": "",
-                "precondition": f"에러 전파: 입력 {direction} → 콜체인 방어 처리 확인",
+                "precondition": f"에러 전파: 입력 {direction} → 콜체인 방어 처리 확인{_mark(_side)}",
                 "inputs": err_inputs,
                 "expected": err_expected,
             })
+            _record_bounded(sub_cases[-1], _side)
             next_num += 1
 
     # GAP D: Global state combination — toggle indirect (global) vars
     indirect_vars = flow.get("indirect_vars") or []
+    indirect_types = flow.get("indirect_types")
+    if not isinstance(indirect_types, list):
+        indirect_types = []
     if indirect_vars and input_vars and len(sub_cases) < max_cases:
         for gv_idx, gv in enumerate(indirect_vars[:2]):
             if len(sub_cases) >= max_cases:
@@ -2037,7 +2501,10 @@ def _generate_sub_case_candidates(
             for vi, vname in enumerate(input_vars):
                 bv = bv_sets[vi]
                 gstate_inputs[vname] = bv[3]  # mid
-            gv_bv = _infer_boundary_values(gv)
+            # (R90) 전역 상태 변수도 입력이다 — 선언 타입을 알면 그 타입의 최솟값(enum 이면 첫 열거자)
+            _gv_dom = indirect_types[gv_idx] if gv_idx < len(indirect_types) else None
+            gv_bv = (_typed_boundary_values(_gv_dom)[0] if isinstance(_gv_dom, dict)
+                     else _infer_boundary_values(gv))
             gstate_inputs[gv] = gv_bv[1]  # global at min
             gstate_expected: Dict[str, Any] = {}
             for ev_idx, ev in enumerate(expected_vars):
@@ -2193,6 +2660,9 @@ def generate_itc_list(
             # FI 축 — 0 이 "요청이 없었다"인지 "요청했는데 못 냈다"인지 구분되게.
             "fi_emitted": _fi_emitted,
             "fi_requested": len(fi_flows or []),
+            # (R90) 강건성 값(무효-하한/상한 · 오류 전파)을 선언 타입이 못 담아 경계 바로 안쪽으로 옮긴 (서브케이스, 입력) 수
+            "input_type_bounded_values": sum(len(sc.get("type_bounded") or ()) for t in itcs
+                                             for sc in t.get("sub_cases") or ()),
         })
     if not _fi_emitted:
         # 침묵 금지: 정본에는 FI 축이 있다. 0 인 이유를 산출 시점에 남긴다.
@@ -3755,6 +4225,8 @@ def generate_sits(
         # — SUTS 가 7차 라운드에서 겪은 사각과 같은 형태다.
         _globals_info_map = report_data.get("globals_info_map", {}) or {}
         _struct_members = report_data.get("struct_member_arrays", {}) or {}
+        # (R90) 멤버 입력(`s.Bits.F`)의 선언 타입 · 비트 폭 — 서브케이스 값을 그 타입 안으로 낸다
+        _struct_member_types = report_data.get("struct_member_types", {}) or {}
         total_source_functions = len(function_details)
         if not function_details:
             raise ValueError("No function_details in source parse result")
@@ -3768,6 +4240,7 @@ def generate_sits(
             #  `array_size_map_entries` 0 으로 보인다).
             _globals_info_map = {}
             _struct_members = {}
+            _struct_member_types = {}
             total_source_functions = len(function_details)
         except Exception as e2:
             _logger.error("SITS: lightweight parse also failed: %s", e2)
@@ -3842,6 +4315,16 @@ def generate_sits(
     _uds_asil_map = load_uds_asil_map(uds_path)
     # Related 칸은 SwCom 만이 아니다(SwFn·SwSTR·SwST·SwTK) — 넓은 판을 따로 받는다.
     _uds_related_map = load_uds_related_map(uds_path)
+    # (R90 후속) SwUDS 함수 표의 `Value Range` — 입력 값 도메인을 설계서 범위로 좁힌다(SUTS 와 같은 로더 · 같은 판독).
+    #   못 읽으면 빈 맵(로더가 사유를 `reading.read_error` 에 남긴다) — 그때 값은 선언 타입 그대로다.
+    _uds_unit_io: Optional[Dict[str, Any]] = None
+    if uds_path:
+        from generators.uds_unit_io import load_uds_unit_io
+        _uds_unit_io = load_uds_unit_io(uds_path, source_functions=[
+            str((v or {}).get("name") or "") for v in function_details.values() if isinstance(v, dict)])
+        if not (_uds_unit_io or {}).get("by_name"):
+            _logger.warning("SITS: SwUDS 함수 표를 못 읽었다(%s) — 입력 값은 설계서 범위 없이 선언 타입으로 낸다",
+                            ((_uds_unit_io or {}).get("reading") or {}).get("read_error") or "표 0개")
     flow_stats: Dict[str, Any] = {}
     # (R89) 빌드를 가르는 루트는 **파서가 실제로 쓴 루트**(`project_context["roots"]` — 로컬은 resolve 한 경로, Cloudium 은 받은 경로 그대로)
     #   — 함수 레코드의 `source_path` 가 그 밑에 있다. 사용자가 적은 문자열(상대경로 · 정션 · 끝 슬래시)로 가르면 모드에 따라 결과가 갈린다.
@@ -3854,7 +4337,7 @@ def generate_sits(
         sds_map=_project_sds_map or None, uds_swcom_map=_uds_swcom_map,
         uds_asil_map=_uds_asil_map, uds_related_map=_uds_related_map,
         globals_info_map=_globals_info_map, struct_members=_struct_members,
-        source_roots=_build_roots)
+        source_roots=_build_roots, struct_member_types=_struct_member_types, uds_unit_io=_uds_unit_io)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")

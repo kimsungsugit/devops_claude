@@ -7,7 +7,9 @@ of the function has undefined behaviour* — possibly a path behind a condition 
 W5), so it is not a proof that every run fails. A reference test specification carries none of this; here it becomes a
 "Source Findings" sheet, one row per (function, kind), with the sequences it occurred in, an example vector, and the
 expected-value slots it blocked (a UB refuses the whole run, so unrelated outputs of that sequence count as blocked —
-the sequence count is the measure, review W4).
+the sequence count is the measure, review W4). (R90) A UB proven only on a path a branch on an unknown value chose no
+longer refuses the run (the path runs on with the faulting result unknown — ``forked_path_undefined_behavior`` on the
+sequence, with the branch that chose it): it is still a finding of its kind, in the sequence count, blocking no slot.
 
 A finding is a **candidate**: the example inputs may lie outside what the callers can produce (a type-maximum boundary
 row). Each row says so, and says whether it was reproduced independently — the generator does not run clang
@@ -34,7 +36,8 @@ MEANING = {
     "division_by_zero": _ON_A_PATH + "0 으로 나눈다(C 미정의 동작). 제수가 0 이 될 수 없다는 근거가 없으면 결함 후보 — "
                         "0 검사를 확인할 것",
     "shift_count_out_of_range": _ON_A_PATH + "형 폭 이상으로 시프트한다(C 미정의 동작) — 시프트 수 범위를 확인할 것",
-    "signed_left_shift_overflow": _ON_A_PATH + "부호 있는 값을 왼쪽 시프트해 범위를 넘긴다(C 미정의 동작)",
+    "signed_left_shift_overflow": _ON_A_PATH + "부호 있는 값을 왼쪽 시프트해 범위를 넘기거나 음수를 왼쪽 시프트한다(C 미정의 동작 — "
+                                  "예: 16비트 int 에서 128 이상인 8비트 값을 8 만큼, (R90) ~(0 또는 1) 같은 음수를 왼쪽 시프트)",
     "float_to_int_out_of_range": _ON_A_PATH + "정수형이 담을 수 없는 실수를 정수로 바꾼다(C 미정의 동작)",
     "array_index_out_of_bounds": _ON_A_PATH + "배열 범위 밖을 읽거나 쓴다(C 미정의 동작) — 첨자 범위 검사를 확인할 것",
 }
@@ -66,27 +69,49 @@ REPRODUCTION = {INPUT_GAP_KIND: INPUT_GAP_REPRODUCTION, OUTPUT_GAP_KIND: OUTPUT_
 
 def collect_findings(units: list[dict[str, Any]], all_sequences: dict[str, list[dict[str, Any]]],
                      rendered_tc_ids: dict[str, str]) -> list[dict[str, Any]]:
-    """One finding per (function, UB kind) over every expected slot whose reason is proven undefined behaviour."""
+    """One finding per (function, UB kind) over every expected slot whose reason is proven undefined behaviour — and
+    (R90) every sequence whose run proved it on a path a branch on an unknown value chose
+    (``forked_path_undefined_behavior``)."""
     found: dict[tuple, dict[str, Any]] = {}
+
+    def finding(unit, seq, kind, var, ev):
+        f = found.setdefault((unit["fid"], kind), {
+            "function_id": unit["fid"], "function": unit.get("name", ""), "kind": kind,
+            "occurrences": 0, "sequences": [], "observables": [],
+            "example_tc": rendered_tc_ids.get(unit["fid"], ""),
+            "example_sequence": seq.get("seq_num"), "example_inputs": dict(seq.get("inputs") or {}),
+            "example_observable": var, "source_path": (ev or {}).get("source_path", ""),
+            "source_hash": (ev or {}).get("source_hash", "")})
+        if seq.get("seq_num") not in f["sequences"]:
+            f["sequences"].append(seq.get("seq_num"))
+        return f
+
     for unit in units:
         for seq in all_sequences.get(unit["fid"], []):
             for var, ev in (seq.get("expected_evidence") or {}).items():
                 m = _UB.search(str((ev or {}).get("reason") or ""))
                 if not m:
                     continue
-                key = (unit["fid"], m.group(1))
-                f = found.setdefault(key, {
-                    "function_id": unit["fid"], "function": unit.get("name", ""), "kind": m.group(1),
-                    "occurrences": 0, "sequences": [], "observables": [],
-                    "example_tc": rendered_tc_ids.get(unit["fid"], ""),
-                    "example_sequence": seq.get("seq_num"), "example_inputs": dict(seq.get("inputs") or {}),
-                    "example_observable": var, "source_path": (ev or {}).get("source_path", ""),
-                    "source_hash": (ev or {}).get("source_hash", "")})
+                f = finding(unit, seq, m.group(1), var, ev)
                 f["occurrences"] += 1
-                if seq.get("seq_num") not in f["sequences"]:
-                    f["sequences"].append(seq.get("seq_num"))
                 if var not in f["observables"]:
                     f["observables"].append(var)
+            # (R90 review C1) undefined behaviour proven on a path a branch on an unknown value chose: the run went
+            #   on with the faulting result unknown (`c_source_oracle._Interp.undefined`) — still a candidate of the
+            #   kind; it blocks no expected slot of the sequence. The branch is named: an input the row leaves open, or
+            #   a value the model does not know (a register, a callee it did not run) — not the same claim (X8)
+            seen = set()
+            for x in seq.get("forked_path_undefined_behavior") or ():
+                kind, selector = str(x.get("kind") or ""), str(x.get("selector") or "")
+                evidence = next(iter((seq.get("expected_evidence") or {}).items()), ("", {}))
+                f = finding(unit, seq, kind, evidence[0], evidence[1])
+                if kind not in seen:
+                    f["unknown_branch_sequences"] = f.get("unknown_branch_sequences", 0) + 1
+                    seen.add(kind)
+                # (R90 review W1) every branch that chose the path — `c_source_oracle.selector_text`
+                for one in (s for s in selector.split(FORKED_UB_SELECTOR_SEP) if s):
+                    if one not in f.setdefault("unknown_branch_selectors", []):
+                        f["unknown_branch_selectors"].append(one)
     return sorted(found.values(), key=lambda f: (f["function"], f["kind"]))
 
 
@@ -164,6 +189,31 @@ def summarize_findings(findings: list[dict[str, Any]]) -> dict[str, Any]:
             "blocked_expected_slots": sum(f["occurrences"] for f in findings), "reproduction": "not_run"}
 
 
+# (R90 review X8) a branch selector that is a value the row leaves open — anything else is a value the model does not
+#   know (a volatile register, a callee it did not run, an input outside its declared type, a table it does not hold)
+_INPUT_OPEN_SELECTORS = ("initial_value_not_in_inputs:", "parameter_not_in_inputs:")
+# (R90 review W1) how a possible-UB tag joins the branches that chose its path — `c_source_oracle.FORKED_UB_SELECTOR_SEP`
+#   (not imported: this module stays free of the parser)
+FORKED_UB_SELECTOR_SEP = " · "
+
+
+def _unknown_branch_note(f: dict[str, Any]) -> str:
+    """(R90) What a finding's Meaning adds when some of its sequences proved it only on a path a branch on an unknown value
+    chose — naming that branch, and saying an input left open only when every one is (review X8)."""
+    n = int(f.get("unknown_branch_sequences") or 0)
+    if not n:
+        return ""
+    selectors = list(f.get("unknown_branch_selectors") or [])
+    named = ", ".join(selectors[:3]) + (f" 외 {len(selectors) - 3}" if len(selectors) > 3 else "")
+    if selectors and all(s.startswith(_INPUT_OPEN_SELECTORS) for s in selectors):
+        why = f"시험 입력이 정하지 않은 값({named})"
+    else:
+        why = (f"모델이 값을 정하지 못한 분기({named} — 입력 누락이 아니라 레지스터 · 해석하지 못한 피호출 · 형 범위 밖 입력 같은 "
+               "모델 한계일 수 있다)")
+    return (f" — 이 중 {n}개 시퀀스에선 {why}가 고른 경로에서만 증명됐다: 그 경로는 결함 연산의 결과를 미상으로 두고 계속 "
+            "실행했고 기대값은 그 경로를 타지 않는 실행에 대한 값이다(사유에 possible_ub=…_on_unknown_branch(selector=…) 로 공시)")
+
+
 def write_source_findings_sheet(wb, findings: list[dict[str, Any]], hdr_font=None, hdr_fill=None, border=None) -> int:
     """'Source Findings' sheet (replaces one of that name). No findings → no sheet (and an old one is removed)."""
     if FINDINGS_SHEET in wb.sheetnames:
@@ -184,7 +234,7 @@ def write_source_findings_sheet(wb, findings: list[dict[str, Any]], hdr_font=Non
         ws.append([f["function_id"], f["function"], f["kind"], len(f["sequences"]), f["occurrences"],
                    ", ".join(f["observables"][:12]), f["example_tc"], f["example_sequence"],
                    json.dumps(f["example_inputs"], ensure_ascii=False, sort_keys=True), f["source_path"],
-                   f["source_hash"], MEANING.get(f["kind"], "C 미정의 동작 — 결함 후보"),
+                   f["source_hash"], MEANING.get(f["kind"], "C 미정의 동작 — 결함 후보") + _unknown_branch_note(f),
                    REPRODUCTION.get(f["kind"], NOT_REPRODUCED_HERE)])
     for col, width in zip("ABCDEFGHIJKLM", (14, 30, 18, 10, 12, 40, 22, 10, 60, 48, 20, 70, 36), strict=True):
         ws.column_dimensions[col].width = width

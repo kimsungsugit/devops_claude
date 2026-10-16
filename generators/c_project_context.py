@@ -331,8 +331,19 @@ def arith(op: str, left: tuple[Any, dict] | None, right: tuple[Any, dict], width
 
 def enum_candidates(widths: dict[str, int]) -> list[dict[str, Any]]:
     """The types an implementation may give an enumeration (C11 6.7.2.2p4: ``char``, a signed or an unsigned integer
-    type able to hold every member) as this model enumerates them — the oracle's `_Interp.enum_candidates`."""
-    return [ctype(k, s, widths) for k, s in (("int", True), ("int", False), ("char", True), ("char", False))]
+    type able to hold every member) as this model enumerates them — the oracle's `_Interp.enum_candidates`.
+
+    (R90 review C2) ``short`` too: with members past ``char`` the char types drop out of the oracle's filter
+    (`_Interp.enum_candidates`) and ``int`` alone decided what an enumeration object holds — 70000 stored in a
+    ``{0, 300}`` enumeration was derived as 70000 where an AAPCS short enum (arm-none-eabi GCC, IAR, Keil) holds 4464.
+    Without testimony of its width ``short`` is taken at 16 bits — the least C allows (5.2.4.2.1); a wider ``short`` is no
+    wider than ``int`` and holds what ``int`` holds, so the narrowest one is the strict choice. Both promote like ``int``:
+    arithmetic gives nothing new, only what an object holds is judged more strictly."""
+    w = dict(widths)
+    if not w.get("short"):
+        w["short"] = min(16, w.get("int") or 16)
+    return [ctype(k, s, w) for k, s in (("int", True), ("int", False), ("short", True), ("short", False),
+                                        ("char", True), ("char", False))]
 
 
 def _enum_arith(op, left, right, widths, mode):
@@ -1915,6 +1926,23 @@ def _implementation_may_define(name: str) -> bool:
     return name.startswith("_") or bool(_STANDARD_NAME_RE.match(name))
 
 
+# (R90) A reserved name of include-guard form — one underscore, upper case, ``_H`` at the end (``_MC9S08SC4_H``: the guard
+#   of the CodeWarrior derivative header ``mc9s08sc4.h``, which the LIN driver tests to pick a derivative). Such a name is
+#   defined by the header it guards, not predefined by a compiler (a compiler predefines names of the implementation:
+#   ``__S12Z__``, ``__HIWARE__``, ``__STDC__`` — none of this form). So in a unit that has read no header from outside the
+#   tree (no ``<...>``, no toolchain header, no missing include) up to the ``#if``, with the build's -D set read (none for
+#   the name) and no file of the tree defining it, the header that would define it was not included: undefined, 0 — an
+#   assumption of the unit (`assumed_header_guards`, said in `pp_assumptions`). A reserved name of any other form, or the
+#   same name after a header from outside the tree, stays undecided (R17: `_implementation_may_define`). HDPDM01 · KJPDS02
+#   LIN units: ``#if (_LIN_GPIO_ == 0) && !defined(_MC9S08SC4_H)`` around the transport/diagnostic functions was
+#   undecided — 6,144 SITS expected cells `conditional_compilation_unresolved` (r89c).
+_HEADER_GUARD_NAME_RE = re.compile(r"_[A-Z][A-Z0-9_]*_H_?")
+
+
+def _header_guard_name(name: str) -> bool:
+    return bool(_HEADER_GUARD_NAME_RE.fullmatch(name))
+
+
 # (R83) The <stdint.h> exact-width names. The tree's own typedef of one sits under ``#ifndef int16_t`` (PE_Types.h: in case a
 #   header made the name a macro) and stayed undecided — a standard name a header outside the tree (the toolchain's hidef.h)
 #   may define, R17 — so the type was unresolved and every cast to it untyped (KJPDS02_PV `s_MotorSpeedMeasure`:
@@ -2028,6 +2056,12 @@ def _pp_undefined(name, env):
             # (R17) the build configuration lists every -D (none for this name) and the name is not the
             # implementation's to define: undefined, 0 (C11 6.10.1p4) — recorded as an assumption of the unit
             env["assumed_undefined"].add(name)
+            return 0
+        if env.get("build_defines_complete") and not env.get("outside_headers") and _header_guard_name(name):
+            # (R90) the guard of a header this unit has not read (`_header_guard_name`): undefined, an assumption
+            env["assumed_undefined"].add(name)
+            if env.get("assumed_header_guards") is not None:
+                env["assumed_header_guards"].add(name)
             return 0
         raise _PPUnknown("undefined_outside_tree:" + name)
     return 0
@@ -2247,8 +2281,16 @@ def body_verdict(scope: dict[str, Any], keyword: str, argument: str, assumed: se
            "varied": set(scope.get("pp_varied") or ()),
            "build_defines_complete": bool((scope.get("build_defines") or {}).get("complete")),
            "c_language": (scope.get("build_defines") or {}).get("cplusplus_mode") is False,
+           # (R90) the table is the one at the end of the unit: any header from outside the tree it read counts
+           "outside_headers": _reads_outside_headers(scope),
            "assumed_undefined": assumed if assumed is not None else set()}
     return _pp_condition(ev, env)
+
+
+def _reads_outside_headers(scope: dict[str, Any]) -> bool:
+    """(R90) Did the unit read a header from outside the tree — ``<...>``, a toolchain header, a missing include, or an
+    ``#include`` the file-level walk does not follow (`body_includes`)? Such a header may define any include guard."""
+    return any(scope.get(k) for k in ("system_includes", "toolchain_includes", "missing_includes", "body_includes"))
 
 
 def pp_condition(scope: dict[str, Any], node, raw: bytes, assumed: set | None = None) -> bool | None:
@@ -2764,14 +2806,16 @@ def _changes_table(ev: dict[str, Any], path: str, mode: str, macros: dict[str, A
 
 def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = None,
                     defines: dict[str, str] | None = None, known_names: set[str] | None = None,
-                    build_defines_complete: bool = False, c_language: bool = False) -> dict[str, Any]:
+                    build_defines_complete: bool = False, c_language: bool = False,
+                    header_guards: bool = True) -> dict[str, Any]:
     """Walk ``main`` and its quoted includes in order, tracking the macro table like the compiler would.
 
     Returns declaration states ``{(file, pos): "active" | "unknown"}`` (absent = not compiled in this
     configuration), the final macro table, macros whose value changed during the unit, and include facts.
     A condition that depends on an unknown macro makes *both* branches "unknown" — never a guess.
     ``defines`` are build-configuration macros (``-D``), when known; without them a name the tree never
-    defines is undecided, not 0.
+    defines is undecided, not 0. ``header_guards=False``: no include guard is taken as undefined (R90 — the unit reads
+    an ``#include`` the walk does not follow, `translation_unit_scope`).
     """
     files = context.get("files") or {}
     parser = shared_parser()
@@ -2794,9 +2838,13 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
            "defined_anywhere": (known_names if known_names is not None else defined_names(context)) | set(defines or ()),
            "build_defines_complete": build_defines_complete, "assumed_undefined": set(),
            # (R63) no option compiles this C unit as C++: ``__cplusplus`` is no name the implementation defines
-           "c_language": c_language}
+           "c_language": c_language,
+           # (R90) a header from outside the tree read so far (``<...>``, a toolchain header) may define any include
+           #   guard — until then a guard no tree file defines is undefined (`_header_guard_name`)
+           "outside_headers": not header_guards, "assumed_header_guards": set()}
     out["defined_anywhere"] = env["defined_anywhere"]
     out["assumed_undefined"] = env["assumed_undefined"]
+    out["assumed_header_guards"] = env["assumed_header_guards"]
     stack: list[str] = []
 
     def run(path, events, mode, depth):
@@ -2838,6 +2886,7 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
                 if ev["system"]:
                     if ev["name"] not in out["system_includes"]:
                         out["system_includes"].append(ev["name"])
+                    env["outside_headers"] = True   # (R90) in an undecided region too: it may have been read
                     continue
                 found = _resolve_include(context, path, ev["name"])
                 if not found and _toolchain_header(context, ev["name"]):
@@ -2845,6 +2894,7 @@ def preprocess_unit(context: dict[str, Any], main: str, bodies: dict | None = No
                     # (C11 6.10.2p3 retries a failed quoted include as <...>). Treated like a system header.
                     if ev["name"] not in out["toolchain_includes"]:
                         out["toolchain_includes"].append(ev["name"])
+                    env["outside_headers"] = True   # (R90)
                     continue
                 if not found:
                     if ev["name"] not in out["missing_includes"]:
@@ -2916,6 +2966,14 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     build = _unit_build_defines(context, path)
     pp = preprocess_unit(context, path, bodies, defines=build["defines"], known_names=known_names,
                          build_defines_complete=build["complete"], c_language=not build.get("cplusplus_mode", True))
+    if pp["assumed_header_guards"] and any(
+            d.get("op") == "include" for f in pp["files"]
+            for d in ((files.get(f) or {}).get("stray_directives") or {}).get("directives") or ()):
+        # (R90) an #include the file-level walk does not follow (a function body, a construct the parser did not read)
+        #   may read a header from outside the tree before an include-guard test: no guard is taken as undefined
+        pp = preprocess_unit(context, path, bodies, defines=build["defines"], known_names=known_names,
+                             build_defines_complete=build["complete"], c_language=not build.get("cplusplus_mode", True),
+                             header_guards=False)
     # (R62 review round 2 W-B) a #define / #undef inside a function body of this unit changes the table for the code
     #   after it, where the file-level walk does not look: those names vary in the unit (undecided everywhere, never
     #   "undefined" on build evidence); an #include there may define anything (`body_includes` — a gap for body #if)
@@ -2972,6 +3030,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
     scope["build_defines"] = {"evidence": build["evidence"], "complete": build["complete"], "reason": build["reason"],
                               "defines": dict(build["defines"]), "cplusplus_mode": build.get("cplusplus_mode", True)}
     scope["assumed_undefined"] = sorted(pp["assumed_undefined"])
+    # (R90) of those, the include guards of headers the unit did not read (`_header_guard_name`) — another assumption
+    scope["assumed_header_guards"] = sorted(pp["assumed_header_guards"])
     # (R17 review R2 W1) names a function-body #if of this unit takes as undefined on the same evidence (every body
     # condition's names — the MC/DC design and the disclosures read this; one oracle run records only what it met)
     scope["missing_includes"], scope["system_includes"], scope["files"] = pp["missing_includes"], pp["system_includes"], pp["files"]
@@ -3119,10 +3179,16 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
         reached.add(n)
         for d in macro_defs.get(n) or ():
             pending.extend(re.findall(r"\b[A-Za-z_]\w*\b", str(d.get("body") or "")))
-    scope["assumed_undefined_body"] = sorted(
+    # (R90) and the include guards no tree file defines, in a unit that read no header from outside the tree
+    body_guards = sorted(
         n for n in reached
         if build["complete"] and not pp.get("gaps") and n not in pp["defined_anywhere"]
-        and not _implementation_may_define(n))
+        and _implementation_may_define(n) and _header_guard_name(n) and not _reads_outside_headers(scope))
+    scope["assumed_undefined_body"] = sorted(
+        [n for n in reached
+         if build["complete"] and not pp.get("gaps") and n not in pp["defined_anywhere"]
+         and not _implementation_may_define(n)] + body_guards)
+    scope["assumed_header_guards"] = sorted(set(scope["assumed_header_guards"]) | set(body_guards))
     # Final macro table for ``#if`` inside function bodies (``pp_condition``) — bodies after every header.
     scope["pp_macros"] = {name: (_UNKNOWN if key == _UNKNOWN else name) for name, key in pp["macros"].items()}
     scope["pp_bodies"] = {name: d[0] for name, d in macro_defs.items() if pp["macros"].get(name) != _UNKNOWN}
@@ -3139,7 +3205,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                              for name, key in pp["macros"].items()}
     scope["macro_status"].update({name: "varied" for name in pp["varied"] if name not in scope["macro_status"]})
     scope["prototypes"] = sorted({n for p, rec in recs for n in rec.get("prototypes") or ()})
-    plain_assumed = list(scope["assumed_undefined"])
+    guard_assumed = list(scope["assumed_header_guards"])
+    plain_assumed = [n for n in scope["assumed_undefined"] if n not in set(guard_assumed)]
     exact_assumed = list(scope["exact_width_guards"])
     scope["pp_assumptions"] = [
         "a name some project file #defines is not also a build -D (a name the tree never defines is undecided unless "
@@ -3155,6 +3222,13 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
            + ", ".join(plain_assumed[:12])
            + (f" (+{len(plain_assumed) - 12})" if len(plain_assumed) > 12 else "")]
           if plain_assumed else []),
+        # (R90) include guards of headers the unit did not read — the argument is not R17's
+        *(["the include guards " + ", ".join(guard_assumed[:12])
+           + (f" (+{len(guard_assumed) - 12})" if len(guard_assumed) > 12 else "")
+           + " (a reserved name of the form _X_H) are defined only by the header each guards — no compiler predefines "
+           "a name of that form — and no file of the tree defines them, the build configuration lists no -D of them and "
+           "the unit read no header from outside the tree (<...>, toolchain, missing) before the #if: undefined"]
+          if guard_assumed else []),
         # (R83) the <stdint.h> exact-width names `#ifndef` asks about — the argument is not R17's
         *(["the tree's typedef of the <stdint.h> exact-width names " + ", ".join(exact_assumed) + " under `#ifndef` of "
            "that name is read though the guard is undecided: had a header outside the tree made the name a macro, it "
@@ -3711,6 +3785,7 @@ def summarize_build_assumptions(scopes) -> dict[str, Any]:
     from collections import Counter
     seen, reasons, names, units, complete, with_names = set(), Counter(), set(), 0, 0, 0
     exact_names, with_exact = set(), 0
+    guard_names, with_guards = set(), 0
     for scope in scopes:
         if not isinstance(scope, dict) or id(scope) in seen:
             continue
@@ -3728,11 +3803,16 @@ def summarize_build_assumptions(scopes) -> dict[str, Any]:
         if scope.get("exact_width_guards"):
             with_exact += 1
             exact_names.update(scope["exact_width_guards"])
+        if scope.get("assumed_header_guards"):
+            with_guards += 1
+            guard_names.update(scope["assumed_header_guards"])
     return {"units": units, "units_with_complete_build_evidence": complete, "incomplete_reasons": dict(reasons),
             "units_with_assumed_undefined": with_names, "assumed_undefined_names": sorted(names)[:40],
             "assumed_undefined_total": len(names),
             # (R83) exact-width typedefs read past their undecided `#ifndef` guard
-            "units_with_exact_width_guards": with_exact, "exact_width_guard_names": sorted(exact_names)}
+            "units_with_exact_width_guards": with_exact, "exact_width_guard_names": sorted(exact_names),
+            # (R90) include guards of headers the unit did not read, taken as undefined (also in the names above)
+            "units_with_header_guards": with_guards, "header_guard_names": sorted(guard_names)[:40]}
 
 
 def _unit_build_defines(context, path):
@@ -3966,6 +4046,9 @@ def build_scopes(context: dict[str, Any], paths) -> dict[str, dict[str, Any]]:
                 owner = scopes.get(defs[0].get("file")) if defs[0].get("file") in scopes else None
                 if owner is not None and owner.get("assumed_undefined"):
                     scope["assumed_undefined"] = sorted(set(scope["assumed_undefined"]) | set(owner["assumed_undefined"]))
+                    # (R90) the owner's include-guard assumptions keep their own name
+                    scope["assumed_header_guards"] = sorted(set(scope.get("assumed_header_guards") or ())
+                                                            | set(owner.get("assumed_header_guards") or ()))
     _link_const_arrays(context, scopes, wanted, scope_of)
     return {path: scopes[path] for path in wanted}
 
@@ -4012,6 +4095,8 @@ def _link_const_arrays(context, scopes, wanted, scope_of) -> None:
             owner = scopes.get(p)
             if owner is not None and owner.get("assumed_undefined"):
                 scope["assumed_undefined"] = sorted(set(scope["assumed_undefined"]) | set(owner["assumed_undefined"]))
+                scope["assumed_header_guards"] = sorted(set(scope.get("assumed_header_guards") or ())
+                                                        | set(owner.get("assumed_header_guards") or ()))   # (R90)
 
 
 _DESIGNATOR_RE = re.compile(r"\(*\s*([A-Za-z_]\w*)(?:\s*\.\s*[A-Za-z_]\w*|\s*\[\s*(?:0[xX][0-9A-Fa-f]+|\d+)[uUlL]*\s*\])*\s*\)*")

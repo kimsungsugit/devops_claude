@@ -211,6 +211,8 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
     stats: dict[str, Any] = {"status": "", "tc_total": len(itcs), "tc_evaluated": 0, "tc_with_derived": 0,
                              "tc_skipped": {}, "sub_cases": 0, "cells": 0, "derived": 0, "derived_assigned": 0,
                              "derived_unchanged_input": 0, "unknown_reasons": {}, "inlined_calls": 0,
+                             # (R90 review W1) derived where the run had UB proven on a path an unknown branch chose
+                             "derived_with_possible_ub_on_forked_path": 0,
                              "not_inlined": {}, "units_scoped": 0, "elapsed_s": 0.0}
     context = (report_data or {}).get("project_context") or {}
     files = (report_data or {}).get("source_files") or {}
@@ -306,6 +308,8 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
                     derived_here += 1
                     stats["derived"] += 1
                     stats["derived_unchanged_input" if ev.get("basis") == "unchanged_input" else "derived_assigned"] += 1
+                    if ev.get("possible_ub_on_forked_path"):
+                        stats["derived_with_possible_ub_on_forked_path"] += 1
                 else:
                     reasons[str(ev.get("reason") or "").split(":", 1)[0] or "unrecorded"] += 1
             for name, count in ((sub.get("interprocedural") or {}).get("not_inlined") or {}).items():

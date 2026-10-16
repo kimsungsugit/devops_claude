@@ -13,8 +13,9 @@ enumerators, const objects, scalar globals and one-dimensional arrays. Nothing i
   (in the function or a callee) reaches arrays, address-taken objects and escaped locals; a callee with unknown
   effects (library, indirect) havocs every global, every escaped local and every static local;
 * undefined behaviour proven on a path (signed overflow, division by zero, shift range, out-of-bounds index,
-  unsequenced side effects) refuses the whole evaluation; undefined behaviour that depends on an unknown value is
-  disclosed (``possible_undefined_behavior``);
+  unsequenced side effects) refuses the whole evaluation when that path is the run's only one; undefined behaviour that
+  depends on an unknown value — a value, or (R90) a branch on one that chose the path it was proven on (the faulting
+  result is then unknown and the path runs on) — is disclosed (``possible_undefined_behavior``);
 * implementation-defined results (signed narrowing, an enumeration object's underlying type) are unknown
   unless every permitted choice gives the same value.
 """
@@ -30,24 +31,56 @@ from typing import Any
 from generators import c_project_context as cpc
 from generators import pointer_flow
 
-SCHEMA_VERSION = 4   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
+SCHEMA_VERSION = 5   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
 #                      3 (R38): a sequence stub writes no global or static (VectorCAST replaces the body — `stubbed_call`)
 #                      4 (backlog 2-c): an output no final path read nor wrote gives `UNWRITTEN_OUTPUT_PREFIX`, not
 #                        `INITIAL_VALUE_PREFIX` (the function did not read it — the observation needs its initial value)
+#                      5 (R90): UB proven on a path a branch on an unknown value chose no longer refuses the record — it is
+#                        possible UB (``forked_path_undefined_behavior``, `_Interp.undefined`); ``sizeof`` of a character
+#                        type / array is evaluated
 # (backlog 2-c) the two reasons an unset initial value gives — one vocabulary for the oracle and its readers
 INITIAL_VALUE_PREFIX = "initial_value_not_in_inputs:"
 UNWRITTEN_OUTPUT_PREFIX = "unwritten_output_initial_not_in_inputs:"
 # an enum-typed input: the values every permitted underlying type holds unchanged (C11 6.7.2.2p4) — one range for the
 #   oracle's input check and the SUTS widening over the enumerators (review R80 W4)
 ENUM_INPUT_RANGE = (0, 127)
+
+
+def enum_member_span(scope, t) -> tuple[int, int] | None:
+    """(R90 review W4) The least and greatest member value of the enumeration type ``t`` (``t["enum"]`` — its one
+    definition in the unit, `c_project_context` ``enum_types``), or None when the unit does not give every member a
+    value."""
+    key = (t or {}).get("enum") if isinstance(t, dict) else None
+    rec = ((scope or {}).get("enum_types") or {}).get(key) if key else None
+    members = (rec or {}).get("members") or []
+    constants = scope.get("constants") if isinstance(scope, dict) and scope.get("constants") is not None else {}
+    values = []
+    for m in members:
+        value = (constants.get(m.get("name")) or {}).get("value")
+        if type(value) is not int:
+            return None
+        values.append(value)
+    return (min(values), max(values)) if values else None
+
+
+def enum_input_range(scope, t) -> tuple[int, int]:
+    """(R90 review W4) The values an input of enumeration type ``t`` may hold under every permitted underlying type: the
+    type the implementation picks holds every member (C11 6.7.2.2p4) and 0..127 (every char or int type, signed or not —
+    `ENUM_INPUT_RANGE`), so it holds the interval spanning both. HDPDM01 service ids 0xB0 · 0xB2 · 0xB7 are members —
+    an input of one was refused as outside the type. Only 0..127 when a member's value is not known."""
+    lo, hi = ENUM_INPUT_RANGE
+    span = enum_member_span(scope, t)
+    return (min(lo, span[0]), max(hi, span[1])) if span else (lo, hi)
 _UB_REASONS = frozenset({"signed_overflow", "division_by_zero", "shift_count_out_of_range", "signed_left_shift_overflow",
                          "float_to_int_out_of_range"})
 _EXECUTION_BUDGET = 200_000
 _PATH_BUDGET = 64
 _LOOP_BUDGET = 4096
 ASSUMPTIONS = (
-    "undefined behaviour is refused when proven on a path; where it depends on an unknown value (divisor, shift "
-    "count, index, overflow of an unknown operand) it is not proven absent — derived values hold for runs without it",
+    "undefined behaviour is refused when proven on the run's only path; where it depends on an unknown value (divisor, "
+    "shift count, index, overflow of an unknown operand, or a branch on an unknown value that chose the path it was "
+    "proven on — that path runs on with the faulting result unknown) it is not proven absent — derived values hold for "
+    "runs without it",
     "callee effects are the project write closure (a callee that runs — outputs it may write are unknown); a callee "
     "the sequence stubs writes no global or static (what it may put through a pointer argument is unknown)",
     "reachability and termination of callees are not proven",
@@ -115,10 +148,57 @@ def _untyped_overflow_tag(operands, int_bits):
     untyped = [x.v.reason if isinstance(x.v, Unknown) else "" for x in operands if x.t is None]
     if any(r.startswith(_POINTER_REASONS) for r in untyped):
         return "pointer_arithmetic_untyped"
-    if untyped and all(r == "sizeof_unmodeled" for r in untyped) and all(
+    if untyped and all(r in ("sizeof_unmodeled", _SIZE_REASON) for r in untyped) and all(
             x.t.get("bits", 99) <= int_bits for x in operands if isinstance(x.t, dict)):
         return None
     return "signed_overflow_untyped_operand"
+
+
+# (R90) a ``sizeof`` whose value C fixes (`_Interp.sizeof_value`) — or a result exact under every choice of its type
+#   (`_Interp.size_arith`): the value rides in ``_Val.r`` (an interval no operator reads on an untyped value — `operand_range`
+#   wants a type), so every reader that does not ask `_size_value` sees an unknown of unknown type, as before R90
+_SIZE_REASON = "sizeof_type_unspecified"
+# (R90 review C1) undefined behaviour proven on a path a branch on an unknown value chose (`_Interp.undefined`): the
+#   possible-UB tag ``<kind>_on_unknown_branch(selector=<that branch's reason>)`` — `source_findings` keeps it as a finding
+#   of the kind — and the reason of the faulting operation's unknown result
+FORKED_UB_SUFFIX = "_on_unknown_branch"
+FORKED_UB_REASON = "possible_undefined_behavior_on_unknown_branch:"
+_FORKED_UB_TAG = re.compile(r"([a-z_]+)" + FORKED_UB_SUFFIX + r"\(selector=(.*)\)")
+
+
+FORKED_UB_SELECTOR_SEP = " · "
+FORKED_UB_SELECTORS_SHOWN = 4
+
+
+def selector_text(selectors) -> str:
+    """(R90 review W1) Every branch on an unknown value that chose a path, in order, once each — up to
+    `FORKED_UB_SELECTORS_SHOWN`, then how many more (``… N more``: not one of them, so never read as an open input)."""
+    names: list[str] = []
+    for s in selectors:
+        s = s[len("branch_on_unknown:"):] if s.startswith("branch_on_unknown:") else s
+        s = s[:80].replace("+", " ")    # `+` joins the reason's possible-UB tags
+        if s not in names:
+            names.append(s)
+    shown = names[:FORKED_UB_SELECTORS_SHOWN]
+    if len(names) > len(shown):
+        shown.append(f"… {len(names) - len(shown)} more")
+    return FORKED_UB_SELECTOR_SEP.join(shown)
+
+
+def forked_path_ub(tags) -> list[tuple[str, str]]:
+    """(R90 review C1) ``(kind, selector)`` of every possible-UB tag `_Interp.undefined` gave, sorted."""
+    return sorted({(m.group(1), m.group(2)) for t in tags or () for m in [_FORKED_UB_TAG.fullmatch(str(t))] if m})
+
+
+def _size_value(x):
+    """(R90) The value of ``x`` when it is a ``sizeof`` value (`_SIZE_REASON`) — known, of the implementation's ``size_t``
+    (an unsigned type of at least 16 bits whose rank the source does not say: C11 6.5.3.4p5, 7.19p2, 7.20.3) — else None.
+    A value passed through an operator that is not `_Interp.size_arith` loses ``r`` (``_Val(x.v, None)``), so it is no
+    longer one."""
+    if x.t is None and isinstance(x.v, Unknown) and x.v.reason == _SIZE_REASON and x.r is not None \
+            and x.r[0] == x.r[1]:
+        return x.r[0]
+    return None
 
 
 class _Pointer:
@@ -174,7 +254,7 @@ def _loaded(value, t):
 
 class _State:
     __slots__ = ("store", "mode", "ret", "havoc_all", "havoc_pointer", "havoc_bases", "escaped", "forks", "possible_ub",
-                 "decisions", "initial_reads", "rebound")
+                 "decisions", "initial_reads", "rebound", "selectors", "ub_proven")
 
     def __init__(self):
         self.store: dict[str, Any] = {}
@@ -194,6 +274,13 @@ class _State:
         # (review R82 C1) pointer members of a harness object (`@pointee:msg[0].data`) the path wrote or may have written
         #   — they no longer point to the harness buffer: an access through them is through an unknown pointer again
         self.rebound: set[str] = set()
+        # (R90 review C1) the branches on an unknown value that chose this path among others in this run — unlike
+        #   ``forks``, not those of a callee whose paths were joined back into one (`_World.inline`): the joined state is
+        #   every callee path, not a choice among them. Empty: this is the run's only path
+        self.selectors: list[str] = []
+        # (R90 review C1) the kind of the first undefined behaviour proven on this very path (`_Interp.undefined`), or ""
+        #   — a joined callee state has it only when every callee path had it; every final path with it refuses the run
+        self.ub_proven = ""
 
     def copy(self, records=True):
         """A copy of the path — (R79 review I-R2-3) without its records (``records=False``) for a probe that reads only
@@ -206,6 +293,8 @@ class _State:
         s.havoc_pointer = self.havoc_pointer
         s.initial_reads = set(self.initial_reads)
         s.rebound = set(self.rebound)
+        s.selectors = list(self.selectors)
+        s.ub_proven = self.ub_proven
         return s
 
 
@@ -215,6 +304,25 @@ def _text(node, raw):
 
 def _named(node):
     return [c for c in node.named_children if c.type != "comment"]
+
+
+#: (R90) conditional groups (`_Interp.switch_items`)
+_PP_GROUPS = frozenset({"preproc_if", "preproc_ifdef", "preproc_elif", "preproc_elifdef"})
+
+
+def _group_holds(node, kinds: frozenset) -> bool:
+    """(R90) A node of ``kinds`` directly in an arm of this conditional group (through nested groups and ``#else``, not
+    into blocks) — in a switch body, a label of that switch or a declaration in the switch block's scope."""
+    for c in node.named_children:
+        if c.type in kinds or (c.type in _PP_GROUPS | {"preproc_else"} and _group_holds(c, kinds)):
+            return True
+    return False
+
+
+#: (R90) what a group in a switch body must be decided for before the switch runs (`_Interp.switch_items`): a label is
+#   a jump target, and a declaration is in scope at every later label — a jump past it passes it (C11 6.2.1p4, R16b
+#   review C2 `skipped_decls`) whether or not the path ran its group
+_SWITCH_EAGER = frozenset({"case_statement", "declaration"})
 
 
 def _op(node, raw):
@@ -509,15 +617,34 @@ class _Interp:
         if self.steps > self.limit:
             raise Unsupported("execution_budget")
 
-    def lift(self, fn, *args):
-        """cpc operation: UB refuses the evaluation, other unresolved results are an unknown value."""
+    def lift(self, fn, *args, state=None):
+        """cpc operation: UB refuses the evaluation (`undefined` — on ``state``, the path being evaluated, when the
+        caller names it), other unresolved results are an unknown value."""
         try:
             return fn(*args)
         except cpc.Unresolved as exc:
             reason = str(exc)
             if reason in _UB_REASONS:
-                raise Unsupported("undefined_behavior:" + reason) from exc
+                return self.undefined(state, reason)
             return Unknown(reason)
+
+    def undefined(self, state, kind):
+        """(R90 review C1) Undefined behaviour ``kind`` proven on the path ``state``. On the run's only path (no branch on
+        an unknown value chose it — `_State.selectors`; ``state`` None: not known) it refuses the evaluation, as before.
+        On a path such a branch chose, the run may or may not take it: possible undefined behaviour of the run, as an
+        unknown divisor is (when every final path has proven one, no run is without it — refused at the end,
+        `_every_path_undefined`) — disclosed (``<kind>_on_unknown_branch(selector=…)``, every branch that chose the path, in
+        order — review W1: the last one alone named an open input where a register had chosen the path before it)
+        and the faulting operation's result is unknown (the caller: an unknown value, an out-of-bounds write unknown in
+        the whole object). The path runs on. It is never dropped: dropping it would take "the program has no undefined
+        behaviour" as evidence about the unknown that chose it — ``if (g_mode == 1U) { g_out = g_tbl[5]; } else
+        { g_out = 2U; }`` would derive ``g_out = 2`` where ``g_tbl[1]`` in its place leaves it unknown (HDPDM01
+        `lin_tl_make_slaveres_pdu`: the path a callee's pointer write chose was the one the real run takes)."""
+        if state is None or not state.selectors:
+            raise Unsupported("undefined_behavior:" + kind)
+        state.possible_ub.add(f"{kind}{FORKED_UB_SUFFIX}(selector={selector_text(state.selectors)})")
+        state.ub_proven = state.ub_proven or kind   # every final path with it: no run without it (`_every_path_undefined`)
+        return Unknown(FORKED_UB_REASON + kind)
 
     def type_of(self, text):
         text = " ".join(str(text).split())
@@ -544,7 +671,7 @@ class _Interp:
             return Unknown("input_type_unmodeled:" + name)
         lo, hi = (0, 1) if t["kind"] == "_Bool" else cpc.type_range(t)
         if t.get("enum"):
-            lo, hi = ENUM_INPUT_RANGE
+            lo, hi = enum_input_range(self.scope, t)   # (R90 review W4)
         if not lo <= value <= hi:
             return Unknown("input_outside_declared_type:" + name)
         return value
@@ -717,23 +844,38 @@ class _Interp:
             self.havoc_everything(state, target[1], locals_too=True)  # the target may be any name in scope
 
     def convert_to(self, val, t):
-        if isinstance(val.v, Unknown):
+        value = _size_value(val)
+        if value is not None:
+            # (R90) a ``sizeof`` value converts by its value alone (C11 6.3.1.3 — a non-negative value, whatever unsigned
+            #   type ``size_t`` is); never stored as the marked unknown it is (`_size_value` reads no stored object)
+            if not isinstance(t, dict) or cpc.is_float(t):
+                return Unknown("floating_point_unmodeled" if cpc.is_float(t) else "sizeof_unmodeled")
+        elif isinstance(val.v, Unknown):
             # Stored with exactly the interval of the value stored — an object reused from another value may carry
             # that value's interval, which must not be stored (review round 6 C1).
             if val.r is None and val.v.range is None:
                 return val.v
             return Unknown(val.v.reason, val.r)
-        if cpc.is_float(t) or cpc.is_float(val.t) or val.t is None:
+        elif cpc.is_float(t) or cpc.is_float(val.t) or val.t is None:
             return Unknown("floating_point_unmodeled" if (cpc.is_float(t) or cpc.is_float(val.t)) else "value_type_unresolved")
+        else:
+            value = val.v
         if t.get("enum"):
             # An enumeration object's underlying type is implementation-defined (C11 6.7.2.2p4): the stored value
             # is known only if every permitted choice holds it unchanged.
-            outs = {repr(self.lift(cpc.convert, val.v, c)) for c in self.enum_candidates()}
-            return val.v if outs == {repr(val.v)} else Unknown("enum_object_type_implementation_defined")
-        return self.lift(cpc.convert, val.v, t)
+            outs = {repr(self.lift(cpc.convert, value, c)) for c in self.enum_candidates(t)}
+            return value if outs == {repr(value)} else Unknown("enum_object_type_implementation_defined")
+        return self.lift(cpc.convert, value, t)
 
-    def enum_candidates(self):
-        return cpc.enum_candidates(self.widths)   # (R67) one list for the oracle and constant expressions
+    def enum_candidates(self, t=None):
+        """(R67) one list for the oracle and constant expressions — (R90 review W4) for the enumeration ``t`` only the
+        types that hold every member of it (C11 6.7.2.2p4: ``E_SID_B2 = 0xB2`` rules out ``signed char``)."""
+        candidates = cpc.enum_candidates(self.widths)
+        span = enum_member_span(self.scope, t) if t is not None else None
+        if span is None:
+            return candidates
+        held = [c for c in candidates if cpc.type_range(c)[0] <= span[0] and span[1] <= cpc.type_range(c)[1]]
+        return held or candidates
 
     # ── function entry ───────────────────────────────────────────────────────────────────────────
     def bind_parameters(self, state, args=None):
@@ -915,6 +1057,8 @@ class _Interp:
                 reason = "branch_on_unknown:" + val.v.reason if isinstance(val.v, Unknown) else "branch_on_unknown"
                 s.forks.append(reason)
                 other.forks.append(reason)
+                s.selectors.append(reason)       # (R90 review C1)
+                other.selectors.append(reason)
                 yes.append(s)
                 no.append(other)
             elif truth:
@@ -926,6 +1070,9 @@ class _Interp:
         return yes, no
 
     def truth(self, val):
+        size = _size_value(val)
+        if size is not None:
+            return bool(size)   # (R90) a ``sizeof`` value: its value is known, whatever its type
         if isinstance(val.v, Unknown):
             return None
         return bool(val.v)
@@ -996,15 +1143,76 @@ class _Interp:
                 raise Unsupported("path_budget")
         return done
 
+    def switch_layout(self, n, body) -> list:
+        """(R90 review) `switch_items` of the switch ``n``, once per function: ``shared`` is kept for one ``fn`` / ``raw`` /
+        ``scope`` across the vectors and loop passes, and the layout rests on the unit's preprocessing only, never on the
+        inputs. The names its verdicts took as undefined are kept with it and added to every run that uses it (each run
+        records its own); an undecided group's refusal is kept as a refusal."""
+        memo = self.shared.setdefault("switch_layouts", {})
+        key = (n.start_byte, n.end_byte)
+        hit = memo.get(key)
+        if hit is None:
+            assumed: set[str] = set()
+            try:
+                hit = ("ok", self.switch_items(_named(body) if body is not None else [], [], assumed), frozenset(assumed))
+            except Unsupported as exc:
+                hit = ("refused", str(exc), frozenset(assumed))
+            memo[key] = hit
+        self.assumed_undefined |= hit[2]
+        if hit[0] == "refused":
+            raise Unsupported(hit[1])
+        return hit[1]
+
+    def switch_items(self, nodes, out: list, assumed: set) -> list:
+        """(R90) The switch body as the compiler reads it: ``("label", case_statement)`` and ``("stmt", node)`` in source
+        order. A conditional group with a ``case`` / ``default`` label in an arm (``#if (LIN_PROTOCOL == PROTOCOL_21)``
+        around five ``case`` labels — HDPDM01 ``lin_tl_make_slaveres_pdu`` / ``lin_tl_attach_service``) is replaced by the
+        arm the unit's preprocessing decides (`cpc.pp_condition` — the verdict `statement` gives a group between
+        statements, with its assumptions); the other arm is absent. Undecided → ``conditional_compilation_unresolved``.
+        So is a group holding a declaration (in scope at every later label, `_SWITCH_EAGER`). A group with neither stays
+        one statement (`statement` decides it when a path reaches it). The parser ends a
+        case's statement list at a directive, so the group and the statements after its ``#endif`` are children of the
+        switch body: in source order they belong to the label before them, as for the compiler (before R90 they made
+        the whole switch `switch_body_statement_outside_case`). A group is never a child of a ``case_statement`` in
+        this grammar; walking a case's children keeps the order should one be."""
+        for x in nodes:
+            if x.type == "comment":
+                continue
+            if x.type == "case_statement":
+                value = x.child_by_field_name("value")
+                out.append(("label", x))
+                self.switch_items([c for c in x.named_children if c != value], out, assumed)
+                continue
+            if x.type == "preproc_else":   # the arm a decided group chose (below)
+                self.switch_items(x.named_children, out, assumed)
+                continue
+            if x.type in _PP_GROUPS and _group_holds(x, _SWITCH_EAGER):
+                verdict = cpc.pp_condition(self.scope, x, self.raw, assumed)
+                if verdict is None:
+                    raise Unsupported("conditional_compilation_unresolved")
+                cond, name, alt = (x.child_by_field_name(f) for f in ("condition", "name", "alternative"))
+                arm = [c for c in x.named_children if c not in (cond, name, alt)] if verdict else \
+                    ([alt] if alt is not None else [])
+                self.switch_items(arm, out, assumed)
+                continue
+            out.append(("stmt", x))
+        return out
+
     def switch(self, states, n):
         raw = self.raw
         body = n.child_by_field_name("body")
-        cases = [c for c in _named(body)] if body is not None else []
-        if any(c.type != "case_statement" for c in cases):
-            raise Unsupported("switch_body_statement_outside_case")
+        # (R90) labels and statements after deciding the conditional groups that hold labels (`switch_items`)
+        cases: list[tuple[Any, list]] = []
+        for kind, x in self.switch_layout(n, body):
+            if kind == "label":
+                cases.append((x, []))
+            elif not cases:
+                raise Unsupported("switch_body_statement_outside_case")
+            else:
+                cases[-1][1].append(x)
         # (R16b review R2 WR2-3) a label inside a block of an earlier case (``else { case 3U: … }``) is a jump target
         # of this switch too — only direct labels are modelled, so such a switch is not interpreted
-        stack = [x for c in cases for x in _named(c)]
+        stack = [x for _c, stmts in cases for x in stmts]
         while stack:
             x = stack.pop()
             if x.type == "case_statement":
@@ -1012,7 +1220,7 @@ class _Interp:
             if x.type != "switch_statement":   # a nested switch's labels are its own
                 stack.extend(_named(x))
         labels = []
-        for c in cases:
+        for c, _stmts in cases:
             v = c.child_by_field_name("value")
             if v is None:
                 labels.append(None)
@@ -1050,6 +1258,7 @@ class _Interp:
                 for i, target in enumerate(targets):
                     t = s if i == 0 else s.copy()
                     t.forks.append(reason)
+                    t.selectors.append(reason)   # (R90 review C1)
                     (ended if target == -1 else entering.setdefault(target, [])).append(t)
                 continue
             chosen = None
@@ -1067,7 +1276,7 @@ class _Interp:
         self.lexical.append({})  # declarations after a case label live in the switch body's block (review W6)
         try:
             skipped_decls: list = []
-            for i, c in enumerate(cases):
+            for i, (_c, stmts) in enumerate(cases):
                 for s in entering.get(i, []):
                     # (R16b review C2) a jump to this label passes the declarations of the earlier cases: their names
                     # are in scope to the end of the switch block (C11 6.2.1p4) — a later ``cnt`` is that local, not a
@@ -1075,11 +1284,8 @@ class _Interp:
                     for d in skipped_decls:
                         self.declaration(s, d, skipped=True)
                 running = running + entering.get(i, [])
-                skipped_decls.extend(stmt for stmt in c.named_children if stmt.type == "declaration")
-                value = c.child_by_field_name("value")
-                for stmt in c.named_children:
-                    if stmt == value or stmt.type == "comment":
-                        continue
+                skipped_decls.extend(stmt for stmt in stmts if stmt.type == "declaration")
+                for stmt in stmts:
                     running = self.run(running, stmt)
         finally:
             self.lexical.pop()
@@ -1145,7 +1351,7 @@ class _Interp:
                     if isinstance(lv.v, int) and lv.v > 0:
                         length = lv.v
                 info = {"key": key, "type": t if isinstance(t, dict) else None, "array": True, "length": length,
-                        "volatile": volatile, "kind": "local"}
+                        "volatile": volatile, "kind": "local", "type_name": _text(typ, raw) if typ is not None else ""}
                 items = _named(value) if value is not None and value.type == "initializer_list" else None
                 if length is None and items is not None and not any(i.type == "initializer_pair" for i in items):
                     length = info["length"] = len(items)
@@ -1254,10 +1460,18 @@ class _Interp:
             base = cpc._base_identifier(node, raw) if node is not None else ""
             return self.resolve_alias(base) if base else ""
 
-        def through_pointer(name):
+        def through_pointer(name, w):
             """A write target that is not a named object (``*p``, ``p[i]`` on a pointer, an unknown name)."""
             if not name:
                 return True
+            node = _unwrap(w.child_by_field_name("left" if w.type == "assignment_expression" else "argument"))
+            if node is not None and node.type == "identifier" and name not in self.macro_status and (
+                    (self.lookup(name) is not None and not self.lookup(name).get("extern")) or name in self.globals
+                    or name in self.arrays or name in (self.scope.get("unresolved_globals") or {})):
+                # (R90) ``p++`` · ``p = q``: the pointer object itself is written, not what it points to — HDPDM01
+                #   `sf_Crc32Cal` ``crc = s_Crc32Table[(crc ^ *p++) & 0xFFu] ^ (crc >> 8u)`` was refused as a write
+                #   through ``p`` beside a read of the table (no access of ``p`` but the increment's own)
+                return False
             info = self.lookup(name)
             if info is not None and not info.get("extern"):
                 # ``PT q`` (``typedef U8 *PT``) resolves to no scalar type: it may be a pointer (round 4 C2)
@@ -1279,11 +1493,11 @@ class _Interp:
 
         for i, w1 in enumerate(writes):
             t1 = target(w1)
-            p1 = through_pointer(t1)
+            p1 = through_pointer(t1, w1)
             for w2 in writes[i + 1:]:
                 nested = inside(w2, w1) or inside(w1, w2)
                 t2 = target(w2)
-                p2 = through_pointer(t2)
+                p2 = through_pointer(t2, w2)
                 if nested and ((t1 and t1 == t2) or (p1 and (p2 or reachable(t2))) or (p2 and reachable(t1))):
                     raise Unsupported("unsequenced_side_effects")
                 if not nested and not _sequenced_apart(w1, w2, raw):
@@ -1755,7 +1969,9 @@ class _Interp:
             return _Val(Unknown("pointer_dereference"), None)
         if k == "call_expression":
             return self.call(state, n, raw, depth)
-        if k in {"sizeof_expression", "alignof_expression"}:
+        if k == "sizeof_expression":
+            return self.sizeof_value(n, raw)   # (R90)
+        if k == "alignof_expression":
             return _Val(Unknown("sizeof_unmodeled"), None)
         if k == "string_literal" or k == "concatenated_string":
             return _Val(Unknown("string_literal"), None)
@@ -1847,7 +2063,8 @@ class _Interp:
         if not isinstance(value, _Pointer):
             return None
         if value.target is None:
-            raise Unsupported("undefined_behavior:null_pointer_dereference")
+            self.undefined(state, "null_pointer_dereference")   # (R90 review C1) a chosen path: through an unknown pointer
+            return None
         return value.target, "".join("." + x for x in reversed(parts))
 
     def pointee_object(self, target, path, state=None):
@@ -2120,9 +2337,85 @@ class _Interp:
         self.check_sequencing(state, node, eraw)  # the expansion's own order (``g_x + g_x++``; round 2 B)
         return self.expression(state, node, eraw, depth + 1)
 
+    def sizeof_value(self, n, raw):
+        """(R90) ``sizeof`` where C fixes the size whatever the implementation pads: a character type is 1 (C11 6.5.3.4p4)
+        and an array of one with a known length is that length (p4, 6.2.5p20) — HDPDM01 `sf_Crc32Init` loops ``i <
+        sizeof(p) / sizeof(UINT8)`` over ``static const UINT8 p[] = {…14 items…}``; unread, every pass of that loop was a
+        branch on an unknown value and the pass past 14 indexed past ``p`` — undefined behaviour that refused every SITS
+        row through `CheckProgDependencies`. The operand is not evaluated (p2): only its type is read. The value is known,
+        its type is ``size_t`` (`_size_value`). Anything else stays ``sizeof_unmodeled``: ``sizeof(U16)`` is 2 only
+        without padding bits, a struct only with its layout, a parameter declared as an array is a pointer."""
+        size = None
+        tnode, operand = n.child_by_field_name("type"), n.child_by_field_name("value")
+        if tnode is not None:
+            if tnode.child_by_field_name("declarator") is None:   # ``sizeof(U8 *)`` is a pointer's size
+                size = self.char_type_size(_text(tnode, raw))
+        elif operand is not None:
+            size = self.object_size(operand, raw)
+        if size is None:
+            return _Val(Unknown("sizeof_unmodeled"), None)
+        return _Val(Unknown(_SIZE_REASON), None, (size, size))
+
+    def char_type_size(self, text):
+        """(R90) 1 when ``text`` names a character type (plain ``char`` too — its signedness does not change its size),
+        else None."""
+        words = [w for w in str(text).split() if w not in {"const", "volatile"}]
+        if not words:
+            return None
+        t = self.type_of(" ".join(words))
+        if isinstance(t, dict):
+            return 1 if t.get("kind") == "char" and not t.get("enum") and not cpc.is_float(t) else None
+        kind = cpc.base_kind(" ".join(words))
+        return 1 if kind is not None and kind[0] == "char" else None
+
+    def object_size(self, node, raw):
+        """(R90) The size `sizeof_value` may take of an expression operand: an object of a character type (1), an
+        element of a character array (1), a character array of known length (its length) — named directly; a parameter,
+        a macro or anything else is None."""
+        while node.type == "parenthesized_expression" and len(_named(node)) == 1:
+            node = _named(node)[0]
+        element = node.type == "subscript_expression"
+        if element:
+            node = node.child_by_field_name("argument")
+            while node is not None and node.type == "parenthesized_expression" and len(_named(node)) == 1:
+                node = _named(node)[0]
+        if node is None or node.type != "identifier":
+            return None
+        name = _text(node, raw)
+        if name in self.macro_status:
+            return None
+        info = self.lookup(name)
+        if info is not None and not info.get("extern"):
+            if info.get("pointer"):   # a pointer — a parameter declared as an array is one (C11 6.7.6.3p7)
+                return None
+            is_array, t = bool(info.get("array")), info.get("type")
+            if is_array and not isinstance(t, dict):
+                # ``static const UINT8 p[]``: the qualified name is no type the scope holds — the element's size is not
+                #   the qualifier's (6.2.5p26)
+                t = self.type_of(" ".join(w for w in str(info.get("type_name") or "").split()
+                                          if w not in {"const", "volatile"}) or "?")
+            length = info.get("length") if is_array else None
+        elif name in self.arrays:
+            is_array, t, length = True, self.arrays[name]["type"], self.arrays[name]["length"]
+        elif name in self.globals:
+            is_array, t, length = False, self.globals[name]["type"], None
+        elif element or name in (self.scope.get("unresolved_globals") or {}) or _declared_in_function(node, name, raw):
+            return None
+        else:
+            # ``sizeof (UINT8)``: the grammar reads a parenthesized type name as a parenthesized expression — a name no
+            #   object in scope has is the typedef it names, if the scope resolves one
+            return self.char_type_size(name)
+        if (element and not is_array) or not isinstance(t, dict) or t.get("kind") != "char" or t.get("enum"):
+            return None
+        if element or not is_array:
+            return 1
+        return length if isinstance(length, int) and length > 0 else None
+
     def cast(self, inner, t):
         if isinstance(t, Unknown):
             return _Val(t, None)
+        if _size_value(inner) is not None and not cpc.is_float(t):
+            return _Val(self.convert_to(inner, t), t)   # (R90) ``(U8)sizeof(buf)``: by its value (`convert_to`)
         if cpc.is_float(t) or cpc.is_float(inner.t):
             return _Val(Unknown("floating_point_unmodeled"), t)
         if isinstance(inner.v, Unknown):
@@ -2148,8 +2441,8 @@ class _Interp:
             span = self.note_possible_overflow(state, op, (arg,), rt) if op == "-" and state is not None else None
             return _Val(arg.v, rt, span)
         if arg.t.get("enum") and op != "!":
-            return self.enum_dual(lambda c: cpc.arith(op, None, (arg.v, c), self.widths), rt)
-        value = self.lift(cpc.arith, op, None, (arg.v, arg.t), self.widths)
+            return self.enum_dual(lambda c: cpc.arith(op, None, (arg.v, c), self.widths), rt, arg.t)
+        value = self.lift(cpc.arith, op, None, (arg.v, arg.t), self.widths, state=state)
         return _Val(value[0] if isinstance(value, tuple) else value, rt)
 
     def operand_range(self, x):
@@ -2160,7 +2453,7 @@ class _Interp:
         if not isinstance(x.t, dict) or cpc.is_float(x.t):
             return None
         if x.t.get("enum"):
-            ranges = [cpc.type_range(c) for c in self.enum_candidates()]
+            ranges = [cpc.type_range(c) for c in self.enum_candidates(x.t)]
             return min(r[0] for r in ranges), max(r[1] for r in ranges)
         lo, hi = cpc.type_range(x.t)
         span = x.r
@@ -2203,10 +2496,11 @@ class _Interp:
             return None
         return span
 
-    def enum_dual(self, compute, rt):
-        """Result of an operation on an enumeration object under every permitted underlying type."""
+    def enum_dual(self, compute, rt, et=None):
+        """Result of an operation on an enumeration object under every permitted underlying type (``et``: the one
+        enumeration type it reads — (R90 review W4) the types that hold its members)."""
         results = set()
-        for c in self.enum_candidates():
+        for c in self.enum_candidates(et):
             try:
                 v, t = compute(c)
             except cpc.Unresolved:
@@ -2340,6 +2634,10 @@ class _Interp:
         state (review C3); undefined behaviour there is only possible, and disclosed. Otherwise the operand does not
         run at all (the other arm of a decided ``?:``) and only its type is wanted."""
         probe = state.copy()
+        # (R90 review W2) an operand that runs on some executions is judged as on the run's only path: undefined behaviour
+        #   there is possible whatever path this is (`operand_under_unknown_condition`) — on a forked path it was tagged
+        #   with the branch that chose the path, not with the condition that runs the operand
+        probe.selectors = []
         try:
             value = self.expression(probe, node, raw, depth + 1)
         except Unsupported as exc:
@@ -2561,7 +2859,8 @@ class _Interp:
                 if key in self.harness_buffers and iv.v >= 0:
                     # (review R82 I6) past the length the model gives a harness buffer — a limit of the model, not C's
                     raise Unsupported("harness_buffer_index_beyond_model:" + str(iv.v))
-                raise Unsupported("undefined_behavior:array_index_out_of_bounds")
+                # (R90 review C1) on a chosen path: a read is unknown, a write leaves the whole array unknown
+                return ("base", key, self.undefined(state, "array_index_out_of_bounds").reason)
             if key in self.harness_buffers:
                 self.buffer_reach[key] = max(self.buffer_reach.get(key, -1), int(iv.v))
             return ("key", f"{key}[{iv.v}]", t, volatile)
@@ -2643,7 +2942,7 @@ class _Interp:
         values = [self.expression(state, x, raw, depth + 1) for x in reversed(indices[1:])] + [last]   # outermost first
         known = [None if isinstance(v.v, Unknown) or v.t is None else int(v.v) for v in values]
         if any(k is not None and (k < 0 or (d is not None and k >= d)) for k, d in zip(known, shape["dims"], strict=True)):
-            raise Unsupported("undefined_behavior:array_index_out_of_bounds")
+            return ("base", name, self.undefined(state, "array_index_out_of_bounds").reason)   # (R90 review C1)
         if None in known:
             state.possible_ub.add("index_unknown")
             v = values[known.index(None)]
@@ -2795,16 +3094,61 @@ class _Interp:
         except Exception:  # noqa: BLE001  # silent-ok — no common integer type: the values as evaluated
             return a, b
 
+    def size_arith(self, op, left, right):
+        """(R90) An operator with a ``sizeof`` value (`_size_value`): its value is known, its type is ``size_t`` — an
+        unsigned type of at least 16 bits (SIZE_MAX >= 65535, C11 7.20.3) whose rank the source does not say, so the
+        common type is not known. With both operands' values known and non-negative the result does not depend on it
+        where it is exact in every such type: a comparison (each value is representable in the common type, whichever
+        it is — 6.3.1.8 — so it compares the values; ``int``), ``/`` ``%`` (no wrap, no overflow), ``+`` ``-`` ``*`` ``&``
+        ``|`` ``^`` with a result in 0..32767 (representable in ``int`` and in every unsigned type, so no wrap and no
+        overflow), ``>>`` of a ``sizeof`` value by a count below 16 (no type is narrower). Then the result is again a value
+        of a type the source does not say. None otherwise — the operator then reads it as an unknown of unknown type, as
+        before R90."""
+        a, b = _size_value(left), _size_value(right)
+        if a is None and b is None:
+            return None
+        sized_left = a is not None
+        a = a if a is not None else _known_int(left)
+        b = b if b is not None else _known_int(right)
+        if a is None or b is None or a < 0 or b < 0:
+            return None
+        if op in {"<", "<=", ">", ">=", "==", "!="}:
+            return _Val(int({"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b, "==": a == b, "!=": a != b}[op]),
+                        self.int_t)
+        if op in {"/", "%"} and b:
+            r = a // b if op == "/" else a % b
+        elif op in {"+", "-", "*", "&", "|", "^"}:
+            r = {"+": a + b, "-": a - b, "*": a * b, "&": a & b, "|": a | b, "^": a ^ b}[op]
+        elif op == ">>" and sized_left and b < 16:
+            r = a >> b
+        else:
+            return None
+        if not 0 <= r <= 32767:
+            return None
+        return _Val(Unknown(_SIZE_REASON), None, (r, r))
+
+    def faulted(self, state, kind, op, left, right):
+        """(R90 review C1) An operator whose undefined behaviour ``kind`` is proven whatever the other operand holds: refused
+        on the run's only path (`undefined`), an unknown result of the operator's type on a path an unknown branch chose."""
+        reason = self.undefined(state, kind)
+        typed = all(isinstance(x.t, dict) and not cpc.is_float(x.t) and not x.t.get("enum") for x in (left, right))
+        rt = (cpc.promote(left.t, self.widths) if op in {"<<", ">>"} else cpc.usual_conversion(left.t, right.t, self.widths)) \
+            if typed else None
+        return _Val(reason, rt)
+
     def arith_values(self, op, left, right, state):
         """One binary operator on evaluated operands (arithmetic, bitwise, shift, comparison)."""
         comparison = op in {"<", "<=", ">", ">=", "==", "!="}
         right_known = not isinstance(right.v, Unknown) and isinstance(right.t, dict) and not cpc.is_float(right.t)
         # Undefined whatever the other operand holds (C11 6.5.5p5, 6.5.7p3): refused even when it is unknown.
         if right_known and op in {"/", "%"} and right.v == 0:
-            raise Unsupported("undefined_behavior:division_by_zero")
+            return self.faulted(state, "division_by_zero", op, left, right)
         if right_known and op in {"<<", ">>"} and (right.v < 0 or (
                 isinstance(left.t, dict) and not cpc.is_float(left.t) and right.v >= cpc.promote(left.t, self.widths)["bits"])):
-            raise Unsupported("undefined_behavior:shift_count_out_of_range")
+            return self.faulted(state, "shift_count_out_of_range", op, left, right)
+        sized = self.size_arith(op, left, right)
+        if sized is not None:
+            return sized   # (R90)
         if not right_known and op in {"/", "%", "<<", ">>"}:
             # An unknown divisor or shift count may be undefined on the real run: disclosed, not proven absent.
             state.possible_ub.add("division_by_unknown" if op in {"/", "%"} else "shift_by_unknown")
@@ -2831,9 +3175,11 @@ class _Interp:
                 # A result that provably stayed in range keeps its interval (``(S32)a * 1000L + b`` stays checkable).
                 return _Val(x.v, rt, span)
         if left.t.get("enum") or right.t.get("enum"):
+            # (R90 review W4) one enumeration operand: the types that hold its members; two: every choice, as before
+            et = None if left.t.get("enum") and right.t.get("enum") else (left.t if left.t.get("enum") else right.t)
             return self.enum_dual(lambda c: cpc.arith(op, (left.v, c if left.t.get("enum") else left.t),
-                                                      (right.v, c if right.t.get("enum") else right.t), self.widths), rt)
-        value = self.lift(cpc.arith, op, (left.v, left.t), (right.v, right.t), self.widths)
+                                                      (right.v, c if right.t.get("enum") else right.t), self.widths), rt, et)
+        value = self.lift(cpc.arith, op, (left.v, left.t), (right.v, right.t), self.widths, state=state)
         if isinstance(value, Unknown):
             return _Val(value, rt)
         return _Val(value[0], value[1])
@@ -3309,8 +3655,10 @@ class _World:
     binds to (or raises `Unsupported`). The callee runs on a copy of the caller's state, its parameters bound to the
     argument values; its final paths are **joined** back into the caller's one state: an object on which paths
     disagree becomes unknown (``path_dependent_in_callee``), as does a return value they disagree on. Nothing the
-    callee does is dropped: havoc marks, escapes, possible UB and forks carry over; UB proven inside it refuses the
-    evaluation as it would in the caller. A call that cannot run (no definition, recursion, depth, an unsupported
+    callee does is dropped: havoc marks, escapes, possible UB and forks carry over; UB proven inside it is judged as it
+    would be in the caller — (R90 review C1) on a callee path a branch on an unknown value chose (in the callee or before
+    the call) it is possible UB of that path, which runs on (`_Interp.undefined`); on the only path it refuses the
+    evaluation. A call that cannot run (no definition, recursion, depth, an unsupported
     statement, its budget share) falls back to the write-closure effects — the same unknowns as without a world.
 
     Globals are keyed by name across translation units, so a name must mean one object: an internal-linkage object
@@ -3434,7 +3782,7 @@ class _World:
         except Unsupported as exc:
             caller.steps = sub.steps
             if str(exc).startswith("undefined_behavior:") or str(exc) in _REFUSING_IN_CALLEE:
-                raise  # proven on a path of the integrated run: the evaluation has no defined result
+                raise  # proven on the run's only path (`_Interp.undefined`): the evaluation has no defined result
             return self.fail(name, str(exc))
         finally:
             self.stack.pop()
@@ -3452,10 +3800,11 @@ class _World:
             base = key.split("[", 1)[0]
             if key not in before and key.startswith("@") and base not in self.static_keys and base not in merged.escaped:
                 del merged.store[key]   # (review I1) statics of callees it called stay too
-        ret = state.ret
+        ret, selectors = state.ret, list(state.selectors)
         for slot in _State.__slots__:
             setattr(state, slot, getattr(merged, slot))
-        state.mode, state.ret = "normal", ret
+        # (R90 review C1) the joined state is every callee path: the call chose no path of the caller's
+        state.mode, state.ret, state.selectors = "normal", ret, selectors
         # (review C3, W-R2-2) no re-application here: the callee's own havoc already judges by every admitted unit's
         # objects and every activation's static locals (`havoc_pointer_targets`, `all_statics`).
         self.inlined[name] = self.inlined.get(name, 0) + 1
@@ -3501,6 +3850,8 @@ class _World:
                 merged.forks.extend(f for f in s.forks if f not in merged.forks)
             if "callee_paths:" + name not in merged.forks:   # a loop joins the same callee many times: once is the fact
                 merged.forks.append("callee_paths:" + name)
+            # (R90 review C1) the joined state is every callee path: it proved undefined behaviour only if each did
+            merged.ub_proven = finals[0].ub_proven if all(s.ub_proven for s in finals) else ""
         if void:
             return merged, _Val(Unknown("void_call_value:" + name), None)
         if not isinstance(rt, dict):
@@ -4015,6 +4366,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             finals = interp.run([state], fn.child_by_field_name("body"))
             if any(s.mode in {"break", "continue"} for s in finals):
                 raise Unsupported("jump_outside_loop")
+            _every_path_undefined(finals)   # (R90 review C1)
             values = _final_outputs(interp, finals, outs)
             possible = sorted({k for s in finals for k in s.possible_ub})
             if interp.stubs_used:
@@ -4079,6 +4431,17 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             record.update(status="supported", reason="project_context_source_evaluation" +
                           (":possible_ub=" + "+".join(possible) if possible else ""),
                           outputs=values, paths=len(finals), possible_undefined_behavior=possible)
+            forked = forked_path_ub(possible)
+            if forked:
+                # (R90 review C1) proven on a path an unknown branch chose — the path ran on with the faulting result
+                #   unknown; still a defect candidate of the source (`source_findings`), said on every derived value
+                record["forked_path_undefined_behavior"] = [{"kind": k, "selector": sel} for k, sel in forked]
+                record["assumptions"] = list(record["assumptions"]) + [
+                    "possible_ub_on_forked_path: undefined behaviour proven on a path a branch on an unknown value chose ("
+                    + "; ".join(f"{k} — chosen by {sel}" for k, sel in forked[:6])
+                    + (f"; +{len(forked) - 6}" if len(forked) > 6 else "") + ") — that path ran on with the faulting "
+                    "operation's result unknown (an out-of-bounds write: the whole array); a value derived here holds for "
+                    "runs that do not take it"]
             if written:
                 try:
                     why: dict[str, str] = {}
@@ -4094,6 +4457,14 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             record.update(status="unsupported", reason=reason, outputs={o: {"reason": reason} for o in outs})
         results.append(record)
     return results
+
+
+def _every_path_undefined(finals):
+    """(R90 review C1) Refuse a run whose every final path proved undefined behaviour (`_Interp.undefined` tolerates it
+    on a path an unknown branch chose): whichever way those branches go, the run has it — ``if (u) { x = 10U / 0U; }
+    else { y = 20U / 0U; }`` is no run without undefined behaviour."""
+    if finals and all(s.ub_proven for s in finals):
+        raise Unsupported("undefined_behavior:" + finals[0].ub_proven)
 
 
 def _final_outputs(interp, finals, outs):
@@ -4358,6 +4729,7 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
             finals = interp.run([state], fn.child_by_field_name("body"))
             if any(s.mode in {"break", "continue"} for s in finals):
                 raise Unsupported("jump_outside_loop")
+            _every_path_undefined(finals)   # (R90 review C1)
             record["steps"] = interp.steps  # (R2c) the run's cost: callers budget searches by it (deterministic)
             for spec in specs.values():
                 record["decisions"][spec["key"]] = _summarize(finals, spec["key"])

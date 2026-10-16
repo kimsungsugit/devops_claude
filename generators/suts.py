@@ -3398,7 +3398,7 @@ def _enumerator_values(unit: Dict[str, Any], ctype: Dict[str, Any]) -> List[int]
 def _value_set_widening(unit: Dict[str, Any], name: str, values: List[int],
                         ctype: Optional[Dict[str, Any]] = None) -> Tuple[List[int], str]:
     """(R80) 값 목록 ``values``(열거자 · `#define` 상태값)와 그 범위 ±1(선언 타입 범위 안 — C enum 이면 enum 입력이 가질 수
-    있는 0 ~ 127 안, oracle 의 입력 판정과 같은 `ENUM_INPUT_RANGE`) — 넓힐 값이 없으면 빈 목록. 타입은 선언(전역 · 1차원 원소 ·
+    있는 0 ~ 127 과 멤버 값을 잇는 구간 안, oracle 의 입력 판정과 같은 `enum_input_range` — R90) — 넓힐 값이 없으면 빈 목록. 타입은 선언(전역 · 1차원 원소 ·
     포인터 매개변수 대상 · 매개변수 — `_value_set_ctype`)에서 — 모르면 넓히지 않는다."""
     from generators import c_project_context as _cpc
     # (review R80 I-R4-1) a domain that carries its type (a stub return, an element) is read by it
@@ -3410,10 +3410,12 @@ def _value_set_widening(unit: Dict[str, Any], name: str, values: List[int],
     except (_cpc.Unresolved, KeyError, TypeError, ValueError):
         return [], "type_unresolved"
     if t.get("enum"):
-        # (review R80 W4) and inside what an enum input can be — the oracle refuses the rest (`ENUM_INPUT_RANGE`); a
-        #   value set over an integer type (`#define` states — review R80 W-R2-2) has its type's range
-        from generators.c_source_oracle import ENUM_INPUT_RANGE
-        lo, hi = max(lo, ENUM_INPUT_RANGE[0]), min(hi, ENUM_INPUT_RANGE[1])
+        # (review R80 W4) and inside what an enum input can be — the oracle refuses the rest (`enum_input_range`: 0..127
+        #   and the members — R90 review W4); a value set over an integer type (`#define` states — review R80 W-R2-2) has
+        #   its type's range
+        from generators.c_source_oracle import enum_input_range
+        elo, ehi = enum_input_range(unit.get("project_scope"), t)
+        lo, hi = max(lo, elo), min(hi, ehi)
     extra = [x for x in (values[0] - 1, values[-1] + 1) if isinstance(lo, int) and isinstance(hi, int) and lo <= x <= hi]
     return (sorted(set(values) | set(extra)), "") if extra else ([], "nothing_to_widen")
 
@@ -6207,7 +6209,8 @@ def render_row_io(unit: Dict[str, Any], sequences: List[Dict[str, Any]]) -> Dict
             if (ev or {}).get("status") == "derived":
                 # (리뷰 I1) 확정의 근거(계산 근거·가정·stub·해석한 callee)는 떼어 낸다 — 미상 칸이 근거를 말하면 안 된다
                 for k in ("basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only",
-                          "observed_only_pointees", "exact_width_guards"):   # (review R81 I-R3-2 · R83 I-R2-4)
+                          "observed_only_pointees", "exact_width_guards",   # (review R81 I-R3-2 · R83 I-R2-4)
+                          "possible_ub_on_forked_path"):                    # (R90 review W1)
                     ev.pop(k, None)
                 ev.update(status="unknown", oracle_kind="none", reason=reason)
                 seq.setdefault("expected", {})[var] = f"{VERIFY_PREFIX} {reason}"

@@ -77,6 +77,11 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                 if evaluated.get("assumed_undefined"):
                     # (R17) #if verdicts this value rests on: names undefined on build-configuration evidence
                     item["assumed_undefined"] = list(evaluated["assumed_undefined"])
+                if evaluated.get("forked_path_undefined_behavior"):
+                    # (R90 review W1) the run had undefined behaviour on a path a branch on an unknown value chose — the
+                    #   value holds for runs that do not take it (`c_source_oracle._Interp.undefined`)
+                    item["possible_ub_on_forked_path"] = [f"{x['kind']} (selector {x['selector']})"
+                                                          for x in evaluated["forked_path_undefined_behavior"]]
                 if evaluated.get("exact_width_guards"):
                     # (R83) exact-width typedefs read past an undecided `#ifndef` guard that the function names
                     item["exact_width_guards"] = list(evaluated["exact_width_guards"])
@@ -108,6 +113,11 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
             seq["source_written"] = dict(evaluated["written"])
         else:
             seq.pop("source_written", None)   # an earlier run's record is not this one's
+        if evaluated.get("forked_path_undefined_behavior"):
+            # (R90 review C1) proven on a path a branch on an unknown value chose — a finding still (`source_findings`)
+            seq["forked_path_undefined_behavior"] = [dict(x) for x in evaluated["forked_path_undefined_behavior"]]
+        else:
+            seq.pop("forked_path_undefined_behavior", None)
         if written and evaluated.get("written_unknown"):
             seq["source_written_unknown"] = dict(evaluated["written_unknown"])   # (R81) why a written object stays unknown
         else:
@@ -140,7 +150,9 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
               # (R81) derived in a row whose pointer parameter's pointee is set up only because the row observes it
               "derived_on_observed_only_pointee": 0,
               # (R83) derived in a function that names an exact-width typedef read past its `#ifndef` guard
-              "derived_on_exact_width_guard": 0}
+              "derived_on_exact_width_guard": 0,
+              # (R90 review W1) derived in a run with undefined behaviour proven on a path an unknown branch chose
+              "derived_with_possible_ub_on_forked_path": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
             item = seq.get("expected_evidence", {}).get(var) or {}
@@ -157,6 +169,8 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
                 counts["derived_on_assumed_undefined"] += 1
             if status == "derived" and item.get("exact_width_guards"):
                 counts["derived_on_exact_width_guard"] += 1
+            if status == "derived" and item.get("possible_ub_on_forked_path"):
+                counts["derived_with_possible_ub_on_forked_path"] += 1
             if status == "derived" and item.get("observed_only_pointees"):
                 counts["derived_on_observed_only_pointee"] += 1
     return counts
